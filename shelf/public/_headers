@@ -1,0 +1,8 @@
+# Cloudflare Pages / Netlify headers. Any origin may read (the extension's
+# offscreen document fetches cross-origin); a versioned file never changes.
+/*
+  Access-Control-Allow-Origin: *
+  X-Content-Type-Options: nosniff
+/tl*/*
+  Cache-Control: public, max-age=31536000, immutable
+  Content-Type: text/plain; charset=utf-8
