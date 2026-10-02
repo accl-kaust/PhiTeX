@@ -674,6 +674,12 @@ pub(crate) struct Frame<M: Machine> {
     pub(crate) own: u64,
     /// A probed hit's body, run again (`open.rs`).
     pub(crate) quiet: bool,
+    /// Whether the frame keeps its own reads and its body's first writes
+    /// among its children ([`Item::Wrote`]): what a lookup verifies. A
+    /// frame whose record is never looked up (a step outside check mode,
+    /// `Runtime::begin_lean`) and the root keep neither; a read in them
+    /// is noted only as the open step's (DESIGN 4.3 item 2).
+    pub(crate) keep: bool,
 }
 
 impl<M: Machine> Frame<M> {
@@ -690,6 +696,7 @@ impl<M: Machine> Frame<M> {
             cost: 0,
             own: 0,
             quiet: false,
+            keep: false,
         }
     }
 }

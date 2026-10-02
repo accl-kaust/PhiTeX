@@ -414,7 +414,13 @@ load of what the job stored is a φ. The construction draws on:
   on an earlier read's value.
 - **The grain.** A call is recorded if its body usually costs more than
   a record, about a hundred nanoseconds. The results are identical at
-  any grain.
+  any grain. Outside check mode (4.3 item 2) only the steps and the pure
+  typesetting calls (`line_break`, the packs, the page steps,
+  `ship_out`, the fonts) have frames and records; `tokenize`,
+  `write_out` and the output routine run in the frame around them. A
+  step's record keeps its net writes, effects and children but not its
+  own reads: its reads from outside it are the fold's (3.15), and its
+  own are kept only in check mode, where it is looked up.
 
 ### 3.4 Change propagation
 
@@ -1012,6 +1018,7 @@ accessor.
 |---|---|
 | `PARTEX_SSA=1` | build with the recorder; rebuilds by readers |
 | `PARTEX_SSA_APPLY=0` | apply no hit in a rebuild (`=1`: apply in a cold build too) |
+| `PARTEX_SSA_LEAN=0` | record every routine (`tokenize`, `write_out`, the output routine too) and each step's own reads, as check mode does |
 | `PARTEX_SSA_CHECK=1` | check mode |
 | `PARTEX_LINK_SPLICE=0` | link in full and write every file |
 | `PARTEX_STAT_CACHE=0` | read every file again at a rebuild |

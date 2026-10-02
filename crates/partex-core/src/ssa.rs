@@ -443,6 +443,18 @@ impl Func {
     pub const fn applies(self) -> bool {
         matches!(self, Func::FontFile | Func::Encoding | Func::FontDict)
     }
+
+    /// Whether a call of the routine has a frame and a record outside
+    /// check mode (DESIGN 4.3 item 2): the steps, and the pure
+    /// typesetting calls that apply or are to apply (`line_break`, the
+    /// packs, the page steps, `ship_out`, the fonts). The others
+    /// (`tokenize`, `write_out`, the output routine) run in the frame of
+    /// the call around them, their reads and writes its own; in check
+    /// mode, and with `PARTEX_SSA_LEAN=0`, every routine has its record.
+    #[must_use]
+    pub const fn recorded(self) -> bool {
+        !matches!(self, Func::Tokenize | Func::WriteOut | Func::Output)
+    }
 }
 
 /// A routine's counts ([`SsaReport::routines`]): its calls and the hits
@@ -1112,8 +1124,9 @@ pub struct SsaTracker {
     pstamps: [core::cell::Cell<u32>; 32],
     pwstamps: [core::cell::Cell<u32>; 32],
     /// The calls the engine opened (`Tracker::call_begin`), innermost
-    /// last: the record a hit found, and the call's name for reports.
-    calls: RefCell<Vec<(Option<RecId>, Func)>>,
+    /// last: the record a hit found, the call's name for reports, and
+    /// whether it has a frame ([`Func::recorded`]).
+    calls: RefCell<Vec<(Option<RecId>, Func, bool)>>,
     /// Bytes printed since the last call boundary (log 0, terminal 1): the
     /// running call's effect, noted at the next boundary; whether they are
     /// kept (the recorder is on).
@@ -1129,11 +1142,33 @@ pub struct SsaTracker {
     swstamps: Vec<core::cell::Cell<u32>>,
     /// Check mode: each table read's version compared with the content.
     check: bool,
+    /// Records only for the steps and the routines [`Func::recorded`]
+    /// names, and a step's record without its own reads (DESIGN 4.3 item
+    /// 2; on by default). Off (`PARTEX_SSA_LEAN=0`), every routine has a
+    /// record and every step keeps its reads, as in check mode, which
+    /// does so either way.
+    lean: bool,
     /// Writes whose version could not be stored (the recorder was busy).
     pub lost: core::cell::Cell<u64>,
 }
 
 impl SsaTracker {
+    /// Whether routine `f` gets a frame and a record ([`SsaTracker::lean`]).
+    fn framed(&self, f: Func) -> bool {
+        self.check || !self.lean || f.recorded()
+    }
+
+    /// Whether a step's frame keeps its own reads.
+    fn step_keeps_reads(&self) -> bool {
+        self.check || !self.lean
+    }
+
+    /// Record lean (the default) or, `false`, every routine and every
+    /// step's reads ([`SsaTracker::lean`]).
+    pub fn set_lean(&mut self, on: bool) {
+        self.lean = on;
+    }
+
     #[must_use]
     pub fn new(rec: Recorder) -> Self {
         SsaTracker {
@@ -1152,6 +1187,7 @@ impl SsaTracker {
             sstamps: Vec::new(),
             swstamps: Vec::new(),
             check: false,
+            lean: true,
             lost: core::cell::Cell::new(0),
         }
     }
@@ -1359,6 +1395,20 @@ impl Tracker for SsaTracker {
     }
 
     fn call_begin(&self, f: Func, args: &[u128], view: &dyn EngineView) -> Option<u32> {
+        if !self.framed(f) {
+            // (no frame, record or probe: the body runs in the frame of
+            // the call around it, DESIGN 4.3 item 2)
+            let Ok(mut r) = self.rec.try_borrow_mut() else {
+                return None;
+            };
+            if !r.on {
+                return None;
+            }
+            r.st.routines[f as usize].calls += 1;
+            drop(r);
+            self.calls.borrow_mut().push((None, f, false));
+            return None;
+        }
         self.flush_effects();
         {
             let Ok(mut r) = self.rec.try_borrow_mut() else {
@@ -1400,7 +1450,7 @@ impl Tracker for SsaTracker {
                 return Some(id);
             }
             rr.rt.begin_quiet(f, args, hit.is_some());
-            self.calls.borrow_mut().push((hit, f));
+            self.calls.borrow_mut().push((hit, f, true));
         }
         self.boundary();
         None
@@ -1411,9 +1461,14 @@ impl Tracker for SsaTracker {
     }
 
     fn call_end(&self, view: &dyn EngineView) {
+        if self.calls.borrow().last().is_some_and(|c| !c.2) {
+            // (a call with no frame: nothing to close)
+            self.calls.borrow_mut().pop();
+            return;
+        }
         self.flush_effects();
         {
-            let Some((hit, f)) = self.calls.borrow_mut().pop() else {
+            let Some((hit, f, _)) = self.calls.borrow_mut().pop() else {
                 return;
             };
             let Ok(mut r) = self.rec.try_borrow_mut() else {
@@ -2122,7 +2177,14 @@ pub fn run_applying<H: Host>(
         // (the top level is a fold of steps and reads nothing, 7.17.9: the
         // job's start is the first step)
         r.rt.begin_step();
-        r.rt.begin(Func::Start, alloc::vec![Version::of(&command_line)]);
+        // (a step's record keeps its own reads only to be compared, in
+        // check mode: DESIGN 4.3 item 2)
+        let args = alloc::vec![Version::of(&command_line)];
+        if check || !tex.tracker.lean {
+            r.rt.begin(Func::Start, args);
+        } else {
+            r.rt.begin_lean(Func::Start, args);
+        }
         r.on = true;
     }
     tex.tracker.check = check;
@@ -2235,8 +2297,12 @@ fn open_paragraph<H: Host>(
         .clamp(start, limit + 1);
     let line: Vec<u8> = (start..limit).map(|i| tex.buffer[i]).collect();
     let bytes = Version::of(&line);
+    // (the tokenizer has a frame and a record in check mode only, DESIGN
+    // 4.3 item 2: otherwise the codes it reads are reads of the step, in
+    // no frame of their own)
+    let framed = tex.tracker.framed(Func::Tokenize);
     let tokens = {
-        let found = {
+        let found = if framed {
             let mut r = tex.tracker.rec.borrow_mut();
             let rr = &mut *r;
             rr.flush_output();
@@ -2251,9 +2317,12 @@ fn open_paragraph<H: Host>(
                 alloc::vec![bytes],
                 matches!(f, Found::Hit(_)),
             );
+            drop(r);
+            tex.tracker.boundary();
             f
+        } else {
+            Found::New
         };
-        tex.tracker.boundary();
         rep.tokenize_calls += 1;
         if matches!(found, Found::Hit(_)) {
             rep.tokenize_hits += 1;
@@ -2294,12 +2363,14 @@ fn open_paragraph<H: Host>(
             Some(t) => Version::of(&(1u8, t, past_end)),
             None => Version::of(&(2u8, rest, state, past_end, rest_codes.end_line_char)),
         };
-        let mut r = tex.tracker.rec.borrow_mut();
-        let rr = &mut *r;
-        rr.flush_output();
-        rr.rt.end(&View { tex, rec: &rr.st }, SVal::ver(v));
-        drop(r);
-        tex.tracker.boundary();
+        if framed {
+            let mut r = tex.tracker.rec.borrow_mut();
+            let rr = &mut *r;
+            rr.flush_output();
+            rr.rt.end(&View { tex, rec: &rr.st }, SVal::ver(v));
+            drop(r);
+            tex.tracker.boundary();
+        }
         (v, offset)
     };
     // (the line's tokens and what the paragraph reads of it: a clean
@@ -2318,18 +2389,29 @@ fn open_paragraph<H: Host>(
         Found::New
     };
     let hit = matches!(found, Found::Hit(_));
-    let name = alloc::format!(
-        "step({}, {}) at level {} line {} loc {} state {} `{}`",
-        tokens.0,
-        tokens.1,
-        tex.in_open,
-        tex.line,
-        file.loc - file.start,
-        file.state,
-        String::from_utf8_lossy(&line)
-    );
+    // (the step's name for check mode's reports)
+    let name = if check {
+        alloc::format!(
+            "step({}, {}) at level {} line {} loc {} state {} `{}`",
+            tokens.0,
+            tokens.1,
+            tex.in_open,
+            tex.line,
+            file.loc - file.start,
+            file.state,
+            String::from_utf8_lossy(&line)
+        )
+    } else {
+        String::new()
+    };
     rr.flush_output();
-    rr.rt.begin_quiet(Func::Step, args, hit);
+    // (its own reads kept only to be compared, in check mode: DESIGN 4.3
+    // item 2; its reads from outside it are the fold's either way)
+    if tex.tracker.step_keeps_reads() {
+        rr.rt.begin_quiet(Func::Step, args, hit);
+    } else {
+        rr.rt.begin_lean(Func::Step, args);
+    }
     rr.st.src = Some(source_at_start(tex, rr.st.generation));
     drop(r);
     tex.tracker.boundary();

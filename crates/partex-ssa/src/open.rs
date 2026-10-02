@@ -236,7 +236,10 @@ impl<M: Machine> Open<M> {
         let Some(top) = self.frames.last() else {
             return;
         };
-        if self.frames.len() <= 1 {
+        if !top.keep {
+            // (a frame that keeps no reads, or the root: the read is only
+            // the open step's, if from outside it; no version is made)
+            self.note_step_read(loc);
             return;
         }
         let start = top.start;
@@ -299,11 +302,13 @@ impl<M: Machine> Open<M> {
         });
     }
 
-    /// A read of `loc` from outside a hit put in place in the open step:
-    /// a read of the step too (7.17.3, "Hits applied inside a step that
-    /// runs again", item 3), unless the step wrote the slot before. It is
-    /// noted once per step, as [`Open::note_read_with`] notes the body's;
-    /// the frame's reads are not touched (the hit's stay in its record).
+    /// A read of `loc` that is only the open step's: from outside a hit
+    /// put in place in the step (7.17.3, "Hits applied inside a step that
+    /// runs again", item 3), or in a frame that keeps no reads. It is a
+    /// read of the step unless the step wrote the slot before, noted once
+    /// per step, as [`Open::note_read_with`] notes the body's; the
+    /// frame's reads are not touched (a hit's stay in its record).
+    #[inline]
     fn note_step_read(&mut self, loc: &Loc<M::Addr>) {
         let step = self.step.map_or(0, |s| s.1);
         if step == 0 {
@@ -398,8 +403,8 @@ impl<M: Machine> Open<M> {
         pos.ix = u32::try_from(top.writes.len()).expect("fewer than 2^32 writes");
         top.writes.push((a.clone(), s));
         // (the body's first write of the slot, among its children: a later
-        // child's read of it is inside the call)
-        if own {
+        // child's read of it is inside the call, for a lookup's walk)
+        if own && top.keep {
             top.items.push(Item::Wrote(a.clone()));
         }
     }
@@ -682,7 +687,7 @@ impl<M: Machine> Runtime<M> {
         if let Found::Hit(id) = found {
             return self.apply(store, id);
         }
-        self.begin_named(f, name, argv.to_vec(), false);
+        self.begin_named(f, name, argv.to_vec(), false, true);
         let result = body(store, self);
         self.end(store, result.clone());
         result
@@ -713,10 +718,28 @@ impl<M: Machine> Runtime<M> {
     /// trace if `quiet` (the body of a probed hit).
     pub fn begin_quiet(&mut self, f: M::Func, args: Vec<Version>, quiet: bool) {
         let name = name_of(f, &args);
-        self.begin_named(f, name, args, quiet);
+        self.begin_named(f, name, args, quiet, true);
     }
 
-    fn begin_named(&mut self, f: M::Func, name: Version, args: Vec<Version>, quiet: bool) {
+    /// [`Runtime::begin`] for a call whose record is never looked up (a
+    /// step outside check mode, DESIGN 4.3 item 2): its frame keeps no
+    /// reads of its own and no [`Item::Wrote`], only its net writes, its
+    /// effects and its children. A read in it is noted as the open
+    /// step's, if from outside the step (its readers in the fold), and no
+    /// version is made for it.
+    pub fn begin_lean(&mut self, f: M::Func, args: Vec<Version>) {
+        let name = name_of(f, &args);
+        self.begin_named(f, name, args, false, false);
+    }
+
+    fn begin_named(
+        &mut self,
+        f: M::Func,
+        name: Version,
+        args: Vec<Version>,
+        quiet: bool,
+        keep: bool,
+    ) {
         self.open.serial += 1;
         if quiet {
             self.open.quiet += 1;
@@ -740,6 +763,7 @@ impl<M: Machine> Runtime<M> {
             cost: 0,
             own: 0,
             quiet,
+            keep,
         });
     }
 
