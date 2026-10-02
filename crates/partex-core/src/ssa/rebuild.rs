@@ -149,6 +149,12 @@ struct Data {
     /// by where the level was at the step's start (7.17.3, "A line
     /// number read is kept by position"; `from` and `to` both that).
     numbers: Vec<LineRead>,
+    /// An edit replaced it: its readers moved to the new data, and an
+    /// input state that held it is mapped through that edit, so once no
+    /// line of it is read it is not compared with its file again (a
+    /// rebuild's diffs cost the data read now, not every one an edit
+    /// ever left behind).
+    superseded: bool,
 }
 
 /// A line a step read: its bytes, and the step's run that read it.
@@ -178,6 +184,7 @@ impl Steps {
                 file,
                 lines: Vec::new(),
                 numbers: Vec::new(),
+                superseded: false,
             });
         }
         d
@@ -1341,7 +1348,11 @@ pub fn rebuild<H: Host>(tex: &mut Tex<H, SsaTracker>, trace: bool, apply: bool) 
                 .datas
                 .iter()
                 .enumerate()
-                .filter(|(_, d)| d.file && lines.contains(&d.name))
+                .filter(|(_, d)| {
+                    d.file
+                        && lines.contains(&d.name)
+                        && !(d.superseded && d.lines.is_empty() && d.numbers.is_empty())
+                })
                 .filter_map(|(i, d)| Some((u32::try_from(i).ok()?, d.name, d.bytes.clone())))
                 .collect();
             (files, datas, lines)
@@ -1480,6 +1491,7 @@ pub fn rebuild<H: Host>(tex: &mut Tex<H, SsaTracker>, trace: bool, apply: bool) 
             let name = rr.st.steps.datas[e.data as usize].name;
             let n = rr.st.steps.loaded(name, &e.new, true);
             seed(rr, &e, n, &mut dirty, trace);
+            rr.st.steps.datas[e.data as usize].superseded = true;
             if let Some(l) = rr.st.loads.get_mut(name as usize) {
                 l.1 = Version::of(&e.new[..]);
             }
@@ -1969,6 +1981,7 @@ fn data_edits<H: Host>(
             rr.st.steps.log.push(l);
         }
         seed(rr, &e, n, dirty, rep.trace);
+        rr.st.steps.datas[d as usize].superseded = true;
         rep.data_edits += 1;
         rr.st.steps.edits.push(e);
     }
