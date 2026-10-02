@@ -1167,9 +1167,10 @@ cold build with recording takes 3.2–3.4× a plain one and peaks at 24 GB.
    writes and effects in the trace's form (5.3). The form:
 
    ```text
-   %0 = format                  ; step 0: the job's start, (preloaded format=plain 2026.10.2), 631946 definitions: incr.tex:1
-   %1 = file incr.tex
-   %7 = window(incr.tex:14-16=%1, \catcode92=%0, \section=%5, \count5=%6, page.len=%6, ...; \count5, page[3], page.len, ...) ; step 6: incr.tex:14-16 "Opening Lorem ipsum dolor sit amet, con…"
+   %0 = format          ; step 0: the job's start, (preloaded format=plain 2026.10.2), 631946 definitions: incr:1
+   %1 = file incr
+   %71 = window(incr:15-18=%1, \catcode92=%0, ..., \section=%66, \words=%64, \toc=%4, align_state=%68, page.total=%61, ...; page[56], ..., save.level, list.list) ; step 68: incr:15-18 "Opening Lorem ipsum dolor sit amet,"
+   %76 = window(..., page[0]=%7, ..., \count1=%71, output=%0, ...; ...) ; step 73: ships [3] "Lorem ipsum dolor sit amet, consectetur"
    ```
 
    - The job's start, the step that loaded the format and read the
@@ -1187,28 +1188,39 @@ cold build with recording takes 3.2–3.4× a plain one and peaks at 24 GB.
      some of it, then the lines it read (`Steps`' line reads, the ones a
      rebuild seeds from). Its exports are the addresses its records
      wrote.
-   - Names: a control sequence by its name in the hash (`\section`; one
-     of the frozen ones, a font's identifier and pdfTeX's primitive
-     copies with a prefix, since another slot has the same name); the
-     rest of eqtb as TeX calls it (`\count12`, `\dimen3`, `\toks0`,
-     `\box255`, `\catcode92`, `\baselineskip`, `\everypar`,
-     `\textfont1`); the other families by a prefix and a field:
-     `text:\foo` and `next:\foo` (the hash), `lookup:\foo`,
-     `font:cmr10.fontdimen`, `page.contents`, `page[3]` (the page's
-     nodes), `list.mode`, `nest`, `save[4]`, `cond`, `\botmark`,
-     `str_ptr`, `string:2031`, `pdf.objs`, `write:3`.
+   - Names: a control sequence's meaning by its name in the hash
+     (`\section`; one of the frozen ones, a font's identifier and
+     pdfTeX's primitive copies with a prefix, since another slot has the
+     same name); the registers and codes as TeX writes them (`\count12`,
+     `\dimen3`, `\toks0`, `\box255`, `\catcode92`, `\textfont1`); a
+     parameter without its escape (`baselineskip`, `everypar`, `hsize`:
+     `\hsize` is the control sequence, another address); the other
+     families by a prefix and a field: `text:\foo` and `next:\foo` (the
+     hash), `lookup:\foo`, `font:cmr10.fontdimen`, `page.contents`,
+     `page[3]` (the page's nodes), `list.mode`, `nest`, `save[4]`,
+     `cond`, `botmark`, `str_ptr`, `string:2031`, `pdf.objs`, `write:3`.
    - Its comment: the step's id (and its run, once a rebuild ran it
-     again), its runs of lines, the pages it shipped, and an excerpt of
-     the text it set: the characters of the nodes it put on the page,
-     else of what it added to its list, else the source it began on.
+     again), its runs of lines, the pages it shipped (by the counts the
+     log shows, `[3]`), and an excerpt of text: of the page it shipped
+     (the page's nodes it read), else of the nodes it put on the page,
+     else of what it added to its list, else of the source it began on.
    - `Program::check` verifies that it is SSA and that each import from
      a window names one of that window's exports; `to_text` and `parse`
      round-trip it (`ssa::view`'s golden test, `phitex-ir`'s tests).
-   - The per-call trace is today the step's records as they are kept
-     (each call marked `new`: how a call was found is kept per trip, not
-     per record). Once records are kept only for windows and the pure
-     typesetting calls (item 2), it needs the window run again with the
-     full recorder, which is not built.
+   - The per-call trace is today the step's records as they are kept,
+     their addresses named as in the view (each call marked `new`: how
+     a call was found is kept per trip, not per record). Once records
+     are kept only for windows and the pure typesetting calls (item 2),
+     it needs the window run again with the full recorder, which is not
+     built.
+   - Diffing two views shows what a rebuild did: after `edits.tex`'s
+     first edit, the paragraph's window, the fire that ships its page
+     and the job's end are `(run 2)`, nothing else changes. It also
+     shows where a rebuilt graph differs from a cold build's: fonts and
+     hyphenation are not placed (3.15), so a paragraph run again reads
+     the interword glue and the packed patterns the cold build made
+     later, defines them no more, and the next reader's import moves to
+     the window before (`font:cmr10.glue=%12` becomes `=%5`).
 8. **The gate.** `cargo xtask check` adds `ssa-edits`: every
    incremental e2e case run in SSA mode, one process, each stage
    byte-identical to plain partex on the same sources (logs masked).
