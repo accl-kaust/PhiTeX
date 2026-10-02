@@ -1135,8 +1135,8 @@ pub struct SsaTracker {
     wstamps: [core::cell::Cell<u32>; 96],
     /// The structure rows' read and write stamps (a read or a write noted
     /// once per call).
-    vstamps: [core::cell::Cell<u32>; 32],
-    vwstamps: [core::cell::Cell<u32>; 32],
+    vstamps: [core::cell::Cell<u32>; 256],
+    vwstamps: [core::cell::Cell<u32>; 256],
     /// The page family's (`track::page`).
     pstamps: [core::cell::Cell<u32>; 32],
     pwstamps: [core::cell::Cell<u32>; 32],
@@ -2058,9 +2058,9 @@ pub trait EngineView {
     /// (§930): its positions', or none.
     #[allow(clippy::ptr_arg, reason = "the map's key, looked up as it is")]
     fn hyph_word(&self, key: &Vec<u8>) -> u128;
-    /// A field of `cur_list` (`track::list`), the nest, a save stack slot
-    /// (`track::save`).
-    fn list_version(&self, f: u8) -> u128;
+    /// A field of a level of the nest at its slot (`track::list::slot`),
+    /// the nest, a save stack slot (`track::save`).
+    fn list_version(&self, i: u32) -> u128;
     fn nest_ver(&self) -> u128;
     /// A field of the alignment state (`track::align`).
     fn align_ver(&self, f: u8) -> u128;
@@ -2111,8 +2111,8 @@ impl<H: Host, T: Tracker> EngineView for Tex<H, T> {
     fn hyph_word(&self, key: &Vec<u8>) -> u128 {
         self.hyph.exceptions.word_version(key).0
     }
-    fn list_version(&self, f: u8) -> u128 {
-        self.list_field_version(f)
+    fn list_version(&self, i: u32) -> u128 {
+        self.level_field_version(i).unwrap_or(0)
     }
     fn nest_ver(&self) -> u128 {
         self.nest_version()
@@ -2234,12 +2234,18 @@ impl Store<TexSsa> for View<'_> {
             Fam::Mark => Version(self.tex.mark_ver(s.1)),
             Fam::Sealed => Version(self.tex.sealed_ver(s.1)),
             Fam::List => {
-                let f = u8::try_from(s.1).unwrap_or(0);
-                let count = crate::track::list::COUNT;
-                Version(match f.cmp(&count) {
-                    core::cmp::Ordering::Equal => self.tex.nest_ver(),
-                    core::cmp::Ordering::Greater => self.tex.align_ver(f - count - 1),
-                    core::cmp::Ordering::Less => self.tex.list_version(f),
+                use crate::track::list::{COUNT, STRIDE};
+                let i = u32::try_from(s.1).unwrap_or(0);
+                let count = u32::from(COUNT);
+                // (level 0's fields, the nest, the alignment's, then the
+                // deeper levels' fields)
+                Version(if i < count || i >= STRIDE {
+                    self.tex.list_version(i)
+                } else if i == count {
+                    self.tex.nest_ver()
+                } else {
+                    self.tex
+                        .align_ver(u8::try_from(i - count - 1).unwrap_or(u8::MAX))
                 })
             }
             Fam::Line => {
@@ -3152,8 +3158,14 @@ fn slot_value<H: Host, T: Tracker>(t: &Tex<H, T>, s: Slot) -> Option<SValue> {
         }
         Fam::Alloc => SValue::Int(scalar_get(t, u16::try_from(s.1).ok()?)?),
         Fam::List => {
-            let l = &t.cur_list;
-            match u8::try_from(s.1).ok()? {
+            let i = u32::try_from(s.1).ok()?;
+            let (d, f) = (i / list::STRIDE, u8::try_from(i % list::STRIDE).ok()?);
+            let l = if d == 0 && f >= list::COUNT {
+                &t.cur_list
+            } else {
+                t.level_at_depth(usize::try_from(d).ok()?)?
+            };
+            match f {
                 list::LIST => SValue::Nodes(l.list.clone()),
                 list::MLIST => SValue::Mlist(l.mlist.clone()),
                 list::MODE => SValue::Int(l.mode),
@@ -3287,8 +3299,31 @@ fn set_value<H: Host, T: Tracker>(t: &mut Tex<H, T>, vers: &mut Versions, s: Slo
             vers.set(s, v.0.0);
         }
         (Fam::List, val) => {
-            let l = &mut t.cur_list;
-            match (u8::try_from(s.1).unwrap_or(0), val) {
+            let i = u32::try_from(s.1).unwrap_or(u32::MAX);
+            let (d, f) = (
+                i / list::STRIDE,
+                u8::try_from(i % list::STRIDE).unwrap_or(u8::MAX),
+            );
+            if d == 0 && f == list::COUNT {
+                if let SValue::Nest(n) = val {
+                    t.nest.clone_from(n);
+                }
+                return;
+            }
+            if d == 0 && f > list::COUNT {
+                if let SValue::Field(x) = val {
+                    crate::values::set(t, s, x);
+                }
+                return;
+            }
+            // (a level deeper than the nest placed has no place)
+            let Some(l) = usize::try_from(d)
+                .ok()
+                .and_then(|d| t.level_at_depth_mut(d))
+            else {
+                return;
+            };
+            match (f, val) {
                 (list::LIST, SValue::Nodes(n)) => l.list = n.clone(),
                 (list::MLIST, SValue::Mlist(m)) => l.mlist.clone_from(m),
                 (list::MODE, SValue::Int(x)) => l.mode = *x,
@@ -3301,10 +3336,6 @@ fn set_value<H: Host, T: Tracker>(t: &mut Tex<H, T>, vers: &mut Versions, s: Slo
                 (list::MIDDLE, SValue::Int(x)) => l.middle = *x != 0,
                 (list::LR_SAVE, SValue::LrSave(x)) => l.lr_save.clone_from(x),
                 (list::LR_BOX, SValue::LrBox(x)) => l.lr_box.clone_from(x),
-                (list::COUNT, SValue::Nest(n)) => t.nest.clone_from(n),
-                (_, SValue::Field(x)) => {
-                    crate::values::set(t, s, x);
-                }
                 _ => {}
             }
         }

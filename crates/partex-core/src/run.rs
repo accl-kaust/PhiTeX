@@ -335,8 +335,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
     /// command ([`Self::set_defer_page`]): nothing runs in between. (An
     /// empty contribution list has nothing to build.)
     pub(crate) fn build_page_after_par(&mut self) -> Result<(), Jump> {
-        if T::VALUES && self.defer_page && !self.output_active() && !self.nest_at(0).list.is_empty()
-        {
+        if T::VALUES && self.defer_page && !self.output_active() && !self.level_list_is_empty(0) {
             self.page_pending = true;
             Ok(())
         } else {

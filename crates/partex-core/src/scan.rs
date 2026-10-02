@@ -251,10 +251,10 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                     self.cur_val = 0; // `prev_graf=0` within \write
                 } else {
                     let mut p = self.nest_ptr();
-                    while self.nest_at(p).mode.abs() != VMODE {
+                    while self.level_mode(p).abs() != VMODE {
                         p -= 1;
                     }
-                    self.cur_val = self.nest_at(p).pg;
+                    self.cur_val = self.level_pg(p);
                 }
                 self.cur_val_level = INT_VAL;
             }

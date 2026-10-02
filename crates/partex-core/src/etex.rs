@@ -378,7 +378,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
 impl<H: Host, T: Tracker> Tex<H, T> {
     /// The mode of nest level `p` (`nest_ptr` is the current list).
     fn nest_mode(&self, p: usize) -> i32 {
-        self.nest_at(p).mode
+        self.level_mode(p)
     }
 
     /// e-TeX: `\showgroups`: the groups being built, innermost first,
@@ -570,7 +570,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
     /// Whether the math list at nest level `p` was begun by `\middle`
     /// (else by `\left`).
     fn nest_is_middle(&self, p: usize) -> bool {
-        self.nest_at(p).middle
+        self.level_middle(p)
     }
 
     /// e-TeX: `\showifs`: the conditionals being processed, innermost

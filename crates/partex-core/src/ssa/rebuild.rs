@@ -1309,12 +1309,94 @@ fn nest_whole<H: Host>(tex: &Tex<H, SsaTracker>, key: u64, next: &mut Vec<Slot>)
     use crate::track::{align, list};
     let r = tex.tracker.rec.borrow();
     let fold = &r.rt.fold;
-    for k in 0..=list::COUNT + align::COUNT {
+    let nest = Slot(Fam::List, i64::from(list::COUNT));
+    // (the nest and the alignment's fields)
+    for k in list::COUNT..=list::COUNT + align::COUNT {
         let a = Slot(Fam::List, i64::from(k));
         if later(fold, &a, key) {
             next.push(a);
         }
     }
+    // (the nest placed holds its levels' fields as they were when it was
+    // made: each field goes after it, at its own definition, as deep as
+    // the nest placed goes)
+    let placed = later(fold, &nest, key);
+    let depth = if placed {
+        fold.reaching(&nest, key).map_or(0, |d| {
+            r.rt.record(d.rec)
+                .writes
+                .get(d.ix as usize)
+                .and_then(|(_, v)| nest_depth(v.as_ref()?))
+                .unwrap_or(tex.max_nest_stack + 1)
+        })
+    } else {
+        tex.nest.len()
+    };
+    for a in level_fields(depth) {
+        if placed || later(fold, &a, key) {
+            next.push(a);
+        }
+    }
+}
+
+/// The fields (`track::list::slot`) of the levels from the outermost to
+/// depth `d`.
+fn level_fields(d: usize) -> impl Iterator<Item = Slot> {
+    use crate::track::list;
+    (0..=d)
+        .flat_map(|d| (0..list::COUNT).map(move |f| Slot(Fam::List, i64::from(list::slot(d, f)))))
+}
+
+/// The depth of a value of the nest.
+fn nest_depth(v: &SVal) -> Option<usize> {
+    match v.1.as_deref()? {
+        super::SValue::Nest(n) => Some(n.len()),
+        _ => None,
+    }
+}
+
+/// The values `value` gives `slots`, and with the nest among them, its
+/// levels' fields too: the levels it holds are as they were when it was
+/// made, and `cur_list` as a run left it. As deep as the nest put back
+/// goes (the arrays' if it is not), a deeper level having no place.
+fn with_levels<H: Host>(
+    tex: &Tex<H, SsaTracker>,
+    slots: impl IntoIterator<Item = Slot>,
+    mut value: impl FnMut(Slot) -> Option<SVal>,
+) -> Vec<(Slot, SVal)> {
+    use crate::track::list;
+    let nest = Slot(Fam::List, i64::from(list::COUNT));
+    let field = |a: &Slot| {
+        a.0 == Fam::List && (a.1 < i64::from(list::COUNT) || a.1 >= i64::from(list::STRIDE))
+    };
+    let mut vals = Vec::new();
+    let mut done = BTreeSet::new();
+    let mut with_nest = false;
+    for a in slots {
+        with_nest |= a == nest;
+        if field(&a) {
+            done.insert(a);
+        }
+        if let Some(v) = value(a) {
+            vals.push((a, v));
+        }
+    }
+    if with_nest {
+        let depth = vals
+            .iter()
+            .find(|(a, _)| *a == nest)
+            .map_or(tex.nest.len(), |(_, v)| {
+                nest_depth(v).unwrap_or(tex.max_nest_stack + 1)
+            });
+        for a in level_fields(depth) {
+            if !done.contains(&a)
+                && let Some(v) = value(a)
+            {
+                vals.push((a, v));
+            }
+        }
+    }
+    vals
 }
 
 /// A step's definitions: each slot its records wrote, at its last write.
@@ -1423,9 +1505,11 @@ fn put<H: Host>(tex: &mut Tex<H, SsaTracker>, vals: &[(Slot, SVal)]) {
     let mut vers: Versions = core::mem::take(&mut tex.tracker.rec.borrow_mut().st.vers);
     // (the page's length, then its tail, before its nodes: the list is
     // made that long with stand-ins, and the nodes read put in place,
-    // 7.17.3 item 5)
+    // 7.17.3 item 5; and the nest, whole, before its levels' fields: they
+    // are put over the levels it holds)
     let rank = |a: &Slot| match (a.0, u8::try_from(a.1)) {
-        (Fam::Page, Ok(crate::track::page::LIST_LEN)) => 0,
+        (Fam::Page, Ok(crate::track::page::LIST_LEN))
+        | (Fam::List, Ok(crate::track::list::COUNT)) => 0,
         (Fam::Page, Ok(crate::track::page::LIST_TAIL)) => 1,
         (Fam::PageNode, _) => 3,
         _ => 2,
@@ -2420,13 +2504,9 @@ fn retire<H: Host>(
         // (its chunks leave the link)
         rr.st.steps.fx_changed.push(s);
         dirty.remove(key);
-        let mut vals = Vec::new();
-        for a in old.keys().filter(|a| positioned(a)) {
-            if let Some(v) = latest(tex, rr, *a, s, rep) {
-                vals.push((*a, v));
-            }
-        }
-        vals
+        with_levels(tex, old.keys().filter(|a| positioned(a)).copied(), |a| {
+            latest(tex, rr, a, s, rep)
+        })
     };
     rep.restored += vals.len();
     rep.removed += 1;
@@ -2676,7 +2756,6 @@ fn run_step<H: Host>(
         let vals = {
             let mut r = tex.tracker.rec.borrow_mut();
             let rr = &mut *r;
-            let mut vals = Vec::new();
             // (the page's length put back makes the nodes past the list's
             // end stand-ins again: the nodes set go back with it, 7.17.3
             // item 5)
@@ -2689,15 +2768,18 @@ fn run_step<H: Host>(
             } else {
                 Vec::new()
             };
-            for a in written.into_iter().filter(positioned).chain(nodes) {
-                touched.insert(a);
-                if !miss.contains(&a)
-                    && let Some(v) = reaching(tex, rr, a, key, rep)
-                {
-                    vals.push((a, v));
-                }
-            }
-            vals
+            with_levels(
+                tex,
+                written.into_iter().filter(positioned).chain(nodes),
+                |a| {
+                    touched.insert(a);
+                    if miss.contains(&a) {
+                        None
+                    } else {
+                        reaching(tex, rr, a, key, rep)
+                    }
+                },
+            )
         };
         put(tex, &vals);
         next = miss;
@@ -2802,13 +2884,9 @@ fn run_step<H: Host>(
             }
         }
         // the arrays hold the latest definitions again
-        let mut vals = Vec::new();
-        for a in set.iter().chain(touched.iter()) {
-            if let Some(v) = latest(tex, rr, *a, j, rep) {
-                vals.push((*a, v));
-            }
-        }
-        vals
+        with_levels(tex, set.union(&touched).copied(), |a| {
+            latest(tex, rr, a, j, rep)
+        })
     };
     rep.restored += vals.len();
     put(tex, &vals);

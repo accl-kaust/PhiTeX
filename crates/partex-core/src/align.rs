@@ -440,7 +440,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         // \valign.
         if self.mode() == MMODE {
             self.set_mode(-VMODE);
-            let pd = self.nest_at(self.nest_ptr() - 2).prev_depth;
+            let pd = self.level_prev_depth(self.nest_ptr() - 2);
             self.set_prev_depth(pd);
         } else if self.mode() > 0 {
             self.set_mode(-self.mode());
@@ -790,7 +790,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             self.confusion(b"align0")?;
         }
         self.unsave()?; // that `align_group` was for the whole alignment
-        let o: Scaled = if self.nest_at(self.nest_ptr() - 1).mode == MMODE {
+        let o: Scaled = if self.level_mode(self.nest_ptr() - 1) == MMODE {
             self.dimen_par(DISPLAY_INDENT_CODE)
         } else {
             0
@@ -807,7 +807,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             display: pdftex
                 && !vertical
                 && self.nest_ptr() > 0
-                && self.nest_at(self.nest_ptr() - 1).mode == MMODE,
+                && self.level_mode(self.nest_ptr() - 1) == MMODE,
             pdftex,
             shift: o,
         };

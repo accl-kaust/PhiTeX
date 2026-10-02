@@ -628,7 +628,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
     /// §994: append contributions to the current page, one step per
     /// node ([`Self::page_step`]).
     pub(crate) fn build_page(&mut self) -> Result<(), Jump> {
-        if self.nest_at(0).list.is_empty() || self.output_active() {
+        if self.level_list_is_empty(0) || self.output_active() {
             return Ok(());
         }
         loop {
@@ -684,7 +684,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                 return Ok(()); // user's output routine will act
             }
             // the page has been shipped out by default output routine
-            if self.nest_at(0).list.is_empty() {
+            if self.level_list_is_empty(0) {
                 return Ok(());
             }
         }

@@ -400,13 +400,15 @@ fn shipped(rt: &Runtime<TexSsa>, recs: &[RecId]) -> String {
 
 /// The text the step at `key` with records `recs` set: the characters of
 /// the nodes it put on the page, in order; else what it added to the
-/// list it left (the list's text past the text of the list that reached
-/// it, or all of it).
+/// list of the level it left (the list's text past the text of that
+/// level's list that reached it, or all of it).
 fn set_text(rt: &Runtime<TexSsa>, key: u64, recs: &[RecId]) -> String {
+    use crate::track::list;
     use partex_engine::node::Node;
-    let list = Slot(Fam::List, i64::from(crate::track::list::LIST));
+    let nest = Slot(Fam::List, i64::from(list::COUNT));
     let mut page: BTreeMap<i64, &Node> = BTreeMap::new();
-    let mut left = None;
+    let mut lists: BTreeMap<Slot, &partex_engine::nodelist::NodeList> = BTreeMap::new();
+    let mut depth = None;
     for &r in recs {
         for (a, v) in &rt.record(r).writes {
             match (a.0, v.as_ref().and_then(|v| v.1.as_deref())) {
@@ -415,7 +417,10 @@ fn set_text(rt: &Runtime<TexSsa>, key: u64, recs: &[RecId]) -> String {
                         page.insert(a.1, n);
                     }
                 }
-                (Fam::List, Some(SValue::Nodes(l))) if *a == list => left = Some(l),
+                (Fam::List, Some(SValue::Nodes(l))) => {
+                    lists.insert(*a, l);
+                }
+                (Fam::List, Some(SValue::Nest(n))) => depth = Some(n.len()),
                 _ => {}
             }
         }
@@ -430,7 +435,20 @@ fn set_text(rt: &Runtime<TexSsa>, key: u64, recs: &[RecId]) -> String {
     if !out.trim().is_empty() {
         return out;
     }
-    let Some(left) = left else {
+    let reaching = |a: &Slot| {
+        rt.fold
+            .reaching(a, key)
+            .and_then(|d| rt.record(d.rec).writes.get(d.ix as usize)?.1.clone())
+    };
+    // (the level it left: the nest as it left it, or as it reached it)
+    let depth = depth
+        .or_else(|| match reaching(&nest)?.1.as_deref() {
+            Some(SValue::Nest(n)) => Some(n.len()),
+            _ => None,
+        })
+        .unwrap_or(0);
+    let list = Slot(Fam::List, i64::from(list::slot(depth, list::LIST)));
+    let Some(left) = lists.get(&list) else {
         return String::new();
     };
     let text = |l: &partex_engine::nodelist::NodeList| {
@@ -441,10 +459,7 @@ fn set_text(rt: &Runtime<TexSsa>, key: u64, recs: &[RecId]) -> String {
         t
     };
     let now = text(left);
-    let before = rt
-        .fold
-        .reaching(&list, key)
-        .and_then(|d| rt.record(d.rec).writes.get(d.ix as usize)?.1.clone())
+    let before = reaching(&list)
         .and_then(|v| match v.1.as_deref() {
             Some(SValue::Nodes(l)) => Some(text(l)),
             _ => None,
@@ -1054,6 +1069,14 @@ fn list_name(i: i64) -> String {
             .and_then(|k| names.get(k))
             .map(|n| (*n).to_string())
     };
+    // (a deeper level's fields by its depth: `list1.mode`)
+    let stride = i64::from(list::STRIDE);
+    if i >= stride {
+        return name(&LIST, i % stride).map_or_else(
+            || format!("list:{i}"),
+            |n| format!("list{}.{n}", i / stride),
+        );
+    }
     match i.cmp(&count) {
         core::cmp::Ordering::Less => name(&LIST, i).map(|n| format!("list.{n}")),
         core::cmp::Ordering::Equal => Some(String::from("nest")),

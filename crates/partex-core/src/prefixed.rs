@@ -736,7 +736,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
     /// §1244
     fn alter_prev_graf(&mut self) -> Result<(), Jump> {
         let mut p = self.nest_ptr();
-        while self.nest_at(p).mode.abs() != VMODE {
+        while self.level_mode(p).abs() != VMODE {
             p -= 1;
         }
         self.scan_optional_equals()?;
@@ -747,7 +747,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             self.help(&[b"I allow only nonnegative values here."]);
             self.int_error(self.cur_val)
         } else {
-            self.nest_at_mut(p).pg = self.cur_val;
+            self.set_level_pg(p, self.cur_val);
             Ok(())
         }
     }

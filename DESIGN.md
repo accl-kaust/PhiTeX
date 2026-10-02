@@ -1026,7 +1026,7 @@ The value fields fall into six families:
 | tables | eqtb, `xeq_level`, registers above 255, the hash (`text`, `next`), the pool (a string by its bytes), `str_ptr`, `hash_used`, `hash_high`, fonts' fields (each `\fontdimen`, `\hyphenchar`, code array…, with metrics by identity), hyphenation (patterns as one address, each exception word its own) | a version array beside the entries, set at the write from the content; a format's load versions them whole. A lookup by name reads the name's address, not the hash chain |
 | groups | the group frames (3.2), `cur_level`, `cur_group`, `cur_boundary`, e-TeX's saved registers | frames as a shared stack; local definitions scoped |
 | tokens | token lists, the input state (3.5), the open files and their positions, the conditional stack, `align_state`, `after_token`, `\read` streams | lists carry their polynomial; the input is the call's result; a file is a load |
-| lists | the nest's lists and boxes, the alignment state, pack results, `last_badness`, `shown_mode`, sealed lines' contents | a box carries its version, made when packed; a pack's result is its node's output; a sealed line's box is its dimensions and key, its contents a slot of their own |
+| lists | the nest's lists and boxes, the alignment state, pack results, `last_badness`, `shown_mode`, sealed lines' contents | each level's fields are slots of their own by depth, the nest its depth: entering a level reads only the mode and `aux` it inherits (a box built in vertical mode does not read the `\prevgraf` before it), leaving one writes nothing of the level left to, and a field of the current level reads the depth; a box carries its version, made when packed; a pack's result is its node's output; a sealed line's box is its dimensions and key, its contents a slot of their own |
 | page | the page builder's fields (contents, list, `page_so_far`'s eight, `page_max_depth`, `least_page_cost`, `best_page_break`, `best_size`, insertions, `insert_penalties`, `last_glue` …), marks, `split_discards`, `dead_cycles`, `output_active` | an address per field; the list by appends (3.4) |
 | output | the PDF writer's tables (object numbering, destinations, fonts and glyphs, the font map, `\pdfglyphtounicode`'s table, color stacks, the `\pdflast…` values), the DVI writer's totals, `\write` streams (`Out(n)`: the name each stores to), `selector`, the log's state, `Random` (the generator's state), `Clock` (the host's answers) | writer scopes (3.8); stores and loads (3.7) |
 
@@ -1190,9 +1190,13 @@ of *steps*: calls from one clean point to the next.
    - the slots its last run read, where a later definition holds the
      arrays, take their reaching values;
    - the save stack below its pointer is placed whole, and so is the
-     semantic nest (`cur_list`'s fields, the nest, the alignment
-     state): a field placed over a nest that was not is a state no run
-     makes, which the run can meet before its reads are checked;
+     semantic nest (the nest, each level's fields down to its depth,
+     the alignment state): a field placed over a nest that was not is a
+     state no run makes, which the run can meet before its reads are
+     checked. Wherever the nest is put back (a dropped run's writes, a
+     step's end, a step removed), the levels' fields down to the depth
+     it is put back at go with it: the levels it holds are as they were
+     when it was made, and `cur_list` as the run left it;
    - the page list's length, its tail, and the nodes the step reads are
      placed;
    - the input is set to the previous step's result (3.5), mapped

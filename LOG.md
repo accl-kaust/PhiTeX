@@ -10745,3 +10745,53 @@ the picture's `\hbox`, built in vertical mode, pushes the outer level
 onto the nest, and `push_nest` reads all its fields, `\prevgraf` (the
 line count before) among them. That is the next change: the nest's
 levels as slots of their own, by depth.
+
+## 2026-10-03 — The nest's levels as slots of their own, by depth (coordinator)
+
+A box built in vertical mode (the TikZ picture's `\hbox`, before its
+`\leavevmode`) pushes the outer level onto the nest, and `push_nest`
+read every field of it, `\prevgraf` (the line count of the paragraph
+before) among them: `cur_list`'s fields were twelve slots shared by
+every depth, so entering a level read them all and leaving one wrote
+them all. A word that made the paragraph before wrap to one more line
+ran the picture's step again (3,082 commands), and the page with it.
+
+- Each level's fields are slots of their own: level `d`'s field `f` is
+  `List(d * 32 + f)` (`track::list::slot`), level 0's where they were,
+  so the nest, the alignment's fields and the view's names
+  (`list.pg`, `list1.mode`, …) stay put. The nest's version is its
+  depth.
+- `push_nest` reads only what the new level inherits (the mode and
+  `aux`: `prev_depth`, `space_factor`, `clang`, §216) and writes the
+  new level's fields; `pop_nest` writes the nest alone (the level left
+  to is in its slots as it was). A read or write of a field of the
+  current level reads the nest's depth: which slot it is depends on it.
+- The searches of the nest (`\prevgraf` read and set, e-TeX's
+  `\showgroups`, a display alignment's `prev_depth` and modes in
+  `init_align`) and the contribution list (level 0's list) read the
+  field of the level they look at, not the whole level.
+- A rebuild puts the nest back in three places (a dropped run's
+  writes, a step's end, a step removed). The levels' fields go with
+  it, down to the depth it is put back at, the nest placed first: the
+  first version restored only the slots the run wrote, so a run that
+  pushed a paragraph's level and was dropped left `cur_list` as the
+  paragraph's while the nest said depth 0 (the harness's
+  `semantic nest` panic in `pop_nest`). Bounded by that depth, not by
+  `max_nest_stack`, which made every step place a dozen levels and
+  cost 8–12% on the TikZ keystrokes.
+- The view's text of a step is what it added to the list of the level
+  it left, by the nest's depth there (the line break's step now shows
+  the lines it set, `Hello World. One line.`, not the part of the
+  paragraph's list after its first step's).
+
+The harness: 14 cases, 79 stages, identical in all three modes; the
+rebuilds' commands 116,129 → 112,369 (−3.2%), all of it in two of
+machine_edits' stages (−1,880 commands each), every other stage the
+same. The TikZ mock (LTO, 100 keystrokes each, instructions in the
+process per keystroke): a word 3.62 → 3.64 M, a `(` that changes its
+line's height 12.25 → 12.50 M (+2.0%), the heading 23.58 → 23.88 M
+(+1.3%), the long sentence that wraps 40.20 → 19.25 M (−52%): its
+rebuild runs 9 steps and 1,108 commands, the picture's step not among
+them; the same PDFs. What the wrap still runs is mostly the output
+routine (956 commands adding the sentence, 481 removing it): the page's
+text changed.

@@ -85,9 +85,12 @@ pub enum Row {
     /// Current mark `t` of class `c` (§382, e-TeX's `\\marks`), at slot
     /// `5c + t`: a shared token list carrying its version.
     Mark(u32),
-    /// A field of `cur_list` (§213, [`list`]): a value, versioned by the
-    /// value itself (the list carries its version).
-    List(u8),
+    /// A field of a level of the semantic nest (§213, [`list`]): level
+    /// `d`'s field `f` at `d * list::STRIDE + f`, level 0 the outer one
+    /// and `cur_list` the deepest. A value, versioned by the value itself
+    /// (the list carries its version). A level's fields stay where they
+    /// are while levels above it come and go.
+    List(u32),
     /// The enclosing levels of the nest (§211).
     Nest,
     /// A field of the alignment state (§770, [`align`]): a value,
@@ -205,6 +208,18 @@ pub mod list {
     pub const LR_BOX: u8 = 11;
     /// The fields end here; the nest is slot `COUNT`.
     pub const COUNT: u8 = 12;
+    /// The slots of a level's fields are this far apart: level 0's, the
+    /// nest's and the alignment's ([`super::align`]) come below the first.
+    pub const STRIDE: u32 = 32;
+
+    /// The slot of level `d`'s field `f`.
+    #[must_use]
+    pub fn slot(d: usize, f: u8) -> u32 {
+        u32::try_from(d)
+            .unwrap_or(u32::MAX)
+            .saturating_mul(STRIDE)
+            .saturating_add(u32::from(f))
+    }
 }
 
 /// The fields of the alignment state (DESIGN 7.17.12's `align` row), by
