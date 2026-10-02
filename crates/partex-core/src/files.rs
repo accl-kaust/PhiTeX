@@ -519,6 +519,9 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             self.tracker.load_lines(name, FileKind::Tex, contents);
         } else {
             self.tracker.load(name, FileKind::Tex, contents);
+            if self.stop_after_load {
+                self.load_stop = 1;
+            }
         }
         found
     }

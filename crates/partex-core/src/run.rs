@@ -27,6 +27,11 @@ pub enum CleanPoint {
     /// the step that begins here ships the page, so it alone reads the
     /// sealed lines of the page (`seal.rs`).
     Ship = 3,
+    /// At the command after one that read a file whole by name (SSA
+    /// mode, with [`Tex::set_stop_after_load`]): what the file's size
+    /// (`\pdffilesize`) changes is the step before, which LaTeX's
+    /// `\IfFileExists` only tests for being blank.
+    Load = 4,
 }
 
 /// Where [`Tex::start`] or [`Tex::resume`] stopped.
@@ -228,7 +233,10 @@ impl<H: Host, T: Tracker> Tex<H, T> {
     ///   stack;
     /// - [`CleanPoint::Ship`]: stopped before a `\shipout` (SSA mode,
     ///   [`Self::set_stop_before_ship`]), whatever is on top of the input
-    ///   stack, the output routine active as a rule.
+    ///   stack, the output routine active as a rule;
+    /// - [`CleanPoint::Load`]: stopped at the command after one that read
+    ///   a file whole by name (SSA mode, [`Self::set_stop_after_load`]),
+    ///   whatever is on top of the input stack.
     ///
     /// The mode is tested with its sign (§211): internal vertical and
     /// restricted horizontal modes are not clean. The paragraph's flag
@@ -249,6 +257,10 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         if T::VALUES && self.ship_stop == 1 {
             return Some(CleanPoint::Ship);
         }
+        // (stopped after a file read whole: SSA mode's too)
+        if T::VALUES && self.load_stop == 2 {
+            return Some(CleanPoint::Load);
+        }
         if self.cur_input.state == crate::web::TOKEN_LIST || self.output_active() {
             return None;
         }
@@ -265,6 +277,12 @@ impl<H: Host, T: Tracker> Tex<H, T> {
     /// boundaries, inside the output routine.
     pub fn set_stop_before_ship(&mut self, on: bool) {
         self.stop_before_ship = on;
+    }
+
+    /// Stop (or not) for a checkpoint at the command after one that read
+    /// a file whole by name ([`CleanPoint::Load`]).
+    pub fn set_stop_after_load(&mut self, on: bool) {
+        self.stop_after_load = on;
     }
 
     /// Whether the job stopped just before a `\shipout`.

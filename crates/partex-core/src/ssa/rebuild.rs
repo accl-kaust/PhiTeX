@@ -619,6 +619,9 @@ pub(crate) struct InputState {
     /// Stopped before a `\shipout` (the token backed up): the next step
     /// begins with it (`CleanPoint::Ship`).
     ship: bool,
+    /// Stopped at the command after one that read a file whole
+    /// (`CleanPoint::Load`).
+    load: bool,
     line: i32,
     /// The shared parts: the levels, the parameters, the buffer below the
     /// top file level's line and the file levels below the top one.
@@ -656,6 +659,7 @@ impl InputState {
             finished,
             fire: t.fire_pending,
             ship: t.ship_stop == 1,
+            load: t.load_stop == 2,
             line: t.line,
             top: (v.from..t.first.max(t.last)).map(|i| t.buffer[i]).collect(),
             v,
@@ -686,6 +690,7 @@ impl InputState {
     fn set<H: Host, T: Tracker>(&self, t: &mut Tex<H, T>) {
         t.fire_pending = self.fire;
         t.ship_stop = u8::from(self.ship);
+        t.load_stop = if self.load { 2 } else { 0 };
         t.line = self.line;
         t.cur_input = self.cur.clone();
         t.in_open = self.in_open;
@@ -798,6 +803,7 @@ fn same_place<H: Host, T: Tracker>(t: &Tex<H, T>, a: &InputState, b: &InputState
     a.finished == b.finished
         && a.fire == b.fire
         && a.ship == b.ship
+        && a.load == b.load
         && a.in_open == b.in_open
         && a.line == b.line
         && a.file.line == b.file.line
@@ -1157,7 +1163,7 @@ impl InputState {
     fn brief(&self) -> alloc::string::String {
         let pos = self.file.file.as_ref().map_or(0, |f| f.pos);
         alloc::format!(
-            "level {} line {} pos {} loc {} state {}{}{}{}",
+            "level {} line {} pos {} loc {} state {}{}{}{}{}",
             self.in_open,
             self.line,
             pos,
@@ -1167,6 +1173,11 @@ impl InputState {
             if self.fire { " (a fire pending)" } else { "" },
             if self.ship {
                 " (before a \\shipout)"
+            } else {
+                ""
+            },
+            if self.load {
+                " (after a file read whole)"
             } else {
                 ""
             }
@@ -1756,6 +1767,7 @@ pub fn rebuild<H: Host>(tex: &mut Tex<H, SsaTracker>, trace: bool, apply: bool) 
             if tex.commands() == c0
                 && !input.fire
                 && !input.ship
+                && !input.load
                 && same_place(tex, &end, &input)
                 && same_input(tex, &end, &input)
             {
@@ -2441,7 +2453,12 @@ fn run_step<H: Host>(
                     if stopped
                         || matches!(
                             tex.clean_point(),
-                            Some(CleanPoint::Outer | CleanPoint::Fire | CleanPoint::Ship)
+                            Some(
+                                CleanPoint::Outer
+                                    | CleanPoint::Fire
+                                    | CleanPoint::Ship
+                                    | CleanPoint::Load
+                            )
                         )
                     {
                         break false;

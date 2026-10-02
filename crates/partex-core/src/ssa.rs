@@ -2419,6 +2419,10 @@ pub fn run_applying<H: Host>(
     // routine before the `\shipout` as they were, DESIGN 7.17.3)
     tex.set_stop_before_ship(true);
     tex.set_seal_lines(true);
+    // (and the command after one that read a file whole: what a file's
+    // size changes, `\IfFileExists` asking `\pdffilesize`, is the step
+    // before)
+    tex.set_stop_after_load(true);
     let mut open = Some(Open {
         hit: false,
         rec: None,
@@ -2432,7 +2436,9 @@ pub fn run_applying<H: Host>(
             Step::Checkpoint => {
                 if matches!(
                     tex.clean_point(),
-                    Some(CleanPoint::Outer | CleanPoint::Fire | CleanPoint::Ship)
+                    Some(
+                        CleanPoint::Outer | CleanPoint::Fire | CleanPoint::Ship | CleanPoint::Load
+                    )
                 ) {
                     close_paragraph(tex, &mut open, &mut rep, Close::Step);
                     open = Some(open_paragraph(tex, check, &mut rep, None));
@@ -2601,6 +2607,10 @@ fn open_paragraph<H: Host>(
     if tex.ship_stop == 1 {
         // (a step that begins with a `\shipout`)
         args.push(Version::of(&0x7368_6970u32));
+    }
+    if tex.load_stop == 2 {
+        // (a step that begins after a file read whole)
+        args.push(Version::of(&0x6c6f_6164u32));
     }
     let mut r = tex.tracker.rec.borrow_mut();
     let rr = &mut *r;

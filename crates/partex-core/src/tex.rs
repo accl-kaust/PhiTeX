@@ -428,6 +428,11 @@ pub struct Tex<H: Host, T: Tracker = Untracked> {
     /// before (1).
     pub(crate) stop_before_ship: bool,
     pub(crate) ship_stop: u8,
+    /// Stop at the command after one that read a file whole by name (SSA
+    /// mode: `\pdffilesize`, which LaTeX's `\IfFileExists` asks), and
+    /// whether one did (1) or main control stopped there (2).
+    pub(crate) stop_after_load: bool,
+    pub(crate) load_stop: u8,
     /// A paragraph was begun (§1091, at `nest_ptr = 1`) since the last
     /// candidate boundary: the next one is its start (`Tex::clean_point`).
     pub(crate) par_start: bool,
@@ -754,6 +759,8 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             seal_log: Vec::new(),
             stop_before_ship: false,
             ship_stop: 0,
+            stop_after_load: false,
+            load_stop: 0,
             par_start: false,
             fire_pending: false,
             defer_fire: false,

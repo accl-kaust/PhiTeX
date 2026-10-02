@@ -1131,6 +1131,12 @@ of *steps*: calls from one clean point to the next.
   step that ships a page is apart from the routine's expansion before
   it. (The output routine has no frame, in check mode either: a frame
   does not span steps.)
+- So does the command after one that read a file whole by name
+  (`CleanPoint::Load`): `\pdffilesize`, which LaTeX's `\IfFileExists`
+  asks for every `\input` and only tests for being blank. A typed
+  character changes the file's size, so the step that read it runs
+  again, but the rest of `\input`'s lookup, which sees only the name it
+  found, is a step of its own.
 - The line breaker seals each line (`seal.rs`). The line box keeps its
   dimensions and a key, and its glue setting and list go to a table
   under the key, a slot of their own (`Fam::Sealed`, versioned by the

@@ -134,6 +134,19 @@ to the cold build's):
      parallel), and the `\input{ch15}` step that reruns 564 commands for
      nothing. LTO is the default now (LOG 2026-10-02, "A step run again
      keeps its files' handles").
+   - **Done: the output routine no longer runs again for a word** (sealed
+     lines and a step before `\shipout`, LOG 2026-10-02): a TikZ
+     article's keystroke runs 75 commands where it ran 556, 3.3 → 1.6 ms.
+     Left: a word that changes its line's height or depth (a `(` on a
+     line that had none), or the paragraph's count of lines, changes the
+     page box, and the routine runs again; a re-run that makes fewer
+     lines leaves the entries of the lines it no longer makes in the
+     table (bounded by the step's lines; a retired step's go).
+   - Left, the TikZ keystroke after sealing (natively, 1.6 ms):
+     `NativeHost::unchanged` makes a `Vec` key and a SipHash per load
+     looked up (6%, CLI only), kpathsea searches the map and the font
+     files again (3.6%, CLI only), and `run_step` asks `Fold::latest`
+     twice for most reads (once predicting, once checking), 4%.
    - The step holding `\input{ch15}` re-runs 564 commands because the
      file it loads changed, and changes nothing. The cause, found while
      doing the fix this item planned (LOG 2026-10-02, "Loads by lines"):

@@ -10609,3 +10609,33 @@ instructions (−63%), cycles −55%; the same PDF. The harness: 14 cases,
 79 stages, identical with `--fixpoint`, with `PARTEX_SSA_TRIPS=1` and in
 check mode; the workspace's tests pass.
 
+## 2026-10-02 — A step boundary after a file's size is read (coordinator)
+
+The extension opened its document with `\input{main}` on the first
+line, LaTeX's `\input`, and every keystroke ran again the job's first
+step, 184 of its 259 commands: `\IfFileExists` asks
+`\file_full_name:n`, which reads the file's size (`\pdffilesize`, a
+read of the file whole) and only tests the digits for being blank; a
+typed character changes the size. `pdflatex main.tex` opens the file
+with the primitive, so the extension does that now
+(`\csname @@input\endcsname{main}`): 2 steps and 75 commands a
+keystroke, about 6.5 ms median in Chrome (5.9–9.1 ms) on its TikZ
+article, under the 16.7 ms target.
+
+A document's own `\input{chapter}` has the same lookup (the course's
+`\input{ch15}` step, 564 commands). Main control now stops at the
+command after one that read a file whole by name (`read_source` with
+`lines` false: `\pdffilesize`, `\pdfmdfivesum file`, `\pdffiledump`,
+`\pdfobj file`, an image), and the next step begins there
+(`CleanPoint::Load`, like `Ship`: the input state's `load`, a mark in
+the step's name). The step that read the size runs again; the rest of
+the lookup, which sees only the name found, does not.
+
+The extension's old first line natively (LTO, 200 keystrokes each, the
+same PDF): the lookup runs 14 + 5 + 46 commands in three steps (`main`,
+`main.tex` and once more) where it ran 184, 259 → 140 commands a
+keystroke; 4.48 G → 2.00 G instructions (−55%), cycles −42%. Left: each
+read of the edited file is data of its own, and a rebuild diffs five
+of them. The harness: 14 cases, 79 stages, identical in all three modes;
+the workspace's tests pass.
+

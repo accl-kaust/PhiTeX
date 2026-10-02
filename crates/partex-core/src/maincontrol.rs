@@ -114,6 +114,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                     if self.at_checkpoint {
                         // (resumed: this command was counted)
                         self.at_checkpoint = false;
+                        self.load_stop = 0;
                         if self.fire_pending {
                             // (a step that begins at a fire begins with
                             // it; then the test below is made again,
@@ -145,6 +146,13 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                                 self.at_checkpoint = true;
                                 return Err(Jump::Checkpoint);
                             }
+                        }
+                        if self.load_stop == 1 {
+                            // (the command before read a file whole: a step
+                            // boundary, `CleanPoint::Load`)
+                            self.load_stop = 2;
+                            self.at_checkpoint = true;
+                            return Err(Jump::Checkpoint);
                         }
                         if self.candidate_due()? {
                             self.at_checkpoint = true;
