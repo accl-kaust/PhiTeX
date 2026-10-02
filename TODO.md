@@ -9,7 +9,7 @@ code is. Read DESIGN 4.3 and LOG.md's 2026-10-02 entries first.
 Merged and verified (scripts/ssa-edits, every stage byte-identical to
 plain partex, with `--fixpoint` and with `PARTEX_SSA_TRIPS=1`):
 
-- **gate:** `scripts/ssa-edits` (10 cases, 61 stages); `cargo xtask
+- **gate:** `scripts/ssa-edits` (12 cases, 71 stages); `cargo xtask
   ssa-edits`; `xtask check` runs it in both trip modes;
   `bench/ssa-course.sh` (course edits in one SSA process, JSON in
   `bench/results/`).
@@ -131,10 +131,22 @@ to the cold build's):
      deflate (12%: the engine's byte count `gone` needs the compressed
      size at once, so overlapping it needs that count deferred), the
      link's fresh deflates (3.1 ms: two streams, which could go in
-     parallel), the `\input{ch15}` step that reruns 564 commands for
-     nothing, and LTO as the default (the user's call).
+     parallel), and the `\input{ch15}` step that reruns 564 commands for
+     nothing. LTO is the default now (LOG 2026-10-02, "A step run again
+     keeps its files' handles").
    - The step holding `\input{ch15}` re-runs 564 commands because the
-     file it loads changed, and changes nothing.
+     file it loads changed, and changes nothing. The cause: LaTeX's
+     `\input{ch15}` first opens `ch15` only to test that it is there
+     (`\IfFileExists`: `\openin`, `\ifeof`, `\closein`), and a load whose
+     data has no line read counts as read whole. The fix: a load opened
+     by `\openin` and closed with no line asked for reads only whether the
+     file is there. An `\input` or a `\read` that met the file's end must
+     still count as reading it (no line is recorded for an empty file).
+   - DVI mode: an edit that changes a page's DVI length re-runs every
+     later page's shipout (each `bop` points back at the one before by its
+     offset, and the movement reuse of §611 depends on the buffer's
+     positions). PDF mode resolves offsets at the link. Making DVI pages
+     position-independent would need the link to redo §611's choices.
    - How the profile was taken: a frame-pointer build
      (`RUSTFLAGS="-C force-frame-pointers=yes"`, `CARGO_TARGET_DIR=target/fp`)
      and `perf record --call-graph fp -p` attached from a rebuild line
@@ -190,3 +202,24 @@ to the cold build's):
      extra; the cause is unknown.
 10. **Machine mode removal** (DESIGN 4.3 item 8), once SSA passes
     everything.
+11. **The Overleaf extension's requests** (its session, 2026-10-02, in its
+    order; the user decides which are taken):
+    - per keystroke on a short article it measured 31 steps in 2 trips
+      (476 ms in wasm, engine 96cb126); with this branch and the native
+      host the same edit is 2 steps in 1 trip. To check once it runs this
+      engine with `open_write_again` in its host;
+    - a fresh engine after the format: a clone made once, for cold starts
+      (1.2 s in wasm) and a plain fast path. `Tex::snapshot` at the first
+      command serves plain runs of the same command line; an SSA build
+      needs its own entry point (`run_applying` sets the tracker up before
+      `start`);
+    - the visible page first: a rebuild that returns once page k has
+      shipped and continues on a second call; and which pages changed;
+    - source positions on the page at word grain (SyncTeX's), for
+      click-to-word;
+    - pages to the host in PDF mode (`page_written` is DVI only), with
+      `\pdfliteral`s, color stack pushes and pops, and XObject placements;
+    - a `Linker<H>` in partex-core, the pure-Rust deflate (item 5), and
+      the "not yet" `read_file`;
+    - its acmart paper's cold build is 3 trips, 18 s natively: trip 2
+      runs 801 K commands in 12 s (15 µs a command, against 6 µs cold).

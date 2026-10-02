@@ -10196,3 +10196,88 @@ its revert, `label`, its revert; counts, not times):
   build, or the syntax tree's paragraphs). The setup's 51,910 steps
   before the cover's average 14 commands: they are better run as one span
   than spread over workers.
+
+## 2026-10-02 — A step run again keeps its files' handles; an empty line's protrusion; trips that never settled; LTO the default (coordinator)
+
+**A file opened again** (the Overleaf extension's feedback, item 2). An
+edit in the first paragraph, which shares a step with `\begin{document}`'s
+`\openout` of the `.aux` and whose page opens the PDF, re-ran every page
+and every `\write` after it. Four causes, each fixed:
+- A step that runs again opened its files on new host handles; the PDF
+  writer's state (`pdf:4`) and the streams' versions hold the handle, so
+  every later page and `\write` woke. The engine now asks the host to
+  open the file on the handle the step's last run had
+  (`Tracker::reopen`: the step's old chunks' opens, in order;
+  `Host::open_write_again`, whose default opens anew; `NativeHost` gives
+  the handle back if it gave it for that file). A first try, reusing a
+  closed file's handle in the host, was wrong: the link keeps bytes per
+  handle, so a file closed and written again in one build (beamer's
+  `.vrb`) would get both contents.
+- A rebuild restored the PDF writer before the first page from a fresh
+  format engine (`initial`), made without `set_effects(true)`: its object
+  streams were not symbolic, so its state hashed differently. The format
+  value now gets the build's setting.
+- A dropped run's opened files were never closed: the retry got new
+  handles. Its outputs are dropped with their files closed
+  (`drop_outputs`).
+- `\jobname`, the log's and the output file's names are string numbers;
+  the string pool is not put back, so a re-run made them again under new
+  numbers and woke their readers (every DVI `ship_out` reads the output
+  file's name). They are versioned by their characters.
+
+`scripts/ssa-edits` has `aux_reopen` (`tests/e2e/reopen.tex`): the
+first-paragraph edit went from 16 steps (4,165 commands) to 9 (1,374),
+its revert from 16 (4,568) to 9 (1,777).
+
+Left, measured on a small article in DVI mode (`\pdfoutput=0
+\input{main}`): an edit that changes a page's DVI length re-runs every
+later page's shipout. That is the format: each `bop` points back at the
+previous one by its offset, and TeX's movement reuse (§611) depends on
+the buffer's positions. PDF mode has no such chain (3 steps). And
+LaTeX's `\input{main}` first opens `main` only to test that it exists
+(`\IfFileExists`); that load counts as read whole, so any edit to the
+file re-runs its step (the course's `\input{ch15}` step, 564 commands).
+
+**The margin panic** (a crash the extension reported). With protrusion
+on, a paragraph that ends with a forced break has an empty last line
+(its `\parfillskip` pruned, §879); `post_line_break` took `line.len() -
+1` on it. pdfTeX's `prev_rightmost` finds nothing there and puts no
+kern in, and partex now does the same. The e2e `microtype` case has the
+paragraph (identical to pdfTeX). The extension's acmart paper reached it
+only in trip 2, with the bibliography.
+
+**Trips that never settled.** The same paper's SSA build stopped after
+5 trips, unsettled (6.0, 13.1, 0.5, 6.3, 6.9 s); plain runs settle two
+runs after the bibliography. A `\write` line was stored to the file its
+stream number last opened in any run (`out_addr`, the recorder's, never
+put back), not to the file the stream stores to where the step runs: a
+re-run step's `.aux` lines (biblatex's) went astray, every other trip.
+Lines now go to the name the engine's stream holds (`streams.out_name`,
+restored with the stream): 3 trips (5.4, 12.0, 0.5 s), as plain TeX
+settles. The harness has `streams` (`tests/e2e/streams.tex`: one stream,
+two files), which the binary before the fix fails. The trace now says
+where a changed store first differs.
+
+**LTO is the default** (fat, one codegen unit; the user's call). Release
+builds take longer.
+
+**np/parallel merged.** Its timing (`PARTEX_SSA_DAG`) costs nothing when
+off. Job 6330, acclnode01, alternating, the course's word edit (median
+of 10, rebuild in parentheses) and the cold build:
+
+| run | cold build | word edit | revert |
+|---|---:|---:|---:|
+| without, 1 | 63.8 s | 31.9 ms (29.4) | 30.1 ms (29.4) |
+| with, 1 | 63.9 s | 32.7 ms (28.9) | 28.3 ms (27.6) |
+| without, 2 | 64.5 s | 32.9 ms (28.9) | 28.9 ms (28.2) |
+| with, 2 | 63.3 s | 31.3 ms (27.9) | 30.0 ms (29.3) |
+
+(The node was running the gate at the same time: compare the rows, not
+the numbers with the last entry's.)
+
+Also: with a host that cannot deflate, a stream the link compresses is
+counted as zlib's stored blocks (what the link writes then), so "Output
+written" gives the file's size.
+
+The harness: 12 cases, 71 stages, identical with `--fixpoint`, with
+`PARTEX_SSA_TRIPS=1` and in check mode.
