@@ -80,6 +80,10 @@ pub(crate) struct Steps {
     /// ("The link after a rebuild is a watch's link").
     pub(super) cur_chunks: Vec<StepEffects>,
     pub(super) effects: Vec<Vec<StepEffects>>,
+    /// The steps whose chunks changed since the link last took them (a
+    /// run closed, or the step left the fold): what the link costs (DESIGN
+    /// 4.3 item 4, [`super::take_step_changes`]).
+    pub(super) fx_changed: Vec<StepId>,
 }
 
 /// A store a step made: a name opened (`\openout`, a whole definition)
@@ -395,6 +399,7 @@ pub(super) fn step_closed(rr: &mut Recorder, id: StepId, input: InputState) -> V
         s.effects.resize(i + 1, Vec::new());
     }
     s.effects[i] = core::mem::take(&mut s.cur_chunks);
+    s.fx_changed.push(id);
     changed
 }
 
@@ -1667,6 +1672,8 @@ fn retire<H: Host>(
         rr.st.steps.queries.remove(&s);
         mark_store_readers(rr, &ids, key, dirty, rep);
         rr.rt.fold.remove(s);
+        // (its chunks leave the link)
+        rr.st.steps.fx_changed.push(s);
         dirty.remove(&key);
         let mut vals = Vec::new();
         for a in old.keys().filter(|a| positioned(a)) {

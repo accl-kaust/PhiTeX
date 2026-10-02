@@ -34,8 +34,11 @@ use alloc::vec::Vec;
 use crate::exec::Executor;
 use crate::host::{Host, WriteId};
 pub use crate::pdf::xref::{Deflate, XEntry, Xref, XrefStream};
+
+mod splice;
 use crate::tex::Tex;
 use crate::track::Tracker;
+pub use splice::{Splice, SpliceOut, SpliceStats, StepChunks};
 
 /// One output of the engine, as a value.
 #[derive(Clone, Debug, PartialEq, Eq)]

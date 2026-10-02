@@ -9443,3 +9443,104 @@ definition plus the token lists, about 3.6 GB, and 1.5 G read edges);
 starting SSA at `\begin{document}` (keyed on a name, and a setup edit
 would be a cold build, where the setup as a span re-runs 6.5% and wakes
 only what changed).
+
+## 2026-10-02 — The link costs the changed chunks: an offset tree, files written from the first changed byte (agent link)
+
+DESIGN 4.3 item 4. The SSA build's link (`effects::link_cached`, LOG
+2026-09-29) laid every file out from every live chunk at each rebuild:
+the course's word edit linked in 12–14 ms, 6.3 ms of it its own work
+(the layout 4.7 ms, the cross-reference section 3.2 ms of that, the
+copy into the files' buffers 1.4 ms) and 5–9 ms writing 3.3 MB (the PDF
+and the log, whole). Two more walks were outside its clock:
+`ssa::step_effects` gathered the 3,427 chunks from the 58,710 steps,
+and each file was hashed whole to see whether it changed.
+
+**The form** (DESIGN 3.8, "The link costs the changed chunks", written
+before the code):
+- The runtime logs the steps whose chunks changed since the link last
+  took them: a run closed (`step_closed`) or the step left the fold.
+  `ssa::take_step_changes` hands them over with their keys and chunks.
+  That is two pushes in `ssa/rebuild.rs`, `Steps::fx_changed`, and no
+  walk of the steps.
+- `effects::Splice` keeps the last layout:
+  - the chunks in program order, each with its pieces of each file and
+    its objects' marks at their offsets in the chunk;
+  - a Fenwick tree per file over the chunks' lengths;
+  - each object stream as rendered, with its objects;
+  - the cross-reference sections and byte counts.
+
+  A step with as many chunks as before has them replaced in place
+  (`O(log n)` a file). Chunks inserted or removed make the order and the
+  trees again in `O(n)`, without reading any other chunk's effects.
+  Then the object streams a change reached are rendered again: those a
+  new chunk closes, and the first one closed after each chunk put in or
+  taken out. The cross-reference section is rendered from the trees
+  when its file changed at or before it, and the byte counts with the
+  files' new lengths.
+- Each file comes out as its pieces, with its length and its first
+  changed byte: the least prefix sum over the chunks whose bytes or
+  marks in it changed. A chunk put in with the same bytes and marks does
+  not count, so a step that changed only the log leaves the PDF.
+- The CLI writes a file from that byte on (seek, write, `set_len`) when
+  the file is as the link last wrote it: the same length and
+  modification time, and no step opened it since (an open empties it).
+  Any other file is written whole. Nothing is hashed.
+- Deflate stays memoized by content, now keeping what the last eight
+  links used: an edit undone finds its streams.
+- The diagnostics, pages and closes are walked when a host wants them,
+  not copied each link.
+- "The edited page ready" is when the changed chunks are placed: their
+  bytes and offsets are final, so the edited page's content stream is
+  there. That is before the object streams, the cross-reference section
+  and the byte counts. The rebuild line now reads `X ms (the rebuild R
+  ms, the link L ms), the edited page ready P ms after the rebuild,
+  files written W ms`. L is the link without the disk, and X = R + L +
+  W.
+- `PARTEX_LINK_SPLICE=0` links in full and writes every file, as
+  before. A debug build, or `PARTEX_LINK_CHECK=1`, checks every link
+  against a full one: files, terminal text, opens, closes, diagnostics,
+  pages, and the chunks in order against `step_effects`. Virtual object
+  numbers (machine mode) fall back to the full link. Machine mode keeps
+  `link_cached`.
+
+**Tests.**
+- Unit tests: the Fenwick tree; a page edited (one chunk, the PDF
+  changed from the page on); pages added and removed; a chunk that
+  changed only the log, which leaves the PDF unchanged. A randomized
+  test makes 300 random edits of a document (pages changed, added and
+  removed, the object streams' sizes changed) and checks every link
+  against a full link.
+- `scripts/ssa-edits`: 10/10 cases, 61 stages, byte-identical to plain
+  partex, in release and in debug (where every link is also checked
+  against a full one).
+- The course on accl (below): every stage byte-identical, PDF and
+  `.aux` by `cmp`, log with the statistics masked.
+
+**The course** (`bench/link-course.sh`, new: the word edit and its
+revert alternated, 10 rebuilds in one SSA process, each stage compared
+with plain partex on the same source; base c22e989 and this branch
+built back to back on acclnode01, 16 CPUs allocated, load 3.5; release
+binaries):
+
+| per rebuild | base (c22e989) | now |
+|---|---|---|
+| the link's own work, rebuild 1 | 6.3 ms (layout 4.8: xref 3.2, object streams 0.6; copy 1.3) | 3.39 ms (deflate 3.34: the xref and one object stream) |
+| the link's own work, rebuilds 2–10 | 6.1–6.8 ms | 0.18–0.19 ms |
+| files written | 2 whole, 3,312,090 bytes, 5.1–9.1 ms | 2 from a byte on, 1,598,028 bytes, 0.60–0.76 ms |
+| the link in the rebuild line (all of it, writes included) | 12.3–16.3 ms | 0.8–4.2 ms |
+| the edited page ready | (not measured) | 0.02 ms after the rebuild |
+| the rebuild itself | 115.9, then 63.9–67.6 ms | 115.6, then 61.7–66.2 ms |
+| cold build (wall, max RSS) | 124.6 s, 15.0 GB | 124.8 s, 15.0 GB |
+| cold link (own work; files written) | 23.9 ms; 10.8 ms | 29.0 ms (deflate 21.8: 44 object streams and the xref); 5.8 ms |
+
+The first rebuild's link is the deflates. The word edit moves every
+object after page 156, so the cross-reference stream (5,104 entries,
+25,520 bytes, zlib level 9) is new. Of the two object streams rendered
+again (40,758 bytes), the one holding the page's annotations changed
+too. The memo has neither yet. From the second rebuild on, the edit and the
+revert alternate, so every stream was compressed two links before and
+the memo returns it: 0.19 ms is the link without any deflate. A new
+edit pays the deflates every time. That is the zlib port's work, a
+separate delivery: zlib's deflate in Rust, byte-identical, its matches
+computed in parallel and kept before the first changed byte. The disk
+write is from page 156 on, half the PDF: 1.6 MB in 0.6–0.8 ms.

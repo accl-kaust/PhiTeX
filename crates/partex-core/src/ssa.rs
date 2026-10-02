@@ -2466,6 +2466,48 @@ pub fn step_effects(rec: &Recorder) -> Vec<(u64, StepEffects)> {
     out
 }
 
+/// The steps whose chunks changed since the last call, each once: its
+/// key in program order and its chunks with their versions, or none if it
+/// left the fold (DESIGN 4.3 item 4: the link takes what changed, not
+/// every step's chunks as [`step_effects`] does).
+pub fn take_step_changes(rec: &mut Recorder) -> Vec<crate::effects::StepChunks> {
+    let mut ids = core::mem::take(&mut rec.st.steps.fx_changed);
+    ids.sort_unstable();
+    ids.dedup();
+    let fold = &rec.rt.fold;
+    ids.into_iter()
+        .map(|s| {
+            let step = fold.steps.get(s as usize);
+            let live = step.is_some_and(|x| x.live);
+            crate::effects::StepChunks {
+                step: s,
+                order: step.map_or(0, |x| x.key),
+                chunks: live.then(|| {
+                    rec.st
+                        .steps
+                        .effects
+                        .get(s as usize)
+                        .map(|v| v.iter().map(|e| (e.0.0, e.1.clone())).collect())
+                        .unwrap_or_default()
+                }),
+            }
+        })
+        .collect()
+}
+
+/// How many times the fold's keys were made again (each step's key, for
+/// the link: [`step_key`]).
+#[must_use]
+pub fn keys_renumbered(rec: &Recorder) -> u32 {
+    rec.rt.fold.renumbered
+}
+
+/// Step `s`'s key in program order now.
+#[must_use]
+pub fn step_key(rec: &Recorder, s: u32) -> u64 {
+    rec.rt.fold.steps.get(s as usize).map_or(0, |x| x.key)
+}
+
 /// A family's row name for check mode's report of a store that did not
 /// put the recorded version back.
 fn set_row(f: Fam) -> &'static str {
