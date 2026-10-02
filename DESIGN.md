@@ -577,7 +577,10 @@ template, which a compiled backend exploits.
   stream is a sequence of lines, and `write_out` appends to it.
 - **Loads.** `\openin`, `\read` and `\input` of the same name are a
   load, served the stored value in memory, never the file, which a call
-  re-run out of order may have truncated.
+  re-run out of order may have truncated. So is every other read of a
+  file by name on TeX's path: `\pdffilesize` (LaTeX's `\IfFileExists`
+  calls it, through expl3's `\file_full_name:n`), `\pdfmdfivesum file`,
+  `\pdffiledump`, `\pdfobj file` and an image (`Tex::read_source`).
 - **No name is special.** `.aux`, `.toc`, `.lof` and `.bcf` are
   addresses the document chose.
 - **The cycle is a φ.** A load of a name the job stores reads, on its

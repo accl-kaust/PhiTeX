@@ -8,7 +8,7 @@
 
 use alloc::vec::Vec;
 
-use crate::host::{FileKind, Host};
+use crate::host::Host;
 use crate::print::NEW_STRING;
 use crate::tex::{Jump, Tex};
 use crate::track::Tracker;
@@ -89,11 +89,8 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             }
             PDF_FILE_SIZE_CODE => {
                 let name = file_name(&self.scan_ext_string()?);
-                let found = self.host.read_file(&name, FileKind::Tex);
-                if T::VALUES {
-                    self.tracker
-                        .load(&name, FileKind::Tex, found.as_ref().map(|f| &f.contents));
-                }
+                // (a load: a name the job stores reads its store, DESIGN 3.7)
+                let found = self.read_source(&name);
                 match found {
                     Some(f) => alloc::format!("{}", f.contents.len()).into_bytes(),
                     None => Vec::new(),
@@ -107,14 +104,8 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                 self.restore_ext_scan(saved);
                 let digest = if file {
                     let name = file_name(&s);
-                    let found = self.host.read_file(&name, FileKind::Tex);
-                    if T::VALUES {
-                        self.tracker.load(
-                            &name,
-                            FileKind::Tex,
-                            found.as_ref().map(|f| &f.contents),
-                        );
-                    }
+                    // (a load: a name the job stores reads its store)
+                    let found = self.read_source(&name);
                     found.map(|f| partex_engine::md5::md5(&f.contents))
                 } else {
                     Some(partex_engine::md5::md5(&s))
@@ -327,11 +318,8 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             return Ok(Vec::new());
         }
         let name = file_name(&s);
-        let found = self.host.read_file(&name, FileKind::Tex);
-        if T::VALUES {
-            self.tracker
-                .load(&name, FileKind::Tex, found.as_ref().map(|f| &f.contents));
-        }
+        // (a load: a name the job stores reads its store, DESIGN 3.7)
+        let found = self.read_source(&name);
         let Some(f) = found else {
             return Ok(Vec::new());
         };

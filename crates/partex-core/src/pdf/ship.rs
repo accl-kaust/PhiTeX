@@ -25,7 +25,7 @@ use super::{DIRECT_ALWAYS, DIRECT_PAGE, ONE_BP, ONE_HUNDRED_BP, SCAN_SPECIAL, SE
 use crate::arith::Scaled;
 use crate::dvi::SetGlue;
 use crate::fontmap::{F_PK, MapEntry};
-use crate::host::{FileKind, Host};
+use crate::host::Host;
 use crate::scan::MAX_DIMEN;
 use crate::tex::{Jump, Tex};
 use crate::track::Tracker;
@@ -2471,11 +2471,8 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             // (pdfTeX's `tex_b_openin`: web2c's `open_input` with
             // `kpse_tex_format`, so `\pdfobj file {t1.cmap}` is found on
             // TeX's search path)
-            let found = self.host.read_file(&s, FileKind::Tex);
-            if T::VALUES {
-                self.tracker
-                    .load(&s, FileKind::Tex, found.as_ref().map(|f| &f.contents));
-            }
+            // (a load: a name the job stores reads its store, DESIGN 3.7)
+            let found = self.read_source(&s);
             let Some(f) = found else {
                 self.print_nl(b"! ");
                 self.print_str(&s);
