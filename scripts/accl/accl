@@ -1,0 +1,113 @@
+#!/bin/bash
+# Offload partex-PhiTeX work to the accl cluster (run locally, in the
+# repository or a worktree of it: scripts/accl/accl ...):
+#
+#   accl submit <task> [args...]   snapshot the tree, push it, submit; prints the job id
+#   accl run <task> [args...]      submit, wait, fetch, print the summary
+#   accl wait <job>...             wait for jobs, fetch their results, print summaries
+#   accl q                         your jobs
+#   accl log <job>                 a job's output so far
+#   accl cancel <job>...           cancel your jobs
+#   accl snap                      only snapshot and push; prints the commit
+#
+# Tasks (job.sbatch): gate | course plain|ab|ssa|rebuild|label ... |
+# edits [DOC...] | cmd <command...>. Each gets resources from its preset
+# below; ACCL_OPTS adds or overrides sbatch options (for example
+# ACCL_OPTS="-c 16 -t 1:00:00"); ACCL_COMMIT=<rev> submits that commit
+# instead of a snapshot of the tree.
+#
+# The snapshot is the working tree as it is (tracked and untracked files,
+# .gitignore respected, the handoff notes and presentation/ left out)
+# made into a commit object with a scratch index: the branch, the index
+# and the stash are untouched. It is pushed to the `accl` remote as
+# refs/wip/<commit>. Results land in ~/code/flinner/partex-phitex-runs/<task>-<job>/
+# here and on accl.
+set -euo pipefail
+here=$(cd "$(dirname "$0")" && pwd)
+H=acclhead1
+slurm='export PATH=/opt/slurm/current/bin:$PATH;'
+runs=$HOME/code/flinner/partex-phitex-runs
+
+preset() {
+  case $1 in
+    gate) echo "-p build --qos=build4 -c 48 --mem=128G -t 03:00:00" ;;
+    course)
+      case ${2:-} in
+        ssa|rebuild|label) echo "-p build --qos=build4 -c 8 --mem=96G -t 04:00:00" ;;
+        *) echo "-p build --qos=build4 -c 8 --mem=48G -t 03:00:00" ;;
+      esac ;;
+    edits) echo "-p build --qos=build4 -c 8 --mem=32G -t 01:30:00" ;;
+    *) echo "-p build --qos=build4 -c 16 --mem=64G -t 02:00:00" ;;
+  esac
+}
+
+snap() {
+  local repo idx tree head c
+  if [ -n "${ACCL_COMMIT:-}" ]; then
+    c=$(git rev-parse "$ACCL_COMMIT^{commit}")
+    git push -q accl "$c:refs/wip/$c" 2>/dev/null || true
+    echo "$c"
+    return
+  fi
+  repo=$(git rev-parse --show-toplevel)
+  idx=$(mktemp)
+  cp "$(git rev-parse --git-path index)" "$idx"
+  (cd "$repo" && GIT_INDEX_FILE=$idx git add -A -- . ':!HANDOFF.md' ':!GPT_HANDOFF.md' ':!presentation')
+  tree=$(GIT_INDEX_FILE=$idx git write-tree)
+  rm -f "$idx"
+  head=$(git rev-parse HEAD)
+  if [ "$tree" = "$(git rev-parse "HEAD^{tree}")" ]; then
+    c=$head
+  else
+    c=$(git commit-tree "$tree" -p "$head" -m "wip snapshot of $(git rev-parse --short HEAD)")
+  fi
+  git push -q accl "$c:refs/wip/$c" 2>/dev/null || git push -q accl "+$c:refs/wip/$c"
+  echo "$c"
+}
+
+sync_scripts() {
+  rsync -a --delete --exclude=accl "$here/" "$H:code/flinner/partex-phitex-accl/"
+  ssh $H "mkdir -p code/flinner/partex-phitex-runs"
+}
+
+submit() {
+  local task=$1 c opts
+  c=$(snap)
+  sync_scripts
+  opts="$(preset "$@") ${ACCL_OPTS:-}"
+  echo "accl: commit $c, $opts" >&2
+  ssh $H "$slurm cd code/flinner/partex-phitex-runs && sbatch --parsable -J partex-$task $opts \$HOME/code/flinner/partex-phitex-accl/job.sbatch $c $(printf '%q ' "$@")"
+}
+
+state() { ssh $H "$slurm sacct -j $1 -n -X -o State" | awk '{print $1}' | head -1; }
+
+wait_jobs() {
+  local j s
+  for j in "$@"; do
+    while :; do
+      s=$(state "$j")
+      case $s in COMPLETED | FAILED | CANCELLED* | TIMEOUT | OUT_OF_ME* | NODE_FAIL) break ;; esac
+      sleep 20
+    done
+    mkdir -p "$runs"
+    rsync -a "$H:code/flinner/partex-phitex-runs/*-$j" "$runs/" 2>/dev/null || true
+    rsync -a "$H:code/flinner/partex-phitex-runs/partex-$j.out" "$runs/" 2>/dev/null || true
+    local d
+    d=$(ls -d "$runs"/*-"$j" 2>/dev/null | head -1)
+    echo "== job $j: $s  ($d)"
+    if [ -n "$d" ] && [ -f "$d/summary.txt" ]; then cat "$d/summary.txt"; else tail -30 "$runs/partex-$j.out" 2>/dev/null; fi
+  done
+}
+
+cmd=${1:-}
+shift || true
+case $cmd in
+  snap) snap ;;
+  submit) submit "$@" ;;
+  run) j=$(submit "$@"); echo "accl: job $j" >&2; wait_jobs "$j" ;;
+  wait) wait_jobs "$@" ;;
+  q) ssh $H "$slurm squeue -u \$USER -o '%.8i %.12j %.9T %.10M %.4C %.6m %R'" ;;
+  log) ssh $H "cat code/flinner/partex-phitex-runs/partex-$1.out" ;;
+  cancel) ssh $H "$slurm scancel $*" ;;
+  *) sed -n '2,24p' "$0"; exit 2 ;;
+esac

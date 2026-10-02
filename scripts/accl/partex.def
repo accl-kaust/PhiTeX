@@ -1,0 +1,30 @@
+# Apptainer image for partex runs on the accl cluster: Arch Linux pinned to
+# an Arch Linux Archive snapshot, so pdfTeX, TeX Live, zlib and the fonts
+# are the versions the oracle outputs come from, and the repository's Rust
+# toolchain. Built by build-image.sbatch (kept outside the repository).
+Bootstrap: docker
+From: archlinux:base
+
+%post
+    set -eu
+    snapshot=2026/09/25
+    echo "Server = https://archive.archlinux.org/repos/$snapshot/\$repo/os/\$arch" > /etc/pacman.d/mirrorlist
+    sed -i 's/^#\?CheckSpace/#CheckSpace/; s/^#DisableSandbox/DisableSandbox/' /etc/pacman.conf
+    grep -q '^DisableSandbox' /etc/pacman.conf || sed -i '/^\[options\]/a DisableSandbox' /etc/pacman.conf
+    pacman -Syyuu --noconfirm
+    pacman -S --noconfirm --needed base-devel git time rustup clang mold biber ghostscript valgrind qpdf \
+        texlive-basic texlive-bibtexextra texlive-bin texlive-binextra texlive-context \
+        texlive-fontsextra texlive-fontsrecommended texlive-fontutils texlive-formatsextra \
+        texlive-latex texlive-latexextra texlive-latexrecommended texlive-luatex \
+        texlive-mathscience texlive-metapost texlive-pictures texlive-plaingeneric \
+        texlive-pstricks texlive-publishers texlive-xetex texlive-humanities texlive-langarabic
+    export RUSTUP_HOME=/opt/rust/rustup CARGO_HOME=/opt/rust/cargo
+    rustup toolchain install nightly-2026-08-08 --profile minimal \
+        --component rustfmt,clippy --target wasm32-unknown-unknown
+    rustup default nightly-2026-08-08
+    pacman -Scc --noconfirm
+
+%environment
+    export RUSTUP_HOME=/opt/rust/rustup
+    export PATH=/opt/rust/cargo/bin:$PATH
+    export LANG=C.UTF-8
