@@ -665,13 +665,56 @@ template, which a compiled backend exploits.
   calls that apply (3.4): at such a call's start, and at its end before
   its writes are versioned. Each chunk carries a version made from its
   content, keyed by `step << 32 | k`.
-- **The link** (`effects::link_cached`) lays every file out from the
-  live chunks in program order. A chunk whose version and entry state
-  (the object-stream counters, the file being filled, the numbers it
-  writes) are those last linked is taken from the cache. Deflate is
-  memoized by content. A file is written only when its bytes changed.
-  `PARTEX_LINK_SPLICE=0` links everything in full, and a debug build
-  checks each cached link against a full one.
+- **The link costs the changed chunks** (`effects::Splice`, the SSA
+  build's link; 4.3 item 4). It keeps the last link's layout:
+  - the chunks in program order (by their step's key, then their place
+    in the step), each with its pieces of each file (bytes of `Write`
+    effects, or pieces rendered at the link: object streams,
+    cross-reference sections, byte counts) and the marks of the objects
+    it writes, each at its offset in the chunk's bytes of its file;
+  - an **offset tree** per file: a Fenwick tree over the chunks' lengths
+    in that file, so an object's offset is a prefix sum plus its mark's
+    offset in its chunk, `O(log n)`;
+  - each object stream as rendered, with the objects it holds, and each
+    cross-reference section and byte count as rendered.
+
+  The runtime logs the steps whose chunks changed since the link last
+  took them (a run closed, or the step left the fold;
+  `ssa::take_step_changes`). A link replaces their chunks: a step with as
+  many chunks as before has each replaced in place (its lengths' changes
+  into the trees, its marks into the table); chunks inserted or removed
+  make the order and the trees again, `O(n)` without reading any other
+  chunk's effects. Then, in order:
+  1. the object streams a change reached are rendered again: those a
+     chunk put in closes, and the first one closed after each chunk put
+     in or taken out (its events fed it), by file;
+  2. the cross-reference section is rendered from the trees when a byte
+     of its file changed at or before it;
+  3. the byte counts (`Effect::Length`) are written with the files'
+     lengths.
+
+  Each file comes out with its length and the first byte that changed:
+  the least prefix sum over the chunks whose bytes or marks of it
+  changed (a chunk put in whose bytes and marks of the file are the
+  same does not count). A file that is as last written (its length and
+  modification time those of the link's last write, no step opened it
+  since) is written from that byte on and cut to its length; any other
+  is written whole. Deflate is memoized by content, keeping what the
+  last eight links used. The diagnostics, pages and closes are not
+  copied; a host walks them when it wants them.
+
+  "The edited page ready" is when the changed chunks are placed: their
+  bytes and offsets are final, so an edited page's content stream is
+  there, before the object streams, the cross-reference section and the
+  byte counts that come after it.
+
+  `PARTEX_LINK_SPLICE=0` links everything in full and writes every
+  file. A debug build, or `PARTEX_LINK_CHECK=1`, checks every link
+  against a full one (files, terminal text, opens, closes, diagnostics,
+  pages, and the chunks against the build's). Virtual object numbers
+  (machine mode) are not laid out by the splice: a full link resolves
+  them. Machine mode keeps `effects::link_cached`: its regions are
+  resolved from a cache and laid out in full.
 - The writer's position in the file and the objects' offsets are not
   state: TeX never observes them, and the link places every object.
 - **Writer scopes.** Each routine that changes the PDF or DVI writers'

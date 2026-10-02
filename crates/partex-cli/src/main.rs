@@ -1056,11 +1056,12 @@ fn run_ssa(host: native::NativeHost, params: Params, command_line: &[u8]) -> i32
         partex_core::ssa::settle(&mut tex, trace, apply, &mut t, r.commands, ns)
     });
     let millis = t0.elapsed().as_secs_f64() * 1e3;
-    let t1 = std::time::Instant::now();
     let mut linker = SsaLinker::default();
-    let how = linker.link(&mut tex);
-    let link_ms = t1.elapsed().as_secs_f64() * 1e3;
-    eprintln!("partex: ssa build 0: link {link_ms:.1} ms: {how}");
+    let lr = linker.link(&mut tex);
+    eprintln!(
+        "partex: ssa build 0: link {:.1} ms: {}; files written {:.1} ms",
+        lr.link_ms, lr.how, lr.write_ms
+    );
     let mut history = r.history;
     let mut commands = r.commands;
     if let Some(s) = &settled {
@@ -1189,20 +1190,22 @@ fn rebuild_ssa(
         eprintln!("partex: ssa rebuild {n}: {l}");
     }
     let millis = t0.elapsed().as_secs_f64() * 1e3;
-    let t1 = std::time::Instant::now();
-    let how = linker.link(tex);
-    let link_ms = t1.elapsed().as_secs_f64() * 1e3;
-    eprintln!("partex: ssa rebuild {n}: link: {how}");
+    let lr = linker.link(tex);
+    let link_ms = lr.link_ms;
+    eprintln!("partex: ssa rebuild {n}: link: {}", lr.how);
     let s = tex.tracker().rec.borrow().rt.stats;
     eprintln!(
         "partex: ssa rebuild {n}: {:.1} ms (the rebuild {millis:.1} ms, the link {link_ms:.1} ms), \
+         the edited page ready {:.2} ms after the rebuild, files written {:.1} ms, \
          edits {}, seeds {} \
          (loads of a changed φ {}, of a changed store {}, queries answered anew {}; data edited in it {}), \
          steps run {} (new {}, runs dropped {}, passed over {}), calls {} (fresh {}, \
          hits applied {} for {} commands), \
          definitions changed {}, readers marked {}, reads checked {}, positioned {}, \
          restored {}, from the format {}, commands {}",
-        millis + link_ms,
+        millis + link_ms + lr.write_ms,
+        lr.ready_ms,
+        lr.write_ms,
         rr.edits,
         rr.seeds,
         rr.phi,
@@ -1347,26 +1350,51 @@ fn report_trips(what: &str, r: &partex_core::ssa::RebuildReport) {
     }
 }
 
-/// The SSA build's link (DESIGN 7.17.3, "The link after a rebuild is a
-/// watch's link"): a chunk per call of a step that made effects, keyed by
-/// the step's id and its place in the step, taken from the last link when
-/// its version is the one linked then and its entry is the same
-/// (`effects::link_cached`); deflate memoized by content; only the files
-/// whose bytes changed written. `PARTEX_LINK_SPLICE=0`: a full link and
-/// every file written, each time, as before.
+/// The SSA build's link (DESIGN 3.8; 4.3, item 4: the link costs the
+/// changed chunks): the steps whose chunks changed since the last link
+/// (`ssa::take_step_changes`) are spliced into the last link's layout
+/// (`effects::Splice`: an offset tree per file, object streams and the
+/// cross-reference section rendered again only when a change reaches
+/// them); deflate memoized by content; each file written from its first
+/// changed byte when the file is as last written, else in full.
+/// `PARTEX_LINK_SPLICE=0`: a full link of every step's chunks and every
+/// file written, each time, as before. A debug build (or
+/// `PARTEX_LINK_CHECK=1`) checks each link against a full one.
 #[derive(Default)]
 struct SsaLinker {
-    cache: partex_core::effects::LinkCache,
-    /// Each chunk's version at the last link, by key.
-    linked: std::collections::HashMap<u64, u128>,
-    /// Deflate's output by its input's hash, as the last link used it.
-    deflated: std::collections::HashMap<u128, Vec<u8>>,
-    /// The hash of the bytes last written to each file, by name.
-    written: std::collections::BTreeMap<Vec<u8>, u128>,
+    splice: partex_core::effects::Splice,
+    /// The fold's count of renumberings at the last link.
+    renumbered: u32,
+    /// Deflate's output by its input's hash, with the link that last used
+    /// it.
+    deflated: std::collections::HashMap<u128, (Vec<u8>, u64)>,
+    links: u64,
+    /// What was last written to each file, by name: the engine's id of it,
+    /// and the file's length and modification time after the write.
+    written: std::collections::BTreeMap<Vec<u8>, (u32, u64, Option<std::time::SystemTime>)>,
     /// The highest id of a file the engine had opened at the last link:
     /// a file opened since was made anew by its open (the host's ids
     /// grow).
     opened: Option<u32>,
+}
+
+/// What a link cost, for the reports.
+struct LinkReport {
+    how: String,
+    /// The link (without the files' writes), the time until the changed
+    /// chunks were placed, and the writes.
+    link_ms: f64,
+    ready_ms: f64,
+    write_ms: f64,
+}
+
+/// How each file was written: files written whole, files written from a
+/// byte on, and the bytes.
+#[derive(Default)]
+struct Written {
+    whole: usize,
+    patched: usize,
+    bytes: u64,
 }
 
 impl SsaLinker {
@@ -1374,60 +1402,134 @@ impl SsaLinker {
     /// file by the name it was opened with (the last open of a name
     /// wins), the terminal's text, the diagnostics. What it cost, for the
     /// report.
-    fn link(&mut self, tex: &mut Tex<native::NativeHost, partex_core::ssa::SsaTracker>) -> String {
+    fn link(
+        &mut self,
+        tex: &mut Tex<native::NativeHost, partex_core::ssa::SsaTracker>,
+    ) -> LinkReport {
         use partex_core::host::Host;
-        let splice = !std::env::var("PARTEX_LINK_SPLICE").is_ok_and(|v| v == "0");
-        let chunks = partex_core::ssa::step_effects(&tex.tracker().rec.borrow());
-        if std::env::var("PARTEX_SSA_LINK_TRACE").is_ok_and(|v| v == "1") {
-            trace_ssa_link(&chunks);
-        }
-        let threads = partex_incr::Threads::available();
         let origin = std::time::Instant::now();
         let clock = || u64::try_from(origin.elapsed().as_nanos()).unwrap_or(u64::MAX);
-        let mut times = partex_core::effects::LinkTimes::default();
-        let versions: std::collections::HashMap<u64, u128> =
-            chunks.iter().map(|(k, e)| (*k, e.0.0)).collect();
+        #[allow(clippy::cast_precision_loss, reason = "a report")]
+        let ms = |ns: u64| ns as f64 / 1e6;
+        let splice = !std::env::var("PARTEX_LINK_SPLICE").is_ok_and(|v| v == "0");
+        let check =
+            cfg!(debug_assertions) || std::env::var("PARTEX_LINK_CHECK").is_ok_and(|v| v == "1");
+        let trace = std::env::var("PARTEX_SSA_LINK_TRACE").is_ok_and(|v| v == "1");
+        self.links += 1;
+        let changes = partex_core::ssa::take_step_changes(&mut tex.tracker().rec.borrow_mut());
+        if !splice || trace {
+            let rec = tex.tracker().rec.borrow();
+            let chunks = partex_core::ssa::step_effects(&rec);
+            if trace {
+                trace_ssa_link(&chunks);
+            }
+            if !splice {
+                drop(rec);
+                return self.link_full(tex, &origin);
+            }
+        }
+        let n_changes = changes.len();
+        let (linked, misses) = self.spliced(tex, changes, &clock);
+        let out = match linked {
+            Ok(Some(out)) => out,
+            // (virtual object numbers: a full link resolves them)
+            Ok(None) => return self.link_full(tex, &origin),
+            Err(e) => {
+                eprintln!("partex: ssa: the link step failed: {e:?}");
+                std::process::exit(3);
+            }
+        };
+        let t_link = clock();
+        if check {
+            self.check(tex, &out);
+        }
+        let t_check = clock();
+        let host = tex.host_mut();
+        let w = self.write_spliced(host, &out);
+        host.term_write(&out.term);
+        self.splice.each_diagnostic(&mut |d| host.diagnostic(d));
+        let t_end = clock();
+        let st = self.splice.stats;
+        let checked = check.then(|| ms(t_check - t_link));
+        LinkReport {
+            how: splice_report(
+                n_changes,
+                &st,
+                misses,
+                (ms(t_link), checked, ms(t_end - t_check)),
+                &w,
+            ),
+            link_ms: ms(t_link),
+            ready_ms: ms(st.placed_at),
+            write_ms: ms(t_end - t_check),
+        }
+    }
+
+    /// The spliced link of `changes`, deflate memoized by content (what
+    /// the last few links used is kept: an edit undone finds its streams);
+    /// with how many streams deflate compressed anew.
+    fn spliced(
+        &mut self,
+        tex: &Tex<native::NativeHost, partex_core::ssa::SsaTracker>,
+        changes: Vec<partex_core::effects::StepChunks>,
+        clock: &dyn Fn() -> u64,
+    ) -> (
+        Result<Option<partex_core::effects::SpliceOut>, partex_core::effects::LinkError>,
+        usize,
+    ) {
+        let links = self.links;
         let (mut was, mut now) = (
             std::mem::take(&mut self.deflated),
             std::collections::HashMap::new(),
         );
-        // (content-keyed: a stream made again alike compresses alike)
+        let mut misses = 0usize;
         let mut deflate = |level: i32, data: &[u8]| {
-            if !splice {
-                return crate::zlib::deflate_stream(level, data);
-            }
             let key = partex_core::StableHasher::of(&(b"deflate", level, data));
-            if let Some(z) = now.get(&key) {
+            if let Some((z, _)) = now.get(&key) {
                 return Some(Vec::clone(z));
             }
-            let z = match was.remove(&key) {
-                Some(z) => z,
-                None => crate::zlib::deflate_stream(level, data)?,
+            let z = if let Some((z, _)) = was.remove(&key) {
+                z
+            } else {
+                misses += 1;
+                crate::zlib::deflate_stream(level, data)?
             };
-            now.insert(key, z.clone());
+            now.insert(key, (z.clone(), links));
             Some(z)
         };
-        let linked = if splice {
-            let keyed: Vec<(u64, &[partex_core::effects::Effect])> =
-                chunks.iter().map(|(k, e)| (*k, &e.1[..])).collect();
-            let touched = |k: u64| versions.get(&k) != self.linked.get(&k);
-            partex_core::effects::link_cached_timed(
-                &keyed,
-                &touched,
-                &mut self.cache,
-                &threads,
-                &mut deflate,
-                &clock,
-                &mut times,
-            )
-        } else {
-            let slices: Vec<&[partex_core::effects::Effect]> =
-                chunks.iter().map(|(_, e)| &e.1[..]).collect();
-            partex_core::effects::link(&slices, &threads, &mut deflate)
+        let linked = {
+            let rec = tex.tracker().rec.borrow();
+            let renumbered = partex_core::ssa::keys_renumbered(&rec);
+            let key_of = |s: u32| partex_core::ssa::step_key(&rec, s);
+            let keys: Option<&dyn Fn(u32) -> u64> =
+                (renumbered != self.renumbered).then_some(&key_of);
+            self.renumbered = renumbered;
+            self.splice.link(changes, keys, &mut deflate, clock)
         };
         drop(deflate);
+        was.retain(|_, (_, at)| *at + 8 > links);
+        now.extend(was);
         self.deflated = now;
-        self.linked = versions;
+        (linked, misses)
+    }
+
+    /// The full link (`PARTEX_LINK_SPLICE=0`, or virtual object numbers):
+    /// every step's chunks, every file written.
+    fn link_full(
+        &mut self,
+        tex: &mut Tex<native::NativeHost, partex_core::ssa::SsaTracker>,
+        origin: &std::time::Instant,
+    ) -> LinkReport {
+        use partex_core::host::Host;
+        #[allow(clippy::cast_precision_loss, reason = "a report")]
+        let ms = |d: std::time::Duration| d.as_secs_f64() * 1e3;
+        let chunks = partex_core::ssa::step_effects(&tex.tracker().rec.borrow());
+        let threads = partex_incr::Threads::available();
+        let slices: Vec<&[partex_core::effects::Effect]> =
+            chunks.iter().map(|(_, e)| &e.1[..]).collect();
+        let linked = partex_core::effects::link(&slices, &threads, &mut |level, data| {
+            crate::zlib::deflate_stream(level, data)
+        });
         let l = match linked {
             Ok(l) => l,
             Err(e) => {
@@ -1435,88 +1537,232 @@ impl SsaLinker {
                 std::process::exit(3);
             }
         };
-        if splice && cfg!(debug_assertions) {
-            let slices: Vec<&[partex_core::effects::Effect]> =
-                chunks.iter().map(|(_, e)| &e.1[..]).collect();
-            let full = partex_core::effects::link(&slices, &threads, &mut |level, data| {
-                crate::zlib::deflate_stream(level, data)
-            });
-            assert!(
-                full.as_ref()
-                    .is_ok_and(|f| f.files == l.files && f.term == l.term),
-                "the SSA link taken from the cache is not a full link's"
-            );
-        }
+        // (the next spliced link lays everything out again)
+        self.splice.reset();
         let t_link = origin.elapsed();
         let host = tex.host_mut();
-        let (files, bytes_out) = self.write(host, &l, splice);
+        let (files, bytes) = self.write_full(host, &l);
         host.term_write(&l.term);
         for d in &l.diagnostics {
             host.diagnostic(d);
         }
-        #[allow(clippy::cast_precision_loss, reason = "a report")]
-        let ms = |ns: u64| ns as f64 / 1e6;
-        format!(
-            "{} of {} chunks resolved; ms: numbering {:.1}, resolve {:.1}, layout {:.1} \
-             (object streams {:.1}, cross-reference {:.1}), lengths {:.1}, copy {:.1}; \
-             link {:.1}, files written {:.1} ({files} files, {bytes_out} bytes)",
-            self.cache.resolved,
-            chunks.len(),
-            ms(times.numbering),
-            ms(times.resolve),
-            ms(times.layout),
-            ms(times.objstm),
-            ms(times.xref),
-            ms(times.lengths),
-            ms(times.copy),
-            t_link.as_secs_f64() * 1e3,
-            origin.elapsed().saturating_sub(t_link).as_secs_f64() * 1e3,
-        )
+        let t_end = origin.elapsed();
+        LinkReport {
+            how: format!(
+                "linked in full, {} chunks; ms: link {:.2}; files written {:.2} ({files} files, \
+                 {bytes} bytes)",
+                chunks.len(),
+                ms(t_link),
+                ms(t_end.saturating_sub(t_link)),
+            ),
+            link_ms: ms(t_link),
+            ready_ms: ms(t_link),
+            write_ms: ms(t_end.saturating_sub(t_link)),
+        }
     }
 
-    /// Write the linked files: each by the name it was opened with (the
-    /// last open of a name wins), unless `splice` and its bytes are the
-    /// ones last written and no step opened it since. The files and bytes
-    /// written.
-    fn write(
+    /// Panic unless the spliced link is a full link's: its chunks the
+    /// build's, in order, and every file's bytes and the terminal's text
+    /// those of a full link.
+    fn check(
+        &self,
+        tex: &Tex<native::NativeHost, partex_core::ssa::SsaTracker>,
+        out: &partex_core::effects::SpliceOut,
+    ) {
+        let chunks = partex_core::ssa::step_effects(&tex.tracker().rec.borrow());
+        let keys: Vec<(u32, u32, u128)> = chunks
+            .iter()
+            .map(|(k, e)| {
+                (
+                    u32::try_from(k >> 32).unwrap_or(u32::MAX),
+                    u32::try_from(k & 0xffff_ffff).unwrap_or(u32::MAX),
+                    e.0.0,
+                )
+            })
+            .collect();
+        assert!(
+            keys == self.splice.chunk_keys(),
+            "the spliced link's chunks are not the build's"
+        );
+        let slices: Vec<&[partex_core::effects::Effect]> =
+            chunks.iter().map(|(_, e)| &e.1[..]).collect();
+        let full =
+            partex_core::effects::link(&slices, &partex_core::Sequential, &mut |level, data| {
+                crate::zlib::deflate_stream(level, data)
+            })
+            .expect("a full link");
+        assert!(
+            full.files.len() == out.files.len()
+                && full.files.iter().all(|(f, b)| {
+                    out.files.get(f).is_some_and(|x| x.0 == b.len() as u64)
+                        && self.splice.file(*f) == *b
+                }),
+            "the spliced link's files are not a full link's"
+        );
+        let mut diagnostics = Vec::new();
+        self.splice
+            .each_diagnostic(&mut |d| diagnostics.push(d.clone()));
+        assert!(
+            full.term == out.term
+                && full.opened == out.opened
+                && full.closed == self.splice.closed()
+                && full.diagnostics == diagnostics
+                && full.pages == self.splice.pages(),
+            "the spliced link's terminal text, opens, closes, diagnostics or pages are not a full link's"
+        );
+    }
+
+    /// The files to write: each name with the engine's id and kind of its
+    /// last open (the engine's handles closed: their bytes are the link's
+    /// to write), and whether a step opened it since the last link (its
+    /// open emptied it).
+    fn names(
         &mut self,
         host: &mut native::NativeHost,
-        l: &partex_core::effects::Linked,
-        splice: bool,
-    ) -> (usize, usize) {
+        opened: &[(
+            partex_core::host::WriteId,
+            Vec<u8>,
+            partex_core::host::FileKind,
+        )],
+    ) -> Vec<(Vec<u8>, u32, partex_core::host::FileKind, bool)> {
         use partex_core::host::Host;
         let mut last: std::collections::BTreeMap<Vec<u8>, (u32, partex_core::host::FileKind)> =
             std::collections::BTreeMap::new();
-        for (id, name, kind) in &l.opened {
-            // (the engine's handle: its bytes are the link's to write)
+        let mut anew: std::collections::BTreeSet<&[u8]> = std::collections::BTreeSet::new();
+        for (id, name, kind) in opened {
             host.close(*id);
             last.insert(name.clone(), (id.0, *kind));
+            if self.opened.is_none_or(|m| id.0 > m) {
+                anew.insert(name);
+            }
         }
-        // (the files opened since the last link: their opens emptied them)
-        let anew: std::collections::BTreeSet<&[u8]> = l
-            .opened
-            .iter()
-            .filter(|(id, ..)| self.opened.is_none_or(|m| id.0 > m))
-            .map(|(_, name, _)| &name[..])
-            .collect();
-        self.opened = l.opened.iter().map(|(id, ..)| id.0).max().max(self.opened);
-        let (mut files, mut bytes_out) = (0, 0);
-        for (name, (id, kind)) in &last {
-            let bytes = l.files.get(id).map_or(&[][..], Vec::as_slice);
-            let h = partex_core::StableHasher::of(bytes);
-            if splice && !anew.contains(&name[..]) && self.written.get(name) == Some(&h) {
+        self.opened = opened.iter().map(|(id, ..)| id.0).max().max(self.opened);
+        last.into_iter()
+            .map(|(name, (id, kind))| {
+                let a = anew.contains(&name[..]);
+                (name, id, kind, a)
+            })
+            .collect()
+    }
+
+    /// Write the spliced link's files: a file whose bytes did not change
+    /// and which is as last written is left; one that changed from a byte
+    /// on, and is as last written, is written from there (and cut to its
+    /// length); any other is written whole.
+    fn write_spliced(
+        &mut self,
+        host: &mut native::NativeHost,
+        out: &partex_core::effects::SpliceOut,
+    ) -> Written {
+        use std::io::{Seek, SeekFrom, Write};
+        let mut w = Written::default();
+        for (name, id, kind, anew) in self.names(host, &out.opened) {
+            let (len, from) = out.files.get(&id).copied().unwrap_or((0, None));
+            let n = native::with_suffix(&name, kind);
+            let path = native::path(&host.in_output_dir(&n).unwrap_or(n));
+            let as_written = !anew
+                && self.written.get(&name).is_some_and(|&(i, l, t)| {
+                    i == id
+                        && std::fs::metadata(&path)
+                            .is_ok_and(|m| m.len() == l && m.modified().ok() == t)
+                });
+            let from = match (as_written, from) {
+                (true, None) => continue,
+                (true, Some(x)) => x,
+                (false, _) => 0,
+            };
+            let file = if from == 0 {
+                std::fs::File::create(&path)
+            } else {
+                std::fs::OpenOptions::new().write(true).open(&path)
+            };
+            let Ok(file) = file else {
+                continue;
+            };
+            let mut file = std::io::BufWriter::with_capacity(1 << 16, file);
+            if from > 0 && file.seek(SeekFrom::Start(from)).is_err() {
                 continue;
             }
-            if let Some((w, _)) = host.open_write(name, *kind) {
+            self.splice.write_from(id, from, &mut |b| {
+                let _ = file.write_all(b);
+            });
+            let Ok(file) = file.into_inner() else {
+                continue;
+            };
+            if from > 0 {
+                let _ = file.set_len(len);
+                w.patched += 1;
+            } else {
+                w.whole += 1;
+            }
+            w.bytes += len - from;
+            let t = file.metadata().ok().and_then(|m| m.modified().ok());
+            self.written.insert(name, (id, len, t));
+        }
+        w
+    }
+
+    /// Write a full link's files, every one.
+    fn write_full(
+        &mut self,
+        host: &mut native::NativeHost,
+        l: &partex_core::effects::Linked,
+    ) -> (usize, usize) {
+        use partex_core::host::Host;
+        let (mut files, mut bytes_out) = (0, 0);
+        for (name, id, kind, _) in self.names(host, &l.opened) {
+            let bytes = l.files.get(&id).map_or(&[][..], Vec::as_slice);
+            if let Some((w, _)) = host.open_write(&name, kind) {
                 host.write(w, bytes);
                 host.close(w);
             }
-            self.written.insert(name.clone(), h);
             files += 1;
             bytes_out += bytes.len();
+            // (the next spliced link writes it whole)
+            self.written.remove(&name);
         }
         (files, bytes_out)
     }
+}
+
+/// The spliced link's report: what it put in and rendered, and its times
+/// (`times`: the link, the check against a full link if made, the
+/// writes, in ms).
+fn splice_report(
+    changes: usize,
+    st: &partex_core::effects::SpliceStats,
+    misses: usize,
+    times: (f64, Option<f64>, f64),
+    w: &Written,
+) -> String {
+    #[allow(clippy::cast_precision_loss, reason = "a report")]
+    let ms = |ns: u64| ns as f64 / 1e6;
+    format!(
+        "{changes} steps changed, {} chunks put in, {} taken out, {} live{}; \
+         {} object streams rendered ({} bytes), {} cross-reference sections \
+         ({} entries), deflate {misses} new ({:.2} ms in all); ms: placed {:.2}, \
+         link {:.2}{}; files written {:.2} ({} whole, {} from a byte on, \
+         {} bytes)",
+        st.chunks_in,
+        st.chunks_out,
+        st.chunks,
+        if st.reindexed { ", moved" } else { "" },
+        st.streams,
+        st.stream_bytes,
+        st.xrefs,
+        st.xref_entries,
+        ms(st.deflate_ns),
+        ms(st.placed_at),
+        times.0,
+        times
+            .1
+            .map(|c| format!(", checked against a full link {c:.1}"))
+            .unwrap_or_default(),
+        times.2,
+        w.whole,
+        w.patched,
+        w.bytes,
+    )
 }
 
 /// `PARTEX_SSA_LINK_TRACE=1`: each chunk's step, the files it opens and
