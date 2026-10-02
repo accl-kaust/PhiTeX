@@ -183,6 +183,16 @@ impl<M: Machine> Fold<M> {
     /// Close step `id`: its outside reads (`reads`, each with its
     /// address's hash) and its records' writes (`writes` gives each
     /// record's written addresses) become index entries.
+    ///
+    /// A step run again replaces its last run's entries where they are
+    /// (the step's entry of a slot is at its key): an entry this run makes
+    /// again takes the old one's place, and the old run's entries this run
+    /// does not make are removed. So a slot's lists hold only live entries
+    /// but those of removed steps, and closing a run costs its own reads
+    /// and writes, each a search in its slot's list, with nothing moved
+    /// unless the run reads or defines a slot its last run did not: a slot
+    /// every step reads (a catcode, `\baselineskip`) has a list as long as
+    /// the fold, and an insertion moves its tail.
     pub(crate) fn close(
         &mut self,
         id: StepId,
@@ -192,10 +202,15 @@ impl<M: Machine> Fold<M> {
     ) {
         // (this run's entries replace the last run's, which stayed live
         // while it ran: a rebuild compares against them)
-        let (key, run) = {
+        let (key, run, old_recs, old_reads) = {
             let s = &mut self.steps[id as usize];
             s.run += 1;
-            (s.key, s.run)
+            (
+                s.key,
+                s.run,
+                core::mem::take(&mut s.recs),
+                core::mem::take(&mut s.reads),
+            )
         };
         let mut addrs = Vec::with_capacity(reads.len());
         for (h, a) in reads {
@@ -206,12 +221,17 @@ impl<M: Machine> Fold<M> {
                 rec: 0,
                 ix: 0,
             };
-            Self::insert_sorted(
+            Self::put(
                 self.readers
                     .entry_by(h, |k| k.0 == a, || ByHash(a.clone()), Vec::new()),
                 e,
             );
             addrs.push(a);
+        }
+        for a in &old_reads {
+            if let Some(v) = self.readers.get_mut_by(hash64(a), |k| k.0 == *a) {
+                Self::drop_stale(v, id, key, run);
+            }
         }
         for &rec in &recs {
             for (ix, a) in writes(rec).iter().enumerate() {
@@ -222,21 +242,19 @@ impl<M: Machine> Fold<M> {
                     rec,
                     ix: u32::try_from(ix).expect("fewer than 2^32 writes"),
                 };
-                let v =
-                    self.defs
-                        .entry_by(hash64(a), |k| k.0 == *a, || ByHash(a.clone()), Vec::new());
                 // (a later record of the step defines the slot again: the
-                // step's definition is its last; the step's entries are
-                // at its key)
-                let at = v.partition_point(|x| x.key < key);
-                if let Some(last) = v[at..]
-                    .iter_mut()
-                    .take_while(|x| x.key == key)
-                    .find(|x| x.step == id && x.run == run)
-                {
-                    *last = e;
-                } else {
-                    Self::insert_sorted(v, e);
+                // step's definition is its last)
+                Self::put(
+                    self.defs
+                        .entry_by(hash64(a), |k| k.0 == *a, || ByHash(a.clone()), Vec::new()),
+                    e,
+                );
+            }
+        }
+        for &rec in &old_recs {
+            for a in writes(rec) {
+                if let Some(v) = self.defs.get_mut_by(hash64(&a), |k| k.0 == a) {
+                    Self::drop_stale(v, id, key, run);
                 }
             }
         }
@@ -245,9 +263,29 @@ impl<M: Machine> Fold<M> {
         s.reads = addrs;
     }
 
-    fn insert_sorted(v: &mut Vec<Entry>, e: Entry) {
-        let at = v.partition_point(|x| x.key <= e.key);
-        v.insert(at, e);
+    /// Put `e` in `v`, sorted by key: over its step's entry at its key (the
+    /// step's last run's, or an earlier record's of this run), else
+    /// inserted after the entries at its key.
+    fn put(v: &mut Vec<Entry>, e: Entry) {
+        let at = v.partition_point(|x| x.key < e.key);
+        let same = v[at..].iter().take_while(|x| x.key == e.key).count();
+        match v[at..at + same].iter_mut().find(|x| x.step == e.step) {
+            Some(x) => *x = e,
+            None => v.insert(at + same, e),
+        }
+    }
+
+    /// Remove step `step`'s entry at `key` from `v` if a run before `run`
+    /// made it.
+    fn drop_stale(v: &mut Vec<Entry>, step: StepId, key: u64, run: u32) {
+        let at = v.partition_point(|x| x.key < key);
+        if let Some(i) = v[at..]
+            .iter()
+            .take_while(|x| x.key == key)
+            .position(|x| x.step == step && x.run != run)
+        {
+            v.remove(at + i);
+        }
     }
 
     /// The definition of `a` that reaches key `key`: the last live one
