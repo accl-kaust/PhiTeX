@@ -43,8 +43,10 @@ use crate::tex::Tex;
 use crate::track::{Cell, LineCodes, Output, Row, Tracker, line_tokens};
 
 mod rebuild;
+mod view;
 
 pub use rebuild::{RebuildReport, Trips, rebuild, rebuild_log, rebuild_trips, settle};
+pub use view::{step_trace, view};
 
 /// A slot's family.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]

@@ -12,6 +12,8 @@ partex-incr = { path = "../partex-incr", default-features = false }
 partex-trace = { path = "../partex-trace" }
 # The dynamic-SSA runtime (DESIGN.md 7.17), `PARTEX_SSA=1` (`ssa.rs`).
 partex-ssa = { path = "../partex-ssa" }
+# The build printed as a program (`ssa::view`, DESIGN 4.3 item 7).
+phitex-ir = { path = "../phitex-ir" }
 
 [lints]
 workspace = true

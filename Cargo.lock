@@ -54,6 +54,7 @@ dependencies = [
  "partex-incr",
  "partex-ssa",
  "partex-trace",
+ "phitex-ir",
 ]
 
 [[package]]

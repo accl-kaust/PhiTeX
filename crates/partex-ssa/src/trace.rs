@@ -25,7 +25,7 @@ use alloc::vec::Vec;
 use core::fmt::Write as _;
 
 use crate::hash::Version;
-use crate::machine::Machine;
+use crate::machine::{Loc, Machine};
 use crate::runtime::{Item, RecId, Runtime, Status as RStatus};
 use crate::value::{Value, version_opt};
 
@@ -118,8 +118,14 @@ impl<M: Machine> Runtime<M> {
                     value: if t.index > 0 { pt } else { pb },
                 });
             }
-            let mut cursor = 0;
-            let body = self.nodes(&t.root, &t.statuses, &mut cursor, false);
+            let mut name = |a: &M::Addr| a.to_string();
+            let mut mk = Make {
+                st: &t.statuses,
+                cur: 0,
+                none: RStatus::Hit,
+                name: &mut name,
+            };
+            let body = self.nodes(&t.root, false, &mut mk);
             let mut notes: Vec<Note> = t
                 .streams
                 .iter()
@@ -148,36 +154,62 @@ impl<M: Machine> Runtime<M> {
         Trace { trips }
     }
 
-    fn nodes(
-        &self,
-        items: &[Item<M>],
-        st: &[RStatus<M::Addr>],
-        cur: &mut usize,
-        reused: bool,
-    ) -> Vec<Node> {
+    /// Records `recs` (a step's calls of the top level, say) and their
+    /// subtrees as a trace of their own: one trip, each call marked
+    /// `new` (how each call was found is the build's trace's, kept per
+    /// trip and not per record; a hit applied is marked `new` too), each
+    /// address written as `name` gives it (one token: no spaces, commas,
+    /// parentheses, `;` or `=`).
+    #[must_use]
+    pub fn trace_of(&self, recs: &[RecId], name: &mut dyn FnMut(&M::Addr) -> String) -> Trace {
+        let items: Vec<Item<M>> = recs.iter().map(|&r| Item::Call(r)).collect();
+        let mut mk = Make {
+            st: &[],
+            cur: 0,
+            none: RStatus::New,
+            name,
+        };
+        let body = self.nodes(&items, false, &mut mk);
+        Trace {
+            trips: alloc::vec![Trip {
+                index: 0,
+                phis: Vec::new(),
+                body,
+                notes: Vec::new(),
+            }],
+        }
+    }
+
+    /// `items` as trace nodes, each call's status the next of `mk`'s, or
+    /// a hit's under one (`reused`).
+    fn nodes(&self, items: &[Item<M>], reused: bool, mk: &mut Make<'_, M>) -> Vec<Node> {
         items
             .iter()
             .map(|it| match it {
                 Item::Out(e) => Node::Effect(e.to_string()),
-                Item::Open(a) => Node::Open(a.to_string()),
-                Item::Store(a, v) => Node::Store(a.to_string(), v.version()),
-                Item::Call(id) => Node::Call(self.call_node(*id, st, cur, reused)),
-                Item::Wrote(a) => Node::Wrote(a.to_string()),
+                Item::Open(a) => Node::Open((mk.name)(a)),
+                Item::Store(a, v) => Node::Store((mk.name)(a), v.version()),
+                Item::Call(id) => Node::Call(self.call_node(*id, reused, mk)),
+                Item::Wrote(a) => Node::Wrote((mk.name)(a)),
             })
             .collect()
     }
 
-    fn call_node(&self, id: RecId, st: &[RStatus<M::Addr>], cur: &mut usize, reused: bool) -> Call {
+    fn call_node(&self, id: RecId, reused: bool, mk: &mut Make<'_, M>) -> Call {
         let r = self.record(id);
         let status = if reused {
             Status::Hit
         } else {
-            let s = st.get(*cur).cloned().unwrap_or(RStatus::Hit);
-            *cur += 1;
+            let s = mk
+                .st
+                .get(mk.cur)
+                .cloned()
+                .unwrap_or_else(|| mk.none.clone());
+            mk.cur += 1;
             match s {
                 RStatus::Hit => Status::Hit,
                 RStatus::New => Status::New,
-                RStatus::Miss(l) => Status::Miss(l.to_string()),
+                RStatus::Miss(l) => Status::Miss(mk.loc(&l)),
             }
         };
         let hit = status == Status::Hit;
@@ -187,13 +219,34 @@ impl<M: Machine> Runtime<M> {
             result: r.result.version(),
             name: r.name,
             status,
-            reads: r.reads.iter().map(|(l, v)| (l.to_string(), *v)).collect(),
+            reads: r.reads.iter().map(|(l, v)| (mk.loc(l), *v)).collect(),
             writes: r
                 .writes
                 .iter()
-                .map(|(a, v)| (a.to_string(), version_opt(v.as_ref())))
+                .map(|(a, v)| ((mk.name)(a), version_opt(v.as_ref())))
                 .collect(),
-            body: self.nodes(&r.items, st, cur, reused || hit),
+            body: self.nodes(&r.items, reused || hit, mk),
+        }
+    }
+}
+
+/// How records become a trace: the trip's statuses in program order, the
+/// next one's index, the status past their end, and an address's text.
+struct Make<'a, M: Machine> {
+    st: &'a [RStatus<M::Addr>],
+    cur: usize,
+    none: RStatus<M::Addr>,
+    name: &'a mut dyn FnMut(&M::Addr) -> String,
+}
+
+impl<M: Machine> Make<'_, M> {
+    /// A location's text, as `Loc`'s `Display` writes it with the
+    /// address's.
+    fn loc(&mut self, l: &Loc<M::Addr>) -> String {
+        match l {
+            Loc::State(a) => (self.name)(a),
+            Loc::Field(a, i) => format!("{}.{i}", (self.name)(a)),
+            Loc::Phi(a) => format!("phi:{}", (self.name)(a)),
         }
     }
 }

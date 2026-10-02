@@ -42,15 +42,39 @@
 //! Reading the pending text in its environment goes on where the builder
 //! stopped (the text before the second `;` is the paragraph it had begun).
 //! The source in it is as it is, but for its line ends, written `␤`.
+//!
+//! A value can also be an operation of its own, named, that defines
+//! names: `op(operands; names)`. A build's window (partex's view of a
+//! build, `partex_core::ssa::view`) is one: its operands are what it
+//! imports, each a name and the value that defined it (`name=%n`, a
+//! constant if no value before it did), and its names are what it
+//! exports, the names it defines:
+//!
+//! ```text
+//! %0 = format plain
+//! %3 = window(\count1=%2, \loop=%0; \count1, \body) ; step 3
+//! ```
+//!
+//! A name is written as it is unless it is empty or has a character that
+//! would end it (a space, `,`, `;`, `(`, `)`, `=`, `%` or `"`, or a
+//! leading `'`): then it is quoted, as a literal is.
 
-use std::fmt::Write as _;
+#![no_std]
+
+extern crate alloc;
+
+use alloc::format;
+use alloc::string::{String, ToString};
+use alloc::vec;
+use alloc::vec::Vec;
+use core::fmt::Write as _;
 
 /// A value's name, `%n`: its index in [`Program::values`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ValueId(pub u32);
 
-impl std::fmt::Display for ValueId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Display for ValueId {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "%{}", self.0)
     }
 }
@@ -65,6 +89,10 @@ pub enum Operand {
     From(ValueId, String),
     /// Source text, read by the node itself.
     Source(String),
+    /// What name `.0` means as value `.1` left it: an import by name
+    /// (`\count1=%5`). If `.1` is an operation ([`Def::Op`]), the name
+    /// is one it defines.
+    Named(String, ValueId),
 }
 
 /// How a value is defined.
@@ -104,24 +132,44 @@ pub enum Def {
         par: Vec<Operand>,
         text: Vec<Operand>,
     },
+    /// `op(operands; defines)`: an operation of its own (`op`, a word of
+    /// lowercase letters and `_`) over its operands, defining the names
+    /// `defines` (a build's window: its imports, then its exports).
+    Op {
+        op: String,
+        operands: Vec<Operand>,
+        defines: Vec<String>,
+    },
 }
 
 fn operand_uses(o: &Operand) -> Option<ValueId> {
     match o {
-        Operand::Value(u) | Operand::From(u, _) => Some(*u),
+        Operand::Value(u) | Operand::From(u, _) | Operand::Named(_, u) => Some(*u),
         Operand::Source(_) => None,
     }
 }
 
 impl Def {
+    /// Its operands (an application's, an operation's, the text a pending
+    /// node holds).
+    pub fn operands(&self) -> impl Iterator<Item = &Operand> {
+        let (a, b): (&[Operand], &[Operand]) = match self {
+            Def::Apply { operands, .. } | Def::Op { operands, .. } => (operands, &[]),
+            Def::Pending { par, text, .. } => (par, text),
+            _ => (&[], &[]),
+        };
+        a.iter().chain(b)
+    }
+
     /// The values this one uses.
     #[must_use]
     pub fn uses(&self) -> Vec<ValueId> {
         match self {
             Def::Const(_) => Vec::new(),
-            Def::Apply { callee, operands } => std::iter::once(*callee)
+            Def::Apply { callee, operands } => core::iter::once(*callee)
                 .chain(operands.iter().filter_map(operand_uses))
                 .collect(),
+            Def::Op { operands, .. } => operands.iter().filter_map(operand_uses).collect(),
             Def::Phi { cond, then, els } => vec![*cond, *then, *els],
             Def::Mu { init, next } => vec![*init, *next],
             Def::Env { base, binds } => base
@@ -129,7 +177,7 @@ impl Def {
                 .copied()
                 .chain(binds.iter().map(|b| b.1))
                 .collect(),
-            Def::Pending { env, par, text } => std::iter::once(*env)
+            Def::Pending { env, par, text } => core::iter::once(*env)
                 .chain(par.iter().chain(text).filter_map(operand_uses))
                 .collect(),
         }
@@ -166,8 +214,12 @@ impl Program {
     }
 
     /// Whether the program is SSA: every operand and callee is a value
-    /// defined before its use.
+    /// defined before its use; and whether its names are names: none
+    /// empty or with a line end, and each one imported from an operation
+    /// one that the operation defines.
     pub fn check(&self) -> Result<(), String> {
+        // (each operation's names, sorted: what an import from it finds)
+        let mut defined: Vec<Vec<&str>> = Vec::new();
         for (i, v) in self.values.iter().enumerate() {
             let uses = match &v.def {
                 // (μ's `next` is the back edge: anywhere in the program)
@@ -184,6 +236,30 @@ impl Program {
                     return Err(format!("%{i} uses {u}, defined at or after it"));
                 }
             }
+            for o in v.def.operands() {
+                let Operand::Named(n, u) = o else { continue };
+                if let Some(e) = bad_name(n) {
+                    return Err(format!("%{i}: the name {n:?} {e}"));
+                }
+                let op = matches!(self.values[u.0 as usize].def, Def::Op { .. });
+                if op && defined[u.0 as usize].binary_search(&n.as_str()).is_err() {
+                    return Err(format!(
+                        "%{i} imports {n} from {u}, which does not define it"
+                    ));
+                }
+            }
+            let mut names: Vec<&str> = Vec::new();
+            if let Def::Op { op, defines, .. } = &v.def {
+                if !is_op(op) {
+                    return Err(format!("%{i}: `{op}` is not an operation's name"));
+                }
+                if let Some((n, e)) = defines.iter().find_map(|n| Some((n, bad_name(n)?))) {
+                    return Err(format!("%{i}: the name {n:?} {e}"));
+                }
+                names = defines.iter().map(String::as_str).collect();
+                names.sort_unstable();
+            }
+            defined.push(names);
         }
         Ok(())
     }
@@ -223,6 +299,15 @@ impl Program {
                     };
                     format!("pending({env}; {}; {})", ops(par), ops(text))
                 }
+                Def::Op {
+                    op,
+                    operands,
+                    defines,
+                } => {
+                    let ops: Vec<String> = operands.iter().map(operand_text).collect();
+                    let names: Vec<String> = defines.iter().map(|n| name_text(n)).collect();
+                    format!("{op}({}; {})", ops.join(", "), names.join(", "))
+                }
             };
             let lhs = format!("%{i} = {rhs}");
             if v.shows.is_empty() {
@@ -240,7 +325,56 @@ fn operand_text(o: &Operand) -> String {
         Operand::Value(v) => v.to_string(),
         Operand::From(v, text) => format!("{v}:{}", quote(text)),
         Operand::Source(text) => text.clone(),
+        Operand::Named(name, v) => format!("{}={v}", name_text(name)),
     }
+}
+
+/// Whether `op` names an operation ([`Def::Op`]): a word of lowercase
+/// letters and `_`, not `env` or `pending`.
+fn is_op(op: &str) -> bool {
+    !op.is_empty()
+        && op.bytes().all(|b| b.is_ascii_lowercase() || b == b'_')
+        && op != "env"
+        && op != "pending"
+}
+
+/// Why `n` is not a name, if it is not: empty, or with a line end.
+fn bad_name(n: &str) -> Option<&'static str> {
+    if n.is_empty() {
+        Some("is empty")
+    } else if n.contains('\n') {
+        Some("has a line end")
+    } else {
+        None
+    }
+}
+
+/// Whether `c` ends a name written as it is.
+fn ends_name(c: char) -> bool {
+    c.is_whitespace() || matches!(c, ',' | ';' | '(' | ')' | '=' | '%' | '"' | '␤')
+}
+
+/// Whether name `n` is written as it is: nothing in it ends a name, and it
+/// does not begin as a character literal does.
+fn bare(n: &str) -> bool {
+    !n.is_empty() && !n.starts_with('\'') && !n.chars().any(ends_name)
+}
+
+/// A name in the text form: as it is, or quoted ([`bare`]).
+#[must_use]
+pub fn name_text(n: &str) -> String {
+    if bare(n) { n.to_string() } else { quote(n) }
+}
+
+/// A name at the start of `s` ([`name_text`]'s inverse): its text and
+/// the rest of `s`. A bare name ends where a character that cannot be in
+/// one is.
+fn name(s: &str) -> Option<(String, &str)> {
+    if s.starts_with('"') {
+        return unquote(s);
+    }
+    let end = s.find(ends_name).unwrap_or(s.len());
+    bare(&s[..end]).then(|| (s[..end].to_string(), &s[end..]))
 }
 
 /// Text as a literal: in double quotes, a `"` inside written `""`, a line
@@ -276,8 +410,9 @@ fn value_id(s: &str) -> Option<(ValueId, &str)> {
     Some((ValueId(n), &s[end..]))
 }
 
-/// One operand at the start of `s` (up to `, ` or the closing `)`).
-fn operand(s: &str) -> Option<(Operand, &str)> {
+/// One operand at the start of `s`, in a list that `end` ends (`)`, or
+/// `;` for the first of two).
+fn operand(s: &str, end: char) -> Option<(Operand, &str)> {
     if let Some((v, rest)) = value_id(s) {
         return Some(match rest.strip_prefix(':') {
             Some(r) => {
@@ -286,6 +421,13 @@ fn operand(s: &str) -> Option<(Operand, &str)> {
             }
             None => (Operand::Value(v), rest),
         });
+    }
+    // (a name, then the value it is imported from)
+    if let Some((n, rest)) = name(s)
+        && let Some((v, rest)) = rest.strip_prefix('=').and_then(value_id)
+        && (rest.is_empty() || rest.starts_with(", ") || rest.starts_with(end))
+    {
+        return Some((Operand::Named(n, v), rest));
     }
     if s.starts_with('"') {
         let (text, rest) = unquote(s)?;
@@ -297,12 +439,43 @@ fn operand(s: &str) -> Option<(Operand, &str)> {
         let end = i + 2;
         return Some((Operand::Source(s[..=end].to_string()), &s[end + 1..]));
     }
-    let end = [s.find(", "), s.rfind(')')]
-        .into_iter()
-        .flatten()
-        .min()
-        .unwrap_or(s.len());
+    let end = [
+        s.find(", "),
+        s.rfind(')'),
+        (end == ';').then(|| s.find("; ")).flatten(),
+    ]
+    .into_iter()
+    .flatten()
+    .min()
+    .unwrap_or(s.len());
     Some((Operand::Source(s[..end].to_string()), &s[end..]))
+}
+
+/// An operation `op`'s operands and names, `s` from after its `(`: the
+/// value and the rest after its `)`.
+fn op_rest(op: String, s: &str) -> Option<(Def, &str)> {
+    let (operands, r) = operands_until(s, ';')?;
+    let mut r = r.strip_prefix(' ').unwrap_or(r);
+    let mut defines = Vec::new();
+    while !r.starts_with(')') {
+        let (n, next) = name(r)?;
+        defines.push(n);
+        r = next.strip_prefix(", ").unwrap_or(next);
+    }
+    let def = Def::Op {
+        op,
+        operands,
+        defines,
+    };
+    Some((def, &r[1..]))
+}
+
+/// An operation's name and its `(` at the start of `s`: the name and the
+/// rest after the `(`.
+fn op_head(s: &str) -> Option<(String, &str)> {
+    let end = s.find(|c: char| !(c.is_ascii_lowercase() || c == '_'))?;
+    let r = s[end..].strip_prefix('(')?;
+    is_op(&s[..end]).then(|| (s[..end].to_string(), r))
 }
 
 /// `name=%n` at the start of `s`: the name is up to the first `=%`
@@ -328,7 +501,7 @@ fn operands_until(mut r: &str, end: char) -> Option<(Vec<Operand>, &str)> {
         if let Some(rest) = r.strip_prefix(end) {
             return Some((out, rest));
         }
-        let (o, next) = operand(r)?;
+        let (o, next) = operand(r, end)?;
         out.push(o);
         r = next.strip_prefix(", ").unwrap_or(next);
     }
@@ -401,11 +574,13 @@ impl Program {
                 let mut r = r.strip_prefix('(').ok_or_else(|| bad("`(`"))?;
                 let mut operands = Vec::new();
                 while !r.starts_with(')') {
-                    let (o, next) = operand(r).ok_or_else(|| bad("an operand"))?;
+                    let (o, next) = operand(r, ')').ok_or_else(|| bad("an operand"))?;
                     operands.push(o);
                     r = next.strip_prefix(", ").unwrap_or(next);
                 }
                 (Def::Apply { callee, operands }, &r[1..])
+            } else if let Some((op, r)) = op_head(rest) {
+                op_rest(op, r).ok_or_else(|| bad("an operation"))?
             } else {
                 let end = rest.find(" ; ").unwrap_or(rest.len());
                 (Def::Const(rest[..end].trim_end().to_string()), &rest[end..])
@@ -423,5 +598,162 @@ impl Program {
         }
         prog.source = lines.join("\n");
         Ok(prog)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `p`'s text parses back to `p`, and prints again as the same text.
+    fn round_trips(p: &Program) {
+        let text = p.to_text();
+        let q = Program::parse(&text).unwrap_or_else(|e| panic!("{e}\n{text}"));
+        assert_eq!(q.to_text(), text);
+        assert_eq!(q.values, p.values, "{text}");
+    }
+
+    fn value(def: Def, shows: &str) -> Value {
+        Value {
+            def,
+            shows: shows.to_string(),
+            line: 0,
+        }
+    }
+
+    /// A program as `PhiTeX`'s builder writes one, with headings.
+    const PHITEX: &str = "
+; l.1  \\def\\name{World}
+%0 = prim def
+%1 = catcodes plain
+%2 = %0(%1, \\name, \"World\")                  ; macro \"World\"
+
+; l.2  \\greet{\\name}
+%3 = prim par
+%4 = %3(%1, %2:\"Hello \", 'x', \"a \"\"b\"\"\")     ; paragraph
+%5 = φ(%4, %2, %3)                           ; \\count1 (then)
+%6 = μ(%5, %7)
+%7 = env(%6; \\count1=%2, catcodes=%1)
+%8 = pending(%7; \"ab\"; %2:\"\\loop\", \"␤␤more\")
+";
+
+    #[test]
+    fn phitex_programs_round_trip() {
+        let p = Program::parse(PHITEX).unwrap();
+        p.check().unwrap();
+        assert_eq!(p.values.len(), 9);
+        assert_eq!(p.to_text(), PHITEX);
+        round_trips(&p);
+    }
+
+    /// Operations with their imports and exports by name, the names that
+    /// need quoting quoted.
+    #[test]
+    fn operations_round_trip() {
+        let named = |n: &str, v: u32| Operand::Named(n.to_string(), ValueId(v));
+        let strings = |ns: &[&str]| ns.iter().map(|n| (*n).to_string()).collect();
+        let odd = [
+            "\\=",
+            "\\csname a b\\endcsname",
+            "a\"b",
+            "x, y",
+            "p; q",
+            "f(x)",
+            "'c'",
+            "100%",
+            "a␤b",
+        ];
+        let p = Program {
+            values: vec![
+                value(Def::Const("format plain".to_string()), "the format"),
+                value(Def::Const("file edits.tex".to_string()), ""),
+                value(
+                    Def::Op {
+                        op: "window".to_string(),
+                        operands: vec![
+                            named("\\count1", 0),
+                            named("edits.tex:1-3", 1),
+                            named(odd[0], 0),
+                        ],
+                        defines: strings(&["\\count1", "\\x"]),
+                    },
+                    "step 1: edits.tex:1-3 \"Hello\"",
+                ),
+                value(
+                    Def::Op {
+                        op: "window".to_string(),
+                        operands: Vec::new(),
+                        defines: strings(&odd),
+                    },
+                    "",
+                ),
+                value(
+                    Def::Op {
+                        op: "window".to_string(),
+                        operands: odd.iter().map(|n| named(n, 3)).collect(),
+                        defines: Vec::new(),
+                    },
+                    "imports only",
+                ),
+                value(
+                    Def::Op {
+                        op: "page_step".to_string(),
+                        operands: vec![named("\\count1", 2), Operand::Value(ValueId(4))],
+                        defines: strings(&["\\x"]),
+                    },
+                    "",
+                ),
+                value(
+                    Def::Apply {
+                        callee: ValueId(0),
+                        operands: vec![named("\\x", 5), Operand::Source("\\y".to_string())],
+                    },
+                    "an application with a name",
+                ),
+            ],
+            source: String::new(),
+        };
+        p.check().unwrap();
+        let text = p.to_text();
+        assert!(
+            text.contains("%2 = window(\\count1=%0, edits.tex:1-3=%1, \"\\=\"=%0; \\count1, \\x)"),
+            "{text}"
+        );
+        assert!(text.contains("%4 = window(\"\\=\"=%3, "), "{text}");
+        assert!(text.contains("\"a\"\"b\"=%3, \"x, y\"=%3, "), "{text}");
+        assert!(text.contains("%3 = window(; \"\\=\", "), "{text}");
+        assert!(text.contains("\"100%\"=%3, \"a␤b\"=%3; )"), "{text}");
+        round_trips(&p);
+    }
+
+    /// What `check` rejects: a name imported from an operation that does
+    /// not define it, a use before its definition, a name with a line end.
+    #[test]
+    fn check_names() {
+        let parse = |t: &str| Program::parse(t).unwrap();
+        let ok = "%0 = format\n%1 = window(\\a=%0; \\b)\n%2 = window(\\b=%1, \\c=%0; )\n";
+        parse(ok).check().unwrap();
+        let undefined = "%0 = format\n%1 = window(\\a=%0; \\b)\n%2 = window(\\a=%1; )\n";
+        assert_eq!(
+            parse(undefined).check(),
+            Err("%2 imports \\a from %1, which does not define it".to_string())
+        );
+        let later = "%0 = window(\\a=%1; )\n%1 = format\n";
+        assert!(parse(later).check().is_err());
+        let p = Program {
+            values: vec![value(
+                Def::Op {
+                    op: "window".to_string(),
+                    operands: Vec::new(),
+                    defines: vec!["a\nb".to_string()],
+                },
+                "",
+            )],
+            source: String::new(),
+        };
+        assert_eq!(
+            p.check(),
+            Err("%0: the name \"a\\nb\" has a line end".to_string())
+        );
     }
 }

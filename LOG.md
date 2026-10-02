@@ -9824,3 +9824,88 @@ edit pays the deflates every time. That is the zlib port's work, a
 separate delivery: zlib's deflate in Rust, byte-identical, its matches
 computed in parallel and kept before the first changed byte. The disk
 write is from page 156 on, half the PDF: 1.6 MB in 0.6–0.8 ms.
+## 2026-10-02 — The build printed as a program (agent view)
+
+DESIGN 4.3 item 7: `PARTEX_SSA_VIEW=FILE` writes the build as a
+`phitex-ir` program after the cold build, and to `FILE.N` after rebuild
+`N`; `PARTEX_SSA_VIEW_STEP=ID` adds step `ID`'s per-call trace
+(`FILE.stepID`). Commits on `np/view`: f7c9201 (phitex-ir), ecd7cd8,
+29958fb, 025a77b, 2ac1f1e and this entry's.
+
+**What was built.**
+- `phitex-ir` is `no_std` + `alloc` now, so `partex-core` builds the
+  `Program` itself (`ssa/view.rs`) and the CLI only writes its text; the
+  other way, the core handing raw rows to the CLI to render, would have
+  put the naming (which needs the engine's hash, fonts and eqtb layout)
+  outside the core. Two forms were added, keeping the round trip: an
+  operation that defines names, `op(operands; names)` (`Def::Op`), and
+  an operand that imports a name from a value, `name=%n`
+  (`Operand::Named`). A name is written bare unless a character in it
+  would end it, then quoted as a literal. `check` now also verifies that
+  each name imported from an operation is one it defines. Tests: the
+  `PhiTeX` forms still round-trip, operations with odd names round-trip,
+  `check` rejects an import a window does not define.
+- The view (`ssa::view`): `%0 = format` is the job's start (the step
+  that loaded the format: its record writes every eqtb slot, 632 K
+  definitions on plain, which as a window took 8.2 MB of a 8.5 MB view
+  of `incr.tex`; as a constant it is the format's definitions, and also
+  stands for what no step defined); a `file NAME` constant per file;
+  then `window(imports; exports)` per live step in fold order. Imports
+  are the step's reads from outside it, each named, from the window
+  `Fold::reaching` gives (or `%0`); the source is imported by runs of
+  lines from the steps' line reads (`Steps::line_runs`, what a rebuild
+  seeds from) and from where the previous step left the input
+  (`Steps::ended_at`). Exports are the records' writes. The comment
+  carries the step id, `(run N)` once a rebuild ran it again, its
+  spans, the pages it shipped (`[3]`, from the log bytes of its
+  `ship_out` records) and a text excerpt (the shipped page's nodes it
+  read, else the page nodes it wrote, else what it added to its list,
+  else its source).
+- Names: a parameter is written without its escape (`hsize`), because
+  `\hsize` is also the control sequence, whose meaning is another
+  address: with both written `\hsize` a window imported `\hsize` twice.
+  Frozen control sequences, font identifiers and pdfTeX's primitive
+  copies take a prefix for the same reason.
+- `Runtime::trace_of(recs, name)` (partex-ssa) prints one step's
+  records with the trace's `to_text`, addresses named as in the view.
+- A golden test (`crates/partex-core/tests/view.rs`): a small INITEX
+  document built in SSA mode, its view's window-to-window edges, one
+  step's named trace, then a word edited and rebuilt: what changed. It
+  is an integration test, a process of its own: an SSA build turns on
+  the boxes' versions for the whole process (`node::VERSIONS`), and as
+  a unit test it raced machine mode's
+  `the_page_leaves_rest_as_a_cell_of_its_own`, which hashes the page
+  twice and saw the switch flip in between (the first `xtask check`
+  failed on it).
+
+**Measured** (release, sandboxed, this machine under load 15–25, so
+instructions rather than ms):
+- `incr.tex` (plain, e2e): 92 values, 225 KB; the cold SSA build is
+  2.432 G instructions without the view and 2.471 G with it (+1.6%).
+- `scripts/ssa-edits --env PARTEX_SSA_VIEW=../view.txt --env
+  PARTEX_SSA_VIEW_STEP=3`: 10 of 10 cases identical, 61 stages, every
+  view checked. `edits.tex` (pdflatex, `machine_edits`): 2,840 values,
+  8.3 MB a view.
+- After `edits.tex`'s first edit (`Para5x2 ` typed into), the views
+  differ in exactly three windows, the three steps the rebuild ran:
+  `step 2248 (run 2): edits:80-81 "Para5x2 TYPED sigma delta lambda
+  macro"`, the fire `step 2255 (run 2): ships [9]`, and the job's end.
+
+**Found.** The view shows where a rebuilt graph differs from a cold
+build's. Fonts and hyphenation are not placed (DESIGN 3.15), so a
+paragraph run again reads the interword glue and the packed patterns
+the cold build computed later, writes them no more, and the next
+reader's import moves to an earlier window (`font:cmr10.glue=%12`
+becomes `=%5`, `hyph.patterns=%12` becomes `=%0`, the golden test pins
+it). Harmless for the output (both are functions of what they were
+made from), but a cold build and a rebuild do not have the same graph
+there. And the pool's string numbers differ after a rebuild (allocated
+numbers are not positioned, 3.2): the golden test writes them
+`string:N`.
+
+**Limits.** The per-call trace is the step's records as kept (each call
+marked `new`); once records are lean (item 2) it needs the window run
+again with the full recorder, not built. Value numbers are positions: a
+step inserted by a rebuild shifts every later `%n`. A `Line` read (a
+line number, relative to the step) is shown by its raw slot
+(`line:1+5`).

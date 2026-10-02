@@ -31,7 +31,7 @@ impl Field {
         Field(Arc::new(v.clone()))
     }
 
-    fn get<T: 'static>(&self) -> Option<&T> {
+    pub(crate) fn get<T: 'static>(&self) -> Option<&T> {
         self.0.downcast_ref::<T>()
     }
 }
