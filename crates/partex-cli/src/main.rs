@@ -1042,6 +1042,8 @@ fn run_ssa(host: native::NativeHost, params: Params, command_line: &[u8]) -> i32
     // item 2; `=0`: every routine's, and the steps' own reads)
     let mut tracker = SsaTracker::new(Recorder::new());
     tracker.set_lean(!std::env::var("PARTEX_SSA_LEAN").is_ok_and(|v| v == "0"));
+    // (the steps' reads and writes timed, for the graph `write_dag` prints)
+    tracker.set_timed(std::env::var_os("PARTEX_SSA_DAG").is_some());
     let mut tex = Tex::new(host, tracker, params);
     let t0 = std::time::Instant::now();
     let r = partex_core::ssa::run_applying(&mut tex, command_line, check, 0, apply);
@@ -1260,6 +1262,26 @@ fn rebuild_ssa(
     Ok((rr.edits > 0).then_some(rr.history))
 }
 
+/// `PARTEX_SSA_DAG=<file>`: the build's steps as a dependency graph
+/// (`partex_core::ssa::dag`: each step's commands, the steps whose
+/// definitions it read, the versions of its definitions), written to
+/// `<file>` after the cold build and to `<file>.N` after rebuild `N`, for
+/// `scripts/ssa-parallel.py`. Unset, nothing is made.
+fn write_dag(tex: &Tex<native::NativeHost, partex_core::ssa::SsaTracker>, build: usize) {
+    let Some(mut path) = std::env::var_os("PARTEX_SSA_DAG") else {
+        return;
+    };
+    if build > 0 {
+        path.push(format!(".{build}"));
+    }
+    let text = partex_core::ssa::dag(tex);
+    let shown = std::path::Path::new(&path).display().to_string();
+    match std::fs::write(&path, &text) {
+        Ok(()) => eprintln!("partex: ssa dag {build}: {} bytes ({shown})", text.len()),
+        Err(e) => eprintln!("partex: ssa dag {build}: {shown}: {e}"),
+    }
+}
+
 /// `PARTEX_SSA_TRIPS`: an SSA build's trips at most (DESIGN 3.7, "Trips,
 /// as built"), 5 by default, latexmk's bound; 1 is one trip per build,
 /// a rebuild matching one plain pass, with no outside tool run.
@@ -1375,6 +1397,7 @@ fn report_trips(what: &str, r: &partex_core::ssa::RebuildReport) {
 /// with their reads and writes too (`partex_core::ssa::step_trace`), to
 /// that file's name with `.step<id>` after it. Unset, nothing is made.
 fn write_view(tex: &Tex<native::NativeHost, partex_core::ssa::SsaTracker>, build: usize) {
+    write_dag(tex, build);
     let Some(base) = std::env::var_os("PARTEX_SSA_VIEW") else {
         return;
     };

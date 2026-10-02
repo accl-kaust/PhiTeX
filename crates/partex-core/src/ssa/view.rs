@@ -266,6 +266,73 @@ pub fn step_trace<H: Host>(tex: &Tex<H, SsaTracker>, id: StepId) -> Option<Strin
     Some(t.to_text())
 }
 
+/// The build's steps as a dependency graph (`PARTEX_SSA_DAG`), to measure
+/// how much of it could run at once: per live step, in program order, a
+/// line `S id run commands` (the commands its last run ran), then a line
+/// per address it read from outside it, `R from at name` (`from`: the step
+/// whose definition reached the read, `-` for none: the format's or the
+/// engine's), `L from at name` for a file it loaded, and a line per
+/// address it defined, `W version at name` (the low 64 bits of the version
+/// of its last write there, in hex; `-` if the job ended in it). `at` is
+/// how many commands into the step's run the read was made or the address
+/// last written, with the steps timed (`SsaTracker::set_timed`), else
+/// `-`. Fields are separated by tabs, and a name is the view's.
+#[must_use]
+pub fn dag<H: Host>(tex: &Tex<H, SsaTracker>) -> String {
+    let rec = tex.tracker.rec.borrow();
+    let (st, rt) = (&rec.st, &rec.rt);
+    let fold = &rt.fold;
+    let mut names = Names::new(tex);
+    let mut out = String::new();
+    let at = |t: Option<u64>| t.map_or_else(|| String::from("-"), |t| t.to_string());
+    for &s in &fold.order {
+        let step = &fold.steps[s as usize];
+        let commands = st.step_commands.get(s as usize).copied().unwrap_or(0);
+        let _ = writeln!(out, "S\t{s}\t{}\t{commands}", step.run);
+        // (the times of its last run, if timed and as many as its reads)
+        let times = rt
+            .step_times(s)
+            .filter(|t| t.reads.len() == step.reads.len());
+        for (i, a) in step.reads.iter().enumerate() {
+            let kind = if a.0 == Fam::Load { 'L' } else { 'R' };
+            let from = fold
+                .reaching(a, step.key)
+                .map_or_else(|| String::from("-"), |d| d.step.to_string());
+            let t = at(times.map(|t| t.reads[i].saturating_sub(t.began)));
+            let _ = writeln!(out, "{kind}\t{from}\t{t}\t{}", names.slot(st, *a));
+        }
+        let wrote: BTreeMap<Slot, u64> = times
+            .map(|t| {
+                t.wrote
+                    .iter()
+                    .map(|(a, w)| (*a, w.saturating_sub(t.began)))
+                    .collect()
+            })
+            .unwrap_or_default();
+        // (each address once, with its last write's version: the step's
+        // definition of it)
+        let mut defs: Vec<(Slot, Option<u128>)> = Vec::new();
+        let mut ix: BTreeMap<Slot, usize> = BTreeMap::new();
+        for &r in &step.recs {
+            for (a, v) in &rt.record(r).writes {
+                let v = v.as_ref().map(|v| v.0.0 & u128::from(u64::MAX));
+                if let Some(&i) = ix.get(a) {
+                    defs[i].1 = v;
+                } else {
+                    ix.insert(*a, defs.len());
+                    defs.push((*a, v));
+                }
+            }
+        }
+        for (a, v) in defs {
+            let v = v.map_or_else(|| String::from("-"), |v| format!("{v:016x}"));
+            let t = at(wrote.get(&a).copied());
+            let _ = writeln!(out, "W\t{v}\t{t}\t{}", names.slot(st, a));
+        }
+    }
+    out
+}
+
 /// The addresses records `recs` wrote, each once, in order (a later
 /// record's write of an address is the same definition).
 fn writes(rt: &Runtime<TexSsa>, recs: &[RecId]) -> Vec<Slot> {

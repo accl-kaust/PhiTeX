@@ -46,7 +46,7 @@ mod rebuild;
 mod view;
 
 pub use rebuild::{RebuildReport, Trips, rebuild, rebuild_log, rebuild_trips, settle};
-pub use view::{step_trace, view};
+pub use view::{dag, step_trace, view};
 
 /// A slot's family.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -862,6 +862,9 @@ pub struct RecState {
     /// The fold's steps as a rebuild finds them (DESIGN 7.17.3): the
     /// files and the lines each step read, where each left the input.
     pub(crate) steps: rebuild::Steps,
+    /// The commands each step's last run ran, by step id: the steps'
+    /// costs in the dependency graph ([`dag`]).
+    pub step_commands: Vec<u64>,
 }
 
 /// Record `id`'s effects and stores, its children's included, in program
@@ -1153,9 +1156,19 @@ pub struct SsaTracker {
     lean: bool,
     /// Writes whose version could not be stored (the recorder was busy).
     pub lost: core::cell::Cell<u64>,
+    /// The steps' reads and writes timed by the engine's commands (a
+    /// measurement for [`dag`], `PARTEX_SSA_DAG`; off by default).
+    timed: bool,
 }
 
 impl SsaTracker {
+    /// Time each step's reads and writes by the engine's commands
+    /// (`partex_ssa::open::StepTimes`, printed by [`dag`]).
+    pub fn set_timed(&mut self, on: bool) {
+        self.timed = on;
+        self.rec.get_mut().rt.set_timing(on);
+    }
+
     /// Whether routine `f` gets a frame and a record ([`SsaTracker::lean`]).
     fn framed(&self, f: Func) -> bool {
         self.check || !self.lean || f.recorded()
@@ -1192,6 +1205,7 @@ impl SsaTracker {
             check: false,
             lean: true,
             lost: core::cell::Cell::new(0),
+            timed: false,
         }
     }
 
@@ -1302,6 +1316,15 @@ impl Tracker for SsaTracker {
     const VALUES: bool = true;
     const LINES: bool = true;
     const NAMES: bool = true;
+
+    fn command(&self, n: u64, _depth: usize, _line: i32, _level: i32, _outer: bool) {
+        // (the steps' times, [`SsaTracker::set_timed`])
+        if self.timed
+            && let Ok(mut r) = self.rec.try_borrow_mut()
+        {
+            r.rt.set_clock(n);
+        }
+    }
 
     fn read(&self, cell: Cell) {
         if matches!(
@@ -2493,6 +2516,14 @@ fn close_paragraph<H: Host>(
     let result = close_source(tex, rr);
     // (the commands the body ran: what a hit of its record stands for)
     rr.rt.note_cost(tex.commands() - o.commands);
+    // (and the step's cost, its last run's: a dropped run's is not)
+    if let Some(id) = rr.rt.open_step_id() {
+        let c = &mut rr.st.step_commands;
+        if c.len() <= id as usize {
+            c.resize(id as usize + 1, 0);
+        }
+        c[id as usize] = tex.commands() - o.commands;
+    }
     let body = rr.rt.end(&View { tex, rec: &rr.st }, result);
     if how == Close::Call {
         drop(r);
