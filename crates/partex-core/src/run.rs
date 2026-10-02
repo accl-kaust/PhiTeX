@@ -23,6 +23,10 @@ pub enum CleanPoint {
     /// Before a fire the page builder decided (DESIGN §7.16.1, "The
     /// deferred fire's form"): the step that begins here begins with it.
     Fire = 2,
+    /// Before a `\shipout` (SSA mode, with [`Tex::set_stop_before_ship`]):
+    /// the step that begins here ships the page, so it alone reads the
+    /// sealed lines of the page (`seal.rs`).
+    Ship = 3,
 }
 
 /// Where [`Tex::start`] or [`Tex::resume`] stopped.
@@ -221,7 +225,10 @@ impl<H: Host, T: Tracker> Tex<H, T> {
     ///   `Rest`;
     /// - [`CleanPoint::Fire`]: a fire is pending (only with the deferral
     ///   on, [`Self::set_defer_fire`]), whatever is on top of the input
-    ///   stack.
+    ///   stack;
+    /// - [`CleanPoint::Ship`]: stopped before a `\shipout` (SSA mode,
+    ///   [`Self::set_stop_before_ship`]), whatever is on top of the input
+    ///   stack, the output routine active as a rule.
     ///
     /// The mode is tested with its sign (§211): internal vertical and
     /// restricted horizontal modes are not clean. The paragraph's flag
@@ -236,6 +243,11 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         // start waits for the next candidate after the routine)
         if self.fire_pending {
             return Some(CleanPoint::Fire);
+        }
+        // (stopped before a `\shipout`, inside an output routine as a rule:
+        // a step's boundary in SSA mode, not the machine's)
+        if T::VALUES && self.ship_stop == 1 {
+            return Some(CleanPoint::Ship);
         }
         if self.cur_input.state == crate::web::TOKEN_LIST || self.output_active() {
             return None;

@@ -10562,3 +10562,50 @@ the change, partex-engine and partex-core have no `__multi3` call left
 on a keystroke's path (two remain in the core's `strtol` and Type 1
 parsing, for overflow checks). Natively the code is the same.
 
+## 2026-10-02 — Sealed lines and a step before `\shipout`: the output routine stays put (coordinator)
+
+A keystroke in the TikZ article ran two steps again: its paragraph (41
+commands) and the fire that ships the only page (515), which is LaTeX's
+output routine (`\@makecol`, `\@outputpage`, ltshipout's `\shipout`
+with its hooks), about 5,700 lines of pdflatex's `\tracingcommands=3`
+log. The page changed, so `\box255` read a new version, and so did every
+command that moved it. The course's word edit is the same: its
+shipout step was 2,844 of its 4,443 commands. The extension's wasm
+profile put 89% of a keystroke in `run_step`, `ship_out` 3%.
+
+The machine of §7.0 (`DESIGN_ARCHIVE.md`) had the answer: sealed lines
+(`seal.rs`) and a boundary before `\shipout`. They are SSA mode's now:
+- the line breaker seals each line: the box keeps its dimensions and a
+  key, and its glue setting and list go to a table, each entry a slot
+  (`Fam::Sealed`, `Row::Sealed`, versioned by the contents, placed as
+  values: `SValue::Sealed`). The key is the step's id
+  (`Tracker::step_salt`), the paragraph's count in the step (from 0 at
+  each step's start, `seal_restart`) and the line's index, so each run of
+  the step seals under the same keys, with no search for a free one;
+- only what looks inside a line reads it (shipping out, `\unhbox`,
+  `\showbox`, a display's width, `\leftmarginkern`);
+- main control stops before a `\shipout`, and the next step begins with
+  it (`CleanPoint::Ship`; the input state's `ship`; the step's name has
+  a mark of its own, as a fire's has).
+
+A word that leaves its line's dimensions changes the page box nowhere:
+its lines are the same stubs. The output routine's step before the
+`\shipout` reads what it read before and does not run again. The ship
+step reads the changed lines and does, opening them from the table into
+the box the routine left, which is placed as it was.
+
+Check mode failed at first, in 7 of 14 cases: the pages after the edit
+were not shipped. In check mode every routine has a frame, the output
+routine's too, which now spans the ship boundary. The output routine has
+no frame now in any mode (in lean mode it had none already). The view
+names a step by the text it set, so it opens sealed lines from the last
+definition of their slots; `tests/view.rs`'s cold build exports and
+imports the sealed slots.
+
+The TikZ article's keystroke (LTO, alternating 3 × 100): 2 steps and 75
+commands (41 + 34) where there were 556, median 3.3 → 1.6 ms, p10 2.8 →
+1.4 ms, p90 6.6 → 3.0 ms; over 200 keystrokes, 1.967 G → 0.723 G
+instructions (−63%), cycles −55%; the same PDF. The harness: 14 cases,
+79 stages, identical with `--fixpoint`, with `PARTEX_SSA_TRIPS=1` and in
+check mode; the workspace's tests pass.
+

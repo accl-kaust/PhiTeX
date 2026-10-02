@@ -616,6 +616,9 @@ pub(crate) struct InputState {
     finished: bool,
     /// A fire is pending: the next step begins with it (DESIGN 3.15).
     fire: bool,
+    /// Stopped before a `\shipout` (the token backed up): the next step
+    /// begins with it (`CleanPoint::Ship`).
+    ship: bool,
     line: i32,
     /// The shared parts: the levels, the parameters, the buffer below the
     /// top file level's line and the file levels below the top one.
@@ -652,6 +655,7 @@ impl InputState {
         InputState {
             finished,
             fire: t.fire_pending,
+            ship: t.ship_stop == 1,
             line: t.line,
             top: (v.from..t.first.max(t.last)).map(|i| t.buffer[i]).collect(),
             v,
@@ -681,6 +685,7 @@ impl InputState {
     /// Put the input where this state has it.
     fn set<H: Host, T: Tracker>(&self, t: &mut Tex<H, T>) {
         t.fire_pending = self.fire;
+        t.ship_stop = u8::from(self.ship);
         t.line = self.line;
         t.cur_input = self.cur.clone();
         t.in_open = self.in_open;
@@ -792,6 +797,7 @@ fn same_place<H: Host, T: Tracker>(t: &Tex<H, T>, a: &InputState, b: &InputState
                 .all(|(x, y)| same_file(x.as_ref(), y.as_ref())));
     a.finished == b.finished
         && a.fire == b.fire
+        && a.ship == b.ship
         && a.in_open == b.in_open
         && a.line == b.line
         && a.file.line == b.file.line
@@ -1151,14 +1157,19 @@ impl InputState {
     fn brief(&self) -> alloc::string::String {
         let pos = self.file.file.as_ref().map_or(0, |f| f.pos);
         alloc::format!(
-            "level {} line {} pos {} loc {} state {}{}{}",
+            "level {} line {} pos {} loc {} state {}{}{}{}",
             self.in_open,
             self.line,
             pos,
             self.cur.loc - self.cur.start,
             self.cur.state,
             if self.finished { " (finished)" } else { "" },
-            if self.fire { " (a fire pending)" } else { "" }
+            if self.fire { " (a fire pending)" } else { "" },
+            if self.ship {
+                " (before a \\shipout)"
+            } else {
+                ""
+            }
         )
     }
 }
@@ -1183,7 +1194,8 @@ fn positioned(a: &Slot) -> bool {
         | Fam::Read
         | Fam::Random
         | Fam::Glyphs
-        | Fam::PageNode => true,
+        | Fam::PageNode
+        | Fam::Sealed => true,
         Fam::Alloc => ![STR_TOP, HASH_USED, HASH_HIGH, GLUE_LINEAGE]
             .iter()
             .any(|&k| a.1 == i64::from(k)),
@@ -1743,6 +1755,7 @@ pub fn rebuild<H: Host>(tex: &mut Tex<H, SsaTracker>, trace: bool, apply: bool) 
             // with a fire went on)
             if tex.commands() == c0
                 && !input.fire
+                && !input.ship
                 && same_place(tex, &end, &input)
                 && same_input(tex, &end, &input)
             {
@@ -2428,7 +2441,7 @@ fn run_step<H: Host>(
                     if stopped
                         || matches!(
                             tex.clean_point(),
-                            Some(CleanPoint::Outer | CleanPoint::Fire)
+                            Some(CleanPoint::Outer | CleanPoint::Fire | CleanPoint::Ship)
                         )
                     {
                         break false;

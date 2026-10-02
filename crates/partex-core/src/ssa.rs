@@ -117,6 +117,9 @@ pub enum Fam {
     /// The page's `k`-th node (`track::Row::PageNode`): an append,
     /// versioned by the node.
     PageNode,
+    /// A sealed line's contents (`seal.rs`, `track::Row::Sealed`), by its
+    /// key: versioned by the contents.
+    Sealed,
 }
 
 /// Codes id of a [`Fam::Source`] line versioned by its bytes.
@@ -172,6 +175,7 @@ impl Slot {
             Row::Random => Slot(Fam::Random, 0),
             // (versioned by the answer read; a probe's is never equal)
             Row::Clock => Slot(Fam::Unknown, 1 << 20),
+            Row::Sealed(k) => Slot(Fam::Sealed, k.cast_signed()),
         }
     }
 
@@ -227,6 +231,9 @@ impl fmt::Display for Slot {
             Fam::Mark => "mark",
             Fam::Glyphs => "glyphs",
             Fam::PageNode => "pagenode",
+            Fam::Sealed => {
+                return write!(f, "sealed:{:x}", self.1.cast_unsigned());
+            }
         };
         write!(f, "{fam}:{}", self.1)
     }
@@ -308,6 +315,8 @@ pub(crate) enum SValue {
     },
     /// A current mark.
     Mark(Option<partex_engine::node::Tokens>),
+    /// A sealed line's contents, or none.
+    Sealed(Option<alloc::sync::Arc<crate::seal::Sealed>>),
     /// Where a paragraph call ended in the source (its result).
     Pos(Position),
     /// A field of the families whose fields are the engine's structures
@@ -450,7 +459,9 @@ impl Func {
     /// packs, the page steps, `ship_out`, the fonts). The others
     /// (`tokenize`, `write_out`, the output routine) run in the frame of
     /// the call around them, their reads and writes its own; in check
-    /// mode, and with `PARTEX_SSA_LEAN=0`, every routine has its record.
+    /// mode, and with `PARTEX_SSA_LEAN=0`, every routine but the output
+    /// routine has its record (a step begins inside it, before its
+    /// `\shipout`).
     #[must_use]
     pub const fn recorded(self) -> bool {
         !matches!(self, Func::Tokenize | Func::WriteOut | Func::Output)
@@ -1179,8 +1190,10 @@ impl SsaTracker {
     }
 
     /// Whether routine `f` gets a frame and a record ([`SsaTracker::lean`]).
+    /// Never the output routine: a step begins inside it, before its
+    /// `\shipout` (`CleanPoint::Ship`), and a frame does not span steps.
     fn framed(&self, f: Func) -> bool {
-        self.check || !self.lean || f.recorded()
+        f != Func::Output && (self.check || !self.lean || f.recorded())
     }
 
     /// A load of `name`, read `whole` ([`Tracker::load`]) or by lines
@@ -1487,6 +1500,15 @@ impl Tracker for SsaTracker {
                 .rec
                 .try_borrow_mut()
                 .is_ok_and(|mut r| rebuild::read_later(&mut r))
+    }
+
+    fn step_salt(&self) -> u64 {
+        // (the step's id: its key moves when the fold is numbered again)
+        self.rec
+            .try_borrow()
+            .ok()
+            .and_then(|r| r.rt.open_step_id())
+            .map_or(0, u64::from)
     }
 
     #[inline(always)]
@@ -2049,6 +2071,8 @@ pub trait EngineView {
     fn save_version(&self, s: i64) -> u128;
     fn cond_ver(&self) -> u128;
     fn mark_ver(&self, s: i64) -> u128;
+    /// The sealed line `k`'s contents (`seal.rs`).
+    fn sealed_ver(&self, k: i64) -> u128;
     /// The value slot `s` holds now (the families whose values the
     /// engine can put back; none for a read-only one).
     #[allow(private_interfaces, reason = "the values are the engine's")]
@@ -2111,6 +2135,11 @@ impl<H: Host, T: Tracker> EngineView for Tex<H, T> {
     fn mark_ver(&self, s: i64) -> u128 {
         let (c, t) = (s / 5, s % 5);
         self.mark_version(i32::try_from(c).unwrap_or(0), i32::try_from(t).unwrap_or(0))
+    }
+    fn sealed_ver(&self, k: i64) -> u128 {
+        self.seals
+            .get(u128::from(k.cast_unsigned()))
+            .map_or(Version::ABSENT.0, |s| s.version())
     }
     #[allow(private_interfaces, reason = "the values are the engine's")]
     fn value_of(&self, s: Slot) -> Option<alloc::sync::Arc<SValue>> {
@@ -2203,6 +2232,7 @@ impl Store<TexSsa> for View<'_> {
             Fam::Save => Version(self.tex.save_version(s.1)),
             Fam::Cond => Version(self.tex.cond_ver()),
             Fam::Mark => Version(self.tex.mark_ver(s.1)),
+            Fam::Sealed => Version(self.tex.sealed_ver(s.1)),
             Fam::List => {
                 let f = u8::try_from(s.1).unwrap_or(0);
                 let count = crate::track::list::COUNT;
@@ -2384,6 +2414,11 @@ pub fn run_applying<H: Host>(
     tex.set_stop_at_candidate(true);
     // (a fire is a step boundary, DESIGN §7.16.1)
     tex.set_defer_fire(true);
+    // (and so is a `\shipout`, and the lines it ships are sealed: a word
+    // that leaves its line's dimensions leaves the page and the output
+    // routine before the `\shipout` as they were, DESIGN 7.17.3)
+    tex.set_stop_before_ship(true);
+    tex.set_seal_lines(true);
     let mut open = Some(Open {
         hit: false,
         rec: None,
@@ -2397,7 +2432,7 @@ pub fn run_applying<H: Host>(
             Step::Checkpoint => {
                 if matches!(
                     tex.clean_point(),
-                    Some(CleanPoint::Outer | CleanPoint::Fire)
+                    Some(CleanPoint::Outer | CleanPoint::Fire | CleanPoint::Ship)
                 ) {
                     close_paragraph(tex, &mut open, &mut rep, Close::Step);
                     open = Some(open_paragraph(tex, check, &mut rep, None));
@@ -2456,6 +2491,9 @@ fn open_paragraph<H: Host>(
         }
         r.st.steps.run_begins(rerun);
     }
+    // (the lines it seals are counted from its start: their keys are the
+    // same at each run of the step)
+    tex.seal_restart();
     // the line the paragraph starts on, its tokens, and the offset in them
     // (at a fire, the topmost file level's, under the token lists: DESIGN
     // §7.16.1, "The deferred fire's form")
@@ -2559,6 +2597,10 @@ fn open_paragraph<H: Host>(
     if tex.fire_pending {
         // (a step that begins with a fire)
         args.push(Version::of(&0x6669_7265u32));
+    }
+    if tex.ship_stop == 1 {
+        // (a step that begins with a `\shipout`)
+        args.push(Version::of(&0x7368_6970u32));
     }
     let mut r = tex.tracker.rec.borrow_mut();
     let rr = &mut *r;
@@ -3139,6 +3181,7 @@ fn slot_value<H: Host, T: Tracker>(t: &Tex<H, T>, s: Slot) -> Option<SValue> {
             let (c, k) = (i32of(s.1 / 5), usize::try_from(s.1 % 5).ok()?);
             SValue::Mark(t.cur_mark.get(&c).and_then(|m| m[k].clone()))
         }
+        Fam::Sealed => SValue::Sealed(t.seals.get(u128::from(s.1.cast_unsigned())).cloned()),
         _ => SValue::Field(crate::values::value(t, s)?),
     })
 }
@@ -3292,6 +3335,13 @@ fn set_value<H: Host, T: Tracker>(t: &mut Tex<H, T>, vers: &mut Versions, s: Slo
         (Fam::Mark, SValue::Mark(m)) => {
             let (c, k) = (i32of(s.1 / 5), usize::try_from(s.1 % 5).unwrap_or(0));
             t.cur_mark.entry(c).or_default()[k].clone_from(m);
+        }
+        (Fam::Sealed, SValue::Sealed(x)) => {
+            let k = u128::from(s.1.cast_unsigned());
+            match x {
+                Some(x) => t.seals.insert(k, x.clone()),
+                None => t.seals.remove(k),
+            }
         }
         // (a table family's version is in its array)
         (_, SValue::Field(x)) if crate::values::set(t, s, x) => vers.set(s, v.0.0),

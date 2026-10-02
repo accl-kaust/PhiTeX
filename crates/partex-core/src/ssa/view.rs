@@ -422,7 +422,7 @@ fn set_text(rt: &Runtime<TexSsa>, key: u64, recs: &[RecId]) -> String {
     }
     let mut out = String::new();
     for n in page.values() {
-        node_text(n, &mut out);
+        node_text(rt, n, &mut out);
         if out.chars().count() > EXCERPT {
             break;
         }
@@ -436,7 +436,7 @@ fn set_text(rt: &Runtime<TexSsa>, key: u64, recs: &[RecId]) -> String {
     let text = |l: &partex_engine::nodelist::NodeList| {
         let mut t = String::new();
         for n in l.iter() {
-            node_text(n, &mut t);
+            node_text(rt, n, &mut t);
         }
         t
     };
@@ -472,7 +472,7 @@ fn page_text(rt: &Runtime<TexSsa>, key: u64, reads: &[Slot]) -> String {
         if let Some(SValue::Field(f)) = v.as_ref().and_then(|v| v.1.as_deref())
             && let Some(n) = f.get::<partex_engine::node::Node>()
         {
-            node_text(n, &mut out);
+            node_text(rt, n, &mut out);
         }
         if out.chars().count() > EXCERPT {
             break;
@@ -481,20 +481,40 @@ fn page_text(rt: &Runtime<TexSsa>, key: u64, reads: &[Slot]) -> String {
     out
 }
 
-/// The characters of node `n` (and of the nodes in it), glue as a space.
-fn node_text(n: &partex_engine::node::Node, out: &mut String) {
+/// The characters of node `n` (and of the nodes in it), glue as a space;
+/// a sealed line's (`seal.rs`) as the last definition of its slot holds
+/// them.
+fn node_text(rt: &Runtime<TexSsa>, n: &partex_engine::node::Node, out: &mut String) {
     use partex_engine::node::Node;
     match n {
         Node::Glyphs(g) => out.extend(g.chars().iter().map(|&c| text_char(c))),
         Node::Ligature(l) => out.extend(l.original.iter().map(|&c| text_char(c))),
         Node::Disc(d) => {
             for m in &d.replace {
-                node_text(m, out);
+                node_text(rt, m, out);
             }
         }
         Node::Box(b) => {
-            for m in &b.list {
-                node_text(m, out);
+            let sealed = b.seal.and_then(|k| {
+                #[allow(clippy::cast_possible_truncation, reason = "a key's low 64 bits")]
+                let a = Slot(Fam::Sealed, (k as u64).cast_signed());
+                let d = rt.fold.latest(&a)?;
+                match rt
+                    .record(d.rec)
+                    .writes
+                    .get(d.ix as usize)?
+                    .1
+                    .as_ref()?
+                    .1
+                    .as_deref()
+                {
+                    Some(SValue::Sealed(Some(s))) => Some(s.clone()),
+                    _ => None,
+                }
+            });
+            let list = sealed.as_ref().map_or(&b.list, |s| &s.list);
+            for m in list {
+                node_text(rt, m, out);
                 if out.chars().count() > EXCERPT {
                     return;
                 }
@@ -767,7 +787,7 @@ fn slot_name<H: Host>(names: &mut Names<'_, H>, st: &super::RecState, a: Slot) -
         Fam::Out => format!("write:{i}"),
         Fam::Random => String::from("random"),
         Fam::Str => format!("strings:{i:#x}"),
-        Fam::Source | Fam::Line => format!("{a}"),
+        Fam::Source | Fam::Line | Fam::Sealed => format!("{a}"),
         Fam::Name => {
             let n = interned(&st.names);
             format!("lookup:\\{n}")

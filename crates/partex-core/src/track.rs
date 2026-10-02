@@ -134,6 +134,10 @@ pub enum Row {
     /// date, a file's date, a line from the terminal (§71). Its version
     /// is the answer, and no other build's is equal to it.
     Clock,
+    /// A sealed line's contents (`seal.rs`), by its key: what is inside a
+    /// line box, written when the line breaker seals it and read where
+    /// it is opened (shipping out, `\\unhbox`, a display's width).
+    Sealed(u64),
 }
 
 /// The fields of a font slot, by [`Row::Font`] slot (DESIGN 7.17.12's
@@ -472,6 +476,12 @@ pub trait Tracker {
     /// run that read a later definition").
     fn stop_due(&self, _n: u64) -> bool {
         false
+    }
+    /// (With [`Tracker::VALUES`].) The open step's name, for the keys of
+    /// the lines it seals (`seal.rs`): the same at each run of the step,
+    /// and no other step's.
+    fn step_salt(&self) -> u64 {
+        0
     }
     /// Before an access to the page builder's state (§980–§982: the
     /// page, its totals, insertions, `last_glue` and friends, e-TeX's

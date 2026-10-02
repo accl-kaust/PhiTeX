@@ -1,4 +1,5 @@
-//! Sealed lines (machine mode, `DESIGN.md` §7.0).
+//! Sealed lines (SSA mode, `DESIGN.md` 7.17.9's fold; the machine's,
+//! `DESIGN_ARCHIVE.md` §7.0).
 //!
 //! Once a paragraph is broken into lines, what is inside a line box (its
 //! glue setting and list) is observed by very little: shipping the page
@@ -21,6 +22,15 @@
 //! Entries are never removed (a copy of a line box, `\copy`, shares its
 //! key); the table is sharded behind `Arc`s, so a snapshot shares it and
 //! a write copies one shard.
+//!
+//! In SSA mode each entry is a slot (`track::Row::Sealed`), written by
+//! the step that breaks the paragraph and read where the line is opened,
+//! and its key is the step's id, the paragraph's count in the step and
+//! the line's index: the same at each run of the step, and no other
+//! line's. With the step boundary before `\shipout` (`CleanPoint::Ship`),
+//! a word that leaves its line's dimensions runs again its paragraph's
+//! step and the step that ships the page, not the output routine before
+//! the `\shipout`.
 
 use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
@@ -136,6 +146,13 @@ impl SealTable {
     }
 }
 
+/// The slot of sealed line `k` (`track::Row::Sealed`): SSA mode's keys
+/// are 64 bits.
+#[allow(clippy::cast_possible_truncation, reason = "a key's low 64 bits")]
+fn sealed_row(k: u128) -> u64 {
+    k as u64
+}
+
 /// Does `n`, or anything inside it, hold a sealed line?
 fn has_sealed(n: &Node) -> bool {
     match n {
@@ -154,15 +171,28 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         self.seal_lines = on;
     }
 
-    /// The contents of the sealed line `k`, logged as read.
+    /// The contents of the sealed line `k`, logged as read (a read of its
+    /// slot, `track::Row::Sealed`, for a tracker that keeps versions).
     pub(crate) fn sealed_content(&mut self, k: u128) -> Arc<Sealed> {
         let s = self
             .seals
             .get(k)
             .cloned()
             .expect("a sealed line is in the table");
-        self.seal_log.push((k, Some(s.version())));
+        if T::VALUES {
+            self.tracker
+                .value_read(crate::track::Row::Sealed(sealed_row(k)), || s.version());
+        } else {
+            self.seal_log.push((k, Some(s.version())));
+        }
         s
+    }
+
+    /// A step begins (SSA mode): the paragraphs it breaks are counted
+    /// from 0 ([`Tex::seal_paragraph`]), so each run of the step seals its
+    /// lines under the same keys.
+    pub(crate) fn seal_restart(&mut self) {
+        self.seal_at = (0, 0);
     }
 
     /// Seal line `idx` of the paragraph just broken, `b`, if sealing is
@@ -174,12 +204,19 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         let mut h = StableHasher::new();
         (self.seal_at, idx).hash(&mut h);
         let mut k = h.finish128();
-        // (the same place twice, a file read twice: the next free key,
-        // which is the same in two runs that got here alike)
-        while self.seals.get(k).is_some() {
-            let mut h = StableHasher::new();
-            k.hash(&mut h);
-            k = h.finish128();
+        if T::VALUES {
+            // (SSA mode: the step's name and the paragraph's count in it
+            // make the key no other line has, and the same at each run of
+            // the step; 64 bits, a slot's address)
+            k = u128::from(sealed_row(k));
+        } else {
+            // (the same place twice, a file read twice: the next free key,
+            // which is the same in two runs that got here alike)
+            while self.seals.get(k).is_some() {
+                let mut h = StableHasher::new();
+                k.hash(&mut h);
+                k = h.finish128();
+            }
         }
         let s = Sealed::new(
             core::mem::take(&mut b.glue_set),
@@ -188,7 +225,12 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             core::mem::take(&mut b.list),
         );
         self.seals.insert(k, Arc::new(s));
-        self.seal_log.push((k, None));
+        if T::VALUES {
+            self.tracker
+                .value_wrote(crate::track::Row::Sealed(sealed_row(k)));
+        } else {
+            self.seal_log.push((k, None));
+        }
         b.seal = Some(k);
         b
     }
@@ -199,14 +241,20 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         if !self.seal_lines {
             return;
         }
-        let mut h = StableHasher::new();
-        let file = self
-            .input_file
-            .get(self.in_open)
-            .and_then(Option::as_ref)
-            .map(|f| f.name.clone());
-        (file.as_deref(), self.in_open, self.line).hash(&mut h);
-        let at = h.finish128();
+        let at = if T::VALUES {
+            // (SSA mode: the step breaking it, from whose start paragraphs
+            // are counted, `seal_restart`; never 0, the count's reset)
+            u128::from(self.tracker.step_salt()) | 1 << 64
+        } else {
+            let mut h = StableHasher::new();
+            let file = self
+                .input_file
+                .get(self.in_open)
+                .and_then(Option::as_ref)
+                .map(|f| f.name.clone());
+            (file.as_deref(), self.in_open, self.line).hash(&mut h);
+            h.finish128()
+        };
         self.seal_at = if self.seal_at.0 == at {
             (at, self.seal_at.1 + 1)
         } else {

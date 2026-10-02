@@ -1026,7 +1026,7 @@ The value fields fall into six families:
 | tables | eqtb, `xeq_level`, registers above 255, the hash (`text`, `next`), the pool (a string by its bytes), `str_ptr`, `hash_used`, `hash_high`, fonts' fields (each `\fontdimen`, `\hyphenchar`, code array…, with metrics by identity), hyphenation (patterns as one address, each exception word its own) | a version array beside the entries, set at the write from the content; a format's load versions them whole. A lookup by name reads the name's address, not the hash chain |
 | groups | the group frames (3.2), `cur_level`, `cur_group`, `cur_boundary`, e-TeX's saved registers | frames as a shared stack; local definitions scoped |
 | tokens | token lists, the input state (3.5), the open files and their positions, the conditional stack, `align_state`, `after_token`, `\read` streams | lists carry their polynomial; the input is the call's result; a file is a load |
-| lists | the nest's lists and boxes, the alignment state, pack results, `last_badness`, `shown_mode` | a box carries its version, made when packed; a pack's result is its node's output |
+| lists | the nest's lists and boxes, the alignment state, pack results, `last_badness`, `shown_mode`, sealed lines' contents | a box carries its version, made when packed; a pack's result is its node's output; a sealed line's box is its dimensions and key, its contents a slot of their own |
 | page | the page builder's fields (contents, list, `page_so_far`'s eight, `page_max_depth`, `least_page_cost`, `best_page_break`, `best_size`, insertions, `insert_penalties`, `last_glue` …), marks, `split_discards`, `dead_cycles`, `output_active` | an address per field; the list by appends (3.4) |
 | output | the PDF writer's tables (object numbering, destinations, fonts and glyphs, the font map, `\pdfglyphtounicode`'s table, color stacks, the `\pdflast…` values), the DVI writer's totals, `\write` streams (`Out(n)`: the name each stores to), `selector`, the log's state, `Random` (the generator's state), `Clock` (the host's answers) | writer scopes (3.8); stores and loads (3.7) |
 
@@ -1126,6 +1126,21 @@ of *steps*: calls from one clean point to the next.
   an empty nest and contribution list, the input at a file level, and
   no output routine active.
 - A page that completes defers its fire to the start of the next step.
+- Main control stops before a `\shipout`, and the next step begins with
+  it (`CleanPoint::Ship`, inside the output routine as a rule): the
+  step that ships a page is apart from the routine's expansion before
+  it. (The output routine has no frame, in check mode either: a frame
+  does not span steps.)
+- The line breaker seals each line (`seal.rs`). The line box keeps its
+  dimensions and a key, and its glue setting and list go to a table
+  under the key, a slot of their own (`Fam::Sealed`, versioned by the
+  contents). The key is the step's id, the paragraph's count in the
+  step and the line's index: the same at each run of the step. Only
+  what looks inside a line reads the slot: shipping out, `\unhbox`,
+  `\showbox`, a display's width, `\leftmarginkern`. So a word that
+  leaves its line's dimensions changes its paragraph's step and the
+  ship step only. The page, `\box255` and the output routine before
+  its `\shipout` read what they read before.
 - Each step has a fixed id and a key: cold keys are 2²⁰ apart, and a
   step spliced in takes a key between its neighbours.
 - A step keeps its records, and the slots it read from outside it.
