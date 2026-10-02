@@ -1873,6 +1873,21 @@ fn more_trips<H: Host>(
                     if wrote { "; a tool wrote" } else { "" }
                 ),
             );
+            // (each one's first line that differs from what the trip read)
+            let firsts: Vec<alloc::string::String> = {
+                let r = tex.tracker.rec.borrow();
+                changed
+                    .iter()
+                    .map(|id| {
+                        let was = r.st.steps.last_phi.get(id).cloned().flatten();
+                        let now = phi.get(id).cloned().flatten();
+                        first_difference(was.as_deref(), now.as_deref())
+                    })
+                    .collect()
+            };
+            for (n, f) in names.iter().zip(firsts) {
+                note(tex, alloc::format!("  {n}: {f}"));
+            }
         }
         tex.tracker.rec.borrow_mut().st.steps.next = Some(NextTrip {
             phi,
@@ -1895,6 +1910,35 @@ fn more_trips<H: Host>(
 }
 
 /// A line of the rebuild's trace.
+/// Where two contents of a stored name first differ, for the trace: the
+/// line's number and both versions of it (absent: none).
+fn first_difference(was: Option<&[u8]>, now: Option<&[u8]>) -> alloc::string::String {
+    let (Some(was), Some(now)) = (was, now) else {
+        return alloc::format!(
+            "was {}, now {}",
+            was.map_or("absent", |_| "there"),
+            now.map_or("absent", |_| "there")
+        );
+    };
+    let lines = |b: &[u8]| -> Vec<alloc::string::String> {
+        b.split(|&c| c == b'\n')
+            .map(|l| alloc::string::String::from_utf8_lossy(l).into_owned())
+            .collect()
+    };
+    let (w, n) = (lines(was), lines(now));
+    match (0..w.len().max(n.len())).find(|&i| w.get(i) != n.get(i)) {
+        Some(i) => alloc::format!(
+            "line {}: was {:?}, now {:?} ({} and {} lines)",
+            i + 1,
+            w.get(i).map_or("(none)", |l| &l[..]),
+            n.get(i).map_or("(none)", |l| &l[..]),
+            w.len(),
+            n.len()
+        ),
+        None => alloc::string::String::from("the same lines"),
+    }
+}
+
 fn note<H: Host>(tex: &Tex<H, SsaTracker>, line: alloc::string::String) {
     tex.tracker.rec.borrow_mut().st.steps.log.push(line);
 }

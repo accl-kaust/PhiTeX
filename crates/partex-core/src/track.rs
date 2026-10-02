@@ -422,11 +422,7 @@ pub trait Tracker {
     /// opened file `name` on, if the step runs again: the engine asks the
     /// host for it again (`Host::open_write_again`, DESIGN 7.17.3). Each
     /// is given once, the run's opens of a name in their order.
-    fn reopen(
-        &self,
-        _name: &[u8],
-        _kind: crate::host::FileKind,
-    ) -> Option<crate::host::WriteId> {
+    fn reopen(&self, _name: &[u8], _kind: crate::host::FileKind) -> Option<crate::host::WriteId> {
         None
     }
     /// (With [`Tracker::VALUES`].) Structure row `row` was written (its
@@ -552,8 +548,10 @@ pub trait Tracker {
     /// (DESIGN 7.17.5).
     fn store_open(&self, _stream: u8, _name: &[u8]) {}
     /// (With [`Tracker::VALUES`].) A line (without its end) written to
-    /// stream `stream`'s file: a store to it (7.17.5).
-    fn store_line(&self, _stream: u8, _line: &[u8]) {}
+    /// file `name` by the `\\write` stream that stores to it (the stream's
+    /// name as the engine holds it, restored with the stream in a
+    /// rebuild): a store to it (7.17.5).
+    fn store_line(&self, _name: &[u8], _line: &[u8]) {}
     /// (With [`Tracker::VALUES`].) Bytes of output `what` made: an effect
     /// of the running call.
     fn output(&self, _what: Output, _bytes: &[u8]) {}

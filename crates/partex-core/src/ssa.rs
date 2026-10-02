@@ -850,10 +850,6 @@ pub struct RecState {
     /// Files this build opened for writing: a load of one reads what the
     /// build wrote (the φ, not built), never equal across builds.
     written: alloc::collections::BTreeSet<Vec<u8>>,
-    /// Where each `\write` stream stores its lines: the file's address,
-    /// by name as a load names it (`Fam::Load`), so a file's store and its
-    /// loads are one address (7.17.5).
-    out_addr: [Option<Slot>; 16],
     /// Output made since the last call boundary, a run per output:
     /// effects of the call open now (`Recorder::flush_output`).
     pending: Vec<(Output, Vec<u8>)>,
@@ -1801,7 +1797,7 @@ impl Tracker for SsaTracker {
         r.st.steps.served(&r.rt.fold, id, key)
     }
 
-    fn store_open(&self, stream: u8, name: &[u8]) {
+    fn store_open(&self, _stream: u8, name: &[u8]) {
         let Ok(mut r) = self.rec.try_borrow_mut() else {
             return;
         };
@@ -1814,9 +1810,6 @@ impl Tracker for SsaTracker {
                 .push((name.to_vec(), Version::ABSENT, crate::host::FileKind::Tex));
         }
         let a = Slot(Fam::Load, i64::from(id));
-        if let Some(s) = rr.st.out_addr.get_mut(usize::from(stream)) {
-            *s = Some(a);
-        }
         if rr.on {
             rr.flush_output();
             rr.rt.note_open(&a);
@@ -1824,7 +1817,7 @@ impl Tracker for SsaTracker {
         }
     }
 
-    fn store_line(&self, stream: u8, line: &[u8]) {
+    fn store_line(&self, name: &[u8], line: &[u8]) {
         let Ok(mut r) = self.rec.try_borrow_mut() else {
             self.lost.set(self.lost.get() + 1);
             return;
@@ -1833,13 +1826,14 @@ impl Tracker for SsaTracker {
         if !rr.on {
             return;
         }
-        if let Some(Some(a)) = rr.st.out_addr.get(usize::from(stream)).copied() {
+        // (the file's address, by name as a load names it, `Fam::Load`: a
+        // file's store and its loads are one address, 7.17.5)
+        if let Some(&id) = rr.st.loads_ix.get(name) {
+            let a = Slot(Fam::Load, i64::from(id));
             // (in program order with the effects before it)
             rr.flush_output();
             rr.rt.note_store(&a, SVal::ver(Version::of(line)));
-            if let Ok(id) = u32::try_from(a.1) {
-                rr.st.steps.store_line(id, line);
-            }
+            rr.st.steps.store_line(id, line);
         }
     }
 

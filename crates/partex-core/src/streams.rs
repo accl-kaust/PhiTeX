@@ -154,10 +154,15 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         }
         self.tracker
             .output(Output::Write(u8::try_from(n & 15).unwrap_or(0)), &[c]);
-        let line = &mut self.streams.lines[n & 15];
+        let s = &mut self.streams;
+        let line = &mut s.lines[n & 15];
         if c == b'\n' {
-            let k = u8::try_from(n & 15).unwrap_or(0);
-            self.tracker.store_line(k, line);
+            // (to the file the stream stores to as the engine holds it,
+            // which a rebuild restores with the stream: not the file its
+            // number opened last, in whatever run)
+            if let Some(name) = s.out_name[n & 15].as_deref() {
+                self.tracker.store_line(name, line);
+            }
             line.clear();
         } else {
             line.push(c);

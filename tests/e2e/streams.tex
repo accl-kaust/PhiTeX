@@ -1,0 +1,20 @@
+% One \write stream, two files: \jobname.one, read back at the start,
+% then \jobname.two. A step that writes to the first file runs again
+% after the stream opened the second: its lines are still the first's.
+\documentclass{article}
+\newwrite\w
+\begin{document}
+\InputIfFileExists{\jobname.one}{}{}
+\immediate\openout\w=\jobname.one
+\immediate\write\w{\string\gdef\string\first{Alpha}}
+Opening paragraph, \ifdefined\first\first\else none\fi.
+
+\immediate\write\w{\string\gdef\string\second{Beta}}
+Second paragraph, \ifdefined\second\second\else none\fi.
+
+\immediate\closeout\w
+\immediate\openout\w=\jobname.two
+\immediate\write\w{unrelated}
+\immediate\closeout\w
+Third paragraph.
+\end{document}

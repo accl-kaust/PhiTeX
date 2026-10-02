@@ -18,10 +18,12 @@ letters no page had, and their removal: the end runs for each) and
 `machine_edits_dvi` (`edits-dvi.tex`, latex format), both under
 `-output-directory=out` after two plain runs of the original text, as
 e2e's `machine_edits` seeds them; `label`: the same document given a
-`\\label` nothing refers to, then rebuilt twice with no edit; and
+`\\label` nothing refers to, then rebuilt twice with no edit;
 `aux_reopen` (`reopen.tex`, pdflatex format): an edit in the first
 paragraph, whose step opens the `.aux` and whose page opens the PDF, its
-revert, and a later edit.
+revert, and a later edit; and `streams` (`streams.tex`): a line written to
+the file a stream opened first, changed and back, after the stream opened
+a second.
 
 Each case runs in WORK/<case>/:
 - `o/`: the oracle, one run per stage, the stage's edit made before it
@@ -117,6 +119,9 @@ REOPEN_EDITS = [
     ("Opening phrases", "Opening words"),
     ("Para5x2 ", "Para5x2 later "),
 ]
+# streams.tex: a line its first file's step writes, changed and back,
+# after the stream opened a second file
+STREAMS_EDITS = [("{Beta}", "{Gamma}"), ("{Gamma}", "{Beta}")]
 # a \label nothing refers to, then two rebuilds with no edit (LOG
 # 2026-09-29, "A label no one refers to")
 LABEL_EDITS = [("Para5x2 ", "Para5x2 \\label{new}"), ("", ""), ("", "")]
@@ -273,6 +278,7 @@ def all_cases():
         latex("machine_edits_dvi", "edits-dvi.tex", "latex", MACHINE_EDITS_DVI),
         latex("label", "edits.tex", "pdflatex", LABEL_EDITS),
         latex("aux_reopen", "reopen.tex", "pdflatex", REOPEN_EDITS),
+        latex("streams", "streams.tex", "pdflatex", STREAMS_EDITS),
     ]
 
 
