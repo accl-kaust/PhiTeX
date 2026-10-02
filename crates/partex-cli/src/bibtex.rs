@@ -33,6 +33,10 @@ pub struct KpseFiles {
     /// job`, as latexmk runs it for an output directory): `.aux`, `.bbl`
     /// and `.blg` names are in it.
     dir: Option<Vec<u8>>,
+    /// `.aux` files read from these contents, by path, not from disk: the
+    /// streams the build just wrote, which an SSA build holds in memory
+    /// while it rewrites the files (DESIGN 3.7, "Trips, as built").
+    served: HashMap<Vec<u8>, Vec<u8>>,
 }
 
 /// Read `name` (not a directory).
@@ -66,6 +70,14 @@ fn aux_digest(data: &[u8]) -> Vec<u8> {
 }
 
 impl KpseFiles {
+    /// The `.aux` file at `name`: served, or read from disk.
+    fn read_aux(&self, name: &[u8]) -> Option<Vec<u8>> {
+        match self.served.get(name) {
+            Some(d) => Some(d.clone()),
+            None => read_file(name),
+        }
+    }
+
     /// Where `name` is, relative names being in [`KpseFiles::dir`].
     fn at(&self, name: &[u8]) -> Vec<u8> {
         match &self.dir {
@@ -90,7 +102,7 @@ impl KpseFiles {
     fn unchanged(&mut self, read: &[Lookup]) -> bool {
         read.iter().all(|(name, was)| {
             let now = if name.ends_with(b".aux") {
-                read_file(name).map(|d| (name.clone(), aux_digest(&d)))
+                self.read_aux(name).map(|d| (name.clone(), aux_digest(&d)))
             } else {
                 let format = if was.as_ref().is_some_and(|(f, _)| f.ends_with(b".bst")) {
                     Format::Bst
@@ -109,7 +121,7 @@ impl KpseFiles {
 impl Files for KpseFiles {
     fn aux(&mut self, name: &[u8]) -> Option<Vec<u8>> {
         let name = self.at(name);
-        let data = read_file(&name);
+        let data = self.read_aux(&name);
         self.read
             .push((name.clone(), data.as_ref().map(|d| (name, aux_digest(d)))));
         data
@@ -165,9 +177,11 @@ pub struct Runs {
 /// After a pass of a converging build (its outputs written): run BibTeX
 /// on each `.aux` file of the job that asks for it (`\bibdata`), unless
 /// what its last run read is unchanged, writing the `.bbl` and `.blg`
-/// files as `bibtex` would. A report line for each run.
+/// files as `bibtex` would. The `.aux` files are read from `auxes`, by
+/// path (the others, from disk). A report line for each run.
 pub fn after_pass(runs: &mut Runs, auxes: &[(Vec<u8>, Vec<u8>)]) -> Vec<String> {
     let mut reports = Vec::new();
+    let served: HashMap<Vec<u8>, Vec<u8>> = auxes.iter().cloned().collect();
     for (name, contents) in auxes {
         if !contents
             .split(|&c| c == b'\n')
@@ -179,7 +193,9 @@ pub fn after_pass(runs: &mut Runs, auxes: &[(Vec<u8>, Vec<u8>)]) -> Vec<String> 
             kpse: crate::kpse_instance("bibtex", ""),
             read: Vec::new(),
             dir: None,
+            served: HashMap::new(),
         });
+        files.served.clone_from(&served);
         let slash = name.iter().rposition(|&c| c == b'/');
         files.dir = slash.map(|i| name[..=i].to_vec());
         let base = slash.map_or(name.as_slice(), |i| &name[i + 1..]).to_vec();
@@ -260,6 +276,7 @@ pub fn main() -> ! {
         kpse,
         read: Vec::new(),
         dir: None,
+        served: HashMap::new(),
     };
     let out = partex_bibtex::run(files[0].as_bytes(), &opts, &mut fs);
     for f in [&out.blg, &out.bbl].into_iter().flatten() {

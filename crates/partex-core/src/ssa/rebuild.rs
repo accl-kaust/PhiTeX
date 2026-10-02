@@ -69,6 +69,12 @@ pub(crate) struct Steps {
     /// Inside a rebuild: each stored name's φ, what the last trip stored
     /// (absent: it was not there).
     phi: Option<BTreeMap<u32, Option<Arc<[u8]>>>>,
+    /// The φ the last trip read, kept after it (DESIGN 3.7, "Trips, as
+    /// built"): a name no live step opens keeps it, and a name whose
+    /// value is the same keeps its bytes.
+    last_phi: BTreeMap<u32, Option<Arc<[u8]>>>,
+    /// Between two trips of a build: what the next one starts from.
+    next: Option<NextTrip>,
     /// The queries of the host the open step's run asked, and each
     /// step's, by step id, with their answers' versions (7.17.3, "A
     /// query is asked again").
@@ -80,6 +86,16 @@ pub(crate) struct Steps {
     /// ("The link after a rebuild is a watch's link").
     pub(super) cur_chunks: Vec<StepEffects>,
     pub(super) effects: Vec<Vec<StepEffects>>,
+}
+
+/// What trip k+1 of a build starts from (DESIGN 3.7, "Trips, as built").
+struct NextTrip {
+    /// Each stored name's φ: what trip k stored.
+    phi: BTreeMap<u32, Option<Arc<[u8]>>>,
+    /// The names whose φ is not trip k's.
+    changed: BTreeSet<u32>,
+    /// A tool wrote a file: the job's other loads are looked at again.
+    files: bool,
 }
 
 /// A store a step made: a name opened (`\openout`, a whole definition)
@@ -278,6 +294,60 @@ impl Steps {
             Ok(v) => Some(Some(Arc::from(v))),
             Err(()) => phi.get(&id).cloned(),
         }
+    }
+
+    /// What each stored name holds at a trip's end (DESIGN 3.7, "Trips,
+    /// as built"): its lines since its last open, or, if no live step
+    /// opens it, the φ the trip read. The next trip's φ, and the names
+    /// whose value is not that φ; a name whose value is the same keeps
+    /// the φ's bytes, shared.
+    #[allow(clippy::type_complexity)]
+    fn trip_end(&self, fold: &Fold<TexSsa>) -> (BTreeMap<u32, Option<Arc<[u8]>>>, BTreeSet<u32>) {
+        let mut phi = BTreeMap::new();
+        let mut changed = BTreeSet::new();
+        for &id in &self.stored {
+            let was = self.last_phi.get(&id);
+            let Some(Ok(now)) = self.value_at(fold, id, u64::MAX) else {
+                if let Some(w) = was {
+                    phi.insert(id, w.clone());
+                }
+                continue;
+            };
+            if let Some(Some(w)) = was
+                && w[..] == now[..]
+            {
+                phi.insert(id, Some(w.clone()));
+            } else {
+                phi.insert(id, Some(Arc::from(now)));
+                changed.insert(id);
+            }
+        }
+        (phi, changed)
+    }
+
+    /// The loads of the φ that found other than `phi` holds (DESIGN 3.7):
+    /// each one's step's key, the step, and the name loaded.
+    fn phi_seeds(
+        &self,
+        fold: &Fold<TexSsa>,
+        phi: &BTreeMap<u32, Option<Arc<[u8]>>>,
+    ) -> Vec<(u64, StepId, u32)> {
+        let vers: BTreeMap<u32, Version> = phi
+            .iter()
+            .map(|(&id, v)| {
+                let ver = v.as_ref().map_or(Version::ABSENT, |c| Version::of(&c[..]));
+                (id, ver)
+            })
+            .collect();
+        let mut out = Vec::new();
+        for (&s, seen) in &self.loads {
+            for l in seen.iter().filter(|l| l.phi) {
+                if vers.get(&l.id).is_some_and(|v| *v != l.ver) {
+                    out.push((fold.steps[s as usize].key, s, l.id));
+                }
+            }
+        }
+        out
     }
 
     /// Step `s`'s result, in the source as it is now.
@@ -915,6 +985,17 @@ pub struct RebuildReport {
     /// Why the rebuild stopped short, if it did.
     pub unsupported: Option<&'static str>,
     pub commands: u64,
+    /// The trips run (DESIGN 3.7, "Trips, as built"), each one's steps
+    /// run, commands and time (ns, by [`Trips::clock`]); whether the build
+    /// converged, and if not, the names whose loads read what the trip
+    /// before stored; a line for each outside tool's run.
+    pub trips: usize,
+    pub trip_steps: Vec<usize>,
+    pub trip_commands: Vec<u64>,
+    pub trip_ns: Vec<u64>,
+    pub settled: bool,
+    pub unsettled: Vec<Vec<u8>>,
+    pub tools: Vec<alloc::string::String>,
     /// With `trace`: a line per step run, what it changed and where it
     /// ended.
     pub trace: bool,
@@ -1144,6 +1225,9 @@ pub fn rebuild<H: Host>(tex: &mut Tex<H, SsaTracker>, trace: bool, apply: bool) 
     };
     let c0 = tex.commands();
     let mut dirty: BTreeMap<u64, StepId> = BTreeMap::new();
+    // (a build's trip after the first: its φ is what the trip before
+    // stored, DESIGN 3.7, "Trips, as built")
+    let next = tex.tracker.rec.borrow_mut().st.steps.next.take();
     {
         // the files loaded, as they are now: a file read by lines changed
         // where its lines did, in each data it was loaded as (7.17.3,
@@ -1151,9 +1235,10 @@ pub fn rebuild<H: Host>(tex: &mut Tex<H, SsaTracker>, trace: bool, apply: bool) 
         // and a file read whole reads its contents (each looked up as the
         // kind of file it was loaded as)
         #[allow(clippy::type_complexity)]
-        let (files, datas): (
+        let (files, datas, lines): (
             Vec<(u32, Vec<u8>, FileKind, Option<Arc<[u8]>>, bool, bool)>,
             Vec<(u32, u32, Arc<[u8]>)>,
+            BTreeSet<u32>,
         ) = {
             let r = tex.tracker.rec.borrow();
             let s = &r.st.steps;
@@ -1170,6 +1255,12 @@ pub fn rebuild<H: Host>(tex: &mut Tex<H, SsaTracker>, trace: bool, apply: bool) 
                     .filter_map(|(i, (name, _, kind))| {
                         let id = u32::try_from(i).ok()?;
                         let stored = s.stored.contains(&id);
+                        // (a later trip: a stored name's φ is in memory,
+                        // and the other loads are looked at again only
+                        // after a tool wrote a file)
+                        if next.as_ref().is_some_and(|n| stored || !n.files) {
+                            return None;
+                        }
                         let old = s.files.get(i).cloned().flatten();
                         Some((id, name.clone(), *kind, old, lines.contains(&id), stored))
                     })
@@ -1182,7 +1273,7 @@ pub fn rebuild<H: Host>(tex: &mut Tex<H, SsaTracker>, trace: bool, apply: bool) 
                 .filter(|(_, d)| d.file && lines.contains(&d.name))
                 .filter_map(|(i, d)| Some((u32::try_from(i).ok()?, d.name, d.bytes.clone())))
                 .collect();
-            (files, datas)
+            (files, datas, lines)
         };
         let mut edits = Vec::new();
         let mut loads = Vec::new();
@@ -1223,6 +1314,20 @@ pub fn rebuild<H: Host>(tex: &mut Tex<H, SsaTracker>, trace: bool, apply: bool) 
                 phi.insert(id, now);
             }
         }
+        // (a later trip: each stored name's φ is what the trip before
+        // stored, and a name read by lines whose φ changed is edited)
+        let later = next.is_some();
+        if let Some(n) = next {
+            for (id, now) in n.phi {
+                if let Some(c) = &now
+                    && n.changed.contains(&id)
+                    && lines.contains(&id)
+                {
+                    nows.insert(id, c.clone());
+                }
+                phi.insert(id, now);
+            }
+        }
         if trace {
             note(
                 tex,
@@ -1235,8 +1340,11 @@ pub fn rebuild<H: Host>(tex: &mut Tex<H, SsaTracker>, trace: bool, apply: bool) 
             }
         }
         // the queries the steps asked, asked again: a step whose answer
-        // differs is dirty (one answer per query, for the whole trip)
-        let asked: Vec<(StepId, u64, Query, u128)> = {
+        // differs is dirty (one answer per query, for the whole trip; a
+        // build's later trips ask none: the first asked for the build)
+        let asked: Vec<(StepId, u64, Query, u128)> = if later {
+            Vec::new()
+        } else {
             let r = tex.tracker.rec.borrow();
             let fold = &r.rt.fold;
             r.st.steps
@@ -1269,21 +1377,12 @@ pub fn rebuild<H: Host>(tex: &mut Tex<H, SsaTracker>, trace: bool, apply: bool) 
         let mut r = tex.tracker.rec.borrow_mut();
         let rr = &mut *r;
         // the loads that read the φ, dirty if it is not what they found
-        for (&s, seen) in &rr.st.steps.loads {
-            for l in seen.iter().filter(|l| l.phi) {
-                let Some(now) = phi.get(&l.id) else { continue };
-                if now
-                    .as_ref()
-                    .map_or(Version::ABSENT, |c| Version::of(&c[..]))
-                    != l.ver
-                {
-                    rep.phi += 1;
-                    dirty.insert(rr.rt.fold.steps[s as usize].key, s);
-                    if trace {
-                        let n = alloc::format!("seed: step {s} loaded φ {}", l.id);
-                        rr.st.steps.log.push(n);
-                    }
-                }
+        for (key, s, id) in rr.st.steps.phi_seeds(&rr.rt.fold, &phi) {
+            rep.phi += 1;
+            dirty.insert(key, s);
+            if trace {
+                let n = alloc::format!("seed: step {s} loaded φ {id}");
+                rr.st.steps.log.push(n);
             }
         }
         rep.edits = edits.len() + loads.len();
@@ -1474,8 +1573,206 @@ pub fn rebuild<H: Host>(tex: &mut Tex<H, SsaTracker>, trace: bool, apply: bool) 
     // (the arrays hold the latest definitions: `history` is the job's)
     rep.history = tex.history;
     rep.log = rebuild_log(tex);
-    tex.tracker.rec.borrow_mut().st.steps.phi = None;
+    {
+        // (the φ this trip read, kept for the next trip's names that no
+        // live step opens)
+        let mut r = tex.tracker.rec.borrow_mut();
+        let s = &mut r.st.steps;
+        if let Some(p) = s.phi.take() {
+            s.last_phi = p;
+        }
+    }
     rep
+}
+
+/// What a build's trips call outside the engine (DESIGN 3.7, "Trips, as
+/// built").
+pub struct Trips<'a, H> {
+    /// Trips in a build at most (`PARTEX_SSA_TRIPS`; 1: one trip, no tool
+    /// run).
+    pub max: usize,
+    /// The outside tools, run between two trips on the streams the job
+    /// stores, by name, as the trip left them: whether one wrote a file,
+    /// and a line for each run.
+    #[allow(clippy::type_complexity)]
+    pub tools:
+        &'a mut dyn FnMut(&mut H, &[(Vec<u8>, Arc<[u8]>)]) -> (bool, Vec<alloc::string::String>),
+    /// A clock in nanoseconds, for the trips' times.
+    pub clock: Option<fn() -> u64>,
+}
+
+impl<H> Trips<'_, H> {
+    fn now(&self) -> u64 {
+        self.clock.map_or(0, |c| c())
+    }
+}
+
+impl RebuildReport {
+    /// Trip `r`, which took `ns`, added to the build's counts.
+    fn absorb(&mut self, r: RebuildReport, ns: u64) {
+        self.trips += 1;
+        self.trip_steps.push(r.steps_run);
+        self.trip_commands.push(r.commands);
+        self.trip_ns.push(ns);
+        self.edits += r.edits;
+        self.seeds += r.seeds;
+        self.phi += r.phi;
+        self.store_readers += r.store_readers;
+        self.queries += r.queries;
+        self.data_edits += r.data_edits;
+        self.steps_run += r.steps_run;
+        self.retries += r.retries;
+        self.new_steps += r.new_steps;
+        self.removed += r.removed;
+        self.defs_changed += r.defs_changed;
+        self.readers_marked += r.readers_marked;
+        self.reads_checked += r.reads_checked;
+        self.positioned += r.positioned;
+        self.restored += r.restored;
+        self.initial += r.initial;
+        self.applied += r.applied;
+        self.skipped += r.skipped;
+        self.commands += r.commands;
+        self.unsupported = self.unsupported.or(r.unsupported);
+        self.history = r.history;
+        self.log.extend(r.log);
+    }
+}
+
+/// Rebuild the job in trips (DESIGN 3.7, "Trips, as built"): trip 1 is
+/// [`rebuild`], what the edits reach; then, while the stores the last
+/// trip left make seeds, the outside tools whose input changed run and
+/// the next trip runs, `trips.max` trips at most. The files are linked
+/// after the last.
+pub fn rebuild_trips<H: Host>(
+    tex: &mut Tex<H, SsaTracker>,
+    trace: bool,
+    apply: bool,
+    trips: &mut Trips<'_, H>,
+) -> RebuildReport {
+    let t0 = trips.now();
+    let first = rebuild(tex, trace, apply);
+    let ns = trips.now().saturating_sub(t0);
+    let ran = first.steps_run > 0;
+    let mut rep = RebuildReport {
+        trace,
+        ..RebuildReport::default()
+    };
+    rep.absorb(first, ns);
+    if !ran {
+        // (nothing ran: the stores are what the loads of the φ read)
+        rep.settled = rep.unsupported.is_none();
+        return rep;
+    }
+    if trips.max <= 1 {
+        // (one trip per build: a plain pass, nothing more looked at)
+        return rep;
+    }
+    more_trips(tex, trace, apply, trips, rep)
+}
+
+/// After a cold build, its trip 1, which ran `commands` commands in `ns`:
+/// the trips that follow, as in [`rebuild_trips`] (DESIGN 3.7, "The cold
+/// build converges too").
+pub fn settle<H: Host>(
+    tex: &mut Tex<H, SsaTracker>,
+    trace: bool,
+    apply: bool,
+    trips: &mut Trips<'_, H>,
+    commands: u64,
+    ns: u64,
+) -> RebuildReport {
+    let rep = RebuildReport {
+        trace,
+        trips: 1,
+        trip_steps: alloc::vec![tex.tracker.rec.borrow().rt.fold.order.len()],
+        trip_commands: alloc::vec![commands],
+        trip_ns: alloc::vec![ns],
+        ..RebuildReport::default()
+    };
+    more_trips(tex, trace, apply, trips, rep)
+}
+
+/// The trips after a build's first, which `rep` holds.
+fn more_trips<H: Host>(
+    tex: &mut Tex<H, SsaTracker>,
+    trace: bool,
+    apply: bool,
+    trips: &mut Trips<'_, H>,
+    mut rep: RebuildReport,
+) -> RebuildReport {
+    loop {
+        if rep.unsupported.is_some() {
+            return rep;
+        }
+        let (phi, changed) = {
+            let r = tex.tracker.rec.borrow();
+            r.st.steps.trip_end(&r.rt.fold)
+        };
+        if rep.trips >= trips.max.max(1) {
+            // (the bound: converged only if every load of the φ read what
+            // the last trip stored; else the names, as latexmk reports)
+            let r = tex.tracker.rec.borrow();
+            let mut ids: Vec<u32> =
+                r.st.steps
+                    .phi_seeds(&r.rt.fold, &phi)
+                    .into_iter()
+                    .map(|x| x.2)
+                    .collect();
+            ids.sort_unstable();
+            ids.dedup();
+            rep.unsettled = ids
+                .iter()
+                .filter_map(|&id| Some(r.st.loads.get(id as usize)?.0.clone()))
+                .collect();
+            rep.settled = rep.unsettled.is_empty();
+            return rep;
+        }
+        // the outside tools, on the streams as the trip left them
+        let streams: Vec<(Vec<u8>, Arc<[u8]>)> = {
+            let r = tex.tracker.rec.borrow();
+            phi.iter()
+                .filter_map(|(&id, v)| Some((r.st.loads.get(id as usize)?.0.clone(), v.clone()?)))
+                .collect()
+        };
+        let (wrote, lines) = (trips.tools)(&mut tex.host, &streams);
+        rep.tools.extend(lines);
+        if trace {
+            let names: Vec<alloc::string::String> = {
+                let r = tex.tracker.rec.borrow();
+                changed
+                    .iter()
+                    .filter_map(|&id| r.st.loads.get(id as usize))
+                    .map(|l| alloc::string::String::from_utf8_lossy(&l.0).into_owned())
+                    .collect()
+            };
+            note(
+                tex,
+                alloc::format!(
+                    "trip {}: the stores changed {names:?}{}",
+                    rep.trips + 1,
+                    if wrote { "; a tool wrote" } else { "" }
+                ),
+            );
+        }
+        tex.tracker.rec.borrow_mut().st.steps.next = Some(NextTrip {
+            phi,
+            changed,
+            files: wrote,
+        });
+        let t0 = trips.now();
+        let r = rebuild(tex, trace, apply);
+        let ns = trips.now().saturating_sub(t0);
+        if r.steps_run == 0 {
+            // (no seed: every load of the φ read what the trip stored)
+            rep.settled = r.unsupported.is_none();
+            rep.unsupported = rep.unsupported.or(r.unsupported);
+            rep.log.extend(r.log);
+            rep.log.extend(rebuild_log(tex));
+            return rep;
+        }
+        rep.absorb(r, ns);
+    }
 }
 
 /// A line of the rebuild's trace.

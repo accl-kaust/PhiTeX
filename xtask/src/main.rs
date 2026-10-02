@@ -124,7 +124,23 @@ fn check() -> Result<()> {
         let etex_machine = scope.spawn(|| etrip::run(&root, &[String::from("--machine")]));
         // (SSA mode's edit sequences, every stage against plain partex:
         // DESIGN.md 4.3, item 8)
-        let ssa_edits = scope.spawn(|| ssa_edits::harness(&root, &[String::from("--brief")]));
+        // (a rebuild settles the .aux loop in trips, DESIGN 3.7, so the
+        // oracle runs to its fixed point; with `PARTEX_SSA_TRIPS=1`, one
+        // trip a rebuild, against one plain pass a stage)
+        let ssa_edits = scope.spawn(|| {
+            let brief = String::from("--brief");
+            ssa_edits::harness(&root, &[brief.clone(), String::from("--fixpoint")])?;
+            ssa_edits::harness(
+                &root,
+                &[
+                    brief,
+                    String::from("--env"),
+                    String::from("PARTEX_SSA_TRIPS=1"),
+                    String::from("--work"),
+                    String::from("target/ssa-edits-trips1"),
+                ],
+            )
+        });
         let e2e = e2e::run(&root, &[]);
         // (and in machine mode, the default of `partex watch`: after the
         // plain run, which the format caches are shared with, in a

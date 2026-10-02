@@ -9,7 +9,7 @@ use alloc::vec::Vec;
 use super::objtab::{Aux, Id, OBJ_TYPE_XIMAGE, XImage};
 use super::out::TEN_POW;
 use super::{ONE_HUNDRED_BP, ONE_HUNDRED_INCH};
-use crate::host::{FileKind, Host};
+use crate::host::Host;
 use crate::tex::{Jump, Tex};
 use crate::track::Tracker;
 use crate::web::*;
@@ -209,11 +209,8 @@ impl<H: Host, T: Tracker> Tex<H, T> {
 
     /// writeimg.c's `read_image`.
     fn read_image(&mut self, s: &[u8], colorspace: i32) -> Result<Arc<Image>, Jump> {
-        let found = self.host.read_file(s, FileKind::Tex);
-        if T::VALUES {
-            self.tracker
-                .load(s, FileKind::Tex, found.as_ref().map(|f| &f.contents));
-        }
+        // (a load: a name the job stores reads its store, DESIGN 3.7)
+        let found = self.read_source(s);
         let Some(f) = found else {
             let mut m = b"cannot find image file ".to_vec();
             m.extend_from_slice(s);

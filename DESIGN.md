@@ -582,7 +582,10 @@ template, which a compiled backend exploits.
   stream is a sequence of lines, and `write_out` appends to it.
 - **Loads.** `\openin`, `\read` and `\input` of the same name are a
   load, served the stored value in memory, never the file, which a call
-  re-run out of order may have truncated.
+  re-run out of order may have truncated. So is every other read of a
+  file by name on TeX's path: `\pdffilesize` (LaTeX's `\IfFileExists`
+  calls it, through expl3's `\file_full_name:n`), `\pdfmdfivesum file`,
+  `\pdffiledump`, `\pdfobj file` and an image (`Tex::read_source`).
 - **No name is special.** `.aux`, `.toc`, `.lof` and `.bcf` are
   addresses the document chose.
 - **The cycle is a φ.** A load of a name the job stores reads, on its
@@ -600,6 +603,58 @@ template, which a compiled backend exploits.
   version changed. Which tool reads which stream is fixed in partex.
 - **Files are a view.** The build holds the streams and writes files
   for outside tools, never reading its own writes back.
+
+**Trips, as built** (`ssa/rebuild.rs`, `rebuild_trips` and `settle`):
+- *A build is a sequence of trips.* Trip 1 runs what the edit reaches
+  (3.15, "A rebuild"); a cold build's trip 1 is the whole job. A store
+  whose lines changed makes dirty, in the same trip, the later loads
+  that read the job's own store (3.15, step 4). The loads that read the
+  φ wait for the next trip.
+- *Trip 1's φ* is the file on disk: what the last build's link wrote,
+  which is what its last trip stored, or, in a process's first build,
+  what the run before left.
+- *A trip's end.* Each stored name has a value: its lines since its
+  last open in the fold, or the trip's φ if no live step opens it.
+  That value is the next trip's φ, held in memory. The file is never
+  read back: a step run again out of order has truncated it (its open
+  is the host's `File::create`), and the link writes it only after the
+  last trip. A name whose value is the same keeps its φ, the same
+  shared bytes.
+- *Trip k+1's seeds* are the steps whose load of the φ found other than
+  the new φ, compared by versions, and, for a name whose φ changed and
+  that is read by lines, the steps that read the lines it changed, as
+  an edit of the data (3.15, "Lines are of a data"). Nothing else is
+  looked at: no source file and no query (a rebuild asks the host once,
+  in its first trip), except the loads again after a tool wrote a file
+  (below).
+- *Outside tools run between trips.* After each trip, BibTeX runs on
+  each stored `.aux` that has a `\bibdata` line, and makeindex on each
+  stored `.idx`, unless what the tool's last run read reads the same:
+  its stream's lines (BibTeX's `\citation`, `\bibdata`, `\bibstyle` and
+  `\@input` lines, makeindex's whole `.idx`), its style and its
+  databases. That is a memo of one entry per stream, the one `-watch`
+  keeps (`bibtex::Runs`, `makeindex::Runs`). A tool reads the streams
+  from the build's stores, served by name, never from the files, and
+  writes its outputs (`.bbl` and `.blg`, `.ind` and `.ilg`) as the
+  conventional tool does, in the output directory: files the job loads
+  by name like any input. A tool that wrote makes the next trip look
+  at the job's loads again, as trip 1 does, so the steps that loaded a
+  changed output (a `.bbl` that appeared) are seeds.
+- *Convergence.* The build has converged after a trip whose end makes
+  no seed: every load of the φ read what the same trip stored. The
+  bound is `PARTEX_SSA_TRIPS` trips (default 5, latexmk's
+  `max_repeat`). A build that reaches it with seeds left keeps the last
+  trip's output, as latexmk does, and reports the names whose loads
+  differ (`not settled`). The link runs once, after the last trip.
+- *The cold build converges too* (decided 2026-10-02): trip 1 is the
+  job from its start, and trips 2 on follow as above. A process's first
+  build is then what latexmk makes from the files on disk, and every
+  stage of the edit harness compares with the oracle run to its fixed
+  point (`scripts/ssa-edits --fixpoint`).
+- *One trip per build.* `PARTEX_SSA_TRIPS=1` keeps the behaviour before
+  trips: one trip per build, no tool run, so a rebuild matches one plain
+  pass and a label needs two rebuilds (the harness without
+  `--fixpoint`).
 
 ### 3.8 Output: effects and the link
 
@@ -740,8 +795,9 @@ convergence.
 
 **The oracle.** The result is the fixed point. It is checked against
 plain partex, or pdfTeX, run until its stores stop changing (latexmk's
-rule). A switch keeps one evaluation per trip, so a stage can still be
-compared with a single plain run.
+rule; `scripts/ssa-edits --fixpoint`). A switch keeps one evaluation per
+trip (`PARTEX_SSA_TRIPS=1`, 3.7), so a stage can still be compared with
+a single plain run.
 
 ### 3.10 Threads
 
@@ -917,6 +973,7 @@ accessor.
 | `PARTEX_LINK_SPLICE=0` | link in full and write every file |
 | `PARTEX_STAT_CACHE=0` | read every file again at a rebuild |
 | `PARTEX_SSA_REBUILD` | commands run between rebuilds in one process (the harness) |
+| `PARTEX_SSA_TRIPS=N` | trips per build at most (default 5, 3.7); `=1`: one trip, a rebuild matching one plain pass, no tool run |
 
 Each is exact: output is byte-identical with it on or off.
 
@@ -1020,7 +1077,13 @@ of *steps*: calls from one clean point to the next.
    removed with their definitions, and their readers now read the
    definitions before them.
 6. After the steps, the arrays hold every slot's latest definition
-   again, and the link writes the files (3.8).
+   again. That ends a trip.
+7. The trip's stores are the next trip's φ (3.7, "Trips, as built"):
+   the outside tools whose input changed run, and the next trip runs
+   the loads of a changed φ and the readers of a changed tool output,
+   by steps 2–6, until a trip ends with no seed or the bound is
+   reached. A cold build goes on in the same way after its first trip.
+   Then the link writes the files (3.8).
 
 ---
 
@@ -1149,7 +1212,9 @@ cold build with recording takes 3.2–3.4× a plain one and peaks at 24 GB.
 5. **The `.aux` loop in one rebuild** (3.7): a store whose lines changed
    wakes its loads in the same rebuild, until every load read what the
    same trip stored (bound: 5 trips, then a report). The oracle is then
-   plain partex run to its fixed point.
+   plain partex run to its fixed point. Built as trips (3.7, "Trips, as
+   built"): the cold build converges too, BibTeX and makeindex run
+   between trips, and `PARTEX_SSA_TRIPS=1` keeps one trip per build.
 6. **The front end** (`phitex-syntax`, and `phitex-doc`, new): the
    static document layer from the syntax tree, without running TeX:
    the outline, labels, references, citations, the `\input` and

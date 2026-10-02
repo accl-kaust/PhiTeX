@@ -490,10 +490,13 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         }
     }
 
-    /// The file `\input` or `\openin` reads by `name`: the host's, or,
-    /// for a name the job stores, inside a rebuild, the store's value
-    /// there (DESIGN 7.17.3, "A load reads the store, not the file"),
-    /// under the name the host finds it by. A load (7.17.5).
+    /// The file `\input` or `\openin` reads by `name`, and every other
+    /// read of a file by name on TeX's path (`\pdffilesize`,
+    /// `\pdfmdfivesum file`, `\pdffiledump`, `\pdfobj file`, an image):
+    /// the host's, or, for a name the job stores, inside a rebuild, the
+    /// store's value there (DESIGN 3.7: a load is served the store, never
+    /// the file, which a step run again may have truncated), under the
+    /// name the host finds it by. A load (7.17.5).
     pub(crate) fn read_source(&mut self, name: &[u8]) -> Option<crate::host::OpenedFile> {
         let found = self.host.read_file(name, FileKind::Tex);
         if !T::VALUES {
