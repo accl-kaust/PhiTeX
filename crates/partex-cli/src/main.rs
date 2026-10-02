@@ -17,6 +17,7 @@ mod machinehost;
 mod makeindex;
 mod modern;
 mod native;
+mod outline;
 mod render;
 mod resident;
 mod sanitize;
@@ -530,6 +531,9 @@ fn choose_command_line() {
         compat::Selection::Compat { progname, mut args } => {
             args.insert(0, progname);
             set_args(args);
+        }
+        compat::Selection::Modern(args) if args.first().is_some_and(|a| a == "outline") => {
+            outline::main(&args[1..])
         }
         compat::Selection::Modern(args) => modern::main(&args),
         compat::Selection::Unsupported(name) => {

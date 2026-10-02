@@ -43,6 +43,7 @@ dependencies = [
  "partex-kpse",
  "partex-makeindex",
  "partex-trace",
+ "phitex-doc",
 ]
 
 [[package]]
@@ -83,6 +84,13 @@ name = "partex-trace"
 version = "0.0.0"
 dependencies = [
  "tracing",
+]
+
+[[package]]
+name = "phitex-doc"
+version = "0.0.0"
+dependencies = [
+ "phitex-syntax",
 ]
 
 [[package]]
