@@ -411,10 +411,6 @@ impl<'a> Cursor<'a> {
     }
 }
 
-fn blank(line: &[u8]) -> bool {
-    line.iter().all(|&c| matches!(c, b' ' | b'\t' | b'\r'))
-}
-
 fn line_end(s: &[u8], from: usize) -> usize {
     s[from..]
         .iter()
@@ -422,59 +418,95 @@ fn line_end(s: &[u8], from: usize) -> usize {
         .map_or(s.len(), |i| from + i)
 }
 
+/// The bytes the paragraph cutter stops at.
+static PARA_SPECIAL: [bool; 256] = {
+    let mut t = [false; 256];
+    t[b'\\' as usize] = true;
+    t[b'%' as usize] = true;
+    t[b'{' as usize] = true;
+    t[b'}' as usize] = true;
+    t[b'\n' as usize] = true;
+    t
+};
+
 /// Where the paragraph that begins at `start` ends: after the blank lines
 /// that follow its text at brace depth 0 (the blank lines before any text
 /// are its own). A verbatim run is skipped whole: its braces, `%` and blank
-/// lines are characters.
+/// lines are characters. (One pass over the bytes.)
 fn para_end(s: &[u8], start: usize) -> usize {
+    let len = s.len();
+    let blank = |c: u8| matches!(c, b' ' | b'\t' | b'\r');
     let mut i = start;
     let mut depth = 0usize;
     let mut text = false;
     loop {
-        if i >= s.len() {
-            return s.len();
+        // (a line from `i`: blank, or with text)
+        let mut c = i;
+        while c < len && blank(s[c]) {
+            c += 1;
         }
-        let mut e = line_end(s, i);
-        if blank(&s[i..e]) {
+        if c >= len {
+            return len;
+        }
+        if s[c] == b'\n' {
             if depth == 0 && text {
-                let mut j = (e + 1).min(s.len());
-                while j < s.len() {
-                    let e2 = line_end(s, j);
-                    if !blank(&s[j..e2]) {
-                        break;
+                // (the blank lines after it are its own)
+                let mut after = c + 1;
+                loop {
+                    let mut end = after;
+                    while end < len && blank(s[end]) {
+                        end += 1;
                     }
-                    j = (e2 + 1).min(s.len());
+                    if end >= len {
+                        return len;
+                    }
+                    if s[end] != b'\n' {
+                        return after;
+                    }
+                    after = end + 1;
                 }
-                return j;
             }
-        } else {
-            text = true;
-            let mut c = i;
-            while c < e {
-                match s[c] {
-                    b'\\' => {
-                        if let Some(v) = verbatim_at(s, c) {
-                            // (to the line where the run ends)
-                            c = v.end;
-                            if c > e {
-                                e = line_end(s, c);
-                            }
-                            continue;
-                        }
+            i = c + 1;
+            continue;
+        }
+        text = true;
+        while c < len {
+            let ch = s[c];
+            if !PARA_SPECIAL[ch as usize] {
+                c += 1;
+                continue;
+            }
+            match ch {
+                b'\n' => break,
+                b'\\' => {
+                    if let Some(v) = verbatim_at(s, c) {
+                        // (to where the run ends, maybe lines further)
+                        c = v.end;
+                        continue;
+                    }
+                    // (the next character is the control symbol's, unless
+                    // it ends the line)
+                    c += 1;
+                    if c < len && s[c] != b'\n' {
                         c += 1;
                     }
-                    b'%' => break,
-                    b'{' => depth += 1,
-                    b'}' => depth = depth.saturating_sub(1),
-                    _ => {}
+                    continue;
                 }
-                c += 1;
+                b'%' => {
+                    while c < len && s[c] != b'\n' {
+                        c += 1;
+                    }
+                    break;
+                }
+                b'{' => depth += 1,
+                _ => depth = depth.saturating_sub(1),
             }
+            c += 1;
         }
-        if e >= s.len() {
-            return s.len();
+        if c >= len {
+            return len;
         }
-        i = e + 1;
+        i = c + 1;
     }
 }
 
@@ -560,6 +592,13 @@ struct Verb {
 /// environment, the body after its arguments, up to `\end{name}` (or the
 /// end of the text).
 fn verbatim_at(s: &[u8], i: usize) -> Option<Verb> {
+    // (the names' first letters: most commands are not one of them)
+    if !matches!(
+        s.get(i + 1),
+        Some(b'b' | b'v' | b'V' | b'l' | b'm' | b'u' | b'n' | b'h')
+    ) {
+        return None;
+    }
     let n0 = i + 1;
     let mut n1 = n0;
     while n1 < s.len() && s[n1].is_ascii_alphabetic() {
@@ -709,41 +748,35 @@ fn utf8_len(b: u8) -> usize {
 #[must_use]
 pub fn lex(text: &str) -> Green {
     let b = text.as_bytes();
-    // (the children of the group being read, and of those around it)
-    let mut cur: Vec<Green> = Vec::new();
-    let mut outer: Vec<Vec<Green>> = Vec::new();
+    // (every child not yet in a node, in order, and where each open
+    // group's begin: a group's children move to a vector of their own,
+    // of their exact size, when it closes)
+    let mut items: Vec<Green> = Vec::with_capacity(b.len() / 4 + 4);
+    let mut open: Vec<usize> = Vec::new();
     let mut i = 0;
     // (a verbatim run ahead: the tokens before it stop where it begins)
     let mut verb: Option<Verb> = None;
+    let token = |kind, len| Green::Token { kind, len };
     while i < b.len() {
         if let Some(v) = verb.filter(|v| v.start <= i) {
             verb = None;
             if v.end > i {
-                cur.push(Green::Token {
-                    kind: SyntaxKind::Verbatim,
-                    len: v.end - i,
-                });
+                items.push(token(SyntaxKind::Verbatim, v.end - i));
                 i = v.end;
             }
             continue;
         }
         match b[i] {
             b'{' => {
-                outer.push(std::mem::take(&mut cur));
-                cur.push(Green::Token {
-                    kind: SyntaxKind::Brace,
-                    len: 1,
-                });
+                open.push(items.len());
+                items.push(token(SyntaxKind::Brace, 1));
                 i += 1;
             }
-            b'}' if !outer.is_empty() => {
-                cur.push(Green::Token {
-                    kind: SyntaxKind::Brace,
-                    len: 1,
-                });
-                let group = node(SyntaxKind::Group, std::mem::take(&mut cur));
-                cur = outer.pop().unwrap_or_default();
-                cur.push(group);
+            b'}' if !open.is_empty() => {
+                items.push(token(SyntaxKind::Brace, 1));
+                let from = open.pop().unwrap_or(0);
+                let group = node(SyntaxKind::Group, items.drain(from..).collect());
+                items.push(group);
                 i += 1;
             }
             c => {
@@ -752,18 +785,31 @@ pub fn lex(text: &str) -> Green {
                 }
                 let limit = verb.map_or(b.len(), |v| v.start);
                 let (kind, end) = scan(b, i, limit);
-                cur.push(Green::Token { kind, len: end - i });
+                items.push(token(kind, end - i));
                 i = end;
             }
         }
     }
     // (a group still open at the end: closed here, without its brace)
-    while let Some(mut parent) = outer.pop() {
-        parent.push(node(SyntaxKind::Group, cur));
-        cur = parent;
+    while let Some(from) = open.pop() {
+        let group = node(SyntaxKind::Group, items.drain(from..).collect());
+        items.push(group);
     }
-    node(SyntaxKind::Para, cur)
+    items.shrink_to_fit();
+    node(SyntaxKind::Para, items)
 }
+
+/// The bytes that end a text token.
+static TEXT_END: [bool; 256] = {
+    let mut t = [false; 256];
+    let mut k = 0;
+    let ends = b"\\{}%\n \t\r#";
+    while k < ends.len() {
+        t[ends[k] as usize] = true;
+        k += 1;
+    }
+    t
+};
 
 /// The token at `i` (not a group's brace), read no further than `limit`:
 /// its kind and where it ends.
@@ -810,12 +856,7 @@ fn scan(b: &[u8], mut i: usize, limit: usize) -> (SyntaxKind, usize) {
             SyntaxKind::Param
         }
         _ => {
-            while i < limit
-                && !matches!(
-                    b[i],
-                    b'\\' | b'{' | b'}' | b'%' | b'\n' | b' ' | b'\t' | b'\r' | b'#'
-                )
-            {
+            while i < limit && !TEXT_END[b[i] as usize] {
                 i += 1;
             }
             SyntaxKind::Text
@@ -1082,6 +1123,99 @@ mod tests {
         // a verbatim opened in `a`, before an existing end
         check_edit(src, 0, 0, "\\begin{verbatim}");
         check_edit(src, 0, 1, "\\begin{comment}");
+    }
+
+    /// The paragraph cutter as first written, line by line: the one-pass
+    /// cutter must agree with it.
+    fn para_end_by_lines(s: &[u8], start: usize) -> usize {
+        let blank = |l: &[u8]| l.iter().all(|&c| matches!(c, b' ' | b'\t' | b'\r'));
+        let mut i = start;
+        let mut depth = 0usize;
+        let mut text = false;
+        loop {
+            if i >= s.len() {
+                return s.len();
+            }
+            let mut e = line_end(s, i);
+            if blank(&s[i..e]) {
+                if depth == 0 && text {
+                    let mut j = (e + 1).min(s.len());
+                    while j < s.len() {
+                        let e2 = line_end(s, j);
+                        if !blank(&s[j..e2]) {
+                            break;
+                        }
+                        j = (e2 + 1).min(s.len());
+                    }
+                    return j;
+                }
+            } else {
+                text = true;
+                let mut c = i;
+                while c < e {
+                    match s[c] {
+                        b'\\' => {
+                            if let Some(v) = verbatim_at(s, c) {
+                                c = v.end;
+                                if c > e {
+                                    e = line_end(s, c);
+                                }
+                                continue;
+                            }
+                            c += 1;
+                        }
+                        b'%' => break,
+                        b'{' => depth += 1,
+                        b'}' => depth = depth.saturating_sub(1),
+                        _ => {}
+                    }
+                    c += 1;
+                }
+            }
+            if e >= s.len() {
+                return s.len();
+            }
+            i = e + 1;
+        }
+    }
+
+    #[test]
+    fn one_pass_cutter() {
+        const PIECES: &[&str] = &[
+            "w",
+            " ",
+            "\t",
+            "\n",
+            "\n\n",
+            " \n",
+            "{",
+            "}",
+            "%",
+            "\\",
+            "\\verb|",
+            "|",
+            "\\begin{verbatim}",
+            "\\end{verbatim}",
+            "\\x",
+            "\\{",
+        ];
+        let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+        for _ in 0..2000 {
+            let mut src = String::new();
+            for _ in 0..40 {
+                seed ^= seed << 13;
+                seed ^= seed >> 7;
+                seed ^= seed << 17;
+                src.push_str(PIECES[usize::try_from(seed % PIECES.len() as u64).unwrap()]);
+            }
+            let b = src.as_bytes();
+            let mut pos = 0;
+            while pos < b.len() {
+                let e = para_end(b, pos);
+                assert_eq!(e, para_end_by_lines(b, pos), "{src:?} from {pos}");
+                pos = e;
+            }
+        }
     }
 
     /// Random edits of a document made of the pieces that move paragraph
