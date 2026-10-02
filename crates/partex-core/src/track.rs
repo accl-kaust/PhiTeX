@@ -418,6 +418,17 @@ pub trait Tracker {
     /// change, and runs the end only if it differs (DESIGN 4.3, "The
     /// job's end").
     fn glyphs_united(&self, _union: u128) {}
+    /// (With [`Tracker::VALUES`].) The handle the running step's last run
+    /// opened file `name` on, if the step runs again: the engine asks the
+    /// host for it again (`Host::open_write_again`, DESIGN 7.17.3). Each
+    /// is given once, the run's opens of a name in their order.
+    fn reopen(
+        &self,
+        _name: &[u8],
+        _kind: crate::host::FileKind,
+    ) -> Option<crate::host::WriteId> {
+        None
+    }
     /// (With [`Tracker::VALUES`].) Structure row `row` was written (its
     /// value, with its version, is the engine's).
     fn value_wrote(&self, _row: Row) {}

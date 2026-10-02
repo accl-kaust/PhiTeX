@@ -59,9 +59,6 @@ scalar_rows! {
     dead_cycles, set_dead_cycles, dead_cycles, scalar::DEAD_CYCLES, i32;
     after_token, set_after_token, after_token, scalar::AFTER_TOKEN, i32;
     long_help_seen, set_long_help_seen, long_help_seen, scalar::LONG_HELP_SEEN, bool;
-    job_name, set_job_name, job_name, scalar::JOB_NAME, i32;
-    log_name, set_log_name, log_name, scalar::LOG_NAME, i32;
-    output_file_name, set_output_file_name, output_file_name, scalar::OUTPUT_FILE_NAME, i32;
     log_opened, set_log_opened, log_opened, scalar::LOG_OPENED, bool;
     open_parens, set_open_parens, open_parens, scalar::OPEN_PARENS, i32;
     sys_time, set_sys_time, sys_time, scalar::SYS_TIME, i32;
@@ -70,7 +67,53 @@ scalar_rows! {
     sys_year, set_sys_year, sys_year, scalar::SYS_YEAR, i32;
 }
 
+/// The rows that hold a string's number, versioned by its characters: a
+/// step that runs again makes the name again, a new string with the same
+/// characters (the string pool is not put back, DESIGN 7.17.3), and the
+/// steps that read it are not woken by its number.
+macro_rules! name_rows {
+    ($( $get:ident, $set:ident, $field:ident, $slot:expr );* $(;)?) => {
+        impl<H: Host, T: Tracker> Tex<H, T> {
+            $(
+                #[doc = concat!("`", stringify!($field), "`, read.")]
+                #[inline]
+                pub(crate) fn $get(&self) -> i32 {
+                    if T::VALUES {
+                        self.tracker
+                            .row_read(Row::Scalar($slot), || self.name_version(self.$field));
+                    }
+                    self.$field
+                }
+                #[doc = concat!("`", stringify!($field), "`, written.")]
+                #[inline]
+                pub(crate) fn $set(&mut self, v: i32) {
+                    self.$field = v;
+                    if T::VALUES {
+                        self.tracker.row_wrote(Row::Scalar($slot), self.name_version(v));
+                    }
+                }
+            )*
+        }
+    };
+}
+
+name_rows! {
+    job_name, set_job_name, job_name, scalar::JOB_NAME;
+    log_name, set_log_name, log_name, scalar::LOG_NAME;
+    output_file_name, set_output_file_name, output_file_name, scalar::OUTPUT_FILE_NAME;
+}
+
 impl<H: Host, T: Tracker> Tex<H, T> {
+    /// String `s`'s version as a name row holds it: its characters (odd,
+    /// apart from the even versions of numbers), or its number if it is
+    /// none or a character.
+    fn name_version(&self, s: i32) -> u128 {
+        match usize::try_from(s) {
+            Ok(n) if n >= 256 && n < self.str_ptr => self.string_version(n) | 1,
+            _ => crate::track::scalar_version_i32(s),
+        }
+    }
+
     /// `\pdfelapsedtime`'s start (seconds, microseconds), read.
     #[inline]
     pub(crate) fn epoch(&self) -> (i32, i32) {
@@ -124,7 +167,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         if !T::VALUES {
             return;
         }
-        let rows: [(u16, i32); 28] = [
+        let rows: [(u16, i32); 25] = [
             (
                 scalar::GLUE_LINEAGE,
                 i32::try_from(self.glue_lineage).unwrap_or(i32::MAX),
@@ -143,9 +186,6 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             (scalar::DEAD_CYCLES, self.dead_cycles),
             (scalar::AFTER_TOKEN, self.after_token),
             (scalar::LONG_HELP_SEEN, i32::from(self.long_help_seen)),
-            (scalar::JOB_NAME, self.job_name),
-            (scalar::LOG_NAME, self.log_name),
-            (scalar::OUTPUT_FILE_NAME, self.output_file_name),
             (scalar::LOG_OPENED, i32::from(self.log_opened)),
             (scalar::OPEN_PARENS, self.open_parens),
             (scalar::SYS_TIME, self.sys_time),
@@ -160,6 +200,13 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         for (k, v) in rows {
             self.tracker
                 .row_made(Row::Scalar(k), crate::track::scalar_version_i32(v));
+        }
+        for (k, s) in [
+            (scalar::JOB_NAME, self.job_name),
+            (scalar::LOG_NAME, self.log_name),
+            (scalar::OUTPUT_FILE_NAME, self.output_file_name),
+        ] {
+            self.tracker.row_made(Row::Scalar(k), self.name_version(s));
         }
         self.tracker.row_made(
             Row::Scalar(scalar::STR_TOP),

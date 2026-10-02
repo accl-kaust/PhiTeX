@@ -97,6 +97,20 @@ pub trait Host {
 
     /// Create (or truncate) an output file. Returns the name TeX prints.
     fn open_write(&mut self, name: &[u8], kind: FileKind) -> Option<(WriteId, Vec<u8>)>;
+    /// [`open_write`](Host::open_write), on handle `id` if this host gave
+    /// it for the same file: a step that runs again opens its files on the
+    /// handles its last run had (DESIGN 7.17.3), so what the later steps
+    /// hold of a file (a writer's state, their writes) still names it.
+    /// The default opens the file on a new handle, which wakes them.
+    fn open_write_again(
+        &mut self,
+        name: &[u8],
+        kind: FileKind,
+        id: WriteId,
+    ) -> Option<(WriteId, Vec<u8>)> {
+        let _ = id;
+        self.open_write(name, kind)
+    }
     fn write(&mut self, file: WriteId, bytes: &[u8]);
     fn close(&mut self, file: WriteId);
 

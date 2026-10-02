@@ -15,6 +15,12 @@ use crate::dvithread::DviThread;
 pub struct NativeHost {
     files: HashMap<WriteId, File>,
     next_id: u32,
+    /// The file each handle was given for, and the count of opens
+    /// (`opens`) at its last open: a step that runs again opens a file on
+    /// its handle again (`open_write_again`), and a file opened since a
+    /// link was emptied by its open ([`NativeHost::opened_after`]).
+    given: HashMap<WriteId, (Vec<u8>, u64)>,
+    opens: u64,
     clock: crate::clock::Clock,
     kpse: partex_kpse::Kpse,
     /// `-output-directory`: where output files go, and where input files
@@ -87,6 +93,8 @@ impl NativeHost {
         Self {
             files: HashMap::new(),
             next_id: 0,
+            given: HashMap::new(),
+            opens: 0,
             clock,
             kpse,
             output_dir: None,
@@ -244,6 +252,17 @@ pub fn with_suffix(name: &[u8], kind: FileKind) -> Vec<u8> {
 }
 
 impl NativeHost {
+    /// How many files were opened for writing so far.
+    pub fn opens(&self) -> u64 {
+        self.opens
+    }
+
+    /// Whether handle `id`'s file was opened after the first `count`
+    /// opens ([`NativeHost::opens`]): its open emptied it.
+    pub fn opened_after(&self, id: WriteId, count: u64) -> bool {
+        self.given.get(&id).is_some_and(|&(_, at)| at > count)
+    }
+
     /// `name` in the output directory, if there is one and `name` is
     /// relative (openclose.c).
     pub fn in_output_dir(&self, name: &[u8]) -> Option<Vec<u8>> {
@@ -478,6 +497,26 @@ impl Host for NativeHost {
         let file = File::create(path(&n)).ok()?;
         let id = WriteId(self.next_id);
         self.next_id += 1;
+        self.opens += 1;
+        self.given.insert(id, (n.clone(), self.opens));
+        self.files.insert(id, file);
+        Some((id, n))
+    }
+
+    fn open_write_again(
+        &mut self,
+        name: &[u8],
+        kind: FileKind,
+        id: WriteId,
+    ) -> Option<(WriteId, Vec<u8>)> {
+        let n = with_suffix(name, kind);
+        let n = self.in_output_dir(&n).unwrap_or(n);
+        let Some((_, at)) = self.given.get_mut(&id).filter(|(p, _)| *p == n) else {
+            return self.open_write(name, kind);
+        };
+        let file = File::create(path(&n)).ok()?;
+        self.opens += 1;
+        *at = self.opens;
         self.files.insert(id, file);
         Some((id, n))
     }

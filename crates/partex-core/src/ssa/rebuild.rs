@@ -91,6 +91,11 @@ pub(crate) struct Steps {
     /// ("The link after a rebuild is a watch's link").
     pub(super) cur_chunks: Vec<StepEffects>,
     pub(super) effects: Vec<Vec<StepEffects>>,
+    /// The files the running step's last run opened, in order, with the
+    /// host's handles: a step that runs again opens each on its handle
+    /// again ([`Steps::reopen`]), so a writer's state that holds it, and
+    /// the later steps' writes to it, are as they were.
+    reopen: Vec<(Vec<u8>, FileKind, crate::host::WriteId)>,
     /// The steps whose chunks changed since the link last took them (a
     /// run closed, or the step left the fold): what the link costs (DESIGN
     /// 4.3 item 4, [`super::take_step_changes`]).
@@ -212,14 +217,33 @@ impl Steps {
         self.step_numbers.insert((addr, pos));
     }
 
-    /// A step begins a run: no stores, loads or queries yet.
-    pub(super) fn run_begins(&mut self) {
+    /// A step begins a run (`rerun`: step `j` runs again): no stores,
+    /// loads or queries yet, and the files its last run opened to open
+    /// again.
+    pub(super) fn run_begins(&mut self, rerun: Option<StepId>) {
         self.step_lines.clear();
         self.step_numbers.clear();
         self.cur_stores.clear();
         self.cur_loads.clear();
         self.cur_queries.clear();
         self.cur_chunks.clear();
+        self.reopen.clear();
+        let old = rerun.and_then(|j| self.effects.get(j as usize));
+        for e in old.into_iter().flatten().flat_map(|c| c.1.iter()) {
+            if let crate::effects::Effect::Open { file, name, kind } = e {
+                self.reopen.push((name.clone(), *kind, *file));
+            }
+        }
+    }
+
+    /// The handle the running step's last run opened file `name` on, the
+    /// first of them not given yet.
+    pub(super) fn reopen(&mut self, name: &[u8], kind: FileKind) -> Option<crate::host::WriteId> {
+        let i = self
+            .reopen
+            .iter()
+            .position(|(n, k, _)| n == name && *k == kind)?;
+        Some(self.reopen.remove(i).2)
     }
 
     /// The open step asked query `q`, answered as `answer` versions.
@@ -525,6 +549,7 @@ pub(super) fn step_closed(rr: &mut Recorder, id: StepId, input: InputState) -> V
     }
     s.effects[i] = core::mem::take(&mut s.cur_chunks);
     s.fx_changed.push(id);
+    s.reopen.clear();
     changed
 }
 
@@ -1238,7 +1263,12 @@ fn latest<H: Host>(
 /// are the format's).
 fn initial<H: Host>(tex: &Tex<H, SsaTracker>, steps: &mut Steps, a: Slot) -> Option<SVal> {
     if steps.format.is_none() {
-        let f = Tex::format_value(tex.params.clone(), tex.format_data.as_deref())?;
+        let mut f = Tex::format_value(tex.params.clone(), tex.format_data.as_deref())?;
+        // (as the build set it up before its first step: with effects on,
+        // the PDF writer's object streams are symbolic, `Tex::set_effects`;
+        // the first page shipped again must find the writer the first
+        // build's did, or every later page's writer differs)
+        f.pdf.out.symbolic = tex.pdf.out.symbolic;
         steps.format = Some(Box::new(f));
     }
     let f = steps.format.as_deref()?;
@@ -1477,7 +1507,11 @@ pub fn rebuild<H: Host>(tex: &mut Tex<H, SsaTracker>, trace: bool, apply: bool) 
             for x in rr.rt.fold.readers_between(&a, 0, None) {
                 dirty.insert(rr.rt.fold.steps[x as usize].key, x);
                 if trace {
-                    let n = alloc::format!("seed: step {x} loaded {id}");
+                    let name = rr.st.loads.get(id as usize).map(|l| &l.0[..]);
+                    let n = alloc::format!(
+                        "seed: step {x} loaded {id} ({})",
+                        alloc::string::String::from_utf8_lossy(name.unwrap_or_default())
+                    );
                     rr.st.steps.log.push(n);
                 }
             }
@@ -2104,6 +2138,19 @@ fn mark_store_readers(
     }
 }
 
+/// Drop the outputs a run left (one dropped, or none at a step's start):
+/// the files it opened are closed, as no link writes them, and the next
+/// run opens them on their handles again ([`Steps::reopen`]).
+fn drop_outputs<H: Host>(tex: &mut Tex<H, SsaTracker>) {
+    let fx = tex.take_effects();
+    let chunks = core::mem::take(&mut tex.tracker.rec.borrow_mut().st.steps.cur_chunks);
+    for e in fx.iter().chain(chunks.iter().flat_map(|c| c.1.iter())) {
+        if let crate::effects::Effect::Open { file, .. } = e {
+            tex.host.close(*file);
+        }
+    }
+}
+
 /// Run step `j` at its place from `input` (7.17.3 items 2 and 3, "A read
 /// resolves by prediction and validation"), the reads of step `predict`'s
 /// last run predicting its own; mark the readers of the definitions it
@@ -2164,7 +2211,7 @@ fn run_step<H: Host>(
         tex.at_checkpoint = true;
         // (a step's outputs are flushed at its end: a dropped run's are
         // not the next run's)
-        drop(tex.take_effects());
+        drop_outputs(tex);
         tex.log_file.buf.clear();
         // (nor are the bytes a dropped run left waiting in a `\write`
         // stream with no file, which a consistent run never does: a

@@ -17,8 +17,11 @@ each font's union is as it was and the job's end does not run, then
 letters no page had, and their removal: the end runs for each) and
 `machine_edits_dvi` (`edits-dvi.tex`, latex format), both under
 `-output-directory=out` after two plain runs of the original text, as
-e2e's `machine_edits` seeds them; and `label`: the same document given a
-`\\label` nothing refers to, then rebuilt twice with no edit.
+e2e's `machine_edits` seeds them; `label`: the same document given a
+`\\label` nothing refers to, then rebuilt twice with no edit; and
+`aux_reopen` (`reopen.tex`, pdflatex format): an edit in the first
+paragraph, whose step opens the `.aux` and whose page opens the PDF, its
+revert, and a later edit.
 
 Each case runs in WORK/<case>/:
 - `o/`: the oracle, one run per stage, the stage's edit made before it
@@ -100,9 +103,20 @@ MACHINE_EDITS = [
     # and it shrinks again
     ("Para2x0 early 99 ", "Para2x0 early 99 QJZ "),
     ("Para2x0 early 99 QJZ ", "Para2x0 early 99 "),
+    # the first paragraph, in the step that opens the .aux (\openout at
+    # \begin{document}): the stream opened again is the same file
+    ("Para0x0 ", "Para0x0 first "),
 ]
 # e2e.rs's `run_machine_edits_dvi`
 MACHINE_EDITS_DVI = [("P5x2 ", "P5x2 typed "), ("P2x0 ", "P2x0 early ")]
+# the first paragraph of reopen.tex shares its step with \begin{document}'s
+# \openout of the .aux; every page's shipout writes .aux lines (a \label
+# per section): the stream opened again on the same file wakes none of them
+REOPEN_EDITS = [
+    ("Opening words", "Opening phrases"),
+    ("Opening phrases", "Opening words"),
+    ("Para5x2 ", "Para5x2 later "),
+]
 # a \label nothing refers to, then two rebuilds with no edit (LOG
 # 2026-09-29, "A label no one refers to")
 LABEL_EDITS = [("Para5x2 ", "Para5x2 \\label{new}"), ("", ""), ("", "")]
@@ -258,6 +272,7 @@ def all_cases():
         latex("machine_edits", "edits.tex", "pdflatex", MACHINE_EDITS),
         latex("machine_edits_dvi", "edits-dvi.tex", "latex", MACHINE_EDITS_DVI),
         latex("label", "edits.tex", "pdflatex", LABEL_EDITS),
+        latex("aux_reopen", "reopen.tex", "pdflatex", REOPEN_EDITS),
     ]
 
 

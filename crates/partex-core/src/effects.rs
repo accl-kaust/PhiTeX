@@ -310,13 +310,17 @@ impl<H: Host, T: Tracker> Tex<H, T> {
     }
 
     /// `Host::open_write`; with effects on, the file's open is an effect
-    /// too, naming it for the link.
+    /// too, naming it for the link. A step that runs again opens the file
+    /// on the handle its last run had, if the host can (`Tracker::reopen`).
     pub(crate) fn open_out(
         &mut self,
         name: &[u8],
         kind: crate::host::FileKind,
     ) -> Option<(WriteId, Vec<u8>)> {
-        let r = self.host.open_write(name, kind);
+        let r = match self.tracker.reopen(name, kind) {
+            Some(id) => self.host.open_write_again(name, kind, id),
+            None => self.host.open_write(name, kind),
+        };
         if let (Some((id, _)), Some(e)) = (&r, &mut self.effects) {
             e.push(Effect::Open {
                 file: *id,

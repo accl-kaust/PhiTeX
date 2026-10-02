@@ -1378,6 +1378,10 @@ impl Tracker for SsaTracker {
         }
     }
 
+    fn reopen(&self, name: &[u8], kind: crate::host::FileKind) -> Option<crate::host::WriteId> {
+        self.rec.try_borrow_mut().ok()?.st.steps.reopen(name, kind)
+    }
+
     fn value_read(&self, row: Row, version: impl FnOnce() -> u128) {
         let s = Slot::row(row);
         let stamp = self.value_stamp(s, false);
@@ -2297,7 +2301,7 @@ fn open_paragraph<H: Host>(
                 r.rt.begin_step();
             }
         }
-        r.st.steps.run_begins();
+        r.st.steps.run_begins(rerun);
     }
     // the line the paragraph starts on, its tokens, and the offset in them
     // (at a fire, the topmost file level's, under the token lists: DESIGN

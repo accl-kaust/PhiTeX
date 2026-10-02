@@ -1439,10 +1439,9 @@ struct SsaLinker {
     /// What was last written to each file, by name: the engine's id of it,
     /// and the file's length and modification time after the write.
     written: std::collections::BTreeMap<Vec<u8>, (u32, u64, Option<std::time::SystemTime>)>,
-    /// The highest id of a file the engine had opened at the last link:
-    /// a file opened since was made anew by its open (the host's ids
-    /// grow).
-    opened: Option<u32>,
+    /// The host's count of files opened at the last link: a file opened
+    /// since was made anew by its open (`NativeHost::opened_after`).
+    opened: u64,
 }
 
 /// What a link cost, for the reports.
@@ -1699,11 +1698,11 @@ impl SsaLinker {
         for (id, name, kind) in opened {
             host.close(*id);
             last.insert(name.clone(), (id.0, *kind));
-            if self.opened.is_none_or(|m| id.0 > m) {
+            if host.opened_after(*id, self.opened) {
                 anew.insert(name);
             }
         }
-        self.opened = opened.iter().map(|(id, ..)| id.0).max().max(self.opened);
+        self.opened = host.opens();
         last.into_iter()
             .map(|(name, (id, kind))| {
                 let a = anew.contains(&name[..]);
