@@ -24,12 +24,7 @@ const BASE: [u64; 2] = [0x0ab5_4c3a_79d1_2e6f, 0x1d6e_93c7_2f58_b40b];
 
 #[inline]
 fn mulmod(a: u64, b: u64) -> u64 {
-    let x = u128::from(a) * u128::from(b);
-    // Truncation intended: the reduction modulo 2^61 - 1.
-    #[allow(clippy::cast_possible_truncation)]
-    let (lo, hi) = ((x as u64) & P, (x >> 61) as u64);
-    let r = lo + hi;
-    if r >= P { r - P } else { r }
+    crate::hash::mulmod61(a, b)
 }
 
 #[inline]

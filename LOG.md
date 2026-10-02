@@ -10543,3 +10543,22 @@ instead, over 200 keystrokes of the TikZ article in the process alone
 → 1.967 G instructions (−8.1%), cycles −3 to −3.5%, the same PDF. The
 harness: 14 cases, 79 stages, identical in all three modes.
 
+## 2026-10-02 — No `__multi3` per token in wasm (coordinator)
+
+89289fe took the 128-bit product out of `hash::fold` on wasm32; two more
+were left. `tok_poly_step` (a token list's polynomial, modulo 2⁶¹ − 1,
+for every token of every list made: each macro argument is hashed as it
+is made, `TokenList::remake`) and `pvec`'s `mulmod` multiplied two
+64-bit numbers into a `u128`, which wasm32 has no instruction for. The
+wasm32 assembly called `__multi3` once per token in `tok_version`'s
+loop, in `TokenList::new`, `remake` and `shared`, and 20 times in
+`pvec::Node<VNode>::fix` and `fix_last`. If V8 inlines that call, its
+time shows up in the caller, which fits `macro_call`'s 12% self time in
+the extension's wasm profile against 3.3% natively. Both now use
+`hash::mulmod61`, which is the `u128` product natively and the 32-bit
+halves of `mul_wide` on wasm32. Its test checks both products against
+the `u128` residue: values do not change, so neither do versions. After
+the change, partex-engine and partex-core have no `__multi3` call left
+on a keystroke's path (two remain in the core's `strtol` and Type 1
+parsing, for overflow checks). Natively the code is the same.
+

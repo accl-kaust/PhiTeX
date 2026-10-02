@@ -339,15 +339,8 @@ const TOK_B: u64 = 0x0e3f_5b79_a1c3_e5f7 % TOK_P;
 #[inline]
 #[must_use]
 pub fn tok_poly_step(h: u64, t: i32) -> u64 {
-    let r = u128::from(h) * u128::from(TOK_B);
-    #[allow(clippy::cast_possible_truncation, reason = "the low 61 bits")]
-    let lo = (r as u64) & TOK_P;
-    #[allow(clippy::cast_possible_truncation, reason = "below 2^67 / 2^61")]
-    let hi = (r >> 61) as u64;
-    let mut m = lo + hi;
-    if m >= TOK_P {
-        m -= TOK_P;
-    }
+    // (no 128-bit product on wasm32: `mulmod61` makes it from halves there)
+    let m = partex_ssa::hash::mulmod61(h, TOK_B);
     let mut s = m + u64::from(t.cast_unsigned()) + 1;
     if s >= TOK_P {
         s -= TOK_P;

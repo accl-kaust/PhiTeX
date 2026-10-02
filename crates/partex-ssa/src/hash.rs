@@ -106,6 +106,25 @@ fn mul_wide(x: u64, y: u64) -> (u64, u64) {
     }
 }
 
+/// `a · b` modulo 2⁶¹ − 1, for `a` and `b` below it: the product of the
+/// polynomial hashes (a token list's, [`crate::pvec`]'s lanes), by
+/// [`mul_wide`], so wasm32 makes it from 32-bit halves (it called the
+/// compiler's `__multi3` for each token of every token list made).
+#[inline]
+#[must_use]
+pub fn mulmod61(a: u64, b: u64) -> u64 {
+    reduce61(mul_wide(a, b))
+}
+
+/// A product below 2¹²², as [`mul_wide`]'s halves, modulo 2⁶¹ − 1: its
+/// low 61 bits plus the bits from 61 up (2⁶¹ is 1 there).
+#[inline]
+fn reduce61((lo, hi): (u64, u64)) -> u64 {
+    const P: u64 = (1 << 61) - 1;
+    let r = (lo & P) + ((hi << 3) | (lo >> 61));
+    if r >= P { r - P } else { r }
+}
+
 /// [`mul_wide`] from the 32-bit halves, with 64-bit multiplies: wasm has
 /// no 64×64→128 multiply, and the compiler's 128-bit routine (`__multi3`)
 /// was 4% of a keystroke in the browser.
@@ -263,6 +282,40 @@ mod tests {
             x ^= x << 17;
             let y = x.rotate_left(29) ^ 0xd6e8_feb8_6659_fd93;
             check(x, y);
+        }
+    }
+
+    /// [`mulmod61`] is the residue of the 128-bit product, by either
+    /// product (wasm's from 32-bit halves, checked natively).
+    #[test]
+    fn mulmod61_is_the_residue() {
+        const P: u64 = (1 << 61) - 1;
+        let want = |a: u64, b: u64| {
+            let x = u128::from(a) * u128::from(b);
+            #[allow(clippy::cast_possible_truncation)]
+            let r = ((x as u64) & P) + (x >> 61) as u64;
+            if r >= P { r - P } else { r }
+        };
+        let check = |a: u64, b: u64| {
+            assert_eq!(super::mulmod61(a, b), want(a, b), "{a:#x} * {b:#x}");
+            assert_eq!(
+                super::reduce61(super::mul_wide_limbs(a, b)),
+                want(a, b),
+                "{a:#x} * {b:#x} by halves"
+            );
+        };
+        let edges = [0, 1, 2, P - 1, P - 2, 1 << 60, (1 << 32) - 1, 1 << 32];
+        for &a in &edges {
+            for &b in &edges {
+                check(a, b);
+            }
+        }
+        let mut x: u64 = 0x2545_f491_4f6c_dd1d;
+        for _ in 0..100_000 {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            check(x % P, x.rotate_left(23) % P);
         }
     }
 
