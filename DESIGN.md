@@ -1093,6 +1093,79 @@ After them:
 - XeTeX (C5) and LuaTeX (C6);
 - trace compilation.
 
+### 4.3 partex-PhiTeX: windows (2026-10-02)
+
+This repository is partex at 21edd4e merged with two crates from
+PhiTeX (ec3d63a): `phitex-syntax`, the lossless syntax tree cut into
+paragraphs and reparsed incrementally, and `phitex-ir`, the SSA
+program's text form with its parser and checker. The invariant of 3.1
+stands. What changes is the grain, what is recorded, and what a
+rebuild may cost. This section overrides 4.2 where they differ.
+
+The measurements behind it (LOG 2026-09-29, the course's one-word
+edit): the edit re-runs 4,450 commands, about 3.7 ms of plain TeX, but
+the rebuild takes 95–133 ms and the link 12–14 ms. Steps between clean
+points average 29 K commands in the body and a pgfplots figure is one
+step of a million, so a `\label` nothing refers to re-ran 4.82 M
+commands. Recording makes 1.68 M records, 1.51 M of them `unsave`'s; a
+cold build with recording takes 3.2–3.4× a plain one and peaks at 24 GB.
+
+1. **The window is the unit of re-execution.** A step (3.15's fold
+   unit) may begin at any command boundary at main control's top
+   (§1030) where no call is open and the output routine is not active:
+   inside groups, inside boxes (any `nest_ptr`), with token lists on
+   the input stack, inside alignments. A step ends at the first such
+   boundary after: a paragraph's end (back in the enclosing vertical
+   mode after `line_break`), a deferred fire, a file level opened or
+   closed, or `PARTEX_SSA_WINDOW` commands (default 4,096) since it
+   began. A text paragraph is then one window, about a thousand
+   commands. Re-entry places what the step reads of the nest (each
+   level's mode, fields and list as the appends made so far), the
+   group frames, the conditionals, the alignment state, the page
+   builder and the input, from the definitions reaching the step, as
+   the code places the save stack and the page list today. Commands
+   are not nodes: the trace is per window, and a window re-runs whole.
+2. **Records.** A window's record (its reads from outside it, its net
+   writes, its effects, where it began and ended), and records for the
+   pure typesetting calls that apply (3.4): `line_break`, `hpack`,
+   `vpack`, the page steps, `ship_out`, the fonts, deflate. `unsave` is
+   not a call: a group's end is writes of the window that runs it.
+   Targets: a cold build with recording at most 1.5× plain (1.2× the
+   aim), the course's peak memory at most 4 GB.
+3. **A rebuild costs what the edit reaches.** Nothing in a rebuild
+   walks every step, record, file, chunk or slot; allocators (string
+   numbers, hash slots) are not read as values by the steps that
+   allocate (3.9, "No chains through a cursor"). Targets on the course:
+   the word edit within 16.7 ms, rebuild and link together, warm; a
+   `\label` nothing refers to within 50 K commands re-run.
+4. **The link costs the changed chunks.** Byte offsets come from an
+   offset tree over the chunks' lengths, so a changed chunk costs its
+   bytes and `O(log n)`; the cross-reference table is written from it.
+5. **The `.aux` loop in one rebuild** (3.7): a store whose lines changed
+   wakes its loads in the same rebuild, until every load read what the
+   same trip stored (bound: 5 trips, then a report). The oracle is then
+   plain partex run to its fixed point.
+6. **The front end** (`phitex-syntax`, and `phitex-doc`, new): the
+   static document layer from the syntax tree, without running TeX:
+   the outline, labels, references, citations, the `\input` and
+   `\include` graph, with the guards it assumes (the meanings of
+   `\section`, `\label`, `\ref`, ... are LaTeX's), which a build's
+   records confirm or break. It never produces output bytes.
+7. **The view** (`phitex-ir`): a build printed as a program, a value
+   per window: its imports by name (a control sequence's name for an
+   eqtb or hash slot) with the window that defined each, its exports,
+   and the text it set. `phitex-ir`'s parse and check round-trip it.
+   One window's per-call trace is printed on demand by running that
+   window again with the full recorder.
+8. **The gate.** `cargo xtask check` adds `ssa-edits`: every
+   incremental e2e case run in SSA mode, one process, each stage
+   byte-identical to plain partex on the same sources (logs masked).
+   Machine mode stays until SSA passes everything; removing it is last.
+
+The work, one agent each, on branches `np/<name>` in worktrees under
+`~/code/tmp/`: `windows` (1), `rebuild-cost` (3), `records` (2),
+`link` (4), `aux-loop` (5), `front` (6), `view` (7), `gate` (8).
+
 ---
 
 ## 5. Performance, observability and the text form

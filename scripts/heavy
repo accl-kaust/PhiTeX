@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# Run a course-scale command alone and under a memory cap:
+#
+#   scripts/heavy CMD...            e.g. scripts/heavy scripts/sandbox target/release/partex ...
+#
+# One heavy run at a time on this machine (a lock shared by every
+# worktree), virtual memory capped at HEAVY_VMEM_GB (default 40), and a
+# wall-clock limit of HEAVY_TIMEOUT seconds (default 1800). The user's
+# own `partex watch` already holds about 32 GB: never run two of these.
+set -euo pipefail
+lock=/home/lambda/code/tmp/partex-phitex-heavy.lock
+vmem_kb=$(( ${HEAVY_VMEM_GB:-40} * 1024 * 1024 ))
+exec flock "$lock" timeout -s KILL "${HEAVY_TIMEOUT:-1800}" \
+  bash -c 'ulimit -v "$0"; exec "$@"' "$vmem_kb" "$@"

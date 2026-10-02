@@ -1,4 +1,36 @@
-# Rules for agents working on partex
+# Rules for agents working on partex-PhiTeX
+
+This repository is partex (imported at 21edd4e) with PhiTeX's
+`phitex-syntax` and `phitex-ir` crates. Its design is `DESIGN.md`; the
+work now is DESIGN 4.3 ("partex-PhiTeX: windows"), which overrides 4.2
+where they differ. The rules below the line are partex's and still
+hold, except where this section changes them.
+
+- **Branches and commits.** Each agent works on its own branch
+  `np/<name>` in its own worktree under `~/code/tmp/np-<name>`, and
+  **commits there** (small commits, each passing its tests). The
+  coordinator merges into `main`. Merge `main` into your branch when
+  the coordinator says it moved; resolve conflicts keeping both sides'
+  intent.
+- **The gitignored inputs** (`refs/`, `upstream/`) are hard-linked into
+  each worktree: never modify a file in them in place.
+- **Heavy runs** (the course, anything over a few GB): only through
+  `scripts/heavy` (one at a time on the machine, memory capped). The
+  user's own `partex watch` holds about 32 GB: never touch it, never
+  `pkill`/`killall` by name (kill only PIDs you started), never write
+  to `/tmp/tex`.
+- **The course** (the 295-page benchmark): a clean copy is
+  `~/code/tmp/np-course` (sources, `_out/` with the job's `.aux`,
+  `.out` and `.toc`). Never run in it: copy it to
+  `~/code/tmp/np-<name>-course` first. Its edits are
+  `bench/edits/course.txt`.
+- **LOG.md**: append your entry under a dated heading naming your
+  agent (`## 2026-10-02 — <title> (agent <name>)`); on a merge
+  conflict keep both sides in time order.
+
+---
+
+# partex's rules
 
 Read `DESIGN.md` first: it is the whole design, self-contained;
 `git log` and `LOG.md` have the current state. `DESIGN.md` is the only
