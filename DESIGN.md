@@ -938,11 +938,39 @@ nothing is undone.
 - The parallelism is the width of the dirty frontier. A word edit is
   narrow: its frame is met by doing little work, not by threads. A
   reflow over *N* pages, a cold build and a changed preamble macro are
-  wide.
+  wide once speculated; their dependencies alone chain them (below).
 - The limits are true dependencies only: chains of definitions of one
   address, kept short by the no-cursor rules (3.9), and the page fold.
 - The SSA report prints the frontier's width, the re-runs validation
   caused, and the estimates hit, so the waste is measured.
+
+**Measured** on the course (`PARTEX_SSA_DAG`, `scripts/ssa-parallel.py`,
+LOG 2026-10-02 "How much of a build could run at once"), with a worker
+per step and the steps' boundaries known:
+- *Waiting for dependencies gains nothing.* The 58,710 steps (66.06 M
+  commands) are one chain: a critical path of 66.04 M, 1.00x, whether a
+  step waits for the steps it read from to end or only, at each read, for
+  that definition (pipelined). Dropping the reads of local saves and
+  restores keeps it at 1.00x, and dropping every read of an address the
+  step itself defines (an upper bound for scoped definitions, 3.2) gives
+  1.15x. The chains are LaTeX's state that most steps touch near their
+  start (`\reserved@a` saved by a local `\def` inside the `document`
+  group, `\@currenvir`, `\if@nobreak`, `clubpenalty`, `align_state`,
+  `cond`, the save stack, the allocators), not the page fold: pipelined,
+  the page builder's edges alone allow 12.4x.
+- *Speculation parallelizes.* Run from the last build's entry states and
+  validated in order, 99.995% of the steps validate after a word edit,
+  99.997% after a TikZ edit and 99.6% after a `\label` (99.8% once a save
+  and restore inside a step is not a read, TODO 2); the bound is then
+  the costliest step's, 12.4x (8.4x for the `\label`, whose 243 failures
+  chain through `\@savsf`): the largest steps are pgfplots figures and the
+  cover, 3.6–5.3 M commands each, 26% of the build in four steps, so past
+  12x they are cut into windows (4.3 item 1), speculated too.
+- *Validation needs versions that are content.* A cache read and written
+  as a value (a font's expanded instances, `font:…expand`), an object
+  numbering (`pdf.fonts`), a save restored by every output routine
+  (`\@savsf`) and a definition a re-run does not make again (a font
+  loaded, a name entered) each fail a validation that should hold.
 
 ### 3.11 Records, memory and sessions
 
@@ -1026,6 +1054,7 @@ accessor.
 | `PARTEX_SSA_TRIPS=N` | trips per build at most (default 5, 3.7); `=1`: one trip, a rebuild matching one plain pass, no tool run |
 | `PARTEX_SSA_VIEW=FILE` | the build as a program after each build (4.3 item 7) |
 | `PARTEX_SSA_VIEW_STEP=ID` | with the view, step `ID`'s calls in the trace's form |
+| `PARTEX_SSA_DAG=FILE` | the steps as a dependency graph after each build (`FILE.N` after rebuild `N`): each step's commands, the step whose definition each of its reads reached, its definitions' versions, and how many commands into the step each read and last write came; `scripts/ssa-parallel.py` measures it (3.10, "Measured") |
 
 Each is exact: output is byte-identical with it on or off.
 
@@ -1535,7 +1564,9 @@ gives the same values; printed again, the same text.
   disk.
 - **Serial fraction.** The page builder and output routines bound the
   parallel speedup (Amdahl), so it is measured per document before any
-  claim.
+  claim. Measured on the course (3.10, "Measured"): without speculation
+  the steps are one chain (1.00x); speculated from the last build, the
+  bound is the largest step's, 12.4x.
 - **Read-set sizes** for expl3 documents are to be measured on the
   latex3 corpus.
 

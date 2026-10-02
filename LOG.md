@@ -10050,3 +10050,149 @@ rebuilds of new words): TeX itself 30%, the tracker 21%, the rebuild's
 other bookkeeping 19% (`run_step` 4%, positioning and restoring slots,
 `Fold::latest`), the page's deflate 12%, the input check 7% (before the
 per-name watcher), `Fold::close` 5.5%, the link 5%.
+
+## 2026-10-02 — How much of a build could run at once: the step graph measured (agent parallel)
+
+**Why.** DESIGN 3.10 runs the evaluation on many threads, and DESIGN 6
+("Serial fraction") asks for the parallelism to be measured per document
+before any claim. Nothing measured it: the view (4.3 item 7) prints each
+window's imports, but not what each step costs or when in it a read is
+made.
+
+**What.** `PARTEX_SSA_DAG=FILE` (DESIGN 3.14) writes the live steps after
+each build as a graph (`ssa::dag`, beside the view): per step its last
+run's commands (`RecState::step_commands`, set where the step's call
+closes); per read from outside it, the step whose definition reached it
+(`Fold::reaching`) and how many commands into the step it was made; per
+definition, its version and how many commands into the step it was last
+written. The times come from the runtime's clock (`Runtime::set_timing`,
+`set_clock`, `open::StepTimes`), which `SsaTracker::command` sets at each
+command only when the dump is asked for: without it nothing is timed. A
+first version kept the write times in one table cleared at each step;
+the format's step grew it to 2 M slots, and clearing and walking it at
+each of the 58 K steps took the course build past 13 minutes: the table
+is made afresh per step. `scripts/ssa-parallel.py` reads the dumps:
+`cold DAG` for one build, `rebuild DAG.K DAG.N` for what a rebuild ran
+(the steps whose run changed). Two schedules, each with a worker per
+step and the step boundaries taken as known (found by running, they
+chain every step to the one before it): *whole steps* (a step begins
+when every step it read from has ended) and *pipelined* (a step may
+begin earlier, each read waiting for its definition's last write). Four
+models of the reads: as recorded; *soft definitions* (a definition equal
+to the one before it is passed through to that one); *soft reads* (the
+step's own read of such an address dropped too: the save and restore of
+TODO 2); *blind writes* (a step's read of any address it defines dropped:
+an upper bound for 3.2's scoped definitions, which read no old value).
+For speculation, a re-run step *validates* if every address it read
+finds the same version at its place in the graph before the rebuild (a
+definition that vanished because a re-run does not allocate again, a
+font loaded or a name entered, counts as the same).
+
+Outputs are unchanged: `scripts/ssa-edits --brief --fixpoint`, 10/10
+cases and 63 stages identical, with the dump off and with it on
+(`--env PARTEX_SSA_DAG=...`).
+
+**Measured** (the course, local release build of np/parallel on edd563d,
+one SSA process: the cold build, then `word`, its revert, `tikz-node` (a
+node of ch15's pgfplots figure, from the coordinator's course edits),
+its revert, `label`, its revert; counts, not times):
+
+| cold build | |
+|---|---|
+| steps, commands | 58,710, 66,063,925 |
+| setup (before the first ship) | 51,911 steps, 4,271,144 commands (6.5%) |
+| body | 6,799 steps, 61,792,781 commands |
+| reads from outside a step, definitions | 9.30 M, 2.87 M |
+| definitions equal to the one before them | 1.07 M of 2.23 M (macros 660 K, save stack 172 K) |
+| costliest steps | 5.31 M (ch24's figure), 4.27 M (ch07's), 3.87 M (ch04's), 3.57 M (the cover) |
+| no edges at all | bound 12.44x (the costliest step) |
+
+| critical path, bound | whole steps | pipelined |
+|---|---|---|
+| all reads | 66.04 M, 1.00x | 65.93 M, 1.00x |
+| soft definitions | 66.01 M, 1.00x | 65.83 M, 1.00x |
+| soft reads | 66.01 M, 1.00x | 65.79 M, 1.00x |
+| blind writes | 62.39 M, 1.06x | 57.68 M, 1.15x |
+
+- With all reads, 39,515 of the 58,710 steps are on the critical path.
+  The mean number of steps running is 1.0 in every tenth of it; the widest
+  depth is 2,343 steps, all cheap; list schedules on 2, 8 and 64 workers
+  give 1.00x. The body alone is 1.00x in every model but blind writes
+  (1.06x whole, 1.15x pipelined).
+- What carries it (all reads): `align_state` is on 37,981 of the path's
+  39,514 edges, `cond` 18,096, `str_ptr` 13,532, `hash_high` 13,241,
+  `selector` 8,159, `\reserved@a`–`d` and `\@let@token` (written by every
+  `\@ifnextchar`, read to be saved), the save stack (`save.ptr`, `level`,
+  `group`, `boundary`), the nest (`list.*`). Before the expensive steps
+  (by their commands): `align_state`, `cond`, the save stack and the nest.
+  No family alone: keeping only the page builder's edges still gives
+  1.01x, and ignoring classes one after another, the one that helps most
+  first, reaches 1.01x after eight (engine scalars, conditionals,
+  allocators, macros, log, hash, save stack, nest).
+- Pipelined, soft reads: the binding reads before 47.6 M commands are of
+  `\reserved@a`, then `list.list`, `save.ptr`, `cond`. The figures' steps
+  read `\reserved@a` and `\@currenvir` at their first command, `\begin`'s
+  local `\def`s, from the step before, which wrote them at its end. The
+  body runs inside the `document` environment's group (`\document` does
+  not close the group `\begin` opened, and `\end{document}` ends the job
+  inside it), so every local assignment in the body saves the value
+  before it, a read, and that saved value is never restored. Blind
+  writes drop those: then `\if@nobreak` (42.5 M), `pdf.stacks`, `\count0`,
+  `clubpenalty`, `page.goal` bind.
+- With blind writes the page builder stops binding once pipelined: its
+  edges alone give 12.44x (whole steps 10.36x), and with the nest's and
+  the counters' 10.22x. Ignoring classes one after another (pipelined,
+  blind writes): the macros 1.96x, then the PDF writer's tables 2.84x,
+  the registers 3.84x, the parameters 4.86x, the hash 8.30x, and only
+  then the page builder 12.43x.
+
+| rebuild | steps, commands | dependency chain | bound | speculated: validate | bound | cold build from the last records: validate | bound |
+|---|---|---|---|---|---|---|---|
+| word | 5, 4,443 | all 5 | 1.00x | 2 of 5 (1,531 commands) | 1.15x | 99.995% | 12.44x |
+| tikz-node | 4, 995,102 | all 4 (the figure step 991,637) | 1.00x | 2 of 4 | 1.00x | 99.997% | 12.44x |
+| label | 247, 3,812,865 | 232 | 1.00x | 4 of 247 | 1.00x | 99.586% | 8.43x |
+| label, soft reads | | 220 | 1.01x | 146 of 247 (3.03 M commands) | 3.63x | 99.828% | 11.99x |
+| label, blind writes | | 137 | 1.55x | 181 of 247 | 3.63x | 99.888% | 12.44x |
+
+- `word`: the `\input{ch15}` step and the edited paragraph validate; the
+  steps after them read the paragraph's page nodes (`page[44]`, the line
+  that changed) and fail, rightly. `tikz-node` is one step: the figure
+  float is a single step of 991,637 commands.
+- `label`: the first read that differs is `\@savsf` (`\count146`) for 196
+  of the 247 steps: every output routine saves and restores it, and its
+  definition is a new one each time (TODO 2). With soft reads the rest are
+  `pdf.fonts` (31; the PDF writer's fonts and their object numbers,
+  numbered by count), `font:…expand` (44; pdfTeX's expanded instances of a
+  font, made on demand by the paragraphs that use them, so every such
+  paragraph reads and rewrites the font's set), the 12 new steps (the
+  `.aux`'s new lines) and `str_ptr`.
+
+**What it says.**
+- A schedule that waits for dependencies gains nothing on the course: at
+  the step grain the build is one chain (1.00x), it stays one when steps
+  overlap at their reads and when the save-and-restore reads are dropped,
+  and dropping every read of what a step itself defines gives 1.15x. The
+  chains are not the page builder's (pipelined, it allows 12x) but the
+  state every LaTeX step touches near its start: the `\@ifnextchar`
+  scratch macros, `\@currenvir`, `\if@nobreak`, `clubpenalty`, the
+  conditionals and `align_state`, the save stack, the allocators.
+- Speculation is what parallelizes, as 3.10 says: run from the last
+  build's entry states, 99.6–99.995% of the steps validate after these
+  edits, and the bound is the costliest step's, 12.4x. The four largest
+  steps (pgfplots figures and the cover, 3.6–5.3 M commands) are 26% of
+  the build; past 12x they must be cut into windows (4.3 item 1), each
+  speculated too.
+- For validation to hold, a version must be the content: `\@savsf`'s and
+  the save stack's restores (soft reads, TODO 2; 4 → 146 of 247 steps on
+  `label`), `font:…expand` and `pdf.fonts` (a cache and an object
+  numbering read and written as values), and definitions that a re-run
+  does not make again (fonts, names) are each a validation failure or a
+  false wake-up.
+- A save in a group that the job ends inside (the body's `document`
+  group) is never restored, so it need not be a read at all; with 3.2's
+  scoped definitions no save is one.
+- A first cold build has no records to speculate from: its step
+  boundaries and entry states have to be predicted (a session's last
+  build, or the syntax tree's paragraphs). The setup's 51,910 steps
+  before the cover's average 14 commands: they are better run as one span
+  than spread over workers.
