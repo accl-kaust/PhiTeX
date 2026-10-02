@@ -1612,11 +1612,15 @@ impl<E: Env> Breaker<'_, E> {
                     }
                 }
             }
-            if self.p.protrude_chars > 0 {
+            // (a line can be empty: the last one of a paragraph that ends
+            // with a forced break, its \parfillskip pruned; pdfTeX's
+            // `prev_rightmost` finds nothing there, and no kern goes in)
+            if self.p.protrude_chars > 0
+                && let Some(q) = line.len().checked_sub(1)
+            {
                 // pdfTeX: a margin kern for the character that protrudes
                 // at the right, before the node at the break (or after a
                 // discretionary's pre-break text, which ends the line).
-                let q = line.len() - 1;
                 let (c, at) = if disc_break && !matches!(line[q], Node::Disc(_)) {
                     (margin::char_at(&line[q], false), q + 1)
                 } else {

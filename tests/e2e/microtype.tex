@@ -52,6 +52,9 @@
 {\parindent=0pt \leftskip=5pt \rightskip=0pt plus 20pt \para}
 {\hsize=100pt T\hbox{\hbox{.}}oo\discretionary{-}{A}{x}yT A\-T
   \penalty-10000 \kern0pt T\vadjust{}\mark{}. \par}
+% a paragraph that ends with a forced break: its last line is empty (the
+% \parfillskip pruned), and nothing protrudes at its right
+{\hsize=100pt Text.\penalty-10000\par}
 \pdfprotrudechars=1 \para
 \pdfprotrudechars=0 \para
 % font expansion: a real font and a virtual one (ptmr8t over ptmr8r)
