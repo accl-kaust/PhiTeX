@@ -145,6 +145,21 @@ fn loc_hash<A>(loc: &Loc<A>, ha: u64) -> u64 {
     (ha ^ t.wrapping_mul(0x9e37_79b9_7f4a_7c15)).rotate_left(29)
 }
 
+/// When a step's run made its reads from outside it and last wrote each
+/// address, on the engine's clock (its commands), kept only with timing
+/// on ([`Runtime::set_timing`]): a measurement of how far into a step
+/// each read waits for its definition and each definition is made, for
+/// the parallelism a dependency graph allows (`PARTEX_SSA_DAG`).
+#[derive(Clone, Debug, Default)]
+pub struct StepTimes<A> {
+    /// The clock when the run began.
+    pub began: u64,
+    /// When each outside read was made, in the order of the step's reads.
+    pub reads: Vec<u64>,
+    /// When each address written was last written.
+    pub wrote: Vec<(A, u64)>,
+}
+
 /// What a lookup found.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Found<A> {
@@ -183,6 +198,14 @@ pub(crate) struct Open<M: Machine> {
     pub(crate) step: Option<(StepId, u64)>,
     pub(crate) step_reads: Vec<(u64, M::Addr)>,
     pub(crate) step_recs: Vec<RecId>,
+    /// Timing ([`StepTimes`], a measurement, off unless asked for): the
+    /// engine's clock, when the open step began, when it made each read
+    /// in `step_reads`, and when it last wrote each address.
+    pub(crate) timing: bool,
+    pub(crate) clock: u64,
+    step_began: u64,
+    step_read_at: Vec<u64>,
+    step_wrote_at: Table<ByHash<M::Addr>, u64>,
 }
 
 impl<M: Machine> Open<M> {
@@ -202,14 +225,33 @@ impl<M: Machine> Open<M> {
             step: None,
             step_reads: Vec::new(),
             step_recs: Vec::new(),
+            timing: false,
+            clock: 0,
+            step_began: 0,
+            step_read_at: Vec::new(),
+            step_wrote_at: Table::new(),
         }
     }
 
-    /// A fresh trip, its vectors sized like the last one's.
+    /// A fresh trip, its vectors sized like the last one's (the timing
+    /// switch and the clock kept).
     pub(crate) fn reset(&mut self, statuses: Vec<Status<M::Addr>>, reran: usize) {
+        let (timing, clock) = (self.timing, self.clock);
         *self = Open::new();
         self.statuses = statuses;
         self.reran = Vec::with_capacity(reran);
+        self.timing = timing;
+        self.clock = clock;
+    }
+
+    /// The open step's read of `a` from outside it, noted (with its time,
+    /// if timing).
+    #[inline]
+    fn push_step_read(&mut self, ha: u64, a: &M::Addr) {
+        self.step_reads.push((ha, a.clone()));
+        if self.timing {
+            self.step_read_at.push(self.clock);
+        }
     }
 
     fn last_write(&self, a: &M::Addr) -> u64 {
@@ -260,7 +302,7 @@ impl<M: Machine> Open<M> {
             if step != 0 && st.w < step && st.s != step {
                 st.s = step;
                 let a = loc.addr();
-                self.step_reads.push((hash64(a), a.clone()));
+                self.push_step_read(hash64(a), a);
             }
             dense_hash(f, i)
         } else {
@@ -288,7 +330,7 @@ impl<M: Machine> Open<M> {
             slot.f = start;
             if step != 0 && w < step && slot.s != step {
                 slot.s = step;
-                self.step_reads.push((ha, a.clone()));
+                self.push_step_read(ha, a);
             }
             loc_hash(loc, ha)
         };
@@ -319,7 +361,7 @@ impl<M: Machine> Open<M> {
             let st = dense_at(&mut self.dense, f, i);
             if st.w < step && st.s != step {
                 st.s = step;
-                self.step_reads.push((hash64(a), a.clone()));
+                self.push_step_read(hash64(a), a);
             }
             return;
         }
@@ -340,7 +382,7 @@ impl<M: Machine> Open<M> {
         );
         if slot.s != step {
             slot.s = step;
-            self.step_reads.push((ha, a.clone()));
+            self.push_step_read(ha, a);
         }
     }
 
@@ -365,6 +407,12 @@ impl<M: Machine> Open<M> {
         let d = self.frames.len() - 1;
         if d == 0 {
             return;
+        }
+        if self.timing && self.step.is_some() {
+            let now = self.clock;
+            *self
+                .step_wrote_at
+                .entry_by(hash64(a), |k| k.0 == *a, || ByHash(a.clone()), 0) = now;
         }
         self.serial += 1;
         let s = self.serial;
@@ -447,8 +495,11 @@ impl<M: Machine> Runtime<M> {
     /// Start trip `trip` of an open build: a fresh root, no reads or
     /// writes; trip 0 starts a build.
     pub fn open_trip(&mut self, trip: usize) {
+        let (timing, clock) = (self.open.timing, self.open.clock);
         self.open = Open::new();
         self.open.trip = trip;
+        self.open.timing = timing;
+        self.open.clock = clock;
         if trip == 0 {
             self.stats.builds += 1;
             self.clear_log();
@@ -897,6 +948,28 @@ impl<M: Machine> Runtime<M> {
         self.open.step = Some((id, self.open.serial));
         self.open.step_reads.clear();
         self.open.step_recs.clear();
+        self.open.step_began = self.open.clock;
+        self.open.step_read_at.clear();
+        // (a table per step: clearing or walking a large one costs its room)
+        self.open.step_wrote_at = Table::new();
+    }
+
+    /// Time each step's reads and writes on the engine's clock
+    /// ([`StepTimes`], a measurement; [`Runtime::step_times`]).
+    pub fn set_timing(&mut self, on: bool) {
+        self.open.timing = on;
+    }
+
+    /// The engine's clock now (its commands so far), for the steps' times.
+    #[inline]
+    pub fn set_clock(&mut self, now: u64) {
+        self.open.clock = now;
+    }
+
+    /// The times of step `id`'s last run, with timing on.
+    #[must_use]
+    pub fn step_times(&self, id: StepId) -> Option<&StepTimes<M::Addr>> {
+        self.step_times.get(id as usize)?.as_ref()
     }
 
     /// Drop the open step's run (7.17.3's validation: it read a slot
@@ -907,6 +980,8 @@ impl<M: Machine> Runtime<M> {
         self.open.step = None;
         self.open.step_reads.clear();
         self.open.step_recs.clear();
+        self.open.step_read_at.clear();
+        self.open.step_wrote_at = Table::new();
     }
 
     /// End the open step: its records' writes are its definitions and its
@@ -915,6 +990,22 @@ impl<M: Machine> Runtime<M> {
         let (id, _) = self.open.step.take()?;
         let recs = core::mem::take(&mut self.open.step_recs);
         let reads = core::mem::take(&mut self.open.step_reads);
+        if self.open.timing {
+            let wrote = core::mem::take(&mut self.open.step_wrote_at)
+                .iter()
+                .map(|(a, t)| (a.0.clone(), *t))
+                .collect();
+            let times = StepTimes {
+                began: self.open.step_began,
+                reads: core::mem::take(&mut self.open.step_read_at),
+                wrote,
+            };
+            let i = id as usize;
+            if self.step_times.len() <= i {
+                self.step_times.resize_with(i + 1, || None);
+            }
+            self.step_times[i] = Some(times);
+        }
         let Runtime {
             recs: arena, fold, ..
         } = self;

@@ -256,6 +256,9 @@ pub struct Runtime<M: Machine> {
     /// The last build's status vector, reused.
     pub(crate) spare_statuses: Vec<Status<M::Addr>>,
     pub(crate) default_val: Option<M::Val>,
+    /// Each step's last run's times, by step id, with timing on
+    /// ([`Runtime::set_timing`]).
+    pub(crate) step_times: Vec<Option<crate::open::StepTimes<M::Addr>>>,
 }
 
 fn stream_version<V: Value>(s: Option<&Stream<V>>) -> Version {
@@ -295,6 +298,7 @@ impl<M: Machine> Runtime<M> {
             sizes: Sizes::default(),
             spare_statuses: Vec::new(),
             default_val: None,
+            step_times: Vec::new(),
         }
     }
 
