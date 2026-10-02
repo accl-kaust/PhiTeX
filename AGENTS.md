@@ -14,7 +14,15 @@ hold, except where this section changes them.
   intent.
 - **The gitignored inputs** (`refs/`, `upstream/`) are hard-linked into
   each worktree: never modify a file in them in place.
-- **Heavy runs** (the course, anything over a few GB): only through
+- **The accl cluster** (Slurm, nearly idle) takes the course runs and
+  every timing: `scripts/accl/accl run <task> [args...]` from a worktree
+  builds a snapshot of the working tree in partex's Apptainer image on a
+  compute node (tasks: `edits`, `course plain|ab|ssa|rebuild|label`,
+  `cmd <command...>`, `gate`; `ACCL_OPTS` overrides the resources;
+  results in `~/code/flinner/partex-phitex-runs/`). This machine is
+  loaded by the agents' builds: its wall-clock times are not
+  measurements. Never run anything on `acclhead1` itself.
+- **Heavy runs** here (the course, anything over a few GB): only through
   `scripts/heavy` (one at a time on the machine, memory capped). The
   user's own `partex watch` holds about 32 GB: never touch it, never
   `pkill`/`killall` by name (kill only PIDs you started), never write
