@@ -18,13 +18,13 @@ use phitex_ir::{Def, Operand, Program};
 
 /// Files in memory, the outputs kept.
 #[derive(Default)]
-struct Files {
+struct Disk {
     files: BTreeMap<Vec<u8>, Vec<u8>>,
     written: BTreeMap<u32, Vec<u8>>,
     next: u32,
 }
 
-impl Host for Files {
+impl Host for Disk {
     fn read_file(&mut self, name: &[u8], kind: FileKind) -> Option<OpenedFile> {
         let mut with = name.to_vec();
         with.extend_from_slice(match kind {
@@ -82,8 +82,8 @@ const DOC: &str = r"\catcode`\{=1 \catcode`\}=2 \catcode`\#=6
 ";
 
 /// `DOC` built in SSA mode, in batch mode.
-fn build() -> Tex<Files, SsaTracker> {
-    let mut host = Files::default();
+fn build() -> Tex<Disk, SsaTracker> {
+    let mut host = Disk::default();
     host.files.insert(
         b"cmr10.tfm".to_vec(),
         include_bytes!("../testdata/cmr10.tfm").to_vec(),
