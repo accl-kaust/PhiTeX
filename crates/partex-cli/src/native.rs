@@ -112,9 +112,19 @@ impl NativeHost {
     }
 
     /// Read the file at `p`, keeping its contents and the stamp taken
-    /// before reading them if its times are old enough.
+    /// before reading them if its times are old enough. A file whose stamp
+    /// is the one kept is as it was: its contents are handed out again,
+    /// the same `Arc`, which the engine's caches know by identity (the
+    /// 5 MB font map, read again whenever the step that ships the first
+    /// page runs again).
     fn read_at(&mut self, p: &[u8]) -> Option<std::sync::Arc<[u8]>> {
         let st = self.seen.as_ref().and_then(|_| stamp(p));
+        if let (Some(seen), Some(s)) = (&self.seen, st)
+            && let Some((kept, c)) = seen.files.get(p)
+            && *kept == s
+        {
+            return Some(c.clone());
+        }
         let contents: std::sync::Arc<[u8]> = std::fs::read(path(p)).ok()?.into();
         if let Some(seen) = &mut self.seen {
             match st.filter(quiet) {

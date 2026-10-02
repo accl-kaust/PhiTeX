@@ -1666,6 +1666,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             after_token,
             memo: _,
             cs_cache: _,
+            map_cache: _,
             hash_memo: _,
             line_log: _,
             log_lines: _,

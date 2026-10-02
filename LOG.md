@@ -10433,3 +10433,38 @@ moves, and a re-run costs more per command than a cold run (TODO 3).
 
 The harness: 14 cases, 79 stages, identical with `--fixpoint`, with
 `PARTEX_SSA_TRIPS=1` and in check mode.
+
+## 2026-10-02 — A keystroke on a one-page document: the font map read once (coordinator)
+
+The Overleaf extension measured about 170 ms a keystroke in wasm on a
+one-page article with a TikZ picture (its `mock/tikz/main.tex`: 3 steps,
+728 commands, 1 trip), and about 90 ms natively on its one-page article:
+a cost per rebuild, not per command. Natively here (the quick build, no
+LTO; a settled cold build, then a character typed and taken away, 100
+times in one process): 2 steps, the paragraph (41 commands) and the
+fire at `\end{document}` that ships the page (515), median 29.6 ms.
+
+The profile (perf, frame pointers, 200 rebuilds): two thirds of it was
+the font map. The only page is the first shipout, which reads the
+default map (`pdftex.map`, 5 MB), so the step that ships it reads the
+map again at every keystroke: the host read the file again, the tracker
+hashed it for the load's version, `read_map_file` hashed it twice more
+(the table's digest, the key of its warnings in the host's cache), and
+the first lookup indexed its 42 000 lines again (`first_field` 22.8%,
+`Version::of` 17.8%, the lookup's loop 10.8%, `StableHasher::of` 10.5%,
+the index's inserts 4.2%). The course does not show it: only its first
+page reads the map.
+
+What the contents give is kept by their identity:
+- the native host hands out the same `Arc` again for a file whose stamp
+  is the one taken when it was last read (the stamps `unchanged` keeps);
+- the tracker keeps the versions of the last 32 large contents loaded,
+  by identity, the `Arc`s held so an address names one contents;
+- the engine keeps the map's hash and its index (`fontmap::MapCache`, a
+  cache like `cs_cache`, not state): one hash serves the digest and the
+  warnings' key (`fontmap-warnings/2`).
+
+Median 29.6 → 7.6 ms a keystroke (min 22.7 → 3.7 ms), the same PDF. A
+host in wasm gets this if it hands out the same `Arc<[u8]>` for a file
+that did not change. The harness: 14 cases, 79 stages, identical with
+`--fixpoint`, with `PARTEX_SSA_TRIPS=1` and in check mode.

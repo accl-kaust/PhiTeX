@@ -477,6 +477,9 @@ pub struct Tex<H: Host, T: Tracker = Untracked> {
     pub(crate) pdf: crate::pdf::PdfState,
     /// pdfTeX's font map (mapfile.c).
     pub(crate) fontmap: crate::fontmap::FontMap,
+    /// What the map file read gives, kept by its contents' identity (not
+    /// state: `fontmap::MapCache`).
+    pub(crate) map_cache: crate::fontmap::MapCache,
     /// TFM names whose map entries have been used (`in_use`; the
     /// `FONTS_MAPPED` field).
     pub(crate) fonts_mapped: crate::pdf::val::VSet<Vec<u8>>,
@@ -771,6 +774,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             tounicode: crate::pdfconv::ToUnicodeTable::default(),
             pdf: crate::pdf::PdfState::default(),
             fontmap: crate::fontmap::FontMap::default(),
+            map_cache: crate::fontmap::MapCache::default(),
             fonts_mapped: crate::pdf::val::VSet::default(),
             streams: crate::streams::Streams::default(),
             fonts: FontArrays::new(p.font_max),

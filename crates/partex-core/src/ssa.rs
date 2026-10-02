@@ -1163,6 +1163,11 @@ pub struct SsaTracker {
     /// reads of later definitions, and stopped if it made one
     /// ([`Tracker::stop_due`]; `u64::MAX`: none is).
     pub(crate) stop_after: core::cell::Cell<u64>,
+    /// Large contents loaded, with their versions, by identity: the host
+    /// hands out the same `Arc` again for a file as it was, and a step
+    /// run again that loads it (the 5 MB font map, at the first page) need
+    /// not hash it again. The last few (`SsaTracker::contents_version`).
+    load_versions: RefCell<Vec<(alloc::sync::Arc<[u8]>, Version)>>,
 }
 
 impl SsaTracker {
@@ -1192,7 +1197,7 @@ impl SsaTracker {
             return;
         };
         let rr = &mut *r;
-        let v = contents.map_or(Version::ABSENT, |c| Version::of(&c[..]));
+        let v = contents.map_or(Version::ABSENT, |c| self.contents_version(c));
         let (id, fresh) = Recorder::intern(&mut rr.st.loads_ix, rr.st.loads.len(), name);
         if fresh {
             rr.st.loads.push((name.to_vec(), v, kind));
@@ -1264,7 +1269,29 @@ impl SsaTracker {
             lost: core::cell::Cell::new(0),
             timed: false,
             stop_after: core::cell::Cell::new(u64::MAX),
+            load_versions: RefCell::new(Vec::new()),
         }
+    }
+
+    /// The version of loaded contents `c`, kept for the large ones
+    /// ([`SsaTracker::load_versions`]: the `Arc`s kept, so an address
+    /// names one contents).
+    fn contents_version(&self, c: &alloc::sync::Arc<[u8]>) -> Version {
+        const LARGE: usize = 1 << 14;
+        const KEPT: usize = 32;
+        if c.len() < LARGE {
+            return Version::of(&c[..]);
+        }
+        let mut m = self.load_versions.borrow_mut();
+        if let Some((_, v)) = m.iter().find(|(d, _)| alloc::sync::Arc::ptr_eq(d, c)) {
+            return *v;
+        }
+        let v = Version::of(&c[..]);
+        if m.len() == KEPT {
+            m.remove(0);
+        }
+        m.push((c.clone(), v));
+        v
     }
 
     /// The output made since the last boundary, noted as effects of the

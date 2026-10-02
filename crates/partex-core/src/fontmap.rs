@@ -191,22 +191,26 @@ impl Lazy {
 }
 
 impl Lookups {
-    fn index(&mut self, data: &[u8]) -> &crate::u64map::U64Map<u32> {
-        self.index.get_or_insert_with(|| {
-            let mut m = crate::u64map::U64Map::default();
-            let mut at = 0;
-            while at < data.len() {
-                let (f, next) = Lazy::first_field(data, at);
-                if let Some(f) = f {
-                    let k = Lazy::key(f);
-                    if m.get(k).is_none() {
-                        m.insert(k, u32::try_from(at).unwrap_or(u32::MAX));
-                    }
+    /// The first line of each first field's hash in `data`, by offset.
+    fn build_index(data: &[u8]) -> crate::u64map::U64Map<u32> {
+        let mut m = crate::u64map::U64Map::default();
+        let mut at = 0;
+        while at < data.len() {
+            let (f, next) = Lazy::first_field(data, at);
+            if let Some(f) = f {
+                let k = Lazy::key(f);
+                if m.get(k).is_none() {
+                    m.insert(k, u32::try_from(at).unwrap_or(u32::MAX));
                 }
-                at = next;
             }
-            Arc::new(m)
-        })
+            at = next;
+        }
+        m
+    }
+
+    fn index(&mut self, data: &[u8]) -> &crate::u64map::U64Map<u32> {
+        self.index
+            .get_or_insert_with(|| Arc::new(Self::build_index(data)))
     }
 
     /// The entry for `tfm` in `lazy`: its first line that scans as a
@@ -242,6 +246,50 @@ impl Lookups {
         }
         self.found.insert(tfm.to_vec(), found.clone());
         found
+    }
+}
+
+/// What a map file's contents give, kept by identity (not state: the
+/// engine's cache, as `cs_cache` is): the host hands out the same `Arc`
+/// for a file as it was, and the step that ships the first page, which
+/// reads the default map, runs again at each keystroke of a one-page
+/// document. It hashed the 5 MB file twice and indexed its 42 000 lines
+/// each time (two thirds of such a rebuild).
+#[derive(Clone, Debug, Default)]
+pub(crate) struct MapCache {
+    data: Option<Arc<[u8]>>,
+    hash: u128,
+    index: Option<Arc<crate::u64map::U64Map<u32>>>,
+}
+
+impl MapCache {
+    /// The cache for `data`, made anew for other contents.
+    fn of(&mut self, data: &Arc<[u8]>) -> &mut Self {
+        if !self.data.as_ref().is_some_and(|d| Arc::ptr_eq(d, data)) {
+            *self = MapCache {
+                data: Some(data.clone()),
+                hash: partex_engine::stablehash::StableHasher::of(&data[..]),
+                index: None,
+            };
+        }
+        self
+    }
+
+    /// The hash of `data`.
+    fn hash(&mut self, data: &Arc<[u8]>) -> u128 {
+        self.of(data).hash
+    }
+
+    /// The index of `data` read lazily ([`Lookups`]).
+    #[allow(
+        clippy::arc_with_non_send_sync,
+        reason = "an engine lives on one thread; the index is an Arc for sharing"
+    )]
+    fn index(&mut self, data: &Arc<[u8]>) -> Arc<crate::u64map::U64Map<u32>> {
+        self.of(data)
+            .index
+            .get_or_insert_with(|| Arc::new(Lookups::build_index(data)))
+            .clone()
     }
 }
 
@@ -877,16 +925,15 @@ impl<H: crate::host::Host, T: crate::track::Tracker> crate::tex::Tex<H, T> {
             self.pdftex_warn_in(Some(name), b"cannot open font map file");
             return;
         };
-        self.fontmap.changed(&(0u8, &f.contents[..], mode));
+        // (the contents' hash, made once for each contents the host hands
+        // out: `MapCache`)
+        let hash = self.map_cache.hash(&f.contents);
+        self.fontmap.changed(&(0u8, hash, mode));
         self.print_str(b"{");
         self.print_str(&f.name);
         let suppress = self.int_par(crate::web::PDF_SUPPRESS_WARNING_DUP_MAP_CODE) > 0;
         let key = (self.fontmap.table.is_empty() && mode == Mode::DupIgnore).then(|| {
-            partex_engine::stablehash::StableHasher::of(&(
-                b"fontmap-warnings/1",
-                &f.contents[..],
-                suppress,
-            ))
+            partex_engine::stablehash::StableHasher::of(&(b"fontmap-warnings/2", hash, suppress))
         });
         let cached = key.and_then(|k| self.host.cache_get(k)).and_then(|b| {
             let mut l = partex_engine::persist::Loader::new(&b);
@@ -900,7 +947,10 @@ impl<H: crate::host::Host, T: crate::track::Tracker> crate::tex::Tex<H, T> {
                 lazy: Some(Lazy::new(f.contents.clone())),
                 ..Table::default()
             });
-            self.fontmap.lookups = Lookups::default();
+            self.fontmap.lookups = Lookups {
+                index: Some(self.map_cache.index(&f.contents)),
+                found: BTreeMap::new(),
+            };
             self.print_str(b"}");
             return;
         }
