@@ -1,0 +1,275 @@
+@firstpass
+@secondpass
+[]\r banana 
+@ via @@0 b=10000 p=0 d=100010000
+@@1: line 1.0 t=100010000 -> @@0
+table 
+@ via @@0 b=10000 p=0 d=100010000
+@ via @@1 b=10000 p=0 d=100000000
+@@2: line 1.0 t=100010000 -> @@0
+rat-
+@\discretionary via @@0 b=10000 p=50 d=100012500
+@\discretionary via @@1 b=10000 p=50 d=100002500
+@\discretionary via @@2 b=10000 p=50 d=100002500
+@@3: line 1.0- t=100012500 -> @@0
+tle 
+@ via @@0 b=10000 p=0 d=100010000
+@ via @@1 b=10000 p=0 d=100000000
+@ via @@2 b=10000 p=0 d=100000000
+@ via @@3 b=10000 p=0 d=100000000
+@@4: line 1.0 t=100010000 -> @@0
+bat-
+@\discretionary via @@1 b=10000 p=50 d=100002500
+@\discretionary via @@2 b=10000 p=50 d=100002500
+@\discretionary via @@3 b=10000 p=50 d=100012500
+@\discretionary via @@4 b=10000 p=50 d=100002500
+@@5: line 2.0- t=200012500 -> @@4
+tle 
+@ via @@1 b=10000 p=0 d=100000000
+@ via @@2 b=10000 p=0 d=100000000
+@ via @@3 b=10000 p=0 d=100000000
+@ via @@4 b=10000 p=0 d=100000000
+@ via @@5 b=10000 p=0 d=100000000
+@@6: line 2.0 t=200010000 -> @@4
+a 
+@ via @@1 b=2126 p=0 d=4562496
+@ via @@2 b=10000 p=0 d=100000000
+@ via @@3 b=10000 p=0 d=100000000
+@ via @@4 b=10000 p=0 d=100000000
+@ via @@5 b=10000 p=0 d=100000000
+@ via @@6 b=10000 p=0 d=100000000
+@@7: line 2.0 t=104572496 -> @@1
+bot-
+@\discretionary via @@2 b=4254 p=50 d=18184196
+@\discretionary via @@3 b=10000 p=50 d=100012500
+@\discretionary via @@4 b=10000 p=50 d=100002500
+@\discretionary via @@5 b=10000 p=50 d=100012500
+@\discretionary via @@6 b=10000 p=50 d=100002500
+@\discretionary via @@7 b=10000 p=50 d=100002500
+@@8: line 2.0- t=118194196 -> @@2
+tle 
+@ via @@2 b=725 p=0 d=540225
+@ via @@3 b=10000 p=0 d=100000000
+@ via @@4 b=10000 p=0 d=100000000
+@ via @@5 b=10000 p=0 d=100000000
+@ via @@6 b=10000 p=0 d=100000000
+@ via @@7 b=10000 p=0 d=100000000
+@ via @@8 b=10000 p=0 d=100000000
+@@9: line 2.0 t=100550225 -> @@2
+en-
+@\discretionary via @@3 b=66 p=50 d=18276
+@\discretionary via @@4 b=6658 p=50 d=44464724
+@\discretionary via @@5 b=10000 p=50 d=100012500
+@\discretionary via @@6 b=10000 p=50 d=100002500
+@\discretionary via @@7 b=10000 p=50 d=100002500
+@\discretionary via @@8 b=10000 p=50 d=100012500
+@\discretionary via @@9 b=10000 p=50 d=100002500
+@@10: line 2.1- t=100030776 -> @@3
+tangled 
+@ via @@5 b=181 p=0 d=36481
+@ via @@6 b=10000 p=0 d=100000000
+@ via @@7 b=10000 p=0 d=100000000
+@ via @@8 b=10000 p=0 d=100000000
+@ via @@9 b=10000 p=0 d=100000000
+@ via @@10 b=10000 p=0 d=100000000
+@@11: line 3.0 t=200030776 -> @@10
+re-
+@\discretionary via @@6 b=135 p=50 d=23525
+@\discretionary via @@7 b=7186 p=50 d=51784916
+@\discretionary via @@8 b=10000 p=50 d=100012500
+@\discretionary via @@9 b=10000 p=50 d=100002500
+@\discretionary via @@10 b=10000 p=50 d=100012500
+@\discretionary via @@11 b=10000 p=50 d=100002500
+@@12: line 3.0- t=156357412 -> @@7
+gat-
+@\discretionary via @@7 b=0 p=50 d=12600
+@\discretionary via @@8 b=10000 p=50 d=100012500
+@\discretionary via @@9 b=10000 p=50 d=100002500
+@\discretionary via @@10 b=10000 p=50 d=100012500
+@\discretionary via @@11 b=10000 p=50 d=100002500
+@\discretionary via @@12 b=10000 p=50 d=100012500
+@@13: line 3.2- t=104585096 -> @@7
+tas 
+@ via @@8 b=376 p=0 d=148996
+@ via @@9 b=10000 p=0 d=100000000
+@ via @@10 b=10000 p=0 d=100000000
+@ via @@11 b=10000 p=0 d=100000000
+@ via @@12 b=10000 p=0 d=100000000
+@ via @@13 b=10000 p=0 d=100010000
+@@14: line 3.0 t=118343192 -> @@8
+tabletop 
+@ via @@11 b=10000 p=0 d=100000000
+@ via @@12 b=10000 p=0 d=100000000
+@ via @@13 b=10000 p=0 d=100010000
+@ via @@14 b=10000 p=0 d=100000000
+@@15: line 4.0 t=204595096 -> @@13
+ban-
+@\discretionary via @@11 b=53 p=50 d=6469
+@\discretionary via @@12 b=3646 p=50 d=13378836
+@\discretionary via @@13 b=10000 p=50 d=100022500
+@\discretionary via @@14 b=10000 p=50 d=100002500
+@\discretionary via @@15 b=10000 p=50 d=100002500
+@@16: line 4.0- t=169736248 -> @@12
+ana 
+@ via @@12 b=14 p=0 d=10576
+@ via @@13 b=5548 p=0 d=30901364
+@ via @@14 b=10000 p=0 d=100000000
+@ via @@15 b=10000 p=0 d=100000000
+@ via @@16 b=10000 p=0 d=100000000
+@@17: line 4.0 t=135486460 -> @@13
+tall 
+@ via @@14 b=3690 p=0 d=13690000
+@ via @@15 b=10000 p=0 d=100000000
+@ via @@16 b=10000 p=0 d=100000000
+@ via @@17 b=10000 p=0 d=100000000
+@@18: line 4.0 t=132033192 -> @@14
+rat-
+@\discretionary via @@15 b=10000 p=50 d=100002500
+@\discretionary via @@16 b=10000 p=50 d=100012500
+@\discretionary via @@17 b=10000 p=50 d=100002500
+@\discretionary via @@18 b=10000 p=50 d=100002500
+@@19: line 5.0- t=232035692 -> @@18
+tles
+@\par via @@15 b=10000 p=-10000 d=100000000
+@\par via @@16 b=10000 p=-10000 d=100000000
+@\par via @@17 b=10000 p=-10000 d=100000000
+@\par via @@18 b=10000 p=-10000 d=100000000
+@\par via @@19 b=10000 p=-10000 d=100000000
+@@20: line 5.0- t=232033192 -> @@18
+
+
+Underfull \hbox (badness 10000) in paragraph at lines 8--8
+[]\r banana table
+
+\hbox(6.94444+0.0)x100.0, glue set 26.00008
+.\hbox(0.0+0.0)x0.0
+.\r b
+.\r a
+.\r n
+.\r a
+.\r n
+.\r a
+.\glue 3.33333 plus 1.66666 minus 1.11111
+.\r t
+.\r a
+.\r b
+.\r l
+.\r e
+.\glue(\rightskip) 0.0
+
+
+Underfull \hbox (badness 4254) in paragraph at lines 8--8
+\r rat-tle bat-tle a bot-
+
+\hbox(6.94444+0.0)x100.0, glue set 3.49443
+.\r r
+.\r a
+.\r t
+.\discretionary
+..\r -
+.\r t
+.\r l
+.\r e
+.\glue 3.33333 plus 1.66666 minus 1.11111
+.\r b
+.\r a
+.\r t
+.\discretionary
+..\r -
+.\r t
+.\r l
+.\r e
+.\glue 3.33333 plus 1.66666 minus 1.11111
+.\r a
+.\glue 3.33333 plus 1.66666 minus 1.11111
+.\r b
+.\kern0.27779
+.\r o
+.\r t
+.\discretionary
+.\r -
+.\glue(\rightskip) 0.0
+
+
+Underfull \hbox (badness 376) in paragraph at lines 8--8
+\r tle en-tangled re-gat-tas
+
+\hbox(6.94444+1.94444)x100.0, glue set 1.55829
+.\r t
+.\r l
+.\r e
+.\glue 3.33333 plus 1.66666 minus 1.11111
+.\r e
+.\discretionary replacing 2
+..\r n
+..\r -
+.\r n
+.\kern-0.27779
+.\r t
+.\r a
+.\r n
+.\r g
+.\r l
+.\r e
+.\r d
+.\glue 3.33333 plus 1.66666 minus 1.11111
+.\r r
+.\r e
+.\discretionary
+..\r -
+.\r g
+.\r a
+.\r t
+.\discretionary
+..\r -
+.\r t
+.\r a
+.\r s
+.\glue(\rightskip) 0.0
+
+
+Underfull \hbox (badness 3690) in paragraph at lines 8--8
+\r tabletop ban-ana tall
+
+\hbox(6.94444+1.94444)x100.0, glue set 3.33328
+.\r t
+.\r a
+.\r b
+.\r l
+.\r e
+.\r t
+.\r o
+.\r p
+.\glue 3.33333 plus 1.66666 minus 1.11111
+.\r b
+.\r a
+.\r n
+.\discretionary
+..\r -
+.\r a
+.\r n
+.\r a
+.\glue 3.33333 plus 1.66666 minus 1.11111
+.\r t
+.\r a
+.\r l
+.\r l
+.\glue(\rightskip) 0.0
+
+
+Underfull \hbox (badness 10000) in paragraph at lines 8--8
+\r rat-tles
+
+\hbox(6.94444+0.0)x100.0
+.\r r
+.\r a
+.\r t
+.\discretionary
+..\r -
+.\r t
+.\r l
+.\r e
+.\r s
+.\penalty 10000
+.\glue(\parfillskip) 0.0
+.\glue(\rightskip) 0.0

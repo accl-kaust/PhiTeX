@@ -1,0 +1,24 @@
+% A LaTeX document in DVI mode, with the LaTeX format built from latex.ini
+% by each engine (see xtask/src/e2e.rs); run twice so the aux and toc
+% files settle.
+\documentclass{article}
+\usepackage{amsmath}
+\title{A Test}\author{partex}\date{25 September 2026}
+\begin{document}
+\maketitle
+\tableofcontents
+\section{Introduction}\label{sec:intro}
+Hello, world! This is a small \LaTeX{} document with some math:
+\begin{equation}\label{eq:e}
+  e^{i\pi} + 1 = 0, \qquad \int_0^\infty e^{-x^2}\,dx = \frac{\sqrt{\pi}}{2}.
+\end{equation}
+See Section~\ref{sec:intro} and equation~\eqref{eq:e}.
+\begin{align}
+  a &= b + c \\ d &= e f
+\end{align}
+\subsection{Lists}
+\begin{itemize}\item One \item Two\end{itemize}
+\begin{enumerate}\item First \item Second\end{enumerate}
+\begin{tabular}{|l|c|r|}\hline a & b & c\\ \hline\end{tabular}
+\footnote{A footnote.}
+\end{document}

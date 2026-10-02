@@ -1,0 +1,91 @@
+#!/usr/bin/env bash
+# Compare partex's PDF output with pdfTeX's, apart from compression.
+#
+#   scripts/pdfcheck uncompressed DOC.tex [ENGINE]
+#       Build DOC.tex with the oracle (ENGINE, default pdflatex) and with
+#       partex, both with \pdfcompresslevel=0 and \pdfobjcompresslevel=0,
+#       the same output path and SOURCE_DATE_EPOCH, and compare the two
+#       PDFs byte for byte. This checks everything but deflate and object
+#       stream packing, /Length values and xref offsets included.
+#
+#   scripts/pdfcheck same A.pdf B.pdf
+#       Compare two PDFs as content: streams decompressed, object streams
+#       unpacked, dictionary keys sorted, objects renumbered in traversal
+#       order (qpdf's QDF form), /ID ignored. Equal means the same
+#       objects with the same decompressed bytes, however compressed,
+#       packed or numbered. This is the check for partex's fast output
+#       mode (DESIGN.md §7.15).
+#
+# Environment: PARTEX_BIN (default target/release/partex) and PARTEX_FMT
+# (the native format without .fmt, default the newest under the partex
+# cache). Runs are inside scripts/sandbox, in a work directory under
+# target/pdfcheck (or $PDFCHECK_DIR). Exit 0 when equal, 1 when not.
+set -euo pipefail
+
+repo="$(cd "$(dirname "$0")/.." && pwd)"
+sb="$repo/scripts/sandbox"
+die() { echo "pdfcheck: $*" >&2; exit 2; }
+
+canon() { # canon IN OUT: qpdf's QDF form with the /ID pair removed
+  "$sb" qpdf --qdf --object-streams=disable --compress-streams=n \
+    --decode-level=generalized --no-original-object-ids "$1" "$2.tmp"
+  sed -E 's#^( *)/ID \[<[0-9a-fA-F]*> *<[0-9a-fA-F]*>\]#\1/ID []#' "$2.tmp" > "$2"
+  rm -f "$2.tmp"
+}
+
+cmd=${1:-}; shift || true
+case "$cmd" in
+  same)
+    [ $# -eq 2 ] || die "usage: pdfcheck same A.pdf B.pdf"
+    work="${PDFCHECK_DIR:-$repo/target/pdfcheck}/same"
+    mkdir -p "$work"
+    cp "$1" "$work/a.pdf"; cp "$2" "$work/b.pdf"
+    (cd "$work" && canon a.pdf a.qdf && canon b.pdf b.qdf)
+    if cmp -s "$work/a.qdf" "$work/b.qdf"; then
+      echo "same content: $1 = $2"
+    else
+      echo "content differs: $1 vs $2 (first differences, QDF form):"
+      diff -a "$work/a.qdf" "$work/b.qdf" | cut -c1-300 | head -20
+      exit 1
+    fi
+    ;;
+  uncompressed)
+    [ $# -ge 1 ] || die "usage: pdfcheck uncompressed DOC.tex [ENGINE]"
+    doc="$(cd "$(dirname "$1")" && pwd)/$(basename "$1")"
+    engine=${2:-pdflatex}
+    job=$(basename "$doc" .tex)
+    bin=${PARTEX_BIN:-$repo/target/release/partex}
+    fmt=${PARTEX_FMT:-}
+    if [ -z "$fmt" ]; then
+      f=$(ls -t "${PARTEX_CACHE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/partex}"/formats-*/"$engine".fmt 2>/dev/null | head -1 || true)
+      [ -n "$f" ] || die "no native $engine format found; set PARTEX_FMT"
+      fmt=${f%.fmt}
+    fi
+    work="${PDFCHECK_DIR:-$repo/target/pdfcheck}/$job"
+    rm -rf "$work"; mkdir -p "$work/src" "$work/fmt"
+    cp -r "$(dirname "$doc")"/. "$work/src/"
+    cp "$fmt.fmt" "$work/fmt/"
+    pre='\pdfcompresslevel=0\pdfobjcompresslevel=0'
+    run() { # run NAME CMD...: one build into src/out, kept as NAME.pdf
+      local name=$1; shift
+      rm -rf "$work/src/out"; mkdir -p "$work/src/out"
+      (cd "$work/src" && "$sb" env SOURCE_DATE_EPOCH=1758800000 FORCE_SOURCE_DATE=1 \
+        "$@" -interaction=batchmode -output-directory=out "$pre\\input{$job}" \
+        </dev/null >"$work/$name.term" 2>&1) || true
+      [ -f "$work/src/out/$job.pdf" ] || die "$name made no PDF (see $work/$name.term)"
+      mv "$work/src/out/$job.pdf" "$work/$name.pdf"
+      cp "$work/src/out/$job.log" "$work/$name.log" 2>/dev/null || true
+    }
+    run oracle "$engine"
+    run partex "$bin" --compat=pdftex -fmt="$work/fmt/$(basename "$fmt")"
+    a="$work/oracle.pdf"; b="$work/partex.pdf"
+    if cmp -s "$a" "$b"; then
+      echo "uncompressed, byte-identical: $job ($(stat -c %s "$a") bytes)"
+    else
+      echo "uncompressed, differs: $job: $(cmp "$a" "$b" 2>&1 | head -1)"
+      echo "sizes: oracle $(stat -c %s "$a"), partex $(stat -c %s "$b")"
+      exit 1
+    fi
+    ;;
+  *) die "usage: pdfcheck uncompressed DOC.tex [ENGINE] | pdfcheck same A.pdf B.pdf" ;;
+esac

@@ -1,0 +1,26 @@
+% Skipped conditional text: the same macro bodies skipped again after
+% the meanings a skip depends on change (partex remembers skips).
+\catcode`\{=1 \catcode`\}=2 \catcode`\#=6 \catcode`\&=4
+\def\m{\iffalse A\x B\fi C}
+\let\x\relax
+\message{[\m]}
+\let\x\fi          % \x now ends the skip early
+\message{[\m]}
+\let\x\relax
+\message{[\m]}
+% switches in the style of \newif: the skip is the same either way
+\def\iftrue@{\iftrue}\let\ifsw\iffalse
+\def\n{\ifnum1=2 \ifsw X\else Y\fi Z\else W\fi}
+\message{[\n]}\let\ifsw\iftrue\message{[\n]}\let\ifsw\iffalse\message{[\n]}
+% nesting and \ifcase
+\def\c#1{\ifcase#1 zero\or one\iffalse\or no\fi\or two\else many\fi}
+\message{[\c0\c1\c2\c3]}
+% a tab in skipped text: outside an alignment it is skipped over; in an
+% alignment entry it ends the entry
+\def\t{\iffalse x&y\fi}
+\message{[\t]}
+\setbox0\vbox{\halign{#\cr a\t z\cr}}
+\message{[\t]}
+\setbox0\vbox{\halign{#\cr {\t}z\cr}}
+\message{[done]}
+\end

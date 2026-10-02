@@ -1,0 +1,27 @@
+% Math typesetting: every noad kind, styles, choices, mu glue, scripts,
+% limits, accents, delimiters and extensibles, in text and display.
+\hsize=4in \parindent=0pt
+\def\f{{a+b\over c-d}}
+$x^2+y_1^{n+1}=z_{i,j}^{\prime\prime}$, $\sqrt{x^2+1}\le\sqrt[3]{y}$,
+$\alpha\beta\gamma\,\delta\!\epsilon\;\zeta\>\eta$, $a\mathbin{*}b\mathrel{:}c$,
+$f(x)={1\over2}\left(\f\right)$, $\sum_{i=1}^n i={n(n+1)\over2}$,
+$\int_0^\infty e^{-x^2}\,dx$, $\bigl(a\bigr)\Bigl[b\Bigr]\biggl\{c\biggr\}$,
+$\hat a\tilde b\bar c\vec d\dot e\ddot f\widehat{xyz}\widetilde{uvw}$,
+$\overline{a+b}\underline{c+d}\overbrace{x+y}\underbrace{u+v}$,
+$\mathchoice{D}{T}{S}{SS}^{\mathchoice{D}{T}{S}{SS}^{\mathchoice{D}{T}{S}{SS}}}$,
+$a\atop b$, $a\above2pt b$, ${n\choose k}$, $a\brace b$, $a\brack b$,
+$\vcenter{\hbox{v}}$, $\mathop{\rm lim}\limits_{x\to0}$, $\lim_{n\to\infty}$,
+$\displaystyle\sum_{k}\prod_{j}\int\oint\bigcup\bigoplus$,
+$\scriptstyle a+b$, $\scriptscriptstyle a+b$, $a\mskip3mu plus 1mu b\mkern-2mu c$,
+$\nonscript\mskip5mu x_{\nonscript\mskip5mu y}$, $\mathpunct{,}\mathinner{\ldots}$,
+$ff\,fi\,{\it ff}\,{\rm fi}$, $a\penalty-100 b\discretionary{}{}{}c$,
+$$\left(\matrix{a&b\cr c&d}\right)\quad\left\{\eqalign{x&=1\cr y&=2}\right.$$
+$$\int_{-\infty}^{\infty}{\sin x\over x}\,dx=\pi\eqno(1)$$
+$$\sqrt{\sqrt{\sqrt{\sqrt{\sqrt{x}}}}}\quad\left(\left(\left(\left(\f\right)\right)\right)\right)$$
+$$x\over y\leqno(2)$$
+$$\displaylines{a=b\cr \hfill c=d}$$
+% math's boxes are packed by hpack and vpack (§649, §668), which set \badness
+\setbox0\hbox to 100pt{a}$x^2$\message{[\the\badness]}
+\setbox0\hbox to 100pt{a}$\sqrt{x}\over y$\message{[\the\badness]}
+\setbox0\hbox to 100pt{a}$\left(\matrix{a\cr b}\right)$\message{[\the\badness]}
+\bye

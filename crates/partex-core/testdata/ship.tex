@@ -1,0 +1,8 @@
+\catcode`\{=1 \catcode`\}=2 \showboxdepth=100 \showboxbreadth=100
+\font\r=cmr10 \r
+\setbox1\vbox{\hrule height 1pt width 3pt\kern2pt\hbox{A}\vskip 3pt\hrule depth 1pt}
+\setbox0\hbox{AV\kern3pt\vrule width 2pt\hskip 5pt\raise 2pt\copy1 \hskip 5pt W\hskip5pt W}
+\showbox0
+\shipout\box0
+\shipout\hbox{\kern 400pt A}
+\end

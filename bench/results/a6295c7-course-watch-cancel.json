@@ -1,0 +1,372 @@
+{
+  "commit": "a6295c7",
+  "dirty": false,
+  "date": "2026-09-27T14:26:43+03:00",
+  "host": "argon",
+  "cpus": 24,
+  "reference": "partex cold build of the same text (store off), byte-identical PDFs checked",
+  "document": "course copy: 299 pages, pdflatex, -o _out, SOURCE_DATE_EPOCH fixed",
+  "figures": [
+    {
+      "case": "course watch, ch05 aswell (binary before a6295c7: looks at all files every 20 ms): 8 keystrokes 150-300 ms apart, last keystroke to complete PDF (cancellation on)",
+      "seconds": [
+        0.19,
+        0.183,
+        0.198
+      ],
+      "pdf_identical": true,
+      "median_seconds": 0.19,
+      "min_seconds": 0.183
+    },
+    {
+      "case": "course watch, ch05 aswell (binary before a6295c7: looks at all files every 20 ms): the same as one save, to complete PDF (cancellation on)",
+      "seconds": [
+        0.203,
+        0.223,
+        0.197
+      ],
+      "pdf_identical": true,
+      "median_seconds": 0.203,
+      "min_seconds": 0.197
+    },
+    {
+      "case": "course watch, ch05 aswell (binary before a6295c7: looks at all files every 20 ms): taken back, to complete PDF (cancellation on)",
+      "seconds": [
+        0.245,
+        0.191,
+        0.242
+      ],
+      "pdf_identical": true,
+      "median_seconds": 0.242,
+      "min_seconds": 0.191
+    },
+    {
+      "case": "course watch, ch05 aswell (binary before a6295c7: looks at all files every 20 ms): 8 keystrokes 150-300 ms apart, last keystroke to complete PDF (PARTEX_WATCH_CANCEL=0)",
+      "seconds": [
+        0.257,
+        0.151,
+        0.191
+      ],
+      "pdf_identical": true,
+      "median_seconds": 0.191,
+      "min_seconds": 0.151
+    },
+    {
+      "case": "course watch, ch05 aswell (binary before a6295c7: looks at all files every 20 ms): the same as one save, to complete PDF (PARTEX_WATCH_CANCEL=0)",
+      "seconds": [
+        0.205,
+        0.209,
+        0.168
+      ],
+      "pdf_identical": true,
+      "median_seconds": 0.205,
+      "min_seconds": 0.168
+    },
+    {
+      "case": "course watch, ch05 aswell (binary before a6295c7: looks at all files every 20 ms): taken back, to complete PDF (PARTEX_WATCH_CANCEL=0)",
+      "seconds": [
+        0.171,
+        0.222,
+        0.228
+      ],
+      "pdf_identical": true,
+      "median_seconds": 0.222,
+      "min_seconds": 0.171
+    },
+    {
+      "case": "course watch, ch03 aswell (binary before a6295c7: looks at all files every 20 ms): 8 keystrokes 150-300 ms apart, last keystroke to complete PDF (cancellation on)",
+      "seconds": [
+        0.225,
+        0.236,
+        0.212
+      ],
+      "pdf_identical": true,
+      "median_seconds": 0.225,
+      "min_seconds": 0.212
+    },
+    {
+      "case": "course watch, ch03 aswell (binary before a6295c7: looks at all files every 20 ms): the same as one save, to complete PDF (cancellation on)",
+      "seconds": [
+        0.259,
+        0.239,
+        0.213
+      ],
+      "pdf_identical": true,
+      "median_seconds": 0.239,
+      "min_seconds": 0.213
+    },
+    {
+      "case": "course watch, ch03 aswell (binary before a6295c7: looks at all files every 20 ms): taken back, to complete PDF (cancellation on)",
+      "seconds": [
+        0.226,
+        0.213,
+        0.222
+      ],
+      "pdf_identical": true,
+      "median_seconds": 0.222,
+      "min_seconds": 0.213
+    },
+    {
+      "case": "course watch, ch03 aswell (binary before a6295c7: looks at all files every 20 ms): 8 keystrokes 150-300 ms apart, last keystroke to complete PDF (PARTEX_WATCH_CANCEL=0)",
+      "seconds": [
+        0.29,
+        0.18,
+        0.222
+      ],
+      "pdf_identical": true,
+      "median_seconds": 0.222,
+      "min_seconds": 0.18
+    },
+    {
+      "case": "course watch, ch03 aswell (binary before a6295c7: looks at all files every 20 ms): the same as one save, to complete PDF (PARTEX_WATCH_CANCEL=0)",
+      "seconds": [
+        0.24,
+        0.235,
+        0.23
+      ],
+      "pdf_identical": true,
+      "median_seconds": 0.235,
+      "min_seconds": 0.23
+    },
+    {
+      "case": "course watch, ch03 aswell (binary before a6295c7: looks at all files every 20 ms): taken back, to complete PDF (PARTEX_WATCH_CANCEL=0)",
+      "seconds": [
+        0.228,
+        0.255,
+        0.253
+      ],
+      "pdf_identical": true,
+      "median_seconds": 0.253,
+      "min_seconds": 0.228
+    },
+    {
+      "case": "course watch, ch12 quietly (binary before a6295c7: looks at all files every 20 ms): 8 keystrokes 150-300 ms apart, last keystroke to complete PDF (cancellation on)",
+      "seconds": [
+        31.547,
+        31.06
+      ],
+      "pdf_identical": true,
+      "median_seconds": 31.303,
+      "min_seconds": 31.06
+    },
+    {
+      "case": "course watch, ch12 quietly (binary before a6295c7: looks at all files every 20 ms): the same as one save, to complete PDF (cancellation on)",
+      "seconds": [
+        33.722,
+        35.559
+      ],
+      "pdf_identical": true,
+      "median_seconds": 34.641,
+      "min_seconds": 33.722
+    },
+    {
+      "case": "course watch, ch12 quietly (binary before a6295c7: looks at all files every 20 ms): taken back, to complete PDF (cancellation on)",
+      "seconds": [
+        32.2,
+        31.961
+      ],
+      "pdf_identical": true,
+      "median_seconds": 32.081,
+      "min_seconds": 31.961
+    },
+    {
+      "case": "course watch, ch12 quietly (binary before a6295c7: looks at all files every 20 ms): 8 keystrokes 150-300 ms apart, last keystroke to complete PDF (PARTEX_WATCH_CANCEL=0)",
+      "seconds": [
+        32.427,
+        31.976
+      ],
+      "pdf_identical": true,
+      "median_seconds": 32.201,
+      "min_seconds": 31.976
+    },
+    {
+      "case": "course watch, ch12 quietly (binary before a6295c7: looks at all files every 20 ms): the same as one save, to complete PDF (PARTEX_WATCH_CANCEL=0)",
+      "seconds": [
+        30.946,
+        31.57
+      ],
+      "pdf_identical": true,
+      "median_seconds": 31.258,
+      "min_seconds": 30.946
+    },
+    {
+      "case": "course watch, ch12 quietly (binary before a6295c7: looks at all files every 20 ms): taken back, to complete PDF (PARTEX_WATCH_CANCEL=0)",
+      "seconds": [
+        31.797,
+        31.41
+      ],
+      "pdf_identical": true,
+      "median_seconds": 31.604,
+      "min_seconds": 31.41
+    },
+    {
+      "case": "course watch, ch12 quietly (job's files every 50 ms): 8 keystrokes 150-300 ms apart, last keystroke to complete PDF (cancellation on)",
+      "seconds": [
+        32.621,
+        33.555
+      ],
+      "pdf_identical": true,
+      "median_seconds": 33.088,
+      "min_seconds": 32.621
+    },
+    {
+      "case": "course watch, ch12 quietly (job's files every 50 ms): the same as one save, to complete PDF (cancellation on)",
+      "seconds": [
+        30.953,
+        31.764
+      ],
+      "pdf_identical": true,
+      "median_seconds": 31.358,
+      "min_seconds": 30.953
+    },
+    {
+      "case": "course watch, ch12 quietly (job's files every 50 ms): taken back, to complete PDF (cancellation on)",
+      "seconds": [
+        31.584,
+        33.093
+      ],
+      "pdf_identical": true,
+      "median_seconds": 32.339,
+      "min_seconds": 31.584
+    },
+    {
+      "case": "course watch, ch12 quietly (job's files every 50 ms): 8 keystrokes 150-300 ms apart, last keystroke to complete PDF (PARTEX_WATCH_CANCEL=0)",
+      "seconds": [
+        32.754,
+        33.646
+      ],
+      "pdf_identical": true,
+      "median_seconds": 33.2,
+      "min_seconds": 32.754
+    },
+    {
+      "case": "course watch, ch12 quietly (job's files every 50 ms): the same as one save, to complete PDF (PARTEX_WATCH_CANCEL=0)",
+      "seconds": [
+        31.457,
+        33.255
+      ],
+      "pdf_identical": true,
+      "median_seconds": 32.356,
+      "min_seconds": 31.457
+    },
+    {
+      "case": "course watch, ch12 quietly (job's files every 50 ms): taken back, to complete PDF (PARTEX_WATCH_CANCEL=0)",
+      "seconds": [
+        31.245,
+        31.588
+      ],
+      "pdf_identical": true,
+      "median_seconds": 31.416,
+      "min_seconds": 31.245
+    },
+    {
+      "case": "course watch, ch12 longtype (job's files every 50 ms, PARTEX_MACHINE_COARSEN=0): 36 keystrokes 150-300 ms apart, last keystroke to complete PDF (cancellation on)",
+      "seconds": [
+        2.709
+      ],
+      "pdf_identical": true,
+      "median_seconds": 2.709,
+      "min_seconds": 2.709
+    },
+    {
+      "case": "course watch, ch12 longtype (job's files every 50 ms, PARTEX_MACHINE_COARSEN=0): the same as one save, to complete PDF (cancellation on)",
+      "seconds": [
+        1.885
+      ],
+      "pdf_identical": true,
+      "median_seconds": 1.885,
+      "min_seconds": 1.885
+    },
+    {
+      "case": "course watch, ch12 longtype (job's files every 50 ms, PARTEX_MACHINE_COARSEN=0): taken back, to complete PDF (cancellation on)",
+      "seconds": [
+        1.841
+      ],
+      "pdf_identical": true,
+      "median_seconds": 1.841,
+      "min_seconds": 1.841
+    },
+    {
+      "case": "course watch, ch12 longtype (job's files every 50 ms): 36 keystrokes 150-300 ms apart, last keystroke to complete PDF (PARTEX_WATCH_CANCEL=0)",
+      "seconds": [
+        58.924
+      ],
+      "pdf_identical": true,
+      "median_seconds": 58.924,
+      "min_seconds": 58.924
+    },
+    {
+      "case": "course watch, ch12 longtype (job's files every 50 ms): the same as one save, to complete PDF (PARTEX_WATCH_CANCEL=0)",
+      "seconds": [
+        2.038
+      ],
+      "pdf_identical": true,
+      "median_seconds": 2.038,
+      "min_seconds": 2.038
+    },
+    {
+      "case": "course watch, ch12 longtype (job's files every 50 ms): taken back, to complete PDF (PARTEX_WATCH_CANCEL=0)",
+      "seconds": [
+        1.988
+      ],
+      "pdf_identical": true,
+      "median_seconds": 1.988,
+      "min_seconds": 1.988
+    },
+    {
+      "case": "course watch, ch12 longtype (a6295c7: coarsening by settled rebuilds): 36 keystrokes 150-300 ms apart, last keystroke to complete PDF (cancellation on)",
+      "seconds": [
+        2.664
+      ],
+      "pdf_identical": true,
+      "median_seconds": 2.664,
+      "min_seconds": 2.664
+    },
+    {
+      "case": "course watch, ch12 longtype (a6295c7: coarsening by settled rebuilds): the same as one save, to complete PDF (cancellation on)",
+      "seconds": [
+        1.865
+      ],
+      "pdf_identical": true,
+      "median_seconds": 1.865,
+      "min_seconds": 1.865
+    },
+    {
+      "case": "course watch, ch12 longtype (a6295c7: coarsening by settled rebuilds): taken back, to complete PDF (cancellation on)",
+      "seconds": [
+        1.822
+      ],
+      "pdf_identical": true,
+      "median_seconds": 1.822,
+      "min_seconds": 1.822
+    },
+    {
+      "case": "course watch, ch12 longtype (a6295c7: coarsening by settled rebuilds): 36 keystrokes 150-300 ms apart, last keystroke to complete PDF (PARTEX_WATCH_CANCEL=0)",
+      "seconds": [
+        62.337
+      ],
+      "pdf_identical": true,
+      "median_seconds": 62.337,
+      "min_seconds": 62.337
+    },
+    {
+      "case": "course watch, ch12 longtype (a6295c7: coarsening by settled rebuilds): the same as one save, to complete PDF (PARTEX_WATCH_CANCEL=0)",
+      "seconds": [
+        2.037
+      ],
+      "pdf_identical": true,
+      "median_seconds": 2.037,
+      "min_seconds": 2.037
+    },
+    {
+      "case": "course watch, ch12 longtype (a6295c7: coarsening by settled rebuilds): taken back, to complete PDF (PARTEX_WATCH_CANCEL=0)",
+      "seconds": [
+        1.983
+      ],
+      "pdf_identical": true,
+      "median_seconds": 1.983,
+      "min_seconds": 1.983
+    }
+  ],
+  "note": "a typing burst 150-300 ms apart (fixed seed) into one sentence, timed from the last keystroke to a PDF byte-identical to a cold build of the final text; the binary for each figure is named in its case"
+}

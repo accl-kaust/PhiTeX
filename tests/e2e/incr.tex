@@ -1,0 +1,37 @@
+% Incremental rebuilds (`partex -watch`): the e2e harness edits this file
+% and incr-part.tex between builds (see xtask/src/e2e.rs).
+\newwrite\toc
+\openin1=incr.toc
+\ifeof1 \message{no toc yet}\else\closein1 \input incr.toc \fi
+\immediate\openout\toc=incr.toc
+\def\words{Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do
+eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim
+veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo
+consequat. }
+\def\section#1{\bigskip\noindent{\bf #1}\mark{#1}%
+  \write\toc{\string\line{#1\string\dotfill\folio}}\par\nobreak\medskip}
+\headline={\hfil\botmark}
+\count5=0
+\section{Opening}
+\words\words
+% edit-1
+The first section ends here.\par
+\long\def\partA{\advance\count5 by 1
+  \section{Part \the\count5}
+  \words\words\words\par
+  \ifodd\count5 \footnote*{\words\words}\fi
+  $$\sum_{i=1}^{\the\count5} x_i^2 = \sqrt{y}$$
+  \words\par}
+\loop \partA \ifnum\count5<12 \repeat
+\input incr-part
+\section{Middle}
+% edit-2
+\halign{#\hfil&&\quad#\hfil\cr a&b&c\cr dd&ee&ff\cr}
+\long\def\partB{\advance\count5 by 1
+  \section{Part \the\count5}
+  \words\words\words\par}
+\loop \partB \ifnum\count5<24 \repeat
+\section{Closing}
+% edit-3
+\words\par
+\bye

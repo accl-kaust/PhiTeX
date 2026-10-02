@@ -1,0 +1,17 @@
+[package]
+name = "partex-core"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+partex-engine = { path = "../partex-engine" }
+# The executor (§7.14) and, later, the adapter (§7.0). `no_std`: no threads.
+partex-incr = { path = "../partex-incr", default-features = false }
+partex-trace = { path = "../partex-trace" }
+# The dynamic-SSA runtime (DESIGN.md 7.17), `PARTEX_SSA=1` (`ssa.rs`).
+partex-ssa = { path = "../partex-ssa" }
+
+[lints]
+workspace = true

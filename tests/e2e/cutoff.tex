@@ -1,0 +1,55 @@
+% Early cutoff (`partex -watch`): the e2e harness edits pages whose
+% breaks are fixed, so a rebuild stops at the next checkpoint and splices
+% in the rest of the previous build (see xtask/src/e2e.rs).
+\def\words{Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do
+eiusmod tempor incididunt ut labore et dolore magna aliqua. }
+\def\page#1{\advance\count1 by 1 {\bf Page \the\count1.} #1\words\words\par
+  \words\words\words\words\par\vfill\eject}
+\newwrite\log \immediate\openout\log=cutoff.txt
+\page{}
+\page{}
+\page{
+% edit-1
+}
+\page{}
+\page{}\immediate\write\log{page \the\count1}
+\page{}
+\page{}
+\page{}
+\page{}
+\page{}\immediate\write\log{page \the\count1}
+\page{}
+\page{}
+\page{}
+\page{}
+\page{}\immediate\write\log{page \the\count1}
+\page{}
+\page{}
+\page{}
+\page{}
+\page{
+% edit-2
+}\immediate\write\log{page \the\count1}
+\page{}
+\page{}
+\page{}
+\page{}
+\page{}\immediate\write\log{page \the\count1}
+\page{}
+\page{}
+\page{}
+\page{}
+\page{}\immediate\write\log{page \the\count1}
+\page{}
+\page{}
+\page{
+% edit-3
+}
+\page{}
+\page{}\immediate\write\log{page \the\count1}
+\page{}
+\page{}
+\page{}
+\page{}
+\page{}\immediate\write\log{page \the\count1}
+\bye

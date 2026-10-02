@@ -1,0 +1,155 @@
+{
+  "commit": "e322703",
+  "dirty": false,
+  "date": "2026-09-27T15:30:00+03:00",
+  "host": "argon",
+  "cpus": 24,
+  "reference": "pdfTeX 3.141592653-2.6-1.40.29 (TeX Live 2026/Arch Linux)",
+  "document": "the course (295 pages, 66.06M commands), copy of 2026-09-27; outputs compared with plain partex runs of the edited files",
+  "figures": [
+    {
+      "case": "course: machine rebuild, footnote added in ch15 (master 37932d2 binary)",
+      "seconds": [
+        27.188
+      ],
+      "median_seconds": 27.188,
+      "min_seconds": 27.188,
+      "pdf_identical": true,
+      "note": "warm from the cold build in the same process"
+    },
+    {
+      "case": "course: machine rebuild, \\Cref added in ch15 (master 37932d2 binary)",
+      "seconds": [
+        0.882
+      ],
+      "median_seconds": 0.882,
+      "min_seconds": 0.882,
+      "pdf_identical": true
+    },
+    {
+      "case": "course: machine rebuild, \\label added in ch15 (master 37932d2 binary)",
+      "seconds": [
+        1.481
+      ],
+      "median_seconds": 1.481,
+      "min_seconds": 1.481,
+      "pdf_identical": true
+    },
+    {
+      "case": "course: machine rebuild, footnote added in ch15 (machine-converge 036d7af binary (fonts as cells), grow 1)",
+      "seconds": [
+        3.241,
+        3.2
+      ],
+      "median_seconds": 3.241,
+      "min_seconds": 3.2,
+      "pdf_identical": true
+    },
+    {
+      "case": "course: machine rebuild, the footnote removed again (machine-converge 036d7af binary (fonts as cells), grow 1)",
+      "seconds": [
+        0.88
+      ],
+      "median_seconds": 0.88,
+      "min_seconds": 0.88,
+      "pdf_identical": true
+    },
+    {
+      "case": "course: machine rebuild, \\Cref added in ch15 (machine-converge 036d7af binary (fonts as cells), grow 1)",
+      "seconds": [
+        0.813
+      ],
+      "median_seconds": 0.813,
+      "min_seconds": 0.813,
+      "pdf_identical": true
+    },
+    {
+      "case": "course: machine rebuild, \\label added in ch15 (machine-converge 036d7af binary (fonts as cells), grow 1)",
+      "seconds": [
+        1.338
+      ],
+      "median_seconds": 1.338,
+      "min_seconds": 1.338,
+      "pdf_identical": true
+    },
+    {
+      "case": "course: machine rebuild, \\linespread in the preamble, everything re-run (machine-converge 036d7af binary (fonts as cells), grow 1)",
+      "seconds": [
+        77.68
+      ],
+      "median_seconds": 77.68,
+      "min_seconds": 77.68,
+      "pdf_identical": true
+    },
+    {
+      "case": "course: \\linespread rebuild, grow 1 (machine-converge 7a9f120+ binary, PARTEX_MACHINE_GROW)",
+      "seconds": [
+        84.073
+      ],
+      "median_seconds": 84.073,
+      "min_seconds": 84.073,
+      "pdf_identical": true
+    },
+    {
+      "case": "course: \\linespread rebuild, grow 2 (machine-converge 7a9f120+ binary, PARTEX_MACHINE_GROW)",
+      "seconds": [
+        67.522,
+        71.115
+      ],
+      "median_seconds": 71.115,
+      "min_seconds": 67.522,
+      "pdf_identical": true
+    },
+    {
+      "case": "course: one-word edit in ch15, grow 1 (machine-converge 7a9f120+ binary, PARTEX_MACHINE_GROW)",
+      "seconds": [
+        0.508
+      ],
+      "median_seconds": 0.508,
+      "min_seconds": 0.508,
+      "pdf_identical": true
+    },
+    {
+      "case": "course: one-word edit in ch15, grow 2 (machine-converge 7a9f120+ binary, PARTEX_MACHINE_GROW)",
+      "seconds": [
+        0.372,
+        0.356
+      ],
+      "median_seconds": 0.372,
+      "min_seconds": 0.356,
+      "pdf_identical": true
+    },
+    {
+      "case": "course: second one-word edit nearby, grow 1 (machine-converge 7a9f120+ binary, PARTEX_MACHINE_GROW)",
+      "seconds": [
+        0.074
+      ],
+      "median_seconds": 0.074,
+      "min_seconds": 0.074,
+      "pdf_identical": true
+    },
+    {
+      "case": "course: second one-word edit nearby, grow 2 (machine-converge 7a9f120+ binary, PARTEX_MACHINE_GROW)",
+      "seconds": [
+        0.078,
+        0.072
+      ],
+      "median_seconds": 0.078,
+      "min_seconds": 0.072,
+      "pdf_identical": true
+    },
+    {
+      "case": "course: machine cold build (machine-converge 036d7af binary (fonts as cells), grow 1)",
+      "seconds": [
+        57.6,
+        53.89,
+        56.75,
+        55.23,
+        56.0
+      ],
+      "median_seconds": 56.0,
+      "min_seconds": 53.89,
+      "pdf_identical": true
+    }
+  ]
+}

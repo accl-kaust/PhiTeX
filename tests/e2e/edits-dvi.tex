@@ -1,0 +1,532 @@
+% Machine-mode rebuilds in DVI mode (xtask/src/e2e.rs, `machine_edits_dvi`):
+% an edit in section 5, then one in section 2, whose page was shipped from
+% a DVI buffer the rebuild did not compare.
+% Rebuilds in machine mode (xtask/src/e2e.rs, `machine_edits`): a document
+% long enough to be cut into many regions, whose .aux is read from disk at
+% \begin{document} and read back at \end{document}, where the .toc is
+% written from it. Each paragraph is a line of its own, for the edits.
+\documentclass{article}
+\newcommand\w{alpha beta gamma delta epsilon zeta theta kappa lambda sigma omega region trace guard frontier}
+\begin{document}
+\tableofcontents
+\section{Section 0}\label{s0}
+P0x0 \w\w\w\w\w\w See section~\ref{s0} on page~\pageref{s0}.
+
+P0x1 \w\w\w\w\w\w See section~\ref{s1} on page~\pageref{s1}.
+
+P0x2 \w\w\w\w\w\w See section~\ref{s2} on page~\pageref{s2}.
+
+P0x3 \w\w\w\w\w\w See section~\ref{s3} on page~\pageref{s3}.
+
+P0x4 \w\w\w\w\w\w See section~\ref{s4} on page~\pageref{s4}.
+
+P0x5 \w\w\w\w\w\w See section~\ref{s5} on page~\pageref{s5}.
+
+\section{Section 1}\label{s1}
+P1x0 \w\w\w\w\w\w See section~\ref{s7} on page~\pageref{s3}.
+
+P1x1 \w\w\w\w\w\w See section~\ref{s8} on page~\pageref{s4}.
+
+P1x2 \w\w\w\w\w\w See section~\ref{s9} on page~\pageref{s5}.
+
+P1x3 \w\w\w\w\w\w See section~\ref{s10} on page~\pageref{s6}.
+
+P1x4 \w\w\w\w\w\w See section~\ref{s11} on page~\pageref{s7}.
+
+P1x5 \w\w\w\w\w\w See section~\ref{s12} on page~\pageref{s8}.
+
+\section{Section 2}\label{s2}
+P2x0 \w\w\w\w\w\w See section~\ref{s14} on page~\pageref{s6}.
+
+P2x1 \w\w\w\w\w\w See section~\ref{s15} on page~\pageref{s7}.
+
+P2x2 \w\w\w\w\w\w See section~\ref{s16} on page~\pageref{s8}.
+
+P2x3 \w\w\w\w\w\w See section~\ref{s17} on page~\pageref{s9}.
+
+P2x4 \w\w\w\w\w\w See section~\ref{s18} on page~\pageref{s10}.
+
+P2x5 \w\w\w\w\w\w See section~\ref{s19} on page~\pageref{s11}.
+
+\section{Section 3}\label{s3}
+P3x0 \w\w\w\w\w\w See section~\ref{s21} on page~\pageref{s9}.
+
+P3x1 \w\w\w\w\w\w See section~\ref{s22} on page~\pageref{s10}.
+
+P3x2 \w\w\w\w\w\w See section~\ref{s23} on page~\pageref{s11}.
+
+P3x3 \w\w\w\w\w\w See section~\ref{s24} on page~\pageref{s12}.
+
+P3x4 \w\w\w\w\w\w See section~\ref{s25} on page~\pageref{s13}.
+
+P3x5 \w\w\w\w\w\w See section~\ref{s26} on page~\pageref{s14}.
+
+\section{Section 4}\label{s4}
+P4x0 \w\w\w\w\w\w See section~\ref{s28} on page~\pageref{s12}.
+
+P4x1 \w\w\w\w\w\w See section~\ref{s29} on page~\pageref{s13}.
+
+P4x2 \w\w\w\w\w\w See section~\ref{s30} on page~\pageref{s14}.
+
+P4x3 \w\w\w\w\w\w See section~\ref{s31} on page~\pageref{s15}.
+
+P4x4 \w\w\w\w\w\w See section~\ref{s32} on page~\pageref{s16}.
+
+P4x5 \w\w\w\w\w\w See section~\ref{s33} on page~\pageref{s17}.
+
+\section{Section 5}\label{s5}
+P5x0 \w\w\w\w\w\w See section~\ref{s35} on page~\pageref{s15}.
+
+P5x1 \w\w\w\w\w\w See section~\ref{s36} on page~\pageref{s16}.
+
+P5x2 \w\w\w\w\w\w See section~\ref{s37} on page~\pageref{s17}.
+
+P5x3 \w\w\w\w\w\w See section~\ref{s38} on page~\pageref{s18}.
+
+P5x4 \w\w\w\w\w\w See section~\ref{s39} on page~\pageref{s19}.
+
+P5x5 \w\w\w\w\w\w See section~\ref{s0} on page~\pageref{s20}.
+
+\section{Section 6}\label{s6}
+P6x0 \w\w\w\w\w\w See section~\ref{s2} on page~\pageref{s18}.
+
+P6x1 \w\w\w\w\w\w See section~\ref{s3} on page~\pageref{s19}.
+
+P6x2 \w\w\w\w\w\w See section~\ref{s4} on page~\pageref{s20}.
+
+P6x3 \w\w\w\w\w\w See section~\ref{s5} on page~\pageref{s21}.
+
+P6x4 \w\w\w\w\w\w See section~\ref{s6} on page~\pageref{s22}.
+
+P6x5 \w\w\w\w\w\w See section~\ref{s7} on page~\pageref{s23}.
+
+\section{Section 7}\label{s7}
+P7x0 \w\w\w\w\w\w See section~\ref{s9} on page~\pageref{s21}.
+
+P7x1 \w\w\w\w\w\w See section~\ref{s10} on page~\pageref{s22}.
+
+P7x2 \w\w\w\w\w\w See section~\ref{s11} on page~\pageref{s23}.
+
+P7x3 \w\w\w\w\w\w See section~\ref{s12} on page~\pageref{s24}.
+
+P7x4 \w\w\w\w\w\w See section~\ref{s13} on page~\pageref{s25}.
+
+P7x5 \w\w\w\w\w\w See section~\ref{s14} on page~\pageref{s26}.
+
+\section{Section 8}\label{s8}
+P8x0 \w\w\w\w\w\w See section~\ref{s16} on page~\pageref{s24}.
+
+P8x1 \w\w\w\w\w\w See section~\ref{s17} on page~\pageref{s25}.
+
+P8x2 \w\w\w\w\w\w See section~\ref{s18} on page~\pageref{s26}.
+
+P8x3 \w\w\w\w\w\w See section~\ref{s19} on page~\pageref{s27}.
+
+P8x4 \w\w\w\w\w\w See section~\ref{s20} on page~\pageref{s28}.
+
+P8x5 \w\w\w\w\w\w See section~\ref{s21} on page~\pageref{s29}.
+
+\section{Section 9}\label{s9}
+P9x0 \w\w\w\w\w\w See section~\ref{s23} on page~\pageref{s27}.
+
+P9x1 \w\w\w\w\w\w See section~\ref{s24} on page~\pageref{s28}.
+
+P9x2 \w\w\w\w\w\w See section~\ref{s25} on page~\pageref{s29}.
+
+P9x3 \w\w\w\w\w\w See section~\ref{s26} on page~\pageref{s30}.
+
+P9x4 \w\w\w\w\w\w See section~\ref{s27} on page~\pageref{s31}.
+
+P9x5 \w\w\w\w\w\w See section~\ref{s28} on page~\pageref{s32}.
+
+\section{Section 10}\label{s10}
+P10x0 \w\w\w\w\w\w See section~\ref{s30} on page~\pageref{s30}.
+
+P10x1 \w\w\w\w\w\w See section~\ref{s31} on page~\pageref{s31}.
+
+P10x2 \w\w\w\w\w\w See section~\ref{s32} on page~\pageref{s32}.
+
+P10x3 \w\w\w\w\w\w See section~\ref{s33} on page~\pageref{s33}.
+
+P10x4 \w\w\w\w\w\w See section~\ref{s34} on page~\pageref{s34}.
+
+P10x5 \w\w\w\w\w\w See section~\ref{s35} on page~\pageref{s35}.
+
+\section{Section 11}\label{s11}
+P11x0 \w\w\w\w\w\w See section~\ref{s37} on page~\pageref{s33}.
+
+P11x1 \w\w\w\w\w\w See section~\ref{s38} on page~\pageref{s34}.
+
+P11x2 \w\w\w\w\w\w See section~\ref{s39} on page~\pageref{s35}.
+
+P11x3 \w\w\w\w\w\w See section~\ref{s0} on page~\pageref{s36}.
+
+P11x4 \w\w\w\w\w\w See section~\ref{s1} on page~\pageref{s37}.
+
+P11x5 \w\w\w\w\w\w See section~\ref{s2} on page~\pageref{s38}.
+
+\section{Section 12}\label{s12}
+P12x0 \w\w\w\w\w\w See section~\ref{s4} on page~\pageref{s36}.
+
+P12x1 \w\w\w\w\w\w See section~\ref{s5} on page~\pageref{s37}.
+
+P12x2 \w\w\w\w\w\w See section~\ref{s6} on page~\pageref{s38}.
+
+P12x3 \w\w\w\w\w\w See section~\ref{s7} on page~\pageref{s39}.
+
+P12x4 \w\w\w\w\w\w See section~\ref{s8} on page~\pageref{s0}.
+
+P12x5 \w\w\w\w\w\w See section~\ref{s9} on page~\pageref{s1}.
+
+\section{Section 13}\label{s13}
+P13x0 \w\w\w\w\w\w See section~\ref{s11} on page~\pageref{s39}.
+
+P13x1 \w\w\w\w\w\w See section~\ref{s12} on page~\pageref{s0}.
+
+P13x2 \w\w\w\w\w\w See section~\ref{s13} on page~\pageref{s1}.
+
+P13x3 \w\w\w\w\w\w See section~\ref{s14} on page~\pageref{s2}.
+
+P13x4 \w\w\w\w\w\w See section~\ref{s15} on page~\pageref{s3}.
+
+P13x5 \w\w\w\w\w\w See section~\ref{s16} on page~\pageref{s4}.
+
+\section{Section 14}\label{s14}
+P14x0 \w\w\w\w\w\w See section~\ref{s18} on page~\pageref{s2}.
+
+P14x1 \w\w\w\w\w\w See section~\ref{s19} on page~\pageref{s3}.
+
+P14x2 \w\w\w\w\w\w See section~\ref{s20} on page~\pageref{s4}.
+
+P14x3 \w\w\w\w\w\w See section~\ref{s21} on page~\pageref{s5}.
+
+P14x4 \w\w\w\w\w\w See section~\ref{s22} on page~\pageref{s6}.
+
+P14x5 \w\w\w\w\w\w See section~\ref{s23} on page~\pageref{s7}.
+
+\section{Section 15}\label{s15}
+P15x0 \w\w\w\w\w\w See section~\ref{s25} on page~\pageref{s5}.
+
+P15x1 \w\w\w\w\w\w See section~\ref{s26} on page~\pageref{s6}.
+
+P15x2 \w\w\w\w\w\w See section~\ref{s27} on page~\pageref{s7}.
+
+P15x3 \w\w\w\w\w\w See section~\ref{s28} on page~\pageref{s8}.
+
+P15x4 \w\w\w\w\w\w See section~\ref{s29} on page~\pageref{s9}.
+
+P15x5 \w\w\w\w\w\w See section~\ref{s30} on page~\pageref{s10}.
+
+\section{Section 16}\label{s16}
+P16x0 \w\w\w\w\w\w See section~\ref{s32} on page~\pageref{s8}.
+
+P16x1 \w\w\w\w\w\w See section~\ref{s33} on page~\pageref{s9}.
+
+P16x2 \w\w\w\w\w\w See section~\ref{s34} on page~\pageref{s10}.
+
+P16x3 \w\w\w\w\w\w See section~\ref{s35} on page~\pageref{s11}.
+
+P16x4 \w\w\w\w\w\w See section~\ref{s36} on page~\pageref{s12}.
+
+P16x5 \w\w\w\w\w\w See section~\ref{s37} on page~\pageref{s13}.
+
+\section{Section 17}\label{s17}
+P17x0 \w\w\w\w\w\w See section~\ref{s39} on page~\pageref{s11}.
+
+P17x1 \w\w\w\w\w\w See section~\ref{s0} on page~\pageref{s12}.
+
+P17x2 \w\w\w\w\w\w See section~\ref{s1} on page~\pageref{s13}.
+
+P17x3 \w\w\w\w\w\w See section~\ref{s2} on page~\pageref{s14}.
+
+P17x4 \w\w\w\w\w\w See section~\ref{s3} on page~\pageref{s15}.
+
+P17x5 \w\w\w\w\w\w See section~\ref{s4} on page~\pageref{s16}.
+
+\section{Section 18}\label{s18}
+P18x0 \w\w\w\w\w\w See section~\ref{s6} on page~\pageref{s14}.
+
+P18x1 \w\w\w\w\w\w See section~\ref{s7} on page~\pageref{s15}.
+
+P18x2 \w\w\w\w\w\w See section~\ref{s8} on page~\pageref{s16}.
+
+P18x3 \w\w\w\w\w\w See section~\ref{s9} on page~\pageref{s17}.
+
+P18x4 \w\w\w\w\w\w See section~\ref{s10} on page~\pageref{s18}.
+
+P18x5 \w\w\w\w\w\w See section~\ref{s11} on page~\pageref{s19}.
+
+\section{Section 19}\label{s19}
+P19x0 \w\w\w\w\w\w See section~\ref{s13} on page~\pageref{s17}.
+
+P19x1 \w\w\w\w\w\w See section~\ref{s14} on page~\pageref{s18}.
+
+P19x2 \w\w\w\w\w\w See section~\ref{s15} on page~\pageref{s19}.
+
+P19x3 \w\w\w\w\w\w See section~\ref{s16} on page~\pageref{s20}.
+
+P19x4 \w\w\w\w\w\w See section~\ref{s17} on page~\pageref{s21}.
+
+P19x5 \w\w\w\w\w\w See section~\ref{s18} on page~\pageref{s22}.
+
+\section{Section 20}\label{s20}
+P20x0 \w\w\w\w\w\w See section~\ref{s20} on page~\pageref{s20}.
+
+P20x1 \w\w\w\w\w\w See section~\ref{s21} on page~\pageref{s21}.
+
+P20x2 \w\w\w\w\w\w See section~\ref{s22} on page~\pageref{s22}.
+
+P20x3 \w\w\w\w\w\w See section~\ref{s23} on page~\pageref{s23}.
+
+P20x4 \w\w\w\w\w\w See section~\ref{s24} on page~\pageref{s24}.
+
+P20x5 \w\w\w\w\w\w See section~\ref{s25} on page~\pageref{s25}.
+
+\section{Section 21}\label{s21}
+P21x0 \w\w\w\w\w\w See section~\ref{s27} on page~\pageref{s23}.
+
+P21x1 \w\w\w\w\w\w See section~\ref{s28} on page~\pageref{s24}.
+
+P21x2 \w\w\w\w\w\w See section~\ref{s29} on page~\pageref{s25}.
+
+P21x3 \w\w\w\w\w\w See section~\ref{s30} on page~\pageref{s26}.
+
+P21x4 \w\w\w\w\w\w See section~\ref{s31} on page~\pageref{s27}.
+
+P21x5 \w\w\w\w\w\w See section~\ref{s32} on page~\pageref{s28}.
+
+\section{Section 22}\label{s22}
+P22x0 \w\w\w\w\w\w See section~\ref{s34} on page~\pageref{s26}.
+
+P22x1 \w\w\w\w\w\w See section~\ref{s35} on page~\pageref{s27}.
+
+P22x2 \w\w\w\w\w\w See section~\ref{s36} on page~\pageref{s28}.
+
+P22x3 \w\w\w\w\w\w See section~\ref{s37} on page~\pageref{s29}.
+
+P22x4 \w\w\w\w\w\w See section~\ref{s38} on page~\pageref{s30}.
+
+P22x5 \w\w\w\w\w\w See section~\ref{s39} on page~\pageref{s31}.
+
+\section{Section 23}\label{s23}
+P23x0 \w\w\w\w\w\w See section~\ref{s1} on page~\pageref{s29}.
+
+P23x1 \w\w\w\w\w\w See section~\ref{s2} on page~\pageref{s30}.
+
+P23x2 \w\w\w\w\w\w See section~\ref{s3} on page~\pageref{s31}.
+
+P23x3 \w\w\w\w\w\w See section~\ref{s4} on page~\pageref{s32}.
+
+P23x4 \w\w\w\w\w\w See section~\ref{s5} on page~\pageref{s33}.
+
+P23x5 \w\w\w\w\w\w See section~\ref{s6} on page~\pageref{s34}.
+
+\section{Section 24}\label{s24}
+P24x0 \w\w\w\w\w\w See section~\ref{s8} on page~\pageref{s32}.
+
+P24x1 \w\w\w\w\w\w See section~\ref{s9} on page~\pageref{s33}.
+
+P24x2 \w\w\w\w\w\w See section~\ref{s10} on page~\pageref{s34}.
+
+P24x3 \w\w\w\w\w\w See section~\ref{s11} on page~\pageref{s35}.
+
+P24x4 \w\w\w\w\w\w See section~\ref{s12} on page~\pageref{s36}.
+
+P24x5 \w\w\w\w\w\w See section~\ref{s13} on page~\pageref{s37}.
+
+\section{Section 25}\label{s25}
+P25x0 \w\w\w\w\w\w See section~\ref{s15} on page~\pageref{s35}.
+
+P25x1 \w\w\w\w\w\w See section~\ref{s16} on page~\pageref{s36}.
+
+P25x2 \w\w\w\w\w\w See section~\ref{s17} on page~\pageref{s37}.
+
+P25x3 \w\w\w\w\w\w See section~\ref{s18} on page~\pageref{s38}.
+
+P25x4 \w\w\w\w\w\w See section~\ref{s19} on page~\pageref{s39}.
+
+P25x5 \w\w\w\w\w\w See section~\ref{s20} on page~\pageref{s0}.
+
+\section{Section 26}\label{s26}
+P26x0 \w\w\w\w\w\w See section~\ref{s22} on page~\pageref{s38}.
+
+P26x1 \w\w\w\w\w\w See section~\ref{s23} on page~\pageref{s39}.
+
+P26x2 \w\w\w\w\w\w See section~\ref{s24} on page~\pageref{s0}.
+
+P26x3 \w\w\w\w\w\w See section~\ref{s25} on page~\pageref{s1}.
+
+P26x4 \w\w\w\w\w\w See section~\ref{s26} on page~\pageref{s2}.
+
+P26x5 \w\w\w\w\w\w See section~\ref{s27} on page~\pageref{s3}.
+
+\section{Section 27}\label{s27}
+P27x0 \w\w\w\w\w\w See section~\ref{s29} on page~\pageref{s1}.
+
+P27x1 \w\w\w\w\w\w See section~\ref{s30} on page~\pageref{s2}.
+
+P27x2 \w\w\w\w\w\w See section~\ref{s31} on page~\pageref{s3}.
+
+P27x3 \w\w\w\w\w\w See section~\ref{s32} on page~\pageref{s4}.
+
+P27x4 \w\w\w\w\w\w See section~\ref{s33} on page~\pageref{s5}.
+
+P27x5 \w\w\w\w\w\w See section~\ref{s34} on page~\pageref{s6}.
+
+\section{Section 28}\label{s28}
+P28x0 \w\w\w\w\w\w See section~\ref{s36} on page~\pageref{s4}.
+
+P28x1 \w\w\w\w\w\w See section~\ref{s37} on page~\pageref{s5}.
+
+P28x2 \w\w\w\w\w\w See section~\ref{s38} on page~\pageref{s6}.
+
+P28x3 \w\w\w\w\w\w See section~\ref{s39} on page~\pageref{s7}.
+
+P28x4 \w\w\w\w\w\w See section~\ref{s0} on page~\pageref{s8}.
+
+P28x5 \w\w\w\w\w\w See section~\ref{s1} on page~\pageref{s9}.
+
+\section{Section 29}\label{s29}
+P29x0 \w\w\w\w\w\w See section~\ref{s3} on page~\pageref{s7}.
+
+P29x1 \w\w\w\w\w\w See section~\ref{s4} on page~\pageref{s8}.
+
+P29x2 \w\w\w\w\w\w See section~\ref{s5} on page~\pageref{s9}.
+
+P29x3 \w\w\w\w\w\w See section~\ref{s6} on page~\pageref{s10}.
+
+P29x4 \w\w\w\w\w\w See section~\ref{s7} on page~\pageref{s11}.
+
+P29x5 \w\w\w\w\w\w See section~\ref{s8} on page~\pageref{s12}.
+
+\section{Section 30}\label{s30}
+P30x0 \w\w\w\w\w\w See section~\ref{s10} on page~\pageref{s10}.
+
+P30x1 \w\w\w\w\w\w See section~\ref{s11} on page~\pageref{s11}.
+
+P30x2 \w\w\w\w\w\w See section~\ref{s12} on page~\pageref{s12}.
+
+P30x3 \w\w\w\w\w\w See section~\ref{s13} on page~\pageref{s13}.
+
+P30x4 \w\w\w\w\w\w See section~\ref{s14} on page~\pageref{s14}.
+
+P30x5 \w\w\w\w\w\w See section~\ref{s15} on page~\pageref{s15}.
+
+\section{Section 31}\label{s31}
+P31x0 \w\w\w\w\w\w See section~\ref{s17} on page~\pageref{s13}.
+
+P31x1 \w\w\w\w\w\w See section~\ref{s18} on page~\pageref{s14}.
+
+P31x2 \w\w\w\w\w\w See section~\ref{s19} on page~\pageref{s15}.
+
+P31x3 \w\w\w\w\w\w See section~\ref{s20} on page~\pageref{s16}.
+
+P31x4 \w\w\w\w\w\w See section~\ref{s21} on page~\pageref{s17}.
+
+P31x5 \w\w\w\w\w\w See section~\ref{s22} on page~\pageref{s18}.
+
+\section{Section 32}\label{s32}
+P32x0 \w\w\w\w\w\w See section~\ref{s24} on page~\pageref{s16}.
+
+P32x1 \w\w\w\w\w\w See section~\ref{s25} on page~\pageref{s17}.
+
+P32x2 \w\w\w\w\w\w See section~\ref{s26} on page~\pageref{s18}.
+
+P32x3 \w\w\w\w\w\w See section~\ref{s27} on page~\pageref{s19}.
+
+P32x4 \w\w\w\w\w\w See section~\ref{s28} on page~\pageref{s20}.
+
+P32x5 \w\w\w\w\w\w See section~\ref{s29} on page~\pageref{s21}.
+
+\section{Section 33}\label{s33}
+P33x0 \w\w\w\w\w\w See section~\ref{s31} on page~\pageref{s19}.
+
+P33x1 \w\w\w\w\w\w See section~\ref{s32} on page~\pageref{s20}.
+
+P33x2 \w\w\w\w\w\w See section~\ref{s33} on page~\pageref{s21}.
+
+P33x3 \w\w\w\w\w\w See section~\ref{s34} on page~\pageref{s22}.
+
+P33x4 \w\w\w\w\w\w See section~\ref{s35} on page~\pageref{s23}.
+
+P33x5 \w\w\w\w\w\w See section~\ref{s36} on page~\pageref{s24}.
+
+\section{Section 34}\label{s34}
+P34x0 \w\w\w\w\w\w See section~\ref{s38} on page~\pageref{s22}.
+
+P34x1 \w\w\w\w\w\w See section~\ref{s39} on page~\pageref{s23}.
+
+P34x2 \w\w\w\w\w\w See section~\ref{s0} on page~\pageref{s24}.
+
+P34x3 \w\w\w\w\w\w See section~\ref{s1} on page~\pageref{s25}.
+
+P34x4 \w\w\w\w\w\w See section~\ref{s2} on page~\pageref{s26}.
+
+P34x5 \w\w\w\w\w\w See section~\ref{s3} on page~\pageref{s27}.
+
+\section{Section 35}\label{s35}
+P35x0 \w\w\w\w\w\w See section~\ref{s5} on page~\pageref{s25}.
+
+P35x1 \w\w\w\w\w\w See section~\ref{s6} on page~\pageref{s26}.
+
+P35x2 \w\w\w\w\w\w See section~\ref{s7} on page~\pageref{s27}.
+
+P35x3 \w\w\w\w\w\w See section~\ref{s8} on page~\pageref{s28}.
+
+P35x4 \w\w\w\w\w\w See section~\ref{s9} on page~\pageref{s29}.
+
+P35x5 \w\w\w\w\w\w See section~\ref{s10} on page~\pageref{s30}.
+
+\section{Section 36}\label{s36}
+P36x0 \w\w\w\w\w\w See section~\ref{s12} on page~\pageref{s28}.
+
+P36x1 \w\w\w\w\w\w See section~\ref{s13} on page~\pageref{s29}.
+
+P36x2 \w\w\w\w\w\w See section~\ref{s14} on page~\pageref{s30}.
+
+P36x3 \w\w\w\w\w\w See section~\ref{s15} on page~\pageref{s31}.
+
+P36x4 \w\w\w\w\w\w See section~\ref{s16} on page~\pageref{s32}.
+
+P36x5 \w\w\w\w\w\w See section~\ref{s17} on page~\pageref{s33}.
+
+\section{Section 37}\label{s37}
+P37x0 \w\w\w\w\w\w See section~\ref{s19} on page~\pageref{s31}.
+
+P37x1 \w\w\w\w\w\w See section~\ref{s20} on page~\pageref{s32}.
+
+P37x2 \w\w\w\w\w\w See section~\ref{s21} on page~\pageref{s33}.
+
+P37x3 \w\w\w\w\w\w See section~\ref{s22} on page~\pageref{s34}.
+
+P37x4 \w\w\w\w\w\w See section~\ref{s23} on page~\pageref{s35}.
+
+P37x5 \w\w\w\w\w\w See section~\ref{s24} on page~\pageref{s36}.
+
+\section{Section 38}\label{s38}
+P38x0 \w\w\w\w\w\w See section~\ref{s26} on page~\pageref{s34}.
+
+P38x1 \w\w\w\w\w\w See section~\ref{s27} on page~\pageref{s35}.
+
+P38x2 \w\w\w\w\w\w See section~\ref{s28} on page~\pageref{s36}.
+
+P38x3 \w\w\w\w\w\w See section~\ref{s29} on page~\pageref{s37}.
+
+P38x4 \w\w\w\w\w\w See section~\ref{s30} on page~\pageref{s38}.
+
+P38x5 \w\w\w\w\w\w See section~\ref{s31} on page~\pageref{s39}.
+
+\section{Section 39}\label{s39}
+P39x0 \w\w\w\w\w\w See section~\ref{s33} on page~\pageref{s37}.
+
+P39x1 \w\w\w\w\w\w See section~\ref{s34} on page~\pageref{s38}.
+
+P39x2 \w\w\w\w\w\w See section~\ref{s35} on page~\pageref{s39}.
+
+P39x3 \w\w\w\w\w\w See section~\ref{s36} on page~\pageref{s0}.
+
+P39x4 \w\w\w\w\w\w See section~\ref{s37} on page~\pageref{s1}.
+
+P39x5 \w\w\w\w\w\w See section~\ref{s38} on page~\pageref{s2}.
+
+\end{document}

@@ -1,0 +1,42 @@
+\indexentry{alpha}{1}
+\indexentry{alpha}{2}
+\indexentry{alpha}{3}
+\indexentry{alpha}{5}
+\indexentry{Alpha}{4}
+\indexentry{alpha!beta}{ii}
+\indexentry{alpha!beta!gamma}{iv}
+\indexentry{alpha!beta!gamma}{III}
+\indexentry{sort@\textbf{actual}}{7}
+\indexentry{sort@\textbf{actual}|textbf}{8}
+\indexentry{range|(}{10}
+\indexentry{range|textit}{11}
+\indexentry{range|)}{14}
+\indexentry{range|)}{15}
+\indexentry{nested|(}{1}
+\indexentry{nested|(}{2}
+\indexentry{nested|)}{3}
+\indexentry{chap}{1-5}
+\indexentry{chap}{1-6}
+\indexentry{chap}{2-1}
+\indexentry{chap}{a-3}
+\indexentry{"!quoted "@ "| sign}{9}
+\indexentry{\"escaped}{9}
+\indexentry{123}{1}
+\indexentry{45}{1}
+\indexentry{!empty}{1}
+\indexentry{a!!b}{1}
+\indexentry{bad|x|y}{1}
+\indexentry{x}{1 2}
+\indexentry{x}{q}
+\indexentry{x}{}
+\indexentry{unterminated}{1
+\indexentry{a}}{1}
+\index{wrong}{1}
+\indexentry{same}{2}
+\indexentry{same}{2}
+\indexentry{same|see{alpha}}{2}
+\indexentry{  spaced   out  }{4}
+\indexentry{Zulu}{A}
+\indexentry{zulu}{b}
+\indexentry{$\alpha$}{6}
+\indexentry{~tilde}{6}

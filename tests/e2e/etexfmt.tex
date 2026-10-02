@@ -1,0 +1,7 @@
+% e-TeX state in a format: registers above 255, penalty arrays, \protected.
+\catcode`\{=1 \catcode`\}=2 \catcode`\#=6 \catcode`\^=7
+\input plain
+\count300=5 \dimen4000=3pt \skip999=1pt plus 2fil \muskip1000=3mu \toks500={abc}
+\setbox300\hbox{x}\interlinepenalties=3 1 2 3 \TeXXeTstate=1
+\protected\def\p{q}\marks3{m}
+\dump

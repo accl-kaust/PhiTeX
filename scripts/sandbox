@@ -1,0 +1,72 @@
+#!/usr/bin/env bash
+# Run a command inside a bubblewrap sandbox rooted at the repository.
+#
+#   scripts/sandbox [--net] <command> [args...]
+#
+# - System dirs (/usr, /etc, TeX Live's /var/lib/texmf formats) read-only;
+#   $HOME is an empty tmpfs.
+# - Only the repository and cargo's registry/git caches are writable.
+# - The rustup toolchain store and the rest of $CARGO_HOME (incl. bin/) are
+#   read-only, so build scripts and downloaded code cannot persist outside.
+# - No network unless --net is given (cargo is then allowed to fetch).
+set -euo pipefail
+
+repo="$(cd "$(dirname "$0")/.." && pwd)"
+cargo_home="${CARGO_HOME:-$HOME/.cargo}"
+rustup_home="${RUSTUP_HOME:-$HOME/.rustup}"
+
+net=(--unshare-net)
+offline=true
+if [ "${1:-}" = "--net" ]; then
+  net=(--share-net)
+  offline=false
+  shift
+fi
+[ $# -gt 0 ] || { echo "usage: $0 [--net] <command> [args...]" >&2; exit 2; }
+
+mkdir -p "$cargo_home/registry" "$cargo_home/git"
+
+args=(
+  --unshare-all "${net[@]}"
+  --die-with-parent --new-session
+  --ro-bind /usr /usr
+  --symlink usr/bin /bin --symlink usr/bin /sbin
+  --symlink usr/lib /lib --symlink usr/lib /lib64
+  --ro-bind /etc /etc
+  --ro-bind-try /var/lib/texmf /var/lib/texmf
+  --proc /proc --dev /dev
+  --tmpfs /tmp
+  --tmpfs "$HOME"
+  --ro-bind "$rustup_home" "$rustup_home"
+  --ro-bind-try "$cargo_home" "$cargo_home"
+  --bind "$cargo_home/registry" "$cargo_home/registry"
+  --bind "$cargo_home/git" "$cargo_home/git"
+  --bind "$repo" "$repo"
+  --chdir "$PWD"
+  --clearenv
+  --setenv HOME "$HOME"
+  --setenv PATH "$cargo_home/bin:/usr/bin"
+  --setenv CARGO_HOME "$cargo_home"
+  --setenv RUSTUP_HOME "$rustup_home"
+  --setenv CARGO_NET_OFFLINE "$offline"
+  --setenv TERM "${TERM:-dumb}"
+  --setenv LANG "${LANG:-C.UTF-8}"
+  --setenv TEXMFVAR /tmp/texmf-var
+  --setenv PARTEX_SANDBOX 1
+)
+# partex's own switches (PARTEX_PERSIST_CHECK, PARTEX_WATCH_DEBUG, ...) pass
+# through.
+while IFS='=' read -r name value; do
+  [[ $name == PARTEX_* && $name != PARTEX_SANDBOX ]] && args+=(--setenv "$name" "$value")
+done < <(env)
+# A separate target directory (inside the repo) passes through too.
+[ -n "${CARGO_TARGET_DIR:-}" ] && args+=(--setenv CARGO_TARGET_DIR "$CARGO_TARGET_DIR")
+# Keep $PWD inside the repo, or a git worktree under ~/code/tmp (bound
+# too); fall back to the repo root otherwise.
+case "$PWD" in
+  "$repo"*) ;;
+  "$HOME"/code/tmp/*) args+=(--bind "$PWD" "$PWD" --chdir "$PWD") ;;
+  *) args+=(--chdir "$repo") ;;
+esac
+
+exec bwrap "${args[@]}" "$@"

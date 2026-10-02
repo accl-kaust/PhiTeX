@@ -1,0 +1,20 @@
+[package]
+name = "partex-incr"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "Language-independent incremental and parallel runtime: cells, traces, propagation, holes, rounds, link"
+
+[features]
+default = ["threads"]
+# `std` threads for the `Threads` executor. Without it the crate is
+# `no_std` + `alloc` and every parallel phase runs on `Sequential`.
+threads = []
+
+[lints]
+workspace = true
+
+[[example]]
+name = "measure"
+required-features = ["threads"]

@@ -1,0 +1,152 @@
+{
+  "commit": "42445c9a081d",
+  "dirty": false,
+  "date": "2026-09-26T10:47:53+03:00",
+  "host": "argon",
+  "cpus": 24,
+  "reference": "pdfTeX 3.141592653-2.6-1.40.29 (TeX Live 2026/Arch Linux)",
+  "figures": [
+    {
+      "case": "article: pdflatex, plain run",
+      "seconds": [
+        0.58,
+        0.59,
+        0.63,
+        0.58,
+        0.61,
+        0.62,
+        0.63,
+        0.61,
+        0.58,
+        0.62
+      ],
+      "max_rss_kib": [
+        73780,
+        74444,
+        76568,
+        76280,
+        76388,
+        73636,
+        73628,
+        73796,
+        73652,
+        76428
+      ],
+      "median_seconds": 0.61,
+      "min_seconds": 0.58
+    },
+    {
+      "case": "article: plain run",
+      "seconds": [
+        0.47,
+        0.49,
+        0.5,
+        0.5,
+        0.47,
+        0.47,
+        0.47,
+        0.51,
+        0.47,
+        0.46
+      ],
+      "max_rss_kib": [
+        73432,
+        68284,
+        68236,
+        68532,
+        70856,
+        71048,
+        67844,
+        68036,
+        71244,
+        71760
+      ],
+      "median_seconds": 0.47,
+      "min_seconds": 0.46,
+      "pdf_identical": true
+    },
+    {
+      "case": "article: -converge, cold",
+      "seconds": [
+        1.44,
+        1.43,
+        1.48
+      ],
+      "max_rss_kib": [
+        500432,
+        501484,
+        503096
+      ],
+      "median_seconds": 1.44,
+      "min_seconds": 1.43
+    },
+    {
+      "case": "article: -converge, unchanged",
+      "seconds": [
+        0.08,
+        0.07,
+        0.08,
+        0.08,
+        0.08
+      ],
+      "max_rss_kib": [
+        147076,
+        146908,
+        146840,
+        146856,
+        147036
+      ],
+      "median_seconds": 0.08,
+      "min_seconds": 0.07
+    },
+    {
+      "case": "article: -converge, body edit",
+      "seconds": [
+        0.49,
+        0.44,
+        0.47
+      ],
+      "max_rss_kib": [
+        296536,
+        276432,
+        285552
+      ],
+      "median_seconds": 0.47,
+      "min_seconds": 0.44
+    },
+    {
+      "case": "pgfsub: pdflatex, plain run",
+      "seconds": [
+        24.38
+      ],
+      "max_rss_kib": [
+        98292
+      ],
+      "median_seconds": 24.38,
+      "min_seconds": 24.38
+    },
+    {
+      "case": "pgfsub: plain run",
+      "seconds": [
+        26.82
+      ],
+      "max_rss_kib": [
+        116916
+      ],
+      "median_seconds": 26.82,
+      "min_seconds": 26.82,
+      "pdf_identical": true
+    },
+    {
+      "case": "pgfsub: -converge, cold",
+      "seconds": [
+        83.28
+      ],
+      "max_rss_kib": [
+        1156168
+      ],
+      "median_seconds": 83.28,
+      "min_seconds": 83.28
+    }
+  ]
+}

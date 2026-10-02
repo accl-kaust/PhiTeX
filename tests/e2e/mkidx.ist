@@ -1,0 +1,18 @@
+% a style exercising most attributes
+headings_flag 1
+heading_prefix "\n\\letter{"
+heading_suffix "}\n"
+symhead_positive "Symbole"
+numhead_positive "Zahlen"
+line_max 40
+indent_space "  "
+indent_length 2
+delim_0 " \\dotfill "
+delim_r "\\,--\\,"
+suffix_2p "\\,f."
+page_precedence "rnaRA"
+unknown_spec "x"
+level '>'
+encap_prefix "\\enc{"
+encap_infix "}{"
+encap_suffix "}"

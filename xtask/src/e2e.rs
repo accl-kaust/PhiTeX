@@ -1,0 +1,1738 @@
+//! `cargo xtask e2e`: run partex and the installed oracle engine on the same
+//! jobs, side by side, and compare everything observable: the terminal
+//! output, every log, and every DVI file.
+//!
+//! The incremental cases run `partex -watch` and edit its inputs between
+//! builds; after each rebuild, the oracle runs afresh on the same files and
+//! everything must match again.
+//!
+//! Each case is a sequence of runs in one fresh directory (so a format
+//! dumped by one run is loaded by the next). The first line of each log and
+//! of the terminal output (banner and date) is not compared, nor are format
+//! files, whose layout is partex's own, nor TeX's memory statistics (see
+//! `mask.rs`).
+
+use std::fs;
+use std::io::{BufRead, BufReader, Write};
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+
+use anyhow::{Context, Result, ensure};
+
+struct Case {
+    name: &'static str,
+    /// The oracle binary; partex runs with the same arguments (in that
+    /// engine's flavor).
+    oracle: &'static str,
+    /// Files from `tests/e2e/` copied into the run directory.
+    inputs: &'static [&'static str],
+    runs: &'static [&'static [&'static str]],
+}
+
+/// A run's first argument that makes it a BibTeX run (`bibtex` against
+/// `partex -bibtex`).
+const BIBTEX: &str = "*bibtex";
+
+/// A run's first argument that makes it a makeindex run (`makeindex`
+/// against `partex -makeindex`).
+const MAKEINDEX: &str = "*makeindex";
+
+const CASES: &[Case] = &[
+    Case {
+        name: "plain",
+        oracle: "tex",
+        inputs: &[],
+        runs: &[
+            &["-ini", "-interaction=nonstopmode", r"\input plain \dump"],
+            &[
+                "-output-comment=partex",
+                "-interaction=nonstopmode",
+                "&plain",
+                "story",
+                r"\end",
+            ],
+        ],
+    },
+    Case {
+        name: "token_lists",
+        oracle: "tex",
+        inputs: &[],
+        runs: &[
+            &["-ini", "-interaction=nonstopmode", r"\input plain \dump"],
+            &[
+                "-output-comment=partex",
+                "-interaction=nonstopmode",
+                "&plain",
+                r"\def\swap#1#2.{<#2|#1>}\toks0={A{B}}\toks2=\toks0\def\a{\swap x{y}.}\let\b=\a\ifx\a\b\message{IFX-YES}\else\message{IFX-NO}\fi\message{TOKS:\the\toks0}\uppercase{\message{CASE-ok}}\immediate\write16{WRITE:\the\toks2}\mark{top}\halign{#&#\cr a&b\cr}\hbox{\a}\bye",
+            ],
+        ],
+    },
+    Case {
+        name: "skips",
+        oracle: "tex",
+        inputs: &["skips.tex"],
+        runs: &[&["-ini", "-interaction=nonstopmode", "skips"]],
+    },
+    Case {
+        name: "cut_page",
+        oracle: "tex",
+        inputs: &[],
+        runs: &[
+            &["-ini", "-interaction=nonstopmode", r"\input plain \dump"],
+            &[
+                "-output-comment=partex",
+                "-interaction=nonstopmode",
+                "&plain",
+                r"\def\a{\b\b}\def\b{\c\c}\def\c{\d\d}\def\d{\e\e}\def\e{\f\f}\def\f{\g\g}\def\g{\u\u}\shipout\vbox{\hbox{A}\hbox{\kern1pt\special{x}\hbox{B\write-1{\a}C}\hbox{D}}\hbox{E}}\end",
+            ],
+        ],
+    },
+    Case {
+        name: "pages",
+        oracle: "tex",
+        inputs: &["pages.tex"],
+        runs: &[
+            &["-ini", "-interaction=nonstopmode", r"\input plain \dump"],
+            &[
+                "-output-comment=partex",
+                "-interaction=nonstopmode",
+                "&plain",
+                "pages",
+            ],
+        ],
+    },
+    Case {
+        name: "math",
+        oracle: "tex",
+        inputs: &["math.tex"],
+        runs: &[
+            &["-ini", "-interaction=nonstopmode", r"\input plain \dump"],
+            &[
+                "-output-comment=partex",
+                "-interaction=nonstopmode",
+                "&plain",
+                "math",
+            ],
+        ],
+    },
+    Case {
+        name: "align",
+        oracle: "tex",
+        inputs: &["align.tex"],
+        runs: &[
+            &["-ini", "-interaction=nonstopmode", r"\input plain \dump"],
+            &[
+                "-output-comment=partex",
+                "-interaction=nonstopmode",
+                "&plain",
+                "align",
+            ],
+        ],
+    },
+    Case {
+        name: "texxet",
+        oracle: "pdftex",
+        inputs: &["texxet.tex"],
+        runs: &[&[
+            "-ini",
+            "-etex",
+            "-no-shell-escape",
+            "-no-parse-first-line",
+            "-output-format=dvi",
+            "-output-comment=partex",
+            "-interaction=nonstopmode",
+            "texxet",
+        ]],
+    },
+    Case {
+        name: "microtype",
+        oracle: "pdftex",
+        inputs: &["microtype.tex"],
+        runs: &[&[
+            "-ini",
+            "-no-shell-escape",
+            "-no-parse-first-line",
+            "-interaction=nonstopmode",
+            "microtype",
+        ]],
+    },
+    Case {
+        name: "etex_format",
+        oracle: "pdftex",
+        inputs: &["etexfmt.tex", "etexuse.tex"],
+        runs: &[
+            &[
+                "-ini",
+                "-etex",
+                "-no-shell-escape",
+                "-no-parse-first-line",
+                "-output-comment=partex",
+                "-interaction=nonstopmode",
+                "etexfmt",
+            ],
+            &[
+                "-no-shell-escape",
+                "-no-parse-first-line",
+                "-output-comment=partex",
+                "-interaction=nonstopmode",
+                "-fmt=etexfmt",
+                "etexuse",
+            ],
+        ],
+    },
+    // LaTeX: the format from `latex.ini`, then a document (twice, for its
+    // aux and toc files)
+    Case {
+        name: "latex",
+        oracle: "pdftex",
+        inputs: &["latexdoc.tex"],
+        runs: &[
+            &[
+                "-no-shell-escape",
+                "-no-parse-first-line",
+                "-output-comment=partex",
+                "-interaction=nonstopmode",
+                "-ini",
+                "-etex",
+                "-jobname=latex",
+                "*latex.ini",
+            ],
+            &[
+                "-no-shell-escape",
+                "-no-parse-first-line",
+                "-output-comment=partex",
+                "-interaction=nonstopmode",
+                "-fmt=latex",
+                "latexdoc",
+            ],
+            &[
+                "-no-shell-escape",
+                "-no-parse-first-line",
+                "-output-comment=partex",
+                "-interaction=nonstopmode",
+                "-fmt=latex",
+                "latexdoc",
+            ],
+        ],
+    },
+    Case {
+        name: "bibtex",
+        oracle: "pdftex",
+        inputs: &["bibdoc.tex"],
+        runs: &[
+            &[
+                "-no-shell-escape",
+                "-no-parse-first-line",
+                "-output-comment=partex",
+                "-interaction=nonstopmode",
+                "-ini",
+                "-etex",
+                "-jobname=latex",
+                "*latex.ini",
+            ],
+            &[
+                "-no-shell-escape",
+                "-no-parse-first-line",
+                "-output-comment=partex",
+                "-interaction=nonstopmode",
+                "-fmt=latex",
+                "bibdoc",
+            ],
+            &[BIBTEX, "bibdoc"],
+            &[
+                "-no-shell-escape",
+                "-no-parse-first-line",
+                "-output-comment=partex",
+                "-interaction=nonstopmode",
+                "-fmt=latex",
+                "bibdoc",
+            ],
+            &[
+                "-no-shell-escape",
+                "-no-parse-first-line",
+                "-output-comment=partex",
+                "-interaction=nonstopmode",
+                "-fmt=latex",
+                "bibdoc",
+            ],
+        ],
+    },
+    Case {
+        name: "bibtex_builtins",
+        oracle: "pdftex",
+        inputs: &["bibtest.aux", "bibtest.bst", "bibtest.bib"],
+        runs: &[
+            &[BIBTEX, "bibtest"],
+            &[BIBTEX, "-terse", "-min-crossrefs=1", "bibtest"],
+        ],
+    },
+    // an index: latex, makeindex, latex
+    Case {
+        name: "makeindex",
+        oracle: "pdftex",
+        inputs: &["idxdoc.tex"],
+        runs: &[
+            LATEX_INI,
+            &[
+                "-no-shell-escape",
+                "-no-parse-first-line",
+                "-output-comment=partex",
+                "-interaction=nonstopmode",
+                "-fmt=latex",
+                "idxdoc",
+            ],
+            &[MAKEINDEX, "idxdoc"],
+            &[
+                "-no-shell-escape",
+                "-no-parse-first-line",
+                "-output-comment=partex",
+                "-interaction=nonstopmode",
+                "-fmt=latex",
+                "idxdoc",
+            ],
+        ],
+    },
+    // makeindex's options, a style, and malformed entries
+    Case {
+        name: "makeindex_styles",
+        oracle: "pdftex",
+        inputs: &["mkidx.idx", "mkidx.ist"],
+        runs: &[
+            &[MAKEINDEX, "mkidx"],
+            &[
+                MAKEINDEX,
+                "-s",
+                "mkidx.ist",
+                "-o",
+                "s.ind",
+                "-t",
+                "s.ilg",
+                "mkidx",
+            ],
+            &[
+                MAKEINDEX,
+                "-lcr",
+                "-o",
+                "lcr.ind",
+                "-t",
+                "lcr.ilg",
+                "mkidx.idx",
+            ],
+            &[MAKEINDEX, "-g", "-o", "g.ind", "-t", "g.ilg", "mkidx.idx"],
+            &[
+                MAKEINDEX, "-q", "-p", "7", "-o", "p.ind", "-t", "p.ilg", "mkidx",
+            ],
+            &[MAKEINDEX, "-s", "missing.ist", "mkidx"],
+        ],
+    },
+];
+
+/// A job built by `partex -watch`, with edits `(file, marker, replacement)`
+/// applied one at a time (an empty marker: no edit, rebuild for the files
+/// the job wrote itself).
+struct Incremental {
+    name: &'static str,
+    inputs: &'static [&'static str],
+    job: &'static str,
+    edits: &'static [(&'static str, &'static str, &'static str)],
+    /// How many rebuilds must stop early (early cutoff, at least).
+    cutoffs: usize,
+    /// How many rebuilds must run nothing, every changed line reading as
+    /// the same tokens (DESIGN.md §7.2), at least (unless
+    /// `PARTEX_TOKEN_DEPS=0`).
+    invisible: usize,
+    /// Built by pdfTeX, writing a PDF file (else Knuth's TeX, a DVI file).
+    pdf: bool,
+    by: By,
+}
+
+impl Incremental {
+    /// The oracle's program, and partex's `--compat` argument.
+    fn engines(&self) -> (&'static str, &'static str) {
+        if self.pdf {
+            ("pdftex", "--compat=pdftex")
+        } else {
+            ("tex", "--compat=tex")
+        }
+    }
+}
+
+/// How an incremental case is built.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum By {
+    /// One `partex -watch` process.
+    Watch,
+    /// `partex -resident` invocations (a session in the background; the
+    /// terminal output is compared too).
+    Resident,
+    /// `partex -converge` processes, each rebuilding from the session the
+    /// last one saved (DESIGN.md §5.3); the oracle runs to its fixpoint.
+    Persisted,
+}
+
+const INCREMENTAL: &[Incremental] = &[
+    // Files read verbatim (under other category codes) or by \read: their
+    // edits rebuild, spaces included.
+    Incremental {
+        name: "verbatim",
+        inputs: &["verbatim.tex", "verbatim-part.tex", "verbatim-read.tex"],
+        job: "verbatim",
+        edits: &[
+            ("verbatim-part.tex", "x = 1", "x = 2"),
+            ("verbatim-part.tex", "spaces  too", "spaces too"),
+            ("verbatim-read.tex", "Second line", "Second  line"),
+            ("verbatim-read.tex", "First line", "The first line"),
+        ],
+        cutoffs: 0,
+        invisible: 0,
+        pdf: false,
+        by: By::Watch,
+    },
+    // Backdating compares effects as well as the state: a file only looked
+    // up changes what is written, but no state. `\pdffilemoddate` is a
+    // lookup too.
+    Incremental {
+        name: "effects",
+        inputs: &["effects.tex", "effects-part.tex"],
+        job: "effects",
+        edits: &[
+            ("effects-part.tex", "version one", "version two"),
+            ("effects-part.tex", "version two", "version three, longer"),
+            // only touched: its date changes
+            ("effects-part.tex", "version three", "version three"),
+        ],
+        cutoffs: 0,
+        invisible: 0,
+        pdf: true,
+        by: By::Watch,
+    },
+    // A job that reads back a file it writes (LaTeX's .aux file): a label
+    // edit changes the file, yet the rebuild stops early, joining the
+    // previous build's pages up to where the file is read back; the pass
+    // that reads the file again joins them up to where the label is read,
+    // a label renamed too (DESIGN.md §7.4).
+    Incremental {
+        name: "readback",
+        inputs: &["readback.tex"],
+        job: "readback",
+        edits: &[
+            ("readback.tex", "{a}{one}", "{a}{three}"),
+            ("readback.tex", "{b}{two}", "{b}{tow}"),
+            // another name: a control sequence of another name is made
+            ("readback.tex", "{c}{one}", "{cc}{one}"),
+        ],
+        cutoffs: 3,
+        invisible: 0,
+        pdf: true,
+        by: By::Watch,
+    },
+    // Early cutoff with a PDF file: the rebuild goes on from the previous
+    // build's last checkpoint, its byte positions moved. Pages are short
+    // and the page objects wait in an object stream, so a later checkpoint
+    // has written less than the meeting point's offset (a PDF whose
+    // cross-reference table pointed before every later object, once).
+    Incremental {
+        name: "cutoff_pdf",
+        inputs: &["cutoff-pdf.tex"],
+        job: "cutoff-pdf",
+        edits: &[
+            ("cutoff-pdf.tex", "% edit-2", "Page age."),
+            ("cutoff-pdf.tex", "% edit-1", "age"),
+            ("cutoff-pdf.tex", "Page age.", "% edit-2"),
+            ("cutoff-pdf.tex", "age\n", "Page\n"),
+        ],
+        cutoffs: 3,
+        invisible: 0,
+        pdf: true,
+        by: By::Watch,
+    },
+    Incremental {
+        name: "incremental",
+        inputs: &["incr.tex", "incr-part.tex"],
+        job: "incr",
+        edits: &[
+            // the table of contents settles
+            ("incr.tex", "", ""),
+            ("incr.tex", "", ""),
+            // near the end, then the middle, an included file, the start
+            ("incr.tex", "% edit-3", "Closing words, edited."),
+            ("incr.tex", "% edit-2", r"A middle paragraph appears.\par"),
+            ("incr-part.tex", "% edit-4", r"\words\words\words\par"),
+            (
+                "incr.tex",
+                "% edit-1",
+                r"An early edit moves every page after it.\par\words\words\par",
+            ),
+            // and back to a text seen before
+            ("incr.tex", "Closing words, edited.", "% edit-3"),
+        ],
+        cutoffs: 0,
+        invisible: 0,
+        pdf: false,
+        by: By::Watch,
+    },
+    Incremental {
+        name: "cutoff",
+        inputs: &["cutoff.tex"],
+        job: "cutoff",
+        edits: &[
+            // a page grows (the DVI file after it moves), then one later on
+            (
+                "cutoff.tex",
+                "% edit-1",
+                "Words inserted early on, and more.",
+            ),
+            ("cutoff.tex", "% edit-2", "Middle."),
+            // back, against the checkpoints kept from before
+            (
+                "cutoff.tex",
+                "Words inserted early on, and more.",
+                "% edit-1",
+            ),
+            ("cutoff.tex", "% edit-3", r"\count1=100 "),
+            ("cutoff.tex", "Middle.", "% edit-2"),
+        ],
+        cutoffs: 4,
+        invisible: 0,
+        pdf: false,
+        by: By::Watch,
+    },
+    Incremental {
+        name: "tokens",
+        inputs: &["tokens.tex", "tokens-part.tex"],
+        job: "tokens",
+        edits: &[
+            // the same tokens: spaces, a comment, spaces in an included file
+            ("tokens.tex", "Alpha beta", "Alpha   beta"),
+            ("tokens.tex", "% note-1", "% a longer note"),
+            ("tokens-part.tex", "Included   text", "Included text"),
+            // not: under \obeyspaces, in a line that changes category
+            // codes, in a line an error shows
+            ("tokens.tex", "keep  their", "keep their"),
+            ("tokens.tex", "Text with   spaces", "Text with spaces"),
+            ("tokens.tex", "here  too", "here too"),
+            // the same tokens again, in a line \write writes
+            ("tokens.tex", "A   written line", "A written line"),
+            // other text
+            ("tokens.tex", "Delta epsilon.", "Delta zeta."),
+            ("tokens.tex", "Alpha   beta", "Alpha beta"),
+            // a line more, then spaces after it
+            ("tokens-part.tex", "% part-edit", "A new line.\n% part-edit"),
+            ("tokens-part.tex", "Included text", "Included  text"),
+            ("tokens.tex", "Alpha beta", "Alpha  beta"),
+            // a line \read reads
+            ("tokens-part.tex", "first  line", "first line"),
+        ],
+        cutoffs: 0,
+        invisible: 7,
+        pdf: false,
+        by: By::Watch,
+    },
+    Incremental {
+        name: "resident",
+        inputs: &["cutoff.tex"],
+        job: "cutoff",
+        edits: &[
+            ("cutoff.tex", "", ""),
+            (
+                "cutoff.tex",
+                "% edit-1",
+                "Words inserted early on, and more.",
+            ),
+            ("cutoff.tex", "% edit-2", "Middle."),
+            ("cutoff.tex", "% edit-3", r"\count1=100 "),
+        ],
+        cutoffs: 2,
+        invisible: 0,
+        pdf: false,
+        by: By::Resident,
+    },
+    Incremental {
+        name: "persisted",
+        inputs: &["incr.tex", "incr-part.tex"],
+        job: "incr",
+        edits: &[
+            ("incr.tex", "", ""),
+            ("incr.tex", "% edit-3", "Closing words, edited."),
+            ("incr.tex", "% edit-2", r"A middle paragraph appears.\par"),
+            ("incr-part.tex", "% edit-4", r"\words\words\words\par"),
+            (
+                "incr.tex",
+                "% edit-1",
+                r"An early edit moves every page after it.\par\words\words\par",
+            ),
+            ("incr.tex", "Closing words, edited.", "% edit-3"),
+        ],
+        cutoffs: 0,
+        invisible: 0,
+        pdf: false,
+        by: By::Persisted,
+    },
+];
+
+/// A case's directories, made afresh with its inputs: the oracle's and
+/// partex's.
+fn case_dirs(root: &Path, name: &str, inputs: &[&str]) -> Result<(PathBuf, PathBuf)> {
+    let work = out_root(root).join(name);
+    if work.exists() {
+        fs::remove_dir_all(&work)?;
+    }
+    let (o, p) = (work.join("o"), work.join("p"));
+    fs::create_dir_all(&o)?;
+    fs::create_dir_all(&p)?;
+    for input in inputs {
+        let src = root.join("tests/e2e").join(input);
+        for dir in [&o, &p] {
+            fs::copy(&src, dir.join(input))?;
+            stamp(&dir.join(input), 0)?;
+        }
+    }
+    Ok((o, p))
+}
+
+/// Give `f` the fixed modification time `at` seconds after the cases'
+/// epoch: `\pdffilemoddate` must say the same on both sides.
+fn stamp(f: &Path, at: u64) -> Result<()> {
+    let t = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_758_800_000 + at);
+    fs::File::options().write(true).open(f)?.set_modified(t)?;
+    Ok(())
+}
+
+/// Replace `marker` by `new` in `file` of the oracle's directory `o` and
+/// partex's `p` (the same text again touches it), changed at `at`.
+fn edit_file(o: &Path, p: &Path, file: &str, marker: &str, new: &str, at: u64) -> Result<()> {
+    for dir in [o, p] {
+        let f = dir.join(file);
+        let text = fs::read_to_string(&f)?;
+        ensure!(text.contains(marker), "{file} has no `{marker}`");
+        // (as editors save: a watcher never sees half a file)
+        let tmp = dir.join(".edit.tmp");
+        fs::write(&tmp, text.replacen(marker, new, 1))?;
+        stamp(&tmp, at)?;
+        fs::rename(&tmp, &f)?;
+    }
+    Ok(())
+}
+
+/// Run an incremental case; the names of the files that differ, by build.
+fn run_incremental(root: &Path, partex: &Path, case: &Incremental) -> Result<Vec<String>> {
+    if case.by != By::Watch {
+        return run_resident(root, partex, case);
+    }
+    let (o, p) = case_dirs(root, case.name, case.inputs)?;
+    let ini = ["-ini", "-interaction=nonstopmode", r"\input plain \dump"];
+    let (oracle, compat) = case.engines();
+    let partex_as = || {
+        let mut cmd = Command::new(partex);
+        cmd.arg(compat);
+        cmd
+    };
+    exec(Command::new(oracle), &o, &ini, "term0.txt")?;
+    exec(partex_as(), &p, &ini, "term0.txt")?;
+    let args = [
+        "-output-comment=partex",
+        "-interaction=nonstopmode",
+        "&plain",
+        case.job,
+    ];
+    let mut child = partex_as()
+        .current_dir(&p)
+        // (the oracle's fixed time: a PDF file records when it was made)
+        .env("SOURCE_DATE_EPOCH", "1758800000")
+        .env("FORCE_SOURCE_DATE", "1")
+        .args(["-watch", "-checkpoint-every=4"])
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let mut stdin = child.stdin.take().expect("piped");
+    let mut lines = BufReader::new(child.stderr.take().expect("piped")).lines();
+    // Commands run by rebuilds and by the whole job, per rebuild.
+    let mut runs: Vec<(u64, u64)> = Vec::new();
+    let (mut cutoffs, mut invisible) = (0, 0);
+    let mut wait_for = |what: &str| -> Result<()> {
+        for line in lines.by_ref() {
+            let line = line?;
+            eprintln!("    {line}");
+            invisible += usize::from(line.contains("read as the same tokens"));
+            if let Some(rest) = line.strip_prefix("partex: rebuilt in ") {
+                // "X ms: A of B commands run, ..."
+                let mut w = rest.split(' ').skip(2);
+                let ran = w.next().and_then(|n| n.parse().ok());
+                let all = w.nth(1).and_then(|n| n.parse().ok());
+                runs.extend(ran.zip(all));
+                cutoffs += usize::from(line.contains("converged at"));
+            }
+            if line.starts_with(what) {
+                return Ok(());
+            }
+        }
+        anyhow::bail!("partex -watch stopped before `{what}`")
+    };
+    let mut diffs = Vec::new();
+    // (-watch runs every build to its fixpoint, as -converge does)
+    wait_for("partex: built")?;
+    fixpoint(oracle, &o, &args, true)?;
+    diffs.extend(
+        compare(&o, &p, true)?
+            .into_iter()
+            .map(|n| format!("build: {n}")),
+    );
+    for (i, &(file, marker, new)) in case.edits.iter().enumerate() {
+        if !marker.is_empty() {
+            edit_file(&o, &p, file, marker, new, (i as u64 + 1) * 1000)?;
+        }
+        writeln!(stdin, "rebuild {i}")?;
+        wait_for(&format!("partex: done rebuild {i}"))?;
+        fixpoint(oracle, &o, &args, true)?;
+        diffs.extend(
+            compare(&o, &p, true)?
+                .into_iter()
+                .map(|n| format!("edit {}: {n}", i + 1)),
+        );
+    }
+    writeln!(stdin, "q")?;
+    child.wait()?;
+    drop(wait_for);
+    // (else a bug could make every rebuild start over, unnoticed)
+    if !runs.iter().any(|&(a, b)| a < b) {
+        diffs.push(format!("no rebuild resumed from a checkpoint: {runs:?}"));
+    }
+    if cutoffs < case.cutoffs {
+        diffs.push(format!(
+            "{cutoffs} rebuilds stopped early, not {}",
+            case.cutoffs
+        ));
+    }
+    let token_deps = std::env::var_os("PARTEX_TOKEN_DEPS").is_none_or(|v| v != "0");
+    if token_deps && invisible < case.invisible {
+        diffs.push(format!(
+            "{invisible} rebuilds ran nothing (the same tokens), not {}",
+            case.invisible
+        ));
+    }
+    Ok(diffs)
+}
+
+/// A `-converge` case: `partex -converge` once, against the oracle run
+/// until the job's own files stop changing, with BibTeX between runs
+/// when the `.aux` file's citation lines change (as latexmk runs it).
+struct Converge {
+    name: &'static str,
+    oracle: &'static str,
+    inputs: &'static [&'static str],
+    ini: &'static [&'static str],
+    args: &'static [&'static str],
+    job: &'static str,
+    /// The job's files that decide another run.
+    watch: &'static [&'static str],
+    /// The fewest oracle runs the case must need.
+    passes: usize,
+    /// With `-output-directory=out`: the job's files there, and BibTeX and
+    /// makeindex run in it (as latexmk runs them).
+    outdir: bool,
+}
+
+const LATEX_INI: &[&str] = &[
+    "-no-shell-escape",
+    "-no-parse-first-line",
+    "-output-comment=partex",
+    "-interaction=nonstopmode",
+    "-ini",
+    "-etex",
+    "-jobname=latex",
+    "*latex.ini",
+];
+
+const CONVERGE: &[Converge] = &[
+    // `incr.tex` reads the table of contents it writes
+    Converge {
+        name: "converge",
+        oracle: "tex",
+        inputs: &["incr.tex", "incr-part.tex"],
+        ini: &["-ini", "-interaction=nonstopmode", r"\input plain \dump"],
+        args: &[
+            "-output-comment=partex",
+            "-interaction=nonstopmode",
+            "&plain",
+        ],
+        job: "incr",
+        watch: &["incr.toc"],
+        passes: 2,
+        outdir: false,
+    },
+    // citations: LaTeX, BibTeX, LaTeX, LaTeX
+    Converge {
+        name: "converge_bibtex",
+        oracle: "pdftex",
+        inputs: &["bibdoc.tex"],
+        ini: LATEX_INI,
+        args: &[
+            "-no-shell-escape",
+            "-no-parse-first-line",
+            "-output-comment=partex",
+            "-interaction=nonstopmode",
+            "-fmt=latex",
+        ],
+        job: "bibdoc",
+        watch: &["bibdoc.aux", "bibdoc.bbl"],
+        passes: 3,
+        outdir: false,
+    },
+    // an index: LaTeX, makeindex, LaTeX
+    Converge {
+        name: "converge_makeindex",
+        oracle: "pdftex",
+        inputs: &["idxdoc.tex"],
+        ini: LATEX_INI,
+        args: &[
+            "-no-shell-escape",
+            "-no-parse-first-line",
+            "-output-comment=partex",
+            "-interaction=nonstopmode",
+            "-fmt=latex",
+        ],
+        job: "idxdoc",
+        watch: &["idxdoc.aux", "idxdoc.idx", "idxdoc.ind"],
+        passes: 2,
+        outdir: false,
+    },
+    // citations with an output directory (BibTeX runs in it)
+    Converge {
+        name: "converge_bibtex_outdir",
+        oracle: "pdftex",
+        inputs: &["bibdoc.tex"],
+        ini: LATEX_INI,
+        args: &[
+            "-no-shell-escape",
+            "-no-parse-first-line",
+            "-output-comment=partex",
+            "-interaction=nonstopmode",
+            "-fmt=latex",
+            "-output-directory=out",
+        ],
+        job: "bibdoc",
+        watch: &["bibdoc.aux", "bibdoc.bbl"],
+        passes: 3,
+        outdir: true,
+    },
+    // an index with an output directory
+    Converge {
+        name: "converge_makeindex_outdir",
+        oracle: "pdftex",
+        inputs: &["idxdoc.tex"],
+        ini: LATEX_INI,
+        args: &[
+            "-no-shell-escape",
+            "-no-parse-first-line",
+            "-output-comment=partex",
+            "-interaction=nonstopmode",
+            "-fmt=latex",
+            "-output-directory=out",
+        ],
+        job: "idxdoc",
+        watch: &["idxdoc.aux", "idxdoc.idx", "idxdoc.ind"],
+        passes: 2,
+        outdir: true,
+    },
+];
+
+/// What BibTeX reads in an `.aux` file.
+fn citation_lines(aux: &[u8]) -> Vec<u8> {
+    aux.split(|&c| c == b'\n')
+        .filter(|l| {
+            [
+                &b"\\citation{"[..],
+                b"\\bibdata{",
+                b"\\bibstyle{",
+                b"\\@input{",
+            ]
+            .iter()
+            .any(|p| l.starts_with(p))
+        })
+        .flat_map(|l| l.iter().chain(b"\n"))
+        .copied()
+        .collect()
+}
+
+/// Run the oracle in `o` on `args` as latexmk would, BibTeX and makeindex
+/// in `out` when their inputs change, until the watched files settle: the
+/// runs of each.
+fn oracle_passes(
+    case: &Converge,
+    o: &Path,
+    out: &Path,
+    args: &[&str],
+) -> Result<(usize, usize, usize)> {
+    let aux = out.join(format!("{}.aux", case.job));
+    let idx = out.join(format!("{}.idx", case.job));
+    let (mut passes, mut bibtex_runs, mut cited) = (0, 0, None);
+    let (mut makeindex_runs, mut indexed) = (0, None);
+    loop {
+        let snapshot = || {
+            case.watch
+                .iter()
+                .map(|f| fs::read(out.join(f)).ok())
+                .collect::<Vec<_>>()
+        };
+        let before = snapshot();
+        exec(Command::new(case.oracle), o, args, "term.txt")?;
+        passes += 1;
+        if let Ok(text) = fs::read(&aux)
+            && text.windows(9).any(|w| w == b"\\bibdata{")
+            && cited.as_ref() != Some(&citation_lines(&text))
+        {
+            // (latexmk's BIBINPUTS for an output directory: the sources first)
+            let mut bibtex = Command::new("bibtex");
+            bibtex.env("BIBINPUTS", format!("{}:", o.display()));
+            exec(bibtex, out, &[case.job], "bibterm.txt")?;
+            bibtex_runs += 1;
+            cited = Some(citation_lines(&text));
+        }
+        if let Ok(text) = fs::read(&idx)
+            && indexed.as_ref() != Some(&text)
+        {
+            exec(Command::new("makeindex"), out, &[case.job], "mkterm.txt")?;
+            makeindex_runs += 1;
+            indexed = Some(text);
+        }
+        if snapshot() == before || passes == 5 {
+            break;
+        }
+    }
+    Ok((passes, bibtex_runs, makeindex_runs))
+}
+
+/// Run a [`Converge`] case.
+fn run_converge(root: &Path, partex: &Path, case: &Converge) -> Result<Vec<String>> {
+    let work = out_root(root).join(case.name);
+    if work.exists() {
+        fs::remove_dir_all(&work)?;
+    }
+    let (o, p) = (work.join("o"), work.join("p"));
+    fs::create_dir_all(&o)?;
+    fs::create_dir_all(&p)?;
+    for input in case.inputs {
+        let src = root.join("tests/e2e").join(input);
+        fs::copy(&src, o.join(input))?;
+        fs::copy(&src, p.join(input))?;
+    }
+    exec(Command::new(case.oracle), &o, case.ini, "term0.txt")?;
+    let engine = format!("-engine={}", case.oracle);
+    let mut cmd = tex_compat(partex);
+    cmd.arg(&engine);
+    exec(cmd, &p, case.ini, "term0.txt")?;
+    fs::remove_file(o.join("term0.txt"))?;
+    fs::remove_file(p.join("term0.txt"))?;
+    let mut args = case.args.to_vec();
+    args.push(case.job);
+    // where the job's files go
+    let out = if case.outdir {
+        fs::create_dir_all(o.join("out"))?;
+        fs::create_dir_all(p.join("out"))?;
+        o.join("out")
+    } else {
+        o.clone()
+    };
+    let (passes, bibtex_runs, makeindex_runs) = oracle_passes(case, &o, &out, &args)?;
+    let _ = fs::remove_file(out.join("bibterm.txt"));
+    let _ = fs::remove_file(out.join("mkterm.txt"));
+    let mut converge = args.clone();
+    converge.insert(0, "-converge");
+    let cache = work.join("cache");
+    let run = || -> Result<()> {
+        let mut cmd = tex_compat(partex);
+        cmd.arg(&engine)
+            .env("PARTEX_REPORT", "1")
+            .env("PARTEX_CACHE_DIR", &cache)
+            .env_remove("PARTEX_PERSIST");
+        for line in exec(cmd, &p, &converge, "term.txt")?.lines() {
+            eprintln!("    {line}");
+        }
+        Ok(())
+    };
+    run()?;
+    eprintln!(
+        "    ({}: {passes} runs, bibtex: {bibtex_runs}, makeindex: {makeindex_runs})",
+        case.oracle
+    );
+    ensure!(
+        passes >= case.passes,
+        "the case must need {} runs",
+        case.passes
+    );
+    let compare_all = || -> Result<Vec<String>> {
+        let mut diffs = compare(&o, &p, false)?;
+        if case.outdir {
+            diffs.extend(
+                compare(&o.join("out"), &p.join("out"), false)?
+                    .into_iter()
+                    .map(|n| format!("out/{n}")),
+            );
+        }
+        Ok(diffs)
+    };
+    let mut diffs = compare_all()?;
+    // Again, from the session it saved (DESIGN.md §5.3): nothing changed.
+    run()?;
+    diffs.extend(
+        compare_all()?
+            .into_iter()
+            .map(|n| format!("from the saved session: {n}")),
+    );
+    Ok(diffs)
+}
+
+/// The modern command line: `partex build` of `modern.tex` against
+/// `pdflatex` run to its fixpoint as latexmk would (BibTeX between runs).
+/// Every file must be identical (not the terminal: the renderer's), and
+/// the renderer must name each kind of problem the document has; then a
+/// rebuild from the saved session (`-v`), `partex why` and `partex clean`.
+fn run_modern(root: &Path, partex: &Path) -> Result<Vec<String>> {
+    let case = Converge {
+        name: "modern",
+        oracle: "pdflatex",
+        inputs: &["modern.tex"],
+        ini: &[],
+        args: &["-interaction=nonstopmode"],
+        job: "modern",
+        watch: &["modern.aux", "modern.bbl"],
+        passes: 3,
+        outdir: false,
+    };
+    let work = out_root(root).join(case.name);
+    if work.exists() {
+        fs::remove_dir_all(&work)?;
+    }
+    let (o, p) = (work.join("o"), work.join("p"));
+    fs::create_dir_all(&o)?;
+    fs::create_dir_all(&p)?;
+    for input in case.inputs {
+        let src = root.join("tests/e2e").join(input);
+        fs::copy(&src, o.join(input))?;
+        fs::copy(&src, p.join(input))?;
+    }
+    // (as `partex build modern.tex` gives it to TeX)
+    let args = ["-interaction=nonstopmode", "modern.tex"];
+    let (passes, bibtex_runs, _) = oracle_passes(&case, &o, &o, &args)?;
+    let _ = fs::remove_file(o.join("bibterm.txt"));
+    // (its formats outlive the case: making pdflatex's takes a while)
+    let formats = root.join("target/e2e-formats");
+    let modern = |args: &[&str]| -> Result<(String, String)> {
+        let mut cmd = Command::new(partex);
+        cmd.env("PARTEX_CACHE_DIR", work.join("cache"))
+            .env("PARTEX_FORMATS", &formats)
+            .env("NO_COLOR", "1")
+            .env_remove("PARTEX_PERSIST");
+        let err = exec(cmd, &p, args, "term.txt")?;
+        let out = fs::read_to_string(p.join("term.txt"))?;
+        Ok((out, err))
+    };
+    // (the build has an error: `--copy-pdf` must not copy its PDF)
+    let (out, report) = modern(&["build", "--copy-pdf=copied", "modern.tex"])?;
+    ensure!(
+        !p.join("copied").exists(),
+        "--copy-pdf copied the PDF of a failed build"
+    );
+    for line in report.lines() {
+        eprintln!("    {line}");
+    }
+    eprintln!("    (pdflatex: {passes} runs, bibtex: {bibtex_runs})");
+    ensure!(
+        passes >= case.passes,
+        "the case must need {} runs",
+        case.passes
+    );
+    ensure!(out.is_empty(), "partex build wrote to standard output");
+    for want in [
+        "error[undefined-control-sequence]: Undefined control sequence \\undefinedcontrolsequence",
+        "  --> modern.tex:17:29",
+        "warning: 1 overfull \\hbox",
+        "warning: 1 undefined reference: `sec:nowhere`",
+        "warning: 1 font substitution",
+        "OT1/cmr/bx/sc -> OT1/cmr/bx/n",
+        "Failed modern.tex (1 page, 3 passes, 1 error, 3 warnings)",
+    ] {
+        ensure!(report.contains(want), "the report lacks `{want}`");
+    }
+    ensure!(
+        !report.contains("modern: a line from typeout"),
+        "the report shows \\typeout lines without -v"
+    );
+    let mut diffs = compare(&o, &p, true)?;
+    // Again, from the session it saved: nothing changed.
+    let (_, report) = modern(&["build", "-v", "modern.tex"])?;
+    ensure!(
+        report.contains("modern: a line from typeout"),
+        "-v does not show \\typeout lines"
+    );
+    diffs.extend(
+        compare(&o, &p, true)?
+            .into_iter()
+            .map(|n| format!("from the saved session: {n}")),
+    );
+    let (why, _) = modern(&["why", "modern.tex"])?;
+    ensure!(
+        why.contains("warning: 1 overfull \\hbox"),
+        "partex why lacks the warnings"
+    );
+    modern(&["clean", "modern.tex"])?;
+    ensure!(
+        !p.join("modern.pdf").exists() && !p.join("modern.aux").exists(),
+        "partex clean left the outputs"
+    );
+    Ok(diffs)
+}
+
+/// `partex watch` (machine mode, its default) of `modern.tex` against
+/// `pdflatex` run to its fixpoint as latexmk would: the files after the
+/// first build, and after an edit (a word, then a new forward reference),
+/// must be identical; the watch must say it runs as a machine.
+#[allow(clippy::too_many_lines)] // (one scripted session, kept whole)
+fn run_modern_watch(root: &Path, partex: &Path, sanitize: bool) -> Result<Vec<String>> {
+    let case = Converge {
+        name: if sanitize {
+            "modern_watch_sanitized"
+        } else {
+            "modern_watch"
+        },
+        oracle: "pdflatex",
+        inputs: &["modern.tex"],
+        ini: &[],
+        args: &["-interaction=nonstopmode"],
+        job: "modern",
+        watch: &["modern.aux", "modern.bbl"],
+        passes: 3,
+        outdir: false,
+    };
+    let work = out_root(root).join(case.name);
+    if work.exists() {
+        fs::remove_dir_all(&work)?;
+    }
+    let (o, p) = (work.join("o"), work.join("p"));
+    fs::create_dir_all(&o)?;
+    fs::create_dir_all(&p)?;
+    for input in case.inputs {
+        let src = root.join("tests/e2e").join(input);
+        fs::copy(&src, o.join(input))?;
+        fs::copy(&src, p.join(input))?;
+    }
+    let args = ["-interaction=nonstopmode", "modern.tex"];
+    oracle_passes(&case, &o, &o, &args)?;
+    let _ = fs::remove_file(o.join("bibterm.txt"));
+    let mut child = Command::new(partex)
+        .env("PARTEX_CACHE_DIR", work.join("cache"))
+        // (its own: `modern` may be making its formats at the same time)
+        .env(
+            "PARTEX_FORMATS",
+            root.join(if sanitize {
+                "target/e2e-formats-watch-sanitized"
+            } else {
+                "target/e2e-formats-watch"
+            }),
+        )
+        .env("NO_COLOR", "1")
+        .env("SOURCE_DATE_EPOCH", "1758800000")
+        .env("FORCE_SOURCE_DATE", "1")
+        .env_remove("PARTEX_PERSIST")
+        .env_remove("PARTEX_MACHINE")
+        // (with the sanitizer, each rebuild is also built afresh and
+        // compared: its passes, BibTeX between them, against one fresh
+        // build of the same inputs)
+        .env("PARTEX_MACHINE_SANITIZE", if sanitize { "1" } else { "0" })
+        .current_dir(&p)
+        .args(["watch", "-v", "modern.tex"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let (tx, rx) = std::sync::mpsc::channel();
+    let err = child.stderr.take().context("the watch's stderr")?;
+    std::thread::spawn(move || {
+        for line in std::io::BufReader::new(err).lines() {
+            let Ok(line) = line else { break };
+            if tx.send(line).is_err() {
+                break;
+            }
+        }
+    });
+    let mut report = String::new();
+    // (until the build ends: `Watching` after the first, the result line
+    // after a rebuild)
+    let mut wait = |until: &str| -> Result<()> {
+        loop {
+            let line = rx
+                .recv_timeout(std::time::Duration::from_secs(120))
+                .with_context(|| format!("partex watch stopped before `{until}`"))?;
+            eprintln!("    {line}");
+            report.push_str(&line);
+            report.push('\n');
+            if line.contains(until) {
+                return Ok(());
+            }
+        }
+    };
+    wait("Watching")?;
+    let mut diffs: Vec<String> = compare(&o, &p, true)?
+        .into_iter()
+        .map(|n| format!("build: {n}"))
+        .collect();
+    let edits = [
+        ("is at the end", "is at the very end"),
+        ("\\section{End}", "See~\\ref{sec:more}.\n\\section{End}"),
+        (
+            "\\bibliographystyle",
+            "\\section{More}\\label{sec:more}\n\\bibliographystyle",
+        ),
+    ];
+    for (i, (marker, new)) in edits.iter().enumerate() {
+        for dir in [&o, &p] {
+            let f = dir.join("modern.tex");
+            let text = fs::read_to_string(&f)?;
+            ensure!(text.contains(marker), "modern.tex has no `{marker}`");
+            // (as editors save: a watcher never sees half a file)
+            let tmp = dir.join("modern.tex.new");
+            fs::write(&tmp, text.replacen(marker, new, 1))?;
+            fs::rename(&tmp, &f)?;
+        }
+        oracle_passes(&case, &o, &o, &args)?;
+        let _ = fs::remove_file(o.join("bibterm.txt"));
+        wait("modern.tex (")?;
+        diffs.extend(
+            compare(&o, &p, true)?
+                .into_iter()
+                .map(|n| format!("edit {}: {n}", i + 1)),
+        );
+    }
+    if let Some(mut stdin) = child.stdin.take() {
+        writeln!(stdin, "q")?;
+    }
+    child.wait()?;
+    ensure!(
+        report.contains("Machine built in"),
+        "partex watch did not run in machine mode"
+    );
+    ensure!(
+        report.contains("Machine rebuilt in"),
+        "partex watch did not rebuild incrementally"
+    );
+    Ok(diffs)
+}
+
+/// Machine-mode rebuilds (`PARTEX_MACHINE=1`, DESIGN.md §7.4, §7.11) of
+/// `edits.tex` (40 sections of random words, so lines and pages break
+/// unevenly, one paragraph per line) under an output directory, edited
+/// four times in memory (`PARTEX_MACHINE_EDIT`), against the oracle run
+/// once on the edited text, both reading the `.aux` and `.toc` two earlier
+/// runs wrote: every file must be identical, also when every rebuild but
+/// the last stops early at a region boundary (`PARTEX_MACHINE_STOP=1`) and
+/// the next goes on from there. LaTeX reads its `.aux` from disk at
+/// `\begin{document}` and back at `\end{document}`, writing the `.toc`
+/// from it: a rebuild that replayed a region inside the read back once
+/// read on in the `.aux` from disk (these edits of this text showed it).
+/// The last two insert lines (a paragraph, then a blank line that changes
+/// no output), which moves every later line of the file; a third run
+/// checks each rebuild with the sanitizer (`PARTEX_MACHINE_SANITIZE=1`),
+/// which found that keying positions by lines left broke how the regions
+/// before an inserted line chain.
+fn run_machine_edits(root: &Path, partex: &Path) -> Result<Vec<String>> {
+    let long = format!("Para20x1 {}", "inserted ".repeat(150));
+    let edits = [
+        ("Para5x2 ", "Para5x2 TYPED "),
+        ("Para20x1 ", long.as_str()),
+        ("Para5x2 TYPED ", "Para5x2 TYPED MORE "),
+        ("Para2x0 ", "Para2x0 early "),
+        ("Para7x1 ", "Para7x1 \n\nA paragraph of its own.\n\n"),
+        ("\\label{sec:12}\n", "\\label{sec:12}\n\n"),
+    ];
+    machine_edits(
+        root,
+        partex,
+        "machine_edits",
+        "edits.tex",
+        &edits,
+        "pdflatex",
+        true,
+    )
+}
+
+/// [`run_machine_edits`] in DVI mode (LaTeX's `latex` format): an edit in
+/// section 5 of `edits-dvi.tex`, then one in section 2. The DVI writer
+/// keeps a page's bytes in its buffer after the page is shipped; a rebuild
+/// that did not compare them met the old run at the next boundary, and
+/// the page came out as it was before the edit.
+fn run_machine_edits_dvi(root: &Path, partex: &Path) -> Result<Vec<String>> {
+    let edits = [("P5x2 ", "P5x2 typed "), ("P2x0 ", "P2x0 early ")];
+    // (no stopped rebuilds: a DVI page's bytes depend on every page before
+    // it, so a re-run after a longer page goes on to the job's end, where
+    // there is no boundary left to stop at)
+    machine_edits(
+        root,
+        partex,
+        "machine_edits_dvi",
+        "edits-dvi.tex",
+        &edits,
+        "latex",
+        false,
+    )
+}
+
+/// The case `name`: `input` (from `tests/e2e/`, as `edits.tex`) built by
+/// `format`, edited by `edits` in one machine-mode process, against the
+/// oracle on the edited text; with `stops`, again with every rebuild but
+/// the last stopped early.
+fn machine_edits(
+    root: &Path,
+    partex: &Path,
+    name: &str,
+    input: &str,
+    edits: &[(&str, &str)],
+    format: &str,
+    stops: bool,
+) -> Result<Vec<String>> {
+    let work = root.join("target/e2e").join(name);
+    if work.exists() {
+        fs::remove_dir_all(&work)?;
+    }
+    let text = fs::read_to_string(root.join("tests/e2e").join(input))?;
+    let mut edited = text.clone();
+    for &(from, to) in edits {
+        ensure!(edited.contains(from), "the document has no `{from}`");
+        edited = edited.replacen(from, to, 1);
+    }
+    let flags = [
+        "-no-shell-escape",
+        "-no-parse-first-line",
+        "-output-comment=partex",
+        "-interaction=nonstopmode",
+    ];
+    let (jobname, ini_file, fmt) = (
+        format!("-jobname={format}"),
+        format!("*{format}.ini"),
+        format!("-fmt={format}"),
+    );
+    let mut ini = flags.to_vec();
+    ini.extend(["-ini", "-etex", jobname.as_str(), ini_file.as_str()]);
+    let mut args = flags.to_vec();
+    args.extend([fmt.as_str(), "-output-directory=out", "edits"]);
+    let dirs = ["seed", "o", "p", "q", "r"].map(|d| work.join(d));
+    for d in &dirs {
+        fs::create_dir_all(d.join("out"))?;
+    }
+    let [seed, o, p, q, r] = &dirs;
+    // (the files two runs leave)
+    fs::write(seed.join("edits.tex"), &text)?;
+    exec(Command::new("pdftex"), seed, &ini, "term0.txt")?;
+    for _ in 0..2 {
+        exec(Command::new("pdftex"), seed, &args, "term.txt")?;
+    }
+    for d in [o, p, q, r] {
+        for f in ["edits.aux", "edits.toc"] {
+            fs::copy(seed.join("out").join(f), d.join("out").join(f))?;
+        }
+    }
+    fs::write(o.join("edits.tex"), &edited)?;
+    exec(Command::new("pdftex"), o, &ini, "term0.txt")?;
+    exec(Command::new("pdftex"), o, &args, "term.txt")?;
+    let spec: Vec<String> = edits
+        .iter()
+        .map(|(from, to)| format!("edits.tex|{from}|{to}"))
+        .collect();
+    let spec = spec.join(";;");
+    let mut diffs = Vec::new();
+    // (the directory, `PARTEX_MACHINE_STOP`, and whether sanitized)
+    let runs: &[(&Path, Option<&str>, bool)] = if stops {
+        &[(p, None, false), (q, Some("1"), false), (r, None, true)]
+    } else {
+        &[(p, None, false)]
+    };
+    for &(d, stop, sanitize) in runs {
+        fs::write(d.join("edits.tex"), &text)?;
+        let mut cmd = tex_compat(partex);
+        cmd.arg("-engine=pdftex");
+        exec(cmd, d, &ini, "term0.txt")?;
+        let mut cmd = tex_compat(partex);
+        cmd.arg("-engine=pdftex")
+            .env("PARTEX_MACHINE", "1")
+            .env("PARTEX_MACHINE_EDIT", &spec)
+            .env("PARTEX_MACHINE_SANITIZE", if sanitize { "1" } else { "0" })
+            .env_remove("PARTEX_MACHINE_STOP");
+        if let Some(n) = stop {
+            cmd.env("PARTEX_MACHINE_STOP", n);
+        }
+        let err = exec(cmd, d, &args, "term.txt")?;
+        let rebuilt = err.matches("machine: rebuilt in").count();
+        let stopped = err.matches("machine: stopped in").count();
+        ensure!(
+            rebuilt + stopped == edits.len() && (stop.is_none() || stopped > 0),
+            "{rebuilt} rebuilds and {stopped} stopped, for {} edits",
+            edits.len()
+        );
+        let name = d
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let mut found = compare(o, d, false)?;
+        found.retain(|n| n != "edits.tex");
+        found.extend(
+            compare(&o.join("out"), &d.join("out"), false)?
+                .into_iter()
+                .map(|n| format!("out/{n}")),
+        );
+        diffs.extend(found.into_iter().map(|n| format!("{name}: {n}")));
+    }
+    Ok(diffs)
+}
+
+/// Run plain TeX in `o` on `args`; with `fixpoint`, again while the files
+/// it writes (but its log and DVI file) change, as `-converge` does.
+fn fixpoint(program: &str, o: &Path, args: &[&str], fixpoint: bool) -> Result<()> {
+    let snapshot = || -> Result<Vec<(std::ffi::OsString, Vec<u8>)>> {
+        let mut files = Vec::new();
+        for e in fs::read_dir(o)? {
+            let e = e?;
+            let name = e.file_name();
+            let n = name.to_string_lossy();
+            if !(n.ends_with(".log")
+                || n.ends_with(".dvi")
+                || n.ends_with(".pdf")
+                || n == "term.txt")
+            {
+                files.push((name, fs::read(e.path())?));
+            }
+        }
+        files.sort();
+        Ok(files)
+    };
+    for _ in 0..5 {
+        let before = snapshot()?;
+        exec(Command::new(program), o, args, "term.txt")?;
+        if !fixpoint || snapshot()? == before {
+            break;
+        }
+    }
+    Ok(())
+}
+
+/// Run an incremental case as `partex -resident` invocations, or as
+/// `partex -converge` processes with a persisted session.
+fn run_resident(root: &Path, partex: &Path, case: &Incremental) -> Result<Vec<String>> {
+    let work = out_root(root).join(case.name);
+    if work.exists() {
+        fs::remove_dir_all(&work)?;
+    }
+    let (o, p) = (work.join("o"), work.join("p"));
+    fs::create_dir_all(&o)?;
+    fs::create_dir_all(&p)?;
+    for input in case.inputs {
+        let src = root.join("tests/e2e").join(input);
+        fs::copy(&src, o.join(input))?;
+        fs::copy(&src, p.join(input))?;
+    }
+    let ini = ["-ini", "-interaction=nonstopmode", r"\input plain \dump"];
+    exec(Command::new("tex"), &o, &ini, "term0.txt")?;
+    exec(tex_compat(partex), &p, &ini, "term0.txt")?;
+    fs::remove_file(o.join("term0.txt"))?;
+    fs::remove_file(p.join("term0.txt"))?;
+    let args = [
+        "-output-comment=partex",
+        "-interaction=nonstopmode",
+        "&plain",
+        case.job,
+    ];
+    let persisted = case.by == By::Persisted;
+    let mut resident = args.to_vec();
+    resident.splice(
+        0..0,
+        [
+            if persisted { "-converge" } else { "-resident" },
+            "-checkpoint-every=4",
+        ],
+    );
+    let cache = work.join("cache");
+    // (a session per case directory; it ends soon after the last build)
+    let build = || -> Result<String> {
+        let mut cmd = tex_compat(partex);
+        cmd.env("PARTEX_REPORT", "1")
+            .env("PARTEX_RESIDENT_IDLE", "5")
+            .env("PARTEX_CACHE_DIR", &cache)
+            .env_remove("PARTEX_PERSIST");
+        exec(cmd, &p, &resident, "term.txt")
+    };
+    let oracle = || fixpoint("tex", &o, &args, persisted);
+    let mut loads = 0;
+    let (mut diffs, mut runs, mut cutoffs) = (Vec::new(), Vec::new(), 0);
+    let mut note = |report: &str| {
+        for line in report.lines() {
+            eprintln!("    {line}");
+            loads += usize::from(line.contains("loaded a saved session"));
+            if let Some(rest) = line.trim_start().strip_prefix("partex: rebuilt in ") {
+                let mut w = rest.split(' ').skip(2);
+                let ran: Option<u64> = w.next().and_then(|n| n.parse().ok());
+                let all: Option<u64> = w.nth(1).and_then(|n| n.parse().ok());
+                runs.extend(ran.zip(all));
+                cutoffs += usize::from(line.contains("converged at"));
+            }
+        }
+    };
+    note(&build()?);
+    oracle()?;
+    diffs.extend(
+        compare(&o, &p, false)?
+            .into_iter()
+            .map(|n| format!("build: {n}")),
+    );
+    for (i, &(file, marker, new)) in case.edits.iter().enumerate() {
+        for dir in [&o, &p].into_iter().filter(|_| !marker.is_empty()) {
+            let f = dir.join(file);
+            let text = fs::read_to_string(&f)?;
+            ensure!(text.contains(marker), "{file} has no `{marker}`");
+            fs::write(&f, text.replacen(marker, new, 1))?;
+        }
+        note(&build()?);
+        oracle()?;
+        diffs.extend(
+            compare(&o, &p, false)?
+                .into_iter()
+                .map(|n| format!("edit {}: {n}", i + 1)),
+        );
+    }
+    if persisted && loads != case.edits.len() {
+        diffs.push(format!(
+            "{loads} builds loaded a saved session, not {}",
+            case.edits.len()
+        ));
+    }
+    if !runs.iter().any(|&(a, b)| a < b) {
+        diffs.push(format!("no rebuild resumed from a checkpoint: {runs:?}"));
+    }
+    if cutoffs < case.cutoffs {
+        diffs.push(format!(
+            "{cutoffs} rebuilds stopped early, not {}",
+            case.cutoffs
+        ));
+    }
+    Ok(diffs)
+}
+
+/// A case to run, by name.
+type Job<'a> = (
+    &'static str,
+    Box<dyn Fn() -> Result<Vec<String>> + Send + Sync + 'a>,
+);
+
+/// Where the cases' outputs go: `target/e2e`, or `XTASK_E2E_DIR` (the
+/// gate's machine-mode run keeps its own).
+fn out_root(root: &Path) -> PathBuf {
+    root.join(std::env::var("XTASK_E2E_DIR").unwrap_or_else(|_| "target/e2e".to_owned()))
+}
+
+pub fn run(root: &Path, args: &[String]) -> Result<()> {
+    let filter = args.first().map(String::as_str);
+    let status = Command::new(env!("CARGO"))
+        .current_dir(root)
+        .args(["build", "--release", "-p", "partex-cli"])
+        .status()?;
+    ensure!(status.success(), "building partex failed");
+    let partex = root.join("target/release/partex");
+    // Each case has its own directory: they run side by side, reported in
+    // order.
+    let mut jobs: Vec<Job> = Vec::new();
+    let partex = &partex;
+    for case in CASES {
+        jobs.push((
+            case.name,
+            Box::new(move || {
+                // Knuth's TeX reads the clock: a run that straddles a
+                // minute differs in the date, so a difference must repeat
+                // to count
+                let diffs = run_case(root, partex, case)?;
+                if diffs.is_empty() {
+                    Ok(diffs)
+                } else {
+                    run_case(root, partex, case)
+                }
+            }),
+        ));
+    }
+    for case in INCREMENTAL {
+        jobs.push((
+            case.name,
+            Box::new(move || run_incremental(root, partex, case)),
+        ));
+    }
+    for case in CONVERGE {
+        jobs.push((
+            case.name,
+            Box::new(move || run_converge(root, partex, case)),
+        ));
+    }
+    jobs.push((
+        "machine_edits",
+        Box::new(move || run_machine_edits(root, partex)),
+    ));
+    jobs.push((
+        "machine_edits_dvi",
+        Box::new(move || run_machine_edits_dvi(root, partex)),
+    ));
+    jobs.push(("modern", Box::new(move || run_modern(root, partex))));
+    jobs.push((
+        "modern_watch",
+        Box::new(move || run_modern_watch(root, partex, false)),
+    ));
+    jobs.push((
+        "modern_watch_sanitized",
+        Box::new(move || run_modern_watch(root, partex, true)),
+    ));
+    jobs.retain(|(name, _)| filter.is_none_or(|f| name.contains(f)));
+    let ran = jobs.len();
+    let width = std::thread::available_parallelism().map_or(4, std::num::NonZero::get);
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let results: Vec<std::sync::Mutex<Option<Result<Vec<String>>>>> =
+        (0..ran).map(|_| std::sync::Mutex::new(None)).collect();
+    std::thread::scope(|scope| {
+        for _ in 0..width.min(ran) {
+            scope.spawn(|| {
+                loop {
+                    let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let Some((_, job)) = jobs.get(i) else { break };
+                    let r = job();
+                    if let Ok(mut slot) = results[i].lock() {
+                        *slot = Some(r);
+                    }
+                }
+            });
+        }
+    });
+    let mut failed = 0;
+    for ((name, _), r) in jobs.iter().zip(results) {
+        match r.into_inner().ok().flatten() {
+            Some(Ok(diffs)) if diffs.is_empty() => println!("ok       {name}"),
+            Some(Ok(diffs)) => {
+                failed += 1;
+                println!("DIFFERS  {name}: {}", diffs.join(", "));
+            }
+            Some(Err(e)) => {
+                failed += 1;
+                println!("FAILED   {name}: {e:#}");
+            }
+            None => {
+                failed += 1;
+                println!("FAILED   {name}: did not finish");
+            }
+        }
+    }
+    println!(
+        "\ne2e: {}/{ran} cases identical (outputs in {})",
+        ran - failed,
+        out_root(root).display()
+    );
+    ensure!(failed == 0, "e2e outputs differ");
+    Ok(())
+}
+
+/// Run `cmd`, keeping its terminal output in `term`; returns its stderr.
+/// Runs `case` on both sides; the names of the files that differ.
+fn run_case(root: &Path, partex: &Path, case: &Case) -> Result<Vec<String>> {
+    let work = out_root(root).join(case.name);
+    if work.exists() {
+        fs::remove_dir_all(&work)?;
+    }
+    let (o, p) = (work.join("o"), work.join("p"));
+    fs::create_dir_all(&o)?;
+    fs::create_dir_all(&p)?;
+    for input in case.inputs {
+        let src = root.join("tests/e2e").join(input);
+        fs::copy(&src, o.join(input))?;
+        fs::copy(&src, p.join(input))?;
+    }
+    for (i, args) in case.runs.iter().enumerate() {
+        let term = format!("term{}.txt", i + 1);
+        if let Some(&tool @ (BIBTEX | MAKEINDEX)) = args.first() {
+            exec(Command::new(&tool[1..]), &o, &args[1..], &term)?;
+            let mut cmd = Command::new(partex);
+            cmd.arg(format!("-{}", &tool[1..])); // (not an engine: no `--compat`)
+            exec(cmd, &p, &args[1..], &term)?;
+            continue;
+        }
+        exec(Command::new(case.oracle), &o, args, &term)?;
+        let mut cmd = tex_compat(partex);
+        cmd.arg(format!("-engine={}", case.oracle));
+        exec(cmd, &p, args, &term)?;
+    }
+    compare(&o, &p, false)
+}
+
+/// partex with TeX's command line (bare `partex` is the modern one:
+/// DESIGN.md, "Command line and terminal"); `-engine=` still picks the
+/// engine.
+fn tex_compat(partex: &Path) -> Command {
+    let mut cmd = Command::new(partex);
+    cmd.arg("--compat=tex");
+    cmd
+}
+
+fn exec(mut cmd: Command, dir: &Path, args: &[&str], term: &str) -> Result<String> {
+    // one fixed time for both sides: runs that straddle a minute would
+    // differ in `\time` (LaTeX writes it to texsys.aux)
+    let out = cmd
+        .env("SOURCE_DATE_EPOCH", "1758800000")
+        .env("FORCE_SOURCE_DATE", "1")
+        .current_dir(dir)
+        .args(args)
+        .stdin(Stdio::null())
+        .output()?;
+    fs::write(dir.join(term), out.stdout)?; // errors are part of the output
+    Ok(String::from_utf8_lossy(&out.stderr).into_owned())
+}
+
+/// Names of the files that differ (or exist on one side only); without
+/// the terminal transcripts if `no_term`.
+#[allow(clippy::case_sensitive_file_extension_comparisons)] // names are ours
+fn compare(o: &Path, p: &Path, no_term: bool) -> Result<Vec<String>> {
+    let mut names: Vec<String> = Vec::new();
+    for dir in [o, p] {
+        for e in fs::read_dir(dir)? {
+            let e = e?;
+            let n = e.file_name().to_string_lossy().into_owned();
+            let skip =
+                n.ends_with(".fmt") || no_term && n.starts_with("term") || e.file_type()?.is_dir();
+            if !skip && !names.contains(&n) {
+                names.push(n);
+            }
+        }
+    }
+    names.sort();
+    let masks = crate::mask::memory_statistics();
+    let mask = |b: &[u8]| {
+        let mut s = String::from_utf8_lossy(skip_line(b)).into_owned();
+        for (re, rep) in &masks {
+            s = re.replace_all(&s, *rep).into_owned();
+        }
+        s
+    };
+    let mut diffs = Vec::new();
+    for n in names {
+        let (a, b) = (fs::read(o.join(&n)), fs::read(p.join(&n)));
+        let same = match (a, b) {
+            (Ok(a), Ok(b))
+                if n.ends_with(".log") || n.ends_with(".blg") || n.starts_with("term") =>
+            {
+                mask(&a) == mask(&b)
+            }
+            (Ok(a), Ok(b)) => a == b,
+            _ => false,
+        };
+        if !same {
+            diffs.push(n);
+        }
+    }
+    Ok(diffs)
+}
+
+fn skip_line(b: &[u8]) -> &[u8] {
+    b.iter()
+        .position(|&c| c == b'\n')
+        .map_or(&[], |i| &b[i + 1..])
+}

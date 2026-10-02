@@ -1,0 +1,18 @@
+% A LaTeX document with an index: latex, makeindex, latex (see
+% xtask/src/e2e.rs).
+\documentclass{article}
+\usepackage{makeidx}
+\makeindex
+\begin{document}
+\section{Letters}
+Alpha\index{alpha} and beta\index{beta!sub}, gamma\index{gamma|textbf},
+delta\index{delta@$\delta$}, and a symbol\index{"!bang}.
+\index{range|(}A range starts here.
+\newpage
+More alpha\index{alpha}, a number\index{10} and\index{2} another,
+a cross-reference\index{seeing|see{alpha}}.
+\index{Zeta}\index{zeta!Sub!subsub}
+\newpage
+The range ends\index{range|)}; alpha again\index{alpha}\index{alpha|textit}.
+\printindex
+\end{document}

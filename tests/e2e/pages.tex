@@ -1,0 +1,24 @@
+\def\words{Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do
+eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim
+veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo
+consequat. }
+\def\para{\words\words\words\par}
+\count1=0
+\loop \advance\count1 by 1
+  \mark{sec \the\count1}
+  \para
+  \ifodd\count1 \footnote*{\words\words\words\words\words\words\words\words\words\words\words\words\words\words}\fi
+  \ifnum\count1=5 \topinsert\vbox to 3in{\hrule\vfil\hrule}\endinsert\fi
+  \ifnum\count1=9 \midinsert\vbox to 2in{\vfil}\endinsert\fi
+  \penalty-50
+\ifnum\count1<40 \repeat
+\setbox0=\vbox{\hsize=3in \para\para\para\para\mark{a}\para\mark{b}\para}
+\count2=0
+\loop \setbox2=\vsplit0 to 1.3in
+  \message{[\splitfirstmark|\splitbotmark]}
+  \advance\count2 by 1
+  \line{\box2\hss}
+\ifvoid0 \else\repeat
+\setbox0=\vbox{\hbox{x}\vskip 0pt minus 1fil\hbox{y}\penalty0\hbox{z}}
+\setbox2=\vsplit0 to 10pt
+\bye

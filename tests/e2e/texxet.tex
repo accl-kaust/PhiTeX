@@ -1,0 +1,36 @@
+% e-TeX's TeXXeT: mixed-direction text, reversed at shipout.
+\catcode`\{=1 \catcode`\}=2 \catcode`\#=6 \catcode`\^=7
+\input plain
+\TeXXeTstate=1
+\hsize=200pt \parindent=10pt
+Left text \beginR right to left words here\endR\ and back again.
+\beginR Whole paragraph written from right to left, with \beginL embedded
+left text\endL\ inside, spanning more than one line of output so that the
+line breaks need reopening segments.\endR
+
+\setbox0\hbox{\beginR abc\hskip 10pt plus 5pt def\endR}\copy0
+\hbox to 150pt{\beginR x\hfil y\leaders\hrule\hskip 20pt z\endR}
+\hbox to 150pt{\beginR x\leaders\hbox to 7pt{.\hss}\hskip 30pt y\endR}
+\hbox{\beginR a\raise2pt\hbox{bc}d\vrule width 3pt e\endR}
+\hbox{\beginR a\vbox{\hbox{bc}\hrule\moveright 3pt\hbox{d}}e\endR}
+\hbox{unmatched\endR\ and \beginL open}
+\beginR\noindent Text $a+b$ more text\endR
+\beginR\noindent para with display
+$$x=y\eqno(1)$$
+after display\endR
+\beginL\beginR \beginL q\endL r\endR s\endL
+\vfill\eject
+\setbox0\hbox{\beginR abc\beginL de\global\TeXXeTstate=0}
+\setbox1\hbox{x\TeXXeTstate=1 \beginR y\endL z\global\TeXXeTstate=0}
+\TeXXeTstate=1
+\setbox2\hbox{p\beginR q\global\TeXXeTstate=0}
+\box0 \box1
+\hbox{\beginR m\copy2 n\hbox{\beginL o\box2 w\endL}\endR}
+\TeXXeTstate=1
+\hbox{\beginR\vbox{\hsize 50pt \leaders\vrule\vskip 5pt \leaders\hbox{a}\vskip 30pt\hrule\moveleft2pt\hbox{b}\hbox{\beginL c\endL d}}\endR}
+\hbox to 100pt{\beginR a\cleaders\hbox to 9pt{\hss.}\hfil b\xleaders\hbox to 9pt{-}\hskip 27pt plus 1fil c\endR}
+\hbox{\beginR\special{one}a\write-1{w1}b\write-1{w2}\special{two}\endR}
+\hbox{\beginR\discretionary{x}{y}{zz}\kern3pt\kern0pt ff\endR}
+\showboxdepth=100 \showboxbreadth=100 \tracingonline1
+\showlists
+\bye

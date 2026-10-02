@@ -1,0 +1,96 @@
+% pdfTeX's character codes, protrusion and font expansion (what
+% microtype drives), in PDF output.
+\catcode`\{=1 \catcode`\}=2 \catcode`\#=6
+\pdfoutput=1 \pdfcompresslevel=0 \pdfobjcompresslevel=0
+\hsize=200pt \vsize=300pt \parfillskip=0pt plus 1fil \baselineskip=12pt
+\tolerance=10000 \parindent=10pt
+\font\f=cmr10 \f
+% \pdfobj file finds its file on TeX's search path (cmap's t1.cmap)
+\immediate\pdfobj stream file {t1.cmap}
+% the codes: defaults, clamping, and the tables they are kept in
+\lpcode\f`A=50 \rpcode\f`A=-2000 \efcode\f`A=-5
+\message{[\the\lpcode\f`A,\the\rpcode\f`A,\the\efcode\f`A,\the\efcode\f`B]}
+\knbscode\f1=7 \stbscode\f1=8 \shbscode\f1=9 \knbccode\f1=10 \knaccode\f1=11
+\message{[\the\knbscode\f1,\the\stbscode\f1,\the\shbscode\f1,%
+  \the\knbccode\f1,\the\knaccode\f1,\the\knbscode\f2]}
+% tags: ligature programs, larger characters and extensibles
+\message{[\the\tagcode\f`f,\the\tagcode\f`A,\the\tagcode\f200,\the\pdfnoligatures\f]}
+\font\e=cmex10
+\message{[\the\tagcode\e0,\the\tagcode\e"10,\the\pdfnoligatures\e]}
+\tagcode\e"10=-2 \tagcode\e0=-4 \tagcode\e1=5
+\message{[\the\tagcode\e0,\the\tagcode\e"10,\the\tagcode\e1]}
+\font\g=cmr12 \tagcode\g`A=-1 \setbox0\hbox{\g AV}\message{[\the\wd0]}
+\pdfnoligatures\g \setbox0\hbox{\g ffi}\message{[\the\wd0,\the\pdfnoligatures\g]}
+\def\words{The quick brown fox jumps over the lazy dog, and then
+  ``again'' (twice), to fill a line or two. }
+\words\words\par
+% protrusion: punctuation and some letters hang into the margins
+\count255=33
+\def\allcodes{\ifnum\count255<128 \lpcode\f\count255=25 \rpcode\f\count255=35
+  \advance\count255 1 \expandafter\allcodes\fi}
+\allcodes
+\def\setpr#1#2#3{\lpcode\f`#1=#2 \rpcode\f`#1=#3 }
+\setpr,{0}{700}\setpr.{0}{700}\setpr-{0}{700}\setpr({100}{0}\setpr){0}{100}
+\setpr`{500}{0}\setpr'{0}{500}\setpr T{70}{70}\setpr A{50}{50}\setpr y{0}{50}
+\setpr f{0}{80}\setpr o{20}{20}
+\lpcode\f 11=40 \rpcode\f 11=60 % the ligatures ff, `` and ''
+\lpcode\f 92=300 \rpcode\f 34=300
+\pdfprotrudechars=2 \showboxdepth=10 \showboxbreadth=100
+\def\para{``Too long a text'' (said Ann), ``fills the lines, yes. And
+  hyphenation: extraordinary, disestablishmentarianism, a coffee-break
+  offer, stuff.'' The end.\par}
+\para
+{\tracingparagraphs=1 \tracingonline=1 \para}
+\setbox3\vbox{\parindent=0pt \para \global\setbox1\lastbox
+  \unskip\unpenalty \global\setbox4\lastbox}
+\showbox1 \showbox4
+\message{[\leftmarginkern1,\rightmarginkern1,\leftmarginkern4,\rightmarginkern4]}
+\setbox2\hbox{\unhcopy4}\showbox2
+\message{[\leftmarginkern2,\rightmarginkern2]}
+\setbox2\hbox{}\message{[\leftmarginkern2]}
+\box3 \box4 \box1
+{\parindent=0pt \leftskip=5pt \rightskip=0pt plus 20pt \para}
+{\hsize=100pt T\hbox{\hbox{.}}oo\discretionary{-}{A}{x}yT A\-T
+  \penalty-10000 \kern0pt T\vadjust{}\mark{}. \par}
+\pdfprotrudechars=1 \para
+\pdfprotrudechars=0 \para
+% font expansion: a real font and a virtual one (ptmr8t over ptmr8r)
+\font\h=cmr12 \pdffontexpand\h 20 20 5 autoexpand
+\font\v=ptmr8t at 11pt \pdffontexpand\v 30 20 10 autoexpand
+\efcode\h`i=500 \efcode\h`l=0 \efcode\v`o=700
+\message{[\the\efcode\h`i,\the\efcode\h`a]}
+\def\xpara#1{#1\def\words{The quick brown fox jumps over the lazy dog, and then
+  ``again'' (twice), to fill a line or two; efficient AVAWA office.}%
+  \words\ \words\ \words\par}
+\pdfadjustspacing=2 \xpara\h
+{\tracingparagraphs=1 \tracingonline=1 \xpara\h}
+\setbox3\vbox{\xpara\h \global\setbox1\lastbox}\showbox1
+\xpara\v
+\setbox3\vbox{\xpara\v \global\setbox1\lastbox}\showbox1
+\pdfadjustspacing=1 \xpara\h \xpara\v
+\pdfadjustspacing=2 \pdfprotrudechars=2 \lpcode\h`T=100 \rpcode\h`.=500
+  \rpcode\h`,=500 \xpara\h
+\pdfadjustspacing=0 \pdfprotrudechars=0 \xpara\h
+% a ligature at the margin varies the margin kerns from 0 (pdfTeX's
+% char_pw of its lig_char, which is no char node)
+\font\q=cmr12 at 11pt \pdffontexpand\q 20 20 5 autoexpand
+{\pdfadjustspacing=2 \pdfprotrudechars=2 \lpcode\q 34=400 \rpcode\q 34=300
+  \lpcode\q 92=300 \rpcode\q`.=200 \parfillskip=0pt \parindent=0pt
+  \tracingparagraphs=1 \tracingonline=1 \q
+  \def\fit#1#2{\setbox0\hbox{#2}\hsize=\wd0 \advance\hsize#1\relax
+    \noindent#2\par}%
+  \fit{4pt}{``Quick brown fox jumps, over the lazy''}
+  \fit{8pt}{``Quick brown fox jumps, over the lazy''}
+  \fit{12pt}{Quick brown fox jumps over a lazy ``dog''}
+  \fit{8pt}{``The quick brown fox jumps, again.}
+  \fit{-3pt}{``The quick brown fox jumps, again''}\par}
+% letterspacing (a virtual font) and copies of fonts
+\letterspacefont\ls\h 100 \letterspacefont\lt\v -50 nolig
+\message{[\fontname\ls,\fontname\lt,\the\fontdimen6\ls]}
+\setbox1\hbox{\ls office AVA}\message{[\the\wd1]}\showbox1
+\pdfcopyfont\hc\f \message{[\fontname\hc]}
+\pdffontexpand\hc 10 10 5 autoexpand
+{\ls Spaced out text, a line of it.}\par
+{\lt Tighter text, fi fl ffi.}\par
+\pdfadjustspacing=2 {\hc\words\ \words\ \words}\par
+\end

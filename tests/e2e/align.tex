@@ -1,0 +1,45 @@
+% Alignments: spans, \omit, \noalign rules, tabskip glue, `to` and
+% `spread`, \valign, display alignments with an indent, overfull rows.
+\parindent=0pt
+\halign{#\hfil&\hfil#\hfil&\hfil#\cr
+Left&Center&Right\cr
+\noalign{\hrule}
+a&bb&ccc\cr
+\multispan2 spanning two columns&x\cr
+\omit\vrule height 12pt depth 4pt\hfil&y&z\cr
+\multispan3\hfil all three\hfil\cr
+}
+\halign to 4in{\tabskip=0pt plus 1fil#\tabskip=3pt plus 2pt minus 1pt&&\quad#\quad\cr
+one&two&three&four\cr
+\noalign{\kern2pt\hrule\kern2pt}
+1&2\cr
+\span\omit spanned&\omit\hfil r\cr
+}
+\halign spread 1in{#\tabskip=0pt minus 10pt&#\cr
+wide entry here&and another one\cr}
+\halign to 1in{#&#\cr
+much too wide for the box&also wide\cr}
+\hbox{\valign{#\vfil\tabskip=2pt&\vfil#\cr
+\hbox{top}&\hbox{bottom}\cr
+\noalign{\vrule}
+\hbox{A}\par\hbox{B}&\hbox{C}\cr
+\multispan2\vfil\hbox{spans}\vfil\cr}}
+\leftskip=1in
+Some text before the display
+$$\displayindent=20pt\displaywidth=3in
+\halign{#\hfil\tabskip=1em&$#$\cr
+\noalign{\hrule}
+first&x^2\cr
+\noalign{\hrule}
+second&\sum_i y_i\cr}$$
+and after.
+$$\eqalignno{a&=b+c&(1)\cr d&=e&(2)\cr}$$
+\settabs 3\columns
+\+one&two&three\cr
+\+&&x\cr
+\halign{&#\cr a&b&c&d&e&f&g\cr a\cr}
+% a shifted display's rules are packed (§806), which sets \badness
+\hangindent=1in \hangafter=0 Hanging.
+\setbox0\hbox to 100pt{a}$$\halign to 200pt{#\cr a\cr\noalign{\hrule}b\cr}$$
+\message{[\the\badness]}
+\bye

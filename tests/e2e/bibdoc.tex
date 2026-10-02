@@ -1,0 +1,10 @@
+% A LaTeX document with a bibliography from xampl.bib: latex, bibtex,
+% latex, latex (see xtask/src/e2e.rs).
+\documentclass{article}
+\begin{document}
+Knuth's volumes~\cite{whole-set,book-crossref} and an article~\cite{article-full};
+see also \cite{inproceedings-full,techreport-full,misc-full,Knuth:1968}.
+\nocite{mastersthesis-minimal,phdthesis-full,unpublished-full}
+\bibliographystyle{alpha}
+\bibliography{xampl}
+\end{document}

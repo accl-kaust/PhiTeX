@@ -1,0 +1,20 @@
+% The modern command line (`partex build`, see xtask/src/e2e.rs): a
+% document with what its renderer groups. A forward reference (two runs),
+% citations (BibTeX), an undefined reference, an overfull box, a font
+% substitution, a \typeout and an undefined control sequence.
+\documentclass{article}
+\begin{document}
+\section{Start}
+Section~\ref{sec:end} is at the end; \ref{sec:nowhere} is nowhere.
+Knuth's volumes~\cite{whole-set} and an article~\cite{article-full}.
+\typeout{modern: a line from typeout}
+
+\hbox to 1in{This line is far too wide for the one inch box it is in.}
+
+\textsc{\textbf{Bold small capitals}} are substituted.
+
+\section{End}\label{sec:end}
+An \undefinedcontrolsequence here.
+\bibliographystyle{plain}
+\bibliography{xampl}
+\end{document}

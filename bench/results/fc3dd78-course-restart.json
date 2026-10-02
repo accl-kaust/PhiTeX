@@ -1,0 +1,144 @@
+{
+  "commit": "fc3dd78",
+  "dirty": false,
+  "date": "2026-09-27T14:26:43+03:00",
+  "host": "argon",
+  "cpus": 24,
+  "reference": "partex cold build of the same text (store off), byte-identical PDFs checked",
+  "document": "course copy: 299 pages, pdflatex, -o _out, SOURCE_DATE_EPOCH fixed",
+  "figures": [
+    {
+      "case": "course build, nothing changed: to the result (no-op path on)",
+      "seconds": [
+        0.084,
+        0.07,
+        0.08
+      ],
+      "pdf_identical": true,
+      "median_seconds": 0.08,
+      "min_seconds": 0.07
+    },
+    {
+      "case": "course build, nothing changed: to exit (no-op path on)",
+      "seconds": [
+        0.085,
+        0.072,
+        0.085
+      ],
+      "pdf_identical": true,
+      "median_seconds": 0.085,
+      "min_seconds": 0.072
+    },
+    {
+      "case": "course watch, nothing changed: to the result (no-op path on)",
+      "seconds": [
+        0.061,
+        0.077,
+        0.063
+      ],
+      "pdf_identical": true,
+      "median_seconds": 0.063,
+      "min_seconds": 0.061
+    },
+    {
+      "case": "course watch, nothing changed: to exit (no-op path on)",
+      "seconds": [
+        2.902,
+        2.914,
+        2.879
+      ],
+      "pdf_identical": true,
+      "median_seconds": 2.902,
+      "min_seconds": 2.879
+    },
+    {
+      "case": "course build after an edit: to the result (no-op path on)",
+      "seconds": [
+        1.533,
+        1.538,
+        1.527
+      ],
+      "pdf_identical": true,
+      "median_seconds": 1.533,
+      "min_seconds": 1.527
+    },
+    {
+      "case": "course build after an edit: to exit (no-op path on)",
+      "seconds": [
+        2.751,
+        2.771,
+        2.712
+      ],
+      "pdf_identical": true,
+      "median_seconds": 2.751,
+      "min_seconds": 2.712
+    },
+    {
+      "case": "course build, nothing changed: to the result (PARTEX_STORE_QUICK=0)",
+      "seconds": [
+        0.961,
+        0.917,
+        0.928
+      ],
+      "pdf_identical": true,
+      "median_seconds": 0.928,
+      "min_seconds": 0.917
+    },
+    {
+      "case": "course build, nothing changed: to exit (PARTEX_STORE_QUICK=0)",
+      "seconds": [
+        0.961,
+        0.918,
+        0.929
+      ],
+      "pdf_identical": true,
+      "median_seconds": 0.929,
+      "min_seconds": 0.918
+    },
+    {
+      "case": "course watch, nothing changed: to the result (PARTEX_STORE_QUICK=0)",
+      "seconds": [
+        0.915,
+        0.969,
+        0.912
+      ],
+      "pdf_identical": true,
+      "median_seconds": 0.915,
+      "min_seconds": 0.912
+    },
+    {
+      "case": "course watch, nothing changed: to exit (PARTEX_STORE_QUICK=0)",
+      "seconds": [
+        2.979,
+        3.083,
+        2.976
+      ],
+      "pdf_identical": true,
+      "median_seconds": 2.979,
+      "min_seconds": 2.976
+    },
+    {
+      "case": "course build after an edit: to the result (PARTEX_STORE_QUICK=0)",
+      "seconds": [
+        1.56,
+        2.826,
+        1.497
+      ],
+      "pdf_identical": true,
+      "median_seconds": 1.56,
+      "min_seconds": 1.497
+    },
+    {
+      "case": "course build after an edit: to exit (PARTEX_STORE_QUICK=0)",
+      "seconds": [
+        2.774,
+        3.994,
+        2.744
+      ],
+      "pdf_identical": true,
+      "median_seconds": 2.774,
+      "min_seconds": 2.744
+    }
+  ],
+  "note": "each case a fresh process; before = the same binary with PARTEX_STORE_QUICK=0; watch to exit includes 2 s waiting before quitting"
+}

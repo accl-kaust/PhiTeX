@@ -1,0 +1,255 @@
+//! The engine's only window to the outside world (Typst's "World" idea).
+
+use alloc::sync::Arc;
+use alloc::vec::Vec;
+
+use partex_engine::dviout::{DviWriter, Summary, TooLong};
+use partex_engine::pageir::Page;
+
+/// What kind of file TeX asks for. Selects the kpathsea search path and
+/// default suffix on native hosts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum FileKind {
+    /// `\input`, `\openin` (`.tex`).
+    Tex,
+    /// Font metrics (`.tfm`).
+    Tfm,
+    /// Format files (`.fmt`).
+    Fmt,
+    /// Font map files (`.map`, pdfTeX).
+    FontMap,
+    /// Type 1 fonts (`.pfb`, `.pfa`).
+    Type1,
+    /// Encoding vectors (`.enc`).
+    Enc,
+    /// Virtual fonts (`.vf`).
+    Vf,
+    /// TrueType fonts (`.ttf`).
+    TrueType,
+    /// Everything else, looked up by exact name.
+    Other,
+}
+
+/// A load as [`Host::unchanged`] is asked about it: the name, its kind,
+/// and the contents [`Host::read_file`] gave (none: it found nothing).
+pub type Load<'a> = (&'a [u8], FileKind, Option<&'a Arc<[u8]>>);
+
+/// A file found and read by the host.
+/// A memoized value (see [`Host::cached`]).
+pub type Memo = Arc<dyn core::any::Any + Send + Sync>;
+
+pub struct OpenedFile {
+    /// The name TeX prints (`(./trip.tex`): the host's resolved path, as
+    /// kpathsea would return it.
+    pub name: Vec<u8>,
+    /// Shared: the engine keeps open input files as they were read, and a
+    /// host may keep them too (to see what a checkpoint has read).
+    pub contents: Arc<[u8]>,
+}
+
+/// Handle for a file opened for writing (`\openout`, `.log`, `.dvi`, `.pdf`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct WriteId(pub u32);
+
+partex_engine::persist_struct!(WriteId; 0);
+
+/// Calendar time as TeX sees it (`\time`, `\day`, `\month`, `\year`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DateTime {
+    pub year: i32,
+    pub month: i32,
+    pub day: i32,
+    /// Minutes since midnight.
+    pub minutes: i32,
+}
+
+/// A DVI writer on another thread: pages are queued and written while
+/// TeX goes on (see [`Host::page_sink`]). The engine queues a page only
+/// when the file surely stays below 2^31 bytes, so §598's error still
+/// happens at the page it would in TeX.
+pub trait PageSink {
+    /// Take over `writer`, which writes `file`.
+    fn start(&mut self, writer: DviWriter, file: WriteId);
+    /// Queue `page`; returns an empty page to reuse.
+    fn page(&mut self, page: Page) -> Page;
+    /// Write `page` after the queued ones, and wait: the page back, and
+    /// the file's length.
+    fn page_now(&mut self, page: Page) -> (Page, Result<i32, TooLong>);
+    /// Finish the file (§642) and write it all out.
+    fn finish(&mut self, mag: i32) -> Result<Summary, TooLong>;
+}
+
+/// All effects of the engine. Implementations must be deterministic for a
+/// given input tree and `SOURCE_DATE_EPOCH`; the memoization layers rely on it.
+pub trait Host {
+    /// Look up and read a whole file. `None` if it does not exist.
+    fn read_file(&mut self, name: &[u8], kind: FileKind) -> Option<OpenedFile>;
+
+    /// For each load (a name, its kind, and the contents
+    /// [`read_file`](Host::read_file) gave, or none), whether `read_file`
+    /// would give the same again, known without making the lookup or
+    /// reading the file (DESIGN 7.17.3, "A rebuild's file checks cost the
+    /// files that changed"). False says nothing: the caller loads again
+    /// and compares.
+    fn unchanged(&mut self, loads: &[Load<'_>]) -> Vec<bool> {
+        alloc::vec![false; loads.len()]
+    }
+
+    /// Create (or truncate) an output file. Returns the name TeX prints.
+    fn open_write(&mut self, name: &[u8], kind: FileKind) -> Option<(WriteId, Vec<u8>)>;
+    fn write(&mut self, file: WriteId, bytes: &[u8]);
+    fn close(&mut self, file: WriteId);
+
+    /// Terminal output (TeX's `term_out`).
+    fn term_write(&mut self, bytes: &[u8]);
+    /// One line of terminal input (`\read16`, error prompts). `None` at EOF.
+    fn term_read_line(&mut self) -> Option<Vec<u8>>;
+
+    /// Time of the job start.
+    fn now(&self) -> DateTime;
+
+    /// pdfTeX's `\pdfcreationdate`: when the job started, as a PDF date
+    /// (`D:YYYYmmddHHMMSS` and the zone: `Z`, or `+HH'MM'`). By default
+    /// the minute of [`Host::now`], as if it were UTC.
+    fn creation_date(&mut self) -> Vec<u8> {
+        let t = self.now();
+        alloc::format!(
+            "D:{:04}{:02}{:02}{:02}{:02}00Z",
+            t.year,
+            t.month,
+            t.day,
+            t.minutes / 60,
+            t.minutes % 60
+        )
+        .into_bytes()
+    }
+
+    /// pdfTeX's `\pdffilemoddate`: when the file `\input` would find as
+    /// `name` last changed, as a PDF date; `None` if not found (or the
+    /// host cannot tell).
+    fn file_mod_date(&mut self, _name: &[u8]) -> Option<Vec<u8>> {
+        None
+    }
+
+    /// Seconds since the epoch and microseconds, for pdfTeX's timer and
+    /// random seed (web2c's `get_seconds_and_micros`). Hosts that must be
+    /// reproducible keep the default.
+    fn seconds_and_micros(&mut self) -> (i32, i32) {
+        (0, 0)
+    }
+
+    /// A structured report of an error TeX has just printed (see
+    /// [`crate::diag`]). Ignored unless the host implements it.
+    fn diagnostic(&mut self, _diagnostic: &crate::diag::Diagnostic) {}
+
+    /// Whether [`Host::diagnostic`] should also get warnings (overfull and
+    /// underfull boxes) and notes (`\message`, `\write` to the terminal).
+    /// Nothing TeX prints depends on it.
+    fn notes(&self) -> bool {
+        false
+    }
+
+    /// A page is being shipped out, `\count0` its number (for progress
+    /// reports; nothing TeX prints depends on it).
+    fn shipping(&mut self, _count0: i32) {}
+
+    /// `\write18`. Denied unless the host implements it.
+    /// A page just written to the DVI file (not called while a
+    /// [`PageSink`] has the file). A host that splices outputs keeps it,
+    /// to write the page again elsewhere in the file.
+    fn page_written(&mut self, _page: &Page) {}
+
+    /// zlib's `compress` of `data` at `level` (1–9), as pdfTeX's zlib
+    /// writes it; `None` if the host has no zlib (PDF streams are then
+    /// stored uncompressed).
+    fn deflate(&mut self, _level: i32, _data: &[u8]) -> Option<Vec<u8>> {
+        None
+    }
+
+    /// What a pure computation made, by `key`, a hash of everything it
+    /// read (a content-keyed memo: a machine's host keeps them across
+    /// rebuilds, so a rebuild that ends the job again does not subset
+    /// the same fonts again). `None` by default.
+    fn cached(&mut self, _key: u128) -> Option<Memo> {
+        None
+    }
+
+    /// Keep `value` under `key` (see [`Host::cached`]).
+    fn cache(&mut self, _key: u128, _value: Memo) {}
+
+    /// The slot (internal number) for a font of identity `ident` (a hash
+    /// of what it is: its file, name and size, or the font it was
+    /// expanded or copied from), `fresh` being tex.web's next number
+    /// (§576). A machine's host keeps a registry shared by every run of a
+    /// build, so a font keeps its slot however many fonts were loaded
+    /// before it; a slot is never given to two identities. The default is
+    /// `fresh`.
+    fn font_slot(&mut self, _ident: u128, fresh: i32) -> i32 {
+        fresh
+    }
+
+    /// A writer for the DVI file on another thread, if the host has one.
+    fn page_sink(&mut self) -> Option<&mut dyn PageSink> {
+        None
+    }
+
+    fn shell_escape(&mut self, _command: &[u8]) -> Option<i32> {
+        None
+    }
+
+    /// A value cached under `key` by an earlier run (of this same
+    /// program), if the host keeps a cache. Cached values are results of
+    /// pure functions of their key (a map file's table, for one): using
+    /// one changes nothing but the time taken.
+    fn cache_get(&mut self, _key: u128) -> Option<Vec<u8>> {
+        None
+    }
+
+    /// Keep `value` under `key` for later runs (see [`Host::cache_get`]).
+    fn cache_put(&mut self, _key: u128, _value: &[u8]) {}
+}
+
+partex_engine::persist_struct!(DateTime {
+    year,
+    month,
+    day,
+    minutes
+});
+partex_engine::persist_enum!(FileKind {
+    Tex,
+    Tfm,
+    Fmt,
+    FontMap,
+    Type1,
+    Enc,
+    Vf,
+    TrueType,
+    Other
+});
+
+/// A host with no files and no terminal: the engine that holds the
+/// format's definitions runs nothing (`ssa::rebuild`, DESIGN 7.17.3).
+pub(crate) struct NoHost;
+
+impl Host for NoHost {
+    fn read_file(&mut self, _name: &[u8], _kind: FileKind) -> Option<OpenedFile> {
+        None
+    }
+    fn open_write(&mut self, _name: &[u8], _kind: FileKind) -> Option<(WriteId, Vec<u8>)> {
+        None
+    }
+    fn write(&mut self, _file: WriteId, _bytes: &[u8]) {}
+    fn close(&mut self, _file: WriteId) {}
+    fn term_write(&mut self, _bytes: &[u8]) {}
+    fn term_read_line(&mut self) -> Option<Vec<u8>> {
+        None
+    }
+    fn now(&self) -> DateTime {
+        DateTime {
+            year: 1776,
+            month: 7,
+            day: 4,
+            minutes: 720,
+        }
+    }
+}

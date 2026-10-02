@@ -1,0 +1,26 @@
+% Source text as values (`partex -watch`, DESIGN.md 7.2): the e2e harness
+% edits this file and tokens-part.tex between builds, some edits reading as
+% the same tokens as before (nothing to run), some not (see xtask/src/e2e.rs).
+\def\words{Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do
+eiusmod tempor incididunt ut labore et dolore magna aliqua. }
+\newwrite\out \immediate\openout\out=tokens.txt
+\openin1=tokens-part \read1 to\firstline \closein1
+\def\section#1{\bigskip\noindent{\bf #1}\par\nobreak\medskip}
+\section{Opening}
+Alpha beta gamma, and \words
+% note-1
+\words\words\par
+\immediate\write\out{A   written line, at line \the\inputlineno.}
+\message{[line \the\inputlineno]}
+\input tokens-part
+\section{Codes}
+\begingroup\obeyspaces\obeylines%
+Obeyed  lines keep  their spaces
+and their ends%
+\endgroup
+\catcode`\@=11 \def\x@y{XY}\catcode`\@=12 Text with   spaces.\par
+\undefinedmacro here  too.\par
+\section{Closing}
+Delta epsilon. \words\words\par
+\words\words\words\par
+\bye

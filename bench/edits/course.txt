@@ -1,0 +1,23 @@
+# The canonical edits (bench/edits.sh), all in chapter 15 of the course.
+# name<TAB>path|from|to; <NL> is a newline.
+# space: a second space after a word mid-sentence (line 69): no token changes.
+space	ch15.tex|penalty methods raise the weight|penalty methods raise  the weight
+# word: `expensive` becomes `dear` (line 32).
+word	ch15.tex|That limit is expensive.|That limit is dear.
+# label: \label{partex:bench} right after the sentence that ends a paragraph (line 67).
+label	ch15.tex|zero where the constraint holds.|zero where the constraint holds.\label{partex:bench}
+# footnote: \footnote{Bench.} after the first word of the first section (line 18).
+footnote	ch15.tex|Placement is a constrained problem.|Placement\footnote{Bench.} is a constrained problem.
+# enter: the paragraph of line 69 split in two by a blank line (two inserted lines).
+enter	ch15.tex|the solution first. \doc{ePlace} adjusts|the solution first.<NL><NL>\doc{ePlace} adjusts
+# word-local: `small` becomes `tiny` in the line-69 paragraph, which keeps its lines (no reflow past it).
+word-local	ch15.tex|starting small so|starting tiny so
+# delete-par: the second paragraph of the first section (line 20, two lines of text) deleted with its blank line; the chapter's page breaks after it move.
+delete-par	ch15.tex|The example: minimise \(f(x,y)=x^2+y^2\) subject to \(x+y=2\). The answer is \(x=y=1\), the point of the line closest to the origin, with \(f^\star=2\).<NL><NL>|
+# Typing (`;;`: a second edit in the same process, rebuilt on the regions the first rebuild recorded; the row is the second rebuild).
+# word2: the `word` edit, then `of` becomes `for` three words later in the same paragraph (line 32).
+word2	ch15.tex|That limit is expensive.|That limit is dear.;;ch15.tex|dear. The Hessian of the|dear. The Hessian for the
+# space2: the `space` edit, then a second extra space two words on (line 69).
+space2	ch15.tex|penalty methods raise the weight|penalty methods raise  the weight;;ch15.tex|raise  the weight|raise  the  weight
+# enter2: the `enter` edit, then `every` becomes `each` in the new paragraph.
+enter2	ch15.tex|the solution first. \doc{ePlace} adjusts|the solution first.<NL><NL>\doc{ePlace} adjusts;;ch15.tex|adjusts \(\lambda\) at every iteration|adjusts \(\lambda\) at each iteration

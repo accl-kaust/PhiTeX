@@ -1,0 +1,24 @@
+% Files read in other ways (`partex -watch`, see xtask/src/e2e.rs, case
+% verbatim): input under other category codes (as \verbatiminput and
+% \lstinputlisting do), and read line by line with \read. Every
+% edit of them must rebuild.
+\def\page#1{\advance\count1 by 1 Page \the\count1. #1\par\vfill\eject}
+\page{}
+%
+%
+\begingroup
+\obeylines \obeyspaces \tt \catcode`\#=12 \catcode`\^=12 \catcode`\_=12
+\catcode`\%=12 \catcode`\{=12 \catcode`\}=12 \catcode`\|=0 \catcode`\\=12
+|input verbatim-part
+|endgroup
+\page{}
+%
+%
+\newread\r \openin\r=verbatim-read
+\def\readall{\ifeof\r\else\read\r to\l \l\par\expandafter\readall\fi}
+\readall \closein\r
+\page{}
+%
+%
+\page{}
+\bye

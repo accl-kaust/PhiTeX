@@ -1,0 +1,178 @@
+{
+  "commit": "c584831",
+  "dirty": false,
+  "date": "2026-09-27T15:25:41+03:00",
+  "host": "argon",
+  "cpus": 24,
+  "reference": "a classic single pass of the final text (partex, store off), same output path: PDF, .aux, .toc byte-identical",
+  "document": "course copy (299 pages), PARTEX_MACHINE=1 PARTEX_MACHINE_EDIT with three ;; edits in one process after a cold build; splice = Stats.other_parts_ns[1]",
+  "figures": [
+    {
+      "case": "course: cold build (fb8abf5 (B-tree indexes))",
+      "seconds": [
+        55.76
+      ],
+      "median_seconds": 55.76,
+      "min_seconds": 55.76,
+      "pdf_identical": true,
+      "note": "identical to the reference except the trailer /ID, which hashes the output path (this run wrote elsewhere)"
+    },
+    {
+      "case": "course: indexes of the build (fb8abf5 (B-tree indexes))",
+      "seconds": [
+        0.61
+      ],
+      "median_seconds": 0.61,
+      "min_seconds": 0.61,
+      "pdf_identical": true,
+      "note": "identical to the reference except the trailer /ID, which hashes the output path (this run wrote elsewhere)"
+    },
+    {
+      "case": "course: one-word edit in ch15 (fb8abf5 (B-tree indexes))",
+      "seconds": [
+        0.515
+      ],
+      "median_seconds": 0.515,
+      "min_seconds": 0.515,
+      "pdf_identical": true,
+      "cuts": 28,
+      "splice_ms": 52.8,
+      "splice_ms_per_cut": 1.884,
+      "note": "identical to the reference except the trailer /ID, which hashes the output path (this run wrote elsewhere)"
+    },
+    {
+      "case": "course: second edit nearby (fb8abf5 (B-tree indexes))",
+      "seconds": [
+        1.201
+      ],
+      "median_seconds": 1.201,
+      "min_seconds": 1.201,
+      "pdf_identical": true,
+      "cuts": 44,
+      "splice_ms": 55.2,
+      "splice_ms_per_cut": 1.255,
+      "note": "identical to the reference except the trailer /ID, which hashes the output path (this run wrote elsewhere)"
+    },
+    {
+      "case": "course: \\linespread in the preamble, all re-run (fb8abf5 (B-tree indexes))",
+      "seconds": [
+        85.802
+      ],
+      "median_seconds": 85.802,
+      "min_seconds": 85.802,
+      "pdf_identical": true,
+      "cuts": 4399,
+      "splice_ms": 8512.5,
+      "splice_ms_per_cut": 1.935,
+      "note": "identical to the reference except the trailer /ID, which hashes the output path (this run wrote elsewhere)"
+    },
+    {
+      "case": "course: cold build (dense ids)",
+      "seconds": [
+        54.11
+      ],
+      "median_seconds": 54.11,
+      "min_seconds": 54.11,
+      "pdf_identical": true
+    },
+    {
+      "case": "course: indexes of the build (dense ids)",
+      "seconds": [
+        0.35
+      ],
+      "median_seconds": 0.35,
+      "min_seconds": 0.35,
+      "pdf_identical": true
+    },
+    {
+      "case": "course: one-word edit in ch15 (dense ids)",
+      "seconds": [
+        0.447
+      ],
+      "median_seconds": 0.447,
+      "min_seconds": 0.447,
+      "pdf_identical": true,
+      "cuts": 28,
+      "splice_ms": 18.6,
+      "splice_ms_per_cut": 0.665
+    },
+    {
+      "case": "course: second edit nearby (dense ids)",
+      "seconds": [
+        1.079
+      ],
+      "median_seconds": 1.079,
+      "min_seconds": 1.079,
+      "pdf_identical": true,
+      "cuts": 44,
+      "splice_ms": 28.5,
+      "splice_ms_per_cut": 0.649
+    },
+    {
+      "case": "course: \\linespread in the preamble, all re-run (dense ids)",
+      "seconds": [
+        76.613
+      ],
+      "median_seconds": 76.613,
+      "min_seconds": 76.613,
+      "pdf_identical": true,
+      "cuts": 4399,
+      "splice_ms": 3552.3,
+      "splice_ms_per_cut": 0.808
+    },
+    {
+      "case": "course: cold build (dense ids, staged splices)",
+      "seconds": [
+        55.02
+      ],
+      "median_seconds": 55.02,
+      "min_seconds": 55.02,
+      "pdf_identical": true
+    },
+    {
+      "case": "course: indexes of the build (dense ids, staged splices)",
+      "seconds": [
+        0.35
+      ],
+      "median_seconds": 0.35,
+      "min_seconds": 0.35,
+      "pdf_identical": true
+    },
+    {
+      "case": "course: one-word edit in ch15 (dense ids, staged splices)",
+      "seconds": [
+        0.464
+      ],
+      "median_seconds": 0.464,
+      "min_seconds": 0.464,
+      "pdf_identical": true,
+      "cuts": 28,
+      "splice_ms": 19.2,
+      "splice_ms_per_cut": 0.687
+    },
+    {
+      "case": "course: second edit nearby (dense ids, staged splices)",
+      "seconds": [
+        1.121
+      ],
+      "median_seconds": 1.121,
+      "min_seconds": 1.121,
+      "pdf_identical": true,
+      "cuts": 44,
+      "splice_ms": 24.7,
+      "splice_ms_per_cut": 0.56
+    },
+    {
+      "case": "course: \\linespread in the preamble, all re-run (dense ids, staged splices)",
+      "seconds": [
+        71.638
+      ],
+      "median_seconds": 71.638,
+      "min_seconds": 71.638,
+      "pdf_identical": true,
+      "cuts": 4399,
+      "splice_ms": 939.9,
+      "splice_ms_per_cut": 0.214
+    }
+  ]
+}

@@ -1,0 +1,47 @@
+%% goal height=50.0, max depth=2.0
+% t=10.0 g=50.0 b=10000 p=0 c=100000#
+% t=22.0 g=50.0 b=10000 p=0 c=100000#
+% t=34.0 g=50.0 b=10000 p=50 c=100000#
+% t=46.0 g=50.0 b=10000 p=0 c=100000#
+% t=58.0 g=50.0 b=* p=0 c=*
+
+Completed box being shipped out [0]
+\vbox(50.0+2.0)x20.0
+.\glue(\topskip) 3.0
+.\hbox(7.0+2.0)x20.0, glue set 19.6fil
+..\rule(7.0+2.0)x0.4
+..\glue 0.0 plus 1.0fil
+.\glue(\baselineskip) 3.0
+.\hbox(7.0+2.0)x20.0, glue set 19.6fil
+..\rule(7.0+2.0)x0.4
+..\glue 0.0 plus 1.0fil
+.\glue(\baselineskip) 3.0
+.\hbox(7.0+2.0)x20.0, glue set 19.6fil
+..\rule(7.0+2.0)x0.4
+..\glue 0.0 plus 1.0fil
+.\penalty 50
+.\glue(\baselineskip) 3.0
+.\hbox(7.0+2.0)x20.0, glue set 19.6fil
+..\rule(7.0+2.0)x0.4
+..\glue 0.0 plus 1.0fil
+
+%% goal height=50.0, max depth=2.0
+% t=10.0 g=50.0 b=10000 p=0 c=100000#
+% t=22.0 g=50.0 b=10000 p=0 c=100000#
+% t=34.0 g=50.0 b=10000 p=-10000 c=-10000#
+
+Completed box being shipped out [0]
+\vbox(50.0+2.0)x20.0
+.\glue(\topskip) 3.0
+.\hbox(7.0+2.0)x20.0, glue set 19.6fil
+..\rule(7.0+2.0)x0.4
+..\glue 0.0 plus 1.0fil
+.\glue(\baselineskip) 3.0
+.\hbox(7.0+2.0)x20.0, glue set 19.6fil
+..\rule(7.0+2.0)x0.4
+..\glue 0.0 plus 1.0fil
+.\glue(\baselineskip) 3.0
+.\hbox(7.0+2.0)x20.0, glue set 19.6fil
+..\rule(7.0+2.0)x0.4
+..\glue 0.0 plus 1.0fil
+

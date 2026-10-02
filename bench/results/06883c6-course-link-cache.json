@@ -1,0 +1,199 @@
+{
+  "commit": "06883c6",
+  "dirty": false,
+  "date": "2026-09-27T19:39:17+03:00",
+  "host": "argon",
+  "cpus": 24,
+  "reference": "partex build (store off) of each edited state, classic: PDFs byte-identical; pdfcheck same on the \\Cref pair",
+  "document": "course copy (299 pages), partex watch -o _out, edits in ch05 (a word) and ch15 (\\label, \\Cref), each taken back; links_ms per pass",
+  "figures": [
+    {
+      "case": "course watch: word, to the complete PDF (PARTEX_MACHINE_LINK_CACHE=0)",
+      "seconds": [
+        0.403
+      ],
+      "median_seconds": 0.403,
+      "min_seconds": 0.403,
+      "pdf_identical": true,
+      "links_ms": [
+        35.7
+      ],
+      "regions_resolved": [
+        0
+      ]
+    },
+    {
+      "case": "course watch: word-back, to the complete PDF (PARTEX_MACHINE_LINK_CACHE=0)",
+      "seconds": [
+        0.202
+      ],
+      "median_seconds": 0.202,
+      "min_seconds": 0.202,
+      "pdf_identical": true,
+      "links_ms": [
+        39.4
+      ],
+      "regions_resolved": [
+        0
+      ]
+    },
+    {
+      "case": "course watch: label, to the complete PDF (PARTEX_MACHINE_LINK_CACHE=0)",
+      "seconds": [
+        2.572
+      ],
+      "median_seconds": 2.572,
+      "min_seconds": 2.572,
+      "pdf_identical": true,
+      "links_ms": [
+        29.2,
+        27.2
+      ],
+      "regions_resolved": [
+        0,
+        0
+      ]
+    },
+    {
+      "case": "course watch: label-back, to the complete PDF (PARTEX_MACHINE_LINK_CACHE=0)",
+      "seconds": [
+        3.738
+      ],
+      "median_seconds": 3.738,
+      "min_seconds": 3.738,
+      "pdf_identical": true,
+      "links_ms": [
+        26.4,
+        0.0
+      ],
+      "regions_resolved": [
+        0,
+        0
+      ]
+    },
+    {
+      "case": "course watch: cref, to the complete PDF (PARTEX_MACHINE_LINK_CACHE=0)",
+      "seconds": [
+        0.809
+      ],
+      "median_seconds": 0.809,
+      "min_seconds": 0.809,
+      "pdf_identical": true,
+      "links_ms": [
+        41.7
+      ],
+      "regions_resolved": [
+        0
+      ]
+    },
+    {
+      "case": "course watch: cref-back, to the complete PDF (PARTEX_MACHINE_LINK_CACHE=0)",
+      "seconds": [
+        0.76
+      ],
+      "median_seconds": 0.76,
+      "min_seconds": 0.76,
+      "pdf_identical": true,
+      "links_ms": [
+        27.8
+      ],
+      "regions_resolved": [
+        0
+      ]
+    },
+    {
+      "case": "course watch: word, to the complete PDF (resolved regions cached)",
+      "seconds": [
+        0.403
+      ],
+      "median_seconds": 0.403,
+      "min_seconds": 0.403,
+      "pdf_identical": true,
+      "links_ms": [
+        16.0
+      ],
+      "regions_resolved": [
+        17
+      ]
+    },
+    {
+      "case": "course watch: word-back, to the complete PDF (resolved regions cached)",
+      "seconds": [
+        0.152
+      ],
+      "median_seconds": 0.152,
+      "min_seconds": 0.152,
+      "pdf_identical": true,
+      "links_ms": [
+        13.5
+      ],
+      "regions_resolved": [
+        2
+      ]
+    },
+    {
+      "case": "course watch: label, to the complete PDF (resolved regions cached)",
+      "seconds": [
+        2.571
+      ],
+      "median_seconds": 2.571,
+      "min_seconds": 2.571,
+      "pdf_identical": true,
+      "links_ms": [
+        23.2,
+        13.0
+      ],
+      "regions_resolved": [
+        145,
+        64
+      ]
+    },
+    {
+      "case": "course watch: label-back, to the complete PDF (resolved regions cached)",
+      "seconds": [
+        3.131
+      ],
+      "median_seconds": 3.131,
+      "min_seconds": 3.131,
+      "pdf_identical": true,
+      "links_ms": [
+        13.2,
+        0.0
+      ],
+      "regions_resolved": [
+        339,
+        339
+      ]
+    },
+    {
+      "case": "course watch: cref, to the complete PDF (resolved regions cached)",
+      "seconds": [
+        0.81
+      ],
+      "median_seconds": 0.81,
+      "min_seconds": 0.81,
+      "pdf_identical": true,
+      "links_ms": [
+        35.4
+      ],
+      "regions_resolved": [
+        467
+      ]
+    },
+    {
+      "case": "course watch: cref-back, to the complete PDF (resolved regions cached)",
+      "seconds": [
+        0.76
+      ],
+      "median_seconds": 0.76,
+      "min_seconds": 0.76,
+      "pdf_identical": true,
+      "links_ms": [
+        21.9
+      ],
+      "regions_resolved": [
+        148
+      ]
+    }
+  ]
+}

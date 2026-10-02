@@ -1,0 +1,9 @@
+\catcode`\{=1 \catcode`\}=2 \showboxdepth=100 \showboxbreadth=100 \tracingonline1
+\font\r=cmr10 \r \overfullrule=5pt \boxmaxdepth=1pt
+\setbox0\hbox to 20pt{A\hskip 2pt plus 3pt B}
+\setbox0\hbox to 10pt{A\hskip 2pt minus 1pt B}
+\setbox0\hbox spread 1pt{A\hskip 2pt plus 1fil B}\showbox0
+\setbox0\hbox to 16pt{A\hskip 2pt minus 1pt B}
+\setbox0\vbox to 30pt{\hrule\vskip 3pt plus 2pt\hrule depth 3pt}
+\setbox0\vbox to 3pt{\hrule\vskip 3pt minus 2pt\hrule depth 3pt}
+\end
