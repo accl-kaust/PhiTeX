@@ -10281,3 +10281,44 @@ written" gives the file's size.
 
 The harness: 12 cases, 71 stages, identical with `--fixpoint`, with
 `PARTEX_SSA_TRIPS=1` and in check mode.
+
+## 2026-10-02 — A run that read a later definition stops past its budget (coordinator)
+
+**The settle hang** (the Overleaf extension's: a one-page article in PDF
+mode with no font map, an SSA build that never returned; plain runs end
+with partex's fatal "PK fonts are not implemented"). The fatal error
+comes in the last page's output routine, at `\end{document}`: the job's
+last step, a fire, leaves `output_active` true in the arrays. Trip 2
+reads the `.aux` trip 1 wrote, and the steps that read it are new (trip
+1 found no file): predicted by a step whose reads did not include
+`output_active`, the run read the arrays' value, the later step's, and
+`\end` fired again and again. The miss check that drops such a run
+(DESIGN 7.17.3, "A read resolves by prediction and validation") runs
+only at the step's end, which never came.
+
+A run is now watched once it passes its budget, twice its last run's
+commands and 10,000: past it, main control asks the tracker at each
+command (`Tracker::stop_due`) whether a read of the run so far found a
+slot a later definition holds, not placed, and if so stops there, a
+checkpoint. The rebuild ends the calls still open and drops the run as
+before. Stopping at the first such read, without a budget, was
+rejected: a dropped run finds all its misses in one run now (2 to 11
+slots in the extension's article log), and stopping early would make
+one retry per miss. Below the budget the check costs a compare per
+command.
+
+The extension's repro: 2 trips, settled, the fatal error as plain partex
+gives it (the terminal output identical to a plain second pass; the
+log's string counts differ, as after any dropped run, and are masked).
+Steps 677 to 679 of trip 2 each stopped after about 10,800 commands,
+then ran with the missed slots placed.
+
+The harness has `fatal_end` (`tests/e2e/fatal-end.tex`): `\read16` in
+nonstop mode at the shipout, a fatal error real TeX makes too, not
+seeded, so that the `.aux` the first build wrote is read by its second
+trip (or, one trip a build, by the next stage). The binary before the
+fix times out in both modes. 13 cases, 74 stages, identical with
+`--fixpoint` and with `PARTEX_SSA_TRIPS=1`.
+
+Left: a loop that never reaches main control (pure expansion, `\def\a{\a}`
+read from a stale meaning) is not stopped.

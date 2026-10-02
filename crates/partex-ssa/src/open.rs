@@ -935,6 +935,12 @@ impl<M: Machine> Runtime<M> {
         self.open.step_reads.iter().map(|r| &r.1)
     }
 
+    /// Those reads from the `from`th on.
+    pub fn open_step_reads_from(&self, from: usize) -> impl Iterator<Item = &M::Addr> {
+        let r = self.open.step_reads.get(from..).unwrap_or_default();
+        r.iter().map(|r| &r.1)
+    }
+
     /// The records the open step has made so far (its calls of the top
     /// level that ended).
     #[must_use]

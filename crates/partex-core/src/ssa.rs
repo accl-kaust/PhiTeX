@@ -1159,6 +1159,10 @@ pub struct SsaTracker {
     /// The steps' reads and writes timed by the engine's commands (a
     /// measurement for [`dag`], `PARTEX_SSA_DAG`; off by default).
     timed: bool,
+    /// The command past which a rebuild's run of a step is checked for
+    /// reads of later definitions, and stopped if it made one
+    /// ([`Tracker::stop_due`]; `u64::MAX`: none is).
+    pub(crate) stop_after: core::cell::Cell<u64>,
 }
 
 impl SsaTracker {
@@ -1206,6 +1210,7 @@ impl SsaTracker {
             lean: true,
             lost: core::cell::Cell::new(0),
             timed: false,
+            stop_after: core::cell::Cell::new(u64::MAX),
         }
     }
 
@@ -1324,6 +1329,15 @@ impl Tracker for SsaTracker {
         {
             r.rt.set_clock(n);
         }
+    }
+
+    #[inline]
+    fn stop_due(&self, n: u64) -> bool {
+        n > self.stop_after.get()
+            && self
+                .rec
+                .try_borrow_mut()
+                .is_ok_and(|mut r| rebuild::read_later(&mut r))
     }
 
     fn read(&self, cell: Cell) {

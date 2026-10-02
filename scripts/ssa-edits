@@ -23,7 +23,10 @@ e2e's `machine_edits` seeds them; `label`: the same document given a
 paragraph, whose step opens the `.aux` and whose page opens the PDF, its
 revert, and a later edit; and `streams` (`streams.tex`): a line written to
 the file a stream opened first, changed and back, after the stream opened
-a second.
+a second; and `fatal_end` (`fatal-end.tex`): a word edited and back in a
+job that ends fatally in its last page's output routine, not seeded: the
+.aux the first build wrote is read by its next trip (or, one trip a
+build, by the next stage's), which runs earlier steps again.
 
 Each case runs in WORK/<case>/:
 - `o/`: the oracle, one run per stage, the stage's edit made before it
@@ -122,6 +125,9 @@ REOPEN_EDITS = [
 # streams.tex: a line its first file's step writes, changed and back,
 # after the stream opened a second file
 STREAMS_EDITS = [("{Beta}", "{Gamma}"), ("{Gamma}", "{Beta}")]
+# fatal-end.tex: a word, edited and back, in a job that ends fatally in
+# its last page's output routine
+FATAL_EDITS = [("Hello world.", "Hello there."), ("Hello there.", "Hello world.")]
 # a \label nothing refers to, then two rebuilds with no edit (LOG
 # 2026-09-29, "A label no one refers to")
 LABEL_EDITS = [("Para5x2 ", "Para5x2 \\label{new}"), ("", ""), ("", "")]
@@ -267,10 +273,10 @@ def e2e_watch_cases():
 
 
 def all_cases():
-    def latex(name, src, fmt, edits):
+    def latex(name, src, fmt, edits, seed=2):
         args = [*LATEX_FLAGS, f"-fmt={fmt}", "-output-directory=out", "edits"]
         edits = [("edits.tex", m, n) for m, n in edits]
-        return Case(name, {"edits.tex": src}, fmt, args, edits, outdir="out", seed=2)
+        return Case(name, {"edits.tex": src}, fmt, args, edits, outdir="out", seed=seed)
 
     return [
         *e2e_watch_cases(),
@@ -279,6 +285,9 @@ def all_cases():
         latex("label", "edits.tex", "pdflatex", LABEL_EDITS),
         latex("aux_reopen", "reopen.tex", "pdflatex", REOPEN_EDITS),
         latex("streams", "streams.tex", "pdflatex", STREAMS_EDITS),
+        # (not seeded: the first build's second trip reads the .aux the
+        # first wrote, as the next stage's pass does with one trip a build)
+        latex("fatal_end", "fatal-end.tex", "pdflatex", FATAL_EDITS, seed=0),
     ]
 
 

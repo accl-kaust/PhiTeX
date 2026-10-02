@@ -100,6 +100,43 @@ pub(crate) struct Steps {
     /// run closed, or the step left the fold): what the link costs (DESIGN
     /// 4.3 item 4, [`super::take_step_changes`]).
     pub(super) fx_changed: Vec<StepId>,
+    /// The run of a step under way past its budget ([`run_step`]).
+    watch: Option<Watch>,
+}
+
+/// A run of a step that went on past its budget (twice its last run's
+/// commands, and some), checked for reads of slots a later definition
+/// holds, not placed (DESIGN 7.17.3, "A read resolves by prediction and
+/// validation"): it read the arrays' value, is dropped and must stop. Such
+/// a run may never reach the step's end: with the output routine's being
+/// active, left by a later step's fatal fire, `\end` fires again and
+/// again. ([`read_later`].)
+struct Watch {
+    /// The step's place and the slots its run is placed at.
+    key: u64,
+    set: BTreeSet<Slot>,
+    /// The reads checked so far, and whether one read a later definition.
+    scanned: usize,
+    later: bool,
+}
+
+/// Whether the run of a step under way past its budget read a later
+/// definition: its reads made since the last time checked.
+pub(super) fn read_later(rr: &mut Recorder) -> bool {
+    let Some(w) = rr.st.steps.watch.as_mut() else {
+        return false;
+    };
+    if !w.later {
+        let fold = &rr.rt.fold;
+        for a in rr.rt.open_step_reads_from(w.scanned) {
+            w.scanned += 1;
+            if positioned(a) && !w.set.contains(a) && later(fold, a, w.key) {
+                w.later = true;
+                break;
+            }
+        }
+    }
+    w.later
 }
 
 /// What trip k+1 of a build starts from (DESIGN 3.7, "Trips, as built").
@@ -2215,7 +2252,7 @@ fn run_step<H: Host>(
         note(tex, alloc::format!("step {j} begins at {}", input.brief()));
     }
     let c0 = tex.commands();
-    let (key, old, mut next): (u64, BTreeMap<Slot, Version>, Vec<Slot>) = {
+    let (key, old, mut next, budget): (u64, BTreeMap<Slot, Version>, Vec<Slot>, u64) = {
         let r = tex.tracker.rec.borrow();
         let fold = &r.rt.fold;
         let key = fold.steps[j as usize].key;
@@ -2226,7 +2263,10 @@ fn run_step<H: Host>(
             .filter(|a| positioned(a) && later(fold, a, key))
             .copied()
             .collect();
-        (key, old, reads)
+        // (a run past it that read a later definition stops: [`Watch`])
+        let last = r.st.step_commands.get(predict as usize).copied();
+        let budget = last.unwrap_or(0).saturating_mul(2).saturating_add(10_000);
+        (key, old, reads, budget)
     };
     save_stack_whole(tex, key, &mut next, rep);
     let mut set: BTreeSet<Slot> = BTreeSet::new();
@@ -2268,7 +2308,17 @@ fn run_step<H: Host>(
         // the candidate they followed)
         let mut prof: BTreeMap<(usize, i32), u64> = BTreeMap::new();
         let mut at = (tex.in_open, tex.line, tex.commands());
+        tex.tracker.rec.borrow_mut().st.steps.watch = Some(Watch {
+            key,
+            set: core::mem::take(&mut set),
+            scanned: 0,
+            later: false,
+        });
+        tex.tracker
+            .stop_after
+            .set(tex.commands().saturating_add(budget));
         let mut step = tex.resume();
+        let mut stopped = false;
         let fin = loop {
             match step {
                 Step::Checkpoint => {
@@ -2277,10 +2327,23 @@ fn run_step<H: Host>(
                         *prof.entry((at.0, at.1)).or_default() += c - at.2;
                         at = (tex.in_open, tex.line, c);
                     }
-                    if matches!(
-                        tex.clean_point(),
-                        Some(CleanPoint::Outer | CleanPoint::Fire)
-                    ) {
+                    // (stopped where it was: [`Tracker::stop_due`])
+                    stopped = tex.commands() > tex.tracker.stop_after.get()
+                        && tex
+                            .tracker
+                            .rec
+                            .borrow()
+                            .st
+                            .steps
+                            .watch
+                            .as_ref()
+                            .is_some_and(|w| w.later);
+                    if stopped
+                        || matches!(
+                            tex.clean_point(),
+                            Some(CleanPoint::Outer | CleanPoint::Fire)
+                        )
+                    {
                         break false;
                     }
                     step = tex.resume();
@@ -2291,7 +2354,11 @@ fn run_step<H: Host>(
                 }
             }
         };
-        if fin {
+        tex.tracker.stop_after.set(u64::MAX);
+        if let Some(w) = tex.tracker.rec.borrow_mut().st.steps.watch.take() {
+            set = w.set;
+        }
+        if fin || stopped {
             tex.tracker.end_open_calls(&*tex);
         }
         if rep.trace && prof.values().sum::<u64>() > 10_000 {
@@ -2339,7 +2406,12 @@ fn run_step<H: Host>(
             note(
                 tex,
                 alloc::format!(
-                    "  run of step {j} dropped: read {} of {} slots at a later definition ({} ...)",
+                    "  run of step {j} dropped{}: read {} of {} slots at a later definition ({} ...)",
+                    if stopped {
+                        " (stopped past its budget)"
+                    } else {
+                        ""
+                    },
                     miss.len(),
                     set.len() + miss.len(),
                     m.join(" ")

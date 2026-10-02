@@ -141,6 +141,10 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                                 self.cur_level,
                                 outer,
                             );
+                            if self.tracker.stop_due(self.commands) {
+                                self.at_checkpoint = true;
+                                return Err(Jump::Checkpoint);
+                            }
                         }
                         if self.candidate_due()? {
                             self.at_checkpoint = true;

@@ -466,6 +466,13 @@ pub trait Tracker {
     /// the input a file, no output routine): an observer's clock (the
     /// event log, `PARTEX_EVENTS`).
     fn command(&self, _n: u64, _depth: usize, _line: i32, _level: i32, _outer: bool) {}
+    /// (With [`Tracker::VALUES`].) Whether main control stops before
+    /// command `n`, a checkpoint: a rebuild's run of a step that read a
+    /// value it must not, and ran past its budget (`ssa::rebuild`, "A
+    /// run that read a later definition").
+    fn stop_due(&self, _n: u64) -> bool {
+        false
+    }
     /// Before an access to the page builder's state (§980–§982: the
     /// page, its totals, insertions, `last_glue` and friends, e-TeX's
     /// `page_disc`), a write if `write` (which reads it too).

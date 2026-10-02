@@ -1,0 +1,11 @@
+% A job that ends fatally in its last page's output routine (\read from
+% the terminal in nonstop mode, at the shipout): the fire at
+% \end{document}, the job's last step, leaves the output routine active.
+% The next trip, which reads the .aux, runs steps before it again: one
+% that read that value instead of its own never reached its end.
+\documentclass{article}
+\AddToHook{shipout/before}{\read16 to\x}
+\begin{document}
+\section{Intro}
+Hello world.
+\end{document}
