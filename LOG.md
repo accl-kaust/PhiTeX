@@ -9443,3 +9443,151 @@ definition plus the token lists, about 3.6 GB, and 1.5 G read edges);
 starting SSA at `\begin{document}` (keyed on a name, and a setup edit
 would be a cold build, where the setup as a span re-runs 6.5% and wakes
 only what changed).
+
+## 2026-10-02 — The SSA edit harness, `scripts/ssa-edits` (agent gate)
+
+Commit 2d589d3 (the harness); DESIGN 1.4, 4.3 item 8 and 5.2.
+
+**Why.** The window work (DESIGN 4.3) changes how a rebuild re-enters,
+what it records and how it links. Every agent working on it needs one
+command that says whether SSA mode's rebuilds still give plain partex's
+bytes at every stage. The harness that answered this before,
+`ssa-edits.py` (LOG 2026-09-29), lived outside the repository and
+pointed at the old tree.
+
+**What it does.** `scripts/sandbox scripts/ssa-edits [--case NAME]...`.
+For each case, in `target/ssa-edits/<case>/`:
+- `o/`: the oracle, plain partex (the same binary, no `PARTEX_*`
+  variable), run once per stage. Each stage's edit is made before its
+  run, and the files the runs before wrote (`.aux`, `.toc`, `\write`
+  streams) stay, as e2e's incremental cases have them.
+- `p/`: ONE process, `PARTEX_SSA=1`, whose `PARTEX_SSA_REBUILD` lines
+  are the edits. Each line first saves what the build or rebuild before
+  it wrote, then makes the next edit. The last stage is saved when the
+  process exits.
+- Every file of each stage is compared: PDF, DVI and every written file
+  byte for byte, logs without their first line (banner and date) and
+  with `xtask/src/mask.rs`'s statistics masked.
+- A table per case: each stage's result (identical, or the files that
+  differ with a log's first differing line), its ms (rebuild, link), the
+  steps run and the commands. Exit 1 on any difference, or when the
+  SSA process failed (a panic, a `stopped:` rebuild, a timeout). Every
+  number goes to `target/ssa-edits/results.json`.
+
+The cases, 10 sequences of 61 stages:
+- the 7 incremental cases e2e builds with `-watch` (`verbatim`,
+  `effects`, `readback`, `cutoff_pdf`, `incremental`, `cutoff`,
+  `tokens`). They are read from `INCREMENTAL` in `xtask/src/e2e.rs` by a
+  small reader of Rust constant expressions, so a case or an edit added
+  there runs here too. `tokens` (13 edits) and `incremental`'s two
+  stages with no edit were not in the old harness.
+- `machine_edits` (`edits.tex`, pdflatex) and `machine_edits_dvi`
+  (`edits-dvi.tex`, latex): e2e's arguments, with
+  `-output-directory=out`. Their edits are written out in the script,
+  since e2e builds one of them with `format!`. `machine_edits` has a
+  seventh edit, `99` on an early page (LOG 2026-09-29). It is the only
+  stage where the job's end runs again with every font call a hit (7
+  `font_file`, 7 `font_dict`).
+- `label`: `edits.tex` given a `\label{new}` nothing refers to, then two
+  rebuilds with no edit (LOG 2026-09-29, "A label no one refers to").
+
+**Decisions, and why.**
+- *One pass per stage* on the oracle's side, because an SSA rebuild is
+  one pass today: a `\write`'s store is read by the next rebuild. e2e's
+  `-watch` cases run every build to its fixed point. `--fixpoint` makes
+  the oracle do the same, for item 5 (`aux-loop`). Its rule is e2e's
+  `fixpoint`: run again while a file the job wrote, other than its log,
+  DVI and PDF, changed, at most 5 runs. latexmk's rule (the files read
+  back) would need a recorder, which partex does not have. The two rules
+  give the same outputs: a file that is only written depends only on
+  the sources and on what its run read back, so e2e's rule makes at
+  most one more run, and that run is identical.
+- *The LaTeX cases are seeded as e2e's `machine_edits` is*: the `.aux`
+  and `.toc` of two plain runs of the original text, on both sides. So
+  stage 0 is converged, and each stage measures its own edit. The old
+  harness seeded with one run, so its first rebuild was LaTeX's second
+  pass (1,419 ms, 698 steps).
+- *Edits as e2e's `edit_file` makes them*: the edited text goes to a
+  temporary file, which is dated and renamed over the file. Inputs are
+  dated 1758800000 and edit *k* 1758800000 + 1000 *k*, so
+  `\pdffilemoddate` agrees on both sides. The rebuild's file checks see
+  what an editor's save gives them: a new inode in a changed directory.
+  Each stage's text is made once, and both sides copy it. An empty
+  marker is a rebuild with no edit; a marker equal to its replacement
+  only dates the file (`effects`' third edit).
+- *The masks* are `mask.rs`'s patterns, applied to bytes. On a log they
+  mask what `mask.rs` masks and never more, since `\d` matches only ASCII
+  digits here. Bytes are compared rather than lossily decoded text. So
+  the comparison is at least as strict as e2e's. Checked on the
+  harness's own outputs: a pdflatex log masks 8 lines, and the oracle's
+  and the SSA process's raw logs differ only in "strings out of" and
+  "string characters out of".
+- *Formats* are made once per binary, keyed by its SHA-256, in
+  `target/ssa-edits/formats/`. pdflatex's takes about 14 s.
+- *No `PARTEX_*` variable* reaches the oracle or the format runs, which
+  are plain partex. The harness says which variables it ignored.
+  `--env K=V` passes a variable to the SSA process, and `--check` adds
+  `PARTEX_SSA_CHECK=1`.
+- *Every process has a cap*: virtual memory (`--mem-gb`, 8) and a
+  timeout (`--timeout`, 600 s). An SSA bug that loops (LOG 2026-09-29:
+  `edits` "ran without end") then fails its case and not the machine.
+  The harness refuses to run outside the sandbox.
+
+**Measured.** Two binaries, both sandboxed:
+- main's release binary (dc849cf, built in the main tree and copied
+  into the worktree);
+- this branch's own release build of the same source.
+
+Every stage of the 10 cases is identical on both binaries. On this
+branch's binary it is also identical with `--check`, with
+`--env PARTEX_SSA_APPLY=0`, and with `--jobs 1`. Runtimes:
+
+| run | wall | load (1 min) |
+|---|---|---|
+| all cases, 8 at a time, formats cached | 7.0 s | 23 |
+| the same, formats made first | 21–31 s | 20–41 |
+| `--jobs 1` (each case's oracle, then its SSA process) | 33.7 s | 9.6 → 7.5 |
+
+Three negative tests:
+- `--fixpoint` makes `incremental` differ at stages 0, 1 and 4–6, where
+  the oracle runs again to settle the `.toc`. It makes `label` differ at
+  stage 1, LaTeX's "Label(s) may have changed" run.
+- `--timeout 3` kills `machine_edits`' process in its third rebuild. The
+  harness reports that stage as not reported, with the process killed,
+  and the later stages as not built.
+- A format that cannot be made stops the run with its directory named.
+
+The numbers with `--jobs 1` (this branch's binary; ms is the rebuild and
+the link together):
+
+| case | cold | rebuilds, ms (steps run) |
+|---|---|---|
+| verbatim (plain, DVI) | 539 ms | 3.8 (6), 3.1 (9), 1.4 (1), 3.5 (4) |
+| effects (PDF) | 543 ms | 2.9 (3), 1.0 (3), 1.1 (1) |
+| readback (PDF) | 549 ms | 70.0 (64), 41.4 (54), 43.5 (54) |
+| cutoff_pdf | 566 ms | 32.4 (2), 1.9 (2), 2.8 (2), 3.4 (2) |
+| incremental (DVI) | 532 ms | 91.0 (85), 200.7 (64), 2.9 (2), 38.6 (11), 85.2 (20), 93.6 (48), 36.1 (36) |
+| cutoff (DVI) | 563 ms | 22.3 (40), 12.9 (23), 25.0 (40), 15.9 (19), 23.1 (23) |
+| tokens (DVI) | 514 ms | 28.1 (1), 1.2 (1), 1.6 (1), 5.3 (7), 3.8 (4), 5.1 (4), 4.3 (6), 5.4 (4), 2.3 (1), 4.2 (2), 3.1 (1), 2.5 (1), 6.7 (7) |
+| machine_edits (pdflatex) | 1,336 ms | 63.7 (3), 541.4 (237), 468.6 (168), 20.5 (6), 596.9 (277), 146.4 (47), 16.6 (3) |
+| machine_edits_dvi (latex) | 1,024 ms | 136.1 (42), 148.2 (46) |
+| label (pdflatex) | 1,336 ms | 66.7 (17), 10.5 (11), 1.3 (0) |
+
+`incremental`'s second rebuild spent 169.4 ms in its link, writing
+files to disk; its rebuild took 31.3 ms. The step counts are those of
+LOG 2026-09-29 wherever the sequences are the same. `label`'s 17 steps
+and 1,467 commands, then 11 and 437, then none, are that entry's
+`edits.tex` numbers.
+
+**Seen in passing**, for `rebuild-cost` (not profiled): in some
+sequences a process's first rebuild costs about 25–30 ms more than a
+later one that does the same work.
+- `tokens` re-runs 1 step of 73 commands in 28.1 ms, then the same step
+  in 1.2 ms.
+- `cutoff_pdf` re-runs 2 steps in 32.4 ms, then 1.9 ms. The second run
+  has the same calls by routine.
+- `effects` (2.9 ms) and `verbatim` (3.8 ms) do not show it.
+
+**Next** (part 2): `cargo xtask ssa-edits` in `xtask check`; the
+course's edits as rebuilds of one process (`bench/ssa-course.sh`), with
+JSON in `bench/results/`.
