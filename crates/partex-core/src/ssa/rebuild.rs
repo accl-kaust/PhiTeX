@@ -80,6 +80,11 @@ pub(crate) struct Steps {
     /// query is asked again").
     cur_queries: Vec<(Query, u128)>,
     queries: BTreeMap<StepId, Vec<(Query, u128)>>,
+    /// The version of each font's glyphs used as the job's end last made
+    /// them: a ship whose glyphs changed wakes the end only if the union
+    /// its rows make now differs ([`glyph_union_now`], DESIGN 4.3, "The
+    /// job's end").
+    glyph_union: Option<u128>,
     /// The open step's run's effects in the link's form, its chunks in
     /// program order (7.17.3, "Hits applied inside a step that runs
     /// again", item 2), and each step's, by step id, as its run ended
@@ -213,6 +218,11 @@ impl Steps {
     /// The open step asked query `q`, answered as `answer` versions.
     pub(super) fn queried(&mut self, q: Query, answer: u128) {
         self.cur_queries.push((q, answer));
+    }
+
+    /// The job's end made each font's glyphs used, of version `union`.
+    pub(super) fn glyphs_united(&mut self, union: u128) {
+        self.glyph_union = Some(union);
     }
 
     /// The open step opened name `id` for storing.
@@ -1151,6 +1161,24 @@ fn defs(
         }
     }
     d
+}
+
+/// The version of each font's glyphs used as the ships' latest rows make
+/// it (`pdf::ship::glyph_union`, as the job's end makes it); `None` if a
+/// row's value is not kept.
+fn glyph_union_now(rr: &Recorder) -> Option<u128> {
+    let mut gl = Vec::new();
+    for n in 0.. {
+        let Some(d) = rr.rt.fold.latest(&Slot(Fam::Glyphs, n)) else {
+            break;
+        };
+        let (_, v) = rr.rt.record(d.rec).writes.get(d.ix as usize)?;
+        let super::SValue::Field(f) = &**v.as_ref()?.1.as_ref()? else {
+            return None;
+        };
+        gl.push(f.get::<crate::pdf::ship::Glyphs>()?.clone());
+    }
+    Some(Version::of(&crate::pdf::ship::glyph_union(&gl)).0)
 }
 
 /// The version of the definition of `a` that reaches `key` (a step's
@@ -2269,6 +2297,7 @@ fn run_step<H: Host>(
         let slots = old
             .keys()
             .chain(new.keys().filter(|a| !old.contains_key(a)));
+        let mut union_same = None;
         for a in slots.filter(|a| positioned(a)) {
             touched.insert(*a);
             let (o, n) = (old.get(a).copied(), new.get(a).copied());
@@ -2277,7 +2306,19 @@ fn run_step<H: Host>(
             }
             rep.defs_changed += 1;
             let next = rr.rt.fold.next_after(a, key).map(|d| d.key);
-            let readers = rr.rt.fold.readers_between(a, key, next);
+            let mut readers = rr.rt.fold.readers_between(a, key, next);
+            // (a ship's glyphs are read by the job's end alone, for each
+            // font's union: if the ships' rows make the union the end
+            // last made, the end need not run, DESIGN 4.3, "The job's
+            // end"; made after the step closed, so a later ship that
+            // changes the union again looks again)
+            let cut = a.0 == Fam::Glyphs
+                && *union_same.get_or_insert_with(|| {
+                    glyph_union_now(rr).is_some_and(|u| rr.st.steps.glyph_union == Some(u))
+                });
+            if cut {
+                readers.clear();
+            }
             if rep.trace && (changed.len() < 12 || readers.iter().any(|&s| s != j)) {
                 // (the trace: the versions, short, and which calls of each
                 // reader read it)
@@ -2298,11 +2339,16 @@ fn run_step<H: Host>(
                     })
                 };
                 changed.push(alloc::format!(
-                    "{a} {}->{} (before {}; {} readers{}: {})",
+                    "{a} {}->{} (before {}; {} readers{}{}: {})",
                     short(o),
                     short(n),
                     short(reaching_version(rr, a, key)),
                     readers.len(),
+                    if cut {
+                        ", each font's union as it was"
+                    } else {
+                        ""
+                    },
                     if readers.is_empty() {
                         alloc::string::String::new()
                     } else {

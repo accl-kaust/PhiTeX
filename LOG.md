@@ -9954,3 +9954,44 @@ hashing at every eqtb write (`wrote_eqtb`), which a lazy version made
 at a step's end or a recorded read would cut. Tokenize's record was
 dropped with item 2; its rebuild numbers against the old record are
 still to be compared on the course's word edit.
+
+## 2026-10-02 — The job's end runs only if a font's union of glyphs changed (coordinator)
+
+**Why.** A profile of the course's warm word edit (TODO 3: 80 edit and
+revert rebuilds in one process, a frame-pointer build, `perf record
+--call-graph fp` attached after the cold build) put 22% of the rebuild
+in the job's end: the object streams, the cross-reference stream, the
+name tree and the outlines, made again on every rebuild. The rebuild
+trace says why: the page's ship writes its `glyphs:N` row, and the job's
+end reads every ship's row to make each font's union. "expensive" →
+"dear" changes the page's glyphs, not a font's union (the font files
+were all hits), so the end ran for nothing.
+
+**What.** An early cutoff on the union (DESIGN 4.3, "The job's end").
+`glyphs_union` tells the recorder the version of the union it made
+(`Tracker::glyphs_united`, kept in `Steps::glyph_union`); `pdf::ship::
+glyph_union` makes the union for both. When a step closes with a ship's
+glyph row changed, the rebuild makes the union again from the ships'
+latest rows (`glyph_union_now`) and marks the end only if its version
+differs. `scripts/ssa-edits`' `machine_edits` gains letters no page had
+("QJZ"), then their removal: the end must run for both, and the font
+subsets grow and shrink as plain partex's do.
+
+**Tests.** `cargo xtask check` passes: ssa-edits 10/10 cases, 63 stages
+identical (`--fixpoint`, `PARTEX_SSA_TRIPS=1`, and `--fixpoint
+--check`), e2e 34/34 plain and machine mode, trip and etrip. In
+`machine_edits` the digits edit now runs 2 steps (586 commands) where
+main ran 3 (593); the "QJZ" edit and its removal run 3 on both.
+`tests/view.rs` failed on main since the records merge (its step trace
+prints a step's own reads, which lean records do not keep): it builds
+with the full recorder now (`set_lean(false)`), as TODO 8 said.
+
+**Measured** (the course on accl, acclnode01, job 6318 against 6317 on
+main; final outputs equal to the cold build's):
+
+| | main (6317) | this (6318) |
+|---|---|---|
+| word, median of 3 warm | 49.3 ms (rebuild 48.5) | 37.9 ms (rebuild 37.2) |
+| word revert, median | 49.8 ms | 34.8 ms |
+| word: steps, commands | 6, 4,450 | 5, 4,443 |
+| label | 6.90 s | 6.62 s |

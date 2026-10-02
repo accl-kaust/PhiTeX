@@ -1383,6 +1383,26 @@ cold build with recording takes 3.2–3.4× a plain one and peaks at 24 GB.
    by the rebuild's line), the ms, the peak RSS, and whether the final
    outputs, every edit reverted, are the cold build's.
 
+**The job's end** (from the profile of the course's word edit, LOG
+2026-10-02). Each ship writes the glyphs it used, by font (`glyphs:N`,
+an append), and the job's end reads every ship's row to make each
+font's union: the glyphs its subset holds. A word edit changes its
+page's glyphs but almost never a font's union, yet the page's row made
+the end dirty, and the end ran again for nothing: the object streams,
+the cross-reference stream, the name tree and the outlines, 22% of the
+warm word edit. Now the end tells the recorder the version of the
+union it made (`Tracker::glyphs_united`). A rebuild that finds a ship's
+glyph row changed makes the union again from the ships' latest rows
+(`glyph_union_now`, an OR of small bitsets) and marks the end only if
+the version differs: an early cutoff on the one value through which the
+end depends on the ships' glyphs. The union is made again after each
+step closes, so a later ship that changes it again is seen. A ship that
+changes it and a later one that changes it back can cost a run of the
+end that was not needed, never miss one that was. `scripts/ssa-edits`'
+`machine_edits` covers both sides: digits the fonts already have (the
+end does not run), then letters no page had, and their removal (it runs
+for each).
+
 The work, one agent each, on branches `np/<name>` in worktrees under
 `~/code/tmp/`: `windows` (1), `rebuild-cost` (3), `records` (2),
 `link` (4), `aux-loop` (5), `front` (6), `view` (7), `gate` (8).

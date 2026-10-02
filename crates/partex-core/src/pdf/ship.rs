@@ -233,6 +233,22 @@ pub(crate) struct Ship {
 /// The glyphs a ship used: each font's, in font order.
 pub(crate) type Glyphs = Arc<[(i32, [u64; 4])]>;
 
+/// Each font's glyphs used: the union of the ships' `gl`, as the job's
+/// end makes it, and as a rebuild makes it again to see whether the end
+/// must run (DESIGN 4.3, "The job's end").
+pub(crate) fn glyph_union<'a>(
+    gl: impl IntoIterator<Item = &'a Glyphs>,
+) -> alloc::collections::BTreeMap<i32, [u64; 4]> {
+    let mut sets = alloc::collections::BTreeMap::<i32, [u64; 4]>::new();
+    for (f, c) in gl.into_iter().flat_map(|g| g.iter()) {
+        let s = sets.entry(*f).or_default();
+        for (a, b) in s.iter_mut().zip(c) {
+            *a |= b;
+        }
+    }
+    sets
+}
+
 partex_engine::persist_struct!(Ship {
     st,
     fonts,
@@ -1996,20 +2012,18 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         if !T::VALUES {
             return;
         }
-        let mut sets: alloc::collections::BTreeMap<i32, [u64; 4]> =
-            alloc::collections::BTreeMap::new();
+        let mut gl = Vec::with_capacity(self.pdf.ship.ships as usize);
         for n in 0..self.pdf.ship.ships {
             let g = self.pdf.ship.glyphs.get(n as usize).cloned();
             self.tracker.row_read(crate::track::Row::Glyphs(n), || {
                 partex_ssa::Version::of(&g.clone().unwrap_or_else(|| Arc::from(&[][..]))).0
             });
-            for (f, c) in g.iter().flat_map(|g| g.iter()) {
-                let s = sets.entry(*f).or_default();
-                for (a, b) in s.iter_mut().zip(c) {
-                    *a |= b;
-                }
-            }
+            gl.extend(g);
         }
+        let sets = glyph_union(&gl);
+        // (a ship whose glyphs changed makes the end run again only if
+        // this union changes: DESIGN 4.3, "The job's end")
+        self.tracker.glyphs_united(partex_ssa::Version::of(&sets).0);
         for f in 0..self.pdf.ship.fonts.len() {
             let Ok(k) = i32::try_from(f) else { break };
             let c = sets.get(&k).copied().unwrap_or([0; 4]);

@@ -121,15 +121,9 @@ to the cold build's):
    | 4% | `Edit::diff` |
    | 15% | the rest (`Version::of` 2.6%, `run_step` 2.4%, `Fold::latest` 1.1%) |
 
-   - **The job's end runs again for a word edit** (the biggest item; the
-     rebuild trace shows it). The page's ship writes its `glyphs:N` slot
-     (`Fam::Glyphs`, the glyphs that ship used), and the job's end reads
-     every ship's slot to subset the fonts. A word edit changes the
-     page's glyph set but not the union over the document (the font
-     files are all cache hits), so the end's object streams, xref, name
-     tree and outlines are made again for nothing. Fix: the end reads
-     the union per font, answered anew like a query when a ship's
-     glyphs change; then a word edit skips it (−22%).
+   - **Done: the job's end no longer runs for a word edit** (an early
+     cutoff on each font's union of glyphs; LOG 2026-10-02). The word
+     edit went from 49.3 ms to 37.9 ms on accl (job 6318).
    - The step holding `\input{ch15}` re-runs 564 commands because the
      file it loads changed, and changes nothing.
    - How the profile was taken: a frame-pointer build

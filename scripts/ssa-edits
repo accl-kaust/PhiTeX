@@ -12,8 +12,9 @@ check` with `--brief`.)
 
 The cases: every incremental case of `xtask/src/e2e.rs` built `By::Watch`
 (read from `INCREMENTAL` there), `machine_edits` (`edits.tex`, pdflatex
-format, e2e's six edits and a seventh whose glyphs the fonts have, so that
-the job's end runs again with every font call a hit) and
+format, e2e's six edits, a seventh whose glyphs the fonts have, so that
+each font's union is as it was and the job's end does not run, then
+letters no page had, and their removal: the end runs for each) and
 `machine_edits_dvi` (`edits-dvi.tex`, latex format), both under
 `-output-directory=out` after two plain runs of the original text, as
 e2e's `machine_edits` seeds them; and `label`: the same document given a
@@ -92,9 +93,13 @@ MACHINE_EDITS = [
     ("Para2x0 ", "Para2x0 early "),
     ("Para7x1 ", "Para7x1 \n\nA paragraph of its own.\n\n"),
     ("\\label{sec:12}\n", "\\label{sec:12}\n\n"),
-    # digits the fonts have from other pages' folios: the job's end runs
-    # again and each font's call is a hit (LOG 2026-09-29)
+    # digits the fonts have from other pages' folios: each font's union is
+    # as it was, so the job's end does not run (DESIGN 4.3, "The job's end")
     ("Para2x0 early ", "Para2x0 early 99 "),
+    # letters no page had: a union grows and the end runs; then they go
+    # and it shrinks again
+    ("Para2x0 early 99 ", "Para2x0 early 99 QJZ "),
+    ("Para2x0 early 99 QJZ ", "Para2x0 early 99 "),
 ]
 # e2e.rs's `run_machine_edits_dvi`
 MACHINE_EDITS_DVI = [("P5x2 ", "P5x2 typed "), ("P2x0 ", "P2x0 early ")]

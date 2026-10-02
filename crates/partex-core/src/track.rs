@@ -412,6 +412,12 @@ pub trait Tracker {
     /// (With [`Tracker::VALUES`].) The host answered query `q`, the
     /// answer's version `answer` (a `Row::Clock` read too).
     fn queried(&self, _q: Query, _answer: u128) {}
+    /// (With [`Tracker::VALUES`].) The job's end made each font's glyphs
+    /// used, the union of the ships' rows ([`Row::Glyphs`]), of version
+    /// `union`: a rebuild makes the union again when a ship's glyphs
+    /// change, and runs the end only if it differs (DESIGN 4.3, "The
+    /// job's end").
+    fn glyphs_united(&self, _union: u128) {}
     /// (With [`Tracker::VALUES`].) Structure row `row` was written (its
     /// value, with its version, is the engine's).
     fn value_wrote(&self, _row: Row) {}

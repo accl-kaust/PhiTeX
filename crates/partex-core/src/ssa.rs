@@ -1356,6 +1356,14 @@ impl Tracker for SsaTracker {
         }
     }
 
+    fn glyphs_united(&self, union: u128) {
+        if let Ok(mut r) = self.rec.try_borrow_mut() {
+            r.st.steps.glyphs_united(union);
+        } else {
+            self.lost.set(self.lost.get() + 1);
+        }
+    }
+
     fn value_read(&self, row: Row, version: impl FnOnce() -> u128) {
         let s = Slot::row(row);
         let stamp = self.value_stamp(s, false);
