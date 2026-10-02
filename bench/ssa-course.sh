@@ -317,8 +317,9 @@ if os.path.isdir(cold_dir) and all("ms" in r for r in result["rebuilds"]):
         if x != y:
             differ.append(f)
     result["final_differs_from_cold"] = differ
-os.makedirs(os.path.dirname(out), exist_ok=True)
-json.dump(result, open(out, "w"), indent=1)
+if cold:  # (a run that never built is not a measurement)
+    os.makedirs(os.path.dirname(out), exist_ok=True)
+    json.dump(result, open(out, "w"), indent=1)
 # the table
 def f(x, p=1):
     return "-" if x is None else f"{x:.{p}f}" if isinstance(x, float) else str(x)
@@ -355,7 +356,7 @@ print(f"on {result['host']}: peak RSS {f(rss and rss / 1048576, 2)} GB; exit {st
       f"load {load0} -> {load1}; final outputs = cold build's: "
       f"{'yes' if result.get('final_differs_from_cold') == [] else result.get('final_differs_from_cold', 'not compared')}"
       + (f"; PANIC: {panic}" if panic else ""))
-print(f"JSON: {out}")
+print(f"JSON: {out}" if cold else "no JSON: the cold build did not finish")
 failed = int(status) != 0 or panic or any("ms" not in r or "stopped" in r
                                           for r in result["rebuilds"])
 sys.exit(1 if failed else 0)
