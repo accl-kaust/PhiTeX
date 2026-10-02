@@ -375,12 +375,6 @@ pub enum Func {
     /// The tokenizer over the line a step begins on (§343–§356), named by
     /// its bytes; its result is the line's tokens under the codes it read.
     Tokenize,
-    /// §281: `unsave`, named by the entries of the group it ends.
-    Unsave,
-    /// §281: `unsave` of a group with tokens to insert (§326,
-    /// `\aftergroup`'s), which go into the input, outside its record: its
-    /// hit is not applied ([`Func::applies`]). Named as `Unsave` is.
-    UnsaveAfter,
     /// §649: `hpack`, named by the list, the spec, whether material
     /// migrates, pdfTeX's expansion of a line's fonts, and the kind of
     /// context its report names.
@@ -421,14 +415,12 @@ pub enum Func {
 
 impl Func {
     /// How many routines there are.
-    pub const COUNT: usize = 15;
+    pub const COUNT: usize = 13;
     /// The routines by index ([`SsaReport::routines`]).
     pub const ALL: [Func; Func::COUNT] = [
         Func::Start,
         Func::Step,
         Func::Tokenize,
-        Func::Unsave,
-        Func::UnsaveAfter,
         Func::Hpack,
         Func::Vpack,
         Func::LineBreak,
@@ -447,10 +439,7 @@ impl Func {
     /// outside its writes and effects.
     #[must_use]
     pub const fn applies(self) -> bool {
-        matches!(
-            self,
-            Func::Unsave | Func::FontFile | Func::Encoding | Func::FontDict
-        )
+        matches!(self, Func::FontFile | Func::Encoding | Func::FontDict)
     }
 }
 
@@ -469,8 +458,6 @@ impl fmt::Display for Func {
             Func::Start => "start",
             Func::Step => "step",
             Func::Tokenize => "tokenize",
-            Func::Unsave => "unsave",
-            Func::UnsaveAfter => "unsave_after",
             Func::Hpack => "hpack",
             Func::Vpack => "vpack",
             Func::LineBreak => "line_break",

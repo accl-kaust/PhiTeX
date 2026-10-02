@@ -548,38 +548,15 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         Ok(())
     }
 
-    /// §281: pop the top level off the save stack: a recorded call
-    /// (DESIGN 7.17.2), named by the entries of the group it ends, which
-    /// it reads as it restores them.
+    /// §281: pop the top level off the save stack. Not a call (DESIGN
+    /// 4.3 item 2): a group's end is writes of the step that runs it, its
+    /// restores ordinary writes through the accessors, and a value put
+    /// back equal to what its address held keeps its version (the
+    /// accessor versions it by content), so the readers after the group
+    /// stay asleep. The `\aftergroup` tokens it puts in the input (§326)
+    /// are the step's too: no record stands for a group's end, so no hit
+    /// can lose them.
     pub(crate) fn unsave(&mut self) -> Result<(), Jump> {
-        if !T::VALUES {
-            return self.unsave_body();
-        }
-        let (lo, hi) = (self.cur_boundary.max(0), self.save_ptr.max(0));
-        let entries: alloc::vec::Vec<u128> = (lo..hi).map(|p| self.save_entry_version(p)).collect();
-        let name = partex_ssa::Version::of(&(entries, self.cur_group)).0;
-        // (tokens to insert go into the input, outside the record: DESIGN
-        // 7.17.3, "Hits applied inside a step that runs again", item 4;
-        // the entries' types are in the name, and read as its versions are)
-        let f = if (lo..hi).any(|p| self.save_stack[Self::sx(p)].b0() == INSERT_TOKEN) {
-            crate::ssa::Func::UnsaveAfter
-        } else {
-            crate::ssa::Func::Unsave
-        };
-        // (the step's effects cut at the call's start and its end, item 2)
-        crate::ssa::cut_chunk(self);
-        if let Some(id) = self.tracker.call_begin(f, &[name], self) {
-            // (a hit put in place: its body does not run)
-            crate::ssa::apply_hit(self, id);
-            return Ok(());
-        }
-        let r = self.unsave_body();
-        crate::ssa::cut_chunk(self);
-        self.tracker.call_end(self);
-        r
-    }
-
-    fn unsave_body(&mut self) -> Result<(), Jump> {
         if self.cur_level() <= LEVEL_ONE {
             // `unsave` is not used when `cur_group=bottom_level`
             return self.confusion(b"curlevel");
