@@ -260,6 +260,11 @@ pub(crate) struct MapCache {
     data: Option<Arc<[u8]>>,
     hash: u128,
     index: Option<Arc<crate::u64map::U64Map<u32>>>,
+    /// The warnings a full reading of it into an empty table gave, under
+    /// `\pdfsuppresswarningdupmap` or not: what the host's cache keeps
+    /// across processes (`Host::cache_get`), kept here for a host that
+    /// has none.
+    warnings: Option<(bool, Vec<Vec<u8>>)>,
 }
 
 impl MapCache {
@@ -270,6 +275,7 @@ impl MapCache {
                 data: Some(data.clone()),
                 hash: partex_engine::stablehash::StableHasher::of(&data[..]),
                 index: None,
+                warnings: None,
             };
         }
         self
@@ -278,6 +284,17 @@ impl MapCache {
     /// The hash of `data`.
     fn hash(&mut self, data: &Arc<[u8]>) -> u128 {
         self.of(data).hash
+    }
+
+    /// The warnings a full reading of `data` gave, if kept.
+    fn warnings(&mut self, data: &Arc<[u8]>, suppress: bool) -> Option<Vec<Vec<u8>>> {
+        let w = self.of(data).warnings.as_ref()?;
+        (w.0 == suppress).then(|| w.1.clone())
+    }
+
+    /// Keep the warnings a full reading of `data` gave.
+    fn keep_warnings(&mut self, data: &Arc<[u8]>, suppress: bool, warnings: Vec<Vec<u8>>) {
+        self.of(data).warnings = Some((suppress, warnings));
     }
 
     /// The index of `data` read lazily ([`Lookups`]).
@@ -935,9 +952,15 @@ impl<H: crate::host::Host, T: crate::track::Tracker> crate::tex::Tex<H, T> {
         let key = (self.fontmap.table.is_empty() && mode == Mode::DupIgnore).then(|| {
             partex_engine::stablehash::StableHasher::of(&(b"fontmap-warnings/2", hash, suppress))
         });
-        let cached = key.and_then(|k| self.host.cache_get(k)).and_then(|b| {
-            let mut l = partex_engine::persist::Loader::new(&b);
-            Vec::<Vec<u8>>::load(&mut l).filter(|_| l.at_end())
+        let kept = key.and_then(|_| self.map_cache.warnings(&f.contents, suppress));
+        let cached = kept.or_else(|| {
+            let w = key.and_then(|k| self.host.cache_get(k)).and_then(|b| {
+                let mut l = partex_engine::persist::Loader::new(&b);
+                Vec::<Vec<u8>>::load(&mut l).filter(|_| l.at_end())
+            })?;
+            self.map_cache
+                .keep_warnings(&f.contents, suppress, w.clone());
+            Some(w)
         });
         if let Some(warnings) = cached {
             for w in &warnings {
@@ -971,6 +994,8 @@ impl<H: crate::host::Host, T: crate::track::Tracker> crate::tex::Tex<H, T> {
             let mut s = partex_engine::persist::Saver::new();
             warnings.save(&mut s);
             self.host.cache_put(k, &s.into_bytes());
+            self.map_cache
+                .keep_warnings(&f.contents, suppress, warnings);
         }
         self.print_str(b"}");
     }

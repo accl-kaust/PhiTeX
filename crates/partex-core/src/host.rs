@@ -214,7 +214,10 @@ pub trait Host {
     /// A value cached under `key` by an earlier run (of this same
     /// program), if the host keeps a cache. Cached values are results of
     /// pure functions of their key (a map file's table, for one): using
-    /// one changes nothing but the time taken.
+    /// one changes nothing but the time taken. Without one, a new engine
+    /// reads the default font map (`pdftex.map`, 42 000 lines) in full at
+    /// its first page, once: the engine then keeps what it found, for as
+    /// long as the host hands out the same contents (`fontmap::MapCache`).
     fn cache_get(&mut self, _key: u128) -> Option<Vec<u8>> {
         None
     }

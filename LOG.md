@@ -10468,3 +10468,21 @@ Median 29.6 → 7.6 ms a keystroke (min 22.7 → 3.7 ms), the same PDF. A
 host in wasm gets this if it hands out the same `Arc<[u8]>` for a file
 that did not change. The harness: 14 cases, 79 stages, identical with
 `--fixpoint`, with `PARTEX_SSA_TRIPS=1` and in check mode.
+
+The extension's own host handed out the same `Arc` already; what it
+still paid for was `Host::cache_get`, which it did not have: without
+the warnings a full reading gave, `read_map_file` read all 42 000 lines
+into the table again at each rebuild (its profile: `map_line`,
+`read_map_file` and `scan_line`, 30%). With an in-memory cache it went
+from 90 to 9 ms a keystroke natively and from 150 to 31 ms in wasm. The
+engine now keeps those warnings in `MapCache` too, so a host with no
+cache reads the map in full once per engine. Natively with the cache
+turned off (`PARTEX_CACHE=0`): 76.6 → 6.2 ms a keystroke, the same PDF.
+`Host::cache_get` says what it saves.
+
+Also tried, and dropped: keeping the runtime's dense stamp tables from
+one trip to the next (the serial going on, so every kept stamp is older
+than the trip's frames, as zeros are), as `open::dense_at` was 11% of
+the profile after the map. No change in the time a keystroke takes (600
+rebuilds each, alternating: median 7.6 ms both, p10 3.9 ms both): the
+cost is the accesses, not the allocation.
