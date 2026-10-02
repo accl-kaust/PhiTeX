@@ -280,6 +280,21 @@ impl Steps {
         }
     }
 
+    /// The runs of lines the steps read (7.17.3, "Lines are of a data"),
+    /// each with its data's load id and bytes, where the run begins and
+    /// where the line after it does, and the step and the run of it that
+    /// read it (an old run's are dead): the view's source spans
+    /// (`view.rs`).
+    pub(super) fn line_runs(
+        &self,
+    ) -> impl Iterator<Item = (u32, &Arc<[u8]>, usize, usize, StepId, u32)> + '_ {
+        self.datas.iter().flat_map(|d| {
+            d.lines
+                .iter()
+                .map(move |l| (d.name, &d.bytes, l.from, l.to, l.step, l.run))
+        })
+    }
+
     /// Step `s`'s result, in the source as it is now.
     fn end(&self, s: StepId) -> Option<InputState> {
         let (g, e) = self.inputs.get(s as usize)?.as_ref()?;

@@ -119,7 +119,7 @@ impl<M: Machine> Runtime<M> {
                 });
             }
             let mut cursor = 0;
-            let body = self.nodes(&t.root, &t.statuses, &mut cursor, false);
+            let body = self.nodes(&t.root, &t.statuses, &mut cursor, false, &RStatus::Hit);
             let mut notes: Vec<Note> = t
                 .streams
                 .iter()
@@ -148,12 +148,34 @@ impl<M: Machine> Runtime<M> {
         Trace { trips }
     }
 
+    /// Records `recs` (a step's calls of the top level, say) and their
+    /// subtrees as a trace of their own: one trip, each call marked
+    /// `new` (how each call was found is the build's trace's, kept per
+    /// trip and not per record; a hit applied is marked `new` too).
+    #[must_use]
+    pub fn trace_of(&self, recs: &[RecId]) -> Trace {
+        let items: Vec<Item<M>> = recs.iter().map(|&r| Item::Call(r)).collect();
+        let mut cursor = 0;
+        let body = self.nodes(&items, &[], &mut cursor, false, &RStatus::New);
+        Trace {
+            trips: alloc::vec![Trip {
+                index: 0,
+                phis: Vec::new(),
+                body,
+                notes: Vec::new(),
+            }],
+        }
+    }
+
+    /// `items` as trace nodes, each call's status the next of `st` (from
+    /// `cur`; past its end, `none`), or a hit's under one (`reused`).
     fn nodes(
         &self,
         items: &[Item<M>],
         st: &[RStatus<M::Addr>],
         cur: &mut usize,
         reused: bool,
+        none: &RStatus<M::Addr>,
     ) -> Vec<Node> {
         items
             .iter()
@@ -161,18 +183,25 @@ impl<M: Machine> Runtime<M> {
                 Item::Out(e) => Node::Effect(e.to_string()),
                 Item::Open(a) => Node::Open(a.to_string()),
                 Item::Store(a, v) => Node::Store(a.to_string(), v.version()),
-                Item::Call(id) => Node::Call(self.call_node(*id, st, cur, reused)),
+                Item::Call(id) => Node::Call(self.call_node(*id, st, cur, reused, none)),
                 Item::Wrote(a) => Node::Wrote(a.to_string()),
             })
             .collect()
     }
 
-    fn call_node(&self, id: RecId, st: &[RStatus<M::Addr>], cur: &mut usize, reused: bool) -> Call {
+    fn call_node(
+        &self,
+        id: RecId,
+        st: &[RStatus<M::Addr>],
+        cur: &mut usize,
+        reused: bool,
+        none: &RStatus<M::Addr>,
+    ) -> Call {
         let r = self.record(id);
         let status = if reused {
             Status::Hit
         } else {
-            let s = st.get(*cur).cloned().unwrap_or(RStatus::Hit);
+            let s = st.get(*cur).cloned().unwrap_or_else(|| none.clone());
             *cur += 1;
             match s {
                 RStatus::Hit => Status::Hit,
@@ -193,7 +222,7 @@ impl<M: Machine> Runtime<M> {
                 .iter()
                 .map(|(a, v)| (a.to_string(), version_opt(v.as_ref())))
                 .collect(),
-            body: self.nodes(&r.items, st, cur, reused || hit),
+            body: self.nodes(&r.items, st, cur, reused || hit, none),
         }
     }
 }
