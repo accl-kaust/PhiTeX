@@ -233,15 +233,36 @@ impl<M: Machine> Open<M> {
         }
     }
 
-    /// A fresh trip, its vectors sized like the last one's (the timing
-    /// switch and the clock kept).
-    pub(crate) fn reset(&mut self, statuses: Vec<Status<M::Addr>>, reran: usize) {
-        let (timing, clock) = (self.timing, self.clock);
+    /// A fresh trip's state in place of this one's, the timing switch
+    /// and the clock kept.
+    ///
+    /// The dense slots' tables are kept as they are, and the serial goes
+    /// on: every stamp in them is older than the new trip's frames and
+    /// steps, as a new table's zeros are, so no test tells them apart (a
+    /// write's entry is live only if its frame, all of the new trip,
+    /// holds that serial). Made anew, they were grown and zeroed again at
+    /// each trip as far as the highest slot the trip touched (the eqtb's
+    /// entries of the names in the hash's extra room, the pool's newest
+    /// strings): a one-page document's keystroke spent most of its time
+    /// noting writes doing that.
+    fn renew(&mut self) {
+        let dense = core::mem::take(&mut self.dense);
+        let dpos = core::mem::take(&mut self.dpos);
+        let (timing, clock, serial) = (self.timing, self.clock, self.serial);
         *self = Open::new();
-        self.statuses = statuses;
-        self.reran = Vec::with_capacity(reran);
+        self.dense = dense;
+        self.dpos = dpos;
         self.timing = timing;
         self.clock = clock;
+        self.serial = serial;
+    }
+
+    /// A fresh trip ([`Open::renew`]), its vectors sized like the last
+    /// one's.
+    pub(crate) fn reset(&mut self, statuses: Vec<Status<M::Addr>>, reran: usize) {
+        self.renew();
+        self.statuses = statuses;
+        self.reran = Vec::with_capacity(reran);
     }
 
     /// The open step's read of `a` from outside it, noted (with its time,
@@ -495,11 +516,8 @@ impl<M: Machine> Runtime<M> {
     /// Start trip `trip` of an open build: a fresh root, no reads or
     /// writes; trip 0 starts a build.
     pub fn open_trip(&mut self, trip: usize) {
-        let (timing, clock) = (self.open.timing, self.open.clock);
-        self.open = Open::new();
+        self.open.renew();
         self.open.trip = trip;
-        self.open.timing = timing;
-        self.open.clock = clock;
         if trip == 0 {
             self.stats.builds += 1;
             self.clear_log();

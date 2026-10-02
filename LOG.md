@@ -10486,3 +10486,40 @@ than the trip's frames, as zeros are), as `open::dense_at` was 11% of
 the profile after the map. No change in the time a keystroke takes (600
 rebuilds each, alternating: median 7.6 ms both, p10 3.9 ms both): the
 cost is the accesses, not the allocation.
+
+## 2026-10-02 — The recorder's stamp tables kept from one trip to the next (coordinator)
+
+Each trip, so each rebuild, began with a new `open::Open`, whose dense
+stamp tables (`dense` and `dpos`: 32 bytes of stamps and an 8-byte
+position per slot, a vector per family, grown to the next power of two
+past the highest slot touched) were grown and filled with zeros again.
+One write of the newest string (the PDF file's name, which the step
+that ships the only page makes again) grows the pool's table to its
+highest string; a write of the eqtb entry of a name in the hash's extra
+room grows the eqtb's past `eqtb_size`. On the TikZ article's keystroke
+(`mock/tikz`), `perf annotate` put about 90% of `note_write_by`'s own
+time in that fill loop. `Open::renew` keeps both tables and the serial:
+a stamp left by an earlier trip is older than every frame and step of
+the new one, as a zero is, and a write's entry is live only if its
+frame, all of the new trip, holds that serial, so no test tells them
+apart.
+
+The keystroke (LTO, 300 rebuilds each, 3 × 100 alternating): median
+4.5 → 3.2 ms, p10 3.6 → 2.9 ms, p90 8.1 → 6.6 ms, the same PDF. The
+harness: 14 cases, 79 stages, identical with `--fixpoint`, with
+`PARTEX_SSA_TRIPS=1` and in check mode.
+
+The experiment the last entry dropped kept the tables in `Open::reset`
+only, the path of a recorded trip (`trip_recorded`); a build's trips
+start in `Runtime::open_trip`, which made a new `Open`, so it measured
+an unchanged binary. Both go through `renew` now. Ruled out on the way:
+page faults. The process takes none during a keystroke (its own minor
+faults read from `/proc` around each rebuild: 0); `/usr/bin/time`'s
+count includes the toggle script's Python processes.
+
+Before this, 89289fe: wasm32 has no 64 × 64 → 128-bit multiply, and
+`hash::fold`'s product called the compiler's `__multi3`, 4% of a
+keystroke in the browser. It is now made from 32-bit halves there
+(`mul_wide_limbs`, tested against `u128`'s natively). The Overleaf
+extension measured the TikZ article's keystroke in Chrome at 31 → 20 ms
+median (16.4–23.4 ms over 8 keystrokes).

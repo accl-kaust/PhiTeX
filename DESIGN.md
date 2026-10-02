@@ -1094,7 +1094,11 @@ write came before the frame began; otherwise the frame, or a child,
 wrote the slot, and the read is internal. A read is noted once per call
 through per-slot stamps (a *slot* is the code's word for an address).
 Families that are dense arrays (eqtb, the hash, the fonts) keep their
-stamps in arrays, so the engine's hot path hashes nothing.
+stamps in arrays, so the engine's hot path hashes nothing. The arrays
+and the serial outlive a trip: a stamp left by an earlier trip is older
+than every frame of this one, as a zero is, so the arrays are never
+cleared or made again (made again, they were zeroed at each trip as far
+as the highest slot it touched).
 
 **The engine's side.**
 - `SsaTracker` implements the engine's `Tracker` trait. The accessors
