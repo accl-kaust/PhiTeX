@@ -22,6 +22,14 @@
 //! the SSA builder reads the characters again with the real ones. For it a
 //! paragraph boundary is only a place where it may stop, if its state is
 //! clean there.
+//!
+//! One exception: LaTeX's verbatim constructs, whose text is characters,
+//! not commands, are read as such ([`SyntaxKind::Verbatim`]): `\verb|…|`
+//! (and `\lstinline`, `\mintinline`, `\Verb`, `\url`, `\nolinkurl`, the
+//! URL of `\href`), and the body of the environments in
+//! [`VERBATIM_ENVIRONMENTS`] up to their `\end{name}`. A brace or a `%` in
+//! them neither opens a group nor starts a comment, and a blank line in a
+//! verbatim body does not end the paragraph.
 
 use std::ops::Range;
 use std::rc::Rc;
@@ -46,6 +54,10 @@ pub enum SyntaxKind {
     Brace,
     /// A `}` with no group open.
     Other,
+    /// Characters a LaTeX verbatim construct reads as they are: what
+    /// follows `\verb` up to its closing delimiter (the star and the
+    /// delimiters included), or a verbatim environment's body.
+    Verbatim,
 }
 
 /// A green node: a kind, a length, and children; or a token, a kind and
@@ -412,7 +424,8 @@ fn line_end(s: &[u8], from: usize) -> usize {
 
 /// Where the paragraph that begins at `start` ends: after the blank lines
 /// that follow its text at brace depth 0 (the blank lines before any text
-/// are its own).
+/// are its own). A verbatim run is skipped whole: its braces, `%` and blank
+/// lines are characters.
 fn para_end(s: &[u8], start: usize) -> usize {
     let mut i = start;
     let mut depth = 0usize;
@@ -421,11 +434,10 @@ fn para_end(s: &[u8], start: usize) -> usize {
         if i >= s.len() {
             return s.len();
         }
-        let e = line_end(s, i);
-        let next = (e + 1).min(s.len());
+        let mut e = line_end(s, i);
         if blank(&s[i..e]) {
             if depth == 0 && text {
-                let mut j = next;
+                let mut j = (e + 1).min(s.len());
                 while j < s.len() {
                     let e2 = line_end(s, j);
                     if !blank(&s[j..e2]) {
@@ -440,7 +452,17 @@ fn para_end(s: &[u8], start: usize) -> usize {
             let mut c = i;
             while c < e {
                 match s[c] {
-                    b'\\' => c += 1,
+                    b'\\' => {
+                        if let Some(v) = verbatim_at(s, c) {
+                            // (to the line where the run ends)
+                            c = v.end;
+                            if c > e {
+                                e = line_end(s, c);
+                            }
+                            continue;
+                        }
+                        c += 1;
+                    }
                     b'%' => break,
                     b'{' => depth += 1,
                     b'}' => depth = depth.saturating_sub(1),
@@ -452,8 +474,223 @@ fn para_end(s: &[u8], start: usize) -> usize {
         if e >= s.len() {
             return s.len();
         }
-        i = next;
+        i = e + 1;
     }
+}
+
+/// The environments whose body LaTeX reads verbatim, up to the first
+/// `\end{name}` (the kernel's, `verbatim.sty`'s, `comment.sty`'s, `fancyvrb`'s,
+/// `listings`'s, `minted`'s and `filecontents`).
+pub const VERBATIM_ENVIRONMENTS: &[&str] = &[
+    "verbatim",
+    "verbatim*",
+    "Verbatim",
+    "Verbatim*",
+    "BVerbatim",
+    "LVerbatim",
+    "lstlisting",
+    "minted",
+    "comment",
+    "filecontents",
+    "filecontents*",
+    "VerbatimOut",
+    "SaveVerbatim",
+];
+
+/// The commands whose argument LaTeX reads verbatim.
+pub const VERBATIM_COMMANDS: &[&str] = &[
+    "verb",
+    "Verb",
+    "lstinline",
+    "mintinline",
+    "url",
+    "nolinkurl",
+    "href",
+];
+
+/// What follows `\begin{name}` of a verbatim environment before its body:
+/// whether an optional argument may, and how many mandatory ones do.
+fn verbatim_env_args(name: &[u8]) -> Option<(bool, usize)> {
+    Some(match name {
+        b"verbatim" | b"verbatim*" | b"comment" => (false, 0),
+        b"Verbatim" | b"Verbatim*" | b"BVerbatim" | b"LVerbatim" | b"lstlisting" => (true, 0),
+        b"minted" | b"filecontents" | b"filecontents*" | b"SaveVerbatim" => (true, 1),
+        b"VerbatimOut" => (false, 1),
+        _ => return None,
+    })
+}
+
+/// How a verbatim command's text is delimited.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Delim {
+    /// By any character, up to its next occurrence on the line (`\verb`).
+    Char,
+    /// By a character, or by balanced braces.
+    CharOrBraces,
+    /// By balanced braces only (`\href`'s URL).
+    Braces,
+}
+
+/// A verbatim command: whether an optional argument may come first, how
+/// many brace groups come first (`\mintinline`'s language), and its
+/// delimiters.
+fn verbatim_cmd(name: &[u8]) -> Option<(bool, usize, Delim)> {
+    Some(match name {
+        b"verb" => (false, 0, Delim::Char),
+        b"Verb" => (true, 0, Delim::Char),
+        b"lstinline" => (true, 0, Delim::CharOrBraces),
+        b"mintinline" => (true, 1, Delim::CharOrBraces),
+        b"url" | b"nolinkurl" => (false, 0, Delim::CharOrBraces),
+        b"href" => (false, 0, Delim::Braces),
+        _ => return None,
+    })
+}
+
+/// A verbatim run: the bytes `start..end`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Verb {
+    start: usize,
+    end: usize,
+}
+
+/// The verbatim run the command at `i` (a backslash) reads, if it is one of
+/// LaTeX's verbatim constructs: for a command, everything after its name
+/// up to the closing delimiter (the end of the line if there is none,
+/// where LaTeX stops with an error); for `\begin{name}` of a verbatim
+/// environment, the body after its arguments, up to `\end{name}` (or the
+/// end of the text).
+fn verbatim_at(s: &[u8], i: usize) -> Option<Verb> {
+    let n0 = i + 1;
+    let mut n1 = n0;
+    while n1 < s.len() && s[n1].is_ascii_alphabetic() {
+        n1 += 1;
+    }
+    let name = &s[n0..n1];
+    if name == b"begin" {
+        return verbatim_env(s, n1);
+    }
+    let (opt, groups, delim) = verbatim_cmd(name)?;
+    let mut j = n1;
+    if name == b"verb" && s.get(j) == Some(&b'*') {
+        j += 1;
+    }
+    if delim != Delim::Char {
+        j = skip_blanks(s, j);
+    }
+    if opt && s.get(j) == Some(&b'[') {
+        j = bracket_end(s, j)?;
+    }
+    for _ in 0..groups {
+        j = skip_blanks(s, j);
+        if s.get(j) != Some(&b'{') {
+            return None;
+        }
+        j = brace_end(s, j);
+    }
+    let d = *s.get(j)?;
+    let end = match (delim, d) {
+        (Delim::Braces | Delim::CharOrBraces, b'{') => brace_end(s, j),
+        // (an ASCII delimiter only: a run never ends inside a character)
+        (Delim::Char | Delim::CharOrBraces, d) if d.is_ascii() && d != b'\n' && d != b'\r' => {
+            let le = line_end(s, j + 1);
+            s[j + 1..le]
+                .iter()
+                .position(|&c| c == d)
+                .map_or(le, |k| j + 1 + k + 1)
+        }
+        _ => return None,
+    };
+    Some(Verb { start: n1, end })
+}
+
+/// `\begin{name}` from `j` (after `\begin`): the body of a verbatim
+/// environment.
+fn verbatim_env(s: &[u8], j: usize) -> Option<Verb> {
+    let j = skip_blanks(s, j);
+    if s.get(j) != Some(&b'{') {
+        return None;
+    }
+    // (an environment's name is short)
+    let close = j + 1 + s[j + 1..].iter().take(32).position(|&c| c == b'}')?;
+    let name = &s[j + 1..close];
+    let (opt, groups) = verbatim_env_args(name)?;
+    let mut k = close + 1;
+    if opt {
+        let t = skip_blanks(s, k);
+        if s.get(t) == Some(&b'[') {
+            k = bracket_end(s, t)?;
+        }
+    }
+    for _ in 0..groups {
+        let t = skip_blanks(s, k);
+        if s.get(t) != Some(&b'{') {
+            return None;
+        }
+        k = brace_end(s, t);
+    }
+    Some(Verb {
+        start: k,
+        end: find_end(s, k, name),
+    })
+}
+
+/// Past the spaces and tabs from `j`.
+fn skip_blanks(s: &[u8], mut j: usize) -> usize {
+    while j < s.len() && matches!(s[j], b' ' | b'\t') {
+        j += 1;
+    }
+    j
+}
+
+/// Past the `]` that closes the `[` at `j`, outside braces (`None`: there
+/// is none, and LaTeX would not read an optional argument either).
+fn bracket_end(s: &[u8], j: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    for (k, &c) in s.iter().enumerate().skip(j + 1) {
+        match c {
+            b'{' => depth += 1,
+            b'}' => depth = depth.saturating_sub(1),
+            b']' if depth == 0 => return Some(k + 1),
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Past the `}` that closes the `{` at `j` (the end of the text if none
+/// does).
+fn brace_end(s: &[u8], j: usize) -> usize {
+    let mut depth = 0usize;
+    for (k, &c) in s.iter().enumerate().skip(j) {
+        match c {
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return k + 1;
+                }
+            }
+            _ => {}
+        }
+    }
+    s.len()
+}
+
+/// Where `\end{name}` is, from `from` (the end of the text if nowhere).
+fn find_end(s: &[u8], from: usize, name: &[u8]) -> usize {
+    let mut i = from;
+    while let Some(k) = s[i..].iter().position(|&c| c == b'\\') {
+        let p = i + k;
+        let rest = &s[p + 1..];
+        if rest.starts_with(b"end{")
+            && rest[4..].starts_with(name)
+            && rest.get(4 + name.len()) == Some(&b'}')
+        {
+            return p;
+        }
+        i = p + 1;
+    }
+    s.len()
 }
 
 /// The length of the UTF-8 character that begins with `b`.
@@ -466,99 +703,125 @@ fn utf8_len(b: u8) -> usize {
     }
 }
 
-/// A paragraph's text as a green node, read with plain TeX's catcodes.
-fn lex(text: &str) -> Green {
-    let token = |kind, len| Green::Token { kind, len };
+/// A text as a green node, read with plain TeX's catcodes (and LaTeX's
+/// verbatim constructs as [`SyntaxKind::Verbatim`] runs): a paragraph's,
+/// or any other (a macro's body with its arguments put in).
+#[must_use]
+pub fn lex(text: &str) -> Green {
     let b = text.as_bytes();
-    let mut stack: Vec<(SyntaxKind, Vec<Green>)> = vec![(SyntaxKind::Para, Vec::new())];
+    // (the children of the group being read, and of those around it)
+    let mut cur: Vec<Green> = Vec::new();
+    let mut outer: Vec<Vec<Green>> = Vec::new();
     let mut i = 0;
+    // (a verbatim run ahead: the tokens before it stop where it begins)
+    let mut verb: Option<Verb> = None;
     while i < b.len() {
-        let start = i;
-        let kind = match b[i] {
-            b'\\' => {
-                i += 1;
-                if i < b.len() {
-                    if b[i].is_ascii_alphabetic() {
-                        while i < b.len() && b[i].is_ascii_alphabetic() {
-                            i += 1;
-                        }
-                    } else {
-                        i = (i + utf8_len(b[i])).min(b.len());
-                    }
-                }
-                SyntaxKind::Cs
+        if let Some(v) = verb.filter(|v| v.start <= i) {
+            verb = None;
+            if v.end > i {
+                cur.push(Green::Token {
+                    kind: SyntaxKind::Verbatim,
+                    len: v.end - i,
+                });
+                i = v.end;
             }
+            continue;
+        }
+        match b[i] {
             b'{' => {
-                stack.push((SyntaxKind::Group, vec![token(SyntaxKind::Brace, 1)]));
+                outer.push(std::mem::take(&mut cur));
+                cur.push(Green::Token {
+                    kind: SyntaxKind::Brace,
+                    len: 1,
+                });
                 i += 1;
-                continue;
             }
-            b'}' => {
+            b'}' if !outer.is_empty() => {
+                cur.push(Green::Token {
+                    kind: SyntaxKind::Brace,
+                    len: 1,
+                });
+                let group = node(SyntaxKind::Group, std::mem::take(&mut cur));
+                cur = outer.pop().unwrap_or_default();
+                cur.push(group);
                 i += 1;
-                if stack.len() > 1 {
-                    let (kind, mut children) = stack.pop().expect("a group");
-                    children.push(token(SyntaxKind::Brace, 1));
-                    stack
-                        .last_mut()
-                        .expect("the paragraph")
-                        .1
-                        .push(node(kind, children));
-                    continue;
+            }
+            c => {
+                if c == b'\\' && verb.is_none() {
+                    verb = verbatim_at(b, i);
                 }
-                SyntaxKind::Other
+                let limit = verb.map_or(b.len(), |v| v.start);
+                let (kind, end) = scan(b, i, limit);
+                cur.push(Green::Token { kind, len: end - i });
+                i = end;
             }
-            b'%' => {
-                while i < b.len() && b[i] != b'\n' {
-                    i += 1;
-                }
-                SyntaxKind::Comment
-            }
-            b'\n' => {
-                i += 1;
-                SyntaxKind::Newline
-            }
-            b' ' | b'\t' | b'\r' => {
-                while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\r') {
-                    i += 1;
-                }
-                SyntaxKind::Space
-            }
-            b'#' => {
-                i += 1;
-                if i < b.len() && b[i].is_ascii_digit() {
-                    i += 1;
-                }
-                SyntaxKind::Param
-            }
-            _ => {
-                while i < b.len()
-                    && !matches!(
-                        b[i],
-                        b'\\' | b'{' | b'}' | b'%' | b'\n' | b' ' | b'\t' | b'\r' | b'#'
-                    )
-                {
-                    i += 1;
-                }
-                SyntaxKind::Text
-            }
-        };
-        stack
-            .last_mut()
-            .expect("the paragraph")
-            .1
-            .push(token(kind, i - start));
+        }
     }
     // (a group still open at the end: closed here, without its brace)
-    while stack.len() > 1 {
-        let (kind, children) = stack.pop().expect("a group");
-        stack
-            .last_mut()
-            .expect("the paragraph")
-            .1
-            .push(node(kind, children));
+    while let Some(mut parent) = outer.pop() {
+        parent.push(node(SyntaxKind::Group, cur));
+        cur = parent;
     }
-    let (kind, children) = stack.pop().expect("the paragraph");
-    node(kind, children)
+    node(SyntaxKind::Para, cur)
+}
+
+/// The token at `i` (not a group's brace), read no further than `limit`:
+/// its kind and where it ends.
+fn scan(b: &[u8], mut i: usize, limit: usize) -> (SyntaxKind, usize) {
+    let kind = match b[i] {
+        b'\\' => {
+            i += 1;
+            if i < limit {
+                if b[i].is_ascii_alphabetic() {
+                    while i < limit && b[i].is_ascii_alphabetic() {
+                        i += 1;
+                    }
+                } else {
+                    i = (i + utf8_len(b[i])).min(limit);
+                }
+            }
+            SyntaxKind::Cs
+        }
+        b'}' => {
+            i += 1;
+            SyntaxKind::Other
+        }
+        b'%' => {
+            while i < limit && b[i] != b'\n' {
+                i += 1;
+            }
+            SyntaxKind::Comment
+        }
+        b'\n' => {
+            i += 1;
+            SyntaxKind::Newline
+        }
+        b' ' | b'\t' | b'\r' => {
+            while i < limit && matches!(b[i], b' ' | b'\t' | b'\r') {
+                i += 1;
+            }
+            SyntaxKind::Space
+        }
+        b'#' => {
+            i += 1;
+            if i < limit && b[i].is_ascii_digit() {
+                i += 1;
+            }
+            SyntaxKind::Param
+        }
+        _ => {
+            while i < limit
+                && !matches!(
+                    b[i],
+                    b'\\' | b'{' | b'}' | b'%' | b'\n' | b' ' | b'\t' | b'\r' | b'#'
+                )
+            {
+                i += 1;
+            }
+            SyntaxKind::Text
+        }
+    };
+    (kind, i)
 }
 
 #[cfg(test)]
@@ -653,5 +916,227 @@ mod tests {
         check_edit(src, src.len(), 0, "\nf\n");
         check_edit("", 0, 0, "only\n");
         check_edit(src, 0, src.len(), "");
+    }
+
+    fn texts(t: &Tree) -> Vec<&str> {
+        t.paras().iter().map(Para::text).collect()
+    }
+
+    /// The tokens of a text, depth first, with their text (groups by
+    /// their braces).
+    fn tokens(text: &str) -> Vec<(SyntaxKind, &str)> {
+        fn walk<'a>(
+            g: &Green,
+            text: &'a str,
+            at: &mut usize,
+            out: &mut Vec<(SyntaxKind, &'a str)>,
+        ) {
+            match g {
+                Green::Token { kind, len } => {
+                    out.push((*kind, &text[*at..*at + len]));
+                    *at += len;
+                }
+                Green::Node { children, .. } => {
+                    for c in children {
+                        walk(c, text, at, out);
+                    }
+                }
+            }
+        }
+        let mut out = Vec::new();
+        walk(&lex(text), text, &mut 0, &mut out);
+        out
+    }
+
+    /// `\verb`'s braces and `%` are characters: no group, no comment, and
+    /// the paragraph ends where it would without them.
+    #[test]
+    fn verb() {
+        use SyntaxKind::{Brace, Comment, Cs, Newline, Space, Text, Verbatim};
+        let src = "a \\verb|{%| b\n\nc \\verb*+}+\n";
+        assert_eq!(
+            texts(&Tree::parse(src)),
+            ["a \\verb|{%| b\n\n", "c \\verb*+}+\n"]
+        );
+        assert_eq!(
+            tokens("a \\verb|{%| b"),
+            [
+                (Text, "a"),
+                (Space, " "),
+                (Cs, "\\verb"),
+                (Verbatim, "|{%|"),
+                (Space, " "),
+                (Text, "b")
+            ]
+        );
+        // (no closing delimiter: to the end of the line, as LaTeX reads it
+        // before its error)
+        assert_eq!(
+            tokens("\\verb|{x\n}"),
+            [
+                (Cs, "\\verb"),
+                (Verbatim, "|{x"),
+                (Newline, "\n"),
+                (Text, "}")
+            ]
+            .map(|(k, t)| (if t == "}" { SyntaxKind::Other } else { k }, t))
+        );
+        // (a URL's `%` and `#`; `\href`'s text is read as usual)
+        assert_eq!(
+            tokens("\\href{a%20#b}{x}%c"),
+            [
+                (Cs, "\\href"),
+                (Verbatim, "{a%20#b}"),
+                (Brace, "{"),
+                (Text, "x"),
+                (Brace, "}"),
+                (Comment, "%c")
+            ]
+        );
+        assert_eq!(
+            tokens("\\lstinline[language=C]{a{b}%}"),
+            [(Cs, "\\lstinline"), (Verbatim, "[language=C]{a{b}%}")]
+        );
+        // (the lists say what is read)
+        assert!(
+            VERBATIM_COMMANDS
+                .iter()
+                .all(|c| verbatim_cmd(c.as_bytes()).is_some())
+        );
+        assert!(
+            VERBATIM_ENVIRONMENTS
+                .iter()
+                .all(|e| verbatim_env_args(e.as_bytes()).is_some())
+        );
+        // (a control word that only begins like one is not)
+        assert_eq!(tokens("\\verbatim{x}")[0], (Cs, "\\verbatim"));
+    }
+
+    /// A verbatim environment's body is one run: its blank lines do not
+    /// end the paragraph, its braces open nothing; its arguments are read
+    /// as usual.
+    #[test]
+    fn verbatim_environments() {
+        use SyntaxKind::{Brace, Cs, Newline, Text, Verbatim};
+        let src = "x\n\\begin{verbatim}\n{\n\n%}\n\\end{verbatim}\ny\n\nz\n";
+        assert_eq!(
+            texts(&Tree::parse(src)),
+            [
+                "x\n\\begin{verbatim}\n{\n\n%}\n\\end{verbatim}\ny\n\n",
+                "z\n"
+            ]
+        );
+        let toks = tokens("\\begin{lstlisting}[caption={a}]\nint x;{\n\\end{lstlisting}");
+        assert_eq!(
+            toks,
+            [
+                (Cs, "\\begin"),
+                (Brace, "{"),
+                (Text, "lstlisting"),
+                (Brace, "}"),
+                (Text, "[caption="),
+                (Brace, "{"),
+                (Text, "a"),
+                (Brace, "}"),
+                (Text, "]"),
+                (Verbatim, "\nint x;{\n"),
+                (Cs, "\\end"),
+                (Brace, "{"),
+                (Text, "lstlisting"),
+                (Brace, "}"),
+            ]
+        );
+        assert_eq!(
+            tokens("\\begin{minted}{python}\nx\\end{minted}")[6..8],
+            [(Brace, "}"), (Verbatim, "\nx")]
+        );
+        // (an empty body; a body never closed runs to the end)
+        assert!(
+            tokens("\\begin{comment}\\end{comment}")
+                .iter()
+                .all(|t| t.0 != Verbatim)
+        );
+        let src = "a\n\n\\begin{comment}\n\nb\n\nc\n";
+        assert_eq!(
+            texts(&Tree::parse(src)),
+            ["a\n\n", "\\begin{comment}\n\nb\n\nc\n"]
+        );
+        // (`\begin{verbatim}` in a comment is a comment)
+        let src = "% \\begin{verbatim}\n\nb\n";
+        assert_eq!(texts(&Tree::parse(src)), ["% \\begin{verbatim}\n\n", "b\n"]);
+        assert_eq!(tokens("a\n").last(), Some(&(Newline, "\n")));
+    }
+
+    /// Edits that open and close verbatim runs: the tree is the fresh
+    /// parse's, and the paragraphs outside the splice are kept.
+    #[test]
+    fn verbatim_edits() {
+        let src = "a\n\nb\n\n\\begin{verbatim}\n{\n\nx\n\\end{verbatim}\n\nc\n\nd\n";
+        assert_eq!(Tree::parse(src).paras().len(), 5);
+        // the verbatim's end removed: it runs to the end
+        let at = src.find("\\end").unwrap();
+        check_edit(src, at, 1, "");
+        // a `\verb|{|` typed in `b`, then its delimiter removed
+        check_edit(src, 3, 0, "\\verb|{|");
+        check_edit(src, 3, 0, "\\verb|{");
+        // a verbatim opened in `a`, before an existing end
+        check_edit(src, 0, 0, "\\begin{verbatim}");
+        check_edit(src, 0, 1, "\\begin{comment}");
+    }
+
+    /// Random edits of a document made of the pieces that move paragraph
+    /// boundaries: the edited tree is always the fresh parse's.
+    #[test]
+    fn random_edits() {
+        const PIECES: &[&str] = &[
+            "w",
+            " ",
+            "\n",
+            "\n\n",
+            "{",
+            "}",
+            "%",
+            "\\verb|",
+            "|",
+            "\\begin{verbatim}",
+            "\\end{verbatim}",
+            "\\url{",
+            "\\x",
+            "\\begin{lstlisting}[",
+            "]",
+            "\\end{lstlisting}",
+        ];
+        let mut seed = 0x2545_f491_4f6c_dd1du64;
+        let mut rand = |n: usize| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            usize::try_from(seed % (n as u64)).unwrap()
+        };
+        let mut src = String::new();
+        for _ in 0..200 {
+            src.push_str(PIECES[rand(PIECES.len())]);
+        }
+        let mut t = Tree::parse(&src);
+        for _ in 0..500 {
+            let start = rand(src.len() + 1);
+            let old_len = rand((src.len() - start).min(12) + 1);
+            let mut text = String::new();
+            for _ in 0..rand(3) {
+                text.push_str(PIECES[rand(PIECES.len())]);
+            }
+            let before: Vec<ParaId> = t.paras().iter().map(|p| p.id).collect();
+            let s = t.edit(start, old_len, &text);
+            src.replace_range(start..start + old_len, &text);
+            assert_eq!(t.text(), src);
+            let fresh = Tree::parse(&src);
+            assert_eq!(t.para_ends(), fresh.para_ends(), "{src:?}");
+            for (p, f) in t.paras().iter().zip(fresh.paras()) {
+                assert_eq!(p.green, f.green);
+            }
+            let after: Vec<ParaId> = t.paras().iter().map(|p| p.id).collect();
+            assert_eq!(after[..s.at], before[..s.at]);
+            assert_eq!(after[s.at + s.inserted..], before[s.at + s.removed..]);
+        }
     }
 }
