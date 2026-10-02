@@ -86,11 +86,41 @@ impl Default for Stable {
 
 #[inline]
 fn fold(x: u64, y: u64) -> u64 {
-    let p = u128::from(x) * u128::from(y);
-    // Truncation intended: the two halves of the product are folded.
-    #[allow(clippy::cast_possible_truncation)]
-    let r = (p as u64) ^ ((p >> 64) as u64);
-    r
+    let (lo, hi) = mul_wide(x, y);
+    lo ^ hi
+}
+
+/// The 128-bit product of `x` and `y`: its low and high halves.
+#[inline]
+fn mul_wide(x: u64, y: u64) -> (u64, u64) {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let p = u128::from(x) * u128::from(y);
+        // Truncation intended: the halves of the product.
+        #[allow(clippy::cast_possible_truncation)]
+        (p as u64, (p >> 64) as u64)
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        mul_wide_limbs(x, y)
+    }
+}
+
+/// [`mul_wide`] from the 32-bit halves, with 64-bit multiplies: wasm has
+/// no 64×64→128 multiply, and the compiler's 128-bit routine (`__multi3`)
+/// was 4% of a keystroke in the browser.
+#[inline]
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+fn mul_wide_limbs(x: u64, y: u64) -> (u64, u64) {
+    const LOW: u64 = 0xffff_ffff;
+    let (x0, x1) = (x & LOW, x >> 32);
+    let (y0, y1) = (y & LOW, y >> 32);
+    let (p00, p01, p10, p11) = (x0 * y0, x0 * y1, x1 * y0, x1 * y1);
+    // (the middle column, under 3 × 2^32: no overflow)
+    let mid = (p00 >> 32) + (p01 & LOW) + (p10 & LOW);
+    let lo = (p00 & LOW) | (mid << 32);
+    let hi = p11 + (p01 >> 32) + (p10 >> 32) + (mid >> 32);
+    (lo, hi)
 }
 
 impl Stable {
@@ -201,6 +231,41 @@ pub fn hash64<T: Hash + ?Sized>(v: &T) -> u64 {
 
 #[cfg(test)]
 mod tests {
+    /// The product from 32-bit halves is the 128-bit product (wasm's
+    /// path, checked natively).
+    #[test]
+    fn mul_wide_limbs_is_the_product() {
+        let mut x: u64 = 0x9e37_79b9_7f4a_7c15;
+        let edges = [
+            0,
+            1,
+            u64::MAX,
+            u64::MAX - 1,
+            1 << 32,
+            (1 << 32) - 1,
+            1 << 63,
+        ];
+        let check = |a: u64, b: u64| {
+            let p = u128::from(a) * u128::from(b);
+            #[allow(clippy::cast_possible_truncation)]
+            let want = (p as u64, (p >> 64) as u64);
+            assert_eq!(super::mul_wide_limbs(a, b), want, "{a:#x} * {b:#x}");
+        };
+        for &a in &edges {
+            for &b in &edges {
+                check(a, b);
+            }
+        }
+        for _ in 0..100_000 {
+            // (xorshift: inputs over the whole range)
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            let y = x.rotate_left(29) ^ 0xd6e8_feb8_6659_fd93;
+            check(x, y);
+        }
+    }
+
     use super::*;
 
     #[test]
