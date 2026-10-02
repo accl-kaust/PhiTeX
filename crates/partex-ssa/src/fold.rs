@@ -43,6 +43,10 @@ pub struct Step<A> {
     pub reads: Vec<A>,
     /// Which run of the step made its entries (a run again bumps it).
     pub run: u32,
+    /// Which run made its reader entries: a run that read what the run
+    /// before it read, in that order, keeps them, and this
+    /// ([`Fold::close`]).
+    pub rrun: u32,
     /// Whether it is in the fold (a rebuild removes the steps it passes
     /// over when it ends a step elsewhere).
     pub live: bool,
@@ -100,6 +104,14 @@ impl<M: Machine> Fold<M> {
             .is_some_and(|s| s.live && s.run == e.run)
     }
 
+    /// Whether reader entry `e` is its step's (made by the run that made
+    /// the step's reader entries).
+    fn live_reader(&self, e: &Entry) -> bool {
+        self.steps
+            .get(e.step as usize)
+            .is_some_and(|s| s.live && s.rrun == e.run)
+    }
+
     /// A new step at the end of the fold.
     pub(crate) fn push(&mut self) -> StepId {
         let key = self
@@ -117,6 +129,7 @@ impl<M: Machine> Fold<M> {
             recs: Vec::new(),
             reads: Vec::new(),
             run: 0,
+            rrun: 0,
             live: true,
         });
         self.order.insert(pos, id);
@@ -160,18 +173,18 @@ impl<M: Machine> Fold<M> {
             self.steps[s as usize].key = (i as u64 + 1) * KEY_GAP;
         }
         let steps = &self.steps;
-        let fix = |v: &mut Vec<Entry>| {
+        let fix = |v: &mut Vec<Entry>, reads: bool| {
             v.retain(|e| {
                 steps
                     .get(e.step as usize)
-                    .is_some_and(|s| s.live && s.run == e.run)
+                    .is_some_and(|s| s.live && e.run == if reads { s.rrun } else { s.run })
             });
             for e in v.iter_mut() {
                 e.key = steps[e.step as usize].key;
             }
         };
-        self.defs.values_mut().for_each(fix);
-        self.readers.values_mut().for_each(fix);
+        self.defs.values_mut().for_each(|v| fix(v, false));
+        self.readers.values_mut().for_each(|v| fix(v, true));
     }
 
     /// Remove step `id` from the fold (its entries die with it).
@@ -212,27 +225,43 @@ impl<M: Machine> Fold<M> {
                 core::mem::take(&mut s.reads),
             )
         };
-        let mut addrs = Vec::with_capacity(reads.len());
-        for (h, a) in reads {
-            let e = Entry {
-                step: id,
-                run,
-                key,
-                rec: 0,
-                ix: 0,
+        // (a run that read what the run before it read, in that order,
+        // keeps that run's reader entries: a slot every step reads has a
+        // list as long as the fold, and a search in it per read is most of
+        // a rerun step's close)
+        let same = reads.len() == old_reads.len()
+            && reads.iter().zip(&old_reads).all(|((_, a), b)| a == b);
+        let addrs = if same {
+            old_reads
+        } else {
+            let rrun = {
+                let s = &mut self.steps[id as usize];
+                s.rrun += 1;
+                s.rrun
             };
-            Self::put(
-                self.readers
-                    .entry_by(h, |k| k.0 == a, || ByHash(a.clone()), Vec::new()),
-                e,
-            );
-            addrs.push(a);
-        }
-        for a in &old_reads {
-            if let Some(v) = self.readers.get_mut_by(hash64(a), |k| k.0 == *a) {
-                Self::drop_stale(v, id, key, run);
+            let mut addrs = Vec::with_capacity(reads.len());
+            for (h, a) in reads {
+                let e = Entry {
+                    step: id,
+                    run: rrun,
+                    key,
+                    rec: 0,
+                    ix: 0,
+                };
+                Self::put(
+                    self.readers
+                        .entry_by(h, |k| k.0 == a, || ByHash(a.clone()), Vec::new()),
+                    e,
+                );
+                addrs.push(a);
             }
-        }
+            for a in &old_reads {
+                if let Some(v) = self.readers.get_mut_by(hash64(a), |k| k.0 == *a) {
+                    Self::drop_stale(v, id, key, rrun);
+                }
+            }
+            addrs
+        };
         for &rec in &recs {
             for (ix, a) in writes(rec).iter().enumerate() {
                 let e = Entry {
@@ -332,7 +361,7 @@ impl<M: Machine> Fold<M> {
         v[from..]
             .iter()
             .take_while(|e| hi.is_none_or(|h| e.key <= h))
-            .filter(|e| self.live(e))
+            .filter(|e| self.live_reader(e))
             .map(|e| e.step)
             .collect()
     }
