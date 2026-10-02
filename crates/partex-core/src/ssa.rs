@@ -658,6 +658,7 @@ pub fn count_name(i: usize) -> alloc::string::String {
 const COND_STAMP: usize =
     crate::track::list::COUNT as usize + 1 + crate::track::align::COUNT as usize;
 
+#[inline]
 fn table_at(f: Fam, a: i64) -> Option<(usize, usize)> {
     let ext = i64::from(crate::xregs::EXT_BASE);
     let (t, i) = match f {
@@ -713,6 +714,12 @@ impl Versions {
     /// A table slot's version, if its array has one.
     fn known(&self, s: Slot) -> Option<Version> {
         let (f, i) = table_at(s.0, s.1)?;
+        self.known_at(f, i)
+    }
+
+    /// [`Versions::known`] of the slot at index `i` of table `f`.
+    #[inline]
+    fn known_at(&self, f: usize, i: usize) -> Option<Version> {
         let v = *self.table[f].get(i)?;
         (v != 0).then_some(Version(v))
     }
@@ -1240,6 +1247,7 @@ impl SsaTracker {
         }
     }
 
+    #[inline]
     fn stamp(&self, s: Slot) -> Option<&core::cell::Cell<u32>> {
         let (f, i) = table_at(s.0, s.1)?;
         self.stamps[f].get(i)
@@ -1257,8 +1265,12 @@ impl SsaTracker {
 impl SsaTracker {
     /// A read of table slot `s`: once per call (its stamp), with the
     /// version its array holds; in check mode, `content` tests it.
+    #[inline]
     fn read_slot(&self, s: Slot, content: impl FnOnce() -> u128) {
-        let stamp = self.stamp(s);
+        // (the slot's table and index, found once for its stamp and its
+        // version)
+        let at = table_at(s.0, s.1);
+        let stamp = at.and_then(|(f, i)| self.stamps[f].get(i));
         let generation = self.generation.get();
         if stamp.is_some_and(|c| c.get() == generation) {
             return;
@@ -1271,7 +1283,9 @@ impl SsaTracker {
         }
         // (every slot has the version its last writer made; none: a slot
         // past the tables, which no write reaches, never equal)
-        let v = r.st.vers.known(s).unwrap_or_else(|| r.st.vers.revision(s));
+        let v = at
+            .and_then(|(f, i)| r.st.vers.known_at(f, i))
+            .unwrap_or_else(|| r.st.vers.revision(s));
         if self.check && Version(content() | 1) != v {
             // (the test of 7.17.12's convention: a store that bypassed its
             // accessor leaves the version behind the content)
