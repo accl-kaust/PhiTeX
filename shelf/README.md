@@ -18,8 +18,12 @@ packages a document uses without a TeX installation or a server process.
 
 ## Build and deploy
 
-    python3 build.py [tl2026]   # → public/tl2026/, MANIFEST.tsv
-    ./deploy.sh                 # Cloudflare Pages
+    scripts/sandbox --net python3 build.py [tl2026]   # → public/tl2026/, MANIFEST.tsv
+    scripts/sandbox --net npx wrangler login          # once (prints a URL to open)
+    scripts/sandbox --net ./deploy.sh                 # Cloudflare Pages
+
+`scripts/sandbox` (bubblewrap) sees only this repository: its `$HOME` is
+`.home/` (git-ignored), where npm's cache and wrangler's login token stay.
 
 `build.py` needs no TeX installation: it reads TeX Live's package database
 from tlnet, downloads every package with LaTeX/generic/plain input files

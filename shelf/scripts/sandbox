@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+# Run a command in a bubblewrap sandbox: this repo writable, nothing else.
+# (Adapted from PhiTeX's scripts/sandbox.)
+#
+#   scripts/sandbox [--net] <command> [args...]
+#   scripts/sandbox --net npx wrangler login     # once: prints a URL to open
+#   scripts/sandbox --net ./deploy.sh
+#
+# - System dirs (/usr, /etc) read-only.
+# - $HOME is the repo's .home/ (git-ignored): npm's cache and wrangler's
+#   login (an OAuth token: a secret) persist there, and nowhere else.
+# - No network unless --net is given. With it the network namespace is
+#   shared, so `wrangler login`'s callback on localhost:8976 reaches it from
+#   your browser.
+set -euo pipefail
+
+repo="$(cd "$(dirname "$0")/.." && pwd)"
+home="$repo/.home"
+
+net=(--unshare-net)
+if [ "${1:-}" = "--net" ]; then
+  net=(--share-net)
+  shift
+fi
+[ $# -gt 0 ] || { echo "usage: $0 [--net] <command> [args...]" >&2; exit 2; }
+
+mkdir -p "$home"
+chmod 700 "$home"
+
+case "$PWD" in
+  "$repo"*) dir="$PWD" ;;
+  *) dir="$repo" ;;
+esac
+
+exec bwrap \
+  --unshare-all "${net[@]}" \
+  --die-with-parent --new-session \
+  --ro-bind /usr /usr \
+  --symlink usr/bin /bin --symlink usr/bin /sbin \
+  --symlink usr/lib /lib --symlink usr/lib /lib64 \
+  --ro-bind /etc /etc \
+  --proc /proc --dev /dev \
+  --tmpfs /tmp \
+  --bind "$repo" "$repo" \
+  --chdir "$dir" \
+  --clearenv \
+  --setenv HOME "$home" \
+  --setenv PATH /usr/bin \
+  --setenv TERM "${TERM:-dumb}" \
+  --setenv LANG "${LANG:-C.UTF-8}" \
+  --setenv WRANGLER_SEND_METRICS false \
+  --setenv SHELF_SANDBOX 1 \
+  "$@"

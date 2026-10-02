@@ -1,8 +1,10 @@
-# Cloudflare Pages / Netlify headers. Any origin may read (the extension's
-# offscreen document fetches cross-origin); a versioned file never changes.
+# Cloudflare Pages headers. Any origin may read (the extension's offscreen
+# document fetches cross-origin); a versioned file never changes. (One
+# splat per rule, at the end: a new TeX Live gets its own block.)
 /*
   Access-Control-Allow-Origin: *
   X-Content-Type-Options: nosniff
-/tl*/*
+
+/tl2026/*
   Cache-Control: public, max-age=31536000, immutable
   Content-Type: text/plain; charset=utf-8
