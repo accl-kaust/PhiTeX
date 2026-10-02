@@ -7,6 +7,7 @@ mod etrip;
 mod mask;
 mod oracle;
 mod sections;
+mod ssa_edits;
 mod trip;
 
 use std::path::PathBuf;
@@ -21,6 +22,8 @@ commands:
   oracle    run the installed engines on the corpus, store outputs in refs/
   sections  tex.web port coverage (sections cited as `§N` under crates/)
   e2e       compare partex with the oracle engines on end-to-end jobs
+  ssa-edits the incremental cases as rebuilds of one SSA process, every stage
+            against plain partex (scripts/ssa-edits; its options pass through)
   trip      run Knuth's trip test on partex and compare with refs/tex/trip
   etrip     run e-TeX's etrip test on partex and compare with pdfTeX's run
   bench     time partex against pdflatex, record JSON in bench/results/ (--pgf: PGF subset)
@@ -35,6 +38,7 @@ fn main() -> Result<()> {
         Some("sections") => sections::run(&workspace_root(), &args[1..]),
         Some("oracle") => oracle::run(&workspace_root(), &args[1..]),
         Some("e2e") => e2e::run(&workspace_root(), &args[1..]),
+        Some("ssa-edits") => ssa_edits::run(&workspace_root(), &args[1..]),
         Some("trip") => trip::run(&workspace_root(), &args[1..]),
         Some("etrip") => etrip::run(&workspace_root(), &args[1..]),
         Some("-h" | "--help") | None => {
@@ -118,6 +122,9 @@ fn check() -> Result<()> {
         // (and both in machine mode, the `partex watch` default)
         let knuth_machine = scope.spawn(|| trip::run(&root, &[String::from("--machine")]));
         let etex_machine = scope.spawn(|| etrip::run(&root, &[String::from("--machine")]));
+        // (SSA mode's edit sequences, every stage against plain partex:
+        // DESIGN.md 4.3, item 8)
+        let ssa_edits = scope.spawn(|| ssa_edits::harness(&root, &[String::from("--brief")]));
         let e2e = e2e::run(&root, &[]);
         // (and in machine mode, the default of `partex watch`: after the
         // plain run, which the format caches are shared with, in a
@@ -150,6 +157,7 @@ fn check() -> Result<()> {
             ),
             ("e2e", e2e),
             ("e2e (machine mode)", e2e_machine),
+            ("ssa-edits", join(ssa_edits, "ssa-edits")),
             ("lints", join(lints, "lints")),
         ];
         let failed: Vec<String> = results
