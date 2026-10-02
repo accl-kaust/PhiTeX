@@ -376,8 +376,9 @@ load of what the job stored is a φ. The construction draws on:
 - **Every operation is a call**, and every routine is one: the
   tokenizer over a line, `macro_call`, `hpack`, `vpack`, `line_break`,
   each `build_page` step, the output routine, `ship_out`, `write_out`,
-  `unsave`, the fonts written at the job's end, BibTeX and makeindex.
-  Primitives and macros are one category.
+  the fonts written at the job's end, BibTeX and makeindex. Primitives
+  and macros are one category. A group's end (`unsave`, §281) is not a
+  call: its restores are writes of the step that runs it (4.3 item 2).
 - **A record** holds:
   - the call's name;
   - its body's own reads in order, each a version (a child's reads stay
@@ -448,11 +449,11 @@ because a version it read changed.
   - its reads from outside it become the running call's reads.
 
   A call *applies* only if its record holds everything it makes, with
-  nothing handed back to its caller outside it. Today those are
-  `unsave` of a group with no tokens to insert, and the fonts
-  (`font_file`, `encoding`, `font_dict`). An `unsave` that inserts
-  `\aftergroup` tokens is `unsave_after`, which runs. Each other routine
-  applies once its results are values (4.2, item 5).
+  nothing handed back to its caller outside it. Today those are the
+  fonts (`font_file`, `encoding`, `font_dict`). Each other routine
+  applies once its results are values (4.2, item 5). A group's end is
+  not a call, so the `\aftergroup` tokens it puts in the input (§326)
+  come from the step's own run: no hit can lose them.
   `PARTEX_SSA_APPLY=0` switches applied hits off.
 - **Queries are sources.** The host's answers that are not file
   contents (a file's date, the clock, the timer, a terminal line) are
@@ -1038,7 +1039,7 @@ that:
 | the page list placed with stand-ins | the engine holds the list, not its nodes | the list as appends read by timestamp |
 | the input copied at a step's end and mapped | "where the engine is" was a copy | the input's value, shared (3.5) |
 | a store read by the next rebuild | steps close before their loads are known | the φ in the same evaluation (3.7) |
-| hits applied for `unsave` and the fonts only | the other routines' results are not values | every node whose results are values |
+| hits applied for the fonts only | the other routines' results are not values | every node whose results are values |
 | records as heap trees, one per call | the first runtime | the trace: chunks, spans, timestamps (3.9) |
 | one record per name | the first memo | the memo of *k* (3.9) |
 | the dirty steps in key order | one engine, one position | the worklist; many workers (3.10) |
