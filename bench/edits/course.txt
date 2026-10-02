@@ -21,3 +21,9 @@ word2	ch15.tex|That limit is expensive.|That limit is dear.;;ch15.tex|dear. The 
 space2	ch15.tex|penalty methods raise the weight|penalty methods raise  the weight;;ch15.tex|raise  the weight|raise  the  weight
 # enter2: the `enter` edit, then `every` becomes `each` in the new paragraph.
 enter2	ch15.tex|the solution first. \doc{ePlace} adjusts|the solution first.<NL><NL>\doc{ePlace} adjusts;;ch15.tex|adjusts \(\lambda\) at every iteration|adjusts \(\lambda\) at each iteration
+# tikz-node: a node's text in ch15's pgfplots figure (line 47; the figure's float is one step).
+tikz-node	ch15.tex|at (axis cs:1.03,1.03) {\(c=99\)}|at (axis cs:1.03,1.03) {\(c=98\)}
+# tikz-coord: a node of the figure moved (line 44).
+tikz-coord	ch15.tex|at (axis cs:0.55,0.46)|at (axis cs:0.55,0.40)
+# tikz-plot: a plotted point of the figure moved (line 42).
+tikz-plot	ch15.tex|(0.5,0.5) (0.9,0.9) (0.99,0.99)|(0.5,0.5) (0.8,0.8) (0.99,0.99)

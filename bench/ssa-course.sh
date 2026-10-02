@@ -13,6 +13,9 @@
 # $w/aux. A private copy is made afresh in target/ssa-course/run; COURSE
 # itself is only read. One process builds the job cold, then rebuilds it
 # after `word` and its revert, N times (default 20: the warm numbers),
+# (each warm edit puts a different word in place of `dear`, so its page
+# and what the link compresses were never made before: typing, not the
+# same edit again; the reverts go back to the original, made cold),
 # then after each edit of EDITS (default bench/edits/course.txt,
 # bench/edits.sh's format; `--edits` keeps the names listed), each
 # followed by its revert (the original text) and the revert's rebuild;
@@ -370,9 +373,14 @@ def sequence(name, spec, warm=0):
 word = dict(specs).get("word")
 if word is None:
     sys.exit("ssa-course: the edits have no `word`")
-# (the warm pairs first: a slow edit that times out cuts only the tail)
+# (the warm pairs first: a slow edit that times out cuts only the tail;
+# each puts a different word in, as typing does, so the page it makes was
+# never made before and nothing the link compresses is in its cache)
+FRESH = ["dear", "high", "vast", "huge", "dire", "grim", "hard", "rich", "deep", "dull",
+         "bold", "keen", "wild", "tame", "slow", "fast", "lean", "weak", "firm", "late"]
 for w in range(1, n + 1):
-    sequence("word", word, w)
+    path_from, to = word.rsplit("|", 1)
+    sequence("word", path_from + "|" + to.replace("dear", FRESH[(w - 1) % len(FRESH)]), w)
 names = only.split(",") if only else [name for name, _ in specs]
 unknown = sorted(set(names) - {name for name, _ in specs})
 if unknown:
