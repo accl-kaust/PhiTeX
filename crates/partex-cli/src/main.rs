@@ -11,6 +11,7 @@ mod deps;
 mod dvithread;
 mod eventlog;
 mod events;
+mod inotify;
 mod intervals;
 mod lz;
 mod machinehost;
