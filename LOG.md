@@ -10523,3 +10523,23 @@ keystroke in the browser. It is now made from 32-bit halves there
 (`mul_wide_limbs`, tested against `u128`'s natively). The Overleaf
 extension measured the TikZ article's keystroke in Chrome at 31 → 20 ms
 median (16.4–23.4 ms over 8 keystrokes).
+
+## 2026-10-02 — The tracker's read tests inline (coordinator)
+
+After the stamp tables, the keystroke's profile had the tracker's read
+hooks as calls that did nothing: `Tracker::read` of an eqtb cell (its
+version comes with `read_content`) pushed five registers to return at
+once (1.4%), and `read_content`, `row_read`, `value_read` and
+`value_wrote` paid a whole call to compare a slot's stamp with the call
+generation, which is all a repeated read does (`read_content` alone
+4.7% self). The test is inline now where the engine reads, and a read
+or write it lets through is noted out of line (`read_slot_noted`,
+`read_revision`, `value_read_noted`, `value_wrote_noted`).
+
+Timings were too noisy to judge on the machine that day (the same
+binary measured median 3.2 ms and then 4.7 ms an hour later). Counted
+instead, over 200 keystrokes of the TikZ article in the process alone
+(`perf stat -i`, so not the toggle script's children), twice: 2.141 G
+→ 1.967 G instructions (−8.1%), cycles −3 to −3.5%, the same PDF. The
+harness: 14 cases, 79 stages, identical in all three modes.
+

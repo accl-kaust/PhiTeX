@@ -1327,6 +1327,7 @@ impl SsaTracker {
     /// (`cur_list`'s fields, the nest, the alignment's), then the
     /// conditionals' one slot after them; the page and the save stack
     /// have arrays of their own.
+    #[inline]
     fn value_stamp(&self, s: Slot, write: bool) -> Option<&core::cell::Cell<u32>> {
         let i = usize::try_from(s.1).ok()?;
         match (s.0, write) {
@@ -1359,17 +1360,35 @@ impl SsaTracker {
 
 impl SsaTracker {
     /// A read of table slot `s`: once per call (its stamp), with the
-    /// version its array holds; in check mode, `content` tests it.
-    #[inline]
+    /// version its array holds; in check mode, `content` tests it. The
+    /// stamp's test is inline where the engine reads; a read it lets
+    /// through is noted out of line ([`SsaTracker::read_slot_noted`]).
+    #[inline(always)]
+    #[allow(
+        clippy::inline_always,
+        reason = "every read of a table slot: a call that only tested the stamp was 5% of a keystroke"
+    )]
     fn read_slot(&self, s: Slot, content: impl FnOnce() -> u128) {
         // (the slot's table and index, found once for its stamp and its
         // version)
         let at = table_at(s.0, s.1);
         let stamp = at.and_then(|(f, i)| self.stamps[f].get(i));
-        let generation = self.generation.get();
-        if stamp.is_some_and(|c| c.get() == generation) {
+        if stamp.is_some_and(|c| c.get() == self.generation.get()) {
             return;
         }
+        self.read_slot_noted(s, at, stamp, content);
+    }
+
+    /// [`SsaTracker::read_slot`]'s read the call has not noted yet.
+    #[inline(never)]
+    fn read_slot_noted(
+        &self,
+        s: Slot,
+        at: Option<(usize, usize)>,
+        stamp: Option<&core::cell::Cell<u32>>,
+        content: impl FnOnce() -> u128,
+    ) {
+        let generation = self.generation.get();
         let Ok(mut r) = self.rec.try_borrow_mut() else {
             return;
         };
@@ -1394,6 +1413,56 @@ impl SsaTracker {
         if let Some(c) = stamp {
             c.set(generation);
         }
+    }
+
+    /// [`Tracker::value_read`]'s read the call has not noted yet.
+    #[inline(never)]
+    fn value_read_noted(
+        &self,
+        s: Slot,
+        stamp: Option<&core::cell::Cell<u32>>,
+        version: impl FnOnce() -> u128,
+    ) {
+        let Ok(mut r) = self.rec.try_borrow_mut() else {
+            return;
+        };
+        if !r.on {
+            return;
+        }
+        r.note(s, Version(version()));
+        if let Some(c) = stamp {
+            c.set(self.generation.get());
+        }
+    }
+
+    /// [`Tracker::value_wrote`]'s write the call has not noted yet.
+    #[inline(never)]
+    fn value_wrote_noted(&self, s: Slot, stamp: Option<&core::cell::Cell<u32>>) {
+        if let Ok(mut r) = self.rec.try_borrow_mut() {
+            if r.on {
+                r.rt.note_write(&s);
+                if let Some(c) = stamp {
+                    c.set(self.generation.get());
+                }
+            }
+        } else {
+            self.lost.set(self.lost.get() + 1);
+        }
+    }
+
+    /// [`Tracker::read`] of a slot with no version array: its revision.
+    #[inline(never)]
+    fn read_revision(&self, cell: Cell) {
+        let Ok(mut r) = self.rec.try_borrow_mut() else {
+            return;
+        };
+        if !r.on {
+            return;
+        }
+        let s = Slot::of(cell);
+        let v = r.st.vers.revision(s);
+        r.st.noted[count_ix(s)] += 1;
+        r.rt.note_read(&Loc::State(s), v);
     }
 }
 
@@ -1420,6 +1489,11 @@ impl Tracker for SsaTracker {
                 .is_ok_and(|mut r| rebuild::read_later(&mut r))
     }
 
+    #[inline(always)]
+    #[allow(
+        clippy::inline_always,
+        reason = "every eqtb read: a call that only returned was 1.4% of a keystroke"
+    )]
     fn read(&self, cell: Cell) {
         if matches!(
             cell,
@@ -1435,22 +1509,17 @@ impl Tracker for SsaTracker {
             // the font table by field, in `row_read`)
             return;
         }
-        let Ok(mut r) = self.rec.try_borrow_mut() else {
-            return;
-        };
-        if !r.on {
-            return;
-        }
-        let s = Slot::of(cell);
-        let v = r.st.vers.revision(s);
-        r.st.noted[count_ix(s)] += 1;
-        r.rt.note_read(&Loc::State(s), v);
+        self.read_revision(cell);
     }
 
+    #[inline(always)]
+    #[allow(clippy::inline_always, reason = "only `read_slot`'s test")]
     fn read_content(&self, cell: Cell, content: impl FnOnce() -> u128) {
         self.read_slot(Slot::of(cell), content);
     }
 
+    #[inline(always)]
+    #[allow(clippy::inline_always, reason = "only `read_slot`'s test")]
     fn row_read(&self, row: Row, content: impl FnOnce() -> u128) {
         self.read_slot(Slot::row(row), content);
     }
@@ -1495,42 +1564,32 @@ impl Tracker for SsaTracker {
         self.rec.try_borrow_mut().ok()?.st.steps.reopen(name, kind)
     }
 
+    #[inline(always)]
+    #[allow(
+        clippy::inline_always,
+        reason = "every read of a structure row: only the stamp's test inline"
+    )]
     fn value_read(&self, row: Row, version: impl FnOnce() -> u128) {
         let s = Slot::row(row);
         let stamp = self.value_stamp(s, false);
-        let generation = self.generation.get();
-        if stamp.is_some_and(|c| c.get() == generation) {
+        if stamp.is_some_and(|c| c.get() == self.generation.get()) {
             return;
         }
-        let Ok(mut r) = self.rec.try_borrow_mut() else {
-            return;
-        };
-        if !r.on {
-            return;
-        }
-        r.note(s, Version(version()));
-        if let Some(c) = stamp {
-            c.set(generation);
-        }
+        self.value_read_noted(s, stamp, version);
     }
 
+    #[inline(always)]
+    #[allow(
+        clippy::inline_always,
+        reason = "every write of a structure row: only the stamp's test inline"
+    )]
     fn value_wrote(&self, row: Row) {
         let s = Slot::row(row);
         let stamp = self.value_stamp(s, true);
-        let generation = self.generation.get();
-        if stamp.is_some_and(|c| c.get() == generation) {
+        if stamp.is_some_and(|c| c.get() == self.generation.get()) {
             return;
         }
-        if let Ok(mut r) = self.rec.try_borrow_mut() {
-            if r.on {
-                r.rt.note_write(&s);
-                if let Some(c) = stamp {
-                    c.set(generation);
-                }
-            }
-        } else {
-            self.lost.set(self.lost.get() + 1);
-        }
+        self.value_wrote_noted(s, stamp);
     }
 
     fn call_begin(&self, f: Func, args: &[u128], view: &dyn EngineView) -> Option<u32> {
