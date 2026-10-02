@@ -622,6 +622,12 @@ pub(crate) struct InputState {
     /// Stopped at the command after one that read a file whole
     /// (`CleanPoint::Load`).
     load: bool,
+    /// The page builder a paragraph's end (or start) deferred is pending:
+    /// the next step begins with it (`CleanPoint::Page`).
+    page: bool,
+    /// Stopped at a paragraph's start (`CleanPoint::Graf`), or before the
+    /// page builder `new_graf` deferred.
+    graf: bool,
     line: i32,
     /// The shared parts: the levels, the parameters, the buffer below the
     /// top file level's line and the file levels below the top one.
@@ -660,6 +666,8 @@ impl InputState {
             fire: t.fire_pending,
             ship: t.ship_stop == 1,
             load: t.load_stop == 2,
+            page: t.page_pending,
+            graf: t.graf_stop,
             line: t.line,
             top: (v.from..t.first.max(t.last)).map(|i| t.buffer[i]).collect(),
             v,
@@ -691,6 +699,8 @@ impl InputState {
         t.fire_pending = self.fire;
         t.ship_stop = u8::from(self.ship);
         t.load_stop = if self.load { 2 } else { 0 };
+        t.page_pending = self.page;
+        t.graf_stop = self.graf;
         t.line = self.line;
         t.cur_input = self.cur.clone();
         t.in_open = self.in_open;
@@ -781,14 +791,22 @@ fn same_file(x: Option<&AlphaFile>, y: Option<&AlphaFile>) -> bool {
 
 /// Whether two results leave the input at the same place (DESIGN 3.15,
 /// step 5): the same files at the same positions and lines, the same
-/// levels.
+/// levels. A place in a line is its offset in it, from its start or from
+/// its end: where the line ends (`limit`, and `first` and `last` after it)
+/// is the input's, so a step that ends in a line that an edit before or
+/// after that place changed meets its old end, and the next step runs
+/// again in its place.
 fn same_place<H: Host, T: Tracker>(t: &Tex<H, T>, a: &InputState, b: &InputState) -> bool {
     let rec = |x: &InStateRecord, y: &InStateRecord| {
+        // (a file level's place in its line counts from either end: an
+        // edit earlier in the line moves it from the start, one later from
+        // the end; equal lines, which `same_input` asks for, agree on both)
+        let at = x.loc == y.loc
+            || (x.state != crate::web::TOKEN_LIST && x.limit - x.loc == y.limit - y.loc);
         x.state == y.state
             && x.index == y.index
             && x.start == y.start
-            && x.loc == y.loc
-            && x.limit == y.limit
+            && at
             && same_str(t, x.name, y.name)
     };
     let (fa, fb) = (&a.v.files, &b.v.files);
@@ -804,11 +822,11 @@ fn same_place<H: Host, T: Tracker>(t: &Tex<H, T>, a: &InputState, b: &InputState
         && a.fire == b.fire
         && a.ship == b.ship
         && a.load == b.load
+        && a.page == b.page
+        && a.graf == b.graf
         && a.in_open == b.in_open
         && a.line == b.line
         && a.file.line == b.file.line
-        && a.first == b.first
-        && a.last == b.last
         && a.v.depth == b.v.depth
         && rec(&a.cur, &b.cur)
         && same_chain(a.v.levels.as_ref(), b.v.levels.as_ref(), rec)
@@ -833,9 +851,12 @@ fn same_input<H: Host, T: Tracker>(t: &Tex<H, T>, a: &InputState, b: &InputState
     a.v.from == b.v.from
         && same_data(&a.v.below, &b.v.below)
         && a.top == b.top
+        && a.first == b.first
+        && a.last == b.last
+        && a.cur.limit == b.cur.limit
         && a.cur.list == b.cur.list
         && same_chain(a.v.levels.as_ref(), b.v.levels.as_ref(), |x, y| {
-            x.list == y.list
+            x.list == y.list && x.limit == y.limit
         })
         && a.v.np == b.v.np
         && same_chain(a.v.params.as_ref(), b.v.params.as_ref(), |x, y| x == y)
@@ -1129,6 +1150,9 @@ pub struct RebuildReport {
     /// format's definitions.
     pub defs_changed: usize,
     pub readers_marked: usize,
+    /// Dirty steps passed over: each definition that marked them reaches
+    /// them at the version they read ([`Dirty`]).
+    pub readers_kept: usize,
     pub reads_checked: usize,
     pub positioned: usize,
     pub restored: usize,
@@ -1163,7 +1187,7 @@ impl InputState {
     fn brief(&self) -> alloc::string::String {
         let pos = self.file.file.as_ref().map_or(0, |f| f.pos);
         alloc::format!(
-            "level {} line {} pos {} loc {} state {}{}{}{}{}",
+            "level {} line {} pos {} loc {} state {}{}{}{}{}{}{}",
             self.in_open,
             self.line,
             pos,
@@ -1178,6 +1202,16 @@ impl InputState {
             },
             if self.load {
                 " (after a file read whole)"
+            } else {
+                ""
+            },
+            if self.page {
+                " (the page builder pending)"
+            } else {
+                ""
+            },
+            if self.graf {
+                " (at a paragraph's start)"
             } else {
                 ""
             }
@@ -1434,7 +1468,7 @@ pub fn rebuild<H: Host>(tex: &mut Tex<H, SsaTracker>, trace: bool, apply: bool) 
         ..RebuildReport::default()
     };
     let c0 = tex.commands();
-    let mut dirty: BTreeMap<u64, StepId> = BTreeMap::new();
+    let mut dirty = Dirty::default();
     // (a build's trip after the first: its φ is what the trip before
     // stored, DESIGN 3.7, "Trips, as built")
     let next = tex.tracker.rec.borrow_mut().st.steps.next.take();
@@ -1601,7 +1635,7 @@ pub fn rebuild<H: Host>(tex: &mut Tex<H, SsaTracker>, trace: bool, apply: bool) 
                 Query::TimerStart => Some(a),
                 Query::Terminal => None,
             });
-            if now != Some(a) && dirty.insert(key, s).is_none() {
+            if now != Some(a) && dirty.mark(key, s) {
                 rep.queries += 1;
                 if trace {
                     note(tex, alloc::format!("seed: step {s} asked {q:?}"));
@@ -1631,7 +1665,7 @@ pub fn rebuild<H: Host>(tex: &mut Tex<H, SsaTracker>, trace: bool, apply: bool) 
         // the loads that read the φ, dirty if it is not what they found
         for (key, s, id) in rr.st.steps.phi_seeds(&rr.rt.fold, &phi) {
             rep.phi += 1;
-            dirty.insert(key, s);
+            dirty.mark(key, s);
             if trace {
                 let n = alloc::format!("seed: step {s} loaded φ {id}");
                 rr.st.steps.log.push(n);
@@ -1645,7 +1679,7 @@ pub fn rebuild<H: Host>(tex: &mut Tex<H, SsaTracker>, trace: bool, apply: bool) 
         for (id, now) in loads {
             let a = Slot(Fam::Load, i64::from(id));
             for x in rr.rt.fold.readers_between(&a, 0, None) {
-                dirty.insert(rr.rt.fold.steps[x as usize].key, x);
+                dirty.mark(rr.rt.fold.steps[x as usize].key, x);
                 if trace {
                     let name = rr.st.loads.get(id as usize).map(|l| &l.0[..]);
                     let n = alloc::format!(
@@ -1675,7 +1709,7 @@ pub fn rebuild<H: Host>(tex: &mut Tex<H, SsaTracker>, trace: bool, apply: bool) 
         if trace {
             let l = alloc::format!(
                 "seeds (step, key): {:?}; edits {:?}",
-                dirty.iter().map(|(k, s)| (*s, *k)).collect::<Vec<_>>(),
+                dirty.steps().collect::<Vec<_>>(),
                 rr.st.steps.edits[rr.st.steps.edits.len().saturating_sub(rep.edits)..]
                     .iter()
                     .map(|e| (e.data, &e.hunks[..e.hunks.len().min(4)]))
@@ -1692,12 +1726,33 @@ pub fn rebuild<H: Host>(tex: &mut Tex<H, SsaTracker>, trace: bool, apply: bool) 
     let applied = (tex.tracker.applied.get(), tex.tracker.skipped.get());
     tex.tracker.boundary();
     let mut srep = SsaReport::default();
-    while let Some((_, j)) = dirty.pop_first() {
+    while let Some((j, why)) = dirty.pop_first() {
         let (prev, mut target) = {
             let r = tex.tracker.rec.borrow();
             let fold = &r.rt.fold;
             if !fold.steps[j as usize].live {
                 continue;
+            }
+            // (marked by definitions that changed, each reaching it at the
+            // version it read again: its reads are as they were)
+            if let Some(reads) = why {
+                let key = fold.steps[j as usize].key;
+                if reads
+                    .iter()
+                    .all(|(a, v)| reaching_version(&r, a, key) == Some(*v))
+                {
+                    rep.readers_kept += 1;
+                    if rep.trace {
+                        drop(r);
+                        note(
+                            tex,
+                            alloc::format!(
+                                "step {j} kept: each definition that marked it reaches it as it read it"
+                            ),
+                        );
+                    }
+                    continue;
+                }
             }
             let Some(pos) = fold.position(j) else {
                 continue;
@@ -1768,6 +1823,8 @@ pub fn rebuild<H: Host>(tex: &mut Tex<H, SsaTracker>, trace: bool, apply: bool) 
                 && !input.fire
                 && !input.ship
                 && !input.load
+                && !input.page
+                && !input.graf
                 && same_place(tex, &end, &input)
                 && same_input(tex, &end, &input)
             {
@@ -1799,10 +1856,7 @@ pub fn rebuild<H: Host>(tex: &mut Tex<H, SsaTracker>, trace: bool, apply: bool) 
                 let fold = &r.rt.fold;
                 if fold.renumbered != renumbered {
                     // (the keys were made again: the dirty steps' too)
-                    dirty = dirty
-                        .into_values()
-                        .map(|s| (fold.steps[s as usize].key, s))
-                        .collect();
+                    dirty.rekey(fold);
                 }
                 // (a new step's reads are predicted by the old step whose
                 // text it runs, and by the step just run: text the old run
@@ -1890,6 +1944,7 @@ impl RebuildReport {
         self.removed += r.removed;
         self.defs_changed += r.defs_changed;
         self.readers_marked += r.readers_marked;
+        self.readers_kept += r.readers_kept;
         self.reads_checked += r.reads_checked;
         self.positioned += r.positioned;
         self.restored += r.restored;
@@ -2098,7 +2153,7 @@ pub fn rebuild_log<H: Host>(tex: &Tex<H, SsaTracker>) -> Vec<alloc::string::Stri
 
 /// Make the steps whose lines edit `e` changed dirty, and move the other
 /// lines of its data to where they are in the new one, data `to`.
-fn seed(rr: &mut Recorder, e: &Edit, to: u32, dirty: &mut BTreeMap<u64, StepId>, trace: bool) {
+fn seed(rr: &mut Recorder, e: &Edit, to: u32, dirty: &mut Dirty, trace: bool) {
     let fold = &rr.rt.fold;
     let Some(d) = rr.st.steps.datas.get_mut(e.data as usize) else {
         return;
@@ -2112,7 +2167,7 @@ fn seed(rr: &mut Recorder, e: &Edit, to: u32, dirty: &mut BTreeMap<u64, StepId>,
         }
         if e.touches(l.from, l.to) {
             // (its run again reads the line anew)
-            dirty.insert(st.key, l.step);
+            dirty.mark(st.key, l.step);
             if trace {
                 let n = alloc::format!(
                     "seed: step {} reads data {} [{}, {}), {} hunks",
@@ -2142,7 +2197,7 @@ fn seed(rr: &mut Recorder, e: &Edit, to: u32, dirty: &mut BTreeMap<u64, StepId>,
             continue;
         }
         if e.lines_before(l.from) != 0 {
-            dirty.insert(st.key, l.step);
+            dirty.mark(st.key, l.step);
             continue;
         }
         let p = e.pos(l.from);
@@ -2169,7 +2224,7 @@ fn data_edits<H: Host>(
     tex: &Tex<H, SsaTracker>,
     end: &InputState,
     old: InputState,
-    dirty: &mut BTreeMap<u64, StepId>,
+    dirty: &mut Dirty,
     rep: &mut RebuildReport,
 ) -> InputState {
     if end.in_open != old.in_open {
@@ -2219,16 +2274,89 @@ fn data_edits<H: Host>(
     }
 }
 
+/// The steps to run, in key order (item 3), each with why. A step a
+/// changed definition marked keeps the slots and the versions its last
+/// run read of them, and when its turn comes it is passed over if each
+/// reaches it at that version again: a definition that went from one step
+/// to the next, as when a step run again in its place ends elsewhere
+/// (LaTeX's `.aux` read at `\begin{document}`, its new line in a new
+/// step). Any other mark runs it: an edit, a store, a query answered
+/// anew, an input that changed, a definition its last run did not read.
+#[derive(Default)]
+pub(crate) struct Dirty {
+    order: BTreeMap<u64, StepId>,
+    why: BTreeMap<StepId, Why>,
+}
+
+/// Why a step is dirty: `None` runs it, `Some` holds the slots it read at
+/// a definition that changed, and the versions it read.
+type Why = Option<Vec<(Slot, Version)>>;
+
+impl Dirty {
+    /// Step `s`, at `key`, runs; whether it was not dirty yet.
+    fn mark(&mut self, key: u64, s: StepId) -> bool {
+        self.why.insert(s, None);
+        self.order.insert(key, s).is_none()
+    }
+
+    /// Step `s`, at `key`, read slot `a` at version `v`, which the
+    /// definition that reaches it may no longer be. The first change of
+    /// `a` before it to mark it knows what it read: the changes come in
+    /// key order, and those after the first are not what it read.
+    fn mark_read(&mut self, key: u64, s: StepId, a: Slot, v: Version) {
+        self.order.insert(key, s);
+        if let Some(r) = self.why.entry(s).or_insert_with(|| Some(Vec::new()))
+            && !r.iter().any(|(b, _)| *b == a)
+        {
+            r.push((a, v));
+        }
+    }
+
+    /// The first step in key order, and why.
+    fn pop_first(&mut self) -> Option<(StepId, Why)> {
+        let (_, s) = self.order.pop_first()?;
+        Some((s, self.why.remove(&s).flatten()))
+    }
+
+    /// The step at `key` is not dirty.
+    fn remove(&mut self, key: u64) {
+        if let Some(s) = self.order.remove(&key) {
+            self.why.remove(&s);
+        }
+    }
+
+    /// The keys made again (`Fold::renumber`).
+    fn rekey(&mut self, fold: &Fold<TexSsa>) {
+        self.order = core::mem::take(&mut self.order)
+            .into_values()
+            .map(|s| (fold.steps[s as usize].key, s))
+            .collect();
+    }
+
+    fn len(&self) -> usize {
+        self.order.len()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.order.is_empty()
+    }
+
+    /// The dirty steps and their keys, in key order.
+    fn steps(&self) -> impl Iterator<Item = (StepId, u64)> + '_ {
+        self.order.iter().map(|(&k, &s)| (s, k))
+    }
+}
+
 /// The step after `s` in the fold reads where `s` left the input, which
 /// changed: it is dirty.
-fn mark_next<H: Host>(tex: &Tex<H, SsaTracker>, s: StepId, dirty: &mut BTreeMap<u64, StepId>) {
+fn mark_next<H: Host>(tex: &Tex<H, SsaTracker>, s: StepId, dirty: &mut Dirty) {
     let r = tex.tracker.rec.borrow();
     let fold = &r.rt.fold;
     if let Some(n) = fold
         .position(s)
         .and_then(|p| fold.order.get(p + 1).copied())
     {
-        dirty.insert(fold.steps[n as usize].key, n);
+        dirty.mark(fold.steps[n as usize].key, n);
     }
 }
 
@@ -2253,7 +2381,7 @@ fn meet<H: Host>(
 fn retire<H: Host>(
     tex: &mut Tex<H, SsaTracker>,
     s: StepId,
-    dirty: &mut BTreeMap<u64, StepId>,
+    dirty: &mut Dirty,
     rep: &mut RebuildReport,
 ) {
     let vals = {
@@ -2269,7 +2397,7 @@ fn retire<H: Host>(
             }
             let next = rr.rt.fold.next_after(a, key).map(|d| d.key);
             for x in rr.rt.fold.readers_between(a, key, next) {
-                dirty.insert(rr.rt.fold.steps[x as usize].key, x);
+                dirty.mark_read(rr.rt.fold.steps[x as usize].key, x, *a, *v);
                 rep.readers_marked += 1;
             }
         }
@@ -2291,7 +2419,7 @@ fn retire<H: Host>(
         rr.rt.fold.remove(s, old.keys());
         // (its chunks leave the link)
         rr.st.steps.fx_changed.push(s);
-        dirty.remove(&key);
+        dirty.remove(key);
         let mut vals = Vec::new();
         for a in old.keys().filter(|a| positioned(a)) {
             if let Some(v) = latest(tex, rr, *a, s, rep) {
@@ -2312,7 +2440,7 @@ fn mark_store_readers(
     rr: &Recorder,
     ids: &[u32],
     key: u64,
-    dirty: &mut BTreeMap<u64, StepId>,
+    dirty: &mut Dirty,
     rep: &mut RebuildReport,
 ) {
     if ids.is_empty() {
@@ -2323,7 +2451,7 @@ fn mark_store_readers(
             continue;
         };
         if k > key && seen.iter().any(|l| !l.phi && ids.contains(&l.id)) {
-            dirty.insert(k, s);
+            dirty.mark(k, s);
             rep.store_readers += 1;
         }
     }
@@ -2352,7 +2480,7 @@ fn run_step<H: Host>(
     j: StepId,
     predict: &[StepId],
     input: &InputState,
-    dirty: &mut BTreeMap<u64, StepId>,
+    dirty: &mut Dirty,
     rep: &mut RebuildReport,
     srep: &mut SsaReport,
 ) -> InputState {
@@ -2460,6 +2588,8 @@ fn run_step<H: Host>(
                                     | CleanPoint::Fire
                                     | CleanPoint::Ship
                                     | CleanPoint::Load
+                                    | CleanPoint::Page
+                                    | CleanPoint::Graf
                             )
                         )
                     {
@@ -2656,7 +2786,17 @@ fn run_step<H: Host>(
             }
             for s in readers {
                 if s != j {
-                    dirty.insert(rr.rt.fold.steps[s as usize].key, s);
+                    // (they read the old definition, or, where the last run
+                    // made none, the one that reaches the step: passed over
+                    // if it is what reaches them again when their turn
+                    // comes)
+                    let k = rr.rt.fold.steps[s as usize].key;
+                    match o.or_else(|| reaching_version(rr, a, key)) {
+                        Some(v) => dirty.mark_read(k, s, *a, v),
+                        None => {
+                            dirty.mark(k, s);
+                        }
+                    }
                     rep.readers_marked += 1;
                 }
             }

@@ -2423,6 +2423,9 @@ pub fn run_applying<H: Host>(
     // size changes, `\IfFileExists` asking `\pdffilesize`, is the step
     // before)
     tex.set_stop_after_load(true);
+    // (and around the page builder after a paragraph's end, and at a
+    // paragraph's start: its lines read none of the page's totals)
+    tex.set_defer_page(true);
     let mut open = Some(Open {
         hit: false,
         rec: None,
@@ -2437,7 +2440,12 @@ pub fn run_applying<H: Host>(
                 if matches!(
                     tex.clean_point(),
                     Some(
-                        CleanPoint::Outer | CleanPoint::Fire | CleanPoint::Ship | CleanPoint::Load
+                        CleanPoint::Outer
+                            | CleanPoint::Fire
+                            | CleanPoint::Ship
+                            | CleanPoint::Load
+                            | CleanPoint::Page
+                            | CleanPoint::Graf
                     )
                 ) {
                     close_paragraph(tex, &mut open, &mut rep, Close::Step);
@@ -2498,8 +2506,9 @@ fn open_paragraph<H: Host>(
         r.st.steps.run_begins(rerun);
     }
     // (the lines it seals are counted from its start: their keys are the
-    // same at each run of the step)
+    // same at each run of the step; and its commands)
     tex.seal_restart();
+    tex.mark_step_start();
     // the line the paragraph starts on, its tokens, and the offset in them
     // (at a fire, the topmost file level's, under the token lists: DESIGN
     // §7.16.1, "The deferred fire's form")
@@ -2611,6 +2620,14 @@ fn open_paragraph<H: Host>(
     if tex.load_stop == 2 {
         // (a step that begins after a file read whole)
         args.push(Version::of(&0x6c6f_6164u32));
+    }
+    if tex.page_pending {
+        // (a step that begins with the page builder)
+        args.push(Version::of(&0x7061_6765u32));
+    }
+    if tex.graf_stop {
+        // (a step that begins after a paragraph's start)
+        args.push(Version::of(&0x6772_6166u32));
     }
     let mut r = tex.tracker.rec.borrow_mut();
     let rr = &mut *r;

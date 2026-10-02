@@ -10694,3 +10694,54 @@ The heading keystroke natively (LTO, 100 each, the same PDF): median
 harness: 14 cases, 79 stages, identical in all three modes; the
 workspace's tests pass.
 
+## 2026-10-03 — The page builder apart from a paragraph's lines, and readers kept (coordinator)
+
+When an edit changes a paragraph's line count, the page totals change
+for everything after it on the page. Every later paragraph's step read
+them: `new_graf`'s page builder at its start (the `\parskip` glue) and
+§1094's after its `\par`. So the paragraphs after an edited one ran
+again down to the page's end, and the output routine with them.
+
+- The page builder after a paragraph's end is deferred to the next
+  command, a step boundary before it (`CleanPoint::Page`); the step that
+  begins there runs it and ends at the next clean point.
+- A paragraph's start is a step boundary (`CleanPoint::Graf`): the
+  machine's `ParStart`, the first candidate after `new_graf`, so after
+  LaTeX's restart of the paragraph from its `\everypar` (since 2021 the
+  kernel ends the paragraph `new_graf` began and begins it again with
+  `\noindent`: two `new_graf`s, two page builders, at every paragraph)
+  and its first word. Only on the line the paragraph's level began on:
+  the step that begins there takes the level's `mode_line` as its own,
+  the line it begins on, since the step before kept a number an edit
+  above it can move (the harness caught the overfull box's `lines
+  155--160` where the line was 159).
+- `new_graf`'s page builder is deferred too in a step that ran 64
+  commands before the paragraph began: a picture built in vertical mode
+  before its `\leavevmode`.
+- The steps now end inside lines, and an edit in such a line made new
+  steps where the old ones should have run again in place (new keys,
+  so new sealed-line keys, the output routine run again, poor
+  predictions and dropped runs). A step's end in a line is now placed
+  by its offset from the line's start or from its end; where the line
+  ends (`limit`, `first`, `last`) is the input's, compared by
+  `same_input`.
+- A step run again in its place can end elsewhere, and a definition it
+  made moves to the next (new) step. Its readers were marked dirty when
+  the first step stopped making it, and ran although the next one made
+  it again with the same value (the heading keystroke's second trip:
+  97 → 935 commands). A reader a changed definition marks now keeps the
+  slot and the version it read, and is passed over when its turn comes
+  if each such slot reaches it at that version again (`Dirty`).
+
+The harness: 14 cases, 79 stages, identical in all three modes; the
+rebuilds' commands 158,623 → 116,129 (−27%), fewer in every case
+(incremental −40%, streams −61%, fatal_end 1,906 → 56, machine_edits
+−24%), more steps run (746 → 1,057 in machine_edits). TikZ mock, 100
+keystrokes each, instructions in the process: a word 3.62 → 3.62 M,
+a `(` that changes its line's height 12.04 → 12.25 M, the heading
+25.55 → 23.58 M (−7.7%), the long sentence that wraps 41.05 → 40.20 M;
+the same PDFs. That last one still runs the TikZ picture's step again:
+the picture's `\hbox`, built in vertical mode, pushes the outer level
+onto the nest, and `push_nest` reads all its fields, `\prevgraf` (the
+line count before) among them. That is the next change: the nest's
+levels as slots of their own, by depth.

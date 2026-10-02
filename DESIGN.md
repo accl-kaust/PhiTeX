@@ -1137,6 +1137,28 @@ of *steps*: calls from one clean point to the next.
   character changes the file's size, so the step that read it runs
   again, but the rest of `\input`'s lookup, which sees only the name it
   found, is a step of its own.
+- A paragraph's lines read none of the page builder's state, which
+  every paragraph before them on the page changes:
+  - the page builder after a paragraph's end (§1094) is deferred to the
+    next command, and the step that begins there begins with it and
+    ends at the next clean point (`CleanPoint::Page`);
+  - a paragraph's start (`CleanPoint::ParStart`: the first candidate
+    after `new_graf`, its `\everypar` and LaTeX's restart of the
+    paragraph done) is a step boundary when it is on the line the
+    paragraph's level began on (`CleanPoint::Graf`). The step that
+    begins there takes the level's `mode_line` as its own, the line it
+    begins on: the one before kept a number that an edit above it can
+    move;
+  - `new_graf`'s page builder is deferred too in a step that ran 64
+    commands or more before the paragraph began: a picture built in
+    vertical mode before its `\leavevmode` is then a step that reads
+    none of the page's state. The step that begins at that page builder
+    takes the paragraph's `mode_line` as its own as well.
+  A step that ends in a line is placed by its offset in it, from its
+  start or from its end: where the line ends is the input's, so an edit
+  earlier or later in the line (a heading's title, read in `\section`'s
+  expansion before its page builder) runs the next step again in its
+  place instead of making new ones.
 - The line breaker seals each line (`seal.rs`). The line box keeps its
   dimensions and a key, and its glue setting and list go to a table
   under the key, a slot of their own (`Fam::Sealed`, versioned by the
@@ -1185,9 +1207,19 @@ of *steps*: calls from one clean point to the next.
 4. Its definitions replace its old ones. Each definition whose value
    changed, or that only one of the two runs made, marks its old readers
    dirty, up to the slot's next definition. Its stores changed make
-   dirty the later loads that read the build's own store.
+   dirty the later loads that read the build's own store. A reader a
+   definition marked keeps the slot and the version it read (the old
+   definition's, or where the old run made none, the one that reached
+   the step; the first change of the slot before it knows, as the
+   changes come in key order). When its turn comes it is passed over if
+   each such slot reaches it at that version again: a definition that
+   went from one step to the next, as when a step run again in its
+   place ends elsewhere. Any other mark (an edit, a store, an input
+   that changed) runs it.
 5. A step that ended where its old run did (its result, mapped, equals
-   the old one) goes on to the next dirty step. One that ended elsewhere
+   the old one; in a line, at the same offset from its start or from its
+   end, where the line ends being the input's) goes on to the next dirty step, and runs the one after
+   it again in its place if the input there is not the same. One that ended elsewhere
    (Enter pressed, a paragraph break deleted) runs on, a step at a time,
    until one ends at an old step's start. Each new step's reads are
    predicted by the old step after it, whose text it runs, and by the

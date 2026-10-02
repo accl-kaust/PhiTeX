@@ -1210,7 +1210,7 @@ fn rebuild_ssa(
          (loads of a changed φ {}, of a changed store {}, queries answered anew {}; data edited in it {}), \
          steps run {} (new {}, runs dropped {}, passed over {}), calls {} (fresh {}, \
          hits applied {} for {} commands), \
-         definitions changed {}, readers marked {}, reads checked {}, positioned {}, \
+         definitions changed {}, readers marked {} (kept {}), reads checked {}, positioned {}, \
          restored {}, from the format {}, commands {}",
         millis + link_ms + lr.write_ms,
         lr.ready_ms,
@@ -1231,6 +1231,7 @@ fn rebuild_ssa(
         rr.skipped,
         rr.defs_changed,
         rr.readers_marked,
+        rr.readers_kept,
         rr.reads_checked,
         rr.positioned,
         rr.restored,

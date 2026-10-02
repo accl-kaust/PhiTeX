@@ -1699,6 +1699,10 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             // (SSA mode's switch and stop, never a machine's)
             stop_after_load: _,
             load_stop: _,
+            defer_page: _,
+            page_pending: _,
+            graf_stop: _,
+            step_began: _,
             par_start,
             fire_pending,
             // (a switch)

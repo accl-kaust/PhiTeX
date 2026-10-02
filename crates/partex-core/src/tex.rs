@@ -433,6 +433,18 @@ pub struct Tex<H: Host, T: Tracker = Untracked> {
     /// whether one did (1) or main control stopped there (2).
     pub(crate) stop_after_load: bool,
     pub(crate) load_stop: u8,
+    /// Defer the page builder after a paragraph's end (§1094), and after
+    /// its start (§1091) in a step that ran commands before it, to the next
+    /// command, a step boundary (SSA mode, `CleanPoint::Page`), and whether
+    /// it is pending.
+    pub(crate) defer_page: bool,
+    pub(crate) page_pending: bool,
+    /// Stopped at a paragraph's start (`CleanPoint::Graf`), or before the
+    /// page builder `new_graf` deferred: the step that begins there takes
+    /// the paragraph's `mode_line` as its own.
+    pub(crate) graf_stop: bool,
+    /// The commands begun when the open step began (SSA mode).
+    pub(crate) step_began: u64,
     /// A paragraph was begun (§1091, at `nest_ptr = 1`) since the last
     /// candidate boundary: the next one is its start (`Tex::clean_point`).
     pub(crate) par_start: bool,
@@ -761,6 +773,10 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             ship_stop: 0,
             stop_after_load: false,
             load_stop: 0,
+            defer_page: false,
+            page_pending: false,
+            graf_stop: false,
+            step_began: 0,
             par_start: false,
             fire_pending: false,
             defer_fire: false,

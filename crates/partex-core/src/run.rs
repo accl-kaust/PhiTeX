@@ -13,6 +13,13 @@ use crate::mem::NULL;
 use crate::tex::{Jump, Tex};
 use crate::track::Tracker;
 
+/// The commands a step runs before a paragraph begins for the paragraph's
+/// page builder to be deferred to a step of its own ([`Tex::set_defer_page`]):
+/// a picture built in vertical mode before its `\leavevmode`, not the
+/// letter that began the paragraph or LaTeX's restart of it with
+/// `\noindent` from its `\everypar`.
+pub(crate) const DEFER_PAGE_AFTER: u64 = 64;
+
 /// The kinds of clean point ([`Tex::clean_point`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CleanPoint {
@@ -32,6 +39,16 @@ pub enum CleanPoint {
     /// (`\pdffilesize`) changes is the step before, which LaTeX's
     /// `\IfFileExists` only tests for being blank.
     Load = 4,
+    /// Before the page builder a paragraph's start or end deferred (SSA
+    /// mode, with [`Tex::set_defer_page`]): the step that begins here
+    /// begins with it, so the paragraph's steps read none of the page's
+    /// state, which every paragraph before it on the page changes.
+    Page = 5,
+    /// A paragraph's start ([`CleanPoint::ParStart`]) on the line its
+    /// level began on, in SSA mode with [`Tex::set_defer_page`]: what began
+    /// the paragraph read the page's state (its `\parskip`'s page builder,
+    /// §1091), the rest of its lines are a step that reads none of it.
+    Graf = 6,
 }
 
 /// Where [`Tex::start`] or [`Tex::resume`] stopped.
@@ -236,7 +253,12 @@ impl<H: Host, T: Tracker> Tex<H, T> {
     ///   stack, the output routine active as a rule;
     /// - [`CleanPoint::Load`]: stopped at the command after one that read
     ///   a file whole by name (SSA mode, [`Self::set_stop_after_load`]),
-    ///   whatever is on top of the input stack.
+    ///   whatever is on top of the input stack;
+    /// - [`CleanPoint::Page`]: before the page builder a paragraph's end
+    ///   (or start) deferred (SSA mode, [`Self::set_defer_page`]), whatever
+    ///   is on top of the input stack;
+    /// - [`CleanPoint::Graf`]: a [`CleanPoint::ParStart`] on the line the
+    ///   paragraph's level began on, in SSA mode.
     ///
     /// The mode is tested with its sign (§211): internal vertical and
     /// restricted horizontal modes are not clean. The paragraph's flag
@@ -261,13 +283,26 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         if T::VALUES && self.load_stop == 2 {
             return Some(CleanPoint::Load);
         }
+        // (the page builder a paragraph's end, or its start, deferred)
+        if T::VALUES && self.page_pending {
+            return Some(CleanPoint::Page);
+        }
         if self.cur_input.state == crate::web::TOKEN_LIST || self.output_active() {
             return None;
         }
         let start = core::mem::take(&mut self.par_start);
         match self.nest_ptr() {
             0 if self.mode() == VMODE && self.nodes().is_empty() => Some(CleanPoint::Outer),
-            1 if start && self.mode() == HMODE => Some(CleanPoint::ParStart),
+            1 if start && self.mode() == HMODE => {
+                if T::VALUES && self.defer_page && self.cur_list.ml == self.line {
+                    // (a step boundary, SSA mode's: `mode_line` is the line
+                    // now, the line its next step begins on)
+                    self.graf_stop = true;
+                    Some(CleanPoint::Graf)
+                } else {
+                    Some(CleanPoint::ParStart)
+                }
+            }
             _ => None,
         }
     }
@@ -283,6 +318,36 @@ impl<H: Host, T: Tracker> Tex<H, T> {
     /// a file whole by name ([`CleanPoint::Load`]).
     pub fn set_stop_after_load(&mut self, on: bool) {
         self.stop_after_load = on;
+    }
+
+    /// Defer (or not) the page builder after a paragraph's end, and after
+    /// its start in a step that ran commands before it
+    /// ([`DEFER_PAGE_AFTER`]), to the next command, a checkpoint
+    /// ([`CleanPoint::Page`]), and stop (or not) at a paragraph's start
+    /// ([`CleanPoint::Graf`]): a paragraph's lines are then a step that
+    /// reads none of the page's state, which every paragraph before it on
+    /// the page changes.
+    pub fn set_defer_page(&mut self, on: bool) {
+        self.defer_page = on;
+    }
+
+    /// §1094's `build_page` after a paragraph, or, deferred, at the next
+    /// command ([`Self::set_defer_page`]): nothing runs in between. (An
+    /// empty contribution list has nothing to build.)
+    pub(crate) fn build_page_after_par(&mut self) -> Result<(), Jump> {
+        if T::VALUES && self.defer_page && !self.output_active() && !self.nest_at(0).list.is_empty()
+        {
+            self.page_pending = true;
+            Ok(())
+        } else {
+            self.build_page()
+        }
+    }
+
+    /// The open step began now (SSA mode): [`DEFER_PAGE_AFTER`] counts the
+    /// commands from here.
+    pub(crate) fn mark_step_start(&mut self) {
+        self.step_began = self.commands;
     }
 
     /// Whether the job stopped just before a `\shipout`.

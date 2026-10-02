@@ -115,6 +115,28 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                         // (resumed: this command was counted)
                         self.at_checkpoint = false;
                         self.load_stop = 0;
+                        if core::mem::take(&mut self.graf_stop) {
+                            // (a paragraph's lines go on here, on the line
+                            // its level began on (`CleanPoint::Graf`, or the
+                            // page builder `new_graf` deferred), its
+                            // `mode_line`. The step takes it as its own: the
+                            // one before kept a number that is not where the
+                            // paragraph is after an edit above it moved its
+                            // lines, and only the over/underfull boxes'
+                            // messages read it)
+                            self.set_ml(self.line);
+                        }
+                        if self.page_pending {
+                            // (a step that begins at a deferred page
+                            // builder begins with it and ends after it: at
+                            // a fire it decides, at a clean point)
+                            self.page_pending = false;
+                            self.build_page()?;
+                            if self.fire_pending || self.candidate_due()? {
+                                self.at_checkpoint = true;
+                                return Err(Jump::Checkpoint);
+                            }
+                        }
                         if self.fire_pending {
                             // (a step that begins at a fire begins with
                             // it; then the test below is made again,
@@ -151,6 +173,12 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                             // (the command before read a file whole: a step
                             // boundary, `CleanPoint::Load`)
                             self.load_stop = 2;
+                            self.at_checkpoint = true;
+                            return Err(Jump::Checkpoint);
+                        }
+                        if self.page_pending {
+                            // (the page builder a paragraph's start or end
+                            // deferred: a step boundary, `CleanPoint::Page`)
                             self.at_checkpoint = true;
                             return Err(Jump::Checkpoint);
                         }
@@ -751,7 +779,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             (VMODE, PAR_END) => {
                 self.normal_paragraph()?;
                 if self.mode() > 0 {
-                    self.build_page()?;
+                    self.build_page_after_par()?;
                 }
             }
             (HMODE, PAR_END) => {
@@ -760,7 +788,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                 }
                 self.end_graf()?; // this takes us to the enclosing mode, if `mode>0`
                 if self.mode() == VMODE {
-                    self.build_page()?;
+                    self.build_page_after_par()?;
                 }
             }
             (HMODE, STOP | VSKIP | HRULE | UN_VBOX | HALIGN) => self.head_for_vmode()?,

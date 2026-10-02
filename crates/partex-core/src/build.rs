@@ -494,7 +494,21 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             // (a paragraph's start: the next candidate boundary, in
             // machine mode)
             self.par_start = self.stop_at_candidate && crate::machine::clean_cuts();
-            self.build_page()?; // put `par_skip` glue on current page
+            if T::VALUES
+                && self.defer_page
+                && self.commands - self.step_began >= crate::run::DEFER_PAGE_AFTER
+            {
+                // (the step ran commands before the paragraph began, a
+                // picture built in vertical mode before its `\leavevmode`:
+                // the page builder is at the next command, a step of its
+                // own, and they read none of the page's state; the step
+                // that begins there takes the paragraph's `mode_line`, the
+                // line it begins on, as its own)
+                self.page_pending = true;
+                self.graf_stop = true;
+            } else {
+                self.build_page()?; // put `par_skip` glue on current page
+            }
         }
         Ok(())
     }
