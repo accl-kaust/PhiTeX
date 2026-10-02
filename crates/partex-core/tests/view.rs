@@ -95,7 +95,11 @@ fn build() -> Tex<Disk, SsaTracker> {
         interaction: Some(0), // (batch mode, §73)
         ..Params::default()
     };
-    let mut tex = Tex::new(host, SsaTracker::new(Recorder::new()), params);
+    // (the full recorder: the step trace prints a step's own reads, which
+    // lean records do not keep, TODO 8)
+    let mut tracker = SsaTracker::new(Recorder::new());
+    tracker.set_lean(false);
+    let mut tex = Tex::new(host, tracker, params);
     let rep = run(&mut tex, b"doc", false, 0);
     assert!(rep.history <= 1, "the build failed: {}", rep.history);
     tex
