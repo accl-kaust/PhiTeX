@@ -1139,14 +1139,21 @@ of *steps*: calls from one clean point to the next.
 2. The dirty steps run in key order. Before each one:
    - the slots its last run read, where a later definition holds the
      arrays, take their reaching values;
-   - the save stack below its pointer is placed whole;
+   - the save stack below its pointer is placed whole, and so is the
+     semantic nest (`cur_list`'s fields, the nest, the alignment
+     state): a field placed over a nest that was not is a state no run
+     makes, which the run can meet before its reads are checked;
    - the page list's length, its tail, and the nodes the step reads are
      placed;
    - the input is set to the previous step's result (3.5), mapped
      through the edits.
 3. The step runs, applying the hits of the calls that apply (3.4). If
    it read a slot a later definition holds and that was not placed, its
-   run is dropped and made again with that slot placed.
+   run is dropped and made again with that slot placed. A run that
+   read one may never reach the step's end (`\end` firing again and
+   again over an output routine left active): past its budget, twice
+   its last run's commands and 10,000, it stops at the next command
+   that finds such a read.
 4. Its definitions replace its old ones. Each definition whose value
    changed, or that only one of the two runs made, marks its old readers
    dirty, up to the slot's next definition. Its stores changed make
@@ -1183,7 +1190,7 @@ that:
 | flat arrays holding the latest definitions | fast reads | reads resolved by timestamp in the definition index (3.2) |
 | placing a step: its predicted slots set to their reaching values | the arrays hold another point's values | nothing: a read carries its timestamp |
 | dropped runs ("read a later definition, run again") | a prediction missed | nothing: a read resolves right the first time |
-| the save stack placed whole | TeX's undo log must be consistent where it is re-entered | scoped local definitions and group frames (3.2) |
+| the save stack and the semantic nest placed whole | TeX's undo log and its nest must be consistent where they are re-entered | scoped local definitions and group frames (3.2) |
 | the page list placed with stand-ins | the engine holds the list, not its nodes | the list as appends read by timestamp |
 | the input copied at a step's end and mapped | "where the engine is" was a copy | the input's value, shared (3.5) |
 | a store read by the next rebuild | steps close before their loads are known | the φ in the same evaluation (3.7) |

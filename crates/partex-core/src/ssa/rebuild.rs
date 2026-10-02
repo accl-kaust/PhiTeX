@@ -1218,6 +1218,27 @@ fn save_stack_whole<H: Host>(
     }
 }
 
+/// The semantic nest's slots placed whole for the step at `key`, as the
+/// save stack's are ([`save_stack_whole`]): `cur_list`'s fields, the nest
+/// and the alignment state, where a later definition holds the arrays.
+/// They are one structure: a field placed over a nest that was not (the
+/// step's prediction read the one and not the other) is a state no run
+/// makes, which the run may meet before its reads are checked. (A step
+/// that began at the fire `new_graf`'s `build_page` deferred, §1091, was
+/// placed in a paragraph's mode over the job's end's empty nest, and
+/// `pop_nest` found none.)
+fn nest_whole<H: Host>(tex: &Tex<H, SsaTracker>, key: u64, next: &mut Vec<Slot>) {
+    use crate::track::{align, list};
+    let r = tex.tracker.rec.borrow();
+    let fold = &r.rt.fold;
+    for k in 0..=list::COUNT + align::COUNT {
+        let a = Slot(Fam::List, i64::from(k));
+        if later(fold, &a, key) {
+            next.push(a);
+        }
+    }
+}
+
 /// A step's definitions: each slot its records wrote, at its last write.
 fn defs(
     rt: &partex_ssa::Runtime<TexSsa>,
@@ -2269,6 +2290,7 @@ fn run_step<H: Host>(
         (key, old, reads, budget)
     };
     save_stack_whole(tex, key, &mut next, rep);
+    nest_whole(tex, key, &mut next);
     let mut set: BTreeSet<Slot> = BTreeSet::new();
     let mut touched: BTreeSet<Slot> = BTreeSet::new();
     let finished = loop {

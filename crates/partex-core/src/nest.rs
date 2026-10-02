@@ -262,11 +262,11 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         self.nest.len()
     }
 
-    /// Level `p` of the nest (`nest_ptr` is `cur_list`).
+    /// Level `p` of the nest (`nest_ptr` is `cur_list`). (Which level `p`
+    /// is reads the nest's length: a read of the nest either way.)
     pub(crate) fn nest_at(&self, p: usize) -> &ListStateRecord {
-        if p < self.nest.len() {
-            self.nest_read();
-        } else {
+        self.nest_read();
+        if p >= self.nest.len() {
             // (the current level whole: its caller reads any field)
             for f in 0..crate::track::list::COUNT {
                 self.list_read(f);
@@ -276,8 +276,8 @@ impl<H: Host, T: Tracker> Tex<H, T> {
     }
 
     pub(crate) fn nest_at_mut(&mut self, p: usize) -> &mut ListStateRecord {
+        self.nest_read();
         if p < self.nest.len() {
-            self.nest_read();
             self.nest_wrote();
         } else {
             for f in 0..crate::track::list::COUNT {
@@ -291,12 +291,16 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         }
     }
 
-    /// The contribution list (§215: the outer level's list).
+    /// The contribution list (§215: the outer level's list). (Whether
+    /// there is an outer level reads the nest: a step that found it
+    /// empty and took `cur_list`'s list reads the nest too, or a rebuild
+    /// does not predict the read and places `cur_list` over another
+    /// nest.)
     pub(crate) fn contrib(&mut self) -> &mut partex_engine::nodelist::NodeList {
+        self.nest_read();
         if self.nest.is_empty() {
             return self.nodes_mut();
         }
-        self.nest_read();
         self.nest_wrote();
         &mut self.nest[0].list
     }

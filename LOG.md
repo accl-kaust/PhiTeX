@@ -10322,3 +10322,52 @@ fix times out in both modes. 13 cases, 74 stages, identical with
 
 Left: a loop that never reaches main control (pure expansion, `\def\a{\a}`
 read from a stale meaning) is not stopped.
+
+## 2026-10-02 — The page builder reads the nest; the nest placed whole (coordinator)
+
+**The PGF manual's panic** (the Overleaf extension's: `pop_nest`,
+"semantic nest", in the first rebuild after a cold build of one trip).
+Reproduced on accl with `scripts/accl/tasks/pgfman.sh` (the manual from
+`upstream/pgf`, the tutorial's "Karl is a math" made "maths"; job 6344:
+cold build 419 s, 388 M commands, 7.1 GB), then locally on three of its
+chapters (`\includeonly`: cold build 32 s).
+
+The cold build of one trip finds no `.toc`; the first rebuild reads the
+one it wrote, and the steps that set the table of contents are new,
+each predicted by the old step after them, the `\tableofcontents` step
+(DESIGN 7.17.3, "a new step's reads are predicted by the old step whose
+text it runs"). That step had read `cur_list`'s twelve fields and not
+the nest: `build_page` asks `nest_at(0)`, which with the nest empty read
+the current level's fields and decided from the nest's length without
+noting a read of it, and `contrib()` did the same. A new step beginning
+at the fire that `new_graf`'s `build_page` deferred (§1091: the manual's
+`\l@section` starts its line with `\leavevmode` after the section
+penalty, where the page breaks) was placed in the paragraph's mode over
+the arrays' nest, the job's end's, empty. Its run took the paragraph's
+list for the contributions and, in the output routine, `end_graf`
+popped a nest that was not there, before the miss check could drop the
+run (738 of its 2,033 reads were of later definitions).
+
+Two changes, each enough for the repro:
+- `nest_at`, `nest_at_mut` and `contrib` read the nest whenever they
+  decide from its length. `crates/partex-core/tests/nest.rs`: every step
+  that runs the page builder reads the nest (the binary before fails it:
+  a `\penalty` in vertical mode, a step of its own).
+- The semantic nest is placed whole for every step run, as the save
+  stack is: `cur_list`'s fields, the nest and the alignment state (20
+  slots), where a later definition holds the arrays. A field placed over
+  a nest that was not is a state no run makes; placing a slot at its
+  reaching value is always right and costs a lookup.
+
+The three chapters' rebuild now completes: 57 s against the cold
+build's 32 s, 1,513 steps run, 814 runs dropped. Against plain partex
+(one pass, the edit, a second pass) the PDF differs only in font
+resource names: the rebuild keeps the cold build's font numbers, and the
+table of contents now uses some fonts first (TODO 9). The slowness is
+the prediction of new steps: a new table-of-contents line, predicted by
+the `\tableofcontents` step, misses most of its reads (156 of 216) and
+runs three times.
+
+DESIGN 7.17.3's rebuild steps 2 and 3 have the nest and the budget stop
+(the last entry's). The harness: 13 cases, 74 stages, identical with
+`--fixpoint` and with `PARTEX_SSA_TRIPS=1`.

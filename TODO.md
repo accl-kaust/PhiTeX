@@ -200,6 +200,14 @@ to the cold build's):
      pass multi-line values inside it (`scripts/sandbox env K="..."`).
    - The first rebuild in `tokens` and `cutoff_pdf` costs 25–30 ms
      extra; the cause is unknown.
+   - A rebuild that changes the order in which fonts are first used
+     keeps the build's font numbers, so pdfTeX's `/F<n>` resource names
+     (and the resource dictionaries' order) differ from a plain run's:
+     the same fonts and objects otherwise. Seen on three chapters of the
+     PGF manual, whose first rebuild after a one-trip cold build sets the
+     table of contents (`scripts/accl/tasks/pgfman.sh`). Fonts are
+     allocations, not placed (DESIGN 3.2), as strings were for DVI's
+     names.
 10. **Machine mode removal** (DESIGN 4.3 item 8), once SSA passes
     everything.
 11. **The Overleaf extension's requests** (its session, 2026-10-02, in its
