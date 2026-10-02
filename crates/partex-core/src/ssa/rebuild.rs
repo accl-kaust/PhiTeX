@@ -295,6 +295,23 @@ impl Steps {
         })
     }
 
+    /// Where step `s` left the input, in the source as it is now, if a
+    /// file's line is on top with some of it not read yet: the data (its
+    /// load id and bytes), where the line begins in it, and the rest of
+    /// it in the buffer, its end-of-line character included. What the
+    /// next step begins with (the view's spans, `view.rs`).
+    pub(super) fn ended_at(&self, s: StepId) -> Option<(u32, Arc<[u8]>, usize, Vec<u8>)> {
+        let e = self.end(s)?;
+        if e.finished || e.cur.state == crate::web::TOKEN_LIST {
+            return None;
+        }
+        let f = e.file.file.as_ref()?;
+        let d = self.datas.get(*self.ids.get(&(f.data.as_ptr() as usize))? as usize)?;
+        let at = |x: i32| usize::try_from(x).ok()?.checked_sub(e.v.from);
+        let rest = e.top.get(at(e.cur.loc)?..=at(e.cur.limit)?)?;
+        (!rest.is_empty()).then(|| (d.name, d.bytes.clone(), f.line_from, rest.to_vec()))
+    }
+
     /// Step `s`'s result, in the source as it is now.
     fn end(&self, s: StepId) -> Option<InputState> {
         let (g, e) = self.inputs.get(s as usize)?.as_ref()?;

@@ -912,6 +912,8 @@ accessor.
 | `PARTEX_LINK_SPLICE=0` | link in full and write every file |
 | `PARTEX_STAT_CACHE=0` | read every file again at a rebuild |
 | `PARTEX_SSA_REBUILD` | commands run between rebuilds in one process (the harness) |
+| `PARTEX_SSA_VIEW=FILE` | the build as a program after each build (4.3 item 7) |
+| `PARTEX_SSA_VIEW_STEP=ID` | with the view, step `ID`'s calls in the trace's form |
 
 Each is exact: output is byte-identical with it on or off.
 
@@ -1156,7 +1158,57 @@ cold build with recording takes 3.2–3.4× a plain one and peaks at 24 GB.
    eqtb or hash slot) with the window that defined each, its exports,
    and the text it set. `phitex-ir`'s parse and check round-trip it.
    One window's per-call trace is printed on demand by running that
-   window again with the full recorder.
+   window again with the full recorder. As built (`ssa/view.rs`, made
+   after a build from the fold, the records and the engine's tables, so
+   a build that asks for no view pays nothing):
+   `PARTEX_SSA_VIEW=FILE` writes it after the cold build, and to
+   `FILE.N` after rebuild `N`; `PARTEX_SSA_VIEW_STEP=ID` adds
+   `FILE.stepID` (`FILE.N.stepID`), step `ID`'s calls with their reads,
+   writes and effects in the trace's form (5.3). The form:
+
+   ```text
+   %0 = format                  ; step 0: the job's start, (preloaded format=plain 2026.10.2), 631946 definitions: incr.tex:1
+   %1 = file incr.tex
+   %7 = window(incr.tex:14-16=%1, \catcode92=%0, \section=%5, \count5=%6, page.len=%6, ...; \count5, page[3], page.len, ...) ; step 6: incr.tex:14-16 "Opening Lorem ipsum dolor sit amet, con…"
+   ```
+
+   - The job's start, the step that loaded the format and read the
+     first command, is the constant `%0`: the format's definitions are
+     its, and so is an address no window defined (the engine's initial
+     state, a lookup by name, a line number read). A file is a constant
+     `file NAME`.
+   - Then a window per live step, in program order: an operation
+     `window(imports; exports)` (`phitex-ir`'s `Def::Op`). An import is
+     an operand `name=%n` (`Operand::Named`): an address the step read
+     from outside itself (`Fold::steps`' reads), and the window whose
+     definition reached it (`Fold::reaching`), or `%0`. The source it
+     read is imports of the file's constant, by runs of lines
+     `file:first-last`: the line it began on if the step before left
+     some of it, then the lines it read (`Steps`' line reads, the ones a
+     rebuild seeds from). Its exports are the addresses its records
+     wrote.
+   - Names: a control sequence by its name in the hash (`\section`; one
+     of the frozen ones, a font's identifier and pdfTeX's primitive
+     copies with a prefix, since another slot has the same name); the
+     rest of eqtb as TeX calls it (`\count12`, `\dimen3`, `\toks0`,
+     `\box255`, `\catcode92`, `\baselineskip`, `\everypar`,
+     `\textfont1`); the other families by a prefix and a field:
+     `text:\foo` and `next:\foo` (the hash), `lookup:\foo`,
+     `font:cmr10.fontdimen`, `page.contents`, `page[3]` (the page's
+     nodes), `list.mode`, `nest`, `save[4]`, `cond`, `\botmark`,
+     `str_ptr`, `string:2031`, `pdf.objs`, `write:3`.
+   - Its comment: the step's id (and its run, once a rebuild ran it
+     again), its runs of lines, the pages it shipped, and an excerpt of
+     the text it set: the characters of the nodes it put on the page,
+     else of what it added to its list, else the source it began on.
+   - `Program::check` verifies that it is SSA and that each import from
+     a window names one of that window's exports; `to_text` and `parse`
+     round-trip it (`ssa::view`'s golden test, `phitex-ir`'s tests).
+   - The per-call trace is today the step's records as they are kept
+     (each call marked `new`: how a call was found is kept per trip, not
+     per record). Once records are kept only for windows and the pure
+     typesetting calls (item 2), it needs the window run again with the
+     full recorder, which is not built.
 8. **The gate.** `cargo xtask check` adds `ssa-edits`: every
    incremental e2e case run in SSA mode, one process, each stage
    byte-identical to plain partex on the same sources (logs masked).
@@ -1258,6 +1310,16 @@ LLVM IR (the shape, illustrated):
 
 On a rebuild, each call is marked `hit`, `new` or
 `miss=@<first read that differed>`.
+
+The build as a program (4.3 item 7) is `phitex-ir`'s form, `PhiTeX`'s
+SSA text: a value per line, `%n = def ; shows`, in program order,
+where `def` is a constant, an application `%c(operands)`, a φ, a μ, an
+environment, a pending text, or an operation `op(operands; names)`
+that defines `names` (a window). An operand is a value `%n`, a use of
+it `%n:"text"`, source text, or a name imported from a value
+`name=%n`. A name is written as it is unless a character in it would
+end it, then quoted (`"\csname a b\endcsname"=%0`). Parsed, the text
+gives the same values; printed again, the same text.
 
 ---
 

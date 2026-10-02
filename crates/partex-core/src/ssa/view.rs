@@ -50,46 +50,67 @@ use crate::tex::Tex;
 /// How many characters of text a window's comment shows.
 const EXCERPT: usize = 40;
 
-/// The build `tex` holds as a program: a constant for what no window
-/// defined (the format), one per file the windows read, then a window
-/// per live step of the fold, in program order. It passes
-/// [`Program::check`], and its text form round-trips.
+/// The build `tex` holds as a program: the job's start as a constant
+/// (the format: what no window defined, or the start defined), one per
+/// file the windows read, then a window per live step of the fold after
+/// the start, in program order. It passes [`Program::check`], and its
+/// text form round-trips.
 #[must_use]
 pub fn view<H: Host>(tex: &Tex<H, SsaTracker>) -> Program {
     let rec = tex.tracker.rec.borrow();
+    let st = &rec.st;
     let rt = &rec.rt;
     let fold = &rt.fold;
     let mut names = Names::new(tex);
     let mut prog = Program::default();
-    let ident = tex.str_bytes(usize::try_from(tex.format_ident).unwrap_or(0));
-    let format = prog.define(
-        Def::Const(String::from("format")),
-        printable(trim(ident)),
-        0,
-    );
     // (the lines each live step's last run read, by step: each file's
     // runs of lines, numbered)
     let mut lines: BTreeMap<StepId, Vec<(u32, u32, u32)>> = BTreeMap::new();
     let mut numbering: BTreeMap<usize, LineIndex> = BTreeMap::new();
-    for (name, bytes, from, to, step, run) in rec.st.steps.line_runs() {
+    let mut number = |bytes: &[u8], at: usize| {
+        numbering
+            .entry(bytes.as_ptr() as usize)
+            .or_insert_with(|| LineIndex::of(bytes))
+            .line(at)
+    };
+    for (name, bytes, from, to, step, run) in st.steps.line_runs() {
         let live = fold
             .steps
             .get(step as usize)
             .is_some_and(|s| s.live && s.run == run);
-        if !live || to <= from {
-            continue;
+        if live && to > from {
+            let span = (name, number(bytes, from), number(bytes, to - 1));
+            lines.entry(step).or_default().push(span);
         }
-        let ix = numbering
-            .entry(bytes.as_ptr() as usize)
-            .or_insert_with(|| LineIndex::of(bytes));
-        lines
-            .entry(step)
-            .or_default()
-            .push((name, ix.line(from), ix.line(to - 1)));
+    }
+    // (each step after the first begins where the one before it left the
+    // input: the line it reads the rest of, if any is left)
+    let mut rests: BTreeMap<StepId, Vec<u8>> = BTreeMap::new();
+    for w in fold.order.windows(2) {
+        let Some((name, bytes, from, rest)) = st.steps.ended_at(w[0]) else {
+            continue;
+        };
+        let line = number(&bytes, from);
+        lines.entry(w[1]).or_default().insert(0, (name, line, line));
+        rests.insert(w[1], rest);
     }
     for v in lines.values_mut() {
         *v = runs(v);
     }
+    let first = fold
+        .order
+        .first()
+        .copied()
+        .filter(|&s| starts(rt, &fold.steps[s as usize].recs));
+    // (the job's start, which loaded the format: a constant)
+    let ident = tex.str_bytes(usize::try_from(tex.format_ident).unwrap_or(0));
+    let mut shows = printable(trim(ident));
+    if let Some(s) = first {
+        let spans = spans(st, lines.get(&s));
+        let w = writes(rt, &fold.steps[s as usize].recs).len();
+        shows = format!("step {s}: the job's start, {shows}, {w} definitions:{spans}");
+    }
+    let format = prog.define(Def::Const(String::from("format")), shows, 0);
     // (a constant per file: the ones read by lines, and the ones loaded)
     let mut files: BTreeMap<u32, ValueId> = BTreeMap::new();
     let mut loaded: BTreeSet<u32> = lines.values().flatten().map(|l| l.0).collect();
@@ -101,46 +122,62 @@ pub fn view<H: Host>(tex: &Tex<H, SsaTracker>) -> Program {
         }
     }
     for id in loaded {
-        let name = file_name(&rec.st, id);
-        let v = prog.define(Def::Const(format!("file {name}")), String::new(), 0);
+        let v = prog.define(
+            Def::Const(format!("file {}", file_name(st, id))),
+            String::new(),
+            0,
+        );
         files.insert(id, v);
     }
     let mut value: Vec<Option<ValueId>> = alloc::vec![None; fold.steps.len()];
-    for &s in &fold.order {
-        let st = &fold.steps[s as usize];
+    if let Some(s) = first {
+        value[s as usize] = Some(format);
+    }
+    for &s in fold.order.iter().skip(usize::from(first.is_some())) {
+        let step = &fold.steps[s as usize];
         let mut operands = Vec::new();
-        let mut spans = Vec::new();
         for &(file, a, b) in lines.get(&s).into_iter().flatten() {
-            let span = if a == b {
-                format!("{}:{a}", file_name(&rec.st, file))
-            } else {
-                format!("{}:{a}-{b}", file_name(&rec.st, file))
-            };
-            operands.push(Operand::Named(span.clone(), files[&file]));
-            spans.push(span);
+            operands.push(Operand::Named(span(st, file, a, b), files[&file]));
         }
-        for a in &st.reads {
+        for a in &step.reads {
             match a.0 {
                 // (the lines, above)
                 Fam::Source => {}
                 Fam::Load => {
                     let id = u32::try_from(a.1).unwrap_or(u32::MAX);
-                    operands.push(Operand::Named(file_name(&rec.st, id), files[&id]));
+                    operands.push(Operand::Named(file_name(st, id), files[&id]));
                 }
                 _ => {
                     // (a definition reaching it is a live step's before it,
                     // whose value is made)
                     let from = fold
-                        .reaching(a, st.key)
+                        .reaching(a, step.key)
                         .and_then(|d| value[d.step as usize])
                         .unwrap_or(format);
-                    operands.push(Operand::Named(names.slot(&rec.st, *a), from));
+                    operands.push(Operand::Named(names.slot(st, *a), from));
                 }
             }
         }
-        let written = writes(rt, &st.recs);
-        let defines: Vec<String> = written.iter().map(|a| names.slot(&rec.st, *a)).collect();
-        let shows = shows(tex, rt, s, st.run, &st.recs, &spans, &lines, &rec.st);
+        let written = writes(rt, &step.recs);
+        let defines: Vec<String> = written.iter().map(|a| names.slot(st, *a)).collect();
+        let mut shows = format!("step {s}");
+        if step.run > 1 {
+            shows.push_str(&format!(" (run {})", step.run));
+        }
+        shows.push(':');
+        shows.push_str(&spans(st, lines.get(&s)));
+        shows.push_str(&shipped(rt, &step.recs));
+        let mut text = set_text(rt, step.key, &step.recs);
+        if text.is_empty() {
+            // (else the source it read: the rest of the line it began on,
+            // or the first line it read)
+            text = match (rests.get(&s), lines.get(&s).and_then(|v| v.first())) {
+                (Some(rest), _) => printable(rest.strip_suffix(b"\r").unwrap_or(rest)),
+                (None, Some(&(file, a, _))) => source_line(st, file, a),
+                (None, None) => String::new(),
+            };
+        }
+        shows.push_str(&excerpt(&text));
         let v = prog.define(
             Def::Op {
                 op: String::from("window"),
@@ -153,6 +190,44 @@ pub fn view<H: Host>(tex: &Tex<H, SsaTracker>) -> Program {
         value[s as usize] = Some(v);
     }
     prog
+}
+
+/// Whether records `recs` are the job's start's (`Func::Start`).
+fn starts(rt: &Runtime<TexSsa>, recs: &[RecId]) -> bool {
+    recs.iter().any(|&r| rt.record(r).func == Func::Start)
+}
+
+/// A run of lines' name: `file:line`, or `file:first-last`.
+fn span(st: &super::RecState, file: u32, a: u32, b: u32) -> String {
+    if a == b {
+        format!("{}:{a}", file_name(st, file))
+    } else {
+        format!("{}:{a}-{b}", file_name(st, file))
+    }
+}
+
+/// The runs of lines `v`, each after a space.
+fn spans(st: &super::RecState, v: Option<&Vec<(u32, u32, u32)>>) -> String {
+    let mut out = String::new();
+    for &(file, a, b) in v.into_iter().flatten() {
+        out.push(' ');
+        out.push_str(&span(st, file, a, b));
+    }
+    out
+}
+
+/// A text's first characters, its spaces made one, quoted, after a space
+/// (nothing for no text).
+fn excerpt(text: &str) -> String {
+    let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if text.is_empty() {
+        return String::new();
+    }
+    let mut t: String = text.chars().take(EXCERPT).collect();
+    if text.chars().count() > EXCERPT {
+        t.push('…');
+    }
+    format!(" {}", phitex_ir::quote(&t))
 }
 
 /// Step `id`'s calls, with their reads, writes and effects, in the
@@ -180,108 +255,107 @@ fn writes(rt: &Runtime<TexSsa>, recs: &[RecId]) -> Vec<Slot> {
     out
 }
 
-/// A window's comment: its step, the run if it ran again, the source it
-/// read, whether it shipped pages, and the text it set.
-#[allow(clippy::too_many_arguments)]
-fn shows<H: Host>(
-    tex: &Tex<H, SsaTracker>,
-    rt: &Runtime<TexSsa>,
-    s: StepId,
-    run: u32,
-    recs: &[RecId],
-    spans: &[String],
-    lines: &BTreeMap<StepId, Vec<(u32, u32, u32)>>,
-    st: &super::RecState,
-) -> String {
-    let mut out = format!("step {s}");
-    if run > 1 {
-        out.push_str(&format!(" (run {run})"));
-    }
-    out.push(':');
-    for sp in spans {
-        out.push(' ');
-        out.push_str(sp);
-    }
-    let ships = recs.iter().map(|&r| ships(rt, r)).sum::<usize>();
-    match ships {
-        0 => {}
-        1 => out.push_str(" ships a page"),
-        n => out.push_str(&format!(" ships {n} pages")),
-    }
-    let mut text = String::new();
-    set_text(rt, recs, &mut text);
-    if text.trim().is_empty() {
-        // (the source it read: its first run of lines)
-        text = lines
-            .get(&s)
-            .and_then(|v| v.first())
-            .map(|&(file, a, _)| source_line(tex, st, file, a))
-            .unwrap_or_default();
-    }
-    let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    if !text.is_empty() {
-        let mut t: String = text.chars().take(EXCERPT).collect();
-        if text.chars().count() > EXCERPT {
-            t.push('…');
+/// The pages records `recs` shipped, after a space: ` ships [3]`, each
+/// by the counts the log shows it with (§638), or ` ships a page`.
+fn shipped(rt: &Runtime<TexSsa>, recs: &[RecId]) -> String {
+    /// The ships under `r`, and what each wrote to the log.
+    fn walk(rt: &Runtime<TexSsa>, r: RecId, ship: bool, logs: &mut Vec<Vec<u8>>) {
+        let rec = rt.record(r);
+        let ship = ship || rec.func == Func::ShipOut;
+        if rec.func == Func::ShipOut {
+            logs.push(Vec::new());
         }
-        out.push_str(&format!(" {}", phitex_ir::quote(&t)));
-    }
-    out
-}
-
-/// The pages record `r`'s subtree shipped.
-fn ships(rt: &Runtime<TexSsa>, r: RecId) -> usize {
-    let rec = rt.record(r);
-    usize::from(rec.func == Func::ShipOut)
-        + rec
-            .items
-            .iter()
-            .map(|it| match it {
-                Item::Call(c) => ships(rt, *c),
-                _ => 0,
-            })
-            .sum::<usize>()
-}
-
-/// The text records `recs` set: the characters of the nodes their writes
-/// put on the page, in order, else of the list they left.
-fn set_text(rt: &Runtime<TexSsa>, recs: &[RecId], out: &mut String) {
-    let mut page: BTreeMap<i64, &partex_engine::node::Node> = BTreeMap::new();
-    let mut list = None;
-    for &r in recs {
-        for (a, v) in &rt.record(r).writes {
-            let Some(v) = v.as_ref().and_then(|v| v.1.as_deref()) else {
-                continue;
-            };
-            match (a.0, v) {
-                (Fam::PageNode, SValue::Field(f)) => {
-                    if let Some(n) = f.get::<partex_engine::node::Node>() {
-                        page.insert(a.1, n);
+        for it in &rec.items {
+            match it {
+                Item::Call(c) => walk(rt, *c, ship, logs),
+                Item::Out(super::Effect::Bytes(crate::track::Output::Log, b)) if ship => {
+                    if let Some(l) = logs.last_mut() {
+                        l.extend_from_slice(b);
                     }
-                }
-                (Fam::List, SValue::Nodes(l)) if a.1 == i64::from(crate::track::list::LIST) => {
-                    list = Some(l);
                 }
                 _ => {}
             }
         }
     }
-    for n in page.values() {
-        node_text(n, out);
-        if out.chars().count() > EXCERPT {
-            return;
+    let mut logs = Vec::new();
+    for &r in recs {
+        walk(rt, r, false, &mut logs);
+    }
+    let mut out = String::new();
+    for log in &logs {
+        // (`[` and the counts, §638)
+        let label = log.iter().position(|&c| c == b'[').map(|i| {
+            let n = log[i + 1..]
+                .iter()
+                .take_while(|c| c.is_ascii_digit() || matches!(c, b'.' | b'-'))
+                .count();
+            printable(&log[i + 1..=i + n])
+        });
+        match label {
+            Some(l) if !l.is_empty() => out.push_str(&format!(" [{l}]")),
+            _ => out.push_str(" [?]"),
         }
     }
-    if out.trim().is_empty()
-        && let Some(l) = list
-    {
-        for n in l.iter() {
-            node_text(n, out);
-            if out.chars().count() > EXCERPT {
-                return;
+    if out.is_empty() {
+        out
+    } else {
+        format!(" ships{out}")
+    }
+}
+
+/// The text the step at `key` with records `recs` set: the characters of
+/// the nodes it put on the page, in order; else what it added to the
+/// list it left (the list's text past the text of the list that reached
+/// it, or all of it).
+fn set_text(rt: &Runtime<TexSsa>, key: u64, recs: &[RecId]) -> String {
+    use partex_engine::node::Node;
+    let list = Slot(Fam::List, i64::from(crate::track::list::LIST));
+    let mut page: BTreeMap<i64, &Node> = BTreeMap::new();
+    let mut left = None;
+    for &r in recs {
+        for (a, v) in &rt.record(r).writes {
+            match (a.0, v.as_ref().and_then(|v| v.1.as_deref())) {
+                (Fam::PageNode, Some(SValue::Field(f))) => {
+                    if let Some(n) = f.get::<Node>() {
+                        page.insert(a.1, n);
+                    }
+                }
+                (Fam::List, Some(SValue::Nodes(l))) if *a == list => left = Some(l),
+                _ => {}
             }
         }
     }
+    let mut out = String::new();
+    for n in page.values() {
+        node_text(n, &mut out);
+        if out.chars().count() > EXCERPT {
+            break;
+        }
+    }
+    if !out.trim().is_empty() {
+        return out;
+    }
+    let Some(left) = left else {
+        return String::new();
+    };
+    let text = |l: &partex_engine::nodelist::NodeList| {
+        let mut t = String::new();
+        for n in l.iter() {
+            node_text(n, &mut t);
+        }
+        t
+    };
+    let now = text(left);
+    let before = rt
+        .fold
+        .reaching(&list, key)
+        .and_then(|d| rt.record(d.rec).writes.get(d.ix as usize)?.1.clone())
+        .and_then(|v| match v.1.as_deref() {
+            Some(SValue::Nodes(l)) => Some(text(l)),
+            _ => None,
+        })
+        .unwrap_or_default();
+    now.strip_prefix(&before).unwrap_or(&now).to_string()
 }
 
 /// The characters of node `n` (and of the nodes in it), glue as a space.
@@ -321,14 +395,9 @@ fn text_char(c: u8) -> char {
 }
 
 /// Line `line` of the file whose load id is `file`, as it is now.
-fn source_line<H: Host>(
-    tex: &Tex<H, SsaTracker>,
-    st: &super::RecState,
-    file: u32,
-    line: u32,
-) -> String {
-    let _ = tex;
-    let Some(bytes) = st.steps.line_runs().find(|l| l.0 == file).map(|l| l.1) else {
+fn source_line(st: &super::RecState, file: u32, line: u32) -> String {
+    // (its newest data: an edit's lines are moved to the data it made)
+    let Some(bytes) = st.steps.line_runs().filter(|l| l.0 == file).last().map(|l| l.1) else {
         return String::new();
     };
     let mut from = 0;
@@ -448,6 +517,8 @@ struct Names<'a, H: Host> {
     tex: &'a Tex<H, SsaTracker>,
     /// The fonts' names, by slot.
     fonts: BTreeMap<usize, String>,
+    /// The names made, by slot.
+    made: BTreeMap<Slot, String>,
 }
 
 impl<'a, H: Host> Names<'a, H> {
@@ -455,12 +526,18 @@ impl<'a, H: Host> Names<'a, H> {
         Names {
             tex,
             fonts: BTreeMap::new(),
+            made: BTreeMap::new(),
         }
     }
 
     /// Slot `a`'s name.
     fn slot(&mut self, st: &super::RecState, a: Slot) -> String {
-        slot_name(self, st, a)
+        if let Some(n) = self.made.get(&a) {
+            return n.clone();
+        }
+        let n = slot_name(self, st, a);
+        self.made.insert(a, n.clone());
+        n
     }
 
     /// Control sequence `p`'s name, `\` and its characters, as TeX prints
@@ -608,9 +685,9 @@ fn slot_name<H: Host>(names: &mut Names<'_, H>, st: &super::RecState, a: Slot) -
                 .copied()
                 .unwrap_or("?");
             if c == 0 {
-                format!("\\{kind}mark")
+                format!("{kind}mark")
             } else {
-                format!("\\{kind}marks{c}")
+                format!("{kind}marks{c}")
             }
         }
         Fam::PageNode => format!("page[{i}]"),
@@ -622,7 +699,9 @@ fn slot_name<H: Host>(names: &mut Names<'_, H>, st: &super::RecState, a: Slot) -
 fn eqtb_name<H: Host>(names: &Names<'_, H>, p: i32) -> String {
     use crate::equiv::{dimen_param_name, int_param_name};
     use crate::web::*;
-    let esc = |s: &[u8]| format!("\\{}", printable(s));
+    // (a parameter without its escape: `\\hsize` is the control
+    // sequence, whose meaning is another address)
+    let plain = |s: &[u8]| printable(s);
     if p >= crate::xregs::EXT_BASE {
         let (kind, r) = crate::xregs::ext_reg(p);
         let k = match kind {
@@ -640,7 +719,7 @@ fn eqtb_name<H: Host>(names: &Names<'_, H>, p: i32) -> String {
     }
     if p < SKIP_BASE {
         return skip_param_name(p - GLUE_BASE)
-            .map_or_else(|| format!("gluepar{}", p - GLUE_BASE), |n| esc(n));
+            .map_or_else(|| format!("gluepar{}", p - GLUE_BASE), |n| plain(n));
     }
     let regions: [(i32, &str); 15] = [
         (SKIP_BASE, "skip"),
@@ -687,11 +766,11 @@ fn eqtb_name<H: Host>(names: &Names<'_, H>, p: i32) -> String {
     }
     if (INT_BASE..COUNT_BASE).contains(&p) {
         return int_param_name(p - INT_BASE)
-            .map_or_else(|| format!("intpar{}", p - INT_BASE), |n| esc(n));
+            .map_or_else(|| format!("intpar{}", p - INT_BASE), |n| plain(n));
     }
     if (DIMEN_BASE..SCALED_BASE).contains(&p) {
         return dimen_param_name(p - DIMEN_BASE)
-            .map_or_else(|| format!("dimenpar{}", p - DIMEN_BASE), |n| esc(n));
+            .map_or_else(|| format!("dimenpar{}", p - DIMEN_BASE), |n| plain(n));
     }
     let local: &[u8] = match p {
         PAR_SHAPE_LOC => b"parshape",
@@ -713,13 +792,13 @@ fn eqtb_name<H: Host>(names: &Names<'_, H>, p: i32) -> String {
         CLUB_PENALTIES_LOC => b"clubpenalties",
         WIDOW_PENALTIES_LOC => b"widowpenalties",
         DISPLAY_WIDOW_PENALTIES_LOC => b"displaywidowpenalties",
-        CUR_FONT_LOC => b"font",
+        CUR_FONT_LOC => b"current_font",
         XORD_CODE_BASE => b"xordcode",
         XCHR_CODE_BASE => b"xchrcode",
         XPRN_CODE_BASE => b"xprncode",
         _ => return format!("eqtb:{p}"),
     };
-    esc(local)
+    plain(local)
 }
 
 /// §225: a glue parameter's name.
@@ -860,7 +939,7 @@ fn page_name(i: i64) -> String {
         DISCARDS => "page.discards",
         LIST_LEN => "page.len",
         LIST_TAIL => "page.tail",
-        SPLIT_DISCARDS => "\\splitdiscards",
+        SPLIT_DISCARDS => "splitdiscards",
         k if (SO_FAR..SO_FAR + 8).contains(&k) => {
             return format!("page.{}", SO_FAR_NAMES[usize::from(k - SO_FAR)]);
         }
@@ -883,11 +962,11 @@ fn pdf_name(i: i64) -> String {
         OBJ_COUNT => "pdf.obj_count",
         XFORM_COUNT => "pdf.xform_count",
         XIMAGE_COUNT => "pdf.ximage_count",
-        INFO_TOKS => "\\pdfinfo",
-        CATALOG_TOKS => "\\pdfcatalog",
-        NAMES_TOKS => "\\pdfnames",
-        TRAILER_TOKS => "\\pdftrailer",
-        TRAILER_ID_TOKS => "\\pdftrailerid",
+        INFO_TOKS => "pdfinfo",
+        CATALOG_TOKS => "pdfcatalog",
+        NAMES_TOKS => "pdfnames",
+        TRAILER_TOKS => "pdftrailer",
+        TRAILER_ID_TOKS => "pdftrailerid",
         CATALOG_OPENACTION => "pdf.catalog_openaction",
         OUTLINES => "pdf.outlines",
         SPACE_FONT_NAME => "pdf.space_font_name",
@@ -908,8 +987,76 @@ fn pdf_name(i: i64) -> String {
 
 #[cfg(test)]
 mod tests {
+    extern crate std;
+
     use super::*;
+    use crate::params::Params;
+    use crate::ssa::Recorder;
+    use crate::testing::TestHost;
     use alloc::sync::Arc;
+
+    /// A small document for INITEX with one font: definitions, a
+    /// register in a group and out of it, two paragraphs, a page.
+    const DOC: &[u8] = b"\\catcode`\\{=1 \\catcode`\\}=2 \\catcode`\\#=6
+\\font\\rm=cmr10 \\rm \\hsize=100pt \\vsize=100pt \\parfillskip=0pt plus 1fil
+\\tolerance=10000 \\baselineskip=12pt
+\\def\\greet#1{Hello #1.}
+\\count1=5
+
+\\greet{World} One line.
+
+{\\count1=6 Second paragraph.}
+
+\\end
+";
+
+    /// `DOC` built in SSA mode (with `doc` as the edit makes it, if any).
+    fn build(doc: &[u8]) -> Tex<TestHost, SsaTracker> {
+        let mut host = TestHost::default();
+        host.files.insert(
+            b"cmr10.tfm".to_vec(),
+            include_bytes!("../../testdata/cmr10.tfm").to_vec(),
+        );
+        host.files.insert(b"doc.tex".to_vec(), doc.to_vec());
+        let params = Params {
+            ini: true,
+            interaction: Some(crate::error::BATCH_MODE),
+            ..Params::default()
+        };
+        let mut tex = Tex::new(host, SsaTracker::new(Recorder::new()), params);
+        let rep = crate::ssa::run(&mut tex, b"doc", false, 0);
+        assert!(rep.history <= 1, "the build failed: {}", rep.history);
+        tex
+    }
+
+    /// A view's text, checked and round-tripped.
+    fn text(p: &Program) -> String {
+        p.check().unwrap();
+        let t = p.to_text();
+        let q = Program::parse(&t).unwrap();
+        assert_eq!(q.values, p.values);
+        t
+    }
+
+    /// The view of a small document, and of it rebuilt after a word
+    /// changed: a value per window, its imports from the windows that
+    /// defined them, its exports, its span and the text it set.
+    #[test]
+    fn a_small_document() {
+        let mut tex = build(DOC);
+        let cold = text(&view(&tex));
+        std::println!("{cold}");
+        let edited = String::from_utf8(DOC.to_vec()).unwrap().replace("World", "Moon");
+        tex.host_mut()
+            .files
+            .insert(b"doc.tex".to_vec(), edited.into_bytes());
+        let r = crate::ssa::rebuild(&mut tex, false, true);
+        assert!(r.unsupported.is_none(), "{:?}", r.unsupported);
+        let warm = text(&view(&tex));
+        std::println!("{warm}");
+        assert_eq!(cold, "");
+        assert_eq!(warm, "");
+    }
 
     /// The lines from byte `from` to the line that begins at `to`.
     fn lines_of(data: &Arc<[u8]>, from: usize, to: usize) -> (u32, u32) {

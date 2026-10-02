@@ -1072,6 +1072,7 @@ fn run_ssa(host: native::NativeHost, params: Params, command_line: &[u8]) -> i32
             report_check(&r, &rec);
         }
     }
+    write_view(&tex, 0);
     // (one rebuild after each line's command)
     for (n, cmd) in rebuild.as_deref().unwrap_or_default().lines().enumerate() {
         match rebuild_ssa(&mut tex, &mut linker, n + 1, cmd) {
@@ -1180,7 +1181,60 @@ fn rebuild_ssa(
         eprintln!("partex: ssa rebuild {n}: stopped: {u}");
         return Err(3);
     }
+    write_view(tex, n);
     Ok((rr.edits > 0).then_some(rr.history))
+}
+
+/// `PARTEX_SSA_VIEW=<file>`: the build as a program (DESIGN 4.3 item 7,
+/// `partex_core::ssa::view`), a value per window, written to `<file>`
+/// after the cold build and to `<file>.N` after rebuild `N`, checked
+/// (`Program::check`); with `PARTEX_SSA_VIEW_STEP=<id>`, step `id`'s calls
+/// with their reads and writes too (`partex_core::ssa::step_trace`), to
+/// that file's name with `.step<id>` after it. Unset, nothing is made.
+fn write_view(tex: &Tex<native::NativeHost, partex_core::ssa::SsaTracker>, build: usize) {
+    let Some(base) = std::env::var_os("PARTEX_SSA_VIEW") else {
+        return;
+    };
+    let mut path = base;
+    if build > 0 {
+        path.push(format!(".{build}"));
+    }
+    let t0 = std::time::Instant::now();
+    let prog = partex_core::ssa::view(tex);
+    let text = prog.to_text();
+    let ms = t0.elapsed().as_secs_f64() * 1e3;
+    let checked = match prog.check() {
+        Ok(()) => "checked".to_string(),
+        Err(e) => format!("NOT SSA: {e}"),
+    };
+    let shown = std::path::Path::new(&path).display().to_string();
+    if let Err(e) = std::fs::write(&path, &text) {
+        eprintln!("partex: ssa view {build}: {shown}: {e}");
+        return;
+    }
+    eprintln!(
+        "partex: ssa view {build}: {} values, {} bytes, {ms:.1} ms, {checked} ({shown})",
+        prog.values.len(),
+        text.len(),
+    );
+    let Ok(step) = std::env::var("PARTEX_SSA_VIEW_STEP") else {
+        return;
+    };
+    let Some(trace) = step
+        .parse()
+        .ok()
+        .and_then(|id| partex_core::ssa::step_trace(tex, id))
+    else {
+        eprintln!("partex: ssa view {build}: no live step {step}");
+        return;
+    };
+    path.push(format!(".step{step}"));
+    if let Err(e) = std::fs::write(&path, trace) {
+        eprintln!(
+            "partex: ssa view {build}: {}: {e}",
+            std::path::Path::new(&path).display()
+        );
+    }
 }
 
 /// The SSA build's link (DESIGN 7.17.3, "The link after a rebuild is a
