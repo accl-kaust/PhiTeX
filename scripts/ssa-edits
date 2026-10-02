@@ -1,0 +1,759 @@
+#!/usr/bin/env python3
+"""The SSA edit harness (DESIGN 4.3, item 8): each case's edits as rebuilds
+of ONE `PARTEX_SSA=1` process, each stage against plain partex (the same
+binary, no `PARTEX_*` variable) run on the same sources.
+
+    scripts/sandbox scripts/ssa-edits [--case NAME]... [--bin PATH]
+        [--work DIR] [--jobs N] [--fixpoint] [--check] [--env K=V]...
+
+The cases: every incremental case of `xtask/src/e2e.rs` built `By::Watch`
+(read from `INCREMENTAL` there), `machine_edits` (`edits.tex`, pdflatex
+format, e2e's six edits and a seventh whose glyphs the fonts have, so that
+the job's end runs again with every font call a hit) and
+`machine_edits_dvi` (`edits-dvi.tex`, latex format), both under
+`-output-directory=out` after two plain runs of the original text, as
+e2e's `machine_edits` seeds them; and `label`: the same document given a
+`\\label` nothing refers to, then rebuilt twice with no edit.
+
+Each case runs in WORK/<case>/:
+- `o/`: the oracle, one run per stage, the stage's edit made before it
+  (`--fixpoint`: each stage run again while a file it wrote, but its log,
+  DVI and PDF, changed, at most 5 runs, e2e's `fixpoint`);
+- `p/`: one SSA process whose `PARTEX_SSA_REBUILD` lines each snapshot
+  what the build before wrote, then make the next edit;
+- an edit is made as e2e's `edit_file` makes it: the text with its
+  marker replaced, its modification time fixed (`\\pdffilemoddate` must
+  agree: inputs at 1758800000, edit k at 1758800000 + 1000 k), renamed
+  over the file; an empty marker is a rebuild with no edit;
+- `snap/{o,p}/<stage>/`: every file of the run directory after each stage
+  (the format aside), compared stage by stage: byte for byte, and `.log`
+  and `.blg` files without their first line (banner, date) and with
+  `xtask/src/mask.rs`'s statistics masked, as e2e compares them;
+- `logs/`: each process's terminal output and stderr; `results.json` in
+  WORK holds every number.
+
+The formats are built once per binary, in WORK/formats. Exits 1 if a stage
+of a case differs or its SSA process failed, 2 on a usage error.
+"""
+
+import argparse
+import concurrent.futures
+import hashlib
+import json
+import os
+import re
+import shlex
+import shutil
+import subprocess
+import sys
+import threading
+import time
+from pathlib import Path
+
+SCRIPT = Path(__file__).resolve()
+REPO = SCRIPT.parent.parent
+EPOCH = 1_758_800_000
+# (the oracle's fixed time: a PDF file and LaTeX's \time record it)
+FIXED_TIME = {"SOURCE_DATE_EPOCH": str(EPOCH), "FORCE_SOURCE_DATE": "1"}
+
+# e2e's flags for LaTeX runs (`machine_edits`, `LATEX_INI`)
+LATEX_FLAGS = [
+    "-no-shell-escape",
+    "-no-parse-first-line",
+    "-output-comment=partex",
+    "-interaction=nonstopmode",
+]
+PLAIN_INI = ["-ini", "-interaction=nonstopmode", r"\input plain \dump"]
+# key: (partex's arguments before the job's, the format's -ini run, its name)
+FORMATS = {
+    "plain-tex": (["--compat=tex"], PLAIN_INI, "plain"),
+    "plain-pdftex": (["--compat=pdftex"], PLAIN_INI, "plain"),
+    "pdflatex": (
+        ["--compat=tex", "-engine=pdftex"],
+        [*LATEX_FLAGS, "-ini", "-etex", "-jobname=pdflatex", "*pdflatex.ini"],
+        "pdflatex",
+    ),
+    "latex": (
+        ["--compat=tex", "-engine=pdftex"],
+        [*LATEX_FLAGS, "-ini", "-etex", "-jobname=latex", "*latex.ini"],
+        "latex",
+    ),
+}
+
+# e2e.rs's `run_machine_edits` edits (its `long` written out), and one more
+MACHINE_EDITS = [
+    ("Para5x2 ", "Para5x2 TYPED "),
+    ("Para20x1 ", "Para20x1 " + "inserted " * 150),
+    ("Para5x2 TYPED ", "Para5x2 TYPED MORE "),
+    ("Para2x0 ", "Para2x0 early "),
+    ("Para7x1 ", "Para7x1 \n\nA paragraph of its own.\n\n"),
+    ("\\label{sec:12}\n", "\\label{sec:12}\n\n"),
+    # digits the fonts have from other pages' folios: the job's end runs
+    # again and each font's call is a hit (LOG 2026-09-29)
+    ("Para2x0 early ", "Para2x0 early 99 "),
+]
+# e2e.rs's `run_machine_edits_dvi`
+MACHINE_EDITS_DVI = [("P5x2 ", "P5x2 typed "), ("P2x0 ", "P2x0 early ")]
+# a \label nothing refers to, then two rebuilds with no edit (LOG
+# 2026-09-29, "A label no one refers to")
+LABEL_EDITS = [("Para5x2 ", "Para5x2 \\label{new}"), ("", ""), ("", "")]
+
+
+class Case:
+    def __init__(self, name, inputs, fmt, args, edits, outdir=None, seed=0):
+        self.name = name
+        # {name in the run directory: file in tests/e2e}
+        self.inputs = inputs
+        self.fmt = fmt
+        self.argv = [*FORMATS[fmt][0], *args]
+        # [(file, marker, replacement)]
+        self.edits = edits
+        self.outdir = outdir
+        # plain runs of the original text before the first stage, whose
+        # files (but the log and output) both sides start from
+        self.seed = seed
+
+
+# --- the cases of xtask/src/e2e.rs -------------------------------------
+
+
+class RustConst:
+    """A reader for the constant expressions `INCREMENTAL` is written in:
+    struct literals, slices, tuples, strings (raw or escaped), integers,
+    paths, `&`."""
+
+    TOKEN = re.compile(
+        r"""(?P<skip>\s+|//[^\n]*|/\*.*?\*/)
+        |(?P<raw>r(?P<hashes>\#*)"(?P<rawbody>.*?)"(?P=hashes))
+        |(?P<str>"(?P<body>(?:[^"\\]|\\.)*)")
+        |(?P<num>[0-9][0-9_]*)
+        |(?P<path>[A-Za-z_]\w*(?:::[A-Za-z_]\w*)*)
+        |(?P<punct>[][{}(),:&;])""",
+        re.S | re.X,
+    )
+    ESCAPES = {"n": "\n", "r": "\r", "t": "\t", "\\": "\\", "0": "\0", "'": "'", '"': '"'}
+
+    def __init__(self, src, pos):
+        self.src, self.pos = src, pos
+
+    def next(self):
+        while True:
+            m = self.TOKEN.match(self.src, self.pos)
+            if not m:
+                raise ValueError(f"e2e.rs: cannot read {self.src[self.pos:self.pos + 40]!r}")
+            self.pos = m.end()
+            if m.group("skip") is not None:
+                continue
+            if m.group("raw") is not None:
+                return "str", m.group("rawbody")
+            if m.group("str") is not None:
+                return "str", self.unescape(m.group("body"))
+            kind = next(k for k in ("num", "path", "punct") if m.group(k) is not None)
+            return kind, m.group(kind)
+
+    def peek(self):
+        at = self.pos
+        token = self.next()
+        self.pos = at
+        return token
+
+    def unescape(self, body):
+        out, i = [], 0
+        while i < len(body):
+            c = body[i]
+            if c != "\\":
+                out.append(c)
+                i += 1
+                continue
+            e = body[i + 1]
+            if e == "\n":  # (a line continued: its indentation dropped)
+                i += 2
+                while i < len(body) and body[i] in " \t\r\n":
+                    i += 1
+            elif e in self.ESCAPES:
+                out.append(self.ESCAPES[e])
+                i += 2
+            elif e == "x":
+                out.append(chr(int(body[i + 2 : i + 4], 16)))
+                i += 4
+            elif e == "u":
+                j = body.index("}", i)
+                out.append(chr(int(body[i + 3 : j], 16)))
+                i = j + 1
+            else:
+                raise ValueError(f"e2e.rs: unknown escape \\{e}")
+        return "".join(out)
+
+    def value(self):
+        kind, text = self.next()
+        if (kind, text) == ("punct", "&"):
+            return self.value()
+        if kind == "punct" and text in "[(":
+            close = "]" if text == "[" else ")"
+            items = []
+            while self.peek() != ("punct", close):
+                items.append(self.value())
+                if self.peek() == ("punct", ","):
+                    self.next()
+            self.next()
+            return items
+        if kind == "str":
+            return text
+        if kind == "num":
+            return int(text.replace("_", ""))
+        if kind == "path" and self.peek() == ("punct", "{"):
+            self.next()
+            fields = {}
+            while self.peek() != ("punct", "}"):
+                k, name = self.next()
+                if k != "path" or self.next() != ("punct", ":"):
+                    raise ValueError(f"e2e.rs: a field expected, not {name!r}")
+                fields[name] = self.value()
+                if self.peek() == ("punct", ","):
+                    self.next()
+            self.next()
+            return fields
+        if kind == "path":
+            return {"true": True, "false": False}.get(text, text)
+        raise ValueError(f"e2e.rs: unexpected {text!r}")
+
+
+def e2e_watch_cases():
+    src = (REPO / "xtask/src/e2e.rs").read_text()
+    head = "const INCREMENTAL: &[Incremental] ="
+    cases = []
+    for c in RustConst(src, src.index(head) + len(head)).value():
+        if c["by"] != "By::Watch":
+            continue
+        fmt = "plain-pdftex" if c["pdf"] else "plain-tex"
+        cases.append(
+            Case(
+                c["name"],
+                {f: f for f in c["inputs"]},
+                fmt,
+                ["-output-comment=partex", "-interaction=nonstopmode", "&plain", c["job"]],
+                [tuple(e) for e in c["edits"]],
+            )
+        )
+    return cases
+
+
+def all_cases():
+    def latex(name, src, fmt, edits):
+        args = [*LATEX_FLAGS, f"-fmt={fmt}", "-output-directory=out", "edits"]
+        edits = [("edits.tex", m, n) for m, n in edits]
+        return Case(name, {"edits.tex": src}, fmt, args, edits, outdir="out", seed=2)
+
+    return [
+        *e2e_watch_cases(),
+        latex("machine_edits", "edits.tex", "pdflatex", MACHINE_EDITS),
+        latex("machine_edits_dvi", "edits-dvi.tex", "latex", MACHINE_EDITS_DVI),
+        latex("label", "edits.tex", "pdflatex", LABEL_EDITS),
+    ]
+
+
+# --- files ---------------------------------------------------------------
+
+# xtask/src/mask.rs, as bytes (its `\d` and `.` here match ASCII digits and
+# any byte: on a log they mask what mask.rs masks, never more)
+MASKS = [
+    (re.compile(p, re.M), r)
+    for p, r in [
+        (rb"^Reallocated .*\n", b""),
+        (rb"^Field filled up at .*\n", b""),
+        (rb"^ \d+ strings? out of \d+$", b" MASKED strings"),
+        (rb"^ \d+ string characters out of \d+$", b" MASKED string characters"),
+        (
+            rb"^ \d+ multiletter control sequences out of \d+\+\d+$",
+            b" MASKED multiletter control sequences",
+        ),
+        (
+            rb"^ \d+ words of font info for \d+ fonts?, out of \d+ for \d+$",
+            b" MASKED words of font info",
+        ),
+        (rb"^ \d+ hyphenation exceptions? out of \d+$", b" MASKED hyphenation exceptions"),
+        (
+            rb"^ \d+i,\d+n,\d+p,\d+b,\d+s stack positions out of .*$",
+            b" MASKED stack positions",
+        ),
+        (rb"^\d+ strings of total length \d+$", b"MASKED strings"),
+        (rb"^\d+ multiletter control sequences$", b"MASKED multiletter control sequences"),
+        (rb"^\d+ words of font info for \d+ preloaded fonts?$", b"MASKED font info"),
+        (rb"^\d+ hyphenation exceptions?$", b"MASKED hyphenation exceptions"),
+        (
+            rb"^Hyphenation trie of length \d+ has \d+ ops? out of \d+$",
+            b"MASKED hyphenation trie",
+        ),
+        (
+            rb"Memory usage before: \d+&\d+; after: \d+&\d+; still untouched: \d+",
+            b"Memory usage MASKED",
+        ),
+        (rb"\d+ words of memory out of \d+", b"MASKED words of memory"),
+        (
+            rb"^ \d+ words of extra memory for PDF output out of \d+ \(max\. \d+\)$",
+            b" MASKED words of extra memory for PDF output",
+        ),
+        (
+            rb"\d+ memory locations dumped; current usage is \d+&\d+",
+            b"MASKED memory locations dumped",
+        ),
+    ]
+]
+
+
+def masked(b):
+    """A log as e2e's `compare` sees it: without its first line, masked."""
+    nl = b.find(b"\n")
+    b = b[nl + 1 :] if nl >= 0 else b""
+    for pattern, rep in MASKS:
+        b = pattern.sub(rep, b)
+    return b
+
+
+def is_log(name):
+    return name.endswith((".log", ".blg"))
+
+
+def files(d):
+    """Every file under `d` but formats and a half-made edit, by relative
+    path."""
+    out = {}
+    for root, _, names in os.walk(d):
+        for n in names:
+            if n.endswith(".fmt") or n == ".edit.tmp":
+                continue
+            p = Path(root, n)
+            out[p.relative_to(d).as_posix()] = p
+    return out
+
+
+def snapshot(d, dest):
+    if dest.exists():
+        shutil.rmtree(dest)
+    for rel, p in files(d).items():
+        (dest / rel).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(p, dest / rel)
+
+
+def written(d):
+    """What e2e's `fixpoint` compares between runs: every file but logs,
+    DVI and PDF."""
+    return {
+        rel: p.read_bytes()
+        for rel, p in files(d).items()
+        if not rel.endswith((".log", ".dvi", ".pdf"))
+    }
+
+
+def stamp(f, at):
+    t = EPOCH + at
+    os.utime(f, (t, t))
+
+
+def make_edit(cdir, run_dir, stage):
+    """Stage `stage`'s edit in `run_dir` as e2e's `edit_file` makes it: the
+    edited text, dated, renamed over the file (none for an empty marker)."""
+    plan = json.loads((cdir / "plan.json").read_text())
+    file, edited = plan["edits"][stage - 1]
+    if not edited:
+        return
+    tmp = run_dir / ".edit.tmp"
+    shutil.copyfile(cdir / "edits" / str(stage) / file, tmp)
+    stamp(tmp, 1000 * stage)
+    os.rename(tmp, run_dir / file)
+
+
+def step(cdir, stage):
+    """`--_step`: a rebuild line of the SSA process, before rebuild
+    `stage`: the outputs of the stage before, then this stage's edit."""
+    cdir = Path(cdir)
+    snapshot(cdir / "p", cdir / "snap" / "p" / str(stage - 1))
+    make_edit(cdir, cdir / "p", stage)
+
+
+# --- runs ------------------------------------------------------------------
+
+
+class Runner:
+    def __init__(self, opts):
+        self.bin = Path(opts.bin).resolve()
+        self.work = Path(opts.work).resolve()
+        self.timeout = opts.timeout
+        self.mem_kb = opts.mem_gb * 1024 * 1024
+        self.fixpoint = opts.fixpoint
+        self.parallel = opts.jobs > 1
+        # (no PARTEX_* variable reaches the oracle: it is plain partex)
+        base = {k: v for k, v in os.environ.items() if not k.startswith("PARTEX_")}
+        base["PARTEX_SANDBOX"] = os.environ.get("PARTEX_SANDBOX", "")
+        self.env = {**base, **FIXED_TIME}
+        self.ssa_env = {**self.env, "PARTEX_SSA": "1", "RUST_BACKTRACE": "1"}
+        if opts.check:
+            self.ssa_env["PARTEX_SSA_CHECK"] = "1"
+        for kv in opts.env:
+            k, _, v = kv.partition("=")
+            self.ssa_env[k] = v
+
+    def exec(self, argv, cwd, log, env):
+        """Run partex with `argv` in `cwd`, under the memory cap and the
+        timeout; its terminal output and stderr in `log`.out/.err. Its exit
+        code ("timeout" if killed) and stderr."""
+        cmd = ["sh", "-c", 'ulimit -v "$0" && exec "$@"', str(self.mem_kb), str(self.bin), *argv]
+        with open(f"{log}.out", "wb") as out, open(f"{log}.err", "wb") as err:
+            try:
+                code = subprocess.run(
+                    cmd,
+                    cwd=cwd,
+                    env=env,
+                    stdin=subprocess.DEVNULL,
+                    stdout=out,
+                    stderr=err,
+                    timeout=self.timeout,
+                    check=False,
+                ).returncode
+            except subprocess.TimeoutExpired:
+                code = "timeout"
+        return code, Path(f"{log}.err").read_text(errors="replace")
+
+    def formats(self, keys):
+        """The formats `keys` with this binary, made once per binary: the
+        directory holding each."""
+        h = hashlib.sha256()
+        with open(self.bin, "rb") as f:
+            for block in iter(lambda: f.read(1 << 20), b""):
+                h.update(block)
+        root = self.work / "formats"
+        mark = root / "binary.sha256"
+        if not mark.exists() or mark.read_text() != h.hexdigest():
+            shutil.rmtree(root, ignore_errors=True)
+            root.mkdir(parents=True)
+            mark.write_text(h.hexdigest())
+
+        def make(key):
+            compat, ini, name = FORMATS[key]
+            d = root / key
+            if not (d / f"{name}.fmt").exists():
+                shutil.rmtree(d, ignore_errors=True)
+                d.mkdir()
+                self.exec([*compat, *ini], d, d / "ini", self.env)
+                if not (d / f"{name}.fmt").exists():
+                    raise RuntimeError(f"the {key} format was not made: see {d}")
+            return key, d / f"{name}.fmt"
+
+        with concurrent.futures.ThreadPoolExecutor() as pool:
+            return dict(pool.map(make, sorted(keys)))
+
+    def prepare(self, case, fmt):
+        cdir = self.work / case.name
+        if cdir.exists():
+            shutil.rmtree(cdir)
+        sides = ["o", "p"] + (["seed"] if case.seed else [])
+        for d in [*sides, "snap/o", "snap/p", "logs"]:
+            (cdir / d).mkdir(parents=True)
+        texts = {}
+        for name, src in case.inputs.items():
+            texts[name] = (REPO / "tests/e2e" / src).read_bytes()
+            for side in sides:
+                (cdir / side / name).write_bytes(texts[name])
+                stamp(cdir / side / name, 0)
+        for side in sides:
+            try:
+                os.link(fmt, cdir / side / fmt.name)
+            except OSError:
+                shutil.copyfile(fmt, cdir / side / fmt.name)
+            if case.outdir:
+                (cdir / side / case.outdir).mkdir()
+        # each stage's edited text, made once for both sides
+        plan = []
+        for k, (file, marker, new) in enumerate(case.edits, 1):
+            if marker:
+                text = texts[file]
+                if marker.encode() not in text:
+                    raise RuntimeError(f"{case.name}: {file} has no `{marker}` at edit {k}")
+                texts[file] = text.replace(marker.encode(), new.encode(), 1)
+                (cdir / "edits" / str(k)).mkdir(parents=True)
+                (cdir / "edits" / str(k) / file).write_bytes(texts[file])
+            plan.append((file, bool(marker)))
+        (cdir / "plan.json").write_text(json.dumps({"edits": plan}))
+        if case.seed:
+            seed = cdir / "seed"
+            for k in range(case.seed):
+                self.exec(case.argv, seed, cdir / "logs" / f"seed-{k}", self.env)
+            out = case.outdir or "."
+            for f in (seed / out).iterdir():
+                if f.is_file() and f.name not in case.inputs and not f.name.endswith(
+                    (".fmt", ".log", ".dvi", ".pdf")
+                ):
+                    for side in ("o", "p"):
+                        shutil.copyfile(f, cdir / side / out / f.name)
+        return cdir
+
+    def oracle(self, case, cdir):
+        """Plain partex, stage by stage: the runs of each."""
+        o, runs = cdir / "o", []
+        for k in range(len(case.edits) + 1):
+            if k:
+                make_edit(cdir, o, k)
+            n = 0
+            while True:
+                before = written(o) if self.fixpoint else None
+                self.exec(case.argv, o, cdir / "logs" / f"o-{k}-{n}", self.env)
+                n += 1
+                if not self.fixpoint or n == 5 or written(o) == before:
+                    break
+            runs.append(n)
+            snapshot(o, cdir / "snap" / "o" / str(k))
+        return runs
+
+    def ssa(self, case, cdir):
+        """The SSA process: its exit code, stderr, and the stage it ended in."""
+        py, me = shlex.quote(sys.executable), shlex.quote(str(SCRIPT))
+        lines = [
+            f"exec {py} {me} --_step {shlex.quote(str(cdir))} {k}"
+            for k in range(1, len(case.edits) + 1)
+        ]
+        env = {**self.ssa_env, "PARTEX_SSA_REBUILD": "\n".join(lines)}
+        t = time.monotonic()
+        code, err = self.exec(case.argv, cdir / "p", cdir / "logs" / "ssa", env)
+        wall = time.monotonic() - t
+        # (stages 0 to last - 1 were snapshotted by the rebuild lines)
+        last = len(list((cdir / "snap" / "p").iterdir()))
+        snapshot(cdir / "p", cdir / "snap" / "p" / str(last))
+        return code, err, last, wall
+
+    def run(self, case, fmt):
+        t = time.monotonic()
+        cdir = self.prepare(case, fmt)
+        if self.parallel:
+            with concurrent.futures.ThreadPoolExecutor(2) as pool:
+                ssa = pool.submit(self.ssa, case, cdir)
+                runs = self.oracle(case, cdir)
+                code, err, last, wall = ssa.result()
+        else:
+            runs = self.oracle(case, cdir)
+            code, err, last, wall = self.ssa(case, cdir)
+        result = judge(case, cdir, runs, code, err, last)
+        result["ssa_wall_s"] = round(wall, 2)
+        result["wall_s"] = round(time.monotonic() - t, 2)
+        return result
+
+
+# --- results --------------------------------------------------------------
+
+COLD = re.compile(r"^partex: ssa build 0: ([\d.]+) ms, (.*)$", re.M)
+COLD_LINK = re.compile(r"^partex: ssa build 0: link ([\d.]+) ms", re.M)
+REBUILT = re.compile(
+    r"^partex: ssa rebuild (\d+): ([\d.]+) ms \(the rebuild ([\d.]+) ms, "
+    r"the link ([\d.]+) ms\)(.*)$",
+    re.M,
+)
+STOPPED = re.compile(r"^partex: ssa rebuild (\d+): stopped: (.*)$", re.M)
+
+
+def count(text, name):
+    m = re.search(rf"\b{name} (\d+)", text)
+    return int(m.group(1)) if m else None
+
+
+def differences(a, b):
+    """The files of stage snapshots `a` (oracle) and `b` (SSA) that differ,
+    and for a log the first line that does."""
+    fa, fb = files(a), files(b)
+    diffs, notes = [], []
+    for n in sorted(fa.keys() | fb.keys()):
+        if n not in fb:
+            diffs.append(f"{n} (not written)")
+            continue
+        if n not in fa:
+            diffs.append(f"{n} (only SSA's)")
+            continue
+        x, y = fa[n].read_bytes(), fb[n].read_bytes()
+        if is_log(n):
+            x, y = masked(x), masked(y)
+        if x == y:
+            continue
+        diffs.append(n)
+        if is_log(n):
+            xl, yl = x.split(b"\n"), y.split(b"\n")
+            i = next((i for i, (u, v) in enumerate(zip(xl, yl)) if u != v), min(len(xl), len(yl)))
+            u, v = (ls[i].decode(errors="replace") if i < len(ls) else "(end)" for ls in (xl, yl))
+            notes.append(f"{n} line {i + 2}: oracle {u!r}, SSA {v!r}")
+    return diffs, notes
+
+
+def judge(case, cdir, runs, code, err, last):
+    stages = []
+    n = len(case.edits)
+    rebuilt = {int(m.group(1)): m for m in REBUILT.finditer(err)}
+    stopped = {int(m.group(1)): m.group(2) for m in STOPPED.finditer(err)}
+    cold, cold_link = COLD.search(err), COLD_LINK.search(err)
+    crashed = "panicked at" in err or code == "timeout" or code not in (0, 1)
+    for k in range(n + 1):
+        s = {"stage": k, "oracle_runs": runs[k]}
+        if k:
+            file, marker, new = case.edits[k - 1]
+            s["edit"] = [file, marker, new]
+        problems = []
+        if k > last:
+            problems.append("not built")
+        elif k == 0 and cold:
+            s["ms"] = float(cold.group(1))
+            s["link_ms"] = float(cold_link.group(1)) if cold_link else None
+            s["commands"] = count(cold.group(2), "commands")
+            s["records"] = count(cold.group(2), "records")
+        elif k in rebuilt:
+            m = rebuilt[k]
+            s["ms"], s["rebuild_ms"], s["link_ms"] = (float(m.group(i)) for i in (2, 3, 4))
+            s["steps"] = count(m.group(5), "steps run")
+            s["commands"] = count(m.group(5), "commands")
+            s["edits_seen"] = count(m.group(5), "edits")
+        else:
+            problems.append("no report")
+        if k in stopped:
+            problems.append(f"stopped: {stopped[k]}")
+        if k == last and "partex: ssa: the rebuild command failed" in err:
+            problems.append("the rebuild line failed (the snapshot or the edit)")
+        if k == last and crashed:
+            problems.append(f"the SSA process ended: exit {code}")
+        if k <= last:
+            diffs, notes = differences(cdir / "snap" / "o" / str(k), cdir / "snap" / "p" / str(k))
+        else:
+            diffs, notes = [], []
+        s["diffs"], s["notes"], s["problems"] = diffs, notes, problems
+        s["ok"] = not diffs and not problems
+        stages.append(s)
+    panic = next((l for l in err.splitlines() if "panicked at" in l), None)
+    return {
+        "case": case.name,
+        "argv": case.argv,
+        "ok": all(s["ok"] for s in stages),
+        "ssa_exit": code,
+        "panic": panic,
+        "stages": stages,
+        "dir": str(cdir),
+    }
+
+
+def fmt_ms(x):
+    return "-" if x is None else f"{x:.1f}"
+
+
+def table(r, fixpoint):
+    lines = [f"== {r['case']}: {'identical' if r['ok'] else 'DIFFERS'} "
+             f"(SSA exit {r['ssa_exit']}, {r['ssa_wall_s']} s; {r['dir']})"]
+    head = f"{'stage':>5}  {'edit':<18} {'ms (rebuild, link)':<24} {'steps':>6} {'commands':>10}"
+    lines.append(head + ("  runs" if fixpoint else "") + "  result")
+    for s in r["stages"]:
+        if s["stage"] == 0:
+            edit, ms = "cold build", f"{fmt_ms(s.get('ms'))} (link {fmt_ms(s.get('link_ms'))})"
+        else:
+            file, marker, new = s["edit"]
+            edit = file if marker and marker != new else "(touched)" if marker else "(no edit)"
+            ms = f"{fmt_ms(s.get('ms'))} ({fmt_ms(s.get('rebuild_ms'))}, {fmt_ms(s.get('link_ms'))})"
+            if "ms" not in s:
+                ms = "-"
+        steps = "-" if s.get("steps") is None else str(s["steps"])
+        cmds = "-" if s.get("commands") is None else str(s["commands"])
+        res = "identical" if s["ok"] else "; ".join(
+            [*s["problems"], *(["differ: " + ", ".join(s["diffs"])] if s["diffs"] else [])]
+        )
+        runs = f"  {s['oracle_runs']:>4}" if fixpoint else ""
+        lines.append(f"{s['stage']:>5}  {edit:<18} {ms:<24} {steps:>6} {cmds:>10}{runs}  {res}")
+        lines.extend(f"         {note}" for note in s["notes"])
+    if r["panic"]:
+        lines.append(f"   {r['panic']}")
+    return "\n".join(lines)
+
+
+def main():
+    if len(sys.argv) == 4 and sys.argv[1] == "--_step":
+        step(sys.argv[2], int(sys.argv[3]))
+        return 0
+    cases = all_cases()
+    names = [c.name for c in cases]
+    ap = argparse.ArgumentParser(
+        prog="scripts/ssa-edits",
+        description="Each incremental case's edits as rebuilds of one PARTEX_SSA=1 process, "
+        "every stage compared with plain partex on the same sources.",
+        epilog=f"cases: {', '.join(names)}",
+    )
+    ap.add_argument("--case", action="append", choices=names, metavar="NAME",
+                    help="run this case (repeatable; default: all)")
+    ap.add_argument("--bin", default=str(REPO / "target/release/partex"),
+                    help="the partex binary (default: target/release/partex)")
+    ap.add_argument("--work", default=str(REPO / "target/ssa-edits"),
+                    help="the work directory (default: target/ssa-edits)")
+    ap.add_argument("--jobs", type=int, default=8,
+                    help="cases in parallel (default 8; 1 also runs each case's oracle "
+                    "and SSA process one after the other, for quieter timings)")
+    ap.add_argument("--fixpoint", action="store_true",
+                    help="run the oracle's every stage to its fixed point: again while a "
+                    "file it wrote, but its log, DVI and PDF, changed, at most 5 runs")
+    ap.add_argument("--check", action="store_true", help="the SSA process in check mode")
+    ap.add_argument("--env", action="append", default=[], metavar="K=V",
+                    help="a variable for the SSA process (repeatable)")
+    ap.add_argument("--timeout", type=int, default=600, help="seconds per process (default 600)")
+    ap.add_argument("--mem-gb", type=int, default=8,
+                    help="virtual memory cap per process, GB (default 8)")
+    opts = ap.parse_args()
+    if os.environ.get("PARTEX_SANDBOX") != "1":
+        print("ssa-edits: run it inside the sandbox: scripts/sandbox scripts/ssa-edits ...",
+              file=sys.stderr)
+        return 2
+    if any("=" not in kv for kv in opts.env):
+        ap.error("--env takes K=V")
+    ignored = sorted(k for k in os.environ if k.startswith("PARTEX_") and k != "PARTEX_SANDBOX")
+    if ignored:
+        print(f"ssa-edits: ignoring {', '.join(ignored)} (--env K=V passes a variable "
+              "to the SSA process)", file=sys.stderr)
+    if opts.case:
+        cases = [c for c in cases if c.name in opts.case]
+    runner = Runner(opts)
+    if not runner.bin.is_file():
+        print(f"ssa-edits: no binary at {runner.bin}", file=sys.stderr)
+        return 2
+    t0 = time.monotonic()
+    load0 = os.getloadavg()
+    try:
+        fmts = runner.formats({c.fmt for c in cases})
+    except RuntimeError as e:
+        print(f"ssa-edits: {e}", file=sys.stderr)
+        return 1
+    lock = threading.Lock()
+
+    def one(case):
+        try:
+            r = runner.run(case, fmts[case.fmt])
+        except Exception as e:  # (a case that could not run fails alone)
+            r = {"case": case.name, "ok": False, "error": f"{type(e).__name__}: {e}",
+                 "stages": []}
+        with lock:
+            state = "identical" if r["ok"] else "DIFFERS" if "error" not in r else "FAILED"
+            print(f"ssa-edits: {case.name}: {state} ({r.get('wall_s', '-')} s)", file=sys.stderr)
+        return r
+
+    # (the LaTeX cases, the longest, first; reported in their order)
+    order = sorted(cases, key=lambda c: (-c.seed, -len(c.edits)))
+    with concurrent.futures.ThreadPoolExecutor(max(1, opts.jobs)) as pool:
+        done = dict(zip([c.name for c in order], pool.map(one, order)))
+    results = [done[c.name] for c in cases]
+    wall = time.monotonic() - t0
+    for r in results:
+        print(table(r, opts.fixpoint) if "error" not in r else f"== {r['case']}: FAILED: {r['error']}")
+        print()
+    bad = [r["case"] for r in results if not r["ok"]]
+    load1 = os.getloadavg()
+    print(
+        f"ssa-edits: {len(results) - len(bad)}/{len(results)} cases identical"
+        + (f" (not: {', '.join(bad)})" if bad else "")
+        + f", {sum(len(r['stages']) for r in results)} stages, {wall:.1f} s; "
+        f"load {load0[0]:.1f} at the start, {load1[0]:.1f} at the end; binary {runner.bin}"
+    )
+    (runner.work / "results.json").write_text(json.dumps(
+        {"binary": str(runner.bin), "fixpoint": opts.fixpoint, "check": opts.check,
+         "env": opts.env, "wall_s": round(wall, 1), "load": [load0, load1],
+         "cases": results}, indent=1))
+    return 1 if bad else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
