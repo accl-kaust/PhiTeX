@@ -82,6 +82,10 @@ pub(crate) struct Steps {
     pub(super) effects: Vec<Vec<StepEffects>>,
 }
 
+/// Where a step left a file's line ([`Steps::ended_at`]): the data's
+/// load id and bytes, where the line begins in it, and its rest.
+pub(super) type Ended = (u32, Arc<[u8]>, usize, Vec<u8>);
+
 /// A store a step made: a name opened (`\openout`, a whole definition)
 /// or a line appended to it.
 #[derive(Clone, PartialEq, Eq)]
@@ -300,13 +304,15 @@ impl Steps {
     /// load id and bytes), where the line begins in it, and the rest of
     /// it in the buffer, its end-of-line character included. What the
     /// next step begins with (the view's spans, `view.rs`).
-    pub(super) fn ended_at(&self, s: StepId) -> Option<(u32, Arc<[u8]>, usize, Vec<u8>)> {
+    pub(super) fn ended_at(&self, s: StepId) -> Option<Ended> {
         let e = self.end(s)?;
         if e.finished || e.cur.state == crate::web::TOKEN_LIST {
             return None;
         }
         let f = e.file.file.as_ref()?;
-        let d = self.datas.get(*self.ids.get(&(f.data.as_ptr() as usize))? as usize)?;
+        let d = self
+            .datas
+            .get(*self.ids.get(&(f.data.as_ptr() as usize))? as usize)?;
         let at = |x: i32| usize::try_from(x).ok()?.checked_sub(e.v.from);
         let rest = e.top.get(at(e.cur.loc)?..=at(e.cur.limit)?)?;
         (!rest.is_empty()).then(|| (d.name, d.bytes.clone(), f.line_from, rest.to_vec()))
