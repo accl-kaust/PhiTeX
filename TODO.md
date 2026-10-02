@@ -158,8 +158,8 @@ to the cold build's):
 6. **aux-loop leftovers.**
    - The tools test: BibTeX matched at every stage; makeindex matched
      except DVI font numbering, which needs investigating.
-   - The course label run: `bench/aux-label.sh`, untracked in
-     `~/code/tmp/np-aux-loop`.
+   - The course label run: `bench/aux-label.sh`, on the branch
+     `np/aux-loop` (c632234), not merged.
    - LOG entry.
 7. **front leftovers** (uncommitted in `~/code/tmp/np-front`):
    - `\texorpdfstring` in the table of contents (789/790 entries match);
@@ -172,7 +172,9 @@ to the cold build's):
      The output is right; the graph is not.
    - The per-step trace needs a re-run with the full recorder once
      records are lean.
-   - The view costs about 7.5 s per course build.
+   - The view costs about 7.5 s per course build; its measurement,
+     `bench/view-course.sh`, is on the branch `np/view` (6456c0f), not
+     merged.
 9. **Infrastructure.**
    - `perf` is not in the accl image: add it to `scripts/accl/partex.def`
      and rebuild the image (`build-image.sbatch`).
