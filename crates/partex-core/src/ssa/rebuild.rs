@@ -1743,8 +1743,10 @@ pub fn rebuild_trips<H: Host>(
     };
     rep.absorb(first, ns);
     if !ran {
-        // (nothing ran: the stores are what the loads of the φ read)
+        // (nothing ran: the stores are what the loads of the φ read; the
+        // trace of the trip, as `more_trips` keeps it)
         rep.settled = rep.unsupported.is_none();
+        rep.log.extend(rebuild_log(tex));
         return rep;
     }
     if trips.max <= 1 {
