@@ -96,6 +96,9 @@ pub fn view<H: Host>(tex: &Tex<H, SsaTracker>) -> Program {
         rests.insert(w[1], rest);
     }
     for v in lines.values_mut() {
+        // (by file, in the order loaded, and line: an edit's data is
+        // loaded again, and its lines are where they were)
+        v.sort_unstable();
         *v = runs(v);
     }
     let first = fold
@@ -108,7 +111,13 @@ pub fn view<H: Host>(tex: &Tex<H, SsaTracker>) -> Program {
     let mut shows = printable(trim(ident));
     if let Some(s) = first {
         let spans = spans(st, lines.get(&s));
-        let w = writes(rt, &fold.steps[s as usize].recs).len();
+        // (each record's writes are each address once: the start's are
+        // the format's, too many to gather)
+        let w: usize = fold.steps[s as usize]
+            .recs
+            .iter()
+            .map(|&r| rt.record(r).writes.len())
+            .sum();
         shows = format!("step {s}: the job's start, {shows}, {w} definitions:{spans}");
     }
     let format = prog.define(Def::Const(String::from("format")), shows, 0);
@@ -167,8 +176,15 @@ pub fn view<H: Host>(tex: &Tex<H, SsaTracker>) -> Program {
         }
         shows.push(':');
         shows.push_str(&spans(st, lines.get(&s)));
-        shows.push_str(&shipped(rt, &step.recs));
-        let mut text = set_text(rt, step.key, &step.recs);
+        let ships = shipped(rt, &step.recs);
+        shows.push_str(&ships);
+        // (a window that ships a page: the page's text, the nodes it read
+        // of it; else the text it set)
+        let mut text = if ships.is_empty() {
+            set_text(rt, step.key, &step.recs)
+        } else {
+            page_text(rt, step.key, &step.reads)
+        };
         if text.is_empty() {
             // (else the source it read: the rest of the line it began on,
             // or the first line it read)
@@ -237,7 +253,11 @@ fn excerpt(text: &str) -> String {
 pub fn step_trace<H: Host>(tex: &Tex<H, SsaTracker>, id: StepId) -> Option<String> {
     let rec = tex.tracker.rec.borrow();
     let st = rec.rt.fold.steps.get(id as usize).filter(|s| s.live)?;
-    let t: Trace = rec.rt.trace_of(&st.recs);
+    let mut names = Names::new(tex);
+    // (the addresses by the view's names, quoted where they would not be
+    // one token)
+    let mut name = |a: &Slot| phitex_ir::name_text(&names.slot(&rec.st, *a));
+    let t: Trace = rec.rt.trace_of(&st.recs, &mut name);
     Some(t.to_text())
 }
 
@@ -361,6 +381,34 @@ fn set_text(rt: &Runtime<TexSsa>, key: u64, recs: &[RecId]) -> String {
     now.strip_prefix(&before).unwrap_or(&now).to_string()
 }
 
+/// The text of the page's nodes the step at `key` read (`reads`), in
+/// order, as the definitions reaching it hold them: the page a fire
+/// shipped.
+fn page_text(rt: &Runtime<TexSsa>, key: u64, reads: &[Slot]) -> String {
+    let mut nodes: Vec<i64> = reads
+        .iter()
+        .filter(|a| a.0 == Fam::PageNode)
+        .map(|a| a.1)
+        .collect();
+    nodes.sort_unstable();
+    let mut out = String::new();
+    for k in nodes {
+        let v = rt
+            .fold
+            .reaching(&Slot(Fam::PageNode, k), key)
+            .and_then(|d| rt.record(d.rec).writes.get(d.ix as usize)?.1.clone());
+        if let Some(SValue::Field(f)) = v.as_ref().and_then(|v| v.1.as_deref())
+            && let Some(n) = f.get::<partex_engine::node::Node>()
+        {
+            node_text(n, &mut out);
+        }
+        if out.chars().count() > EXCERPT {
+            break;
+        }
+    }
+    out
+}
+
 /// The characters of node `n` (and of the nodes in it), glue as a space.
 fn node_text(n: &partex_engine::node::Node, out: &mut String) {
     use partex_engine::node::Node;
@@ -420,8 +468,8 @@ fn source_line(st: &super::RecState, file: u32, line: u32) -> String {
     printable(&bytes[from..end])
 }
 
-/// Runs of consecutive lines, by file, in the order read: `(file, first,
-/// last)`, each line read once.
+/// Runs of consecutive lines, by file, from spans sorted by file and
+/// line: `(file, first, last)`, each line once.
 fn runs(v: &[(u32, u32, u32)]) -> Vec<(u32, u32, u32)> {
     let mut out: Vec<(u32, u32, u32)> = Vec::new();
     for &(f, a, b) in v {
@@ -1089,6 +1137,11 @@ mod tests {
         text(&warm);
         let a = edges(&cold);
         assert_eq!(a, COLD, "the view's edges are now:\n{a}");
+        // (the paragraph's calls, the addresses named as in the view)
+        let t = step_trace(&tex, 11).unwrap();
+        assert!(t.contains("read @\\greet = "), "{t}");
+        assert!(t.contains("call @line_break("), "{t}");
+        assert_eq!(Trace::parse(&t).unwrap().to_text(), t);
         let d = changes(&cold, &warm);
         assert_eq!(d, WARM, "the changes are now:\n{d}");
     }
@@ -1170,7 +1223,7 @@ mod tests {
 %14 = window(\catcode123=%2, \catcode125=%3, list.mode=%12, save.level=%13, \count1=%10, save.ptr=%13, nest=%12, list.list=%12; save[1], save.ptr, save[2], \count1) ; step 13: doc:8 "\count1=6 Second paragraph.}"
 %15 = window(\catcode123=%2, \catcode125=%3, list.mode=%12, list.list=%12, nest=%12, list.mlist=%12, list.ml=%12, list.prev_depth=%12, list.space_factor=%12, list.clang=%12, list.incompleat=%12, list.middle=%12, list.lr_save=%12, list.lr_box=%12, page.contents=%12, page.goal=%12, page.total=%12, page.stretch=%12, page.fil=%12, page.fill=%12, page.filll=%12, page.shrink=%12, page.depth=%12, page.max_depth=%12, page.least_cost=%12, page.len=%12, page.tail=%12, current_font=%5, font:cmr10.metrics=%5, font:cmr10.hyphenchar=%5, font:cmr10.glue=%12, align_state=%13, save.group=%13, save.level=%13, save.ptr=%14, save[2]=%14, save[1]=%14, \count1=%14, save[0]=%13, save.boundary=%13, hsize=%6, hyph.patterns=%12, selector=%12, font:cmr10.expand=%5, text:fontid:1:\rm=%5; page.least_cost, page.best_break, page.best_size, page[2], align_state, save.level, save.ptr, save[1], \count1, save.group, save.boundary, list.mlist, list.mode, list.ml, list.space_factor, list.clang, list.incompleat, list.middle, list.lr_box, nest, last_badness, file_offset, selector, hpack_result, list.prev_depth, list.pg, line_break_result, list.lr_save, error_count, page.stretch, page.shrink, page[3], page.total, page.depth, page.last_glue, page.last_penalty, page.last_kern, page.last_node_type, page_step_result, page[4], page.len, page.tail, list.list) ; step 14: doc:8-9 "Second paragraph."
 %16 = window(list.mode=%15, page.len=%15, hsize=%6, list.list=%15, list.mlist=%15, list.pg=%15, list.ml=%15, list.prev_depth=%15, list.space_factor=%15, list.clang=%15, list.incompleat=%15, list.middle=%15, list.lr_save=%15, list.lr_box=%15, page.contents=%12, page.total=%15, page.depth=%15, page.max_depth=%12, page.goal=%12, page.stretch=%15, page.fil=%12, page.fill=%12, page.filll=%12, page.shrink=%15, page.least_cost=%15; page[5], page.total, page.fill, page.shrink, page.depth, page[6], page.len, page.tail, page.least_cost, page.best_break, page.best_size, page.last_glue, page.last_penalty, page.last_kern, page.last_node_type, page_step_result, list.list) ; step 15: doc:10 "\end"
-%17 = window(list.list=%16, page.contents=%12, page.goal=%12, page.total=%16, page.stretch=%15, page.fil=%12, page.fill=%16, page.filll=%12, page.shrink=%16, page.depth=%16, page.max_depth=%12, page.least_cost=%16, page.best_break=%16, page.best_size=%16, page.last_glue=%16, page.last_penalty=%16, page.last_kern=%16, page.last_node_type=%16, page.len=%16, page[0]=%12, page[1]=%12, page[2]=%15, page[3]=%15, page[4]=%15, page[5]=%16, page[6]=%16, file_offset=%15, selector=%15, \count1=%15, str_ptr=%8, list.mlist=%15, list.mode=%15, list.pg=%15, list.ml=%15, list.prev_depth=%15, list.space_factor=%15, list.clang=%15, list.incompleat=%15, list.middle=%15, list.lr_save=%15, list.lr_box=%15, save.level=%15; page.contents, page.goal, page.total, page.stretch, page.fil, page.fill, page.filll, page.shrink, page.depth, page.max_depth, page.least_cost, page.best_break, page.best_size, page.ins, page.insert_penalties, last_badness, vpack_result, outputpenalty, page.len, page.tail, page.discards, string:N, str_ptr, string:N, string:N, output_file_name, dead_cycles, \box255, page.last_glue, page.last_penalty, page.last_kern, page.last_node_type, page_step_result, list.list, file_offset, open_parens, newlinechar, mag_set, dvi.file, dvi.fonts, dvi.totals, dvi.writer, write:log, selector) ; step 16: ships [0.5]
+%17 = window(list.list=%16, page.contents=%12, page.goal=%12, page.total=%16, page.stretch=%15, page.fil=%12, page.fill=%16, page.filll=%12, page.shrink=%16, page.depth=%16, page.max_depth=%12, page.least_cost=%16, page.best_break=%16, page.best_size=%16, page.last_glue=%16, page.last_penalty=%16, page.last_kern=%16, page.last_node_type=%16, page.len=%16, page[0]=%12, page[1]=%12, page[2]=%15, page[3]=%15, page[4]=%15, page[5]=%16, page[6]=%16, file_offset=%15, selector=%15, \count1=%15, str_ptr=%8, list.mlist=%15, list.mode=%15, list.pg=%15, list.ml=%15, list.prev_depth=%15, list.space_factor=%15, list.clang=%15, list.incompleat=%15, list.middle=%15, list.lr_save=%15, list.lr_box=%15, save.level=%15; page.contents, page.goal, page.total, page.stretch, page.fil, page.fill, page.filll, page.shrink, page.depth, page.max_depth, page.least_cost, page.best_break, page.best_size, page.ins, page.insert_penalties, last_badness, vpack_result, outputpenalty, page.len, page.tail, page.discards, string:N, str_ptr, string:N, string:N, output_file_name, dead_cycles, \box255, page.last_glue, page.last_penalty, page.last_kern, page.last_node_type, page_step_result, list.list, file_offset, open_parens, newlinechar, mag_set, dvi.file, dvi.fonts, dvi.totals, dvi.writer, write:log, selector) ; step 16: ships [0.5] "Hello World. One line. Second paragraph."
 "#;
 
     /// What changed after the edit: the paragraph ran again, and the
@@ -1195,7 +1248,7 @@ mod tests {
   -import hyph.patterns=%12
   +import font:cmr10.glue=%5
   +import hyph.patterns=%0
-%17 step 16 (run 2): ships [0.5]
+%17 step 16 (run 2): ships [0.5] "Hello Moon. One line. Second paragraph."
 "#;
 
     /// The lines from byte `from` to the line that begins at `to`.
@@ -1211,8 +1264,8 @@ mod tests {
         assert_eq!(lines_of(&d, 2, 10), (2, 3));
         assert_eq!(lines_of(&d, 11, 12), (5, 5));
         assert_eq!(
-            runs(&[(0, 1, 2), (0, 3, 3), (1, 1, 1), (0, 4, 5)]),
-            [(0, 1, 3), (1, 1, 1), (0, 4, 5)]
+            runs(&[(0, 1, 2), (0, 3, 3), (0, 5, 6), (1, 1, 1)]),
+            [(0, 1, 3), (0, 5, 6), (1, 1, 1)]
         );
         assert_eq!(scaled(12 * 65536), "12.0pt");
         assert_eq!(scaled(65536 / 2), "0.5pt");
