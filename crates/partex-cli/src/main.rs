@@ -1086,6 +1086,24 @@ fn run_ssa(host: native::NativeHost, params: Params, command_line: &[u8]) -> i32
     history
 }
 
+/// Whether rebuild `n` is traced (`PARTEX_SSA_REBUILD_TRACE`): `1` traces
+/// every rebuild; a list of numbers and ranges (`67,70-72`; `1-1` for the
+/// first alone) traces those, so a long sequence is timed untraced and
+/// traced where it matters, in one process.
+fn rebuild_traced(n: usize) -> bool {
+    let Ok(v) = std::env::var("PARTEX_SSA_REBUILD_TRACE") else {
+        return false;
+    };
+    if v == "1" {
+        return true;
+    }
+    let num = |s: &str| s.trim().parse::<usize>().ok();
+    v.split(',').any(|p| match p.split_once('-') {
+        Some((a, b)) => num(a).is_some_and(|a| a <= n) && num(b).is_some_and(|b| n <= b),
+        None => num(p) == Some(n),
+    })
+}
+
 /// Rebuild `n` of an SSA build (DESIGN 7.17.3): run the edit `cmd`, then
 /// rebuild the same engine in place and link its files; the exit code it
 /// sets, if its edits changed the job's (`Err`: it failed or stopped).
@@ -1108,7 +1126,7 @@ fn rebuild_ssa(
     let before = tex.tracker().rec.borrow().rt.stats;
     let routines = tex.tracker().rec.borrow().st.routines;
     let t0 = std::time::Instant::now();
-    let trace = std::env::var("PARTEX_SSA_REBUILD_TRACE").is_ok_and(|v| v == "1");
+    let trace = rebuild_traced(n);
     // (hits applied in the steps run, DESIGN 7.17.3: on unless `=0`)
     let apply = !matches!(std::env::var("PARTEX_SSA_APPLY").as_deref(), Ok("0"));
     let rr = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {

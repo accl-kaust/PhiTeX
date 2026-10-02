@@ -105,6 +105,27 @@ impl<K: TKey, V> Table<K, V> {
         }
     }
 
+    /// [`Table::get_by`], mutable.
+    #[inline]
+    pub fn get_mut_by(&mut self, h: u64, eq: impl Fn(&K) -> bool) -> Option<&mut V> {
+        if self.slots.is_empty() {
+            return None;
+        }
+        let mask = self.slots.len() - 1;
+        // Truncation intended: the probe start.
+        #[allow(clippy::cast_possible_truncation)]
+        let mut i = (h as usize) & mask;
+        loop {
+            match &self.slots[i] {
+                None => return None,
+                Some((sh, sk, _)) if *sh == h && eq(sk) => {
+                    return self.slots[i].as_mut().map(|s| &mut s.2);
+                }
+                Some(_) => i = (i + 1) & mask,
+            }
+        }
+    }
+
     /// Set the value at the key with hash `h` satisfying `eq` to `v`,
     /// making the key with `make` if absent; returns the previous value.
     pub fn swap_by(
