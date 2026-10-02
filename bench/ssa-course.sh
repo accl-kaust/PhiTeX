@@ -1,15 +1,18 @@
 #!/usr/bin/env bash
-# bench/ssa-course.sh [N]: the course's edits as the rebuilds of ONE
-# `PARTEX_SSA=1` process (DESIGN 4.3), measured.
+# bench/ssa-course.sh [--warm N] [COURSE [AUX]]: the course's edits as
+# the rebuilds of ONE `PARTEX_SSA=1` process (DESIGN 4.3), measured.
 #
-# A private copy of the course (COURSE, default ~/code/tmp/np-course: its
-# sources, and `_out/` with the job's .aux, .out and .toc from a full
-# build) is made afresh in target/ssa-course/run; COURSE itself is only
-# read. One process builds the job cold, then rebuilds it after each edit
-# of EDITS (default bench/edits/course.txt, bench/edits.sh's format),
-# each followed by its revert (the original text) and the revert's
-# rebuild; the steps of a `;;` spec are rebuilt one by one before the
-# revert. Then `word` and its revert N more times (default 20), warm.
+# COURSE is the course's sources (default ~/code/tmp/np-course), AUX the
+# directory holding the job's .aux, .out and .toc from a full build
+# (default COURSE/_out); in an accl job (`scripts/accl/accl run cmd sh -c
+# 'bench/ssa-course.sh "$w/course" "$w/aux"'`) they are $w/course and
+# $w/aux. A private copy is made afresh in target/ssa-course/run; COURSE
+# itself is only read. One process builds the job cold, then rebuilds it
+# after each edit of EDITS (default bench/edits/course.txt,
+# bench/edits.sh's format), each followed by its revert (the original
+# text) and the revert's rebuild; the steps of a `;;` spec are rebuilt
+# one by one before the revert. Then `word` and its revert N more times
+# (default 20), warm.
 # Each rebuild is one pass: a `\label`'s `.aux` is read by the next
 # rebuild, here its revert's. A last rebuild with no edit closes the
 # count of the one before it and is not reported.
@@ -18,7 +21,8 @@
 # file and renamed over it. The process runs alone on the machine and
 # under the memory cap (scripts/heavy: HEAVY_VMEM_GB, HEAVY_TIMEOUT), in
 # the sandbox, inside GNU time for its peak RSS. The format is made by
-# the binary (BIN, default target/release/partex), once per binary, as
+# the binary (BIN, default target/release/partex, built if missing), once
+# per binary, as
 # the course's own: `-ini -jobname=pdflatex -translate-file=cp227.tcx
 # *pdflatex.ini`, at the jobs' fixed time (it dumps `\time`, which a job
 # sets again when it starts). PARTEX_* variables set by the caller reach
@@ -32,7 +36,8 @@
 # around the process until the first rebuild line disables it), and each
 # rebuild's with its link (a perf attached to the process by the rebuild's
 # line, enabled before the rebuild starts and stopped by the next line;
-# it includes the next line's shell, about a million). INSN=0: no perf.
+# it includes the next line's shell, about a million). INSN=0, or no
+# perf that counts: no instructions.
 #
 # Output: a Markdown table on stdout and the JSON in OUT (default
 # bench/results/<commit>-ssa-course.json): per rebuild, its ms (rebuild,
@@ -45,28 +50,40 @@
 set -euo pipefail
 
 repo=$(cd "$(dirname "$0")/.." && pwd)
-n=${1:-20}
+n=20
+if [ "${1:-}" = --warm ]; then n=$2; shift 2; fi
+course=$(realpath "${1:-$HOME/code/tmp/np-course}")
+aux=$(realpath "${2:-$course/_out}")
 bin=${BIN:-$repo/target/release/partex}
-course=${COURSE:-$HOME/code/tmp/np-course}
 edits=$(realpath "${EDITS:-$repo/bench/edits/course.txt}")
 main=${MAIN:-course.tex}
 job=${main%.tex}
 insn=${INSN:-1}
 dir=$repo/target/ssa-course
-rev=$(git -C "$repo" rev-parse --short HEAD)
+rev=$(git -C "$repo" rev-parse --short HEAD 2>/dev/null || echo unknown)
 dirty=false
-git -C "$repo" diff --quiet HEAD || dirty=true
+git -C "$repo" diff --quiet HEAD 2>/dev/null || dirty=true
 out=${OUT:-$repo/bench/results/$rev-ssa-course.json}
 
+[ -f "$course/$main" ] || { echo "ssa-course: no $course/$main" >&2; exit 2; }
+[ -f "$aux/$job.aux" ] || { echo "ssa-course: no $aux/$job.aux" >&2; exit 2; }
+if [ ! -x "$bin" ] && [ -z "${BIN:-}" ]; then
+  echo "ssa-course: building $bin" >&2
+  (cd "$repo" && scripts/sandbox cargo build --release -q -p partex-cli >&2)
+fi
 [ -x "$bin" ] || { echo "ssa-course: no binary $bin" >&2; exit 2; }
-[ -f "$course/_out/$job.aux" ] || { echo "ssa-course: no $course/_out/$job.aux" >&2; exit 2; }
+if [ "$insn" = 1 ] && ! "$repo"/scripts/sandbox perf stat -e instructions:u -x, -o /dev/null \
+  -- true >/dev/null 2>&1; then
+  echo "ssa-course: no perf that counts instructions:u here; INSN=0" >&2
+  insn=0
+fi
 
 # The copy, afresh (the edits are made in it).
-rm -rf "$dir/run" "$dir/plan"
+rm -rf "$dir/run" "$dir/plan" "$dir/time.txt" "$dir/err.txt" "$dir/term.txt"
 mkdir -p "$dir/run" "$dir/plan/insn" "$dir/formats"
 cp -a "$course/." "$dir/run/"
 rm -rf "$dir/run/out" && mkdir "$dir/run/out"
-for f in "$dir/run/_out/$job".*; do cp "$f" "$dir/run/out/"; done
+for f in "$aux/$job".*; do cp "$f" "$dir/run/out/"; done
 
 # The format, made by this binary once.
 sha=$(sha256sum "$bin" | cut -c1-16)
@@ -333,7 +350,8 @@ for kind in ("edit", "revert"):
               f"{g(w['median_instructions'])} |")
 print()
 rss = result["peak_rss_kb"]
-print(f"peak RSS {f(rss and rss / 1048576, 2)} GB; exit {status}; wall {result['wall_s']} s; "
+print(f"on {result['host']}: peak RSS {f(rss and rss / 1048576, 2)} GB; exit {status}; "
+      f"wall {result['wall_s']} s; "
       f"load {load0} -> {load1}; final outputs = cold build's: "
       f"{'yes' if result.get('final_differs_from_cold') == [] else result.get('final_differs_from_cold', 'not compared')}"
       + (f"; PANIC: {panic}" if panic else ""))

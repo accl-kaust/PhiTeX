@@ -8,7 +8,8 @@
 #   gate                 fmt --check, clippy -D warnings, cargo xtask check
 #   course <what> [...]  the course: plain | ssa | rebuild | label (tasks/course.sh)
 #   edits [ARGS...]      the SSA edit harness (scripts/ssa-edits ARGS)
-#   cmd <command...>     any command in the checkout
+#   cmd <command...>     any command in the checkout (the course at
+#                        $w/course, its aux files in $w/aux)
 #
 # The sandbox is the container: a read-only image, an empty home, no
 # network (`--network none`), and only the node-local workspace writable.
@@ -116,6 +117,11 @@ case $task in
     box scripts/ssa-edits --bin target/release/partex --work "$w/edits" "$@" | tee "$r/summary.txt" || status=$?
     ;;
   cmd)
+    # (the course too, node-local, as for `course`: $w/course, $w/aux)
+    if [ -d "$HOME/code/tmp/np-course/src" ]; then
+      cp -a "$HOME/code/tmp/np-course/src" "$w/course"
+      cp -a "$HOME/code/tmp/np-course/aux" "$w/aux"
+    fi
     status=0
     box "$@" || status=$?
     ;;

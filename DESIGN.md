@@ -118,7 +118,8 @@ listed in `partex_engine::bugs::PdftexBugs`, and switchable with
   `refs/<engine>/`, which is gitignored and regenerated with
   `--oracle`, and ours are compared against them.
 - The gate is `scripts/sandbox cargo xtask check`: fmt, clippy, the
-  wasm build, trip, etrip and e2e.
+  wasm build, trip, etrip, e2e and SSA mode's edit sequences
+  (`ssa-edits`).
 
 ---
 
@@ -1188,6 +1189,18 @@ cold build with recording takes 3.2–3.4× a plain one and peaks at 24 GB.
    - *The report*: per stage, the rebuild's and the link's ms, the
      steps run and the commands.
 
+   `cargo xtask ssa-edits` runs it on the release binary, and `cargo
+   xtask check` runs it beside e2e. The course's numbers come from
+   `bench/ssa-course.sh`: one process builds the course cold, then
+   rebuilds it after each edit of `bench/edits/course.txt` and after
+   that edit's revert, then after N warm `word` edits and their reverts.
+   It runs through `scripts/heavy`. Per rebuild it records the counts
+   that do not depend on the machine's load: steps, commands, reads
+   checked, readers marked and records made. It also records the user
+   instructions of each phase (`perf stat -e instructions:u`, attached
+   by the rebuild's line), the ms, the peak RSS, and whether the final
+   outputs, every edit reverted, are the cold build's.
+
 The work, one agent each, on branches `np/<name>` in worktrees under
 `~/code/tmp/`: `windows` (1), `rebuild-cost` (3), `records` (2),
 `link` (4), `aux-loop` (5), `front` (6), `view` (7), `gate` (8).
@@ -1261,6 +1274,10 @@ edit lands nearer 15–30 ms.
 - Benchmarks are recorded as JSON in `bench/results/`. The edit harness
   is `bench/edits.sh`; SSA mode's is `scripts/ssa-edits` (4.3 item 8),
   which writes each stage's numbers to `target/ssa-edits/results.json`.
+  The course's edits as the rebuilds of one SSA process are
+  `bench/ssa-course.sh`, which writes `bench/results/<commit>-ssa-course.json`.
+  On a loaded machine, edits are compared by counts, instructions and
+  peak RSS, not ms.
 
 ### 5.3 The text form
 
