@@ -10645,3 +10645,21 @@ same slots, mostly in the same order, the fold unchanged in between);
 reusing the first answers by position saved 0.9% of a TikZ keystroke's
 instructions and no measurable cycles.
 
+## 2026-10-02 — Pooled token lists carry no version (coordinator)
+
+A pooled list (a macro's argument, tokens backed up or inserted:
+`pooled_list`, `str_toks`) is an input level only. Every maker of one
+puts it on the input stack, none is stored as a value, and the input
+state is kept as shared chains, never hashed. Yet `TokenList::remake`
+hashed its tokens for a version (2.4% self in a profile of a keystroke
+that runs the output routine again, and dearer in wasm, whose 128-bit
+product is made from halves). It makes none now. A list's `Hash` still
+hashes the tokens when it has no version. Instructions, 200 keystrokes
+of the TikZ article: −0.2% for a word, −2.3% for one that runs the
+output routine again (a `(` changing its line's height); the same PDFs.
+The harness: 14 cases, 79 stages, identical in all three modes.
+
+The course A/B of the step boundary after a file read whole (433451e
+against eb0085a, job 6383): no change, word edit 21.1 ms both (7
+steps, 1,560 commands).
+

@@ -411,14 +411,14 @@ impl TokenList {
         &mut self.toks
     }
 
-    /// The list made again from its (changed) tokens.
+    /// The list made again from its (changed) tokens, as a pooled list
+    /// is (a macro's argument, tokens backed up or inserted): an input
+    /// level only, never a value whose version is read, so none is made
+    /// (hashing every argument's tokens was 2.4% of a keystroke natively,
+    /// and more in wasm, whose 128-bit product is made from halves).
     pub fn remake(&mut self, protected: bool) {
         self.protected = protected;
-        self.ver = if VERSIONS.load(core::sync::atomic::Ordering::Relaxed) {
-            tok_version(&self.toks, protected)
-        } else {
-            0
-        };
+        self.ver = 0;
     }
 }
 
