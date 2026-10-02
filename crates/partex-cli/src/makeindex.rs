@@ -47,6 +47,10 @@ pub struct KpseFiles {
     /// job.idx`, as latexmk runs it for an output directory): relative
     /// names are in it.
     dir: Option<Vec<u8>>,
+    /// Files read from these contents, by path, not from disk: the `.idx`
+    /// streams the build just wrote, which an SSA build holds in memory
+    /// while it rewrites the files (DESIGN 3.7, "Trips, as built").
+    served: HashMap<Vec<u8>, Vec<u8>>,
 }
 
 fn read_file(name: &[u8]) -> Option<Vec<u8>> {
@@ -77,10 +81,18 @@ impl KpseFiles {
         Some((found, data))
     }
 
+    /// The file at `name`: served, or read from disk.
+    fn read_at(&self, name: &[u8]) -> Option<Vec<u8>> {
+        match self.served.get(name) {
+            Some(d) => Some(d.clone()),
+            None => read_file(name),
+        }
+    }
+
     /// Whether every lookup in `read` finds the same now.
     fn unchanged(&mut self, read: &[Lookup]) -> bool {
         read.iter().all(|l| match l {
-            Lookup::Read(n, was) => read_file(n) == *was,
+            Lookup::Read(n, was) => self.read_at(n) == *was,
             Lookup::Readable(n, was) => readable(n) == *was,
             Lookup::Style(n, was) => self.find_style(n) == *was,
         })
@@ -121,7 +133,7 @@ impl KpseFiles {
 impl Files for KpseFiles {
     fn read(&mut self, name: &[u8]) -> Option<Vec<u8>> {
         let name = self.at(name);
-        let d = read_file(&name);
+        let d = self.read_at(&name);
         self.read.push(Lookup::Read(name, d.clone()));
         d
     }
@@ -173,15 +185,20 @@ pub struct Runs {
 
 /// After a pass of a converging build (its outputs written): run
 /// makeindex on each `.idx` file of the job, as `makeindex job.idx`,
-/// unless what its last run read is unchanged. A report line for each run.
+/// unless what its last run read is unchanged. The `.idx` files are read
+/// from `idxes`, by path (the others, from disk). A report line for each
+/// run.
 pub fn after_pass(runs: &mut Runs, idxes: &[(Vec<u8>, Vec<u8>)]) -> Vec<String> {
     let mut reports = Vec::new();
+    let served: HashMap<Vec<u8>, Vec<u8>> = idxes.iter().cloned().collect();
     for (name, _) in idxes {
         let files = runs.files.get_or_insert_with(|| KpseFiles {
             kpse: crate::kpse_instance("makeindex", ""),
             read: Vec::new(),
             dir: None,
+            served: HashMap::new(),
         });
+        files.served.clone_from(&served);
         let slash = name.iter().rposition(|&c| c == b'/');
         files.dir = slash.map(|i| name[..=i].to_vec());
         let base = slash.map_or(name.as_slice(), |i| &name[i + 1..]).to_vec();
@@ -228,6 +245,7 @@ pub fn main() -> ! {
         kpse: crate::kpse_instance("makeindex", ""),
         read: Vec::new(),
         dir: None,
+        served: HashMap::new(),
     };
     let out = partex_makeindex::run(&args, &version(), &mut files);
     let err = write_outputs(&out, &files);

@@ -1029,12 +1029,28 @@ fn run_ssa(host: native::NativeHost, params: Params, command_line: &[u8]) -> i32
     let check = std::env::var("PARTEX_SSA_CHECK").is_ok_and(|v| v == "1");
     let rebuild = std::env::var("PARTEX_SSA_REBUILD").ok();
     let apply = std::env::var("PARTEX_SSA_APPLY").is_ok_and(|v| v == "1");
+    let trips = ssa_trips();
+    // (BibTeX's and makeindex's last runs, across the builds' trips)
+    let mut between = Between::default();
     let mut tex = Tex::new(host, SsaTracker::new(Recorder::new()), params);
     let t0 = std::time::Instant::now();
     let r = partex_core::ssa::run_applying(&mut tex, command_line, check, 0, apply);
     if check {
         eprintln!("partex: ssa lost writes {}", tex.lost_writes());
     }
+    // (the cold build converges as latexmk would from the files on disk:
+    // its trips after the first, DESIGN 3.7)
+    let settled = (trips > 1).then(|| {
+        let ns = u64::try_from(t0.elapsed().as_nanos()).unwrap_or(u64::MAX);
+        let mut tools = ssa_tools(&mut between);
+        let mut t = partex_core::ssa::Trips {
+            max: trips,
+            tools: &mut tools,
+            clock: Some(clock_ns),
+        };
+        let (trace, apply) = rebuild_switches();
+        partex_core::ssa::settle(&mut tex, trace, apply, &mut t, r.commands, ns)
+    });
     let millis = t0.elapsed().as_secs_f64() * 1e3;
     let t1 = std::time::Instant::now();
     let mut linker = SsaLinker::default();
@@ -1042,6 +1058,21 @@ fn run_ssa(host: native::NativeHost, params: Params, command_line: &[u8]) -> i32
     let link_ms = t1.elapsed().as_secs_f64() * 1e3;
     eprintln!("partex: ssa build 0: link {link_ms:.1} ms: {how}");
     let mut history = r.history;
+    let mut commands = r.commands;
+    if let Some(s) = &settled {
+        for l in &s.log {
+            eprintln!("partex: ssa build 0: {l}");
+        }
+        report_trips("build 0", s);
+        if s.trips > 1 {
+            history = s.history;
+            commands += s.commands;
+        }
+        if let Some(u) = s.unsupported {
+            eprintln!("partex: ssa build 0: stopped: {u}");
+            return 3;
+        }
+    }
     {
         let rec = tex.tracker().rec.borrow();
         report_read_counts(&rec);
@@ -1061,7 +1092,7 @@ fn run_ssa(host: native::NativeHost, params: Params, command_line: &[u8]) -> i32
             r.tokenize_calls,
             r.tokenize_hits,
             s.reads_verified,
-            r.commands,
+            commands,
             r.commands_in_hits,
             rec.rt.live_records(),
             r.applied,
@@ -1074,7 +1105,7 @@ fn run_ssa(host: native::NativeHost, params: Params, command_line: &[u8]) -> i32
     }
     // (one rebuild after each line's command)
     for (n, cmd) in rebuild.as_deref().unwrap_or_default().lines().enumerate() {
-        match rebuild_ssa(&mut tex, &mut linker, n + 1, cmd) {
+        match rebuild_ssa(&mut tex, &mut linker, &mut between, trips, n + 1, cmd) {
             Ok(Some(h)) => history = h,
             Ok(None) => {}
             Err(code) => return code,
@@ -1092,6 +1123,8 @@ fn run_ssa(host: native::NativeHost, params: Params, command_line: &[u8]) -> i32
 fn rebuild_ssa(
     tex: &mut Tex<native::NativeHost, partex_core::ssa::SsaTracker>,
     linker: &mut SsaLinker,
+    between: &mut Between,
+    trips: usize,
     n: usize,
     cmd: &str,
 ) -> Result<Option<i32>, i32> {
@@ -1108,11 +1141,17 @@ fn rebuild_ssa(
     let before = tex.tracker().rec.borrow().rt.stats;
     let routines = tex.tracker().rec.borrow().st.routines;
     let t0 = std::time::Instant::now();
-    let trace = std::env::var("PARTEX_SSA_REBUILD_TRACE").is_ok_and(|v| v == "1");
-    // (hits applied in the steps run, DESIGN 7.17.3: on unless `=0`)
-    let apply = !matches!(std::env::var("PARTEX_SSA_APPLY").as_deref(), Ok("0"));
+    let (trace, apply) = rebuild_switches();
+    // (in trips until the loads read what the same trip stored, DESIGN
+    // 3.7; `PARTEX_SSA_TRIPS=1`: one, a plain pass)
+    let mut tools = ssa_tools(between);
+    let mut t = partex_core::ssa::Trips {
+        max: trips,
+        tools: &mut tools,
+        clock: Some(clock_ns),
+    };
     let rr = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        partex_core::ssa::rebuild(tex, trace, apply)
+        partex_core::ssa::rebuild_trips(tex, trace, apply, &mut t)
     })) {
         Ok(rr) => rr,
         Err(e) => {
@@ -1176,11 +1215,112 @@ fn rebuild_ssa(
             .collect();
         report_routines(&format!("rebuild {n}"), &d);
     }
+    if trips > 1 {
+        report_trips(&format!("rebuild {n}"), &rr);
+    }
     if let Some(u) = rr.unsupported {
         eprintln!("partex: ssa rebuild {n}: stopped: {u}");
         return Err(3);
     }
     Ok((rr.edits > 0).then_some(rr.history))
+}
+
+/// `PARTEX_SSA_TRIPS`: an SSA build's trips at most (DESIGN 3.7, "Trips,
+/// as built"), 5 by default, latexmk's bound; 1 is one trip per build,
+/// a rebuild matching one plain pass, with no outside tool run.
+fn ssa_trips() -> usize {
+    std::env::var("PARTEX_SSA_TRIPS")
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .filter(|&n| n >= 1)
+        .unwrap_or(5)
+}
+
+/// A rebuild's switches: its trace (`PARTEX_SSA_REBUILD_TRACE=1`), and
+/// whether hits are applied in the steps run (DESIGN 7.17.3: on unless
+/// `PARTEX_SSA_APPLY=0`).
+fn rebuild_switches() -> (bool, bool) {
+    let trace = std::env::var("PARTEX_SSA_REBUILD_TRACE").is_ok_and(|v| v == "1");
+    let apply = !matches!(std::env::var("PARTEX_SSA_APPLY").as_deref(), Ok("0"));
+    (trace, apply)
+}
+
+/// Nanoseconds since the epoch: the trips' clock.
+fn clock_ns() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| u64::try_from(d.as_nanos()).unwrap_or(u64::MAX))
+}
+
+/// The outside tools an SSA build runs between its trips (DESIGN 3.7,
+/// "Trips, as built"): BibTeX on each stored `.aux` stream, makeindex on
+/// each stored `.idx` stream, each read from the build's stores (the
+/// files are being rewritten) and run unless what its last run read
+/// reads the same, writing its files where the conventional tool does.
+#[allow(clippy::type_complexity)]
+fn ssa_tools(
+    between: &mut Between,
+) -> impl FnMut(&mut native::NativeHost, &[(Vec<u8>, std::sync::Arc<[u8]>)]) -> (bool, Vec<String>) + '_
+{
+    move |host, streams| {
+        // (each stream by the path its file has, in the output directory)
+        let ending = |ext: &[u8]| -> Vec<(Vec<u8>, Vec<u8>)> {
+            streams
+                .iter()
+                .filter(|(name, _)| name.ends_with(ext))
+                .map(|(name, c)| {
+                    (
+                        host.in_output_dir(name).unwrap_or_else(|| name.clone()),
+                        c.to_vec(),
+                    )
+                })
+                .collect()
+        };
+        let mut lines = bibtex::after_pass(&mut between.bib, &ending(b".aux"));
+        lines.extend(makeindex::after_pass(&mut between.idx, &ending(b".idx")));
+        (!lines.is_empty(), lines)
+    }
+}
+
+/// A build's trips, as the SSA report gives them: each trip's steps,
+/// commands and time, whether the build converged, and the outside
+/// tools' runs.
+#[allow(clippy::cast_precision_loss, reason = "a report")]
+fn report_trips(what: &str, r: &partex_core::ssa::RebuildReport) {
+    let each: Vec<String> = (0..r.trips)
+        .map(|k| {
+            format!(
+                "trip {}: {} steps, {} commands, {:.1} ms",
+                k + 1,
+                r.trip_steps.get(k).copied().unwrap_or(0),
+                r.trip_commands.get(k).copied().unwrap_or(0),
+                r.trip_ns.get(k).copied().unwrap_or(0) as f64 / 1e6
+            )
+        })
+        .collect();
+    let state = if r.settled {
+        String::from("settled")
+    } else if r.unsupported.is_some() {
+        String::from("stopped")
+    } else {
+        let names: Vec<String> = r
+            .unsettled
+            .iter()
+            .map(|n| String::from_utf8_lossy(n).into_owned())
+            .collect();
+        format!(
+            "not settled: the loads of {} read what the trip before stored",
+            names.join(", ")
+        )
+    };
+    eprintln!(
+        "partex: ssa {what}: trips {} ({state}); {}",
+        r.trips,
+        each.join("; ")
+    );
+    for t in &r.tools {
+        eprintln!("partex: ssa {what}: {t}");
+    }
 }
 
 /// The SSA build's link (DESIGN 7.17.3, "The link after a rebuild is a

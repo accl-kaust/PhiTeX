@@ -44,7 +44,7 @@ use crate::track::{Cell, LineCodes, Output, Row, Tracker, line_tokens};
 
 mod rebuild;
 
-pub use rebuild::{RebuildReport, rebuild, rebuild_log};
+pub use rebuild::{RebuildReport, Trips, rebuild, rebuild_log, rebuild_trips, settle};
 
 /// A slot's family.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
