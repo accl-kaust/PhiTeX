@@ -21,6 +21,7 @@ partex-core = { path = "../partex-core" }
 partex-incr = { path = "../partex-incr" }
 partex-kpse = { path = "../partex-kpse" }
 partex-trace = { path = "../partex-trace" }
+phitex-doc = { path = "../phitex-doc" }
 
 [lints]
 workspace = true
