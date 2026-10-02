@@ -49,12 +49,11 @@ struct Seen {
     files: HashMap<Vec<u8>, (Stamp, std::sync::Arc<[u8]>)>,
     /// Each name's last lookup, by kind.
     lookups: HashMap<(Vec<u8>, FileKind), Lookup>,
-    /// The directories of those, watched (`crate::inotify`), and when
-    /// each load was last found as it was (the watcher's count then): a
-    /// load whose directories had no event since needs no `stat`;
-    /// `unwatched`: there is no watcher (`PARTEX_INOTIFY=0`, or none).
+    /// The directories of those, watched (`crate::inotify`): a load none
+    /// of whose names had an event since it was last found as it was
+    /// (`Lookup::checked`) needs no `stat`; `unwatched`: there is no
+    /// watcher (`PARTEX_INOTIFY=0`, or none).
     watch: Option<crate::inotify::Watcher>,
-    checked: HashMap<(Vec<u8>, FileKind), u64>,
     unwatched: bool,
 }
 
@@ -63,6 +62,8 @@ struct Seen {
 struct Lookup {
     found: Option<Vec<u8>>,
     trail: Vec<Missed>,
+    /// When `unchanged` last found it as it was (the watcher's count).
+    checked: Option<u64>,
 }
 
 /// The candidates a lookup tried in one directory and did not find, and
@@ -379,6 +380,7 @@ impl Host for NativeHost {
             Lookup {
                 found: found_at,
                 trail: missed,
+                checked: None,
             },
         );
         found.ok().flatten()
@@ -388,80 +390,85 @@ impl Host for NativeHost {
         let Some(seen) = &mut self.seen else {
             return vec![false; loads.len()];
         };
-        // (the watcher: the events since the last look taken, and every
-        // directory of these loads watched before any is checked, so a
-        // change after a check is an event the next look takes)
+        // (the watcher's events since the last look taken first: a check
+        // made now knows them all)
         if seen.watch.is_none() && !seen.unwatched {
             seen.watch = crate::inotify::Watcher::new();
             seen.unwatched = seen.watch.is_none();
         }
         if let Some(w) = seen.watch.as_mut() {
             w.look();
-            for &(name, kind, _) in loads {
-                if let Some(l) = seen.lookups.get(&(name.to_vec(), kind)) {
-                    let found = l.found.as_deref().map(|p| crate::inotify::split(p).0);
-                    for d in l.trail.iter().map(|m| &m.dir[..]).chain(found) {
-                        w.watch(d);
-                    }
-                }
-            }
         }
         let now = seen.watch.as_ref().map(crate::inotify::Watcher::now);
         // (each directory looked at once)
-        let mut dirs: HashMap<&[u8], Option<Stamp>> = HashMap::new();
-        let found: Vec<bool> = loads
+        let mut dirs: HashMap<Vec<u8>, Option<Stamp>> = HashMap::new();
+        loads
             .iter()
             .map(|&(name, kind, last)| {
-                let key = (name.to_vec(), kind);
-                let Some(l) = seen.lookups.get(&key) else {
+                let Some(l) = seen.lookups.get_mut(&(name.to_vec(), kind)) else {
                     return false;
                 };
-                // (a directory watched since this load's last check, with
-                // no event in it since, is as that check found it)
-                let quiet = |d: &[u8]| {
-                    seen.watch
-                        .as_ref()
-                        .zip(seen.checked.get(&key))
-                        .is_some_and(|(w, &c)| w.quiet(d, c))
-                };
-                // (a directory with its stamp holds none of the candidates;
-                // in one changed since, each is looked at: not a file, as
-                // kpathsea's `readable_file` asks)
-                if !l.trail.iter().all(|m| {
-                    quiet(&m.dir) || {
-                        let now = *dirs.entry(&m.dir).or_insert_with(|| dir_stamp(&m.dir));
+                let w = &mut seen.watch;
+                // (as it was when last checked, if none of its names had an
+                // event since: its candidates still absent, its file as read)
+                let quiet = w.as_ref().zip(l.checked).is_some_and(|(w, c)| {
+                    l.trail.iter().all(|m| {
+                        w.quiet(
+                            &m.dir,
+                            m.files.iter().map(|f| crate::inotify::split(f).1),
+                            c,
+                        )
+                    }) && l.found.as_deref().is_none_or(|p| {
+                        let (d, n) = crate::inotify::split(p);
+                        w.quiet(d, [n], c)
+                    })
+                });
+                let same = if quiet {
+                    match (&l.found, last) {
+                        (None, None) => true,
+                        (Some(p), Some(last)) => seen.files.get(p).is_some_and(|(_, a)| {
+                            std::sync::Arc::ptr_eq(a, last) || a[..] == last[..]
+                        }),
+                        _ => false,
+                    }
+                } else {
+                    // (its directories watched before it is checked, so a
+                    // change after the check is an event the next look takes)
+                    if let Some(w) = w.as_mut() {
+                        let found = l.found.as_deref().map(|p| crate::inotify::split(p).0);
+                        for d in l.trail.iter().map(|m| &m.dir[..]).chain(found) {
+                            w.watch(d);
+                        }
+                    }
+                    // (a directory with its stamp holds none of the
+                    // candidates; in one changed since, each is looked at:
+                    // not a file, as kpathsea's `readable_file` asks)
+                    l.trail.iter().all(|m| {
+                        let now = *dirs
+                            .entry(m.dir.clone())
+                            .or_insert_with(|| dir_stamp(&m.dir));
                         (m.kept && m.stamp == now)
                             || m.files
                                 .iter()
                                 .all(|f| !std::fs::metadata(path(f)).is_ok_and(|m| m.is_file()))
+                    }) && match (&l.found, last) {
+                        // (found where it was, with the stamp it had just
+                        // before its contents were read; two names can find
+                        // one file)
+                        (None, None) => true,
+                        (Some(p), Some(last)) => seen.files.get(p).is_some_and(|(st, a)| {
+                            stamp(p) == Some(*st)
+                                && (std::sync::Arc::ptr_eq(a, last) || a[..] == last[..])
+                        }),
+                        _ => false,
                     }
-                }) {
-                    return false;
-                }
-                // (found where it was, with the stamp it had just before
-                // its contents were read; two names can find one file)
-                match (&l.found, last) {
-                    (None, None) => true,
-                    (Some(p), Some(last)) => seen.files.get(p).is_some_and(|(st, a)| {
-                        (quiet(crate::inotify::split(p).0) || stamp(p) == Some(*st))
-                            && (std::sync::Arc::ptr_eq(a, last) || a[..] == last[..])
-                    }),
-                    _ => false,
-                }
+                };
+                // (one found as it was is checked as of now; one that was
+                // not is read again, and checked by its stamps next time)
+                l.checked = if same { now } else { None };
+                same
             })
-            .collect();
-        // (each load found as it was is checked as of now; one that was
-        // not is read again, and checked by its stamps next time)
-        if let Some(now) = now {
-            for (&(name, kind, _), &same) in loads.iter().zip(&found) {
-                if same {
-                    seen.checked.insert((name.to_vec(), kind), now);
-                } else {
-                    seen.checked.remove(&(name.to_vec(), kind));
-                }
-            }
-        }
-        found
+            .collect()
     }
 
     fn open_write(&mut self, name: &[u8], kind: FileKind) -> Option<(WriteId, Vec<u8>)> {
