@@ -544,8 +544,10 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                     let mut f = self.input_file[index].take().unwrap_or_default();
                     let from = f.pos;
                     let got = self.input_ln(&mut f);
-                    if matches!(got, Ok(true)) {
-                        self.start_line(&mut f, from, true);
+                    match got {
+                        Ok(true) => self.start_line(&mut f, from, true),
+                        Ok(false) => self.end_of_file(&f, from),
+                        Err(_) => {}
                     }
                     self.input_file[index] = Some(f);
                     got?

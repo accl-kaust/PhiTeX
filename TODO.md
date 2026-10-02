@@ -135,13 +135,13 @@ to the cold build's):
      nothing. LTO is the default now (LOG 2026-10-02, "A step run again
      keeps its files' handles").
    - The step holding `\input{ch15}` re-runs 564 commands because the
-     file it loads changed, and changes nothing. The cause: LaTeX's
-     `\input{ch15}` first opens `ch15` only to test that it is there
-     (`\IfFileExists`: `\openin`, `\ifeof`, `\closein`), and a load whose
-     data has no line read counts as read whole. The fix: a load opened
-     by `\openin` and closed with no line asked for reads only whether the
-     file is there. An `\input` or a `\read` that met the file's end must
-     still count as reading it (no line is recorded for an empty file).
+     file it loads changed, and changes nothing. The cause, found while
+     doing the fix this item planned (LOG 2026-10-02, "Loads by lines"):
+     the kernel's `\IfFileExists` asks `\file_full_name:n`, which reads
+     the file's size (`\pdffilesize`), a read of it whole; only whether
+     the size is blank is used. Reading the size as a value of its own
+     would spare only edits that keep the file's length. Left as is: the
+     step is small (the extension's article: 178 commands).
    - DVI mode: an edit that changes a page's DVI length re-runs every
      later page's shipout (each `bop` points back at the one before by its
      offset, and the movement reuse of §611 depends on the buffer's

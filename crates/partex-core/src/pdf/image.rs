@@ -210,7 +210,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
     /// writeimg.c's `read_image`.
     fn read_image(&mut self, s: &[u8], colorspace: i32) -> Result<Arc<Image>, Jump> {
         // (a load: a name the job stores reads its store, DESIGN 3.7)
-        let found = self.read_source(s);
+        let found = self.read_source(s, false);
         let Some(f) = found else {
             let mut m = b"cannot find image file ".to_vec();
             m.extend_from_slice(s);

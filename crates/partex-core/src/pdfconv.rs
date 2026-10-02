@@ -90,7 +90,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             PDF_FILE_SIZE_CODE => {
                 let name = file_name(&self.scan_ext_string()?);
                 // (a load: a name the job stores reads its store, DESIGN 3.7)
-                let found = self.read_source(&name);
+                let found = self.read_source(&name, false);
                 match found {
                     Some(f) => alloc::format!("{}", f.contents.len()).into_bytes(),
                     None => Vec::new(),
@@ -105,7 +105,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                 let digest = if file {
                     let name = file_name(&s);
                     // (a load: a name the job stores reads its store)
-                    let found = self.read_source(&name);
+                    let found = self.read_source(&name, false);
                     found.map(|f| partex_engine::md5::md5(&f.contents))
                 } else {
                     Some(partex_engine::md5::md5(&s))
@@ -319,7 +319,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         }
         let name = file_name(&s);
         // (a load: a name the job stores reads its store, DESIGN 3.7)
-        let found = self.read_source(&name);
+        let found = self.read_source(&name, false);
         let Some(f) = found else {
             return Ok(Vec::new());
         };

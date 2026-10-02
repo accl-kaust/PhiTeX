@@ -350,6 +350,14 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         }
     }
 
+    /// `f` met its end at byte `from`, no line there (a read of the next
+    /// line that found none): what lines added there change.
+    pub(crate) fn end_of_file(&self, f: &AlphaFile, from: usize) {
+        if T::LINES {
+            self.tracker.eof_read(&f.data, from);
+        }
+    }
+
     /// Continue reading `new` wherever `old` is open, with the same input
     /// left (a file changed in the part read so far, and each open file's
     /// rest ends both).

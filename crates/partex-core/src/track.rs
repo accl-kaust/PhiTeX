@@ -542,6 +542,21 @@ pub trait Tracker {
         _contents: Option<&alloc::sync::Arc<[u8]>>,
     ) {
     }
+    /// (With [`Tracker::VALUES`].) [`Tracker::load`] of a file to be read
+    /// by lines (`\\input`, `\\openin`): what the reader takes of its
+    /// contents is the lines it reads and the ends it meets
+    /// ([`Tracker::eof_read`]); the load itself, whether the file is there.
+    fn load_lines(
+        &self,
+        name: &[u8],
+        kind: crate::host::FileKind,
+        contents: Option<&alloc::sync::Arc<[u8]>>,
+    ) {
+        self.load(name, kind, contents);
+    }
+    /// (With [`Tracker::LINES`].) A read of the next line of `data` found
+    /// its end, at byte `pos`: what lines added there change.
+    fn eof_read(&self, _data: &[u8], _pos: usize) {}
     /// (With [`Tracker::VALUES`].) What a load of `name` (`\\input`,
     /// `\\openin`) reads when the build holds the name's value: a name
     /// the job stores, inside a rebuild (DESIGN 7.17.3, "A load reads the

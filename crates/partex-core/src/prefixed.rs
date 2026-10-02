@@ -968,7 +968,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             self.scan_file_name()?;
             self.pack_file_name(self.cur_name, self.cur_area, self.cur_ext);
             let name = self.name_of_file.clone();
-            let found = self.read_source(&name);
+            let found = self.read_source(&name, true);
             if let Some(f) = found {
                 let name: alloc::sync::Arc<[u8]> = f.name.as_slice().into();
                 if T::LINES {

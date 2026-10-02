@@ -1,0 +1,22 @@
+% Files read by lines. A file \input by the primitive (no \pdffilesize,
+% as LaTeX's \input reads), given a line after its last and then without
+% it: the step that met its end runs again, a read of no line there; its
+% MD5 sum, a read of it whole, changes with any edit. And a file only
+% tested for by \openin and \ifeof, edited: its contents are not read,
+% so nothing runs again.
+\documentclass{article}
+\newread\probe
+\begin{document}
+First paragraph.
+
+\makeatletter
+\@@input inputs-sub.tex
+\makeatother
+
+Its sum: \pdfmdfivesum file {inputs-sub.tex}.
+
+\immediate\openin\probe=inputs-probe.tex
+\ifeof\probe No probe.\else The probe is there.\immediate\closein\probe\fi
+
+Last paragraph.
+\end{document}

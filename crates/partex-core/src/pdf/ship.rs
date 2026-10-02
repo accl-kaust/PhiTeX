@@ -2486,7 +2486,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             // `kpse_tex_format`, so `\pdfobj file {t1.cmap}` is found on
             // TeX's search path)
             // (a load: a name the job stores reads its store, DESIGN 3.7)
-            let found = self.read_source(&s);
+            let found = self.read_source(&s, false);
             let Some(f) = found else {
                 self.print_nl(b"! ");
                 self.print_str(&s);

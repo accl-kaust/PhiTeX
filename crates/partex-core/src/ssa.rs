@@ -1178,6 +1178,59 @@ impl SsaTracker {
         self.check || !self.lean || f.recorded()
     }
 
+    /// A load of `name`, read `whole` ([`Tracker::load`]) or by lines
+    /// ([`Tracker::load_lines`]): a file read whole anywhere has its
+    /// contents compared by a rebuild, not only the lines read of it.
+    fn load_as(
+        &self,
+        name: &[u8],
+        kind: crate::host::FileKind,
+        contents: Option<&alloc::sync::Arc<[u8]>>,
+        whole: bool,
+    ) {
+        let Ok(mut r) = self.rec.try_borrow_mut() else {
+            return;
+        };
+        let rr = &mut *r;
+        let v = contents.map_or(Version::ABSENT, |c| Version::of(&c[..]));
+        let (id, fresh) = Recorder::intern(&mut rr.st.loads_ix, rr.st.loads.len(), name);
+        if fresh {
+            rr.st.loads.push((name.to_vec(), v, kind));
+        } else {
+            rr.st.loads[id as usize].1 = v;
+            rr.st.loads[id as usize].2 = kind;
+        }
+        if whole {
+            rr.st.steps.read_whole(id);
+        }
+        // (whether it read the φ, not the build's own store: DESIGN 7.17.3,
+        // "A load reads the store, not the file")
+        let key = rr
+            .rt
+            .open_step_id()
+            .map(|j| rr.rt.fold.steps[j as usize].key);
+        let phi = key.is_none_or(|k| rr.st.steps.reads_phi(&rr.rt.fold, id, k));
+        if let Some(c) = contents {
+            rr.st.steps.loaded(id, c, phi);
+        }
+        if !rr.on {
+            return;
+        }
+        // (the open step's load, with what it found)
+        if key.is_some() {
+            rr.st.steps.load_seen(id, v, phi);
+        }
+        if let (Some(src), Some(c)) = (rr.st.src.as_mut(), contents) {
+            src.opened.push(c.as_ptr() as usize);
+        }
+        let v = if rr.st.written.contains(name) {
+            rr.st.vers.revision(Slot(Fam::Unknown, 0))
+        } else {
+            v
+        };
+        rr.note(Slot(Fam::Load, i64::from(id)), v);
+    }
+
     /// Whether a step's frame keeps its own reads.
     fn step_keeps_reads(&self) -> bool {
         self.check || !self.lean
@@ -1787,44 +1840,27 @@ impl Tracker for SsaTracker {
         kind: crate::host::FileKind,
         contents: Option<&alloc::sync::Arc<[u8]>>,
     ) {
+        self.load_as(name, kind, contents, true);
+    }
+
+    fn load_lines(
+        &self,
+        name: &[u8],
+        kind: crate::host::FileKind,
+        contents: Option<&alloc::sync::Arc<[u8]>>,
+    ) {
+        self.load_as(name, kind, contents, false);
+    }
+
+    fn eof_read(&self, data: &[u8], pos: usize) {
         let Ok(mut r) = self.rec.try_borrow_mut() else {
             return;
         };
-        let rr = &mut *r;
-        let v = contents.map_or(Version::ABSENT, |c| Version::of(&c[..]));
-        let (id, fresh) = Recorder::intern(&mut rr.st.loads_ix, rr.st.loads.len(), name);
-        if fresh {
-            rr.st.loads.push((name.to_vec(), v, kind));
-        } else {
-            rr.st.loads[id as usize].1 = v;
-            rr.st.loads[id as usize].2 = kind;
+        if r.on && r.rt.open_step_id().is_some() {
+            // (a read of what follows the last line: an edit that adds
+            // lines there wakes it)
+            r.st.steps.eof_read(data, pos);
         }
-        // (whether it read the φ, not the build's own store: DESIGN 7.17.3,
-        // "A load reads the store, not the file")
-        let key = rr
-            .rt
-            .open_step_id()
-            .map(|j| rr.rt.fold.steps[j as usize].key);
-        let phi = key.is_none_or(|k| rr.st.steps.reads_phi(&rr.rt.fold, id, k));
-        if let Some(c) = contents {
-            rr.st.steps.loaded(id, c, phi);
-        }
-        if !rr.on {
-            return;
-        }
-        // (the open step's load, with what it found)
-        if key.is_some() {
-            rr.st.steps.load_seen(id, v, phi);
-        }
-        if let (Some(src), Some(c)) = (rr.st.src.as_mut(), contents) {
-            src.opened.push(c.as_ptr() as usize);
-        }
-        let v = if rr.st.written.contains(name) {
-            rr.st.vers.revision(Slot(Fam::Unknown, 0))
-        } else {
-            v
-        };
-        rr.note(Slot(Fam::Load, i64::from(id)), v);
     }
 
     fn stored(&self, name: &[u8]) -> Option<Option<alloc::sync::Arc<[u8]>>> {

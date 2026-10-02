@@ -66,6 +66,10 @@ pub(crate) struct Steps {
     loads: BTreeMap<StepId, Vec<LoadSeen>>,
     /// The names the job stores (the load ids of their addresses).
     stored: BTreeSet<u32>,
+    /// The loads some step read whole (`\pdffilesize`, `\pdfmdfivesum`,
+    /// an image, a font's file), not by lines: a rebuild compares their
+    /// contents, not only the lines read of them.
+    whole: BTreeSet<u32>,
     /// Inside a rebuild: each stored name's φ, what the last trip stored
     /// (absent: it was not there).
     phi: Option<BTreeMap<u32, Option<Arc<[u8]>>>>,
@@ -246,6 +250,20 @@ impl Steps {
             return;
         }
         self.step_lines.push((id, from, to));
+    }
+
+    /// The open step read file `data` to its end, at `pos`, finding no
+    /// line there: a read of nothing (an edit that adds lines there
+    /// touches it), kept apart from the line before.
+    pub(super) fn eof_read(&mut self, data: &[u8], pos: usize) {
+        if let Some(&id) = self.ids.get(&(data.as_ptr() as usize)) {
+            self.step_lines.push((id, pos, pos));
+        }
+    }
+
+    /// Load `id` was read whole.
+    pub(super) fn read_whole(&mut self, id: u32) {
+        self.whole.insert(id);
     }
 
     /// The open step read the line number of a level reading the data at
@@ -1043,10 +1061,13 @@ impl Edit {
     }
 
     /// Whether a hunk touches the old line `from..to` (or is inserted
-    /// where it begins).
+    /// where it begins); a read of no line (a file's end met at `from`)
+    /// is touched by a hunk that inserts or changes bytes there.
     fn touches(&self, from: usize, to: usize) -> bool {
         let i = self.hunks.partition_point(|h| h.ot < from);
-        self.hunks.get(i).is_some_and(|h| to > h.of)
+        self.hunks.get(i).is_some_and(|h| {
+            to > h.of || (from == to && h.of <= from && (h.ot > from || h.of == from))
+        })
     }
 
     /// File `f`, reading the data this edit replaced, in the new data
@@ -1402,7 +1423,7 @@ pub fn rebuild<H: Host>(tex: &mut Tex<H, SsaTracker>, trace: bool, apply: bool) 
         // kind of file it was loaded as)
         #[allow(clippy::type_complexity)]
         let (files, datas, lines): (
-            Vec<(u32, Vec<u8>, FileKind, Option<Arc<[u8]>>, bool, bool)>,
+            Vec<(u32, Vec<u8>, FileKind, Option<Arc<[u8]>>, bool, bool, bool)>,
             Vec<(u32, u32, Arc<[u8]>)>,
             BTreeSet<u32>,
         ) = {
@@ -1428,7 +1449,16 @@ pub fn rebuild<H: Host>(tex: &mut Tex<H, SsaTracker>, trace: bool, apply: bool) 
                             return None;
                         }
                         let old = s.files.get(i).cloned().flatten();
-                        Some((id, name.clone(), *kind, old, lines.contains(&id), stored))
+                        let whole = s.whole.contains(&id);
+                        Some((
+                            id,
+                            name.clone(),
+                            *kind,
+                            old,
+                            lines.contains(&id),
+                            stored,
+                            whole,
+                        ))
                     })
                     .collect();
             // (the data found in the files, not served from the stores)
@@ -1462,7 +1492,13 @@ pub fn rebuild<H: Host>(tex: &mut Tex<H, SsaTracker>, trace: bool, apply: bool) 
             tex.host.unchanged(&loads)
         };
         let (mut same, mut read) = (0, 0);
-        for ((id, name, kind, old, lines, stored), unchanged) in files.into_iter().zip(checks) {
+        // (a file read by lines that no step read a line of, nor met its
+        // end: only its being there was read, `\IfFileExists`; its
+        // contents now, for the next check)
+        let mut there: Vec<(u32, Arc<[u8]>)> = Vec::new();
+        for ((id, name, kind, old, lines, stored, whole), unchanged) in
+            files.into_iter().zip(checks)
+        {
             let now = if unchanged {
                 same += 1;
                 old.clone()
@@ -1472,12 +1508,17 @@ pub fn rebuild<H: Host>(tex: &mut Tex<H, SsaTracker>, trace: bool, apply: bool) 
             };
             match (&old, &now) {
                 _ if unchanged => {}
-                (Some(_), Some(now)) if lines => {
-                    nows.insert(id, now.clone());
+                (Some(o), Some(n)) if lines => {
+                    nows.insert(id, n.clone());
+                    // (and read whole somewhere: those readers compare it)
+                    if whole && o[..] != n[..] {
+                        loads.push((id, now.clone()));
+                    }
                 }
                 (Some(old), Some(now)) if old[..] == now[..] => {}
                 (None, None) => {}
                 _ if stored => {}
+                (Some(_), Some(n)) if !whole => there.push((id, n.clone())),
                 _ => loads.push((id, now.clone())),
             }
             if stored {
@@ -1546,6 +1587,24 @@ pub fn rebuild<H: Host>(tex: &mut Tex<H, SsaTracker>, trace: bool, apply: bool) 
         }
         let mut r = tex.tracker.rec.borrow_mut();
         let rr = &mut *r;
+        // (the files only tested for: as they are now, for the next check)
+        for (id, now) in there {
+            let i = id as usize;
+            if trace {
+                let name = rr.st.loads.get(i).map_or(&b""[..], |l| &l.0[..]);
+                let n = alloc::format!(
+                    "load {id} ({}): changed, read for its being there only",
+                    alloc::string::String::from_utf8_lossy(name)
+                );
+                rr.st.steps.log.push(n);
+            }
+            if let Some(l) = rr.st.loads.get_mut(i) {
+                l.1 = Version::of(&now[..]);
+            }
+            if let Some(f) = rr.st.steps.files.get_mut(i) {
+                *f = Some(now);
+            }
+        }
         // the loads that read the φ, dirty if it is not what they found
         for (key, s, id) in rr.st.steps.phi_seeds(&rr.rt.fold, &phi) {
             rep.phi += 1;

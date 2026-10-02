@@ -10371,3 +10371,37 @@ runs three times.
 DESIGN 7.17.3's rebuild steps 2 and 3 have the nest and the budget stop
 (the last entry's). The harness: 13 cases, 74 stages, identical with
 `--fixpoint` and with `PARTEX_SSA_TRIPS=1`.
+
+## 2026-10-02 — Loads by lines: a file only tested for, a file's end, a file read both ways (coordinator)
+
+TODO 3 planned this to stop the course's `\input{ch15}` step re-running
+(564 commands, the file "loaded whole" by LaTeX's `\IfFileExists`). It
+does not do that: the kernel's `\IfFileExists` asks `\file_full_name:n`,
+which reads the file's size with `\pdffilesize`, a read of the file
+whole, and the step reads the size's digits (only whether they are
+blank matters). What it does instead, each case in the harness's new
+`inputs` case (`tests/e2e/inputs.tex`), which the binary before fails
+at two stages:
+
+- **A load says how it is read.** `\input` and `\openin` load by lines
+  (`Tracker::load_lines`); `\pdffilesize`, `\pdfmdfivesum`, images and
+  font files load whole (`Tracker::load`).
+- **A file only tested for.** A file loaded by lines that no step read a
+  line of, nor met the end of, and that nothing read whole: only its
+  being there was read (`\openin` and `\ifeof`). An edit to it runs
+  nothing again, and its contents are kept for the next check. The
+  harness's probe edit: 1 step before, 0 after (0.3 ms).
+- **A file's end is a read.** `input_ln` that finds no line records a
+  read of no line at the end (`Tracker::eof_read`), which an edit that
+  inserts there touches (`Edit::touches`). Before, a line appended after
+  the last line of a file read by the `\input` primitive touched no
+  recorded line: the rebuild ran nothing and the page missed the line
+  (stage 2 differed, 0 steps run). LaTeX's `\input` hid this, as its
+  `\pdffilesize` re-ran the step anyway.
+- **A file read both ways.** A file read by lines whose contents changed
+  also wakes its whole readers. Before, only the steps that read changed
+  lines ran: a `\pdfmdfivesum` of an `\input` file printed the old sum
+  (stage 4 differed).
+
+The harness: 14 cases, 79 stages, identical with `--fixpoint`, with
+`PARTEX_SSA_TRIPS=1` and in check mode.

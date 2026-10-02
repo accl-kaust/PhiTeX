@@ -21,12 +21,16 @@ e2e's `machine_edits` seeds them; `label`: the same document given a
 `\\label` nothing refers to, then rebuilt twice with no edit;
 `aux_reopen` (`reopen.tex`, pdflatex format): an edit in the first
 paragraph, whose step opens the `.aux` and whose page opens the PDF, its
-revert, and a later edit; and `streams` (`streams.tex`): a line written to
+revert, and a later edit; `streams` (`streams.tex`): a line written to
 the file a stream opened first, changed and back, after the stream opened
-a second; and `fatal_end` (`fatal-end.tex`): a word edited and back in a
-job that ends fatally in its last page's output routine, not seeded: the
+a second; `fatal_end` (`fatal-end.tex`): a word edited and back in a job
+that ends fatally in its last page's output routine, not seeded: the
 .aux the first build wrote is read by its next trip (or, one trip a
-build, by the next stage's), which runs earlier steps again.
+build, by the next stage's), which runs earlier steps again; and
+`inputs` (`inputs.tex`): a file only tested for (`\\openin` and
+`\\ifeof`), edited, and a line appended after the last line of a file
+`\\input` (the primitive), then taken away, then a word of it changed,
+the file's MD5 sum printed.
 
 Each case runs in WORK/<case>/:
 - `o/`: the oracle, one run per stage, the stage's edit made before it
@@ -125,6 +129,14 @@ REOPEN_EDITS = [
 # streams.tex: a line its first file's step writes, changed and back,
 # after the stream opened a second file
 STREAMS_EDITS = [("{Beta}", "{Gamma}"), ("{Gamma}", "{Beta}")]
+# inputs.tex: the file only tested for, edited; a line appended to the
+# file \input and taken away; a word of it, whose sum is printed
+INPUTS_EDITS = [
+    ("inputs-probe.tex", "alpha", "beta"),
+    ("inputs-sub.tex", "its last line.\n", "its last line.\nAppended after it.\n"),
+    ("inputs-sub.tex", "Appended after it.\n", ""),
+    ("inputs-sub.tex", "Sub text", "Sub words"),
+]
 # fatal-end.tex: a word, edited and back, in a job that ends fatally in
 # its last page's output routine
 FATAL_EDITS = [("Hello world.", "Hello there."), ("Hello there.", "Hello world.")]
@@ -288,6 +300,15 @@ def all_cases():
         # (not seeded: the first build's second trip reads the .aux the
         # first wrote, as the next stage's pass does with one trip a build)
         latex("fatal_end", "fatal-end.tex", "pdflatex", FATAL_EDITS, seed=0),
+        Case(
+            "inputs",
+            {"edits.tex": "inputs.tex", **{f: f for f in ("inputs-sub.tex", "inputs-probe.tex")}},
+            "pdflatex",
+            [*LATEX_FLAGS, "-fmt=pdflatex", "-output-directory=out", "edits"],
+            INPUTS_EDITS,
+            outdir="out",
+            seed=2,
+        ),
     ]
 
 

@@ -496,8 +496,13 @@ impl<H: Host, T: Tracker> Tex<H, T> {
     /// the host's, or, for a name the job stores, inside a rebuild, the
     /// store's value there (DESIGN 3.7: a load is served the store, never
     /// the file, which a step run again may have truncated), under the
-    /// name the host finds it by. A load (7.17.5).
-    pub(crate) fn read_source(&mut self, name: &[u8]) -> Option<crate::host::OpenedFile> {
+    /// name the host finds it by. A load (7.17.5): by `lines` (`\input`,
+    /// `\openin`), or whole.
+    pub(crate) fn read_source(
+        &mut self,
+        name: &[u8],
+        lines: bool,
+    ) -> Option<crate::host::OpenedFile> {
         let found = self.host.read_file(name, FileKind::Tex);
         if !T::VALUES {
             return found;
@@ -509,8 +514,12 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             }),
             None => found,
         };
-        self.tracker
-            .load(name, FileKind::Tex, found.as_ref().map(|f| &f.contents));
+        let contents = found.as_ref().map(|f| &f.contents);
+        if lines {
+            self.tracker.load_lines(name, FileKind::Tex, contents);
+        } else {
+            self.tracker.load(name, FileKind::Tex, contents);
+        }
         found
     }
 
@@ -523,7 +532,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             self.begin_file_reading()?; // set up `cur_file` and new level of input
             // Kpathsea tries all the various ways to get the file.
             let name = self.name_of_file.clone();
-            let found = self.read_source(&name);
+            let found = self.read_source(&name, true);
             if let Some(f) = found {
                 // web2c's `open_input`: drop a leading `./` the user did
                 // not type.
@@ -592,8 +601,10 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         let mut f = self.input_file[index].take().unwrap_or_default();
         let from = f.pos;
         let r = self.input_ln(&mut f);
-        if matches!(r, Ok(true)) {
-            self.start_line(&mut f, from, true);
+        match r {
+            Ok(true) => self.start_line(&mut f, from, true),
+            Ok(false) => self.end_of_file(&f, from),
+            Err(_) => {}
         }
         self.input_file[index] = Some(f);
         r?;
