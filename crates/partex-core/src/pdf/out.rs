@@ -1127,9 +1127,11 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             // unless a relocation's digits differ; the host keeps it, so
             // the link finds it again then)
             let size = if level > 0 {
+                // (a host with no deflate: zlib's stored blocks, as the
+                // link writes them then)
                 self.host
                     .deflate(level, &data)
-                    .map_or(data.len(), |z| z.len())
+                    .map_or_else(|| partex_engine::zlib::stored_len(data.len()), |z| z.len())
             } else {
                 data.len()
             };

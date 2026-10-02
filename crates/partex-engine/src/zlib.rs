@@ -56,6 +56,14 @@ pub fn stored(data: &[u8]) -> Vec<u8> {
     out
 }
 
+/// The length of [`stored`]'s output for `n` bytes: its header, a
+/// block's five bytes for each 65,535 bytes (one for none), the bytes,
+/// and the checksum.
+#[must_use]
+pub fn stored_len(n: usize) -> usize {
+    2 + 5 * n.div_ceil(65535).max(1) + n + 4
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -69,5 +77,16 @@ mod tests {
     #[test]
     fn stored_empty() {
         assert_eq!(stored(b""), [0x78, 1, 1, 0, 0, 0xFF, 0xFF, 0, 0, 0, 1]);
+    }
+
+    #[test]
+    fn stored_lengths() {
+        for n in [0, 1, 65_534, 65_535, 65_536, 131_070, 200_000] {
+            assert_eq!(
+                stored(&alloc::vec![7u8; n]).len(),
+                stored_len(n),
+                "{n} bytes"
+            );
+        }
     }
 }
