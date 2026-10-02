@@ -1692,10 +1692,10 @@ pub fn rebuild<H: Host>(tex: &mut Tex<H, SsaTracker>, trace: bool, apply: bool) 
         // (the step whose old end the runs try to meet, and that end)
         let cursor = j;
         let mut cur = j;
-        let mut predict = j;
+        let mut predict = alloc::vec![j];
         loop {
             let c0 = tex.commands();
-            let end = run_step(tex, cur, predict, &input, &mut dirty, &mut rep, &mut srep);
+            let end = run_step(tex, cur, &predict, &input, &mut dirty, &mut rep, &mut srep);
             if let Some(t) = target.take() {
                 target = Some(data_edits(tex, &end, t, &mut dirty, &mut rep));
             }
@@ -1778,11 +1778,14 @@ pub fn rebuild<H: Host>(tex: &mut Tex<H, SsaTracker>, trace: bool, apply: bool) 
                         .collect();
                 }
                 // (a new step's reads are predicted by the old step whose
-                // text it runs)
-                predict = fold
+                // text it runs, and by the step just run: text the old run
+                // never read, as a table of contents read for the first
+                // time, reads what the step before it read)
+                let old = fold
                     .position(n)
                     .and_then(|p| fold.order.get(p + 1).copied())
                     .unwrap_or(cursor);
+                predict = alloc::vec![old, cur];
                 n
             };
             rep.new_steps += 1;
@@ -2313,14 +2316,14 @@ fn drop_outputs<H: Host>(tex: &mut Tex<H, SsaTracker>) {
 }
 
 /// Run step `j` at its place from `input` (7.17.3 items 2 and 3, "A read
-/// resolves by prediction and validation"), the reads of step `predict`'s
-/// last run predicting its own; mark the readers of the definitions it
-/// changed dirty. Its result.
+/// resolves by prediction and validation"), the reads of the last runs of
+/// the steps `predict` predicting its own; mark the readers of the
+/// definitions it changed dirty. Its result.
 #[allow(clippy::too_many_arguments)]
 fn run_step<H: Host>(
     tex: &mut Tex<H, SsaTracker>,
     j: StepId,
-    predict: StepId,
+    predict: &[StepId],
     input: &InputState,
     dirty: &mut BTreeMap<u64, StepId>,
     rep: &mut RebuildReport,
@@ -2337,14 +2340,17 @@ fn run_step<H: Host>(
         let fold = &r.rt.fold;
         let key = fold.steps[j as usize].key;
         let old = defs(&r.rt, &fold.steps[j as usize].recs);
-        let reads = fold.steps[predict as usize]
-            .reads
+        let reads = predict
             .iter()
+            .flat_map(|&p| &fold.steps[p as usize].reads)
             .filter(|a| positioned(a) && later(fold, a, key))
             .copied()
             .collect();
         // (a run past it that read a later definition stops: [`Watch`])
-        let last = r.st.step_commands.get(predict as usize).copied();
+        let last = predict
+            .iter()
+            .filter_map(|&p| r.st.step_commands.get(p as usize).copied())
+            .max();
         let budget = last.unwrap_or(0).saturating_mul(2).saturating_add(10_000);
         (key, old, reads, budget)
     };
@@ -2638,7 +2644,7 @@ fn run_step<H: Host>(
         note(
             tex,
             alloc::format!(
-                "step {j} (key {key}, predicted by {predict}): {} commands, changed {}",
+                "step {j} (key {key}, predicted by {predict:?}): {} commands, changed {}",
                 tex.commands() - c0,
                 changed.join(", ")
             ),

@@ -1161,9 +1161,12 @@ of *steps*: calls from one clean point to the next.
 5. A step that ended where its old run did (its result, mapped, equals
    the old one) goes on to the next dirty step. One that ended elsewhere
    (Enter pressed, a paragraph break deleted) runs on, a step at a time,
-   until one ends at an old step's start. The old steps passed over are
-   removed with their definitions, and their readers now read the
-   definitions before them.
+   until one ends at an old step's start. Each new step's reads are
+   predicted by the old step after it, whose text it runs, and by the
+   step just run, whose text is like its own where the run reads text
+   the old one never read (a table of contents read for the first
+   time). The old steps passed over are removed with their definitions,
+   and their readers now read the definitions before them.
 6. After the steps, the arrays hold every slot's latest definition
    again. That ends a trip.
 7. The trip's stores are the next trip's φ (3.7, "Trips, as built"):

@@ -10405,3 +10405,31 @@ at two stages:
 
 The harness: 14 cases, 79 stages, identical with `--fixpoint`, with
 `PARTEX_SSA_TRIPS=1` and in check mode.
+
+## 2026-10-02 — A new step is predicted by the step just run too (coordinator)
+
+A new step's reads were predicted by the old step after it, "whose text
+it runs" (a paragraph split by Enter runs the old step's text). Where
+the run reads text the old run never read, that step is unrelated: the
+first rebuild after a cold build of one trip sets the table of contents
+for the first time, and each new line, predicted by the
+`\tableofcontents` step, missed most of its reads (156 of 216) and ran
+three times. The step just run reads what the next line will, so it
+predicts too: both steps' reads are placed (a slot placed at its
+reaching value is always right; it costs a lookup), and the budget is
+the larger of their last runs'.
+
+Measured locally, the binary before and after, one-trip cold build then
+one word edit:
+
+| document | rebuild before | after | runs dropped |
+|---|---:|---:|---:|
+| article, 120 sections and their table of contents | 836 ms | 467 ms | 455 → 99 |
+| PGF manual, three chapters (`\includeonly`) | 57.1 s | 34.6 s | 814 → 383 |
+
+The same PDF before and after in both. The manual's rebuild still
+exceeds its cold build (32.7 s): every page after the table of contents
+moves, and a re-run costs more per command than a cold run (TODO 3).
+
+The harness: 14 cases, 79 stages, identical with `--fixpoint`, with
+`PARTEX_SSA_TRIPS=1` and in check mode.
