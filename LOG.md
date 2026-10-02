@@ -9443,3 +9443,48 @@ definition plus the token lists, about 3.6 GB, and 1.5 G read edges);
 starting SSA at `\begin{document}` (keyed on a name, and a setup edit
 would be a cold build, where the setup as a span re-runs 6.5% and wakes
 only what changed).
+
+## 2026-10-02 — A group's end is not a call; records for steps and typesetting calls only (agent records)
+
+Commits 3b410c5 (item 1) and the one after it (item 2), DESIGN 4.3 item 2.
+
+**What changed.**
+- `unsave` (§281) is not a call: its restores are writes of the step
+  that runs it. `Func::Unsave`/`UnsaveAfter` go with their records,
+  frames, probes, applied hits and chunk cuts; `\aftergroup`'s tokens
+  come from the step's own run, so no hit can lose them.
+- Outside check mode only the steps and the pure typesetting calls
+  (`line_break`, `hpack`, `vpack`, page steps, `ship_out`, the fonts)
+  get frames and records (`Func::recorded`); `tokenize`, `write_out`
+  and the output routine run in the frame around them. A step's frame
+  (`Runtime::begin_lean`) keeps no own reads and no `Item::Wrote`: a read
+  in it is only the open step's read from outside it (the fold's
+  readers, as before), and no version is made for it. The tokenizer's
+  code reads stay the step's reads (a lean frame or the root notes them
+  as the step's). `PARTEX_SSA_LEAN=0` records as before.
+
+**Tests.** scripts/ssa-edits: 10/10 cases, 61 stages identical after
+each commit, plain and `--check` (the check reports' uncovered parts as
+on main; fewer hits checked), and `PARTEX_SSA_APPLY=0`; the per-stage
+steps and commands are main's.
+
+**Measured** (a 3-chapter copy of the course: ch00, ch01, ch15; 8.8 M
+commands, 49 K steps; `perf stat -e instructions:u`, `/usr/bin/time`,
+local machine under load 12-20, so wall times are only indicative):
+
+| build | instructions:u | / plain | peak RSS | minor faults | records |
+|---|---|---|---|---|---|
+| plain (main) | 42.09 G | 1 | 157 MB | 23.6 K | — |
+| SSA, main (cb30e2e) | 141.24 G | 3.36 | 3.06 GB | 576 K | 223,943 (157.6 K unsave) |
+| SSA, item 1 (3b410c5) | 120.19 G | 2.86 | 1.57 GB | 270 K | 66,307 |
+
+Item 2 was not measured yet (the user's tokens ran out). What remains
+for the 1.5x / 4 GB targets, from perf on main's binary (self time):
+`Fold::close` 5-7% (the readers' and definitions' sorted inserts do a
+binary search per entry; a cold build only appends), the tracker's read
+path ~13% (`read_content`, `table_at` three times per read, `stamp`),
+token-list versions ~4% (`TokenList::remake`), page faults ~3-5%, and
+hashing at every eqtb write (`wrote_eqtb`), which a lazy version made
+at a step's end or a recorded read would cut. Tokenize's record was
+dropped with item 2; its rebuild numbers against the old record are
+still to be compared on the course's word edit.

@@ -1023,13 +1023,18 @@ fn deliver_effects<T: partex_core::track::Tracker>(tex: &mut Tex<native::NativeH
 /// §7.17, `partex_core::ssa`), with `PARTEX_SSA_CHECK=1` check mode.
 /// `PARTEX_SSA_REBUILD=<shell command>` runs the command after the cold
 /// build (an edit) and builds again with the same records;
-/// `PARTEX_SSA_TRACE=<file>` writes the last build's trace there.
+/// `PARTEX_SSA_TRACE=<file>` writes the last build's trace there;
+/// `PARTEX_SSA_LEAN=0` records every routine, and each step's own reads.
 fn run_ssa(host: native::NativeHost, params: Params, command_line: &[u8]) -> i32 {
     use partex_core::ssa::{Recorder, SsaTracker};
     let check = std::env::var("PARTEX_SSA_CHECK").is_ok_and(|v| v == "1");
     let rebuild = std::env::var("PARTEX_SSA_REBUILD").ok();
     let apply = std::env::var("PARTEX_SSA_APPLY").is_ok_and(|v| v == "1");
-    let mut tex = Tex::new(host, SsaTracker::new(Recorder::new()), params);
+    // (records for the steps and the typesetting calls only, DESIGN 4.3
+    // item 2; `=0`: every routine's, and the steps' own reads)
+    let mut tracker = SsaTracker::new(Recorder::new());
+    tracker.set_lean(!std::env::var("PARTEX_SSA_LEAN").is_ok_and(|v| v == "0"));
+    let mut tex = Tex::new(host, tracker, params);
     let t0 = std::time::Instant::now();
     let r = partex_core::ssa::run_applying(&mut tex, command_line, check, 0, apply);
     if check {
