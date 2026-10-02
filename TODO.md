@@ -124,6 +124,15 @@ to the cold build's):
    - **Done: the job's end no longer runs for a word edit** (an early
      cutoff on each font's union of glyphs; LOG 2026-10-02). The word
      edit went from 49.3 ms to 37.9 ms on accl (job 6318).
+   - **Done since** (LOG 2026-10-02, "Typing on the course"): typing a
+     new word 41.3 → 30.6 ms on accl (job 6324); with LTO about 28 ms.
+     Left, by the profile after them: the tracker (21%), positioning and
+     restoring slots (`run_step`, `latest`: most of 19%), the page's
+     deflate (12%: the engine's byte count `gone` needs the compressed
+     size at once, so overlapping it needs that count deferred), the
+     link's fresh deflates (3.1 ms: two streams, which could go in
+     parallel), the `\input{ch15}` step that reruns 564 commands for
+     nothing, and LTO as the default (the user's call).
    - The step holding `\input{ch15}` re-runs 564 commands because the
      file it loads changed, and changes nothing.
    - How the profile was taken: a frame-pointer build

@@ -9995,3 +9995,58 @@ main; final outputs equal to the cold build's):
 | word revert, median | 49.8 ms | 34.8 ms |
 | word: steps, commands | 6, 4,450 | 5, 4,443 |
 | label | 6.90 s | 6.62 s |
+
+## 2026-10-02 — Typing on the course: 41.3 → 30.6 ms; TikZ edits measured (coordinator)
+
+**The bench measures typing.** `bench/ssa-course.sh`'s warm word edits
+put a different word in each time: the page and what the link
+compresses were never made before. Alternating one edit with its revert
+let the link find every stream it compresses in its cache (0.1 ms); a
+new word costs it 3.1 ms. Three edits in ch15's pgfplots figure join
+`bench/edits/course.txt` (`tikz-node`, `tikz-coord`, `tikz-plot`).
+
+**Changes** (each measured on accl, acclnode01, the warm word edit's
+median of 10, final outputs equal to the cold build's):
+
+| change | job | word edit (rebuild) |
+|---|---|---:|
+| main (edd563d), typing | 6319 | 41.3 ms (37.5) |
+| a data an edit replaced, no line of it read, not diffed again; inotify | 6320 | 37.6 ms (34.4) |
+| a rerun step that read what its last run read keeps its reader entries | 6321 | 36.0 ms (32.7) |
+| a read finds its table index once; `table_at`, `stamp`, `read_slot` inline | 6322 | 33.4 ms (29.8) |
+| the watcher precise per name (`PARTEX_INOTIFY=0` on the same binary: 33.4) | 6324 | 30.6 ms (28.5) |
+
+- The diffs: every data a file was ever loaded with was compared with
+  its new text at each rebuild, so a session's rebuilds grew with its
+  edits. A data an edit replaced has its readers moved to the new one
+  (`seed`), and an input state that held it is mapped through that edit
+  (`InputState::mapped` applies the edits in order), so once no line of
+  it is read it is skipped (`Data::superseded`).
+- The watcher (`crates/partex-cli/src/inotify.rs`): the loads'
+  directories are watched; a load none of whose names (its lookup's
+  candidates, its file) had an event since its last check needs no
+  `stat`. Per name, because every lookup tries `.` first and an edit in
+  `.` otherwise sent all 847 loads to their stamps. A first version took
+  events per directory for all loads at once and lost them for loads a
+  later trip did not ask about (the `incremental` case's `.toc`, under
+  load): each load now keeps the count it was checked at.
+- The fold: reads have a run counter of their own (`Step::rrun`), and a
+  rerun whose reads are the last run's, in order, keeps their entries.
+- LTO (`CARGO_PROFILE_RELEASE_LTO=fat`, one codegen unit; job 6323, on
+  6322's tree): the word edit 33.4 → 30.9 ms, the cold build 73.9 →
+  64.6 s. Not made the default: release builds get slower; the user's
+  call.
+
+**TikZ** (job 6319): an edit inside ch15's figure (a float with one
+tikzpicture of two pgfplots axes) takes 1.18 s: the figure is one step of
+995 K commands (steps are cut only outside boxes), all run again at about
+the cold build's speed. pgfplots reads its 11 CSV files, parses each
+number with pgfmath, and draws every plot at `\end{axis}`. Windows inside
+boxes (DESIGN 4.3 item 1) would spare what comes before the edit and,
+perhaps, the other axis.
+
+**Profile after these** (local, a frame-pointer build of 210c870, 80
+rebuilds of new words): TeX itself 30%, the tracker 21%, the rebuild's
+other bookkeeping 19% (`run_step` 4%, positioning and restoring slots,
+`Fold::latest`), the page's deflate 12%, the input check 7% (before the
+per-name watcher), `Fold::close` 5.5%, the link 5%.
