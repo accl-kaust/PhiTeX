@@ -10639,3 +10639,9 @@ read of the edited file is data of its own, and a rebuild diffs five
 of them. The harness: 14 cases, 79 stages, identical in all three modes;
 the workspace's tests pass.
 
+Also tried, and dropped: the check after a step's run asked
+`Fold::latest` again of the reads its prediction had asked about (the
+same slots, mostly in the same order, the fold unchanged in between);
+reusing the first answers by position saved 0.9% of a TikZ keystroke's
+instructions and no measurable cycles.
+
