@@ -9443,3 +9443,283 @@ definition plus the token lists, about 3.6 GB, and 1.5 G read edges);
 starting SSA at `\begin{document}` (keyed on a name, and a setup edit
 would be a cold build, where the setup as a span re-runs 6.5% and wakes
 only what changed).
+
+## 2026-10-02 — The SSA edit harness, `scripts/ssa-edits` (agent gate)
+
+Commit 2d589d3 (the harness); DESIGN 1.4, 4.3 item 8 and 5.2.
+
+**Why.** The window work (DESIGN 4.3) changes how a rebuild re-enters,
+what it records and how it links. Every agent working on it needs one
+command that says whether SSA mode's rebuilds still give plain partex's
+bytes at every stage. The harness that answered this before,
+`ssa-edits.py` (LOG 2026-09-29), lived outside the repository and
+pointed at the old tree.
+
+**What it does.** `scripts/sandbox scripts/ssa-edits [--case NAME]...`.
+For each case, in `target/ssa-edits/<case>/`:
+- `o/`: the oracle, plain partex (the same binary, no `PARTEX_*`
+  variable), run once per stage. Each stage's edit is made before its
+  run, and the files the runs before wrote (`.aux`, `.toc`, `\write`
+  streams) stay, as e2e's incremental cases have them.
+- `p/`: ONE process, `PARTEX_SSA=1`, whose `PARTEX_SSA_REBUILD` lines
+  are the edits. Each line first saves what the build or rebuild before
+  it wrote, then makes the next edit. The last stage is saved when the
+  process exits.
+- Every file of each stage is compared: PDF, DVI and every written file
+  byte for byte, logs without their first line (banner and date) and
+  with `xtask/src/mask.rs`'s statistics masked.
+- A table per case: each stage's result (identical, or the files that
+  differ with a log's first differing line), its ms (rebuild, link), the
+  steps run and the commands. Exit 1 on any difference, or when the
+  SSA process failed (a panic, a `stopped:` rebuild, a timeout). Every
+  number goes to `target/ssa-edits/results.json`.
+
+The cases, 10 sequences of 61 stages:
+- the 7 incremental cases e2e builds with `-watch` (`verbatim`,
+  `effects`, `readback`, `cutoff_pdf`, `incremental`, `cutoff`,
+  `tokens`). They are read from `INCREMENTAL` in `xtask/src/e2e.rs` by a
+  small reader of Rust constant expressions, so a case or an edit added
+  there runs here too. `tokens` (13 edits) and `incremental`'s two
+  stages with no edit were not in the old harness.
+- `machine_edits` (`edits.tex`, pdflatex) and `machine_edits_dvi`
+  (`edits-dvi.tex`, latex): e2e's arguments, with
+  `-output-directory=out`. Their edits are written out in the script,
+  since e2e builds one of them with `format!`. `machine_edits` has a
+  seventh edit, `99` on an early page (LOG 2026-09-29). It is the only
+  stage where the job's end runs again with every font call a hit (7
+  `font_file`, 7 `font_dict`).
+- `label`: `edits.tex` given a `\label{new}` nothing refers to, then two
+  rebuilds with no edit (LOG 2026-09-29, "A label no one refers to").
+
+**Decisions, and why.**
+- *One pass per stage* on the oracle's side, because an SSA rebuild is
+  one pass today: a `\write`'s store is read by the next rebuild. e2e's
+  `-watch` cases run every build to its fixed point. `--fixpoint` makes
+  the oracle do the same, for item 5 (`aux-loop`). Its rule is e2e's
+  `fixpoint`: run again while a file the job wrote, other than its log,
+  DVI and PDF, changed, at most 5 runs. latexmk's rule (the files read
+  back) would need a recorder, which partex does not have. The two rules
+  give the same outputs: a file that is only written depends only on
+  the sources and on what its run read back, so e2e's rule makes at
+  most one more run, and that run is identical.
+- *The LaTeX cases are seeded as e2e's `machine_edits` is*: the `.aux`
+  and `.toc` of two plain runs of the original text, on both sides. So
+  stage 0 is converged, and each stage measures its own edit. The old
+  harness seeded with one run, so its first rebuild was LaTeX's second
+  pass (1,419 ms, 698 steps).
+- *Edits as e2e's `edit_file` makes them*: the edited text goes to a
+  temporary file, which is dated and renamed over the file. Inputs are
+  dated 1758800000 and edit *k* 1758800000 + 1000 *k*, so
+  `\pdffilemoddate` agrees on both sides. The rebuild's file checks see
+  what an editor's save gives them: a new inode in a changed directory.
+  Each stage's text is made once, and both sides copy it. An empty
+  marker is a rebuild with no edit; a marker equal to its replacement
+  only dates the file (`effects`' third edit).
+- *The masks* are `mask.rs`'s patterns, applied to bytes. On a log they
+  mask what `mask.rs` masks and never more, since `\d` matches only ASCII
+  digits here. Bytes are compared rather than lossily decoded text. So
+  the comparison is at least as strict as e2e's. Checked on the
+  harness's own outputs: a pdflatex log masks 8 lines, and the oracle's
+  and the SSA process's raw logs differ only in "strings out of" and
+  "string characters out of".
+- *Formats* are made once per binary, keyed by its SHA-256, in
+  `target/ssa-edits/formats/`. pdflatex's takes about 14 s.
+- *No `PARTEX_*` variable* reaches the oracle or the format runs, which
+  are plain partex. The harness says which variables it ignored.
+  `--env K=V` passes a variable to the SSA process, and `--check` adds
+  `PARTEX_SSA_CHECK=1`.
+- *Every process has a cap*: virtual memory (`--mem-gb`, 8) and a
+  timeout (`--timeout`, 600 s). An SSA bug that loops (LOG 2026-09-29:
+  `edits` "ran without end") then fails its case and not the machine.
+  The harness refuses to run outside the sandbox.
+
+**Measured.** Two binaries, both sandboxed:
+- main's release binary (dc849cf, built in the main tree and copied
+  into the worktree);
+- this branch's own release build of the same source.
+
+Every stage of the 10 cases is identical on both binaries. On this
+branch's binary it is also identical with `--check`, with
+`--env PARTEX_SSA_APPLY=0`, and with `--jobs 1`. Runtimes:
+
+| run | wall | load (1 min) |
+|---|---|---|
+| all cases, 8 at a time, formats cached | 7.0 s | 23 |
+| the same, formats made first | 21–31 s | 20–41 |
+| `--jobs 1` (each case's oracle, then its SSA process) | 33.7 s | 9.6 → 7.5 |
+
+Three negative tests:
+- `--fixpoint` makes `incremental` differ at stages 0, 1 and 4–6, where
+  the oracle runs again to settle the `.toc`. It makes `label` differ at
+  stage 1, LaTeX's "Label(s) may have changed" run.
+- `--timeout 3` kills `machine_edits`' process in its third rebuild. The
+  harness reports that stage as not reported, with the process killed,
+  and the later stages as not built.
+- A format that cannot be made stops the run with its directory named.
+
+The numbers with `--jobs 1` (this branch's binary; ms is the rebuild and
+the link together):
+
+| case | cold | rebuilds, ms (steps run) |
+|---|---|---|
+| verbatim (plain, DVI) | 539 ms | 3.8 (6), 3.1 (9), 1.4 (1), 3.5 (4) |
+| effects (PDF) | 543 ms | 2.9 (3), 1.0 (3), 1.1 (1) |
+| readback (PDF) | 549 ms | 70.0 (64), 41.4 (54), 43.5 (54) |
+| cutoff_pdf | 566 ms | 32.4 (2), 1.9 (2), 2.8 (2), 3.4 (2) |
+| incremental (DVI) | 532 ms | 91.0 (85), 200.7 (64), 2.9 (2), 38.6 (11), 85.2 (20), 93.6 (48), 36.1 (36) |
+| cutoff (DVI) | 563 ms | 22.3 (40), 12.9 (23), 25.0 (40), 15.9 (19), 23.1 (23) |
+| tokens (DVI) | 514 ms | 28.1 (1), 1.2 (1), 1.6 (1), 5.3 (7), 3.8 (4), 5.1 (4), 4.3 (6), 5.4 (4), 2.3 (1), 4.2 (2), 3.1 (1), 2.5 (1), 6.7 (7) |
+| machine_edits (pdflatex) | 1,336 ms | 63.7 (3), 541.4 (237), 468.6 (168), 20.5 (6), 596.9 (277), 146.4 (47), 16.6 (3) |
+| machine_edits_dvi (latex) | 1,024 ms | 136.1 (42), 148.2 (46) |
+| label (pdflatex) | 1,336 ms | 66.7 (17), 10.5 (11), 1.3 (0) |
+
+`incremental`'s second rebuild spent 169.4 ms in its link, writing
+files to disk; its rebuild took 31.3 ms. The step counts are those of
+LOG 2026-09-29 wherever the sequences are the same. `label`'s 17 steps
+and 1,467 commands, then 11 and 437, then none, are that entry's
+`edits.tex` numbers.
+
+**Seen in passing**, for `rebuild-cost` (not profiled): in some
+sequences a process's first rebuild costs about 25–30 ms more than a
+later one that does the same work.
+- `tokens` re-runs 1 step of 73 commands in 28.1 ms, then the same step
+  in 1.2 ms.
+- `cutoff_pdf` re-runs 2 steps in 32.4 ms, then 1.9 ms. The second run
+  has the same calls by routine.
+- `effects` (2.9 ms) and `verbatim` (3.8 ms) do not show it.
+
+**Next** (part 2): `cargo xtask ssa-edits` in `xtask check`; the
+course's edits as rebuilds of one process (`bench/ssa-course.sh`), with
+JSON in `bench/results/`.
+
+## 2026-10-02 — The gate runs ssa-edits; the course's edits in one SSA process (agent gate)
+
+Commits 36359a8, baf5ad6, a877ebc, 93092dc and this entry's; DESIGN 1.4,
+4.3 item 8 and 5.2.
+
+**`cargo xtask ssa-edits`** builds the release binary and runs
+`scripts/ssa-edits` with its arguments. `cargo xtask check` runs it
+beside e2e, on the binary its release build made, with `--brief`: a line
+for each identical case, and a table for a case that differs. The
+harness stays one Python script, which xtask only calls. Machine mode's
+steps stay in the gate.
+
+**`bench/ssa-course.sh [--warm N] [--edits NAME,...] [--rebuild-timeout S]
+[COURSE [AUX]]`** measures the course's edits as the rebuilds of one SSA
+process.
+- The course (`COURSE`, default `~/code/tmp/np-course`) is copied afresh
+  into `target/ssa-course/run`, with the aux files of a full build
+  (`AUX`, default `COURSE/_out`).
+- One process builds it cold. Then come `word` and its revert, N times
+  (default 20): the warm numbers, first. Then, for each edit of
+  `bench/edits/course.txt` in its order (`--edits` keeps those named):
+  the edit, its rebuild, the revert to the original text, and that
+  rebuild. A `;;` spec's steps are rebuilt one by one before the revert.
+  Each rebuild is one pass.
+- `--rebuild-timeout S`: a watchdog started by each rebuild's line ends
+  the process if the rebuild takes over S seconds, and the numbers so far
+  are kept. The warm pairs come first so that a slow edit cuts only the
+  tail. `--report DIR` prints the table and writes the JSON again from a
+  run's saved directory, such as the one saved from a cancelled job.
+- Here it runs through `scripts/heavy`. In an accl job, `scripts/heavy`
+  passes through, and the allocation caps the memory.
+
+Per rebuild it records:
+- the ms (rebuild, link), which depend on the machine's load;
+- the counts, which do not: steps run, commands, reads checked, readers
+  marked, definitions changed, and records made (summed over the
+  rebuild's routines line);
+- `instructions:u`, the user-space instructions of the phase.
+
+For the process it records the cold build's ms, commands, records and
+instructions, the peak RSS (GNU time inside the sandbox, around the
+process), and whether the final outputs are the cold build's.
+
+**How the instructions are counted by phase.** The user asked for
+numbers that do not depend on the load. A `perf stat` counts a process,
+not its phases, so each phase gets its own count:
+- *The cold build*: a `perf stat` around the process, with a control
+  FIFO. The first rebuild line sends `disable` and waits for the ack, so
+  the count ends where the cold build's link ended.
+- *Rebuild K*: its line makes the edit, then starts
+  `perf stat -p <the process> -D -1` with a control FIFO of its own. It
+  sends `enable` and waits for the ack before it returns, so the count
+  starts before the rebuild does. The next line stops it with SIGINT.
+  The next line's shell is the process's child, made while the phase's
+  counter was on, so a phase includes that shell, about a million
+  instructions.
+- *The last measured rebuild*'s counter is stopped by one more line. Its
+  rebuild, with no edit, is not reported. A perf still attached when the
+  sandbox ends would be killed before it wrote its count.
+
+**The final outputs against the cold build's.** Every edit is reverted,
+and the warm `word` pairs leave the text as it was. With one pass per
+rebuild, an `.aux` that a `\label` or `\footnote` changed has settled
+again long before the end. So the final PDF, `.aux`, `.toc` and `.out`
+must be the cold build's byte for byte, and the log must be the same
+with the statistics masked. That is an exactness check on the course,
+and a cheap one: it needs none of the oracle's plain builds of a minute
+each.
+
+**The format** is made by the binary measured, at the jobs' fixed time,
+with the course's recipe (`-ini -jobname=pdflatex
+-translate-file=cp227.tcx *pdflatex.ini`). It differs from the course
+copy's `_fmt/pdflatex.fmt` in 2 of its 15,551,983 bytes: the dumped
+`\time` (630 minutes against 419). TeX sets the date and time again when
+a job starts, after loading the format (§1337, `fix_date_and_time`), so
+the outputs are the same. The fixed time makes the format reproducible.
+
+**accl.** The machine's load made local timings meaningless, and the
+heavy lock was held by three other agents' course runs, so the baseline
+ran on the accl cluster:
+`scripts/accl/accl run cmd sh -c 'bench/ssa-course.sh "$w/course" "$w/aux"'`.
+In a job, the course is `$w/course` and its aux files are `$w/aux`.
+job.sbatch's `cmd` task copies them there, as its `course` task does
+(c22e989). Before, it copied neither, and the container cannot see the
+home directory. The JSON comes back in the run's `bench-results/`.
+
+**A bug the first, stopped run found.** I killed a run while it waited
+for the heavy lock. It reported the peak RSS of the run before it, read
+from a stale `time.txt`. The outputs of an earlier run are now cleared
+first, and a run whose cold build did not finish writes no JSON.
+
+**The gate** (local, at 36359a8): `cargo xtask check` passes. e2e is
+34/34 identical, so is e2e in machine mode, and `ssa-edits/*` is 10/10
+inside the gate (75 s under load 23–35).
+
+**The course on main's engine** (cb30e2e; accl, acclnode01, 16 CPUs
+allocated, quiet; release binary built in the job; the course's edits in
+their file order, before the warm pairs moved first). The job was
+cancelled during rebuild 8, the footnote's revert, when the user asked
+not to wait for the reflow edits. The numbers so far are in
+`bench/results/baf5ad6-ssa-course-acclnode01.json`. The cluster image
+has no `perf`, so there are no instruction counts.
+
+| rebuild | ms (rebuild, link) | steps | commands | reads checked | readers marked | records made |
+|---|---|---:|---:|---:|---:|---:|
+| cold build | 120,009 (link 35) | | 66,063,925 | | | 1,609,529 |
+| space | 51.1 (46.6, 4.5) | 2 | 1,903 | 3,019 | 0 | 15 |
+| space, reverted | 31.1 (26.7, 4.4) | 2 | 1,903 | 3,019 | 0 | 10 |
+| word | 116.0 (100.8, 15.2) | 6 | 4,450 | 6,599 | 32 | 49 |
+| word, reverted | 75.8 (63.4, 12.4) | 6 | 4,450 | 6,594 | 32 | 12 |
+| label | 9,675.6 (9,669.8, 5.8) | 244 | 3,821,794 | 719,419 | 884 | 2,073 |
+| label, reverted | 10,496.0 (10,489.4, 6.6) | 244 | 3,822,938 | 721,792 | 887 | 1,331 |
+| footnote | 584,869.3 (584,846.1, 23.2) | 851 | 23,604,036 | 1,902,564 | 7,734 | 291,109 |
+
+- *Memory.* GNU time wrote nothing, since the job was cancelled.
+  Slurm's sampled accounting of the batch step gives MaxRSS 18.4 GiB
+  (19,253,632 KB) and MaxVMSize 18.3 GiB, over the cold build and
+  rebuilds 1–8. That is under `scripts/heavy`'s 40 GB cap, and down from
+  24 GB before 1ffe4d4.
+- *The word edit* has LOG 2026-09-29's counts: 6 steps, 4,450 commands,
+  6,599 reads checked, 32 readers marked. On a quiet node it takes
+  116 ms; DESIGN 4.3's target is 16.7 ms.
+- *The label* re-runs 244 steps and 3.8 M commands; DESIGN 4.3's target
+  is 50 K. That is the step grain the `windows` agent replaces.
+- *The footnote* re-runs 851 steps and 23.6 M commands (36% of the cold
+  build's), ships 136 pages again, and makes 1.2 M `unsave` calls (914 K
+  of them applied hits, 284 K records). It takes 585 s, almost five cold
+  builds. That is 24.8 µs a command, against 2.5 µs in the label's
+  rebuild and 1.8 µs in the cold build: something in the rebuild path
+  costs more per command as more is re-run. Not profiled; for
+  `rebuild-cost`.

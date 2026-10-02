@@ -1,0 +1,607 @@
+{
+ "commit": "baf5ad6",
+ "dirty": true,
+ "date": "2026-10-02T11:03:44+03:00",
+ "host": "acclnode01",
+ "cpus": 24,
+ "load": [
+  "",
+  ""
+ ],
+ "binary": "/tmp/mohaam0e-6311/partex/target/release/partex",
+ "document": "the course (295 pages), its edits as the rebuilds of one PARTEX_SSA=1 process, each followed by its revert; one pass per rebuild",
+ "edits": "bench/edits/course.txt",
+ "warm_repetitions": 20,
+ "note": "accl job 6311 (acclnode01, 16 CPUs, quiet), engine sources = main cb30e2e; cancelled during rebuild 8 (the footnote's revert) to save time; no perf in the cluster image",
+ "exit": 143,
+ "wall_s": null,
+ "rebuild_timeout_s": null,
+ "cold": {
+  "ms": 120009.1,
+  "link_ms": 35.0,
+  "commands": 66063925,
+  "records": 1675858,
+  "records_made": 1609529,
+  "instructions": null
+ },
+ "rebuilds": [
+  {
+   "n": 1,
+   "name": "space",
+   "step": 1,
+   "steps": 1,
+   "revert": false,
+   "warm": 0,
+   "ms": 51.1,
+   "rebuild_ms": 46.6,
+   "link_ms": 4.5,
+   "steps_run": 2,
+   "commands": 1903,
+   "reads_checked": 3019,
+   "readers_marked": 0,
+   "definitions_changed": 2,
+   "records_made": 15,
+   "instructions": null
+  },
+  {
+   "n": 2,
+   "name": "space",
+   "step": 0,
+   "steps": 1,
+   "revert": true,
+   "warm": 0,
+   "ms": 31.1,
+   "rebuild_ms": 26.7,
+   "link_ms": 4.4,
+   "steps_run": 2,
+   "commands": 1903,
+   "reads_checked": 3019,
+   "readers_marked": 0,
+   "definitions_changed": 0,
+   "records_made": 10,
+   "instructions": null
+  },
+  {
+   "n": 3,
+   "name": "word",
+   "step": 1,
+   "steps": 1,
+   "revert": false,
+   "warm": 0,
+   "ms": 116.0,
+   "rebuild_ms": 100.8,
+   "link_ms": 15.2,
+   "steps_run": 6,
+   "commands": 4450,
+   "reads_checked": 6599,
+   "readers_marked": 32,
+   "definitions_changed": 44,
+   "records_made": 49,
+   "instructions": null
+  },
+  {
+   "n": 4,
+   "name": "word",
+   "step": 0,
+   "steps": 1,
+   "revert": true,
+   "warm": 0,
+   "ms": 75.8,
+   "rebuild_ms": 63.4,
+   "link_ms": 12.4,
+   "steps_run": 6,
+   "commands": 4450,
+   "reads_checked": 6594,
+   "readers_marked": 32,
+   "definitions_changed": 38,
+   "records_made": 12,
+   "instructions": null
+  },
+  {
+   "n": 5,
+   "name": "label",
+   "step": 1,
+   "steps": 1,
+   "revert": false,
+   "warm": 0,
+   "ms": 9675.6,
+   "rebuild_ms": 9669.8,
+   "link_ms": 5.8,
+   "steps_run": 244,
+   "commands": 3821794,
+   "reads_checked": 719419,
+   "readers_marked": 884,
+   "definitions_changed": 1463,
+   "records_made": 2073,
+   "instructions": null
+  },
+  {
+   "n": 6,
+   "name": "label",
+   "step": 0,
+   "steps": 1,
+   "revert": true,
+   "warm": 0,
+   "ms": 10496.0,
+   "rebuild_ms": 10489.4,
+   "link_ms": 6.6,
+   "steps_run": 244,
+   "commands": 3822938,
+   "reads_checked": 721792,
+   "readers_marked": 887,
+   "definitions_changed": 974,
+   "records_made": 1331,
+   "instructions": null
+  },
+  {
+   "n": 7,
+   "name": "footnote",
+   "step": 1,
+   "steps": 1,
+   "revert": false,
+   "warm": 0,
+   "ms": 584869.3,
+   "rebuild_ms": 584846.1,
+   "link_ms": 23.2,
+   "steps_run": 851,
+   "commands": 23604036,
+   "reads_checked": 1902564,
+   "readers_marked": 7734,
+   "definitions_changed": 33231,
+   "records_made": 291109,
+   "instructions": null
+  },
+  {
+   "n": 8,
+   "name": "footnote",
+   "step": 0,
+   "steps": 1,
+   "revert": true,
+   "warm": 0
+  },
+  {
+   "n": 9,
+   "name": "enter",
+   "step": 1,
+   "steps": 1,
+   "revert": false,
+   "warm": 0
+  },
+  {
+   "n": 10,
+   "name": "enter",
+   "step": 0,
+   "steps": 1,
+   "revert": true,
+   "warm": 0
+  },
+  {
+   "n": 11,
+   "name": "word-local",
+   "step": 1,
+   "steps": 1,
+   "revert": false,
+   "warm": 0
+  },
+  {
+   "n": 12,
+   "name": "word-local",
+   "step": 0,
+   "steps": 1,
+   "revert": true,
+   "warm": 0
+  },
+  {
+   "n": 13,
+   "name": "delete-par",
+   "step": 1,
+   "steps": 1,
+   "revert": false,
+   "warm": 0
+  },
+  {
+   "n": 14,
+   "name": "delete-par",
+   "step": 0,
+   "steps": 1,
+   "revert": true,
+   "warm": 0
+  },
+  {
+   "n": 15,
+   "name": "word2",
+   "step": 1,
+   "steps": 2,
+   "revert": false,
+   "warm": 0
+  },
+  {
+   "n": 16,
+   "name": "word2",
+   "step": 2,
+   "steps": 2,
+   "revert": false,
+   "warm": 0
+  },
+  {
+   "n": 17,
+   "name": "word2",
+   "step": 0,
+   "steps": 2,
+   "revert": true,
+   "warm": 0
+  },
+  {
+   "n": 18,
+   "name": "space2",
+   "step": 1,
+   "steps": 2,
+   "revert": false,
+   "warm": 0
+  },
+  {
+   "n": 19,
+   "name": "space2",
+   "step": 2,
+   "steps": 2,
+   "revert": false,
+   "warm": 0
+  },
+  {
+   "n": 20,
+   "name": "space2",
+   "step": 0,
+   "steps": 2,
+   "revert": true,
+   "warm": 0
+  },
+  {
+   "n": 21,
+   "name": "enter2",
+   "step": 1,
+   "steps": 2,
+   "revert": false,
+   "warm": 0
+  },
+  {
+   "n": 22,
+   "name": "enter2",
+   "step": 2,
+   "steps": 2,
+   "revert": false,
+   "warm": 0
+  },
+  {
+   "n": 23,
+   "name": "enter2",
+   "step": 0,
+   "steps": 2,
+   "revert": true,
+   "warm": 0
+  },
+  {
+   "n": 24,
+   "name": "word",
+   "step": 1,
+   "steps": 1,
+   "revert": false,
+   "warm": 1
+  },
+  {
+   "n": 25,
+   "name": "word",
+   "step": 0,
+   "steps": 1,
+   "revert": true,
+   "warm": 1
+  },
+  {
+   "n": 26,
+   "name": "word",
+   "step": 1,
+   "steps": 1,
+   "revert": false,
+   "warm": 2
+  },
+  {
+   "n": 27,
+   "name": "word",
+   "step": 0,
+   "steps": 1,
+   "revert": true,
+   "warm": 2
+  },
+  {
+   "n": 28,
+   "name": "word",
+   "step": 1,
+   "steps": 1,
+   "revert": false,
+   "warm": 3
+  },
+  {
+   "n": 29,
+   "name": "word",
+   "step": 0,
+   "steps": 1,
+   "revert": true,
+   "warm": 3
+  },
+  {
+   "n": 30,
+   "name": "word",
+   "step": 1,
+   "steps": 1,
+   "revert": false,
+   "warm": 4
+  },
+  {
+   "n": 31,
+   "name": "word",
+   "step": 0,
+   "steps": 1,
+   "revert": true,
+   "warm": 4
+  },
+  {
+   "n": 32,
+   "name": "word",
+   "step": 1,
+   "steps": 1,
+   "revert": false,
+   "warm": 5
+  },
+  {
+   "n": 33,
+   "name": "word",
+   "step": 0,
+   "steps": 1,
+   "revert": true,
+   "warm": 5
+  },
+  {
+   "n": 34,
+   "name": "word",
+   "step": 1,
+   "steps": 1,
+   "revert": false,
+   "warm": 6
+  },
+  {
+   "n": 35,
+   "name": "word",
+   "step": 0,
+   "steps": 1,
+   "revert": true,
+   "warm": 6
+  },
+  {
+   "n": 36,
+   "name": "word",
+   "step": 1,
+   "steps": 1,
+   "revert": false,
+   "warm": 7
+  },
+  {
+   "n": 37,
+   "name": "word",
+   "step": 0,
+   "steps": 1,
+   "revert": true,
+   "warm": 7
+  },
+  {
+   "n": 38,
+   "name": "word",
+   "step": 1,
+   "steps": 1,
+   "revert": false,
+   "warm": 8
+  },
+  {
+   "n": 39,
+   "name": "word",
+   "step": 0,
+   "steps": 1,
+   "revert": true,
+   "warm": 8
+  },
+  {
+   "n": 40,
+   "name": "word",
+   "step": 1,
+   "steps": 1,
+   "revert": false,
+   "warm": 9
+  },
+  {
+   "n": 41,
+   "name": "word",
+   "step": 0,
+   "steps": 1,
+   "revert": true,
+   "warm": 9
+  },
+  {
+   "n": 42,
+   "name": "word",
+   "step": 1,
+   "steps": 1,
+   "revert": false,
+   "warm": 10
+  },
+  {
+   "n": 43,
+   "name": "word",
+   "step": 0,
+   "steps": 1,
+   "revert": true,
+   "warm": 10
+  },
+  {
+   "n": 44,
+   "name": "word",
+   "step": 1,
+   "steps": 1,
+   "revert": false,
+   "warm": 11
+  },
+  {
+   "n": 45,
+   "name": "word",
+   "step": 0,
+   "steps": 1,
+   "revert": true,
+   "warm": 11
+  },
+  {
+   "n": 46,
+   "name": "word",
+   "step": 1,
+   "steps": 1,
+   "revert": false,
+   "warm": 12
+  },
+  {
+   "n": 47,
+   "name": "word",
+   "step": 0,
+   "steps": 1,
+   "revert": true,
+   "warm": 12
+  },
+  {
+   "n": 48,
+   "name": "word",
+   "step": 1,
+   "steps": 1,
+   "revert": false,
+   "warm": 13
+  },
+  {
+   "n": 49,
+   "name": "word",
+   "step": 0,
+   "steps": 1,
+   "revert": true,
+   "warm": 13
+  },
+  {
+   "n": 50,
+   "name": "word",
+   "step": 1,
+   "steps": 1,
+   "revert": false,
+   "warm": 14
+  },
+  {
+   "n": 51,
+   "name": "word",
+   "step": 0,
+   "steps": 1,
+   "revert": true,
+   "warm": 14
+  },
+  {
+   "n": 52,
+   "name": "word",
+   "step": 1,
+   "steps": 1,
+   "revert": false,
+   "warm": 15
+  },
+  {
+   "n": 53,
+   "name": "word",
+   "step": 0,
+   "steps": 1,
+   "revert": true,
+   "warm": 15
+  },
+  {
+   "n": 54,
+   "name": "word",
+   "step": 1,
+   "steps": 1,
+   "revert": false,
+   "warm": 16
+  },
+  {
+   "n": 55,
+   "name": "word",
+   "step": 0,
+   "steps": 1,
+   "revert": true,
+   "warm": 16
+  },
+  {
+   "n": 56,
+   "name": "word",
+   "step": 1,
+   "steps": 1,
+   "revert": false,
+   "warm": 17
+  },
+  {
+   "n": 57,
+   "name": "word",
+   "step": 0,
+   "steps": 1,
+   "revert": true,
+   "warm": 17
+  },
+  {
+   "n": 58,
+   "name": "word",
+   "step": 1,
+   "steps": 1,
+   "revert": false,
+   "warm": 18
+  },
+  {
+   "n": 59,
+   "name": "word",
+   "step": 0,
+   "steps": 1,
+   "revert": true,
+   "warm": 18
+  },
+  {
+   "n": 60,
+   "name": "word",
+   "step": 1,
+   "steps": 1,
+   "revert": false,
+   "warm": 19
+  },
+  {
+   "n": 61,
+   "name": "word",
+   "step": 0,
+   "steps": 1,
+   "revert": true,
+   "warm": 19
+  },
+  {
+   "n": 62,
+   "name": "word",
+   "step": 1,
+   "steps": 1,
+   "revert": false,
+   "warm": 20
+  },
+  {
+   "n": 63,
+   "name": "word",
+   "step": 0,
+   "steps": 1,
+   "revert": true,
+   "warm": 20
+  }
+ ],
+ "peak_rss_kb": null,
+ "peak_rss_kb_slurm": 19253632,
+ "max_vmsize_kb_slurm": 19170216,
+ "peak_rss_note": "GNU time wrote nothing (the job was cancelled); Slurm's sacct MaxRSS and MaxVMSize of the batch step (sampled), over the cold build and rebuilds 1-8"
+}

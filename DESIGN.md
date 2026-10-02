@@ -110,12 +110,16 @@ listed in `partex_engine::bugs::PdftexBugs`, and switchable with
   - web2c's engine tests;
   - the LaTeX kernel's and expl3's l3build tests;
   - e2e: `tests/e2e/`, run by `xtask/src/e2e.rs` as whole runs against
-    the oracle, including rebuilds after edits.
+    the oracle, including rebuilds after edits;
+  - SSA mode's edit sequences, `scripts/ssa-edits`: e2e's incremental
+    cases as rebuilds of one SSA process, each stage against plain
+    partex on the same sources (4.3 item 8).
 - Each test runs under the real engine. Its raw outputs go to
   `refs/<engine>/`, which is gitignored and regenerated with
   `--oracle`, and ours are compared against them.
 - The gate is `scripts/sandbox cargo xtask check`: fmt, clippy, the
-  wasm build, trip, etrip and e2e.
+  wasm build, trip, etrip, e2e and SSA mode's edit sequences
+  (`ssa-edits`).
 
 ---
 
@@ -1161,6 +1165,43 @@ cold build with recording takes 3.2–3.4× a plain one and peaks at 24 GB.
    incremental e2e case run in SSA mode, one process, each stage
    byte-identical to plain partex on the same sources (logs masked).
    Machine mode stays until SSA passes everything; removing it is last.
+   The harness is `scripts/ssa-edits` (in the sandbox):
+   - *The cases*: e2e's incremental cases built by `-watch`, read from
+     `INCREMENTAL` in `xtask/src/e2e.rs`; e2e's `machine_edits`, with
+     a seventh edit whose glyphs the fonts already have, so the job's
+     end runs again with every font call a hit; `machine_edits_dvi`;
+     and `label`, a `\label` nothing refers to, then two rebuilds with
+     no edit. The LaTeX cases start, as e2e's do, from the `.aux` and
+     `.toc` of two plain runs of the original text.
+   - *The SSA side*: one process per case, its edits as its
+     `PARTEX_SSA_REBUILD` lines. Each line saves what the build before
+     wrote, then makes the edit as e2e's `edit_file` does: the new text,
+     its modification time fixed, renamed over the file.
+   - *The oracle*: plain partex (no `PARTEX_*` variable), once per
+     stage, in a directory of its own where the files of the runs
+     before stay, as the SSA process's do. `--fixpoint` runs each stage
+     to its fixed point instead, the oracle for item 5: again while a
+     file it wrote, other than its log, DVI and PDF, changed, at most 5
+     runs (e2e's `fixpoint`).
+   - *The comparison*: every file the job wrote, at every stage, byte
+     for byte. Logs are compared without their first line and with
+     `mask.rs`'s statistics masked.
+   - *The report*: per stage, the rebuild's and the link's ms, the
+     steps run and the commands.
+
+   `cargo xtask ssa-edits` runs it on the release binary, and `cargo
+   xtask check` runs it beside e2e. The course's numbers come from
+   `bench/ssa-course.sh`: one process builds the course cold, then
+   rebuilds it after N warm `word` edits and their reverts, then after
+   each edit of `bench/edits/course.txt` (or those `--edits` names) and
+   after that edit's revert. A rebuild over `--rebuild-timeout` seconds
+   ends the run, and the numbers so far are kept. It runs through
+   `scripts/heavy`, or in an accl job. Per rebuild it records the counts
+   that do not depend on the machine's load: steps, commands, reads
+   checked, readers marked and records made. It also records the user
+   instructions of each phase (`perf stat -e instructions:u`, attached
+   by the rebuild's line), the ms, the peak RSS, and whether the final
+   outputs, every edit reverted, are the cold build's.
 
 The work, one agent each, on branches `np/<name>` in worktrees under
 `~/code/tmp/`: `windows` (1), `rebuild-cost` (3), `records` (2),
@@ -1233,7 +1274,12 @@ edit lands nearer 15–30 ms.
   - hits applied, with the commands they stand for;
   - the link's chunks.
 - Benchmarks are recorded as JSON in `bench/results/`. The edit harness
-  is `bench/edits.sh`.
+  is `bench/edits.sh`; SSA mode's is `scripts/ssa-edits` (4.3 item 8),
+  which writes each stage's numbers to `target/ssa-edits/results.json`.
+  The course's edits as the rebuilds of one SSA process are
+  `bench/ssa-course.sh`, which writes `bench/results/<commit>-ssa-course-<host>.json`.
+  On a loaded machine, edits are compared by counts, instructions and
+  peak RSS, not ms.
 
 ### 5.3 The text form
 

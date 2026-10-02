@@ -5,6 +5,10 @@ binary, no `PARTEX_*` variable) run on the same sources.
 
     scripts/sandbox scripts/ssa-edits [--case NAME]... [--bin PATH]
         [--work DIR] [--jobs N] [--fixpoint] [--check] [--env K=V]...
+        [--timeout S] [--mem-gb N] [--brief]
+
+(`cargo xtask ssa-edits` runs it on the release binary, and `cargo xtask
+check` with `--brief`.)
 
 The cases: every incremental case of `xtask/src/e2e.rs` built `By::Watch`
 (read from `INCREMENTAL` there), `machine_edits` (`edits.tex`, pdflatex
@@ -694,6 +698,8 @@ def main():
     ap.add_argument("--timeout", type=int, default=600, help="seconds per process (default 600)")
     ap.add_argument("--mem-gb", type=int, default=8,
                     help="virtual memory cap per process, GB (default 8)")
+    ap.add_argument("--brief", action="store_true",
+                    help="a line per identical case, a table only for the others")
     opts = ap.parse_args()
     if os.environ.get("PARTEX_SANDBOX") != "1":
         print("ssa-edits: run it inside the sandbox: scripts/sandbox scripts/ssa-edits ...",
@@ -738,8 +744,12 @@ def main():
     results = [done[c.name] for c in cases]
     wall = time.monotonic() - t0
     for r in results:
-        print(table(r, opts.fixpoint) if "error" not in r else f"== {r['case']}: FAILED: {r['error']}")
-        print()
+        if "error" in r:
+            print(f"== {r['case']}: FAILED: {r['error']}\n")
+        elif opts.brief and r["ok"]:
+            print(f"ok       ssa-edits/{r['case']} ({len(r['stages'])} stages)")
+        else:
+            print(table(r, opts.fixpoint) + "\n")
     bad = [r["case"] for r in results if not r["ok"]]
     load1 = os.getloadavg()
     print(
