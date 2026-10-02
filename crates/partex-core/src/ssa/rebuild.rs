@@ -1029,6 +1029,15 @@ fn defs(
     d
 }
 
+/// The version of the definition of `a` that reaches `key` (a step's
+/// definitions' versions are those [`defs`] gives; `None`: no step before
+/// `key` defines it, and its version, the format's, is not kept).
+fn reaching_version(rr: &Recorder, a: &Slot, key: u64) -> Option<Version> {
+    let d = rr.rt.fold.reaching(a, key)?;
+    let (_, v) = rr.rt.record(d.rec).writes.get(d.ix as usize)?;
+    Some(v.as_ref().map_or(Version::ABSENT, |v| v.0))
+}
+
 /// The value of `a` that reaches `key`: the definition before it, or the
 /// format's.
 fn reaching<H: Host>(
@@ -1643,8 +1652,13 @@ fn retire<H: Host>(
         let mut r = tex.tracker.rec.borrow_mut();
         let rr = &mut *r;
         let key = rr.rt.fold.steps[s as usize].key;
-        let old = defs(&rr.rt, &rr.rt.fold.steps[s as usize].recs.clone());
-        for a in old.keys().filter(|a| positioned(a)) {
+        let old = defs(&rr.rt, &rr.rt.fold.steps[s as usize].recs);
+        for (a, v) in old.iter().filter(|(a, _)| positioned(a)) {
+            // (its readers now read the definition that reaches it: an
+            // equal one changes nothing for them)
+            if reaching_version(rr, a, key) == Some(*v) {
+                continue;
+            }
             let next = rr.rt.fold.next_after(a, key).map(|d| d.key);
             for x in rr.rt.fold.readers_between(a, key, next) {
                 dirty.insert(rr.rt.fold.steps[x as usize].key, x);
@@ -1907,17 +1921,24 @@ fn run_step<H: Host>(
         let mut r = tex.tracker.rec.borrow_mut();
         let rr = &mut *r;
         // a definition that changed makes its readers dirty, up to the
-        // slot's next definition (item 3)
-        for a in old.keys().chain(new.keys()).filter(|a| positioned(a)) {
+        // slot's next definition (item 3); where one of the runs made none,
+        // its readers read the definition that reaches the step, and an
+        // equal one changes nothing for them
+        let slots = old
+            .keys()
+            .chain(new.keys().filter(|a| !old.contains_key(a)));
+        for a in slots.filter(|a| positioned(a)) {
             touched.insert(*a);
-            if old.get(a) == new.get(a) {
+            let (o, n) = (old.get(a).copied(), new.get(a).copied());
+            if o == n || ((o.is_none() || n.is_none()) && reaching_version(rr, a, key) == o.or(n)) {
                 continue;
             }
             rep.defs_changed += 1;
             let next = rr.rt.fold.next_after(a, key).map(|d| d.key);
             let readers = rr.rt.fold.readers_between(a, key, next);
-            if rep.trace && changed.len() < 12 {
-                // (the trace: which calls of each reader read it)
+            if rep.trace && (changed.len() < 12 || readers.iter().any(|&s| s != j)) {
+                // (the trace: the versions, short, and which calls of each
+                // reader read it)
                 let mut who = Vec::new();
                 for &s in readers.iter().take(3) {
                     let mut path = Vec::new();
@@ -1929,9 +1950,22 @@ fn run_step<H: Host>(
                         &mut who,
                     );
                 }
+                let short = |v: Option<Version>| {
+                    v.map_or(alloc::string::String::from("-"), |v| {
+                        alloc::format!("{:04x}", v.0 & 0xffff)
+                    })
+                };
                 changed.push(alloc::format!(
-                    "{a} ({} readers: {})",
+                    "{a} {}->{} (before {}; {} readers{}: {})",
+                    short(o),
+                    short(n),
+                    short(reaching_version(rr, a, key)),
                     readers.len(),
+                    if readers.is_empty() {
+                        alloc::string::String::new()
+                    } else {
+                        alloc::format!(" {:?}", readers.iter().take(4).collect::<Vec<_>>())
+                    },
                     who.join("; ")
                 ));
             }
