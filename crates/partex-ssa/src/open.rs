@@ -784,7 +784,7 @@ impl<M: Machine> Runtime<M> {
         rh: &crate::hash::Stable,
         net: &[(M::Addr, u64)],
         writes: Vec<(M::Addr, Option<M::Val>)>,
-        items: Vec<Item<M>>,
+        mut items: Vec<Item<M>>,
         cost: u64,
         own: u64,
         quiet: bool,
@@ -804,6 +804,12 @@ impl<M: Machine> Runtime<M> {
                 .items
                 .insert(Version(u128::from(hash64(&f))), items.len());
         }
+        // (the record keeps its items for the session: the room the frame
+        // began with, the last large frame's of its function, goes back.
+        // Kept, every later call of a function that once had 256 items
+        // held that room untouched: 16 KB a record, the course's 1.68 M
+        // records 27 GB of address space at 13 GB resident)
+        items.shrink_to_fit();
         let rec = Record {
             func: func.expect("a call frame"),
             name,
