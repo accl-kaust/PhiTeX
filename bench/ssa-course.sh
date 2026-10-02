@@ -40,7 +40,7 @@
 # perf that counts: no instructions.
 #
 # Output: a Markdown table on stdout and the JSON in OUT (default
-# bench/results/<commit>-ssa-course.json): per rebuild, its ms (rebuild,
+# bench/results/<commit>-ssa-course-<host>.json): per rebuild, its ms (rebuild,
 # link), counts and instructions; the cold build's; the warm `word`
 # edits' medians; the peak RSS; the load before and after; and whether
 # the final outputs, every edit reverted, are the cold build's byte for
@@ -63,7 +63,7 @@ dir=$repo/target/ssa-course
 rev=$(git -C "$repo" rev-parse --short HEAD 2>/dev/null || echo unknown)
 dirty=false
 git -C "$repo" diff --quiet HEAD 2>/dev/null || dirty=true
-out=${OUT:-$repo/bench/results/$rev-ssa-course.json}
+out=${OUT:-$repo/bench/results/$rev-ssa-course-$(hostname -s 2>/dev/null || echo host).json}
 
 [ -f "$course/$main" ] || { echo "ssa-course: no $course/$main" >&2; exit 2; }
 [ -f "$aux/$job.aux" ] || { echo "ssa-course: no $aux/$job.aux" >&2; exit 2; }

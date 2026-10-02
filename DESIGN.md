@@ -1275,7 +1275,7 @@ edit lands nearer 15–30 ms.
   is `bench/edits.sh`; SSA mode's is `scripts/ssa-edits` (4.3 item 8),
   which writes each stage's numbers to `target/ssa-edits/results.json`.
   The course's edits as the rebuilds of one SSA process are
-  `bench/ssa-course.sh`, which writes `bench/results/<commit>-ssa-course.json`.
+  `bench/ssa-course.sh`, which writes `bench/results/<commit>-ssa-course-<host>.json`.
   On a loaded machine, edits are compared by counts, instructions and
   peak RSS, not ms.
 
