@@ -9488,9 +9488,15 @@ DESIGN 4.3 item 7: `PARTEX_SSA_VIEW=FILE` writes the build as a
   copies take a prefix for the same reason.
 - `Runtime::trace_of(recs, name)` (partex-ssa) prints one step's
   records with the trace's `to_text`, addresses named as in the view.
-- A golden test (`ssa::view::tests`): a small INITEX document built in
-  SSA mode, its view's window-to-window edges, then a word edited and
-  rebuilt: what changed.
+- A golden test (`crates/partex-core/tests/view.rs`): a small INITEX
+  document built in SSA mode, its view's window-to-window edges, one
+  step's named trace, then a word edited and rebuilt: what changed. It
+  is an integration test, a process of its own: an SSA build turns on
+  the boxes' versions for the whole process (`node::VERSIONS`), and as
+  a unit test it raced machine mode's
+  `the_page_leaves_rest_as_a_cell_of_its_own`, which hashes the page
+  twice and saw the switch flip in between (the first `xtask check`
+  failed on it).
 
 **Measured** (release, sandboxed, this machine under load 15–25, so
 instructions rather than ms):

@@ -1206,7 +1206,7 @@ cold build with recording takes 3.2–3.4× a plain one and peaks at 24 GB.
      else of what it added to its list, else of the source it began on.
    - `Program::check` verifies that it is SSA and that each import from
      a window names one of that window's exports; `to_text` and `parse`
-     round-trip it (`ssa::view`'s golden test, `phitex-ir`'s tests).
+     round-trip it (`partex-core`'s `tests/view.rs`, `phitex-ir`'s tests).
    - The per-call trace is today the step's records as they are kept,
      their addresses named as in the view (each call marked `new`: how
      a call was found is kept per trip, not per record). Once records
