@@ -64,6 +64,16 @@ records item 1 on a 3-chapter copy: instructions, SSA against plain,
 went from 3.36× to 2.86×; peak memory from 3.06 GB to 1.57 GB; records
 from 224 K to 66 K. Item 2 is not measured yet.
 
+After all the merges (main cb6cb6e, job 6317, acclnode01; outputs equal
+to the cold build's):
+
+| | before (6311) | after (6317) |
+|---|---|---|
+| cold SSA build | 120.0 s, ~18 GB | 91.1 s, 2.28 GB peak |
+| records | 1.68 M | 123 K |
+| word, median of 3 warm | 116 ms | 49 ms (rebuild 48.5, link 0.2) |
+| label | 9.7 s, 244 steps | 6.9 s, 250 steps, 3.84 M commands |
+
 ## Left, in priority order
 
 1. **windows** (DESIGN 4.3 item 1). This is the biggest win: the label
@@ -96,9 +106,37 @@ from 224 K to 66 K. Item 2 is not measured yet.
      saved the incoming value and restored it unobserved neither reads
      nor defines that slot.
    - `PDF_FONTS` (pdf:30) and the glyphs chain behind it.
-3. **Rebuild cost** (rebuild-cost).
-   - Profile the warm word edit: about 64 ms on accl against the target
-     of 10 ms.
+3. **Rebuild cost** (rebuild-cost). The warm word edit, profiled
+   (2026-10-02, locally, 80 edit/revert rebuilds of the course in one
+   process, about 72 ms each under the profiler):
+
+   | share | what |
+   |---:|---|
+   | 22% | the job's end (`close_files_and_terminate`), run again every rebuild: deflate 14%, the name tree 3% |
+   | 18% | the tracker's reads and writes while TeX runs (`read_content`, `stamp`, `row_read`, `table_at`) |
+   | 19% | TeX itself (4,450 commands) |
+   | 9% | `Fold::close` at each step's end |
+   | 8% | deflating the shipped page's content stream |
+   | 4.5% | `NativeHost::unchanged`: a `stat` of every input file |
+   | 4% | `Edit::diff` |
+   | 15% | the rest (`Version::of` 2.6%, `run_step` 2.4%, `Fold::latest` 1.1%) |
+
+   - **The job's end runs again for a word edit** (the biggest item; the
+     rebuild trace shows it). The page's ship writes its `glyphs:N` slot
+     (`Fam::Glyphs`, the glyphs that ship used), and the job's end reads
+     every ship's slot to subset the fonts. A word edit changes the
+     page's glyph set but not the union over the document (the font
+     files are all cache hits), so the end's object streams, xref, name
+     tree and outlines are made again for nothing. Fix: the end reads
+     the union per font, answered anew like a query when a ship's
+     glyphs change; then a word edit skips it (−22%).
+   - The step holding `\input{ch15}` re-runs 564 commands because the
+     file it loads changed, and changes nothing.
+   - How the profile was taken: a frame-pointer build
+     (`RUSTFLAGS="-C force-frame-pointers=yes"`, `CARGO_TARGET_DIR=target/fp`)
+     and `perf record --call-graph fp -p` attached from a rebuild line
+     after the cold build (as `bench/ssa-course.sh` attaches `perf stat`);
+     DWARF unwinding stops after a frame or two on this binary.
    - The footnote rebuild costs 24.8 µs a command, against 1.8 µs cold:
      the rebuild path grows worse than linearly with what it re-runs.
      Profile it.
