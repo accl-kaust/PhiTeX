@@ -9591,3 +9591,135 @@ later one that does the same work.
 **Next** (part 2): `cargo xtask ssa-edits` in `xtask check`; the
 course's edits as rebuilds of one process (`bench/ssa-course.sh`), with
 JSON in `bench/results/`.
+
+## 2026-10-02 — The gate runs ssa-edits; the course's edits in one SSA process (agent gate)
+
+Commits 36359a8, baf5ad6, a877ebc, 93092dc and this entry's; DESIGN 1.4,
+4.3 item 8 and 5.2.
+
+**`cargo xtask ssa-edits`** builds the release binary and runs
+`scripts/ssa-edits` with its arguments. `cargo xtask check` runs it
+beside e2e, on the binary its release build made, with `--brief`: a line
+for each identical case, and a table for a case that differs. The
+harness stays one Python script, which xtask only calls. Machine mode's
+steps stay in the gate.
+
+**`bench/ssa-course.sh [--warm N] [--edits NAME,...] [--rebuild-timeout S]
+[COURSE [AUX]]`** measures the course's edits as the rebuilds of one SSA
+process.
+- The course (`COURSE`, default `~/code/tmp/np-course`) is copied afresh
+  into `target/ssa-course/run`, with the aux files of a full build
+  (`AUX`, default `COURSE/_out`).
+- One process builds it cold. Then come `word` and its revert, N times
+  (default 20): the warm numbers, first. Then, for each edit of
+  `bench/edits/course.txt` in its order (`--edits` keeps those named):
+  the edit, its rebuild, the revert to the original text, and that
+  rebuild. A `;;` spec's steps are rebuilt one by one before the revert.
+  Each rebuild is one pass.
+- `--rebuild-timeout S`: a watchdog started by each rebuild's line ends
+  the process if the rebuild takes over S seconds, and the numbers so far
+  are kept. The warm pairs come first so that a slow edit cuts only the
+  tail. `--report DIR` prints the table and writes the JSON again from a
+  run's saved directory, such as the one saved from a cancelled job.
+- Here it runs through `scripts/heavy`. In an accl job, `scripts/heavy`
+  passes through, and the allocation caps the memory.
+
+Per rebuild it records:
+- the ms (rebuild, link), which depend on the machine's load;
+- the counts, which do not: steps run, commands, reads checked, readers
+  marked, definitions changed, and records made (summed over the
+  rebuild's routines line);
+- `instructions:u`, the user-space instructions of the phase.
+
+For the process it records the cold build's ms, commands, records and
+instructions, the peak RSS (GNU time inside the sandbox, around the
+process), and whether the final outputs are the cold build's.
+
+**How the instructions are counted by phase.** The user asked for
+numbers that do not depend on the load. A `perf stat` counts a process,
+not its phases, so each phase gets its own count:
+- *The cold build*: a `perf stat` around the process, with a control
+  FIFO. The first rebuild line sends `disable` and waits for the ack, so
+  the count ends where the cold build's link ended.
+- *Rebuild K*: its line makes the edit, then starts
+  `perf stat -p <the process> -D -1` with a control FIFO of its own. It
+  sends `enable` and waits for the ack before it returns, so the count
+  starts before the rebuild does. The next line stops it with SIGINT.
+  The next line's shell is the process's child, made while the phase's
+  counter was on, so a phase includes that shell, about a million
+  instructions.
+- *The last measured rebuild*'s counter is stopped by one more line. Its
+  rebuild, with no edit, is not reported. A perf still attached when the
+  sandbox ends would be killed before it wrote its count.
+
+**The final outputs against the cold build's.** Every edit is reverted,
+and the warm `word` pairs leave the text as it was. With one pass per
+rebuild, an `.aux` that a `\label` or `\footnote` changed has settled
+again long before the end. So the final PDF, `.aux`, `.toc` and `.out`
+must be the cold build's byte for byte, and the log must be the same
+with the statistics masked. That is an exactness check on the course,
+and a cheap one: it needs none of the oracle's plain builds of a minute
+each.
+
+**The format** is made by the binary measured, at the jobs' fixed time,
+with the course's recipe (`-ini -jobname=pdflatex
+-translate-file=cp227.tcx *pdflatex.ini`). It differs from the course
+copy's `_fmt/pdflatex.fmt` in 2 of its 15,551,983 bytes: the dumped
+`\time` (630 minutes against 419). TeX sets the date and time again when
+a job starts, after loading the format (§1337, `fix_date_and_time`), so
+the outputs are the same. The fixed time makes the format reproducible.
+
+**accl.** The machine's load made local timings meaningless, and the
+heavy lock was held by three other agents' course runs, so the baseline
+ran on the accl cluster:
+`scripts/accl/accl run cmd sh -c 'bench/ssa-course.sh "$w/course" "$w/aux"'`.
+In a job, the course is `$w/course` and its aux files are `$w/aux`.
+job.sbatch's `cmd` task copies them there, as its `course` task does
+(c22e989). Before, it copied neither, and the container cannot see the
+home directory. The JSON comes back in the run's `bench-results/`.
+
+**A bug the first, stopped run found.** I killed a run while it waited
+for the heavy lock. It reported the peak RSS of the run before it, read
+from a stale `time.txt`. The outputs of an earlier run are now cleared
+first, and a run whose cold build did not finish writes no JSON.
+
+**The gate** (local, at 36359a8): `cargo xtask check` passes. e2e is
+34/34 identical, so is e2e in machine mode, and `ssa-edits/*` is 10/10
+inside the gate (75 s under load 23–35).
+
+**The course on main's engine** (cb30e2e; accl, acclnode01, 16 CPUs
+allocated, quiet; release binary built in the job; the course's edits in
+their file order, before the warm pairs moved first). The job was
+cancelled during rebuild 8, the footnote's revert, when the user asked
+not to wait for the reflow edits. The numbers so far are in
+`bench/results/baf5ad6-ssa-course-acclnode01.json`. The cluster image
+has no `perf`, so there are no instruction counts.
+
+| rebuild | ms (rebuild, link) | steps | commands | reads checked | readers marked | records made |
+|---|---|---:|---:|---:|---:|---:|
+| cold build | 120,009 (link 35) | | 66,063,925 | | | 1,609,529 |
+| space | 51.1 (46.6, 4.5) | 2 | 1,903 | 3,019 | 0 | 15 |
+| space, reverted | 31.1 (26.7, 4.4) | 2 | 1,903 | 3,019 | 0 | 10 |
+| word | 116.0 (100.8, 15.2) | 6 | 4,450 | 6,599 | 32 | 49 |
+| word, reverted | 75.8 (63.4, 12.4) | 6 | 4,450 | 6,594 | 32 | 12 |
+| label | 9,675.6 (9,669.8, 5.8) | 244 | 3,821,794 | 719,419 | 884 | 2,073 |
+| label, reverted | 10,496.0 (10,489.4, 6.6) | 244 | 3,822,938 | 721,792 | 887 | 1,331 |
+| footnote | 584,869.3 (584,846.1, 23.2) | 851 | 23,604,036 | 1,902,564 | 7,734 | 291,109 |
+
+- *Memory.* GNU time wrote nothing, since the job was cancelled.
+  Slurm's sampled accounting of the batch step gives MaxRSS 18.4 GiB
+  (19,253,632 KB) and MaxVMSize 18.3 GiB, over the cold build and
+  rebuilds 1–8. That is under `scripts/heavy`'s 40 GB cap, and down from
+  24 GB before 1ffe4d4.
+- *The word edit* has LOG 2026-09-29's counts: 6 steps, 4,450 commands,
+  6,599 reads checked, 32 readers marked. On a quiet node it takes
+  116 ms; DESIGN 4.3's target is 16.7 ms.
+- *The label* re-runs 244 steps and 3.8 M commands; DESIGN 4.3's target
+  is 50 K. That is the step grain the `windows` agent replaces.
+- *The footnote* re-runs 851 steps and 23.6 M commands (36% of the cold
+  build's), ships 136 pages again, and makes 1.2 M `unsave` calls (914 K
+  of them applied hits, 284 K records). It takes 585 s, almost five cold
+  builds. That is 24.8 µs a command, against 2.5 µs in the label's
+  rebuild and 1.8 µs in the cold build: something in the rebuild path
+  costs more per command as more is re-run. Not profiled; for
+  `rebuild-cost`.

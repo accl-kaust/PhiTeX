@@ -1192,9 +1192,11 @@ cold build with recording takes 3.2–3.4× a plain one and peaks at 24 GB.
    `cargo xtask ssa-edits` runs it on the release binary, and `cargo
    xtask check` runs it beside e2e. The course's numbers come from
    `bench/ssa-course.sh`: one process builds the course cold, then
-   rebuilds it after each edit of `bench/edits/course.txt` and after
-   that edit's revert, then after N warm `word` edits and their reverts.
-   It runs through `scripts/heavy`. Per rebuild it records the counts
+   rebuilds it after N warm `word` edits and their reverts, then after
+   each edit of `bench/edits/course.txt` (or those `--edits` names) and
+   after that edit's revert. A rebuild over `--rebuild-timeout` seconds
+   ends the run, and the numbers so far are kept. It runs through
+   `scripts/heavy`, or in an accl job. Per rebuild it records the counts
    that do not depend on the machine's load: steps, commands, reads
    checked, readers marked and records made. It also records the user
    instructions of each phase (`perf stat -e instructions:u`, attached
