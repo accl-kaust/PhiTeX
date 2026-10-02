@@ -14,8 +14,12 @@ pedantic = { level = "warn", priority = -1 }
 module_name_repetitions = "allow"
 missing_errors_doc = "allow"
 
+# (fat LTO, one codegen unit: the course's typing edit 30.6 -> about 28 ms
+# on accl, LOG 2026-10-02; builds take longer)
 [profile.release]
 debug = "line-tables-only"
+lto = "fat"
+codegen-units = 1
 
 [profile.profiling]
 inherits = "release"
