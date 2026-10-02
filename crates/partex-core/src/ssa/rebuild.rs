@@ -1790,7 +1790,9 @@ pub fn rebuild<H: Host>(tex: &mut Tex<H, SsaTracker>, trace: bool, apply: bool) 
             let next = {
                 let mut r = tex.tracker.rec.borrow_mut();
                 let renumbered = r.rt.fold.renumbered;
-                let Some(n) = r.rt.fold.insert_after(cur) else {
+                // (the first new step after the step run again is put near
+                // the next one, `Fold::insert_after`)
+                let Some(n) = r.rt.fold.insert_after(cur, cur == j) else {
                     rep.unsupported = Some("a step not in the fold");
                     break;
                 };
@@ -2286,7 +2288,7 @@ fn retire<H: Host>(
         rr.st.steps.loads.remove(&s);
         rr.st.steps.queries.remove(&s);
         mark_store_readers(rr, &ids, key, dirty, rep);
-        rr.rt.fold.remove(s);
+        rr.rt.fold.remove(s, old.keys());
         // (its chunks leave the link)
         rr.st.steps.fx_changed.push(s);
         dirty.remove(&key);

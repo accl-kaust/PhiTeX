@@ -29,8 +29,10 @@ use crate::table::{ByHash, Table};
 /// A step's id: its index in [`Fold::steps`], never reused.
 pub type StepId = u32;
 
-/// The gap between the keys of consecutive steps of a cold build.
-pub const KEY_GAP: u64 = 1 << 20;
+/// The gap between the keys of consecutive steps of a cold build (room
+/// for a thousand new steps in a run, a thousand keystrokes' runs at one
+/// place, before [`Fold::renumber`]; 2^31 steps before a key overflows).
+pub const KEY_GAP: u64 = 1 << 32;
 
 /// A step of the fold.
 #[derive(Clone, Debug)]
@@ -137,16 +139,25 @@ impl<M: Machine> Fold<M> {
     }
 
     /// A new step right after live step `id` (DESIGN 7.17.3 item 4: a
-    /// step that ended elsewhere runs on), its key halfway to the next
-    /// step's.
+    /// step that ended elsewhere runs on), its key a sixty-fourth of the
+    /// gap to the next step's away from one end: from the next step's
+    /// back toward `id`'s for the first new step after a step run again
+    /// (`near_next`), from `id`'s toward the next step's for a later one
+    /// of the same run.
     ///
-    /// Its key is a sixty-fourth of the way to the next step's: a step
-    /// that runs on usually makes a run of steps, each after the last.
-    /// With no key left between the two, the fold's keys are made again
-    /// ([`Fold::renumber`]).
+    /// A step run again that ends elsewhere at every keystroke (the
+    /// `.aux` read again at the job's end, after a heading changed) puts
+    /// its first new step before the ones the last keystroke put there,
+    /// which this run passes over: put near `id`, the gap after it shrank
+    /// sixty-four times a keystroke and the fold was numbered again every
+    /// third one (half a heading keystroke's time in the browser); put
+    /// near the next step, it shrinks by a sixty-fourth. A run of new
+    /// steps, each after the last, takes a sixty-fourth of what is left
+    /// each time. With no key left between the two, the fold's keys are
+    /// made again ([`Fold::renumber`]).
     ///
     /// `None`: `id` is not live.
-    pub fn insert_after(&mut self, id: StepId) -> Option<StepId> {
+    pub fn insert_after(&mut self, id: StepId, near_next: bool) -> Option<StepId> {
         let mut pos = self.position(id)?;
         let next_key = |f: &Self, pos: usize| {
             let key = f.steps[f.order[pos] as usize].key;
@@ -162,7 +173,8 @@ impl<M: Machine> Fold<M> {
             pos = self.position(id)?;
             (key, next) = next_key(self, pos);
         }
-        Some(self.insert_at(pos + 1, key + ((next - key) / 64).max(1)))
+        let d = ((next - key) / 64).max(1);
+        Some(self.insert_at(pos + 1, if near_next { next - d } else { key + d }))
     }
 
     /// Give the live steps keys [`KEY_GAP`] apart again, in their order,
@@ -187,10 +199,35 @@ impl<M: Machine> Fold<M> {
         self.readers.values_mut().for_each(|v| fix(v, true));
     }
 
-    /// Remove step `id` from the fold (its entries die with it).
-    pub fn remove(&mut self, id: StepId) {
-        self.steps[id as usize].live = false;
-        self.order.retain(|&s| s != id);
+    /// Remove step `id` from the fold, and its entries: as a reader of
+    /// the slots it read from outside it, and as the definition of each
+    /// slot in `written` (its records' writes). Left in their lists, dead,
+    /// a removed step's entries went only when the keys were made again
+    /// ([`Fold::renumber`]): every third keystroke in a heading did that
+    /// once, and with it rare, the lists grew at each one (four steps
+    /// passed over), and each keystroke took longer than the last.
+    pub fn remove<'a>(&mut self, id: StepId, written: impl IntoIterator<Item = &'a M::Addr>)
+    where
+        M::Addr: 'a,
+    {
+        if let Some(pos) = self.position(id) {
+            self.order.remove(pos);
+        } else {
+            self.order.retain(|&s| s != id);
+        }
+        let s = &mut self.steps[id as usize];
+        s.live = false;
+        let key = s.key;
+        for a in &self.steps[id as usize].reads {
+            if let Some(v) = self.readers.get_mut_by(hash64(a), |k| k.0 == *a) {
+                Self::drop_step(v, id, key);
+            }
+        }
+        for a in written {
+            if let Some(v) = self.defs.get_mut_by(hash64(a), |k| k.0 == *a) {
+                Self::drop_step(v, id, key);
+            }
+        }
     }
 
     /// Close step `id`: its outside reads (`reads`, each with its
@@ -314,6 +351,20 @@ impl<M: Machine> Fold<M> {
             .position(|x| x.step == step && x.run != run)
         {
             v.remove(at + i);
+        }
+    }
+
+    /// Remove step `step`'s entries at `key` from `v`.
+    fn drop_step(v: &mut Vec<Entry>, step: StepId, key: u64) {
+        let at = v.partition_point(|x| x.key < key);
+        let n = v[at..].iter().take_while(|x| x.key == key).count();
+        let mut i = at;
+        for _ in 0..n {
+            if v[i].step == step {
+                v.remove(i);
+            } else {
+                i += 1;
+            }
         }
     }
 

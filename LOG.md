@@ -10663,3 +10663,34 @@ The course A/B of the step boundary after a file read whole (433451e
 against eb0085a, job 6383): no change, word edit 21.1 ms both (7
 steps, 1,560 commands).
 
+## 2026-10-03 — Keys that leave room, and a removed step's entries removed (coordinator)
+
+The extension profiled edits to a section title (each runs the output
+routine again and a second trip for the `.aux`): 57 ms a keystroke in
+wasm, 41% of it in `rebuild` itself. Natively, `Fold::insert_after` was
+54% of such a keystroke, all of it `Fold::renumber`. At the job's end
+the `.aux` is read again, and its new `\@writefile{toc}` line makes the
+step that reads it end elsewhere; its new steps went after it, before
+the ones the last keystroke had put there (passed over after the run),
+each a sixty-fourth of the gap from it. So the gap shrank sixty-four
+times a keystroke, and every third one numbered the fold again: every
+index entry rewritten (p90 59 ms, max 91 ms natively).
+
+- The first new step after a step run again goes a sixty-fourth of the
+  gap back from the next step; the later new steps of the run, a
+  sixty-fourth on from the step before them, as before. The gap after
+  the step run again now shrinks by a sixty-fourth a keystroke.
+- Cold keys are 2^32 apart, not 2^20.
+- Renumbering also dropped the dead entries of removed steps, which
+  stayed in the lists until then. Once it was rare, the lists grew at
+  every keystroke (four steps passed over each time), and keystroke
+  100 took 19 ms where keystroke 10 took 11 ms. `Fold::remove` now
+  drops a removed step's entries: its reads, and its writes, which the
+  rebuild passes in.
+
+The heading keystroke natively (LTO, 100 each, the same PDF): median
+9.7 → 8.3 ms, p90 59.3 → 9.4 ms, max 91.1 → 18.8 ms; −42% instructions,
+−62% cycles; the 10th, 50th and 99th rebuilds 7.4, 8.0 and 8.6 ms. The
+harness: 14 cases, 79 stages, identical in all three modes; the
+workspace's tests pass.
+

@@ -1147,8 +1147,11 @@ of *steps*: calls from one clean point to the next.
   leaves its line's dimensions changes its paragraph's step and the
   ship step only. The page, `\box255` and the output routine before
   its `\shipout` read what they read before.
-- Each step has a fixed id and a key: cold keys are 2²⁰ apart, and a
-  step spliced in takes a key between its neighbours.
+- Each step has a fixed id and a key: cold keys are 2³² apart, and a
+  step spliced in takes a key between its neighbours, a sixty-fourth of
+  the gap from the next one's for the first new step after a step run
+  again, from its own predecessor's for the later ones of the run. A
+  removed step's index entries go with it.
 - A step keeps its records, and the slots it read from outside it.
 - Each slot keeps its definitions in key order, each naming the step
   and the run that made it, and each with its readers. A step run again
