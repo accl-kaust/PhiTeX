@@ -11244,3 +11244,20 @@ Measured: word edits 112.16 → 112.10 M instructions a rebuild, edits of
 the size only 71.59 → 71.58 M; cycles within the runs' noise (a step
 places hundreds of slots). The harness: 14 cases identical in all three
 modes; the workspace's tests pass.
+
+## 2026-10-03 — The host's lookup memos only between load checks (coordinator)
+
+Gate 6440 (3c83e5f) failed the e2e suite in plain and machine mode (17
+of 34 cases): 6114868's memos in the native host — `again`, a name's
+lookup answered as it was, and `racy`, the contents of a file too new
+to keep by its stamp — were cleared only by a check of the loads
+(`Host::unchanged`), which an SSA session makes at each rebuild and
+trip, and a plain or machine run never makes. Such a run writes a file
+and reads it back (the `.aux`, a `\write` stream's file) and was
+answered with what it read before. The host now keeps both memos only
+once a check was made (`Seen::checking`): a run that makes none reads a
+file again whenever it asks for it, as before 6114868; an SSA session's
+rebuilds are unchanged.
+
+Checked: e2e 34/34 identical in plain and in machine mode; the harness
+is unaffected (its sessions check at every rebuild).

@@ -66,6 +66,12 @@ struct Seen {
     /// size asked for again and again) is answered as it was, without
     /// its search and `stat`s.
     again: phitex_doc::FxMap<Vec<u8>, Vec<(FileKind, Answer)>>,
+    /// Whether a check of the loads was made ([`Host::unchanged`]: an SSA
+    /// session's, at each rebuild and trip): `racy` and `again` are kept
+    /// only from one to the next. A session that makes none (a plain
+    /// build, machine mode, a run to convergence) reads a file again
+    /// whenever it asks for it, as it may have changed since.
+    checking: bool,
     /// Each name's last lookup, by kind (a name is looked up as one kind,
     /// mostly).
     lookups: phitex_doc::FxMap<Vec<u8>, Vec<(FileKind, Lookup)>>,
@@ -168,7 +174,10 @@ impl NativeHost {
     fn read_at(&mut self, p: &[u8]) -> Option<std::sync::Arc<[u8]>> {
         let st = self.seen.as_ref().and_then(|_| stamp(p));
         if let (Some(seen), Some(s)) = (&self.seen, st)
-            && let Some((kept, c)) = seen.files.get(p).or_else(|| seen.racy.get(p))
+            && let Some((kept, c)) = seen
+                .files
+                .get(p)
+                .or_else(|| seen.racy.get(p).filter(|_| seen.checking))
             && *kept == s
         {
             return Some(c.clone());
@@ -182,8 +191,10 @@ impl NativeHost {
                 seen.files.remove(p);
                 // (too new to keep across checks: kept until the next one)
                 match st {
-                    Some(st) => seen.racy.insert(p.to_vec(), (st, contents.clone())),
-                    None => seen.racy.remove(p),
+                    Some(st) if seen.checking => {
+                        seen.racy.insert(p.to_vec(), (st, contents.clone()))
+                    }
+                    _ => seen.racy.remove(p),
                 };
             }
         }
@@ -437,6 +448,7 @@ impl NativeHost {
 impl Host for NativeHost {
     fn read_file(&mut self, name: &[u8], kind: FileKind) -> Option<OpenedFile> {
         if let Some(seen) = &self.seen
+            && seen.checking
             && let Some((_, a)) = seen
                 .again
                 .get(name)
@@ -503,11 +515,13 @@ impl Host for NativeHost {
                 .or_default()
                 .push((kind, l)),
         }
-        let answer = f.as_ref().map(|f| (f.name.clone(), f.contents.clone()));
-        seen.again
-            .entry(name.to_vec())
-            .or_default()
-            .push((kind, answer));
+        if seen.checking {
+            let answer = f.as_ref().map(|f| (f.name.clone(), f.contents.clone()));
+            seen.again
+                .entry(name.to_vec())
+                .or_default()
+                .push((kind, answer));
+        }
         found.ok().flatten()
     }
 
@@ -519,6 +533,7 @@ impl Host for NativeHost {
         // name looked up again)
         seen.racy.clear();
         seen.again.clear();
+        seen.checking = true;
         // (the watcher's events since the last look taken first: a check
         // made now knows them all)
         if seen.watch.is_none() && !seen.unwatched {
