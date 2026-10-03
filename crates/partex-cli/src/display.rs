@@ -1,7 +1,8 @@
 //! `PARTEX_DISPLAY=1`: display lists (DESIGN 4.5, `partex_core::displist`)
 //! kept, and written after each build or rebuild to `<job>.display.jsonl`
 //! next to the PDF, for checking them (`cargo xtask display`) and for
-//! looking at them. Its lines:
+//! looking at them (`PARTEX_DISPLAY=keep`: kept, nothing written, what
+//! keeping them costs). Its lines:
 //! - `{"pages":N,"forms":[id,...]}`;
 //! - a line per page: `{"page":N,"hash":"…","length":L,
 //!   "literals":[[start,end,mode],...],"media":[x0,y0,x1,y1],"rotate":R,
@@ -33,14 +34,21 @@ use partex_core::track::Tracker;
 use crate::native::NativeHost;
 use crate::origins::json_str;
 
-/// Whether display lists are asked for.
-pub fn wanted() -> bool {
-    std::env::var("PARTEX_DISPLAY").is_ok_and(|v| v == "1")
+/// What `PARTEX_DISPLAY` asks for: `1`, the lists kept and the side file
+/// written after each build (the time the lists took to make reported on
+/// stderr); `keep`, the lists kept and nothing else (what keeping them
+/// costs a build). `None`: off.
+fn wanted() -> Option<bool> {
+    match std::env::var("PARTEX_DISPLAY").as_deref() {
+        Ok("1") => Some(true),
+        Ok("keep") => Some(false),
+        _ => None,
+    }
 }
 
 /// Turn display lists on for `tex` if they are asked for.
 pub fn setup<T: Tracker>(tex: &mut Tex<NativeHost, T>) {
-    if wanted() {
+    if wanted().is_some() {
         tex.set_display_lists(true);
     }
 }
@@ -327,16 +335,34 @@ fn render_images<T: Tracker>(
 
 /// Write `<job>.display.jsonl` (if display lists are on).
 pub fn write<T: Tracker>(tex: &mut Tex<NativeHost, T>) {
-    if !tex.display_lists_on() {
+    if !tex.display_lists_on() || wanted() != Some(true) {
         return;
     }
     let Some(job) = tex.job_name_bytes() else {
         return;
     };
+    // (what a renderer asks for after a build: every page's list, and
+    // the hashes; each made once, then the file from them)
+    let t0 = std::time::Instant::now();
+    let pages = tex.display_pages();
+    let items: usize = (0..pages)
+        .map(|n| tex.display_list(n).map_or(0, |l| l.items.len()))
+        .sum();
+    let t1 = std::time::Instant::now();
+    let _ = tex.display_hashes();
+    let t2 = std::time::Instant::now();
     let mut name = job;
     name.extend_from_slice(b".display.jsonl");
     let name = tex.host().in_output_dir(&name).unwrap_or(name);
     let text = render(tex);
+    eprintln!(
+        "partex: display lists: {pages} pages, {items} items made in {:.1} ms, \
+         hashed in {:.1} ms; side file {} bytes in {:.1} ms",
+        (t1 - t0).as_secs_f64() * 1e3,
+        (t2 - t1).as_secs_f64() * 1e3,
+        text.len(),
+        t2.elapsed().as_secs_f64() * 1e3
+    );
     let path = crate::native::path(&name);
     if let Err(e) = std::fs::write(&path, text) {
         eprintln!("partex: {}: {e}", path.display());
