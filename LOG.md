@@ -12010,15 +12010,41 @@ as cold builds, each checked; the `glyphs` job with display lists on too
 (plain and both SSA rebuilds, glyph counts equal to origins'). fmt,
 clippy (both feature sets) and the wasm32 check pass.
 
-Left (stopped at the coordinator's request):
-- the cost on the PGF subset (off against c651cf3, and on) is not
-  measured; the baseline binary is built (`target/base/partex`);
-- `cargo xtask check` was not run whole; the e2e jobs above ran on the
-  code before `cargo fmt` (formatting only since);
-- literals naming resources (pgf's opacity `gs`, shadings, patterns:
-  `\pdfpageresources` and `\pdfobj` objects) are not resolved: the list
-  carries the literal, not the resource it names;
-- form and image ids are object numbers, which an edit making objects
-  before them can change (images are recognized by their bytes);
-- DESIGN 4.5 is a short note; the extension's contract (the item types'
-  documentation) is in `pdftext` and `displist.rs`.
+Verified on accl at c5e027d: the full gate (job 6515: fmt, clippy,
+`cargo xtask check`, the e2e jobs including `display` and `glyphs`,
+38/38 cases) and the SSA edits (`edits --brief --fixpoint`, job 6521:
+17/17 cases identical). A run of the edits without `--fixpoint` (job
+6516) differs only in the aux round-trip cases (readback, incremental,
+machine_edits, label, streams, fatal_end, windows), as main does
+without it.
+
+`PARTEX_DISPLAY=keep` keeps the lists and writes nothing (what keeping
+them costs a build); with `PARTEX_DISPLAY=1` stderr reports how long
+each page's list took to make and hash and to write.
+
+Left (wrap-up at the user's request):
+- **Cost not measured.** The harness (`bench/display-cost.sh`, accl cmd
+  job 6517) built both binaries and their formats, but every run exited
+  with status 2 in 0.00 s, so there are no numbers. The cause, not
+  looked into, is in the harness's `run` (likely `/usr/bin/time` or the
+  `env` call in the container), not in partex. Lists off still has to
+  be compared with c651cf3, and lists on measured.
+- **Resource resolution is unverified.** It is on branch
+  `display-resources` (8c0e3f3, not for merge):
+  - `PageList::resources` and `attrs` as `PdfValue`:
+    `\pdfpageresources`, `\pdfxform resources` and `attr`, and
+    `\pdfobj` objects (`Effect::DisplayObj`), with a form or image
+    named by its id;
+  - page hashes become a walk over every stream reached;
+  - the checker compares resources and attributes with the PDF.
+
+  It is clippy clean, but no e2e has run on it, and `display.tex` does
+  not yet have shadings, patterns or fadings. Until it lands, a list
+  carries the literal (`/pgf@CA0.5 gs`, `/Sh sh`, `/pgfpat3 scn`) but
+  not the resource it names.
+- **Ids.** Form and image ids are object numbers, which an edit that
+  makes objects before them can change. Images are recognized by their
+  bytes.
+- **The contract.** DESIGN 4.5 is a short note. The extension's
+  contract, including the `display_` names and the id-stability rules,
+  is in the documentation of `pdftext` and `displist.rs`.
