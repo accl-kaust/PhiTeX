@@ -1761,13 +1761,30 @@ made again is another version and is made again too (the rest of its
 paragraph and page; an edit that moves no line costs the steps of the
 page it is on). With `SyncTeX`, no step is taken from another's record.
 
-**Not done.** The DVI mode (no file is written: the DVI writer's walk
-has no point to record); a document that sets `\synctex` with no
-`-synctex` on the command line (no file: places would have to be kept
-from the job's start); a session or persisted build with `SyncTeX` (not
-saved: places are a side channel); in SSA mode, the controller's
-warnings, printed by pdfTeX as they happen. The overhead with it off,
-and on, is not measured yet.
+**A document's own `\synctex`.** With no `-synctex`, the controller is
+made when the document first sets `\synctex` nonzero (`assign_int`),
+where pdfTeX's first acts: files are counted from the job's start
+whatever the setting (`synctex_start_input`; the counter a scalar row),
+the first file's name is kept for `Input:1`, and a page shipped before
+leaves it off, with pdfTeX's warning at the next sheet. In SSA mode the
+controller's flags are a scalar row, so the steps print its warnings
+where pdfTeX prints them. pdfTeX gives a node its place in `get_node`
+whatever `\synctex` is; here a node made before `\synctex` is set gets
+one where it next enters a list, box or register.
+
+**Not done.** The DVI mode (no file is written). The DVI writer
+resolves positions in its backend, from the page IR; SyncTeX would need
+`build_list`, `node_item`, `leaders_items` and `reflect.rs`'s walk to
+track `cur_h` and `cur_v` as tex.web's `hlist_out` and `vlist_out` do
+(leader boxes repeated, TeX--XeT's reversed segments) and feed the PDF
+walk's events, a sheet begun before "Completed box being shipped out"
+and ended after the memory statistics, and `Output:dvi` with offsets of
+1in (4736287sp) while pdfTeX's `pdf_output_value` is not positive. A
+session or persisted build with `SyncTeX` (saving one is refused):
+nodes' `Side` handles in the node codec, the places table, the
+controller's state and the steps' events would all have to be saved.
+The cost off and on is measured by `scripts/accl/tasks/synctex-ab.sh`
+(LOG 2026-10-03).
 
 ---
 
