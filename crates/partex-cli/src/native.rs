@@ -32,8 +32,6 @@ pub struct NativeHost {
     /// Ask the engine for warnings and notes as diagnostics (the modern
     /// command line's renderer groups them).
     pub notes: bool,
-    /// Where live progress goes (pages as they are shipped out).
-    pub live: Option<crate::events::LiveSink>,
     /// A directory searched for formats before kpathsea's path (the
     /// modern command line's own formats).
     pub formats: Option<std::path::PathBuf>,
@@ -155,7 +153,6 @@ impl NativeHost {
             dvi_thread: true,
             dvi: None,
             notes: false,
-            live: None,
             formats: None,
             memo: (!std::env::var("PARTEX_T1_CACHE").is_ok_and(|v| v == "0"))
                 .then(std::collections::BTreeMap::new),

@@ -2509,6 +2509,9 @@ pub struct Watch {
     idle: bool,
     /// The store the build is kept in across processes.
     keeper: Option<persisted::Keeper>,
+    /// What the last rebuild's edits changed: each file, and the first
+    /// line it changed at (`paper.tex:18`).
+    last_changes: Vec<String>,
 }
 
 /// Passes of a watch rebuild at most (as `-converge`).
@@ -2529,10 +2532,17 @@ impl Watch {
         let mut m = TexMachine::new(tex, command_line);
         switches(&mut m);
         observe(crate::events::Progress::PassStart(1));
+        observe(crate::events::Progress::Phase(crate::events::Phase::Cold));
         let t = Instant::now();
         let b = Build::new(m, &cfg);
         let elapsed = t.elapsed();
-        print_census(&b);
+        // (a report for debugging, not for the modern command line's
+        // terminal unless asked for)
+        if std::env::var_os("PARTEX_WATCH_DEBUG").is_some()
+            || partex_core::machine::CUT_TIMING.load(std::sync::atomic::Ordering::Relaxed)
+        {
+            print_census(&b);
+        }
         let mut w = Self::from_build(b);
         w.cfg = cfg;
         let first = (
@@ -2568,7 +2578,41 @@ impl Watch {
             tick: 0,
             idle: false,
             keeper: None,
+            last_changes: Vec::new(),
         }
+    }
+
+    /// What the last rebuild's edits changed: each file, and the first
+    /// line it changed at (`paper.tex:18`).
+    pub fn last_changes(&self) -> &[String] {
+        &self.last_changes
+    }
+
+    /// `changes` as the terminal names them: each file and the first line
+    /// that differs from what the build read (a time is no file's).
+    fn describe(&self, changes: &[(Vec<u8>, Arc<[u8]>)]) -> Vec<String> {
+        let init = self.b.initial().tex().host();
+        changes
+            .iter()
+            .filter(|(k, _)| k.as_slice() != CLOCK)
+            .map(|(k, now)| {
+                // (a file that appeared: its name)
+                let name = k.rsplit(|&c| c == 0).next().unwrap_or(k);
+                let name = String::from_utf8_lossy(undotted(name)).into_owned();
+                match init.file(k) {
+                    Some(old) => {
+                        let same = old
+                            .iter()
+                            .zip(now.iter())
+                            .take_while(|(a, b)| a == b)
+                            .count();
+                        let line = old[..same].split(|&c| c == b'\n').count();
+                        format!("{name}:{line}")
+                    }
+                    None => name,
+                }
+            })
+            .collect()
     }
 
     /// Whether an input changed on disk (by modification time; the files
@@ -2594,6 +2638,7 @@ impl Watch {
         if changes.is_empty() {
             return None;
         }
+        self.last_changes = self.describe(&changes);
         observe(crate::events::Progress::PassStart(1));
         let first = self.apply_to_the_end(changes);
         Some(self.converge(first, between, observe))
@@ -2807,6 +2852,9 @@ impl Watch {
         let mut passes = 1;
         loop {
             observe(crate::events::Progress::Pass(passes, Some(&report)));
+            observe(crate::events::Progress::Phase(
+                crate::events::Phase::Linking,
+            ));
             let (term, diagnostics) = match self.write() {
                 Ok(x) => x,
                 Err(e) => {
