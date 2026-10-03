@@ -1088,6 +1088,7 @@ fn ssa_tracker() -> partex_core::ssa::SsaTracker {
     tracker.set_lean(!std::env::var("PARTEX_SSA_LEAN").is_ok_and(|v| v == "0"));
     // (the names a run makes placed by name, DESIGN 3.9's allocators)
     tracker.set_names_by_name(std::env::var("PARTEX_SSA_NAMES").is_ok_and(|v| v == "1"));
+    tracker.cancel.set(cancel_after());
     // (the steps' reads and writes timed, for the graph `write_dag` prints)
     tracker.set_timed(std::env::var_os("PARTEX_SSA_DAG").is_some());
     // (a rebuild runs this many commands at most: past them it stops, as
@@ -1107,6 +1108,7 @@ fn ssa_tracker() -> partex_core::ssa::SsaTracker {
 /// build (an edit) and builds again with the same records;
 /// `PARTEX_SSA_TRACE=<file>` writes the last build's trace there;
 /// `PARTEX_SSA_LEAN=0` records every routine, and each step's own reads.
+#[allow(clippy::too_many_lines)]
 fn run_ssa(host: native::NativeHost, params: Params, command_line: &[u8]) -> i32 {
     let check = std::env::var("PARTEX_SSA_CHECK").is_ok_and(|v| v == "1");
     let rebuild = std::env::var("PARTEX_SSA_REBUILD").ok();
@@ -1119,6 +1121,9 @@ fn run_ssa(host: native::NativeHost, params: Params, command_line: &[u8]) -> i32
     origins::setup(&mut tex);
     let t0 = std::time::Instant::now();
     let r = partex_core::ssa::run_applying(&mut tex, command_line, check, 0, apply);
+    if r.cancelled {
+        return cancelled();
+    }
     if check {
         eprintln!("partex: ssa lost writes {}", tex.lost_writes());
     }
@@ -1402,6 +1407,36 @@ fn rebuild_deadline() -> Option<partex_core::ssa::Deadline> {
         clock,
         clock_ns().saturating_add(ms.saturating_mul(1_000_000)),
     ))
+}
+
+/// A cold build cancelled ([`cancel_after`]): its engine is in the
+/// middle of the job, so the run ends there.
+fn cancelled() -> i32 {
+    eprintln!("partex: ssa build 0: cancelled at a step boundary");
+    3
+}
+
+/// `PARTEX_SSA_CANCEL_AFTER=N`: [`partex_core::ssa::SsaTracker::cancel`]
+/// says to stop from its `N`th question on (the host's signal, as a test
+/// stands it in).
+fn cancel_after() -> Option<partex_core::ssa::Cancel> {
+    static LEFT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = std::env::var("PARTEX_SSA_CANCEL_AFTER")
+        .ok()?
+        .trim()
+        .parse::<u64>()
+        .ok()?;
+    LEFT.store(n, std::sync::atomic::Ordering::Relaxed);
+    Some(|| {
+        // (the count left before this question: 1 is the `N`th)
+        LEFT.try_update(
+            std::sync::atomic::Ordering::Relaxed,
+            std::sync::atomic::Ordering::Relaxed,
+            |v| Some(v.saturating_sub(1)),
+        )
+        .unwrap_or(0)
+            <= 1
+    })
 }
 
 /// A rebuild's cascades that went cold (`RebuildReport::cold`).

@@ -1238,6 +1238,9 @@ impl Edit {
 #[derive(Clone, Debug, Default)]
 pub struct RebuildReport {
     pub history: i32,
+    /// The rebuild stopped after a step because [`super::SsaTracker::cancel`]
+    /// said so; it stops as one past its deadline does.
+    pub cancelled: bool,
     /// The files that changed, and the steps their lines made dirty.
     pub edits: usize,
     pub seeds: usize,
@@ -2190,6 +2193,11 @@ pub fn rebuild<H: Host>(tex: &mut Tex<H, SsaTracker>, trace: bool, apply: bool) 
                 rep.unsupported = Some("a rebuild past its deadline");
                 break;
             }
+            if tex.tracker.cancel.get().is_some_and(|c| c()) {
+                rep.unsupported = Some("a rebuild cancelled");
+                rep.cancelled = true;
+                break;
+            }
             if let Some(s) = dirty.anchor.take()
                 && let Some(i) = ahead.iter().position(|&o| o == s)
             {
@@ -2391,6 +2399,7 @@ impl RebuildReport {
         self.skipped += r.skipped;
         self.commands += r.commands;
         self.unsupported = self.unsupported.or(r.unsupported);
+        self.cancelled |= r.cancelled;
         self.history = r.history;
         self.log.extend(r.log);
     }
@@ -2541,6 +2550,7 @@ fn more_trips<H: Host>(
             // (no seed: every load of the φ read what the trip stored)
             rep.settled = r.unsupported.is_none();
             rep.unsupported = rep.unsupported.or(r.unsupported);
+            rep.cancelled |= r.cancelled;
             rep.log.extend(r.log);
             rep.log.extend(rebuild_log(tex));
             return rep;

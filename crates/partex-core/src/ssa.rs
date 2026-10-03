@@ -1127,6 +1127,10 @@ impl Default for Recorder {
 /// nanoseconds, and the time on it past which the rebuild stops.
 pub type Deadline = (fn() -> u64, u64);
 
+/// A build's cancel ([`SsaTracker::cancel`]): asked at each step boundary,
+/// `true` stops the build there.
+pub type Cancel = fn() -> bool;
+
 /// The engine's tracker that records into the runtime.
 ///
 /// A read of a table slot is noted once per call: the slot's stamp is the
@@ -1202,6 +1206,15 @@ pub struct SsaTracker {
     /// between rebuilds, so a host that would build cold instead past
     /// the cold build's time sets this.
     pub deadline: core::cell::Cell<Option<Deadline>>,
+    /// Whether to stop the build now, asked at each step boundary of a
+    /// cold build ([`run_applying`]) and after each step a rebuild runs:
+    /// a host whose build runs synchronously (wasm in a Worker) polls its
+    /// own signal (an edit arrived) from it (`None`, the default: never).
+    /// A cancelled cold build leaves the engine in the middle of the job:
+    /// the host drops it and builds anew ([`SsaReport::cancelled`]). A
+    /// cancelled rebuild stops as one past its deadline does
+    /// ([`rebuild::RebuildReport::cancelled`]).
+    pub cancel: core::cell::Cell<Option<Cancel>>,
     /// Large contents loaded, with their versions, by identity: the host
     /// hands out the same `Arc` again for a file as it was, and a step
     /// run again that loads it (the 5 MB font map, at the first page) need
@@ -1330,6 +1343,7 @@ impl SsaTracker {
             stop_after: core::cell::Cell::new(u64::MAX),
             budget: core::cell::Cell::new(u64::MAX),
             deadline: core::cell::Cell::new(None),
+            cancel: core::cell::Cell::new(None),
             load_versions: RefCell::new(Vec::new()),
         }
     }
@@ -2339,6 +2353,10 @@ impl Store<TexSsa> for View<'_> {
 #[derive(Clone, Debug, Default)]
 pub struct SsaReport {
     pub history: i32,
+    /// The build stopped at a step boundary because
+    /// [`SsaTracker::cancel`] said so: the engine is in the middle of the
+    /// job, to be dropped.
+    pub cancelled: bool,
     pub paragraphs: u64,
     pub para_hits: u64,
     pub tokenize_hits: u64,
@@ -2505,6 +2523,10 @@ pub fn run_applying<H: Host>(
         match step {
             Step::Checkpoint => {
                 if step_ends(tex) {
+                    if tex.tracker.cancel.get().is_some_and(|c| c()) {
+                        rep.cancelled = true;
+                        break;
+                    }
                     close_paragraph(tex, &mut open, &mut rep, Close::Step);
                     open = Some(open_paragraph(tex, check, &mut rep, None));
                 }
