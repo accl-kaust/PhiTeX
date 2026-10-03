@@ -159,6 +159,11 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             // a font's first use numbers its object: in the walk's order
             self.pdf_init_font(f)?;
         }
+        if let Draw::Image { objnum, .. } = item {
+            // (a PDF page's group is numbered where `out_image` meets it,
+            // in the walk's order too)
+            self.image_group(objnum)?;
+        }
         let at_once = self.pdf.ship.faked_space || matches!(item, Draw::FakeSpace);
         if let Draw::Char { f, .. } = item
             && !at_once

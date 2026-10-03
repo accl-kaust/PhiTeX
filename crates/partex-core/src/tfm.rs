@@ -92,7 +92,14 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             let empty = self.pool_str(b"");
             self.pack_file_name(nom, aire, empty);
             let name = self.name_of_file.clone();
-            if let Some(file) = self.host.read_file(&name, FileKind::Tfm) {
+            let found = self.host.read_file(&name, FileKind::Tfm);
+            if T::VALUES {
+                // (a load, found or not: a metric file that comes after
+                // the font failed wakes the step that asked for it)
+                self.tracker
+                    .load(&name, FileKind::Tfm, found.as_ref().map(|f| &f.contents));
+            }
+            if let Some(file) = found {
                 file_opened = true;
                 let data: Arc<[u8]> = file.contents;
                 if let Some(g) = self.read_tfm(&data, u, nom, aire, s) {

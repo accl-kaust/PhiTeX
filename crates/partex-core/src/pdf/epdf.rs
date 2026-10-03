@@ -341,7 +341,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         errorlevel: i32,
     ) -> Result<PdfInfo, Jump> {
         let id = self.epdf_find_add(name);
-        let Ok(doc) = Doc::open(data.clone()) else {
+        let Ok(doc) = Doc::open(data) else {
             return self.pdftex_fail(Some(name), b"xpdf: reading PDF image failed");
         };
         #[allow(clippy::cast_possible_truncation, reason = "C's float")]
@@ -385,7 +385,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         let Some(page) = doc.page(usize::try_from(page_num).unwrap_or(0)) else {
             return self.pdftex_fail(Some(name), b"xpdf: reading PDF image failed");
         };
-        let Some(b) = page_box(page, spec) else {
+        let Some(b) = page_box(&page, spec) else {
             let m = alloc::format!("PDF inclusion: unknown value of pagebox spec ({spec})");
             return self.pdftex_fail(Some(name), m.as_bytes());
         };
@@ -542,6 +542,13 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                 let n = self.ep_add(c, *r, file)?;
                 self.ep_ref(n);
             }
+            Obj::Cmd(_) | Obj::Error | Obj::Eof => {
+                let m = alloc::format!(
+                    "PDF inclusion: type <{}> cannot be copied",
+                    o.type_name()
+                );
+                return self.pdftex_fail(Some(file), m.as_bytes());
+            }
         }
         Ok(())
     }
@@ -692,10 +699,10 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             d.occurrences -= 1;
             core::mem::take(&mut d.objs)
         };
-        let Ok(doc) = Doc::open(data.clone()) else {
+        let Ok(doc) = Doc::open(data) else {
             return self.pdftex_fail(Some(file), b"xpdf: reading PDF image failed");
         };
-        let Some(page) = doc.page(usize::try_from(im.page).unwrap_or(0)).cloned() else {
+        let Some(page) = doc.page(usize::try_from(im.page).unwrap_or(0)) else {
             return self.pdftex_fail(Some(file), b"xpdf: reading PDF image failed");
         };
         let mut c = Copy { doc: &doc, objs };
@@ -831,7 +838,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                 self.pdf_begin_stream();
                 for (i, x) in a.iter().enumerate() {
                     if let Obj::Stream(s) = doc.follow(x) {
-                        let decoded = doc.decode(&s).unwrap_or_default();
+                        let decoded = doc.decode(&s);
                         self.ep_stream_bytes(&decoded);
                     }
                     if i + 1 < a.len() {

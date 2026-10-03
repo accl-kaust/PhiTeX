@@ -974,7 +974,22 @@ impl<H: Host, T: Tracker> Tex<H, T> {
     pub(crate) fn adv_char_width(&mut self, f: i32, c: u8) -> Result<(i32, Scaled), Jump> {
         let w = self.fonts.get(f).width(c);
         if !self.is_scalable(f) {
-            return self.pdf_error(b"font", b"PK fonts are not implemented in partex yet");
+            // (no map entry with a Type 1 file: pdfTeX would make a
+            // bitmap font of it from its PK file)
+            let mut m = b"PK fonts are not implemented in partex yet (font ".to_vec();
+            m.extend_from_slice(&self.font_name_bytes(f));
+            let x = self.fonts.expand[crate::fonts::fx(f)];
+            if x.blink != NULL_FONT {
+                m.extend_from_slice(b", expanded from ");
+                m.extend_from_slice(&self.font_name_bytes(x.blink));
+                if !x.auto {
+                    m.extend_from_slice(b", not autoexpand");
+                }
+            } else if self.fm_entry(f).is_none() {
+                m.extend_from_slice(b": no map entry");
+            }
+            m.push(b')');
+            return self.pdf_error(b"font", &m);
         }
         let size = self.pdf_font_ref(f).size;
         let tm_a = self.pdf.ship.tm_a;
@@ -1997,11 +2012,20 @@ impl<H: Host, T: Tracker> Tex<H, T> {
     /// Shipping reads and writes the writer's tables ([`SHIPPING`]).
     pub(crate) fn pdf_ship_out(&mut self, p: &BoxNode, shipping_page: bool) -> Result<(), Jump> {
         self.writer_scope(SHIPPING_READS, SHIPPING, |t| {
-            if T::VALUES {
-                t.pdf.ship.marking.clear();
-            }
+            // (a form is shipped inside the ship of the page that uses
+            // it, after the page's contents: the page's glyphs marked so
+            // far are kept apart, and its marking goes on after the
+            // form's ship has taken its own)
+            let outer = if T::VALUES {
+                core::mem::take(&mut t.pdf.ship.marking)
+            } else {
+                alloc::collections::BTreeMap::new()
+            };
             let r = t.pdf_ship_out_now(p, shipping_page);
             t.glyphs_shipped();
+            if T::VALUES {
+                t.pdf.ship.marking = outer;
+            }
             r
         })
     }

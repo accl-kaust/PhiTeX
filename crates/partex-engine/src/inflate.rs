@@ -3,10 +3,8 @@
 //! cross-reference streams, and contents copied decoded. A stream that
 //! goes wrong ends there, with what was decoded before, as xpdf's does
 //! (it reports the error and hands out the bytes it has); the zlib
-//! trailer's checksum is not checked, as xpdf does not.
-//!
-//! Also the predictors of `/DecodeParms` (PNG's and TIFF's), which
-//! cross-reference streams use.
+//! trailer's checksum is not checked, as xpdf does not. (The predictors
+//! of `/DecodeParms` are `pdfread.rs`'s.)
 
 use alloc::vec::Vec;
 
@@ -261,104 +259,6 @@ pub fn inflate(d: &[u8]) -> Option<Vec<u8>> {
     Some(out)
 }
 
-/// `/DecodeParms` of a stream: its predictor (1: none, 2: TIFF's, 10-15:
-/// PNG's), and the row's colors, bits per component and columns.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Predictor {
-    pub predictor: i32,
-    pub colors: i32,
-    pub bits: i32,
-    pub columns: i32,
-}
-
-impl Default for Predictor {
-    fn default() -> Self {
-        Predictor {
-            predictor: 1,
-            colors: 1,
-            bits: 8,
-            columns: 1,
-        }
-    }
-}
-
-/// `data` with predictor `p` undone (xpdf's `StreamPredictor`): PNG rows
-/// each led by their filter type; TIFF's horizontal differencing (8 bits
-/// per component; other widths are left as they are). `None` if the
-/// parameters are out of xpdf's range (it then decodes nothing).
-#[must_use]
-pub fn unpredict(data: &[u8], p: Predictor) -> Option<Vec<u8>> {
-    if p.predictor <= 1 {
-        return Some(data.to_vec());
-    }
-    if !(1..=32).contains(&p.colors)
-        || !matches!(p.bits, 1 | 2 | 4 | 8 | 16)
-        || p.columns <= 0
-        || p.columns > i32::MAX / p.colors / p.bits
-    {
-        return None;
-    }
-    let pix_bits = usize::try_from(p.colors * p.bits).ok()?;
-    let row = (usize::try_from(p.columns).ok()? * pix_bits).div_ceil(8);
-    let bpp = pix_bits.div_ceil(8);
-    let mut out = Vec::with_capacity(data.len());
-    if p.predictor == 2 {
-        if p.bits != 8 {
-            return Some(data.to_vec());
-        }
-        for r in data.chunks(row) {
-            let start = out.len();
-            for (i, &b) in r.iter().enumerate() {
-                let left = if i >= bpp { out[start + i - bpp] } else { 0 };
-                out.push(b.wrapping_add(left));
-            }
-        }
-        return Some(out);
-    }
-    // (PNG: a row of zeros above the first)
-    let mut prev = alloc::vec![0u8; row];
-    let mut cur = alloc::vec![0u8; row];
-    let mut i = 0;
-    while i < data.len() {
-        let ty = data[i];
-        i += 1;
-        let n = row.min(data.len() - i);
-        cur[..n].copy_from_slice(&data[i..i + n]);
-        cur[n..].fill(0);
-        i += n;
-        for k in 0..row {
-            let a = if k >= bpp { cur[k - bpp] } else { 0 };
-            let b = prev[k];
-            let c = if k >= bpp { prev[k - bpp] } else { 0 };
-            let x = cur[k];
-            cur[k] = match ty {
-                1 => x.wrapping_add(a),
-                2 => x.wrapping_add(b),
-                3 => x.wrapping_add(
-                    u8::try_from(u16::midpoint(u16::from(a), u16::from(b))).unwrap_or(0),
-                ),
-                4 => {
-                    let (ia, ib, ic) = (i16::from(a), i16::from(b), i16::from(c));
-                    let pp = ia + ib - ic;
-                    let (pa, pb, pc) = ((pp - ia).abs(), (pp - ib).abs(), (pp - ic).abs());
-                    let pr = if pa <= pb && pa <= pc {
-                        a
-                    } else if pb <= pc {
-                        b
-                    } else {
-                        c
-                    };
-                    x.wrapping_add(pr)
-                }
-                _ => x,
-            };
-        }
-        out.extend_from_slice(&cur[..n]);
-        core::mem::swap(&mut prev, &mut cur);
-    }
-    Some(out)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -394,17 +294,5 @@ mod tests {
         let out = inflate(&z).unwrap();
         assert!(b"hello".starts_with(&out));
         assert!(inflate(b"\x00\x00").is_none());
-    }
-
-    #[test]
-    fn undoes_png_up_rows() {
-        // (a cross-reference stream's rows: /Columns 3 /Predictor 12)
-        let rows = [2u8, 1, 0, 16, 2, 0, 1, 5];
-        let p = Predictor {
-            predictor: 12,
-            columns: 3,
-            ..Predictor::default()
-        };
-        assert_eq!(unpredict(&rows, p).unwrap(), [1, 0, 16, 1, 1, 21]);
     }
 }

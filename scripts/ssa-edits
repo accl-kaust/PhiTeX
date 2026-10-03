@@ -129,6 +129,14 @@ REOPEN_EDITS = [
 # streams.tex: a line its first file's step writes, changed and back,
 # after the stream opened a second file
 STREAMS_EDITS = [("{Beta}", "{Gamma}"), ("{Gamma}", "{Beta}")]
+# images.tex: a caption, an image's size, the file one includes (its
+# document then one image fewer, the other's one more), and back
+IMAGES_EDITS = [
+    ("edits.tex", "First caption.", "First caption, edited."),
+    ("edits.tex", "width=0.5", "width=0.6"),
+    ("edits.tex", "height=2cm]{images-hand}", "height=2cm]{images-fig}"),
+    ("edits.tex", "height=2cm]{images-fig}", "height=2cm]{images-hand}"),
+]
 # inputs.tex: the file only tested for, edited; a line appended to the
 # file \input and taken away; a word of it, whose sum is printed
 INPUTS_EDITS = [
@@ -326,6 +334,15 @@ def all_cases():
             seed=2,
         ),
         latex("windows", "windows.tex", "pdflatex", WINDOW_EDITS),
+        Case(
+            "images",
+            {"edits.tex": "images.tex", **{f: f for f in ("images-fig.pdf", "images-hand.pdf")}},
+            "pdflatex",
+            [*LATEX_FLAGS, "-fmt=pdflatex", "-output-directory=out", "edits"],
+            IMAGES_EDITS,
+            outdir="out",
+            seed=2,
+        ),
     ]
 
 

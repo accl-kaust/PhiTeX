@@ -11371,3 +11371,76 @@ Pages node and its page have `/Resources` (only dictionaries kept), its
 duplicate keys (the first place, the last value) and a few damaged-file
 paths are next, as is the SSA build of the LaTeX case, whose page loses
 its own font (the plain build is right).
+
+## 2026-10-03: PDF inclusion, second pass: xpdf's own rules; SSA fixes
+
+The reader (`pdfread.rs`) checked against TeX Live's xpdf 4.05 source
+(`libs/xpdf`), file by file, and rewritten to it where they differed:
+
+- `Dict::add` keeps a key given twice once, in its first place, with its
+  last value.
+- `PageAttrs` merges a node's and its page's `/Resources` when both have
+  them: only categories that are dictionaries survive (a `/ProcSet` is
+  dropped), the page's entries replacing the node's of the same name.
+  pdfTeX's output showed it first: a hand-made file's page with its own
+  `/Font` came out with its parent's `/ExtGState` and `/XObject` too.
+- Boxes clamped to ±10⁹; a page found by its tree's `/Count`s
+  (`loadPage2`), the page count from the top's (counted when 0 or above
+  50,000); `findDest`'s name tree by `/Limits`, `LinkDest`'s validity.
+- The lexer: `{` `}` are errors, `--123` is 0, an integer's digits wrap,
+  a hex string's non-hex byte is a 0 digit, `#` escapes as xpdf reads
+  them (`#00` an error, a name a C string). The parser: a negative
+  reference is an error, arrays keep keywords and errors (pdfTeX then
+  fails copying them, as it does). `makeStream`: a repaired file's
+  stream ends at its `endstream`'s line, a wrong `/Length` gets 5,000
+  bytes more, no length searches `endstream`.
+- The xref: tables parsed byte by byte as `readXRefTable` does (the
+  first section's entry wins, IBM's off-by-one table), streams'
+  subsections failing at the data's end, `constructXRef`'s scan (object
+  headers, trailers, `endstream`s, object streams' entries), an object
+  stream's object whatever its reference's generation.
+- The filters `Stream.cc` makes: `/F` and `/DP` as fallbacks, a
+  parameter array only with a filter array, `StreamPredictor` exactly
+  (a last partial row, TIFF at 16 and fewer bits), ASCIIHex's last 0
+  byte, ASCII85's arithmetic on any byte, RunLength past the end, LZW's
+  table cleared at 4,097.
+
+pdfTeX's first LaTeX run of the `images` case wrote 47,948 bytes,
+partex 47,949: the page group's object took 11 where pdfTeX's took 10.
+pdfTeX numbers a font at its first use in the page and an image's group
+in `out_image`, both in the content's order; partex numbers fonts in
+the walk, but encodes an image's drawing later, with the drawn list. The
+group is now numbered in the walk too (`image_group`). (e2e compares a
+case's last run only: the case now uses a bold font after the image in
+its final run.)
+
+SSA: a page that uses a form (`\pdfxform` without `\immediate`; every
+graphicx `clip`) lost its fonts: the form is shipped inside the page's
+ship, after its contents, and `pdf_ship_out` began by clearing the
+glyphs marked so far, then took them as the form's. The page's glyphs
+went with the form's ship, the page's own were empty, and the job's end
+embedded nothing of fonts only the page used (`Unknown font tag F32`).
+Old: the windows binary and the one before it show it. The outer
+ship's marking is now kept across the inner ship.
+
+A `\font` whose TFM file was missing records the miss as a load, as
+VF, map, encoding and Type 1 reads did: the step wakes when the file
+comes (the Overleaf host supplies files as the job asks for them).
+Checked natively: `\font\x=mytfm` built by SSA without `mytfm.tfm`,
+the file copied in as the rebuild's edit: the rebuild (7 steps, 39
+commands, 2 ms) writes the DVI a plain run with the file there writes.
+
+The PK error names its font: "PK fonts are not implemented in partex
+yet (font X, expanded from Y)" for an instance `\pdffontexpand` made
+(with "not autoexpand" for a non-auto one), "(font X: no map entry)"
+otherwise. The Overleaf peer meets it on a page with math in an acmart
+document (libertine, newtxmath, microtype, zi4) that every native build
+here writes as pdfTeX does; the message will say which font it is.
+
+Also: the PNG average predictor wraps as C's `Guchar` does (a debug
+build panicked on a sum past 255).
+
+Tests: e2e 35/35 (plain and `PARTEX_MACHINE=1`), ssa-edits 16/16
+(`--brief --fixpoint`, as `cargo xtask check` runs it; without
+`--fixpoint` the oracle runs once a stage, and the cases whose first
+build reads a file it writes differ by design).

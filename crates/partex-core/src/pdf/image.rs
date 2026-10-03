@@ -444,16 +444,39 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         }
     }
 
-    /// pdfTeX §1629: `out_image`.
+    /// `out_image`'s page group: a PDF page's group is the page's if no
+    /// image gave it one, numbered at the image's first page (called
+    /// where the walk meets the image, before its drawing is encoded).
+    pub(crate) fn image_group(&mut self, objnum: i32) -> Result<(), Jump> {
+        let Some((xi, image)) = self.ximage(objnum) else {
+            return Ok(());
+        };
+        let group_ref = xi.group_ref;
+        if image.pdf.is_none() || group_ref == 0 || self.pdf.ship.page_group_val != 0 {
+            return Ok(());
+        }
+        if group_ref == -1 {
+            let g = self.pdf_new_objnum()?;
+            self.pdf.ship.page_group_val = g;
+            if let Aux::XImage(xi) = &mut self.pdf.objs.get_mut(objnum).aux {
+                xi.group_ref = g;
+            }
+        } else {
+            self.pdf.ship.page_group_val = group_ref;
+        }
+        Ok(())
+    }
+
+    /// pdfTeX §1629: `out_image` (its page group numbered before, by
+    /// [`Self::image_group`]).
     pub(crate) fn emit_image(
         &mut self,
         objnum: i32,
         dims: partex_engine::node::Dims,
     ) -> Result<(), Jump> {
-        let Some((xi, image)) = self.ximage(objnum) else {
+        let Some((_, image)) = self.ximage(objnum) else {
             return Ok(());
         };
-        let group_ref = xi.group_ref;
         let (img_w, img_h) = image.shown();
         self.pdf_end_text();
         self.pdf.out.print_ln(b"q");
@@ -464,18 +487,6 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         let (x, y) = (s.cur_h - s.origin_h, s.origin_v - s.cur_v);
         let total = dims.height + dims.depth;
         if let Some(p) = &image.pdf {
-            // (a PDF page's group: numbered here, at its first page)
-            if group_ref != 0 && self.pdf.ship.page_group_val == 0 {
-                if group_ref == -1 {
-                    let g = self.pdf_new_objnum()?;
-                    self.pdf.ship.page_group_val = g;
-                    if let Aux::XImage(xi) = &mut self.pdf.objs.get_mut(objnum).aux {
-                        xi.group_ref = g;
-                    }
-                } else {
-                    self.pdf.ship.page_group_val = group_ref;
-                }
-            }
             self.pdf
                 .out
                 .print_real(ext_xn_over_d(dims.width, TEN_POW[6], img_w), 6);
