@@ -12029,3 +12029,78 @@ the user's .aux (glibc): RSS after pass 1 10.3 GB -> about 2.4 GB.
   `cargo fmt`, clippy on partex-core and partex-cli (`-D warnings`),
   the unit tests of partex-core, partex-cli and partex-incr (a new
   `journal::tests::small_chunks`). DESIGN.md not updated.
+
+## 2026-10-03 — `partex watch`'s memory, continued: the gate, the store's pins, a session harness (agent watch-mem)
+
+**Verified on accl, commit `828286c`** (the loop and the snapshots):
+- the gate, job 6511: exit 0 (fmt, clippy, the workspace's tests, trip
+  7/7 and etrip 18/18 in plain and machine mode, e2e 37/37 in plain and
+  machine mode with `modern_watch_sanitized` and `machine_edits`, and its
+  ssa-edits 17/17 twice);
+- `scripts/ssa-edits --brief --fixpoint`, job 6520: 17/17 cases
+  identical. (Job 6512 ran it without `--fixpoint`: the seven cases with
+  aux round trips differ there because the reference runs each stage
+  once, as on main.)
+- the course's edits in machine mode under `PARTEX_MACHINE_SANITIZE=1`
+  (`bench/edits.sh`, `bench/edits/course.txt`), job 6513: still running
+  at the wrap-up; its result is in
+  `~/code/flinner/partex-phitex-runs/cmd-6513/` on accl. The counts it
+  must match, main at `c651cf3` on the same course (job 6514, no
+  sanitizer): space 32,871 commands re-run (1 / 583 regions dirty, 9
+  cuts), word 298,715 (3, 22), label 40,058 (2, 16), footnote 1,977,499
+  (18, 115), enter 228,285 (8, 50), word-local 32,871 (1, 9), delete-par
+  1,223,360 (12, 68), word2 10,016 (4 / 602, 4), space2 1,114 (1 / 591,
+  1), enter2 6,263 (3 / 625, 3), tikz-node 586,628 (3, 19), tikz-coord
+  586,625 (3, 19), tikz-plot 586,628 (3, 19).
+
+**Cause 3: the store's known values were never let go** (`3551e29`).
+A save keeps, by address, every value it wrote (`Known`, with a handle
+on each so the address stays the value's), and the next save names a
+value it meets again by its blob without encoding it. `merkle_known`
+carried every entry over as long as the store had its blob, used or
+not, so each save of a watch added the values its rebuilds had replaced
+and none went: in a watch rebuilding all day (the loop above), that is
+every snapshot ever made. Evidence on a three-section document
+(`bench/watch-rss.sh`, below): RSS 740 -> 902 MB over 6 rebuilds; the
+jemalloc heap at exit after 2 edits and after 12 (each with its revert)
+was 467 and 1,024 MB, the difference by site: font map entries
+(`map_line`, `register`, `scan_line`, their tree) +316 MB (the map is
+read again by each rebuild of the first ship), eqtb's object chunks +66
+MB, the `Known` map itself +50 MB, hyphenation patterns +49 MB, eqtb's
+word chunks +31 MB. The fix: a save lets go of each known value nothing
+but its handle holds (an `Arc`'s strong count of one), again until none
+is left, so a value only such a value held goes too; a value the build
+still has keeps its entry (the runs a save refers to whole keep theirs).
+Test: `persist::tests::known_lets_go_of_what_the_build_dropped`.
+Verified: fmt, clippy, the unit tests of partex-engine, partex-core,
+partex-cli and partex-incr. Not verified yet: a watch session's RSS with
+the fix (the release build was stopped at the wrap-up), the gate and the
+course sanitizer on `3551e29`.
+
+**`bench/watch-rss.sh`** (`f42eda8`): a `partex watch` session as a
+user's: the first build to its fixpoint, EDITS one-word edits (the
+longest word of a prose line of each chapter file, its last letter
+doubled, saved as editors save) each with its revert, SAVES saves with
+nothing changed, IDLE seconds; after each step the watch settles (its
+report, the save and the restart record done) and its RSS, peak and CPU
+are logged; then the idle CPU. Run on the small document only so far
+(with `828286c`'s binary: the saves with nothing changed rebuilt
+nothing, idle CPU 0.1-0.2%).
+
+**Left** (the wrap-up stopped the work here):
+- the course session through `bench/watch-rss.sh` (20 edits, their
+  reverts, 20 saves): not run; with `3551e29` it should show whether RSS
+  stays flat over rebuilds;
+- memory in a big rebuild pass: pass 2 of the course (the .aux and .toc
+  changed) re-runs 64.7 M of 68.9 M commands at the fine grain, 3,771
+  regions, RSS 2.4 -> 7.4 GB. Candidates, not measured: growing the
+  grain along a re-execution by default (`PARTEX_MACHINE_GROW=2`),
+  eqtb's objects in chunks of 128;
+- the store's save: it deep-copies every trace (`copy_build`), indexes
+  and coarsens the copy and holds every blob in memory before writing
+  (2.26 GB raw on the course's first save), RSS 7.4 -> 13.8 GB at its
+  peak and 11.5 GB after it (the allocator keeps what the save freed);
+- idle CPU on the course, 4.9% (a stat of each served file every 50 ms,
+  the TeX tree's every 500 ms), against 0.1-0.2% on the small document;
+- the SSA comparison on the course; DESIGN.md; main has moved (8ffafff)
+  and is not merged into this branch.
