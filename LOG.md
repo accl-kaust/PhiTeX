@@ -11588,3 +11588,21 @@ e2e case `png` (seven images, PDF 1.5, through graphicx) is identical.
 
 Tests: e2e 36/36, ssa-edits (`--brief --fixpoint`), the engine's and
 core's tests (11 new in `png.rs`), clippy, rustfmt.
+
+## 2026-10-03: `cargo xtask parallel`, the step graph measured in Rust
+
+`scripts/ssa-parallel.py` took 456 s on the step graph of four of the
+PGF manual's chapters (61,706 steps, 19.1 M reads, 7.7 M definitions);
+the whole manual's is ten times that. `cargo xtask parallel`
+(`xtask/src/parallel.rs`) is the same models and schedules in Rust:
+20 s on those chapters (7.9 s of it reading the dump), with the same
+numbers (every model's edges and critical paths, whole and pipelined,
+the list schedules, the definitions passed through).
+
+It adds speculation from a predicted entry state: each *segment* (the
+steps between two loads of a file `--segments` matches, by default any
+`.tex`: an `\include`d chapter) or each step, started from the state the
+setup left (the steps before the first that ships), a read of a later
+definition mispredicted unless its version is the setup's; which
+classes of addresses block, and the units that validate as classes are
+taken as predicted, the class that validates the most first.
