@@ -10849,3 +10849,52 @@ keystroke): a word 3.64 → 3.64 M, a `(` 12.50 → 12.48 M, the heading
 23.88 → 23.70 M, the sentence that wraps 19.25 → 19.10 M; the same
 PDFs. The harness: 14 cases identical in all three modes, the same
 commands.
+
+## 2026-10-03 — Deflate goes on from where it was (coordinator)
+
+A profile of the course's word edit (an LTO build with frame pointers,
+perf attached during the rebuilds only, 10 edits and their reverts):
+zlib's `deflate` was 28% of the process. A word edit compresses two
+streams again:
+- the page it changed, 72 KB at level 9, about 4 ms, in the ship: the
+  course has no virtual object numbers, so the ship writes its streams
+  compressed (the link compresses only what `Effect::Deflate` defers,
+  with virtual numbers);
+- the cross-reference stream, 25 KB, about 4.5 ms, in the link: every
+  object after the page moved.
+
+A revert compresses the page as it was before. The edited page and its
+last version share their first bytes up to the edit's place (6 KB of
+72 for the course's sentence near the top of its page), and the
+cross-reference stream shares its entries up to the first object that
+moved (16 of 25 KB for ch15's page).
+
+zlib's output is the same however its input is split. A new test checks
+this at levels 1–9, with pieces from 1 byte to 64 KiB, on page-like
+text, xref-like entries, random bytes and long runs. So a compression
+can go on from a state taken partway through another (`deflateCopy`)
+and give the bytes a compression from the start gives, provided the two
+inputs agree up to that point:
+- After the cold build, `zlib::deflate_stream` keeps its last 6 streams.
+  For each it keeps the input, the output, and the compressor's state
+  after each 4 KiB of input but the last (about 260 KB each at level 9,
+  the output buffer's pending bytes with it).
+- A stream identical to a kept one is that one's output again (a
+  revert's page). One sharing its first bytes with a kept stream goes
+  on from the last state within them, its output so far copied.
+- `PARTEX_DEFLATE_RESUME=0`: from the start, as before. The cold build
+  keeps nothing.
+
+A test checks resumed outputs against compressions from the start
+(levels 1, 6 and 9; edits early, mid-piece, at a piece's end and late;
+shorter, longer and exact-piece-length streams).
+
+Measured locally, the course's word edits, the same binary with and
+without (the machine loaded, so times are rough): the link of an edit
+4.4–6.5 → 3.0–5.2 ms (the cross-reference stream resumed 64% in), its
+page resumed only from 4 KiB, and a revert's page compressed before
+(about −4 ms). The PDFs were the same at all 13 checkpoints. The TikZ
+mock (LTO, instructions per keystroke): a word 3.64 → 3.51 M (−3.4%),
+a `(` 12.48 → 12.04 M, the heading 23.70 → 23.27 M, the sentence that
+wraps 19.10 → 18.64 M; the same PDFs. The harness: 14 cases identical
+in all three modes. The course on accl follows.

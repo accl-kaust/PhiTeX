@@ -1066,6 +1066,11 @@ fn run_ssa(host: native::NativeHost, params: Params, command_line: &[u8]) -> i32
     let millis = t0.elapsed().as_secs_f64() * 1e3;
     let mut linker = SsaLinker::default();
     let lr = linker.link(&mut tex);
+    // (a rebuild compresses its page and the cross-reference stream again,
+    // the same up to the edit's place: deflate goes on from where it was
+    // there, `zlib::deflate_stream`; `PARTEX_DEFLATE_RESUME=0`: from the
+    // start)
+    zlib::resume_streams(!std::env::var("PARTEX_DEFLATE_RESUME").is_ok_and(|v| v == "0"));
     eprintln!(
         "partex: ssa build 0: link {:.1} ms: {}; files written {:.1} ms",
         lr.link_ms, lr.how, lr.write_ms
