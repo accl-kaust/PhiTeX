@@ -272,6 +272,7 @@ pub fn check(dir: &Path, key: u128, look: &mut dyn Look) -> Option<Hit> {
             diagnostics: r.diagnostics,
             outputs: r.sizes,
             reports: r.reports,
+            unsettled: Vec::new(),
         },
         looked,
     })
@@ -302,6 +303,7 @@ mod tests {
             diagnostics: Vec::new(),
             outputs: vec![(b"o.pdf".to_vec(), 3)],
             reports: vec![String::from("r")],
+            unsettled: Vec::new(),
         }
     }
 

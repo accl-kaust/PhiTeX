@@ -11951,3 +11951,81 @@ input before and after its heading; placement from glyph lists,
 synthesized glyphs passed over), and the `glyphs` e2e job's check of
 `partex outline glyphs.tex --json` against the heading's place in
 pdfTeX's PDF.
+
+## 2026-10-03 — `partex watch`'s memory: its own outputs, and eqtb's objects in every snapshot (agent watch-mem)
+
+**What happened.** The user's `partex watch -o /tmp/tex course.tex`
+(machine mode, the 299-page course, 68.7 M commands a pass) grew from
+7.6 GB to 72 GB in 2 h 45 min at 100% CPU, rewriting course.pdf, .aux,
+.toc and .out every few minutes with no source edited. A copy run under
+a 16 GB cgroup was killed 8 s after pass 1 (14.1 GB then).
+
+**Cause 1: the watch rebuilt for its own outputs.** `converge` stopped
+at `PASSES` (5) without looking at the files its last pass wrote, so
+their stamps stayed old; the next tick's `changed()` saw new mtimes,
+`changes()` found the .aux different from what the build read (pass 5
+read pass 4's), and a new 5-pass rebuild began: forever, for any job
+whose own files do not settle. Evidence, with a one-page job whose .aux
+counts its passes (never settles), base binary (main at c651cf3): 120
+pass reports in 60 s with no edit (24 rebuilds of 5 passes a minute),
+RSS 243 MB to 2.7 GB in 144 s. Fixed binary: 5 passes, then
+`Unsettled flip.aux still changed after 5 passes; waiting for an edit`,
+no rebuild in 60 s idle; an edit rebuilds once (5 passes, the pending
+.aux applied with the edit) and waits again; RSS 198 MB, 746 MB after
+the first build, 828 MB after the edit's.
+
+The fix (`machinehost.rs`): the watch records each file it writes (real
+path, hash of the bytes, the mtime it got). `changed()` skips a file
+the job read that is as the watch last wrote it; `changes()` marks such
+files `own` and stamps a changed file only when a rebuild applies it.
+`rebuild()` runs only for an edit (own files alone wait, unstamped, and
+go in with the next edit); between passes the own files are applied as
+before. At `PASSES` the own files still changing are reported once
+(`Outcome::unsettled`, the `Unsettled` line of `partex build` and
+`watch`). A save with nothing changed does not rebuild (the contents
+are compared, then stamped).
+
+**Cause 2: every region snapshot copied eqtb's objects whole.** A
+jemalloc heap profile (`LD_PRELOAD=libjemalloc.so`,
+`MALLOC_CONF=prof:true,prof_final:true`, `jeprof --collapsed`) of the
+course's cold machine build (`PARTEX_MACHINE=1`, 589 regions, live heap
+at exit 11.82 GB): `Snapshot::of`'s `Tex::clone` held 10.22 GB, of which
+`eqtb_obj` (a plain `Vec<Option<Obj>>` over eqtb and the hash's extra
+places, 16.8 MB) 9.92 GB: one copy per snapshot. Then the input stack
+(196 MB, 333 KB a snapshot), the parameter stack (93 MB), JVec chunk
+copies (559 MB), the regions' guards and writes (284 MB).
+
+The fix (`journal.rs`, `objs.rs`, `machine.rs`): `JVec` takes any
+`Elem` (clonable, with a cheap `same` for a chunk written back as it
+was: pointer equality for token lists, boxes and shapes, glue by value)
+and a chunk size `C` (a const parameter, default 512); `eqtb_obj` is a
+`JVec`, committed and thawed (and rebased) with eqtb, compared by
+chunks in `eqtb_differences`. A snapshot holds the input and parameter
+stacks' live prefixes (`[0, input_ptr)`, `[0, param_ptr)`, what the
+state hash reads); `Snapshot::engine` gives them their lengths back.
+The store's layout tag is `partex machine build/12`.
+
+Measured, the same cold build (jemalloc, live heap at exit): 11.82 GB
+-> 3.07 GB (-74%), RSS at the end 11.25 GB -> 3.05 GB; the PDF is the
+same bytes but the dates (no SOURCE_DATE_EPOCH). In `partex watch` from
+the user's .aux (glibc): RSS after pass 1 10.3 GB -> about 2.4 GB.
+
+**Not yet fixed (numbers from the fixed binary on the course).**
+- Pass 2 re-ran 64.7 M of 68.9 M commands (the .aux and .toc change at
+  `\begin{document}` and in the contents) at the fine grain: 3771
+  regions, RSS about 2.4 -> 8.8 GB, about 1.7 MB a fine region. The
+  course then settled (2 passes). Candidates: `PARTEX_MACHINE_GROW=2` by
+  default (LOG: faster on the label too), eqtb's objects in chunks of
+  128 (1.45 GB of the 3.07 GB is their chunk copies at 512), and
+  `coarsen`'s `keep=2`, which leaves a whole cascade fine until two
+  more rebuilds.
+- The background store save after that: 2.26 GB of blobs encoded in
+  memory (951 MB on disk, 37 s), RSS 12.07 GB after it (peak 14.4 GB);
+  `Kept::known` pins the last save's values.
+- Idle CPU 4.9% on the course (a stat of each served file every 50 ms,
+  the TeX tree and the files not found every 500 ms); 0.1% on one page.
+- Not run: the 20-edit series (goal 2's flat RSS), the SSA comparison,
+  `cargo xtask check` (e2e, trip and etrip in machine mode). Run:
+  `cargo fmt`, clippy on partex-core and partex-cli (`-D warnings`),
+  the unit tests of partex-core, partex-cli and partex-incr (a new
+  `journal::tests::small_chunks`). DESIGN.md not updated.

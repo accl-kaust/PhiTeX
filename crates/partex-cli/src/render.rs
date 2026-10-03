@@ -386,6 +386,15 @@ impl Renderer {
         self.live.note(text);
     }
 
+    /// A status line, its verb in yellow: something the user may want to
+    /// act on.
+    pub fn warn(&self, verb: &str, what: &str) {
+        if self.settings.quiet {
+            return;
+        }
+        self.live.warn(verb, what);
+    }
+
     /// A line on standard error, above the live line.
     pub fn line(&self, text: &str) {
         self.live.print(text);
