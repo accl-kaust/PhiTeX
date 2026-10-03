@@ -11094,3 +11094,41 @@ median 2.9 → 1.4 ms), a `(` 12.01 → 11.86 M, the heading 23.20 → 23.10
 M, the sentence that wraps 18.59 → 18.45 M; the same PDFs. The harness:
 14 cases identical in all three modes; the workspace's tests pass. The
 course on accl follows.
+
+## 2026-10-03 — The fold's lists searched where their keys put them, and the loads indexed by name (coordinator)
+
+The profile after de451fa (the course's word edits and reverts, LTO
+with frame pointers) had costs that grow with the document:
+- The fold's searches (5.8% of the samples: `Fold::reaching` 2.3%,
+  `Fold::close` 2.3%): each a binary search (`partition_point`) over a
+  slot's list, in the order of its steps' keys, each probe a load of a
+  step's key from the array of keys, by step. The lists of the slots
+  every step reads are as long as the fold (the course: 135 slots read
+  by more than 8,000 steps each), and their probes miss the cache. The
+  keys are spread evenly, and `Fold::renumber` keeps them so, so
+  `first_not_below` guesses where an even spread puts the key, gallops
+  from the guess to bracket it, and halves within the bracket: its
+  answer is `partition_point`'s, in a few probes (a list under 32 long:
+  `partition_point`). Every search of the fold's lists uses it
+  (`reaching`, `next_after`, `readers_between`, `position`, `close`'s
+  definitions, `remove`, `put_reader`, `drop_reader`).
+- `Steps::phi_seeds`: de451fa kept the steps with a load of a φ, but
+  every load of a name not stored is one (a trip's first run reads the
+  value from before the job), so it walked most steps' loads. The steps
+  are kept by the names they loaded (`loaders`, by load id, as runs
+  close and steps leave), and `phi_seeds` walks only the loaders of the
+  names whose φ's version changed.
+- `mark_store_readers` (a step that stored differently: the loads after
+  it that read the store) walked every step's loads; it walks the
+  loaders of the names stored.
+
+The profile again (the course's 10 word edits and reverts, an LTO build
+with frame pointers): 1,804 → 1,687 samples; the searches 4.4 → 3.3%
+of them; `phi_seeds` 2.9 → 1.5% (what is left hashes a φ's bytes read
+again, the next change's). Instructions per rebuild (the course's 6
+word edits and reverts, perf stat, two rounds): de451fa 120.20 M, with
+the index 119.75–119.77 M, with the searches too 120.06–120.09 M; cycles
+96.6–97.6 M in all, within the runs' noise. The guess is a 128-bit
+division, a call, so the searches cost a few more instructions than
+they save: a float's division is next. The harness: 14 cases identical
+in all three modes; the workspace's tests pass.

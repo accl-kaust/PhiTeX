@@ -71,8 +71,9 @@ pub(crate) struct Steps {
     cur_loads: Vec<LoadSeen>,
     stores: BTreeMap<StepId, Vec<StoreEv>>,
     loads: BTreeMap<StepId, Vec<LoadSeen>>,
-    /// The steps some of whose loads read a φ ([`Steps::phi_seeds`]).
-    phi_loaders: BTreeSet<StepId>,
+    /// The steps that loaded each name, by its load id
+    /// ([`Steps::phi_seeds`], [`mark_store_readers`]).
+    loaders: BTreeMap<u32, BTreeSet<StepId>>,
     /// The names the job stores (the load ids of their addresses).
     stored: BTreeSet<u32>,
     /// The loads some step read whole (`\pdffilesize`, `\pdfmdfivesum`,
@@ -523,14 +524,13 @@ impl Steps {
             })
             .collect();
         let mut out = Vec::new();
-        for (&s, seen) in self
-            .phi_loaders
-            .iter()
-            .filter_map(|s| Some((s, self.loads.get(s)?)))
-        {
-            for l in seen.iter().filter(|l| l.phi) {
-                if vers.get(&l.id).is_some_and(|v| *v != l.ver) {
-                    out.push((fold.steps[s as usize].key, s, l.id));
+        for (&id, v) in &vers {
+            for &s in self.loaders.get(&id).into_iter().flatten() {
+                let seen = self.loads.get(&s).map_or(&[][..], |l| &l[..]);
+                for l in seen.iter().filter(|l| l.id == id && l.phi) {
+                    if *v != l.ver {
+                        out.push((fold.steps[s as usize].key, s, l.id));
+                    }
                 }
             }
         }
@@ -634,10 +634,14 @@ pub(super) fn step_closed(rr: &mut Recorder, id: StepId, input: InputState) -> V
         }
     }
     let loads = core::mem::take(&mut s.cur_loads);
-    if loads.iter().any(|l| l.phi) {
-        s.phi_loaders.insert(id);
-    } else {
-        s.phi_loaders.remove(&id);
+    // (the names it loads, indexed: its last run's taken out first)
+    for l in s.loads.get(&id).into_iter().flatten() {
+        if let Some(ss) = s.loaders.get_mut(&l.id) {
+            ss.remove(&id);
+        }
+    }
+    for l in &loads {
+        s.loaders.entry(l.id).or_default().insert(id);
     }
     if loads.is_empty() {
         s.loads.remove(&id);
@@ -2730,8 +2734,11 @@ fn retire<H: Host>(
         for &i in &ids {
             *rr.st.steps.store_changes.entry(i).or_default() += 1;
         }
-        rr.st.steps.loads.remove(&s);
-        rr.st.steps.phi_loaders.remove(&s);
+        for l in rr.st.steps.loads.remove(&s).into_iter().flatten() {
+            if let Some(ss) = rr.st.steps.loaders.get_mut(&l.id) {
+                ss.remove(&s);
+            }
+        }
         rr.st.steps.queries.remove(&s);
         mark_store_readers(rr, &ids, key, dirty, rep);
         rr.rt.fold.remove(s, old.keys());
@@ -2761,14 +2768,24 @@ fn mark_store_readers(
     dirty: &mut Dirty,
     rep: &mut RebuildReport,
 ) {
-    if ids.is_empty() {
-        return;
+    let st = &rr.st.steps;
+    let mut readers = BTreeSet::new();
+    for id in ids {
+        for &s in st.loaders.get(id).into_iter().flatten() {
+            if st
+                .loads
+                .get(&s)
+                .is_some_and(|seen| seen.iter().any(|l| !l.phi && l.id == *id))
+            {
+                readers.insert(s);
+            }
+        }
     }
-    for (&s, seen) in &rr.st.steps.loads {
+    for s in readers {
         let Some(k) = rr.rt.fold.steps.get(s as usize).map(|x| x.key) else {
             continue;
         };
-        if k > key && seen.iter().any(|l| !l.phi && ids.contains(&l.id)) {
+        if k > key {
             dirty.mark(k, s);
             rep.store_readers += 1;
         }

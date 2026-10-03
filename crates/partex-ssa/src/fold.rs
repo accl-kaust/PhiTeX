@@ -281,7 +281,7 @@ impl<M: Machine> Fold<M> {
         }
         for a in written {
             if let Some(v) = self.defs.get_mut_by(hash64(a), |k| k.0 == *a) {
-                let at = v.partition_point(|x| self.keys[x.step as usize] < key);
+                let at = first_not_below(v, |x| self.keys[x.step as usize], key);
                 if v.get(at).is_some_and(|x| x.step == id) {
                     v.remove(at);
                 }
@@ -374,7 +374,7 @@ impl<M: Machine> Fold<M> {
                 if v.last().is_none_or(|l| keys[l.step as usize] < key) {
                     v.push(e);
                 } else {
-                    let at = v.partition_point(|x| keys[x.step as usize] < key);
+                    let at = first_not_below(v, |x| keys[x.step as usize], key);
                     match v.get_mut(at) {
                         Some(x) if x.step == id => *x = e,
                         _ => v.insert(at, e),
@@ -390,7 +390,7 @@ impl<M: Machine> Fold<M> {
         for &rec in old_recs.iter().filter(|r| made.binary_search(r).is_err()) {
             for a in writes(rec) {
                 if let Some(v) = defs.get_mut_by(hash64(&a), |k| k.0 == a) {
-                    let at = v.partition_point(|x| keys[x.step as usize] < key);
+                    let at = first_not_below(v, |x| keys[x.step as usize], key);
                     if v.get(at)
                         .is_some_and(|x| x.step == id && made.binary_search(&x.rec).is_err())
                     {
@@ -409,7 +409,7 @@ impl<M: Machine> Fold<M> {
     #[must_use]
     pub fn reaching(&self, a: &M::Addr, key: u64) -> Option<Def> {
         let v = self.defs.get_by(hash64(a), |k| k.0 == *a)?;
-        let at = v.partition_point(|x| self.key_of(x.step) < key);
+        let at = first_not_below(v, |x| self.key_of(x.step), key);
         v[..at]
             .iter()
             .rev()
@@ -428,7 +428,7 @@ impl<M: Machine> Fold<M> {
     #[must_use]
     pub fn next_after(&self, a: &M::Addr, key: u64) -> Option<Def> {
         let v = self.defs.get_by(hash64(a), |k| k.0 == *a)?;
-        let at = v.partition_point(|x| self.key_of(x.step) <= key);
+        let at = first_above(v, |x| self.key_of(x.step), key);
         v[at..].iter().find(|e| self.live(e)).map(|e| self.def(e))
     }
 
@@ -448,7 +448,7 @@ impl<M: Machine> Fold<M> {
         let Some(v) = self.readers.get_by(hash64(a), |k| k.0 == *a) else {
             return Vec::new();
         };
-        let from = v.partition_point(|&s| self.key_of(s) <= lo);
+        let from = first_above(v, |&s| self.key_of(s), lo);
         v[from..]
             .iter()
             .copied()
@@ -460,9 +460,7 @@ impl<M: Machine> Fold<M> {
     #[must_use]
     pub fn position(&self, id: StepId) -> Option<usize> {
         let key = self.steps.get(id as usize)?.key;
-        let at = self
-            .order
-            .partition_point(|&s| self.steps[s as usize].key < key);
+        let at = first_not_below(&self.order, |&s| self.steps[s as usize].key, key);
         (self.order.get(at) == Some(&id)).then_some(at)
     }
 
@@ -474,6 +472,64 @@ impl<M: Machine> Fold<M> {
     }
 }
 
+/// The first index of `v`, in increasing order of `key_of`, whose key is
+/// not below `key`: `v.partition_point(|x| key_of(x) < key)`, found by
+/// guessing where keys spread evenly would put it (the fold's are, and
+/// renumbering keeps them so), galloping from the guess, then halving. A
+/// list as long as the fold (a slot every step reads or defines) takes a
+/// few probes, each a load of a step's key, not its length's logarithm.
+fn first_not_below<T>(v: &[T], key_of: impl Fn(&T) -> u64, key: u64) -> usize {
+    let n = v.len();
+    if n < 32 {
+        return v.partition_point(|x| key_of(x) < key);
+    }
+    let (lo, hi) = (key_of(&v[0]), key_of(&v[n - 1]));
+    if key <= lo {
+        return 0;
+    }
+    if key > hi {
+        return n;
+    }
+    // (lo < key <= hi: the guess is in [0, n - 1])
+    let last = u128::try_from(n - 1).unwrap_or(u128::MAX);
+    let g = usize::try_from(u128::from(key - lo) * last / u128::from(hi - lo))
+        .unwrap_or(n - 1)
+        .min(n - 1);
+    let below = |i: usize| key_of(&v[i]) < key;
+    // (below at `a`, not at `b`: v[0] is below, v[n - 1] is not)
+    let (mut a, mut b);
+    let mut step = 1;
+    if below(g) {
+        a = g;
+        loop {
+            b = (a + step).min(n - 1);
+            if !below(b) {
+                break;
+            }
+            a = b;
+            step *= 2;
+        }
+    } else {
+        b = g;
+        loop {
+            a = b.saturating_sub(step);
+            if below(a) {
+                break;
+            }
+            b = a;
+            step *= 2;
+        }
+    }
+    a + 1 + v[a + 1..b].partition_point(|x| key_of(x) < key)
+}
+
+/// The first index of `v` whose key is above `key`
+/// (`v.partition_point(|x| key_of(x) <= key)`, [`first_not_below`]).
+fn first_above<T>(v: &[T], key_of: impl Fn(&T) -> u64, key: u64) -> usize {
+    key.checked_add(1)
+        .map_or(v.len(), |k| first_not_below(v, key_of, k))
+}
+
 /// Put reader `id`, whose key is `key`, in `v` (in the order of the
 /// steps' keys, `keys`) if it is not there. A cold build's steps come in
 /// key order: each at the end.
@@ -482,7 +538,7 @@ fn put_reader(keys: &[u64], v: &mut Vec<StepId>, id: StepId, key: u64) {
         v.push(id);
         return;
     }
-    let at = v.partition_point(|&s| keys[s as usize] < key);
+    let at = first_not_below(v, |&s| keys[s as usize], key);
     if v.get(at) != Some(&id) {
         v.insert(at, id);
     }
@@ -490,7 +546,7 @@ fn put_reader(keys: &[u64], v: &mut Vec<StepId>, id: StepId, key: u64) {
 
 /// Remove reader `id`, whose key is `key`, from `v`.
 fn drop_reader(keys: &[u64], v: &mut Vec<StepId>, id: StepId, key: u64) {
-    let at = v.partition_point(|&s| keys[s as usize] < key);
+    let at = first_not_below(v, |&s| keys[s as usize], key);
     if v.get(at) == Some(&id) {
         v.remove(at);
     }
