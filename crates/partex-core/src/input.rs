@@ -747,7 +747,12 @@ impl<H: Host, T: Tracker> Tex<H, T> {
     #[inline(never)]
     fn push_input_deeper(&mut self) -> Result<(), Jump> {
         self.max_in_stack = self.input_ptr;
-        if self.input_ptr == ux(self.params.stack_size) {
+        // (`>=`, not §321's `=`: a rebuild drops a run that overflowed and
+        // runs the step again with `max_in_stack` left at the stack's size,
+        // so the push at that size takes the quick path and the next one
+        // comes here one past it, where tex.web, its overflow fatal, never
+        // gets)
+        if self.input_ptr >= ux(self.params.stack_size) {
             return self.overflow(b"input stack size", self.params.stack_size);
         }
         self.push_input_now();
