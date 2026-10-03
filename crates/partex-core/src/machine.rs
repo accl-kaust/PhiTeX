@@ -1699,9 +1699,28 @@ impl<H: CellHost> Snapshot<H> {
         // (the state hash's memo is scratch, which would keep each
         // snapshot's replaced chunks alive: the running engine's only)
         let memo = core::mem::take(&mut tex.hash_memo);
+        // (the input and parameter stacks to their live prefixes only,
+        // as the state hash reads them: TeX writes a level past
+        // `input_ptr` before it reads it, §321, and the arguments past
+        // `param_ptr`, §390; the dead parts, a stack's size each, would
+        // be most of a fine region's snapshot. [`Snapshot::engine`] gives
+        // them their lengths back)
+        let stacks = (
+            core::mem::take(&mut tex.input_stack),
+            core::mem::take(&mut tex.param_stack),
+        );
         let timing = CUT_TIMING.load(Relaxed);
         let t0 = if timing { tex.host.nanos() } else { 0 };
-        let snap = tex.clone();
+        let mut snap = tex.clone();
+        let live = (
+            tex.input_ptr.min(stacks.0.len()),
+            usize::try_from(tex.param_ptr)
+                .unwrap_or(0)
+                .min(stacks.1.len()),
+        );
+        snap.input_stack = stacks.0[..live.0].to_vec();
+        snap.param_stack = stacks.1[..live.1].to_vec();
+        (tex.input_stack, tex.param_stack) = stacks;
         if timing {
             CUT_T[47].fetch_add(tex.host.nanos() - t0, Relaxed);
             if CUT_TIMING_DETAIL.load(Relaxed) {
@@ -1796,10 +1815,22 @@ impl<H: CellHost> Snapshot<H> {
         }
     }
 
-    /// The engine, whole.
+    /// The engine, whole (its stacks at their full lengths again, the
+    /// dead parts as a new engine has them: [`Snapshot::of`]).
     fn engine(&self) -> Tex<H, CellTracker> {
         let mut t = self.tex.clone();
         Lists::put(&mut t, self.lists.lists());
+        let (input, param) = (
+            usize::try_from(t.params.stack_size).unwrap_or(0) + 1,
+            usize::try_from(t.params.param_size).unwrap_or(0) + 1,
+        );
+        if t.input_stack.len() < input {
+            t.input_stack
+                .resize(input, crate::input::InStateRecord::default());
+        }
+        if t.param_stack.len() < param {
+            t.param_stack.resize(param, None);
+        }
         t
     }
 }

@@ -552,7 +552,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             self.xregs.set(c[0], w);
             self.xregs.set_level(c[0], c[1]);
         }
-        self.eqtb_obj = alloc::vec![None; self.eqtb.len()];
+        self.eqtb_obj = crate::journal::JVec::from_elem(None, self.eqtb.len());
         for (p, o) in held {
             if p >= crate::xregs::EXT_BASE {
                 self.xregs.set_obj(p, Some(o));

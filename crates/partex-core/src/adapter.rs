@@ -10,7 +10,6 @@
 //! round trip per region: the entry with the region's writes applied has
 //! the exit's eqtb.
 
-use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use crate::host::Host;
@@ -44,30 +43,22 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         // An entry is its word and the object beside it (`objs.rs`, DESIGN
         // 7.17.12). The words are compared by chunk, a chunk the two
         // states share holding the same words. The objects are compared
-        // apart, every one: the word of an entry that holds one is the
-        // same whatever it holds (its `equiv` is null, or a macro's
-        // `\protected` flag), and a chunk of words the two states share
-        // says nothing of the objects beside it (a `\def` that gives a
-        // macro a new body writes its word back as it was). An object
-        // that is the very value in both states is the same without a
-        // look; any other pair is compared by content, as the cell's
-        // version is (`Tex::cell_content`).
-        let same_obj = |a: Option<&Option<Obj>>, b: Option<&Option<Obj>>| match (
-            a.and_then(Option::as_ref),
-            b.and_then(Option::as_ref),
-        ) {
-            (None, None) => true,
-            (Some(Obj::Toks(x)), Some(Obj::Toks(y))) => Arc::ptr_eq(x, y),
-            (Some(Obj::Glue(x)), Some(Obj::Glue(y))) => x == y,
-            (Some(Obj::Shape(x)), Some(Obj::Shape(y))) => Arc::ptr_eq(x, y),
-            (Some(Obj::Box(x)), Some(Obj::Box(y))) => Arc::ptr_eq(x, y),
-            _ => false,
-        };
+        // apart: the word of an entry that holds one is the same whatever
+        // it holds (its `equiv` is null, or a macro's `\protected` flag),
+        // and a chunk of words the two states share says nothing of the
+        // objects beside it (a `\def` that gives a macro a new body
+        // writes its word back as it was). The objects are journaled in
+        // chunks of their own, a chunk the two states share holding the
+        // same objects; in the others, an object that is the very value
+        // in both states is the same without a look, and any other pair
+        // is compared by content, as the cell's version is
+        // (`Tex::cell_content`).
         let words = self
             .eqtb
             .differences(&other.eqtb, |a, b| a.bits() == b.bits());
-        let n = self.eqtb_obj.len().max(other.eqtb_obj.len());
-        let objs = (0..n).filter(|&i| !same_obj(self.eqtb_obj.get(i), other.eqtb_obj.get(i)));
+        let objs = self
+            .eqtb_obj
+            .differences(&other.eqtb_obj, <Option<Obj> as crate::journal::Elem>::same);
         let mut out: Vec<Cell> = words
             .into_iter()
             .chain(objs)
