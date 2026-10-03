@@ -50,6 +50,12 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                 .wrote(Cell::HashNext(p), self.name_content(Cell::HashNext(p)));
         }
     }
+    /// `text(p)` without telling the tracker or the memo: for what the
+    /// host is told and TeX never prints (`diag.rs`'s suggestions).
+    #[inline]
+    pub(crate) fn peek_text(&self, p: i32) -> i32 {
+        self.hash[Self::hash_idx(p)].rh()
+    }
     /// §256: `text(p)`, the string number of the name.
     #[inline]
     pub(crate) fn text(&self, p: i32) -> i32 {

@@ -11261,3 +11261,15 @@ rebuilds are unchanged.
 
 Checked: e2e 34/34 identical in plain and in machine mode; the harness
 is unaffected (its sessions check at every rebuild).
+
+## 2026-10-03 — An undefined control sequence's suggestions read nothing of the job's (coordinator)
+
+The diagnostic of an undefined control sequence suggests similar names:
+`similar_control_sequences` went through every entry of the hash, each
+by `eq_type` and `text`, the tracked accessors. In an SSA step each is
+a read the step records (and a macro memo's), some sixty thousand at
+each such error: a rebuild whose steps met undefined control sequences
+again and again (a `\documentclass` option changed, below) grew to 4.7
+GB in nine minutes, a quarter of its time in the scan. The scan now
+peeks (`peek_eqtb`, `peek_text`): the suggestions are the host's, TeX
+prints none of them.

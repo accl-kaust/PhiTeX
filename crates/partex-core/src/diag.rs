@@ -476,7 +476,10 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         if cs < HASH_BASE || cs > self.eqtb_top {
             return Vec::new();
         }
-        let Ok(s) = usize::try_from(self.text(cs)) else {
+        // (the tables peeked at, not read: the host's suggestions are no
+        // read of the job's, which an SSA step would record for every
+        // name of the hash at each undefined control sequence)
+        let Ok(s) = usize::try_from(self.peek_text(cs)) else {
             return Vec::new();
         };
         if s < 256 || s >= self.str_ptr {
@@ -486,10 +489,10 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         let max = (name.len() / 3).clamp(1, 3);
         let mut best: Vec<(usize, Vec<u8>)> = Vec::new();
         for p in HASH_BASE..=self.hash_top.min(self.eqtb_top) {
-            if p == cs || self.eq_type(p) == UNDEFINED_CS {
+            if p == cs || self.peek_eqtb(p).b0() == UNDEFINED_CS {
                 continue;
             }
-            let Ok(t) = usize::try_from(self.text(p)) else {
+            let Ok(t) = usize::try_from(self.peek_text(p)) else {
                 continue;
             };
             if t < 256 || t >= self.str_ptr {
