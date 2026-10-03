@@ -314,6 +314,7 @@ fn pdf_value<H: Host, T: Tracker>(t: &Tex<H, T>, f: u8) -> Option<Field> {
         TOUNICODE => Field::of(&t.tounicode),
         FONTMAP => Field::of(&t.fontmap),
         FONTS_MAPPED => Field::of(&t.fonts_mapped),
+        EPDF => Field::of(&p.epdf),
         _ => return None,
     })
 }
@@ -385,6 +386,7 @@ fn set_pdf<H: Host, T: Tracker>(t: &mut Tex<H, T>, f: u8, v: &Field) -> bool {
         TOUNICODE => put(&mut t.tounicode, v),
         FONTMAP => put(&mut t.fontmap, v),
         FONTS_MAPPED => put(&mut t.fonts_mapped, v),
+        EPDF => put(&mut p.epdf, v),
         _ => false,
     }
 }

@@ -218,6 +218,22 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                     t.print_str(b"pt");
                 })
             }
+            PDF_XIMAGE_BBOX_CODE => {
+                self.scan_int()?;
+                let n = self.cur_val;
+                self.writer_read(crate::pdf::val::field::OBJS);
+                self.pdf_check_obj(crate::pdf::objtab::OBJ_TYPE_XIMAGE, n)?;
+                self.scan_int()?;
+                let j = self.cur_val;
+                if !(1..=4).contains(&j) {
+                    return self.pdf_error(b"pdfximagebbox", b"invalid parameter");
+                }
+                let v = self.ximage_bbox(n, j);
+                self.printed(|t| {
+                    t.print_scaled(v);
+                    t.print_str(b"pt");
+                })
+            }
             _ => return self.pdf_error(b"conversion", b"not implemented in partex yet"),
         };
         let p = self.text_toks(&out);

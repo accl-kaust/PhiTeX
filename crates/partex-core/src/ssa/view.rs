@@ -1151,6 +1151,7 @@ fn pdf_name(i: i64) -> String {
         TOUNICODE => "pdf.tounicode",
         FONTMAP => "pdf.fontmap",
         FONTS_MAPPED => "pdf.fonts_mapped",
+        EPDF => "pdf.epdf",
         k if (LAST..INFO_TOKS).contains(&k) => return format!("pdf.last[{}]", k - LAST),
         k => return format!("pdf.{k}"),
     })

@@ -103,8 +103,11 @@ pub(crate) mod field {
     pub(crate) const FONTMAP: u8 = 34;
     /// The TFM names whose map entries were used.
     pub(crate) const FONTS_MAPPED: u8 = 35;
+    /// The documents open for PDF inclusion (pdftoepdf.cc's
+    /// `PdfDocument`s: their images to write, their objects copied).
+    pub(crate) const EPDF: u8 = 36;
     /// The fields end here.
-    pub(crate) const COUNT: u8 = 36;
+    pub(crate) const COUNT: u8 = 37;
 }
 
 /// The DVI writer's fields (`Row::Dvi`), numbered from [`DVI`] in a
@@ -1055,6 +1058,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             SHIP => drop(p.ship.st.share()),
             PDF_FONTS => p.ship.fonts.0.settle(),
             FONTW => drop(p.fontw.share()),
+            EPDF => drop(p.epdf.share()),
             dvi_field::FONTS | dvi_field::TOTALS | dvi_field::WRITER => {
                 if let Some(w) = self.dvi.writer.as_mut() {
                     drop(w.share());
@@ -1123,6 +1127,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             TOUNICODE => self.tounicode.version(),
             FONTMAP => self.fontmap.version(),
             FONTS_MAPPED => self.fonts_mapped.version(),
+            EPDF => p.epdf.version(0),
             dvi_field::FILE => self.dvi.file_version(),
             dvi_field::FONTS | dvi_field::TOTALS | dvi_field::WRITER => self
                 .dvi

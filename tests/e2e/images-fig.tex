@@ -1,0 +1,18 @@
+% images-fig.pdf: a figure of two pages for PDF inclusion, as pdfTeX
+% writes one (object streams, an xref stream, a page group, text in two
+% Type 1 fonts, a page turned by /Rotate and cropped):
+%   pdftex -ini images-fig
+\catcode`\{=1 \catcode`\}=2 \catcode`\#=6
+\pdfoutput=1 \pdfminorversion=5 \pdfobjcompresslevel=2 \pdfcompresslevel=9
+\pdfpagewidth=200pt \pdfpageheight=100pt
+\hsize=200pt \vsize=100pt \parindent=0pt \parskip=0pt
+\pdfhorigin=0pt \pdfvorigin=0pt
+\font\rm=cmr10 \font\bf=cmbx12 \rm
+\pdfinfo{/Title (A figure \string\(of two pages\string\))}
+\pdfpageattr{/Group << /S /Transparency /CS /DeviceRGB /I true >>}
+\shipout\vbox to 100pt{\hbox{Figure text, {\bf bold} too.}\vfil
+  \hbox{\kern20pt\vrule width 50pt height 30pt
+    \pdfliteral{q 0 0 1 rg 0 0 m 40 40 l 80 0 l f Q}}\vfil}
+\pdfpageattr{/Rotate 90 /CropBox [10 5 190 95]}
+\shipout\vbox to 100pt{\hbox{\vrule width 100pt height 50pt}\vfil}
+\end

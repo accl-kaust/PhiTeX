@@ -215,6 +215,42 @@ const CASES: &[Case] = &[
             ],
         ],
     },
+    // PDF inclusion: pages of PDF files (pdfTeX's, with object streams;
+    // one made by hand, a classic xref table) through graphicx, as
+    // pdftoepdf.cc writes them
+    Case {
+        name: "images",
+        oracle: "pdftex",
+        inputs: &["images.tex", "images-fig.pdf", "images-hand.pdf"],
+        runs: &[
+            &[
+                "-no-shell-escape",
+                "-no-parse-first-line",
+                "-output-comment=partex",
+                "-interaction=nonstopmode",
+                "-ini",
+                "-etex",
+                "-jobname=pdflatex",
+                "*pdflatex.ini",
+            ],
+            &[
+                "-no-shell-escape",
+                "-no-parse-first-line",
+                "-output-comment=partex",
+                "-interaction=nonstopmode",
+                "-fmt=pdflatex",
+                "images",
+            ],
+            &[
+                "-no-shell-escape",
+                "-no-parse-first-line",
+                "-output-comment=partex",
+                "-interaction=nonstopmode",
+                "-fmt=pdflatex",
+                "images",
+            ],
+        ],
+    },
     Case {
         name: "bibtex",
         oracle: "pdftex",

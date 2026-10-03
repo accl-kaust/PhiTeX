@@ -1,7 +1,8 @@
 //! pdfTeX's images (`\pdfximage`, writeimg.c): reading an image's size,
 //! scaling it (`scale_image`), placing it (`out_image`) and writing its
 //! `XObject`. JPEG is read natively (writejpg.c: the file goes into the
-//! PDF as it is); PNG, JBIG2 and PDF inclusion are not written yet.
+//! PDF as it is), a page of a PDF file as pdftoepdf.cc does (`epdf.rs`);
+//! PNG and JBIG2 are not written yet.
 
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -42,6 +43,30 @@ pub(crate) struct Image {
     pub bits: i32,
     color_space: u8,
     data: Arc<[u8]>,
+    /// A PDF file's page (`pdf_ptr`).
+    pub pdf: Option<super::epdf::PdfImage>,
+}
+
+impl Image {
+    /// `img_rotate`.
+    fn rotate(&self) -> i32 {
+        self.pdf.as_ref().map_or(0, |p| p.rotate)
+    }
+
+    /// `img_pages`.
+    fn pages(&self) -> i32 {
+        self.pdf.as_ref().map_or(1, |p| p.pages)
+    }
+
+    /// `img_width`, `img_height`, as the page is shown (a page turned a
+    /// quarter has them swapped).
+    fn shown(&self) -> (i32, i32) {
+        if matches!(self.rotate(), 90 | 270) {
+            (self.height, self.width)
+        } else {
+            (self.width, self.height)
+        }
+    }
 }
 
 partex_engine::persist_struct!(Image {
@@ -54,7 +79,8 @@ partex_engine::persist_struct!(Image {
     colorspace_ref,
     bits,
     color_space,
-    data
+    data,
+    pdf
 });
 
 pub(crate) use partex_engine::scaled::ext_xn_over_d;
@@ -139,6 +165,7 @@ fn read_jpg_info(
                     bits,
                     color_space,
                     data,
+                    pdf: None,
                 });
             }
             // markers without parameters
@@ -161,10 +188,14 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         } else {
             None
         };
+        let mut named = None;
+        let mut page = 1;
         if self.scan_keyword(b"named")? {
-            self.scan_pdf_ext_toks()?;
+            let t = self.scan_pdf_ext_toks()?;
+            named = Some(self.tokens_string(&t));
         } else if self.scan_keyword(b"page")? {
             self.scan_int()?;
+            page = self.cur_val;
         }
         let colorspace = if self.scan_keyword(b"colorspace")? {
             self.scan_int()?;
@@ -172,43 +203,99 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         } else {
             0
         };
-        self.scan_pdf_box_spec()?;
+        let mut pagebox = self.scan_pdf_box_spec()?;
+        if pagebox == 0 {
+            pagebox = self.int_par(PDF_PAGEBOX_CODE);
+        }
         let t = self.scan_pdf_ext_toks()?;
         let s = self.tokens_string(&t);
         let s = crate::pdfconv::c_string(&s).to_vec();
-        let image = self.read_image(&s, colorspace)?;
+        let always = self.int_par(PDF_OPTION_ALWAYS_USE_PDFPAGEBOX_CODE);
+        if always != 0 {
+            self.pdf_warning(
+                b"PDF inclusion",
+                b"Primitive \\pdfoptionalwaysusepdfpagebox is obsolete; use \\pdfpagebox instead.",
+                true,
+                true,
+            );
+            self.set_int_par(PDF_FORCE_PAGEBOX_CODE, always);
+            self.set_int_par(PDF_OPTION_ALWAYS_USE_PDFPAGEBOX_CODE, 0);
+            self.pdf.epdf.pagebox_warned = true;
+        }
+        let level = self.int_par(PDF_OPTION_PDF_INCLUSION_ERRORLEVEL_CODE);
+        if level != 0 {
+            self.pdf_warning(
+                b"PDF inclusion",
+                b"Primitive \\pdfoptionpdfinclusionerrorlevel is obsolete; use \\pdfinclusionerrorlevel instead.",
+                true,
+                true,
+            );
+            self.set_int_par(PDF_INCLUSION_ERRORLEVEL_CODE, level);
+            self.set_int_par(PDF_OPTION_PDF_INCLUSION_ERRORLEVEL_CODE, 0);
+        }
+        let force = self.int_par(PDF_FORCE_PAGEBOX_CODE);
+        if force > 0 {
+            if !self.pdf.epdf.pagebox_warned {
+                self.pdf_warning(
+                    b"PDF inclusion",
+                    b"Primitive \\pdfforcepagebox is obsolete; use \\pdfpagebox instead.",
+                    true,
+                    true,
+                );
+                self.pdf.epdf.pagebox_warned = true;
+            }
+            pagebox = force;
+        }
+        if pagebox == 0 {
+            pagebox = super::epdf::BOX_CROP;
+        }
+        let image = self.read_image(&s, page, named.as_deref(), colorspace, pagebox)?;
+        let group_ref = match &image.pdf {
+            Some(p) if p.group => -1,
+            _ => 0,
+        };
         self.pdf.objs.get_mut(k).aux = Aux::XImage(alloc::boxed::Box::new(XImage {
             width: dims.width,
             height: dims.height,
             depth: dims.depth,
             attr,
             image: Some(image.clone()),
+            group_ref,
         }));
         self.scale_image(k, &image)?;
         self.set_pdf_last(crate::pdf::PdfLast::XImage, k);
-        self.set_pdf_last(crate::pdf::PdfLast::XImagePages, 1);
+        self.set_pdf_last(crate::pdf::PdfLast::XImagePages, image.pages());
         self.set_pdf_last(crate::pdf::PdfLast::XImageColordepth, image.bits);
         Ok(())
     }
 
-    /// `scan_pdf_box_spec`.
-    fn scan_pdf_box_spec(&mut self) -> Result<(), Jump> {
-        for k in [
-            &b"mediabox"[..],
-            b"cropbox",
-            b"bleedbox",
-            b"trimbox",
-            b"artbox",
+    /// `scan_pdf_box_spec`: a page box keyword's `pdf_box_spec_*`, or 0.
+    fn scan_pdf_box_spec(&mut self) -> Result<i32, Jump> {
+        for (k, spec) in [
+            (&b"mediabox"[..], super::epdf::BOX_MEDIA),
+            (b"cropbox", super::epdf::BOX_CROP),
+            (b"bleedbox", super::epdf::BOX_BLEED),
+            (b"trimbox", super::epdf::BOX_TRIM),
+            (b"artbox", super::epdf::BOX_ART),
         ] {
             if self.scan_keyword(k)? {
-                break;
+                return Ok(spec);
             }
         }
-        Ok(())
+        Ok(0)
     }
 
-    /// writeimg.c's `read_image`.
-    fn read_image(&mut self, s: &[u8], colorspace: i32) -> Result<Arc<Image>, Jump> {
+    /// writeimg.c's `read_image`: file `s` found, its type by its first
+    /// bytes (`checktypebyheader`) or its name (`checktypebyextension`),
+    /// and read.
+    fn read_image(
+        &mut self,
+        s: &[u8],
+        page: i32,
+        named: Option<&[u8]>,
+        colorspace: i32,
+        pagebox: i32,
+    ) -> Result<Arc<Image>, Jump> {
         // (a load: a name the job stores reads its store, DESIGN 3.7)
         let found = self.read_source(s, false);
         let Some(f) = found else {
@@ -217,30 +304,82 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             return self.pdftex_fail(None, &m);
         };
         let d = &f.contents;
-        let jpg = d.starts_with(b"\xFF\xD8");
-        let other =
-            d.starts_with(b"\x89PNG") || d.starts_with(b"\x97JB2") || d.starts_with(b"%PDF");
-        let ext = s
-            .rsplit(|&c| c == b'.')
-            .next()
-            .map(<[u8]>::to_ascii_lowercase);
-        if other || (!jpg && ext.as_deref() != Some(b"jpg") && ext.as_deref() != Some(b"jpeg")) {
-            return self.pdf_error(
-                b"ext1",
-                b"PNG, JBIG2 and PDF images are not implemented in partex yet",
-            );
+        if d.len() < 8 {
+            return self.pdftex_fail(Some(&f.name), b"reading image file failed");
         }
-        let pdf_12 = self.pdf.out.fixed_major == 1 && self.pdf.out.fixed_minor <= 2;
-        match read_jpg_info(f.name.clone(), f.contents.clone(), colorspace, pdf_12) {
-            Ok(i) => Ok(Arc::new(i)),
-            Err(m) => self.pdftex_fail(Some(&f.name), m),
+        let suffix = f
+            .name
+            .iter()
+            .rposition(|&c| c == b'.')
+            .map(|i| f.name[i..].to_ascii_lowercase());
+        let kind = if d.starts_with(b"\xFF\xD8") {
+            b"jpg"
+        } else if d.starts_with(b"\x89PNG\r\n\x1A\n") {
+            b"png"
+        } else if d.starts_with(b"\x97JB2\r\n\x1A\n") {
+            b"jb2"
+        } else if d.starts_with(b"%PDF-1.") {
+            b"pdf"
+        } else {
+            match suffix.as_deref() {
+                Some(b".png") => b"png",
+                Some(b".jpg" | b".jpeg") => b"jpg",
+                Some(b".jbig2" | b".jb2") => b"jb2",
+                Some(b".pdf") => b"pdf",
+                _ => return self.pdftex_fail(Some(&f.name), b"unknown type of image"),
+            }
+        };
+        match kind {
+            b"pdf" => {
+                let major = self.int_par(PDF_MAJOR_VERSION_CODE);
+                let minor = self.int_par(PDF_MINOR_VERSION_CODE);
+                let level = self.int_par(PDF_INCLUSION_ERRORLEVEL_CODE);
+                let info = self.read_pdf_info(
+                    &f.name,
+                    &f.contents,
+                    named,
+                    page,
+                    pagebox,
+                    major,
+                    minor,
+                    level,
+                )?;
+                Ok(Arc::new(Image {
+                    name: f.name.clone(),
+                    width: info.width,
+                    height: info.height,
+                    x_res: 0,
+                    y_res: 0,
+                    color: 0,
+                    colorspace_ref: colorspace,
+                    bits: 0,
+                    color_space: 0,
+                    data: f.contents.clone(),
+                    pdf: Some(info.image),
+                }))
+            }
+            b"jpg" => {
+                let pdf_12 = self.pdf.out.fixed_major == 1 && self.pdf.out.fixed_minor <= 2;
+                match read_jpg_info(f.name.clone(), f.contents.clone(), colorspace, pdf_12) {
+                    Ok(i) => Ok(Arc::new(i)),
+                    Err(m) => self.pdftex_fail(Some(&f.name), m),
+                }
+            }
+            _ => self.pdf_error(
+                b"ext1",
+                b"PNG and JBIG2 images are not implemented in partex yet",
+            ),
         }
     }
 
     /// pdfTeX §1552: `scale_image`.
     fn scale_image(&mut self, n: i32, image: &Image) -> Result<(), Jump> {
-        let (x, y) = (image.width, image.height);
-        let (mut xr, mut yr) = (image.x_res, image.y_res);
+        let (x, y) = image.shown();
+        let (mut xr, mut yr) = if matches!(image.rotate(), 90 | 270) {
+            (image.y_res, image.x_res)
+        } else {
+            (image.x_res, image.y_res)
+        };
         if xr > 65535 || yr > 65535 {
             (xr, yr) = (0, 0);
             self.pdf_warning(b"ext1", b"too large image resolution ignored", true, true);
@@ -252,16 +391,21 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             (xr, yr) = (0, 0);
             self.pdf_warning(b"ext1", b"too small image resolution ignored", true, true);
         }
-        let default_res = self.int_par(PDF_IMAGE_RESOLUTION_CODE).clamp(0, 65535);
-        if default_res > 0 && (xr == 0 || yr == 0) {
-            (xr, yr) = (default_res, default_res);
+        let pdf = image.pdf.is_some();
+        if !pdf {
+            let default_res = self.int_par(PDF_IMAGE_RESOLUTION_CODE).clamp(0, 65535);
+            if default_res > 0 && (xr == 0 || yr == 0) {
+                (xr, yr) = (default_res, default_res);
+            }
         }
         let Aux::XImage(xi) = &mut self.pdf.objs.get_mut(n).aux else {
             return Ok(());
         };
         let running = |v: i32| v == super::ext::RUNNING;
         let (mut w, mut h) = (0, 0);
-        if running(xi.width) && running(xi.height) {
+        if pdf {
+            (w, h) = (x, y);
+        } else if running(xi.width) && running(xi.height) {
             if xr > 0 && yr > 0 {
                 w = ext_xn_over_d(ONE_HUNDRED_INCH, x, 100 * xr);
                 h = ext_xn_over_d(ONE_HUNDRED_INCH, y, 100 * yr);
@@ -306,26 +450,54 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         objnum: i32,
         dims: partex_engine::node::Dims,
     ) -> Result<(), Jump> {
-        let Some((_, image)) = self.ximage(objnum) else {
+        let Some((xi, image)) = self.ximage(objnum) else {
             return Ok(());
         };
+        let group_ref = xi.group_ref;
+        let (img_w, img_h) = image.shown();
         self.pdf_end_text();
         self.pdf.out.print_ln(b"q");
         if !self.pdf.ship.ximage_list.contains(&objnum) {
             self.pdf.ship.ximage_list.push(objnum);
         }
-        let _ = image;
-        let a = ext_xn_over_d(dims.width, TEN_POW[6], ONE_HUNDRED_BP);
-        self.pdf.out.print_real(a, 4);
-        self.pdf.out.print(b" 0 0 ");
-        let b = ext_xn_over_d(dims.height + dims.depth, TEN_POW[6], ONE_HUNDRED_BP);
-        self.pdf.out.print_real(b, 4);
-        self.pdf.out.out(b' ');
         let s = &self.pdf.ship;
         let (x, y) = (s.cur_h - s.origin_h, s.origin_v - s.cur_v);
-        self.pdf_print_bp(x)?;
-        self.pdf.out.out(b' ');
-        self.pdf_print_bp(y)?;
+        let total = dims.height + dims.depth;
+        if let Some(p) = &image.pdf {
+            // (a PDF page's group: numbered here, at its first page)
+            if group_ref != 0 && self.pdf.ship.page_group_val == 0 {
+                if group_ref == -1 {
+                    let g = self.pdf_new_objnum()?;
+                    self.pdf.ship.page_group_val = g;
+                    if let Aux::XImage(xi) = &mut self.pdf.objs.get_mut(objnum).aux {
+                        xi.group_ref = g;
+                    }
+                } else {
+                    self.pdf.ship.page_group_val = group_ref;
+                }
+            }
+            self.pdf
+                .out
+                .print_real(ext_xn_over_d(dims.width, TEN_POW[6], img_w), 6);
+            self.pdf.out.print(b" 0 0 ");
+            self.pdf
+                .out
+                .print_real(ext_xn_over_d(total, TEN_POW[6], img_h), 6);
+            self.pdf.out.out(b' ');
+            self.pdf_print_bp(x - ext_xn_over_d(dims.width, p.orig_x, img_w))?;
+            self.pdf.out.out(b' ');
+            self.pdf_print_bp(y - ext_xn_over_d(total, p.orig_y, img_h))?;
+        } else {
+            let a = ext_xn_over_d(dims.width, TEN_POW[6], ONE_HUNDRED_BP);
+            self.pdf.out.print_real(a, 4);
+            self.pdf.out.print(b" 0 0 ");
+            let b = ext_xn_over_d(total, TEN_POW[6], ONE_HUNDRED_BP);
+            self.pdf.out.print_real(b, 4);
+            self.pdf.out.out(b' ');
+            self.pdf_print_bp(x)?;
+            self.pdf.out.out(b' ');
+            self.pdf_print_bp(y)?;
+        }
         self.pdf.out.print_ln(b" cm");
         self.pdf.out.print(b"/Im");
         let n = self.pdf.objs.get(objnum).info.num();
@@ -336,6 +508,20 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         Ok(())
     }
 
+    /// `\pdfximagebbox`'s value `j` (1 to 4) of image `n`: its page box
+    /// (0 for an image not of a PDF file).
+    pub(crate) fn ximage_bbox(&self, n: i32, j: i32) -> Scaled {
+        let Some((_, i)) = self.ximage(n) else {
+            return 0;
+        };
+        i.pdf.as_ref().map_or(0, |p| match j {
+            1 => p.orig_x,
+            2 => p.orig_y,
+            3 => p.orig_x + i.width,
+            _ => p.orig_y + i.height,
+        })
+    }
+
     /// `update_image_procset`.
     pub(crate) fn image_color(&self, n: i32) -> i32 {
         self.ximage(n).map_or(0, |(_, i)| i.color)
@@ -343,8 +529,11 @@ impl<H: Host, T: Tracker> Tex<H, T> {
 
     /// pdfTeX §1628: `pdf_write_image`.
     pub(crate) fn pdf_write_image(&mut self, n: i32) -> Result<(), Jump> {
-        use super::val::{SHIPPING, SHIPPING_READS};
-        self.writer_scope(SHIPPING_READS, SHIPPING, |t| t.pdf_write_image_now(n))
+        use super::val::{SHIPPING, SHIPPING_READS, bit, field};
+        let epdf = bit(field::EPDF);
+        self.writer_scope(SHIPPING_READS | epdf, SHIPPING | epdf, |t| {
+            t.pdf_write_image_now(n)
+        })
     }
 
     fn pdf_write_image_now(&mut self, n: i32) -> Result<(), Jump> {
@@ -356,7 +545,12 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         if let Some(a) = &attr {
             self.pdf_print_toks_ln(a);
         }
-        if self.pdf.out.fixed_draftmode == 0 {
+        if let (0, Some(p)) = (self.pdf.out.fixed_draftmode, &image.pdf) {
+            self.print_str(b" <");
+            self.print_str(&image.name);
+            self.write_epdf(p, &image.name, &image.data)?;
+            self.print_str(b">");
+        } else if self.pdf.out.fixed_draftmode == 0 {
             self.print_str(b" <");
             self.print_str(&image.name);
             let o = &mut *self.pdf.out;
@@ -391,6 +585,10 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         }
         if let Aux::XImage(xi) = &mut self.pdf.objs.get_mut(n).aux {
             xi.attr = None;
+        }
+        // (`delete_image`; INITEX keeps it, for a format)
+        if let (Some(p), false) = (&image.pdf, self.params.ini) {
+            self.epdf_delete(p);
         }
         Ok(())
     }

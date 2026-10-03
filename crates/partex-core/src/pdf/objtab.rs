@@ -169,6 +169,9 @@ pub(crate) struct XImage {
     pub depth: i32,
     pub attr: Option<Tokens>,
     pub image: Option<alloc::sync::Arc<super::image::Image>>,
+    /// `img_group_ref`: a PDF page's `/Group` object (0: none, -1: not
+    /// numbered yet).
+    pub group_ref: i32,
 }
 
 partex_engine::persist_struct!(XImage {
@@ -176,7 +179,8 @@ partex_engine::persist_struct!(XImage {
     height,
     depth,
     attr,
-    image
+    image,
+    group_ref
 });
 
 /// An outline entry (`pdfmem_outline_size`).

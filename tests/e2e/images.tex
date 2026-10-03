@@ -1,0 +1,29 @@
+\documentclass{article}
+% PDF inclusion (`\pdfximage` of a page, written as pdftoepdf.cc writes
+% it): images-fig.pdf (pdfTeX's, object streams), images-hand.pdf (made
+% by hand, a classic xref table), through graphicx. The included files'
+% fonts are copied as they are (pdfTeX's replacement of a font its map
+% has is not written yet).
+\usepackage{graphicx}
+\pdfinclusioncopyfonts=1
+\begin{document}
+Opening words, before the figures.
+
+\begin{figure}[h]
+  \centering
+  \includegraphics[width=0.5\linewidth]{images-fig}
+  \caption{First caption.}\label{fig:a}
+\end{figure}
+
+A paragraph between them refers to Figure~\ref{fig:a}.
+
+\begin{figure}[h]
+  \centering
+  \includegraphics[page=2,angle=30]{images-fig.pdf}\quad
+  \includegraphics[trim=10 10 30 30,clip,height=2cm]{images-hand}\quad
+  \includegraphics[page=3,scale=0.5]{images-hand}
+  \caption{Second caption.}
+\end{figure}
+
+Closing words.
+\end{document}

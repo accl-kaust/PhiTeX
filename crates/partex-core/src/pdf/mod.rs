@@ -4,6 +4,7 @@
 pub(crate) mod colorstack;
 pub(crate) mod draw;
 pub(crate) mod enc;
+pub(crate) mod epdf;
 pub(crate) mod ext;
 pub(crate) mod finish;
 pub(crate) mod image;
@@ -90,6 +91,8 @@ pub(crate) struct PdfState {
     pub ship: ship::Ship,
     /// The font trees of writefont.c.
     pub fontw: val::Val<writefont::FontWriter>,
+    /// pdftoepdf.cc's documents open for PDF inclusion.
+    pub epdf: val::Val<epdf::EpdfDocs>,
     /// The writer scope open (`val.rs`; scratch, empty between calls).
     pub(crate) scope: val::Scope,
 }
@@ -126,6 +129,7 @@ partex_engine::persist_struct!(PdfState {
     stacks,
     ship,
     fontw,
+    epdf,
     scope
 });
 
@@ -179,6 +183,7 @@ impl PdfState {
             ("stacks", h(&|s| self.stacks.hash(s))),
             ("ship", h(&|s| self.ship.hash(s))),
             ("fontw", h(&|s| self.fontw.hash(s))),
+            ("epdf", h(&|s| self.epdf.hash(s))),
         ]
     }
 }
@@ -304,6 +309,7 @@ impl core::hash::Hash for WithoutLast<'_> {
             stacks,
             ship,
             fontw,
+            epdf,
             scope: _,
         } = self.0;
         (last_match, objs, out, obj_count, xform_count, ximage_count).hash(h);
@@ -316,7 +322,7 @@ impl core::hash::Hash for WithoutLast<'_> {
             nobuiltin_tounicode,
         )
             .hash(h);
-        (stacks, ship, fontw).hash(h);
+        (stacks, ship, fontw, epdf).hash(h);
     }
 }
 

@@ -316,7 +316,7 @@ pub(crate) struct ShipState {
     pub last_page: i32,
     pub last_pages: i32,
     last_stream: i32,
-    page_group_val: i32,
+    pub(crate) page_group_val: i32,
     pub font_list: Vec<i32>,
     obj_list: Vec<i32>,
     xform_list: Vec<i32>,

@@ -11324,3 +11324,50 @@ run again alone, last first) fails 11 of the 15 cases, on save stack
 entries (`save:10`, `save:14`) at main's own clean points (a
 paragraph's start, a fire): the check predates those points, and what
 it flags is not yet known to be wrong.
+
+## 2026-10-03: PDF inclusion (`\pdfximage` of a PDF page)
+
+The Overleaf extension's last blocker for a real paper: `\includegraphics`
+of a PDF figure stopped the job ("PNG, JBIG2 and PDF images are not
+implemented"). pdfTeX's inclusion is two pieces, ported apart:
+
+- `partex-engine`'s `pdfread`: the file read as TeX Live's xpdf reads it
+  for pdftoepdf.cc (its lexer's numbers, `50-100` is 50 and a real is
+  summed digit by digit; xref tables and streams, `/Prev`, `/XRefStm`,
+  object streams, a damaged file's objects found by scanning; the page
+  tree and `PageAttrs`), with `inflate` (zlib, PNG and TIFF predictors)
+  and the other filters a content array needs decoded.
+- `partex-core`'s `pdf/epdf.rs`: `read_pdf_info` (the page by number or
+  named destination, its box, the version check) and `write_epdf` (the
+  form XObject as pdftoepdf.cc prints it: `stripzeros` of `%.8f`,
+  `convertNumToPDF`, `copyObject`'s strings, names and arrays,
+  `pdf_newline` after `pdf_last_byte`, the page group as its own object
+  for the first image on a page, then every object referred to, under
+  new numbers). The open documents are a writer field of their own
+  (`EPDF`): an image read and not yet written keeps its document's
+  copied objects for the next image of it, as `PdfDocument` does.
+
+`scan_image`'s keywords (`page`, `named`, the boxes, `\pdfpagebox`,
+`\pdfforcepagebox` and the obsolete parameters' warnings), `scale_image`
+for a page turned a quarter, `out_image`'s matrix and page group number,
+and `\pdfximagebbox`.
+
+Checked against pdfTeX 1.40.29, byte for byte: plain TeX including pages
+of PDF files pdfTeX wrote (object streams, an xref stream, a page group,
+fonts, `/Rotate 90` with a crop box, `\immediate`, two images of one
+document on a page), a file made by hand (a classic xref table, a
+contents array, attributes and resources inherited from the page tree,
+`/Rotate -90`, every page box, a named destination, strings and names
+with escapes), and a LaTeX document through graphicx (width, `angle`,
+`scale`, `page=2`, `trim` with `clip`). The logs differ only in pdfTeX's
+memory statistics (`words of extra memory for PDF output`), which e2e
+masks. e2e case `images`.
+
+Not yet: pdfTeX's replacement of an included Type 1 font its map has
+(`copyFont`'s first branch, the default `\pdfinclusioncopyfonts=0`): the
+file's fonts are copied as they are, a valid PDF that differs from
+pdfTeX's for figures pdfTeX made. xpdf's resource merging when both a
+Pages node and its page have `/Resources` (only dictionaries kept), its
+duplicate keys (the first place, the last value) and a few damaged-file
+paths are next, as is the SSA build of the LaTeX case, whose page loses
+its own font (the plain build is right).
