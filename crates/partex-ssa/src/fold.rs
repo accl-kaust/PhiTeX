@@ -76,6 +76,10 @@ pub struct Fold<M: Machine> {
     /// Each step's key, by id, as [`Step::key`] holds it: the index's
     /// searches read them here, eight bytes a step where a step is 72.
     keys: Vec<u64>,
+    /// Whether each step is live, a bit by id, as [`Step::live`] holds
+    /// it: the searches test each entry's step here, a few kilobytes for
+    /// the fold, where the steps are megabytes.
+    alive: Vec<u64>,
     /// The live steps in program order.
     pub order: Vec<StepId>,
     /// Each slot's definitions, by the address's hash, in the order of
@@ -96,6 +100,7 @@ impl<M: Machine> Default for Fold<M> {
         Fold {
             steps: Vec::new(),
             keys: Vec::new(),
+            alive: Vec::new(),
             order: Vec::new(),
             defs: Table::new(),
             readers: Table::new(),
@@ -106,7 +111,10 @@ impl<M: Machine> Default for Fold<M> {
 
 impl<M: Machine> Fold<M> {
     fn live(&self, e: &Entry) -> bool {
-        self.steps.get(e.step as usize).is_some_and(|s| s.live)
+        let s = e.step as usize;
+        self.alive
+            .get(s / 64)
+            .is_some_and(|w| w >> (s % 64) & 1 != 0)
     }
 
     /// Step `s`'s key.
@@ -193,6 +201,11 @@ impl<M: Machine> Fold<M> {
             live: true,
         });
         self.keys.push(key);
+        let s = id as usize;
+        if self.alive.len() <= s / 64 {
+            self.alive.resize(s / 64 + 1, 0);
+        }
+        self.alive[s / 64] |= 1 << (s % 64);
         self.order.insert(pos, id);
         id
     }
@@ -288,6 +301,10 @@ impl<M: Machine> Fold<M> {
             }
         }
         self.steps[id as usize].live = false;
+        let s = id as usize;
+        if let Some(w) = self.alive.get_mut(s / 64) {
+            *w &= !(1 << (s % 64));
+        }
     }
 
     /// Close step `id`: its outside reads (`reads`, each with its
@@ -490,11 +507,16 @@ fn first_not_below<T>(v: &[T], key_of: impl Fn(&T) -> u64, key: u64) -> usize {
     if key > hi {
         return n;
     }
-    // (lo < key <= hi: the guess is in [0, n - 1])
-    let last = u128::try_from(n - 1).unwrap_or(u128::MAX);
-    let g = usize::try_from(u128::from(key - lo) * last / u128::from(hi - lo))
-        .unwrap_or(n - 1)
-        .min(n - 1);
+    // (lo < key <= hi: the guess is in [0, n - 1]; a float's division,
+    // where a 128-bit one is a call)
+    #[allow(
+        clippy::cast_precision_loss,
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "a guess: any index in range is right, and the cast saturates"
+    )]
+    let g = (((key - lo) as f64 / (hi - lo) as f64) * (n - 1) as f64) as usize;
+    let g = g.min(n - 1);
     let below = |i: usize| key_of(&v[i]) < key;
     // (below at `a`, not at `b`: v[0] is below, v[n - 1] is not)
     let (mut a, mut b);

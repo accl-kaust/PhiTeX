@@ -11172,3 +11172,19 @@ stat): da668f3 120.06 M; with this and the next commit 114.62 M
 is read again; comparing its bytes first would recover that. The
 harness: 14 cases identical in all three modes; the workspace's tests
 pass.
+
+## 2026-10-03 — The fold's steps live by a bit, the search's guess by a float (coordinator)
+
+- `Fold::live`, asked of each entry a search passes over or stops at
+  (`reaching`, `latest`, `next_after`), read the step's `live` from the
+  steps (72 bytes each, megabytes for the course: a cache line a step).
+  A bit per step (`alive`, eight kilobytes for the course) holds it, as
+  steps are made and removed.
+- `first_not_below`'s guess divided in 128 bits, a call; a float's
+  division makes it now (a guess: any index in range is right, and the
+  search's answer is `partition_point`'s whatever it is).
+
+Instructions per rebuild: −0.02 M (113.10 → 113.07–113.09, measured
+with the dropped hunk above); cycles within the runs' noise. The
+harness: 14 cases identical in all three modes; the workspace's tests
+pass.
