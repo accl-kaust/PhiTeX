@@ -3552,8 +3552,9 @@ fn run_step<H: Host>(
                         alloc::format!("{:04x}", v.0 & 0xffff)
                     })
                 };
+                let name = super::view::trace_name(tex, &rr.st, *a);
                 changed.push(alloc::format!(
-                    "{a} {}->{} (before {}; {} readers{}{}: {})",
+                    "{a}={name} {}->{} (before {}; {} readers{}{}: {})",
                     short(o),
                     short(n),
                     short(reaching_version(rr, a, key)),

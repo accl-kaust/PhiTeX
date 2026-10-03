@@ -677,6 +677,16 @@ fn scaled(mut s: i32) -> String {
 }
 
 /// Addresses' names, with what the engine's tables say of them.
+/// Slot `a`'s name as the view gives it (a control sequence's, a
+/// register's, a font's field), for the rebuild's trace.
+pub(super) fn trace_name<H: Host>(
+    tex: &Tex<H, SsaTracker>,
+    st: &super::RecState,
+    a: Slot,
+) -> String {
+    slot_name(&mut Names::new(tex), st, a)
+}
+
 struct Names<'a, H: Host> {
     tex: &'a Tex<H, SsaTracker>,
     /// The fonts' names, by slot.
