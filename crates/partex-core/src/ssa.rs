@@ -45,7 +45,9 @@ use crate::track::{Cell, LineCodes, Output, Row, Tracker, line_tokens};
 mod rebuild;
 mod view;
 
-pub use rebuild::{RebuildReport, Trips, rebuild, rebuild_log, rebuild_trips, settle};
+pub use rebuild::{
+    RebuildReport, Trips, prepare_rebuilds, rebuild, rebuild_log, rebuild_trips, settle,
+};
 pub use view::{dag, step_trace, view};
 
 /// A slot's family.

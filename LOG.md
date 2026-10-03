@@ -10898,3 +10898,42 @@ mock (LTO, instructions per keystroke): a word 3.64 → 3.51 M (−3.4%),
 a `(` 12.48 → 12.04 M, the heading 23.70 → 23.27 M, the sentence that
 wraps 19.10 → 18.64 M; the same PDFs. The harness: 14 cases identical
 in all three modes. The course on accl follows.
+
+The course on accl, 636cdc4 against 895a16f (job 6414, two rounds,
+alternating; gates 6412 and 6413 passed): the warm word edit
+20.2/21.6 → 20.7/20.1 ms (its link 3.2/3.1 → 2.3/2.4 ms, the rest
+noise), the revert 18.5/17.8 → 13.8/14.4 ms (−23%: its page compressed
+before), the cold build and peak RSS the same (2.29–2.32 GB; 2.48–2.50
+before the index entries went to 4 and 12 bytes).
+
+## 2026-10-03 — A rebuild's fixed costs: the glyph union counted, the φ's versions kept, the format decoded before the first keystroke (coordinator)
+
+The word edit's profile without the deflate showed costs that every
+rebuild pays, whatever it runs:
+- `glyph_union_now` (2.6% of the samples): whether the job's end must
+  run again after a ship's glyphs changed. It made the union of every
+  ship's glyph row, 295 rows, each font's bits merged into a map. Now
+  `GlyphCount` keeps the rows it counted, and for each font how many
+  rows have it and each of its glyphs. A row whose value changed (a
+  different `Arc`) is counted out and the new one in, and the union's
+  version is made again only then. Debug builds check it against the
+  union made whole.
+- `Steps::phi_seeds` (2.6%): the loads of the φ whose value is not
+  what they read. It hashed every stored name's bytes (`.aux`, `.toc`,
+  `.out`) at each rebuild. A φ kept from the last trip is the same
+  bytes, shared, so its version is kept with it (`phi_vers`, by the
+  `Arc`).
+- `initial` (5.3% over 20 rebuilds, all in the first): the format's
+  definitions, decoded the first time a slot no step defines is placed,
+  about 40 ms on the course's first keystroke. `ssa::prepare_rebuilds`
+  decodes them, and the command line calls it after the cold build's
+  link when rebuilds are to come.
+
+The same profile again (an LTO build with frame pointers, the course's
+10 word edits and reverts): the first rebuild 65 → 35 ms; `initial`
+5.3 → 0.1% of the samples, `phi_seeds` 2.6 → 1.5%, `glyph_union_now`
+2.6 → 1.7% (the walk over the 296 rows' latest definitions, mostly);
+`run_step` outside the commands 18.1 → 13.6%. What is left is mostly the
+work itself: the commands 61% (the ship 33% of it: deflate 20%, the
+page's operators 13%, whatsits 9% of those), the link 8%. The harness:
+14 cases identical in all three modes; the workspace's tests pass.

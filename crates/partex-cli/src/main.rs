@@ -1071,6 +1071,11 @@ fn run_ssa(host: native::NativeHost, params: Params, command_line: &[u8]) -> i32
     // there, `zlib::deflate_stream`; `PARTEX_DEFLATE_RESUME=0`: from the
     // start)
     zlib::resume_streams(!std::env::var("PARTEX_DEFLATE_RESUME").is_ok_and(|v| v == "0"));
+    // (what the first rebuild would decode, the output written: not the
+    // first keystroke's wait)
+    if rebuild.is_some() {
+        partex_core::ssa::prepare_rebuilds(&tex);
+    }
     eprintln!(
         "partex: ssa build 0: link {:.1} ms: {}; files written {:.1} ms",
         lr.link_ms, lr.how, lr.write_ms

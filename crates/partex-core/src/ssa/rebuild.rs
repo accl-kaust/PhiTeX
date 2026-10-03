@@ -31,6 +31,9 @@ use crate::track::{Query, Tracker, Untracked};
 /// for the place where it ended (item 4: a step that ended elsewhere).
 const LOOK_AHEAD: usize = 64;
 
+/// The version of each name's φ, with the bytes it was made from.
+type PhiVersions = BTreeMap<u32, (Arc<[u8]>, Version)>;
+
 /// The fold's steps as a rebuild finds them.
 #[derive(Default)]
 pub(crate) struct Steps {
@@ -77,6 +80,9 @@ pub(crate) struct Steps {
     /// built"): a name no live step opens keeps it, and a name whose
     /// value is the same keeps its bytes.
     last_phi: BTreeMap<u32, Option<Arc<[u8]>>>,
+    /// The version of each name's φ, with the bytes it was made from
+    /// ([`Steps::phi_seeds`]: the same bytes, shared, have it).
+    phi_vers: core::cell::RefCell<PhiVersions>,
     /// Between two trips of a build: what the next one starts from.
     next: Option<NextTrip>,
     /// The queries of the host the open step's run asked, and each
@@ -89,6 +95,9 @@ pub(crate) struct Steps {
     /// its rows make now differs ([`glyph_union_now`], DESIGN 4.3, "The
     /// job's end").
     glyph_union: Option<u128>,
+    /// The ships' glyph rows the union was last counted from
+    /// ([`glyph_union_now`]).
+    glyph_count: GlyphCount,
     /// The open step's run's effects in the link's form, its chunks in
     /// program order (7.17.3, "Hits applied inside a step that runs
     /// again", item 2), and each step's, by step id, as its run ended
@@ -461,10 +470,20 @@ impl Steps {
         fold: &Fold<TexSsa>,
         phi: &BTreeMap<u32, Option<Arc<[u8]>>>,
     ) -> Vec<(u64, StepId, u32)> {
+        // (a φ kept from the last trip is the same bytes, shared: its
+        // version is the one made then)
+        let mut memo = self.phi_vers.borrow_mut();
         let vers: BTreeMap<u32, Version> = phi
             .iter()
             .map(|(&id, v)| {
-                let ver = v.as_ref().map_or(Version::ABSENT, |c| Version::of(&c[..]));
+                let ver = v.as_ref().map_or(Version::ABSENT, |c| match memo.get(&id) {
+                    Some((was, ver)) if Arc::ptr_eq(was, c) => *ver,
+                    _ => {
+                        let ver = Version::of(&c[..]);
+                        memo.insert(id, (c.clone(), ver));
+                        ver
+                    }
+                });
                 (id, ver)
             })
             .collect();
@@ -1440,20 +1459,103 @@ fn defs(
 
 /// The version of each font's glyphs used as the ships' latest rows make
 /// it (`pdf::ship::glyph_union`, as the job's end makes it); `None` if a
-/// row's value is not kept.
-fn glyph_union_now(rr: &Recorder) -> Option<u128> {
-    let mut gl = Vec::new();
-    for n in 0.. {
-        let Some(d) = rr.rt.fold.latest(&Slot(Fam::Glyphs, n)) else {
-            break;
-        };
-        let (_, v) = rr.rt.record(d.rec).writes.get(d.ix as usize)?;
+/// row's value is not kept. Counted from the rows that changed since the
+/// last time ([`GlyphCount`]): an edit changes a ship or two of hundreds.
+fn glyph_union_now(rr: &mut Recorder) -> Option<u128> {
+    let (rt, count) = (&rr.rt, &mut rr.st.steps.glyph_count);
+    let mut n = 0;
+    while let Some(d) = rt.fold.latest(&Slot(Fam::Glyphs, i64::try_from(n).ok()?)) {
+        let (_, v) = rt.record(d.rec).writes.get(d.ix as usize)?;
         let super::SValue::Field(f) = &**v.as_ref()?.1.as_ref()? else {
             return None;
         };
-        gl.push(f.get::<crate::pdf::ship::Glyphs>()?.clone());
+        count.set(n, f.get::<crate::pdf::ship::Glyphs>()?);
+        n += 1;
     }
-    Some(Version::of(&crate::pdf::ship::glyph_union(&gl)).0)
+    count.truncate(n);
+    let v = count.version();
+    debug_assert_eq!(
+        v,
+        Version::of(&crate::pdf::ship::glyph_union(count.rows.iter())).0,
+        "the glyph union counted is the union"
+    );
+    Some(v)
+}
+
+/// The ships' glyph rows as counted: each row, and for each font, how
+/// many rows have it and how many have each of its glyphs. The union
+/// (`pdf::ship::glyph_union`) is each font some row has, with the glyphs
+/// some row has; a row changed is taken out and the new one put in.
+#[derive(Default)]
+pub(crate) struct GlyphCount {
+    rows: Vec<crate::pdf::ship::Glyphs>,
+    fonts: BTreeMap<i32, (u32, alloc::boxed::Box<[u32; 256]>)>,
+    version: Option<u128>,
+}
+
+impl GlyphCount {
+    /// Row `row` counted in (`up`) or out.
+    fn count(&mut self, row: &crate::pdf::ship::Glyphs, up: bool) {
+        for (f, bits) in row.iter() {
+            let (k, c) = self
+                .fonts
+                .entry(*f)
+                .or_insert_with(|| (0, alloc::boxed::Box::new([0; 256])));
+            *k = if up { *k + 1 } else { k.saturating_sub(1) };
+            for (w, word) in bits.iter().enumerate() {
+                let mut x = *word;
+                while x != 0 {
+                    let g = w * 64 + x.trailing_zeros() as usize;
+                    c[g] = if up { c[g] + 1 } else { c[g].saturating_sub(1) };
+                    x &= x - 1;
+                }
+            }
+        }
+        self.version = None;
+    }
+
+    /// Row `n` is `row` (`n` at most the count of rows).
+    fn set(&mut self, n: usize, row: &crate::pdf::ship::Glyphs) {
+        match self.rows.get(n) {
+            Some(old) if Arc::ptr_eq(old, row) => return,
+            Some(old) => {
+                let old = old.clone();
+                self.count(&old, false);
+                self.rows[n] = row.clone();
+            }
+            None => self.rows.push(row.clone()),
+        }
+        self.count(row, true);
+    }
+
+    /// The rows from `n` on are gone.
+    fn truncate(&mut self, n: usize) {
+        while self.rows.len() > n {
+            if let Some(r) = self.rows.pop() {
+                self.count(&r, false);
+            }
+        }
+    }
+
+    /// The union's version, as `pdf::ship::glyphs_union` makes it.
+    fn version(&mut self) -> u128 {
+        let fonts = &self.fonts;
+        *self.version.get_or_insert_with(|| {
+            let mut sets = BTreeMap::<i32, [u64; 4]>::new();
+            for (f, (k, c)) in fonts {
+                if *k > 0 {
+                    let mut b = [0u64; 4];
+                    for (g, n) in c.iter().enumerate() {
+                        if *n > 0 {
+                            b[g / 64] |= 1 << (g % 64);
+                        }
+                    }
+                    sets.insert(*f, b);
+                }
+            }
+            Version::of(&sets).0
+        })
+    }
 }
 
 /// The version of the definition of `a` that reaches `key` (a step's
@@ -1565,6 +1667,15 @@ fn put<H: Host>(tex: &mut Tex<H, SsaTracker>, vals: &[(Slot, SVal)]) {
         }
     }
     tex.tracker.rec.borrow_mut().st.vers = vers;
+}
+
+/// Make ready what the first rebuild would make: the format's
+/// definitions, which a slot no step defines takes ([`initial`]),
+/// decoded from the format (tens of milliseconds a first keystroke
+/// would wait for). A build's end can do it after its output is out.
+pub fn prepare_rebuilds<H: Host>(tex: &Tex<H, SsaTracker>) {
+    let mut r = tex.tracker.rec.borrow_mut();
+    let _ = initial(tex, &mut r.st.steps, Slot(Fam::Eqtb, 0));
 }
 
 /// Rebuild the job in place after its sources changed (DESIGN 7.17.3):
