@@ -1055,6 +1055,8 @@ accessor.
 | `PARTEX_SSA_VIEW=FILE` | the build as a program after each build (4.3 item 7) |
 | `PARTEX_SSA_VIEW_STEP=ID` | with the view, step `ID`'s calls in the trace's form |
 | `PARTEX_SSA_DAG=FILE` | the steps as a dependency graph after each build (`FILE.N` after rebuild `N`): each step's commands, the step whose definition each of its reads reached, its definitions' versions, and how many commands into the step each read and last write came; `scripts/ssa-parallel.py` measures it (3.10, "Measured") |
+| `PARTEX_SSA_WINDOW=W` | windows of `W` commands (default 4,096); `0`: clean points (4.3 item 1) |
+| `PARTEX_SSA_RERUN_CHECK=1` | after the cold build, run every window again alone and compare (4.3 item 1) |
 
 Each is exact: output is byte-identical with it on or off.
 
@@ -1121,7 +1123,8 @@ as the highest slot it touched).
 - font slots shared across builds.
 
 **The fold** (`partex-ssa/src/fold.rs`). Today the top level is a fold
-of *steps*: calls from one clean point to the next.
+of *steps*: windows (4.3 item 1), or with `PARTEX_SSA_WINDOW=0` calls
+from one clean point to the next.
 - A *clean point* is main control's top, in outer vertical mode, with
   an empty nest and contribution list, the input at a file level, and
   no output routine active.
@@ -1197,6 +1200,8 @@ of *steps*: calls from one clean point to the next.
      step's end, a step removed), the levels' fields down to the depth
      it is put back at go with it: the levels it holds are as they were
      when it was made, and `cur_list` as the run left it;
+     for a window (4.3 item 1), the conditionals and `align_state`
+     are placed whole too;
    - the page list's length, its tail, and the nodes the step reads are
      placed;
    - the input is set to the previous step's result (3.5), mapped
@@ -1333,21 +1338,73 @@ step of a million, so a `\label` nothing refers to re-ran 4.82 M
 commands. Recording makes 1.68 M records, 1.51 M of them `unsave`'s; a
 cold build with recording takes 3.2–3.4× a plain one and peaks at 24 GB.
 
-1. **The window is the unit of re-execution.** A step (3.15's fold
-   unit) may begin at any command boundary at main control's top
-   (§1030) where no call is open and the output routine is not active:
-   inside groups, inside boxes (any `nest_ptr`), with token lists on
-   the input stack, inside alignments. A step ends at the first such
-   boundary after: a paragraph's end (back in the enclosing vertical
-   mode after `line_break`), a deferred fire, a file level opened or
-   closed, or `PARTEX_SSA_WINDOW` commands (default 4,096) since it
-   began. A text paragraph is then one window, about a thousand
-   commands. Re-entry places what the step reads of the nest (each
-   level's mode, fields and list as the appends made so far), the
-   group frames, the conditionals, the alignment state, the page
-   builder and the input, from the definitions reaching the step, as
-   the code places the save stack and the page list today. Commands
-   are not nodes: the trace is per window, and a window re-runs whole.
+1. **The window is the unit of re-execution.** A *window* is a step
+   (3.15's fold unit) cut by the rule below. Commands are not nodes:
+   the trace is per window, and a window re-runs whole.
+   `PARTEX_SSA_WINDOW=W` sets the count (default 4,096); `=0` keeps
+   3.15's clean points, byte-identical either way.
+   - *Where a window may begin.* At a *boundary*: main control's top
+     (§1030's `big_switch`, before the next command is fetched), or
+     inside that fetch at §380's loop top once the lists an expansion
+     pushed are exhausted and popped and a file is on top (3.15's
+     candidate), wherever the output routine is not active. The output
+     routine is the one call that spans commands, so no call is open
+     at a boundary. Boundaries lie inside groups, inside boxes at any
+     nest depth, inside alignments, math and conditionals, and with
+     token lists on the input. Every local of `main_control` and of
+     the scanners is dead there: what is live is the state of 3.13's
+     families and the input (3.5). The input's value gains
+     `force_eof` (§362: an `\endinput` waits for its line's end).
+   - *Where a window ends.* At the first boundary after any of: a
+     paragraph's end (`end_graf`, §1096, back in the enclosing
+     vertical mode after `line_break`; not a null paragraph, since
+     LaTeX's paragraph hooks begin each paragraph with one); a
+     deferred fire (no boundary qualifies until its output routine
+     ends); a file opened by `\input` or ended (a `\scantokens` pseudo
+     file is not one: expl3 rescans tokens in tight loops); or `W`
+     commands since the window began. A boundary where a fire is
+     pending ends the window too, and the next one begins with the
+     fire (3.15). In LaTeX the first boundary after a paragraph's end
+     lies inside the `\par` macro, after its `\tex_par:D`, so a window
+     is the rest of one `\par`, the next paragraph and its `\par` up to
+     the same point, and a word edit re-runs that one window. The
+     engine decides
+     (`Tex::window_due`), from the window's own count and the events
+     noted while it runs, never from a global counter. So a window run
+     again from the same place over the same commands ends at the same
+     place, and a run that begins where an old window began meets the
+     old run again (3.15, step 5). A text paragraph is one window,
+     about a thousand commands; a million-command figure is about 250.
+     An edit inside a long box shifts the count's cuts after it, which
+     then re-run to the box's next paragraph end or file event: the
+     window's slack.
+   - *Re-entry.* A window runs from the previous window's end (its
+     input, mapped through the edits). Before it runs, the slots that
+     say where the engine is are placed whole from the definitions
+     that reach the window, wherever a later definition holds the
+     arrays, as the save stack is (3.15): the current list's fields
+     and the nest's levels (`Fam::List` 0–12), the alignment's fields
+     (the current alignment and its stack), the conditionals,
+     `align_state`, and the save stack. Placed whole, not only as the
+     old run predicted, they keep a dropped run from running on a
+     structure laid out by a later point (a `\fi` with no conditional,
+     a nest popped past its bottom). Every other slot is predicted and
+     validated as in 3.15.
+   - *The lists.* The current list and the nest's lists are persistent
+     sequences (`NodeList`, a `PVec`: an append shares the prefix, a
+     copy is O(1)). A window's record keeps the list it leaves as one
+     shared value, at the cost of its own appends, and re-entry places
+     it with one store: that value is the list "as the appends made so
+     far" (3.4). An append still reads the list it appends to, so an
+     edit early in a list re-runs the later windows appending to it (a
+     cursor, 3.9). A text paragraph is one window, so this costs only
+     inside long boxes, whose pack reads the whole list anyway.
+   - *Checked.* `PARTEX_SSA_RERUN_CHECK=1` runs every window again
+     alone after the cold build, last first, and compares each run's
+     end, definitions, stores and effect chunks with its last run's.
+     In reverse order the engine's fields outside the families hold
+     another window's leftovers, so any difference is state that a
+     boundary leaves outside the families and the input.
 2. **Records.** A window's record (its reads from outside it, its net
    writes, its effects, where it began and ended), and records for the
    pure typesetting calls that apply (3.4): `line_break`, `hpack`,

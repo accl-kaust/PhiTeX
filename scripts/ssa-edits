@@ -143,6 +143,22 @@ FATAL_EDITS = [("Hello world.", "Hello there."), ("Hello there.", "Hello world."
 # a \label nothing refers to, then two rebuilds with no edit (LOG
 # 2026-09-29, "A label no one refers to")
 LABEL_EDITS = [("Para5x2 ", "Para5x2 \\label{new}"), ("", ""), ("", "")]
+# windows.tex (DESIGN 4.3 item 1): edits inside a figure's caption, a
+# pgfplots axis (its coordinates, its function), a minipage, an alignment,
+# a footnote and a loop's tokens, a label nothing refers to, and an early
+# edit that moves everything after it
+WINDOW_EDITS = [
+    ("Cap1 ", "Cap1 Edited "),
+    ("(1,2)", "(1,2.5)"),
+    ("Para3 ", "Para3 More words. "),
+    ("Mini1 ", "Mini1 Typed "),
+    ("Cell2 ", "Cell2 x "),
+    ("Para4 ", "Para4 \\label{new} "),
+    ("Foot1 ", "Foot1 more "),
+    ("Loop\\the", "Loop \\the"),
+    ("{x^2 - 1}", "{x^2 - 2}"),
+    ("Para1 ", "Para1 Early "),
+]
 
 
 class Case:
@@ -309,6 +325,7 @@ def all_cases():
             outdir="out",
             seed=2,
         ),
+        latex("windows", "windows.tex", "pdflatex", WINDOW_EDITS),
     ]
 
 

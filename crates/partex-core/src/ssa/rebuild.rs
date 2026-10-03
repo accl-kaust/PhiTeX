@@ -23,13 +23,17 @@ use super::{
 };
 use crate::host::{FileKind, Host, NoHost};
 use crate::input::{AlphaFile, InStateRecord, InputValue, same_chain};
-use crate::run::{CleanPoint, Step};
+use crate::run::Step;
 use crate::tex::Tex;
 use crate::track::{Query, Tracker, Untracked};
 
 /// How many old steps after the one a run tries to meet are looked at
 /// for the place where it ended (item 4: a step that ended elsewhere).
 const LOOK_AHEAD: usize = 64;
+
+/// The old steps after a step run again that predict the new steps of
+/// its run, at most (with windows: the rebuild's `ahead`).
+const CASCADE_AHEAD: usize = 4096;
 
 /// The version of each name's φ, with the bytes it was made from.
 type PhiVersions = BTreeMap<u32, (Arc<[u8]>, Version)>;
@@ -726,6 +730,9 @@ pub(crate) struct InputState {
     /// Stopped at a paragraph's start (`CleanPoint::Graf`), or before the
     /// page builder `new_graf` deferred.
     graf: bool,
+    /// An `\endinput` waits for its line's end (§362): live at a
+    /// window's boundary (DESIGN 4.3 item 1).
+    force_eof: bool,
     line: i32,
     /// The shared parts: the levels, the parameters, the buffer below the
     /// top file level's line and the file levels below the top one.
@@ -766,6 +773,7 @@ impl InputState {
             load: t.load_stop == 2,
             page: t.page_pending,
             graf: t.graf_stop,
+            force_eof: t.force_eof,
             line: t.line,
             top: (v.from..t.first.max(t.last)).map(|i| t.buffer[i]).collect(),
             v,
@@ -799,6 +807,7 @@ impl InputState {
         t.load_stop = if self.load { 2 } else { 0 };
         t.page_pending = self.page;
         t.graf_stop = self.graf;
+        t.force_eof = self.force_eof;
         t.line = self.line;
         t.cur_input = self.cur.clone();
         t.in_open = self.in_open;
@@ -947,6 +956,7 @@ fn same_input<H: Host, T: Tracker>(t: &Tex<H, T>, a: &InputState, b: &InputState
             && strs(&fa.full_names, &fb.full_names));
     let (x, y) = (&a.file, &b.file);
     a.v.from == b.v.from
+        && a.force_eof == b.force_eof
         && same_data(&a.v.below, &b.v.below)
         && a.top == b.top
         && a.first == b.first
@@ -1495,6 +1505,26 @@ fn with_levels<H: Host>(
         }
     }
     vals
+}
+
+/// What else says where the engine is, placed whole for the window at
+/// `key` beside the nest ([`nest_whole`]): the conditionals and
+/// `align_state` (DESIGN 4.3 item 1, "Re-entry"). A window may begin in a
+/// conditional's arm or an alignment's entry, where a run that met
+/// another `\fi` or `&` than its last one's before its reads are checked
+/// would be in a state no run makes.
+fn window_whole<H: Host>(tex: &Tex<H, SsaTracker>, key: u64, next: &mut Vec<Slot>) {
+    use crate::track::scalar;
+    let r = tex.tracker.rec.borrow();
+    let fold = &r.rt.fold;
+    for a in [
+        Slot(Fam::Cond, 0),
+        Slot(Fam::Alloc, i64::from(scalar::ALIGN_STATE)),
+    ] {
+        if later(fold, &a, key) {
+            next.push(a);
+        }
+    }
 }
 
 /// A step's definitions: each slot its records wrote, at its last write.
@@ -2108,12 +2138,40 @@ pub fn rebuild<H: Host>(tex: &mut Tex<H, SsaTracker>, trace: bool, apply: bool) 
         let cursor = j;
         let mut cur = j;
         let mut predict = alloc::vec![j];
+        let mut writes: Vec<StepId> = Vec::new();
+        // (with windows, the old steps after it as they were: the k-th new
+        // step of a run that ended elsewhere, a window about as long as an
+        // old one, runs about the text the k-th of them ran, and is
+        // predicted by it and its neighbours too, DESIGN 4.3 item 1)
+        let ahead: Vec<StepId> = if tex.window() > 0 {
+            let r = tex.tracker.rec.borrow();
+            let fold = &r.rt.fold;
+            fold.position(j).map_or_else(Vec::new, |p| {
+                fold.order[p + 1..]
+                    .iter()
+                    .take(CASCADE_AHEAD)
+                    .copied()
+                    .collect()
+            })
+        } else {
+            Vec::new()
+        };
+        // (the old step about where the run is, in `ahead`: one further
+        // for each new step, or where a dropped run read)
+        let mut at = 0usize;
         loop {
             let c0 = tex.commands();
-            let end = run_step(tex, cur, &predict, &input, &mut dirty, &mut rep, &mut srep);
+            let end = run_step(
+                tex, cur, &predict, &writes, &input, &mut dirty, &mut rep, &mut srep,
+            );
             if tex.commands() - budget_from > tex.tracker.budget.get() {
                 rep.unsupported = Some("a rebuild past its budget of commands");
                 break;
+            }
+            if let Some(s) = dirty.anchor.take()
+                && let Some(i) = ahead.iter().position(|&o| o == s)
+            {
+                at = i;
             }
             if let Some(t) = target.take() {
                 target = Some(data_edits(tex, &end, t, &mut dirty, &mut rep));
@@ -2208,6 +2266,14 @@ pub fn rebuild<H: Host>(tex: &mut Tex<H, SsaTracker>, trace: bool, apply: bool) 
                     .and_then(|p| fold.order.get(p + 1).copied())
                     .unwrap_or(cursor);
                 predict = alloc::vec![old, cur];
+                writes.clear();
+                for &o in ahead.iter().skip(at).take(3) {
+                    if !predict.contains(&o) {
+                        predict.push(o);
+                    }
+                    writes.push(o);
+                }
+                at += 1;
                 n
             };
             rep.new_steps += 1;
@@ -2452,6 +2518,153 @@ fn more_trips<H: Host>(
     }
 }
 
+/// What [`rerun_check`] found (DESIGN 4.3 item 1, "Checked").
+#[derive(Clone, Debug, Default)]
+pub struct RerunCheck {
+    /// The steps run again, and the commands they ran.
+    pub steps: usize,
+    pub commands: u64,
+    /// Runs dropped for a read not placed (normal: the prediction).
+    pub retries: usize,
+    /// Steps whose run ended elsewhere than their last run, changed a
+    /// definition, stored other lines or made other effects than it.
+    pub ended_elsewhere: usize,
+    pub defs_changed: usize,
+    pub stores_changed: usize,
+    pub effects_changed: usize,
+    /// The first differences, each described.
+    pub first: Vec<alloc::string::String>,
+}
+
+/// Run every step of the fold again alone, the last first, and compare
+/// each run with the step's last one: where it ended, its definitions,
+/// its stores and its effects (DESIGN 4.3 item 1, "Checked"). The loads
+/// of a stored name read what the cold build's did: the φ it found, or
+/// the stores before them. In reverse order the engine's fields outside
+/// the families hold another step's leftovers, so a difference is state
+/// that a step's boundary leaves outside the families and the input.
+pub fn rerun_check<H: Host>(tex: &mut Tex<H, SsaTracker>, apply: bool) -> RerunCheck {
+    let mut out = RerunCheck::default();
+    let mut rep = RebuildReport::default();
+    let order = {
+        let mut r = tex.tracker.rec.borrow_mut();
+        let rr = &mut *r;
+        // (each stored name's φ: the file the build's loads found before
+        // it stored the name, or none)
+        let s = &rr.st.steps;
+        let phi: BTreeMap<u32, Option<Arc<[u8]>>> = s
+            .stored
+            .iter()
+            .map(|&id| {
+                let found = s.datas.iter().rev().find(|d| d.name == id && d.file);
+                (id, found.map(|d| d.bytes.clone()))
+            })
+            .collect();
+        rr.st.steps.phi = Some(phi);
+        rr.st.vers.epoch += 1;
+        rr.rt.open_trip(1);
+        rr.on = true;
+        rr.rt.fold.order.clone()
+    };
+    tex.tracker.check = false;
+    tex.tracker.apply.set(apply);
+    tex.tracker.boundary();
+    let mut dirty = Dirty::default();
+    let mut srep = SsaReport::default();
+    for pos in (1..order.len()).rev() {
+        let (j, prev) = (order[pos], order[pos - 1]);
+        let (input, old_end, old_defs, old_stores, old_fx) = {
+            let r = tex.tracker.rec.borrow();
+            let s = &r.st.steps;
+            let Some(input) = s.end(prev) else { continue };
+            let fx: Vec<Version> = s
+                .effects
+                .get(j as usize)
+                .map(|v| v.iter().map(|e| e.0).collect())
+                .unwrap_or_default();
+            (
+                input,
+                s.end(j),
+                defs(&r.rt, &r.rt.fold.steps[j as usize].recs),
+                s.stores.get(&j).cloned(),
+                fx,
+            )
+        };
+        let (retries, commands) = (rep.retries, tex.commands());
+        let end = run_step(tex, j, &[j], &[], &input, &mut dirty, &mut rep, &mut srep);
+        out.steps += 1;
+        out.commands += tex.commands() - commands;
+        out.retries += rep.retries - retries;
+        let r = tex.tracker.rec.borrow();
+        let s = &r.st.steps;
+        let mut why = Vec::new();
+        if !old_end
+            .as_ref()
+            .is_some_and(|o| same_place(tex, &end, o) && same_input(tex, &end, o))
+        {
+            out.ended_elsewhere += 1;
+            why.push(alloc::format!(
+                "ended at {}, before at {}",
+                end.brief(),
+                old_end
+                    .as_ref()
+                    .map_or(alloc::string::String::from("-"), InputState::brief)
+            ));
+        }
+        let new_defs = defs(&r.rt, &r.rt.fold.steps[j as usize].recs);
+        let changed: Vec<alloc::string::String> = old_defs
+            .keys()
+            .chain(new_defs.keys())
+            .filter(|a| positioned(a) && old_defs.get(a) != new_defs.get(a))
+            .map(|a| alloc::format!("{a}"))
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        if !changed.is_empty() {
+            out.defs_changed += 1;
+            why.push(alloc::format!(
+                "definitions changed: {}",
+                changed[..changed.len().min(8)].join(" ")
+            ));
+        }
+        if s.stores.get(&j) != old_stores.as_ref() {
+            out.stores_changed += 1;
+            why.push(alloc::string::String::from("stores changed"));
+        }
+        let fx: Vec<Version> = s
+            .effects
+            .get(j as usize)
+            .map(|v| v.iter().map(|e| e.0).collect())
+            .unwrap_or_default();
+        if fx != old_fx {
+            out.effects_changed += 1;
+            why.push(alloc::format!(
+                "effects changed ({} chunks, before {})",
+                fx.len(),
+                old_fx.len()
+            ));
+        }
+        if !why.is_empty() && out.first.len() < 12 {
+            out.first.push(alloc::format!(
+                "step {j} (from {}): {}",
+                input.brief(),
+                why.join("; ")
+            ));
+        }
+    }
+    tex.tracker.flush_effects();
+    {
+        let mut r = tex.tracker.rec.borrow_mut();
+        r.flush_output();
+        r.on = false;
+        r.rt.close_trip();
+        r.st.steps.phi = None;
+        r.st.steps.log.clear();
+    }
+    tex.tracker.apply.set(false);
+    out
+}
+
 /// A line of the rebuild's trace.
 /// Where two contents of a stored name first differ, for the trace: the
 /// line's number and both versions of it (absent: none).
@@ -2627,6 +2840,28 @@ fn data_edits<H: Host>(
 pub(crate) struct Dirty {
     order: BTreeMap<u64, StepId>,
     why: BTreeMap<StepId, Why>,
+    /// The table entries a run of this rebuild was dropped for (read at a
+    /// later definition, not placed): each step run after it is placed at
+    /// them too, where a later definition holds the arrays. A loop's
+    /// windows take branches by value, and the reads one window's run
+    /// made only now, the next one's makes too ([`MISSED_MAX`] at most;
+    /// `eqtb` only, [`predicts_alone`]).
+    missed: BTreeSet<Slot>,
+    /// The old step whose definition a dropped run read first (the
+    /// earliest): where the run is in the old run's text, for the new
+    /// steps after it (with windows, the rebuild's `ahead`).
+    anchor: Option<StepId>,
+}
+
+/// The slots [`Dirty::missed`] keeps at most.
+const MISSED_MAX: usize = 4096;
+
+/// Whether a slot may be placed apart from the slots a run reads with it
+/// (a prediction made of other runs' misses or writes): an `eqtb` entry.
+/// Not a page node without the page's length, a nest level's field
+/// without the nest, a save stack entry without its pointer.
+fn predicts_alone(a: &Slot) -> bool {
+    a.0 == Fam::Eqtb
 }
 
 /// Why a step is dirty: `None` runs it, `Some` holds the slots it read at
@@ -2830,13 +3065,15 @@ fn drop_outputs<H: Host>(tex: &mut Tex<H, SsaTracker>) {
 
 /// Run step `j` at its place from `input` (7.17.3 items 2 and 3, "A read
 /// resolves by prediction and validation"), the reads of the last runs of
-/// the steps `predict` predicting its own; mark the readers of the
-/// definitions it changed dirty. Its result.
+/// the steps `predict` predicting its own, and the writes of the steps
+/// `writes` too; mark the readers of the definitions it changed dirty.
+/// Its result.
 #[allow(clippy::too_many_arguments)]
 fn run_step<H: Host>(
     tex: &mut Tex<H, SsaTracker>,
     j: StepId,
     predict: &[StepId],
+    writes: &[StepId],
     input: &InputState,
     dirty: &mut Dirty,
     rep: &mut RebuildReport,
@@ -2861,15 +3098,36 @@ fn run_step<H: Host>(
         let old = defs(&r.rt, &fold.steps[j as usize].recs);
         // (each with the definition that reaches the step, found where the
         // test for a later one looked)
-        let reads = predict
+        // (a name the old run made, as a loop's points, is read by a new
+        // run that finds it made: the old run's writes predict it)
+        let written = writes.iter().flat_map(|&p| {
+            fold.steps[p as usize]
+                .recs
+                .iter()
+                .flat_map(|&q| r.rt.record(q).writes.iter().map(|(a, _)| a))
+                .filter(|a| predicts_alone(a))
+        });
+        let mut cand: Vec<Slot> = predict
             .iter()
             .flat_map(|&p| &fold.steps[p as usize].reads)
+            .chain(&dirty.missed)
+            .chain(written)
             .filter(|a| positioned(a))
+            .copied()
+            .collect();
+        if predict.len() > 1 || !writes.is_empty() || !dirty.missed.is_empty() {
+            // (the steps predicting it read much the same slots: each
+            // looked up once)
+            cand.sort_unstable();
+            cand.dedup();
+        }
+        let reads = cand
+            .into_iter()
             .filter_map(|a| {
                 if a.0 == Fam::PageNode {
-                    Some((*a, fold.reaching(a, key)))
+                    Some((a, fold.reaching(&a, key)))
                 } else {
-                    fold.reaching_if_later(a, key).map(|d| (*a, d))
+                    fold.reaching_if_later(&a, key).map(|d| (a, d))
                 }
             })
             .collect();
@@ -2884,6 +3142,9 @@ fn run_step<H: Host>(
     let mut next = Vec::new();
     save_stack_whole(tex, key, &mut next, rep);
     nest_whole(tex, key, &mut next);
+    if tex.window() > 0 {
+        window_whole(tex, key, &mut next);
+    }
     let mut set: BTreeSet<Slot> = BTreeSet::new();
     let mut touched: BTreeSet<Slot> = BTreeSet::new();
     let finished = loop {
@@ -2960,19 +3221,7 @@ fn run_step<H: Host>(
                             .watch
                             .as_ref()
                             .is_some_and(|w| w.later);
-                    if stopped
-                        || matches!(
-                            tex.clean_point(),
-                            Some(
-                                CleanPoint::Outer
-                                    | CleanPoint::Fire
-                                    | CleanPoint::Ship
-                                    | CleanPoint::Load
-                                    | CleanPoint::Page
-                                    | CleanPoint::Graf
-                            )
-                        )
-                    {
+                    if stopped || super::step_ends(tex) {
                         break false;
                     }
                     step = tex.resume();
@@ -3030,8 +3279,18 @@ fn run_step<H: Host>(
             (miss, written)
         };
         if rep.trace && !miss.is_empty() {
-            let m: Vec<alloc::string::String> =
-                miss.iter().take(8).map(|a| alloc::format!("{a}")).collect();
+            let r = tex.tracker.rec.borrow();
+            let fold = &r.rt.fold;
+            // (each with the step whose definition the run read)
+            let m: Vec<alloc::string::String> = miss
+                .iter()
+                .take(8)
+                .map(|a| match fold.latest(a) {
+                    Some(d) => alloc::format!("{a}@{}", d.step),
+                    None => alloc::format!("{a}"),
+                })
+                .collect();
+            drop(r);
             note(
                 tex,
                 alloc::format!(
@@ -3051,6 +3310,23 @@ fn run_step<H: Host>(
             break fin;
         }
         rep.retries += 1;
+        if dirty.missed.len() < MISSED_MAX {
+            dirty
+                .missed
+                .extend(miss.iter().filter(|a| predicts_alone(a)).copied());
+        }
+        {
+            let r = tex.tracker.rec.borrow();
+            let fold = &r.rt.fold;
+            let first = miss
+                .iter()
+                .filter_map(|a| fold.latest(a))
+                .filter(|d| d.step != j)
+                .min_by_key(|d| d.key);
+            if let Some(d) = first {
+                dirty.anchor = Some(d.step);
+            }
+        }
         tex.tracker.rec.borrow_mut().rt.abort_step();
         // (what the dropped run wrote goes back to what reaches the step)
         let vals = {
@@ -3198,10 +3474,21 @@ fn run_step<H: Host>(
     rep.restored += vals.len();
     put(tex, &vals);
     if rep.trace {
+        // (why a window ended: DESIGN 4.3 item 1)
+        let cut = if tex.window() == 0 || !tex.window_due() {
+            // (none, or a clean point's: the end's place names its kind)
+            alloc::string::String::new()
+        } else if tex.fire_pending {
+            alloc::string::String::from(", cut: a fire pending")
+        } else if let Some(e) = tex.window_cut() {
+            alloc::format!(", cut: {e:?}")
+        } else {
+            alloc::string::String::from(", cut: the count")
+        };
         note(
             tex,
             alloc::format!(
-                "step {j} (key {key}, predicted by {predict:?}): {} commands, changed {}",
+                "step {j} (key {key}, predicted by {predict:?}): {} commands{cut}, changed {}",
                 tex.commands() - c0,
                 changed.join(", ")
             ),

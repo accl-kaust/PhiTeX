@@ -1707,6 +1707,10 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             fire_pending,
             // (a switch)
             defer_fire: _,
+            // (scheduling: where windows end, DESIGN 4.3 item 1)
+            window: _,
+            window_start: _,
+            window_cut: _,
             fresh_def: _,
             long_help_seen,
             cancel_boundary,

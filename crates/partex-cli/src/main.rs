@@ -1027,6 +1027,47 @@ fn deliver_effects<T: partex_core::track::Tracker>(tex: &mut Tex<native::NativeH
     }
 }
 
+/// `PARTEX_SSA_RERUN_CHECK=1`: every window of the cold build run again
+/// alone, the last first (DESIGN 4.3 item 1); whether each ended where it
+/// did and made what it made.
+fn rerun_check(tex: &mut Tex<native::NativeHost, partex_core::ssa::SsaTracker>) -> bool {
+    // (every window run again alone, the last first: DESIGN 4.3 item 1)
+    let t = std::time::Instant::now();
+    let c = partex_core::ssa::rerun_check(tex, true);
+    eprintln!(
+        "partex: ssa rerun check: {:.1} ms, steps {}, commands {}, runs dropped {}, \
+         ended elsewhere {}, definitions changed {}, stores changed {}, effects changed {}",
+        t.elapsed().as_secs_f64() * 1e3,
+        c.steps,
+        c.commands,
+        c.retries,
+        c.ended_elsewhere,
+        c.defs_changed,
+        c.stores_changed,
+        c.effects_changed,
+    );
+    for l in &c.first {
+        eprintln!("partex: ssa rerun check: {l}");
+    }
+    if c.ended_elsewhere + c.defs_changed + c.stores_changed + c.effects_changed > 0 {
+        // (a step's boundary left state outside the families: the
+        // harness sees the process fail)
+        eprintln!("partex: ssa rerun check: FAILED");
+        return false;
+    }
+    true
+}
+
+/// The commands a window of the SSA build's steps runs at most (DESIGN
+/// 4.3 item 1; `PARTEX_SSA_WINDOW`, default 4096; `0`: steps from one
+/// clean point to the next).
+fn ssa_window() -> u64 {
+    std::env::var("PARTEX_SSA_WINDOW")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(4096)
+}
+
 /// The SSA build's tracker, as the environment sets it up.
 fn ssa_tracker() -> partex_core::ssa::SsaTracker {
     use partex_core::ssa::{Recorder, SsaTracker};
@@ -1061,6 +1102,7 @@ fn run_ssa(host: native::NativeHost, params: Params, command_line: &[u8]) -> i32
     // (BibTeX's and makeindex's last runs, across the builds' trips)
     let mut between = Between::default();
     let mut tex = Tex::new(host, ssa_tracker(), params);
+    tex.set_window(ssa_window());
     let t0 = std::time::Instant::now();
     let r = partex_core::ssa::run_applying(&mut tex, command_line, check, 0, apply);
     if check {
@@ -1080,6 +1122,9 @@ fn run_ssa(host: native::NativeHost, params: Params, command_line: &[u8]) -> i32
         partex_core::ssa::settle(&mut tex, trace, apply, &mut t, r.commands, ns)
     });
     let millis = t0.elapsed().as_secs_f64() * 1e3;
+    if std::env::var("PARTEX_SSA_RERUN_CHECK").is_ok_and(|v| v == "1") && !rerun_check(&mut tex) {
+        return 3;
+    }
     let mut linker = SsaLinker::default();
     let lr = linker.link(&mut tex);
     ready_for_rebuilds(&tex, rebuild.is_some());

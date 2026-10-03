@@ -697,6 +697,9 @@ impl<H: Host, T: Tracker> Tex<H, T> {
     /// goes on after it.
     pub(crate) fn fire_deferred(&mut self) -> Result<(), Jump> {
         self.fire_pending = false;
+        // (the window that begins with the fire ends at the first boundary
+        // after its output routine: DESIGN 4.3 item 1)
+        self.window_event(crate::run::WindowEvent::Fire);
         let mut rest: VecDeque<Node> = mem::take(self.contrib()).into_vec().into();
         let Some(p) = rest.pop_front() else {
             return self.confusion(b"fire");

@@ -11273,3 +11273,54 @@ again and again (a `\documentclass` option changed, below) grew to 4.7
 GB in nine minutes, a quarter of its time in the scan. The scan now
 peeks (`peek_eqtb`, `peek_text`): the suggestions are the host's, TeX
 prints none of them.
+
+## 2026-10-03 — Windows: a step ends inside a group, a box or a macro too (coordinator)
+
+DESIGN 4.3 item 1, ported from np/windows (40b33be) onto main and merged.
+A figure's caption edited re-ran the whole figure: a step ended only at
+the clean points, and a float's body, a box or a TikZ picture is one
+step (the demo, short.tex: 872,156 commands, 1.07 s for a word of the
+caption). Now the engine also ends a step at a main-control boundary
+inside groups, boxes and macros (token lists on the input stack): at
+the first after a paragraph broken into lines, a deferred fire, a file
+opened by `\input` or ended, or `PARTEX_SSA_WINDOW` commands (4,096 by
+default; 0: the clean points alone). The clean points still end a
+step. A rebuild enters a window with the nest, the alignment, the
+conditionals and `align_state` placed whole beside the save stack, and
+`force_eof` is part of the input's value.
+
+An edit that changes a loop's command count shifts every count-cut
+window after it, and the rebuild makes new steps until one ends where
+an old one did. Their runs were dropped for slots no prediction had
+(\petals 5 -> 7 in the demo's plot: 286 new windows, 304 runs dropped,
+3.6 s against main's 1.0 s). Now: the eqtb entries a run of the rebuild
+was dropped for are placed in every later step's run (a branch taken by
+value, which the window's last run did not take); and a new window is
+predicted by the reads and the eqtb writes of the old windows at about
+its place, one further per new window, put back where a dropped run
+read (a control sequence the old run made per plot point, which the new
+run finds made and reads). 5 runs dropped; each slot looked up once.
+
+The demo, LTO, one process (rebuild ms; main -> windows):
+
+| edit | main | windows |
+|---|---|---|
+| a word of a paragraph | 5.0 | 5.2 |
+| a word of the figure's caption | 1,071 | 15 |
+| `\colorlet{petal}{red}` -> violet | 1,016 | 141 |
+| `\newcommand\petals{5}` -> 7 | 1,011 | 1,552 |
+
+`\petals` is read by every point of the plot: the windows run its
+895,739 commands (main 871,375) and pay their placements and records,
+some 300 windows'. The course's word edit (perf stat, 12 rebuilds, two
+rounds): 112.11 -> 110.71 M instructions a rebuild.
+
+Checked: scripts/ssa-edits 15/15 (a windows case added: a pgfplots
+figure, a minipage, an alignment, math, a footnote, a loop,
+\scantokens) with the default window (fixpoint, one trip, check mode)
+and with PARTEX_SSA_WINDOW=0; e2e 34/34 plain and machine; the
+workspace's tests; clippy. Open: PARTEX_SSA_RERUN_CHECK=1 (every window
+run again alone, last first) fails 11 of the 15 cases, on save stack
+entries (`save:10`, `save:14`) at main's own clean points (a
+paragraph's start, a fire): the check predates those points, and what
+it flags is not yet known to be wrong.
