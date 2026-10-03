@@ -48,6 +48,7 @@ pub mod page;
 pub mod pageir;
 pub mod pdfread;
 pub mod persist;
+pub mod png;
 pub mod regex;
 pub mod scaled;
 pub mod stablehash;

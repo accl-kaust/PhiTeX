@@ -1,0 +1,23 @@
+\documentclass{article}
+% PNG images (`\pdfximage` of a PNG, written as writepng.c with libpng
+% writes it), through graphicx: an RGB one whose IDAT data PDF decodes
+% as they are (the "PNG copy"), one with an sRGB chunk (decoded and
+% written again), RGBA and gray+alpha ones (a soft mask, and the page's
+% transparency group), a palette one with tRNS (expanded to RGBA), a
+% 16-bit gray one, an interlaced one.
+\usepackage{graphicx}
+\begin{document}
+Before the images.
+
+\includegraphics{png-rgb8}\quad
+\includegraphics[width=3cm]{png-rgb8srgb.png}\quad
+\includegraphics[height=1cm]{png-gray16}
+
+\includegraphics{png-rgba8}\quad
+\includegraphics{png-ga8}\quad
+\includegraphics[angle=90]{png-pal4trns}\quad
+\includegraphics{png-rgb8i}
+
+\newpage
+The second page shows the RGBA image again: \includegraphics{png-rgba8}.
+\end{document}

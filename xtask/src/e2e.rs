@@ -251,6 +251,51 @@ const CASES: &[Case] = &[
             ],
         ],
     },
+    // PNG images (copied IDAT data, decoded rows, soft masks, a palette
+    // with transparency, 16 bits, interlaced) through graphicx, as
+    // writepng.c with libpng writes them
+    Case {
+        name: "png",
+        oracle: "pdftex",
+        inputs: &[
+            "png.tex",
+            "png-rgb8.png",
+            "png-rgb8srgb.png",
+            "png-gray16.png",
+            "png-rgba8.png",
+            "png-ga8.png",
+            "png-pal4trns.png",
+            "png-rgb8i.png",
+        ],
+        runs: &[
+            &[
+                "-no-shell-escape",
+                "-no-parse-first-line",
+                "-output-comment=partex",
+                "-interaction=nonstopmode",
+                "-ini",
+                "-etex",
+                "-jobname=pdflatex",
+                "*pdflatex.ini",
+            ],
+            &[
+                "-no-shell-escape",
+                "-no-parse-first-line",
+                "-output-comment=partex",
+                "-interaction=nonstopmode",
+                "-fmt=pdflatex",
+                "png",
+            ],
+            &[
+                "-no-shell-escape",
+                "-no-parse-first-line",
+                "-output-comment=partex",
+                "-interaction=nonstopmode",
+                "-fmt=pdflatex",
+                "png",
+            ],
+        ],
+    },
     Case {
         name: "bibtex",
         oracle: "pdftex",

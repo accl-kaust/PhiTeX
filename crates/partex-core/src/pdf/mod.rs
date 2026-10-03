@@ -17,6 +17,7 @@ pub(crate) mod val;
 pub(crate) mod vf;
 pub mod vnum;
 pub(crate) mod writefont;
+pub(crate) mod writepng;
 pub(crate) mod writet1;
 pub mod xref;
 

@@ -11526,3 +11526,65 @@ with 2,000 ms stops at 2,002 ms, after 4,862 steps. Off by default.
 Also: `824a511` was not formatted; the generated `fofi_tables.rs` is
 now skipped by rustfmt (`#[rustfmt::skip]` on its module) and keeps its
 layout.
+
+## 2026-10-03: PNG images (writepng.c, libpng 1.6.58)
+
+`\pdfximage` of a PNG file failed ("PNG and JBIG2 images are not
+implemented"); the Overleaf peer's ChillCGRA paper has one. pdfTeX reads
+it with libpng (`read_png_info` at `\pdfximage`, `write_png` where the
+image object is written), so the output depends on libpng's reading of
+the file, which `partex_engine::png` ports from libpng 1.6.58 (the
+system's, which this machine's pdfTeX links): the chunks up to the
+first IDAT (`png_read_info`: libpng's table of positions, lengths and
+duplicates, each handler's acceptance, CRC errors fatal for critical
+chunks and dropping ancillary ones, benign errors as warnings), and the
+rows after pdfTeX's transformations (`png_set_tRNS_to_alpha`,
+`png_set_strip_alpha` before PDF 1.4, `png_set_strip_16` without
+`\pdfimagehicolor`; the row filters, Adam7, `png_read_update_info`).
+
+`writepng.rs` writes what writepng.c does: the IDAT data as they are
+with a PNG predictor (the "PNG copy") for a non-interlaced gray or RGB
+image with nothing to change (no tRNS, alpha or 16 bits to strip, gamma
+1 or none, none of cHRM, iCCP, sBIT, sRGB, bKGD, hIST, sPLT); otherwise
+the rows: a palette as `/Indexed` (its own object), an alpha channel as
+an `/SMask` image (8 bits: a 16-bit alpha's high bytes), the color
+bytes and alpha bytes split as `write_*_pixel_*` do. An alpha PNG in
+PDF 1.4 or later asks for a transparency group: one object per job
+(`transparent_page_group`), the page's group where the image is read if
+the page has none, and the image's (`img_group_ref`) where it is placed;
+the group object is written after the first such image.
+`\pdfimageapplygamma` is refused ("not implemented").
+
+The decoder (`png.rs`, 2,800 lines) has zlib 1.3.2's `inflate` and
+`inflate_table` inside it as a resumable state machine, fed as libpng
+feeds it (8,192 bytes a read, a row at a time): that boundary decides
+whether a damaged stream's end is an error or a warning. `inflate.rs` is
+untouched. Not ported, because pdfTeX never asks for them: gamma and the
+other transforms, text chunks' contents (warnings only), unknown chunks
+kept, `png_read_end`, the progressive reader; libpng's limits are ported
+(8,000,000-byte chunks, 1,000,000 pixels a side).
+
+Checked against the system's libpng (`scripts/png-check/compare.sh`:
+`harness.c` drives libpng as writepng.c does, the `png_dump` example
+prints the port's reading the same way): PngSuite and 282 edge cases
+(`gen_edge.py`: bad CRCs on every chunk kind, tRNS of every length,
+iCCP profiles of every kind and damage, IDATs split and damaged, zlib
+header, block and adler32 errors at the 8,192-byte boundary, 40
+randomly damaged streams, IHDR/PLTE errors, truncations, Adam7), 458
+files and 471 readings (every transformation set pdfTeX can ask for),
+126 of them errors: identical (every info field with the whole `valid`
+word, the transformed format, a hash of the rows, the message).
+
+Against pdfTeX: 22 images (gray 1–16 bits, palettes with and without
+tRNS, RGB(A) 8 and 16 bits, gray-alpha, Adam7, gAMA 1, pHYs, sRGB,
+bKGD) in six jobs (PDF 1.1, 1.3, 1.4 and 1.5; compress levels 0, 6 and
+9; `\pdfimagehicolor` on and off; object streams): the same PDFs, when
+the 1- to 4-bit palette images' rows fill their last byte. When they do
+not, pdfTeX's own output is not reproducible: the bits past the row's
+end come from writepng.c's `xtalloc`'d row buffer, never written
+(libpng keeps a row's trailing bits), and three runs of pdfTeX gave
+three different bytes for one image; partex writes zeros there. The new
+e2e case `png` (seven images, PDF 1.5, through graphicx) is identical.
+
+Tests: e2e 36/36, ssa-edits (`--brief --fixpoint`), the engine's and
+core's tests (11 new in `png.rs`), clippy, rustfmt.

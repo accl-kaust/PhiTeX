@@ -116,7 +116,8 @@ partex_engine::persist_struct!(EpdfDoc {
     objs
 });
 
-/// The open documents (`pdfDocuments`): the `EPDF` field.
+/// The open documents (`pdfDocuments`), and what the images' writers
+/// keep across images: the `EPDF` field.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
 pub(crate) struct EpdfDocs {
     pub docs: Vec<EpdfDoc>,
@@ -124,12 +125,18 @@ pub(crate) struct EpdfDocs {
     pub next: u32,
     /// `\pdfforcepagebox`'s warning was given (`warn_pdfpagebox` false).
     pub pagebox_warned: bool,
+    /// writepng.c's `transparent_page_group` (0: none yet) and
+    /// `transparent_page_group_was_written`.
+    pub png_group: i32,
+    pub png_group_written: bool,
 }
 
 partex_engine::persist_struct!(EpdfDocs {
     docs,
     next,
-    pagebox_warned
+    pagebox_warned,
+    png_group,
+    png_group_written
 });
 
 super::val::record_by_hash!(EpdfDocs);
