@@ -455,6 +455,15 @@ pub struct Tex<H: Host, T: Tracker = Untracked> {
     /// Defer the page builder's fires to the next `big_switch` (an SSA
     /// build's steps, `ssa.rs`).
     pub(crate) defer_fire: bool,
+    /// Windows (DESIGN 4.3 item 1): the commands after which the next
+    /// boundary ends the open window (0: no windows, the clean points of
+    /// [`Tex::clean_point`]); the command counter where the open window
+    /// began; and whether an event since then ends it at the next
+    /// boundary (a paragraph's end, a fire, a file level opened or
+    /// closed). Scheduling, not state.
+    pub(crate) window: u64,
+    pub(crate) window_start: u64,
+    pub(crate) window_cut: Option<crate::run::WindowEvent>,
     /// `\def` is defining a body just made (and maybe interned).
     pub(crate) fresh_def: bool,
     pub(crate) long_help_seen: bool,
@@ -780,6 +789,9 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             par_start: false,
             fire_pending: false,
             defer_fire: false,
+            window: 0,
+            window_start: 0,
+            window_cut: None,
             fresh_def: false,
             long_help_seen: false,
             cancel_boundary: false,

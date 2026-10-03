@@ -46,7 +46,8 @@ mod rebuild;
 mod view;
 
 pub use rebuild::{
-    RebuildReport, Trips, prepare_rebuilds, rebuild, rebuild_log, rebuild_trips, settle,
+    RebuildReport, RerunCheck, Trips, prepare_rebuilds, rebuild, rebuild_log, rebuild_trips,
+    rerun_check, settle,
 };
 pub use view::{dag, step_trace, view};
 
@@ -2458,21 +2459,13 @@ pub fn run_applying<H: Host>(
         entry: None,
         commands: 0,
     });
+    // (the job's start is the first window's: DESIGN 4.3 item 1)
+    tex.begin_window();
     let mut step = tex.start(command_line);
     loop {
         match step {
             Step::Checkpoint => {
-                if matches!(
-                    tex.clean_point(),
-                    Some(
-                        CleanPoint::Outer
-                            | CleanPoint::Fire
-                            | CleanPoint::Ship
-                            | CleanPoint::Load
-                            | CleanPoint::Page
-                            | CleanPoint::Graf
-                    )
-                ) {
+                if step_ends(tex) {
                     close_paragraph(tex, &mut open, &mut rep, Close::Step);
                     open = Some(open_paragraph(tex, check, &mut rep, None));
                 }
@@ -2510,15 +2503,37 @@ pub fn run_applying<H: Host>(
     rep
 }
 
-/// Begin the fold's next step at a clean point (7.17.9): the tokenizer
-/// over the line it begins on, then the step's call, named by the line's
-/// tokens.
+/// Whether the engine, stopped for a checkpoint, is where the open step
+/// ends: with windows, every stop is a window's end (the engine stops
+/// only there, `Tex::window_due`, and where a step must begin: a fire, a
+/// `\shipout`, a file read whole, a deferred page builder; DESIGN 4.3
+/// item 1); without, a clean point of those kinds, an outer one or a
+/// paragraph's start on its level's line (3.15).
+fn step_ends<H: Host, T: crate::track::Tracker>(tex: &mut Tex<H, T>) -> bool {
+    tex.window() > 0
+        || matches!(
+            tex.clean_point(),
+            Some(
+                CleanPoint::Outer
+                    | CleanPoint::Fire
+                    | CleanPoint::Ship
+                    | CleanPoint::Load
+                    | CleanPoint::Page
+                    | CleanPoint::Graf
+            )
+        )
+}
+
+/// Begin the fold's next step at a clean point (7.17.9), or a window
+/// (DESIGN 4.3 item 1): the tokenizer over the line it begins on, then
+/// the step's call, named by the line's tokens.
 fn open_paragraph<H: Host>(
     tex: &mut Tex<H, SsaTracker>,
     check: bool,
     rep: &mut SsaReport,
     rerun: Option<partex_ssa::fold::StepId>,
 ) -> Open {
+    tex.begin_window();
     tex.tracker.flush_effects();
     {
         let mut r = tex.tracker.rec.borrow_mut();

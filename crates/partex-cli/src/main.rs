@@ -1048,6 +1048,13 @@ fn run_ssa(host: native::NativeHost, params: Params, command_line: &[u8]) -> i32
     // (the steps' reads and writes timed, for the graph `write_dag` prints)
     tracker.set_timed(std::env::var_os("PARTEX_SSA_DAG").is_some());
     let mut tex = Tex::new(host, tracker, params);
+    // (the steps are windows of this many commands, DESIGN 4.3 item 1;
+    // `0`: from one clean point to the next)
+    let window = std::env::var("PARTEX_SSA_WINDOW")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(4096);
+    tex.set_window(window);
     let t0 = std::time::Instant::now();
     let r = partex_core::ssa::run_applying(&mut tex, command_line, check, 0, apply);
     if check {
@@ -1067,6 +1074,32 @@ fn run_ssa(host: native::NativeHost, params: Params, command_line: &[u8]) -> i32
         partex_core::ssa::settle(&mut tex, trace, apply, &mut t, r.commands, ns)
     });
     let millis = t0.elapsed().as_secs_f64() * 1e3;
+    if std::env::var("PARTEX_SSA_RERUN_CHECK").is_ok_and(|v| v == "1") {
+        // (every window run again alone, the last first: DESIGN 4.3 item 1)
+        let t = std::time::Instant::now();
+        let c = partex_core::ssa::rerun_check(&mut tex, true);
+        eprintln!(
+            "partex: ssa rerun check: {:.1} ms, steps {}, commands {}, runs dropped {}, \
+             ended elsewhere {}, definitions changed {}, stores changed {}, effects changed {}",
+            t.elapsed().as_secs_f64() * 1e3,
+            c.steps,
+            c.commands,
+            c.retries,
+            c.ended_elsewhere,
+            c.defs_changed,
+            c.stores_changed,
+            c.effects_changed,
+        );
+        for l in &c.first {
+            eprintln!("partex: ssa rerun check: {l}");
+        }
+        if c.ended_elsewhere + c.defs_changed + c.stores_changed + c.effects_changed > 0 {
+            // (a step's boundary left state outside the families: the
+            // harness sees the process fail)
+            eprintln!("partex: ssa rerun check: FAILED");
+            return 3;
+        }
+    }
     let mut linker = SsaLinker::default();
     let lr = linker.link(&mut tex);
     ready_for_rebuilds(&tex, rebuild.is_some());

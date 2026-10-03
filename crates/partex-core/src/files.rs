@@ -620,6 +620,9 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         }
         self.first = ux(self.cur_input.limit + 1);
         self.cur_input.loc = self.cur_input.start;
+        // (a file level opened ends the open window at the next boundary:
+        // DESIGN 4.3 item 1)
+        self.window_event(crate::run::WindowEvent::FileOpened);
         Ok(())
     }
 

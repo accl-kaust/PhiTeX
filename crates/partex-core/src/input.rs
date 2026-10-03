@@ -1058,6 +1058,9 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             if T::VALUES {
                 self.tracker.file(index, None);
             }
+            // (a file ended ends the open window at the next boundary:
+            // DESIGN 4.3 item 1)
+            self.window_event(crate::run::WindowEvent::FileEnded);
         }
         self.pop_input();
         self.in_open -= 1;

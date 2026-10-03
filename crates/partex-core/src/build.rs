@@ -569,6 +569,10 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                 self.pop_nest(); // null paragraphs are ignored
             } else {
                 self.line_break(false)?;
+                // (a paragraph broken into lines ends the open window at
+                // the next boundary, DESIGN 4.3 item 1; not a null one:
+                // LaTeX's paragraph hooks begin each paragraph with one)
+                self.window_event(crate::run::WindowEvent::ParEnd);
             }
             self.lr_save_mut().clear();
             self.normal_paragraph()?;

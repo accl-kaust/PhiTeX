@@ -51,6 +51,19 @@ pub enum CleanPoint {
     Graf = 6,
 }
 
+/// What ends a window at the next boundary (DESIGN 4.3 item 1).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WindowEvent {
+    /// A paragraph ended (`end_graf`, §1096).
+    ParEnd,
+    /// A deferred fire was taken.
+    Fire,
+    /// A file was opened by `\input`.
+    FileOpened,
+    /// A file ended.
+    FileEnded,
+}
+
 /// Where [`Tex::start`] or [`Tex::resume`] stopped.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Step {
@@ -102,6 +115,9 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         if self.stop_at != 0 && self.commands >= self.stop_at {
             self.stop_at = 0;
             return true;
+        }
+        if self.window > 0 && self.stop_at_candidate {
+            return self.window_due();
         }
         if self.stop_at_candidate
             && (self.cur_input.state != crate::web::TOKEN_LIST || self.fire_pending)
@@ -188,6 +204,59 @@ impl<H: Host, T: Tracker> Tex<H, T> {
     /// [`Self::set_stop_at_candidate`] and `machine::clean_cuts()` on.
     pub fn set_defer_fire(&mut self, on: bool) {
         self.defer_fire = on;
+    }
+
+    /// Cut the SSA build's steps into windows of `every` commands (0: at
+    /// the clean points only, [`Self::clean_point`]): DESIGN 4.3 item 1.
+    /// Only with [`Self::set_stop_at_candidate`] and
+    /// `machine::clean_cuts()` on, as for the deferred fire.
+    pub fn set_window(&mut self, every: u64) {
+        self.window = every;
+    }
+
+    /// The window size [`Self::set_window`] set (0: no windows).
+    #[must_use]
+    pub fn window(&self) -> u64 {
+        self.window
+    }
+
+    /// A window begins here (DESIGN 4.3 item 1): its count starts, and
+    /// no event has happened in it yet. (A pending fire is the input's,
+    /// not the window's: the window begins with it.)
+    pub(crate) fn begin_window(&mut self) {
+        self.window_start = self.commands;
+        self.window_cut = None;
+    }
+
+    /// An event after which the next boundary ends the open window: a
+    /// paragraph's end, a fire, a file level opened or closed (DESIGN
+    /// 4.3 item 1).
+    #[inline]
+    pub(crate) fn window_event(&mut self, e: WindowEvent) {
+        if self.window_cut.is_none() {
+            self.window_cut = Some(e);
+        }
+    }
+
+    /// The event that ends the open window, if one happened (the trace's).
+    #[must_use]
+    pub fn window_cut(&self) -> Option<WindowEvent> {
+        self.window_cut
+    }
+
+    /// Whether the boundary the engine is at ends the open window (DESIGN
+    /// 4.3 item 1): a fire is pending (the next window begins with it),
+    /// or, outside the output routine, an event happened in the window
+    /// or it has run its count of commands. The fields themselves, never
+    /// their accessors: where a window ends is the scheduler's, and no
+    /// read of the window's.
+    pub(crate) fn window_due(&self) -> bool {
+        if self.fire_pending {
+            return true;
+        }
+        !self.output_active
+            && (self.window_cut.is_some()
+                || self.commands.saturating_sub(self.window_start) >= self.window)
     }
 
     /// `big_switch`'s candidate test: the exhausted token lists on top
