@@ -225,14 +225,17 @@ pub fn size(bytes: usize) -> String {
     }
 }
 
-/// A duration as people read it: `38 ms`, `1.23 s`, `2 min 05 s`.
+/// A duration as people read it: `38 ms`, `1.23 s`, `12.3 s`, `2 min
+/// 05 s`.
 #[must_use]
 pub fn secs(d: Duration) -> String {
     let s = d.as_secs_f64();
     if s < 1.0 {
         format!("{:.0} ms", s * 1e3)
-    } else if s < 60.0 {
+    } else if s < 10.0 {
         format!("{s:.2} s")
+    } else if s < 60.0 {
+        format!("{s:.1} s")
     } else {
         let whole = d.as_secs();
         format!("{} min {:02} s", whole / 60, whole % 60)
@@ -311,9 +314,9 @@ struct Run {
     commands: u64,
     total: u64,
     /// The problems of the last build shown (a watch shows what is new),
-    /// and its count of warnings.
+    /// and its counts.
     last: Option<(Vec<String>, Vec<String>)>,
-    last_warnings: Option<usize>,
+    was: Was,
     /// The last full summary (`w` shows it again).
     summary: Option<Summary>,
 }
@@ -344,7 +347,7 @@ impl Renderer {
                 commands: 0,
                 total: 0,
                 last: None,
-                last_warnings: None,
+                was: Was::default(),
                 summary: None,
             }),
             said_watching: std::sync::atomic::AtomicBool::new(false),
@@ -675,7 +678,7 @@ impl Renderer {
                 ran: r.commands.min(r.total),
                 total: r.total,
             };
-            (t, r.last.clone(), r.last_warnings)
+            (t, r.last.clone(), r.was)
         };
         if let Some(rb) = &end.rebuild {
             // (a watch's log: the line first, then what is new)
@@ -697,7 +700,10 @@ impl Renderer {
         {
             let mut r = lock(&self.run);
             r.last = Some(identities(end.summary, s, self.settings.verbose));
-            r.last_warnings = Some(end.summary.warnings());
+            r.was = Was {
+                pages: Some(end.summary.pages),
+                warnings: Some(end.summary.warnings()),
+            };
             r.summary = Some(Summary {
                 errors: end.summary.errors.clone(),
                 groups: end.summary.groups.clone(),
@@ -771,17 +777,26 @@ fn result_line(end: &End, t: &Totals, s: Style) -> String {
     format!("{verb} {}{sep}{}\n", subject(end, s), facts.join(sep))
 }
 
+/// What the last build had: a watch's line says what is not the same.
+#[derive(Clone, Copy, Default)]
+struct Was {
+    pages: Option<usize>,
+    warnings: Option<usize>,
+}
+
 /// A watch's line for a rebuild: `17:03:12 ↻ paper.tex:18 ✓ paper.pdf ·
-/// 18 ms · 12 pages · 0.8% run again`; its warnings if they are not as
+/// 18 ms · 0.8% run again`; its pages and warnings if they are not as
 /// many as the last build's (`was`).
-fn rebuild_line(end: &End, rb: &Rebuild, t: &Totals, was: Option<usize>, s: Style) -> String {
+fn rebuild_line(end: &End, rb: &Rebuild, t: &Totals, was: Was, s: Style) -> String {
     let sep = s.sep();
     let mut facts = Vec::new();
     if end.failed {
         facts.push(s.red(&plural(end.summary.errors.len(), "error", "errors")));
     }
     facts.push(s.bold(&secs(t.elapsed)));
-    facts.push(plural(end.summary.pages, "page", "pages"));
+    if was.pages != Some(end.summary.pages) {
+        facts.push(plural(end.summary.pages, "page", "pages"));
+    }
     if t.passes > 1 {
         facts.push(plural(t.passes, "pass", "passes"));
     }
@@ -798,7 +813,7 @@ fn rebuild_line(end: &End, rb: &Rebuild, t: &Totals, was: Option<usize>, s: Styl
         facts.push(s.dim(&format!("{pct}% run again")));
     }
     let w = end.summary.warnings();
-    if was.is_none_or(|was| was != w) && (w > 0 || was.is_some()) {
+    if was.warnings.is_none_or(|was| was != w) && (w > 0 || was.warnings.is_some()) {
         facts.push(s.yellow(&plural(w, "warning", "warnings")));
     }
     let mark = if end.failed {
@@ -1012,6 +1027,7 @@ mod tests {
         assert_eq!(size(1_300_000), "1.2 MB");
         assert_eq!(secs(Duration::from_millis(38)), "38 ms");
         assert_eq!(secs(Duration::from_millis(1234)), "1.23 s");
+        assert_eq!(secs(Duration::from_millis(12_345)), "12.3 s");
         assert_eq!(secs(Duration::from_secs(125)), "2 min 05 s");
         assert_eq!(plural(1, "page", "pages"), "1 page");
         assert_eq!(plural(1295, "page", "pages"), "1,295 pages");

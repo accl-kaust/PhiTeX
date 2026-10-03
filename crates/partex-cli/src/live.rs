@@ -536,20 +536,19 @@ fn task_line(t: &Task, s: Style, now: Instant, width: usize) -> String {
         let _ = write!(line, "  {tail}");
         line
     };
-    // (the most that fits: the bar shrinks to 10 cells, then facts go
-    // from the end; then the bar)
-    for keep in (0..=facts.len()).rev() {
-        for cells in [24, 16, 10] {
+    // (the bar as wide as the terminal allows, the same from frame to
+    // frame; then the facts that fit, dropped from the end; then no bar)
+    let cells = match width {
+        100.. => 24,
+        70..100 => 16,
+        _ => 10,
+    };
+    for cells in [cells, 0] {
+        for keep in (0..=facts.len()).rev() {
             let line = fit(&facts[..keep], cells);
             if crate::term::width(&line) <= width {
                 return line;
             }
-        }
-    }
-    for keep in (0..=facts.len()).rev() {
-        let line = fit(&facts[..keep], 0);
-        if crate::term::width(&line) <= width {
-            return line;
         }
     }
     fit(&[], 0)
