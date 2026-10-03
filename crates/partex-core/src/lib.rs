@@ -38,6 +38,7 @@ pub mod exec;
 mod flat;
 pub mod host;
 pub mod params;
+pub mod progress;
 mod skipcache;
 pub mod ssa;
 pub mod track;
