@@ -894,16 +894,22 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                     && self.str_eq_str(ux(self.fonts.area[fi]), ux(self.cur_area))
                 {
                     let (size, dsize) = (self.fonts.get(f).size, self.fonts.get(f).design_size);
-                    if s > 0 {
-                        if s == size {
-                            break 'common_ending f;
-                        }
+                    let same = if s > 0 {
+                        s == size
                     } else {
                         self.arith_error = false;
                         let d = self.xn_over_d(dsize, -s, 1000);
-                        if size == d && !self.arith_error {
-                            break 'common_ending f;
+                        size == d && !self.arith_error
+                    };
+                    if same {
+                        // (a font the program has not made by now: a
+                        // rebuild's step run again finding its own older
+                        // run's, or a later step's; loaded here, it is
+                        // made again in its slot, keeping its number)
+                        if !self.tracker.font_visible(f) {
+                            self.remake_font(f);
                         }
+                        break 'common_ending f;
                     }
                 }
             }

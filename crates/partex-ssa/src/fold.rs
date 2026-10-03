@@ -46,6 +46,9 @@ pub struct Step<A> {
     pub reads: Vec<A>,
     /// Which run of the step made its entries (a run again bumps it).
     pub run: u32,
+    /// The serial its latest run began at ([`crate::Runtime::open_step_serial`]):
+    /// what the engine made in an older run of it is not the program's.
+    pub serial: u64,
     /// Whether it is in the fold (a rebuild removes the steps it passes
     /// over when it ends a step elsewhere).
     pub live: bool,
@@ -198,6 +201,7 @@ impl<M: Machine> Fold<M> {
             recs: Vec::new(),
             reads: Vec::new(),
             run: 0,
+            serial: 0,
             live: true,
         });
         self.keys.push(key);

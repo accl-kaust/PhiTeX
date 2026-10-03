@@ -1079,7 +1079,11 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                 // (only the font loaded last has room after it, and the
                 // room is the table's)
                 self.font_table_read();
-                if f == self.fonts.last_loaded() {
+                if self
+                    .tracker
+                    .font_newest(f)
+                    .unwrap_or_else(|| f == self.fonts.last_loaded())
+                {
                     // §580: increase the number of parameters in the last font.
                     loop {
                         if self.fmem_ptr == self.params.font_mem_size {

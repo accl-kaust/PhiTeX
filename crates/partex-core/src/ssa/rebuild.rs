@@ -3508,7 +3508,11 @@ fn run_step<H: Host>(
             .keys()
             .chain(new.keys().filter(|a| !old.contains_key(a)));
         let mut union_same = None;
-        for a in slots.filter(|a| positioned(a)) {
+        // (a font's fields are not placed, their values not built yet,
+        // but one that changed still makes its readers dirty: a step run
+        // again that sets `\hyphenchar` or a `\fontdimen`, an
+        // `\intarray`'s count or entries, is read by later steps)
+        for a in slots.filter(|a| positioned(a) || a.0 == Fam::Font) {
             touched.insert(*a);
             let (o, n) = (old.get(a).copied(), new.get(a).copied());
             if o == n || ((o.is_none() || n.is_none()) && reaching_version(rr, a, key) == o.or(n)) {

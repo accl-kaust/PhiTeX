@@ -420,6 +420,20 @@ pub trait Tracker {
     /// (With [`Tracker::VALUES`].) Table row `row` was written and holds
     /// content version `version` now (made at the write).
     fn row_wrote(&self, _row: Row, _version: u128) {}
+    /// Font slot `f` was made (loaded, expanded, copied) by the run now.
+    fn font_loaded(&self, _f: i32) {}
+    /// Whether loaded font `f` is one the program has made by now, for
+    /// `\font`'s search of the fonts loaded (§1260): a rebuild's step run
+    /// again does not find what a later step, or its own older run, made.
+    fn font_visible(&self, _f: i32) -> bool {
+        true
+    }
+    /// Whether font `f` is the newest the program has made by now (§579:
+    /// only it may grow its parameters), if the tracker knows (`None`:
+    /// the table's last loaded font is).
+    fn font_newest(&self, _f: i32) -> Option<bool> {
+        None
+    }
     /// (With [`Tracker::VALUES`].) Table row `row` holds content version
     /// `version`, stored wholesale past the accessors (a format's load):
     /// its version, not a write of the running call.

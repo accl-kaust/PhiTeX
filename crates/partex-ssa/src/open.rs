@@ -948,6 +948,12 @@ impl<M: Machine> Runtime<M> {
         self.open.step.map(|s| s.0)
     }
 
+    /// The step open now and the serial its run began at, if any.
+    #[must_use]
+    pub fn open_step_serial(&self) -> Option<(StepId, u64)> {
+        self.open.step
+    }
+
     /// The addresses the open step has read from outside it so far.
     pub fn open_step_reads(&self) -> impl Iterator<Item = &M::Addr> {
         self.open.step_reads.iter().map(|r| &r.1)
@@ -970,6 +976,9 @@ impl<M: Machine> Runtime<M> {
         debug_assert!(self.open.step.is_none(), "a step inside a step");
         self.open.serial += 1;
         self.open.step = Some((id, self.open.serial));
+        if let Some(st) = self.fold.steps.get_mut(id as usize) {
+            st.serial = self.open.serial;
+        }
         self.open.step_reads.clear();
         self.open.step_recs.clear();
         self.open.step_began = self.open.clock;
