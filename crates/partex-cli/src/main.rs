@@ -1027,6 +1027,26 @@ fn deliver_effects<T: partex_core::track::Tracker>(tex: &mut Tex<native::NativeH
     }
 }
 
+/// The SSA build's tracker, as the environment sets it up.
+fn ssa_tracker() -> partex_core::ssa::SsaTracker {
+    use partex_core::ssa::{Recorder, SsaTracker};
+    // (records for the steps and the typesetting calls only, DESIGN 4.3
+    // item 2; `=0`: every routine's, and the steps' own reads)
+    let mut tracker = SsaTracker::new(Recorder::new());
+    tracker.set_lean(!std::env::var("PARTEX_SSA_LEAN").is_ok_and(|v| v == "0"));
+    // (the steps' reads and writes timed, for the graph `write_dag` prints)
+    tracker.set_timed(std::env::var_os("PARTEX_SSA_DAG").is_some());
+    // (a rebuild runs this many commands at most: past them it stops, as
+    // one it cannot make, its trace printed)
+    if let Some(b) = std::env::var("PARTEX_SSA_REBUILD_BUDGET")
+        .ok()
+        .and_then(|v| v.parse().ok())
+    {
+        tracker.budget.set(b);
+    }
+    tracker
+}
+
 /// `PARTEX_SSA=1`: the build on the dynamic-SSA runtime (DESIGN.md
 /// §7.17, `partex_core::ssa`), with `PARTEX_SSA_CHECK=1` check mode.
 /// `PARTEX_SSA_REBUILD=<shell command>` runs the command after the cold
@@ -1034,20 +1054,13 @@ fn deliver_effects<T: partex_core::track::Tracker>(tex: &mut Tex<native::NativeH
 /// `PARTEX_SSA_TRACE=<file>` writes the last build's trace there;
 /// `PARTEX_SSA_LEAN=0` records every routine, and each step's own reads.
 fn run_ssa(host: native::NativeHost, params: Params, command_line: &[u8]) -> i32 {
-    use partex_core::ssa::{Recorder, SsaTracker};
     let check = std::env::var("PARTEX_SSA_CHECK").is_ok_and(|v| v == "1");
     let rebuild = std::env::var("PARTEX_SSA_REBUILD").ok();
     let apply = std::env::var("PARTEX_SSA_APPLY").is_ok_and(|v| v == "1");
     let trips = ssa_trips();
     // (BibTeX's and makeindex's last runs, across the builds' trips)
     let mut between = Between::default();
-    // (records for the steps and the typesetting calls only, DESIGN 4.3
-    // item 2; `=0`: every routine's, and the steps' own reads)
-    let mut tracker = SsaTracker::new(Recorder::new());
-    tracker.set_lean(!std::env::var("PARTEX_SSA_LEAN").is_ok_and(|v| v == "0"));
-    // (the steps' reads and writes timed, for the graph `write_dag` prints)
-    tracker.set_timed(std::env::var_os("PARTEX_SSA_DAG").is_some());
-    let mut tex = Tex::new(host, tracker, params);
+    let mut tex = Tex::new(host, ssa_tracker(), params);
     let t0 = std::time::Instant::now();
     let r = partex_core::ssa::run_applying(&mut tex, command_line, check, 0, apply);
     if check {

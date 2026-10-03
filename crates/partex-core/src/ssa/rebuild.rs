@@ -1794,6 +1794,8 @@ pub fn rebuild<H: Host>(tex: &mut Tex<H, SsaTracker>, trace: bool, apply: bool) 
         ..RebuildReport::default()
     };
     let c0 = tex.commands();
+    // (a rebuild past its budget stops: `SsaTracker::budget`)
+    let budget_from = c0;
     let mut dirty = Dirty::default();
     // (a build's trip after the first: its φ is what the trip before
     // stored, DESIGN 3.7, "Trips, as built")
@@ -2109,6 +2111,10 @@ pub fn rebuild<H: Host>(tex: &mut Tex<H, SsaTracker>, trace: bool, apply: bool) 
         loop {
             let c0 = tex.commands();
             let end = run_step(tex, cur, &predict, &input, &mut dirty, &mut rep, &mut srep);
+            if tex.commands() - budget_from > tex.tracker.budget.get() {
+                rep.unsupported = Some("a rebuild past its budget of commands");
+                break;
+            }
             if let Some(t) = target.take() {
                 target = Some(data_edits(tex, &end, t, &mut dirty, &mut rep));
             }

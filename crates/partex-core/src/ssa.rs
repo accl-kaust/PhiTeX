@@ -1176,6 +1176,11 @@ pub struct SsaTracker {
     /// reads of later definitions, and stopped if it made one
     /// ([`Tracker::stop_due`]; `u64::MAX`: none is).
     pub(crate) stop_after: core::cell::Cell<u64>,
+    /// The commands a rebuild runs at most: past them it stops, its
+    /// trace kept, as one it cannot make (`u64::MAX`, the default: no
+    /// limit; the CLI's `PARTEX_SSA_REBUILD_BUDGET`). A host may build
+    /// cold instead.
+    pub budget: core::cell::Cell<u64>,
     /// Large contents loaded, with their versions, by identity: the host
     /// hands out the same `Arc` again for a file as it was, and a step
     /// run again that loads it (the 5 MB font map, at the first page) need
@@ -1296,6 +1301,7 @@ impl SsaTracker {
             lost: core::cell::Cell::new(0),
             timed: false,
             stop_after: core::cell::Cell::new(u64::MAX),
+            budget: core::cell::Cell::new(u64::MAX),
             load_versions: RefCell::new(Vec::new()),
         }
     }
