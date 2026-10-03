@@ -1173,6 +1173,13 @@ pub struct SsaTracker {
     /// record and every step keeps its reads, as in check mode, which
     /// does so either way.
     lean: bool,
+    /// Names placed by name (DESIGN 3.9, "allocators name what they
+    /// allocate by identity"): a control sequence a run makes goes where
+    /// its name probes (`hash.rs`, `id_lookup_probe`), not to the next
+    /// free place, so where it goes does not depend on the names made
+    /// before it, and making it reads no count (`PARTEX_SSA_NAMES=1`;
+    /// off by default).
+    names_by_name: bool,
     /// Writes whose version could not be stored (the recorder was busy).
     pub lost: core::cell::Cell<u64>,
     /// The steps' reads and writes timed by the engine's commands (a
@@ -1293,6 +1300,11 @@ impl SsaTracker {
         self.lean = on;
     }
 
+    /// Place the names a run makes by name ([`SsaTracker::names_by_name`]).
+    pub fn set_names_by_name(&mut self, on: bool) {
+        self.names_by_name = on;
+    }
+
     #[must_use]
     pub fn new(rec: Recorder) -> Self {
         SsaTracker {
@@ -1312,6 +1324,7 @@ impl SsaTracker {
             swstamps: Vec::new(),
             check: false,
             lean: true,
+            names_by_name: false,
             lost: core::cell::Cell::new(0),
             timed: false,
             stop_after: core::cell::Cell::new(u64::MAX),
@@ -2446,6 +2459,12 @@ pub fn run_applying<H: Host>(
     tex.tracker.apply.set(apply);
     // (the files are linked from the steps' effects, DESIGN 7.17.3)
     tex.set_effects(true);
+    // (the names the run makes placed by name: [`SsaTracker::names_by_name`])
+    if tex.tracker.names_by_name {
+        tex.set_cs_by_name(true);
+        tex.set_name_cells(true);
+        tex.set_probe_names(true);
+    }
     // (boxes carry versions, made when each becomes a shared value)
     partex_engine::node::VERSIONS.store(true, core::sync::atomic::Ordering::Relaxed);
     tex.remake_constant_lists();

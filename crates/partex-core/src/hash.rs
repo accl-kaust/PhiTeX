@@ -394,13 +394,14 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             return Ok(UNDEFINED_CONTROL_SEQUENCE);
         }
         if q > EQTB_SIZE {
-            self.hash_high_read();
+            // (the count is the table's capacity alone: where the name goes
+            // is its own, so it is not read as a value, and a name made
+            // depends on no other made before it, DESIGN 3.9's allocators)
             if self.hash_high >= self.params.hash_extra {
                 let n = HASH_SIZE + self.params.hash_extra;
                 return self.overflow(b"hash size", n);
             }
             self.hash_high += 1;
-            self.hash_high_wrote();
         }
         self.name_slot(q, j, l)
     }

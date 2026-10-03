@@ -1086,6 +1086,8 @@ fn ssa_tracker() -> partex_core::ssa::SsaTracker {
     // item 2; `=0`: every routine's, and the steps' own reads)
     let mut tracker = SsaTracker::new(Recorder::new());
     tracker.set_lean(!std::env::var("PARTEX_SSA_LEAN").is_ok_and(|v| v == "0"));
+    // (the names a run makes placed by name, DESIGN 3.9's allocators)
+    tracker.set_names_by_name(std::env::var("PARTEX_SSA_NAMES").is_ok_and(|v| v == "1"));
     // (the steps' reads and writes timed, for the graph `write_dag` prints)
     tracker.set_timed(std::env::var_os("PARTEX_SSA_DAG").is_some());
     // (a rebuild runs this many commands at most: past them it stops, as
