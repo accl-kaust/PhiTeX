@@ -42,6 +42,14 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         let mut match_chr = b'#';
         let mut n = b'0';
         let mut i = 0;
+        // (a character token shown into a string being made goes in as it
+        // is, §59's `print` and §58's `print_char` for `new_string`: what
+        // they would read, the selector and `\newlinechar`, decides
+        // nothing then; a `\pdfliteral`'s text is made so at each ship)
+        let to_string = self.selector() == crate::print::NEW_STRING
+            && !self.special_printing
+            && !self.message_printing
+            && self.diag.as_ref().is_none_or(|d| !d.capturing);
         while i < len && self.tally < l {
             if i == q {
                 self.set_trick_count(); // §320: do magic computation
@@ -57,6 +65,15 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                 let c = t % 0o400;
                 // §294: display the token (m, c).
                 match m {
+                    LEFT_BRACE | RIGHT_BRACE | MATH_SHIFT | TAB_MARK | SUP_MARK | SUB_MARK
+                    | SPACER | LETTER | OTHER_CHAR
+                        if to_string =>
+                    {
+                        if self.pool_ptr < self.pool_size() {
+                            self.append_char(u8::try_from(c).unwrap_or(0));
+                        }
+                        self.tally += 1;
+                    }
                     LEFT_BRACE | RIGHT_BRACE | MATH_SHIFT | TAB_MARK | SUP_MARK | SUB_MARK
                     | SPACER | LETTER | OTHER_CHAR => self.print(c),
                     MAC_PARAM => {

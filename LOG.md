@@ -10937,3 +10937,26 @@ The same profile again (an LTO build with frame pointers, the course's
 work itself: the commands 61% (the ship 33% of it: deflate 20%, the
 page's operators 13%, whatsits 9% of those), the link 8%. The harness:
 14 cases identical in all three modes; the workspace's tests pass.
+
+## 2026-10-03 — A token list shown into a string: its characters straight to the pool (coordinator)
+
+A ship makes each `\pdfliteral`'s text with `tokens_string` (§465's
+`show_token_list` into a new string), and the course's pages have many:
+`tokens_string` was 5.0% of the samples of its word edit and revert.
+For each character token `show_tokens` called `print`, which read the
+selector (tracked), and `print_char`, which read `\newlinechar` (tracked)
+to see whether the character is the new-line one, only to append it to
+the pool. With the selector `new_string` and no special or message
+printing, §59's `print` of a character is its `print_char`, and §58's
+`print_char` appends it and counts it whatever `\newlinechar` is
+(`new_string` > `pseudo`). So `show_tokens` appends such a character
+itself, its `tally` counted; control sequences and the rest are printed
+as before.
+
+The profile again (an LTO build with frame pointers, the course's 10
+word edits and reverts): `tokens_string` 5.0 → 2.6% of the samples,
+`pdf_list_out` 13.2 → 11.0%. The TikZ mock (LTO, instructions per
+keystroke): a word 3.51 → 3.49 M, a `(` 12.04 → 12.01 M, the heading
+23.27 → 23.20 M, the sentence that wraps 18.64 → 18.59 M; the same PDFs.
+The harness: 14 cases identical in all three modes; the workspace's
+tests pass.
