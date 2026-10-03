@@ -11228,3 +11228,19 @@ and their reverts), 281be74 73.41 M instructions a rebuild, now 71.59 M
 (−2.5%), the median rebuild 9.9 → 9.2 ms locally; word edits, 114.62 →
 112.16 M (−2.1%), cycles 96.5 → 93.0 M (one round). The harness: 14
 cases identical in all three modes; the workspace's tests pass.
+
+## 2026-10-03 — A step's predicted reads placed with one lookup each (coordinator)
+
+A step run again is placed at its predicted reads: for each slot its
+last run read, whether a definition at or after the step holds the
+arrays (`later`: a lookup of the slot's definitions, its last live
+entry), then the definition that reaches the step (`reaching`: the
+lookup again, and a search). `Fold::reaching_if_later` does both with
+one lookup, and the placement takes the definition it found
+(`value_of`); the slots added for the save stack and the nest, and a
+dropped run's misses, are placed as before.
+
+Measured: word edits 112.16 → 112.10 M instructions a rebuild, edits of
+the size only 71.59 → 71.58 M; cycles within the runs' noise (a step
+places hundreds of slots). The harness: 14 cases identical in all three
+modes; the workspace's tests pass.

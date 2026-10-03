@@ -15,7 +15,7 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use partex_ssa::Version;
-use partex_ssa::fold::{Fold, StepId};
+use partex_ssa::fold::{Def, Fold, StepId};
 
 use super::{
     Close, Fam, Recorder, SVal, Slot, SsaReport, SsaTracker, StepEffects, TexSsa, Versions,
@@ -1670,7 +1670,19 @@ fn reaching<H: Host>(
     key: u64,
     rep: &mut RebuildReport,
 ) -> Option<SVal> {
-    if let Some(d) = rr.rt.fold.reaching(&a, key) {
+    let d = rr.rt.fold.reaching(&a, key);
+    value_of(tex, rr, a, d, rep)
+}
+
+/// The value definition `d` of `a` made (`None`: the format's).
+fn value_of<H: Host>(
+    tex: &Tex<H, SsaTracker>,
+    rr: &mut Recorder,
+    a: Slot,
+    d: Option<Def>,
+    rep: &mut RebuildReport,
+) -> Option<SVal> {
+    if let Some(d) = d {
         rr.rt.record(d.rec).writes.get(d.ix as usize)?.1.clone()
     } else {
         rep.initial += 1;
@@ -2830,16 +2842,30 @@ fn run_step<H: Host>(
         note(tex, alloc::format!("step {j} begins at {}", input.brief()));
     }
     let c0 = tex.commands();
-    let (key, old, mut next, budget): (u64, BTreeMap<Slot, Version>, Vec<Slot>, u64) = {
+    #[allow(clippy::type_complexity)]
+    let (key, old, mut found, budget): (
+        u64,
+        BTreeMap<Slot, Version>,
+        Vec<(Slot, Option<Def>)>,
+        u64,
+    ) = {
         let r = tex.tracker.rec.borrow();
         let fold = &r.rt.fold;
         let key = fold.steps[j as usize].key;
         let old = defs(&r.rt, &fold.steps[j as usize].recs);
+        // (each with the definition that reaches the step, found where the
+        // test for a later one looked)
         let reads = predict
             .iter()
             .flat_map(|&p| &fold.steps[p as usize].reads)
-            .filter(|a| positioned(a) && later(fold, a, key))
-            .copied()
+            .filter(|a| positioned(a))
+            .filter_map(|a| {
+                if a.0 == Fam::PageNode {
+                    Some((*a, fold.reaching(a, key)))
+                } else {
+                    fold.reaching_if_later(a, key).map(|d| (*a, d))
+                }
+            })
             .collect();
         // (a run past it that read a later definition stops: [`Watch`])
         let last = predict
@@ -2849,6 +2875,7 @@ fn run_step<H: Host>(
         let budget = last.unwrap_or(0).saturating_mul(2).saturating_add(10_000);
         (key, old, reads, budget)
     };
+    let mut next = Vec::new();
     save_stack_whole(tex, key, &mut next, rep);
     nest_whole(tex, key, &mut next);
     let mut set: BTreeSet<Slot> = BTreeSet::new();
@@ -2859,7 +2886,14 @@ fn run_step<H: Host>(
         let vals = {
             let mut r = tex.tracker.rec.borrow_mut();
             let rr = &mut *r;
-            let mut vals = Vec::with_capacity(next.len());
+            let mut vals = Vec::with_capacity(found.len() + next.len());
+            for (a, d) in found.drain(..) {
+                if set.insert(a)
+                    && let Some(v) = value_of(tex, rr, a, d, rep)
+                {
+                    vals.push((a, v));
+                }
+            }
             for a in next.drain(..) {
                 if set.insert(a)
                     && let Some(v) = reaching(tex, rr, a, key, rep)

@@ -441,6 +441,26 @@ impl<M: Machine> Fold<M> {
         v.iter().rev().find(|e| self.live(e)).map(|e| self.def(e))
     }
 
+    /// The definition of `a` that reaches key `key` ([`Fold::reaching`]),
+    /// if a live one is at or after `key` (`None`: none is, and the latest
+    /// reaches it): the test and the search with one lookup of the slot.
+    #[must_use]
+    pub fn reaching_if_later(&self, a: &M::Addr, key: u64) -> Option<Option<Def>> {
+        let v = self.defs.get_by(hash64(a), |k| k.0 == *a)?;
+        let last = v.iter().rev().find(|e| self.live(e))?;
+        if self.key_of(last.step) < key {
+            return None;
+        }
+        let at = first_not_below(v, |x| self.key_of(x.step), key);
+        Some(
+            v[..at]
+                .iter()
+                .rev()
+                .find(|e| self.live(e))
+                .map(|e| self.def(e)),
+        )
+    }
+
     /// The first live definition of `a` after key `key`.
     #[must_use]
     pub fn next_after(&self, a: &M::Addr, key: u64) -> Option<Def> {
