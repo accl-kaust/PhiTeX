@@ -1223,6 +1223,7 @@ impl Edit {
         let d = self.lines_before(f.pos);
         f.data = self.new.clone();
         f.line_from = self.pos(f.line_from);
+        f.call = self.pos(f.call);
         f.pos = self.pos(f.pos);
         f.lines = f.lines.saturating_add_signed(d);
         d
@@ -3501,4 +3502,23 @@ fn run_step<H: Host>(
         .steps
         .end(j)
         .expect("the step's result")
+}
+
+/// Sources' edits, for glyph origins (`srcmap.rs`): each edit's old and
+/// new data and its runs of changed lines' old and new byte ranges.
+pub(crate) type Edits = Vec<(Arc<[u8]>, Arc<[u8]>, Vec<[usize; 4]>)>;
+
+/// The sources' edits from the `k`-th on ([`Edits`]).
+pub(crate) fn edits_from(rec: &Recorder, k: usize) -> Edits {
+    rec.st
+        .steps
+        .edits
+        .get(k..)
+        .unwrap_or_default()
+        .iter()
+        .map(|e| {
+            let hunks = e.hunks.iter().map(|h| [h.of, h.ot, h.nf, h.nt]).collect();
+            (e.old.clone(), e.new.clone(), hunks)
+        })
+        .collect()
 }

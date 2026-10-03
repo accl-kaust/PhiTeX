@@ -45,6 +45,7 @@ use crate::track::{Cell, LineCodes, Output, Row, Tracker, line_tokens};
 mod rebuild;
 mod view;
 
+pub(crate) use rebuild::{Edits, edits_from};
 pub use rebuild::{
     RebuildReport, RerunCheck, Trips, prepare_rebuilds, rebuild, rebuild_log, rebuild_trips,
     rerun_check, settle,

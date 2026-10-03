@@ -6,6 +6,7 @@ mod e2e;
 mod etrip;
 mod mask;
 mod oracle;
+mod origins;
 mod sections;
 mod ssa_edits;
 mod trip;
@@ -24,6 +25,8 @@ commands:
   e2e       compare partex with the oracle engines on end-to-end jobs
   ssa-edits the incremental cases as rebuilds of one SSA process, every stage
             against plain partex (scripts/ssa-edits; its options pass through)
+  origins   check DIR/JOB.origins.jsonl against DIR/JOB.pdf and the sources
+            (`--glyphs`: with glyphs.tex's expectations; `--dump`: each glyph)
   trip      run Knuth's trip test on partex and compare with refs/tex/trip
   etrip     run e-TeX's etrip test on partex and compare with pdfTeX's run
   bench     time partex against pdflatex, record JSON in bench/results/ (--pgf: PGF subset)
@@ -39,6 +42,7 @@ fn main() -> Result<()> {
         Some("oracle") => oracle::run(&workspace_root(), &args[1..]),
         Some("e2e") => e2e::run(&workspace_root(), &args[1..]),
         Some("ssa-edits") => ssa_edits::run(&workspace_root(), &args[1..]),
+        Some("origins") => origins::run(&args[1..]),
         Some("trip") => trip::run(&workspace_root(), &args[1..]),
         Some("etrip") => etrip::run(&workspace_root(), &args[1..]),
         Some("-h" | "--help") | None => {

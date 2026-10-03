@@ -60,6 +60,9 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             && self.cur_input.state == TOKEN_LIST
             && self.cur_input.loc != NULL
             && !self.memo.recording()
+            // (with glyph origins, a list whose tokens carry them, an
+            // argument's, is read a token at a time: `srcmap.rs`)
+            && (self.org.is_none() || self.cur_input.list.as_deref().is_none_or(|l| l.org() == 0))
     }
 
     /// Whether control sequence token `t` is stored as it is read, as

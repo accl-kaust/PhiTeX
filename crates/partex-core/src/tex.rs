@@ -520,6 +520,10 @@ pub struct Tex<H: Host, T: Tracker = Untracked> {
     /// Outputs as values, not yet taken (`effects.rs`); `None`: outputs
     /// go to the host as they are made.
     pub(crate) effects: Option<Vec<crate::effects::Effect>>,
+    /// Glyph origins (`srcmap.rs`, DESIGN 4.4), when they are recorded:
+    /// the table nodes' handles point into, what the walk collects, and
+    /// how the sources' edits move them. `None`: off, and free.
+    pub(crate) org: Option<alloc::boxed::Box<crate::srcmap::OrgState>>,
 }
 
 /// web2c's `const_chk` bounds (merged §11): (inf, sup) per parameter.
@@ -815,6 +819,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             fonts: FontArrays::new(p.font_max),
             diag: p.diagnostics.then(DiagState::default),
             effects: None,
+            org: None,
             params: p,
         }
     }

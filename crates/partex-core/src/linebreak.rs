@@ -82,6 +82,12 @@ impl<H: Host, T: Tracker> ExpandEnv for BreakEnv<'_, H, T> {
         self.0.font_read(i32::from(f.0), field::PARAMS);
         self.0.font_code(i32::from(f.0), code, c)
     }
+    fn origins(&mut self) -> Option<&mut partex_engine::origin::OrgTable> {
+        self.0.org.as_deref_mut().map(|o| &mut o.table)
+    }
+    fn origin_table(&self) -> Option<&partex_engine::origin::OrgTable> {
+        self.0.org.as_deref().map(|o| &o.table)
+    }
     fn get_expand_font(&mut self, f: FontId, e: i32) -> FontId {
         if self.1.is_some() {
             return f;

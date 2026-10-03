@@ -51,6 +51,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
 
     /// §367: expand a nonmacro.
     fn expand_nonmacro(&mut self) -> Result<(), Jump> {
+        self.origin_expand();
         if self.memo.recording() && !Self::memo_expand_ok(self.cur_cmd, self.cur_chr) {
             self.memo.impure_cmd(self.cur_cmd);
         }
@@ -91,6 +92,8 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                 // §368: expand the token after the next token.
                 self.get_token()?;
                 let t = self.cur_tok;
+                // (with glyph origins: `t`'s, before the input moves on)
+                let t_org = self.back_org();
                 self.get_token()?;
                 if self.cur_cmd > MAX_COMMAND {
                     self.expand()?;
@@ -98,7 +101,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                     self.back_input()?;
                 }
                 self.cur_tok = t;
-                self.back_input()?;
+                self.back_input_from(t_org)?;
             }
             NO_EXPAND if self.cur_chr == 1 => {
                 // pdfTeX §394: implement `\pdfprimitive`.
@@ -354,6 +357,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         if T::PROFILE {
             self.tracker.macro_call(self.cur_cs);
         }
+        self.origin_expand();
         let save_scanner_status = self.scanner_status;
         let save_warning_index = self.warning_index;
         self.warning_index = self.cur_cs;
@@ -394,6 +398,8 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                 .unwrap_or(END_MATCH_TOKEN)
         };
         let is_match = |t: i32| (MATCH_TOKEN..=END_MATCH_TOKEN).contains(&t);
+        // (glyph origins: each argument token's, kept with the argument)
+        let on = self.origins_on();
         if info(self, r) != END_MATCH_TOKEN {
             // §391: scan the parameters and make `r` index the end of the
             // parameter part; but return if an illegal \par is detected.
@@ -411,6 +417,9 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             loop {
                 // The argument list (tex.web's `link(temp_head):=null`).
                 self.arg_list.clear();
+                if on {
+                    self.arg_orgs_clear();
+                }
                 self.arg_active = true;
                 let arg = crate::bulk::Dst::Arg;
                 if info(self, r) > MATCH_TOKEN + 255 || info(self, r) < MATCH_TOKEN {
@@ -501,6 +510,9 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                                 par_ends: self.long_state != LONG_CALL,
                             };
                             loop {
+                                if on {
+                                    self.arg_org();
+                                }
                                 self.arg_list.push(self.cur_tok);
                                 // (the group's inside at once, `bulk.rs`)
                                 self.bulk_group(arg, &mut unbalance, how);
@@ -518,6 +530,9 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                                         }
                                     }
                                 }
+                            }
+                            if on {
+                                self.arg_org();
                             }
                             self.arg_list.push(self.cur_tok);
                         } else {
@@ -551,6 +566,9 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                         {
                             continue 'continue_;
                         }
+                        if on {
+                            self.arg_org();
+                        }
                         self.arg_list.push(self.cur_tok);
                     }
                     m += 1;
@@ -567,13 +585,17 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                     let braced = m == 1 && last.is_some_and(|t| t < RIGHT_BRACE_LIMIT);
                     let a = core::mem::take(&mut self.arg_list);
                     // (the argument made a value, in a pooled allocation)
-                    let v = self.pooled_list(|b| {
+                    let mut v = self.pooled_list(|b| {
                         if braced {
                             b.extend_from_slice(&a[1..a.len() - 1]);
                         } else {
                             b.extend_from_slice(&a);
                         }
                     });
+                    if on {
+                        // (its tokens' origins, with it)
+                        self.arg_orgs_give(&mut v, a.len(), braced);
+                    }
                     self.arg_list = a;
                     self.arg_list.clear();
                     self.arg_active = false; // the argument is taken

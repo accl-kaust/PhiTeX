@@ -1567,6 +1567,84 @@ The work, one agent each, on branches `np/<name>` in worktrees under
 `~/code/tmp/`: `windows` (1), `rebuild-cost` (3), `records` (2),
 `link` (4), `aux-loop` (5), `front` (6), `view` (7), `gate` (8).
 
+### 4.4 Source and PDF: glyph origins (2026-10-03)
+
+An editor beside the PDF maps a click on a glyph to the source bytes it
+came from, and back. Its renderer draws one glyph per character code a
+text-showing operator shows, so the origins are defined in that order,
+and both sides line up by construction.
+
+**The API** (`partex_core::srcmap`, its module documentation the
+reference). `Tex::set_origins(true)` before the cold build; after each
+build or rebuild, once linked, `Tex::origins(page) -> Vec<GlyphOrigin>`
+(page 0-based in shipping order, glyph `i` the page's `i`-th code) and
+`Tex::origin_files()` (file id to the name the job asked `read_file`
+for). `GlyphOrigin { file, start, end, synthesized }`: bytes
+`start..end` of the file's current text. The CLI's `PARTEX_ORIGINS=1`
+writes `<job>.origins.jsonl` beside the PDF after each build or rebuild:
+`{"files":[...]}`, then a line per page, `{"page":N,"glyphs":[[file,
+start,end,synth],...]}` (N from 1).
+
+**The order.** Every code `Tj`, `TJ`, `'` and `"` show, in content
+stream order; a form's codes at each `Do` that draws it, again at each
+use, recursively; numbers in a `TJ` array are kerns. A code is a byte in
+a simple font, its `CMap`'s bytes in a Type 0 font (an included page's:
+`Identity-H`/`-V` two, an embedded `CMap` by its codespace ranges, any
+other predefined `CMap` two). Codes no glyph of TeX's made have an entry
+with no source (`file = u32::MAX`): literal text, pdfTeX's fake and
+interword spaces, an included page's text (its forms too).
+`partex_engine::pdftext` is the walk; the `glyphs` e2e job checks every
+page's count against it.
+
+**Where a glyph comes from.** A character read from a file: its bytes
+(`^^` forms whole). An argument's tokens keep their bytes: a macro's
+argument list carries an origin per token (a handle in its
+`TokenList`), through parameter substitution, `back_input` and
+`\expandafter`. A character from a macro body, `\the`, `\number`, a
+counter or `\char` is *synthesized*, its range the call's in the
+innermost file: from the start of the last command taken from that file
+(an expandable one expanded there, or one main control executed) to the
+file's read position (each file level's `call`, kept and mapped through
+edits with the input state). A ligature covers its characters; a break's
+hyphen is synthesized with the range of the character before it; a box
+used again shows the same origins again.
+
+**The side channel.** Origins never enter equality, hashing or any
+version, so a build is the same with them on or off, and the off path
+reads nothing. An `Org` is 64 bits (a data, i.e. one version of a
+file's contents, a start and a length, or an index into long ranges);
+an append-only `OrgTable` holds them, and nodes hold `u32` handles: a
+glyph run's characters are entries `h..h+n` (copy-on-write when a run
+grows away from the table's end), a ligature one entry, a token list
+one per token. `Glyphs` gave a byte of its inline characters for the
+handle (15 a run, not 16), so nodes stay 24 bytes. The ship walk tags
+each drawn item with its handle; the encoder emits a stream's glyph
+list (handles, form markers at `Do`, runs of no-source entries) as it
+writes the stream: kept per page and form in a plain run, and as the
+ship step's effect (`Effect::Origins`, ignored by the link) in SSA mode,
+so a reused step keeps its list and a re-run one makes a new one.
+
+**Incremental.** A reused step's origins name the datas of the text it
+read. Each rebuild's edits (old and new data, the changed lines' byte
+ranges) become maps from a data to its successor, exact outside the
+changed lines and inside them where a line kept its start or end
+(common prefix and suffix); an origin is mapped through the chain when
+asked for and written back, never made again. The `glyphs` job edits
+twice (a comment line inserted before a paragraph, then a paragraph) and
+checks each rebuild's side file and PDF are a cold build's of its text.
+
+**Costs** (the PGF subset, `bench/inputs/pgfsub.tex`: four chapters of
+the manual, 115 pages, a plain run on settled auxiliary files, against
+the branch point built the same way; `perf stat -e instructions:u`).
+Off: 146.90 G instructions against 145.42 G, +1.0% (the checks on the
+token path; wall time within the machine's noise, 29.7 s against
+29.6 s at best), the PDF the same bytes. On: 159.90 G, +10.0%, and the
+peak RSS 132 MB to 187–205 MB for 237,566 glyphs, most of it the
+origins of argument tokens (every token of every argument read from a
+file has an entry); the side file is 4.7 MB. Making argument origins
+compact (a run per argument, its tokens' bytes found again by reading
+the source) is left to do.
+
 ---
 
 ## 5. Performance, observability and the text form

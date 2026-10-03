@@ -1161,7 +1161,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             let ms = self.dimen_par(MATH_SURROUND_CODE);
             self.tail_append(new_math(ms, BEFORE));
             let h = self.mlist_to_hlist(p, TEXT_STYLE, self.mode() > 0)?;
-            crate::build::append_list(self.nodes_mut(), h);
+            self.append_nodes(h);
             self.tail_append(new_math(ms, AFTER));
             self.set_space_factor(1000);
             self.unsave()

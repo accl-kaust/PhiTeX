@@ -154,6 +154,9 @@ pub enum Effect {
         name: Vec<u8>,
         kind: crate::host::FileKind,
     },
+    /// The glyphs a page's or form's content stream shows, with glyph
+    /// origins on (`srcmap.rs`, DESIGN 4.4): no bytes of any file.
+    Origins(crate::srcmap::StreamOrgs),
 }
 
 /// Where text goes.
@@ -880,8 +883,10 @@ fn layout_timed<E: Executor>(
             Effect::Shipping(c) => pages.push(*c),
             Effect::Close(f) => closed.push(*f),
             Effect::Open { file, name, kind } => opened.push((*file, name.clone(), *kind)),
-            // (resolved before: `resolve_numbers`)
-            Effect::ObjRef { .. }
+            // (glyph origins: read by `Tex::origins`, not linked; the rest
+            // resolved before: `resolve_numbers`)
+            Effect::Origins(_)
+            | Effect::ObjRef { .. }
             | Effect::ObjStmRef { .. }
             | Effect::Num(..)
             | Effect::FontLoad(_)
@@ -1072,6 +1077,7 @@ partex_engine::persist_enum!(Effect {
     StreamLength { file },
     Deflate { file, level, parts },
     Open { file, name, kind },
+    Origins(a0),
 });
 
 #[cfg(test)]
@@ -1156,6 +1162,10 @@ mod persist_tests {
                 name: b"x.aux".to_vec(),
                 kind: crate::host::FileKind::Other,
             },
+            Effect::Origins(crate::srcmap::StreamOrgs {
+                form: 4,
+                glyphs: alloc::vec![1, 2, crate::srcmap::FORM | 7].into(),
+            }),
         ];
         let mut kinds = alloc::collections::BTreeSet::new();
         for e in &all {
@@ -1180,9 +1190,10 @@ mod persist_tests {
                 Effect::StreamLength { .. } => 17,
                 Effect::Deflate { .. } => 18,
                 Effect::Open { .. } => 19,
+                Effect::Origins(_) => 20,
             });
         }
-        assert_eq!(kinds.len(), 20);
+        assert_eq!(kinds.len(), 21);
         let mut s = Saver::new();
         all.save(&mut s);
         let bytes = s.into_bytes();

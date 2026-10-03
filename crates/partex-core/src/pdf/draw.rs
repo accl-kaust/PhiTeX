@@ -59,15 +59,18 @@ partex_engine::persist_enum!(Draw {
     EndText
 });
 
-/// A display item with the walk's position when it was asked for.
+/// A display item with the walk's position when it was asked for (and,
+/// with glyph origins on, a character's origin: `srcmap.rs`; not part of
+/// the item's value).
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct Drawn {
     pub h: Scaled,
     pub v: Scaled,
     pub item: Draw,
+    pub org: partex_engine::origin::Side,
 }
 
-partex_engine::persist_struct!(Drawn { h, v, item });
+partex_engine::persist_struct!(Drawn { h, v, item, org });
 
 impl Drawn {
     /// The polynomial `p` (`partex_engine::node::tok_poly_step`'s) with
@@ -183,6 +186,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             h: self.pdf.ship.cur_h,
             v: self.pdf.ship.cur_v,
             item,
+            org: partex_engine::origin::Side(self.origin_cur()),
         };
         if self.pdf.ship.recording && !at_once {
             self.pdf.ship.drawn.push(drawn);
@@ -207,10 +211,22 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         self.pdf.ship.cur_h = d.h;
         self.pdf.ship.cur_v = d.v;
         let r = match &d.item {
-            Draw::Char { f, c } => self.emit_char(*f, *c),
+            Draw::Char { f, c } => {
+                self.origin_emit(d.org.0);
+                self.emit_char(*f, *c)
+            }
             Draw::Rule { x, y, w, h } => self.pdf_set_rule(*x, *y, *w, *h),
-            Draw::Literal { text, mode } => self.emit_literal(text, *mode),
-            Draw::Form { objnum } => self.emit_form(*objnum),
+            Draw::Literal { text, mode } => {
+                // (with glyph origins: the text a literal shows, none's)
+                if self.origins_on() {
+                    self.origin_none(partex_engine::pdftext::simple_codes(text));
+                }
+                self.emit_literal(text, *mode)
+            }
+            Draw::Form { objnum } => {
+                self.origin_form(*objnum);
+                self.emit_form(*objnum)
+            }
             Draw::Image { objnum, dims } => self.emit_image(*objnum, *dims),
             Draw::FakeSpace => self.pdf_insert_fake_space(),
             Draw::EndText => {

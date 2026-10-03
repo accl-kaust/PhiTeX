@@ -72,16 +72,29 @@ pub(crate) const FIL_NEG_GLUE: GlueSpec = GlueSpec {
 }
 .copy();
 
-/// Append `src` to `dst`, keeping glyph runs canonical.
-pub(crate) fn append_list(dst: &mut partex_engine::nodelist::NodeList, src: Vec<Node>) {
+/// Append `src` to `dst`, keeping glyph runs canonical (and, with `t`,
+/// the characters' origins: `srcmap.rs`).
+pub(crate) fn append_list(
+    dst: &mut partex_engine::nodelist::NodeList,
+    src: Vec<Node>,
+    mut t: Option<&mut partex_engine::origin::OrgTable>,
+) {
     let mut src = src.into_iter();
     for n in src.by_ref() {
         match n {
-            Node::Glyphs(g) => {
-                for &c in g.chars() {
-                    dst.push_char(g.font, c);
+            Node::Glyphs(g) => match t.as_deref_mut() {
+                Some(t) => {
+                    for (i, &c) in g.chars().iter().enumerate() {
+                        let o = partex_engine::origin::char_org(t, &g, i);
+                        dst.push_char_org(g.font, c, o, t);
+                    }
                 }
-            }
+                None => {
+                    for &c in g.chars() {
+                        dst.push_char(g.font, c);
+                    }
+                }
+            },
             n => {
                 dst.push(n);
                 break;
@@ -92,6 +105,23 @@ pub(crate) fn append_list(dst: &mut partex_engine::nodelist::NodeList, src: Vec<
 }
 
 impl<H: Host, T: Tracker> Tex<H, T> {
+    /// Append `src` to the current list ([`append_list`]).
+    pub(crate) fn append_nodes(&mut self, src: Vec<Node>) {
+        // (the current list read and written, as `nodes_mut`)
+        let _ = self.nodes_mut();
+        let t = self.org.as_deref_mut().map(|o| &mut o.table);
+        append_list(&mut self.cur_list.list, src, t);
+    }
+
+    /// A single glyph node `n` (made by `new_character`) given origin `o`.
+    pub(crate) fn with_org(&mut self, mut n: Node, o: partex_engine::origin::Org) -> Node {
+        if let Node::Glyphs(g) = &mut n {
+            let h = self.org_handle(o);
+            g.set_org(h);
+        }
+        n
+    }
+
     /// §1060
     pub(crate) fn append_glue(&mut self) -> Result<(), Jump> {
         let (spec, subtype) = self.scan_appended_glue()?;
@@ -770,7 +800,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             } else {
                 core::mem::take(self.split_discards_mut()).into_vec()
             };
-            append_list(self.nodes_mut(), without_margin_kerns(list));
+            self.append_nodes(without_margin_kerns(list));
             return Ok(());
         }
         self.scan_register_num()?;
@@ -800,7 +830,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             let b = self.take_box(self.cur_val).unwrap_or_default();
             Arc::try_unwrap(b).map_or_else(|b| b.list.clone(), |b| b.list)
         };
-        append_list(self.nodes_mut(), without_margin_kerns(list));
+        self.append_nodes(without_margin_kerns(list));
         Ok(())
     }
 
@@ -822,12 +852,15 @@ impl<H: Host, T: Tracker> Tex<H, T> {
     pub(crate) fn append_discretionary(&mut self) -> Result<(), Jump> {
         let mut d = Disc::default();
         if self.cur_chr == 1 {
+            // (`\-`'s hyphen: synthesized, the command's range)
+            let o = self.char_num_org();
             let f = self.cur_font();
             self.font_read(f, crate::track::font::HYPHEN_CHAR);
             let c = self.fonts.hyphen_char[crate::fonts::fx(f)];
             if (0..256).contains(&c)
                 && let Some(p) = self.new_character(f, c)?
             {
+                let p = self.with_org(p, o);
                 d.pre.push(p);
             }
             self.tail_append(Node::Disc(Box::new(d)));
@@ -916,7 +949,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                 if n > MAX_QUARTERWORD {
                     // tex.web keeps the list but not its length.
                     if let Some(replaced) = self.tail_disc(|d| core::mem::take(&mut d.replace)) {
-                        append_list(self.nodes_mut(), replaced);
+                        self.append_nodes(replaced);
                     }
                     self.print_err(b"Discretionary list is too long");
                     self.help(&[
@@ -940,11 +973,14 @@ impl<H: Host, T: Tracker> Tex<H, T> {
 
     /// §1123
     pub(crate) fn make_accent(&mut self) -> Result<(), Jump> {
+        // (the accent's origin: synthesized, `\accent`'s range)
+        let accent_org = self.char_num_org();
         self.scan_char_num()?;
         let mut f = self.cur_font();
-        let Some(mut p) = self.new_character(f, self.cur_val)? else {
+        let Some(p) = self.new_character(f, self.cur_val)? else {
             return Ok(());
         };
+        let mut p = self.with_org(p, accent_org);
         let x = self.font_param(X_HEIGHT_CODE, f);
         let s = f64::from(self.font_param(SLANT_CODE, f)) / 65536.0;
         let a = self.char_metrics(f, self.cur_val).width;
@@ -954,18 +990,21 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         let mut q = None;
         f = self.cur_font();
         if self.cur_cmd == LETTER || self.cur_cmd == OTHER_CHAR || self.cur_cmd == CHAR_GIVEN {
+            let o = self.char_org();
             q = self
                 .new_character(f, self.cur_chr)?
-                .map(|n| (n, self.cur_chr));
+                .map(|n| (n, self.cur_chr, o));
         } else if self.cur_cmd == CHAR_NUM {
+            let o = self.char_num_org();
             self.scan_char_num()?;
             q = self
                 .new_character(f, self.cur_val)?
-                .map(|n| (n, self.cur_val));
+                .map(|n| (n, self.cur_val, o));
         } else {
             self.back_input()?;
         }
-        if let Some((q, qc)) = q {
+        if let Some((q, qc, qo)) = q {
+            let q = self.with_org(q, qo);
             // §1125: append the accent with appropriate kerns, then set
             // `p:=q`.
             let t = f64::from(self.font_param(SLANT_CODE, f)) / 65536.0;
@@ -979,19 +1018,18 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             }
             let delta: Scaled =
                 zround(f64::from(w - a) / 2.0 + f64::from(h) * t - f64::from(x) * s);
-            let list = self.nodes_mut();
-            list.push(Node::Kern {
+            self.nodes_mut().push(Node::Kern {
                 width: delta,
                 subtype: subtype(ACC_KERN),
             });
-            append_list(list, alloc::vec![p]);
-            list.push(Node::Kern {
+            self.append_nodes(alloc::vec![p]);
+            self.nodes_mut().push(Node::Kern {
                 width: -a - delta,
                 subtype: subtype(ACC_KERN),
             });
             p = q;
         }
-        append_list(self.nodes_mut(), alloc::vec![p]);
+        self.append_nodes(alloc::vec![p]);
         self.set_space_factor(1000);
         Ok(())
     }

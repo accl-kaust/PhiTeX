@@ -516,6 +516,12 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         self.pdf_print_resname_prefix();
         self.pdf.out.print_ln(b" Do");
         self.pdf.out.print_ln(b"Q");
+        // (with glyph origins: the codes an included page shows, none's)
+        if self.origins_on()
+            && let Some(p) = &image.pdf
+        {
+            self.origin_image(&image.data, p.page);
+        }
         Ok(())
     }
 

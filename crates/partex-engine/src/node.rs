@@ -104,11 +104,17 @@ pub const RUNNING: Scaled = -0o10000000000;
 /// character). Lists keep runs canonical: a maximal sequence of same-font
 /// characters is split into runs of [`Glyphs::CAP`] from its start (see
 /// [`push_char`]), so structural equality and hashing are character-level.
+///
+/// The run also holds a handle to its characters' origins
+/// (`origin::OrgTable`, DESIGN 4.4), outside its value: it is neither
+/// compared nor hashed.
 #[derive(Clone, Copy)]
 pub struct Glyphs {
     pub font: FontId,
     len: u8,
     chars: [u8; Glyphs::CAP],
+    /// The origins' handle, in halves (the node keeps an alignment of 2).
+    org: [u16; 2],
 }
 
 /// By the characters in the run: bytes past `len` are left over from
@@ -129,18 +135,43 @@ impl core::hash::Hash for Glyphs {
 }
 
 impl Glyphs {
-    /// Characters per run (what fits in a 24-byte node).
-    pub const CAP: usize = 19;
+    /// Characters per run (what fits in a 24-byte node beside the
+    /// origins' handle).
+    pub const CAP: usize = 15;
 
     #[must_use]
     pub fn one(font: FontId, ch: u8) -> Glyphs {
+        Self::one_at(font, ch, 0)
+    }
+
+    /// A run of `ch` whose origins are at handle `org`.
+    #[must_use]
+    pub fn one_at(font: FontId, ch: u8, org: u32) -> Glyphs {
         let mut chars = [0; Glyphs::CAP];
         chars[0] = ch;
         Glyphs {
             font,
             len: 1,
             chars,
+            org: Self::halves(org),
         }
+    }
+
+    fn halves(h: u32) -> [u16; 2] {
+        [(h & 0xffff) as u16, (h >> 16) as u16]
+    }
+
+    /// The handle of the run's origins (0: none).
+    #[inline]
+    #[must_use]
+    pub fn org(&self) -> u32 {
+        u32::from(self.org[0]) | (u32::from(self.org[1]) << 16)
+    }
+
+    /// Set the handle of the run's origins.
+    #[inline]
+    pub fn set_org(&mut self, h: u32) {
+        self.org = Self::halves(h);
     }
 
     #[must_use]
@@ -325,6 +356,9 @@ pub struct TokenList {
     toks: Vec<i32>,
     protected: bool,
     ver: u128,
+    /// The handle of its tokens' origins (`origin::OrgTable`, DESIGN 4.4:
+    /// a macro argument read from a file; 0: none). Not part of its value.
+    org: u32,
 }
 
 /// A shared token list.
@@ -371,7 +405,21 @@ impl TokenList {
             toks,
             protected,
             ver,
+            org: 0,
         }
+    }
+
+    /// The handle of the tokens' origins (0: none): token `i`'s is entry
+    /// `org + i`.
+    #[inline]
+    #[must_use]
+    pub fn org(&self) -> u32 {
+        self.org
+    }
+
+    /// Set the handle of the tokens' origins.
+    pub fn set_org(&mut self, h: u32) {
+        self.org = h;
     }
 
     /// A shared list of `toks`.
@@ -419,6 +467,7 @@ impl TokenList {
     pub fn remake(&mut self, protected: bool) {
         self.protected = protected;
         self.ver = 0;
+        self.org = 0;
     }
 }
 
@@ -537,6 +586,9 @@ pub struct Ligature {
     pub subtype: u8,
     /// The characters the ligature stands for.
     pub original: Vec<u8>,
+    /// The handle of its origin, the range of all its characters
+    /// (`origin::OrgTable`; not part of its value).
+    pub org: crate::origin::Side,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Hash)]
@@ -932,7 +984,7 @@ mod tests {
     fn glyph_runs_are_canonical() {
         let (a, b) = (FontId(1), FontId(2));
         let mut list = Vec::new();
-        for i in 0..45u8 {
+        for i in 0..44u8 {
             push_char(&mut list, a, i);
         }
         push_char(&mut list, b, 7);
@@ -944,7 +996,7 @@ mod tests {
                 _ => 0,
             })
             .collect();
-        assert_eq!(lens, [19, 19, 7, 1, 1]);
+        assert_eq!(lens, [15, 15, 14, 1, 1]);
         assert!(is_canonical(&list));
         list.swap(0, 2);
         assert!(!is_canonical(&list));

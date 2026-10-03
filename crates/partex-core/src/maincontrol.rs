@@ -8,6 +8,7 @@ use alloc::vec::Vec;
 use partex_engine::font::{Font, Glyph, LigKern, Tag};
 use partex_engine::math::{Item, Kind, Noad};
 use partex_engine::node::{GlueSpec, Ligature, Node, Whatsit};
+use partex_engine::origin::{Org, Side};
 
 use crate::build::{LEADER_FLAG, norm_min};
 use crate::cmds::*;
@@ -41,18 +42,19 @@ enum L {
 
 /// §1034: an entry of `lig_stack`: the lookahead character (a character
 /// node in tex.web), or a ligature item made by a `|=:` instruction, with
-/// the lookahead character it replaced (`lig_ptr`), if any.
+/// the lookahead character it replaced (`lig_ptr`), if any; each
+/// character with its origin (`srcmap.rs`; none when origins are off).
 #[derive(Clone, Copy)]
 enum Lig {
-    Char(u8),
-    Item { ch: i32, ptr: Option<u8> },
+    Char(u8, Org),
+    Item { ch: i32, ptr: Option<(u8, Org)> },
 }
 
 impl Lig {
     /// `character(lig_stack)`
     fn ch(self) -> i32 {
         match self {
-            Lig::Char(c) => i32::from(c),
+            Lig::Char(c, _) => i32::from(c),
             Lig::Item { ch, .. } => ch,
         }
     }
@@ -78,6 +80,9 @@ struct Main {
     ligature_present: bool,
     lft_hit: bool,
     rt_hit: bool,
+    /// The origin of the character read last (a ligature with no
+    /// characters of its own takes it).
+    last_org: Org,
 }
 
 impl<H: Host, T: Tracker> Tex<H, T> {
@@ -104,6 +109,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             ligature_present: false,
             lft_hit: false,
             rt_hit: false,
+            last_org: Org::NONE,
         };
         let mut l = L::BigSwitch;
         loop {
@@ -190,6 +196,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                     // (macros expanded right here are memo candidates:
                     // nothing else is collecting their tokens)
                     self.memo.top = true;
+                    self.origin_fetch();
                     let r = self.get_command();
                     self.memo.top = false;
                     r?;
@@ -244,7 +251,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                     }
                 }
                 L::Move1 => {
-                    if let Some(Lig::Char(_)) = m.lig_stack.last() {
+                    if let Some(Lig::Char(..)) = m.lig_stack.last() {
                         L::Move2
                     } else {
                         L::MoveLig
@@ -263,8 +270,8 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                     };
                     if exists {
                         // `main_loop_lookahead` is next
-                        if let Some(Lig::Char(c)) = m.lig_stack.pop() {
-                            self.nodes_mut().push_char(font_id(m.f), c);
+                        if let Some(Lig::Char(c, o)) = m.lig_stack.pop() {
+                            self.push_glyph(font_id(m.f), c, o);
                             m.after_q += 1;
                         }
                         L::Lookahead
@@ -280,9 +287,9 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                         Some(Lig::Item { ptr, .. }) => ptr,
                         _ => None,
                     };
-                    if let Some(c) = main_p {
+                    if let Some((c, o)) = main_p {
                         // append a single character
-                        self.nodes_mut().push_char(font_id(m.f), c);
+                        self.push_glyph(font_id(m.f), c, o);
                         m.after_q += 1;
                     }
                     m.i = self.char_metrics(m.f, m.cur_l);
@@ -302,6 +309,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                 L::Lookahead => {
                     // §1038: look ahead for another character, or leave
                     // `lig_stack` empty if there's none there.
+                    self.origin_fetch();
                     self.get_next()?; // set only `cur_cmd` and `cur_chr`, for speed
                     if matches!(self.cur_cmd, LETTER | OTHER_CHAR | CHAR_GIVEN) {
                         L::Lookahead1
@@ -310,6 +318,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                         if matches!(self.cur_cmd, LETTER | OTHER_CHAR | CHAR_GIVEN) {
                             L::Lookahead1
                         } else if self.cur_cmd == CHAR_NUM {
+                            self.char_num_pending();
                             self.scan_char_num()?;
                             self.cur_chr = self.cur_val;
                             L::Lookahead1
@@ -326,8 +335,11 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                 L::Lookahead1 => {
                     self.adjust_space_factor();
                     m.lig_stack.clear();
-                    m.lig_stack
-                        .push(Lig::Char(u8::try_from(self.cur_chr).unwrap_or(0)));
+                    m.last_org = self.char_org();
+                    m.lig_stack.push(Lig::Char(
+                        u8::try_from(self.cur_chr).unwrap_or(0),
+                        m.last_org,
+                    ));
                     m.cur_r = self.cur_chr;
                     if m.cur_r == m.false_bchar {
                         m.cur_r = NON_CHAR; // this prevents spurious ligatures
@@ -436,8 +448,11 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             self.fix_language();
         }
         m.lig_stack.clear();
-        m.lig_stack
-            .push(Lig::Char(u8::try_from(self.cur_chr).unwrap_or(0)));
+        m.last_org = self.char_org();
+        m.lig_stack.push(Lig::Char(
+            u8::try_from(self.cur_chr).unwrap_or(0),
+            m.last_org,
+        ));
         m.cur_l = self.cur_chr;
         m.after_q = 0; // `cur_q:=tail`
         let label = if self.cancel_boundary {
@@ -458,11 +473,17 @@ impl<H: Host, T: Tracker> Tex<H, T> {
     /// §1035: `pack_lig(z)`: the characters after `cur_q` become a
     /// ligature.
     fn pack_lig(&mut self, m: &mut Main, z: bool) {
+        let on = self.origins_on();
+        // (the entries of the characters' origins, with origins on)
+        let mut entries: Vec<u32> = Vec::new();
         let list = self.nodes_mut();
         let mut original = Vec::with_capacity(m.after_q);
         for _ in 0..m.after_q {
             match list.last() {
                 Some(Node::Glyphs(g)) if g.chars().len() > 1 => {
+                    if on && g.org() != 0 {
+                        entries.push(g.org() + u32::try_from(g.chars().len() - 1).unwrap_or(0));
+                    }
                     // (the run made again, one character shorter)
                     let c = list.edit_last(|n| match n {
                         Node::Glyphs(g) => g.pop(),
@@ -471,6 +492,9 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                     original.extend(c.flatten());
                 }
                 Some(Node::Glyphs(g)) => {
+                    if on && g.org() != 0 {
+                        entries.push(g.org());
+                    }
                     original.push(g.chars()[0]);
                     list.pop();
                 }
@@ -478,6 +502,20 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             }
         }
         original.reverse();
+        let org = if on {
+            let mut u = Org::NONE;
+            for e in entries {
+                let o = self.org_at(e);
+                u = self.org_union(u, o);
+            }
+            if u.is_none() {
+                u = m.last_org;
+            }
+            Side(self.org_handle(u))
+        } else {
+            Side(0)
+        };
+        let list = self.nodes_mut();
         let mut subtype = 0;
         if m.lft_hit {
             subtype = 2;
@@ -492,6 +530,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             ch: u8::try_from(m.cur_l).unwrap_or(0),
             subtype,
             original,
+            org,
         })));
         m.after_q = 0; // the ligature is not a character
         m.ligature_present = false;
@@ -555,12 +594,14 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                         m.lig_stack.push(Lig::Item { ch: rem, ptr: None });
                         m.bchar = NON_CHAR;
                     }
-                    Some(top @ Lig::Char(_)) => {
+                    Some(top @ Lig::Char(..)) => {
                         // `link(lig_stack)=null`
-                        let Lig::Char(c) = *top else { unreachable!() };
+                        let Lig::Char(c, o) = *top else {
+                            unreachable!()
+                        };
                         *top = Lig::Item {
                             ch: rem,
-                            ptr: Some(c),
+                            ptr: Some((c, o)),
                         };
                     }
                     Some(Lig::Item { ch, .. }) => *ch = rem,
@@ -656,6 +697,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         match (mode, self.cur_cmd) {
             (HMODE, LETTER | OTHER_CHAR | CHAR_GIVEN) => return Ok(Some(L::MainLoop)),
             (HMODE, CHAR_NUM) => {
+                self.char_num_pending();
                 self.scan_char_num()?;
                 self.cur_chr = self.cur_val;
                 return Ok(Some(L::MainLoop));

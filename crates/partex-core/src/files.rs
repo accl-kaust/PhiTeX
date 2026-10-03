@@ -546,16 +546,18 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                     found.clone()
                 };
                 full_name = found;
-                let name: alloc::sync::Arc<[u8]> = full_name.as_slice().into();
+                let found_name: alloc::sync::Arc<[u8]> = full_name.as_slice().into();
                 if T::LINES {
                     self.tracker.lines_open(&f.contents);
                     if self.log_lines {
-                        self.line_log.push((name.clone(), u32::MAX));
+                        self.line_log.push((found_name.clone(), u32::MAX));
                     }
                 }
+                // (glyph origins name the file as it was asked for)
+                self.origin_file_opened(&name, &full_name, &f.contents);
                 self.input_file[self.in_open] = Some(AlphaFile {
                     data: f.contents,
-                    name,
+                    name: found_name,
                     ..AlphaFile::default()
                 });
                 break;
