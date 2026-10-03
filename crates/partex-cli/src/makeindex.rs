@@ -5,6 +5,7 @@
 
 use std::collections::HashMap;
 use std::io::{Read, Write};
+use std::sync::Arc;
 
 use partex_kpse::{Format, Kpse};
 use partex_makeindex::Files;
@@ -50,7 +51,7 @@ pub struct KpseFiles {
     /// Files read from these contents, by path, not from disk: the `.idx`
     /// streams the build just wrote, which an SSA build holds in memory
     /// while it rewrites the files (DESIGN 3.7, "Trips, as built").
-    served: HashMap<Vec<u8>, Vec<u8>>,
+    served: HashMap<Vec<u8>, Arc<[u8]>>,
 }
 
 fn read_file(name: &[u8]) -> Option<Vec<u8>> {
@@ -84,7 +85,7 @@ impl KpseFiles {
     /// The file at `name`: served, or read from disk.
     fn read_at(&self, name: &[u8]) -> Option<Vec<u8>> {
         match self.served.get(name) {
-            Some(d) => Some(d.clone()),
+            Some(d) => Some(d.to_vec()),
             None => read_file(name),
         }
     }
@@ -92,7 +93,10 @@ impl KpseFiles {
     /// Whether every lookup in `read` finds the same now.
     fn unchanged(&mut self, read: &[Lookup]) -> bool {
         read.iter().all(|l| match l {
-            Lookup::Read(n, was) => self.read_at(n) == *was,
+            Lookup::Read(n, was) => match self.served.get(n) {
+                Some(d) => was.as_deref() == Some(&d[..]),
+                None => read_file(n) == *was,
+            },
             Lookup::Readable(n, was) => readable(n) == *was,
             Lookup::Style(n, was) => self.find_style(n) == *was,
         })
@@ -188,9 +192,9 @@ pub struct Runs {
 /// unless what its last run read is unchanged. The `.idx` files are read
 /// from `idxes`, by path (the others, from disk). A report line for each
 /// run.
-pub fn after_pass(runs: &mut Runs, idxes: &[(Vec<u8>, Vec<u8>)]) -> Vec<String> {
+pub fn after_pass(runs: &mut Runs, idxes: &[(Vec<u8>, Arc<[u8]>)]) -> Vec<String> {
     let mut reports = Vec::new();
-    let served: HashMap<Vec<u8>, Vec<u8>> = idxes.iter().cloned().collect();
+    let served: HashMap<Vec<u8>, Arc<[u8]>> = idxes.iter().cloned().collect();
     for (name, _) in idxes {
         let files = runs.files.get_or_insert_with(|| KpseFiles {
             kpse: crate::kpse_instance("makeindex", ""),

@@ -10960,3 +10960,99 @@ keystroke): a word 3.51 → 3.49 M, a `(` 12.04 → 12.01 M, the heading
 23.27 → 23.20 M, the sentence that wraps 18.64 → 18.59 M; the same PDFs.
 The harness: 14 cases identical in all three modes; the workspace's
 tests pass.
+
+## 2026-10-03 — A page's stream compressed on a thread of its own: slower on a desktop, not kept (coordinator)
+
+A word edit compresses its page again (the course's: 72 KB at level 9,
+about 4 ms, in `pdf_end_stream` after `pdf_list_out` made the page's
+operators, 2–2.5 ms). Since zlib's output does not depend on how its
+input is split, the stream's pieces could be compressed as `pdf_flush`
+hands them on (16 KiB), on another thread, the stream's end waiting for
+the rest only. Tried in full: a host feed for a stream's bytes (`PdfOut`
+holding it, not state), a deflate thread that compares the pieces with
+the kept streams while they are those streams' first bytes, then goes on
+from the last state within them in pieces of 4 KiB, and at the stream's
+end compresses the whole itself if what it was given is not it. Its
+answers were zlib's output in every case tested (pieces of 100 B to
+100 KB, gaps, other bytes at the end, streams left before their end,
+edits early, mid-piece, at a piece's end and late; levels 1, 6, 9); the
+harness was identical in its three modes; the course's PDFs were the
+same at all 13 checkpoints.
+
+It was slower. On this machine (a 12-core Haswell Xeon at 1.2–3.1 GHz,
+the `schedutil` governor, load about 2.5), the course's rebuilds took
+7–15 ms more with the thread than without, the same binary
+(`PARTEX_DEFLATE_THREAD=0/1`, two rounds alternating): edits 24–37 →
+30–50 ms, reverts 17–25 → 23–34 ms. A log of the waits: the stream's end
+waited 16–17.6 ms for the thread, whose own end took 0.9 ms, so the
+thread spent about 16 ms compressing what takes about 4 ms on the main
+thread. A thread busy a few milliseconds per keystroke on an otherwise
+idle core runs at that core's low clock, while the main thread, busy all
+along, runs at its high one. Each hand-over also costs 60–300 µs of
+wake-up: the TikZ mock's small streams were answered in 5–180 µs and
+waited for 63–313 µs. Latency is what users feel on the machines they
+have, so a thread for a few milliseconds of work per keystroke is not
+kept (not committed). On a governor that keeps the clock up (servers, a
+`performance` setting) it would save the overlap, about 2 ms of the
+course's word edit.
+
+## 2026-10-03 — A rebuild's walks over every file, stored name and ship, cut to what changed (coordinator)
+
+DESIGN 4.3 item 3: nothing in a rebuild walks every step, record, file,
+chunk or slot. The course's word edit's profile (an LTO build with
+frame pointers, its 10 word edits and reverts) still had four such
+walks:
+- The load check (`NativeHost::unchanged`, 5.2% of the samples): for
+  every file the build loaded, its lookup found by `(name, kind)` (the
+  name copied, hashed with SipHash), then `inotify::Watcher::quiet` for
+  each directory its lookup tried, each found by its path (SipHash), and
+  in a directory that ever had an event (the document's own) each
+  candidate's name split off and looked up. Now the host numbers the
+  directories its lookups tried as it records them, and the watcher keeps
+  each directory's state by that number: when it was watched from, its
+  last event, and each name's last event. A directory with no event since
+  the check is quiet whatever names are asked about, without looking at
+  them. The lookups are found by name with no copy (a name's kinds kept
+  together), in maps with phitex-doc's word-at-a-time hasher. And a
+  directory that is not there cannot be watched: with
+  `-output-directory`, every `\input` tries the output directory first,
+  so the course's 218 `figs/data/*.csv` files each tried `out/figs/data`,
+  and their lookups, never quiet, were checked by their stamps (a `stat`
+  of each file found) at every rebuild: 227 lookups of the course's. A
+  directory not there is now watched through the nearest one above it
+  that is, for the name that would make it (`out`, for `figs`): 6
+  lookups are checked by their stamps now (the three stored names, the
+  edited file under its two names, and a font's VF).
+- `Steps::trip_end` (1.8%): after each trip, each stored name's value
+  (`.aux`, `.toc`, `.out`) made again from every step's stores, sorted,
+  its lines joined, and compared with the last. Now each stored name
+  counts its store changes (a step's run that stored to it otherwise than
+  its last run did, a step that stored to it leaving the fold), and the
+  value made is kept with that count: made again only when the count
+  moved, and kept as the bytes the last trip read when equal, so the φ's
+  bytes stay shared (and `phi_seeds` finds its version by identity).
+- The tools between trips (about 1%): the command line copied each
+  `.aux` and `.idx` stream to hand it to BibTeX and makeindex, and BibTeX's
+  check copied each again, scanned it for `\bibdata`, and made its digest.
+  Now they are handed on shared (`Arc`), and the scan and the digest are
+  kept with the contents they were made of.
+- `glyph_union_now` (1.7%): when a ship's glyphs changed, every ship's row
+  (296) looked up again. Now the rows whose definitions a step's run or
+  removal changed are noted, and only those are counted again; rows that
+  appear or go (a row past the last counted, a row no longer defined)
+  count them all again, as does a row whose value is not kept. And the
+  union's version, made again whenever a row changed, made each font's
+  set from its 256 counts (1% of the samples once the rows were counted
+  by change): each font's set is kept as its counts change. Debug builds
+  check the count against the union made whole.
+
+The course (LTO, 6 word edits each reverted, `perf stat` over the
+rebuilds, two rounds alternating with 8832cc6): instructions per rebuild
+124.66/124.65 → 122.01/122.02 M (−2.1%), cycles 101.2/101.6 →
+95.4/95.2 M (−6.2%: the walks were cache misses and `stat`s more than
+instructions); the revert's median 24.6/24.5 → 22.3/22.9 ms, the edit's
+36.9/34.8 → 34.5/34.8 ms (this machine, loaded). A profile before the
+last two (the directories not there, the fonts' sets): the load check
+5.2 → 3.8% of the samples, SipHash 1.8 → 0, `trip_end` 1.8 → 0, the
+trips' end 3.5 → 1.2%, the glyph union 1.7 → 1.2%. The harness: 14
+cases identical in all three modes; the workspace's tests pass.

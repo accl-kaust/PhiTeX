@@ -52,9 +52,14 @@ pub struct NativeHost {
 struct Seen {
     /// What each path held when last read, with its stamp taken just
     /// before: none for a file whose times were under 2 s old then.
-    files: HashMap<Vec<u8>, (Stamp, std::sync::Arc<[u8]>)>,
-    /// Each name's last lookup, by kind.
-    lookups: HashMap<(Vec<u8>, FileKind), Lookup>,
+    files: phitex_doc::FxMap<Vec<u8>, (Stamp, std::sync::Arc<[u8]>)>,
+    /// Each name's last lookup, by kind (a name is looked up as one kind,
+    /// mostly).
+    lookups: phitex_doc::FxMap<Vec<u8>, Vec<(FileKind, Lookup)>>,
+    /// The directories of those, numbered (as `crate::inotify` knows
+    /// them), and their names by number.
+    dir_ids: phitex_doc::FxMap<Vec<u8>, u32>,
+    dir_names: Vec<Vec<u8>>,
     /// The directories of those, watched (`crate::inotify`): a load none
     /// of whose names had an event since it was last found as it was
     /// (`Lookup::checked`) needs no `stat`; `unwatched`: there is no
@@ -63,21 +68,44 @@ struct Seen {
     unwatched: bool,
 }
 
-/// A lookup: the path it found, and its trail, the candidates it tried
-/// and did not find, by directory.
+impl Seen {
+    /// Directory `d`'s number.
+    fn dir_id(&mut self, d: &[u8]) -> u32 {
+        if let Some(&id) = self.dir_ids.get(d) {
+            return id;
+        }
+        let id = u32::try_from(self.dir_names.len()).unwrap_or(u32::MAX);
+        self.dir_ids.insert(d.to_vec(), id);
+        self.dir_names.push(d.to_vec());
+        id
+    }
+
+    /// Name `name`'s last lookup as `kind`.
+    fn lookup(&mut self, name: &[u8], kind: FileKind) -> Option<&mut Lookup> {
+        let ks = self.lookups.get_mut(name)?;
+        ks.iter_mut().find(|(k, _)| *k == kind).map(|(_, l)| l)
+    }
+}
+
+/// A lookup: the path it found (and its directory's number), and its
+/// trail, the candidates it tried and did not find, by directory.
 struct Lookup {
-    found: Option<Vec<u8>>,
+    found: Option<(Vec<u8>, u32)>,
     trail: Vec<Missed>,
     /// When `unchanged` last found it as it was (the watcher's count).
     checked: Option<u64>,
 }
 
-/// The candidates a lookup tried in one directory and did not find, and
-/// the directory's stamp after the search (none for a directory that is
-/// not there), `kept` if it was over 2 s old: while the directory has
-/// that stamp, none of them is there.
+/// The candidates a lookup tried in one directory (by its number) and
+/// did not find, and the directory's stamp after the search (none for a
+/// directory that is not there), `kept` if it was over 2 s old: while
+/// the directory has that stamp, none of them is there. For a directory
+/// that is not there, `anchor`: the nearest one above it that is, and
+/// the name in it that would make it be (`out/figs/data`: `out` and
+/// `figs`), which the watcher watches for it.
 struct Missed {
-    dir: Vec<u8>,
+    dir: u32,
+    anchor: Option<(u32, Vec<u8>)>,
     stamp: Option<Stamp>,
     kept: bool,
     files: Vec<Vec<u8>>,
@@ -300,6 +328,22 @@ fn quiet(st: &Stamp) -> bool {
 }
 
 /// The stamp of the directory (or file) at `p`, if there is one.
+/// The nearest directory above `d` (one that is not there) that is
+/// there, and the name in it of the one below it on the way to `d`.
+fn anchor(d: &[u8]) -> Option<(&[u8], &[u8])> {
+    let mut d = d;
+    loop {
+        let (up, name) = crate::inotify::split(d);
+        if up == d {
+            return None;
+        }
+        if dir_stamp(up).is_some() {
+            return Some((up, name));
+        }
+        d = up;
+    }
+}
+
 fn dir_stamp(p: &[u8]) -> Option<Stamp> {
     use std::os::unix::fs::MetadataExt;
     let m = std::fs::metadata(path(p)).ok()?;
@@ -374,9 +418,10 @@ impl Host for NativeHost {
         let Some(seen) = &mut self.seen else {
             return found.ok().flatten();
         };
-        let key = (name.to_vec(), kind);
         let Ok(f) = &found else {
-            seen.lookups.remove(&key);
+            if let Some(ks) = seen.lookups.get_mut(name) {
+                ks.retain(|(k, _)| *k != kind);
+            }
             return None;
         };
         // (the candidates by directory, each directory's stamp as it is
@@ -385,33 +430,44 @@ impl Host for NativeHost {
         // kept)
         let mut missed: Vec<Missed> = Vec::new();
         for c in trail {
-            let d = match c.iter().rposition(|&b| b == b'/') {
-                Some(0) => b"/".to_vec(),
-                Some(i) => c[..i].to_vec(),
-                None => b".".to_vec(),
-            };
+            let d = crate::inotify::split(&c).0;
             match missed.last_mut() {
-                Some(m) if m.dir == d => m.files.push(c),
+                Some(m) if seen.dir_names[m.dir as usize] == d => m.files.push(c),
                 _ => {
-                    let st = dir_stamp(&d);
+                    let st = dir_stamp(d);
+                    let dir = seen.dir_id(d);
+                    let anchor = if st.is_none() {
+                        anchor(d).map(|(a, n)| (seen.dir_id(a), n.to_vec()))
+                    } else {
+                        None
+                    };
                     missed.push(Missed {
                         stamp: st,
                         kept: st.is_none_or(|s| quiet(&s)),
-                        dir: d,
+                        dir,
+                        anchor,
                         files: vec![c],
                     });
                 }
             }
         }
-        let found_at = f.as_ref().map(|f| f.name.clone());
-        seen.lookups.insert(
-            key,
-            Lookup {
-                found: found_at,
-                trail: missed,
-                checked: None,
-            },
-        );
+        let found_at = f.as_ref().map(|f| {
+            let d = seen.dir_id(crate::inotify::split(&f.name).0);
+            (f.name.clone(), d)
+        });
+        let l = Lookup {
+            found: found_at,
+            trail: missed,
+            checked: None,
+        };
+        match seen.lookup(name, kind) {
+            Some(old) => *old = l,
+            None => seen
+                .lookups
+                .entry(name.to_vec())
+                .or_default()
+                .push((kind, l)),
+        }
         found.ok().flatten()
     }
 
@@ -430,32 +486,37 @@ impl Host for NativeHost {
         }
         let now = seen.watch.as_ref().map(crate::inotify::Watcher::now);
         // (each directory looked at once)
-        let mut dirs: HashMap<Vec<u8>, Option<Stamp>> = HashMap::new();
+        let mut dirs: std::collections::BTreeMap<u32, Option<Stamp>> =
+            std::collections::BTreeMap::new();
         loads
             .iter()
             .map(|&(name, kind, last)| {
-                let Some(l) = seen.lookups.get_mut(&(name.to_vec(), kind)) else {
+                let Some(l) = seen
+                    .lookups
+                    .get_mut(name)
+                    .and_then(|ks| ks.iter_mut().find(|(k, _)| *k == kind))
+                    .map(|(_, l)| l)
+                else {
                     return false;
                 };
                 let w = &mut seen.watch;
+                let names = &seen.dir_names;
                 // (as it was when last checked, if none of its names had an
                 // event since: its candidates still absent, its file as read)
                 let quiet = w.as_ref().zip(l.checked).is_some_and(|(w, c)| {
-                    l.trail.iter().all(|m| {
-                        w.quiet(
-                            &m.dir,
-                            m.files.iter().map(|f| crate::inotify::split(f).1),
-                            c,
-                        )
-                    }) && l.found.as_deref().is_none_or(|p| {
-                        let (d, n) = crate::inotify::split(p);
-                        w.quiet(d, [n], c)
-                    })
+                    l.trail.iter().all(|m| match (&m.stamp, &m.anchor) {
+                        // (a directory not there, still not made)
+                        (None, Some((a, name))) => w.quiet(*a, [&name[..]], c),
+                        _ => w.quiet(m.dir, m.files.iter().map(|f| crate::inotify::split(f).1), c),
+                    }) && l
+                        .found
+                        .as_ref()
+                        .is_none_or(|(p, d)| w.quiet(*d, [crate::inotify::split(p).1], c))
                 });
                 let same = if quiet {
                     match (&l.found, last) {
                         (None, None) => true,
-                        (Some(p), Some(last)) => seen.files.get(p).is_some_and(|(_, a)| {
+                        (Some((p, _)), Some(last)) => seen.files.get(p).is_some_and(|(_, a)| {
                             std::sync::Arc::ptr_eq(a, last) || a[..] == last[..]
                         }),
                         _ => false,
@@ -464,9 +525,13 @@ impl Host for NativeHost {
                     // (its directories watched before it is checked, so a
                     // change after the check is an event the next look takes)
                     if let Some(w) = w.as_mut() {
-                        let found = l.found.as_deref().map(|p| crate::inotify::split(p).0);
-                        for d in l.trail.iter().map(|m| &m.dir[..]).chain(found) {
-                            w.watch(d);
+                        let found = l.found.as_ref().map(|&(_, d)| d);
+                        let dirs = l.trail.iter().map(|m| match (&m.stamp, &m.anchor) {
+                            (None, Some((a, _))) => *a,
+                            _ => m.dir,
+                        });
+                        for d in dirs.chain(found) {
+                            w.watch(d, &names[d as usize]);
                         }
                     }
                     // (a directory with its stamp holds none of the
@@ -474,8 +539,8 @@ impl Host for NativeHost {
                     // not a file, as kpathsea's `readable_file` asks)
                     l.trail.iter().all(|m| {
                         let now = *dirs
-                            .entry(m.dir.clone())
-                            .or_insert_with(|| dir_stamp(&m.dir));
+                            .entry(m.dir)
+                            .or_insert_with(|| dir_stamp(&names[m.dir as usize]));
                         (m.kept && m.stamp == now)
                             || m.files
                                 .iter()
@@ -485,7 +550,7 @@ impl Host for NativeHost {
                         // before its contents were read; two names can find
                         // one file)
                         (None, None) => true,
-                        (Some(p), Some(last)) => seen.files.get(p).is_some_and(|(st, a)| {
+                        (Some((p, _)), Some(last)) => seen.files.get(p).is_some_and(|(st, a)| {
                             stamp(p) == Some(*st)
                                 && (std::sync::Arc::ptr_eq(a, last) || a[..] == last[..])
                         }),

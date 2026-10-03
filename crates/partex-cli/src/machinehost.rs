@@ -2814,11 +2814,11 @@ impl Watch {
                     return self.outcome(Vec::new(), Vec::new(), reports, Some(3));
                 }
             };
-            let ending = |ext: &[u8]| -> Vec<(Vec<u8>, Vec<u8>)> {
+            let ending = |ext: &[u8]| -> Vec<(Vec<u8>, Arc<[u8]>)> {
                 self.files
                     .iter()
                     .filter(|(n, _)| n.ends_with(ext))
-                    .cloned()
+                    .map(|(n, c)| (n.clone(), Arc::from(&c[..])))
                     .collect()
             };
             let mut tools = crate::bibtex::after_pass(&mut between.bib, &ending(b".aux"));

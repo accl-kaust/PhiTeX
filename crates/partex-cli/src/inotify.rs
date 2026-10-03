@@ -34,18 +34,23 @@ const IN_IGNORED: u32 = 0x8000;
 
 pub struct Watcher {
     fd: OwnedFd,
-    /// Each watched directory, as named, and each watch's names (one
-    /// directory named two ways is one watch).
-    dirs: HashMap<Vec<u8>, c_int>,
-    names: HashMap<c_int, Vec<Vec<u8>>>,
-    /// The events seen, counted: the last one of each name in each
-    /// directory, and when each directory was watched from; `lost`: when
-    /// events were last lost (the queue overflowed), before which nothing
-    /// is known.
+    /// The directories, by the caller's numbers for them (one name each),
+    /// and each watch's (one directory named two ways is one watch).
+    dirs: Vec<Dir>,
+    watches: HashMap<c_int, Vec<u32>>,
+    /// The events seen, counted; `lost`: when events were last lost (the
+    /// queue overflowed), before which nothing is known.
     seq: u64,
-    last: HashMap<Vec<u8>, HashMap<Vec<u8>, u64>>,
-    since: HashMap<Vec<u8>, u64>,
     lost: u64,
+}
+
+/// A directory: when it was watched from (none: it is not), and the
+/// events seen in it: the last one, and the last of each name.
+#[derive(Default)]
+struct Dir {
+    since: Option<u64>,
+    latest: u64,
+    last: phitex_doc::FxMap<Vec<u8>, u64>,
 }
 
 impl Watcher {
@@ -62,11 +67,9 @@ impl Watcher {
         Some(Watcher {
             // SAFETY: `fd` is a descriptor just made and owned by no one else.
             fd: unsafe { OwnedFd::from_raw_fd(fd) },
-            dirs: HashMap::new(),
-            names: HashMap::new(),
+            dirs: Vec::new(),
+            watches: HashMap::new(),
             seq: 1,
-            last: HashMap::new(),
-            since: HashMap::new(),
             lost: 0,
         })
     }
@@ -76,10 +79,12 @@ impl Watcher {
         self.seq
     }
 
-    /// Watch directory `dir` from now on, if it is not watched already
-    /// (and can be: a directory that is not there is never watched).
-    pub fn watch(&mut self, dir: &[u8]) {
-        if self.dirs.contains_key(dir) {
+    /// Watch directory `dir`, the caller's number `id`, from now on, if
+    /// it is not watched already (and can be: a directory that is not
+    /// there is never watched).
+    pub fn watch(&mut self, id: u32, dir: &[u8]) {
+        let i = id as usize;
+        if self.dirs.get(i).is_some_and(|d| d.since.is_some()) {
             return;
         }
         let Ok(c) = std::ffi::CString::new(dir) else {
@@ -97,33 +102,36 @@ impl Watcher {
         // SAFETY: the descriptor is ours and `c` a NUL-terminated path.
         let wd = unsafe { inotify_add_watch(self.fd.as_raw_fd(), c.as_ptr(), mask) };
         if wd >= 0 {
-            self.dirs.insert(dir.to_vec(), wd);
-            self.names.entry(wd).or_default().push(dir.to_vec());
-            self.since.insert(dir.to_vec(), self.seq);
+            if self.dirs.len() <= i {
+                self.dirs.resize_with(i + 1, Dir::default);
+            }
+            self.dirs[i].since = Some(self.seq);
+            self.watches.entry(wd).or_default().push(id);
         }
     }
 
-    /// Whether directory `dir` has been watched since `check` (a count of
+    /// Whether directory `id` has been watched since `check` (a count of
     /// [`Watcher::now`]) with no event since of a name `names` gives:
     /// what a check then found of those files still holds (a file made,
     /// written, renamed or removed is an event of its name; the other
     /// files of the directory are not looked at).
     pub fn quiet<'a>(
         &self,
-        dir: &[u8],
+        id: u32,
         names: impl IntoIterator<Item = &'a [u8]>,
         check: u64,
     ) -> bool {
         // (events counted up to `check` were taken before that check)
-        if self.lost > check || self.since.get(dir).is_none_or(|&s| s > check) {
+        let Some(d) = self.dirs.get(id as usize) else {
+            return false;
+        };
+        if self.lost > check || d.since.is_none_or(|s| s > check) {
             return false;
         }
-        let Some(last) = self.last.get(dir) else {
-            return true;
-        };
-        names
-            .into_iter()
-            .all(|n| last.get(n).is_none_or(|&l| l <= check))
+        d.latest <= check
+            || names
+                .into_iter()
+                .all(|n| d.last.get(n).is_none_or(|&l| l <= check))
     }
 
     /// Take the events queued since the last look.
@@ -160,21 +168,22 @@ impl Watcher {
                     self.lost = self.seq;
                     continue;
                 }
-                let Some(dirs) = self.names.get(&wd) else {
+                let Some(ids) = self.watches.get(&wd) else {
                     continue;
                 };
-                for d in dirs {
-                    self.last
-                        .entry(d.clone())
-                        .or_default()
-                        .insert(name.to_vec(), self.seq);
+                for &id in ids {
+                    if let Some(d) = self.dirs.get_mut(id as usize) {
+                        d.latest = self.seq;
+                        d.last.insert(name.to_vec(), self.seq);
+                    }
                 }
                 if mask & (IN_DELETE_SELF | IN_MOVE_SELF | IN_IGNORED) != 0 {
                     // (the directory itself moved or went: watched no more,
                     // so never quiet until watched again)
-                    for d in self.names.remove(&wd).unwrap_or_default() {
-                        self.dirs.remove(&d);
-                        self.since.remove(&d);
+                    for id in self.watches.remove(&wd).unwrap_or_default() {
+                        if let Some(d) = self.dirs.get_mut(id as usize) {
+                            d.since = None;
+                        }
                     }
                 }
             }

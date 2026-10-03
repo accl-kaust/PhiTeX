@@ -5,6 +5,7 @@
 
 use std::collections::HashMap;
 use std::io::Write;
+use std::sync::Arc;
 
 use partex_bibtex::{Files, Options};
 use partex_kpse::{Format, Kpse};
@@ -36,8 +37,15 @@ pub struct KpseFiles {
     /// `.aux` files read from these contents, by path, not from disk: the
     /// streams the build just wrote, which an SSA build holds in memory
     /// while it rewrites the files (DESIGN 3.7, "Trips, as built").
-    served: HashMap<Vec<u8>, Vec<u8>>,
+    served: HashMap<Vec<u8>, Arc<[u8]>>,
+    /// Each served `.aux` file's digest ([`aux_digest`]), with the
+    /// contents it was made of (a build's trips serve the same contents,
+    /// shared, while the file does not change).
+    digests: HashMap<Vec<u8>, Digest>,
 }
+
+/// An `.aux` file's digest, with the contents it was made of.
+type Digest = (Arc<[u8]>, Vec<u8>);
 
 /// Read `name` (not a directory).
 fn read_file(name: &[u8]) -> Option<Vec<u8>> {
@@ -73,9 +81,26 @@ impl KpseFiles {
     /// The `.aux` file at `name`: served, or read from disk.
     fn read_aux(&self, name: &[u8]) -> Option<Vec<u8>> {
         match self.served.get(name) {
-            Some(d) => Some(d.clone()),
+            Some(d) => Some(d.to_vec()),
             None => read_file(name),
         }
+    }
+
+    /// The digest of the `.aux` file at `name` ([`aux_digest`]), served or
+    /// read from disk.
+    fn aux_digest_of(&mut self, name: &[u8]) -> Option<Vec<u8>> {
+        let Some(d) = self.served.get(name) else {
+            return read_file(name).map(|d| aux_digest(&d));
+        };
+        if let Some((was, digest)) = self.digests.get(name)
+            && Arc::ptr_eq(was, d)
+        {
+            return Some(digest.clone());
+        }
+        let digest = aux_digest(d);
+        self.digests
+            .insert(name.to_vec(), (d.clone(), digest.clone()));
+        Some(digest)
     }
 
     /// Where `name` is, relative names being in [`KpseFiles::dir`].
@@ -102,7 +127,7 @@ impl KpseFiles {
     fn unchanged(&mut self, read: &[Lookup]) -> bool {
         read.iter().all(|(name, was)| {
             let now = if name.ends_with(b".aux") {
-                self.read_aux(name).map(|d| (name.clone(), aux_digest(&d)))
+                self.aux_digest_of(name).map(|d| (name.clone(), d))
             } else {
                 let format = if was.as_ref().is_some_and(|(f, _)| f.ends_with(b".bst")) {
                     Format::Bst
@@ -172,6 +197,9 @@ pub struct Runs {
     opts: Option<Options>,
     /// For each `.aux` file, the lookups its last run made.
     last: HashMap<Vec<u8>, Vec<Lookup>>,
+    /// For each `.aux` file, whether it asks for BibTeX (`\bibdata`), with
+    /// the contents that answer is of.
+    asks: HashMap<Vec<u8>, (Arc<[u8]>, bool)>,
 }
 
 /// After a pass of a converging build (its outputs written): run BibTeX
@@ -179,14 +207,21 @@ pub struct Runs {
 /// what its last run read is unchanged, writing the `.bbl` and `.blg`
 /// files as `bibtex` would. The `.aux` files are read from `auxes`, by
 /// path (the others, from disk). A report line for each run.
-pub fn after_pass(runs: &mut Runs, auxes: &[(Vec<u8>, Vec<u8>)]) -> Vec<String> {
+pub fn after_pass(runs: &mut Runs, auxes: &[(Vec<u8>, Arc<[u8]>)]) -> Vec<String> {
     let mut reports = Vec::new();
-    let served: HashMap<Vec<u8>, Vec<u8>> = auxes.iter().cloned().collect();
+    let served: HashMap<Vec<u8>, Arc<[u8]>> = auxes.iter().cloned().collect();
     for (name, contents) in auxes {
-        if !contents
-            .split(|&c| c == b'\n')
-            .any(|l| l.starts_with(b"\\bibdata{"))
-        {
+        let asks = match runs.asks.get(name) {
+            Some((was, asks)) if Arc::ptr_eq(was, contents) => *asks,
+            _ => {
+                let asks = contents
+                    .split(|&c| c == b'\n')
+                    .any(|l| l.starts_with(b"\\bibdata{"));
+                runs.asks.insert(name.clone(), (contents.clone(), asks));
+                asks
+            }
+        };
+        if !asks {
             continue;
         }
         let files = runs.files.get_or_insert_with(|| KpseFiles {
@@ -194,6 +229,7 @@ pub fn after_pass(runs: &mut Runs, auxes: &[(Vec<u8>, Vec<u8>)]) -> Vec<String> 
             read: Vec::new(),
             dir: None,
             served: HashMap::new(),
+            digests: HashMap::new(),
         });
         files.served.clone_from(&served);
         let slash = name.iter().rposition(|&c| c == b'/');
@@ -277,6 +313,7 @@ pub fn main() -> ! {
         read: Vec::new(),
         dir: None,
         served: HashMap::new(),
+        digests: HashMap::new(),
     };
     let out = partex_bibtex::run(files[0].as_bytes(), &opts, &mut fs);
     for f in [&out.blg, &out.bbl].into_iter().flatten() {

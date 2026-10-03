@@ -34,6 +34,10 @@ const LOOK_AHEAD: usize = 64;
 /// The version of each name's φ, with the bytes it was made from.
 type PhiVersions = BTreeMap<u32, (Arc<[u8]>, Version)>;
 
+/// A stored name's value as [`Steps::trip_end`] made it (`Steps::value_at`'s,
+/// its bytes shared), with the count of the name's store changes then.
+type TripValues = BTreeMap<u32, (u64, Option<Result<Arc<[u8]>, ()>>)>;
+
 /// The fold's steps as a rebuild finds them.
 #[derive(Default)]
 pub(crate) struct Steps {
@@ -96,8 +100,10 @@ pub(crate) struct Steps {
     /// job's end").
     glyph_union: Option<u128>,
     /// The ships' glyph rows the union was last counted from
-    /// ([`glyph_union_now`]).
+    /// ([`glyph_union_now`]), and the rows whose definitions a step's run
+    /// or removal changed since.
     glyph_count: GlyphCount,
+    glyph_dirty: BTreeSet<i64>,
     /// The open step's run's effects in the link's form, its chunks in
     /// program order (7.17.3, "Hits applied inside a step that runs
     /// again", item 2), and each step's, by step id, as its run ended
@@ -115,6 +121,12 @@ pub(crate) struct Steps {
     pub(super) fx_changed: Vec<StepId>,
     /// The run of a step under way past its budget ([`run_step`]).
     watch: Option<Watch>,
+    /// How many times each stored name's stores changed (a step's run
+    /// stored to it otherwise than its last, a step that stored to it
+    /// left the fold), and the value [`Steps::trip_end`] made of it last,
+    /// with that count then: made again only when the count moved.
+    store_changes: BTreeMap<u32, u64>,
+    trip_values: TripValues,
 }
 
 /// What the steps' own records hold, roughly, in bytes by part (a
@@ -440,25 +452,46 @@ impl Steps {
     /// whose value is not that φ; a name whose value is the same keeps
     /// the φ's bytes, shared.
     #[allow(clippy::type_complexity)]
-    fn trip_end(&self, fold: &Fold<TexSsa>) -> (BTreeMap<u32, Option<Arc<[u8]>>>, BTreeSet<u32>) {
+    fn trip_end(
+        &mut self,
+        fold: &Fold<TexSsa>,
+    ) -> (BTreeMap<u32, Option<Arc<[u8]>>>, BTreeSet<u32>) {
         let mut phi = BTreeMap::new();
         let mut changed = BTreeSet::new();
-        for &id in &self.stored {
+        // (the values made with no step open, kept)
+        let keep = self.cur_stores.is_empty();
+        let stored: Vec<u32> = self.stored.iter().copied().collect();
+        for id in stored {
+            // (a name whose stores did not change since: the value made
+            // then, its bytes shared)
+            let count = self.store_changes.get(&id).copied().unwrap_or(0);
+            let now = match self.trip_values.get(&id) {
+                Some((c, v)) if *c == count && keep => v.clone(),
+                _ => self
+                    .value_at(fold, id, u64::MAX)
+                    .map(|v| v.map(Arc::<[u8]>::from)),
+            };
             let was = self.last_phi.get(&id);
-            let Some(Ok(now)) = self.value_at(fold, id, u64::MAX) else {
+            let Some(Ok(now)) = now else {
+                if keep {
+                    self.trip_values.insert(id, (count, now));
+                }
                 if let Some(w) = was {
                     phi.insert(id, w.clone());
                 }
                 continue;
             };
-            if let Some(Some(w)) = was
-                && w[..] == now[..]
-            {
-                phi.insert(id, Some(w.clone()));
-            } else {
-                phi.insert(id, Some(Arc::from(now)));
-                changed.insert(id);
+            let now = match was {
+                Some(Some(w)) if Arc::ptr_eq(w, &now) || w[..] == now[..] => w.clone(),
+                _ => {
+                    changed.insert(id);
+                    now
+                }
+            };
+            if keep {
+                self.trip_values.insert(id, (count, Some(Ok(now.clone()))));
             }
+            phi.insert(id, Some(now));
         }
         (phi, changed)
     }
@@ -591,6 +624,7 @@ pub(super) fn step_closed(rr: &mut Recorder, id: StepId, input: InputState) -> V
         let b = new.iter().filter(|x| x.id() == i);
         if !a.eq(b) {
             changed.push(i);
+            *s.store_changes.entry(i).or_default() += 1;
         }
     }
     let loads = core::mem::take(&mut s.cur_loads);
@@ -1462,17 +1496,53 @@ fn defs(
 /// row's value is not kept. Counted from the rows that changed since the
 /// last time ([`GlyphCount`]): an edit changes a ship or two of hundreds.
 fn glyph_union_now(rr: &mut Recorder) -> Option<u128> {
-    let (rt, count) = (&rr.rt, &mut rr.st.steps.glyph_count);
-    let mut n = 0;
-    while let Some(d) = rt.fold.latest(&Slot(Fam::Glyphs, i64::try_from(n).ok()?)) {
+    let (rt, steps) = (&rr.rt, &mut rr.st.steps);
+    let count = &mut steps.glyph_count;
+    let dirty = core::mem::take(&mut steps.glyph_dirty);
+    // (row `n` as the latest definition has it: `Some(None)`, none)
+    let row = |n: usize| -> Option<Option<&crate::pdf::ship::Glyphs>> {
+        let Some(d) = rt.fold.latest(&Slot(Fam::Glyphs, i64::try_from(n).ok()?)) else {
+            return Some(None);
+        };
         let (_, v) = rt.record(d.rec).writes.get(d.ix as usize)?;
         let super::SValue::Field(f) = &**v.as_ref()?.1.as_ref()? else {
             return None;
         };
-        count.set(n, f.get::<crate::pdf::ship::Glyphs>()?);
-        n += 1;
+        Some(Some(f.get::<crate::pdf::ship::Glyphs>()?))
+    };
+    // (the rows changed, if they are rows counted that are still there;
+    // else every row again, up to the first not there)
+    let counted = (|| -> Option<()> {
+        let mut walk = count.rows.is_empty()
+            || dirty
+                .iter()
+                .any(|&n| usize::try_from(n).map_or(true, |n| n >= count.rows.len()));
+        if !walk {
+            for &n in &dirty {
+                let n = usize::try_from(n).ok()?;
+                let Some(r) = row(n)? else {
+                    walk = true;
+                    break;
+                };
+                count.set(n, r);
+            }
+        }
+        if walk {
+            let mut n = 0;
+            while let Some(r) = row(n)? {
+                count.set(n, r);
+                n += 1;
+            }
+            count.truncate(n);
+        }
+        Some(())
+    })();
+    if counted.is_none() {
+        // (a row's value is not kept: counted from none next time, every
+        // row again)
+        count.truncate(0);
+        return None;
     }
-    count.truncate(n);
     let v = count.version();
     debug_assert_eq!(
         v,
@@ -1483,30 +1553,41 @@ fn glyph_union_now(rr: &mut Recorder) -> Option<u128> {
 }
 
 /// The ships' glyph rows as counted: each row, and for each font, how
-/// many rows have it and how many have each of its glyphs. The union
-/// (`pdf::ship::glyph_union`) is each font some row has, with the glyphs
-/// some row has; a row changed is taken out and the new one put in.
+/// many rows have it, how many have each of its glyphs, and the glyphs
+/// some row has. The union (`pdf::ship::glyph_union`) is each font some
+/// row has, with the glyphs some row has; a row changed is taken out and
+/// the new one put in.
 #[derive(Default)]
 pub(crate) struct GlyphCount {
     rows: Vec<crate::pdf::ship::Glyphs>,
-    fonts: BTreeMap<i32, (u32, alloc::boxed::Box<[u32; 256]>)>,
+    fonts: BTreeMap<i32, FontCount>,
     version: Option<u128>,
 }
+
+/// A font's count in [`GlyphCount`]: rows that have it, rows that have
+/// each glyph, and the glyphs some row has.
+type FontCount = (u32, alloc::boxed::Box<[u32; 256]>, [u64; 4]);
 
 impl GlyphCount {
     /// Row `row` counted in (`up`) or out.
     fn count(&mut self, row: &crate::pdf::ship::Glyphs, up: bool) {
         for (f, bits) in row.iter() {
-            let (k, c) = self
+            let (k, c, union) = self
                 .fonts
                 .entry(*f)
-                .or_insert_with(|| (0, alloc::boxed::Box::new([0; 256])));
+                .or_insert_with(|| (0, alloc::boxed::Box::new([0; 256]), [0; 4]));
             *k = if up { *k + 1 } else { k.saturating_sub(1) };
             for (w, word) in bits.iter().enumerate() {
                 let mut x = *word;
                 while x != 0 {
-                    let g = w * 64 + x.trailing_zeros() as usize;
+                    let b = x.trailing_zeros();
+                    let g = w * 64 + b as usize;
                     c[g] = if up { c[g] + 1 } else { c[g].saturating_sub(1) };
+                    if c[g] == 0 {
+                        union[w] &= !(1 << b);
+                    } else {
+                        union[w] |= 1 << b;
+                    }
                     x &= x - 1;
                 }
             }
@@ -1541,18 +1622,11 @@ impl GlyphCount {
     fn version(&mut self) -> u128 {
         let fonts = &self.fonts;
         *self.version.get_or_insert_with(|| {
-            let mut sets = BTreeMap::<i32, [u64; 4]>::new();
-            for (f, (k, c)) in fonts {
-                if *k > 0 {
-                    let mut b = [0u64; 4];
-                    for (g, n) in c.iter().enumerate() {
-                        if *n > 0 {
-                            b[g / 64] |= 1 << (g % 64);
-                        }
-                    }
-                    sets.insert(*f, b);
-                }
-            }
+            let sets: BTreeMap<i32, [u64; 4]> = fonts
+                .iter()
+                .filter(|(_, (k, ..))| *k > 0)
+                .map(|(f, (_, _, union))| (*f, *union))
+                .collect();
             Version::of(&sets).0
         })
     }
@@ -2247,7 +2321,7 @@ fn more_trips<H: Host>(
             return rep;
         }
         let (phi, changed) = {
-            let r = tex.tracker.rec.borrow();
+            let r = &mut *tex.tracker.rec.borrow_mut();
             r.st.steps.trip_end(&r.rt.fold)
         };
         if rep.trips >= trips.max.max(1) {
@@ -2633,12 +2707,19 @@ fn retire<H: Host>(
             .map(StoreEv::id)
             .collect();
         ids.dedup();
+        for &i in &ids {
+            *rr.st.steps.store_changes.entry(i).or_default() += 1;
+        }
         rr.st.steps.loads.remove(&s);
         rr.st.steps.queries.remove(&s);
         mark_store_readers(rr, &ids, key, dirty, rep);
         rr.rt.fold.remove(s, old.keys());
         // (its chunks leave the link)
         rr.st.steps.fx_changed.push(s);
+        rr.st
+            .steps
+            .glyph_dirty
+            .extend(old.keys().filter(|a| a.0 == Fam::Glyphs).map(|a| a.1));
         dirty.remove(key);
         with_levels(tex, old.keys().filter(|a| positioned(a)).copied(), |a| {
             latest(tex, rr, a, s, rep)
@@ -2929,6 +3010,13 @@ fn run_step<H: Host>(
         rr.rt.end_step();
         let stores = step_closed(rr, j, input);
         mark_store_readers(rr, &stores, key, dirty, rep);
+        // (the glyph rows it defined or defines: [`glyph_union_now`])
+        rr.st.steps.glyph_dirty.extend(
+            old.keys()
+                .chain(d.keys())
+                .filter(|a| a.0 == Fam::Glyphs)
+                .map(|a| a.1),
+        );
         d
     };
     let mut changed = Vec::new();

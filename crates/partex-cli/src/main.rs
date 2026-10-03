@@ -822,11 +822,14 @@ fn serve_observed(
         if converge && r.is_some() {
             // (BibTeX and makeindex between passes, as the conventional
             // pipeline runs them)
-            let mut tools = bibtex::after_pass(&mut between.bib, &s.outputs_ending(b".aux"));
-            tools.extend(makeindex::after_pass(
-                &mut between.idx,
-                &s.outputs_ending(b".idx"),
-            ));
+            let ending = |ext: &[u8]| -> Vec<(Vec<u8>, std::sync::Arc<[u8]>)> {
+                s.outputs_ending(ext)
+                    .into_iter()
+                    .map(|(n, c)| (n, c.into()))
+                    .collect()
+            };
+            let mut tools = bibtex::after_pass(&mut between.bib, &ending(b".aux"));
+            tools.extend(makeindex::after_pass(&mut between.idx, &ending(b".idx")));
             for t in &tools {
                 observe(events::Progress::Tool(t));
             }
@@ -1329,14 +1332,14 @@ fn ssa_tools(
 {
     move |host, streams| {
         // (each stream by the path its file has, in the output directory)
-        let ending = |ext: &[u8]| -> Vec<(Vec<u8>, Vec<u8>)> {
+        let ending = |ext: &[u8]| -> Vec<(Vec<u8>, std::sync::Arc<[u8]>)> {
             streams
                 .iter()
                 .filter(|(name, _)| name.ends_with(ext))
                 .map(|(name, c)| {
                     (
                         host.in_output_dir(name).unwrap_or_else(|| name.clone()),
-                        c.to_vec(),
+                        c.clone(),
                     )
                 })
                 .collect()
