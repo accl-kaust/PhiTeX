@@ -30,6 +30,7 @@ pub mod codec;
 pub mod dviout;
 pub mod expand;
 pub mod fofi;
+#[rustfmt::skip]
 pub mod fofi_tables;
 pub mod font;
 pub mod gfxfont;

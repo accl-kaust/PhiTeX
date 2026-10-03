@@ -231,8 +231,10 @@ fn identify_cff(r: &mut Reader<'_>, start: i32) -> Kind {
         if !(1..=4).contains(&off_size1) {
             return Kind::Unknown;
         }
-        let Some(offset1) = r.uvar_be(pos.wrapping_add(3).wrapping_add(n.wrapping_mul(off_size1)), off_size1)
-        else {
+        let Some(offset1) = r.uvar_be(
+            pos.wrapping_add(3).wrapping_add(n.wrapping_mul(off_size1)),
+            off_size1,
+        ) else {
             return Kind::Unknown;
         };
         if offset1 > 0x7fff_ffff {
@@ -439,7 +441,9 @@ fn type1_array(file: &[u8], l: usize) -> Encoding {
                 };
                 let mut code: u32 = 0;
                 while at(p) >= b'0' && u32::from(at(p)) < u32::from(b'0') + base {
-                    code = code.wrapping_mul(base).wrapping_add(u32::from(at(p) - b'0'));
+                    code = code
+                        .wrapping_mul(base)
+                        .wrapping_add(u32::from(at(p) - b'0'));
                     p += 1;
                 }
                 while matches!(at(p), b' ' | b'\t') {
@@ -499,7 +503,10 @@ impl Op {
     fn to_int(self) -> i32 {
         match self {
             Op::Int(i) => i,
-            #[allow(clippy::cast_possible_truncation, reason = "C's (int) of a double in range")]
+            #[allow(
+                clippy::cast_possible_truncation,
+                reason = "C's (int) of a double in range"
+            )]
             Op::Float(f) if (-2e9..=2e9).contains(&f) => f as i32,
             _ => 0,
         }
@@ -554,7 +561,9 @@ impl Cff<'_> {
             return 0;
         }
         let p = pos.cast_unsigned() as usize;
-        (0..size.cast_unsigned() as usize).fold(0u32, |x, i| (x << 8).wrapping_add(u32::from(self.file[p + i])))
+        (0..size.cast_unsigned() as usize).fold(0u32, |x, i| {
+            (x << 8).wrapping_add(u32::from(self.file[p + i]))
+        })
     }
 
     /// `getIndex`.
@@ -580,7 +589,8 @@ impl Cff<'_> {
                 self.ok = false;
             }
             let v = self.uvar_be(
-                pos.wrapping_add(3).wrapping_add(idx.len.wrapping_mul(idx.off_size)),
+                pos.wrapping_add(3)
+                    .wrapping_add(idx.len.wrapping_mul(idx.off_size)),
                 idx.off_size,
             );
             idx.end = idx.start.cast_unsigned().wrapping_add(v).cast_signed();
@@ -597,12 +607,17 @@ impl Cff<'_> {
             self.ok = false;
             return (0, 0);
         }
-        let at = |k: i32| idx.pos.wrapping_add(3).wrapping_add(k.wrapping_mul(idx.off_size));
+        let at = |k: i32| {
+            idx.pos
+                .wrapping_add(3)
+                .wrapping_add(k.wrapping_mul(idx.off_size))
+        };
         let v0 = self.uvar_be(at(i), idx.off_size);
         let v1 = self.uvar_be(at(i + 1), idx.off_size);
         let pos0 = idx.start.cast_unsigned().wrapping_add(v0).cast_signed();
         let pos1 = idx.start.cast_unsigned().wrapping_add(v1).cast_signed();
-        if pos0 < idx.start || pos0 > idx.end || pos1 <= idx.start || pos1 > idx.end || pos1 < pos0 {
+        if pos0 < idx.start || pos0 > idx.end || pos1 <= idx.start || pos1 > idx.end || pos1 < pos0
+        {
             self.ok = false;
         }
         (pos0, pos1.wrapping_sub(pos0))
@@ -693,7 +708,10 @@ impl Cff<'_> {
     fn string(&mut self, strings: &Index, sid: i32) -> Vec<u8> {
         if sid < 0 {
             Vec::new()
-        } else if let Some(s) = usize::try_from(sid).ok().and_then(|s| tables::CFF_STD_STRINGS.get(s)) {
+        } else if let Some(s) = usize::try_from(sid)
+            .ok()
+            .and_then(|s| tables::CFF_STD_STRINGS.get(s))
+        {
             s.as_bytes().to_vec()
         } else {
             let (pos, len) = self.index_val(strings, sid - 391);
@@ -868,7 +886,13 @@ fn put(c: &mut Cff<'_>, enc: &mut Encoding, strings: &Index, code: i32, sid: i32
 }
 
 /// `buildEncoding`.
-fn cff_encoding(c: &mut Cff<'_>, offset: i32, charset: &[u16], n_glyphs: i32, strings: &Index) -> Encoding {
+fn cff_encoding(
+    c: &mut Cff<'_>,
+    offset: i32,
+    charset: &[u16],
+    n_glyphs: i32,
+    strings: &Index,
+) -> Encoding {
     match offset {
         0 => return table(&tables::FOFI_TYPE1_STANDARD),
         1 => return table(&tables::FOFI_TYPE1_EXPERT),
@@ -891,7 +915,13 @@ fn cff_encoding(c: &mut Cff<'_>, offset: i32, charset: &[u16], n_glyphs: i32, st
             if !c.ok {
                 return enc;
             }
-            put(c, &mut enc, strings, code, i32::from(charset[usize::try_from(i).unwrap_or(0)]));
+            put(
+                c,
+                &mut enc,
+                strings,
+                code,
+                i32::from(charset[usize::try_from(i).unwrap_or(0)]),
+            );
         }
     } else if kind == 1 {
         let n_ranges = c.next(&mut pos);
@@ -908,7 +938,13 @@ fn cff_encoding(c: &mut Cff<'_>, offset: i32, charset: &[u16], n_glyphs: i32, st
             let mut j = 0;
             while j <= n_left && n_codes < n_glyphs {
                 if code < 256 {
-                    put(c, &mut enc, strings, code, i32::from(charset[usize::try_from(n_codes).unwrap_or(0)]));
+                    put(
+                        c,
+                        &mut enc,
+                        strings,
+                        code,
+                        i32::from(charset[usize::try_from(n_codes).unwrap_or(0)]),
+                    );
                 }
                 n_codes += 1;
                 code += 1;
@@ -971,7 +1007,10 @@ dup 65 /A put\n dup 8#102 /B put dup 67 /C put\ndup\n68 /D put\nreadonly def\n/X
 
     #[test]
     fn identifies_font_files() {
-        assert_eq!(identify(b"\x80\x01\x20\0\0\0%!PS-AdobeFont-1.0"), Kind::Type1Pfb);
+        assert_eq!(
+            identify(b"\x80\x01\x20\0\0\0%!PS-AdobeFont-1.0"),
+            Kind::Type1Pfb
+        );
         assert_eq!(identify(b"\0\x01\0\0rest"), Kind::TrueType);
         assert_eq!(identify(b"OTTO\0\0"), Kind::Unknown);
         assert_eq!(identify(b"nothing"), Kind::Unknown);

@@ -359,7 +359,10 @@ impl<H: Host, T: Tracker> Tex<H, T> {
     pub(crate) fn epdf_mark_glyphs(&mut self, key: &(Vec<u8>, i32, i32), charset: &[u8]) {
         let space = |c: u8| matches!(c, b' ' | b'\t' | b'\n' | b'\r' | 0x0c);
         // (a C string: to its first NUL)
-        let cs = &charset[..charset.iter().position(|&c| c == 0).unwrap_or(charset.len())];
+        let cs = &charset[..charset
+            .iter()
+            .position(|&c| c == 0)
+            .unwrap_or(charset.len())];
         let cs = &cs[cs.iter().take_while(|&&c| space(c)).count()..];
         let Some(fd) = self.pdf.fontw.fd_tree.get_mut(key) else {
             return;
