@@ -506,19 +506,24 @@ impl Steps {
         fold: &Fold<TexSsa>,
         phi: &BTreeMap<u32, Option<Arc<[u8]>>>,
     ) -> Vec<(u64, StepId, u32)> {
-        // (a φ kept from the last trip is the same bytes, shared: its
-        // version is the one made then)
+        // (a φ kept from the last trip is the same bytes, shared, or the
+        // same bytes read again: its version is the one made then)
         let mut memo = self.phi_vers.borrow_mut();
         let vers: BTreeMap<u32, Version> = phi
             .iter()
             .map(|(&id, v)| {
-                let ver = v.as_ref().map_or(Version::ABSENT, |c| match memo.get(&id) {
-                    Some((was, ver)) if Arc::ptr_eq(was, c) => *ver,
-                    _ => {
+                let ver = v.as_ref().map_or(Version::ABSENT, |c| {
+                    let kept = memo.get_mut(&id).and_then(|(was, ver)| {
+                        (Arc::ptr_eq(was, c) || was[..] == c[..]).then(|| {
+                            *was = c.clone();
+                            *ver
+                        })
+                    });
+                    kept.unwrap_or_else(|| {
                         let ver = Version::of(&c[..]);
                         memo.insert(id, (c.clone(), ver));
                         ver
-                    }
+                    })
                 });
                 (id, ver)
             })

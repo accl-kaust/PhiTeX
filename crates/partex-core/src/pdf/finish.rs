@@ -365,7 +365,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             if crate::fonts::fx(k) >= n {
                 continue;
             }
-            let pf = self.pdf_font(k).clone();
+            let pf = self.pdf_font_ref(k).clone();
             if pf.used && pf.map.as_ref().is_some_and(Option::is_some) && pf.num < 0 {
                 let i = -pf.num;
                 for c in 0..=255u8 {

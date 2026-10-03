@@ -492,12 +492,13 @@ partex_engine::persist_struct!(ShipState {
 });
 
 impl<H: Host, T: Tracker> Tex<H, T> {
-    /// The PDF state of font `f`.
     /// Mark glyph `c` of font `f` used, and note it among the glyphs this
     /// stretch of the job used (a machine's `Glyphs` cell; a session's
     /// `Interval.chars`, [`Tex::take_chars_shipped`]).
     pub(crate) fn mark_glyph(&mut self, f: i32, c: u8) {
-        self.pdf_font(f).mark(c);
+        if !self.pdf_font_ref(f).marked(c) {
+            self.pdf_font(f).mark(c);
+        }
         if T::VALUES {
             self.pdf.ship.marking.entry(f).or_default()[usize::from(c >> 6)] |= 1 << (c & 63);
         }
@@ -519,7 +520,24 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             .collect()
     }
 
+    /// The PDF state of font `f`, to change (versioned again when the
+    /// writer's scope ends).
     pub(crate) fn pdf_font(&mut self, f: i32) -> &mut PdfFont {
+        let i = self.pdf_font_slot(f);
+        &mut self.pdf.ship.fonts[i]
+    }
+
+    /// The PDF state of font `f`, to read: read as [`Tex::pdf_font`]
+    /// reads it, the table not taken to change (no chunk of it copied,
+    /// the font not versioned again).
+    pub(crate) fn pdf_font_ref(&mut self, f: i32) -> &PdfFont {
+        let i = self.pdf_font_slot(f);
+        &self.pdf.ship.fonts[i]
+    }
+
+    /// Font `f`'s slot in the table, made if it is not there, the table
+    /// read.
+    fn pdf_font_slot(&mut self, f: i32) -> usize {
         use super::val::{bit, field::PDF_FONTS};
         if T::VALUES {
             // (the `PDF_FONTS` field: read, and written by the scope of
@@ -539,7 +557,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                 t.pdf.ship.fonts.resize(i + 1, PdfFont::default());
             });
         }
-        &mut self.pdf.ship.fonts[i]
+        i
     }
 
     /// The name of font `f`.
@@ -551,7 +569,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
     /// mapfile.c's `hasfmentry`: the map entry of font `f`, looked up
     /// (reading the default map file) the first time.
     pub(crate) fn fm_entry(&mut self, f: i32) -> Option<Arc<MapEntry>> {
-        if let Some(m) = &self.pdf_font(f).map {
+        if let Some(m) = &self.pdf_font_ref(f).map {
             return m.clone();
         }
         // an auto-expanded font is its base font's (`pdf_init_font`)
@@ -724,7 +742,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                     b"auto expansion is only possible with scalable fonts",
                 );
             }
-            if !self.pdf_font(b).used {
+            if !self.pdf_font_ref(b).used {
                 self.pdf_init_font(b)?;
             }
         }
@@ -744,7 +762,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                     && self.is_scalable(k)
                     && (k_name == name || base_name.as_ref() == Some(&k_name))
                 {
-                    let nk = self.pdf_font(k).num;
+                    let nk = self.pdf_font_ref(k).num;
                     return self.pdf_use_font(f, if nk < 0 { nk } else { -k });
                 }
                 i = self.pdf.objs.get(i).link;
@@ -759,7 +777,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
 
     /// `set_ff`: the font whose object font `f` uses.
     pub(crate) fn pdf_ff(&mut self, f: i32) -> i32 {
-        let n = self.pdf_font(f).num;
+        let n = self.pdf_font_ref(f).num;
         if n < 0 { -n } else { f }
     }
 
@@ -778,12 +796,14 @@ impl<H: Host, T: Tracker> Tex<H, T> {
     /// `pdf_set_font`.
     fn pdf_set_font(&mut self, f: i32) -> Result<(), Jump> {
         self.pdf.ship.pdf_f = f;
-        if !self.pdf_font(f).used {
+        if !self.pdf_font_ref(f).used {
             self.pdf_init_font(f)?;
         }
         let k = self.pdf_ff(f);
-        let list = self.pdf.ship.font_list.clone();
-        if !list.iter().any(|&g| self.pdf_ff(g) == k) {
+        let list = core::mem::take(&mut self.pdf.ship.font_list);
+        let known = list.iter().any(|&g| self.pdf_ff(g) == k);
+        self.pdf.ship.font_list = list;
+        if !known {
             self.pdf.ship.font_list.push(f);
         }
         let size = self.fonts.get(f).size;
@@ -858,7 +878,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         let faked = self.pdf.ship.faked_space;
         let pdf_f = self.pdf.ship.pdf_f;
         let switch = if faked {
-            !(self.pdf_font(f).used && self.pdf_font(pdf_f).used)
+            !(self.pdf_font_ref(f).used && self.pdf_font_ref(pdf_f).used)
         } else {
             pdf_f != f
         };
@@ -866,7 +886,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             self.pdf_end_string();
             self.pdf_set_font(f)?;
         }
-        let size = self.pdf_font(f).size;
+        let size = self.pdf_font_ref(f).size;
         let s0 = &self.pdf.ship;
         let (mut s, mut s_out) = if s0.tm_a == 0 {
             self.divide_scaled(s0.cur_h - (s0.tj_start_h + s0.delta_h), size, 3)?
@@ -907,7 +927,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             must_insert_space = true;
         }
         if must_insert_space {
-            if self.pdf_font(f).has_space && self.pdf.ship.doing_string {
+            if self.pdf_font_ref(f).has_space && self.pdf.ship.doing_string {
                 self.pdf.out.out(b' ');
                 let (ws, wout) = self.adv_char_width(f, 32)?;
                 s -= ws;
@@ -919,7 +939,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         }
         if must_end_string {
             self.pdf_end_string();
-            if must_insert_space && !self.pdf_font(f).has_space {
+            if must_insert_space && !self.pdf_font_ref(f).has_space {
                 self.pdf_insert_interword_space()?;
             }
             self.pdf_set_font(f)?;
@@ -956,7 +976,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         if !self.is_scalable(f) {
             return self.pdf_error(b"font", b"PK fonts are not implemented in partex yet");
         }
-        let size = self.pdf_font(f).size;
+        let size = self.pdf_font_ref(f).size;
         let tm_a = self.pdf.ship.tm_a;
         let (s, s_out) = if tm_a == 0 {
             self.divide_scaled(w, size, 4)?
@@ -2298,7 +2318,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                 self.pdf_print_font_number(ff);
                 self.pdf_print_resname_prefix();
                 self.pdf.out.out(b' ');
-                let n = self.pdf_font(ff).num;
+                let n = self.pdf_font_ref(ff).num;
                 self.pdf.out.objnum(n);
                 self.pdf.out.print(b" 0 R ");
             }

@@ -161,6 +161,10 @@ impl<H: Host, T: Tracker> Tex<H, T> {
     /// write of the `PDF_FONTS` table).
     pub(crate) fn pdf_font_type(&mut self, f: i32) -> Result<FontType, Jump> {
         use super::val::{bit, field::PDF_FONTS};
+        let t = &self.pdf_font_ref(f).font_type;
+        if *t != FontType::New {
+            return Ok(t.clone());
+        }
         self.writer_scope(0, bit(PDF_FONTS), |t| {
             if t.pdf_font(f).font_type == FontType::New {
                 t.do_vf(f)?;
@@ -603,14 +607,14 @@ impl<H: Host, T: Tracker> Tex<H, T> {
 
     /// pdfTeX's `vf_expand_local_fonts`.
     pub(crate) fn vf_expand_local_fonts(&mut self, f: i32) -> Result<(), Jump> {
-        let FontType::Virtual(vf) = self.pdf_font(f).font_type.clone() else {
+        let FontType::Virtual(vf) = self.pdf_font_ref(f).font_type.clone() else {
             return Ok(());
         };
         let x = self.fonts.expand[crate::fonts::fx(f)];
         let (stretch, shrink) = self.expand_limits(f);
         for &(_, lf) in &vf.fonts {
             self.set_expand_params(lf, x.auto, stretch, shrink, x.step, x.ratio)?;
-            if matches!(self.pdf_font(lf).font_type, FontType::Virtual(_)) {
+            if matches!(self.pdf_font_ref(lf).font_type, FontType::Virtual(_)) {
                 self.vf_expand_local_fonts(lf)?;
             }
         }

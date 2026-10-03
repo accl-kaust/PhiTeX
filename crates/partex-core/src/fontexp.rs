@@ -353,7 +353,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                 );
             }
         } else {
-            let t = self.pdf_font(f).font_type.clone();
+            let t = self.pdf_font_ref(f).font_type.clone();
             let virtual_font = matches!(t, crate::pdf::vf::FontType::Virtual(_));
             if t != crate::pdf::vf::FontType::New && !virtual_font {
                 self.pdf_warning(
@@ -460,7 +460,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
     /// `name+100ls`.
     fn is_letterspaced_font(&mut self, f: i32) -> bool {
         if !matches!(
-            self.pdf_font(f).font_type,
+            self.pdf_font_ref(f).font_type,
             crate::pdf::vf::FontType::Virtual(_)
         ) {
             return false;

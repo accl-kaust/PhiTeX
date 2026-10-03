@@ -154,7 +154,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
     /// mode) encoded at once.
     pub(crate) fn draw(&mut self, item: Draw) -> Result<(), Jump> {
         if let Draw::Char { f, .. } = item
-            && !self.pdf_font(f).used
+            && !self.pdf_font_ref(f).used
         {
             // a font's first use numbers its object: in the walk's order
             self.pdf_init_font(f)?;

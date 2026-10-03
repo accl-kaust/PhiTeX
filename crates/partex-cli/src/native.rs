@@ -87,10 +87,11 @@ impl Seen {
     }
 }
 
-/// A lookup: the path it found (and its directory's number), and its
-/// trail, the candidates it tried and did not find, by directory.
+/// A lookup: the path it found (its directory's number, and where its
+/// name in the directory begins), and its trail, the candidates it tried
+/// and did not find, by directory.
 struct Lookup {
-    found: Option<(Vec<u8>, u32)>,
+    found: Option<(Vec<u8>, u32, usize)>,
     trail: Vec<Missed>,
     /// When `unchanged` last found it as it was (the watcher's count).
     checked: Option<u64>,
@@ -102,13 +103,19 @@ struct Lookup {
 /// the directory has that stamp, none of them is there. For a directory
 /// that is not there, `anchor`: the nearest one above it that is, and
 /// the name in it that would make it be (`out/figs/data`: `out` and
-/// `figs`), which the watcher watches for it.
+/// `figs`), which the watcher watches for it. Each candidate's path is
+/// kept with where its name in the directory begins.
 struct Missed {
     dir: u32,
     anchor: Option<(u32, Vec<u8>)>,
     stamp: Option<Stamp>,
     kept: bool,
-    files: Vec<Vec<u8>>,
+    files: Vec<(Vec<u8>, usize)>,
+}
+
+/// Where the name of `p` in its directory begins.
+fn name_start(p: &[u8]) -> usize {
+    p.len() - crate::inotify::split(p).1.len()
 }
 
 /// How old a file's times must be for its stamp to be kept: a later write
@@ -431,8 +438,9 @@ impl Host for NativeHost {
         let mut missed: Vec<Missed> = Vec::new();
         for c in trail {
             let d = crate::inotify::split(&c).0;
+            let at = name_start(&c);
             match missed.last_mut() {
-                Some(m) if seen.dir_names[m.dir as usize] == d => m.files.push(c),
+                Some(m) if seen.dir_names[m.dir as usize] == d => m.files.push((c, at)),
                 _ => {
                     let st = dir_stamp(d);
                     let dir = seen.dir_id(d);
@@ -446,14 +454,14 @@ impl Host for NativeHost {
                         kept: st.is_none_or(|s| quiet(&s)),
                         dir,
                         anchor,
-                        files: vec![c],
+                        files: vec![(c, at)],
                     });
                 }
             }
         }
         let found_at = f.as_ref().map(|f| {
             let d = seen.dir_id(crate::inotify::split(&f.name).0);
-            (f.name.clone(), d)
+            (f.name.clone(), d, name_start(&f.name))
         });
         let l = Lookup {
             found: found_at,
@@ -507,16 +515,16 @@ impl Host for NativeHost {
                     l.trail.iter().all(|m| match (&m.stamp, &m.anchor) {
                         // (a directory not there, still not made)
                         (None, Some((a, name))) => w.quiet(*a, [&name[..]], c),
-                        _ => w.quiet(m.dir, m.files.iter().map(|f| crate::inotify::split(f).1), c),
+                        _ => w.quiet(m.dir, m.files.iter().map(|(f, at)| &f[*at..]), c),
                     }) && l
                         .found
                         .as_ref()
-                        .is_none_or(|(p, d)| w.quiet(*d, [crate::inotify::split(p).1], c))
+                        .is_none_or(|(p, d, at)| w.quiet(*d, [&p[*at..]], c))
                 });
                 let same = if quiet {
                     match (&l.found, last) {
                         (None, None) => true,
-                        (Some((p, _)), Some(last)) => seen.files.get(p).is_some_and(|(_, a)| {
+                        (Some((p, ..)), Some(last)) => seen.files.get(p).is_some_and(|(_, a)| {
                             std::sync::Arc::ptr_eq(a, last) || a[..] == last[..]
                         }),
                         _ => false,
@@ -525,7 +533,7 @@ impl Host for NativeHost {
                     // (its directories watched before it is checked, so a
                     // change after the check is an event the next look takes)
                     if let Some(w) = w.as_mut() {
-                        let found = l.found.as_ref().map(|&(_, d)| d);
+                        let found = l.found.as_ref().map(|&(_, d, _)| d);
                         let dirs = l.trail.iter().map(|m| match (&m.stamp, &m.anchor) {
                             (None, Some((a, _))) => *a,
                             _ => m.dir,
@@ -542,15 +550,15 @@ impl Host for NativeHost {
                             .entry(m.dir)
                             .or_insert_with(|| dir_stamp(&names[m.dir as usize]));
                         (m.kept && m.stamp == now)
-                            || m.files
-                                .iter()
-                                .all(|f| !std::fs::metadata(path(f)).is_ok_and(|m| m.is_file()))
+                            || m.files.iter().all(|(f, _)| {
+                                !std::fs::metadata(path(f)).is_ok_and(|m| m.is_file())
+                            })
                     }) && match (&l.found, last) {
                         // (found where it was, with the stamp it had just
                         // before its contents were read; two names can find
                         // one file)
                         (None, None) => true,
-                        (Some((p, _)), Some(last)) => seen.files.get(p).is_some_and(|(st, a)| {
+                        (Some((p, ..)), Some(last)) => seen.files.get(p).is_some_and(|(st, a)| {
                             stamp(p) == Some(*st)
                                 && (std::sync::Arc::ptr_eq(a, last) || a[..] == last[..])
                         }),

@@ -143,7 +143,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
 
     /// `preset_fontmetrics`.
     fn preset_fontmetrics(&mut self, f: i32) -> Result<[(i32, bool); 11], Jump> {
-        let size = self.pdf_font(f).size;
+        let size = self.pdf_font_ref(f).size;
         let font = self.fonts.get(f);
         let (slant, xh, quad) = (font.param(1), font.param(5), font.param(6));
         let mut d = [(0, true); 11];
@@ -259,7 +259,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             self.pdf.fontw.fd_tree.insert(key.clone(), fd);
         }
         // the /Widths array
-        let size = self.pdf_font(f).size;
+        let size = self.pdf_font_ref(f).size;
         let cw_objnum = self.pdf_new_objnum()?;
         self.pdf_begin_obj(cw_objnum, 1)?;
         self.pdf.out.print(b"[");

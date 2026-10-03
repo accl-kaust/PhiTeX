@@ -11132,3 +11132,43 @@ the index 119.75–119.77 M, with the searches too 120.06–120.09 M; cycles
 division, a call, so the searches cost a few more instructions than
 they save: a float's division is next. The harness: 14 cases identical
 in all three modes; the workspace's tests pass.
+
+## 2026-10-03 — A glyph shipped without taking the font table to change, a φ read again not hashed again, a trail's names split once (coordinator)
+
+The profile after da668f3 (the course's word edits and reverts, LTO with
+frame pointers) still had costs per glyph shipped and per rebuild:
+- The font table (3.7% of the samples): each glyph took the PDF state
+  of its font as `&mut` several times (`draw`'s first-use test and
+  resources, `pdf_font_type`, `pdf_begin_string`, `adv_char_width` and
+  `fm_entry`, `mark_glyph`), each `VTab::get_mut`: two `Arc::make_mut`,
+  each an atomic compare-and-swap and a store, and the font marked to be
+  versioned again. `pdf_font_ref` reads it as `pdf_font` reads it (the
+  same tracked read), the table not taken; `pdf_font_type` takes the
+  writer's scope only for a font whose type is not known yet;
+  `mark_glyph` takes the font only for a glyph not marked yet; and
+  `pdf_set_font` no longer clones the page's font list to look in it.
+- `phi_seeds` (1.5%): each rebuild read again the stored names the link
+  had rewritten (`.aux`, `.toc`, `.out`: their stamps changed), into new
+  buffers, so the versions kept by buffer missed and the names' bytes
+  were hashed again, a byte at a time. A version kept for other bytes
+  is checked against them (compared) before they are hashed.
+- The loads' check (`unchanged`, 3.7%): for a directory with events
+  since the last check (the output directory, the edited file's), each
+  candidate a lookup tried there was split at its last `/` to find its
+  name. A trail keeps where each candidate's name begins.
+
+Tried and dropped: a file read again in a rebuild's check with the same
+bytes kept its old buffer, so the φ's version would be found by buffer.
+A buffer's identity means something there: `InputState::mapped` follows
+the edits from an open file's buffer by identity, and an edit's new
+buffer could then be one it came from. The harness's readback case,
+in one-trip mode, looped there for good.
+
+Instructions per rebuild (the course's 6 word edits and reverts, perf
+stat): da668f3 120.06 M; with this and the next commit 114.62 M
+(−4.5%), cycles 97.9 → 94.5 M (one round). With the dropped hunk it was
+113.10 M: the tracker's versions of large loads are kept by buffer too
+(`contents_version`), so a file the link rewrote is hashed again when it
+is read again; comparing its bytes first would recover that. The
+harness: 14 cases identical in all three modes; the workspace's tests
+pass.
