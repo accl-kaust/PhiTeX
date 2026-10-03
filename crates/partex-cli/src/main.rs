@@ -1272,6 +1272,7 @@ fn rebuild_ssa(
     let link_ms = lr.link_ms;
     eprintln!("partex: ssa rebuild {n}: link: {}", lr.how);
     let s = tex.tracker().rec.borrow().rt.stats;
+    report_cold(n, &rr);
     eprintln!(
         "partex: ssa rebuild {n}: {:.1} ms (the rebuild {millis:.1} ms, the link {link_ms:.1} ms), \
          the edited page ready {:.2} ms after the rebuild, files written {:.1} ms, \
@@ -1385,6 +1386,16 @@ fn rebuild_deadline() -> Option<partex_core::ssa::Deadline> {
         clock,
         clock_ns().saturating_add(ms.saturating_mul(1_000_000)),
     ))
+}
+
+/// A rebuild's cascades that went cold (`RebuildReport::cold`).
+fn report_cold(n: usize, rr: &partex_core::ssa::RebuildReport) {
+    if rr.cold > 0 {
+        eprintln!(
+            "partex: ssa rebuild {n}: cold after {} cascades (the old steps after each retired)",
+            rr.cold
+        );
+    }
 }
 
 /// Nanoseconds since the epoch: the trips' clock.

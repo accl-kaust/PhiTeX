@@ -137,6 +137,14 @@ IMAGES_EDITS = [
     ("edits.tex", "height=2cm]{images-hand}", "height=2cm]{images-fig}"),
     ("edits.tex", "height=2cm]{images-fig}", "height=2cm]{images-hand}"),
 ]
+# preamble.tex (the Overleaf extension's): a package added to the
+# preamble, which makes every step after it new (the cascade goes cold:
+# the old steps after it retired at once), taken away, then a word
+PREAMBLE_EDITS = [
+    ("\\usepackage{tikz}\n", "\\usepackage{tikz}\n\\usepackage{circuitikz}\n"),
+    ("\\usepackage{tikz}\n\\usepackage{circuitikz}\n", "\\usepackage{tikz}\n"),
+    ("Cool init?", "Cool init!"),
+]
 # inputs.tex: the file only tested for, edited; a line appended to the
 # file \input and taken away; a word of it, whose sum is printed
 INPUTS_EDITS = [
@@ -334,6 +342,7 @@ def all_cases():
             seed=2,
         ),
         latex("windows", "windows.tex", "pdflatex", WINDOW_EDITS),
+        latex("preamble", "preamble.tex", "pdflatex", PREAMBLE_EDITS),
         Case(
             "images",
             {"edits.tex": "images.tex", **{f: f for f in ("images-fig.pdf", "images-hand.pdf")}},

@@ -11606,3 +11606,45 @@ setup left (the steps before the first that ships), a read of a later
 definition mispredicted unless its version is the setup's; which
 classes of addresses block, and the units that validate as classes are
 taken as predicted, the class that validates the most first.
+
+## 2026-10-03: A cascade gone cold: the preamble edit at a cold build's cost
+
+The Overleaf extension's preamble edit (`\usepackage{circuitikz}` added
+to a one-page article with a TikZ picture and a `circuitikz`
+environment) ran 25,038 new steps in 55 s natively, against 1.2 s for
+the cold build. Each new step ran as a rebuild runs any step: the old
+build's steps after it were still live, their definitions later than
+it, so the reads predicted for it (those of the two steps predicting it,
+about 3,100 slots) were placed at their reaching definitions before it
+ran and put back after (77.2 M slots each way), and its reads were
+checked for later definitions (8,997 runs dropped). A frame-pointer
+profile put about 78% of the rebuild in that placing and putting back
+(`run_step`'s candidates, `latest`, the B-tree of slots placed, the
+values cloned and dropped).
+
+A cascade (new steps until a run ends where an old step ended) now
+weighs what it has cost (its commands, a slot placed or put back as
+half of one) against the old steps after it (their last runs' commands,
+looked at once the cost passes 50,000). Past them, the rest of the job
+run cold costs less than going on: those steps are retired at once,
+the last first (`go_cold`), and each new step after that is the fold's
+last. No definition is later than it, so nothing is placed, checked or
+put back, as in a cold build: but for the page's nodes, which the
+arrays hold only up to the list's length. Those the step is predicted
+to read are placed and put back, and a run that read one not placed is
+dropped, as before. (A first version placed none of them: page 1's ship
+read stand-ins and lost the empty `\write` LaTeX makes there, an empty
+line of the log; PDF and `.aux` were the same.) The choice is ski
+rental's: at most about twice what the better of going on and going cold
+would have cost; an edit whose cascade meets an old step soon never
+weighs anything.
+
+The repro: 55.0 s → 1.9 s (LTO, 1.88 and 1.90 s; 25,037 new steps, 1
+run dropped, 78 K slots placed, 129 K put back), the PDF identical to
+plain runs of the two texts and the log too (its string statistics
+aside, as before). `scripts/ssa-edits` has `preamble`
+(`tests/e2e/preamble.tex`, the extension's document): the package
+added, taken away, then a word.
+
+Tests: ssa-edits 17/17 (99 stages, `--brief --fixpoint`), e2e 36/36,
+clippy, rustfmt.
