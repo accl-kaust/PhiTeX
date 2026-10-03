@@ -11505,7 +11505,8 @@ workspace's tests, clippy.
 ## 2026-10-03 — A terminal that moves: the live line, the watch's log and keys (agent cli-ux)
 
 Branch `cli-ux`: `6532acc` (the progress board), `15d62d8` (the
-terminal), `b80f57a` (rustfmt of seven files of main), and this entry.
+terminal), `b80f57a` (rustfmt of seven files of main), `375b998` (this
+entry), `85932d6` (the bar's width steady, a watch's line shorter).
 
 **Why.** `partex watch` printed `Rebuilding (inputs changed)` and then
 `Pass 1 |  0 ms`, which stayed as it was until the rebuild was over.
@@ -11550,8 +11551,9 @@ the build before). Nothing is drawn for a build quicker than 150 ms.
 build: `Finished big.pdf · 74 pages · 244 KB · 1 pass · 1.47 s · 10
 warnings` (the PDF an OSC 8 hyperlink where the terminal has them). A
 watch logs one line per rebuild, `18:13:53 ↻ big.tex:10 ✓ big.pdf ·
-1.72 s · 74 pages · 54% run again` (the first line each edit changed,
-from the machine's old and new contents, `Watch::last_changes`), then
+1.72 s · 54% run again` (the first line each edit changed,
+from the machine's old and new contents, `Watch::last_changes`; the
+pages and warnings only when their counts changed), then
 the errors that are new in full (one that stays is its headline, `as
 before`), the warnings that are new, and how many went, under a footer
 `Watching big.tex · ▁▃█▁ last 372 ms · r rebuild  o open  q quit  w

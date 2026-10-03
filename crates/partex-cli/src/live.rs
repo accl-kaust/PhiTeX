@@ -516,7 +516,10 @@ fn task_line(t: &Task, s: Style, now: Instant, width: usize) -> String {
         Some(Duration::from_secs_f64((total - ran).max(0.1)))
     });
     let tail = match left {
-        Some(l) => format!("{elapsed}{}", s.dim(&format!(" · {} left", ticking(l)))),
+        Some(l) => format!(
+            "{elapsed}{}",
+            s.dim(&format!("{}{} left", s.sep(), ticking(l)))
+        ),
         None => elapsed,
     };
     let sep = s.dim(s.sep());
