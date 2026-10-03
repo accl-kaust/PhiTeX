@@ -524,6 +524,10 @@ pub struct Tex<H: Host, T: Tracker = Untracked> {
     /// the table nodes' handles point into, what the walk collects, and
     /// how the sources' edits move them. `None`: off, and free.
     pub(crate) org: Option<alloc::boxed::Box<crate::srcmap::OrgState>>,
+    /// Display lists (`displist.rs`, DESIGN 4.5), when they are kept: the
+    /// open stream's literals, the streams shipped (without a recorder),
+    /// and what the queries made. `None`: off, and free.
+    pub(crate) dl: Option<alloc::boxed::Box<crate::displist::DlState>>,
 }
 
 /// web2c's `const_chk` bounds (merged §11): (inf, sup) per parameter.
@@ -820,6 +824,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             diag: p.diagnostics.then(DiagState::default),
             effects: None,
             org: None,
+            dl: None,
             params: p,
         }
     }

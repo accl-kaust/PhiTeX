@@ -319,7 +319,7 @@ pub(crate) struct ShipState {
     pub(crate) page_group_val: i32,
     pub font_list: Vec<i32>,
     obj_list: Vec<i32>,
-    xform_list: Vec<i32>,
+    pub xform_list: Vec<i32>,
     pub ximage_list: Vec<i32>,
     text_procset: bool,
     /// `pdf_image_procset`.
@@ -1168,6 +1168,9 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             }
             DIRECT_PAGE => self.pdf_end_text(),
             _ => self.pdf_end_string_nl(),
+        }
+        if self.display_lists_on() {
+            self.display_literal(text.len(), mode);
         }
         self.pdf.out.print(text);
         self.pdf.out.out(b'\n');
@@ -2266,6 +2269,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         // start the stream of page/form contents
         self.pdf_begin_stream();
         self.origins_stream_begin();
+        self.display_stream_begin();
         self.pdf.ship.recording = true;
         let r = self.pdf_ship_contents(p, shipping_page);
         let flushed = self.flush_drawn();
@@ -2283,6 +2287,15 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             let what = if shipping_page { "page" } else { "form" };
             let m = alloc::format!("{n} unmatched \\pdfsave after {what} shipout");
             return self.pdftex_fail(None, m.as_bytes());
+        }
+        // (display lists: the stream as written, and its box)
+        if self.display_lists_on() {
+            let (w, h) = if shipping_page {
+                (self.pdf.ship.page_width, self.pdf.ship.page_height)
+            } else {
+                (p.width, p.height + p.depth)
+            };
+            self.display_stream_end(form, w, h);
         }
         self.pdf_end_stream();
         self.pdf_ship_resources(last_resources, p, shipping_page, saved_lists)
@@ -2604,6 +2617,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         let mediabox_given = attr_text
             .as_ref()
             .is_some_and(|s| substr_of_str(b"/MediaBox", s));
+        self.display_page_object(attr_text.as_deref());
         if !mediabox_given {
             self.pdf.out.print(b"/MediaBox [0 0 ");
             let (w, h) = (self.pdf.ship.page_width, self.pdf.ship.page_height);

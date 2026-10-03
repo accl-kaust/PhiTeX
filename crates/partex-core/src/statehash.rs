@@ -1738,8 +1738,9 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             // (outputs, not state; with them, the DVI file's position is
             // state, `DviState::hash_state`)
             effects,
-            // (glyph origins: a side channel, not state)
+            // (glyph origins and display lists: side channels, not state)
             org: _,
+            dl: _,
         } = self;
         let mut c = Canon::new();
         if let Some((m, s)) = memo {

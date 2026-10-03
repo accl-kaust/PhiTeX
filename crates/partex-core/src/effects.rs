@@ -157,6 +157,10 @@ pub enum Effect {
     /// The glyphs a page's or form's content stream shows, with glyph
     /// origins on (`srcmap.rs`, DESIGN 4.4): no bytes of any file.
     Origins(crate::srcmap::StreamOrgs),
+    /// A page's or form's content stream as shipped, with display lists
+    /// on (`displist.rs`, DESIGN 4.5): what its list is made from; no
+    /// bytes of any file.
+    Display(alloc::sync::Arc<crate::displist::Shipped>),
 }
 
 /// Where text goes.
@@ -883,9 +887,11 @@ fn layout_timed<E: Executor>(
             Effect::Shipping(c) => pages.push(*c),
             Effect::Close(f) => closed.push(*f),
             Effect::Open { file, name, kind } => opened.push((*file, name.clone(), *kind)),
-            // (glyph origins: read by `Tex::origins`, not linked; the rest
-            // resolved before: `resolve_numbers`)
+            // (glyph origins and display lists: read by `Tex::origins` and
+            // `Tex::display_list`, not linked; the rest resolved before:
+            // `resolve_numbers`)
             Effect::Origins(_)
+            | Effect::Display(_)
             | Effect::ObjRef { .. }
             | Effect::ObjStmRef { .. }
             | Effect::Num(..)
@@ -1078,6 +1084,7 @@ partex_engine::persist_enum!(Effect {
     Deflate { file, level, parts },
     Open { file, name, kind },
     Origins(a0),
+    Display(a0),
 });
 
 #[cfg(test)]
@@ -1166,6 +1173,7 @@ mod persist_tests {
                 form: 4,
                 glyphs: alloc::vec![1, 2, crate::srcmap::FORM | 7].into(),
             }),
+            Effect::Display(alloc::sync::Arc::new(crate::displist::Shipped::example())),
         ];
         let mut kinds = alloc::collections::BTreeSet::new();
         for e in &all {
@@ -1191,9 +1199,10 @@ mod persist_tests {
                 Effect::Deflate { .. } => 18,
                 Effect::Open { .. } => 19,
                 Effect::Origins(_) => 20,
+                Effect::Display(_) => 21,
             });
         }
-        assert_eq!(kinds.len(), 21);
+        assert_eq!(kinds.len(), 22);
         let mut s = Saver::new();
         all.save(&mut s);
         let bytes = s.into_bytes();

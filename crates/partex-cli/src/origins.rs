@@ -27,7 +27,7 @@ pub fn setup<T: Tracker>(tex: &mut Tex<NativeHost, T>) {
 }
 
 /// A JSON string.
-fn json_str(out: &mut Vec<u8>, s: &str) {
+pub(crate) fn json_str(out: &mut Vec<u8>, s: &str) {
     out.push(b'"');
     for c in s.chars() {
         match c {

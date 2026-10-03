@@ -11951,3 +11951,74 @@ input before and after its heading; placement from glyph lists,
 synthesized glyphs passed over), and the `glyphs` e2e job's check of
 `partex outline glyphs.tex --json` against the heading's place in
 pdfTeX's PDF.
+
+
+## 2026-10-03 — Display lists: each page's drawing without the PDF (agent display-list) — partial
+
+For the PhiTeX Overleaf extension's preview, which today links the whole
+PDF and re-parses it to draw one page (about 37 ms of a 65 ms
+keystroke): a per-page display list from shipout, so the PDF is linked
+only for the download. DESIGN 4.5 has the design;
+`partex_core::displist`'s documentation is the reference.
+
+What was built:
+
+- **The walk** (`partex_engine::pdftext`): `Text` gained an operator
+  hook (`op`, with the token's offset and operands), a glyph hook with
+  the text matrix and state (`shown`) and `end`; `pdftext::list` makes
+  a stream's items (glyphs, glyph matrices, pdfTeX's rules from `re f`
+  and its stroked thin lines, literals by the spans the ship noted,
+  `XObject`s with the CTM), `pdftext::glyphs` the codes in glyph
+  origins' order, forms walked where drawn. `pdfread::number_value`
+  reads a number as the PDF reader does, for widths and boxes.
+- **The record** (`displist.rs`): at each content stream's end the ship
+  keeps the stream's bytes (`PdfOut::stream_bytes`: `zip`'s, or the
+  pending bytes since the stream's start at level 0), the literals'
+  spans (`emit_literal`), the fonts (`FontRec`: TFM name, map entry,
+  size, the TFM's widths as `/Widths` prints them), forms and images, and
+  the box; a page's after its page object (`\pdfpageattr`). SSA:
+  `Effect::Display`, collected from the steps' effects like origins.
+- **The API**: `Tex::set_display_lists`, `display_pages`,
+  `display_hashes`, `display_list`, `display_form`, `display_glyphs`,
+  `display_font`, `display_image`, `display_stream`, `display_forms`.
+  Font ids are interned per engine (stable across rebuilds); form and
+  image ids are object numbers. `writet1::builtin_encoding` reads a Type
+  1 file's own encoding; `epdf::included_form_box` an included page's
+  `/BBox` and `/Matrix`.
+- **The side file** `PARTEX_DISPLAY=1` (`partex-cli/src/display.rs`):
+  `<job>.display.jsonl`, fonts numbered by first use so a rebuild's file
+  and a cold build's of the same text are the same bytes.
+
+Rejected: building the items in the encoder from pdfTeX's positions
+(`pdf_h`, `delta_h`): exact in sp, but not the PDF's (its rounding of
+`Td`, kerns and `/Widths`), and a second implementation of the viewer's
+arithmetic; walking the linked PDF: the point is not to link.
+
+Tests (all passed): `pdftext`'s unit tests of `list` and `glyphs` (text,
+a rule, a thin rule, a literal with text and a `cm`, scaled text, a
+form, an image, a turned rule); the effects' round trip with
+`Effect::Display`; the `display` e2e job (`tests/e2e/display.tex`: fonts
+and sizes, math, rules and a table, colors, `\rotatebox`,
+`\scalebox`, TikZ with an opacity and a turned node, a form drawn twice,
+an included PDF page, a PNG, literals in each mode, a page with
+`/Rotate 90`) against pdfTeX (every file the same with display lists
+on) and each page's list against `pdftext` over the PDF: 254 items, 152
+glyphs placed bit for bit; `microtype.tex` (font expansion, its `Tm`:
+glyph matrices 0.98 to 1.03): 3,741 items, 3,419 glyphs; SSA rebuilds
+(a comment line, then a paragraph inserted) the same side file and PDF
+as cold builds, each checked; the `glyphs` job with display lists on too
+(plain and both SSA rebuilds, glyph counts equal to origins'). fmt,
+clippy (both feature sets) and the wasm32 check pass.
+
+Left (stopped at the coordinator's request):
+- the cost on the PGF subset (off against c651cf3, and on) is not
+  measured; the baseline binary is built (`target/base/partex`);
+- `cargo xtask check` was not run whole; the e2e jobs above ran on the
+  code before `cargo fmt` (formatting only since);
+- literals naming resources (pgf's opacity `gs`, shadings, patterns:
+  `\pdfpageresources` and `\pdfobj` objects) are not resolved: the list
+  carries the literal, not the resource it names;
+- form and image ids are object numbers, which an edit making objects
+  before them can change (images are recognized by their bytes);
+- DESIGN 4.5 is a short note; the extension's contract (the item types'
+  documentation) is in `pdftext` and `displist.rs`.

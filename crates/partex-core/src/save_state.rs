@@ -263,11 +263,16 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             fonts,
             diag,
             effects,
-            // (glyph origins: a session's side channel, not saved; a state
-            // recording them is not saved)
+            // (glyph origins and display lists: a session's side channels,
+            // not saved; a state recording them is not saved)
             org,
+            dl,
         } = self;
-        if memo.enabled || effects.as_ref().is_some_and(|e| !e.is_empty()) || org.is_some() {
+        if memo.enabled
+            || effects.as_ref().is_some_and(|e| !e.is_empty())
+            || org.is_some()
+            || dl.is_some()
+        {
             return false;
         }
         s.mark("params");
@@ -889,6 +894,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             diag: Persist::load(l)?,
             effects: bool::load(l)?.then(alloc::vec::Vec::new),
             org: None,
+            dl: None,
         })
     }
 
