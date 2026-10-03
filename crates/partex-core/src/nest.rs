@@ -396,7 +396,9 @@ impl<H: Host, T: Tracker> Tex<H, T> {
 
     /// §214: `tail_append(p)`: a node goes to the current list (an mlist
     /// in math mode).
-    pub(crate) fn tail_append(&mut self, p: Node) {
+    pub(crate) fn tail_append(&mut self, mut p: Node) {
+        // (`SyncTeX`: a node made now is placed here)
+        self.sync_node(&mut p);
         if self.mode().abs() == MMODE {
             self.mlist_mut().push(Item::Node(p));
         } else {

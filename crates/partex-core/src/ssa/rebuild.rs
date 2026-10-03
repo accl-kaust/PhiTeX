@@ -894,6 +894,7 @@ fn same_file(x: Option<&AlphaFile>, y: Option<&AlphaFile>) -> bool {
                 && x.line_open == y.line_open
                 && x.lines == y.lines
                 && x.name == y.name
+                && x.synctex_tag == y.synctex_tag
                 && same_data(&x.data, &y.data)
         }
         _ => false,

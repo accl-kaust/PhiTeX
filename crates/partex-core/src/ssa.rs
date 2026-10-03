@@ -2692,7 +2692,9 @@ fn open_paragraph<H: Host>(
     }
     let mut r = tex.tracker.rec.borrow_mut();
     let rr = &mut *r;
-    let found = if tex.tracker.probing(Func::Step) {
+    // (with `SyncTeX`, no step is taken from another's record: its nodes'
+    // places are where it ran)
+    let found = if tex.tracker.probing(Func::Step) && !tex.synctex_on() {
         rr.rt.probe(&View { tex, rec: &rr.st }, Func::Step, &args)
     } else {
         Found::New
@@ -3107,6 +3109,7 @@ fn scalar_get<H: Host, T: Tracker>(t: &Tex<H, T>, k: u16) -> Option<i32> {
         OUTPUT_FILE_NAME => t.output_file_name,
         LOG_OPENED => b(t.log_opened),
         OPEN_PARENS => t.open_parens,
+        SYNCTEX_TAGS => t.synctex_tags,
         SYS_TIME => t.sys_time,
         SYS_DAY => t.sys_day,
         SYS_MONTH => t.sys_month,
@@ -3158,6 +3161,7 @@ fn scalar_set<H: Host, T: Tracker>(t: &mut Tex<H, T>, k: u16, v: i32) {
         OUTPUT_FILE_NAME => t.output_file_name = v,
         LOG_OPENED => t.log_opened = v != 0,
         OPEN_PARENS => t.open_parens = v,
+        SYNCTEX_TAGS => t.synctex_tags = v,
         SYS_TIME => t.sys_time = v,
         SYS_DAY => t.sys_day = v,
         SYS_MONTH => t.sys_month = v,

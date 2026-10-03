@@ -203,6 +203,7 @@ const VALUE_OPTIONS: &[&str] = &[
     "output-directory",
     "output-format",
     "progname",
+    "synctex",
     "translate-file",
 ];
 
@@ -372,6 +373,7 @@ fn parse_command_line() -> CommandLine {
                 fmt_name = Some(o[4..].to_owned());
             }
             Some(o) if o.starts_with("progname=") => user_progname = Some(o[9..].to_owned()),
+            Some(o) if o.starts_with("synctex=") => origins::set_synctex(&o[8..]),
             Some(o) if o.starts_with("engine=") => {
                 engine = match &o[7..] {
                     "tex" => Flavor::Tex,

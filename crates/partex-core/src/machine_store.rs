@@ -1086,6 +1086,7 @@ mod tests {
                         &[partex_engine::node::Node::Kern {
                             width: 12,
                             subtype: 0,
+                            sync: partex_engine::origin::Side(0),
                         }][..],
                     ),
                 ],

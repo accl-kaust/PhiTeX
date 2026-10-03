@@ -11951,3 +11951,45 @@ input before and after its heading; placement from glyph lists,
 synthesized glyphs passed over), and the `glyphs` e2e job's check of
 `partex outline glyphs.tex --json` against the heading's place in
 pdfTeX's PDF.
+
+## 2026-10-03: SyncTeX, byte for byte, in plain runs and SSA rebuilds (branch `synctex`; partial)
+
+`-synctex=N` writes pdfTeX's `.synctex.gz` (DESIGN 4.5): `synctex.c`'s
+controller ported, fed by events where pdfTeX's hooks are, nodes'
+places as handles outside their values.
+
+Checked against pdfTeX 1.40.29 run in the same directory (the `Input:`
+lines are absolute): a plain TeX document (font kerns, ligatures, math,
+rules, leaders of both kinds, `\copy`, an alignment, a footnote,
+`\vadjust`, discretionaries, hyphenation, accents, forms, a display, two
+pages, an `\input`), the same file, terminal and PDF for `-synctex=1`,
+`-1`, `2`, `4`, `8`, `9`, `15`, `-12`, `0` and batch mode; the e2e
+`glyphs.tex` (LaTeX, TikZ, graphicx, a savebox, a form, an included
+PDF). In SSA mode the cold build's file is the same, and so is each
+rebuild's against pdfTeX on the edited text: twelve edits of the plain
+document (a comment line, a paragraph inserted with the next one's first
+words, a word, blank lines, a line deleted, two lines joined, a line
+split, an edit in the `\input` file, a line of an alignment split) and
+six of `glyphs.tex` (the same kinds, and a TikZ node's text).
+
+What it took, beyond the port: pdfTeX in e-TeX mode turns glue set with
+its box into a kern while shipping it out ("Handle a glue node for mixed
+direction typesetting"), so its record is `k` with the glue's width;
+the glue at a line break is reused as `\rightskip`, keeping its line;
+`synctexcurrent`'s `=` compares the context's `curv`, not the point it
+prints. In SSA mode a rebuild keeps a step whose reads are the same,
+and with it the nodes it made, though a step run again before it made
+equal nodes on other lines (two lines joined: the paragraph's lines
+kept, their nodes' places stale): places are hashed there, each a handle
+of its own, so that a node made again is another version.
+
+Partial, stopped here: `cargo fmt` and `clippy --all-targets` clean,
+`partex-engine`'s and `partex-core`'s tests pass; `cargo xtask e2e`
+(the off path's byte identity included) and `scripts/ssa-edits` were
+not run on this commit. Not done: the DVI mode, a document's own
+`\synctex` without the option, persisted builds and sessions with it,
+an e2e job (the checks above are scripts, in `target/stx`), and the
+overhead's measure, off and on. A case `synctex` is added to
+`scripts/ssa-edits` (its files compared as text, the two run
+directories' names replaced), not yet run.
+

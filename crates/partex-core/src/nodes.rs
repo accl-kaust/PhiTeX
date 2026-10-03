@@ -30,16 +30,25 @@ pub(crate) const NEW_RULE: Node = Node::Rule {
     width: RUNNING,
     height: RUNNING,
     depth: RUNNING,
+    sync: partex_engine::origin::Side(0),
 };
 
 /// §153: glue with spec `spec`.
 pub(crate) fn new_glue(spec: GlueSpec) -> Node {
-    Node::Glue { spec, subtype: 0 }
+    Node::Glue {
+        spec,
+        subtype: 0,
+        sync: partex_engine::origin::Side(0),
+    }
 }
 
 /// §156
 pub(crate) fn new_kern(width: Scaled) -> Node {
-    Node::Kern { width, subtype: 0 }
+    Node::Kern {
+        width,
+        subtype: 0,
+        sync: partex_engine::origin::Side(0),
+    }
 }
 
 /// §147
@@ -47,6 +56,7 @@ pub(crate) fn new_math(width: Scaled, s: i32) -> Node {
     Node::Math {
         width,
         subtype: u8::try_from(s).unwrap_or(0),
+        sync: partex_engine::origin::Side(0),
     }
 }
 
@@ -85,5 +95,6 @@ pub(crate) fn param_glue(spec: GlueSpec, n: i32) -> Node {
     Node::Glue {
         spec,
         subtype: u8::try_from(n + 1).unwrap_or(0),
+        sync: partex_engine::origin::Side(0),
     }
 }

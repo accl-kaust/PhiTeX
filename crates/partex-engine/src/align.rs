@@ -152,6 +152,7 @@ pub fn set_rows(
                 mut width,
                 mut height,
                 mut depth,
+                sync,
             } => {
                 // §806
                 if width == RUNNING {
@@ -163,10 +164,12 @@ pub fn set_rows(
                 if depth == RUNNING {
                     depth = p.depth;
                 }
+                // (the rule changed in place: its place kept)
                 let r = Node::Rule {
                     width,
                     height,
                     depth,
+                    sync,
                 };
                 if params.shift == 0 {
                     out.push(r);
@@ -186,6 +189,7 @@ fn tab(spec: GlueSpec) -> Node {
     Node::Glue {
         spec,
         subtype: TAB_SKIP + 1,
+        sync: crate::origin::Side(0),
     }
 }
 
@@ -225,6 +229,8 @@ fn set_unset_box(
         list: Vec::with_capacity(q.list.len()),
         seal: None,
         ver: 0,
+        // (the unset row made a box: its place kept)
+        sync: q.sync,
     };
     if params.vertical {
         row.height = p.height;
@@ -296,6 +302,7 @@ fn set_unset_box(
             list: Vec::new(),
             seal: None,
             ver: 0,
+            sync: r.sync,
         };
         let d;
         if params.vertical {

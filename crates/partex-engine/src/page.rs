@@ -204,6 +204,7 @@ pub fn prune_page_top(
                         ..split_top_skip.copy()
                     },
                     subtype: SPLIT_TOP_SKIP + 1,
+                    sync: crate::origin::Side(0),
                 });
                 out.push(n);
                 out.extend(nodes);

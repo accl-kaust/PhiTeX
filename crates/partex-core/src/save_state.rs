@@ -123,6 +123,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             cur_input,
             in_open,
             open_parens,
+            synctex_tags,
             input_file,
             line_stack,
             grp_stack,
@@ -263,11 +264,16 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             fonts,
             diag,
             effects,
-            // (glyph origins: a session's side channel, not saved; a state
-            // recording them is not saved)
+            // (glyph origins and `SyncTeX`: a session's side channels, not
+            // saved; a state recording them is not saved)
             org,
+            sync,
         } = self;
-        if memo.enabled || effects.as_ref().is_some_and(|e| !e.is_empty()) || org.is_some() {
+        if memo.enabled
+            || effects.as_ref().is_some_and(|e| !e.is_empty())
+            || org.is_some()
+            || sync.is_some()
+        {
             return false;
         }
         s.mark("params");
@@ -463,6 +469,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         in_open.save(s);
         s.mark("open_parens");
         open_parens.save(s);
+        synctex_tags.save(s);
         s.mark("input_file");
         input_file.save(s);
         s.mark("line_stack");
@@ -749,6 +756,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             cur_input: Persist::load(l)?,
             in_open: Persist::load(l)?,
             open_parens: Persist::load(l)?,
+            synctex_tags: Persist::load(l)?,
             input_file: Persist::load(l)?,
             line_stack: Persist::load(l)?,
             grp_stack: Persist::load(l)?,
@@ -889,6 +897,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             diag: Persist::load(l)?,
             effects: bool::load(l)?.then(alloc::vec::Vec::new),
             org: None,
+            sync: None,
         })
     }
 

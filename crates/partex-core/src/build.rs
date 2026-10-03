@@ -106,7 +106,8 @@ pub(crate) fn append_list(
 
 impl<H: Host, T: Tracker> Tex<H, T> {
     /// Append `src` to the current list ([`append_list`]).
-    pub(crate) fn append_nodes(&mut self, src: Vec<Node>) {
+    pub(crate) fn append_nodes(&mut self, mut src: Vec<Node>) {
+        self.sync_list(&mut src);
         // (the current list read and written, as `nodes_mut`)
         let _ = self.nodes_mut();
         let t = self.org.as_deref_mut().map(|o| &mut o.table);
@@ -125,7 +126,11 @@ impl<H: Host, T: Tracker> Tex<H, T> {
     /// §1060
     pub(crate) fn append_glue(&mut self) -> Result<(), Jump> {
         let (spec, subtype) = self.scan_appended_glue()?;
-        self.tail_append(Node::Glue { spec, subtype });
+        self.tail_append(Node::Glue {
+            spec,
+            subtype,
+            sync: partex_engine::origin::Side(0),
+        });
         Ok(())
     }
 
@@ -157,6 +162,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         self.tail_append(Node::Kern {
             width: self.cur_val,
             subtype: u8::try_from(s).unwrap_or(0),
+            sync: partex_engine::origin::Side(0),
         });
         Ok(())
     }
@@ -280,7 +286,11 @@ impl<H: Host, T: Tracker> Tex<H, T> {
 
     /// §1075
     pub(crate) fn box_end(&mut self, box_context: i32) -> Result<(), Jump> {
-        let cur_box = self.cur_box.take();
+        let mut cur_box = self.cur_box.take();
+        // (`SyncTeX`: a box made now is placed here)
+        if let Some(b) = &mut cur_box {
+            self.sync_node(b);
+        }
         if box_context < BOX_FLAG {
             // §1076: append box `cur_box` to the current list, shifted by
             // `box_context`.
@@ -292,7 +302,8 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                 }
                 if self.mode().abs() == VMODE {
                     self.append_to_vlist(Node::Box(b));
-                    if let Some(adjust) = self.adjust.take() {
+                    if let Some(mut adjust) = self.adjust.take() {
+                        self.sync_list(&mut adjust);
                         self.nodes_mut().extend(adjust);
                     }
                     if self.mode() > 0 {
@@ -337,6 +348,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                         spec,
                         kind,
                         leader: cur_box,
+                        sync: partex_engine::origin::Side(0),
                     })));
                 } else {
                     self.print_err(b"Leaders not followed by proper glue");
@@ -365,6 +377,13 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             COPY_CODE => {
                 self.scan_register_num()?;
                 self.cur_box = self.box_reg(self.cur_val).cloned().map(Node::Box);
+                // (`SyncTeX`: a copy's rules are made now)
+                if self.synctex_on()
+                    && let Some(mut b) = self.cur_box.take()
+                {
+                    self.sync_copied(core::slice::from_mut(&mut b));
+                    self.cur_box = Some(b);
+                }
             }
             LAST_BOX_CODE => {
                 // §1080: if the current list ends with a box node, delete it
@@ -516,7 +535,8 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                 + self.hyph.cur_lang,
         );
         if indented {
-            let indent = self.indent_box();
+            let mut indent = self.indent_box();
+            self.sync_node(&mut indent);
             self.nodes_mut().push(indent);
         }
         self.begin_toks_at(EVERY_PAR_LOC, EVERY_PAR_TEXT)?;
@@ -558,7 +578,8 @@ impl<H: Host, T: Tracker> Tex<H, T> {
     pub(crate) fn indent_in_hmode(&mut self) {
         if self.cur_chr > 0 {
             // \indent
-            let p = self.indent_box();
+            let mut p = self.indent_box();
+            self.sync_node(&mut p);
             if self.mode().abs() == HMODE {
                 self.set_space_factor(1000);
                 self.nodes_mut().push(p);
@@ -817,7 +838,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             ]);
             return self.error();
         }
-        let list = if let Some(open) = self.unsealed_box(&p) {
+        let mut list = if let Some(open) = self.unsealed_box(&p) {
             // (a sealed line: its contents, read)
             if c != COPY_CODE {
                 let _ = self.take_box(self.cur_val);
@@ -830,6 +851,10 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             let b = self.take_box(self.cur_val).unwrap_or_default();
             Arc::try_unwrap(b).map_or_else(|b| b.list.clone(), |b| b.list)
         };
+        if c == COPY_CODE {
+            // (`SyncTeX`: a copy's rules are made now)
+            self.sync_copied(&mut list);
+        }
         self.append_nodes(without_margin_kerns(list));
         Ok(())
     }
@@ -845,6 +870,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         self.tail_append(Node::Kern {
             width: italic,
             subtype: subtype(EXPLICIT),
+            sync: partex_engine::origin::Side(0),
         });
     }
 
@@ -1018,15 +1044,19 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             }
             let delta: Scaled =
                 zround(f64::from(w - a) / 2.0 + f64::from(h) * t - f64::from(x) * s);
-            self.nodes_mut().push(Node::Kern {
-                width: delta,
-                subtype: subtype(ACC_KERN),
-            });
-            self.append_nodes(alloc::vec![p]);
-            self.nodes_mut().push(Node::Kern {
-                width: -a - delta,
-                subtype: subtype(ACC_KERN),
-            });
+            self.append_nodes(alloc::vec![
+                Node::Kern {
+                    width: delta,
+                    subtype: subtype(ACC_KERN),
+                    sync: partex_engine::origin::Side(0),
+                },
+                p,
+                Node::Kern {
+                    width: -a - delta,
+                    subtype: subtype(ACC_KERN),
+                    sync: partex_engine::origin::Side(0),
+                },
+            ]);
             p = q;
         }
         self.append_nodes(alloc::vec![p]);

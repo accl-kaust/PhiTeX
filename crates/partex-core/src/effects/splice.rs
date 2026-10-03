@@ -243,6 +243,7 @@ impl Slot {
                 // (written by the resolution of virtual numbers only; glyph
                 // origins, read by `Tex::origins`)
                 Effect::Origins(_)
+                | Effect::Synctex(_)
                 | Effect::ObjRef { .. }
                 | Effect::ObjStmRef { .. }
                 | Effect::FontLoad(_)

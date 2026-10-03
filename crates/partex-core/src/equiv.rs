@@ -514,7 +514,10 @@ impl<H: Host, T: Tracker> Tex<H, T> {
 
     /// `box(n):=b`: tex.web's direct assignment (no save stack entry,
     /// the level stays).
-    pub(crate) fn set_box_reg(&mut self, n: i32, b: Option<Arc<BoxNode>>) {
+    pub(crate) fn set_box_reg(&mut self, n: i32, mut b: Option<Arc<BoxNode>>) {
+        if let Some(b) = &mut b {
+            self.sync_arc(b);
+        }
         let loc = reg_loc(BOX_VAL, n);
         let w = self.peek_eqtb(loc);
         self.set_eqtb_entry(loc, w, b.map(Obj::Box));

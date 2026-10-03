@@ -99,13 +99,14 @@ impl Enc {
                 width,
                 height,
                 depth,
+                ..
             } => {
                 self.u8(2);
                 self.i32(*width);
                 self.i32(*height);
                 self.i32(*depth);
             }
-            Node::Glue { spec, subtype } => {
+            Node::Glue { spec, subtype, .. } => {
                 self.u8(3);
                 self.glue(spec);
                 self.u8(*subtype);
@@ -120,7 +121,7 @@ impl Enc {
                 });
                 self.node(&l.leader);
             }
-            Node::Kern { width, subtype } => {
+            Node::Kern { width, subtype, .. } => {
                 self.u8(5);
                 self.i32(*width);
                 self.u8(*subtype);
@@ -141,7 +142,7 @@ impl Enc {
                 self.u8(6);
                 self.i32(*p);
             }
-            Node::Math { width, subtype } => {
+            Node::Math { width, subtype, .. } => {
                 self.u8(7);
                 self.i32(*width);
                 self.u8(*subtype);
@@ -472,6 +473,7 @@ impl<'a> Dec<'a> {
             list: self.list()?,
             seal,
             ver: 0,
+            sync: crate::origin::Side(0),
         })
     }
     pub fn list(&mut self) -> Option<Vec<Node>> {
@@ -520,10 +522,12 @@ impl<'a> Dec<'a> {
                 width: self.scaled()?,
                 height: self.scaled()?,
                 depth: self.scaled()?,
+                sync: crate::origin::Side(0),
             },
             3 => Node::Glue {
                 spec: self.glue()?,
                 subtype: self.u8()?,
+                sync: crate::origin::Side(0),
             },
             4 => {
                 let spec = self.glue()?;
@@ -534,11 +538,17 @@ impl<'a> Dec<'a> {
                     _ => return None,
                 };
                 let leader = self.node()?;
-                Node::Leaders(Box::new(LeaderNode { spec, kind, leader }))
+                Node::Leaders(Box::new(LeaderNode {
+                    spec,
+                    kind,
+                    leader,
+                    sync: crate::origin::Side(0),
+                }))
             }
             5 => Node::Kern {
                 width: self.scaled()?,
                 subtype: self.u8()?,
+                sync: crate::origin::Side(0),
             },
             15 => Node::MarginKern {
                 width: self.scaled()?,
@@ -550,6 +560,7 @@ impl<'a> Dec<'a> {
             7 => Node::Math {
                 width: self.scaled()?,
                 subtype: self.u8()?,
+                sync: crate::origin::Side(0),
             },
             8 => Node::Ligature(Box::new(Ligature {
                 font: self.font()?,
@@ -590,6 +601,7 @@ impl<'a> Dec<'a> {
                 stretch_order: self.order()?,
                 shrink_order: self.order()?,
                 list: self.list()?,
+                sync: crate::origin::Side(0),
             })),
             _ => return None,
         })
@@ -775,23 +787,28 @@ mod tests {
                 width: 1,
                 height: 2,
                 depth: 3,
+                sync: crate::origin::Side(0),
             },
             Node::Glue {
                 spec: glue,
                 subtype: 99,
+                sync: crate::origin::Side(0),
             },
             Node::Leaders(Box::new(LeaderNode {
                 spec: glue,
                 kind: Leaders::Centered,
                 leader: Node::Box(inner.share()),
+                sync: crate::origin::Side(0),
             })),
             Node::Kern {
                 width: -2,
                 subtype: 1,
+                sync: crate::origin::Side(0),
             },
             Node::Math {
                 width: 0,
                 subtype: 1,
+                sync: crate::origin::Side(0),
             },
             Node::Ligature(Box::new(Ligature {
                 font: FontId(1),
