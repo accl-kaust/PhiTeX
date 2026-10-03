@@ -1665,8 +1665,10 @@ impl Tracker for SsaTracker {
             return;
         };
         if r.on {
-            r.rt
-                .note_read(&Loc::State(Slot(Fam::Class, i64::from(p))), class_version(0));
+            r.rt.note_read(
+                &Loc::State(Slot(Fam::Class, i64::from(p))),
+                class_version(0),
+            );
         }
     }
 
@@ -2503,10 +2505,7 @@ impl Store<TexSsa> for View<'_> {
             Fam::Cond => Version(self.tex.cond_ver()),
             Fam::Mark => Version(self.tex.mark_ver(s.1)),
             Fam::Sealed => Version(self.tex.sealed_ver(s.1)),
-            Fam::Class => class_version(
-                self.tex
-                    .token_class_of(i32::try_from(s.1).unwrap_or(0)),
-            ),
+            Fam::Class => class_version(self.tex.token_class_of(i32::try_from(s.1).unwrap_or(0))),
             Fam::List => {
                 use crate::track::list::{COUNT, STRIDE};
                 let i = u32::try_from(s.1).unwrap_or(0);
