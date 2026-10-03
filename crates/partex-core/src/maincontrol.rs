@@ -86,6 +86,19 @@ struct Main {
 }
 
 impl<H: Host, T: Tracker> Tex<H, T> {
+    /// Post the commands run, and the file and line being read, to the
+    /// progress board (`progress.rs`): what a terminal shows, read from
+    /// the fields themselves (not a read of the command's).
+    #[cold]
+    #[inline(never)]
+    fn post_progress(&self) {
+        let board = &crate::progress::BOARD;
+        board.commands(crate::progress::EVERY);
+        if let Some(f) = self.input_file.get(self.in_open).and_then(Option::as_ref) {
+            board.reading(&f.name, self.line);
+        }
+    }
+
     /// §1030: governs TeX's activities.
     pub(crate) fn main_control(&mut self) -> Result<(), Jump> {
         let mut m = Main {
@@ -155,6 +168,9 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                         }
                     } else {
                         self.commands += 1;
+                        if self.commands.is_multiple_of(crate::progress::EVERY) {
+                            self.post_progress();
+                        }
                         if T::VALUES {
                             // (the fields themselves: an observer's
                             // reads are not the command's)

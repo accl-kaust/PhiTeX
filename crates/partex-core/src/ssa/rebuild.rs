@@ -35,6 +35,10 @@ const LOOK_AHEAD: usize = 64;
 /// its run, at most (with windows: the rebuild's `ahead`).
 const CASCADE_AHEAD: usize = 4096;
 
+/// What a cascade of new steps costs (commands, and slots placed or put
+/// back) before it is weighed against the old steps after it.
+const COLD_FLOOR: u64 = 50_000;
+
 /// The version of each name's φ, with the bytes it was made from.
 type PhiVersions = BTreeMap<u32, (Arc<[u8]>, Version)>;
 
@@ -1253,6 +1257,10 @@ pub struct RebuildReport {
     pub retries: usize,
     pub new_steps: usize,
     pub removed: usize,
+    /// Cascades that went cold: their new steps had cost more than the
+    /// old steps after them would to run, which were retired at once
+    /// ([`go_cold`]).
+    pub cold: usize,
     /// Definitions whose value changed, the readers they made dirty, the
     /// outside reads validated, the slots set to the definition reaching
     /// a step and back to their latest, the values taken from the
@@ -2160,13 +2168,26 @@ pub fn rebuild<H: Host>(tex: &mut Tex<H, SsaTracker>, trace: bool, apply: bool) 
         // (the old step about where the run is, in `ahead`: one further
         // for each new step, or where a dropped run read)
         let mut at = 0usize;
+        // (what the cascade's runs cost, in commands, a slot placed or put
+        // back as half of one; the old steps after it, their last runs'
+        // commands, looked at once that passes `COLD_FLOOR`)
+        let mut spent = 0u64;
+        let mut after: Option<u64> = None;
         loop {
             let c0 = tex.commands();
+            let moved = rep.positioned + rep.restored;
             let end = run_step(
                 tex, cur, &predict, &writes, &input, &mut dirty, &mut rep, &mut srep,
             );
+            spent += tex.commands() - c0 + ((rep.positioned + rep.restored - moved) / 2) as u64;
             if tex.commands() - budget_from > tex.tracker.budget.get() {
                 rep.unsupported = Some("a rebuild past its budget of commands");
+                break;
+            }
+            if let Some((clock, end)) = tex.tracker.deadline.get()
+                && clock() > end
+            {
+                rep.unsupported = Some("a rebuild past its deadline");
                 break;
             }
             if let Some(s) = dirty.anchor.take()
@@ -2243,6 +2264,14 @@ pub fn rebuild<H: Host>(tex: &mut Tex<H, SsaTracker>, trace: bool, apply: bool) 
                     retire(tex, s, &mut dirty, &mut rep);
                 }
                 break;
+            }
+            // (a cascade that has cost more than running the rest of the
+            // job would: the old steps after it go at once, and the rest
+            // runs as a cold build does, each new step the fold's last)
+            if spent > COLD_FLOOR && spent > *after.get_or_insert_with(|| commands_after(tex, cur))
+            {
+                go_cold(tex, cur, &mut dirty, &mut rep);
+                after = Some(u64::MAX);
             }
             let next = {
                 let mut r = tex.tracker.rec.borrow_mut();
@@ -2350,6 +2379,7 @@ impl RebuildReport {
         self.retries += r.retries;
         self.new_steps += r.new_steps;
         self.removed += r.removed;
+        self.cold += r.cold;
         self.defs_changed += r.defs_changed;
         self.readers_marked += r.readers_marked;
         self.readers_kept += r.readers_kept;
@@ -2955,6 +2985,50 @@ fn meet<H: Host>(
 
 /// Step `s` is passed over (item 4): it is gone with its definitions,
 /// and a reader of one now reads the definition before it.
+/// The commands the live steps after `cur` ran last: what running the
+/// rest of the job again would cost.
+fn commands_after<H: Host>(tex: &Tex<H, SsaTracker>, cur: StepId) -> u64 {
+    let r = tex.tracker.rec.borrow();
+    let fold = &r.rt.fold;
+    let from = fold.position(cur).map_or(fold.order.len(), |p| p + 1);
+    fold.order[from..]
+        .iter()
+        .map(|&s| r.st.step_commands.get(s as usize).copied().unwrap_or(0))
+        .sum()
+}
+
+/// A cascade gone cold (the extension's preamble edit: every step after
+/// it new, each costing more to place than to run): the live steps after
+/// `cur` retired, the last first, so that no definition is later than the
+/// new steps, which then run as a cold build's do ([`run_step`], a new
+/// step the fold's last).
+fn go_cold<H: Host>(
+    tex: &mut Tex<H, SsaTracker>,
+    cur: StepId,
+    dirty: &mut Dirty,
+    rep: &mut RebuildReport,
+) {
+    let rest: Vec<StepId> = {
+        let r = tex.tracker.rec.borrow();
+        let fold = &r.rt.fold;
+        let from = fold.position(cur).map_or(fold.order.len(), |p| p + 1);
+        fold.order[from..].to_vec()
+    };
+    if rep.trace {
+        note(
+            tex,
+            alloc::format!(
+                "  cold after step {cur}: {} old steps after it retired",
+                rest.len()
+            ),
+        );
+    }
+    for &s in rest.iter().rev() {
+        retire(tex, s, dirty, rep);
+    }
+    rep.cold += 1;
+}
+
 fn retire<H: Host>(
     tex: &mut Tex<H, SsaTracker>,
     s: StepId,
@@ -3087,16 +3161,24 @@ fn run_step<H: Host>(
     }
     let c0 = tex.commands();
     #[allow(clippy::type_complexity)]
-    let (key, old, mut found, budget): (
+    let (key, old, mut found, budget, alone): (
         u64,
         BTreeMap<Slot, Version>,
         Vec<(Slot, Option<Def>)>,
         u64,
+        bool,
     ) = {
         let r = tex.tracker.rec.borrow();
         let fold = &r.rt.fold;
         let key = fold.steps[j as usize].key;
         let old = defs(&r.rt, &fold.steps[j as usize].recs);
+        // (a new step the fold's last, as a cascade gone cold makes them:
+        // no definition is later than it, so the arrays hold what reaches
+        // it, as in a cold build, but for the page's nodes, which they
+        // hold only up to the list's length: those alone are placed,
+        // checked and put back; an old step's own old definitions are
+        // later than it)
+        let alone = old.is_empty() && fold.order.last() == Some(&j);
         // (each with the definition that reaches the step, found where the
         // test for a later one looked)
         // (a name the old run made, as a loop's points, is read by a new
@@ -3108,14 +3190,24 @@ fn run_step<H: Host>(
                 .flat_map(|&q| r.rt.record(q).writes.iter().map(|(a, _)| a))
                 .filter(|a| predicts_alone(a))
         });
-        let mut cand: Vec<Slot> = predict
-            .iter()
-            .flat_map(|&p| &fold.steps[p as usize].reads)
-            .chain(&dirty.missed)
-            .chain(written)
-            .filter(|a| positioned(a))
-            .copied()
-            .collect();
+        let mut cand: Vec<Slot> = if alone {
+            predict
+                .iter()
+                .flat_map(|&p| &fold.steps[p as usize].reads)
+                .chain(&dirty.missed)
+                .filter(|a| a.0 == Fam::PageNode)
+                .copied()
+                .collect()
+        } else {
+            predict
+                .iter()
+                .flat_map(|&p| &fold.steps[p as usize].reads)
+                .chain(&dirty.missed)
+                .chain(written)
+                .filter(|a| positioned(a))
+                .copied()
+                .collect()
+        };
         if predict.len() > 1 || !writes.is_empty() || !dirty.missed.is_empty() {
             // (the steps predicting it read much the same slots: each
             // looked up once)
@@ -3138,13 +3230,15 @@ fn run_step<H: Host>(
             .filter_map(|&p| r.st.step_commands.get(p as usize).copied())
             .max();
         let budget = last.unwrap_or(0).saturating_mul(2).saturating_add(10_000);
-        (key, old, reads, budget)
+        (key, old, reads, budget, alone)
     };
     let mut next = Vec::new();
-    save_stack_whole(tex, key, &mut next, rep);
-    nest_whole(tex, key, &mut next);
-    if tex.window() > 0 {
-        window_whole(tex, key, &mut next);
+    if !alone {
+        save_stack_whole(tex, key, &mut next, rep);
+        nest_whole(tex, key, &mut next);
+        if tex.window() > 0 {
+            window_whole(tex, key, &mut next);
+        }
     }
     let mut set: BTreeSet<Slot> = BTreeSet::new();
     let mut touched: BTreeSet<Slot> = BTreeSet::new();
@@ -3265,12 +3359,19 @@ fn run_step<H: Host>(
             let r = tex.tracker.rec.borrow();
             let fold = &r.rt.fold;
             let mut n = 0;
-            let miss: Vec<Slot> =
+            let miss: Vec<Slot> = if alone {
+                r.rt.open_step_reads()
+                    .inspect(|_| n += 1)
+                    .filter(|a| a.0 == Fam::PageNode && !set.contains(*a))
+                    .copied()
+                    .collect()
+            } else {
                 r.rt.open_step_reads()
                     .inspect(|_| n += 1)
                     .filter(|a| positioned(a) && !set.contains(*a) && later(fold, a, key))
                     .copied()
-                    .collect();
+                    .collect()
+            };
             rep.reads_checked += n;
             let written = if miss.is_empty() {
                 Vec::new()
@@ -3380,7 +3481,13 @@ fn run_step<H: Host>(
         d
     };
     let mut changed = Vec::new();
-    let vals = {
+    let vals = if alone {
+        // (no step after it to read its definitions, and the arrays hold
+        // them: the page's nodes placed go back)
+        let mut r = tex.tracker.rec.borrow_mut();
+        let rr = &mut *r;
+        with_levels(tex, set.iter().copied(), |a| latest(tex, rr, a, j, rep))
+    } else {
         let mut r = tex.tracker.rec.borrow_mut();
         let rr = &mut *r;
         // a definition that changed makes its readers dirty, up to the

@@ -141,26 +141,27 @@ pub fn error(d: &Diagnostic, s: Style, verbose: u8) -> String {
     let f = &d.frames[i];
     let before = lossy(&f.before);
     let col = before.chars().count();
+    let (start, len) = span(d, &before, &d.frames[..i]);
     let label = if let FrameKind::File { name, line } = &f.kind {
         let _ = writeln!(
             out,
             "{} {}:{line}:{}",
             s.blue("  -->"),
             shown(name),
-            col + 1
+            start + 1
         );
         line.to_string()
     } else {
-        let _ = writeln!(out, "{} <terminal>:{}", s.blue("  -->"), col + 1);
+        let _ = writeln!(out, "{} <terminal>:{}", s.blue("  -->"), start + 1);
         String::from("*")
     };
     let pad = " ".repeat(label.len());
     let bar = s.blue(&format!("{pad} |"));
     let (line, at) = window(&format!("{before}{}", lossy(&f.after)), col);
-    let tok = lossy(&f.before[f.before.len() - last_token(&f.before)..])
-        .chars()
-        .count()
-        .max(1);
+    // (the span in the window: it ends where TeX was, `at`, unless the
+    // culprit is earlier in the line)
+    let start = (start + at).saturating_sub(col).max(usize::from(at < col));
+    let len = len.min(line.chars().count().saturating_sub(start)).max(1);
     let hint = d
         .suggestions
         .first()
@@ -171,8 +172,8 @@ pub fn error(d: &Diagnostic, s: Style, verbose: u8) -> String {
     let _ = writeln!(
         out,
         "{bar} {}{}",
-        " ".repeat(at.saturating_sub(tok)),
-        s.red(&format!("{}{hint}", "^".repeat(tok)))
+        " ".repeat(start),
+        s.red(&format!("{}{hint}", "^".repeat(len)))
     );
     let eq = s.blue(&format!("{pad} ="));
     backtrace(&mut out, &eq, &d.frames[..i], verbose);
@@ -183,6 +184,48 @@ pub fn error(d: &Diagnostic, s: Style, verbose: u8) -> String {
     }
     tail(&mut out, &pad, d, &notes, s, verbose);
     out
+}
+
+/// What the carets mark in `before` (the line as far as TeX read it),
+/// in characters: the control sequence an error is about where the line
+/// has it, else the call of the macro the error happened in (`macros`,
+/// innermost first), else the last token TeX read. Its start and length.
+fn span(d: &Diagnostic, before: &str, macros: &[Frame]) -> (usize, usize) {
+    let n = before.chars().count();
+    // (the last place `needle` begins, as a word: not the start of a
+    // longer control word)
+    let find = |needle: &str| -> Option<usize> {
+        let mut end = before.len();
+        while let Some(k) = before[..end].rfind(needle) {
+            let after = before[k + needle.len()..].chars().next();
+            let word = needle.chars().last().is_some_and(char::is_alphabetic);
+            if !(word && after.is_some_and(char::is_alphabetic)) {
+                return Some(before[..k].chars().count());
+            }
+            end = k;
+        }
+        None
+    };
+    if let Some(cs) = culprit(d)
+        && let Some(k) = find(&cs)
+    {
+        return (k, cs.chars().count());
+    }
+    let call = macros.iter().rev().find_map(|f| match &f.kind {
+        FrameKind::Macro { name } => {
+            let name = lossy(name);
+            let name = name.trim_end();
+            (name.len() > 1).then(|| name.to_owned())
+        }
+        _ => None,
+    });
+    if let Some(k) = call.and_then(|c| find(&c)) {
+        return (k, n - k);
+    }
+    let tok = before
+        .get(before.len() - last_token(before.as_bytes())..)
+        .map_or(1, |t| t.chars().count().max(1));
+    (n.saturating_sub(tok), tok)
 }
 
 /// The macro levels of an error (`frames`, innermost first), folded to
@@ -348,15 +391,15 @@ mod tests {
     #[test]
     fn rustc_style() {
         assert_eq!(
-            error(&undefined(), Style { color: false }, 0),
+            error(&undefined(), Style::plain(), 0),
             "error[undefined-control-sequence]: Undefined control sequence \\fooo\n\
-             \x20 --> paper.tex:12:13\n\
+             \x20 --> paper.tex:12:7\n\
              \x20  |\n\
              12 | Hello \\greet world\n\
              \x20  |       ^^^^^^ did you mean `\\foo`?\n\
              \x20  = in expansion of \\greet\n"
         );
-        let v = error(&undefined(), Style { color: false }, 1);
+        let v = error(&undefined(), Style::plain(), 1);
         assert!(v.contains("   = in \\greet: `->\\fooo ` | ``\n"), "{v}");
         assert!(v.contains("   = help: The control sequence at the end of the top line\n"));
     }
@@ -374,13 +417,63 @@ mod tests {
                 macro_frame("\\a", "->\\b "),
             ],
         );
-        let text = error(&d, Style { color: false }, 0);
+        let text = error(&d, Style::plain(), 0);
         assert!(
             text.contains(
                 "   = in expansion of \\a -> … -> \\d -> \\e (2 frames hidden, -v to show)\n"
             ),
             "{text}"
         );
+    }
+
+    #[test]
+    fn the_carets_mark_the_culprit_or_the_call() {
+        let file = |before: &str, after: &str| {
+            frame(
+                FrameKind::File {
+                    name: b"./err.tex".to_vec(),
+                    line: 7,
+                },
+                before,
+                after,
+            )
+        };
+        // (the culprit in the line, inside an argument: it is marked)
+        let mut d = undefined();
+        d.suggestions.clear();
+        d.frames = vec![
+            frame(
+                FrameKind::TokenList("argument"),
+                "undefined \\badmacro",
+                " here",
+            ),
+            macro_frame("\\textbf ", "->\\protect \\textbf  "),
+            file(
+                "\\greet{world}, and an \\textbf{undefined \\badmacro here}",
+                ".",
+            ),
+        ];
+        let text = error(&d, Style::plain(), 0);
+        assert!(text.contains("  --> err.tex:7:41\n"), "{text}");
+        assert!(
+            text.contains("  |                                         ^^^^^^^^^\n"),
+            "{text}"
+        );
+        // (not in the line: the call it happened in)
+        d.frames = vec![
+            macro_frame("\\greet", "->Hello \\fooo"),
+            file("\\greet{world}", ", and"),
+        ];
+        let text = error(&d, Style::plain(), 0);
+        assert!(text.contains("  --> err.tex:7:1\n"), "{text}");
+        assert!(text.contains("  | ^^^^^^^^^^^^^\n"), "{text}");
+        // (a longer control word is not the culprit's place)
+        d.frames = vec![
+            macro_frame("\\x", "->\\badmacro "),
+            file("\\badmacros \\x", ""),
+        ];
+        let text = error(&d, Style::plain(), 0);
+        assert!(text.contains("  --> err.tex:7:12\n"), "{text}");
     }
 
     #[test]

@@ -419,9 +419,6 @@ impl Host for SessionHost {
             suggestions: Vec::new(),
             boxed: None,
         });
-        if let Some(live) = &sh.base.live {
-            live(crate::events::Live::Page(count0));
-        }
     }
 
     /// No terminal input in a session (as if it were at its end).

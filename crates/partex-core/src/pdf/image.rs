@@ -1,8 +1,9 @@
 //! pdfTeX's images (`\pdfximage`, writeimg.c): reading an image's size,
 //! scaling it (`scale_image`), placing it (`out_image`) and writing its
 //! `XObject`. JPEG is read natively (writejpg.c: the file goes into the
-//! PDF as it is), a page of a PDF file as pdftoepdf.cc does (`epdf.rs`);
-//! PNG and JBIG2 are not written yet.
+//! PDF as it is), PNG as writepng.c with libpng does (`writepng.rs`), a
+//! page of a PDF file as pdftoepdf.cc does (`epdf.rs`); JBIG2 is not
+//! written yet.
 
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -41,10 +42,12 @@ pub(crate) struct Image {
     pub color: i32,
     pub colorspace_ref: i32,
     pub bits: i32,
-    color_space: u8,
-    data: Arc<[u8]>,
+    pub(crate) color_space: u8,
+    pub(crate) data: Arc<[u8]>,
     /// A PDF file's page (`pdf_ptr`).
     pub pdf: Option<super::epdf::PdfImage>,
+    /// A PNG file (`png_ptr`: read again where it is written).
+    pub png: bool,
 }
 
 impl Image {
@@ -80,7 +83,8 @@ partex_engine::persist_struct!(Image {
     bits,
     color_space,
     data,
-    pdf
+    pdf,
+    png
 });
 
 pub(crate) use partex_engine::scaled::ext_xn_over_d;
@@ -166,6 +170,7 @@ fn read_jpg_info(
                     color_space,
                     data,
                     pdf: None,
+                    png: false,
                 });
             }
             // markers without parameters
@@ -249,11 +254,8 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         if pagebox == 0 {
             pagebox = super::epdf::BOX_CROP;
         }
-        let image = self.read_image(&s, page, named.as_deref(), colorspace, pagebox)?;
-        let group_ref = match &image.pdf {
-            Some(p) if p.group => -1,
-            _ => 0,
-        };
+        let (image, group_ref) =
+            self.read_image(&s, page, named.as_deref(), colorspace, pagebox)?;
         self.pdf.objs.get_mut(k).aux = Aux::XImage(alloc::boxed::Box::new(XImage {
             width: dims.width,
             height: dims.height,
@@ -287,7 +289,8 @@ impl<H: Host, T: Tracker> Tex<H, T> {
 
     /// writeimg.c's `read_image`: file `s` found, its type by its first
     /// bytes (`checktypebyheader`) or its name (`checktypebyextension`),
-    /// and read.
+    /// and read; with its group (`img_group_ref`: -1 for a PDF page's to
+    /// be numbered where it is first shown, a PNG's object, or 0).
     fn read_image(
         &mut self,
         s: &[u8],
@@ -295,7 +298,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         named: Option<&[u8]>,
         colorspace: i32,
         pagebox: i32,
-    ) -> Result<Arc<Image>, Jump> {
+    ) -> Result<(Arc<Image>, i32), Jump> {
         // (a load: a name the job stores reads its store, DESIGN 3.7)
         let found = self.read_source(s, false);
         let Some(f) = found else {
@@ -344,7 +347,8 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                     minor,
                     level,
                 )?;
-                Ok(Arc::new(Image {
+                let group = if info.image.group { -1 } else { 0 };
+                let image = Image {
                     name: f.name.clone(),
                     width: info.width,
                     height: info.height,
@@ -356,19 +360,22 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                     color_space: 0,
                     data: f.contents.clone(),
                     pdf: Some(info.image),
-                }))
+                    png: false,
+                };
+                Ok((Arc::new(image), group))
             }
             b"jpg" => {
                 let pdf_12 = self.pdf.out.fixed_major == 1 && self.pdf.out.fixed_minor <= 2;
                 match read_jpg_info(f.name.clone(), f.contents.clone(), colorspace, pdf_12) {
-                    Ok(i) => Ok(Arc::new(i)),
+                    Ok(i) => Ok((Arc::new(i), 0)),
                     Err(m) => self.pdftex_fail(Some(&f.name), m),
                 }
             }
-            _ => self.pdf_error(
-                b"ext1",
-                b"PNG and JBIG2 images are not implemented in partex yet",
-            ),
+            b"png" => {
+                let (image, group) = self.read_png_info(&f.name, &f.contents, colorspace)?;
+                Ok((Arc::new(image), group))
+            }
+            _ => self.pdf_error(b"ext1", b"JBIG2 images are not implemented in partex yet"),
         }
     }
 
@@ -445,13 +452,18 @@ impl<H: Host, T: Tracker> Tex<H, T> {
     }
 
     /// `out_image`'s page group: a PDF page's group is the page's if no
-    /// image gave it one, numbered at the image's first page (called
-    /// where the walk meets the image, before its drawing is encoded).
+    /// image gave it one, numbered at the image's first page; a PNG's
+    /// (its transparency group) likewise (called where the walk meets
+    /// the image, before its drawing is encoded).
     pub(crate) fn image_group(&mut self, objnum: i32) -> Result<(), Jump> {
         let Some((xi, image)) = self.ximage(objnum) else {
             return Ok(());
         };
         let group_ref = xi.group_ref;
+        if image.png && group_ref > 0 && self.pdf.ship.page_group_val == 0 {
+            self.pdf.ship.page_group_val = group_ref;
+            return Ok(());
+        }
         if image.pdf.is_none() || group_ref == 0 || self.pdf.ship.page_group_val != 0 {
             return Ok(());
         }
@@ -566,6 +578,11 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             self.print_str(b" <");
             self.print_str(&image.name);
             self.write_epdf(p, &image.name, &image.data)?;
+            self.print_str(b">");
+        } else if self.pdf.out.fixed_draftmode == 0 && image.png {
+            self.print_str(b" <");
+            self.print_str(&image.name);
+            self.write_png(&image)?;
             self.print_str(b">");
         } else if self.pdf.out.fixed_draftmode == 0 {
             self.print_str(b" <");

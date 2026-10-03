@@ -251,6 +251,51 @@ const CASES: &[Case] = &[
             ],
         ],
     },
+    // PNG images (copied IDAT data, decoded rows, soft masks, a palette
+    // with transparency, 16 bits, interlaced) through graphicx, as
+    // writepng.c with libpng writes them
+    Case {
+        name: "png",
+        oracle: "pdftex",
+        inputs: &[
+            "png.tex",
+            "png-rgb8.png",
+            "png-rgb8srgb.png",
+            "png-gray16.png",
+            "png-rgba8.png",
+            "png-ga8.png",
+            "png-pal4trns.png",
+            "png-rgb8i.png",
+        ],
+        runs: &[
+            &[
+                "-no-shell-escape",
+                "-no-parse-first-line",
+                "-output-comment=partex",
+                "-interaction=nonstopmode",
+                "-ini",
+                "-etex",
+                "-jobname=pdflatex",
+                "*pdflatex.ini",
+            ],
+            &[
+                "-no-shell-escape",
+                "-no-parse-first-line",
+                "-output-comment=partex",
+                "-interaction=nonstopmode",
+                "-fmt=pdflatex",
+                "png",
+            ],
+            &[
+                "-no-shell-escape",
+                "-no-parse-first-line",
+                "-output-comment=partex",
+                "-interaction=nonstopmode",
+                "-fmt=pdflatex",
+                "png",
+            ],
+        ],
+    },
     Case {
         name: "bibtex",
         oracle: "pdftex",
@@ -1247,14 +1292,22 @@ fn run_modern(root: &Path, partex: &Path) -> Result<Vec<String>> {
     ensure!(out.is_empty(), "partex build wrote to standard output");
     for want in [
         "error[undefined-control-sequence]: Undefined control sequence \\undefinedcontrolsequence",
-        "  --> modern.tex:17:29",
+        "  --> modern.tex:17:4",
         "warning: 1 overfull \\hbox",
         "warning: 1 undefined reference: `sec:nowhere`",
         "warning: 1 font substitution",
         "OT1/cmr/bx/sc -> OT1/cmr/bx/n",
-        "Failed modern.tex (1 page, 3 passes, 1 error, 3 warnings)",
     ] {
         ensure!(report.contains(want), "the report lacks `{want}`");
+    }
+    // (the last line: `Failed modern.tex · 1 error · 3 warnings · 1 page ·
+    // 3 passes · 0.41 s`, its separators as the locale has them)
+    let last = report
+        .lines()
+        .find(|l| l.trim_start().starts_with("Failed modern.tex"))
+        .context("the report has no `Failed modern.tex` line")?;
+    for want in ["1 error", "3 warnings", "1 page", "3 passes"] {
+        ensure!(last.contains(want), "the last line lacks `{want}`: {last}");
     }
     ensure!(
         !report.contains("modern: a line from typeout"),
@@ -1358,8 +1411,8 @@ fn run_modern_watch(root: &Path, partex: &Path, sanitize: bool) -> Result<Vec<St
         }
     });
     let mut report = String::new();
-    // (until the build ends: `Watching` after the first, the result line
-    // after a rebuild)
+    // (until the build ends: `Watching` after the first; after a rebuild,
+    // `-v`'s report of it, which follows its line in the log)
     let mut wait = |until: &str| -> Result<()> {
         loop {
             let line = rx
@@ -1398,7 +1451,7 @@ fn run_modern_watch(root: &Path, partex: &Path, sanitize: bool) -> Result<Vec<St
         }
         oracle_passes(&case, &o, &o, &args)?;
         let _ = fs::remove_file(o.join("bibterm.txt"));
-        wait("modern.tex (")?;
+        wait("Machine rebuilt in")?;
         diffs.extend(
             compare(&o, &p, true)?
                 .into_iter()

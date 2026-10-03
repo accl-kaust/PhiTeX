@@ -781,6 +781,9 @@ impl Opened {
             Self::Unchanged(l) => *l,
         };
         let t = Instant::now();
+        observe(crate::events::Progress::Phase(
+            crate::events::Phase::Loading,
+        ));
         let (loaded, keeper) = match (l.job, l.native) {
             (Some(job), _) => match job.join() {
                 Ok((r, k)) => (r, Some(k)),
@@ -898,7 +901,12 @@ impl Watch {
             }
         }
         let loaded = match keeper.as_mut() {
-            Some(k) => k.load(native),
+            Some(k) => {
+                observe(crate::events::Progress::Phase(
+                    crate::events::Phase::Loading,
+                ));
+                k.load(native)
+            }
             None => Err(native),
         };
         let native = match loaded {

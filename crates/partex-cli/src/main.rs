@@ -13,6 +13,7 @@ mod eventlog;
 mod events;
 mod inotify;
 mod intervals;
+mod live;
 mod lz;
 mod machinehost;
 mod makeindex;
@@ -26,6 +27,7 @@ mod sanitize;
 mod session;
 mod snippet;
 mod store;
+mod term;
 #[cfg(feature = "deps")]
 mod texprof;
 mod timeline;
@@ -789,6 +791,9 @@ fn serve_observed(
     let mut reports = Vec::new();
     let mut h = history.unwrap_or(0);
     observe(events::Progress::PassStart(1));
+    if history.is_none() {
+        observe(events::Progress::Phase(events::Phase::Cold));
+    }
     let mut r = match history {
         None => Some(("built", s.build())),
         Some(_) => s.rebuild().map(|r| ("rebuilt", r)),
@@ -803,6 +808,7 @@ fn serve_observed(
             }
             None => reports.push(String::from("partex: unchanged")),
         }
+        observe(events::Progress::Phase(events::Phase::Writing));
         let term = match s.write_outputs() {
             Ok(term) => {
                 if std::env::var_os("PARTEX_PASS_DUMP").is_some() {
@@ -884,7 +890,10 @@ fn converge_saved(
     let t0 = std::time::Instant::now();
     let loaded = {
         let _p = timeline::phase("load session");
-        key.and_then(cache::get).is_some_and(|saved| s.load(saved))
+        key.and_then(cache::get).is_some_and(|saved| {
+            observe(events::Progress::Phase(events::Phase::Loading));
+            s.load(saved)
+        })
     };
     let mut reports = Vec::new();
     if loaded {
@@ -901,6 +910,7 @@ fn converge_saved(
         && s.changed()
     {
         let t0 = std::time::Instant::now();
+        observe(events::Progress::Phase(events::Phase::Saving));
         let saved = {
             let _p = timeline::phase("save session");
             s.save()
@@ -1255,6 +1265,7 @@ fn rebuild_ssa(
         tools: &mut tools,
         clock: Some(clock_ns),
     };
+    tex.tracker().deadline.set(rebuild_deadline());
     let rr = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         partex_core::ssa::rebuild_trips(tex, trace, apply, &mut t)
     })) {
@@ -1275,6 +1286,7 @@ fn rebuild_ssa(
     let link_ms = lr.link_ms;
     eprintln!("partex: ssa rebuild {n}: link: {}", lr.how);
     let s = tex.tracker().rec.borrow().rt.stats;
+    report_cold(n, &rr);
     eprintln!(
         "partex: ssa rebuild {n}: {:.1} ms (the rebuild {millis:.1} ms, the link {link_ms:.1} ms), \
          the edited page ready {:.2} ms after the rebuild, files written {:.1} ms, \
@@ -1373,6 +1385,31 @@ fn rebuild_switches() -> (bool, bool) {
     let trace = std::env::var("PARTEX_SSA_REBUILD_TRACE").is_ok_and(|v| v == "1");
     let apply = !matches!(std::env::var("PARTEX_SSA_APPLY").as_deref(), Ok("0"));
     (trace, apply)
+}
+
+/// `PARTEX_SSA_REBUILD_MS`: a rebuild stops past this many milliseconds
+/// from now, as one past its budget of commands does.
+fn rebuild_deadline() -> Option<partex_core::ssa::Deadline> {
+    let ms = std::env::var("PARTEX_SSA_REBUILD_MS")
+        .ok()?
+        .trim()
+        .parse::<u64>()
+        .ok()?;
+    let clock: fn() -> u64 = clock_ns;
+    Some((
+        clock,
+        clock_ns().saturating_add(ms.saturating_mul(1_000_000)),
+    ))
+}
+
+/// A rebuild's cascades that went cold (`RebuildReport::cold`).
+fn report_cold(n: usize, rr: &partex_core::ssa::RebuildReport) {
+    if rr.cold > 0 {
+        eprintln!(
+            "partex: ssa rebuild {n}: cold after {} cascades (the old steps after each retired)",
+            rr.cold
+        );
+    }
 }
 
 /// Nanoseconds since the epoch: the trips' clock.

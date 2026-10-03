@@ -1123,6 +1123,10 @@ impl Default for Recorder {
     }
 }
 
+/// A rebuild's deadline ([`SsaTracker::deadline`]): a clock in
+/// nanoseconds, and the time on it past which the rebuild stops.
+pub type Deadline = (fn() -> u64, u64);
+
 /// The engine's tracker that records into the runtime.
 ///
 /// A read of a table slot is noted once per call: the slot's stamp is the
@@ -1183,6 +1187,14 @@ pub struct SsaTracker {
     /// limit; the CLI's `PARTEX_SSA_REBUILD_BUDGET`). A host may build
     /// cold instead.
     pub budget: core::cell::Cell<u64>,
+    /// When a rebuild stops, by a clock: past the time `.1` on the
+    /// clock `.0` (nanoseconds; the host's, as wasm has no `Instant`),
+    /// checked after each step it runs, it stops as one past its budget
+    /// of commands does (`None`, the default: no deadline; the CLI's
+    /// `PARTEX_SSA_REBUILD_MS`). The cost of a command varies tenfold
+    /// between rebuilds, so a host that would build cold instead past
+    /// the cold build's time sets this.
+    pub deadline: core::cell::Cell<Option<Deadline>>,
     /// Large contents loaded, with their versions, by identity: the host
     /// hands out the same `Arc` again for a file as it was, and a step
     /// run again that loads it (the 5 MB font map, at the first page) need
@@ -1304,6 +1316,7 @@ impl SsaTracker {
             timed: false,
             stop_after: core::cell::Cell::new(u64::MAX),
             budget: core::cell::Cell::new(u64::MAX),
+            deadline: core::cell::Cell::new(None),
             load_versions: RefCell::new(Vec::new()),
         }
     }

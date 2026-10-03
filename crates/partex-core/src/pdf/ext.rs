@@ -32,7 +32,11 @@ fn pdf_extension_fields(chr: i32) -> (u64, u64) {
         PDF_OBJ_CODE => (0, OBJECTS | bit(field::OBJ_COUNT)),
         PDF_REFOBJ_NODE | PDF_REFXFORM_NODE | PDF_REFXIMAGE_NODE => (bit(field::OBJS), 0),
         PDF_XFORM_CODE => (0, OBJECTS | bit(field::XFORM_COUNT)),
-        PDF_XIMAGE_CODE => (0, WRITING | bit(field::XIMAGE_COUNT) | bit(field::EPDF)),
+        // (a PNG with an alpha channel sets the page's group)
+        PDF_XIMAGE_CODE => (
+            0,
+            WRITING | bit(field::XIMAGE_COUNT) | bit(field::EPDF) | bit(field::SHIP),
+        ),
         PDF_OUTLINE_CODE => (0, WRITING | bit(field::OUTLINES)),
         PDF_ANNOT_NODE | PDF_START_LINK_NODE | PDF_DEST_NODE => (0, OBJECTS),
         PDF_INFO_CODE => (0, bit(field::INFO_TOKS)),

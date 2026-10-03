@@ -11501,6 +11501,339 @@ that commit).
 Tests: e2e 35/35, ssa-edits 16/16 (`--brief --fixpoint`), the
 workspace's tests, clippy.
 
+## 2026-10-03: A rebuild's deadline; a preamble edit costs 47 cold builds
+
+The Overleaf extension's repro: a one-page article with a TikZ picture
+and a `circuitikz` environment, then `\usepackage{circuitikz}` added to
+the preamble as one edit. Natively (release build of `824a511`, one trip
+a build): the cold build takes 1.18 s (85,620 commands); the rebuild
+55.0 s, running 25,038 steps (25,037 new, 8,997 runs dropped) and
+772,325 commands, with 77.2 M slots positioned and 77.3 M restored,
+about 3,100 of each per step. The extension measured 51 s in wasm. The
+cost is per step, not per command: the edit makes every step after it
+new, and each is run as a rebuild runs a step (its predicted reads
+placed, its writes restored), where a cold build runs straight through.
+
+A budget of commands cannot bound this: the cost of a command varies
+tenfold between rebuilds (the extension's ChillCGRA rebuilds run
+150–250 K commands in 1.7–3 s; this one 0.3 ms a command).
+`SsaTracker::deadline` (the CLI's `PARTEX_SSA_REBUILD_MS`) is a clock,
+the host's since wasm has no `Instant`, and a time on it. It is checked
+after each step a rebuild runs; past it the rebuild stops as one past
+its budget of commands does, and a host builds cold instead. The repro
+with 2,000 ms stops at 2,002 ms, after 4,862 steps. Off by default.
+
+Also: `824a511` was not formatted; the generated `fofi_tables.rs` is
+now skipped by rustfmt (`#[rustfmt::skip]` on its module) and keeps its
+layout.
+
+## 2026-10-03: PNG images (writepng.c, libpng 1.6.58)
+
+`\pdfximage` of a PNG file failed ("PNG and JBIG2 images are not
+implemented"); the Overleaf peer's ChillCGRA paper has one. pdfTeX reads
+it with libpng (`read_png_info` at `\pdfximage`, `write_png` where the
+image object is written), so the output depends on libpng's reading of
+the file, which `partex_engine::png` ports from libpng 1.6.58 (the
+system's, which this machine's pdfTeX links): the chunks up to the
+first IDAT (`png_read_info`: libpng's table of positions, lengths and
+duplicates, each handler's acceptance, CRC errors fatal for critical
+chunks and dropping ancillary ones, benign errors as warnings), and the
+rows after pdfTeX's transformations (`png_set_tRNS_to_alpha`,
+`png_set_strip_alpha` before PDF 1.4, `png_set_strip_16` without
+`\pdfimagehicolor`; the row filters, Adam7, `png_read_update_info`).
+
+`writepng.rs` writes what writepng.c does: the IDAT data as they are
+with a PNG predictor (the "PNG copy") for a non-interlaced gray or RGB
+image with nothing to change (no tRNS, alpha or 16 bits to strip, gamma
+1 or none, none of cHRM, iCCP, sBIT, sRGB, bKGD, hIST, sPLT); otherwise
+the rows: a palette as `/Indexed` (its own object), an alpha channel as
+an `/SMask` image (8 bits: a 16-bit alpha's high bytes), the color
+bytes and alpha bytes split as `write_*_pixel_*` do. An alpha PNG in
+PDF 1.4 or later asks for a transparency group: one object per job
+(`transparent_page_group`), the page's group where the image is read if
+the page has none, and the image's (`img_group_ref`) where it is placed;
+the group object is written after the first such image.
+`\pdfimageapplygamma` is refused ("not implemented").
+
+The decoder (`png.rs`, 2,800 lines) has zlib 1.3.2's `inflate` and
+`inflate_table` inside it as a resumable state machine, fed as libpng
+feeds it (8,192 bytes a read, a row at a time): that boundary decides
+whether a damaged stream's end is an error or a warning. `inflate.rs` is
+untouched. Not ported, because pdfTeX never asks for them: gamma and the
+other transforms, text chunks' contents (warnings only), unknown chunks
+kept, `png_read_end`, the progressive reader; libpng's limits are ported
+(8,000,000-byte chunks, 1,000,000 pixels a side).
+
+Checked against the system's libpng (`scripts/png-check/compare.sh`:
+`harness.c` drives libpng as writepng.c does, the `png_dump` example
+prints the port's reading the same way): PngSuite and 282 edge cases
+(`gen_edge.py`: bad CRCs on every chunk kind, tRNS of every length,
+iCCP profiles of every kind and damage, IDATs split and damaged, zlib
+header, block and adler32 errors at the 8,192-byte boundary, 40
+randomly damaged streams, IHDR/PLTE errors, truncations, Adam7), 458
+files and 471 readings (every transformation set pdfTeX can ask for),
+126 of them errors: identical (every info field with the whole `valid`
+word, the transformed format, a hash of the rows, the message).
+
+Against pdfTeX: 22 images (gray 1–16 bits, palettes with and without
+tRNS, RGB(A) 8 and 16 bits, gray-alpha, Adam7, gAMA 1, pHYs, sRGB,
+bKGD) in six jobs (PDF 1.1, 1.3, 1.4 and 1.5; compress levels 0, 6 and
+9; `\pdfimagehicolor` on and off; object streams): the same PDFs, when
+the 1- to 4-bit palette images' rows fill their last byte. When they do
+not, pdfTeX's own output is not reproducible: the bits past the row's
+end come from writepng.c's `xtalloc`'d row buffer, never written
+(libpng keeps a row's trailing bits), and three runs of pdfTeX gave
+three different bytes for one image; partex writes zeros there. The new
+e2e case `png` (seven images, PDF 1.5, through graphicx) is identical.
+
+Tests: e2e 36/36, ssa-edits (`--brief --fixpoint`), the engine's and
+core's tests (11 new in `png.rs`), clippy, rustfmt.
+
+## 2026-10-03: `cargo xtask parallel`, the step graph measured in Rust
+
+`scripts/ssa-parallel.py` took 456 s on the step graph of four of the
+PGF manual's chapters (61,706 steps, 19.1 M reads, 7.7 M definitions);
+the whole manual's is ten times that. `cargo xtask parallel`
+(`xtask/src/parallel.rs`) is the same models and schedules in Rust:
+20 s on those chapters (7.9 s of it reading the dump), with the same
+numbers (every model's edges and critical paths, whole and pipelined,
+the list schedules, the definitions passed through).
+
+It adds speculation from a predicted entry state: each *segment* (the
+steps between two loads of a file `--segments` matches, by default any
+`.tex`: an `\include`d chapter) or each step, started from the state the
+setup left (the steps before the first that ships), a read of a later
+definition mispredicted unless its version is the setup's; which
+classes of addresses block, and the units that validate as classes are
+taken as predicted, the class that validates the most first.
+
+## 2026-10-03: A cascade gone cold: the preamble edit at a cold build's cost
+
+The Overleaf extension's preamble edit (`\usepackage{circuitikz}` added
+to a one-page article with a TikZ picture and a `circuitikz`
+environment) ran 25,038 new steps in 55 s natively, against 1.2 s for
+the cold build. Each new step ran as a rebuild runs any step: the old
+build's steps after it were still live, their definitions later than
+it, so the reads predicted for it (those of the two steps predicting it,
+about 3,100 slots) were placed at their reaching definitions before it
+ran and put back after (77.2 M slots each way), and its reads were
+checked for later definitions (8,997 runs dropped). A frame-pointer
+profile put about 78% of the rebuild in that placing and putting back
+(`run_step`'s candidates, `latest`, the B-tree of slots placed, the
+values cloned and dropped).
+
+A cascade (new steps until a run ends where an old step ended) now
+weighs what it has cost (its commands, a slot placed or put back as
+half of one) against the old steps after it (their last runs' commands,
+looked at once the cost passes 50,000). Past them, the rest of the job
+run cold costs less than going on: those steps are retired at once,
+the last first (`go_cold`), and each new step after that is the fold's
+last. No definition is later than it, so nothing is placed, checked or
+put back, as in a cold build: but for the page's nodes, which the
+arrays hold only up to the list's length. Those the step is predicted
+to read are placed and put back, and a run that read one not placed is
+dropped, as before. (A first version placed none of them: page 1's ship
+read stand-ins and lost the empty `\write` LaTeX makes there, an empty
+line of the log; PDF and `.aux` were the same.) The choice is ski
+rental's: at most about twice what the better of going on and going cold
+would have cost; an edit whose cascade meets an old step soon never
+weighs anything.
+
+The repro: 55.0 s → 1.9 s (LTO, 1.88 and 1.90 s; 25,037 new steps, 1
+run dropped, 78 K slots placed, 129 K put back), the PDF identical to
+plain runs of the two texts and the log too (its string statistics
+aside, as before). `scripts/ssa-edits` has `preamble`
+(`tests/e2e/preamble.tex`, the extension's document): the package
+added, taken away, then a word.
+
+Tests: ssa-edits 17/17 (99 stages, `--brief --fixpoint`), e2e 36/36,
+clippy, rustfmt.
+
+## 2026-10-03: The whole PGF manual: how much of a build could run at once
+
+The step graph of the whole manual (the `.aux` files settled by two
+plain runs, then one `PARTEX_SSA=1` process dumping each build's graph:
+the cold build and edits). 236,040 steps, 389.7 M commands, 164.0 M
+reads from outside a step, 64.5 M definitions. The setup (the steps
+before the first that ships) is 0.1% of the commands. The body is 379
+segments (the `\include`d chapters and the files they load); the
+largest, `dv-stylesheets`, is 72.1 M commands (19%), so chapters at
+once can give at most 5.38x.
+
+| model | whole steps | pipelined |
+|---|---|---|
+| all reads | 1.00x | 1.00x |
+| blind writes (a definition that does not read the one before it does not wait for it) | 1.55x | 2.89x |
+
+Every step reads something the step before it wrote: TeX's cursors
+(`align_state`, the conditional stack, the save stack's pointer and
+level, `selector`, `str_ptr`). With blind writes, the classes ignored
+one after another, pipelined: macros 6.38x, registers 10.25x,
+parameters 18.69x, the save stack 106x, the hash table 330x, codes
+2,156x, engine scalars 6,987x, counters 11,327x. The page builder's
+edges alone (whole steps): 20.77x. The data flow is wide; the state
+TeX keeps in one place is what makes it a chain.
+
+Speculation from the setup's end (each unit from the state the setup
+left; a segment runs its steps in order): 1 of 379 segments validates
+(0.0% of the commands), 11,296 of 203,021 steps. What the segments
+misread (blind writes): the hash table and macros (first uses:
+`\T1/cmr/m/n/10` and the other fonts NFSS loads when first used,
+xcolor's mixins, TikZ's animation attributes, `\hook_use:n`), counters,
+registers (`\tikz@lastx`), the `\write` streams (the `.aux` at its
+offset), codes.
+
+Rounds (`xtask parallel`, new): every unit at once from the setup's
+end; a unit that misread a definition of an earlier unit runs again in
+the round after that unit's last; a round takes its costliest unit.
+Segments: 287 rounds, 0.03x, 145x the work. Steps: 91,048 rounds,
+1.04x. With classes predicted, the class that validates the most first
+(steps, blind writes): macros 1.94x, the page builder 2.09x, parameters
+12.4x, PDF writer and fonts 20.1x, counters 25.7x, codes 48.4x,
+registers 428x (3.0x the work), the nest 999x (1.3x), the save stack
+1,116x in 4 rounds (1.01x the work).
+
+From the last build's records instead (each step of the word edit's
+rebuild from its entry state in the cold build): 236,037 of 236,040
+steps validate (the others misread `str_ptr` twice and a `\write`
+sealed by the step before), a bound of 93,450x.
+
+Edits, the whole manual in one process without the dump (a
+frame-pointer profiling build of 824a511): a word, 116.5 ms (the first
+rebuild after the cold build; 109.5 ms of it the rebuild), its revert
+20.6 ms (14.6 ms); a TikZ coordinate, 153.8 ms and 58.4 ms; a
+subsection's title, 182.1 ms and 210.2 ms. About 80 ms of the
+coordinate's and the title's is the link deflating the new page, after
+the page is ready (0.03 ms after the rebuild). The 2.1 to 11.9 s
+measured with the dump on were the dump's 7.1 GB per build. Open: the
+first rebuild's 95 ms more than its revert for the same 6 steps.
+
+## 2026-10-03 — A terminal that moves: the live line, the watch's log and keys (agent cli-ux)
+
+Branch `cli-ux`: `6532acc` (the progress board), `15d62d8` (the
+terminal), `b80f57a` (rustfmt of seven files of main), `375b998` (this
+entry), `85932d6` (the bar's width steady, a watch's line shorter).
+
+**Why.** `partex watch` printed `Rebuilding (inputs changed)` and then
+`Pass 1 |  0 ms`, which stayed as it was until the rebuild was over.
+The cause was in two places. The live line was drawn only by the
+build's own thread: at a pass's start, and at each page a session
+shipped (`Live::Page`, sent by the session's host). Nothing drew it on
+a timer, so while the engine ran between pages its time and spinner
+stood still. And machine mode, the default of `partex watch` and
+`partex build`, never connected that page sink at all: during a
+machine rebuild nothing called the drawing code, whatever the engine
+did.
+
+**The progress board** (`partex_core::progress`). The engine posts to
+a board of relaxed atomics: every 1024 commands the commands run and
+the file and line being read (the name copied only when it is another
+file, by an FNV hash of its bytes, under a sequence lock, so a reader
+never sees half a name), at each page shipped the count and `\count0`,
+and when it starts to finish the PDF file a phase. It is observability
+only: no tracker sees it, the engine never reads it, a replay or a
+rebuild leaves it as it is. Between posts a command pays a test of its
+count's low bits (`post_progress` is out of line, `#[cold]`). The board
+is one for the process; a reader takes differences.
+
+**The live line** (`live.rs`). A thread of its own draws the area
+below everything printed, every 80 ms while a task runs and whenever
+the state changes, sampling the board: `Pass 1 ⠹ ━━━━━━━━━━━━╺━━━━━━━━━━━
+54% page 19/74 · big.tex:11  1.1 s · 0.9 s left`. The build's thread
+only says what runs (a pass, or a phase: loading the saved build,
+linking, writing, saving) through `Progress`, which gained `Phase`. A
+build from the start shows a bar and the time left from the last full
+build's totals (commands on the board, pages, time), kept in the cache
+by directory and engine command line; the time left leans on the last
+build's time early and on this one's rate later. Printing goes above
+the area in one write, in synchronized output (`ESC [?2026h`), and
+the area is cut to the terminal's width so a redraw always finds it. A
+frame composed before a change is not drawn (a generation count), and
+a change made while a frame is drawn is drawn next (a first version
+waited for the next change and lost it: the footer kept the time of
+the build before). Nothing is drawn for a build quicker than 150 ms.
+
+**The result and the watch** (`render.rs`, `modern.rs`). One line per
+build: `Finished big.pdf · 74 pages · 244 KB · 1 pass · 1.47 s · 10
+warnings` (the PDF an OSC 8 hyperlink where the terminal has them). A
+watch logs one line per rebuild, `18:13:53 ↻ big.tex:10 ✓ big.pdf ·
+1.72 s · 54% run again` (the first line each edit changed,
+from the machine's old and new contents, `Watch::last_changes`; the
+pages and warnings only when their counts changed), then
+the errors that are new in full (one that stays is its headline, `as
+before`), the warnings that are new, and how many went, under a footer
+`Watching big.tex · ▁▃█▁ last 372 ms · r rebuild  o open  q quit  w
+warnings  ? help`. On a terminal in the foreground the watch reads
+keys: echo, line editing and the signal keys off (`stty`), so Ctrl-C is
+a key: the watch stops after saving its build (as `q`; a second Ctrl-C
+stops it at once, with 130), and during a rebuild it says it will stop
+once the rebuild is over. Ctrl-Z restores the terminal and stops the
+job's process group as the shell's Ctrl-Z would, and sets the modes
+again when it goes on. A watchdog `sh` started with the modes waits on
+a pipe: if partex dies without restoring them (killed, crashed), the
+pipe closes and the `sh` shows the cursor and sets the modes back. The
+panic hook restores them too. Errors mark what they are about: the
+undefined control sequence where the line has it, else the call of the
+macro it happened in (`\greet{world}`), else the last token, and the
+column is the mark's start (`modern.tex:17:4`, was `:29`, after it).
+Package warnings get their own headline (`warning: lipsum: Unknown
+language`). Off a terminal the same lines come out plain, as they
+happen; `--color`, `NO_COLOR`, `CLICOLOR_FORCE` and `CLICOLOR` choose
+the colours.
+
+**No dependency.** The terminal's size (`stty size`, asked at most
+once a second while something moves) and modes (`stty -g`, `stty
+-icanon -echo -isig`) are `stty`'s, run on the terminal's descriptor;
+whether this process may set them is `/proc/self/stat`'s foreground
+group. A crate (`rustix`, `libc`) would have saved a few `stty`
+processes per session, against the rule of no dependencies and no
+`unsafe`.
+
+**Found on the way.**
+- Every cold machine build printed `partex: machine: candidates by
+  level …` (the census, a debugging report) into the modern terminal;
+  it is now printed only with `PARTEX_WATCH_DEBUG` or the cut timing.
+- Saving the store after `partex build` takes seconds (1.5 s for the
+  74-page document, 4 s for a 12-page one on this loaded machine) and
+  was invisible: the process seemed to hang after its result. It now
+  has a live line (`Saving ⠹ the build for the next run  0.8 s`).
+- `main` at `824a511` failed `cargo fmt --check` in seven files of the
+  PDF inclusion (`fontmap.rs`, `epdf.rs`, `writefont.rs`, `fofi.rs`,
+  `fofi_tables.rs`, `gfxfont.rs`, `pdfread.rs`); `b80f57a` formats them
+  and nothing else, and can be dropped if their author formats them.
+
+**Measured** (this machine, loaded, release builds with fat LTO, the
+branch against `824a511`):
+- a 74-page LaTeX document (lipsum, hyperref), one plain pass
+  (`--compat=pdftex`), 20 runs of each alternating: instructions
+  3.2135 G → 3.2145 G (+0.03%), cycles (median) 1.6846 G → 1.6850 G
+  (+0.02%);
+- the same document's `partex build` from the start on a terminal (the
+  live line drawn; no store, no saved session), 12 runs of each
+  alternating: wall time 2.52 s → 2.52 s (median), user 2.065 →
+  2.075 s;
+- the course (299 pages), one plain pass, 2 runs of each alternating
+  (`scripts/heavy`): instructions 274.63 G → 274.93 G (+0.10%), cycles
+  146.9 G → 147.0 G (+0.1%), wall 55.4 s → 55.2 s. The PDF is the same
+  size (3,184,359 bytes); e2e compares the bytes.
+
+**Tests.** e2e's `modern` now checks the last line's facts (`Failed
+modern.tex`, `1 error`, `3 warnings`, `1 page`, `3 passes`) instead of
+the old text, and the error's column 4 (the mark's start) instead of
+29; `modern_watch` waits for `-v`'s `Machine rebuilt in` after each
+edit instead of the old result line's `modern.tex (`. The renderer's,
+the terminal's and the board's unit tests are new (`render.rs`,
+`live.rs`, `term.rs`, `snippet.rs`, `progress.rs`). In a
+pseudo-terminal (a Python driver with a small VT100 model, not kept in
+the tree): a cold
+build at 60, 80, 100 and 120 columns, a watch's rebuilds, an error and
+its fix, the keys, Ctrl-C during a rebuild (once, twice), Ctrl-Z and
+`fg` under an interactive bash, and partex killed (the watchdog showed
+the cursor and bash had the modes back). `cargo xtask check` passes:
+fmt (with `b80f57a`), clippy (both feature sets), the wasm build, the
+workspace's tests, trip 7/7 and etrip 18/18 (plain and machine mode),
+e2e 35/35 (plain and machine mode), ssa-edits 16/16 (`--brief
+--fixpoint`) and 16/16 (`PARTEX_SSA_TRIPS=1`).
 
 ## 2026-10-03: Glyph origins: each glyph of the PDF and the source bytes it came from (branch `synctex`)
 

@@ -8,11 +8,14 @@
 //! session code as `-converge` and `-watch`, rendering what happens
 //! (`render.rs`) instead of printing TeX's terminal stream.
 
-use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicBool;
+use std::sync::mpsc;
+use std::time::{Duration, SystemTime};
 
 use crate::config;
-use crate::render::{End, Renderer, Settings, Style};
+use crate::render::{End, Estimate, Rebuild, Renderer, Settings, Style};
+use crate::term::{self, ColorChoice};
 
 const USAGE: &str = "\
 partex: a TeX engine that builds documents in one shot
@@ -21,7 +24,8 @@ usage: partex <command> [options] [file.tex]
 
 commands:
   build    build the document to its fixpoint (BibTeX and makeindex included)
-  watch    build, then rebuild whenever an input changes
+  watch    build, then rebuild whenever an input changes (on a terminal,
+           keys: r rebuild, o open the PDF, w warnings, q quit, ? help)
   check    compile once without writing the output files
   why      why the last build ran as it did, and every warning it gave
   trace    build, writing a Chrome/Perfetto timeline (--open: open Perfetto)
@@ -34,7 +38,8 @@ options:
       --interactive        TeX's own terminal, stopping at errors (no fixpoint)
   -v, --verbose            show \\message and \\typeout lines (-vv: TeX's terminal)
   -q, --quiet              only problems and the result
-      --color WHEN         auto, always or never (NO_COLOR is honoured)
+      --color WHEN         auto, always or never (NO_COLOR and
+                           CLICOLOR_FORCE are honoured)
       --message-format F   human or json
       --open               watch: open the PDF; trace: open Perfetto
       --copy-pdf[=DIR]     build, watch: copy the PDF after each successful
@@ -62,13 +67,6 @@ enum Command {
     Clean,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Color {
-    Auto,
-    Always,
-    Never,
-}
-
 /// The modern command line's options.
 #[derive(Debug)]
 #[allow(clippy::struct_excessive_bools)]
@@ -81,7 +79,7 @@ struct Options {
     interactive: bool,
     verbose: u8,
     quiet: bool,
-    color: Color,
+    color: ColorChoice,
     json: bool,
     open: bool,
     /// `partex trace --output FILE`.
@@ -119,7 +117,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
         interactive: false,
         verbose: 0,
         quiet: false,
-        color: Color::Auto,
+        color: ColorChoice::Auto,
         json: false,
         open: false,
         timeline: None,
@@ -151,9 +149,9 @@ fn parse(args: &[String]) -> Result<Options, String> {
             "-q" | "--quiet" => o.quiet = true,
             "--color" | "--colour" => {
                 o.color = match value()?.as_str() {
-                    "auto" => Color::Auto,
-                    "always" => Color::Always,
-                    "never" => Color::Never,
+                    "auto" => ColorChoice::Auto,
+                    "always" => ColorChoice::Always,
+                    "never" => ColorChoice::Never,
                     v => return Err(format!("--color: `{v}` is not auto, always or never")),
                 };
             }
@@ -321,17 +319,14 @@ fn copy_dir(c: &config::CopyPdf, cwd: &Path, base: &Path) -> Option<PathBuf> {
 }
 
 fn settings(o: &Options) -> Settings {
-    let tty = std::io::stderr().is_terminal();
-    let dumb = std::env::var("TERM").is_ok_and(|t| t == "dumb");
-    let no_color = std::env::var_os("NO_COLOR").is_some_and(|v| !v.is_empty());
-    let color = match o.color {
-        Color::Always => true,
-        Color::Never => false,
-        Color::Auto => tty && !dumb && !no_color,
-    };
+    let caps = term::Caps::detect(o.color);
     Settings {
-        style: Style { color },
-        progress: tty && !dumb && !o.json,
+        style: Style {
+            color: caps.color,
+            unicode: caps.unicode,
+            links: caps.links && caps.color,
+        },
+        progress: caps.tty && !o.json,
         verbose: o.verbose,
         quiet: o.quiet,
     }
@@ -339,7 +334,7 @@ fn settings(o: &Options) -> Settings {
 
 fn fail(msg: &str, style: Style) -> ! {
     eprintln!("{}: {msg}", style.red("error"));
-    std::process::exit(2);
+    term::exit(2);
 }
 
 /// Run the modern command line with `args`.
@@ -405,6 +400,7 @@ fn ensure_format(engine: &str, r: Option<&Renderer>) -> Option<PathBuf> {
             "Preparing",
             &format!("the {engine} format (once per partex build)"),
         );
+        r.task("Preparing", &format!("the {engine} format"), true);
     }
     let mut args = vec![
         flavor.to_owned(),
@@ -427,6 +423,9 @@ fn ensure_format(engine: &str, r: Option<&Renderer>) -> Option<PathBuf> {
     );
     let rep = s.build();
     let _ = s.write_outputs();
+    if let Some(r) = r {
+        r.idle();
+    }
     if !dir.join(format!("{engine}.fmt")).is_file() || rep.history > 2 {
         eprintln!(
             "partex: making the {engine} format failed; see {}",
@@ -444,7 +443,6 @@ fn session(t: &Target, r: &Renderer) -> crate::session::Session {
     let mut job = crate::setup();
     job.host.formats = formats;
     job.host.notes = true;
-    job.host.live = Some(r.live_sink());
     crate::make_output_dir(&job.host);
     crate::session::Session::new(
         job.params,
@@ -475,7 +473,7 @@ fn main_output(outputs: &[(Vec<u8>, usize)]) -> Option<String> {
 /// the build saved for the job, rebuilt after what changed since (else
 /// built afresh), then saved again, after the result: the exit status.
 fn machine_build(t: &Target, st: Settings) -> i32 {
-    let mut ren = Renderer::new(st);
+    let ren = Renderer::new(st);
     ren.status("Compiling", &format!("{} ({})", t.file, t.engine));
     let formats = ensure_format(&t.engine, Some(&ren));
     crate::set_args(t.engine_args("nonstopmode"));
@@ -483,6 +481,7 @@ fn machine_build(t: &Target, st: Settings) -> i32 {
     job.host.formats = formats;
     job.host.notes = true;
     crate::make_output_dir(&job.host);
+    ren.set_estimate(load_estimate());
     ren.start();
     let mut between = crate::Between::default();
     let (mut w, out) = crate::machinehost::Watch::open(
@@ -493,8 +492,13 @@ fn machine_build(t: &Target, st: Settings) -> i32 {
         &mut |p| ren.progress(&p),
         false,
     );
-    let status = machine_finish(t, &ren, &out);
+    let status = machine_finish(t, &ren, &out, None);
+    save_estimate(&ren);
+    ren.progress(&crate::events::Progress::Phase(
+        crate::events::Phase::Saving,
+    ));
     w.finish_saving();
+    ren.idle();
     // (the build is not torn down: the process ends)
     std::mem::forget(w);
     status
@@ -510,13 +514,15 @@ fn build(t: &Target, st: Settings, check: bool) -> i32 {
     if !check && machine_builds(t) {
         return machine_build(t, st);
     }
-    let mut r = Renderer::new(st);
+    let r = Renderer::new(st);
     let verb = if check { "Checking" } else { "Compiling" };
     r.status(verb, &format!("{} ({})", t.file, t.engine));
     let mut s = session(t, &r);
+    r.set_estimate(load_estimate());
     r.start();
     let (reports, term, h) = if check {
         r.progress(&crate::events::Progress::PassStart(1));
+        r.progress(&crate::events::Progress::Phase(crate::events::Phase::Cold));
         let rep = s.build();
         r.progress(&crate::events::Progress::Pass(1, Some(&rep)));
         (Vec::new(), s.terminal(), rep.history)
@@ -525,11 +531,48 @@ fn build(t: &Target, st: Settings, check: bool) -> i32 {
             r.progress(&p);
         })
     };
-    finish(t, &r, &s, &reports, &term, h, check)
+    let status = finish(t, &r, &s, &reports, &term, h, check, None);
+    save_estimate(&r);
+    status
+}
+
+/// Where the totals of the last build of this job from its start are
+/// kept (by directory and engine command line: not by day, as a saved
+/// session is).
+fn estimate_key() -> u128 {
+    let dir = std::env::current_dir().unwrap_or_default();
+    partex_core::persist_hash(&(
+        "estimate/1",
+        dir.as_os_str().as_encoded_bytes(),
+        crate::args(),
+    ))
+}
+
+/// The totals of the last build of this job from its start.
+fn load_estimate() -> Option<Estimate> {
+    let text = crate::cache::get(estimate_key())?;
+    Estimate::parse(std::str::from_utf8(&text).ok()?)
+}
+
+/// Keep this build's totals for the next, if it ran from the start.
+fn save_estimate(r: &Renderer) {
+    if let Some(e) = r.measured() {
+        crate::cache::put(estimate_key(), e.to_text().as_bytes());
+    }
+}
+
+/// The size of the file named `name` among `outputs`.
+fn output_bytes(outputs: &[(Vec<u8>, usize)], name: Option<&str>) -> Option<usize> {
+    let name = name?;
+    outputs.iter().find_map(|(n, len)| {
+        let n = String::from_utf8_lossy(n);
+        (n.replace("//", "/") == name).then_some(*len)
+    })
 }
 
 /// Render the end of a build and record it for `partex why` and `partex
 /// clean`: the exit status.
+#[allow(clippy::too_many_arguments)]
 fn finish(
     t: &Target,
     r: &Renderer,
@@ -538,16 +581,20 @@ fn finish(
     term: &[u8],
     h: i32,
     check: bool,
+    rebuild: Option<Rebuild>,
 ) -> i32 {
     let summary = crate::warnings::summarize(&s.diagnostics());
     let outputs = s.outputs();
+    let output = if check { None } else { main_output(&outputs) };
     r.finish(&End {
         file: &t.file,
         summary: &summary,
         term,
-        output: if check { None } else { main_output(&outputs) },
+        bytes: output_bytes(&outputs, output.as_deref()),
+        output,
         failed: h > 1,
         checked: check,
+        rebuild,
     });
     if !check {
         record(t, reports, &summary, &outputs);
@@ -756,38 +803,158 @@ fn open_url(what: &str) {
         .spawn();
 }
 
-/// `partex watch`: build, then rebuild whenever an input changes (`q` and
-/// Enter quits).
-fn watch(opts: &Options, target: &Target, st: Settings) -> ! {
-    use std::sync::mpsc;
-    use std::time::{Duration, SystemTime};
+/// What a watch reads from its user: keys on a terminal, else lines.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Input {
+    /// `q`, Ctrl-D, Ctrl-C (or a line `q`): stop, after saving the build.
+    Quit,
+    /// `r`: look at every input now, and rebuild if one changed.
+    Rebuild,
+    /// `o`: open the PDF.
+    Open,
+    /// `w`: the last build's errors and warnings again.
+    Problems,
+    /// `c`, Ctrl-L: clear the screen.
+    Clear,
+    /// `?`, `h`: the keys.
+    Help,
+}
 
+/// What `?` shows.
+const KEYS: [&str; 2] = [
+    "r rebuild now · o open the PDF · w the errors and warnings again · c clear",
+    "q or Ctrl-C stop, after saving the build (Ctrl-C twice: at once) · Ctrl-Z suspend",
+];
+
+/// A watch is rebuilding (Ctrl-C then stops it once the rebuild is over).
+static BUSY: AtomicBool = AtomicBool::new(false);
+/// Ctrl-C was pressed (a second one stops the watch at once).
+static INTERRUPTED: AtomicBool = AtomicBool::new(false);
+
+/// Read the user's keys (`keys`: the terminal's modes are set for it) or
+/// lines into `tx`, on a thread of its own.
+fn read_input(keys: bool, printer: std::sync::Arc<crate::live::Live>, tx: mpsc::Sender<Input>) {
+    use std::io::Read;
+    use std::sync::atomic::Ordering::Relaxed;
+    std::thread::spawn(move || {
+        if !keys {
+            for line in std::io::stdin().lines() {
+                let Ok(line) = line else { break };
+                if line.trim() == "q" && tx.send(Input::Quit).is_err() {
+                    break;
+                }
+            }
+            return;
+        }
+        let mut buf = [0u8; 64];
+        let mut stdin = std::io::stdin().lock();
+        loop {
+            let n = match stdin.read(&mut buf) {
+                Ok(0) | Err(_) => {
+                    let _ = tx.send(Input::Quit);
+                    return;
+                }
+                Ok(n) => n,
+            };
+            for &b in &buf[..n] {
+                let input = match b {
+                    // (an escape sequence: an arrow, a function key)
+                    0x1b => break,
+                    b'q' | b'Q' | 0x04 => Input::Quit,
+                    0x03 => {
+                        if INTERRUPTED.swap(true, Relaxed) {
+                            printer.close();
+                            term::exit(130);
+                        }
+                        if BUSY.load(Relaxed) {
+                            printer
+                                .warn("Stopping", "once this rebuild is over (Ctrl-C again: now)");
+                        }
+                        Input::Quit
+                    }
+                    0x1c => {
+                        printer.close();
+                        term::exit(131);
+                    }
+                    0x1a => {
+                        printer.suspend();
+                        continue;
+                    }
+                    b'r' | b'R' => Input::Rebuild,
+                    b'o' | b'O' => Input::Open,
+                    b'w' | b'W' | b'e' | b'E' => Input::Problems,
+                    b'c' | b'C' | 0x0c => Input::Clear,
+                    b'?' | b'h' | b'H' => Input::Help,
+                    _ => continue,
+                };
+                if tx.send(input).is_err() {
+                    return;
+                }
+            }
+        }
+    });
+}
+
+/// The watch's polling period (`PARTEX_WATCH_POLL_MS`, `default` ms).
+fn poll_period(default: u64) -> Duration {
+    Duration::from_millis(
+        std::env::var("PARTEX_WATCH_POLL_MS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(default),
+    )
+}
+
+/// The next input, or `None` after `poll` (a watch reading no more lines
+/// sleeps instead).
+fn next_input(rx: &mpsc::Receiver<Input>, poll: Duration) -> Option<Input> {
+    match rx.recv_timeout(poll) {
+        Ok(i) => Some(i),
+        Err(mpsc::RecvTimeoutError::Timeout) => None,
+        Err(mpsc::RecvTimeoutError::Disconnected) => {
+            std::thread::sleep(poll);
+            None
+        }
+    }
+}
+
+/// What a watch does with `input` that is not a rebuild or a stop
+/// (`outputs`: the last build's files).
+fn answer(input: Input, ren: &Renderer, target: &Target, outputs: &[(Vec<u8>, usize)]) {
+    match input {
+        Input::Open => match main_output(outputs) {
+            Some(pdf) => {
+                open_output(target, outputs);
+                ren.note(&format!("opening {pdf}"));
+            }
+            None => ren.note("no PDF yet"),
+        },
+        Input::Problems => ren.show_problems(),
+        Input::Clear => ren.live().clear_screen(),
+        Input::Help => KEYS.iter().for_each(|k| ren.note(k)),
+        Input::Quit | Input::Rebuild => {}
+    }
+}
+
+/// `partex watch`: build, then rebuild whenever an input changes (`q`
+/// and Enter quits; on a terminal, keys).
+fn watch(opts: &Options, target: &Target, st: Settings) -> ! {
     if target.machine {
         machine_watch(opts, target, st);
     }
-    let mut ren = Renderer::new(st);
+    let ren = Renderer::new(st);
     ren.status("Compiling", &format!("{} ({})", target.file, target.engine));
     let mut sess = session(target, &ren);
+    ren.set_estimate(load_estimate());
     ren.start();
     let mut between = crate::Between::default();
     let (reports, term, mut history) =
         crate::converge_saved(&mut sess, &mut between, &mut |p| ren.progress(&p));
-    finish(target, &ren, &sess, &reports, &term, history, false);
+    finish(target, &ren, &sess, &reports, &term, history, false, None);
+    save_estimate(&ren);
     if opts.open {
-        match (&target.viewer, main_output(&sess.outputs())) {
-            (Some(v), Some(pdf)) => {
-                let _ = std::process::Command::new(v)
-                    .arg(pdf)
-                    .stdin(std::process::Stdio::null())
-                    .stdout(std::process::Stdio::null())
-                    .stderr(std::process::Stdio::null())
-                    .spawn();
-            }
-            (None, Some(pdf)) => open_url(&pdf),
-            _ => {}
-        }
+        open_output(target, &sess.outputs());
     }
-    ren.status("Watching", "for changes (q and Enter to quit)");
     let stamps = |s: &crate::session::Session| -> Vec<(PathBuf, Option<SystemTime>)> {
         s.inputs()
             .into_iter()
@@ -798,25 +965,29 @@ fn watch(opts: &Options, target: &Target, st: Settings) -> ! {
             .collect()
     };
     let mut last = stamps(&sess);
+    let keys = st.progress && term::keys_on();
+    ren.watching(&target.file, keys);
     let (tx, rx) = mpsc::channel();
-    std::thread::spawn(move || {
-        for line in std::io::stdin().lines() {
-            let Ok(line) = line else { break };
-            if tx.send(line).is_err() {
-                break;
-            }
-        }
-    });
+    read_input(keys, ren.live(), tx);
+    let poll = poll_period(200);
     loop {
-        match rx.recv_timeout(Duration::from_millis(200)) {
-            Ok(line) if line.trim() == "q" => std::process::exit(i32::from(history > 1)),
-            Ok(_) | Err(mpsc::RecvTimeoutError::Timeout) => {}
-            Err(mpsc::RecvTimeoutError::Disconnected) => {
-                std::thread::sleep(Duration::from_millis(200));
+        let input = next_input(&rx, poll);
+        match input {
+            Some(Input::Quit) => {
+                ren.close();
+                term::exit(i32::from(history > 1));
+            }
+            Some(Input::Rebuild) | None => {}
+            Some(other) => {
+                answer(other, &ren, target, &sess.outputs());
+                continue;
             }
         }
         let now = stamps(&sess);
         if now == last {
+            if input == Some(Input::Rebuild) {
+                ren.note("nothing changed since the last build");
+            }
             continue;
         }
         let changed: Vec<String> = now
@@ -828,15 +999,22 @@ fn watch(opts: &Options, target: &Target, st: Settings) -> ! {
             })
             .take(3)
             .collect();
-        ren.status("Rebuilding", &format!("({} changed)", changed.join(", ")));
-        ren.start();
+        BUSY.store(true, std::sync::atomic::Ordering::Relaxed);
+        ren.start_rebuild();
         let (reports, term, h) =
             crate::serve_observed(&mut sess, Some(history), true, &mut between, &mut |p| {
                 ren.progress(&p);
             });
+        BUSY.store(false, std::sync::atomic::Ordering::Relaxed);
         history = h;
-        finish(target, &ren, &sess, &reports, &term, h, false);
+        let rebuild = Some(Rebuild { changed });
+        finish(target, &ren, &sess, &reports, &term, h, false, rebuild);
         last = stamps(&sess);
+        ren.watching(&target.file, keys);
+        if INTERRUPTED.load(std::sync::atomic::Ordering::Relaxed) {
+            ren.close();
+            term::exit(i32::from(history > 1));
+        }
     }
 }
 
@@ -858,16 +1036,24 @@ fn open_output(target: &Target, outputs: &[(Vec<u8>, usize)]) {
 
 /// Render the end of a machine-mode build (as [`finish`] does a
 /// session's) and record it: the exit status.
-fn machine_finish(t: &Target, r: &Renderer, out: &crate::machinehost::Outcome) -> i32 {
+fn machine_finish(
+    t: &Target,
+    r: &Renderer,
+    out: &crate::machinehost::Outcome,
+    rebuild: Option<Rebuild>,
+) -> i32 {
     let summary = crate::warnings::summarize(&out.diagnostics);
     let failed = out.history > 1;
+    let output = main_output(&out.outputs);
     r.finish(&End {
         file: &t.file,
         summary: &summary,
         term: &out.term,
-        output: main_output(&out.outputs),
+        bytes: output_bytes(&out.outputs, output.as_deref()),
+        output,
         failed,
         checked: false,
+        rebuild,
     });
     if r.verbose() {
         for line in &out.reports {
@@ -881,14 +1067,21 @@ fn machine_finish(t: &Target, r: &Renderer, out: &crate::machinehost::Outcome) -
     i32::from(failed)
 }
 
+/// Stop a machine-mode watch: the build saved as it is, then the exit.
+fn machine_quit(ren: &Renderer, w: &mut crate::machinehost::Watch, history: i32) -> ! {
+    ren.progress(&crate::events::Progress::Phase(
+        crate::events::Phase::Saving,
+    ));
+    w.finish_saving();
+    ren.close();
+    term::exit(i32::from(history > 1));
+}
+
 /// `partex watch` in machine mode (DESIGN.md §6.1, §7.0): the build is
 /// recorded as regions, and an edit re-runs only the regions whose reads
 /// it changed.
 fn machine_watch(opts: &Options, target: &Target, st: Settings) -> ! {
-    use std::sync::mpsc;
-    use std::time::Duration;
-
-    let mut ren = Renderer::new(st);
+    let ren = Renderer::new(st);
     ren.status("Compiling", &format!("{} ({})", target.file, target.engine));
     let formats = ensure_format(&target.engine, Some(&ren));
     crate::set_args(target.engine_args("nonstopmode"));
@@ -896,6 +1089,7 @@ fn machine_watch(opts: &Options, target: &Target, st: Settings) -> ! {
     job.host.formats = formats;
     job.host.notes = true;
     crate::make_output_dir(&job.host);
+    ren.set_estimate(load_estimate());
     ren.start();
     let mut between = crate::Between::default();
     let (opened, out) = crate::machinehost::Watch::open(
@@ -907,7 +1101,9 @@ fn machine_watch(opts: &Options, target: &Target, st: Settings) -> ! {
         true,
     );
     let mut history = out.history;
-    machine_finish(target, &ren, &out);
+    let mut outputs = out.outputs.clone();
+    machine_finish(target, &ren, &out, None);
+    save_estimate(&ren);
     if opts.open {
         open_output(target, &out.outputs);
     }
@@ -916,46 +1112,49 @@ fn machine_watch(opts: &Options, target: &Target, st: Settings) -> ! {
     let (mut w, since) = opened.into_watch(&mut between, &mut |p| ren.progress(&p));
     if let Some(out) = since {
         history = out.history;
-        machine_finish(target, &ren, &out);
+        outputs.clone_from(&out.outputs);
+        let changed = w.last_changes().to_vec();
+        machine_finish(target, &ren, &out, Some(Rebuild { changed }));
     }
     w.idle();
-    ren.status("Watching", "for changes (q and Enter to quit)");
+    let keys = st.progress && term::keys_on();
+    ren.watching(&target.file, keys);
     let (tx, rx) = mpsc::channel();
-    std::thread::spawn(move || {
-        for line in std::io::stdin().lines() {
-            let Ok(line) = line else { break };
-            if tx.send(line).is_err() {
-                break;
-            }
-        }
-    });
-    let poll = Duration::from_millis(
-        std::env::var("PARTEX_WATCH_POLL_MS")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(50),
-    );
+    read_input(keys, ren.live(), tx);
+    let poll = poll_period(50);
     loop {
-        match rx.recv_timeout(poll) {
-            Ok(line) if line.trim() == "q" => {
-                // (the build saved as it is, after the result)
-                w.finish_saving();
-                std::process::exit(i32::from(history > 1));
+        let input = next_input(&rx, poll);
+        match input {
+            Some(Input::Quit) => machine_quit(&ren, &mut w, history),
+            Some(Input::Rebuild) | None => {}
+            Some(other) => {
+                answer(other, &ren, target, &outputs);
+                continue;
             }
-            Ok(_) | Err(mpsc::RecvTimeoutError::Timeout) => {}
-            Err(mpsc::RecvTimeoutError::Disconnected) => std::thread::sleep(poll),
         }
-        if !w.changed() {
+        if input.is_none() && !w.changed() {
             continue;
         }
-        ren.status("Rebuilding", "(inputs changed)");
-        ren.start();
-        let Some(out) = w.rebuild(&mut between, &mut |p| ren.progress(&p)) else {
+        BUSY.store(true, std::sync::atomic::Ordering::Relaxed);
+        ren.start_rebuild();
+        let out = w.rebuild(&mut between, &mut |p| ren.progress(&p));
+        BUSY.store(false, std::sync::atomic::Ordering::Relaxed);
+        let Some(out) = out else {
+            ren.idle();
+            if input == Some(Input::Rebuild) {
+                ren.note("nothing changed since the last build");
+            }
             continue;
         };
         history = out.history;
-        machine_finish(target, &ren, &out);
+        outputs.clone_from(&out.outputs);
+        let changed = w.last_changes().to_vec();
+        machine_finish(target, &ren, &out, Some(Rebuild { changed }));
         w.idle();
+        ren.watching(&target.file, keys);
+        if INTERRUPTED.load(std::sync::atomic::Ordering::Relaxed) {
+            machine_quit(&ren, &mut w, history);
+        }
     }
 }
 
@@ -1022,7 +1221,7 @@ mod tests {
         .unwrap();
         assert_eq!(o.command, Command::Build);
         assert_eq!(o.verbose, 2);
-        assert_eq!(o.color, Color::Never);
+        assert_eq!(o.color, ColorChoice::Never);
         assert_eq!(o.output_dir.as_deref(), Some("out"));
         assert_eq!(o.file.as_deref(), Some("paper.tex"));
         assert!(o.json);

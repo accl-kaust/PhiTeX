@@ -220,9 +220,37 @@ the graph of chapter 3, not from a pipeline split.
   - `clean` removes what the last build wrote.
 
   It is configured by `partex.toml` and `% !TEX` comments.
-- **The terminal** is drawn from events, not from the log: warnings,
-  notes and pages shipped come as data from the host, and LaTeX's
-  warnings are grouped and deduplicated.
+- **The terminal** is drawn from events, not from the log: warnings
+  and notes come as data from the host, and LaTeX's warnings are
+  grouped and deduplicated (`render.rs`, `warnings.rs`, `snippet.rs`).
+  - *The live line.* On a terminal a thread of its own draws one line
+    about twelve times a second: the pass or phase (loading the saved
+    build, linking, writing, saving), the pages shipped, the file and
+    line being read, the commands run, the time. Its numbers come from
+    the engine's *progress board* (`partex_core::progress`): relaxed
+    atomics the engine posts every 1024 commands (the commands, the
+    file and line) and at each page, which the thread samples. It is
+    observability only: no tracker sees it and the engine never reads
+    it, so it changes no output. A build from the start shows a bar and
+    the time left from the last such build's totals, kept in the cache.
+    A build quicker than 150 ms never shows the line.
+  - *The result* is one line: `Finished paper.pdf · 12 pages · 84 KB ·
+    2 passes · 1.31 s`, the file a hyperlink (OSC 8) where the terminal
+    has them.
+  - *`partex watch`* logs a line per rebuild (the time, the file and
+    line that changed, the result, the share of the commands run
+    again), the errors that are new in full and the warnings that are
+    new, under a footer (the last builds' times as a sparkline, the
+    keys). On a terminal in the foreground it reads keys (`r` rebuild,
+    `o` open, `w` warnings, `c` clear, `q` quit) with echo, line
+    editing and the signal keys off: Ctrl-C stops the watch after
+    saving its build (twice: at once), Ctrl-Z suspends it. A watchdog
+    `sh`, waiting on a pipe, restores the terminal's modes and cursor
+    if partex dies first. partex takes no dependency for this: the
+    terminal's size and modes are `stty`'s.
+  - Elsewhere (a pipe, a file, CI) the same lines come out plain, as
+    they happen, and nothing is redrawn. `--color`, `NO_COLOR`,
+    `CLICOLOR_FORCE` and `CLICOLOR` choose the colours.
 
 ---
 
@@ -1715,6 +1743,10 @@ edit lands nearer 15–30 ms.
   JSON. `partex trace` writes them.
 - **The TeX-level profiler**: per control sequence, file, line and
   page.
+- **The progress board** (`partex_core::progress`, 2.5): the commands
+  run, the pages shipped and the file and line being read, as relaxed
+  atomics the engine posts every 1024 commands, for the terminal's live
+  line.
 - **Native profiling**: `perf` and callgrind.
 - **The event log** (`PARTEX_EVENTS=DIR`, `partex-cli/src/eventlog.rs`):
   a tracker that observes a plain build and writes a table of every

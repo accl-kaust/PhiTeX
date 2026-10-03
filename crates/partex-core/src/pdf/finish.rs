@@ -106,6 +106,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
     }
 
     fn finish_pdf_file_now(&mut self) -> Result<(), Jump> {
+        crate::progress::BOARD.phase(crate::progress::Phase::FinishPdf);
         if self.pdf.objs.virt {
             // (machine mode: the objects the end of the job makes are
             // named by their order from here, not by where the input is,
