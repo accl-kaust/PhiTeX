@@ -2504,24 +2504,25 @@ pub fn run_applying<H: Host>(
 }
 
 /// Whether the engine, stopped for a checkpoint, is where the open step
-/// ends: with windows, every stop is a window's end (the engine stops
-/// only there, `Tex::window_due`, and where a step must begin: a fire, a
-/// `\shipout`, a file read whole, a deferred page builder; DESIGN 4.3
-/// item 1); without, a clean point of those kinds, an outer one or a
-/// paragraph's start on its level's line (3.15).
+/// ends: a clean point of the kinds that begin a step (an outer one, a
+/// fire, a `\shipout`, a file read whole, a deferred page builder, a
+/// paragraph's start on its level's line: 3.15), and with windows, the
+/// end of the open window too (`Tex::window_due`, DESIGN 4.3 item 1),
+/// which may be inside a group, a box or a macro's expansion. The clean
+/// point is asked at every stop: it takes the paragraph's start.
 fn step_ends<H: Host, T: crate::track::Tracker>(tex: &mut Tex<H, T>) -> bool {
-    tex.window() > 0
-        || matches!(
-            tex.clean_point(),
-            Some(
-                CleanPoint::Outer
-                    | CleanPoint::Fire
-                    | CleanPoint::Ship
-                    | CleanPoint::Load
-                    | CleanPoint::Page
-                    | CleanPoint::Graf
-            )
+    let clean = matches!(
+        tex.clean_point(),
+        Some(
+            CleanPoint::Outer
+                | CleanPoint::Fire
+                | CleanPoint::Ship
+                | CleanPoint::Load
+                | CleanPoint::Page
+                | CleanPoint::Graf
         )
+    );
+    clean || (tex.window() > 0 && tex.window_due())
 }
 
 /// Begin the fold's next step at a clean point (7.17.9), or a window

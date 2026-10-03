@@ -116,8 +116,10 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             self.stop_at = 0;
             return true;
         }
-        if self.window > 0 && self.stop_at_candidate {
-            return self.window_due();
+        // (a window ends at a candidate with token lists on top too, which
+        // no clean point is: DESIGN 4.3 item 1)
+        if self.window > 0 && self.stop_at_candidate && self.window_due() {
+            return true;
         }
         if self.stop_at_candidate
             && (self.cur_input.state != crate::web::TOKEN_LIST || self.fire_pending)
@@ -206,8 +208,9 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         self.defer_fire = on;
     }
 
-    /// Cut the SSA build's steps into windows of `every` commands (0: at
-    /// the clean points only, [`Self::clean_point`]): DESIGN 4.3 item 1.
+    /// Cut the SSA build's steps into windows of `every` commands too,
+    /// between the clean points ([`Self::clean_point`], where a step ends
+    /// with windows or without; 0: no windows): DESIGN 4.3 item 1.
     /// Only with [`Self::set_stop_at_candidate`] and
     /// `machine::clean_cuts()` on, as for the deferred fire.
     pub fn set_window(&mut self, every: u64) {

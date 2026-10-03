@@ -31,6 +31,10 @@ use crate::track::{Query, Tracker, Untracked};
 /// for the place where it ended (item 4: a step that ended elsewhere).
 const LOOK_AHEAD: usize = 64;
 
+/// The old steps after a step run again that predict the new steps of
+/// its run, at most (with windows: the rebuild's `ahead`).
+const CASCADE_AHEAD: usize = 4096;
+
 /// The version of each name's φ, with the bytes it was made from.
 type PhiVersions = BTreeMap<u32, (Arc<[u8]>, Version)>;
 
@@ -2132,9 +2136,37 @@ pub fn rebuild<H: Host>(tex: &mut Tex<H, SsaTracker>, trace: bool, apply: bool) 
         let cursor = j;
         let mut cur = j;
         let mut predict = alloc::vec![j];
+        let mut writes: Vec<StepId> = Vec::new();
+        // (with windows, the old steps after it as they were: the k-th new
+        // step of a run that ended elsewhere, a window about as long as an
+        // old one, runs about the text the k-th of them ran, and is
+        // predicted by it and its neighbours too, DESIGN 4.3 item 1)
+        let ahead: Vec<StepId> = if tex.window() > 0 {
+            let r = tex.tracker.rec.borrow();
+            let fold = &r.rt.fold;
+            fold.position(j).map_or_else(Vec::new, |p| {
+                fold.order[p + 1..]
+                    .iter()
+                    .take(CASCADE_AHEAD)
+                    .copied()
+                    .collect()
+            })
+        } else {
+            Vec::new()
+        };
+        // (the old step about where the run is, in `ahead`: one further
+        // for each new step, or where a dropped run read)
+        let mut at = 0usize;
         loop {
             let c0 = tex.commands();
-            let end = run_step(tex, cur, &predict, &input, &mut dirty, &mut rep, &mut srep);
+            let end = run_step(
+                tex, cur, &predict, &writes, &input, &mut dirty, &mut rep, &mut srep,
+            );
+            if let Some(s) = dirty.anchor.take()
+                && let Some(i) = ahead.iter().position(|&o| o == s)
+            {
+                at = i;
+            }
             if let Some(t) = target.take() {
                 target = Some(data_edits(tex, &end, t, &mut dirty, &mut rep));
             }
@@ -2228,6 +2260,14 @@ pub fn rebuild<H: Host>(tex: &mut Tex<H, SsaTracker>, trace: bool, apply: bool) 
                     .and_then(|p| fold.order.get(p + 1).copied())
                     .unwrap_or(cursor);
                 predict = alloc::vec![old, cur];
+                writes.clear();
+                for &o in ahead.iter().skip(at).take(3) {
+                    if !predict.contains(&o) {
+                        predict.push(o);
+                    }
+                    writes.push(o);
+                }
+                at += 1;
                 n
             };
             rep.new_steps += 1;
@@ -2545,7 +2585,7 @@ pub fn rerun_check<H: Host>(tex: &mut Tex<H, SsaTracker>, apply: bool) -> RerunC
             )
         };
         let (retries, commands) = (rep.retries, tex.commands());
-        let end = run_step(tex, j, &[j], &input, &mut dirty, &mut rep, &mut srep);
+        let end = run_step(tex, j, &[j], &[], &input, &mut dirty, &mut rep, &mut srep);
         out.steps += 1;
         out.commands += tex.commands() - commands;
         out.retries += rep.retries - retries;
@@ -2794,6 +2834,28 @@ fn data_edits<H: Host>(
 pub(crate) struct Dirty {
     order: BTreeMap<u64, StepId>,
     why: BTreeMap<StepId, Why>,
+    /// The table entries a run of this rebuild was dropped for (read at a
+    /// later definition, not placed): each step run after it is placed at
+    /// them too, where a later definition holds the arrays. A loop's
+    /// windows take branches by value, and the reads one window's run
+    /// made only now, the next one's makes too ([`MISSED_MAX`] at most;
+    /// `eqtb` only, [`predicts_alone`]).
+    missed: BTreeSet<Slot>,
+    /// The old step whose definition a dropped run read first (the
+    /// earliest): where the run is in the old run's text, for the new
+    /// steps after it (with windows, the rebuild's `ahead`).
+    anchor: Option<StepId>,
+}
+
+/// The slots [`Dirty::missed`] keeps at most.
+const MISSED_MAX: usize = 4096;
+
+/// Whether a slot may be placed apart from the slots a run reads with it
+/// (a prediction made of other runs' misses or writes): an `eqtb` entry.
+/// Not a page node without the page's length, a nest level's field
+/// without the nest, a save stack entry without its pointer.
+fn predicts_alone(a: &Slot) -> bool {
+    a.0 == Fam::Eqtb
 }
 
 /// Why a step is dirty: `None` runs it, `Some` holds the slots it read at
@@ -2997,13 +3059,15 @@ fn drop_outputs<H: Host>(tex: &mut Tex<H, SsaTracker>) {
 
 /// Run step `j` at its place from `input` (7.17.3 items 2 and 3, "A read
 /// resolves by prediction and validation"), the reads of the last runs of
-/// the steps `predict` predicting its own; mark the readers of the
-/// definitions it changed dirty. Its result.
+/// the steps `predict` predicting its own, and the writes of the steps
+/// `writes` too; mark the readers of the definitions it changed dirty.
+/// Its result.
 #[allow(clippy::too_many_arguments)]
 fn run_step<H: Host>(
     tex: &mut Tex<H, SsaTracker>,
     j: StepId,
     predict: &[StepId],
+    writes: &[StepId],
     input: &InputState,
     dirty: &mut Dirty,
     rep: &mut RebuildReport,
@@ -3028,15 +3092,36 @@ fn run_step<H: Host>(
         let old = defs(&r.rt, &fold.steps[j as usize].recs);
         // (each with the definition that reaches the step, found where the
         // test for a later one looked)
-        let reads = predict
+        // (a name the old run made, as a loop's points, is read by a new
+        // run that finds it made: the old run's writes predict it)
+        let written = writes.iter().flat_map(|&p| {
+            fold.steps[p as usize]
+                .recs
+                .iter()
+                .flat_map(|&q| r.rt.record(q).writes.iter().map(|(a, _)| a))
+                .filter(|a| predicts_alone(a))
+        });
+        let mut cand: Vec<Slot> = predict
             .iter()
             .flat_map(|&p| &fold.steps[p as usize].reads)
+            .chain(&dirty.missed)
+            .chain(written)
             .filter(|a| positioned(a))
+            .copied()
+            .collect();
+        if predict.len() > 1 || !writes.is_empty() || !dirty.missed.is_empty() {
+            // (the steps predicting it read much the same slots: each
+            // looked up once)
+            cand.sort_unstable();
+            cand.dedup();
+        }
+        let reads = cand
+            .into_iter()
             .filter_map(|a| {
                 if a.0 == Fam::PageNode {
-                    Some((*a, fold.reaching(a, key)))
+                    Some((a, fold.reaching(&a, key)))
                 } else {
-                    fold.reaching_if_later(a, key).map(|d| (*a, d))
+                    fold.reaching_if_later(&a, key).map(|d| (a, d))
                 }
             })
             .collect();
@@ -3188,8 +3273,18 @@ fn run_step<H: Host>(
             (miss, written)
         };
         if rep.trace && !miss.is_empty() {
-            let m: Vec<alloc::string::String> =
-                miss.iter().take(8).map(|a| alloc::format!("{a}")).collect();
+            let r = tex.tracker.rec.borrow();
+            let fold = &r.rt.fold;
+            // (each with the step whose definition the run read)
+            let m: Vec<alloc::string::String> = miss
+                .iter()
+                .take(8)
+                .map(|a| match fold.latest(a) {
+                    Some(d) => alloc::format!("{a}@{}", d.step),
+                    None => alloc::format!("{a}"),
+                })
+                .collect();
+            drop(r);
             note(
                 tex,
                 alloc::format!(
@@ -3209,6 +3304,23 @@ fn run_step<H: Host>(
             break fin;
         }
         rep.retries += 1;
+        if dirty.missed.len() < MISSED_MAX {
+            dirty
+                .missed
+                .extend(miss.iter().filter(|a| predicts_alone(a)).copied());
+        }
+        {
+            let r = tex.tracker.rec.borrow();
+            let fold = &r.rt.fold;
+            let first = miss
+                .iter()
+                .filter_map(|a| fold.latest(a))
+                .filter(|d| d.step != j)
+                .min_by_key(|d| d.key);
+            if let Some(d) = first {
+                dirty.anchor = Some(d.step);
+            }
+        }
         tex.tracker.rec.borrow_mut().rt.abort_step();
         // (what the dropped run wrote goes back to what reaches the step)
         let vals = {
@@ -3357,7 +3469,8 @@ fn run_step<H: Host>(
     put(tex, &vals);
     if rep.trace {
         // (why a window ended: DESIGN 4.3 item 1)
-        let cut = if tex.window() == 0 {
+        let cut = if tex.window() == 0 || !tex.window_due() {
+            // (none, or a clean point's: the end's place names its kind)
             alloc::string::String::new()
         } else if tex.fire_pending {
             alloc::string::String::from(", cut: a fire pending")

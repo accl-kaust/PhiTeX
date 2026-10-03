@@ -299,11 +299,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             }
             if self.cur_input.state == crate::web::TOKEN_LIST && self.cur_input.loc == NULL {
                 self.pop_exhausted_lists()?;
-                // (with windows, only a boundary that ends one: DESIGN 4.3
-                // item 1)
-                if self.cur_input.state != crate::web::TOKEN_LIST
-                    && (self.window == 0 || self.window_due())
-                {
+                if self.cur_input.state != crate::web::TOKEN_LIST {
                     self.at_checkpoint = true;
                     return Err(Jump::Checkpoint);
                 }
