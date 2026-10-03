@@ -313,6 +313,42 @@ impl<M: Machine> Runtime<M> {
         self.recs[id as usize].as_ref().expect("a live record")
     }
 
+    /// What the records and the fold hold, roughly, in bytes by part (a
+    /// report: `PARTEX_SSA_MEM`; the values' own contents not counted).
+    #[must_use]
+    pub fn mem_report(&self) -> alloc::string::String {
+        use core::mem::size_of;
+        let (mut n, mut rc, mut wc, mut ic, mut ac, mut held) = (0usize, 0, 0, 0, 0, 0);
+        let (mut rl, mut wl) = (0usize, 0);
+        for r in self.recs.iter().flatten() {
+            n += 1;
+            rl += r.reads.len();
+            rc += r.reads.capacity();
+            wl += r.writes.len();
+            wc += r.writes.capacity();
+            ic += r.items.capacity();
+            ac += r.args.capacity();
+            held += r.writes.iter().filter(|w| w.1.is_some()).count();
+        }
+        let (sr, sw, si) = (
+            size_of::<(Loc<M::Addr>, Version)>(),
+            size_of::<(M::Addr, Option<M::Val>)>(),
+            size_of::<Item<M>>(),
+        );
+        alloc::format!(
+            "records: {n} of {} ({} B each, {} MB); reads {rl} (capacity {rc}, {sr} B: {} MB); writes {wl} (capacity {wc}, {sw} B: {} MB, {held} with a value); items capacity {ic} ({si} B: {} MB); arguments {} MB; memo {} names; {}",
+            self.recs.len(),
+            size_of::<Option<Record<M>>>(),
+            (self.recs.capacity() * size_of::<Option<Record<M>>>()) >> 20,
+            (rc * sr) >> 20,
+            (wc * sw) >> 20,
+            (ic * si) >> 20,
+            (ac * size_of::<Version>()) >> 20,
+            self.memo.len(),
+            self.fold.mem_report()
+        )
+    }
+
     /// The streams the last build's last trip stored.
     #[must_use]
     pub fn streams(&self) -> &PMap<M::Addr, Stream<M::Val>> {

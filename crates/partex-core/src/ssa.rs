@@ -1182,6 +1182,16 @@ pub struct SsaTracker {
 }
 
 impl SsaTracker {
+    /// What the recorder holds, roughly, by part (`PARTEX_SSA_MEM`).
+    #[must_use]
+    pub fn mem_report(&self) -> alloc::string::String {
+        let r = self.rec.borrow();
+        alloc::format!(
+            "{}; {}",
+            r.rt.mem_report(),
+            rebuild::steps_mem_report(&r.st.steps)
+        )
+    }
     /// Time each step's reads and writes by the engine's commands
     /// (`partex_ssa::open::StepTimes`, printed by [`dag`]).
     pub fn set_timed(&mut self, on: bool) {

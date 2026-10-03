@@ -1077,6 +1077,12 @@ fn run_ssa(host: native::NativeHost, params: Params, command_line: &[u8]) -> i32
             eprintln!("partex: ssa build 0: {l}");
         }
         report_trips("build 0", s);
+        if std::env::var_os("PARTEX_SSA_MEM").is_some() {
+            eprintln!(
+                "partex: ssa build 0: memory: {}",
+                tex.tracker().mem_report()
+            );
+        }
         if s.trips > 1 {
             history = s.history;
             commands += s.commands;

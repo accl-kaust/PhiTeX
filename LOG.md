@@ -10795,3 +10795,57 @@ rebuild runs 9 steps and 1,108 commands, the picture's step not among
 them; the same PDFs. What the wrap still runs is mostly the output
 routine (956 commands adding the sentence, 481 removing it): the page's
 text changed.
+
+## 2026-10-03 — The fold's index entries name steps, not keys (coordinator)
+
+The course on accl, two rounds each, alternating: 93f8836 against
+2b742d1 (job 6403; gate 6404 passed): the warm word edit 21.1/22.4 →
+21.5/21.8 ms, its revert 19.7/19.5 → 18.4/18.3 ms, the cold build +1.5%,
+records +4.6%, peak RSS 2.19 → 2.50 GB. bef4f62 against 93f8836 (job
+6411; gate 6410 passed): the word edit 20.6/21.1 → 20.6/20.8 ms, the
+cold build and RSS the same.
+
+The RSS: `PARTEX_SSA_MEM=1` now prints what the recorder
+holds after the cold build, by part (the values' own contents not
+counted). The course (65,441 steps; 59,406 before 93f8836) held:
+
+| part | before | after |
+|---|---|---|
+| the readers' lists: 11.6 M entries of 24 bytes, capacity 16.7 M | 383 MB | 63 MB |
+| the definitions' lists: 3.7 M entries of 24 bytes, capacity 7.4 M | 168 MB | 84 MB |
+| the records' writes: 4.1 M of 64 bytes, each with its value | 253 MB | 253 MB |
+| the steps' reads: 11.6 M slots of 16 bytes | 177 MB | 177 MB |
+| the records' reads, items, headers | 136 MB | 136 MB |
+
+The page builder's steps (6,035 more) made the growth: each part grows
+with the steps' reads and writes, about 53 KB a step, with nothing
+wrong in any one of them. Most of a step's reads are slots every step
+reads (135 slots are read by more than 8,000 steps each, 3.1 M entries;
+1,776 more by 1,000 to 8,000).
+
+- A reader's entry was the step, its run and its key, and two fields
+  (`rec`, `ix`) only a definition uses: 24 bytes. It is the step's id
+  alone now, the lists in the order of the steps' keys (a search reads
+  each step's key); a definition's is the step, the record and the
+  write's index, 12 bytes.
+- No entry names a run: a run's close already put its own entries over
+  the last run's and removed the rest, and a removed step's entries go
+  with it, so every entry is a live step's last run's. A step's reader
+  entries change only where its reads did (the slots it reads that its
+  last run did not, and those it no longer reads), where every read was
+  searched for before.
+- No entry names a key, so making the keys again (`Fold::renumber`)
+  rewrites the steps' keys and nothing in the lists. The searches read
+  the keys from an array of their own, by step id (8 bytes a step, the
+  course's half a megabyte), not from the steps (72 bytes each): read
+  from the steps, `Fold::reaching` went from 2 to 32 of 2,200 samples on
+  the wrapping keystroke.
+- A step's reads that changed are found with a small hash set of each
+  run's reads, not by sorting both (which cost as much again).
+
+The course's cold build: peak RSS 2.577 → 2.384 GB (−193 MB, −7.5%),
+wall 1:35 → 1:32. The TikZ mock (LTO, 100 keystrokes, instructions per
+keystroke): a word 3.64 → 3.64 M, a `(` 12.50 → 12.48 M, the heading
+23.88 → 23.70 M, the sentence that wraps 19.25 → 19.10 M; the same
+PDFs. The harness: 14 cases identical in all three modes, the same
+commands.

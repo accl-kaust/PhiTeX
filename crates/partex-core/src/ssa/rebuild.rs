@@ -108,6 +108,31 @@ pub(crate) struct Steps {
     watch: Option<Watch>,
 }
 
+/// What the steps' own records hold, roughly, in bytes by part (a
+/// report: `PARTEX_SSA_MEM`).
+pub(crate) fn steps_mem_report(st: &Steps) -> alloc::string::String {
+    use core::mem::size_of;
+    let inputs = st.inputs.iter().flatten().count();
+    let top: usize = st
+        .inputs
+        .iter()
+        .flatten()
+        .map(|(_, i)| i.top.capacity())
+        .sum();
+    let fx: usize = st.effects.iter().map(Vec::len).sum();
+    let fxc: usize = st.effects.iter().map(Vec::capacity).sum();
+    alloc::format!(
+        "steps: inputs {inputs} ({} B each, lines {} KB); effects {fx} chunks (capacity {fxc}, {} B each) in {} steps; stores {} steps, loads {} steps, queries {} steps",
+        size_of::<InputState>(),
+        top >> 10,
+        size_of::<StepEffects>(),
+        st.effects.len(),
+        st.stores.len(),
+        st.loads.len(),
+        st.queries.len(),
+    )
+}
+
 /// A run of a step that went on past its budget (twice its last run's
 /// commands, and some), checked for reads of slots a later definition
 /// holds, not placed (DESIGN 7.17.3, "A read resolves by prediction and
