@@ -20,6 +20,11 @@
 //! is the graphics state's: `q`/`Q` save and restore it, and a form
 //! starts with the state in force where it is drawn, its `/Matrix`
 //! applied.
+//!
+//! [`list`] makes a stream's display list (DESIGN 4.6) in the same walk:
+//! the glyphs where it places them, pdfTeX's rules, the literals' texts
+//! and the `XObject`s, in the stream's order; [`glyphs`] the codes a page
+//! shows, forms walked where drawn, in glyph origins' order.
 
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -170,11 +175,22 @@ pub trait Text {
     fn code(&mut self, font: &[u8], code: u32, x: f64, y: f64);
     /// `XObject` `name` drawn (`Do`), with state `state` in force.
     fn draw(&mut self, name: &[u8], state: &State);
+    /// Operator `op`, whose token begins at byte `at` of the stream, about
+    /// to run with `operands` in state `state` (nothing by default).
+    fn op(&mut self, _at: usize, _op: &[u8], _operands: &[Operand], _state: &State) {}
+    /// [`Text::code`], with the text matrix times the CTM (`m`) and the
+    /// state, which draw the glyph's shape (PDF 9.4.4). By default
+    /// [`Text::code`].
+    fn shown(&mut self, font: &[u8], code: u32, x: f64, y: f64, _m: &Matrix, _state: &State) {
+        self.code(font, code, x, y);
+    }
+    /// The stream ended, in state `state` (nothing by default).
+    fn end(&mut self, _state: &State) {}
 }
 
 /// An operand.
 #[derive(Clone, Debug, PartialEq)]
-enum Operand {
+pub enum Operand {
     Num(f64),
     Str(Vec<u8>),
     Name(Vec<u8>),
@@ -239,6 +255,7 @@ pub fn walk_from(s: &[u8], t: &mut dyn Text, state: State) {
                     ops.push(Operand::Num(v));
                     continue;
                 }
+                t.op(from, tok, &ops, &g);
                 let num = |k: usize| -> f64 {
                     // (the k-th of the operator's last numbers)
                     let nums: Vec<f64> = ops
@@ -337,6 +354,7 @@ pub fn walk_from(s: &[u8], t: &mut dyn Text, state: State) {
         }
         i += 1;
     }
+    t.end(&g);
 }
 
 /// Show string `st` in state `g`, the text matrix `tm` advanced.
@@ -351,7 +369,7 @@ fn show(st: &[u8], g: &State, tm: &mut Matrix, t: &mut dyn Text) {
         // (the glyph's origin: (0, rise) in text space)
         let m = concat(tm, &g.ctm);
         let (x, y) = (g.rise * m[2] + m[4], g.rise * m[3] + m[5]);
-        t.code(&g.font.name, code, x, y);
+        t.shown(&g.font.name, code, x, y, &m, g);
         let space = if n == 1 && code == 32 {
             g.word_space
         } else {
@@ -792,6 +810,500 @@ pub fn page_code_count(data: &Arc<[u8]>, page: usize) -> usize {
     doc.page(page).map_or(0, |p| page_codes(&doc, &p).len())
 }
 
+// ---- display lists (DESIGN 4.6) ----
+
+/// A font as a display list draws it: a PDF font at one size (`Tf`'s).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct FontId(pub u32);
+
+impl FontId {
+    /// A font resource the stream's resources do not name.
+    pub const UNKNOWN: FontId = FontId(u32::MAX);
+}
+
+/// How pdfTeX placed a literal.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum LiteralMode {
+    /// `\pdfliteral{…}`, `\special{pdf:…}`, `\pdfsave`, `\pdfrestore`,
+    /// `\pdfsetmatrix`: text ended and the origin moved to the current
+    /// point (a `cm` before the literal's text).
+    Origin,
+    /// `\pdfliteral page{…}`: text ended, the origin left where it was.
+    Page,
+    /// `\pdfliteral direct{…}` (a color stack's usual mode): as it is,
+    /// inside a text object if one is open.
+    Direct,
+}
+
+impl LiteralMode {
+    /// The mode of pdfTeX's number (`set_origin` 0, `direct_page` 1,
+    /// `direct_always` 2).
+    #[must_use]
+    pub fn of(code: u8) -> LiteralMode {
+        match code {
+            1 => LiteralMode::Page,
+            2 => LiteralMode::Direct,
+            _ => LiteralMode::Origin,
+        }
+    }
+}
+
+/// What an `XObject` is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum XKind {
+    /// A form (`\pdfxform`): its own display list.
+    Form,
+    /// An image (`\pdfximage`): a raster image, or a page of a PDF file.
+    Image,
+}
+
+/// One thing a content stream draws, in the stream's order (DESIGN 4.6).
+/// Coordinates are in points (PDF's default user space: from the media
+/// box's origin, `y` upwards).
+#[derive(Clone, Debug, PartialEq)]
+pub enum Item {
+    /// Code `code` of font `font`, its glyph's origin at `(x, y)` in the
+    /// page's space, where the text and transformation matrices put it
+    /// (as [`page_codes`]). Its shape is drawn with the last
+    /// [`Item::GlyphMatrix`] before it.
+    Glyph {
+        font: FontId,
+        code: u8,
+        x: f64,
+        y: f64,
+    },
+    /// From here on, a glyph's shape is drawn with `[a b c d]`: a point
+    /// `(u, v)` of it, in text space (the font's size its unit: a Type 1
+    /// font's glyph units over 1000), at `(x + size·(a·u + c·v),
+    /// y + size·(b·u + d·v))`. A list starts upright, `[1 0 0 1]`: this
+    /// comes only where it changes (an expanded font's `Tm`, text
+    /// rotated or scaled by a literal's `cm`, `\mag`).
+    GlyphMatrix([f64; 4]),
+    /// A rule (pdfTeX's: `re f`, or a line stroked when it is thinner
+    /// than 1bp, `stroke`): the rectangle `(x, y)`-`(x + w, y + h)` in the
+    /// space `ctm` maps to the page. `ctm` is the identity, the rectangle
+    /// the page's, unless the space was rotated or skewed.
+    Rule {
+        x: f64,
+        y: f64,
+        w: f64,
+        h: f64,
+        stroke: bool,
+        ctm: Matrix,
+    },
+    /// A literal's text (`\pdfliteral`, `\special{pdf:…}`, a color stack,
+    /// `\pdfsave`, `\pdfrestore`, `\pdfsetmatrix`), PDF operators to run
+    /// with the CTM `ctm` (in force where the text begins: pdfTeX's moves
+    /// of its origin made); the rest of the graphics state is the
+    /// literals' before it. `codes`: the character codes its text shows,
+    /// which take that many places in glyph origins' order.
+    Literal {
+        bytes: Vec<u8>,
+        mode: LiteralMode,
+        ctm: Matrix,
+        codes: u32,
+    },
+    /// `XObject` `id` (its object number) drawn (`Do`) with the CTM
+    /// `matrix`: a form's own space (its list's), or an image's (a raster
+    /// image: the unit square; a PDF page: its space after the form's
+    /// `/Matrix`) maps to the page by it.
+    XObject {
+        kind: XKind,
+        id: u32,
+        matrix: Matrix,
+    },
+}
+
+/// Where a literal's text is in its stream (bytes `start..end`) and its
+/// mode (pdfTeX's number, [`LiteralMode::of`]).
+pub type LiteralSpan = (u32, u32, u8);
+
+/// What a list walk asks of a stream's resources.
+pub trait ListRes {
+    /// Font resource `name`: how it splits strings, and its widths (as
+    /// [`Text::font`]).
+    fn font(&mut self, name: &[u8]) -> Font;
+    /// The id of font resource `name` at size `size`.
+    fn font_id(&mut self, name: &[u8], size: f64) -> FontId;
+    /// `XObject` resource `name`: what it is and its object number.
+    fn xobject(&mut self, name: &[u8]) -> Option<(XKind, u32)>;
+}
+
+/// `m` applied to the point `(x, y)`.
+#[must_use]
+pub fn apply(m: &Matrix, x: f64, y: f64) -> (f64, f64) {
+    (m[0] * x + m[2] * y + m[4], m[1] * x + m[3] * y + m[5])
+}
+
+/// The last `k` numbers of `ops` (zeros if fewer).
+fn last_nums<const K: usize>(ops: &[Operand]) -> [f64; K] {
+    let mut out = [0.0; K];
+    let mut k = K;
+    for o in ops.iter().rev() {
+        if k == 0 {
+            break;
+        }
+        if let Operand::Num(v) = o {
+            k -= 1;
+            out[k] = *v;
+        }
+    }
+    out
+}
+
+/// The literals of a walk: which is open, and which comes next.
+struct Spans<'a> {
+    list: &'a [LiteralSpan],
+    next: usize,
+    /// The literal being walked: where its text ends (and, in a list, its
+    /// item).
+    open: Option<(usize, usize)>,
+}
+
+impl Spans<'_> {
+    /// Operator byte `at` is reached: the literals that began before it
+    /// entered (each to `begun`, with where its text is), the one it is
+    /// in open.
+    fn reach(&mut self, at: usize, mut begun: impl FnMut(usize, usize, u8) -> usize) {
+        if self.open.is_some_and(|(end, _)| at >= end) {
+            self.open = None;
+        }
+        while let Some(&(start, end, mode)) = self.list.get(self.next) {
+            let (start, end) = (start as usize, end as usize);
+            if start > at {
+                break;
+            }
+            self.next += 1;
+            let item = begun(start, end, mode);
+            if at < end {
+                self.open = Some((end, item));
+            }
+        }
+    }
+}
+
+/// A path pdfTeX makes for a rule: a rectangle, or a line from a point,
+/// with the CTM it is made in.
+#[derive(Clone, Copy)]
+enum Path {
+    None,
+    Move(f64, f64),
+    Rect([f64; 4], Matrix),
+    Line([f64; 4], Matrix),
+}
+
+/// The walk of [`list`].
+struct ListWalk<'a> {
+    res: &'a mut dyn ListRes,
+    s: &'a [u8],
+    lits: Spans<'a>,
+    out: Vec<Item>,
+    /// The glyph matrix last given, and the font last named.
+    gm: [f64; 4],
+    last_font: Option<(Vec<u8>, u64, FontId)>,
+    path: Path,
+    /// The line width pdfTeX's last `w` set.
+    lw: f64,
+}
+
+impl ListWalk<'_> {
+    fn reach(&mut self, at: usize, ctm: &Matrix) {
+        let (s, out) = (self.s, &mut self.out);
+        let mut entered = false;
+        self.lits.reach(at, |start, end, mode| {
+            entered = true;
+            let bytes = s.get(start..end.min(s.len())).unwrap_or_default().to_vec();
+            out.push(Item::Literal {
+                bytes,
+                mode: LiteralMode::of(mode),
+                ctm: *ctm,
+                codes: 0,
+            });
+            out.len() - 1
+        });
+        if entered {
+            self.path = Path::None;
+        }
+    }
+
+    /// A rule's rectangle `r` (`x y w h`) in the space of `c`.
+    fn rule(&mut self, r: [f64; 4], stroke: bool, c: &Matrix) {
+        let item = if c[1] == 0.0 && c[2] == 0.0 {
+            // (its corner placed, its sides scaled: the lower left corner
+            // the least)
+            let (x, y) = apply(c, r[0], r[1]);
+            let (w, h) = (c[0] * r[2], c[3] * r[3]);
+            Item::Rule {
+                x: if w < 0.0 { x + w } else { x },
+                y: if h < 0.0 { y + h } else { y },
+                w: w.abs(),
+                h: h.abs(),
+                stroke,
+                ctm: IDENTITY,
+            }
+        } else {
+            Item::Rule {
+                x: r[0],
+                y: r[1],
+                w: r[2],
+                h: r[3],
+                stroke,
+                ctm: *c,
+            }
+        };
+        self.out.push(item);
+    }
+}
+
+impl Text for ListWalk<'_> {
+    fn font(&mut self, name: &[u8]) -> Font {
+        self.res.font(name)
+    }
+
+    fn code(&mut self, _: &[u8], _: u32, _: f64, _: f64) {}
+
+    fn shown(&mut self, font: &[u8], code: u32, x: f64, y: f64, m: &Matrix, g: &State) {
+        if let Some((_, i)) = self.lits.open {
+            if let Some(Item::Literal { codes, .. }) = self.out.get_mut(i) {
+                *codes += 1;
+            }
+            return;
+        }
+        let gm = [g.scale * m[0], g.scale * m[1], m[2], m[3]];
+        #[expect(clippy::float_cmp, reason = "given again whenever it changes at all")]
+        let changed = gm != self.gm;
+        if changed {
+            self.gm = gm;
+            self.out.push(Item::GlyphMatrix(gm));
+        }
+        let size = g.size.to_bits();
+        let id = match &self.last_font {
+            Some((n, s, id)) if n == font && *s == size => *id,
+            _ => {
+                let id = self.res.font_id(font, g.size);
+                self.last_font = Some((font.to_vec(), size, id));
+                id
+            }
+        };
+        self.out.push(Item::Glyph {
+            font: id,
+            code: u8::try_from(code).unwrap_or(u8::MAX),
+            x,
+            y,
+        });
+    }
+
+    fn draw(&mut self, name: &[u8], state: &State) {
+        if self.lits.open.is_some() {
+            return;
+        }
+        if let Some((kind, id)) = self.res.xobject(name) {
+            self.out.push(Item::XObject {
+                kind,
+                id,
+                matrix: state.ctm,
+            });
+        }
+    }
+
+    fn op(&mut self, at: usize, op: &[u8], operands: &[Operand], g: &State) {
+        self.reach(at, &g.ctm);
+        if self.lits.open.is_some() {
+            return;
+        }
+        // (pdfTeX's own operators: its rules' paths)
+        match op {
+            b"w" => self.lw = last_nums::<1>(operands)[0],
+            b"re" => self.path = Path::Rect(last_nums::<4>(operands), g.ctm),
+            b"m" => {
+                let [x, y] = last_nums::<2>(operands);
+                self.path = Path::Move(x, y);
+            }
+            b"l" => {
+                let [x, y] = last_nums::<2>(operands);
+                self.path = match self.path {
+                    Path::Move(x0, y0) => Path::Line([x0, y0, x, y], g.ctm),
+                    _ => Path::None,
+                };
+            }
+            b"f" | b"F" | b"f*" => {
+                if let Path::Rect(r, c) = self.path {
+                    self.rule(r, false, &c);
+                }
+                self.path = Path::None;
+            }
+            #[expect(
+                clippy::float_cmp,
+                reason = "pdfTeX's lines are exactly level or upright"
+            )]
+            b"S" => {
+                if let Path::Line([x0, y0, x1, y1], c) = self.path {
+                    let h = self.lw / 2.0;
+                    if y0 == y1 {
+                        self.rule([x0.min(x1), y0 - h, (x1 - x0).abs(), self.lw], true, &c);
+                    } else if x0 == x1 {
+                        self.rule([x0 - h, y0.min(y1), self.lw, (y1 - y0).abs()], true, &c);
+                    }
+                }
+                self.path = Path::None;
+            }
+            b"n" | b"s" | b"b" | b"B" | b"b*" | b"B*" => self.path = Path::None,
+            _ => {}
+        }
+    }
+
+    fn end(&mut self, g: &State) {
+        self.reach(usize::MAX, &g.ctm);
+    }
+}
+
+/// The display list of content stream `s` (DESIGN 4.6): what it draws,
+/// in order, with its literals' texts at `literals` (in order) and its
+/// resources `res`. Everything outside a literal is pdfTeX's own: text,
+/// rules, `XObject`s and the moves of its origin; inside one, the
+/// literal's (its text's codes counted, its paths and `Do`s its own).
+pub fn list(s: &[u8], literals: &[LiteralSpan], res: &mut dyn ListRes) -> Vec<Item> {
+    let mut w = ListWalk {
+        res,
+        s,
+        lits: Spans {
+            list: literals,
+            next: 0,
+            open: None,
+        },
+        out: Vec::new(),
+        gm: [1.0, 0.0, 0.0, 1.0],
+        last_font: None,
+        path: Path::None,
+        lw: 1.0,
+    };
+    walk(s, &mut w);
+    w.out
+}
+
+/// A glyph placed: code `code` of font `font`, its origin at `(x, y)`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Placed {
+    pub font: FontId,
+    pub code: u8,
+    pub x: f64,
+    pub y: f64,
+}
+
+/// A form's stream, its literals and its `/Matrix`.
+pub type FormStream = (Arc<[u8]>, Arc<[LiteralSpan]>, Matrix);
+
+/// What [`glyphs`] asks of a stream's resources: [`ListRes`], and the
+/// forms drawn.
+pub trait GlyphRes: ListRes {
+    /// Form `id` entered (its resources in force until [`GlyphRes::leave`]):
+    /// its stream, its literals and its `/Matrix`.
+    fn enter(&mut self, id: u32) -> Option<FormStream>;
+    fn leave(&mut self);
+    /// How many codes image `id` shows (a PDF page's text; 0 for a
+    /// raster image).
+    fn image_codes(&mut self, id: u32) -> usize;
+}
+
+/// The walk of [`glyphs`].
+struct GlyphWalk<'a> {
+    res: &'a mut dyn GlyphRes,
+    lits: Spans<'a>,
+    out: &'a mut Vec<Option<Placed>>,
+    depth: usize,
+    last_font: Option<(Vec<u8>, u64, FontId)>,
+}
+
+impl Text for GlyphWalk<'_> {
+    fn font(&mut self, name: &[u8]) -> Font {
+        self.res.font(name)
+    }
+
+    fn code(&mut self, _: &[u8], _: u32, _: f64, _: f64) {}
+
+    fn shown(&mut self, font: &[u8], code: u32, x: f64, y: f64, _: &Matrix, g: &State) {
+        if self.lits.open.is_some() {
+            self.out.push(None);
+            return;
+        }
+        let size = g.size.to_bits();
+        let id = match &self.last_font {
+            Some((n, s, id)) if n == font && *s == size => *id,
+            _ => {
+                let id = self.res.font_id(font, g.size);
+                self.last_font = Some((font.to_vec(), size, id));
+                id
+            }
+        };
+        self.out.push(Some(Placed {
+            font: id,
+            code: u8::try_from(code).unwrap_or(u8::MAX),
+            x,
+            y,
+        }));
+    }
+
+    fn draw(&mut self, name: &[u8], state: &State) {
+        if self.lits.open.is_some() || self.depth > 32 {
+            return;
+        }
+        match self.res.xobject(name) {
+            Some((XKind::Form, id)) => {
+                let Some((s, spans, m)) = self.res.enter(id) else {
+                    return;
+                };
+                // (as `DocText::draw`: the state where it is drawn, its
+                // `/Matrix` applied)
+                let mut st = state.clone();
+                st.ctm = concat(&m, &st.ctm);
+                let mut inner = GlyphWalk {
+                    res: &mut *self.res,
+                    lits: Spans {
+                        list: &spans,
+                        next: 0,
+                        open: None,
+                    },
+                    out: &mut *self.out,
+                    depth: self.depth + 1,
+                    last_font: None,
+                };
+                walk_from(&s, &mut inner, st);
+                self.res.leave();
+            }
+            Some((XKind::Image, id)) => {
+                let n = self.res.image_codes(id);
+                self.out.extend(core::iter::repeat_n(None, n));
+            }
+            None => {}
+        }
+    }
+
+    fn op(&mut self, at: usize, _: &[u8], _: &[Operand], _: &State) {
+        self.lits.reach(at, |_, _, _| 0);
+    }
+}
+
+/// The codes content stream `s` shows (its literals' texts at
+/// `literals`), forms walked where they are drawn, in glyph origins'
+/// order (DESIGN 4.4): each of pdfTeX's own placed, a literal's or an
+/// image's (a PDF page's text) `None`.
+pub fn glyphs(s: &[u8], literals: &[LiteralSpan], res: &mut dyn GlyphRes) -> Vec<Option<Placed>> {
+    let mut out = Vec::new();
+    let mut w = GlyphWalk {
+        res,
+        lits: Spans {
+            list: literals,
+            next: 0,
+            open: None,
+        },
+        out: &mut out,
+        depth: 0,
+        last_font: None,
+    };
+    walk(s, &mut w);
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -879,5 +1391,166 @@ mod tests {
                 (100.0, 200.0)
             ]
         );
+    }
+
+    /// A list walk's resources: fonts as [`Codes2`]'s, each id its
+    /// name's last byte and its size; `Fm1` form 7, `Im1` image 9 (of 3
+    /// codes); form 7 shows one code.
+    struct Res;
+    impl ListRes for Res {
+        fn font(&mut self, n: &[u8]) -> Font {
+            Codes2(Vec::new()).font(n)
+        }
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "a test's sizes"
+        )]
+        fn font_id(&mut self, n: &[u8], size: f64) -> FontId {
+            FontId(u32::from(*n.last().unwrap_or(&0)) * 1000 + size as u32)
+        }
+        fn xobject(&mut self, n: &[u8]) -> Option<(XKind, u32)> {
+            match n {
+                b"Fm1" => Some((XKind::Form, 7)),
+                b"Im1" => Some((XKind::Image, 9)),
+                _ => None,
+            }
+        }
+    }
+    impl GlyphRes for Res {
+        fn enter(&mut self, id: u32) -> Option<FormStream> {
+            (id == 7).then(|| {
+                (
+                    Arc::from(&b"BT /F1 10 Tf (q) Tj ET"[..]),
+                    Arc::from(&[][..]),
+                    IDENTITY,
+                )
+            })
+        }
+        fn leave(&mut self) {}
+        fn image_codes(&mut self, _: u32) -> usize {
+            3
+        }
+    }
+
+    /// pdfTeX's text, a rule, a thin rule, a move of its origin, a
+    /// literal (its color, its text, its `cm`), text it scales, a form and
+    /// an image.
+    const STREAM: &[u8] = b"BT\n/F1 10 Tf 72 700 Td [(ab)-500(c)]TJ\nET\n\
+        q\n1 0 0 1 72 650 cm\n0 0 100 0.5 re f\nQ\n\
+        q\n1 0 0 1 72 640 cm\n[]0 d 0 J 0.4 w 0 0 m 50 0 l S\nQ\n\
+        1 0 0 1 10 20 cm\n\
+        0 0 1 rg BT /F1 5 Tf (zz) Tj ET 2 0 0 2 0 0 cm\n\
+        BT\n/F1 10 Tf 0 0 Td (d) Tj\nET\n\
+        q\n1 0 0 1 3 4 cm\n/Fm1 Do\nQ\n\
+        q\n10 0 0 20 5 6 cm\n/Im1 Do\nQ\n\
+        q 0 1 -1 0 100 100 cm 0 0 10 5 re f Q\n% end";
+
+    /// [`STREAM`]'s literal's text, and the comment ending it as one.
+    fn literals() -> Vec<LiteralSpan> {
+        let find = |w: &[u8]| STREAM.windows(w.len()).position(|x| x == w).unwrap_or(0);
+        let lit = b"0 0 1 rg BT /F1 5 Tf (zz) Tj ET 2 0 0 2 0 0 cm";
+        let (a, c) = (find(lit), find(b"% end"));
+        let n = |x: usize| u32::try_from(x).unwrap_or(0);
+        alloc::vec![(n(a), n(a + lit.len()), 0), (n(c), n(STREAM.len()), 2)]
+    }
+
+    #[test]
+    fn lists_what_a_stream_draws() {
+        let items = list(STREAM, &literals(), &mut Res);
+        let g = |code: u8, x: f64, y: f64, size: u32| Item::Glyph {
+            font: FontId(u32::from(b'1') * 1000 + size),
+            code,
+            x,
+            y,
+        };
+        let moved = [1.0, 0.0, 0.0, 1.0, 10.0, 20.0];
+        let scaled = [2.0, 0.0, 0.0, 2.0, 10.0, 20.0];
+        let lit = b"0 0 1 rg BT /F1 5 Tf (zz) Tj ET 2 0 0 2 0 0 cm".to_vec();
+        let want = alloc::vec![
+            // (each glyph 5 wide; a kern of -500: 5 more)
+            g(b'a', 72.0, 700.0, 10),
+            g(b'b', 77.0, 700.0, 10),
+            g(b'c', 87.0, 700.0, 10),
+            Item::Rule {
+                x: 72.0,
+                y: 650.0,
+                w: 100.0,
+                h: 0.5,
+                stroke: false,
+                ctm: IDENTITY,
+            },
+            // (a line 0.4 wide: its rectangle)
+            Item::Rule {
+                x: 72.0,
+                y: -0.2 + 640.0,
+                w: 50.0,
+                h: 0.4,
+                stroke: true,
+                ctm: IDENTITY,
+            },
+            Item::Literal {
+                bytes: lit,
+                mode: LiteralMode::Origin,
+                ctm: moved,
+                codes: 2,
+            },
+            Item::GlyphMatrix([2.0, 0.0, 0.0, 2.0]),
+            g(b'd', 10.0, 20.0, 10),
+            Item::XObject {
+                kind: XKind::Form,
+                id: 7,
+                matrix: [2.0, 0.0, 0.0, 2.0, 16.0, 28.0],
+            },
+            Item::XObject {
+                kind: XKind::Image,
+                id: 9,
+                matrix: [20.0, 0.0, 0.0, 40.0, 20.0, 32.0],
+            },
+            // (turned: its own space, and the CTM)
+            Item::Rule {
+                x: 0.0,
+                y: 0.0,
+                w: 10.0,
+                h: 5.0,
+                stroke: false,
+                ctm: concat(&[0.0, 1.0, -1.0, 0.0, 100.0, 100.0], &scaled),
+            },
+            Item::Literal {
+                bytes: b"% end".to_vec(),
+                mode: LiteralMode::Direct,
+                ctm: scaled,
+                codes: 0,
+            },
+        ];
+        assert_eq!(items, want);
+    }
+
+    #[test]
+    fn glyphs_in_origins_order() {
+        let got = glyphs(STREAM, &literals(), &mut Res);
+        let shown: Vec<Option<(u8, f64, f64)>> =
+            got.iter().map(|p| p.map(|p| (p.code, p.x, p.y))).collect();
+        // (the literal's two codes, the form's where it is drawn, the
+        // image's three)
+        assert_eq!(
+            shown,
+            [
+                Some((b'a', 72.0, 700.0)),
+                Some((b'b', 77.0, 700.0)),
+                Some((b'c', 87.0, 700.0)),
+                None,
+                None,
+                Some((b'd', 10.0, 20.0)),
+                Some((b'q', 16.0, 28.0)),
+                None,
+                None,
+                None,
+            ]
+        );
+        // (as the walk places codes)
+        let mut t = Codes2(Vec::new());
+        walk(STREAM, &mut t);
+        assert_eq!(t.0.len(), 6);
     }
 }

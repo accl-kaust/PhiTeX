@@ -267,15 +267,17 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             fonts,
             diag,
             effects,
-            // (glyph origins and `SyncTeX`: a session's side channels, not
-            // saved; a state recording them is not saved)
+            // (glyph origins, `SyncTeX` and display lists: a session's side
+            // channels, not saved; a state recording them is not saved)
             org,
             sync,
+            dl,
         } = self;
         if memo.enabled
             || effects.as_ref().is_some_and(|e| !e.is_empty())
             || org.is_some()
             || sync.is_some()
+            || dl.is_some()
         {
             return false;
         }
@@ -907,6 +909,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             effects: bool::load(l)?.then(alloc::vec::Vec::new),
             org: None,
             sync: None,
+            dl: None,
         })
     }
 

@@ -1786,6 +1786,48 @@ controller's state and the steps' events would all have to be saved.
 The cost off and on is measured by `scripts/accl/tasks/synctex-ab.sh`
 (LOG 2026-10-03).
 
+### 4.6 Display lists: each page's drawing without the PDF (2026-10-03)
+
+A renderer beside the editor (the PhiTeX Overleaf extension) draws pages
+itself; it should not need the PDF linked and parsed for that. A page's
+display list is what its content stream draws, as items in the
+stream's order: `Glyph { font, code, x, y }`, `GlyphMatrix([a b c d])`
+(where text is drawn turned, scaled or expanded), `Rule { x, y, w, h,
+stroke, ctm }`, `Literal { bytes, mode, ctm, codes }` (a
+`\pdfliteral`'s, a color stack's, `\pdfsave`/`\pdfrestore`/
+`\pdfsetmatrix`'s text, run with `ctm`) and `XObject { kind, id,
+matrix }`. Coordinates are points in the page's default user space (the
+media box `[0 0 w h]` pdfTeX writes; `\pdfpageattr`'s if it gives one).
+
+**Made from the stream's bytes, not at ship time.** The list is the walk
+of the content stream as written (`partex_engine::pdftext::list`, the
+walk glyph origins count with), the fonts' widths those of the PDF's
+`/Widths`: each glyph is where a reader of the PDF puts it, bit for bit,
+and the walk is the one a check runs over the linked PDF. A list made by
+the encoder from pdfTeX's own positions (`cur_h`, `pdf_delta_h`) would
+differ from the PDF's by its rounding. The ship keeps only what the walk
+cannot see in the bytes: the stream (uncompressed), where each literal's
+text is in it and its mode (`emit_literal` notes it), and the resources
+(each `/F<n>`'s PDF font with its TFM's widths and map entry, each
+`/Fm<n>`'s and `/Im<n>`'s object, a PDF page image's file): `Shipped`,
+`displist.rs`. Without a recorder it is kept by the engine; with one it
+is the ship step's effect (`Effect::Display`, ignored by the link), so a
+reused step keeps its stream and a rebuild needs no link. Lists are
+walked when asked for, once per stream. Off (the default) nothing is
+kept and the output is the same bytes either way.
+
+**The API** (`partex_core::displist`): `Tex::set_display_lists(true)`
+before the cold build; then `display_pages`, `display_hashes` (a hash
+per page of its stream, box, fonts, forms and images: redraw the pages
+whose hash a rebuild changed), `display_list(page)`, `display_form(id)`,
+`display_glyphs(page)` (the codes in glyph origins' order, forms walked
+where drawn, a literal's or an included page's `None`),
+`display_font(id)` (PS name, size, the whole Type 1 file the map names,
+its encoding, the TFM's widths, slant and extend) and
+`display_image(id)`. `PARTEX_DISPLAY=1` writes `<job>.display.jsonl`.
+The `display` e2e job and the `glyphs` job check every page's list
+against `pdftext` over the PDF, and SSA rebuilds against cold builds.
+
 ---
 
 ## 5. Performance, observability and the text form

@@ -12018,3 +12018,98 @@ PDFs compared; results in `partex-phitex-runs/cmd-6525`).
 Not done: the DVI mode, and persisted builds and sessions with SyncTeX
 (DESIGN 4.5 says what each would take).
 
+## 2026-10-03 — Display lists: each page's drawing without the PDF (agent display-list) — partial
+
+For the PhiTeX Overleaf extension's preview, which today links the whole
+PDF and re-parses it to draw one page (about 37 ms of a 65 ms
+keystroke): a per-page display list from shipout, so the PDF is linked
+only for the download. DESIGN 4.5 has the design;
+`partex_core::displist`'s documentation is the reference.
+
+What was built:
+
+- **The walk** (`partex_engine::pdftext`): `Text` gained an operator
+  hook (`op`, with the token's offset and operands), a glyph hook with
+  the text matrix and state (`shown`) and `end`; `pdftext::list` makes
+  a stream's items (glyphs, glyph matrices, pdfTeX's rules from `re f`
+  and its stroked thin lines, literals by the spans the ship noted,
+  `XObject`s with the CTM), `pdftext::glyphs` the codes in glyph
+  origins' order, forms walked where drawn. `pdfread::number_value`
+  reads a number as the PDF reader does, for widths and boxes.
+- **The record** (`displist.rs`): at each content stream's end the ship
+  keeps the stream's bytes (`PdfOut::stream_bytes`: `zip`'s, or the
+  pending bytes since the stream's start at level 0), the literals'
+  spans (`emit_literal`), the fonts (`FontRec`: TFM name, map entry,
+  size, the TFM's widths as `/Widths` prints them), forms and images, and
+  the box; a page's after its page object (`\pdfpageattr`). SSA:
+  `Effect::Display`, collected from the steps' effects like origins.
+- **The API**: `Tex::set_display_lists`, `display_pages`,
+  `display_hashes`, `display_list`, `display_form`, `display_glyphs`,
+  `display_font`, `display_image`, `display_stream`, `display_forms`.
+  Font ids are interned per engine (stable across rebuilds); form and
+  image ids are object numbers. `writet1::builtin_encoding` reads a Type
+  1 file's own encoding; `epdf::included_form_box` an included page's
+  `/BBox` and `/Matrix`.
+- **The side file** `PARTEX_DISPLAY=1` (`partex-cli/src/display.rs`):
+  `<job>.display.jsonl`, fonts numbered by first use so a rebuild's file
+  and a cold build's of the same text are the same bytes.
+
+Rejected: building the items in the encoder from pdfTeX's positions
+(`pdf_h`, `delta_h`): exact in sp, but not the PDF's (its rounding of
+`Td`, kerns and `/Widths`), and a second implementation of the viewer's
+arithmetic; walking the linked PDF: the point is not to link.
+
+Tests (all passed): `pdftext`'s unit tests of `list` and `glyphs` (text,
+a rule, a thin rule, a literal with text and a `cm`, scaled text, a
+form, an image, a turned rule); the effects' round trip with
+`Effect::Display`; the `display` e2e job (`tests/e2e/display.tex`: fonts
+and sizes, math, rules and a table, colors, `\rotatebox`,
+`\scalebox`, TikZ with an opacity and a turned node, a form drawn twice,
+an included PDF page, a PNG, literals in each mode, a page with
+`/Rotate 90`) against pdfTeX (every file the same with display lists
+on) and each page's list against `pdftext` over the PDF: 254 items, 152
+glyphs placed bit for bit; `microtype.tex` (font expansion, its `Tm`:
+glyph matrices 0.98 to 1.03): 3,741 items, 3,419 glyphs; SSA rebuilds
+(a comment line, then a paragraph inserted) the same side file and PDF
+as cold builds, each checked; the `glyphs` job with display lists on too
+(plain and both SSA rebuilds, glyph counts equal to origins'). fmt,
+clippy (both feature sets) and the wasm32 check pass.
+
+Verified on accl at c5e027d: the full gate (job 6515: fmt, clippy,
+`cargo xtask check`, the e2e jobs including `display` and `glyphs`,
+38/38 cases) and the SSA edits (`edits --brief --fixpoint`, job 6521:
+17/17 cases identical). A run of the edits without `--fixpoint` (job
+6516) differs only in the aux round-trip cases (readback, incremental,
+machine_edits, label, streams, fatal_end, windows), as main does
+without it.
+
+`PARTEX_DISPLAY=keep` keeps the lists and writes nothing (what keeping
+them costs a build); with `PARTEX_DISPLAY=1` stderr reports how long
+each page's list took to make and hash and to write.
+
+Left (wrap-up at the user's request):
+- **Cost not measured.** The harness (`bench/display-cost.sh`, accl cmd
+  job 6517) built both binaries and their formats, but every run exited
+  with status 2 in 0.00 s, so there are no numbers. The cause, not
+  looked into, is in the harness's `run` (likely `/usr/bin/time` or the
+  `env` call in the container), not in partex. Lists off still has to
+  be compared with c651cf3, and lists on measured.
+- **Resource resolution is unverified.** It is on branch
+  `display-resources` (8c0e3f3, not for merge):
+  - `PageList::resources` and `attrs` as `PdfValue`:
+    `\pdfpageresources`, `\pdfxform resources` and `attr`, and
+    `\pdfobj` objects (`Effect::DisplayObj`), with a form or image
+    named by its id;
+  - page hashes become a walk over every stream reached;
+  - the checker compares resources and attributes with the PDF.
+
+  It is clippy clean, but no e2e has run on it, and `display.tex` does
+  not yet have shadings, patterns or fadings. Until it lands, a list
+  carries the literal (`/pgf@CA0.5 gs`, `/Sh sh`, `/pgfpat3 scn`) but
+  not the resource it names.
+- **Ids.** Form and image ids are object numbers, which an edit that
+  makes objects before them can change. Images are recognized by their
+  bytes.
+- **The contract.** DESIGN 4.5 is a short note. The extension's
+  contract, including the `display_` names and the id-stability rules,
+  is in the documentation of `pdftext` and `displist.rs`.

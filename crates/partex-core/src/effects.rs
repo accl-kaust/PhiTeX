@@ -161,6 +161,10 @@ pub enum Effect {
     /// bytes of any file; the build's `SyncTeX` file is rendered from them
     /// once it is linked.
     Synctex(Vec<crate::synctex::Event>),
+    /// A page's or form's content stream as shipped, with display lists
+    /// on (`displist.rs`, DESIGN 4.6): what its list is made from; no
+    /// bytes of any file.
+    Display(alloc::sync::Arc<crate::displist::Shipped>),
 }
 
 /// Where text goes.
@@ -887,10 +891,12 @@ fn layout_timed<E: Executor>(
             Effect::Shipping(c) => pages.push(*c),
             Effect::Close(f) => closed.push(*f),
             Effect::Open { file, name, kind } => opened.push((*file, name.clone(), *kind)),
-            // (glyph origins: read by `Tex::origins`, not linked; the rest
-            // resolved before: `resolve_numbers`)
+            // (glyph origins and display lists: read by `Tex::origins` and
+            // `Tex::display_list`, not linked; the rest resolved before:
+            // `resolve_numbers`)
             Effect::Origins(_)
             | Effect::Synctex(_)
+            | Effect::Display(_)
             | Effect::ObjRef { .. }
             | Effect::ObjStmRef { .. }
             | Effect::Num(..)
@@ -1084,6 +1090,7 @@ partex_engine::persist_enum!(Effect {
     Open { file, name, kind },
     Origins(a0),
     Synctex(a0),
+    Display(a0),
 });
 
 #[cfg(test)]
@@ -1182,6 +1189,7 @@ mod persist_tests {
                     dims: [7, 8, 9],
                 },
             ]),
+            Effect::Display(alloc::sync::Arc::new(crate::displist::Shipped::example())),
         ];
         let mut kinds = alloc::collections::BTreeSet::new();
         for e in &all {
@@ -1208,9 +1216,10 @@ mod persist_tests {
                 Effect::Open { .. } => 19,
                 Effect::Origins(_) => 20,
                 Effect::Synctex(_) => 21,
+                Effect::Display(_) => 22,
             });
         }
-        assert_eq!(kinds.len(), 22);
+        assert_eq!(kinds.len(), 23);
         let mut s = Saver::new();
         all.save(&mut s);
         let bytes = s.into_bytes();
