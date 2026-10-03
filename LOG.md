@@ -11444,3 +11444,59 @@ Tests: e2e 35/35 (plain and `PARTEX_MACHINE=1`), ssa-edits 16/16
 (`--brief --fixpoint`, as `cargo xtask check` runs it; without
 `--fixpoint` the oracle runs once a stage, and the cases whose first
 build reads a file it writes differ by design).
+
+
+## 2026-10-03: PDF inclusion: font replacement (`copyFont`)
+
+With `\pdfinclusioncopyfonts=0` (the default), pdfTeX does not copy a
+Type 1 font of an included page: when the font has its file (`/FontFile`,
+or `/FontFile3` of subtype `Type1C`) and the map has an entry for its
+PostScript name, the font is replaced by pdfTeX's own embedding of that
+entry's file. partex copied every font (as `\pdfinclusioncopyfonts=1`
+does), so every LaTeX-made figure differed from pdfTeX's output. Now:
+
+- `lookup_fontmap` (`fontmap.rs`): the name without a subset tag,
+  `-Slant_<n>`/`-Extend_<n>` read off its end, found in `ps_tree`. The
+  default map is read lazily (42,000 lines; a document looks up a few),
+  so `ps_tree` is found the way registering every line would have built
+  it: the first line naming the PostScript name (found by its bytes) that
+  is the first valid line of its TFM name and names a Type 1 file to
+  include. The font file must be there (a load).
+- `epdf_create_fontdescriptor` and the rest (`writefont.rs`): the
+  descriptor of the entry's file is shared with TeX's fonts of that file
+  (its glyphs the union, one subset), numbered when the image is written,
+  its `/StemV` the PDF's; the glyphs of the PDF's `/CharSet` marked, or
+  the whole font embedded (`all_glyphs`) when there is none or the entry
+  is not subsetted; the font name an object of its own (`fn_objnum`),
+  written with the descriptor at the job's end.
+- `epdf.rs`: the copied objects have kinds (`objFont`, `objFontDesc`,
+  `objOther`); a replaced font's dictionary is copied without its
+  `/FontDescriptor`, `/BaseFont` and `/Encoding` (any key starting so),
+  which pdfTeX's objects replace; its encoding is written as
+  `/Differences` after the contents (`writeEncodings`, the last font
+  first), a CID font failing there.
+- The encoding is xpdf's (`partex_engine::gfxfont`, `GfxFont.cc` of
+  4.05): the font's type from its dictionary and its embedded file
+  (`getFontType`, with `FoFiIdentifier`), then `Gfx8BitFont`'s base
+  encoding (the dictionary's `/Encoding` or `/BaseEncoding`, else the
+  file's own: `FoFiType1::parse` of the first 100 lines, or
+  `FoFiType1C`'s charset and encoding; else Standard, or WinAnsi for
+  TrueType, or a Base 14 font's), Type 1C gaps filled from Standard, and
+  `/Differences` over it (`fofi.rs`, with xpdf's tables generated into
+  `fofi_tables.rs`).
+
+Checked against pdfTeX: a plain document using cmr10 that includes three
+figures (pdfTeX's CM fonts with built-in encodings; T1-encoded Latin
+Modern, an `/Encoding` with `/Differences`; the first again through
+Ghostscript, its fonts Type 1C with WinAnsi), on two pages, plain and
+`PARTEX_SSA=1`: the same bytes. The `images` e2e case no longer sets
+`\pdfinclusioncopyfonts=1`: its figure's cmr10 and the document's share
+one descriptor.
+
+`tests/view.rs` expected the view of a small document before `1483121`
+made a missing TFM a load: the view now has that load's node (`%2 =
+file cmr10`), the rest renumbered (the crate's tests were not run before
+that commit).
+
+Tests: e2e 35/35, ssa-edits 16/16 (`--brief --fixpoint`), the
+workspace's tests, clippy.

@@ -36,6 +36,13 @@ pub(crate) struct Fd {
     gl_tree: BTreeSet<Vec<u8>>,
     /// The font file's own encoding (`builtin_glyph_names`).
     builtin: Option<Vec<Vec<u8>>>,
+    /// `fn_objnum`: the object holding the font's name, which a font of
+    /// an included PDF replaced by this one has as its `/BaseFont` (0:
+    /// none).
+    fn_objnum: i32,
+    /// `all_glyphs`: the whole font embedded (an included PDF's font
+    /// with no `/CharSet`, or a map entry not subsetted).
+    all_glyphs: bool,
 }
 
 partex_engine::persist_struct!(Fd {
@@ -47,7 +54,9 @@ partex_engine::persist_struct!(Fd {
     font_dim,
     tx_tree,
     gl_tree,
-    builtin
+    builtin,
+    fn_objnum,
+    all_glyphs
 });
 
 /// A font dictionary (`fo_entry`).
@@ -255,6 +264,8 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                 tx_tree: BTreeSet::new(),
                 gl_tree: BTreeSet::new(),
                 builtin: None,
+                fn_objnum: 0,
+                all_glyphs: false,
             };
             self.pdf.fontw.fd_tree.insert(key.clone(), fd);
         }
@@ -308,6 +319,95 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         };
         self.pdf.fontw.fo_tree.insert(fm.tfm_name.clone(), fo);
         Ok(())
+    }
+
+    /// epdf.c's `epdf_create_fontdescriptor`: the descriptor of map entry
+    /// `fm`'s font file (its key), made if there is none yet: numbered
+    /// now, its `/StemV` the included PDF's, the entry used.
+    pub(crate) fn epdf_create_fontdescriptor(
+        &mut self,
+        fm: &Arc<MapEntry>,
+        stem_v: i32,
+    ) -> Result<(Vec<u8>, i32, i32), Jump> {
+        let key = (fm.ff_name.clone().unwrap_or_default(), fm.slant, fm.extend);
+        if !self.pdf.fontw.fd_tree.contains_key(&key) {
+            self.fonts_mapped.insert(fm.tfm_name.clone());
+            let objnum = self.pdf_new_objnum()?;
+            let mut font_dim = [(0, false); 11];
+            font_dim[writet1::STEMV] = (stem_v, true);
+            let fd = Fd {
+                fm: fm.clone(),
+                fontname: fm.ps_name.clone().unwrap_or_default(),
+                subset_tag: None,
+                ff_found: false,
+                objnum,
+                font_dim,
+                tx_tree: BTreeSet::new(),
+                gl_tree: BTreeSet::new(),
+                builtin: None,
+                fn_objnum: 0,
+                all_glyphs: false,
+            };
+            self.pdf.fontw.fd_tree.insert(key.clone(), fd);
+        }
+        Ok(key)
+    }
+
+    /// epdf.c's `epdf_mark_glyphs`: the glyphs of an included PDF's
+    /// `/CharSet` (`/a/b /c`, generic spaces before or between names)
+    /// marked in descriptor `key`.
+    pub(crate) fn epdf_mark_glyphs(&mut self, key: &(Vec<u8>, i32, i32), charset: &[u8]) {
+        let space = |c: u8| matches!(c, b' ' | b'\t' | b'\n' | b'\r' | 0x0c);
+        // (a C string: to its first NUL)
+        let cs = &charset[..charset.iter().position(|&c| c == 0).unwrap_or(charset.len())];
+        let cs = &cs[cs.iter().take_while(|&&c| space(c)).count()..];
+        let Some(fd) = self.pdf.fontw.fd_tree.get_mut(key) else {
+            return;
+        };
+        // (the first byte, a slash, skipped; each name ends at a slash or
+        // at spaces, which are skipped to the next slash)
+        let mut s = 1;
+        while s < cs.len() {
+            let mut p = s;
+            while p < cs.len() && cs[p] != b'/' && !space(cs[p]) {
+                p += 1;
+            }
+            let name = &cs[s..p];
+            if p < cs.len() && space(cs[p]) {
+                p += 1;
+                while p < cs.len() && space(cs[p]) {
+                    p += 1;
+                }
+            }
+            fd.gl_tree.insert(name.to_vec());
+            s = p + 1;
+        }
+    }
+
+    /// epdf.c's `embed_whole_font`.
+    pub(crate) fn embed_whole_font(&mut self, key: &(Vec<u8>, i32, i32)) {
+        if let Some(fd) = self.pdf.fontw.fd_tree.get_mut(key) {
+            fd.all_glyphs = true;
+        }
+    }
+
+    /// `get_fd_objnum`.
+    pub(crate) fn fd_objnum(&self, key: &(Vec<u8>, i32, i32)) -> i32 {
+        self.pdf.fontw.fd_tree.get(key).map_or(0, |fd| fd.objnum)
+    }
+
+    /// `get_fn_objnum`: the font name object's number, made at the first
+    /// ask.
+    pub(crate) fn fn_objnum(&mut self, key: &(Vec<u8>, i32, i32)) -> Result<i32, Jump> {
+        let n = self.pdf.fontw.fd_tree.get(key).map_or(0, |fd| fd.fn_objnum);
+        if n != 0 {
+            return Ok(n);
+        }
+        let n = self.pdf_new_objnum()?;
+        if let Some(fd) = self.pdf.fontw.fd_tree.get_mut(key) {
+            fd.fn_objnum = n;
+        }
+        Ok(n)
     }
 
     /// `writefontstuff`.
@@ -388,6 +488,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                 fd.fm.extend,
                 &fd.gl_tree,
                 &fd.tx_tree,
+                fd.all_glyphs,
             )
                 .hash(&mut h);
             (&fd.fontname, &fd.font_dim).hash(&mut h);
@@ -412,6 +513,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                 extend: fd.fm.extend,
                 glyphs: fd.gl_tree.clone(),
                 codes: fd.tx_tree.clone(),
+                all_glyphs: fd.all_glyphs,
                 fontname: fd.fontname.clone(),
                 font_dim: fd.font_dim,
                 tags: &mut tags,
@@ -483,6 +585,17 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             );
         };
         let mut fd = self.pdf.fontw.fd_tree[key].clone();
+        if fd.fn_objnum != 0 {
+            // `write_fontname_object`
+            self.pdf_begin_obj(fd.fn_objnum, 1)?;
+            self.pdf.out.print(b"/");
+            if let Some(t) = &fd.subset_tag {
+                self.pdf.out.print(t);
+                self.pdf.out.print(b"+");
+            }
+            self.pdf.out.print_ln(&fd.fontname);
+            self.pdf_end_obj();
+        }
         if fd.objnum == 0 {
             fd.objnum = self.pdf_new_objnum()?;
             self.pdf

@@ -11,9 +11,13 @@
 //! `pdf_printf` setting `pdf_last_byte` (which `pdf_newline` reads) and
 //! each byte of a name or a string not, as in utils.c.
 //!
-//! Embedded Type 1 fonts are copied as they are, as with
-//! `\pdfinclusioncopyfonts=1`: pdfTeX's replacement of a font its map
-//! has by its own (`copyFont`'s first branch) is not written yet.
+//! A page's Type 1 font that the map has (by its PostScript name, and
+//! whose file is there) is replaced by pdfTeX's own embedding of it
+//! (`copyFont`, unless `\pdfinclusioncopyfonts`): its descriptor is the
+//! map entry's font file's, shared with TeX's fonts (its glyphs the
+//! union), its `/BaseFont` an object holding the name, its `/Encoding`
+//! the one xpdf reads it with (`partex_engine::gfxfont`) as
+//! `/Differences`. Other fonts are copied as they are.
 
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -56,22 +60,42 @@ partex_engine::persist_struct!(PdfImage {
     group
 });
 
-/// An object of the file copied (`InObj`, only `objOther`s: fonts are
-/// copied as other objects are).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+/// What an object copied is (`InObjType`).
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum InKind {
+    /// `objOther`: copied as it is.
+    Other,
+    /// `objFont`: a font replaced, its descriptor's key and its encoding's
+    /// object (`fd`, `enc_objnum`).
+    Font { fd: (Vec<u8>, i32, i32), enc: i32 },
+    /// `objFontDesc`: a replaced font's descriptor, which the job's end
+    /// writes (its number the descriptor's).
+    FontDesc,
+}
+
+partex_engine::persist_enum!(InKind {
+    Other,
+    Font { fd, enc },
+    FontDesc
+});
+
+/// An object of the file copied (`InObj`).
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct InObj {
     pub num: i32,
     pub generation: i32,
     /// Its number in the output.
     pub objnum: i32,
     pub written: bool,
+    pub kind: InKind,
 }
 
 partex_engine::persist_struct!(InObj {
     num,
     generation,
     objnum,
-    written
+    written,
+    kind
 });
 
 /// An open document (`PdfDocument`).
@@ -281,6 +305,18 @@ fn page_box(p: &partex_engine::pdfread::Page, spec: i32) -> Option<[f64; 4]> {
 struct Copy<'d> {
     doc: &'d Doc,
     objs: Vec<InObj>,
+    /// `encodingList`: the replaced fonts' encodings (`None` for a CID
+    /// font) and their objects, the last added first.
+    encodings: Vec<(Option<partex_engine::fofi::Encoding>, i32)>,
+}
+
+/// What `copyFont` reads of a font it replaces.
+struct Replaced {
+    fm: Arc<crate::fontmap::MapEntry>,
+    desc: Ref,
+    stem_v: f64,
+    charset: Option<Vec<u8>>,
+    dict: Dict,
 }
 
 impl<H: Host, T: Tracker> Tex<H, T> {
@@ -440,6 +476,19 @@ impl<H: Host, T: Tracker> Tex<H, T> {
     /// `addOther`: the number of the copy of object `r`, new if it was
     /// not copied yet (and then copied by `writeRefs`).
     fn ep_add(&mut self, c: &mut Copy<'_>, r: Ref, file: &[u8]) -> Result<i32, Jump> {
+        self.ep_add_kind(c, r, InKind::Other, None, file)
+    }
+
+    /// `addInObj`: object `r` as `kind`, numbered `num` (a descriptor's,
+    /// `get_fd_objnum`) or anew; or its number if it is there already.
+    fn ep_add_kind(
+        &mut self,
+        c: &mut Copy<'_>,
+        r: Ref,
+        kind: InKind,
+        num: Option<i32>,
+        file: &[u8],
+    ) -> Result<i32, Jump> {
         if r.num == 0 {
             return self.pdftex_fail(Some(file), b"PDF inclusion: invalid reference");
         }
@@ -450,12 +499,16 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         {
             return Ok(o.objnum);
         }
-        let objnum = self.pdf_new_objnum()?;
+        let objnum = match num {
+            Some(n) => n,
+            None => self.pdf_new_objnum()?,
+        };
         c.objs.push(InObj {
             num: r.num,
             generation: r.generation,
             objnum,
             written: false,
+            kind,
         });
         Ok(objnum)
     }
@@ -578,6 +631,8 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                         self.ep_puts(b" ");
                         self.ep_ref(n);
                         self.ep_puts(b" ");
+                    } else if let Some(rep) = self.ep_replaceable(c, *r) {
+                        self.ep_replace_font(c, k, *r, &rep, file)?;
                     } else {
                         self.ep_name(k);
                         self.ep_puts(b" ");
@@ -599,6 +654,156 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             }
         }
         self.ep_puts(b">>\n");
+        Ok(())
+    }
+
+    /// `copyFont`'s test: font `r` is a Type 1 font with its file (or a
+    /// Type 1C one) whose PostScript name the map has, and replacement is
+    /// on; what is read of it then.
+    fn ep_replaceable(&mut self, c: &Copy<'_>, r: Ref) -> Option<Replaced> {
+        if self.pdf.out.fixed_inclusion_copy_font != 0 {
+            return None;
+        }
+        let doc = c.doc;
+        let Obj::Dict(dict) = doc.fetch(r) else {
+            return None;
+        };
+        if doc.lookup(&dict, b"Subtype").as_name() != Some(b"Type1") {
+            return None;
+        }
+        let Obj::Name(base) = doc.lookup(&dict, b"BaseFont") else {
+            return None;
+        };
+        let Some(Obj::Ref(desc)) = dict.get(b"FontDescriptor") else {
+            return None;
+        };
+        let desc = *desc;
+        let Obj::Dict(fd) = doc.fetch(desc) else {
+            return None;
+        };
+        let file_ok = matches!(doc.lookup(&fd, b"FontFile"), Obj::Stream(_))
+            || matches!(doc.lookup(&fd, b"FontFile3"),
+                Obj::Stream(s) if doc.lookup(&s.dict, b"Subtype").as_name() == Some(b"Type1C"));
+        if !file_ok {
+            return None;
+        }
+        let fm = self.lookup_fontmap(&base)?;
+        // (a /StemV that is no number: pdfTeX reads what xpdf's union
+        // holds; 0 here)
+        let stem_v = doc.lookup(&fd, b"StemV").as_num().unwrap_or(0.0);
+        let charset = match doc.lookup(&fd, b"CharSet") {
+            Obj::Str(s) => Some(s),
+            _ => None,
+        };
+        Some(Replaced {
+            fm,
+            desc,
+            stem_v,
+            charset,
+            dict,
+        })
+    }
+
+    /// `copyFont`'s replacement: the font's descriptor made or shared,
+    /// its glyphs marked (or the whole font), its encoding read, and the
+    /// font numbered as an `objFont`, which `writeRefs` writes.
+    fn ep_replace_font(
+        &mut self,
+        c: &mut Copy<'_>,
+        tag: &[u8],
+        r: Ref,
+        rep: &Replaced,
+        file: &[u8],
+    ) -> Result<(), Jump> {
+        let key = self.epdf_create_fontdescriptor(&rep.fm, crate::arith::zround(rep.stem_v))?;
+        match &rep.charset {
+            Some(cs) if rep.fm.is(crate::fontmap::F_SUBSETTED) => self.epdf_mark_glyphs(&key, cs),
+            _ => self.embed_whole_font(&key),
+        }
+        let fd_objnum = self.fd_objnum(&key);
+        self.ep_add_kind(c, rep.desc, InKind::FontDesc, Some(fd_objnum), file)?;
+        self.ep_name(tag);
+        // (`GfxFont::makeFont`, then `addEncoding`: its object first)
+        let enc = partex_engine::gfxfont::encoding(c.doc, &rep.dict);
+        let enc_objnum = self.pdf_new_objnum()?;
+        c.encodings.insert(0, (enc, enc_objnum));
+        let n = self.ep_add_kind(c, r, InKind::Font { fd: key, enc: enc_objnum }, None, file)?;
+        self.ep_puts(b" ");
+        self.ep_ref(n);
+        self.ep_puts(b" ");
+        Ok(())
+    }
+
+    /// `copyFontDict`: a replaced font's dictionary, its descriptor, name
+    /// and encoding pdfTeX's.
+    fn ep_font_dict(
+        &mut self,
+        c: &mut Copy<'_>,
+        o: &Obj,
+        fd: &(Vec<u8>, i32, i32),
+        enc: i32,
+        file: &[u8],
+    ) -> Result<(), Jump> {
+        let Obj::Dict(d) = o else {
+            let m = alloc::format!("PDF inclusion: invalid dict type <{}>", o.type_name());
+            return self.pdftex_fail(Some(file), m.as_bytes());
+        };
+        self.ep_puts(b"<<\n");
+        for (k, v) in &d.0 {
+            if k.starts_with(b"FontDescriptor") || k.starts_with(b"BaseFont") || k.starts_with(b"Encoding") {
+                continue;
+            }
+            self.ep_name(k);
+            self.ep_puts(b" ");
+            self.ep_object(c, v, file)?;
+            self.ep_puts(b"\n");
+        }
+        let fd_objnum = self.fd_objnum(fd);
+        let fn_objnum = self.fn_objnum(fd)?;
+        for (key, n) in [(&b"FontDescriptor"[..], fd_objnum), (b"BaseFont", fn_objnum), (b"Encoding", enc)] {
+            self.ep_puts(b"/");
+            self.ep_puts(key);
+            self.ep_puts(b" ");
+            self.pdf.out.objnum(n);
+            self.ep_puts(b" 0 R\n");
+        }
+        self.ep_puts(b">>");
+        Ok(())
+    }
+
+    /// `writeEncodings`: each replaced font's encoding (`epdf_write_enc`),
+    /// the last added first; a CID font fails.
+    fn ep_write_encodings(&mut self, c: &mut Copy<'_>, file: &[u8]) -> Result<(), Jump> {
+        for (enc, objnum) in core::mem::take(&mut c.encodings) {
+            let Some(names) = enc else {
+                return self.pdftex_fail(
+                    Some(file),
+                    b"PDF inclusion: CID fonts are not supported (try to disable font replacement to fix this)",
+                );
+            };
+            self.pdf_begin_dict(objnum, 1)?;
+            self.ep_puts(b"/Type /Encoding\n");
+            self.ep_puts(b"/Differences [");
+            let mut old: i32 = -2;
+            for (i, name) in (0i32..).zip(&names) {
+                let Some(name) = name else {
+                    continue;
+                };
+                let mut l = Vec::new();
+                if i != old + 1 {
+                    if old != -2 {
+                        l.push(b' ');
+                    }
+                    l.extend_from_slice(alloc::format!("{i}").as_bytes());
+                }
+                l.push(b'/');
+                l.extend_from_slice(name);
+                self.ep_puts(&l);
+                old = i;
+            }
+            self.ep_puts(b"]\n");
+            self.pdf_end_dict();
+        }
         Ok(())
     }
 
@@ -665,11 +870,23 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                     num: c.objs[i].num,
                     generation: c.objs[i].generation,
                 });
-                let level = if matches!(o, Obj::Stream(_)) { 0 } else { 2 };
-                self.pdf_begin_obj(c.objs[i].objnum, level)?;
-                self.ep_object(c, &o, file)?;
-                self.ep_puts(b"\n");
-                self.pdf_end_obj();
+                match c.objs[i].kind.clone() {
+                    InKind::Font { fd, enc } => {
+                        self.pdf_begin_obj(c.objs[i].objnum, 2)?;
+                        self.ep_font_dict(c, &o, &fd, enc, file)?;
+                        self.ep_puts(b"\n");
+                        self.pdf_end_obj();
+                    }
+                    // (the job's end writes it, `write_fontdescriptor`)
+                    InKind::FontDesc => {}
+                    InKind::Other => {
+                        let level = if matches!(o, Obj::Stream(_)) { 0 } else { 2 };
+                        self.pdf_begin_obj(c.objs[i].objnum, level)?;
+                        self.ep_object(c, &o, file)?;
+                        self.ep_puts(b"\n");
+                        self.pdf_end_obj();
+                    }
+                }
             }
             i += 1;
         }
@@ -705,7 +922,11 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         let Some(page) = doc.page(usize::try_from(im.page).unwrap_or(0)) else {
             return self.pdftex_fail(Some(file), b"xpdf: reading PDF image failed");
         };
-        let mut c = Copy { doc: &doc, objs };
+        let mut c = Copy {
+            doc: &doc,
+            objs,
+            encodings: Vec::new(),
+        };
         let page_obj = doc.fetch(page.dict_ref);
         let empty = Dict::default();
         let page_dict = page_obj.as_dict().unwrap_or(&empty);
@@ -852,6 +1073,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                 self.pdf_end_stream();
             }
         }
+        self.ep_write_encodings(&mut c, file)?;
         if let Some((val, gd)) = sep_group {
             self.pdf_begin_obj(val, 2)?;
             self.ep_object(&mut c, &Obj::Dict(gd), file)?;

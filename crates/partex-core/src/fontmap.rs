@@ -137,6 +137,9 @@ pub(crate) struct Lookups {
     index: Option<Arc<crate::u64map::U64Map<u32>>>,
     /// The entries looked up so far.
     found: BTreeMap<Vec<u8>, Option<Arc<MapEntry>>>,
+    /// The `ps_tree` entries looked up so far (by PostScript name, slant
+    /// and extend).
+    ps_found: BTreeMap<(Vec<u8>, i32, i32), Option<Arc<MapEntry>>>,
 }
 
 /// With the entries found: a loaded table must hand out the same ones
@@ -149,6 +152,7 @@ impl partex_engine::persist::Persist for Lookups {
         Some(Self {
             index: None,
             found: partex_engine::persist::Persist::load(l)?,
+            ps_found: BTreeMap::new(),
         })
     }
 }
@@ -249,6 +253,63 @@ impl Lookups {
     }
 }
 
+impl Lookups {
+    /// The entry `ps_tree` has for `key` in `lazy`: registering every line
+    /// in order puts a line's PostScript name there when the line is the
+    /// first valid one of its TFM name, the name is not there yet, and the
+    /// line names a Type 1 file to include. So: the first line naming it
+    /// (found by its bytes, then scanned) that is all three.
+    fn lookup_ps(&mut self, lazy: &Lazy, key: &(Vec<u8>, i32, i32)) -> Option<Arc<MapEntry>> {
+        if let Some(e) = self.ps_found.get(key) {
+            return e.clone();
+        }
+        let data = &lazy.data[..];
+        let needle = &key.0[..];
+        let mut found = None;
+        let mut at = 0;
+        while !needle.is_empty()
+            && let Some(i) = data[at..].windows(needle.len()).position(|w| w == needle)
+        {
+            let pos = at + i;
+            let start = data[..pos]
+                .iter()
+                .rposition(|&c| c == 10 || c == 13)
+                .map_or(0, |p| p + 1);
+            let end = data[pos..]
+                .iter()
+                .position(|&c| c == 10 || c == 13)
+                .map_or(data.len(), |p| pos + p);
+            let mut entry = None;
+            let mut warn = Vec::new();
+            for_map_file_lines(&data[start..end], |line| {
+                if entry.is_none() {
+                    entry = scan_line(line, &mut warn);
+                }
+            });
+            if let Some(fm) = entry
+                && fm.ps_key().as_ref() == Some(key)
+                && fm.is_t1fontfile()
+                && fm.is(F_INCLUDED)
+            {
+                let first = if fm.tfm_name == b"<nontfm>" {
+                    Some(Arc::new(fm.clone()))
+                } else {
+                    self.lookup(lazy, &fm.tfm_name)
+                };
+                if let Some(f) = first
+                    && *f == fm
+                {
+                    found = Some(f);
+                    break;
+                }
+            }
+            at = end.max(pos + 1);
+        }
+        self.ps_found.insert(key.clone(), found.clone());
+        found
+    }
+}
+
 /// What a map file's contents give, kept by identity (not state: the
 /// engine's cache, as `cs_cache` is): the host hands out the same `Arc`
 /// for a file as it was, and the step that ships the first page, which
@@ -345,6 +406,14 @@ impl FontMap {
         match &self.table.lazy {
             Some(l) => self.lookups.lookup(l, tfm),
             None => self.table.by_tfm.get(tfm).cloned(),
+        }
+    }
+
+    /// The `ps_tree` entry for a PostScript name, slant and extend.
+    pub(crate) fn lookup_ps(&mut self, key: &(Vec<u8>, i32, i32)) -> Option<Arc<MapEntry>> {
+        match &self.table.lazy {
+            Some(l) => self.lookups.lookup_ps(l, key),
+            None => self.table.by_ps.get(key).cloned(),
         }
     }
 
@@ -458,6 +527,66 @@ impl Table {
             }
         }
     }
+}
+
+/// C's `strtol(s, &end, 10)`: the value (as `(int)` of a `long`) and
+/// where it ends (0 if no number).
+fn strtol(s: &[u8]) -> (i32, usize) {
+    let mut i = s
+        .iter()
+        .take_while(|c| matches!(c, b' ' | b'\t' | b'\n' | 0x0b | 0x0c | b'\r'))
+        .count();
+    let neg = match s.get(i) {
+        Some(b'-') => {
+            i += 1;
+            true
+        }
+        Some(b'+') => {
+            i += 1;
+            false
+        }
+        _ => false,
+    };
+    let digits = s[i.min(s.len())..].iter().take_while(|c| c.is_ascii_digit()).count();
+    if digits == 0 {
+        return (0, 0);
+    }
+    let v = s[i..i + digits].iter().fold(0i64, |v, &c| {
+        v.saturating_mul(10).saturating_add(i64::from(c - b'0'))
+    });
+    let v = if neg { -v } else { v };
+    #[allow(clippy::cast_possible_truncation, reason = "C's (int) of a long")]
+    (v as i32, i + digits)
+}
+
+/// `lookup_fontmap`'s reading of `<name>-Slant_<n>`, `<name>-Slant_<n>
+/// ...-Extend_<n>` and `<name>-Extend_<n>` (each number running to the
+/// end): the name and the slant and extend.
+fn slant_extend(s: &[u8]) -> (&[u8], i32, i32) {
+    let find = |h: &[u8], n: &[u8]| h.windows(n.len()).position(|w| w == n);
+    if let Some(a) = find(s, b"-Slant_") {
+        let b = a + 7;
+        let (sl, n) = strtol(&s[b..]);
+        if n != 0 && b + n == s.len() {
+            return (&s[..a], sl, 0);
+        }
+        if n != 0
+            && let Some(c) = find(&s[b + n..], b"-Extend_")
+        {
+            let d = b + n + c + 8;
+            let (ex, m) = strtol(&s[d..]);
+            if m != 0 && d + m == s.len() {
+                return (&s[..a], sl, ex);
+            }
+        }
+    } else if let Some(a) = find(s, b"-Extend_") {
+        let b = a + 8;
+        let (ex, n) = strtol(&s[b..]);
+        if n != 0 && b + n == s.len() {
+            return (&s[..a], 0, ex);
+        }
+    }
+    (s, 0, 0)
 }
 
 /// ptexmac.h's `is_cfg_comment`.
@@ -973,6 +1102,7 @@ impl<H: crate::host::Host, T: crate::track::Tracker> crate::tex::Tex<H, T> {
             self.fontmap.lookups = Lookups {
                 index: Some(self.map_cache.index(&f.contents)),
                 found: BTreeMap::new(),
+                ps_found: BTreeMap::new(),
             };
             self.print_str(b"}");
             return;
@@ -1016,6 +1146,30 @@ impl<H: crate::host::Host, T: crate::track::Tracker> crate::tex::Tex<H, T> {
                 warn,
             );
         }
+    }
+
+    /// mapfile.c's `lookup_fontmap`: the map entry of an included PDF's
+    /// font by its PostScript name (a subset tag dropped, `-Slant_<n>`
+    /// and `-Extend_<n>` read off its end), if its Type 1 file is there
+    /// (`fm_valid_for_font_replacement`). The default map is read first
+    /// if no map was.
+    pub(crate) fn lookup_fontmap(&mut self, ps_name: &[u8]) -> Option<Arc<MapEntry>> {
+        if !self.fontmap.read {
+            self.read_default_map();
+        }
+        let mut s = ps_name;
+        if ps_name.len() > 7 && ps_name[..6].iter().all(u8::is_ascii_uppercase) && ps_name[6] == b'+' {
+            s = &ps_name[7..];
+        }
+        let (name, slant, extend) = slant_extend(s);
+        let fm = self.fontmap.lookup_ps(&(name.to_vec(), slant, extend))?;
+        let ff = fm.ff_name.clone()?;
+        let found = self.host.read_file(&ff, crate::host::FileKind::Type1);
+        if T::VALUES {
+            self.tracker
+                .load(&ff, crate::host::FileKind::Type1, found.as_ref().map(|f| &f.contents));
+        }
+        found.map(|_| fm)
     }
 
     /// `fm_read_info` of the default map file, if it is still pending.

@@ -1,11 +1,10 @@
 \documentclass{article}
 % PDF inclusion (`\pdfximage` of a page, written as pdftoepdf.cc writes
 % it): images-fig.pdf (pdfTeX's, object streams), images-hand.pdf (made
-% by hand, a classic xref table), through graphicx. The included files'
-% fonts are copied as they are (pdfTeX's replacement of a font its map
-% has is not written yet).
+% by hand, a classic xref table), through graphicx. The figure's Type 1
+% fonts are replaced by pdfTeX's own (its cmr10 shares the document's
+% font descriptor: one subset of both's glyphs).
 \usepackage{graphicx}
-\pdfinclusioncopyfonts=1
 \begin{document}
 Opening words, before the figures.
 

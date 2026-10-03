@@ -232,37 +232,38 @@ fn a_small_document() {
 /// The edges of `DOC`'s view.
 const COLD: &str = r#"%0 = format                                  ; step 0: the job's start, (INITEX), 31944 definitions: doc:1
 %1 = file doc
-%2 = window(; \catcode123)                   ; step 1: doc:1 "\catcode`\{=1 \catcode`\}=2 \catcode`\#=…"
-%3 = window(\catcode123=%2; \catcode125)     ; step 2: doc:1 "\catcode`\}=2 \catcode`\#=6"
-%4 = window(\catcode123=%2, \catcode125=%3; \catcode35) ; step 3: doc:1 "\catcode`\#=6"
-%5 = window(\catcode123=%2, \catcode125=%3, \catcode35=%4; string:N, str_ptr, text:\rm, string:N, font:cmr10.metrics, font:cmr10.fontdimen, font:cmr10.hyphenchar, font:cmr10.skewchar, font:cmr10.expand, font:cmr10.glue, font:cmr10.code0, font:cmr10.code1, font:cmr10.code2, font:cmr10.code3, font:cmr10.code4, font:cmr10.code5, font:cmr10.code6, font:cmr10.code7, fonts, \rm, fontid:1:\rm, text:fontid:1:\rm, current_font) ; step 4: doc:2 "\font\rm=cmr10 \rm \hsize=100pt \vsize=1…"
-%6 = window(; hsize)                         ; step 5: doc:2 "\hsize=100pt \vsize=100pt"
-%7 = window(; vsize)                         ; step 6: doc:2 "\vsize=100pt"
-%8 = window(\catcode35=%4, str_ptr=%5, \catcode123=%2, \catcode125=%3; string:N, str_ptr, text:\greet, align_state, \greet) ; step 7: doc:3 "\def\greet#1{Hello #1.}"
-%9 = window(\catcode35=%4, \catcode123=%2, \catcode125=%3; ) ; step 8: doc:3
-%10 = window(\catcode35=%4, \catcode123=%2, \catcode125=%3; \count1) ; step 9: doc:4 "\count1=5"
-%11 = window(; )                             ; step 10: doc:5
-%12 = window(\catcode123=%2, text:\greet=%8, \greet=%8, align_state=%8, \catcode125=%3, current_font=%5, font:cmr10.metrics=%5, font:cmr10.hyphenchar=%5, font:cmr10.glue=%5, font:cmr10.fontdimen=%5; align_state, list.pg, nest, list1.mlist, list1.mode, list1.pg, list1.ml, list1.prev_depth, list1.clang, list1.incompleat, list1.middle, list1.lr_save, list1.lr_box, page.last_glue, page.last_penalty, page.last_kern, page.last_node_type, page_step_result, list.list, list1.space_factor, list1.list, font:cmr10.glue) ; step 11: doc:6 "Hello World."
-%13 = window(\catcode123=%2, \catcode125=%3, nest=%12, list1.mode=%12, current_font=%5, font:cmr10.metrics=%5, list1.clang=%12, list1.list=%12, font:cmr10.hyphenchar=%5, font:cmr10.glue=%12, align_state=%12, list1.pg=%12, hsize=%6, list.pg=%12, font:cmr10.expand=%5, text:fontid:1:\rm=%5, list.list=%12; list1.ml, list1.space_factor, list1.list, nest, hyph.patterns, last_badness, file_offset, selector, hpack_result, sealed:37c7f75150622283, list.list, list.prev_depth, list.pg, line_break_result, list.lr_save, error_count) ; step 12: doc:6-7 "Hello World. One line."
-%14 = window(nest=%13, list.list=%13, vsize=%7; page.contents, page.goal, page.fil, page.fill, page.filll, page.max_depth, page.least_cost, page.stretch, page.shrink, page[0], page.total, page.depth, page.last_glue, page.last_penalty, page.last_kern, page.last_node_type, page_step_result, page[1], page.len, page.tail, list.list) ; step 13: "Hello World. One line."
-%15 = window(\catcode123=%2, align_state=%12, nest=%13, list.list=%14; align_state, save[0], save.boundary, save.group, save.level, save.ptr) ; step 14: doc:8 "{\count1=6 Second paragraph.}"
-%16 = window(\catcode123=%2, \catcode125=%3, nest=%13, save.level=%15, \count1=%10, save.ptr=%15, list.list=%14; save[1], save.ptr, save[2], \count1) ; step 15: doc:8 "\count1=6 Second paragraph.}"
-%17 = window(\catcode123=%2, \catcode125=%3, nest=%13, list.list=%14, list.prev_depth=%13, page.contents=%14, page.goal=%14, page.total=%14, page.stretch=%14, page.fil=%14, page.fill=%14, page.filll=%14, page.shrink=%14, page.depth=%14, page.max_depth=%14, page.least_cost=%14, page.len=%14, page.tail=%14, current_font=%5, font:cmr10.metrics=%5, font:cmr10.hyphenchar=%5, font:cmr10.glue=%12; list.pg, nest, list1.mlist, list1.mode, list1.pg, list1.ml, list1.prev_depth, list1.clang, list1.incompleat, list1.middle, list1.lr_save, list1.lr_box, page.total, page.stretch, page.shrink, page.depth, page.least_cost, page.best_break, page.best_size, page.last_glue, page.last_penalty, page.last_kern, page.last_node_type, page_step_result, page[2], page.len, page.tail, list.list, list1.space_factor, list1.list) ; step 16: doc:8 "Second"
-%18 = window(\catcode123=%2, \catcode125=%3, nest=%17, list1.mode=%17, current_font=%5, font:cmr10.metrics=%5, list1.clang=%17, list1.list=%17, font:cmr10.hyphenchar=%5, align_state=%15, save.group=%15, save.level=%15, save.ptr=%16, save[2]=%16, save[1]=%16, \count1=%16, save[0]=%15, save.boundary=%15, font:cmr10.glue=%12, list1.pg=%17, hsize=%6, list.pg=%17, list.lr_save=%13, hyph.patterns=%13, selector=%13, font:cmr10.expand=%5, text:fontid:1:\rm=%5, list.prev_depth=%13, list.list=%17; list1.ml, list1.space_factor, align_state, save.level, save.ptr, save[1], \count1, save.group, save.boundary, list1.list, nest, last_badness, file_offset, selector, hpack_result, sealed:a1557562e55d2c4f, list.list, list.prev_depth, list.pg, line_break_result, list.lr_save, error_count) ; step 17: doc:8-9 "Second paragraph."
-%19 = window(nest=%18, list.list=%18, page.contents=%14, page.total=%17, page.stretch=%17, page.shrink=%17, page.depth=%17, page.max_depth=%14, page.tail=%17, page.len=%17; page.stretch, page.shrink, page[3], page.total, page.depth, page.last_glue, page.last_penalty, page.last_kern, page.last_node_type, page_step_result, page[4], page.len, page.tail, list.list) ; step 18: "Second paragraph."
-%20 = window(nest=%18, page.len=%19, hsize=%6, list.list=%19, page.contents=%14, page.total=%19, page.depth=%19, page.max_depth=%14, page.goal=%14, page.stretch=%19, page.fil=%14, page.fill=%14, page.filll=%14, page.shrink=%19, page.least_cost=%17; page[5], page.total, page.fill, page.shrink, page.depth, page[6], page.len, page.tail, page.least_cost, page.best_break, page.best_size, page.last_glue, page.last_penalty, page.last_kern, page.last_node_type, page_step_result, list.list) ; step 19: doc:10 "\end"
-%21 = window(nest=%18, list.list=%20, page.contents=%14, page.goal=%14, page.total=%20, page.stretch=%19, page.fil=%14, page.fill=%20, page.filll=%14, page.shrink=%20, page.depth=%20, page.max_depth=%14, page.least_cost=%20, page.best_break=%20, page.best_size=%20, page.last_glue=%20, page.last_penalty=%20, page.last_kern=%20, page.last_node_type=%20, page.len=%20, page[0]=%14, page[1]=%14, page[2]=%17, page[3]=%19, page[4]=%19, page[5]=%20, page[6]=%20, sealed:37c7f75150622283=%13, sealed:a1557562e55d2c4f=%18, file_offset=%18, selector=%18, \count1=%18, str_ptr=%8, save.level=%18; page.contents, page.goal, page.total, page.stretch, page.fil, page.fill, page.filll, page.shrink, page.depth, page.max_depth, page.least_cost, page.best_break, page.best_size, page.ins, page.insert_penalties, last_badness, vpack_result, outputpenalty, page.len, page.tail, page.discards, string:N, str_ptr, string:N, string:N, output_file_name, dead_cycles, \box255, page.last_glue, page.last_penalty, page.last_kern, page.last_node_type, page_step_result, list.list, file_offset, open_parens, newlinechar, mag_set, dvi.file, dvi.fonts, dvi.totals, dvi.writer, write:log, selector) ; step 20: ships [0.5] "Hello World. One line. Second paragraph."
+%2 = file cmr10
+%3 = window(; \catcode123)                   ; step 1: doc:1 "\catcode`\{=1 \catcode`\}=2 \catcode`\#=…"
+%4 = window(\catcode123=%3; \catcode125)     ; step 2: doc:1 "\catcode`\}=2 \catcode`\#=6"
+%5 = window(\catcode123=%3, \catcode125=%4; \catcode35) ; step 3: doc:1 "\catcode`\#=6"
+%6 = window(\catcode123=%3, \catcode125=%4, \catcode35=%5; string:N, str_ptr, text:\rm, string:N, font:cmr10.metrics, font:cmr10.fontdimen, font:cmr10.hyphenchar, font:cmr10.skewchar, font:cmr10.expand, font:cmr10.glue, font:cmr10.code0, font:cmr10.code1, font:cmr10.code2, font:cmr10.code3, font:cmr10.code4, font:cmr10.code5, font:cmr10.code6, font:cmr10.code7, fonts, \rm, fontid:1:\rm, text:fontid:1:\rm, current_font) ; step 4: doc:2 "\font\rm=cmr10 \rm \hsize=100pt \vsize=1…"
+%7 = window(; hsize)                         ; step 5: doc:2 "\hsize=100pt \vsize=100pt"
+%8 = window(; vsize)                         ; step 6: doc:2 "\vsize=100pt"
+%9 = window(\catcode35=%5, str_ptr=%6, \catcode123=%3, \catcode125=%4; string:N, str_ptr, text:\greet, align_state, \greet) ; step 7: doc:3 "\def\greet#1{Hello #1.}"
+%10 = window(\catcode35=%5, \catcode123=%3, \catcode125=%4; ) ; step 8: doc:3
+%11 = window(\catcode35=%5, \catcode123=%3, \catcode125=%4; \count1) ; step 9: doc:4 "\count1=5"
+%12 = window(; )                             ; step 10: doc:5
+%13 = window(\catcode123=%3, text:\greet=%9, \greet=%9, align_state=%9, \catcode125=%4, current_font=%6, font:cmr10.metrics=%6, font:cmr10.hyphenchar=%6, font:cmr10.glue=%6, font:cmr10.fontdimen=%6; align_state, list.pg, nest, list1.mlist, list1.mode, list1.pg, list1.ml, list1.prev_depth, list1.clang, list1.incompleat, list1.middle, list1.lr_save, list1.lr_box, page.last_glue, page.last_penalty, page.last_kern, page.last_node_type, page_step_result, list.list, list1.space_factor, list1.list, font:cmr10.glue) ; step 11: doc:6 "Hello World."
+%14 = window(\catcode123=%3, \catcode125=%4, nest=%13, list1.mode=%13, current_font=%6, font:cmr10.metrics=%6, list1.clang=%13, list1.list=%13, font:cmr10.hyphenchar=%6, font:cmr10.glue=%13, align_state=%13, list1.pg=%13, hsize=%7, list.pg=%13, font:cmr10.expand=%6, text:fontid:1:\rm=%6, list.list=%13; list1.ml, list1.space_factor, list1.list, nest, hyph.patterns, last_badness, file_offset, selector, hpack_result, sealed:37c7f75150622283, list.list, list.prev_depth, list.pg, line_break_result, list.lr_save, error_count) ; step 12: doc:6-7 "Hello World. One line."
+%15 = window(nest=%14, list.list=%14, vsize=%8; page.contents, page.goal, page.fil, page.fill, page.filll, page.max_depth, page.least_cost, page.stretch, page.shrink, page[0], page.total, page.depth, page.last_glue, page.last_penalty, page.last_kern, page.last_node_type, page_step_result, page[1], page.len, page.tail, list.list) ; step 13: "Hello World. One line."
+%16 = window(\catcode123=%3, align_state=%13, nest=%14, list.list=%15; align_state, save[0], save.boundary, save.group, save.level, save.ptr) ; step 14: doc:8 "{\count1=6 Second paragraph.}"
+%17 = window(\catcode123=%3, \catcode125=%4, nest=%14, save.level=%16, \count1=%11, save.ptr=%16, list.list=%15; save[1], save.ptr, save[2], \count1) ; step 15: doc:8 "\count1=6 Second paragraph.}"
+%18 = window(\catcode123=%3, \catcode125=%4, nest=%14, list.list=%15, list.prev_depth=%14, page.contents=%15, page.goal=%15, page.total=%15, page.stretch=%15, page.fil=%15, page.fill=%15, page.filll=%15, page.shrink=%15, page.depth=%15, page.max_depth=%15, page.least_cost=%15, page.len=%15, page.tail=%15, current_font=%6, font:cmr10.metrics=%6, font:cmr10.hyphenchar=%6, font:cmr10.glue=%13; list.pg, nest, list1.mlist, list1.mode, list1.pg, list1.ml, list1.prev_depth, list1.clang, list1.incompleat, list1.middle, list1.lr_save, list1.lr_box, page.total, page.stretch, page.shrink, page.depth, page.least_cost, page.best_break, page.best_size, page.last_glue, page.last_penalty, page.last_kern, page.last_node_type, page_step_result, page[2], page.len, page.tail, list.list, list1.space_factor, list1.list) ; step 16: doc:8 "Second"
+%19 = window(\catcode123=%3, \catcode125=%4, nest=%18, list1.mode=%18, current_font=%6, font:cmr10.metrics=%6, list1.clang=%18, list1.list=%18, font:cmr10.hyphenchar=%6, align_state=%16, save.group=%16, save.level=%16, save.ptr=%17, save[2]=%17, save[1]=%17, \count1=%17, save[0]=%16, save.boundary=%16, font:cmr10.glue=%13, list1.pg=%18, hsize=%7, list.pg=%18, list.lr_save=%14, hyph.patterns=%14, selector=%14, font:cmr10.expand=%6, text:fontid:1:\rm=%6, list.prev_depth=%14, list.list=%18; list1.ml, list1.space_factor, align_state, save.level, save.ptr, save[1], \count1, save.group, save.boundary, list1.list, nest, last_badness, file_offset, selector, hpack_result, sealed:a1557562e55d2c4f, list.list, list.prev_depth, list.pg, line_break_result, list.lr_save, error_count) ; step 17: doc:8-9 "Second paragraph."
+%20 = window(nest=%19, list.list=%19, page.contents=%15, page.total=%18, page.stretch=%18, page.shrink=%18, page.depth=%18, page.max_depth=%15, page.tail=%18, page.len=%18; page.stretch, page.shrink, page[3], page.total, page.depth, page.last_glue, page.last_penalty, page.last_kern, page.last_node_type, page_step_result, page[4], page.len, page.tail, list.list) ; step 18: "Second paragraph."
+%21 = window(nest=%19, page.len=%20, hsize=%7, list.list=%20, page.contents=%15, page.total=%20, page.depth=%20, page.max_depth=%15, page.goal=%15, page.stretch=%20, page.fil=%15, page.fill=%15, page.filll=%15, page.shrink=%20, page.least_cost=%18; page[5], page.total, page.fill, page.shrink, page.depth, page[6], page.len, page.tail, page.least_cost, page.best_break, page.best_size, page.last_glue, page.last_penalty, page.last_kern, page.last_node_type, page_step_result, list.list) ; step 19: doc:10 "\end"
+%22 = window(nest=%19, list.list=%21, page.contents=%15, page.goal=%15, page.total=%21, page.stretch=%20, page.fil=%15, page.fill=%21, page.filll=%15, page.shrink=%21, page.depth=%21, page.max_depth=%15, page.least_cost=%21, page.best_break=%21, page.best_size=%21, page.last_glue=%21, page.last_penalty=%21, page.last_kern=%21, page.last_node_type=%21, page.len=%21, page[0]=%15, page[1]=%15, page[2]=%18, page[3]=%20, page[4]=%20, page[5]=%21, page[6]=%21, sealed:37c7f75150622283=%14, sealed:a1557562e55d2c4f=%19, file_offset=%19, selector=%19, \count1=%19, str_ptr=%9, save.level=%19; page.contents, page.goal, page.total, page.stretch, page.fil, page.fill, page.filll, page.shrink, page.depth, page.max_depth, page.least_cost, page.best_break, page.best_size, page.ins, page.insert_penalties, last_badness, vpack_result, outputpenalty, page.len, page.tail, page.discards, string:N, str_ptr, string:N, string:N, output_file_name, dead_cycles, \box255, page.last_glue, page.last_penalty, page.last_kern, page.last_node_type, page_step_result, list.list, file_offset, open_parens, newlinechar, mag_set, dvi.file, dvi.fonts, dvi.totals, dvi.writer, write:log, selector) ; step 20: ships [0.5] "Hello World. One line. Second paragraph."
 "#;
 
 /// What changed after the edit: the paragraph ran again, and the fire;
 /// the second paragraph's imports of the font's glue and of the patterns
 /// are now the ones before the first paragraph (its run read the glue and
 /// the patterns the cold build had made, which are not placed).
-const WARM: &str = r#"%12 step 11 (run 2): doc:6 "Hello Moon."
+const WARM: &str = r#"%13 step 11 (run 2): doc:6 "Hello Moon."
   -import \catcode87=%0
   -import \catcode108=%0
   -import \catcode100=%0
-  -import font:cmr10.fontdimen=%5
+  -import font:cmr10.fontdimen=%6
   -import \sfcode87=%0
   -import \sfcode114=%0
   -import \sfcode100=%0
@@ -271,23 +272,23 @@ const WARM: &str = r#"%12 step 11 (run 2): doc:6 "Hello Moon."
   +import \sfcode77=%0
   +import \sfcode110=%0
   -export font:cmr10.glue
-%13 step 12 (run 2): doc:6-7 "Hello Moon. One line."
+%14 step 12 (run 2): doc:6-7 "Hello Moon. One line."
   -import \catcode87=%0
   -import \catcode100=%0
-  -import font:cmr10.glue=%12
+  -import font:cmr10.glue=%13
   -import \lccode87=%0
   +import \catcode77=%0
-  +import font:cmr10.glue=%5
+  +import font:cmr10.glue=%6
   +import \lccode77=%0
   -export hyph.patterns
-%14 step 13: "Hello Moon. One line."
-%17 step 16: doc:8 "Second"
-  -import font:cmr10.glue=%12
-  +import font:cmr10.glue=%5
-%18 step 17: doc:8-9 "Second paragraph."
-  -import font:cmr10.glue=%12
-  -import hyph.patterns=%13
-  +import font:cmr10.glue=%5
+%15 step 13: "Hello Moon. One line."
+%18 step 16: doc:8 "Second"
+  -import font:cmr10.glue=%13
+  +import font:cmr10.glue=%6
+%19 step 17: doc:8-9 "Second paragraph."
+  -import font:cmr10.glue=%13
+  -import hyph.patterns=%14
+  +import font:cmr10.glue=%6
   +import hyph.patterns=%0
-%21 step 20 (run 2): ships [0.5] "Hello Moon. One line. Second paragraph."
+%22 step 20 (run 2): ships [0.5] "Hello Moon. One line. Second paragraph."
 "#;

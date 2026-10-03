@@ -211,6 +211,8 @@ pub(crate) struct T1Job<'a> {
     pub glyphs: BTreeSet<Vec<u8>>,
     /// `fd->tx_tree`: character codes of non-reencoded fonts.
     pub codes: BTreeSet<u8>,
+    /// `fd->all_glyphs`: every glyph kept (an included PDF's font).
+    pub all_glyphs: bool,
     pub fontname: Vec<u8>,
     pub font_dim: [(i32, bool); 11],
     /// Subset tags already given (`st_tree`).
@@ -1635,7 +1637,7 @@ impl T1<'_, '_> {
     }
 
     fn mark_glyphs(&mut self) -> Result<(), Fail> {
-        if self.synthetic {
+        if self.synthetic || self.job.all_glyphs {
             for c in &mut self.cs_tab {
                 if c.valid {
                     c.used = true;

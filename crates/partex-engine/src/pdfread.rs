@@ -2018,9 +2018,13 @@ fn check_header(d: &[u8]) -> (usize, f64) {
     (i, atof(&word))
 }
 
-/// C's `atof` of a word: the longest number at its start (sign, digits,
-/// a point, an exponent), 0 if none.
-fn atof(w: &[u8]) -> f64 {
+/// C's `atof`: after any white space, the longest number at the start
+/// (sign, digits, a point, an exponent), 0 if none.
+pub(crate) fn atof(w: &[u8]) -> f64 {
+    let w = &w[w
+        .iter()
+        .take_while(|c| matches!(c, b' ' | b'\t' | b'\n' | 0x0b | 0x0c | b'\r'))
+        .count()..];
     let mut end = 0;
     let mut best = 0;
     if matches!(w.first(), Some(b'+' | b'-')) {
