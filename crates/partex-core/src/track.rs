@@ -270,6 +270,9 @@ pub mod scalar {
     pub const STR_TOP: u16 = 0;
     /// `SyncTeX`'s tag counter (`synctex.rs`).
     pub const SYNCTEX_TAGS: u16 = 3;
+    /// `SyncTeX`'s controller's flags in SSA mode (`synctex.rs`: off,
+    /// content ready, warned), for its warnings in program order.
+    pub const SYNCTEX_FLAGS: u16 = 4;
     /// The hash's allocator, `hash_used` (§256).
     pub const HASH_USED: u16 = 1;
     /// The allocator of the hash's extra area, `hash_high` (web2c).

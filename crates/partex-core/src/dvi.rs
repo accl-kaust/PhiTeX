@@ -282,6 +282,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                 return Ok(());
             }
         }
+        self.synctex_ship_off();
         let tracing_output = self.int_par(TRACING_OUTPUT_CODE);
         if tracing_output > 0 {
             self.print_nl(b"");

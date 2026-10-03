@@ -230,7 +230,7 @@ fn a_small_document() {
 }
 
 /// The edges of `DOC`'s view.
-const COLD: &str = r#"%0 = format                                  ; step 0: the job's start, (INITEX), 31944 definitions: doc:1
+const COLD: &str = r#"%0 = format                                  ; step 0: the job's start, (INITEX), 31945 definitions: doc:1
 %1 = file doc
 %2 = file cmr10
 %3 = window(; \catcode123)                   ; step 1: doc:1 "\catcode`\{=1 \catcode`\}=2 \catcode`\#=…"

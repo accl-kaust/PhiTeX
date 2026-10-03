@@ -37,6 +37,19 @@ use crate::track::Tracker;
 /// A node's place, as the machine reads it: `sync_tag`, `sync_line`.
 pub type Place = (i32, i32);
 
+/// `SYNCTEX_NO_OPTION`: no `-synctex` on the command line.
+pub const NO_OPTION: i32 = i32::MAX;
+
+/// `synctexsheet`'s warning once the controller is off.
+const WARN_OFF: &[u8] = b"\nSyncTeX warning: Synchronization was disabled from\nthe command line with -synctex=0\nChanging the value of \\synctex has no effect.";
+
+/// `Tex::synctex_flags`: set (the flags were made), off for good,
+/// content ready, warned.
+const FLAG_INIT: i32 = 1;
+const FLAG_OFF: i32 = 2;
+const FLAG_READY: i32 = 4;
+const FLAG_WARNED: i32 = 8;
+
 /// What the engine tells the controller, in order.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Event {
@@ -226,7 +239,9 @@ impl Machine {
             return None;
         }
         self.option_read = true;
-        Some(if self.cli == 0 {
+        Some(if self.cli == NO_OPTION {
+            0
+        } else if self.cli == 0 {
             self.off = true;
             0
         } else {
@@ -612,10 +627,7 @@ impl Machine {
         }
         if self.value != 0 && !self.warned {
             self.warned = true;
-            self.term.push(
-                b"\nSyncTeX warning: Synchronization was disabled from\nthe command line with -synctex=0\nChanging the value of \\synctex has no effect."
-                    .to_vec(),
-            );
+            self.term.push(WARN_OFF.to_vec());
         }
         true
     }
@@ -1120,23 +1132,32 @@ impl<H: Host, T: Tracker> Tex<H, T> {
     }
 
     /// `synctex_init_command`: `\synctex` as the command line says, as
-    /// TeX comes to life (unless the first file's open did it).
+    /// TeX comes to life (unless the first file's open did it); with no
+    /// `-synctex`, 0 (pdfTeX's `SYNCTEX_VALUE = 0`, a write only if the
+    /// format left it otherwise).
     pub(crate) fn synctex_init_command(&mut self) {
-        if let Some(st) = self.sync.as_deref_mut()
-            && let Some(v) = st.machine.read_option()
-        {
-            self.set_int_par(partex_engine::web::SYNCTEX_CODE, v);
+        match self.sync.as_deref_mut() {
+            Some(st) => {
+                if let Some(v) = st.machine.read_option() {
+                    self.set_int_par(partex_engine::web::SYNCTEX_CODE, v);
+                }
+            }
+            None => {
+                if self.int_par(partex_engine::web::SYNCTEX_CODE) != 0 {
+                    self.set_int_par(partex_engine::web::SYNCTEX_CODE, 0);
+                }
+            }
         }
     }
 
     /// `synctexstartinput`: the file just opened at the current level,
-    /// which the host found as `found`, gets its tag.
+    /// which the host found as `found`, gets its tag. Files are counted
+    /// whether `SyncTeX` is on or not (unless `-synctex=0`), as pdfTeX
+    /// counts them: a document can turn it on (`\synctex=1`), and its
+    /// tags are then the files' numbers from the job's start.
     pub(crate) fn synctex_start_input(&mut self, found: &[u8]) {
         self.synctex_init_command();
-        let Some(st) = self.sync.as_deref_mut() else {
-            return;
-        };
-        if st.machine.is_off() {
+        if self.sync.as_deref().is_some_and(|st| st.machine.is_off()) {
             return;
         }
         let tag = self.synctex_tags() + 1;
@@ -1144,14 +1165,67 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         if let Some(Some(f)) = self.input_file.get_mut(self.in_open) {
             f.synctex_tag = tag;
         }
+        if tag == 1 {
+            // (the root's name, for a `\synctex` set later)
+            self.synctex_root = Some(found.into());
+        }
+        if self.sync.is_none() {
+            return;
+        }
         let name: Arc<[u8]> = self.host.synctex_name(found).into();
         let value = self.int_par(partex_engine::web::SYNCTEX_CODE);
         self.synctex_event(Event::Input { tag, name, value });
     }
 
+    /// `\synctex` set to `v` by the document: with no `-synctex` on the
+    /// command line, a first value other than 0 turns `SyncTeX` on from
+    /// here (pdfTeX's controller, which had nothing to do until then:
+    /// the files it counted and the root's name are known; a page or
+    /// form shipped before, with `\synctex` 0, turned it off for good).
+    /// The nodes made before have no place, and get the place where
+    /// they next enter a list or a box.
+    pub(crate) fn synctex_assigned(&mut self, v: i32) {
+        if v == 0 || self.sync.is_some() {
+            return;
+        }
+        let mut st = SyncState::new(NO_OPTION);
+        st.machine.read_option();
+        self.sync = Some(alloc::boxed::Box::new(st));
+        if let Some(root) = self.synctex_root.clone() {
+            let name: Arc<[u8]> = self.host.synctex_name(&root).into();
+            self.synctex_event(Event::Input {
+                tag: 1,
+                name,
+                value: v,
+            });
+        }
+        if self.synctex_shipped {
+            // (`synctexsheet` with `\synctex` 0: `synctex_prepare_content`
+            // failed, and `synctexabort`)
+            self.synctex_event(Event::Sheet {
+                mag: 0,
+                pages: 1,
+                value: 0,
+            });
+        }
+    }
+
+    /// A sheet or form begins with `SyncTeX` not on (with no command line
+    /// option): what [`Tex::synctex_assigned`] needs to know.
+    #[inline]
+    pub(crate) fn synctex_ship_off(&mut self) {
+        if self.sync.is_none() {
+            self.synctex_shipped = true;
+        }
+    }
+
     /// Event `e` for the controller: fed to it now, or, in SSA mode, an
-    /// effect of the step (rendered by [`Tex::synctex_file`]).
+    /// effect of the step (rendered by [`Tex::synctex_write`]; the step
+    /// prints the controller's warnings, `synctex_flags_step`).
     fn synctex_event(&mut self, e: Event) {
+        if T::VALUES && self.effects.is_some() {
+            self.synctex_flags_step(&e);
+        }
         if T::VALUES
             && let Some(fx) = &mut self.effects
         {
@@ -1190,6 +1264,38 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             for l in lines {
                 self.term_bytes(&l);
             }
+        }
+    }
+
+    /// SSA mode: the controller's flags as event `e` leaves them (off for
+    /// good, content ready, warned; a scalar row, so a step run again
+    /// finds them as they were), and its warning printed now if `e`
+    /// gives one: a sheet or form with `\synctex` set once the
+    /// controller is off (`-synctex=0`, or a first sheet or form shipped
+    /// with `\synctex` 0). (`dot_open` with no job name, which pdfTeX
+    /// also warns of, cannot happen with a sheet.)
+    fn synctex_flags_step(&mut self, e: &Event) {
+        let (Event::Sheet { value, .. } | Event::Form { value, .. }) = *e else {
+            return;
+        };
+        let Some(st) = self.sync.as_deref() else {
+            return;
+        };
+        let mut f = self.synctex_flags();
+        if f & FLAG_INIT == 0 {
+            f = FLAG_INIT | if st.cli == 0 { FLAG_OFF } else { 0 };
+        }
+        let old = f;
+        if f & FLAG_OFF != 0 {
+            if value != 0 && f & FLAG_WARNED == 0 {
+                f |= FLAG_WARNED;
+                self.term_bytes(WARN_OFF);
+            }
+        } else if f & FLAG_READY == 0 {
+            f |= if value != 0 { FLAG_READY } else { FLAG_OFF };
+        }
+        if f != old {
+            self.set_synctex_flags(f);
         }
     }
 
@@ -1497,6 +1603,18 @@ impl<H: Host, T: Tracker> Tex<H, T> {
     /// it is linked): only the message, from the steps' events so far.
     pub(crate) fn synctex_terminate(&mut self, log_opened: bool) {
         if self.sync.is_none() {
+            // (pdfTeX's `synctexterminate` removes the files of an
+            // earlier run whatever this one did)
+            if log_opened
+                && let Some((name, other)) = self.synctex_names(&Finish {
+                    text: None,
+                    gzip: true,
+                    gz_name: true,
+                })
+            {
+                self.host.remove_output(&name);
+                self.host.remove_output(&other);
+            }
             return;
         }
         let (f, quoted) = if T::VALUES {

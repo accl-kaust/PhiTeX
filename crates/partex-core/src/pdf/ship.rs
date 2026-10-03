@@ -2215,6 +2215,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             self.end_diagnostic(true);
         }
         // (`SyncTeX`: the sheet or form, around its contents)
+        self.synctex_ship_off();
         self.synctex_ship_begin(shipping_page);
         self.pdf_ship_box_out(p, shipping_page)?;
         self.synctex_ship_end(shipping_page);
