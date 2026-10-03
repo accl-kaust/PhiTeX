@@ -61,6 +61,8 @@ scalar_rows! {
     long_help_seen, set_long_help_seen, long_help_seen, scalar::LONG_HELP_SEEN, bool;
     log_opened, set_log_opened, log_opened, scalar::LOG_OPENED, bool;
     open_parens, set_open_parens, open_parens, scalar::OPEN_PARENS, i32;
+    synctex_tags, set_synctex_tags, synctex_tags, scalar::SYNCTEX_TAGS, i32;
+    synctex_flags, set_synctex_flags, synctex_flags, scalar::SYNCTEX_FLAGS, i32;
     sys_time, set_sys_time, sys_time, scalar::SYS_TIME, i32;
     sys_day, set_sys_day, sys_day, scalar::SYS_DAY, i32;
     sys_month, set_sys_month, sys_month, scalar::SYS_MONTH, i32;

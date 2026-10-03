@@ -11,7 +11,9 @@ use alloc::boxed::Box;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
-use partex_engine::node::{Action, BoxNode, Dims, Leaders, Node, PdfId, PdfWhatsit, Whatsit};
+use partex_engine::node::{
+    Action, BoxNode, Dims, GlueSign, Leaders, Node, PdfId, PdfWhatsit, Whatsit,
+};
 
 use super::draw::Draw;
 use super::enc::GlyphNames;
@@ -1580,9 +1582,11 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                 self.append_link(this_box, left_edge, base_line, i)?;
             }
         }
+        self.synctex_box(this_box);
         for p in &this_box.list {
             self.pdf_hnode(this_box, p, &mut glue, base_line, left_edge)?;
         }
+        self.synctex_box_end(this_box);
         self.pdf.ship.cur_s -= 1;
         Ok(())
     }
@@ -1595,6 +1599,8 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         base_line: Scaled,
         left_edge: Scaled,
     ) -> Result<(), Jump> {
+        // (`SyncTeX`: where a run of characters ends)
+        self.synctex_hnode(p);
         match p {
             Node::Glyphs(g) => {
                 let f = i32::from(g.font.0);
@@ -1622,6 +1628,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             }
             Node::Box(b) => {
                 if b.list.is_empty() {
+                    self.synctex_void(b);
                     self.pdf.ship.cur_h += b.width;
                 } else {
                     self.pdf.ship.cur_v = base_line + b.shift;
@@ -1635,17 +1642,45 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                 width,
                 height,
                 depth,
-            } => self.pdf_hrule(this_box, *height, *depth, *width, base_line)?,
+                sync,
+            } => {
+                self.pdf_hrule(this_box, *height, *depth, *width, base_line)?;
+                if self.synctex_on() {
+                    let dp = if *depth == RUNNING {
+                        this_box.depth
+                    } else {
+                        *depth
+                    };
+                    let ht = if *height == RUNNING {
+                        this_box.height
+                    } else {
+                        *height
+                    };
+                    self.synctex_rule(*sync, [*width, ht + dp, dp]);
+                }
+            }
             Node::Whatsit(w) => self.pdf_whatsit(this_box, w, left_edge, base_line, false)?,
-            Node::Glue { spec, .. } => {
+            Node::Glue { spec, sync, .. } => {
                 let wd = glue.set(this_box, spec);
                 self.pdf.ship.cur_h += wd;
+                if self.synctex_on() {
+                    // (e-TeX's `hlist_out` makes glue set with the box a
+                    // kern: "Handle a glue node for mixed direction")
+                    let converts = self.etex_ex()
+                        && match this_box.glue_sign {
+                            GlueSign::Stretching => spec.stretch_order == this_box.glue_order,
+                            GlueSign::Shrinking => spec.shrink_order == this_box.glue_order,
+                            GlueSign::Normal => false,
+                        };
+                    self.synctex_glue_moved(*sync, wd, converts);
+                }
             }
             Node::Leaders(l) => {
                 let rule_wd = glue.set(this_box, &l.spec);
                 match &l.leader {
                     Node::Rule { height, depth, .. } => {
                         self.pdf_hrule(this_box, *height, *depth, rule_wd, base_line)?;
+                        self.synctex_glue(l.sync);
                     }
                     Node::Box(leader_box) => {
                         let leader_wd = leader_box.width;
@@ -1668,12 +1703,20 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                                     cur_h + (lr - (lq - 1) * lx) / 2
                                 }
                             };
+                            let mut again = false;
                             while self.pdf.ship.cur_h + leader_wd <= edge {
                                 self.pdf.ship.cur_v = base_line + leader_box.shift;
                                 let save_h = self.pdf.ship.cur_h;
                                 let outer = self.pdf.ship.doing_leaders;
                                 self.pdf.ship.doing_leaders = true;
+                                if again {
+                                    self.synctex_again(true);
+                                }
                                 self.pdf_list_out(leader_box)?;
+                                if again {
+                                    self.synctex_again(false);
+                                }
+                                again = true;
                                 self.pdf.ship.doing_leaders = outer;
                                 self.pdf.ship.cur_v = base_line;
                                 self.pdf.ship.cur_h = save_h + leader_wd + lx;
@@ -1681,15 +1724,25 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                             self.pdf.ship.cur_h = edge - 10;
                         } else {
                             self.pdf.ship.cur_h += rule_wd;
+                            self.synctex_glue(l.sync);
                         }
                     }
                     _ => return self.confusion(b"leaders"),
                 }
             }
-            Node::Kern { width, .. } | Node::MarginKern { width, .. } => {
+            Node::Kern { width, sync, .. } => {
+                self.synctex_kern(*sync, *width);
                 self.pdf.ship.cur_h += width;
             }
-            Node::Math { width, subtype } => {
+            Node::MarginKern { width, .. } => {
+                self.pdf.ship.cur_h += width;
+            }
+            Node::Math {
+                width,
+                subtype,
+                sync,
+            } => {
+                self.synctex_math(*sync);
                 if *subtype >= partex_engine::lr::L_CODE {
                     return self.pdf_error(
                         b"ext4",
@@ -1748,13 +1801,16 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         let mut glue = SetGlue::default();
         self.pdf.ship.cur_s += 1;
         let left_edge = self.pdf.ship.cur_h;
+        self.synctex_box(this_box);
         self.pdf.ship.cur_v -= this_box.height;
         let top_edge = self.pdf.ship.cur_v;
         for p in &this_box.list {
             match p {
                 Node::Box(b) => {
                     if b.list.is_empty() {
-                        self.pdf.ship.cur_v += b.height + b.depth;
+                        self.pdf.ship.cur_v += b.height;
+                        self.synctex_void(b);
+                        self.pdf.ship.cur_v += b.depth;
                     } else {
                         self.pdf.ship.cur_v += b.height;
                         let save_v = self.pdf.ship.cur_v;
@@ -1768,6 +1824,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                     width,
                     height,
                     depth,
+                    ..
                 } => self.pdf_vrule(this_box, *height + *depth, *width, left_edge)?,
                 Node::Whatsit(w) => {
                     let y = top_edge + this_box.height;
@@ -1804,13 +1861,21 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                                         cur_v + (lr - (lq - 1) * lx) / 2
                                     }
                                 };
+                                let mut again = false;
                                 while self.pdf.ship.cur_v + leader_ht <= edge {
                                     self.pdf.ship.cur_h = left_edge + leader_box.shift;
                                     self.pdf.ship.cur_v += leader_box.height;
                                     let save_v = self.pdf.ship.cur_v;
                                     let outer = self.pdf.ship.doing_leaders;
                                     self.pdf.ship.doing_leaders = true;
+                                    if again {
+                                        self.synctex_again(true);
+                                    }
                                     self.pdf_list_out(leader_box)?;
+                                    if again {
+                                        self.synctex_again(false);
+                                    }
+                                    again = true;
                                     self.pdf.ship.doing_leaders = outer;
                                     self.pdf.ship.cur_h = left_edge;
                                     self.pdf.ship.cur_v =
@@ -1829,6 +1894,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                 _ => {}
             }
         }
+        self.synctex_box_end(this_box);
         self.pdf.ship.cur_s -= 1;
         Ok(())
     }
@@ -1920,12 +1986,14 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                     self.pdf.ship.cur_v += dims.height;
                     let save_v = self.pdf.ship.cur_v;
                     self.pdf.ship.cur_h = x;
+                    self.synctex_refxform(*objnum);
                     self.draw(Draw::Form { objnum: *objnum })?;
                     self.pdf.ship.cur_v = save_v + dims.depth;
                     self.pdf.ship.cur_h = x;
                 } else {
                     self.pdf.ship.cur_v = y;
                     let edge = self.pdf.ship.cur_h;
+                    self.synctex_refxform(*objnum);
                     self.draw(Draw::Form { objnum: *objnum })?;
                     self.pdf.ship.cur_h = edge + dims.width;
                     self.pdf.ship.cur_v = y;
@@ -2146,7 +2214,11 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             self.show_box_node(p);
             self.end_diagnostic(true);
         }
+        // (`SyncTeX`: the sheet or form, around its contents)
+        self.synctex_ship_off();
+        self.synctex_ship_begin(shipping_page);
         self.pdf_ship_box_out(p, shipping_page)?;
+        self.synctex_ship_end(shipping_page);
         if self.etex_ex() {
             self.report_lr_problems();
         }

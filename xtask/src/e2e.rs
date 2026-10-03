@@ -1231,6 +1231,195 @@ fn glyphs_ssa(root: &Path, partex: &Path, work: &Path, diffs: &mut Vec<String>) 
     glyphs_check(&cold[1], "SSA origins (edit 2)", diffs)
 }
 
+/// The `synctex` job's inputs, copied into its run directory.
+const SYNCTEX_INPUTS: [&str; 5] = [
+    "synctex.tex",
+    "synctex-sub.tex",
+    "synctex-doc.tex",
+    "glyphs.tex",
+    "images-fig.pdf",
+];
+
+/// `SyncTeX` (DESIGN 4.5): pdfTeX and partex in one directory, `run/`
+/// (the `Input:` lines are absolute names), each side's outputs moved to
+/// `o/` and `p/` and compared (the `.synctex.gz` files byte for byte):
+/// `synctex.tex` with `-synctex=1`, `-1` (not gzipped) and `12` (forms'
+/// records, `=` positions), `synctex-doc.tex`, which sets `\synctex`
+/// itself with no option, and `glyphs.tex` (LaTeX, run twice) with
+/// `-synctex=1`; then TeX Live's `synctex view` (every line of each
+/// source) and `synctex edit` (a grid of points on each page) asked of
+/// both sides' files, their answers compared. Plain mode's only.
+fn run_synctex(root: &Path, partex: &Path) -> Result<Vec<String>> {
+    if std::env::var_os("PARTEX_MACHINE").is_some() {
+        return Ok(Vec::new());
+    }
+    let work = out_root(root).join("synctex");
+    if work.exists() {
+        fs::remove_dir_all(&work)?;
+    }
+    let (run, o, p) = (work.join("run"), work.join("o"), work.join("p"));
+    for d in [&run, &o, &p] {
+        fs::create_dir_all(d)?;
+    }
+    for i in SYNCTEX_INPUTS {
+        fs::copy(root.join("tests/e2e").join(i), run.join(i))?;
+    }
+    let partex_cmd = || glyphs_partex(partex, &work);
+    // (each side's formats, by names of their own)
+    for (side, oracle) in [("o", true), ("p", false)] {
+        let cmd = || {
+            if oracle {
+                Command::new("pdftex")
+            } else {
+                partex_cmd()
+            }
+        };
+        let plain = format!("-jobname=plain-{side}");
+        exec(
+            cmd(),
+            &run,
+            &[
+                "-ini",
+                "-etex",
+                "-interaction=nonstopmode",
+                &plain,
+                r"\input plain \dump",
+            ],
+            "term-ini.txt",
+        )?;
+        let latex = format!("-jobname=pdflatex-{side}");
+        let ini: Vec<&str> = GLYPHS_FLAGS
+            .iter()
+            .copied()
+            .chain(["-ini", "-etex", &latex, "*pdflatex.ini"])
+            .collect();
+        exec(cmd(), &run, &ini, "term-ini.txt")?;
+    }
+    // (job, its format, the options, the file, runs)
+    let jobs: [(&str, &str, &str, &str, usize); 5] = [
+        ("s1", "plain", "-synctex=1", "synctex", 1),
+        ("s2", "plain", "-synctex=-1", "synctex", 1),
+        ("s3", "plain", "-synctex=12", "synctex", 1),
+        ("s4", "plain", "", "synctex-doc", 1),
+        ("glyphs", "pdflatex", "-synctex=1", "glyphs", 2),
+    ];
+    for (side, oracle, dest) in [("o", true, &o), ("p", false, &p)] {
+        for &(job, fmt, opt, file, n) in &jobs {
+            let jobname = format!("-jobname={job}");
+            let fmt = format!("-fmt={fmt}-{side}");
+            let args: Vec<&str> = GLYPHS_FLAGS
+                .iter()
+                .copied()
+                .chain([opt, jobname.as_str(), fmt.as_str(), file])
+                .filter(|a| !a.is_empty())
+                .collect();
+            for _ in 0..n {
+                let cmd = if oracle {
+                    Command::new("pdftex")
+                } else {
+                    partex_cmd()
+                };
+                exec(cmd, &run, &args, &format!("term-{job}.txt"))?;
+            }
+            // (the job's outputs to its side's directory)
+            for e in fs::read_dir(&run)? {
+                let n = e?.file_name().to_string_lossy().into_owned();
+                let source = Path::new(&n).extension().is_some_and(|e| e == "tex");
+                let output = n.starts_with(&format!("{job}.")) && !source;
+                if output || n == format!("term-{job}.txt") {
+                    fs::rename(run.join(&n), dest.join(&n))?;
+                }
+            }
+        }
+    }
+    let mut diffs = compare(&o, &p, false)?;
+    for (job, ..) in &jobs[..2] {
+        let gz = if *job == "s2" {
+            "synctex"
+        } else {
+            "synctex.gz"
+        };
+        if !o.join(format!("{job}.{gz}")).exists() {
+            diffs.push(format!("{job}.{gz} (not written)"));
+        }
+    }
+    synctex_queries(&work, &jobs.map(|j| (j.0, j.3)), &mut diffs)?;
+    Ok(diffs)
+}
+
+/// `synctex view` of every line of the job's source files and `synctex
+/// edit` of a grid of points on each of its pages, against `o/` and `p/`:
+/// the answers must be the same (the directory's name masked). Without
+/// TeX Live's `synctex` on the path, nothing (the files were compared).
+fn synctex_queries(work: &Path, jobs: &[(&str, &str)], diffs: &mut Vec<String>) -> Result<()> {
+    let ask = |args: &[String]| -> Option<String> {
+        let out = Command::new("synctex")
+            .current_dir(work)
+            .args(args)
+            .stdin(Stdio::null())
+            .output()
+            .ok()?;
+        let text = String::from_utf8_lossy(&out.stdout).into_owned();
+        Some(text.replace("o/", "SIDE/").replace("p/", "SIDE/"))
+    };
+    if ask(&["help".to_owned()]).is_none() {
+        eprintln!("e2e synctex: no `synctex` command; the files were compared byte for byte");
+        return Ok(());
+    }
+    for &(job, file) in jobs {
+        let pdf = |side: &str| format!("{side}/{job}.pdf");
+        let mut inputs = vec![format!("{file}.tex")];
+        if file.starts_with("synctex") {
+            inputs.push("synctex-sub.tex".to_owned());
+        }
+        for input in &inputs {
+            let lines = fs::read_to_string(work.join("run").join(input))?
+                .lines()
+                .count();
+            for l in 1..=lines {
+                let q = |side: &str| {
+                    ask(&[
+                        "view".to_owned(),
+                        "-i".to_owned(),
+                        format!("{l}:0:{input}"),
+                        "-o".to_owned(),
+                        pdf(side),
+                    ])
+                };
+                if q("o") != q("p") {
+                    diffs.push(format!("synctex view {job} {input}:{l}"));
+                }
+            }
+        }
+        let pages = fs::read_to_string(work.join("o").join(format!("{job}.log")))
+            .ok()
+            .and_then(|log| {
+                let at = log.find("Output written on")?;
+                let rest = &log[at..];
+                let open = rest.find('(')?;
+                rest[open + 1..].split(' ').next()?.parse::<usize>().ok()
+            })
+            .unwrap_or(1);
+        for page in 1..=pages {
+            for x in (0..=600).step_by(60) {
+                for y in (0..=840).step_by(60) {
+                    let q = |side: &str| {
+                        ask(&[
+                            "edit".to_owned(),
+                            "-o".to_owned(),
+                            format!("{page}:{x}:{y}:{}", pdf(side)),
+                        ])
+                    };
+                    if q("o") != q("p") {
+                        diffs.push(format!("synctex edit {job} {page}:{x}:{y}"));
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Every file must be identical (not the terminal: the renderer's), and
 /// the renderer must name each kind of problem the document has; then a
 /// rebuild from the saved session (`-v`), `partex why` and `partex clean`.
@@ -1840,6 +2029,7 @@ pub fn run(root: &Path, args: &[String]) -> Result<()> {
     ));
     jobs.push(("modern", Box::new(move || run_modern(root, partex))));
     jobs.push(("glyphs", Box::new(move || run_glyphs(root, partex))));
+    jobs.push(("synctex", Box::new(move || run_synctex(root, partex))));
     jobs.push((
         "modern_watch",
         Box::new(move || run_modern_watch(root, partex, false)),

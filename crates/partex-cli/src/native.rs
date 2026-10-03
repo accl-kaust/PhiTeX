@@ -300,6 +300,23 @@ pub fn path(name: &[u8]) -> std::path::PathBuf {
     std::ffi::OsStr::from_bytes(name).into()
 }
 
+/// web2c's `generic_synctex_get_current_name`: the name `SyncTeX` gives
+/// the input file found as `found`, absolute (the working directory, a
+/// slash and `found`, when `found` is relative).
+pub fn synctex_name(found: &[u8]) -> Vec<u8> {
+    use std::os::unix::ffi::OsStrExt;
+    if found.is_empty() || found.starts_with(b"/") {
+        return found.to_vec();
+    }
+    let Ok(cwd) = std::env::current_dir() else {
+        return found.to_vec();
+    };
+    let mut n = cwd.as_os_str().as_bytes().to_vec();
+    n.push(b'/');
+    n.extend_from_slice(found);
+    n
+}
+
 /// The name an output file gets (web2c adds the default suffix).
 pub fn with_suffix(name: &[u8], kind: FileKind) -> Vec<u8> {
     let suffix: &[u8] = match kind {
@@ -732,6 +749,20 @@ impl Host for NativeHost {
 
     fn cache_put(&mut self, key: u128, value: &[u8]) {
         crate::cache::put(key, value);
+    }
+
+    fn synctex_name(&mut self, found: &[u8]) -> Vec<u8> {
+        synctex_name(found)
+    }
+
+    fn output_name(&mut self, name: &[u8], kind: FileKind) -> Vec<u8> {
+        let n = with_suffix(name, kind);
+        self.in_output_dir(&n).unwrap_or(n)
+    }
+
+    fn remove_output(&mut self, name: &[u8]) {
+        let n = self.in_output_dir(name).unwrap_or_else(|| name.to_vec());
+        let _ = std::fs::remove_file(path(&n));
     }
 
     fn page_sink(&mut self) -> Option<&mut dyn PageSink> {

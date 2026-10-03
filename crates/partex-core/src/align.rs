@@ -695,7 +695,8 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                 let w = b.width;
                 ((b, st, sh), w)
             } else {
-                let packed = self.vpack_call(list, Spec::NATURAL, 0)?;
+                let mut packed = self.vpack_call(list, Spec::NATURAL, 0)?;
+                self.sync_box(&mut packed.node);
                 let (st, sh) = (packed.total_stretch, packed.total_shrink);
                 let b = packed.node;
                 let w = b.height;
@@ -736,6 +737,8 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                 stretch_order: so,
                 shrink_order: ho,
                 list: b.list,
+                // (the box made an unset node: its place kept)
+                sync: b.sync,
             };
             self.pop_nest();
             self.nodes_mut().push(Node::Unset(Box::new(unset)));
@@ -769,11 +772,18 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             row = unset_row(b);
             self.append_to_vlist(row);
             let mut adjust = core::mem::take(self.row_adjust_mut());
+            if self.synctex_on() {
+                let mut v = adjust.into_vec();
+                self.sync_list(&mut v);
+                adjust = partex_engine::nodelist::NodeList::from_vec(v);
+            }
             self.nodes_mut().append(&mut adjust);
         } else {
             let b = self.vpack(list, Spec::NATURAL)?;
             self.pop_nest();
-            self.nodes_mut().push(unset_row(b));
+            let mut row = unset_row(b);
+            self.sync_node(&mut row);
+            self.nodes_mut().push(row);
             self.set_space_factor(1000);
         }
         self.begin_toks_at(EVERY_CR_LOC, EVERY_CR_TEXT)?;
@@ -831,13 +841,15 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         // §805–§806: set the glue in all the unset boxes of the current
         // list.
         let list = core::mem::take(self.nodes_mut()).into_vec();
-        let p = match align::set_rows(list, &prototype, &tabskips, params, |r| {
+        let mut p = match align::set_rows(list, &prototype, &tabskips, params, |r| {
             self.hpack(alloc::vec![r], Spec::NATURAL, None)
         }) {
             Ok(p) => p,
             Err(c) => return self.confusion(c.0.as_bytes()),
         };
         self.pop_alignment();
+        // (`SyncTeX`: what the alignment made now is placed here)
+        self.sync_list(&mut p);
         // §812: insert the current list into its environment.
         let (pd, sf, lang) = (self.prev_depth(), self.space_factor(), self.clang());
         self.pop_nest();
@@ -864,6 +876,8 @@ fn unset_row(b: partex_engine::node::BoxNode) -> Node {
         height: b.height,
         depth: b.depth,
         list: b.list,
+        // (the box made an unset node: its place kept)
+        sync: b.sync,
         ..Unset::default()
     }))
 }

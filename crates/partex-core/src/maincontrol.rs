@@ -946,6 +946,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             (MMODE, NON_SCRIPT) => self.tail_append(Node::Glue {
                 spec: GlueSpec::ZERO_GLUE,
                 subtype: subtype(COND_MATH_GLUE),
+                sync: partex_engine::origin::Side(0),
             }),
             (MMODE, MATH_CHOICE) => self.append_choices()?,
             // §1175

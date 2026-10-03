@@ -275,6 +275,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                 width,
                 height,
                 depth,
+                ..
             } => {
                 // §187
                 self.print_esc(b"rule(");
@@ -299,7 +300,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                 self.node_list_display(&i.list, b'.');
             }
             Node::Whatsit(w) => self.display_whatsit(w),
-            Node::Glue { spec, subtype } => self.display_glue(spec, *subtype),
+            Node::Glue { spec, subtype, .. } => self.display_glue(spec, *subtype),
             Node::Leaders(l) => {
                 // §190: display leaders `p`.
                 self.print_esc(b"");
@@ -322,7 +323,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                     b" (right margin)"
                 });
             }
-            Node::Kern { width, subtype } => {
+            Node::Kern { width, subtype, .. } => {
                 // §191
                 let subtype = i32::from(*subtype);
                 if subtype == MU_GLUE {
@@ -340,7 +341,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                     }
                 }
             }
-            Node::Math { width, subtype } if i32::from(*subtype) > AFTER => {
+            Node::Math { width, subtype, .. } if i32::from(*subtype) > AFTER => {
                 // pdfTeX §192: an LR node.
                 self.print_esc(if subtype % 2 == 1 { b"end" } else { b"begin" });
                 self.print_char(if i32::from(*subtype) > R_CODE {
@@ -352,7 +353,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                 });
                 let _ = width;
             }
-            Node::Math { width, subtype } => {
+            Node::Math { width, subtype, .. } => {
                 // §192
                 self.print_esc(b"math");
                 if i32::from(*subtype) == BEFORE {
@@ -1071,12 +1072,14 @@ mod tests {
                 Node::Kern {
                     width: 3 * u,
                     subtype: 1,
+                    sync: partex_engine::origin::Side(0),
                 },
                 Node::Penalty(5),
                 Node::Rule {
                     width: 2 * u,
                     height: RUNNING,
                     depth: RUNNING,
+                    sync: partex_engine::origin::Side(0),
                 },
                 Node::Glue {
                     spec: GlueSpec {
@@ -1087,10 +1090,12 @@ mod tests {
                         ..GlueSpec::default()
                     },
                     subtype: 0,
+                    sync: partex_engine::origin::Side(0),
                 },
                 Node::Kern {
                     width: -u,
                     subtype: 1,
+                    sync: partex_engine::origin::Side(0),
                 },
             ],
             ..BoxNode::default()
@@ -1112,6 +1117,7 @@ mod tests {
                         ..GlueSpec::default()
                     },
                     subtype: 0,
+                    sync: partex_engine::origin::Side(0),
                 },
                 Node::Mark(alloc::boxed::Box::new(Mark {
                     class: 0,

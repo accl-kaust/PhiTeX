@@ -157,6 +157,10 @@ pub enum Effect {
     /// The glyphs a page's or form's content stream shows, with glyph
     /// origins on (`srcmap.rs`, DESIGN 4.4): no bytes of any file.
     Origins(crate::srcmap::StreamOrgs),
+    /// `SyncTeX`'s events, in SSA mode (`synctex.rs`, DESIGN 4.5): no
+    /// bytes of any file; the build's `SyncTeX` file is rendered from them
+    /// once it is linked.
+    Synctex(Vec<crate::synctex::Event>),
 }
 
 /// Where text goes.
@@ -886,6 +890,7 @@ fn layout_timed<E: Executor>(
             // (glyph origins: read by `Tex::origins`, not linked; the rest
             // resolved before: `resolve_numbers`)
             Effect::Origins(_)
+            | Effect::Synctex(_)
             | Effect::ObjRef { .. }
             | Effect::ObjStmRef { .. }
             | Effect::Num(..)
@@ -1078,6 +1083,7 @@ partex_engine::persist_enum!(Effect {
     Deflate { file, level, parts },
     Open { file, name, kind },
     Origins(a0),
+    Synctex(a0),
 });
 
 #[cfg(test)]
@@ -1166,6 +1172,16 @@ mod persist_tests {
                 form: 4,
                 glyphs: alloc::vec![1, 2, crate::srcmap::FORM | 7].into(),
             }),
+            Effect::Synctex(alloc::vec![
+                crate::synctex::Event::Teehs { pages: 3 },
+                crate::synctex::Event::Rule {
+                    id: 4,
+                    sync: partex_engine::origin::Side(0),
+                    h: 5,
+                    v: -6,
+                    dims: [7, 8, 9],
+                },
+            ]),
         ];
         let mut kinds = alloc::collections::BTreeSet::new();
         for e in &all {
@@ -1191,9 +1207,10 @@ mod persist_tests {
                 Effect::Deflate { .. } => 18,
                 Effect::Open { .. } => 19,
                 Effect::Origins(_) => 20,
+                Effect::Synctex(_) => 21,
             });
         }
-        assert_eq!(kinds.len(), 21);
+        assert_eq!(kinds.len(), 22);
         let mut s = Saver::new();
         all.save(&mut s);
         let bytes = s.into_bytes();

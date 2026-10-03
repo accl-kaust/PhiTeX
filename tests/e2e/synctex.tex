@@ -1,0 +1,41 @@
+% SyncTeX (DESIGN 4.5): xtask's `synctex` job runs this with pdfTeX and
+% partex, -synctex=1, -1 and 12, in one directory, and compares the files
+% and `synctex view`/`edit`'s answers. Kerns, ligatures, math, rules,
+% leaders of both kinds, \copy, an alignment, a footnote, \vadjust, a
+% discretionary, hyphenation, accents, forms, a display, two pages, an
+% \input file.
+\pdfoutput=1
+\pdfpagewidth=210mm \pdfpageheight=297mm
+\hsize=120pt \parindent=10pt
+\font\big=cmr10 at 14pt
+AVAT WAVE office affine fluffy. Hello world,
+first finer office.
+
+\input synctex-sub
+
+A paragraph with $x^2+y_1 = \sqrt{z}$ and math. Then a
+rule \vrule width 2pt height 5pt depth 1pt and a kern\kern3pt here.
+\hbox{boxed text}\hbox{}\hskip 5pt plus 1fil glue.
+
+\setbox0\hbox{A \vrule width 1pt copy}
+\copy0 \box0
+
+\noindent\leaders\hrule\hskip 30pt \hrulefill\ \dotfill\par
+
+\noindent\hbox to 60pt{\hfil centred\hfil}\par
+\halign{#\hfil&\quad#\cr a&b\cr ccc&dddd\cr}
+\vskip 10pt
+\hrule
+Characteristically representative unquestionably incomprehensibilities
+supercalifragilistic.\footnote*{A footnote with text.}
+\vadjust{\hrule}Discretionary\discretionary{x-}{y}{z}here.
+\'el\`eve \accent"7F a.
+\setbox1\hbox{form content}
+\immediate\pdfxform1 \pdfrefxform\pdflastxform\ and again
+\setbox2\hbox{lazy form}\pdfxform2 \pdfrefxform\pdflastxform.
+$$ a+b \over c \eqno(1) $$
+After display {\big big text}.
+\vfill\eject
+Second page.\hfill\break
+$x\mathbin{\vrule height 3pt}y\mkern3mu z \mskip 6mu w$
+\end

@@ -1695,6 +1695,97 @@ file has an entry); the side file is 4.7 MB. Making argument origins
 compact (a run per argument, its tokens' bytes found again by reading
 the source) is left to do.
 
+### 4.5 SyncTeX (2026-10-03)
+
+`-synctex=N` (or `-synctex N`) writes `<job>.synctex.gz` as pdfTeX
+1.40.29 does, byte for byte: `-synctex=-N` the uncompressed
+`<job>.synctex`, `N` with bit 2 the gzipped text under the name without
+`.gz`, bit 4 the forms' records, bit 8 the compressed `=` vertical
+positions, `0` off for good (with pdfTeX's warning if the document sets
+`\synctex`). `Tex::set_synctex(option)` is the library's switch; the
+CLI reads the option as web2c does (`strtol(optarg, NULL, 0)`).
+
+**The controller** (`partex_core::synctex`) is `synctex.c` ported: its
+context (the last node, the kern recorder, tag, line, point,
+`total_length`, `lastv`, `form_depth`, the flags), its record functions
+with their `SYNCTEX_IGNORE` variants, anchors, counts and quirks (a
+kern's record at the point of the last node that moved it; glue e-TeX's
+`hlist_out` turned into a kern recorded as one; `\synctex` read at each
+call), `synctex_dot_open`'s file names (`Input:N:` the absolute name,
+the working directory before a relative one: the host's
+`synctex_name`), `synctexterminate`'s postamble, `SyncTeX written on
+NAME.` on the terminal (not in batch mode) between `Output written on`
+and `Transcript written on`, and the files of earlier runs removed.
+gzip is zlib's `gzopen(name, "wb")`: the host's deflate at level 6 (the
+same stream whatever the chunks `gzprintf` gave it) between zlib's gzip
+header (no name, time 0, OS 3) and its CRC and length.
+
+**Events.** The engine tells the controller what pdfTeX's hooks tell
+it, where they tell it: a file opened (`synctex_start_input`, before its
+first line; the tag counter is a scalar row, each file level's tag in
+its `AlphaFile`), a sheet or form begun and ended around "Ship box p
+out", and the PDF walk's boxes (`[`, `(` before a vlist's height is
+taken, `]`, `)`), empty boxes (`v`, `h`; a vlist's between its height
+and depth), the end of a run of characters (`x`: a ligature ends one
+and begins the next, which goes on over the characters after it), kerns
+(`k`, the recorder), glue and rules moved past (`g`, `r` with
+`rule_wd`, `rule_ht`, `rule_dp`), math nodes (`$`) and form references
+(`f`). A plain run feeds each event to the controller at once.
+
+**Places.** pdfTeX gives every node of `medium_node_size` or more the
+tag of the file being read and TeX's `line` in `get_node`. Here boxes,
+rules, glue, kerns, math nodes, leaders and unset nodes carry a handle
+(`origin::Side`, outside their value) into a table of places. A node
+gets its place where it enters a list, a box register or a box being
+made (`tail_append`, `box_end`, the line breaker's lines, `hpack` and
+`vpack`'s results, an alignment's rows, `set_box_reg`): the engine's
+algorithms make nodes with none, and none of them reads input, so the
+place then is where they were made. What pdfTeX changes in place keeps
+its place: the glue at a break made `\rightskip`, a kern or math node
+at a break emptied, an unset node made a box, a rule an alignment
+stretches, a kern font expansion resizes. A copy (`\copy`, `\unhcopy`,
+`\unvcopy`) keeps its nodes' places but its rules', which pdfTeX does
+not copy; a kern hyphenation makes again has none (pdfTeX clears its
+tag, "it is too late").
+
+**SSA mode.** Events are the steps' effects (`Effect::Synctex`), and the
+build's file is rendered after each build or rebuild is linked
+(`Tex::synctex_write`): every step's events in order, through a new
+controller, each place's line moved through the edits since it was made
+as a rebuild moves a step's reads (`Edit::pos`: a position where bytes
+were inserted stays before them). The final step prints the message
+from the same render. A node made again by a step that runs again must
+not hide behind an equal value: in SSA mode each place is a handle of
+its own in `Side::HASHED`'s range, which is hashed, so what holds a node
+made again is another version and is made again too (the rest of its
+paragraph and page; an edit that moves no line costs the steps of the
+page it is on). With `SyncTeX`, no step is taken from another's record.
+
+**A document's own `\synctex`.** With no `-synctex`, the controller is
+made when the document first sets `\synctex` nonzero (`assign_int`),
+where pdfTeX's first acts: files are counted from the job's start
+whatever the setting (`synctex_start_input`; the counter a scalar row),
+the first file's name is kept for `Input:1`, and a page shipped before
+leaves it off, with pdfTeX's warning at the next sheet. In SSA mode the
+controller's flags are a scalar row, so the steps print its warnings
+where pdfTeX prints them. pdfTeX gives a node its place in `get_node`
+whatever `\synctex` is; here a node made before `\synctex` is set gets
+one where it next enters a list, box or register.
+
+**Not done.** The DVI mode (no file is written). The DVI writer
+resolves positions in its backend, from the page IR; SyncTeX would need
+`build_list`, `node_item`, `leaders_items` and `reflect.rs`'s walk to
+track `cur_h` and `cur_v` as tex.web's `hlist_out` and `vlist_out` do
+(leader boxes repeated, TeX--XeT's reversed segments) and feed the PDF
+walk's events, a sheet begun before "Completed box being shipped out"
+and ended after the memory statistics, and `Output:dvi` with offsets of
+1in (4736287sp) while pdfTeX's `pdf_output_value` is not positive. A
+session or persisted build with `SyncTeX` (saving one is refused):
+nodes' `Side` handles in the node codec, the places table, the
+controller's state and the steps' events would all have to be saved.
+The cost off and on is measured by `scripts/accl/tasks/synctex-ab.sh`
+(LOG 2026-10-03).
+
 ---
 
 ## 5. Performance, observability and the text form

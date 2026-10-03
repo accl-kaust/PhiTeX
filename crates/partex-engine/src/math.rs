@@ -286,7 +286,11 @@ struct Ctx<'a, E: Env> {
 }
 
 fn kern(width: Scaled) -> Node {
-    Node::Kern { width, subtype: 0 }
+    Node::Kern {
+        width,
+        subtype: 0,
+        sync: crate::origin::Side(0),
+    }
 }
 
 /// §704: `fraction_rule`.
@@ -295,6 +299,7 @@ fn rule(t: Scaled) -> Node {
         width: RUNNING,
         height: t,
         depth: 0,
+        sync: crate::origin::Side(0),
     }
 }
 
@@ -567,6 +572,7 @@ impl<E: Env> Ctx<'_, E> {
                     shared_zero: false,
                 },
                 subtype: 0,
+                sync: crate::origin::Side(0),
             };
             list.insert(0, ss.clone());
             list.push(ss);
@@ -889,7 +895,7 @@ impl<E: Env> Ctx<'_, E> {
                 *max_h = (*max_h).max(*height);
                 *max_d = (*max_d).max(*depth);
             }
-            Node::Glue { spec, subtype } => {
+            Node::Glue { spec, subtype, .. } => {
                 // §732: convert math glue to ordinary glue.
                 if *subtype == MU_GLUE {
                     *spec = Self::math_glue(spec, self.mu);
@@ -906,7 +912,7 @@ impl<E: Env> Ctx<'_, E> {
                     todo.pop_front();
                 }
             }
-            Node::Kern { width, subtype } => {
+            Node::Kern { width, subtype, .. } => {
                 // §717
                 if *subtype == MU_GLUE {
                     let (n, f) = mu_parts(self.mu);
@@ -1478,6 +1484,7 @@ impl<E: Env> Ctx<'_, E> {
                     out.push(Node::Glue {
                         spec: Self::math_glue(g, self.mu),
                         subtype: THIN_MU_SKIP + u8::try_from(x).unwrap_or(0) + 1,
+                        sync: crate::origin::Side(0),
                     });
                 }
             }

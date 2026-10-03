@@ -171,6 +171,8 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                     let mut migrated = Vec::new();
                     let packed = self.pack_line(list, width, &mut migrated, packer)?;
                     let mut b = packed.node;
+                    // (`SyncTeX`: the line, made now, placed here)
+                    self.sync_box(&mut b);
                     b.shift = shift;
                     let open = Arc::new(b.clone());
                     just_box = Some(open);
@@ -180,6 +182,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                     // list, followed by the adjustments.
                     self.append_to_vlist(Node::Box(b.share()));
                     if !migrated.is_empty() {
+                        self.sync_list(&mut migrated);
                         self.nodes_mut().extend(migrated);
                     }
                 }

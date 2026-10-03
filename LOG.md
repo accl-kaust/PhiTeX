@@ -11951,3 +11951,70 @@ input before and after its heading; placement from glyph lists,
 synthesized glyphs passed over), and the `glyphs` e2e job's check of
 `partex outline glyphs.tex --json` against the heading's place in
 pdfTeX's PDF.
+
+## 2026-10-03: SyncTeX, byte for byte, in plain runs and SSA rebuilds (branch `synctex`; gate and cost not yet seen)
+
+`-synctex=N` writes pdfTeX's `.synctex.gz` (DESIGN 4.5): `synctex.c`'s
+controller ported, fed by events where pdfTeX's hooks are, nodes'
+places as handles outside their values.
+
+Checked against pdfTeX 1.40.29 run in the same directory (the `Input:`
+lines are absolute): a plain TeX document (font kerns, ligatures, math,
+rules, leaders of both kinds, `\copy`, an alignment, a footnote,
+`\vadjust`, discretionaries, hyphenation, accents, forms, a display, two
+pages, an `\input`), the same file, terminal and PDF for `-synctex=1`,
+`-1`, `2`, `4`, `8`, `9`, `15`, `-12`, `0` and batch mode; the e2e
+`glyphs.tex` (LaTeX, TikZ, graphicx, a savebox, a form, an included
+PDF). In SSA mode the cold build's file is the same, and so is each
+rebuild's against pdfTeX on the edited text: twelve edits of the plain
+document (a comment line, a paragraph inserted with the next one's first
+words, a word, blank lines, a line deleted, two lines joined, a line
+split, an edit in the `\input` file, a line of an alignment split) and
+six of `glyphs.tex` (the same kinds, and a TikZ node's text).
+
+What it took, beyond the port: pdfTeX in e-TeX mode turns glue set with
+its box into a kern while shipping it out ("Handle a glue node for mixed
+direction typesetting"), so its record is `k` with the glue's width;
+the glue at a line break is reused as `\rightskip`, keeping its line;
+`synctexcurrent`'s `=` compares the context's `curv`, not the point it
+prints. In SSA mode a rebuild keeps a step whose reads are the same,
+and with it the nodes it made, though a step run again before it made
+equal nodes on other lines (two lines joined: the paragraph's lines
+kept, their nodes' places stale): places are hashed there, each a handle
+of its own, so that a node made again is another version.
+
+Then (65e8322): a document's own `\synctex` turns it on as pdfTeX's
+controller does. Files are counted from the job's start whatever the
+setting (the counter a scalar row), the first file's name is kept for
+`Input:1`, and a page shipped while `\synctex` was 0 leaves it off with
+pdfTeX's warning; the `.synctex` files of an earlier run are removed at
+the end as pdfTeX removes them. In SSA mode the controller's warnings
+are printed by the steps (its flags a scalar row). Checked against
+pdfTeX, plain and SSA: `\synctex=1` on the first line, in a LaTeX
+preamble, after the first page (the warning), and with `-synctex=0`
+(the warnings). A limitation none of these meets: pdfTeX gives a node
+its place when it makes it, whatever `\synctex` is; here a node made
+before `\synctex` is set gets its place where it next enters a list,
+box or register.
+
+`cargo xtask e2e` has a job `synctex`: pdfTeX and partex in one
+directory, `-synctex=1`, `-1`, `12`, a document's own `\synctex`, and
+LaTeX's `glyphs.tex` run twice; the files compared byte for byte, then
+`synctex view` for every line and `synctex edit` on a grid of points on
+each page asked of both, the answers compared (without the `synctex`
+program it says so and compares only the files). It passes here, with
+the program. `scripts/ssa-edits` has a case `synctex` (its files
+compared as text, the two run directories' names replaced).
+
+Checked on accl at 65e8322: `accl run edits --brief --fixpoint` (job
+6523): 18/18 cases identical, 106 stages, `synctex` among them (7
+stages). Not seen when this was written: the gate (job 6522: fmt,
+clippy, `cargo xtask check` with the e2e suite, whose other jobs are
+SyncTeX off's byte identity), and the cost off and on (job 6525,
+`scripts/accl/tasks/synctex-ab.sh e5354cb 5`: the PGF subset, the
+parent commit against this one off and on, five rounds alternated, the
+PDFs compared; results in `partex-phitex-runs/cmd-6525`).
+
+Not done: the DVI mode, and persisted builds and sessions with SyncTeX
+(DESIGN 4.5 says what each would take).
+

@@ -104,6 +104,7 @@ pub mod srcmap;
 pub mod statehash;
 mod streams;
 mod strings;
+pub mod synctex;
 mod tex;
 mod tfm;
 mod tok;

@@ -215,6 +215,8 @@ pub(crate) struct AlphaFile {
     /// control last took from this level began, in `data` (a
     /// synthesized glyph's range starts there).
     pub(crate) call: usize,
+    /// `SyncTeX`'s tag of the file (`synctex_start_input`; 0: none).
+    pub(crate) synctex_tag: i32,
 }
 
 partex_engine::persist_struct!(AlphaFile {
@@ -225,7 +227,8 @@ partex_engine::persist_struct!(AlphaFile {
     line_open,
     lines,
     name,
-    call
+    call,
+    synctex_tag
 });
 
 impl<H: Host, T: Tracker> Tex<H, T> {

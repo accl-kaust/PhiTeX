@@ -55,6 +55,7 @@ of a case differs or its SSA process failed, 2 on a usage error.
 
 import argparse
 import concurrent.futures
+import gzip
 import hashlib
 import json
 import os
@@ -159,6 +160,18 @@ FATAL_EDITS = [("Hello world.", "Hello there."), ("Hello there.", "Hello world."
 # a \label nothing refers to, then two rebuilds with no edit (LOG
 # 2026-09-29, "A label no one refers to")
 LABEL_EDITS = [("Para5x2 ", "Para5x2 \\label{new}"), ("", ""), ("", "")]
+# edits.tex with `-synctex=1` (DESIGN 4.5): a word; a line split and
+# joined again (the typeset text the same, its places not); a comment line
+# (nothing typeset changes, the places after it move); a paragraph; a
+# blank line
+SYNCTEX_EDITS = [
+    ("Para5x2 ", "Para5x2 TYPED "),
+    ("Para5x2 TYPED sigma delta ", "Para5x2 TYPED sigma\ndelta "),
+    ("Para5x2 TYPED sigma\ndelta ", "Para5x2 TYPED sigma delta "),
+    ("Para2x0 ", "% a comment line\nPara2x0 "),
+    ("Para7x1 ", "Para7x1 \n\nA paragraph of its own.\n\n"),
+    ("\\label{sec:12}\n", "\\label{sec:12}\n\n"),
+]
 # windows.tex (DESIGN 4.3 item 1): edits inside a figure's caption, a
 # pgfplots axis (its coordinates, its function), a minipage, an alignment,
 # a footnote and a loop's tokens, a label nothing refers to, and an early
@@ -317,8 +330,8 @@ def e2e_watch_cases():
 
 
 def all_cases():
-    def latex(name, src, fmt, edits, seed=2):
-        args = [*LATEX_FLAGS, f"-fmt={fmt}", "-output-directory=out", "edits"]
+    def latex(name, src, fmt, edits, seed=2, extra=()):
+        args = [*LATEX_FLAGS, *extra, f"-fmt={fmt}", "-output-directory=out", "edits"]
         edits = [("edits.tex", m, n) for m, n in edits]
         return Case(name, {"edits.tex": src}, fmt, args, edits, outdir="out", seed=seed)
 
@@ -342,6 +355,7 @@ def all_cases():
             seed=2,
         ),
         latex("windows", "windows.tex", "pdflatex", WINDOW_EDITS),
+        latex("synctex", "edits.tex", "pdflatex", SYNCTEX_EDITS, extra=["-synctex=1"]),
         latex("preamble", "preamble.tex", "pdflatex", PREAMBLE_EDITS),
         Case(
             "images",
@@ -657,9 +671,19 @@ def count(text, name):
     return int(m.group(1)) if m else None
 
 
-def differences(a, b):
+def synctex_text(b, run):
+    """A `SyncTeX` file's text, gunzipped, its run directory's name (in
+    each `Input:` line, absolute) replaced: the oracle and the SSA process
+    run in two."""
+    if b[:2] == b"\x1f\x8b":
+        b = gzip.decompress(b)
+    return b.replace(os.fsencode(run) + b"/", b"RUN/")
+
+
+def differences(a, b, runs=None):
     """The files of stage snapshots `a` (oracle) and `b` (SSA) that differ,
-    and for a log the first line that does."""
+    and for a log the first line that does; a `SyncTeX` file by its text,
+    `runs` the two sides' run directories."""
     fa, fb = files(a), files(b)
     diffs, notes = [], []
     for n in sorted(fa.keys() | fb.keys()):
@@ -672,6 +696,8 @@ def differences(a, b):
         x, y = fa[n].read_bytes(), fb[n].read_bytes()
         if is_log(n):
             x, y = masked(x), masked(y)
+        if runs and n.endswith((".synctex", ".synctex.gz")):
+            x, y = synctex_text(x, runs[0]), synctex_text(y, runs[1])
         if x == y:
             continue
         diffs.append(n)
@@ -718,7 +744,11 @@ def judge(case, cdir, runs, code, err, last):
         if k == last and crashed:
             problems.append(f"the SSA process ended: exit {code}")
         if k <= last:
-            diffs, notes = differences(cdir / "snap" / "o" / str(k), cdir / "snap" / "p" / str(k))
+            diffs, notes = differences(
+                cdir / "snap" / "o" / str(k),
+                cdir / "snap" / "p" / str(k),
+                (cdir / "o", cdir / "p"),
+            )
         else:
             diffs, notes = [], []
         s["diffs"], s["notes"], s["problems"] = diffs, notes, problems
