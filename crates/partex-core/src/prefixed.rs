@@ -375,12 +375,16 @@ impl<H: Host, T: Tracker> Tex<H, T> {
     /// §1215
     pub(crate) fn get_r_token(&mut self) -> Result<(), Jump> {
         loop {
-            loop {
-                self.get_token()?;
-                if self.cur_tok != SPACE_TOKEN {
-                    break;
+            // (the target's meaning is not read: only its class, for
+            // `get_next`)
+            self.tokens_only(|t| {
+                loop {
+                    t.get_token()?;
+                    if t.cur_tok != SPACE_TOKEN {
+                        return Ok(());
+                    }
                 }
-            }
+            })?;
             if self.cur_cs == 0
                 || self.cur_cs > self.eqtb_top
                 || (self.cur_cs > FROZEN_CONTROL_SEQUENCE && self.cur_cs <= EQTB_SIZE)

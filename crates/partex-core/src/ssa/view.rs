@@ -813,6 +813,7 @@ fn slot_name<H: Host>(names: &mut Names<'_, H>, st: &super::RecState, a: Slot) -
         Fam::Random => String::from("random"),
         Fam::Str => format!("strings:{i:#x}"),
         Fam::Source | Fam::Line | Fam::Sealed => format!("{a}"),
+        Fam::Class => format!("class:{}", slot_name(names, st, Slot(Fam::Eqtb, i))),
         Fam::Name => {
             let n = interned(&st.names);
             format!("lookup:\\{n}")

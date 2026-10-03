@@ -380,6 +380,10 @@ pub trait Tracker {
     /// `Cell::Str` of its characters, and hash slots are read with their
     /// content ([`Tracker::read_content`]).
     const NAMES: bool = false;
+    /// Whether a lookup where only the token is wanted (an argument's or
+    /// a body's token, an assignment's target) reads the control
+    /// sequence's class ([`Tracker::read_class`]) instead of its meaning.
+    const CLASSES: bool = false;
     /// Before a read of a cell.
     fn read(&self, cell: Cell);
     /// A local assignment at group level `level` to `cell`, whose old
@@ -526,6 +530,13 @@ pub trait Tracker {
     /// The last read of `cell` was a lookup the reader does not depend on
     /// (the target of `\\def`, `\\let` and the like, pdfTeX §1215).
     fn retract(&self, _cell: Cell) {}
+    /// A lookup of control sequence `p` where only its token is wanted,
+    /// whose meaning is of class 0 (`skipcache::token_class`): what
+    /// `get_next` and the reader do with the token depends on the class
+    /// alone ([`Tracker::CLASSES`]).
+    fn read_class(&self, _p: i32) {}
+    /// The class of control sequence `p`'s meaning changed.
+    fn class_wrote(&self, _p: i32) {}
     /// A blank line of a file became `\\par` outside definitions,
     /// arguments and skipped text: a point a cold build could start from
     /// (DESIGN.md §7.6).

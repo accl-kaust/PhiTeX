@@ -11,7 +11,7 @@ use crate::host::Host;
 use crate::mem::{MemoryWord, NULL};
 use crate::objs::Shape;
 use crate::print::TERM_AND_LOG;
-use crate::tex::Tex;
+use crate::tex::{Jump, Tex};
 use crate::track::{Cell, Tracker};
 use crate::web::{BOX_VAL, DIMEN_VAL, GLUE_VAL, INT_VAL, MU_VAL, TOK_VAL};
 #[allow(unused_imports)]
@@ -192,6 +192,9 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         }
         let old = self.peek_eqtb(p);
         self.note_meaning(p, old, w);
+        if T::CLASSES {
+            self.note_class(p, old, w);
+        }
         if p >= EXT_BASE {
             self.xregs.set(p, w);
         } else {
@@ -323,6 +326,71 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         }
     }
 
+    /// A write of control sequence `p`'s meaning that changes its class
+    /// ([`Tracker::class_wrote`]).
+    #[inline]
+    fn note_class(&self, p: i32, old: MemoryWord, new: MemoryWord) {
+        let cs = p < GLUE_BASE || (p > EQTB_SIZE && p < EXT_BASE);
+        if cs
+            && crate::skipcache::token_class(old.b0(), old.rh())
+                != crate::skipcache::token_class(new.b0(), new.rh())
+        {
+            self.tracker.class_wrote(p);
+        }
+    }
+
+    /// The class of control sequence `p`'s meaning
+    /// (`skipcache::token_class`), not told to the tracker.
+    pub(crate) fn token_class_of(&self, p: i32) -> u8 {
+        let w = self.peek_eqtb(p);
+        crate::skipcache::token_class(w.b0(), w.rh())
+    }
+
+    /// Control sequence `p`'s meaning, looked up where only its token is
+    /// wanted ([`Tex::token_only`]): a meaning of class 0 is read as its
+    /// class ([`Tracker::read_class`]), any other as itself. (A call's
+    /// memo, `memo.rs`, reads the meaning still.)
+    #[inline(always)]
+    #[allow(clippy::inline_always, reason = "a test of a const, on the token path")]
+    pub(crate) fn token_meaning(&self, p: i32) -> MemoryWord {
+        if T::CLASSES {
+            let w = self.peek_eqtb(p);
+            if crate::skipcache::token_class(w.b0(), w.rh()) == 0 {
+                self.tracker.read_class(p);
+                // (a call's memo keeps the whole meaning)
+                if self.memo.recording() {
+                    self.memo_read_eqtb(p, w);
+                }
+                return w;
+            }
+        }
+        self.eqtb(p)
+    }
+
+    /// Control sequence `p`'s meaning as `get_next` looks it up: as
+    /// [`Tex::token_meaning`] while [`Tex::token_only`].
+    #[inline(always)]
+    #[allow(clippy::inline_always, reason = "a test of a const, on the token path")]
+    pub(crate) fn lookup_meaning(&self, p: i32) -> MemoryWord {
+        if T::CLASSES && self.token_only {
+            self.token_meaning(p)
+        } else {
+            self.eqtb(p)
+        }
+    }
+
+    /// Run `f` with [`Tex::token_only`] set: its lookups want only the
+    /// tokens.
+    pub(crate) fn tokens_only<R>(
+        &mut self,
+        f: impl FnOnce(&mut Self) -> Result<R, Jump>,
+    ) -> Result<R, Jump> {
+        let was = core::mem::replace(&mut self.token_only, true);
+        let r = f(self);
+        self.token_only = was;
+        r
+    }
+
     /// Remember skips with a machine's tracker (`class_hash` from
     /// scratch: every control sequence's class to a skip).
     pub fn set_skip_tracked(&mut self, on: bool) {
@@ -355,6 +423,9 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             (old, *x)
         };
         self.note_meaning(p, old, new);
+        if T::CLASSES {
+            self.note_class(p, old, new);
+        }
         if T::VALUES {
             self.tracker
                 .write_value(Cell::Eqtb(p), old.bits(), new.bits());

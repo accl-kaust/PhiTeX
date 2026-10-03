@@ -175,7 +175,9 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             // §474: scan and build the parameter part of the macro definition.
             let mut done = false;
             loop {
-                self.get_token()?; // set `cur_cmd`, `cur_chr`, `cur_tok`
+                // (set `cur_cmd`, `cur_chr`, `cur_tok`; a control
+                // sequence's meaning matters by its class alone)
+                self.tokens_only(Self::get_token)?;
                 if self.cur_tok < RIGHT_BRACE_LIMIT {
                     break; // done1
                 }
@@ -185,7 +187,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                     // brace, store `left_brace, end_match`, set
                     // `hash_brace`, and `goto done`.
                     let s = MATCH_TOKEN + self.cur_chr;
-                    self.get_token()?;
+                    self.tokens_only(Self::get_token)?;
                     if self.cur_tok < LEFT_BRACE_LIMIT {
                         hash_brace = self.cur_tok;
                         self.def_ref.push(self.cur_tok);
@@ -265,7 +267,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                     }
                     self.x_token()?;
                 } else {
-                    self.get_token()?;
+                    self.tokens_only(Self::get_token)?;
                 }
                 if self.cur_tok < RIGHT_BRACE_LIMIT {
                     if self.cur_cmd < RIGHT_BRACE {
@@ -282,7 +284,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                     if xpand {
                         self.get_x_token()?;
                     } else {
-                        self.get_token()?;
+                        self.tokens_only(Self::get_token)?;
                     }
                     if self.cur_cmd != MAC_PARAM {
                         if self.cur_tok <= ZERO_TOKEN || self.cur_tok > t {

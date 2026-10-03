@@ -149,20 +149,24 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             }
             return Ok(());
         }
-        loop {
-            self.bulk_skip(); // (a run at once, `bulk.rs`)
-            self.get_next()?;
-            if self.cur_cmd == FI_OR_ELSE {
-                if l == 0 {
-                    break;
+        // (a skipped token's meaning matters by its class alone)
+        self.tokens_only(|t| {
+            loop {
+                t.bulk_skip(); // (a run at once, `bulk.rs`)
+                t.get_next()?;
+                if t.cur_cmd == FI_OR_ELSE {
+                    if l == 0 {
+                        break;
+                    }
+                    if t.cur_chr == FI_CODE {
+                        l -= 1;
+                    }
+                } else if t.cur_cmd == IF_TEST {
+                    l += 1;
                 }
-                if self.cur_chr == FI_CODE {
-                    l -= 1;
-                }
-            } else if self.cur_cmd == IF_TEST {
-                l += 1;
             }
-        }
+            Ok(())
+        })?;
         self.scanner_status = save_scanner_status;
         if self.int_par(TRACING_IFS_CODE) > 0 {
             self.show_cur_cmd_chr();

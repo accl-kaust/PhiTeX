@@ -365,7 +365,9 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         // never expands, so no other macro call uses it meanwhile)
         let mut pstack = core::mem::take(&mut self.pstack_buf);
         pstack.clear();
-        let r = self.macro_call_body(&mut pstack);
+        // (argument scanning stores the tokens: a control sequence's
+        // meaning matters by its class alone)
+        let r = self.tokens_only(|t| t.macro_call_body(&mut pstack));
         self.pstack_buf = pstack;
         // exit:
         self.scanner_status = save_scanner_status;

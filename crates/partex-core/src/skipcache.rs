@@ -22,8 +22,8 @@ use alloc::vec::Vec;
 
 use crate::mem::NULL;
 use crate::web::{
-    CAR_RET, CS_TOKEN_FLAG, FI_CODE, FI_OR_ELSE, IF_TEST, LEFT_BRACE, OUTER_CALL, RIGHT_BRACE,
-    TAB_MARK,
+    CAR_RET, CS_TOKEN_FLAG, FI_CODE, FI_OR_ELSE, IF_TEST, LEFT_BRACE, MAC_PARAM, OUTER_CALL,
+    RIGHT_BRACE, TAB_MARK,
 };
 
 /// Entries (direct-mapped).
@@ -107,6 +107,18 @@ pub(crate) fn class(c: i32, chr: i32) -> u8 {
         5
     } else {
         0
+    }
+}
+
+/// What a control sequence meaning is to a reader that only stores its
+/// token (an argument's, a body's, an assignment's target): what `get_next`
+/// acts on (\outer, an alignment's tab or `\cr`), what a skip counts
+/// ([`class`]), a macro parameter (a definition's `#`), or nothing (0).
+#[inline]
+pub(crate) fn token_class(c: i32, chr: i32) -> u8 {
+    match class(c, chr) {
+        0 if c == MAC_PARAM => 6,
+        k => k,
     }
 }
 

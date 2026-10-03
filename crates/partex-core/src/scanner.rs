@@ -140,7 +140,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             let (t, next) = self.cur_tok_and_next();
             if t >= CS_TOKEN_FLAG {
                 let cs = t - CS_TOKEN_FLAG;
-                let w = self.eqtb(cs);
+                let w = self.lookup_meaning(cs);
                 let cmd = w.b0();
                 if cmd < OUTER_CALL && (cmd > CAR_RET || cmd < TAB_MARK || self.align_state() != 0)
                 {
@@ -194,7 +194,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                 if t >= CS_TOKEN_FLAG {
                     // a control sequence token
                     self.cur_cs = t - CS_TOKEN_FLAG;
-                    let w = self.eqtb(self.cur_cs);
+                    let w = self.lookup_meaning(self.cur_cs);
                     self.cur_cmd = w.b0();
                     self.cur_chr = w.rh();
                     if self.cur_cmd >= OUTER_CALL {
@@ -321,8 +321,9 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             ACTIVE_CHAR => {
                 // §353: process an active-character control sequence.
                 self.cur_cs = self.cur_chr + ACTIVE_BASE;
-                self.cur_cmd = self.eq_type(self.cur_cs);
-                self.cur_chr = self.equiv(self.cur_cs);
+                let w = self.lookup_meaning(self.cur_cs);
+                self.cur_cmd = w.b0();
+                self.cur_chr = w.rh();
                 self.cur_input.state = MID_LINE;
                 if self.cur_cmd >= OUTER_CALL {
                     self.check_outer_validity()?;
@@ -401,8 +402,9 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                     self.tracker.blank_line();
                 }
                 self.cur_cs = self.par_loc;
-                self.cur_cmd = self.eq_type(self.cur_cs);
-                self.cur_chr = self.equiv(self.cur_cs);
+                let w = self.lookup_meaning(self.cur_cs);
+                self.cur_cmd = w.b0();
+                self.cur_chr = w.rh();
                 if self.cur_cmd >= OUTER_CALL {
                     self.check_outer_validity()?;
                 }
@@ -483,8 +485,9 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             }
         }
         // found:
-        self.cur_cmd = self.eq_type(self.cur_cs);
-        self.cur_chr = self.equiv(self.cur_cs);
+        let w = self.lookup_meaning(self.cur_cs);
+        self.cur_cmd = w.b0();
+        self.cur_chr = w.rh();
         if self.cur_cmd >= OUTER_CALL {
             self.check_outer_validity()?;
         }
