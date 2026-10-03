@@ -70,7 +70,13 @@ impl<H: Host, T: Tracker> Tex<H, T> {
     #[inline(always)]
     #[allow(clippy::inline_always, reason = "measured: 1% of the course as a call")]
     fn bulk_cs(&self, t: i32, how: Absorb, align: i32) -> bool {
-        let w = self.eqtb(t - CS_TOKEN_FLAG);
+        // (an argument's or a body's token is only stored: its class is
+        // what the run depends on, as for `get_next`'s lookup)
+        let w = if matches!(how, Absorb::Expand { .. }) {
+            self.eqtb(t - CS_TOKEN_FLAG)
+        } else {
+            self.token_meaning(t - CS_TOKEN_FLAG)
+        };
         let cmd = w.b0();
         if cmd >= OUTER_CALL || (align == 0 && (cmd == TAB_MARK || cmd == CAR_RET)) {
             return false;
@@ -282,7 +288,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         let mut k = loc;
         while let Some(&t) = toks.get(k) {
             if t >= CS_TOKEN_FLAG {
-                let c = self.eqtb(t - CS_TOKEN_FLAG).b0();
+                let c = self.token_meaning(t - CS_TOKEN_FLAG).b0();
                 if c == IF_TEST
                     || c == FI_OR_ELSE
                     || c >= OUTER_CALL

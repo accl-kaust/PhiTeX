@@ -385,6 +385,10 @@ pub trait Tracker {
     /// `Cell::Str` of its characters, and hash slots are read with their
     /// content ([`Tracker::read_content`]).
     const NAMES: bool = false;
+    /// Whether a lookup where only the token is wanted (an argument's or
+    /// a body's token, an assignment's target) reads the control
+    /// sequence's class ([`Tracker::read_class`]) instead of its meaning.
+    const CLASSES: bool = false;
     /// Before a read of a cell.
     fn read(&self, cell: Cell);
     /// A local assignment at group level `level` to `cell`, whose old
@@ -425,6 +429,20 @@ pub trait Tracker {
     /// (With [`Tracker::VALUES`].) Table row `row` was written and holds
     /// content version `version` now (made at the write).
     fn row_wrote(&self, _row: Row, _version: u128) {}
+    /// Font slot `f` was made (loaded, expanded, copied) by the run now.
+    fn font_loaded(&self, _f: i32) {}
+    /// Whether loaded font `f` is one the program has made by now, for
+    /// `\font`'s search of the fonts loaded (§1260): a rebuild's step run
+    /// again does not find what a later step, or its own older run, made.
+    fn font_visible(&self, _f: i32) -> bool {
+        true
+    }
+    /// Whether font `f` is the newest the program has made by now (§579:
+    /// only it may grow its parameters), if the tracker knows (`None`:
+    /// the table's last loaded font is).
+    fn font_newest(&self, _f: i32) -> Option<bool> {
+        None
+    }
     /// (With [`Tracker::VALUES`].) Table row `row` holds content version
     /// `version`, stored wholesale past the accessors (a format's load):
     /// its version, not a write of the running call.
@@ -517,6 +535,13 @@ pub trait Tracker {
     /// The last read of `cell` was a lookup the reader does not depend on
     /// (the target of `\\def`, `\\let` and the like, pdfTeX §1215).
     fn retract(&self, _cell: Cell) {}
+    /// A lookup of control sequence `p` where only its token is wanted,
+    /// whose meaning is of class 0 (`skipcache::token_class`): what
+    /// `get_next` and the reader do with the token depends on the class
+    /// alone ([`Tracker::CLASSES`]).
+    fn read_class(&self, _p: i32) {}
+    /// The class of control sequence `p`'s meaning changed.
+    fn class_wrote(&self, _p: i32) {}
     /// A blank line of a file became `\\par` outside definitions,
     /// arguments and skipped text: a point a cold build could start from
     /// (DESIGN.md §7.6).

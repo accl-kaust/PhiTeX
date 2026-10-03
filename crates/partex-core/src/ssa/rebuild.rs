@@ -1239,6 +1239,9 @@ impl Edit {
 #[derive(Clone, Debug, Default)]
 pub struct RebuildReport {
     pub history: i32,
+    /// The rebuild stopped after a step because [`super::SsaTracker::cancel`]
+    /// said so; it stops as one past its deadline does.
+    pub cancelled: bool,
     /// The files that changed, and the steps their lines made dirty.
     pub edits: usize,
     pub seeds: usize,
@@ -1538,7 +1541,9 @@ fn window_whole<H: Host>(tex: &Tex<H, SsaTracker>, key: u64, next: &mut Vec<Slot
 }
 
 /// A step's definitions: each slot its records wrote, at its last write.
-fn defs(
+/// The writes of records `recs` (the open step's so far), each slot's
+/// last.
+fn recs_writes(
     rt: &partex_ssa::Runtime<TexSsa>,
     recs: &[partex_ssa::runtime::RecId],
 ) -> BTreeMap<Slot, Version> {
@@ -1546,6 +1551,23 @@ fn defs(
     for &r in recs {
         for (a, v) in &rt.record(r).writes {
             d.insert(*a, v.as_ref().map_or(Version::ABSENT, |v| v.0));
+        }
+    }
+    d
+}
+
+/// Step `s`'s definitions, as the index holds them.
+fn defs(rt: &partex_ssa::Runtime<TexSsa>, s: partex_ssa::fold::StepId) -> BTreeMap<Slot, Version> {
+    let mut d = BTreeMap::new();
+    let Some(step) = rt.fold.steps.get(s as usize) else {
+        return d;
+    };
+    for &r in &step.recs {
+        for (a, v) in &rt.record(r).writes {
+            // (a slot the step left as it found it is not its definition)
+            if rt.fold.defines(a, s) {
+                d.insert(*a, v.as_ref().map_or(Version::ABSENT, |v| v.0));
+            }
         }
     }
     d
@@ -2191,6 +2213,11 @@ pub fn rebuild<H: Host>(tex: &mut Tex<H, SsaTracker>, trace: bool, apply: bool) 
                 rep.unsupported = Some("a rebuild past its deadline");
                 break;
             }
+            if tex.tracker.cancel.get().is_some_and(|c| c()) {
+                rep.unsupported = Some("a rebuild cancelled");
+                rep.cancelled = true;
+                break;
+            }
             if let Some(s) = dirty.anchor.take()
                 && let Some(i) = ahead.iter().position(|&o| o == s)
             {
@@ -2392,6 +2419,7 @@ impl RebuildReport {
         self.skipped += r.skipped;
         self.commands += r.commands;
         self.unsupported = self.unsupported.or(r.unsupported);
+        self.cancelled |= r.cancelled;
         self.history = r.history;
         self.log.extend(r.log);
     }
@@ -2542,6 +2570,7 @@ fn more_trips<H: Host>(
             // (no seed: every load of the φ read what the trip stored)
             rep.settled = r.unsupported.is_none();
             rep.unsupported = rep.unsupported.or(r.unsupported);
+            rep.cancelled |= r.cancelled;
             rep.log.extend(r.log);
             rep.log.extend(rebuild_log(tex));
             return rep;
@@ -2617,7 +2646,7 @@ pub fn rerun_check<H: Host>(tex: &mut Tex<H, SsaTracker>, apply: bool) -> RerunC
             (
                 input,
                 s.end(j),
-                defs(&r.rt, &r.rt.fold.steps[j as usize].recs),
+                defs(&r.rt, j),
                 s.stores.get(&j).cloned(),
                 fx,
             )
@@ -2643,7 +2672,7 @@ pub fn rerun_check<H: Host>(tex: &mut Tex<H, SsaTracker>, apply: bool) -> RerunC
                     .map_or(alloc::string::String::from("-"), InputState::brief)
             ));
         }
-        let new_defs = defs(&r.rt, &r.rt.fold.steps[j as usize].recs);
+        let new_defs = defs(&r.rt, j);
         let changed: Vec<alloc::string::String> = old_defs
             .keys()
             .chain(new_defs.keys())
@@ -3040,7 +3069,7 @@ fn retire<H: Host>(
         let mut r = tex.tracker.rec.borrow_mut();
         let rr = &mut *r;
         let key = rr.rt.fold.steps[s as usize].key;
-        let old = defs(&rr.rt, &rr.rt.fold.steps[s as usize].recs);
+        let old = defs(&rr.rt, s);
         for (a, v) in old.iter().filter(|(a, _)| positioned(a)) {
             // (its readers now read the definition that reaches it: an
             // equal one changes nothing for them)
@@ -3172,7 +3201,7 @@ fn run_step<H: Host>(
         let r = tex.tracker.rec.borrow();
         let fold = &r.rt.fold;
         let key = fold.steps[j as usize].key;
-        let old = defs(&r.rt, &fold.steps[j as usize].recs);
+        let old = defs(&r.rt, j);
         // (a new step the fold's last, as a cascade gone cold makes them:
         // no definition is later than it, so the arrays hold what reaches
         // it, as in a cold build, but for the page's nodes, which they
@@ -3377,7 +3406,9 @@ fn run_step<H: Host>(
             let written = if miss.is_empty() {
                 Vec::new()
             } else {
-                defs(&r.rt, r.rt.open_step_recs()).into_keys().collect()
+                recs_writes(&r.rt, r.rt.open_step_recs())
+                    .into_keys()
+                    .collect()
             };
             (miss, written)
         };
@@ -3431,6 +3462,7 @@ fn run_step<H: Host>(
             }
         }
         tex.tracker.rec.borrow_mut().rt.abort_step();
+        tex.tracker.drop_softs();
         // (what the dropped run wrote goes back to what reaches the step)
         let vals = {
             let mut r = tex.tracker.rec.borrow_mut();
@@ -3468,8 +3500,8 @@ fn run_step<H: Host>(
         let input = InputState::of(tex, finished);
         let mut r = tex.tracker.rec.borrow_mut();
         let rr = &mut *r;
-        let d = defs(&rr.rt, rr.rt.open_step_recs());
-        rr.rt.end_step();
+        tex.tracker.end_step(rr);
+        let d = defs(&rr.rt, j);
         let stores = step_closed(rr, j, input);
         mark_store_readers(rr, &stores, key, dirty, rep);
         // (the glyph rows it defined or defines: [`glyph_union_now`])
@@ -3499,10 +3531,22 @@ fn run_step<H: Host>(
             .keys()
             .chain(new.keys().filter(|a| !old.contains_key(a)));
         let mut union_same = None;
-        for a in slots.filter(|a| positioned(a)) {
+        // (a font's fields are not placed, their values not built yet,
+        // but one that changed still makes its readers dirty: a step run
+        // again that sets `\hyphenchar` or a `\fontdimen`, an
+        // `\intarray`'s count or entries, is read by later steps)
+        // (nor a meaning's class, made by the meaning's writes, which
+        // are placed)
+        for a in slots.filter(|a| positioned(a) || matches!(a.0, Fam::Font | Fam::Class)) {
             touched.insert(*a);
             let (o, n) = (old.get(a).copied(), new.get(a).copied());
             if o == n || ((o.is_none() || n.is_none()) && reaching_version(rr, a, key) == o.or(n)) {
+                continue;
+            }
+            // (a font's field the run did not write again holds what the
+            // last run left, its values not placed: a cache made at its
+            // first use, `font:cmr10.glue`, is there still)
+            if a.0 == Fam::Font && n.is_none() {
                 continue;
             }
             rep.defs_changed += 1;
@@ -3539,8 +3583,9 @@ fn run_step<H: Host>(
                         alloc::format!("{:04x}", v.0 & 0xffff)
                     })
                 };
+                let name = super::view::trace_name(tex, &rr.st, *a);
                 changed.push(alloc::format!(
-                    "{a} {}->{} (before {}; {} readers{}{}: {})",
+                    "{a}={name} {}->{} (before {}; {} readers{}{}: {})",
                     short(o),
                     short(n),
                     short(reaching_version(rr, a, key)),

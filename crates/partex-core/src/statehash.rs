@@ -1662,6 +1662,8 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             omit_list: _,
             arg_list,
             arg_active,
+            // (set only inside a scan)
+            token_only: _,
             preamble_list,
             preamble_active,
             prims,

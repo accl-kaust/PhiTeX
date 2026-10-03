@@ -208,6 +208,32 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         Some(Ok(f))
     }
 
+    /// Font `f` made again in its slot, as §1260's search found it where
+    /// the program has not made it (a rebuild's step run again: its own
+    /// older run's font, or a later step's): its parameters the TFM's
+    /// again, the font memory they took past them given back, its hyphen
+    /// and skew characters the defaults (§576), and the newest font
+    /// ([`crate::track::Tracker::font_newest`]), as a load here would
+    /// leave it. An `\intarray` (a font whose parameters grow) made again
+    /// in a trip finds it so.
+    pub(crate) fn remake_font(&mut self, f: i32) {
+        let data = self.fonts.tfm[fx(f)].clone();
+        let size = self.fonts.get(f).size;
+        if let Ok(font) = Font::from_tfm(&data, Some(size)) {
+            let had = self.fonts.params_mut(f).len();
+            let n = font.params.len();
+            *self.fonts.params_mut(f) = font.params;
+            self.fmem_ptr = self
+                .fmem_ptr
+                .saturating_sub(i32::try_from(had.saturating_sub(n)).unwrap_or(0));
+        }
+        self.tracker.write(crate::track::Cell::FontTable);
+        self.tracker.write(crate::track::Cell::Font(f));
+        self.fonts.hyphen_char[fx(f)] = self.int_par(DEFAULT_HYPHEN_CHAR_CODE);
+        self.fonts.skew_char[fx(f)] = self.int_par(DEFAULT_SKEW_CHAR_CODE);
+        self.font_made(f);
+    }
+
     /// §561: `start_font_error_message`.
     fn start_font_error_message(&mut self, u: Pointer, nom: i32, aire: i32, s: Scaled) {
         self.print_err(b"Font ");

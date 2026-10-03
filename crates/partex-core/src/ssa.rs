@@ -124,6 +124,16 @@ pub enum Fam {
     /// A sealed line's contents (`seal.rs`, `track::Row::Sealed`), by its
     /// key: versioned by the contents.
     Sealed,
+    /// The class of control sequence `p`'s meaning
+    /// (`skipcache::token_class`): what a lookup that wants only the token
+    /// depends on ([`Tracker::read_class`]), versioned by the class. Made
+    /// by the meaning's writes, never placed.
+    Class,
+}
+
+/// The version of a [`Fam::Class`] slot holding class `c`.
+fn class_version(c: u8) -> Version {
+    Version::of(&(0xc1a5_u16, c))
 }
 
 /// Codes id of a [`Fam::Source`] line versioned by its bytes.
@@ -238,6 +248,7 @@ impl fmt::Display for Slot {
             Fam::Sealed => {
                 return write!(f, "sealed:{:x}", self.1.cast_unsigned());
             }
+            Fam::Class => "class",
         };
         write!(f, "{fam}:{}", self.1)
     }
@@ -596,6 +607,7 @@ impl Machine for TexSsa {
             Fam::Save => 10,
             Fam::FontTable => 11,
             Fam::Hyph => 12,
+            Fam::Class => 16,
             _ => return None,
         };
         usize::try_from(a.1)
@@ -1127,6 +1139,10 @@ impl Default for Recorder {
 /// nanoseconds, and the time on it past which the rebuild stops.
 pub type Deadline = (fn() -> u64, u64);
 
+/// A build's cancel ([`SsaTracker::cancel`]): asked at each step boundary,
+/// `true` stops the build there.
+pub type Cancel = fn() -> bool;
+
 /// The engine's tracker that records into the runtime.
 ///
 /// A read of a table slot is noted once per call: the slot's stamp is the
@@ -1202,6 +1218,27 @@ pub struct SsaTracker {
     /// between rebuilds, so a host that would build cold instead past
     /// the cold build's time sets this.
     pub deadline: core::cell::Cell<Option<Deadline>>,
+    /// Whether to stop the build now, asked at each step boundary of a
+    /// cold build ([`run_applying`]) and after each step a rebuild runs:
+    /// a host whose build runs synchronously (wasm in a Worker) polls its
+    /// own signal (an edit arrived) from it (`None`, the default: never).
+    /// A cancelled cold build leaves the engine in the middle of the job:
+    /// the host drops it and builds anew ([`SsaReport::cancelled`]). A
+    /// cancelled rebuild stops as one past its deadline does
+    /// ([`rebuild::RebuildReport::cancelled`]).
+    pub cancel: core::cell::Cell<Option<Cancel>>,
+    /// Each font slot's maker: the fold's step and the serial its run began
+    /// at ([`Tracker::font_visible`]); none for a format's fonts.
+    fonts_by: RefCell<Vec<Option<(partex_ssa::fold::StepId, u64, u64)>>>,
+    /// How many fonts were made, counting: each made font's place among a
+    /// step run's ([`Tracker::font_newest`]).
+    fonts_made: core::cell::Cell<u64>,
+    /// The open step's soft reads ([`Tracker::soft_read`]): each slot with
+    /// its version then, settled at the step's end
+    /// ([`SsaTracker::end_step`]).
+    softs: RefCell<Vec<(Slot, Version)>>,
+    soft_kept: core::cell::Cell<u64>,
+    soft_read: core::cell::Cell<u64>,
     /// Large contents loaded, with their versions, by identity: the host
     /// hands out the same `Arc` again for a file as it was, and a step
     /// run again that loads it (the 5 MB font map, at the first page) need
@@ -1330,6 +1367,12 @@ impl SsaTracker {
             stop_after: core::cell::Cell::new(u64::MAX),
             budget: core::cell::Cell::new(u64::MAX),
             deadline: core::cell::Cell::new(None),
+            cancel: core::cell::Cell::new(None),
+            fonts_by: RefCell::new(Vec::new()),
+            fonts_made: core::cell::Cell::new(0),
+            softs: RefCell::new(Vec::new()),
+            soft_kept: core::cell::Cell::new(0),
+            soft_read: core::cell::Cell::new(0),
             load_versions: RefCell::new(Vec::new()),
         }
     }
@@ -1532,10 +1575,181 @@ impl SsaTracker {
     }
 }
 
+impl SsaTracker {
+    /// End the open step ([`Runtime::end_step_soft`]), its soft reads
+    /// settled: a slot whose value is back to the one the step began with
+    /// is neither read nor defined by it; another is read from outside it.
+    pub(crate) fn end_step(&self, r: &mut Recorder) -> Option<partex_ssa::fold::StepId> {
+        let softs = core::mem::take(&mut *self.softs.borrow_mut());
+        if softs.is_empty() {
+            return r.rt.end_step();
+        }
+        let (mut read, mut untouched): (Vec<Slot>, Vec<Slot>) = (Vec::new(), Vec::new());
+        let mut seen = alloc::collections::BTreeSet::new();
+        for &(s, v) in &softs {
+            // (the first soft read of a slot holds the step's entry value)
+            if !seen.insert(s) {
+                continue;
+            }
+            let now = table_at(s.0, s.1)
+                .and_then(|(f, i)| r.st.vers.known_at(f, i))
+                .unwrap_or_else(|| r.st.vers.revision(s));
+            if now == v {
+                untouched.push(s);
+            } else {
+                read.push(s);
+            }
+        }
+        self.soft_kept
+            .set(self.soft_kept.get() + untouched.len() as u64);
+        self.soft_read.set(self.soft_read.get() + read.len() as u64);
+        r.rt.end_step_soft(&read, &untouched)
+    }
+
+    /// The open step's run dropped: its soft reads with it.
+    pub(crate) fn drop_softs(&self) {
+        self.softs.borrow_mut().clear();
+    }
+
+    /// How many soft reads the steps' ends settled as untouched (neither
+    /// read nor defined) and as reads.
+    #[must_use]
+    pub fn soft_counts(&self) -> (u64, u64) {
+        (self.soft_kept.get(), self.soft_read.get())
+    }
+}
+
+/// Where a font stands in program order at the open step
+/// ([`font_made_by_now`]).
+enum FontMade {
+    /// No maker: a format's font, or made with no step open.
+    Before,
+    /// Made by now: its maker's key, and its count among the fonts made.
+    Now(u64, u64),
+    /// Not made by now: by a later step, or by an older run of a step.
+    NotYet,
+}
+
+/// Where a font made by `by` (its maker step, the serial of that run,
+/// its count among the fonts made) stands at the open step: made by now
+/// if by the open step's run, or by the latest run of a live step before
+/// it ([`Tracker::font_visible`]).
+fn font_made_by_now(r: &Recorder, by: Option<(partex_ssa::fold::StepId, u64, u64)>) -> FontMade {
+    let (Some((sid, ser, n)), Some((cur, cser))) = (by, r.rt.open_step_serial()) else {
+        return FontMade::Before;
+    };
+    let steps = &r.rt.fold.steps;
+    let (Some(maker), Some(now)) = (steps.get(sid as usize), steps.get(cur as usize)) else {
+        return FontMade::NotYet;
+    };
+    if ser == cser {
+        FontMade::Now(now.key, n)
+    } else if maker.serial == ser && maker.live && maker.key < now.key {
+        FontMade::Now(maker.key, n)
+    } else {
+        FontMade::NotYet
+    }
+}
+
 impl Tracker for SsaTracker {
     const VALUES: bool = true;
     const LINES: bool = true;
     const NAMES: bool = true;
+    const SOFT_READS: bool = true;
+
+    const CLASSES: bool = true;
+
+    /// (only lookups of a meaning of class 0 come here)
+    fn read_class(&self, p: i32) {
+        let Ok(mut r) = self.rec.try_borrow_mut() else {
+            return;
+        };
+        if r.on {
+            r.rt.note_read(
+                &Loc::State(Slot(Fam::Class, i64::from(p))),
+                class_version(0),
+            );
+        }
+    }
+
+    fn class_wrote(&self, p: i32) {
+        if let Ok(mut r) = self.rec.try_borrow_mut() {
+            if r.on {
+                r.rt.note_write(&Slot(Fam::Class, i64::from(p)));
+            }
+        } else {
+            self.lost.set(self.lost.get() + 1);
+        }
+    }
+
+    /// A local assignment's look at the value it replaces (saved at the
+    /// group's start, put back at its end): the running call's read, and
+    /// the open step's only if the value at the step's end is not the one
+    /// it began with ([`SsaTracker::end_step`]): a step that sets a scratch
+    /// variable inside a group and leaves it as it found it neither
+    /// depends on its value nor defines it.
+    fn soft_read(&self, cell: Cell, _level: i32) {
+        let Cell::Eqtb(_) = cell else {
+            self.read(cell);
+            return;
+        };
+        let s = Slot::of(cell);
+        let Ok(mut r) = self.rec.try_borrow_mut() else {
+            return;
+        };
+        if !r.on {
+            return;
+        }
+        let v = table_at(s.0, s.1)
+            .and_then(|(f, i)| r.st.vers.known_at(f, i))
+            .unwrap_or_else(|| r.st.vers.revision(s));
+        if r.rt.note_read_soft(&Loc::State(s), v) {
+            self.softs.borrow_mut().push((s, v));
+        }
+    }
+
+    fn font_loaded(&self, f: i32) {
+        let Ok(r) = self.rec.try_borrow() else { return };
+        let Some((sid, ser)) = r.rt.open_step_serial() else {
+            return;
+        };
+        let Ok(i) = usize::try_from(f) else { return };
+        let n = self.fonts_made.get() + 1;
+        self.fonts_made.set(n);
+        let mut v = self.fonts_by.borrow_mut();
+        if v.len() <= i {
+            v.resize(i + 1, None);
+        }
+        v[i] = Some((sid, ser, n));
+    }
+
+    fn font_visible(&self, f: i32) -> bool {
+        let Ok(r) = self.rec.try_borrow() else {
+            return true;
+        };
+        let by = usize::try_from(f)
+            .ok()
+            .and_then(|i| self.fonts_by.borrow().get(i).copied().flatten());
+        !matches!(font_made_by_now(&r, by), FontMade::NotYet)
+    }
+
+    fn font_newest(&self, f: i32) -> Option<bool> {
+        let r = self.rec.try_borrow().ok()?;
+        r.rt.open_step_serial()?;
+        // (the newest of the fonts made by now, by their makers' places
+        // in program order, then by when they were made)
+        let v = self.fonts_by.borrow();
+        let newest = v
+            .iter()
+            .enumerate()
+            .filter_map(|(g, by)| match font_made_by_now(&r, *by) {
+                FontMade::Now(key, n) => Some(((key, n), g)),
+                _ => None,
+            })
+            .max()?
+            .1;
+        Some(usize::try_from(f).is_ok_and(|i| i == newest))
+    }
 
     fn command(&self, n: u64, _depth: usize, _line: i32, _level: i32, _outer: bool) {
         // (the steps' times, [`SsaTracker::set_timed`])
@@ -2126,6 +2340,8 @@ pub trait EngineView {
     fn mark_ver(&self, s: i64) -> u128;
     /// The sealed line `k`'s contents (`seal.rs`).
     fn sealed_ver(&self, k: i64) -> u128;
+    /// The class of control sequence `p`'s meaning ([`Fam::Class`]).
+    fn token_class_of(&self, p: i32) -> u8;
     /// The value slot `s` holds now (the families whose values the
     /// engine can put back; none for a read-only one).
     #[allow(private_interfaces, reason = "the values are the engine's")]
@@ -2188,6 +2404,9 @@ impl<H: Host, T: Tracker> EngineView for Tex<H, T> {
     fn mark_ver(&self, s: i64) -> u128 {
         let (c, t) = (s / 5, s % 5);
         self.mark_version(i32::try_from(c).unwrap_or(0), i32::try_from(t).unwrap_or(0))
+    }
+    fn token_class_of(&self, p: i32) -> u8 {
+        Tex::token_class_of(self, p)
     }
     fn sealed_ver(&self, k: i64) -> u128 {
         self.seals
@@ -2286,6 +2505,7 @@ impl Store<TexSsa> for View<'_> {
             Fam::Cond => Version(self.tex.cond_ver()),
             Fam::Mark => Version(self.tex.mark_ver(s.1)),
             Fam::Sealed => Version(self.tex.sealed_ver(s.1)),
+            Fam::Class => class_version(self.tex.token_class_of(i32::try_from(s.1).unwrap_or(0))),
             Fam::List => {
                 use crate::track::list::{COUNT, STRIDE};
                 let i = u32::try_from(s.1).unwrap_or(0);
@@ -2339,6 +2559,10 @@ impl Store<TexSsa> for View<'_> {
 #[derive(Clone, Debug, Default)]
 pub struct SsaReport {
     pub history: i32,
+    /// The build stopped at a step boundary because
+    /// [`SsaTracker::cancel`] said so: the engine is in the middle of the
+    /// job, to be dropped.
+    pub cancelled: bool,
     pub paragraphs: u64,
     pub para_hits: u64,
     pub tokenize_hits: u64,
@@ -2441,6 +2665,8 @@ pub fn run_applying<H: Host>(
         // (a build from the job's start is a fold of its own: the last
         // build's steps are not its)
         r.rt.fold = partex_ssa::fold::Fold::default();
+        // (and the fonts' makers were its steps)
+        tex.tracker.fonts_by.borrow_mut().clear();
         r.rt.open_trip(0);
         // (the top level is a fold of steps and reads nothing, 7.17.9: the
         // job's start is the first step)
@@ -2505,6 +2731,10 @@ pub fn run_applying<H: Host>(
         match step {
             Step::Checkpoint => {
                 if step_ends(tex) {
+                    if tex.tracker.cancel.get().is_some_and(|c| c()) {
+                        rep.cancelled = true;
+                        break;
+                    }
                     close_paragraph(tex, &mut open, &mut rep, Close::Step);
                     open = Some(open_paragraph(tex, check, &mut rep, None));
                 }
@@ -2818,7 +3048,7 @@ fn close_paragraph<H: Host>(
         return;
     }
     // (the step ends with its call: its definitions and readers, 7.17.3)
-    if let (Some(id), Some(input)) = (rr.rt.end_step(), input) {
+    if let (Some(id), Some(input)) = (tex.tracker.end_step(rr), input) {
         rebuild::step_closed(rr, id, input);
     }
     let mut stores = None;

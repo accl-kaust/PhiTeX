@@ -364,6 +364,11 @@ pub struct Tex<H: Host, T: Tracker = Untracked> {
     /// `temp_head`), for "Runaway argument", while `arg_active`.
     pub(crate) arg_list: Vec<i32>,
     pub(crate) arg_active: bool,
+    /// The lookups `get_next` makes want only the tokens: an argument's,
+    /// a body's without expansion, an assignment's target
+    /// ([`Tex::tokens_only`], [`Tracker::CLASSES`]). (Not saved: set
+    /// only inside a scan, by a tracker that takes no snapshots.)
+    pub(crate) token_only: bool,
     /// The template `get_preamble_token` is scanning (tex.web builds it at
     /// `hold_head`), for "Runaway preamble", while `preamble_active`.
     pub(crate) preamble_list: Vec<i32>,
@@ -776,6 +781,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             omit_list: partex_engine::node::TokenList::shared(&[crate::web::END_TEMPLATE_TOKEN]),
             arg_list: Vec::new(),
             arg_active: false,
+            token_only: false,
             preamble_list: Vec::new(),
             preamble_active: false,
             max_reg_num: 255,

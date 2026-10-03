@@ -842,6 +842,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
     /// Font slot `f` was made (loaded, expanded, copied): its fields, and
     /// the table it joined.
     pub(crate) fn font_made(&self, f: i32) {
+        self.tracker.font_loaded(f);
         if T::VALUES {
             for k in FIELDS {
                 self.font_wrote(f, k);

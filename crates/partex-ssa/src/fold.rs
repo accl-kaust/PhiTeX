@@ -46,6 +46,9 @@ pub struct Step<A> {
     pub reads: Vec<A>,
     /// Which run of the step made its entries (a run again bumps it).
     pub run: u32,
+    /// The serial its latest run began at ([`crate::Runtime::open_step_serial`]):
+    /// what the engine made in an older run of it is not the program's.
+    pub serial: u64,
     /// Whether it is in the fold (a rebuild removes the steps it passes
     /// over when it ends a step elsewhere).
     pub live: bool,
@@ -198,6 +201,7 @@ impl<M: Machine> Fold<M> {
             recs: Vec::new(),
             reads: Vec::new(),
             run: 0,
+            serial: 0,
             live: true,
         });
         self.keys.push(key);
@@ -326,6 +330,7 @@ impl<M: Machine> Fold<M> {
         recs: Vec<RecId>,
         reads: Vec<(u64, M::Addr)>,
         writes: impl Fn(RecId) -> Vec<M::Addr>,
+        skip: &[M::Addr],
     ) {
         // (this run's entries replace the last run's, which stayed live
         // while it ran: a rebuild compares against them)
@@ -379,6 +384,12 @@ impl<M: Machine> Fold<M> {
         let Fold { keys, defs, .. } = self;
         for &rec in &recs {
             for (ix, a) in writes(rec).iter().enumerate() {
+                // (a slot the run left as it found it, read only softly:
+                // not its definition, `Runtime::end_step_soft`; the index
+                // stays the record's)
+                if skip.contains(a) {
+                    continue;
+                }
                 let e = Entry {
                     step: id,
                     rec,
@@ -416,9 +427,34 @@ impl<M: Machine> Fold<M> {
                 }
             }
         }
+        // (and the step's entries of the slots skipped, a record made
+        // again having left its last run's in place)
+        for a in skip {
+            if let Some(v) = defs.get_mut_by(hash64(a), |k| k.0 == *a) {
+                let at = first_not_below(v, |x| keys[x.step as usize], key);
+                if v.get(at).is_some_and(|x| x.step == id) {
+                    v.remove(at);
+                }
+            }
+        }
         let s = &mut self.steps[id as usize];
         s.recs = recs;
         s.reads = addrs;
+    }
+
+    /// Whether step `id` has a definition of `a` in the index (a slot it
+    /// left as it found it, read only softly, has none:
+    /// `Runtime::end_step_soft`).
+    #[must_use]
+    pub fn defines(&self, a: &M::Addr, id: StepId) -> bool {
+        let Some(key) = self.steps.get(id as usize).map(|s| s.key) else {
+            return false;
+        };
+        let Some(v) = self.defs.get_by(hash64(a), |k| k.0 == *a) else {
+            return false;
+        };
+        let at = first_not_below(v, |x| self.key_of(x.step), key);
+        v.get(at).is_some_and(|x| x.step == id)
     }
 
     /// The definition of `a` that reaches key `key`: the last live one
