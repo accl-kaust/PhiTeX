@@ -154,19 +154,31 @@ fn font_type(doc: &Doc, font: &Dict) -> (GfxType, Option<Ref>) {
                 match doc.lookup(&s.dict, b"Subtype").as_name() {
                     Some(b"Type1") => {
                         if expected != GfxType::Type1 {
-                            expected = if t0 { GfxType::CidType0 } else { GfxType::Type1 };
+                            expected = if t0 {
+                                GfxType::CidType0
+                            } else {
+                                GfxType::Type1
+                            };
                         }
                     }
                     Some(b"Type1C") => {
                         if expected == GfxType::Type1 {
                             expected = GfxType::Type1C;
                         } else if expected != GfxType::Type1C {
-                            expected = if t0 { GfxType::CidType0C } else { GfxType::Type1C };
+                            expected = if t0 {
+                                GfxType::CidType0C
+                            } else {
+                                GfxType::Type1C
+                            };
                         }
                     }
                     Some(b"TrueType") => {
                         if expected != GfxType::TrueType {
-                            expected = if t0 { GfxType::CidType2 } else { GfxType::TrueType };
+                            expected = if t0 {
+                                GfxType::CidType2
+                            } else {
+                                GfxType::TrueType
+                            };
                         }
                     }
                     Some(b"CIDFontType0C") => {
@@ -243,7 +255,10 @@ pub fn encoding(doc: &Doc, font: &Dict) -> Option<Encoding> {
     // a Base 14 font's name, its spaces removed
     let builtin = name.as_ref().and_then(|n| {
         let n: Vec<u8> = n.iter().copied().filter(|&c| c != b' ').collect();
-        BASE14.iter().find(|(a, _)| a.as_bytes() == n).map(|&(_, b)| b)
+        BASE14
+            .iter()
+            .find(|(a, _)| a.as_bytes() == n)
+            .map(|&(_, b)| b)
     });
     let enc_obj = doc.lookup(font, b"Encoding");
     let named = |n: &[u8]| -> Option<Encoding> {
@@ -261,7 +276,10 @@ pub fn encoding(doc: &Doc, font: &Dict) -> Option<Encoding> {
     };
     // (a non-embedded Symbol or ZapfDingbats font never uses one of the
     // non-symbol encodings)
-    if builtin.is_some_and(|b| b != Builtin::Standard) && emb.is_none() && !matches!(enc_obj, Obj::Dict(_)) {
+    if builtin.is_some_and(|b| b != Builtin::Standard)
+        && emb.is_none()
+        && !matches!(enc_obj, Obj::Dict(_))
+    {
         base = None;
     }
     // the embedded file's own (Type 1 and CFF files only)

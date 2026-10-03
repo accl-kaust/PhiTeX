@@ -1252,6 +1252,7 @@ fn rebuild_ssa(
         tools: &mut tools,
         clock: Some(clock_ns),
     };
+    tex.tracker().deadline.set(rebuild_deadline());
     let rr = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         partex_core::ssa::rebuild_trips(tex, trace, apply, &mut t)
     })) {
@@ -1369,6 +1370,21 @@ fn rebuild_switches() -> (bool, bool) {
     let trace = std::env::var("PARTEX_SSA_REBUILD_TRACE").is_ok_and(|v| v == "1");
     let apply = !matches!(std::env::var("PARTEX_SSA_APPLY").as_deref(), Ok("0"));
     (trace, apply)
+}
+
+/// `PARTEX_SSA_REBUILD_MS`: a rebuild stops past this many milliseconds
+/// from now, as one past its budget of commands does.
+fn rebuild_deadline() -> Option<partex_core::ssa::Deadline> {
+    let ms = std::env::var("PARTEX_SSA_REBUILD_MS")
+        .ok()?
+        .trim()
+        .parse::<u64>()
+        .ok()?;
+    let clock: fn() -> u64 = clock_ns;
+    Some((
+        clock,
+        clock_ns().saturating_add(ms.saturating_mul(1_000_000)),
+    ))
 }
 
 /// Nanoseconds since the epoch: the trips' clock.

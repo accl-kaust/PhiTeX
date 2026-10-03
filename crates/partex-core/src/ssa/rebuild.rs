@@ -2168,6 +2168,12 @@ pub fn rebuild<H: Host>(tex: &mut Tex<H, SsaTracker>, trace: bool, apply: bool) 
                 rep.unsupported = Some("a rebuild past its budget of commands");
                 break;
             }
+            if let Some((clock, end)) = tex.tracker.deadline.get()
+                && clock() > end
+            {
+                rep.unsupported = Some("a rebuild past its deadline");
+                break;
+            }
             if let Some(s) = dirty.anchor.take()
                 && let Some(i) = ahead.iter().position(|&o| o == s)
             {

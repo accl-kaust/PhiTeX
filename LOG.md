@@ -11500,3 +11500,29 @@ that commit).
 
 Tests: e2e 35/35, ssa-edits 16/16 (`--brief --fixpoint`), the
 workspace's tests, clippy.
+
+## 2026-10-03: A rebuild's deadline; a preamble edit costs 47 cold builds
+
+The Overleaf extension's repro: a one-page article with a TikZ picture
+and a `circuitikz` environment, then `\usepackage{circuitikz}` added to
+the preamble as one edit. Natively (release build of `824a511`, one trip
+a build): the cold build takes 1.18 s (85,620 commands); the rebuild
+55.0 s, running 25,038 steps (25,037 new, 8,997 runs dropped) and
+772,325 commands, with 77.2 M slots positioned and 77.3 M restored,
+about 3,100 of each per step. The extension measured 51 s in wasm. The
+cost is per step, not per command: the edit makes every step after it
+new, and each is run as a rebuild runs a step (its predicted reads
+placed, its writes restored), where a cold build runs straight through.
+
+A budget of commands cannot bound this: the cost of a command varies
+tenfold between rebuilds (the extension's ChillCGRA rebuilds run
+150–250 K commands in 1.7–3 s; this one 0.3 ms a command).
+`SsaTracker::deadline` (the CLI's `PARTEX_SSA_REBUILD_MS`) is a clock,
+the host's since wasm has no `Instant`, and a time on it. It is checked
+after each step a rebuild runs; past it the rebuild stops as one past
+its budget of commands does, and a host builds cold instead. The repro
+with 2,000 ms stops at 2,002 ms, after 4,862 steps. Off by default.
+
+Also: `824a511` was not formatted; the generated `fofi_tables.rs` is
+now skipped by rustfmt (`#[rustfmt::skip]` on its module) and keeps its
+layout.
