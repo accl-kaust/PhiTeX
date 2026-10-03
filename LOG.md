@@ -11648,3 +11648,62 @@ added, taken away, then a word.
 
 Tests: ssa-edits 17/17 (99 stages, `--brief --fixpoint`), e2e 36/36,
 clippy, rustfmt.
+
+## 2026-10-03: The whole PGF manual: how much of a build could run at once
+
+The step graph of the whole manual (the `.aux` files settled by two
+plain runs, then one `PARTEX_SSA=1` process dumping each build's graph:
+the cold build and edits). 236,040 steps, 389.7 M commands, 164.0 M
+reads from outside a step, 64.5 M definitions. The setup (the steps
+before the first that ships) is 0.1% of the commands. The body is 379
+segments (the `\include`d chapters and the files they load); the
+largest, `dv-stylesheets`, is 72.1 M commands (19%), so chapters at
+once can give at most 5.38x.
+
+| model | whole steps | pipelined |
+|---|---|---|
+| all reads | 1.00x | 1.00x |
+| blind writes (a definition that does not read the one before it does not wait for it) | 1.55x | 2.89x |
+
+Every step reads something the step before it wrote: TeX's cursors
+(`align_state`, the conditional stack, the save stack's pointer and
+level, `selector`, `str_ptr`). With blind writes, the classes ignored
+one after another, pipelined: macros 6.38x, registers 10.25x,
+parameters 18.69x, the save stack 106x, the hash table 330x, codes
+2,156x, engine scalars 6,987x, counters 11,327x. The page builder's
+edges alone (whole steps): 20.77x. The data flow is wide; the state
+TeX keeps in one place is what makes it a chain.
+
+Speculation from the setup's end (each unit from the state the setup
+left; a segment runs its steps in order): 1 of 379 segments validates
+(0.0% of the commands), 11,296 of 203,021 steps. What the segments
+misread (blind writes): the hash table and macros (first uses:
+`\T1/cmr/m/n/10` and the other fonts NFSS loads when first used,
+xcolor's mixins, TikZ's animation attributes, `\hook_use:n`), counters,
+registers (`\tikz@lastx`), the `\write` streams (the `.aux` at its
+offset), codes.
+
+Rounds (`xtask parallel`, new): every unit at once from the setup's
+end; a unit that misread a definition of an earlier unit runs again in
+the round after that unit's last; a round takes its costliest unit.
+Segments: 287 rounds, 0.03x, 145x the work. Steps: 91,048 rounds,
+1.04x. With classes predicted, the class that validates the most first
+(steps, blind writes): macros 1.94x, the page builder 2.09x, parameters
+12.4x, PDF writer and fonts 20.1x, counters 25.7x, codes 48.4x,
+registers 428x (3.0x the work), the nest 999x (1.3x), the save stack
+1,116x in 4 rounds (1.01x the work).
+
+From the last build's records instead (each step of the word edit's
+rebuild from its entry state in the cold build): 236,037 of 236,040
+steps validate (the others misread `str_ptr` twice and a `\write`
+sealed by the step before), a bound of 93,450x.
+
+Edits, the whole manual in one process without the dump (a
+frame-pointer profiling build of 824a511): a word, 116.5 ms (the first
+rebuild after the cold build; 109.5 ms of it the rebuild), its revert
+20.6 ms (14.6 ms); a TikZ coordinate, 153.8 ms and 58.4 ms; a
+subsection's title, 182.1 ms and 210.2 ms. About 80 ms of the
+coordinate's and the title's is the link deflating the new page, after
+the page is ready (0.03 ms after the rebuild). The 2.1 to 11.9 s
+measured with the dump on were the dump's 7.1 GB per build. Open: the
+first rebuild's 95 ms more than its revert for the same 6 steps.

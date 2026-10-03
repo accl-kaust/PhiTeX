@@ -1189,6 +1189,10 @@ fn from_setup(cx: &Ctx, body: usize, m: Model, label: &str) {
     let mut step_mask = vec![0u32; n];
     let mut seg_names: Vec<FxMap<u32, u64>> = vec![FxMap::default(); 21];
     let mut step_names: Vec<FxMap<u32, u64>> = vec![FxMap::default(); 21];
+    // (each unit's mispredicted reads by the unit that made the definition
+    // read, and its class: the rounds ([`report_units`]))
+    let mut seg_src: Vec<Vec<(u32, u8)>> = vec![Vec::new(); cx.segs.len()];
+    let mut step_src: Vec<Vec<(u32, u8)>> = vec![Vec::new(); n - body];
     for p in body..n {
         let s = cx.seg_of[p];
         let s_start = if s == NONE {
@@ -1217,11 +1221,23 @@ fn from_setup(cx: &Ctx, body: usize, m: Model, label: &str) {
             let c = d.cls[nm as usize] as usize;
             step_mask[p] |= 1 << c;
             *step_names[c].entry(nm).or_default() += 1;
+            step_src[p - body].push(((a - body) as u32, c as u8));
             if a < s_start && s != NONE {
                 seg_mask[s as usize] |= 1 << c;
                 *seg_names[c].entry(nm).or_default() += 1;
+                let from = cx.seg_of[a];
+                if from != NONE {
+                    seg_src[s as usize].push((from, c as u8));
+                }
             }
         }
+        let v = &mut step_src[p - body];
+        v.sort_unstable();
+        v.dedup();
+    }
+    for v in &mut seg_src {
+        v.sort_unstable();
+        v.dedup();
     }
     let setup: u64 = d.cost[..body].iter().sum();
     let body_cost: u64 = d.cost[body..].iter().sum();
@@ -1232,6 +1248,7 @@ fn from_setup(cx: &Ctx, body: usize, m: Model, label: &str) {
         &cx.segs.iter().map(|s| s.cost).collect::<Vec<_>>(),
         &seg_mask,
         &seg_names,
+        &seg_src,
         setup,
         body_cost,
         true,
@@ -1242,6 +1259,7 @@ fn from_setup(cx: &Ctx, body: usize, m: Model, label: &str) {
         &d.cost[body..],
         &step_mask[body..],
         &step_names,
+        &step_src,
         setup,
         body_cost,
         false,
@@ -1259,11 +1277,48 @@ fn report_units(
     cost: &[u64],
     mask: &[u32],
     names: &[FxMap<u32, u64>],
+    src: &[Vec<(u32, u8)>],
     setup: u64,
     body_cost: u64,
     chained: bool,
 ) {
     let total = setup + body_cost;
+    // (rounds, as Jacobi's iteration: every unit runs at once from the
+    // setup's end; a unit that misread a definition of an earlier unit
+    // runs again, in the round after that unit's last; each round takes as
+    // long as its costliest unit: the rounds, their time and the work)
+    let rounds = |known: u32| -> (u32, u64, u64) {
+        let mut round = vec![1u32; mask.len()];
+        for u in 0..mask.len() {
+            let mut r = 1;
+            for &(v, c) in &src[u] {
+                if known >> c & 1 == 0 {
+                    r = r.max(round[v as usize] + 1);
+                }
+            }
+            round[u] = r;
+        }
+        let rmax = round.iter().copied().max().unwrap_or(1) as usize;
+        let mut best = vec![0u64; rmax + 2];
+        let mut work = 0u64;
+        for (u, &r) in round.iter().enumerate() {
+            best[r as usize] = best[r as usize].max(cost[u]);
+            work += u64::from(r) * cost[u];
+        }
+        for r in (1..=rmax).rev() {
+            best[r] = best[r].max(best[r + 1]);
+        }
+        (rmax as u32, best[1..=rmax].iter().sum(), work)
+    };
+    let round_line = |known: u32| -> String {
+        let (r, t, w) = rounds(known);
+        format!(
+            "in rounds: {r} rounds, {} commands' time, bound {}x, work {:.2}x",
+            fmt(setup + t),
+            ratio(total, setup + t),
+            w as f64 / body_cost.max(1) as f64
+        )
+    };
     let validates = |known: u32| -> (usize, u64, u64) {
         let (mut k, mut c) = (0usize, 0u64);
         let mut fin = setup;
@@ -1296,6 +1351,7 @@ fn report_units(
         ratio(total, cp),
         ratio(total, setup + biggest)
     );
+    println!("    {}", round_line(0));
     // (the classes that block, by the units and commands they block)
     let mut blocks: Vec<(usize, u64, usize)> = (0..21)
         .map(|cl| {
@@ -1347,12 +1403,13 @@ fn report_units(
         cur = cc;
         let (kk, _, cp) = validates(known);
         println!(
-            "    + {} predicted: {} validate ({:.1}% of the commands), critical path {}, bound {}x",
+            "    + {} predicted: {} validate ({:.1}% of the commands), critical path {}, bound {}x; {}",
             mask_names(b).join(""),
             fmt(kk as u64),
             100.0 * cc as f64 / body_cost.max(1) as f64,
             fmt(cp),
-            ratio(total, cp)
+            ratio(total, cp),
+            round_line(known)
         );
     }
 }
