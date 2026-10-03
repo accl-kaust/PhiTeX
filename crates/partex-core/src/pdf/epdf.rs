@@ -596,10 +596,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                 self.ep_ref(n);
             }
             Obj::Cmd(_) | Obj::Error | Obj::Eof => {
-                let m = alloc::format!(
-                    "PDF inclusion: type <{}> cannot be copied",
-                    o.type_name()
-                );
+                let m = alloc::format!("PDF inclusion: type <{}> cannot be copied", o.type_name());
                 return self.pdftex_fail(Some(file), m.as_bytes());
             }
         }
@@ -727,7 +724,16 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         let enc = partex_engine::gfxfont::encoding(c.doc, &rep.dict);
         let enc_objnum = self.pdf_new_objnum()?;
         c.encodings.insert(0, (enc, enc_objnum));
-        let n = self.ep_add_kind(c, r, InKind::Font { fd: key, enc: enc_objnum }, None, file)?;
+        let n = self.ep_add_kind(
+            c,
+            r,
+            InKind::Font {
+                fd: key,
+                enc: enc_objnum,
+            },
+            None,
+            file,
+        )?;
         self.ep_puts(b" ");
         self.ep_ref(n);
         self.ep_puts(b" ");
@@ -750,7 +756,10 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         };
         self.ep_puts(b"<<\n");
         for (k, v) in &d.0 {
-            if k.starts_with(b"FontDescriptor") || k.starts_with(b"BaseFont") || k.starts_with(b"Encoding") {
+            if k.starts_with(b"FontDescriptor")
+                || k.starts_with(b"BaseFont")
+                || k.starts_with(b"Encoding")
+            {
                 continue;
             }
             self.ep_name(k);
@@ -760,7 +769,11 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         }
         let fd_objnum = self.fd_objnum(fd);
         let fn_objnum = self.fn_objnum(fd)?;
-        for (key, n) in [(&b"FontDescriptor"[..], fd_objnum), (b"BaseFont", fn_objnum), (b"Encoding", enc)] {
+        for (key, n) in [
+            (&b"FontDescriptor"[..], fd_objnum),
+            (b"BaseFont", fn_objnum),
+            (b"Encoding", enc),
+        ] {
             self.ep_puts(b"/");
             self.ep_puts(key);
             self.ep_puts(b" ");

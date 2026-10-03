@@ -805,7 +805,10 @@ impl Doc {
             .skip_while(|&&c| c_space(c))
             .take_while(|c| c.is_ascii_digit())
         {
-            let Some(y) = x.checked_mul(10).and_then(|x| x.checked_add(u64::from(c - b'0'))) else {
+            let Some(y) = x
+                .checked_mul(10)
+                .and_then(|x| x.checked_add(u64::from(c - b'0')))
+            else {
                 break;
             };
             x = y;
@@ -945,7 +948,9 @@ impl Doc {
                 }
                 let mut off: i64 = 0;
                 loop {
-                    off = off.wrapping_mul(10).wrapping_add(i64::from(c - i32::from(b'0')));
+                    off = off
+                        .wrapping_mul(10)
+                        .wrapping_add(i64::from(c - i32::from(b'0')));
                     c = get(&mut k);
                     if !digit(c) {
                         break;
@@ -1136,7 +1141,10 @@ impl Doc {
         let Some(end) = first.checked_add(n) else {
             return false;
         };
-        let (first, end) = (usize::try_from(first).unwrap_or(0), usize::try_from(end).unwrap_or(0));
+        let (first, end) = (
+            usize::try_from(first).unwrap_or(0),
+            usize::try_from(end).unwrap_or(0),
+        );
         let width: usize = w.iter().sum();
         if (end - first).saturating_mul(width) > data.len().saturating_sub(*at) {
             return false;
@@ -1179,7 +1187,9 @@ impl Doc {
                 };
                 self.entries[i] = Entry {
                     offset,
-                    generation: u32::try_from(generation & 0xffff_ffff).unwrap_or(0).cast_signed(),
+                    generation: u32::try_from(generation & 0xffff_ffff)
+                        .unwrap_or(0)
+                        .cast_signed(),
                     kind,
                 };
                 self.last = self.last.max(i64::try_from(i).unwrap_or(0));
@@ -1330,7 +1340,12 @@ impl Doc {
             return p;
         }
         // (the entry's offset: where its number began)
-        if self.construct_set(num, generation, i64::try_from(pos).unwrap_or(0), Kind::Uncompressed) {
+        if self.construct_set(
+            num,
+            generation,
+            i64::try_from(pos).unwrap_or(0),
+            Kind::Uncompressed,
+        ) {
             *last_num = i64::from(num);
         }
         p
@@ -1411,7 +1426,10 @@ impl Doc {
                 };
                 let mut p = Parser::new(self.bytes(), off, Some(self), true);
                 let (n, g, o) = (p.obj(true, depth), p.obj(true, depth), p.obj(true, depth));
-                if n != Obj::Int(r.num) || g != Obj::Int(r.generation) || !Parser::is_cmd(&o, b"obj") {
+                if n != Obj::Int(r.num)
+                    || g != Obj::Int(r.generation)
+                    || !Parser::is_cmd(&o, b"obj")
+                {
                     return Obj::Null;
                 }
                 p.obj(false, depth)
@@ -1897,7 +1915,10 @@ impl Attrs {
             rotate = r;
         }
         rotate = rotate.rem_euclid(360);
-        let resources = match (up.and_then(|a| a.resources.as_ref()), doc.lookup(d, b"Resources")) {
+        let resources = match (
+            up.and_then(|a| a.resources.as_ref()),
+            doc.lookup(d, b"Resources"),
+        ) {
             (Some(p), Obj::Dict(c)) => Some(merge(doc, p, &c)),
             (Some(p), _) => Some(p.clone()),
             (None, Obj::Dict(c)) => Some(c),
@@ -2298,9 +2319,9 @@ fn ascii85(d: &[u8]) -> Vec<u8> {
                     }
                     c[n + 1] = 0x21 + 84;
                 }
-                let t = c
-                    .iter()
-                    .fold(0u64, |t, &v| t.wrapping_mul(85).wrapping_add((v - 0x21).cast_unsigned()));
+                let t = c.iter().fold(0u64, |t, &v| {
+                    t.wrapping_mul(85).wrapping_add((v - 0x21).cast_unsigned())
+                });
                 out.extend_from_slice(&t.to_be_bytes()[4..][..n]);
                 if eof {
                     return out;
@@ -2576,7 +2597,10 @@ mod tests {
         assert_eq!(ascii_hex(b"486>"), b"H`");
         assert_eq!(ascii85(b"87cURD]i,\"Ebo7~>"), b"Hello World");
         assert_eq!(ascii85(b"z!!~>"), [0, 0, 0, 0, 0]);
-        assert_eq!(run_length(&[2, b'a', b'b', b'c', 254, b'x', 128]), b"abcxxx");
+        assert_eq!(
+            run_length(&[2, b'a', b'b', b'c', 254, b'x', 128]),
+            b"abcxxx"
+        );
         assert_eq!(run_length(&[3, b'a']), [b'a', 255, 255, 255]);
         // (PNG's Up on rows of 2: [1,2] then [1+3, 2+4])
         let p = Pred {
@@ -2587,10 +2611,7 @@ mod tests {
         };
         assert_eq!(p.apply(&[2, 1, 2, 2, 3, 4]), [1, 2, 4, 6]);
         // (a cross-reference stream's rows: /Columns 3 /Predictor 12)
-        let x = Pred {
-            columns: 3,
-            ..p
-        };
+        let x = Pred { columns: 3, ..p };
         assert_eq!(x.apply(&[2, 1, 0, 16, 2, 0, 1, 5]), [1, 0, 16, 1, 1, 21]);
         // (TIFF's on 8 bits, 2 colors)
         let t = Pred {

@@ -547,7 +547,10 @@ fn strtol(s: &[u8]) -> (i32, usize) {
         }
         _ => false,
     };
-    let digits = s[i.min(s.len())..].iter().take_while(|c| c.is_ascii_digit()).count();
+    let digits = s[i.min(s.len())..]
+        .iter()
+        .take_while(|c| c.is_ascii_digit())
+        .count();
     if digits == 0 {
         return (0, 0);
     }
@@ -1158,7 +1161,10 @@ impl<H: crate::host::Host, T: crate::track::Tracker> crate::tex::Tex<H, T> {
             self.read_default_map();
         }
         let mut s = ps_name;
-        if ps_name.len() > 7 && ps_name[..6].iter().all(u8::is_ascii_uppercase) && ps_name[6] == b'+' {
+        if ps_name.len() > 7
+            && ps_name[..6].iter().all(u8::is_ascii_uppercase)
+            && ps_name[6] == b'+'
+        {
             s = &ps_name[7..];
         }
         let (name, slant, extend) = slant_extend(s);
@@ -1166,8 +1172,11 @@ impl<H: crate::host::Host, T: crate::track::Tracker> crate::tex::Tex<H, T> {
         let ff = fm.ff_name.clone()?;
         let found = self.host.read_file(&ff, crate::host::FileKind::Type1);
         if T::VALUES {
-            self.tracker
-                .load(&ff, crate::host::FileKind::Type1, found.as_ref().map(|f| &f.contents));
+            self.tracker.load(
+                &ff,
+                crate::host::FileKind::Type1,
+                found.as_ref().map(|f| &f.contents),
+            );
         }
         found.map(|_| fm)
     }
