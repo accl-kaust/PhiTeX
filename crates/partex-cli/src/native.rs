@@ -46,6 +46,9 @@ pub struct NativeHost {
     seen: Option<Seen>,
 }
 
+/// A lookup's answer: the path found and its bytes.
+type Answer = Option<(Vec<u8>, std::sync::Arc<[u8]>)>;
+
 /// What [`Host::unchanged`] answers from (DESIGN 7.17.3, "A rebuild's
 /// file checks cost the files that changed").
 #[derive(Default)]
@@ -53,6 +56,16 @@ struct Seen {
     /// What each path held when last read, with its stamp taken just
     /// before: none for a file whose times were under 2 s old then.
     files: phitex_doc::FxMap<Vec<u8>, (Stamp, std::sync::Arc<[u8]>)>,
+    /// Those files under 2 s old, kept until the next check of the loads
+    /// ([`Host::unchanged`]): a rebuild that reads one again (a file's
+    /// size asked for again and again) is handed the same bytes, shared,
+    /// while its stamp is the same.
+    racy: phitex_doc::FxMap<Vec<u8>, (Stamp, std::sync::Arc<[u8]>)>,
+    /// Each name's answer since the last check of the loads, by kind,
+    /// until a file is opened to write: a lookup asked again (a file's
+    /// size asked for again and again) is answered as it was, without
+    /// its search and `stat`s.
+    again: phitex_doc::FxMap<Vec<u8>, Vec<(FileKind, Answer)>>,
     /// Each name's last lookup, by kind (a name is looked up as one kind,
     /// mostly).
     lookups: phitex_doc::FxMap<Vec<u8>, Vec<(FileKind, Lookup)>>,
@@ -155,20 +168,23 @@ impl NativeHost {
     fn read_at(&mut self, p: &[u8]) -> Option<std::sync::Arc<[u8]>> {
         let st = self.seen.as_ref().and_then(|_| stamp(p));
         if let (Some(seen), Some(s)) = (&self.seen, st)
-            && let Some((kept, c)) = seen.files.get(p)
+            && let Some((kept, c)) = seen.files.get(p).or_else(|| seen.racy.get(p))
             && *kept == s
         {
             return Some(c.clone());
         }
         let contents: std::sync::Arc<[u8]> = std::fs::read(path(p)).ok()?.into();
         if let Some(seen) = &mut self.seen {
-            match st.filter(quiet) {
-                Some(st) => {
-                    seen.files.insert(p.to_vec(), (st, contents.clone()));
-                }
-                None => {
-                    seen.files.remove(p);
-                }
+            if let Some(st) = st.filter(quiet) {
+                seen.files.insert(p.to_vec(), (st, contents.clone()));
+                seen.racy.remove(p);
+            } else {
+                seen.files.remove(p);
+                // (too new to keep across checks: kept until the next one)
+                match st {
+                    Some(st) => seen.racy.insert(p.to_vec(), (st, contents.clone())),
+                    None => seen.racy.remove(p),
+                };
             }
         }
         Some(contents)
@@ -420,6 +436,17 @@ impl NativeHost {
 
 impl Host for NativeHost {
     fn read_file(&mut self, name: &[u8], kind: FileKind) -> Option<OpenedFile> {
+        if let Some(seen) = &self.seen
+            && let Some((_, a)) = seen
+                .again
+                .get(name)
+                .and_then(|ks| ks.iter().find(|(k, _)| *k == kind))
+        {
+            return a.as_ref().map(|(n, c)| OpenedFile {
+                name: n.clone(),
+                contents: c.clone(),
+            });
+        }
         let mut trail = Vec::new();
         let found = self.find_read(name, kind, &mut trail);
         let Some(seen) = &mut self.seen else {
@@ -476,6 +503,11 @@ impl Host for NativeHost {
                 .or_default()
                 .push((kind, l)),
         }
+        let answer = f.as_ref().map(|f| (f.name.clone(), f.contents.clone()));
+        seen.again
+            .entry(name.to_vec())
+            .or_default()
+            .push((kind, answer));
         found.ok().flatten()
     }
 
@@ -483,6 +515,10 @@ impl Host for NativeHost {
         let Some(seen) = &mut self.seen else {
             return vec![false; loads.len()];
         };
+        // (a file under 2 s old is read again from here on, and every
+        // name looked up again)
+        seen.racy.clear();
+        seen.again.clear();
         // (the watcher's events since the last look taken first: a check
         // made now knows them all)
         if seen.watch.is_none() && !seen.unwatched {
@@ -577,6 +613,10 @@ impl Host for NativeHost {
         let n = with_suffix(name, kind);
         // openclose.c's `open_output`: in the output directory
         let n = self.in_output_dir(&n).unwrap_or(n);
+        if let Some(seen) = &mut self.seen {
+            seen.racy.remove(&n);
+            seen.again.clear();
+        }
         let file = File::create(path(&n)).ok()?;
         let id = WriteId(self.next_id);
         self.next_id += 1;
@@ -597,6 +637,10 @@ impl Host for NativeHost {
         let Some((_, at)) = self.given.get_mut(&id).filter(|(p, _)| *p == n) else {
             return self.open_write(name, kind);
         };
+        if let Some(seen) = &mut self.seen {
+            seen.racy.remove(&n);
+            seen.again.clear();
+        }
         let file = File::create(path(&n)).ok()?;
         self.opens += 1;
         *at = self.opens;

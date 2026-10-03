@@ -11188,3 +11188,43 @@ Instructions per rebuild: −0.02 M (113.10 → 113.07–113.09, measured
 with the dropped hunk above); cycles within the runs' noise. The
 harness: 14 cases identical in all three modes; the workspace's tests
 pass.
+
+## 2026-10-03 — A file's size asked for again and again: its lookup answered once a rebuild, its bytes shared, hashed a word at a time (coordinator)
+
+A profile of edits that change only `ch15.tex`'s size (a comment line
+at its end, added and taken away: the steps that run again are the five
+that read the size of the file `\include{ch15}` looks up, and the one
+that reads its last lines) showed where those steps' 107 commands spend
+about 3 ms locally: 18% of the samples in `\pdffilesize` (expl3's
+`\file_full_name:n`, which only tests the digits for being blank), each
+asking the host for the file again:
+- its lookup again: the output directory first (`stat`s), kpathsea's
+  search with its trail, a `stat` of each directory the trail tried;
+- the file read again from disk: a file under 2 s old is not kept (its
+  stamp could stay the same through another write in the same clock
+  tick, git's racy entries), and the file just edited is always that;
+- its bytes hashed again for the load's version: the versions of large
+  loads are kept by buffer, each read made a new one, and the stable
+  hasher took a byte at a time.
+
+Now:
+- The host answers a name looked up again as the same kind, since its
+  last check of the loads, as it answered it (`Seen::again`), until it
+  opens a file to write (a lookup could find that file then).
+- A file under 2 s old is kept until the next check of the loads
+  (`Seen::racy`), with its stamp: read again in the rebuild, the same
+  buffer.
+- A large load's version kept for other bytes is found by comparing
+  them (`contents_version`): a stored name the link rewrote, read again
+  into another buffer, is not hashed again (what 6e55be8's dropped hunk
+  had saved, 1.5 M instructions a rebuild).
+- The stable hasher takes eight bytes at a time while its buffer is
+  empty: the same words, so the same versions (a test feeds bytes
+  whole, in pieces and one at a time).
+
+Measured (the course; perf stat, user space, so the lookups' `stat`s
+and reads, kernel time, are not counted): edits of the size only (6
+and their reverts), 281be74 73.41 M instructions a rebuild, now 71.59 M
+(−2.5%), the median rebuild 9.9 → 9.2 ms locally; word edits, 114.62 →
+112.16 M (−2.1%), cycles 96.5 → 93.0 M (one round). The harness: 14
+cases identical in all three modes; the workspace's tests pass.

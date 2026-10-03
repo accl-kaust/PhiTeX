@@ -162,6 +162,19 @@ impl Stable {
         self.n = self.n.wrapping_add(8);
     }
 
+    /// Feed one byte: eight make a word, the first its lowest.
+    #[inline]
+    fn byte(&mut self, x: u8) {
+        self.buf |= u64::from(x) << (8 * self.nbuf);
+        self.nbuf += 1;
+        if self.nbuf == 8 {
+            let w = self.buf;
+            self.buf = 0;
+            self.nbuf = 0;
+            self.word(w);
+        }
+    }
+
     /// Feed one 128-bit word.
     #[inline]
     pub fn word128(&mut self, w: u128) {
@@ -188,15 +201,22 @@ impl Stable {
 
 impl Hasher for Stable {
     fn write(&mut self, bytes: &[u8]) {
-        for &x in bytes {
-            self.buf |= u64::from(x) << (8 * self.nbuf);
-            self.nbuf += 1;
-            if self.nbuf == 8 {
-                let w = self.buf;
-                self.buf = 0;
-                self.nbuf = 0;
-                self.word(w);
-            }
+        // (a byte at a time until the buffer is empty, then whole words,
+        // eight bytes at a time: the words a byte at a time makes)
+        let mut rest = bytes;
+        while self.nbuf != 0 {
+            let Some((&x, r)) = rest.split_first() else {
+                return;
+            };
+            rest = r;
+            self.byte(x);
+        }
+        let (words, tail) = rest.as_chunks::<8>();
+        for w in words {
+            self.word(u64::from_le_bytes(*w));
+        }
+        for &x in tail {
+            self.byte(x);
         }
     }
     fn write_u8(&mut self, i: u8) {
@@ -250,6 +270,30 @@ pub fn hash64<T: Hash + ?Sized>(v: &T) -> u64 {
 
 #[cfg(test)]
 mod tests {
+    use core::hash::Hasher;
+
+    /// Bytes fed whole, in pieces, or one at a time make the same digest.
+    #[test]
+    fn bytes_hash_alike_however_fed() {
+        let data: alloc::vec::Vec<u8> = (0..200u32)
+            .map(|i| u8::try_from(i.wrapping_mul(37) % 251).unwrap_or(0))
+            .collect();
+        for n in [0, 1, 7, 8, 9, 15, 16, 17, 63, 64, 65, 200] {
+            let d = &data[..n];
+            let mut one = super::Stable::new();
+            for &x in d {
+                one.byte(x);
+            }
+            let want = one.finish128();
+            for cut in 0..=n.min(20) {
+                let mut s = super::Stable::new();
+                s.write(&d[..cut]);
+                s.write(&d[cut..]);
+                assert_eq!(s.finish128(), want, "{n} bytes cut at {cut}");
+            }
+        }
+    }
+
     /// The product from 32-bit halves is the 128-bit product (wasm's
     /// path, checked natively).
     #[test]

@@ -1179,7 +1179,9 @@ pub struct SsaTracker {
     /// Large contents loaded, with their versions, by identity: the host
     /// hands out the same `Arc` again for a file as it was, and a step
     /// run again that loads it (the 5 MB font map, at the first page) need
-    /// not hash it again. The last few (`SsaTracker::contents_version`).
+    /// not hash it again; the same bytes read again into another buffer
+    /// (a file the link rewrote) are found by comparing them. The last
+    /// few (`SsaTracker::contents_version`).
     load_versions: RefCell<Vec<(alloc::sync::Arc<[u8]>, Version)>>,
 }
 
@@ -1308,7 +1310,12 @@ impl SsaTracker {
             return Version::of(&c[..]);
         }
         let mut m = self.load_versions.borrow_mut();
-        if let Some((_, v)) = m.iter().find(|(d, _)| alloc::sync::Arc::ptr_eq(d, c)) {
+        // (by buffer, or the same bytes read again into another, compared)
+        if let Some((d, v)) = m
+            .iter_mut()
+            .find(|(d, _)| alloc::sync::Arc::ptr_eq(d, c) || d[..] == c[..])
+        {
+            *d = c.clone();
             return *v;
         }
         let v = Version::of(&c[..]);
