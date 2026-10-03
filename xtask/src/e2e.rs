@@ -1106,8 +1106,33 @@ fn run_glyphs(root: &Path, partex: &Path) -> Result<Vec<String>> {
         .filter(|n| n != "glyphs.origins.jsonl")
         .collect();
     glyphs_check(&plain, "origins", &mut diffs)?;
+    glyphs_outline(partex, &plain, &mut diffs)?;
     glyphs_ssa(root, partex, &work, &mut diffs)?;
     Ok(diffs)
+}
+
+/// `partex outline glyphs.tex --json` beside the plain run: its heading
+/// placed from the side file, where pdfTeX's content stream puts its
+/// title's first glyph (`I` of `Intro`, after the number and its kern).
+fn glyphs_outline(partex: &Path, dir: &Path, diffs: &mut Vec<String>) -> Result<()> {
+    let out = Command::new(partex)
+        .current_dir(dir)
+        .args(["outline", "glyphs.tex", "--json"])
+        .env_remove("PARTEX_MACHINE")
+        .output()?;
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout)
+        .with_context(|| String::from_utf8_lossy(&out.stderr).into_owned())?;
+    let h = &v["outline"][0];
+    let near = |k: &str, want: f64| h[k].as_f64().is_some_and(|x| (x - want).abs() < 0.01);
+    let ok = h["title"] == "Intro"
+        && h["number"] == "1"
+        && h["page"] == 0
+        && near("x", 157.977)
+        && near("y", 657.235);
+    if !ok {
+        diffs.push(format!("outline: {h}"));
+    }
+    Ok(())
 }
 
 /// The `glyphs` job's inputs, and its runs' flags.
@@ -1756,14 +1781,23 @@ fn out_root(root: &Path) -> PathBuf {
     root.join(std::env::var("XTASK_E2E_DIR").unwrap_or_else(|_| "target/e2e".to_owned()))
 }
 
-pub fn run(root: &Path, args: &[String]) -> Result<()> {
-    let filter = args.first().map(String::as_str);
+/// The binary the cases run: `XTASK_PARTEX`, one built before, as it is;
+/// else the release build, made now.
+fn partex_binary(root: &Path) -> Result<PathBuf> {
+    if let Some(p) = std::env::var_os("XTASK_PARTEX") {
+        return Ok(PathBuf::from(p));
+    }
     let status = Command::new(env!("CARGO"))
         .current_dir(root)
         .args(["build", "--release", "-p", "partex-cli"])
         .status()?;
     ensure!(status.success(), "building partex failed");
-    let partex = root.join("target/release/partex");
+    Ok(root.join("target/release/partex"))
+}
+
+pub fn run(root: &Path, args: &[String]) -> Result<()> {
+    let filter = args.first().map(String::as_str);
+    let partex = partex_binary(root)?;
     // Each case has its own directory: they run side by side, reported in
     // order.
     let mut jobs: Vec<Job> = Vec::new();

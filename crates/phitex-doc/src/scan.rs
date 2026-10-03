@@ -654,6 +654,11 @@ impl<'d> Scan<'d> {
                 let end = self
                     .at
                     .unwrap_or_else(|| u32::try_from(cur.pos()).unwrap_or(u32::MAX));
+                let title_at = if self.at.is_none() {
+                    u32::try_from(title.base).ok()
+                } else {
+                    None
+                };
                 self.push(
                     at,
                     cs,
@@ -663,6 +668,7 @@ impl<'d> Scan<'d> {
                         short,
                         title: title.text.to_owned(),
                         end,
+                        title_at,
                     },
                 );
                 self.walk_arg(&title);

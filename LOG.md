@@ -11913,3 +11913,41 @@ argument tokens' origins (left to make compact); the side file 4.7 MB.
 
 Also on the branch: the rustfmt main gave the font replacement commit
 (`89fd1db`), so that `cargo fmt --check` passes here too.
+
+
+## 2026-10-03: The outline, in the source and on the PDF (branch `synctex`)
+
+The editor's outline pane (Overleaf's file outline): `phitex_doc`'s
+static layer already read every heading; `Project::outline()` now gives
+each as an `Entry` with its bytes (the command and its title: the
+paragraph's offset in its file added to the fact's, the title's start
+kept by the scanner, none through a document macro), its line and
+LaTeX's number, before any build, and `Outline::section_at(file,
+offset)`. `Outline::place` puts each heading on the PDF from a build's
+glyph origins: the first glyph whose origin lies inside the title's
+bytes and is not synthesized. That rule finds the heading and not its
+other appearances: the table of contents reads the title back from the
+`.toc` (origins in that file), a running head from a mark (synthesized).
+
+The point is the glyph's origin on the page, which needs the content
+stream walked with positions: `partex_engine::pdftext` now keeps the
+text matrix, the CTM, `Tf`'s size, `Tc`, `Tw`, `Tz`, `TL`, `Ts`, the
+fonts' widths (`/Widths`, a Type 3 font's `/FontMatrix`, a CID font's
+`/W` and `/DW`), `q`/`Q`, and a form's `/Matrix` at its `Do`, so each
+code it shows has its place, in the same walk the glyph origins are
+counted by. On `glyphs.tex`, `Intro`'s `I` is at (157.977, 657.235):
+`1` at 133.768, its `/Widths` 562.5 thousandths of 14.3462 pt, then the
+`\quad` kern of 1125; MuPDF puts it 0.007 pt further right (it takes
+the advance from the font program, not `/Widths`).
+
+`partex outline FILE.tex --json` places the entries from the side file
+next to the PDF (`<job>.origins.jsonl`, `<job>.pdf`; `--origins PATH`
+for another): reading a side file costs nothing and keeps the command
+static; running a build from the outline command would not.
+
+Tests: `phitex-doc`'s `outline` tests (entries, ranges and numbers of a
+document with an `\input`; `section_at` in the main file and inside the
+input before and after its heading; placement from glyph lists,
+synthesized glyphs passed over), and the `glyphs` e2e job's check of
+`partex outline glyphs.tex --json` against the heading's place in
+pdfTeX's PDF.

@@ -39,6 +39,7 @@ version = "0.0.0"
 dependencies = [
  "partex-bibtex",
  "partex-core",
+ "partex-engine",
  "partex-incr",
  "partex-kpse",
  "partex-makeindex",

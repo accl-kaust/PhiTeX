@@ -18,6 +18,7 @@ deps = []
 partex-bibtex = { path = "../partex-bibtex" }
 partex-makeindex = { path = "../partex-makeindex" }
 partex-core = { path = "../partex-core" }
+partex-engine = { path = "../partex-engine" }
 partex-incr = { path = "../partex-incr" }
 partex-kpse = { path = "../partex-kpse" }
 partex-trace = { path = "../partex-trace" }

@@ -3,7 +3,7 @@
 use std::fmt::Write as _;
 
 use crate::views::{EnvProblem, Keyed, Loc, Views};
-use crate::{AssetKind, InputKind, Project, text};
+use crate::{AssetKind, InputKind, Outline, Project, text};
 
 /// Times measured by the caller, in milliseconds, by phase.
 #[derive(Clone, Debug, Default)]
@@ -296,24 +296,46 @@ fn array(items: impl Iterator<Item = String>) -> String {
     format!("[{}]", v.join(","))
 }
 
-/// The views as JSON.
+/// The views as JSON; each heading with where the PDF shows it when
+/// `placed` is given (an outline [`Outline::place`]d, made from the same
+/// project).
 #[must_use]
 #[allow(clippy::too_many_lines)]
-pub fn json(p: &Project, v: &Views<'_>, timing: Option<&Timing>) -> String {
+pub fn json(
+    p: &Project,
+    v: &Views<'_>,
+    timing: Option<&Timing>,
+    placed: Option<&Outline>,
+) -> String {
     let mut fields: Vec<String> = Vec::new();
     fields.push(format!(r#""main":{}"#, s(p.path(p.main()))));
     fields.push(format!(r#""class":{}"#, opt(v.class)));
     fields.push(format!(
         r#""outline":{}"#,
-        array(v.outline.iter().map(|h| {
+        array(v.outline.iter().enumerate().map(|(i, h)| {
+            let (ts, te) = h.title_range.unwrap_or((h.start, h.start));
+            let pdf = placed
+                .and_then(|o| o.entries.get(i))
+                .map(|e| {
+                    let num = |x: Option<f64>| x.map_or_else(|| "null".to_owned(), |x| format!("{x:.3}"));
+                    format!(
+                        r#","page":{},"x":{},"y":{}"#,
+                        e.page.map_or_else(|| "null".to_owned(), |n| n.to_string()),
+                        num(e.x),
+                        num(e.y)
+                    )
+                })
+                .unwrap_or_default();
             format!(
-                r#"{{"level":{},"star":{},"number":{},"title":{},"short":{},{},"label":{},"guarded":{}}}"#,
+                r#"{{"level":{},"star":{},"number":{},"title":{},"short":{},{},"start":{},"end":{},"titleStart":{ts},"titleEnd":{te},"label":{},"guarded":{}{pdf}}}"#,
                 h.level,
                 h.star,
                 opt(h.number.as_deref()),
                 s(&text::display(h.title)),
                 opt(h.short),
                 loc(p, h.loc),
+                h.start,
+                h.end,
                 opt(h.label),
                 h.guarded
             )

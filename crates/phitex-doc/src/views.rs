@@ -29,6 +29,12 @@ pub struct Heading<'p> {
     pub title: &'p str,
     pub short: Option<&'p str>,
     pub loc: Loc,
+    /// Its bytes in its file: the command (or the call of the document's
+    /// macro it came from), and its title's text (`None`: not in the
+    /// text, read through a macro).
+    pub start: u32,
+    pub end: u32,
+    pub title_range: Option<(u32, u32)>,
     /// The label right after it (`\section{A}\label{sec:a}`).
     pub label: Option<&'p str>,
     pub guarded: bool,
@@ -170,6 +176,9 @@ pub struct Assumption {
 #[derive(Default)]
 pub struct Views<'p> {
     pub outline: Vec<Heading<'p>>,
+    /// Each file's readings, in reading order: the file, and how many
+    /// headings came before it.
+    pub entered: Vec<(FileId, usize)>,
     /// The entries of the lists (`toc` and others), in order.
     pub toc: Vec<TocLine<'p>>,
     pub labels: Vec<Keyed<'p>>,
@@ -383,6 +392,8 @@ struct Ctx<'p> {
     file: FileId,
     para: usize,
     text: &'p str,
+    /// The paragraph's offset in its file.
+    off: u32,
     /// The paragraph's first line.
     line: u32,
     depth: usize,
@@ -485,16 +496,20 @@ impl Project {
 impl<'p> Fold<'p> {
     fn file(&mut self, id: FileId, depth: usize) {
         self.reading.push(id);
+        self.v.entered.push((id, self.v.outline.len()));
         let f = &self.p.files[id];
         let mut line = 1;
+        let mut off = 0u32;
         for (i, pf) in f.paras.iter().enumerate() {
             if self.stopped {
                 break;
             }
+            let text = f.tree.paras()[i].text();
             let ctx = Ctx {
                 file: id,
                 para: i,
-                text: f.tree.paras()[i].text(),
+                text,
+                off,
                 line,
                 depth,
             };
@@ -505,6 +520,7 @@ impl<'p> Fold<'p> {
                 }
             }
             line += pf.newlines;
+            off = off.saturating_add(u32::try_from(text.len()).unwrap_or(u32::MAX));
         }
         self.reading.pop();
     }
@@ -555,6 +571,7 @@ impl<'p> Fold<'p> {
                 short,
                 title,
                 end,
+                title_at,
             } => {
                 let number = self.num.heading(*level, *star);
                 if !star {
@@ -569,6 +586,12 @@ impl<'p> Fold<'p> {
                     });
                 }
                 self.attach = Some((self.v.outline.len(), ctx.file, ctx.para, *end));
+                let start = ctx.off.saturating_add(fact.at);
+                let title_range = title_at.map(|t| {
+                    let t = ctx.off.saturating_add(t);
+                    let n = u32::try_from(title.len()).unwrap_or(u32::MAX);
+                    (t, t.saturating_add(n))
+                });
                 self.v.outline.push(Heading {
                     level: *level,
                     star: *star,
@@ -576,6 +599,9 @@ impl<'p> Fold<'p> {
                     title,
                     short: short.as_deref(),
                     loc,
+                    start,
+                    end: ctx.off.saturating_add(*end).max(start),
+                    title_range,
                     label: None,
                     guarded: true,
                     fact,
