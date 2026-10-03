@@ -1,16 +1,25 @@
-//! What a build tells the modern command line's renderer (DESIGN.md,
-//! "Command line and terminal"): live progress from the engine, and the
-//! structured diagnostics a session keeps (`session.rs`), saved with a
-//! persisted session.
+//! What a build tells the modern command line's renderer (DESIGN.md 2.5):
+//! its passes and phases, and the structured diagnostics a session keeps
+//! (`session.rs`), saved with a persisted session.
 
 use partex_core::diag::{BoxWarning, Diagnostic, Frame, FrameKind, Severity};
 use partex_core::persist::{Loader, Persist, Saver};
 
-/// Progress while a pass runs.
-#[derive(Clone, Copy, Debug)]
-pub enum Live {
-    /// A page is being shipped out (its `\count0`).
-    Page(i32),
+/// What a build is doing, beyond running the engine (the live line's
+/// phase; the engine's own progress is `partex_core::progress`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Phase {
+    /// Running the document from its start (a cold build: the last
+    /// build's totals estimate how far it is).
+    Cold,
+    /// Loading the build saved by the last run.
+    Loading,
+    /// Linking the outputs (the PDF) from what the build made.
+    Linking,
+    /// Writing the output files.
+    Writing,
+    /// Saving the build for the next run.
+    Saving,
 }
 
 /// What a converging build has done (`serve_request` in `main.rs`).
@@ -21,10 +30,9 @@ pub enum Progress<'a> {
     Pass(usize, Option<&'a crate::session::Report>),
     /// A native tool ran between passes (its report line).
     Tool(&'a str),
+    /// The build is now doing this.
+    Phase(Phase),
 }
-
-/// Where live progress goes.
-pub type LiveSink = std::sync::Arc<dyn Fn(Live) + Send + Sync>;
 
 /// The code of the note a session logs for each page shipped out (its
 /// message is `\count0`), so a build's page count survives resumed passes

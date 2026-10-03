@@ -11707,3 +11707,130 @@ coordinate's and the title's is the link deflating the new page, after
 the page is ready (0.03 ms after the rebuild). The 2.1 to 11.9 s
 measured with the dump on were the dump's 7.1 GB per build. Open: the
 first rebuild's 95 ms more than its revert for the same 6 steps.
+
+## 2026-10-03 — A terminal that moves: the live line, the watch's log and keys (agent cli-ux)
+
+Branch `cli-ux`: `6532acc` (the progress board), `15d62d8` (the
+terminal), `b80f57a` (rustfmt of seven files of main), `375b998` (this
+entry), `85932d6` (the bar's width steady, a watch's line shorter).
+
+**Why.** `partex watch` printed `Rebuilding (inputs changed)` and then
+`Pass 1 |  0 ms`, which stayed as it was until the rebuild was over.
+The cause was in two places. The live line was drawn only by the
+build's own thread: at a pass's start, and at each page a session
+shipped (`Live::Page`, sent by the session's host). Nothing drew it on
+a timer, so while the engine ran between pages its time and spinner
+stood still. And machine mode, the default of `partex watch` and
+`partex build`, never connected that page sink at all: during a
+machine rebuild nothing called the drawing code, whatever the engine
+did.
+
+**The progress board** (`partex_core::progress`). The engine posts to
+a board of relaxed atomics: every 1024 commands the commands run and
+the file and line being read (the name copied only when it is another
+file, by an FNV hash of its bytes, under a sequence lock, so a reader
+never sees half a name), at each page shipped the count and `\count0`,
+and when it starts to finish the PDF file a phase. It is observability
+only: no tracker sees it, the engine never reads it, a replay or a
+rebuild leaves it as it is. Between posts a command pays a test of its
+count's low bits (`post_progress` is out of line, `#[cold]`). The board
+is one for the process; a reader takes differences.
+
+**The live line** (`live.rs`). A thread of its own draws the area
+below everything printed, every 80 ms while a task runs and whenever
+the state changes, sampling the board: `Pass 1 ⠹ ━━━━━━━━━━━━╺━━━━━━━━━━━
+54% page 19/74 · big.tex:11  1.1 s · 0.9 s left`. The build's thread
+only says what runs (a pass, or a phase: loading the saved build,
+linking, writing, saving) through `Progress`, which gained `Phase`. A
+build from the start shows a bar and the time left from the last full
+build's totals (commands on the board, pages, time), kept in the cache
+by directory and engine command line; the time left leans on the last
+build's time early and on this one's rate later. Printing goes above
+the area in one write, in synchronized output (`ESC [?2026h`), and
+the area is cut to the terminal's width so a redraw always finds it. A
+frame composed before a change is not drawn (a generation count), and
+a change made while a frame is drawn is drawn next (a first version
+waited for the next change and lost it: the footer kept the time of
+the build before). Nothing is drawn for a build quicker than 150 ms.
+
+**The result and the watch** (`render.rs`, `modern.rs`). One line per
+build: `Finished big.pdf · 74 pages · 244 KB · 1 pass · 1.47 s · 10
+warnings` (the PDF an OSC 8 hyperlink where the terminal has them). A
+watch logs one line per rebuild, `18:13:53 ↻ big.tex:10 ✓ big.pdf ·
+1.72 s · 54% run again` (the first line each edit changed,
+from the machine's old and new contents, `Watch::last_changes`; the
+pages and warnings only when their counts changed), then
+the errors that are new in full (one that stays is its headline, `as
+before`), the warnings that are new, and how many went, under a footer
+`Watching big.tex · ▁▃█▁ last 372 ms · r rebuild  o open  q quit  w
+warnings  ? help`. On a terminal in the foreground the watch reads
+keys: echo, line editing and the signal keys off (`stty`), so Ctrl-C is
+a key: the watch stops after saving its build (as `q`; a second Ctrl-C
+stops it at once, with 130), and during a rebuild it says it will stop
+once the rebuild is over. Ctrl-Z restores the terminal and stops the
+job's process group as the shell's Ctrl-Z would, and sets the modes
+again when it goes on. A watchdog `sh` started with the modes waits on
+a pipe: if partex dies without restoring them (killed, crashed), the
+pipe closes and the `sh` shows the cursor and sets the modes back. The
+panic hook restores them too. Errors mark what they are about: the
+undefined control sequence where the line has it, else the call of the
+macro it happened in (`\greet{world}`), else the last token, and the
+column is the mark's start (`modern.tex:17:4`, was `:29`, after it).
+Package warnings get their own headline (`warning: lipsum: Unknown
+language`). Off a terminal the same lines come out plain, as they
+happen; `--color`, `NO_COLOR`, `CLICOLOR_FORCE` and `CLICOLOR` choose
+the colours.
+
+**No dependency.** The terminal's size (`stty size`, asked at most
+once a second while something moves) and modes (`stty -g`, `stty
+-icanon -echo -isig`) are `stty`'s, run on the terminal's descriptor;
+whether this process may set them is `/proc/self/stat`'s foreground
+group. A crate (`rustix`, `libc`) would have saved a few `stty`
+processes per session, against the rule of no dependencies and no
+`unsafe`.
+
+**Found on the way.**
+- Every cold machine build printed `partex: machine: candidates by
+  level …` (the census, a debugging report) into the modern terminal;
+  it is now printed only with `PARTEX_WATCH_DEBUG` or the cut timing.
+- Saving the store after `partex build` takes seconds (1.5 s for the
+  74-page document, 4 s for a 12-page one on this loaded machine) and
+  was invisible: the process seemed to hang after its result. It now
+  has a live line (`Saving ⠹ the build for the next run  0.8 s`).
+- `main` at `824a511` failed `cargo fmt --check` in seven files of the
+  PDF inclusion (`fontmap.rs`, `epdf.rs`, `writefont.rs`, `fofi.rs`,
+  `fofi_tables.rs`, `gfxfont.rs`, `pdfread.rs`); `b80f57a` formats them
+  and nothing else, and can be dropped if their author formats them.
+
+**Measured** (this machine, loaded, release builds with fat LTO, the
+branch against `824a511`):
+- a 74-page LaTeX document (lipsum, hyperref), one plain pass
+  (`--compat=pdftex`), 20 runs of each alternating: instructions
+  3.2135 G → 3.2145 G (+0.03%), cycles (median) 1.6846 G → 1.6850 G
+  (+0.02%);
+- the same document's `partex build` from the start on a terminal (the
+  live line drawn; no store, no saved session), 12 runs of each
+  alternating: wall time 2.52 s → 2.52 s (median), user 2.065 →
+  2.075 s;
+- the course (299 pages), one plain pass, 2 runs of each alternating
+  (`scripts/heavy`): instructions 274.63 G → 274.93 G (+0.10%), cycles
+  146.9 G → 147.0 G (+0.1%), wall 55.4 s → 55.2 s. The PDF is the same
+  size (3,184,359 bytes); e2e compares the bytes.
+
+**Tests.** e2e's `modern` now checks the last line's facts (`Failed
+modern.tex`, `1 error`, `3 warnings`, `1 page`, `3 passes`) instead of
+the old text, and the error's column 4 (the mark's start) instead of
+29; `modern_watch` waits for `-v`'s `Machine rebuilt in` after each
+edit instead of the old result line's `modern.tex (`. The renderer's,
+the terminal's and the board's unit tests are new (`render.rs`,
+`live.rs`, `term.rs`, `snippet.rs`, `progress.rs`). In a
+pseudo-terminal (a Python driver with a small VT100 model, not kept in
+the tree): a cold
+build at 60, 80, 100 and 120 columns, a watch's rebuilds, an error and
+its fix, the keys, Ctrl-C during a rebuild (once, twice), Ctrl-Z and
+`fg` under an interactive bash, and partex killed (the watchdog showed
+the cursor and bash had the modes back). `cargo xtask check` passes:
+fmt (with `b80f57a`), clippy (both feature sets), the wasm build, the
+workspace's tests, trip 7/7 and etrip 18/18 (plain and machine mode),
+e2e 35/35 (plain and machine mode), ssa-edits 16/16 (`--brief
+--fixpoint`) and 16/16 (`PARTEX_SSA_TRIPS=1`).

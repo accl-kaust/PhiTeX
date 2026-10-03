@@ -265,6 +265,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             self.tracker.page();
         }
         let count0 = self.count(0);
+        crate::progress::BOARD.page(count0);
         match &mut self.effects {
             Some(e) => e.push(crate::effects::Effect::Shipping(count0)),
             None => self.host.shipping(count0),

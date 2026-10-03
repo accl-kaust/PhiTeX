@@ -13,6 +13,7 @@ mod eventlog;
 mod events;
 mod inotify;
 mod intervals;
+mod live;
 mod lz;
 mod machinehost;
 mod makeindex;
@@ -25,6 +26,7 @@ mod sanitize;
 mod session;
 mod snippet;
 mod store;
+mod term;
 #[cfg(feature = "deps")]
 mod texprof;
 mod timeline;
@@ -788,6 +790,9 @@ fn serve_observed(
     let mut reports = Vec::new();
     let mut h = history.unwrap_or(0);
     observe(events::Progress::PassStart(1));
+    if history.is_none() {
+        observe(events::Progress::Phase(events::Phase::Cold));
+    }
     let mut r = match history {
         None => Some(("built", s.build())),
         Some(_) => s.rebuild().map(|r| ("rebuilt", r)),
@@ -802,6 +807,7 @@ fn serve_observed(
             }
             None => reports.push(String::from("partex: unchanged")),
         }
+        observe(events::Progress::Phase(events::Phase::Writing));
         let term = match s.write_outputs() {
             Ok(term) => {
                 if std::env::var_os("PARTEX_PASS_DUMP").is_some() {
@@ -883,7 +889,10 @@ fn converge_saved(
     let t0 = std::time::Instant::now();
     let loaded = {
         let _p = timeline::phase("load session");
-        key.and_then(cache::get).is_some_and(|saved| s.load(saved))
+        key.and_then(cache::get).is_some_and(|saved| {
+            observe(events::Progress::Phase(events::Phase::Loading));
+            s.load(saved)
+        })
     };
     let mut reports = Vec::new();
     if loaded {
@@ -900,6 +909,7 @@ fn converge_saved(
         && s.changed()
     {
         let t0 = std::time::Instant::now();
+        observe(events::Progress::Phase(events::Phase::Saving));
         let saved = {
             let _p = timeline::phase("save session");
             s.save()
