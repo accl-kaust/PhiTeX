@@ -40,6 +40,7 @@ mod bib;
 pub mod compare;
 mod defs;
 mod known;
+mod outline;
 mod report;
 mod scan;
 pub mod text;
@@ -54,6 +55,7 @@ use phitex_syntax::{ParaId, Splice, Tree};
 pub use bib::Bib;
 pub use defs::{Args, Def, Spec};
 pub use known::{AssetKind, CounterOp, Definer, InputKind, LEVELS, Matter};
+pub use outline::{Entry, GlyphRef, Outline};
 pub use report::{Timing, json, report};
 pub use views::{
     AssetRef, Assumption, BibRef, Broken, EnvProblem, FileRef, GuardState, Heading, Keyed, Loc,
@@ -144,13 +146,16 @@ pub struct Fact {
 #[derive(Clone, Debug, PartialEq)]
 pub enum What {
     /// `\section*[short]{title}`: its level (`\part` −1 … `\subparagraph`
-    /// 5), and where its title ends in the paragraph.
+    /// 5), where its title ends in the paragraph, and where the title's
+    /// text begins there (`None`: read through a macro, not in the
+    /// paragraph's text).
     Heading {
         level: i8,
         star: bool,
         short: Option<String>,
         title: String,
         end: u32,
+        title_at: Option<u32>,
     },
     /// `\addcontentsline{list}{level}{title}`.
     Toc {

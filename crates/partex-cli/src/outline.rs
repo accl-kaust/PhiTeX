@@ -2,6 +2,13 @@
 //! source without running TeX (`phitex-doc`, DESIGN 4.3.6): the outline,
 //! labels, references, citations, the file graph and the guards, with the
 //! time it took. `--edits` times the layer's update after edits.
+//!
+//! With `--json`, each heading also has where the PDF shows it (`page`
+//! from 0, `x` and `y` in points from the page's bottom left: DESIGN
+//! 4.4), from the glyph origins a build wrote beside its PDF
+//! (`PARTEX_ORIGINS=1`: `<job>.origins.jsonl` and `<job>.pdf`, found next
+//! to FILE.tex, or `--origins PATH`); without them, or for a heading the
+//! PDF does not show, they are `null`.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -12,13 +19,17 @@ use phitex_doc::compare::{compare_labels, compare_toc};
 use phitex_doc::{Files, Project, Timing, Views};
 
 const USAGE: &str = "\
-usage: partex outline FILE.tex [--json] [--aux FILE.aux] [--toc FILE.toc]
+usage: partex outline FILE.tex [--json [--origins FILE.origins.jsonl]]
+                      [--aux FILE.aux] [--toc FILE.toc]
                       [--edits EDITS.txt [--only NAME]] [--repeat N] [--check]
 
 The document's outline, labels, references, citations, files and guards,
 read from its source without running TeX.
 
-  --json          the report as JSON
+  --json          the report as JSON; each heading with where the PDF shows
+                  it (page, x, y), from a build's glyph origins
+                  (PARTEX_ORIGINS=1) beside FILE.tex
+  --origins FILE  the glyph origins to use (the PDF beside them)
   --aux FILE      compare the labels with an .aux file's \\newlabel lines
   --toc FILE      compare the table of contents with a .toc file
   --edits FILE    apply each edit of FILE (`name<TAB>path|from|to`, `;;`
@@ -74,6 +85,7 @@ impl Files for Cached {
 struct Options {
     file: String,
     json: bool,
+    origins: Option<String>,
     aux: Option<String>,
     toc: Option<String>,
     edits: Option<String>,
@@ -86,6 +98,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
     let mut o = Options {
         file: String::new(),
         json: false,
+        origins: None,
         aux: None,
         toc: None,
         edits: None,
@@ -98,6 +111,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
         let mut value = || it.next().cloned().ok_or(format!("{a} needs a value"));
         match a.as_str() {
             "--json" => o.json = true,
+            "--origins" => o.origins = Some(value()?),
             "--aux" => o.aux = Some(value()?),
             "--toc" => o.toc = Some(value()?),
             "--edits" => o.edits = Some(value()?),
@@ -208,7 +222,15 @@ pub fn main(args: &[String]) -> ! {
         ],
     };
     if o.json {
-        print!("{}", phitex_doc::json(&project, &v, Some(&timing)));
+        let side = o.origins.as_ref().map_or_else(
+            || path.with_extension("origins.jsonl"),
+            std::path::PathBuf::from,
+        );
+        let placed = placed_outline(&project, &side);
+        print!(
+            "{}",
+            phitex_doc::json(&project, &v, Some(&timing), placed.as_ref())
+        );
     } else {
         print!("{}", phitex_doc::report(&project, &v, Some(&timing)));
         println!(
@@ -418,6 +440,96 @@ fn run_edits(p: &mut Project, file: &str, o: &Options) {
             && let Err(e) = p.check()
         {
             println!("  {name}: CHECK FAILED after undo: {e}");
+        }
+    }
+}
+
+/// The outline placed on the PDF, from side file `side` and the PDF
+/// beside it (`<job>.origins.jsonl`, `<job>.pdf`); `None` without them.
+fn placed_outline(p: &Project, side: &Path) -> Option<phitex_doc::Outline> {
+    let (files, pages) = read_origins(side)?;
+    let name = side.file_name()?.to_str()?.strip_suffix(".origins.jsonl")?;
+    let pdf: std::sync::Arc<[u8]> = std::fs::read(side.with_file_name(format!("{name}.pdf")))
+        .ok()?
+        .into();
+    let doc = partex_engine::pdfread::Doc::open(&pdf).ok()?;
+    let mut outline = p.outline();
+    // (each page's codes placed, once)
+    let mut placed: HashMap<usize, Vec<(f64, f64)>> = HashMap::new();
+    outline.place(&files, &pages, &mut |n, k| {
+        let codes = placed.entry(n).or_insert_with(|| {
+            doc.page(n + 1).map_or_else(Vec::new, |page| {
+                let (x0, y0) = (page.media[0], page.media[1]);
+                partex_engine::pdftext::page_codes(&doc, &page)
+                    .into_iter()
+                    .map(|s| (s.x - x0, s.y - y0))
+                    .collect()
+            })
+        });
+        codes.get(k).copied()
+    });
+    Some(outline)
+}
+
+/// A side file of glyph origins (`origins.rs`'s format): the files, and
+/// each page's glyphs.
+fn read_origins(path: &Path) -> Option<(Vec<String>, Vec<Vec<phitex_doc::GlyphRef>>)> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let mut lines = text.lines();
+    let first = lines.next()?;
+    let files = json_strings(first.get(first.find('[')? + 1..)?)?;
+    let mut pages = Vec::new();
+    for l in lines {
+        let at = l.find("\"glyphs\":[")? + "\"glyphs\":[".len();
+        let nums: Vec<u32> = l[at..]
+            .split(|c: char| !c.is_ascii_digit())
+            .filter(|s| !s.is_empty())
+            .map(str::parse)
+            .collect::<Result<_, _>>()
+            .ok()?;
+        pages.push(
+            nums.as_chunks::<4>()
+                .0
+                .iter()
+                .map(|&[file, start, end, synth]| phitex_doc::GlyphRef {
+                    file,
+                    start,
+                    end,
+                    synthesized: synth != 0,
+                })
+                .collect(),
+        );
+    }
+    Some((files, pages))
+}
+
+/// The strings of a JSON array's text, from after its `[`.
+fn json_strings(s: &str) -> Option<Vec<String>> {
+    let mut out = Vec::new();
+    let mut chars = s.chars();
+    loop {
+        match chars.next()? {
+            ']' => return Some(out),
+            '"' => {
+                let mut v = String::new();
+                loop {
+                    match chars.next()? {
+                        '"' => break,
+                        '\\' => match chars.next()? {
+                            'u' => {
+                                let hex: String = chars.by_ref().take(4).collect();
+                                v.push(char::from_u32(u32::from_str_radix(&hex, 16).ok()?)?);
+                            }
+                            'n' => v.push('\n'),
+                            't' => v.push('\t'),
+                            c => v.push(c),
+                        },
+                        c => v.push(c),
+                    }
+                }
+                out.push(v);
+            }
+            _ => {}
         }
     }
 }

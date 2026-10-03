@@ -1633,6 +1633,28 @@ asked for and written back, never made again. The `glyphs` job edits
 twice (a comment line inserted before a paragraph, then a paragraph) and
 checks each rebuild's side file and PDF are a cold build's of its text.
 
+**The outline** (`phitex_doc::Outline`, Overleaf's file outline). The
+static layer (4.3.6) knows each heading before any build:
+`Project::outline()` gives `Entry { level, title, number, file, start,
+end, title_start, title_end, line, page, x, y }`, the command's bytes
+and its title's in the file (none for a heading a document macro makes),
+LaTeX's number as the layer counts it, and `Outline::section_at(file,
+offset)`, the innermost heading at or before a byte in reading order (in
+a file read by `\input`, before its first heading: the section it is
+read in). `Outline::place(files, origins, position)` adds where the PDF
+shows each heading: the first glyph, in page order, not synthesized,
+whose origin lies inside the title's bytes (the heading itself; a
+running head or the table of contents shows the title from a mark or
+the `.toc`, not from its bytes), at that glyph's origin on the page in
+points from the bottom left, which `partex_engine::pdftext` computes by
+walking the page's content stream as a viewer does (the text and
+transformation matrices, `/Widths`, a form's `/Matrix`). The entries
+follow edits (`Project::edit`, then `outline()` again) and rebuilds
+(`place` again with the new origins). `partex outline FILE.tex --json`
+places them from the side file a build wrote beside its PDF
+(`PARTEX_ORIGINS=1`), or `--origins PATH`; without one, `page`, `x` and
+`y` are `null`.
+
 **Costs** (the PGF subset, `bench/inputs/pgfsub.tex`: four chapters of
 the manual, 115 pages, a plain run on settled auxiliary files, against
 the branch point built the same way; `perf stat -e instructions:u`).
