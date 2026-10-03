@@ -476,7 +476,26 @@ impl<'a> Dec<'a> {
     }
     pub fn list(&mut self) -> Option<Vec<Node>> {
         let n = self.count()?;
-        (0..n).map(|_| self.node()).collect()
+        let mut out = Vec::with_capacity(n);
+        for _ in 0..n {
+            // (a run is put back by its characters: a run longer than
+            // `Glyphs::CAP`, which a format made when runs were longer
+            // holds, becomes canonical runs)
+            if self.data.get(self.pos) == Some(&0) {
+                self.pos += 1;
+                let font = self.font()?;
+                let chars = self.bytes()?;
+                if chars.is_empty() {
+                    return None;
+                }
+                for &c in chars {
+                    crate::node::push_char(&mut out, font, c);
+                }
+                continue;
+            }
+            out.push(self.node()?);
+        }
+        Some(out)
     }
     fn tokens(&mut self) -> Option<crate::node::Tokens> {
         Some(Arc::new(crate::node::TokenList::new(self.ints()?, false)))
@@ -537,6 +556,7 @@ impl<'a> Dec<'a> {
                 ch: self.u8()?,
                 subtype: self.u8()?,
                 original: self.bytes()?.to_vec(),
+                org: crate::origin::Side::default(),
             })),
             9 => Node::Disc(Box::new(Disc {
                 pre: self.list()?,
@@ -778,6 +798,7 @@ mod tests {
                 ch: 11,
                 subtype: 2,
                 original: vec![b'f', b'f'],
+                org: crate::origin::Side::default(),
             })),
             Node::Disc(Box::new(Disc {
                 pre: vec![Node::Penalty(1)],

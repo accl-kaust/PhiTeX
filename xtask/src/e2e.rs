@@ -1067,6 +1067,145 @@ fn run_converge(root: &Path, partex: &Path, case: &Converge) -> Result<Vec<Strin
 
 /// The modern command line: `partex build` of `modern.tex` against
 /// `pdflatex` run to its fixpoint as latexmk would (BibTeX between runs).
+/// Glyph origins (DESIGN 4.4): `glyphs.tex` run by pdfTeX and by partex
+/// with `PARTEX_ORIGINS=1`, every file the same but partex's side file,
+/// which `crate::origins` checks against the PDF and the text; then SSA
+/// mode's rebuilds ([`glyphs_ssa`]). Plain and SSA mode's: in machine
+/// mode's e2e run, nothing.
+fn run_glyphs(root: &Path, partex: &Path) -> Result<Vec<String>> {
+    if std::env::var_os("PARTEX_MACHINE").is_some() {
+        return Ok(Vec::new());
+    }
+    let work = out_root(root).join("glyphs");
+    if work.exists() {
+        fs::remove_dir_all(&work)?;
+    }
+    let (oracle, plain) = (work.join("o"), work.join("p"));
+    for d in [&oracle, &plain] {
+        fs::create_dir_all(d)?;
+        for i in GLYPHS_INPUTS {
+            fs::copy(root.join("tests/e2e").join(i), d.join(i))?;
+        }
+    }
+    let ini: Vec<&str> = GLYPHS_FLAGS
+        .iter()
+        .copied()
+        .chain(["-ini", "-etex", "-jobname=pdflatex", "*pdflatex.ini"])
+        .collect();
+    exec(Command::new("pdftex"), &oracle, &ini, "term1.txt")?;
+    exec(glyphs_partex(partex, &work), &plain, &ini, "term1.txt")?;
+    for i in 2..=3 {
+        let term = format!("term{i}.txt");
+        exec(Command::new("pdftex"), &oracle, &GLYPHS_DOC, &term)?;
+        let mut cmd = glyphs_partex(partex, &work);
+        cmd.env("PARTEX_ORIGINS", "1");
+        exec(cmd, &plain, &GLYPHS_DOC, &term)?;
+    }
+    let mut diffs: Vec<String> = compare(&oracle, &plain, false)?
+        .into_iter()
+        .filter(|n| n != "glyphs.origins.jsonl")
+        .collect();
+    glyphs_check(&plain, "origins", &mut diffs)?;
+    glyphs_ssa(root, partex, &work, &mut diffs)?;
+    Ok(diffs)
+}
+
+/// The `glyphs` job's inputs, and its runs' flags.
+const GLYPHS_INPUTS: [&str; 2] = ["glyphs.tex", "images-fig.pdf"];
+const GLYPHS_FLAGS: [&str; 4] = [
+    "-no-shell-escape",
+    "-no-parse-first-line",
+    "-output-comment=partex",
+    "-interaction=nonstopmode",
+];
+const GLYPHS_DOC: [&str; 6] = [
+    "-no-shell-escape",
+    "-no-parse-first-line",
+    "-output-comment=partex",
+    "-interaction=nonstopmode",
+    "-fmt=pdflatex",
+    "glyphs",
+];
+
+/// partex for the `glyphs` job, in `work`'s cache.
+fn glyphs_partex(partex: &Path, work: &Path) -> Command {
+    let mut cmd = tex_compat(partex);
+    cmd.arg("-engine=pdftex")
+        .env("PARTEX_CACHE_DIR", work.join("cache"))
+        .env_remove("PARTEX_MACHINE")
+        .env_remove("PARTEX_SSA")
+        .env_remove("PARTEX_PERSIST");
+    cmd
+}
+
+/// `crate::origins::check` of `glyphs.tex`'s run in `dir`, its problems
+/// added to `diffs` (as `what`'s).
+fn glyphs_check(dir: &Path, what: &str, diffs: &mut Vec<String>) -> Result<()> {
+    for m in crate::origins::check(dir, "glyphs", crate::origins::GLYPHS)? {
+        diffs.push(format!("{what}: {m}"));
+    }
+    Ok(())
+}
+
+/// The `glyphs` job in SSA mode (with the format the plain run made): the
+/// text edited twice, rebuilt after each edit (a comment line inserted
+/// before a paragraph: nothing typeset changes, the steps after are kept,
+/// their origins moved; then a paragraph inserted there), each rebuild's
+/// side file and PDF against a cold SSA build's of its text, and checked.
+fn glyphs_ssa(root: &Path, partex: &Path, work: &Path, diffs: &mut Vec<String>) -> Result<()> {
+    let text = fs::read_to_string(root.join("tests/e2e/glyphs.tex"))?;
+    let edit1 = text.replacen("Hello world", "% A comment line.\nHello world", 1);
+    let edit2 = edit1.replacen(
+        "Hello world",
+        "A paragraph inserted before.\n\nHello world",
+        1,
+    );
+    let ssa = work.join("s");
+    let cold = [work.join("c1"), work.join("c2")];
+    for (d, edited) in [
+        (&ssa, None),
+        (&cold[0], Some(&edit1)),
+        (&cold[1], Some(&edit2)),
+    ] {
+        fs::create_dir_all(d)?;
+        for i in GLYPHS_INPUTS {
+            fs::copy(root.join("tests/e2e").join(i), d.join(i))?;
+        }
+        if let Some(t) = edited {
+            fs::write(d.join("glyphs.tex"), t)?;
+        }
+        fs::copy(work.join("p/pdflatex.fmt"), d.join("pdflatex.fmt"))?;
+    }
+    fs::write(ssa.join("glyphs-1.tex"), &edit1)?;
+    fs::write(ssa.join("glyphs-2.tex"), &edit2)?;
+    for d in [&ssa, &cold[0], &cold[1]] {
+        let mut cmd = glyphs_partex(partex, work);
+        cmd.env("PARTEX_SSA", "1").env("PARTEX_ORIGINS", "1");
+        if d == &ssa {
+            // (each line a rebuild after it; the side file each wrote kept)
+            cmd.env(
+                "PARTEX_SSA_REBUILD",
+                "cp glyphs-1.tex glyphs.tex\n\
+                 cp glyphs.origins.jsonl rebuild1.origins.jsonl; \
+                 cp glyphs.pdf rebuild1.pdf; cp glyphs-2.tex glyphs.tex",
+            );
+        }
+        let err = exec(cmd, d, &GLYPHS_DOC, "term2.txt")?;
+        fs::write(d.join("stderr2.txt"), err)?;
+    }
+    for (c, rebuilt) in [(&cold[0], "rebuild1"), (&cold[1], "glyphs")] {
+        for ext in ["origins.jsonl", "pdf"] {
+            let ours = fs::read(ssa.join(format!("{rebuilt}.{ext}")));
+            let theirs = fs::read(c.join(format!("glyphs.{ext}")));
+            if !matches!((&ours, &theirs), (Ok(x), Ok(y)) if x == y) {
+                diffs.push(format!("SSA {rebuilt}.{ext}"));
+            }
+        }
+    }
+    glyphs_check(&cold[0], "SSA origins (edit 1)", diffs)?;
+    glyphs_check(&cold[1], "SSA origins (edit 2)", diffs)
+}
+
 /// Every file must be identical (not the terminal: the renderer's), and
 /// the renderer must name each kind of problem the document has; then a
 /// rebuild from the saved session (`-v`), `partex why` and `partex clean`.
@@ -1666,6 +1805,7 @@ pub fn run(root: &Path, args: &[String]) -> Result<()> {
         Box::new(move || run_machine_edits_dvi(root, partex)),
     ));
     jobs.push(("modern", Box::new(move || run_modern(root, partex))));
+    jobs.push(("glyphs", Box::new(move || run_glyphs(root, partex))));
     jobs.push((
         "modern_watch",
         Box::new(move || run_modern_watch(root, partex, false)),

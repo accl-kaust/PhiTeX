@@ -863,6 +863,8 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         let d = self.pdf.ship.dummy_font;
         self.pdf_set_font(d)?;
         self.pdf.out.print(b"( )Tj");
+        // (a glyph with no source: `srcmap.rs`)
+        self.origin_none(1);
         Ok(())
     }
 
@@ -929,6 +931,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         if must_insert_space {
             if self.pdf_font_ref(f).has_space && self.pdf.ship.doing_string {
                 self.pdf.out.out(b' ');
+                self.origin_none(1);
                 let (ws, wout) = self.adv_char_width(f, 32)?;
                 s -= ws;
                 s_out -= wout;
@@ -1012,6 +1015,11 @@ impl<H: Host, T: Tracker> Tex<H, T> {
     /// `pdf_print_char`.
     pub(crate) fn pdf_print_char(&mut self, f: i32, c: u8) {
         self.mark_glyph(f, c);
+        // (the glyph's origin, in the order the stream shows them)
+        if self.origins_on() {
+            let h = self.origin_emitting();
+            self.origin_glyph(h);
+        }
         if c <= 32 || c == 92 || c == 40 || c == 41 || c > 127 {
             self.pdf.out.out(92);
             self.pdf.out.print_octal(c);
@@ -1028,6 +1036,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         let d = self.pdf.ship.dummy_font;
         self.pdf_begin_string(d)?;
         self.pdf.out.print(b" ");
+        self.origin_none(1);
         self.adv_char_width(d, 32)?;
         self.pdf_end_string_nl();
         self.pdf.ship.faked_space = saved;
@@ -1589,11 +1598,28 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         match p {
             Node::Glyphs(g) => {
                 let f = i32::from(g.font.0);
-                for &c in g.chars() {
-                    self.pdf_char(f, c)?;
+                if self.origins_on() {
+                    // (each glyph's origin, for the encoder: `srcmap.rs`)
+                    let h = g.org();
+                    for (i, &c) in g.chars().iter().enumerate() {
+                        let k = if h == 0 {
+                            0
+                        } else {
+                            h + u32::try_from(i).unwrap_or(0)
+                        };
+                        self.origin_walk(k);
+                        self.pdf_char(f, c)?;
+                    }
+                } else {
+                    for &c in g.chars() {
+                        self.pdf_char(f, c)?;
+                    }
                 }
             }
-            Node::Ligature(l) => self.pdf_char(i32::from(l.font.0), l.ch)?,
+            Node::Ligature(l) => {
+                self.origin_walk(l.org.0);
+                self.pdf_char(i32::from(l.font.0), l.ch)?;
+            }
             Node::Box(b) => {
                 if b.list.is_empty() {
                     self.pdf.ship.cur_h += b.width;
@@ -2239,10 +2265,17 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         }
         // start the stream of page/form contents
         self.pdf_begin_stream();
+        self.origins_stream_begin();
         self.pdf.ship.recording = true;
         let r = self.pdf_ship_contents(p, shipping_page);
         let flushed = self.flush_drawn();
         self.pdf.ship.recording = false;
+        let form = if shipping_page {
+            0
+        } else {
+            self.pdf.ship.cur_form
+        };
+        self.origins_stream_end(form);
         r?;
         flushed?;
         if !self.pdf.stacks.pos.is_empty() {

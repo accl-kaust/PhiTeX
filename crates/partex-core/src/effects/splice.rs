@@ -240,8 +240,10 @@ impl Slot {
                 | Effect::Close(_)
                 | Effect::Open { .. } => s.misc.push(i),
                 Effect::Num(..) => s.virt = true,
-                // (written by the resolution of virtual numbers only)
-                Effect::ObjRef { .. }
+                // (written by the resolution of virtual numbers only; glyph
+                // origins, read by `Tex::origins`)
+                Effect::Origins(_)
+                | Effect::ObjRef { .. }
                 | Effect::ObjStmRef { .. }
                 | Effect::FontLoad(_)
                 | Effect::FontRef { .. }

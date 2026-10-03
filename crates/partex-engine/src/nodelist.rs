@@ -164,6 +164,32 @@ impl NodeList {
         self.push(Node::Glyphs(crate::node::Glyphs::one(font, ch)));
     }
 
+    /// [`NodeList::push_char`] of a character from `o`, its origin kept
+    /// in `t` with its run's (`origin::push_char_org`'s rule).
+    pub fn push_char_org(
+        &mut self,
+        font: crate::node::FontId,
+        ch: u8,
+        o: crate::origin::Org,
+        t: &mut crate::origin::OrgTable,
+    ) {
+        if let Some(Node::Glyphs(g)) = self.last()
+            && g.font == font
+            && !g.is_full()
+        {
+            let h = t.run_push(g.org(), g.chars().len(), o);
+            self.edit_last(|n| {
+                if let Node::Glyphs(g) = n {
+                    g.push(ch);
+                    g.set_org(h);
+                }
+            });
+            return;
+        }
+        let h = if o.is_none() { 0 } else { t.push(o) };
+        self.push(Node::Glyphs(crate::node::Glyphs::one_at(font, ch, h)));
+    }
+
     /// Keep the first `n` nodes.
     pub fn truncate(&mut self, n: usize) {
         if n == 0 {

@@ -11834,3 +11834,82 @@ fmt (with `b80f57a`), clippy (both feature sets), the wasm build, the
 workspace's tests, trip 7/7 and etrip 18/18 (plain and machine mode),
 e2e 35/35 (plain and machine mode), ssa-edits 16/16 (`--brief
 --fixpoint`) and 16/16 (`PARTEX_SSA_TRIPS=1`).
+
+## 2026-10-03: Glyph origins: each glyph of the PDF and the source bytes it came from (branch `synctex`)
+
+For an editor beside the PDF (its renderer draws one glyph per character
+code a text-showing operator shows, so the origins are given in that
+order): `Tex::set_origins(true)` before the cold build, then after each
+build or rebuild `Tex::origins(page)`, one `GlyphOrigin { file, start,
+end, synthesized }` per code the page's content stream shows, forms at
+each `Do`, and `Tex::origin_files()`. `PARTEX_ORIGINS=1` writes them
+beside the PDF (`<job>.origins.jsonl`). DESIGN 4.4 has the rules;
+`partex_core::srcmap`'s documentation is the reference.
+
+How, and what was rejected:
+
+- **A side channel in the nodes.** A parallel structure (a map from
+  nodes to origins, or per-list vectors) would have had to follow every
+  list operation TeX does (copies, `\unhbox`, line breaking's splits,
+  hyphenation's reconstitution, `\vsplit`, the page builder). A handle
+  inside the node follows by construction. `Glyphs` gave up a byte of its
+  inline characters (15, not 16) for a 32-bit handle, so a node stays 24
+  bytes; a `Ligature` has a handle; a `TokenList` has one per list (its
+  tokens' entries consecutive). Handles are outside `PartialEq` and
+  `Hash` (a `Side` wrapper that is always equal): no version, record or
+  SSA decision depends on them. The table (`OrgTable`) only grows, so a
+  handle in an old step's record keeps its meaning.
+- **Synthesized ranges.** A glyph made by a macro body or `\the` has no
+  bytes of its own; it gets the range of the call in the innermost file:
+  from the start of the last command taken from that file (expanded
+  there, or executed by main control) to the read position. A first
+  version took only main control's fetches and gave the section number
+  of `\section{Intro}` the range from `\newsavebox` three lines up:
+  `\begin{document}` ends in `\ignorespaces`, whose `get_x_token`
+  expands the next line's `\section` without main control taking
+  anything from the file.
+- **Arguments keep their bytes** (the coordinator's change of the
+  contract, approved): `macro_call` records each argument token's origin
+  as it stores it, and the argument's list carries them, through
+  parameter substitution (`expand::apply`), `back_input` and
+  `\expandafter`. A list with origins is read a token at a time (the
+  bulk readers skip it), only when origins are on.
+- **Order by construction.** The encoder emits a stream's list of
+  handles as it writes the stream: glyphs as `pdf_print_char` writes
+  their codes, a form marker at `Do`, no-source runs for literal text
+  (counted by `partex_engine::pdftext`, the same walk the checker uses),
+  pdfTeX's fake and interword spaces, and an included page's codes
+  (counted once per page). In SSA mode the list is the ship step's
+  effect, so reused steps keep theirs; the edits since (old and new
+  data, the changed lines) map each origin to the current text when it
+  is read.
+
+Tests: the `glyphs` e2e job (`tests/e2e/glyphs.tex`: text, ligatures, a
+macro, `\thesection`, hyphenated breaks, a TikZ node, a reused
+`\savebox`, a form drawn twice, a literal's text, an included PDF page,
+two pages) runs pdfTeX and partex with origins on (every file the same
+but the side file), checks every page's glyph count against the PDF's
+content streams, each one-byte letter or digit glyph against its source
+byte, and chosen runs (`Hello`, `fi`/`ffi` ligatures, `bar` from `\foo`
+synthesized as `\foo`, `1` as `\thesection`, `Saved` twice with the same
+bytes, the break hyphens as the character before them, the literal's
+three no-source codes, the figure's 19); then SSA mode, edited twice
+(a comment line inserted before a paragraph: the second page's ship step
+kept, its origins moved; then a paragraph inserted), each rebuild's side
+file and PDF equal to a cold build's of its text. `cargo xtask origins
+DIR JOB [--dump]` checks any run.
+
+Costs (the PGF subset, 115 pages, plain run, against 824a511 built the
+same way, `perf stat -e instructions:u`): off, +1.27% instructions at
+first (147.26 G against 145.42 G). A profile put it in the hooks that
+were calls (`origin_fetch` alone 0.68 G: an `#[inline]` hint the
+compiler did not take) and in the bulk readers' test of the list's
+origins, which read the list with origins off. Each hook is now an
+always-inlined test of `Tex::org` with its body out of line, and the
+bulk test reads nothing when origins are off: +1.02% (146.90 G); the
+wall time is within the machine's noise. On: +10.0% instructions
+(159.90 G), peak RSS 132 MB to 187–205 MB for 237,566 glyphs, mostly
+argument tokens' origins (left to make compact); the side file 4.7 MB.
+
+Also on the branch: the rustfmt main gave the font replacement commit
+(`89fd1db`), so that `cargo fmt --check` passes here too.

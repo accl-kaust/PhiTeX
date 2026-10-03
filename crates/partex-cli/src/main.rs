@@ -19,6 +19,7 @@ mod machinehost;
 mod makeindex;
 mod modern;
 mod native;
+mod origins;
 mod outline;
 mod render;
 mod resident;
@@ -1113,6 +1114,7 @@ fn run_ssa(host: native::NativeHost, params: Params, command_line: &[u8]) -> i32
     let mut between = Between::default();
     let mut tex = Tex::new(host, ssa_tracker(), params);
     tex.set_window(ssa_window());
+    origins::setup(&mut tex);
     let t0 = std::time::Instant::now();
     let r = partex_core::ssa::run_applying(&mut tex, command_line, check, 0, apply);
     if check {
@@ -1137,6 +1139,7 @@ fn run_ssa(host: native::NativeHost, params: Params, command_line: &[u8]) -> i32
     }
     let mut linker = SsaLinker::default();
     let lr = linker.link(&mut tex);
+    origins::write(&mut tex);
     ready_for_rebuilds(&tex, rebuild.is_some());
     eprintln!(
         "partex: ssa build 0: link {:.1} ms: {}; files written {:.1} ms",
@@ -1279,6 +1282,7 @@ fn rebuild_ssa(
     }
     let millis = t0.elapsed().as_secs_f64() * 1e3;
     let lr = linker.link(tex);
+    origins::write(tex);
     let link_ms = lr.link_ms;
     eprintln!("partex: ssa rebuild {n}: link: {}", lr.how);
     let s = tex.tracker().rec.borrow().rt.stats;
@@ -2067,6 +2071,7 @@ fn run_memo(host: native::NativeHost, mut params: Params, command_line: &[u8]) -
     let memo = std::env::var("PARTEX_MEMO").unwrap_or_default();
     params.memo = !memo.is_empty() && memo != "0";
     let mut tex = Tex::new(host, Untracked, params);
+    origins::setup(&mut tex);
     if memo == "check" {
         tex.set_memo_check();
     }
@@ -2085,6 +2090,7 @@ fn run_memo(host: native::NativeHost, mut params: Params, command_line: &[u8]) -
     if effects {
         deliver_effects(&mut tex);
     }
+    origins::write(&mut tex);
     if limit.is_some() {
         eprintln!(
             "partex: memo last hit {}",

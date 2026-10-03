@@ -3015,7 +3015,8 @@ impl<H: CellHost> TexMachine<H> {
             | Effect::PdfObject { .. }
             | Effect::Length { .. }
             | Effect::ObjStmStart { .. }
-            | Effect::Open { .. } => {}
+            | Effect::Open { .. }
+            | Effect::Origins(_) => {}
         }
     }
 }

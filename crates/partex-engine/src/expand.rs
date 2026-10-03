@@ -39,6 +39,16 @@ pub trait ExpandEnv: Fonts {
     /// pdfTeX's `get_expand_font`: font `f` expanded by `e` (a nonzero
     /// multiple of its step), loaded now if it is new.
     fn get_expand_font(&mut self, f: FontId, e: i32) -> FontId;
+    /// The glyphs' origins (DESIGN 4.4), when they are kept: what a
+    /// routine that makes glyph runs again (a line's fonts substituted, a
+    /// word hyphenated) keeps the characters' origins in.
+    fn origins(&mut self) -> Option<&mut crate::origin::OrgTable> {
+        None
+    }
+    /// The glyphs' origins, read.
+    fn origin_table(&self) -> Option<&crate::origin::OrgTable> {
+        None
+    }
 }
 
 fn ratio_of(env: &impl ExpandEnv, f: Option<FontId>) -> i32 {
@@ -339,8 +349,9 @@ fn substitute(
     let mut fonts = fonts.into_iter();
     let mut widths = widths.into_iter();
     let mut out = Vec::with_capacity(list.len() + 4);
+    let mut t = env.origins();
     for n in list {
-        apply(n, &mut out, &mut fonts, &mut widths);
+        apply(n, &mut out, &mut fonts, &mut widths, t.as_deref_mut());
     }
     out
 }
@@ -350,13 +361,26 @@ fn next_font(fonts: &mut impl Iterator<Item = FontId>, f: FontId) -> FontId {
     fonts.next().unwrap_or(f)
 }
 
-/// Put the characters of `part` on `out` with their substituted fonts.
-fn apply_text(part: Vec<Node>, out: &mut Vec<Node>, fonts: &mut impl Iterator<Item = FontId>) {
+/// Put the characters of `part` on `out` with their substituted fonts
+/// (and their origins, with `t`).
+fn apply_text(
+    part: Vec<Node>,
+    out: &mut Vec<Node>,
+    fonts: &mut impl Iterator<Item = FontId>,
+    mut t: Option<&mut crate::origin::OrgTable>,
+) {
     for n in part {
         match n {
             Node::Glyphs(g) => {
-                for &c in g.chars() {
-                    push_char(out, next_font(fonts, g.font), c);
+                for (i, &c) in g.chars().iter().enumerate() {
+                    let f = next_font(fonts, g.font);
+                    match t.as_deref_mut() {
+                        Some(t) => {
+                            let o = crate::origin::char_org(t, &g, i);
+                            crate::origin::push_char_org(out, f, c, o, t);
+                        }
+                        None => push_char(out, f, c),
+                    }
                 }
             }
             Node::Ligature(mut l) => {
@@ -374,9 +398,10 @@ fn apply(
     out: &mut Vec<Node>,
     fonts: &mut impl Iterator<Item = FontId>,
     widths: &mut impl Iterator<Item = Scaled>,
+    mut t: Option<&mut crate::origin::OrgTable>,
 ) {
     match n {
-        Node::Glyphs(_) | Node::Ligature(_) => apply_text(alloc::vec![n], out, fonts),
+        Node::Glyphs(_) | Node::Ligature(_) => apply_text(alloc::vec![n], out, fonts, t),
         Node::Kern { width, subtype: 0 } => out.push(Node::Kern {
             width: widths.next().unwrap_or(width),
             subtype: 0,
@@ -394,11 +419,11 @@ fn apply(
         }),
         Node::Disc(mut d) => {
             let (pre, post) = (core::mem::take(&mut d.pre), core::mem::take(&mut d.post));
-            apply_text(pre, &mut d.pre, fonts);
-            apply_text(post, &mut d.post, fonts);
+            apply_text(pre, &mut d.pre, fonts, t.as_deref_mut());
+            apply_text(post, &mut d.post, fonts, t.as_deref_mut());
             let mut replace = Vec::with_capacity(d.replace.len());
             for n in core::mem::take(&mut d.replace) {
-                apply(n, &mut replace, fonts, widths);
+                apply(n, &mut replace, fonts, widths, t.as_deref_mut());
             }
             d.replace = replace;
             out.push(Node::Disc(d));

@@ -211,6 +211,10 @@ pub(crate) struct AlphaFile {
     pub(crate) lines: u32,
     /// The file's name as the host resolved it (empty for the terminal).
     pub(crate) name: Arc<[u8]>,
+    /// With glyph origins kept (`srcmap.rs`): where the command main
+    /// control last took from this level began, in `data` (a
+    /// synthesized glyph's range starts there).
+    pub(crate) call: usize,
 }
 
 partex_engine::persist_struct!(AlphaFile {
@@ -220,7 +224,8 @@ partex_engine::persist_struct!(AlphaFile {
     line_generation,
     line_open,
     lines,
-    name
+    name,
+    call
 });
 
 impl<H: Host, T: Tracker> Tex<H, T> {
@@ -968,6 +973,13 @@ impl<H: Host, T: Tracker> Tex<H, T> {
 
     /// §325: undo one token of input.
     pub(crate) fn back_input(&mut self) -> Result<(), Jump> {
+        // (with glyph origins: the token's, read before the input moves)
+        let o = self.back_org();
+        self.back_input_from(o)
+    }
+
+    /// [`Tex::back_input`] of a token whose origin is `o` (`srcmap.rs`).
+    pub(crate) fn back_input_from(&mut self, o: partex_engine::origin::Org) -> Result<(), Jump> {
         while self.state() == TOKEN_LIST
             && self.cur_input.loc == NULL
             && self.token_type() != V_TEMPLATE
@@ -976,7 +988,10 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         }
         // (a pooled list: `tok.rs`, `pooled_list`)
         let t = self.cur_tok;
-        let p = self.pooled_list(|b| b.push(t));
+        let mut p = self.pooled_list(|b| b.push(t));
+        if !o.is_none() {
+            self.give_org(&mut p, &[o]);
+        }
         if self.cur_tok < RIGHT_BRACE_LIMIT {
             if self.cur_tok < LEFT_BRACE_LIMIT {
                 self.set_align_state(self.align_state() - 1);

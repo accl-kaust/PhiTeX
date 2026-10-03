@@ -22,6 +22,7 @@ use crate::hyph::{MAX_WORD, Patterns, exception_key, hyphen_values};
 use crate::lr;
 use crate::margin::{self, At};
 use crate::node::{Disc, FontId, GlueSpec, Ligature, Node, Order, Whatsit, push_char};
+use crate::origin::{Org, OrgTable, Side, char_org, push_char_org};
 use crate::pack;
 use crate::scaled::{INF_BAD, MAX_DIMEN, badness, fract};
 
@@ -1554,7 +1555,7 @@ impl<E: Env> Breaker<'_, E> {
                 });
             }
             for n in carry.drain(..) {
-                append(&mut line, n);
+                append(&mut line, n, self.env.origins());
             }
             // §881: modify the end of the line to reflect the nature of the
             // break and to include \rightskip.
@@ -1565,7 +1566,7 @@ impl<E: Env> Breaker<'_, E> {
                 None => {
                     for (_, n) in nodes.by_ref() {
                         track(lr_open, &n);
-                        append(&mut line, n);
+                        append(&mut line, n, self.env.origins());
                     }
                 }
                 Some(at) => {
@@ -1575,7 +1576,7 @@ impl<E: Env> Breaker<'_, E> {
                         }
                         let (_, n) = nodes.next().expect("peeked");
                         track(lr_open, &n);
-                        append(&mut line, n);
+                        append(&mut line, n, self.env.origins());
                     }
                     let (_, n) = nodes.next().ok_or(Confusion("line breaking"))?;
                     match n {
@@ -1598,7 +1599,7 @@ impl<E: Env> Breaker<'_, E> {
                             line.push(Node::Disc(Box::default()));
                             // §885: transplant the pre-break list.
                             for n in d.pre {
-                                append(&mut line, n);
+                                append(&mut line, n, self.env.origins());
                             }
                             disc_break = true;
                         }
@@ -1799,8 +1800,21 @@ impl<E: Env> Breaker<'_, E> {
         if self.l_hyf + self.r_hyf > 63 {
             return;
         }
-        // §897: skip to node `hb`, putting letters into `hu` and `hc`.
+        // §897: skip to node `hb`, putting letters into `hu` and `hc`
+        // (and, with origins kept, each letter's into `ho`).
         let font = env.font(hf);
+        let table = env.origin_table();
+        let org_at = |p: Pos| -> Org {
+            let Some(t) = table else {
+                return Org::NONE;
+            };
+            match self.list.get(p.node) {
+                Some(Node::Glyphs(g)) => char_org(t, g, p.ch),
+                Some(Node::Ligature(l)) => t.get(l.org.0),
+                _ => Org::NONE,
+            }
+        };
+        let mut ho = [Org::NONE; MAX_WORD + 2];
         let mut hu = [0i32; MAX_WORD + 2];
         let mut hc = [0u8; MAX_WORD + 2];
         let mut hn = 0usize;
@@ -1820,6 +1834,7 @@ impl<E: Env> Breaker<'_, E> {
                     hn += 1;
                     hu[hn] = i32::from(c);
                     hc[hn] = lc(self.cur_lang, c);
+                    ho[hn] = org_at(s);
                     hyf_bchar = NON_CHAR;
                 }
                 Some(Atom::Node(Node::Ligature(l))) => {
@@ -1833,6 +1848,7 @@ impl<E: Env> Breaker<'_, E> {
                         hyf_bchar = i32::from(first);
                     }
                     let mut letters = true;
+                    let lo = org_at(s);
                     for &c in &l.original {
                         if lc(self.cur_lang, c) == 0 || j == MAX_WORD {
                             letters = false;
@@ -1841,6 +1857,7 @@ impl<E: Env> Breaker<'_, E> {
                         j += 1;
                         hu[j] = i32::from(c);
                         hc[j] = lc(self.cur_lang, c);
+                        ho[j] = lo;
                     }
                     if !letters {
                         break;
@@ -1918,13 +1935,16 @@ impl<E: Env> Breaker<'_, E> {
         }
         // §903: replace nodes `ha..hb` by a sequence of nodes that includes
         // the discretionary hyphens.
+        let init_org = org_at(ha);
         let mut w = Word {
             font: hf,
             hu,
+            ho,
             hyf,
             hn,
             hyf_char,
             init_list: Vec::new(),
+            init_org,
             init_lig: false,
             init_lft: false,
             hyphen_passed: 0,
@@ -1935,10 +1955,12 @@ impl<E: Env> Breaker<'_, E> {
             Some(Atom::Char(f, c)) if f == hf => {
                 w.init_list.push(c);
                 w.hu[0] = i32::from(c);
+                w.ho[0] = init_org;
                 (ha, 0)
             }
             Some(Atom::Node(Node::Ligature(l))) if l.font == hf => {
                 w.init_list.clone_from(&l.original);
+                w.ho[0] = init_org;
                 w.init_lig = true;
                 w.init_lft = l.subtype > 1;
                 w.hu[0] = i32::from(l.ch);
@@ -1985,6 +2007,7 @@ impl<E: Env> Breaker<'_, E> {
         let old: Vec<Node> = self.list.drain(first..=last).collect();
         let mut new = Vec::with_capacity(old.len() + major.len());
         let mut placed = false;
+        let mut t = self.env.origins();
         for (k, n) in old.into_iter().enumerate() {
             let idx = first + k;
             match n {
@@ -1992,26 +2015,32 @@ impl<E: Env> Breaker<'_, E> {
                     for (ci, &c) in g.chars().iter().enumerate() {
                         let pos = Pos { node: idx, ch: ci };
                         if pos < from || pos > to {
-                            push_char(&mut new, g.font, c);
+                            match t.as_deref_mut() {
+                                Some(t) => {
+                                    let o = char_org(t, &g, ci);
+                                    push_char_org(&mut new, g.font, c, o, t);
+                                }
+                                None => push_char(&mut new, g.font, c),
+                            }
                         } else if !placed {
                             placed = true;
-                            tmp_into(&mut new, major, hf);
+                            tmp_into(&mut new, major, hf, t.as_deref_mut());
                         }
                     }
                 }
                 n => {
                     let pos = Pos::node(idx);
                     if pos < from || pos > to {
-                        append(&mut new, n);
+                        append(&mut new, n, t.as_deref_mut());
                     } else if !placed {
                         placed = true;
-                        tmp_into(&mut new, major, hf);
+                        tmp_into(&mut new, major, hf, t.as_deref_mut());
                     }
                 }
             }
         }
         if !placed {
-            tmp_into(&mut new, major, hf);
+            tmp_into(&mut new, major, hf, t);
         }
         self.list.splice(first..first, new);
     }
@@ -2043,21 +2072,10 @@ fn discardable(n: &Node) -> bool {
     }
 }
 
-/// Append `n` to `list`, merging glyph runs to keep them canonical.
-fn append(list: &mut Vec<Node>, n: Node) {
-    match n {
-        // a run that cannot merge with the last one stays canonical
-        Node::Glyphs(g) if !matches!(list.last(), Some(Node::Glyphs(h)) if h.font == g.font && !h.is_full()) =>
-        {
-            list.push(Node::Glyphs(g));
-        }
-        Node::Glyphs(g) => {
-            for &c in g.chars() {
-                push_char(list, g.font, c);
-            }
-        }
-        n => list.push(n),
-    }
+/// Append `n` to `list`, merging glyph runs to keep them canonical (the
+/// characters' origins kept, with `t`).
+fn append(list: &mut Vec<Node>, n: Node, t: Option<&mut OrgTable>) {
+    crate::origin::append_node(list, n, t);
 }
 
 /// A position in a list: a node, and a character within a glyph run.
@@ -2097,14 +2115,16 @@ fn next_pos(list: &[Node], p: Pos) -> Pos {
     Pos::node(p.node + 1)
 }
 
-/// Nodes built while reconstituting a hyphenated word (all in its font).
+/// Nodes built while reconstituting a hyphenated word (all in its font),
+/// with the characters' origins.
 #[derive(Clone, Debug)]
 enum Tmp {
-    Char(u8),
+    Char(u8, Org),
     Lig {
         ch: u8,
         subtype: u8,
         original: Vec<u8>,
+        orgs: Vec<Org>,
     },
     Kern(Scaled),
     Disc {
@@ -2114,29 +2134,43 @@ enum Tmp {
     },
 }
 
-fn tmp_into(list: &mut Vec<Node>, items: &[Tmp], font: FontId) {
-    for t in items {
-        match t {
-            Tmp::Char(c) => push_char(list, font, *c),
+fn tmp_into(list: &mut Vec<Node>, items: &[Tmp], font: FontId, mut t: Option<&mut OrgTable>) {
+    for it in items {
+        match it {
+            Tmp::Char(c, o) => match t.as_deref_mut() {
+                Some(t) => push_char_org(list, font, *c, *o, t),
+                None => push_char(list, font, *c),
+            },
             Tmp::Lig {
                 ch,
                 subtype,
                 original,
-            } => list.push(Node::Ligature(Box::new(Ligature {
-                font,
-                ch: *ch,
-                subtype: *subtype,
-                original: original.clone(),
-            }))),
+                orgs,
+            } => {
+                let org = match t.as_deref_mut() {
+                    Some(t) => {
+                        let u = orgs.iter().fold(Org::NONE, |a, &b| t.union(a, b));
+                        if u.is_none() { 0 } else { t.push(u) }
+                    }
+                    None => 0,
+                };
+                list.push(Node::Ligature(Box::new(Ligature {
+                    font,
+                    ch: *ch,
+                    subtype: *subtype,
+                    original: original.clone(),
+                    org: Side(org),
+                })));
+            }
             Tmp::Kern(w) => list.push(Node::Kern {
                 width: *w,
                 subtype: KERN_NORMAL,
             }),
             Tmp::Disc { pre, post, replace } => {
                 let mut d = Disc::default();
-                tmp_into(&mut d.pre, pre, font);
-                tmp_into(&mut d.post, post, font);
-                tmp_into(&mut d.replace, replace, font);
+                tmp_into(&mut d.pre, pre, font, t.as_deref_mut());
+                tmp_into(&mut d.post, post, font, t.as_deref_mut());
+                tmp_into(&mut d.replace, replace, font, t.as_deref_mut());
                 list.push(Node::Disc(Box::new(d)));
             }
         }
@@ -2148,10 +2182,15 @@ struct Word {
     font: FontId,
     /// The characters, `hu[1..=hn]` (`hu[0]` the one before, or 256).
     hu: [i32; MAX_WORD + 2],
+    /// Their origins (DESIGN 4.4; none unless origins are kept).
+    ho: [Org; MAX_WORD + 2],
     hyf: [u8; MAX_WORD + 2],
     hn: usize,
     hyf_char: i32,
     init_list: Vec<u8>,
+    /// The origin of `init_list`'s characters (a ligature's, or the
+    /// character's).
+    init_org: Org,
     init_lig: bool,
     init_lft: bool,
     hyphen_passed: usize,
@@ -2236,10 +2275,14 @@ impl Word {
             let mut pre = Vec::new();
             let hyf_exists = font.glyph(self.hyf_char).is_some();
             let mut c = 0;
+            let mut c_org = Org::NONE;
             if hyf_exists {
                 i += 1;
                 c = self.hu[i];
                 self.hu[i] = self.hyf_char;
+                // (a hyphen at a break: the character before it, made)
+                c_org = self.ho[i];
+                self.ho[i] = OrgTable::synth(self.ho[i - 1]);
             } else {
                 self.events.push(Event::MissingChar {
                     font: self.font,
@@ -2253,6 +2296,7 @@ impl Word {
             }
             if hyf_exists {
                 self.hu[i] = c; // restore the character in the hyphen position
+                self.ho[i] = c_org;
                 *l = i;
             }
             // §916: put the characters `hu[i+1..]` into `post_break(r)`,
@@ -2322,13 +2366,13 @@ impl Word {
         if !cur.ligature_present {
             return;
         }
-        let original = hold
+        let (original, orgs) = hold
             .drain(cur.cur_q..)
             .map(|t| match t {
-                Tmp::Char(c) => c,
-                _ => 0,
+                Tmp::Char(c, o) => (c, o),
+                _ => (0, Org::NONE),
             })
-            .collect();
+            .unzip();
         let mut subtype = 0;
         if cur.lft_hit {
             subtype = 2;
@@ -2342,6 +2386,7 @@ impl Word {
             ch: byte(cur.cur_l),
             subtype,
             original,
+            orgs,
         });
         cur.ligature_present = false;
     }
@@ -2360,7 +2405,7 @@ impl Word {
     ) -> i32 {
         let (_, consumed) = cur.lig_stack.pop().expect("lig_stack is not empty");
         if let Some(c) = consumed {
-            hold.push(Tmp::Char(c)); // this is a charnode for `hu[j+1]`
+            hold.push(Tmp::Char(c, self.ho[*j + 1])); // this is a charnode for `hu[j+1]`
             *j += 1;
         }
         if let Some(&(top, _)) = cur.lig_stack.last() {
@@ -2401,10 +2446,10 @@ impl Word {
                 cur.lft_hit = self.init_lft;
             }
             for &c in &self.init_list {
-                hold.push(Tmp::Char(c));
+                hold.push(Tmp::Char(c, self.init_org));
             }
         } else if cur.cur_l < NON_CHAR {
-            hold.push(Tmp::Char(byte(cur.cur_l)));
+            hold.push(Tmp::Char(byte(cur.cur_l), self.ho[j]));
         }
         let mut cur_rh = self.set_cur_r(&mut cur, j, n, bchar, hchar);
         'continue_: loop {
@@ -2497,7 +2542,7 @@ impl Word {
                                     } else if j == n {
                                         break 'done;
                                     } else {
-                                        hold.push(Tmp::Char(byte(cur.cur_r)));
+                                        hold.push(Tmp::Char(byte(cur.cur_r), self.ho[j + 1]));
                                         j += 1;
                                         cur_rh = self.set_cur_r(&mut cur, j, n, bchar, hchar);
                                     }
