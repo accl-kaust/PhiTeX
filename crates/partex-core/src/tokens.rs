@@ -33,8 +33,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
 
     /// §292 for a shared list (a mark or `\write` text).
     pub(crate) fn show_token_slice(&mut self, toks: &Tokens, l: i32) {
-        let toks = toks.clone();
-        self.show_token_list(&toks, NULL, l);
+        self.show_token_list(toks, NULL, l);
     }
 
     /// §292: the display loop over `len` tokens, token `i` being `at(i)`.

@@ -71,6 +71,8 @@ pub(crate) struct Steps {
     cur_loads: Vec<LoadSeen>,
     stores: BTreeMap<StepId, Vec<StoreEv>>,
     loads: BTreeMap<StepId, Vec<LoadSeen>>,
+    /// The steps some of whose loads read a φ ([`Steps::phi_seeds`]).
+    phi_loaders: BTreeSet<StepId>,
     /// The names the job stores (the load ids of their addresses).
     stored: BTreeSet<u32>,
     /// The loads some step read whole (`\pdffilesize`, `\pdfmdfivesum`,
@@ -521,7 +523,11 @@ impl Steps {
             })
             .collect();
         let mut out = Vec::new();
-        for (&s, seen) in &self.loads {
+        for (&s, seen) in self
+            .phi_loaders
+            .iter()
+            .filter_map(|s| Some((s, self.loads.get(s)?)))
+        {
             for l in seen.iter().filter(|l| l.phi) {
                 if vers.get(&l.id).is_some_and(|v| *v != l.ver) {
                     out.push((fold.steps[s as usize].key, s, l.id));
@@ -628,6 +634,11 @@ pub(super) fn step_closed(rr: &mut Recorder, id: StepId, input: InputState) -> V
         }
     }
     let loads = core::mem::take(&mut s.cur_loads);
+    if loads.iter().any(|l| l.phi) {
+        s.phi_loaders.insert(id);
+    } else {
+        s.phi_loaders.remove(&id);
+    }
     if loads.is_empty() {
         s.loads.remove(&id);
     } else {
@@ -1772,9 +1783,15 @@ pub fn rebuild<H: Host>(tex: &mut Tex<H, SsaTracker>, trace: bool, apply: bool) 
         // "Lines are of a data"); a load reads whether the file is there,
         // and a file read whole reads its contents (each looked up as the
         // kind of file it was loaded as)
+        // (the loads the host knows are as they were are not made again,
+        // 7.17.3, "A rebuild's file checks cost the files that changed":
+        // looked at by reference, and only the others kept, with what is
+        // read of them after)
         #[allow(clippy::type_complexity)]
-        let (files, datas, lines): (
+        let (files, kept, same, datas, lines): (
             Vec<(u32, Vec<u8>, FileKind, Option<Arc<[u8]>>, bool, bool, bool)>,
+            Vec<(u32, Option<Arc<[u8]>>)>,
+            usize,
             Vec<(u32, u32, Arc<[u8]>)>,
             BTreeSet<u32>,
         ) = {
@@ -1786,32 +1803,52 @@ pub fn rebuild<H: Host>(tex: &mut Tex<H, SsaTracker>, trace: bool, apply: bool) 
                 .filter(|d| !d.lines.is_empty())
                 .map(|d| d.name)
                 .collect();
-            let files =
+            // (a later trip: a stored name's φ is in memory, and the other
+            // loads are looked at again only after a tool wrote a file)
+            let looked: Vec<(u32, &[u8], FileKind, Option<&Arc<[u8]>>)> =
                 r.st.loads
                     .iter()
                     .enumerate()
                     .filter_map(|(i, (name, _, kind))| {
                         let id = u32::try_from(i).ok()?;
-                        let stored = s.stored.contains(&id);
-                        // (a later trip: a stored name's φ is in memory,
-                        // and the other loads are looked at again only
-                        // after a tool wrote a file)
-                        if next.as_ref().is_some_and(|n| stored || !n.files) {
+                        if next
+                            .as_ref()
+                            .is_some_and(|n| !n.files || s.stored.contains(&id))
+                        {
                             return None;
                         }
-                        let old = s.files.get(i).cloned().flatten();
-                        let whole = s.whole.contains(&id);
                         Some((
                             id,
-                            name.clone(),
+                            &name[..],
                             *kind,
-                            old,
-                            lines.contains(&id),
-                            stored,
-                            whole,
+                            s.files.get(i).and_then(Option::as_ref),
                         ))
                     })
                     .collect();
+            let checks = {
+                let loads: Vec<_> = looked.iter().map(|&(_, n, k, o)| (n, k, o)).collect();
+                tex.host.unchanged(&loads)
+            };
+            let (mut files, mut kept, mut same) = (Vec::new(), Vec::new(), 0);
+            for (&(id, name, kind, old), unchanged) in looked.iter().zip(checks) {
+                let stored = s.stored.contains(&id);
+                if unchanged {
+                    same += 1;
+                    if stored {
+                        kept.push((id, old.cloned()));
+                    }
+                } else {
+                    files.push((
+                        id,
+                        name.to_vec(),
+                        kind,
+                        old.cloned(),
+                        lines.contains(&id),
+                        stored,
+                        s.whole.contains(&id),
+                    ));
+                }
+            }
             // (the data found in the files, not served from the stores)
             let datas = s
                 .datas
@@ -1824,41 +1861,24 @@ pub fn rebuild<H: Host>(tex: &mut Tex<H, SsaTracker>, trace: bool, apply: bool) 
                 })
                 .filter_map(|(i, d)| Some((u32::try_from(i).ok()?, d.name, d.bytes.clone())))
                 .collect();
-            (files, datas, lines)
+            (files, kept, same, datas, lines)
         };
         let mut edits = Vec::new();
         let mut loads = Vec::new();
         // (a name the job stores: its φ, what the last trip stored, which
         // its file holds, 7.17.3's "A load reads the store")
-        let mut phi: BTreeMap<u32, Option<Arc<[u8]>>> = BTreeMap::new();
+        let mut phi: BTreeMap<u32, Option<Arc<[u8]>>> = kept.into_iter().collect();
         // (each file read by lines, as it is now)
         let mut nows: BTreeMap<u32, Arc<[u8]>> = BTreeMap::new();
-        // (a load the host knows is as it was is not made again: 7.17.3,
-        // "A rebuild's file checks cost the files that changed")
-        let checks = {
-            let loads: Vec<_> = files
-                .iter()
-                .map(|(_, name, kind, old, ..)| (&name[..], *kind, old.as_ref()))
-                .collect();
-            tex.host.unchanged(&loads)
-        };
-        let (mut same, mut read) = (0, 0);
+        let mut read = 0;
         // (a file read by lines that no step read a line of, nor met its
         // end: only its being there was read, `\IfFileExists`; its
         // contents now, for the next check)
         let mut there: Vec<(u32, Arc<[u8]>)> = Vec::new();
-        for ((id, name, kind, old, lines, stored, whole), unchanged) in
-            files.into_iter().zip(checks)
-        {
-            let now = if unchanged {
-                same += 1;
-                old.clone()
-            } else {
-                read += 1;
-                tex.host.read_file(&name, kind).map(|f| f.contents)
-            };
+        for (id, name, kind, old, lines, stored, whole) in files {
+            read += 1;
+            let now = tex.host.read_file(&name, kind).map(|f| f.contents);
             match (&old, &now) {
-                _ if unchanged => {}
                 (Some(o), Some(n)) if lines => {
                     nows.insert(id, n.clone());
                     // (and read whole somewhere: those readers compare it)
@@ -2711,6 +2731,7 @@ fn retire<H: Host>(
             *rr.st.steps.store_changes.entry(i).or_default() += 1;
         }
         rr.st.steps.loads.remove(&s);
+        rr.st.steps.phi_loaders.remove(&s);
         rr.st.steps.queries.remove(&s);
         mark_store_readers(rr, &ids, key, dirty, rep);
         rr.rt.fold.remove(s, old.keys());

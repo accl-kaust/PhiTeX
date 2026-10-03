@@ -11056,3 +11056,41 @@ last two (the directories not there, the fonts' sets): the load check
 5.2 → 3.8% of the samples, SipHash 1.8 → 0, `trip_end` 1.8 → 0, the
 trips' end 3.5 → 1.2%, the glyph union 1.7 → 1.2%. The harness: 14
 cases identical in all three modes; the workspace's tests pass.
+
+The course on accl, 57d5260 (with 8832cc6's `show_tokens`) against
+202c918 (job 6419, two rounds alternating; gate 6418 passed): the warm
+word edit 19.0/19.1 → 17.4/16.6 ms (its rebuild 16.8/16.9 → 15.7/15.0
+ms), the revert 14.1/12.9 → 11.8/12.2 ms; the cold build and peak RSS the
+same.
+
+## 2026-10-03 — More of a rebuild's fixed costs: the loads looked at by reference, the φ's loaders kept, the drawn items' hash kept (coordinator)
+
+The profile after 57d5260 (the course's word edits and reverts, LTO with
+frame pointers) still had costs every rebuild pays:
+- The loads looked at (1.1%): `rebuild` made a list of every load the
+  build made, each with its name copied, its kept contents and three set
+  lookups, to ask the host which are as they were, then kept only the
+  others. Now the host is asked with the names and contents by
+  reference, and only the loads it does not know are as they were are
+  copied out (the course: 3 to 5 of over a thousand).
+- `Steps::phi_seeds` (1.3%): the loads of a φ that found other than the
+  φ, found by walking every step's loads. The steps with a load of a φ
+  are kept as their runs close and leave (`phi_loaders`), and only their
+  loads are walked.
+- The ship's versions (2.1%): a recorded call begun while a page is
+  shipped (each `\write` of the page) versions the ship state first,
+  which hashed the page's display items recorded so far (`drawn`) each
+  time. The items are kept with the polynomial of their words
+  (`DrawnList`, `TokenList`'s polynomial: position, kind and fields, a
+  literal's length and bytes), made as each is recorded, and the state's
+  version hashes that and their count.
+- `show_token_slice` cloned the token list's `Arc` to show it (an atomic
+  increment and decrement for each `\pdfliteral` shown): it shows the
+  list it is given.
+
+The TikZ mock (LTO, 100 keystrokes, instructions per keystroke, against
+8832cc6, so with 57d5260's cuts): a word 3.49 → 3.31 M (−5.1%; its
+median 2.9 → 1.4 ms), a `(` 12.01 → 11.86 M, the heading 23.20 → 23.10
+M, the sentence that wraps 18.59 → 18.45 M; the same PDFs. The harness:
+14 cases identical in all three modes; the workspace's tests pass. The
+course on accl follows.

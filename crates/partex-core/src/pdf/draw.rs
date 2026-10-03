@@ -69,6 +69,85 @@ pub(crate) struct Drawn {
 
 partex_engine::persist_struct!(Drawn { h, v, item });
 
+impl Drawn {
+    /// The polynomial `p` (`partex_engine::node::tok_poly_step`'s) with
+    /// this item's words after it: its position, its kind, and its fields
+    /// (a literal's length, then its bytes, four to a word), so that the
+    /// words of a list of items say which items they are.
+    fn fold(&self, p: u64) -> u64 {
+        use partex_engine::node::tok_poly_step as step;
+        let words = |p: u64, ws: &[i32]| ws.iter().fold(p, |p, &w| step(p, w));
+        let p = words(p, &[self.h, self.v]);
+        match &self.item {
+            Draw::Char { f, c } => words(p, &[0, *f, i32::from(*c)]),
+            Draw::Rule { x, y, w, h } => words(p, &[1, *x, *y, *w, *h]),
+            Draw::Literal { text, mode } => {
+                let n = i32::try_from(text.len()).unwrap_or(i32::MAX);
+                let p = words(p, &[2, *mode, n]);
+                text.chunks(4).fold(p, |p, c| {
+                    let mut b = [0u8; 4];
+                    b[..c.len()].copy_from_slice(c);
+                    step(p, i32::from_le_bytes(b))
+                })
+            }
+            Draw::Form { objnum } => words(p, &[3, *objnum]),
+            Draw::Image { objnum, dims } => {
+                words(p, &[4, *objnum, dims.width, dims.height, dims.depth])
+            }
+            Draw::FakeSpace => words(p, &[5]),
+            Draw::EndText => words(p, &[6]),
+        }
+    }
+}
+
+/// The display items recorded and not encoded yet, with the polynomial
+/// of their words ([`Drawn::fold`]) made as each is recorded: the ship
+/// state's version hashes that, and the count, not every item again (a
+/// recorded call's start versions the ship state, `val.rs`: each `\write`
+/// of a page, hashing the items so far each time).
+#[derive(Clone, Debug, Default)]
+pub(crate) struct DrawnList {
+    items: Vec<Drawn>,
+    poly: u64,
+}
+
+impl DrawnList {
+    pub(crate) fn push(&mut self, d: Drawn) {
+        self.poly = d.fold(self.poly);
+        self.items.push(d);
+    }
+
+    /// The items, the list left empty.
+    pub(crate) fn take(&mut self) -> Vec<Drawn> {
+        self.poly = 0;
+        core::mem::take(&mut self.items)
+    }
+}
+
+impl PartialEq for DrawnList {
+    fn eq(&self, other: &Self) -> bool {
+        self.items == other.items
+    }
+}
+
+impl core::hash::Hash for DrawnList {
+    fn hash<H: core::hash::Hasher>(&self, h: &mut H) {
+        (self.items.len(), self.poly).hash(h);
+    }
+}
+
+impl partex_engine::persist::Persist for DrawnList {
+    fn save(&self, s: &mut partex_engine::persist::Saver) {
+        self.items.save(s);
+    }
+
+    fn load(l: &mut partex_engine::persist::Loader) -> Option<Self> {
+        let items: Vec<Drawn> = partex_engine::persist::Persist::load(l)?;
+        let poly = items.iter().fold(0, |p, d| d.fold(p));
+        Some(DrawnList { items, poly })
+    }
+}
+
 impl<H: Host, T: Tracker> Tex<H, T> {
     /// Ask the encoder for `item` at the walk's position: recorded while
     /// a content stream is open, else (and in `\pdfinterwordspaceon`
@@ -110,7 +189,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
 
     /// Encode the recorded items.
     pub(crate) fn flush_drawn(&mut self) -> Result<(), Jump> {
-        let items = core::mem::take(&mut self.pdf.ship.drawn);
+        let items = self.pdf.ship.drawn.take();
         for d in &items {
             self.encode(d)?;
         }

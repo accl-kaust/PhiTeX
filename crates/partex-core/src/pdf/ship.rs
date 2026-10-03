@@ -335,7 +335,7 @@ pub(crate) struct ShipState {
     /// (`draw.rs`).
     pub recording: bool,
     /// The display items recorded and not encoded yet.
-    pub drawn: Vec<super::draw::Drawn>,
+    pub drawn: super::draw::DrawnList,
 }
 
 super::val::record_by_hash!(ShipState);
