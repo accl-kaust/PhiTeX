@@ -1604,13 +1604,37 @@ a version it read changed.
 **Switches.** `PARTEX_SSA_TOOLS=outside` runs the conventional tools
 between trips instead (the reference); `PARTEX_SSA_TOOLS=0` none.
 
-**As built** (2026-10-04, stage 1): the BibTeX node is one call per
-`.aux` stream: it runs again, the whole of bibtex.web, when one of the
-four commands it reads in the `.aux` files changed or one of its files
-changed by stamp; its `.bbl` is a stream the tool defines, served from
-memory and written by the link. makeindex still runs as an outside
-tool. The calls inside BibTeX (stage 2) and makeindex's nodes (stage 3)
-follow.
+**As built** (2026-10-04).
+- *The node* (`ssa/tools.rs`): one per `.aux` stream asking for BibTeX.
+  It runs when one of the four commands it reads in the `.aux` files
+  changed, or one of its files by stamp; its `.bbl` and `.blg` are
+  streams it defines (`ssa::define_stream`).
+- *Its calls* (`partex_bibtex::Session`, stage 2): a run parses the
+  `.aux` files, the style and the databases again (`READ` is one call
+  over the databases, linear in their size; its outputs are per entry),
+  diffs `READ`'s outputs against the last run's (entries added, removed,
+  changed field by field; the cite order kept where it can be, by a
+  longest increasing run of the old keys), and then visits only the
+  places a change reached. The style's execution commands are deferred
+  while it is parsed (their places in the parse's `.blg` and terminal
+  output kept) and run as calls afterwards. A fatal error drops the
+  session and runs bibtex.web's program. Checked against bibtex.web's
+  run on TeX Live's `plain`, `alpha`, `abbrv`, `unsrt` and `IEEEtran`
+  styles over `xampl.bib` with random edits (citations added, removed,
+  swapped, `\citation{*}`, fields, strings, the preamble, crossrefs,
+  types, keys: `crates/partex-bibtex/tests/session.rs`): the same `.bbl`,
+  `.blg` and terminal at every step.
+- *Measured* (alpha, the 25 `xampl` keys cited, 105 calls): a note
+  edited runs 1 call; a citation added runs 17 (its 4 calls, the
+  `forward.pass`/`reverse.pass` chains as far as `last.sort.label`,
+  `next.extra` and the longest label changed); taken away, 13. The
+  thesis (`IEEEtran`, 48 entries, 103 calls): a title edited runs 1
+  call (and its `.bbl` comes out the same: IEEEtran lower-cases it, so
+  no step runs); an uncited entry edited runs 0 calls; a citation added
+  runs 20 of 105.
+- *Left*: `READ` is not split by entry (an edit of one entry parses the
+  databases again, a few milliseconds for a thesis's); makeindex's
+  nodes (stage 3).
 
 ---
 

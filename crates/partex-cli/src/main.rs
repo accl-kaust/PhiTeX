@@ -1629,6 +1629,9 @@ fn ssa_native() -> Option<partex_core::ssa::NativeTools> {
     Some(partex_core::ssa::NativeTools {
         bibtex: Some(bibtex::options(&mut kpse, false, 2)),
         makeindex: None,
+        // (`PARTEX_SSA_TOOL_CALLS=0`: each run of a tool's node is the
+        // whole program, the reference)
+        calls: std::env::var("PARTEX_SSA_TOOL_CALLS").map_or(true, |v| v != "0"),
     })
 }
 

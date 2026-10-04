@@ -12699,3 +12699,55 @@ TeX Live's bibtex and makeindex to the fixed point; with
 BibTeX ran (its file changed), its `.bbl` came out the same: 0 steps
 after it. A field edit: 0 steps in trip 1, BibTeX, then 5 steps (93
 commands) in trip 2.
+
+## 2026-10-04 — BibTeX's calls, stage 2 (branch `nativebib`, agent nativebib)
+
+**What changed** (DESIGN 3.16, "Exactly the dirty work", "As built"):
+`partex_bibtex::Session` runs BibTeX as a program of calls. The style's
+`EXECUTE`/`ITERATE`/`REVERSE`/`SORT` commands are deferred while it is
+parsed (`Bib::defer`, their places in the parse's output kept), then run
+as calls: one per `EXECUTE`, one per entry for the iterating commands,
+placed by command and the entry's key in the order the command iterates.
+Every state access that another call can write goes through a slot
+(`Bib::field`, `ent_int`, `glb_str`, `out_touch`, ... in `session.rs`;
+the plain run uses the arrays as before): `READ`'s outputs (an entry's
+fields, type, key; the preamble), entry variables, global variables and
+the output buffer. A slot keeps its definitions by place and its readers;
+a run diffs `READ`'s outputs, places new and moved calls, and visits only
+the places a change reached: a call whose reads resolve as before is
+kept, any other runs and wakes the readers of the writes that changed,
+up to the slot's next definition *and its maker* (it read the slot
+before writing it: the first version missed those, and a longest-label
+chain kept a stale maximum). `SORT` keeps a sorted map by (sort key,
+cite-order key): an entry whose key changed is placed again between its
+placed neighbours (it keeps its order key if that is still between
+theirs), and its calls in the commands that follow move. Moves take all
+the moved calls out before putting any back (an entry's new key can be
+another's old one: the first version lost a call that way). The `.bbl`,
+`.blg` and terminal are the parse's pieces and the calls' chunks in
+order; the built-in counts are summed; the history is made from the
+counted warnings and errors (an error: the errors' count, else the
+warnings').
+
+The node (`ssa/tools.rs`) keeps a session per `.aux` stream
+(`PARTEX_SSA_TOOL_CALLS=0`: bibtex.web's whole run each time, the
+reference), and reports each run's calls (run, kept, moved; entries
+added, removed, changed, sorted).
+
+**Rebased on memout d3720d4**: its producer API `ssa::define_stream`
+replaces stage 1's `Steps::produce`/`take_produced`; the `.blg` is a
+produced stream too, written by the linker.
+
+**Measured.** A/B tests against `partex_bibtex::run`
+(`tests/session.rs`: five TeX Live styles, `xampl.bib`, random edits,
+~600 steps): identical `.bbl`, `.blg`, terminal and status at every
+step. alpha, 25 entries: a note edited runs 1 of 105 calls; a citation
+added 17; removed 13. The thesis (IEEEtran, `References.bib`, SSA,
+fastdev): cold build's BibTeX 8.6 ms (fresh, 103 calls), its second trip
+4.0 ms (38 run); a title edit runs 1 call (the `.bbl` the same, IEEEtran
+lower-cases titles: 0 steps); an uncited entry's edit 0 calls; a
+citation added in Chapter 2 runs 20 of 105 calls, the TeX side 29 + 148
++ 98 steps in 3 trips; the final `.bbl` byte-identical to TeX Live's
+`bibtex` on the final `.aux`, the `.blg` too but its masked
+`Reallocated` lines. `ssa-edits --fixpoint` `bibtex`: identical, the
+node's calls per stage 17 (fresh), 9, 2, 1, 0, 5, 3.

@@ -41,6 +41,10 @@ type Served = BTreeMap<Vec<u8>, Option<Bytes>>;
 pub struct NativeTools {
     pub bibtex: Option<partex_bibtex::Options>,
     pub makeindex: Option<Vec<u8>>,
+    /// BibTeX's calls run again only where what they read changed
+    /// (`partex_bibtex::Session`); `false`: bibtex.web's whole run each
+    /// time the node runs (the reference).
+    pub calls: bool,
 }
 
 /// The tools' nodes, by the stream each reads.
@@ -65,6 +69,8 @@ struct BibNode {
     /// One of those files changed since (`look`).
     stale: bool,
     runs: u64,
+    /// Its calls, kept between its runs.
+    session: partex_bibtex::Session,
 }
 
 /// What BibTeX reads in an `.aux` file: its `\citation`, `\bibdata`,
@@ -247,13 +253,23 @@ pub(super) fn derive<H: Host>(
         }
         let t0 = clock.map(|c| c());
         let base = aux.strip_suffix(b".aux").unwrap_or(&aux).to_vec();
+        let mut session = {
+            let r = &mut *tex.tracker.rec.borrow_mut();
+            let node = r.st.tools.bib.entry(aux.clone()).or_default();
+            core::mem::take(&mut node.session)
+        };
         let mut files = BibFiles {
             host: &mut tex.host,
             served: &served,
             auxes: Vec::new(),
             files: Vec::new(),
         };
-        let out = partex_bibtex::run(&base, opts, &mut files);
+        let (out, stats) = if native.calls {
+            let (o, s) = session.run(&base, opts, &mut files);
+            (o, Some(s))
+        } else {
+            (partex_bibtex::run(&base, opts, &mut files), None)
+        };
         let (auxes, hfiles) = (files.auxes, files.files);
         {
             let r = &mut *tex.tracker.rec.borrow_mut();
@@ -273,6 +289,7 @@ pub(super) fn derive<H: Host>(
             node.files = hfiles;
             node.stale = false;
             node.runs += 1;
+            node.session = session;
         }
         // (the log a stream too, which the job does not load: the link
         // writes it)
@@ -308,8 +325,22 @@ pub(super) fn derive<H: Host>(
             .rfind(|l| !l.is_empty())
             .map(|l| String::from_utf8_lossy(l).into_owned())
             .unwrap_or_default();
+        let calls = stats.map_or_else(String::new, |s| {
+            alloc::format!(
+                "; calls {} (run {}, kept {}, moved {}; entries added {}, removed {}, changed {}, sorted {}{})",
+                s.calls,
+                s.run,
+                s.kept,
+                s.moved,
+                s.added,
+                s.removed,
+                s.changed,
+                s.sorted,
+                if s.fresh { "; fresh" } else { "" }
+            )
+        });
         lines.push(alloc::format!(
-            "bibtex {}{ms}: {last}",
+            "bibtex {}{ms}{calls}: {last}",
             String::from_utf8_lossy(&aux)
         ));
     }

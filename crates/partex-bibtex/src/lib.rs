@@ -32,7 +32,10 @@ mod bib;
 mod bst;
 mod builtins;
 mod exec;
+mod session;
 mod table;
+
+pub use session::{Session, Stats};
 
 use alloc::vec::Vec;
 
@@ -328,6 +331,12 @@ struct Bib<'f> {
     bbl: Vec<u8>,
     history: u8,
     err_count: i64,
+    /// The warnings and errors marked, counted (a session's history is
+    /// made from its calls' counts).
+    n_warn: i64,
+    n_err: i64,
+    /// A session's run: the execution commands are calls (`session.rs`).
+    inc: Option<alloc::boxed::Box<session::Inc>>,
     t: Table,
 
     // §41–43, §80: the input line and scanning
@@ -510,6 +519,9 @@ impl<'f> Bib<'f> {
             bbl: Vec::new(),
             history: SPOTLESS,
             err_count: 0,
+            n_warn: 0,
+            n_err: 0,
+            inc: None,
             t: Table::new(),
             buffer: Vec::new(),
             last: 0,
@@ -638,6 +650,7 @@ impl<'f> Bib<'f> {
 
     // §18
     fn mark_warning(&mut self) {
+        self.n_warn += 1;
         if self.history == WARNING_MESSAGE {
             self.err_count += 1;
         } else if self.history == SPOTLESS {
@@ -647,6 +660,7 @@ impl<'f> Bib<'f> {
     }
 
     fn mark_error(&mut self) {
+        self.n_err += 1;
         if self.history < ERROR_MESSAGE {
             self.history = ERROR_MESSAGE;
             self.err_count = 1;

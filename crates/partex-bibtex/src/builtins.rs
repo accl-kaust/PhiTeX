@@ -206,7 +206,7 @@ impl Bib<'_> {
                     self.bst_cant_mess_with_entries_print();
                     return Ok(());
                 }
-                match self.type_list[self.cite_ptr] {
+                match self.entry_type() {
                     UNDEFINED => self.execute_fn(self.b_default),
                     EMPTY => Ok(()),
                     t => self.execute_fn(t),
@@ -217,7 +217,7 @@ impl Bib<'_> {
             "cite$" => {
                 // §378
                 if self.mess_with_entries {
-                    let s = self.cite_list[self.cite_ptr].clone();
+                    let s = self.cur_cite();
                     self.push(Lit::Str(s, false));
                 } else {
                     self.bst_cant_mess_with_entries_print();
@@ -323,7 +323,7 @@ impl Bib<'_> {
             }
             "preamble$" => {
                 // §429
-                let v: Vec<u8> = self.s_preamble[..self.num_preamble_strings].concat();
+                let v = self.preamble();
                 self.push_new(v);
                 Ok(())
             }
@@ -361,7 +361,7 @@ impl Bib<'_> {
             "type$" => {
                 // §447
                 if self.mess_with_entries {
-                    match self.type_list[self.cite_ptr] {
+                    match self.entry_type() {
                         UNDEFINED | EMPTY => self.push_null(),
                         t => {
                             let s = self.t.text(t).clone();
@@ -536,7 +536,7 @@ impl Bib<'_> {
         let idx = self.t.info(f) as usize;
         match (class, &l2) {
             (INT_ENTRY_VAR, Lit::Int(n)) => {
-                self.entry_ints[self.cite_ptr * self.num_ent_ints + idx] = *n;
+                self.set_ent_int(idx, *n);
             }
             (STR_ENTRY_VAR, Lit::Str(s, _)) => {
                 // §357
@@ -545,9 +545,9 @@ impl Bib<'_> {
                     self.bst_string_size_exceeded(self.opts.ent_str_size, ", the entry");
                     v.truncate(self.opts.ent_str_size);
                 }
-                self.entry_strs[self.cite_ptr * self.num_ent_strs + idx] = v;
+                self.set_ent_str(idx, v);
             }
-            (INT_GLOBAL_VAR, Lit::Int(n)) => self.t.set_info(f, *n),
+            (INT_GLOBAL_VAR, Lit::Int(n)) => self.set_glb_int(f, *n),
             (STR_GLOBAL_VAR, Lit::Str(s, made)) => {
                 // §359: a string of the database or style is kept as it
                 // is; one computed by this command is copied
@@ -557,9 +557,9 @@ impl Bib<'_> {
                         self.bst_string_size_exceeded(self.opts.glob_str_size, ", the global");
                         v.truncate(self.opts.glob_str_size);
                     }
-                    self.glb_strs[idx] = (None, v);
+                    self.set_glb_str(idx, None, v);
                 } else {
-                    self.glb_strs[idx] = (Some(s.clone()), Vec::new());
+                    self.set_glb_str(idx, Some(s.clone()), Vec::new());
                 }
             }
             (INT_ENTRY_VAR | INT_GLOBAL_VAR, _) => self.print_wrong_stk_lit(&l2, STK_INT)?,

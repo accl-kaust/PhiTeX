@@ -293,6 +293,9 @@ impl Bib<'_> {
     /// §178
     fn bst_execute_command(&mut self) -> B {
         let loc = self.bst_fn_argument("execute")?;
+        if self.defer(0, loc) {
+            return Ok(());
+        }
         // §296
         self.init_command_execution();
         self.mess_with_entries = false;
@@ -471,6 +474,9 @@ impl Bib<'_> {
     /// §203
     fn bst_iterate_command(&mut self) -> B {
         let loc = self.bst_fn_argument("iterate")?;
+        if self.defer(1, loc) {
+            return Ok(());
+        }
         // §297
         self.init_command_execution();
         self.mess_with_entries = true;
@@ -546,6 +552,9 @@ impl Bib<'_> {
     /// §212
     fn bst_reverse_command(&mut self) -> B {
         let loc = self.bst_fn_argument("reverse")?;
+        if self.defer(2, loc) {
+            return Ok(());
+        }
         // §298
         self.init_command_execution();
         self.mess_with_entries = true;
@@ -561,6 +570,9 @@ impl Bib<'_> {
     fn bst_sort_command(&mut self) -> B {
         if !self.read_seen {
             return Err(self.bst_err(&[&"Illegal, sort command before read command"]));
+        }
+        if self.defer(3, 0) {
+            return Ok(());
         }
         // §299–306: `less_than` orders entries by `sort.key$`, ties by
         // position, so the order is total and any sort gives bibtex's
