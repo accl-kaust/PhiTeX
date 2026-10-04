@@ -1305,6 +1305,9 @@ pub struct SsaTracker {
     /// reads of later definitions, and stopped if it made one
     /// ([`Tracker::stop_due`]; `u64::MAX`: none is).
     pub(crate) stop_after: core::cell::Cell<u64>,
+    /// The command the macro calls since are counted from, and how many
+    /// ([`Tracker::stop_expanding`]).
+    expanding: core::cell::Cell<(u64, u64)>,
     /// The commands a rebuild runs at most: past them it stops, its
     /// trace kept, as one it cannot make (`u64::MAX`, the default: no
     /// limit; the CLI's `PARTEX_SSA_REBUILD_BUDGET`). A host may build
@@ -1479,6 +1482,7 @@ impl SsaTracker {
             lost: core::cell::Cell::new(0),
             timed: false,
             stop_after: core::cell::Cell::new(u64::MAX),
+            expanding: core::cell::Cell::new((0, 0)),
             budget: core::cell::Cell::new(u64::MAX),
             deadline: core::cell::Cell::new(None),
             cancel: core::cell::Cell::new(None),
@@ -2054,6 +2058,16 @@ impl Tracker for SsaTracker {
                 got.0 & 0xffff
             ));
         }
+        // (the step open, and the rebuild's trace so far)
+        out.push_str(&alloc::format!(
+            "\nopen step: {:?}",
+            r.rt.open_step_serial()
+        ));
+        let log = &r.st.steps.log;
+        for l in &log[log.len().saturating_sub(40)..] {
+            out.push_str("\n  ");
+            out.push_str(l);
+        }
         out
     }
 
@@ -2116,6 +2130,30 @@ impl Tracker for SsaTracker {
                 .rec
                 .try_borrow_mut()
                 .is_ok_and(|mut r| rebuild::read_later(&mut r))
+    }
+
+    #[inline]
+    fn stop_expanding(&self, n: u64) -> bool {
+        // (every 2^16 calls with no command between them, in a rebuild's
+        // run: whether it read a later definition, and stops now)
+        if self.stop_after.get() == u64::MAX {
+            return false;
+        }
+        let (at, calls) = self.expanding.get();
+        let calls = if at == n { calls + 1 } else { 1 };
+        self.expanding.set((n, calls));
+        if calls & 0xffff != 0 {
+            return false;
+        }
+        let stop = self
+            .rec
+            .try_borrow_mut()
+            .is_ok_and(|mut r| rebuild::read_later(&mut r));
+        if stop {
+            // ([`rebuild::run_step`] sees it stopped)
+            self.stop_after.set(0);
+        }
+        stop
     }
 
     fn step_salt(&self) -> u64 {

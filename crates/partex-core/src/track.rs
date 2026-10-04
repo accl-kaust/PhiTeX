@@ -528,6 +528,14 @@ pub trait Tracker {
     fn stop_due(&self, _n: u64) -> bool {
         false
     }
+    /// A macro call with no command since command `n`: whether the run
+    /// stops there, a checkpoint (a rebuild's run of a step that read a
+    /// value it must not, expanding on with it, which may never end: the
+    /// run is dropped, `ssa::rebuild`, "A run that read a later
+    /// definition").
+    fn stop_expanding(&self, _n: u64) -> bool {
+        false
+    }
     /// (With [`Tracker::VALUES`].) The open step's name, for the keys of
     /// the lines it seals (`seal.rs`): the same at each run of the step,
     /// and no other step's.
