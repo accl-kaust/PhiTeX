@@ -12564,3 +12564,11 @@ Thesis: values held 3.70 M → 2.82 M; peak 2,123,168 KB → 2,045,336 KB;
 outputs, trips and steps the same; `pt` with two edits (3 and 377 steps
 run) and `acro2`, `ac3`: outputs equal to main's, the entry check as on
 main.
+
+**A retired step's end goes with it** (same branch). Each step keeps its
+end (`Steps::inputs`, an `InputState`: the input stack's levels, the
+macros' arguments open there, the buffer) for the next run to start
+from; a retired step's was kept for good, and no run starts from it
+again. `retire` drops it. Thesis: peak 2,045,336 KB → 1,940,368 KB
+(trip 1's end 1.52 GB; the trips that ran most steps again add 0.38 GB);
+outputs, trips and steps the same.

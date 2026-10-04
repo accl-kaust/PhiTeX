@@ -3323,6 +3323,11 @@ fn retire<H: Host>(
         rr.st.steps.queries.remove(&s);
         mark_store_readers(rr, &ids, key, dirty, rep);
         rr.rt.fold.remove(s, old.keys());
+        // (its end, which no run starts from again: the input it held,
+        // the token lists and the macros' arguments open there, goes)
+        if let Some(x) = rr.st.steps.inputs.get_mut(s as usize) {
+            *x = None;
+        }
         // (its chunks leave the link)
         rr.st.steps.fx_changed.push(s);
         rr.st
