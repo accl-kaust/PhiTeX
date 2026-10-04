@@ -12387,3 +12387,24 @@ the rebuild's chain (no step runs for it). What chains is
 holding every level's saved entries, read and written whole by each
 `\dimen324`-style save or restore, so a window deep in a TikZ figure
 reads the outer levels' saved values too.
+
+## 2026-10-04 — The saved registers' shape puts its entries back with it (branch `xchain-fix`)
+
+**The bug.** After the entry-by-entry chains (`29390b4`), a thesis
+rebuild panicked: `restore_ext` met an entry with no location
+(`peek_xeq_level`: `xeq_level` index out of range). After a step's run
+the arrays are put back to the latest definitions only for the slots
+placed or written. A placement of an earlier, shorter shape cut the
+chains; putting the latest shape back padded them with stand-ins, and
+the entries in between, neither placed nor written, were never put
+back: the next restore read a stand-in.
+
+**The fix.** As the nest's levels go with the nest, `with_levels` gives
+every entry within a shape it puts its own value (placement, the put
+back after a run, a dropped run's undoing), and `save_stack_whole`
+places every entry within a shape it places.
+
+**Measured** (fastdev, this machine): the thesis's five edits as
+rebuilds (`th.sh`): no panic, entry check 0 bad reads at all six
+builds. proj2: rebuild 2 still 16 steps (46 ms), PDF equal to a cold
+SSA build; `pt`, `acro2`, `ac3`: 0 bad reads, PDFs equal to cold.

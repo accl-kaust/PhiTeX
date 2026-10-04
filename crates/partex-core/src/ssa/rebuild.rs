@@ -1480,9 +1480,12 @@ fn save_stack_whole<H: Host>(
             next.push(a);
         }
     }
+    // (with the shape placed, every entry within it: the arrays hold
+    // the entries of the shape they hold, no others)
+    let whole = later(fold, &shape, key);
     for k in (0..u32::try_from(xlen).unwrap_or(0)).map(|i| XENTRY.saturating_add(i)) {
         let a = slot(k);
-        if later(fold, &a, key) {
+        if whole || later(fold, &a, key) {
             next.push(a);
         }
     }
@@ -1557,20 +1560,47 @@ fn with_levels<H: Host>(
     mut value: impl FnMut(Slot) -> Option<SVal>,
 ) -> Vec<(Slot, SVal)> {
     use crate::track::list;
+    use crate::track::save::{XCHAIN, XENTRY};
     let nest = Slot(Fam::List, i64::from(list::COUNT));
     let field = |a: &Slot| {
         a.0 == Fam::List && (a.1 < i64::from(list::COUNT) || a.1 >= i64::from(list::STRIDE))
     };
+    let shape = Slot(Fam::Save, i64::from(XCHAIN));
+    let entry = |a: &Slot| a.0 == Fam::Save && a.1 >= i64::from(XENTRY);
     let mut vals = Vec::new();
     let mut done = BTreeSet::new();
-    let mut with_nest = false;
+    let (mut with_nest, mut with_shape) = (false, false);
     for a in slots {
         with_nest |= a == nest;
-        if field(&a) {
+        with_shape |= a == shape;
+        if field(&a) || entry(&a) {
             done.insert(a);
         }
         if let Some(v) = value(a) {
             vals.push((a, v));
+        }
+    }
+    if with_shape {
+        // (e-TeX's chains put back hold the entries their shape says, each
+        // at its own definition: the entries a shape put before dropped
+        // or left stand-ins are put with it)
+        let n: usize = vals
+            .iter()
+            .find(|(a, _)| *a == shape)
+            .and_then(|(_, v)| match v.1.as_deref() {
+                Some(super::SValue::XChain { lens, .. }) => {
+                    Some(lens.iter().map(|&n| n as usize).sum())
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| tex.xregs.chain_lens().iter().map(|&n| n as usize).sum());
+        for i in 0..u32::try_from(n).unwrap_or(0) {
+            let a = Slot(Fam::Save, i64::from(XENTRY.saturating_add(i)));
+            if !done.contains(&a)
+                && let Some(v) = value(a)
+            {
+                vals.push((a, v));
+            }
         }
     }
     if with_nest {
