@@ -1089,9 +1089,14 @@ readers rerun. What is built:
 - *Positions in the conditionals.* The `cond` slot holds each open
   conditional's absolute `if_line`. An edit that adds a line before a
   conditional that stays open across steps changes `cond` for every
-  step until it closes: 101 of 169 steps on the thesis. Each level's
-  line can be a slot of its own, read only by the messages that print
-  it, apart from the stack's shape.
+  step until it closes: 101 of 169 steps on the thesis. A line is
+  observable only where a message prints it (`print_line_no`), and those
+  steps are already seeded by position ("a line number read is kept by
+  position"). So `cond`'s version could leave the lines out. But a step
+  placed from a definition that was kept would then hold a stale line,
+  and placing it would have to map the lines through the edits, as
+  `InputState::mapped` maps the input's. Per-level line slots
+  (a push reads none of the lines below) are the other way.
 - *A relative save pointer.* A step that leaves `save_ptr` where it
   found it, and never pops below it, uses only addresses relative to its
   entry. It could neither read nor define the pointer. In the data so

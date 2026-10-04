@@ -12061,3 +12061,8 @@ built"):
   redundant store is a firewall here, not a false dependency. The
   rebuild passes over a marked reader whose read definition comes back
   at the same version.
+
+Oracle for `45f91fe`, both on accl: `edits --brief --fixpoint` gave 17/17
+cases identical over 99 stages (job 6573; the base 904ea54 gave the same,
+job 6575), and `gate` exited 0 (job 6574: e2e 37/37, trip and etrip
+identical, clippy clean).
