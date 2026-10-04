@@ -359,6 +359,8 @@ pub(crate) struct ObjTab {
     pub(crate) vcount: u32,
     /// `alog` replayed (scratch: a cache).
     ncache: NumCache,
+    /// SSA mode's virtual numbers (DESIGN 3.12, "PDF object numbers").
+    pub(crate) ssa: SsaObjs,
 }
 
 partex_engine::persist_struct!(ObjTab {
@@ -375,7 +377,8 @@ partex_engine::persist_struct!(ObjTab {
     alog,
     vseed,
     vcount,
-    ncache
+    ncache,
+    ssa
 });
 
 /// [`ObjTab::numbering`]'s cache: not state (equal to any other, saved
@@ -401,6 +404,94 @@ impl partex_engine::persist::Persist for NumCache {
         Some(Self(None))
     }
 }
+
+/// SSA mode's virtual object numbers (DESIGN 3.12, "PDF object
+/// numbers"). pdfTeX numbers objects in the order they are made, so an
+/// object made or dropped early renumbers every later one; with one slot
+/// for the table, every later step that made an object read a changed
+/// table and made a changed one. Here an object's number is a virtual
+/// id that does not depend on what came before it (`vnum.rs`), the
+/// link writes pdfTeX's numbers, and each piece of the table is a slot
+/// of its own:
+/// - each object's entry (`track::Row::PdfObj`), by its id;
+/// - each lookup tree's entry (`track::Row::PdfName`), by its type and
+///   identifier;
+/// - each step's numbering events (`track::Row::PdfNum`), by the step:
+///   an append, read only where TeX observes a number (`\pdflastobj`
+///   and friends, a number given back, the job's end), which reads the
+///   events of every step before it;
+/// - the lists' heads, the `OBJS` field.
+///
+/// An object TeX identifies (a page, a destination, a font: see
+/// [`tex_identity`]) is named by that identity, any other by its step
+/// and its count in it, so a step run again names its objects as before.
+/// (Scratch beside the state: not saved, equal to any other.)
+#[derive(Clone, Default)]
+pub(crate) struct SsaObjs {
+    pub(crate) on: bool,
+    /// The open step, whose objects are named by it.
+    pub(crate) step: Option<u32>,
+    /// The seed of hashed ids (an applied call's name, or a step's id).
+    pub(crate) seed: u128,
+    /// The open step's numbering events.
+    pub(crate) events: Vec<super::vnum::NumEvent>,
+    /// Each step's events as its latest run made them, with their
+    /// version (`track::Row::PdfNum`'s values).
+    pub(crate) steplogs: alloc::collections::BTreeMap<u32, (Arc<[super::vnum::NumEvent]>, u128)>,
+    /// The numbering after the steps before the open one (made where the
+    /// step first observes a number), and the slots it read.
+    pub(crate) prefix: Option<Prefix>,
+    /// Who made each hashed id (to tell a collision from the same object
+    /// made again).
+    vowner: alloc::collections::BTreeMap<i32, u128>,
+    /// The lookup trees' entries by their slot.
+    pub(crate) name_keys: alloc::collections::BTreeMap<i64, (u8, Id)>,
+    /// The entries' versions before their first change since the last
+    /// flush (`Tex::obj_flush`).
+    pub(crate) before: alloc::collections::BTreeMap<i32, u128>,
+    /// The lookup trees' entries read (`false`, with the version read)
+    /// and written (`true`) since the last flush, in order.
+    pub(crate) names: Vec<(bool, i64, u128)>,
+}
+
+impl PartialEq for SsaObjs {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+
+impl core::fmt::Debug for SsaObjs {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "SsaObjs({})", self.on)
+    }
+}
+
+impl partex_engine::persist::Persist for SsaObjs {
+    fn save(&self, _: &mut partex_engine::persist::Saver) {}
+    fn load(_: &mut partex_engine::persist::Loader) -> Option<Self> {
+        Some(Self::default())
+    }
+}
+
+/// The numbering of the steps before the open one, and the slots read
+/// for it (each step's events, with their version).
+pub(crate) type Prefix = (Arc<super::vnum::Numbering>, Arc<[(u32, u128)]>);
+
+/// The version of an absent object or tree entry.
+const ABSENT_CELL: u128 = 0x6162_7365_6e74;
+
+/// The slot of lookup tree `t`'s entry for `i`.
+#[must_use]
+pub(crate) fn name_slot(t: u8, i: &Id) -> i64 {
+    #[allow(clippy::cast_possible_truncation, reason = "a slot's 64 bits")]
+    let k = partex_engine::stablehash::StableHasher::of(&(b"pdfname", t, i)) as u64;
+    k.cast_signed()
+}
+
+/// Structured ids (a step's objects): `1 + (step << SEQ_BITS | count)`,
+/// below `HASHED`; ids from `HASHED` on are hashed.
+const SEQ_BITS: u32 = 12;
+const HASHED: i32 = 1 << 30;
 
 /// A cell of the table named by what it holds: a lookup tree's entry
 /// (type and identifier).
@@ -497,6 +588,7 @@ impl core::hash::Hash for ObjTab {
             vseed: _,
             vcount: _,
             ncache: _,
+            ssa: _,
         } = self;
         if self.virt {
             // (virtual numbers: the entries are cells, and how many
@@ -549,6 +641,7 @@ impl Default for ObjTab {
             vseed: 0,
             vcount: 0,
             ncache: NumCache::default(),
+            ssa: SsaObjs::default(),
         }
     }
 }
@@ -585,6 +678,11 @@ impl ObjTab {
 
     fn version_with(&self, tab: u128) -> u128 {
         use partex_ssa::Version;
+        if self.ssa.on {
+            // (the entries are slots of their own, and how many there are
+            // is the link's: the lists' heads)
+            return Version::node(0x6f62_6a73, &[Version::of(&(self.head, self.symbolic))]).0;
+        }
         let rest = if self.virt {
             Version::of(&(self.vtab.len(), self.alog.len(), self.vseed, self.vcount))
         } else {
@@ -597,6 +695,10 @@ impl ObjTab {
     /// The `OBJ_TREES` field's version: the trees'.
     pub(crate) fn trees_version(&self) -> u128 {
         use partex_ssa::Version;
+        if self.ssa.on {
+            // (each entry is a slot of its own)
+            return Version::node(0x7472_6565, &[]).0;
+        }
         let parts: Vec<Version> = self.trees.iter().map(|t| Version(t.version())).collect();
         Version::node(0x7472_6565, &parts).0
     }
@@ -607,17 +709,34 @@ impl ObjTab {
             self.log.overflow.set(true);
         }
         if self.virt {
-            return self.vtab.get(&k).expect("a virtual object");
+            // (SSA mode: one a run found where a later definition is, as
+            // `get_mut`)
+            return self
+                .vtab
+                .get(&k)
+                .or_else(|| self.vtab.get(&0).filter(|_| self.ssa.on))
+                .expect("a virtual object");
         }
         &self.tab[usize::try_from(k).unwrap_or(0)]
     }
 
     /// Entry `k`, to change (a machine's region reads it, then writes it).
     pub(crate) fn get_mut(&mut self, k: i32) -> &mut Entry {
+        if self.ssa.on && !self.ssa.before.contains_key(&k) {
+            let v = self.cell_version(k);
+            self.ssa.before.insert(k, v);
+        }
         if self.log.on && !(self.log.objs.push(k) && self.log.objs.push(-1 - k)) {
             self.log.overflow.set(true);
         }
         if self.virt {
+            if self.ssa.on && !self.vtab.contains_key(&k) {
+                // (SSA mode: an object a run found where a later
+                // definition is, not placed; the run is dropped and made
+                // again with it placed)
+                let e = self.vtab.get(&0).cloned().expect("object 0");
+                self.vtab.insert(k, e);
+            }
             return self.vtab.get_mut(&k).expect("a virtual object");
         }
         &mut self.tab[usize::try_from(k).unwrap_or(0)]
@@ -638,7 +757,11 @@ impl ObjTab {
 
     /// Record a numbering event (virtual numbers).
     pub(crate) fn num_event(&mut self, e: super::vnum::NumEvent) {
-        self.alog.push(e);
+        if self.ssa.on {
+            self.ssa.events.push(e);
+        } else {
+            self.alog.push(e);
+        }
     }
 
     /// pdfTeX's numbering where the job is now, observed: the region
@@ -651,6 +774,9 @@ impl ObjTab {
     /// then read whole: `forced`; a single number read with `NUM_ANSWERS`
     /// on is an answer instead).
     fn numbering_whole(&mut self, whole: bool) -> Arc<super::vnum::Numbering> {
+        if self.ssa.on {
+            return self.ssa_numbering();
+        }
         if whole {
             self.log.observers.2 += 1;
         }
@@ -678,7 +804,7 @@ impl ObjTab {
         self.log.observers.0 += 1;
         self.log.observers.3.insert(k);
         let n = self.numbering_whole(false).of(k);
-        if self.answers_on() {
+        if self.answers_on() && !self.ssa.on {
             self.log.answers.push(NumAnswer::Final(k, n));
         }
         n
@@ -718,7 +844,7 @@ impl ObjTab {
             self.log.observers.1 += 1;
             self.log.observers.3.insert(-n);
             let v = self.numbering_whole(false).vid.get(&n).copied();
-            if self.answers_on() {
+            if self.answers_on() && !self.ssa.on {
                 self.log.answers.push(NumAnswer::Of(n, v));
             }
             v
@@ -753,6 +879,9 @@ impl ObjTab {
     /// or else the step's position and count, the first free one (reading
     /// each tried).
     fn new_vid(&mut self, name: Option<u128>) -> i32 {
+        if self.ssa.on {
+            return self.ssa_vid(name);
+        }
         let mut j = 0u32;
         loop {
             let h = if let Some(n) = name {
@@ -777,12 +906,30 @@ impl ObjTab {
     /// reads `MCell::Dests`).
     pub(crate) fn dest_names_read(&mut self) -> Vec<(Arc<[u8]>, i32)> {
         self.log.dests_read = true;
+        if self.ssa.on {
+            // (SSA mode keeps no list of them: the destinations' list,
+            // newest first, has them)
+            let mut v = Vec::new();
+            let mut k = self.head[OBJ_TYPE_DEST];
+            while k != 0 {
+                let e = self.get(k);
+                if let Id::Name(s) = &e.info {
+                    v.push((s.clone(), k));
+                }
+                k = e.link;
+            }
+            v.reverse();
+            return v;
+        }
         self.dest_names.to_vec()
     }
 
     /// How many destination names there are (read as
     /// [`Self::dest_names_read`]).
     pub(crate) fn dest_count(&mut self) -> usize {
+        if self.ssa.on {
+            return self.dest_names_read().len();
+        }
         self.log.dests_read = true;
         self.dest_names.len()
     }
@@ -816,7 +963,7 @@ impl ObjTab {
     pub(crate) fn reserve_log(&mut self) {
         if self.log.on {
             // (drained after each step)
-            let n = (4 * self.tab.len()).max(1 << 14);
+            let n = (4 * self.len()).max(1 << 14);
             if core::mem::replace(&mut self.log.sized, true) {
                 self.log.objs.reserve(n);
             } else {
@@ -933,6 +1080,173 @@ impl ObjTab {
         h.finish128()
     }
 
+    /// Object `k`'s slot's version (SSA mode): its entry's, a written
+    /// object as written, not where.
+    pub(crate) fn cell_version(&self, k: i32) -> u128 {
+        self.vtab
+            .get(&k)
+            .map_or(ABSENT_CELL, |e| self.entry_version(e))
+    }
+
+    /// The version of the lookup trees' entry at slot `key` (SSA mode).
+    pub(crate) fn name_version(&self, key: i64) -> u128 {
+        let Some((t, i)) = self.ssa.name_keys.get(&key) else {
+            return ABSENT_CELL;
+        };
+        let v = self.trees.get(usize::from(*t)).and_then(|m| m.get(i));
+        partex_ssa::Version::of(&(b"name", v)).0
+    }
+
+    /// The version of step `n`'s numbering events (SSA mode).
+    pub(crate) fn num_version(&self, n: u32) -> u128 {
+        self.ssa.steplogs.get(&n).map_or(ABSENT_CELL, |e| e.1)
+    }
+
+    /// A lookup tree's entry read (`write`: written), SSA mode.
+    fn ssa_name(&mut self, write: bool, t: u8, i: &Id) {
+        let key = name_slot(t, i);
+        self.ssa
+            .name_keys
+            .entry(key)
+            .or_insert_with(|| (t, i.clone()));
+        let v = if write { 0 } else { self.name_version(key) };
+        self.ssa.names.push((write, key, v));
+    }
+
+    /// The lookup trees' entry at slot `key`: its type, identifier and
+    /// object (a record's value, SSA mode).
+    pub(crate) fn name_cell(&self, key: i64) -> Option<(u8, Id, Option<i32>)> {
+        let (t, i) = self.ssa.name_keys.get(&key)?;
+        let v = self.trees.get(usize::from(*t))?.get(i).copied();
+        Some((*t, i.clone(), v))
+    }
+
+    /// Put the lookup trees' entry back (a record's value, SSA mode).
+    pub(crate) fn set_name_cell(&mut self, key: i64, t: u8, i: &Id, v: Option<i32>) {
+        self.ssa
+            .name_keys
+            .entry(key)
+            .or_insert_with(|| (t, i.clone()));
+        self.set_tree_entry(usize::from(t), i, v);
+    }
+
+    /// Take the lookup trees' entry at slot `key` away (SSA mode).
+    pub(crate) fn clear_name_cell(&mut self, key: i64) {
+        if let Some((t, i)) = self.ssa.name_keys.get(&key).cloned() {
+            self.set_tree_entry(usize::from(t), &i, None);
+        }
+    }
+
+    /// A new virtual id in SSA mode: an object TeX names by `name`, the
+    /// next of the open step's otherwise.
+    fn ssa_vid(&mut self, name: Option<u128>) -> i32 {
+        use partex_engine::stablehash::StableHasher;
+        let owner = if let Some(n) = name {
+            n
+        } else {
+            let c = self.vcount;
+            self.vcount += 1;
+            if let Some(step) = self.ssa.step
+                && step < (1 << (30 - SEQ_BITS)) - 1
+                && c < 1 << SEQ_BITS
+            {
+                return 1 + i32::try_from(step << SEQ_BITS | c).unwrap_or(0);
+            }
+            StableHasher::of(&(b"seq", self.ssa.seed, self.ssa.step, c))
+        };
+        let mut j = 0u32;
+        loop {
+            let h = StableHasher::of(&(owner, j));
+            j += 1;
+            #[allow(clippy::cast_possible_truncation, reason = "a hash's low bits")]
+            let low = (h as u32) % (HASHED.cast_unsigned() - 1);
+            let v = HASHED + low.cast_signed();
+            match self.ssa.vowner.get(&v) {
+                Some(&o) if o != owner => {}
+                _ => {
+                    self.ssa.vowner.insert(v, owner);
+                    return v;
+                }
+            }
+        }
+    }
+
+    /// An applied call begins (SSA mode): the objects it makes are named
+    /// by its name; what it replaces, given back at its end.
+    pub(crate) fn ssa_call_seed(&mut self, name: u128) -> (Option<u32>, u128, u32) {
+        let was = (self.ssa.step, self.ssa.seed, self.vcount);
+        if self.ssa.on {
+            self.ssa.step = None;
+            self.ssa.seed = name;
+            self.vcount = 0;
+        }
+        was
+    }
+
+    /// The applied call ends (SSA mode).
+    pub(crate) fn ssa_call_seed_end(&mut self, was: (Option<u32>, u128, u32)) {
+        if self.ssa.on {
+            (self.ssa.step, self.ssa.seed, self.vcount) = was;
+        }
+    }
+
+    /// The numbering of the steps before the open one, and the slots read
+    /// for it (SSA mode).
+    pub(crate) fn ssa_set_prefix(
+        &mut self,
+        n: Arc<super::vnum::Numbering>,
+        reads: Arc<[(u32, u128)]>,
+    ) {
+        self.ssa.prefix = Some((n, reads));
+        self.ncache = NumCache::default();
+    }
+
+    /// Note a read of entry `k` made without [`Self::get`] (SSA mode).
+    pub(crate) fn log_read(&self, k: i32) {
+        if self.log.on && !self.log.objs.push(k) {
+            self.log.overflow.set(true);
+        }
+    }
+
+    /// A step begins (SSA mode): its objects are named by `step`.
+    pub(crate) fn ssa_step_begin(&mut self, step: Option<u32>) {
+        self.ssa.step = step;
+        self.ssa.seed = u128::from(step.unwrap_or(u32::MAX));
+        self.vcount = 0;
+        self.ssa.events.clear();
+        self.ssa.prefix = None;
+        self.ncache = NumCache::default();
+        self.ssa.before.clear();
+        self.ssa.names.clear();
+        self.log.objs.clear();
+        self.log.overflow.set(false);
+        self.reserve_log();
+    }
+
+    /// The numbering where the job is now (SSA mode): the steps' before
+    /// the open one (`ssa.prefix`, made by `Tex::obj_observe`), then the
+    /// open step's events.
+    fn ssa_numbering(&mut self) -> Arc<super::vnum::Numbering> {
+        let base = self
+            .ssa
+            .prefix
+            .as_ref()
+            .map_or_else(Arc::default, |p| p.0.clone());
+        let want = base.seen + self.ssa.events.len();
+        if let Some(n) = &self.ncache.0
+            && n.seen == want
+        {
+            return n.clone();
+        }
+        let mut n = (*base).clone();
+        for &e in &self.ssa.events {
+            n.step(e);
+        }
+        let n = Arc::new(n);
+        self.ncache.0 = Some(n.clone());
+        n
+    }
+
     /// pdfTeX §698: `pdf_create_obj`: a new object of type `t` with
     /// identifier `i` (the caller checks the table size).
     pub(crate) fn create(&mut self, t: usize, i: Id) -> i32 {
@@ -953,7 +1267,7 @@ impl ObjTab {
         let k = if self.virt {
             let v = self.new_vid(name);
             self.vtab.insert(v, fresh);
-            self.alog.push(super::vnum::NumEvent::Create(v));
+            self.num_event(super::vnum::NumEvent::Create(v));
             v
         } else {
             self.tab.push(fresh);
@@ -964,14 +1278,18 @@ impl ObjTab {
             self.log.overflow.set(true);
         }
         let tree = u8::try_from(t).unwrap_or(u8::MAX);
-        if self.log.on {
+        if self.ssa.on {
+            self.ssa_name(false, tree, &i);
+        } else if self.log.on {
             self.log
                 .names
                 .push((false, NameCell::Tree(tree, i.clone())));
         }
         if !self.trees[t].contains_key(&i) {
             self.trees[t].insert(i.clone(), k);
-            if self.log.on {
+            if self.ssa.on {
+                self.ssa_name(true, tree, &i);
+            } else if self.log.on {
                 self.log.names.push((true, NameCell::Tree(tree, i.clone())));
             }
         }
@@ -998,6 +1316,7 @@ impl ObjTab {
             self.get_mut(k).link = self.head[t];
             self.head[t] = k;
             if t == OBJ_TYPE_DEST
+                && !self.ssa.on
                 && let Id::Name(s) = i
             {
                 self.push_dest(s, k);
@@ -1009,7 +1328,9 @@ impl ObjTab {
     /// avlstuff.c's `avlfindobj`: the object of type `t` with
     /// identifier `i`, or 0.
     pub(crate) fn find(&mut self, t: usize, i: &Id) -> i32 {
-        if self.log.on {
+        if self.ssa.on {
+            self.ssa_name(false, u8::try_from(t).unwrap_or(u8::MAX), i);
+        } else if self.log.on {
             let tree = u8::try_from(t).unwrap_or(u8::MAX);
             self.log
                 .names

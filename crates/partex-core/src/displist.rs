@@ -225,6 +225,26 @@ impl Shipped {
         }
     }
 
+    /// This stream with its form's and its resources' objects named by
+    /// pdfTeX's numbers `n` (virtual object numbers), shared if none moves.
+    fn numbered(self: &Arc<Self>, n: &crate::pdf::vnum::Numbering) -> Arc<Self> {
+        let moved = n.of(self.form) != self.form
+            || self.forms.iter().any(|&(_, k)| n.of(k) != k)
+            || self.images.iter().any(|(_, k, _)| n.of(*k) != *k);
+        if !moved {
+            return self.clone();
+        }
+        let mut s = (**self).clone();
+        s.form = n.of(s.form);
+        s.forms = s.forms.iter().map(|&(m, k)| (m, n.of(k))).collect();
+        s.images = s
+            .images
+            .iter()
+            .map(|(m, k, i)| (*m, n.of(*k), i.clone()))
+            .collect();
+        Arc::new(s)
+    }
+
     /// The box and the turn the PDF gives this stream's page (or form).
     fn media(&self) -> ([f64; 4], i32) {
         let given = (!self.attr.is_empty())
@@ -679,14 +699,22 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         {
             return Some(s.clone());
         }
+        // (virtual object numbers: forms and images named by pdfTeX's
+        // numbers, which the steps' numbering events give, as the link's)
+        let slices: Vec<&[crate::effects::Effect]> = chunks.iter().map(|(_, e)| &e.1[..]).collect();
+        let numbering = crate::effects::numbering_of(&slices).map(|(n, _)| n);
         let (mut pages, mut forms) = (Vec::new(), BTreeMap::new());
         for (_, c) in &chunks {
             for e in c.1.iter() {
                 if let crate::effects::Effect::Display(s) = e {
+                    let s = match &numbering {
+                        Some(n) => s.numbered(n),
+                        None => s.clone(),
+                    };
                     if s.form == 0 {
-                        pages.push(s.clone());
+                        pages.push(s);
                     } else {
-                        forms.insert(s.form, s.clone());
+                        forms.insert(s.form, s);
                     }
                 }
             }

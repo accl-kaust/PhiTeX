@@ -12388,6 +12388,81 @@ holding every level's saved entries, read and written whole by each
 `\dimen324`-style save or restore, so a window deep in a TikZ figure
 reads the outer levels' saved values too.
 
+## 2026-10-04 — Virtual PDF object numbers in SSA mode (agent pdfnum)
+
+**What prompted it.** The extension team measured the PDF object table
+as the largest chain of a reflowing edit: `pdf.objs`, `pdf.obj_trees`
+and `pdf.dests` were each one slot read whole by every writer scope, so
+one link annotation fewer renumbered every later object and every later
+step that made a destination, a link or a page ran again (DESIGN 3.12,
+"Analysed, not built", now built).
+
+**What changed** (DESIGN 3.12, "Virtual PDF object numbers"; switch
+`PARTEX_SSA_VOBJ=0`):
+- SSA mode turns on machine mode's virtual object numbers
+  (`pdf/vnum.rs`): numbers in the bytes are relocations, the link writes
+  pdfTeX's numbers from the numbering events. An object TeX identifies is
+  named by its identity; any other by its step's id and its count in it
+  (`1 + (step << 12 | count)`, hashed past 4,096 objects in a step or
+  2^18 steps), so a step run again names its objects as before; an
+  applied call (the fonts') by its own name.
+- Each object entry (`pdfobj:ID`), each lookup tree entry
+  (`pdfname:KEY`) and each step's numbering events (`pdfnum:STEP`, an
+  append) are slots of their own. `pdf.objs` keeps the lists' heads only;
+  `pdf.obj_trees` and `pdf.dests` are no longer read or written (the
+  destinations' names are the destination list's, at the job's end).
+- A number TeX observes (`\pdflast…`, a number given back, the job's
+  end) reads every earlier step's events (`Tracker::steps_before`).
+- The link: with virtual numbers SSA mode links in full every build
+  (6–9 ms on the thesis), deflate memoized by content as the spliced
+  link's; the splice no longer builds its mark tables for virtual
+  chunks (their ids reach 2^31: a 17 s link of a 5-page document).
+- Placing a stage's slots from the format's state copies the writer's
+  `virt` (as `symbolic`): else a rerun placed `pdf.out` without
+  relocations and wrote raw ids.
+
+**Measured** (64-page thesis, fastdev, local, same process: cold build
+then five rebuilds; base 9f13c82 → this branch): "x" after "big data
+applications." 6 → 6 steps; a space after it 5 → 5; the long reflowing
+insertion in Chapter 2 5,712 steps / 10.97 M commands / 46.4 s → 586
+steps / 0.29 M commands / 3.0 s (its new steps, cut by the window
+count, 5,505 → 93); a section title in Chapter 3 351 → 350 steps
+(its 1.1 M commands are windows that do not line up again, not PDF
+numbers); "Like an ASICx," 5 → 5. pt 3 → 3, acro2 0 → 0, ac3 14 → 14,
+each rebuilt PDF identical to the base's plain run.
+
+**Exactness.** The cold build's trip 1 is byte-identical to the base's
+(PDF, `.aux`, `.toc`, `.out`, log). Run to its fixed point, the base's
+cold build of the thesis made 66 pages and this branch's 64; real
+pdfTeX run with BibTeX to its fixed point makes 64. On the thesis the
+rebuilt PDF after the five edits differs from a cold build of the edited
+source here, as it does in the base (there the `.aux` agreed and the PDF
+did not; here two `\ACRO{pages}` records differ by one page): not
+resolved yet.
+
+**Merge of main (eaaa2db), and what it needed** (af5eeb2 and after):
+the gate's e2e `glyphs` and `display` cases (new on main) failed with
+virtual numbers. Display lists named forms by their virtual ids: they
+are named by pdfTeX's numbers now, from the steps' numbering events. And
+the display document's PDF came out 100,421 bytes where the engine
+guessed 98,187: a byte count of another number of digits stopped the
+link (`LengthDigits`). With the columns the link's (`effects/flow.rs`),
+the text that prints the length is rendered again with the length the
+link found, and the files linked again.
+
+**The long insertion's rebuild against a cold build** (thesis, run
+alone): with `PARTEX_SSA_VOBJ=0` (the base's numbering, pre-merge
+binary) the rebuilt and cold `.aux` and `.toc` are equal and the PDFs
+differ (the cold build's fixed point leaves two citations of the edited
+paragraph undefined; real pdfTeX with BibTeX resolves them, as the
+rebuild does). With virtual numbers the same citations differ, and also
+the rebuilt `Chapter_2.aux` records three acronym uses (`mrrg`, `ii`) a
+page early and the `.toc` one page number (24 for 25), where cold and
+real pdfTeX agree. The page text is otherwise the real one. The two
+settings reach different fixed points (66 pages with VOBJ=0, 64 with it
+on, as real pdfTeX), so the comparison does not say whether the page
+records' staleness is the numbering's: open.
+
 ## 2026-10-04 — The saved registers' shape puts its entries back with it (branch `xchain-fix`)
 
 **The bug.** After the entry-by-entry chains (`29390b4`), a thesis
@@ -12408,3 +12483,16 @@ places every entry within a shape it places.
 rebuilds (`th.sh`): no panic, entry check 0 bad reads at all six
 builds. proj2: rebuild 2 still 16 steps (46 ms), PDF equal to a cold
 SSA build; `pt`, `acro2`, `ac3`: 0 bad reads, PDFs equal to cold.
+
+**The pages 19–21 difference was not the numbering's** (after merging
+main aecd07f, 20e5bf6). The rebuilt page 18 had Figure 2.x's
+`tikzpicture` scaled by `\resizebox` 3.544 instead of 1.200: the
+picture's bounding box (pgf's dimen registers above 255) came out small,
+so three lines moved up a page and the acronym page records with them.
+The steps that made it ran for page, save-stack and list slots, none for
+a PDF slot, and the entry check found 0 bad reads. With main's fix of
+e-TeX's saved registers (every entry goes where their shape is put) the
+same long insertion, run alone with virtual numbers, rebuilds in 199 + 26
+steps (VOBJ=0: 6,476 + 26) and its `.aux` files and `.toc` equal the
+cold build's; the PDFs differ only in the known `[?, ?]` citations.
+

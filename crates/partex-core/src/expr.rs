@@ -418,19 +418,23 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             // final one also reads the numbering, `final_num`)
             PDF_LAST_OBJ_CODE => {
                 let k = self.pdf_last(PdfLast::Obj);
+                self.obj_observe();
                 self.pdf.objs.final_num(k)
             }
             PDF_LAST_XFORM_CODE => {
                 let k = self.pdf_last(PdfLast::XForm);
+                self.obj_observe();
                 self.pdf.objs.final_num(k)
             }
             PDF_LAST_XIMAGE_CODE => {
                 let k = self.pdf_last(PdfLast::XImage);
+                self.obj_observe();
                 self.pdf.objs.final_num(k)
             }
             PDF_LAST_XIMAGE_PAGES_CODE => self.pdf_last(PdfLast::XImagePages),
             PDF_LAST_ANNOT_CODE => {
                 let k = self.pdf_last(PdfLast::Annot);
+                self.obj_observe();
                 self.pdf.objs.final_num(k)
             }
             PDF_LAST_X_POS_CODE => self.pdf_last(PdfLast::XPos),
@@ -439,6 +443,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             PDF_LAST_XIMAGE_COLORDEPTH_CODE => self.pdf_last(PdfLast::XImageColordepth),
             PDF_LAST_LINK_CODE => {
                 let k = self.pdf_last(PdfLast::Link);
+                self.obj_observe();
                 self.pdf.objs.final_num(k)
             }
             _ => 0,

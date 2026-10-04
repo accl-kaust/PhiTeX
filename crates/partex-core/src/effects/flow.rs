@@ -159,8 +159,16 @@ pub fn has_flow(fx: &[Effect]) -> bool {
 /// `fx` with its [`Effect::Flow`]s rendered from the columns `cols`,
 /// which are left where the text ends; lines wrap at `max`
 /// (`max_print_line`).
+///
+/// A byte count whose file `lengths` gives is printed with that length's
+/// digits instead of the engine's guess.
 #[must_use]
-pub fn render(fx: &[Effect], cols: &mut Cols, max: i32) -> Vec<Effect> {
+pub fn render(
+    fx: &[Effect],
+    cols: &mut Cols,
+    max: i32,
+    lengths: &alloc::collections::BTreeMap<u32, i64>,
+) -> Vec<Effect> {
     let mut out = Vec::with_capacity(fx.len());
     for e in fx {
         let Effect::Flow { log, ops } = e else {
@@ -174,8 +182,11 @@ pub fn render(fx: &[Effect], cols: &mut Cols, max: i32) -> Vec<Effect> {
             cols: *cols,
             max,
         };
-        // (a byte count being printed: its file and guess)
+        // (a byte count being printed: its file and guess, and the length
+        // the link found, printed in its place, with the outputs its
+        // digits went to)
         let mut len: Option<(WriteId, i64)> = None;
+        let mut known: Option<(i64, u8)> = None;
         let mut i = 0;
         while i < ops.len() {
             let (op, mask) = (ops[i], ops[i + 1]);
@@ -183,8 +194,12 @@ pub fn render(fx: &[Effect], cols: &mut Cols, max: i32) -> Vec<Effect> {
             match op {
                 TEXT => {
                     let n = usize::from(ops[i]);
-                    for &c in &ops[i + 1..i + 1 + n] {
-                        o.ch(mask, c);
+                    if let Some((_, m)) = &mut known {
+                        *m |= mask;
+                    } else {
+                        for &c in &ops[i + 1..i + 1 + n] {
+                            o.ch(mask, c);
+                        }
                     }
                     i += 1 + n;
                 }
@@ -233,9 +248,16 @@ pub fn render(fx: &[Effect], cols: &mut Cols, max: i32) -> Vec<Effect> {
                     a.copy_from_slice(&ops[i + 4..i + 12]);
                     i += 12;
                     o.flush(&mut out);
-                    len = Some((file, i64::from_le_bytes(a)));
+                    let assumed = i64::from_le_bytes(a);
+                    known = lengths.get(&file.0).map(|&k| (k, 0));
+                    len = Some((file, known.map_or(assumed, |k| k.0)));
                 }
                 LEN_END => {
+                    if let Some((k, m)) = known.take() {
+                        for c in alloc::format!("{k}").bytes() {
+                            o.ch(m, c);
+                        }
+                    }
                     if let Some((file, assumed)) = len.take() {
                         if let Some(log) = o.log
                             && !o.file.is_empty()
@@ -357,14 +379,14 @@ mod tests {
         fl.push(&mut fx, log, &[NLC, 2]);
         fl.text(&mut fx, log, 2, b'x');
         let mut cols = (0, 0);
-        let r = render(&fx, &mut cols, 10);
+        let r = render(&fx, &mut cols, 10, &alloc::collections::BTreeMap::new());
         assert_eq!(text(&r), (b"[12]".to_vec(), b"[12]\nx".to_vec()));
         assert_eq!(cols, (4, 1));
         let mut cols = (3, 8);
-        let r = render(&fx, &mut cols, 10);
+        let r = render(&fx, &mut cols, 10, &alloc::collections::BTreeMap::new());
         assert_eq!(text(&r), (b"\n[12]".to_vec(), b"\n[12]\nx".to_vec()));
         let mut cols = (1, 7);
-        let r = render(&fx, &mut cols, 10);
+        let r = render(&fx, &mut cols, 10, &alloc::collections::BTreeMap::new());
         assert_eq!(text(&r), (b" [12]".to_vec(), b" [1\n2]\nx".to_vec()));
         assert_eq!(cols, (6, 1));
     }

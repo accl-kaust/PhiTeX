@@ -955,6 +955,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         self.writer_enter(0, 0);
         let r = body(self);
         self.writer_leave();
+        self.obj_flush();
         self.tracker.call_end(self);
         self.pdf.scope = outer;
         r
@@ -986,10 +987,14 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             self.pdf.scope = outer;
             return Ok(());
         }
+        // (the objects it makes are named by its name, not by the step's
+        // count: a hit applied makes none)
+        let seq = self.pdf.objs.ssa_call_seed(name);
         self.writer_enter(reads | writes, writes);
         let r = body(self);
         crate::ssa::cut_chunk(self);
         self.writer_leave();
+        self.pdf.objs.ssa_call_seed_end(seq);
         self.tracker.call_end(self);
         self.pdf.scope = outer;
         r
@@ -1000,6 +1005,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
     /// scope open in the child. The scope, returned, is reopened when the
     /// child ends; its end versions its fields again as they are then.
     fn writer_child_begin(&mut self) -> Scope {
+        self.obj_flush();
         let outer = self.pdf.scope;
         let mut left = outer.dirty;
         while left != 0 {
@@ -1012,6 +1018,14 @@ impl<H: Host, T: Tracker> Tex<H, T> {
     }
 
     fn writer_enter(&mut self, reads: u64, writes: u64) {
+        // (with virtual numbers the lookup trees' and the destinations'
+        // fields are not read or written: their entries are slots)
+        let (reads, writes) = if self.pdf.objs.ssa.on {
+            let cells = !(bit(field::OBJ_TREES) | bit(field::DESTS));
+            (reads & cells, writes & cells)
+        } else {
+            (reads, writes)
+        };
         let mut fresh = reads & !self.pdf.scope.dirty;
         while fresh != 0 {
             let f = u8::try_from(fresh.trailing_zeros()).unwrap_or(0);
@@ -1028,6 +1042,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         if self.pdf.scope.depth > 0 {
             return;
         }
+        self.obj_flush();
         let d = self.pdf.scope.dirty;
         let mut left = d;
         while left != 0 {
@@ -1135,6 +1150,128 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                 .as_ref()
                 .map_or(0, |w| w.version(usize::from(f - dvi_field::FONTS))),
             _ => 0,
+        }
+    }
+
+    /// A step begins (SSA mode, virtual numbers): its objects are named
+    /// by it.
+    pub(crate) fn obj_step_begin(&mut self) {
+        if T::VALUES && self.pdf.objs.ssa.on {
+            let s = self.tracker.open_step();
+            self.pdf.objs.ssa_step_begin(s);
+        }
+    }
+
+    /// The step ends (SSA mode, virtual numbers): its objects' reads and
+    /// writes noted, and its numbering events its append
+    /// (`Row::PdfNum`), or none.
+    pub(crate) fn obj_step_end(&mut self) {
+        if !T::VALUES || !self.pdf.objs.ssa.on {
+            return;
+        }
+        self.obj_flush();
+        let Some(n) = self.pdf.objs.ssa.step.take() else {
+            return;
+        };
+        let ev = core::mem::take(&mut self.pdf.objs.ssa.events);
+        if ev.is_empty() {
+            self.pdf.objs.ssa.steplogs.remove(&n);
+        } else {
+            let a: Arc<[super::vnum::NumEvent]> = ev.into();
+            let v = Version::of(&(b"pdfnum", &a[..])).0;
+            self.pdf.objs.ssa.steplogs.insert(n, (a, v));
+            self.tracker.value_wrote(Row::PdfNum(n));
+        }
+    }
+
+    /// The object table's reads and writes since the last flush noted, in
+    /// order (SSA mode, virtual numbers): each entry and lookup tree
+    /// entry a slot, read with the version it had before the first
+    /// change, written with its version now.
+    pub(crate) fn obj_flush(&mut self) {
+        if !T::VALUES || !self.pdf.objs.ssa.on {
+            return;
+        }
+        let (log, overflow, _) = self.pdf.objs.take_log();
+        let before = core::mem::take(&mut self.pdf.objs.ssa.before);
+        let names = core::mem::take(&mut self.pdf.objs.ssa.names);
+        let mut read = alloc::collections::BTreeSet::new();
+        let mut wrote = alloc::collections::BTreeSet::new();
+        for x in log {
+            if x >= 0 {
+                if !wrote.contains(&x) && read.insert(x) {
+                    let v = before
+                        .get(&x)
+                        .copied()
+                        .unwrap_or_else(|| self.pdf.objs.cell_version(x));
+                    self.tracker.value_read(Row::PdfObj(x), || v);
+                }
+            } else {
+                wrote.insert(-1 - x);
+            }
+        }
+        if overflow {
+            // (the log ran out of room: every entry read)
+            for k in self.pdf.objs.keys() {
+                if !wrote.contains(&k) && !read.contains(&k) {
+                    let v = before
+                        .get(&k)
+                        .copied()
+                        .unwrap_or_else(|| self.pdf.objs.cell_version(k));
+                    self.tracker.value_read(Row::PdfObj(k), || v);
+                }
+            }
+        }
+        for k in wrote {
+            self.tracker.value_wrote(Row::PdfObj(k));
+        }
+        let mut nread = alloc::collections::BTreeSet::new();
+        let mut nwrote = alloc::collections::BTreeSet::new();
+        for (w, key, v) in names {
+            if w {
+                nwrote.insert(key);
+            } else if !nwrote.contains(&key) && nread.insert(key) {
+                self.tracker.value_read(Row::PdfName(key), || v);
+            }
+        }
+        for key in nwrote {
+            self.tracker.value_wrote(Row::PdfName(key));
+        }
+        self.pdf.objs.reserve_log();
+    }
+
+    /// TeX observes an object's number (SSA mode, virtual numbers): the
+    /// numbering of the steps before the open one, each step's events a
+    /// read, is made once per run of the step.
+    pub(crate) fn obj_observe(&mut self) {
+        if !T::VALUES || !self.pdf.objs.ssa.on {
+            return;
+        }
+        self.obj_flush();
+        if self.pdf.objs.ssa.prefix.is_none() {
+            let ids = self.tracker.steps_before().unwrap_or_default();
+            let mut n = super::vnum::Numbering::default();
+            let mut reads = Vec::new();
+            for id in ids {
+                if let Some((ev, v)) = self.pdf.objs.ssa.steplogs.get(&id) {
+                    for &e in ev.iter() {
+                        n.step(e);
+                    }
+                    reads.push((id, *v));
+                }
+            }
+            self.pdf.objs.ssa_set_prefix(Arc::new(n), reads.into());
+        }
+        let reads = self
+            .pdf
+            .objs
+            .ssa
+            .prefix
+            .as_ref()
+            .map(|p| p.1.clone())
+            .unwrap_or_default();
+        for &(id, v) in reads.iter() {
+            self.tracker.value_read(Row::PdfNum(id), || v);
         }
     }
 

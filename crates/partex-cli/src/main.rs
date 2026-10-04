@@ -580,6 +580,9 @@ fn debug_switches() {
     if std::env::var("PARTEX_SSA_ENTRY_CHECK").is_ok_and(|v| v == "1") {
         partex_core::ssa::ENTRY_CHECK.store(true, std::sync::atomic::Ordering::Relaxed);
     }
+    if std::env::var("PARTEX_SSA_VOBJ").is_ok_and(|v| v == "0") {
+        partex_core::ssa::VOBJ.store(false, std::sync::atomic::Ordering::Relaxed);
+    }
     if std::env::var("PARTEX_SSA_FLOW").is_ok_and(|v| v == "0") {
         partex_core::ssa::FLOW.store(false, std::sync::atomic::Ordering::Relaxed);
     }
@@ -1805,6 +1808,10 @@ impl SsaLinker {
                 return self.link_full(tex, &origin);
             }
         }
+        // (virtual object numbers: a full link resolves them, every time)
+        if tex.virtual_objects() {
+            return self.link_full(tex, &origin);
+        }
         let n_changes = changes.len();
         let (linked, misses) = self.spliced(tex, changes, &clock);
         let out = match linked {
@@ -1897,6 +1904,17 @@ impl SsaLinker {
         tex: &mut Tex<native::NativeHost, partex_core::ssa::SsaTracker>,
         origin: &std::time::Instant,
     ) -> LinkReport {
+        self.link_full_once(tex, origin, true)
+    }
+
+    /// [`SsaLinker::link_full`], linking again once (`retry`) after a
+    /// byte count's digits were rendered anew.
+    fn link_full_once(
+        &mut self,
+        tex: &mut Tex<native::NativeHost, partex_core::ssa::SsaTracker>,
+        origin: &std::time::Instant,
+        retry: bool,
+    ) -> LinkReport {
         use partex_core::host::Host;
         #[allow(clippy::cast_precision_loss, reason = "a report")]
         let ms = |d: std::time::Duration| d.as_secs_f64() * 1e3;
@@ -1904,11 +1922,45 @@ impl SsaLinker {
         let threads = partex_incr::Threads::available();
         let slices: Vec<&[partex_core::effects::Effect]> =
             chunks.iter().map(|(_, e)| &e.1[..]).collect();
+        // (deflate memoized by content, as the spliced link's)
+        let links = self.links;
+        let (mut was, mut now) = (
+            std::mem::take(&mut self.deflated),
+            std::collections::HashMap::new(),
+        );
         let linked = partex_core::effects::link(&slices, &threads, &mut |level, data| {
-            crate::zlib::deflate_stream(level, data)
+            let key = partex_core::StableHasher::of(&(b"deflate", level, data));
+            if let Some((z, _)) = now.get(&key) {
+                return Some(Vec::clone(z));
+            }
+            let z = match was.remove(&key) {
+                Some((z, _)) => z,
+                None => crate::zlib::deflate_stream(level, data)?,
+            };
+            now.insert(key, (z.clone(), links));
+            Some(z)
         });
+        was.retain(|_, (_, at)| *at + 8 > links);
+        now.extend(was);
+        self.deflated = now;
         let l = match linked {
             Ok(l) => l,
+            // (virtual object numbers: the engine's guess at a file's length
+            // took another number of digits; the text that prints it is
+            // rendered again with the length the link found, and linked
+            // again: the file's own bytes do not depend on that text)
+            Err(partex_core::effects::LinkError::LengthDigits { file, actual, .. })
+                if retry
+                    && partex_core::ssa::set_flow_length(
+                        &mut tex.tracker().rec.borrow_mut(),
+                        file.0,
+                        actual,
+                    ) =>
+            {
+                drop(chunks);
+                let _ = partex_core::ssa::take_step_changes(&mut tex.tracker().rec.borrow_mut());
+                return self.link_full_once(tex, origin, false);
+            }
             Err(e) => {
                 eprintln!("partex: ssa: the link step failed: {e:?}");
                 std::process::exit(3);

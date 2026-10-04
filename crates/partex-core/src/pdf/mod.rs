@@ -355,7 +355,10 @@ impl<H: Host, T: Tracker> Tex<H, T> {
 
     /// Object `k`'s `obj_aux`, read.
     pub(crate) fn pdf_obj_aux(&self, k: i32) -> &objtab::Aux {
-        self.writer_read(val::field::OBJS);
+        // (with virtual numbers, the entry's own slot: `get` logs it)
+        if !self.pdf.objs.ssa.on {
+            self.writer_read(val::field::OBJS);
+        }
         &self.pdf.objs.get(k).aux
     }
 

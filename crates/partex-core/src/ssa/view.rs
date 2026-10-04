@@ -842,7 +842,9 @@ fn slot_name<H: Host>(names: &mut Names<'_, H>, st: &super::RecState, a: Slot) -
         Fam::Out => format!("write:{i}"),
         Fam::Random => String::from("random"),
         Fam::Str => format!("strings:{i:#x}"),
-        Fam::Source | Fam::Line | Fam::Sealed => format!("{a}"),
+        Fam::Source | Fam::Line | Fam::Sealed | Fam::PdfObj | Fam::PdfName | Fam::PdfNum => {
+            format!("{a}")
+        }
         Fam::Class => format!("class:{}", slot_name(names, st, Slot(Fam::Eqtb, i))),
         Fam::Name => {
             let n = interned(&st.names);

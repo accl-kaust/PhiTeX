@@ -780,8 +780,8 @@ template, which a compiled backend exploits.
   file. A debug build, or `PARTEX_LINK_CHECK=1`, checks every link
   against a full one (files, terminal text, opens, closes, diagnostics,
   pages, and the chunks against the build's). Virtual object numbers
-  (machine mode) are not laid out by the splice: a full link resolves
-  them. Machine mode keeps `effects::link_cached`: its regions are
+  (SSA mode's, 3.12, and machine mode's) are not laid out by the
+  splice: a full link resolves them, at every build. Machine mode keeps `effects::link_cached`: its regions are
   resolved from a cache and laid out in full.
 - The writer's position in the file and the objects' offsets are not
   state: TeX never observes them, and the link places every object.
@@ -1145,17 +1145,52 @@ readers rerun. What is built:
   placement had shortened came back padded with stand-ins, and a later
   restore read one: `xeq_level` index panic on the thesis.)
 
+- *Virtual PDF object numbers* (`PARTEX_SSA_VOBJ`; `pdf/objtab.rs`,
+  `SsaObjs`). pdfTeX numbers objects in the order they are made, so a
+  reflow that splits one link annotation fewer numbers every later
+  object again. With the table as one slot (`pdf.objs`, `pdf.obj_trees`,
+  `pdf.dests`, read whole by every writer scope), every later step that
+  made a destination, a link or a page read a changed table and made a
+  changed one, through to the job's end. Now:
+  - an object's number inside the build is a *virtual id* that does not
+    depend on what came before it: an object TeX identifies (a page by
+    its number, a destination by its name, a font, a raw object, form or
+    image by its count: `tex_identity`) is named by that identity, any
+    other by its step's id and its count in the step
+    (`1 + (step << 12 | count)`), so a step run again names its objects
+    as before. An applied call (a font's) names its objects by its own
+    name. The numbers in the bytes are relocations (`Effect::ObjRef`),
+    and the numbering events (`Effect::Num`) let the link write
+    pdfTeX's numbers in pdfTeX's order (`vnum.rs`, as machine mode had);
+  - each object's entry is a slot (`pdfobj:ID`), and each lookup tree
+    entry (`pdfname:KEY`, by type and identifier). A scope reads the
+    entries it touched, each at the version it had before the scope
+    first changed it, and writes those it changed: the table's log
+    (`ObjLog`) is turned into reads and writes when a writer scope or a
+    call ends (`Tex::obj_flush`);
+  - `pdf.objs` is the lists' heads alone; `pdf.obj_trees` and
+    `pdf.dests` are neither read nor written (the destinations' names
+    are the destination list's, read at the job's end);
+  - each step's numbering events are an append (`pdfnum:STEP`), read
+    only where TeX observes a number (`\pdflastobj` and its siblings, a
+    number given back to `\pdfrefobj` and the like, the job's end):
+    the observer reads the events of every live step before it, in
+    program order (`Tracker::steps_before`), and is the only step a
+    changed count of objects before it runs again.
+  The link resolves the numbers in full at every build (the splice lays
+  out pdfTeX's numbers only); on the 64-page thesis that is 6 to 9 ms.
+  The engine cannot know the PDF's length (the link fills the object
+  streams and writes the numbers), so "Output written on … bytes" holds
+  its guess; when the link finds a length with another number of
+  digits, the text that prints it is rendered again with the length's
+  digits (`flow::render`'s lengths, `ssa::set_flow_length`) and linked
+  again. Display lists (4.6) name forms and images by pdfTeX's numbers,
+  from the steps' numbering events, as the link does.
+  Measured on that thesis (its long reflowing insertion, 4 words in
+  Chapter 2): 5,712 steps and 11.0 M commands before, 586 steps and
+  0.29 M commands after (LOG 2026-10-04).
+
 **Analysed, not built** (LOG 2026-10-04):
-- *PDF object numbers.* `pdf.objs`, `pdf.obj_trees` and `pdf.dests` are
-  each one slot, read whole by every writer scope. A reflow that splits
-  one link annotation fewer numbers every later object again. Every
-  later step that makes a destination or a link then reads a changed
-  table and makes a changed one, through to the job's end (300 steps of
-  the thesis's 590 for a long insertion). The numbers are in the bytes,
-  so only numbers resolved at the link cut this: virtual ids, as
-  machine mode has (`pdf/vnum.rs`). Each scope would read the shape
-  (count, heads), the entries it uses, and the answers it asks
-  (`\pdflastobj`), never the whole table.
 - *Positions in the conditionals.* The `cond` slot holds each open
   conditional's absolute `if_line`. An edit that adds a line before a
   conditional that stays open across steps changes `cond` for every
@@ -1230,6 +1265,7 @@ accessor.
 | `PARTEX_SSA_SOFT_READS=0`, `PARTEX_SSA_CLASS_READS=0` | a local assignment reads the value it replaces; a lookup that stores a token reads its meaning (3.12) |
 | `PARTEX_SSA_SOFT_PLACE=0` | a soft-read slot's level and value decide its save and assignment as the arrays hold them (3.12) |
 | `PARTEX_SSA_DEAD_SAVES=0` | every save stack entry a step writes is its definition (3.12) |
+| `PARTEX_SSA_VOBJ=0` | the PDF object table one slot, pdfTeX's numbers as made (3.12, "Virtual PDF object numbers") |
 | `PARTEX_SSA_FLOW=0` | the log's and the terminal's columns are slots each printing step reads and writes, not the link's (3.8) |
 
 Each is exact: output is byte-identical with it on or off.

@@ -596,9 +596,13 @@ impl Splice {
             self.xref_at.insert(p);
         }
         self.virt += usize::from(s.virt);
-        let marks = s.marks.clone();
-        for (f, num, at) in marks {
-            self.mark(f, num, p, at);
+        // (virtual numbers: a full link resolves them, and its marks are
+        // not by pdfTeX's numbers)
+        if !s.virt {
+            let marks = s.marks.clone();
+            for (f, num, at) in marks {
+                self.mark(f, num, p, at);
+            }
         }
     }
 
@@ -622,6 +626,9 @@ impl Splice {
         self.marks.clear();
         self.dup_marks = false;
         for p in 0..self.slots.len() {
+            if self.slots[p].virt {
+                continue;
+            }
             let marks = self.slots[p].marks.clone();
             for (f, num, at) in marks {
                 let m = self.marks.entry(f).or_default();
@@ -802,9 +809,11 @@ impl Splice {
                 t.count -= 1;
             }
         }
-        let marks = self.slots[p].marks.clone();
-        for (f, num, at) in marks {
-            self.mark(f, num, p, at);
+        if !self.slots[p].virt {
+            let marks = self.slots[p].marks.clone();
+            for (f, num, at) in marks {
+                self.mark(f, num, p, at);
+            }
         }
     }
 

@@ -38,6 +38,20 @@ impl Field {
 
 /// The value slot `s` of these families holds in `t` now.
 pub(crate) fn value<H: Host, T: Tracker>(t: &Tex<H, T>, s: Slot) -> Option<Field> {
+    match s.0 {
+        Fam::PdfObj => {
+            let k = i32::try_from(s.1).ok()?;
+            return Some(Field::of(&t.pdf.objs.entry(k).cloned()));
+        }
+        // (none: no entry, in a state that may not know the slot's name,
+        // as the format's)
+        Fam::PdfName => return Some(Field::of(&t.pdf.objs.name_cell(s.1))),
+        Fam::PdfNum => {
+            let n = u32::try_from(s.1).ok()?;
+            return Some(Field::of(&t.pdf.objs.ssa.steplogs.get(&n).cloned()));
+        }
+        _ => {}
+    }
     if s.0 == Fam::Glyphs {
         let g = t.pdf.ship.glyphs.get(usize::try_from(s.1).ok()?)?;
         return Some(Field::of(g));
@@ -71,6 +85,45 @@ pub(crate) fn value<H: Host, T: Tracker>(t: &Tex<H, T>, s: Slot) -> Option<Field
 
 /// Store value `v` at slot `s` of these families; whether `v` was one.
 pub(crate) fn set<H: Host, T: Tracker>(t: &mut Tex<H, T>, s: Slot, v: &Field) -> bool {
+    match s.0 {
+        Fam::PdfObj => {
+            let (Ok(k), Some(e)) = (
+                i32::try_from(s.1),
+                v.get::<Option<crate::pdf::objtab::Entry>>(),
+            ) else {
+                return false;
+            };
+            t.pdf.objs.set_entry(k, e.clone());
+            return true;
+        }
+        Fam::PdfName => {
+            type Cell = Option<(u8, crate::pdf::objtab::Id, Option<i32>)>;
+            let Some(c) = v.get::<Cell>() else {
+                return false;
+            };
+            match c {
+                Some((ty, i, o)) => t.pdf.objs.set_name_cell(s.1, *ty, i, *o),
+                None => t.pdf.objs.clear_name_cell(s.1),
+            }
+            return true;
+        }
+        Fam::PdfNum => {
+            type Log = Option<(Arc<[crate::pdf::vnum::NumEvent]>, u128)>;
+            let (Ok(n), Some(l)) = (u32::try_from(s.1), v.get::<Log>()) else {
+                return false;
+            };
+            match l {
+                Some(l) => {
+                    t.pdf.objs.ssa.steplogs.insert(n, l.clone());
+                }
+                None => {
+                    t.pdf.objs.ssa.steplogs.remove(&n);
+                }
+            }
+            return true;
+        }
+        _ => {}
+    }
     if s.0 == Fam::Glyphs {
         let (Ok(n), Some(g)) = (usize::try_from(s.1), v.get::<crate::pdf::ship::Glyphs>()) else {
             return false;
