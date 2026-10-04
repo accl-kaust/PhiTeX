@@ -423,18 +423,6 @@ impl<M: Machine> Fold<M> {
         }
     }
 
-    /// Let the records of the steps removed since
-    /// [`Fold::release_removed`] go (their reads stay, for the rebuild's
-    /// predictions, until it ends).
-    pub fn release_removed_records(&mut self) {
-        for &id in &self.removed {
-            let s = &mut self.steps[id as usize];
-            if !s.live {
-                s.recs = Vec::new();
-            }
-        }
-    }
-
     /// Close step `id`: its outside reads (`reads`, each with its
     /// address's hash) and its records' writes (`writes` gives each
     /// record's written addresses) become index entries.
@@ -624,7 +612,12 @@ impl<M: Machine> Fold<M> {
                 v[..at].iter().rev().find(|e| self.live(e))
             })
             .map(|e| self.def(e))
-            .or_else(|| self.base_def(a).filter(|d| d.key < key))
+            .or_else(|| {
+                // (the base step's, the first, if it is before `key`)
+                (self.keys.first().is_some_and(|&k| k < key))
+                    .then(|| self.base_def(a))
+                    .flatten()
+            })
     }
 
     /// The last live definition of `a`.
@@ -658,7 +651,9 @@ impl<M: Machine> Fold<M> {
     /// The first live definition of `a` after key `key`.
     #[must_use]
     pub fn next_after(&self, a: &M::Addr, key: u64) -> Option<Def> {
-        if let Some(b) = self.base_def(a).filter(|b| b.key > key) {
+        if self.keys.first().is_some_and(|&k| k > key)
+            && let Some(b) = self.base_def(a)
+        {
             return Some(b);
         }
         let v = self.defs.get_by(hash64(a), |k| k.0 == *a)?;

@@ -3754,14 +3754,26 @@ pub fn step_effects(rec: &Recorder) -> Vec<(u64, StepEffects)> {
 /// `raw`.
 #[must_use]
 pub fn step_effects_as(rec: &Recorder, raw: bool) -> Vec<(u64, StepEffects)> {
-    let mut out = Vec::new();
-    for &s in &rec.rt.fold.order {
-        let fx = if raw {
+    let chunks = |s: StepId| {
+        if raw {
             rec.st.steps.effects.get(s as usize).map(|v| &v[..])
         } else {
             linked_chunks(&rec.st, s)
-        };
-        let Some(fx) = fx else {
+        }
+    };
+    // (counted first: made by doubling, a vector this long is moved a
+    // dozen times, each a large allocation)
+    let n = rec
+        .rt
+        .fold
+        .order
+        .iter()
+        .filter_map(|&s| chunks(s))
+        .map(<[_]>::len)
+        .sum();
+    let mut out = Vec::with_capacity(n);
+    for &s in &rec.rt.fold.order {
+        let Some(fx) = chunks(s) else {
             continue;
         };
         for (k, e) in fx.iter().enumerate() {
