@@ -208,6 +208,16 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         Some(Ok(f))
     }
 
+    /// Font `f`, found loaded by a search before a load (§1260's, pdfTeX's
+    /// `tfm_lookup`): made again in its slot ([`Tex::remake_font`]) if the
+    /// program has not made it by now, where a run of the program loads
+    /// it, its number the next.
+    pub(crate) fn found_font(&mut self, f: i32) {
+        if !self.tracker.font_visible(f) {
+            self.remake_font(f);
+        }
+    }
+
     /// Font `f` made again in its slot, as §1260's search found it where
     /// the program has not made it (a rebuild's step run again: its own
     /// older run's font, or a later step's): its parameters the TFM's

@@ -914,9 +914,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                         // rebuild's step run again finding its own older
                         // run's, or a later step's; loaded here, it is
                         // made again in its slot, keeping its number)
-                        if !self.tracker.font_visible(f) {
-                            self.remake_font(f);
-                        }
+                        self.found_font(f);
                         break 'common_ending f;
                     }
                 }

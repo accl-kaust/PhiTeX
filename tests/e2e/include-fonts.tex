@@ -1,0 +1,13 @@
+% Chapters by \include whose first loads fonts the second also uses (the
+% SSA edit harness, case `include_fonts`): the first excluded by
+% \includeonly, so that the second loads them first, then included again.
+% A font's number (its /F name in the PDF) is the order fonts are loaded
+% in: Courier in T1 is virtual, its base font (pcrr8r) loaded by the page's
+% shipout, when the VF is read.
+\documentclass{report}
+\usepackage[T1]{fontenc}
+\includeonly{inclf-ch1,inclf-ch2}
+\begin{document}
+\include{inclf-ch1}
+\include{inclf-ch2}
+\end{document}

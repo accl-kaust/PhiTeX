@@ -436,6 +436,11 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         if k == NULL_FONT {
             let empty = self.pool_str(b"");
             k = self.read_font_info(NULL_CS, s, empty, fs)?;
+        } else {
+            // (a rebuild's shipout run again reads the VF again: its local
+            // font, loaded by its older run or by a step gone, is loaded
+            // here)
+            self.found_font(k);
         }
         if k != NULL_FONT {
             let kf = self.fonts.get(k);

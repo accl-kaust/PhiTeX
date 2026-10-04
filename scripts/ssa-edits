@@ -25,7 +25,9 @@ revert, and a later edit; `garbled`: the same, the SSA side's written files
 (`.aux`, `.toc`, `.out`) cut to their first line, their times kept,
 before each rebuild, which must read the build's own values of them; `streams` (`streams.tex`): a line written to
 the file a stream opened first, changed and back, after the stream opened
-a second; `fatal_end` (`fatal-end.tex`): a word edited and back in a job
+a second; `include_fonts` (`include-fonts.tex`): a chapter whose T1
+Courier (a virtual font, its base fonts loaded at the shipout) the next
+chapter also uses, left out by `\\includeonly` and taken back; `fatal_end` (`fatal-end.tex`): a word edited and back in a job
 that ends fatally in its last page's output routine, not seeded: the
 .aux the first build wrote is read by its next trip (or, one trip a
 build, by the next stage's), which runs earlier steps again; and
@@ -193,6 +195,13 @@ INCLUDE_EDITS = [
     ("incl-ch1.tex", "Ch1s2p1 gamma ", "Ch1s2p1  gamma "),
     ("incl-ch1.tex", "Ch1s2p1  gamma ", "Ch1s2p1  gammax "),
     ("incl-ch1.tex", "Ch1s2p1  gammax ", "Ch1s2p1 gamma "),
+]
+# include-fonts.tex: its first chapter, which loads fonts the second uses,
+# excluded by \includeonly (the second loads them first: their numbers,
+# and so the /F names of every font after them, move), then included again
+INCLUDE_FONTS_EDITS = [
+    ("edits.tex", "\\includeonly{inclf-ch1,inclf-ch2}", "\\includeonly{inclf-ch2}"),
+    ("edits.tex", "\\includeonly{inclf-ch2}", "\\includeonly{inclf-ch1,inclf-ch2}"),
 ]
 # edits.tex with virtual object numbers, each link checked against a full
 # one (PARTEX_LINK_CHECK): a word (the steps changed resolved alone, the
@@ -539,6 +548,15 @@ def all_cases():
         # (as an editor types: each edit's rebuild one trip, linked and its
         # files written, then the idle settle's trips, linked again)
         include("include_keys", {"PARTEX_SSA_KEY_TRIPS": "1", "PARTEX_SSA_IDLE_SETTLE": "1"}),
+        Case(
+            "include_fonts",
+            {"edits.tex": "include-fonts.tex", **{f"inclf-ch{c}.tex": f"inclf-ch{c}.tex" for c in (1, 2)}},
+            "pdflatex",
+            [*LATEX_FLAGS, "-fmt=pdflatex", "-output-directory=out", "edits"],
+            INCLUDE_FONTS_EDITS,
+            outdir="out",
+            seed=2,
+        ),
         latex("synctex", "edits.tex", "pdflatex", SYNCTEX_EDITS, extra=["-synctex=1"]),
         latex("preamble", "preamble.tex", "pdflatex", PREAMBLE_EDITS),
         latex(

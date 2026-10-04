@@ -181,8 +181,12 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         let s = self.expand_font_name(f, e)?;
         let size = self.fonts.metrics[fx(f)].size;
         let mut k = self.tfm_lookup(s, size);
+        self.font_read(f, field::EXPAND);
+        if k != NULL_FONT && !self.fonts.expand[fx(f)].auto {
+            // (a font from its own TFM file, as `vf_def_font`'s)
+            self.found_font(k);
+        }
         if k == NULL_FONT {
-            self.font_read(f, field::EXPAND);
             k = if self.fonts.expand[fx(f)].auto {
                 self.auto_expand_font(f, e)?
             } else {

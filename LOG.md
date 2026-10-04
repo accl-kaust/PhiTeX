@@ -13516,3 +13516,56 @@ end, as the comment at `go_cold` already said a cold cascade does.
   numbers of the open `FontLoad` issue.
 - The put-back rebuild costs 190 s (3 trips, 63M commands), against a
   65 s cold build. That cost is still open.
+
+## 2026-10-04 — A VF's local fonts are loaded again where a shipout runs again (branch `fontload`)
+
+**Symptom.** pgfsub with the arrows chapter left out by `\includeonly`
+(b0380d6's rebuild) wrote a `.aux` equal to plain partex's. In the PDF,
+though, every `/F` name from `/F53` on was 2 lower than plain's, and
+`/F51` and `/F52` were each used for two fonts.
+
+**Cause.** The two fonts with no `FontLoad` were `pcrr8r` and `pcrb8r`,
+not fonts from the chapter left out. They are the base fonts of T1
+Courier (`pcrr8t` is virtual), which the title page uses. pdfTeX loads
+them at the page's shipout, when it reads `pcrr8t.vf`: `vf_def_font`
+searches the loaded fonts (`tfm_lookup`) and loads the font if the search
+finds nothing. The rebuild ran the title page's shipout step again, and
+it read the VF again. The search then found both fonts in the engine's
+table, made by that step's older run. §1260's search tests such a font
+(`font_visible`: has the program made it by now?) and makes it again in
+its slot (`remake_font`, which emits `FontLoad`). `tfm_lookup`'s callers
+did not. The step's new chunks had no `FontLoad` for the two fonts, so the
+link numbered them by their slots and every later font 2 lower. A
+rebuild of any page using a virtual font, when its shipout runs again,
+does the same.
+
+**Fix.** `Tex::found_font(f)`: a font found by a search that comes before
+a load is made again in its slot if the program has not made it by now.
+§1260 (`new_font`), `vf_def_font` and `load_expand_font` (an expanded
+font with its own TFM file) all call it. An auto-expanded font found by
+name, or by `get_expand_font`'s map, is still not tested. It is made from
+its base font's metrics, so making it again would not be `remake_font`'s
+TFM reload. DESIGN 3.8's "Fonts' numbers are the link's" says which
+searches test it.
+
+The plan was to move `FontLoad` to the step that now loads a font first,
+and to drop the stale slot of a retired step. Neither was needed:
+- `font_made_by_now` already treats a font whose maker is gone or later
+  as not made, and the step that now loads the font makes it again in its
+  slot.
+- The slot is only the font's identity. Its number is the link's
+  (`FontLoad`) and the program's (`FONT_COUNT`).
+The bug was the one search that skipped the test.
+
+**Test.** New ssa-edits case `include_fonts` (`include-fonts.tex`,
+`inclf-ch1.tex`, `inclf-ch2.tex`): two `\include`d chapters with T1
+Courier. The first is left out by `\includeonly`, then taken back. On
+b0380d6 both stages' PDFs differ from plain. With the fix, all are
+identical.
+
+**Measured** (pgfsub, the exclude edit, native, on b0380d6 + this fix):
+- Stage 1: the PDF and every `.aux` are byte-identical to plain partex.
+- Rebuild: trip 1 5574 steps; trip 2 2229 steps and 4.3M commands, down
+  from 2852 and 6.6M (the fonts' numbers no longer move); trip 3 94
+  steps.
+- 144 s for the cold build and the rebuild together, down from 158 s.

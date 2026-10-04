@@ -933,7 +933,12 @@ template, which a compiled backend exploits.
   object numbers each `/F` number is a relocation (`Effect::FontRef`).
   The link numbers the fonts from the `Effect::FontLoad` events of the
   steps' runs as they are now, in program order. A font a step run again
-  makes anew in its slot (`remake_font`) is loaded there too.
+  makes anew in its slot (`remake_font`) is loaded there too: every
+  search that comes before a load finds a font the program has not made
+  by now (an older run's, a later step's, a step gone's) as not loaded
+  and makes it there (`found_font`): §1260's, and pdfTeX's `tfm_lookup`
+  of a VF's local fonts (`vf_def_font`, at the shipout that first uses
+  the VF) and of an expanded font's own TFM file.
   DVI's font numbers cannot be relocations: their opcodes' lengths
   depend on them, and §611's movement optimization depends on where
   bytes fall. So a font's number is a value the program makes: each font
