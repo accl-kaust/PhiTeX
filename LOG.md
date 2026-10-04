@@ -13102,3 +13102,19 @@ with no skips remembered.
 Outputs are byte-identical. `PARTEX_SSA_TRACE`'s 162 MB trace of the
 cold build is identical to the one without the cache, except for the
 clock's two scalars and the random seed (`\pdfelapsedtime`'s epoch).
+
+## 2026-10-04 — The SSA full link reuses its resolved chunks (branch `mem`)
+
+With virtual object numbers every SSA link is a full one, and it resolved
+the numbers into a fresh copy of every effect of the job at each
+keystroke (`effects::link` → `resolve_numbers`: each `Write`'s bytes
+copied). `SsaLinker::link_full_once` now links with `effects::link_cached`
+(the machine host's): each chunk, keyed by step and place, is resolved
+again only if its version is not the one the last link resolved, or its
+entry counters or the numbers it writes changed; the others' resolved
+effects are taken as they were. Thesis (fastdev, this machine, on
+e587cb2): a word changed, 3 edits: the link 8.0–9.2 → 5.7–7.3 ms, 2 of
+2169 chunks resolved again; a space, 4 edits: 7.4–7.8 → 5.2–5.6 ms, none
+resolved again. Outputs byte-identical to e587cb2's after the edits. (On
+e587cb2 a thesis rebuild itself is 31 ms for a space and 112–120 ms for a
+word, where 24f149a's was 7 ms for a space: not this branch's.)

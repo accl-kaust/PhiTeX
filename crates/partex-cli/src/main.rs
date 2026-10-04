@@ -1860,6 +1860,12 @@ struct SsaLinker {
     /// The streams producers outside the steps defined, as last written
     /// (`partex_core::ssa::define_stream`).
     produced: std::collections::BTreeMap<Vec<u8>, u128>,
+    /// The full link's chunks as their numbers were resolved, by key
+    /// (`effects::link_cached`), and the version of each chunk then: a
+    /// keystroke resolves the chunks that changed, not a copy of every
+    /// effect of the job.
+    resolved: partex_core::effects::LinkCache,
+    resolved_versions: std::collections::HashMap<u64, u128>,
 }
 
 /// What a link cost, for the reports.
@@ -2045,26 +2051,43 @@ impl SsaLinker {
         let ms = |d: std::time::Duration| d.as_secs_f64() * 1e3;
         let chunks = partex_core::ssa::step_effects(&tex.tracker().rec.borrow());
         let threads = partex_incr::Threads::available();
-        let slices: Vec<&[partex_core::effects::Effect]> =
-            chunks.iter().map(|(_, e)| &e.1[..]).collect();
+        let keyed: Vec<(u64, &[partex_core::effects::Effect])> =
+            chunks.iter().map(|(k, e)| (*k, &e.1[..])).collect();
+        // (a chunk is resolved again if its version is not the one the last
+        // link resolved)
+        let last = std::mem::take(&mut self.resolved_versions);
+        let versions: std::collections::HashMap<u64, u128> =
+            chunks.iter().map(|(k, e)| (*k, e.0.0)).collect();
+        let touched = |k: u64| last.get(&k).is_none_or(|v| versions.get(&k) != Some(v));
         // (deflate memoized by content, as the spliced link's)
         let links = self.links;
         let (mut was, mut now) = (
             std::mem::take(&mut self.deflated),
             std::collections::HashMap::new(),
         );
-        let linked = partex_core::effects::link(&slices, &threads, &mut |level, data| {
-            let key = partex_core::StableHasher::of(&(b"deflate", level, data));
-            if let Some((z, _)) = now.get(&key) {
-                return Some(Vec::clone(z));
-            }
-            let z = match was.remove(&key) {
-                Some((z, _)) => z,
-                None => crate::zlib::deflate_stream(level, data)?,
-            };
-            now.insert(key, (z.clone(), links));
-            Some(z)
-        });
+        let linked = partex_core::effects::link_cached(
+            &keyed,
+            &touched,
+            &mut self.resolved,
+            &threads,
+            &mut |level, data| {
+                let key = partex_core::StableHasher::of(&(b"deflate", level, data));
+                if let Some((z, _)) = now.get(&key) {
+                    return Some(Vec::clone(z));
+                }
+                let z = match was.remove(&key) {
+                    Some((z, _)) => z,
+                    None => crate::zlib::deflate_stream(level, data)?,
+                };
+                now.insert(key, (z.clone(), links));
+                Some(z)
+            },
+        );
+        if linked.is_ok() {
+            self.resolved_versions = versions;
+        } else {
+            self.resolved = partex_core::effects::LinkCache::default();
+        }
         was.retain(|_, (_, at)| *at + 8 > links);
         now.extend(was);
         self.deflated = now;
@@ -2103,9 +2126,10 @@ impl SsaLinker {
         let t_end = origin.elapsed();
         LinkReport {
             how: format!(
-                "linked in full, {} chunks; ms: link {:.2}; files written {:.2} ({files} files, \
-                 {bytes} bytes)",
+                "linked in full, {} chunks ({} resolved again); ms: link {:.2}; files written {:.2} \
+                 ({files} files, {bytes} bytes)",
                 chunks.len(),
+                self.resolved.resolved,
                 ms(t_link),
                 ms(t_end.saturating_sub(t_link)),
             ),
