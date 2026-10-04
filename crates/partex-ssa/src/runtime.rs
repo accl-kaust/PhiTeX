@@ -250,6 +250,14 @@ pub struct Runtime<M: Machine> {
     /// Per record: its subtree has no effects or stores, so the link
     /// passes it without reading it.
     inert: Vec<bool>,
+    /// Per record: it is never looked up (a lean frame's,
+    /// [`Runtime::begin_lean`]: a step's), so a kept build's roots do not
+    /// keep it, only its children ([`Runtime::collect`]).
+    lean: Vec<bool>,
+    /// The writes the records made since the last collection held, and
+    /// the live records' after it ([`Runtime::keep_roots`]).
+    writes_made: usize,
+    writes_after_gc: usize,
     /// The last trip's counts, to size the next trip's vectors, and the
     /// items of each function's last large frame, by the function's hash.
     pub(crate) sizes: Sizes,
@@ -295,6 +303,9 @@ impl<M: Machine> Runtime<M> {
             open: crate::open::Open::new(),
             fold: crate::fold::Fold::default(),
             inert: Vec::new(),
+            lean: Vec::new(),
+            writes_made: 0,
+            writes_after_gc: 0,
             sizes: Sizes::default(),
             spare_statuses: Vec::new(),
             default_val: None,
@@ -561,9 +572,26 @@ impl<M: Machine> Runtime<M> {
         while self.roots.len() > self.cfg.keep.max(1) {
             self.roots.pop_front();
         }
-        if self.live > 2 * self.live_after_gc + 4096 {
+        // (or when the writes the records hold grew by half: a step's
+        // record holds its step's, a hundred where a routine's holds a few,
+        // and a trip that runs most steps again, a cascade gone cold, makes
+        // few records that hold as much as the build's)
+        if self.live > 2 * self.live_after_gc + 4096
+            || self.writes_made > self.writes_after_gc / 2 + (1 << 16)
+        {
             self.collect();
         }
+    }
+
+    /// Record `id`, made now (`fresh`) or found equal to one made before,
+    /// is a lean frame's (`lean`): it is lean if every call that made it
+    /// was.
+    pub(crate) fn note_lean(&mut self, id: RecId, fresh: bool, lean: bool) {
+        let i = id as usize;
+        if self.lean.len() <= i {
+            self.lean.resize(i + 1, false);
+        }
+        self.lean[i] = lean && (fresh || self.lean[i]);
     }
 
     /// The effects and stores under `items`, in program order.
@@ -645,6 +673,7 @@ impl<M: Machine> Runtime<M> {
             RecId::try_from(self.recs.len() - 1).expect("fewer than 2^32 records")
         };
         self.live += 1;
+        self.writes_made += self.record(id).writes.len();
         if self.inert.len() <= id as usize {
             self.inert.resize(id as usize + 1, false);
         }
@@ -666,21 +695,55 @@ impl<M: Machine> Runtime<M> {
         }
     }
 
-    /// Drop the records no kept build reaches.
+    /// Between two steps of a trip that removed many steps (a cascade
+    /// gone cold retires the old steps after it): drop the records only
+    /// they held ([`Runtime::collect`]), which the trip's new steps would
+    /// otherwise replace at its end, both held at once.
+    pub fn collect_retired(&mut self) {
+        self.fold.release_removed_records();
+        self.collect();
+    }
+
+    /// Drop the records no kept build reaches. A kept build's lean
+    /// records (a step's, never looked up) are kept only if a live step
+    /// of the fold holds them: an older run's, or a removed step's, goes,
+    /// and its children, which a later call may hit, stay. Kept, a trip
+    /// that ran most steps again kept the records of the trips before it,
+    /// each holding its steps' writes: a thesis's settling grew by 1 GB.
     pub fn collect(&mut self) {
-        let mut mark = alloc::vec![false; self.recs.len()];
-        let mut stack: Vec<RecId> = self.roots.iter().flatten().copied().collect();
-        // (the fold's steps are the state of every build to come)
-        stack.extend(self.fold.roots());
-        while let Some(id) = stack.pop() {
-            if core::mem::replace(&mut mark[id as usize], true) {
-                continue;
+        let n = self.recs.len();
+        let mut mark = alloc::vec![false; n];
+        let mut seen = alloc::vec![false; n];
+        // (each with whether it is held whatever it is: the fold's steps
+        // are the state of every build to come)
+        let mut stack: Vec<(RecId, bool)> =
+            self.roots.iter().flatten().map(|&id| (id, false)).collect();
+        stack.extend(self.fold.roots().map(|id| (id, true)));
+        // (and, inside a trip, the calls its root made so far, which its
+        // end walks, and the open step's)
+        if let Some(root) = self.open.frames.first() {
+            stack.extend(root.items.iter().filter_map(|it| match it {
+                Item::Call(c) => Some((*c, true)),
+                _ => None,
+            }));
+        }
+        stack.extend(self.open.step_recs.iter().map(|&id| (id, true)));
+        while let Some((id, held)) = stack.pop() {
+            let i = id as usize;
+            if held || !self.lean.get(i).copied().unwrap_or(false) {
+                if core::mem::replace(&mut mark[i], true) {
+                    continue;
+                }
+                seen[i] = true;
+                stack.extend(self.record(id).children().map(|c| (c, true)));
+            } else if !core::mem::replace(&mut seen[i], true) {
+                stack.extend(self.record(id).children().map(|c| (c, false)));
             }
-            stack.extend(self.record(id).children());
         }
         self.memo.clear();
         self.dedup.clear();
         self.live = 0;
+        let mut writes = 0;
         for (i, r) in self.recs.iter_mut().enumerate() {
             let id = RecId::try_from(i).expect("fewer than 2^32 records");
             if r.is_some() && !mark[i] {
@@ -690,12 +753,20 @@ impl<M: Machine> Runtime<M> {
             }
             if let Some(r) = r {
                 self.live += 1;
+                writes += r.writes.len();
                 let name = r.name;
                 Self::memo_add_to(&mut self.memo, name, id);
                 self.dedup.insert(r.content, id);
             }
         }
+        // (a kept build's roots name only records kept: an id let go may
+        // name another record later)
+        for r in &mut self.roots {
+            r.retain(|&id| mark[id as usize]);
+        }
         self.live_after_gc = self.live;
+        self.writes_after_gc = writes;
+        self.writes_made = 0;
     }
 }
 

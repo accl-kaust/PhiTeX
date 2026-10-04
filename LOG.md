@@ -12534,3 +12534,19 @@ and `.log` byte-identical):
 **Measured** (fastdev, this machine, the thesis repro): peak 3,758,312 KB
 → 2,641,312 KB, 164 s → 160 s; trips 6 (63796, 415, 8131, 8373, 726, 163
 steps), rebuild 1: 5 steps, as before.
+
+**The collector and a step's records** (same branch, next commit). A
+settling trip that runs most steps again (trips 3 and 4 of the thesis,
+cascades gone cold) made new records for them while the last runs' stayed
+reachable from the last three trips' roots, and the collector ran only
+when the arena's record count doubled, which a few thousand large step
+records never do. Now a lean record (a step's: never looked up, its frame
+keeps no reads) is kept only if a live step of the fold holds it; a kept
+build's roots keep its children (the routines' records a later call may
+hit). The collector also runs when the writes the records hold grew by
+half since the last collection, and when a cascade goes cold, right after
+the old steps after it are retired (`Runtime::collect_retired`; their
+reads stay until the rebuild ends, for its predictions). After a
+collection the kept roots name only kept records. Thesis: peak 2,641,312
+KB → 2,123,168 KB; trips, steps, routine hits (126 of 252 calls) and the
+outputs the same; `pt`, `acro2`, `ac3`: outputs equal, entry check 0.

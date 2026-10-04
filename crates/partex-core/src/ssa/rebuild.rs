@@ -3271,6 +3271,9 @@ fn go_cold<H: Host>(
     for &s in rest.iter().rev() {
         retire(tex, s, dirty, rep);
     }
+    // (the retired steps' records go now: the rest of the job, run as a
+    // cold build, makes new ones in their place)
+    tex.tracker.rec.borrow_mut().rt.collect_retired();
     rep.cold += 1;
 }
 

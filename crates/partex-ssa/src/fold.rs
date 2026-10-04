@@ -334,6 +334,18 @@ impl<M: Machine> Fold<M> {
         }
     }
 
+    /// Let the records of the steps removed since
+    /// [`Fold::release_removed`] go (their reads stay, for the rebuild's
+    /// predictions, until it ends).
+    pub fn release_removed_records(&mut self) {
+        for &id in &self.removed {
+            let s = &mut self.steps[id as usize];
+            if !s.live {
+                s.recs = Vec::new();
+            }
+        }
+    }
+
     /// Close step `id`: its outside reads (`reads`, each with its
     /// address's hash) and its records' writes (`writes` gives each
     /// record's written addresses) become index entries.
