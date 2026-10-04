@@ -207,6 +207,11 @@ impl<H: Host, T: Tracker> Tex<H, T> {
     fn mark_save(&mut self, p: i32, eqtb: bool) {
         self.save_wrote(p);
         let p = Self::sx(p);
+        // (an entry made a plain value holds no object: one a dead entry
+        // left there is not this entry's, and its version would carry it)
+        if !eqtb && let Some(o) = self.save_obj.get_mut(p) {
+            *o = None;
+        }
         if self.save_eqtb.len() <= p {
             if !eqtb {
                 return; // (unmarked slots are plain)
@@ -449,6 +454,18 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         reads
     }
 
+    /// Whether `eqtb[p]`, assigned locally, holds the open step's entry
+    /// value ([`Tracker::entry_value`]): saved whatever its level.
+    fn holds_entry_value(&self, p: Pointer) -> bool {
+        T::SOFT_READS
+            && self.cur_level() > LEVEL_ONE
+            && self.int_par(TRACING_ASSIGNS_CODE) <= 0
+            && self.int_par(TRACING_RESTORES_CODE) <= 0
+            && self
+                .tracker
+                .entry_value(crate::track::Cell::Eqtb(p), self.cur_level())
+    }
+
     pub(crate) fn eq_define(&mut self, p: Pointer, t: i32, e: i32) -> Result<(), Jump> {
         debug_assert!(
             !crate::equiv::holds_object(t) || e == NULL,
@@ -467,8 +484,12 @@ impl<H: Host, T: Tracker> Tex<H, T> {
     ) -> Result<(), Jump> {
         self.memo.wrote_local(self.cur_level());
         let reads = self.assignment_reads(p);
+        // (a value the open step began with, assigned in a group it opened:
+        // saved and replaced whatever it is, `Tracker::entry_value`)
+        let entry = reads && self.holds_entry_value(p);
         // (pdfTeX's `\def` makes a new list, never the one already there)
         if reads
+            && !entry
             && self.etex_ex()
             && !self.fresh_def
             && self.peek_eqtb(p).b0() == t
@@ -480,7 +501,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             return Ok(());
         }
         self.assign_trace(p, b"changing");
-        if self.peek_eqtb(p).b1() == self.cur_level() {
+        if self.peek_eqtb(p).b1() == self.cur_level() && !entry {
             // (the old value is dropped with the entry's write below)
         } else if self.cur_level() > LEVEL_ONE {
             self.eq_save(p, self.peek_eqtb(p).b1())?;
@@ -502,12 +523,13 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             self.set_eqtb_int(p, w);
             return Ok(());
         }
-        if self.etex_ex() && self.peek_eqtb(p).int() == w {
+        let entry = self.holds_entry_value(p);
+        if self.etex_ex() && !entry && self.peek_eqtb(p).int() == w {
             self.assign_trace(p, b"reassigning");
             return Ok(());
         }
         self.assign_trace(p, b"changing");
-        if self.peek_xeq_level(p) != self.cur_level() {
+        if self.peek_xeq_level(p) != self.cur_level() || entry {
             self.eq_save(p, self.peek_xeq_level(p))?;
             self.set_xeq_level(p, self.cur_level());
         }

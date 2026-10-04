@@ -11951,3 +11951,118 @@ input before and after its heading; placement from glyph lists,
 synthesized glyphs passed over), and the `glyphs` e2e job's check of
 `partex outline glyphs.tex --json` against the heading's place in
 pdfTeX's PDF.
+
+## 2026-10-04 — SSA optimizations as each step closes (branch `ssa-opt`, agent ssa-opt)
+
+The question: which classic SSA optimizations, applied as each step is
+built and closed, make the recorded graph more precise without losing
+soundness, so that an edit reruns fewer steps. The base is `cancel` at
+904ea54 (soft reads and class reads on). Measured with fastdev builds,
+counting steps and commands, not times. The rebuild trace now says why
+each step runs: `step N runs for: SLOT...`, which lists the slots whose
+reaching definition is not the version the step read, or `a mark` (a
+seed, a store, or the input after a step that ended elsewhere).
+
+**Where the steps go.** pt (one edit: 3 steps), acro2 (15), ac3 (14)
+and the course's word edit (8, seven of them seeds) were already
+minimal. On a 64-page thesis (cold: 63,816 steps in trip 1, 4 trips), a
+word or a space in body text reruns 6 to 22 steps. Three edit kinds
+cascaded:
+- a section title (986 steps);
+- an insertion long enough to reflow pages (588);
+- a line break added mid-chapter (547).
+
+**What was wrong: a soft read decided something.** A local assignment in
+a group the step opened reads the old value only softly, so a rebuild
+never places that slot, and the run finds whatever the arrays hold:
+often a later step's definition. TeX decides two things from that value:
+- whether to save it (§277: its level against `cur_level`);
+- whether to assign it at all (e-TeX's `reassigning` when equal).
+
+In the section edit, step 65990's cold run found `\=` at level 5 and
+equal to the new value, so it skipped the assignment. The rebuild's run
+found the level-1 value, assigned it and saved it. The step's
+definitions changed (`\=`, `\-`, `\'`, `` \` ``, `\lineskip`,
+`\vfuzz`), and the save stack below every following window of a long
+figure shifted. That changed 111,738 save-entry definitions over 880
+steps. The output was right either way: the cascade recomputed
+everything. The cost was the cascade, and a run whose behaviour hung on
+an unrecorded value.
+
+**Built** (DESIGN 3.12, "As each step closes"):
+- *A soft read decides nothing* (`PARTEX_SSA_SOFT_PLACE=0` turns it
+  off). A slot that holds the step's entry value, assigned in a group
+  the step opened (`Tracker::entry_value`), is always saved and
+  assigned, as a consistent state would do. An entry value still saved
+  at the step's end (`SsaTracker::entry_saved`) is checked in a rebuild
+  like a read: at a later definition the run is dropped and the slot
+  placed.
+  - Rejected first: placing every soft-read slot like a read. It cut the
+    section edit to 96, but the extra dropped runs tripped `go_cold` in
+    the reflow edit's second trip (564 + 1,592 steps instead of 562 +
+    26).
+- *Dead save stack entries are not definitions*
+  (`PARTEX_SSA_DEAD_SAVES=0` turns it off). An entry at or above the
+  pointer at a step's end is never read before being written again. A
+  rebuild therefore places the stack below a step's pointer whole. An
+  entry made a plain value drops a stale object left there
+  (`mark_save`), which its version carried.
+
+**Measured** (steps / commands of the rebuild, all trips; base is this
+binary with `PARTEX_SSA_SOFT_PLACE=0 PARTEX_SSA_DEAD_SAVES=0`, the
+same as `cancel`'s numbers where both were run):
+
+| edit | base | ssa-opt |
+|---|---|---|
+| pt, acro2, ac3 | 3, 15, 14 | 3, 15, 14 |
+| thesis: word, space, 5 other one-letter edits, a figure's text, an acronym use | 6–22 | the same |
+| thesis: a section title | 986 / 3,637,766 | 84 / 51,168 |
+| thesis: a line break added mid-chapter | 547 / 2,019,908 | 169 / 447,021 |
+| thesis: a page-reflowing insertion | 588 / 545,564 | 590 / 530,012 |
+
+Every thesis rebuild's PDF is byte-identical to base's, and for the
+section, reflow and line-break edits to a cold SSA build of the edited
+source.
+
+The rerun check (`PARTEX_SSA_TRIPS=1 PARTEX_SSA_RERUN_CHECK=1`), as
+definitions changed / ended elsewhere / runs dropped:
+
+| document | base | ssa-opt |
+|---|---|---|
+| pt | 14 / 4 / 9 | 10 / 4 / 8 |
+| acro2 | 15 / 1 / 20 | 5 / 1 / 19 |
+| ac3 | 18 / 1 / 20 | 7 / 1 / 19 |
+| thesis | 3,001 / 23 / 795 | 680 / 23 / 779 |
+
+On the thesis, effects changed stays at 5. The rest are mostly
+`save[8]` in fire steps, and the windows before a fire that end
+elsewhere with an error.
+
+**What is left, and what blocks it** (DESIGN 3.12, "Analysed, not
+built"):
+- *The reflow edit's 300 steps are PDF object numbers.* `pdf.last[6]`
+  went 0439→0437: two objects fewer, so every later number shifts. Each
+  later step that makes a destination or a link reads `pdf.objs`,
+  `pdf.obj_trees` and `pdf.dests` whole and defines them anew. The
+  numbers are in the PDF's bytes, so only numbers resolved at the link
+  cut this: virtual ids, as machine mode's `vnum.rs` has, with each
+  writer scope reading the table's shape, the entries it uses and the
+  numbers it asks for.
+- *The line-break edit's 101 `cond` steps.* The conditional stack is one
+  slot that holds each open conditional's absolute `if_line`. One slot
+  per level for the lines, read only by the messages that print them,
+  would cut it.
+- *A relative save pointer* (a step that leaves `save_ptr` as it found
+  it and never pops below it neither reads nor defines it). It is sound
+  under that condition, but the data showed no chain through the
+  pointer once the soft decisions were fixed.
+- *Value numbering, copy propagation, redundant stores.* The memo, the
+  copy model of the save stack and backdating already give them. A
+  redundant store is a firewall here, not a false dependency. The
+  rebuild passes over a marked reader whose read definition comes back
+  at the same version.
+
+Oracle for `45f91fe`, both on accl: `edits --brief --fixpoint` gave 17/17
+cases identical over 99 stages (job 6573; the base 904ea54 gave the same,
+job 6575), and `gate` exited 0 (job 6574: e2e 37/37, trip and etrip
+identical, clippy clean).

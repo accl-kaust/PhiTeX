@@ -96,8 +96,6 @@ struct Stamp {
     f: u64,
     s: u64,
     u: u64,
-    /// The step that observed the slot softly ([`Open::step_soft`]).
-    o: u64,
 }
 
 /// A location's last recorded read, the frame that recorded it, and the
@@ -211,11 +209,6 @@ pub(crate) struct Open<M: Machine> {
     /// (debug) writes made while no step was open.
     pub(crate) stepless_writes: u64,
     pub(crate) step_reads: Vec<(u64, M::Addr)>,
-    /// The slots the open step read softly from outside it (a local
-    /// assignment's look at the value it saves): not its dependencies,
-    /// but what its run saw, which a rebuild puts in place as it puts its
-    /// reads ([`Runtime::open_step_observed`]).
-    pub(crate) step_soft: Vec<M::Addr>,
     pub(crate) step_recs: Vec<RecId>,
     /// Timing ([`StepTimes`], a measurement, off unless asked for): the
     /// engine's clock, when the open step began, when it made each read
@@ -247,7 +240,6 @@ impl<M: Machine> Open<M> {
             root_writes: 0,
             stepless_writes: 0,
             step_reads: Vec::new(),
-            step_soft: Vec::new(),
             step_recs: Vec::new(),
             timing: false,
             clock: 0,
@@ -363,10 +355,6 @@ impl<M: Machine> Open<M> {
             if step != 0 && (st.w < step || st.u == step) && st.s != step {
                 if self.soft {
                     self.soft_new = true;
-                    if st.o != step {
-                        st.o = step;
-                        self.step_soft.push(loc.addr().clone());
-                    }
                 } else {
                     st.s = step;
                     let a = loc.addr();
@@ -437,10 +425,6 @@ impl<M: Machine> Open<M> {
             if (st.w < step || st.u == step) && st.s != step {
                 if self.soft {
                     self.soft_new = true;
-                    if st.o != step {
-                        st.o = step;
-                        self.step_soft.push(a.clone());
-                    }
                 } else {
                     st.s = step;
                     self.push_step_read(hash64(a), a);
@@ -1040,29 +1024,10 @@ impl<M: Machine> Runtime<M> {
         self.open.step
     }
 
-    /// The addresses the open step has read from outside it so far.
     /// (debug) Writes made with no call open while a step was.
     #[must_use]
     pub fn root_writes(&self) -> (u64, u64) {
         (self.open.root_writes, self.open.stepless_writes)
-    }
-
-    /// What the open step's run saw from outside it: its reads, then the
-    /// slots it read softly ([`Open::step_soft`]); from the `reads`th read
-    /// and the `soft`th soft one on.
-    pub fn open_step_observed_from(
-        &self,
-        reads: usize,
-        soft: usize,
-    ) -> impl Iterator<Item = &M::Addr> {
-        self.open_step_reads_from(reads)
-            .chain(self.open.step_soft.get(soft..).unwrap_or_default())
-    }
-
-    /// How many slots the open step read softly.
-    #[must_use]
-    pub fn open_step_soft_len(&self) -> usize {
-        self.open.step_soft.len()
     }
 
     /// How many reads the open step has made from outside it.
@@ -1071,6 +1036,7 @@ impl<M: Machine> Runtime<M> {
         self.open.step_reads.len()
     }
 
+    /// The addresses the open step has read from outside it so far.
     pub fn open_step_reads(&self) -> impl Iterator<Item = &M::Addr> {
         self.open.step_reads.iter().map(|r| &r.1)
     }
@@ -1096,7 +1062,6 @@ impl<M: Machine> Runtime<M> {
             st.serial = self.open.serial;
         }
         self.open.step_reads.clear();
-        self.open.step_soft.clear();
         self.open.step_recs.clear();
         self.open.step_began = self.open.clock;
         self.open.step_read_at.clear();
@@ -1129,7 +1094,6 @@ impl<M: Machine> Runtime<M> {
     pub fn abort_step(&mut self) {
         self.open.step = None;
         self.open.step_reads.clear();
-        self.open.step_soft.clear();
         self.open.step_recs.clear();
         self.open.step_read_at.clear();
         self.open.step_wrote_at = Table::new();
@@ -1141,7 +1105,6 @@ impl<M: Machine> Runtime<M> {
         let (id, _) = self.open.step.take()?;
         let recs = core::mem::take(&mut self.open.step_recs);
         let reads = core::mem::take(&mut self.open.step_reads);
-        self.open.step_soft.clear();
         if self.open.timing {
             let wrote = core::mem::take(&mut self.open.step_wrote_at)
                 .iter()
@@ -1180,7 +1143,6 @@ impl<M: Machine> Runtime<M> {
         let (id, _) = self.open.step.take()?;
         let recs = core::mem::take(&mut self.open.step_recs);
         let reads = core::mem::take(&mut self.open.step_reads);
-        self.open.step_soft.clear();
         self.open.step_read_at.clear();
         self.open.step_wrote_at = Table::new();
         let Runtime {

@@ -394,6 +394,16 @@ pub trait Tracker {
     fn soft_read(&self, cell: Cell, _level: i32) {
         self.read(cell);
     }
+    /// Whether `cell` holds the value the open step began with, assigned
+    /// locally at group level `level` in a group the step opened: a value
+    /// from before the group, which a consistent state gives a level
+    /// below `level`, so the assignment saves it whatever level the
+    /// engine's arrays hold (a rebuild's run may find there a later
+    /// definition's, which it did not place since it read the value only
+    /// softly, [`Tracker::soft_read`]).
+    fn entry_value(&self, _cell: Cell, _level: i32) -> bool {
+        false
+    }
     /// `eqtb[cell]`'s value is saved at group level `level`.
     fn saved(&self, _cell: Cell, _level: i32) {}
     /// `eqtb[cell]`'s value is saved at group level `level` in the save

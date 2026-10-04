@@ -177,6 +177,19 @@ pub fn entry_check_report<H: Host>(tex: &Tex<H, SsaTracker>) -> (u64, Vec<String
     (r.st.entry_bad_count, lines)
 }
 
+/// A local assignment in a group the step opened saves a slot that holds
+/// the step's entry value whatever level the value has
+/// ([`Tracker::entry_value`]); off (`PARTEX_SSA_SOFT_PLACE=0`), the level
+/// the engine's arrays hold decides, which in a rebuild may be a later
+/// definition's.
+pub static SOFT_PLACE: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(true);
+
+/// A save stack entry above the pointer at a step's end is not its
+/// definition ([`SsaTracker::end_step`]): no command reads an entry above
+/// the pointer before writing it, so the step's write of it is dead.
+/// Off (`PARTEX_SSA_DEAD_SAVES=0`), every entry written is a definition.
+pub static DEAD_SAVES: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(true);
+
 /// The version of a [`Fam::Class`] slot holding class `c`.
 fn class_version(c: u8) -> Version {
     Version::of(&(0xc1a5_u16, c))
@@ -1718,8 +1731,18 @@ impl SsaTracker {
     /// before the step made); an entry value still saved on the stack is a
     /// read of the step. (Every other write stays a definition, a dead
     /// save stack entry's too: a rebuild puts the store back by them.)
-    pub(crate) fn end_step(&self, r: &mut Recorder) -> Option<partex_ssa::fold::StepId> {
-        let id = self.end_step_inner(r);
+    ///
+    /// `save_ptr` is the save stack's pointer at the step's end: the
+    /// entries the step wrote at or above it are dead (popped, and never
+    /// read before a later push writes them), not its definitions
+    /// ([`DEAD_SAVES`]; a rebuild places the stack below a step's pointer
+    /// whole, `rebuild::save_stack_whole`).
+    pub(crate) fn end_step(
+        &self,
+        r: &mut Recorder,
+        save_ptr: i32,
+    ) -> Option<partex_ssa::fold::StepId> {
+        let id = self.end_step_inner(r, save_ptr);
         // (the run's findings kept: a dropped run's go with it)
         r.st.entry_bad_count += core::mem::take(&mut r.st.entry_bad_run_count);
         let run = core::mem::take(&mut r.st.entry_bad_run);
@@ -1772,10 +1795,20 @@ impl SsaTracker {
         id
     }
 
-    fn end_step_inner(&self, r: &mut Recorder) -> Option<partex_ssa::fold::StepId> {
+    fn end_step_inner(&self, r: &mut Recorder, save_ptr: i32) -> Option<partex_ssa::fold::StepId> {
         let saved = core::mem::take(&mut *self.entry_saves.borrow_mut());
         let undone = core::mem::take(&mut *self.undone.borrow_mut());
-        if saved.is_empty() && undone.is_empty() {
+        let dead: Vec<Slot> = if DEAD_SAVES.load(core::sync::atomic::Ordering::Relaxed) {
+            let first = i64::from(crate::track::save::ENTRY) + i64::from(save_ptr.max(0));
+            r.rt.open_step_recs()
+                .iter()
+                .flat_map(|&id| r.rt.record(id).writes.iter().map(|w| w.0))
+                .filter(|a| a.0 == Fam::Save && a.1 >= first)
+                .collect()
+        } else {
+            Vec::new()
+        };
+        if saved.is_empty() && undone.is_empty() && dead.is_empty() {
             return r.rt.end_step();
         }
         let mut read: Vec<Slot> = saved.iter().map(|e| e.0).collect();
@@ -1787,27 +1820,12 @@ impl SsaTracker {
             .collect();
         skip.sort_unstable();
         skip.dedup();
-        if ENTRY_CHECK.load(core::sync::atomic::Ordering::Relaxed)
-            && let Some(id) = r.rt.open_step_id()
-            && let Some(key) = r.rt.fold.steps.get(id as usize).map(|t| t.key)
-        {
-            // (a class's version is made from the meaning: the meaning's
-            // own check covers it)
-            for &s in skip.iter().filter(|s| s.0 != Fam::Class) {
-                let now = table_at(s.0, s.1)
-                    .and_then(|(f, i)| r.st.vers.known_at(f, i))
-                    .unwrap_or_else(|| r.st.vers.revision(s));
-                if let Some(rv) = rebuild::reaching_version(r, &s, key)
-                    && rv != now
-                {
-                    r.st.entry_bad_count += 1;
-                    if r.st.entry_bad.len() < 40 {
-                        r.st.entry_bad.push((id, s, rv, now, true));
-                    }
-                }
-            }
-        }
         self.soft_kept.set(self.soft_kept.get() + skip.len() as u64);
+        if !dead.is_empty() {
+            skip.extend(dead);
+            skip.sort_unstable();
+            skip.dedup();
+        }
         self.soft_read.set(self.soft_read.get() + read.len() as u64);
         r.rt.end_step_soft(&read, &skip)
     }
@@ -1820,6 +1838,19 @@ impl SsaTracker {
             r.st.entry_bad_run.clear();
             r.st.entry_bad_run_count = 0;
         }
+    }
+
+    /// The slots whose entry value the open step saved and has not put
+    /// back yet: still on the save stack at its end, they are its reads
+    /// ([`SsaTracker::end_step`]), and its run is right only if each held
+    /// the value that reaches the step (a rebuild places them).
+    pub(crate) fn entry_saved(&self) -> Vec<Slot> {
+        self.entry_saves
+            .borrow()
+            .iter()
+            .map(|e| e.0)
+            .filter(|s| s.0 == Fam::Eqtb)
+            .collect()
     }
 
     /// How many soft reads the steps' ends settled as untouched (neither
@@ -1918,6 +1949,20 @@ impl Tracker for SsaTracker {
             // value's level)
             r.note_read(s, v);
         }
+    }
+
+    fn entry_value(&self, cell: Cell, level: i32) -> bool {
+        let Cell::Eqtb(_) = cell else { return false };
+        if level <= self.step_level.get()
+            || !SOFT_READS_ON.load(core::sync::atomic::Ordering::Relaxed)
+            || !SOFT_PLACE.load(core::sync::atomic::Ordering::Relaxed)
+        {
+            return false;
+        }
+        let Ok(mut r) = self.rec.try_borrow_mut() else {
+            return false;
+        };
+        r.on && r.rt.entry_write(&Slot::of(cell)).is_some()
     }
 
     fn save_entry(&self, cell: Cell, level: i32, at: Option<i32>) {
@@ -3354,7 +3399,7 @@ fn close_paragraph<H: Host>(
         return;
     }
     // (the step ends with its call: its definitions and readers, 7.17.3)
-    if let (Some(id), Some(input)) = (tex.tracker.end_step(rr), input) {
+    if let (Some(id), Some(input)) = (tex.tracker.end_step(rr, tex.save_ptr), input) {
         rebuild::step_closed(rr, id, input);
     }
     let mut stores = None;

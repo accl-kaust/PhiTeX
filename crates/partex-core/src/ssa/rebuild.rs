@@ -18,8 +18,8 @@ use partex_ssa::Version;
 use partex_ssa::fold::{Def, Fold, StepId};
 
 use super::{
-    Close, Fam, Recorder, SVal, Slot, SsaReport, SsaTracker, StepEffects, TexSsa, Versions,
-    close_paragraph, line_bounds, open_paragraph, set_value, slot_value,
+    Close, Fam, Recorder, SOFT_PLACE, SVal, Slot, SsaReport, SsaTracker, StepEffects, TexSsa,
+    Versions, close_paragraph, line_bounds, open_paragraph, set_value, slot_value,
 };
 use crate::host::{FileKind, Host, NoHost};
 use crate::input::{AlphaFile, InStateRecord, InputValue, same_chain};
@@ -176,11 +176,8 @@ struct Watch {
     /// The step's place and the slots its run is placed at.
     key: u64,
     set: BTreeSet<Slot>,
-    /// The reads checked so far (and soft reads: what the run saw,
-    /// [`Runtime::open_step_observed_from`]), and whether one read a later
-    /// definition.
+    /// The reads checked so far, and whether one read a later definition.
     scanned: usize,
-    scanned_soft: usize,
     later: bool,
 }
 
@@ -192,15 +189,13 @@ pub(super) fn read_later(rr: &mut Recorder) -> bool {
     };
     if !w.later {
         let fold = &rr.rt.fold;
-        let reads = rr.rt.open_step_reads_len();
-        for a in rr.rt.open_step_observed_from(w.scanned, w.scanned_soft) {
+        for a in rr.rt.open_step_reads_from(w.scanned) {
+            w.scanned += 1;
             if positioned(a) && !w.set.contains(a) && later(fold, a, w.key) {
                 w.later = true;
                 break;
             }
         }
-        w.scanned = reads;
-        w.scanned_soft = rr.rt.open_step_soft_len();
     }
     w.later
 }
@@ -1410,12 +1405,19 @@ fn save_stack_whole<H: Host>(
         tex.save_ptr
     };
     let fold = &rr.rt.fold;
-    for k in [SAVE_PTR, CUR_LEVEL, CUR_GROUP, CUR_BOUNDARY, XCHAIN]
-        .into_iter()
-        .chain((0..u32::try_from(at).unwrap_or(0)).map(|p| ENTRY + p))
-    {
+    // (with dead entries not definitions, the arrays can hold a later
+    // step's dead write of an entry below the pointer that no later
+    // definition shows: each is placed, [`super::DEAD_SAVES`])
+    let all = super::DEAD_SAVES.load(core::sync::atomic::Ordering::Relaxed);
+    for k in [SAVE_PTR, CUR_LEVEL, CUR_GROUP, CUR_BOUNDARY, XCHAIN] {
         let a = slot(k);
         if later(fold, &a, key) {
+            next.push(a);
+        }
+    }
+    for k in (0..u32::try_from(at).unwrap_or(0)).map(|p| ENTRY + p) {
+        let a = slot(k);
+        if all || later(fold, &a, key) {
             next.push(a);
         }
     }
@@ -2130,12 +2132,29 @@ pub fn rebuild<H: Host>(tex: &mut Tex<H, SsaTracker>, trace: bool, apply: bool) 
     tex.tracker.boundary();
     let mut srep = SsaReport::default();
     while let Some((j, why)) = dirty.pop_first() {
-        let (prev, mut target) = {
+        let (prev, mut target, whyn) = {
             let r = tex.tracker.rec.borrow();
             let fold = &r.rt.fold;
             if !fold.steps[j as usize].live {
                 continue;
             }
+            // (the trace: why it runs, the slots whose definition reaching
+            // it is not the version it read, or a mark)
+            let whyn = rep.trace.then(|| match &why {
+                Some(reads) => {
+                    let key = fold.steps[j as usize].key;
+                    reads
+                        .iter()
+                        .filter(|(a, v)| reaching_version(&r, a, key) != Some(*v))
+                        .take(8)
+                        .map(|(a, _)| {
+                            alloc::format!("{a}={}", super::view::trace_name(tex, &r.st, *a))
+                        })
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                }
+                None => alloc::string::String::from("a mark"),
+            });
             // (marked by definitions that changed, each reaching it at the
             // version it read again: its reads are as they were)
             if let Some(reads) = why {
@@ -2164,8 +2183,11 @@ pub fn rebuild<H: Host>(tex: &mut Tex<H, SsaTracker>, trace: bool, apply: bool) 
                 rep.unsupported = Some("an edit in the job's first step (its start)");
                 break;
             }
-            (fold.order[pos - 1], r.st.steps.end(j))
+            (fold.order[pos - 1], r.st.steps.end(j), whyn)
         };
+        if let Some(w) = whyn {
+            note(tex, alloc::format!("step {j} runs for: {w}"));
+        }
         let Some(mut input) = tex.tracker.rec.borrow().st.steps.end(prev) else {
             rep.unsupported = Some("a step with no result");
             break;
@@ -3336,7 +3358,6 @@ fn run_step<H: Host>(
             key,
             set: core::mem::take(&mut set),
             scanned: 0,
-            scanned_soft: 0,
             later: false,
         });
         tex.tracker
@@ -3413,14 +3434,23 @@ fn run_step<H: Host>(
                     .copied()
                     .collect()
             } else {
-                // (and what it read softly: the value it saved is put back)
-                r.rt.open_step_observed_from(0, 0)
-                    .inspect(|_| n += 1)
-                    .filter(|a| positioned(a) && !set.contains(*a) && later(fold, a, key))
-                    .copied()
-                    .collect::<BTreeSet<Slot>>()
-                    .into_iter()
-                    .collect()
+                // (and the entry values it saved that are still saved:
+                // reads of it, made at its end, [`SsaTracker::entry_saved`])
+                let saved = if SOFT_PLACE.load(core::sync::atomic::Ordering::Relaxed) {
+                    tex.tracker.entry_saved()
+                } else {
+                    Vec::new()
+                };
+                let mut m: Vec<Slot> =
+                    r.rt.open_step_reads()
+                        .chain(saved.iter())
+                        .inspect(|_| n += 1)
+                        .filter(|a| positioned(a) && !set.contains(*a) && later(fold, a, key))
+                        .copied()
+                        .collect();
+                m.sort_unstable();
+                m.dedup();
+                m
             };
             rep.reads_checked += n;
             let written = if miss.is_empty() {
@@ -3520,7 +3550,7 @@ fn run_step<H: Host>(
         let input = InputState::of(tex, finished);
         let mut r = tex.tracker.rec.borrow_mut();
         let rr = &mut *r;
-        tex.tracker.end_step(rr);
+        tex.tracker.end_step(rr, tex.save_ptr);
         let d = defs(&rr.rt, j);
         let stores = step_closed(rr, j, input);
         mark_store_readers(rr, &stores, key, dirty, rep);
