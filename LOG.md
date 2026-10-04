@@ -13484,3 +13484,35 @@ partex.
 - The exclude rebuild costs more than the cold build.
 
 `ssa-edits --fixpoint`: 30/30.
+
+## 2026-10-04 — A cascade gone cold runs to the job's end (branch `incl66`)
+
+**Symptom** (#66, second half). On pgfsub, after the arrows chapter was
+left out of `\includeonly` and the rebuild ran, putting it back gave a
+`pgfsub.aux` that stopped at `\@input{pgfmanual-en-tikz-arrows.aux}`: 26
+lines instead of 155. The `.toc` was empty and the PDF wrong.
+
+**Cause.** The `\include` step ran again and read the chapter again. The
+chapter's steps are all new, and they cost more than the old steps
+after them, so the cascade went cold: `go_cold` retired every old step
+after it. The run still stopped at its `target`, the end of the old run
+of the step it started from. Without the chapter, the `\include` had
+ended just after `\include{...-arrows}`. With the chapter, the run comes
+back to that same place once the chapter is done. The rebuild took that
+as the end of the cascade and stopped. The old steps that would have
+followed were retired, so the job's later writes (the other chapters'
+`\@input` lines, `\end{document}`'s) were never made.
+
+**Fix.** A cascade that goes cold drops its target and runs to the job's
+end, as the comment at `go_cold` already said a cold cascade does.
+
+**Measured.**
+- New `ssa-edits` case `includeonly` (`includeonly.tex`, a long middle
+  chapter `incl-big.tex` left out and put back): it fails on b0380d6
+  (the main `.aux` lacks `incl-ch3`'s `\@input`, the `.toc` is empty) and
+  passes with the fix. `--fixpoint`: 31/31.
+- pgfsub (native, fastdev): with the chapter put back, the `.aux` and `.toc`
+  files are byte-identical to plain partex. The PDF still has the `/F`
+  numbers of the open `FontLoad` issue.
+- The put-back rebuild costs 190 s (3 trips, 63M commands), against a
+  65 s cold build. That cost is still open.
