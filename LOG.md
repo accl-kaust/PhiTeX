@@ -12548,3 +12548,29 @@ overfull box messages name `\U/cmr/m/n/12` where the oracle names
 converged PDF names its fonts one higher than pdfTeX's (`/F43` for
 `/F42`), because a font loaded only by an earlier trip, the bold `?` of
 an undefined citation, keeps its number.
+
+## 2026-10-04 — Fonts' numbers and identifiers as the final run makes them (agent offsets)
+
+**Fonts' numbers.** On a small BibTeX document (a `\cite`, `IEEEtran`), the
+converged SSA PDF named its fonts one higher than pdfTeX, `/F43` where
+pdfTeX has `/F42`. The first trip loaded a bold font for the `[?]` of
+an undefined citation. The engine's table kept that font, and its place
+there was its number. The fix: with virtual object numbers, the `/F`
+numbers are relocations, as machine mode's are (`PdfOut::font_refs`). The
+link numbers fonts from the `FontLoad` events of the live steps' runs in
+program order. `remake_font`, a step run again loading a font an older
+run made, emits one too. The converged PDF is now content-identical to
+the oracle (plain partex to the fixed point, BibTeX between passes).
+`PARTEX_SSA_FONT_REFS=0` switches it off. DVI's font numbers still come
+from the table.
+
+**Fonts' identifiers.** Overfull box messages named `\U/cmr/m/n/12` where
+pdfTeX names `\OT1/cmr/m/n/12`. Repro: `\font\fa=cmr12` with a box,
+then `\font\fb=cmr12` (the same font, so `font_id_text` becomes `\fb`)
+with a box, and a document whose first build takes two trips. The second
+trip ran the `\fa` step again and wrote `font_id_text = \fa` at the
+frontier. The later box's step, run again, read the hash's text there,
+because hash slots are not placed, and printed `\fa Second.` where pdfTeX
+prints `\fb Second.`. The fix: the font identifier region of the hash
+(`FONT_ID_BASE..UNDEFINED_CONTROL_SEQUENCE`) is positioned, so it is
+placed and checked like eqtb.

@@ -402,6 +402,12 @@ load of what the job stored is a φ. The construction draws on:
   and glue lineages are handed out by the build and never observed: a
   string is read by its characters, a control sequence by its name. A
   node that runs again allocates past the arrays' ends.
+- **A font's identifier is positioned.** `font_id_text(f)` (§256) is
+  the one hash text that changes: each `\font` that names an already
+  loaded font sets it. So those hash slots are placed like eqtb's
+  (`rebuild::font_id_slot`). Before, a step run again in a later trip
+  read the identifier a later step had set: an overfull box's
+  `\OT1/cmr/m/n/12` came out as `\U/cmr/m/n/12`.
 - **A name is made where its meaning is first defined.** Names are never
   taken out of the hash, so a step run again in its place, or in a later
   trip, can find a name that a later step entered. A lookup that did not
@@ -799,6 +805,14 @@ template, which a compiled backend exploits.
   resolved from a cache and laid out in full.
 - The writer's position in the file and the objects' offsets are not
   state: TeX never observes them, and the link places every object.
+- **Fonts' numbers are the link's.** pdfTeX's `/F` names number the
+  fonts in the order the job loaded them (§576). The engine's table keeps
+  every font any run loaded, including one that only an older trip
+  loaded (the bold `?` of a citation not yet defined). So with virtual
+  object numbers each `/F` number is a relocation (`Effect::FontRef`).
+  The link numbers the fonts from the `Effect::FontLoad` events of the
+  steps' runs as they are now, in program order. A font a step run again
+  makes anew in its slot (`remake_font`) is loaded there too.
 - **Columns are the link's** (`effects/flow.rs`). `term_offset` and
   `file_offset` (§54), where the terminal's and the log's lines stand,
   decide only what is printed: the wrap at `max_print_line` (§58),
@@ -1280,6 +1294,7 @@ accessor.
 | `PARTEX_SSA_SOFT_PLACE=0` | a soft-read slot's level and value decide its save and assignment as the arrays hold them (3.12) |
 | `PARTEX_SSA_DEAD_SAVES=0` | every save stack entry a step writes is its definition (3.12) |
 | `PARTEX_SSA_VOBJ=0` | the PDF object table one slot, pdfTeX's numbers as made (3.12, "Virtual PDF object numbers") |
+| `PARTEX_SSA_FONT_REFS=0` | a font's `/F` number is its place in the engine's table, which keeps the fonts an older run loaded, not the link's (3.8) |
 | `PARTEX_SSA_FLOW=0` | the log's and the terminal's columns are slots each printing step reads and writes, not the link's (3.8) |
 
 Each is exact: output is byte-identical with it on or off.

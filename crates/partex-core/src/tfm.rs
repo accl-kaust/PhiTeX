@@ -232,6 +232,8 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         self.fonts.hyphen_char[fx(f)] = self.int_par(DEFAULT_HYPHEN_CHAR_CODE);
         self.fonts.skew_char[fx(f)] = self.int_par(DEFAULT_SKEW_CHAR_CODE);
         self.font_made(f);
+        // (loaded here in program order: its number is the link's)
+        self.font_loaded(f);
     }
 
     /// §561: `start_font_error_message`.

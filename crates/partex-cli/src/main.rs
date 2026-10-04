@@ -583,6 +583,9 @@ fn debug_switches() {
     if std::env::var("PARTEX_SSA_VOBJ").is_ok_and(|v| v == "0") {
         partex_core::ssa::VOBJ.store(false, std::sync::atomic::Ordering::Relaxed);
     }
+    if std::env::var("PARTEX_SSA_FONT_REFS").is_ok_and(|v| v == "0") {
+        partex_core::ssa::FONT_REFS.store(false, std::sync::atomic::Ordering::Relaxed);
+    }
     if std::env::var("PARTEX_SSA_FLOW").is_ok_and(|v| v == "0") {
         partex_core::ssa::FLOW.store(false, std::sync::atomic::Ordering::Relaxed);
     }

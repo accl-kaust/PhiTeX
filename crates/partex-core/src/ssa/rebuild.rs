@@ -1394,8 +1394,19 @@ pub(super) fn positioned(a: &Slot) -> bool {
         Fam::Alloc => ![STR_TOP, HASH_USED, HASH_HIGH, GLUE_LINEAGE]
             .iter()
             .any(|&k| a.1 == i64::from(k)),
+        // (a font's identifier, `font_id_text`, §256: the one hash text
+        // that changes, each `\font` naming the font sets it, so a step
+        // run again reads the one that reaches it, not a later step's)
+        Fam::Hash => font_id_slot(a.1),
         _ => false,
     }
+}
+
+/// Whether hash slot `p` is a font's identifier (§222's `font_id_base`
+/// region).
+pub(super) fn font_id_slot(p: i64) -> bool {
+    use crate::web::{FONT_ID_BASE, UNDEFINED_CONTROL_SEQUENCE};
+    (i64::from(FONT_ID_BASE)..i64::from(UNDEFINED_CONTROL_SEQUENCE)).contains(&p)
 }
 
 /// Whether a run's read of `a` is checked against the definitions
@@ -3772,8 +3783,9 @@ fn run_step<H: Host>(
             positioned(a) || matches!(a.0, Fam::Font | Fam::Class | Fam::Name | Fam::Hash)
         }) {
             // (a name and its hash slot only wake their readers: the
-            // table keeps every name made, and is not put back)
-            if !matches!(a.0, Fam::Name | Fam::Hash) {
+            // table keeps every name made, and is not put back; a font's
+            // identifier is put back)
+            if !matches!(a.0, Fam::Name | Fam::Hash) || positioned(a) {
                 touched.insert(*a);
             }
             let (o, n) = (old.get(a).copied(), new.get(a).copied());

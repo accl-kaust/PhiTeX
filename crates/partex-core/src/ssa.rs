@@ -205,6 +205,13 @@ pub static DEAD_SAVES: core::sync::atomic::AtomicBool = core::sync::atomic::Atom
 /// object table is one slot and numbers are pdfTeX's as made.
 pub static VOBJ: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(true);
 
+/// The fonts' numbers in the PDF's `/F` names are the link's, made from
+/// the fonts loaded in program order by the steps' runs as they are now
+/// (`Effect::FontLoad`, `Effect::FontRef`), with virtual object numbers.
+/// Off (`PARTEX_SSA_FONT_REFS=0`), a font's number is its place in the
+/// engine's table, which keeps the fonts an older run loaded.
+pub static FONT_REFS: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(true);
+
 /// The log's and the terminal's columns are the link's, not state
 /// (`effects/flow.rs`, DESIGN 3.8): printing makes ops the link renders
 /// from the columns the step before left. Off (`PARTEX_SSA_FLOW=0`), each
@@ -3375,6 +3382,11 @@ pub fn run_applying<H: Host>(
     // (the files are linked from the steps' effects, DESIGN 7.17.3)
     tex.set_effects(true);
     tex.set_ssa_objects(VOBJ.load(core::sync::atomic::Ordering::Relaxed));
+    // (the fonts' numbers in `/F` names the link's too, from the fonts
+    // the final run loads in program order: a font only an older trip's
+    // run loaded takes none, `Effect::FontLoad`)
+    tex.pdf.out.font_refs =
+        tex.pdf.out.virt && FONT_REFS.load(core::sync::atomic::Ordering::Relaxed);
     // (and their text from the columns, DESIGN 3.8)
     tex.flow.on = FLOW.load(core::sync::atomic::Ordering::Relaxed);
     tex.tracker.rec.borrow_mut().st.steps.flow = tex.flow.on.then(|| Flows {
