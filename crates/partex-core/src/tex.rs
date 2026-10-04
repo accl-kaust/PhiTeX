@@ -483,6 +483,15 @@ pub struct Tex<H: Host, T: Tracker = Untracked> {
     pub(crate) window: u64,
     pub(crate) window_start: u64,
     pub(crate) window_cut: Option<crate::run::WindowEvent>,
+    /// The open window's command hash (a gear hash of the commands since
+    /// it began, `run::Tex::window_command`), and whether it has hit a
+    /// cut since the window's least length: where a window ends past its
+    /// events is decided by the commands just run, not by their count,
+    /// so that a run whose commands agree again with a former run's
+    /// cuts its windows where that run did (content-defined, as in
+    /// rsync).
+    pub(crate) window_hash: u64,
+    pub(crate) window_hit: bool,
     /// `\def` is defining a body just made (and maybe interned).
     pub(crate) fresh_def: bool,
     pub(crate) long_help_seen: bool,
@@ -829,6 +838,8 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             window: 0,
             window_start: 0,
             window_cut: None,
+            window_hash: 0,
+            window_hit: false,
             fresh_def: false,
             long_help_seen: false,
             cancel_boundary: false,

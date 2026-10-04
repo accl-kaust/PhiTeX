@@ -3828,6 +3828,8 @@ fn run_step<H: Host>(
             alloc::string::String::from(", cut: a fire pending")
         } else if let Some(e) = tex.window_cut() {
             alloc::format!(", cut: {e:?}")
+        } else if tex.window_hit {
+            alloc::string::String::from(", cut: the commands' hash")
         } else {
             alloc::string::String::from(", cut: the count")
         };

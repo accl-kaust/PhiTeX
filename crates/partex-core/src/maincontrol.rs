@@ -168,6 +168,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                         }
                     } else {
                         self.commands += 1;
+                        self.window_command();
                         if self.commands.is_multiple_of(crate::progress::EVERY) {
                             self.post_progress();
                         }

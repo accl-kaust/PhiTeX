@@ -1718,6 +1718,8 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             window: _,
             window_start: _,
             window_cut: _,
+            window_hash: _,
+            window_hit: _,
             fresh_def: _,
             long_help_seen,
             cancel_boundary,
