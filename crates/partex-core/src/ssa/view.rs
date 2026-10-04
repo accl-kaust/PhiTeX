@@ -833,6 +833,7 @@ fn slot_name<H: Host>(names: &mut Names<'_, H>, st: &super::RecState, a: Slot) -
                 save::CUR_GROUP => String::from("save.group"),
                 save::CUR_BOUNDARY => String::from("save.boundary"),
                 save::XCHAIN => String::from("save.xchain"),
+                k if k >= save::XENTRY => format!("save.xchain[{}]", k - save::XENTRY),
                 k if k >= save::ENTRY => format!("save[{}]", k - save::ENTRY),
                 k => format!("save.{k}"),
             }

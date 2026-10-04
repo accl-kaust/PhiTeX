@@ -87,15 +87,18 @@ impl<H: Host, T: Tracker> Tex<H, T> {
 
     /// The version of save stack slot `s` (`track::save`) now.
     pub(crate) fn save_row_version(&self, s: i64) -> u128 {
-        use crate::track::save::{CUR_BOUNDARY, CUR_GROUP, CUR_LEVEL, ENTRY, SAVE_PTR, XCHAIN};
+        use crate::track::save::{
+            CUR_BOUNDARY, CUR_GROUP, CUR_LEVEL, ENTRY, SAVE_PTR, XCHAIN, XENTRY,
+        };
         let int = crate::track::scalar_version_i32;
         match u32::try_from(s).unwrap_or(u32::MAX) {
             SAVE_PTR => int(self.save_ptr),
             CUR_LEVEL => int(self.cur_level),
             CUR_GROUP => int(self.cur_group),
             CUR_BOUNDARY => int(self.cur_boundary),
-            XCHAIN => {
-                let x = &self.xregs;
+            XCHAIN => partex_ssa::Version::of(&(self.xregs.chain_level, self.xregs.chain_lens())).0,
+            k if k >= XENTRY => {
+                let i = usize::try_from(k - XENTRY).unwrap_or(usize::MAX);
                 let one = |c: &Saved| {
                     (
                         c.loc,
@@ -104,13 +107,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                         c.level,
                     )
                 };
-                let chain: alloc::vec::Vec<_> = x.chain.iter().map(one).collect();
-                let outer: alloc::vec::Vec<alloc::vec::Vec<_>> = x
-                    .outer
-                    .iter()
-                    .map(|c| c.iter().map(one).collect())
-                    .collect();
-                partex_ssa::Version::of(&(x.chain_level, chain, outer)).0
+                partex_ssa::Version::of(&self.xregs.chain_entry(i).map(one)).0
             }
             k if k >= ENTRY => self.save_entry_version(i32::try_from(k - ENTRY).unwrap_or(0)),
             _ => 0,
@@ -154,12 +151,23 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         self.save_top_wrote(crate::track::save::CUR_BOUNDARY);
     }
 
-    /// e-TeX's chain of saved registers above 255, read (and written).
+    /// The shape of e-TeX's chains of saved registers above 255, read
+    /// (and written).
     fn xchain_read(&self) {
         self.save_top_read(crate::track::save::XCHAIN);
     }
     fn xchain_wrote(&self) {
         self.save_top_wrote(crate::track::save::XCHAIN);
+    }
+    /// The chains' entry `i` (laid end to end), read (and written).
+    fn xentry_slot(i: usize) -> u32 {
+        crate::track::save::XENTRY.saturating_add(u32::try_from(i).unwrap_or(u32::MAX))
+    }
+    fn xentry_read(&self, i: usize) {
+        self.save_top_read(Self::xentry_slot(i));
+    }
+    fn xentry_wrote(&self, i: usize) {
+        self.save_top_wrote(Self::xentry_slot(i));
     }
 
     /// §268: `save_type(p)`.
@@ -343,6 +351,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         }
         let word = self.peek_eqtb(p);
         let obj = self.peek_obj(p).cloned();
+        self.xentry_wrote(self.xregs.chain_base() + self.xregs.chain.len());
         self.xregs.chain.push(Saved {
             loc: p,
             word,
@@ -357,6 +366,14 @@ impl<H: Host, T: Tracker> Tex<H, T> {
     fn restore_ext(&mut self) {
         self.xchain_read();
         self.xchain_wrote();
+        // (each entry restored is read, and dropped: a write)
+        if T::VALUES {
+            let base = self.xregs.chain_base();
+            for i in base..base + self.xregs.chain.len() {
+                self.xentry_read(i);
+                self.xentry_wrote(i);
+            }
+        }
         let chain = core::mem::take(&mut self.xregs.chain);
         let tracing = self.int_par(TRACING_RESTORES_CODE) > 0;
         for s in chain.into_iter().rev() {

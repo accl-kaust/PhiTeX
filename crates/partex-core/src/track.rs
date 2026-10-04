@@ -186,10 +186,15 @@ pub mod save {
     pub const CUR_LEVEL: u32 = 1;
     pub const CUR_GROUP: u32 = 2;
     pub const CUR_BOUNDARY: u32 = 3;
-    /// e-TeX's saved registers above 255 (`xregs.rs`'s chain).
+    /// The shape of e-TeX's chains of saved registers above 255
+    /// (`xregs.rs`): each level's length (and the current chain's level).
     pub const XCHAIN: u32 = 4;
-    /// Entry `p` is slot `ENTRY + p`.
+    /// Entry `p` is slot `ENTRY + p`, below [`XENTRY`].
     pub const ENTRY: u32 = 8;
+    /// The chains' saved register `i` (the chains laid end to end, outer
+    /// levels first) is slot `XENTRY + i`: an entry is never changed
+    /// once pushed, so a step reads only the entries it restores.
+    pub const XENTRY: u32 = 1 << 30;
 }
 
 /// The fields of `cur_list`, by [`Row::List`] slot.
