@@ -3989,6 +3989,13 @@ fn run_step<H: Host>(
             if a.0 == Fam::Font && n.is_none() {
                 continue;
             }
+            // (nor does a name or its hash slot's text the run did not
+            // make again: the table keeps every name made, so a step run
+            // again finds the names its last run entered and enters none,
+            // and the lookups after it find them still)
+            if matches!(a.0, Fam::Name | Fam::Hash) && !positioned(a) && n.is_none() {
+                continue;
+            }
             rep.defs_changed += 1;
             let next = rr.rt.fold.next_after(a, key).map(|d| d.key);
             let mut readers = rr.rt.fold.readers_between(a, key, next);

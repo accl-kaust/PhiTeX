@@ -12947,3 +12947,57 @@ harness checks, every stage of every case, that each stream the stores
 would serve is the file the link wrote; a new case, `include_keys`:
 `include` as an editor types it (one trip an edit, then the settle).
 24/24 cases identical, with `--fixpoint` and with one trip a build.
+
+## 2026-10-04 — A step run again leaves the names it entered as they were (branch `auxloss`)
+
+**Symptom.** From `bc13bb1` on, the thesis's SSA cold build no longer
+settles cheaply. Starting from the files of three plain passes with BibTeX,
+trip 2 ran 4138 to 6918 steps and 14.5 to 14.9M commands, where
+`be5a91e` and `f33e519` ran 43 steps and 85,949 commands. On
+`bc13bb1..f227c53` the converged `.aux`, `.toc`, `.lof` and `.lot` also
+differed from plain partex. A native run on a later cancel binary did
+not settle in 4 trips. The Overleaf extension saw a settle of 14.7M
+commands where `be5a91e` did 82k. (The extension's dump of a written
+`Chapter_2.aux` missing its early lines came from its own host, which
+served its scratch `written` buffer before the linked file. It was not
+the engine's.)
+
+**Bisect.** Natively, the cold build alone (`PARTEX_SSA=1`, default
+trips, BibTeX between trips) on the first parents: `48b9a0a`,
+`eaaa2db` and `f33e519` are good. `bc13bb1`, the merge of `offsets`
+with 48c033b ("a name is made where its meaning is first defined"), is
+the first bad one. `02a251c`, `f3e2971`, `f227c53`, `e09dc57`,
+`ba64313` and `f2fa90b` are all bad.
+
+**Cause.** 48c033b lets a rebuild compare a re-run step's definitions of
+`Fam::Name` and `Fam::Hash` with its last run's, so that a step that now
+defines a name a later step entered wakes the lookups between. A step
+that *entered* a name defines its hash slot's text (`set_text` at §260).
+When that step runs again, the table already holds the name, because its
+last run entered it and names are never taken out. The lookup finds the
+name, enters nothing, and the new run has no definition of `Hash(p)`.
+The comparison read that as `old -> none` with nothing before the step,
+and woke every reader of the slot: every later lookup that probed it. On
+the thesis, trip 2 re-runs the steps that load the `.aux` files, which
+entered `\__file_name=Abstract.aux`, `\r@chapter:background`, hook and
+font names, and the cascade ran most of the document again.
+
+**Fix.** In `run_step`, a name or a non-positioned hash slot that the new
+run did not define is not a change. The table keeps the name with the
+text the last run gave it, so its readers read what they read before.
+This is the same reasoning as a font's field that the run did not write
+again. A positioned slot (a font's identifier) is still compared. The
+case 48c033b added, a definition where there was none, still wakes its
+readers.
+
+**Measured.** Thesis (three plain passes and BibTeX first; f2fa90b,
+native, release): trip 2 went from 4666 steps and 14,454,654 commands to
+43 steps and 85,949 commands, as on `be5a91e`. The `.aux`, `.toc`, `.lof`
+and `.lot` files are byte-identical to plain partex's. A space typed in
+`Chapter_2.tex` after the cold build runs 5 steps and 1915 commands.
+New `ssa-edits` case `names_rerun` (`names-rerun.tex`): a paragraph
+enters a name and reads a macro that the `.aux` defines from trip 2 on,
+and 200 paragraphs look the name up. `Case.trip_steps` bounds the steps
+of the cold build's later trips at 30. On f2fa90b trip 2 ran 229 steps
+and the case fails; with the fix it runs 27 and passes. The `names`,
+`include`, `bibtex` and `fontid` cases are identical with `--fixpoint`.

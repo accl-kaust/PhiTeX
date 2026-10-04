@@ -180,6 +180,13 @@ FATAL_EDITS = [("Hello world.", "Hello there."), ("Hello there.", "Hello world."
 # `\begin{document}` from the second trip on, which the first trip entered
 # later in the document, as `\end{document}`'s `\@testdef` enters a
 # `\bibcite`'s name (`SsaTracker::name_defined`); then a word and back
+# names-rerun.tex (not seeded): a paragraph that enters a name and reads
+# a macro the `.aux` defines from the second trip on, so that trip runs
+# it again, and 200 paragraphs that look the name up; the step run again
+# finds the name its last run entered and enters none, which changes
+# nothing for the lookups: the cold build's later trips run 30 steps at
+# most (they ran 229, every lookup woken); then a word and back
+NAMES_RERUN_EDITS = [("Paragraph 7:", "Paragraph seven:"), ("Paragraph seven:", "Paragraph 7:")]
 # fontid.tex (not seeded): a font named again by a second `\font`, which
 # sets its identifier; the first build's second trip runs the first
 # `\font`'s step again, after the second set it (DESIGN 3.2, "A font's
@@ -261,10 +268,13 @@ WINDOW_EDITS = [
 
 
 class Case:
-    def __init__(self, name, inputs, fmt, args, edits, outdir=None, seed=0, garble=False, env=None):
+    def __init__(self, name, inputs, fmt, args, edits, outdir=None, seed=0, garble=False, env=None,
+                 trip_steps=None):
         self.name = name
         # the SSA process's own variables (over --env's)
         self.env = env or {}
+        # the steps the cold build's trips after its first may run, at most
+        self.trip_steps = trip_steps
         # the SSA side's written files garbled before each rebuild
         self.garble = garble
         # {name in the run directory: file in tests/e2e}
@@ -404,11 +414,12 @@ def e2e_watch_cases():
 
 
 def all_cases():
-    def latex(name, src, fmt, edits, seed=2, extra=(), garble=False):
+    def latex(name, src, fmt, edits, seed=2, extra=(), garble=False, trip_steps=None):
         args = [*LATEX_FLAGS, *extra, f"-fmt={fmt}", "-output-directory=out", "edits"]
         edits = [("edits.tex", m, n) for m, n in edits]
         return Case(
-            name, {"edits.tex": src}, fmt, args, edits, outdir="out", seed=seed, garble=garble
+            name, {"edits.tex": src}, fmt, args, edits, outdir="out", seed=seed, garble=garble,
+            trip_steps=trip_steps,
         )
 
     def include(name="include", env=None):
@@ -436,6 +447,8 @@ def all_cases():
         # first wrote, as the next stage's pass does with one trip a build)
         latex("fatal_end", "fatal-end.tex", "pdflatex", FATAL_EDITS, seed=0),
         latex("names", "names.tex", "pdflatex", NAMES_EDITS, seed=0),
+        latex("names_rerun", "names-rerun.tex", "pdflatex", NAMES_RERUN_EDITS, seed=0,
+              trip_steps=30),
         latex("fontid", "fontid.tex", "pdflatex", FONTID_EDITS, seed=0),
         latex("fontnum", "fontnum.tex", "pdflatex", FONTNUM_EDITS, seed=0),
         latex("fontdrop", "fontdrop.tex", "pdflatex", FONTDROP_EDITS),
@@ -814,6 +827,9 @@ class Runner:
 
 COLD = re.compile(r"^partex: ssa build 0: ([\d.]+) ms, (.*)$", re.M)
 COLD_LINK = re.compile(r"^partex: ssa build 0: link ([\d.]+) ms", re.M)
+# the cold build's trips, and each one's steps
+COLD_TRIPS = re.compile(r"^partex: ssa build 0: trips .*$", re.M)
+TRIP_STEPS = re.compile(r"trip (\d+): (\d+) steps")
 REBUILT = re.compile(
     r"^partex: ssa rebuild (\d+): ([\d.]+) ms \(the rebuild ([\d.]+) ms, "
     r"the link ([\d.]+) ms\)(.*)$",
@@ -904,6 +920,12 @@ def judge(case, cdir, runs, code, err, last):
             s["link_ms"] = float(cold_link.group(1)) if cold_link else None
             s["commands"] = count(cold.group(2), "commands")
             s["records"] = count(cold.group(2), "records")
+            trips = COLD_TRIPS.search(err)
+            later = [int(n) for t, n in TRIP_STEPS.findall(trips.group(0) if trips else "")
+                     if t != "1"]
+            if case.trip_steps is not None and sum(later) > case.trip_steps:
+                problems.append(f"the cold build's later trips ran {sum(later)} steps "
+                                f"(at most {case.trip_steps})")
         elif k in rebuilt:
             m = rebuilt[k]
             s["ms"], s["rebuild_ms"], s["link_ms"] = (float(m.group(i)) for i in (2, 3, 4))
