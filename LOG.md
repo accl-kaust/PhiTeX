@@ -12066,3 +12066,59 @@ Oracle for `45f91fe`, both on accl: `edits --brief --fixpoint` gave 17/17
 cases identical over 99 stages (job 6573; the base 904ea54 gave the same,
 job 6575), and `gate` exited 0 (job 6574: e2e 37/37, trip and etrip
 identical, clippy clean).
+
+## 2026-10-04 — The log's and the terminal's columns are the link's (agent offsets)
+
+**Why.** `term_offset` and `file_offset` (`alloc:7`, `alloc:8`) were
+scalar slots that every printing step read and wrote. TeX reads them
+only to decide what to print: the wrap at `max_print_line` (§58),
+`print_nl`'s new line (§62), and the space or new line before a page's
+`[` (§638), a file's `(` (§537), a `\message` (§1280) and
+`\scantokens`' `( `. One message a character longer changed the column
+for every later step that printed, so each of those steps ran again,
+and its own end column, a changed definition, woke the next one. On the
+thesis (64 pages; the edit `big data applications.` → `big data
+applications. x` in `Chapter_2.tex`), 261 of the changed definitions over
+the cold build's trips and the rebuild were these two slots.
+
+**What.** In an SSA build the columns are output position, like an
+object's offset (DESIGN 3.8, "Columns are the link's"):
+- The engine records what it prints to the terminal and the log as
+  `Effect::Flow` ops (`effects/flow.rs`): runs of characters, `print_ln`,
+  and each column decision as an op of its own (`NLC` for `print_nl`,
+  `SEP` for the space-or-new-line rule, with its threshold), raw bytes
+  (`wlog`, `wterm`) and a byte count's digits (`LEN` … `LEN_END`). The
+  engine keeps its own columns as TeX does, untracked; they no longer
+  are slots (`offsets_read` and `offsets_wrote` do nothing).
+- The link renders each step's flow from the columns the step before it
+  left (`ssa::resolve_flows`, at `take_step_changes`): the steps whose
+  chunks changed, then each next step while its columns at the end come
+  out other than they were. A flow chunk's version is its rendered
+  bytes', so the splice sees a step whose text moved as a changed chunk,
+  and nothing else. The splice and the full link are as they were.
+- A flow reads `Out(LOG)`, the log's being open, when it begins: a step
+  run again in a later trip found the arrays holding the log closed (the
+  job's end's definition), recorded its text for no log, and lost it (the
+  first cut of this lost `(./Acknowledgment.aux)` and 20 lines after it in
+  the thesis's cold build). The read makes the rebuild place the slot,
+  as the log's flush read it before.
+- `PARTEX_SSA_FLOW=0` keeps the columns as slots.
+
+**Measured** (thesis, fastdev, native, defaults): the "applications. x"
+edit's changed definitions of `term_offset`/`file_offset` over the build
+and rebuild went from 261 to 0. Its rebuild still runs 5,800 steps (5,523
+new): windows of 4,096 commands in a long TikZ stretch re-cut after a
+window ran a different number of commands, which the columns did not
+cause (below). The rebuild's PDF and log are byte for byte the base's
+(9f13c82) rebuild's; the cold build's are the base's cold build's. Both
+rebuilds differ from the cold build of the edited source (a "Float too
+large" warning and a page's fancyhdr warning; the PDF too): a defect
+that was there before this change.
+
+**The save stack chain, looked at.** On that edit `save.ptr` is not in
+the rebuild's chain (no step runs for it). What chains is
+`save.xchain` (93 changed definitions, 90 steps run for it) and
+`save[k]` (617): e-TeX's chain of saved registers above 255 is one slot
+holding every level's saved entries, read and written whole by each
+`\dimen324`-style save or restore, so a window deep in a TikZ figure
+reads the outer levels' saved values too.

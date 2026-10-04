@@ -288,12 +288,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             self.print_ln();
             self.print_str(b"Completed box being shipped out");
         }
-        let (term_offset, file_offset) = self.offsets();
-        if term_offset > self.params.max_print_line - 9 {
-            self.print_ln();
-        } else if term_offset > 0 || file_offset > 0 {
-            self.print_char(b' ');
-        }
+        self.print_sep(self.params.max_print_line - 9);
         self.print_char(b'[');
         let mut j = 9;
         while self.count(j) == 0 && j > 0 {

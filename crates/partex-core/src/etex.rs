@@ -323,12 +323,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         self.cur_input.limit = self.cur_input.start;
         self.cur_input.loc = self.cur_input.limit + 1; // force line read
         if self.int_par(TRACING_SCAN_TOKENS_CODE) > 0 {
-            let (term_offset, file_offset) = self.offsets();
-            if term_offset > self.params.max_print_line - 3 {
-                self.print_ln();
-            } else if term_offset > 0 || file_offset > 0 {
-                self.print_char(b' ');
-            }
+            self.print_sep(self.params.max_print_line - 3);
             self.cur_input.name = 19;
             self.print_str(b"( ");
             self.set_open_parens(self.open_parens() + 1);

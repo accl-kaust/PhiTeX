@@ -130,6 +130,9 @@ pub(crate) struct Steps {
     /// run closed, or the step left the fold): what the link costs (DESIGN
     /// 4.3 item 4, [`super::take_step_changes`]).
     pub(super) fx_changed: Vec<StepId>,
+    /// With the columns the link's, each step's chunks rendered
+    /// (`effects/flow.rs`, [`super::resolve_flows`]).
+    pub(super) flow: Option<super::Flows>,
     /// The run of a step under way past its budget ([`run_step`]).
     watch: Option<Watch>,
     /// How many times each stored name's stores changed (a step's run

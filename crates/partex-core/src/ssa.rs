@@ -34,6 +34,7 @@ use alloc::vec::Vec;
 use core::cell::RefCell;
 use core::fmt;
 
+use partex_ssa::fold::StepId;
 use partex_ssa::runtime::RecId;
 use partex_ssa::{Config, Cx, Found, Loc, Machine, Runtime, Store, Value, Version};
 
@@ -189,6 +190,138 @@ pub static SOFT_PLACE: core::sync::atomic::AtomicBool = core::sync::atomic::Atom
 /// the pointer before writing it, so the step's write of it is dead.
 /// Off (`PARTEX_SSA_DEAD_SAVES=0`), every entry written is a definition.
 pub static DEAD_SAVES: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(true);
+
+/// The log's and the terminal's columns are the link's, not state
+/// (`effects/flow.rs`, DESIGN 3.8): printing makes ops the link renders
+/// from the columns the step before left. Off (`PARTEX_SSA_FLOW=0`), each
+/// step that prints reads and writes `term_offset` and `file_offset`.
+pub static FLOW: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(true);
+
+/// An entry value's copy to the save stack: the slot, its group level,
+/// its entry on the stack and [`Runtime::entry_write`]'s `(step, w)`.
+type EntrySave = (Slot, i32, i32, u64, u64);
+
+/// The steps' chunks with their text rendered (`effects/flow.rs`): from
+/// the columns the build began at, each step's from the columns the step
+/// before it left.
+#[derive(Default)]
+pub(crate) struct Flows {
+    /// The columns at the build's start, and `max_print_line`.
+    start: crate::effects::flow::Cols,
+    max: i32,
+    /// By step id: the columns it was rendered from and those it left, and
+    /// its chunks rendered.
+    steps: Vec<Option<Flowed>>,
+}
+
+struct Flowed {
+    entry: crate::effects::flow::Cols,
+    exit: crate::effects::flow::Cols,
+    chunks: Vec<StepEffects>,
+}
+
+/// Render the text of the steps whose chunks changed, and of each step
+/// after one whose columns at its end changed, until the columns come out
+/// as before (DESIGN 3.8, "Columns are the link's"). The steps whose
+/// rendered chunks changed join `fx_changed`, which they leave in order.
+fn resolve_flows(rec: &mut Recorder) {
+    let Some(fl) = rec.st.steps.flow.as_mut() else {
+        return;
+    };
+    let fx_changed = &mut rec.st.steps.fx_changed;
+    fx_changed.sort_unstable();
+    fx_changed.dedup();
+    let fold = &rec.rt.fold;
+    let key = |s: StepId| fold.steps.get(s as usize).map_or(0, |x| x.key);
+    let order = &fold.order;
+    let pos = |k: u64| order.partition_point(|&x| key(x) < k);
+    let mut work: BTreeMap<u64, StepId> = BTreeMap::new();
+    let raw: alloc::collections::BTreeSet<StepId> = fx_changed.iter().copied().collect();
+    for &s in fx_changed.iter() {
+        let st = fold.steps.get(s as usize);
+        if st.is_some_and(|x| x.live) {
+            work.insert(key(s), s);
+        } else {
+            if let Some(f) = fl.steps.get_mut(s as usize) {
+                *f = None;
+            }
+            // (the step after it begins where the one before it ended)
+            if let Some(&n) = order.get(pos(key(s))) {
+                work.insert(key(n), n);
+            }
+        }
+    }
+    let mut more = Vec::new();
+    while let Some((k, s)) = work.pop_first() {
+        let p = pos(k);
+        if order.get(p) != Some(&s) {
+            continue;
+        }
+        let entry = match p.checked_sub(1) {
+            None => fl.start,
+            Some(q) => fl
+                .steps
+                .get(order[q] as usize)
+                .and_then(|f| f.as_ref())
+                .map_or(fl.start, |f| f.exit),
+        };
+        let old = fl.steps.get(s as usize).and_then(|f| f.as_ref());
+        if !raw.contains(&s) && old.is_some_and(|f| f.entry == entry) {
+            continue;
+        }
+        let mut cols = entry;
+        let chunks: Vec<StepEffects> = rec
+            .st
+            .steps
+            .effects
+            .get(s as usize)
+            .map(|v| {
+                v.iter()
+                    .map(|c| {
+                        if crate::effects::flow::has_flow(&c.1) {
+                            StepEffects::new(crate::effects::flow::render(&c.1, &mut cols, fl.max))
+                        } else {
+                            c.clone()
+                        }
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let same = old.is_some_and(|f| {
+            f.chunks.len() == chunks.len() && f.chunks.iter().zip(&chunks).all(|(a, b)| a == b)
+        });
+        if !same && !raw.contains(&s) {
+            more.push(s);
+        }
+        if old.is_none_or(|f| f.exit != cols)
+            && let Some(&n) = order.get(p + 1)
+        {
+            work.insert(key(n), n);
+        }
+        if fl.steps.len() <= s as usize {
+            fl.steps.resize_with(s as usize + 1, || None);
+        }
+        fl.steps[s as usize] = Some(Flowed {
+            entry,
+            exit: cols,
+            chunks,
+        });
+    }
+    fx_changed.extend(more);
+}
+
+/// A step's chunks as the link takes them: with their text rendered, if
+/// the columns are the link's.
+fn linked_chunks(st: &RecState, s: StepId) -> Option<&[StepEffects]> {
+    match &st.steps.flow {
+        Some(fl) => fl
+            .steps
+            .get(s as usize)
+            .and_then(|f| f.as_ref())
+            .map(|f| &f.chunks[..]),
+        None => st.steps.effects.get(s as usize).map(|v| &v[..]),
+    }
+}
 
 /// The version of a [`Fam::Class`] slot holding class `c`.
 fn class_version(c: u8) -> Version {
@@ -1341,7 +1474,7 @@ pub struct SsaTracker {
     /// `(step, w)`. The
     /// group's end copies the entry value back ([`Tracker::restored`]);
     /// one still on the stack at the step's end is a read of it.
-    entry_saves: RefCell<Vec<(Slot, i32, i32, u64, u64)>>,
+    entry_saves: RefCell<Vec<EntrySave>>,
     /// The slots a group's end gave back their entry values to.
     undone: RefCell<Vec<Slot>>,
     /// The group level the open step began at: a local assignment in a
@@ -2046,13 +2179,16 @@ impl Tracker for SsaTracker {
             r.st.entry_bad_count
         );
         for (id, s, want, got, skip) in &r.st.entry_bad {
-            out.push_str(&alloc::format!(
-                "\n  step {id}: {s}{} reaching {:04x}, {} {:04x}",
-                if *skip { "!" } else { "" },
-                want.0 & 0xffff,
-                if *skip { "left at" } else { "read" },
-                got.0 & 0xffff
-            ));
+            let _ = core::fmt::Write::write_fmt(
+                &mut out,
+                format_args!(
+                    "\n  step {id}: {s}{} reaching {:04x}, {} {:04x}",
+                    if *skip { "!" } else { "" },
+                    want.0 & 0xffff,
+                    if *skip { "left at" } else { "read" },
+                    got.0 & 0xffff
+                ),
+            );
         }
         out
     }
@@ -3037,6 +3173,13 @@ pub fn run_applying<H: Host>(
     tex.tracker.apply.set(apply);
     // (the files are linked from the steps' effects, DESIGN 7.17.3)
     tex.set_effects(true);
+    // (and their text from the columns, DESIGN 3.8)
+    tex.flow.on = FLOW.load(core::sync::atomic::Ordering::Relaxed);
+    tex.tracker.rec.borrow_mut().st.steps.flow = tex.flow.on.then(|| Flows {
+        start: (tex.term_offset, tex.file_offset),
+        max: tex.params.max_print_line,
+        steps: Vec::new(),
+    });
     // (the names the run makes placed by name: [`SsaTracker::names_by_name`])
     if tex.tracker.names_by_name {
         tex.set_cs_by_name(true);
@@ -3437,16 +3580,30 @@ fn close_paragraph<H: Host>(
     tex.tracker.boundary();
 }
 
+/// [`step_effects_as`], as the link takes them.
+#[must_use]
+pub fn step_effects(rec: &Recorder) -> Vec<(u64, StepEffects)> {
+    step_effects_as(rec, false)
+}
+
 /// The live steps' effects in program order: what the build's files are
 /// linked from (DESIGN 7.17.3, `effects::link`), each chunk with its key,
 /// its step's id and its place in the step (`step << 32 | k`), as the
 /// steps kept them when their runs ended.
+///
+/// With the columns the link's, their text is as the last link rendered
+/// it ([`take_step_changes`] renders it), or as the steps made it if
+/// `raw`.
 #[must_use]
-pub fn step_effects(rec: &Recorder) -> Vec<(u64, StepEffects)> {
-    let kept = &rec.st.steps.effects;
+pub fn step_effects_as(rec: &Recorder, raw: bool) -> Vec<(u64, StepEffects)> {
     let mut out = Vec::new();
     for &s in &rec.rt.fold.order {
-        let Some(fx) = kept.get(s as usize) else {
+        let fx = if raw {
+            rec.st.steps.effects.get(s as usize).map(|v| &v[..])
+        } else {
+            linked_chunks(&rec.st, s)
+        };
+        let Some(fx) = fx else {
             continue;
         };
         for (k, e) in fx.iter().enumerate() {
@@ -3461,6 +3618,7 @@ pub fn step_effects(rec: &Recorder) -> Vec<(u64, StepEffects)> {
 /// left the fold (DESIGN 4.3 item 4: the link takes what changed, not
 /// every step's chunks as [`step_effects`] does).
 pub fn take_step_changes(rec: &mut Recorder) -> Vec<crate::effects::StepChunks> {
+    resolve_flows(rec);
     let mut ids = core::mem::take(&mut rec.st.steps.fx_changed);
     ids.sort_unstable();
     ids.dedup();
@@ -3473,10 +3631,7 @@ pub fn take_step_changes(rec: &mut Recorder) -> Vec<crate::effects::StepChunks> 
                 step: s,
                 order: step.map_or(0, |x| x.key),
                 chunks: live.then(|| {
-                    rec.st
-                        .steps
-                        .effects
-                        .get(s as usize)
+                    linked_chunks(&rec.st, s)
                         .map(|v| v.iter().map(|e| (e.0.0, e.1.clone())).collect())
                         .unwrap_or_default()
                 }),

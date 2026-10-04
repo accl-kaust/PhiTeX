@@ -35,6 +35,7 @@ use crate::exec::Executor;
 use crate::host::{Host, WriteId};
 pub use crate::pdf::xref::{Deflate, XEntry, Xref, XrefStream};
 
+pub mod flow;
 mod splice;
 use crate::tex::Tex;
 use crate::track::Tracker;
@@ -157,6 +158,13 @@ pub enum Effect {
     /// The glyphs a page's or form's content stream shows, with glyph
     /// origins on (`srcmap.rs`, DESIGN 4.4): no bytes of any file.
     Origins(crate::srcmap::StreamOrgs),
+    /// Text for the terminal and the log (`log`), relative to their
+    /// columns: rendered by the link from the columns the text before it
+    /// left ([`flow::render`], DESIGN 3.8).
+    Flow {
+        log: Option<WriteId>,
+        ops: Vec<u8>,
+    },
 }
 
 /// Where text goes.
@@ -886,6 +894,7 @@ fn layout_timed<E: Executor>(
             // (glyph origins: read by `Tex::origins`, not linked; the rest
             // resolved before: `resolve_numbers`)
             Effect::Origins(_)
+            | Effect::Flow { .. }
             | Effect::ObjRef { .. }
             | Effect::ObjStmRef { .. }
             | Effect::Num(..)
@@ -1078,6 +1087,7 @@ partex_engine::persist_enum!(Effect {
     Deflate { file, level, parts },
     Open { file, name, kind },
     Origins(a0),
+    Flow { log, ops },
 });
 
 #[cfg(test)]
@@ -1166,6 +1176,10 @@ mod persist_tests {
                 form: 4,
                 glyphs: alloc::vec![1, 2, crate::srcmap::FORM | 7].into(),
             }),
+            Effect::Flow {
+                log: Some(f),
+                ops: alloc::vec![super::flow::NL, 3],
+            },
         ];
         let mut kinds = alloc::collections::BTreeSet::new();
         for e in &all {
@@ -1191,9 +1205,10 @@ mod persist_tests {
                 Effect::Deflate { .. } => 18,
                 Effect::Open { .. } => 19,
                 Effect::Origins(_) => 20,
+                Effect::Flow { .. } => 21,
             });
         }
-        assert_eq!(kinds.len(), 21);
+        assert_eq!(kinds.len(), 22);
         let mut s = Saver::new();
         all.save(&mut s);
         let bytes = s.into_bytes();
