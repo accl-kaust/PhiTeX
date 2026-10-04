@@ -1,0 +1,12 @@
+\documentclass{article}
+\makeatletter
+\begin{document}
+\ifx\fontswap\@undefined \textit{First page in italic.}\else
+\texttt{First page in typewriter.}\fi
+\immediate\write\@auxout{\string\gdef\string\fontswap{}}
+\newpage
+\ifx\fontswap\@undefined \texttt{Second page in typewriter} \textsf{and sans.}\else
+\textit{Second page in italic} \textsf{and sans.}\fi
+\newpage
+Third page text.
+\end{document}

@@ -324,8 +324,8 @@ impl<H: Host, T: Tracker> Tex<H, T> {
     /// "Check for non-existing destinations" (and structure
     /// destinations).
     fn fix_dests(&mut self) -> Result<(), Jump> {
-        let mut k = self.pdf.objs.head[OBJ_TYPE_DEST];
-        while k != 0 {
+        let mut w = self.pdf.objs.walk(OBJ_TYPE_DEST);
+        while let Some(k) = w.next(&self.pdf.objs) {
             if !matches!(self.pdf.objs.get(k).aux, Aux::Dest(_)) {
                 self.pdf_warning(b"dest", b"", true, false);
                 self.print_obj_id(k);
@@ -339,10 +339,9 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                 self.pdf.out.print_ln(b" 0 R /Fit]");
                 self.pdf_end_obj();
             }
-            k = self.pdf.objs.get(k).link;
         }
-        let mut k = self.pdf.objs.head[OBJ_TYPE_STRUCT_DEST];
-        while k != 0 {
+        let mut w = self.pdf.objs.walk(OBJ_TYPE_STRUCT_DEST);
+        while let Some(k) = w.next(&self.pdf.objs) {
             if !matches!(self.pdf.objs.get(k).aux, Aux::Dest(_)) {
                 self.pdf_warning(b"structure dest", b"", false, false);
                 self.print_obj_id(k);
@@ -350,7 +349,6 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                 self.print_ln();
                 self.print_ln();
             }
-            k = self.pdf.objs.get(k).link;
         }
         Ok(())
     }
@@ -398,11 +396,10 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             }
         }
         self.pdf.fontw.gen_tounicode = self.int_par(PDF_GEN_TOUNICODE_CODE);
-        let mut k = self.pdf.objs.head[OBJ_TYPE_FONT];
-        while k != 0 {
+        let mut w = self.pdf.objs.walk(OBJ_TYPE_FONT);
+        while let Some(k) = w.next(&self.pdf.objs) {
             let f = self.pdf.objs.get(k).info.num();
             self.do_pdf_font(k, f)?;
-            k = self.pdf.objs.get(k).link;
         }
         self.write_fontstuff()
     }

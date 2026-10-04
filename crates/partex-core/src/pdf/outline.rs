@@ -156,8 +156,8 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         o.int_entry_ln(b"Count", i64::from(k));
         self.pdf_end_dict();
         // the entries
-        let mut k = self.pdf.objs.head[OBJ_TYPE_OUTLINE];
-        while k != 0 {
+        let mut w = self.pdf.objs.walk(OBJ_TYPE_OUTLINE);
+        while let Some(k) = w.next(&self.pdf.objs) {
             let e = self.ol(k).clone();
             if e.parent == self.pdf.parent_outline {
                 if e.prev == 0 {
@@ -190,7 +190,6 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                 self.ol_mut(k).attr = None;
             }
             self.pdf_end_dict();
-            k = self.pdf.objs.get(k).link;
         }
         Ok(outlines)
     }

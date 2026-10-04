@@ -13173,3 +13173,56 @@ IDLE_SETTLE=1): a word's trip 1 47 → 8.2 ms, its rebuild 55 → 15.7 ms
 and a plain pass's. Profile after: nothing in the page step is
 document-sized. The top items are the link's layout threads (7%) and
 `copy_png`'s IDAT bytes (2%).
+
+## 2026-10-04 — PDF object lists are placed whole with their heads (branch `fontspin`)
+
+**Symptom.** The thesis's cold SSA build with `PARTEX_SSA_TRIPS=2` (or
+the default 5) spun for over 14 minutes after trip 1, in
+`pdf_init_font`'s walk of the font list (`ObjTab::get`,
+`font_name_bytes`). Trip 1 alone was fine.
+
+**Cause.** In trip 2, a step that ships a page (step 66986) runs
+again. It now uses `cmmi8` first, which an earlier page used first in
+trip 1. The step's last run read the lists' heads (`OBJS`) and the
+fonts' state (`PDF_FONTS`), so both were placed at the definitions that
+reach the step. Its last run made no font, though, and never walked
+the font list, so no entry was predicted. With virtual numbers each
+entry is a slot of its own (`PdfObj`), and the arrays held them as
+trip 1 left them (their latest definitions, the job's end). The list
+from the placed head followed trip 1's links to `cmmi8`'s object.
+`PDF_FONTS` said `cmmi8` was not used yet, and `pdf_create_obj` pushed
+it on a list it was already on, its link pointing back into the list.
+`ObjTab::get` notes the entries' reads in the table's log; they reach
+the tracker at the writer scope's end, and the run is checked for reads
+at a later definition after it ends (or, past its budget, at a
+checkpoint). This run never ended: the next font's walk, inside the
+same `\shipout`, went round the cycle for ever.
+
+**Fix.** A list placed with its head (`rebuild::objs_whole`, as the
+nest's levels go with the nest): when a run places `OBJS` or
+`PDF_FONTS`, it places both, and every entry on a list from the heads
+that reach the step, following the links that reach it, wherever a
+later definition holds the arrays. The run then sees the lists as the
+steps before it left them, as pdfTeX would. Entries read by their
+number, off the lists, are checked as any read. Each list walk is also
+an `objtab::Walk`, which ends after as many entries as the table holds:
+a safety net for a run whose state no run made (a list pdfTeX makes
+never reaches the bound). With the bound taken out, the thesis and the
+new case still settle.
+
+**Measured** (fastdev, this machine, the thesis from
+`partex-cancel/target/demo/thesis` with its `.aux` files, format made
+by the binary). Before: trip 2 spins (killed at 10 minutes). After: 4
+trips, settled. Trip 1: 63,817 steps, 36.6 s. Trip 2: 8,387 steps,
+58.0 s (57.2 s with the bound alone; placing every entry instead of the
+lists' cost 14 s more). Trip 3: 1,918 steps, 2.8 s. The PDF,
+`Thesis.aux`, `.toc`, `.lof`, `.lot`, `.out`, `.bbl` and every
+chapter's `.aux` are byte-identical to the plain oracle's (plain partex,
+BibTeX between, 4 passes). proj2: 2 trips, settled; PDF and `.aux`
+identical to plain.
+New `ssa-edits` case `font_rerun` (`font-rerun.tex`): a macro that the
+`.aux` defines from trip 2 on swaps the fonts of the first two pages.
+On 5547b27 its cold build hangs (killed at the 120 s timeout); now it
+settles in 2 trips. `font_rerun`, `fontid`, `fontnum`, `fontdrop`,
+`names_rerun`, `images` and `include` are identical with `--fixpoint`.
+New unit test `objtab::tests::walk_ends_on_a_list_that_never_ends`.

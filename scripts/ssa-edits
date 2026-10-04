@@ -187,6 +187,14 @@ FATAL_EDITS = [("Hello world.", "Hello there."), ("Hello there.", "Hello world."
 # nothing for the lookups: the cold build's later trips run 30 steps at
 # most (they ran 229, every lookup woken); then a word and back
 NAMES_RERUN_EDITS = [("Paragraph 7:", "Paragraph seven:"), ("Paragraph seven:", "Paragraph 7:")]
+# font-rerun.tex (not seeded): a macro the `.aux` defines from the second
+# trip on swaps the first two pages' fonts, so that trip's run again of
+# the second page's ship uses first the italic font the first trip's first
+# page made, whose object a later font's entry, as the first trip left
+# it, links to: the font list is placed whole with its head
+# (`rebuild::objs_whole`; the font's object was pushed on the list it was
+# on and the next font's walk looped for ever); then a word and back
+FONT_RERUN_EDITS = [("Third page text.", "Third page words."), ("Third page words.", "Third page text.")]
 # fontid.tex (not seeded): a font named again by a second `\font`, which
 # sets its identifier; the first build's second trip runs the first
 # `\font`'s step again, after the second set it (DESIGN 3.2, "A font's
@@ -450,6 +458,7 @@ def all_cases():
         latex("names_rerun", "names-rerun.tex", "pdflatex", NAMES_RERUN_EDITS, seed=0,
               trip_steps=30),
         latex("fontid", "fontid.tex", "pdflatex", FONTID_EDITS, seed=0),
+        latex("font_rerun", "font-rerun.tex", "pdflatex", FONT_RERUN_EDITS, seed=0),
         latex("fontnum", "fontnum.tex", "pdflatex", FONTNUM_EDITS, seed=0),
         latex("fontdrop", "fontdrop.tex", "pdflatex", FONTDROP_EDITS),
         Case(
