@@ -12751,3 +12751,34 @@ citation added in Chapter 2 runs 20 of 105 calls, the TeX side 29 + 148
 `bibtex` on the final `.aux`, the `.blg` too but its masked
 `Reallocated` lines. `ssa-edits --fixpoint` `bibtex`: identical, the
 node's calls per stage 17 (fresh), 9, 2, 1, 0, 5, 3.
+
+## 2026-10-04 — makeindex a node of the build, stage 3 (branch `nativebib`, agent nativebib)
+
+**What changed** (DESIGN 3.16): `ssa/tools.rs`'s makeindex node, one per
+stored `.idx` stream, runs `makeindex NAME.idx` at a trip's end when the
+stream or one of its host files (a style, a `.mst`, by stamp) changed;
+its `.ind` and `.ilg` are streams it defines (`ssa::define_stream`), the
+`.ind` served to `\printindex` from memory. The CLI's closure runs no
+tool unless `PARTEX_SSA_TOOLS=outside`.
+
+`partex_makeindex::Session`: the scan and the sort run whole (the sort's
+comparison count, progress dots and duplicate marks are in the `.ilg`:
+qsort.c's comparisons are behaviour, so the sort is one call over every
+entry); the output is made block by block (`make_block`): each sorted
+entry's `make_entry` keyed by what it reads (its entry and the entries
+genind.c's state names, without their input lines; the level, the open
+line, the range and encapsulator flags, the indent), taken as it was
+when that key is the last run's. A block records which state entries it
+set to its own and the state it left; one that warned (its message
+reads input and output lines) is not kept.
+
+**Measured.** A/B tests against `partex_makeindex::run` (random `.idx`
+edits, default style and a headings style, 480 steps): identical `.ind`,
+`.ilg`, terminal and status. 300 entries: an entry added makes 2 of 301
+blocks, an entry's page changed 2. `ssa-edits` `makeindex`: identical
+with `--fixpoint` and with `PARTEX_SSA_TRIPS=1`; blocks made per stage 8
+(fresh), 2, 1, 2.
+
+Stage 2's gate (a07f01a, job 6647): all but `garbled` with
+`PARTEX_SSA_TRIPS=1`, memout's case (it fails on add8361 too; the
+memout agent fixes it); edits job 6648: 24/24.

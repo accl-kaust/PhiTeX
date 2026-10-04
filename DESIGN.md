@@ -1632,9 +1632,26 @@ between trips instead (the reference); `PARTEX_SSA_TOOLS=0` none.
   call (and its `.bbl` comes out the same: IEEEtran lower-cases it, so
   no step runs); an uncited entry edited runs 0 calls; a citation added
   runs 20 of 105.
-- *Left*: `READ` is not split by entry (an edit of one entry parses the
-  databases again, a few milliseconds for a thesis's); makeindex's
-  nodes (stage 3).
+- *makeindex* (stage 3): one node per `.idx` stream, run as `makeindex
+  NAME.idx` when the stream or one of its files (a style, a `.mst`)
+  changed; its `.ind` and `.ilg` are streams it defines.
+  `partex_makeindex::Session` scans and sorts as makeindex does (the
+  sort is one call over every entry: its comparison count, dots and
+  duplicate marks are the `.ilg`'s), then makes the output block by
+  block: a block (genind.c's `make_entry` for one sorted entry) is keyed
+  by what it reads (its entry and the entries genind.c's state names,
+  all but their input lines; the level, the open line, the range and
+  encapsulator flags, the indent) and taken as it was when that is the
+  same. A block that warned is always made again (its warning reads the
+  input and output lines). Checked against makeindex's run with random
+  edits of an `.idx` (entries added, removed, re-paged; ranges,
+  encapsulators, sub-entries, cross-references; the default style and
+  one with headings and a short `line_max`:
+  `crates/partex-makeindex/tests/session.rs`). 300 entries: one added
+  makes 2 of 301 blocks; one entry's page changed, 2.
+- *Left*: `READ` and makeindex's scan are not split by entry (an edit
+  of one entry parses the databases or the `.idx` again, linear and a
+  few milliseconds); makeindex's sort is whole by its nature.
 
 ---
 

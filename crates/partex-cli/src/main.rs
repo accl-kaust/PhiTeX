@@ -1628,7 +1628,7 @@ fn ssa_native() -> Option<partex_core::ssa::NativeTools> {
     let mut kpse = kpse_instance("bibtex", "");
     Some(partex_core::ssa::NativeTools {
         bibtex: Some(bibtex::options(&mut kpse, false, 2)),
-        makeindex: None,
+        makeindex: Some(makeindex::version()),
         // (`PARTEX_SSA_TOOL_CALLS=0`: each run of a tool's node is the
         // whole program, the reference)
         calls: std::env::var("PARTEX_SSA_TOOL_CALLS").map_or(true, |v| v != "0"),
@@ -1646,13 +1646,8 @@ fn ssa_tools(
     between: &mut Between,
 ) -> impl FnMut(&mut native::NativeHost, &[(Vec<u8>, std::sync::Arc<[u8]>)]) -> (bool, Vec<String>) + '_
 {
-    let tools = std::env::var("PARTEX_SSA_TOOLS").ok();
-    let outside = tools.as_deref() == Some("outside");
-    let off = tools.as_deref() == Some("0");
+    let outside = std::env::var("PARTEX_SSA_TOOLS").is_ok_and(|v| v == "outside");
     move |host, streams| {
-        if off {
-            return (false, Vec::new());
-        }
         // (each stream by the path its file has, in the output directory)
         let ending = |ext: &[u8]| -> Vec<(Vec<u8>, std::sync::Arc<[u8]>)> {
             streams
@@ -1666,12 +1661,10 @@ fn ssa_tools(
                 })
                 .collect()
         };
-        // (BibTeX is the build's own unless outside; makeindex is outside)
-        let mut lines = if outside {
-            bibtex::after_pass(&mut between.bib, &ending(b".aux"))
-        } else {
-            Vec::new()
-        };
+        if !outside {
+            return (false, Vec::new());
+        }
+        let mut lines = bibtex::after_pass(&mut between.bib, &ending(b".aux"));
         lines.extend(makeindex::after_pass(&mut between.idx, &ending(b".idx")));
         (!lines.is_empty(), lines)
     }
