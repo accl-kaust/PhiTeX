@@ -229,37 +229,6 @@ impl<H: Host, T: Tracker> Tex<H, T> {
     pub(crate) fn begin_window(&mut self) {
         self.window_start = self.commands;
         self.window_cut = None;
-        self.window_hash = 0;
-        self.window_hit = false;
-    }
-
-    /// The command just counted, in the open window's hash: past a
-    /// quarter of the window's size, a hash whose low bits are zero (one
-    /// command in about `window / 2`) marks the window to end at the next
-    /// boundary. The hash forgets a command 64 commands later, so a
-    /// window's end depends on the last 64 commands only: two runs that
-    /// run the same commands again cut where each other did, whatever
-    /// their counts (DESIGN 4.3 item 1).
-    #[inline]
-    pub(crate) fn window_command(&mut self) {
-        if self.window == 0 {
-            return;
-        }
-        let x = (u64::from(self.cur_cmd.cast_unsigned()) << 32)
-            | u64::from(self.cur_chr.cast_unsigned());
-        // (a 64-bit mix of the command: splitmix64's finalizer)
-        let mut z = x.wrapping_add(0x9e37_79b9_7f4a_7c15);
-        z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
-        z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
-        z ^= z >> 31;
-        self.window_hash = (self.window_hash << 1).wrapping_add(z);
-        let mask = (self.window / 2).next_power_of_two() - 1;
-        if !self.window_hit
-            && self.window_hash & mask == 0
-            && self.commands.saturating_sub(self.window_start) >= self.window / 4
-        {
-            self.window_hit = true;
-        }
     }
 
     /// An event after which the next boundary ends the open window: a
@@ -288,11 +257,9 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         if self.fire_pending {
             return true;
         }
-        // (the count only as a bound: four windows' worth)
         !self.output_active
             && (self.window_cut.is_some()
-                || self.window_hit
-                || self.commands.saturating_sub(self.window_start) >= self.window.saturating_mul(4))
+                || self.commands.saturating_sub(self.window_start) >= self.window)
     }
 
     /// `big_switch`'s candidate test: the exhausted token lists on top
