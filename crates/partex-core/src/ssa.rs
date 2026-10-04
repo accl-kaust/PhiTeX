@@ -3091,15 +3091,17 @@ impl Tracker for SsaTracker {
         let a = Slot(Fam::Load, i64::from(id));
         rr.flush_output();
         rr.rt.note_open(&a);
-        rr.st.steps.store_made(id);
+        rr.st.steps.store_made(id, contents.into());
+        // (each line a store's version, then the whole, so that a last
+        // line's end alone changed is a change too)
         let body = contents.strip_suffix(b"\n").unwrap_or(contents);
         if contents.is_empty() {
             return;
         }
         for line in body.split(|&c| c == b'\n') {
             rr.rt.note_store(&a, SVal::ver(Version::of(line)));
-            rr.st.steps.store_line(id, line);
         }
+        rr.rt.note_store(&a, SVal::ver(Version::of(contents)));
     }
 
     fn run_doomed(&self) -> bool {

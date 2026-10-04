@@ -239,16 +239,17 @@ pub(super) type Ended = (u32, Arc<[u8]>, usize, Vec<u8>);
 enum StoreEv {
     Open(u32),
     Line(u32, Arc<[u8]>),
-    /// A command (`\write18`) made the file, its lines following, or
-    /// removed it (DESIGN 3.7, "Commands").
-    Made(u32),
+    /// A command (`\write18`) made the file, these its bytes as they are
+    /// (a last line without its end kept so), or removed it (DESIGN 3.7,
+    /// "Commands").
+    Made(u32, Arc<[u8]>),
     Remove(u32),
 }
 
 impl StoreEv {
     fn id(&self) -> u32 {
         match self {
-            StoreEv::Open(i) | StoreEv::Line(i, _) | StoreEv::Made(i) | StoreEv::Remove(i) => *i,
+            StoreEv::Open(i) | StoreEv::Line(i, _) | StoreEv::Made(i, _) | StoreEv::Remove(i) => *i,
         }
     }
 }
@@ -399,9 +400,9 @@ impl Steps {
 
     /// A command run by the open step made name `id`'s file (its lines
     /// follow, as an open's).
-    pub(super) fn store_made(&mut self, id: u32) {
+    pub(super) fn store_made(&mut self, id: u32, contents: Arc<[u8]>) {
         self.stored.insert(id);
-        self.cur_stores.push(StoreEv::Made(id));
+        self.cur_stores.push(StoreEv::Made(id, contents));
     }
 
     /// The names whose store reaching the open step, at `key`, is the
@@ -479,18 +480,17 @@ impl Steps {
             id: u32,
             lines: &mut Vec<&'a Arc<[u8]>>,
             removed: &mut bool,
-            made: &mut bool,
+            made: &mut Option<&'a Arc<[u8]>>,
         ) -> bool {
             for e in evs.iter().rev() {
                 match e {
                     StoreEv::Open(i) if *i == id => return true,
-                    StoreEv::Made(i) if *i == id => {
-                        *made = true;
+                    StoreEv::Made(i, c) if *i == id => {
+                        *made = Some(c);
                         return true;
                     }
                     StoreEv::Remove(i) if *i == id => {
                         *removed = true;
-                        *made = true;
                         return true;
                     }
                     StoreEv::Line(i, l) if *i == id => lines.push(l),
@@ -503,7 +503,7 @@ impl Steps {
             return None;
         }
         let mut lines: Vec<&Arc<[u8]>> = Vec::new();
-        let (mut removed, mut made) = (false, false);
+        let (mut removed, mut made) = (false, None);
         // (the open step's own, then the steps before it, latest first)
         let mut found = back(&self.cur_stores, id, &mut lines, &mut removed, &mut made);
         if !found {
@@ -527,14 +527,15 @@ impl Steps {
             return Some(Err(()));
         }
         if removed {
-            return Some(Ok((None, made)));
+            return Some(Ok((None, true)));
         }
-        let mut v = Vec::with_capacity(lines.iter().map(|l| l.len() + 1).sum());
+        // (a command's file as it made it, then the lines after it)
+        let mut v = made.map_or_else(Vec::new, |c| c.to_vec());
         for l in lines.iter().rev() {
             v.extend_from_slice(l);
             v.push(b'\n');
         }
-        Some(Ok((Some(v), made)))
+        Some(Ok((Some(v), made.is_some())))
     }
 
     /// The cold build's first trip serves its loads too (`on`), from no φ:

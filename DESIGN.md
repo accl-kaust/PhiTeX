@@ -728,7 +728,8 @@ template, which a compiled backend exploits.
   - *It writes* each file it made or changed: the host finds them
     (natively by the output directory's stamps before and after, a
     wasm host by its file system's) and each is a store of the step, as
-    an `\openout` and a `\write` per line would make. A file it
+    an `\openout` and a `\write` per line would make, but its value is
+    its bytes as made (a last line without its end is served so). A file it
     removed is a store too, of nothing (`StoreEv::Remove`): a load after
     it finds no file, and the link, which writes the job's `\openout`
     files from their effects, removes again those whose last store is a

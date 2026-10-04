@@ -13354,6 +13354,13 @@ not merged yet.
   disk then. A key that ran before is not run: its files are put back,
   and its `Ran` is answered again.
 
+- A command's file is served with its exact bytes (`StoreEv::Made`
+  carries them). The gate's one-trip `ssa-edits minted` failed after the
+  merge: main's stream check (`PARTEX_SSA_STREAMS`, newer than
+  `shell-escape`) found that latexminted's `.index.minted` was served with
+  a newline its file does not end with (379 bytes against 378), because
+  the store kept the file as lines.
+
 **Evidence** (thesis, release, restricted shell escape, formats built
 with `-translate-file=cp227.tcx` as fmtutil builds them):
 - Plain: run, BibTeX, runs to the fixpoint. Each of the 5 PDFs equals
@@ -13366,7 +13373,7 @@ with `-translate-file=cp227.tcx` as fmtutil builds them):
   `.lot` and `.bbl` equal pdfTeX + BibTeX run to their fixpoint on the
   same sources. latexminted runs, through a counting wrapper on `PATH`:
   - cold build: 10 (config/cleanconfig per trip, batch, clean)
-  - the block edit: 4 (cleanconfig, highlight, clean, cleanconfig)
+  - the block edit: 3 (highlight, clean, cleanconfig)
   - the word: 0, was 1
   - the block back: 3, was 3
   - no edit: 0, was 1
@@ -13375,5 +13382,5 @@ with `-translate-file=cp227.tcx` as fmtutil builds them):
   captions add citations at the front in run 2, so the `.bbl`'s order is
   stale. BibTeX has to run again, as latexmk does, and then pdfTeX
   agrees with the SSA cold build.
-- e2e `shell`, `minted`: identical. `scripts/ssa-edits --case minted
-  --fixpoint`: 5/5 identical.
+- e2e `shell`, `minted`: identical. `scripts/ssa-edits --case minted`,
+  with `--fixpoint` and with `PARTEX_SSA_TRIPS=1`: 5/5 identical each.
