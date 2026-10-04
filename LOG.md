@@ -12123,3 +12123,10 @@ fastdev binary, this machine:
 - The thesis (private copy), the Chapter 2 edit alone, N = 1: identical
   (rebuild 1 stopped after 1 step with 4 pending, and the continuation
   ran 5 steps in 50 ms).
+- The thesis, 3 edits (Chapter 2, then Chapter 3, then Chapter 1, the
+  last one before the pending steps), N = 1, 2, 3, 4, 6: all identical.
+  The exit code is 1 both cold and rebuilt (the document's own
+  errors), and the entry check finds 0 bad reads at every rebuild.
+
+Gates on `52f8199` (accl): `gate` exited 0 (job 6578); `edits --brief
+--fixpoint` gave 17/17 cases identical over 99 stages (job 6579).
