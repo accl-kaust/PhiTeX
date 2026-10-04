@@ -637,6 +637,66 @@ template, which a compiled backend exploits.
   version changed. Which tool reads which stream is fixed in partex.
 - **Files are a view.** The build holds the streams and writes files
   for outside tools, never reading its own writes back.
+- **Commands** (`\write18`, `crate::shell`, `Host::system`). Which
+  command runs is the engine's, the same on every host: web2c's
+  `runsystem` and `shell_cmd_is_allowed` (texmfmp.c). Unrestricted
+  (`-shell-escape`) it runs as written; restricted (`shell_escape = p`,
+  TeX Live's default, or `-shell-restricted`) only if its first word is
+  in `shell_escape_commands`, each argument quoted with `'` (a user's
+  `"…"` becoming `'…'`; a `'`, or a `"` not closed or not followed by a
+  space, is a quotation error; a `|` in the quoted command is refused).
+  The log says `runsystem(CMD)...executed.`, `...executed safely
+  (allowed).`, `...disabled (restricted).`, `...disabled.` or
+  `...quotation error in system command.`, whatever the status, as
+  pdfTeX's does; a status not 0 goes to the standard error. The host
+  only runs the command it is handed: the native host with `/bin/sh -c`
+  and kpathsea's variables in the environment (`SELFAUTOLOC`, by which
+  latexminted's `latexrestricted` finds TeX Live; `TEXMF_OUTPUT_DIRECTORY`
+  with `-output-directory`), a wasm host with whatever it has (Pyodide
+  for latexminted, `tools/minted-pyodide`).
+
+  In an SSA build a command is a call of the step that runs it, like
+  BibTeX between trips but in program order, since the job reads what
+  it wrote at once (minted `\input`s the highlighted code after
+  latexminted wrote it):
+  - *It reads* its command string (the `\write`'s tokens, the call's
+    name) and the job's own files, those stored with `\openout` that a
+    store reaches at that point and that are closed there: each is a
+    load of the build's store, and the host is handed their contents,
+    so a command run in a step run again out of order sees what the job
+    wrote before it, not what a later step left on disk. A file still
+    open is not an input (pdfTeX's command finds of it whatever stdio
+    flushed). So minted's `batch` runs again when a code block's data,
+    written to `_<md5>.data.minted`, changed, and not otherwise.
+  - *It writes* each file it made or changed: the host finds them
+    (natively by the output directory's stamps before and after, a
+    wasm host by its file system's) and each is a store of the step, as
+    an `\openout` and a `\write` per line would make. A file it
+    removed is a store too, of nothing (`StoreEv::Remove`): a load after
+    it finds no file, and the link, which writes the job's `\openout`
+    files from their effects, removes again those whose last store is a
+    removal (`ssa::removed_files`; minted removes its data file after
+    reading it). A load after it
+    reads the store, a load before it the φ, and a store that changes
+    wakes its loads, in the same trip or the next, as any store does: a
+    cold build of a minted document converges where `pdflatex` run
+    twice does (the first run writes the cache, the second reads it).
+  - *A run that will be dropped runs no command.* A step run in a
+    rebuild that read a definition it was not placed at is dropped and
+    made again (3.15, "A rebuild", step 3); before a command, the run's
+    reads so far are checked as a run past its budget is
+    (`Tracker::run_doomed`), and a doomed run skips the command: it would
+    see the wrong files (minted wrote `\minted@tmpdatabufferline39`
+    unexpanded into its data file) and leave what it wrote.
+  - What it does not model: a command's reads of files that neither the
+    job stores nor a step loads (an edit of such a file alone runs
+    nothing again; minted's `\inputminted` reads its file in TeX too,
+    `\pdfmdfivesum`), and the files other commands made (not inputs, or
+    each code block's change would run every later command again).
+  - Machine mode's host keeps the job's files in memory until its link:
+    it puts each name's last opened file on disk before a command, and
+    its link leaves the files a command removed since their last open
+    removed. The resident session's host runs no commands.
 
 **Trips, as built** (`ssa/rebuild.rs`, `rebuild_trips` and `settle`):
 - *A build is a sequence of trips.* Trip 1 runs what the edit reaches

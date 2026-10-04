@@ -624,6 +624,28 @@ pub trait Tracker {
     /// by `\\write` stream `stream` (`\\openout`, §1374): a store made
     /// (DESIGN 7.17.5).
     fn store_open(&self, _stream: u8, _name: &[u8]) {}
+    /// (With [`Tracker::VALUES`].) The files the job stored with
+    /// `\openout` (not a command's) whose store reaches the running
+    /// step's point, with their contents there (DESIGN 3.7, "Commands"):
+    /// what a command run there is handed of the job's own files.
+    fn stores_reaching(&self) -> alloc::vec::Vec<(alloc::vec::Vec<u8>, alloc::sync::Arc<[u8]>)> {
+        alloc::vec::Vec::new()
+    }
+    /// (With [`Tracker::VALUES`].) A command the running step ran made
+    /// or changed file `name`, now `contents`: a store of the step, as an
+    /// `\openout`, a `\write` of each of its lines and a `\closeout`
+    /// would make (DESIGN 3.7, "Commands").
+    fn command_wrote(&self, _name: &[u8], _contents: &[u8]) {}
+    /// (With [`Tracker::VALUES`].) Whether the running step's run has read
+    /// a slot a later definition holds, not placed: it will be dropped and
+    /// made again, so a command it would run is not run (DESIGN 3.7,
+    /// "Commands").
+    fn run_doomed(&self) -> bool {
+        false
+    }
+    /// (With [`Tracker::VALUES`].) A command the running step ran removed
+    /// file `name`: loads after it find none (DESIGN 3.7, "Commands").
+    fn command_removed(&self, _name: &[u8]) {}
     /// (With [`Tracker::VALUES`].) A line (without its end) written to
     /// file `name` by the `\\write` stream that stores to it (the stream's
     /// name as the engine holds it, restored with the stream in a

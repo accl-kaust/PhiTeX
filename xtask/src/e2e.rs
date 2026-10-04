@@ -38,6 +38,72 @@ const BIBTEX: &str = "*bibtex";
 const MAKEINDEX: &str = "*makeindex";
 
 const CASES: &[Case] = &[
+    // `\write18` in each mode (web2c's `runsystem`): the log's lines,
+    // restricted shell escape's quoting and refusals
+    Case {
+        name: "shell",
+        oracle: "pdftex",
+        inputs: &["shell.tex"],
+        runs: &[
+            &[
+                "-ini",
+                "-shell-restricted",
+                "-interaction=nonstopmode",
+                "-jobname=restricted",
+                "shell",
+            ],
+            &[
+                "-ini",
+                "-shell-escape",
+                "-interaction=nonstopmode",
+                "-jobname=unrestricted",
+                "shell",
+            ],
+            &[
+                "-ini",
+                "-no-shell-escape",
+                "-interaction=nonstopmode",
+                "-jobname=disabled",
+                "shell",
+            ],
+        ],
+    },
+    // minted v3 through restricted shell escape (latexminted, which TeX
+    // Live allows): the first run highlights in a batch at the end, the
+    // second reads the cache
+    Case {
+        name: "minted",
+        oracle: "pdftex",
+        inputs: &["minted.tex"],
+        runs: &[
+            &[
+                "-no-shell-escape",
+                "-no-parse-first-line",
+                "-output-comment=partex",
+                "-interaction=nonstopmode",
+                "-ini",
+                "-etex",
+                "-jobname=pdflatex",
+                "*pdflatex.ini",
+            ],
+            &[
+                "-shell-restricted",
+                "-no-parse-first-line",
+                "-output-comment=partex",
+                "-interaction=nonstopmode",
+                "-fmt=pdflatex",
+                "minted",
+            ],
+            &[
+                "-shell-restricted",
+                "-no-parse-first-line",
+                "-output-comment=partex",
+                "-interaction=nonstopmode",
+                "-fmt=pdflatex",
+                "minted",
+            ],
+        ],
+    },
     Case {
         name: "plain",
         oracle: "tex",

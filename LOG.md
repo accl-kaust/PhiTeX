@@ -12113,3 +12113,96 @@ Left (wrap-up at the user's request):
 - **The contract.** DESIGN 4.5 is a short note. The extension's
   contract, including the `display_` names and the id-stability rules,
   is in the documentation of `pdftext` and `displist.rs`.
+
+## 2026-10-04 — Shell escape: `\write18` runs commands, minted v3 works (agent shell-escape)
+
+**Why.** The user's thesis uses minted, whose v3 runs the Python
+executable `latexminted` through restricted shell escape. partex printed
+`runsystem(...)...executed safely (allowed).` from its banner state but
+ran nothing (`Host::shell_escape` was never implemented), so minted
+stopped with "minted v3+ executable is not installed, is not added to
+PATH, or is not permitted with restricted shell escape".
+
+**What changed.**
+- `partex_core::shell`: web2c's `runsystem` and `shell_cmd_is_allowed`
+  (texmfmp.c), the same on every host: unrestricted runs the command as
+  written; restricted runs it only if its first word is in
+  `shell_escape_commands` (now read from texmf.cnf into
+  `Params::shell_escape_commands`), every argument quoted with `'`, a
+  user's `"…"` turned into `'…'`, a `'` or a bad `"` a quotation error,
+  a `|` refused. `write_out` (§1370, tex.ch's `j=18` branch) prints the
+  log line from that decision, `clobbered` only for a NUL before the
+  last character, as web2c.
+- `Host::shell_escape` became `Host::system(command, inputs) ->
+  Option<Ran>`: the host runs only an allowed, quoted command and says
+  which files it made, changed or removed. `NativeHost` runs `/bin/sh
+  -c` with kpathsea's `SELFAUTO*`/`progname`/`engine` exported
+  (`Kpse::exported`; latexminted's `latexrestricted` finds TeX Live by
+  `SELFAUTOLOC`) and `TEXMF_OUTPUT_DIRECTORY` under
+  `-output-directory`, prints `system returned with code N` on stderr
+  as web2c does, and finds the files by the output directory's stamps
+  before and after (hidden directories skipped). `MachineHost` (the
+  watch's default runtime) puts the job's in-memory files on disk
+  first, and its link leaves the files a command removed removed.
+- SSA (DESIGN 3.7, "Commands"): the command is a call of its step. It
+  reads the job's closed `\openout` files that a store reaches there
+  (loads of the build's stores, handed to the host so a step run out of
+  order sees the right bytes) and writes each file it made or changed as
+  a store of the step (`Tracker::command_wrote`), and a removal as a
+  `StoreEv::Remove` (a load after it finds nothing; the link removes
+  the file again, `ssa::removed_files`). Commands' own files are not
+  inputs of later commands, so a changed code block does not re-run
+  every later block's command.
+- wasm: `tools/minted-pyodide/runner.mjs`, latexminted in Pyodide over
+  an in-memory `/work` the host copies the job's files into, with
+  `subprocess.run` answering `kpsewhich` (Pyodide has no processes);
+  `host-glue.mjs` is the import a wasm host (the extension's `MemHost`)
+  calls, with the Rust side written out in its comment.
+
+**Why Pyodide.** latexminted, latexrestricted, latex2pydata and
+Pygments are pure Python (TeX Live ships them as wheels), so CPython in
+wasm runs them unchanged; Pyodide is CPython built for the browser with
+a synchronous `runPython` once loaded, which the engine's synchronous
+`Host::system` needs. wasmer-python would need a WASI runtime in the
+page and gives nothing more for pure-Python code.
+
+**Evidence** (this machine, release binary, `SOURCE_DATE_EPOCH` fixed):
+- e2e `shell` (plain TeX: restricted, unrestricted, disabled; the
+  quoting errors, `|`, an empty command, a `\write18` shipped out) and
+  `minted` (pdflatex format, restricted, two runs: the batch, then the
+  cache): identical to pdfTeX 1.40.29 (logs, PDFs, `.aux`), plain and
+  `PARTEX_MACHINE=1`.
+- The user's thesis (64-page report, eight `julia` minted blocks,
+  `staroffice` style), format built with `-translate-file=cp227.tcx` as
+  fmtutil builds it: run, bibtex, run, run under `-shell-restricted`,
+  PDF and log identical to `pdflatex` at each run (16–18 s, 150 MB).
+  (Without the TCX, partex's own format writes `^^e2^^80^^94` into
+  minted's data file, as pdfTeX would: not a partex difference.)
+- `scripts/ssa-edits --case minted --fixpoint`: 5/5 stages identical to
+  plain partex run to its fixpoint. The cold build takes 3 trips (the
+  batch, then the cache read, then the `.aux`); a code block edited
+  re-runs 42 steps and latexminted once (3.1 s, of which Python ~0.3
+  s); a word outside the blocks 6 steps, no command (0.56 s).
+- Two bugs the harness found on the way: minted's cache is loaded by
+  the path from the working directory (`out/_minted/…`) where the
+  command's files were stored by their name in the output directory, so
+  a command's file is now stored under both; and a rebuild's run that
+  will be dropped (it read a definition it was not placed at) ran
+  latexminted over a data file with `\minted@tmpdatabufferline39`
+  unexpanded, leaving an `.errlog.minted`: a doomed run now skips its
+  commands (`Tracker::run_doomed`, `read_later`).
+- `tools/minted-pyodide/test.mjs` (Node 26, Pyodide 314.0.7): the six
+  latexminted calls of two pdflatex runs, through the import glue, give
+  file trees identical to the native latexminted's; Pyodide and the
+  wheels load in 3.0 s, `config` 0.3 s cold, later calls 12–25 ms,
+  `batch` 0.26 s.
+
+**Not done.** `-resident`'s host runs no commands (its log still says
+`executed`). `\input|"cmd"` and `\openout|` pipes (web2c's
+`open_in_or_pipe`, which l3sys-query uses) are not implemented. Other
+Python tools: pythontex runs as a separate pass (`pythontex job`
+between runs, like BibTeX: an outside tool reading `.pytxcode`), so it
+needs a `Trips::tools` entry rather than `\write18`; its Pyodide side
+would need its dependencies (none but the standard library for plain
+Python code). sympy-/matplotlib-using code would need Pyodide's
+packages.
