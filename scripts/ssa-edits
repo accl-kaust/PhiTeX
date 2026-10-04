@@ -21,7 +21,9 @@ e2e's `machine_edits` seeds them; `label`: the same document given a
 `\\label` nothing refers to, then rebuilt twice with no edit;
 `aux_reopen` (`reopen.tex`, pdflatex format): an edit in the first
 paragraph, whose step opens the `.aux` and whose page opens the PDF, its
-revert, and a later edit; `streams` (`streams.tex`): a line written to
+revert, and a later edit; `garbled`: the same, the SSA side's written files
+(`.aux`, `.toc`, `.out`) cut to their first line, their times kept,
+before each rebuild, which must read the build's own values of them; `streams` (`streams.tex`): a line written to
 the file a stream opened first, changed and back, after the stream opened
 a second; `fatal_end` (`fatal-end.tex`): a word edited and back in a job
 that ends fatally in its last page's output routine, not seeded: the
@@ -210,8 +212,10 @@ WINDOW_EDITS = [
 
 
 class Case:
-    def __init__(self, name, inputs, fmt, args, edits, outdir=None, seed=0):
+    def __init__(self, name, inputs, fmt, args, edits, outdir=None, seed=0, garble=False):
         self.name = name
+        # the SSA side's written files garbled before each rebuild
+        self.garble = garble
         # {name in the run directory: file in tests/e2e}
         self.inputs = inputs
         self.fmt = fmt
@@ -349,10 +353,12 @@ def e2e_watch_cases():
 
 
 def all_cases():
-    def latex(name, src, fmt, edits, seed=2, extra=()):
+    def latex(name, src, fmt, edits, seed=2, extra=(), garble=False):
         args = [*LATEX_FLAGS, *extra, f"-fmt={fmt}", "-output-directory=out", "edits"]
         edits = [("edits.tex", m, n) for m, n in edits]
-        return Case(name, {"edits.tex": src}, fmt, args, edits, outdir="out", seed=seed)
+        return Case(
+            name, {"edits.tex": src}, fmt, args, edits, outdir="out", seed=seed, garble=garble
+        )
 
     return [
         *e2e_watch_cases(),
@@ -360,6 +366,8 @@ def all_cases():
         latex("machine_edits_dvi", "edits-dvi.tex", "latex", MACHINE_EDITS_DVI),
         latex("label", "edits.tex", "pdflatex", LABEL_EDITS),
         latex("aux_reopen", "reopen.tex", "pdflatex", REOPEN_EDITS),
+        # (the written files garbled before each rebuild: the build's own)
+        latex("garbled", "reopen.tex", "pdflatex", REOPEN_EDITS, garble=True),
         latex("streams", "streams.tex", "pdflatex", STREAMS_EDITS),
         # (not seeded: the first build's second trip reads the .aux the
         # first wrote, as the next stage's pass does with one trip a build)
@@ -502,11 +510,29 @@ def make_edit(cdir, run_dir, stage):
     os.rename(tmp, run_dir / file)
 
 
+def garble(run_dir):
+    """The job's written files (`.aux`, `.toc`, `.out`) in `run_dir` and
+    below, cut to their first line and given their times back: as a run
+    that truncated them and stopped would leave them, which a rebuild must
+    not read as an edit (DESIGN 3.7, "Files are a view")."""
+    for root, _, names in os.walk(run_dir):
+        for n in names:
+            if n.endswith((".aux", ".toc", ".out")):
+                f = Path(root) / n
+                st = f.stat()
+                data = f.read_bytes()
+                f.write_bytes(data.split(b"\n", 1)[0] + b"\n" if data else b"%garbled\n")
+                os.utime(f, ns=(st.st_atime_ns, st.st_mtime_ns))
+
+
 def step(cdir, stage):
     """`--_step`: a rebuild line of the SSA process, before rebuild
-    `stage`: the outputs of the stage before, then this stage's edit."""
+    `stage`: the outputs of the stage before, then this stage's edit (and,
+    for a case that garbles, its written files cut short first)."""
     cdir = Path(cdir)
     snapshot(cdir / "p", cdir / "snap" / "p" / str(stage - 1))
+    if (cdir / "garble").exists():
+        garble(cdir / "p")
     make_edit(cdir, cdir / "p", stage)
 
 
@@ -613,6 +639,8 @@ class Runner:
                 (cdir / "edits" / str(k) / file).write_bytes(texts[file])
             plan.append((file, bool(marker)))
         (cdir / "plan.json").write_text(json.dumps({"edits": plan}))
+        if case.garble:
+            (cdir / "garble").write_text("")
         if case.seed:
             seed = cdir / "seed"
             for k in range(case.seed):

@@ -456,6 +456,14 @@ impl Steps {
         Some(Ok(v))
     }
 
+    /// The cold build's first trip serves its loads too (`on`), from no φ:
+    /// a name the job stored before the load is served its store, any
+    /// other the host's file (DESIGN 3.7: the job's writes reach no file
+    /// before the link).
+    pub(crate) fn serve_cold(&mut self, on: bool) {
+        self.phi = on.then(BTreeMap::new);
+    }
+
     /// What a load of stored name `id` at `key` is served inside a
     /// rebuild: the store's value there (`None`: read the host's file).
     #[expect(clippy::option_option, reason = "outer: not served; inner: no file")]
@@ -1997,6 +2005,36 @@ pub fn rebuild<H: Host>(tex: &mut Tex<H, SsaTracker>, trace: bool, apply: bool) 
         // 7.17.3, "A rebuild's file checks cost the files that changed":
         // looked at by reference, and only the others kept, with what is
         // read of them after)
+        // (the stored names whose files are as the build's link left them,
+        // with the build's values of them)
+        let (own, own_phi): (BTreeSet<u32>, Vec<(u32, Option<Arc<[u8]>>)>) = if next.is_none() {
+            let names: Vec<(u32, Vec<u8>)> = {
+                let r = tex.tracker.rec.borrow();
+                let s = &r.st.steps;
+                s.stored
+                    .iter()
+                    .filter_map(|&id| Some((id, r.st.loads.get(id as usize)?.0.clone())))
+                    .collect()
+            };
+            let mut own = BTreeSet::new();
+            let mut vals = Vec::new();
+            for (id, name) in names {
+                if tex.host.output_edited(&name) {
+                    continue;
+                }
+                let r = tex.tracker.rec.borrow();
+                let s = &r.st.steps;
+                let v = match s.value_at(&r.rt.fold, id, u64::MAX) {
+                    Some(Ok(v)) => Some(Arc::<[u8]>::from(v)),
+                    _ => s.last_phi.get(&id).cloned().flatten(),
+                };
+                own.insert(id);
+                vals.push((id, v));
+            }
+            (own, vals)
+        } else {
+            (BTreeSet::new(), Vec::new())
+        };
         #[allow(clippy::type_complexity)]
         let (files, kept, same, datas, lines): (
             Vec<(u32, Vec<u8>, FileKind, Option<Arc<[u8]>>, bool, bool, bool)>,
@@ -2014,7 +2052,10 @@ pub fn rebuild<H: Host>(tex: &mut Tex<H, SsaTracker>, trace: bool, apply: bool) 
                 .map(|d| d.name)
                 .collect();
             // (a later trip: a stored name's φ is in memory, and the other
-            // loads are looked at again only after a tool wrote a file)
+            // loads are looked at again only after a tool wrote a file; a
+            // build's first trip: a stored name's φ is the build's own, what
+            // its link wrote, unless the host says the file was edited
+            // since, DESIGN 3.7, "Files are a view")
             let looked: Vec<(u32, &[u8], FileKind, Option<&Arc<[u8]>>)> =
                 r.st.loads
                     .iter()
@@ -2025,6 +2066,9 @@ pub fn rebuild<H: Host>(tex: &mut Tex<H, SsaTracker>, trace: bool, apply: bool) 
                             .as_ref()
                             .is_some_and(|n| !n.files || s.stored.contains(&id))
                         {
+                            return None;
+                        }
+                        if next.is_none() && own.contains(&id) {
                             return None;
                         }
                         Some((
@@ -2078,6 +2122,7 @@ pub fn rebuild<H: Host>(tex: &mut Tex<H, SsaTracker>, trace: bool, apply: bool) 
         // (a name the job stores: its φ, what the last trip stored, which
         // its file holds, 7.17.3's "A load reads the store")
         let mut phi: BTreeMap<u32, Option<Arc<[u8]>>> = kept.into_iter().collect();
+        phi.extend(own_phi);
         // (each file read by lines, as it is now)
         let mut nows: BTreeMap<u32, Arc<[u8]>> = BTreeMap::new();
         let mut read = 0;

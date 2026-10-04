@@ -2113,7 +2113,8 @@ impl SsaLinker {
         for (name, id, kind, anew) in self.names(host, &out.opened) {
             let (len, from) = out.files.get(&id).copied().unwrap_or((0, None));
             let n = native::with_suffix(&name, kind);
-            let path = native::path(&host.in_output_dir(&n).unwrap_or(n));
+            let at = host.in_output_dir(&n).unwrap_or(n);
+            let path = native::path(&at);
             let as_written = !anew
                 && self.written.get(&name).is_some_and(|&(i, l, t)| {
                     i == id
@@ -2151,6 +2152,8 @@ impl SsaLinker {
             }
             w.bytes += len - from;
             let t = file.metadata().ok().and_then(|m| m.modified().ok());
+            drop(file);
+            host.note_written(&at);
             self.written.insert(name, (id, len, t));
         }
         w
@@ -2166,9 +2169,10 @@ impl SsaLinker {
         let (mut files, mut bytes_out) = (0, 0);
         for (name, id, kind, _) in self.names(host, &l.opened) {
             let bytes = l.files.get(&id).map_or(&[][..], Vec::as_slice);
-            if let Some((w, _)) = host.open_write(&name, kind) {
+            if let Some((w, written)) = host.open_write(&name, kind) {
                 host.write(w, bytes);
                 host.close(w);
+                host.note_written(&written);
             }
             files += 1;
             bytes_out += bytes.len();

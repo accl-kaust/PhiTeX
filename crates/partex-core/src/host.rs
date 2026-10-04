@@ -111,6 +111,40 @@ pub trait Host {
         let _ = id;
         self.open_write(name, kind)
     }
+    /// The name a lookup of `name` would give for the file the job writes
+    /// as `name` (where the job writes it, as the lookup names a file
+    /// found there): what TeX prints when it reads it back. By default,
+    /// [`Host::output_name`]'s.
+    fn written_name(&mut self, name: &[u8]) -> Vec<u8> {
+        self.output_name(name, FileKind::Other)
+    }
+
+    /// Whether the file the job writes as `name` was edited since the
+    /// build's link last wrote it (by a user, not by the build): an SSA
+    /// rebuild reads such a file's new contents as an edit; any other is
+    /// the build's own, and its value is the one the build holds (DESIGN
+    /// 3.7, "Files are a view"). The default: edited (read it again).
+    fn output_edited(&mut self, name: &[u8]) -> bool {
+        let _ = name;
+        true
+    }
+
+    /// A handle for output file `name` whose bytes the build keeps in
+    /// memory and a link writes later (an SSA build, DESIGN 3.7, "Files
+    /// are a view"): the host's file is not touched now. `again`: the
+    /// handle a step that runs again had, as [`Host::open_write_again`].
+    /// The default creates the file, as [`Host::open_write`] does.
+    fn open_write_later(
+        &mut self,
+        name: &[u8],
+        kind: FileKind,
+        again: Option<WriteId>,
+    ) -> Option<(WriteId, Vec<u8>)> {
+        match again {
+            Some(id) => self.open_write_again(name, kind, id),
+            None => self.open_write(name, kind),
+        }
+    }
     fn write(&mut self, file: WriteId, bytes: &[u8]);
     fn close(&mut self, file: WriteId);
 

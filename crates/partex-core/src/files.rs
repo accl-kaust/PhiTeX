@@ -508,8 +508,10 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             return found;
         }
         let found = match self.tracker.stored(name) {
+            // (named as the host finds it, or, not written yet, where the
+            // job writes it: the output directory's)
             Some(v) => v.map(|contents| crate::host::OpenedFile {
-                name: found.map_or_else(|| name.to_vec(), |f| f.name),
+                name: found.map_or_else(|| self.host.written_name(name), |f| f.name),
                 contents,
             }),
             None => found,

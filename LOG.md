@@ -12603,3 +12603,34 @@ What stays: a ship not run again after an earlier step stops loading
 a font keeps the numbers it had. The number is not a read the rebuild
 checks (machine mode reads the whole order). In the cases here the
 ship runs again anyway, because its page changed.
+
+## 2026-10-04 — Files the job writes live in memory during an SSA build (branch `memout`, agent pdfnum)
+
+**What prompted it.** `\openout` and `\write` went to the host at once
+("the job may read the file back"), so a step run again truncated its
+file on disk (`File::create`) and wrote only its own lines: mid-rebuild,
+or after a rebuild that stopped, `Chapter_2.aux` held its header line
+alone. The next rebuild's edit detection then read that file as a user's
+edit (the extension: 1,847 steps for a one-letter edit).
+
+**What changed** (DESIGN 3.7, "Files are a view"):
+- With SSA effects on, `open_out` takes a handle the host has not opened
+  (`Host::open_write_later`; the default opens the file, as before, for
+  other hosts), and `write_file_bytes` makes effects only. The link
+  writes every file, as before.
+- Loads of a stored name are served from the stores in the cold build's
+  first trip too (`Steps::serve_cold`), named as kpathsea would name the
+  file where the job writes it (`Host::written_name`).
+- At a rebuild's start a stored name's φ is the build's own value (the
+  stores as the last trip left them), unless the host reports the file
+  edited since the link wrote it (`Host::output_edited`; the native host
+  records each written file's stamp, `NativeHost::note_written`).
+
+**Measured.** `reopen.tex` (pdflatex), an edit in the step that opens
+the `.aux`, the rebuild cancelled at its 1st, 2nd or 3rd poll
+(`PARTEX_SSA_CANCEL_AFTER`): before, `edits.aux` on disk was 8 bytes
+afterwards; now it is the last link's 1,243 bytes, unchanged.
+`ssa-edits --fixpoint`: 22/22 cases identical, with a new case,
+`garbled` (`reopen.tex`'s edits, the SSA side's `.aux`, `.toc`, `.out`
+cut to their first line before each rebuild): identical, the cut files
+read as edits (206 steps a stage, the build converging from them).

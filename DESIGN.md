@@ -656,8 +656,26 @@ template, which a compiled backend exploits.
   stream its reader loads, and a tool runs if and only if an input's
   version changed. Which tool reads which stream is fixed in partex.
 - **Files are a view.** The build holds the streams and writes files
-  for outside tools, never reading its own writes back.
-
+  for outside tools, never reading its own writes back. In an SSA build
+  (effects on) no output file on the host is opened, emptied or written
+  while a build or rebuild runs: `\openout` takes a handle the host has
+  not opened (`Host::open_write_later`), `\write` bytes are effects and
+  the stores' lines, and only the link writes files. So a rebuild that
+  stops halfway (cancelled, past its deadline) leaves every file as the
+  last link wrote it, never a step's truncated `.aux`.
+  - *A load of a name the job writes* is served from the stores in every
+    trip, the cold build's first included (`Steps::serve_cold`): the lines
+    since the last open before it, or, with no open before it, the φ (in a
+    process's first trip, the host's file). It is named as the host's
+    lookup names a file where the job writes it (`Host::written_name`:
+    `./name`, or the output directory's).
+  - *A rebuild's φ of a name the job writes* is the build's own value, the
+    one its link wrote (the stores where the last trip left them), unless
+    the host says the file was edited since that write
+    (`Host::output_edited`: the native host keeps the stamp of each file
+    its link wrote): a user's edit of an `.aux` is an edit as before; a
+    file another process truncated is read as an edit too, and the build
+    converges from it.
 **Trips, as built** (`ssa/rebuild.rs`, `rebuild_trips` and `settle`):
 - *A build is a sequence of trips.* Trip 1 runs what the edit reaches
   (3.15, "A rebuild"); a cold build's trip 1 is the whole job. A store
