@@ -2677,9 +2677,15 @@ pub struct Trips<'a, H> {
     /// The outside tools, run between two trips on the streams the job
     /// stores, by name, as the trip left them: whether one wrote a file,
     /// and a line for each run.
+    /// (The compatibility path: the build's own tools are
+    /// [`Trips::native`]; a host that has them passes a closure that runs
+    /// nothing.)
     #[allow(clippy::type_complexity)]
     pub tools:
         &'a mut dyn FnMut(&mut H, &[(Vec<u8>, Arc<[u8]>)]) -> (bool, Vec<alloc::string::String>),
+    /// The build's BibTeX and makeindex, nodes of its program run at each
+    /// trip's end (DESIGN 3.7, "Outside tools are nodes"); `None`: none.
+    pub native: Option<&'a super::tools::NativeTools>,
     /// A clock in nanoseconds, for the trips' times.
     pub clock: Option<fn() -> u64>,
 }
@@ -2749,6 +2755,9 @@ pub fn rebuild_trips<H: Host>(
     trips: &mut Trips<'_, H>,
 ) -> RebuildReport {
     let t0 = trips.now();
+    // (the tools' files, by stamp, once for the build: before the job's
+    // loads are, whose check the trips after it keep)
+    let tools_stale = trips.native.is_some() && super::tools::look(tex);
     let first = rebuild(tex, trace, apply);
     let ns = trips.now().saturating_sub(t0);
     let ran = first.steps_run > 0;
@@ -2757,6 +2766,15 @@ pub fn rebuild_trips<H: Host>(
         ..RebuildReport::default()
     };
     rep.absorb(first, ns);
+    if !ran && tools_stale && rep.unsupported.is_none() && rep.stopped.is_none() {
+        // (no step ran, but a tool's file changed: it runs at the trip's
+        // end, and the trips go on from what it defines)
+        if trips.max <= 1 {
+            one_trip_tools(tex, trips, &mut rep);
+            return rep;
+        }
+        return more_trips(tex, trace, apply, trips, rep);
+    }
     if !ran {
         // (nothing ran: the stores are what the loads of the φ read; the
         // trace of the trip, as `more_trips` keeps it)
@@ -2765,10 +2783,43 @@ pub fn rebuild_trips<H: Host>(
         return rep;
     }
     if trips.max <= 1 {
-        // (one trip per build: a plain pass, nothing more looked at)
+        // (one trip per build: a plain pass; the tools run after it, as a
+        // pass's are, for the next build to read)
+        one_trip_tools(tex, trips, &mut rep);
         return rep;
     }
     more_trips(tex, trace, apply, trips, rep)
+}
+
+/// One trip per build (`PARTEX_SSA_TRIPS=1`): after the trip, the tools
+/// whose inputs changed run, as after a pass, and define what the next
+/// build's first trip reads; no trip follows.
+fn one_trip_tools<H: Host>(
+    tex: &mut Tex<H, SsaTracker>,
+    trips: &mut Trips<'_, H>,
+    rep: &mut RebuildReport,
+) {
+    if rep.unsupported.is_some() || rep.stopped.is_some() {
+        return;
+    }
+    let (mut phi, mut changed) = {
+        let r = &mut *tex.tracker.rec.borrow_mut();
+        r.st.steps.trip_end(&r.rt.fold)
+    };
+    if let Some(native) = trips.native {
+        let lines = super::tools::derive(tex, &mut phi, &mut changed, native, trips.clock);
+        rep.tools.extend(lines);
+    }
+    // (and the outside tools, whose files the next build's first trip
+    // finds changed)
+    let streams: Vec<(Vec<u8>, Arc<[u8]>)> = {
+        let r = tex.tracker.rec.borrow();
+        phi.iter()
+            .filter_map(|(&id, v)| Some((r.st.loads.get(id as usize)?.0.clone(), v.clone()?)))
+            .collect()
+    };
+    let (_, lines) = (trips.tools)(&mut tex.host, &streams);
+    rep.tools.extend(lines);
 }
 
 /// After a cold build, its trip 1, which ran `commands` commands in `ns`:
@@ -2809,10 +2860,27 @@ fn more_trips<H: Host>(
         if rep.unsupported.is_some() || rep.stopped.is_some() {
             return rep;
         }
-        let (phi, changed) = {
+        let (mut phi, mut changed) = {
             let r = &mut *tex.tracker.rec.borrow_mut();
             r.st.steps.trip_end(&r.rt.fold)
         };
+        // the build's tools, on the stores as the trip left them: the
+        // streams they define are the next trip's φ too (at the bound as
+        // well, as a pass's tools run after it)
+        let native_lines = match trips.native {
+            Some(native) => super::tools::derive(tex, &mut phi, &mut changed, native, trips.clock),
+            None => Vec::new(),
+        };
+        rep.tools.extend(native_lines);
+        // the outside tools, on the streams as the trip left them
+        let streams: Vec<(Vec<u8>, Arc<[u8]>)> = {
+            let r = tex.tracker.rec.borrow();
+            phi.iter()
+                .filter_map(|(&id, v)| Some((r.st.loads.get(id as usize)?.0.clone(), v.clone()?)))
+                .collect()
+        };
+        let (wrote, lines) = (trips.tools)(&mut tex.host, &streams);
+        rep.tools.extend(lines);
         if rep.trips >= trips.max.max(1) {
             // (the bound: converged only if every load of the φ read what
             // the last trip stored; else the names, as latexmk reports)
@@ -2832,15 +2900,6 @@ fn more_trips<H: Host>(
             rep.settled = rep.unsettled.is_empty();
             return rep;
         }
-        // the outside tools, on the streams as the trip left them
-        let streams: Vec<(Vec<u8>, Arc<[u8]>)> = {
-            let r = tex.tracker.rec.borrow();
-            phi.iter()
-                .filter_map(|(&id, v)| Some((r.st.loads.get(id as usize)?.0.clone(), v.clone()?)))
-                .collect()
-        };
-        let (wrote, lines) = (trips.tools)(&mut tex.host, &streams);
-        rep.tools.extend(lines);
         if trace {
             let names: Vec<alloc::string::String> = {
                 let r = tex.tracker.rec.borrow();

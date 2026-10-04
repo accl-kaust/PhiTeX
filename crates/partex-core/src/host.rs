@@ -26,6 +26,13 @@ pub enum FileKind {
     Vf,
     /// TrueType fonts (`.ttf`).
     TrueType,
+    /// BibTeX styles (`.bst`), for the build's own BibTeX (DESIGN 3.7,
+    /// "Outside tools are nodes").
+    Bst,
+    /// BibTeX databases (`.bib`).
+    Bib,
+    /// makeindex styles (`.ist`).
+    Ist,
     /// Everything else, looked up by exact name.
     Other,
 }
@@ -297,7 +304,10 @@ partex_engine::persist_enum!(FileKind {
     Enc,
     Vf,
     TrueType,
-    Other
+    Other,
+    Bst,
+    Bib,
+    Ist
 });
 
 /// A host with no files and no terminal: the engine that holds the

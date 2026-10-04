@@ -73,6 +73,9 @@ from pathlib import Path
 SCRIPT = Path(__file__).resolve()
 REPO = SCRIPT.parent.parent
 EPOCH = 1_758_800_000
+# the oracle's BibTeX and makeindex (TeX Live's)
+BIBTEX = os.environ.get("SSA_EDITS_BIBTEX", "bibtex")
+MAKEINDEX = os.environ.get("SSA_EDITS_MAKEINDEX", "makeindex")
 # (the oracle's fixed time: a PDF file and LaTeX's \time record it)
 FIXED_TIME = {"SOURCE_DATE_EPOCH": str(EPOCH), "FORCE_SOURCE_DATE": "1"}
 
@@ -202,6 +205,30 @@ SYNCTEX_EDITS = [
     ("Para2x0 ", "% a comment line\nPara2x0 "),
     ("Para7x1 ", "Para7x1 \n\nA paragraph of its own.\n\n"),
     ("\\label{sec:12}\n", "\\label{sec:12}\n\n"),
+]
+# bibedits.tex and bibedits.bib (DESIGN 3.7, "Outside tools are nodes"):
+# a citation added whose alpha label collides with one cited (Lam86 and
+# Lam86 become Lam86a and Lam86b), a field of a cited entry edited, the
+# field a crossref's child inherits edited in its parent, an entry no one
+# cites edited, the citation taken away again, another citation removed
+BIB_EDITS = [
+    ("edits.tex", "Second paragraph.", "Second paragraph cites~\\cite{lamport-two}."),
+    ("bibedits.bib", "title = {First Title}", "title = {First Title, Edited}"),
+    (
+        "bibedits.bib",
+        "booktitle = {Proceedings of the Meeting}",
+        "booktitle = {Proceedings of the Big Meeting}",
+    ),
+    ("bibedits.bib", "title = {Never Cited}", "title = {Never Ever Cited}"),
+    ("edits.tex", "Second paragraph cites~\\cite{lamport-two}.", "Second paragraph."),
+    ("edits.tex", " and an article~\\cite{lamport-art}", ""),
+]
+# idxedits.tex: an index entry added, one taken away, and a page break
+# taken away (the entries after it move to the page before)
+IDX_EDITS = [
+    ("Delta\\index{delta@$\\delta$}.", "Delta\\index{delta@$\\delta$}. Eta\\index{eta}."),
+    ("epsilon\\index{epsilon}", "epsilon"),
+    ("\\newpage\nZeta", "Zeta"),
 ]
 # windows.tex (DESIGN 4.3 item 1): edits inside a figure's caption, a
 # pgfplots axis (its coordinates, its function), a minipage, an alignment,
@@ -406,6 +433,16 @@ def all_cases():
         ),
         latex("synctex", "edits.tex", "pdflatex", SYNCTEX_EDITS, extra=["-synctex=1"]),
         latex("preamble", "preamble.tex", "pdflatex", PREAMBLE_EDITS),
+        Case(
+            "bibtex",
+            {"edits.tex": "bibedits.tex", "bibedits.bib": "bibedits.bib"},
+            "pdflatex",
+            [*LATEX_FLAGS, "-fmt=pdflatex", "-output-directory=out", "edits"],
+            BIB_EDITS,
+            outdir="out",
+            seed=2,
+        ),
+        latex("makeindex", "idxedits.tex", "pdflatex", IDX_EDITS),
         Case(
             "images",
             {"edits.tex": "images.tex", **{f: f for f in ("images-fig.pdf", "images-hand.pdf")}},
@@ -666,6 +703,7 @@ class Runner:
             seed = cdir / "seed"
             for k in range(case.seed):
                 self.exec(case.argv, seed, cdir / "logs" / f"seed-{k}", self.env)
+                self.tools(case, seed, cdir / "logs" / f"seed-{k}")
             out = case.outdir or "."
             for f in (seed / out).iterdir():
                 if f.is_file() and f.name not in case.inputs and not f.name.endswith(
@@ -674,6 +712,25 @@ class Runner:
                     for side in ("o", "p"):
                         shutil.copyfile(f, cdir / side / out / f.name)
         return cdir
+
+    def tools(self, case, run, log):
+        """After a pass of the oracle in `run`: BibTeX if the job's `.aux`
+        asks for it (`\\bibdata`), makeindex if it wrote an `.idx`, as
+        latexmk runs them, in the output directory (BibTeX finding the
+        databases in `run` first, as latexmk's `BIBINPUTS`). They run
+        after every pass: a run on the same inputs writes the same files."""
+        out = run / (case.outdir or ".")
+        job = case.argv[-1]
+        aux = out / f"{job}.aux"
+        env = {**self.env, "BIBINPUTS": f"{run}:"}
+        if aux.exists() and b"\\bibdata{" in aux.read_bytes():
+            with open(f"{log}.bibtex", "wb") as f:
+                subprocess.run([BIBTEX, job], cwd=out, env=env, stdout=f, stderr=f, check=False)
+        if (out / f"{job}.idx").exists():
+            with open(f"{log}.makeindex", "wb") as f:
+                subprocess.run(
+                    [MAKEINDEX, f"{job}.idx"], cwd=out, env=self.env, stdout=f, stderr=f, check=False
+                )
 
     def oracle(self, case, cdir):
         """Plain partex, stage by stage: the runs of each."""
@@ -685,6 +742,7 @@ class Runner:
             while True:
                 before = written(o) if self.fixpoint else None
                 self.exec(case.argv, o, cdir / "logs" / f"o-{k}-{n}", self.env)
+                self.tools(case, o, cdir / "logs" / f"o-{k}-{n}")
                 n += 1
                 if not self.fixpoint or n == 5 or written(o) == before:
                     break

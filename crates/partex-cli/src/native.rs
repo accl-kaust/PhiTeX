@@ -225,8 +225,11 @@ impl NativeHost {
         trail: &mut Vec<Vec<u8>>,
     ) -> Result<Option<OpenedFile>, ()> {
         let note = |trail: &mut Vec<Vec<u8>>, p: &[u8]| trail.push(p.to_vec());
-        // openclose.c's `open_input`: the output directory first
-        if let Some(p) = self.in_output_dir(name) {
+        // openclose.c's `open_input`: the output directory first (not for
+        // the build's BibTeX and makeindex, which look their styles and
+        // databases up as the CLI's `bibtex` and `makeindex` do: by
+        // kpathsea, from the working directory)
+        if let Some(p) = self.in_output_dir(name).filter(|_| !tool_kind(kind)) {
             let tries = [p.clone(), with_suffix(&p, kind)];
             for p in tries {
                 if !std::fs::metadata(path(&p)).is_ok_and(|m| m.is_dir())
@@ -258,6 +261,9 @@ impl NativeHost {
             FileKind::Enc => partex_kpse::Format::Enc,
             FileKind::Vf => partex_kpse::Format::Vf,
             FileKind::TrueType => partex_kpse::Format::TrueType,
+            FileKind::Bst => partex_kpse::Format::Bst,
+            FileKind::Bib => partex_kpse::Format::Bib,
+            FileKind::Ist => partex_kpse::Format::Ist,
             FileKind::Other => {
                 let Some(contents) = self.read_at(name) else {
                     note(trail, name);
@@ -335,6 +341,11 @@ pub fn synctex_name(found: &[u8]) -> Vec<u8> {
     n
 }
 
+/// A style or database of the build's BibTeX or makeindex.
+fn tool_kind(kind: FileKind) -> bool {
+    matches!(kind, FileKind::Bst | FileKind::Bib | FileKind::Ist)
+}
+
 /// The name an output file gets (web2c adds the default suffix).
 pub fn with_suffix(name: &[u8], kind: FileKind) -> Vec<u8> {
     let suffix: &[u8] = match kind {
@@ -346,6 +357,9 @@ pub fn with_suffix(name: &[u8], kind: FileKind) -> Vec<u8> {
         | FileKind::Enc
         | FileKind::Vf
         | FileKind::TrueType
+        | FileKind::Bst
+        | FileKind::Bib
+        | FileKind::Ist
         | FileKind::Other => b"",
     };
     let mut n = name.to_vec();
@@ -444,7 +458,7 @@ pub fn stamp(p: &[u8]) -> Option<Stamp> {
 impl NativeHost {
     /// Where [`Host::read_file`] would find `name`, without reading it.
     pub fn locate(&mut self, name: &[u8], kind: FileKind) -> Option<Vec<u8>> {
-        if let Some(p) = self.in_output_dir(name) {
+        if let Some(p) = self.in_output_dir(name).filter(|_| !tool_kind(kind)) {
             for p in [p.clone(), with_suffix(&p, kind)] {
                 if stamp(&p).is_some() {
                     return Some(p);
@@ -471,6 +485,9 @@ impl NativeHost {
             FileKind::Enc => partex_kpse::Format::Enc,
             FileKind::Vf => partex_kpse::Format::Vf,
             FileKind::TrueType => partex_kpse::Format::TrueType,
+            FileKind::Bst => partex_kpse::Format::Bst,
+            FileKind::Bib => partex_kpse::Format::Bib,
+            FileKind::Ist => partex_kpse::Format::Ist,
             FileKind::Other => return stamp(name).map(|_| name.to_vec()),
         };
         self.kpse.find_file(name, format, true)

@@ -12650,3 +12650,52 @@ pass never saw it. A new case, `include` (`include.tex` and its three
 chapter's paragraph, then a letter, then back: 6 steps an edit,
 identical with `--fixpoint` and with one trip a build.
 
+## 2026-10-04 — BibTeX a node of the build, stage 1 (branch `nativebib`, agent nativebib)
+
+**What prompted it.** The user: "bibtex and makeindex should be native
+to me, not passes to run. they resolve exactly the dirty nodes they need
+to resolve and thats it. they are as native as aux". Until now an SSA
+build ran BibTeX and makeindex as outside tools between its trips (the
+CLI's `ssa_tools` closure): each reread its whole stream, reran whole
+when its input bytes changed, and wrote the `.bbl`/`.ind` to disk, which
+the next trip found changed by looking at every load again.
+
+**What changed** (DESIGN 3.7, 3.16; built on `memout`, add8361):
+- `ssa/tools.rs`: the BibTeX node of each stored `.aux` with a
+  `\bibdata` line runs at a trip's end (`tools::derive`, from
+  `more_trips`), on the stores the trip left, if a version it read
+  changed: the `\citation`/`\bibdata`/`\bibstyle`/`\@input` lines of the
+  `.aux` files it read (a `\newlabel` is not one), or one of its files
+  by stamp (`tools::look`, once per rebuild, before the job's loads).
+- Its `.bbl` is a stream the tool defines (`ssa::define_stream`, memout's
+  producer API): a name the
+  job stores that no step opens, so its loads are served the φ from
+  memory, a trip's end compares it like any store and diffs it by lines
+  (a changed `\bibitem` wakes the steps that read its lines), and the
+  build holds it (`last_phi`) for the next rebuild's first trip. The link
+  writes it and the `.blg` (`ssa::produced_streams`, the linker's
+  `write_produced`, each stamped by `note_written`).
+- `FileKind::Bst`, `Bib`, `Ist`: the tools' files are host loads,
+  kpathsea's formats from the working directory (not the output
+  directory first), checked by stamp like every load.
+- `rebuild_trips`: a rebuild in which no step ran but a tool's file
+  changed (a `.bib` edited) goes on to the trips; with one trip a build
+  the tools run after it, as after a pass; at the bound they run once
+  more. `PARTEX_SSA_TOOLS=outside` keeps the closure path (reference),
+  `=0` runs none. makeindex stays an outside tool until stage 3.
+- `scripts/ssa-edits`: the oracle runs `bibtex` (when the `.aux` has
+  `\bibdata`, `BIBINPUTS` the run directory first, as latexmk) and
+  `makeindex` (when there is an `.idx`) after every pass, in the output
+  directory. New cases: `bibtex` (`bibedits.tex`, `bibedits.bib`: a
+  citation added whose alpha label collides, Lam86 becoming Lam86a and
+  Lam86b; a field edited; a crossref parent's inherited field edited; an
+  uncited entry edited; citations removed) and `makeindex`
+  (`idxedits.tex`: an entry added, one removed, a page break removed).
+
+**Measured** (fastdev, this machine, loaded): `ssa-edits --fixpoint`
+`bibtex` 7/7 stages and `makeindex` 4/4 identical to plain partex with
+TeX Live's bibtex and makeindex to the fixed point; with
+`PARTEX_SSA_TRIPS=1` too. The uncited entry's edit: trip 1 ran 0 steps,
+BibTeX ran (its file changed), its `.bbl` came out the same: 0 steps
+after it. A field edit: 0 steps in trip 1, BibTeX, then 5 steps (93
+commands) in trip 2.
