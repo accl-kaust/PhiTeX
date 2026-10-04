@@ -1294,7 +1294,15 @@ fn run_ssa(host: native::NativeHost, params: Params, command_line: &[u8]) -> i32
     // (one rebuild after each line's command)
     let lines: Vec<&str> = rebuild.as_deref().unwrap_or_default().lines().collect();
     for (n, cmd) in lines.iter().enumerate() {
-        match rebuild_ssa(&mut tex, &mut linker, &mut between, trips, n + 1, Some(cmd)) {
+        match rebuild_ssa(
+            &mut tex,
+            &mut linker,
+            &mut between,
+            native.as_ref(),
+            trips,
+            n + 1,
+            Some(cmd),
+        ) {
             Ok(Some(h)) => history = h,
             Ok(None) => {}
             Err(code) => return code,
@@ -1311,6 +1319,7 @@ fn run_ssa(host: native::NativeHost, params: Params, command_line: &[u8]) -> i32
             &mut tex,
             &mut linker,
             &mut between,
+            native.as_ref(),
             trips,
             lines.len() + 1,
             None,
@@ -1360,6 +1369,7 @@ fn rebuild_ssa(
     tex: &mut Tex<native::NativeHost, partex_core::ssa::SsaTracker>,
     linker: &mut SsaLinker,
     between: &mut Between,
+    native: Option<&partex_core::ssa::NativeTools>,
     trips: usize,
     n: usize,
     cmd: Option<&str>,
@@ -1397,11 +1407,10 @@ fn rebuild_ssa(
         .and_then(|v| v.trim().parse::<usize>().ok())
         .filter(|&k| k >= 1);
     let idle = std::env::var("PARTEX_SSA_IDLE_SETTLE").is_ok_and(|v| v == "1");
-    let native = ssa_native();
     let mut t = partex_core::ssa::Trips {
         max: key_trips.unwrap_or(trips),
         tools: &mut tools,
-        native: native.as_ref(),
+        native,
         clock: Some(clock_ns),
     };
     let rr = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -1426,7 +1435,7 @@ fn rebuild_ssa(
         let mut t = partex_core::ssa::Trips {
             max: trips,
             tools: &mut tools,
-            native: native.as_ref(),
+            native,
             clock: Some(clock_ns),
         };
         let s = partex_core::ssa::settle(tex, trace, apply, &mut t, 0, 0);
@@ -1664,7 +1673,9 @@ fn clock_ns() -> u64 {
 /// 3.7, "Outside tools are nodes"), with their `texmf.cnf` settings;
 /// `None` with `PARTEX_SSA_TOOLS=0` (none run, as a host without them) or
 /// `PARTEX_SSA_TOOLS=outside` (run as outside tools between the trips,
-/// [`ssa_tools`]).
+/// [`ssa_tools`]). Made once, for the cold build and every rebuild after
+/// it: its kpathsea instance reads TeX Live's `ls-R` databases, 25-30 ms
+/// that each keystroke paid when every rebuild made it again.
 fn ssa_native() -> Option<partex_core::ssa::NativeTools> {
     if std::env::var("PARTEX_SSA_TOOLS").is_ok_and(|v| v == "0" || v == "outside") {
         return None;

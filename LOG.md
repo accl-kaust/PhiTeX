@@ -13118,3 +13118,29 @@ e587cb2): a word changed, 3 edits: the link 8.0–9.2 → 5.7–7.3 ms, 2 of
 resolved again. Outputs byte-identical to e587cb2's after the edits. (On
 e587cb2 a thesis rebuild itself is 31 ms for a space and 112–120 ms for a
 word, where 24f149a's was 7 ms for a space: not this branch's.)
+
+## 2026-10-04 — A keystroke's rebuild no longer reads kpathsea's databases (branch `editslow`)
+
+**Symptom.** On the thesis an SSA rebuild for one keystroke took 31 ms
+for a space and 112–120 ms for a word on main, where 24f149a took 7 ms
+for a space. The steps that ran were the same: 5 steps (171 commands)
+for a space, 6 (203) for a word, with trip 1 about the same as on
+24f149a (6.9 and 47 ms). The time went outside the trips.
+
+**Cause.** Since nativebib (`f2fa90b`, from `d5ce1c3`: BibTeX is a node
+of the build), `rebuild_ssa` called `ssa_native()` on every rebuild.
+That makes a new kpathsea instance for `bibtex::options`, which reads
+TeX Live's `ls-R` databases and hashes them. perf over 60 keystrokes
+(`-p` after the cold build): `Kpse::cnf_get`/`init_db` 10.9%, its
+`HashMap` 8.6% and the reads' syscalls about 8%, so 25–30 ms per rebuild
+whatever its steps.
+
+**Fix.** The CLI makes the build's `NativeTools` once, for the cold
+build's settle, and passes them to every rebuild and idle settle.
+
+**Measured** (fastdev, this machine, thesis, KEY_TRIPS=1 with
+IDLE_SETTLE=1, so "the rebuild" includes the keystroke's own link, about
+5 ms): a space 37.9 → 13.9 ms (trip 1 6.9 ms), a word 88 → 55 ms (trip
+1 47 ms). The rest of a word's trip 1 is the page step run again, which
+re-encodes the page's PNG figures (`png::Idat::row` and `inflate`, 33%
+of the profile). That cost was already there on 24f149a.
