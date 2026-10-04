@@ -13278,3 +13278,51 @@ back. Both paths run, and every stage is identical to plain partex.
   ms on 5bed2b1. About 563 chunks are resolved again there: every chunk
   after the new object.
 - The PDF after the edits is byte-identical to before.
+
+## 2026-10-04 — A cascade meets the old steps past its look-ahead, SyncTeX tags apart (branch `incl66`)
+
+**Symptom** (#66). On pgfsub (`bench/inputs/pgfsub.tex`: four chapters of the
+PGF manual by `\includeonly`), taking `pgfmanual-en-tikz-arrows` out of the
+`\includeonly` list made the rebuild run for more than 18 minutes. The cold
+build takes 75 s. The process sat in `pdf_init_font`'s walk of the font
+list.
+
+**Cause.** With the chapter left out, the `\include` step runs again and
+reads only the chapter's `.aux`. The steps after it are new, and none of
+them met an old step again. There were two reasons:
+- `meet` looks at the next 64 old steps (`LOOK_AHEAD`), and the left-out
+  chapter is thousands of steps.
+- `same_place` compares the files' SyncTeX tags (`AlphaFile::synctex_tag`).
+  pdfTeX numbers every opened file whether SyncTeX is on or not, so one
+  file fewer numbers every later file one lower. No new step's end was
+  then at an old step's place.
+
+The cascade never went cold either. `commands_after` counts the old
+chapter's steps, so the rest of the job, which is cheaper now, never
+cost more. Every new step ran with the old later steps' definitions in
+the arrays, and each run that read one was dropped and placed. One of
+those stale runs pushed a font's object onto a list it was already on
+(fixed since by `objs_whole` on main).
+
+**Fix.**
+- When none of the next `LOOK_AHEAD` old steps is where a run ended,
+  `meet_far` looks up every old step after it by where each ended (a
+  `place_key` index, made once a cascade needs it). The first one at the
+  same place in the fold's order is met, and the steps between are passed
+  over.
+- `same_file` leaves the SyncTeX tags out. `same_input` compares them
+  (`same_tags`), and only while SyncTeX is on.
+
+**Measured** (pgfsub, native, fastdev, on 1cd7f67): the exclude rebuild
+finishes in 81 s, in 3 trips (5574 + 2852 + 94 steps, 19.6M commands).
+The cold build takes 65 s and 39M commands. The `.aux` files match plain
+partex.
+
+**Still open:**
+- The PDF's `/F` numbers come out 2 low. Fonts first loaded by the passed-over
+  chapter's steps lose their `FontLoad`.
+- Including the chapter again leaves `pgfsub.aux` stopping at
+  `\@input{pgfmanual-en-tikz-arrows.aux}`.
+- The exclude rebuild costs more than the cold build.
+
+`ssa-edits --fixpoint`: 30/30.
