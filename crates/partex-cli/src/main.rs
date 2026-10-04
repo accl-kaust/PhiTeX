@@ -1219,6 +1219,7 @@ fn run_ssa(host: native::NativeHost, params: Params, command_line: &[u8]) -> i32
     }
     let mut linker = SsaLinker::default();
     let lr = linker.link(&mut tex);
+    linker.write_produced(&mut tex);
     side_files_write(&mut tex);
     ready_for_rebuilds(&tex, rebuild.is_some());
     eprintln!(
@@ -1425,6 +1426,7 @@ fn rebuild_ssa(
         return Ok(None);
     }
     let lr = linker.link(tex);
+    linker.write_produced(tex);
     side_files_write(tex);
     let link_ms = lr.link_ms;
     eprintln!("partex: ssa rebuild {n}: link: {}", lr.how);
@@ -1781,6 +1783,9 @@ struct SsaLinker {
     /// The host's count of files opened at the last link: a file opened
     /// since was made anew by its open (`NativeHost::opened_after`).
     opened: u64,
+    /// The streams producers outside the steps defined, as last written
+    /// (`partex_core::ssa::define_stream`).
+    produced: std::collections::BTreeMap<Vec<u8>, u128>,
 }
 
 /// What a link cost, for the reports.
@@ -1803,6 +1808,27 @@ struct Written {
 }
 
 impl SsaLinker {
+    /// Write the streams producers outside the steps defined whose bytes
+    /// changed since they were last written (DESIGN 3.7, "Files are a
+    /// view": the link writes every file the build holds).
+    fn write_produced(&mut self, tex: &mut Tex<native::NativeHost, partex_core::ssa::SsaTracker>) {
+        use partex_core::host::Host;
+        for (name, bytes) in partex_core::ssa::produced_streams(tex) {
+            let Some(bytes) = bytes else { continue };
+            let v = partex_core::StableHasher::of(&bytes[..]);
+            if self.produced.get(&name) == Some(&v) {
+                continue;
+            }
+            let host = tex.host_mut();
+            if let Some((w, written)) = host.open_write(&name, partex_core::host::FileKind::Other) {
+                host.write(w, &bytes);
+                host.close(w);
+                host.note_written(&written);
+            }
+            self.produced.insert(name, v);
+        }
+    }
+
     /// Link `tex`'s files from its steps' effects and write them: each
     /// file by the name it was opened with (the last open of a name
     /// wins), the terminal's text, the diagnostics. What it cost, for the

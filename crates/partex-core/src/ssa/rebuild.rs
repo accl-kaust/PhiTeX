@@ -84,6 +84,10 @@ pub(crate) struct Steps {
     loaders: BTreeMap<u32, BTreeSet<StepId>>,
     /// The names the job stores (the load ids of their addresses).
     stored: BTreeSet<u32>,
+    /// The names a producer outside the steps defines ([`define_stream`]:
+    /// a tool's output, a node's), with their bytes: stored names no step
+    /// opens, whose φ is the value given.
+    produced: BTreeMap<u32, Option<Arc<[u8]>>>,
     /// The loads some step read whole (`\pdffilesize`, `\pdfmdfivesum`,
     /// an image, a font's file), not by lines: a rebuild compares their
     /// contents, not only the lines read of them.
@@ -2007,7 +2011,7 @@ pub fn rebuild<H: Host>(tex: &mut Tex<H, SsaTracker>, trace: bool, apply: bool) 
         // read of them after)
         // (the stored names whose files are as the build's link left them,
         // with the build's values of them)
-        let (own, own_phi): (BTreeSet<u32>, Vec<(u32, Option<Arc<[u8]>>)>) = if next.is_none() {
+        let (own, own_phi): (BTreeSet<u32>, Vec<(u32, Stream)>) = if next.is_none() {
             let names: Vec<(u32, Vec<u8>)> = {
                 let r = tex.tracker.rec.borrow();
                 let s = &r.st.steps;
@@ -2596,6 +2600,55 @@ pub fn rebuild<H: Host>(tex: &mut Tex<H, SsaTracker>, trace: bool, apply: bool) 
         }
     }
     rep
+}
+
+/// A stream's bytes, or none (no file).
+pub type Stream = Option<Arc<[u8]>>;
+
+/// A producer outside the steps (a tool between trips, a node that makes
+/// a stream: DESIGN 3.7, "Files are a view") defines stream `name` as
+/// `bytes` (`None`: no file). Loads of `name` read it as they read a
+/// stored name's φ: from the next trip, or the next rebuild, on, and
+/// only its loads whose value differs run again (`Steps::phi_seeds`); the
+/// link writes it ([`produced_streams`]). Whether its value changed.
+pub fn define_stream<H: Host>(
+    tex: &Tex<H, SsaTracker>,
+    name: &[u8],
+    bytes: Option<Arc<[u8]>>,
+) -> bool {
+    let mut r = tex.tracker.rec.borrow_mut();
+    let rr = &mut *r;
+    let (id, fresh) = super::Recorder::intern(&mut rr.st.loads_ix, rr.st.loads.len(), name);
+    if fresh {
+        rr.st
+            .loads
+            .push((name.to_vec(), Version::ABSENT, FileKind::Tex));
+    }
+    let s = &mut rr.st.steps;
+    let same = s.produced.get(&id).is_some_and(|was| match (was, &bytes) {
+        (Some(a), Some(b)) => a[..] == b[..],
+        (None, None) => true,
+        _ => false,
+    });
+    s.stored.insert(id);
+    s.produced.insert(id, bytes.clone());
+    s.last_phi.insert(id, bytes.clone());
+    if let Some(phi) = s.phi.as_mut() {
+        phi.insert(id, bytes);
+    }
+    !same
+}
+
+/// The streams producers outside the steps defined ([`define_stream`]),
+/// by name, for the link to write.
+#[must_use]
+pub fn produced_streams<H: Host>(tex: &Tex<H, SsaTracker>) -> Vec<(Vec<u8>, Stream)> {
+    let r = tex.tracker.rec.borrow();
+    r.st.steps
+        .produced
+        .iter()
+        .filter_map(|(&id, v)| Some((r.st.loads.get(id as usize)?.0.clone(), v.clone())))
+        .collect()
 }
 
 /// The steps a stopped rebuild left to run (DESIGN 3.7, "A rebuild

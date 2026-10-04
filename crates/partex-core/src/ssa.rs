@@ -48,8 +48,8 @@ mod view;
 
 pub(crate) use rebuild::{Edits, edits_from};
 pub use rebuild::{
-    RebuildReport, RerunCheck, Trips, pending, prepare_rebuilds, rebuild, rebuild_log,
-    rebuild_trips, rerun_check, settle,
+    RebuildReport, RerunCheck, Trips, define_stream, pending, prepare_rebuilds, produced_streams,
+    rebuild, rebuild_log, rebuild_trips, rerun_check, settle,
 };
 pub use view::{dag, step_trace, view};
 

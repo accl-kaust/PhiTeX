@@ -123,7 +123,12 @@ pub trait Host {
     /// build's link last wrote it (by a user, not by the build): an SSA
     /// rebuild reads such a file's new contents as an edit; any other is
     /// the build's own, and its value is the one the build holds (DESIGN
-    /// 3.7, "Files are a view"). The default: edited (read it again).
+    /// 3.7, "Files are a view"). The default, for a host that does not
+    /// know who last wrote a file: edited, so the rebuild reads the file
+    /// again as before, and its user's real edits come through the
+    /// host's normal edit path (`read_file`, [`Host::unchanged`]); since
+    /// an SSA build writes no output before its link, what it reads then
+    /// is the link's own write or the user's.
     fn output_edited(&mut self, name: &[u8]) -> bool {
         let _ = name;
         true

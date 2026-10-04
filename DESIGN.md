@@ -676,6 +676,11 @@ template, which a compiled backend exploits.
     its link wrote): a user's edit of an `.aux` is an edit as before; a
     file another process truncated is read as an edit too, and the build
     converges from it.
+  - *A producer outside the steps* (a tool between trips, a node that
+    makes a stream) defines a named stream's bytes with
+    `ssa::define_stream`: a stored name no step opens, whose φ is the
+    value given, read by loads as a job-written stream is, and written by
+    the link (`ssa::produced_streams`).
 **Trips, as built** (`ssa/rebuild.rs`, `rebuild_trips` and `settle`):
 - *A build is a sequence of trips.* Trip 1 runs what the edit reaches
   (3.15, "A rebuild"); a cold build's trip 1 is the whole job. A store

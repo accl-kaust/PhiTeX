@@ -12634,3 +12634,11 @@ afterwards; now it is the last link's 1,243 bytes, unchanged.
 `garbled` (`reopen.tex`'s edits, the SSA side's `.aux`, `.toc`, `.out`
 cut to their first line before each rebuild): identical, the cut files
 read as edits (206 steps a stage, the build converging from them).
+
+The producer API for streams made outside the steps (BibTeX's, makeindex's
+or a native node's output): `ssa::define_stream(name, bytes)` makes the
+name a stored name no step opens, its φ the bytes given (in the running
+trip's φ too), read by loads like a job-written stream; the CLI's link
+writes each produced stream whose bytes changed (`write_produced`).
+`Trips.tools` is unchanged: the native BibTeX branch builds on this.
+
