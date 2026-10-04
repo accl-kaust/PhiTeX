@@ -12574,3 +12574,32 @@ because hash slots are not placed, and printed `\fa Second.` where pdfTeX
 prints `\fb Second.`. The fix: the font identifier region of the hash
 (`FONT_ID_BASE..UNDEFINED_CONTROL_SEQUENCE`) is positioned, so it is
 placed and checked like eqtb.
+
+## 2026-10-04 — DVI font numbers as the final run makes them (agent offsets)
+
+The PDF's `/F` numbers became the link's (above), but DVI's still were
+each font's place in the engine's table, which keeps a font only an
+older trip loaded. A DVI font number cannot be a relocation: `fnt_num_k`
+is one byte below 64 and `fnt1 k` is two, and the movement optimization
+(§611) depends on byte positions. So the ship asks the tracker for the
+number instead (`Tracker::font_number`, `Tex::dvi_font_number`): the
+font's place among the fonts made by now. Those are the format's fonts in
+the table's order (the null font first), then the run's by their
+makers' places in program order and the count at which each was made.
+The answer is cached per step run and count of fonts made. A second bug
+showed with the numbers no longer equal to the slots: the page's "font
+already listed" flags were cleared by number and set by slot. They are
+now cleared whole after each page.
+
+Repro, now the edit harness's `fontnum` case (`fontnum.tex`, DVI, not
+seeded). A font that only the first trip loads (the aux defines the
+name the test looks for), then a font loaded after it. Base f3e2971
+writes `fntdef1 30` where pdfTeX writes 31 (base 9f13c82 too); the fix
+matches. The small BibTeX document in DVI (`\pdfoutput=0`) converges
+to the oracle's DVI byte for byte, and its log differs only in the
+masked memory statistics.
+
+What stays: a ship not run again after an earlier step stops loading
+a font keeps the numbers it had. The number is not a read the rebuild
+checks (machine mode reads the whole order). In the cases here the
+ship runs again anyway, because its page changed.

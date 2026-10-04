@@ -1,0 +1,9 @@
+\pdfoutput=0
+\documentclass{article}
+\begin{document}
+\makeatletter
+First: \ifcsname zz@a\endcsname defined\else{\font\fx=cmbx12 \fx ?}\fi.
+
+Second: {\font\fy=cmsl12 \fy slanted text}.
+\immediate\write\@auxout{\string\gdef\string\zz@a{1}}
+\end{document}

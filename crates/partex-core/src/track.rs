@@ -469,6 +469,14 @@ pub trait Tracker {
     fn font_visible(&self, _f: i32) -> bool {
         true
     }
+    /// Font `f`'s number as tex.web gives it (§576: its place among the
+    /// fonts loaded, the null font 0), counting only the fonts the program
+    /// has made by now, in program order, if the tracker knows (`None`:
+    /// its place in the table). `loaded` gives the table's fonts in the
+    /// order they were loaded (the null font first).
+    fn font_number(&self, _f: i32, _loaded: &dyn Fn() -> alloc::vec::Vec<i32>) -> Option<i32> {
+        None
+    }
     /// Whether font `f` is the newest the program has made by now (§579:
     /// only it may grow its parameters), if the tracker knows (`None`:
     /// the table's last loaded font is).
