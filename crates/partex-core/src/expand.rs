@@ -226,9 +226,11 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         let first = self.first;
         let mut j = first;
         for &t in name {
-            if j >= self.max_buf_stack {
-                self.max_buf_stack = j + 1;
-                if self.max_buf_stack == crate::input::ux(self.params.buf_size) {
+            // (the size tested apart from the statistic, which a dropped
+            // run leaves at its highest)
+            if j >= self.max_buf_stack || j + 1 >= crate::input::ux(self.params.buf_size) {
+                self.max_buf_stack = self.max_buf_stack.max(j + 1);
+                if j + 1 >= crate::input::ux(self.params.buf_size) {
                     return self.overflow(b"buffer size", self.params.buf_size);
                 }
             }
@@ -713,9 +715,13 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         self.cur_input.loc = loc;
         if n > 0 {
             let n = i32::try_from(n).unwrap_or(0);
-            if self.param_ptr + n > self.max_param_stack {
-                self.max_param_stack = self.param_ptr + n;
-                if self.max_param_stack > self.params.param_size {
+            // (the size tested apart from the statistic, which a dropped
+            // run leaves at its deepest)
+            if self.param_ptr + n > self.max_param_stack
+                || self.param_ptr + n > self.params.param_size
+            {
+                self.max_param_stack = self.max_param_stack.max(self.param_ptr + n);
+                if self.param_ptr + n > self.params.param_size {
                     return self.overflow(b"parameter stack size", self.params.param_size);
                 }
             }

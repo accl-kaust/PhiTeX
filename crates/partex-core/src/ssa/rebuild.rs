@@ -191,7 +191,7 @@ pub(super) fn read_later(rr: &mut Recorder) -> bool {
         let fold = &rr.rt.fold;
         for a in rr.rt.open_step_reads_from(w.scanned) {
             w.scanned += 1;
-            if positioned(a) && !w.set.contains(a) && later(fold, a, w.key) {
+            if checked(a) && !w.set.contains(&placed_as(a)) && later(fold, a, w.key) {
                 w.later = true;
                 break;
             }
@@ -1365,6 +1365,24 @@ pub(super) fn positioned(a: &Slot) -> bool {
             .iter()
             .any(|&k| a.1 == i64::from(k)),
         _ => false,
+    }
+}
+
+/// Whether a run's read of `a` is checked against the definitions
+/// reaching it: a positioned slot's, or a meaning's class
+/// ([`Fam::Class`]), whose value the meaning holds ([`placed_as`]).
+fn checked(a: &Slot) -> bool {
+    positioned(a) || a.0 == Fam::Class
+}
+
+/// The slot placed for a read of `a`: a meaning's class
+/// ([`Fam::Class`]) is the meaning's (`eqtb[p]`, which a rebuild puts
+/// back, the class with it); any other slot itself.
+fn placed_as(a: &Slot) -> Slot {
+    if a.0 == Fam::Class {
+        Slot(Fam::Eqtb, a.1)
+    } else {
+        *a
     }
 }
 
@@ -3272,8 +3290,8 @@ fn run_step<H: Host>(
                 .flat_map(|&p| &fold.steps[p as usize].reads)
                 .chain(&dirty.missed)
                 .chain(written)
-                .filter(|a| positioned(a))
-                .copied()
+                .filter(|a| checked(a))
+                .map(placed_as)
                 .collect()
         };
         if predict.len() > 1 || !writes.is_empty() || !dirty.missed.is_empty() {
@@ -3441,13 +3459,14 @@ fn run_step<H: Host>(
                 } else {
                     Vec::new()
                 };
-                let mut m: Vec<Slot> =
-                    r.rt.open_step_reads()
-                        .chain(saved.iter())
-                        .inspect(|_| n += 1)
-                        .filter(|a| positioned(a) && !set.contains(*a) && later(fold, a, key))
-                        .copied()
-                        .collect();
+                let mut m: Vec<Slot> = r
+                    .rt
+                    .open_step_reads()
+                    .chain(saved.iter())
+                    .inspect(|_| n += 1)
+                    .filter(|a| checked(a) && !set.contains(&placed_as(a)) && later(fold, a, key))
+                    .copied()
+                    .collect();
                 m.sort_unstable();
                 m.dedup();
                 m
@@ -3543,7 +3562,9 @@ fn run_step<H: Host>(
             )
         };
         put(tex, &vals);
-        next = miss;
+        next = miss.iter().map(placed_as).collect();
+        next.sort_unstable();
+        next.dedup();
     };
     // the step ends: its definitions replace the old ones
     let new = {

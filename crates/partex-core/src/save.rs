@@ -227,9 +227,11 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             crate::params::Flavor::Tex => 6,
             crate::params::Flavor::PdfTex => 7,
         };
-        if self.save_ptr() > self.max_save_stack {
-            self.max_save_stack = self.save_ptr();
-            if self.max_save_stack > self.params.save_size - room {
+        // (the size tested apart from the statistic, which a dropped run
+        // leaves at its deepest)
+        if self.save_ptr() > self.max_save_stack || self.save_ptr() > self.params.save_size - room {
+            self.max_save_stack = self.max_save_stack.max(self.save_ptr());
+            if self.save_ptr() > self.params.save_size - room {
                 return self.overflow(b"save size", self.params.save_size);
             }
         }

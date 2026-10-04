@@ -734,7 +734,9 @@ impl<H: Host, T: Tracker> Tex<H, T> {
     /// §321: `push_input`: enter a new input level, save the old.
     #[inline]
     pub(crate) fn push_input(&mut self) -> Result<(), Jump> {
-        if self.input_ptr > self.max_in_stack {
+        // (the size tested apart from the statistic: a dropped run leaves
+        // `max_in_stack` at its deepest, `push_input_deeper`)
+        if self.input_ptr > self.max_in_stack || self.input_ptr >= ux(self.params.stack_size) {
             return self.push_input_deeper();
         }
         self.push_input_now();

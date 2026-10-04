@@ -504,9 +504,12 @@ impl<H: Host, T: Tracker> Tex<H, T> {
     /// §216: enter a new semantic level, saving the old.
     pub(crate) fn push_nest(&mut self) -> Result<(), Jump> {
         let nest_ptr = self.nest_ptr();
-        if nest_ptr > self.max_nest_stack {
-            self.max_nest_stack = nest_ptr;
-            if nest_ptr == usize::try_from(self.params.nest_size).unwrap_or(0) {
+        // (the size tested apart from the statistic, which a dropped run
+        // leaves at its deepest)
+        let size = usize::try_from(self.params.nest_size).unwrap_or(0);
+        if nest_ptr > self.max_nest_stack || nest_ptr >= size {
+            self.max_nest_stack = self.max_nest_stack.max(nest_ptr);
+            if nest_ptr >= size {
                 let n = self.params.nest_size;
                 return self.overflow(b"semantic nest size", n);
             }
