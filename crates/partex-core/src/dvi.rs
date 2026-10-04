@@ -1108,6 +1108,12 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         let Some(ran) = self.host.system(cmd, &inputs) else {
             return;
         };
+        if !ran.stdout.is_empty() {
+            if T::VALUES {
+                self.tracker.output(crate::track::Output::Term, &ran.stdout);
+            }
+            self.out_term(&ran.stdout);
+        }
         if T::VALUES {
             for (name, contents) in &ran.wrote {
                 self.tracker.command_wrote(name, contents);

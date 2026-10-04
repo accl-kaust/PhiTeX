@@ -93,6 +93,11 @@ pub struct Ran {
     pub wrote: Vec<(Vec<u8>, Arc<[u8]>)>,
     /// The files it removed, by name as in `wrote`.
     pub removed: Vec<Vec<u8>>,
+    /// What it wrote to its standard output: the engine puts it on the
+    /// terminal at once, before what TeX has not flushed yet, as the
+    /// child of pdfTeX's `system` writes to the terminal past pdfTeX's
+    /// stdio buffer.
+    pub stdout: Vec<u8>,
 }
 
 /// All effects of the engine. Implementations must be deterministic for a

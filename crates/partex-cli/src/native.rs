@@ -802,8 +802,13 @@ impl Host for NativeHost {
         if let Some(d) = &self.output_dir {
             cmd.env("TEXMF_OUTPUT_DIRECTORY", std::ffi::OsStr::from_bytes(d));
         }
-        // (`system`'s status: the shell's own 127 if it could not start)
-        let status = cmd.status().map_or(127 << 8, ExitStatusExt::into_raw);
+        // (`system`'s status: the shell's own 127 if it could not start;
+        // its standard output goes to the terminal through the engine)
+        let (status, stdout) = cmd
+            .stdin(std::process::Stdio::inherit())
+            .stderr(std::process::Stdio::inherit())
+            .output()
+            .map_or((127 << 8, Vec::new()), |o| (o.status.into_raw(), o.stdout));
         if status != 0 {
             eprintln!("system returned with code {status}");
         }
@@ -844,6 +849,7 @@ impl Host for NativeHost {
             status,
             wrote,
             removed,
+            stdout,
         })
     }
 

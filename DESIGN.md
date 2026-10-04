@@ -648,7 +648,11 @@ template, which a compiled backend exploits.
   The log says `runsystem(CMD)...executed.`, `...executed safely
   (allowed).`, `...disabled (restricted).`, `...disabled.` or
   `...quotation error in system command.`, whatever the status, as
-  pdfTeX's does; a status not 0 goes to the standard error. The host
+  pdfTeX's does; a status not 0 goes to the standard error. The
+  command's standard output is handed back and put on the terminal at
+  once, before what TeX has buffered and not yet flushed (`term_buf`,
+  pdfTeX's stdio buffer), where pdfTeX's child writes it: an effect like
+  any terminal output, so a linked or replayed build keeps its place. The host
   only runs the command it is handed: the native host with `/bin/sh -c`
   and kpathsea's variables in the environment (`SELFAUTOLOC`, by which
   latexminted's `latexrestricted` finds TeX Live; `TEXMF_OUTPUT_DIRECTORY`
