@@ -429,6 +429,9 @@ impl<H: Host, T: Tracker> Tex<H, T> {
     /// it is unacceptable.
     pub(crate) fn load_fmt_file(&mut self, data: &[u8]) -> bool {
         let loaded = self.undump(data);
+        // (the format's fonts are numbered by the table: the run's are made
+        // after them)
+        self.fonts.count = self.font_ptr;
         // (the tables and the token lists were stored wholesale, past their
         // accessors: their versions, as the accessors make them at a write)
         self.version_tables();

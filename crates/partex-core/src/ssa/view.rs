@@ -831,6 +831,7 @@ fn slot_name<H: Host>(names: &mut Names<'_, H>, st: &super::RecState, a: Slot) -
                 font::SKEW_CHAR => String::from("skewchar"),
                 font::EXPAND => String::from("expand"),
                 font::GLUE => String::from("glue"),
+                font::NUMBER => String::from("number"),
                 k if k >= font::CODES => format!("code{}", k - font::CODES),
                 k => format!("field{k}"),
             };
@@ -1070,6 +1071,7 @@ fn scalar_name(k: i64) -> String {
         EPOCH_S => "epoch_s",
         EPOCH_US => "epoch_us",
         GLUE_LINEAGE => "glue_lineage",
+        FONT_COUNT => "font_count",
         HPACK_RESULT => "hpack_result",
         VPACK_RESULT => "vpack_result",
         LINE_BREAK_RESULT => "line_break_result",

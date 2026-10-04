@@ -171,6 +171,14 @@ FATAL_EDITS = [("Hello world.", "Hello there."), ("Hello there.", "Hello world."
 # the fonts the final trip loads (`Tracker::font_number`); then a word and
 # back
 FONTNUM_EDITS = [("slanted text", "slanted words"), ("slanted words", "slanted text")]
+# fontdrop.tex (DVI): a font loaded and not used on the first page,
+# taken away and put back: the second page, unchanged, uses a font
+# loaded after it, whose DVI number moves (its maker makes it again,
+# `FontData::num`, and the ship reads it)
+FONTDROP_EDITS = [
+    ("text.\\font\\fb=cmbx12", "text."),
+    ("First page text.\n", "First page text.\\font\\fb=cmbx12\n"),
+]
 FONTID_EDITS = [("text here", "text HERE"), ("text HERE", "text here")]
 NAMES_EDITS = [
     ("Second paragraph.", "Second paragraph, edited."),
@@ -367,6 +375,7 @@ def all_cases():
         latex("names", "names.tex", "pdflatex", NAMES_EDITS, seed=0),
         latex("fontid", "fontid.tex", "pdflatex", FONTID_EDITS, seed=0),
         latex("fontnum", "fontnum.tex", "pdflatex", FONTNUM_EDITS, seed=0),
+        latex("fontdrop", "fontdrop.tex", "pdflatex", FONTDROP_EDITS),
         Case(
             "inputs",
             {"edits.tex": "inputs.tex", **{f: f for f in ("inputs-sub.tex", "inputs-probe.tex")}},

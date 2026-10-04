@@ -1537,10 +1537,6 @@ pub struct SsaTracker {
     /// How many fonts were made, counting: each made font's place among a
     /// step run's ([`Tracker::font_newest`]).
     fonts_made: core::cell::Cell<u64>,
-    /// The fonts' numbers as the program has made them by now
-    /// ([`Tracker::font_number`]), for the step run and the count of
-    /// fonts made they were counted at.
-    font_numbers: RefCell<Option<FontNumbers>>,
     /// The open step's copies of its entry values to the save stack
     /// (value numbers, symbolically): each eqtb slot a local assignment
     /// saved before the step wrote it, with its group level, its entry on
@@ -1700,7 +1696,6 @@ impl SsaTracker {
             cancel: core::cell::Cell::new(None),
             fonts_by: RefCell::new(Vec::new()),
             fonts_made: core::cell::Cell::new(0),
-            font_numbers: RefCell::new(None),
             entry_saves: RefCell::new(Vec::new()),
             made_at: RefCell::new(Vec::new()),
             made: RefCell::new(Vec::new()),
@@ -2117,10 +2112,6 @@ impl SsaTracker {
     }
 }
 
-/// The fonts' numbers by slot, and the step run and count of fonts made
-/// they were counted at ([`Tracker::font_number`]).
-type FontNumbers = ((partex_ssa::fold::StepId, u64), u64, BTreeMap<i32, i32>);
-
 /// Where a font stands in program order at the open step
 /// ([`font_made_by_now`]).
 enum FontMade {
@@ -2353,46 +2344,6 @@ impl Tracker for SsaTracker {
             .ok()
             .and_then(|i| self.fonts_by.borrow().get(i).copied().flatten());
         !matches!(font_made_by_now(&r, by), FontMade::NotYet)
-    }
-
-    fn font_number(&self, f: i32, loaded: &dyn Fn() -> Vec<i32>) -> Option<i32> {
-        let r = self.rec.try_borrow().ok()?;
-        let at = r.rt.open_step_serial()?;
-        let made = self.fonts_made.get();
-        let mut cache = self.font_numbers.borrow_mut();
-        if !cache.as_ref().is_some_and(|c| c.0 == at && c.1 == made) {
-            // (the fonts made by now: the format's, in the table's order,
-            // then the run's by their makers' places in program order and
-            // when they were made; a font only an older run made has none)
-            let v = self.fonts_by.borrow();
-            let mut before = Vec::new();
-            let mut now = Vec::new();
-            for g in loaded() {
-                let by = usize::try_from(g)
-                    .ok()
-                    .and_then(|i| v.get(i).copied().flatten());
-                // (the null font is 0, whoever made it)
-                if g == 0 {
-                    before.push(g);
-                    continue;
-                }
-                match font_made_by_now(&r, by) {
-                    FontMade::Before => before.push(g),
-                    FontMade::Now(key, n) => now.push(((key, n), g)),
-                    FontMade::NotYet => {}
-                }
-            }
-            now.sort_unstable();
-            drop(v);
-            let numbers = before
-                .into_iter()
-                .chain(now.into_iter().map(|x| x.1))
-                .enumerate()
-                .map(|(k, g)| (g, i32::try_from(k).unwrap_or(i32::MAX)))
-                .collect();
-            *cache = Some((at, made, numbers));
-        }
-        cache.as_ref().and_then(|c| c.2.get(&f).copied())
     }
 
     fn font_newest(&self, f: i32) -> Option<bool> {
@@ -4148,6 +4099,7 @@ fn scalar_get<H: Host, T: Tracker>(t: &Tex<H, T>, k: u16) -> Option<i32> {
         EPOCH_S => t.epoch.0,
         EPOCH_US => t.epoch.1,
         GLUE_LINEAGE => i32::try_from(t.glue_lineage).unwrap_or(i32::MAX),
+        FONT_COUNT => t.fonts.count,
         k if (WRITE_OPEN..WRITE_OPEN + 18).contains(&k) => {
             b(t.write_open[usize::from(k - WRITE_OPEN)])
         }
@@ -4201,6 +4153,7 @@ fn scalar_set<H: Host, T: Tracker>(t: &mut Tex<H, T>, k: u16, v: i32) {
         EPOCH_S => t.epoch.0 = v,
         EPOCH_US => t.epoch.1 = v,
         GLUE_LINEAGE => t.glue_lineage = u64::try_from(v).unwrap_or(0),
+        FONT_COUNT => t.fonts.count = v,
         k if (WRITE_OPEN..WRITE_OPEN + 18).contains(&k) => {
             t.write_open[usize::from(k - WRITE_OPEN)] = v != 0;
         }
