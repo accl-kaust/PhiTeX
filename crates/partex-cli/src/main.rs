@@ -1369,8 +1369,16 @@ fn rebuild_ssa(
     // (in trips until the loads read what the same trip stored, DESIGN
     // 3.7; `PARTEX_SSA_TRIPS=1`: one, a plain pass)
     let mut tools = ssa_tools(between);
+    // (`PARTEX_SSA_KEY_TRIPS=k`: each edit's rebuild runs k trips at most,
+    // as an editor's keystroke would; with `PARTEX_SSA_IDLE_SETTLE=1` a
+    // settle of `trips` trips follows it, as the editor's idle one)
+    let key_trips = std::env::var("PARTEX_SSA_KEY_TRIPS")
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .filter(|&k| k >= 1);
+    let idle = std::env::var("PARTEX_SSA_IDLE_SETTLE").is_ok_and(|v| v == "1");
     let mut t = partex_core::ssa::Trips {
-        max: trips,
+        max: key_trips.unwrap_or(trips),
         tools: &mut tools,
         clock: Some(clock_ns),
     };
@@ -1385,6 +1393,20 @@ fn rebuild_ssa(
             std::panic::resume_unwind(e);
         }
     };
+    if idle && rr.unsupported.is_none() && rr.stopped.is_none() {
+        // (the keystroke's trips first, then the idle settle's)
+        report_trips(&format!("rebuild {n} (keystroke)"), &rr);
+        let mut t = partex_core::ssa::Trips {
+            max: trips,
+            tools: &mut tools,
+            clock: Some(clock_ns),
+        };
+        let s = partex_core::ssa::settle(tex, trace, apply, &mut t, 0, 0);
+        for l in &s.log {
+            eprintln!("partex: ssa rebuild {n} idle settle: {l}");
+        }
+        report_trips(&format!("rebuild {n} idle settle"), &s);
+    }
     for l in &rr.log {
         eprintln!("partex: ssa rebuild {n}: {l}");
     }
