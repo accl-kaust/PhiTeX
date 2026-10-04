@@ -86,6 +86,27 @@ pub trait PageSink {
     fn finish(&mut self, mag: i32) -> Result<Summary, TooLong>;
 }
 
+/// What a command [`Host::system`] ran did.
+#[derive(Clone, Debug, Default)]
+pub struct Ran {
+    /// The status C's `system` returns (web2c prints `system returned with
+    /// code N` on the standard error when it is not 0; the host does).
+    pub status: i32,
+    /// The files the command made or changed, each by the names the job
+    /// would read it by (relative to the output directory, and with
+    /// one, the path to it from the working directory too), with its
+    /// contents. An SSA build stores them, as the step's, so that loads
+    /// read them from the build (DESIGN 3.7, "Commands").
+    pub wrote: Vec<(Vec<u8>, Arc<[u8]>)>,
+    /// The files it removed, by name as in `wrote`.
+    pub removed: Vec<Vec<u8>>,
+    /// What it wrote to its standard output: the engine puts it on the
+    /// terminal at once, before what TeX has not flushed yet, as the
+    /// child of pdfTeX's `system` writes to the terminal past pdfTeX's
+    /// stdio buffer.
+    pub stdout: Vec<u8>,
+}
+
 /// All effects of the engine. Implementations must be deterministic for a
 /// given input tree and `SOURCE_DATE_EPOCH`; the memoization layers rely on it.
 pub trait Host {
@@ -213,7 +234,6 @@ pub trait Host {
     /// reports; nothing TeX prints depends on it).
     fn shipping(&mut self, _count0: i32) {}
 
-    /// `\write18`. Denied unless the host implements it.
     /// A page just written to the DVI file (not called while a
     /// [`PageSink`] has the file). A host that splices outputs keeps it,
     /// to write the page again elsewhere in the file.
@@ -253,7 +273,15 @@ pub trait Host {
         None
     }
 
-    fn shell_escape(&mut self, _command: &[u8]) -> Option<i32> {
+    /// `\write18`'s command, allowed and quoted by the engine (web2c's
+    /// `runsystem`, [`crate::shell`]): run it with the shell and wait, as
+    /// C's `system` does. `inputs` are the job's own files (those it
+    /// wrote with `\openout` and closed) as the build holds them where
+    /// the command runs: a build that ran steps out of order may have left
+    /// other bytes in them, and the command must see these. `None`: this
+    /// host runs no commands. What TeX prints does not depend on the
+    /// answer (pdfTeX's log says `executed` whatever the status).
+    fn system(&mut self, _command: &[u8], _inputs: &[(Vec<u8>, Arc<[u8]>)]) -> Option<Ran> {
         None
     }
 

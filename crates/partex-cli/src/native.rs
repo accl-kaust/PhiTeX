@@ -8,7 +8,7 @@ use std::io::{BufRead, Write};
 
 use partex_core::dviout::{DviWriter, Summary, TooLong};
 use partex_core::pageir::Page;
-use partex_core::{DateTime, FileKind, Host, OpenedFile, PageSink, WriteId};
+use partex_core::{DateTime, FileKind, Host, OpenedFile, PageSink, Ran, WriteId};
 
 use crate::dvithread::DviThread;
 
@@ -438,6 +438,60 @@ fn dir_stamp(p: &[u8]) -> Option<Stamp> {
     ))
 }
 
+/// The stamps of the files under directory `root`, by their paths
+/// relative to it, skipping hidden directories (`.git`) and what is past
+/// 100 000 entries: what a command `\write18` runs may have written.
+fn tree_stamps(root: &[u8]) -> HashMap<Vec<u8>, Stamp> {
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::MetadataExt;
+    let mut out = HashMap::new();
+    let mut todo: Vec<Vec<u8>> = vec![Vec::new()];
+    let mut seen = 0usize;
+    while let Some(rel) = todo.pop() {
+        let dir = if rel.is_empty() {
+            root.to_vec()
+        } else {
+            [root, b"/", &rel].concat()
+        };
+        let Ok(entries) = std::fs::read_dir(path(&dir)) else {
+            continue;
+        };
+        for e in entries.flatten() {
+            seen += 1;
+            if seen > 100_000 {
+                return out;
+            }
+            let name = e.file_name();
+            let name = name.as_bytes();
+            let r = if rel.is_empty() {
+                name.to_vec()
+            } else {
+                [&rel[..], b"/", name].concat()
+            };
+            let Ok(m) = e.metadata() else { continue };
+            if m.is_dir() {
+                if !name.starts_with(b".") {
+                    todo.push(r);
+                }
+            } else if m.is_file() {
+                out.insert(
+                    r,
+                    (
+                        m.size(),
+                        m.mtime(),
+                        m.mtime_nsec(),
+                        m.ctime(),
+                        m.ctime_nsec(),
+                        m.ino(),
+                        m.dev(),
+                    ),
+                );
+            }
+        }
+    }
+    out
+}
+
 /// The stamp of the file at `p`, if it is one (not a directory).
 pub fn stamp(p: &[u8]) -> Option<Stamp> {
     use std::os::unix::fs::MetadataExt;
@@ -784,6 +838,94 @@ impl Host for NativeHost {
 
     fn now(&self) -> DateTime {
         self.clock.start()
+    }
+
+    /// web2c's `runsystem`'s `system`: `/bin/sh -c`, with kpathsea's
+    /// variables in the environment (latexminted's `latexrestricted`
+    /// finds TeX Live by `SELFAUTOLOC`) and `TEXMF_OUTPUT_DIRECTORY` for
+    /// `-output-directory`. The files it made or changed are found by
+    /// comparing the output directory's stamps before and after.
+    fn system(
+        &mut self,
+        command: &[u8],
+        inputs: &[(Vec<u8>, std::sync::Arc<[u8]>)],
+    ) -> Option<Ran> {
+        use std::os::unix::ffi::OsStrExt;
+        use std::os::unix::process::ExitStatusExt;
+        // (the job's files as the build holds them where the command runs)
+        for (name, contents) in inputs {
+            let p = self.in_output_dir(name).unwrap_or_else(|| name.clone());
+            if std::fs::read(path(&p)).ok().as_deref() != Some(&contents[..]) {
+                let _ = std::fs::write(path(&p), &contents[..]);
+            }
+        }
+        let root = self.output_dir.clone().unwrap_or_else(|| b".".to_vec());
+        // (files this host writes, as the DVI thread may while the command
+        // runs, are not the command's)
+        let ours: std::collections::HashSet<Vec<u8>> =
+            self.given.values().map(|(n, _)| n.clone()).collect();
+        let before = tree_stamps(&root);
+        let _ = std::io::stdout().flush();
+        let mut cmd = std::process::Command::new("/bin/sh");
+        cmd.arg("-c").arg(std::ffi::OsStr::from_bytes(command));
+        for (k, v) in self.kpse.exported() {
+            cmd.env(
+                std::ffi::OsStr::from_bytes(k),
+                std::ffi::OsStr::from_bytes(v),
+            );
+        }
+        if let Some(d) = &self.output_dir {
+            cmd.env("TEXMF_OUTPUT_DIRECTORY", std::ffi::OsStr::from_bytes(d));
+        }
+        // (`system`'s status: the shell's own 127 if it could not start;
+        // its standard output goes to the terminal through the engine)
+        let (status, stdout) = cmd
+            .stdin(std::process::Stdio::inherit())
+            .stderr(std::process::Stdio::inherit())
+            .output()
+            .map_or((127 << 8, Vec::new()), |o| (o.status.into_raw(), o.stdout));
+        if status != 0 {
+            eprintln!("system returned with code {status}");
+        }
+        let mut wrote = Vec::new();
+        let after = tree_stamps(&root);
+        // (a file in the output directory is found by its name there, and
+        // by the path to it: `-output-directory=out` gives `x` and `out/x`)
+        let names = |rel: &[u8]| -> Vec<Vec<u8>> {
+            if root == b"." {
+                vec![rel.to_vec()]
+            } else {
+                vec![rel.to_vec(), [&root[..], b"/", rel].concat()]
+            }
+        };
+        let removed = before
+            .keys()
+            .filter(|r| !after.contains_key(*r))
+            .flat_map(|r| names(r))
+            .collect();
+        for (rel, st) in &after {
+            let full = names(rel).pop().unwrap_or_default();
+            if before.get(rel) == Some(st) || ours.contains(&full) || ours.contains(rel) {
+                continue;
+            }
+            if let Some(seen) = &mut self.seen {
+                seen.racy.remove(&full);
+            }
+            if let Ok(c) = std::fs::read(path(&full)) {
+                let c: std::sync::Arc<[u8]> = std::sync::Arc::from(c);
+                wrote.extend(names(rel).into_iter().map(|n| (n, c.clone())));
+            }
+        }
+        // (a lookup made before the command is made again)
+        if let Some(seen) = &mut self.seen {
+            seen.again.clear();
+        }
+        Some(Ran {
+            status,
+            wrote,
+            removed,
+            stdout,
+        })
     }
 
     fn deflate(&mut self, level: i32, data: &[u8]) -> Option<Vec<u8>> {

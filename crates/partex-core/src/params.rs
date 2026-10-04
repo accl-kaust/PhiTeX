@@ -63,6 +63,9 @@ pub struct Params {
     pub shell_escape: bool,
     /// web2c's `restrictedshell` (only commands from `shell_escape_commands`).
     pub restricted_shell: bool,
+    /// web2c's `cmdlist`: `shell_escape_commands` from `texmf.cnf`, the
+    /// commands restricted shell escape runs (`crate::shell`).
+    pub shell_escape_commands: alloc::vec::Vec<alloc::vec::Vec<u8>>,
     /// `-etex` (pdfTeX's `etex_p`): enter e-TeX's extended mode in INITEX
     /// without a `*` on the first line.
     pub etex: bool,
@@ -147,6 +150,7 @@ partex_engine::persist_struct!(Params {
     diagnostics,
     shell_escape,
     restricted_shell,
+    shell_escape_commands,
     etex,
     output_format,
     ini,
@@ -206,6 +210,7 @@ impl Default for Params {
             diagnostics: true,
             shell_escape: false,
             restricted_shell: true,
+            shell_escape_commands: alloc::vec::Vec::new(),
             ini: false,
             dump_name: b"tex".to_vec(),
             version_string: b" (TeX Live 2026)",

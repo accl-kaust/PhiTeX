@@ -70,6 +70,9 @@ pub struct MachineHost {
     /// The fonts' slots by identity, shared by every clone and every run
     /// of the build (`Host::font_slot`).
     fonts: Arc<Mutex<FontSlots>>,
+    /// The output files a command (`\write18`) removed since the job last
+    /// opened them, shared by every clone: the link leaves them removed.
+    removed: Arc<Mutex<BTreeSet<Vec<u8>>>>,
 }
 
 /// Fonts' slots by what they are (`Host::font_slot`): a font keeps its
@@ -315,6 +318,7 @@ impl MachineHost {
                 on: !std::env::var("PARTEX_MACHINE_FONTSLOTS").is_ok_and(|v| v == "0"),
                 ..FontSlots::default()
             })),
+            removed: Arc::default(),
         }
     }
 
@@ -322,6 +326,14 @@ impl MachineHost {
     fn clock(&self) -> Option<Clock> {
         self.clock_read.set();
         self.file(CLOCK).and_then(|b| Clock::parse(&b))
+    }
+
+    /// The output files a command removed since the job last opened them.
+    fn removed_files(&self) -> BTreeSet<Vec<u8>> {
+        self.removed
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 
     fn native(&self) -> std::sync::MutexGuard<'_, NativeHost> {
@@ -435,8 +447,48 @@ impl Host for MachineHost {
         let n = self.native().in_output_dir(&n).unwrap_or(n);
         let id = self.next_id;
         self.next_id += 1;
+        self.removed
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&n);
         self.opened.insert(id, n.clone());
         Some((WriteId(id), n))
+    }
+
+    /// A command, run by the native host over the job's files: this host
+    /// keeps them in memory until the link, so each name's last opened
+    /// file is put on disk first; the files the command removes stay
+    /// removed (DESIGN 3.7, "Commands").
+    fn system(
+        &mut self,
+        command: &[u8],
+        inputs: &[(Vec<u8>, Arc<[u8]>)],
+    ) -> Option<partex_core::Ran> {
+        let mut last: BTreeMap<&[u8], u32> = BTreeMap::new();
+        for (id, name) in &self.opened {
+            last.insert(name, *id);
+        }
+        for (name, id) in last {
+            let bytes = self
+                .written
+                .get(&id)
+                .map(WrittenBuf::to_vec)
+                .unwrap_or_default();
+            let p = crate::native::path(name);
+            if std::fs::read(&p).ok().as_deref() != Some(&bytes[..]) {
+                let _ = std::fs::write(&p, &bytes);
+            }
+        }
+        let ran = self.native().system(command, inputs)?;
+        let mut removed = self
+            .removed
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for n in &ran.removed {
+            removed.insert(self.native().in_output_dir(n).unwrap_or_else(|| n.clone()));
+        }
+        drop(removed);
+        Some(ran)
     }
 
     fn write(&mut self, file: WriteId, bytes: &[u8]) {
@@ -736,7 +788,8 @@ impl Linker {
         let host = fin.tex().host();
         let t_write = Instant::now();
         let (mut bytes_out, mut pdf_bytes) = (0usize, 0usize);
-        for (id, name) in &host.opened {
+        let removed = host.removed_files();
+        for (id, name) in host.opened.iter().filter(|(_, n)| !removed.contains(*n)) {
             let bytes: std::borrow::Cow<'_, [u8]> = match linked.files.get(id) {
                 Some(b) => std::borrow::Cow::Borrowed(b),
                 None => match host.written.get(id) {
@@ -863,8 +916,11 @@ fn link_and_write(fx: &[&[partex_core::effects::Effect]], fin: &Machine) -> i32 
         .filter(|(id, _)| !linked.files.contains_key(id))
         .map(|(id, w)| (*id, w.to_vec()))
         .collect();
+    let removed = host.removed_files();
     for (id, bytes) in linked.files.iter().chain(&written) {
-        if let Some(name) = host.opened.get(id) {
+        if let Some(name) = host.opened.get(id)
+            && !removed.contains(name)
+        {
             let _ = std::fs::write(crate::native::path(name), bytes);
         }
     }
@@ -3127,6 +3183,7 @@ impl partex_core::machine::StoreHost for MachineHost {
             clock_read,
             memo: _,
             fonts: _,
+            removed: _,
         } = self;
         overrides.save(s);
         opened.save(s);
@@ -3185,6 +3242,7 @@ impl partex_core::machine::StoreHost for MachineHost {
             },
             memo: self.memo.clone(),
             fonts: self.fonts.clone(),
+            removed: self.removed.clone(),
         })
     }
 }

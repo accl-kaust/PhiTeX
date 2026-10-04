@@ -3055,6 +3055,78 @@ impl Tracker for SsaTracker {
         }
     }
 
+    fn stores_reaching(&self) -> Vec<(Vec<u8>, alloc::sync::Arc<[u8]>)> {
+        let Ok(r) = self.rec.try_borrow() else {
+            return Vec::new();
+        };
+        let Some(step) = r.rt.open_step_id() else {
+            return Vec::new();
+        };
+        let key = r.rt.fold.steps[step as usize].key;
+        r.st.steps
+            .reaching(&r.rt.fold, key)
+            .into_iter()
+            .filter_map(|(id, v)| Some((r.st.loads.get(id as usize)?.0.clone(), v.into())))
+            .collect()
+    }
+
+    fn command_wrote(&self, name: &[u8], contents: &[u8]) {
+        let Ok(mut r) = self.rec.try_borrow_mut() else {
+            self.lost.set(self.lost.get() + 1);
+            return;
+        };
+        let rr = &mut *r;
+        rr.st.written.insert(name.to_vec());
+        let (id, fresh) = Recorder::intern(&mut rr.st.loads_ix, rr.st.loads.len(), name);
+        if fresh {
+            rr.st
+                .loads
+                .push((name.to_vec(), Version::ABSENT, crate::host::FileKind::Tex));
+        }
+        if !rr.on {
+            return;
+        }
+        // (an open, then each line, as a stream's: the lines end at each
+        // `\n`, a last one without its end kept as a line)
+        let a = Slot(Fam::Load, i64::from(id));
+        rr.flush_output();
+        rr.rt.note_open(&a);
+        rr.st.steps.store_made(id);
+        let body = contents.strip_suffix(b"\n").unwrap_or(contents);
+        if contents.is_empty() {
+            return;
+        }
+        for line in body.split(|&c| c == b'\n') {
+            rr.rt.note_store(&a, SVal::ver(Version::of(line)));
+            rr.st.steps.store_line(id, line);
+        }
+    }
+
+    fn run_doomed(&self) -> bool {
+        self.rec
+            .try_borrow_mut()
+            .is_ok_and(|mut r| rebuild::read_later(&mut r))
+    }
+
+    fn command_removed(&self, name: &[u8]) {
+        let Ok(mut r) = self.rec.try_borrow_mut() else {
+            self.lost.set(self.lost.get() + 1);
+            return;
+        };
+        let rr = &mut *r;
+        // (a name no step loaded or stored is nothing the build reads)
+        let Some(&id) = rr.st.loads_ix.get(name) else {
+            return;
+        };
+        rr.st.written.insert(name.to_vec());
+        if !rr.on {
+            return;
+        }
+        rr.flush_output();
+        rr.rt.note_open(&Slot(Fam::Load, i64::from(id)));
+        rr.st.steps.store_removed(id);
+    }
+
     fn store_line(&self, name: &[u8], line: &[u8]) {
         let Ok(mut r) = self.rec.try_borrow_mut() else {
             self.lost.set(self.lost.get() + 1);
@@ -3970,6 +4042,19 @@ pub fn step_effects_as(rec: &Recorder, raw: bool) -> Vec<(u64, StepEffects)> {
 /// key in program order and its chunks with their versions, or none if it
 /// left the fold (DESIGN 4.3 item 4: the link takes what changed, not
 /// every step's chunks as [`step_effects`] does).
+/// The files the build leaves removed (DESIGN 3.7, "Commands"): each
+/// one a command removed after the job's last open of it. A link that
+/// wrote the job's files removes them again.
+#[must_use]
+pub fn removed_files(rec: &Recorder) -> Vec<Vec<u8>> {
+    rec.st
+        .steps
+        .removed_at_end(&rec.rt.fold)
+        .into_iter()
+        .filter_map(|id| Some(rec.st.loads.get(id as usize)?.0.clone()))
+        .collect()
+}
+
 pub fn take_step_changes(rec: &mut Recorder) -> Vec<crate::effects::StepChunks> {
     resolve_flows(rec);
     let mut ids = core::mem::take(&mut rec.st.steps.fx_changed);

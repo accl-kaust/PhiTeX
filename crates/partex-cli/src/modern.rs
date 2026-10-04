@@ -34,7 +34,7 @@ commands:
 options:
   -o, --output-dir DIR     where the outputs go (TeX's -output-directory)
       --engine NAME        pdflatex (default for LaTeX), pdftex, latex or tex
-      --shell-escape       report \\write18 as enabled (partex runs no commands)
+      --shell-escape       let \\write18 run any command (default: restricted)
       --interactive        TeX's own terminal, stopping at errors (no fixpoint)
   -v, --verbose            show \\message and \\typeout lines (-vv: TeX's terminal)
   -q, --quiet              only problems and the result

@@ -515,6 +515,15 @@ impl Kpse {
         }
     }
 
+    /// The variables kpathsea puts into its process's environment
+    /// (`xputenv`: `SELFAUTOLOC` and the others, `progname`, `engine`),
+    /// which a command TeX runs inherits.
+    pub fn exported(&self) -> impl Iterator<Item = (&[u8], &[u8])> {
+        self.env_overlay
+            .iter()
+            .map(|(k, v)| (k.as_slice(), v.as_slice()))
+    }
+
     /// `getenv`, with kpathsea's own `xputenv` settings first; empty
     /// values count as unset.
     fn getenv(&self, name: &[u8]) -> Option<Bytes> {

@@ -1052,15 +1052,32 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                     .iter()
                     .map(|&c| self.xchr[usize::from(c)])
                     .collect();
-                if cmd.contains(&0) {
+                // (minimal checking: NUL not allowed in the argument
+                // string of `system`, but as its last character it only
+                // ends the string)
+                if cmd.split_last().is_some_and(|(_, init)| init.contains(&0)) {
                     self.print_str(b"clobbered");
                 } else {
-                    match self.host.shell_escape(&cmd) {
-                        Some(-1) => self.print_str(b"quotation error in system command"),
-                        Some(1) => self.print_str(b"executed"),
-                        Some(2) => self.print_str(b"executed safely (allowed)"),
-                        _ => self.print_str(b"disabled (restricted)"),
+                    let cmd = cmd.strip_suffix(&[0]).unwrap_or(&cmd);
+                    // We have the command. See if we're allowed to execute
+                    // it, and report in the log. We don't check the actual
+                    // exit status of the command.
+                    let decision = crate::shell::runsystem(
+                        cmd,
+                        self.params.restricted_shell,
+                        &self.params.shell_escape_commands,
+                    );
+                    if let Some(run) = decision.command() {
+                        self.run_command(run);
                     }
+                    self.print_str(match decision {
+                        crate::shell::Decision::QuotationError => {
+                            b"quotation error in system command"
+                        }
+                        crate::shell::Decision::Restricted => b"disabled (restricted)",
+                        crate::shell::Decision::Any(_) => b"executed",
+                        crate::shell::Decision::Allowed(_) => b"executed safely (allowed)",
+                    });
                 }
             } else {
                 self.print_str(b"disabled"); // `shellenabledp` false
@@ -1072,6 +1089,55 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         }
         self.set_selector(old_setting);
         Ok(())
+    }
+
+    /// Run `\write18`'s command `cmd` (allowed and quoted) through the
+    /// host. In an SSA build (DESIGN 3.7, "Commands") the command reads
+    /// the job's files closed before it, loads of the build's stores that
+    /// it is handed, and each file it made or changed is a store of the
+    /// step.
+    fn run_command(&mut self, cmd: &[u8]) {
+        // (a run that read a definition it was not placed at is dropped
+        // and made again: its command would see the wrong files, and
+        // leave what it wrote)
+        if T::VALUES && self.tracker.run_doomed() {
+            return;
+        }
+        let inputs = if T::VALUES {
+            // (a file still open for writing is not an input: what of it
+            // a command finds on disk is whatever the writer flushed)
+            let open: Vec<alloc::sync::Arc<[u8]>> =
+                (0..16).filter_map(|n| self.streams.out_name(n)).collect();
+            let inputs: Vec<_> = self
+                .tracker
+                .stores_reaching()
+                .into_iter()
+                .filter(|(name, _)| !open.iter().any(|o| o[..] == name[..]))
+                .collect();
+            for (name, contents) in &inputs {
+                self.tracker.load(name, FileKind::Tex, Some(contents));
+            }
+            inputs
+        } else {
+            Vec::new()
+        };
+        let Some(ran) = self.host.system(cmd, &inputs) else {
+            return;
+        };
+        if !ran.stdout.is_empty() {
+            if T::VALUES {
+                self.tracker.output(crate::track::Output::Term, &ran.stdout);
+            }
+            self.out_term(&ran.stdout);
+        }
+        if T::VALUES {
+            for (name, contents) in &ran.wrote {
+                self.tracker.command_wrote(name, contents);
+            }
+            for name in &ran.removed {
+                self.tracker.command_removed(name);
+            }
+        }
     }
 
     /// §1373, §1374: perform an `\openout`, `\write` or `\closeout`
