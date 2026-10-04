@@ -2613,6 +2613,12 @@ pub fn rebuild<H: Host>(tex: &mut Tex<H, SsaTracker>, trace: bool, apply: bool) 
             {
                 go_cold(tex, cur, &mut dirty, &mut rep);
                 after = Some(u64::MAX);
+                // (and it runs to the job's end: the old step's end it was
+                // to meet is gone with the steps after it; a run coming
+                // back to that place, a chapter `\include`d again ending
+                // where its `\include` had ended without it, stopped the
+                // cascade there, and the job's writes after it were lost)
+                target = None;
             }
             let next = {
                 let mut r = tex.tracker.rec.borrow_mut();

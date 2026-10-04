@@ -1,0 +1,13 @@
+% \includeonly edited (the SSA edit harness, case `includeonly`): the
+% long middle chapter left out, then \include'd again. Run again, it is
+% a cascade that goes cold (its new steps cost more than the old ones
+% after it), and it must run to the job's end, though its run comes back
+% to where the \include had ended without the chapter.
+\documentclass{report}
+\includeonly{incl-ch1,incl-big,incl-ch3}
+\begin{document}
+\tableofcontents
+\include{incl-ch1}
+\include{incl-big}
+\include{incl-ch3}
+\end{document}

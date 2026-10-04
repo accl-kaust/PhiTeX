@@ -168,6 +168,13 @@ INPUTS_EDITS = [
 # into a chapter's paragraph, then a letter (the extension's thesis: the
 # chapter's .aux the rebuild serves must be the whole file, never the one
 # line its \\openout began it with); then back
+# includeonly.tex: the long chapter left out of \\includeonly, then put
+# back (#66): the run again of its \\include goes cold, and runs to the
+# job's end
+INCLUDEONLY_EDITS = [
+    ("edits.tex", "incl-ch1,incl-big,incl-ch3", "incl-ch1,incl-ch3"),
+    ("edits.tex", "incl-ch1,incl-ch3", "incl-ch1,incl-big,incl-ch3"),
+]
 INCLUDE_EDITS = [
     ("incl-ch1.tex", "Ch1s2p1 gamma ", "Ch1s2p1  gamma "),
     ("incl-ch1.tex", "Ch1s2p1  gamma ", "Ch1s2p1  gammax "),
@@ -450,6 +457,18 @@ def all_cases():
             trip_steps=trip_steps,
         )
 
+    def includeonly():
+        files = ("incl-ch1.tex", "incl-big.tex", "incl-ch3.tex")
+        return Case(
+            "includeonly",
+            {"edits.tex": "includeonly.tex", **{f: f for f in files}},
+            "pdflatex",
+            [*LATEX_FLAGS, "-fmt=pdflatex", "-output-directory=out", "edits"],
+            INCLUDEONLY_EDITS,
+            outdir="out",
+            seed=2,
+        )
+
     def include(name="include", env=None):
         return Case(
             name,
@@ -502,6 +521,7 @@ def all_cases():
             env={"PARTEX_LINK_CHECK": "1"},
         ),
         include(),
+        includeonly(),
         # (as an editor types: each edit's rebuild one trip, linked and its
         # files written, then the idle settle's trips, linked again)
         include("include_keys", {"PARTEX_SSA_KEY_TRIPS": "1", "PARTEX_SSA_IDLE_SETTLE": "1"}),
