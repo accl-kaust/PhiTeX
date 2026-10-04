@@ -2635,6 +2635,15 @@ impl RebuildReport {
 /// trip left make seeds, the outside tools whose input changed run and
 /// the next trip runs, `trips.max` trips at most. The files are linked
 /// after the last.
+///
+/// The host's output files are scratch until then: a step run again
+/// writes its `\openout`/`\write` bytes to the host at once (the job may
+/// read them back), so a file another step had written is left partly
+/// written (an `\include`'s `.aux` truncated to the lines of the steps
+/// run again). The host must link after each rebuild and write back
+/// every file the link makes, by the name it was opened with, before
+/// its next edit (the CLI's `SsaLinker::link`); else the next rebuild
+/// reads the partial file as an edit of it.
 pub fn rebuild_trips<H: Host>(
     tex: &mut Tex<H, SsaTracker>,
     trace: bool,
