@@ -169,11 +169,12 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         if !T::VALUES {
             return;
         }
-        let rows: [(u16, i32); 25] = [
+        let rows: [(u16, i32); 26] = [
             (
                 scalar::GLUE_LINEAGE,
                 i32::try_from(self.glue_lineage).unwrap_or(i32::MAX),
             ),
+            (scalar::FONT_COUNT, self.fonts.count),
             (scalar::LAST_BADNESS, self.last_badness),
             (scalar::OUTPUT_ACTIVE, i32::from(self.output_active)),
             (scalar::TERM_OFFSET, self.term_offset),

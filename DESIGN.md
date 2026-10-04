@@ -815,11 +815,14 @@ template, which a compiled backend exploits.
   makes anew in its slot (`remake_font`) is loaded there too.
   DVI's font numbers cannot be relocations: their opcodes' lengths
   depend on them, and §611's movement optimization depends on where
-  bytes fall. So the ship numbers its fonts by their places among the
-  fonts the program has made by now (`Tracker::font_number`). Those are
-  the format's fonts in the table's order, then the run's by their
-  makers' places in program order (`font_made_by_now`, as `\font`'s
-  search uses), with the null font 0.
+  bytes fall. So a font's number is a value the program makes: each font
+  made reads the number of the last one (`scalar::FONT_COUNT`, set to
+  the format's last font at its load) and takes the next, its
+  `font::NUMBER` field (`FontData::num`). The ship reads that field. A
+  step that no longer makes a font defines the count otherwise, so the
+  next font's maker runs again and makes its number again, and so on
+  while the numbers move. That wakes exactly the ships that use a moved
+  number, even one whose page is unchanged.
 - **Columns are the link's** (`effects/flow.rs`). `term_offset` and
   `file_offset` (§54), where the terminal's and the log's lines stand,
   decide only what is printed: the wrap at `max_print_line` (§58),

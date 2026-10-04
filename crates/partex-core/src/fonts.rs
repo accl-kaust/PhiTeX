@@ -79,6 +79,14 @@ pub(crate) struct FontData {
     /// one hash per entry that is not the default, kept at each
     /// assignment (`set_code`), so a write costs one entry.
     pub(crate) code_sum: Vec<[u128; 8]>,
+    /// Each slot's number as the program made it (§576: the fonts made
+    /// before it in program order, the null font 0; 0 for one made with
+    /// the table, whose number is its place in `order`), and the number
+    /// of the last font made (`track::scalar::FONT_COUNT`): a font made
+    /// takes the next, so a step that no longer makes a font moves the
+    /// numbers of the fonts made after it, which their makers make again.
+    pub(crate) num: Vec<i32>,
+    pub(crate) count: i32,
 }
 
 /// A loaded font in the table's order: its slot and identity, versioned
@@ -316,7 +324,9 @@ partex_engine::persist_struct!(FontData {
     order_hash,
     idv,
     remade,
-    code_sum
+    code_sum,
+    num,
+    count
 });
 
 impl FontArrays {
@@ -341,6 +351,13 @@ impl FontArrays {
         let i = fx(f);
         if i >= self.metrics.len() {
             return Version::node(0x6e6f_6e65, &[Version(u128::from(k))]).0;
+        }
+        if k == field::NUMBER {
+            return Version::node(
+                0x006e_756d,
+                &[Version(u128::from(self.num[i].cast_unsigned()))],
+            )
+            .0;
         }
         let v = match k {
             field::METRICS if self.remade[i] => Version::node(
@@ -434,6 +451,8 @@ impl FontData {
             idv: Vec::with_capacity(n),
             remade: Vec::with_capacity(n),
             code_sum: Vec::with_capacity(n),
+            num: Vec::with_capacity(n),
+            count: 0,
         }
     }
 
@@ -499,6 +518,7 @@ impl FontData {
             self.idv.resize(n, 0);
             self.remade.resize(n, false);
             self.code_sum.resize(n, [0; 8]);
+            self.num.resize(n, 0);
         }
     }
 
@@ -841,8 +861,21 @@ impl<H: Host, T: Tracker> Tex<H, T> {
 
     /// Font slot `f` was made (loaded, expanded, copied): its fields, and
     /// the table it joined.
-    pub(crate) fn font_made(&self, f: i32) {
+    pub(crate) fn font_made(&mut self, f: i32) {
         self.tracker.font_loaded(f);
+        if f != NULL_FONT {
+            // (its number: the next after the last font made, in program
+            // order, §576)
+            let row = Row::Scalar(crate::track::scalar::FONT_COUNT);
+            self.scalar_read(row, self.fonts.count);
+            self.fonts.count += 1;
+            let n = self.fonts.count;
+            self.scalar_wrote(row, n);
+            if let Some(x) = self.fonts.num.get_mut(fx(f)) {
+                *x = n;
+            }
+            self.font_wrote(f, field::NUMBER);
+        }
         if T::VALUES {
             for k in FIELDS {
                 self.font_wrote(f, k);

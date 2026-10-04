@@ -12603,3 +12603,23 @@ What stays: a ship not run again after an earlier step stops loading
 a font keeps the numbers it had. The number is not a read the rebuild
 checks (machine mode reads the whole order). In the cases here the
 ship runs again anyway, because its page changed.
+
+## 2026-10-04 — A font's DVI number is a value the rebuild checks (agent offsets)
+
+The last entry's limitation is closed. The tracker computed DVI numbers
+from program order, but the number was not a read, so a ship whose page
+was unchanged kept a number that a font dropped before it had moved. Now
+the number is made as the font is made. Each font made (`font_made`,
+not the null font) reads `scalar::FONT_COUNT`, the number of the last
+font made (the format's last at its load), and takes the next as its
+`font::NUMBER` field (`FontData::num`). DVI's `dvi_font_number` reads
+that field. The tracker's `font_number` hook and its cache are gone.
+A step that stops loading a font defines the count otherwise, so the
+next font's maker runs again (it read the count), defines the number
+anew, and wakes the ships that read the number.
+
+New edit harness case `fontdrop` (DVI): page 1 loads a font it never
+uses, the edit takes the `\font` away and then puts it back, and page 2,
+unchanged, uses a font loaded after it. The trace of rebuild 1: the
+edited step, the font maker of page 2 for `font_count`, then the page
+2 ship for `font:cmsl12.number`. All stages match the oracle.

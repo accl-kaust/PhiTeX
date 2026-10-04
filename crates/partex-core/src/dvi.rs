@@ -147,19 +147,25 @@ impl DviState {
 }
 
 impl<H: Host, T: Tracker> Tex<H, T> {
-    /// Font `f`'s number in the DVI file (§576, §621): its place among the
-    /// fonts the program has made by now, where the tracker knows it (an
-    /// SSA build's table keeps fonts only an older run loaded), else in
-    /// the table (`FontArrays::number`).
+    /// Font `f`'s number in the DVI file (§576, §621): as the program made
+    /// it, a read of the font's `NUMBER` field, with a tracker that keeps
+    /// values (an SSA build's table keeps fonts only an older run made);
+    /// else, and for a font made with the table, its place in the table
+    /// (`FontArrays::number`).
     pub(crate) fn dvi_font_number(&self, f: i32) -> i32 {
-        let fonts = &self.fonts;
-        self.tracker
-            .font_number(f, &|| {
-                let mut v = alloc::vec![0];
-                v.extend(fonts.loaded_fonts());
-                v
-            })
-            .unwrap_or_else(|| self.fonts.number(f))
+        if T::VALUES {
+            let n = self
+                .fonts
+                .num
+                .get(crate::fonts::fx(f))
+                .copied()
+                .unwrap_or(0);
+            if n > 0 {
+                self.font_read(f, crate::track::font::NUMBER);
+                return n;
+            }
+        }
+        self.fonts.number(f)
     }
 
     /// §532: `ensure_dvi_open`.

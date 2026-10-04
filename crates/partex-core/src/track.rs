@@ -169,6 +169,9 @@ pub mod font {
     pub const EXPAND: u32 = 4;
     /// The interword glue (§1042, `font_glue`).
     pub const GLUE: u32 = 5;
+    /// Its number as the program made it (`FontData::num`): what DVI's
+    /// font numbers are.
+    pub const NUMBER: u32 = 6;
     /// pdfTeX's character codes, `CODES + code` (`fonts::Code`).
     pub const CODES: u32 = 8;
     /// The fields of a slot.
@@ -336,6 +339,8 @@ pub mod scalar {
     pub const EPOCH_US: u16 = 29;
     /// The next glue lineage (`objs.rs`: glue's identity, as data).
     pub const GLUE_LINEAGE: u16 = 30;
+    /// The number of the last font made (`FontData::count`, §576).
+    pub const FONT_COUNT: u16 = 31;
     /// `write_open[j]` (§1342), `WRITE_OPEN + j` for `j` in 0..18.
     pub const WRITE_OPEN: u16 = 32;
     /// `read_open[j]` (§480), `READ_OPEN + j` for `j` in 0..17.
@@ -468,14 +473,6 @@ pub trait Tracker {
     /// again does not find what a later step, or its own older run, made.
     fn font_visible(&self, _f: i32) -> bool {
         true
-    }
-    /// Font `f`'s number as tex.web gives it (§576: its place among the
-    /// fonts loaded, the null font 0), counting only the fonts the program
-    /// has made by now, in program order, if the tracker knows (`None`:
-    /// its place in the table). `loaded` gives the table's fonts in the
-    /// order they were loaded (the null font first).
-    fn font_number(&self, _f: i32, _loaded: &dyn Fn() -> alloc::vec::Vec<i32>) -> Option<i32> {
-        None
     }
     /// Whether font `f` is the newest the program has made by now (§579:
     /// only it may grow its parameters), if the tracker knows (`None`:
