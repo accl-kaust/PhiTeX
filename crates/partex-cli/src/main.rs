@@ -186,6 +186,14 @@ fn configure(kpse: &mut partex_kpse::Kpse, params: &mut Params, shell: Option<(b
             _ => (false, false),
         }
     });
+    // (texmfmp.c's `init_shell_escape`: the commands restricted shell
+    // escape runs)
+    if params.shell_escape && params.restricted_shell {
+        params.shell_escape_commands = kpse
+            .var_value("shell_escape_commands")
+            .map(|v| partex_core::shell::command_list(&v))
+            .unwrap_or_default();
+    }
     params.log_openout = kpse
         .var_value("log_openout")
         .is_some_and(|v| matches!(v.first(), Some(b't' | b'y' | b'1')));
@@ -389,8 +397,6 @@ fn parse_command_line() -> CommandLine {
             Some(o) if set_option(&mut params, o) => {}
             Some("file-line-error") => params.file_line_error_style = true,
             Some("halt-on-error") => params.halt_on_error = true,
-            // (partex runs no commands: `\write18` is always denied, but
-            // TeX reports the mode it was given)
             Some("shell-escape") => shell = Some((true, false)),
             Some("shell-restricted") => shell = Some((true, true)),
             Some("no-shell-escape") => shell = Some((false, false)),
@@ -1176,7 +1182,8 @@ fn side_files_write<T: partex_core::track::Tracker>(tex: &mut Tex<native::Native
 /// `PARTEX_SSA_TRACE=<file>` writes the last build's trace there;
 /// `PARTEX_SSA_LEAN=0` records every routine, and each step's own reads.
 #[allow(clippy::too_many_lines)]
-fn run_ssa(host: native::NativeHost, params: Params, command_line: &[u8]) -> i32 {
+fn run_ssa(mut host: native::NativeHost, params: Params, command_line: &[u8]) -> i32 {
+    host.commands = Some(native::Commands::default());
     let check = std::env::var("PARTEX_SSA_CHECK").is_ok_and(|v| v == "1");
     let rebuild = std::env::var("PARTEX_SSA_REBUILD").ok();
     let apply = std::env::var("PARTEX_SSA_APPLY").is_ok_and(|v| v == "1");
@@ -1989,8 +1996,10 @@ impl SsaLinker {
             self.check(tex, &out, virt);
         }
         let t_check = clock();
+        let removed = partex_core::ssa::removed_files(&tex.tracker().rec.borrow());
         let host = tex.host_mut();
         let w = self.write_spliced(host, &out);
+        remove_files(host, &removed);
         host.term_write(&out.term);
         self.splice.each_diagnostic(&mut |d| host.diagnostic(d));
         let t_end = clock();
@@ -2197,8 +2206,10 @@ impl SsaLinker {
         self.splice.reset();
         self.virt.reset();
         let t_link = origin.elapsed();
+        let removed = partex_core::ssa::removed_files(&tex.tracker().rec.borrow());
         let host = tex.host_mut();
         let (files, bytes) = self.write_full(host, &l);
+        remove_files(host, &removed);
         host.term_write(&l.term);
         for d in &l.diagnostics {
             host.diagnostic(d);
@@ -2404,6 +2415,15 @@ impl SsaLinker {
             self.written.remove(&name);
         }
         (files, bytes_out)
+    }
+}
+
+/// The files a command removed after the job's last open of each, removed
+/// again after a link wrote the job's files (DESIGN 3.7, "Commands").
+fn remove_files(host: &native::NativeHost, names: &[Vec<u8>]) {
+    for n in names {
+        let p = host.in_output_dir(n).unwrap_or_else(|| n.clone());
+        let _ = std::fs::remove_file(native::path(&p));
     }
 }
 

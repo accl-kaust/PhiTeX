@@ -1,0 +1,21 @@
+% \write18 as pdfTeX runs it (web2c's runsystem): the log lines of each
+% mode, restricted shell escape's quoting, \pdfshellescape and \ifeof18.
+% The commands print nothing (the terminal's order would be stdio's).
+\catcode`\{=1 \catcode`\}=2 \catcode`\#=6
+\message{[shellescape=\the\pdfshellescape]}
+\ifeof18 \message{[eof18]}\else \message{[not eof18]}\fi
+\immediate\write18{kpsewhich --var-value=nothing}
+\immediate\write18{  kpsewhich   --var-value=nothing  }
+\immediate\write18{kpsewhich --format="other text files" nothing}
+\immediate\write18{kpsewhich 'nothing'}
+\immediate\write18{kpsewhich "nothing"x}
+\immediate\write18{kpsewhich "nothing}
+\immediate\write18{kpsewhich nothing|true}
+\immediate\write18{true}
+\immediate\write18{}
+\def\cmd{kpsewhich --var-value=nothing}
+\immediate\write18{\cmd}
+\tracingonline=1
+\immediate\write18{true kpsewhich}
+\shipout\hbox{\write18{kpsewhich --var-value=\jobname}}
+\end

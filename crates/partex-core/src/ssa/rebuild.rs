@@ -44,7 +44,7 @@ type PhiVersions = BTreeMap<u32, (Arc<[u8]>, Version)>;
 
 /// A stored name's value as [`Steps::trip_end`] made it (`Steps::value_at`'s,
 /// its bytes shared), with the count of the name's store changes then.
-type TripValues = BTreeMap<u32, (u64, Option<Result<Arc<[u8]>, ()>>)>;
+type TripValues = BTreeMap<u32, (u64, Option<Result<Option<Arc<[u8]>>, ()>>)>;
 
 /// The fold's steps as a rebuild finds them.
 #[derive(Default)]
@@ -239,12 +239,17 @@ pub(super) type Ended = (u32, Arc<[u8]>, usize, Vec<u8>);
 enum StoreEv {
     Open(u32),
     Line(u32, Arc<[u8]>),
+    /// A command (`\write18`) made the file, these its bytes as they are
+    /// (a last line without its end kept so), or removed it (DESIGN 3.7,
+    /// "Commands").
+    Made(u32, Arc<[u8]>),
+    Remove(u32),
 }
 
 impl StoreEv {
     fn id(&self) -> u32 {
         match self {
-            StoreEv::Open(i) | StoreEv::Line(i, _) => *i,
+            StoreEv::Open(i) | StoreEv::Line(i, _) | StoreEv::Made(i, _) | StoreEv::Remove(i) => *i,
         }
     }
 }
@@ -393,6 +398,42 @@ impl Steps {
         self.cur_stores.push(StoreEv::Open(id));
     }
 
+    /// A command run by the open step made name `id`'s file (its lines
+    /// follow, as an open's).
+    pub(super) fn store_made(&mut self, id: u32, contents: Arc<[u8]>) {
+        self.stored.insert(id);
+        self.cur_stores.push(StoreEv::Made(id, contents));
+    }
+
+    /// The names whose store reaching the open step, at `key`, is the
+    /// job's (`\openout`, not a command's), with their values there: what
+    /// a command run there is handed (DESIGN 3.7, "Commands").
+    pub(super) fn reaching(&self, fold: &Fold<TexSsa>, key: u64) -> Vec<(u32, Vec<u8>)> {
+        self.stored
+            .iter()
+            .filter_map(|&id| match self.value_from(fold, id, key)? {
+                Ok((Some(v), false)) => Some((id, v)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A command the open step ran removed name `id`'s file.
+    pub(super) fn store_removed(&mut self, id: u32) {
+        self.stored.insert(id);
+        self.cur_stores.push(StoreEv::Remove(id));
+    }
+
+    /// The stored names whose file is removed at the build's end (a
+    /// command removed it after its last open): the link leaves none.
+    pub(super) fn removed_at_end(&self, fold: &Fold<TexSsa>) -> Vec<u32> {
+        self.stored
+            .iter()
+            .copied()
+            .filter(|&id| matches!(self.value_at(fold, id, u64::MAX), Some(Ok(None))))
+            .collect()
+    }
+
     /// The open step appended `line` to name `id`.
     pub(super) fn store_line(&mut self, id: u32, line: &[u8]) {
         self.cur_stores.push(StoreEv::Line(id, Arc::from(line)));
@@ -411,15 +452,47 @@ impl Steps {
     }
 
     /// Stored name `id`'s value where the open step, at `key`, is now:
-    /// its lines since its last open before here (`Ok`), or the φ (`Err`)
-    /// if no open is; `None` if the job does not store it.
-    fn value_at(&self, fold: &Fold<TexSsa>, id: u32, key: u64) -> Option<Result<Vec<u8>, ()>> {
+    /// its lines since its last open before here (`Ok(Some)`), absent if
+    /// a command removed it since (`Ok(None)`), or the φ (`Err`) if
+    /// neither is; `None` if the job does not store it.
+    fn value_at(
+        &self,
+        fold: &Fold<TexSsa>,
+        id: u32,
+        key: u64,
+    ) -> Option<Result<Option<Vec<u8>>, ()>> {
+        Some(self.value_from(fold, id, key)?.map(|(v, _)| v))
+    }
+
+    /// [`Steps::value_at`], and whether a command made the value (or
+    /// removed the file).
+    #[allow(clippy::type_complexity)]
+    fn value_from(
+        &self,
+        fold: &Fold<TexSsa>,
+        id: u32,
+        key: u64,
+    ) -> Option<Result<(Option<Vec<u8>>, bool), ()>> {
         // (`evs`' lines of `id` after its last open, latest first; whether
-        // an open is there)
-        fn back<'a>(evs: &'a [StoreEv], id: u32, lines: &mut Vec<&'a Arc<[u8]>>) -> bool {
+        // an open is there, or a removal)
+        fn back<'a>(
+            evs: &'a [StoreEv],
+            id: u32,
+            lines: &mut Vec<&'a Arc<[u8]>>,
+            removed: &mut bool,
+            made: &mut Option<&'a Arc<[u8]>>,
+        ) -> bool {
             for e in evs.iter().rev() {
                 match e {
                     StoreEv::Open(i) if *i == id => return true,
+                    StoreEv::Made(i, c) if *i == id => {
+                        *made = Some(c);
+                        return true;
+                    }
+                    StoreEv::Remove(i) if *i == id => {
+                        *removed = true;
+                        return true;
+                    }
                     StoreEv::Line(i, l) if *i == id => lines.push(l),
                     _ => {}
                 }
@@ -430,8 +503,9 @@ impl Steps {
             return None;
         }
         let mut lines: Vec<&Arc<[u8]>> = Vec::new();
+        let (mut removed, mut made) = (false, None);
         // (the open step's own, then the steps before it, latest first)
-        let mut found = back(&self.cur_stores, id, &mut lines);
+        let mut found = back(&self.cur_stores, id, &mut lines, &mut removed, &mut made);
         if !found {
             let mut before: Vec<(u64, &Vec<StoreEv>)> = self
                 .stores
@@ -443,7 +517,7 @@ impl Steps {
                 .collect();
             before.sort_unstable_by_key(|a| core::cmp::Reverse(a.0));
             for (_, evs) in before {
-                if back(evs, id, &mut lines) {
+                if back(evs, id, &mut lines, &mut removed, &mut made) {
                     found = true;
                     break;
                 }
@@ -452,12 +526,16 @@ impl Steps {
         if !found {
             return Some(Err(()));
         }
-        let mut v = Vec::with_capacity(lines.iter().map(|l| l.len() + 1).sum());
+        if removed {
+            return Some(Ok((None, true)));
+        }
+        // (a command's file as it made it, then the lines after it)
+        let mut v = made.map_or_else(Vec::new, |c| c.to_vec());
         for l in lines.iter().rev() {
             v.extend_from_slice(l);
             v.push(b'\n');
         }
-        Some(Ok(v))
+        Some(Ok((Some(v), made.is_some())))
     }
 
     /// The cold build's first trip serves its loads too (`on`), from no φ:
@@ -479,7 +557,7 @@ impl Steps {
     ) -> Option<Option<Arc<[u8]>>> {
         let phi = self.phi.as_ref()?;
         match self.value_at(fold, id, key)? {
-            Ok(v) => Some(Some(Arc::from(v))),
+            Ok(v) => Some(v.map(Arc::from)),
             Err(()) => phi.get(&id).cloned(),
         }
     }
@@ -507,7 +585,7 @@ impl Steps {
                 Some((c, v)) if *c == count && keep => v.clone(),
                 _ => self
                     .value_at(fold, id, u64::MAX)
-                    .map(|v| v.map(Arc::<[u8]>::from)),
+                    .map(|v| v.map(|v| v.map(Arc::<[u8]>::from))),
             };
             let was = self.last_phi.get(&id);
             let Some(Ok(now)) = now else {
@@ -519,6 +597,17 @@ impl Steps {
                 }
                 continue;
             };
+            // (absent: a command removed it)
+            let Some(now) = now else {
+                if !matches!(was, Some(None)) {
+                    changed.insert(id);
+                }
+                if keep {
+                    self.trip_values.insert(id, (count, Some(Ok(None))));
+                }
+                phi.insert(id, None);
+                continue;
+            };
             let now = match was {
                 Some(Some(w)) if Arc::ptr_eq(w, &now) || w[..] == now[..] => w.clone(),
                 _ => {
@@ -527,7 +616,8 @@ impl Steps {
                 }
             };
             if keep {
-                self.trip_values.insert(id, (count, Some(Ok(now.clone()))));
+                self.trip_values
+                    .insert(id, (count, Some(Ok(Some(now.clone())))));
             }
             phi.insert(id, Some(now));
         }
@@ -2106,7 +2196,7 @@ pub fn rebuild<H: Host>(tex: &mut Tex<H, SsaTracker>, trace: bool, apply: bool) 
                 let r = tex.tracker.rec.borrow();
                 let s = &r.st.steps;
                 let v = match s.value_at(&r.rt.fold, id, u64::MAX) {
-                    Some(Ok(v)) => Some(Arc::<[u8]>::from(v)),
+                    Some(Ok(v)) => v.map(Arc::<[u8]>::from), // (a command removed it: none)
                     _ => s.last_phi.get(&id).cloned().flatten(),
                 };
                 own.insert(id);
@@ -2740,7 +2830,7 @@ pub fn stream_values<H: Host>(tex: &Tex<H, SsaTracker>) -> Vec<(Vec<u8>, Option<
         .iter()
         .filter_map(|&id| {
             let name = r.st.loads.get(id as usize)?.0.clone();
-            Some((name, s.value_at(&r.rt.fold, id, u64::MAX)?.ok()))
+            Some((name, s.value_at(&r.rt.fold, id, u64::MAX)?.ok().flatten()))
         })
         .collect()
 }

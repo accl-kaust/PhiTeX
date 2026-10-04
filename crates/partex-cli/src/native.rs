@@ -8,7 +8,7 @@ use std::io::{BufRead, Write};
 
 use partex_core::dviout::{DviWriter, Summary, TooLong};
 use partex_core::pageir::Page;
-use partex_core::{DateTime, FileKind, Host, OpenedFile, PageSink, WriteId};
+use partex_core::{DateTime, FileKind, Host, OpenedFile, PageSink, Ran, WriteId};
 
 use crate::dvithread::DviThread;
 
@@ -46,6 +46,62 @@ pub struct NativeHost {
     /// path): a file the job writes that still has it was not edited
     /// since ([`Host::output_edited`]).
     outputs: HashMap<Vec<u8>, Stamp>,
+    /// An SSA build's commands as nodes ([`Commands`]); `None`: each
+    /// `\write18` runs (a plain run, as pdfTeX's).
+    pub commands: Option<Commands>,
+}
+
+/// `\write18`'s commands in an SSA build (DESIGN 3.7, "Commands"), as
+/// its BibTeX nodes: a command runs again only if what it reads
+/// changed, not at each trip or rebuild whose step ran it. What it reads
+/// is its key: the command line, the job's files it is handed, and every
+/// file commands made, changed or removed, as it is on disk now
+/// (latexminted's cache and its configuration). A command whose key ran
+/// before is not run: its files are put back as that run left them and
+/// its run is answered again.
+#[derive(Default)]
+pub struct Commands {
+    /// The paths (from the working directory) a command made, changed or
+    /// removed.
+    owned: std::collections::BTreeSet<Vec<u8>>,
+    /// Each run by its key, with the paths it left made or changed (and
+    /// their bytes) and removed.
+    runs: HashMap<u128, Node>,
+}
+
+/// A command's run, kept by [`Commands`].
+struct Node {
+    ran: Ran,
+    wrote: Vec<(Vec<u8>, std::sync::Arc<[u8]>)>,
+    removed: Vec<Vec<u8>>,
+}
+
+impl Commands {
+    /// The key of `command` run now over `inputs` (MD5 of each part,
+    /// length-prefixed).
+    fn key(&self, command: &[u8], inputs: &[(Vec<u8>, std::sync::Arc<[u8]>)]) -> u128 {
+        let mut buf = Vec::new();
+        let mut part = |b: &[u8]| {
+            buf.extend_from_slice(&(b.len() as u64).to_le_bytes());
+            buf.extend_from_slice(b);
+        };
+        part(command);
+        for (name, contents) in inputs {
+            part(name);
+            part(contents);
+        }
+        for p in &self.owned {
+            part(p);
+            match std::fs::read(path(p)) {
+                Ok(c) => {
+                    part(b"=");
+                    part(&c);
+                }
+                Err(_) => part(b"-"),
+            }
+        }
+        u128::from_le_bytes(partex_engine::md5::md5(&buf))
+    }
 }
 
 /// A lookup's answer: the path found and its bytes.
@@ -164,7 +220,34 @@ impl NativeHost {
                 .is_none_or(|v| v != "0")
                 .then(Seen::default),
             outputs: HashMap::new(),
+            commands: None,
         }
+    }
+
+    /// The run of an SSA build's command whose key ran before
+    /// ([`Commands`]), again: its files put back as it left them.
+    fn run_again(&mut self, key: u128) -> Option<Ran> {
+        let node = self.commands.as_ref()?.runs.get(&key)?;
+        // (its run again: the files as it left them)
+        for (p, c) in &node.wrote {
+            if std::fs::read(path(p)).ok().as_deref() != Some(&c[..]) {
+                let _ = std::fs::write(path(p), &c[..]);
+            }
+        }
+        for p in &node.removed {
+            let _ = std::fs::remove_file(path(p));
+        }
+        let ran = node.ran.clone();
+        if let Some(seen) = &mut self.seen {
+            for (p, _) in &node.wrote {
+                seen.racy.remove(p);
+            }
+            seen.again.clear();
+        }
+        if ran.status != 0 {
+            eprintln!("system returned with code {}", ran.status);
+        }
+        Some(ran)
     }
 
     /// The link wrote output file `n` (its path): as it is now, it is the
@@ -436,6 +519,60 @@ fn dir_stamp(p: &[u8]) -> Option<Stamp> {
         m.ino(),
         m.dev(),
     ))
+}
+
+/// The stamps of the files under directory `root`, by their paths
+/// relative to it, skipping hidden directories (`.git`) and what is past
+/// 100 000 entries: what a command `\write18` runs may have written.
+fn tree_stamps(root: &[u8]) -> HashMap<Vec<u8>, Stamp> {
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::MetadataExt;
+    let mut out = HashMap::new();
+    let mut todo: Vec<Vec<u8>> = vec![Vec::new()];
+    let mut seen = 0usize;
+    while let Some(rel) = todo.pop() {
+        let dir = if rel.is_empty() {
+            root.to_vec()
+        } else {
+            [root, b"/", &rel].concat()
+        };
+        let Ok(entries) = std::fs::read_dir(path(&dir)) else {
+            continue;
+        };
+        for e in entries.flatten() {
+            seen += 1;
+            if seen > 100_000 {
+                return out;
+            }
+            let name = e.file_name();
+            let name = name.as_bytes();
+            let r = if rel.is_empty() {
+                name.to_vec()
+            } else {
+                [&rel[..], b"/", name].concat()
+            };
+            let Ok(m) = e.metadata() else { continue };
+            if m.is_dir() {
+                if !name.starts_with(b".") {
+                    todo.push(r);
+                }
+            } else if m.is_file() {
+                out.insert(
+                    r,
+                    (
+                        m.size(),
+                        m.mtime(),
+                        m.mtime_nsec(),
+                        m.ctime(),
+                        m.ctime_nsec(),
+                        m.ino(),
+                        m.dev(),
+                    ),
+                );
+            }
+        }
+    }
+    out
 }
 
 /// The stamp of the file at `p`, if it is one (not a directory).
@@ -784,6 +921,127 @@ impl Host for NativeHost {
 
     fn now(&self) -> DateTime {
         self.clock.start()
+    }
+
+    fn runs_commands(&self) -> bool {
+        true
+    }
+
+    /// web2c's `runsystem`'s `system`: `/bin/sh -c`, with kpathsea's
+    /// variables in the environment (latexminted's `latexrestricted`
+    /// finds TeX Live by `SELFAUTOLOC`) and `TEXMF_OUTPUT_DIRECTORY` for
+    /// `-output-directory`. The files it made or changed are found by
+    /// comparing the output directory's stamps before and after.
+    fn system(
+        &mut self,
+        command: &[u8],
+        inputs: &[(Vec<u8>, std::sync::Arc<[u8]>)],
+    ) -> Option<Ran> {
+        use std::os::unix::ffi::OsStrExt;
+        use std::os::unix::process::ExitStatusExt;
+        // (the job's files as the build holds them where the command runs)
+        for (name, contents) in inputs {
+            let p = self.in_output_dir(name).unwrap_or_else(|| name.clone());
+            if std::fs::read(path(&p)).ok().as_deref() != Some(&contents[..]) {
+                let _ = std::fs::write(path(&p), &contents[..]);
+            }
+        }
+        let key = self.commands.as_ref().map(|c| c.key(command, inputs));
+        if let Some(ran) = key.and_then(|k| self.run_again(k)) {
+            return Some(ran);
+        }
+        let root = self.output_dir.clone().unwrap_or_else(|| b".".to_vec());
+        // (files this host writes, as the DVI thread may while the command
+        // runs, are not the command's)
+        let ours: std::collections::HashSet<Vec<u8>> =
+            self.given.values().map(|(n, _)| n.clone()).collect();
+        let before = tree_stamps(&root);
+        let _ = std::io::stdout().flush();
+        let mut cmd = std::process::Command::new("/bin/sh");
+        cmd.arg("-c").arg(std::ffi::OsStr::from_bytes(command));
+        for (k, v) in self.kpse.exported() {
+            cmd.env(
+                std::ffi::OsStr::from_bytes(k),
+                std::ffi::OsStr::from_bytes(v),
+            );
+        }
+        if let Some(d) = &self.output_dir {
+            cmd.env("TEXMF_OUTPUT_DIRECTORY", std::ffi::OsStr::from_bytes(d));
+        }
+        // (`system`'s status: the shell's own 127 if it could not start;
+        // its standard output goes to the terminal through the engine)
+        let (status, stdout) = cmd
+            .stdin(std::process::Stdio::inherit())
+            .stderr(std::process::Stdio::inherit())
+            .output()
+            .map_or((127 << 8, Vec::new()), |o| (o.status.into_raw(), o.stdout));
+        if status != 0 {
+            eprintln!("system returned with code {status}");
+        }
+        let mut wrote = Vec::new();
+        let after = tree_stamps(&root);
+        // (a file in the output directory is found by its name there, and
+        // by the path to it: `-output-directory=out` gives `x` and `out/x`)
+        let names = |rel: &[u8]| -> Vec<Vec<u8>> {
+            if root == b"." {
+                vec![rel.to_vec()]
+            } else {
+                vec![rel.to_vec(), [&root[..], b"/", rel].concat()]
+            }
+        };
+        let removed = before
+            .keys()
+            .filter(|r| !after.contains_key(*r))
+            .flat_map(|r| names(r))
+            .collect();
+        for (rel, st) in &after {
+            let full = names(rel).pop().unwrap_or_default();
+            if before.get(rel) == Some(st) || ours.contains(&full) || ours.contains(rel) {
+                continue;
+            }
+            if let Some(seen) = &mut self.seen {
+                seen.racy.remove(&full);
+            }
+            if let Ok(c) = std::fs::read(path(&full)) {
+                let c: std::sync::Arc<[u8]> = std::sync::Arc::from(c);
+                wrote.extend(names(rel).into_iter().map(|n| (n, c.clone())));
+            }
+        }
+        // (a lookup made before the command is made again)
+        if let Some(seen) = &mut self.seen {
+            seen.again.clear();
+        }
+        let ran = Ran {
+            status,
+            wrote,
+            removed,
+            stdout,
+        };
+        if let (Some(c), Some(k)) = (&mut self.commands, key) {
+            // (by the path from the working directory: `names`' last)
+            let full = |r: &Vec<u8>| names(r).pop().unwrap_or_default();
+            let node = Node {
+                ran: ran.clone(),
+                wrote: after
+                    .iter()
+                    .filter(|&(r, st)| before.get(r) != Some(st))
+                    .filter_map(|(r, _)| {
+                        let p = full(r);
+                        let c = ran.wrote.iter().find(|(n, _)| *n == p)?.1.clone();
+                        Some((p, c))
+                    })
+                    .collect(),
+                removed: before
+                    .keys()
+                    .filter(|r| !after.contains_key(*r))
+                    .map(full)
+                    .collect(),
+            };
+            c.owned.extend(node.wrote.iter().map(|(p, _)| p.clone()));
+            c.owned.extend(node.removed.iter().cloned());
+            c.runs.insert(k, node);
+        }
+        Some(ran)
     }
 
     fn deflate(&mut self, level: i32, data: &[u8]) -> Option<Vec<u8>> {

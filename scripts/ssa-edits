@@ -32,7 +32,10 @@ build, by the next stage's), which runs earlier steps again; and
 `inputs` (`inputs.tex`): a file only tested for (`\\openin` and
 `\\ifeof`), edited, and a line appended after the last line of a file
 `\\input` (the primitive), then taken away, then a word of it changed,
-the file's MD5 sum printed.
+the file's MD5 sum printed; and `minted` (`minted-edits.tex`, under
+`-shell-restricted`): a code block's lines, a word outside the blocks,
+the block back, an inline snippet, each rebuild running latexminted
+again only when what it reads changed (DESIGN 3.7, "Commands").
 
 Each case runs in WORK/<case>/:
 - `o/`: the oracle, one run per stage, the stage's edit made before it
@@ -154,6 +157,17 @@ PREAMBLE_EDITS = [
     ("\\usepackage{tikz}\n", "\\usepackage{tikz}\n\\usepackage{circuitikz}\n"),
     ("\\usepackage{tikz}\n\\usepackage{circuitikz}\n", "\\usepackage{tikz}\n"),
     ("Cool init?", "Cool init!"),
+]
+# minted-edits.tex, through restricted shell escape (latexminted, DESIGN
+# 3.7, "Commands"): a block's code (its data changes, latexminted runs
+# again and writes the new block's cache), a word outside the blocks (no
+# command runs again), the code back (the old cache file read again), an
+# inline snippet
+MINTED_EDITS = [
+    ("# say hello", "# say hello twice"),
+    ("First words", "First phrases"),
+    ("# say hello twice", "# say hello"),
+    ("int x = 1;", "int y = 2;"),
 ]
 # inputs.tex: the file only tested for, edited; a line appended to the
 # file \input and taken away; a word of it, whose sum is printed
@@ -507,6 +521,13 @@ def all_cases():
         include("include_keys", {"PARTEX_SSA_KEY_TRIPS": "1", "PARTEX_SSA_IDLE_SETTLE": "1"}),
         latex("synctex", "edits.tex", "pdflatex", SYNCTEX_EDITS, extra=["-synctex=1"]),
         latex("preamble", "preamble.tex", "pdflatex", PREAMBLE_EDITS),
+        latex(
+            "minted",
+            "minted-edits.tex",
+            "pdflatex",
+            MINTED_EDITS,
+            extra=["-shell-restricted"],
+        ),
         Case(
             "bibtex",
             {"edits.tex": "bibedits.tex", "bibedits.bib": "bibedits.bib"},

@@ -1,0 +1,22 @@
+\documentclass{article}
+\usepackage{minted}
+\begin{document}
+\section{Code}
+First words of the text, before any code.
+
+\begin{minted}{python}
+def greet(name):
+    # say hello
+    return f"Hello, {name}!"
+\end{minted}
+
+A paragraph between the blocks, with \mintinline{c}{int x = 1;} inline.
+
+\begin{minted}[linenos]{rust}
+fn main() {
+    println!("{}", 1 + 2);
+}
+\end{minted}
+
+Last words of the text.
+\end{document}
