@@ -86,13 +86,18 @@ impl<M: Machine> Store<M> for MapStore<M> {
 /// A slot's serials: its last write, its last recorded read, the start
 /// of the frame that recorded it (a frame records a slot once after each
 /// write; its children record their own), and the start of the step that
-/// noted it as read from outside the step.
+/// noted it as read from outside the step, and the step (its serial) a
+/// group's end gave the slot back the value it began with, not written
+/// since ([`Runtime::unwrite`]): to the step, its entry value again.
 #[derive(Clone, Copy, Default)]
 struct Stamp {
     w: u64,
     r: u64,
     f: u64,
     s: u64,
+    u: u64,
+    /// The step that observed the slot softly ([`Open::step_soft`]).
+    o: u64,
 }
 
 /// A location's last recorded read, the frame that recorded it, and the
@@ -201,7 +206,16 @@ pub(crate) struct Open<M: Machine> {
     /// was made.
     soft: bool,
     soft_new: bool,
+    /// (debug) writes made with no call open while a step was.
+    pub(crate) root_writes: u64,
+    /// (debug) writes made while no step was open.
+    pub(crate) stepless_writes: u64,
     pub(crate) step_reads: Vec<(u64, M::Addr)>,
+    /// The slots the open step read softly from outside it (a local
+    /// assignment's look at the value it saves): not its dependencies,
+    /// but what its run saw, which a rebuild puts in place as it puts its
+    /// reads ([`Runtime::open_step_observed`]).
+    pub(crate) step_soft: Vec<M::Addr>,
     pub(crate) step_recs: Vec<RecId>,
     /// Timing ([`StepTimes`], a measurement, off unless asked for): the
     /// engine's clock, when the open step began, when it made each read
@@ -230,7 +244,10 @@ impl<M: Machine> Open<M> {
             step: None,
             soft: false,
             soft_new: false,
+            root_writes: 0,
+            stepless_writes: 0,
             step_reads: Vec::new(),
+            step_soft: Vec::new(),
             step_recs: Vec::new(),
             timing: false,
             clock: 0,
@@ -321,6 +338,18 @@ impl<M: Machine> Open<M> {
         let lh = if let Some((f, i)) = dense {
             let st = dense_at(&mut self.dense, f, i);
             if st.w >= start || (!self.soft && st.f == start && st.r > st.w) {
+                // (the call has the value already; the step, if a group's end
+                // gave the slot back what it began with, reads it from
+                // outside)
+                if step != 0 && st.u == step && st.s != step {
+                    if self.soft {
+                        self.soft_new = true;
+                    } else {
+                        st.s = step;
+                        let a = loc.addr();
+                        self.push_step_read(hash64(a), a);
+                    }
+                }
                 return;
             }
             // (a soft read leaves the stamps: a read after it is recorded)
@@ -329,10 +358,15 @@ impl<M: Machine> Open<M> {
                 st.f = start;
                 st.r = self.serial;
             }
-            // (a read from outside the step: its readers, 7.17.3)
-            if step != 0 && st.w < step && st.s != step {
+            // (a read from outside the step: its readers, 7.17.3; or of the
+            // value the step began with, a group's end gave back)
+            if step != 0 && (st.w < step || st.u == step) && st.s != step {
                 if self.soft {
                     self.soft_new = true;
+                    if st.o != step {
+                        st.o = step;
+                        self.step_soft.push(loc.addr().clone());
+                    }
                 } else {
                     st.s = step;
                     let a = loc.addr();
@@ -400,9 +434,13 @@ impl<M: Machine> Open<M> {
         let a = loc.addr();
         if let (Loc::State(_), Some((f, i))) = (loc, M::dense(a)) {
             let st = dense_at(&mut self.dense, f, i);
-            if st.w < step && st.s != step {
+            if (st.w < step || st.u == step) && st.s != step {
                 if self.soft {
                     self.soft_new = true;
+                    if st.o != step {
+                        st.o = step;
+                        self.step_soft.push(a.clone());
+                    }
                 } else {
                     st.s = step;
                     self.push_step_read(hash64(a), a);
@@ -469,7 +507,13 @@ impl<M: Machine> Open<M> {
     #[inline]
     fn note_write_by(&mut self, a: &M::Addr, own: bool) {
         let d = self.frames.len() - 1;
+        if self.step.is_none() {
+            self.stepless_writes += 1;
+        }
         if d == 0 {
+            if self.step.is_some() {
+                self.root_writes += 1;
+            }
             return;
         }
         if self.timing && self.step.is_some() {
@@ -481,10 +525,9 @@ impl<M: Machine> Open<M> {
         self.serial += 1;
         let s = self.serial;
         let (st, pos) = if let Some((f, i)) = M::dense(a) {
-            (
-                &mut dense_at(&mut self.dense, f, i).w,
-                dense_at(&mut self.dpos, f, i),
-            )
+            let d = dense_at(&mut self.dense, f, i);
+            d.u = 0;
+            (&mut d.w, dense_at(&mut self.dpos, f, i))
         } else {
             let e = self.wser.entry_by(
                 hash64(a),
@@ -998,6 +1041,36 @@ impl<M: Machine> Runtime<M> {
     }
 
     /// The addresses the open step has read from outside it so far.
+    /// (debug) Writes made with no call open while a step was.
+    #[must_use]
+    pub fn root_writes(&self) -> (u64, u64) {
+        (self.open.root_writes, self.open.stepless_writes)
+    }
+
+    /// What the open step's run saw from outside it: its reads, then the
+    /// slots it read softly ([`Open::step_soft`]); from the `reads`th read
+    /// and the `soft`th soft one on.
+    pub fn open_step_observed_from(
+        &self,
+        reads: usize,
+        soft: usize,
+    ) -> impl Iterator<Item = &M::Addr> {
+        self.open_step_reads_from(reads)
+            .chain(self.open.step_soft.get(soft..).unwrap_or_default())
+    }
+
+    /// How many slots the open step read softly.
+    #[must_use]
+    pub fn open_step_soft_len(&self) -> usize {
+        self.open.step_soft.len()
+    }
+
+    /// How many reads the open step has made from outside it.
+    #[must_use]
+    pub fn open_step_reads_len(&self) -> usize {
+        self.open.step_reads.len()
+    }
+
     pub fn open_step_reads(&self) -> impl Iterator<Item = &M::Addr> {
         self.open.step_reads.iter().map(|r| &r.1)
     }
@@ -1023,6 +1096,7 @@ impl<M: Machine> Runtime<M> {
             st.serial = self.open.serial;
         }
         self.open.step_reads.clear();
+        self.open.step_soft.clear();
         self.open.step_recs.clear();
         self.open.step_began = self.open.clock;
         self.open.step_read_at.clear();
@@ -1055,6 +1129,7 @@ impl<M: Machine> Runtime<M> {
     pub fn abort_step(&mut self) {
         self.open.step = None;
         self.open.step_reads.clear();
+        self.open.step_soft.clear();
         self.open.step_recs.clear();
         self.open.step_read_at.clear();
         self.open.step_wrote_at = Table::new();
@@ -1066,6 +1141,7 @@ impl<M: Machine> Runtime<M> {
         let (id, _) = self.open.step.take()?;
         let recs = core::mem::take(&mut self.open.step_recs);
         let reads = core::mem::take(&mut self.open.step_reads);
+        self.open.step_soft.clear();
         if self.open.timing {
             let wrote = core::mem::take(&mut self.open.step_wrote_at)
                 .iter()
@@ -1104,6 +1180,7 @@ impl<M: Machine> Runtime<M> {
         let (id, _) = self.open.step.take()?;
         let recs = core::mem::take(&mut self.open.step_recs);
         let reads = core::mem::take(&mut self.open.step_reads);
+        self.open.step_soft.clear();
         self.open.step_read_at.clear();
         self.open.step_wrote_at = Table::new();
         let Runtime {
@@ -1174,35 +1251,25 @@ impl<M: Machine> Runtime<M> {
     pub fn entry_write(&mut self, a: &M::Addr) -> Option<(u64, u64)> {
         let step = self.open.step?.1;
         let (f, i) = M::dense(a)?;
-        let w = dense_at(&mut self.open.dense, f, i).w;
-        (w < step).then_some((step, w))
+        let st = dense_at(&mut self.open.dense, f, i);
+        (st.w < step || st.u == step).then_some((step, st.w))
     }
 
     /// Slot `a` holds again the value it held at the open step's start,
-    /// [`Runtime::entry_write`]'s `(step, w)` (a group's end put back the
-    /// value saved before the step wrote it): its last write is `w` again,
-    /// so that a read after it is a read of the step's entry value (from
-    /// outside the step) and not of the step's own write, and the calls
-    /// open have not written it (their entry for it is dead).
-    pub fn unwrite(&mut self, a: &M::Addr, step: u64, w: u64) {
+    /// [`Runtime::entry_write`]'s `step` (a group's end put back the value
+    /// saved before the step wrote it): until written again, a read of it
+    /// is a read of the step's entry value (from outside the step), and the
+    /// step does not define it ([`Runtime::end_step_soft`]). The calls'
+    /// writes of it stay: the store was written.
+    pub fn unwrite(&mut self, a: &M::Addr, step: u64, _w: u64) {
         if self.open.step.map(|s| s.1) != Some(step) {
             return;
         }
-        let Some((f, i)) = M::dense(a) else { return };
-        let open = &mut self.open;
-        // (the calls' write of the slot goes: its value is the one before
-        // them, as if they never wrote it, and a write after it is a first)
-        let cur = dense_at(&mut open.dense, f, i).w;
-        let pos = *dense_at(&mut open.dpos, f, i);
-        if let Some(e) = open
-            .frames
-            .get_mut(pos.at as usize)
-            .and_then(|fr| fr.writes.get_mut(pos.ix as usize))
-            && e.1 == cur
-        {
-            e.1 = 0;
+        // (the calls keep their writes: the store was written; it is the
+        // step that has the slot as it found it)
+        if let Some((f, i)) = M::dense(a) {
+            dense_at(&mut self.open.dense, f, i).u = step;
         }
-        dense_at(&mut open.dense, f, i).w = w;
     }
 
     /// [`Runtime::note_read`] with the version made only if the read is

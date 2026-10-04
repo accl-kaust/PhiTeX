@@ -176,8 +176,11 @@ struct Watch {
     /// The step's place and the slots its run is placed at.
     key: u64,
     set: BTreeSet<Slot>,
-    /// The reads checked so far, and whether one read a later definition.
+    /// The reads checked so far (and soft reads: what the run saw,
+    /// [`Runtime::open_step_observed_from`]), and whether one read a later
+    /// definition.
     scanned: usize,
+    scanned_soft: usize,
     later: bool,
 }
 
@@ -189,13 +192,15 @@ pub(super) fn read_later(rr: &mut Recorder) -> bool {
     };
     if !w.later {
         let fold = &rr.rt.fold;
-        for a in rr.rt.open_step_reads_from(w.scanned) {
-            w.scanned += 1;
+        let reads = rr.rt.open_step_reads_len();
+        for a in rr.rt.open_step_observed_from(w.scanned, w.scanned_soft) {
             if positioned(a) && !w.set.contains(a) && later(fold, a, w.key) {
                 w.later = true;
                 break;
             }
         }
+        w.scanned = reads;
+        w.scanned_soft = rr.rt.open_step_soft_len();
     }
     w.later
 }
@@ -1344,7 +1349,7 @@ impl InputState {
 /// and end, the hash's slots and allocators, the glues' lineage), not a
 /// read of what is not state (the source, lookups, loads, searches), and
 /// not a family whose values are not built yet (the fonts, hyphenation).
-fn positioned(a: &Slot) -> bool {
+pub(super) fn positioned(a: &Slot) -> bool {
     use crate::track::scalar::{GLUE_LINEAGE, HASH_HIGH, HASH_USED, STR_TOP};
     match a.0 {
         Fam::Eqtb
@@ -1716,7 +1721,7 @@ impl GlyphCount {
 /// The version of the definition of `a` that reaches `key` (a step's
 /// definitions' versions are those [`defs`] gives; `None`: no step before
 /// `key` defines it, and its version, the format's, is not kept).
-fn reaching_version(rr: &Recorder, a: &Slot, key: u64) -> Option<Version> {
+pub(super) fn reaching_version(rr: &Recorder, a: &Slot, key: u64) -> Option<Version> {
     let d = rr.rt.fold.reaching(a, key)?;
     let (_, v) = rr.rt.record(d.rec).writes.get(d.ix as usize)?;
     Some(v.as_ref().map_or(Version::ABSENT, |v| v.0))
@@ -3331,6 +3336,7 @@ fn run_step<H: Host>(
             key,
             set: core::mem::take(&mut set),
             scanned: 0,
+            scanned_soft: 0,
             later: false,
         });
         tex.tracker
@@ -3407,10 +3413,13 @@ fn run_step<H: Host>(
                     .copied()
                     .collect()
             } else {
-                r.rt.open_step_reads()
+                // (and what it read softly: the value it saved is put back)
+                r.rt.open_step_observed_from(0, 0)
                     .inspect(|_| n += 1)
                     .filter(|a| positioned(a) && !set.contains(*a) && later(fold, a, key))
                     .copied()
+                    .collect::<BTreeSet<Slot>>()
+                    .into_iter()
                     .collect()
             };
             rep.reads_checked += n;

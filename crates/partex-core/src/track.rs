@@ -396,9 +396,14 @@ pub trait Tracker {
     }
     /// `eqtb[cell]`'s value is saved at group level `level`.
     fn saved(&self, _cell: Cell, _level: i32) {}
-    /// `eqtb[cell]`'s value is saved at group level `level` (a copy, which
-    /// the group's end puts back: [`Tracker::restored`]).
-    fn save_entry(&self, _cell: Cell, _level: i32) {}
+    /// `eqtb[cell]`'s value is saved at group level `level` in the save
+    /// stack's entry `at` (a copy, which the group's end puts back:
+    /// [`Tracker::restore_entry`]; none, e-TeX's chain of registers above
+    /// 255, which is not put back by entry).
+    fn save_entry(&self, _cell: Cell, _level: i32, _at: Option<i32>) {}
+    /// The value saved at entry `at` of the save stack (as
+    /// [`Tracker::save_entry`] gave it) is back in `eqtb[cell]`.
+    fn restore_entry(&self, _cell: Cell, _at: i32) {}
     /// The value saved at group level `level` is back in `eqtb[cell]`.
     fn restored(&self, _cell: Cell, _level: i32) {}
     /// Group level `level` ended.
@@ -533,6 +538,11 @@ pub trait Tracker {
     /// The last read of `cell` was a lookup the reader does not depend on
     /// (the target of `\\def`, `\\let` and the like, pdfTeX §1215).
     fn retract(&self, _cell: Cell) {}
+    /// What the tracker would tell of the build so far, for a job stopped
+    /// by the watchdog (`expand::WATCHDOG`).
+    fn diagnose(&self) -> alloc::string::String {
+        alloc::string::String::new()
+    }
     /// A lookup of control sequence `p` where only its token is wanted,
     /// whose meaning is of class 0 (`skipcache::token_class`): what
     /// `get_next` and the reader do with the token depends on the class

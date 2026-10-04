@@ -561,6 +561,22 @@ fn debug_switches() {
     if std::env::var("PARTEX_SSA_CLASS_READS").is_ok_and(|v| v == "0") {
         partex_core::ssa::CLASS_READS.store(false, std::sync::atomic::Ordering::Relaxed);
     }
+    if let Some(p) = std::env::var("PARTEX_SSA_WATCH_SLOT")
+        .ok()
+        .and_then(|v| v.parse().ok())
+    {
+        partex_core::ssa::WATCH_SLOT.store(p, std::sync::atomic::Ordering::Relaxed);
+        if let Some(f) = std::env::var("PARTEX_SSA_WATCH_FROM")
+            .ok()
+            .and_then(|v| v.parse().ok())
+        {
+            partex_core::ssa::WATCH_FROM.store(f, std::sync::atomic::Ordering::Relaxed);
+        }
+        partex_core::ssa::ENTRY_CHECK.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+    if std::env::var("PARTEX_SSA_ENTRY_CHECK").is_ok_and(|v| v == "1") {
+        partex_core::ssa::ENTRY_CHECK.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
     if std::env::var("PARTEX_SSA_SOFT_READS").is_ok_and(|v| v == "0") {
         partex_core::ssa::SOFT_READS_ON.store(false, std::sync::atomic::Ordering::Relaxed);
     }
@@ -1161,6 +1177,7 @@ fn run_ssa(host: native::NativeHost, params: Params, command_line: &[u8]) -> i32
         partex_core::ssa::settle(&mut tex, trace, apply, &mut t, r.commands, ns)
     });
     let millis = t0.elapsed().as_secs_f64() * 1e3;
+    report_entry_check(&tex, 0);
     if std::env::var("PARTEX_SSA_RERUN_CHECK").is_ok_and(|v| v == "1") && !rerun_check(&mut tex) {
         return 3;
     }
@@ -1372,6 +1389,21 @@ fn rebuild_ssa(
     }
     write_view(tex, n);
     Ok((rr.edits > 0).then_some(rr.history))
+}
+
+/// `PARTEX_SSA_ENTRY_CHECK=1`: the reads that did not see what the
+/// definitions reaching their step made (`ssa::ENTRY_CHECK`).
+fn report_entry_check(tex: &Tex<native::NativeHost, partex_core::ssa::SsaTracker>, n: usize) {
+    if !partex_core::ssa::ENTRY_CHECK.load(std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+    let (count, first) = partex_core::ssa::entry_check_report(tex);
+    eprintln!(
+        "partex: ssa build {n}: entry check: {count} reads not as their step's definitions say"
+    );
+    for l in first {
+        eprintln!("partex: ssa build {n}: entry check: {l}");
+    }
 }
 
 /// `PARTEX_SSA_DAG=<file>`: the build's steps as a dependency graph

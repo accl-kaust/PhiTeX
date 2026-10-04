@@ -131,6 +131,21 @@ pub enum Fam {
     Class,
 }
 
+/// The entry check (the CLI's `PARTEX_SSA_ENTRY_CHECK=1`): each read of a
+/// step from outside it compared with the version the definitions reaching
+/// the step made ([`RecState::entry_bad`]): where they differ, the store
+/// the step runs on is not the one its definitions say (a definition or a
+/// read the build did not record).
+pub static ENTRY_CHECK: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// An eqtb slot watched (the CLI's `PARTEX_SSA_WATCH_SLOT=<p>`; -1 none):
+/// a step that changes it and leaves no definition of it is reported as
+/// the entry check's findings are ([`RecState::entry_bad`]).
+pub static WATCH_SLOT: core::sync::atomic::AtomicI64 = core::sync::atomic::AtomicI64::new(-1);
+/// From this step on (`PARTEX_SSA_WATCH_FROM`), [`WATCH_SLOT`] at each
+/// step's end ([`RecState::watch_log`]).
+pub static WATCH_FROM: core::sync::atomic::AtomicI64 = core::sync::atomic::AtomicI64::new(-1);
+
 /// Class reads on ([`Tracker::read_class`]); off (the CLI's
 /// `PARTEX_SSA_CLASS_READS=0`), a lookup that wants only the token reads
 /// the meaning, to compare a build with them and without.
@@ -139,6 +154,28 @@ pub static CLASS_READS: core::sync::atomic::AtomicBool = core::sync::atomic::Ato
 /// a local assignment reads the value it replaces.
 pub static SOFT_READS_ON: core::sync::atomic::AtomicBool =
     core::sync::atomic::AtomicBool::new(true);
+
+/// [`ENTRY_CHECK`]'s findings, the slots named: how many, and the first.
+#[must_use]
+pub fn entry_check_report<H: Host>(tex: &Tex<H, SsaTracker>) -> (u64, Vec<String>) {
+    let r = tex.tracker.rec.borrow();
+    let mut lines: Vec<String> = alloc::vec![alloc::format!(
+        "writes with no call open in a step, with no step open: {:?}",
+        r.rt.root_writes()
+    )];
+    lines.extend(r.st.watch_log.iter().cloned());
+    lines.extend(r.st.entry_bad.iter().map(|(id, s, want, got, skip)| {
+        alloc::format!(
+            "step {id}: {s}={}{} reaching {:04x}, {} {:04x}",
+            view::trace_name(tex, &r.st, *s),
+            if *skip { "!" } else { "" },
+            want.0 & 0xffff,
+            if *skip { "left at" } else { "read" },
+            got.0 & 0xffff
+        )
+    }));
+    (r.st.entry_bad_count, lines)
+}
 
 /// The version of a [`Fam::Class`] slot holding class `c`.
 fn class_version(c: u8) -> Version {
@@ -876,6 +913,22 @@ pub struct RecState {
     pub stale: BTreeMap<Fam, u64>,
     /// The first slots read stale.
     pub stale_first: Vec<Slot>,
+    /// [`ENTRY_CHECK`]: the first reads of a step from outside it whose
+    /// version was not the one the definitions reaching the step made
+    /// (the step, the slot, that version, the version read).
+    /// (A step's end that leaves out a definition of a slot whose value it
+    /// changed, as a group's end that gave the slot back its entry value
+    /// would: the slot with `!` after it.)
+    pub entry_bad: Vec<(partex_ssa::fold::StepId, Slot, Version, Version, bool)>,
+    /// [`ENTRY_CHECK`]'s count of such reads.
+    pub entry_bad_count: u64,
+    /// The open step's run's [`RecState::entry_bad`] reads, kept when the
+    /// step ends and dropped with the run.
+    pub entry_bad_run: Vec<(partex_ssa::fold::StepId, Slot, Version, Version, bool)>,
+    /// How many reads [`RecState::entry_bad_run`] counted.
+    pub entry_bad_run_count: u64,
+    /// [`WATCH_FROM`]: the watched slot at each step's end.
+    pub watch_log: Vec<String>,
 
     /// Reads verified by family (the lookups' comparisons: `View::version`
     /// calls), and reads noted by family, with the allocators' slots (the
@@ -1113,7 +1166,32 @@ impl Recorder {
 
     fn note(&mut self, s: Slot, v: Version) {
         self.st.noted[count_ix(s)] += 1;
+        self.note_read(s, v);
+    }
+
+    /// The runtime's read of `s` at `v`, checked when [`ENTRY_CHECK`].
+    #[inline]
+    fn note_read(&mut self, s: Slot, v: Version) {
+        if !ENTRY_CHECK.load(core::sync::atomic::Ordering::Relaxed) {
+            self.rt.note_read(&Loc::State(s), v);
+            return;
+        }
+        let n = self.rt.open_step_reads_len();
         self.rt.note_read(&Loc::State(s), v);
+        // (only what a rebuild puts back: allocated numbers, fonts and the
+        // like are not placed, by design)
+        if self.rt.open_step_reads_len() > n
+            && rebuild::positioned(&s)
+            && let Some(id) = self.rt.open_step_id()
+            && let Some(key) = self.rt.fold.steps.get(id as usize).map(|t| t.key)
+            && let Some(rv) = rebuild::reaching_version(self, &s, key)
+            && rv != v
+        {
+            self.st.entry_bad_run_count += 1;
+            if self.st.entry_bad_run.len() < 40 {
+                self.st.entry_bad_run.push((id, s, rv, v, false));
+            }
+        }
     }
 
     /// A line of level `j` done: its read, by its tokens under `codes` (if
@@ -1244,11 +1322,13 @@ pub struct SsaTracker {
     fonts_made: core::cell::Cell<u64>,
     /// The open step's copies of its entry values to the save stack
     /// (value numbers, symbolically): each eqtb slot a local assignment
-    /// saved before the step wrote it, with its group level and
-    /// [`Runtime::entry_write`]'s `(step, w)`. The
+    /// saved before the step wrote it, with its group level, its entry on
+    /// the stack (which identifies the copy: a slot can be saved twice in
+    /// a group, a global assignment between) and [`Runtime::entry_write`]'s
+    /// `(step, w)`. The
     /// group's end copies the entry value back ([`Tracker::restored`]);
     /// one still on the stack at the step's end is a read of it.
-    entry_saves: RefCell<Vec<(Slot, i32, u64, u64)>>,
+    entry_saves: RefCell<Vec<(Slot, i32, i32, u64, u64)>>,
     /// The slots a group's end gave back their entry values to.
     undone: RefCell<Vec<Slot>>,
     /// The group level the open step began at: a local assignment in a
@@ -1256,6 +1336,8 @@ pub struct SsaTracker {
     /// (a soft read); in an older group whether it saves depends on the
     /// value's level, a read ([`Tracker::soft_read`]).
     step_level: core::cell::Cell<i32>,
+    /// [`WATCH_SLOT`]'s version at the last step's end.
+    watch_seen: core::cell::Cell<u128>,
     soft_kept: core::cell::Cell<u64>,
     soft_read: core::cell::Cell<u64>,
     /// Large contents loaded, with their versions, by identity: the host
@@ -1392,6 +1474,7 @@ impl SsaTracker {
             entry_saves: RefCell::new(Vec::new()),
             undone: RefCell::new(Vec::new()),
             step_level: core::cell::Cell::new(crate::web::LEVEL_ONE),
+            watch_seen: core::cell::Cell::new(0),
             soft_kept: core::cell::Cell::new(0),
             soft_read: core::cell::Cell::new(0),
             load_versions: RefCell::new(Vec::new()),
@@ -1539,8 +1622,7 @@ impl SsaTracker {
             }
         }
         r.st.noted[count_ix(s)] += 1;
-        r.rt.note_read(&Loc::State(s), v);
-
+        r.note_read(s, v);
         if let Some(c) = stamp {
             c.set(generation);
         }
@@ -1593,11 +1675,42 @@ impl SsaTracker {
         let s = Slot::of(cell);
         let v = r.st.vers.revision(s);
         r.st.noted[count_ix(s)] += 1;
-        r.rt.note_read(&Loc::State(s), v);
+        r.note_read(s, v);
     }
 }
 
 impl SsaTracker {
+    /// ([`WATCH_FROM`]: an event of the watched slot, logged in its steps.)
+    fn watch_event(r: &mut Recorder, s: Slot, what: &str) {
+        let (w, from) = (
+            WATCH_SLOT.load(core::sync::atomic::Ordering::Relaxed),
+            WATCH_FROM.load(core::sync::atomic::Ordering::Relaxed),
+        );
+        let base = match s.0 {
+            Fam::Eqtb | Fam::Class => s.1,
+            _ => return,
+        };
+        if w != base || from < 0 || r.st.watch_log.len() >= 4000 {
+            return;
+        }
+        let Some((id, ser)) = r.rt.open_step_serial() else {
+            return;
+        };
+        if i64::from(id) < from || i64::from(id) > from + 40 {
+            return;
+        }
+        let v = table_at(s.0, s.1)
+            .and_then(|(f, i)| r.st.vers.known_at(f, i))
+            .unwrap_or(Version::ABSENT);
+        let ew = r.rt.entry_write(&s);
+        let line = alloc::format!(
+            "  step {id} (serial {ser}): {s} {what}: version {:04x}, unwritten {:?}",
+            v.0 & 0xffff,
+            ew
+        );
+        r.st.watch_log.push(line);
+    }
+
     /// End the open step ([`Runtime::end_step_soft`]), its values
     /// numbered symbolically: a slot a group's end gave back its entry
     /// value (a copy, [`Tracker::restored`]) and not written again is not
@@ -1606,6 +1719,60 @@ impl SsaTracker {
     /// read of the step. (Every other write stays a definition, a dead
     /// save stack entry's too: a rebuild puts the store back by them.)
     pub(crate) fn end_step(&self, r: &mut Recorder) -> Option<partex_ssa::fold::StepId> {
+        let id = self.end_step_inner(r);
+        // (the run's findings kept: a dropped run's go with it)
+        r.st.entry_bad_count += core::mem::take(&mut r.st.entry_bad_run_count);
+        let run = core::mem::take(&mut r.st.entry_bad_run);
+        let room = 40usize.saturating_sub(r.st.entry_bad.len());
+        r.st.entry_bad.extend(run.into_iter().take(room));
+        // ([`WATCH_SLOT`]: a step that changed the slot and left no
+        // definition of it)
+        let w = WATCH_SLOT.load(core::sync::atomic::Ordering::Relaxed);
+        if w >= 0
+            && let Some(id) = id
+        {
+            let s = Slot(Fam::Eqtb, w);
+            let now = table_at(s.0, s.1)
+                .and_then(|(f, i)| r.st.vers.known_at(f, i))
+                .unwrap_or(Version::ABSENT);
+            let before = Version(self.watch_seen.replace(now.0));
+            let from = WATCH_FROM.load(core::sync::atomic::Ordering::Relaxed);
+            if from >= 0 && i64::from(id) >= from && r.st.watch_log.len() < 4000 {
+                // (each step's end: whether it defines the slot, with what
+                // version its record holds, and the slot's version)
+                let def =
+                    r.rt.fold
+                        .latest(&s)
+                        .filter(|d| d.step == id)
+                        .and_then(|d| r.rt.record(d.rec).writes.get(d.ix as usize).cloned())
+                        .map(|(_, v)| v.map_or(Version::ABSENT, |v| v.0));
+                let line = alloc::format!(
+                    "step {id}: defines {} recorded {} now {:04x} (before {:04x})",
+                    r.rt.fold.defines(&s, id),
+                    def.map_or(alloc::string::String::from("-"), |v| alloc::format!(
+                        "{:04x}",
+                        v.0 & 0xffff
+                    )),
+                    now.0 & 0xffff,
+                    before.0 & 0xffff
+                );
+                r.st.watch_log.push(line);
+            }
+            // (a hint only: a rebuild's placement before the step changes
+            // the slot too)
+            if before != now && !r.rt.fold.defines(&s, id) && r.st.watch_log.len() < 4000 {
+                let line = alloc::format!(
+                    "step {id}: {s} changed, not defined: {:04x} -> {:04x}",
+                    before.0 & 0xffff,
+                    now.0 & 0xffff
+                );
+                r.st.watch_log.push(line);
+            }
+        }
+        id
+    }
+
+    fn end_step_inner(&self, r: &mut Recorder) -> Option<partex_ssa::fold::StepId> {
         let saved = core::mem::take(&mut *self.entry_saves.borrow_mut());
         let undone = core::mem::take(&mut *self.undone.borrow_mut());
         if saved.is_empty() && undone.is_empty() {
@@ -1620,6 +1787,26 @@ impl SsaTracker {
             .collect();
         skip.sort_unstable();
         skip.dedup();
+        if ENTRY_CHECK.load(core::sync::atomic::Ordering::Relaxed)
+            && let Some(id) = r.rt.open_step_id()
+            && let Some(key) = r.rt.fold.steps.get(id as usize).map(|t| t.key)
+        {
+            // (a class's version is made from the meaning: the meaning's
+            // own check covers it)
+            for &s in skip.iter().filter(|s| s.0 != Fam::Class) {
+                let now = table_at(s.0, s.1)
+                    .and_then(|(f, i)| r.st.vers.known_at(f, i))
+                    .unwrap_or_else(|| r.st.vers.revision(s));
+                if let Some(rv) = rebuild::reaching_version(r, &s, key)
+                    && rv != now
+                {
+                    r.st.entry_bad_count += 1;
+                    if r.st.entry_bad.len() < 40 {
+                        r.st.entry_bad.push((id, s, rv, now, true));
+                    }
+                }
+            }
+        }
         self.soft_kept.set(self.soft_kept.get() + skip.len() as u64);
         self.soft_read.set(self.soft_read.get() + read.len() as u64);
         r.rt.end_step_soft(&read, &skip)
@@ -1629,6 +1816,10 @@ impl SsaTracker {
     pub(crate) fn drop_softs(&self) {
         self.entry_saves.borrow_mut().clear();
         self.undone.borrow_mut().clear();
+        if let Ok(mut r) = self.rec.try_borrow_mut() {
+            r.st.entry_bad_run.clear();
+            r.st.entry_bad_run_count = 0;
+        }
     }
 
     /// How many soft reads the steps' ends settled as untouched (neither
@@ -1685,10 +1876,7 @@ impl Tracker for SsaTracker {
             return;
         };
         if r.on {
-            r.rt.note_read(
-                &Loc::State(Slot(Fam::Class, i64::from(p))),
-                class_version(0),
-            );
+            r.note_read(Slot(Fam::Class, i64::from(p)), class_version(0));
         }
     }
 
@@ -1728,12 +1916,14 @@ impl Tracker for SsaTracker {
         } else {
             // (a group older than the step: the save depends on the
             // value's level)
-            r.rt.note_read(&Loc::State(s), v);
+            r.note_read(s, v);
         }
     }
 
-    fn save_entry(&self, cell: Cell, level: i32) {
-        let Cell::Eqtb(p) = cell else { return };
+    fn save_entry(&self, cell: Cell, level: i32, at: Option<i32>) {
+        let (Cell::Eqtb(p), Some(at)) = (cell, at) else {
+            return;
+        };
         let Ok(mut r) = self.rec.try_borrow_mut() else {
             return;
         };
@@ -1742,10 +1932,15 @@ impl Tracker for SsaTracker {
         }
         // (the slot, and what is made of it: a control sequence's class,
         // [`Fam::Class`], put back with it)
+        Self::watch_event(
+            &mut r,
+            Slot::of(cell),
+            &alloc::format!("saved at level {level}"),
+        );
         let mut v = self.entry_saves.borrow_mut();
         for s in [Slot::of(cell), Slot(Fam::Class, i64::from(p))] {
             if let Some((step, w)) = r.rt.entry_write(&s) {
-                v.push((s, level, step, w));
+                v.push((s, level, at, step, w));
             }
         }
     }
@@ -1755,16 +1950,26 @@ impl Tracker for SsaTracker {
     /// as the step found it ([`Runtime::unwrite`]): a read after it reads
     /// that value, from outside the step, and the slot is not the step's
     /// definition unless written again ([`SsaTracker::end_step`]).
-    fn restored(&self, cell: Cell, level: i32) {
+    fn restore_entry(&self, cell: Cell, at: i32) {
         let Cell::Eqtb(p) = cell else { return };
         for s in [Slot::of(cell), Slot(Fam::Class, i64::from(p))] {
             let found = {
                 let mut v = self.entry_saves.borrow_mut();
                 v.iter()
-                    .rposition(|e| e.0 == s && e.1 == level)
+                    .rposition(|e| e.0 == s && e.2 == at)
                     .map(|k| v.remove(k))
             };
-            let Some((_, _, step, w)) = found else {
+            if let Ok(mut r) = self.rec.try_borrow_mut() {
+                Self::watch_event(
+                    &mut r,
+                    s,
+                    &alloc::format!(
+                        "restored from entry {at}, an entry value {}",
+                        found.is_some()
+                    ),
+                );
+            }
+            let Some((_, _, _, step, w)) = found else {
                 continue;
             };
             if let Ok(mut r) = self.rec.try_borrow_mut() {
@@ -1785,6 +1990,26 @@ impl Tracker for SsaTracker {
         if !v.is_empty() {
             v.retain(|e| e.1 < level);
         }
+    }
+
+    fn diagnose(&self) -> String {
+        let Ok(r) = self.rec.try_borrow() else {
+            return String::new();
+        };
+        let mut out = alloc::format!(
+            "entry check: {} reads not as their step's definitions say",
+            r.st.entry_bad_count
+        );
+        for (id, s, want, got, skip) in &r.st.entry_bad {
+            out.push_str(&alloc::format!(
+                "\n  step {id}: {s}{} reaching {:04x}, {} {:04x}",
+                if *skip { "!" } else { "" },
+                want.0 & 0xffff,
+                if *skip { "left at" } else { "read" },
+                got.0 & 0xffff
+            ));
+        }
+        out
     }
 
     fn font_loaded(&self, f: i32) {
@@ -2111,6 +2336,7 @@ impl Tracker for SsaTracker {
         r.st.vers.wrote(s);
         if r.on {
             r.rt.note_write(&s);
+            Self::watch_event(&mut r, s, "written (before the store)");
         }
     }
 

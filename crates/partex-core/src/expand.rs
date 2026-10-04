@@ -404,11 +404,12 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             });
         }
         panic!(
-            "watchdog: {} macro calls with no command: \\{} at line {}; the input: {}",
+            "watchdog: {} macro calls with no command: \\{} at line {}; the input: {}\n{}",
             WATCHDOG.load(Relaxed),
             name(self, self.cur_cs),
             self.line,
-            levels.join(" > ")
+            levels.join(" > "),
+            self.tracker.diagnose()
         );
     }
 

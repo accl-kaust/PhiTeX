@@ -290,8 +290,11 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         if T::SOFT_READS {
             self.tracker
                 .saved(crate::track::Cell::Eqtb(p), self.cur_level());
-            self.tracker
-                .save_entry(crate::track::Cell::Eqtb(p), self.cur_level());
+            self.tracker.save_entry(
+                crate::track::Cell::Eqtb(p),
+                self.cur_level(),
+                Some(self.save_ptr),
+            );
         }
         if l == LEVEL_ZERO {
             self.set_save_type(self.save_ptr(), RESTORE_ZERO);
@@ -329,7 +332,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             self.tracker
                 .saved(crate::track::Cell::Eqtb(p), self.cur_level());
             self.tracker
-                .save_entry(crate::track::Cell::Eqtb(p), self.cur_level());
+                .save_entry(crate::track::Cell::Eqtb(p), self.cur_level(), None);
         }
         let word = self.peek_eqtb(p);
         let obj = self.peek_obj(p).cloned();
@@ -645,6 +648,8 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                         if T::SOFT_READS {
                             self.tracker
                                 .restored(crate::track::Cell::Eqtb(p), self.cur_level() + 1);
+                            self.tracker
+                                .restore_entry(crate::track::Cell::Eqtb(p), self.save_ptr);
                         }
                         if tracing(self) {
                             self.restore_trace(p, b"restoring");
@@ -657,6 +662,8 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                     if T::SOFT_READS {
                         self.tracker
                             .restored(crate::track::Cell::Eqtb(p), self.cur_level() + 1);
+                        self.tracker
+                            .restore_entry(crate::track::Cell::Eqtb(p), self.save_ptr);
                     }
                     if tracing(self) {
                         self.restore_trace(p, b"restoring");
