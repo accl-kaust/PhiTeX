@@ -649,6 +649,34 @@ impl Default for ObjTab {
 /// `sup_obj_tab_size`.
 pub(crate) const SUP_OBJ_TAB_SIZE: usize = 8_388_607;
 
+/// A walk along an object list, from its head to the entry whose link
+/// is 0 ([`ObjTab::walk`]), each link read when the walk moves past its
+/// entry. It ends past as many entries as the table holds: a run of a
+/// step that read entries at a later definition (dropped at its end and
+/// run again with them placed, DESIGN 7.17.3) may find a list that never
+/// ends, and only a run that ends is dropped. (The entries of one run, a
+/// list made as pdfTeX makes it, end before the bound.)
+pub(crate) struct Walk {
+    at: i32,
+    started: bool,
+    left: usize,
+}
+
+impl Walk {
+    /// The next entry, if any.
+    pub(crate) fn next(&mut self, objs: &ObjTab) -> Option<i32> {
+        if self.started && self.at != 0 {
+            self.at = objs.get(self.at).link;
+        }
+        self.started = true;
+        if self.at == 0 || self.left == 0 {
+            return None;
+        }
+        self.left -= 1;
+        Some(self.at)
+    }
+}
+
 impl ObjTab {
     /// `sys_obj_ptr`: the last object, object streams included.
     pub(crate) fn sys_obj_ptr(&self) -> i32 {
@@ -661,6 +689,15 @@ impl ObjTab {
             self.vtab.len()
         } else {
             self.tab.len()
+        }
+    }
+
+    /// A walk along the list of type `t` ([`Walk`]).
+    pub(crate) fn walk(&self, t: usize) -> Walk {
+        Walk {
+            at: self.head[t],
+            started: false,
+            left: self.len(),
         }
     }
 
@@ -910,13 +947,11 @@ impl ObjTab {
             // (SSA mode keeps no list of them: the destinations' list,
             // newest first, has them)
             let mut v = Vec::new();
-            let mut k = self.head[OBJ_TYPE_DEST];
-            while k != 0 {
-                let e = self.get(k);
-                if let Id::Name(s) = &e.info {
+            let mut w = self.walk(OBJ_TYPE_DEST);
+            while let Some(k) = w.next(self) {
+                if let Id::Name(s) = &self.get(k).info {
                     v.push((s.clone(), k));
                 }
-                k = e.link;
             }
             v.reverse();
             return v;
@@ -1302,12 +1337,15 @@ impl ObjTab {
                 self.head[t] = k;
             } else {
                 let mut q = p;
-                while p != 0 {
+                let mut left = self.len();
+                while p != 0 && left > 0 {
                     if self.get(p).info.num() < n {
                         break;
                     }
                     q = p;
                     p = self.get(p).link;
+                    // (a list that never ends: [`Walk`])
+                    left -= 1;
                 }
                 self.get_mut(q).link = k;
                 self.get_mut(k).link = p;
@@ -1342,11 +1380,13 @@ impl ObjTab {
     /// pdfTeX §1546: `pdf_check_obj`: whether object `n` is on the list
     /// of type `t`.
     pub(crate) fn on_list(&self, t: usize, n: i32) -> bool {
-        let mut k = self.head[t];
-        while k != 0 && k != n {
-            k = self.get(k).link;
+        let mut w = self.walk(t);
+        while let Some(k) = w.next(self) {
+            if k == n {
+                return true;
+            }
         }
-        k != 0
+        false
     }
 
     pub(crate) fn is_scheduled(&self, k: i32) -> bool {
@@ -1361,5 +1401,50 @@ impl ObjTab {
         if self.get(k).offset == -2 {
             self.get_mut(k).offset = -1;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A run of a step that read entries at a later definition (the
+    /// thesis's cold trip 2): font `a`'s entry, as a later run left it,
+    /// links to font `b`, which the step's head reaches, and the step
+    /// makes `a` again, pushing it on the list it is on: the walks end.
+    #[test]
+    fn walk_ends_on_a_list_that_never_ends() {
+        let mut t = ObjTab::default();
+        let a = t.create(OBJ_TYPE_FONT, Id::Num(1));
+        let b = t.create(OBJ_TYPE_FONT, Id::Num(2));
+        let mut e = t.get(a).clone();
+        e.link = b;
+        t.set_entry(a, Some(e));
+        assert!(t.on_list(OBJ_TYPE_FONT, b));
+        assert!(!t.on_list(OBJ_TYPE_FONT, 99));
+        let mut w = t.walk(OBJ_TYPE_FONT);
+        let mut n = 0;
+        while w.next(&t).is_some() {
+            n += 1;
+        }
+        assert_eq!(n, t.len());
+        // a page made on such a list is placed
+        let p = t.create(OBJ_TYPE_PAGE, Id::Num(1));
+        let mut e = t.get(p).clone();
+        e.link = p;
+        t.set_entry(p, Some(e));
+        t.create(OBJ_TYPE_PAGE, Id::Num(0));
+        // and a list made as pdfTeX makes it is walked whole
+        let mut t = ObjTab::default();
+        let ks: Vec<i32> = (0..5)
+            .map(|i| t.create(OBJ_TYPE_FONT, Id::Num(i)))
+            .collect();
+        let mut w = t.walk(OBJ_TYPE_FONT);
+        let mut seen = Vec::new();
+        while let Some(k) = w.next(&t) {
+            seen.push(k);
+        }
+        seen.reverse();
+        assert_eq!(seen, ks);
     }
 }

@@ -752,8 +752,8 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             let map = self.fm_entry(f);
             let name = self.font_name_bytes(f);
             let base_name = expanded_from.map(|b| self.font_name_bytes(b));
-            let mut i = self.pdf.objs.head[super::objtab::OBJ_TYPE_FONT];
-            while i != 0 {
+            let mut w = self.pdf.objs.walk(super::objtab::OBJ_TYPE_FONT);
+            while let Some(i) = w.next(&self.pdf.objs) {
                 let k = self.pdf.objs.get(i).info.num();
                 let same_map = match (&map, &self.fm_entry(k)) {
                     (Some(a), Some(b)) => Arc::ptr_eq(a, b),
@@ -767,7 +767,6 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                     let nk = self.pdf_font_ref(k).num;
                     return self.pdf_use_font(f, if nk < 0 { nk } else { -k });
                 }
-                i = self.pdf.objs.get(i).link;
             }
         }
         let k = self.pdf_create_obj(super::objtab::OBJ_TYPE_FONT, Id::Num(f))?;

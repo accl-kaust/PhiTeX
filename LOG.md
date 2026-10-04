@@ -13001,3 +13001,48 @@ and 200 paragraphs look the name up. `Case.trip_steps` bounds the steps
 of the cold build's later trips at 30. On f2fa90b trip 2 ran 229 steps
 and the case fails; with the fix it runs 27 and passes. The `names`,
 `include`, `bibtex` and `fontid` cases are identical with `--fixpoint`.
+
+## 2026-10-04 — A walk of a PDF object list ends (branch `fontspin`)
+
+**Symptom.** The thesis's cold SSA build with `PARTEX_SSA_TRIPS=2` (or
+the default 5) spun for over 14 minutes after trip 1, in
+`pdf_init_font`'s walk of the font list (`ObjTab::get`,
+`font_name_bytes`). Trip 1 alone was fine.
+
+**Cause.** In trip 2, a step that ships a page (step 66986) runs
+again. It now uses `cmmi8` first, which an earlier page used first in
+trip 1. Its last run made no
+font object, so the font entries were not predicted. Its run is placed
+at the list's head as trip 2 has it, but it reads the entries as trip 1
+left them (their latest definitions, the job's end). Following those
+links reaches `cmmi8`'s object, which `PDF_FONTS` (placed) says is not
+used yet. So `pdf_create_obj` pushed the object on a list it was
+already on: its link pointed back into the list. That run reads entries
+at a later definition, so it is dropped at its end and run again with
+them placed (DESIGN 7.17.3). But it never reached its end: the next
+font's walk, inside the same `\shipout`, went round the cycle for ever.
+The Watch stops such a run only at a checkpoint, between commands.
+
+**Fix.** Each walk of an object list is an `objtab::Walk`. A walk ends
+at the 0 link, or after as many entries as the table holds. A list
+built as pdfTeX builds it always ends before that bound, so a run whose
+state is consistent walks exactly as before. Converted: `pdf_init_font`,
+`on_list` (`\pdfrefobj`'s check), the destinations' names (SSA), a
+page's place among the pages, and the job end's walks of the fonts,
+destinations and outlines. The dropped run ends, and the step's run
+again with the entries placed is pdfTeX's.
+
+**Measured** (fastdev, this machine, the thesis from
+`partex-cancel/target/demo/thesis` with its `.aux` files, format made
+by the binary). Before: trip 2 spins (killed at 10 minutes). After: 4
+trips, settled, 105.5 s (trip 1: 63,817 steps, 41.9 s; trip 2: 8,387
+steps, 59.2 s; trip 3: 1,918 steps, 2.7 s). The PDF, `Thesis.aux`,
+`.toc`, `.lof`, `.lot`, `.out`, `.bbl` and every chapter's `.aux` are
+byte-identical to the plain oracle's (plain partex, BibTeX between,
+4 passes). proj2: 2 trips, settled; PDF and `.aux` identical to plain.
+New `ssa-edits` case `font_rerun` (`font-rerun.tex`): a macro that the
+`.aux` defines from trip 2 on swaps the fonts of the first two pages.
+On 5547b27 its cold build hangs (killed at the 120 s timeout); now it
+settles in 2 trips. `font_rerun`, `fontid`, `fontnum`, `fontdrop` and
+`names_rerun` are identical with `--fixpoint`. New unit test
+`objtab::tests::walk_ends_on_a_list_that_never_ends`.
