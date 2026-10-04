@@ -49,7 +49,7 @@ mod view;
 pub(crate) use rebuild::{Edits, edits_from};
 pub use rebuild::{
     RebuildReport, RerunCheck, Trips, define_stream, pending, prepare_rebuilds, produced_streams,
-    rebuild, rebuild_log, rebuild_trips, rerun_check, settle,
+    rebuild, rebuild_log, rebuild_trips, rerun_check, settle, stream_values,
 };
 pub use view::{dag, step_trace, view};
 

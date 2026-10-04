@@ -681,6 +681,13 @@ template, which a compiled backend exploits.
     `ssa::define_stream`: a stored name no step opens, whose φ is the
     value given, read by loads as a job-written stream is, and written by
     the link (`ssa::produced_streams`).
+  - *What a load is served is the whole stream*, every live step's lines
+    since the last open, a step run again contributing its new run's
+    lines beside the kept steps' (never a copy that a stopped or running
+    trip half wrote): after each link it is byte for byte the file the
+    link wrote. The edit harness checks that at every stage
+    (`PARTEX_SSA_STREAMS=DIR`: the CLI dumps the streams as the stores
+    hold them after each link, `ssa::stream_values`).
 **Trips, as built** (`ssa/rebuild.rs`, `rebuild_trips` and `settle`):
 - *A build is a sequence of trips.* Trip 1 runs what the edit reaches
   (3.15, "A rebuild"); a cold build's trip 1 is the whole job. A store
