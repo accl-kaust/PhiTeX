@@ -804,6 +804,16 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             self.print_int(bytes);
             return;
         };
+        if self.flow.on {
+            // (the digits rendered with the rest of the text, `effects/flow.rs`)
+            let mut op = alloc::vec![crate::effects::flow::LEN, 0];
+            op.extend_from_slice(&file.0.to_le_bytes());
+            op.extend_from_slice(&i64::from(bytes).to_le_bytes());
+            self.flow_op(&op);
+            self.print_int(bytes);
+            self.flow_op(&[crate::effects::flow::LEN_END, 0]);
+            return;
+        }
         // (what is buffered before the digits goes out first)
         if self.log_file.id.is_some() {
             self.flush_log();

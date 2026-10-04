@@ -307,6 +307,43 @@ fn page_box(p: &partex_engine::pdfread::Page, spec: i32) -> Option<[f64; 4]> {
     })
 }
 
+/// The `/BBox` and `/Matrix` (identity if none) `write_epdf` gives page
+/// `page` of PDF file `data` (box `spec`), as a reader of the PDF reads
+/// them (display lists, DESIGN 4.6).
+pub(crate) fn included_form_box(
+    data: &Arc<[u8]>,
+    page: i32,
+    spec: i32,
+) -> Option<([f64; 4], [f64; 6])> {
+    let doc = Doc::open(data).ok()?;
+    let p = doc.page(usize::try_from(page).ok()?)?;
+    let b = page_box(&p, spec)?;
+    // (the numbers as `write_epdf` prints them, read back)
+    let read = |xs: &[f64]| -> Vec<f64> {
+        stripzeros(&eight(xs))
+            .split(|&c| c == b' ')
+            .filter_map(partex_engine::pdfread::number_value)
+            .collect()
+    };
+    let mut bbox = [0.0; 4];
+    for (x, v) in bbox.iter_mut().zip(read(&b)) {
+        *x = v;
+    }
+    let mut matrix = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
+    let m = match p.rotate {
+        90 => Some([0.0, -1.0, 1.0, 0.0, b[0] - b[1], b[1] + b[2]]),
+        180 => Some([-1.0, 0.0, 0.0, -1.0, b[0] + b[2], b[1] + b[3]]),
+        270 => Some([0.0, 1.0, -1.0, 0.0, b[0] + b[3], b[1] - b[0]]),
+        _ => None,
+    };
+    if let Some(m) = m {
+        for (x, v) in matrix.iter_mut().zip(read(&m)) {
+            *x = v;
+        }
+    }
+    Some((bbox, matrix))
+}
+
 /// A document's copy in progress (`write_epdf`'s locals and the
 /// document's `inObjList`).
 struct Copy<'d> {

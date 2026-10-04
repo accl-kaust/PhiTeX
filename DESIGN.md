@@ -689,6 +689,40 @@ template, which a compiled backend exploits.
   trips: one trip per build, no tool run, so a rebuild matches one plain
   pass and a label needs two rebuilds (the harness without
   `--fixpoint`).
+- *A rebuild stopped* (decided 2026-10-04). A rebuild stops past its
+  deadline (`SsaTracker::deadline`), past its budget of commands
+  (`SsaTracker::budget`), or when `SsaTracker::cancel` says so: the
+  extension's keystroke cancels the rebuild under way. It stops only
+  after a step's run is placed, and it keeps its work: the dirty steps
+  it did not reach, each with why (`Dirty`, its `missed` slots too),
+  and the φ its trip served (`Steps::pending`). A stop inside a cascade
+  that runs on (the step ended elsewhere) marks the old step after it,
+  which then runs again from where the step ended, as when an input
+  changed (3.15, step 5): the cascade's other state is not kept. With
+  no old step after it, the cascade goes on. The report says
+  `stopped` and the number of steps `pending` (`ssa::pending`), not
+  `unsupported`; only a state the rebuild cannot make is unsupported,
+  and then only a cold build is sound.
+  - *The next rebuild goes on.* `rebuild`, `rebuild_trips` or `settle`
+    takes the pending steps as seeds beside the new edits' (a mark
+    runs a step whichever way it came). An edit is found against the
+    data each step read, so a pending step that has not run since the
+    first edit is diffed against the source it read then, and a step
+    the stopped rebuild ran against the source it ran on: an edit
+    before, inside or after the pending region marks the steps whose
+    lines it changed, and the places each step ends at are mapped
+    through all the edits since its run. The φ is the stopped trip's.
+    A trip that stopped is not a trip that ended: no store is compared
+    and no tool runs until it ends.
+  - *The link waits.* While work is pending the program mixes runs of
+    two sources, so nothing is linked: the files, the PDF and the
+    stores' files are the last complete build's. The φ of trip 1 is
+    then still the files on disk. The CLI's rebuilds
+    (`PARTEX_SSA_REBUILD`, one per line) with `PARTEX_SSA_REBUILD_MS`
+    or `PARTEX_SSA_CANCEL_AFTER=N` (with rebuilds, counted from each
+    rebuild's start: the cold build is not cancelled) report `stopped
+    (…), N steps pending` and link nothing; after the last line, the
+    work left goes on unstopped (`continued`) and is linked.
 
 ### 3.8 Output: effects and the link
 
@@ -751,6 +785,26 @@ template, which a compiled backend exploits.
   resolved from a cache and laid out in full.
 - The writer's position in the file and the objects' offsets are not
   state: TeX never observes them, and the link places every object.
+- **Columns are the link's** (`effects/flow.rs`). `term_offset` and
+  `file_offset` (§54), where the terminal's and the log's lines stand,
+  decide only what is printed: the wrap at `max_print_line` (§58),
+  `print_nl`'s new line (§62), and the space or new line before a page's
+  `[` (§638), a file's `(` (§537), a `\message` (§1280) and `\scantokens`'
+  `( `. As state, every step that prints read and wrote them, so one
+  message a character longer changed them for every later step that
+  printed: 261 changed definitions over a thesis's build and one rebuild.
+  So in an SSA build they are not slots. The engine records what it
+  prints as a *flow* (`Effect::Flow`): characters, new lines, and each
+  of those decisions as an op (`NLC`, `SEP`), with no column in it. The
+  link renders a step's flow from the columns the step before it left
+  (`ssa::resolve_flows`): it renders the steps whose chunks changed, and
+  then each next step while the columns at a step's end come out other
+  than before, which a new line soon stops. The engine still keeps its
+  own columns, as TeX does, untracked: what they decide that is not
+  printed (`tally`, the structured diagnostics' copy) is not in a file.
+  A byte count's digits are rendered from the flow too (`LEN` …
+  `LEN_END` become `Effect::Length`). `PARTEX_SSA_FLOW=0` makes the
+  columns slots again.
 - **Writer scopes.** Each routine that changes the PDF or DVI writers'
   tables (`ship_out`, a `\pdf…` command, the job's end, a font call)
   declares the fields it reads and writes. The fields are versioned
@@ -1074,6 +1128,18 @@ readers rerun. What is built:
   dead entry left in its place, which its version would otherwise
   carry. The rerun check's changed definitions fall from 3,001 to 680 on
   the thesis, and from 15 to 5 on acro2.
+- *e-TeX's saved registers above 255, entry by entry.* The chains of
+  registers above 255 saved locally (`sa_chain`, one chain per level
+  that saved any) are a shape slot (`save.xchain`: the current chain's
+  level and each level's length) and one slot per entry, the chains laid
+  end to end (`save.xchain[i]`). An entry never changes once pushed: a
+  save reads and writes the shape and writes its entry; a restore reads
+  the shape and the entries it restores, and writes them (dropped) and
+  the shape. One slot hashing every entry made every later local
+  assignment of a register above 255 (pgf's `\dimen261`…) depend on any
+  saved value below it. A rebuild places the shape, and each entry
+  within it where a later definition holds the arrays, with the stack
+  below its pointer (`save_stack_whole`).
 
 - *Virtual PDF object numbers* (`PARTEX_SSA_VOBJ`; `pdf/objtab.rs`,
   `SsaObjs`). pdfTeX numbers objects in the order they are made, so a
@@ -1189,6 +1255,7 @@ accessor.
 | `PARTEX_SSA_SOFT_PLACE=0` | a soft-read slot's level and value decide its save and assignment as the arrays hold them (3.12) |
 | `PARTEX_SSA_DEAD_SAVES=0` | every save stack entry a step writes is its definition (3.12) |
 | `PARTEX_SSA_VOBJ=0` | the PDF object table one slot, pdfTeX's numbers as made (3.12, "Virtual PDF object numbers") |
+| `PARTEX_SSA_FLOW=0` | the log's and the terminal's columns are slots each printing step reads and writes, not the link's (3.8) |
 
 Each is exact: output is byte-identical with it on or off.
 
@@ -1798,6 +1865,139 @@ origins of argument tokens (every token of every argument read from a
 file has an entry); the side file is 4.7 MB. Making argument origins
 compact (a run per argument, its tokens' bytes found again by reading
 the source) is left to do.
+
+### 4.5 SyncTeX (2026-10-03)
+
+`-synctex=N` (or `-synctex N`) writes `<job>.synctex.gz` as pdfTeX
+1.40.29 does, byte for byte: `-synctex=-N` the uncompressed
+`<job>.synctex`, `N` with bit 2 the gzipped text under the name without
+`.gz`, bit 4 the forms' records, bit 8 the compressed `=` vertical
+positions, `0` off for good (with pdfTeX's warning if the document sets
+`\synctex`). `Tex::set_synctex(option)` is the library's switch; the
+CLI reads the option as web2c does (`strtol(optarg, NULL, 0)`).
+
+**The controller** (`partex_core::synctex`) is `synctex.c` ported: its
+context (the last node, the kern recorder, tag, line, point,
+`total_length`, `lastv`, `form_depth`, the flags), its record functions
+with their `SYNCTEX_IGNORE` variants, anchors, counts and quirks (a
+kern's record at the point of the last node that moved it; glue e-TeX's
+`hlist_out` turned into a kern recorded as one; `\synctex` read at each
+call), `synctex_dot_open`'s file names (`Input:N:` the absolute name,
+the working directory before a relative one: the host's
+`synctex_name`), `synctexterminate`'s postamble, `SyncTeX written on
+NAME.` on the terminal (not in batch mode) between `Output written on`
+and `Transcript written on`, and the files of earlier runs removed.
+gzip is zlib's `gzopen(name, "wb")`: the host's deflate at level 6 (the
+same stream whatever the chunks `gzprintf` gave it) between zlib's gzip
+header (no name, time 0, OS 3) and its CRC and length.
+
+**Events.** The engine tells the controller what pdfTeX's hooks tell
+it, where they tell it: a file opened (`synctex_start_input`, before its
+first line; the tag counter is a scalar row, each file level's tag in
+its `AlphaFile`), a sheet or form begun and ended around "Ship box p
+out", and the PDF walk's boxes (`[`, `(` before a vlist's height is
+taken, `]`, `)`), empty boxes (`v`, `h`; a vlist's between its height
+and depth), the end of a run of characters (`x`: a ligature ends one
+and begins the next, which goes on over the characters after it), kerns
+(`k`, the recorder), glue and rules moved past (`g`, `r` with
+`rule_wd`, `rule_ht`, `rule_dp`), math nodes (`$`) and form references
+(`f`). A plain run feeds each event to the controller at once.
+
+**Places.** pdfTeX gives every node of `medium_node_size` or more the
+tag of the file being read and TeX's `line` in `get_node`. Here boxes,
+rules, glue, kerns, math nodes, leaders and unset nodes carry a handle
+(`origin::Side`, outside their value) into a table of places. A node
+gets its place where it enters a list, a box register or a box being
+made (`tail_append`, `box_end`, the line breaker's lines, `hpack` and
+`vpack`'s results, an alignment's rows, `set_box_reg`): the engine's
+algorithms make nodes with none, and none of them reads input, so the
+place then is where they were made. What pdfTeX changes in place keeps
+its place: the glue at a break made `\rightskip`, a kern or math node
+at a break emptied, an unset node made a box, a rule an alignment
+stretches, a kern font expansion resizes. A copy (`\copy`, `\unhcopy`,
+`\unvcopy`) keeps its nodes' places but its rules', which pdfTeX does
+not copy; a kern hyphenation makes again has none (pdfTeX clears its
+tag, "it is too late").
+
+**SSA mode.** Events are the steps' effects (`Effect::Synctex`), and the
+build's file is rendered after each build or rebuild is linked
+(`Tex::synctex_write`): every step's events in order, through a new
+controller, each place's line moved through the edits since it was made
+as a rebuild moves a step's reads (`Edit::pos`: a position where bytes
+were inserted stays before them). The final step prints the message
+from the same render. A node made again by a step that runs again must
+not hide behind an equal value: in SSA mode each place is a handle of
+its own in `Side::HASHED`'s range, which is hashed, so what holds a node
+made again is another version and is made again too (the rest of its
+paragraph and page; an edit that moves no line costs the steps of the
+page it is on). With `SyncTeX`, no step is taken from another's record.
+
+**A document's own `\synctex`.** With no `-synctex`, the controller is
+made when the document first sets `\synctex` nonzero (`assign_int`),
+where pdfTeX's first acts: files are counted from the job's start
+whatever the setting (`synctex_start_input`; the counter a scalar row),
+the first file's name is kept for `Input:1`, and a page shipped before
+leaves it off, with pdfTeX's warning at the next sheet. In SSA mode the
+controller's flags are a scalar row, so the steps print its warnings
+where pdfTeX prints them. pdfTeX gives a node its place in `get_node`
+whatever `\synctex` is; here a node made before `\synctex` is set gets
+one where it next enters a list, box or register.
+
+**Not done.** The DVI mode (no file is written). The DVI writer
+resolves positions in its backend, from the page IR; SyncTeX would need
+`build_list`, `node_item`, `leaders_items` and `reflect.rs`'s walk to
+track `cur_h` and `cur_v` as tex.web's `hlist_out` and `vlist_out` do
+(leader boxes repeated, TeX--XeT's reversed segments) and feed the PDF
+walk's events, a sheet begun before "Completed box being shipped out"
+and ended after the memory statistics, and `Output:dvi` with offsets of
+1in (4736287sp) while pdfTeX's `pdf_output_value` is not positive. A
+session or persisted build with `SyncTeX` (saving one is refused):
+nodes' `Side` handles in the node codec, the places table, the
+controller's state and the steps' events would all have to be saved.
+The cost off and on is measured by `scripts/accl/tasks/synctex-ab.sh`
+(LOG 2026-10-03).
+
+### 4.6 Display lists: each page's drawing without the PDF (2026-10-03)
+
+A renderer beside the editor (the PhiTeX Overleaf extension) draws pages
+itself; it should not need the PDF linked and parsed for that. A page's
+display list is what its content stream draws, as items in the
+stream's order: `Glyph { font, code, x, y }`, `GlyphMatrix([a b c d])`
+(where text is drawn turned, scaled or expanded), `Rule { x, y, w, h,
+stroke, ctm }`, `Literal { bytes, mode, ctm, codes }` (a
+`\pdfliteral`'s, a color stack's, `\pdfsave`/`\pdfrestore`/
+`\pdfsetmatrix`'s text, run with `ctm`) and `XObject { kind, id,
+matrix }`. Coordinates are points in the page's default user space (the
+media box `[0 0 w h]` pdfTeX writes; `\pdfpageattr`'s if it gives one).
+
+**Made from the stream's bytes, not at ship time.** The list is the walk
+of the content stream as written (`partex_engine::pdftext::list`, the
+walk glyph origins count with), the fonts' widths those of the PDF's
+`/Widths`: each glyph is where a reader of the PDF puts it, bit for bit,
+and the walk is the one a check runs over the linked PDF. A list made by
+the encoder from pdfTeX's own positions (`cur_h`, `pdf_delta_h`) would
+differ from the PDF's by its rounding. The ship keeps only what the walk
+cannot see in the bytes: the stream (uncompressed), where each literal's
+text is in it and its mode (`emit_literal` notes it), and the resources
+(each `/F<n>`'s PDF font with its TFM's widths and map entry, each
+`/Fm<n>`'s and `/Im<n>`'s object, a PDF page image's file): `Shipped`,
+`displist.rs`. Without a recorder it is kept by the engine; with one it
+is the ship step's effect (`Effect::Display`, ignored by the link), so a
+reused step keeps its stream and a rebuild needs no link. Lists are
+walked when asked for, once per stream. Off (the default) nothing is
+kept and the output is the same bytes either way.
+
+**The API** (`partex_core::displist`): `Tex::set_display_lists(true)`
+before the cold build; then `display_pages`, `display_hashes` (a hash
+per page of its stream, box, fonts, forms and images: redraw the pages
+whose hash a rebuild changed), `display_list(page)`, `display_form(id)`,
+`display_glyphs(page)` (the codes in glyph origins' order, forms walked
+where drawn, a literal's or an included page's `None`),
+`display_font(id)` (PS name, size, the whole Type 1 file the map names,
+its encoding, the TFM's widths, slant and extend) and
+`display_image(id)`. `PARTEX_DISPLAY=1` writes `<job>.display.jsonl`.
+The `display` e2e job and the `glyphs` job check every page's list
+against `pdftext` over the PDF, and SSA rebuilds against cold builds.
 
 ---
 

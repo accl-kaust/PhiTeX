@@ -8,6 +8,7 @@ mod compat;
 mod config;
 #[cfg(feature = "deps")]
 mod deps;
+mod display;
 mod dvithread;
 mod eventlog;
 mod events;
@@ -203,6 +204,7 @@ const VALUE_OPTIONS: &[&str] = &[
     "output-directory",
     "output-format",
     "progname",
+    "synctex",
     "translate-file",
 ];
 
@@ -372,6 +374,7 @@ fn parse_command_line() -> CommandLine {
                 fmt_name = Some(o[4..].to_owned());
             }
             Some(o) if o.starts_with("progname=") => user_progname = Some(o[9..].to_owned()),
+            Some(o) if o.starts_with("synctex=") => origins::set_synctex(&o[8..]),
             Some(o) if o.starts_with("engine=") => {
                 engine = match &o[7..] {
                     "tex" => Flavor::Tex,
@@ -579,6 +582,9 @@ fn debug_switches() {
     }
     if std::env::var("PARTEX_SSA_VOBJ").is_ok_and(|v| v == "0") {
         partex_core::ssa::VOBJ.store(false, std::sync::atomic::Ordering::Relaxed);
+    }
+    if std::env::var("PARTEX_SSA_FLOW").is_ok_and(|v| v == "0") {
+        partex_core::ssa::FLOW.store(false, std::sync::atomic::Ordering::Relaxed);
     }
     if std::env::var("PARTEX_SSA_DEAD_SAVES").is_ok_and(|v| v == "0") {
         partex_core::ssa::DEAD_SAVES.store(false, std::sync::atomic::Ordering::Relaxed);
@@ -1147,6 +1153,19 @@ fn ssa_tracker() -> partex_core::ssa::SsaTracker {
     tracker
 }
 
+/// The side files asked for: glyph origins (`PARTEX_ORIGINS=1`) and
+/// display lists (`PARTEX_DISPLAY=1`), turned on before the cold build.
+fn side_files_setup<T: partex_core::track::Tracker>(tex: &mut Tex<native::NativeHost, T>) {
+    origins::setup(tex);
+    display::setup(tex);
+}
+
+/// The side files written after a build or rebuild.
+fn side_files_write<T: partex_core::track::Tracker>(tex: &mut Tex<native::NativeHost, T>) {
+    origins::write(tex);
+    display::write(tex);
+}
+
 /// `PARTEX_SSA=1`: the build on the dynamic-SSA runtime (DESIGN.md
 /// §7.17, `partex_core::ssa`), with `PARTEX_SSA_CHECK=1` check mode.
 /// `PARTEX_SSA_REBUILD=<shell command>` runs the command after the cold
@@ -1163,7 +1182,12 @@ fn run_ssa(host: native::NativeHost, params: Params, command_line: &[u8]) -> i32
     let mut between = Between::default();
     let mut tex = Tex::new(host, ssa_tracker(), params);
     tex.set_window(ssa_window());
-    origins::setup(&mut tex);
+    side_files_setup(&mut tex);
+    if rebuild.is_some() {
+        // (with rebuilds, `PARTEX_SSA_CANCEL_AFTER` cancels each rebuild,
+        // not the cold build: `rebuild_ssa`)
+        tex.tracker().cancel.set(None);
+    }
     let t0 = std::time::Instant::now();
     let r = partex_core::ssa::run_applying(&mut tex, command_line, check, 0, apply);
     if r.cancelled {
@@ -1192,7 +1216,7 @@ fn run_ssa(host: native::NativeHost, params: Params, command_line: &[u8]) -> i32
     }
     let mut linker = SsaLinker::default();
     let lr = linker.link(&mut tex);
-    origins::write(&mut tex);
+    side_files_write(&mut tex);
     ready_for_rebuilds(&tex, rebuild.is_some());
     eprintln!(
         "partex: ssa build 0: link {:.1} ms: {}; files written {:.1} ms",
@@ -1252,8 +1276,26 @@ fn run_ssa(host: native::NativeHost, params: Params, command_line: &[u8]) -> i32
     }
     write_view(&tex, 0);
     // (one rebuild after each line's command)
-    for (n, cmd) in rebuild.as_deref().unwrap_or_default().lines().enumerate() {
-        match rebuild_ssa(&mut tex, &mut linker, &mut between, trips, n + 1, cmd) {
+    let lines: Vec<&str> = rebuild.as_deref().unwrap_or_default().lines().collect();
+    for (n, cmd) in lines.iter().enumerate() {
+        match rebuild_ssa(&mut tex, &mut linker, &mut between, trips, n + 1, Some(cmd)) {
+            Ok(Some(h)) => history = h,
+            Ok(None) => {}
+            Err(code) => return code,
+        }
+    }
+    // (a rebuild that stopped left work: it goes on, unstopped, and the
+    // files are linked, DESIGN 3.7, "A rebuild stopped")
+    if partex_core::ssa::pending(&tex) > 0 {
+        tex.tracker().cancel.set(None);
+        match rebuild_ssa(
+            &mut tex,
+            &mut linker,
+            &mut between,
+            trips,
+            lines.len() + 1,
+            None,
+        ) {
             Ok(Some(h)) => history = h,
             Ok(None) => {}
             Err(code) => return code,
@@ -1285,23 +1327,34 @@ fn rebuild_traced(n: usize) -> bool {
 
 /// Rebuild `n` of an SSA build (DESIGN 7.17.3): run the edit `cmd`, then
 /// rebuild the same engine in place and link its files; the exit code it
-/// sets, if its edits changed the job's (`Err`: it failed or stopped).
+/// sets, if its edits changed the job's (`Err`: it failed or stopped
+/// short). With no `cmd`, the work a stopped rebuild left, unstopped. A
+/// rebuild that stops (`PARTEX_SSA_REBUILD_MS`, `PARTEX_SSA_CANCEL_AFTER`,
+/// each counted from the rebuild's start) keeps its work and links
+/// nothing: the next one goes on with it.
+#[allow(clippy::too_many_lines)]
 fn rebuild_ssa(
     tex: &mut Tex<native::NativeHost, partex_core::ssa::SsaTracker>,
     linker: &mut SsaLinker,
     between: &mut Between,
     trips: usize,
     n: usize,
-    cmd: &str,
+    cmd: Option<&str>,
 ) -> Result<Option<i32>, i32> {
-    let ok = std::process::Command::new("sh")
-        .arg("-c")
-        .arg(cmd)
-        .status()
-        .is_ok_and(|s| s.success());
-    if !ok {
-        eprintln!("partex: ssa: the rebuild command failed");
-        return Err(3);
+    if let Some(cmd) = cmd {
+        let ok = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(cmd)
+            .status()
+            .is_ok_and(|s| s.success());
+        if !ok {
+            eprintln!("partex: ssa: the rebuild command failed");
+            return Err(3);
+        }
+        tex.tracker().cancel.set(cancel_after());
+        tex.tracker().deadline.set(rebuild_deadline());
+    } else {
+        tex.tracker().deadline.set(None);
     }
     // (the same engine, rebuilt in place: DESIGN 7.17.3)
     let before = tex.tracker().rec.borrow().rt.stats;
@@ -1318,7 +1371,6 @@ fn rebuild_ssa(
         tools: &mut tools,
         clock: Some(clock_ns),
     };
-    tex.tracker().deadline.set(rebuild_deadline());
     let rr = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         partex_core::ssa::rebuild_trips(tex, trace, apply, &mut t)
     })) {
@@ -1334,8 +1386,21 @@ fn rebuild_ssa(
         eprintln!("partex: ssa rebuild {n}: {l}");
     }
     let millis = t0.elapsed().as_secs_f64() * 1e3;
+    if rr.resumed {
+        eprintln!("partex: ssa rebuild {n}: continued the work a stopped rebuild left");
+    }
+    report_entry_check(tex, n);
+    if let (Some(why), None) = (rr.stopped, rr.unsupported) {
+        // (the link waits until the work is done)
+        eprintln!(
+            "partex: ssa rebuild {n}: stopped ({why}), {} steps pending; {millis:.1} ms, \
+             steps run {}, commands {}",
+            rr.pending, rr.steps_run, rr.commands
+        );
+        return Ok(None);
+    }
     let lr = linker.link(tex);
-    origins::write(tex);
+    side_files_write(tex);
     let link_ms = lr.link_ms;
     eprintln!("partex: ssa rebuild {n}: link: {}", lr.how);
     let s = tex.tracker().rec.borrow().rt.stats;
@@ -1397,7 +1462,7 @@ fn rebuild_ssa(
         return Err(3);
     }
     write_view(tex, n);
-    Ok((rr.edits > 0).then_some(rr.history))
+    Ok((rr.edits > 0 || rr.resumed).then_some(rr.history))
 }
 
 /// `PARTEX_SSA_ENTRY_CHECK=1`: the reads that did not see what the
@@ -1527,7 +1592,12 @@ fn ssa_tools(
     between: &mut Between,
 ) -> impl FnMut(&mut native::NativeHost, &[(Vec<u8>, std::sync::Arc<[u8]>)]) -> (bool, Vec<String>) + '_
 {
+    // (`PARTEX_SSA_TOOLS=0`: none run, as a host without them)
+    let off = std::env::var("PARTEX_SSA_TOOLS").is_ok_and(|v| v == "0");
     move |host, streams| {
+        if off {
+            return (false, Vec::new());
+        }
         // (each stream by the path its file has, in the output directory)
         let ending = |ext: &[u8]| -> Vec<(Vec<u8>, std::sync::Arc<[u8]>)> {
             streams
@@ -1565,7 +1635,7 @@ fn report_trips(what: &str, r: &partex_core::ssa::RebuildReport) {
         .collect();
     let state = if r.settled {
         String::from("settled")
-    } else if r.unsupported.is_some() {
+    } else if r.unsupported.is_some() || r.stopped.is_some() {
         String::from("stopped")
     } else {
         let names: Vec<String> = r
@@ -2191,7 +2261,7 @@ fn run_memo(host: native::NativeHost, mut params: Params, command_line: &[u8]) -
     let memo = std::env::var("PARTEX_MEMO").unwrap_or_default();
     params.memo = !memo.is_empty() && memo != "0";
     let mut tex = Tex::new(host, Untracked, params);
-    origins::setup(&mut tex);
+    side_files_setup(&mut tex);
     if memo == "check" {
         tex.set_memo_check();
     }
@@ -2210,7 +2280,7 @@ fn run_memo(host: native::NativeHost, mut params: Params, command_line: &[u8]) -
     if effects {
         deliver_effects(&mut tex);
     }
-    origins::write(&mut tex);
+    side_files_write(&mut tex);
     if limit.is_some() {
         eprintln!(
             "partex: memo last hit {}",

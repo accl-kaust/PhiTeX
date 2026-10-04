@@ -224,6 +224,23 @@ pub trait Host {
 
     /// Keep `value` under `key` for later runs (see [`Host::cache_get`]).
     fn cache_put(&mut self, _key: u128, _value: &[u8]) {}
+
+    /// The name `SyncTeX` gives an input file the host found as `found`
+    /// (web2c's `generic_synctex_get_current_name`: absolute, the working
+    /// directory before a relative one). By default, `found`.
+    fn synctex_name(&mut self, found: &[u8]) -> Vec<u8> {
+        found.to_vec()
+    }
+
+    /// Remove output file `name` if there is one (`SyncTeX`'s file of an
+    /// earlier run that this one does not write). By default, nothing.
+    fn remove_output(&mut self, _name: &[u8]) {}
+
+    /// The name [`Host::open_write`] would print for output file `name`,
+    /// without opening it. By default, `name`.
+    fn output_name(&mut self, name: &[u8], _kind: FileKind) -> Vec<u8> {
+        name.to_vec()
+    }
 }
 
 partex_engine::persist_struct!(DateTime {

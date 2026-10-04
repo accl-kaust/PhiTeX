@@ -195,10 +195,15 @@ pub mod save {
     pub const CUR_LEVEL: u32 = 1;
     pub const CUR_GROUP: u32 = 2;
     pub const CUR_BOUNDARY: u32 = 3;
-    /// e-TeX's saved registers above 255 (`xregs.rs`'s chain).
+    /// The shape of e-TeX's chains of saved registers above 255
+    /// (`xregs.rs`): each level's length (and the current chain's level).
     pub const XCHAIN: u32 = 4;
-    /// Entry `p` is slot `ENTRY + p`.
+    /// Entry `p` is slot `ENTRY + p`, below [`XENTRY`].
     pub const ENTRY: u32 = 8;
+    /// The chains' saved register `i` (the chains laid end to end, outer
+    /// levels first) is slot `XENTRY + i`: an entry is never changed
+    /// once pushed, so a step reads only the entries it restores.
+    pub const XENTRY: u32 = 1 << 30;
 }
 
 /// The fields of `cur_list`, by [`Row::List`] slot.
@@ -277,6 +282,11 @@ pub mod page {
 pub mod scalar {
     /// The pool's end, `str_ptr` (§38).
     pub const STR_TOP: u16 = 0;
+    /// `SyncTeX`'s tag counter (`synctex.rs`).
+    pub const SYNCTEX_TAGS: u16 = 3;
+    /// `SyncTeX`'s controller's flags in SSA mode (`synctex.rs`: off,
+    /// content ready, warned), for its warnings in program order.
+    pub const SYNCTEX_FLAGS: u16 = 4;
     /// The hash's allocator, `hash_used` (§256).
     pub const HASH_USED: u16 = 1;
     /// The allocator of the hash's extra area, `hash_high` (web2c).
@@ -544,6 +554,14 @@ pub trait Tracker {
     /// value it must not, and ran past its budget (`ssa::rebuild`, "A
     /// run that read a later definition").
     fn stop_due(&self, _n: u64) -> bool {
+        false
+    }
+    /// A macro call with no command since command `n`: whether the run
+    /// stops there, a checkpoint (a rebuild's run of a step that read a
+    /// value it must not, expanding on with it, which may never end: the
+    /// run is dropped, `ssa::rebuild`, "A run that read a later
+    /// definition").
+    fn stop_expanding(&self, _n: u64) -> bool {
         false
     }
     /// (With [`Tracker::VALUES`].) The open step's name, for the keys of

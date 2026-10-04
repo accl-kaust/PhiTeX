@@ -12067,6 +12067,327 @@ cases identical over 99 stages (job 6573; the base 904ea54 gave the same,
 job 6575), and `gate` exited 0 (job 6574: e2e 37/37, trip and etrip
 identical, clippy clean).
 
+## 2026-10-04 — A stopped rebuild keeps its work (branch `resume`, agent resume)
+
+**Why.** The Overleaf extension rebuilds once per keystroke and wants
+the next keystroke to cancel the rebuild under way without losing what
+it did. A rebuild that stopped (past `SsaTracker::deadline`, past
+`SsaTracker::budget`, or `SsaTracker::cancel`) used to report
+`unsupported`. The steps it ran stayed in, but the dirty steps it had
+not reached were dropped, so the program no longer matched the source,
+and only a cold build was sound (the CLI exited 3).
+
+**What changed** (DESIGN 3.7, "A rebuild stopped"):
+- It stops only after a step's run is placed (the cases that end a
+  cascade, or before it would insert a new step). The dirty set left
+  (`Dirty`: each step's why, the missed slots) and the trip's φ go to
+  `Steps::pending`. The report says `stopped` (why) and `pending` (how
+  many steps), with `unsupported` left `None`.
+- A stop inside a cascade that runs on (the step ended elsewhere) marks
+  the old step after it (`mark_next`), as when an input changed. That
+  step then runs from where the stopped one ended, and the cascade's
+  other state (target, prediction, `ahead`) is not kept. A run can cost
+  one extra step, but it stays sound: the old step's run meets its own
+  old end or an old step's later on. When no old step follows, it does
+  not stop.
+- `rebuild` takes the pending dirty set as its seeds, beside the new
+  edits' seeds, and the stopped trip's φ over the files' (the link
+  waited, so the files are the last complete build's). A new edit is
+  diffed against the data each step read: an edit before, inside or
+  after the pending region marks the steps whose lines it changed, and
+  each step's end is mapped through every edit since its run. These are
+  the same mechanisms that already serve steps left unrun across many
+  rebuilds. `rebuild_trips` and `more_trips` return at a stop, and no
+  trip end is computed from a stopped trip. `settle`, with work pending,
+  goes on as `rebuild_trips`.
+- The link waits: nothing is linked while work is pending.
+  `ssa::pending(tex)` gives the count.
+- CLI: with `PARTEX_SSA_REBUILD`, `PARTEX_SSA_CANCEL_AFTER=N` now counts
+  from each rebuild's start, and the cold build is not cancelled. A
+  stopped rebuild prints `stopped (…), N steps pending` and links
+  nothing. The next line's rebuild prints `continued …`. After the last
+  line, the work left runs unstopped (no deadline), and then the link
+  runs. Each rebuild also reports the entry check.
+
+**The check** (`scripts/ssa-stop`): edits, each rebuild cancelled at
+its N-th step boundary, then the continuation. The PDF is compared with
+a cold SSA build of the final source (SOURCE_DATE_EPOCH=1758800000,
+FORCE_SOURCE_DATE=1), and the entry check must report 0 bad reads.
+fastdev binary, this machine:
+- `pt.tex`, 3 edits (one before the pending steps, one inside them),
+  N = 1..14: all identical.
+- `acro2.tex`, 2 edits, N = 1..40: all identical (stops in trips 1 and
+  2).
+- `ac3.tex` (`\include`), 3 edits in two files, N = 1..40: all
+  identical.
+- The thesis (private copy), the Chapter 2 edit alone, N = 1: identical
+  (rebuild 1 stopped after 1 step with 4 pending, and the continuation
+  ran 5 steps in 50 ms).
+- The thesis, 3 edits (Chapter 2, then Chapter 3, then Chapter 1, the
+  last one before the pending steps), N = 1, 2, 3, 4, 6: all identical.
+  The exit code is 1 both cold and rebuilt (the document's own
+  errors), and the entry check finds 0 bad reads at every rebuild.
+
+Gates on `52f8199` (accl): `gate` exited 0 (job 6578); `edits --brief
+--fixpoint` gave 17/17 cases identical over 99 stages (job 6579).
+## 2026-10-03: SyncTeX, byte for byte, in plain runs and SSA rebuilds (branch `synctex`; gate and cost not yet seen)
+
+`-synctex=N` writes pdfTeX's `.synctex.gz` (DESIGN 4.5): `synctex.c`'s
+controller ported, fed by events where pdfTeX's hooks are, nodes'
+places as handles outside their values.
+
+Checked against pdfTeX 1.40.29 run in the same directory (the `Input:`
+lines are absolute): a plain TeX document (font kerns, ligatures, math,
+rules, leaders of both kinds, `\copy`, an alignment, a footnote,
+`\vadjust`, discretionaries, hyphenation, accents, forms, a display, two
+pages, an `\input`), the same file, terminal and PDF for `-synctex=1`,
+`-1`, `2`, `4`, `8`, `9`, `15`, `-12`, `0` and batch mode; the e2e
+`glyphs.tex` (LaTeX, TikZ, graphicx, a savebox, a form, an included
+PDF). In SSA mode the cold build's file is the same, and so is each
+rebuild's against pdfTeX on the edited text: twelve edits of the plain
+document (a comment line, a paragraph inserted with the next one's first
+words, a word, blank lines, a line deleted, two lines joined, a line
+split, an edit in the `\input` file, a line of an alignment split) and
+six of `glyphs.tex` (the same kinds, and a TikZ node's text).
+
+What it took, beyond the port: pdfTeX in e-TeX mode turns glue set with
+its box into a kern while shipping it out ("Handle a glue node for mixed
+direction typesetting"), so its record is `k` with the glue's width;
+the glue at a line break is reused as `\rightskip`, keeping its line;
+`synctexcurrent`'s `=` compares the context's `curv`, not the point it
+prints. In SSA mode a rebuild keeps a step whose reads are the same,
+and with it the nodes it made, though a step run again before it made
+equal nodes on other lines (two lines joined: the paragraph's lines
+kept, their nodes' places stale): places are hashed there, each a handle
+of its own, so that a node made again is another version.
+
+Then (65e8322): a document's own `\synctex` turns it on as pdfTeX's
+controller does. Files are counted from the job's start whatever the
+setting (the counter a scalar row), the first file's name is kept for
+`Input:1`, and a page shipped while `\synctex` was 0 leaves it off with
+pdfTeX's warning; the `.synctex` files of an earlier run are removed at
+the end as pdfTeX removes them. In SSA mode the controller's warnings
+are printed by the steps (its flags a scalar row). Checked against
+pdfTeX, plain and SSA: `\synctex=1` on the first line, in a LaTeX
+preamble, after the first page (the warning), and with `-synctex=0`
+(the warnings). A limitation none of these meets: pdfTeX gives a node
+its place when it makes it, whatever `\synctex` is; here a node made
+before `\synctex` is set gets its place where it next enters a list,
+box or register.
+
+`cargo xtask e2e` has a job `synctex`: pdfTeX and partex in one
+directory, `-synctex=1`, `-1`, `12`, a document's own `\synctex`, and
+LaTeX's `glyphs.tex` run twice; the files compared byte for byte, then
+`synctex view` for every line and `synctex edit` on a grid of points on
+each page asked of both, the answers compared (without the `synctex`
+program it says so and compares only the files). It passes here, with
+the program. `scripts/ssa-edits` has a case `synctex` (its files
+compared as text, the two run directories' names replaced).
+
+Checked on accl at 65e8322: `accl run edits --brief --fixpoint` (job
+6523): 18/18 cases identical, 106 stages, `synctex` among them (7
+stages). Not seen when this was written: the gate (job 6522: fmt,
+clippy, `cargo xtask check` with the e2e suite, whose other jobs are
+SyncTeX off's byte identity), and the cost off and on (job 6525,
+`scripts/accl/tasks/synctex-ab.sh e5354cb 5`: the PGF subset, the
+parent commit against this one off and on, five rounds alternated, the
+PDFs compared; results in `partex-phitex-runs/cmd-6525`).
+
+Not done: the DVI mode, and persisted builds and sessions with SyncTeX
+(DESIGN 4.5 says what each would take).
+
+## 2026-10-03 — Display lists: each page's drawing without the PDF (agent display-list) — partial
+
+For the PhiTeX Overleaf extension's preview, which today links the whole
+PDF and re-parses it to draw one page (about 37 ms of a 65 ms
+keystroke): a per-page display list from shipout, so the PDF is linked
+only for the download. DESIGN 4.5 has the design;
+`partex_core::displist`'s documentation is the reference.
+
+What was built:
+
+- **The walk** (`partex_engine::pdftext`): `Text` gained an operator
+  hook (`op`, with the token's offset and operands), a glyph hook with
+  the text matrix and state (`shown`) and `end`; `pdftext::list` makes
+  a stream's items (glyphs, glyph matrices, pdfTeX's rules from `re f`
+  and its stroked thin lines, literals by the spans the ship noted,
+  `XObject`s with the CTM), `pdftext::glyphs` the codes in glyph
+  origins' order, forms walked where drawn. `pdfread::number_value`
+  reads a number as the PDF reader does, for widths and boxes.
+- **The record** (`displist.rs`): at each content stream's end the ship
+  keeps the stream's bytes (`PdfOut::stream_bytes`: `zip`'s, or the
+  pending bytes since the stream's start at level 0), the literals'
+  spans (`emit_literal`), the fonts (`FontRec`: TFM name, map entry,
+  size, the TFM's widths as `/Widths` prints them), forms and images, and
+  the box; a page's after its page object (`\pdfpageattr`). SSA:
+  `Effect::Display`, collected from the steps' effects like origins.
+- **The API**: `Tex::set_display_lists`, `display_pages`,
+  `display_hashes`, `display_list`, `display_form`, `display_glyphs`,
+  `display_font`, `display_image`, `display_stream`, `display_forms`.
+  Font ids are interned per engine (stable across rebuilds); form and
+  image ids are object numbers. `writet1::builtin_encoding` reads a Type
+  1 file's own encoding; `epdf::included_form_box` an included page's
+  `/BBox` and `/Matrix`.
+- **The side file** `PARTEX_DISPLAY=1` (`partex-cli/src/display.rs`):
+  `<job>.display.jsonl`, fonts numbered by first use so a rebuild's file
+  and a cold build's of the same text are the same bytes.
+
+Rejected: building the items in the encoder from pdfTeX's positions
+(`pdf_h`, `delta_h`): exact in sp, but not the PDF's (its rounding of
+`Td`, kerns and `/Widths`), and a second implementation of the viewer's
+arithmetic; walking the linked PDF: the point is not to link.
+
+Tests (all passed): `pdftext`'s unit tests of `list` and `glyphs` (text,
+a rule, a thin rule, a literal with text and a `cm`, scaled text, a
+form, an image, a turned rule); the effects' round trip with
+`Effect::Display`; the `display` e2e job (`tests/e2e/display.tex`: fonts
+and sizes, math, rules and a table, colors, `\rotatebox`,
+`\scalebox`, TikZ with an opacity and a turned node, a form drawn twice,
+an included PDF page, a PNG, literals in each mode, a page with
+`/Rotate 90`) against pdfTeX (every file the same with display lists
+on) and each page's list against `pdftext` over the PDF: 254 items, 152
+glyphs placed bit for bit; `microtype.tex` (font expansion, its `Tm`:
+glyph matrices 0.98 to 1.03): 3,741 items, 3,419 glyphs; SSA rebuilds
+(a comment line, then a paragraph inserted) the same side file and PDF
+as cold builds, each checked; the `glyphs` job with display lists on too
+(plain and both SSA rebuilds, glyph counts equal to origins'). fmt,
+clippy (both feature sets) and the wasm32 check pass.
+
+Verified on accl at c5e027d: the full gate (job 6515: fmt, clippy,
+`cargo xtask check`, the e2e jobs including `display` and `glyphs`,
+38/38 cases) and the SSA edits (`edits --brief --fixpoint`, job 6521:
+17/17 cases identical). A run of the edits without `--fixpoint` (job
+6516) differs only in the aux round-trip cases (readback, incremental,
+machine_edits, label, streams, fatal_end, windows), as main does
+without it.
+
+`PARTEX_DISPLAY=keep` keeps the lists and writes nothing (what keeping
+them costs a build); with `PARTEX_DISPLAY=1` stderr reports how long
+each page's list took to make and hash and to write.
+
+Left (wrap-up at the user's request):
+- **Cost not measured.** The harness (`bench/display-cost.sh`, accl cmd
+  job 6517) built both binaries and their formats, but every run exited
+  with status 2 in 0.00 s, so there are no numbers. The cause, not
+  looked into, is in the harness's `run` (likely `/usr/bin/time` or the
+  `env` call in the container), not in partex. Lists off still has to
+  be compared with c651cf3, and lists on measured.
+- **Resource resolution is unverified.** It is on branch
+  `display-resources` (8c0e3f3, not for merge):
+  - `PageList::resources` and `attrs` as `PdfValue`:
+    `\pdfpageresources`, `\pdfxform resources` and `attr`, and
+    `\pdfobj` objects (`Effect::DisplayObj`), with a form or image
+    named by its id;
+  - page hashes become a walk over every stream reached;
+  - the checker compares resources and attributes with the PDF.
+
+  It is clippy clean, but no e2e has run on it, and `display.tex` does
+  not yet have shadings, patterns or fadings. Until it lands, a list
+  carries the literal (`/pgf@CA0.5 gs`, `/Sh sh`, `/pgfpat3 scn`) but
+  not the resource it names.
+- **Ids.** Form and image ids are object numbers, which an edit that
+  makes objects before them can change. Images are recognized by their
+  bytes.
+- **The contract.** DESIGN 4.5 is a short note. The extension's
+  contract, including the `display_` names and the id-stability rules,
+  is in the documentation of `pdftext` and `displist.rs`.
+
+## 2026-10-04 — e-TeX's saved registers above 255, entry by entry (branch `xchain`)
+
+**The false dependency.** `save.xchain` (e-TeX's chains of registers
+above 255 saved locally) was one slot whose version hashed every saved
+entry of every level. Each local assignment of a register above 255 in
+a group read and wrote it whole, so a saved value that changed anywhere
+in the chain made every later step touching such a register run again.
+On a private two-edit document (a tikzpicture after the edited
+paragraph): the paragraph's last line gained a descender
+(`list.prev_depth`, a real change), the next window saved a register
+holding it, `save.xchain` changed, and steps 19234–19255 ran for
+`save:4=save.xchain` alone.
+
+**The change.** The slot is now the chains' shape (the current chain's
+level, each level's length), and each entry is its own slot
+(`save::XENTRY + i`, the chains laid end to end, outer levels first;
+`save.xchain[i]` in traces). Entries are immutable once pushed: a save
+reads and writes the shape and writes its entry; a restore reads the
+shape and each entry it restores and writes them (dropped, so a rebuild
+placing an earlier shape finds every entry's later definition) and the
+shape. Placement: the shape (`set_chain_shape` keeps the entries laid
+end to end in place, drops those past it, stand-ins for missing ones)
+and each entry within the reaching shape that a later definition holds
+are placed with the save stack (`save_stack_whole`). The entries are not
+dead-save candidates (`DEAD_SAVES` filters `ENTRY..XENTRY` only): the
+chains' vectors hold nothing past their end.
+
+**Measured** (fastdev, this machine, the document above, rebuild 2 of
+"x" then "y"): 36 steps changed, 258 ms → 16 steps, 43 ms. Entry check
+0 bad reads at every build; the rebuilt PDF equals a cold SSA build of
+the final source. `pt`, `acro2`, `ac3` (one edit each): 0 bad reads,
+PDFs identical to cold SSA builds.
+
+The course's word edit (fastdev, this machine, entry check on): 0 bad
+reads cold and rebuilt; rebuild 1 links 8,006 steps changed (8,053
+before), 8.1 s. Its rebuilt PDF is byte-identical to the one the
+previous binary rebuilds (both differ from a cold SSA build of the same
+local copy, as before this change). Gates on `29390b4` (accl): `gate`
+exited 0 (job 6584); `edits --brief --fixpoint` gave 17/17 cases
+identical over 99 stages (job 6585).
+## 2026-10-04 — The log's and the terminal's columns are the link's (agent offsets)
+
+**Why.** `term_offset` and `file_offset` (`alloc:7`, `alloc:8`) were
+scalar slots that every printing step read and wrote. TeX reads them
+only to decide what to print: the wrap at `max_print_line` (§58),
+`print_nl`'s new line (§62), and the space or new line before a page's
+`[` (§638), a file's `(` (§537), a `\message` (§1280) and
+`\scantokens`' `( `. One message a character longer changed the column
+for every later step that printed, so each of those steps ran again,
+and its own end column, a changed definition, woke the next one. On the
+thesis (64 pages; the edit `big data applications.` → `big data
+applications. x` in `Chapter_2.tex`), 261 of the changed definitions over
+the cold build's trips and the rebuild were these two slots.
+
+**What.** In an SSA build the columns are output position, like an
+object's offset (DESIGN 3.8, "Columns are the link's"):
+- The engine records what it prints to the terminal and the log as
+  `Effect::Flow` ops (`effects/flow.rs`): runs of characters, `print_ln`,
+  and each column decision as an op of its own (`NLC` for `print_nl`,
+  `SEP` for the space-or-new-line rule, with its threshold), raw bytes
+  (`wlog`, `wterm`) and a byte count's digits (`LEN` … `LEN_END`). The
+  engine keeps its own columns as TeX does, untracked; they no longer
+  are slots (`offsets_read` and `offsets_wrote` do nothing).
+- The link renders each step's flow from the columns the step before it
+  left (`ssa::resolve_flows`, at `take_step_changes`): the steps whose
+  chunks changed, then each next step while its columns at the end come
+  out other than they were. A flow chunk's version is its rendered
+  bytes', so the splice sees a step whose text moved as a changed chunk,
+  and nothing else. The splice and the full link are as they were.
+- A flow reads `Out(LOG)`, the log's being open, when it begins: a step
+  run again in a later trip found the arrays holding the log closed (the
+  job's end's definition), recorded its text for no log, and lost it (the
+  first cut of this lost `(./Acknowledgment.aux)` and 20 lines after it in
+  the thesis's cold build). The read makes the rebuild place the slot,
+  as the log's flush read it before.
+- `PARTEX_SSA_FLOW=0` keeps the columns as slots.
+
+**Measured** (thesis, fastdev, native, defaults): the "applications. x"
+edit's changed definitions of `term_offset`/`file_offset` over the build
+and rebuild went from 261 to 0. Its rebuild still runs 5,800 steps (5,523
+new): windows of 4,096 commands in a long TikZ stretch re-cut after a
+window ran a different number of commands, which the columns did not
+cause (below). The rebuild's PDF and log are byte for byte the base's
+(9f13c82) rebuild's; the cold build's are the base's cold build's. Both
+rebuilds differ from the cold build of the edited source (a "Float too
+large" warning and a page's fancyhdr warning; the PDF too): a defect
+that was there before this change.
+
+**The save stack chain, looked at.** On that edit `save.ptr` is not in
+the rebuild's chain (no step runs for it). What chains is
+`save.xchain` (93 changed definitions, 90 steps run for it) and
+`save[k]` (617): e-TeX's chain of saved registers above 255 is one slot
+holding every level's saved entries, read and written whole by each
+`\dimen324`-style save or restore, so a window deep in a TikZ figure
+reads the outer levels' saved values too.
+
 ## 2026-10-04 — Virtual PDF object numbers in SSA mode (agent pdfnum)
 
 **What prompted it.** The extension team measured the PDF object table

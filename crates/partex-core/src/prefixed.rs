@@ -237,6 +237,10 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                 self.scan_optional_equals()?;
                 self.scan_int()?;
                 self.word_define(a, p, self.cur_val)?;
+                if p == INT_BASE + partex_engine::web::SYNCTEX_CODE {
+                    // (`SyncTeX` turned on by the document)
+                    self.synctex_assigned(self.cur_val);
+                }
             }
             ASSIGN_DIMEN => {
                 let p = self.cur_chr;
@@ -1023,12 +1027,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             }
             // §1280: print string `s` on the terminal.
             let len = i32::try_from(self.length(s)).unwrap_or(i32::MAX);
-            let (term_offset, file_offset) = self.offsets();
-            if term_offset + len > self.params.max_print_line - 2 {
-                self.print_ln();
-            } else if term_offset > 0 || file_offset > 0 {
-                self.print_char(b' ');
-            }
+            self.print_sep(self.params.max_print_line - 2 - len);
             self.print(i32::try_from(s).unwrap_or(0));
             self.update_terminal();
         } else {

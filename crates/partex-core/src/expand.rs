@@ -419,6 +419,10 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         if WATCHDOG.load(core::sync::atomic::Ordering::Relaxed) > 0 {
             self.watchdog();
         }
+        if self.tracker.stop_expanding(self.commands()) {
+            self.at_checkpoint = true;
+            return Err(Jump::Checkpoint);
+        }
         self.origin_expand();
         let save_scanner_status = self.scanner_status;
         let save_warning_index = self.warning_index;

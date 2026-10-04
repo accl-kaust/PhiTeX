@@ -260,6 +260,8 @@ pub struct BoxNode {
     /// A box changed after that (`\\wd`, a shift) is versioned again
     /// ([`BoxNode::reversion`]).
     pub ver: u128,
+    /// Where it was made, for `SyncTeX` (not part of its value).
+    pub sync: crate::origin::Side,
 }
 
 /// Boxes are equal by content; the version is a name for the content.
@@ -525,20 +527,31 @@ pub enum Node {
     Glyphs(Glyphs),
     /// §135: a box.
     Box(Arc<BoxNode>),
-    /// §138: a rule; dimensions may be [`RUNNING`].
+    /// §138: a rule; dimensions may be [`RUNNING`]. `sync`: where it was
+    /// made, for `SyncTeX` (a handle, not part of its value; so are the
+    /// others' below).
     Rule {
         width: Scaled,
         height: Scaled,
         depth: Scaled,
+        sync: crate::origin::Side,
     },
     /// §149: glue. `subtype` is TeX's: 0, a glue parameter number plus 1,
     /// `cond_math_glue` (98) or `mu_glue` (99).
-    Glue { spec: GlueSpec, subtype: u8 },
+    Glue {
+        spec: GlueSpec,
+        subtype: u8,
+        sync: crate::origin::Side,
+    },
     /// §149: leaders: glue filled with a box or rule (`leader`).
     Leaders(alloc::boxed::Box<LeaderNode>),
     /// §155: a kern; `subtype` is `normal`, `explicit`, `acc_kern` or
     /// `mu_glue`.
-    Kern { width: Scaled, subtype: u8 },
+    Kern {
+        width: Scaled,
+        subtype: u8,
+        sync: crate::origin::Side,
+    },
     /// pdfTeX's margin kern: a character's protrusion into the margin,
     /// put at the start (`left`) or end of a line.
     MarginKern {
@@ -551,7 +564,11 @@ pub enum Node {
     Penalty(i32),
     /// §147: math on/off; `subtype` is `before`/`after` (plus e-TeX's LR
     /// codes).
-    Math { width: Scaled, subtype: u8 },
+    Math {
+        width: Scaled,
+        subtype: u8,
+        sync: crate::origin::Side,
+    },
     /// §143
     Ligature(alloc::boxed::Box<Ligature>),
     /// §145: a discretionary. The nodes it replaces when broken are inside
@@ -575,6 +592,8 @@ pub struct LeaderNode {
     pub kind: Leaders,
     /// A box or rule node.
     pub leader: Node,
+    /// The glue's `SyncTeX` place (not part of its value).
+    pub sync: crate::origin::Side,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -809,6 +828,8 @@ pub struct Unset {
     pub stretch_order: Order,
     pub shrink_order: Order,
     pub list: Vec<Node>,
+    /// Where it was made, for `SyncTeX` (not part of its value).
+    pub sync: crate::origin::Side,
 }
 
 /// A stable text form of a list, for tests and debugging (not TeX's
@@ -884,17 +905,18 @@ fn dump_into(s: &mut String, list: &[Node], depth: usize) {
                 width,
                 height,
                 depth: dp,
+                ..
             } => {
                 let _ = writeln!(s, "{:ind$}rule wd={width} ht={height} dp={dp}", "");
             }
-            Node::Glue { spec, subtype } => {
+            Node::Glue { spec, subtype, .. } => {
                 let _ = writeln!(s, "{:ind$}glue({subtype}) {}", "", spec_text(spec));
             }
             Node::Leaders(l) => {
                 let _ = writeln!(s, "{:ind$}leaders {:?} {}", "", l.kind, spec_text(&l.spec));
                 dump_into(s, core::slice::from_ref(&l.leader), depth + 1);
             }
-            Node::Kern { width, subtype } => {
+            Node::Kern { width, subtype, .. } => {
                 let _ = writeln!(s, "{:ind$}kern({subtype}) {width}", "");
             }
             Node::MarginKern {
@@ -909,7 +931,7 @@ fn dump_into(s: &mut String, list: &[Node], depth: usize) {
             Node::Penalty(p) => {
                 let _ = writeln!(s, "{:ind$}penalty {p}", "");
             }
-            Node::Math { width, subtype } => {
+            Node::Math { width, subtype, .. } => {
                 let _ = writeln!(s, "{:ind$}math({subtype}) {width}", "");
             }
             Node::Ligature(l) => {

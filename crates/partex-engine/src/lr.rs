@@ -71,16 +71,23 @@ pub fn balance(list: &mut [Node]) -> Problems {
     let mut open: Vec<u8> = Vec::new();
     let mut extra = 0;
     for n in list.iter_mut() {
-        if let Node::Math { width, subtype } = *n {
+        if let Node::Math {
+            width,
+            subtype,
+            sync,
+        } = *n
+        {
             if !is_end(subtype) {
                 open.push(end_of(subtype));
             } else if open.last() == Some(&end_of(subtype)) {
                 open.pop();
             } else {
                 extra += 1;
+                // (the node made a kern, its place kept)
                 *n = Node::Kern {
                     width,
                     subtype: 1, // `explicit`
+                    sync,
                 };
             }
         }
@@ -89,7 +96,11 @@ pub fn balance(list: &mut [Node]) -> Problems {
         missing: open
             .into_iter()
             .rev()
-            .map(|subtype| Node::Math { width: 0, subtype })
+            .map(|subtype| Node::Math {
+                width: 0,
+                subtype,
+                sync: crate::origin::Side(0),
+            })
             .collect(),
         extra,
     }

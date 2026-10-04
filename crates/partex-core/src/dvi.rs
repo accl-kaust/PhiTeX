@@ -282,18 +282,14 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                 return Ok(());
             }
         }
+        self.synctex_ship_off();
         let tracing_output = self.int_par(TRACING_OUTPUT_CODE);
         if tracing_output > 0 {
             self.print_nl(b"");
             self.print_ln();
             self.print_str(b"Completed box being shipped out");
         }
-        let (term_offset, file_offset) = self.offsets();
-        if term_offset > self.params.max_print_line - 9 {
-            self.print_ln();
-        } else if term_offset > 0 || file_offset > 0 {
-            self.print_char(b' ');
-        }
+        self.print_sep(self.params.max_print_line - 9);
         self.print_char(b'[');
         let mut j = 9;
         while self.count(j) == 0 && j > 0 {
@@ -603,6 +599,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                 width,
                 height,
                 depth,
+                ..
             } => {
                 advance = *width;
                 let r = rule_item(this_box, *height, *depth, *width);
@@ -689,6 +686,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                 width,
                 height,
                 depth,
+                ..
             } => {
                 // §626, §635: `goto fin_rule`.
                 if vertical {
@@ -1212,6 +1210,7 @@ mod tests {
                 ..GlueSpec::default()
             },
             subtype: 0,
+            sync: partex_engine::origin::Side(0),
         }
     }
 
@@ -1255,10 +1254,12 @@ mod tests {
                     width: 3 * pt,
                     height: pt,
                     depth: 0,
+                    sync: partex_engine::origin::Side(0),
                 },
                 Node::Kern {
                     width: 2 * pt,
                     subtype: 0,
+                    sync: partex_engine::origin::Side(0),
                 },
                 Node::Box(inner.share()),
                 glue(3 * pt),
@@ -1266,6 +1267,7 @@ mod tests {
                     width: RUNNING,
                     height: 26214, // default rule height 0.4pt
                     depth: pt,
+                    sync: partex_engine::origin::Side(0),
                 },
             ],
             ..BoxNode::default()
@@ -1273,6 +1275,7 @@ mod tests {
         let kern = |w| Node::Kern {
             width: w,
             subtype: 0,
+            sync: partex_engine::origin::Side(0),
         };
         let b0 = hbox(
             wa - 72819 + wv + 10 * pt + 5 * pt + wa + 10 * pt + 2 * ww,
@@ -1286,6 +1289,7 @@ mod tests {
                     width: 2 * pt,
                     height: RUNNING,
                     depth: RUNNING,
+                    sync: partex_engine::origin::Side(0),
                 },
                 glue(5 * pt),
                 Node::Box(v.share()),

@@ -631,6 +631,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         self.term_offset = 0;
         self.file_offset = 0;
         self.offsets_wrote(true, true);
+        self.flow_op(&[crate::effects::flow::COL0, 3]);
         self.print_banner();
         // §1337: get the first line of input and prepare to start.
         self.init_input_routines(command_line)?;
@@ -726,6 +727,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             self.start_input()?; // \input assumed
         }
         self.set_history(SPOTLESS); // ready to go!
+        self.synctex_init_command();
         // §1030: `main_control` begins with `\everyjob`.
         self.begin_toks_at(EVERY_JOB_LOC, EVERY_JOB_TEXT)?;
         self.run_main()
@@ -971,6 +973,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         }
         if self.pdf_output_fixed().1 > 0 {
             if self.history() == crate::error::FATAL_ERROR_STOP {
+                self.synctex_abort();
                 self.print_err(b" ==> Fatal error occurred, no output PDF file produced!");
             } else {
                 self.finish_pdf_file()?;
@@ -981,6 +984,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         } else {
             self.finish_dvi_file()?;
         }
+        self.synctex_terminate(self.log_opened());
         if self.log_opened() {
             self.wlog_bytes(b"\n");
             self.flush_log();

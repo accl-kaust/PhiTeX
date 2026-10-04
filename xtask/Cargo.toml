@@ -10,7 +10,9 @@ anyhow = "1"
 partex-engine = { path = "../crates/partex-engine" }
 regex = "1"
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# (`float_roundtrip`: a number read back is the `f64` written, which the
+# display lists' check compares bit for bit)
+serde_json = { version = "1", features = ["float_roundtrip"] }
 walkdir = "2"
 
 [lints]

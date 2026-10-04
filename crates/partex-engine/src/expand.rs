@@ -193,7 +193,9 @@ fn push_items(items: &mut Vec<Item>, n: &Node) {
     match n {
         Node::Glyphs(g) => items.extend(g.chars().iter().map(|&c| Item::Char(g.font, c))),
         Node::Ligature(l) => items.push(Item::Char(l.font, l.ch)),
-        Node::Kern { width, subtype: 0 } => items.push(Item::Kern(*width)),
+        Node::Kern {
+            width, subtype: 0, ..
+        } => items.push(Item::Kern(*width)),
         Node::MarginKern {
             width,
             left,
@@ -402,9 +404,14 @@ fn apply(
 ) {
     match n {
         Node::Glyphs(_) | Node::Ligature(_) => apply_text(alloc::vec![n], out, fonts, t),
-        Node::Kern { width, subtype: 0 } => out.push(Node::Kern {
+        Node::Kern {
+            width,
+            subtype: 0,
+            sync,
+        } => out.push(Node::Kern {
             width: widths.next().unwrap_or(width),
             subtype: 0,
+            sync,
         }),
         Node::MarginKern {
             width,

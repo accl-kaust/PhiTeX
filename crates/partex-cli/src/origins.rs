@@ -19,15 +19,58 @@ pub fn wanted() -> bool {
     std::env::var("PARTEX_ORIGINS").is_ok_and(|v| v == "1")
 }
 
-/// Turn origins on for `tex` if they are asked for.
+/// `-synctex=N`, as web2c reads it (`strtol(optarg, NULL, 0)`), if given.
+static SYNCTEX: std::sync::Mutex<Option<i32>> = std::sync::Mutex::new(None);
+
+/// The command line's `-synctex=N`.
+pub fn set_synctex(v: &str) {
+    if let Ok(mut s) = SYNCTEX.lock() {
+        *s = Some(strtol(v));
+    }
+}
+
+/// C's `strtol(s, NULL, 0)` into an `int`: an optional sign, then `0x`
+/// for hexadecimal or `0` for octal; what does not parse stops it (none:
+/// 0).
+fn strtol(s: &str) -> i32 {
+    let s = s.trim_start();
+    let (neg, s) = match s.as_bytes().first() {
+        Some(b'-') => (true, &s[1..]),
+        Some(b'+') => (false, &s[1..]),
+        _ => (false, s),
+    };
+    let (radix, digits) = if let Some(h) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+        (16, h)
+    } else if s.starts_with('0') {
+        (8, s)
+    } else {
+        (10, s)
+    };
+    let mut v: i64 = 0;
+    for c in digits.chars() {
+        let Some(d) = c.to_digit(radix) else { break };
+        v = (v * i64::from(radix) + i64::from(d)).min(i64::from(u32::MAX) + 1);
+    }
+    let v = if neg { -v } else { v };
+    // (`long` to `int`: the low 32 bits)
+    #[allow(clippy::cast_possible_truncation, reason = "C's conversion")]
+    let v = v as i32;
+    v
+}
+
+/// Turn origins on for `tex` if they are asked for, and `SyncTeX` if the
+/// command line asks for it.
 pub fn setup<T: Tracker>(tex: &mut Tex<NativeHost, T>) {
     if wanted() {
         tex.set_origins(true);
     }
+    if let Some(n) = SYNCTEX.lock().ok().and_then(|s| *s) {
+        tex.set_synctex(n);
+    }
 }
 
 /// A JSON string.
-fn json_str(out: &mut Vec<u8>, s: &str) {
+pub(crate) fn json_str(out: &mut Vec<u8>, s: &str) {
     out.push(b'"');
     for c in s.chars() {
         match c {
@@ -76,8 +119,11 @@ pub fn render<T: Tracker>(tex: &mut Tex<NativeHost, T>) -> Vec<u8> {
     out
 }
 
-/// Write `<job>.origins.jsonl` (if origins are on).
+/// Write `<job>.origins.jsonl` (if origins are on), and in SSA mode the
+/// build's `SyncTeX` file (if `-synctex` asked for it).
 pub fn write<T: Tracker>(tex: &mut Tex<NativeHost, T>) {
+    // (SSA mode: the build's `SyncTeX` file, from its steps' events)
+    tex.synctex_write();
     if !tex.origins_on() {
         return;
     }

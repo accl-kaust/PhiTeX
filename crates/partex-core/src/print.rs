@@ -35,6 +35,10 @@ impl<H: Host, T: Tracker> Tex<H, T> {
     /// Reads of the printing columns about to change (`term`, `file`).
     #[inline]
     fn offsets_read(&self, term: bool, file: bool) {
+        // (with the columns the link's, they are not state: `effects/flow.rs`)
+        if self.flow.on {
+            return;
+        }
         if term {
             self.scalar_read(
                 crate::track::Row::Scalar(crate::track::scalar::TERM_OFFSET),
@@ -52,6 +56,9 @@ impl<H: Host, T: Tracker> Tex<H, T> {
     /// The printing columns changed (`term`, `file`).
     #[inline]
     pub(crate) fn offsets_wrote(&self, term: bool, file: bool) {
+        if self.flow.on {
+            return;
+        }
         if term {
             self.scalar_wrote(
                 crate::track::Row::Scalar(crate::track::scalar::TERM_OFFSET),
@@ -98,12 +105,87 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         self.term_offset = 0;
         self.file_offset = 0;
         self.offsets_wrote(true, true);
+        self.flow_op(&[crate::effects::flow::COL0, 3]);
+    }
+
+    /// The outputs printing to the selector goes to, as a flow's mask (1
+    /// the terminal, 2 the log), if printing makes flow ops.
+    fn flow_mask(&self) -> u8 {
+        if !self.flow.on {
+            return 0;
+        }
+        match self.selector() {
+            TERM_ONLY => 1,
+            LOG_ONLY => 2,
+            TERM_AND_LOG => 3,
+            _ => 0,
+        }
+    }
+
+    /// Op bytes `op` for the flow (`effects/flow.rs`), unless the decision
+    /// being made has made its op.
+    pub(crate) fn flow_op(&mut self, op: &[u8]) {
+        if !self.flow.on || self.flow.quiet {
+            return;
+        }
+        let log = self.log_file.id;
+        if let Some(fx) = &mut self.effects
+            && self.flow.push(fx, log, op)
+        {
+            self.flow_began();
+        }
+    }
+
+    /// A flow began: the log's being open, which it names, read (in a
+    /// step run again, a read the slot is placed for: the arrays may hold
+    /// the log closed, as the job's end left it).
+    fn flow_began(&self) {
+        self.out_read(crate::streams::LOG);
+    }
+
+    /// A column decision's op (`SEP`, `NLC`), then `f` deciding for the
+    /// engine's own columns, its printing making no ops.
+    fn flow_decide(&mut self, op: &[u8], f: impl FnOnce(&mut Self)) {
+        self.flow_op(op);
+        let quiet = core::mem::replace(&mut self.flow.quiet, true);
+        f(self);
+        self.flow.quiet = quiet;
+    }
+
+    /// The space or new line before a message (§638, §1280 and others):
+    /// a new line if the terminal's column is past `thr`, else a space if
+    /// either column is past its start.
+    pub(crate) fn print_sep(&mut self, thr: i32) {
+        let mask = self.flow_mask();
+        let plain = |t: &mut Self| {
+            let (term_offset, file_offset) = t.offsets();
+            if term_offset > thr {
+                t.print_ln();
+            } else if term_offset > 0 || file_offset > 0 {
+                t.print_char(b' ');
+            }
+        };
+        if mask == 0 {
+            plain(self);
+            return;
+        }
+        let mut op = alloc::vec![crate::effects::flow::SEP, mask];
+        op.extend_from_slice(&thr.to_le_bytes());
+        op.push(u8::from(self.new_line_char() == i32::from(b' ')));
+        self.flow_decide(&op, plain);
     }
 
     // §56: `wterm`, `wlog` and friends.
 
     /// `wterm`: raw bytes to the terminal.
     pub(crate) fn term_bytes(&mut self, s: &[u8]) {
+        if self.flow.on {
+            let mut op = alloc::vec![crate::effects::flow::RAW, 1];
+            op.extend_from_slice(&u32::try_from(s.len()).unwrap_or(0).to_le_bytes());
+            op.extend_from_slice(s);
+            self.flow_op(&op);
+            return;
+        }
         if T::VALUES {
             // (the terminal's bytes are effects, never read)
             self.tracker.output(Output::Term, s);
@@ -152,6 +234,13 @@ impl<H: Host, T: Tracker> Tex<H, T> {
     /// `wlog` of a Pascal string: straight to the log, not counted in
     /// `file_offset`.
     pub(crate) fn wlog_bytes(&mut self, s: &[u8]) {
+        if self.flow.on {
+            let mut op = alloc::vec![crate::effects::flow::RAW, 2];
+            op.extend_from_slice(&u32::try_from(s.len()).unwrap_or(0).to_le_bytes());
+            op.extend_from_slice(s);
+            self.flow_op(&op);
+            return;
+        }
         for &c in s {
             self.wlog(c);
         }
@@ -245,6 +334,17 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         {
             d.buf.push(b'\n');
         }
+        let mask = self.flow_mask();
+        if mask != 0 {
+            self.flow_op(&[crate::effects::flow::NL, mask]);
+            if mask & 1 != 0 {
+                self.term_offset = 0;
+            }
+            if mask & 2 != 0 {
+                self.file_offset = 0;
+            }
+            return;
+        }
         match self.selector() {
             TERM_AND_LOG => {
                 self.wterm_cr();
@@ -291,6 +391,39 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         }
         let x = self.xchr[usize::from(s)];
         let max_print_line = self.params.max_print_line;
+        let mask = self.flow_mask();
+        if mask != 0 {
+            // (the character to the flow, the wraps the link's; the
+            // engine's own columns kept as TeX keeps them)
+            if !self.flow.quiet {
+                let log = self.log_file.id;
+                if let Some(fx) = &mut self.effects
+                    && self.flow.text(fx, log, mask, x)
+                {
+                    self.flow_began();
+                }
+            }
+            if mask & 1 != 0 {
+                self.term_offset += 1;
+            }
+            if mask & 2 != 0 {
+                self.file_offset += 1;
+            }
+            if mask == 3 {
+                if self.term_offset == max_print_line {
+                    self.term_offset = 0;
+                }
+                if self.file_offset == max_print_line {
+                    self.file_offset = 0;
+                }
+            } else if self.term_offset == max_print_line || self.file_offset == max_print_line {
+                let quiet = core::mem::replace(&mut self.flow.quiet, true);
+                self.print_ln();
+                self.flow.quiet = quiet;
+            }
+            self.tally += 1;
+            return;
+        }
         match self.selector() {
             TERM_AND_LOG => {
                 self.offsets_read(true, true);
@@ -435,6 +568,15 @@ impl<H: Host, T: Tracker> Tex<H, T> {
     }
 
     fn new_line_if_needed(&mut self) {
+        let mask = self.flow_mask();
+        if mask != 0 {
+            self.flow_decide(&[crate::effects::flow::NLC, mask], Self::new_line_plain);
+            return;
+        }
+        self.new_line_plain();
+    }
+
+    fn new_line_plain(&mut self) {
         // pdfTeX §62 also ends a line written to a `\write` file.
         let write_file = self.params.flavor == Flavor::PdfTex && self.selector() < NO_PRINT;
         if !write_file {

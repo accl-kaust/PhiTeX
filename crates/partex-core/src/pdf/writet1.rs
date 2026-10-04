@@ -1833,50 +1833,8 @@ pub(crate) fn make_subset_tag(
 /// writet1.c's `writet1`: the font file stream's contents, or the
 /// message of `pdftex_fail`.
 pub(crate) fn writet1(job: &mut T1Job<'_>) -> Result<T1Out, (Fail, Vec<Vec<u8>>)> {
-    let data = job.data;
     let subsetted = job.subsetted;
-    let mut t = T1 {
-        job,
-        data,
-        pos: 0,
-        eof: false,
-        pfa: false,
-        block_length: 0,
-        dr: 55665,
-        er: 55665,
-        in_eexec: 0,
-        cs: false,
-        scan: true,
-        synthetic: false,
-        eexec_encrypt: false,
-        len_iv: 4,
-        last_hexbyte: 0,
-        line: Vec::new(),
-        cslen: 0,
-        cs_start: 0,
-        fb: Vec::new(),
-        save_offset: 0,
-        length1: 0,
-        length2: 0,
-        fontname_offset: 0,
-        standard_encoding: false,
-        cs_tab: Vec::new(),
-        cs_size: 0,
-        cs_notdef: None,
-        cs_dict_start: Vec::new(),
-        cs_dict_end: Vec::new(),
-        cs_size_pos: 0,
-        cs_token_pair: None,
-        subr_tab: Vec::new(),
-        subr_size: 0,
-        subr_max: -1,
-        subr_array_start: Vec::new(),
-        subr_array_end: Vec::new(),
-        subr_size_pos: 0,
-        stack: Vec::new(),
-        warnings: Vec::new(),
-        tag: None,
-    };
+    let mut t = T1::new(job);
     t.open_prefix();
     let run = |t: &mut T1| -> Result<Option<Vec<Vec<u8>>>, Fail> {
         if !subsetted {
@@ -1901,6 +1859,87 @@ pub(crate) fn writet1(job: &mut T1Job<'_>) -> Result<T1Out, (Fail, Vec<Vec<u8>>)
         }),
         Err(m) => Err((m, t.warnings)),
     }
+}
+
+impl<'a, 'j> T1<'a, 'j> {
+    /// A reader of `job`'s font file, at its start.
+    fn new(job: &'j mut T1Job<'a>) -> Self {
+        let data = job.data;
+        T1 {
+            job,
+            data,
+            pos: 0,
+            eof: false,
+            pfa: false,
+            block_length: 0,
+            dr: 55665,
+            er: 55665,
+            in_eexec: 0,
+            cs: false,
+            scan: true,
+            synthetic: false,
+            eexec_encrypt: false,
+            len_iv: 4,
+            last_hexbyte: 0,
+            line: Vec::new(),
+            cslen: 0,
+            cs_start: 0,
+            fb: Vec::new(),
+            save_offset: 0,
+            length1: 0,
+            length2: 0,
+            fontname_offset: 0,
+            standard_encoding: false,
+            cs_tab: Vec::new(),
+            cs_size: 0,
+            cs_notdef: None,
+            cs_dict_start: Vec::new(),
+            cs_dict_end: Vec::new(),
+            cs_size_pos: 0,
+            cs_token_pair: None,
+            subr_tab: Vec::new(),
+            subr_size: 0,
+            subr_max: -1,
+            subr_array_start: Vec::new(),
+            subr_array_end: Vec::new(),
+            subr_size_pos: 0,
+            stack: Vec::new(),
+            warnings: Vec::new(),
+            tag: None,
+        }
+    }
+}
+
+/// Type 1 font file `data`'s own encoding, as `t1_builtin_enc` reads it
+/// from the file's clear text (`StandardEncoding` spelled out), nothing
+/// written; `None` if it cannot be read (display lists, DESIGN 4.6).
+pub(crate) fn builtin_encoding(data: &[u8]) -> Option<Vec<Vec<u8>>> {
+    let mut tags = BTreeSet::new();
+    let mut last_arg = 0;
+    let mut job = T1Job {
+        data,
+        subsetted: true,
+        slant: 0,
+        extend: 0,
+        glyphs: BTreeSet::new(),
+        codes: BTreeSet::new(),
+        all_glyphs: false,
+        fontname: Vec::new(),
+        font_dim: [(0, false); 11],
+        tags: &mut tags,
+        last_arg_other_subr3: &mut last_arg,
+    };
+    let mut t = T1::new(&mut job);
+    t.open_prefix();
+    t.getline().ok()?;
+    while !t.prefix(b"/Encoding") {
+        // (the clear text ends where encryption begins)
+        if t.eof || find(&t.line, b"currentfile eexec").is_some() {
+            return None;
+        }
+        t.getline().ok()?;
+    }
+    t.builtin_enc().ok()
 }
 
 #[cfg(test)]

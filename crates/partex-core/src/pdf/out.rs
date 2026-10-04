@@ -542,6 +542,35 @@ impl PdfOut {
         core::mem::take(&mut self.buf)
     }
 
+    /// Where the next byte goes in the stream being written: how many of
+    /// its bytes there are so far (display lists, DESIGN 4.6).
+    pub(crate) fn stream_pos(&self) -> usize {
+        match &self.zip {
+            Some(z) => z.len() + self.buf.len(),
+            None => usize::try_from(self.offset() - self.save_offset).unwrap_or(0),
+        }
+    }
+
+    /// The bytes of the stream being written so far, uncompressed (what
+    /// is buffered flushed first, as `pdf_end_stream` does next); `None`
+    /// in draft mode, where no bytes are kept (display lists, DESIGN 4.6).
+    pub(crate) fn stream_bytes(&mut self) -> Option<Vec<u8>> {
+        if self.os_mode {
+            return None;
+        }
+        self.flush();
+        if let Some(z) = &self.zip {
+            return Some(z.clone());
+        }
+        if !self.seek_write_length || self.fixed_draftmode != 0 {
+            return None;
+        }
+        // (from the stream's start: the bytes kept since its `/Length`)
+        let from = self.gone - len64(self.pending.len());
+        let at = usize::try_from(self.save_offset - from).ok()?;
+        self.pending.get(at..).map(<[u8]>::to_vec)
+    }
+
     /// `pdf_ptr`.
     pub(crate) fn ptr(&self) -> usize {
         if self.os_mode {
