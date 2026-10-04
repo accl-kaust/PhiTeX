@@ -631,6 +631,10 @@ pub trait Tracker {
     /// `name` found it at hash slot `found` (0: not there), before any
     /// insertion.
     fn name_lookup(&self, _name: &[u8], _found: i32) {}
+    /// (With [`Tracker::NAMES`].) The control sequence named `name` was
+    /// entered at hash slot `p` (§260), by the step running: a step before
+    /// it that defines the name's meaning is where the name is made.
+    fn name_made(&self, _name: &[u8], _p: i32) {}
     /// (With [`Tracker::VALUES`].) §930: a look for the word `key`
     /// (`hyph::exception_key`: its `\\lccode`s and language) in the
     /// exception table found what `version` is the version of (its

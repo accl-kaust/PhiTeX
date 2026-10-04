@@ -402,6 +402,20 @@ load of what the job stored is a φ. The construction draws on:
   and glue lineages are handed out by the build and never observed: a
   string is read by its characters, a control sequence by its name. A
   node that runs again allocates past the arrays' ends.
+- **A name is made where its meaning is first defined.** Names are never
+  taken out of the hash, so a step run again in its place, or in a later
+  trip, can find a name that a later step entered. A lookup that did not
+  find the name (`\ifcsname`) read only the name and the hash slot it
+  probed, and those are not positioned. So a step that writes the meaning
+  of a name entered by a later step is, in program order, where the name
+  is made. Its write is a definition of the name and of its hash slot
+  (`SsaTracker::name_defined`), and that definition wakes the lookups in
+  between. They are not put back: the table keeps the name. LaTeX's
+  `\@ifundefined{b@key}` in a citation is such a lookup. The first trip
+  enters `b@key` at `\end{document}` (`\@testdef`). The trip that reads
+  the `\bibcite` then defines it at `\begin{document}`. Without this, the
+  citations stayed `[?]` in the converged build (the thesis, and a
+  three-line document, `names` in the edit harness).
 
 ### 3.3 Calls and records
 

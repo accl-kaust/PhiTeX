@@ -526,6 +526,9 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         self.set_text(p, i32::try_from(s).unwrap_or(0));
         self.pool_ptr += d;
         self.cs_count += 1;
+        if T::NAMES {
+            self.tracker.name_made(&self.buffer[j..j + l], p);
+        }
         Ok(p)
     }
 

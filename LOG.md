@@ -12496,3 +12496,55 @@ same long insertion, run alone with virtual numbers, rebuilds in 199 + 26
 steps (VOBJ=0: 6,476 + 26) and its `.aux` files and `.toc` equal the
 cold build's; the PDFs differ only in the known `[?, ?]` citations.
 
+## 2026-10-04 — A name is made where its meaning is first defined (agent offsets)
+
+**Symptom.** On the thesis, the rebuild of "big data applications." →
+"big data applications. x" did not match a cold build of the edited
+source, and one plain pass from the rebuild's own files changed
+`Chapter_2.aux` and `Thesis.toc`. The edit was not the cause. The SSA
+cold build already printed `[?]` for every citation in chapters 1 and 2,
+and the page breaks after them followed from that. A three-line
+document with `\cite`, `\bibliography` and BibTeX shows it, and so does
+this, which needs no BibTeX:
+`\ifcsname zz@a\endcsname` in the body, `\csname zz@a\endcsname` later in
+the body, and `\gdef\zz@a{1}` written to the `.aux`. The SSA build gave
+"undefined"; pdfTeX (a second pass) gives "defined".
+
+**Cause.** `\ifcsname` (LaTeX's `\@ifundefined`) that does not find a
+name reads only the name (`Fam::Name`) and the hash slot it probed
+(`Fam::Hash`). Neither is positioned, and no step ever *defined* them in
+a way that marks readers. The first trip enters `b@key` at
+`\end{document}`, where `\@testdef` reads the `.aux` with `\csname`. The
+second trip's `\bibcite` defines `b@key` at `\begin{document}`, finding
+the name already in the table. The `\ifcsname` between them read "not
+there", so nothing woke it.
+
+**Fix.** The tracker keeps, for each name the build entered, the key of
+the step that entered it (`made_at`, `made`, set at §260's entry,
+`Tracker::name_made`). A step that writes the meaning of a name a later
+step entered is where the name is made, in program order: its write is a definition of `Name(id)` and of
+`Hash(p)` (`SsaTracker::name_defined`). The rebuild lets those
+definitions mark their readers. It does not put them back, since the
+table keeps the name. A first cut put them back, and the thesis printed
+`\^^@=\write10` and "Font ^^@ not found". A second cut moved the
+recorded key to the defining step, and so missed the definition whenever
+that step's run was dropped and made again. The key stays the entering
+step's, and every write of the meaning by a step before it is the
+definition. A name entering is not a definition itself: one per name made
+added 322 definitions to the view test's INITEX step and changed nothing
+else.
+
+**Measured.** With the fix, the three-line document and the BibTeX one
+match pdfTeX, and the edit harness's new `names` case (`names.tex`, not
+seeded, `--fixpoint`) passes; base 9f13c82 fails it (the PDF differs).
+The thesis's citations are now numbered in both the cold build and the
+rebuild.
+
+**Left.** On the thesis "applications. x" rebuild, a plain pass from the
+rebuild's files still moves Chapter 2's page breaks (pages 18–24). The
+overfull box messages name `\U/cmr/m/n/12` where the oracle names
+`\OT1/cmr/m/n/12` (a font's identifier, `font_id_text`, set by the last
+`\font` that loaded the same TFM). On a small BibTeX document the
+converged PDF names its fonts one higher than pdfTeX's (`/F43` for
+`/F42`), because a font loaded only by an earlier trip, the bold `?` of
+an undefined citation, keeps its number.

@@ -157,6 +157,14 @@ INPUTS_EDITS = [
 # fatal-end.tex: a word, edited and back, in a job that ends fatally in
 # its last page's output routine
 FATAL_EDITS = [("Hello world.", "Hello there."), ("Hello there.", "Hello world.")]
+# names.tex (not seeded): an `\ifcsname` of a name the `.aux` defines at
+# `\begin{document}` from the second trip on, which the first trip entered
+# later in the document, as `\end{document}`'s `\@testdef` enters a
+# `\bibcite`'s name (`SsaTracker::name_defined`); then a word and back
+NAMES_EDITS = [
+    ("Second paragraph.", "Second paragraph, edited."),
+    ("Second paragraph, edited.", "Second paragraph."),
+]
 # a \label nothing refers to, then two rebuilds with no edit (LOG
 # 2026-09-29, "A label no one refers to")
 LABEL_EDITS = [("Para5x2 ", "Para5x2 \\label{new}"), ("", ""), ("", "")]
@@ -345,6 +353,7 @@ def all_cases():
         # (not seeded: the first build's second trip reads the .aux the
         # first wrote, as the next stage's pass does with one trip a build)
         latex("fatal_end", "fatal-end.tex", "pdflatex", FATAL_EDITS, seed=0),
+        latex("names", "names.tex", "pdflatex", NAMES_EDITS, seed=0),
         Case(
             "inputs",
             {"edits.tex": "inputs.tex", **{f: f for f in ("inputs-sub.tex", "inputs-probe.tex")}},
