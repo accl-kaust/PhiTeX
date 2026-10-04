@@ -2063,10 +2063,10 @@ impl Tracker for SsaTracker {
             );
         }
         // (the step open, and the rebuild's trace so far)
-        out.push_str(&alloc::format!(
-            "\nopen step: {:?}",
-            r.rt.open_step_serial()
-        ));
+        let _ = core::fmt::Write::write_fmt(
+            &mut out,
+            format_args!("\nopen step: {:?}", r.rt.open_step_serial()),
+        );
         let log = &r.st.steps.log;
         for l in &log[log.len().saturating_sub(40)..] {
             out.push_str("\n  ");
