@@ -13144,3 +13144,32 @@ IDLE_SETTLE=1, so "the rebuild" includes the keystroke's own link, about
 1 47 ms). The rest of a word's trip 1 is the page step run again, which
 re-encodes the page's PNG figures (`png::Idat::row` and `inflate`, 33%
 of the profile). That cost was already there on 24f149a.
+
+## 2026-10-04 — A page step run again does not decode its PNG figures again (branch `editslow`)
+
+**Symptom.** With the tools fix, a word changed in the thesis (Chapter_2
+line 22) still took 47 ms in trip 1 for 6 steps and 203 commands, as on
+24f149a. A space took 6.9 ms. In wasm the word's rebuild was 116 ms.
+
+**Cause.** The word re-runs the page step (57501), whose ship-out writes
+the page's images again. `write_png` decoded each PNG again (inflate,
+then the rows' filters: `png::Idat::row` 17%, `Inflate::inflate` 15.5%,
+`decode` 2.6% of the profile over 60 keystrokes), whatever had changed.
+It also decoded every row of an image it then copied as IDAT data.
+
+**Fix.** `write_png` gets the rows' colour type and depth from
+`png::output`, as `png_read_update_info` does, and reads rows only for
+an image it does not copy, as pdfTeX does. The rows are memoized through
+`Host::cached`, keyed by the file's contents and the transformations,
+the way the Type 1 subsets are, so an image written again with its file
+unchanged is not decoded again. Its object numbers and dictionary are
+still made by the step. The rows' bytes are the same, so the output is
+too.
+
+**Measured** (fastdev, this machine, thesis, KEY_TRIPS=1 with
+IDLE_SETTLE=1): a word's trip 1 47 → 8.2 ms, its rebuild 55 → 15.7 ms
+(the keystroke's link included, about 4.5 ms); a space's trip 1
+6.7 ms. After five edits the PDF is byte-identical to main's, 24f149a's
+and a plain pass's. Profile after: nothing in the page step is
+document-sized. The top items are the link's layout threads (7%) and
+`copy_png`'s IDAT bytes (2%).

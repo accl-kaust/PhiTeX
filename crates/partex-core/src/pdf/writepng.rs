@@ -4,6 +4,7 @@
 //! them after pdfTeX's transformations (`partex_engine::png`), an alpha
 //! channel as a soft mask, a palette as an `/Indexed` colour space.
 
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use partex_engine::png::{self, Info, Transforms};
@@ -167,13 +168,13 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                 b"\\pdfimageapplygamma is not implemented in partex yet",
             );
         }
-        let Ok(img) = png::read_image(&image.data, &info, t) else {
-            return self.pdftex_fail(Some(&image.name), b"libpng: internal error");
-        };
+        // (`png_read_update_info`: the rows' depth and colour type; the
+        // rows themselves are read only if not copied, as pdfTeX's are)
+        let (color_type, bit_depth) = png::output(&info, t);
         let o = &mut *self.pdf.out;
         o.int_entry_ln(b"Width", i64::from(info.width));
         o.int_entry_ln(b"Height", i64::from(info.height));
-        o.int_entry_ln(b"BitsPerComponent", i64::from(img.bit_depth));
+        o.int_entry_ln(b"BitsPerComponent", i64::from(bit_depth));
         o.print(b"/ColorSpace ");
         let others = INFO_CHRM
             | INFO_ICCP
@@ -187,20 +188,23 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         if copy
             && (major > 1 || minor > 1)
             && info.interlace == 0
-            && matches!(img.color_type, GRAY | RGB)
+            && matches!(color_type, GRAY | RGB)
             && file_gamma.is_none_or(|g| g == FP_1)
             && info.get_valid(others) == 0
         {
             if image.colorspace_ref != 0 {
                 self.png_colorspace_ref(image.colorspace_ref);
-            } else if img.color_type == GRAY {
+            } else if color_type == GRAY {
                 self.pdf.out.print_ln(b"/DeviceGray");
             } else {
                 self.pdf.out.print_ln(b"/DeviceRGB");
             }
             self.print_str(b" (PNG copy)");
-            return self.copy_png(image, &info, img.bit_depth);
+            return self.copy_png(image, &info, bit_depth);
         }
+        let Some(img) = self.png_rows(image, &info, t) else {
+            return self.pdftex_fail(Some(&image.name), b"libpng: internal error");
+        };
         let rows = &img.rows;
         let mut needs_group = false;
         match img.color_type {
@@ -304,6 +308,35 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             self.pdf_end_obj();
         }
         Ok(())
+    }
+
+    /// The image's rows after the transformations `t` (libpng's read),
+    /// content-keyed through [`Host::cached`]: a page step run again
+    /// writes its images again, and decoding a figure's PNG (inflate,
+    /// the rows' filters) was most of a rebuild that ran that step, the
+    /// file unchanged. The same file and transformations give the same
+    /// rows, so the bytes written are the same.
+    ///
+    /// [`Host::cached`]: crate::host::Host::cached
+    fn png_rows(&mut self, image: &Image, info: &Info, t: Transforms) -> Option<Arc<png::Image>> {
+        let key = {
+            use core::hash::{Hash, Hasher};
+            let mut h = partex_engine::stablehash::StableHasher::new();
+            b"writepng".hash(&mut h);
+            h.write(&image.data);
+            (t.trns_to_alpha, t.strip_alpha, t.strip_16).hash(&mut h);
+            h.finish128()
+        };
+        if let Some(m) = self
+            .host
+            .cached(key)
+            .and_then(|m| m.downcast::<png::Image>().ok())
+        {
+            return Some(m);
+        }
+        let img = Arc::new(png::read_image(&image.data, info, t).ok()?);
+        self.host.cache(key, img.clone());
+        Some(img)
     }
 
     /// A colour space given, or the device space.

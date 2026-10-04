@@ -2423,6 +2423,14 @@ impl Idat<'_> {
     }
 }
 
+/// The colour type and depth of the rows [`read_image`] gives for the
+/// transformations `t` (`png_read_update_info`), without reading them.
+#[must_use]
+pub fn output(info: &Info, t: Transforms) -> (u8, u8) {
+    let (color_type, bit_depth, _) = Transform::new(info, t).output();
+    (color_type, bit_depth)
+}
+
 /// The image as pdfTeX's `write_png` reads it: the transformations `t`
 /// set (`png_set_tRNS_to_alpha`, `png_set_strip_alpha`,
 /// `png_set_strip_16`), `png_set_interlace_handling`,
