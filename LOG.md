@@ -12700,3 +12700,44 @@ from; a retired step's was kept for good, and no run starts from it
 again. `retire` drops it. Thesis: peak 2,045,336 KB → 1,940,368 KB
 (trip 1's end 1.52 GB; the trips that ran most steps again add 0.38 GB);
 outputs, trips and steps the same.
+
+## 2026-10-04 — Saved registers above 255 are copies of their entry values (branch `tikzstale`)
+
+**The bug.** The thesis's cold SSA build (no edit; `PARTEX_SSA_TRIPS=12`,
+settled in 5 trips) converged to the plain oracle's `.aux` and `.toc`
+but drew one TikZ arrow of the page-20 figure (`\figMRRGHeterogeneityFailure`)
+otherwise: object 579, its second vertical arrow's tip at `-70.29994`
+instead of `-65.31856` (5pt) and a diagonal arrow ending at the wrong
+point. The edit (`applications. x`) was irrelevant. By trips: the PDF
+was right after trips 1 and 2 and wrong after trip 3, and a fresh
+one-trip build over trip 2's files was right: trip 3's runs again of
+steps 65276–65294 (the figure's windows) were stale.
+
+**The cause.** A local assignment in a group the step opened is a soft
+read: not a read of the step, so a rebuild does not place the slot,
+and the save stack copy (`Tracker::save_entry`, `restore_entry`) makes
+the group's end give the entry value back, so the slot is not the
+step's definition either. For e-TeX's registers above 255, saved in
+the chains (`save_ext`), `save_entry` was given no place (`None`) and
+returned: no copy was noted. A step run again in a later trip saved
+whatever the arrays held (the frontier, a later picture's `\pgf@x`),
+and the group's end wrote that value back as the step's definition,
+read by the steps after it. The rerun check shows the same on a small
+TikZ article: run alone, a step that declares pgfmath functions in a
+group ended with `\c@pgf@counta` (`\count283`) as a later step left it.
+
+**The fix.** A chain entry names its copy by its place, `-1 - i`
+(`xentry_at`, apart from the save stack's entries): `save_ext` notes it,
+`restore_ext` gives it back by it. DESIGN 3.12 ("e-TeX's saved registers
+above 255, entry by entry") says so.
+
+**Measured** (fastdev, this machine): the thesis cold build, 5 trips
+(trip 3: 6,847 → 6,829 steps), its PDF, `.aux`, `.toc`, `.out` and
+`.lof` byte-identical to the plain oracle's; the cold build and the
+`applications. x` rebuild (7 steps, 194 ms) likewise; entry check 0 bad
+reads in both builds. The small TikZ article's rerun check: changed
+definitions 37 → 34 (the `\count283` ones gone; the rest are `save[k]`
+entries). A minimal document showing the PDF difference was not found:
+the step's run is dropped and placed again whenever another read of it
+misses (its writes are placed with it), which hid the stale copy in each
+small case tried.

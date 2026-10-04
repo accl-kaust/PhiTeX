@@ -432,8 +432,8 @@ pub trait Tracker {
     fn saved(&self, _cell: Cell, _level: i32) {}
     /// `eqtb[cell]`'s value is saved at group level `level` in the save
     /// stack's entry `at` (a copy, which the group's end puts back:
-    /// [`Tracker::restore_entry`]; none, e-TeX's chain of registers above
-    /// 255, which is not put back by entry).
+    /// [`Tracker::restore_entry`]; `-1 - i` for entry `i` of e-TeX's
+    /// chains of registers above 255, laid end to end).
     fn save_entry(&self, _cell: Cell, _level: i32, _at: Option<i32>) {}
     /// The value saved at entry `at` of the save stack (as
     /// [`Tracker::save_entry`] gave it) is back in `eqtb[cell]`.
