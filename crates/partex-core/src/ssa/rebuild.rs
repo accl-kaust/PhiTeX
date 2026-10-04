@@ -1743,7 +1743,7 @@ fn glyph_union_now(rr: &mut Recorder) -> Option<u128> {
     let v = count.version();
     debug_assert_eq!(
         v,
-        Version::of(&crate::pdf::ship::glyph_union(count.rows.iter())).0,
+        { Version::of(&crate::pdf::ship::glyph_union(count.rows.iter())).0 },
         "the glyph union counted is the union"
     );
     Some(v)
@@ -2549,6 +2549,8 @@ pub fn rebuild<H: Host>(tex: &mut Tex<H, SsaTracker>, trace: bool, apply: bool) 
         if let Some(p) = s.phi.take() {
             s.last_phi = p;
         }
+        // (the steps this rebuild passed over: what they read and made)
+        r.rt.fold.release_removed();
     }
     rep
 }
@@ -3289,6 +3291,9 @@ fn go_cold<H: Host>(
     for &s in rest.iter().rev() {
         retire(tex, s, dirty, rep);
     }
+    // (the retired steps' records go now: the rest of the job, run as a
+    // cold build, makes new ones in their place)
+    tex.tracker.rec.borrow_mut().rt.collect_retired();
     rep.cold += 1;
 }
 
@@ -3338,6 +3343,11 @@ fn retire<H: Host>(
         rr.st.steps.queries.remove(&s);
         mark_store_readers(rr, &ids, key, dirty, rep);
         rr.rt.fold.remove(s, old.keys());
+        // (its end, which no run starts from again: the input it held,
+        // the token lists and the macros' arguments open there, goes)
+        if let Some(x) = rr.st.steps.inputs.get_mut(s as usize) {
+            *x = None;
+        }
         // (its chunks leave the link)
         rr.st.steps.fx_changed.push(s);
         rr.st

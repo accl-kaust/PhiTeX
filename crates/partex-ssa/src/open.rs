@@ -914,7 +914,7 @@ impl<M: Machine> Runtime<M> {
         let writes = net.iter().map(|(a, _)| (a.clone(), store.get(a))).collect();
         self.close_frame(
             fr.func, fr.name, fr.args, fr.reads, &fr.rh, &net, writes, fr.items, fr.cost, fr.own,
-            fr.quiet, result,
+            fr.quiet, fr.keep, result,
         )
     }
 
@@ -927,7 +927,7 @@ impl<M: Machine> Runtime<M> {
         let result = self.open_default_result(&fr.items);
         self.close_frame(
             fr.func, fr.name, fr.args, fr.reads, &fr.rh, &net, writes, fr.items, fr.cost, fr.own,
-            fr.quiet, result,
+            fr.quiet, fr.keep, result,
         );
     }
 
@@ -951,6 +951,7 @@ impl<M: Machine> Runtime<M> {
         cost: u64,
         own: u64,
         quiet: bool,
+        keep: bool,
         result: M::Val,
     ) -> RecId {
         if quiet {
@@ -987,7 +988,10 @@ impl<M: Machine> Runtime<M> {
         };
         let total = rec.cost;
         self.stats.cost_rerun += own;
+        let live = self.live_records();
         let id = self.intern(rec, rh.finish128());
+        // (a frame that kept no reads: its record is never looked up)
+        self.note_lean(id, self.live_records() > live, !keep);
         if self.open.frames.len() == 1 && self.open.step.is_some() {
             // (a call of the top level: the open step's)
             self.open.step_recs.push(id);
@@ -1136,6 +1140,7 @@ impl<M: Machine> Runtime<M> {
             },
             &[],
         );
+        self.bare_writes(id);
         Some(id)
     }
 
@@ -1160,6 +1165,7 @@ impl<M: Machine> Runtime<M> {
             },
             skip,
         );
+        self.bare_writes(id);
         Some(id)
     }
 

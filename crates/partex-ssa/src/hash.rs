@@ -10,6 +10,10 @@ use core::hash::{Hash, Hasher};
 
 /// A content version.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+/// (eight-byte aligned: a hash needs no more, and at sixteen every
+/// structure holding one, a record's write, read or value, was padded to
+/// a multiple of sixteen)
+#[repr(C, packed(8))]
 pub struct Version(pub u128);
 
 impl Version {
@@ -53,13 +57,13 @@ impl Version {
 
 impl fmt::Debug for Version {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "#{:032x}", self.0)
+        write!(f, "#{:032x}", { self.0 })
     }
 }
 
 impl fmt::Display for Version {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "#{:032x}", self.0)
+        write!(f, "#{:032x}", { self.0 })
     }
 }
 

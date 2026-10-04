@@ -564,7 +564,8 @@ pub(crate) enum SValue {
     Mlist(Vec<partex_engine::math::Item>),
     Noad(Option<alloc::boxed::Box<partex_engine::math::Noad>>),
     LrSave(Vec<u8>),
-    LrBox(Option<partex_engine::node::BoxNode>),
+    /// (boxed, as [`SValue::Pos`]: a value is an allocation of its own)
+    LrBox(Option<alloc::boxed::Box<partex_engine::node::BoxNode>>),
     /// The enclosing levels of the nest.
     Nest(Vec<crate::nest::ListStateRecord>),
     /// A save stack entry.
@@ -593,7 +594,10 @@ pub(crate) enum SValue {
     /// A sealed line's contents, or none.
     Sealed(Option<alloc::sync::Arc<crate::seal::Sealed>>),
     /// Where a paragraph call ended in the source (its result).
-    Pos(Position),
+    /// (boxed: the largest variant sets every value's size, and a
+    /// record's every write holds one, 6.7 M of a thesis: 120 bytes
+    /// inline made each value 144, where the others need 48)
+    Pos(alloc::boxed::Box<Position>),
     /// A field of the families whose fields are the engine's structures
     /// (`values.rs`: the page builder, the alignment, the writers, the
     /// streams, the random generator).
@@ -646,6 +650,9 @@ impl Position {
 impl Value for SVal {
     fn version(&self) -> Version {
         self.0
+    }
+    fn bare(&self) -> Option<Self> {
+        self.1.is_some().then(|| SVal::ver(self.0))
     }
 }
 
@@ -1578,10 +1585,27 @@ impl SsaTracker {
     #[must_use]
     pub fn mem_report(&self) -> alloc::string::String {
         let r = self.rec.borrow();
+        // (the values the writes hold: each its own allocation, or shared)
+        let mut ptrs: Vec<usize> =
+            r.rt.records()
+                .flat_map(|x| x.writes.iter())
+                .filter_map(|(_, v)| {
+                    v.as_ref()?
+                        .1
+                        .as_ref()
+                        .map(|a| alloc::sync::Arc::as_ptr(a) as usize)
+                })
+                .collect();
+        let n = ptrs.len();
+        ptrs.sort_unstable();
+        ptrs.dedup();
         alloc::format!(
-            "{}; {}",
+            "{}; {}; values held {n}, distinct {} ({} B each: {} MB)",
             r.rt.mem_report(),
-            rebuild::steps_mem_report(&r.st.steps)
+            rebuild::steps_mem_report(&r.st.steps),
+            ptrs.len(),
+            core::mem::size_of::<SValue>(),
+            (ptrs.len() * (core::mem::size_of::<SValue>() + 16)) >> 20
         )
     }
     /// Time each step's reads and writes by the engine's commands
@@ -4009,7 +4033,7 @@ fn close_source<H: Host>(tex: &Tex<H, SsaTracker>, rr: &mut Recorder) -> SVal {
         limit: c.limit - c.start,
         state: c.state,
     };
-    SVal::held(ver, SValue::Pos(pos))
+    SVal::held(ver, SValue::Pos(alloc::boxed::Box::new(pos)))
 }
 
 impl<H: Host> Tex<H, SsaTracker> {
@@ -4221,7 +4245,7 @@ fn slot_value<H: Host, T: Tracker>(t: &Tex<H, T>, s: Slot) -> Option<SValue> {
                 list::INCOMPLEAT => SValue::Noad(l.incompleat.clone()),
                 list::MIDDLE => SValue::Int(i32::from(l.middle)),
                 list::LR_SAVE => SValue::LrSave(l.lr_save.clone()),
-                list::LR_BOX => SValue::LrBox(l.lr_box.clone()),
+                list::LR_BOX => SValue::LrBox(l.lr_box.clone().map(alloc::boxed::Box::new)),
                 list::COUNT => SValue::Nest(t.nest.clone()),
                 // (the alignment's fields, after the nest)
                 _ => SValue::Field(crate::values::value(t, s)?),
@@ -4383,7 +4407,7 @@ fn set_value<H: Host, T: Tracker>(t: &mut Tex<H, T>, vers: &mut Versions, s: Slo
                 (list::INCOMPLEAT, SValue::Noad(x)) => l.incompleat.clone_from(x),
                 (list::MIDDLE, SValue::Int(x)) => l.middle = *x != 0,
                 (list::LR_SAVE, SValue::LrSave(x)) => l.lr_save.clone_from(x),
-                (list::LR_BOX, SValue::LrBox(x)) => l.lr_box.clone_from(x),
+                (list::LR_BOX, SValue::LrBox(x)) => l.lr_box = x.as_deref().cloned(),
                 _ => {}
             }
         }

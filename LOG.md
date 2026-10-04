@@ -12623,3 +12623,80 @@ uses, the edit takes the `\font` away and then puts it back, and page 2,
 unchanged, uses a font loaded after it. The trace of rebuild 1: the
 edited step, the font maker of page 2 for `font_count`, then the page
 2 ship for `font:cmsl12.number`. All stages match the oracle.
+
+
+## 2026-10-04 — Memory: a cold SSA build's records, values and fold, smaller (branch `mem`)
+
+**The problem.** The private thesis repro (cold SSA build, settled in 6
+trips, one edit; `PARTEX_ORIGINS=1`) peaked at 3.76 GB resident on main
+24f149a (fastdev, 164 s) and fails to allocate in wasm32. A massif
+profile of the run (heap 2.5 GB at its peak) put it in: the values the
+records' writes hold (6.75 M, one `Arc<SValue>` each, 128 bytes before
+this change), the writes themselves (7.09 M, 64 bytes each), the fold
+steps' reads (306 MB at the peak), the engine's token lists (macro
+arguments 165 MB, definitions 66 MB), the origin table (100 MB, append
+only), the fold's tables (144 MB) and reader lists (90 MB). Trips 3 and
+4, each running about 8 K steps again (cascades gone cold), add about
+1 GB: the records the removed steps leave stay reachable from the last
+three trips' roots until the arena doubles.
+
+**The changes** (no behaviour change: same trips and steps, PDF, `.aux`
+and `.log` byte-identical):
+- `Fold::close` built a step's reads by collecting its (hash, address)
+  pairs in place: the addresses kept the pairs' room, grown by doubling,
+  2.2 times theirs (26 M reads held 863 MB). Now exactly as long.
+- A removed step's reads and records were kept for good (15 M of the
+  fold's 28 M reads). The rebuild that passed over it still reads them
+  (its new steps' predictions); after it, nothing does:
+  `Fold::release_removed` lets them go at each rebuild's end.
+- `SValue::Pos` (120 bytes) and `SValue::LrBox` (112) set every value's
+  size: boxed, a value is 48 bytes.
+- `Version` is eight-byte aligned (`repr(C, packed(8))`): a 128-bit hash
+  needs no more, and at sixteen every write (`(Slot, Option<SVal>)`) was
+  64 bytes, now 48; records' reads and the version tables shrink too.
+  Its hash (the `u128`'s) and order are the same.
+- `PARTEX_SSA_MEM` also prints the resident set at each trip's end, after
+  settling, after the link and after the rebuilds, and how many values
+  the writes hold.
+
+**Measured** (fastdev, this machine, the thesis repro): peak 3,758,312 KB
+→ 2,641,312 KB, 164 s → 160 s; trips 6 (63796, 415, 8131, 8373, 726, 163
+steps), rebuild 1: 5 steps, as before.
+
+**The collector and a step's records** (same branch, next commit). A
+settling trip that runs most steps again (trips 3 and 4 of the thesis,
+cascades gone cold) made new records for them while the last runs' stayed
+reachable from the last three trips' roots, and the collector ran only
+when the arena's record count doubled, which a few thousand large step
+records never do. Now a lean record (a step's: never looked up, its frame
+keeps no reads) is kept only if a live step of the fold holds it; a kept
+build's roots keep its children (the routines' records a later call may
+hit). The collector also runs when the writes the records hold grew by
+half since the last collection, and when a cascade goes cold, right after
+the old steps after it are retired (`Runtime::collect_retired`; their
+reads stay until the rebuild ends, for its predictions). After a
+collection the kept roots name only kept records. Thesis: peak 2,641,312
+KB → 2,123,168 KB; trips, steps, routine hits (126 of 252 calls) and the
+outputs the same; `pt`, `acro2`, `ac3`: outputs equal, entry check 0.
+
+**A step's writes that are not its definitions keep only their
+versions** (same branch). A lean record's writes are read as values
+only where the fold's index names them a definition; the others (a
+save-stack entry above the stack's end, a slot a group's end put back,
+a slot a later call of the same step wrote again) were each an
+`Arc<SValue>` held for good. `Runtime::bare_writes`, at a step's close,
+lets their contents go (`Value::bare`: the version stays). A lean record
+made again by a run (the record deduplicated) gets the contents back from
+the new run's, and one made by another step's run keeps them for good.
+Thesis: values held 3.70 M → 2.82 M; peak 2,123,168 KB → 2,045,336 KB;
+outputs, trips and steps the same; `pt` with two edits (3 and 377 steps
+run) and `acro2`, `ac3`: outputs equal to main's, the entry check as on
+main.
+
+**A retired step's end goes with it** (same branch). Each step keeps its
+end (`Steps::inputs`, an `InputState`: the input stack's levels, the
+macros' arguments open there, the buffer) for the next run to start
+from; a retired step's was kept for good, and no run starts from it
+again. `retire` drops it. Thesis: peak 2,045,336 KB → 1,940,368 KB
+(trip 1's end 1.52 GB; the trips that ran most steps again add 0.38 GB);
+outputs, trips and steps the same.
