@@ -42,6 +42,10 @@ pub struct NativeHost {
     /// The lookups and files as last made and read, for
     /// [`Host::unchanged`] (`PARTEX_STAT_CACHE=0`: none).
     seen: Option<Seen>,
+    /// Each output file as the link last left it (its stamp, by its
+    /// path): a file the job writes that still has it was not edited
+    /// since ([`Host::output_edited`]).
+    outputs: HashMap<Vec<u8>, Stamp>,
 }
 
 /// A lookup's answer: the path found and its bytes.
@@ -159,6 +163,20 @@ impl NativeHost {
             seen: std::env::var_os("PARTEX_STAT_CACHE")
                 .is_none_or(|v| v != "0")
                 .then(Seen::default),
+            outputs: HashMap::new(),
+        }
+    }
+
+    /// The link wrote output file `n` (its path): as it is now, it is the
+    /// build's ([`Host::output_edited`]).
+    pub fn note_written(&mut self, n: &[u8]) {
+        match stamp(n) {
+            Some(s) => {
+                self.outputs.insert(n.to_vec(), s);
+            }
+            None => {
+                self.outputs.remove(n);
+            }
         }
     }
 
@@ -207,8 +225,11 @@ impl NativeHost {
         trail: &mut Vec<Vec<u8>>,
     ) -> Result<Option<OpenedFile>, ()> {
         let note = |trail: &mut Vec<Vec<u8>>, p: &[u8]| trail.push(p.to_vec());
-        // openclose.c's `open_input`: the output directory first
-        if let Some(p) = self.in_output_dir(name) {
+        // openclose.c's `open_input`: the output directory first (not for
+        // the build's BibTeX and makeindex, which look their styles and
+        // databases up as the CLI's `bibtex` and `makeindex` do: by
+        // kpathsea, from the working directory)
+        if let Some(p) = self.in_output_dir(name).filter(|_| !tool_kind(kind)) {
             let tries = [p.clone(), with_suffix(&p, kind)];
             for p in tries {
                 if !std::fs::metadata(path(&p)).is_ok_and(|m| m.is_dir())
@@ -240,6 +261,9 @@ impl NativeHost {
             FileKind::Enc => partex_kpse::Format::Enc,
             FileKind::Vf => partex_kpse::Format::Vf,
             FileKind::TrueType => partex_kpse::Format::TrueType,
+            FileKind::Bst => partex_kpse::Format::Bst,
+            FileKind::Bib => partex_kpse::Format::Bib,
+            FileKind::Ist => partex_kpse::Format::Ist,
             FileKind::Other => {
                 let Some(contents) = self.read_at(name) else {
                     note(trail, name);
@@ -317,6 +341,11 @@ pub fn synctex_name(found: &[u8]) -> Vec<u8> {
     n
 }
 
+/// A style or database of the build's BibTeX or makeindex.
+fn tool_kind(kind: FileKind) -> bool {
+    matches!(kind, FileKind::Bst | FileKind::Bib | FileKind::Ist)
+}
+
 /// The name an output file gets (web2c adds the default suffix).
 pub fn with_suffix(name: &[u8], kind: FileKind) -> Vec<u8> {
     let suffix: &[u8] = match kind {
@@ -328,6 +357,9 @@ pub fn with_suffix(name: &[u8], kind: FileKind) -> Vec<u8> {
         | FileKind::Enc
         | FileKind::Vf
         | FileKind::TrueType
+        | FileKind::Bst
+        | FileKind::Bib
+        | FileKind::Ist
         | FileKind::Other => b"",
     };
     let mut n = name.to_vec();
@@ -426,7 +458,7 @@ pub fn stamp(p: &[u8]) -> Option<Stamp> {
 impl NativeHost {
     /// Where [`Host::read_file`] would find `name`, without reading it.
     pub fn locate(&mut self, name: &[u8], kind: FileKind) -> Option<Vec<u8>> {
-        if let Some(p) = self.in_output_dir(name) {
+        if let Some(p) = self.in_output_dir(name).filter(|_| !tool_kind(kind)) {
             for p in [p.clone(), with_suffix(&p, kind)] {
                 if stamp(&p).is_some() {
                     return Some(p);
@@ -453,6 +485,9 @@ impl NativeHost {
             FileKind::Enc => partex_kpse::Format::Enc,
             FileKind::Vf => partex_kpse::Format::Vf,
             FileKind::TrueType => partex_kpse::Format::TrueType,
+            FileKind::Bst => partex_kpse::Format::Bst,
+            FileKind::Bib => partex_kpse::Format::Bib,
+            FileKind::Ist => partex_kpse::Format::Ist,
             FileKind::Other => return stamp(name).map(|_| name.to_vec()),
         };
         self.kpse.find_file(name, format, true)
@@ -674,6 +709,46 @@ impl Host for NativeHost {
         self.opens += 1;
         *at = self.opens;
         self.files.insert(id, file);
+        Some((id, n))
+    }
+
+    fn written_name(&mut self, name: &[u8]) -> Vec<u8> {
+        // (kpathsea names a file found in the current directory `./name`)
+        match self.in_output_dir(name) {
+            Some(n) => n,
+            None if name.contains(&b'/') => name.to_vec(),
+            None => [&b"./"[..], name].concat(),
+        }
+    }
+
+    fn output_edited(&mut self, name: &[u8]) -> bool {
+        // (the file the job wrote under this name, in the output directory
+        // if there is one; edited if it is not as the link left it)
+        let n = self.in_output_dir(name).unwrap_or_else(|| name.to_vec());
+        match self.outputs.get(&n) {
+            Some(s) => stamp(&n).as_ref() != Some(s),
+            None => true,
+        }
+    }
+
+    fn open_write_later(
+        &mut self,
+        name: &[u8],
+        kind: FileKind,
+        again: Option<WriteId>,
+    ) -> Option<(WriteId, Vec<u8>)> {
+        let n = with_suffix(name, kind);
+        let n = self.in_output_dir(&n).unwrap_or(n);
+        // (the same handle for the same file; its file is left as it is:
+        // not emptied, so `opened_after` does not count it)
+        if let Some(id) = again
+            && self.given.get(&id).is_some_and(|(p, _)| *p == n)
+        {
+            return Some((id, n));
+        }
+        let id = WriteId(self.next_id);
+        self.next_id += 1;
+        self.given.insert(id, (n.clone(), 0));
         Some((id, n))
     }
 

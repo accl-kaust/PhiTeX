@@ -12741,3 +12741,182 @@ entries). A minimal document showing the PDF difference was not found:
 the step's run is dropped and placed again whenever another read of it
 misses (its writes are placed with it), which hid the stale copy in each
 small case tried.
+
+## 2026-10-04 — Files the job writes live in memory during an SSA build (branch `memout`, agent pdfnum)
+
+**What prompted it.** `\openout` and `\write` went to the host at once
+("the job may read the file back"), so a step run again truncated its
+file on disk (`File::create`) and wrote only its own lines: mid-rebuild,
+or after a rebuild that stopped, `Chapter_2.aux` held its header line
+alone. The next rebuild's edit detection then read that file as a user's
+edit (the extension: 1,847 steps for a one-letter edit).
+
+**What changed** (DESIGN 3.7, "Files are a view"):
+- With SSA effects on, `open_out` takes a handle the host has not opened
+  (`Host::open_write_later`; the default opens the file, as before, for
+  other hosts), and `write_file_bytes` makes effects only. The link
+  writes every file, as before.
+- Loads of a stored name are served from the stores in the cold build's
+  first trip too (`Steps::serve_cold`), named as kpathsea would name the
+  file where the job writes it (`Host::written_name`).
+- At a rebuild's start a stored name's φ is the build's own value (the
+  stores as the last trip left them), unless the host reports the file
+  edited since the link wrote it (`Host::output_edited`; the native host
+  records each written file's stamp, `NativeHost::note_written`).
+
+**Measured.** `reopen.tex` (pdflatex), an edit in the step that opens
+the `.aux`, the rebuild cancelled at its 1st, 2nd or 3rd poll
+(`PARTEX_SSA_CANCEL_AFTER`): before, `edits.aux` on disk was 8 bytes
+afterwards; now it is the last link's 1,243 bytes, unchanged.
+`ssa-edits --fixpoint`: 22/22 cases identical, with a new case,
+`garbled` (`reopen.tex`'s edits, the SSA side's `.aux`, `.toc`, `.out`
+cut to their first line before each rebuild): identical, the cut files
+read as edits (206 steps a stage, the build converging from them).
+
+The producer API for streams made outside the steps (BibTeX's, makeindex's
+or a native node's output): `ssa::define_stream(name, bytes)` makes the
+name a stored name no step opens, its φ the bytes given (in the running
+trip's φ too), read by loads like a job-written stream; the CLI's link
+writes each produced stream whose bytes changed (`write_produced`).
+`Trips.tools` is unchanged: the native BibTeX branch builds on this.
+
+The edit harness's `garbled` case garbles the written files only when
+run to the fixed point (`--fixpoint`): a garbled file is a user's edit,
+which one trip a build reads as one plain pass would, and the oracle's
+pass never saw it. A new case, `include` (`include.tex` and its three
+`\include`d chapters, each with its own `.aux`): a space typed into a
+chapter's paragraph, then a letter, then back: 6 steps an edit,
+identical with `--fixpoint` and with one trip a build.
+
+## 2026-10-04 — BibTeX a node of the build, stage 1 (branch `nativebib`, agent nativebib)
+
+**What prompted it.** The user: "bibtex and makeindex should be native
+to me, not passes to run. they resolve exactly the dirty nodes they need
+to resolve and thats it. they are as native as aux". Until now an SSA
+build ran BibTeX and makeindex as outside tools between its trips (the
+CLI's `ssa_tools` closure): each reread its whole stream, reran whole
+when its input bytes changed, and wrote the `.bbl`/`.ind` to disk, which
+the next trip found changed by looking at every load again.
+
+**What changed** (DESIGN 3.7, 3.16; built on `memout`, add8361):
+- `ssa/tools.rs`: the BibTeX node of each stored `.aux` with a
+  `\bibdata` line runs at a trip's end (`tools::derive`, from
+  `more_trips`), on the stores the trip left, if a version it read
+  changed: the `\citation`/`\bibdata`/`\bibstyle`/`\@input` lines of the
+  `.aux` files it read (a `\newlabel` is not one), or one of its files
+  by stamp (`tools::look`, once per rebuild, before the job's loads).
+- Its `.bbl` is a stream the tool defines (`ssa::define_stream`, memout's
+  producer API): a name the
+  job stores that no step opens, so its loads are served the φ from
+  memory, a trip's end compares it like any store and diffs it by lines
+  (a changed `\bibitem` wakes the steps that read its lines), and the
+  build holds it (`last_phi`) for the next rebuild's first trip. The link
+  writes it and the `.blg` (`ssa::produced_streams`, the linker's
+  `write_produced`, each stamped by `note_written`).
+- `FileKind::Bst`, `Bib`, `Ist`: the tools' files are host loads,
+  kpathsea's formats from the working directory (not the output
+  directory first), checked by stamp like every load.
+- `rebuild_trips`: a rebuild in which no step ran but a tool's file
+  changed (a `.bib` edited) goes on to the trips; with one trip a build
+  the tools run after it, as after a pass; at the bound they run once
+  more. `PARTEX_SSA_TOOLS=outside` keeps the closure path (reference),
+  `=0` runs none. makeindex stays an outside tool until stage 3.
+- `scripts/ssa-edits`: the oracle runs `bibtex` (when the `.aux` has
+  `\bibdata`, `BIBINPUTS` the run directory first, as latexmk) and
+  `makeindex` (when there is an `.idx`) after every pass, in the output
+  directory. New cases: `bibtex` (`bibedits.tex`, `bibedits.bib`: a
+  citation added whose alpha label collides, Lam86 becoming Lam86a and
+  Lam86b; a field edited; a crossref parent's inherited field edited; an
+  uncited entry edited; citations removed) and `makeindex`
+  (`idxedits.tex`: an entry added, one removed, a page break removed).
+
+**Measured** (fastdev, this machine, loaded): `ssa-edits --fixpoint`
+`bibtex` 7/7 stages and `makeindex` 4/4 identical to plain partex with
+TeX Live's bibtex and makeindex to the fixed point; with
+`PARTEX_SSA_TRIPS=1` too. The uncited entry's edit: trip 1 ran 0 steps,
+BibTeX ran (its file changed), its `.bbl` came out the same: 0 steps
+after it. A field edit: 0 steps in trip 1, BibTeX, then 5 steps (93
+commands) in trip 2.
+
+## 2026-10-04 — BibTeX's calls, stage 2 (branch `nativebib`, agent nativebib)
+
+**What changed** (DESIGN 3.16, "Exactly the dirty work", "As built"):
+`partex_bibtex::Session` runs BibTeX as a program of calls. The style's
+`EXECUTE`/`ITERATE`/`REVERSE`/`SORT` commands are deferred while it is
+parsed (`Bib::defer`, their places in the parse's output kept), then run
+as calls: one per `EXECUTE`, one per entry for the iterating commands,
+placed by command and the entry's key in the order the command iterates.
+Every state access that another call can write goes through a slot
+(`Bib::field`, `ent_int`, `glb_str`, `out_touch`, ... in `session.rs`;
+the plain run uses the arrays as before): `READ`'s outputs (an entry's
+fields, type, key; the preamble), entry variables, global variables and
+the output buffer. A slot keeps its definitions by place and its readers;
+a run diffs `READ`'s outputs, places new and moved calls, and visits only
+the places a change reached: a call whose reads resolve as before is
+kept, any other runs and wakes the readers of the writes that changed,
+up to the slot's next definition *and its maker* (it read the slot
+before writing it: the first version missed those, and a longest-label
+chain kept a stale maximum). `SORT` keeps a sorted map by (sort key,
+cite-order key): an entry whose key changed is placed again between its
+placed neighbours (it keeps its order key if that is still between
+theirs), and its calls in the commands that follow move. Moves take all
+the moved calls out before putting any back (an entry's new key can be
+another's old one: the first version lost a call that way). The `.bbl`,
+`.blg` and terminal are the parse's pieces and the calls' chunks in
+order; the built-in counts are summed; the history is made from the
+counted warnings and errors (an error: the errors' count, else the
+warnings').
+
+The node (`ssa/tools.rs`) keeps a session per `.aux` stream
+(`PARTEX_SSA_TOOL_CALLS=0`: bibtex.web's whole run each time, the
+reference), and reports each run's calls (run, kept, moved; entries
+added, removed, changed, sorted).
+
+**Rebased on memout d3720d4**: its producer API `ssa::define_stream`
+replaces stage 1's `Steps::produce`/`take_produced`; the `.blg` is a
+produced stream too, written by the linker.
+
+**Measured.** A/B tests against `partex_bibtex::run`
+(`tests/session.rs`: five TeX Live styles, `xampl.bib`, random edits,
+~600 steps): identical `.bbl`, `.blg`, terminal and status at every
+step. alpha, 25 entries: a note edited runs 1 of 105 calls; a citation
+added 17; removed 13. The thesis (IEEEtran, `References.bib`, SSA,
+fastdev): cold build's BibTeX 8.6 ms (fresh, 103 calls), its second trip
+4.0 ms (38 run); a title edit runs 1 call (the `.bbl` the same, IEEEtran
+lower-cases titles: 0 steps); an uncited entry's edit 0 calls; a
+citation added in Chapter 2 runs 20 of 105 calls, the TeX side 29 + 148
++ 98 steps in 3 trips; the final `.bbl` byte-identical to TeX Live's
+`bibtex` on the final `.aux`, the `.blg` too but its masked
+`Reallocated` lines. `ssa-edits --fixpoint` `bibtex`: identical, the
+node's calls per stage 17 (fresh), 9, 2, 1, 0, 5, 3.
+
+## 2026-10-04 — makeindex a node of the build, stage 3 (branch `nativebib`, agent nativebib)
+
+**What changed** (DESIGN 3.16): `ssa/tools.rs`'s makeindex node, one per
+stored `.idx` stream, runs `makeindex NAME.idx` at a trip's end when the
+stream or one of its host files (a style, a `.mst`, by stamp) changed;
+its `.ind` and `.ilg` are streams it defines (`ssa::define_stream`), the
+`.ind` served to `\printindex` from memory. The CLI's closure runs no
+tool unless `PARTEX_SSA_TOOLS=outside`.
+
+`partex_makeindex::Session`: the scan and the sort run whole (the sort's
+comparison count, progress dots and duplicate marks are in the `.ilg`:
+qsort.c's comparisons are behaviour, so the sort is one call over every
+entry); the output is made block by block (`make_block`): each sorted
+entry's `make_entry` keyed by what it reads (its entry and the entries
+genind.c's state names, without their input lines; the level, the open
+line, the range and encapsulator flags, the indent), taken as it was
+when that key is the last run's. A block records which state entries it
+set to its own and the state it left; one that warned (its message
+reads input and output lines) is not kept.
+
+**Measured.** A/B tests against `partex_makeindex::run` (random `.idx`
+edits, default style and a headings style, 480 steps): identical `.ind`,
+`.ilg`, terminal and status. 300 entries: an entry added makes 2 of 301
+blocks, an entry's page changed 2. `ssa-edits` `makeindex`: identical
+with `--fixpoint` and with `PARTEX_SSA_TRIPS=1`; blocks made per stage 8
+(fresh), 2, 1, 2.
+
+Stage 2's gate (a07f01a, job 6647): all but `garbled` with
+`PARTEX_SSA_TRIPS=1`, memout's case (it fails on add8361 too; the
+memout agent fixes it); edits job 6648: 24/24.

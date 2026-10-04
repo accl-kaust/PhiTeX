@@ -649,15 +649,39 @@ template, which a compiled backend exploits.
   by versions. A store that changes makes its loads dirty *in the same
   evaluation* (3.9): there is no second rebuild and no "pass". Trips
   are bounded as latexmk bounds them: five, then a report.
-- **Outside tools are calls.** BibTeX reads the `.aux` stream's
-  `\bibdata`, `\bibstyle` and `\citation` lines and the `.bib` files.
-  makeindex reads the `.idx` stream. biber (planned, sandboxed) reads
-  the `.bcf` stream and the `.bib` files. Each tool's output is a
-  stream its reader loads, and a tool runs if and only if an input's
-  version changed. Which tool reads which stream is fixed in partex.
+- **Outside tools are nodes** (3.16). BibTeX reads the `.aux` stream's
+  `\bibdata`, `\bibstyle` and `\citation` lines, the `.bst` and the
+  `.bib` files. makeindex reads the `.idx` stream and its style. biber
+  (planned, sandboxed) reads the `.bcf` stream and the `.bib` files.
+  Each tool's output is a stream its reader loads, defined by the tool,
+  and a tool's node runs if and only if a version it read changed.
+  Which tool reads which stream is fixed in partex.
 - **Files are a view.** The build holds the streams and writes files
-  for outside tools, never reading its own writes back.
-
+  for outside tools, never reading its own writes back. In an SSA build
+  (effects on) no output file on the host is opened, emptied or written
+  while a build or rebuild runs: `\openout` takes a handle the host has
+  not opened (`Host::open_write_later`), `\write` bytes are effects and
+  the stores' lines, and only the link writes files. So a rebuild that
+  stops halfway (cancelled, past its deadline) leaves every file as the
+  last link wrote it, never a step's truncated `.aux`.
+  - *A load of a name the job writes* is served from the stores in every
+    trip, the cold build's first included (`Steps::serve_cold`): the lines
+    since the last open before it, or, with no open before it, the φ (in a
+    process's first trip, the host's file). It is named as the host's
+    lookup names a file where the job writes it (`Host::written_name`:
+    `./name`, or the output directory's).
+  - *A rebuild's φ of a name the job writes* is the build's own value, the
+    one its link wrote (the stores where the last trip left them), unless
+    the host says the file was edited since that write
+    (`Host::output_edited`: the native host keeps the stamp of each file
+    its link wrote): a user's edit of an `.aux` is an edit as before; a
+    file another process truncated is read as an edit too, and the build
+    converges from it.
+  - *A producer outside the steps* (a tool between trips, a node that
+    makes a stream) defines a named stream's bytes with
+    `ssa::define_stream`: a stored name no step opens, whose φ is the
+    value given, read by loads as a job-written stream is, and written by
+    the link (`ssa::produced_streams`).
 **Trips, as built** (`ssa/rebuild.rs`, `rebuild_trips` and `settle`):
 - *A build is a sequence of trips.* Trip 1 runs what the edit reaches
   (3.15, "A rebuild"); a cold build's trip 1 is the whole job. A store
@@ -681,19 +705,28 @@ template, which a compiled backend exploits.
   looked at: no source file and no query (a rebuild asks the host once,
   in its first trip), except the loads again after a tool wrote a file
   (below).
-- *Outside tools run between trips.* After each trip, BibTeX runs on
-  each stored `.aux` that has a `\bibdata` line, and makeindex on each
-  stored `.idx`, unless what the tool's last run read reads the same:
-  its stream's lines (BibTeX's `\citation`, `\bibdata`, `\bibstyle` and
-  `\@input` lines, makeindex's whole `.idx`), its style and its
-  databases. That is a memo of one entry per stream, the one `-watch`
-  keeps (`bibtex::Runs`, `makeindex::Runs`). A tool reads the streams
-  from the build's stores, served by name, never from the files, and
-  writes its outputs (`.bbl` and `.blg`, `.ind` and `.ilg`) as the
-  conventional tool does, in the output directory: files the job loads
-  by name like any input. A tool that wrote makes the next trip look
-  at the job's loads again, as trip 1 does, so the steps that loaded a
-  changed output (a `.bbl` that appeared) are seeds.
+- *The tools are nodes at each trip's end* (3.16). After each trip,
+  the build's BibTeX node of each stored `.aux` that has a `\bibdata`
+  line, and its makeindex node of each stored `.idx`, run if a version
+  they read changed, on the stores as the trip left them. Each defines
+  a stream (the `.bbl`, the `.ind`): a name the job stores whose value
+  the node makes, not a step, so it is the next trip's φ of that name,
+  compared and diffed by lines like any φ. Its loads are served from
+  memory; the link writes it, with the tool's log, as a file. The trips
+  end when no load of the φ read other than what the trip stored *or
+  a tool defined*: the tools are in the cycle. At the bound the tools
+  run once more, as after a last pass, and with one trip a build
+  (`PARTEX_SSA_TRIPS=1`) they run after it, as after a pass, for the
+  next build's first trip to read.
+- *The outside path* (`PARTEX_SSA_TOOLS=outside`, the compatibility and
+  reference path; `PARTEX_SSA_TOOLS=0`: no tool runs). The host's
+  closure (`Trips::tools`) runs the conventional tools between trips,
+  each unless what its last run read reads the same (its stream's
+  lines, its style and its databases: the memo of one entry per stream
+  that `-watch` keeps, `bibtex::Runs`, `makeindex::Runs`), reading the
+  streams from the stores and writing its outputs as files in the
+  output directory, which the job loads like any input: a tool that
+  wrote makes the next trip look at the job's loads again.
 - *Convergence.* The build has converged after a trip whose end makes
   no seed: every load of the φ read what the same trip stored. The
   bound is `PARTEX_SSA_TRIPS` trips (default 5, latexmk's
@@ -1510,6 +1543,135 @@ from one clean point to the next.
    by steps 2–6, until a trip ends with no seed or the bound is
    reached. A cold build goes on in the same way after its first trip.
    Then the link writes the files (3.8).
+
+### 3.16 BibTeX and makeindex are nodes
+
+The build's BibTeX and makeindex are not passes run between builds:
+they are nodes of its program, on the edge of the job's cycle (3.7).
+Their inputs are slots the build tracks, their outputs are definitions
+of the streams the job loads, and an edit wakes exactly the parts of
+them that read what it changed (3.1). `partex-bibtex` and
+`partex-makeindex` are the programs; `ssa/tools.rs` makes them nodes.
+
+**Where they sit.** A trip's end makes each stored name's value, the
+next trip's φ (3.7). The tools read those values: BibTeX the `.aux`
+stream (and the `.aux` files its `\@input` lines name, from the stores
+or the host), makeindex the `.idx` stream. Each defines a stream: the
+`.bbl` (`ssa::define_stream`), the `.ind`. Such a name is a name the job
+stores that no step opens, so a load of it reads the φ, which the tool
+defined; a trip's end compares it with what the loads read, and a
+change is an edit of the data its readers read by lines (3.15, "Lines
+are of a data"): a `\bibitem` block that changed wakes the steps that
+read its lines, not the bibliography. The build holds the value
+(`last_phi`, the φ the next trip or rebuild starts from), so a rebuild's
+first trip reads the tool's latest output from memory, as it reads its
+own `.aux` (3.7, "Files are a view"); the link writes the files
+(`ssa::produced_streams`: the `.bbl` and `.blg`, the `.ind` and
+`.ilg`, in the output directory, each only when it changed).
+
+**What they read.** A tool's reads are of three kinds, each checked the
+way the build checks its own:
+- *the stream's commands*: BibTeX reads an `.aux` file's `\citation`,
+  `\bibdata`, `\bibstyle` and `\@input` lines only (bibtex.web §116
+  skips any other line whole), so a `\newlabel` that changed is not a
+  change of what BibTeX read; makeindex reads each `\indexentry`;
+- *its files*: the style and the databases, looked up by the host
+  (`FileKind::Bst`, `Bib`, `Ist`: kpathsea's formats, from the working
+  directory as the CLI's `bibtex` and `makeindex` look them up) and
+  checked by stamp once per rebuild, before the job's loads
+  (`tools::look`), as every load is (3.4, "Files by stamp");
+- *their parts*: a database's entries, an index's entries (below).
+
+**Exactly the dirty work.** A tool's run is itself a small program of
+calls, and it runs as the build does: a call runs again if and only if
+a version it read changed.
+- *BibTeX.* The `.bst` is a stack machine. `READ` turns the databases
+  into entries (each cited key's type and fields, the crossrefs'
+  inherited fields, the cite order); `EXECUTE`, `ITERATE`, `REVERSE`
+  and `SORT` then run functions, `ITERATE f` one call of `f` per entry
+  in the order. A call's reads are slots: an entry's field, type and
+  key (`READ`'s outputs), an entry variable (`sort.key$`, alpha's
+  `label`), a global variable (alpha's `last.label`, `next.extra`), the
+  preamble, and the output buffer (the line `write$` has not ended).
+  Its writes are entry and global variables and the output buffer; its
+  effects are the `.bbl` bytes it wrote (a `\bibitem` block), the `.blg`
+  lines (warnings) and its built-in call counts (the `.blg`'s
+  statistics are their sums). Each call is placed by its command and
+  its entry's key in the order that command iterates, and each slot
+  keeps its definitions in that order, as the fold's do (3.15): a
+  changed field wakes the calls of that entry that read it; a call
+  whose writes come out the same stops the change there; one whose
+  global changed (alpha's `last.label` after a new citation that
+  collides with an older label) wakes the call after it in the order,
+  which reruns only if what it read differs, so the "a"/"b" suffixes
+  are recomputed as far as they changed and no further. `SORT` reads
+  every entry's `sort.key$`; it is incremental (a sorted map from the
+  key and the entry's place in the cite order, bibtex.web's tie-break):
+  an entry whose key changed moves, and its calls in the commands that
+  follow move with it, their definitions and reads re-placed, each
+  run again only if what reaches it differs. The `.bbl` is the calls'
+  bytes in order, the `.blg` the parse's lines and the calls' lines in
+  order, with its statistics summed: byte for byte bibtex's.
+- *makeindex.* Each `\indexentry` is parsed alone (its sort and actual
+  keys, its page, its encapsulator); the sort reads every entry's keys
+  (makeindex's comparison count, in the `.ilg`, and its duplicate
+  marks are the sort's behaviour, so the sort is one node over all
+  keys); each output block (an entry's line with its merged page list,
+  a letter group's heading) reads its entries and its neighbour's keys
+  (whether it is a `\subitem`, a new group), and is made again only if
+  they changed.
+
+**Switches.** `PARTEX_SSA_TOOLS=outside` runs the conventional tools
+between trips instead (the reference); `PARTEX_SSA_TOOLS=0` none.
+
+**As built** (2026-10-04).
+- *The node* (`ssa/tools.rs`): one per `.aux` stream asking for BibTeX.
+  It runs when one of the four commands it reads in the `.aux` files
+  changed, or one of its files by stamp; its `.bbl` and `.blg` are
+  streams it defines (`ssa::define_stream`).
+- *Its calls* (`partex_bibtex::Session`, stage 2): a run parses the
+  `.aux` files, the style and the databases again (`READ` is one call
+  over the databases, linear in their size; its outputs are per entry),
+  diffs `READ`'s outputs against the last run's (entries added, removed,
+  changed field by field; the cite order kept where it can be, by a
+  longest increasing run of the old keys), and then visits only the
+  places a change reached. The style's execution commands are deferred
+  while it is parsed (their places in the parse's `.blg` and terminal
+  output kept) and run as calls afterwards. A fatal error drops the
+  session and runs bibtex.web's program. Checked against bibtex.web's
+  run on TeX Live's `plain`, `alpha`, `abbrv`, `unsrt` and `IEEEtran`
+  styles over `xampl.bib` with random edits (citations added, removed,
+  swapped, `\citation{*}`, fields, strings, the preamble, crossrefs,
+  types, keys: `crates/partex-bibtex/tests/session.rs`): the same `.bbl`,
+  `.blg` and terminal at every step.
+- *Measured* (alpha, the 25 `xampl` keys cited, 105 calls): a note
+  edited runs 1 call; a citation added runs 17 (its 4 calls, the
+  `forward.pass`/`reverse.pass` chains as far as `last.sort.label`,
+  `next.extra` and the longest label changed); taken away, 13. The
+  thesis (`IEEEtran`, 48 entries, 103 calls): a title edited runs 1
+  call (and its `.bbl` comes out the same: IEEEtran lower-cases it, so
+  no step runs); an uncited entry edited runs 0 calls; a citation added
+  runs 20 of 105.
+- *makeindex* (stage 3): one node per `.idx` stream, run as `makeindex
+  NAME.idx` when the stream or one of its files (a style, a `.mst`)
+  changed; its `.ind` and `.ilg` are streams it defines.
+  `partex_makeindex::Session` scans and sorts as makeindex does (the
+  sort is one call over every entry: its comparison count, dots and
+  duplicate marks are the `.ilg`'s), then makes the output block by
+  block: a block (genind.c's `make_entry` for one sorted entry) is keyed
+  by what it reads (its entry and the entries genind.c's state names,
+  all but their input lines; the level, the open line, the range and
+  encapsulator flags, the indent) and taken as it was when that is the
+  same. A block that warned is always made again (its warning reads the
+  input and output lines). Checked against makeindex's run with random
+  edits of an `.idx` (entries added, removed, re-paged; ranges,
+  encapsulators, sub-entries, cross-references; the default style and
+  one with headings and a short `line_max`:
+  `crates/partex-makeindex/tests/session.rs`). 300 entries: one added
+  makes 2 of 301 blocks; one entry's page changed, 2.
+- *Left*: `READ` and makeindex's scan are not split by entry (an edit
+  of one entry parses the databases or the `.idx` again, linear and a
+  few milliseconds); makeindex's sort is whole by its nature.
 
 ---
 

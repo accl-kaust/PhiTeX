@@ -351,9 +351,18 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         name: &[u8],
         kind: crate::host::FileKind,
     ) -> Option<(WriteId, Vec<u8>)> {
-        let r = match self.tracker.reopen(name, kind) {
-            Some(id) => self.host.open_write_again(name, kind, id),
-            None => self.host.open_write(name, kind),
+        // (an SSA build keeps every output in memory, its stores and
+        // effects, and its link writes the files: a host file is never
+        // emptied or half written while the build runs, DESIGN 3.7, "Files
+        // are a view")
+        let again = self.tracker.reopen(name, kind);
+        let r = if T::VALUES && self.effects.is_some() {
+            self.host.open_write_later(name, kind, again)
+        } else {
+            match again {
+                Some(id) => self.host.open_write_again(name, kind, id),
+                None => self.host.open_write(name, kind),
+            }
         };
         if let (Some((id, _)), Some(e)) = (&r, &mut self.effects) {
             e.push(Effect::Open {
@@ -366,11 +375,15 @@ impl<H: Host, T: Tracker> Tex<H, T> {
     }
 
     /// Bytes for `\write` file `id`: to the host at once, since the job
-    /// may read the file back, and, when the build links its files from
-    /// its steps (effects on with values, DESIGN 7.17.3), an effect too.
+    /// may read the file back; when the build links its files from its
+    /// steps (effects on with values, DESIGN 3.7), an effect only: the job
+    /// reads the file back from its stores, and the link writes it.
     pub(crate) fn write_file_bytes(&mut self, id: WriteId, bytes: &[u8]) {
-        self.host.write(id, bytes);
-        if !T::VALUES || bytes.is_empty() {
+        if !T::VALUES || self.effects.is_none() {
+            self.host.write(id, bytes);
+            return;
+        }
+        if bytes.is_empty() {
             return;
         }
         if let Some(e) = &mut self.effects {

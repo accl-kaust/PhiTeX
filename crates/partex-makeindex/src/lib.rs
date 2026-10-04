@@ -33,8 +33,11 @@ extern crate alloc;
 
 mod idx;
 mod ind;
+mod session;
 mod sort;
 mod sty;
+
+pub use session::{Session, Stats};
 
 use alloc::vec::Vec;
 
@@ -343,6 +346,9 @@ pub(crate) struct Mk<'a> {
     /// The sorted entries (`idx_key`).
     pub idx_key: Vec<usize>,
     pub idx_gc: i64,
+    /// A session's run: the output's blocks, by what they read
+    /// (`session.rs`).
+    pub(crate) memo: Option<session::Memo>,
 }
 
 /// Formatting pieces for messages.
@@ -895,6 +901,17 @@ impl Mk<'_> {
 /// program name). `version` is what the banner prints after the program
 /// name, e.g. `version 2.18 [TeX Live 2026] (kpathsea + Thai support)`.
 pub fn run(args: &[Vec<u8>], version: &[u8], files: &mut dyn Files) -> Outcome {
+    run_with(args, version, files, None).0
+}
+
+/// [`run`], its output's blocks looked up in `memo` (a session's): the
+/// outcome and the blocks made.
+pub(crate) fn run_with(
+    args: &[Vec<u8>],
+    version: &[u8],
+    files: &mut dyn Files,
+    memo: Option<session::Memo>,
+) -> (Outcome, Option<session::Memo>) {
     let mut mk = Mk {
         files,
         out: Outcome::default(),
@@ -940,6 +957,7 @@ pub fn run(args: &[Vec<u8>], version: &[u8], files: &mut dyn Files) -> Outcome {
         entries: Vec::new(),
         idx_key: Vec::new(),
         idx_gc: 0,
+        memo,
     };
     let status = i32::from(mk.main(args).is_err());
     let mut out = core::mem::take(&mut mk.out);
@@ -954,5 +972,5 @@ pub fn run(args: &[Vec<u8>], version: &[u8], files: &mut dyn Files) -> Outcome {
         f.name.clone_from(&mk.ilg_fn);
         f.contents = core::mem::take(&mut mk.ilg);
     }
-    out
+    (out, mk.memo.take())
 }

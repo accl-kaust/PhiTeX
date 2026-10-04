@@ -1,0 +1,16 @@
+% makeindex as a node of the build (DESIGN 3.7, "Outside tools are
+% nodes"): scripts/ssa-edits' `makeindex` case adds an index entry, takes
+% one away, and moves entries to another page.
+\documentclass{article}
+\usepackage{makeidx}
+\makeindex
+\begin{document}
+\section{Letters}
+Alpha\index{alpha} and beta\index{beta!sub}, gamma\index{gamma|textbf}.
+Delta\index{delta@$\delta$}.
+\newpage
+More alpha\index{alpha}, epsilon\index{epsilon}.
+\newpage
+Zeta\index{zeta} and alpha\index{alpha}.
+\printindex
+\end{document}

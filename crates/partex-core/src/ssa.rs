@@ -44,13 +44,15 @@ use crate::tex::Tex;
 use crate::track::{Cell, LineCodes, Output, Row, Tracker, line_tokens};
 
 mod rebuild;
+mod tools;
 mod view;
 
 pub(crate) use rebuild::{Edits, edits_from};
 pub use rebuild::{
-    RebuildReport, RerunCheck, Trips, pending, prepare_rebuilds, rebuild, rebuild_log,
-    rebuild_trips, rerun_check, settle,
+    RebuildReport, RerunCheck, Trips, define_stream, pending, prepare_rebuilds, produced_streams,
+    rebuild, rebuild_log, rebuild_trips, rerun_check, settle,
 };
+pub use tools::NativeTools;
 pub use view::{dag, step_trace, view};
 
 /// A slot's family.
@@ -1175,6 +1177,9 @@ pub struct RecState {
     /// The commands each step's last run ran, by step id: the steps'
     /// costs in the dependency graph ([`dag`]).
     pub step_commands: Vec<u64>,
+    /// The build's BibTeX and makeindex, nodes of its program (DESIGN
+    /// 3.7, "Outside tools are nodes").
+    pub(crate) tools: tools::Tools,
 }
 
 /// Record `id`'s effects and stores, its children's included, in program
@@ -3387,6 +3392,9 @@ pub fn run_applying<H: Host>(
         // (and the fonts' makers were its steps)
         tex.tracker.fonts_by.borrow_mut().clear();
         r.rt.open_trip(0);
+        // (a load of a name the job wrote reads the store: no file holds
+        // it before the link, DESIGN 3.7)
+        r.st.steps.serve_cold(true);
         // (the top level is a fold of steps and reads nothing, 7.17.9: the
         // job's start is the first step)
         r.rt.begin_step();
@@ -3502,6 +3510,7 @@ pub fn run_applying<H: Host>(
         c.hits = 0;
     }
     r.rt.close_trip();
+    r.st.steps.serve_cold(false);
     rep.commands = tex.commands();
     rep
 }

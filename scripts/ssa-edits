@@ -21,7 +21,9 @@ e2e's `machine_edits` seeds them; `label`: the same document given a
 `\\label` nothing refers to, then rebuilt twice with no edit;
 `aux_reopen` (`reopen.tex`, pdflatex format): an edit in the first
 paragraph, whose step opens the `.aux` and whose page opens the PDF, its
-revert, and a later edit; `streams` (`streams.tex`): a line written to
+revert, and a later edit; `garbled`: the same, the SSA side's written files
+(`.aux`, `.toc`, `.out`) cut to their first line, their times kept,
+before each rebuild, which must read the build's own values of them; `streams` (`streams.tex`): a line written to
 the file a stream opened first, changed and back, after the stream opened
 a second; `fatal_end` (`fatal-end.tex`): a word edited and back in a job
 that ends fatally in its last page's output routine, not seeded: the
@@ -71,6 +73,9 @@ from pathlib import Path
 SCRIPT = Path(__file__).resolve()
 REPO = SCRIPT.parent.parent
 EPOCH = 1_758_800_000
+# the oracle's BibTeX and makeindex (TeX Live's)
+BIBTEX = os.environ.get("SSA_EDITS_BIBTEX", "bibtex")
+MAKEINDEX = os.environ.get("SSA_EDITS_MAKEINDEX", "makeindex")
 # (the oracle's fixed time: a PDF file and LaTeX's \time record it)
 FIXED_TIME = {"SOURCE_DATE_EPOCH": str(EPOCH), "FORCE_SOURCE_DATE": "1"}
 
@@ -154,6 +159,16 @@ INPUTS_EDITS = [
     ("inputs-sub.tex", "Appended after it.\n", ""),
     ("inputs-sub.tex", "Sub text", "Sub words"),
 ]
+# include.tex: chapters by \\include (each opens its own .aux, written at
+# its pages' shipouts and read back through the main one): a space typed
+# into a chapter's paragraph, then a letter (the extension's thesis: the
+# chapter's .aux the rebuild serves must be the whole file, never the one
+# line its \\openout began it with); then back
+INCLUDE_EDITS = [
+    ("incl-ch1.tex", "Ch1s2p1 gamma ", "Ch1s2p1  gamma "),
+    ("incl-ch1.tex", "Ch1s2p1  gamma ", "Ch1s2p1  gammax "),
+    ("incl-ch1.tex", "Ch1s2p1  gammax ", "Ch1s2p1 gamma "),
+]
 # fatal-end.tex: a word, edited and back, in a job that ends fatally in
 # its last page's output routine
 FATAL_EDITS = [("Hello world.", "Hello there."), ("Hello there.", "Hello world.")]
@@ -199,6 +214,30 @@ SYNCTEX_EDITS = [
     ("Para7x1 ", "Para7x1 \n\nA paragraph of its own.\n\n"),
     ("\\label{sec:12}\n", "\\label{sec:12}\n\n"),
 ]
+# bibedits.tex and bibedits.bib (DESIGN 3.7, "Outside tools are nodes"):
+# a citation added whose alpha label collides with one cited (Lam86 and
+# Lam86 become Lam86a and Lam86b), a field of a cited entry edited, the
+# field a crossref's child inherits edited in its parent, an entry no one
+# cites edited, the citation taken away again, another citation removed
+BIB_EDITS = [
+    ("edits.tex", "Second paragraph.", "Second paragraph cites~\\cite{lamport-two}."),
+    ("bibedits.bib", "title = {First Title}", "title = {First Title, Edited}"),
+    (
+        "bibedits.bib",
+        "booktitle = {Proceedings of the Meeting}",
+        "booktitle = {Proceedings of the Big Meeting}",
+    ),
+    ("bibedits.bib", "title = {Never Cited}", "title = {Never Ever Cited}"),
+    ("edits.tex", "Second paragraph cites~\\cite{lamport-two}.", "Second paragraph."),
+    ("edits.tex", " and an article~\\cite{lamport-art}", ""),
+]
+# idxedits.tex: an index entry added, one taken away, and a page break
+# taken away (the entries after it move to the page before)
+IDX_EDITS = [
+    ("Delta\\index{delta@$\\delta$}.", "Delta\\index{delta@$\\delta$}. Eta\\index{eta}."),
+    ("epsilon\\index{epsilon}", "epsilon"),
+    ("\\newpage\nZeta", "Zeta"),
+]
 # windows.tex (DESIGN 4.3 item 1): edits inside a figure's caption, a
 # pgfplots axis (its coordinates, its function), a minipage, an alignment,
 # a footnote and a loop's tokens, a label nothing refers to, and an early
@@ -218,8 +257,10 @@ WINDOW_EDITS = [
 
 
 class Case:
-    def __init__(self, name, inputs, fmt, args, edits, outdir=None, seed=0):
+    def __init__(self, name, inputs, fmt, args, edits, outdir=None, seed=0, garble=False):
         self.name = name
+        # the SSA side's written files garbled before each rebuild
+        self.garble = garble
         # {name in the run directory: file in tests/e2e}
         self.inputs = inputs
         self.fmt = fmt
@@ -357,10 +398,12 @@ def e2e_watch_cases():
 
 
 def all_cases():
-    def latex(name, src, fmt, edits, seed=2, extra=()):
+    def latex(name, src, fmt, edits, seed=2, extra=(), garble=False):
         args = [*LATEX_FLAGS, *extra, f"-fmt={fmt}", "-output-directory=out", "edits"]
         edits = [("edits.tex", m, n) for m, n in edits]
-        return Case(name, {"edits.tex": src}, fmt, args, edits, outdir="out", seed=seed)
+        return Case(
+            name, {"edits.tex": src}, fmt, args, edits, outdir="out", seed=seed, garble=garble
+        )
 
     return [
         *e2e_watch_cases(),
@@ -368,6 +411,8 @@ def all_cases():
         latex("machine_edits_dvi", "edits-dvi.tex", "latex", MACHINE_EDITS_DVI),
         latex("label", "edits.tex", "pdflatex", LABEL_EDITS),
         latex("aux_reopen", "reopen.tex", "pdflatex", REOPEN_EDITS),
+        # (the written files garbled before each rebuild: the build's own)
+        latex("garbled", "reopen.tex", "pdflatex", REOPEN_EDITS, garble=True),
         latex("streams", "streams.tex", "pdflatex", STREAMS_EDITS),
         # (not seeded: the first build's second trip reads the .aux the
         # first wrote, as the next stage's pass does with one trip a build)
@@ -386,8 +431,27 @@ def all_cases():
             seed=2,
         ),
         latex("windows", "windows.tex", "pdflatex", WINDOW_EDITS),
+        Case(
+            "include",
+            {"edits.tex": "include.tex", **{f"incl-ch{c}.tex": f"incl-ch{c}.tex" for c in (1, 2, 3)}},
+            "pdflatex",
+            [*LATEX_FLAGS, "-fmt=pdflatex", "-output-directory=out", "edits"],
+            INCLUDE_EDITS,
+            outdir="out",
+            seed=2,
+        ),
         latex("synctex", "edits.tex", "pdflatex", SYNCTEX_EDITS, extra=["-synctex=1"]),
         latex("preamble", "preamble.tex", "pdflatex", PREAMBLE_EDITS),
+        Case(
+            "bibtex",
+            {"edits.tex": "bibedits.tex", "bibedits.bib": "bibedits.bib"},
+            "pdflatex",
+            [*LATEX_FLAGS, "-fmt=pdflatex", "-output-directory=out", "edits"],
+            BIB_EDITS,
+            outdir="out",
+            seed=2,
+        ),
+        latex("makeindex", "idxedits.tex", "pdflatex", IDX_EDITS),
         Case(
             "images",
             {"edits.tex": "images.tex", **{f: f for f in ("images-fig.pdf", "images-hand.pdf")}},
@@ -511,11 +575,29 @@ def make_edit(cdir, run_dir, stage):
     os.rename(tmp, run_dir / file)
 
 
+def garble(run_dir):
+    """The job's written files (`.aux`, `.toc`, `.out`) in `run_dir` and
+    below, cut to their first line and given their times back: as a run
+    that truncated them and stopped would leave them, which a rebuild must
+    not read as an edit (DESIGN 3.7, "Files are a view")."""
+    for root, _, names in os.walk(run_dir):
+        for n in names:
+            if n.endswith((".aux", ".toc", ".out")):
+                f = Path(root) / n
+                st = f.stat()
+                data = f.read_bytes()
+                f.write_bytes(data.split(b"\n", 1)[0] + b"\n" if data else b"%garbled\n")
+                os.utime(f, ns=(st.st_atime_ns, st.st_mtime_ns))
+
+
 def step(cdir, stage):
     """`--_step`: a rebuild line of the SSA process, before rebuild
-    `stage`: the outputs of the stage before, then this stage's edit."""
+    `stage`: the outputs of the stage before, then this stage's edit (and,
+    for a case that garbles, its written files cut short first)."""
     cdir = Path(cdir)
     snapshot(cdir / "p", cdir / "snap" / "p" / str(stage - 1))
+    if (cdir / "garble").exists():
+        garble(cdir / "p")
     make_edit(cdir, cdir / "p", stage)
 
 
@@ -622,10 +704,15 @@ class Runner:
                 (cdir / "edits" / str(k) / file).write_bytes(texts[file])
             plan.append((file, bool(marker)))
         (cdir / "plan.json").write_text(json.dumps({"edits": plan}))
+        # (garbled files are edits the build converges from: only a run to
+        # the fixed point compares them with the oracle's)
+        if case.garble and self.fixpoint:
+            (cdir / "garble").write_text("")
         if case.seed:
             seed = cdir / "seed"
             for k in range(case.seed):
                 self.exec(case.argv, seed, cdir / "logs" / f"seed-{k}", self.env)
+                self.tools(case, seed, cdir / "logs" / f"seed-{k}")
             out = case.outdir or "."
             for f in (seed / out).iterdir():
                 if f.is_file() and f.name not in case.inputs and not f.name.endswith(
@@ -634,6 +721,25 @@ class Runner:
                     for side in ("o", "p"):
                         shutil.copyfile(f, cdir / side / out / f.name)
         return cdir
+
+    def tools(self, case, run, log):
+        """After a pass of the oracle in `run`: BibTeX if the job's `.aux`
+        asks for it (`\\bibdata`), makeindex if it wrote an `.idx`, as
+        latexmk runs them, in the output directory (BibTeX finding the
+        databases in `run` first, as latexmk's `BIBINPUTS`). They run
+        after every pass: a run on the same inputs writes the same files."""
+        out = run / (case.outdir or ".")
+        job = case.argv[-1]
+        aux = out / f"{job}.aux"
+        env = {**self.env, "BIBINPUTS": f"{run}:"}
+        if aux.exists() and b"\\bibdata{" in aux.read_bytes():
+            with open(f"{log}.bibtex", "wb") as f:
+                subprocess.run([BIBTEX, job], cwd=out, env=env, stdout=f, stderr=f, check=False)
+        if (out / f"{job}.idx").exists():
+            with open(f"{log}.makeindex", "wb") as f:
+                subprocess.run(
+                    [MAKEINDEX, f"{job}.idx"], cwd=out, env=self.env, stdout=f, stderr=f, check=False
+                )
 
     def oracle(self, case, cdir):
         """Plain partex, stage by stage: the runs of each."""
@@ -645,6 +751,7 @@ class Runner:
             while True:
                 before = written(o) if self.fixpoint else None
                 self.exec(case.argv, o, cdir / "logs" / f"o-{k}-{n}", self.env)
+                self.tools(case, o, cdir / "logs" / f"o-{k}-{n}")
                 n += 1
                 if not self.fixpoint or n == 5 or written(o) == before:
                     break

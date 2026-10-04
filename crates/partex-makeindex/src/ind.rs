@@ -5,24 +5,24 @@ use alloc::vec::Vec;
 use crate::{ALPHA, DUPLICATE, FIELD_MAX, Mk, P, SYMBOL, at, fmt, strtoint, tolower, toupper};
 
 /// genind.c's statics.
-#[derive(Default)]
-struct Gen {
-    curr: Option<usize>,
-    prev: Option<usize>,
-    begin: Option<usize>,
-    the_end: Option<usize>,
-    range_ptr: Option<usize>,
-    level: usize,
-    prev_level: usize,
-    encap: Vec<u8>,
-    prev_encap: Option<Vec<u8>>,
-    in_range: bool,
-    encap_range: bool,
-    buff: Vec<u8>,
-    line: Vec<u8>,
-    ind_lc: i32,
-    ind_ec: i32,
-    ind_indent: i32,
+#[derive(Default, Clone)]
+pub(crate) struct Gen {
+    pub(crate) curr: Option<usize>,
+    pub(crate) prev: Option<usize>,
+    pub(crate) begin: Option<usize>,
+    pub(crate) the_end: Option<usize>,
+    pub(crate) range_ptr: Option<usize>,
+    pub(crate) level: usize,
+    pub(crate) prev_level: usize,
+    pub(crate) encap: Vec<u8>,
+    pub(crate) prev_encap: Option<Vec<u8>>,
+    pub(crate) in_range: bool,
+    pub(crate) encap_range: bool,
+    pub(crate) buff: Vec<u8>,
+    pub(crate) line: Vec<u8>,
+    pub(crate) ind_lc: i32,
+    pub(crate) ind_ec: i32,
+    pub(crate) ind_indent: i32,
 }
 
 fn cat(parts: &[&[u8]]) -> Vec<u8> {
@@ -67,6 +67,7 @@ impl Mk<'_> {
     /// `gen_ind`.
     pub(crate) fn gen_ind(&mut self) {
         let mut g = Gen::default();
+        self.gen_start();
         let ind_fn = self.ind_fn.clone();
         self.message("Generating output file %s...", &[P::S(&ind_fn)]);
         let pre = self.st.preamble.clone();
@@ -78,7 +79,7 @@ impl Mk<'_> {
         self.idx_dc = 0;
         for n in 0..self.idx_key.len() {
             if self.entries[self.idx_key[n]].typ != DUPLICATE {
-                self.make_entry(&mut g, n);
+                self.make_block(&mut g, n);
                 self.idx_dot_tick(crate::DOT_MAX);
             }
         }
@@ -103,7 +104,7 @@ impl Mk<'_> {
     }
 
     /// `make_entry`.
-    fn make_entry(&mut self, g: &mut Gen, n: usize) {
+    pub(crate) fn make_entry(&mut self, g: &mut Gen, n: usize) {
         g.prev = g.curr;
         let c = self.idx_key[n];
         g.curr = Some(c);

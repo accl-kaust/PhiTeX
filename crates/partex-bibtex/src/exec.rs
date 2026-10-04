@@ -3,11 +3,11 @@
 
 use alloc::vec::Vec;
 
-use crate::table::{Loc, Str};
+use crate::table::Loc;
 use crate::{
-    BUILT_IN, Bib, END_OF_DEF, END_OF_STRING, FIELD, INT_ENTRY_VAR, INT_GLOBAL_VAR, INT_LITERAL,
-    Lit, Piece, QUOTE_NEXT_FN, R, STK_FN, STK_INT, STK_STR, STR_ENTRY_VAR, STR_GLOBAL_VAR,
-    STR_LITERAL, WHITE_SPACE, WIZ_DEFINED, lex, set,
+    BUILT_IN, Bib, END_OF_DEF, FIELD, INT_ENTRY_VAR, INT_GLOBAL_VAR, INT_LITERAL, Lit, Piece,
+    QUOTE_NEXT_FN, R, STK_FN, STK_INT, STK_STR, STR_ENTRY_VAR, STR_GLOBAL_VAR, STR_LITERAL,
+    WHITE_SPACE, WIZ_DEFINED, lex, set,
 };
 
 /// §14: the shortest `.bbl` line `add_out_pool` breaks to.
@@ -17,7 +17,7 @@ impl Bib<'_> {
     /// §293: `bst_ex_warn_print`.
     pub(crate) fn bst_ex_warn_print(&mut self) {
         if self.mess_with_entries {
-            let s = self.cite_list[self.cite_ptr].clone();
+            let s = self.cur_cite();
             self.print(&[&" for entry ", &s]);
         }
         self.print_newline();
@@ -35,7 +35,7 @@ impl Bib<'_> {
     /// §294: `bst_mild_ex_warn_print`.
     pub(crate) fn bst_mild_ex_warn_print(&mut self) {
         if self.mess_with_entries {
-            let s = self.cite_list[self.cite_ptr].clone();
+            let s = self.cur_cite();
             self.print(&[&" for entry ", &s]);
         }
         self.print_newline();
@@ -158,6 +158,7 @@ impl Bib<'_> {
 
     /// §321
     pub(crate) fn output_bbl_line(&mut self) {
+        self.out_touch();
         if self.out_buf_length != 0 {
             while self.out_buf_length > 0
                 && lex(self.out_buf[self.out_buf_length - 1]) == WHITE_SPACE
@@ -177,6 +178,7 @@ impl Bib<'_> {
 
     /// §322: append `s` to the output buffer, breaking long lines.
     pub(crate) fn add_out_pool(&mut self, s: &[u8]) {
+        self.out_touch();
         for (i, &c) in s.iter().enumerate() {
             set(&mut self.out_buf, self.out_buf_length + i, c);
         }
@@ -248,8 +250,13 @@ impl Bib<'_> {
                 }
                 Ok(())
             }
-            INT_LITERAL | INT_GLOBAL_VAR => {
+            INT_LITERAL => {
                 let n = self.t.info(loc);
+                self.push_int(n);
+                Ok(())
+            }
+            INT_GLOBAL_VAR => {
+                let n = self.glb_int(loc);
                 self.push_int(n);
                 Ok(())
             }
@@ -261,8 +268,7 @@ impl Bib<'_> {
             FIELD => {
                 // §327
                 if self.mess_with_entries {
-                    let fp = self.cite_ptr * self.num_fields + self.t.info(loc) as usize;
-                    let lit = if let Some(s) = self.field_info.get(fp).cloned().flatten() {
+                    let lit = if let Some(s) = self.field(self.t.info(loc) as usize) {
                         Lit::Str(s, false)
                     } else {
                         Lit::Missing(self.t.text(loc).clone())
@@ -276,8 +282,7 @@ impl Bib<'_> {
             INT_ENTRY_VAR => {
                 // §328
                 if self.mess_with_entries {
-                    let n = self.entry_ints
-                        [self.cite_ptr * self.num_ent_ints + self.t.info(loc) as usize];
+                    let n = self.ent_int(self.t.info(loc) as usize);
                     self.push_int(n);
                 } else {
                     self.bst_cant_mess_with_entries_print();
@@ -287,13 +292,7 @@ impl Bib<'_> {
             STR_ENTRY_VAR => {
                 // §329
                 if self.mess_with_entries {
-                    let s = &self.entry_strs
-                        [self.cite_ptr * self.num_ent_strs + self.t.info(loc) as usize];
-                    let end = s
-                        .iter()
-                        .position(|&c| c == END_OF_STRING)
-                        .unwrap_or(s.len());
-                    let v = s[..end].to_vec();
+                    let v = self.ent_str(self.t.info(loc) as usize);
                     self.push_new(v);
                 } else {
                     self.bst_cant_mess_with_entries_print();
@@ -302,10 +301,10 @@ impl Bib<'_> {
             }
             STR_GLOBAL_VAR => {
                 // §330
-                let (kept, copy) = &self.glb_strs[self.t.info(loc) as usize];
+                let (kept, copy) = self.glb_str(self.t.info(loc) as usize);
                 let lit = match kept {
-                    Some(s) => Lit::Str(s.clone(), false),
-                    None => Lit::Str(Str::from(&copy[..]), true),
+                    Some(s) => Lit::Str(s, false),
+                    None => Lit::Str(copy, true),
                 };
                 self.push(lit);
                 Ok(())

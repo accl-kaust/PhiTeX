@@ -1,0 +1,48 @@
+% The database of bibedits.tex.
+@string{tug = "TUGboat"}
+
+@book{knuth-book,
+  author = {Donald E. Knuth},
+  title = {The {\TeX}book},
+  publisher = {Addison-Wesley},
+  year = 1984
+}
+
+@article{lamport-art,
+  author = {Leslie Lamport},
+  title = {First Title},
+  journal = tug,
+  year = 1986,
+  volume = 7,
+  pages = {1--10}
+}
+
+@article{lamport-two,
+  author = {Leslie Lamport},
+  title = {Second Article},
+  journal = tug,
+  year = 1986,
+  volume = 7,
+  pages = {20--30}
+}
+
+@inproceedings{child-in,
+  author = {Ann Author},
+  title = {A Paper in Proceedings},
+  crossref = {parent-proc},
+  pages = {5--9}
+}
+
+@proceedings{parent-proc,
+  editor = {Ed Editor},
+  title = {Proceedings of the Meeting},
+  booktitle = {Proceedings of the Meeting},
+  publisher = {Pub},
+  year = 1999
+}
+
+@misc{uncited,
+  author = {Nobody},
+  title = {Never Cited},
+  year = 2000
+}

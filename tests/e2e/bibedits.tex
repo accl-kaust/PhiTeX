@@ -1,0 +1,17 @@
+% BibTeX as nodes of the build (DESIGN 3.7, "Outside tools are nodes"):
+% scripts/ssa-edits' `bibtex` case edits its citations and bibedits.bib
+% (a citation added that makes an alpha label collide, a field edited, a
+% crossref's parent edited, an entry no one cites edited, citations
+% removed).
+\documentclass{article}
+\begin{document}
+\section{Citations}
+First paragraph cites the book~\cite{knuth-book} and an article~\cite{lamport-art}.
+
+Second paragraph.
+
+Third paragraph cites a paper~\cite{child-in}.
+
+\bibliographystyle{alpha}
+\bibliography{bibedits}
+\end{document}

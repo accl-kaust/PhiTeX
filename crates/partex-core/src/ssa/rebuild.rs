@@ -84,6 +84,10 @@ pub(crate) struct Steps {
     loaders: BTreeMap<u32, BTreeSet<StepId>>,
     /// The names the job stores (the load ids of their addresses).
     stored: BTreeSet<u32>,
+    /// The names a producer outside the steps defines ([`define_stream`]:
+    /// a tool's output, a node's), with their bytes: stored names no step
+    /// opens, whose φ is the value given.
+    produced: BTreeMap<u32, Option<Arc<[u8]>>>,
     /// The loads some step read whole (`\pdffilesize`, `\pdfmdfivesum`,
     /// an image, a font's file), not by lines: a rebuild compares their
     /// contents, not only the lines read of them.
@@ -454,6 +458,14 @@ impl Steps {
             v.push(b'\n');
         }
         Some(Ok(v))
+    }
+
+    /// The cold build's first trip serves its loads too (`on`), from no φ:
+    /// a name the job stored before the load is served its store, any
+    /// other the host's file (DESIGN 3.7: the job's writes reach no file
+    /// before the link).
+    pub(crate) fn serve_cold(&mut self, on: bool) {
+        self.phi = on.then(BTreeMap::new);
     }
 
     /// What a load of stored name `id` at `key` is served inside a
@@ -1997,6 +2009,36 @@ pub fn rebuild<H: Host>(tex: &mut Tex<H, SsaTracker>, trace: bool, apply: bool) 
         // 7.17.3, "A rebuild's file checks cost the files that changed":
         // looked at by reference, and only the others kept, with what is
         // read of them after)
+        // (the stored names whose files are as the build's link left them,
+        // with the build's values of them)
+        let (own, own_phi): (BTreeSet<u32>, Vec<(u32, Stream)>) = if next.is_none() {
+            let names: Vec<(u32, Vec<u8>)> = {
+                let r = tex.tracker.rec.borrow();
+                let s = &r.st.steps;
+                s.stored
+                    .iter()
+                    .filter_map(|&id| Some((id, r.st.loads.get(id as usize)?.0.clone())))
+                    .collect()
+            };
+            let mut own = BTreeSet::new();
+            let mut vals = Vec::new();
+            for (id, name) in names {
+                if tex.host.output_edited(&name) {
+                    continue;
+                }
+                let r = tex.tracker.rec.borrow();
+                let s = &r.st.steps;
+                let v = match s.value_at(&r.rt.fold, id, u64::MAX) {
+                    Some(Ok(v)) => Some(Arc::<[u8]>::from(v)),
+                    _ => s.last_phi.get(&id).cloned().flatten(),
+                };
+                own.insert(id);
+                vals.push((id, v));
+            }
+            (own, vals)
+        } else {
+            (BTreeSet::new(), Vec::new())
+        };
         #[allow(clippy::type_complexity)]
         let (files, kept, same, datas, lines): (
             Vec<(u32, Vec<u8>, FileKind, Option<Arc<[u8]>>, bool, bool, bool)>,
@@ -2014,7 +2056,10 @@ pub fn rebuild<H: Host>(tex: &mut Tex<H, SsaTracker>, trace: bool, apply: bool) 
                 .map(|d| d.name)
                 .collect();
             // (a later trip: a stored name's φ is in memory, and the other
-            // loads are looked at again only after a tool wrote a file)
+            // loads are looked at again only after a tool wrote a file; a
+            // build's first trip: a stored name's φ is the build's own, what
+            // its link wrote, unless the host says the file was edited
+            // since, DESIGN 3.7, "Files are a view")
             let looked: Vec<(u32, &[u8], FileKind, Option<&Arc<[u8]>>)> =
                 r.st.loads
                     .iter()
@@ -2025,6 +2070,9 @@ pub fn rebuild<H: Host>(tex: &mut Tex<H, SsaTracker>, trace: bool, apply: bool) 
                             .as_ref()
                             .is_some_and(|n| !n.files || s.stored.contains(&id))
                         {
+                            return None;
+                        }
+                        if next.is_none() && own.contains(&id) {
                             return None;
                         }
                         Some((
@@ -2078,6 +2126,7 @@ pub fn rebuild<H: Host>(tex: &mut Tex<H, SsaTracker>, trace: bool, apply: bool) 
         // (a name the job stores: its φ, what the last trip stored, which
         // its file holds, 7.17.3's "A load reads the store")
         let mut phi: BTreeMap<u32, Option<Arc<[u8]>>> = kept.into_iter().collect();
+        phi.extend(own_phi);
         // (each file read by lines, as it is now)
         let mut nows: BTreeMap<u32, Arc<[u8]>> = BTreeMap::new();
         let mut read = 0;
@@ -2555,6 +2604,55 @@ pub fn rebuild<H: Host>(tex: &mut Tex<H, SsaTracker>, trace: bool, apply: bool) 
     rep
 }
 
+/// A stream's bytes, or none (no file).
+pub type Stream = Option<Arc<[u8]>>;
+
+/// A producer outside the steps (a tool between trips, a node that makes
+/// a stream: DESIGN 3.7, "Files are a view") defines stream `name` as
+/// `bytes` (`None`: no file). Loads of `name` read it as they read a
+/// stored name's φ: from the next trip, or the next rebuild, on, and
+/// only its loads whose value differs run again (`Steps::phi_seeds`); the
+/// link writes it ([`produced_streams`]). Whether its value changed.
+pub fn define_stream<H: Host>(
+    tex: &Tex<H, SsaTracker>,
+    name: &[u8],
+    bytes: Option<Arc<[u8]>>,
+) -> bool {
+    let mut r = tex.tracker.rec.borrow_mut();
+    let rr = &mut *r;
+    let (id, fresh) = super::Recorder::intern(&mut rr.st.loads_ix, rr.st.loads.len(), name);
+    if fresh {
+        rr.st
+            .loads
+            .push((name.to_vec(), Version::ABSENT, FileKind::Tex));
+    }
+    let s = &mut rr.st.steps;
+    let same = s.produced.get(&id).is_some_and(|was| match (was, &bytes) {
+        (Some(a), Some(b)) => a[..] == b[..],
+        (None, None) => true,
+        _ => false,
+    });
+    s.stored.insert(id);
+    s.produced.insert(id, bytes.clone());
+    s.last_phi.insert(id, bytes.clone());
+    if let Some(phi) = s.phi.as_mut() {
+        phi.insert(id, bytes);
+    }
+    !same
+}
+
+/// The streams producers outside the steps defined ([`define_stream`]),
+/// by name, for the link to write.
+#[must_use]
+pub fn produced_streams<H: Host>(tex: &Tex<H, SsaTracker>) -> Vec<(Vec<u8>, Stream)> {
+    let r = tex.tracker.rec.borrow();
+    r.st.steps
+        .produced
+        .iter()
+        .filter_map(|(&id, v)| Some((r.st.loads.get(id as usize)?.0.clone(), v.clone())))
+        .collect()
+}
+
 /// The steps a stopped rebuild left to run (DESIGN 3.7, "A rebuild
 /// stopped"): 0 when the program is the source's.
 pub fn pending<H: Host>(tex: &Tex<H, SsaTracker>) -> usize {
@@ -2581,9 +2679,15 @@ pub struct Trips<'a, H> {
     /// The outside tools, run between two trips on the streams the job
     /// stores, by name, as the trip left them: whether one wrote a file,
     /// and a line for each run.
+    /// (The compatibility path: the build's own tools are
+    /// [`Trips::native`]; a host that has them passes a closure that runs
+    /// nothing.)
     #[allow(clippy::type_complexity)]
     pub tools:
         &'a mut dyn FnMut(&mut H, &[(Vec<u8>, Arc<[u8]>)]) -> (bool, Vec<alloc::string::String>),
+    /// The build's BibTeX and makeindex, nodes of its program run at each
+    /// trip's end (DESIGN 3.7, "Outside tools are nodes"); `None`: none.
+    pub native: Option<&'a super::tools::NativeTools>,
     /// A clock in nanoseconds, for the trips' times.
     pub clock: Option<fn() -> u64>,
 }
@@ -2653,6 +2757,9 @@ pub fn rebuild_trips<H: Host>(
     trips: &mut Trips<'_, H>,
 ) -> RebuildReport {
     let t0 = trips.now();
+    // (the tools' files, by stamp, once for the build: before the job's
+    // loads are, whose check the trips after it keep)
+    let tools_stale = trips.native.is_some() && super::tools::look(tex);
     let first = rebuild(tex, trace, apply);
     let ns = trips.now().saturating_sub(t0);
     let ran = first.steps_run > 0;
@@ -2661,6 +2768,15 @@ pub fn rebuild_trips<H: Host>(
         ..RebuildReport::default()
     };
     rep.absorb(first, ns);
+    if !ran && tools_stale && rep.unsupported.is_none() && rep.stopped.is_none() {
+        // (no step ran, but a tool's file changed: it runs at the trip's
+        // end, and the trips go on from what it defines)
+        if trips.max <= 1 {
+            one_trip_tools(tex, trips, &mut rep);
+            return rep;
+        }
+        return more_trips(tex, trace, apply, trips, rep);
+    }
     if !ran {
         // (nothing ran: the stores are what the loads of the φ read; the
         // trace of the trip, as `more_trips` keeps it)
@@ -2669,10 +2785,43 @@ pub fn rebuild_trips<H: Host>(
         return rep;
     }
     if trips.max <= 1 {
-        // (one trip per build: a plain pass, nothing more looked at)
+        // (one trip per build: a plain pass; the tools run after it, as a
+        // pass's are, for the next build to read)
+        one_trip_tools(tex, trips, &mut rep);
         return rep;
     }
     more_trips(tex, trace, apply, trips, rep)
+}
+
+/// One trip per build (`PARTEX_SSA_TRIPS=1`): after the trip, the tools
+/// whose inputs changed run, as after a pass, and define what the next
+/// build's first trip reads; no trip follows.
+fn one_trip_tools<H: Host>(
+    tex: &mut Tex<H, SsaTracker>,
+    trips: &mut Trips<'_, H>,
+    rep: &mut RebuildReport,
+) {
+    if rep.unsupported.is_some() || rep.stopped.is_some() {
+        return;
+    }
+    let (mut phi, mut changed) = {
+        let r = &mut *tex.tracker.rec.borrow_mut();
+        r.st.steps.trip_end(&r.rt.fold)
+    };
+    if let Some(native) = trips.native {
+        let lines = super::tools::derive(tex, &mut phi, &mut changed, native, trips.clock);
+        rep.tools.extend(lines);
+    }
+    // (and the outside tools, whose files the next build's first trip
+    // finds changed)
+    let streams: Vec<(Vec<u8>, Arc<[u8]>)> = {
+        let r = tex.tracker.rec.borrow();
+        phi.iter()
+            .filter_map(|(&id, v)| Some((r.st.loads.get(id as usize)?.0.clone(), v.clone()?)))
+            .collect()
+    };
+    let (_, lines) = (trips.tools)(&mut tex.host, &streams);
+    rep.tools.extend(lines);
 }
 
 /// After a cold build, its trip 1, which ran `commands` commands in `ns`:
@@ -2713,10 +2862,27 @@ fn more_trips<H: Host>(
         if rep.unsupported.is_some() || rep.stopped.is_some() {
             return rep;
         }
-        let (phi, changed) = {
+        let (mut phi, mut changed) = {
             let r = &mut *tex.tracker.rec.borrow_mut();
             r.st.steps.trip_end(&r.rt.fold)
         };
+        // the build's tools, on the stores as the trip left them: the
+        // streams they define are the next trip's φ too (at the bound as
+        // well, as a pass's tools run after it)
+        let native_lines = match trips.native {
+            Some(native) => super::tools::derive(tex, &mut phi, &mut changed, native, trips.clock),
+            None => Vec::new(),
+        };
+        rep.tools.extend(native_lines);
+        // the outside tools, on the streams as the trip left them
+        let streams: Vec<(Vec<u8>, Arc<[u8]>)> = {
+            let r = tex.tracker.rec.borrow();
+            phi.iter()
+                .filter_map(|(&id, v)| Some((r.st.loads.get(id as usize)?.0.clone(), v.clone()?)))
+                .collect()
+        };
+        let (wrote, lines) = (trips.tools)(&mut tex.host, &streams);
+        rep.tools.extend(lines);
         if rep.trips >= trips.max.max(1) {
             // (the bound: converged only if every load of the φ read what
             // the last trip stored; else the names, as latexmk reports)
@@ -2736,15 +2902,6 @@ fn more_trips<H: Host>(
             rep.settled = rep.unsettled.is_empty();
             return rep;
         }
-        // the outside tools, on the streams as the trip left them
-        let streams: Vec<(Vec<u8>, Arc<[u8]>)> = {
-            let r = tex.tracker.rec.borrow();
-            phi.iter()
-                .filter_map(|(&id, v)| Some((r.st.loads.get(id as usize)?.0.clone(), v.clone()?)))
-                .collect()
-        };
-        let (wrote, lines) = (trips.tools)(&mut tex.host, &streams);
-        rep.tools.extend(lines);
         if trace {
             let names: Vec<alloc::string::String> = {
                 let r = tex.tracker.rec.borrow();

@@ -22,7 +22,7 @@ pub fn wanted() -> bool {
 }
 
 /// The banner's version: makeindex 2.18 as TeX Live builds it.
-fn version() -> Vec<u8> {
+pub(crate) fn version() -> Vec<u8> {
     let suffix = env!("PARTEX_ORACLE_VERSION_SUFFIX");
     let year: String = suffix
         .split_once("TeX Live ")

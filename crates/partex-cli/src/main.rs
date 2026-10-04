@@ -1201,12 +1201,16 @@ fn run_ssa(host: native::NativeHost, params: Params, command_line: &[u8]) -> i32
     }
     // (the cold build converges as latexmk would from the files on disk:
     // its trips after the first, DESIGN 3.7)
-    let settled = (trips > 1).then(|| {
+    // (with one trip a build, the tools still run after it, as after a
+    // pass: `settle` stops at its bound)
+    let native = ssa_native();
+    let settled = (trips > 1 || native.is_some()).then(|| {
         let ns = u64::try_from(t0.elapsed().as_nanos()).unwrap_or(u64::MAX);
         let mut tools = ssa_tools(&mut between);
         let mut t = partex_core::ssa::Trips {
             max: trips,
             tools: &mut tools,
+            native: native.as_ref(),
             clock: Some(clock_ns),
         };
         let (trace, apply) = rebuild_switches();
@@ -1222,6 +1226,7 @@ fn run_ssa(host: native::NativeHost, params: Params, command_line: &[u8]) -> i32
     }
     let mut linker = SsaLinker::default();
     let lr = linker.link(&mut tex);
+    linker.write_produced(&mut tex);
     if std::env::var_os("PARTEX_SSA_MEM").is_some() {
         eprintln!("partex: ssa build 0: linked: {}", machinehost::rss());
     }
@@ -1387,9 +1392,11 @@ fn rebuild_ssa(
         .and_then(|v| v.trim().parse::<usize>().ok())
         .filter(|&k| k >= 1);
     let idle = std::env::var("PARTEX_SSA_IDLE_SETTLE").is_ok_and(|v| v == "1");
+    let native = ssa_native();
     let mut t = partex_core::ssa::Trips {
         max: key_trips.unwrap_or(trips),
         tools: &mut tools,
+        native: native.as_ref(),
         clock: Some(clock_ns),
     };
     let rr = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -1409,6 +1416,7 @@ fn rebuild_ssa(
         let mut t = partex_core::ssa::Trips {
             max: trips,
             tools: &mut tools,
+            native: native.as_ref(),
             clock: Some(clock_ns),
         };
         let s = partex_core::ssa::settle(tex, trace, apply, &mut t, 0, 0);
@@ -1435,6 +1443,7 @@ fn rebuild_ssa(
         return Ok(None);
     }
     let lr = linker.link(tex);
+    linker.write_produced(tex);
     side_files_write(tex);
     let link_ms = lr.link_ms;
     eprintln!("partex: ssa rebuild {n}: link: {}", lr.how);
@@ -1617,8 +1626,28 @@ fn clock_ns() -> u64 {
         .map_or(0, |d| u64::try_from(d.as_nanos()).unwrap_or(u64::MAX))
 }
 
-/// The outside tools an SSA build runs between its trips (DESIGN 3.7,
-/// "Trips, as built"): BibTeX on each stored `.aux` stream, makeindex on
+/// The build's own BibTeX and makeindex, nodes of its program (DESIGN
+/// 3.7, "Outside tools are nodes"), with their `texmf.cnf` settings;
+/// `None` with `PARTEX_SSA_TOOLS=0` (none run, as a host without them) or
+/// `PARTEX_SSA_TOOLS=outside` (run as outside tools between the trips,
+/// [`ssa_tools`]).
+fn ssa_native() -> Option<partex_core::ssa::NativeTools> {
+    if std::env::var("PARTEX_SSA_TOOLS").is_ok_and(|v| v == "0" || v == "outside") {
+        return None;
+    }
+    let mut kpse = kpse_instance("bibtex", "");
+    Some(partex_core::ssa::NativeTools {
+        bibtex: Some(bibtex::options(&mut kpse, false, 2)),
+        makeindex: Some(makeindex::version()),
+        // (`PARTEX_SSA_TOOL_CALLS=0`: each run of a tool's node is the
+        // whole program, the reference)
+        calls: std::env::var("PARTEX_SSA_TOOL_CALLS").map_or(true, |v| v != "0"),
+    })
+}
+
+/// The outside tools an SSA build runs between its trips with
+/// `PARTEX_SSA_TOOLS=outside` (DESIGN 3.7, "Trips, as built", the
+/// compatibility path): BibTeX on each stored `.aux` stream, makeindex on
 /// each stored `.idx` stream, each read from the build's stores (the
 /// files are being rewritten) and run unless what its last run read
 /// reads the same, writing its files where the conventional tool does.
@@ -1627,15 +1656,11 @@ fn ssa_tools(
     between: &mut Between,
 ) -> impl FnMut(&mut native::NativeHost, &[(Vec<u8>, std::sync::Arc<[u8]>)]) -> (bool, Vec<String>) + '_
 {
-    // (`PARTEX_SSA_TOOLS=0`: none run, as a host without them)
-    let off = std::env::var("PARTEX_SSA_TOOLS").is_ok_and(|v| v == "0");
+    let outside = std::env::var("PARTEX_SSA_TOOLS").is_ok_and(|v| v == "outside");
     let mem = std::env::var_os("PARTEX_SSA_MEM").is_some();
     move |host, streams| {
         if mem {
             eprintln!("partex: ssa: a trip's end: {}", machinehost::rss());
-        }
-        if off {
-            return (false, Vec::new());
         }
         // (each stream by the path its file has, in the output directory)
         let ending = |ext: &[u8]| -> Vec<(Vec<u8>, std::sync::Arc<[u8]>)> {
@@ -1650,6 +1675,9 @@ fn ssa_tools(
                 })
                 .collect()
         };
+        if !outside {
+            return (false, Vec::new());
+        }
         let mut lines = bibtex::after_pass(&mut between.bib, &ending(b".aux"));
         lines.extend(makeindex::after_pass(&mut between.idx, &ending(b".idx")));
         (!lines.is_empty(), lines)
@@ -1795,6 +1823,9 @@ struct SsaLinker {
     /// The host's count of files opened at the last link: a file opened
     /// since was made anew by its open (`NativeHost::opened_after`).
     opened: u64,
+    /// The streams producers outside the steps defined, as last written
+    /// (`partex_core::ssa::define_stream`).
+    produced: std::collections::BTreeMap<Vec<u8>, u128>,
 }
 
 /// What a link cost, for the reports.
@@ -1817,6 +1848,27 @@ struct Written {
 }
 
 impl SsaLinker {
+    /// Write the streams producers outside the steps defined whose bytes
+    /// changed since they were last written (DESIGN 3.7, "Files are a
+    /// view": the link writes every file the build holds).
+    fn write_produced(&mut self, tex: &mut Tex<native::NativeHost, partex_core::ssa::SsaTracker>) {
+        use partex_core::host::Host;
+        for (name, bytes) in partex_core::ssa::produced_streams(tex) {
+            let Some(bytes) = bytes else { continue };
+            let v = partex_core::StableHasher::of(&bytes[..]);
+            if self.produced.get(&name) == Some(&v) {
+                continue;
+            }
+            let host = tex.host_mut();
+            if let Some((w, written)) = host.open_write(&name, partex_core::host::FileKind::Other) {
+                host.write(w, &bytes);
+                host.close(w);
+                host.note_written(&written);
+            }
+            self.produced.insert(name, v);
+        }
+    }
+
     /// Link `tex`'s files from its steps' effects and write them: each
     /// file by the name it was opened with (the last open of a name
     /// wins), the terminal's text, the diagnostics. What it cost, for the
@@ -2127,7 +2179,8 @@ impl SsaLinker {
         for (name, id, kind, anew) in self.names(host, &out.opened) {
             let (len, from) = out.files.get(&id).copied().unwrap_or((0, None));
             let n = native::with_suffix(&name, kind);
-            let path = native::path(&host.in_output_dir(&n).unwrap_or(n));
+            let at = host.in_output_dir(&n).unwrap_or(n);
+            let path = native::path(&at);
             let as_written = !anew
                 && self.written.get(&name).is_some_and(|&(i, l, t)| {
                     i == id
@@ -2165,6 +2218,8 @@ impl SsaLinker {
             }
             w.bytes += len - from;
             let t = file.metadata().ok().and_then(|m| m.modified().ok());
+            drop(file);
+            host.note_written(&at);
             self.written.insert(name, (id, len, t));
         }
         w
@@ -2180,9 +2235,10 @@ impl SsaLinker {
         let (mut files, mut bytes_out) = (0, 0);
         for (name, id, kind, _) in self.names(host, &l.opened) {
             let bytes = l.files.get(&id).map_or(&[][..], Vec::as_slice);
-            if let Some((w, _)) = host.open_write(&name, kind) {
+            if let Some((w, written)) = host.open_write(&name, kind) {
                 host.write(w, bytes);
                 host.close(w);
+                host.note_written(&written);
             }
             files += 1;
             bytes_out += bytes.len();
