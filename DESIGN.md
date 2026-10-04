@@ -1179,6 +1179,15 @@ readers rerun. What is built:
   saved at the step's end is a read.
 - *Class reads* (`PARTEX_SSA_CLASS_READS`). A lookup that only stores
   the token reads the name's class, not its meaning.
+- *Skips remembered* (`PARTEX_SKIPCACHE`, `skipcache.rs`). A false
+  branch skipped in a macro body is remembered by the list and the
+  position. While no name's class changes, the skip ends in the same
+  place with the same terminating token. A remembered skip makes again
+  the reads the skip makes token by token: each name it meets, once, in
+  the order it first meets them, and `align_state`'s read and write. So
+  the steps' reads are the same as a token-by-token skip's, and the
+  tokens are not walked again. Each build and rebuild starts with none
+  remembered.
 - *A soft read decides nothing* (`PARTEX_SSA_SOFT_PLACE`). A soft read
   is not a read, so a rebuild does not place the slot, and the run finds
   whatever value the arrays hold, possibly a later definition's. Both

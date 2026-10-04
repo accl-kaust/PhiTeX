@@ -14,9 +14,10 @@
 //! parameter, the end of the body, or anything that makes `get_next` act
 //! is not remembered and runs as tex.web's does.
 //!
-//! Only without a tracker that records reads (the skip's reads are not
-//! repeated) and without memo recording; `Params::skip_cache` (the CLI's
-//! `PARTEX_SKIPCACHE=0` turns it off).
+//! Without memo recording, and with a tracker that records reads only if
+//! it is the SSA build's, which a remembered skip tells the lookups the
+//! skip makes token by token ([`Skip::reads`]); `Params::skip_cache` (the
+//! CLI's `PARTEX_SKIPCACHE=0` turns it off).
 
 use alloc::vec::Vec;
 
@@ -45,6 +46,9 @@ struct Entry {
     chr: i32,
     cs: i32,
     align: i32,
+    /// The control sequences the skip looks up, each once, in the order
+    /// it first meets them (a tracker's reads: [`Skip::reads`]).
+    reads: Option<alloc::sync::Arc<[i32]>>,
 }
 
 /// The remembered skips.
@@ -82,13 +86,19 @@ impl core::fmt::Debug for SkipCache {
 
 /// A skip's outcome: where it ends, its terminating token, and how much
 /// it changed `align_state`.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub(crate) struct Skip {
     pub end: i32,
     pub cmd: i32,
     pub chr: i32,
     pub cs: i32,
     pub align: i32,
+    /// With a tracker that records reads (the SSA build's): the control
+    /// sequences whose meanings the skip looks up, the terminating one
+    /// included, each once, in the order it first meets them. A
+    /// remembered skip makes these lookups again, so the tracker sees the
+    /// reads the skip makes token by token (`Tex::skip_remembered`).
+    pub reads: Option<alloc::sync::Arc<[i32]>>,
 }
 
 /// What a control sequence meaning (`cmd`, `chr`) is to a skip: a
@@ -143,12 +153,13 @@ impl SkipCache {
         if !(same && e.loc == loc && e.epoch == self.epoch) {
             return None;
         }
-        Some((e.end != UNCACHEABLE).then_some(Skip {
+        Some((e.end != UNCACHEABLE).then(|| Skip {
             end: e.end,
             cmd: e.cmd,
             chr: e.chr,
             cs: e.cs,
             align: e.align,
+            reads: e.reads.clone(),
         }))
     }
 
@@ -161,6 +172,7 @@ impl SkipCache {
             chr: 0,
             cs: 0,
             align: 0,
+            reads: None,
         });
         if self.slots.is_empty() {
             self.slots = alloc::vec![Entry::default(); SLOTS];
@@ -174,6 +186,7 @@ impl SkipCache {
             chr: s.chr,
             cs: s.cs,
             align: s.align,
+            reads: s.reads,
         };
     }
 }
@@ -214,6 +227,7 @@ pub(crate) fn scan(
                         chr,
                         cs,
                         align,
+                        reads: None,
                     });
                 }
                 if chr == FI_CODE {

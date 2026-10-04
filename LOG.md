@@ -13043,3 +13043,27 @@ stack's entry hooks 4.5%; dropping the records at exit 2.8%.
 **Measured** (fastdev, this machine, thesis, trip 1 only, one run
 each): 38.2 s -> 33.8 s, with plain at 15.0 s. The PDF, `.aux`, `.log`,
 `.toc`, `.lof`, `.lot` and `.out` are byte-identical to 5547b27's.
+
+## 2026-10-04 — The SSA build remembers skipped conditional text (branch `coldtrack`, agent coldtrack)
+
+**Symptom.** After 98ff696, `pass_text` was 7.7% of the thesis's trip 1
+(perf, inclusive), against 3.5% of a plain pass. A plain pass skips the
+false branches of macro bodies through the skip cache (`skipcache.rs`).
+The SSA build skipped every branch token by token, because the cache was
+off for any tracker that records reads.
+
+**Fix.** A remembered skip keeps the names it looks up, the terminating
+one included: each once, in the order the skip first meets them
+(`Skip::reads`). A hit, or a miss scanned with `peek_eqtb`, makes those
+lookups again through `token_meaning`, and reads and writes
+`align_state`. Those are the reads `bulk_skip_run` and `get_next` make
+when the skip runs in bulk, which it does where `bulk_ready` holds, so
+the cache is used only there. A lookup repeated within a skip is not a
+read, since nothing between makes it one: no call begins or ends and no
+group ends. Each build and rebuild bumps the cache's epoch, so it starts
+with no skips remembered.
+
+**Measured** (fastdev, this machine, thesis, trip 1): 33.4 s -> 31.7 s.
+Outputs are byte-identical. `PARTEX_SSA_TRACE`'s 162 MB trace of the
+cold build is identical to the one without the cache, except for the
+clock's two scalars and the random seed (`\pdfelapsedtime`'s epoch).

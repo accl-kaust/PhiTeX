@@ -55,7 +55,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
     /// Whether a run can be taken from the current input.
     #[inline(always)]
     #[allow(clippy::inline_always, reason = "a few tests, on the token path")]
-    fn bulk_ready(&self) -> bool {
+    pub(crate) fn bulk_ready(&self) -> bool {
         self.bulk_on()
             && self.cur_input.state == TOKEN_LIST
             && self.cur_input.loc != NULL

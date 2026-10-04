@@ -3515,6 +3515,9 @@ pub fn run_applying<H: Host>(
     // (boxes carry versions, made when each becomes a shared value)
     partex_engine::node::VERSIONS.store(true, core::sync::atomic::Ordering::Relaxed);
     tex.remake_constant_lists();
+    // (the skips remembered start afresh: a build's are its own, and a
+    // skip replays its reads, `Tex::skip_remembered`)
+    tex.skip.epoch += 1;
     if check {
         rep.not_values = tex.value_rows().into_iter().map(|(n, _)| n).collect();
     }

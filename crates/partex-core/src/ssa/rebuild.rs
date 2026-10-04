@@ -1986,6 +1986,9 @@ pub fn rebuild<H: Host>(tex: &mut Tex<H, SsaTracker>, trace: bool, apply: bool) 
         ..RebuildReport::default()
     };
     let c0 = tex.commands();
+    // (the skips remembered start afresh: the state a rebuild places is
+    // not the one they were made in)
+    tex.skip.epoch += 1;
     // (a rebuild past its budget stops: `SsaTracker::budget`)
     let budget_from = c0;
     // (the work a stopped rebuild left, taken up: its dirty steps, and
