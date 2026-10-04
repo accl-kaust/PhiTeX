@@ -1179,6 +1179,18 @@ readers rerun. What is built:
   it at its own definition (`with_levels`). (Put back alone, a shape a
   placement had shortened came back padded with stand-ins, and a later
   restore read one: `xeq_level` index panic on the thesis.)
+  A chain entry is a copy of the save stack's kind, under the rules
+  above: a local assignment of a register above 255 in a group the step
+  opened saves its entry value in the entry (`Tracker::save_entry` names
+  entry `i` by `-1 - i`, apart from the stack's entries), and the
+  group's end gives it back (`Tracker::restore_entry`). So the restored
+  register is not the step's definition, and an entry value still saved
+  at the step's end is a read of it, placed by a rebuild. (Before, the
+  chains were left out: the run saved whatever the arrays held, a later
+  definition's when a later trip ran the step again, and the restore
+  wrote it back as the step's definition. On the thesis pgf's `\pgf@x`
+  family came out of a figure's group with values of the picture after
+  it, and one arrow of the converged build was drawn 5pt off.)
 
 - *Virtual PDF object numbers* (`PARTEX_SSA_VOBJ`; `pdf/objtab.rs`,
   `SsaObjs`). pdfTeX numbers objects in the order they are made, so a

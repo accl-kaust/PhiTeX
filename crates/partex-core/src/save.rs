@@ -163,6 +163,11 @@ impl<H: Host, T: Tracker> Tex<H, T> {
     fn xentry_slot(i: usize) -> u32 {
         crate::track::save::XENTRY.saturating_add(u32::try_from(i).unwrap_or(u32::MAX))
     }
+    /// The chains' entry `i` as [`Tracker::save_entry`] names a copy:
+    /// below zero, apart from the save stack's entries.
+    fn xentry_at(i: usize) -> i32 {
+        -1 - i32::try_from(i).unwrap_or(i32::MAX - 1)
+    }
     fn xentry_read(&self, i: usize) {
         self.save_top_read(Self::xentry_slot(i));
     }
@@ -343,15 +348,19 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             self.xregs.outer.push(outer);
             self.xregs.chain_level = self.cur_level();
         }
+        let i = self.xregs.chain_base() + self.xregs.chain.len();
         if T::SOFT_READS {
             self.tracker
                 .saved(crate::track::Cell::Eqtb(p), self.cur_level());
-            self.tracker
-                .save_entry(crate::track::Cell::Eqtb(p), self.cur_level(), None);
+            self.tracker.save_entry(
+                crate::track::Cell::Eqtb(p),
+                self.cur_level(),
+                Some(Self::xentry_at(i)),
+            );
         }
         let word = self.peek_eqtb(p);
         let obj = self.peek_obj(p).cloned();
-        self.xentry_wrote(self.xregs.chain_base() + self.xregs.chain.len());
+        self.xentry_wrote(i);
         self.xregs.chain.push(Saved {
             loc: p,
             word,
@@ -374,9 +383,10 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                 self.xentry_wrote(i);
             }
         }
+        let base = self.xregs.chain_base();
         let chain = core::mem::take(&mut self.xregs.chain);
         let tracing = self.int_par(TRACING_RESTORES_CODE) > 0;
-        for s in chain.into_iter().rev() {
+        for (k, s) in chain.into_iter().enumerate().rev() {
             let word = is_word_kind(ext_reg(s.loc).0);
             // (whether the current value is global decides)
             self.report_eqtb_read(s.loc);
@@ -403,6 +413,8 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                 if T::SOFT_READS {
                     self.tracker
                         .restored(crate::track::Cell::Eqtb(s.loc), self.cur_level() + 1);
+                    self.tracker
+                        .restore_entry(crate::track::Cell::Eqtb(s.loc), Self::xentry_at(base + k));
                 }
                 if tracing {
                     self.restore_trace(s.loc, b"restoring");
