@@ -1230,6 +1230,7 @@ fn run_ssa(host: native::NativeHost, params: Params, command_line: &[u8]) -> i32
     if std::env::var_os("PARTEX_SSA_MEM").is_some() {
         eprintln!("partex: ssa build 0: linked: {}", machinehost::rss());
     }
+    dump_streams(&tex, 0);
     side_files_write(&mut tex);
     ready_for_rebuilds(&tex, rebuild.is_some());
     eprintln!(
@@ -1411,8 +1412,13 @@ fn rebuild_ssa(
         }
     };
     if idle && rr.unsupported.is_none() && rr.stopped.is_none() {
-        // (the keystroke's trips first, then the idle settle's)
+        // (the keystroke's trips first, linked, its files written as an
+        // editor's would be; then the idle settle's)
         report_trips(&format!("rebuild {n} (keystroke)"), &rr);
+        let lr = linker.link(tex);
+        linker.write_produced(tex);
+        side_files_write(tex);
+        eprintln!("partex: ssa rebuild {n} (keystroke): link: {}", lr.how);
         let mut t = partex_core::ssa::Trips {
             max: trips,
             tools: &mut tools,
@@ -1444,6 +1450,7 @@ fn rebuild_ssa(
     }
     let lr = linker.link(tex);
     linker.write_produced(tex);
+    dump_streams(tex, n);
     side_files_write(tex);
     let link_ms = lr.link_ms;
     eprintln!("partex: ssa rebuild {n}: link: {}", lr.how);
@@ -1584,6 +1591,29 @@ fn rebuild_deadline() -> Option<partex_core::ssa::Deadline> {
 fn cancelled() -> i32 {
     eprintln!("partex: ssa build 0: cancelled at a step boundary");
     3
+}
+
+/// `PARTEX_SSA_STREAMS=<dir>`: after build `n`'s link, each written
+/// stream as the stores hold it (what a load of it is served) into
+/// `<dir>/<n>/`, to compare with the files the link wrote.
+fn dump_streams(tex: &Tex<native::NativeHost, partex_core::ssa::SsaTracker>, n: usize) {
+    let Ok(dir) = std::env::var("PARTEX_SSA_STREAMS") else {
+        return;
+    };
+    let dir = std::path::Path::new(&dir).join(n.to_string());
+    let _ = std::fs::create_dir_all(&dir);
+    for (name, bytes) in partex_core::ssa::stream_values(tex) {
+        let base = name.rsplit(|&b| b == b'/').next().unwrap_or(&name);
+        let file = dir.join(String::from_utf8_lossy(base).as_ref());
+        match bytes {
+            Some(b) => {
+                let _ = std::fs::write(file, b);
+            }
+            None => {
+                let _ = std::fs::write(file.with_extension("none"), b"");
+            }
+        }
+    }
 }
 
 /// `PARTEX_SSA_CANCEL_AFTER=N`: [`partex_core::ssa::SsaTracker::cancel`]

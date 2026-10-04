@@ -48,6 +48,10 @@ Each case runs in WORK/<case>/:
   (the format aside), compared stage by stage: byte for byte, and `.log`
   and `.blg` files without their first line (banner, date) and with
   `xtask/src/mask.rs`'s statistics masked, as e2e compares them;
+- `streams/<stage>/`: each stream the SSA process's stores hold after
+  the stage's link (`PARTEX_SSA_STREAMS`), what a load of it is served:
+  it must be the file the link wrote (`include_keys`: `include`'s edits,
+  each rebuild one trip, linked, then the idle settle, as an editor's);
 - `logs/`: each process's terminal output and stderr; `results.json` in
   WORK holds every number.
 
@@ -257,8 +261,10 @@ WINDOW_EDITS = [
 
 
 class Case:
-    def __init__(self, name, inputs, fmt, args, edits, outdir=None, seed=0, garble=False):
+    def __init__(self, name, inputs, fmt, args, edits, outdir=None, seed=0, garble=False, env=None):
         self.name = name
+        # the SSA process's own variables (over --env's)
+        self.env = env or {}
         # the SSA side's written files garbled before each rebuild
         self.garble = garble
         # {name in the run directory: file in tests/e2e}
@@ -405,6 +411,18 @@ def all_cases():
             name, {"edits.tex": src}, fmt, args, edits, outdir="out", seed=seed, garble=garble
         )
 
+    def include(name="include", env=None):
+        return Case(
+            name,
+            {"edits.tex": "include.tex", **{f"incl-ch{c}.tex": f"incl-ch{c}.tex" for c in (1, 2, 3)}},
+            "pdflatex",
+            [*LATEX_FLAGS, "-fmt=pdflatex", "-output-directory=out", "edits"],
+            INCLUDE_EDITS,
+            outdir="out",
+            seed=2,
+            env=env,
+        )
+
     return [
         *e2e_watch_cases(),
         latex("machine_edits", "edits.tex", "pdflatex", MACHINE_EDITS),
@@ -431,15 +449,10 @@ def all_cases():
             seed=2,
         ),
         latex("windows", "windows.tex", "pdflatex", WINDOW_EDITS),
-        Case(
-            "include",
-            {"edits.tex": "include.tex", **{f"incl-ch{c}.tex": f"incl-ch{c}.tex" for c in (1, 2, 3)}},
-            "pdflatex",
-            [*LATEX_FLAGS, "-fmt=pdflatex", "-output-directory=out", "edits"],
-            INCLUDE_EDITS,
-            outdir="out",
-            seed=2,
-        ),
+        include(),
+        # (as an editor types: each edit's rebuild one trip, linked and its
+        # files written, then the idle settle's trips, linked again)
+        include("include_keys", {"PARTEX_SSA_KEY_TRIPS": "1", "PARTEX_SSA_IDLE_SETTLE": "1"}),
         latex("synctex", "edits.tex", "pdflatex", SYNCTEX_EDITS, extra=["-synctex=1"]),
         latex("preamble", "preamble.tex", "pdflatex", PREAMBLE_EDITS),
         Case(
@@ -766,7 +779,12 @@ class Runner:
             f"exec {py} {me} --_step {shlex.quote(str(cdir))} {k}"
             for k in range(1, len(case.edits) + 1)
         ]
-        env = {**self.ssa_env, "PARTEX_SSA_REBUILD": "\n".join(lines)}
+        env = {
+            **self.ssa_env,
+            **case.env,
+            "PARTEX_SSA_REBUILD": "\n".join(lines),
+            "PARTEX_SSA_STREAMS": str(cdir / "streams"),
+        }
         t = time.monotonic()
         code, err = self.exec(case.argv, cdir / "p", cdir / "logs" / "ssa", env)
         wall = time.monotonic() - t
@@ -847,6 +865,25 @@ def differences(a, b, runs=None):
     return diffs, notes
 
 
+def served(cdir, k):
+    """Each stream the SSA process wrote that its stores, after stage `k`'s
+    link, would serve a load other than the file the link wrote: a load
+    reads the whole stream, as the link writes it (DESIGN 3.7)."""
+    dump, snap = cdir / "streams" / str(k), cdir / "snap" / "p" / str(k)
+    if not dump.is_dir():
+        return []
+    by_name = {}
+    for rel, p in files(snap).items():
+        by_name.setdefault(Path(rel).name, []).append(p)
+    out = []
+    for f in sorted(dump.iterdir()):
+        ps = by_name.get(f.name, [])
+        if len(ps) == 1 and ps[0].read_bytes() != f.read_bytes():
+            out.append(f"served {f.name} ({f.stat().st_size} bytes) is not the file "
+                       f"the link wrote ({ps[0].stat().st_size} bytes)")
+    return out
+
+
 def judge(case, cdir, runs, code, err, last):
     stages = []
     n = len(case.edits)
@@ -882,6 +919,7 @@ def judge(case, cdir, runs, code, err, last):
         if k == last and crashed:
             problems.append(f"the SSA process ended: exit {code}")
         if k <= last:
+            problems += served(cdir, k)
             diffs, notes = differences(
                 cdir / "snap" / "o" / str(k),
                 cdir / "snap" / "p" / str(k),

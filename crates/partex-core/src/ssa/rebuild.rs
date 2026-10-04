@@ -2653,6 +2653,21 @@ pub fn produced_streams<H: Host>(tex: &Tex<H, SsaTracker>) -> Vec<(Vec<u8>, Stre
         .collect()
 }
 
+/// The job's written streams as the stores hold them now, the bytes a
+/// load of each is served (DESIGN 3.7, "Files are a view"): `None` for
+/// one with no open in the stores (a debugging view, `PARTEX_SSA_STREAMS`).
+pub fn stream_values<H: Host>(tex: &Tex<H, SsaTracker>) -> Vec<(Vec<u8>, Option<Vec<u8>>)> {
+    let r = tex.tracker.rec.borrow();
+    let s = &r.st.steps;
+    s.stored
+        .iter()
+        .filter_map(|&id| {
+            let name = r.st.loads.get(id as usize)?.0.clone();
+            Some((name, s.value_at(&r.rt.fold, id, u64::MAX)?.ok()))
+        })
+        .collect()
+}
+
 /// The steps a stopped rebuild left to run (DESIGN 3.7, "A rebuild
 /// stopped"): 0 when the program is the source's.
 pub fn pending<H: Host>(tex: &Tex<H, SsaTracker>) -> usize {

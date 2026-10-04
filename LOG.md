@@ -12920,3 +12920,30 @@ with `--fixpoint` and with `PARTEX_SSA_TRIPS=1`; blocks made per stage 8
 Stage 2's gate (a07f01a, job 6647): all but `garbled` with
 `PARTEX_SSA_TRIPS=1`, memout's case (it fails on add8361 too; the
 memout agent fixes it); edits job 6648: 24/24.
+
+
+The extension's lost `Chapter_2.aux` (a "x" rebuild after a space
+rebuild reading 48 bytes of 18,025; on main the engine's written copy
+16,360 bytes, its early writes gone), tried natively on the thesis with
+the extension's sequence: startup plain passes and BibTeX until the
+`.aux` is stable, an SSA cold build of up to 12 trips, then each edit's
+rebuild one trip (`PARTEX_SSA_KEY_TRIPS=1`) linked and written, then
+the idle settle (`PARTEX_SSA_IDLE_SETTLE=1`), linked again: the space
+after "for big data applications." (Chapter_2.tex, line 22), then "x".
+Not reproduced, on b542df1 nor here (nor here merged with main
+ba64313, nor that started from the extension's own files, whose cold
+build settles in 2 trips as the extension's does): `Chapter_2.aux` is
+18,025 bytes after each link, and here the stores serve each load the
+file the link wrote, byte for byte (`PARTEX_SSA_STREAMS=DIR` dumps the
+streams as the stores hold them after each link). On main the engine's
+copy of a written file is what the host was given during the build; here
+nothing is given until the link, and a load reads the stores' whole
+stream (every step's lines since the last open), not a partial copy.
+
+The CLI's keystroke rebuild (`PARTEX_SSA_KEY_TRIPS` with
+`PARTEX_SSA_IDLE_SETTLE`) now links and writes its files before the
+idle settle, as the editor does, and links again after it. The edit
+harness checks, every stage of every case, that each stream the stores
+would serve is the file the link wrote; a new case, `include_keys`:
+`include` as an editor types it (one trip an edit, then the settle).
+24/24 cases identical, with `--fixpoint` and with one trip a build.
