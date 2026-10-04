@@ -1733,15 +1733,20 @@ impl Tracker for SsaTracker {
     }
 
     fn save_entry(&self, cell: Cell, level: i32) {
-        let Cell::Eqtb(_) = cell else { return };
-        let s = Slot::of(cell);
+        let Cell::Eqtb(p) = cell else { return };
         let Ok(mut r) = self.rec.try_borrow_mut() else {
             return;
         };
-        if r.on
-            && let Some((step, w)) = r.rt.entry_write(&s)
-        {
-            self.entry_saves.borrow_mut().push((s, level, step, w));
+        if !r.on {
+            return;
+        }
+        // (the slot, and what is made of it: a control sequence's class,
+        // [`Fam::Class`], put back with it)
+        let mut v = self.entry_saves.borrow_mut();
+        for s in [Slot::of(cell), Slot(Fam::Class, i64::from(p))] {
+            if let Some((step, w)) = r.rt.entry_write(&s) {
+                v.push((s, level, step, w));
+            }
         }
     }
 
@@ -1751,22 +1756,25 @@ impl Tracker for SsaTracker {
     /// that value, from outside the step, and the slot is not the step's
     /// definition unless written again ([`SsaTracker::end_step`]).
     fn restored(&self, cell: Cell, level: i32) {
-        let Cell::Eqtb(_) = cell else { return };
-        let s = Slot::of(cell);
-        let found = {
-            let mut v = self.entry_saves.borrow_mut();
-            v.iter()
-                .rposition(|e| e.0 == s && e.1 == level)
-                .map(|k| v.remove(k))
-        };
-        let Some((_, _, step, w)) = found else { return };
-        if let Ok(mut r) = self.rec.try_borrow_mut() {
-            r.rt.unwrite(&s, step, w);
-            self.undone.borrow_mut().push(s);
-        }
-        // (the next read of the slot in this call is noted again)
-        if let Some(c) = self.stamp(s) {
-            c.set(0);
+        let Cell::Eqtb(p) = cell else { return };
+        for s in [Slot::of(cell), Slot(Fam::Class, i64::from(p))] {
+            let found = {
+                let mut v = self.entry_saves.borrow_mut();
+                v.iter()
+                    .rposition(|e| e.0 == s && e.1 == level)
+                    .map(|k| v.remove(k))
+            };
+            let Some((_, _, step, w)) = found else {
+                continue;
+            };
+            if let Ok(mut r) = self.rec.try_borrow_mut() {
+                r.rt.unwrite(&s, step, w);
+                self.undone.borrow_mut().push(s);
+            }
+            // (the next read of the slot in this call is noted again)
+            if let Some(c) = self.stamp(s) {
+                c.set(0);
+            }
         }
     }
 
