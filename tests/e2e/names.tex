@@ -1,0 +1,9 @@
+\documentclass{article}
+\begin{document}
+\makeatletter
+First paragraph: \ifcsname zz@a\endcsname defined\else undefined\fi.
+
+Second paragraph.
+\immediate\write\@auxout{\string\gdef\string\zz@a{1}}
+\expandafter\ifx\csname zz@a\endcsname\relax\fi
+\end{document}

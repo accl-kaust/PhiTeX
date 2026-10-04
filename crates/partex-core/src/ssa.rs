@@ -1475,6 +1475,13 @@ pub struct SsaTracker {
     /// one still on the stack at the step's end is a read of it.
     #[allow(clippy::type_complexity)]
     entry_saves: RefCell<Vec<(Slot, i32, i32, u64, u64)>>,
+    /// The names the build entered, by hash slot (an index into `made`,
+    /// plus one; 0: the format's or none): the key of the step that
+    /// entered each, and the name's id ([`Fam::Name`]). A step that defines the meaning
+    /// of a name a later step entered is where the name is made, in
+    /// program order ([`SsaTracker::write`]).
+    made_at: RefCell<Vec<u32>>,
+    made: RefCell<Vec<(u64, u32)>>,
     /// The slots a group's end gave back their entry values to.
     undone: RefCell<Vec<Slot>>,
     /// The group level the open step began at: a local assignment in a
@@ -1619,6 +1626,8 @@ impl SsaTracker {
             fonts_by: RefCell::new(Vec::new()),
             fonts_made: core::cell::Cell::new(0),
             entry_saves: RefCell::new(Vec::new()),
+            made_at: RefCell::new(Vec::new()),
+            made: RefCell::new(Vec::new()),
             undone: RefCell::new(Vec::new()),
             step_level: core::cell::Cell::new(crate::web::LEVEL_ONE),
             watch_seen: core::cell::Cell::new(0),
@@ -1707,6 +1716,41 @@ impl SsaTracker {
     fn stamp(&self, s: Slot) -> Option<&core::cell::Cell<u32>> {
         let (f, i) = table_at(s.0, s.1)?;
         self.stamps[f].get(i)
+    }
+
+    /// The key of the step open, or 0.
+    fn open_key(r: &Recorder) -> u64 {
+        r.rt.open_step_id()
+            .and_then(|id| r.rt.fold.steps.get(id as usize))
+            .map_or(0, |s| s.key)
+    }
+
+    /// The meaning of hash slot `p` was written. If a later step entered
+    /// its name (a step run again in its place, or in a later trip, found
+    /// a name the build entered after it: names are never taken out),
+    /// the name is made here, in program order: a definition of the name,
+    /// which wakes the lookups between that did not find it (`\ifcsname`
+    /// before a `\bibcite` read from the `.aux`, whose name the first trip
+    /// entered at `\end{document}`).
+    fn name_defined(&self, r: &mut Recorder, p: i32) {
+        let Some(k) = usize::try_from(p)
+            .ok()
+            .and_then(|i| self.made_at.borrow().get(i).copied())
+            .filter(|&k| k > 0)
+        else {
+            return;
+        };
+        let key = Self::open_key(r);
+        let m = self.made.borrow()[k as usize - 1];
+        // (every write by a step before the one that entered it: a run
+        // dropped and made again writes it again)
+        if key != 0 && key < m.0 {
+            // (the name, for a lookup by tex.web's chains, and its slot's
+            // text, for one that probed: the free place it found is where
+            // the name went)
+            r.rt.note_write(&Slot(Fam::Name, i64::from(m.1)));
+            r.rt.note_write(&Slot::of(Cell::Hash(p)));
+        }
     }
 
     /// End the engine's calls still open: the job ended inside them (an
@@ -2553,6 +2597,9 @@ impl Tracker for SsaTracker {
         if r.on {
             r.rt.note_write(&s);
             Self::watch_event(&mut r, s, "written (before the store)");
+            if let Cell::Eqtb(p) = cell {
+                self.name_defined(&mut r, p);
+            }
         }
     }
 
@@ -2688,6 +2735,33 @@ impl Tracker for SsaTracker {
         }
         for (addr, pos) in open {
             r.st.steps.number_read(addr, pos);
+        }
+    }
+
+    fn name_made(&self, name: &[u8], p: i32) {
+        let Ok(mut r) = self.rec.try_borrow_mut() else {
+            return;
+        };
+        if !r.on {
+            return;
+        }
+        let rr = &mut *r;
+        let (id, fresh) = Recorder::intern(&mut rr.st.names_ix, rr.st.names.len(), name);
+        if fresh {
+            rr.st.names.push(name.to_vec());
+        }
+        let key = Self::open_key(rr);
+        let Ok(i) = usize::try_from(p) else { return };
+        let mut at = self.made_at.borrow_mut();
+        if at.len() <= i {
+            at.resize(i + 1, 0);
+        }
+        let mut made = self.made.borrow_mut();
+        if at[i] == 0 {
+            made.push((key, id));
+            at[i] = u32::try_from(made.len()).unwrap_or(u32::MAX);
+        } else {
+            made[at[i] as usize - 1] = (key, id);
         }
     }
 

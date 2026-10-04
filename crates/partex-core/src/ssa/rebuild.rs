@@ -3708,9 +3708,18 @@ fn run_step<H: Host>(
         // again that sets `\hyphenchar` or a `\fontdimen`, an
         // `\intarray`'s count or entries, is read by later steps)
         // (nor a meaning's class, made by the meaning's writes, which
-        // are placed)
-        for a in slots.filter(|a| positioned(a) || matches!(a.0, Fam::Font | Fam::Class)) {
-            touched.insert(*a);
+        // are placed; nor a name, which a lookup that did not find it
+        // read, and its hash slot's text, for one that probed: a step
+        // that now makes a name a later step made wakes the lookups
+        // between, `SsaTracker::name_defined`)
+        for a in slots.filter(|a| {
+            positioned(a) || matches!(a.0, Fam::Font | Fam::Class | Fam::Name | Fam::Hash)
+        }) {
+            // (a name and its hash slot only wake their readers: the
+            // table keeps every name made, and is not put back)
+            if !matches!(a.0, Fam::Name | Fam::Hash) {
+                touched.insert(*a);
+            }
             let (o, n) = (old.get(a).copied(), new.get(a).copied());
             if o == n || ((o.is_none() || n.is_none()) && reaching_version(rr, a, key) == o.or(n)) {
                 continue;
