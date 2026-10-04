@@ -12163,3 +12163,11 @@ chains' vectors hold nothing past their end.
 0 bad reads at every build; the rebuilt PDF equals a cold SSA build of
 the final source. `pt`, `acro2`, `ac3` (one edit each): 0 bad reads,
 PDFs identical to cold SSA builds.
+
+The course's word edit (fastdev, this machine, entry check on): 0 bad
+reads cold and rebuilt; rebuild 1 links 8,006 steps changed (8,053
+before), 8.1 s. Its rebuilt PDF is byte-identical to the one the
+previous binary rebuilds (both differ from a cold SSA build of the same
+local copy, as before this change). Gates on `29390b4` (accl): `gate`
+exited 0 (job 6584); `edits --brief --fixpoint` gave 17/17 cases
+identical over 99 stages (job 6585).
