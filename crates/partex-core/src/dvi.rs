@@ -147,6 +147,21 @@ impl DviState {
 }
 
 impl<H: Host, T: Tracker> Tex<H, T> {
+    /// Font `f`'s number in the DVI file (§576, §621): its place among the
+    /// fonts the program has made by now, where the tracker knows it (an
+    /// SSA build's table keeps fonts only an older run loaded), else in
+    /// the table (`FontArrays::number`).
+    pub(crate) fn dvi_font_number(&self, f: i32) -> i32 {
+        let fonts = &self.fonts;
+        self.tracker
+            .font_number(f, &|| {
+                let mut v = alloc::vec![0];
+                v.extend(fonts.loaded_fonts());
+                v
+            })
+            .unwrap_or_else(|| self.fonts.number(f))
+    }
+
     /// §532: `ensure_dvi_open`.
     fn ensure_dvi_open(&mut self) -> Result<(), Jump> {
         if self.output_file_name() == 0 {
@@ -406,9 +421,9 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         page.v_offset = v_offset;
         let walked = self.build_list(p, &mut page, false);
         page.truncated = walked.is_err();
-        for f in &page.fonts {
-            self.dvi.page_fonts[ux(f.font)] = false;
-        }
+        // (by slot, as `page_font` marks them: a font's number is not its
+        // slot, `dvi_font_number`)
+        self.dvi.page_fonts.fill(false);
         let written = if self.dvi.away {
             self.page_away(page)
         } else {
@@ -496,7 +511,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         // (DVI numbers fonts as tex.web does, in the order they were
         // loaded: `FontArrays::number`)
         page.fonts.push(FontDef {
-            font: self.fonts.number(f),
+            font: self.dvi_font_number(f),
             check: font.check,
             size: font.size,
             design_size: font.design_size,
@@ -730,7 +745,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         // N.B.: `orig_char_info`, not `char_info`
         if let Some(g) = self.fonts.get(f).glyph(c) {
             page.items.push(Item::Char {
-                font: self.fonts.number(f),
+                font: self.dvi_font_number(f),
                 ch: c,
                 width: g.width,
                 raise: 0,
@@ -738,7 +753,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             return g.width;
         }
         page.items.push(Item::Missing {
-            font: self.fonts.number(f),
+            font: self.dvi_font_number(f),
         });
         if self.mltex_enabled_p {
             self.substitution(f, c, page);
@@ -834,14 +849,14 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         page.items.extend([
             Item::Move(delta),
             Item::Char {
-                font: self.fonts.number(f),
+                font: self.dvi_font_number(f),
                 ch: accent_c,
                 width: accent_width,
                 raise,
             },
             Item::Move(-accent_width - delta),
             Item::Char {
-                font: self.fonts.number(f),
+                font: self.dvi_font_number(f),
                 ch: base_c,
                 width: base_width,
                 raise: 0,

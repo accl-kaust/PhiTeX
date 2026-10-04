@@ -813,6 +813,13 @@ template, which a compiled backend exploits.
   The link numbers the fonts from the `Effect::FontLoad` events of the
   steps' runs as they are now, in program order. A font a step run again
   makes anew in its slot (`remake_font`) is loaded there too.
+  DVI's font numbers cannot be relocations: their opcodes' lengths
+  depend on them, and §611's movement optimization depends on where
+  bytes fall. So the ship numbers its fonts by their places among the
+  fonts the program has made by now (`Tracker::font_number`). Those are
+  the format's fonts in the table's order, then the run's by their
+  makers' places in program order (`font_made_by_now`, as `\font`'s
+  search uses), with the null font 0.
 - **Columns are the link's** (`effects/flow.rs`). `term_offset` and
   `file_offset` (§54), where the terminal's and the log's lines stand,
   decide only what is printed: the wrap at `max_print_line` (§58),

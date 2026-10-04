@@ -165,6 +165,12 @@ FATAL_EDITS = [("Hello world.", "Hello there."), ("Hello there.", "Hello world."
 # sets its identifier; the first build's second trip runs the first
 # `\font`'s step again, after the second set it (DESIGN 3.2, "A font's
 # identifier is positioned"); then a word in the first box and back
+# fontnum.tex (not seeded; DVI): a font that only the first build's first
+# trip loads (as the bold `?` of a citation the `.aux` does not define
+# yet), then a font loaded after it: its DVI number is its place among
+# the fonts the final trip loads (`Tracker::font_number`); then a word and
+# back
+FONTNUM_EDITS = [("slanted text", "slanted words"), ("slanted words", "slanted text")]
 FONTID_EDITS = [("text here", "text HERE"), ("text HERE", "text here")]
 NAMES_EDITS = [
     ("Second paragraph.", "Second paragraph, edited."),
@@ -360,6 +366,7 @@ def all_cases():
         latex("fatal_end", "fatal-end.tex", "pdflatex", FATAL_EDITS, seed=0),
         latex("names", "names.tex", "pdflatex", NAMES_EDITS, seed=0),
         latex("fontid", "fontid.tex", "pdflatex", FONTID_EDITS, seed=0),
+        latex("fontnum", "fontnum.tex", "pdflatex", FONTNUM_EDITS, seed=0),
         Case(
             "inputs",
             {"edits.tex": "inputs.tex", **{f: f for f in ("inputs-sub.tex", "inputs-probe.tex")}},
