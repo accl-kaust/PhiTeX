@@ -211,6 +211,10 @@ fn class_version(c: u8) -> Version {
 
 /// Codes id of a [`Fam::Source`] line versioned by its bytes.
 const BYTES: u32 = 0;
+/// A saved entry value ([`SsaTracker::save_entry`]): the slot, its
+/// level, where it was saved, and the step and write that made it.
+type EntrySave = (Slot, i32, i32, u64, u64);
+
 /// Codes id of a [`Fam::Source`] line past the end of its file.
 const EOF: u32 = 0xff_ffff;
 
@@ -1363,7 +1367,7 @@ pub struct SsaTracker {
     /// `(step, w)`. The
     /// group's end copies the entry value back ([`Tracker::restored`]);
     /// one still on the stack at the step's end is a read of it.
-    entry_saves: RefCell<Vec<(Slot, i32, i32, u64, u64)>>,
+    entry_saves: RefCell<Vec<EntrySave>>,
     /// The slots a group's end gave back their entry values to.
     undone: RefCell<Vec<Slot>>,
     /// The group level the open step began at: a local assignment in a
@@ -2068,13 +2072,16 @@ impl Tracker for SsaTracker {
             r.st.entry_bad_count
         );
         for (id, s, want, got, skip) in &r.st.entry_bad {
-            out.push_str(&alloc::format!(
-                "\n  step {id}: {s}{} reaching {:04x}, {} {:04x}",
-                if *skip { "!" } else { "" },
-                want.0 & 0xffff,
-                if *skip { "left at" } else { "read" },
-                got.0 & 0xffff
-            ));
+            let _ = core::fmt::Write::write_fmt(
+                &mut out,
+                format_args!(
+                    "\n  step {id}: {s}{} reaching {:04x}, {} {:04x}",
+                    if *skip { "!" } else { "" },
+                    want.0 & 0xffff,
+                    if *skip { "left at" } else { "read" },
+                    got.0 & 0xffff
+                ),
+            );
         }
         out
     }
