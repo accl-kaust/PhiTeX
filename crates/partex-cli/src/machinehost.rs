@@ -455,6 +455,10 @@ impl Host for MachineHost {
         Some((WriteId(id), n))
     }
 
+    fn runs_commands(&self) -> bool {
+        true
+    }
+
     /// A command, run by the native host over the job's files: this host
     /// keeps them in memory until the link, so each name's last opened
     /// file is put on disk first; the files the command removes stay

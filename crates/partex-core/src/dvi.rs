@@ -1055,7 +1055,15 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                 // (minimal checking: NUL not allowed in the argument
                 // string of `system`, but as its last character it only
                 // ends the string)
-                if cmd.split_last().is_some_and(|(_, init)| init.contains(&0)) {
+                if !self.host.runs_commands() {
+                    // (a host that runs none, the wasm extension's: as
+                    // partex printed before it ran commands)
+                    self.print_str(if cmd.contains(&0) {
+                        b"clobbered"
+                    } else {
+                        b"disabled (restricted)"
+                    });
+                } else if cmd.split_last().is_some_and(|(_, init)| init.contains(&0)) {
                     self.print_str(b"clobbered");
                 } else {
                     let cmd = cmd.strip_suffix(&[0]).unwrap_or(&cmd);

@@ -285,6 +285,14 @@ pub trait Host {
         None
     }
 
+    /// Whether [`Host::system`] runs commands. A host that runs none (the
+    /// default, the wasm extension's) logs every `\write18` it is given
+    /// with shell escape on as `disabled (restricted)`, whatever
+    /// `shell_escape_commands` allows.
+    fn runs_commands(&self) -> bool {
+        false
+    }
+
     /// A value cached under `key` by an earlier run (of this same
     /// program), if the host keeps a cache. Cached values are results of
     /// pure functions of their key (a map file's table, for one): using

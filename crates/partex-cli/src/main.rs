@@ -1182,7 +1182,8 @@ fn side_files_write<T: partex_core::track::Tracker>(tex: &mut Tex<native::Native
 /// `PARTEX_SSA_TRACE=<file>` writes the last build's trace there;
 /// `PARTEX_SSA_LEAN=0` records every routine, and each step's own reads.
 #[allow(clippy::too_many_lines)]
-fn run_ssa(host: native::NativeHost, params: Params, command_line: &[u8]) -> i32 {
+fn run_ssa(mut host: native::NativeHost, params: Params, command_line: &[u8]) -> i32 {
+    host.commands = Some(native::Commands::default());
     let check = std::env::var("PARTEX_SSA_CHECK").is_ok_and(|v| v == "1");
     let rebuild = std::env::var("PARTEX_SSA_REBUILD").ok();
     let apply = std::env::var("PARTEX_SSA_APPLY").is_ok_and(|v| v == "1");

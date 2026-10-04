@@ -745,6 +745,20 @@ template, which a compiled backend exploits.
     (`Tracker::run_doomed`), and a doomed run skips the command: it would
     see the wrong files (minted wrote `\minted@tmpdatabufferline39`
     unexpanded into its data file) and leave what it wrote.
+  - *A command runs again only if what it reads changed* (the native
+    host's `Commands`, on in an SSA build), as a BibTeX node: a step
+    run again in a later trip or rebuild runs its commands again, and
+    each is a node keyed by its command line, the job's files it is
+    handed and the files commands made, changed or removed, as they are
+    on disk then (latexminted's cache and configuration). A key that ran
+    before is not run: its files are put back as that run left them and
+    its `Ran` (status, files, standard output) is answered again. So
+    minted's `cleanconfig`, at the document's end, which every rebuild
+    runs again, runs only when a code block changed.
+  - *A host that runs no commands* (`Host::runs_commands` false: the
+    wasm extension's, the resident session's) logs every command
+    `disabled (restricted)` with shell escape on, as partex did before
+    commands ran.
   - What it does not model: a command's reads of files that neither the
     job stores nor a step loads (an edit of such a file alone runs
     nothing again; minted's `\inputminted` reads its file in TeX too,
