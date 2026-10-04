@@ -268,6 +268,11 @@ pub mod page {
 pub mod scalar {
     /// The pool's end, `str_ptr` (§38).
     pub const STR_TOP: u16 = 0;
+    /// `SyncTeX`'s tag counter (`synctex.rs`).
+    pub const SYNCTEX_TAGS: u16 = 3;
+    /// `SyncTeX`'s controller's flags in SSA mode (`synctex.rs`: off,
+    /// content ready, warned), for its warnings in program order.
+    pub const SYNCTEX_FLAGS: u16 = 4;
     /// The hash's allocator, `hash_used` (§256).
     pub const HASH_USED: u16 = 1;
     /// The allocator of the hash's extra area, `hash_high` (web2c).
@@ -526,6 +531,14 @@ pub trait Tracker {
     /// value it must not, and ran past its budget (`ssa::rebuild`, "A
     /// run that read a later definition").
     fn stop_due(&self, _n: u64) -> bool {
+        false
+    }
+    /// A macro call with no command since command `n`: whether the run
+    /// stops there, a checkpoint (a rebuild's run of a step that read a
+    /// value it must not, expanding on with it, which may never end: the
+    /// run is dropped, `ssa::rebuild`, "A run that read a later
+    /// definition").
+    fn stop_expanding(&self, _n: u64) -> bool {
         false
     }
     /// (With [`Tracker::VALUES`].) The open step's name, for the keys of

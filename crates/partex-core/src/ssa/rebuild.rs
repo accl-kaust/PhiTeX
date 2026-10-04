@@ -100,6 +100,10 @@ pub(crate) struct Steps {
     phi_vers: core::cell::RefCell<PhiVersions>,
     /// Between two trips of a build: what the next one starts from.
     next: Option<NextTrip>,
+    /// A rebuild that stopped (its deadline, its budget, cancelled: DESIGN
+    /// 3.7, "A rebuild stopped"): the work it left, which the next
+    /// rebuild takes up.
+    pending: Option<Pending>,
     /// The queries of the host the open step's run asked, and each
     /// step's, by step id, with their answers' versions (7.17.3, "A
     /// query is asked again").
@@ -211,6 +215,14 @@ struct NextTrip {
     changed: BTreeSet<u32>,
     /// A tool wrote a file: the job's other loads are looked at again.
     files: bool,
+}
+
+/// The work a stopped rebuild left (DESIGN 3.7, "A rebuild stopped"):
+/// the dirty steps it did not reach, each with why, and the φ its trip
+/// served, which the link has not written (it waits for the work).
+struct Pending {
+    dirty: Dirty,
+    phi: BTreeMap<u32, Option<Arc<[u8]>>>,
 }
 
 /// Where a step left a file's line ([`Steps::ended_at`]): the data's
@@ -897,6 +909,7 @@ fn same_file(x: Option<&AlphaFile>, y: Option<&AlphaFile>) -> bool {
                 && x.line_open == y.line_open
                 && x.lines == y.lines
                 && x.name == y.name
+                && x.synctex_tag == y.synctex_tag
                 && same_data(&x.data, &y.data)
         }
         _ => false,
@@ -1284,8 +1297,19 @@ pub struct RebuildReport {
     /// that runs again"), and the commands they stand for.
     pub applied: u64,
     pub skipped: u64,
-    /// Why the rebuild stopped short, if it did.
+    /// Why the rebuild stopped short, if it did: a state it cannot make,
+    /// after which only a cold build is sound.
     pub unsupported: Option<&'static str>,
+    /// Why it stopped at a step boundary, if it did (its deadline, its
+    /// budget of commands, cancelled): the work left is kept ([`pending`]),
+    /// and the next [`rebuild`], [`rebuild_trips`] or [`settle`] goes on
+    /// with it, merged with any new edit's (DESIGN 3.7, "A rebuild
+    /// stopped"). The link waits until none is left.
+    pub stopped: Option<&'static str>,
+    /// The steps left to run (dirty) when it stopped.
+    pub pending: usize,
+    /// It began with the work a stopped rebuild left.
+    pub resumed: bool,
     pub commands: u64,
     /// The trips run (DESIGN 3.7, "Trips, as built"), each one's steps
     /// run, commands and time (ns, by [`Trips::clock`]); whether the build
@@ -1885,7 +1909,14 @@ pub fn rebuild<H: Host>(tex: &mut Tex<H, SsaTracker>, trace: bool, apply: bool) 
     let c0 = tex.commands();
     // (a rebuild past its budget stops: `SsaTracker::budget`)
     let budget_from = c0;
-    let mut dirty = Dirty::default();
+    // (the work a stopped rebuild left, taken up: its dirty steps, and
+    // the φ its trip served, DESIGN 3.7, "A rebuild stopped")
+    let pending = tex.tracker.rec.borrow_mut().st.steps.pending.take();
+    rep.resumed = pending.is_some();
+    let (mut dirty, pending_phi) = match pending {
+        Some(p) => (p.dirty, Some(p.phi)),
+        None => (Dirty::default(), None),
+    };
     // (a build's trip after the first: its φ is what the trip before
     // stored, DESIGN 3.7, "Trips, as built")
     let next = tex.tracker.rec.borrow_mut().st.steps.next.take();
@@ -2022,11 +2053,22 @@ pub fn rebuild<H: Host>(tex: &mut Tex<H, SsaTracker>, trace: bool, apply: bool) 
                 phi.insert(id, now);
             }
         }
+        // (a stopped trip's φ: the files hold the one before it, as the
+        // link waited)
+        if let Some(p) = pending_phi {
+            phi.extend(p);
+        }
         if trace {
             note(
                 tex,
                 alloc::format!("loads: {same} as they were by their stamps, {read} made again"),
             );
+            if rep.resumed {
+                note(
+                    tex,
+                    alloc::format!("resumed: {} steps a stopped rebuild left", dirty.len()),
+                );
+            }
         }
         for (d, name, old) in datas {
             if let Some(e) = nows.get(&name).and_then(|now| Edit::diff(d, &old, now)) {
@@ -2250,20 +2292,18 @@ pub fn rebuild<H: Host>(tex: &mut Tex<H, SsaTracker>, trace: bool, apply: bool) 
                 tex, cur, &predict, &writes, &input, &mut dirty, &mut rep, &mut srep,
             );
             spent += tex.commands() - c0 + ((rep.positioned + rep.restored - moved) / 2) as u64;
+            // (past its budget, its deadline, or cancelled: it stops once
+            // this step's run is placed, below, its work kept, DESIGN 3.7,
+            // "A rebuild stopped")
             if tex.commands() - budget_from > tex.tracker.budget.get() {
-                rep.unsupported = Some("a rebuild past its budget of commands");
-                break;
-            }
-            if let Some((clock, end)) = tex.tracker.deadline.get()
+                rep.stopped = Some("a rebuild past its budget of commands");
+            } else if let Some((clock, end)) = tex.tracker.deadline.get()
                 && clock() > end
             {
-                rep.unsupported = Some("a rebuild past its deadline");
-                break;
-            }
-            if tex.tracker.cancel.get().is_some_and(|c| c()) {
-                rep.unsupported = Some("a rebuild cancelled");
+                rep.stopped = Some("a rebuild past its deadline");
+            } else if tex.tracker.cancel.get().is_some_and(|c| c()) {
+                rep.stopped = Some("a rebuild cancelled");
                 rep.cancelled = true;
-                break;
             }
             if let Some(s) = dirty.anchor.take()
                 && let Some(i) = ahead.iter().position(|&o| o == s)
@@ -2340,6 +2380,15 @@ pub fn rebuild<H: Host>(tex: &mut Tex<H, SsaTracker>, trace: bool, apply: bool) 
                 }
                 break;
             }
+            // (stopped in a cascade that runs on: the old step after it
+            // runs again from where this one ended, as when an input
+            // changed; with none after it, it goes on)
+            if rep.stopped.is_some() {
+                if mark_next(tex, cur, &mut dirty) {
+                    break;
+                }
+                rep.stopped = None;
+            }
             // (a cascade that has cost more than running the rest of the
             // job would: the old steps after it go at once, and the rest
             // runs as a cold build does, each new step the fold's last)
@@ -2385,9 +2434,31 @@ pub fn rebuild<H: Host>(tex: &mut Tex<H, SsaTracker>, trace: bool, apply: bool) 
             cur = next;
             input = end;
         }
-        if rep.unsupported.is_some() {
+        if rep.unsupported.is_some() || rep.stopped.is_some() {
             break;
         }
+    }
+    if rep.stopped.is_some() && rep.unsupported.is_none() && !dirty.is_empty() {
+        // (the work left: the next rebuild takes it up)
+        dirty.anchor = None;
+        rep.pending = dirty.len();
+        if rep.trace {
+            note(
+                tex,
+                alloc::format!(
+                    "stopped ({}): {} steps pending",
+                    rep.stopped.unwrap_or_default(),
+                    rep.pending
+                ),
+            );
+        }
+        let mut r = tex.tracker.rec.borrow_mut();
+        let s = &mut r.st.steps;
+        let phi = s.phi.clone().unwrap_or_default();
+        s.pending = Some(Pending { dirty, phi });
+    } else {
+        // (a stop with nothing left is a trip that ended)
+        rep.stopped = None;
     }
     tex.tracker.flush_effects();
     {
@@ -2413,6 +2484,23 @@ pub fn rebuild<H: Host>(tex: &mut Tex<H, SsaTracker>, trace: bool, apply: bool) 
         }
     }
     rep
+}
+
+/// The steps a stopped rebuild left to run (DESIGN 3.7, "A rebuild
+/// stopped"): 0 when the program is the source's.
+pub fn pending<H: Host>(tex: &Tex<H, SsaTracker>) -> usize {
+    tex.tracker
+        .rec
+        .borrow()
+        .st
+        .steps
+        .pending
+        .as_ref()
+        .map_or(0, |p| p.dirty.len())
+}
+
+fn has_pending<H: Host>(tex: &Tex<H, SsaTracker>) -> bool {
+    tex.tracker.rec.borrow().st.steps.pending.is_some()
 }
 
 /// What a build's trips call outside the engine (DESIGN 3.7, "Trips, as
@@ -2467,6 +2555,9 @@ impl RebuildReport {
         self.commands += r.commands;
         self.unsupported = self.unsupported.or(r.unsupported);
         self.cancelled |= r.cancelled;
+        self.stopped = r.stopped;
+        self.pending = r.pending;
+        self.resumed |= r.resumed;
         self.history = r.history;
         self.log.extend(r.log);
     }
@@ -2495,7 +2586,7 @@ pub fn rebuild_trips<H: Host>(
     if !ran {
         // (nothing ran: the stores are what the loads of the φ read; the
         // trace of the trip, as `more_trips` keeps it)
-        rep.settled = rep.unsupported.is_none();
+        rep.settled = rep.unsupported.is_none() && rep.stopped.is_none();
         rep.log.extend(rebuild_log(tex));
         return rep;
     }
@@ -2517,6 +2608,10 @@ pub fn settle<H: Host>(
     commands: u64,
     ns: u64,
 ) -> RebuildReport {
+    if has_pending(tex) {
+        // (a settle that stopped: its work goes on as a rebuild's)
+        return rebuild_trips(tex, trace, apply, trips);
+    }
     let rep = RebuildReport {
         trace,
         trips: 1,
@@ -2537,7 +2632,7 @@ fn more_trips<H: Host>(
     mut rep: RebuildReport,
 ) -> RebuildReport {
     loop {
-        if rep.unsupported.is_some() {
+        if rep.unsupported.is_some() || rep.stopped.is_some() {
             return rep;
         }
         let (phi, changed) = {
@@ -3045,7 +3140,8 @@ impl Dirty {
 
 /// The step after `s` in the fold reads where `s` left the input, which
 /// changed: it is dirty.
-fn mark_next<H: Host>(tex: &Tex<H, SsaTracker>, s: StepId, dirty: &mut Dirty) {
+/// Whether there is one.
+fn mark_next<H: Host>(tex: &Tex<H, SsaTracker>, s: StepId, dirty: &mut Dirty) -> bool {
     let r = tex.tracker.rec.borrow();
     let fold = &r.rt.fold;
     if let Some(n) = fold
@@ -3053,7 +3149,9 @@ fn mark_next<H: Host>(tex: &Tex<H, SsaTracker>, s: StepId, dirty: &mut Dirty) {
         .and_then(|p| fold.order.get(p + 1).copied())
     {
         dirty.mark(fold.steps[n as usize].key, n);
+        return true;
     }
+    false
 }
 
 /// The old step after `cur` (the step just run), within [`LOOK_AHEAD`],

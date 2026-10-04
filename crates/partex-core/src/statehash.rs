@@ -1586,6 +1586,10 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             cur_input,
             in_open,
             open_parens,
+            synctex_tags,
+            synctex_flags,
+            synctex_root,
+            synctex_shipped,
             input_file,
             line_stack,
             grp_stack,
@@ -1741,8 +1745,11 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             // (outputs, not state; with them, the DVI file's position is
             // state, `DviState::hash_state`)
             effects,
-            // (glyph origins: a side channel, not state)
+            // (glyph origins, `SyncTeX` and display lists: side channels,
+            // not state)
             org: _,
+            sync: _,
+            dl: _,
         } = self;
         let mut c = Canon::new();
         if let Some((m, s)) = memo {
@@ -1919,6 +1926,12 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         }
         c.input(cur_input);
         c.put(&(*input_ptr, *in_open, *open_parens, *base_ptr));
+        c.put(&(
+            synctex_tags,
+            synctex_flags,
+            synctex_root.as_deref(),
+            synctex_shipped,
+        ));
         c.section("input: stack", parts);
         // (with positions as cells, a machine's `Rest` has no line
         // numbers of the input: they are `MCell::Positions`'s)

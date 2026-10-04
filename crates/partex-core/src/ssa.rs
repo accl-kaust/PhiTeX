@@ -48,8 +48,8 @@ mod view;
 
 pub(crate) use rebuild::{Edits, edits_from};
 pub use rebuild::{
-    RebuildReport, RerunCheck, Trips, prepare_rebuilds, rebuild, rebuild_log, rebuild_trips,
-    rerun_check, settle,
+    RebuildReport, RerunCheck, Trips, pending, prepare_rebuilds, rebuild, rebuild_log,
+    rebuild_trips, rerun_check, settle,
 };
 pub use view::{dag, step_trace, view};
 
@@ -196,10 +196,6 @@ pub static DEAD_SAVES: core::sync::atomic::AtomicBool = core::sync::atomic::Atom
 /// from the columns the step before left. Off (`PARTEX_SSA_FLOW=0`), each
 /// step that prints reads and writes `term_offset` and `file_offset`.
 pub static FLOW: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(true);
-
-/// An entry value's copy to the save stack: the slot, its group level,
-/// its entry on the stack and [`Runtime::entry_write`]'s `(step, w)`.
-type EntrySave = (Slot, i32, i32, u64, u64);
 
 /// The steps' chunks with their text rendered (`effects/flow.rs`): from
 /// the columns the build began at, each step's from the columns the step
@@ -1438,6 +1434,9 @@ pub struct SsaTracker {
     /// reads of later definitions, and stopped if it made one
     /// ([`Tracker::stop_due`]; `u64::MAX`: none is).
     pub(crate) stop_after: core::cell::Cell<u64>,
+    /// The command the macro calls since are counted from, and how many
+    /// ([`Tracker::stop_expanding`]).
+    expanding: core::cell::Cell<(u64, u64)>,
     /// The commands a rebuild runs at most: past them it stops, its
     /// trace kept, as one it cannot make (`u64::MAX`, the default: no
     /// limit; the CLI's `PARTEX_SSA_REBUILD_BUDGET`). A host may build
@@ -1474,7 +1473,8 @@ pub struct SsaTracker {
     /// `(step, w)`. The
     /// group's end copies the entry value back ([`Tracker::restored`]);
     /// one still on the stack at the step's end is a read of it.
-    entry_saves: RefCell<Vec<EntrySave>>,
+    #[allow(clippy::type_complexity)]
+    entry_saves: RefCell<Vec<(Slot, i32, i32, u64, u64)>>,
     /// The slots a group's end gave back their entry values to.
     undone: RefCell<Vec<Slot>>,
     /// The group level the open step began at: a local assignment in a
@@ -1612,6 +1612,7 @@ impl SsaTracker {
             lost: core::cell::Cell::new(0),
             timed: false,
             stop_after: core::cell::Cell::new(u64::MAX),
+            expanding: core::cell::Cell::new((0, 0)),
             budget: core::cell::Cell::new(u64::MAX),
             deadline: core::cell::Cell::new(None),
             cancel: core::cell::Cell::new(None),
@@ -2190,6 +2191,16 @@ impl Tracker for SsaTracker {
                 ),
             );
         }
+        // (the step open, and the rebuild's trace so far)
+        let _ = core::fmt::Write::write_fmt(
+            &mut out,
+            format_args!("\nopen step: {:?}", r.rt.open_step_serial()),
+        );
+        let log = &r.st.steps.log;
+        for l in &log[log.len().saturating_sub(40)..] {
+            out.push_str("\n  ");
+            out.push_str(l);
+        }
         out
     }
 
@@ -2252,6 +2263,30 @@ impl Tracker for SsaTracker {
                 .rec
                 .try_borrow_mut()
                 .is_ok_and(|mut r| rebuild::read_later(&mut r))
+    }
+
+    #[inline]
+    fn stop_expanding(&self, n: u64) -> bool {
+        // (every 2^16 calls with no command between them, in a rebuild's
+        // run: whether it read a later definition, and stops now)
+        if self.stop_after.get() == u64::MAX {
+            return false;
+        }
+        let (at, calls) = self.expanding.get();
+        let calls = if at == n { calls + 1 } else { 1 };
+        self.expanding.set((n, calls));
+        if calls & 0xffff != 0 {
+            return false;
+        }
+        let stop = self
+            .rec
+            .try_borrow_mut()
+            .is_ok_and(|mut r| rebuild::read_later(&mut r));
+        if stop {
+            // ([`rebuild::run_step`] sees it stopped)
+            self.stop_after.set(0);
+        }
+        stop
     }
 
     fn step_salt(&self) -> u64 {
@@ -3437,7 +3472,9 @@ fn open_paragraph<H: Host>(
     }
     let mut r = tex.tracker.rec.borrow_mut();
     let rr = &mut *r;
-    let found = if tex.tracker.probing(Func::Step) {
+    // (with `SyncTeX`, no step is taken from another's record: its nodes'
+    // places are where it ran)
+    let found = if tex.tracker.probing(Func::Step) && !tex.synctex_on() {
         rr.rt.probe(&View { tex, rec: &rr.st }, Func::Step, &args)
     } else {
         Found::New
@@ -3864,6 +3901,8 @@ fn scalar_get<H: Host, T: Tracker>(t: &Tex<H, T>, k: u16) -> Option<i32> {
         OUTPUT_FILE_NAME => t.output_file_name,
         LOG_OPENED => b(t.log_opened),
         OPEN_PARENS => t.open_parens,
+        SYNCTEX_TAGS => t.synctex_tags,
+        SYNCTEX_FLAGS => t.synctex_flags,
         SYS_TIME => t.sys_time,
         SYS_DAY => t.sys_day,
         SYS_MONTH => t.sys_month,
@@ -3915,6 +3954,8 @@ fn scalar_set<H: Host, T: Tracker>(t: &mut Tex<H, T>, k: u16, v: i32) {
         OUTPUT_FILE_NAME => t.output_file_name = v,
         LOG_OPENED => t.log_opened = v != 0,
         OPEN_PARENS => t.open_parens = v,
+        SYNCTEX_TAGS => t.synctex_tags = v,
+        SYNCTEX_FLAGS => t.synctex_flags = v,
         SYS_TIME => t.sys_time = v,
         SYS_DAY => t.sys_day = v,
         SYS_MONTH => t.sys_month = v,

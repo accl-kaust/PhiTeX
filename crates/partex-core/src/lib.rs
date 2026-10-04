@@ -33,6 +33,7 @@ extern crate alloc;
 pub use partex_engine::{dviout, pageir, persist};
 
 pub mod diag;
+pub mod displist;
 pub mod effects;
 pub mod exec;
 mod flat;
@@ -105,6 +106,7 @@ pub mod srcmap;
 pub mod statehash;
 mod streams;
 mod strings;
+pub mod synctex;
 mod tex;
 mod tfm;
 mod tok;

@@ -1,0 +1,44 @@
+#!/bin/bash
+# The stop-and-continue check (DESIGN 3.7, "A rebuild stopped"): a cold SSA
+# build of a copy of SRCDIR, then one rebuild per EDIT, each cancelled at its
+# N-th step boundary (PARTEX_SSA_CANCEL_AFTER=N), its work left pending and
+# taken up by the next; after the last, the work left runs unstopped and is
+# linked. The PDF must be byte-identical to a cold SSA build of the final
+# source, the exit code the cold build's, and the entry check must find no
+# bad read. Run inside the sandbox:
+#
+#   scripts/sandbox scripts/ssa-stop SRCDIR JOB FMT "N1 N2 ..." EDIT1 [EDIT2 ...]
+#
+# EDITs are shell commands run in the copy (e.g. 'sed -i s/a/b/ doc.tex').
+# B (the binary, default target/fastdev/partex) and W (the work directory,
+# default target/ssa-stop) are taken from the environment. Exit 1 if any N
+# differs.
+set -u
+SRC=$1; MAIN=$2; FMT=$3; NS=$4; shift 4
+B=${B:-$PWD/target/fastdev/partex}
+export SOURCE_DATE_EPOCH=1758800000 FORCE_SOURCE_DATE=1 PARTEX_SSA=1
+W=${W:-$PWD/target/ssa-stop}
+rm -rf "$W"; mkdir -p "$W"
+EDITS=$(printf '%s\n' "$@")
+# (the oracle: the final source, cold)
+cp -r "$SRC" "$W/ref"
+( cd "$W/ref" && for e in "$@"; do sh -c "$e"; done; rm -f "$MAIN.aux"
+  "$B" --compat=pdftex -fmt="$FMT" -interaction=nonstopmode "$MAIN" >/dev/null 2>err.txt
+  ec=$?; echo $ec > ../ref-exit; echo "cold build of the final source: exit $ec" )
+fail=0
+for n in $NS; do
+  rm -rf "$W/r"; cp -r "$SRC" "$W/r"
+  (
+    cd "$W/r" || exit 1
+    env PARTEX_SSA_ENTRY_CHECK=1 PARTEX_SSA_CANCEL_AFTER="$n" "PARTEX_SSA_REBUILD=$EDITS" \
+      "$B" --compat=pdftex -fmt="$FMT" -interaction=nonstopmode "$MAIN" >/dev/null 2>err.txt
+    ec=$?
+    st=$(grep -a -c 'steps pending' err.txt)
+    co=$(grep -a -c 'continued' err.txt)
+    bad=$(grep -a -o 'entry check: [0-9]* reads' err.txt | grep -v ': 0 reads' | head -1)
+    r=SAME; cmp -s "$MAIN.pdf" "$W/ref/$MAIN.pdf" || r=DIFF
+    echo "N=$n: exit $ec, stopped $st, continued $co: $r ${bad:+(entry check: $bad)}"
+    [ $r = SAME ] && [ -z "$bad" ] && [ "$ec" = "$(cat ../ref-exit)" ] || { cp err.txt "$W/err-$n.txt"; exit 1; }
+  ) || fail=1
+done
+exit $fail

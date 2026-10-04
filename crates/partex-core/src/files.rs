@@ -595,6 +595,8 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         self.slow_print(full);
         self.update_terminal();
         self.cur_input.state = NEW_LINE;
+        // (`SyncTeX`'s tag for the file: `synctex_start_input`)
+        self.synctex_start_input(&full_name);
         // §538: read the first line of the new file.
         self.line = 1;
         let index = self.in_open;

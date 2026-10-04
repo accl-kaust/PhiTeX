@@ -241,8 +241,11 @@ impl Slot {
                 | Effect::Open { .. } => s.misc.push(i),
                 Effect::Num(..) => s.virt = true,
                 // (written by the resolution of virtual numbers only; glyph
-                // origins, read by `Tex::origins`)
+                // origins and display lists, read by `Tex::origins` and
+                // `Tex::display_list`)
                 Effect::Origins(_)
+                | Effect::Synctex(_)
+                | Effect::Display(_)
                 | Effect::Flow { .. }
                 | Effect::ObjRef { .. }
                 | Effect::ObjStmRef { .. }

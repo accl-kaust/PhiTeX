@@ -155,6 +155,7 @@ impl HDims {
                 width,
                 height,
                 depth,
+                ..
             } => self.boxed(*width, *height, *depth, 0),
             Node::Unset(u) => self.boxed(u.width, u.height, u.depth, 0),
             Node::Glue { spec, .. } => {
@@ -317,6 +318,7 @@ pub fn vpack(
                 width,
                 height,
                 depth,
+                ..
             } => {
                 x += d + height;
                 d = *depth;
@@ -446,6 +448,7 @@ fn set_glue(
                     width: params.overfull_rule,
                     height: RUNNING,
                     depth: RUNNING,
+                    sync: crate::origin::Side(0),
                 });
             }
             return (1_000_000, Some(Report::Overfull { excess }));

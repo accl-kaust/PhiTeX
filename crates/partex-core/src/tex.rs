@@ -226,6 +226,18 @@ pub struct Tex<H: Host, T: Tracker = Untracked> {
     pub(crate) cur_input: InStateRecord,
     pub(crate) in_open: usize,
     pub(crate) open_parens: i32,
+    /// `SyncTeX`'s `synctex_tag_counter`: the files opened while it is on
+    /// (each one's tag is its `AlphaFile::synctex_tag`).
+    pub(crate) synctex_tags: i32,
+    /// In SSA mode, `SyncTeX`'s controller's flags as its events left them
+    /// so far (`synctex.rs`, `FLAG_*`): its warnings are printed where
+    /// pdfTeX prints them, by the step, not by the render.
+    pub(crate) synctex_flags: i32,
+    /// The first file's name as the host found it (`SyncTeX`'s root, for a
+    /// `\synctex` the document sets), and whether a page or form was
+    /// shipped while `SyncTeX` was not on (`synctex.rs`).
+    pub(crate) synctex_root: Option<alloc::sync::Arc<[u8]>>,
+    pub(crate) synctex_shipped: bool,
     pub(crate) input_file: Vec<Option<AlphaFile>>,
     pub(crate) line_stack: Vec<i32>,
     /// e-TeX: per input file, `cur_boundary` and the depth of the
@@ -531,6 +543,14 @@ pub struct Tex<H: Host, T: Tracker = Untracked> {
     /// the table nodes' handles point into, what the walk collects, and
     /// how the sources' edits move them. `None`: off, and free.
     pub(crate) org: Option<alloc::boxed::Box<crate::srcmap::OrgState>>,
+    /// `SyncTeX` (`synctex.rs`, DESIGN 4.5), when asked for: the places
+    /// nodes' handles point into, the controller and its file. `None`:
+    /// off, and free.
+    pub(crate) sync: crate::synctex::State,
+    /// Display lists (`displist.rs`, DESIGN 4.6), when they are kept: the
+    /// open stream's literals, the streams shipped (without a recorder),
+    /// and what the queries made. `None`: off, and free.
+    pub(crate) dl: Option<alloc::boxed::Box<crate::displist::DlState>>,
 }
 
 /// web2c's `const_chk` bounds (merged §11): (inf, sup) per parameter.
@@ -687,6 +707,10 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             cur_input: InStateRecord::default(),
             in_open: 0,
             open_parens: 0,
+            synctex_tags: 0,
+            synctex_flags: 0,
+            synctex_root: None,
+            synctex_shipped: false,
             input_file: (0..=max_in_open).map(|_| None).collect(),
             line_stack: vec![0; max_in_open + 1],
             grp_stack: vec![0; max_in_open + 1],
@@ -829,6 +853,8 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             diag: p.diagnostics.then(DiagState::default),
             effects: None,
             org: None,
+            sync: None,
+            dl: None,
             params: p,
         }
     }

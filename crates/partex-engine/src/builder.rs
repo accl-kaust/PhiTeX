@@ -599,6 +599,7 @@ impl Builder {
                     let glue = Node::Glue {
                         spec,
                         subtype: TOP_SKIP + 1,
+                        sync: crate::origin::Side(0),
                     };
                     return Ok(Step::TopSkip(glue, p));
                 }
@@ -1126,6 +1127,7 @@ mod tests {
                 list: Vec::new(),
                 seal: None,
                 ver: 0,
+                sync: crate::origin::Side(0),
             })
             .share(),
         )

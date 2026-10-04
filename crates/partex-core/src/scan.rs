@@ -445,7 +445,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         match (m, tail) {
             (INT_VAL, Some(Node::Penalty(p))) => self.cur_val = p,
             (DIMEN_VAL, Some(Node::Kern { width, .. })) => self.cur_val = width,
-            (GLUE_VAL, Some(Node::Glue { spec, subtype })) => {
+            (GLUE_VAL, Some(Node::Glue { spec, subtype, .. })) => {
                 self.cur_glue = spec;
                 if i32::from(subtype) == MU_GLUE {
                     self.cur_val_level = MU_VAL;
@@ -1014,6 +1014,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                     width,
                     height,
                     depth,
+                    sync: partex_engine::origin::Side(0),
                 });
             }
         }

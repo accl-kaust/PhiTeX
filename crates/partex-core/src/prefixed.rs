@@ -237,6 +237,10 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                 self.scan_optional_equals()?;
                 self.scan_int()?;
                 self.word_define(a, p, self.cur_val)?;
+                if p == INT_BASE + partex_engine::web::SYNCTEX_CODE {
+                    // (`SyncTeX` turned on by the document)
+                    self.synctex_assigned(self.cur_val);
+                }
             }
             ASSIGN_DIMEN => {
                 let p = self.cur_chr;

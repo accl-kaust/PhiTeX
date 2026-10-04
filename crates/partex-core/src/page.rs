@@ -1143,6 +1143,7 @@ mod tests {
                 width: 26214, // `default_rule`
                 height: 7 * pt,
                 depth: 2 * pt,
+                sync: partex_engine::origin::Side(0),
             };
             let b = t.hpack(
                 alloc::vec![r, new_glue(FIL_GLUE)],
