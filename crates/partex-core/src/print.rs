@@ -136,6 +136,20 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         }
     }
 
+    /// What the engine printed, by its own columns, for the records'
+    /// effects by output (check mode's, and the view's page numbers): the
+    /// files are made from the flow.
+    fn flow_shadow(&self, mask: u8, s: &[u8]) {
+        if T::VALUES {
+            if mask & 1 != 0 {
+                self.tracker.output(Output::Term, s);
+            }
+            if mask & 2 != 0 {
+                self.tracker.output(Output::Log, s);
+            }
+        }
+    }
+
     /// A flow began: the log's being open, which it names, read (in a
     /// step run again, a read the slot is placed for: the arrays may hold
     /// the log closed, as the job's end left it).
@@ -184,6 +198,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             op.extend_from_slice(&u32::try_from(s.len()).unwrap_or(0).to_le_bytes());
             op.extend_from_slice(s);
             self.flow_op(&op);
+            self.flow_shadow(1, s);
             return;
         }
         if T::VALUES {
@@ -239,6 +254,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             op.extend_from_slice(&u32::try_from(s.len()).unwrap_or(0).to_le_bytes());
             op.extend_from_slice(s);
             self.flow_op(&op);
+            self.flow_shadow(2, s);
             return;
         }
         for &c in s {
@@ -337,6 +353,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         let mask = self.flow_mask();
         if mask != 0 {
             self.flow_op(&[crate::effects::flow::NL, mask]);
+            self.flow_shadow(mask, b"\n");
             if mask & 1 != 0 {
                 self.term_offset = 0;
             }
@@ -403,6 +420,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                     self.flow_began();
                 }
             }
+            self.flow_shadow(mask, &[x]);
             if mask & 1 != 0 {
                 self.term_offset += 1;
             }
@@ -411,9 +429,11 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             }
             if mask == 3 {
                 if self.term_offset == max_print_line {
+                    self.flow_shadow(1, b"\n");
                     self.term_offset = 0;
                 }
                 if self.file_offset == max_print_line {
+                    self.flow_shadow(2, b"\n");
                     self.file_offset = 0;
                 }
             } else if self.term_offset == max_print_line || self.file_offset == max_print_line {
