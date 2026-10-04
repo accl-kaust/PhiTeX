@@ -301,7 +301,7 @@ impl core::hash::Hash for NodeList {
     fn hash<H: core::hash::Hasher>(&self, h: &mut H) {
         if VERSIONS.load(core::sync::atomic::Ordering::Relaxed) {
             // (a versioned list by its version: its nodes', once each)
-            self.version().0.hash(h);
+            { self.version().0 }.hash(h);
             return;
         }
         self.len().hash(h);

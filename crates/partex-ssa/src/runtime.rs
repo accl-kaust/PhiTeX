@@ -308,6 +308,11 @@ impl<M: Machine> Runtime<M> {
         self.live
     }
 
+    /// The live records (a report: `PARTEX_SSA_MEM`).
+    pub fn records(&self) -> impl Iterator<Item = &Record<M>> {
+        self.recs.iter().flatten()
+    }
+
     #[must_use]
     pub fn record(&self, id: RecId) -> &Record<M> {
         self.recs[id as usize].as_ref().expect("a live record")

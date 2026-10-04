@@ -96,6 +96,8 @@ pub struct Fold<M: Machine> {
     readers: Table<ByHash<M::Addr>, Vec<StepId>>,
     /// How many times the keys were made again ([`Fold::renumber`]).
     pub renumbered: u32,
+    /// The steps removed since [`Fold::release_removed`].
+    removed: Vec<StepId>,
 }
 
 impl<M: Machine> Default for Fold<M> {
@@ -108,6 +110,7 @@ impl<M: Machine> Default for Fold<M> {
             defs: Table::new(),
             readers: Table::new(),
             renumbered: 0,
+            removed: Vec::new(),
         }
     }
 }
@@ -156,11 +159,14 @@ impl<M: Machine> Fold<M> {
             hist[k].1 += v.len();
         }
         let (ds, dn, dc) = entries(&self.defs);
-        let (mut sr, mut src, mut recs) = (0, 0, 0);
+        let (mut sr, mut src, mut recs, mut dead) = (0, 0, 0, 0);
         for s in &self.steps {
             sr += s.reads.len();
             src += s.reads.capacity();
             recs += s.recs.capacity();
+            if !s.live {
+                dead += s.reads.capacity();
+            }
         }
         let (a, e, r) = (
             size_of::<M::Addr>(),
@@ -168,11 +174,12 @@ impl<M: Machine> Fold<M> {
             size_of::<StepId>(),
         );
         alloc::format!(
-            "fold: {} steps ({} B each, {} MB); their reads {sr} (capacity {src}, {} MB), records {recs}; readers: {rs} slots, {rn} entries (capacity {rc}, {r} B: {} MB), by a list's length (slots, entries) <=4 {:?}, <=64 {:?}, <=1K {:?}, <=8K {:?}, <=32K {:?}, more {:?}; definitions: {ds} slots, {dn} entries (capacity {dc}, {e} B: {} MB)",
+            "fold: {} steps ({} B each, {} MB); their reads {sr} (capacity {src}, {} MB; the removed steps' {dead}), records {recs}, {} live; readers: {rs} slots, {rn} entries (capacity {rc}, {r} B: {} MB), by a list's length (slots, entries) <=4 {:?}, <=64 {:?}, <=1K {:?}, <=8K {:?}, <=32K {:?}, more {:?}; definitions: {ds} slots, {dn} entries (capacity {dc}, {e} B: {} MB)",
             self.steps.len(),
             size_of::<Step<M::Addr>>(),
             (self.steps.capacity() * size_of::<Step<M::Addr>>()) >> 20,
             (src * a) >> 20,
+            self.order.len(),
             (rc * r) >> 20,
             hist[0],
             hist[1],
@@ -305,9 +312,25 @@ impl<M: Machine> Fold<M> {
             }
         }
         self.steps[id as usize].live = false;
+        self.removed.push(id);
         let s = id as usize;
         if let Some(w) = self.alive.get_mut(s / 64) {
             *w &= !(1 << (s % 64));
+        }
+    }
+
+    /// Let the steps removed since the last call go: their reads and
+    /// records, which the rebuild that passed over them read while it
+    /// ran (its new steps' predictions), and nothing reads after it. Kept,
+    /// a thesis's settling held 15 M reads of removed steps, half the
+    /// fold's, and records the collector had freed.
+    pub fn release_removed(&mut self) {
+        for id in core::mem::take(&mut self.removed) {
+            let s = &mut self.steps[id as usize];
+            if !s.live {
+                s.reads = Vec::new();
+                s.recs = Vec::new();
+            }
         }
     }
 
@@ -379,7 +402,12 @@ impl<M: Machine> Fold<M> {
                     }
                 }
             }
-            reads.into_iter().map(|(_, a)| a).collect()
+            // (exactly as long: collected in place, the addresses would
+            // keep the room of the pairs, grown by doubling, 2.2 times
+            // theirs; a thesis's 26 M reads held 863 MB)
+            let mut addrs = Vec::with_capacity(reads.len());
+            addrs.extend(reads.into_iter().map(|(_, a)| a));
+            addrs
         };
         // (sorted, for a search per write)
         let mut skip_sorted: Vec<&M::Addr> = skip.iter().collect();

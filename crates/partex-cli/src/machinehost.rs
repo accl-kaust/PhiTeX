@@ -878,7 +878,7 @@ fn link_and_write(fx: &[&[partex_core::effects::Effect]], fin: &Machine) -> i32 
 }
 
 /// The resident set now and at its peak (`PARTEX_MACHINE_RSS=1`; Linux).
-fn rss() -> String {
+pub(crate) fn rss() -> String {
     let status = std::fs::read_to_string("/proc/self/status").unwrap_or_default();
     let field = |name: &str| {
         status

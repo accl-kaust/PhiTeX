@@ -1214,8 +1214,14 @@ fn run_ssa(host: native::NativeHost, params: Params, command_line: &[u8]) -> i32
     if std::env::var("PARTEX_SSA_RERUN_CHECK").is_ok_and(|v| v == "1") && !rerun_check(&mut tex) {
         return 3;
     }
+    if std::env::var_os("PARTEX_SSA_MEM").is_some() {
+        eprintln!("partex: ssa build 0: settled: {}", machinehost::rss());
+    }
     let mut linker = SsaLinker::default();
     let lr = linker.link(&mut tex);
+    if std::env::var_os("PARTEX_SSA_MEM").is_some() {
+        eprintln!("partex: ssa build 0: linked: {}", machinehost::rss());
+    }
     side_files_write(&mut tex);
     ready_for_rebuilds(&tex, rebuild.is_some());
     eprintln!(
@@ -1231,8 +1237,9 @@ fn run_ssa(host: native::NativeHost, params: Params, command_line: &[u8]) -> i32
         report_trips("build 0", s);
         if std::env::var_os("PARTEX_SSA_MEM").is_some() {
             eprintln!(
-                "partex: ssa build 0: memory: {}",
-                tex.tracker().mem_report()
+                "partex: ssa build 0: memory: {}; {}",
+                tex.tracker().mem_report(),
+                machinehost::rss()
             );
         }
         if s.trips > 1 {
@@ -1283,6 +1290,9 @@ fn run_ssa(host: native::NativeHost, params: Params, command_line: &[u8]) -> i32
             Ok(None) => {}
             Err(code) => return code,
         }
+    }
+    if std::env::var_os("PARTEX_SSA_MEM").is_some() {
+        eprintln!("partex: ssa: after the rebuilds: {}", machinehost::rss());
     }
     // (a rebuild that stopped left work: it goes on, unstopped, and the
     // files are linked, DESIGN 3.7, "A rebuild stopped")
@@ -1594,7 +1604,11 @@ fn ssa_tools(
 {
     // (`PARTEX_SSA_TOOLS=0`: none run, as a host without them)
     let off = std::env::var("PARTEX_SSA_TOOLS").is_ok_and(|v| v == "0");
+    let mem = std::env::var_os("PARTEX_SSA_MEM").is_some();
     move |host, streams| {
+        if mem {
+            eprintln!("partex: ssa: a trip's end: {}", machinehost::rss());
+        }
         if off {
             return (false, Vec::new());
         }

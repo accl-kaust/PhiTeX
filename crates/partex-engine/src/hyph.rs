@@ -160,7 +160,7 @@ impl core::fmt::Debug for Exceptions {
 impl core::hash::Hash for Exceptions {
     fn hash<H: core::hash::Hasher>(&self, h: &mut H) {
         // (by content: the version is made from the entries)
-        self.version().0.hash(h);
+        { self.version().0 }.hash(h);
     }
 }
 

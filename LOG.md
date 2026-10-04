@@ -12496,3 +12496,41 @@ same long insertion, run alone with virtual numbers, rebuilds in 199 + 26
 steps (VOBJ=0: 6,476 + 26) and its `.aux` files and `.toc` equal the
 cold build's; the PDFs differ only in the known `[?, ?]` citations.
 
+
+## 2026-10-04 — Memory: a cold SSA build's records, values and fold, smaller (branch `mem`)
+
+**The problem.** The private thesis repro (cold SSA build, settled in 6
+trips, one edit; `PARTEX_ORIGINS=1`) peaked at 3.76 GB resident on main
+24f149a (fastdev, 164 s) and fails to allocate in wasm32. A massif
+profile of the run (heap 2.5 GB at its peak) put it in: the values the
+records' writes hold (6.75 M, one `Arc<SValue>` each, 128 bytes before
+this change), the writes themselves (7.09 M, 64 bytes each), the fold
+steps' reads (306 MB at the peak), the engine's token lists (macro
+arguments 165 MB, definitions 66 MB), the origin table (100 MB, append
+only), the fold's tables (144 MB) and reader lists (90 MB). Trips 3 and
+4, each running about 8 K steps again (cascades gone cold), add about
+1 GB: the records the removed steps leave stay reachable from the last
+three trips' roots until the arena doubles.
+
+**The changes** (no behaviour change: same trips and steps, PDF, `.aux`
+and `.log` byte-identical):
+- `Fold::close` built a step's reads by collecting its (hash, address)
+  pairs in place: the addresses kept the pairs' room, grown by doubling,
+  2.2 times theirs (26 M reads held 863 MB). Now exactly as long.
+- A removed step's reads and records were kept for good (15 M of the
+  fold's 28 M reads). The rebuild that passed over it still reads them
+  (its new steps' predictions); after it, nothing does:
+  `Fold::release_removed` lets them go at each rebuild's end.
+- `SValue::Pos` (120 bytes) and `SValue::LrBox` (112) set every value's
+  size: boxed, a value is 48 bytes.
+- `Version` is eight-byte aligned (`repr(C, packed(8))`): a 128-bit hash
+  needs no more, and at sixteen every write (`(Slot, Option<SVal>)`) was
+  64 bytes, now 48; records' reads and the version tables shrink too.
+  Its hash (the `u128`'s) and order are the same.
+- `PARTEX_SSA_MEM` also prints the resident set at each trip's end, after
+  settling, after the link and after the rebuilds, and how many values
+  the writes hold.
+
+**Measured** (fastdev, this machine, the thesis repro): peak 3,758,312 KB
+→ 2,641,312 KB, 164 s → 160 s; trips 6 (63796, 415, 8131, 8373, 726, 163
+steps), rebuild 1: 5 steps, as before.
