@@ -1323,6 +1323,10 @@ fn run_ssa(host: native::NativeHost, params: Params, command_line: &[u8]) -> i32
     if let Some(path) = std::env::var_os("PARTEX_SSA_TRACE") {
         let _ = std::fs::write(path, tex.tracker().rec.borrow().rt.trace().to_text());
     }
+    // (the process ends after this: the records go with it rather than be
+    // freed one by one, which was 2% of the thesis's cold build; the
+    // engine and its host drop as usual, their files closed)
+    std::mem::forget(tex.take_recorder());
     history
 }
 

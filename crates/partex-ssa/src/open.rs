@@ -457,6 +457,22 @@ impl<M: Machine> Open<M> {
         }
     }
 
+    /// Whether the open step read dense slot `a` from outside it (its
+    /// stamp; every read of a dense slot the step notes sets it), or
+    /// `None` for a slot that is not dense.
+    fn dense_step_read(&self, a: &M::Addr) -> Option<bool> {
+        let (f, i) = M::dense(a)?;
+        let step = self.step.map_or(0, |s| s.1);
+        Some(
+            step != 0
+                && self
+                    .dense
+                    .get(f)
+                    .and_then(|v| v.get(i))
+                    .is_some_and(|st| st.s == step),
+        )
+    }
+
     /// `a` read by the open step from outside it, made at a soft read
     /// before the step wrote it ([`Runtime::end_step_soft`]): recorded
     /// once, whatever the step wrote since.
@@ -1197,9 +1213,23 @@ impl<M: Machine> Runtime<M> {
     /// not its definitions; its reads of them stay.
     pub fn end_step_soft(&mut self, read: &[M::Addr], untouched: &[M::Addr]) -> Option<StepId> {
         if !read.is_empty() {
-            let have: alloc::collections::BTreeSet<&M::Addr> =
-                self.open.step_reads.iter().map(|(_, a)| a).collect();
-            let new: Vec<M::Addr> = read.iter().filter(|a| !have.contains(a)).cloned().collect();
+            // (a dense slot's stamp says whether the step read it; the
+            // step's reads gathered only for another, which a soft read
+            // never is: a set of every read of each step that saved an
+            // entry value cost 1% of a cold build)
+            let mut have: Option<alloc::collections::BTreeSet<&M::Addr>> = None;
+            let new: Vec<M::Addr> = read
+                .iter()
+                .filter(|a| match self.open.dense_step_read(a) {
+                    Some(read) => !read,
+                    None => !have
+                        .get_or_insert_with(|| {
+                            self.open.step_reads.iter().map(|(_, a)| a).collect()
+                        })
+                        .contains(a),
+                })
+                .cloned()
+                .collect();
             for a in &new {
                 self.open.force_step_read(a);
             }

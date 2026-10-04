@@ -13036,3 +13036,69 @@ s). The remaining 0.3 ms is the holes the other cuts leave (values let go
 at a step's close, retired steps' inputs) and the base lookups' family
 mapping; collecting by compaction (records' writes in an arena per
 generation, copied out whole) would remove the holes.
+
+## 2026-10-04 — The cold build's tracking, cheaper per read and per step (branch `coldtrack`, agent coldtrack)
+
+**Symptom.** In the Overleaf extension, the thesis's tracked cold pass 1
+takes 73.3 s, where a plain pass takes about 26 s. Natively (fastdev,
+this machine, 5547b27, starting from three plain passes' files): a plain
+pass took 15.0 s, and the SSA cold build's trip 1 alone
+(`PARTEX_SSA_TRIPS=1`: 63,816 steps, 15.26M commands) took 37.7 s.
+`perf stat` counted 157G instructions against plain's 77G, so the extra
+time is mostly extra work, not stalls.
+
+**Profile** (perf with frame pointers, the trip-1 run's samples). 55% is
+engine code with no tracker frame (1.7x plain's whole run, from the
+hooks inlined into it). The rest: the steps' ends 9%; the classes' reads
+in skipped text about 7%; eqtb and scalar writes about 9%; the save
+stack's entry hooks 4.5%; dropping the records at exit 2.8%.
+
+**Causes and fixes** (none changes what is recorded):
+
+- `Tracker::read_class` (each control sequence `pass_text` skips, by
+  its class) borrowed the recorder and went through
+  `Open::note_step_read` at every token. Classes now have read stamps,
+  as table slots do (`SsaTracker::cstamps`), so a class is noted once
+  per call. A group's end that gives a class back its entry value
+  clears its stamp, as it does an eqtb slot's (`restore_entry`).
+- `save_entry` and `restore_entry` made a `format!` message for
+  `PARTEX_SSA_WATCH_SLOT` at every save and restore, even with no slot
+  watched (2.6% of the run). The message is now made only when the
+  watch is on.
+- `end_step_soft` built a `BTreeSet` of every read of the step, for
+  each step that saved an entry value. It now asks the dense slot's
+  stamp (`Open::dense_step_read`). Only eqtb and class slots come there,
+  and both are dense.
+- A scalar's write (`align_state` at every brace) was an out-of-line
+  `row_wrote`. It is now inline (`SsaTracker::scalar_wrote`), with its
+  slot and stamp known where it is written.
+- The CLI forgets the recorder at the process's end instead of freeing
+  its records one by one. The engine and its host drop as before.
+
+**Measured** (fastdev, this machine, thesis, trip 1 only, one run
+each): 38.2 s -> 33.8 s, with plain at 15.0 s. The PDF, `.aux`, `.log`,
+`.toc`, `.lof`, `.lot` and `.out` are byte-identical to 5547b27's.
+
+## 2026-10-04 — The SSA build remembers skipped conditional text (branch `coldtrack`, agent coldtrack)
+
+**Symptom.** After 98ff696, `pass_text` was 7.7% of the thesis's trip 1
+(perf, inclusive), against 3.5% of a plain pass. A plain pass skips the
+false branches of macro bodies through the skip cache (`skipcache.rs`).
+The SSA build skipped every branch token by token, because the cache was
+off for any tracker that records reads.
+
+**Fix.** A remembered skip keeps the names it looks up, the terminating
+one included: each once, in the order the skip first meets them
+(`Skip::reads`). A hit, or a miss scanned with `peek_eqtb`, makes those
+lookups again through `token_meaning`, and reads and writes
+`align_state`. Those are the reads `bulk_skip_run` and `get_next` make
+when the skip runs in bulk, which it does where `bulk_ready` holds, so
+the cache is used only there. A lookup repeated within a skip is not a
+read, since nothing between makes it one: no call begins or ends and no
+group ends. Each build and rebuild bumps the cache's epoch, so it starts
+with no skips remembered.
+
+**Measured** (fastdev, this machine, thesis, trip 1): 33.4 s -> 31.7 s.
+Outputs are byte-identical. `PARTEX_SSA_TRACE`'s 162 MB trace of the
+cold build is identical to the one without the cache, except for the
+clock's two scalars and the random seed (`\pdfelapsedtime`'s epoch).

@@ -178,7 +178,13 @@ impl<H: Host, T: Tracker> Tex<H, T> {
     /// if the skip was done, false if it must run as tex.web's (nothing
     /// changed then).
     fn skip_remembered(&mut self) -> bool {
-        if (T::READS && !self.skip_tracked)
+        // (with the SSA build's tracker, a skip remembered makes the
+        // lookups the skip makes token by token: what `bulk_skip_run`
+        // and `get_next` read when the skip runs in bulk, which it does
+        // where `bulk_ready` holds; the lookups it repeats are no reads)
+        let replay = T::CLASSES && self.tracker.ssa().is_some();
+        if (T::READS && !self.skip_tracked && !replay)
+            || (replay && !self.bulk_ready())
             || !self.params.skip_cache
             || self.memo.recording()
             || self.cur_input.state != TOKEN_LIST
@@ -199,11 +205,29 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             let Some(list) = self.cur_input.list.clone() else {
                 return false;
             };
-            let found = crate::skipcache::scan(&list, loc, |cs| {
-                let w = self.eqtb(cs);
-                (w.b0(), w.rh())
-            });
-            self.skip.put(&list, loc, found);
+            let found = if replay {
+                // (the meanings as they are, untracked: the replay below
+                // reads them)
+                let mut reads = alloc::vec::Vec::new();
+                let mut seen = alloc::collections::BTreeSet::new();
+                crate::skipcache::scan(&list, loc, |cs| {
+                    if seen.insert(cs) {
+                        reads.push(cs);
+                    }
+                    let w = self.peek_eqtb(cs);
+                    (w.b0(), w.rh())
+                })
+                .map(|s| crate::skipcache::Skip {
+                    reads: Some(reads.into()),
+                    ..s
+                })
+            } else {
+                crate::skipcache::scan(&list, loc, |cs| {
+                    let w = self.eqtb(cs);
+                    (w.b0(), w.rh())
+                })
+            };
+            self.skip.put(&list, loc, found.clone());
             found
         };
         let Some(skip) = skip else {
@@ -211,8 +235,14 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         };
         // (with a machine's tracker: the skip read every class)
         self.classes_read = true;
+        let align = self.align_state();
+        if let Some(reads) = &skip.reads {
+            for &cs in reads.iter() {
+                self.token_meaning(cs);
+            }
+        }
         self.cur_input.loc = skip.end;
-        self.set_align_state(self.align_state() + skip.align);
+        self.set_align_state(align + skip.align);
         self.cur_cs = skip.cs;
         self.cur_cmd = skip.cmd;
         self.cur_chr = skip.chr;

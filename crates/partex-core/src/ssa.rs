@@ -1034,6 +1034,12 @@ impl Versions {
         let Some((f, i)) = table_at(s.0, s.1) else {
             return;
         };
+        self.set_at(f, i, v);
+    }
+
+    /// [`Versions::set`] of the slot at index `i` of table `f`.
+    #[inline]
+    fn set_at(&mut self, f: usize, i: usize, v: u128) {
         let t = &mut self.table[f];
         if i >= t.len() {
             t.resize((i + 1).next_power_of_two(), 0);
@@ -1494,6 +1500,9 @@ pub struct SsaTracker {
     /// The save stack's (sized with the stack).
     sstamps: Vec<core::cell::Cell<u32>>,
     swstamps: Vec<core::cell::Cell<u32>>,
+    /// The control sequences' class read stamps ([`Fam::Class`], by eqtb
+    /// pointer): a class read noted once per call, as a table slot's is.
+    cstamps: Vec<core::cell::Cell<u32>>,
     /// Check mode: each table read's version compared with the content.
     check: bool,
     /// Records only for the steps and the routines [`Func::recorded`]
@@ -1713,6 +1722,7 @@ impl SsaTracker {
             skipped: core::cell::Cell::new(0),
             sstamps: Vec::new(),
             swstamps: Vec::new(),
+            cstamps: Vec::new(),
             check: false,
             lean: true,
             names_by_name: false,
@@ -1814,6 +1824,9 @@ impl SsaTracker {
 
     #[inline]
     fn stamp(&self, s: Slot) -> Option<&core::cell::Cell<u32>> {
+        if s.0 == Fam::Class {
+            return self.cstamps.get(usize::try_from(s.1).ok()?);
+        }
         let (f, i) = table_at(s.0, s.1)?;
         self.stamps[f].get(i)
     }
@@ -1919,6 +1932,20 @@ impl SsaTracker {
         }
     }
 
+    /// [`Tracker::read_class`]'s read the call has not noted yet.
+    #[inline(never)]
+    fn read_class_noted(&self, p: i32, stamp: Option<&core::cell::Cell<u32>>) {
+        let Ok(mut r) = self.rec.try_borrow_mut() else {
+            return;
+        };
+        if r.on {
+            r.note_read(Slot(Fam::Class, i64::from(p)), class_version(0));
+            if let Some(c) = stamp {
+                c.set(self.generation.get());
+            }
+        }
+    }
+
     /// [`Tracker::value_read`]'s read the call has not noted yet.
     #[inline(never)]
     fn value_read_noted(
@@ -1972,7 +1999,20 @@ impl SsaTracker {
 
 impl SsaTracker {
     /// ([`WATCH_FROM`]: an event of the watched slot, logged in its steps.)
-    fn watch_event(r: &mut Recorder, s: Slot, what: &str) {
+    ///
+    /// `what` is made only for an event logged: the watch is off but for a
+    /// debugging run, and a message made at every save and restore was 2.6%
+    /// of a cold build.
+    #[inline]
+    fn watch_event<D: fmt::Display>(r: &mut Recorder, s: Slot, what: impl FnOnce() -> D) {
+        if WATCH_FROM.load(core::sync::atomic::Ordering::Relaxed) < 0 {
+            return;
+        }
+        Self::watch_event_on(r, s, &what());
+    }
+
+    #[inline(never)]
+    fn watch_event_on(r: &mut Recorder, s: Slot, what: &dyn fmt::Display) {
         let (w, from) = (
             WATCH_SLOT.load(core::sync::atomic::Ordering::Relaxed),
             WATCH_FROM.load(core::sync::atomic::Ordering::Relaxed),
@@ -2173,6 +2213,51 @@ fn font_made_by_now(r: &Recorder, by: Option<(partex_ssa::fold::StepId, u64, u64
     }
 }
 
+impl SsaTracker {
+    /// Scalar slot `k` ([`Row::Scalar`], [`Fam::Alloc`]) written, holding
+    /// content version `version`: [`Tracker::row_wrote`]'s, its version
+    /// stored and the write noted once per call, by its stamp.
+    #[inline(always)]
+    #[allow(clippy::inline_always, reason = "every scalar write")]
+    fn scalar_wrote(&self, k: u16, version: u128) {
+        let stamp = self.wstamps.get(usize::from(k));
+        let generation = self.generation.get();
+        let Ok(mut r) = self.rec.try_borrow_mut() else {
+            self.lost.set(self.lost.get() + 1);
+            return;
+        };
+        r.st.vers.set_at(5, usize::from(k), version);
+        if r.on && stamp.is_none_or(|c| c.get() != generation) {
+            r.rt.note_write(&Slot(Fam::Alloc, i64::from(k)));
+            if let Some(c) = stamp {
+                c.set(generation);
+            }
+        }
+    }
+
+    /// [`Tracker::row_wrote`] of a row other than a scalar.
+    #[inline(never)]
+    fn row_wrote_any(&self, row: Row, version: u128) {
+        let s = Slot::row(row);
+
+        // (a slot written again in the same call is noted once: its
+        // version is the array's at the call's end)
+        let stamp = self.wstamp(s);
+        let generation = self.generation.get();
+        if let Ok(mut r) = self.rec.try_borrow_mut() {
+            r.st.vers.set(s, version);
+            if r.on && stamp.is_none_or(|c| c.get() != generation) {
+                r.rt.note_write(&s);
+                if let Some(c) = stamp {
+                    c.set(generation);
+                }
+            }
+        } else {
+            self.lost.set(self.lost.get() + 1);
+        }
+    }
+}
+
 impl Tracker for SsaTracker {
     const VALUES: bool = true;
     const LINES: bool = true;
@@ -2181,14 +2266,19 @@ impl Tracker for SsaTracker {
 
     const CLASSES: bool = true;
 
-    /// (only lookups of a meaning of class 0 come here)
+    /// (only lookups of a meaning of class 0 come here: once per call,
+    /// by its stamp, as [`SsaTracker::read_slot`]'s)
+    #[inline(always)]
+    #[allow(
+        clippy::inline_always,
+        reason = "every skipped control sequence's lookup: only the stamp's test inline"
+    )]
     fn read_class(&self, p: i32) {
-        let Ok(mut r) = self.rec.try_borrow_mut() else {
+        let stamp = usize::try_from(p).ok().and_then(|i| self.cstamps.get(i));
+        if stamp.is_some_and(|c| c.get() == self.generation.get()) {
             return;
-        };
-        if r.on {
-            r.note_read(Slot(Fam::Class, i64::from(p)), class_version(0));
         }
+        self.read_class_noted(p, stamp);
     }
 
     fn class_wrote(&self, p: i32) {
@@ -2257,11 +2347,9 @@ impl Tracker for SsaTracker {
         }
         // (the slot, and what is made of it: a control sequence's class,
         // [`Fam::Class`], put back with it)
-        Self::watch_event(
-            &mut r,
-            Slot::of(cell),
-            &alloc::format!("saved at level {level}"),
-        );
+        Self::watch_event(&mut r, Slot::of(cell), || {
+            alloc::format!("saved at level {level}")
+        });
         let mut v = self.entry_saves.borrow_mut();
         for s in [Slot::of(cell), Slot(Fam::Class, i64::from(p))] {
             if let Some((step, w)) = r.rt.entry_write(&s) {
@@ -2285,14 +2373,12 @@ impl Tracker for SsaTracker {
                     .map(|k| v.remove(k))
             };
             if let Ok(mut r) = self.rec.try_borrow_mut() {
-                Self::watch_event(
-                    &mut r,
-                    s,
-                    &alloc::format!(
+                Self::watch_event(&mut r, s, || {
+                    alloc::format!(
                         "restored from entry {at}, an entry value {}",
                         found.is_some()
-                    ),
-                );
+                    )
+                });
             }
             let Some((_, _, _, step, w)) = found else {
                 continue;
@@ -2479,24 +2565,17 @@ impl Tracker for SsaTracker {
         self.read_slot(Slot::row(row), content);
     }
 
+    #[inline(always)]
+    #[allow(
+        clippy::inline_always,
+        reason = "a scalar's write (`align_state` at every brace): no call, its slot known where it is written"
+    )]
     fn row_wrote(&self, row: Row, version: u128) {
-        let s = Slot::row(row);
-
-        // (a slot written again in the same call is noted once: its
-        // version is the array's at the call's end)
-        let stamp = self.wstamp(s);
-        let generation = self.generation.get();
-        if let Ok(mut r) = self.rec.try_borrow_mut() {
-            r.st.vers.set(s, version);
-            if r.on && stamp.is_none_or(|c| c.get() != generation) {
-                r.rt.note_write(&s);
-                if let Some(c) = stamp {
-                    c.set(generation);
-                }
-            }
-        } else {
-            self.lost.set(self.lost.get() + 1);
+        if let Row::Scalar(k) = row {
+            self.scalar_wrote(k, version);
+            return;
         }
+        self.row_wrote_any(row, version);
     }
 
     fn queried(&self, q: crate::track::Query, answer: u128) {
@@ -2711,7 +2790,7 @@ impl Tracker for SsaTracker {
         r.st.vers.wrote(s);
         if r.on {
             r.rt.note_write(&s);
-            Self::watch_event(&mut r, s, "written (before the store)");
+            Self::watch_event(&mut r, s, || "written (before the store)");
             if let Cell::Eqtb(p) = cell {
                 self.name_defined(&mut r, p);
             }
@@ -3436,6 +3515,9 @@ pub fn run_applying<H: Host>(
     // (boxes carry versions, made when each becomes a shared value)
     partex_engine::node::VERSIONS.store(true, core::sync::atomic::Ordering::Relaxed);
     tex.remake_constant_lists();
+    // (the skips remembered start afresh: a build's are its own, and a
+    // skip replays its reads, `Tex::skip_remembered`)
+    tex.skip.epoch += 1;
     if check {
         rep.not_values = tex.value_rows().into_iter().map(|(n, _)| n).collect();
     }
@@ -4085,6 +4167,7 @@ impl<H: Host> Tex<H, SsaTracker> {
             // (the ships' glyphs: each read once, by the job's end)
             Vec::new(),
         ];
+        self.tracker.cstamps = stamps(self.eqtb.len());
         let save = self.save_stack.len() + 16;
         self.tracker.sstamps = stamps(save);
         self.tracker.swstamps = stamps(save);
