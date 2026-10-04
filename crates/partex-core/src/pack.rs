@@ -113,9 +113,11 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         spec: Spec,
         adjust: Option<&mut Vec<Node>>,
     ) -> Hpacked {
-        let Ok(p) = self.hpack_call(list, spec, adjust, Packer::Plain, |t, list, adjust| {
+        let Ok(mut p) = self.hpack_call(list, spec, adjust, Packer::Plain, |t, list, adjust| {
             Ok::<_, core::convert::Infallible>(t.hpack_plain(list, spec, adjust))
         });
+        // (`SyncTeX`: the box, made now, placed here)
+        self.sync_box(&mut p.node);
         p
     }
 
@@ -183,6 +185,8 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             let packed = pack::hpack(list, spec, &params, &t.tracked_fonts(), adjust);
             Ok::<_, core::convert::Infallible>(t.hpacked(packed))
         });
+        let mut p = p;
+        self.sync_box(&mut p.node);
         p
     }
 
@@ -356,7 +360,12 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         quiet: bool,
     ) -> Result<Hpacked, Jump> {
         if !T::VALUES {
-            return self.vpack_body(list, spec, l, quiet);
+            let mut r = self.vpack_body(list, spec, l, quiet);
+            if let Ok(p) = &mut r {
+                // (`SyncTeX`: the box, made now, placed here)
+                self.sync_box(&mut p.node);
+            }
+            return r;
         }
         let name = Version::node(
             0x7670_6163,
@@ -380,6 +389,10 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                 .row_wrote(Row::Scalar(scalar::VPACK_RESULT), v.0);
         }
         self.tracker.call_end(self);
+        let mut r = r;
+        if let Ok(p) = &mut r {
+            self.sync_box(&mut p.node);
+        }
         r
     }
 
@@ -454,7 +467,8 @@ impl<H: Host, T: Tracker> Tex<H, T> {
 
     /// §679: append box (or unset row) `b` to the current vlist, with
     /// interline glue.
-    pub(crate) fn append_to_vlist(&mut self, b: Node) {
+    pub(crate) fn append_to_vlist(&mut self, mut b: Node) {
+        self.sync_node(&mut b);
         let (height, depth) = match &b {
             Node::Box(x) => (x.height, x.depth),
             Node::Unset(u) => (u.height, u.depth),
@@ -469,6 +483,8 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                 g.width = d;
                 param_glue(g, BASELINE_SKIP_CODE)
             };
+            let mut p = p;
+            self.sync_node(&mut p);
             self.nodes_mut().push(p);
         }
         self.nodes_mut().push(b);

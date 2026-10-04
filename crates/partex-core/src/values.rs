@@ -222,6 +222,7 @@ fn set_page<H: Host, T: Tracker>(t: &mut Tex<H, T>, f: u8, v: &Field) -> bool {
                         width: 0,
                         height: 0,
                         depth: 0,
+                        sync: partex_engine::origin::Side(0),
                     }
                 } else {
                     partex_engine::node::Node::Penalty(0)

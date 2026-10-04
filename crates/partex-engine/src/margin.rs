@@ -95,7 +95,7 @@ pub fn cp_skipable(n: &Node) -> bool {
         Node::Whatsit(w) => w.ref_dims().is_none(),
         Node::Disc(d) => d.pre.is_empty() && d.post.is_empty() && d.replace.is_empty(),
         Node::Math { width, .. } => *width == 0,
-        Node::Kern { width, subtype } => {
+        Node::Kern { width, subtype, .. } => {
             *width == 0 || *subtype == KERN_NORMAL || *subtype == AUTO_KERN
         }
         Node::Glue { spec, .. } => spec.shared_zero,

@@ -79,9 +79,20 @@ pub struct Place {
 }
 
 /// A side-channel handle inside a node (an [`OrgTable`] index): never part
-/// of the node's value, so any two are equal and none is hashed.
+/// of the node's value, so any two are equal, and none is hashed but a
+/// handle of the [`Side::HASHED`] range (`SyncTeX`'s places in SSA mode:
+/// a node made again is then another version, so what holds it is made
+/// again too, with its place).
 #[derive(Clone, Copy, Default, Debug)]
 pub struct Side(pub u32);
+
+impl Side {
+    /// A handle that never names an entry: `SyncTeX`'s "no place, for
+    /// good" (the kerns hyphenation makes again, whose tag pdfTeX clears).
+    pub const NONE: Side = Side(0x7fff_ffff);
+    /// The handles from here on are hashed.
+    pub const HASHED: u32 = 0x8000_0000;
+}
 
 impl PartialEq for Side {
     fn eq(&self, _: &Self) -> bool {
@@ -92,7 +103,12 @@ impl PartialEq for Side {
 impl Eq for Side {}
 
 impl core::hash::Hash for Side {
-    fn hash<H: core::hash::Hasher>(&self, _: &mut H) {}
+    #[inline]
+    fn hash<H: core::hash::Hasher>(&self, h: &mut H) {
+        if self.0 >= Side::HASHED {
+            h.write_u32(self.0);
+        }
+    }
 }
 
 /// A handle means nothing outside the run that made it: none is saved.

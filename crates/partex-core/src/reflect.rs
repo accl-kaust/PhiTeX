@@ -64,7 +64,7 @@ fn has_lr(list: &[Node]) -> bool {
 fn flatten<'a>(list: &'a [Node], out: &mut Vec<Ent<'a>>) {
     for n in list {
         match n {
-            Node::Math { width, subtype } => out.push(Ent::Math {
+            Node::Math { width, subtype, .. } => out.push(Ent::Math {
                 width: *width,
                 subtype: *subtype,
             }),

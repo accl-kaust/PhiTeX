@@ -107,8 +107,12 @@ impl LrScan {
         let mut rest = rest.into_iter();
         for q in rest.by_ref() {
             let q = match q {
-                Seen::Node(Node::Math { width, subtype }) => {
-                    let kern = Seen::Node(Node::Kern { width, subtype: 0 });
+                Seen::Node(Node::Math { width, subtype, .. }) => {
+                    let kern = Seen::Node(Node::Kern {
+                        width,
+                        subtype: 0,
+                        sync: partex_engine::origin::Side(0),
+                    });
                     if lr::is_end(subtype) {
                         if self.open.last() == Some(&lr::end_of(subtype)) {
                             self.open.pop();
@@ -117,6 +121,7 @@ impl LrScan {
                                 Seen::Node(Node::Math {
                                     width,
                                     subtype: subtype - 1,
+                                    sync: partex_engine::origin::Side(0),
                                 })
                             } else if m > 0 {
                                 m -= 1;
@@ -136,6 +141,7 @@ impl LrScan {
                             Seen::Node(Node::Math {
                                 width,
                                 subtype: subtype + 1,
+                                sync: partex_engine::origin::Side(0),
                             })
                         } else {
                             m += 1;
@@ -480,6 +486,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                 ..*g
             },
             subtype: u8::try_from(n + 1).unwrap_or(0),
+            sync: partex_engine::origin::Side(0),
         };
         let (r, t) = match &outer {
             None => (new_kern(0), new_kern(0)),
@@ -586,7 +593,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                 }
                 Seen::Node(Node::Box(b)) => (b.width, true),
                 Seen::Node(Node::Rule { width, .. }) => (*width, true),
-                Seen::Node(Node::Math { width, subtype }) if pdftex => {
+                Seen::Node(Node::Math { width, subtype, .. }) if pdftex => {
                     let s = *subtype;
                     if texxet {
                         if lr::is_end(s) {
@@ -1263,6 +1270,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             g2 = 0;
         }
         // migrating material comes after equation number
+        self.sync_list(&mut adjust);
         self.nodes_mut().extend(adjust);
         self.tail_append(Node::Penalty(self.int_par(POST_DISPLAY_PENALTY_CODE)));
         if g2 > 0 {
@@ -1325,6 +1333,8 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         self.tail_append(Node::Penalty(self.int_par(PRE_DISPLAY_PENALTY_CODE)));
         let g = self.new_param_glue(ABOVE_DISPLAY_SKIP_CODE);
         self.tail_append(g);
+        let mut p = p;
+        self.sync_list(&mut p);
         self.nodes_mut().extend(p);
         self.tail_append(Node::Penalty(self.int_par(POST_DISPLAY_PENALTY_CODE)));
         let g = self.new_param_glue(BELOW_DISPLAY_SKIP_CODE);

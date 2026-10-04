@@ -8,6 +8,7 @@ mod compat;
 mod config;
 #[cfg(feature = "deps")]
 mod deps;
+mod display;
 mod dvithread;
 mod eventlog;
 mod events;
@@ -203,6 +204,7 @@ const VALUE_OPTIONS: &[&str] = &[
     "output-directory",
     "output-format",
     "progname",
+    "synctex",
     "translate-file",
 ];
 
@@ -372,6 +374,7 @@ fn parse_command_line() -> CommandLine {
                 fmt_name = Some(o[4..].to_owned());
             }
             Some(o) if o.starts_with("progname=") => user_progname = Some(o[9..].to_owned()),
+            Some(o) if o.starts_with("synctex=") => origins::set_synctex(&o[8..]),
             Some(o) if o.starts_with("engine=") => {
                 engine = match &o[7..] {
                     "tex" => Flavor::Tex,
@@ -1144,6 +1147,19 @@ fn ssa_tracker() -> partex_core::ssa::SsaTracker {
     tracker
 }
 
+/// The side files asked for: glyph origins (`PARTEX_ORIGINS=1`) and
+/// display lists (`PARTEX_DISPLAY=1`), turned on before the cold build.
+fn side_files_setup<T: partex_core::track::Tracker>(tex: &mut Tex<native::NativeHost, T>) {
+    origins::setup(tex);
+    display::setup(tex);
+}
+
+/// The side files written after a build or rebuild.
+fn side_files_write<T: partex_core::track::Tracker>(tex: &mut Tex<native::NativeHost, T>) {
+    origins::write(tex);
+    display::write(tex);
+}
+
 /// `PARTEX_SSA=1`: the build on the dynamic-SSA runtime (DESIGN.md
 /// §7.17, `partex_core::ssa`), with `PARTEX_SSA_CHECK=1` check mode.
 /// `PARTEX_SSA_REBUILD=<shell command>` runs the command after the cold
@@ -1160,7 +1176,7 @@ fn run_ssa(host: native::NativeHost, params: Params, command_line: &[u8]) -> i32
     let mut between = Between::default();
     let mut tex = Tex::new(host, ssa_tracker(), params);
     tex.set_window(ssa_window());
-    origins::setup(&mut tex);
+    side_files_setup(&mut tex);
     if rebuild.is_some() {
         // (with rebuilds, `PARTEX_SSA_CANCEL_AFTER` cancels each rebuild,
         // not the cold build: `rebuild_ssa`)
@@ -1194,7 +1210,7 @@ fn run_ssa(host: native::NativeHost, params: Params, command_line: &[u8]) -> i32
     }
     let mut linker = SsaLinker::default();
     let lr = linker.link(&mut tex);
-    origins::write(&mut tex);
+    side_files_write(&mut tex);
     ready_for_rebuilds(&tex, rebuild.is_some());
     eprintln!(
         "partex: ssa build 0: link {:.1} ms: {}; files written {:.1} ms",
@@ -1378,7 +1394,7 @@ fn rebuild_ssa(
         return Ok(None);
     }
     let lr = linker.link(tex);
-    origins::write(tex);
+    side_files_write(tex);
     let link_ms = lr.link_ms;
     eprintln!("partex: ssa rebuild {n}: link: {}", lr.how);
     let s = tex.tracker().rec.borrow().rt.stats;
@@ -2212,7 +2228,7 @@ fn run_memo(host: native::NativeHost, mut params: Params, command_line: &[u8]) -
     let memo = std::env::var("PARTEX_MEMO").unwrap_or_default();
     params.memo = !memo.is_empty() && memo != "0";
     let mut tex = Tex::new(host, Untracked, params);
-    origins::setup(&mut tex);
+    side_files_setup(&mut tex);
     if memo == "check" {
         tex.set_memo_check();
     }
@@ -2231,7 +2247,7 @@ fn run_memo(host: native::NativeHost, mut params: Params, command_line: &[u8]) -
     if effects {
         deliver_effects(&mut tex);
     }
-    origins::write(&mut tex);
+    side_files_write(&mut tex);
     if limit.is_some() {
         eprintln!(
             "partex: memo last hit {}",

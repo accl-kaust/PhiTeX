@@ -3016,7 +3016,9 @@ impl<H: CellHost> TexMachine<H> {
             | Effect::Length { .. }
             | Effect::ObjStmStart { .. }
             | Effect::Open { .. }
-            | Effect::Origins(_) => {}
+            | Effect::Origins(_)
+            | Effect::Synctex(_)
+            | Effect::Display(_) => {}
         }
     }
 }

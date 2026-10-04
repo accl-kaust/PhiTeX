@@ -177,6 +177,20 @@ fn hex_value(c: Option<u8>) -> Option<u8> {
 /// `tokBufSize`: a keyword is at most one less.
 const TOK_BUF: usize = 128;
 
+/// The value of number `text` as this reader reads one in a file (an
+/// integer or a real, xpdf's way: a real summed digit by digit), or
+/// `None` if `text` does not begin with a number. A value made from
+/// pdfTeX's printed numbers this way is the value a reader of the file
+/// gets (display lists, DESIGN 4.6).
+#[must_use]
+pub fn number_value(text: &[u8]) -> Option<f64> {
+    let mut l = Lexer { d: text, pos: 0 };
+    match l.token() {
+        o @ (Obj::Int(_) | Obj::Real(_)) => o.as_num(),
+        _ => None,
+    }
+}
+
 /// xpdf's `Lexer`, over `d` (a file from its header, or the decoded
 /// bytes of an object stream) from `pos`.
 struct Lexer<'a> {
@@ -2587,6 +2601,19 @@ mod tests {
         assert!(matches!(a[14], Obj::Real(r) if (r - 1.52).abs() < 1e-12));
         // (an integer's digits wrap)
         assert_eq!(a[15], Obj::Int(i32::MIN));
+    }
+
+    #[test]
+    fn number_values_as_read() {
+        assert_eq!(number_value(b"612"), Some(612.0));
+        assert_eq!(number_value(b"-.5 x"), Some(-0.5));
+        assert_eq!(number_value(b"/a"), None);
+        // (as a file's real is read: what `Obj::Real` holds)
+        let mut p = Parser::new(b"277.8", 0, None, false);
+        assert_eq!(
+            Some(p.obj(false, 0)).and_then(|o| o.as_num()),
+            number_value(b"277.8")
+        );
     }
 
     #[test]

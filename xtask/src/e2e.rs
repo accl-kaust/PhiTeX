@@ -1098,14 +1098,15 @@ fn run_glyphs(root: &Path, partex: &Path) -> Result<Vec<String>> {
         let term = format!("term{i}.txt");
         exec(Command::new("pdftex"), &oracle, &GLYPHS_DOC, &term)?;
         let mut cmd = glyphs_partex(partex, &work);
-        cmd.env("PARTEX_ORIGINS", "1");
+        cmd.env("PARTEX_ORIGINS", "1").env("PARTEX_DISPLAY", "1");
         exec(cmd, &plain, &GLYPHS_DOC, &term)?;
     }
     let mut diffs: Vec<String> = compare(&oracle, &plain, false)?
         .into_iter()
-        .filter(|n| n != "glyphs.origins.jsonl")
+        .filter(|n| !is_side_file(n))
         .collect();
     glyphs_check(&plain, "origins", &mut diffs)?;
+    display_check(&plain, "glyphs", "display", &mut diffs)?;
     glyphs_outline(partex, &plain, &mut diffs)?;
     glyphs_ssa(root, partex, &work, &mut diffs)?;
     Ok(diffs)
@@ -1205,13 +1206,16 @@ fn glyphs_ssa(root: &Path, partex: &Path, work: &Path, diffs: &mut Vec<String>) 
     fs::write(ssa.join("glyphs-2.tex"), &edit2)?;
     for d in [&ssa, &cold[0], &cold[1]] {
         let mut cmd = glyphs_partex(partex, work);
-        cmd.env("PARTEX_SSA", "1").env("PARTEX_ORIGINS", "1");
+        cmd.env("PARTEX_SSA", "1")
+            .env("PARTEX_ORIGINS", "1")
+            .env("PARTEX_DISPLAY", "1");
         if d == &ssa {
-            // (each line a rebuild after it; the side file each wrote kept)
+            // (each line a rebuild after it; the side files each wrote kept)
             cmd.env(
                 "PARTEX_SSA_REBUILD",
                 "cp glyphs-1.tex glyphs.tex\n\
                  cp glyphs.origins.jsonl rebuild1.origins.jsonl; \
+                 cp glyphs.display.jsonl rebuild1.display.jsonl; \
                  cp glyphs.pdf rebuild1.pdf; cp glyphs-2.tex glyphs.tex",
             );
         }
@@ -1219,7 +1223,8 @@ fn glyphs_ssa(root: &Path, partex: &Path, work: &Path, diffs: &mut Vec<String>) 
         fs::write(d.join("stderr2.txt"), err)?;
     }
     for (c, rebuilt) in [(&cold[0], "rebuild1"), (&cold[1], "glyphs")] {
-        for ext in ["origins.jsonl", "pdf"] {
+        display_check(&ssa, rebuilt, &format!("SSA display ({rebuilt})"), diffs)?;
+        for ext in ["origins.jsonl", "display.jsonl", "pdf"] {
             let ours = fs::read(ssa.join(format!("{rebuilt}.{ext}")));
             let theirs = fs::read(c.join(format!("glyphs.{ext}")));
             if !matches!((&ours, &theirs), (Ok(x), Ok(y)) if x == y) {
@@ -1229,6 +1234,353 @@ fn glyphs_ssa(root: &Path, partex: &Path, work: &Path, diffs: &mut Vec<String>) 
     }
     glyphs_check(&cold[0], "SSA origins (edit 1)", diffs)?;
     glyphs_check(&cold[1], "SSA origins (edit 2)", diffs)
+}
+
+/// The `synctex` job's inputs, copied into its run directory.
+const SYNCTEX_INPUTS: [&str; 5] = [
+    "synctex.tex",
+    "synctex-sub.tex",
+    "synctex-doc.tex",
+    "glyphs.tex",
+    "images-fig.pdf",
+];
+
+/// `SyncTeX` (DESIGN 4.5): pdfTeX and partex in one directory, `run/`
+/// (the `Input:` lines are absolute names), each side's outputs moved to
+/// `o/` and `p/` and compared (the `.synctex.gz` files byte for byte):
+/// `synctex.tex` with `-synctex=1`, `-1` (not gzipped) and `12` (forms'
+/// records, `=` positions), `synctex-doc.tex`, which sets `\synctex`
+/// itself with no option, and `glyphs.tex` (LaTeX, run twice) with
+/// `-synctex=1`; then TeX Live's `synctex view` (every line of each
+/// source) and `synctex edit` (a grid of points on each page) asked of
+/// both sides' files, their answers compared. Plain mode's only.
+fn run_synctex(root: &Path, partex: &Path) -> Result<Vec<String>> {
+    if std::env::var_os("PARTEX_MACHINE").is_some() {
+        return Ok(Vec::new());
+    }
+    let work = out_root(root).join("synctex");
+    if work.exists() {
+        fs::remove_dir_all(&work)?;
+    }
+    let (run, o, p) = (work.join("run"), work.join("o"), work.join("p"));
+    for d in [&run, &o, &p] {
+        fs::create_dir_all(d)?;
+    }
+    for i in SYNCTEX_INPUTS {
+        fs::copy(root.join("tests/e2e").join(i), run.join(i))?;
+    }
+    let partex_cmd = || glyphs_partex(partex, &work);
+    // (each side's formats, by names of their own)
+    for (side, oracle) in [("o", true), ("p", false)] {
+        let cmd = || {
+            if oracle {
+                Command::new("pdftex")
+            } else {
+                partex_cmd()
+            }
+        };
+        let plain = format!("-jobname=plain-{side}");
+        exec(
+            cmd(),
+            &run,
+            &[
+                "-ini",
+                "-etex",
+                "-interaction=nonstopmode",
+                &plain,
+                r"\input plain \dump",
+            ],
+            "term-ini.txt",
+        )?;
+        let latex = format!("-jobname=pdflatex-{side}");
+        let ini: Vec<&str> = GLYPHS_FLAGS
+            .iter()
+            .copied()
+            .chain(["-ini", "-etex", &latex, "*pdflatex.ini"])
+            .collect();
+        exec(cmd(), &run, &ini, "term-ini.txt")?;
+    }
+    // (job, its format, the options, the file, runs)
+    let jobs: [(&str, &str, &str, &str, usize); 5] = [
+        ("s1", "plain", "-synctex=1", "synctex", 1),
+        ("s2", "plain", "-synctex=-1", "synctex", 1),
+        ("s3", "plain", "-synctex=12", "synctex", 1),
+        ("s4", "plain", "", "synctex-doc", 1),
+        ("glyphs", "pdflatex", "-synctex=1", "glyphs", 2),
+    ];
+    for (side, oracle, dest) in [("o", true, &o), ("p", false, &p)] {
+        for &(job, fmt, opt, file, n) in &jobs {
+            let jobname = format!("-jobname={job}");
+            let fmt = format!("-fmt={fmt}-{side}");
+            let args: Vec<&str> = GLYPHS_FLAGS
+                .iter()
+                .copied()
+                .chain([opt, jobname.as_str(), fmt.as_str(), file])
+                .filter(|a| !a.is_empty())
+                .collect();
+            for _ in 0..n {
+                let cmd = if oracle {
+                    Command::new("pdftex")
+                } else {
+                    partex_cmd()
+                };
+                exec(cmd, &run, &args, &format!("term-{job}.txt"))?;
+            }
+            // (the job's outputs to its side's directory)
+            for e in fs::read_dir(&run)? {
+                let n = e?.file_name().to_string_lossy().into_owned();
+                let source = Path::new(&n).extension().is_some_and(|e| e == "tex");
+                let output = n.starts_with(&format!("{job}.")) && !source;
+                if output || n == format!("term-{job}.txt") {
+                    fs::rename(run.join(&n), dest.join(&n))?;
+                }
+            }
+        }
+    }
+    let mut diffs = compare(&o, &p, false)?;
+    for (job, ..) in &jobs[..2] {
+        let gz = if *job == "s2" {
+            "synctex"
+        } else {
+            "synctex.gz"
+        };
+        if !o.join(format!("{job}.{gz}")).exists() {
+            diffs.push(format!("{job}.{gz} (not written)"));
+        }
+    }
+    synctex_queries(&work, &jobs.map(|j| (j.0, j.3)), &mut diffs)?;
+    Ok(diffs)
+}
+
+/// `synctex view` of every line of the job's source files and `synctex
+/// edit` of a grid of points on each of its pages, against `o/` and `p/`:
+/// the answers must be the same (the directory's name masked). Without
+/// TeX Live's `synctex` on the path, nothing (the files were compared).
+fn synctex_queries(work: &Path, jobs: &[(&str, &str)], diffs: &mut Vec<String>) -> Result<()> {
+    let ask = |args: &[String]| -> Option<String> {
+        let out = Command::new("synctex")
+            .current_dir(work)
+            .args(args)
+            .stdin(Stdio::null())
+            .output()
+            .ok()?;
+        let text = String::from_utf8_lossy(&out.stdout).into_owned();
+        Some(text.replace("o/", "SIDE/").replace("p/", "SIDE/"))
+    };
+    if ask(&["help".to_owned()]).is_none() {
+        eprintln!("e2e synctex: no `synctex` command; the files were compared byte for byte");
+        return Ok(());
+    }
+    for &(job, file) in jobs {
+        let pdf = |side: &str| format!("{side}/{job}.pdf");
+        let mut inputs = vec![format!("{file}.tex")];
+        if file.starts_with("synctex") {
+            inputs.push("synctex-sub.tex".to_owned());
+        }
+        for input in &inputs {
+            let lines = fs::read_to_string(work.join("run").join(input))?
+                .lines()
+                .count();
+            for l in 1..=lines {
+                let q = |side: &str| {
+                    ask(&[
+                        "view".to_owned(),
+                        "-i".to_owned(),
+                        format!("{l}:0:{input}"),
+                        "-o".to_owned(),
+                        pdf(side),
+                    ])
+                };
+                if q("o") != q("p") {
+                    diffs.push(format!("synctex view {job} {input}:{l}"));
+                }
+            }
+        }
+        let pages = fs::read_to_string(work.join("o").join(format!("{job}.log")))
+            .ok()
+            .and_then(|log| {
+                let at = log.find("Output written on")?;
+                let rest = &log[at..];
+                let open = rest.find('(')?;
+                rest[open + 1..].split(' ').next()?.parse::<usize>().ok()
+            })
+            .unwrap_or(1);
+        for page in 1..=pages {
+            for x in (0..=600).step_by(60) {
+                for y in (0..=840).step_by(60) {
+                    let q = |side: &str| {
+                        ask(&[
+                            "edit".to_owned(),
+                            "-o".to_owned(),
+                            format!("{page}:{x}:{y}:{}", pdf(side)),
+                        ])
+                    };
+                    if q("o") != q("p") {
+                        diffs.push(format!("synctex edit {job} {page}:{x}:{y}"));
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Whether file `n` is one of partex's side files (glyph origins,
+/// display lists), which pdfTeX does not write.
+fn is_side_file(n: &str) -> bool {
+    n.ends_with(".origins.jsonl") || n.ends_with(".display.jsonl")
+}
+
+/// `crate::display::check` of job `job`'s run in `dir`, its problems
+/// added to `diffs` (as `what`'s).
+fn display_check(dir: &Path, job: &str, what: &str, diffs: &mut Vec<String>) -> Result<()> {
+    for m in crate::display::check(dir, job)?.0 {
+        diffs.push(format!("{what}: {m}"));
+    }
+    Ok(())
+}
+
+/// The `display` job's inputs, and its document's runs' flags.
+const DISPLAY_INPUTS: [&str; 3] = ["display.tex", "images-fig.pdf", "png-rgb8.png"];
+const DISPLAY_DOC: [&str; 6] = [
+    "-no-shell-escape",
+    "-no-parse-first-line",
+    "-output-comment=partex",
+    "-interaction=nonstopmode",
+    "-fmt=pdflatex",
+    "display",
+];
+
+/// Display lists (DESIGN 4.6): `display.tex` run by pdfTeX and by partex
+/// with `PARTEX_DISPLAY=1` (and `PARTEX_ORIGINS=1`), every file the same
+/// but partex's side files, its lists checked against its PDF
+/// (`crate::display`: each page's glyphs, items, box); `microtype.tex`
+/// (font expansion's text matrices, plain pdfTeX) likewise; then
+/// `display.tex` in SSA mode ([`display_ssa`]). In machine mode's e2e
+/// run, nothing.
+fn run_display(root: &Path, partex: &Path) -> Result<Vec<String>> {
+    if std::env::var_os("PARTEX_MACHINE").is_some() {
+        return Ok(Vec::new());
+    }
+    let work = out_root(root).join("display");
+    if work.exists() {
+        fs::remove_dir_all(&work)?;
+    }
+    let (oracle, plain) = (work.join("o"), work.join("p"));
+    let (moracle, mplain) = (work.join("mo"), work.join("mp"));
+    for d in [&oracle, &plain] {
+        fs::create_dir_all(d)?;
+        for i in DISPLAY_INPUTS {
+            fs::copy(root.join("tests/e2e").join(i), d.join(i))?;
+        }
+    }
+    let ini: Vec<&str> = GLYPHS_FLAGS
+        .iter()
+        .copied()
+        .chain(["-ini", "-etex", "-jobname=pdflatex", "*pdflatex.ini"])
+        .collect();
+    exec(Command::new("pdftex"), &oracle, &ini, "term1.txt")?;
+    exec(glyphs_partex(partex, &work), &plain, &ini, "term1.txt")?;
+    for i in 2..=3 {
+        let term = format!("term{i}.txt");
+        exec(Command::new("pdftex"), &oracle, &DISPLAY_DOC, &term)?;
+        let mut cmd = glyphs_partex(partex, &work);
+        cmd.env("PARTEX_DISPLAY", "1").env("PARTEX_ORIGINS", "1");
+        exec(cmd, &plain, &DISPLAY_DOC, &term)?;
+    }
+    let mut diffs: Vec<String> = compare(&oracle, &plain, false)?
+        .into_iter()
+        .filter(|n| !is_side_file(n))
+        .collect();
+    display_check(&plain, "display", "display", &mut diffs)?;
+    // (plain pdfTeX with font expansion: `Tm`'s scaled text)
+    let micro = [
+        "-ini",
+        "-no-shell-escape",
+        "-no-parse-first-line",
+        "-interaction=nonstopmode",
+        "microtype",
+    ];
+    for d in [&moracle, &mplain] {
+        fs::create_dir_all(d)?;
+        fs::copy(
+            root.join("tests/e2e/microtype.tex"),
+            d.join("microtype.tex"),
+        )?;
+    }
+    exec(Command::new("pdftex"), &moracle, &micro, "term1.txt")?;
+    let mut cmd = glyphs_partex(partex, &work);
+    cmd.env("PARTEX_DISPLAY", "1");
+    exec(cmd, &mplain, &micro, "term1.txt")?;
+    diffs.extend(
+        compare(&moracle, &mplain, false)?
+            .into_iter()
+            .filter(|n| !is_side_file(n))
+            .map(|n| format!("microtype: {n}")),
+    );
+    display_check(&mplain, "microtype", "microtype display", &mut diffs)?;
+    display_ssa(root, partex, &work, &mut diffs)?;
+    Ok(diffs)
+}
+
+/// `display.tex` in SSA mode (with the format the plain run made), its
+/// text edited twice and rebuilt after each edit (a comment line before
+/// a paragraph: the pages' streams kept; then a paragraph inserted before
+/// the figure, moving it); each rebuild's display lists, page hashes and
+/// PDF a cold SSA build's of its text, and checked against its PDF.
+fn display_ssa(root: &Path, partex: &Path, work: &Path, diffs: &mut Vec<String>) -> Result<()> {
+    let text = fs::read_to_string(root.join("tests/e2e/display.tex"))?;
+    let edit1 = text.replacen("Plain text,", "% A comment line.\nPlain text,", 1);
+    let edit2 = edit1.replacen(
+        "\\begin{tikzpicture}",
+        "A paragraph inserted before the picture.\n\n\\begin{tikzpicture}",
+        1,
+    );
+    let ssa = work.join("s");
+    let cold = [work.join("c1"), work.join("c2")];
+    for (d, edited) in [
+        (&ssa, None),
+        (&cold[0], Some(&edit1)),
+        (&cold[1], Some(&edit2)),
+    ] {
+        fs::create_dir_all(d)?;
+        for i in DISPLAY_INPUTS {
+            fs::copy(root.join("tests/e2e").join(i), d.join(i))?;
+        }
+        if let Some(t) = edited {
+            fs::write(d.join("display.tex"), t)?;
+        }
+        fs::copy(work.join("p/pdflatex.fmt"), d.join("pdflatex.fmt"))?;
+        // (the auxiliary files of the plain run: the same passes)
+        fs::copy(work.join("p/display.aux"), d.join("display.aux"))?;
+    }
+    fs::write(ssa.join("display-1.tex"), &edit1)?;
+    fs::write(ssa.join("display-2.tex"), &edit2)?;
+    for d in [&ssa, &cold[0], &cold[1]] {
+        let mut cmd = glyphs_partex(partex, work);
+        cmd.env("PARTEX_SSA", "1").env("PARTEX_DISPLAY", "1");
+        if d == &ssa {
+            cmd.env(
+                "PARTEX_SSA_REBUILD",
+                "cp display-1.tex display.tex\n\
+                 cp display.display.jsonl rebuild1.display.jsonl; \
+                 cp display.pdf rebuild1.pdf; cp display-2.tex display.tex",
+            );
+        }
+        let err = exec(cmd, d, &DISPLAY_DOC, "term2.txt")?;
+        fs::write(d.join("stderr2.txt"), err)?;
+    }
+    for (c, rebuilt) in [(&cold[0], "rebuild1"), (&cold[1], "display")] {
+        display_check(&ssa, rebuilt, &format!("SSA display ({rebuilt})"), diffs)?;
+        for ext in ["display.jsonl", "pdf"] {
+            let ours = fs::read(ssa.join(format!("{rebuilt}.{ext}")));
+            let theirs = fs::read(c.join(format!("display.{ext}")));
+            if !matches!((&ours, &theirs), (Ok(x), Ok(y)) if x == y) {
+                diffs.push(format!("SSA {rebuilt}.{ext}"));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Every file must be identical (not the terminal: the renderer's), and
@@ -1840,6 +2192,8 @@ pub fn run(root: &Path, args: &[String]) -> Result<()> {
     ));
     jobs.push(("modern", Box::new(move || run_modern(root, partex))));
     jobs.push(("glyphs", Box::new(move || run_glyphs(root, partex))));
+    jobs.push(("synctex", Box::new(move || run_synctex(root, partex))));
+    jobs.push(("display", Box::new(move || run_display(root, partex))));
     jobs.push((
         "modern_watch",
         Box::new(move || run_modern_watch(root, partex, false)),

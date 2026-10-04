@@ -430,7 +430,7 @@ impl ExpState {
                     w[1] += env.font(l.font).width(l.ch);
                     self.chars(env, l.font, &[l.ch])?
                 }
-                Node::Kern { width, subtype } => {
+                Node::Kern { width, subtype, .. } => {
                     w[1] += width;
                     if *subtype == KERN_NORMAL {
                         let l = k
@@ -520,6 +520,7 @@ pub fn line_break(
     list.push(Node::Glue {
         spec: p.par_fill_skip,
         subtype: PAR_FILL_SKIP + 1,
+        sync: crate::origin::Side(0),
     });
     let mut b = Breaker {
         env,
@@ -770,7 +771,7 @@ impl<E: Env> Breaker<'_, E> {
                             self.try_to_hyphenate(i); // §894
                         }
                     }
-                    Node::Kern { width, subtype } => {
+                    Node::Kern { width, subtype, .. } => {
                         let w = *width;
                         if *subtype == KERN_EXPLICIT {
                             self.kern_break(i, w, auto_breaking)?;
@@ -812,7 +813,7 @@ impl<E: Env> Breaker<'_, E> {
                         let replace = self.exp.part(&*self.env, &d.replace, after, "disc4")?;
                         add_widths(&mut self.active_width, &replace);
                     }
-                    Node::Math { width, subtype } => {
+                    Node::Math { width, subtype, .. } => {
                         let w = *width;
                         // (text-direction nodes leave it as it is)
                         if *subtype < lr::L_CODE {
@@ -968,7 +969,7 @@ impl<E: Env> Breaker<'_, E> {
                 Node::Leaders(l) => self.subtract_glue(l.spec),
                 Node::Penalty(_) => {}
                 Node::Math { width, .. } => self.break_width[1] -= width,
-                Node::Kern { width, subtype } => {
+                Node::Kern { width, subtype, .. } => {
                     if *subtype != KERN_EXPLICIT {
                         return Ok(());
                     }
@@ -1552,6 +1553,7 @@ impl<E: Env> Breaker<'_, E> {
                 line.push(Node::Math {
                     width: 0,
                     subtype: lr::begin_of(e),
+                    sync: crate::origin::Side(0),
                 });
             }
             for n in carry.drain(..) {
@@ -1581,9 +1583,17 @@ impl<E: Env> Breaker<'_, E> {
                     let (_, n) = nodes.next().ok_or(Confusion("line breaking"))?;
                     match n {
                         Node::Glue { .. } | Node::Leaders(_) => {
+                            // (TeX makes the glue at the break the
+                            // \rightskip: its place kept)
+                            let sync = match &n {
+                                Node::Glue { sync, .. } => *sync,
+                                Node::Leaders(l) => l.sync,
+                                _ => crate::origin::Side(0),
+                            };
                             line.push(Node::Glue {
                                 spec: right_skip,
                                 subtype: RIGHT_SKIP + 1,
+                                sync,
                             });
                             add_right_skip = false;
                         }
@@ -1603,12 +1613,21 @@ impl<E: Env> Breaker<'_, E> {
                             }
                             disc_break = true;
                         }
-                        Node::Math { subtype, .. } => {
-                            let n = Node::Math { width: 0, subtype };
+                        Node::Math { subtype, sync, .. } => {
+                            // (the node made empty: its place kept)
+                            let n = Node::Math {
+                                width: 0,
+                                subtype,
+                                sync,
+                            };
                             track(lr_open, &n);
                             line.push(n);
                         }
-                        Node::Kern { subtype, .. } => line.push(Node::Kern { width: 0, subtype }),
+                        Node::Kern { subtype, sync, .. } => line.push(Node::Kern {
+                            width: 0,
+                            subtype,
+                            sync,
+                        }),
                         n => line.push(n),
                     }
                 }
@@ -1637,16 +1656,18 @@ impl<E: Env> Breaker<'_, E> {
                 line.push(Node::Glue {
                     spec: right_skip,
                     subtype: RIGHT_SKIP + 1,
+                    sync: crate::origin::Side(0),
                 });
             }
             // TeXXeT: close the open segments before the \rightskip.
             let at = line.len() - 1;
             line.splice(
                 at..at,
-                lr_open
-                    .iter()
-                    .rev()
-                    .map(|&subtype| Node::Math { width: 0, subtype }),
+                lr_open.iter().rev().map(|&subtype| Node::Math {
+                    width: 0,
+                    subtype,
+                    sync: crate::origin::Side(0),
+                }),
             );
             if self.p.protrude_chars > 0 {
                 // pdfTeX: and one for the character at the left.
@@ -1662,6 +1683,7 @@ impl<E: Env> Breaker<'_, E> {
                     Node::Glue {
                         spec: left_skip,
                         subtype: LEFT_SKIP + 1,
+                        sync: crate::origin::Side(0),
                     },
                 );
             }
@@ -2162,9 +2184,12 @@ fn tmp_into(list: &mut Vec<Node>, items: &[Tmp], font: FontId, mut t: Option<&mu
                     org: Side(org),
                 })));
             }
+            // (a kern made again has no `SyncTeX` place: pdfTeX clears
+            // its tag, "it is too late")
             Tmp::Kern(w) => list.push(Node::Kern {
                 width: *w,
                 subtype: KERN_NORMAL,
+                sync: crate::origin::Side::NONE,
             }),
             Tmp::Disc { pre, post, replace } => {
                 let mut d = Disc::default();

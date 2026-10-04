@@ -2,6 +2,7 @@
 
 mod bench;
 mod corpus;
+mod display;
 mod e2e;
 mod etrip;
 mod mask;
@@ -29,6 +30,7 @@ commands:
   parallel  how much of an SSA build could run at once (PARTEX_SSA_DAG dumps)
   origins   check DIR/JOB.origins.jsonl against DIR/JOB.pdf and the sources
             (`--glyphs`: with glyphs.tex's expectations; `--dump`: each glyph)
+  display   check DIR/JOB.display.jsonl (display lists) against DIR/JOB.pdf
   trip      run Knuth's trip test on partex and compare with refs/tex/trip
   etrip     run e-TeX's etrip test on partex and compare with pdfTeX's run
   bench     time partex against pdflatex, record JSON in bench/results/ (--pgf: PGF subset)
@@ -46,6 +48,7 @@ fn main() -> Result<()> {
         Some("ssa-edits") => ssa_edits::run(&workspace_root(), &args[1..]),
         Some("parallel") => parallel::run(&args[1..]),
         Some("origins") => origins::run(&args[1..]),
+        Some("display") => display::run(&args[1..]),
         Some("trip") => trip::run(&workspace_root(), &args[1..]),
         Some("etrip") => etrip::run(&workspace_root(), &args[1..]),
         Some("-h" | "--help") | None => {
