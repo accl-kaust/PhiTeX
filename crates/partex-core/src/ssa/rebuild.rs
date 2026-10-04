@@ -2587,9 +2587,6 @@ pub fn rebuild<H: Host>(tex: &mut Tex<H, SsaTracker>, trace: bool, apply: bool) 
         // commands, looked at once that passes `COLD_FLOOR`)
         let mut spent = 0u64;
         let mut after: Option<u64> = None;
-        // (where the old steps after it ended, made once a run of the
-        // cascade meets none of the next `LOOK_AHEAD`: `meet_far`)
-        let mut ends: Option<Ends> = None;
         loop {
             let c0 = tex.commands();
             let moved = rep.positioned + rep.restored;
@@ -2640,10 +2637,8 @@ pub fn rebuild<H: Host>(tex: &mut Tex<H, SsaTracker>, trace: bool, apply: bool) 
                 break;
             }
             // (it ended elsewhere: at the end of an old step after it, which
-            // passes over the steps between, or it runs on; the next
-            // `LOOK_AHEAD` first, then any)
-            let met = meet(tex, cur, &end).or_else(|| meet_far(tex, cur, &end, &mut ends));
-            if let Some((m, old_end)) = met {
+            // passes over the steps between, or it runs on)
+            if let Some((m, old_end)) = meet(tex, cur, &end) {
                 let passed = {
                     let r = tex.tracker.rec.borrow();
                     let fold = &r.rt.fold;
@@ -3612,71 +3607,6 @@ fn meet<H: Host>(
     let fold = &r.rt.fold;
     let from = fold.position(cur)? + 1;
     fold.order[from..].iter().take(LOOK_AHEAD).find_map(|&s| {
-        let e = r.st.steps.end(s)?;
-        same_place(tex, end, &e).then_some((s, e))
-    })
-}
-
-/// What [`same_place`] compares first, as a key: the flags, the levels'
-/// counts, the line numbers and the top level's state and index.
-type PlaceKey = (u8, usize, usize, i32, i32, i32, i32, i32);
-
-fn place_key(e: &InputState) -> PlaceKey {
-    let flags = u8::from(e.finished)
-        | u8::from(e.fire) << 1
-        | u8::from(e.ship) << 2
-        | u8::from(e.load) << 3
-        | u8::from(e.page) << 4
-        | u8::from(e.graf) << 5;
-    (
-        flags,
-        e.in_open,
-        e.v.depth,
-        e.line,
-        e.file.line,
-        e.cur.state,
-        e.cur.index,
-        e.cur.start,
-    )
-}
-
-/// The old steps after a cascade's step, by where each ended
-/// ([`place_key`]): [`meet`] past [`LOOK_AHEAD`].
-type Ends = BTreeMap<PlaceKey, Vec<StepId>>;
-
-/// [`meet`] among every old step after `cur`, not only the next
-/// [`LOOK_AHEAD`]: a cascade that ran past them (the text of many old
-/// steps gone, as a chapter `\includeonly` leaves out) meets the old
-/// steps where its run comes back to their text, and passes over the
-/// ones between. `ends` is made at the first call of a cascade, from the
-/// old steps after `cur` then.
-fn meet_far<H: Host>(
-    tex: &Tex<H, SsaTracker>,
-    cur: StepId,
-    end: &InputState,
-    ends: &mut Option<Ends>,
-) -> Option<(StepId, InputState)> {
-    let r = tex.tracker.rec.borrow();
-    let fold = &r.rt.fold;
-    let from = fold.position(cur)? + 1;
-    let ends = ends.get_or_insert_with(|| {
-        let mut m = Ends::new();
-        for &s in &fold.order[from..] {
-            if let Some(e) = r.st.steps.end(s) {
-                m.entry(place_key(&e)).or_default().push(s);
-            }
-        }
-        m
-    });
-    // (the first one in the fold's order, live and after the run)
-    let mut at: Vec<(usize, StepId)> = ends
-        .get(&place_key(end))?
-        .iter()
-        .filter_map(|&s| Some((fold.position(s)?, s)))
-        .filter(|&(p, _)| p >= from)
-        .collect();
-    at.sort_unstable();
-    at.into_iter().find_map(|(_, s)| {
         let e = r.st.steps.end(s)?;
         same_place(tex, end, &e).then_some((s, e))
     })

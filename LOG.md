@@ -13569,3 +13569,35 @@ identical.
   from 2852 and 6.6M (the fonts' numbers no longer move); trip 3 94
   steps.
 - 144 s for the cold build and the rebuild together, down from 158 s.
+
+## 2026-10-04 — meet_far taken back out (branch `incl66b`)
+
+**Symptom.** After cc72b11, the thesis's 12→11pt class edit rebuilt
+fast, 33.5 s against a 30.8 s cold build (main took 65 s). Its `.aux` and
+`.toc` matched plain partex, but the PDF did not: "Chapter~2" and
+"HyCUBE~[3]" printed a literal tilde, and the CMR10 subset changed. The
+b0380d6 binary alone shows it, so 5dbc810's go_cold target fix is not
+involved.
+
+**Cause** (not yet at its root). With `meet_far`, the preamble's cascade
+meets old steps far ahead instead of going cold, and the rebuild then
+runs old steps again one by one. Around `\inputminted`/listing file inputs
+and output-routine fires, one of them (61065) now ends early, at "a fire
+pending". It loses its group-end restore of `\catcode126` (`5ab9->-`), so a
+new step's `\catcode126`=12, made inside the group, leaks to the steps
+after it. This is a latent bug of steps run again. The cold path hid it.
+
+**Fix forward.** `meet_far` is taken out. The SyncTeX-tag change
+(`same_tags`, compared only in `same_input` and while SyncTeX is on) and
+5dbc810's cold cascade running to the job's end stay. `meet_far` comes back
+once the leaked restore is fixed at its root.
+
+**Measured** (native, fastdev, on 8a5a454; plain oracles made by this
+binary from scratch: plain passes with BibTeX to a fixed point):
+- Thesis 12→11pt: rebuild trip 1 takes 57 s against a 31 s cold build;
+  every `.aux`, the `.toc`, `.lof`, `.lot` and the PDF are byte-identical
+  to plain.
+- pgfsub `\includeonly`, the chapter left out then put back: both stages
+  are byte-identical to plain, PDF included (with 8a5a454's `/F` fix).
+  They take 112 s and 93 s against a 67 s cold build.
+- `ssa-edits --fixpoint`: 33/33.
