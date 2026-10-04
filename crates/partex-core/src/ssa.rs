@@ -644,6 +644,9 @@ impl Value for SVal {
     fn version(&self) -> Version {
         self.0
     }
+    fn bare(&self) -> Option<Self> {
+        self.1.is_some().then(|| SVal::ver(self.0))
+    }
 }
 
 /// The engine's functions.

@@ -1140,6 +1140,7 @@ impl<M: Machine> Runtime<M> {
             },
             &[],
         );
+        self.bare_writes(id);
         Some(id)
     }
 
@@ -1164,6 +1165,7 @@ impl<M: Machine> Runtime<M> {
             },
             skip,
         );
+        self.bare_writes(id);
         Some(id)
     }
 

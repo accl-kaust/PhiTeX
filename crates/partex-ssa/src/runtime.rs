@@ -254,6 +254,9 @@ pub struct Runtime<M: Machine> {
     /// [`Runtime::begin_lean`]: a step's), so a kept build's roots do not
     /// keep it, only its children ([`Runtime::collect`]).
     lean: Vec<bool>,
+    /// Per lean record: the step whose run made it, and whether another
+    /// step's run made it too ([`Runtime::bare_writes`]).
+    owner: Vec<(u32, bool)>,
     /// The writes the records made since the last collection held, and
     /// the live records' after it ([`Runtime::keep_roots`]).
     writes_made: usize,
@@ -304,6 +307,7 @@ impl<M: Machine> Runtime<M> {
             fold: crate::fold::Fold::default(),
             inert: Vec::new(),
             lean: Vec::new(),
+            owner: Vec::new(),
             writes_made: 0,
             writes_after_gc: 0,
             sizes: Sizes::default(),
@@ -656,7 +660,23 @@ impl<M: Machine> Runtime<M> {
             }
         }
         rec.content = Version(h.finish128());
+        let step = self.open.step.map_or(u32::MAX, |s| s.0);
         if let Some(&id) = self.dedup.get(&rec.content) {
+            // (a lean record whose writes let their contents go, made
+            // again: the contents come back, the same values; made by
+            // another step's run, it keeps them for good)
+            if let Some(o) = self.owner.get_mut(id as usize) {
+                if o.0 != step {
+                    o.1 = true;
+                }
+                if let Some(old) = self.recs[id as usize].as_mut() {
+                    for (w, n) in old.writes.iter_mut().zip(rec.writes) {
+                        if w.1.as_ref().is_some_and(|v| v.bare().is_none()) {
+                            w.1 = n.1;
+                        }
+                    }
+                }
+            }
             return id;
         }
         let (name, content) = (rec.name, rec.content);
@@ -678,6 +698,10 @@ impl<M: Machine> Runtime<M> {
             self.inert.resize(id as usize + 1, false);
         }
         self.inert[id as usize] = inert;
+        if self.owner.len() <= id as usize {
+            self.owner.resize(id as usize + 1, (u32::MAX, false));
+        }
+        self.owner[id as usize] = (step, false);
         self.memo_add(name, id);
         self.dedup.insert(content, id);
         id
@@ -692,6 +716,43 @@ impl<M: Machine> Runtime<M> {
             c.push(id);
         } else {
             memo.insert(name, Cands::one(id));
+        }
+    }
+
+    /// Let the contents of step `id`'s writes that are not its
+    /// definitions go: a lean record's (a step's, never looked up) writes
+    /// are read only as the definitions the fold's index names; the
+    /// others (a save-stack entry above the stack's end, a slot a group's
+    /// end put back, a slot a later call of the step wrote again) keep
+    /// their versions. A record another step's run made too keeps them.
+    pub(crate) fn bare_writes(&mut self, id: crate::fold::StepId) {
+        let Runtime {
+            recs,
+            fold,
+            lean,
+            owner,
+            ..
+        } = self;
+        let Some(step) = fold.steps.get(id as usize) else {
+            return;
+        };
+        for &r in &step.recs {
+            let i = r as usize;
+            if !lean.get(i).copied().unwrap_or(false) || owner.get(i).is_none_or(|o| o.1) {
+                continue;
+            }
+            let Some(rec) = recs[i].as_mut() else {
+                continue;
+            };
+            for (ix, (a, v)) in rec.writes.iter_mut().enumerate() {
+                let Some(b) = v.as_ref().and_then(Value::bare) else {
+                    continue;
+                };
+                let ix = u32::try_from(ix).expect("fewer than 2^32 writes");
+                if fold.entry_of(a, id) != Some((r, ix)) {
+                    *v = Some(b);
+                }
+            }
         }
     }
 

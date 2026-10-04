@@ -500,6 +500,16 @@ impl<M: Machine> Fold<M> {
         v.get(at).is_some_and(|x| x.step == id)
     }
 
+    /// Step `id`'s definition of `a` in the index: its record and the
+    /// write's index in it.
+    #[must_use]
+    pub fn entry_of(&self, a: &M::Addr, id: StepId) -> Option<(RecId, u32)> {
+        let key = self.steps.get(id as usize)?.key;
+        let v = self.defs.get_by(hash64(a), |k| k.0 == *a)?;
+        let at = first_not_below(v, |x| self.key_of(x.step), key);
+        v.get(at).filter(|x| x.step == id).map(|x| (x.rec, x.ix))
+    }
+
     /// The definition of `a` that reaches key `key`: the last live one
     /// before it (`None`: the slot's value before the build defined it).
     #[must_use]

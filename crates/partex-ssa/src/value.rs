@@ -15,6 +15,13 @@ pub trait Value: Clone {
         let _ = field;
         None
     }
+
+    /// The value known by its version alone, its content let go, if it
+    /// holds a content to let go (a step's write that is not its
+    /// definition: no one reads its content, [`crate::Runtime`]).
+    fn bare(&self) -> Option<Self> {
+        None
+    }
 }
 
 /// The version of an optional value ([`Version::ABSENT`] for `None`).

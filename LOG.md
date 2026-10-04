@@ -12550,3 +12550,17 @@ reads stay until the rebuild ends, for its predictions). After a
 collection the kept roots name only kept records. Thesis: peak 2,641,312
 KB → 2,123,168 KB; trips, steps, routine hits (126 of 252 calls) and the
 outputs the same; `pt`, `acro2`, `ac3`: outputs equal, entry check 0.
+
+**A step's writes that are not its definitions keep only their
+versions** (same branch). A lean record's writes are read as values
+only where the fold's index names them a definition; the others (a
+save-stack entry above the stack's end, a slot a group's end put back,
+a slot a later call of the same step wrote again) were each an
+`Arc<SValue>` held for good. `Runtime::bare_writes`, at a step's close,
+lets their contents go (`Value::bare`: the version stays). A lean record
+made again by a run (the record deduplicated) gets the contents back from
+the new run's, and one made by another step's run keeps them for good.
+Thesis: values held 3.70 M → 2.82 M; peak 2,123,168 KB → 2,045,336 KB;
+outputs, trips and steps the same; `pt` with two edits (3 and 377 steps
+run) and `acro2`, `ac3`: outputs equal to main's, the entry check as on
+main.
