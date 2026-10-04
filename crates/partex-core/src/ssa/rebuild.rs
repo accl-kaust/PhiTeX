@@ -1560,6 +1560,80 @@ fn nest_whole<H: Host>(tex: &Tex<H, SsaTracker>, key: u64, next: &mut Vec<Slot>)
     }
 }
 
+/// Whether slot `a` is the PDF object lists' heads (`OBJS`) or what the
+/// writer keeps of the fonts (`PDF_FONTS`), which say which objects the
+/// lists hold.
+fn object_table(a: &Slot) -> bool {
+    use crate::pdf::val::field::{OBJS, PDF_FONTS};
+    a.0 == Fam::Pdf && (a.1 == i64::from(OBJS) || a.1 == i64::from(PDF_FONTS))
+}
+
+/// The PDF object lists placed whole for the step at `key`, as the
+/// nest's levels go with the nest (DESIGN 3.12, "PDF object numbers"):
+/// with the lists' heads or the fonts' state placed, the heads, the
+/// fonts' state and each entry on a list from the heads that reach the
+/// step, followed by the links that reach it, where a later definition
+/// holds the arrays. A head placed and its entries not would be a list
+/// no run made: the entries a later run left link on to objects this
+/// run has not made yet; a font the fonts' state says is not used, made
+/// again, was pushed on the list it was on, its link pointing back into
+/// it, and the next font's walk (`pdf_init_font`) went round for ever
+/// (the thesis's cold trip 2). Added to `next`. (An entry read by its
+/// number, off the lists, is checked as any read.)
+fn objs_whole<H: Host>(
+    tex: &Tex<H, SsaTracker>,
+    key: u64,
+    next: &mut Vec<Slot>,
+    rep: &mut RebuildReport,
+) {
+    use crate::pdf::objtab::{Entry, HEAD_TAB_MAX};
+    use crate::pdf::val::field::{OBJS, PDF_FONTS};
+    type Objs = (crate::pdf::val::VTab<Entry>, [i32; HEAD_TAB_MAX + 1], i32);
+    let objs = &tex.pdf.objs;
+    let mut r = tex.tracker.rec.borrow_mut();
+    let rr = &mut *r;
+    let field = |v: &Option<SVal>| match v.as_ref().and_then(|v| v.1.as_deref()) {
+        Some(super::SValue::Field(f)) => Some(f.clone()),
+        _ => None,
+    };
+    let heads = Slot(Fam::Pdf, i64::from(OBJS));
+    let fonts = Slot(Fam::Pdf, i64::from(PDF_FONTS));
+    if later(&rr.rt.fold, &fonts, key) {
+        next.push(fonts);
+    }
+    let head = if later(&rr.rt.fold, &heads, key) {
+        next.push(heads);
+        let v = reaching(tex, rr, heads, key, rep);
+        field(&v).and_then(|f| f.get::<Objs>().map(|o| o.1))
+    } else {
+        None
+    }
+    .unwrap_or(objs.head);
+    if !objs.ssa.on {
+        // (the entries are the `OBJS` field's)
+        return;
+    }
+    for mut k in head {
+        // (as many as there are entries: links from runs that do not
+        // agree may go round)
+        let mut left = objs.len();
+        while k != 0 && left > 0 {
+            left -= 1;
+            let a = Slot(Fam::PdfObj, i64::from(k));
+            k = if later(&rr.rt.fold, &a, key) {
+                next.push(a);
+                let v = reaching(tex, rr, a, key, rep);
+                field(&v)
+                    .and_then(|f| f.get::<Option<Entry>>().cloned())
+                    .flatten()
+                    .map_or(0, |e| e.link)
+            } else {
+                objs.entry(k).map_or(0, |e| e.link)
+            };
+        }
+    }
+}
+
 /// The fields (`track::list::slot`) of the levels from the outermost to
 /// depth `d`.
 fn level_fields(d: usize) -> impl Iterator<Item = Slot> {
@@ -3687,7 +3761,14 @@ fn run_step<H: Host>(
     }
     let mut set: BTreeSet<Slot> = BTreeSet::new();
     let mut touched: BTreeSet<Slot> = BTreeSet::new();
+    let mut objs_placed = false;
     let finished = loop {
+        // (the object table placed whole with its lists' heads or the
+        // fonts' state: [`objs_whole`])
+        if !alone && !objs_placed && found.iter().map(|(a, _)| a).chain(&next).any(object_table) {
+            objs_placed = true;
+            objs_whole(tex, key, &mut next, rep);
+        }
         // the definitions that reach the step, where a later one is in
         // the arrays
         let vals = {

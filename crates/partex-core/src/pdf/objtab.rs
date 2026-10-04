@@ -651,11 +651,11 @@ pub(crate) const SUP_OBJ_TAB_SIZE: usize = 8_388_607;
 
 /// A walk along an object list, from its head to the entry whose link
 /// is 0 ([`ObjTab::walk`]), each link read when the walk moves past its
-/// entry. It ends past as many entries as the table holds: a run of a
-/// step that read entries at a later definition (dropped at its end and
-/// run again with them placed, DESIGN 7.17.3) may find a list that never
-/// ends, and only a run that ends is dropped. (The entries of one run, a
-/// list made as pdfTeX makes it, end before the bound.)
+/// entry. It also ends past as many entries as the table holds, which a
+/// list made as pdfTeX makes it never reaches. (A step run again has its
+/// lists placed whole with their heads, `rebuild::objs_whole`; the bound
+/// only keeps a run whose state no run made, which is dropped at its end,
+/// DESIGN 7.17.3, from never reaching it.)
 pub(crate) struct Walk {
     at: i32,
     started: bool,
