@@ -1137,9 +1137,13 @@ readers rerun. What is built:
   the shape and the entries it restores, and writes them (dropped) and
   the shape. One slot hashing every entry made every later local
   assignment of a register above 255 (pgf's `\dimen261`…) depend on any
-  saved value below it. A rebuild places the shape, and each entry
-  within it where a later definition holds the arrays, with the stack
-  below its pointer (`save_stack_whole`).
+  saved value below it. The shape is one structure with its entries, as
+  the nest is with its levels' fields: wherever a rebuild puts the shape
+  (placed with the stack below its pointer, `save_stack_whole`; put back
+  after a run; a dropped run's undone), every entry within it goes with
+  it at its own definition (`with_levels`). (Put back alone, a shape a
+  placement had shortened came back padded with stand-ins, and a later
+  restore read one: `xeq_level` index panic on the thesis.)
 
 - *Virtual PDF object numbers* (`PARTEX_SSA_VOBJ`; `pdf/objtab.rs`,
   `SsaObjs`). pdfTeX numbers objects in the order they are made, so a
