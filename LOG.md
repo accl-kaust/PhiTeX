@@ -12066,3 +12066,60 @@ Oracle for `45f91fe`, both on accl: `edits --brief --fixpoint` gave 17/17
 cases identical over 99 stages (job 6573; the base 904ea54 gave the same,
 job 6575), and `gate` exited 0 (job 6574: e2e 37/37, trip and etrip
 identical, clippy clean).
+
+## 2026-10-04 — A stopped rebuild keeps its work (branch `resume`, agent resume)
+
+**Why.** The Overleaf extension rebuilds once per keystroke and wants
+the next keystroke to cancel the rebuild under way without losing what
+it did. A rebuild that stopped (past `SsaTracker::deadline`, past
+`SsaTracker::budget`, or `SsaTracker::cancel`) used to report
+`unsupported`. The steps it ran stayed in, but the dirty steps it had
+not reached were dropped, so the program no longer matched the source,
+and only a cold build was sound (the CLI exited 3).
+
+**What changed** (DESIGN 3.7, "A rebuild stopped"):
+- It stops only after a step's run is placed (the cases that end a
+  cascade, or before it would insert a new step). The dirty set left
+  (`Dirty`: each step's why, the missed slots) and the trip's φ go to
+  `Steps::pending`. The report says `stopped` (why) and `pending` (how
+  many steps), with `unsupported` left `None`.
+- A stop inside a cascade that runs on (the step ended elsewhere) marks
+  the old step after it (`mark_next`), as when an input changed. That
+  step then runs from where the stopped one ended, and the cascade's
+  other state (target, prediction, `ahead`) is not kept. A run can cost
+  one extra step, but it stays sound: the old step's run meets its own
+  old end or an old step's later on. When no old step follows, it does
+  not stop.
+- `rebuild` takes the pending dirty set as its seeds, beside the new
+  edits' seeds, and the stopped trip's φ over the files' (the link
+  waited, so the files are the last complete build's). A new edit is
+  diffed against the data each step read: an edit before, inside or
+  after the pending region marks the steps whose lines it changed, and
+  each step's end is mapped through every edit since its run. These are
+  the same mechanisms that already serve steps left unrun across many
+  rebuilds. `rebuild_trips` and `more_trips` return at a stop, and no
+  trip end is computed from a stopped trip. `settle`, with work pending,
+  goes on as `rebuild_trips`.
+- The link waits: nothing is linked while work is pending.
+  `ssa::pending(tex)` gives the count.
+- CLI: with `PARTEX_SSA_REBUILD`, `PARTEX_SSA_CANCEL_AFTER=N` now counts
+  from each rebuild's start, and the cold build is not cancelled. A
+  stopped rebuild prints `stopped (…), N steps pending` and links
+  nothing. The next line's rebuild prints `continued …`. After the last
+  line, the work left runs unstopped (no deadline), and then the link
+  runs. Each rebuild also reports the entry check.
+
+**The check** (`scripts/ssa-stop`): edits, each rebuild cancelled at
+its N-th step boundary, then the continuation. The PDF is compared with
+a cold SSA build of the final source (SOURCE_DATE_EPOCH=1758800000,
+FORCE_SOURCE_DATE=1), and the entry check must report 0 bad reads.
+fastdev binary, this machine:
+- `pt.tex`, 3 edits (one before the pending steps, one inside them),
+  N = 1..14: all identical.
+- `acro2.tex`, 2 edits, N = 1..40: all identical (stops in trips 1 and
+  2).
+- `ac3.tex` (`\include`), 3 edits in two files, N = 1..40: all
+  identical.
+- The thesis (private copy), the Chapter 2 edit alone, N = 1: identical
+  (rebuild 1 stopped after 1 step with 4 pending, and the continuation
+  ran 5 steps in 50 ms).

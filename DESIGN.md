@@ -689,6 +689,40 @@ template, which a compiled backend exploits.
   trips: one trip per build, no tool run, so a rebuild matches one plain
   pass and a label needs two rebuilds (the harness without
   `--fixpoint`).
+- *A rebuild stopped* (decided 2026-10-04). A rebuild stops past its
+  deadline (`SsaTracker::deadline`), past its budget of commands
+  (`SsaTracker::budget`), or when `SsaTracker::cancel` says so: the
+  extension's keystroke cancels the rebuild under way. It stops only
+  after a step's run is placed, and it keeps its work: the dirty steps
+  it did not reach, each with why (`Dirty`, its `missed` slots too),
+  and the φ its trip served (`Steps::pending`). A stop inside a cascade
+  that runs on (the step ended elsewhere) marks the old step after it,
+  which then runs again from where the step ended, as when an input
+  changed (3.15, step 5): the cascade's other state is not kept. With
+  no old step after it, the cascade goes on. The report says
+  `stopped` and the number of steps `pending` (`ssa::pending`), not
+  `unsupported`; only a state the rebuild cannot make is unsupported,
+  and then only a cold build is sound.
+  - *The next rebuild goes on.* `rebuild`, `rebuild_trips` or `settle`
+    takes the pending steps as seeds beside the new edits' (a mark
+    runs a step whichever way it came). An edit is found against the
+    data each step read, so a pending step that has not run since the
+    first edit is diffed against the source it read then, and a step
+    the stopped rebuild ran against the source it ran on: an edit
+    before, inside or after the pending region marks the steps whose
+    lines it changed, and the places each step ends at are mapped
+    through all the edits since its run. The φ is the stopped trip's.
+    A trip that stopped is not a trip that ended: no store is compared
+    and no tool runs until it ends.
+  - *The link waits.* While work is pending the program mixes runs of
+    two sources, so nothing is linked: the files, the PDF and the
+    stores' files are the last complete build's. The φ of trip 1 is
+    then still the files on disk. The CLI's rebuilds
+    (`PARTEX_SSA_REBUILD`, one per line) with `PARTEX_SSA_REBUILD_MS`
+    or `PARTEX_SSA_CANCEL_AFTER=N` (with rebuilds, counted from each
+    rebuild's start: the cold build is not cancelled) report `stopped
+    (…), N steps pending` and link nothing; after the last line, the
+    work left goes on unstopped (`continued`) and is linked.
 
 ### 3.8 Output: effects and the link
 
