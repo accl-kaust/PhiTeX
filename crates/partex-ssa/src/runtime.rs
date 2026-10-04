@@ -257,10 +257,9 @@ pub struct Runtime<M: Machine> {
     /// Per lean record: the step whose run made it, and whether another
     /// step's run made it too ([`Runtime::bare_writes`]).
     owner: Vec<(u32, bool)>,
-    /// The writes the records made since the last collection held, and
-    /// the live records' after it ([`Runtime::keep_roots`]).
-    writes_made: usize,
-    writes_after_gc: usize,
+    /// What the collections let go (a report: `PARTEX_SSA_MEM`): lean
+    /// records and their writes, then the others'.
+    freed: [(usize, usize); 2],
     /// The last trip's counts, to size the next trip's vectors, and the
     /// items of each function's last large frame, by the function's hash.
     pub(crate) sizes: Sizes,
@@ -308,8 +307,7 @@ impl<M: Machine> Runtime<M> {
             inert: Vec::new(),
             lean: Vec::new(),
             owner: Vec::new(),
-            writes_made: 0,
-            writes_after_gc: 0,
+            freed: [(0, 0); 2],
             sizes: Sizes::default(),
             spare_statuses: Vec::new(),
             default_val: None,
@@ -356,10 +354,12 @@ impl<M: Machine> Runtime<M> {
             size_of::<Item<M>>(),
         );
         alloc::format!(
-            "records: {n} of {} ({} B each, {} MB); reads {rl} (capacity {rc}, {sr} B: {} MB); writes {wl} (capacity {wc}, {sw} B: {} MB, {held} with a value); items capacity {ic} ({si} B: {} MB); arguments {} MB; memo {} names; {}",
+            "records: {n} of {} ({} B each, {} MB; collected lean {:?}, others {:?}); reads {rl} (capacity {rc}, {sr} B: {} MB); writes {wl} (capacity {wc}, {sw} B: {} MB, {held} with a value); items capacity {ic} ({si} B: {} MB); arguments {} MB; memo {} names; {}",
             self.recs.len(),
             size_of::<Option<Record<M>>>(),
             (self.recs.capacity() * size_of::<Option<Record<M>>>()) >> 20,
+            self.freed[0],
+            self.freed[1],
             (rc * sr) >> 20,
             (wc * sw) >> 20,
             (ic * si) >> 20,
@@ -576,13 +576,7 @@ impl<M: Machine> Runtime<M> {
         while self.roots.len() > self.cfg.keep.max(1) {
             self.roots.pop_front();
         }
-        // (or when the writes the records hold grew by half: a step's
-        // record holds its step's, a hundred where a routine's holds a few,
-        // and a trip that runs most steps again, a cascade gone cold, makes
-        // few records that hold as much as the build's)
-        if self.live > 2 * self.live_after_gc + 4096
-            || self.writes_made > self.writes_after_gc / 2 + (1 << 16)
-        {
+        if self.live > 2 * self.live_after_gc + 4096 {
             self.collect();
         }
     }
@@ -693,7 +687,6 @@ impl<M: Machine> Runtime<M> {
             RecId::try_from(self.recs.len() - 1).expect("fewer than 2^32 records")
         };
         self.live += 1;
-        self.writes_made += self.record(id).writes.len();
         if self.inert.len() <= id as usize {
             self.inert.resize(id as usize + 1, false);
         }
@@ -756,15 +749,6 @@ impl<M: Machine> Runtime<M> {
         }
     }
 
-    /// Between two steps of a trip that removed many steps (a cascade
-    /// gone cold retires the old steps after it): drop the records only
-    /// they held ([`Runtime::collect`]), which the trip's new steps would
-    /// otherwise replace at its end, both held at once.
-    pub fn collect_retired(&mut self) {
-        self.fold.release_removed_records();
-        self.collect();
-    }
-
     /// Drop the records no kept build reaches. A kept build's lean
     /// records (a step's, never looked up) are kept only if a live step
     /// of the fold holds them: an older run's, or a removed step's, goes,
@@ -804,17 +788,18 @@ impl<M: Machine> Runtime<M> {
         self.memo.clear();
         self.dedup.clear();
         self.live = 0;
-        let mut writes = 0;
         for (i, r) in self.recs.iter_mut().enumerate() {
             let id = RecId::try_from(i).expect("fewer than 2^32 records");
-            if r.is_some() && !mark[i] {
+            if let Some(x) = r.as_ref().filter(|_| !mark[i]) {
+                let k = usize::from(!self.lean.get(i).copied().unwrap_or(false));
+                self.freed[k].0 += 1;
+                self.freed[k].1 += x.writes.len();
                 *r = None;
                 self.free.push(id);
                 self.stats.collected += 1;
             }
             if let Some(r) = r {
                 self.live += 1;
-                writes += r.writes.len();
                 let name = r.name;
                 Self::memo_add_to(&mut self.memo, name, id);
                 self.dedup.insert(r.content, id);
@@ -826,8 +811,6 @@ impl<M: Machine> Runtime<M> {
             r.retain(|&id| mark[id as usize]);
         }
         self.live_after_gc = self.live;
-        self.writes_after_gc = writes;
-        self.writes_made = 0;
     }
 }
 

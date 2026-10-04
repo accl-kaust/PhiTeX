@@ -13001,3 +13001,38 @@ and 200 paragraphs look the name up. `Case.trip_steps` bounds the steps
 of the cold build's later trips at 30. On f2fa90b trip 2 ran 229 steps
 and the case fails; with the fix it runs 27 and passes. The `names`,
 `include`, `bibtex` and `fontid` cases are identical with `--fixpoint`.
+
+**The job's start's definitions apart** (same branch). The fold's first
+step (the job's start: the format's state) defines 633 K of a thesis's
+826 K slots, most of them never defined again; each had a list of its own
+in the definitions' table and a place in it (150 MB). Now `Fold::base`
+keeps the first step's definitions apart, a packed record and write index
+per slot in an array per dense family (`Machine::dense`), by address for
+the others; the table holds the other steps' (249 K slots). Every lookup
+(`reaching`, `latest`, `reaching_if_later`, `next_after`, `defines`,
+`entry_of`) answers as before, the base's being the first entry. A slot's
+first definition in the table gets a list of room one. Thesis: peak
+1,940,368 KB → 1,825,580 KB; rebuild 1 16.7 ms (the rebuild 7.5); outputs,
+trips and steps the same; `pt` (two edits), `acro2`, `ac3` as on main.
+
+**The eager collections undone: a speed regression** (same branch). The
+collections 4f667ed added (when the records' writes grew by half, and when
+a cascade goes cold) made each thesis edit slower: rebuild 1 13.6 → 17.6
+ms, the link 5.0 → 8.5 ms (4 edits, same binaries; the cold build
+unchanged). perf over 600 edits put the difference in glibc's
+`_int_malloc`/`realloc` slow path: a collection in the middle of a build
+frees the old runs' records among live data, the heap stays full of
+holes, and every later allocation (the link's first: it resolves the
+virtual numbers into a fresh copy of every effect at each edit) pays for
+them; with both collections off the link was 5.2 ms again (glibc's
+`hugetlb=1` recovered half). Both are gone: the collector runs when the
+arena has doubled, as before; a lean record is still kept only while a
+live step holds it. `step_effects_as` counts the chunks first (its vector
+was made by doubling, a dozen large reallocations each edit). Thesis peak
+1.83 GB → 2.18 GB. 20 edits, medians of two alternating runs each: base
+(24f149a) rebuild 7.2/6.9 ms, link 5.3/5.1 ms; this rebuild 7.4/7.2 ms,
+link 5.6/5.5 ms (the cold build equal: user 161–164 s against 157–185
+s). The remaining 0.3 ms is the holes the other cuts leave (values let go
+at a step's close, retired steps' inputs) and the base lookups' family
+mapping; collecting by compaction (records' writes in an arena per
+generation, copied out whole) would remove the holes.

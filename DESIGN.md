@@ -1144,9 +1144,9 @@ per step and the steps' boundaries known:
 
   A kept record is still verified before use, so no policy can make a
   hit wrong. Today it collects inline, keeping the last three builds'
-  roots, when the arena has doubled or the writes its records hold have
-  grown by half, and when a cascade goes cold (the old steps after it
-  retired). A lean record (a step's, never looked up) is kept only while
+  roots, when the arena has doubled (not more often: a collection in
+  the middle of a build leaves the heap full of holes, and every later
+  allocation, the link's first, pays for them). A lean record (a step's, never looked up) is kept only while
   a live step of the fold holds it: a kept build's roots keep its
   children, which a later call may hit, not it. Planned: on its own
   thread.

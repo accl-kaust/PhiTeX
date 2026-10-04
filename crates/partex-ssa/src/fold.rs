@@ -98,6 +98,30 @@ pub struct Fold<M: Machine> {
     pub renumbered: u32,
     /// The steps removed since [`Fold::release_removed`].
     removed: Vec<StepId>,
+    /// The first step's definitions ([`BASE`], the job's start: the
+    /// format's state, most slots' only definition), out of `defs`: each
+    /// a record and a write's index packed ([`pack`]), by the slot's place
+    /// in its family's array ([`Machine::dense`]), or by address for a
+    /// slot with none. In `defs`, 633 K slots of a thesis's 826 K, each a
+    /// list of its own and a place in the table, held 150 MB.
+    base: Vec<Vec<u64>>,
+    base_sparse: Table<ByHash<M::Addr>, u64>,
+}
+
+/// The step whose definitions are kept apart ([`Fold::base`]): the first.
+pub const BASE: StepId = 0;
+
+/// No definition, in [`Fold::base`]'s arrays.
+const NO_DEF: u64 = u64::MAX;
+
+fn pack(rec: RecId, ix: u32) -> u64 {
+    u64::from(rec) << 32 | u64::from(ix)
+}
+
+fn unpack(x: u64) -> (RecId, u32) {
+    #[allow(clippy::cast_possible_truncation, reason = "the two halves")]
+    let r = ((x >> 32) as u32, x as u32);
+    r
 }
 
 impl<M: Machine> Default for Fold<M> {
@@ -111,6 +135,8 @@ impl<M: Machine> Default for Fold<M> {
             readers: Table::new(),
             renumbered: 0,
             removed: Vec::new(),
+            base: Vec::new(),
+            base_sparse: Table::new(),
         }
     }
 }
@@ -126,6 +152,67 @@ impl<M: Machine> Fold<M> {
     /// Step `s`'s key.
     fn key_of(&self, s: StepId) -> u64 {
         self.keys[s as usize]
+    }
+
+    /// The base step's definition of `a`, if the step is live.
+    fn base_def(&self, a: &M::Addr) -> Option<Def> {
+        if !self.steps.get(BASE as usize).is_some_and(|s| s.live) {
+            return None;
+        }
+        let x = match M::dense(a) {
+            Some((f, i)) => *self.base.get(f)?.get(i)?,
+            None => *self.base_sparse.get_by(hash64(a), |k| k.0 == *a)?,
+        };
+        (x != NO_DEF).then(|| {
+            let (rec, ix) = unpack(x);
+            Def {
+                step: BASE,
+                key: self.key_of(BASE),
+                rec,
+                ix,
+            }
+        })
+    }
+
+    /// The base step's definitions, made whole again from its records'
+    /// writes: its last write of each slot, but those in `skip` (sorted).
+    fn close_base(
+        &mut self,
+        recs: &[RecId],
+        writes: impl Fn(RecId) -> Vec<M::Addr>,
+        skip: &[&M::Addr],
+    ) {
+        self.base.clear();
+        self.base_sparse = Table::new();
+        for &rec in recs {
+            for (ix, a) in writes(rec).iter().enumerate() {
+                if skip.binary_search(&a).is_err() {
+                    let ix = u32::try_from(ix).expect("fewer than 2^32 writes");
+                    self.set_base(a, pack(rec, ix));
+                }
+            }
+        }
+    }
+
+    /// Make `a`'s base definition `x` ([`pack`]).
+    fn set_base(&mut self, a: &M::Addr, x: u64) {
+        match M::dense(a) {
+            Some((f, i)) => {
+                if self.base.len() <= f {
+                    self.base.resize_with(f + 1, Vec::new);
+                }
+                let v = &mut self.base[f];
+                if v.len() <= i {
+                    v.resize(i + 1, NO_DEF);
+                }
+                v[i] = x;
+            }
+            None => {
+                *self
+                    .base_sparse
+                    .entry_by(hash64(a), |k| k.0 == *a, || ByHash(a.clone()), x) = x;
+            }
+        }
     }
 
     /// What the fold holds, roughly, in bytes by part (a report:
@@ -159,6 +246,7 @@ impl<M: Machine> Fold<M> {
             hist[k].1 += v.len();
         }
         let (ds, dn, dc) = entries(&self.defs);
+        let base: usize = self.base.iter().map(Vec::capacity).sum();
         let (mut sr, mut src, mut recs, mut dead) = (0, 0, 0, 0);
         for s in &self.steps {
             sr += s.reads.len();
@@ -174,7 +262,7 @@ impl<M: Machine> Fold<M> {
             size_of::<StepId>(),
         );
         alloc::format!(
-            "fold: {} steps ({} B each, {} MB); their reads {sr} (capacity {src}, {} MB; the removed steps' {dead}), records {recs}, {} live; readers: {rs} slots, {rn} entries (capacity {rc}, {r} B: {} MB), by a list's length (slots, entries) <=4 {:?}, <=64 {:?}, <=1K {:?}, <=8K {:?}, <=32K {:?}, more {:?}; definitions: {ds} slots, {dn} entries (capacity {dc}, {e} B: {} MB)",
+            "fold: {} steps ({} B each, {} MB); their reads {sr} (capacity {src}, {} MB; the removed steps' {dead}), records {recs}, {} live; readers: {rs} slots, {rn} entries (capacity {rc}, {r} B: {} MB), by a list's length (slots, entries) <=4 {:?}, <=64 {:?}, <=1K {:?}, <=8K {:?}, <=32K {:?}, more {:?}; definitions: {ds} slots, {dn} entries (capacity {dc}, {e} B: {} MB), the first step's apart: {base} places, {} by address",
             self.steps.len(),
             size_of::<Step<M::Addr>>(),
             (self.steps.capacity() * size_of::<Step<M::Addr>>()) >> 20,
@@ -188,6 +276,7 @@ impl<M: Machine> Fold<M> {
             hist[4],
             hist[5],
             (dc * e) >> 20,
+            self.base_sparse.len(),
         )
     }
 
@@ -334,18 +423,6 @@ impl<M: Machine> Fold<M> {
         }
     }
 
-    /// Let the records of the steps removed since
-    /// [`Fold::release_removed`] go (their reads stay, for the rebuild's
-    /// predictions, until it ends).
-    pub fn release_removed_records(&mut self) {
-        for &id in &self.removed {
-            let s = &mut self.steps[id as usize];
-            if !s.live {
-                s.recs = Vec::new();
-            }
-        }
-    }
-
     /// Close step `id`: its outside reads (`reads`, each with its
     /// address's hash) and its records' writes (`writes` gives each
     /// record's written addresses) become index entries.
@@ -424,6 +501,11 @@ impl<M: Machine> Fold<M> {
         // (sorted, for a search per write)
         let mut skip_sorted: Vec<&M::Addr> = skip.iter().collect();
         skip_sorted.sort_unstable();
+        if id == BASE {
+            self.close_base(&recs, writes, &skip_sorted);
+            (self.steps[id as usize].recs, self.steps[id as usize].reads) = (recs, addrs);
+            return;
+        }
         let Fold { keys, defs, .. } = self;
         for &rec in &recs {
             for (ix, a) in writes(rec).iter().enumerate() {
@@ -443,6 +525,8 @@ impl<M: Machine> Fold<M> {
                 // last)
                 let v = defs.entry_by(hash64(a), |k| k.0 == *a, || ByHash(a.clone()), Vec::new());
                 if v.last().is_none_or(|l| keys[l.step as usize] < key) {
+                    // (room for one first: most slots have one definition)
+                    v.reserve_exact(usize::from(v.capacity() == 0));
                     v.push(e);
                 } else {
                     let at = first_not_below(v, |x| keys[x.step as usize], key);
@@ -490,6 +574,9 @@ impl<M: Machine> Fold<M> {
     /// `Runtime::end_step_soft`).
     #[must_use]
     pub fn defines(&self, a: &M::Addr, id: StepId) -> bool {
+        if id == BASE {
+            return self.base_def(a).is_some();
+        }
         let Some(key) = self.steps.get(id as usize).map(|s| s.key) else {
             return false;
         };
@@ -504,6 +591,9 @@ impl<M: Machine> Fold<M> {
     /// write's index in it.
     #[must_use]
     pub fn entry_of(&self, a: &M::Addr, id: StepId) -> Option<(RecId, u32)> {
+        if id == BASE {
+            return self.base_def(a).map(|d| (d.rec, d.ix));
+        }
         let key = self.steps.get(id as usize)?.key;
         let v = self.defs.get_by(hash64(a), |k| k.0 == *a)?;
         let at = first_not_below(v, |x| self.key_of(x.step), key);
@@ -514,20 +604,30 @@ impl<M: Machine> Fold<M> {
     /// before it (`None`: the slot's value before the build defined it).
     #[must_use]
     pub fn reaching(&self, a: &M::Addr, key: u64) -> Option<Def> {
-        let v = self.defs.get_by(hash64(a), |k| k.0 == *a)?;
-        let at = first_not_below(v, |x| self.key_of(x.step), key);
-        v[..at]
-            .iter()
-            .rev()
-            .find(|e| self.live(e))
+        // (else the base step's, the first)
+        self.defs
+            .get_by(hash64(a), |k| k.0 == *a)
+            .and_then(|v| {
+                let at = first_not_below(v, |x| self.key_of(x.step), key);
+                v[..at].iter().rev().find(|e| self.live(e))
+            })
             .map(|e| self.def(e))
+            .or_else(|| {
+                // (the base step's, the first, if it is before `key`)
+                (self.keys.first().is_some_and(|&k| k < key))
+                    .then(|| self.base_def(a))
+                    .flatten()
+            })
     }
 
     /// The last live definition of `a`.
     #[must_use]
     pub fn latest(&self, a: &M::Addr) -> Option<Def> {
-        let v = self.defs.get_by(hash64(a), |k| k.0 == *a)?;
-        v.iter().rev().find(|e| self.live(e)).map(|e| self.def(e))
+        self.defs
+            .get_by(hash64(a), |k| k.0 == *a)
+            .and_then(|v| v.iter().rev().find(|e| self.live(e)))
+            .map(|e| self.def(e))
+            .or_else(|| self.base_def(a))
     }
 
     /// The definition of `a` that reaches key `key` ([`Fold::reaching`]),
@@ -535,24 +635,27 @@ impl<M: Machine> Fold<M> {
     /// reaches it): the test and the search with one lookup of the slot.
     #[must_use]
     pub fn reaching_if_later(&self, a: &M::Addr, key: u64) -> Option<Option<Def>> {
-        let v = self.defs.get_by(hash64(a), |k| k.0 == *a)?;
-        let last = v.iter().rev().find(|e| self.live(e))?;
+        let v = self.defs.get_by(hash64(a), |k| k.0 == *a);
+        let last = v.and_then(|v| v.iter().rev().find(|e| self.live(e)));
+        let Some(last) = last else {
+            // (the base step's alone, the first)
+            let b = self.base_def(a)?;
+            return (b.key >= key).then_some(None);
+        };
         if self.key_of(last.step) < key {
             return None;
         }
-        let at = first_not_below(v, |x| self.key_of(x.step), key);
-        Some(
-            v[..at]
-                .iter()
-                .rev()
-                .find(|e| self.live(e))
-                .map(|e| self.def(e)),
-        )
+        Some(self.reaching(a, key))
     }
 
     /// The first live definition of `a` after key `key`.
     #[must_use]
     pub fn next_after(&self, a: &M::Addr, key: u64) -> Option<Def> {
+        if self.keys.first().is_some_and(|&k| k > key)
+            && let Some(b) = self.base_def(a)
+        {
+            return Some(b);
+        }
         let v = self.defs.get_by(hash64(a), |k| k.0 == *a)?;
         let at = first_above(v, |x| self.key_of(x.step), key);
         v[at..].iter().find(|e| self.live(e)).map(|e| self.def(e))
