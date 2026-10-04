@@ -1108,6 +1108,18 @@ readers rerun. What is built:
   dead entry left in its place, which its version would otherwise
   carry. The rerun check's changed definitions fall from 3,001 to 680 on
   the thesis, and from 15 to 5 on acro2.
+- *e-TeX's saved registers above 255, entry by entry.* The chains of
+  registers above 255 saved locally (`sa_chain`, one chain per level
+  that saved any) are a shape slot (`save.xchain`: the current chain's
+  level and each level's length) and one slot per entry, the chains laid
+  end to end (`save.xchain[i]`). An entry never changes once pushed: a
+  save reads and writes the shape and writes its entry; a restore reads
+  the shape and the entries it restores, and writes them (dropped) and
+  the shape. One slot hashing every entry made every later local
+  assignment of a register above 255 (pgf's `\dimen261`…) depend on any
+  saved value below it. A rebuild places the shape, and each entry
+  within it where a later definition holds the arrays, with the stack
+  below its pointer (`save_stack_whole`).
 
 **Analysed, not built** (LOG 2026-10-04):
 - *PDF object numbers.* `pdf.objs`, `pdf.obj_trees` and `pdf.dests` are

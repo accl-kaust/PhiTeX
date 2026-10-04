@@ -374,12 +374,14 @@ pub(crate) enum SValue {
         obj: Option<crate::objs::Obj>,
         eqtb: bool,
     },
-    /// e-TeX's chain of saved registers above 255.
+    /// The shape of e-TeX's chains of saved registers above 255: the
+    /// current chain's level, each level's length.
     XChain {
         level: i32,
-        chain: Vec<crate::xregs::Saved>,
-        outer: Vec<Vec<crate::xregs::Saved>>,
+        lens: Vec<u32>,
     },
+    /// An entry of the chains (none past their end).
+    XEntry(Option<crate::xregs::Saved>),
     /// The conditionals.
     Cond {
         stack: crate::conds::CondStack,
@@ -1808,7 +1810,9 @@ impl SsaTracker {
             r.rt.open_step_recs()
                 .iter()
                 .flat_map(|&id| r.rt.record(id).writes.iter().map(|w| w.0))
-                .filter(|a| a.0 == Fam::Save && a.1 >= first)
+                .filter(|a| {
+                    a.0 == Fam::Save && a.1 >= first && a.1 < i64::from(crate::track::save::XENTRY)
+                })
                 .collect()
         } else {
             Vec::new()
@@ -3897,9 +3901,13 @@ fn slot_value<H: Host, T: Tracker>(t: &Tex<H, T>, s: Slot) -> Option<SValue> {
                 save::CUR_BOUNDARY => SValue::Int(t.cur_boundary),
                 save::XCHAIN => SValue::XChain {
                     level: t.xregs.chain_level,
-                    chain: t.xregs.chain.clone(),
-                    outer: t.xregs.outer.clone(),
+                    lens: t.xregs.chain_lens(),
                 },
+                k if k >= save::XENTRY => SValue::XEntry(
+                    t.xregs
+                        .chain_entry(usize::try_from(k - save::XENTRY).ok()?)
+                        .cloned(),
+                ),
                 k if k >= save::ENTRY => {
                     let p = usize::try_from(k - save::ENTRY).ok()?;
                     SValue::Save {
@@ -4049,17 +4057,15 @@ fn set_value<H: Host, T: Tracker>(t: &mut Tex<H, T>, vers: &mut Versions, s: Slo
             (save::CUR_LEVEL, SValue::Int(x)) => t.cur_level = *x,
             (save::CUR_GROUP, SValue::Int(x)) => t.cur_group = *x,
             (save::CUR_BOUNDARY, SValue::Int(x)) => t.cur_boundary = *x,
-            (
-                save::XCHAIN,
-                SValue::XChain {
-                    level,
-                    chain,
-                    outer,
-                },
-            ) => {
+            (save::XCHAIN, SValue::XChain { level, lens }) => {
                 t.xregs.chain_level = *level;
-                t.xregs.chain.clone_from(chain);
-                t.xregs.outer.clone_from(outer);
+                t.xregs.set_chain_shape(lens);
+            }
+            // (one past the chains' end is no entry: their shape, placed
+            // too, drops it)
+            (k, SValue::XEntry(Some(e))) if k >= save::XENTRY => {
+                t.xregs
+                    .set_chain_entry(usize::try_from(k - save::XENTRY).unwrap_or(0), e.clone());
             }
             (k, SValue::Save { w, obj, eqtb }) if k >= save::ENTRY => {
                 let p = usize::try_from(k - save::ENTRY).unwrap_or(0);

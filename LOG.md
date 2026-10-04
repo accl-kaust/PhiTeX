@@ -12291,3 +12291,44 @@ Left (wrap-up at the user's request):
 - **The contract.** DESIGN 4.5 is a short note. The extension's
   contract, including the `display_` names and the id-stability rules,
   is in the documentation of `pdftext` and `displist.rs`.
+
+## 2026-10-04 — e-TeX's saved registers above 255, entry by entry (branch `xchain`)
+
+**The false dependency.** `save.xchain` (e-TeX's chains of registers
+above 255 saved locally) was one slot whose version hashed every saved
+entry of every level. Each local assignment of a register above 255 in
+a group read and wrote it whole, so a saved value that changed anywhere
+in the chain made every later step touching such a register run again.
+On a private two-edit document (a tikzpicture after the edited
+paragraph): the paragraph's last line gained a descender
+(`list.prev_depth`, a real change), the next window saved a register
+holding it, `save.xchain` changed, and steps 19234–19255 ran for
+`save:4=save.xchain` alone.
+
+**The change.** The slot is now the chains' shape (the current chain's
+level, each level's length), and each entry is its own slot
+(`save::XENTRY + i`, the chains laid end to end, outer levels first;
+`save.xchain[i]` in traces). Entries are immutable once pushed: a save
+reads and writes the shape and writes its entry; a restore reads the
+shape and each entry it restores and writes them (dropped, so a rebuild
+placing an earlier shape finds every entry's later definition) and the
+shape. Placement: the shape (`set_chain_shape` keeps the entries laid
+end to end in place, drops those past it, stand-ins for missing ones)
+and each entry within the reaching shape that a later definition holds
+are placed with the save stack (`save_stack_whole`). The entries are not
+dead-save candidates (`DEAD_SAVES` filters `ENTRY..XENTRY` only): the
+chains' vectors hold nothing past their end.
+
+**Measured** (fastdev, this machine, the document above, rebuild 2 of
+"x" then "y"): 36 steps changed, 258 ms → 16 steps, 43 ms. Entry check
+0 bad reads at every build; the rebuilt PDF equals a cold SSA build of
+the final source. `pt`, `acro2`, `ac3` (one edit each): 0 bad reads,
+PDFs identical to cold SSA builds.
+
+The course's word edit (fastdev, this machine, entry check on): 0 bad
+reads cold and rebuilt; rebuild 1 links 8,006 steps changed (8,053
+before), 8.1 s. Its rebuilt PDF is byte-identical to the one the
+previous binary rebuilds (both differ from a cold SSA build of the same
+local copy, as before this change). Gates on `29390b4` (accl): `gate`
+exited 0 (job 6584); `edits --brief --fixpoint` gave 17/17 cases
+identical over 99 stages (job 6585).

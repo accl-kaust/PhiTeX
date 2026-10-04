@@ -50,7 +50,7 @@ pub(crate) fn is_word_kind(kind: i32) -> bool {
 
 /// A saved register: its location, value (the word and the object it
 /// holds) and level.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub(crate) struct Saved {
     pub loc: i32,
     pub word: MemoryWord,
@@ -113,6 +113,66 @@ struct Dense {
 partex_engine::persist_struct!(Dense { on, kinds });
 
 impl ExtRegs {
+    /// The chains' shape (the slot `track::save::XCHAIN`): each outer
+    /// level's length, then the current chain's.
+    pub fn chain_lens(&self) -> Vec<u32> {
+        let n = |c: &Vec<Saved>| u32::try_from(c.len()).unwrap_or(u32::MAX);
+        self.outer.iter().map(n).chain([n(&self.chain)]).collect()
+    }
+
+    /// Where the current chain begins in the chains laid end to end,
+    /// outer levels first (an entry's slot is `XENTRY` + its place).
+    pub fn chain_base(&self) -> usize {
+        self.outer.iter().map(Vec::len).sum()
+    }
+
+    /// Entry `i` of the chains laid end to end.
+    pub fn chain_entry(&self, mut i: usize) -> Option<&Saved> {
+        for c in self.outer.iter().chain([&self.chain]) {
+            if i < c.len() {
+                return Some(&c[i]);
+            }
+            i -= c.len();
+        }
+        None
+    }
+
+    /// Give the chains the shape `lens` (as [`Self::chain_lens`]), the
+    /// entries laid end to end kept where they are (the ones past the
+    /// end dropped, missing ones stand-ins, placed after).
+    pub fn set_chain_shape(&mut self, lens: &[u32]) {
+        let mut all: Vec<Saved> = core::mem::take(&mut self.outer)
+            .into_iter()
+            .flatten()
+            .chain(core::mem::take(&mut self.chain))
+            .collect();
+        let at = |n: &u32| usize::try_from(*n).unwrap_or(0);
+        all.resize(lens.iter().map(at).sum(), Saved::default());
+        let mut rest = all.into_iter();
+        let (last, outer) = lens.split_last().unwrap_or((&0, &[]));
+        self.outer = outer
+            .iter()
+            .map(|n| rest.by_ref().take(at(n)).collect())
+            .collect();
+        self.chain = rest.take(at(last)).collect();
+    }
+
+    /// Put `s` at entry `i` of the chains laid end to end (the current
+    /// chain made that long if it is shorter).
+    pub fn set_chain_entry(&mut self, mut i: usize, s: Saved) {
+        for c in &mut self.outer {
+            if i < c.len() {
+                c[i] = s;
+                return;
+            }
+            i -= c.len();
+        }
+        if self.chain.len() <= i {
+            self.chain.resize(i + 1, Saved::default());
+        }
+        self.chain[i] = s;
+    }
+
     /// No register set; `dense`: kept by kind and number too.
     pub fn new(dense: bool) -> Self {
         Self {

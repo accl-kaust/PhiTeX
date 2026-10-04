@@ -1430,7 +1430,7 @@ fn save_stack_whole<H: Host>(
     next: &mut Vec<Slot>,
     rep: &mut RebuildReport,
 ) {
-    use crate::track::save::{CUR_BOUNDARY, CUR_GROUP, CUR_LEVEL, ENTRY, SAVE_PTR, XCHAIN};
+    use crate::track::save::{CUR_BOUNDARY, CUR_GROUP, CUR_LEVEL, ENTRY, SAVE_PTR, XCHAIN, XENTRY};
     let mut r = tex.tracker.rec.borrow_mut();
     let rr = &mut *r;
     let slot = |k: u32| Slot(Fam::Save, i64::from(k));
@@ -1446,6 +1446,20 @@ fn save_stack_whole<H: Host>(
     } else {
         tex.save_ptr
     };
+    // (e-TeX's chains: their shape, and each entry within it, as the
+    // stack's entries below its pointer)
+    let shape = slot(XCHAIN);
+    let xlen: usize = if later(&rr.rt.fold, &shape, key) {
+        match reaching(tex, rr, shape, key, rep) {
+            Some(SVal(_, Some(v))) => match &*v {
+                super::SValue::XChain { lens, .. } => lens.iter().map(|&n| n as usize).sum(),
+                _ => 0,
+            },
+            _ => 0,
+        }
+    } else {
+        tex.xregs.chain_lens().iter().map(|&n| n as usize).sum()
+    };
     let fold = &rr.rt.fold;
     // (with dead entries not definitions, the arrays can hold a later
     // step's dead write of an entry below the pointer that no later
@@ -1460,6 +1474,12 @@ fn save_stack_whole<H: Host>(
     for k in (0..u32::try_from(at).unwrap_or(0)).map(|p| ENTRY + p) {
         let a = slot(k);
         if all || later(fold, &a, key) {
+            next.push(a);
+        }
+    }
+    for k in (0..u32::try_from(xlen).unwrap_or(0)).map(|i| XENTRY.saturating_add(i)) {
+        let a = slot(k);
+        if later(fold, &a, key) {
             next.push(a);
         }
     }
