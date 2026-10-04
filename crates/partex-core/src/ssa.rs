@@ -47,8 +47,8 @@ mod view;
 
 pub(crate) use rebuild::{Edits, edits_from};
 pub use rebuild::{
-    RebuildReport, RerunCheck, Trips, prepare_rebuilds, rebuild, rebuild_log, rebuild_trips,
-    rerun_check, settle,
+    RebuildReport, RerunCheck, Trips, pending, prepare_rebuilds, rebuild, rebuild_log,
+    rebuild_trips, rerun_check, settle,
 };
 pub use view::{dag, step_trace, view};
 
@@ -1344,6 +1344,7 @@ pub struct SsaTracker {
     /// `(step, w)`. The
     /// group's end copies the entry value back ([`Tracker::restored`]);
     /// one still on the stack at the step's end is a read of it.
+    #[allow(clippy::type_complexity)]
     entry_saves: RefCell<Vec<(Slot, i32, i32, u64, u64)>>,
     /// The slots a group's end gave back their entry values to.
     undone: RefCell<Vec<Slot>>,
@@ -2050,13 +2051,16 @@ impl Tracker for SsaTracker {
             r.st.entry_bad_count
         );
         for (id, s, want, got, skip) in &r.st.entry_bad {
-            out.push_str(&alloc::format!(
-                "\n  step {id}: {s}{} reaching {:04x}, {} {:04x}",
-                if *skip { "!" } else { "" },
-                want.0 & 0xffff,
-                if *skip { "left at" } else { "read" },
-                got.0 & 0xffff
-            ));
+            let _ = core::fmt::Write::write_fmt(
+                &mut out,
+                format_args!(
+                    "\n  step {id}: {s}{} reaching {:04x}, {} {:04x}",
+                    if *skip { "!" } else { "" },
+                    want.0 & 0xffff,
+                    if *skip { "left at" } else { "read" },
+                    got.0 & 0xffff
+                ),
+            );
         }
         // (the step open, and the rebuild's trace so far)
         out.push_str(&alloc::format!(
