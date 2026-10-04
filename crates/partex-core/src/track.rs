@@ -141,6 +141,15 @@ pub enum Row {
     /// line box, written when the line breaker seals it and read where
     /// it is opened (shipping out, `\\unhbox`, a display's width).
     Sealed(u64),
+    /// A PDF object's entry, by its virtual id (SSA mode: `pdf/objtab.rs`,
+    /// `SsaObjs`).
+    PdfObj(i32),
+    /// A PDF lookup tree's entry, by its type and identifier
+    /// (`pdf::objtab::name_slot`).
+    PdfName(i64),
+    /// The PDF numbering events step `n` made: an append, read where TeX
+    /// observes an object's number.
+    PdfNum(u32),
 }
 
 /// The fields of a font slot, by [`Row::Font`] slot (DESIGN 7.17.12's
@@ -473,6 +482,15 @@ pub trait Tracker {
     /// change, and runs the end only if it differs (DESIGN 4.3, "The
     /// job's end").
     fn glyphs_united(&self, _union: u128) {}
+    /// (With [`Tracker::VALUES`].) The step open now, if any.
+    fn open_step(&self) -> Option<u32> {
+        None
+    }
+    /// (With [`Tracker::VALUES`].) The live steps before the open one, in
+    /// program order (`None`: no step open, or no fold).
+    fn steps_before(&self) -> Option<alloc::vec::Vec<u32>> {
+        None
+    }
     /// (With [`Tracker::VALUES`].) The handle the running step's last run
     /// opened file `name` on, if the step runs again: the engine asks the
     /// host for it again (`Host::open_write_again`, DESIGN 7.17.3). Each

@@ -129,6 +129,14 @@ pub enum Fam {
     /// depends on ([`Tracker::read_class`]), versioned by the class. Made
     /// by the meaning's writes, never placed.
     Class,
+    /// A PDF object's entry by its virtual id (`track::Row::PdfObj`),
+    /// versioned by the entry.
+    PdfObj,
+    /// A PDF lookup tree's entry (`track::Row::PdfName`), by the object
+    /// it names.
+    PdfName,
+    /// A step's PDF numbering events (`track::Row::PdfNum`): an append.
+    PdfNum,
 }
 
 /// The entry check (the CLI's `PARTEX_SSA_ENTRY_CHECK=1`): each read of a
@@ -190,6 +198,12 @@ pub static SOFT_PLACE: core::sync::atomic::AtomicBool = core::sync::atomic::Atom
 /// Off (`PARTEX_SSA_DEAD_SAVES=0`), every entry written is a definition.
 pub static DEAD_SAVES: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(true);
 
+/// Virtual PDF object numbers (DESIGN 3.12, "PDF object numbers"): each
+/// object's entry, lookup tree entry and step's numbering events a slot
+/// of its own, the numbers the link's. Off (`PARTEX_SSA_VOBJ=0`), the
+/// object table is one slot and numbers are pdfTeX's as made.
+pub static VOBJ: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(true);
+
 /// The version of a [`Fam::Class`] slot holding class `c`.
 fn class_version(c: u8) -> Version {
     Version::of(&(0xc1a5_u16, c))
@@ -249,6 +263,9 @@ impl Slot {
             // (versioned by the answer read; a probe's is never equal)
             Row::Clock => Slot(Fam::Unknown, 1 << 20),
             Row::Sealed(k) => Slot(Fam::Sealed, k.cast_signed()),
+            Row::PdfObj(k) => Slot(Fam::PdfObj, i64::from(k)),
+            Row::PdfName(k) => Slot(Fam::PdfName, k),
+            Row::PdfNum(n) => Slot(Fam::PdfNum, i64::from(n)),
         }
     }
 
@@ -308,6 +325,11 @@ impl fmt::Display for Slot {
                 return write!(f, "sealed:{:x}", self.1.cast_unsigned());
             }
             Fam::Class => "class",
+            Fam::PdfObj => "pdfobj",
+            Fam::PdfName => {
+                return write!(f, "pdfname:{:x}", self.1.cast_unsigned());
+            }
+            Fam::PdfNum => "pdfnum",
         };
         write!(f, "{fam}:{}", self.1)
     }
@@ -2191,6 +2213,19 @@ impl Tracker for SsaTracker {
         }
     }
 
+    fn open_step(&self) -> Option<u32> {
+        self.rec.try_borrow().ok()?.rt.open_step_id()
+    }
+
+    fn steps_before(&self) -> Option<Vec<u32>> {
+        let r = self.rec.try_borrow().ok()?;
+        let id = r.rt.open_step_id()?;
+        let f = &r.rt.fold;
+        let key = f.steps.get(id as usize)?.key;
+        let at = f.order.partition_point(|&s| f.steps[s as usize].key < key);
+        Some(f.order[..at].to_vec())
+    }
+
     fn glyphs_united(&self, union: u128) {
         if let Ok(mut r) = self.rec.try_borrow_mut() {
             r.st.steps.glyphs_united(union);
@@ -2691,6 +2726,9 @@ pub trait EngineView {
     fn mark_ver(&self, s: i64) -> u128;
     /// The sealed line `k`'s contents (`seal.rs`).
     fn sealed_ver(&self, k: i64) -> u128;
+    /// A PDF object's, lookup tree entry's or step's numbering events'
+    /// slot ([`Fam::PdfObj`], [`Fam::PdfName`], [`Fam::PdfNum`]).
+    fn pdf_cell_ver(&self, s: Slot) -> u128;
     /// The class of control sequence `p`'s meaning ([`Fam::Class`]).
     fn token_class_of(&self, p: i32) -> u8;
     /// The value slot `s` holds now (the families whose values the
@@ -2758,6 +2796,15 @@ impl<H: Host, T: Tracker> EngineView for Tex<H, T> {
     }
     fn token_class_of(&self, p: i32) -> u8 {
         Tex::token_class_of(self, p)
+    }
+    fn pdf_cell_ver(&self, s: Slot) -> u128 {
+        let o = &self.pdf.objs;
+        match s.0 {
+            Fam::PdfObj => o.cell_version(i32::try_from(s.1).unwrap_or(0)),
+            Fam::PdfName => o.name_version(s.1),
+            Fam::PdfNum => o.num_version(u32::try_from(s.1).unwrap_or(u32::MAX)),
+            _ => 0,
+        }
     }
     fn sealed_ver(&self, k: i64) -> u128 {
         self.seals
@@ -2856,6 +2903,7 @@ impl Store<TexSsa> for View<'_> {
             Fam::Cond => Version(self.tex.cond_ver()),
             Fam::Mark => Version(self.tex.mark_ver(s.1)),
             Fam::Sealed => Version(self.tex.sealed_ver(s.1)),
+            Fam::PdfObj | Fam::PdfName | Fam::PdfNum => Version(self.tex.pdf_cell_ver(s)),
             Fam::Class => class_version(self.tex.token_class_of(i32::try_from(s.1).unwrap_or(0))),
             Fam::List => {
                 use crate::track::list::{COUNT, STRIDE};
@@ -3037,6 +3085,7 @@ pub fn run_applying<H: Host>(
     tex.tracker.apply.set(apply);
     // (the files are linked from the steps' effects, DESIGN 7.17.3)
     tex.set_effects(true);
+    tex.set_ssa_objects(VOBJ.load(core::sync::atomic::Ordering::Relaxed));
     // (the names the run makes placed by name: [`SsaTracker::names_by_name`])
     if tex.tracker.names_by_name {
         tex.set_cs_by_name(true);
@@ -3171,6 +3220,7 @@ fn open_paragraph<H: Host>(
     // (the lines it seals are counted from its start: their keys are the
     // same at each run of the step; and its commands)
     tex.seal_restart();
+    tex.obj_step_begin();
     tex.mark_step_start();
     // the line the paragraph starts on, its tokens, and the offset in them
     // (at a fire, the topmost file level's, under the token lists: DESIGN
@@ -3372,6 +3422,8 @@ fn close_paragraph<H: Host>(
             }
         }
     }
+    // (its PDF objects' reads and writes, and its numbering events)
+    tex.obj_step_end();
     // (the step's last chunk of effects in the link's form: what the
     // files are linked from, DESIGN 7.17.3)
     cut_chunk(tex);
@@ -4168,6 +4220,18 @@ pub(crate) fn apply_hit<H: Host, T: Tracker>(t: &mut Tex<H, T>, id: RecId) -> Op
                 Effect::Step(se) => Some(se.clone()),
                 Effect::Bytes(..) => None,
             }));
+        // (and its numbering events, the step's: virtual numbers)
+        if t.pdf.objs.ssa.on {
+            for e in &effects {
+                if let Effect::Step(se) = e {
+                    for x in se.1.iter() {
+                        if let crate::effects::Effect::Num(ev, _) = x {
+                            t.pdf.objs.ssa.events.push(*ev);
+                        }
+                    }
+                }
+            }
+        }
         (result, rt.record(id).cost, effects)
     };
     // (every output is an effect in the link's form, in the chunks; the

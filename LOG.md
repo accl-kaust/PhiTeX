@@ -12066,3 +12066,55 @@ Oracle for `45f91fe`, both on accl: `edits --brief --fixpoint` gave 17/17
 cases identical over 99 stages (job 6573; the base 904ea54 gave the same,
 job 6575), and `gate` exited 0 (job 6574: e2e 37/37, trip and etrip
 identical, clippy clean).
+
+## 2026-10-04 — Virtual PDF object numbers in SSA mode (agent pdfnum)
+
+**What prompted it.** The extension team measured the PDF object table
+as the largest chain of a reflowing edit: `pdf.objs`, `pdf.obj_trees`
+and `pdf.dests` were each one slot read whole by every writer scope, so
+one link annotation fewer renumbered every later object and every later
+step that made a destination, a link or a page ran again (DESIGN 3.12,
+"Analysed, not built", now built).
+
+**What changed** (DESIGN 3.12, "Virtual PDF object numbers"; switch
+`PARTEX_SSA_VOBJ=0`):
+- SSA mode turns on machine mode's virtual object numbers
+  (`pdf/vnum.rs`): numbers in the bytes are relocations, the link writes
+  pdfTeX's numbers from the numbering events. An object TeX identifies is
+  named by its identity; any other by its step's id and its count in it
+  (`1 + (step << 12 | count)`, hashed past 4,096 objects in a step or
+  2^18 steps), so a step run again names its objects as before; an
+  applied call (the fonts') by its own name.
+- Each object entry (`pdfobj:ID`), each lookup tree entry
+  (`pdfname:KEY`) and each step's numbering events (`pdfnum:STEP`, an
+  append) are slots of their own. `pdf.objs` keeps the lists' heads only;
+  `pdf.obj_trees` and `pdf.dests` are no longer read or written (the
+  destinations' names are the destination list's, at the job's end).
+- A number TeX observes (`\pdflast…`, a number given back, the job's
+  end) reads every earlier step's events (`Tracker::steps_before`).
+- The link: with virtual numbers SSA mode links in full every build
+  (6–9 ms on the thesis), deflate memoized by content as the spliced
+  link's; the splice no longer builds its mark tables for virtual
+  chunks (their ids reach 2^31: a 17 s link of a 5-page document).
+- Placing a stage's slots from the format's state copies the writer's
+  `virt` (as `symbolic`): else a rerun placed `pdf.out` without
+  relocations and wrote raw ids.
+
+**Measured** (64-page thesis, fastdev, local, same process: cold build
+then five rebuilds; base 9f13c82 → this branch): "x" after "big data
+applications." 6 → 6 steps; a space after it 5 → 5; the long reflowing
+insertion in Chapter 2 5,712 steps / 10.97 M commands / 46.4 s → 586
+steps / 0.29 M commands / 3.0 s (its new steps, cut by the window
+count, 5,505 → 93); a section title in Chapter 3 351 → 350 steps
+(its 1.1 M commands are windows that do not line up again, not PDF
+numbers); "Like an ASICx," 5 → 5. pt 3 → 3, acro2 0 → 0, ac3 14 → 14,
+each rebuilt PDF identical to the base's plain run.
+
+**Exactness.** The cold build's trip 1 is byte-identical to the base's
+(PDF, `.aux`, `.toc`, `.out`, log). Run to its fixed point, the base's
+cold build of the thesis made 66 pages and this branch's 64; real
+pdfTeX run with BibTeX to its fixed point makes 64. On the thesis the
+rebuilt PDF after the five edits differs from a cold build of the edited
+source here, as it does in the base (there the `.aux` agreed and the PDF
+did not; here two `\ACRO{pages}` records differ by one page): not
+resolved yet.

@@ -577,6 +577,9 @@ fn debug_switches() {
     if std::env::var("PARTEX_SSA_ENTRY_CHECK").is_ok_and(|v| v == "1") {
         partex_core::ssa::ENTRY_CHECK.store(true, std::sync::atomic::Ordering::Relaxed);
     }
+    if std::env::var("PARTEX_SSA_VOBJ").is_ok_and(|v| v == "0") {
+        partex_core::ssa::VOBJ.store(false, std::sync::atomic::Ordering::Relaxed);
+    }
     if std::env::var("PARTEX_SSA_DEAD_SAVES").is_ok_and(|v| v == "0") {
         partex_core::ssa::DEAD_SAVES.store(false, std::sync::atomic::Ordering::Relaxed);
     }
@@ -1735,6 +1738,10 @@ impl SsaLinker {
                 return self.link_full(tex, &origin);
             }
         }
+        // (virtual object numbers: a full link resolves them, every time)
+        if tex.virtual_objects() {
+            return self.link_full(tex, &origin);
+        }
         let n_changes = changes.len();
         let (linked, misses) = self.spliced(tex, changes, &clock);
         let out = match linked {
@@ -1834,9 +1841,27 @@ impl SsaLinker {
         let threads = partex_incr::Threads::available();
         let slices: Vec<&[partex_core::effects::Effect]> =
             chunks.iter().map(|(_, e)| &e.1[..]).collect();
+        // (deflate memoized by content, as the spliced link's)
+        let links = self.links;
+        let (mut was, mut now) = (
+            std::mem::take(&mut self.deflated),
+            std::collections::HashMap::new(),
+        );
         let linked = partex_core::effects::link(&slices, &threads, &mut |level, data| {
-            crate::zlib::deflate_stream(level, data)
+            let key = partex_core::StableHasher::of(&(b"deflate", level, data));
+            if let Some((z, _)) = now.get(&key) {
+                return Some(Vec::clone(z));
+            }
+            let z = match was.remove(&key) {
+                Some((z, _)) => z,
+                None => crate::zlib::deflate_stream(level, data)?,
+            };
+            now.insert(key, (z.clone(), links));
+            Some(z)
         });
+        was.retain(|_, (_, at)| *at + 8 > links);
+        now.extend(was);
+        self.deflated = now;
         let l = match linked {
             Ok(l) => l,
             Err(e) => {

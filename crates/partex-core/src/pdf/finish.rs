@@ -240,6 +240,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
 
     fn pdf_statistics_now(&mut self) {
         let (obj_ptr, os_cntr, os_objidx) = if self.pdf.objs.virt {
+            self.obj_observe();
             let n = self.pdf.objs.numbering();
             (n.obj_ptr, n.streams, n.idx)
         } else {
@@ -853,6 +854,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         } else {
             0
         };
+        self.obj_observe();
         let n = self.pdf.objs.numbering();
         // (each number: written, and whether at a byte offset; an object
         // stream's number names no object and is written)

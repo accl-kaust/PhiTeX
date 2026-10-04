@@ -271,6 +271,21 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         self.pdf.out.virt = on;
     }
 
+    /// With effects on, SSA mode's virtual object numbers (`pdf/objtab.rs`,
+    /// `SsaObjs`); before any object is made.
+    pub fn set_ssa_objects(&mut self, on: bool) {
+        let on = on && self.effects.is_some();
+        self.pdf.objs.log.on = on;
+        self.pdf.objs.ssa.on = on;
+        self.pdf.objs.set_virt(on);
+        self.pdf.out.virt = on;
+    }
+
+    /// Whether object numbers are virtual, the link's to write.
+    pub fn virtual_objects(&self) -> bool {
+        self.pdf.objs.virt
+    }
+
     /// Whether effects are on.
     pub fn effects_on(&self) -> bool {
         self.effects.is_some()

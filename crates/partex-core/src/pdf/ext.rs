@@ -143,6 +143,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             if n <= 0 {
                 return n;
             }
+            self.obj_observe();
             self.pdf.objs.of_final(n).unwrap_or(-1)
         } else {
             n
@@ -152,6 +153,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
     /// `k <= obj_ptr`: object `k` is one users see.
     fn obj_in_range(&mut self, k: i32) -> bool {
         if self.pdf.objs.virt {
+            self.pdf.objs.log_read(k);
             self.pdf.objs.entry(k).is_some()
         } else {
             k <= self.pdf.objs.obj_ptr

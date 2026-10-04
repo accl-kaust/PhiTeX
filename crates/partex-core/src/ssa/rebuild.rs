@@ -1360,7 +1360,10 @@ pub(super) fn positioned(a: &Slot) -> bool {
         | Fam::Random
         | Fam::Glyphs
         | Fam::PageNode
-        | Fam::Sealed => true,
+        | Fam::Sealed
+        | Fam::PdfObj
+        | Fam::PdfName
+        | Fam::PdfNum => true,
         Fam::Alloc => ![STR_TOP, HASH_USED, HASH_HIGH, GLUE_LINEAGE]
             .iter()
             .any(|&k| a.1 == i64::from(k)),
@@ -1806,6 +1809,9 @@ fn initial<H: Host>(tex: &Tex<H, SsaTracker>, steps: &mut Steps, a: Slot) -> Opt
         // the first page shipped again must find the writer the first
         // build's did, or every later page's writer differs)
         f.pdf.out.symbolic = tex.pdf.out.symbolic;
+        // (and with virtual object numbers, its numbers are relocations)
+        f.pdf.out.virt = tex.pdf.out.virt;
+        f.pdf.out.font_refs = tex.pdf.out.font_refs;
         steps.format = Some(Box::new(f));
     }
     let f = steps.format.as_deref()?;
