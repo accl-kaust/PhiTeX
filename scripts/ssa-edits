@@ -173,6 +173,26 @@ INCLUDE_EDITS = [
     ("incl-ch1.tex", "Ch1s2p1  gamma ", "Ch1s2p1  gammax "),
     ("incl-ch1.tex", "Ch1s2p1  gammax ", "Ch1s2p1 gamma "),
 ]
+# edits.tex with virtual object numbers, each link checked against a full
+# one (PARTEX_LINK_CHECK): a word (the steps changed resolved alone, the
+# job's numbering as it was), a font no page had (the fonts' numbers
+# move: every step resolved), a word after it, an object no page had (a
+# text annotation: the objects' numbers move), and back
+VOBJ_EDITS = [
+    ("Para5x2 ", "Para5x2 typed "),
+    ("Para5x2 typed ", "Para5x2 \\textsf{sans} "),
+    ("Para5x2 \\textsf{sans} ", "Para5x2 \\textsf{sans} more "),
+    (
+        "Para5x2 \\textsf{sans} more ",
+        "Para5x2 \\textsf{sans} more \\pdfannot width 1pt height 1pt depth 0pt"
+        " {/Subtype /Text /Contents (a)} ",
+    ),
+    (
+        "Para5x2 \\textsf{sans} more \\pdfannot width 1pt height 1pt depth 0pt"
+        " {/Subtype /Text /Contents (a)} ",
+        "Para5x2 ",
+    ),
+]
 # fatal-end.tex: a word, edited and back, in a job that ends fatally in
 # its last page's output routine
 FATAL_EDITS = [("Hello world.", "Hello there."), ("Hello there.", "Hello world.")]
@@ -462,6 +482,16 @@ def all_cases():
             seed=2,
         ),
         latex("windows", "windows.tex", "pdflatex", WINDOW_EDITS),
+        Case(
+            "vobj",
+            {"edits.tex": "edits.tex"},
+            "pdflatex",
+            [*LATEX_FLAGS, "-fmt=pdflatex", "-output-directory=out", "edits"],
+            [("edits.tex", m, n) for m, n in VOBJ_EDITS],
+            outdir="out",
+            seed=2,
+            env={"PARTEX_LINK_CHECK": "1"},
+        ),
         include(),
         # (as an editor types: each edit's rebuild one trip, linked and its
         # files written, then the idle settle's trips, linked again)

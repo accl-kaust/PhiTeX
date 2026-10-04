@@ -1877,6 +1877,16 @@ struct SsaLinker {
     /// effect of the job.
     resolved: partex_core::effects::LinkCache,
     resolved_versions: std::collections::HashMap<u64, u128>,
+    /// With virtual object numbers, each step's entry and signature
+    /// (`effects::Resolver`): the spliced link resolves the steps that
+    /// changed while the job's numbering holds.
+    virt: partex_core::effects::Resolver,
+    /// A stream's length in one chunk and its stream in another: the
+    /// resolver cannot cut there, so every link is a full one.
+    virt_dead: bool,
+    /// The last spliced link's times in ns: every step's chunks gathered
+    /// (a full resolution), and the resolution with it.
+    virt_ns: (u64, u64),
 }
 
 /// What a link cost, for the reports.
@@ -1950,16 +1960,25 @@ impl SsaLinker {
                 return self.link_full(tex, &origin);
             }
         }
-        // (virtual object numbers: a full link resolves them, every time)
-        if tex.virtual_objects() {
+        // (virtual object numbers: resolved per step changed, while the
+        // job's numbering holds, `effects::Resolver`; a stream's length in
+        // one chunk and its stream in another: a full link, every time)
+        let virt = tex.virtual_objects();
+        if virt && self.virt_dead {
             return self.link_full(tex, &origin);
         }
         let n_changes = changes.len();
-        let (linked, misses) = self.spliced(tex, changes, &clock);
+        self.virt_ns = (0, 0);
+        let (linked, misses) = self.spliced(tex, changes, virt, &clock);
         let out = match linked {
             Ok(Some(out)) => out,
-            // (virtual object numbers: a full link resolves them)
-            Ok(None) => return self.link_full(tex, &origin),
+            Ok(None) => {
+                self.virt_dead |= virt;
+                return self.link_full(tex, &origin);
+            }
+            // (a byte count's digits changed: the full link renders its
+            // text again, and the next link resolves in full)
+            Err(_) if virt => return self.link_full(tex, &origin),
             Err(e) => {
                 eprintln!("partex: ssa: the link step failed: {e:?}");
                 std::process::exit(3);
@@ -1967,7 +1986,7 @@ impl SsaLinker {
         };
         let t_link = clock();
         if check {
-            self.check(tex, &out);
+            self.check(tex, &out, virt);
         }
         let t_check = clock();
         let host = tex.host_mut();
@@ -1984,7 +2003,23 @@ impl SsaLinker {
                 misses,
                 (ms(t_link), checked, ms(t_end - t_check)),
                 &w,
-            ),
+            ) + &if virt {
+                format!(
+                    "; virtual numbers: {} steps laid out ({}), {} chunks resolved again, \
+                     ms {:.2} (every step's chunks {:.2})",
+                    self.virt.steps_out,
+                    if self.virt.full {
+                        "the numbering made again"
+                    } else {
+                        "the numbering as it was"
+                    },
+                    self.virt.resolved,
+                    ms(self.virt_ns.1),
+                    ms(self.virt_ns.0),
+                )
+            } else {
+                String::new()
+            },
             link_ms: ms(t_link),
             ready_ms: ms(st.placed_at),
             write_ms: ms(t_end - t_check),
@@ -1998,6 +2033,7 @@ impl SsaLinker {
         &mut self,
         tex: &Tex<native::NativeHost, partex_core::ssa::SsaTracker>,
         changes: Vec<partex_core::effects::StepChunks>,
+        virt: bool,
         clock: &dyn Fn() -> u64,
     ) -> (
         Result<Option<partex_core::effects::SpliceOut>, partex_core::effects::LinkError>,
@@ -2030,7 +2066,29 @@ impl SsaLinker {
             let keys: Option<&dyn Fn(u32) -> u64> =
                 (renumbered != self.renumbered).then_some(&key_of);
             self.renumbered = renumbered;
-            self.splice.link(changes, keys, &mut deflate, clock)
+            // (virtual numbers: the steps changed resolved, or every step
+            // if the job's numbering moved, and the layout then made anew)
+            let t0 = clock();
+            let changes = if virt {
+                if let Some(c) = self.virt.changes(&changes, &mut deflate) {
+                    Some(c)
+                } else {
+                    let all = partex_core::ssa::all_step_chunks(&rec);
+                    self.virt_ns.0 = clock() - t0;
+                    let c = self.virt.full(&all, &mut deflate);
+                    if c.as_ref().is_none_or(|x| x.1) {
+                        self.splice.reset();
+                    }
+                    c.map(|x| x.0)
+                }
+            } else {
+                Some(changes)
+            };
+            self.virt_ns.1 = clock() - t0;
+            match changes {
+                Some(c) => self.splice.link(c, keys, &mut deflate, clock),
+                None => Ok(None),
+            }
         };
         drop(deflate);
         was.retain(|_, (_, at)| *at + 8 > links);
@@ -2051,6 +2109,7 @@ impl SsaLinker {
 
     /// [`SsaLinker::link_full`], linking again once (`retry`) after a
     /// byte count's digits were rendered anew.
+    #[allow(clippy::too_many_lines)]
     fn link_full_once(
         &mut self,
         tex: &mut Tex<native::NativeHost, partex_core::ssa::SsaTracker>,
@@ -2060,7 +2119,11 @@ impl SsaLinker {
         use partex_core::host::Host;
         #[allow(clippy::cast_precision_loss, reason = "a report")]
         let ms = |d: std::time::Duration| d.as_secs_f64() * 1e3;
+        #[allow(clippy::cast_precision_loss, reason = "a report")]
+        let ns = |n: u64| n as f64 / 1e6;
+        let t_fx = origin.elapsed();
         let chunks = partex_core::ssa::step_effects(&tex.tracker().rec.borrow());
+        let t_fx = origin.elapsed().saturating_sub(t_fx);
         let threads = partex_incr::Threads::available();
         let keyed: Vec<(u64, &[partex_core::effects::Effect])> =
             chunks.iter().map(|(k, e)| (*k, &e.1[..])).collect();
@@ -2076,7 +2139,9 @@ impl SsaLinker {
             std::mem::take(&mut self.deflated),
             std::collections::HashMap::new(),
         );
-        let linked = partex_core::effects::link_cached(
+        let mut times = partex_core::effects::LinkTimes::default();
+        let clock = || u64::try_from(origin.elapsed().as_nanos()).unwrap_or(u64::MAX);
+        let linked = partex_core::effects::link_cached_timed(
             &keyed,
             &touched,
             &mut self.resolved,
@@ -2093,6 +2158,8 @@ impl SsaLinker {
                 now.insert(key, (z.clone(), links));
                 Some(z)
             },
+            &clock,
+            &mut times,
         );
         if linked.is_ok() {
             self.resolved_versions = versions;
@@ -2125,8 +2192,10 @@ impl SsaLinker {
                 std::process::exit(3);
             }
         };
-        // (the next spliced link lays everything out again)
+        // (the next spliced link lays everything out again, resolving every
+        // step: this link took the steps' changes)
         self.splice.reset();
+        self.virt.reset();
         let t_link = origin.elapsed();
         let host = tex.host_mut();
         let (files, bytes) = self.write_full(host, &l);
@@ -2137,11 +2206,21 @@ impl SsaLinker {
         let t_end = origin.elapsed();
         LinkReport {
             how: format!(
-                "linked in full, {} chunks ({} resolved again); ms: link {:.2}; files written {:.2} \
+                "linked in full, {} chunks ({} resolved again); ms: link {:.2} (the effects {:.2}, \
+                 numbering {:.2}, resolve {:.2}, layout {:.2}: object streams {:.2}, \
+                 cross-reference {:.2}; lengths {:.2}, copy {:.2}); files written {:.2} \
                  ({files} files, {bytes} bytes)",
                 chunks.len(),
                 self.resolved.resolved,
                 ms(t_link),
+                ms(t_fx),
+                ns(times.numbering),
+                ns(times.resolve),
+                ns(times.layout),
+                ns(times.objstm),
+                ns(times.xref),
+                ns(times.lengths),
+                ns(times.copy),
                 ms(t_end.saturating_sub(t_link)),
             ),
             link_ms: ms(t_link),
@@ -2157,6 +2236,7 @@ impl SsaLinker {
         &self,
         tex: &Tex<native::NativeHost, partex_core::ssa::SsaTracker>,
         out: &partex_core::effects::SpliceOut,
+        virt: bool,
     ) {
         let chunks = partex_core::ssa::step_effects(&tex.tracker().rec.borrow());
         let keys: Vec<(u32, u32, u128)> = chunks
@@ -2169,8 +2249,17 @@ impl SsaLinker {
                 )
             })
             .collect();
+        // (virtual numbers: the splice's chunks are resolved, versioned
+        // with their entries)
+        let laid: Vec<(u32, u32, u128)> = self
+            .splice
+            .chunk_keys()
+            .into_iter()
+            .zip(&keys)
+            .map(|(l, k)| if virt { (l.0, l.1, k.2) } else { l })
+            .collect();
         assert!(
-            keys == self.splice.chunk_keys(),
+            keys.len() == self.splice.chunk_keys().len() && keys == laid,
             "the spliced link's chunks are not the build's"
         );
         let slices: Vec<&[partex_core::effects::Effect]> =
