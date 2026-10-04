@@ -59,6 +59,7 @@ mod equiv;
 mod error;
 mod etex;
 mod expand;
+pub use expand::WATCHDOG;
 mod expr;
 mod files;
 mod fontexp;

@@ -2676,7 +2676,19 @@ pub fn rerun_check<H: Host>(tex: &mut Tex<H, SsaTracker>, apply: bool) -> RerunC
             .keys()
             .chain(new_defs.keys())
             .filter(|a| positioned(a) && old_defs.get(a) != new_defs.get(a))
-            .map(|a| alloc::format!("{a}"))
+            .map(|a| {
+                let v = |x: Option<&Version>| {
+                    x.map_or(alloc::string::String::from("-"), |v| {
+                        alloc::format!("{:04x}", v.0 & 0xffff)
+                    })
+                };
+                alloc::format!(
+                    "{a}={} {}->{}",
+                    super::view::trace_name(tex, &r.st, *a),
+                    v(old_defs.get(a)),
+                    v(new_defs.get(a))
+                )
+            })
             .collect::<BTreeSet<_>>()
             .into_iter()
             .collect();
@@ -2704,7 +2716,7 @@ pub fn rerun_check<H: Host>(tex: &mut Tex<H, SsaTracker>, apply: bool) -> RerunC
                 old_fx.len()
             ));
         }
-        if !why.is_empty() && out.first.len() < 12 {
+        if !why.is_empty() && out.first.len() < 40 {
             out.first.push(alloc::format!(
                 "step {j} (from {}): {}",
                 input.brief(),

@@ -24,3 +24,11 @@ codegen-units = 1
 [profile.profiling]
 inherits = "release"
 debug = true
+
+# Debug iterations: release speed without fat LTO's link (minutes -> seconds);
+# `cargo build --profile fastdev`, binary in target/fastdev/.
+[profile.fastdev]
+inherits = "release"
+lto = "thin"
+codegen-units = 16
+incremental = true

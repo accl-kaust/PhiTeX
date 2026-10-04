@@ -353,7 +353,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
     #[inline(always)]
     #[allow(clippy::inline_always, reason = "a test of a const, on the token path")]
     pub(crate) fn token_meaning(&self, p: i32) -> MemoryWord {
-        if T::CLASSES {
+        if T::CLASSES && crate::ssa::CLASS_READS.load(core::sync::atomic::Ordering::Relaxed) {
             let w = self.peek_eqtb(p);
             if crate::skipcache::token_class(w.b0(), w.rh()) == 0 {
                 self.tracker.read_class(p);

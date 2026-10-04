@@ -396,6 +396,9 @@ pub trait Tracker {
     }
     /// `eqtb[cell]`'s value is saved at group level `level`.
     fn saved(&self, _cell: Cell, _level: i32) {}
+    /// `eqtb[cell]`'s value is saved at group level `level` (a copy, which
+    /// the group's end puts back: [`Tracker::restored`]).
+    fn save_entry(&self, _cell: Cell, _level: i32) {}
     /// The value saved at group level `level` is back in `eqtb[cell]`.
     fn restored(&self, _cell: Cell, _level: i32) {}
     /// Group level `level` ended.

@@ -547,7 +547,27 @@ fn choose_command_line() {
     }
 }
 
+/// The debugging switches: the expansion watchdog
+/// (`PARTEX_WATCHDOG=N`), and the SSA's class and soft reads off
+/// (`PARTEX_SSA_CLASS_READS=0`, `PARTEX_SSA_SOFT_READS=0`), to compare a
+/// build with them and without.
+fn debug_switches() {
+    if let Some(n) = std::env::var("PARTEX_WATCHDOG")
+        .ok()
+        .and_then(|v| v.parse().ok())
+    {
+        partex_core::WATCHDOG.store(n, std::sync::atomic::Ordering::Relaxed);
+    }
+    if std::env::var("PARTEX_SSA_CLASS_READS").is_ok_and(|v| v == "0") {
+        partex_core::ssa::CLASS_READS.store(false, std::sync::atomic::Ordering::Relaxed);
+    }
+    if std::env::var("PARTEX_SSA_SOFT_READS").is_ok_and(|v| v == "0") {
+        partex_core::ssa::SOFT_READS_ON.store(false, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
 fn main() {
+    debug_switches();
     if std::env::var_os("PARTEX_LIST_HASH").is_some_and(|v| v == "0") {
         partex_core::statehash::LIST_HASHES.store(false, std::sync::atomic::Ordering::Relaxed);
     }

@@ -439,8 +439,9 @@ impl<M: Machine> Open<M> {
     /// before the step wrote it ([`Runtime::end_step_soft`]): recorded
     /// once, whatever the step wrote since.
     fn force_step_read(&mut self, a: &M::Addr) {
+        // (the caller passes only slots not read yet)
         let step = self.step.map_or(0, |s| s.1);
-        if step == 0 || self.step_reads.iter().any(|(_, b)| b == a) {
+        if step == 0 {
             return;
         }
         if let Some((f, i)) = M::dense(a) {
@@ -1147,17 +1148,61 @@ impl<M: Machine> Runtime<M> {
     /// End the open step as [`Runtime::end_step`] does, its soft reads
     /// settled: those in `read` become reads of the step from outside it
     /// (unless it read the slot so already), and the slots in `untouched`
-    /// (the value back at the step's end to the one it began with, never
-    /// read but softly) are neither read nor defined by it.
+    /// (back at the step's end at the value it began with, or dead) are
+    /// not its definitions; its reads of them stay.
     pub fn end_step_soft(&mut self, read: &[M::Addr], untouched: &[M::Addr]) -> Option<StepId> {
-        for a in read {
-            self.open.force_step_read(a);
+        if !read.is_empty() {
+            let have: alloc::collections::BTreeSet<&M::Addr> =
+                self.open.step_reads.iter().map(|(_, a)| a).collect();
+            let new: Vec<M::Addr> = read.iter().filter(|a| !have.contains(a)).cloned().collect();
+            for a in &new {
+                self.open.force_step_read(a);
+            }
         }
+        // (a slot left as the step found it is not its definition; its
+        // reads stay the step's)
         if untouched.is_empty() {
             return self.end_step();
         }
-        self.open.step_reads.retain(|(_, a)| !untouched.contains(a));
         self.end_step_filtered(untouched)
+    }
+
+    /// Whether the open step has not written dense slot `a`: then the
+    /// value it holds is the step's entry value, and `(step, w)` is the
+    /// step's serial and the slot's last write before it
+    /// ([`Runtime::unwrite`]).
+    pub fn entry_write(&mut self, a: &M::Addr) -> Option<(u64, u64)> {
+        let step = self.open.step?.1;
+        let (f, i) = M::dense(a)?;
+        let w = dense_at(&mut self.open.dense, f, i).w;
+        (w < step).then_some((step, w))
+    }
+
+    /// Slot `a` holds again the value it held at the open step's start,
+    /// [`Runtime::entry_write`]'s `(step, w)` (a group's end put back the
+    /// value saved before the step wrote it): its last write is `w` again,
+    /// so that a read after it is a read of the step's entry value (from
+    /// outside the step) and not of the step's own write, and the calls
+    /// open have not written it (their entry for it is dead).
+    pub fn unwrite(&mut self, a: &M::Addr, step: u64, w: u64) {
+        if self.open.step.map(|s| s.1) != Some(step) {
+            return;
+        }
+        let Some((f, i)) = M::dense(a) else { return };
+        let open = &mut self.open;
+        // (the calls' write of the slot goes: its value is the one before
+        // them, as if they never wrote it, and a write after it is a first)
+        let cur = dense_at(&mut open.dense, f, i).w;
+        let pos = *dense_at(&mut open.dpos, f, i);
+        if let Some(e) = open
+            .frames
+            .get_mut(pos.at as usize)
+            .and_then(|fr| fr.writes.get_mut(pos.ix as usize))
+            && e.1 == cur
+        {
+            e.1 = 0;
+        }
+        dense_at(&mut open.dense, f, i).w = w;
     }
 
     /// [`Runtime::note_read`] with the version made only if the read is

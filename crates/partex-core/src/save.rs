@@ -290,6 +290,8 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         if T::SOFT_READS {
             self.tracker
                 .saved(crate::track::Cell::Eqtb(p), self.cur_level());
+            self.tracker
+                .save_entry(crate::track::Cell::Eqtb(p), self.cur_level());
         }
         if l == LEVEL_ZERO {
             self.set_save_type(self.save_ptr(), RESTORE_ZERO);
@@ -326,6 +328,8 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         if T::SOFT_READS {
             self.tracker
                 .saved(crate::track::Cell::Eqtb(p), self.cur_level());
+            self.tracker
+                .save_entry(crate::track::Cell::Eqtb(p), self.cur_level());
         }
         let word = self.peek_eqtb(p);
         let obj = self.peek_obj(p).cloned();
@@ -425,7 +429,11 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         let tracing = self.int_par(TRACING_ASSIGNS_CODE) > 0;
         let reads = self.cur_level() > LEVEL_ONE || tracing;
         if reads {
-            if T::SOFT_READS && !tracing && self.int_par(TRACING_RESTORES_CODE) <= 0 {
+            if T::SOFT_READS
+                && crate::ssa::SOFT_READS_ON.load(core::sync::atomic::Ordering::Relaxed)
+                && !tracing
+                && self.int_par(TRACING_RESTORES_CODE) <= 0
+            {
                 // (the old value is saved and restored, or kept: a read
                 // only if the group outlives the region, `Tracker::soft_read`;
                 // a trace would print it)

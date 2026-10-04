@@ -131,6 +131,15 @@ pub enum Fam {
     Class,
 }
 
+/// Class reads on ([`Tracker::read_class`]); off (the CLI's
+/// `PARTEX_SSA_CLASS_READS=0`), a lookup that wants only the token reads
+/// the meaning, to compare a build with them and without.
+pub static CLASS_READS: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(true);
+/// Soft reads on ([`Tracker::soft_read`]); off (`PARTEX_SSA_SOFT_READS=0`),
+/// a local assignment reads the value it replaces.
+pub static SOFT_READS_ON: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(true);
+
 /// The version of a [`Fam::Class`] slot holding class `c`.
 fn class_version(c: u8) -> Version {
     Version::of(&(0xc1a5_u16, c))
@@ -1233,10 +1242,20 @@ pub struct SsaTracker {
     /// How many fonts were made, counting: each made font's place among a
     /// step run's ([`Tracker::font_newest`]).
     fonts_made: core::cell::Cell<u64>,
-    /// The open step's soft reads ([`Tracker::soft_read`]): each slot with
-    /// its version then, settled at the step's end
-    /// ([`SsaTracker::end_step`]).
-    softs: RefCell<Vec<(Slot, Version)>>,
+    /// The open step's copies of its entry values to the save stack
+    /// (value numbers, symbolically): each eqtb slot a local assignment
+    /// saved before the step wrote it, with its group level and
+    /// [`Runtime::entry_write`]'s `(step, w)`. The
+    /// group's end copies the entry value back ([`Tracker::restored`]);
+    /// one still on the stack at the step's end is a read of it.
+    entry_saves: RefCell<Vec<(Slot, i32, u64, u64)>>,
+    /// The slots a group's end gave back their entry values to.
+    undone: RefCell<Vec<Slot>>,
+    /// The group level the open step began at: a local assignment in a
+    /// group the step opened saves and restores a copy of its entry value
+    /// (a soft read); in an older group whether it saves depends on the
+    /// value's level, a read ([`Tracker::soft_read`]).
+    step_level: core::cell::Cell<i32>,
     soft_kept: core::cell::Cell<u64>,
     soft_read: core::cell::Cell<u64>,
     /// Large contents loaded, with their versions, by identity: the host
@@ -1370,7 +1389,9 @@ impl SsaTracker {
             cancel: core::cell::Cell::new(None),
             fonts_by: RefCell::new(Vec::new()),
             fonts_made: core::cell::Cell::new(0),
-            softs: RefCell::new(Vec::new()),
+            entry_saves: RefCell::new(Vec::new()),
+            undone: RefCell::new(Vec::new()),
+            step_level: core::cell::Cell::new(crate::web::LEVEL_ONE),
             soft_kept: core::cell::Cell::new(0),
             soft_read: core::cell::Cell::new(0),
             load_versions: RefCell::new(Vec::new()),
@@ -1519,6 +1540,7 @@ impl SsaTracker {
         }
         r.st.noted[count_ix(s)] += 1;
         r.rt.note_read(&Loc::State(s), v);
+
         if let Some(c) = stamp {
             c.set(generation);
         }
@@ -1576,39 +1598,37 @@ impl SsaTracker {
 }
 
 impl SsaTracker {
-    /// End the open step ([`Runtime::end_step_soft`]), its soft reads
-    /// settled: a slot whose value is back to the one the step began with
-    /// is neither read nor defined by it; another is read from outside it.
+    /// End the open step ([`Runtime::end_step_soft`]), its values
+    /// numbered symbolically: a slot a group's end gave back its entry
+    /// value (a copy, [`Tracker::restored`]) and not written again is not
+    /// the step's definition (the store holds the value the definition
+    /// before the step made); an entry value still saved on the stack is a
+    /// read of the step. (Every other write stays a definition, a dead
+    /// save stack entry's too: a rebuild puts the store back by them.)
     pub(crate) fn end_step(&self, r: &mut Recorder) -> Option<partex_ssa::fold::StepId> {
-        let softs = core::mem::take(&mut *self.softs.borrow_mut());
-        if softs.is_empty() {
+        let saved = core::mem::take(&mut *self.entry_saves.borrow_mut());
+        let undone = core::mem::take(&mut *self.undone.borrow_mut());
+        if saved.is_empty() && undone.is_empty() {
             return r.rt.end_step();
         }
-        let (mut read, mut untouched): (Vec<Slot>, Vec<Slot>) = (Vec::new(), Vec::new());
-        let mut seen = alloc::collections::BTreeSet::new();
-        for &(s, v) in &softs {
-            // (the first soft read of a slot holds the step's entry value)
-            if !seen.insert(s) {
-                continue;
-            }
-            let now = table_at(s.0, s.1)
-                .and_then(|(f, i)| r.st.vers.known_at(f, i))
-                .unwrap_or_else(|| r.st.vers.revision(s));
-            if now == v {
-                untouched.push(s);
-            } else {
-                read.push(s);
-            }
-        }
-        self.soft_kept
-            .set(self.soft_kept.get() + untouched.len() as u64);
+        let mut read: Vec<Slot> = saved.iter().map(|e| e.0).collect();
+        read.sort_unstable();
+        read.dedup();
+        let mut skip: Vec<Slot> = undone
+            .into_iter()
+            .filter(|s| r.rt.entry_write(s).is_some())
+            .collect();
+        skip.sort_unstable();
+        skip.dedup();
+        self.soft_kept.set(self.soft_kept.get() + skip.len() as u64);
         self.soft_read.set(self.soft_read.get() + read.len() as u64);
-        r.rt.end_step_soft(&read, &untouched)
+        r.rt.end_step_soft(&read, &skip)
     }
 
     /// The open step's run dropped: its soft reads with it.
     pub(crate) fn drop_softs(&self) {
-        self.softs.borrow_mut().clear();
+        self.entry_saves.borrow_mut().clear();
+        self.undone.borrow_mut().clear();
     }
 
     /// How many soft reads the steps' ends settled as untouched (neither
@@ -1688,7 +1708,7 @@ impl Tracker for SsaTracker {
     /// it began with ([`SsaTracker::end_step`]): a step that sets a scratch
     /// variable inside a group and leaves it as it found it neither
     /// depends on its value nor defines it.
-    fn soft_read(&self, cell: Cell, _level: i32) {
+    fn soft_read(&self, cell: Cell, level: i32) {
         let Cell::Eqtb(_) = cell else {
             self.read(cell);
             return;
@@ -1703,8 +1723,59 @@ impl Tracker for SsaTracker {
         let v = table_at(s.0, s.1)
             .and_then(|(f, i)| r.st.vers.known_at(f, i))
             .unwrap_or_else(|| r.st.vers.revision(s));
-        if r.rt.note_read_soft(&Loc::State(s), v) {
-            self.softs.borrow_mut().push((s, v));
+        if level > self.step_level.get() {
+            r.rt.note_read_soft(&Loc::State(s), v);
+        } else {
+            // (a group older than the step: the save depends on the
+            // value's level)
+            r.rt.note_read(&Loc::State(s), v);
+        }
+    }
+
+    fn save_entry(&self, cell: Cell, level: i32) {
+        let Cell::Eqtb(_) = cell else { return };
+        let s = Slot::of(cell);
+        let Ok(mut r) = self.rec.try_borrow_mut() else {
+            return;
+        };
+        if r.on
+            && let Some((step, w)) = r.rt.entry_write(&s)
+        {
+            self.entry_saves.borrow_mut().push((s, level, step, w));
+        }
+    }
+
+    /// A value put back by a group's end: a copy of the open step's entry
+    /// value if the step saved it before writing the slot, which then is
+    /// as the step found it ([`Runtime::unwrite`]): a read after it reads
+    /// that value, from outside the step, and the slot is not the step's
+    /// definition unless written again ([`SsaTracker::end_step`]).
+    fn restored(&self, cell: Cell, level: i32) {
+        let Cell::Eqtb(_) = cell else { return };
+        let s = Slot::of(cell);
+        let found = {
+            let mut v = self.entry_saves.borrow_mut();
+            v.iter()
+                .rposition(|e| e.0 == s && e.1 == level)
+                .map(|k| v.remove(k))
+        };
+        let Some((_, _, step, w)) = found else { return };
+        if let Ok(mut r) = self.rec.try_borrow_mut() {
+            r.rt.unwrite(&s, step, w);
+            self.undone.borrow_mut().push(s);
+        }
+        // (the next read of the slot in this call is noted again)
+        if let Some(c) = self.stamp(s) {
+            c.set(0);
+        }
+    }
+
+    fn group_end(&self, level: i32) {
+        // (a saved value the group's end did not put back, a global
+        // assignment's being kept, is gone with the group)
+        let mut v = self.entry_saves.borrow_mut();
+        if !v.is_empty() {
+            v.retain(|e| e.1 < level);
         }
     }
 
@@ -1815,6 +1886,7 @@ impl Tracker for SsaTracker {
 
     fn row_wrote(&self, row: Row, version: u128) {
         let s = Slot::row(row);
+
         // (a slot written again in the same call is noted once: its
         // version is the array's at the call's end)
         let stamp = self.wstamp(s);
@@ -2671,6 +2743,7 @@ pub fn run_applying<H: Host>(
         // (the top level is a fold of steps and reads nothing, 7.17.9: the
         // job's start is the first step)
         r.rt.begin_step();
+        tex.tracker.step_level.set(tex.cur_level);
         // (a step's record keeps its own reads only to be compared, in
         // check mode: DESIGN 4.3 item 2)
         let args = alloc::vec![Version::of(&command_line)];
@@ -2813,6 +2886,7 @@ fn open_paragraph<H: Host>(
                 r.rt.begin_step();
             }
         }
+        tex.tracker.step_level.set(tex.cur_level);
         r.st.steps.run_begins(rerun);
     }
     // (the lines it seals are counted from its start: their keys are the

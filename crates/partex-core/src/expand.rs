@@ -9,6 +9,13 @@ use crate::web::*;
 /// §1371: `end_write_token`.
 pub(crate) const END_WRITE_TOKEN: i32 = CS_TOKEN_FLAG + END_WRITE;
 
+/// The watchdog's limit (the CLI's `PARTEX_WATCHDOG=N`; 0, off): this many
+/// macro calls with no command between them stop the job with a panic that
+/// names the macros being expanded ([`Tex::watchdog`]).
+pub static WATCHDOG: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+static WATCH_COMMANDS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+static WATCH_CALLS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
 impl<H: Host, T: Tracker> Tex<H, T> {
     /// §366: expand the expandable command `cur_cmd`, `cur_chr`.
     pub(crate) fn expand(&mut self) -> Result<(), Jump> {
@@ -353,9 +360,61 @@ impl<H: Host, T: Tracker> Tex<H, T> {
     }
 
     /// §389: invoke a user-defined control sequence.
+    /// [`WATCHDOG`]: the macro calls since the last command counted; past
+    /// the limit, a panic naming the macro and the input stack's macros
+    /// (an expansion that never ends, which a tracker cannot show: its
+    /// terminal is the build's, written at the end).
+    #[cold]
+    fn watchdog(&self) {
+        use core::sync::atomic::Ordering::Relaxed;
+        let c = self.commands();
+        if WATCH_COMMANDS.swap(c, Relaxed) != c {
+            WATCH_CALLS.store(0, Relaxed);
+            return;
+        }
+        if WATCH_CALLS.fetch_add(1, Relaxed) < WATCHDOG.load(Relaxed) {
+            return;
+        }
+        let name = |t: &Self, cs: i32| -> alloc::string::String {
+            let n = if cs > 0 && cs <= t.eqtb_top {
+                t.peek_text(cs)
+            } else {
+                0
+            };
+            match usize::try_from(n) {
+                Ok(n) if n > 0 && n < t.str_ptr => {
+                    alloc::string::String::from_utf8_lossy(t.str_bytes(n)).into_owned()
+                }
+                _ => alloc::format!("#{cs}"),
+            }
+        };
+        let mut levels = alloc::vec::Vec::new();
+        for i in 0..=self.input_ptr {
+            let r = if i < self.input_ptr {
+                &self.input_stack[i]
+            } else {
+                &self.cur_input
+            };
+            levels.push(if r.state != TOKEN_LIST {
+                alloc::format!("file:{}", r.name)
+            } else if r.index == MACRO {
+                name(self, r.name)
+            } else {
+                alloc::format!("list{}", r.index)
+            });
+        }
+        panic!(
+            "watchdog: {} macro calls with no command: \\{} at line {}; the input: {}",
+            WATCHDOG.load(Relaxed),
+            name(self, self.cur_cs),
+            self.line,
+            levels.join(" > ")
+        );
+    }
+
     pub(crate) fn macro_call(&mut self) -> Result<(), Jump> {
-        if T::PROFILE {
-            self.tracker.macro_call(self.cur_cs);
+        if WATCHDOG.load(core::sync::atomic::Ordering::Relaxed) > 0 {
+            self.watchdog();
         }
         self.origin_expand();
         let save_scanner_status = self.scanner_status;
