@@ -3993,6 +3993,26 @@ pub fn take_step_changes(rec: &mut Recorder) -> Vec<crate::effects::StepChunks> 
         .collect()
 }
 
+/// Every live step with chunks, its chunks, in program order, as
+/// [`take_step_changes`] gives a changed step's (after it: the flows
+/// rendered): what a link that resolves virtual numbers in full reads
+/// ([`crate::effects::Resolver`]).
+#[must_use]
+pub fn all_step_chunks(rec: &Recorder) -> Vec<crate::effects::StepChunks> {
+    let fold = &rec.rt.fold;
+    fold.order
+        .iter()
+        .filter_map(|&s| {
+            let fx = linked_chunks(&rec.st, s).filter(|v| !v.is_empty())?;
+            Some(crate::effects::StepChunks {
+                step: s,
+                order: fold.steps.get(s as usize).map_or(0, |x| x.key),
+                chunks: Some(fx.iter().map(|e| (e.0.0, e.1.clone())).collect()),
+            })
+        })
+        .collect()
+}
+
 /// How many times the fold's keys were made again (each step's key, for
 /// the link: [`step_key`]).
 #[must_use]

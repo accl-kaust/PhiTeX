@@ -37,9 +37,11 @@ pub use crate::pdf::xref::{Deflate, XEntry, Xref, XrefStream};
 
 pub mod flow;
 mod splice;
+mod virt;
 use crate::tex::Tex;
 use crate::track::Tracker;
 pub use splice::{Splice, SpliceOut, SpliceStats, StepChunks};
+pub use virt::Resolver;
 
 /// One output of the engine, as a value.
 #[derive(Clone, Debug, PartialEq, Eq)]

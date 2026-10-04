@@ -13226,3 +13226,55 @@ On 5547b27 its cold build hangs (killed at the 120 s timeout); now it
 settles in 2 trips. `font_rerun`, `fontid`, `fontnum`, `fontdrop`,
 `names_rerun`, `images` and `include` are identical with `--fixpoint`.
 New unit test `objtab::tests::walk_ends_on_a_list_that_never_ends`.
+
+## 2026-10-04 — The SSA link with virtual object numbers costs the steps that changed (branch `editslow`)
+
+**Symptom.** After the two fixes above, the link was a large share of
+a thesis keystroke: 4.5–6 ms native per word (13–17 ms in wasm), and the
+files written another 1.5 ms. With virtual object numbers every link was
+a full one: `step_effects` 0.74 ms, `numbering_of` 0.35, resolving
+(`region_inputs` over all 2169 chunks, the cache rebuilt) 1.5, the
+layout 1.6 (the cross-reference section 0.7), the copy into fresh
+buffers 1.2, then all 21 files written whole (1.47 MB). None of that
+depends on what changed.
+
+**Fix.** `effects::Resolver` (`effects/virt.rs`) stands in front of
+`effects::Splice`, which already lays out what a change reaches
+(Fenwick trees per file, an object stream rendered again only where a
+chunk holding one of its objects changed, the files written from their
+first changed byte). For each step it keeps the counters and object-stream
+file at its entry, and a signature: a hash of its `Num`, `FontLoad` and
+`ObjStmStart` events in order. For each chunk it keeps its version,
+entry, written numbers and resolved effects.
+- When every changed step's signature is unchanged (a step new or gone
+  must have an empty one), the job's numbering, the fonts' numbers and
+  every other step's entry are as they were. Only the changed steps'
+  chunks are resolved, from their entries, and the splice gets them as
+  chunks with real numbers.
+- When any signature differs, the numbering is made again from every
+  step. A chunk whose version, entry and written numbers are unchanged
+  is taken as it was; the others are resolved again, and the splice gets
+  only the steps that changed. The live chunks' compressed streams are
+  kept by content, so a chunk resolved again for numbers outside its
+  streams does not compress them again.
+- A stream's length and its stream in different chunks: a full link
+  every time, as before.
+
+The CLI's `SsaLinker` uses this for virtual numbers in place of the full
+link. `PARTEX_LINK_CHECK=1` checks each spliced link against a full one.
+New ssa-edits case `vobj` (edits.tex, with the check): a word, a font no
+page had (`\textsf`), a word, an object no page had (`\pdfannot`), and
+back. Both paths run, and every stage is identical to plain partex.
+
+**Measured** (fastdev, this machine, thesis):
+- Keystroke link, KEY_TRIPS=1, IDLE_SETTLE=1: a space 4.7 → 0.23 ms; a
+  word 5.8 → 1.1–1.2 ms in the first edits. Over 100 new words in a row
+  the link averages 0.64 ms and the files written 0.52 ms (the PDF from
+  the changed byte on, the other files not at all).
+- A whole keystroke ("the rebuild", the idle settle included): a space
+  7.7 ms, a word 10–10.7 ms.
+- An edit that moves the numbering (an `\href` added and taken away, 12
+  times): link 8.3–9.2 ms, files written 1.1 ms, against 7.7–9.2 and 1.4
+  ms on 5bed2b1. About 563 chunks are resolved again there: every chunk
+  after the new object.
+- The PDF after the edits is byte-identical to before.
