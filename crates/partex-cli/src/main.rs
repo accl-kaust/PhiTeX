@@ -1586,7 +1586,12 @@ fn ssa_tools(
     between: &mut Between,
 ) -> impl FnMut(&mut native::NativeHost, &[(Vec<u8>, std::sync::Arc<[u8]>)]) -> (bool, Vec<String>) + '_
 {
+    // (`PARTEX_SSA_TOOLS=0`: none run, as a host without them)
+    let off = std::env::var("PARTEX_SSA_TOOLS").is_ok_and(|v| v == "0");
     move |host, streams| {
+        if off {
+            return (false, Vec::new());
+        }
         // (each stream by the path its file has, in the output directory)
         let ending = |ext: &[u8]| -> Vec<(Vec<u8>, std::sync::Arc<[u8]>)> {
             streams
