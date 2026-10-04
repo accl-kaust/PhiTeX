@@ -488,7 +488,9 @@ fn render_objstm(
 /// replayed from the `Num` events of every region, and the fonts' numbers
 /// (the order they were loaded in, the null font 0). `None` without
 /// virtual numbers.
-fn numbering_of(chunks: &[&[Effect]]) -> Option<(crate::pdf::vnum::Numbering, BTreeMap<i32, i32>)> {
+pub(crate) fn numbering_of(
+    chunks: &[&[Effect]],
+) -> Option<(crate::pdf::vnum::Numbering, BTreeMap<i32, i32>)> {
     let all = || chunks.iter().flat_map(|c| c.iter());
     if !all().any(|e| matches!(e, Effect::Num(..))) {
         return None;

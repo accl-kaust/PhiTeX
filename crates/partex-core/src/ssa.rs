@@ -226,6 +226,10 @@ pub(crate) struct Flows {
     /// By step id: the columns it was rendered from and those it left, and
     /// its chunks rendered.
     steps: Vec<Option<Flowed>>,
+    /// The files' lengths as the last link found them, printed where the
+    /// engine's guess has another number of digits (virtual object
+    /// numbers: the engine cannot know them; [`set_flow_length`]).
+    lengths: BTreeMap<u32, i64>,
 }
 
 struct Flowed {
@@ -293,7 +297,12 @@ fn resolve_flows(rec: &mut Recorder) {
                 v.iter()
                     .map(|c| {
                         if crate::effects::flow::has_flow(&c.1) {
-                            StepEffects::new(crate::effects::flow::render(&c.1, &mut cols, fl.max))
+                            StepEffects::new(crate::effects::flow::render(
+                                &c.1,
+                                &mut cols,
+                                fl.max,
+                                &fl.lengths,
+                            ))
                         } else {
                             c.clone()
                         }
@@ -322,6 +331,33 @@ fn resolve_flows(rec: &mut Recorder) {
         });
     }
     fx_changed.extend(more);
+}
+
+/// The link found file `file` to be `actual` bytes long, where the text
+/// that prints its length took another number of digits: the steps that
+/// print it are rendered again with `actual`'s digits at the next
+/// [`take_step_changes`]. Whether any step prints it (with the columns
+/// the link's; else the text cannot be made again).
+pub fn set_flow_length(rec: &mut Recorder, file: u32, actual: i64) -> bool {
+    let Some(fl) = rec.st.steps.flow.as_mut() else {
+        return false;
+    };
+    fl.lengths.insert(file, actual);
+    let mut found = false;
+    for (s, f) in fl.steps.iter().enumerate() {
+        let prints = f.as_ref().is_some_and(|f| {
+            f.chunks.iter().any(|c| {
+                c.1.iter().any(
+                    |e| matches!(e, crate::effects::Effect::Length { file: w, .. } if w.0 == file),
+                )
+            })
+        });
+        if prints && let Ok(s) = StepId::try_from(s) {
+            rec.st.steps.fx_changed.push(s);
+            found = true;
+        }
+    }
+    found
 }
 
 /// A step's chunks as the link takes them: with their text rendered, if
@@ -3271,6 +3307,7 @@ pub fn run_applying<H: Host>(
         start: (tex.term_offset, tex.file_offset),
         max: tex.params.max_print_line,
         steps: Vec::new(),
+        lengths: BTreeMap::new(),
     });
     // (the names the run makes placed by name: [`SsaTracker::names_by_name`])
     if tex.tracker.names_by_name {

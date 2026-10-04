@@ -1175,6 +1175,13 @@ readers rerun. What is built:
     changed count of objects before it runs again.
   The link resolves the numbers in full at every build (the splice lays
   out pdfTeX's numbers only); on the 64-page thesis that is 6 to 9 ms.
+  The engine cannot know the PDF's length (the link fills the object
+  streams and writes the numbers), so "Output written on … bytes" holds
+  its guess; when the link finds a length with another number of
+  digits, the text that prints it is rendered again with the length's
+  digits (`flow::render`'s lengths, `ssa::set_flow_length`) and linked
+  again. Display lists (4.6) name forms and images by pdfTeX's numbers,
+  from the steps' numbering events, as the link does.
   Measured on that thesis (its long reflowing insertion, 4 words in
   Chapter 2): 5,712 steps and 11.0 M commands before, 586 steps and
   0.29 M commands after (LOG 2026-10-04).

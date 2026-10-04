@@ -1904,6 +1904,17 @@ impl SsaLinker {
         tex: &mut Tex<native::NativeHost, partex_core::ssa::SsaTracker>,
         origin: &std::time::Instant,
     ) -> LinkReport {
+        self.link_full_once(tex, origin, true)
+    }
+
+    /// [`SsaLinker::link_full`], linking again once (`retry`) after a
+    /// byte count's digits were rendered anew.
+    fn link_full_once(
+        &mut self,
+        tex: &mut Tex<native::NativeHost, partex_core::ssa::SsaTracker>,
+        origin: &std::time::Instant,
+        retry: bool,
+    ) -> LinkReport {
         use partex_core::host::Host;
         #[allow(clippy::cast_precision_loss, reason = "a report")]
         let ms = |d: std::time::Duration| d.as_secs_f64() * 1e3;
@@ -1934,6 +1945,22 @@ impl SsaLinker {
         self.deflated = now;
         let l = match linked {
             Ok(l) => l,
+            // (virtual object numbers: the engine's guess at a file's length
+            // took another number of digits; the text that prints it is
+            // rendered again with the length the link found, and linked
+            // again: the file's own bytes do not depend on that text)
+            Err(partex_core::effects::LinkError::LengthDigits { file, actual, .. })
+                if retry
+                    && partex_core::ssa::set_flow_length(
+                        &mut tex.tracker().rec.borrow_mut(),
+                        file.0,
+                        actual,
+                    ) =>
+            {
+                drop(chunks);
+                let _ = partex_core::ssa::take_step_changes(&mut tex.tracker().rec.borrow_mut());
+                return self.link_full_once(tex, origin, false);
+            }
             Err(e) => {
                 eprintln!("partex: ssa: the link step failed: {e:?}");
                 std::process::exit(3);

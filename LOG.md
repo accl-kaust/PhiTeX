@@ -12439,3 +12439,27 @@ rebuilt PDF after the five edits differs from a cold build of the edited
 source here, as it does in the base (there the `.aux` agreed and the PDF
 did not; here two `\ACRO{pages}` records differ by one page): not
 resolved yet.
+
+**Merge of main (eaaa2db), and what it needed** (af5eeb2 and after):
+the gate's e2e `glyphs` and `display` cases (new on main) failed with
+virtual numbers. Display lists named forms by their virtual ids: they
+are named by pdfTeX's numbers now, from the steps' numbering events. And
+the display document's PDF came out 100,421 bytes where the engine
+guessed 98,187: a byte count of another number of digits stopped the
+link (`LengthDigits`). With the columns the link's (`effects/flow.rs`),
+the text that prints the length is rendered again with the length the
+link found, and the files linked again.
+
+**The long insertion's rebuild against a cold build** (thesis, run
+alone): with `PARTEX_SSA_VOBJ=0` (the base's numbering, pre-merge
+binary) the rebuilt and cold `.aux` and `.toc` are equal and the PDFs
+differ (the cold build's fixed point leaves two citations of the edited
+paragraph undefined; real pdfTeX with BibTeX resolves them, as the
+rebuild does). With virtual numbers the same citations differ, and also
+the rebuilt `Chapter_2.aux` records three acronym uses (`mrrg`, `ii`) a
+page early and the `.toc` one page number (24 for 25), where cold and
+real pdfTeX agree. The page text is otherwise the real one. The two
+settings reach different fixed points (66 pages with VOBJ=0, 64 with it
+on, as real pdfTeX), so the comparison does not say whether the page
+records' staleness is the numbering's: open.
+
