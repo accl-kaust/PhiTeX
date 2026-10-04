@@ -156,6 +156,16 @@ INPUTS_EDITS = [
     ("inputs-sub.tex", "Appended after it.\n", ""),
     ("inputs-sub.tex", "Sub text", "Sub words"),
 ]
+# include.tex: chapters by \\include (each opens its own .aux, written at
+# its pages' shipouts and read back through the main one): a space typed
+# into a chapter's paragraph, then a letter (the extension's thesis: the
+# chapter's .aux the rebuild serves must be the whole file, never the one
+# line its \\openout began it with); then back
+INCLUDE_EDITS = [
+    ("incl-ch1.tex", "Ch1s2p1 gamma ", "Ch1s2p1  gamma "),
+    ("incl-ch1.tex", "Ch1s2p1  gamma ", "Ch1s2p1  gammax "),
+    ("incl-ch1.tex", "Ch1s2p1  gammax ", "Ch1s2p1 gamma "),
+]
 # fatal-end.tex: a word, edited and back, in a job that ends fatally in
 # its last page's output routine
 FATAL_EDITS = [("Hello world.", "Hello there."), ("Hello there.", "Hello world.")]
@@ -385,6 +395,15 @@ def all_cases():
             seed=2,
         ),
         latex("windows", "windows.tex", "pdflatex", WINDOW_EDITS),
+        Case(
+            "include",
+            {"edits.tex": "include.tex", **{f"incl-ch{c}.tex": f"incl-ch{c}.tex" for c in (1, 2, 3)}},
+            "pdflatex",
+            [*LATEX_FLAGS, "-fmt=pdflatex", "-output-directory=out", "edits"],
+            INCLUDE_EDITS,
+            outdir="out",
+            seed=2,
+        ),
         latex("synctex", "edits.tex", "pdflatex", SYNCTEX_EDITS, extra=["-synctex=1"]),
         latex("preamble", "preamble.tex", "pdflatex", PREAMBLE_EDITS),
         Case(
@@ -639,7 +658,9 @@ class Runner:
                 (cdir / "edits" / str(k) / file).write_bytes(texts[file])
             plan.append((file, bool(marker)))
         (cdir / "plan.json").write_text(json.dumps({"edits": plan}))
-        if case.garble:
+        # (garbled files are edits the build converges from: only a run to
+        # the fixed point compares them with the oracle's)
+        if case.garble and self.fixpoint:
             (cdir / "garble").write_text("")
         if case.seed:
             seed = cdir / "seed"

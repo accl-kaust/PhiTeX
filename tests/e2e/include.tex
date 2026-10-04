@@ -1,0 +1,11 @@
+% Chapters by \include, as a thesis has them (the SSA edit harness, case
+% `include`): each chapter's .aux is opened by \include and written at its
+% pages' shipouts, read back by the main .aux; a space typed into a
+% chapter, then a letter.
+\documentclass{report}
+\begin{document}
+\tableofcontents
+\include{incl-ch1}
+\include{incl-ch2}
+\include{incl-ch3}
+\end{document}

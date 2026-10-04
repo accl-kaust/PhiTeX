@@ -12642,3 +12642,11 @@ trip's φ too), read by loads like a job-written stream; the CLI's link
 writes each produced stream whose bytes changed (`write_produced`).
 `Trips.tools` is unchanged: the native BibTeX branch builds on this.
 
+The edit harness's `garbled` case garbles the written files only when
+run to the fixed point (`--fixpoint`): a garbled file is a user's edit,
+which one trip a build reads as one plain pass would, and the oracle's
+pass never saw it. A new case, `include` (`include.tex` and its three
+`\include`d chapters, each with its own `.aux`): a space typed into a
+chapter's paragraph, then a letter, then back: 6 steps an edit,
+identical with `--fixpoint` and with one trip a build.
+
