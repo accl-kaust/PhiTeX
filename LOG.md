@@ -12483,3 +12483,16 @@ places every entry within a shape it places.
 rebuilds (`th.sh`): no panic, entry check 0 bad reads at all six
 builds. proj2: rebuild 2 still 16 steps (46 ms), PDF equal to a cold
 SSA build; `pt`, `acro2`, `ac3`: 0 bad reads, PDFs equal to cold.
+
+**The pages 19–21 difference was not the numbering's** (after merging
+main aecd07f, 20e5bf6). The rebuilt page 18 had Figure 2.x's
+`tikzpicture` scaled by `\resizebox` 3.544 instead of 1.200: the
+picture's bounding box (pgf's dimen registers above 255) came out small,
+so three lines moved up a page and the acronym page records with them.
+The steps that made it ran for page, save-stack and list slots, none for
+a PDF slot, and the entry check found 0 bad reads. With main's fix of
+e-TeX's saved registers (every entry goes where their shape is put) the
+same long insertion, run alone with virtual numbers, rebuilds in 199 + 26
+steps (VOBJ=0: 6,476 + 26) and its `.aux` files and `.toc` equal the
+cold build's; the PDFs differ only in the known `[?, ?]` citations.
+
