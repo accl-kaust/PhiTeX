@@ -3789,6 +3789,12 @@ fn close_paragraph<H: Host>(
 }
 
 /// [`step_effects_as`], as the link takes them.
+///
+/// With the columns the link's ([`FLOW`], on by default), call
+/// [`take_step_changes`] first, at every link: it renders the text of the
+/// steps that changed since the last link from the columns the steps
+/// before them left. A step whose text was never rendered gives no
+/// effects here.
 #[must_use]
 pub fn step_effects(rec: &Recorder) -> Vec<(u64, StepEffects)> {
     step_effects_as(rec, false)
