@@ -12572,3 +12572,16 @@ from; a retired step's was kept for good, and no run starts from it
 again. `retire` drops it. Thesis: peak 2,045,336 KB → 1,940,368 KB
 (trip 1's end 1.52 GB; the trips that ran most steps again add 0.38 GB);
 outputs, trips and steps the same.
+
+**The job's start's definitions apart** (same branch). The fold's first
+step (the job's start: the format's state) defines 633 K of a thesis's
+826 K slots, most of them never defined again; each had a list of its own
+in the definitions' table and a place in it (150 MB). Now `Fold::base`
+keeps the first step's definitions apart, a packed record and write index
+per slot in an array per dense family (`Machine::dense`), by address for
+the others; the table holds the other steps' (249 K slots). Every lookup
+(`reaching`, `latest`, `reaching_if_later`, `next_after`, `defines`,
+`entry_of`) answers as before, the base's being the first entry. A slot's
+first definition in the table gets a list of room one. Thesis: peak
+1,940,368 KB → 1,825,580 KB; rebuild 1 16.7 ms (the rebuild 7.5); outputs,
+trips and steps the same; `pt` (two edits), `acro2`, `ac3` as on main.
