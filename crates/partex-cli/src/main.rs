@@ -561,6 +561,12 @@ fn debug_switches() {
     if std::env::var("PARTEX_SSA_CLASS_READS").is_ok_and(|v| v == "0") {
         partex_core::ssa::CLASS_READS.store(false, std::sync::atomic::Ordering::Relaxed);
     }
+    if std::env::var("PARTEX_SSA_DEAD_SAVES").is_ok_and(|v| v == "0") {
+        partex_core::ssa::DEAD_SAVES.store(false, std::sync::atomic::Ordering::Relaxed);
+    }
+    if std::env::var("PARTEX_SSA_SOFT_PLACE").is_ok_and(|v| v == "0") {
+        partex_core::ssa::SOFT_PLACE.store(false, std::sync::atomic::Ordering::Relaxed);
+    }
     if std::env::var("PARTEX_SSA_SOFT_READS").is_ok_and(|v| v == "0") {
         partex_core::ssa::SOFT_READS_ON.store(false, std::sync::atomic::Ordering::Relaxed);
     }

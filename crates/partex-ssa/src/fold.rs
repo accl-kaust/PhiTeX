@@ -381,13 +381,16 @@ impl<M: Machine> Fold<M> {
             }
             reads.into_iter().map(|(_, a)| a).collect()
         };
+        // (sorted, for a search per write)
+        let mut skip_sorted: Vec<&M::Addr> = skip.iter().collect();
+        skip_sorted.sort_unstable();
         let Fold { keys, defs, .. } = self;
         for &rec in &recs {
             for (ix, a) in writes(rec).iter().enumerate() {
                 // (a slot the run left as it found it, read only softly:
                 // not its definition, `Runtime::end_step_soft`; the index
                 // stays the record's)
-                if skip.contains(a) {
+                if skip_sorted.binary_search(&a).is_ok() {
                     continue;
                 }
                 let e = Entry {

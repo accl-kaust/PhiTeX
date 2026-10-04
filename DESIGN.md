@@ -1030,6 +1030,73 @@ per step and the steps' boundaries known:
 - **Later: trace compilation.** A recorded trace is straight-line SSA
   with guards, a tracing JIT's input.
 
+**As each step closes** (`SsaTracker::end_step`). A step's reads from
+outside it and its definitions are its node in the graph. What a step
+records here decides how far an edit's change travels: a read the step
+did not need makes it rerun, and a definition it did not make makes its
+readers rerun. What is built:
+- *Copies of the save stack* (soft reads, `PARTEX_SSA_SOFT_READS`). A
+  local assignment in a group the step opened saves the slot's entry
+  value and the group's end puts it back. That is a copy, so a slot left
+  as the step found it is neither read nor defined. An entry value still
+  saved at the step's end is a read.
+- *Class reads* (`PARTEX_SSA_CLASS_READS`). A lookup that only stores
+  the token reads the name's class, not its meaning.
+- *A soft read decides nothing* (`PARTEX_SSA_SOFT_PLACE`). A soft read
+  is not a read, so a rebuild does not place the slot, and the run finds
+  whatever value the arrays hold, possibly a later definition's. Both
+  of TeX's decisions on that value are made as a consistent state would
+  make them:
+  - whether to save it: §277 compares its level with `cur_level`, and an
+    entry value's level is below the group's;
+  - whether to assign it: e-TeX skips an equal value (`reassigning`).
+
+  So a slot that holds the step's entry value (`Tracker::entry_value`)
+  is always saved and assigned. In a plain run the outcome is the same:
+  the value is saved and put back, and only the save stack's use
+  differs, which nothing observes. An entry value still saved at the
+  step's end is a read, so a rebuild places it like one: a run that
+  found it at a later definition is dropped and placed again.
+
+  Measured on a 64-page thesis, a section title edit reran 986 steps
+  without this and 85 with it. A run had found the frontier's value of
+  `\=` (a later step's), skipped the assignment as `reassigning`, and
+  saved nothing. That shifted the save stack under every window of the
+  long figure that followed.
+- *Dead save stack entries* (`PARTEX_SSA_DEAD_SAVES`). An entry at or
+  above the pointer at a step's end has been popped, and every command
+  writes an entry before it reads one above the pointer (§274's
+  `saved(k)` is written, then the pointer moves up). So the step's write
+  of such an entry is dead, and it is not a definition. Without those
+  definitions the arrays can hold a dead value that no later definition
+  shows, so a rebuild places the stack below a step's pointer whole
+  (`save_stack_whole`). An entry made a plain value drops any object a
+  dead entry left in its place, which its version would otherwise
+  carry. The rerun check's changed definitions fall from 3,001 to 680 on
+  the thesis, and from 15 to 5 on acro2.
+
+**Analysed, not built** (LOG 2026-10-04):
+- *PDF object numbers.* `pdf.objs`, `pdf.obj_trees` and `pdf.dests` are
+  each one slot, read whole by every writer scope. A reflow that splits
+  one link annotation fewer numbers every later object again. Every
+  later step that makes a destination or a link then reads a changed
+  table and makes a changed one, through to the job's end (300 steps of
+  the thesis's 590 for a long insertion). The numbers are in the bytes,
+  so only numbers resolved at the link cut this: virtual ids, as
+  machine mode has (`pdf/vnum.rs`). Each scope would read the shape
+  (count, heads), the entries it uses, and the answers it asks
+  (`\pdflastobj`), never the whole table.
+- *Positions in the conditionals.* The `cond` slot holds each open
+  conditional's absolute `if_line`. An edit that adds a line before a
+  conditional that stays open across steps changes `cond` for every
+  step until it closes: 101 of 169 steps on the thesis. Each level's
+  line can be a slot of its own, read only by the messages that print
+  it, apart from the stack's shape.
+- *A relative save pointer.* A step that leaves `save_ptr` where it
+  found it, and never pops below it, uses only addresses relative to its
+  entry. It could neither read nor define the pointer. In the data so
+  far the pointer chained only through the soft read decisions above.
+
 ### 3.13 TeX's state
 
 Every field of `Tex` (and of the structs it owns) is one of four
@@ -1085,6 +1152,9 @@ accessor.
 | `PARTEX_SSA_DAG=FILE` | the steps as a dependency graph after each build (`FILE.N` after rebuild `N`): each step's commands, the step whose definition each of its reads reached, its definitions' versions, and how many commands into the step each read and last write came; `scripts/ssa-parallel.py` measures it (3.10, "Measured") |
 | `PARTEX_SSA_WINDOW=W` | windows of `W` commands (default 4,096); `0`: clean points (4.3 item 1) |
 | `PARTEX_SSA_RERUN_CHECK=1` | after the cold build, run every window again alone and compare (4.3 item 1) |
+| `PARTEX_SSA_SOFT_READS=0`, `PARTEX_SSA_CLASS_READS=0` | a local assignment reads the value it replaces; a lookup that stores a token reads its meaning (3.12) |
+| `PARTEX_SSA_SOFT_PLACE=0` | a soft-read slot's level and value decide its save and assignment as the arrays hold them (3.12) |
+| `PARTEX_SSA_DEAD_SAVES=0` | every save stack entry a step writes is its definition (3.12) |
 
 Each is exact: output is byte-identical with it on or off.
 
