@@ -246,6 +246,7 @@ impl Slot {
                 Effect::Origins(_)
                 | Effect::Synctex(_)
                 | Effect::Display(_)
+                | Effect::Flow { .. }
                 | Effect::ObjRef { .. }
                 | Effect::ObjStmRef { .. }
                 | Effect::FontLoad(_)

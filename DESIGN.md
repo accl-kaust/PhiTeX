@@ -785,6 +785,26 @@ template, which a compiled backend exploits.
   resolved from a cache and laid out in full.
 - The writer's position in the file and the objects' offsets are not
   state: TeX never observes them, and the link places every object.
+- **Columns are the link's** (`effects/flow.rs`). `term_offset` and
+  `file_offset` (§54), where the terminal's and the log's lines stand,
+  decide only what is printed: the wrap at `max_print_line` (§58),
+  `print_nl`'s new line (§62), and the space or new line before a page's
+  `[` (§638), a file's `(` (§537), a `\message` (§1280) and `\scantokens`'
+  `( `. As state, every step that prints read and wrote them, so one
+  message a character longer changed them for every later step that
+  printed: 261 changed definitions over a thesis's build and one rebuild.
+  So in an SSA build they are not slots. The engine records what it
+  prints as a *flow* (`Effect::Flow`): characters, new lines, and each
+  of those decisions as an op (`NLC`, `SEP`), with no column in it. The
+  link renders a step's flow from the columns the step before it left
+  (`ssa::resolve_flows`): it renders the steps whose chunks changed, and
+  then each next step while the columns at a step's end come out other
+  than before, which a new line soon stops. The engine still keeps its
+  own columns, as TeX does, untracked: what they decide that is not
+  printed (`tally`, the structured diagnostics' copy) is not in a file.
+  A byte count's digits are rendered from the flow too (`LEN` …
+  `LEN_END` become `Effect::Length`). `PARTEX_SSA_FLOW=0` makes the
+  columns slots again.
 - **Writer scopes.** Each routine that changes the PDF or DVI writers'
   tables (`ship_out`, a `\pdf…` command, the job's end, a font call)
   declares the fields it reads and writes. The fields are versioned
@@ -1206,6 +1226,7 @@ accessor.
 | `PARTEX_SSA_SOFT_READS=0`, `PARTEX_SSA_CLASS_READS=0` | a local assignment reads the value it replaces; a lookup that stores a token reads its meaning (3.12) |
 | `PARTEX_SSA_SOFT_PLACE=0` | a soft-read slot's level and value decide its save and assignment as the arrays hold them (3.12) |
 | `PARTEX_SSA_DEAD_SAVES=0` | every save stack entry a step writes is its definition (3.12) |
+| `PARTEX_SSA_FLOW=0` | the log's and the terminal's columns are slots each printing step reads and writes, not the link's (3.8) |
 
 Each is exact: output is byte-identical with it on or off.
 

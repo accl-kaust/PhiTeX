@@ -35,6 +35,7 @@ use crate::exec::Executor;
 use crate::host::{Host, WriteId};
 pub use crate::pdf::xref::{Deflate, XEntry, Xref, XrefStream};
 
+pub mod flow;
 mod splice;
 use crate::tex::Tex;
 use crate::track::Tracker;
@@ -165,6 +166,13 @@ pub enum Effect {
     /// on (`displist.rs`, DESIGN 4.6): what its list is made from; no
     /// bytes of any file.
     Display(alloc::sync::Arc<crate::displist::Shipped>),
+    /// Text for the terminal and the log (`log`), relative to their
+    /// columns: rendered by the link from the columns the text before it
+    /// left ([`flow::render`], DESIGN 3.8).
+    Flow {
+        log: Option<WriteId>,
+        ops: Vec<u8>,
+    },
 }
 
 /// Where text goes.
@@ -897,6 +905,7 @@ fn layout_timed<E: Executor>(
             Effect::Origins(_)
             | Effect::Synctex(_)
             | Effect::Display(_)
+            | Effect::Flow { .. }
             | Effect::ObjRef { .. }
             | Effect::ObjStmRef { .. }
             | Effect::Num(..)
@@ -1091,6 +1100,7 @@ partex_engine::persist_enum!(Effect {
     Origins(a0),
     Synctex(a0),
     Display(a0),
+    Flow { log, ops },
 });
 
 #[cfg(test)]
@@ -1190,6 +1200,10 @@ mod persist_tests {
                 },
             ]),
             Effect::Display(alloc::sync::Arc::new(crate::displist::Shipped::example())),
+            Effect::Flow {
+                log: Some(f),
+                ops: alloc::vec![super::flow::NL, 3],
+            },
         ];
         let mut kinds = alloc::collections::BTreeSet::new();
         for e in &all {
@@ -1217,9 +1231,10 @@ mod persist_tests {
                 Effect::Origins(_) => 20,
                 Effect::Synctex(_) => 21,
                 Effect::Display(_) => 22,
+                Effect::Flow { .. } => 23,
             });
         }
-        assert_eq!(kinds.len(), 23);
+        assert_eq!(kinds.len(), 24);
         let mut s = Saver::new();
         all.save(&mut s);
         let bytes = s.into_bytes();

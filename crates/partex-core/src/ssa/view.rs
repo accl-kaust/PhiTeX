@@ -352,7 +352,13 @@ fn writes(rt: &Runtime<TexSsa>, recs: &[RecId]) -> Vec<Slot> {
 /// by the counts the log shows it with (§638), or ` ships a page`.
 fn shipped(rt: &Runtime<TexSsa>, recs: &[RecId]) -> String {
     /// The ships under `r`, and what each wrote to the log.
-    fn walk(rt: &Runtime<TexSsa>, r: RecId, ship: bool, logs: &mut Vec<Vec<u8>>) {
+    fn walk(
+        rt: &Runtime<TexSsa>,
+        r: RecId,
+        ship: bool,
+        logs: &mut Vec<Vec<u8>>,
+        flowed: &mut Vec<u8>,
+    ) {
         let rec = rt.record(r);
         let ship = ship || rec.func == Func::ShipOut;
         if rec.func == Func::ShipOut {
@@ -360,7 +366,16 @@ fn shipped(rt: &Runtime<TexSsa>, recs: &[RecId]) -> String {
         }
         for it in &rec.items {
             match it {
-                Item::Call(c) => walk(rt, *c, ship, logs),
+                Item::Call(c) => walk(rt, *c, ship, logs, flowed),
+                // (with the columns the link's, the log's text is in the
+                // step's flow ops: `effects/flow.rs`)
+                Item::Out(super::Effect::Step(fx)) => {
+                    for e in fx.1.iter() {
+                        if let crate::effects::Effect::Flow { ops, .. } = e {
+                            flowed.extend(crate::effects::flow::log_text(ops));
+                        }
+                    }
+                }
                 Item::Out(super::Effect::Bytes(crate::track::Output::Log, b)) if ship => {
                     if let Some(l) = logs.last_mut() {
                         l.extend_from_slice(b);
@@ -371,8 +386,23 @@ fn shipped(rt: &Runtime<TexSsa>, recs: &[RecId]) -> String {
         }
     }
     let mut logs = Vec::new();
+    let mut flowed = Vec::new();
     for &r in recs {
-        walk(rt, r, false, &mut logs);
+        walk(rt, r, false, &mut logs, &mut flowed);
+    }
+    // (each ship's counts: in its own log bytes, else the `[`s of the
+    // step's flowed text in order)
+    let mut brackets = flowed
+        .iter()
+        .enumerate()
+        .filter(|&(_, &c)| c == b'[')
+        .map(|(i, _)| flowed[i..].to_vec());
+    for log in &mut logs {
+        if !log.contains(&b'[')
+            && let Some(f) = brackets.next()
+        {
+            *log = f;
+        }
     }
     let mut out = String::new();
     for log in &logs {

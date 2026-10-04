@@ -589,12 +589,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         // needn't be set to meaningful values yet
         let full = self.full_source_filename_stack[self.in_open];
         let len = i32::try_from(self.length(ux(full))).unwrap_or(0);
-        let (term_offset, file_offset) = self.offsets();
-        if term_offset + len > self.params.max_print_line - 2 {
-            self.print_ln();
-        } else if term_offset > 0 || file_offset > 0 {
-            self.print_char(b' ');
-        }
+        self.print_sep(self.params.max_print_line - 2 - len);
         self.print_char(b'(');
         self.set_open_parens(self.open_parens() + 1);
         self.slow_print(full);

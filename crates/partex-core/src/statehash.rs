@@ -1504,6 +1504,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             tally: _,
             term_offset,
             file_offset,
+            flow: _,
             trick_buf,
             trick_count,
             first_count,

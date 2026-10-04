@@ -483,7 +483,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         let edits = crate::ssa::edits_from(&rec, o.edits_seen);
         o.edits_seen += edits.len();
         o.take_edits(edits);
-        let chunks = crate::ssa::step_effects(&rec);
+        let chunks = crate::ssa::step_effects_as(&rec, true);
         let key =
             partex_ssa::Version::of(&chunks.iter().map(|(k, e)| (*k, e.0.0)).collect::<Vec<_>>()).0;
         if let Some((k, streams)) = &o.cached

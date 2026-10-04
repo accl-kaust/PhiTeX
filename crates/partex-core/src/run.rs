@@ -631,6 +631,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         self.term_offset = 0;
         self.file_offset = 0;
         self.offsets_wrote(true, true);
+        self.flow_op(&[crate::effects::flow::COL0, 3]);
         self.print_banner();
         // §1337: get the first line of input and prepare to start.
         self.init_input_routines(command_line)?;

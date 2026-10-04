@@ -3018,7 +3018,8 @@ impl<H: CellHost> TexMachine<H> {
             | Effect::Open { .. }
             | Effect::Origins(_)
             | Effect::Synctex(_)
-            | Effect::Display(_) => {}
+            | Effect::Display(_)
+            | Effect::Flow { .. } => {}
         }
     }
 }

@@ -94,6 +94,8 @@ pub struct Tex<H: Host, T: Tracker = Untracked> {
     pub(crate) tally: i32,
     pub(crate) term_offset: i32,
     pub(crate) file_offset: i32,
+    /// With the columns the link's, what printing makes (`effects/flow.rs`).
+    pub(crate) flow: crate::effects::flow::Flow,
     pub(crate) trick_buf: Vec<u8>,
     pub(crate) trick_count: i32,
     pub(crate) first_count: i32,
@@ -624,6 +626,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             tally: 0,
             term_offset: 0,
             file_offset: 0,
+            flow: crate::effects::flow::Flow::default(),
             trick_buf: vec![0; 256],
             trick_count: 0,
             first_count: 0,
