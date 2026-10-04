@@ -938,7 +938,8 @@ fn same_tags(a: &InputState, b: &InputState) -> bool {
     let tag = |f: Option<&AlphaFile>| f.map_or(0, |f| f.synctex_tag);
     tag(a.file.file.as_ref()) == tag(b.file.file.as_ref())
         && a.v.files.files.len() == b.v.files.files.len()
-        && a.v.files
+        && a.v
+            .files
             .files
             .iter()
             .zip(&b.v.files.files)
