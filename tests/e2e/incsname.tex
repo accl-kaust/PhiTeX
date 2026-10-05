@@ -1,0 +1,16 @@
+% A step run again that newly reads a name defined later (\x, whose later
+% definition expands for ever) inside \csname: the run with the arrays
+% holding the later definition stops inside the \csname and is dropped;
+% the step's next run must start with e-TeX's in-\csname flag as the step
+% found it (LaTeX's ~ is an other ~ inside \csname, \ifincsname), not as
+% the dropped run left it (the SSA edit harness, case `incsname`)
+\documentclass{article}
+\begin{document}
+\def\x{1}
+First paragraph.
+
+Second paragraph, see Section~1 and page~2 here.
+
+\def\x{\x}
+Last paragraph.
+\end{document}
