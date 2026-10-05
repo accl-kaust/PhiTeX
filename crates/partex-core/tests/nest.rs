@@ -96,7 +96,7 @@ fn the_page_builder_reads_the_nest() {
     let nest = Slot(Fam::List, i64::from(partex_core::track::list::COUNT));
     let mut builders = 0;
     for &s in &fold.order {
-        let reads = &fold.steps[s as usize].reads;
+        let reads: Vec<Slot> = fold.reads_of(s).copied().collect();
         if reads.iter().any(|a| a.0 == Fam::Page) {
             builders += 1;
             assert!(

@@ -3829,7 +3829,7 @@ fn run_step<H: Host>(
         let mut cand: Vec<Slot> = if alone {
             predict
                 .iter()
-                .flat_map(|&p| &fold.steps[p as usize].reads)
+                .flat_map(|&p| fold.reads_of(p))
                 .chain(&dirty.missed)
                 .filter(|a| a.0 == Fam::PageNode)
                 .copied()
@@ -3837,7 +3837,7 @@ fn run_step<H: Host>(
         } else {
             predict
                 .iter()
-                .flat_map(|&p| &fold.steps[p as usize].reads)
+                .flat_map(|&p| fold.reads_of(p))
                 .chain(&dirty.missed)
                 .chain(written)
                 .filter(|a| checked(a))

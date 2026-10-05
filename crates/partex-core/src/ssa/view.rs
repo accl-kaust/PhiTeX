@@ -130,7 +130,7 @@ pub fn view<H: Host>(tex: &Tex<H, SsaTracker>) -> Program {
     let mut files: BTreeMap<u32, ValueId> = BTreeMap::new();
     let mut loaded: BTreeSet<u32> = lines.values().flatten().map(|l| l.0).collect();
     for &s in &fold.order {
-        for a in &fold.steps[s as usize].reads {
+        for a in fold.reads_of(s) {
             if a.0 == Fam::Load {
                 loaded.insert(u32::try_from(a.1).unwrap_or(u32::MAX));
             }
@@ -154,7 +154,7 @@ pub fn view<H: Host>(tex: &Tex<H, SsaTracker>) -> Program {
         for &(file, a, b) in lines.get(&s).into_iter().flatten() {
             operands.push(Operand::Named(span(st, file, a, b), files[&file]));
         }
-        for a in &step.reads {
+        for a in fold.reads_of(s) {
             match a.0 {
                 // (the lines, above)
                 Fam::Source => {}
@@ -188,7 +188,8 @@ pub fn view<H: Host>(tex: &Tex<H, SsaTracker>) -> Program {
         let mut text = if ships.is_empty() {
             set_text(rt, step.key, &step.recs)
         } else {
-            page_text(rt, step.key, &step.reads)
+            let reads: Vec<Slot> = fold.reads_of(s).copied().collect();
+            page_text(rt, step.key, &reads)
         };
         if text.is_empty() {
             // (else the source it read: the rest of the line it began on,
@@ -293,7 +294,7 @@ pub fn dag<H: Host>(tex: &Tex<H, SsaTracker>) -> String {
         let times = rt
             .step_times(s)
             .filter(|t| t.reads.len() == step.reads.len());
-        for (i, a) in step.reads.iter().enumerate() {
+        for (i, a) in fold.reads_of(s).enumerate() {
             let kind = if a.0 == Fam::Load { 'L' } else { 'R' };
             let from = fold
                 .reaching(a, step.key)

@@ -1580,7 +1580,10 @@ from one clean point to the next.
   the gap from the next one's for the first new step after a step run
   again, from its own predecessor's for the later ones of the run. A
   removed step's index entries go with it.
-- A step keeps its records, and the slots it read from outside it.
+- A step keeps its records, and the slots it read from outside it, each
+  as a slot id: the fold numbers each slot read once (`Fold::slot`), and
+  a slot's readers are kept by its id. A removed step's reads and
+  records go at the end of the rebuild that passed over it.
 - Each slot keeps its definitions in key order, each naming the step
   and the run that made it, and each with its readers. A step run again
   bumps its run, so its old entries are dead in place.
