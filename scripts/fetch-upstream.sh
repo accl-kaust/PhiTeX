@@ -8,6 +8,8 @@ mkdir -p upstream
 # name  url  commit  [sparse paths...]
 REPOS=(
   "texlive-source https://github.com/TeX-Live/texlive-source.git 94234726a6f894b4c170e296f86c93603ae48534 texk/web2c texk/dvipdfm-x libs/teckit"
+  # TeX Live 2026 as released (dvipdfm-x 20260113): the installed binaries' sources.
+  "texlive-2026 https://github.com/TeX-Live/texlive-source.git ad9095449fbb1a924f9bad312bcece14c825d7ce texk/web2c texk/dvipdfm-x libs/teckit"
   "latex2e https://github.com/latex3/latex2e.git 4e72b3d75e366268e9f4330ed29bafbab2820f78"
   "latex3 https://github.com/latex3/latex3.git e2de762010a413b93a4216e028d0a629d7948dfd"
   "pgf https://github.com/pgf-tikz/pgf.git 839974a3f895bfb86f5a8bc155f0886c918f1bff doc/generic/pgf"

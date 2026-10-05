@@ -1,0 +1,22 @@
+[package]
+name = "partex-xdvipdfmx"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "xdvipdfmx (dvipdfm-x 20260113) ported: XDV in, PDF out, byte for byte"
+
+[dependencies]
+partex-engine = { path = "../partex-engine" }
+libm = "0.2"
+
+[features]
+# The `xdv2pdf` test tool: std, files from a TeX Live tree, the system zlib.
+cli = []
+
+[[bin]]
+name = "xdv2pdf"
+required-features = ["cli"]
+
+[lints]
+workspace = true

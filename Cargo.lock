@@ -211,6 +211,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "partex-xdvipdfmx"
+version = "0.0.0"
+dependencies = [
+ "libm",
+ "partex-engine",
+]
+
+[[package]]
 name = "phitex-doc"
 version = "0.0.0"
 dependencies = [
