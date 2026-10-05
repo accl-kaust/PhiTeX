@@ -107,11 +107,12 @@ impl Files for Kpsewhich {
 
 fn main() {
     let mut args = std::env::args().skip(1);
-    let (mut pdf, mut dvi, mut input) = (None, None, None);
+    let (mut pdf, mut dvi, mut input, mut resume) = (None, None, None, false);
     while let Some(a) = args.next() {
         match a.as_str() {
             "-o" => pdf = args.next(),
             "--dvi" => dvi = args.next(),
+            "--check-resume" => resume = true,
             _ => input = Some(a),
         }
     }
@@ -133,6 +134,10 @@ fn main() {
             .and_then(|s| s.trim().parse().ok()),
         ..Options::default()
     };
+    if resume {
+        check_resume(options, &xdv);
+        return;
+    }
     // Page by page, as xdvipdfmx writes: when it stops on an error
     // (`ERROR` exits; here a panic), its output file keeps what was
     // written until then, and so does stdout here.
@@ -160,4 +165,38 @@ fn main() {
         }
         std::process::exit(1);
     }
+}
+
+/// `--check-resume`: the incremental link's test. A cold run keeps a
+/// snapshot before each page; going on from each snapshot (that page,
+/// the pages after it, the end) must give the cold run's bytes. Prints
+/// the number of pages checked; exits 1 on a difference.
+fn check_resume(options: Options, xdv: &[u8]) {
+    let (pre, pages) = split_xdv(xdv);
+    let mut s = Session::new(
+        options,
+        Box::new(Kpsewhich::default()),
+        Box::new(deflate),
+        &xdv[..pre],
+    );
+    let mut snaps = Vec::new();
+    let mut outs: Vec<Vec<u8>> = Vec::new();
+    for &(a, b) in &pages {
+        snaps.push(s.snapshot());
+        outs.push(s.page(&xdv[a..b]).pdf);
+    }
+    outs.push(s.finish());
+    for (k, snap) in snaps.into_iter().enumerate() {
+        let mut s = snap;
+        let mut tail = Vec::new();
+        for &(a, b) in &pages[k..] {
+            tail.push(s.page(&xdv[a..b]).pdf);
+        }
+        tail.push(s.finish());
+        if tail[..] != outs[k..] {
+            eprintln!("xdv2pdf: resuming before page {} differs", k + 1);
+            std::process::exit(1);
+        }
+    }
+    println!("{} pages resumed identically", pages.len());
 }
