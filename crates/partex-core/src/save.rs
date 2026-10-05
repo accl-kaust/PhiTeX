@@ -935,15 +935,15 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             // §234: show the font identifier in `eqtb[n]`.
             if n == CUR_FONT_LOC {
                 self.print_str(b"current font");
-            } else if n < MATH_FONT_BASE + 16 {
+            } else if n < MATH_FONT_BASE + SCRIPT_SIZE {
                 self.print_esc(b"textfont");
                 self.print_int(n - MATH_FONT_BASE);
-            } else if n < MATH_FONT_BASE + 32 {
+            } else if n < MATH_FONT_BASE + SCRIPT_SCRIPT_SIZE {
                 self.print_esc(b"scriptfont");
-                self.print_int(n - MATH_FONT_BASE - 16);
+                self.print_int(n - MATH_FONT_BASE - SCRIPT_SIZE);
             } else {
                 self.print_esc(b"scriptscriptfont");
-                self.print_int(n - MATH_FONT_BASE - 32);
+                self.print_int(n - MATH_FONT_BASE - SCRIPT_SCRIPT_SIZE);
             }
             self.print_char(b'=');
             self.print_font_id(self.equiv(n));

@@ -34,10 +34,11 @@ pub const SCRIPT: u8 = 4;
 pub const SCRIPT_SCRIPT: u8 = 6;
 /// §699: sizes.
 const TEXT_SIZE: usize = 0;
-const SCRIPT_SIZE: usize = 16;
-const SCRIPT_SCRIPT_SIZE: usize = 32;
+const SCRIPT_SIZE: usize = crate::web::SCRIPT_SIZE as usize;
+const SCRIPT_SCRIPT_SIZE: usize = crate::web::SCRIPT_SCRIPT_SIZE as usize;
 /// §224: `thin_mu_skip_code`.
-const THIN_MU_SKIP: u8 = 15;
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+const THIN_MU_SKIP: u8 = crate::web::THIN_MU_SKIP_CODE as u8;
 
 /// §764: `math_spacing`, indexed by `(r_type-ord)*8+(t-ord)`.
 const MATH_SPACING: &[u8; 64] = b"02340001\
@@ -269,9 +270,9 @@ pub trait Env: Fonts {
 /// What the caller reports, in order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Event {
-    /// §723: "\textfont 3 is undefined (character x)"; `size` is 0, 16
-    /// or 32.
-    UndefinedFamily { size: u8, fam: u8, ch: u8 },
+    /// §723: "\textfont 3 is undefined (character x)"; `size` is 0, 256
+    /// or 512 (`script_size`, 4.7).
+    UndefinedFamily { size: u16, fam: u8, ch: u8 },
     /// §581: the character is not in the font.
     MissingChar { font: FontId, ch: u8 },
 }
@@ -394,7 +395,7 @@ impl<E: Env> Ctx<'_, E> {
         self.size = if self.style < SCRIPT {
             TEXT_SIZE
         } else {
-            16 * usize::from((self.style - TEXT) / 2)
+            SCRIPT_SIZE * usize::from((self.style - TEXT) / 2)
         };
         self.mu = self.mathsy(6, self.size) / 18;
     }
@@ -665,7 +666,7 @@ impl<E: Env> Ctx<'_, E> {
     fn fetch(&mut self, fam: u8, ch: u8) -> Option<(FontId, Glyph)> {
         let Some(f) = self.env.fam_fnt(usize::from(fam) + self.size) else {
             self.events.push(Event::UndefinedFamily {
-                size: u8::try_from(self.size).unwrap_or(0),
+                size: u16::try_from(self.size).unwrap_or(0),
                 fam,
                 ch,
             });

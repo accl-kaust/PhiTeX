@@ -935,8 +935,11 @@ fn eqtb_name<H: Host>(names: &Names<'_, H>, p: i32) -> String {
         (TOKS_BASE, "toks"),
         (BOX_BASE, "box"),
         (MATH_FONT_BASE, "textfont"),
-        (MATH_FONT_BASE + 16, "scriptfont"),
-        (MATH_FONT_BASE + 32, "scriptscriptfont"),
+        (MATH_FONT_BASE + crate::web::SCRIPT_SIZE, "scriptfont"),
+        (
+            MATH_FONT_BASE + crate::web::SCRIPT_SCRIPT_SIZE,
+            "scriptscriptfont",
+        ),
         (CAT_CODE_BASE, "catcode"),
         (LC_CODE_BASE, "lccode"),
         (UC_CODE_BASE, "uccode"),

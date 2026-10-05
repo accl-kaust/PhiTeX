@@ -688,7 +688,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         self.set_eq_type(CUR_FONT_LOC, DATA);
         self.set_eq_level(CUR_FONT_LOC, LEVEL_ONE);
         let w = self.eqtb(CUR_FONT_LOC);
-        for k in MATH_FONT_BASE..=MATH_FONT_BASE + 47 {
+        for k in MATH_FONT_BASE..MATH_FONT_BASE + NUMBER_MATH_FONTS {
             self.set_eqtb(k, w);
         }
         self.set_equiv(CAT_CODE_BASE, 0);

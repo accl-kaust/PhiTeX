@@ -12,7 +12,7 @@ import re, pathlib
 
 root = pathlib.Path(__file__).resolve().parent.parent
 consts = set(re.findall(r"^pub const ([A-Z_0-9]+):",
-                        (root / "crates/partex-core/src/web.rs").read_text(), re.M))
+                        (root / "crates/partex-engine/src/web.rs").read_text(), re.M))
 
 def collect(file, pattern):
   web = (root / "target/web" / file).read_text(errors="replace").split("\n")
