@@ -187,8 +187,15 @@ pub fn paperinfo(ppformat: &[u8]) -> Option<Paper> {
             (p.pswidth, p.psheight)
         }
     };
-    let name = PAPERSPECS.iter().find(|p| p.name == &lower[..]).map_or(&b"custom"[..], |p| p.name);
-    Some(Paper { name, pswidth: w, psheight: h })
+    let name = PAPERSPECS
+        .iter()
+        .find(|p| p.name == &lower[..])
+        .map_or(&b"custom"[..], |p| p.name);
+    Some(Paper {
+        name,
+        pswidth: w,
+        psheight: h,
+    })
 }
 
 /// `struct page_range`.
@@ -291,8 +298,10 @@ impl Default for State {
 
 impl Dpx {
     /// `set_default_pdf_filename`: from `dvi_filename`.
-    fn set_default_pdf_filename(&mut self) {
-        let Some(dvi) = self.dvi_filename.clone() else { return };
+    pub(crate) fn session_set_default_pdf_filename(&mut self) {
+        let Some(dvi) = self.dvi_filename.clone() else {
+            return;
+        };
         let base = dvi.rsplit(|&c| c == b'/').next().unwrap_or(&dvi).to_vec();
         let lower: Vec<u8> = base.iter().map(u8::to_ascii_lowercase).collect();
         let stem = if lower.len() > 4 && (lower.ends_with(b".dvi") || lower.ends_with(b".xdv")) {
@@ -316,7 +325,8 @@ impl Dpx {
             let mut p = 0;
             let (_, w) = crate::dpxutil::dpx_util_read_length(1.0, &paperspec[..comma], &mut p);
             let mut p = 0;
-            let (error, h) = crate::dpxutil::dpx_util_read_length(1.0, &paperspec[comma + 1..], &mut p);
+            let (error, h) =
+                crate::dpxutil::dpx_util_read_length(1.0, &paperspec[comma + 1..], &mut p);
             self.session.paper_width = w;
             self.session.paper_height = h;
             if error != 0 || w <= 0.0 || h <= 0.0 {
@@ -330,7 +340,12 @@ impl Dpx {
     }
     /// `compute_id_string`: the MD5 of the date (no timezone), producer,
     /// DVI and PDF names.
-    pub fn compute_id_string(&mut self, producer: Option<&[u8]>, dviname: Option<&[u8]>, pdfname: Option<&[u8]>) -> [u8; 16] {
+    pub fn compute_id_string(
+        &mut self,
+        producer: Option<&[u8]>,
+        dviname: Option<&[u8]>,
+        pdfname: Option<&[u8]>,
+    ) -> [u8; 16] {
         let mut data = self.dpx_util_format_asn_date(false);
         for s in [producer, dviname, pdfname].into_iter().flatten() {
             data.extend_from_slice(s);
@@ -347,7 +362,7 @@ impl Dpx {
         p
     }
     /// `do_args_first_pass`: `args[0]` is the program name (getopt's argv).
-    fn do_args_first_pass(&mut self, args: &[Vec<u8>], _source: Option<&[u8]>, _unsafe: i32) {
+    fn do_args_first_pass_(&mut self, args: &[Vec<u8>], _source: Option<&[u8]>, _unsafe: i32) {
         for (c, optarg) in getopt(args) {
             match c {
                 132 => self.conf.compat_mode = crate::ctx::CompatMode::Compat,
@@ -369,7 +384,12 @@ impl Dpx {
         }
     }
     /// `do_args_second_pass`.
-    fn do_args_second_pass(&mut self, args: &[Vec<u8>], _source: Option<&[u8]>, unsafe_: i32) {
+    pub(crate) fn do_args_second_pass(
+        &mut self,
+        args: &[Vec<u8>],
+        _source: Option<&[u8]>,
+        unsafe_: i32,
+    ) {
         use crate::dpxutil::dpx_util_read_length;
         for (c, optarg) in getopt(args) {
             let a = optarg.unwrap_or_default();
@@ -532,8 +552,12 @@ impl Dpx {
         self.do_args_second_pass(&argv, Some(b"config_special"), 1);
     }
     /// `system_default`: the system paper size.
-    fn system_default(&mut self) {
-        let name = self.session.system_paper_name.clone().unwrap_or_else(|| DEFAULT_PAPER_NAME.to_vec());
+    pub(crate) fn session_system_default(&mut self) {
+        let name = self
+            .session
+            .system_paper_name
+            .clone()
+            .unwrap_or_else(|| DEFAULT_PAPER_NAME.to_vec());
         self.select_paper(&name);
     }
     /// `do_dvi_pages`: the whole file, linear (C's loop; the page API in
@@ -594,4 +618,16 @@ fn getopt(args: &[Vec<u8>]) -> Vec<(i32, Option<Vec<u8>>)> {
         i += 1;
     }
     out
+}
+
+impl Dpx {
+    /// `do_args_first_pass` over xdvipdfmx's argv.
+    pub(crate) fn session_args_first_pass(&mut self, args: &[Vec<u8>]) {
+        self.do_args_first_pass_(args, None, 0);
+        // (the DVI name C takes from argv is `Options::dvi_filename`)
+    }
+    /// `do_args_second_pass` over xdvipdfmx's argv.
+    pub(crate) fn session_args_second_pass(&mut self, args: &[Vec<u8>]) {
+        self.do_args_second_pass(args, None, 0);
+    }
 }

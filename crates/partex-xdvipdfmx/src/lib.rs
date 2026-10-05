@@ -32,6 +32,7 @@
 extern crate alloc;
 
 pub mod agl;
+pub mod api;
 pub mod cff;
 pub mod cff_dict;
 pub mod cid;

@@ -438,7 +438,11 @@ impl Dpx {
 
     /// `get_origin`: `dev_origin_x` if `x`, else `dev_origin_y`.
     pub fn get_origin(&mut self, x: i32) -> f64 {
-        if x != 0 { self.dvi.dev_origin_x } else { self.dvi.dev_origin_y }
+        if x != 0 {
+            self.dvi.dev_origin_x
+        } else {
+            self.dvi.dev_origin_y
+        }
     }
 
     /// `need_more_fonts`.
@@ -449,7 +453,9 @@ impl Dpx {
     fn buf_put(&mut self, ch: u8) {
         let i = self.dvi.dvi_page_buf_index as usize;
         if i >= self.dvi.dvi_page_buffer.len() {
-            self.dvi.dvi_page_buffer.resize(i + DVI_PAGE_BUF_CHUNK as usize, 0);
+            self.dvi
+                .dvi_page_buffer
+                .resize(i + DVI_PAGE_BUF_CHUNK as usize, 0);
         }
         self.dvi.dvi_page_buffer[i] = ch;
         self.dvi.dvi_page_buf_index += 1;
@@ -478,7 +484,9 @@ impl Dpx {
         }
         let i = self.dvi.dvi_page_buf_index as usize;
         if i + data.len() > self.dvi.dvi_page_buffer.len() {
-            self.dvi.dvi_page_buffer.resize(i + data.len() + DVI_PAGE_BUF_CHUNK as usize, 0);
+            self.dvi
+                .dvi_page_buffer
+                .resize(i + data.len() + DVI_PAGE_BUF_CHUNK as usize, 0);
         }
         self.dvi.dvi_page_buffer[i..i + data.len()].copy_from_slice(&data);
         self.dvi.dvi_page_buf_index += count;
@@ -537,7 +545,11 @@ impl Dpx {
     fn check_id_bytes(&mut self) {
         let (pre, post) = (self.dvi.pre_id_byte, self.dvi.post_id_byte);
         if pre != post && (pre != i32::from(DVI_ID) || post != i32::from(DVIV_ID)) {
-            crate::error!("Inconsistent DVI id_bytes {} (pre) and {} (post)", pre, post);
+            crate::error!(
+                "Inconsistent DVI id_bytes {} (pre) and {} (post)",
+                pre,
+                post
+            );
         }
     }
     /// `need_XeTeX`.
@@ -572,7 +584,10 @@ impl Dpx {
         }
         if (size as i64 - current) < 4
             || current == 0
-            || !(ch == i32::from(DVI_ID) || ch == i32::from(DVIV_ID) || ch == i32::from(XDV_ID) || ch == i32::from(XDV_ID_OLD))
+            || !(ch == i32::from(DVI_ID)
+                || ch == i32::from(DVIV_ID)
+                || ch == i32::from(XDV_ID)
+                || ch == i32::from(XDV_ID_OLD))
         {
             crate::error!("{}", core::str::from_utf8(INVALID_SIGNATURE).unwrap_or(""));
         }
@@ -628,7 +643,8 @@ impl Dpx {
     /// `do_scales`.
     fn do_scales(&mut self, mag: f64) {
         self.dvi.total_mag = f64::from(self.dvi.dvi_info.mag) / 1000.0 * mag;
-        self.dvi.dvi2pts = f64::from(self.dvi.dvi_info.unit_num) / f64::from(self.dvi.dvi_info.unit_den);
+        self.dvi.dvi2pts =
+            f64::from(self.dvi.dvi_info.unit_num) / f64::from(self.dvi.dvi_info.unit_den);
         self.dvi.dvi2pts *= 72.0 / 254000.0;
     }
     /// `get_dvi_info`.
@@ -673,10 +689,18 @@ impl Dpx {
     pub fn dvi_comment(&mut self) -> Vec<u8> {
         // (C's comment is a C string: it ends at a NUL)
         let c = &self.dvi.dvi_info.comment;
-        c.iter().position(|&b| b == 0).map_or_else(|| c.clone(), |n| c[..n].to_vec())
+        c.iter()
+            .position(|&b| b == 0)
+            .map_or_else(|| c.clone(), |n| c[..n].to_vec())
     }
     /// `proc_dvilua_font_record`.
-    fn proc_dvilua_font_record(&mut self, tex_id: i32, font_name: &[u8], point_size: u32, design_size: u32) {
+    fn proc_dvilua_font_record(
+        &mut self,
+        tex_id: i32,
+        font_name: &[u8],
+        point_size: u32,
+        design_size: u32,
+    ) {
         let mut index: u32 = 0;
         let mut embolden: i32 = 0;
         let mut slant: i32 = 0;
@@ -690,8 +714,15 @@ impl Dpx {
         if rest.first() == Some(&b':') {
             let mut p = 1;
             while p < rest.len() && rest[p] != 0 {
-                let delim = rest[p..].iter().position(|&c| c == b';').map_or(rest.len(), |d| p + d);
-                let Some(kv) = rest[p..delim].iter().position(|&c| c == b'=').map(|k| p + k) else {
+                let delim = rest[p..]
+                    .iter()
+                    .position(|&c| c == b';')
+                    .map_or(rest.len(), |d| p + d);
+                let Some(kv) = rest[p..delim]
+                    .iter()
+                    .position(|&c| c == b'=')
+                    .map(|k| p + k)
+                else {
                     crate::error!("Syntax error in dvilua fnt_def: not in key=value format");
                 };
                 let key = &rest[p..kv];
@@ -989,7 +1020,11 @@ impl Dpx {
                     padbytes[0] = ((m.opt.mapc >> 24) & 0xff) as u8;
                     padbytes[1] = ((m.opt.mapc >> 16) & 0xff) as u8;
                 }
-            } else if m.enc_name.as_deref().is_some_and(|e| e.windows(5).any(|w| w == b"UTF16")) {
+            } else if m
+                .enc_name
+                .as_deref()
+                .is_some_and(|e| e.windows(5).any(|w| w == b"UTF16"))
+            {
                 is_unicode = ENC_UTF16;
             }
         }
@@ -1017,11 +1052,16 @@ impl Dpx {
             (p, true, false)
         } else if let Some(p) = self.dpx_find_type1_file(filename) {
             (p, false, true)
-        } else if let Some(p) = self.dpx_find_opentype_file(filename).or_else(|| self.dpx_find_truetype_file(filename))
+        } else if let Some(p) = self
+            .dpx_find_opentype_file(filename)
+            .or_else(|| self.dpx_find_truetype_file(filename))
         {
             (p, false, false)
         } else {
-            crate::error!("Cannot proceed without the font: {}", alloc::string::String::from_utf8_lossy(filename));
+            crate::error!(
+                "Cannot proceed without the font: {}",
+                alloc::string::String::from_utf8_lossy(filename)
+            );
         };
         let cur_id = self.dvi.loaded_fonts.len();
         self.dvi.loaded_fonts.push(LoadedFont::default());
@@ -1041,7 +1081,9 @@ impl Dpx {
         key.extend_from_slice(&b.0);
         let mrec = match self.pdf_lookup_fontmap_record(&key) {
             Some(m) => m,
-            None => match self.pdf_insert_native_fontmap_record(&path, index, layout_dir, extend, slant, embolden) {
+            None => match self
+                .pdf_insert_native_fontmap_record(&path, index, layout_dir, extend, slant, embolden)
+            {
                 Some(m) => m,
                 None => crate::error!("Failed to insert font record for font"),
             },
@@ -1128,10 +1170,18 @@ impl Dpx {
             let metrics = if layout_dir == 1 && sfont.sfnt_find_table_pos(b"vmtx") > 0 {
                 let vhea = sfont.tt_read_vhea_table();
                 sfont.sfnt_locate_table(b"vmtx");
-                sfont.tt_read_longMetrics(num_glyphs, vhea.num_of_long_ver_metrics, vhea.num_of_ex_side_bearings)
+                sfont.tt_read_longMetrics(
+                    num_glyphs,
+                    vhea.num_of_long_ver_metrics,
+                    vhea.num_of_ex_side_bearings,
+                )
             } else {
                 sfont.sfnt_locate_table(b"hmtx");
-                sfont.tt_read_longMetrics(num_glyphs, hhea.num_of_long_hor_metrics, hhea.num_of_ex_side_bearings)
+                sfont.tt_read_longMetrics(
+                    num_glyphs,
+                    hhea.num_of_long_hor_metrics,
+                    hhea.num_of_ex_side_bearings,
+                )
             };
             let mut gm = vec![Gm::default(); num_glyphs as usize];
             for i in 0..num_glyphs as usize {
@@ -1170,7 +1220,11 @@ impl Dpx {
             self.dvi.lr_width = self.dvi.lr_width.wrapping_add(x as u32);
             return;
         }
-        let x = if self.dvi.lr_mode == RTYPESETTING { x.wrapping_neg() } else { x };
+        let x = if self.dvi.lr_mode == RTYPESETTING {
+            x.wrapping_neg()
+        } else {
+            x
+        };
         let save_h = self.dvi.dvi_state.h;
         let save_v = self.dvi.dvi_state.v;
         let st = &mut self.dvi.dvi_state;
@@ -1229,7 +1283,12 @@ impl Dpx {
                 let ls = utf32_to_utf16_ls(ch as u32);
                 wbuf = [(hs >> 8) as u8, hs as u8, (ls >> 8) as u8, ls as u8];
             } else {
-                wbuf = [(ch >> 24) as u8, (ch >> 16) as u8, (ch >> 8) as u8, ch as u8];
+                wbuf = [
+                    (ch >> 24) as u8,
+                    (ch >> 16) as u8,
+                    (ch >> 8) as u8,
+                    ch as u8,
+                ];
             }
             n = 4;
         } else if ch > 255 {
@@ -1275,7 +1334,10 @@ impl Dpx {
         match ftype {
             PHYSICAL => {
                 let (wbuf, n) = self.char_bytes(cf, ch);
-                let (minbytes, font_id) = (self.dvi.loaded_fonts[cf].minbytes, self.dvi.loaded_fonts[cf].font_id);
+                let (minbytes, font_id) = (
+                    self.dvi.loaded_fonts[cf].minbytes,
+                    self.dvi.loaded_fonts[cf].font_id,
+                );
                 let cbytes = (minbytes as usize).max(n);
                 let (h, v) = (self.dvi.dvi_state.h, self.dvi.dvi_state.v);
                 self.set_string(h, v.wrapping_neg(), &wbuf[4 - cbytes..], width, font_id);
@@ -1469,7 +1531,10 @@ impl Dpx {
     /// `do_fnt`.
     fn do_fnt(&mut self, tex_id: i32) {
         let Some(i) = self.dvi.def_fonts.iter().position(|d| d.tex_id == tex_id) else {
-            crate::error!("Tried to select a font that hasn't been defined: id={}", tex_id);
+            crate::error!(
+                "Tried to select a font that hasn't been defined: id={}",
+                tex_id
+            );
         };
         if self.dvi.def_fonts[i].used == 0 {
             let d = self.dvi.def_fonts[i].clone();
@@ -1497,7 +1562,8 @@ impl Dpx {
                 self.o.put_name(xgs_dict, b"Type", b"ExtGState");
                 self.o.put_number(xgs_dict, b"ca", f64::from(a) / 255.0);
                 self.o.put_number(xgs_dict, b"CA", f64::from(a) / 255.0);
-                self.dvi.loaded_fonts[fi].xgs_id = self.pdf_defineresource(b"ExtGState", None, xgs_dict, 0);
+                self.dvi.loaded_fonts[fi].xgs_id =
+                    self.pdf_defineresource(b"ExtGState", None, xgs_dict, 0);
             }
             self.dvi.loaded_fonts[fi].source = DVI;
             self.dvi.def_fonts[i].used = 1;
@@ -1595,7 +1661,12 @@ impl Dpx {
         let flags = f.get_unsigned_pair();
         let name_length = f.get_unsigned_byte() as usize;
         f.skip_bytes(name_length + 4);
-        for flag in [XDV_FLAG_COLORED, XDV_FLAG_EXTEND, XDV_FLAG_SLANT, XDV_FLAG_EMBOLDEN] {
+        for flag in [
+            XDV_FLAG_COLORED,
+            XDV_FLAG_EXTEND,
+            XDV_FLAG_SLANT,
+            XDV_FLAG_EMBOLDEN,
+        ] {
             if flags & flag != 0 {
                 f.skip_bytes(4);
             }
@@ -1702,7 +1773,10 @@ impl Dpx {
                 }
             }
             let wbuf = [(glyph_id >> 8) as u8, glyph_id as u8];
-            let (x, y) = (h.wrapping_add(xloc[i]), v.wrapping_neg().wrapping_sub(yloc[i]));
+            let (x, y) = (
+                h.wrapping_add(xloc[i]),
+                v.wrapping_neg().wrapping_sub(yloc[i]),
+            );
             self.record_glyph_run(cf, glyph_id, x, y, size, rgba_used, rgba_color);
             self.set_string(x, y, &wbuf, advance, font_id);
         }
@@ -1723,7 +1797,16 @@ impl Dpx {
 
     /// The side output: a glyph of a native font at DVI position
     /// (`x`, `y`) (y up), in the page's default user space.
-    fn record_glyph_run(&mut self, cf: usize, glyph: u16, x: Spt, y: Spt, size: Spt, rgba_used: u8, rgba: u32) {
+    fn record_glyph_run(
+        &mut self,
+        cf: usize,
+        glyph: u16,
+        x: Spt,
+        y: Spt,
+        size: Spt,
+        rgba_used: u8,
+        rgba: u32,
+    ) {
         let lf = &self.dvi.loaded_fonts[cf];
         if lf.type_ != NATIVE {
             return;
@@ -1733,8 +1816,10 @@ impl Dpx {
             font_file: lf.native_path.clone(),
             face_index: lf.face_index,
             glyph,
-            x: self.dvi.dev_origin_x + mag * (f64::from(x.wrapping_sub(self.dvi.compensation.x)) * d),
-            y: self.dvi.dev_origin_y + mag * (f64::from(y.wrapping_sub(self.dvi.compensation.y)) * d),
+            x: self.dvi.dev_origin_x
+                + mag * (f64::from(x.wrapping_sub(self.dvi.compensation.x)) * d),
+            y: self.dvi.dev_origin_y
+                + mag * (f64::from(y.wrapping_sub(self.dvi.compensation.y)) * d),
             size: mag * f64::from(size) * d,
             rgba: if rgba_used == 1 { rgba } else { 0x0000_00ff },
         };
@@ -1764,7 +1849,11 @@ impl Dpx {
         self.dvi_file().skip_bytes(4);
         let post_id_byte = self.dvi_file().get_unsigned_byte();
         self.dvi.post_id_byte = i32::from(post_id_byte);
-        if !(post_id_byte == DVI_ID || post_id_byte == DVIV_ID || post_id_byte == XDV_ID || post_id_byte == XDV_ID_OLD) {
+        if !(post_id_byte == DVI_ID
+            || post_id_byte == DVIV_ID
+            || post_id_byte == XDV_ID
+            || post_id_byte == XDV_ID_OLD)
+        {
             crate::error!("DVI ID = {}", post_id_byte);
         }
         self.check_id_bytes();
@@ -1894,7 +1983,9 @@ impl Dpx {
                     self.dvi.num_pages = 0;
                     return;
                 }
-                PRE | POST | POST_POST => crate::error!("Unexpected preamble or postamble in dvi file"),
+                PRE | POST | POST_POST => {
+                    crate::error!("Unexpected preamble or postamble in dvi file")
+                }
                 _ => crate::error!("Unexpected opcode or DVI file ended prematurely"),
             }
         }
@@ -1975,7 +2066,9 @@ impl Dpx {
         ext.owner_pw.clear();
         ext.user_pw.clear();
         while error == 0 && *pp < s.len() {
-            let Some(kp) = crate::dpxutil::parse_c_ident(s, pp) else { break };
+            let Some(kp) = crate::dpxutil::parse_c_ident(s, pp) else {
+                break;
+            };
             crate::parse::skip_white(s, pp);
             match &kp[..] {
                 b"ownerpw" | b"userpw" => match self.o.parse_pdf_string(s, pp) {
@@ -2014,7 +2107,12 @@ impl Dpx {
         error
     }
     /// `scan_special_trailerid`: status.
-    fn scan_special_trailerid(&mut self, ext: &mut ScanSpecialsExt, s: &[u8], pp: &mut usize) -> i32 {
+    fn scan_special_trailerid(
+        &mut self,
+        ext: &mut ScanSpecialsExt,
+        s: &[u8],
+        pp: &mut usize,
+    ) -> i32 {
         let mut error = 0;
         crate::parse::skip_white(s, pp);
         match self.o.parse_pdf_array(s, pp, None) {
@@ -2027,8 +2125,10 @@ impl Dpx {
                         && self.o.is_string(t2)
                         && self.o.string_value(t2.expect("string")).len() == 16
                     {
-                        ext.id1.copy_from_slice(self.o.string_value(t1.expect("string")));
-                        ext.id2.copy_from_slice(self.o.string_value(t2.expect("string")));
+                        ext.id1
+                            .copy_from_slice(self.o.string_value(t1.expect("string")));
+                        ext.id2
+                            .copy_from_slice(self.o.string_value(t2.expect("string")));
                     } else {
                         error = -1;
                     }
@@ -2077,7 +2177,9 @@ impl Dpx {
             b"landscape" => sp.landscape = 1,
             b"pagesize" if ns_pdf => {
                 while error == 0 && p < s.len() {
-                    let Some(kp) = parse_c_ident(s, &mut p) else { break };
+                    let Some(kp) = parse_c_ident(s, &mut p) else {
+                        break;
+                    };
                     sw(&mut p);
                     match &kp[..] {
                         b"width" | b"height" | b"xoffset" | b"yoffset" => {
@@ -2202,7 +2304,9 @@ impl Dpx {
                 XXX1..=XXX4 => {
                     let mut size = self.get_and_buffer_unsigned_byte() as u32;
                     for _ in XXX1..opcode {
-                        size = size.wrapping_mul(0x100).wrapping_add(self.get_and_buffer_unsigned_byte() as u32);
+                        size = size
+                            .wrapping_mul(0x100)
+                            .wrapping_add(self.get_and_buffer_unsigned_byte() as u32);
                     }
                     let f = self.dvi.dvi_file.as_mut().expect("DVI file");
                     let data = f.read(size as usize).to_vec();
@@ -2212,17 +2316,27 @@ impl Dpx {
                     self.scan_special(sp, &data);
                     let i = self.dvi.dvi_page_buf_index as usize;
                     if i + data.len() > self.dvi.dvi_page_buffer.len() {
-                        self.dvi.dvi_page_buffer.resize(i + data.len() + DVI_PAGE_BUF_CHUNK as usize, 0);
+                        self.dvi
+                            .dvi_page_buffer
+                            .resize(i + data.len() + DVI_PAGE_BUF_CHUNK as usize, 0);
                     }
                     self.dvi.dvi_page_buffer[i..i + data.len()].copy_from_slice(&data);
                     self.dvi.dvi_page_buf_index += size;
                 }
                 BOP => self.get_and_buffer_bytes(44),
                 NOP | PUSH | POP | W0 | X0 | Y0 | Z0 => {}
-                SET1 | PUT1 | RIGHT1 | DOWN1 | W1 | X1 | Y1 | Z1 | FNT1 => self.get_and_buffer_bytes(1),
-                SET2 | PUT2 | RIGHT2 | DOWN2 | W2 | X2 | Y2 | Z2 | FNT2 => self.get_and_buffer_bytes(2),
-                SET3 | PUT3 | RIGHT3 | DOWN3 | W3 | X3 | Y3 | Z3 | FNT3 => self.get_and_buffer_bytes(3),
-                SET4 | PUT4 | RIGHT4 | DOWN4 | W4 | X4 | Y4 | Z4 | FNT4 => self.get_and_buffer_bytes(4),
+                SET1 | PUT1 | RIGHT1 | DOWN1 | W1 | X1 | Y1 | Z1 | FNT1 => {
+                    self.get_and_buffer_bytes(1)
+                }
+                SET2 | PUT2 | RIGHT2 | DOWN2 | W2 | X2 | Y2 | Z2 | FNT2 => {
+                    self.get_and_buffer_bytes(2)
+                }
+                SET3 | PUT3 | RIGHT3 | DOWN3 | W3 | X3 | Y3 | Z3 | FNT3 => {
+                    self.get_and_buffer_bytes(3)
+                }
+                SET4 | PUT4 | RIGHT4 | DOWN4 | W4 | X4 | Y4 | Z4 | FNT4 => {
+                    self.get_and_buffer_bytes(4)
+                }
                 SET_RULE | PUT_RULE => self.get_and_buffer_bytes(8),
                 FNT_DEF1..=FNT_DEF4 => {
                     let id = self.dvi_file().get_unsigned_num(opcode - FNT_DEF1);
