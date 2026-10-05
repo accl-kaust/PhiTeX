@@ -32,6 +32,8 @@ R=${RESULTS:-${r:-}}
 S=$R/summary.txt
 mkdir -p "$R"
 say() { echo "$*" | tee -a "$S"; }
+# (the dates fixed: the outputs of two runs compare byte for byte)
+env0=(SOURCE_DATE_EPOCH=1758800000 FORCE_SOURCE_DATE=1)
 
 if [ ! -x "$B" ]; then
   cargo build --release -p partex-cli -q || { say "BUILD FAILED"; exit 1; }
@@ -59,7 +61,7 @@ child() {
 # timed DIR CMD...: CMD under GNU time in the course's directory, sampled
 timed() {
   local d=$1; shift
-  (cd "$C" && exec /usr/bin/time -v -o "$d/time.txt" "$@" </dev/null >"$d/term.txt" 2>&1) &
+  (cd "$C" && exec env "${env0[@]}" /usr/bin/time -v -o "$d/time.txt" "$@" </dev/null >"$d/term.txt" 2>&1) &
   local sh=$!
   sleep 0.5
   local pid
@@ -74,7 +76,7 @@ timed() {
 watched() {
   local d=$1; shift
   mkfifo "$d/stdin"
-  (cd "$C" && exec env NO_COLOR=1 PARTEX_STORE_DIR="$d/store" PARTEX_CACHE_DIR="$d/cache" \
+  (cd "$C" && exec env NO_COLOR=1 "${env0[@]}" PARTEX_STORE_DIR="$d/store" PARTEX_CACHE_DIR="$d/cache" \
     PARTEX_FORMATS="$R/formats" ${PRELOAD:+LD_PRELOAD=$PRELOAD} /usr/bin/time -v -o "$d/time.txt" "$B" watch "$@" <"$d/stdin" >"$d/term.txt" 2>&1) &
   local sh=$!
   # (q only once the build has settled: the watch reads its input then)
