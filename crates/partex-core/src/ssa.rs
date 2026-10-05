@@ -51,7 +51,7 @@ mod view;
 pub(crate) use rebuild::{Edits, edits_from};
 pub use rebuild::{
     RebuildReport, RerunCheck, Trips, define_stream, pending, prepare_rebuilds, produced_streams,
-    rebuild, rebuild_log, rebuild_trips, rerun_check, settle, stream_values,
+    rebuild, rebuild_log, rebuild_trips, rerun_check, settle, stream_values, withheld_streams,
 };
 pub use tools::NativeTools;
 pub use view::{dag, step_trace, view};
@@ -1607,6 +1607,17 @@ pub struct SsaTracker {
     /// cancelled rebuild stops as one past its deadline does
     /// ([`rebuild::RebuildReport::cancelled`]).
     pub cancel: core::cell::Cell<Option<Cancel>>,
+    /// Whether a trip whose job ended fatally (`history` is
+    /// `fatal_error_stop` at its end: no legal `\end`, an emergency stop,
+    /// a capacity exceeded, 100 errors) leaves the job's written streams
+    /// as the last complete trip left them (DESIGN 3.7, "A trip that
+    /// ended fatally"): the next trip's loads, the tools, the link's files
+    /// and [`stream_values`] keep the last complete trip's `.aux`, not the
+    /// one cut short. Off (the default) is pdfTeX's: the next run reads
+    /// what the fatal one wrote. An editor that compiles each keystroke
+    /// turns it on (`PARTEX_SSA_KEEP_COMPLETE=1` in the CLI); its link
+    /// then writes [`withheld_streams`] over the files.
+    pub keep_complete: core::cell::Cell<bool>,
     /// Each font slot's maker: the fold's step and the serial its run began
     /// at ([`Tracker::font_visible`]); none for a format's fonts.
     fonts_by: RefCell<Vec<Option<(partex_ssa::fold::StepId, u64, u64)>>>,
@@ -1797,6 +1808,7 @@ impl SsaTracker {
             budget: core::cell::Cell::new(u64::MAX),
             deadline: core::cell::Cell::new(None),
             cancel: core::cell::Cell::new(None),
+            keep_complete: core::cell::Cell::new(false),
             fonts_by: RefCell::new(Vec::new()),
             fonts_made: core::cell::Cell::new(0),
             entry_saves: RefCell::new(Vec::new()),
@@ -3742,7 +3754,13 @@ pub fn run_applying<H: Host>(
     }
     r.rt.close_trip();
     r.st.steps.serve_cold(false);
+    drop(r);
     rep.commands = tex.commands();
+    // (the cold build's trip ended: its φ was the host's files, DESIGN
+    // 3.7, "A trip that ended fatally")
+    if !rep.cancelled {
+        rebuild::trip_ended(tex, true);
+    }
     rep
 }
 

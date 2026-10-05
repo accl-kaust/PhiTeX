@@ -1,0 +1,25 @@
+% A display typed key by key (the video session's): a state with a brace
+% not closed (\frac{\p) makes \frac's argument scan run to the file's end
+% ("File ended while scanning use of \frac"), and the job ends with no
+% legal \end, its .aux cut short before the \newlabel lines its later
+% pages write. Page 1's \ref and \cite read those lines.
+\documentclass{article}
+\begin{document}
+\section{Introduction}
+As Section~\ref{sec:method} shows, and Section~\ref{sec:results}
+confirms, the sum is Euler's~\cite{euler1735}:
+\[ \]
+Closing words.
+
+\newpage
+\section{Method}\label{sec:method}
+Method text.
+
+\newpage
+\section{Results}\label{sec:results}
+Results text.
+
+\begin{thebibliography}{9}
+\bibitem{euler1735} L.~Euler, \emph{De summis serierum reciprocarum}, 1735.
+\end{thebibliography}
+\end{document}

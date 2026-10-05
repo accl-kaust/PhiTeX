@@ -946,6 +946,25 @@ impl<H: Host, T: Tracker> Tex<H, T> {
     }
 
     /// §1333: the full version of `close_files_and_terminate`.
+    /// The PDF file a job that ended fatally removes (pdfTeX's
+    /// `remove_pdffile`, utils.c: in PDF mode, not draft, once the file
+    /// was opened), by the name the job opened it as: an SSA build's link,
+    /// which writes the files from the effects after the job ran, removes
+    /// it afterwards (DESIGN 3.7, "A trip that ended fatally").
+    #[must_use]
+    pub fn fatal_pdf(&self) -> Option<alloc::vec::Vec<u8>> {
+        if self.history() != crate::error::FATAL_ERROR_STOP
+            || self.pdf_output_fixed().1 <= 0
+            || self.output_file_name() == 0
+            || self.pdf.out.fixed_draftmode != 0
+        {
+            return None;
+        }
+        let mut n = self.job_name_bytes()?;
+        n.extend_from_slice(b".pdf");
+        Some(n)
+    }
+
     pub(crate) fn close_files_and_terminate(&mut self) -> Result<(), Jump> {
         // §1378: finish the extensions.
         for k in 0..16 {
@@ -974,6 +993,17 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         if self.pdf_output_fixed().1 > 0 {
             if self.history() == crate::error::FATAL_ERROR_STOP {
                 self.synctex_abort();
+                // pdfTeX's `remove_pdffile` (utils.c): the PDF begun goes;
+                // with effects on, the link removes it after writing the
+                // files ([`Tex::fatal_pdf`])
+                if !self.effects_on()
+                    && let Some(name) = self.fatal_pdf()
+                {
+                    if let Some(id) = self.pdf.out.file.take() {
+                        self.host.close(id);
+                    }
+                    self.host.remove_output(&name);
+                }
                 self.print_err(b" ==> Fatal error occurred, no output PDF file produced!");
             } else {
                 self.finish_pdf_file()?;
