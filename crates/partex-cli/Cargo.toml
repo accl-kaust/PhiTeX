@@ -10,6 +10,11 @@ name = "partex"
 path = "src/main.rs"
 
 [features]
+default = ["jemalloc"]
+# jemalloc as the global allocator (native only): the SSA collector frees
+# millions of small values while a build runs, and glibc's malloc then
+# made each later keystroke slower; jemalloc does not, and builds faster.
+jemalloc = ["dep:tikv-jemallocator"]
 trace = ["partex-trace/trace"]
 # `PARTEX_DEPS=report.txt`: record the dependency graph between input files.
 deps = []
@@ -23,6 +28,9 @@ partex-incr = { path = "../partex-incr" }
 partex-kpse = { path = "../partex-kpse" }
 partex-trace = { path = "../partex-trace" }
 phitex-doc = { path = "../phitex-doc" }
+
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+tikv-jemallocator = { version = "0.6", optional = true }
 
 [lints]
 workspace = true

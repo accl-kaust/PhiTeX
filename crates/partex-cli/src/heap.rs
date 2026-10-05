@@ -7,17 +7,21 @@
 //! (a thesis's link 5 ms became 7 to 25 ms for a dozen keystrokes after
 //! the build). Trimming once, right after a build that collected, sorts
 //! and coalesces them then, and gives the free pages back to the system.
-#![expect(unsafe_code, reason = "FFI to the C library's malloc_trim")]
+#![cfg_attr(
+    not(feature = "jemalloc"),
+    expect(unsafe_code, reason = "FFI to the C library's malloc_trim")
+)]
 
-#[cfg(all(target_os = "linux", target_env = "gnu"))]
+#[cfg(all(target_os = "linux", target_env = "gnu", not(feature = "jemalloc")))]
 unsafe extern "C" {
     fn malloc_trim(pad: usize) -> i32;
 }
 
 /// Consolidate the heap's free chunks and return free pages (a no-op
-/// where the C library has no `malloc_trim`).
+/// where the C library has no `malloc_trim`, or under jemalloc, which
+/// returns free pages itself).
 pub fn trim() {
-    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    #[cfg(all(target_os = "linux", target_env = "gnu", not(feature = "jemalloc")))]
     // SAFETY: malloc_trim takes no pointers and is thread-safe.
     unsafe {
         malloc_trim(0);

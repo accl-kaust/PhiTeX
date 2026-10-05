@@ -37,6 +37,10 @@ mod tokendeps;
 mod warnings;
 mod zlib;
 
+#[cfg(all(feature = "jemalloc", not(target_family = "wasm")))]
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
 use partex_core::{Flavor, Params, PdftexBugs, Tex, Untracked};
 
 /// The engine command line this invocation runs (see `compat.rs`): the
