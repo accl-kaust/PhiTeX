@@ -152,6 +152,7 @@ dependencies = [
  "partex-makeindex",
  "partex-otf",
  "partex-trace",
+ "partex-xdvipdfmx",
  "phitex-doc",
  "tikv-jemallocator",
 ]

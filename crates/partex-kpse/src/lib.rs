@@ -1,4 +1,4 @@
-//! A native port of kpathsea's file lookup, as `tex` uses it.
+//! A native port of kpathsea's file lookup, as `tex` and xdvipdfmx use it.
 //!
 //! Follows the kpathsea sources (`texk/kpathsea`, cited by file and
 //! function): reading `texmf.cnf` (`cnf.c`), variable, tilde and brace
@@ -11,7 +11,8 @@
 //! the `aliases` database, `mktex*` file generation, case-folding search,
 //! Windows path syntax, and the compile-time defaults for paths that
 //! `texmf.cnf` always sets (only `TEXMFCNF`'s default is needed to find
-//! `texmf.cnf` in the first place).
+//! `texmf.cnf` in the first place, and the program formats', which name
+//! the program).
 
 use std::collections::HashMap;
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
@@ -19,7 +20,7 @@ use std::path::Path;
 
 type Bytes = Vec<u8>;
 
-/// The file formats `tex` asks for (`kpse_file_format_type`).
+/// The file formats `tex` and xdvipdfmx ask for (`kpse_file_format_type`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Format {
     Tex,
@@ -49,6 +50,20 @@ pub enum Format {
     OpenType,
     /// `kpse_miscfonts_format`: `XeTeX`'s `TECkit` mappings.
     MiscFonts,
+    /// `kpse_ofm_format`: Omega font metrics (and TFMs).
+    Ofm,
+    /// `kpse_ovf_format`: Omega virtual fonts (and VFs).
+    Ovf,
+    /// `kpse_cmap_format`: `CMap` files.
+    Cmap,
+    /// `kpse_sfd_format`: subfont definition files.
+    Sfd,
+    /// `kpse_pict_format`: graphics.
+    Pict,
+    /// `kpse_program_text_format`: the program's own text files.
+    ProgramText,
+    /// `kpse_program_binary_format`: the program's own binary files.
+    ProgramBinary,
 }
 
 /// `tex-file.c`, `kpathsea_init_format`: how each format is searched.
@@ -163,7 +178,7 @@ fn format_info(f: Format) -> FormatInfo {
             envs: &["OPENTYPEFONTS", "TEXFONTS"],
             suffixes: &[".otf", ".OTF"],
             alt_suffixes: &[],
-            suffix_search_only: false,
+            suffix_search_only: true,
             default_path: "",
         },
         Format::MiscFonts => FormatInfo {
@@ -190,6 +205,50 @@ fn format_info(f: Format) -> FormatInfo {
         Format::Ist => FormatInfo {
             envs: &["INDEXSTYLE"],
             suffixes: &[".ist"],
+            alt_suffixes: &[],
+            suffix_search_only: false,
+            default_path: "",
+        },
+        Format::Ofm => FormatInfo {
+            envs: &["OFMFONTS", "TEXFONTS"],
+            suffixes: &[".ofm", ".tfm"],
+            alt_suffixes: &[],
+            suffix_search_only: true,
+            default_path: "",
+        },
+        Format::Ovf => FormatInfo {
+            envs: &["OVFFONTS", "TEXFONTS"],
+            suffixes: &[".ovf", ".vf"],
+            alt_suffixes: &[],
+            suffix_search_only: true,
+            default_path: "",
+        },
+        Format::Cmap => FormatInfo {
+            envs: &["CMAPFONTS", "TEXFONTS"],
+            suffixes: &[],
+            alt_suffixes: &[],
+            suffix_search_only: false,
+            default_path: "",
+        },
+        Format::Sfd => FormatInfo {
+            envs: &["SFDFONTS", "TEXFONTS"],
+            suffixes: &[".sfd"],
+            alt_suffixes: &[],
+            suffix_search_only: true,
+            default_path: "",
+        },
+        Format::Pict => FormatInfo {
+            envs: &["TEXPICTS", "TEXINPUTS"],
+            suffixes: &[],
+            alt_suffixes: &[".eps", ".epsi"],
+            suffix_search_only: false,
+            default_path: "",
+        },
+        // (the variable, `<PROGNAME>INPUTS`, and the default path,
+        // `.:$TEXMF/<progname>//`, are the program's: `init_format`)
+        Format::ProgramText | Format::ProgramBinary => FormatInfo {
+            envs: &[],
+            suffixes: &[],
             alt_suffixes: &[],
             suffix_search_only: false,
             default_path: "",
@@ -542,6 +601,20 @@ impl Kpse {
             .map(|(k, v)| (k.as_slice(), v.as_slice()))
     }
 
+    /// `kpathsea_reset_program_name`: search as the program `progname`
+    /// from now on (the search paths made so far are made again, but for
+    /// `texmf.cnf`'s and the databases').
+    pub fn reset_program_name(&mut self, progname: &[u8]) {
+        if self.program_name == progname {
+            return;
+        }
+        self.program_name = progname.to_vec();
+        self.env_overlay
+            .insert(b"progname".to_vec(), progname.to_vec());
+        self.paths
+            .retain(|&f, _| f == Format::Cnf || f == Format::Db);
+    }
+
     /// `getenv`, with kpathsea's own `xputenv` settings first; empty
     /// values count as unset.
     fn getenv(&self, name: &[u8]) -> Option<Bytes> {
@@ -758,10 +831,23 @@ impl Kpse {
             return p.clone();
         }
         let info = format_info(format);
+        let (envs, default_path): (Vec<Bytes>, Bytes) =
+            if matches!(format, Format::ProgramText | Format::ProgramBinary) {
+                let prog = &self.program_name;
+                (
+                    vec![[prog.to_ascii_uppercase().as_slice(), b"INPUTS"].concat()],
+                    [b".:$TEXMF/", prog.as_slice(), b"//"].concat(),
+                )
+            } else {
+                (
+                    info.envs.iter().map(|e| e.as_bytes().to_vec()).collect(),
+                    info.default_path.as_bytes().to_vec(),
+                )
+            };
         let mut env_value: Option<Bytes> = None;
         let mut cnf_path: Option<Bytes> = None;
-        for env in info.envs {
-            let env = env.as_bytes();
+        for env in &envs {
+            let env = env.as_slice();
             if env_value.is_none() {
                 env_value = self
                     .getenv(&self.dotted(env, b'.'))
@@ -776,7 +862,7 @@ impl Kpse {
                 break;
             }
         }
-        let mut path = info.default_path.as_bytes().to_vec();
+        let mut path = default_path;
         if let Some(c) = &cnf_path {
             path = expand_default(c, &path);
         }
