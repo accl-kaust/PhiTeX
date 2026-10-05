@@ -2,7 +2,15 @@
 //! XDV in, PDF out, byte for byte what `xelatex` writes.
 //!
 //! `no_std` + `alloc`: files come through [`Files`], compression through
-//! the caller's deflater.
+//! the caller's deflater. [`api::Session`] runs it a page at a time.
+//!
+//! Not ported (no corpus reaches them; each stops the run where C would
+//! need it): PK fonts (pkfont.c), subfonts (subfont.c, `@SFD@` map
+//! entries), encryption (pdfencrypt.c), MetaPost input (mpost.c), BMP and
+//! JPEG 2000 images, EPS through the distiller, manual thumbnails,
+//! extractbb, page selection (`-s`), libpng's gamma and background
+//! transforms for PNGs. tpic and PostScript specials (spc_tpic.c,
+//! spc_dvips.c: ghostscript) are skipped, as a failed special is.
 
 // The C names are kept (non_snake_case among them); lints to be tightened.
 #![allow(unused, dead_code, non_snake_case, clippy::all, clippy::pedantic)]
