@@ -121,7 +121,7 @@ pub fn view<H: Host>(tex: &Tex<H, SsaTracker>) -> Program {
         let w: usize = fold.steps[s as usize]
             .recs
             .iter()
-            .map(|&r| rt.record(r).writes.len())
+            .map(|&r| rt.writes(r).len())
             .sum();
         shows = format!("step {s}: the job's start, {shows}, {w} definitions:{spans}");
     }
@@ -314,7 +314,7 @@ pub fn dag<H: Host>(tex: &Tex<H, SsaTracker>) -> String {
         let mut defs: Vec<(Slot, Option<u128>)> = Vec::new();
         let mut ix: BTreeMap<Slot, usize> = BTreeMap::new();
         for &r in &step.recs {
-            for (a, v) in &rt.record(r).writes {
+            for (a, v) in rt.writes(r) {
                 let v = v.as_ref().map(|v| v.0.0 & u128::from(u64::MAX));
                 if let Some(&i) = ix.get(a) {
                     defs[i].1 = v;
@@ -339,7 +339,7 @@ fn writes(rt: &Runtime<TexSsa>, recs: &[RecId]) -> Vec<Slot> {
     let mut seen = BTreeSet::new();
     let mut out = Vec::new();
     for &r in recs {
-        for (a, _) in &rt.record(r).writes {
+        for (a, _) in rt.writes(r) {
             if seen.insert(*a) {
                 out.push(*a);
             }
@@ -440,7 +440,7 @@ fn set_text(rt: &Runtime<TexSsa>, key: u64, recs: &[RecId]) -> String {
     let mut lists: BTreeMap<Slot, &partex_engine::nodelist::NodeList> = BTreeMap::new();
     let mut depth = None;
     for &r in recs {
-        for (a, v) in &rt.record(r).writes {
+        for (a, v) in rt.writes(r) {
             match (a.0, v.as_ref().and_then(|v| v.1.as_deref())) {
                 (Fam::PageNode, Some(SValue::Field(f))) => {
                     if let Some(n) = f.get::<Node>() {
@@ -468,7 +468,7 @@ fn set_text(rt: &Runtime<TexSsa>, key: u64, recs: &[RecId]) -> String {
     let reaching = |a: &Slot| {
         rt.fold
             .reaching(a, key)
-            .and_then(|d| rt.record(d.rec).writes.get(d.ix as usize)?.1.clone())
+            .and_then(|d| rt.writes(d.rec).get(d.ix as usize)?.1.clone())
     };
     // (the level it left: the nest as it left it, or as it reached it)
     let depth = depth
@@ -513,7 +513,7 @@ fn page_text(rt: &Runtime<TexSsa>, key: u64, reads: &[Slot]) -> String {
         let v = rt
             .fold
             .reaching(&Slot(Fam::PageNode, k), key)
-            .and_then(|d| rt.record(d.rec).writes.get(d.ix as usize)?.1.clone());
+            .and_then(|d| rt.writes(d.rec).get(d.ix as usize)?.1.clone());
         if let Some(SValue::Field(f)) = v.as_ref().and_then(|v| v.1.as_deref())
             && let Some(n) = f.get::<partex_engine::node::Node>()
         {
@@ -545,8 +545,7 @@ fn node_text(rt: &Runtime<TexSsa>, n: &partex_engine::node::Node, out: &mut Stri
                 let a = Slot(Fam::Sealed, (k as u64).cast_signed());
                 let d = rt.fold.latest(&a)?;
                 match rt
-                    .record(d.rec)
-                    .writes
+                    .writes(d.rec)
                     .get(d.ix as usize)?
                     .1
                     .as_ref()?

@@ -1265,8 +1265,7 @@ impl RecState {
                 .or_insert((0, String::from(name)));
             e.0 += 1;
         }
-        let map =
-            |id| -> BTreeMap<Slot, Option<SVal>> { rt.record(id).writes.iter().cloned().collect() };
+        let map = |id| -> BTreeMap<Slot, Option<SVal>> { rt.writes(id).iter().cloned().collect() };
         let (a, b) = (map(hit), map(body));
         let mut fams: alloc::collections::BTreeSet<&'static str> =
             alloc::collections::BTreeSet::new();
@@ -1602,7 +1601,7 @@ impl SsaTracker {
         // (the values the writes hold: each its own allocation, or shared)
         let mut ptrs: Vec<usize> =
             r.rt.records()
-                .flat_map(|x| x.writes.iter())
+                .flat_map(|x| r.rt.writes_of(x).iter())
                 .filter_map(|(_, v)| {
                     v.as_ref()?
                         .1
@@ -2085,7 +2084,7 @@ impl SsaTracker {
                     r.rt.fold
                         .latest(&s)
                         .filter(|d| d.step == id)
-                        .and_then(|d| r.rt.record(d.rec).writes.get(d.ix as usize).cloned())
+                        .and_then(|d| r.rt.writes(d.rec).get(d.ix as usize).cloned())
                         .map(|(_, v)| v.map_or(Version::ABSENT, |v| v.0));
                 let line = alloc::format!(
                     "step {id}: defines {} recorded {} now {:04x} (before {:04x})",
@@ -2120,7 +2119,7 @@ impl SsaTracker {
             let first = i64::from(crate::track::save::ENTRY) + i64::from(save_ptr.max(0));
             r.rt.open_step_recs()
                 .iter()
-                .flat_map(|&id| r.rt.record(id).writes.iter().map(|w| w.0))
+                .flat_map(|&id| r.rt.writes(id).iter().map(|w| w.0))
                 .filter(|a| {
                     a.0 == Fam::Save && a.1 >= first && a.1 < i64::from(crate::track::save::XENTRY)
                 })
@@ -3958,7 +3957,7 @@ fn close_paragraph<H: Host>(
     if let (true, Some(hit)) = (o.entry.is_some(), o.rec) {
         let same = rr.st.compare_writes(&rr.rt, hit, body, &o.name);
         if same {
-            stores = Some(rr.rt.record(hit).writes.clone());
+            stores = Some(rr.rt.writes(hit).to_vec());
         }
     }
     drop(r);

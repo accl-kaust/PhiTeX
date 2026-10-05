@@ -1226,9 +1226,15 @@ per step and the steps' boundaries known:
 
   A kept record is still verified before use, so no policy can make a
   hit wrong. Today it collects inline, keeping the last three builds'
-  roots, when the arena has doubled (not more often: a collection in
-  the middle of a build leaves the heap full of holes, and every later
-  allocation, the link's first, pays for them). A lean record (a step's, never looked up) is kept only while
+  roots, when the arena has doubled, and when a cascade goes cold, right
+  after it retired the old steps after it (the rest of the job, run as a
+  cold build, makes their records again). Not more often: a collection
+  in the middle of a build leaves the heap full of holes among live
+  data, and every later allocation pays for them. The records' writes
+  live in chunks (`Writes`), a collection copying the kept ones into new
+  chunks and freeing the old ones whole; the native CLI has the C
+  library sort and return its free memory once the build settles
+  (`malloc_trim`). A lean record (a step's, never looked up) is kept only while
   a live step of the fold holds it: a kept build's roots keep its
   children, which a later call may hit, not it. Planned: on its own
   thread.

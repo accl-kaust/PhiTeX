@@ -66,6 +66,102 @@ pub enum EffectKind {
     Output,
 }
 
+/// Where a record's writes are in [`Writes`]: a chunk, and a range in
+/// it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct WSpan {
+    chunk: u32,
+    start: u32,
+    len: u32,
+}
+
+impl WSpan {
+    /// How many writes.
+    #[must_use]
+    pub fn len(self) -> usize {
+        self.len as usize
+    }
+
+    #[must_use]
+    pub fn is_empty(self) -> bool {
+        self.len == 0
+    }
+}
+
+/// The records' writes, each record's together in a chunk, the chunks
+/// made whole and let go whole: a collection copies the kept records'
+/// writes into new chunks and frees the old ones ([`Runtime::collect`]).
+/// Each record's own vector, freed when the record was, left the heap
+/// full of holes among live data, and every later allocation paid for
+/// them (a thesis keystroke's full link, 5.2 ms with the freed records'
+/// vectors kept, 7.1 with them freed).
+pub struct Writes<M: Machine + ?Sized> {
+    chunks: Vec<Vec<Write<M>>>,
+}
+
+/// A write of a record: the slot, and the value it left (`None`: removed).
+pub type Write<M> = (<M as Machine>::Addr, Option<<M as Machine>::Val>);
+
+/// A chunk's room, in writes (3 MB of the engine's).
+const WCHUNK: usize = 1 << 16;
+
+impl<M: Machine + ?Sized> Default for Writes<M> {
+    fn default() -> Self {
+        Writes { chunks: Vec::new() }
+    }
+}
+
+impl<M: Machine + ?Sized> Writes<M> {
+    /// The writes at `s`.
+    #[must_use]
+    pub fn get(&self, s: WSpan) -> &[(M::Addr, Option<M::Val>)] {
+        if s.len == 0 {
+            return &[];
+        }
+        let (a, n) = (s.start as usize, s.len as usize);
+        &self.chunks[s.chunk as usize][a..a + n]
+    }
+
+    fn get_mut(&mut self, s: WSpan) -> &mut [(M::Addr, Option<M::Val>)] {
+        if s.len == 0 {
+            return &mut [];
+        }
+        let (a, n) = (s.start as usize, s.len as usize);
+        &mut self.chunks[s.chunk as usize][a..a + n]
+    }
+
+    /// Put `w` in the last chunk, or a new one if it has no room.
+    fn put(&mut self, w: impl ExactSizeIterator<Item = (M::Addr, Option<M::Val>)>) -> WSpan {
+        let n = w.len();
+        if n == 0 {
+            return WSpan::default();
+        }
+        if self
+            .chunks
+            .last()
+            .is_none_or(|c| c.capacity() - c.len() < n)
+        {
+            self.chunks.push(Vec::with_capacity(n.max(WCHUNK)));
+        }
+        let chunk = self.chunks.len() - 1;
+        let c = &mut self.chunks[chunk];
+        let start = c.len();
+        c.extend(w);
+        WSpan {
+            chunk: u32::try_from(chunk).expect("fewer than 2^32 chunks"),
+            start: u32::try_from(start).expect("fewer than 2^32 writes"),
+            len: u32::try_from(n).expect("fewer than 2^32 writes"),
+        }
+    }
+
+    /// The writes held, and the room.
+    fn sizes(&self) -> (usize, usize) {
+        self.chunks
+            .iter()
+            .fold((0, 0), |(n, c), x| (n + x.len(), c + x.capacity()))
+    }
+}
+
 /// A call's record.
 pub struct Record<M: Machine + ?Sized> {
     pub func: M::Func,
@@ -74,7 +170,9 @@ pub struct Record<M: Machine + ?Sized> {
     pub result: M::Val,
     /// The body's own reads, in order (7.17.2).
     pub reads: Vec<(Loc<M::Addr>, Version)>,
-    pub writes: Vec<(M::Addr, Option<M::Val>)>,
+    /// Its net writes, each with the value it left, in the runtime's
+    /// [`Writes`] ([`Runtime::writes`]).
+    pub w: WSpan,
     pub items: Vec<Item<M>>,
     /// The cost of the subtree.
     pub cost: u64,
@@ -232,6 +330,8 @@ pub(crate) struct TripLog<M: Machine + ?Sized> {
 pub struct Runtime<M: Machine> {
     pub cfg: Config,
     pub(crate) recs: Vec<Option<Record<M>>>,
+    /// The records' writes.
+    pub(crate) wa: Writes<M>,
     free: Vec<RecId>,
     pub(crate) memo: Table<Version, Cands>,
     dedup: Table<Version, RecId>,
@@ -292,6 +392,7 @@ impl<M: Machine> Runtime<M> {
         Runtime {
             cfg,
             recs: Vec::new(),
+            wa: Writes::default(),
             free: Vec::new(),
             memo: Table::new(),
             dedup: Table::new(),
@@ -326,6 +427,18 @@ impl<M: Machine> Runtime<M> {
         self.recs.iter().flatten()
     }
 
+    /// Record `id`'s writes, each with the value it left.
+    #[must_use]
+    pub fn writes(&self, id: RecId) -> &[(M::Addr, Option<M::Val>)] {
+        self.wa.get(self.record(id).w)
+    }
+
+    /// A record's writes ([`Runtime::writes`]).
+    #[must_use]
+    pub fn writes_of(&self, r: &Record<M>) -> &[(M::Addr, Option<M::Val>)] {
+        self.wa.get(r.w)
+    }
+
     #[must_use]
     pub fn record(&self, id: RecId) -> &Record<M> {
         self.recs[id as usize].as_ref().expect("a live record")
@@ -336,17 +449,17 @@ impl<M: Machine> Runtime<M> {
     #[must_use]
     pub fn mem_report(&self) -> alloc::string::String {
         use core::mem::size_of;
-        let (mut n, mut rc, mut wc, mut ic, mut ac, mut held) = (0usize, 0, 0, 0, 0, 0);
+        let (mut n, mut rc, mut ic, mut ac, mut held) = (0usize, 0, 0, 0, 0);
+        let (wn, wc) = self.wa.sizes();
         let (mut rl, mut wl) = (0usize, 0);
         for r in self.recs.iter().flatten() {
             n += 1;
             rl += r.reads.len();
             rc += r.reads.capacity();
-            wl += r.writes.len();
-            wc += r.writes.capacity();
+            wl += r.w.len();
             ic += r.items.capacity();
             ac += r.args.capacity();
-            held += r.writes.iter().filter(|w| w.1.is_some()).count();
+            held += self.wa.get(r.w).iter().filter(|w| w.1.is_some()).count();
         }
         let (sr, sw, si) = (
             size_of::<(Loc<M::Addr>, Version)>(),
@@ -354,7 +467,7 @@ impl<M: Machine> Runtime<M> {
             size_of::<Item<M>>(),
         );
         alloc::format!(
-            "records: {n} of {} ({} B each, {} MB; collected lean {:?}, others {:?}); reads {rl} (capacity {rc}, {sr} B: {} MB); writes {wl} (capacity {wc}, {sw} B: {} MB, {held} with a value); items capacity {ic} ({si} B: {} MB); arguments {} MB; memo {} names; {}",
+            "records: {n} of {} ({} B each, {} MB; collected lean {:?}, others {:?}); reads {rl} (capacity {rc}, {sr} B: {} MB); writes {wl} (in chunks {wn}, room {wc}, {sw} B: {} MB, {held} with a value); items capacity {ic} ({si} B: {} MB); arguments {} MB; memo {} names; {}",
             self.recs.len(),
             size_of::<Option<Record<M>>>(),
             (self.recs.capacity() * size_of::<Option<Record<M>>>()) >> 20,
@@ -619,14 +732,19 @@ impl<M: Machine> Runtime<M> {
     /// Put a finished record in the arena, or find its equal.
     /// `reads` is the hash of the record's reads in order, fed as they
     /// were noted (each location's hash and its version).
-    pub(crate) fn intern(&mut self, mut rec: Record<M>, reads: u128) -> RecId {
+    pub(crate) fn intern(
+        &mut self,
+        mut rec: Record<M>,
+        writes: Vec<(M::Addr, Option<M::Val>)>,
+        reads: u128,
+    ) -> RecId {
         let mut h = Stable::new();
         h.word128(rec.name.0);
         h.word128(rec.result.version().0);
         h.word(rec.reads.len() as u64);
         h.word128(reads);
-        h.word(rec.writes.len() as u64);
-        for (a, v) in &rec.writes {
+        h.word(writes.len() as u64);
+        for (a, v) in &writes {
             h.word(hash64(a));
             h.word128(version_opt(v.as_ref()).0);
         }
@@ -663,8 +781,8 @@ impl<M: Machine> Runtime<M> {
                 if o.0 != step {
                     o.1 = true;
                 }
-                if let Some(old) = self.recs[id as usize].as_mut() {
-                    for (w, n) in old.writes.iter_mut().zip(rec.writes) {
+                if let Some(old) = self.recs[id as usize].as_ref() {
+                    for (w, n) in self.wa.get_mut(old.w).iter_mut().zip(writes) {
                         if w.1.as_ref().is_some_and(|v| v.bare().is_none()) {
                             w.1 = n.1;
                         }
@@ -674,6 +792,7 @@ impl<M: Machine> Runtime<M> {
             return id;
         }
         let (name, content) = (rec.name, rec.content);
+        rec.w = self.wa.put(writes.into_iter());
         let inert = rec.items.iter().all(|it| match it {
             Item::Call(c) => self.inert[*c as usize],
             Item::Wrote(_) => true,
@@ -721,6 +840,7 @@ impl<M: Machine> Runtime<M> {
     pub(crate) fn bare_writes(&mut self, id: crate::fold::StepId) {
         let Runtime {
             recs,
+            wa,
             fold,
             lean,
             owner,
@@ -734,10 +854,10 @@ impl<M: Machine> Runtime<M> {
             if !lean.get(i).copied().unwrap_or(false) || owner.get(i).is_none_or(|o| o.1) {
                 continue;
             }
-            let Some(rec) = recs[i].as_mut() else {
+            let Some(rec) = recs[i].as_ref() else {
                 continue;
             };
-            for (ix, (a, v)) in rec.writes.iter_mut().enumerate() {
+            for (ix, (a, v)) in wa.get_mut(rec.w).iter_mut().enumerate() {
                 let Some(b) = v.as_ref().and_then(Value::bare) else {
                     continue;
                 };
@@ -747,6 +867,14 @@ impl<M: Machine> Runtime<M> {
                 }
             }
         }
+    }
+
+    /// Right after a cascade gone cold retired the old steps after it:
+    /// the records only they held go now, which the rest of the job, run
+    /// as a cold build, would otherwise make again beside them.
+    pub fn collect_retired(&mut self) {
+        self.fold.release_removed_records();
+        self.collect();
     }
 
     /// Drop the records no kept build reaches. A kept build's lean
@@ -793,7 +921,7 @@ impl<M: Machine> Runtime<M> {
             if let Some(x) = r.as_ref().filter(|_| !mark[i]) {
                 let k = usize::from(!self.lean.get(i).copied().unwrap_or(false));
                 self.freed[k].0 += 1;
-                self.freed[k].1 += x.writes.len();
+                self.freed[k].1 += x.w.len();
                 *r = None;
                 self.free.push(id);
                 self.stats.collected += 1;
@@ -810,7 +938,42 @@ impl<M: Machine> Runtime<M> {
         for r in &mut self.roots {
             r.retain(|&id| mark[id as usize]);
         }
+        self.compact_writes();
         self.live_after_gc = self.live;
+    }
+
+    /// The kept records' writes copied into new chunks, in the order they
+    /// were in, each old chunk let go whole once its records' are copied
+    /// (the old and the new together hold at most a chunk more than the
+    /// old did).
+    fn compact_writes(&mut self) {
+        let mut spans: Vec<(WSpan, RecId)> = self
+            .recs
+            .iter()
+            .enumerate()
+            .filter_map(|(i, r)| {
+                let r = r.as_ref()?;
+                (!r.w.is_empty()).then(|| (r.w, RecId::try_from(i).expect("fewer than 2^32")))
+            })
+            .collect();
+        spans.sort_unstable_by_key(|(w, _)| (w.chunk, w.start));
+        let mut old = core::mem::take(&mut self.wa);
+        let mut freed = 0usize;
+        for (w, id) in spans {
+            // (the chunks before this one are copied: let go)
+            while freed < w.chunk as usize {
+                old.chunks[freed] = Vec::new();
+                freed += 1;
+            }
+            let moved = old
+                .get_mut(w)
+                .iter_mut()
+                .map(|(a, v)| (a.clone(), v.take()));
+            let span = self.wa.put(moved);
+            if let Some(r) = self.recs[id as usize].as_mut() {
+                r.w = span;
+            }
+        }
     }
 }
 
