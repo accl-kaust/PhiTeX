@@ -326,7 +326,7 @@ fn forallresourcecategory(dpx: &mut Dpx, kp: Obj, vp: Obj) -> i32 {
                 Some(obj) if dpx.o.type_of(Some(obj)) != PDF_DICT => {
                     crate::warn!("Invalid object type for page resource: {:?}", category);
                     r = -1;
-                    dpx.o.release(obj);
+                    // (C does not release `obj` here.)
                 }
                 Some(obj) => {
                     let res_dict = dpx
