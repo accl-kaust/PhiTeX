@@ -82,3 +82,40 @@ macro_rules! error {
         ::core::panic!($($t)*)
     };
 }
+
+impl Dpx {
+    /// A fresh program: every C static at its initial value.
+    #[must_use]
+    pub fn new(files: Box<dyn Files>, deflate: crate::obj::Deflate) -> Self {
+        Dpx {
+            o: PdfOut::new(deflate),
+            files,
+            conf: DpxConf::default(),
+            dvi_filename: None,
+            pdf_filename: None,
+            dvi: Default::default(),
+            dev: Default::default(),
+            doc: Default::default(),
+            draw: Default::default(),
+            color: Default::default(),
+            resource: Default::default(),
+            font: Default::default(),
+            fontmap: Default::default(),
+            tfm: Default::default(),
+            vf: Default::default(),
+            agl: Default::default(),
+            encoding: Default::default(),
+            cmap: Default::default(),
+            cid: Default::default(),
+            ximage: Default::default(),
+            spc: Default::default(),
+            pdfm: Default::default(),
+            xtx: Default::default(),
+            misc: Default::default(),
+            html: Default::default(),
+            t1_char: Default::default(),
+            cs_type2: Default::default(),
+            session: Default::default(),
+        }
+    }
+}
