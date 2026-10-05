@@ -938,6 +938,12 @@ class Runner:
         for k in range(len(case.edits) + 1):
             if k:
                 make_edit(cdir, o, k)
+            if k in case.stops:
+                # (a stopped rebuild ran no job to its end and published
+                # nothing: the next stage goes on from the files before it)
+                runs.append(0)
+                snapshot(o, cdir / "snap" / "o" / str(k))
+                continue
             n = 0
             while True:
                 before = written(o) if self.fixpoint or case.keep_complete else None

@@ -896,7 +896,10 @@ template, which a compiled backend exploits.
     the fatal keystroke's rebuild after 3 steps
     (`PARTEX_SSA_CANCEL_AFTER=3,0`: a list gives each rebuild its own)
     and checks that it wrote no file and that the next keystroke's one
-    trip has page 1's numbers.
+    trip has page 1's numbers; its oracle runs nothing at the stopped
+    stage (the stopped work published nothing), so that one trip a
+    build (`PARTEX_SSA_TRIPS=1`) compares with one pass from the files
+    before it.
   - *The link waits.* While work is pending the program mixes runs of
     two sources, so nothing is linked: the files, the PDF and the
     stores' files are the last complete build's. The φ of trip 1 is
