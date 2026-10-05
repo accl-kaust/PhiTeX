@@ -119,6 +119,7 @@ mod u64map;
 mod values;
 mod web;
 mod wide;
+mod xetex;
 mod xregs;
 
 #[cfg(test)]

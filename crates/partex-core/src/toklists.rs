@@ -146,6 +146,9 @@ impl<H: Host, T: Tracker> Tex<H, T> {
     /// `\fontname`, `\jobname`.
     pub(crate) fn conv_toks(&mut self) -> Result<(), Jump> {
         let c = self.cur_chr;
+        if c >= XETEX_FIRST_EXPAND_CODE {
+            return self.xetex_conv_toks(c);
+        }
         if c >= EXPANDED_CODE && c != JOB_NAME_CODE {
             return self.pdftex_conv_toks(c);
         }
@@ -176,6 +179,8 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             STRING_CODE => {
                 if self.cur_cs != 0 {
                     self.sprint_cs(self.cur_cs);
+                } else if self.unicode {
+                    self.print_char_x(crate::input::cu(self.cur_chr));
                 } else {
                     self.print_char(u8::try_from(self.cur_chr).unwrap_or(0));
                 }
@@ -184,7 +189,20 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             FONT_NAME_CODE => {
                 self.font_read(self.cur_val, crate::track::font::METRICS);
                 let f = crate::fonts::fx(self.cur_val);
-                self.print(self.fonts.name[f]);
+                if self.is_native_font(self.cur_val) {
+                    // `XeTeX` §472: a native font's name in quotes
+                    let name = self.fonts.name[f];
+                    let quote = if self.str_bytes(crate::input::ux(name)).contains(&b'"') {
+                        b'\''
+                    } else {
+                        b'"'
+                    };
+                    self.print_char(quote);
+                    self.print(name);
+                    self.print_char(quote);
+                } else {
+                    self.print(self.fonts.name[f]);
+                }
                 if self.fonts.metrics[f].size != self.fonts.metrics[f].design_size {
                     self.print_str(b" at ");
                     self.print_scaled(self.fonts.metrics[f].size);

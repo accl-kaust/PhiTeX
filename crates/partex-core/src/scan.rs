@@ -483,6 +483,9 @@ impl<H: Host, T: Tracker> Tex<H, T> {
     fn fetch_last_item(&mut self) -> Result<(), Jump> {
         let m = self.cur_chr;
         if m >= INPUT_LINE_NO_CODE {
+            if m >= XETEX_INT {
+                return self.fetch_xetex_item(m);
+            }
             if m >= ETEX_GLUE {
                 return self.fetch_etex_glue(m);
             }
