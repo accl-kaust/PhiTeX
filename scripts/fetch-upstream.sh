@@ -7,10 +7,13 @@ mkdir -p upstream
 
 # name  url  commit  [sparse paths...]
 REPOS=(
-  "texlive-source https://github.com/TeX-Live/texlive-source.git 94234726a6f894b4c170e296f86c93603ae48534 texk/web2c"
+  "texlive-source https://github.com/TeX-Live/texlive-source.git 94234726a6f894b4c170e296f86c93603ae48534 texk/web2c texk/dvipdfm-x libs/teckit"
   "latex2e https://github.com/latex3/latex2e.git 4e72b3d75e366268e9f4330ed29bafbab2820f78"
   "latex3 https://github.com/latex3/latex3.git e2de762010a413b93a4216e028d0a629d7948dfd"
   "pgf https://github.com/pgf-tikz/pgf.git 839974a3f895bfb86f5a8bc155f0886c918f1bff doc/generic/pgf"
+  "fontspec https://github.com/latex3/fontspec.git 43ee7b4b647c4cd4fcf78b4ca19f9edd02e40669 testfiles"
+  "unicode-math https://github.com/latex3/unicode-math.git 184a23b0cb259d4dc9848ec3db0aa2cd383cae99 testfiles"
+  "polyglossia https://github.com/reutenauer/polyglossia.git 07647fa747ab7002c73209cedbc174239308690b testfiles"
 )
 
 for spec in "${REPOS[@]}"; do
