@@ -680,13 +680,22 @@ mod font_tests {
     const DEJAVU: &str = "/usr/share/texmf-dist/fonts/truetype/public/dejavu/DejaVuSans.ttf";
 
     /// The md5 of the DejaVuSans.ttf the hashes below were made from.
-    const DEJAVU_MD5: &str = "b0e31de57cd5307954a3c54136ce68ae";
+    const FONT_MD5: [(&str, &str); 3] = [
+        (DEJAVU, "b0e31de57cd5307954a3c54136ce68ae"),
+        (SPECTRAL, "7b78ff83168097bf78ed628b3ed15d9c"),
+        (AMIRI, "bca12f1468d2ff8ed1512e7f6e73fb16"),
+    ];
+    const SPECTRAL: &str =
+        "/usr/share/texmf-dist/fonts/truetype/production/spectral/Spectral-Regular.ttf";
+    const AMIRI: &str = "/usr/share/texmf-dist/fonts/truetype/public/amiri/Amiri-BoldItalic.ttf";
 
     /// The md5 of what the C code writes for each case.
-    const C_MD5: [(&str, &str); 3] = [
+    const C_MD5: [(&str, &str); 5] = [
         ("dejavu-id", "939eac881233a8a258ce5abb7ce2de8b"),
         ("dejavu-seq", "c4fe04cef1832ca3a0e422e506236940"),
         ("dejavu-big", "49f5c9fe1006d21e1bd5bb45d7384766"),
+        ("spectral-id", "2e8868aade2ef30cee1d94281f4359d5"),
+        ("amiri-seq", "7e3d71b4a584a121c06103591feab6bb"),
     ];
 
     fn hex(d: &[u8]) -> String {
@@ -705,6 +714,8 @@ mod font_tests {
             ("dejavu-id", DEJAVU, true, some.clone()),
             ("dejavu-seq", DEJAVU, false, some),
             ("dejavu-big", DEJAVU, true, (1..3000).collect()),
+            ("spectral-id", SPECTRAL, true, (1..300).collect()),
+            ("amiri-seq", AMIRI, false, (100..1300).step_by(3).collect()),
         ]
     }
 
@@ -716,11 +727,6 @@ mod font_tests {
                 continue;
             };
             assert_eq!(&bytes[..4], &[0, 1, 0, 0]);
-            let font = std::fs::read(path).unwrap();
-            if hex(&partex_engine::md5::md5(&font)) == DEJAVU_MD5 {
-                let want = C_MD5.iter().find(|c| c.0 == name).unwrap().1;
-                assert_eq!(hex(&partex_engine::md5::md5(&bytes)), want, "{name}");
-            }
             if let Some(dir) = dir.as_deref() {
                 std::fs::write(std::format!("{dir}/{name}.bin"), &bytes).unwrap();
                 std::fs::write(std::format!("{dir}/{name}.txt"), dump).unwrap();
@@ -734,6 +740,13 @@ mod font_tests {
                     ),
                 )
                 .unwrap();
+            }
+            let font = std::fs::read(path).unwrap();
+            let font_md5 = FONT_MD5.iter().find(|f| f.0 == path).unwrap().1;
+            if hex(&partex_engine::md5::md5(&font)) == font_md5 {
+                if let Some(&(_, want)) = C_MD5.iter().find(|c| c.0 == name) {
+                    assert_eq!(hex(&partex_engine::md5::md5(&bytes)), want, "{name}");
+                }
             }
         }
     }

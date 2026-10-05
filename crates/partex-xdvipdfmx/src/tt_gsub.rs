@@ -1567,3 +1567,217 @@ mod tests {
         assert_eq!(clt_lookup_coverage(&cov, 5), -1);
     }
 }
+
+/// cmap, post and GSUB lookups of TeX Live fonts against xdvipdfmx's own
+/// code (a C harness over tt_cmap.c, tt_gsub.c, otl_opt.c, tt_post.c):
+/// the same dump; `PARTEX_XPDF_DUMP=dir` writes it.
+#[cfg(test)]
+mod font_tests {
+    extern crate std;
+
+    use super::*;
+    use crate::stream::MemFile;
+    use alloc::string::String;
+    use alloc::sync::Arc;
+    use core::fmt::Write as _;
+
+    fn dump_gsub(
+        out: &mut String,
+        sfont: &mut Sfnt,
+        n: u16,
+        s: &[u8],
+        l: &[u8],
+        f: &[u8],
+        set: &[u16],
+    ) {
+        let mut g = OtlGsub::otl_gsub_new();
+        let r = g.otl_gsub_add_feat(s, l, f, sfont);
+        let st = |b: &[u8]| String::from_utf8_lossy(b).into_owned();
+        let _ = writeln!(out, "feat {}.{}.{} {}", st(s), st(l), st(f), r);
+        if r >= 0 {
+            for gid in 0..n {
+                let mut g2 = gid;
+                if g.otl_gsub_apply(&mut g2) == 0 {
+                    let _ = writeln!(out, "s {gid} {g2}");
+                }
+                for k in 0..3u16 {
+                    let mut g2 = gid;
+                    if g.otl_gsub_apply_alt(k, &mut g2) == 0 {
+                        let _ = writeln!(out, "a {gid} {k} {g2}");
+                    }
+                }
+            }
+            for &a in set {
+                for &b in set {
+                    let mut g2 = 0;
+                    if g.otl_gsub_apply_lig(&[a, b], &mut g2) == 0 {
+                        let _ = writeln!(out, "l {a} {b} {g2}");
+                    }
+                    for &c in set {
+                        let mut g2 = 0;
+                        if g.otl_gsub_apply_lig(&[a, b, c], &mut g2) == 0 {
+                            let _ = writeln!(out, "l {a} {b} {c} {g2}");
+                        }
+                    }
+                }
+            }
+            let mut g2 = 0;
+            if g.otl_gsub_apply_lig(&set[..1], &mut g2) == 0 {
+                let _ = writeln!(out, "l1 {} {g2}", set[0]);
+            }
+        }
+    }
+
+    /// What the harness prints for `path` and the `(script, language,
+    /// feature)` triples.
+    fn dump(path: &str, feats: &[(&[u8], &[u8], &[u8])]) -> Option<String> {
+        let data = std::fs::read(path).ok()?;
+        let mut sfont = Sfnt::sfnt_open(MemFile::new(Arc::from(data), path.as_bytes()))?;
+        let mut out = String::new();
+        let _ = writeln!(out, "type {}", sfont.type_);
+        sfont.sfnt_read_table_directory(0);
+        let n = sfont.tt_read_maxp_table().num_glyphs;
+        let _ = writeln!(out, "numGlyphs {n}");
+        let mut uni: Option<crate::tt_cmap::TtCmap> = None;
+        for (p, e) in [(3, 10), (3, 1), (0, 3), (0, 4), (1, 0), (3, 0), (0, 5)] {
+            let Some(c) = sfont.tt_cmap_read(p, e) else {
+                let _ = writeln!(out, "cmap {p} {e} none");
+                continue;
+            };
+            let _ = writeln!(
+                out,
+                "cmap {p} {e} format {} language {}",
+                c.format, c.language
+            );
+            let max: u32 = if c.format >= 12 { 0x10FFFF } else { 0xFFFF };
+            if c.format != 14 {
+                for cc in 0..=max {
+                    let g = c.tt_cmap_lookup(cc);
+                    if g != 0 {
+                        let _ = writeln!(out, "{cc:x} {g}");
+                    }
+                }
+            }
+            if uni.is_none() && (c.format == 4 || c.format == 12) {
+                uni = Some(c);
+            }
+        }
+        let mut set: Vec<u16> = Vec::new();
+        for &ch in b"filtaeocsTh0123" {
+            let g = uni.as_ref().map_or(0, |u| u.tt_cmap_lookup(u32::from(ch)));
+            if g != 0 {
+                set.push(g);
+            }
+        }
+        for i in 1..20u16 {
+            if i < n {
+                set.push(i);
+            }
+        }
+        if let Some(post) = sfont.tt_read_post_table() {
+            let _ = writeln!(out, "post {:08x} {}", post.version, post.number_of_glyphs);
+            for gid in 0..n.min(600) {
+                if let Some(nm) = post.tt_get_glyphname(gid) {
+                    let _ = writeln!(
+                        out,
+                        "{gid} {} {}",
+                        String::from_utf8_lossy(&nm),
+                        post.tt_lookup_post_table(&nm)
+                    );
+                }
+            }
+        }
+        for (s, l, f) in feats {
+            dump_gsub(&mut out, &mut sfont, n, s, l, f, &set);
+        }
+        let tags = b"liga:latn.dflt.smcp:onum:kern:DFLT.dflt.c2sc:x";
+        let mut g = OtlGsub::otl_gsub_new();
+        let r = g.otl_gsub_add_feat_list(tags, &mut sfont);
+        g.otl_gsub_set_chain(tags);
+        let _ = writeln!(out, "chain {r}");
+        for gid in 0..n {
+            let mut g2 = gid;
+            let r = g.otl_gsub_apply_chain(&mut g2);
+            if r == 0 || g2 != gid {
+                let _ = writeln!(out, "c {gid} {g2} {r}");
+            }
+        }
+        Some(out)
+    }
+
+    const FEATS: &[(&[u8], &[u8], &[u8])] = &[
+        (b"*", b"*", b"liga"),
+        (b"*", b"*", b"smcp"),
+        (b"*", b"*", b"onum"),
+        (b"*", b"*", b"salt"),
+        (b"*", b"*", b"vert"),
+        (b"*", b"*", b"(?lig|lig?|?cmp|cmp?|frac|afrc)"),
+        (b"latn", b"dflt", b"liga"),
+        (b"latn", b"*", b"c2sc"),
+        (b"arab", b"*", b"init"),
+        (b"*", b"*", b"*"),
+    ];
+
+    /// (name, font, md5 of the C harness's output, md5 of the font).
+    const CASES: &[(&str, &str, &str, &str)] = &[
+        (
+            "dejavu",
+            "/usr/share/texmf-dist/fonts/truetype/public/dejavu/DejaVuSans.ttf",
+            "a3f19e6da97e27cd1d5127084e3d0de1",
+            "b0e31de57cd5307954a3c54136ce68ae",
+        ),
+        (
+            "ebgaramond",
+            "/usr/share/texmf-dist/fonts/opentype/public/ebgaramond/EBGaramond-Regular.otf",
+            "f8e38ead673de4fe2f4324ea4ef2af8d",
+            "c3133d2af9ea5c7f03dfc0b08cdfee46",
+        ),
+        (
+            "amiri",
+            "/usr/share/texmf-dist/fonts/truetype/public/amiri/Amiri-BoldItalic.ttf",
+            "1829d4c5734aabf504e17e57b966bcde",
+            "bca12f1468d2ff8ed1512e7f6e73fb16",
+        ),
+        (
+            "spectral",
+            "/usr/share/texmf-dist/fonts/truetype/production/spectral/Spectral-Regular.ttf",
+            "4e1230d2d6e50d0b86ffdb5386f0b1e7",
+            "7b78ff83168097bf78ed628b3ed15d9c",
+        ),
+    ];
+
+    fn hex(d: &[u8]) -> String {
+        let mut s = String::new();
+        for b in d {
+            let _ = write!(s, "{b:02x}");
+        }
+        s
+    }
+
+    #[test]
+    fn lookups() {
+        let dir = std::env::var("PARTEX_XPDF_DUMP").ok();
+        for &(name, path, want, font_md5) in CASES {
+            let Some(out) = dump(path, FEATS) else {
+                continue;
+            };
+            if let Some(dir) = dir.as_deref() {
+                std::fs::write(std::format!("{dir}/{name}.gsub.txt"), &out).unwrap();
+                let mut args = String::from(path);
+                for (s, l, f) in FEATS {
+                    let st = |b: &[u8]| String::from_utf8_lossy(b).into_owned();
+                    let _ = write!(args, " '{}' '{}' '{}'", st(s), st(l), st(f));
+                }
+                std::fs::write(std::format!("{dir}/{name}.gsub.args"), args).unwrap();
+            }
+            let font = std::fs::read(path).unwrap();
+            if !want.is_empty() && hex(&partex_engine::md5::md5(&font)) == font_md5 {
+                assert_eq!(
+                    hex(&partex_engine::md5::md5(out.as_bytes())),
+                    want,
+                    "{name}"
+                );
+            }
+        }
+    }
+}
