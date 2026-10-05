@@ -61,4 +61,4 @@ sources change, use `-watch`.
 
 ## License
 
-GNU Affero General Public License v3.0 or later (`AGPL-3.0-or-later`); see `LICENSE`.
+GNU Affero General Public License v3.0 only (`AGPL-3.0-only`); see `LICENSE`.
