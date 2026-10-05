@@ -108,6 +108,13 @@ pub(crate) struct Steps {
     /// 3.7, "A rebuild stopped"): the work it left, which the next
     /// rebuild takes up.
     pending: Option<Pending>,
+    /// With [`SsaTracker::keep_complete`], after a trip whose job ended
+    /// fatally: each stored name's value as the last complete trip left it
+    /// (DESIGN 3.7, "A trip that ended fatally"), which the next trip's φ,
+    /// the tools, the link and [`stream_values`] take instead of the
+    /// stores; `None` while the stores are the last trip's and it was
+    /// complete (or the option is off).
+    complete: Option<BTreeMap<u32, Option<Arc<[u8]>>>>,
     /// The queries of the host the open step's run asked, and each
     /// step's, by step id, with their answers' versions (7.17.3, "A
     /// query is asked again").
@@ -574,6 +581,22 @@ impl Steps {
     ) -> (BTreeMap<u32, Option<Arc<[u8]>>>, BTreeSet<u32>) {
         let mut phi = BTreeMap::new();
         let mut changed = BTreeSet::new();
+        // (a trip that ended fatally, its stores withheld: the last
+        // complete trip's values, DESIGN 3.7, "A trip that ended fatally")
+        if let Some(c) = &self.complete {
+            for (&id, v) in c {
+                let same = match (self.last_phi.get(&id), v) {
+                    (Some(Some(w)), Some(v)) => Arc::ptr_eq(w, v) || w[..] == v[..],
+                    (Some(None), None) => true,
+                    _ => false,
+                };
+                if !same {
+                    changed.insert(id);
+                }
+                phi.insert(id, v.clone());
+            }
+            return (phi, changed);
+        }
         // (the values made with no step open, kept)
         let keep = self.cur_stores.is_empty();
         let stored: Vec<u32> = self.stored.iter().copied().collect();
@@ -2214,9 +2237,15 @@ pub fn rebuild<H: Host>(tex: &mut Tex<H, SsaTracker>, trace: bool, apply: bool) 
                 }
                 let r = tex.tracker.rec.borrow();
                 let s = &r.st.steps;
-                let v = match s.value_at(&r.rt.fold, id, u64::MAX) {
-                    Some(Ok(v)) => v.map(Arc::<[u8]>::from), // (a command removed it: none)
-                    _ => s.last_phi.get(&id).cloned().flatten(),
+                // (the last complete trip's, if the trips since ended
+                // fatally and withheld their stores)
+                let v = match (
+                    s.complete.as_ref().and_then(|c| c.get(&id)),
+                    s.value_at(&r.rt.fold, id, u64::MAX),
+                ) {
+                    (Some(v), _) => v.clone(),
+                    (None, Some(Ok(v))) => v.map(Arc::<[u8]>::from), // (a command removed it: none)
+                    (None, _) => s.last_phi.get(&id).cloned().flatten(),
                 };
                 own.insert(id);
                 vals.push((id, v));
@@ -2793,7 +2822,50 @@ pub fn rebuild<H: Host>(tex: &mut Tex<H, SsaTracker>, trace: bool, apply: bool) 
         // (the steps this rebuild passed over: what they read and made)
         r.rt.fold.release_removed();
     }
+    // (a trip that reached the job's end, normally or fatally: a stopped
+    // one is not a trip that ended, and keeps what was published)
+    if rep.stopped.is_none() && rep.unsupported.is_none() {
+        trip_ended(tex, false);
+    }
     rep
+}
+
+/// A trip ended (DESIGN 3.7, "A trip that ended fatally"): with
+/// [`SsaTracker::keep_complete`] and the job ended fatally, its stores are
+/// withheld and the last complete trip's values stand: if this is the
+/// first trip since one that was complete, each name's φ the trip read
+/// (a `cold` build's, the host's file, which no build writes before its
+/// link; else its own [`Steps::last_phi`]). Else its stores are the
+/// streams.
+pub(crate) fn trip_ended<H: Host>(tex: &mut Tex<H, SsaTracker>, cold: bool) {
+    let fatal = tex.history == crate::error::FATAL_ERROR_STOP;
+    if !(fatal && tex.tracker.keep_complete.get()) {
+        tex.tracker.rec.borrow_mut().st.steps.complete = None;
+        return;
+    }
+    if tex.tracker.rec.borrow().st.steps.complete.is_some() {
+        return;
+    }
+    let mut c = BTreeMap::new();
+    if cold {
+        let names: Vec<(u32, Vec<u8>, FileKind)> = {
+            let r = tex.tracker.rec.borrow();
+            r.st.steps
+                .stored
+                .iter()
+                .filter_map(|&id| {
+                    let l = r.st.loads.get(id as usize)?;
+                    Some((id, l.0.clone(), l.2))
+                })
+                .collect()
+        };
+        for (id, name, kind) in names {
+            c.insert(id, tex.host.read_file(&name, kind).map(|f| f.contents));
+        }
+    } else {
+        c = tex.tracker.rec.borrow().st.steps.last_phi.clone();
+    }
+    tex.tracker.rec.borrow_mut().st.steps.complete = Some(c);
 }
 
 /// A stream's bytes, or none (no file).
@@ -2855,8 +2927,27 @@ pub fn stream_values<H: Host>(tex: &Tex<H, SsaTracker>) -> Vec<(Vec<u8>, Option<
         .iter()
         .filter_map(|&id| {
             let name = r.st.loads.get(id as usize)?.0.clone();
+            if let Some(v) = s.complete.as_ref().and_then(|c| c.get(&id)) {
+                return Some((name, v.as_deref().map(<[u8]>::to_vec)));
+            }
             Some((name, s.value_at(&r.rt.fold, id, u64::MAX)?.ok().flatten()))
         })
+        .collect()
+}
+
+/// The written streams the last trip withheld (DESIGN 3.7, "A trip that
+/// ended fatally"; [`SsaTracker::keep_complete`]): each by name, with the
+/// last complete trip's bytes (`None`: no file then). The host's link
+/// writes these over the files the steps' effects made (the cut `.aux`),
+/// after them; empty unless the last trip ended fatally with the option on.
+#[must_use]
+pub fn withheld_streams<H: Host>(tex: &Tex<H, SsaTracker>) -> Vec<(Vec<u8>, Stream)> {
+    let r = tex.tracker.rec.borrow();
+    let Some(c) = &r.st.steps.complete else {
+        return Vec::new();
+    };
+    c.iter()
+        .filter_map(|(&id, v)| Some((r.st.loads.get(id as usize)?.0.clone(), v.clone())))
         .collect()
 }
 

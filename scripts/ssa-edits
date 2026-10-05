@@ -31,6 +31,16 @@ chapter also uses, left out by `\\includeonly` and taken back; `fatal_end` (`fat
 that ends fatally in its last page's output routine, not seeded: the
 .aux the first build wrote is read by its next trip (or, one trip a
 build, by the next stage's), which runs earlier steps again; and
+`petals` (`petals.tex`, the Overleaf extension's report): Backspace on
+`\\petals{5}` (the `\\foreach` runs away and the job ends fatally, its .aux
+cut before the later pages' `\\newlabel` lines), then 7 typed;
+`petals_keys`: the same, one trip a keystroke, the fatal trip's streams
+withheld (`PARTEX_SSA_KEEP_COMPLETE=1`), against an oracle that puts back
+the files a fatal run wrote (DESIGN 3.7, "A trip that ended fatally");
+`petals_stop`: one trip a keystroke, the fatal keystroke's rebuild
+cancelled after 3 steps, which must write no file, and the next one;
+`display_keys` (`display-keys.tex`): a display typed key by key through
+states with `\\frac{` not closed (each fatal), as `petals_keys`; and
 `inputs` (`inputs.tex`): a file only tested for (`\\openin` and
 `\\ifeof`), edited, and a line appended after the last line of a file
 `\\input` (the primitive), then taken away, then a word of it changed,
@@ -226,6 +236,23 @@ VOBJ_EDITS = [
 # fatal-end.tex: a word, edited and back, in a job that ends fatally in
 # its last page's output routine
 FATAL_EDITS = [("Hello world.", "Hello there."), ("Hello there.", "Hello world.")]
+# petals.tex (the Overleaf extension's report): Backspace on \petals's 5
+# (the \foreach runs away and the job ends fatally, no legal \end, its
+# .aux cut short before the \newlabel lines of the later pages), then 7
+# typed: page 1's \ref and \cite must have their numbers again
+PETALS_EDITS = [("\\petals{5}", "\\petals{}"), ("\\petals{}", "\\petals{7}")]
+# display-keys.tex (the video session's): a display typed key by key, the
+# states with a brace not closed (`\frac{\p`) running the argument's scan
+# to the file's end ("File ended while scanning use of \frac"), the job
+# ending fatally; then closed, then a word
+DISPLAY_KEYS_EDITS = [
+    ("\\[ \\]", "\\[ \\sum_{n=1}^{\\infty} \\]"),
+    ("\\[ \\sum_{n=1}^{\\infty} \\]", "\\[ \\sum_{n=1}^{\\infty} \\frac{1 \\]"),
+    ("\\frac{1 \\]", "\\frac{1}{n^2} = \\frac{\\p \\]"),
+    ("\\frac{\\p \\]", "\\frac{\\pi \\]"),
+    ("\\frac{\\pi \\]", "\\frac{\\pi^2}{6} \\]"),
+    ("Closing words.", "Closing phrases."),
+]
 # names.tex (not seeded): an `\ifcsname` of a name the `.aux` defines at
 # `\begin{document}` from the second trip on, which the first trip entered
 # later in the document, as `\end{document}`'s `\@testdef` enters a
@@ -326,8 +353,16 @@ WINDOW_EDITS = [
 
 class Case:
     def __init__(self, name, inputs, fmt, args, edits, outdir=None, seed=0, garble=False, env=None,
-                 trip_steps=None):
+                 trip_steps=None, keep_complete=False, stops=()):
         self.name = name
+        # the oracle as `PARTEX_SSA_KEEP_COMPLETE=1` builds: a run that ends
+        # fatally leaves the files it reads back as the run before it left
+        # them (DESIGN 3.7, "A trip that ended fatally")
+        self.keep_complete = keep_complete
+        # the stages whose rebuild stops (`PARTEX_SSA_CANCEL_AFTER`): it
+        # links nothing, so its files are the stage before's, and the next
+        # stage goes on with its work
+        self.stops = set(stops)
         # the SSA process's own variables (over --env's)
         self.env = env or {}
         # the steps the cold build's trips after its first may run, at most
@@ -471,12 +506,13 @@ def e2e_watch_cases():
 
 
 def all_cases():
-    def latex(name, src, fmt, edits, seed=2, extra=(), garble=False, trip_steps=None):
+    def latex(name, src, fmt, edits, seed=2, extra=(), garble=False, trip_steps=None, env=None,
+              keep_complete=False, stops=()):
         args = [*LATEX_FLAGS, *extra, f"-fmt={fmt}", "-output-directory=out", "edits"]
         edits = [("edits.tex", m, n) for m, n in edits]
         return Case(
             name, {"edits.tex": src}, fmt, args, edits, outdir="out", seed=seed, garble=garble,
-            trip_steps=trip_steps,
+            trip_steps=trip_steps, env=env, keep_complete=keep_complete, stops=stops,
         )
 
     def includeonly():
@@ -515,6 +551,24 @@ def all_cases():
         # (not seeded: the first build's second trip reads the .aux the
         # first wrote, as the next stage's pass does with one trip a build)
         latex("fatal_end", "fatal-end.tex", "pdflatex", FATAL_EDITS, seed=0),
+        # (pdfTeX's way, the default: the fatal stage's cut .aux read by its
+        # next trip, every stage run to its fixed point)
+        latex("petals", "petals.tex", "pdflatex", PETALS_EDITS, seed=0),
+        # (as the extension types: one trip a keystroke, the fatal trip's
+        # streams withheld, so the next keystroke reads the last complete
+        # .aux)
+        latex("petals_keys", "petals.tex", "pdflatex", PETALS_EDITS, seed=0,
+              env={"PARTEX_SSA_KEY_TRIPS": "1", "PARTEX_SSA_KEEP_COMPLETE": "1"},
+              keep_complete=True),
+        # (the fatal keystroke's rebuild cancelled after 3 steps, the next
+        # keystroke going on with its work: the stopped trip published
+        # nothing, without the option)
+        latex("petals_stop", "petals.tex", "pdflatex", PETALS_EDITS, seed=0,
+              env={"PARTEX_SSA_KEY_TRIPS": "1", "PARTEX_SSA_CANCEL_AFTER": "3,0"},
+              stops=[1]),
+        latex("display_keys", "display-keys.tex", "pdflatex", DISPLAY_KEYS_EDITS, seed=0,
+              env={"PARTEX_SSA_KEY_TRIPS": "1", "PARTEX_SSA_KEEP_COMPLETE": "1"},
+              keep_complete=True),
         latex("names", "names.tex", "pdflatex", NAMES_EDITS, seed=0),
         latex("names_rerun", "names-rerun.tex", "pdflatex", NAMES_RERUN_EDITS, seed=0,
               trip_steps=30),
@@ -678,6 +732,20 @@ def written(d):
         for rel, p in files(d).items()
         if not rel.endswith((".log", ".dvi", ".pdf"))
     }
+
+
+# a log of a job that ended fatally (`history` = fatal_error_stop: §93
+# `succumb`, §82's 100 errors, pdfTeX's "no output PDF file")
+FATAL_LOG = re.compile(
+    rb"^! Emergency stop\.$|==> Fatal error occurred|^\(That makes 100 errors|"
+    rb"^! TeX capacity exceeded",
+    re.M,
+)
+
+
+def ended_fatally(case, run):
+    log = run / (case.outdir or ".") / f"{case.argv[-1]}.log"
+    return log.exists() and FATAL_LOG.search(log.read_bytes()) is not None
 
 
 def stamp(f, at):
@@ -872,9 +940,15 @@ class Runner:
                 make_edit(cdir, o, k)
             n = 0
             while True:
-                before = written(o) if self.fixpoint else None
+                before = written(o) if self.fixpoint or case.keep_complete else None
                 self.exec(case.argv, o, cdir / "logs" / f"o-{k}-{n}", self.env)
-                self.tools(case, o, cdir / "logs" / f"o-{k}-{n}")
+                if case.keep_complete and ended_fatally(case, o):
+                    # (the files it reads back as the last complete run
+                    # left them, which its next run reads: no tool runs)
+                    for rel, data in before.items():
+                        (o / rel).write_bytes(data)
+                else:
+                    self.tools(case, o, cdir / "logs" / f"o-{k}-{n}")
                 n += 1
                 if not self.fixpoint or n == 5 or written(o) == before:
                     break
@@ -933,6 +1007,7 @@ REBUILT = re.compile(
     re.M,
 )
 STOPPED = re.compile(r"^partex: ssa rebuild (\d+): stopped: (.*)$", re.M)
+PENDING = re.compile(r"^partex: ssa rebuild (\d+): stopped \((.*)\), (\d+) steps pending", re.M)
 
 
 def count(text, name):
@@ -1002,6 +1077,7 @@ def judge(case, cdir, runs, code, err, last):
     n = len(case.edits)
     rebuilt = {int(m.group(1)): m for m in REBUILT.finditer(err)}
     stopped = {int(m.group(1)): m.group(2) for m in STOPPED.finditer(err)}
+    pending = {int(m.group(1)): m.group(3) for m in PENDING.finditer(err)}
     cold, cold_link = COLD.search(err), COLD_LINK.search(err)
     crashed = "panicked at" in err or code == "timeout" or code not in (0, 1)
     for k in range(n + 1):
@@ -1010,6 +1086,18 @@ def judge(case, cdir, runs, code, err, last):
             file, marker, new = case.edits[k - 1]
             s["edit"] = [file, marker, new]
         problems = []
+        if k in case.stops and k <= last:
+            # (a stopped rebuild: no link, every file as the stage before's)
+            if k not in pending:
+                problems.append("did not stop")
+            else:
+                s["pending"] = int(pending[k])
+            diffs, notes = differences(cdir / "snap" / "p" / str(k - 1), cdir / "snap" / "p" / str(k))
+            diffs = [f"{d} (written while stopped)" for d in diffs if d not in case.inputs]
+            s["diffs"], s["notes"], s["problems"] = diffs, notes, problems
+            s["ok"] = not diffs and not problems
+            stages.append(s)
+            continue
         if k > last:
             problems.append("not built")
         elif k == 0 and cold:

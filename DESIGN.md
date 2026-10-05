@@ -660,6 +660,14 @@ template, which a compiled backend exploits.
   the stores' lines, and only the link writes files. So a rebuild that
   stops halfway (cancelled, past its deadline) leaves every file as the
   last link wrote it, never a step's truncated `.aux`.
+  - *Only a trip that ended publishes its streams.* What a later trip's
+    loads read of a name the job writes (the φ), what the tools read and
+    what the link writes is what the last trip that reached the job's end
+    stored: a trip stopped halfway (deadline, cancel, budget) publishes
+    nothing, whether its work is resumed or dropped (below, "A rebuild
+    stopped"); and, with `SsaTracker::keep_complete`, a trip that ended
+    fatally publishes nothing either (below, "A trip that ended
+    fatally").
   - *A load of a name the job writes* is served from the stores in every
     trip, the cold build's first included (`Steps::serve_cold`): the lines
     since the last open before it, or, with no open before it, the φ (in a
@@ -826,6 +834,34 @@ template, which a compiled backend exploits.
   trips: one trip per build, no tool run, so a rebuild matches one plain
   pass and a label needs two rebuilds (the harness without
   `--fixpoint`).
+- *A trip that ended fatally* (decided 2026-10-05). A trip whose job
+  ends with `history` at `fatal_error_stop` (no legal `\end` in
+  nonstop mode, an emergency stop, a capacity exceeded, 100 errors) is
+  pdfTeX's run that wrote a `.aux` cut short: by default its stores are
+  the streams, the next trip reads the cut `.aux` and the trips go on
+  from it, as `pdflatex` run again does (the fixed point the edit harness
+  compares with; plain partex's messages and cut `.aux` are pdfTeX's on
+  `tests/e2e/petals.tex`). An editor that compiles each keystroke must
+  not: one key (`\petals{}` emptied, a `\frac{\p` not closed) ends the
+  job fatally, and the next keystroke's single trip read a `.aux` without
+  the later pages' `\newlabel` lines, its page 1 showing `??` until the
+  idle settle. `SsaTracker::keep_complete` (off by default; the CLI's
+  `PARTEX_SSA_KEEP_COMPLETE=1`; the extension turns it on) withholds such
+  a trip's stores (`rebuild::trip_ended`, at a cold build's and each
+  rebuild's end): each stored name keeps the value the last complete
+  trip left (`Steps::complete`: the φ the first fatal trip read, a cold
+  build's the host's file, which no build writes before its link), and
+  that is the next trip's φ (its trip end makes no seed: the trips end),
+  what the tools read, the next rebuild's own φ, what `stream_values`
+  serves, and what the link writes over the steps' cut files
+  (`ssa::withheld_streams`). The next trip that reaches the job's end
+  normally publishes its stores again. The harness's oracle for it
+  (`keep_complete` cases: `petals_keys`, `display_keys`) puts the files
+  a fatal run wrote back as the run before left them. Either way the job
+  leaves no PDF, as pdfTeX's `remove_pdffile` does: a plain run removes
+  the file it began, and an SSA build's link, which writes the files
+  from the effects after the job ran, removes it afterwards
+  (`Tex::fatal_pdf`).
 - *A rebuild stopped* (decided 2026-10-04). A rebuild stops past its
   deadline (`SsaTracker::deadline`), past its budget of commands
   (`SsaTracker::budget`), or when `SsaTracker::cancel` says so: the
@@ -849,8 +885,18 @@ template, which a compiled backend exploits.
     before, inside or after the pending region marks the steps whose
     lines it changed, and the places each step ends at are mapped
     through all the edits since its run. The φ is the stopped trip's.
-    A trip that stopped is not a trip that ended: no store is compared
-    and no tool runs until it ends.
+    A trip that stopped is not a trip that ended: no store is compared,
+    no tool runs and nothing is published until it ends. Its stores,
+    written by the steps it ran before the stop (a `.aux` cut before the
+    later pages' lines), are never a φ: the resumed trip's φ is the one
+    the stopped trip served (`Pending::phi`, the last complete trip's
+    streams), and a stopped rebuild dropped (a cold build instead) leaves
+    nothing behind. Whether the trip that resumes it ends fatally is then
+    as for any trip (above). The harness's `petals_stop` case cancels
+    the fatal keystroke's rebuild after 3 steps
+    (`PARTEX_SSA_CANCEL_AFTER=3,0`: a list gives each rebuild its own)
+    and checks that it wrote no file and that the next keystroke's one
+    trip has page 1's numbers.
   - *The link waits.* While work is pending the program mixes runs of
     two sources, so nothing is linked: the files, the PDF and the
     stores' files are the last complete build's. The φ of trip 1 is

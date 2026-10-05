@@ -1148,7 +1148,13 @@ fn ssa_tracker() -> partex_core::ssa::SsaTracker {
     tracker.set_lean(!std::env::var("PARTEX_SSA_LEAN").is_ok_and(|v| v == "0"));
     // (the names a run makes placed by name, DESIGN 3.9's allocators)
     tracker.set_names_by_name(std::env::var("PARTEX_SSA_NAMES").is_ok_and(|v| v == "1"));
-    tracker.cancel.set(cancel_after());
+    tracker.cancel.set(cancel_after(0));
+    // (a trip that ends fatally keeps the last complete trip's streams,
+    // as an editor wants, not pdfTeX's cut `.aux`: DESIGN 3.7, "A trip
+    // that ended fatally")
+    tracker
+        .keep_complete
+        .set(std::env::var("PARTEX_SSA_KEEP_COMPLETE").is_ok_and(|v| v == "1"));
     // (the steps' reads and writes timed, for the graph `write_dag` prints)
     tracker.set_timed(std::env::var_os("PARTEX_SSA_DAG").is_some());
     // (a rebuild runs this many commands at most: past them it stops, as
@@ -1391,7 +1397,7 @@ fn rebuild_ssa(
             eprintln!("partex: ssa: the rebuild command failed");
             return Err(3);
         }
-        tex.tracker().cancel.set(cancel_after());
+        tex.tracker().cancel.set(cancel_after(n));
         tex.tracker().deadline.set(rebuild_deadline());
     } else {
         tex.tracker().deadline.set(None);
@@ -1638,14 +1644,21 @@ fn dump_streams(tex: &Tex<native::NativeHost, partex_core::ssa::SsaTracker>, n: 
 
 /// `PARTEX_SSA_CANCEL_AFTER=N`: [`partex_core::ssa::SsaTracker::cancel`]
 /// says to stop from its `N`th question on (the host's signal, as a test
-/// stands it in).
-fn cancel_after() -> Option<partex_core::ssa::Cancel> {
+/// stands it in). A list (`N1,N2,...`) gives rebuild `k` (from 1) the
+/// `k`th, `0` or none past its end being no cancel; the cold build
+/// (`build` 0) is cancelled only by a single `N`.
+fn cancel_after(build: usize) -> Option<partex_core::ssa::Cancel> {
     static LEFT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let n = std::env::var("PARTEX_SSA_CANCEL_AFTER")
-        .ok()?
-        .trim()
-        .parse::<u64>()
-        .ok()?;
+    let v = std::env::var("PARTEX_SSA_CANCEL_AFTER").ok()?;
+    let n = if v.contains(',') {
+        let at = build.checked_sub(1)?;
+        v.split(',').nth(at)?.trim().parse::<u64>().ok()?
+    } else {
+        v.trim().parse::<u64>().ok()?
+    };
+    if n == 0 {
+        return None;
+    }
     LEFT.store(n, std::sync::atomic::Ordering::Relaxed);
     Some(|| {
         // (the count left before this question: 1 is the `N`th)
@@ -1918,9 +1931,27 @@ struct Written {
 impl SsaLinker {
     /// Write the streams producers outside the steps defined whose bytes
     /// changed since they were last written (DESIGN 3.7, "Files are a
-    /// view": the link writes every file the build holds).
+    /// view": the link writes every file the build holds), and the
+    /// streams a trip that ended fatally withheld, over what the steps'
+    /// effects made of them (`partex_core::ssa::withheld_streams`); a job
+    /// that ended fatally leaves no PDF (pdfTeX's `remove_pdffile`,
+    /// `Tex::fatal_pdf`).
     fn write_produced(&mut self, tex: &mut Tex<native::NativeHost, partex_core::ssa::SsaTracker>) {
         use partex_core::host::Host;
+        if let Some(pdf) = tex.fatal_pdf() {
+            tex.host_mut().remove_output(&pdf);
+        }
+        for (name, bytes) in partex_core::ssa::withheld_streams(tex) {
+            // (where the job writes it, as `remove_files` finds it)
+            let host = tex.host_mut();
+            let n = host.in_output_dir(&name).unwrap_or(name);
+            let p = native::path(&n);
+            let _ = match &bytes {
+                Some(b) => std::fs::write(&p, b),
+                None => std::fs::remove_file(&p),
+            };
+            host.note_written(&n);
+        }
         for (name, bytes) in partex_core::ssa::produced_streams(tex) {
             let Some(bytes) = bytes else { continue };
             let v = partex_core::StableHasher::of(&bytes[..]);

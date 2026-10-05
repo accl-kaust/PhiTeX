@@ -1,0 +1,36 @@
+% A keystroke that ends the job fatally (the Overleaf extension's report):
+% \petals emptied (Backspace on its 5) makes the \foreach run away, and the
+% job ends with no legal \end, its .aux cut short before the \newlabel
+% lines its later pages write. Page 1's \ref and \cite read those lines:
+% the next keystroke (7 typed) must not read the cut .aux. The fatal job
+% has shipped no page; pdfTeX removes the PDF it began.
+\documentclass{article}
+\usepackage{tikz}
+\begin{document}
+\section{Introduction}
+As Section~\ref{sec:method} shows, and Section~\ref{sec:results}
+confirms, the flower follows Knuth~\cite{knuth84}.
+
+\begin{figure}[h]
+\centering
+\newcommand\petals{5}
+\begin{tikzpicture}
+\foreach \i in {1,...,\petals} {
+  \draw[rotate=\i*30] (0,0) ellipse (1 and 0.3);
+}
+\end{tikzpicture}
+\caption{Petals.}
+\end{figure}
+
+\newpage
+\section{Method}\label{sec:method}
+Method text.
+
+\newpage
+\section{Results}\label{sec:results}
+Results text.
+
+\begin{thebibliography}{9}
+\bibitem{knuth84} D.~E. Knuth, \emph{The \TeX book}, 1984.
+\end{thebibliography}
+\end{document}
