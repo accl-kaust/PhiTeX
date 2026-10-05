@@ -1335,3 +1335,56 @@ pub(crate) mod tests {
         assert_eq!(d.o.name_value(r), b"WinAnsiEncoding");
     }
 }
+
+#[cfg(test)]
+mod tounicode_tests {
+    use super::*;
+    use crate::agl::AglName;
+
+    #[test]
+    fn tounicode_cmap() {
+        let mut d = tests::dpx();
+        for (n, u) in [
+            (&b"A"[..], 0x41),
+            (b"B", 0x42),
+            (b"C", 0x43),
+            (b"ff", 0xFB00),
+            (b"f", 0x66),
+        ] {
+            let mut a = AglName {
+                name: Some(n.to_vec()),
+                n_components: 1,
+                ..Default::default()
+            };
+            a.unicodes[0] = u;
+            d.agl.aglmap.ht_append_table(n, a);
+        }
+        let mut enc: Vec<Option<Vec<u8>>> = vec![None; 256];
+        enc[0x41] = Some(b"A".to_vec());
+        enc[0x42] = Some(b"B".to_vec());
+        enc[0x43] = Some(b"C".to_vec());
+        enc[0x0b] = Some(b"ff".to_vec());
+        enc[0x0c] = Some(b"f_f".to_vec());
+        enc[0x0d] = Some(b"uni0041.sc".to_vec());
+        let used = [1u8; 256];
+        let s = d
+            .pdf_create_ToUnicode_CMap(b"Test", &enc, Some(&used))
+            .unwrap();
+        let text = String::from_utf8(d.o.stream_data(s).to_vec()).unwrap();
+        assert!(text.contains("/CMapName /Test-UTF16 def"), "{text}");
+        assert!(
+            text.contains("3 beginbfchar\n<0B> <FB00>\n<0C> <00660066>\n<0D> <0041>\nendbfchar\n"),
+            "{text}"
+        );
+        assert!(
+            text.contains("1 beginbfrange\n<41> <43> <0041>\nendbfrange\n"),
+            "{text}"
+        );
+        // A glyph with no mapping drops the CMap.
+        enc[0x44] = Some(b"nosuchglyph".to_vec());
+        assert!(
+            d.pdf_create_ToUnicode_CMap(b"Test", &enc, Some(&used))
+                .is_none()
+        );
+    }
+}
