@@ -36,6 +36,7 @@ use core::fmt;
 
 use partex_ssa::fold::StepId;
 use partex_ssa::runtime::RecId;
+use partex_ssa::table::Table;
 use partex_ssa::{Config, Cx, Found, Loc, Machine, Runtime, Store, Value, Version};
 
 use crate::host::Host;
@@ -1186,6 +1187,61 @@ pub struct RecState {
     /// The build's BibTeX and makeindex, nodes of its program (DESIGN
     /// 3.7, "Outside tools are nodes").
     pub(crate) tools: tools::Tools,
+    /// The values the records' writes hold, by slot and version
+    /// ([`View::get`]).
+    held: Held,
+}
+
+/// The values the records' writes hold, by version: a value of a version
+/// is made once and shared by every write of it (a
+/// call's net writes are its children's too, and each level of the nest
+/// made its own; a thesis's 2.77 M writes held 384 K distinct versions).
+/// Weak: a value no write holds goes; the table drops the dead entries
+/// once it has doubled since it last did.
+#[derive(Default)]
+struct Held {
+    map: RefCell<Table<Version, alloc::sync::Weak<SValue>>>,
+    after_purge: core::cell::Cell<usize>,
+}
+
+impl Held {
+    /// `x`, the value of slot `a` at version `v`, as one held already if
+    /// one is, else held from now on. Only a value whose version is all
+    /// of it: an eqtb or save stack word with no object (a token list's
+    /// or a box's version leaves out its origins' handles, so two lists
+    /// of a version are not the same list with origins on).
+    fn share(
+        &self,
+        a: Slot,
+        v: Version,
+        content: bool,
+        x: alloc::sync::Arc<SValue>,
+    ) -> alloc::sync::Arc<SValue> {
+        let plain = content
+            && matches!(
+                (a.0, &*x),
+                (Fam::Eqtb, SValue::Word { obj: None, .. })
+                    | (Fam::Save, SValue::Save { obj: None, .. })
+            );
+        let Some(mut m) = self.map.try_borrow_mut().ok().filter(|_| plain) else {
+            return x;
+        };
+        if let Some(y) = m.get(&v).and_then(alloc::sync::Weak::upgrade) {
+            return y;
+        }
+        m.insert(v, alloc::sync::Arc::downgrade(&x));
+        if m.len() > 2 * self.after_purge.get() + 4096 {
+            let mut live = Table::new();
+            for (k, w) in m.iter() {
+                if w.strong_count() > 0 {
+                    live.insert(*k, w.clone());
+                }
+            }
+            self.after_purge.set(live.len());
+            *m = live;
+        }
+        x
+    }
 }
 
 /// Record `id`'s effects and stores, its children's included, in program
@@ -1612,13 +1668,22 @@ impl SsaTracker {
         let n = ptrs.len();
         ptrs.sort_unstable();
         ptrs.dedup();
+        // (and by version: values equal by version, each its own)
+        let mut vers: Vec<u128> =
+            r.rt.records()
+                .flat_map(|x| r.rt.writes_of(x).iter())
+                .filter_map(|(_, v)| v.as_ref().filter(|v| v.1.is_some()).map(|v| v.0.0))
+                .collect();
+        vers.sort_unstable();
+        vers.dedup();
         alloc::format!(
-            "{}; {}; values held {n}, distinct {} ({} B each: {} MB)",
+            "{}; {}; values held {n}, distinct {} ({} B each: {} MB), distinct versions {}",
             r.rt.mem_report(),
             rebuild::steps_mem_report(&r.st.steps),
             ptrs.len(),
             core::mem::size_of::<SValue>(),
-            (ptrs.len() * (core::mem::size_of::<SValue>() + 16)) >> 20
+            (ptrs.len() * (core::mem::size_of::<SValue>() + 16)) >> 20,
+            vers.len()
         )
     }
     /// Time each step's reads and writes by the engine's commands
@@ -3426,7 +3491,18 @@ impl Store<TexSsa> for View<'_> {
         }
     }
     fn get(&self, a: &Slot) -> Option<SVal> {
-        Some(SVal(self.version(&Loc::State(*a)), self.tex.value_of(*a)))
+        let v = self.version(&Loc::State(*a));
+        // (the families whose version is the value's content: an eqtb
+        // entry's its word, level and objects, a save stack entry's its
+        // word, object and kind)
+        // (a version made from the value's content, not a revision: an
+        // eqtb entry's when its table has one, a save stack entry's)
+        let content = a.0 == Fam::Save || a.0 == Fam::Eqtb && self.rec.vers.known(*a) == Some(v);
+        let x = self
+            .tex
+            .value_of(*a)
+            .map(|x| self.rec.held.share(*a, v, content, x));
+        Some(SVal(v, x))
     }
     fn set(&mut self, _a: &Slot, _v: Option<SVal>) {}
 }
