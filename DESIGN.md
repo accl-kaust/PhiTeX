@@ -2491,7 +2491,20 @@ generated from `xetex-merged.web` in its order, not pdfTeX's with more.
     raw.
 - *Hyphenation*: the word's characters go up to 0x10FFFF and the
   trie's to 0xFFFF; `max_hyph_char` grows with the patterns; a word
-  has at most `\XeTeXhyphenatablelength` (≤ 4,095) letters.
+  has at most `\XeTeXhyphenatablelength` (≤ 4,095) letters, which a
+  format keeps (XeTeX dumps e-TeX's state variables). A trie character
+  is a UTF-16 unit: a pattern's character past 0xFFFF is cut to 16
+  bits but still widens the trie. An exception's letters past 0xFFFF
+  are surrogate pairs; its key is its pool string's bytes, so a word
+  of a TFM font matches it through `\lccode`s that are surrogates.
+  Words of TFM fonts are hyphenated as XeTeX does (its native-word
+  branches, §944–§946, §949, §956–§957, wait for native words), but
+  for two differences. First, XeTeX marks a left boundary in `hu` with
+  `max_hyph_char`, not `non_char`, and so makes it a character node in
+  a post-break text when the font has a left-boundary program; partex
+  leaves it out. Second, `\savinghyphcodes`' codes are kept beside the
+  trie, not packed into it, so the trie's length differs (as in
+  pdfTeX mode); the hyphens are the same.
 - *Inter-character tokens*: `\XeTeXinterchartoks` holds a list for a
   pair of classes, in an e-TeX sparse array keyed by
   `class₁*4096 + class₂`. While `\XeTeXinterchartokenstate > 0`, main

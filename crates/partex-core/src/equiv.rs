@@ -757,6 +757,11 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         }
         self.set_eqtb_int(DEL_CODE_BASE + i32::from(b'.'), 0); // null delimiter
         self.set_int_par(SHOW_STREAM_CODE, -1); // pdfTeX §258
+        if self.unicode {
+            // `XeTeX`: "for backward compatibility with standard TeX by
+            // default"
+            self.set_eqtb_int(ETEX_STATE_BASE + XETEX_HYPHENATABLE_LENGTH_CODE, 63);
+        }
         // §250
         for k in DIMEN_BASE..=EQTB_SIZE {
             self.set_eqtb_int(k, 0);
