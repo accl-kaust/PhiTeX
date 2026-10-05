@@ -1386,23 +1386,31 @@ impl Dpx {
     }
     /// `pdf_dev_dtransform`: `m` none means the current CTM.
     pub fn pdf_dev_dtransform(&self, p: &mut PdfCoord, m: Option<&PdfTmatrix>) {
-        let ctm = &self.pdfdraw_gs().matrix;
-        pdf_coord__dtransform(p, m.unwrap_or(ctm));
+        match m {
+            Some(m) => pdf_coord__dtransform(p, m),
+            None => pdf_coord__dtransform(p, &self.pdfdraw_gs().matrix),
+        };
     }
     /// `pdf_dev_idtransform`.
     pub fn pdf_dev_idtransform(&self, p: &mut PdfCoord, m: Option<&PdfTmatrix>) {
-        let ctm = &self.pdfdraw_gs().matrix;
-        pdf_coord__idtransform(p, m.unwrap_or(ctm));
+        match m {
+            Some(m) => pdf_coord__idtransform(p, m),
+            None => pdf_coord__idtransform(p, &self.pdfdraw_gs().matrix),
+        };
     }
     /// `pdf_dev_transform`.
     pub fn pdf_dev_transform(&self, p: &mut PdfCoord, m: Option<&PdfTmatrix>) {
-        let ctm = &self.pdfdraw_gs().matrix;
-        pdf_coord__transform(p, m.unwrap_or(ctm));
+        match m {
+            Some(m) => pdf_coord__transform(p, m),
+            None => pdf_coord__transform(p, &self.pdfdraw_gs().matrix),
+        };
     }
     /// `pdf_dev_itransform`.
     pub fn pdf_dev_itransform(&self, p: &mut PdfCoord, m: Option<&PdfTmatrix>) {
-        let ctm = &self.pdfdraw_gs().matrix;
-        pdf_coord__itransform(p, m.unwrap_or(ctm));
+        match m {
+            Some(m) => pdf_coord__itransform(p, m),
+            None => pdf_coord__itransform(p, &self.pdfdraw_gs().matrix),
+        };
     }
     /// `pdf_dev_arc`.
     pub fn pdf_dev_arc(&mut self, c_x: f64, c_y: f64, r: f64, a_0: f64, a_1: f64) -> i32 {
