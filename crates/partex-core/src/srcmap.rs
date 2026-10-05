@@ -700,7 +700,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                 let c = b(end - 1);
                 if let Some(t) = want
                     && self.cur_cs == 0
-                    && t & 0xff != i32::from(c)
+                    && crate::web::tok_chr(t) != i32::from(c)
                     && !(end >= start + 3 && b(end - 3) == b(end - 2))
                 {
                     return None;

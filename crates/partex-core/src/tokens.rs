@@ -60,8 +60,8 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             } else if t < 0 {
                 self.print_esc(b"BAD.");
             } else {
-                let m = t / 0o400;
-                let c = t % 0o400;
+                let m = tok_cmd(t);
+                let c = tok_chr(t);
                 // §294: display the token (m, c).
                 match m {
                     LEFT_BRACE | RIGHT_BRACE | MATH_SHIFT | TAB_MARK | SUP_MARK | SUB_MARK
@@ -858,13 +858,13 @@ mod tests {
 
         // A macro body: ref count, `#1#2->x#1y#2`.
         let rc = t.tok_from(&[
-            MATCH * 256 + 35,
-            MATCH * 256 + 35,
-            END_MATCH * 256,
-            LETTER * 256 + 120,
-            OUT_PARAM * 256 + 1,
-            LETTER * 256 + 121,
-            OUT_PARAM * 256 + 2,
+            MATCH * MAX_CHAR_VAL + 35,
+            MATCH * MAX_CHAR_VAL + 35,
+            END_MATCH * MAX_CHAR_VAL,
+            LETTER * MAX_CHAR_VAL + 120,
+            OUT_PARAM * MAX_CHAR_VAL + 1,
+            LETTER * MAX_CHAR_VAL + 121,
+            OUT_PARAM * MAX_CHAR_VAL + 2,
         ]);
         let p = crate::web::SINGLE_BASE + i32::from(b'm');
         let mut w = t.peek_eqtb(p);

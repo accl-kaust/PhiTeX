@@ -237,7 +237,7 @@ pub(crate) fn scan(
                 l += 1;
             }
         } else {
-            match t / 0o400 {
+            match crate::web::tok_cmd(t) {
                 LEFT_BRACE => align += 1,
                 RIGHT_BRACE => align -= 1,
                 c if (TAB_MARK..=CAR_RET).contains(&c) => return None, // (`OUT_PARAM` too)

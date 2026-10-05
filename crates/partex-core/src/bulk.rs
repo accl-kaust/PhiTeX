@@ -130,7 +130,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                     break;
                 }
             } else {
-                match t >> 8 {
+                match tok_cmd(t) {
                     LEFT_BRACE => {
                         u += 1;
                         align += 1;
@@ -190,8 +190,8 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                 if !self.bulk_cs(t, how, align) {
                     break;
                 }
-            } else if matches!(t >> 8, LEFT_BRACE | RIGHT_BRACE | OUT_PARAM)
-                || ((t >> 8) == TAB_MARK && align == 0)
+            } else if matches!(tok_cmd(t), LEFT_BRACE | RIGHT_BRACE | OUT_PARAM)
+                || (tok_cmd(t) == TAB_MARK && align == 0)
             {
                 break;
             }
@@ -223,7 +223,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         let mut align = self.align_state();
         let mut k = loc;
         while let Some(&t) = toks.get(k) {
-            match t >> 8 {
+            match tok_cmd(t) {
                 _ if t >= CS_TOKEN_FLAG => break,
                 LEFT_BRACE => align += 1,
                 RIGHT_BRACE => align -= 1,
@@ -297,7 +297,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                     break;
                 }
             } else {
-                match t >> 8 {
+                match tok_cmd(t) {
                     LEFT_BRACE => align += 1,
                     RIGHT_BRACE => align -= 1,
                     OUT_PARAM => break,

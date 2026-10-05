@@ -1122,9 +1122,9 @@ mod tests {
                 Node::Mark(alloc::boxed::Box::new(Mark {
                     class: 0,
                     tokens: partex_engine::node::TokenList::shared(&[
-                        LETTER * 256 + 97,
-                        MAC_PARAM * 256 + 35,
-                        LETTER * 256 + 98,
+                        LETTER * crate::web::MAX_CHAR_VAL + 97,
+                        MAC_PARAM * crate::web::MAX_CHAR_VAL + 35,
+                        LETTER * crate::web::MAX_CHAR_VAL + 98,
                     ]),
                 })),
             ],

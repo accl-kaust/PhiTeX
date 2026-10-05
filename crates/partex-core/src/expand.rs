@@ -122,7 +122,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                     if cmd > MAX_COMMAND {
                         self.cur_cmd = cmd;
                         self.cur_chr = chr;
-                        self.cur_tok = cmd * 0o400 + chr;
+                        self.cur_tok = cmd * MAX_CHAR_VAL + chr;
                         self.cur_cs = 0;
                         return self.expand_nonmacro(); // `goto reswitch`
                     }
@@ -234,7 +234,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                     return self.overflow(b"buffer size", self.params.buf_size);
                 }
             }
-            self.buffer[j] = u8::try_from(t % 0o400).unwrap_or(0);
+            self.buffer[j] = u8::try_from(tok_chr(t)).unwrap_or(0);
             j += 1;
         }
         if j > first + 1 {
@@ -355,7 +355,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
 
     fn set_cur_tok(&mut self) {
         self.cur_tok = if self.cur_cs == 0 {
-            self.cur_cmd * 0o400 + self.cur_chr
+            self.cur_cmd * MAX_CHAR_VAL + self.cur_chr
         } else {
             CS_TOKEN_FLAG + self.cur_cs
         };
@@ -790,16 +790,16 @@ mod tests {
         }
         // \a: `#1#2.-><#2|#1>`
         let mut rc = alloc::vec::Vec::new();
-        let other = |c: u8| OTHER_CHAR * 256 + i32::from(c);
+        let other = |c: u8| OTHER_CHAR * MAX_CHAR_VAL + i32::from(c);
         for tok in [
-            MATCH * 256 + 35,
-            MATCH * 256 + 35,
+            MATCH * MAX_CHAR_VAL + 35,
+            MATCH * MAX_CHAR_VAL + 35,
             other(b'.'),
-            END_MATCH * 256,
+            END_MATCH * MAX_CHAR_VAL,
             other(b'<'),
-            OUT_PARAM * 256 + 2,
+            OUT_PARAM * MAX_CHAR_VAL + 2,
             other(b'|'),
-            OUT_PARAM * 256 + 1,
+            OUT_PARAM * MAX_CHAR_VAL + 1,
             other(b'>'),
         ] {
             rc.push(tok);

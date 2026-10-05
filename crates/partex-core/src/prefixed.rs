@@ -1063,7 +1063,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             // §1289: change the case of the token, if a change is
             // appropriate.
             if *t < CS_TOKEN_FLAG + SINGLE_BASE {
-                let c = *t % 256;
+                let c = crate::web::tok_chr(*t);
                 if self.equiv(b + c) != 0 {
                     *t = *t - c + self.equiv(b + c);
                 }

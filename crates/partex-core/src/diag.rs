@@ -688,10 +688,10 @@ mod tests {
 
         // The macro level: `->\fooo{}` with \fooo just read.
         let rc = t.tok_from(&[
-            END_MATCH * 256,
+            END_MATCH * MAX_CHAR_VAL,
             CS_TOKEN_FLAG + fooo,
-            LEFT_BRACE * 256 + 123,
-            RIGHT_BRACE * 256 + 125,
+            LEFT_BRACE * MAX_CHAR_VAL + 123,
+            RIGHT_BRACE * MAX_CHAR_VAL + 125,
         ]);
         let after = 2; // the `{`
         t.begin_token_list(rc, MACRO).unwrap();

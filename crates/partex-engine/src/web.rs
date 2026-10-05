@@ -1131,34 +1131,64 @@ pub const MATH_SHIFT_GROUP: i32 = 15;
 pub const MATH_LEFT_GROUP: i32 = 16;
 /// §269
 pub const MAX_GROUP_CODE: i32 = 16;
+/// XeTeX §289: the characters' bits in a token. Every flavor uses XeTeX's
+/// encoding, `cmd * 0x200000 + chr` (21-bit characters): tokens are
+/// internal, so TeX's and pdfTeX's outputs do not change (DESIGN 4.7).
+pub const CHAR_BITS: u32 = 21;
+/// XeTeX §289 (`max_char_val`): the multiplier of a token's command code.
+pub const MAX_CHAR_VAL: i32 = 1 << CHAR_BITS;
+/// The character bits of a character token.
+pub const CHAR_MASK: i32 = MAX_CHAR_VAL - 1;
 /// §289
-pub const CS_TOKEN_FLAG: i32 = 0o7777;
+pub const CS_TOKEN_FLAG: i32 = 0x1FF_FFFF;
 /// §289
-pub const LEFT_BRACE_TOKEN: i32 = 0o0400;
+pub const LEFT_BRACE_TOKEN: i32 = LEFT_BRACE * MAX_CHAR_VAL;
 /// §289
-pub const LEFT_BRACE_LIMIT: i32 = 0o1000;
+pub const LEFT_BRACE_LIMIT: i32 = (LEFT_BRACE + 1) * MAX_CHAR_VAL;
 /// §289
-pub const RIGHT_BRACE_TOKEN: i32 = 0o1000;
+pub const RIGHT_BRACE_TOKEN: i32 = RIGHT_BRACE * MAX_CHAR_VAL;
 /// §289
-pub const RIGHT_BRACE_LIMIT: i32 = 0o1400;
+pub const RIGHT_BRACE_LIMIT: i32 = (RIGHT_BRACE + 1) * MAX_CHAR_VAL;
 /// §289
-pub const MATH_SHIFT_TOKEN: i32 = 0o1400;
+pub const MATH_SHIFT_TOKEN: i32 = MATH_SHIFT * MAX_CHAR_VAL;
 /// §289
-pub const TAB_TOKEN: i32 = 0o2000;
+pub const TAB_TOKEN: i32 = TAB_MARK * MAX_CHAR_VAL;
 /// §289
-pub const OUT_PARAM_TOKEN: i32 = 0o2400;
+pub const OUT_PARAM_TOKEN: i32 = OUT_PARAM * MAX_CHAR_VAL;
 /// §289
-pub const SPACE_TOKEN: i32 = 0o5040;
+pub const SPACE_TOKEN: i32 = SPACER * MAX_CHAR_VAL + 32;
 /// §289
-pub const LETTER_TOKEN: i32 = 0o5400;
+pub const LETTER_TOKEN: i32 = LETTER * MAX_CHAR_VAL;
 /// §289
-pub const OTHER_TOKEN: i32 = 0o6000;
+pub const OTHER_TOKEN: i32 = OTHER_CHAR * MAX_CHAR_VAL;
 /// §289
-pub const MATCH_TOKEN: i32 = 0o6400;
+pub const MATCH_TOKEN: i32 = MATCH * MAX_CHAR_VAL;
 /// §289
-pub const END_MATCH_TOKEN: i32 = 0o7000;
+pub const END_MATCH_TOKEN: i32 = END_MATCH * MAX_CHAR_VAL;
 /// pdfTeX §311
-pub const PROTECTED_TOKEN: i32 = 0o7001;
+pub const PROTECTED_TOKEN: i32 = END_MATCH_TOKEN + 1;
+
+/// The token of character `chr` with command code `cmd` (§289).
+#[inline]
+#[must_use]
+pub const fn char_token(cmd: i32, chr: i32) -> i32 {
+    cmd * MAX_CHAR_VAL + chr
+}
+
+/// The command code of a character token (`t < CS_TOKEN_FLAG`).
+#[inline]
+#[must_use]
+pub const fn tok_cmd(t: i32) -> i32 {
+    t >> CHAR_BITS
+}
+
+/// The character of a character token (`t < CS_TOKEN_FLAG`).
+#[inline]
+#[must_use]
+pub const fn tok_chr(t: i32) -> i32 {
+    t & CHAR_MASK
+}
+
 /// §303
 pub const MID_LINE: i32 = 1;
 /// §303

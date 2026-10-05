@@ -151,7 +151,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                     return Ok(());
                 }
             } else {
-                let cmd = t >> 8;
+                let cmd = tok_cmd(t);
                 // (`CAR_RET` is `OUT_PARAM` too: a parameter, §359)
                 if !matches!(cmd, TAB_MARK | CAR_RET) {
                     if cmd == LEFT_BRACE {
@@ -162,7 +162,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                     self.cur_input.loc = next;
                     self.cur_cs = 0;
                     self.cur_cmd = cmd;
-                    self.cur_chr = t & 0o377;
+                    self.cur_chr = tok_chr(t);
                     return Ok(());
                 }
             }
@@ -188,7 +188,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                 // (one lookup of the list for the token and the next `loc`)
                 let (t, next) = self.cur_tok_and_next();
                 self.cur_input.loc = next; // move to next
-                if (t >> 8) != OUT_PARAM {
+                if tok_cmd(t) != OUT_PARAM {
                     self.memo.fetched(self.input_ptr, t, self.cur_level());
                 }
                 if t >= CS_TOKEN_FLAG {
@@ -215,8 +215,8 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                         }
                     }
                 } else {
-                    self.cur_cmd = t >> 8;
-                    self.cur_chr = t & 0o377;
+                    self.cur_cmd = tok_cmd(t);
+                    self.cur_chr = tok_chr(t);
                     match self.cur_cmd {
                         LEFT_BRACE => self.set_align_state(self.align_state() + 1),
                         RIGHT_BRACE => self.set_align_state(self.align_state() - 1),
@@ -675,7 +675,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         self.no_new_control_sequence = true;
         r?;
         self.cur_tok = if self.cur_cs == 0 {
-            self.cur_cmd * 0o400 + self.cur_chr
+            self.cur_cmd * MAX_CHAR_VAL + self.cur_chr
         } else {
             CS_TOKEN_FLAG + self.cur_cs
         };
