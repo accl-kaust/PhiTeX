@@ -34,7 +34,7 @@ use crate::store;
 const MIN_BLOB: usize = 64;
 
 /// What a root holds first (its layout's version).
-const ROOT_TAG: &[u8] = b"partex machine build/11";
+const ROOT_TAG: &[u8] = b"partex machine build/12";
 
 /// The store a watch saves to, and the save running.
 pub struct Keeper {
@@ -915,7 +915,8 @@ impl Watch {
                 w.keeper = keeper;
                 observe(crate::events::Progress::PassStart(1));
                 let t = Instant::now();
-                let changes = w.changes(true, true);
+                let found = w.changes();
+                let changes = w.take(found);
                 let t_changes = t.elapsed();
                 let generation = w.b.generation();
                 let edited = !changes.is_empty();

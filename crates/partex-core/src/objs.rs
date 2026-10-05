@@ -53,6 +53,28 @@ partex_engine::persist_enum!(Obj {
     Box(a0)
 });
 
+/// eqtb's objects by chunks of this many (the default, as measured on
+/// the course; the objects a region writes are scattered over the hash's
+/// places, so a chunk written holds few of them and is copied whole:
+/// smaller chunks, 128, are expected to cut those copies, not measured).
+pub(crate) const OBJ_CHUNK: usize = crate::journal::CHUNK;
+
+/// eqtb's objects in a [`crate::journal::JVec`]: an entry written back
+/// as it was holds the very value it held (glue by its content).
+impl crate::journal::Elem for Option<Obj> {
+    #[inline]
+    fn same(a: &Self, b: &Self) -> bool {
+        match (a, b) {
+            (None, None) => true,
+            (Some(Obj::Toks(x)), Some(Obj::Toks(y))) => Arc::ptr_eq(x, y),
+            (Some(Obj::Glue(x)), Some(Obj::Glue(y))) => x == y,
+            (Some(Obj::Shape(x)), Some(Obj::Shape(y))) => Arc::ptr_eq(x, y),
+            (Some(Obj::Box(x)), Some(Obj::Box(y))) => Arc::ptr_eq(x, y),
+            _ => false,
+        }
+    }
+}
+
 impl Obj {
     /// The object's version (DESIGN 7.17.12): a list's, a box's, made
     /// when each was made; glue and shapes by their content (a few words).

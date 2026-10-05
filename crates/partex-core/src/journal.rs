@@ -1,11 +1,12 @@
 //! A flat vector that journals which chunks it wrote, so a checkpoint
-//! costs what changed (DESIGN.md §5.3): eqtb, the hash and the save stack.
+//! costs what changed (DESIGN.md §5.3): eqtb, the objects beside its
+//! words (`objs.rs`), the hash and the save stack.
 //!
 //! The running engine reads and writes `live`, a plain vector: a read is
 //! a bounds check and a load, whether or not the run keeps checkpoints. A
 //! write also sets its block's bit in `dirty` (a block is an eighth of a
-//! chunk, 64 elements: a snapshot compares only the blocks written, to
-//! find the chunks written back as they were). `base` is the contents at
+//! chunk, 64 elements of the default 512: a snapshot compares only the
+//! blocks written, to find the chunks written back as they were). `base` is the contents at
 //! the last snapshot, in shared chunks. A clone (a checkpoint) is `base`
 //! with the dirty chunks copied, and holds no flat vector; a snapshot
 //! ([`JVec::commit`]) makes that the new `base`, so the next checkpoint
@@ -23,16 +24,9 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::ops::{Index, IndexMut};
 
-/// Elements per chunk.
-const BITS: usize = 9;
-pub(crate) const CHUNK: usize = 1 << BITS;
-const MASK: usize = CHUNK - 1;
-/// Elements per block (the unit of `dirty`), and blocks per chunk (a
-/// chunk's bits are one byte of a `dirty` word).
-const BLOCK_BITS: usize = 6;
-const BLOCK: usize = 1 << BLOCK_BITS;
-const BLOCKS: usize = CHUNK / BLOCK;
-const _: () = assert!(BLOCKS == 8);
+/// Elements per chunk, by default (a `JVec` of a larger element may take
+/// fewer: a chunk written is copied whole).
+pub(crate) const CHUNK: usize = 1 << 9;
 
 /// Whether a snapshot compares only the blocks written of a chunk
 /// written (on by default; `set_written_blocks`). Off, it compares the
@@ -64,14 +58,40 @@ pub(crate) fn rebase() -> bool {
     REBASE.load(core::sync::atomic::Ordering::Relaxed)
 }
 
+/// What a [`JVec`] holds: elements cloned into shared chunks (eqtb's
+/// words, and the objects beside them, `objs.rs`).
+pub(crate) trait Elem: Clone + Default {
+    /// Whether `a` is `b`, as a snapshot asks of a chunk written back as
+    /// it was: never true of different elements, and cheap (it may say
+    /// false of equal ones, which costs a copy of the chunk).
+    fn same(a: &Self, b: &Self) -> bool;
+}
+
+impl Elem for crate::mem::MemoryWord {
+    #[inline]
+    fn same(a: &Self, b: &Self) -> bool {
+        a == b
+    }
+}
+
+impl Elem for u64 {
+    #[inline]
+    fn same(a: &Self, b: &Self) -> bool {
+        a == b
+    }
+}
+
+/// A journaled vector of chunks of `C` elements (a power of two, at least
+/// 8): a block, the unit of `dirty`, is an eighth of a chunk (a chunk's
+/// bits are one byte of a `dirty` word).
 #[derive(Debug)]
-pub(crate) struct JVec<T> {
+pub(crate) struct JVec<T, const C: usize = CHUNK> {
     /// The running contents (empty in a checkpoint).
     live: Vec<T>,
     /// The contents at the last snapshot (a checkpoint's contents). A
     /// running vector may have fewer chunks than it needs before its
     /// first snapshot: those count as dirty.
-    base: Vec<Arc<[T; CHUNK]>>,
+    base: Vec<Arc<[T; C]>>,
     /// Blocks written since the last snapshot, one bit each, a chunk's in
     /// one byte (running only).
     dirty: Vec<u64>,
@@ -79,13 +99,26 @@ pub(crate) struct JVec<T> {
     frozen: bool,
 }
 
-impl<T: Copy + Default + PartialEq> JVec<T> {
+impl<T: Elem, const C: usize> JVec<T, C> {
+    /// log2 of `C`.
+    const BITS: usize = {
+        assert!(
+            C.is_power_of_two() && C >= 8,
+            "a chunk of 2^k >= 8 elements"
+        );
+        C.trailing_zeros() as usize
+    };
+    const MASK: usize = C - 1;
+    /// Elements per block: eight blocks a chunk.
+    const BLOCK_BITS: usize = Self::BITS - 3;
+    const BLOCK: usize = 1 << Self::BLOCK_BITS;
+
     /// `n` copies of `v`, running.
     pub(crate) fn from_elem(v: T, n: usize) -> Self {
         Self {
             live: alloc::vec![v; n],
             base: Vec::new(),
-            dirty: alloc::vec![0; n.div_ceil(CHUNK).div_ceil(8)],
+            dirty: alloc::vec![0; n.div_ceil(C).div_ceil(8)],
             len: n,
             frozen: false,
         }
@@ -96,7 +129,7 @@ impl<T: Copy + Default + PartialEq> JVec<T> {
     }
 
     pub(crate) fn chunks(&self) -> usize {
-        self.len.div_ceil(CHUNK)
+        self.len.div_ceil(C)
     }
 
     /// The blocks of chunk `c` written since the last snapshot, a bit each.
@@ -115,14 +148,14 @@ impl<T: Copy + Default + PartialEq> JVec<T> {
     /// block's index is a shift of `i` too).
     #[inline]
     fn mark(&mut self, i: usize) {
-        let b = i >> BLOCK_BITS;
+        let b = i >> Self::BLOCK_BITS;
         self.dirty[b >> 6] |= 1 << (b & 63);
     }
 
     /// The element ranges within chunk `c` to compare with `base`'s: the
     /// blocks written, or (`PARTEX_JVEC_BLOCKS=0`) the whole chunk.
     fn written(&self, c: usize) -> impl Iterator<Item = (usize, usize)> {
-        let n = ((c + 1) * CHUNK).min(self.len) - c * CHUNK;
+        let n = ((c + 1) * C).min(self.len) - c * C;
         let mut bits = if written_blocks() {
             self.blocks(c)
         } else {
@@ -132,7 +165,7 @@ impl<T: Copy + Default + PartialEq> JVec<T> {
             while bits != 0 {
                 let k = bits.trailing_zeros() as usize;
                 bits &= bits - 1;
-                let (x, y) = (k * BLOCK, ((k + 1) * BLOCK).min(n));
+                let (x, y) = (k * Self::BLOCK, ((k + 1) * Self::BLOCK).min(n));
                 if x < y {
                     return Some((x, y));
                 }
@@ -144,21 +177,22 @@ impl<T: Copy + Default + PartialEq> JVec<T> {
     /// Whether running chunk `c`, written, is `b` (`base`'s) still: the
     /// blocks written compared (a group's local assignments are written
     /// back as they were when it ends).
-    fn same_as_base(&self, c: usize, b: &[T; CHUNK]) -> bool {
-        let s = &self.live[c * CHUNK..];
-        self.written(c).all(|(x, y)| b[x..y] == s[x..y])
+    fn same_as_base(&self, c: usize, b: &[T; C]) -> bool {
+        let s = &self.live[c * C..];
+        self.written(c)
+            .all(|(x, y)| b[x..y].iter().zip(&s[x..y]).all(|(p, q)| T::same(p, q)))
     }
 
     /// Running chunk `c`, copied into a shared chunk.
-    fn copy_chunk(&self, c: usize) -> Arc<[T; CHUNK]> {
-        let s = &self.live[c * CHUNK..((c + 1) * CHUNK).min(self.len)];
-        let mut a = [T::default(); CHUNK];
-        a[..s.len()].copy_from_slice(s);
-        Arc::new(a)
+    fn copy_chunk(&self, c: usize) -> Arc<[T; C]> {
+        let s = &self.live[c * C..((c + 1) * C).min(self.len)];
+        Arc::new(core::array::from_fn(|i| {
+            s.get(i).cloned().unwrap_or_default()
+        }))
     }
 
     /// The chunks of the current contents: `base`'s where clean.
-    fn frozen_chunks(&self) -> Vec<Arc<[T; CHUNK]>> {
+    fn frozen_chunks(&self) -> Vec<Arc<[T; C]>> {
         if self.frozen {
             return self.base.clone();
         }
@@ -246,7 +280,7 @@ impl<T: Copy + Default + PartialEq> JVec<T> {
         }
         let mut live = Vec::with_capacity(self.len);
         for (c, a) in self.base.iter().enumerate() {
-            let n = (self.len - c * CHUNK).min(CHUNK);
+            let n = (self.len - c * C).min(C);
             live.extend_from_slice(&a[..n]);
         }
         self.live = live;
@@ -271,8 +305,8 @@ impl<T: Copy + Default + PartialEq> JVec<T> {
         for (c, a) in self.base.iter().enumerate() {
             let same = c < old.base.len() && Arc::ptr_eq(&old.base[c], a) && !old.is_dirty(c);
             if !same {
-                let (x, n) = (c * CHUNK, (self.len - c * CHUNK).min(CHUNK));
-                live[x..x + n].copy_from_slice(&a[..n]);
+                let (x, n) = (c * C, (self.len - c * C).min(C));
+                live[x..x + n].clone_from_slice(&a[..n]);
             }
         }
         debug_assert!(self.slices_equal(&live));
@@ -287,8 +321,11 @@ impl<T: Copy + Default + PartialEq> JVec<T> {
     /// (Debug builds:) whether `live` holds this checkpoint's elements.
     fn slices_equal(&self, live: &[T]) -> bool {
         self.base.iter().enumerate().all(|(c, a)| {
-            let (x, n) = (c * CHUNK, (self.len - c * CHUNK).min(CHUNK));
-            live[x..x + n] == a[..n]
+            let (x, n) = (c * C, (self.len - c * C).min(C));
+            live[x..x + n]
+                .iter()
+                .zip(&a[..n])
+                .all(|(p, q)| T::same(p, q))
         })
     }
 
@@ -300,18 +337,18 @@ impl<T: Copy + Default + PartialEq> JVec<T> {
             parts
                 .iter()
                 .enumerate()
-                .map(|(c, a)| &a[..(self.len - c * CHUNK).min(CHUNK)]),
+                .map(|(c, a)| &a[..(self.len - c * C).min(C)]),
         )
     }
 
     /// Chunk `c` of the contents, and the shared chunk it equals, if known.
-    pub(crate) fn view(&self, c: usize) -> (&[T], Option<&Arc<[T; CHUNK]>>) {
-        let n = (self.len - c * CHUNK).min(CHUNK);
+    pub(crate) fn view(&self, c: usize) -> (&[T], Option<&Arc<[T; C]>>) {
+        let n = (self.len - c * C).min(C);
         if self.frozen {
             let a = &self.base[c];
             (&a[..n], Some(a))
         } else {
-            let s = &self.live[c * CHUNK..c * CHUNK + n];
+            let s = &self.live[c * C..c * C + n];
             (s, (!self.is_dirty(c)).then(|| &self.base[c]))
         }
     }
@@ -333,7 +370,7 @@ impl<T: Copy + Default + PartialEq> JVec<T> {
             }
             for (i, (x, y)) in a.iter().zip(b).enumerate() {
                 if !same(x, y) {
-                    out.push(c * CHUNK + i);
+                    out.push(c * C + i);
                 }
             }
         }
@@ -342,17 +379,42 @@ impl<T: Copy + Default + PartialEq> JVec<T> {
 
     /// The elements `range`, copied out.
     pub(crate) fn to_vec(&self, range: core::ops::Range<usize>) -> Vec<T> {
-        range.map(|i| self[i]).collect()
+        range.map(|i| self[i].clone()).collect()
+    }
+
+    /// Element `i`, if there is one (running or a checkpoint's).
+    #[inline]
+    pub(crate) fn get(&self, i: usize) -> Option<&T> {
+        match self.live.get(i) {
+            Some(v) => Some(v),
+            None if i < self.len => Some(self.frozen_at(i)),
+            None => None,
+        }
+    }
+
+    /// Element `i` to change, if there is one (a checkpoint runs on flat).
+    #[inline]
+    pub(crate) fn get_mut(&mut self, i: usize) -> Option<&mut T> {
+        if i < self.len {
+            Some(&mut self[i])
+        } else {
+            None
+        }
+    }
+
+    /// The elements in order.
+    pub(crate) fn iter(&self) -> impl Iterator<Item = &T> {
+        self.slices().flatten()
     }
 
     /// Set `self[at..at + src.len()]`.
     pub(crate) fn copy_from(&mut self, at: usize, src: &[T]) {
         assert!(at + src.len() <= self.len, "copy out of range");
         self.thaw();
-        self.live[at..at + src.len()].copy_from_slice(src);
+        self.live[at..at + src.len()].clone_from_slice(src);
         if !src.is_empty() {
-            for b in (at >> BLOCK_BITS)..=((at + src.len() - 1) >> BLOCK_BITS) {
-                self.mark(b << BLOCK_BITS);
+            for b in (at >> Self::BLOCK_BITS)..=((at + src.len() - 1) >> Self::BLOCK_BITS) {
+                self.mark(b << Self::BLOCK_BITS);
             }
         }
     }
@@ -361,11 +423,11 @@ impl<T: Copy + Default + PartialEq> JVec<T> {
     #[cold]
     #[inline(never)]
     fn frozen_at(&self, i: usize) -> &T {
-        &self.base[i >> BITS][i & MASK]
+        &self.base[i >> Self::BITS][i & Self::MASK]
     }
 }
 
-impl<T: Copy + Default + PartialEq> Clone for JVec<T> {
+impl<T: Elem, const C: usize> Clone for JVec<T, C> {
     fn clone(&self) -> Self {
         Self {
             live: Vec::new(),
@@ -377,7 +439,7 @@ impl<T: Copy + Default + PartialEq> Clone for JVec<T> {
     }
 }
 
-impl<T: Copy + Default + PartialEq> Index<usize> for JVec<T> {
+impl<T: Elem, const C: usize> Index<usize> for JVec<T, C> {
     type Output = T;
     #[inline]
     fn index(&self, i: usize) -> &T {
@@ -388,7 +450,7 @@ impl<T: Copy + Default + PartialEq> Index<usize> for JVec<T> {
     }
 }
 
-impl<T: Copy + Default + PartialEq> IndexMut<usize> for JVec<T> {
+impl<T: Elem, const C: usize> IndexMut<usize> for JVec<T, C> {
     #[inline]
     fn index_mut(&mut self, i: usize) -> &mut T {
         if self.frozen {
@@ -401,8 +463,8 @@ impl<T: Copy + Default + PartialEq> IndexMut<usize> for JVec<T> {
 
 /// Saved as its chunks (which saved checkpoints share, as in memory);
 /// loaded as a checkpoint, flat again when it resumes.
-impl<T: Copy + Default + PartialEq + partex_engine::persist::Persist + Send + Sync + 'static>
-    partex_engine::persist::Persist for JVec<T>
+impl<T: Elem + partex_engine::persist::Persist + Send + Sync + 'static, const C: usize>
+    partex_engine::persist::Persist for JVec<T, C>
 {
     fn save(&self, s: &mut partex_engine::persist::Saver) {
         self.frozen_chunks().save(s);
@@ -410,9 +472,9 @@ impl<T: Copy + Default + PartialEq + partex_engine::persist::Persist + Send + Sy
     }
     fn load(l: &mut partex_engine::persist::Loader) -> Option<Self> {
         use partex_engine::persist::Persist;
-        let base: Vec<Arc<[T; CHUNK]>> = Persist::load(l)?;
+        let base: Vec<Arc<[T; C]>> = Persist::load(l)?;
         let len = usize::load(l)?;
-        (base.len() == len.div_ceil(CHUNK)).then_some(Self {
+        (base.len() == len.div_ceil(C)).then_some(Self {
             live: Vec::new(),
             base,
             dirty: Vec::new(),
@@ -428,7 +490,7 @@ mod tests {
 
     #[test]
     fn checkpoints_share_what_did_not_change() {
-        let mut v = JVec::from_elem(0u64, 3 * CHUNK + 7);
+        let mut v: JVec<u64> = JVec::from_elem(0u64, 3 * CHUNK + 7);
         v[5] = 1;
         let a = v.clone();
         v.commit();
@@ -448,5 +510,30 @@ mod tests {
         assert_eq!(c.slices().flatten().copied().sum::<u64>(), 10);
         d.copy_from(CHUNK - 1, &[7, 7]);
         assert_eq!(d.to_vec(CHUNK - 2..CHUNK + 2), [0, 7, 7, 0]);
+    }
+
+    #[test]
+    fn small_chunks() {
+        // (16 elements a chunk: blocks of 2)
+        let mut v: JVec<u64, 16> = JVec::from_elem(0, 5 * 16 + 3);
+        v[17] = 1;
+        v.commit();
+        let a = v.clone();
+        v[3] = 2;
+        v[17] = 1;
+        v.commit();
+        let b = v.clone();
+        // (chunk 1 written back as it was: shared; chunk 0 copied)
+        assert!(Arc::ptr_eq(&a.base[1], &b.base[1]));
+        assert!(!Arc::ptr_eq(&a.base[0], &b.base[0]));
+        assert_eq!(a.differences(&b, |x, y| x == y), [3]);
+        assert_eq!((b[3], b[17], b[5 * 16 + 2]), (2, 1, 0));
+        let mut c = b.clone();
+        c.copy_from(15, &[7, 7, 7]);
+        assert_eq!(c.to_vec(14..19), [0, 7, 7, 7, 0]);
+        c.commit();
+        assert_eq!(c.clone().differences(&b, |x, y| x == y), [15, 16, 17]);
+        assert_eq!(c.get(5 * 16 + 3), None);
+        assert_eq!(c.iter().copied().sum::<u64>(), 23);
     }
 }
