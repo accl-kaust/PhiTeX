@@ -9,11 +9,7 @@ pdfTeX's.
 
 This file states the design as it is, completely enough to implement
 it again from `tex.web`, `etex.ch` and `pdftex.web`. It says nothing
-about how the design was reached:
-- `LOG.md` is the dated record of what was built, measured and decided;
-- `DESIGN_ARCHIVE.md` is the old design document, kept as history only
-  (nothing here depends on it);
-- `AGENTS.md` holds the working rules.
+about how the design was reached; `AGENTS.md` holds the working rules.
 
 Code cites this file as `DESIGN N.M`. Older comments cite the old
 document's numbers (`DESIGN 7.17.3`); appendix A maps each to its
@@ -1191,7 +1187,7 @@ nothing is undone.
   caused, and the estimates hit, so the waste is measured.
 
 **Measured** on the course (`PARTEX_SSA_DAG`, `scripts/ssa-parallel.py`,
-LOG 2026-10-02 "How much of a build could run at once"), with a worker
+2026-10-02 "How much of a build could run at once"), with a worker
 per step and the steps' boundaries known:
 - *Waiting for dependencies gains nothing.* The 58,710 steps (66.06 M
   commands) are one chain: a critical path of 66.04 M, 1.00x, whether a
@@ -1378,9 +1374,9 @@ readers rerun. What is built:
   from the steps' numbering events, as the link does.
   Measured on that thesis (its long reflowing insertion, 4 words in
   Chapter 2): 5,712 steps and 11.0 M commands before, 586 steps and
-  0.29 M commands after (LOG 2026-10-04).
+  0.29 M commands after (measured 2026-10-04).
 
-**Analysed, not built** (LOG 2026-10-04):
+**Analysed, not built** (measured 2026-10-04):
 - *Positions in the conditionals.* The `cond` slot holds each open
   conditional's absolute `if_line`. An edit that adds a line before a
   conditional that stays open across steps changes `cond` for every
@@ -1827,7 +1823,7 @@ for them.
 2. **The definition index** replacing the flat arrays and placement
    (3.2): the frontier in the tables, the older definitions per span,
    the running span's local log, spans of the setup and of windows of
-   commands. Measured (LOG 2026-09-29): at command grain the index
+   commands. Measured (measured 2026-09-29): at command grain the index
    takes 6 GB on the course, and memory, not the read path, decides
    the grain.
 3. **The command as the node**: the trace with timestamps and spans,
@@ -1860,7 +1856,7 @@ program's text form with its parser and checker. The invariant of 3.1
 stands. What changes is the grain, what is recorded, and what a
 rebuild may cost. This section overrides 4.2 where they differ.
 
-The measurements behind it (LOG 2026-09-29, the course's one-word
+The measurements behind it (measured 2026-09-29, the course's one-word
 edit): the edit re-runs 4,450 commands, about 3.7 ms of plain TeX, but
 the rebuild takes 95–133 ms and the link 12–14 ms. Steps between clean
 points average 29 K commands in the body and a pgfplots figure is one
@@ -2286,7 +2282,7 @@ session or persisted build with `SyncTeX` (saving one is refused):
 nodes' `Side` handles in the node codec, the places table, the
 controller's state and the steps' events would all have to be saved.
 The cost off and on is measured by `scripts/accl/tasks/synctex-ab.sh`
-(LOG 2026-10-03).
+(measured 2026-10-03).
 
 ### 4.6 Display lists: each page's drawing without the PDF (2026-10-03)
 
@@ -2337,7 +2333,7 @@ against `pdftext` over the PDF, and SSA rebuilds against cold builds.
 ### 5.1 Numbers now
 
 The 295-page course (`ch15.tex`, "expensive" → "dear"), release
-binary, sandboxed (LOG 2026-09-29):
+binary, sandboxed (measured 2026-09-29):
 
 | | time |
 |---|---|

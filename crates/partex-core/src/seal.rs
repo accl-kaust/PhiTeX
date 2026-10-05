@@ -1,5 +1,5 @@
 //! Sealed lines (SSA mode, `DESIGN.md` 7.17.9's fold; the machine's,
-//! `DESIGN_ARCHIVE.md` §7.0).
+//! old DESIGN §7.0).
 //!
 //! Once a paragraph is broken into lines, what is inside a line box (its
 //! glue setting and list) is observed by very little: shipping the page

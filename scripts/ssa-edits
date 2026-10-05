@@ -268,8 +268,7 @@ NAMES_EDITS = [
     ("Second paragraph.", "Second paragraph, edited."),
     ("Second paragraph, edited.", "Second paragraph."),
 ]
-# a \label nothing refers to, then two rebuilds with no edit (LOG
-# 2026-09-29, "A label no one refers to")
+# a \label nothing refers to, then two rebuilds with no edit
 LABEL_EDITS = [("Para5x2 ", "Para5x2 \\label{new}"), ("", ""), ("", "")]
 # edits.tex with `-synctex=1` (DESIGN 4.5): a word; a line split and
 # joined again (the typeset text the same, its places not); a comment line
