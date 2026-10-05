@@ -2579,6 +2579,30 @@ oracle's HarfBuzz.
   oracle's version, and the accl image's snapshot fixes it for the
   gate.
 
+**Room for LuaTeX (C6).** XeTeX's pieces are cut so LuaTeX reuses them,
+not rewrites them:
+- `partex-otf`'s core is neutral: load a face, its metrics, shape a run
+  into glyphs with positions. XeTeX's own semantics (native words, the
+  feature strings, `Fixed` conversions) are a layer on it; LuaTeX
+  shapes glyph nodes in node lists (luaotfload, luahbtex).
+- The font index keeps each face's raw name records; the matching rules
+  are separate (XeTeX's fontconfig order and `XeTeXFontMgr` now,
+  luaotfload's name database later, which can pick another face).
+- Strings go through one per-flavor layer (pool, `print`, the string
+  functions): XeTeX's UTF-16 units kept as CESU-8; LuaTeX's UTF-8, Lua
+  strings being any bytes.
+- The Unicode code tables and `\U…` math codes are built once for both,
+  sized past XeTeX's limits (LuaTeX has more math families and dozens of
+  `\Umath…` parameters).
+- Glyph data is plain per-glyph values, never only packed inside a
+  native word, so a node library could expose nodes later.
+- PDF writing varies by engine: XeTeX is XDV through xdvipdfmx; LuaTeX
+  writes its PDF itself, a backend descended from pdfTeX's (other object
+  order, font embedding, `\pdfextension`), so partex's writer is
+  parameterised for it, not forked.
+- The oracle script takes the engine as a parameter, LuaTeX's with its
+  name cache and font list fixed as `fonts.conf` fixes XeTeX's.
+
 **The work.** Written whole, then brought to byte-identity against the
 oracle. Three parts with fixed interfaces between them, each checkable
 on its own:
@@ -2739,7 +2763,12 @@ gives the same values; printed again, the same text.
   deflate. XeTeX needs HarfBuzz-exact shaping (a pure-Rust shaper
   pinned to its version).
 - **LuaTeX's surface** (callbacks, node and token libraries) is large.
-  At first, every Lua call makes its node unreusable.
+  Lua is a source of effects in the SSA (3.1): at first, every
+  `\directlua` or callback makes its step unreusable; later, the Lua
+  state is a versioned value like any other; all of Lua's I/O (`io`,
+  `os.time`, `kpse`) goes through the Host, for wasm and determinism.
+  Open: the interpreter must be LuaTeX's Lua 5.3 to the bit, float
+  printing included (a port of its own, or a pure-Rust Lua made exact).
 - **biber** is a large Perl program: sandboxed as a call, not ported.
 - **Recording's cold cost** (3.2–3.3× a plain run today) is measured
   and kept switchable. The frame target is per edit, but a cold build
