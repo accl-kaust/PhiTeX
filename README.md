@@ -32,7 +32,7 @@ steps of it, so a build settles in one process with no separate passes.
 | `partex-bibtex`, `partex-makeindex` | BibTeX and makeindex, also as incremental build nodes |
 | `phitex-syntax`, `phitex-ir`, `phitex-doc` | the source CST, the SSA text form, the static document layer |
 
-The design is described in `DESIGN.md`.
+`DESIGN.md` is the design and `AGENTS.md` the working rules.
 
 ## Building
 
