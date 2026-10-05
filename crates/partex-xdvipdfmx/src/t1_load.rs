@@ -1,0 +1,672 @@
+//! t1_load.c, t1_load.h: Type 1 (PFB) fonts read into a [`CffFont`].
+//!
+//! `char **enc_vec` (256 glyph names, filled from the font's Encoding;
+//! NULL when not wanted) is `Option<&mut [Option<Vec<u8>>]>` of length
+//! 256. Parsers `(unsigned char **start, unsigned char *end)` are
+//! `(s: &[u8], p: &mut usize)`. Charstrings go through t1_char's state,
+//! so the functions reaching it are methods of [`Dpx`].
+
+use crate::cff::*;
+use crate::prelude::*;
+use crate::pst::PstObj;
+
+pub const T1_EEKEY: u16 = 55665;
+pub const T1_CHARKEY: u16 = 4330;
+pub const CFF_GLYPH_MAX: i32 = CFF_SID_MAX;
+pub const MAX_ARGS: usize = 127;
+pub const TYPE1_NAME_LEN_MAX: usize = 127;
+pub const PFB_SEG_TYPE_ASCII: i32 = 1;
+pub const PFB_SEG_TYPE_BINARY: i32 = 2;
+
+/// `StandardEncoding` (t1_load.c).
+pub static STANDARD_ENCODING: [&[u8]; 256] = [
+    b".notdef",
+    b".notdef",
+    b".notdef",
+    b".notdef",
+    b".notdef",
+    b".notdef",
+    b".notdef",
+    b".notdef",
+    b".notdef",
+    b".notdef",
+    b".notdef",
+    b".notdef",
+    b".notdef",
+    b".notdef",
+    b".notdef",
+    b".notdef",
+    b".notdef",
+    b".notdef",
+    b".notdef",
+    b".notdef",
+    b".notdef",
+    b".notdef",
+    b".notdef",
+    b".notdef",
+    b".notdef",
+    b".notdef",
+    b".notdef",
+    b".notdef",
+    b".notdef",
+    b".notdef",
+    b".notdef",
+    b".notdef",
+    b"space",
+    b"exclam",
+    b"quotedbl",
+    b"numbersign",
+    b"dollar",
+    b"percent",
+    b"ampersand",
+    b"quoteright",
+    b"parenleft",
+    b"parenright",
+    b"asterisk",
+    b"plus",
+    b"comma",
+    b"hyphen",
+    b"period",
+    b"slash",
+    b"zero",
+    b"one",
+    b"two",
+    b"three",
+    b"four",
+    b"five",
+    b"six",
+    b"seven",
+    b"eight",
+    b"nine",
+    b"colon",
+    b"semicolon",
+    b"less",
+    b"equal",
+    b"greater",
+    b"question",
+    b"at",
+    b"A",
+    b"B",
+    b"C",
+    b"D",
+    b"E",
+    b"F",
+    b"G",
+    b"H",
+    b"I",
+    b"J",
+    b"K",
+    b"L",
+    b"M",
+    b"N",
+    b"O",
+    b"P",
+    b"Q",
+    b"R",
+    b"S",
+    b"T",
+    b"U",
+    b"V",
+    b"W",
+    b"X",
+    b"Y",
+    b"Z",
+    b"bracketleft",
+    b"backslash",
+    b"bracketright",
+    b"asciicircum",
+    b"underscore",
+    b"quoteleft",
+    b"a",
+    b"b",
+    b"c",
+    b"d",
+    b"e",
+    b"f",
+    b"g",
+    b"h",
+    b"i",
+    b"j",
+    b"k",
+    b"l",
+    b"m",
+    b"n",
+    b"o",
+    b"p",
+    b"q",
+    b"r",
+    b"s",
+    b"t",
+    b"u",
+    b"v",
+    b"w",
+    b"x",
+    b"y",
+    b"z",
+    b"braceleft",
+    b"bar",
+    b"braceright",
+    b"asciitilde",
+    b".notdef",
+    b".notdef",
+    b".notdef",
+    b".notdef",
+    b".notdef",
+    b".notdef",
+    b".notdef",
+    b".notdef",
+    b".notdef",
+    b".notdef",
+    b".notdef",
+    b".notdef",
+    b".notdef",
+    b".notdef",
+    b".notdef",
+    b".notdef",
+    b".notdef",
+    b".notdef",
+    b".notdef",
+    b".notdef",
+    b".notdef",
+    b".notdef",
+    b".notdef",
+    b".notdef",
+    b".notdef",
+    b".notdef",
+    b".notdef",
+    b".notdef",
+    b".notdef",
+    b".notdef",
+    b".notdef",
+    b".notdef",
+    b".notdef",
+    b".notdef",
+    b"exclamdown",
+    b"cent",
+    b"sterling",
+    b"fraction",
+    b"yen",
+    b"florin",
+    b"section",
+    b"currency",
+    b"quotesingle",
+    b"quotedblleft",
+    b"guillemotleft",
+    b"guilsinglleft",
+    b"guilsinglright",
+    b"fi",
+    b"fl",
+    b".notdef",
+    b"endash",
+    b"dagger",
+    b"daggerdbl",
+    b"periodcentered",
+    b".notdef",
+    b"paragraph",
+    b"bullet",
+    b"quotesinglbase",
+    b"quotedblbase",
+    b"quotedblright",
+    b"guillemotright",
+    b"ellipsis",
+    b"perthousand",
+    b".notdef",
+    b"questiondown",
+    b".notdef",
+    b"grave",
+    b"acute",
+    b"circumflex",
+    b"tilde",
+    b"macron",
+    b"breve",
+    b"dotaccent",
+    b"dieresis",
+    b".notdef",
+    b"ring",
+    b"cedilla",
+    b".notdef",
+    b"hungarumlaut",
+    b"ogonek",
+    b"caron",
+    b"emdash",
+    b".notdef",
+    b".notdef",
+    b".notdef",
+    b".notdef",
+    b".notdef",
+    b".notdef",
+    b".notdef",
+    b".notdef",
+    b".notdef",
+    b".notdef",
+    b".notdef",
+    b".notdef",
+    b".notdef",
+    b".notdef",
+    b".notdef",
+    b".notdef",
+    b"AE",
+    b".notdef",
+    b"ordfeminine",
+    b".notdef",
+    b".notdef",
+    b".notdef",
+    b".notdef",
+    b"Lslash",
+    b"Oslash",
+    b"OE",
+    b"ordmasculine",
+    b".notdef",
+    b".notdef",
+    b".notdef",
+    b".notdef",
+    b".notdef",
+    b"ae",
+    b".notdef",
+    b".notdef",
+    b".notdef",
+    b"dotlessi",
+    b".notdef",
+    b".notdef",
+    b"lslash",
+    b"oslash",
+    b"oe",
+    b"germandbls",
+    b".notdef",
+    b".notdef",
+    b".notdef",
+    b".notdef",
+];
+
+/// `ISOLatin1Encoding` (t1_load.c).
+pub static ISO_LATIN1_ENCODING: [&[u8]; 256] = [
+    b".notdef",
+    b".notdef",
+    b".notdef",
+    b".notdef",
+    b".notdef",
+    b".notdef",
+    b".notdef",
+    b".notdef",
+    b".notdef",
+    b".notdef",
+    b".notdef",
+    b".notdef",
+    b".notdef",
+    b".notdef",
+    b".notdef",
+    b".notdef",
+    b".notdef",
+    b".notdef",
+    b".notdef",
+    b".notdef",
+    b".notdef",
+    b".notdef",
+    b".notdef",
+    b".notdef",
+    b".notdef",
+    b".notdef",
+    b".notdef",
+    b".notdef",
+    b".notdef",
+    b".notdef",
+    b".notdef",
+    b".notdef",
+    b"space",
+    b"exclam",
+    b"quotedbl",
+    b"numbersign",
+    b"dollar",
+    b"percent",
+    b"ampersand",
+    b"quotesingle",
+    b"parenleft",
+    b"parenright",
+    b"asterisk",
+    b"plus",
+    b"comma",
+    b"hyphen",
+    b"period",
+    b"slash",
+    b"zero",
+    b"one",
+    b"two",
+    b"three",
+    b"four",
+    b"five",
+    b"six",
+    b"seven",
+    b"eight",
+    b"nine",
+    b"colon",
+    b"semicolon",
+    b"less",
+    b"equal",
+    b"greater",
+    b"question",
+    b"at",
+    b"A",
+    b"B",
+    b"C",
+    b"D",
+    b"E",
+    b"F",
+    b"G",
+    b"H",
+    b"I",
+    b"J",
+    b"K",
+    b"L",
+    b"M",
+    b"N",
+    b"O",
+    b"P",
+    b"Q",
+    b"R",
+    b"S",
+    b"T",
+    b"U",
+    b"V",
+    b"W",
+    b"X",
+    b"Y",
+    b"Z",
+    b"bracketleft",
+    b"backslash",
+    b"bracketright",
+    b"asciicircum",
+    b"underscore",
+    b"grave",
+    b"a",
+    b"b",
+    b"c",
+    b"d",
+    b"e",
+    b"f",
+    b"g",
+    b"h",
+    b"i",
+    b"j",
+    b"k",
+    b"l",
+    b"m",
+    b"n",
+    b"o",
+    b"p",
+    b"q",
+    b"r",
+    b"s",
+    b"t",
+    b"u",
+    b"v",
+    b"w",
+    b"x",
+    b"y",
+    b"z",
+    b"braceleft",
+    b"bar",
+    b"braceright",
+    b"asciitilde",
+    b".notdef",
+    b".notdef",
+    b".notdef",
+    b".notdef",
+    b".notdef",
+    b".notdef",
+    b".notdef",
+    b".notdef",
+    b".notdef",
+    b".notdef",
+    b".notdef",
+    b".notdef",
+    b".notdef",
+    b".notdef",
+    b".notdef",
+    b".notdef",
+    b".notdef",
+    b"dotlessi",
+    b"quoteleft",
+    b"quoteright",
+    b"circumflex",
+    b"tilde",
+    b"macron",
+    b"breve",
+    b"dotaccent",
+    b"dieresis",
+    b".notdef",
+    b"ring",
+    b"cedilla",
+    b".notdef",
+    b"hungarumlaut",
+    b"ogonek",
+    b"caron",
+    b"space",
+    b"exclamdown",
+    b"cent",
+    b"sterling",
+    b"currency",
+    b"yen",
+    b"brokenbar",
+    b"section",
+    b"dieresis",
+    b"copyright",
+    b"ordfeminine",
+    b"guillemotleft",
+    b"logicalnot",
+    b"hyphen",
+    b"registered",
+    b"macron",
+    b"degree",
+    b"plusminus",
+    b"twosuperior",
+    b"threesuperior",
+    b"acute",
+    b"mu",
+    b"paragraph",
+    b"periodcentered",
+    b"cedilla",
+    b"onesuperior",
+    b"ordmasculine",
+    b"guillemotright",
+    b"onequarter",
+    b"onehalf",
+    b"threequarters",
+    b"questiondown",
+    b"Agrave",
+    b"Aacute",
+    b"Acircumflex",
+    b"Atilde",
+    b"Adieresis",
+    b"Aring",
+    b"AE",
+    b"Ccedilla",
+    b"Egrave",
+    b"Eacute",
+    b"Ecircumflex",
+    b"Edieresis",
+    b"Igrave",
+    b"Iacute",
+    b"Icircumflex",
+    b"Idieresis",
+    b"Eth",
+    b"Ntilde",
+    b"Ograve",
+    b"Oacute",
+    b"Ocircumflex",
+    b"Otilde",
+    b"Odieresis",
+    b"multiply",
+    b"Oslash",
+    b"Ugrave",
+    b"Uacute",
+    b"Ucircumflex",
+    b"Udieresis",
+    b"Yacute",
+    b"Thorn",
+    b"germandbls",
+    b"agrave",
+    b"aacute",
+    b"acircumflex",
+    b"atilde",
+    b"adieresis",
+    b"aring",
+    b"ae",
+    b"ccedilla",
+    b"egrave",
+    b"eacute",
+    b"ecircumflex",
+    b"edieresis",
+    b"igrave",
+    b"iacute",
+    b"icircumflex",
+    b"idieresis",
+    b"eth",
+    b"ntilde",
+    b"ograve",
+    b"oacute",
+    b"ocircumflex",
+    b"otilde",
+    b"odieresis",
+    b"divide",
+    b"oslash",
+    b"ugrave",
+    b"uacute",
+    b"ucircumflex",
+    b"udieresis",
+    b"yacute",
+    b"thorn",
+    b"ydieresis",
+];
+
+/// `t1_decrypt` (static): in place (C's `dst == src` use) from
+/// `src[skip..len]`; the result is `dst[0..len - skip]`.
+fn t1_decrypt(key: u16, dst: &mut [u8], src: &[u8], skip: i32, len: i32) {
+    todo!()
+}
+
+/// `MATCH_NAME`.
+fn match_name(t: &PstObj, n: &[u8]) -> bool {
+    todo!()
+}
+
+/// `MATCH_OP`.
+fn match_op(t: &PstObj, n: &[u8]) -> bool {
+    todo!()
+}
+
+/// `get_next_key` (static).
+fn get_next_key(s: &[u8], p: &mut usize) -> Option<Vec<u8>> {
+    todo!()
+}
+
+/// `seek_operator` (static): 0 found, -1 not.
+fn seek_operator(s: &[u8], p: &mut usize, op: &[u8]) -> i32 {
+    todo!()
+}
+
+/// `parse_svalue` (static): status and the value.
+fn parse_svalue(s: &[u8], p: &mut usize) -> (i32, Option<Vec<u8>>) {
+    todo!()
+}
+
+/// `parse_bvalue` (static): status and the value.
+fn parse_bvalue(s: &[u8], p: &mut usize) -> (i32, f64) {
+    todo!()
+}
+
+/// `parse_nvalue` (static): the count read (or < 0) into `value`
+/// (at most `max`).
+fn parse_nvalue(s: &[u8], p: &mut usize, value: &mut [f64], max: i32) -> i32 {
+    todo!()
+}
+
+/// `try_put_or_putinterval` (static).
+fn try_put_or_putinterval(enc_vec: &mut [Option<Vec<u8>>], s: &[u8], p: &mut usize) -> i32 {
+    todo!()
+}
+
+/// `parse_encoding` (static).
+fn parse_encoding(enc_vec: Option<&mut [Option<Vec<u8>>]>, s: &[u8], p: &mut usize) -> i32 {
+    todo!()
+}
+
+/// `parse_part1` (static).
+fn parse_part1(
+    font: &mut CffFont,
+    enc_vec: Option<&mut [Option<Vec<u8>>]>,
+    s: &[u8],
+    p: &mut usize,
+) -> i32 {
+    todo!()
+}
+
+/// `get_pfb_segment` (static): the segment (C's `*length` = its len),
+/// or none.
+fn get_pfb_segment(fp: &mut MemFile, expected_type: i32) -> Option<Vec<u8>> {
+    todo!()
+}
+
+/// `init_cff_font` (static).
+fn init_cff_font(cff: &mut CffFont) {
+    todo!()
+}
+
+/// `is_pfb`.
+pub fn is_pfb(fp: &mut MemFile) -> i32 {
+    todo!()
+}
+
+/// `t1_get_standard_glyph`: StandardEncoding's name of `code`.
+pub fn t1_get_standard_glyph(code: i32) -> Option<&'static [u8]> {
+    todo!()
+}
+
+/// `t1_get_fontname`: status (0 ok, -1) and the FontName.
+pub fn t1_get_fontname(fp: &mut MemFile) -> (i32, Vec<u8>) {
+    todo!()
+}
+
+impl Dpx {
+    /// `parse_subrs` (static; prefixed: Dpx methods share a namespace).
+    fn t1_load_parse_subrs(
+        &mut self,
+        font: &mut CffFont,
+        s: &[u8],
+        p: &mut usize,
+        len_iv: i32,
+        mode: i32,
+    ) -> i32 {
+        todo!()
+    }
+    /// `parse_charstrings` (static, prefixed).
+    fn t1_load_parse_charstrings(
+        &mut self,
+        font: &mut CffFont,
+        s: &[u8],
+        p: &mut usize,
+        len_iv: i32,
+        mode: i32,
+    ) -> i32 {
+        todo!()
+    }
+    /// `parse_part2` (static, prefixed).
+    fn t1_load_parse_part2(
+        &mut self,
+        font: &mut CffFont,
+        s: &[u8],
+        p: &mut usize,
+        mode: i32,
+    ) -> i32 {
+        todo!()
+    }
+    /// `t1_load_font`: the font as CFF (`mode` 1: metrics only, no
+    /// charstrings converted).
+    pub fn t1_load_font(
+        &mut self,
+        enc_vec: Option<&mut [Option<Vec<u8>>]>,
+        mode: i32,
+        fp: &mut MemFile,
+    ) -> Option<CffFont> {
+        todo!()
+    }
+}

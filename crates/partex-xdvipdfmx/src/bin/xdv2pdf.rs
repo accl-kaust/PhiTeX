@@ -1,0 +1,140 @@
+//! `xdv2pdf [-o NAME.pdf] [--dvi NAME.xdv] FILE.xdv > OUT.pdf`: XDV to PDF,
+//! as `xelatex` does it (`xdvipdfmx -q -E -o NAME.pdf < NAME.xdv`).
+//!
+//! The PDF goes to stdout. `-o` is the PDF's name as xdvipdfmx is told it
+//! (the subset tags hash it; default: FILE's, with `.pdf`); `--dvi` gives
+//! xdvipdfmx a DVI name, as when it reads a file and not a pipe. Files are
+//! found with `kpsewhich`; streams are compressed with the system zlib's
+//! `compress2`, as xdvipdfmx compresses them.
+#![expect(unsafe_code, reason = "FFI to the system zlib")]
+
+use std::collections::HashMap;
+use std::ffi::{OsStr, c_int, c_ulong};
+use std::io::Write;
+use std::os::unix::ffi::OsStrExt;
+use std::process::Command;
+use std::sync::Arc;
+
+use partex_xdvipdfmx::api::{Options, Session};
+use partex_xdvipdfmx::io::{Files, Format};
+
+#[link(name = "z")]
+unsafe extern "C" {
+    fn compress2(
+        dest: *mut u8,
+        dest_len: *mut c_ulong,
+        source: *const u8,
+        source_len: c_ulong,
+        level: c_int,
+    ) -> c_int;
+    fn compressBound(source_len: c_ulong) -> c_ulong;
+}
+
+/// zlib's `compress2` (pdfobj.c's `write_stream`).
+fn deflate(level: i32, data: &[u8]) -> Vec<u8> {
+    // SAFETY: `out` has the `compressBound` bytes zlib asks for; both
+    // buffers outlive the call.
+    unsafe {
+        let mut len = compressBound(data.len() as c_ulong);
+        let mut out = vec![0u8; usize::try_from(len).expect("size")];
+        let r = compress2(
+            out.as_mut_ptr(),
+            &raw mut len,
+            data.as_ptr(),
+            data.len() as c_ulong,
+            level,
+        );
+        assert_eq!(r, 0, "compress2 failed");
+        out.truncate(usize::try_from(len).expect("size"));
+        out
+    }
+}
+
+/// kpathsea, through `kpsewhich`, its answers cached.
+#[derive(Default)]
+struct Kpsewhich {
+    found: HashMap<(Vec<u8>, Format, Vec<u8>), Option<Vec<u8>>>,
+}
+
+fn format_name(format: Format) -> &'static str {
+    match format {
+        Format::Fontmap => "map",
+        Format::Type1 => "type1 fonts",
+        Format::TrueType => "truetype fonts",
+        Format::OpenType => "opentype fonts",
+        Format::Cmap => "cmap files",
+        Format::Sfd => "subfont definition files",
+        Format::Enc => "enc files",
+        Format::Tfm => "tfm",
+        Format::Ofm => "ofm",
+        Format::Vf => "vf",
+        Format::Ovf => "ovf",
+        Format::Pict => "graphic/figure",
+        Format::Tex => "tex",
+        Format::ProgramText => "other text files",
+        Format::ProgramBinary => "other binary files",
+    }
+}
+
+impl Files for Kpsewhich {
+    fn find(&mut self, name: &[u8], format: Format, progname: &[u8]) -> Option<Vec<u8>> {
+        let key = (name.to_vec(), format, progname.to_vec());
+        if let Some(r) = self.found.get(&key) {
+            return r.clone();
+        }
+        let out = Command::new("kpsewhich")
+            .arg(format!("-progname={}", String::from_utf8_lossy(progname)))
+            .arg(format!("-format={}", format_name(format)))
+            .arg(OsStr::from_bytes(name))
+            .output()
+            .ok()?;
+        let mut path = out.stdout;
+        while path.last() == Some(&b'\n') {
+            path.pop();
+        }
+        let r = (out.status.success() && !path.is_empty()).then_some(path);
+        self.found.insert(key, r.clone());
+        r
+    }
+
+    fn read(&mut self, path: &[u8]) -> Option<Arc<[u8]>> {
+        std::fs::read(OsStr::from_bytes(path)).ok().map(Arc::from)
+    }
+}
+
+fn main() {
+    let mut args = std::env::args().skip(1);
+    let (mut pdf, mut dvi, mut input) = (None, None, None);
+    while let Some(a) = args.next() {
+        match a.as_str() {
+            "-o" => pdf = args.next(),
+            "--dvi" => dvi = args.next(),
+            _ => input = Some(a),
+        }
+    }
+    let Some(input) = input else {
+        eprintln!("usage: xdv2pdf [-o NAME.pdf] [--dvi NAME.xdv] FILE.xdv > OUT.pdf");
+        std::process::exit(2);
+    };
+    let pdf =
+        pdf.unwrap_or_else(|| format!("{}.pdf", input.strip_suffix(".xdv").unwrap_or(&input)));
+    let xdv = std::fs::read(&input).unwrap_or_else(|e| {
+        eprintln!("xdv2pdf: {input}: {e}");
+        std::process::exit(1);
+    });
+    let options = Options {
+        pdf_filename: Some(pdf.into_bytes()),
+        dvi_filename: dvi.map(String::into_bytes),
+        source_date_epoch: std::env::var("SOURCE_DATE_EPOCH")
+            .ok()
+            .and_then(|s| s.trim().parse().ok()),
+        ..Options::default()
+    };
+    let out = Session::convert(
+        options,
+        Box::new(Kpsewhich::default()),
+        Box::new(deflate),
+        &xdv,
+    );
+    std::io::stdout().write_all(&out).expect("stdout");
+}
