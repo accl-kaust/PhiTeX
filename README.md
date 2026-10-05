@@ -61,3 +61,9 @@ sources change, use `-watch`.
 ## License
 
 GNU Affero General Public License v3.0 only (`AGPL-3.0-only`); see `LICENSE`.
+
+This license applies to every revision of this repository, including
+those committed before `LICENSE` was added. The `license` field in
+earlier revisions of `Cargo.toml` (`MIT OR Apache-2.0`, later
+`AGPL-3.0-or-later`) was a placeholder and never licensed this code under
+those terms.
