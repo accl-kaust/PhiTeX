@@ -559,6 +559,15 @@ impl<H: Host, T: Tracker> Tex<H, T> {
     pub(crate) fn cat_code(&self, c: i32) -> i32 {
         self.equiv(CAT_CODE_BASE + c)
     }
+    /// Code `c` of the table at `base` (`cat_code_base`, ...), without
+    /// telling the tracker; a character past the narrow tables has
+    /// `IniTeX`'s value (12 for its category).
+    pub(crate) fn peek_code(&self, base: i32, c: i32) -> i32 {
+        if (0..256).contains(&c) {
+            return self.peek_eqtb(base + c).rh();
+        }
+        if base == CAT_CODE_BASE { OTHER_CHAR } else { 0 }
+    }
     pub(crate) fn lc_code(&self, c: i32) -> i32 {
         self.equiv(LC_CODE_BASE + c)
     }

@@ -1227,8 +1227,11 @@ fn input_difference(new: &Engine, old: &Engine) -> String {
         return "the input differs (the stack or the files left)".to_owned();
     }
     let i = a.iter().zip(&b).take_while(|(x, y)| x == y).count();
-    let show = |v: &[u8]| {
-        String::from_utf8_lossy(&v[i.saturating_sub(20)..(i + 20).min(v.len())]).into_owned()
+    let show = |v: &[u32]| {
+        v[i.saturating_sub(20)..(i + 20).min(v.len())]
+            .iter()
+            .map(|&c| char::from_u32(c).unwrap_or('\u{FFFD}'))
+            .collect::<String>()
     };
     format!(
         "the input differs (the buffer at {i}: {:?} / {:?})",

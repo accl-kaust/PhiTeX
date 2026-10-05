@@ -1471,6 +1471,10 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         let Tex {
             // not state: the host and tracker are the caller's; the
             // parameters are the same for every run of a session
+            unicode: _,
+            doing_special: _,
+            name_scratch: _,
+            file_name_quote_char: _,
             host: _,
             tracker: _,
             params: _,

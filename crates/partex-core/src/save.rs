@@ -238,7 +238,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
     fn check_full_save_stack(&mut self) -> Result<(), Jump> {
         let room = match self.params.flavor {
             crate::params::Flavor::Tex => 6,
-            crate::params::Flavor::PdfTex => 7,
+            crate::params::Flavor::PdfTex | crate::params::Flavor::XeTeX => 7,
         };
         // (the size tested apart from the statistic, which a dropped run
         // leaves at its deepest)

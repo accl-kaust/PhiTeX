@@ -352,14 +352,14 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                 // §506: test if two characters match.
                 self.get_x_token_or_active_char()?;
                 let (m, n) = if self.cur_cmd > ACTIVE_CHAR || self.cur_chr > 255 {
-                    (RELAX, 256) // not a character
+                    (RELAX, TOO_BIG_USV) // not a character
                 } else {
                     (self.cur_cmd, self.cur_chr)
                 };
                 self.get_x_token_or_active_char()?;
                 if self.cur_cmd > ACTIVE_CHAR || self.cur_chr > 255 {
                     self.cur_cmd = RELAX;
-                    self.cur_chr = 256;
+                    self.cur_chr = TOO_BIG_USV;
                 }
                 if this_if == IF_CHAR_CODE {
                     n == self.cur_chr

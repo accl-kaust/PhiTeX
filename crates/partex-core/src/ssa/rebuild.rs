@@ -238,7 +238,7 @@ struct Pending {
 
 /// Where a step left a file's line ([`Steps::ended_at`]): the data's
 /// load id and bytes, where the line begins in it, and its rest.
-pub(super) type Ended = (u32, Arc<[u8]>, usize, Vec<u8>);
+pub(super) type Ended = (u32, Arc<[u8]>, usize, Vec<u32>);
 
 /// A store a step made: a name opened (`\openout`, a whole definition)
 /// or a line appended to it.
@@ -882,7 +882,7 @@ pub(crate) struct InputState {
     /// top file level's line and the file levels below the top one.
     v: InputValue,
     /// The top file level's line, from its start to `first` or `last`.
-    top: Vec<u8>,
+    top: Vec<u32>,
     first: usize,
     last: usize,
     cur: InStateRecord,
@@ -1079,7 +1079,7 @@ fn same_str<H: Host, T: Tracker>(t: &Tex<H, T>, a: i32, b: i32) -> bool {
     }
 }
 
-fn same_data(a: &Arc<[u8]>, b: &Arc<[u8]>) -> bool {
+fn same_data<C: PartialEq>(a: &Arc<[C]>, b: &Arc<[C]>) -> bool {
     Arc::ptr_eq(a, b) || a[..] == b[..]
 }
 

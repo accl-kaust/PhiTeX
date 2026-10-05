@@ -107,7 +107,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                 if self.last == self.first {
                     return Ok(());
                 }
-                let mut c = self.buffer[self.first];
+                let mut c = u8::try_from(self.buffer[self.first]).unwrap_or(0xFF);
                 if c >= b'a' {
                     c = c.wrapping_add(b'A').wrapping_sub(b'a'); // convert to uppercase
                 }
@@ -133,7 +133,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                         // will count as a blank
                         if self.last > self.first + 1 {
                             self.cur_input.loc = i32::try_from(self.first + 1).unwrap_or(0);
-                            self.buffer[self.first] = b' ';
+                            self.buffer[self.first] = u32::from(b' ');
                         } else {
                             self.prompt_input(b"insert>")?;
                             self.cur_input.loc = i32::try_from(self.first).unwrap_or(0);
@@ -198,7 +198,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         let s4 = self.align_state();
         self.set_align_state(1_000_000);
         self.ok_to_interrupt = false;
-        let d = self.buffer[self.first + 1];
+        let d = u8::try_from(self.buffer[self.first + 1]).unwrap_or(0);
         let mut n = if self.last > self.first + 1 && d.is_ascii_digit() {
             i32::from(c) * 10 + i32::from(d) - i32::from(b'0') * 11
         } else {

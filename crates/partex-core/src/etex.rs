@@ -16,6 +16,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         match self.params.flavor {
             Flavor::Tex => self.init_prim_tex(),
             Flavor::PdfTex => self.init_prim_pdftex(),
+            Flavor::XeTeX => self.init_prim_xetex(),
         }
     }
 
@@ -23,15 +24,19 @@ impl<H: Host, T: Tracker> Tex<H, T> {
     /// the command line, in INITEX without a format); whether extended
     /// mode was just entered (then no format is loaded).
     pub(crate) fn enable_etex_if_requested(&mut self) -> Result<bool, Jump> {
-        if self.params.flavor != Flavor::PdfTex || !self.params.ini {
+        if self.params.flavor == Flavor::Tex || !self.params.ini {
             return Ok(false);
         }
         let loc = crate::input::ux(self.cur_input.loc);
-        let star = self.buffer[loc] == b'*';
+        let star = self.buffer[loc] == u32::from(b'*');
         if !(self.params.etex || star) {
             return Ok(false);
         }
-        self.generate_etex_prims()?;
+        if self.params.flavor == Flavor::XeTeX {
+            self.generate_etex_prims_xetex()?;
+        } else {
+            self.generate_etex_prims()?;
+        }
         if star {
             self.cur_input.loc += 1;
         }
@@ -356,13 +361,19 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                 .overflow(b"buffer size", self.params.buf_size)
                 .map(|()| false);
         }
-        let mut last = self.first + line.len();
-        self.buffer[self.first..last].copy_from_slice(line);
+        // (`XeTeX`: the line's characters, from its pool units)
+        let chars: alloc::vec::Vec<u32> = if self.unicode {
+            crate::strings::decode_chars(line).collect()
+        } else {
+            line.iter().map(|&b| u32::from(b)).collect()
+        };
+        let mut last = self.first + chars.len();
+        self.buffer[self.first..last].copy_from_slice(&chars);
         let padded = self.first + 4 * (words - 1);
         if padded >= self.max_buf_stack {
             self.max_buf_stack = padded + 1;
         }
-        while last > self.first && self.buffer[last - 1] == b' ' {
+        while last > self.first && self.buffer[last - 1] == u32::from(b' ') {
             last -= 1;
         }
         self.last = last;

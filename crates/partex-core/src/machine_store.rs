@@ -1607,7 +1607,7 @@ mod tests {
             t.no_new_control_sequence = !new;
             t.cs_cache = crate::hash::CsCache::default();
             for (i, &b) in name.iter().enumerate() {
-                t.buffer[i] = b;
+                t.buffer[i] = u32::from(b);
             }
             t.tracker.clear();
             let p = t.id_lookup(0, name.len()).unwrap();
@@ -1687,7 +1687,9 @@ mod tests {
                     let t = &m.tex;
                     let from = usize::try_from(t.cur_input.loc).unwrap();
                     let to = usize::try_from(t.cur_input.limit).unwrap();
-                    let rest: Vec<u8> = (from..to).map(|k| t.buffer[k]).collect();
+                    let rest: Vec<u8> = (from..to)
+                        .map(|k| u8::try_from(t.buffer[k]).unwrap())
+                        .collect();
                     let after = m.census().clean;
                     let kind = (0..2).find(|&k| after[k] != before[k]);
                     seen.push((String::from_utf8(rest).unwrap(), level, kind));

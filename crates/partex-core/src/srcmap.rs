@@ -617,9 +617,9 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         Some(i)
     }
 
-    /// The category of byte `c`, unread (an origin is not a read).
-    fn quiet_cat(&self, c: u8) -> i32 {
-        self.peek_eqtb(CAT_CODE_BASE + i32::from(c)).rh()
+    /// The category of character `c`, unread (an origin is not a read).
+    fn quiet_cat(&self, c: u32) -> i32 {
+        self.peek_code(CAT_CODE_BASE, crate::input::ci(c))
     }
 
     /// The origin of the token just read from file level `cur_input`
@@ -700,7 +700,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                 let c = b(end - 1);
                 if let Some(t) = want
                     && self.cur_cs == 0
-                    && crate::web::tok_chr(t) != i32::from(c)
+                    && crate::web::tok_chr(t) != crate::input::ci(c)
                     && !(end >= start + 3 && b(end - 3) == b(end - 2))
                 {
                     return None;
@@ -708,8 +708,8 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                 if end >= start + 4
                     && b(end - 4) == b(end - 3)
                     && self.quiet_cat(b(end - 4)) == SUP_MARK
-                    && b(end - 2).is_ascii_hexdigit()
-                    && c.is_ascii_hexdigit()
+                    && u8::try_from(b(end - 2)).is_ok_and(|x| x.is_ascii_hexdigit())
+                    && u8::try_from(c).is_ok_and(|x| x.is_ascii_hexdigit())
                 {
                     end - 4
                 } else if end >= start + 3

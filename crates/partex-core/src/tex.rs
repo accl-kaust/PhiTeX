@@ -63,6 +63,15 @@ pub struct Tex<H: Host, T: Tracker = Untracked> {
     pub(crate) xchr: [u8; 256],
     /// Non-zero iff the character prints as itself (web2c, §24).
     pub(crate) xprn: [bool; 256],
+    /// `XeTeX`'s Unicode (DESIGN 4.7): pool units UTF-16 kept as CESU-8,
+    /// characters printed as UTF-8. Set from the flavor, once.
+    pub(crate) unicode: bool,
+    /// `XeTeX` §61: printing a `\special`'s text (characters go out raw).
+    pub(crate) doing_special: bool,
+    /// Scratch for a name being looked up, in the pool's encoding.
+    pub(crate) name_scratch: alloc::vec::Vec<u8>,
+    /// `XeTeX` §548: the quote a file name being scanned is in (0: none).
+    pub(crate) file_name_quote_char: u32,
 
     // §39: the string pool.
     pub(crate) str_pool: crate::flat::Flat<u8>,
@@ -109,7 +118,7 @@ pub struct Tex<H: Host, T: Tracker = Untracked> {
     pub(crate) line: i32,
 
     // §30: the input buffer.
-    pub(crate) buffer: crate::flat::Flat<u8>,
+    pub(crate) buffer: crate::flat::Flat<u32>,
     pub(crate) first: usize,
     pub(crate) last: usize,
     pub(crate) max_buf_stack: usize,
@@ -610,6 +619,10 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             xord: [0; 256],
             xchr: [0; 256],
             xprn: [false; 256],
+            unicode: p.flavor == crate::params::Flavor::XeTeX,
+            doing_special: false,
+            name_scratch: alloc::vec::Vec::new(),
+            file_name_quote_char: 0,
             str_pool: crate::flat::Flat::new(vec![0; pool_size.min(1 << 16) + 1]),
             str_start: crate::flat::Flat::new(vec![0; max_strings.min(1 << 12) + 1]),
             pool_ptr: 0,

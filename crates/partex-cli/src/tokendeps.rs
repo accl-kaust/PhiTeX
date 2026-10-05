@@ -251,6 +251,7 @@ mod tests {
         cat[0x7f] = 15;
         LineCodes {
             cat,
+            wide: Vec::new(),
             end_line_char: 13,
         }
     }
@@ -289,15 +290,18 @@ mod tests {
         assert_eq!(
             t(b"\\ ~"),
             Some(vec![
-                LineToken::Cs(b" ".to_vec()),
-                LineToken::Active(b'~'),
-                LineToken::Char(10, b' ')
+                LineToken::Cs(vec![u32::from(b' ')]),
+                LineToken::Active(u32::from(b'~')),
+                LineToken::Char(10, u32::from(b' '))
             ])
         );
         // a backslash at the end names `\^^M`
         assert_eq!(
             t(b"a\\"),
-            Some(vec![LineToken::Char(11, b'a'), LineToken::Cs(vec![13])])
+            Some(vec![
+                LineToken::Char(11, u32::from(b'a')),
+                LineToken::Cs(vec![13])
+            ])
         );
     }
 
@@ -436,7 +440,7 @@ mod tests {
         let g = t.line_start(&old, 2);
         let mut obey = plain();
         obey.cat[usize::from(b' ')] = 13;
-        t.line_end(&old, 2, g, || Some(obey));
+        t.line_end(&old, 2, g, || Some(obey.clone()));
         assert!(invisible(&[(0, t.take())], &t, &old, new, 1, "f").is_err());
         // two readings, one under each set of codes
         let (t, iv) = read(&old, None);

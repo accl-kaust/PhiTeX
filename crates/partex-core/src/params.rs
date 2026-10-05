@@ -259,6 +259,9 @@ pub enum Flavor {
     Tex,
     /// pdfTeX (`pdftex`), which includes e-TeX.
     PdfTex,
+    /// `XeTeX` (`xetex`), e-TeX with Unicode and native fonts; its PDF is
+    /// `xdvipdfmx`'s, from its XDV (DESIGN 4.7).
+    XeTeX,
 }
 
-partex_engine::persist_enum!(Flavor { Tex, PdfTex });
+partex_engine::persist_enum!(Flavor { Tex, PdfTex, XeTeX });

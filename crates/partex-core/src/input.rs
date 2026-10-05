@@ -175,7 +175,7 @@ pub(crate) struct InputValues {
     pub starts: Vec<usize>,
     /// The buffer below the top file level's line (the lines of the
     /// levels below it, which do not change while it is open), once made.
-    pub below: Option<Arc<[u8]>>,
+    pub below: Option<Arc<[u32]>>,
     /// The file levels below the top one, once made.
     pub files: Option<Arc<FileLevels>>,
 }
@@ -190,7 +190,7 @@ pub(crate) struct InputValue {
     pub params: Option<Arc<Chain<Option<Tokens>>>>,
     pub np: usize,
     /// The buffer below the top file level's line, and where it starts.
-    pub below: Arc<[u8]>,
+    pub below: Arc<[u32]>,
     pub from: usize,
     /// The file levels below the top one.
     pub files: Arc<FileLevels>,
@@ -217,6 +217,10 @@ pub(crate) struct AlphaFile {
     pub(crate) call: usize,
     /// `SyncTeX`'s tag of the file (`synctex_start_input`; 0: none).
     pub(crate) synctex_tag: i32,
+    /// `XeTeX`'s input mode (`XeTeX_input_mode_*`): auto (sniffed at the
+    /// first line), UTF-8, UTF-16BE, UTF-16LE or bytes. Unused by TeX and
+    /// pdfTeX, which read bytes.
+    pub(crate) mode: u8,
 }
 
 partex_engine::persist_struct!(AlphaFile {
@@ -228,7 +232,8 @@ partex_engine::persist_struct!(AlphaFile {
     lines,
     name,
     call,
-    synctex_tag
+    synctex_tag,
+    mode
 });
 
 impl<H: Host, T: Tracker> Tex<H, T> {
@@ -246,7 +251,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
 
     /// The buffer as the state hash sees it, with the input levels'
     /// `(start, limit)` (`PARTEX_WATCH_DEBUG`).
-    pub fn buffer_view(&self) -> (alloc::vec::Vec<u8>, alloc::vec::Vec<(i32, i32)>) {
+    pub fn buffer_view(&self) -> (alloc::vec::Vec<u32>, alloc::vec::Vec<(i32, i32)>) {
         let n = self.first.max(self.last);
         let levels = self.input_stack[..self.input_ptr]
             .iter()
@@ -341,7 +346,11 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                 *v = u8::try_from(self.peek_eqtb(p).rh()).unwrap_or(255);
             }
             let end_line_char = self.peek_eqtb(INT_BASE + END_LINE_CHAR_CODE).int();
-            Some(crate::track::LineCodes { cat, end_line_char })
+            Some(crate::track::LineCodes {
+                cat,
+                wide: alloc::vec::Vec::new(),
+                end_line_char,
+            })
         });
     }
 
@@ -415,6 +424,9 @@ impl<H: Host, T: Tracker> Tex<H, T> {
     /// `buffer[first..last)`. Lines end at LF, CR or CRLF; trailing spaces
     /// (not tabs) are removed; the bytes go through `xord`.
     pub(crate) fn input_ln(&mut self, f: &mut AlphaFile) -> Result<bool, Jump> {
+        if self.unicode {
+            return self.input_ln_unicode(f);
+        }
         let buf_size = self.buffer.len() - 1;
         self.last = self.first;
         let data = &f.data;
@@ -439,7 +451,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                 // web2c aborts: "! Unable to read an entire line".
                 return self.buffer_overflow();
             }
-            self.buffer[self.last] = c;
+            self.buffer[self.last] = u32::from(c);
             self.last += 1;
             i += 1;
         }
@@ -451,17 +463,112 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             i += 1;
         }
         f.pos = i;
-        self.buffer[self.last] = b' ';
+        self.buffer[self.last] = u32::from(b' ');
         if self.last >= self.max_buf_stack {
             self.max_buf_stack = self.last;
         }
-        while self.last > self.first && self.buffer[self.last - 1] == b' ' {
+        while self.last > self.first && self.buffer[self.last - 1] == u32::from(b' ') {
             self.last -= 1;
         }
         for k in self.first..=self.last {
-            self.buffer[k] = self.xord[usize::from(self.buffer[k])];
+            let c = usize::try_from(self.buffer[k]).unwrap_or(0) & 0xFF;
+            self.buffer[k] = u32::from(self.xord[c]);
         }
         Ok(true)
+    }
+
+    /// `XeTeX`'s `input_line` (`XeTeX_ext.c`): the next line of `f` as
+    /// Unicode scalar values, decoded as its mode says (the mode `auto`
+    /// sniffed from the first two bytes, as `u_open_in` does). A line ends
+    /// at LF or CR, a CR's LF is skipped; trailing spaces are removed.
+    fn input_ln_unicode(&mut self, f: &mut AlphaFile) -> Result<bool, Jump> {
+        use partex_engine::web::{
+            XETEX_INPUT_MODE_AUTO, XETEX_INPUT_MODE_UTF8, XETEX_INPUT_MODE_UTF16BE,
+            XETEX_INPUT_MODE_UTF16LE,
+        };
+        let buf_size = self.buffer.len() - 1;
+        self.last = self.first;
+        let data = f.data.clone();
+        if T::LINES && self.log_lines && !f.name.is_empty() {
+            self.line_log.push((f.name.clone(), f.lines));
+        }
+        if f.mode == u8::try_from(XETEX_INPUT_MODE_AUTO).unwrap_or(0) && f.pos == 0 {
+            let (mode, skip) = sniff_input_mode(&data);
+            f.mode = u8::try_from(mode).unwrap_or(1);
+            f.pos = skip;
+        }
+        if f.pos >= data.len() {
+            return Ok(false);
+        }
+        f.lines += 1;
+        let mode = i32::from(f.mode);
+        let mut i = f.pos;
+        let mut bad = false;
+        let mut end = None;
+        while i < data.len() {
+            let (c, n) = match mode {
+                XETEX_INPUT_MODE_UTF8 | XETEX_INPUT_MODE_AUTO => {
+                    let (c, n, ok) = decode_utf8_xetex(&data[i..]);
+                    bad |= !ok;
+                    (c, n)
+                }
+                XETEX_INPUT_MODE_UTF16BE | XETEX_INPUT_MODE_UTF16LE => {
+                    decode_utf16(&data[i..], mode == XETEX_INPUT_MODE_UTF16BE)
+                }
+                _ => (u32::from(data[i]), 1),
+            };
+            if c == u32::from(b'\n') || c == u32::from(b'\r') {
+                end = Some((c, n));
+                break;
+            }
+            if self.last >= buf_size {
+                return self.buffer_overflow();
+            }
+            self.buffer[self.last] = c;
+            self.last += 1;
+            i += n;
+        }
+        if let Some((c, n)) = end {
+            i += n;
+            if c == u32::from(b'\r') {
+                // (a CR's LF is skipped)
+                let (c2, n2) = match mode {
+                    XETEX_INPUT_MODE_UTF16BE | XETEX_INPUT_MODE_UTF16LE => {
+                        decode_utf16(&data[i..], mode == XETEX_INPUT_MODE_UTF16BE)
+                    }
+                    _ => (data.get(i).map_or(0, |&b| u32::from(b)), 1),
+                };
+                if c2 == u32::from(b'\n') && i < data.len() {
+                    i += n2;
+                }
+            }
+        }
+        f.pos = i;
+        if bad {
+            self.bad_utf8_warning();
+        }
+        self.buffer[self.last] = u32::from(b' ');
+        if self.last >= self.max_buf_stack {
+            self.max_buf_stack = self.last;
+        }
+        while self.last > self.first && self.buffer[self.last - 1] == u32::from(b' ') {
+            self.last -= 1;
+        }
+        Ok(true)
+    }
+
+    /// `XeTeX` §744 `bad_utf8_warning`.
+    fn bad_utf8_warning(&mut self) {
+        self.begin_diagnostic();
+        self.print_nl(b"Invalid UTF-8 byte or sequence");
+        if self.terminal_input() {
+            self.print_str(b" in terminal input");
+        } else {
+            self.print_str(b" at line ");
+            self.print_int(self.line);
+        }
+        self.print_str(b" replaced by U+FFFD.");
+        self.end_diagnostic(false);
     }
 
     /// §35: report overflow of the input buffer, and abort.
@@ -490,7 +597,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
     /// web2c's `print_buffer`: print `buffer[i]` (encTeX's `\mubytein`
     /// conversion is inactive without encTeX).
     pub(crate) fn print_buffer(&mut self, i: &mut usize) {
-        self.print(i32::from(self.buffer[*i]));
+        self.print(crate::input::ci(self.buffer[*i]));
         *i += 1;
     }
 
@@ -667,7 +774,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             // §318: pseudoprint the line.
             l = self.begin_pseudoprint();
             let limit = ux(self.cur_input.limit);
-            let j = if i32::from(self.buffer[limit]) == self.int_par(END_LINE_CHAR_CODE) {
+            let j = if crate::input::ci(self.buffer[limit]) == self.int_par(END_LINE_CHAR_CODE) {
                 limit
             } else {
                 limit + 1 // determine the effective end of the line
@@ -1109,6 +1216,75 @@ impl<H: Host, T: Tracker> Tex<H, T> {
     }
 }
 
+/// `XeTeX`'s `u_open_in` sniffing: the input mode of a file starting with
+/// `data`, and the bytes of its byte-order mark to skip.
+fn sniff_input_mode(data: &[u8]) -> (i32, usize) {
+    use partex_engine::web::{
+        XETEX_INPUT_MODE_UTF8, XETEX_INPUT_MODE_UTF16BE, XETEX_INPUT_MODE_UTF16LE,
+    };
+    match data {
+        [0xFE, 0xFF, ..] => (XETEX_INPUT_MODE_UTF16BE, 2),
+        [0xFF, 0xFE, ..] => (XETEX_INPUT_MODE_UTF16LE, 2),
+        [0, b, ..] if *b != 0 => (XETEX_INPUT_MODE_UTF16BE, 0),
+        [b, 0, ..] if *b != 0 => (XETEX_INPUT_MODE_UTF16LE, 0),
+        [0xEF, 0xBB, 0xBF, ..] => (XETEX_INPUT_MODE_UTF8, 3),
+        _ => (XETEX_INPUT_MODE_UTF8, 0),
+    }
+}
+
+/// `XeTeX`'s `get_uni_c` for UTF-8 (the Unicode consortium's
+/// `ConvertUTF`): the character at the start of `b`, the bytes it took and
+/// whether it was well formed. A lone continuation byte is itself; a lead
+/// byte of 5 or 6 bytes, or a bad continuation (left unread), is U+FFFD;
+/// sequences are not checked for overlong forms or surrogates.
+pub(crate) fn decode_utf8_xetex(b: &[u8]) -> (u32, usize, bool) {
+    const OFFSETS: [u32; 4] = [0, 0x3080, 0x000E_2080, 0x03C8_2080];
+    let c0 = b[0];
+    let extra = match c0 {
+        0..=0xBF => 0,
+        0xC0..=0xDF => 1,
+        0xE0..=0xEF => 2,
+        0xF0..=0xF7 => 3,
+        _ => return (0xFFFD, 1, false),
+    };
+    let mut v = u32::from(c0);
+    for k in 1..=extra {
+        match b.get(k) {
+            Some(&c) if (0x80..0xC0).contains(&c) => v = (v << 6) + u32::from(c),
+            // (the bad byte, or end of file, is read again)
+            _ => return (0xFFFD, k, false),
+        }
+    }
+    let v = v.wrapping_sub(OFFSETS[extra]);
+    if v > 0x10_FFFF {
+        return (0xFFFD, extra + 1, false);
+    }
+    (v, extra + 1, true)
+}
+
+/// `XeTeX`'s `get_uni_c` for UTF-16: the character at the start of `b`
+/// and the bytes it took (a lone surrogate is U+FFFD; a high one's
+/// following unit is read again).
+fn decode_utf16(b: &[u8], be: bool) -> (u32, usize) {
+    let unit = |i: usize| {
+        let x = u32::from(b.get(i).copied().unwrap_or(0));
+        let y = u32::from(b.get(i + 1).copied().unwrap_or(0));
+        if be { (x << 8) | y } else { x | (y << 8) }
+    };
+    let u = unit(0);
+    if (0xD800..=0xDBFF).contains(&u) {
+        let lo = unit(2);
+        if (0xDC00..=0xDFFF).contains(&lo) {
+            return (0x1_0000 + (u - 0xD800) * 0x400 + (lo - 0xDC00), 4);
+        }
+        return (0xFFFD, 2);
+    }
+    if (0xDC00..=0xDFFF).contains(&u) {
+        return (0xFFFD, 2);
+    }
+    (u, 2)
+}
+
 /// A non-negative WEB integer as an index. (A negative one wraps to an
 /// index past the end, failing the bounds check that follows.)
 #[inline]
@@ -1118,6 +1294,21 @@ impl<H: Host, T: Tracker> Tex<H, T> {
 )]
 pub(crate) fn ux(i: i32) -> usize {
     i as usize
+}
+
+/// A buffer character (a Unicode scalar value, DESIGN 4.7) as a WEB
+/// integer.
+#[inline]
+#[allow(clippy::cast_possible_wrap, reason = "a scalar value is below 2^21")]
+pub(crate) const fn ci(c: u32) -> i32 {
+    c as i32
+}
+
+/// A WEB integer character code as a buffer character.
+#[inline]
+#[allow(clippy::cast_sign_loss, reason = "a character code is never negative")]
+pub(crate) const fn cu(c: i32) -> u32 {
+    c as u32
 }
 
 #[cfg(test)]
@@ -1132,7 +1323,9 @@ mod tests {
         let mut t = engine();
         t.set_int_par(crate::web::END_LINE_CHAR_CODE, 13);
         let line = b"\\showbox2\r";
-        t.buffer[1..=line.len()].copy_from_slice(line);
+        for (d, &s) in t.buffer[1..=line.len()].iter_mut().zip(line) {
+            *d = u32::from(s);
+        }
         t.cur_input.state = crate::web::MID_LINE;
         t.cur_input.name = 20;
         t.cur_input.start = 1;

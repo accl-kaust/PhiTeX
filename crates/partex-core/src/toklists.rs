@@ -389,7 +389,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                 self.cur_input.limit -= 1;
             } else {
                 let c = self.int_par(END_LINE_CHAR_CODE);
-                self.buffer[ux(self.cur_input.limit)] = u8::try_from(c).unwrap_or(0);
+                self.buffer[ux(self.cur_input.limit)] = crate::input::cu(c);
             }
             self.first = ux(self.cur_input.limit + 1);
             self.cur_input.loc = self.cur_input.start;
@@ -397,7 +397,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             if line {
                 // e-TeX: handle \readline.
                 while self.cur_input.loc <= self.cur_input.limit {
-                    let c = i32::from(self.buffer[ux(self.cur_input.loc)]);
+                    let c = crate::input::ci(self.buffer[ux(self.cur_input.loc)]);
                     self.cur_input.loc += 1;
                     let t = if c == i32::from(b' ') {
                         SPACE_TOKEN

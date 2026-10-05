@@ -449,7 +449,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         let n = self.cur_chr;
         self.get_r_token()?;
         let p = self.cur_cs;
-        self.define(a, p, RELAX, 256)?;
+        self.define(a, p, RELAX, TOO_BIG_USV)?;
         self.scan_optional_equals()?;
         match n {
             CHAR_DEF_CODE => {

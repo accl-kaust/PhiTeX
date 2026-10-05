@@ -841,7 +841,9 @@ mod tests {
             b"errhelp",
             b"dump",
         ] {
-            t.buffer[..name.len()].copy_from_slice(name);
+            for (d, &s) in t.buffer[..name.len()].iter_mut().zip(name) {
+                *d = u32::from(s);
+            }
             let p = t.id_lookup(0, name.len()).unwrap();
             t.cur_cmd = t.eq_type(p);
             t.cur_chr = t.equiv(p);

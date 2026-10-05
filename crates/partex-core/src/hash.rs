@@ -120,19 +120,30 @@ impl<H: Host, T: Tracker> Tex<H, T> {
     /// §259: find the control sequence `buffer[j..j+l]`, inserting it
     /// unless `no_new_control_sequence`.
     pub(crate) fn id_lookup(&mut self, j: usize, l: usize) -> Result<i32, Jump> {
+        // (the name as the pool keeps it, DESIGN 4.7: bytes, or XeTeX's
+        // UTF-16 units as CESU-8)
+        let mut name = core::mem::take(&mut self.name_scratch);
+        name.clear();
+        self.buffer_name(j, l, &mut name);
+        let r = self.id_lookup_name(j, l, &name);
+        self.name_scratch = name;
+        r
+    }
+
+    fn id_lookup_name(&mut self, j: usize, l: usize, name: &[u8]) -> Result<i32, Jump> {
         // The shortcut: where this text was last found (a hint, checked;
         // a name keeps its location once entered).
-        let key = CsCache::key(&self.buffer[j..j + l]);
+        let key = CsCache::key(name);
         if let Some(p) = self.cs_cache.get(key) {
             let t = self.text(p);
             if t > 0 {
                 let t = usize::try_from(t).unwrap_or(0);
-                if self.length(t) == l && self.str_bytes(t) == &self.buffer[j..j + l] {
+                if self.str_bytes(t) == name {
                     return Ok(p);
                 }
             }
         }
-        let p = self.id_lookup_chain(j, l)?;
+        let p = self.id_lookup_chain(j, l, name)?;
         if p != UNDEFINED_CONTROL_SEQUENCE {
             self.cs_cache.insert(key, p);
         }
@@ -220,45 +231,44 @@ impl<H: Host, T: Tracker> Tex<H, T> {
     /// (a `\label` renamed: its chain's last link differs, and every
     /// lookup down that chain walked past it). Entering a name depends on
     /// the chain's end and the free slots: those reads are told.
-    fn id_lookup_chain(&mut self, j: usize, l: usize) -> Result<i32, Jump> {
+    fn id_lookup_chain(&mut self, j: usize, l: usize, name: &[u8]) -> Result<i32, Jump> {
         // §261: compute the hash code `h`.
-        let mut h = i32::from(self.buffer[j]);
+        let mut h = crate::input::ci(self.buffer[j]);
         for k in j + 1..j + l {
-            h = h + h + i32::from(self.buffer[k]);
+            h = h + h + crate::input::ci(self.buffer[k]);
             while h >= HASH_PRIME {
                 h -= HASH_PRIME;
             }
         }
         let mut p = h + HASH_BASE; // we start searching here
         if self.probe_names() {
-            return self.id_lookup_probe(j, l, p);
+            return self.id_lookup_probe(name, p);
         }
         let start = p;
         if !T::NAMES {
-            self.tracker
-                .read(crate::strings::str_cell(&self.buffer[j..j + l]));
+            self.tracker.read(crate::strings::str_cell(name));
         }
         loop {
             let w = self.walk(p);
             let t = w.rh();
             if t > 0 {
                 let t = usize::try_from(t).unwrap_or(0);
-                if self.length(t) == l && self.str_bytes(t) == &self.buffer[j..j + l] {
+                if self.str_bytes(t) == name {
                     self.tracker.read(Cell::Hash(p));
                     if T::NAMES {
-                        self.tracker.name_lookup(&self.buffer[j..j + l], p);
+                        self.tracker.name_lookup(name, p);
                     }
                     return Ok(p);
                 }
             }
             if w.lh() == 0 {
                 if T::NAMES {
-                    self.tracker.name_lookup(&self.buffer[j..j + l], 0);
+                    self.tracker.name_lookup(name, 0);
                 }
                 if self.name_cells {
                     // (a machine's: the name was not there, and is
                     // entered unless no new ones may be)
-                    let name = alloc::sync::Arc::from(&self.buffer[j..j + l]);
+                    let name = alloc::sync::Arc::from(name);
                     self.name_log.push((name, !self.no_new_control_sequence));
                 }
                 if self.no_new_control_sequence {
@@ -281,7 +291,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                         }
                         q = self.hash[Self::hash_idx(q)].lh();
                     }
-                    p = self.insert_cs_after(p, j, l)?;
+                    p = self.insert_cs_after(p, name)?;
                 }
                 return Ok(p);
             }
@@ -306,21 +316,21 @@ impl<H: Host, T: Tracker> Tex<H, T> {
 
     /// The characters of hash slot `q`'s name equal `buffer[j..j + l]`
     /// (not tracked).
-    fn slot_is(&self, q: i32, j: usize, l: usize) -> bool {
+    fn slot_is(&self, q: i32, name: &[u8]) -> bool {
         let t = self.hash[Self::hash_idx(q)].rh();
         t > 0 && {
             let t = usize::try_from(t).unwrap_or(0);
-            self.length(t) == l && self.str_bytes(t) == &self.buffer[j..j + l]
+            self.str_bytes(t) == name
         }
     }
 
     /// The places the name in `buffer[j..j + l]` probes in the
     /// `hash_extra` region, in order (after 64 of them one by one, so that
     /// every place is tried).
-    fn probes(&self, j: usize, l: usize) -> impl Iterator<Item = i32> + use<H, T> {
+    fn probes(&self, name: &[u8]) -> impl Iterator<Item = i32> + use<H, T> {
         let n = u64::try_from(self.params.hash_extra).unwrap_or(1).max(1);
         let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-        for &b in &self.buffer[j..j + l] {
+        for &b in name {
             h = (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3);
         }
         let step = (h >> 32) | 1;
@@ -349,16 +359,16 @@ impl<H: Host, T: Tracker> Tex<H, T> {
     /// name (a `\label`'s `\r@key`, made by one run and not another, used
     /// to change the link of its chain's last slot, which every name
     /// entered later in that chain read).
-    fn id_lookup_probe(&mut self, j: usize, l: usize, start: i32) -> Result<i32, Jump> {
+    fn id_lookup_probe(&mut self, name: &[u8], start: i32) -> Result<i32, Jump> {
         // (the slot of the hash code: a run's name there, or a format's
         // chain from it)
         self.tracker.read(Cell::Hash(start));
-        if self.slot_is(start, j, l) {
+        if self.slot_is(start, name) {
             return Ok(start);
         }
         if self.hash[Self::hash_idx(start)].rh() == 0 {
             // (no name has this hash code: this one goes here)
-            return self.new_name_at(start, j, l);
+            return self.new_name_at(start, name);
         }
         let mut q = start;
         loop {
@@ -367,18 +377,18 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                 break;
             }
             q = next;
-            if self.slot_is(q, j, l) {
+            if self.slot_is(q, name) {
                 self.tracker.read(Cell::Hash(q));
                 return Ok(q);
             }
         }
-        for q in self.probes(j, l) {
+        for q in self.probes(name) {
             self.tracker.read(Cell::Hash(q));
-            if self.slot_is(q, j, l) {
+            if self.slot_is(q, name) {
                 return Ok(q);
             }
             if self.hash[Self::hash_idx(q)].rh() == 0 {
-                return self.new_name_at(q, j, l);
+                return self.new_name_at(q, name);
             }
         }
         // (every place is taken: the table's capacity, not tex.web's
@@ -389,7 +399,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
 
     /// A name missing at free slot `q` (`id_lookup_probe`): entered there,
     /// unless no new names may be made.
-    fn new_name_at(&mut self, q: i32, j: usize, l: usize) -> Result<i32, Jump> {
+    fn new_name_at(&mut self, q: i32, name: &[u8]) -> Result<i32, Jump> {
         if self.no_new_control_sequence {
             return Ok(UNDEFINED_CONTROL_SEQUENCE);
         }
@@ -403,17 +413,17 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             }
             self.hash_high += 1;
         }
-        self.name_slot(q, j, l)
+        self.name_slot(q, name)
     }
 
     /// With `Tex::cs_by_name`: a free place in the `hash_extra` region for
     /// the name in `buffer[j..j + l]`, probed from places the name picks
     /// (so that where a name goes depends on the names made before it only
     /// when one of them took a place it probes). Its probes are told.
-    fn extra_slot(&mut self, j: usize, l: usize) -> i32 {
+    fn extra_slot(&mut self, name: &[u8]) -> i32 {
         let n = u64::try_from(self.params.hash_extra).unwrap_or(1).max(1);
         let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-        for &b in &self.buffer[j..j + l] {
+        for &b in name {
             h = (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3);
         }
         let step = (h >> 32) | 1;
@@ -457,7 +467,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
     }
 
     /// §260: insert a new control sequence after `p`, then return it.
-    fn insert_cs_after(&mut self, mut p: i32, j: usize, l: usize) -> Result<i32, Jump> {
+    fn insert_cs_after(&mut self, mut p: i32, name: &[u8]) -> Result<i32, Jump> {
         if self.text(p) > 0 {
             self.hash_high_read();
             if self.hash_high < self.params.hash_extra {
@@ -465,7 +475,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                 // packed from its start, where §260 of the run that loads
                 // it goes on putting them)
                 let q = if self.cs_by_name && !self.params.ini {
-                    self.extra_slot(j, l)
+                    self.extra_slot(name)
                 } else {
                     self.hash_high + 1 + EQTB_SIZE
                 };
@@ -507,11 +517,12 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                 p = self.hash_used;
             }
         }
-        self.name_slot(p, j, l)
+        self.name_slot(p, name)
     }
 
     /// §260's end: slot `p` gets the name `buffer[j..j + l]`, a new string.
-    fn name_slot(&mut self, p: i32, j: usize, l: usize) -> Result<i32, Jump> {
+    fn name_slot(&mut self, p: i32, name: &[u8]) -> Result<i32, Jump> {
+        let l = name.len();
         self.str_room(l)?;
         let d = self.cur_length();
         // Move the current string up to make room for another.
@@ -519,15 +530,15 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             self.pool_ptr -= 1;
             self.str_pool[self.pool_ptr + l] = self.str_pool[self.pool_ptr];
         }
-        for k in j..j + l {
-            self.append_char(self.buffer[k]);
+        for &b in name {
+            self.append_byte(b);
         }
         let s = self.make_string()?;
         self.set_text(p, i32::try_from(s).unwrap_or(0));
         self.pool_ptr += d;
         self.cs_count += 1;
         if T::NAMES {
-            self.tracker.name_made(&self.buffer[j..j + l], p);
+            self.tracker.name_made(name, p);
         }
         Ok(p)
     }
@@ -604,7 +615,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             let l = self.str_start[su + 1] - k;
             // We move `s` into the (empty) buffer.
             for j in 0..l {
-                self.buffer[j] = self.str_pool[k + j];
+                self.buffer[j] = u32::from(self.str_pool[k + j]);
             }
             self.cur_val = self.id_lookup(0, l)?; // no_new_control_sequence is false
             self.flush_string();
@@ -635,7 +646,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             }
             let first = self.first;
             for j in 0..l {
-                self.buffer[first + j] = self.str_pool[k + j];
+                self.buffer[first + j] = u32::from(self.str_pool[k + j]);
             }
             self.cur_val = self.id_lookup(first, l)?; // no_new_control_sequence is false
             self.flush_string();
@@ -697,7 +708,8 @@ mod tests {
     fn primitives_and_lookup() {
         let mut t = engine();
         t.no_new_control_sequence = false;
-        t.primitive(b"relax", RELAX, 256).unwrap();
+        t.primitive(b"relax", RELAX, crate::web::TOO_BIG_USV)
+            .unwrap();
         let relax = t.cur_val;
         t.primitive(b"tolerance", ASSIGN_INT, INT_BASE + TOLERANCE_CODE)
             .unwrap();
@@ -709,9 +721,13 @@ mod tests {
         assert_eq!(t.cs_count, 2);
 
         t.no_new_control_sequence = true;
-        t.buffer[..5].copy_from_slice(b"relax");
+        for (d, &s) in t.buffer[..5].iter_mut().zip(b"relax") {
+            *d = u32::from(s);
+        }
         assert_eq!(t.id_lookup(0, 5).unwrap(), relax);
-        t.buffer[..3].copy_from_slice(b"foo");
+        for (d, &s) in t.buffer[..3].iter_mut().zip(b"foo") {
+            *d = u32::from(s);
+        }
         assert_eq!(t.id_lookup(0, 3).unwrap(), UNDEFINED_CONTROL_SEQUENCE);
         assert_eq!(
             (t.eq_type(tol), t.equiv(tol)),
@@ -736,7 +752,9 @@ mod tests {
         assert_eq!(t.cs_count, 322);
         // The primitives reuse pool strings: no new strings.
         assert_eq!(t.str_ptr, 256 + 1093);
-        t.buffer[..7].copy_from_slice(b"synctex");
+        for (d, &s) in t.buffer[..7].iter_mut().zip(b"synctex") {
+            *d = u32::from(s);
+        }
         assert_eq!(t.id_lookup(0, 7).unwrap(), UNDEFINED_CONTROL_SEQUENCE);
     }
 }

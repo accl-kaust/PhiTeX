@@ -184,7 +184,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         self.is_in_csname = b;
         self.look_up_cs_name(&name, true)?;
         if self.eq_type(self.cur_cs) == UNDEFINED_CS {
-            self.eq_define(self.cur_cs, RELAX, 256)?; // N.B.: The `save_stack` might change
+            self.eq_define(self.cur_cs, RELAX, TOO_BIG_USV)?; // N.B.: The `save_stack` might change
         } // the control sequence will now match `\relax`
         self.cur_tok = self.cur_cs + CS_TOKEN_FLAG;
         self.back_input()
@@ -234,7 +234,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                     return self.overflow(b"buffer size", self.params.buf_size);
                 }
             }
-            self.buffer[j] = u8::try_from(tok_chr(t)).unwrap_or(0);
+            self.buffer[j] = crate::input::cu(tok_chr(t));
             j += 1;
         }
         if j > first + 1 {
@@ -244,7 +244,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         } else if j == first {
             self.cur_cs = NULL_CS; // the list is empty
         } else {
-            self.cur_cs = SINGLE_BASE + i32::from(self.buffer[first]); // the list has length one
+            self.cur_cs = SINGLE_BASE + crate::input::ci(self.buffer[first]); // the list has length one
         }
         Ok(())
     }

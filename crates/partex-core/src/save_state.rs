@@ -27,6 +27,10 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             xord,
             xchr,
             xprn,
+            unicode,
+            doing_special: _,
+            name_scratch: _,
+            file_name_quote_char: _,
             str_pool,
             str_start,
             pool_ptr,
@@ -291,6 +295,8 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         xchr.save(s);
         s.mark("xprn");
         xprn.save(s);
+        s.mark("unicode");
+        unicode.save(s);
         s.mark("str_pool");
         str_pool.save(s);
         s.mark("str_start");
@@ -669,6 +675,10 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             xord: Persist::load(l)?,
             xchr: Persist::load(l)?,
             xprn: Persist::load(l)?,
+            unicode: Persist::load(l)?,
+            doing_special: false,
+            name_scratch: alloc::vec::Vec::new(),
+            file_name_quote_char: 0,
             str_pool: Persist::load(l)?,
             str_start: Persist::load(l)?,
             pool_ptr: Persist::load(l)?,

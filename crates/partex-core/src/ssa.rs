@@ -625,7 +625,7 @@ pub(crate) struct Position {
     /// (`start..=limit`), `loc` and `limit` from `start`, and the scanner
     /// state.
     pub(crate) file: bool,
-    pub(crate) line: Vec<u8>,
+    pub(crate) line: Vec<u32>,
     pub(crate) loc: i32,
     pub(crate) limit: i32,
     pub(crate) state: i32,
@@ -1099,14 +1099,15 @@ fn line_bounds(data: &[u8], from: usize) -> (usize, usize) {
 
 /// A line's version under `codes`: its tokens, or (`None`, the tokenizer
 /// would read it otherwise) a version no tokens have.
-fn tokens_version(line: &[u8], codes: &LineCodes) -> Version {
+fn tokens_version<C: Copy + Into<u32>>(line: &[C], codes: &LineCodes) -> Version {
     match line_tokens(line, codes) {
         Some(t) => Version::of(&(1u8, t)),
-        None => Version::of(&(2u8, line)),
+        // (by its characters, the same from the buffer and from the file)
+        None => Version::of(&(2u8, line.iter().map(|&c| c.into()).collect::<Vec<u32>>())),
     }
 }
 
-fn bytes_version(line: &[u8]) -> Version {
+fn bytes_version<C: core::hash::Hash>(line: &[C]) -> Version {
     Version::of(&(0u8, line))
 }
 
@@ -1406,6 +1407,7 @@ impl Recorder {
             st: RecState {
                 codes: alloc::vec![LineCodes {
                     cat: [0; 256],
+                    wide: Vec::new(),
                     end_line_char: -1
                 }],
                 ..RecState::default()
@@ -1437,7 +1439,7 @@ impl Recorder {
         let i = u32::try_from(self.st.codes.len())
             .unwrap_or(EOF - 1)
             .min(EOF - 1);
-        self.st.codes.push(*c);
+        self.st.codes.push(c.clone());
         self.st.codes_ix.insert(key, i);
         i
     }
@@ -2930,6 +2932,7 @@ impl Tracker for SsaTracker {
         let codes = if k == 0 {
             (generation == src.generation && r.st.generation == generation).then_some(LineCodes {
                 cat: [0; 256],
+                wide: Vec::new(),
                 end_line_char: -1,
             })
         } else if r.st.generation == generation {
@@ -3255,7 +3258,7 @@ pub trait EngineView {
     fn line(&self) -> i32;
     fn line_stack_at(&self, j: usize) -> i32;
     /// The current line in the buffer (`start..limit`).
-    fn cur_line(&self) -> &[u8];
+    fn cur_line(&self) -> &[u32];
     /// Input level `j`'s file and where its next line begins.
     fn file_at(&self, j: usize) -> Option<(&[u8], usize)>;
     /// web2c's string search and a control sequence's lookup, by content.
@@ -3301,7 +3304,7 @@ impl<H: Host, T: Tracker> EngineView for Tex<H, T> {
     fn line_stack_at(&self, j: usize) -> i32 {
         self.line_stack.get(j).copied().unwrap_or(0)
     }
-    fn cur_line(&self) -> &[u8] {
+    fn cur_line(&self) -> &[u32] {
         let start = usize::try_from(self.cur_input.start).unwrap_or(0);
         let limit = usize::try_from(self.cur_input.limit)
             .unwrap_or(0)
@@ -3831,7 +3834,7 @@ fn open_paragraph<H: Host>(
     let loc = usize::try_from(file.loc)
         .unwrap_or(0)
         .clamp(start, limit + 1);
-    let line: Vec<u8> = (start..limit).map(|i| tex.buffer[i]).collect();
+    let line: Vec<u32> = (start..limit).map(|i| tex.buffer[i]).collect();
     let bytes = Version::of(&line);
     // (the tokenizer has a frame and a record in check mode only, DESIGN
     // 4.3 item 2: otherwise the codes it reads are reads of the step, in
@@ -3866,15 +3869,26 @@ fn open_paragraph<H: Host>(
         // the catcodes it reads, through the accessors (recorded)
         let mut codes = LineCodes {
             cat: [0; 256],
+            wide: Vec::new(),
             end_line_char: tex.int_par(crate::web::END_LINE_CHAR_CODE),
         };
         let mut seen = [false; 256];
         for &c in line
             .iter()
-            .chain(u8::try_from(codes.end_line_char).ok().as_ref())
+            .chain(u32::try_from(codes.end_line_char).ok().as_ref())
         {
-            if !core::mem::replace(&mut seen[usize::from(c)], true) {
-                codes.cat[usize::from(c)] = u8::try_from(tex.cat_code(i32::from(c))).unwrap_or(15);
+            let code = |c: u32| u8::try_from(tex.cat_code(crate::input::ci(c))).unwrap_or(15);
+            match usize::try_from(c) {
+                Ok(i) if i < 256 => {
+                    if !core::mem::replace(&mut seen[i], true) {
+                        codes.cat[i] = code(c);
+                    }
+                }
+                _ => {
+                    if let Err(i) = codes.wide.binary_search_by_key(&c, |&(k, _)| k) {
+                        codes.wide.insert(i, (c, code(c)));
+                    }
+                }
             }
         }
         // (a line the tokenizer does not read without changing the buffer,
@@ -3893,7 +3907,7 @@ fn open_paragraph<H: Host>(
         };
         let rest_codes = LineCodes {
             end_line_char: if past_end { -1 } else { codes.end_line_char },
-            ..codes
+            ..codes.clone()
         };
         let offset = match crate::track::line_tokens_from(rest, &rest_codes, state) {
             Some(t) => Version::of(&(1u8, t, past_end)),
@@ -3953,7 +3967,9 @@ fn open_paragraph<H: Host>(
             tex.line,
             file.loc - file.start,
             file.state,
-            String::from_utf8_lossy(&line)
+            line.iter()
+                .map(|&c| char::from_u32(c).unwrap_or('?'))
+                .collect::<String>()
         )
     } else {
         String::new()

@@ -91,7 +91,7 @@ pub fn view<H: Host>(tex: &Tex<H, SsaTracker>) -> Program {
     }
     // (each step after the first begins where the one before it left the
     // input: the line it reads the rest of, if any is left)
-    let mut rests: BTreeMap<StepId, Vec<u8>> = BTreeMap::new();
+    let mut rests: BTreeMap<StepId, Vec<u32>> = BTreeMap::new();
     for w in fold.order.windows(2) {
         let Some((name, bytes, from, rest)) = st.steps.ended_at(w[0]) else {
             continue;
@@ -195,7 +195,7 @@ pub fn view<H: Host>(tex: &Tex<H, SsaTracker>) -> Program {
             // (else the source it read: the rest of the line it began on,
             // or the first line it read)
             text = match (rests.get(&s), lines.get(&s).and_then(|v| v.first())) {
-                (Some(rest), _) => printable(rest.strip_suffix(b"\r").unwrap_or(rest)),
+                (Some(rest), _) => printable(rest.strip_suffix(&[13]).unwrap_or(rest)),
                 (None, Some(&(file, a, _))) => source_line(st, file, a),
                 (None, None) => String::new(),
             };
@@ -659,22 +659,23 @@ fn trim(b: &[u8]) -> &[u8] {
 
 /// Bytes as TeX prints them (§49): a character below 32 or from 127 up
 /// in `^^` notation.
-fn printable(b: &[u8]) -> String {
+fn printable<C: Copy + Into<u32>>(b: &[C]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut s = String::with_capacity(b.len());
     for &c in b {
+        let c: u32 = c.into();
         match c {
             0..=31 => {
                 s.push_str("^^");
-                s.push(char::from(c + 64));
+                s.push(char::from_u32(c + 64).unwrap_or('?'));
             }
             127 => s.push_str("^^?"),
-            128.. => {
-                const HEX: &[u8; 16] = b"0123456789abcdef";
+            128..=255 => {
                 s.push_str("^^");
-                s.push(char::from(HEX[usize::from(c >> 4)]));
-                s.push(char::from(HEX[usize::from(c & 15)]));
+                s.push(char::from(HEX[(c >> 4) as usize & 15]));
+                s.push(char::from(HEX[(c & 15) as usize]));
             }
-            _ => s.push(char::from(c)),
+            _ => s.push(char::from_u32(c).unwrap_or('\u{FFFD}')),
         }
     }
     s
@@ -955,9 +956,9 @@ fn eqtb_name<H: Host>(names: &Names<'_, H>, p: i32) -> String {
         LOCAL_BASE,
         TOKS_BASE + 256,
         BOX_BASE + 256,
-        MATH_FONT_BASE + 16,
-        MATH_FONT_BASE + 32,
-        MATH_FONT_BASE + 48,
+        MATH_FONT_BASE + crate::web::SCRIPT_SIZE,
+        MATH_FONT_BASE + crate::web::SCRIPT_SCRIPT_SIZE,
+        MATH_FONT_BASE + crate::web::NUMBER_MATH_FONTS,
         LC_CODE_BASE,
         UC_CODE_BASE,
         SF_CODE_BASE,

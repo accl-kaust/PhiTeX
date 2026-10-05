@@ -502,6 +502,7 @@ fn setup() -> Job {
     let engine_name = match engine {
         Flavor::Tex => "tex",
         Flavor::PdfTex => "pdftex",
+        Flavor::XeTeX => "xetex",
     };
     let mut kpse = kpse_instance(&progname, engine_name);
     // texmfmp.c: `parse_first_line`: a `%&name` first line of the main

@@ -797,21 +797,40 @@ pub fn tokenizes(p: i32) -> bool {
 
 /// What turns a line of a file into tokens (TeX §343–357): the category
 /// codes and `\\endlinechar`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct LineCodes {
     pub cat: [u8; 256],
+    /// `XeTeX`: the codes of the characters above 255 a line has, sorted.
+    pub wide: alloc::vec::Vec<(u32, u8)>,
     pub end_line_char: i32,
+}
+
+impl LineCodes {
+    /// The category code of `c` (one not listed reads as `invalid_char`,
+    /// so that a line using it is not tokenized here).
+    #[must_use]
+    pub fn cat_of(&self, c: u32) -> i32 {
+        match usize::try_from(c) {
+            Ok(i) if i < 256 => i32::from(self.cat[i]),
+            _ => self
+                .wide
+                .binary_search_by_key(&c, |&(k, _)| k)
+                .map_or(partex_engine::web::INVALID_CHAR, |i| {
+                    i32::from(self.wide[i].1)
+                }),
+        }
+    }
 }
 
 /// One token of a line, as [`line_tokens`] gives them.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum LineToken {
     /// A character token (category, character).
-    Char(u8, u8),
+    Char(u8, u32),
     /// An active character.
-    Active(u8),
+    Active(u32),
     /// A control sequence, by name (single-character ones too).
-    Cs(alloc::vec::Vec<u8>),
+    Cs(alloc::vec::Vec<u32>),
     /// An empty line's `\\par`.
     Par,
 }
@@ -821,15 +840,18 @@ pub enum LineToken {
 /// `new_line`), if TeX would read it without changing the buffer or
 /// stopping: `None` for `^^` notation and invalid characters.
 #[must_use]
-pub fn line_tokens(line: &[u8], codes: &LineCodes) -> Option<alloc::vec::Vec<LineToken>> {
+pub fn line_tokens<C: Copy + Into<u32>>(
+    line: &[C],
+    codes: &LineCodes,
+) -> Option<alloc::vec::Vec<LineToken>> {
     line_tokens_from(line, codes, 0)
 }
 
 /// [`line_tokens`] from a scanner state (0 `new_line`, 1 `mid_line`, 2
 /// `skip_blanks`, §303): the rest of a line read from where a call starts.
 #[must_use]
-pub fn line_tokens_from(
-    line: &[u8],
+pub fn line_tokens_from<C: Copy + Into<u32>>(
+    line: &[C],
     codes: &LineCodes,
     start: u8,
 ) -> Option<alloc::vec::Vec<LineToken>> {
@@ -842,11 +864,15 @@ pub fn line_tokens_from(
         MidLine,
         SkipBlanks,
     }
-    let mut buf = line.to_vec();
-    if let Ok(c) = u8::try_from(codes.end_line_char) {
+    let mut buf: alloc::vec::Vec<u32> = line.iter().map(|&c| c.into()).collect();
+    if let Ok(c) = u32::try_from(codes.end_line_char) {
         buf.push(c);
     }
-    let cat = |c: u8| i32::from(codes.cat[usize::from(c)]);
+    // (`XeTeX` §373 joins a surrogate pair in the buffer: not read here)
+    if buf.iter().any(|c| (0xD800..0xE000).contains(c)) {
+        return None;
+    }
+    let cat = |c: u32| codes.cat_of(c);
     let expanded = |k: usize| cat(buf[k]) == SUP_MARK && buf.get(k + 1) == Some(&buf[k]);
     let mut out = alloc::vec::Vec::new();
     let mut state = match start {
@@ -894,14 +920,14 @@ pub fn line_tokens_from(
             SPACER => {
                 if state == State::MidLine {
                     state = State::SkipBlanks;
-                    out.push(LineToken::Char(10, b' '));
+                    out.push(LineToken::Char(10, u32::from(b' ')));
                 }
             }
             CAR_RET => {
                 loc = buf.len();
                 match state {
                     State::NewLine => out.push(LineToken::Par),
-                    State::MidLine => out.push(LineToken::Char(10, b' ')),
+                    State::MidLine => out.push(LineToken::Char(10, u32::from(b' '))),
                     State::SkipBlanks => {}
                 }
             }
