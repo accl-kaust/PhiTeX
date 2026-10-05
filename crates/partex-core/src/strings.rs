@@ -15,23 +15,63 @@ use crate::track::Tracker;
 const TEX_POOL: &[u8] = include_bytes!("tex.pool");
 /// pdfTeX's pool (tangled from pdftex.web + change files).
 const PDFTEX_POOL: &[u8] = include_bytes!("pdftex.pool");
+const XETEX_POOL: &[u8] = include_bytes!("xetex.pool");
 
 /// A string number (§38, `str_number`).
 pub type StrNumber = usize;
 
 impl<H: Host, T: Tracker> Tex<H, T> {
-    /// §40: the number of characters in string `s`.
+    /// §40: the number of characters in string `s` (`XeTeX`'s: of UTF-16
+    /// units).
     pub(crate) fn length(&self, s: StrNumber) -> usize {
-        self.str_start[s + 1] - self.str_start[s]
+        let (a, b) = (self.str_start[s], self.str_start[s + 1]);
+        if self.unicode {
+            units(&self.str_pool[a..b])
+        } else {
+            b - a
+        }
     }
 
     /// §41: the length of the current (unfinished) string.
     pub(crate) fn cur_length(&self) -> usize {
-        self.pool_ptr - self.str_start[self.str_ptr]
+        let a = self.str_start[self.str_ptr];
+        if self.unicode {
+            units(&self.str_pool[a..self.pool_ptr])
+        } else {
+            self.pool_ptr - a
+        }
     }
 
-    /// §42: append a character; the caller has checked room with `str_room`.
-    pub(crate) fn append_char(&mut self, c: u8) {
+    /// §42: append character `c`. The pool holds bytes; `XeTeX`'s holds
+    /// UTF-16 units (a character above 0xFFFF as its two surrogates), each
+    /// kept as its UTF-8 bytes (CESU-8, DESIGN 4.7), so that strings
+    /// compare and order as `XeTeX`'s do.
+    pub(crate) fn append_char(&mut self, c: impl Into<u32>) {
+        let c = c.into();
+        if self.unicode {
+            cesu8(c, |b| self.append_byte(b));
+        } else {
+            self.append_byte(u8::try_from(c).unwrap_or(b'?'));
+        }
+    }
+
+    /// `buffer[j..j + l]` in the pool's encoding (`id_lookup`'s name).
+    pub(crate) fn buffer_name(&self, j: usize, l: usize, out: &mut alloc::vec::Vec<u8>) {
+        if self.unicode {
+            for &c in &self.buffer[j..j + l] {
+                cesu8(c, |b| out.push(b));
+            }
+        } else {
+            out.extend(
+                self.buffer[j..j + l]
+                    .iter()
+                    .map(|&c| u8::try_from(c).unwrap_or(b'?')),
+            );
+        }
+    }
+
+    /// Append one byte of the pool's encoding.
+    pub(crate) fn append_byte(&mut self, c: u8) {
         if self.pool_ptr == self.str_pool.len() {
             self.str_pool.push(c);
         } else {
@@ -213,6 +253,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         let pool = match self.params.flavor {
             Flavor::Tex => TEX_POOL,
             Flavor::PdfTex => PDFTEX_POOL,
+            Flavor::XeTeX => XETEX_POOL,
         };
         for line in pool.split(|&b| b == b'\n') {
             if line.first() == Some(&b'*') || line.len() < 2 {
@@ -260,6 +301,75 @@ impl<H: Host, T: Tracker> Tex<H, T> {
     fn string_vacancies(&self) -> usize {
         usize::try_from(self.params.string_vacancies).unwrap_or(0)
     }
+}
+
+/// Character `c` as `XeTeX`'s pool keeps it: its UTF-16 units (a
+/// character above 0xFFFF as its surrogates, `XeTeX` §42), each as its
+/// UTF-8 bytes (CESU-8).
+pub(crate) fn cesu8(c: u32, mut put: impl FnMut(u8)) {
+    let mut unit = |u: u32| {
+        let byte = |x: u32| u8::try_from(x & 0xFF).unwrap_or(0);
+        if u < 0x80 {
+            put(byte(u));
+        } else if u < 0x800 {
+            put(byte(0xC0 | (u >> 6)));
+            put(byte(0x80 | (u & 0x3F)));
+        } else {
+            put(byte(0xE0 | (u >> 12)));
+            put(byte(0x80 | ((u >> 6) & 0x3F)));
+            put(byte(0x80 | (u & 0x3F)));
+        }
+    };
+    if c > 0xFFFF {
+        unit(0xD800 + (c - 0x1_0000) / 0x400);
+        unit(0xDC00 + c % 0x400);
+    } else {
+        unit(c);
+    }
+}
+
+/// The UTF-16 units of `XeTeX` pool bytes (CESU-8): its bytes that do not
+/// continue a unit.
+pub(crate) fn units(b: &[u8]) -> usize {
+    b.iter().filter(|&&x| x & 0xC0 != 0x80).count()
+}
+
+/// The UTF-16 units of `XeTeX` pool bytes, in order.
+pub(crate) fn decode_units(b: &[u8]) -> impl Iterator<Item = u32> + '_ {
+    let mut i = 0;
+    core::iter::from_fn(move || {
+        let x = u32::from(*b.get(i)?);
+        let (n, init) = if x < 0x80 {
+            (1, x)
+        } else if x < 0xE0 {
+            (2, x & 0x1F)
+        } else {
+            (3, x & 0x0F)
+        };
+        let mut u = init;
+        for k in 1..n {
+            u = (u << 6) | (u32::from(*b.get(i + k).unwrap_or(&0x80)) & 0x3F);
+        }
+        i += n;
+        Some(u)
+    })
+}
+
+/// The characters of `XeTeX` pool bytes: units with surrogate pairs
+/// joined (a lone surrogate stays a unit, as `XeTeX`'s `print` keeps it).
+pub(crate) fn decode_chars(b: &[u8]) -> impl Iterator<Item = u32> + '_ {
+    let mut it = decode_units(b).peekable();
+    core::iter::from_fn(move || {
+        let u = it.next()?;
+        if (0xD800..0xDC00).contains(&u)
+            && let Some(&lo) = it.peek()
+            && (0xDC00..0xE000).contains(&lo)
+        {
+            it.next();
+            return Some(0x1_0000 + (u - 0xD800) * 0x400 + lo - 0xDC00);
+        }
+        Some(u)
+    })
 }
 
 #[cfg(test)]

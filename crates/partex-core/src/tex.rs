@@ -63,6 +63,17 @@ pub struct Tex<H: Host, T: Tracker = Untracked> {
     pub(crate) xchr: [u8; 256],
     /// Non-zero iff the character prints as itself (web2c, §24).
     pub(crate) xprn: [bool; 256],
+    /// `XeTeX`'s Unicode (DESIGN 4.7): pool units UTF-16 kept as CESU-8,
+    /// characters printed as UTF-8. Set from the flavor, once.
+    pub(crate) unicode: bool,
+    /// `XeTeX` §61: printing a `\special`'s text (characters go out raw).
+    pub(crate) doing_special: bool,
+    /// Scratch for a name being looked up, in the pool's encoding.
+    pub(crate) name_scratch: alloc::vec::Vec<u8>,
+    /// `XeTeX`: what finding native fonts keeps (not engine state).
+    pub(crate) xfont: crate::native::NativeEnv,
+    /// `XeTeX` §548: the quote a file name being scanned is in (0: none).
+    pub(crate) file_name_quote_char: u32,
 
     // §39: the string pool.
     pub(crate) str_pool: crate::flat::Flat<u8>,
@@ -96,7 +107,7 @@ pub struct Tex<H: Host, T: Tracker = Untracked> {
     pub(crate) file_offset: i32,
     /// With the columns the link's, what printing makes (`effects/flow.rs`).
     pub(crate) flow: crate::effects::flow::Flow,
-    pub(crate) trick_buf: Vec<u8>,
+    pub(crate) trick_buf: Vec<u32>,
     pub(crate) trick_count: i32,
     pub(crate) first_count: i32,
 
@@ -109,7 +120,7 @@ pub struct Tex<H: Host, T: Tracker = Untracked> {
     pub(crate) line: i32,
 
     // §30: the input buffer.
-    pub(crate) buffer: crate::flat::Flat<u8>,
+    pub(crate) buffer: crate::flat::Flat<u32>,
     pub(crate) first: usize,
     pub(crate) last: usize,
     pub(crate) max_buf_stack: usize,
@@ -385,6 +396,9 @@ pub struct Tex<H: Host, T: Tracker = Untracked> {
     /// §1074: the box (or leader rule) being built.
     pub(crate) cur_box: Option<Node>,
     pub(crate) after_token: i32,
+    /// `XeTeX`'s `prev_class` and `space_class` (`xmain.rs`).
+    pub(crate) prev_class: i32,
+    pub(crate) space_class: i32,
     /// Memoized macro calls (`memo.rs`).
     pub(crate) memo: crate::memo::Memo,
     /// Control sequence names by a hash of their text, to their location
@@ -613,6 +627,11 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             xord: [0; 256],
             xchr: [0; 256],
             xprn: [false; 256],
+            unicode: p.flavor == crate::params::Flavor::XeTeX,
+            doing_special: false,
+            name_scratch: alloc::vec::Vec::new(),
+            xfont: crate::native::NativeEnv::default(),
+            file_name_quote_char: 0,
             str_pool: crate::flat::Flat::new(vec![0; pool_size.min(1 << 16) + 1]),
             str_start: crate::flat::Flat::new(vec![0; max_strings.min(1 << 12) + 1]),
             pool_ptr: 0,
@@ -794,6 +813,8 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             max_reg_help_line: b"A register number must be between 0 and 255.",
             cur_box: None,
             after_token: 0,
+            prev_class: 0,
+            space_class: 0,
             memo: crate::memo::Memo::new(p.memo),
             cs_cache: crate::hash::CsCache::default(),
             hash_memo: crate::hashmemo::HashMemo::default(),

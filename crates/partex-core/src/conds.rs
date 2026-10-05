@@ -331,7 +331,8 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         self.get_x_token()?;
         if self.cur_cmd == RELAX && self.cur_chr == NO_EXPAND_FLAG {
             self.cur_cmd = ACTIVE_CHAR;
-            self.cur_chr = self.cur_tok - CS_TOKEN_FLAG - ACTIVE_BASE;
+            self.cur_chr = crate::wide::active_char(self.cur_tok - CS_TOKEN_FLAG)
+                .unwrap_or(self.cur_tok - CS_TOKEN_FLAG - ACTIVE_BASE);
         }
         Ok(())
     }
@@ -352,14 +353,14 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                 // §506: test if two characters match.
                 self.get_x_token_or_active_char()?;
                 let (m, n) = if self.cur_cmd > ACTIVE_CHAR || self.cur_chr > 255 {
-                    (RELAX, 256) // not a character
+                    (RELAX, TOO_BIG_USV) // not a character
                 } else {
                     (self.cur_cmd, self.cur_chr)
                 };
                 self.get_x_token_or_active_char()?;
                 if self.cur_cmd > ACTIVE_CHAR || self.cur_chr > 255 {
                     self.cur_cmd = RELAX;
-                    self.cur_chr = 256;
+                    self.cur_chr = TOO_BIG_USV;
                 }
                 if this_if == IF_CHAR_CODE {
                     n == self.cur_chr
@@ -522,9 +523,18 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                 // e-TeX: `\iffontchar`
                 self.scan_font_ident()?;
                 let f = self.cur_val;
-                self.scan_char_num()?;
-                self.font_read(f, crate::track::font::METRICS);
-                self.fonts.get(f).glyph(self.cur_val).is_some()
+                if self.params.flavor == crate::params::Flavor::XeTeX {
+                    self.scan_usv_num()?;
+                } else {
+                    self.scan_char_num()?;
+                }
+                if let Some(nf) = self.native_font(f) {
+                    // `XeTeX`: whether the font maps it to a glyph
+                    nf.font.map_char_to_glyph(self.cur_val) > 0
+                } else {
+                    self.font_read(f, crate::track::font::METRICS);
+                    self.fonts.get(f).glyph(self.cur_val).is_some()
+                }
             }
             _ => {
                 // §509: select the appropriate case and return or `goto

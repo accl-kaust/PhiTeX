@@ -948,7 +948,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
     }
 
     fn eqtb_content_with(&self, p: i32, w: MemoryWord, by_tokens: bool) -> u128 {
-        use crate::web::{ETEX_PEN_BASE, OUTPUT_ROUTINE_LOC, TOK_VAL};
+        use crate::web::{ETEX_PEN_BASE, OUTPUT_ROUTINE_LOC};
         use crate::xregs::EXT_BASE;
         let mut c = Canon::new();
         // (a list the entry names is a value with its version: combined)
@@ -957,7 +957,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         {
             {
                 let toks = (OUTPUT_ROUTINE_LOC..ETEX_PEN_BASE).contains(&p)
-                    || (p >= EXT_BASE && ext_reg(p).0 == TOK_VAL);
+                    || (p >= EXT_BASE && crate::xregs::is_toks_kind(ext_reg(p).0));
                 let o = self.peek_obj(p);
                 if toks {
                     c.put(&(w.b0(), w.b1()));
@@ -1471,6 +1471,11 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         let Tex {
             // not state: the host and tracker are the caller's; the
             // parameters are the same for every run of a session
+            unicode: _,
+            doing_special: _,
+            name_scratch: _,
+            xfont: _,
+            file_name_quote_char: _,
             host: _,
             tracker: _,
             params: _,
@@ -1671,6 +1676,8 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             random,
             cur_box,
             after_token,
+            prev_class,
+            space_class,
             memo: _,
             cs_cache: _,
             map_cache: _,
@@ -2130,6 +2137,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         c.put(&(*pack_begin_line, *etex_mode, epoch, *is_in_csname));
         c.put(&(*max_reg_num, max_reg_help_line));
         c.put(&(*after_token, *long_help_seen, *cancel_boundary, diag));
+        c.put(&(*prev_class, *space_class));
         c.put(&(*seal_lines, *seal_at, *ship_stop, *par_start, *fire_pending));
         c.section("scalars", parts);
         // (a persistent map: its hash is its version, made at each write)

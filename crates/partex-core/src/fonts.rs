@@ -87,6 +87,13 @@ pub(crate) struct FontData {
     /// numbers of the fonts made after it, which their makers make again.
     pub(crate) num: Vec<i32>,
     pub(crate) count: i32,
+    /// `XeTeX`: each slot's native font (`font_layout_engine`), if it is
+    /// one.
+    pub(crate) native: Vec<Option<Arc<crate::native::NativeFont>>>,
+    /// `XeTeX`: each native font's direction state, the script its last
+    /// word was shaped in (an OpenType tag, 0 for none): the default
+    /// direction of its next word (the layout engine's buffer's script).
+    pub(crate) native_dir: Vec<u32>,
 }
 
 /// A loaded font in the table's order: its slot and identity, versioned
@@ -326,7 +333,9 @@ partex_engine::persist_struct!(FontData {
     remade,
     code_sum,
     num,
-    count
+    count,
+    native,
+    native_dir
 });
 
 impl FontArrays {
@@ -383,6 +392,7 @@ impl FontArrays {
                 Version::of(&(self.expand[i], chain))
             }
             field::GLUE => Version::of(&(5u8, self.glue[i])),
+            field::NATIVE_DIR => Version::of(&(7u8, self.native_dir[i])),
             c => {
                 let c = usize::try_from(c.saturating_sub(field::CODES))
                     .unwrap_or(0)
@@ -453,6 +463,8 @@ impl FontData {
             code_sum: Vec::with_capacity(n),
             num: Vec::with_capacity(n),
             count: 0,
+            native: Vec::with_capacity(n),
+            native_dir: Vec::with_capacity(n),
         }
     }
 
@@ -490,6 +502,8 @@ impl FontData {
         self.expand[i] = Expand::default();
         self.ident[i] = ident;
         self.retagged[i] = false;
+        self.native[i] = None;
+        self.native_dir[i] = 0;
         self.push_order(slot);
     }
 
@@ -519,6 +533,8 @@ impl FontData {
             self.remade.resize(n, false);
             self.code_sum.resize(n, [0; 8]);
             self.num.resize(n, 0);
+            self.native.resize(n, None);
+            self.native_dir.resize(n, 0);
         }
     }
 
@@ -756,6 +772,13 @@ pub(crate) enum FontIdent<'a> {
     Copied {
         from: i32,
     },
+    /// `XeTeX`'s native font: its face (by content), its full name with
+    /// its options, its size.
+    Native {
+        face: ([u64; 2], u64, u32),
+        name: &'a [u8],
+        size: Scaled,
+    },
 }
 
 impl FontIdent<'_> {
@@ -765,7 +788,7 @@ impl FontIdent<'_> {
     pub(crate) fn content(&self, fonts: &FontData) -> u128 {
         let of = |f: i32| fonts.idv.get(fx(f)).copied().unwrap_or(0);
         match self {
-            FontIdent::Tfm { .. } => self.hash(),
+            FontIdent::Tfm { .. } | FontIdent::Native { .. } => self.hash(),
             FontIdent::Expanded { base, ratio } => {
                 Version::node(
                     0x6578_7061,
@@ -799,6 +822,7 @@ impl FontIdent<'_> {
                 .hash(&mut h),
             FontIdent::Expanded { base, ratio } => (1u8, base, ratio).hash(&mut h),
             FontIdent::Copied { from } => (2u8, from).hash(&mut h),
+            FontIdent::Native { face, name, size } => (3u8, face, name, size).hash(&mut h),
         }
         h.finish128()
     }
@@ -815,7 +839,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
     pub(crate) fn new_font_slot(&mut self, id: &FontIdent<'_>, name: &[u8]) -> (i32, u128, u128) {
         let ident = id.hash();
         let idv = match id {
-            FontIdent::Tfm { .. } => ident,
+            FontIdent::Tfm { .. } | FontIdent::Native { .. } => ident,
             _ => id.content(&self.fonts),
         };
         let fresh = self.font_ptr + 1;

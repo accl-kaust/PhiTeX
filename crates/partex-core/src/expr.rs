@@ -456,7 +456,15 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             FONT_CHAR_WD_CODE | FONT_CHAR_HT_CODE | FONT_CHAR_DP_CODE | FONT_CHAR_IC_CODE => {
                 self.scan_font_ident()?;
                 let f = self.cur_val;
-                self.scan_char_num()?;
+                if self.params.flavor == crate::params::Flavor::XeTeX {
+                    self.scan_usv_num()?;
+                    if let Some(v) = self.native_char_dimen(m, f, self.cur_val) {
+                        self.cur_val = v;
+                        return Ok(());
+                    }
+                } else {
+                    self.scan_char_num()?;
+                }
                 self.cur_val = self
                     .fonts
                     .get(f)

@@ -75,9 +75,11 @@ mod journal;
 mod linebreak;
 pub mod machine;
 mod maincontrol;
+mod mathcodes;
 mod mathmode;
 mod mem;
 mod memo;
+mod native;
 mod nest;
 mod nodes;
 mod objs;
@@ -116,6 +118,9 @@ mod toklists;
 mod u64map;
 mod values;
 mod web;
+mod wide;
+mod xetex;
+mod xmain;
 mod xregs;
 
 #[cfg(test)]

@@ -169,7 +169,8 @@ impl LrScan {
 /// to what a pack's confusion raised.
 struct MathEnv<'a, H: Host, T: Tracker> {
     t: &'a mut Tex<H, T>,
-    /// `fam_fnt(0..48)`
+    /// `fam_fnt` of families 0..16 at each size (the families TeX and
+    /// pdfTeX have; `XeTeX`'s others are read when used).
     fams: [i32; 48],
     jump: Option<Jump>,
 }
@@ -184,7 +185,17 @@ impl<H: Host, T: Tracker> Fonts for MathEnv<'_, H, T> {
 
 impl<H: Host, T: Tracker> Env for MathEnv<'_, H, T> {
     fn fam_fnt(&self, n: usize) -> Option<FontId> {
-        let f = self.fams[n];
+        let size = usize::try_from(SCRIPT_SIZE).unwrap_or(256);
+        let (s, fam) = (n / size, n % size);
+        let f = if fam < 16 {
+            self.fams[s * 16 + fam]
+        } else {
+            let f = self.t.fam_fnt(i32::try_from(n).unwrap_or(0));
+            if f != NULL_FONT {
+                self.t.tracker.read(crate::track::Cell::Font(f));
+            }
+            f
+        };
         (f != NULL_FONT).then(|| font_id(f))
     }
     fn param(&self, f: FontId, k: usize) -> Scaled {
@@ -258,7 +269,8 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         };
         let mut fams = [NULL_FONT; 48];
         for (n, f) in fams.iter_mut().enumerate() {
-            *f = self.fam_fnt(i32::try_from(n).unwrap_or(0));
+            let n = i32::try_from(n).unwrap_or(0);
+            *f = self.fam_fnt(n / 16 * SCRIPT_SIZE + n % 16);
         }
         // (math reads the parameters and skew characters of these fonts)
         for &f in &fams {
@@ -645,7 +657,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
 
     /// §1152: treat `cur_chr` as an active character.
     fn treat_as_active(&mut self) -> Result<(), Jump> {
-        self.cur_cs = self.cur_chr + ACTIVE_BASE;
+        self.cur_cs = crate::wide::active_cs(self.cur_chr);
         self.cur_cmd = self.eq_type(self.cur_cs);
         self.cur_chr = self.equiv(self.cur_cs);
         self.x_token()?;

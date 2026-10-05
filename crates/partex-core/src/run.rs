@@ -459,12 +459,16 @@ impl<H: Host, T: Tracker> Tex<H, T> {
     /// prefixes the state hash reads, the token lists and their records
     /// (the sanitizer's check of a restore that rebased, `machine.rs`).
     pub(crate) fn same_thawed(&self, other: &Self) -> bool {
+        fn prefix<C: Copy + PartialEq + Default>(
+            a: &crate::flat::Flat<C>,
+            b: &crate::flat::Flat<C>,
+            n: usize,
+        ) -> bool {
+            a.prefix(n).iter().eq(b.prefix(n).iter())
+        }
         let jvecs = self.eqtb.slices().eq(other.eqtb.slices())
             && self.hash.slices().eq(other.hash.slices())
             && self.save_stack.slices().eq(other.save_stack.slices());
-        let prefix = |a: &crate::flat::Flat<u8>, b: &crate::flat::Flat<u8>, n: usize| {
-            a.prefix(n).iter().eq(b.prefix(n).iter())
-        };
         let flats = prefix(&self.str_pool, &other.str_pool, self.pool_ptr)
             && self
                 .str_start
@@ -642,7 +646,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         self.init_input_routines(command_line)?;
         let entered = self.enable_etex_if_requested()?;
         let loc = self.cur_input.loc;
-        if !entered && (self.format_ident == 0 || self.buffer[ux(loc)] == b'&') {
+        if !entered && (self.format_ident == 0 || self.buffer[ux(loc)] == u32::from(b'&')) {
             let Some(data) = self.open_fmt_file() else {
                 return Err(Jump::FinalEnd);
             };
@@ -651,7 +655,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             }
             self.format_data = Some(data);
             while self.cur_input.loc < self.cur_input.limit
-                && self.buffer[ux(self.cur_input.loc)] == b' '
+                && self.buffer[ux(self.cur_input.loc)] == u32::from(b' ')
             {
                 self.cur_input.loc += 1;
             }
@@ -706,7 +710,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             self.cur_input.limit -= 1;
         } else {
             let c = self.int_par(END_LINE_CHAR_CODE);
-            self.buffer[ux(self.cur_input.limit)] = u8::try_from(c).unwrap_or(0);
+            self.buffer[ux(self.cur_input.limit)] = crate::input::cu(c);
         }
         if self.mltex_enabled_p {
             self.term_bytes(b"MLTeX v2.2 enabled\n");
@@ -728,7 +732,9 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         };
         self.set_selector(sel);
         let loc = self.cur_input.loc;
-        if loc < self.cur_input.limit && self.cat_code(i32::from(self.buffer[ux(loc)])) != ESCAPE {
+        if loc < self.cur_input.limit
+            && self.cat_code(crate::input::ci(self.buffer[ux(loc)])) != ESCAPE
+        {
             self.start_input()?; // \input assumed
         }
         self.set_history(SPOTLESS); // ready to go!
@@ -806,23 +812,32 @@ impl<H: Host, T: Tracker> Tex<H, T> {
     fn init_terminal(&mut self, command_line: &[u8]) -> Result<bool, Jump> {
         // web2c's `t_open_in`: the command line goes into the buffer,
         // without trailing blanks.
+        // (`XeTeX` reads it as UTF-8)
+        let chars: alloc::vec::Vec<u32> = if self.unicode {
+            alloc::string::String::from_utf8_lossy(command_line)
+                .chars()
+                .map(u32::from)
+                .collect()
+        } else {
+            command_line.iter().map(|&c| u32::from(c)).collect()
+        };
         let mut k = self.first;
-        if k + command_line.len() + 1 >= self.buffer.len() {
+        if k + chars.len() + 1 >= self.buffer.len() {
             return Ok(false);
         }
-        for &c in command_line {
+        for &c in &chars {
             self.buffer[k] = c;
             k += 1;
         }
         let mut last = k;
-        while last > self.first && matches!(self.buffer[last - 1], b' ' | b'\t') {
+        while last > self.first && matches!(self.buffer[last - 1], 0x20 | 0x09) {
             last -= 1;
         }
         self.last = last;
         loop {
             if self.last > self.first {
                 let mut loc = self.first;
-                while loc < self.last && self.buffer[loc] == b' ' {
+                while loc < self.last && self.buffer[loc] == u32::from(b' ') {
                     loc += 1;
                 }
                 if loc < self.last {
@@ -840,7 +855,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             // (the loop tests the line; web2c prints this only for an
             // all-blank typed line)
             let mut loc = self.first;
-            while loc < self.last && self.buffer[loc] == b' ' {
+            while loc < self.last && self.buffer[loc] == u32::from(b' ') {
                 loc += 1;
             }
             if loc < self.last {
@@ -855,14 +870,19 @@ impl<H: Host, T: Tracker> Tex<H, T> {
     /// default one; returns its contents.
     fn open_fmt_file(&mut self) -> Option<alloc::sync::Arc<[u8]>> {
         let mut j = ux(self.cur_input.loc);
-        if self.buffer[j] == b'&' {
+        if self.buffer[j] == u32::from(b'&') {
             self.cur_input.loc += 1;
             j = ux(self.cur_input.loc);
-            self.buffer[self.last] = b' ';
-            while self.buffer[j] != b' ' {
+            self.buffer[self.last] = u32::from(b' ');
+            while self.buffer[j] != u32::from(b' ') {
                 j += 1;
             }
-            let mut name = self.buffer[ux(self.cur_input.loc)..j].to_vec();
+            let mut name: alloc::vec::Vec<u8> = alloc::string::String::from_iter(
+                self.buffer[ux(self.cur_input.loc)..j]
+                    .iter()
+                    .map(|&c| char::from_u32(c).unwrap_or('?')),
+            )
+            .into_bytes();
             name.extend_from_slice(b".fmt");
             if let Some(f) = self.host.read_file(&name, FileKind::Fmt) {
                 self.cur_input.loc = i32::try_from(j).unwrap_or(0);

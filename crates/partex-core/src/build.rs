@@ -928,6 +928,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         // only char_node, kern_node, hlist_node, vlist_node, rule_node, and
         // ligature_node items.
         let mut p = core::mem::take(self.nodes_mut()).into_vec();
+        // (`XeTeX`: and native words and glyphs)
         if let Some(bad) = p.iter().position(|n| {
             !matches!(
                 n,
@@ -936,6 +937,13 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                     | Node::Box(_)
                     | Node::Rule { .. }
                     | Node::Ligature(_)
+            ) && !matches!(
+                n,
+                Node::Whatsit(w) if matches!(
+                    **w,
+                    partex_engine::node::Whatsit::NativeWord(_)
+                        | partex_engine::node::Whatsit::Glyph(_)
+                )
             )
         }) {
             self.print_err(b"Improper discretionary list");

@@ -242,6 +242,45 @@ impl Enc {
                 self.u8(6);
                 self.pdf(p);
             }
+            Whatsit::NativeWord(w) => {
+                self.u8(7);
+                self.i32(i32::from(w.font.0));
+                self.u8(u8::from(w.actual_text));
+                self.count(w.text.len());
+                for &u in w.text.iter() {
+                    self.i32(i32::from(u));
+                }
+                for x in [w.width, w.height, w.depth] {
+                    self.i32(x);
+                }
+                self.count(w.glyphs.len());
+                for g in w.glyphs.iter() {
+                    self.i32(i32::from(g.gid));
+                    self.i32(g.x);
+                    self.i32(g.y);
+                }
+            }
+            Whatsit::Glyph(g) => {
+                self.u8(8);
+                self.i32(i32::from(g.font.0));
+                self.i32(i32::from(g.gid));
+                for x in [g.width, g.height, g.depth] {
+                    self.i32(x);
+                }
+            }
+            Whatsit::Pic(p) => {
+                self.u8(9);
+                self.u8(u8::from(p.pdf));
+                self.bytes(&p.path);
+                self.i32(p.page);
+                self.u8(p.pdf_box);
+                for &t in &p.transform {
+                    self.i32(t);
+                }
+                for x in [p.width, p.height, p.depth] {
+                    self.i32(x);
+                }
+            }
         }
     }
     fn opt_tokens(&mut self, t: Option<&[i32]>) {
@@ -633,6 +672,61 @@ impl<'a> Dec<'a> {
                 tokens: self.tokens()?,
             },
             6 => Whatsit::Pdf(Box::new(self.pdf()?)),
+            7 => {
+                let font = self.font()?;
+                let actual_text = self.u8()? != 0;
+                let n = self.count()?;
+                let mut text = Vec::with_capacity(n.min(4096));
+                for _ in 0..n {
+                    text.push(u16::try_from(self.i32()?).ok()?);
+                }
+                let (width, height, depth) = (self.i32()?, self.i32()?, self.i32()?);
+                let n = self.count()?;
+                let mut glyphs = Vec::with_capacity(n.min(4096));
+                for _ in 0..n {
+                    glyphs.push(crate::native::NativeGlyph {
+                        gid: u16::try_from(self.i32()?).ok()?,
+                        x: self.i32()?,
+                        y: self.i32()?,
+                    });
+                }
+                Whatsit::NativeWord(crate::native::NativeWord {
+                    font,
+                    actual_text,
+                    text: Arc::from(text),
+                    width,
+                    height,
+                    depth,
+                    glyphs: Arc::from(glyphs),
+                })
+            }
+            8 => Whatsit::Glyph(crate::native::GlyphNode {
+                font: self.font()?,
+                gid: u16::try_from(self.i32()?).ok()?,
+                width: self.i32()?,
+                height: self.i32()?,
+                depth: self.i32()?,
+            }),
+            9 => {
+                let pdf = self.u8()? != 0;
+                let path = Arc::from(self.bytes()?);
+                let page = self.i32()?;
+                let pdf_box = self.u8()?;
+                let mut transform = [0; 6];
+                for t in &mut transform {
+                    *t = self.i32()?;
+                }
+                Whatsit::Pic(Box::new(crate::native::PicNode {
+                    pdf,
+                    path,
+                    page,
+                    pdf_box,
+                    transform,
+                    width: self.i32()?,
+                    height: self.i32()?,
+                    depth: self.i32()?,
+                }))
+            }
             _ => return None,
         })
     }

@@ -88,6 +88,9 @@ pub struct Params {
     pub job_name: Option<alloc::vec::Vec<u8>>,
     /// `-output-comment`: replaces the DVI preamble's date comment.
     pub output_comment: Option<alloc::vec::Vec<u8>>,
+    /// `XeTeX`'s `-no-pdf`: write the XDV file, not the PDF xdvipdfmx
+    /// makes of it.
+    pub no_pdf: bool,
     /// `log_openout`: log `\openout` (web2c's `openout` feature; off for
     /// `tex`).
     pub log_openout: bool,
@@ -159,6 +162,7 @@ partex_engine::persist_struct!(Params {
     invocation_name,
     job_name,
     output_comment,
+    no_pdf,
     log_openout,
     memo,
     skip_cache,
@@ -217,6 +221,7 @@ impl Default for Params {
             invocation_name: alloc::vec::Vec::from(*b"tex"),
             job_name: None,
             output_comment: None,
+            no_pdf: false,
             log_openout: false,
             memo: false,
             skip_cache: true,
@@ -259,6 +264,9 @@ pub enum Flavor {
     Tex,
     /// pdfTeX (`pdftex`), which includes e-TeX.
     PdfTex,
+    /// `XeTeX` (`xetex`), e-TeX with Unicode and native fonts; its PDF is
+    /// `xdvipdfmx`'s, from its XDV (DESIGN 4.7).
+    XeTeX,
 }
 
-partex_engine::persist_enum!(Flavor { Tex, PdfTex });
+partex_engine::persist_enum!(Flavor { Tex, PdfTex, XeTeX });

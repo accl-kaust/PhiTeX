@@ -1,0 +1,21 @@
+[package]
+name = "partex-otf"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "OpenType faces, shaping and TECkit for XeTeX (DESIGN 4.7): FreeType's numbers, HarfBuzz's glyphs, no I/O"
+
+[dependencies]
+# HarfBuzz's Rust port; 0.14.0 matches HarfBuzz 14.5.1 (the oracle's is 14.5.0).
+harfrust = { version = "=0.14.0", default-features = false, features = ["libm"] }
+read-fonts = { version = "=0.45.0", default-features = false, features = ["libm"] }
+skrifa = { version = "=0.48.0", default-features = false, features = ["libm"] }
+unicode-bidi = { version = "=0.3.18", default-features = false, features = ["hardcoded-data"] }
+libm = "0.2.16"
+# WOFF2 faces (TeX Live has 45; fontconfig lists Gentium's before its TTFs).
+brotli-decompressor = { version = "5.0.3", default-features = false }
+
+[lints]
+workspace = true
+

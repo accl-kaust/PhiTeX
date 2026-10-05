@@ -16,6 +16,7 @@ use crate::track::{Cell, Tracker};
 use crate::web::{BOX_VAL, DIMEN_VAL, GLUE_VAL, INT_VAL, MU_VAL, TOK_VAL};
 #[allow(unused_imports)]
 pub use crate::web::{CARRIAGE_RETURN, NULL_CODE, NULL_FONT, VAR_CODE};
+use crate::wide::code_loc;
 use crate::xregs::{EXT_BASE, reg_loc};
 use alloc::sync::Arc;
 use partex_engine::node::{BoxNode, GlueSpec, Tokens};
@@ -557,19 +558,25 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         self.equiv(MATH_FONT_BASE + n)
     }
     pub(crate) fn cat_code(&self, c: i32) -> i32 {
-        self.equiv(CAT_CODE_BASE + c)
+        self.equiv(code_loc(CAT_CODE_BASE, c))
+    }
+    /// Code `c` of the table at `base` (`cat_code_base`, ...), without
+    /// telling the tracker; a character past the narrow tables has
+    /// `IniTeX`'s value (12 for its category).
+    pub(crate) fn peek_code(&self, base: i32, c: i32) -> i32 {
+        self.peek_eqtb(code_loc(base, c)).rh()
     }
     pub(crate) fn lc_code(&self, c: i32) -> i32 {
-        self.equiv(LC_CODE_BASE + c)
+        self.equiv(code_loc(LC_CODE_BASE, c))
     }
     pub(crate) fn uc_code(&self, c: i32) -> i32 {
-        self.equiv(UC_CODE_BASE + c)
+        self.equiv(code_loc(UC_CODE_BASE, c))
     }
     pub(crate) fn sf_code(&self, c: i32) -> i32 {
-        self.equiv(SF_CODE_BASE + c)
+        self.equiv(code_loc(SF_CODE_BASE, c))
     }
     pub(crate) fn math_code(&self, c: i32) -> i32 {
-        self.equiv(MATH_CODE_BASE + c)
+        self.equiv(code_loc(MATH_CODE_BASE, c))
     }
     /// `box(n):=null` (at the same level), returning the box.
     pub(crate) fn take_box(&mut self, n: i32) -> Option<Arc<BoxNode>> {
@@ -625,7 +632,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         self.eqtb_int(reg_loc(INT_VAL, n))
     }
     pub(crate) fn del_code(&self, c: i32) -> i32 {
-        self.eqtb_int(DEL_CODE_BASE + c)
+        self.eqtb_int(code_loc(DEL_CODE_BASE, c))
     }
     pub(crate) fn dimen_par(&self, code: i32) -> i32 {
         self.eqtb_int(DIMEN_BASE + code)
@@ -688,7 +695,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         self.set_eq_type(CUR_FONT_LOC, DATA);
         self.set_eq_level(CUR_FONT_LOC, LEVEL_ONE);
         let w = self.eqtb(CUR_FONT_LOC);
-        for k in MATH_FONT_BASE..=MATH_FONT_BASE + 47 {
+        for k in MATH_FONT_BASE..MATH_FONT_BASE + NUMBER_MATH_FONTS {
             self.set_eqtb(k, w);
         }
         self.set_equiv(CAT_CODE_BASE, 0);
@@ -709,15 +716,24 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         self.set_equiv(CAT_CODE_BASE + i32::from(b'%'), COMMENT);
         self.set_equiv(CAT_CODE_BASE + crate::charset::INVALID_CODE, INVALID_CHAR);
         self.set_equiv(CAT_CODE_BASE + NULL_CODE, IGNORE);
+        // (`XeTeX` §258: class 7 is ``use the current family'')
+        let (var_code, fam1) = if self.unicode {
+            (
+                crate::mathcodes::set_class_field(crate::mathcodes::VAR_FAM_CLASS),
+                crate::mathcodes::set_family_field(1),
+            )
+        } else {
+            (VAR_CODE, 0x100)
+        };
         for k in i32::from(b'0')..=i32::from(b'9') {
-            self.set_equiv(MATH_CODE_BASE + k, k + VAR_CODE);
+            self.set_equiv(MATH_CODE_BASE + k, k + var_code);
         }
         let case = i32::from(b'a') - i32::from(b'A');
         for k in i32::from(b'A')..=i32::from(b'Z') {
             self.set_equiv(CAT_CODE_BASE + k, LETTER);
             self.set_equiv(CAT_CODE_BASE + k + case, LETTER);
-            self.set_equiv(MATH_CODE_BASE + k, k + VAR_CODE + 0x100);
-            self.set_equiv(MATH_CODE_BASE + k + case, k + case + VAR_CODE + 0x100);
+            self.set_equiv(MATH_CODE_BASE + k, k + var_code + fam1);
+            self.set_equiv(MATH_CODE_BASE + k + case, k + case + var_code + fam1);
             self.set_equiv(LC_CODE_BASE + k, k + case);
             self.set_equiv(LC_CODE_BASE + k + case, k + case);
             self.set_equiv(UC_CODE_BASE + k, k);
@@ -741,6 +757,11 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         }
         self.set_eqtb_int(DEL_CODE_BASE + i32::from(b'.'), 0); // null delimiter
         self.set_int_par(SHOW_STREAM_CODE, -1); // pdfTeX §258
+        if self.unicode {
+            // `XeTeX`: "for backward compatibility with standard TeX by
+            // default"
+            self.set_eqtb_int(ETEX_STATE_BASE + XETEX_HYPHENATABLE_LENGTH_CODE, 63);
+        }
         // §250
         for k in DIMEN_BASE..=EQTB_SIZE {
             self.set_eqtb_int(k, 0);
@@ -779,6 +800,9 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             THIN_MU_SKIP_CODE => b"thinmuskip",
             MED_MU_SKIP_CODE => b"medmuskip",
             THICK_MU_SKIP_CODE => b"thickmuskip",
+            XETEX_LINEBREAK_SKIP_CODE if self.params.flavor == crate::params::Flavor::XeTeX => {
+                b"XeTeXlinebreakskip"
+            }
             _ => {
                 self.print_str(b"[unknown glue parameter!]");
                 return;
@@ -958,6 +982,21 @@ pub fn int_param_name(n: i32) -> Option<&'static [u8]> {
         SAVING_HYPH_CODES_CODE => b"savinghyphcodes",
         IGNORE_PRIMITIVE_ERROR_CODE => b"ignoreprimitiveerror",
         TEXXET_STATE_CODE => b"TeXXeTstate",
+        // `XeTeX`'s (codes no other engine uses)
+        SUPPRESS_FONTNOTFOUND_ERROR_CODE => b"suppressfontnotfounderror",
+        XETEX_LINEBREAK_PENALTY_CODE => b"XeTeXlinebreakpenalty",
+        XETEX_PROTRUDE_CHARS_CODE => b"XeTeXprotrudechars",
+        c if c == ETEX_STATE_CODE + XETEX_UPWARDS_CODE => b"XeTeXupwardsmode",
+        c if c == ETEX_STATE_CODE + XETEX_USE_GLYPH_METRICS_CODE => b"XeTeXuseglyphmetrics",
+        c if c == ETEX_STATE_CODE + XETEX_INTER_CHAR_TOKENS_CODE => b"XeTeXinterchartokenstate",
+        c if c == ETEX_STATE_CODE + XETEX_DASH_BREAK_CODE => b"XeTeXdashbreakstate",
+        c if c == ETEX_STATE_CODE + XETEX_INPUT_NORMALIZATION_CODE => b"XeTeXinputnormalization",
+        c if c == ETEX_STATE_CODE + XETEX_TRACING_FONTS_CODE => b"XeTeXtracingfonts",
+        c if c == ETEX_STATE_CODE + XETEX_INTERWORD_SPACE_SHAPING_CODE => {
+            b"XeTeXinterwordspaceshaping"
+        }
+        c if c == ETEX_STATE_CODE + XETEX_GENERATE_ACTUAL_TEXT_CODE => b"XeTeXgenerateactualtext",
+        c if c == ETEX_STATE_CODE + XETEX_HYPHENATABLE_LENGTH_CODE => b"XeTeXhyphenatablelength",
         SYNCTEX_CODE => b"synctex",
         _ => return None,
     })

@@ -30,6 +30,9 @@ use partex_engine::lr;
 
 /// §625: `billion`.
 const BILLION: f64 = 1_000_000_000.0;
+/// `XeTeX`'s XDV commands `set_glyphs` and `set_text_and_glyphs`.
+const SET_GLYPHS: u8 = 253;
+const SET_TEXT_AND_GLYPHS: u8 = 254;
 
 /// §625: `vet_glue`.
 fn vet_glue(g: f64) -> f64 {
@@ -174,20 +177,34 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             if self.job_name() == 0 {
                 self.open_log_file()?;
             }
-            self.pack_job_name(b".dvi");
+            // (`XeTeX`'s `output_file_extension`: the XDV, or the PDF
+            // xdvipdfmx makes of it)
+            let (ext, kind): (&[u8], FileKind) = if !self.xdv() {
+                (b".dvi", FileKind::Other)
+            } else if self.params.no_pdf {
+                (b".xdv", FileKind::Other)
+            } else {
+                (b".pdf", FileKind::XdvPipe)
+            };
+            self.pack_job_name(ext);
             loop {
                 let name = self.name_of_file.clone();
-                if let Some((id, printed)) = self.open_out(&name, FileKind::Other) {
+                if let Some((id, printed)) = self.open_out(&name, kind) {
                     self.dvi.file = Some(id);
                     self.name_of_file = printed;
                     break;
                 }
-                self.prompt_file_name(b"file name for output", b".dvi")?;
+                self.prompt_file_name(b"file name for output", ext)?;
             }
             let s = self.make_name_string()?;
             self.set_output_file_name(s);
         }
         Ok(())
+    }
+
+    /// Whether the output is `XeTeX`'s XDV.
+    pub(crate) fn xdv(&self) -> bool {
+        self.params.flavor == crate::params::Flavor::XeTeX
     }
 
     /// Bytes to the DVI file as an effect emitted again (a hit's).
@@ -394,14 +411,19 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             // §617: the preamble.
             self.prepare_mag()?;
             let comment = self.dvi_comment();
-            let w = match DviWriter::new(self.params.dvi_buf_size, self.int_par(MAG_CODE), &comment)
-            {
+            let w = match DviWriter::with_format(
+                self.params.dvi_buf_size,
+                self.int_par(MAG_CODE),
+                &comment,
+                self.xdv(),
+            ) {
                 Ok(w) => w,
                 Err(TooLong) => return self.dvi_too_long(),
             };
             self.dvi.started = true;
-            // (a page sink writes the file itself: not with effects)
-            let effects = self.effects.is_some();
+            // (a page sink writes the file itself: not with effects, nor
+            // `XeTeX`'s, which goes to xdvipdfmx)
+            let effects = self.effects.is_some() || self.xdv();
             match (self.host.page_sink().filter(|_| !effects), self.dvi.file) {
                 (Some(sink), Some(file)) => {
                     self.dvi.bound = u64::try_from(w.length()).unwrap_or(0);
@@ -425,6 +447,30 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         page.counts = counts;
         page.h_offset = h_offset;
         page.v_offset = v_offset;
+        if self.xdv() {
+            // `XeTeX`: a pagesize special at the start of the page
+            let (w, h) = (
+                self.dimen_par(PDF_PAGE_WIDTH_CODE),
+                self.dimen_par(PDF_PAGE_HEIGHT_CODE),
+            );
+            let old_setting = self.selector();
+            self.set_selector(NEW_STRING);
+            self.print_str(b"pdf:pagesize ");
+            if w > 0 && h > 0 {
+                self.print_str(b"width ");
+                self.print_scaled(w);
+                self.print_str(b"pt height ");
+                self.print_scaled(h);
+                self.print_str(b"pt");
+            } else {
+                self.print_str(b"default");
+            }
+            self.set_selector(old_setting);
+            let start = self.str_start[self.str_ptr];
+            page.prelude
+                .extend_from_slice(&self.str_pool[start..self.pool_ptr]);
+            self.pool_ptr = start; // erase the string
+        }
         let walked = self.build_list(p, &mut page, false);
         page.truncated = walked.is_err();
         // (by slot, as `page_font` marks them: a font's number is not its
@@ -481,7 +527,11 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         }
         let old_setting = self.selector();
         self.set_selector(NEW_STRING);
-        self.print_str(b" TeX output ");
+        self.print_str(if self.xdv() {
+            &b" XeTeX output "[..]
+        } else {
+            b" TeX output "
+        });
         self.print_int(self.int_par(YEAR_CODE));
         self.print_char(b'.');
         self.print_two(self.int_par(MONTH_CODE));
@@ -514,6 +564,15 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             self.str_pool[self.str_start[s]..self.str_start[s + 1]].to_vec()
         };
         let font = self.fonts.get(f);
+        let mut name = text(self.fonts.name[fi]);
+        let native = self.native_font(f).map(|n| n.font.font_def());
+        if self.xdv()
+            && let Some(l) = name.iter().position(|&c| c == b':')
+            && l > 0
+        {
+            // `XeTeX`: the name up to a colon (a mapping's options)
+            name.truncate(l);
+        }
         // (DVI numbers fonts as tex.web does, in the order they were
         // loaded: `FontArrays::number`)
         page.fonts.push(FontDef {
@@ -522,7 +581,8 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             size: font.size,
             design_size: font.design_size,
             area: text(self.fonts.area[fi]),
-            name: text(self.fonts.name[fi]),
+            name,
+            native,
         });
     }
 
@@ -648,7 +708,12 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                     let len = u32::try_from(page.specials.len()).expect("page size") - start;
                     page.items.push(Item::Special { start, len });
                 }
-                Whatsit::Language { .. } => {}
+                Whatsit::NativeWord(w) if !vertical => {
+                    advance = w.width;
+                    self.native_item(page, w);
+                }
+                // (`XeTeX` outputs no native word in a vlist)
+                Whatsit::Language { .. } | Whatsit::NativeWord(_) => {}
                 Whatsit::Pdf(p) => {
                     // pdfTeX §1620: `out_what` in DVI mode
                     return if matches!(**p, partex_engine::node::PdfWhatsit::SavePos) {
@@ -659,6 +724,16 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                     } else {
                         self.pdf_error(b"ext4", b"pdf node ended up in DVI mode")
                     };
+                }
+                Whatsit::Glyph(g) => {
+                    advance = g.width;
+                    self.glyph_item(page, g, vertical);
+                }
+                Whatsit::Pic(_) => {
+                    return self.pdf_error(
+                        b"XeTeX",
+                        b"pictures in XDV output are not implemented in partex yet",
+                    );
                 }
             },
             Node::Glue { spec, .. } => {
@@ -744,6 +819,77 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         page.items.push(item);
         Ok(())
     }
+    /// `XeTeX`: native word `w` in an hlist: `set_glyphs`, or with its
+    /// text `set_text_and_glyphs` (`native_word_node_AT`), or nothing (no
+    /// glyphs), after the position and the font are set.
+    fn native_item(&mut self, page: &mut Page, w: &partex_engine::native::NativeWord) {
+        let f = i32::from(w.font.0);
+        self.page_font(page, f);
+        let start = u32::try_from(page.native.len()).expect("page size");
+        let out = &mut page.native;
+        let glyph_array = |out: &mut Vec<u8>| {
+            // `make_xdv_glyph_array_data`
+            out.extend_from_slice(&w.width.to_be_bytes());
+            out.extend_from_slice(&u16::try_from(w.glyphs.len()).unwrap_or(0).to_be_bytes());
+            for g in w.glyphs.iter() {
+                out.extend_from_slice(&g.x.to_be_bytes());
+                out.extend_from_slice(&g.y.to_be_bytes());
+            }
+            for g in w.glyphs.iter() {
+                out.extend_from_slice(&g.gid.to_be_bytes());
+            }
+        };
+        if w.actual_text {
+            if !w.text.is_empty() || !w.glyphs.is_empty() {
+                out.push(SET_TEXT_AND_GLYPHS);
+                out.extend_from_slice(&u16::try_from(w.text.len()).unwrap_or(0).to_be_bytes());
+                for u in w.text.iter() {
+                    out.extend_from_slice(&u.to_be_bytes());
+                }
+                glyph_array(out);
+            }
+        } else if !w.glyphs.is_empty() {
+            out.push(SET_GLYPHS);
+            glyph_array(out);
+        }
+        let len = u32::try_from(page.native.len()).expect("page size") - start;
+        page.items.push(Item::Native {
+            font: self.dvi_font_number(f),
+            width: w.width,
+            height: w.height,
+            depth: w.depth,
+            start,
+            len,
+        });
+    }
+
+    /// `XeTeX`: glyph `g` (one glyph by its identifier); in a vlist, set at
+    /// the left edge with no advance.
+    fn glyph_item(
+        &mut self,
+        page: &mut Page,
+        g: &partex_engine::native::GlyphNode,
+        vertical: bool,
+    ) {
+        let f = i32::from(g.font.0);
+        self.page_font(page, f);
+        let start = u32::try_from(page.native.len()).expect("page size");
+        let out = &mut page.native;
+        out.push(SET_GLYPHS);
+        out.extend_from_slice(&(if vertical { 0 } else { g.width }).to_be_bytes());
+        out.extend_from_slice(&1u16.to_be_bytes()); // glyph count
+        out.extend_from_slice(&[0; 8]); // x and y offsets
+        out.extend_from_slice(&g.gid.to_be_bytes());
+        page.items.push(Item::Native {
+            font: self.dvi_font_number(f),
+            width: g.width,
+            height: g.height,
+            depth: g.depth,
+            start,
+            len: 19,
+        });
+    }
+
     /// §620: character `c` of font `f` in an hlist.
     /// Returns its width.
     pub(crate) fn char_item(&mut self, f: i32, c: i32, page: &mut Page) -> Scaled {
@@ -907,9 +1053,14 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         } else {
             self.print_str(b" pages");
         }
-        self.print_str(b", ");
-        self.print_int(summary.bytes);
-        self.print_str(b" bytes).");
+        if self.xdv() && !self.params.no_pdf {
+            // (`XeTeX`: the PDF's size is xdvipdfmx's)
+            self.print_str(b").");
+        } else {
+            self.print_str(b", ");
+            self.print_int(summary.bytes);
+            self.print_str(b" bytes).");
+        }
         if let Some(id) = self.dvi.file.take() {
             self.out_close(id);
         }
@@ -1159,7 +1310,10 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             Whatsit::Special { .. }
             | Whatsit::LateSpecial { .. }
             | Whatsit::Language { .. }
-            | Whatsit::Pdf(_) => return Ok(()),
+            | Whatsit::Pdf(_)
+            | Whatsit::NativeWord(_)
+            | Whatsit::Glyph(_)
+            | Whatsit::Pic(_) => return Ok(()),
         };
         // §1374: do some work that has been queued up for \write.
         let ju = ux(j);

@@ -671,14 +671,37 @@ pub enum Whatsit {
     },
     /// pdfTeX's PDF whatsits.
     Pdf(Box<PdfWhatsit>),
+    /// `XeTeX`'s word in a native font (`native_word_node`).
+    NativeWord(crate::native::NativeWord),
+    /// `XeTeX`'s glyph by identifier (`glyph_node`).
+    Glyph(crate::native::GlyphNode),
+    /// `XeTeX`'s picture (`pic_node`, `pdf_node`).
+    Pic(Box<crate::native::PicNode>),
 }
 
 impl Whatsit {
     /// The dimensions of a `\\pdfrefxform` or `\\pdfrefximage`, which
-    /// pdfTeX's packing, line breaking and display widths count.
+    /// pdfTeX's packing, line breaking and display widths count (and of
+    /// `XeTeX`'s native words, glyphs and pictures, which `XeTeX` counts
+    /// the same way).
     #[must_use]
     pub fn ref_dims(&self) -> Option<Dims> {
         match self {
+            Self::NativeWord(w) => Some(Dims {
+                width: w.width,
+                height: w.height,
+                depth: w.depth,
+            }),
+            Self::Glyph(g) => Some(Dims {
+                width: g.width,
+                height: g.height,
+                depth: g.depth,
+            }),
+            Self::Pic(p) => Some(Dims {
+                width: p.width,
+                height: p.height,
+                depth: p.depth,
+            }),
             Self::Pdf(p) => match **p {
                 PdfWhatsit::RefXForm { dims, .. } | PdfWhatsit::RefXImage { dims, .. } => {
                     Some(dims)

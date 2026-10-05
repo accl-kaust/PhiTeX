@@ -17,6 +17,8 @@ pub const BANNER: &[u8] = b"This is TeX, Version 3.141592653";
 pub const BANNER_K: &[u8] = b"This is TeXk, Version 3.141592653";
 /// pdfTeX §2: `pdfTeX_banner` (also its `banner_k`).
 pub const PDFTEX_BANNER: &[u8] = b"This is pdfTeX, Version 3.141592653-2.6-1.40.29";
+/// `XeTeX` §2: the banner of `XeTeX` (TeX Live 2026).
+pub const XETEX_BANNER: &[u8] = b"This is XeTeX, Version 3.141592653-2.6-0.999998";
 /// cpascal.h: `promptfilenamehelpmsg` (Unix).
 const PROMPT_FILE_NAME_HELP_MSG: &[u8] = b"(Press Enter to retry, or Control-D to exit";
 
@@ -26,6 +28,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
     pub(crate) fn banner(&self) -> &'static [u8] {
         match self.params.flavor {
             crate::params::Flavor::PdfTex => PDFTEX_BANNER,
+            crate::params::Flavor::XeTeX => XETEX_BANNER,
             crate::params::Flavor::Tex if self.params.file_line_error_style => BANNER_K,
             crate::params::Flavor::Tex => BANNER,
         }
@@ -57,26 +60,64 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         self.area_delimiter = 0;
         self.ext_delimiter = 0;
         self.quoted_filename = false;
+        self.file_name_quote_char = 0;
     }
 
-    /// §516: add `c` to the name being scanned; false at its end.
-    pub(crate) fn more_name(&mut self, c: u8) -> Result<bool, Jump> {
-        if c == b' ' && self.stop_at_space && !self.quoted_filename {
+    /// §516: add `c` to the name being scanned; false at its end. The
+    /// delimiters are where they are in the pool's bytes.
+    pub(crate) fn more_name(&mut self, c: u32) -> Result<bool, Jump> {
+        if self.unicode {
+            return self.more_name_xetex(c);
+        }
+        if c == u32::from(b' ') && self.stop_at_space && !self.quoted_filename {
             Ok(false)
-        } else if c == b'"' {
+        } else if c == u32::from(b'"') {
             self.quoted_filename = !self.quoted_filename;
             Ok(true)
         } else {
             self.str_room(1)?;
             self.append_char(c); // contribute `c` to the current string
-            if c == b'/' {
-                // `IS_DIR_SEP`
-                self.area_delimiter = self.cur_length();
-                self.ext_delimiter = 0;
-            } else if c == b'.' {
-                self.ext_delimiter = self.cur_length();
-            }
+            self.name_delimiters(c);
             Ok(true)
+        }
+    }
+
+    /// `XeTeX` §551: a name may be quoted with `"` or `'` (only while
+    /// spaces end it); the quote characters are not part of it.
+    fn more_name_xetex(&mut self, c: u32) -> Result<bool, Jump> {
+        let quote = u32::from(b'"');
+        let apostrophe = u32::from(b'\'');
+        if self.stop_at_space && c == u32::from(b' ') && self.file_name_quote_char == 0 {
+            Ok(false)
+        } else if self.stop_at_space
+            && self.file_name_quote_char != 0
+            && c == self.file_name_quote_char
+        {
+            self.file_name_quote_char = 0;
+            Ok(true)
+        } else if self.stop_at_space
+            && self.file_name_quote_char == 0
+            && (c == quote || c == apostrophe)
+        {
+            self.file_name_quote_char = c;
+            self.quoted_filename = true;
+            Ok(true)
+        } else {
+            self.str_room(if c > 0xFFFF { 2 } else { 1 })?;
+            self.append_char(c);
+            self.name_delimiters(c);
+            Ok(true)
+        }
+    }
+
+    /// §516's `IS_DIR_SEP` and `.`: the delimiters, as pool offsets.
+    fn name_delimiters(&mut self, c: u32) {
+        let len = self.pool_ptr - self.str_start[self.str_ptr];
+        if c == u32::from(b'/') {
+            self.area_delimiter = len;
+            self.ext_delimiter = 0;
+        } else if c == u32::from(b'.') {
+            self.ext_delimiter = len;
         }
     }
 
@@ -89,8 +130,9 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         }
         self.str_room(6)?; // room for quotes, if needed
         let base = self.str_start[self.str_ptr];
-        // add quotes if needed
-        if self.area_delimiter != 0 {
+        // add quotes if needed (not `XeTeX`, §552)
+        if self.unicode {
+        } else if self.area_delimiter != 0 {
             // maybe quote `cur_area`
             let (s, t) = (base, base + self.area_delimiter);
             if self.str_pool[s..t].contains(&b' ') {
@@ -108,13 +150,13 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         } else {
             base + self.ext_delimiter - 1
         };
-        if self.str_pool[s..t].contains(&b' ') {
+        if !self.unicode && self.str_pool[s..t].contains(&b' ') {
             self.quote_range(s, t, true);
             if self.ext_delimiter != 0 {
                 self.ext_delimiter += 2;
             }
         }
-        if self.ext_delimiter != 0 {
+        if !self.unicode && self.ext_delimiter != 0 {
             // maybe quote `cur_ext`
             let (s, t) = (base + self.ext_delimiter - 1, self.pool_ptr);
             if self.str_pool[s..t].contains(&b' ') {
@@ -219,6 +261,31 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             .collect()
     }
 
+    /// `name_of_file` as the characters of a string: through `xord`, or
+    /// (`XeTeX`'s `make_utf16_name`) decoded from UTF-8 into UTF-16 units.
+    pub(crate) fn name_units(&self) -> alloc::vec::Vec<u32> {
+        if !self.unicode {
+            return self
+                .name_of_file
+                .iter()
+                .map(|&b| u32::from(self.xord[usize::from(b)]))
+                .collect();
+        }
+        let mut out = alloc::vec::Vec::new();
+        let mut rest = &self.name_of_file[..];
+        while !rest.is_empty() {
+            let (c, n, _) = crate::input::decode_utf8_xetex(rest);
+            if c > 0xFFFF {
+                out.push(0xD800 + ((c - 0x1_0000) >> 10));
+                out.push(0xDC00 + (c & 0x3FF));
+            } else {
+                out.push(c);
+            }
+            rest = &rest[n.min(rest.len())..];
+        }
+        out
+    }
+
     /// §525: the string for `name_of_file`; also resets `cur_name`,
     /// `cur_area`, `cur_ext` to match it.
     pub(crate) fn make_name_string(&mut self) -> Result<i32, Jump> {
@@ -229,8 +296,8 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         {
             return Ok(i32::from(b'?'));
         }
-        for k in 0..name_length {
-            let c = self.xord[usize::from(self.name_of_file[k])];
+        let name = self.name_units();
+        for &c in &name {
             self.append_char(c);
         }
         let result = i32::try_from(self.make_string()?).unwrap_or(0);
@@ -242,7 +309,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         self.begin_name();
         self.stop_at_space = false;
         let mut k = 0;
-        while k < name_length && self.more_name(self.name_of_file[k])? {
+        while k < name.len() && self.more_name(name[k])? {
             k += 1;
         }
         self.stop_at_space = save_stop_at_space;
@@ -290,7 +357,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                 {
                     break;
                 }
-                if !self.more_name(u8::try_from(self.cur_chr).unwrap_or(0))? {
+                if !self.more_name(crate::input::cu(self.cur_chr))? {
                     break;
                 }
                 self.get_x_token()?;
@@ -322,8 +389,17 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         let save_stop_at_space = self.stop_at_space;
         self.stop_at_space = false; // allow spaces in file names
         self.begin_name();
-        for i in self.str_start[s]..self.str_start[s + 1] {
-            self.more_name(self.str_pool[i])?;
+        let chars: alloc::vec::Vec<u32> = if self.unicode {
+            crate::strings::decode_units(&self.str_pool[self.str_start[s]..self.str_start[s + 1]])
+                .collect()
+        } else {
+            self.str_pool[self.str_start[s]..self.str_start[s + 1]]
+                .iter()
+                .map(|&b| u32::from(b))
+                .collect()
+        };
+        for c in chars {
+            self.more_name(c)?;
         }
         self.stop_at_space = save_stop_at_space;
         Ok(())
@@ -370,7 +446,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         // §531: scan file name in the buffer.
         self.begin_name();
         let mut k = self.first;
-        while self.buffer[k] == b' ' && k < self.last {
+        while self.buffer[k] == u32::from(b' ') && k < self.last {
             k += 1;
         }
         loop {
@@ -471,11 +547,11 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         self.input_stack[self.input_ptr] = self.cur_input.clone(); // make sure bottom level is in memory
         self.print_nl(b"**");
         let mut l = ux(self.input_stack[0].limit); // last position of first line
-        if i32::from(self.buffer[l]) == self.int_par(END_LINE_CHAR_CODE) {
+        if crate::input::ci(self.buffer[l]) == self.int_par(END_LINE_CHAR_CODE) {
             l = l.saturating_sub(1);
         }
         for k in 1..=l {
-            self.print(i32::from(self.buffer[k]));
+            self.print_chr(crate::input::ci(self.buffer[k]));
         }
         self.print_ln(); // now the transcript file contains the first line of input
         self.set_selector(old_setting + 2); // `log_only` or `term_and_log`
@@ -617,7 +693,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             self.cur_input.limit -= 1;
         } else {
             let c = self.int_par(END_LINE_CHAR_CODE);
-            self.buffer[ux(self.cur_input.limit)] = u8::try_from(c).unwrap_or(0);
+            self.buffer[ux(self.cur_input.limit)] = crate::input::cu(c);
         }
         self.first = ux(self.cur_input.limit + 1);
         self.cur_input.loc = self.cur_input.start;
@@ -655,12 +731,14 @@ mod tests {
             .insert(b"sub.tex".to_vec(), b"x\\end\n".to_vec());
         // The command line, as §1337 leaves it.
         let line = b"\\input sub";
-        t.buffer[1..=line.len()].copy_from_slice(line);
+        for (d, &s) in t.buffer[1..=line.len()].iter_mut().zip(line) {
+            *d = u32::from(s);
+        }
         t.cur_input.state = NEW_LINE;
         t.cur_input.start = 1;
         t.cur_input.loc = 1;
         t.cur_input.limit = 11;
-        t.buffer[11] = b'\r';
+        t.buffer[11] = u32::from(b'\r');
         t.first = 12;
         let out = term_output(&mut t, |t| {
             t.get_x_token().unwrap();

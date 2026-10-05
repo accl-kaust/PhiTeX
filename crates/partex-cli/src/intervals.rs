@@ -245,7 +245,7 @@ impl IntervalReads {
             .borrow()
             .0
             .get(usize::try_from(id).ok()?)
-            .copied()
+            .cloned()
     }
 
     /// Whether lines are followed (see [`LineEvent`]).
@@ -356,7 +356,7 @@ impl Tracker for IntervalReads {
             codes().map(|c| {
                 let mut t = s.codes.borrow_mut();
                 let (all, ids) = &mut *t;
-                let id = *ids.entry(c).or_insert_with(|| {
+                let id = *ids.entry(c.clone()).or_insert_with(|| {
                     all.push(c);
                     u32::try_from(all.len() - 1).unwrap_or(u32::MAX)
                 });

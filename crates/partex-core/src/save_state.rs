@@ -27,6 +27,11 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             xord,
             xchr,
             xprn,
+            unicode,
+            doing_special: _,
+            name_scratch: _,
+            xfont: _,
+            file_name_quote_char: _,
             str_pool,
             str_start,
             pool_ptr,
@@ -208,6 +213,8 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             random,
             cur_box,
             after_token,
+            prev_class,
+            space_class,
             memo,
             cs_cache: _,
             map_cache: _,
@@ -280,7 +287,9 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             || org.is_some()
             || sync.is_some()
             || dl.is_some()
+            || fonts.native.iter().any(Option::is_some)
         {
+            // (`XeTeX`'s native fonts are not saved: `native.rs`)
             return false;
         }
         s.mark("params");
@@ -291,6 +300,8 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         xchr.save(s);
         s.mark("xprn");
         xprn.save(s);
+        s.mark("unicode");
+        unicode.save(s);
         s.mark("str_pool");
         str_pool.save(s);
         s.mark("str_start");
@@ -623,6 +634,9 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         cur_box.save(s);
         s.mark("after_token");
         after_token.save(s);
+        s.mark("char_classes");
+        prev_class.save(s);
+        space_class.save(s);
         s.mark("fresh_def");
         fresh_def.save(s);
         s.mark("long_help_seen");
@@ -669,6 +683,11 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             xord: Persist::load(l)?,
             xchr: Persist::load(l)?,
             xprn: Persist::load(l)?,
+            unicode: Persist::load(l)?,
+            doing_special: false,
+            name_scratch: alloc::vec::Vec::new(),
+            xfont: crate::native::NativeEnv::default(),
+            file_name_quote_char: 0,
             str_pool: Persist::load(l)?,
             str_start: Persist::load(l)?,
             pool_ptr: Persist::load(l)?,
@@ -850,6 +869,8 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             random: Persist::load(l)?,
             cur_box: Persist::load(l)?,
             after_token: Persist::load(l)?,
+            prev_class: Persist::load(l)?,
+            space_class: Persist::load(l)?,
             memo: crate::memo::Memo::new(false),
             cs_cache: crate::hash::CsCache::default(),
             map_cache: crate::fontmap::MapCache::default(),

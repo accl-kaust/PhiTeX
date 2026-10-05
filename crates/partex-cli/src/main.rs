@@ -9,9 +9,11 @@ mod config;
 #[cfg(feature = "deps")]
 mod deps;
 mod display;
+mod dpxfiles;
 mod dvithread;
 mod eventlog;
 mod events;
+mod fontindex;
 mod heap;
 mod inotify;
 mod intervals;
@@ -99,11 +101,13 @@ fn kpse_instance(progname: &str, engine: &str) -> partex_kpse::Kpse {
 }
 
 /// The engine a program name stands for: TeX Live's `etex`, `pdflatex`,
-/// `latex`, … are pdfTeX under other names (the name picks the format).
+/// `latex`, … are pdfTeX under other names (the name picks the format);
+/// `xelatex` is `XeTeX`.
 fn flavor_of(progname: &str) -> Flavor {
     match progname {
         "pdftex" | "etex" | "pdfetex" | "pdflatex" | "latex" | "pdfcsplain" | "dvilualatex"
         | "mex" | "pdfmex" | "utf8mex" | "amstex" | "eplain" | "texsis" => Flavor::PdfTex,
+        "xetex" | "xelatex" | "xelatex-dev" => Flavor::XeTeX,
         _ => Flavor::Tex,
     }
 }
@@ -170,7 +174,7 @@ fn setup_bound_vars(kpse: &mut partex_kpse::Kpse, p: &mut Params) {
 
 fn usage() -> ! {
     eprintln!(
-        "usage: partex [-engine=tex|pdftex] [-ini] [-etex] [-interaction=MODE] [-jobname=NAME] [-output-comment=S] [-shell-escape|-shell-restricted|-no-shell-escape] [-watch [-checkpoint-every=N]] [-resident] [-converge] ARGS..."
+        "usage: partex [-engine=tex|pdftex|xetex] [-ini] [-etex] [-interaction=MODE] [-jobname=NAME] [-output-comment=S] [-shell-escape|-shell-restricted|-no-shell-escape] [-watch [-checkpoint-every=N]] [-resident] [-converge] ARGS..."
     );
     std::process::exit(2);
 }
@@ -309,6 +313,7 @@ fn set_option(params: &mut Params, o: &str) -> bool {
         o if o.starts_with("output-comment=") => {
             params.output_comment = Some(o[15..].into());
         }
+        "no-pdf" => params.no_pdf = true,
         _ => return false,
     }
     true
@@ -392,10 +397,14 @@ fn parse_command_line() -> CommandLine {
                 engine = match &o[7..] {
                     "tex" => Flavor::Tex,
                     "pdftex" => Flavor::PdfTex,
+                    "xetex" => Flavor::XeTeX,
                     _ => usage(),
                 };
                 if progname == "tex" && engine == Flavor::PdfTex {
                     "pdftex".clone_into(&mut progname);
+                }
+                if progname == "tex" && engine == Flavor::XeTeX {
+                    "xetex".clone_into(&mut progname);
                 }
             }
             Some("etex") => params.etex = true,
@@ -502,6 +511,7 @@ fn setup() -> Job {
     let engine_name = match engine {
         Flavor::Tex => "tex",
         Flavor::PdfTex => "pdftex",
+        Flavor::XeTeX => "xetex",
     };
     let mut kpse = kpse_instance(&progname, engine_name);
     // texmfmp.c: `parse_first_line`: a `%&name` first line of the main

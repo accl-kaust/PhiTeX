@@ -23,10 +23,12 @@ deps = []
 partex-bibtex = { path = "../partex-bibtex" }
 partex-makeindex = { path = "../partex-makeindex" }
 partex-core = { path = "../partex-core" }
+partex-otf = { path = "../partex-otf" }
 partex-engine = { path = "../partex-engine" }
 partex-incr = { path = "../partex-incr" }
 partex-kpse = { path = "../partex-kpse" }
 partex-trace = { path = "../partex-trace" }
+partex-xdvipdfmx = { path = "../partex-xdvipdfmx" }
 phitex-doc = { path = "../phitex-doc" }
 
 [target.'cfg(not(target_family = "wasm"))'.dependencies]

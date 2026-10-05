@@ -17,6 +17,8 @@ partex-bibtex = { path = "../partex-bibtex" }
 partex-makeindex = { path = "../partex-makeindex" }
 # The build printed as a program (`ssa::view`, DESIGN 4.3 item 7).
 phitex-ir = { path = "../phitex-ir" }
+# `XeTeX`'s native fonts: lookup, shaping, metrics (DESIGN 4.7).
+partex-otf = { path = "../partex-otf" }
 
 [lints]
 workspace = true

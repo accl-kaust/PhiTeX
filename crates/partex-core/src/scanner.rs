@@ -11,18 +11,23 @@ use crate::tex::{Jump, Tex};
 use crate::track::Tracker;
 use crate::web::*;
 
-/// §358: a special variant of `relax`.
-pub const NO_EXPAND_FLAG: i32 = 257;
+/// §358: a special variant of `relax` (`XeTeX`'s `special_char`, past
+/// every character, DESIGN 4.7).
+pub use crate::web::NO_EXPAND_FLAG;
 
 /// §352: `is_hex(c)`.
-fn is_hex(c: u8) -> bool {
-    c.is_ascii_digit() || (b'a'..=b'f').contains(&c)
+fn is_hex(c: u32) -> bool {
+    (0x30..=0x39).contains(&c) || (0x61..=0x66).contains(&c)
+}
+
+/// §352: the value of hex digit `x`.
+fn hex(x: u32) -> i32 {
+    crate::input::ci(if x <= 0x39 { x - 0x30 } else { x - 0x61 + 10 })
 }
 
 /// §352: `hex_to_cur_chr`.
-fn hex_pair(c: u8, cc: u8) -> i32 {
-    let h = |x: u8| i32::from(if x <= b'9' { x - b'0' } else { x - b'a' + 10 });
-    16 * h(c) + h(cc)
+fn hex_pair(c: u32, cc: u32) -> i32 {
+    16 * hex(c) + hex(cc)
 }
 
 /// What the character scanner does next (tex.web's labels in `get_next`).
@@ -151,7 +156,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                     return Ok(());
                 }
             } else {
-                let cmd = t >> 8;
+                let cmd = tok_cmd(t);
                 // (`CAR_RET` is `OUT_PARAM` too: a parameter, §359)
                 if !matches!(cmd, TAB_MARK | CAR_RET) {
                     if cmd == LEFT_BRACE {
@@ -162,7 +167,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                     self.cur_input.loc = next;
                     self.cur_cs = 0;
                     self.cur_cmd = cmd;
-                    self.cur_chr = t & 0o377;
+                    self.cur_chr = tok_chr(t);
                     return Ok(());
                 }
             }
@@ -188,7 +193,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                 // (one lookup of the list for the token and the next `loc`)
                 let (t, next) = self.cur_tok_and_next();
                 self.cur_input.loc = next; // move to next
-                if (t >> 8) != OUT_PARAM {
+                if tok_cmd(t) != OUT_PARAM {
                     self.memo.fetched(self.input_ptr, t, self.cur_level());
                 }
                 if t >= CS_TOKEN_FLAG {
@@ -215,8 +220,8 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                         }
                     }
                 } else {
-                    self.cur_cmd = t >> 8;
-                    self.cur_chr = t & 0o377;
+                    self.cur_cmd = tok_cmd(t);
+                    self.cur_chr = tok_chr(t);
                     match self.cur_cmd {
                         LEFT_BRACE => self.set_align_state(self.align_state() + 1),
                         RIGHT_BRACE => self.set_align_state(self.align_state() - 1),
@@ -278,8 +283,20 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                 Next::Switch => {
                     if self.cur_input.loc <= self.cur_input.limit {
                         // current line not yet finished
-                        self.cur_chr = i32::from(self.buffer[ux(self.cur_input.loc)]);
+                        self.cur_chr = crate::input::ci(self.buffer[ux(self.cur_input.loc)]);
                         self.cur_input.loc += 1;
+                        if self.unicode {
+                            // `XeTeX` §373: a surrogate pair is one character
+                            let loc = ux(self.cur_input.loc);
+                            if (0xD800..0xDC00).contains(&self.cur_chr)
+                                && self.cur_input.loc <= self.cur_input.limit
+                                && (0xDC00..0xE000).contains(&self.buffer[loc])
+                            {
+                                let lower = crate::input::ci(self.buffer[loc]) - 0xDC00;
+                                self.cur_input.loc += 1;
+                                self.cur_chr = 0x1_0000 + (self.cur_chr - 0xD800) * 1024 + lower;
+                            }
+                        }
                         next = Next::Reswitch;
                     } else {
                         self.cur_input.state = NEW_LINE;
@@ -320,7 +337,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             }
             ACTIVE_CHAR => {
                 // §353: process an active-character control sequence.
-                self.cur_cs = self.cur_chr + ACTIVE_BASE;
+                self.cur_cs = crate::wide::active_cs(self.cur_chr);
                 let w = self.lookup_meaning(self.cur_cs);
                 self.cur_cmd = w.b0();
                 self.cur_chr = w.rh();
@@ -336,7 +353,13 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                 // `state:=mid_line`.
                 let loc = ux(self.cur_input.loc);
                 let limit = self.cur_input.limit;
-                if self.cur_chr == i32::from(self.buffer[loc]) && self.cur_input.loc < limit {
+                if self.unicode {
+                    if self.expanded_char_xetex() {
+                        return Ok(Next::Reswitch);
+                    }
+                } else if self.cur_chr == crate::input::ci(self.buffer[loc])
+                    && self.cur_input.loc < limit
+                {
                     let c = self.buffer[loc + 1];
                     if c < 0o200 {
                         // yes we have an expanded char
@@ -350,9 +373,9 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                             }
                         }
                         self.cur_chr = if c < 0o100 {
-                            i32::from(c) + 0o100
+                            crate::input::ci(c) + 0o100
                         } else {
-                            i32::from(c) - 0o100
+                            crate::input::ci(c) - 0o100
                         };
                         return Ok(Next::Reswitch);
                     }
@@ -439,7 +462,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         } else {
             'start_cs: loop {
                 let mut k = ux(self.cur_input.loc);
-                self.cur_chr = i32::from(self.buffer[k]);
+                self.cur_chr = crate::input::ci(self.buffer[k]);
                 let mut cat = self.cat_code(self.cur_chr);
                 k += 1;
                 self.cur_input.state = if cat == LETTER || cat == SPACER {
@@ -455,7 +478,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                     // control sequence is found, adjust `cur_cs` and `loc`,
                     // and `goto found`.
                     loop {
-                        self.cur_chr = i32::from(self.buffer[k]);
+                        self.cur_chr = crate::input::ci(self.buffer[k]);
                         cat = self.cat_code(self.cur_chr);
                         k += 1;
                         if cat != LETTER || k > ux(self.cur_input.limit) {
@@ -479,7 +502,14 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                     continue 'start_cs;
                 }
                 let loc = ux(self.cur_input.loc);
-                self.cur_cs = SINGLE_BASE + i32::from(self.buffer[loc]);
+                if self.buffer[loc] > 0xFFFF {
+                    // `XeTeX` §384: a single character above 0xFFFF names a
+                    // multiletter control sequence (the pool is UTF-16)
+                    self.cur_cs = self.id_lookup(loc, 1)?;
+                    self.cur_input.loc += 1;
+                    break 'start_cs;
+                }
+                self.cur_cs = crate::wide::single_cs(crate::input::ci(self.buffer[loc]));
                 self.cur_input.loc += 1;
                 break 'start_cs;
             }
@@ -494,11 +524,109 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         Ok(())
     }
 
+    /// `XeTeX` §382: `^^` and up to four more `^` with as many hex digits
+    /// (`^^^^xxxx`, `^^^^^^xxxxxx`), or `^^` and one character: whether an
+    /// expanded character was read into `cur_chr` (`goto reswitch`).
+    fn expanded_char_xetex(&mut self) -> bool {
+        let loc = ux(self.cur_input.loc);
+        let limit = ux(self.cur_input.limit);
+        if self.cur_chr != crate::input::ci(self.buffer[loc]) || loc >= limit {
+            return false;
+        }
+        // we have `^^` and another char; how many `^`s, up to 6
+        let mut sup_count = 2;
+        while sup_count < 6
+            && loc + 2 * sup_count - 2 <= limit
+            && crate::input::ci(self.buffer[loc + sup_count - 1]) == self.cur_chr
+        {
+            sup_count += 1;
+        }
+        // enough hex characters for the number of `^`s?
+        for d in 1..=sup_count {
+            if !is_hex(self.buffer[loc + sup_count - 2 + d]) {
+                // a non-hex character: the single `^^X` form
+                let c = self.buffer[loc + 1];
+                if c < 0o200 {
+                    self.cur_input.loc += 2;
+                    self.cur_chr = if c < 0o100 {
+                        crate::input::ci(c) + 0o100
+                    } else {
+                        crate::input::ci(c) - 0o100
+                    };
+                    return true;
+                }
+                return false;
+            }
+        }
+        let mut v = 0;
+        for d in 1..=sup_count {
+            v = 16 * v + hex(self.buffer[loc + sup_count - 2 + d]);
+        }
+        if v > BIGGEST_USV {
+            self.cur_chr = crate::input::ci(self.buffer[loc]);
+            return false;
+        }
+        self.cur_chr = v;
+        self.cur_input.loc += i32::try_from(2 * sup_count - 1).unwrap_or(0);
+        true
+    }
+
+    /// `XeTeX` §385: §355 with `XeTeX`'s longer forms. `first` is not moved.
+    fn reduce_expanded_code_xetex(&mut self, mut k: usize, cat: i32) -> bool {
+        let limit = ux(self.cur_input.limit);
+        if !(cat == SUP_MARK && crate::input::ci(self.buffer[k]) == self.cur_chr && k < limit) {
+            return false;
+        }
+        let mut sup_count = 2;
+        while sup_count < 6
+            && k + 2 * sup_count - 2 <= limit
+            && crate::input::ci(self.buffer[k + sup_count - 1]) == self.cur_chr
+        {
+            sup_count += 1;
+        }
+        for d in 1..=sup_count {
+            if !is_hex(self.buffer[k + sup_count - 2 + d]) {
+                let c = self.buffer[k + 1];
+                if c < 0o200 {
+                    self.buffer[k - 1] = if c < 0o100 { c + 0o100 } else { c - 0o100 };
+                    let d = 2;
+                    self.cur_input.limit -= 2;
+                    while k <= ux(self.cur_input.limit) {
+                        self.buffer[k] = self.buffer[k + d];
+                        k += 1;
+                    }
+                    return true;
+                }
+                return false;
+            }
+        }
+        let mut v = 0;
+        for d in 1..=sup_count {
+            v = 16 * v + hex(self.buffer[k + sup_count - 2 + d]);
+        }
+        if v > BIGGEST_USV {
+            self.cur_chr = crate::input::ci(self.buffer[k]);
+            return false;
+        }
+        self.cur_chr = v;
+        self.buffer[k - 1] = crate::input::cu(v);
+        let d = 2 * sup_count - 1;
+        self.cur_input.limit -= i32::try_from(d).unwrap_or(0);
+        while k <= ux(self.cur_input.limit) {
+            self.buffer[k] = self.buffer[k + d];
+            k += 1;
+        }
+        true
+    }
+
     /// §355: if an expanded code is present at `k`, reduce it (shift the
     /// rest of the line left) and return true (`goto start_cs`).
     fn reduce_expanded_code(&mut self, mut k: usize, cat: i32) -> bool {
+        if self.unicode {
+            return self.reduce_expanded_code_xetex(k, cat);
+        }
         let limit = ux(self.cur_input.limit);
-        if i32::from(self.buffer[k]) == self.cur_chr && cat == SUP_MARK && k < limit {
+        if crate::input::ci(self.buffer[k]) == self.cur_chr && cat == SUP_MARK && k < limit {
             let c = self.buffer[k + 1];
             if c < 0o200 {
                 // yes, one is indeed present
@@ -512,7 +640,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                 self.buffer[k - 1] = if d > 2 {
                     let v = hex_pair(c, self.buffer[k + 2]);
                     self.cur_chr = v;
-                    u8::try_from(v).unwrap_or(0)
+                    crate::input::cu(v)
                 } else if c < 0o100 {
                     c + 0o100
                 } else {
@@ -632,7 +760,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             self.cur_input.limit -= 1;
         } else {
             let c = self.int_par(END_LINE_CHAR_CODE);
-            self.buffer[ux(self.cur_input.limit)] = u8::try_from(c).unwrap_or(0);
+            self.buffer[ux(self.cur_input.limit)] = crate::input::cu(c);
         }
         self.first = ux(self.cur_input.limit + 1);
         self.cur_input.loc = self.cur_input.start; // ready to read
@@ -675,7 +803,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         self.no_new_control_sequence = true;
         r?;
         self.cur_tok = if self.cur_cs == 0 {
-            self.cur_cmd * 0o400 + self.cur_chr
+            self.cur_cmd * MAX_CHAR_VAL + self.cur_chr
         } else {
             CS_TOKEN_FLAG + self.cur_cs
         };

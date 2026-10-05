@@ -18,6 +18,9 @@ const ZERO_TOKEN: i32 = OTHER_TOKEN + b'0' as i32;
 impl<H: Host, T: Tracker> Tex<H, T> {
     /// §464: convert `str_pool[b..pool_ptr]` to a new token list.
     pub(crate) fn str_toks(&mut self, b: usize) -> Result<crate::tok::Tokens, Jump> {
+        if self.unicode {
+            return self.str_toks_cat(b, 0);
+        }
         self.str_room(1)?;
         // (a pooled list: the result is inserted, and given back when read)
         let end = self.pool_ptr;
@@ -30,6 +33,42 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                     SPACE_TOKEN
                 } else {
                     OTHER_TOKEN + c
+                });
+            }
+            l.remake(false);
+        }
+        self.pool_ptr = b;
+        Ok(p)
+    }
+
+    /// `XeTeX` §503 `str_toks_cat`: `str_toks` of the characters of a
+    /// string (surrogate pairs joined), each with category `cat`, or (0)
+    /// spaces as spaces and the others as other characters.
+    pub(crate) fn str_toks_cat(&mut self, b: usize, cat: i32) -> Result<crate::tok::Tokens, Jump> {
+        self.str_room(1)?;
+        let end = self.pool_ptr;
+        let chars: alloc::vec::Vec<i32> = if self.unicode {
+            crate::strings::decode_chars(&self.str_pool[b..end])
+                .map(crate::input::ci)
+                .collect()
+        } else {
+            self.str_pool[b..end]
+                .iter()
+                .map(|&c| i32::from(c))
+                .collect()
+        };
+        let mut p = self.pooled_list(|_| {});
+        if let Some(l) = alloc::sync::Arc::get_mut(&mut p) {
+            let buf = l.buffer();
+            for c in chars {
+                buf.push(if c == i32::from(b' ') && cat == 0 {
+                    SPACE_TOKEN
+                } else if cat == 0 {
+                    OTHER_TOKEN + c
+                } else if cat == ACTIVE_CHAR {
+                    CS_TOKEN_FLAG + crate::wide::active_cs(c)
+                } else {
+                    MAX_CHAR_VAL * cat + c
                 });
             }
             l.remake(false);
@@ -107,6 +146,9 @@ impl<H: Host, T: Tracker> Tex<H, T> {
     /// `\fontname`, `\jobname`.
     pub(crate) fn conv_toks(&mut self) -> Result<(), Jump> {
         let c = self.cur_chr;
+        if c >= XETEX_FIRST_EXPAND_CODE {
+            return self.xetex_conv_toks(c);
+        }
         if c >= EXPANDED_CODE && c != JOB_NAME_CODE {
             return self.pdftex_conv_toks(c);
         }
@@ -137,6 +179,8 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             STRING_CODE => {
                 if self.cur_cs != 0 {
                     self.sprint_cs(self.cur_cs);
+                } else if self.unicode {
+                    self.print_char_x(crate::input::cu(self.cur_chr));
                 } else {
                     self.print_char(u8::try_from(self.cur_chr).unwrap_or(0));
                 }
@@ -145,7 +189,20 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             FONT_NAME_CODE => {
                 self.font_read(self.cur_val, crate::track::font::METRICS);
                 let f = crate::fonts::fx(self.cur_val);
-                self.print(self.fonts.name[f]);
+                if self.is_native_font(self.cur_val) {
+                    // `XeTeX` §472: a native font's name in quotes
+                    let name = self.fonts.name[f];
+                    let quote = if self.str_bytes(crate::input::ux(name)).contains(&b'"') {
+                        b'\''
+                    } else {
+                        b'"'
+                    };
+                    self.print_char(quote);
+                    self.print(name);
+                    self.print_char(quote);
+                } else {
+                    self.print(self.fonts.name[f]);
+                }
                 if self.fonts.metrics[f].size != self.fonts.metrics[f].design_size {
                     self.print_str(b" at ");
                     self.print_scaled(self.fonts.metrics[f].size);
@@ -389,7 +446,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                 self.cur_input.limit -= 1;
             } else {
                 let c = self.int_par(END_LINE_CHAR_CODE);
-                self.buffer[ux(self.cur_input.limit)] = u8::try_from(c).unwrap_or(0);
+                self.buffer[ux(self.cur_input.limit)] = crate::input::cu(c);
             }
             self.first = ux(self.cur_input.limit + 1);
             self.cur_input.loc = self.cur_input.start;
@@ -397,7 +454,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             if line {
                 // e-TeX: handle \readline.
                 while self.cur_input.loc <= self.cur_input.limit {
-                    let c = i32::from(self.buffer[ux(self.cur_input.loc)]);
+                    let c = crate::input::ci(self.buffer[ux(self.cur_input.loc)]);
                     self.cur_input.loc += 1;
                     let t = if c == i32::from(b' ') {
                         SPACE_TOKEN

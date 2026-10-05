@@ -38,7 +38,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
 
     /// §292: the display loop over `len` tokens, token `i` being `at(i)`.
     fn show_tokens(&mut self, len: i32, at: impl Fn(&Self, i32) -> i32, q: i32, l: i32) {
-        let mut match_chr = b'#';
+        let mut match_chr = i32::from(b'#');
         let mut n = b'0';
         let mut i = 0;
         // (a character token shown into a string being made goes in as it
@@ -60,27 +60,35 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             } else if t < 0 {
                 self.print_esc(b"BAD.");
             } else {
-                let m = t / 0o400;
-                let c = t % 0o400;
+                let m = tok_cmd(t);
+                let c = tok_chr(t);
                 // §294: display the token (m, c).
                 match m {
                     LEFT_BRACE | RIGHT_BRACE | MATH_SHIFT | TAB_MARK | SUP_MARK | SUB_MARK
                     | SPACER | LETTER | OTHER_CHAR
                         if to_string =>
                     {
-                        if self.pool_ptr < self.pool_size() {
-                            self.append_char(u8::try_from(c).unwrap_or(0));
+                        if self.unicode {
+                            // (`XeTeX`: UTF-16 units, as `print_char` makes them)
+                            if self.pool_ptr < self.pool_size() {
+                                self.append_char(crate::input::cu(c));
+                            }
+                            self.tally += if c >= 0x1_0000 { 2 } else { 1 };
+                        } else {
+                            if self.pool_ptr < self.pool_size() {
+                                self.append_char(u8::try_from(c).unwrap_or(0));
+                            }
+                            self.tally += 1;
                         }
-                        self.tally += 1;
                     }
                     LEFT_BRACE | RIGHT_BRACE | MATH_SHIFT | TAB_MARK | SUP_MARK | SUB_MARK
-                    | SPACER | LETTER | OTHER_CHAR => self.print(c),
+                    | SPACER | LETTER | OTHER_CHAR => self.print_chr(c),
                     MAC_PARAM => {
-                        self.print(c);
-                        self.print(c);
+                        self.print_chr(c);
+                        self.print_chr(c);
                     }
                     OUT_PARAM => {
-                        self.print(i32::from(match_chr));
+                        self.print_chr(match_chr);
                         if c <= 9 {
                             self.print_char(b'0' + u8::try_from(c).unwrap_or(0));
                         } else {
@@ -89,8 +97,8 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                         }
                     }
                     MATCH => {
-                        match_chr = u8::try_from(c).unwrap_or(0);
-                        self.print(c);
+                        match_chr = c;
+                        self.print_chr(c);
                         n += 1;
                         self.print_char(n);
                         if n > b'9' {
@@ -134,7 +142,31 @@ impl<H: Host, T: Tracker> Tex<H, T> {
     /// §298: `chr_cmd`.
     fn chr_cmd(&mut self, s: &[u8], chr_code: i32) {
         self.print_str(s);
-        self.print(chr_code);
+        self.print_chr(chr_code);
+    }
+
+    /// `XeTeX`'s forms of `print_cmd_chr` where two primitives mean the
+    /// same (its `\U…` names) or the meaning is no primitive's. Whether
+    /// `cmd`, `chr_code` was one.
+    fn print_cmd_chr_xetex(&mut self, cmd: i32, chr_code: i32) -> bool {
+        let name: &[u8] = match (cmd, chr_code) {
+            (XETEX_DEF_CODE, SF_CODE_BASE) => b"XeTeXcharclass",
+            (XETEX_DEF_CODE, MATH_CODE_BASE) => b"Umathcodenum",
+            (XETEX_DEF_CODE, c) if c == MATH_CODE_BASE + 1 => b"Umathcode",
+            (XETEX_DEF_CODE, DEL_CODE_BASE) => b"Udelcodenum",
+            (XETEX_DEF_CODE, _) => b"Udelcode",
+            (DELIM_NUM, 1) => b"Udelimiter",
+            (MATH_ACCENT, 1) => b"Umathaccent",
+            (MATH_CHAR_NUM, 2) => b"Umathchar",
+            (MATH_CHAR_NUM, 1) => b"Umathcharnum",
+            (RADICAL, 1) => b"Uradical",
+            (SHORTHAND_DEF, XETEX_MATH_CHAR_DEF_CODE) => b"Umathchardef",
+            (SHORTHAND_DEF, XETEX_MATH_CHAR_NUM_DEF_CODE) => b"Umathcharnumdef",
+            (ASSIGN_TOKS, XETEX_INTER_CHAR_LOC) => b"XeTeXinterchartoks",
+            _ => return false,
+        };
+        self.print_esc(name);
+        true
     }
 
     /// §298: symbolic printing of a command code and modifier.
@@ -151,9 +183,14 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             self.print_register_name(kind, n);
             return;
         }
-        if self.params.flavor == crate::params::Flavor::PdfTex {
-            // e-TeX's and pdfTeX's commands print their primitive's name,
-            // except for these forms.
+        if self.params.flavor == crate::params::Flavor::XeTeX
+            && self.print_cmd_chr_xetex(cmd, chr_code)
+        {
+            return;
+        }
+        if self.params.flavor != crate::params::Flavor::Tex {
+            // e-TeX's, pdfTeX's and `XeTeX`'s commands print their
+            // primitive's name, except for these forms.
             if cmd == IF_TEST && chr_code >= UNLESS_CODE {
                 e(self, b"unless");
                 return self.print_cmd_chr(cmd, chr_code % UNLESS_CODE);
@@ -823,7 +860,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
 #[cfg(test)]
 mod tests {
     use crate::testing::{engine, term_output};
-    use crate::web::{CS_TOKEN_FLAG, END_MATCH, LETTER, MATCH, OUT_PARAM};
+    use crate::web::{CS_TOKEN_FLAG, END_MATCH, LETTER, MATCH, MAX_CHAR_VAL, OUT_PARAM};
 
     /// Oracle: `\message{[\meaning\hskip][\meaning\over]...}` in INITEX and
     /// `\def\a#1#2{x#1y#2}\message{[\meaning\a]}`.
@@ -841,7 +878,9 @@ mod tests {
             b"errhelp",
             b"dump",
         ] {
-            t.buffer[..name.len()].copy_from_slice(name);
+            for (d, &s) in t.buffer[..name.len()].iter_mut().zip(name) {
+                *d = u32::from(s);
+            }
             let p = t.id_lookup(0, name.len()).unwrap();
             t.cur_cmd = t.eq_type(p);
             t.cur_chr = t.equiv(p);
@@ -858,13 +897,13 @@ mod tests {
 
         // A macro body: ref count, `#1#2->x#1y#2`.
         let rc = t.tok_from(&[
-            MATCH * 256 + 35,
-            MATCH * 256 + 35,
-            END_MATCH * 256,
-            LETTER * 256 + 120,
-            OUT_PARAM * 256 + 1,
-            LETTER * 256 + 121,
-            OUT_PARAM * 256 + 2,
+            MATCH * MAX_CHAR_VAL + 35,
+            MATCH * MAX_CHAR_VAL + 35,
+            END_MATCH * MAX_CHAR_VAL,
+            LETTER * MAX_CHAR_VAL + 120,
+            OUT_PARAM * MAX_CHAR_VAL + 1,
+            LETTER * MAX_CHAR_VAL + 121,
+            OUT_PARAM * MAX_CHAR_VAL + 2,
         ]);
         let p = crate::web::SINGLE_BASE + i32::from(b'm');
         let mut w = t.peek_eqtb(p);

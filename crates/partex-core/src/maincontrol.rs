@@ -248,7 +248,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                         }
                     }
                 }
-                L::MainLoop => self.main_loop_start(&mut m),
+                L::MainLoop => self.main_loop_start(&mut m)?,
                 L::Wrapup => {
                     // §1035
                     let z = m.rt_hit;
@@ -350,6 +350,11 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                 }
                 L::Lookahead1 => {
                     self.adjust_space_factor();
+                    if !matches!(self.check_for_inter_char_toks()?, crate::xmain::Inter::None) {
+                        m.lig_stack.clear();
+                        l = L::BigSwitch;
+                        continue;
+                    }
                     m.lig_stack.clear();
                     m.last_org = self.char_org();
                     m.lig_stack.push(Lig::Char(
@@ -398,6 +403,10 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                     }
                 }
                 L::AppendNormalSpace => {
+                    if self.check_for_post_char_toks()? {
+                        l = L::BigSwitch;
+                        continue;
+                    }
                     // §1041: append a normal inter-word space to the
                     // current list, then `goto big_switch`.
                     let g = if self.glue_par(SPACE_SKIP_CODE).shared_zero {
@@ -432,9 +441,9 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         None
     }
 
-    /// §1034: `adjust_space_factor`.
-    fn adjust_space_factor(&mut self) {
-        let main_s = self.sf_code(self.cur_chr);
+    /// §1034: `adjust_space_factor` (`XeTeX`'s classes apart).
+    pub(crate) fn adjust_space_factor(&mut self) {
+        let main_s = self.sf_code(self.cur_chr) % 0x1_0000;
         if main_s == 1000 {
             self.set_space_factor(1000);
         } else if main_s < 1000 {
@@ -450,9 +459,22 @@ impl<H: Host, T: Tracker> Tex<H, T> {
 
     /// §1034: append character `cur_chr` and the following characters (if
     /// any) to the current hlist in the current font.
-    fn main_loop_start(&mut self, m: &mut Main) -> L {
+    fn main_loop_start(&mut self, m: &mut Main) -> Result<L, Jump> {
         // (`insert_src_special_auto` is off in `tex`.)
+        self.begin_char_run();
+        if self.params.flavor == crate::params::Flavor::XeTeX
+            && self.is_native_font(self.cur_font())
+        {
+            return Ok(if self.main_loop_native()? {
+                L::BigSwitch
+            } else {
+                L::Reswitch
+            });
+        }
         self.adjust_space_factor();
+        if !matches!(self.check_for_inter_char_toks()?, crate::xmain::Inter::None) {
+            return Ok(L::BigSwitch);
+        }
         m.f = self.cur_font();
         // (the font's metrics, a shared value, read once for the run of
         // characters)
@@ -478,12 +500,12 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             m.font.bchar_label
         };
         let Some(k) = label else {
-            return L::Move2; // no left boundary processing
+            return Ok(L::Move2); // no left boundary processing
         };
         m.k = usize::from(k);
         m.cur_r = m.cur_l;
         m.cur_l = NON_CHAR;
-        L::LigLoop1 // begin with cursor after left boundary
+        Ok(L::LigLoop1) // begin with cursor after left boundary
     }
 
     /// §1035: `pack_lig(z)`: the characters after `cur_q` become a
@@ -714,7 +736,11 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             (HMODE, LETTER | OTHER_CHAR | CHAR_GIVEN) => return Ok(Some(L::MainLoop)),
             (HMODE, CHAR_NUM) => {
                 self.char_num_pending();
-                self.scan_char_num()?;
+                if self.params.flavor == crate::params::Flavor::XeTeX {
+                    self.scan_usv_num()?;
+                } else {
+                    self.scan_char_num()?;
+                }
                 self.cur_chr = self.cur_val;
                 return Ok(Some(L::MainLoop));
             }
@@ -725,6 +751,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                 }
                 return Ok(Some(L::Reswitch));
             }
+            (HMODE, _) if self.check_for_post_char_toks()? => return Ok(Some(L::BigSwitch)),
             (HMODE, SPACER) => {
                 if self.space_factor() == 1000 {
                     return Ok(Some(L::AppendNormalSpace));
@@ -969,10 +996,10 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                 _,
                 TOKS_REGISTER | ASSIGN_TOKS | ASSIGN_INT | ASSIGN_DIMEN | ASSIGN_GLUE
                 | ASSIGN_MU_GLUE | ASSIGN_FONT_DIMEN | ASSIGN_FONT_INT | SET_AUX | SET_PREV_GRAF
-                | SET_PAGE_DIMEN | SET_PAGE_INT | SET_BOX_DIMEN | SET_SHAPE | DEF_CODE | DEF_FAMILY
-                | SET_FONT | DEF_FONT | REGISTER | ADVANCE | MULTIPLY | DIVIDE | PREFIX | LET
-                | SHORTHAND_DEF | READ_TO_CS | DEF | SET_BOX | HYPH_DATA | SET_INTERACTION
-                | LETTERSPACE_FONT | PDF_COPY_FONT,
+                | SET_PAGE_DIMEN | SET_PAGE_INT | SET_BOX_DIMEN | SET_SHAPE | DEF_CODE
+                | XETEX_DEF_CODE | DEF_FAMILY | SET_FONT | DEF_FONT | REGISTER | ADVANCE | MULTIPLY
+                | DIVIDE | PREFIX | LET | SHORTHAND_DEF | READ_TO_CS | DEF | SET_BOX | HYPH_DATA
+                | SET_INTERACTION | LETTERSPACE_FONT | PDF_COPY_FONT,
             ) => self.prefixed_command()?,
             // §1268
             (_, AFTER_ASSIGNMENT) => {
@@ -1098,6 +1125,11 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                 self.scan_toks(false, true)?;
                 let s = self.take_def_ref_string();
                 self.process_map_item(&s, file);
+            }
+            XETEX_LINEBREAK_LOCALE_EXTENSION_CODE
+                if self.params.flavor == crate::params::Flavor::XeTeX =>
+            {
+                self.xetex_linebreak_locale()?;
             }
             c if c >= PDFTEX_FIRST_EXTENSION_CODE => {
                 if !self.do_pdf_extension()? {

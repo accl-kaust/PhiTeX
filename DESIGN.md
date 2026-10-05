@@ -84,7 +84,7 @@ transcript, never a line break, a page break or a glyph's position.
 | C2 | e-TeX | etrip against pdfTeX's output | done |
 | C3 | pdfTeX, DVI mode | plain and LaTeX corpus | in progress: pdfTeX's primitives |
 | C4 | pdfTeX, PDF mode | PDF byte-identical | done: the PGF manual's 1,135 pages and the 295-page course match |
-| C5 | XeTeX | XeTeX corpus | not started |
+| C5 | XeTeX | XDV byte-identical to `xetex -no-pdf`; PDF to piped `xelatex` | in progress (4.7) |
 | C6 | LuaTeX | LuaTeX corpus, embedded Lua | not started |
 
 Byte-exact PDF needs a native port of zlib's deflate that gives its
@@ -1935,7 +1935,7 @@ for them.
 After them:
 - SyncTeX (source origins on nodes);
 - 21-bit tokens;
-- XeTeX (C5) and LuaTeX (C6);
+- XeTeX (C5, 4.7) and LuaTeX (C6);
 - trace compilation.
 
 ### 4.3 partex-PhiTeX: windows (2026-10-02)
@@ -2417,6 +2417,264 @@ its encoding, the TFM's widths, slant and extend) and
 The `display` e2e job and the `glyphs` job check every page's list
 against `pdftext` over the PDF, and SSA rebuilds against cold builds.
 
+### 4.7 XeTeX (C5) (2026-10-05)
+
+XeTeX is e-TeX 2.6 with Unicode inside and its fonts outside TeX. Its
+oracle is TeX Live 2026's `xetex` 3.141592653-2.6-0.999998 for the XDV
+file (`xetex -no-pdf`) and the transcript, and `xdvipdfmx` 20260113 for
+the PDF made from the XDV (without `-no-pdf`, `xetex` pipes its XDV
+into `xdvipdfmx`). Its specification is `xetexdir/xetex.web` with the
+change files of `xetexdir/am/xetex.am`, which `scripts/merge-web.sh`
+merges into `target/web/xetex-merged.web`.
+
+**The size, measured.** `scripts/align-web.py` aligns it with e-TeX
+merged with web2c's change files (`target/web/etex-w2c.web`). Of
+XeTeX's 1,740 sections:
+- 1,184 are e-TeX's;
+- 440 are changed and 116 added (6 of e-TeX's are gone);
+- 9,808 lines differ: 7,168 in changed sections, 2,640 in added ones.
+
+For scale, pdfTeX differs from `tex.web` by 17,821 lines (376 sections
+changed, 526 added). Beside the WEB are 7,582 lines of C and C++
+without the Mac files: `XeTeX_ext.c`, the layout, font and font-manager
+glue, OpenType math, pictures. They call seven libraries. The oracle's
+are the system's (Arch's `texlive-bin` 2026.0-2, here and in the accl
+image alike):
+- HarfBuzz 14.5.0 (compiled against 14.2.0);
+- ICU 78.3, FreeType 2.14.3, Graphite2 1.3.15, fontconfig 2.18.3,
+  libpng 1.6.58;
+- linked in: TECkit and pplib 2.2.
+
+**Primitives.** XeTeX has 506, e-TeX with web2c's changes 396, pdfTeX
+568. Of the 110 XeTeX has and e-TeX does not:
+- 16 are pdfTeX's, by the same names: `\expanded`, `\ifincsname`,
+  `\pdfsavepos`, `\pdflastxpos`, `\pdflastypos`, `\pdfpagewidth`,
+  `\pdfpageheight`, `\leftmarginkern`, `\rightmarginkern`, `\lpcode`,
+  `\rpcode`, `\ignoreprimitiveerror`, `\partokenname`,
+  `\partokencontext`, `\showstream`, `\synctex`.
+- 15 are pdfTeX's without the `pdf`: `\strcmp`, `\mdfivesum`,
+  `\filesize`, `\filemoddate`, `\filedump`, `\creationdate`,
+  `\elapsedtime`, `\resettimer`, `\uniformdeviate`, `\normaldeviate`,
+  `\randomseed`, `\setrandomseed`, `\shellescape`, `\primitive`,
+  `\ifprimitive`. One more is new: `\suppressfontnotfounderror`.
+- 24 are Unicode character and math codes: 13 `\U…` (`\Uchar`,
+  `\Ucharcat`, `\Umathcode`, `\Umathcodenum`, `\Umathchar`,
+  `\Umathcharnum`, `\Umathchardef`, `\Umathcharnumdef`, `\Udelcode`,
+  `\Udelcodenum`, `\Udelimiter`, `\Uradical`, `\Umathaccent`), and 11
+  older names for them (`\XeTeXmath…`, `\XeTeXdel…`, `\XeTeXradical`).
+- 54 are the other `\XeTeX…`:
+  - 23 need no native font: the version and revision, the character
+    classes and inter-character tokens, the input encodings and
+    normalization, the line-break locale, penalty and skip, dash
+    breaking, the hyphenatable length, protrusion, upwards mode, glyph
+    metrics, interword shaping, actual text, font tracing, and of any
+    font its type, first and last character and glyph count;
+  - 3 read pictures: `\XeTeXpicfile`, `\XeTeXpdffile`,
+    `\XeTeXpdfpagecount`;
+  - 28 ask a native font: 5 about glyphs, 6 about OpenType scripts,
+    languages and features, 17 about Graphite's features, selectors
+    and variations (AAT's on a Mac).
+
+156 of pdfTeX's primitives do not exist in XeTeX: `\pdfoutput`,
+`\pdfstrcmp`, `\pdfprimitive`, `\quitvmode`, `\letterspacefont`, …,
+all `undefined` to the oracle. So XeTeX mode's table is XeTeX's,
+generated from `xetex-merged.web` in its order, not pdfTeX's with more.
+
+**Characters.** A character is a Unicode scalar value, up to 0x10FFFF
+(`number_usvs`).
+- *Tokens*: `cmd*0x200000 + chr`; a control sequence is
+  `0x1FFFFFF + p`.
+- *Code tables*: `\catcode`, `\lccode`, `\uccode`, `\sfcode`,
+  `\mathcode`, `\delcode` and the active characters run to 0x10FFFF.
+  Single-character control sequences run to 0xFFFF only: above, the
+  name is a multi-letter one in the hash. `\XeTeXcharclass` (0–4095,
+  4096 for ignored) is kept in `\sfcode`'s bits from 16 up.
+- *Math*: 256 families (`\fam` and `\textfont` up to 255). A math
+  code holds a class, a family and a 21-bit character (`\Umathcode`);
+  `\mathcode` gives and takes its old 15-bit form.
+- *Lines*: `input_line` reads code points. The encoding is sniffed from
+  the first two bytes: a byte-order mark or a NUL means UTF-16 (BE or
+  LE); otherwise UTF-8, decoded leniently (an ill-formed sequence
+  becomes U+FFFD, with "Invalid UTF-8 byte or sequence at line N
+  replaced by U+FFFD." in the log). LF, CR or CRLF ends a line.
+  `\XeTeXinputencoding` and `\XeTeXdefaultencoding` choose UTF-8,
+  UTF-16, `bytes`, or an ICU converter by name;
+  `\XeTeXinputnormalization` applies NFC or NFD (ICU). `^^^^xxxx` and
+  `^^^^^^xxxxxx` name characters.
+- *Strings*: the pool's units are UTF-16 code units, so a character
+  above 0xFFFF takes two, and `print` joins a surrogate pair again.
+  `print_char` writes a character:
+  - from 0xA0 up as UTF-8, to the terminal, the log and `\write` files,
+    counting it one column;
+  - below 0x20, at 0x7F and from 0x80 to 0x9F in `^^` notation
+    (unless `-8bit`);
+  - into a string (`new_string`) as UTF-16, and inside a `\special`
+    raw.
+- *Hyphenation*: the word's characters go up to 0x10FFFF and the
+  trie's to 0xFFFF; `max_hyph_char` grows with the patterns; a word
+  has at most `\XeTeXhyphenatablelength` (≤ 4,095) letters, which a
+  format keeps (XeTeX dumps e-TeX's state variables). A trie character
+  is a UTF-16 unit: a pattern's character past 0xFFFF is cut to 16
+  bits but still widens the trie. An exception's letters past 0xFFFF
+  are surrogate pairs; its key is its pool string's bytes, so a word
+  of a TFM font matches it through `\lccode`s that are surrogates.
+  Words of TFM fonts are hyphenated as XeTeX does (its native-word
+  branches, §944–§946, §949, §956–§957, wait for native words), but
+  for two differences. First, XeTeX marks a left boundary in `hu` with
+  `max_hyph_char`, not `non_char`, and so makes it a character node in
+  a post-break text when the font has a left-boundary program; partex
+  leaves it out. Second, `\savinghyphcodes`' codes are kept beside the
+  trie, not packed into it, so the trie's length differs (as in
+  pdfTeX mode); the hyphens are the same.
+- *Inter-character tokens*: `\XeTeXinterchartoks` holds a list for a
+  pair of classes, in an e-TeX sparse array keyed by
+  `class₁*4096 + class₂`. While `\XeTeXinterchartokenstate > 0`, main
+  control inserts it before a character whose class follows the
+  previous one's, in TFM text and native text alike.
+
+**Native fonts.** `\font\x="Name/B/I:features"` or
+`"[file.otf]:features"`.
+- *Lookup*: a name through fontconfig's font list (1,060 fonts on this
+  machine, none of them TeX Live's) and XeTeX's own matching of family,
+  style, full and PostScript names (`XeTeXFontMgr*.cpp`, 1,026
+  lines). A file in brackets is found through kpathsea (the OpenType
+  and TrueType paths). LaTeX's default font goes by file: `TU/lmr` is
+  `"[lmroman10-regular]:mapping=tex-text;"` (`tuenc.def`, `tulmr.fd`).
+- *Loading*: FreeType, unscaled: the advances (`FT_Get_Advance`), the
+  character map (`FT_Get_Char_Index`, with variation selectors), the
+  extents and bounds from unscaled outlines, the italic angle, the cap
+  and x heights. Metrics are computed in `float` (`unitsToPoints`) and
+  `Fixed`.
+- *Shaping*: HarfBuzz's `ot` shaper (Graphite only when `/GR` asks),
+  with HarfBuzz's own Unicode functions, the font scaled to its units
+  per em with no ppem, and XeTeX's FreeType callbacks. A word goes in
+  as UTF-16 with its context, the script and language taken from the
+  features. ICU's bidi first splits a word into directional runs, and
+  `mapping=` runs a TECkit mapping first: `tex-text`, on every LaTeX
+  default font.
+- *Nodes*: whatsits `native_word_node` (40; 41 with ActualText: the
+  text in UTF-16, and each glyph's id, x and y), `glyph_node` (42),
+  `pic_node` (43), `pdf_node` (44). They go through packaging and line
+  breaking (a native word hyphenated is split and measured again),
+  `\XeTeXinterwordspaceshaping` and letter spacing.
+- *OpenType math*: the MATH table's constants, variants, assemblies,
+  italic corrections and kerns (`XeTeXOTMath.cpp`, and about 1,100
+  lines of WEB in parts 35 and 36).
+
+**XDV.** DVI with `id_byte` 7 and three more commands:
+- `define_native_font` (252): size, flags, path, face index, then
+  color, extend, slant and embolden as the flags say;
+- `set_glyphs` (253): the width, then each glyph's x, y and id;
+- `set_text_and_glyphs` (254): the text first
+  (`\XeTeXgenerateactualtext`).
+
+Every page begins with the special `pdf:pagesize default`, or the
+width and height of `\pdfpagewidth` and `\pdfpageheight`. Pictures are
+`pdf:image` specials. A TFM font never gets a character above 255: the
+log says "Missing character: There is no ü ("FC) in font cmr10!". A
+10 pt native font's size is 657,818 sp in its definition.
+
+**The PDF.** `xdvipdfmx` is another program (`texk/dvipdfm-x`, not in
+our sparse checkout yet). For a plain document it writes:
+- PDF 1.7, with object streams and an xref stream, Flate at level 9;
+- an `/ID` from MD5, the XDV's comment as `/Creator`,
+  `xdvipdfmx (20260113)` as `/Producer`, and the date from
+  `SOURCE_DATE_EPOCH`;
+- a TFM font's Type 1 program (found through `pdftex.map`) converted
+  to CFF (`/FontFile3`, `/Type1C`), with a ToUnicode CMap made from
+  the glyph names (the AGL files);
+- an OpenType font as a Type 0 font with Identity-H: a subset
+  `CIDFontType0` (CFF) or `CIDFontType2` (TrueType), with a ToUnicode
+  CMap made from the `cmap` and GSUB.
+
+Of partex's PDF writer (pdfTeX's), the exact deflate, MD5, PDF values
+and parsing, PNG and JPEG can be used again. The object layout, the
+content streams, the font conversion and subsetting, and the specials
+are xdvipdfmx's own.
+
+**What partex has.** e-TeX 2.6 whole (XeTeX's is the same), pdfTeX's
+31 primitives above, TFM fonts, DVI, the exact deflate, MD5, kpathsea,
+PDF reading, images. Nothing of XeTeX's yet: `xetex` and `xelatex` are
+reserved names that refuse to run (`compat.rs`).
+
+**The shaper.** DESIGN 6 asks for a pure-Rust shaper pinned to the
+oracle's HarfBuzz.
+- rustybuzz 0.20.1 (and Tectonic's fork of it, 0.20.2) matches
+  HarfBuzz 10.0.1, and is no longer developed.
+- HarfRust 0.13.3 is the HarfBuzz project's port, grown from rustybuzz:
+  `#![forbid(unsafe_code)]`, `no_std` with `alloc`, fonts read by
+  `read-fonts`. It matches HarfBuzz 14.3.1, two releases short of the
+  oracle's 14.5.0. The changes between them are to be read from
+  HarfBuzz's history, and ported or shown not to matter.
+- HarfRust has no Graphite (XeTeX uses it only when asked). Its font
+  functions are its own, and they must agree with XeTeX's FreeType ones:
+  the character map chosen, the advances, the extents.
+- Arch updates HarfBuzz on its own schedule. So the corpus records the
+  oracle's version, and the accl image's snapshot fixes it for the
+  gate.
+
+**Room for LuaTeX (C6).** XeTeX's pieces are cut so LuaTeX reuses them,
+not rewrites them:
+- `partex-otf`'s core is neutral: load a face, its metrics, shape a run
+  into glyphs with positions. XeTeX's own semantics (native words, the
+  feature strings, `Fixed` conversions) are a layer on it; LuaTeX
+  shapes glyph nodes in node lists (luaotfload, luahbtex).
+- The font index keeps each face's raw name records; the matching rules
+  are separate (XeTeX's fontconfig order and `XeTeXFontMgr` now,
+  luaotfload's name database later, which can pick another face).
+- Strings go through one per-flavor layer (pool, `print`, the string
+  functions): XeTeX's UTF-16 units kept as CESU-8; LuaTeX's UTF-8, Lua
+  strings being any bytes.
+- The Unicode code tables and `\U…` math codes are built once for both,
+  sized past XeTeX's limits (LuaTeX has more math families and dozens of
+  `\Umath…` parameters).
+- Glyph data is plain per-glyph values, never only packed inside a
+  native word, so a node library could expose nodes later.
+- PDF writing varies by engine: XeTeX is XDV through xdvipdfmx; LuaTeX
+  writes its PDF itself, a backend descended from pdfTeX's (other object
+  order, font embedding, `\pdfextension`), so partex's writer is
+  parameterised for it, not forked.
+- The oracle script takes the engine as a parameter, LuaTeX's with its
+  name cache and font list fixed as `fonts.conf` fixes XeTeX's.
+
+**The work.** Written whole, then brought to byte-identity against the
+oracle. Three parts with fixed interfaces between them, each checkable
+on its own:
+1. *The engine* (`partex-engine`, `partex-core`): `Flavor::XeTeX`, the
+   names `xetex` and `xelatex`, `-no-pdf`; tokens `cmd*0x200000 + chr`
+   in every flavor (tokens are `i32`, so pdfTeX runs the same code and
+   its output does not change); XeTeX's primitive table generated from
+   `xetex-merged.web`; the wide code tables past eqtb (as `xregs.rs`),
+   256 math families, `\U…` math codes, inter-character tokens;
+   input decoding, the pool's UTF-16 units and printing; the native
+   nodes through packaging, line breaking, hyphenation and the page
+   builder; OpenType math; the XDV writer. Checked against
+   `xetex -no-pdf`'s XDV.
+2. *The fonts* (`partex-otf`, `no_std`): the font list (one static
+   index of TeX Live's faces, given to the oracle as its `fonts.conf`
+   and to the Host as its lookup), XeTeX's name matching, faces read by
+   `read-fonts`/`skrifa` with FreeType's unscaled numbers, shaping by
+   HarfRust, TECkit's runtime (`tex-text`), bidi runs. Shaping is a pure
+   function of the face's version and the call's arguments, kept in a
+   content-keyed memo that can be switched off. Checked against
+   `\XeTeXglyphbounds`, the fontdimens and the shaped glyphs of every
+   face in the index.
+3. *The PDF* (`partex-xdvipdfmx`, `no_std`, on the Host): XDV in, PDF
+   out, xdvipdfmx's behaviour: positioning, objects, object streams
+   and the xref stream, Type 1 to CFF, CFF and TrueType CID subsets,
+   ToUnicode, the specials of hyperref, color and graphics, images.
+   Checked from the oracle's own XDV against `xdvipdfmx`, before the
+   engine writes any.
+
+Then whole jobs against piped `xelatex` (`FORCE_SOURCE_DATE=1`,
+`SOURCE_DATE_EPOCH`, the controlled `FONTCONFIG_FILE`): `refs/xetex`,
+the fontspec, unicode-math and polyglossia test suites, the course in
+fontspec; the SSA edits on XeTeX documents; pdfTeX's gates unchanged.
+In the SSA, a native font is a value made by an applied call (like a
+TFM font), its lookup a Host query versioned by its answer (3.4);
+xdvipdfmx's pages and its end are nodes (3.16), its subset tags values
+from first-use order.
+
 ---
 
 ## 5. Performance, observability and the text form
@@ -2539,7 +2797,12 @@ gives the same values; printed again, the same text.
   deflate. XeTeX needs HarfBuzz-exact shaping (a pure-Rust shaper
   pinned to its version).
 - **LuaTeX's surface** (callbacks, node and token libraries) is large.
-  At first, every Lua call makes its node unreusable.
+  Lua is a source of effects in the SSA (3.1): at first, every
+  `\directlua` or callback makes its step unreusable; later, the Lua
+  state is a versioned value like any other; all of Lua's I/O (`io`,
+  `os.time`, `kpse`) goes through the Host, for wasm and determinism.
+  Open: the interpreter must be LuaTeX's Lua 5.3 to the bit, float
+  printing included (a port of its own, or a pure-Rust Lua made exact).
 - **biber** is a large Perl program: sandboxed as a call, not ported.
 - **Recording's cold cost** (3.2–3.3× a plain run today) is measured
   and kept switchable. The frame target is per edit, but a cold build

@@ -334,7 +334,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         self.primitive(b"prevgraf", SET_PREV_GRAF, 0)?;
         self.primitive(b"radical", RADICAL, 0)?;
         self.primitive(b"read", READ_TO_CS, 0)?;
-        self.primitive(b"relax", RELAX, 256)?;
+        self.primitive(b"relax", RELAX, TOO_BIG_USV)?;
         let s = self.pool_str(b"relax");
         self.set_text(FROZEN_RELAX, s);
         let w = self.eqtb(self.cur_val);
@@ -347,7 +347,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         self.primitive(b"vcenter", VCENTER, 0)?;
         self.primitive(b"vrule", VRULE, 0)?;
         // §334
-        self.primitive(b"par", PAR_END, 256)?;
+        self.primitive(b"par", PAR_END, TOO_BIG_USV)?;
         self.par_loc = self.cur_val;
         self.par_token = CS_TOKEN_FLAG + self.par_loc;
         // §376
@@ -1180,7 +1180,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         self.primitive(b"prevgraf", SET_PREV_GRAF, 0)?;
         self.primitive(b"radical", RADICAL, 0)?;
         self.primitive(b"read", READ_TO_CS, 0)?;
-        self.primitive(b"relax", RELAX, 256)?;
+        self.primitive(b"relax", RELAX, TOO_BIG_USV)?;
         let s = self.pool_str(b"relax");
         self.set_text(FROZEN_RELAX, s);
         let w = self.eqtb(self.cur_val);
@@ -1193,7 +1193,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         self.primitive(b"vcenter", VCENTER, 0)?;
         self.primitive(b"vrule", VRULE, 0)?;
         // pdfTeX §356
-        self.primitive(b"par", PAR_END, 256)?;
+        self.primitive(b"par", PAR_END, TOO_BIG_USV)?;
         self.par_loc = self.cur_val;
         self.par_token = CS_TOKEN_FLAG + self.par_loc;
         // pdfTeX §402
@@ -1700,6 +1700,972 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         self.primitive(b"pagediscards", UN_VBOX, LAST_BOX_CODE)?;
         self.primitive(b"splitdiscards", UN_VBOX, VSPLIT_CODE)?;
         // pdfTeX §1864
+        self.primitive(b"interlinepenalties", SET_SHAPE, INTER_LINE_PENALTIES_LOC)?;
+        self.primitive(b"clubpenalties", SET_SHAPE, CLUB_PENALTIES_LOC)?;
+        self.primitive(b"widowpenalties", SET_SHAPE, WIDOW_PENALTIES_LOC)?;
+        self.primitive(
+            b"displaywidowpenalties",
+            SET_SHAPE,
+            DISPLAY_WIDOW_PENALTIES_LOC,
+        )?;
+        self.no_new_control_sequence = true;
+        Ok(())
+    }
+
+    /// `XeTeX` §1336: `XeTeX`'s primitives (INITEX), in compatibility mode.
+    pub(crate) fn init_prim_xetex(&mut self) -> Result<(), Jump> {
+        self.no_new_control_sequence = false;
+        // `XeTeX` §252
+        self.primitive(b"lineskip", ASSIGN_GLUE, GLUE_BASE + LINE_SKIP_CODE)?;
+        self.primitive(b"baselineskip", ASSIGN_GLUE, GLUE_BASE + BASELINE_SKIP_CODE)?;
+        self.primitive(b"parskip", ASSIGN_GLUE, GLUE_BASE + PAR_SKIP_CODE)?;
+        self.primitive(
+            b"abovedisplayskip",
+            ASSIGN_GLUE,
+            GLUE_BASE + ABOVE_DISPLAY_SKIP_CODE,
+        )?;
+        self.primitive(
+            b"belowdisplayskip",
+            ASSIGN_GLUE,
+            GLUE_BASE + BELOW_DISPLAY_SKIP_CODE,
+        )?;
+        self.primitive(
+            b"abovedisplayshortskip",
+            ASSIGN_GLUE,
+            GLUE_BASE + ABOVE_DISPLAY_SHORT_SKIP_CODE,
+        )?;
+        self.primitive(
+            b"belowdisplayshortskip",
+            ASSIGN_GLUE,
+            GLUE_BASE + BELOW_DISPLAY_SHORT_SKIP_CODE,
+        )?;
+        self.primitive(b"leftskip", ASSIGN_GLUE, GLUE_BASE + LEFT_SKIP_CODE)?;
+        self.primitive(b"rightskip", ASSIGN_GLUE, GLUE_BASE + RIGHT_SKIP_CODE)?;
+        self.primitive(b"topskip", ASSIGN_GLUE, GLUE_BASE + TOP_SKIP_CODE)?;
+        self.primitive(
+            b"splittopskip",
+            ASSIGN_GLUE,
+            GLUE_BASE + SPLIT_TOP_SKIP_CODE,
+        )?;
+        self.primitive(b"tabskip", ASSIGN_GLUE, GLUE_BASE + TAB_SKIP_CODE)?;
+        self.primitive(b"spaceskip", ASSIGN_GLUE, GLUE_BASE + SPACE_SKIP_CODE)?;
+        self.primitive(b"xspaceskip", ASSIGN_GLUE, GLUE_BASE + XSPACE_SKIP_CODE)?;
+        self.primitive(b"parfillskip", ASSIGN_GLUE, GLUE_BASE + PAR_FILL_SKIP_CODE)?;
+        self.primitive(
+            b"XeTeXlinebreakskip",
+            ASSIGN_GLUE,
+            GLUE_BASE + XETEX_LINEBREAK_SKIP_CODE,
+        )?;
+        self.primitive(b"thinmuskip", ASSIGN_MU_GLUE, GLUE_BASE + THIN_MU_SKIP_CODE)?;
+        self.primitive(b"medmuskip", ASSIGN_MU_GLUE, GLUE_BASE + MED_MU_SKIP_CODE)?;
+        self.primitive(
+            b"thickmuskip",
+            ASSIGN_MU_GLUE,
+            GLUE_BASE + THICK_MU_SKIP_CODE,
+        )?;
+        // `XeTeX` §256
+        self.primitive(b"output", ASSIGN_TOKS, OUTPUT_ROUTINE_LOC)?;
+        self.primitive(b"everypar", ASSIGN_TOKS, EVERY_PAR_LOC)?;
+        self.primitive(b"everymath", ASSIGN_TOKS, EVERY_MATH_LOC)?;
+        self.primitive(b"everydisplay", ASSIGN_TOKS, EVERY_DISPLAY_LOC)?;
+        self.primitive(b"everyhbox", ASSIGN_TOKS, EVERY_HBOX_LOC)?;
+        self.primitive(b"everyvbox", ASSIGN_TOKS, EVERY_VBOX_LOC)?;
+        self.primitive(b"everyjob", ASSIGN_TOKS, EVERY_JOB_LOC)?;
+        self.primitive(b"everycr", ASSIGN_TOKS, EVERY_CR_LOC)?;
+        self.primitive(b"errhelp", ASSIGN_TOKS, ERR_HELP_LOC)?;
+        // `XeTeX` §264
+        self.primitive(b"pretolerance", ASSIGN_INT, INT_BASE + PRETOLERANCE_CODE)?;
+        self.primitive(b"tolerance", ASSIGN_INT, INT_BASE + TOLERANCE_CODE)?;
+        self.primitive(b"linepenalty", ASSIGN_INT, INT_BASE + LINE_PENALTY_CODE)?;
+        self.primitive(b"hyphenpenalty", ASSIGN_INT, INT_BASE + HYPHEN_PENALTY_CODE)?;
+        self.primitive(
+            b"exhyphenpenalty",
+            ASSIGN_INT,
+            INT_BASE + EX_HYPHEN_PENALTY_CODE,
+        )?;
+        self.primitive(b"clubpenalty", ASSIGN_INT, INT_BASE + CLUB_PENALTY_CODE)?;
+        self.primitive(b"widowpenalty", ASSIGN_INT, INT_BASE + WIDOW_PENALTY_CODE)?;
+        self.primitive(
+            b"displaywidowpenalty",
+            ASSIGN_INT,
+            INT_BASE + DISPLAY_WIDOW_PENALTY_CODE,
+        )?;
+        self.primitive(b"brokenpenalty", ASSIGN_INT, INT_BASE + BROKEN_PENALTY_CODE)?;
+        self.primitive(b"binoppenalty", ASSIGN_INT, INT_BASE + BIN_OP_PENALTY_CODE)?;
+        self.primitive(b"relpenalty", ASSIGN_INT, INT_BASE + REL_PENALTY_CODE)?;
+        self.primitive(
+            b"predisplaypenalty",
+            ASSIGN_INT,
+            INT_BASE + PRE_DISPLAY_PENALTY_CODE,
+        )?;
+        self.primitive(
+            b"postdisplaypenalty",
+            ASSIGN_INT,
+            INT_BASE + POST_DISPLAY_PENALTY_CODE,
+        )?;
+        self.primitive(
+            b"interlinepenalty",
+            ASSIGN_INT,
+            INT_BASE + INTER_LINE_PENALTY_CODE,
+        )?;
+        self.primitive(
+            b"doublehyphendemerits",
+            ASSIGN_INT,
+            INT_BASE + DOUBLE_HYPHEN_DEMERITS_CODE,
+        )?;
+        self.primitive(
+            b"finalhyphendemerits",
+            ASSIGN_INT,
+            INT_BASE + FINAL_HYPHEN_DEMERITS_CODE,
+        )?;
+        self.primitive(b"adjdemerits", ASSIGN_INT, INT_BASE + ADJ_DEMERITS_CODE)?;
+        self.primitive(b"mag", ASSIGN_INT, INT_BASE + MAG_CODE)?;
+        self.primitive(
+            b"delimiterfactor",
+            ASSIGN_INT,
+            INT_BASE + DELIMITER_FACTOR_CODE,
+        )?;
+        self.primitive(b"looseness", ASSIGN_INT, INT_BASE + LOOSENESS_CODE)?;
+        self.primitive(b"time", ASSIGN_INT, INT_BASE + TIME_CODE)?;
+        self.primitive(b"day", ASSIGN_INT, INT_BASE + DAY_CODE)?;
+        self.primitive(b"month", ASSIGN_INT, INT_BASE + MONTH_CODE)?;
+        self.primitive(b"year", ASSIGN_INT, INT_BASE + YEAR_CODE)?;
+        self.primitive(
+            b"showboxbreadth",
+            ASSIGN_INT,
+            INT_BASE + SHOW_BOX_BREADTH_CODE,
+        )?;
+        self.primitive(b"showboxdepth", ASSIGN_INT, INT_BASE + SHOW_BOX_DEPTH_CODE)?;
+        self.primitive(b"hbadness", ASSIGN_INT, INT_BASE + HBADNESS_CODE)?;
+        self.primitive(b"vbadness", ASSIGN_INT, INT_BASE + VBADNESS_CODE)?;
+        self.primitive(b"pausing", ASSIGN_INT, INT_BASE + PAUSING_CODE)?;
+        self.primitive(b"tracingonline", ASSIGN_INT, INT_BASE + TRACING_ONLINE_CODE)?;
+        self.primitive(b"tracingmacros", ASSIGN_INT, INT_BASE + TRACING_MACROS_CODE)?;
+        self.primitive(b"tracingstats", ASSIGN_INT, INT_BASE + TRACING_STATS_CODE)?;
+        self.primitive(
+            b"tracingparagraphs",
+            ASSIGN_INT,
+            INT_BASE + TRACING_PARAGRAPHS_CODE,
+        )?;
+        self.primitive(b"tracingpages", ASSIGN_INT, INT_BASE + TRACING_PAGES_CODE)?;
+        self.primitive(b"tracingoutput", ASSIGN_INT, INT_BASE + TRACING_OUTPUT_CODE)?;
+        self.primitive(
+            b"tracinglostchars",
+            ASSIGN_INT,
+            INT_BASE + TRACING_LOST_CHARS_CODE,
+        )?;
+        self.primitive(
+            b"tracingcommands",
+            ASSIGN_INT,
+            INT_BASE + TRACING_COMMANDS_CODE,
+        )?;
+        self.primitive(
+            b"tracingrestores",
+            ASSIGN_INT,
+            INT_BASE + TRACING_RESTORES_CODE,
+        )?;
+        self.primitive(b"uchyph", ASSIGN_INT, INT_BASE + UC_HYPH_CODE)?;
+        self.primitive(b"outputpenalty", ASSIGN_INT, INT_BASE + OUTPUT_PENALTY_CODE)?;
+        self.primitive(
+            b"maxdeadcycles",
+            ASSIGN_INT,
+            INT_BASE + MAX_DEAD_CYCLES_CODE,
+        )?;
+        self.primitive(b"hangafter", ASSIGN_INT, INT_BASE + HANG_AFTER_CODE)?;
+        self.primitive(
+            b"floatingpenalty",
+            ASSIGN_INT,
+            INT_BASE + FLOATING_PENALTY_CODE,
+        )?;
+        self.primitive(b"globaldefs", ASSIGN_INT, INT_BASE + GLOBAL_DEFS_CODE)?;
+        self.primitive(b"fam", ASSIGN_INT, INT_BASE + CUR_FAM_CODE)?;
+        self.primitive(b"escapechar", ASSIGN_INT, INT_BASE + ESCAPE_CHAR_CODE)?;
+        self.primitive(
+            b"defaulthyphenchar",
+            ASSIGN_INT,
+            INT_BASE + DEFAULT_HYPHEN_CHAR_CODE,
+        )?;
+        self.primitive(
+            b"defaultskewchar",
+            ASSIGN_INT,
+            INT_BASE + DEFAULT_SKEW_CHAR_CODE,
+        )?;
+        self.primitive(b"endlinechar", ASSIGN_INT, INT_BASE + END_LINE_CHAR_CODE)?;
+        self.primitive(b"newlinechar", ASSIGN_INT, INT_BASE + NEW_LINE_CHAR_CODE)?;
+        self.primitive(b"language", ASSIGN_INT, INT_BASE + LANGUAGE_CODE)?;
+        self.primitive(
+            b"lefthyphenmin",
+            ASSIGN_INT,
+            INT_BASE + LEFT_HYPHEN_MIN_CODE,
+        )?;
+        self.primitive(
+            b"righthyphenmin",
+            ASSIGN_INT,
+            INT_BASE + RIGHT_HYPHEN_MIN_CODE,
+        )?;
+        self.primitive(
+            b"holdinginserts",
+            ASSIGN_INT,
+            INT_BASE + HOLDING_INSERTS_CODE,
+        )?;
+        self.primitive(
+            b"errorcontextlines",
+            ASSIGN_INT,
+            INT_BASE + ERROR_CONTEXT_LINES_CODE,
+        )?;
+        if self.params.mltex {
+            self.mltex_enabled_p = true;
+            // `if false then`: self.primitive(b"charsubdefmin", ASSIGN_INT, INT_BASE+CHAR_SUB_DEF_MIN_CODE)?;
+            self.primitive(
+                b"charsubdefmax",
+                ASSIGN_INT,
+                INT_BASE + CHAR_SUB_DEF_MAX_CODE,
+            )?;
+            self.primitive(
+                b"tracingcharsubdef",
+                ASSIGN_INT,
+                INT_BASE + TRACING_CHAR_SUB_DEF_CODE,
+            )?;
+        }
+        self.primitive(
+            b"tracingstacklevels",
+            ASSIGN_INT,
+            INT_BASE + TRACING_STACK_LEVELS_CODE,
+        )?;
+        self.primitive(b"partokenname", PARTOKEN_NAME, 0)?;
+        self.primitive(
+            b"partokencontext",
+            ASSIGN_INT,
+            INT_BASE + PARTOKEN_CONTEXT_CODE,
+        )?;
+        self.primitive(b"showstream", ASSIGN_INT, INT_BASE + SHOW_STREAM_CODE)?;
+        self.primitive(
+            b"XeTeXlinebreakpenalty",
+            ASSIGN_INT,
+            INT_BASE + XETEX_LINEBREAK_PENALTY_CODE,
+        )?;
+        self.primitive(
+            b"XeTeXprotrudechars",
+            ASSIGN_INT,
+            INT_BASE + XETEX_PROTRUDE_CHARS_CODE,
+        )?;
+        // `XeTeX` §274
+        self.primitive(b"parindent", ASSIGN_DIMEN, DIMEN_BASE + PAR_INDENT_CODE)?;
+        self.primitive(
+            b"mathsurround",
+            ASSIGN_DIMEN,
+            DIMEN_BASE + MATH_SURROUND_CODE,
+        )?;
+        self.primitive(
+            b"lineskiplimit",
+            ASSIGN_DIMEN,
+            DIMEN_BASE + LINE_SKIP_LIMIT_CODE,
+        )?;
+        self.primitive(b"hsize", ASSIGN_DIMEN, DIMEN_BASE + HSIZE_CODE)?;
+        self.primitive(b"vsize", ASSIGN_DIMEN, DIMEN_BASE + VSIZE_CODE)?;
+        self.primitive(b"maxdepth", ASSIGN_DIMEN, DIMEN_BASE + MAX_DEPTH_CODE)?;
+        self.primitive(
+            b"splitmaxdepth",
+            ASSIGN_DIMEN,
+            DIMEN_BASE + SPLIT_MAX_DEPTH_CODE,
+        )?;
+        self.primitive(
+            b"boxmaxdepth",
+            ASSIGN_DIMEN,
+            DIMEN_BASE + BOX_MAX_DEPTH_CODE,
+        )?;
+        self.primitive(b"hfuzz", ASSIGN_DIMEN, DIMEN_BASE + HFUZZ_CODE)?;
+        self.primitive(b"vfuzz", ASSIGN_DIMEN, DIMEN_BASE + VFUZZ_CODE)?;
+        self.primitive(
+            b"delimitershortfall",
+            ASSIGN_DIMEN,
+            DIMEN_BASE + DELIMITER_SHORTFALL_CODE,
+        )?;
+        self.primitive(
+            b"nulldelimiterspace",
+            ASSIGN_DIMEN,
+            DIMEN_BASE + NULL_DELIMITER_SPACE_CODE,
+        )?;
+        self.primitive(b"scriptspace", ASSIGN_DIMEN, DIMEN_BASE + SCRIPT_SPACE_CODE)?;
+        self.primitive(
+            b"predisplaysize",
+            ASSIGN_DIMEN,
+            DIMEN_BASE + PRE_DISPLAY_SIZE_CODE,
+        )?;
+        self.primitive(
+            b"displaywidth",
+            ASSIGN_DIMEN,
+            DIMEN_BASE + DISPLAY_WIDTH_CODE,
+        )?;
+        self.primitive(
+            b"displayindent",
+            ASSIGN_DIMEN,
+            DIMEN_BASE + DISPLAY_INDENT_CODE,
+        )?;
+        self.primitive(
+            b"overfullrule",
+            ASSIGN_DIMEN,
+            DIMEN_BASE + OVERFULL_RULE_CODE,
+        )?;
+        self.primitive(b"hangindent", ASSIGN_DIMEN, DIMEN_BASE + HANG_INDENT_CODE)?;
+        self.primitive(b"hoffset", ASSIGN_DIMEN, DIMEN_BASE + H_OFFSET_CODE)?;
+        self.primitive(b"voffset", ASSIGN_DIMEN, DIMEN_BASE + V_OFFSET_CODE)?;
+        self.primitive(
+            b"emergencystretch",
+            ASSIGN_DIMEN,
+            DIMEN_BASE + EMERGENCY_STRETCH_CODE,
+        )?;
+        self.primitive(
+            b"pdfpagewidth",
+            ASSIGN_DIMEN,
+            DIMEN_BASE + PDF_PAGE_WIDTH_CODE,
+        )?;
+        self.primitive(
+            b"pdfpageheight",
+            ASSIGN_DIMEN,
+            DIMEN_BASE + PDF_PAGE_HEIGHT_CODE,
+        )?;
+        // `XeTeX` §295
+        self.primitive(b" ", EX_SPACE, 0)?;
+        self.primitive(b"/", ITAL_CORR, 0)?;
+        self.primitive(b"accent", ACCENT, 0)?;
+        self.primitive(b"advance", ADVANCE, 0)?;
+        self.primitive(b"afterassignment", AFTER_ASSIGNMENT, 0)?;
+        self.primitive(b"aftergroup", AFTER_GROUP, 0)?;
+        self.primitive(b"begingroup", BEGIN_GROUP, 0)?;
+        self.primitive(b"char", CHAR_NUM, 0)?;
+        self.primitive(b"csname", CS_NAME, 0)?;
+        self.primitive(b"delimiter", DELIM_NUM, 0)?;
+        self.primitive(b"XeTeXdelimiter", DELIM_NUM, 1)?;
+        self.primitive(b"Udelimiter", DELIM_NUM, 1)?;
+        self.primitive(b"divide", DIVIDE, 0)?;
+        self.primitive(b"endcsname", END_CS_NAME, 0)?;
+        self.primitive(b"endgroup", END_GROUP, 0)?;
+        let s = self.pool_str(b"endgroup");
+        self.set_text(FROZEN_END_GROUP, s);
+        let w = self.eqtb(self.cur_val);
+        self.set_eqtb(FROZEN_END_GROUP, w);
+        self.primitive(b"expandafter", EXPAND_AFTER, 0)?;
+        self.primitive(b"font", DEF_FONT, 0)?;
+        self.primitive(b"fontdimen", ASSIGN_FONT_DIMEN, 0)?;
+        self.primitive(b"halign", HALIGN, 0)?;
+        self.primitive(b"hrule", HRULE, 0)?;
+        self.primitive(b"ignorespaces", IGNORE_SPACES, 0)?;
+        self.primitive(b"insert", INSERT, 0)?;
+        self.primitive(b"mark", MARK, 0)?;
+        self.primitive(b"mathaccent", MATH_ACCENT, 0)?;
+        self.primitive(b"XeTeXmathaccent", MATH_ACCENT, 1)?;
+        self.primitive(b"Umathaccent", MATH_ACCENT, 1)?;
+        self.primitive(b"mathchar", MATH_CHAR_NUM, 0)?;
+        self.primitive(b"XeTeXmathcharnum", MATH_CHAR_NUM, 1)?;
+        self.primitive(b"Umathcharnum", MATH_CHAR_NUM, 1)?;
+        self.primitive(b"XeTeXmathchar", MATH_CHAR_NUM, 2)?;
+        self.primitive(b"Umathchar", MATH_CHAR_NUM, 2)?;
+        self.primitive(b"mathchoice", MATH_CHOICE, 0)?;
+        self.primitive(b"multiply", MULTIPLY, 0)?;
+        self.primitive(b"noalign", NO_ALIGN, 0)?;
+        self.primitive(b"noboundary", NO_BOUNDARY, 0)?;
+        self.primitive(b"noexpand", NO_EXPAND, 0)?;
+        self.primitive(b"primitive", NO_EXPAND, 1)?;
+        self.primitive(b"nonscript", NON_SCRIPT, 0)?;
+        self.primitive(b"omit", OMIT, 0)?;
+        self.primitive(b"parshape", SET_SHAPE, PAR_SHAPE_LOC)?;
+        self.primitive(b"penalty", BREAK_PENALTY, 0)?;
+        self.primitive(b"prevgraf", SET_PREV_GRAF, 0)?;
+        self.primitive(b"radical", RADICAL, 0)?;
+        self.primitive(b"XeTeXradical", RADICAL, 1)?;
+        self.primitive(b"Uradical", RADICAL, 1)?;
+        self.primitive(b"read", READ_TO_CS, 0)?;
+        self.primitive(b"relax", RELAX, TOO_BIG_USV)?;
+        let s = self.pool_str(b"relax");
+        self.set_text(FROZEN_RELAX, s);
+        let w = self.eqtb(self.cur_val);
+        self.set_eqtb(FROZEN_RELAX, w);
+        self.primitive(b"setbox", SET_BOX, 0)?;
+        self.primitive(b"the", THE, 0)?;
+        self.primitive(b"toks", TOKS_REGISTER, 0)?;
+        self.primitive(b"vadjust", VADJUST, 0)?;
+        self.primitive(b"valign", VALIGN, 0)?;
+        self.primitive(b"vcenter", VCENTER, 0)?;
+        self.primitive(b"vrule", VRULE, 0)?;
+        // `XeTeX` §364
+        self.primitive(b"par", PAR_END, TOO_BIG_USV)?;
+        self.par_loc = self.cur_val;
+        self.par_token = CS_TOKEN_FLAG + self.par_loc;
+        // `XeTeX` §410
+        self.primitive(b"input", INPUT, 0)?;
+        self.primitive(b"endinput", INPUT, 1)?;
+        // `XeTeX` §418
+        self.primitive(b"topmark", TOP_BOT_MARK, TOP_MARK_CODE)?;
+        self.primitive(b"firstmark", TOP_BOT_MARK, FIRST_MARK_CODE)?;
+        self.primitive(b"botmark", TOP_BOT_MARK, BOT_MARK_CODE)?;
+        self.primitive(b"splitfirstmark", TOP_BOT_MARK, SPLIT_FIRST_MARK_CODE)?;
+        self.primitive(b"splitbotmark", TOP_BOT_MARK, SPLIT_BOT_MARK_CODE)?;
+        // `XeTeX` §445
+        self.primitive(b"count", REGISTER, INT_VAL)?;
+        self.primitive(b"dimen", REGISTER, DIMEN_VAL)?;
+        self.primitive(b"skip", REGISTER, GLUE_VAL)?;
+        self.primitive(b"muskip", REGISTER, MU_VAL)?;
+        // `XeTeX` §450
+        self.primitive(b"spacefactor", SET_AUX, HMODE)?;
+        self.primitive(b"prevdepth", SET_AUX, VMODE)?;
+        self.primitive(b"deadcycles", SET_PAGE_INT, 0)?;
+        self.primitive(b"insertpenalties", SET_PAGE_INT, 1)?;
+        self.primitive(b"wd", SET_BOX_DIMEN, WIDTH_OFFSET)?;
+        self.primitive(b"ht", SET_BOX_DIMEN, HEIGHT_OFFSET)?;
+        self.primitive(b"dp", SET_BOX_DIMEN, DEPTH_OFFSET)?;
+        self.primitive(b"lastpenalty", LAST_ITEM, INT_VAL)?;
+        self.primitive(b"lastkern", LAST_ITEM, DIMEN_VAL)?;
+        self.primitive(b"lastskip", LAST_ITEM, GLUE_VAL)?;
+        self.primitive(b"inputlineno", LAST_ITEM, INPUT_LINE_NO_CODE)?;
+        self.primitive(b"badness", LAST_ITEM, BADNESS_CODE)?;
+        self.primitive(b"pdflastxpos", LAST_ITEM, PDF_LAST_X_POS_CODE)?;
+        self.primitive(b"pdflastypos", LAST_ITEM, PDF_LAST_Y_POS_CODE)?;
+        self.primitive(b"elapsedtime", LAST_ITEM, ELAPSED_TIME_CODE)?;
+        self.primitive(b"shellescape", LAST_ITEM, PDF_SHELL_ESCAPE_CODE)?;
+        self.primitive(b"randomseed", LAST_ITEM, RANDOM_SEED_CODE)?;
+        // `XeTeX` §503
+        self.primitive(b"number", CONVERT, NUMBER_CODE)?;
+        self.primitive(b"romannumeral", CONVERT, ROMAN_NUMERAL_CODE)?;
+        self.primitive(b"string", CONVERT, STRING_CODE)?;
+        self.primitive(b"meaning", CONVERT, MEANING_CODE)?;
+        self.primitive(b"fontname", CONVERT, FONT_NAME_CODE)?;
+        self.primitive(b"expanded", CONVERT, EXPANDED_CODE)?;
+        self.primitive(b"leftmarginkern", CONVERT, LEFT_MARGIN_KERN_CODE)?;
+        self.primitive(b"rightmarginkern", CONVERT, RIGHT_MARGIN_KERN_CODE)?;
+        self.primitive(b"creationdate", CONVERT, PDF_CREATION_DATE_CODE)?;
+        self.primitive(b"filemoddate", CONVERT, PDF_FILE_MOD_DATE_CODE)?;
+        self.primitive(b"filesize", CONVERT, PDF_FILE_SIZE_CODE)?;
+        self.primitive(b"mdfivesum", CONVERT, PDF_MDFIVE_SUM_CODE)?;
+        self.primitive(b"filedump", CONVERT, PDF_FILE_DUMP_CODE)?;
+        self.primitive(b"strcmp", CONVERT, PDF_STRCMP_CODE)?;
+        self.primitive(b"uniformdeviate", CONVERT, UNIFORM_DEVIATE_CODE)?;
+        self.primitive(b"normaldeviate", CONVERT, NORMAL_DEVIATE_CODE)?;
+        self.primitive(b"jobname", CONVERT, JOB_NAME_CODE)?;
+        self.primitive(b"Uchar", CONVERT, XETEX_UCHAR_CODE)?;
+        self.primitive(b"Ucharcat", CONVERT, XETEX_UCHARCAT_CODE)?;
+        // `XeTeX` §522
+        self.primitive(b"if", IF_TEST, IF_CHAR_CODE)?;
+        self.primitive(b"ifcat", IF_TEST, IF_CAT_CODE)?;
+        self.primitive(b"ifnum", IF_TEST, IF_INT_CODE)?;
+        self.primitive(b"ifdim", IF_TEST, IF_DIM_CODE)?;
+        self.primitive(b"ifodd", IF_TEST, IF_ODD_CODE)?;
+        self.primitive(b"ifvmode", IF_TEST, IF_VMODE_CODE)?;
+        self.primitive(b"ifhmode", IF_TEST, IF_HMODE_CODE)?;
+        self.primitive(b"ifmmode", IF_TEST, IF_MMODE_CODE)?;
+        self.primitive(b"ifinner", IF_TEST, IF_INNER_CODE)?;
+        self.primitive(b"ifvoid", IF_TEST, IF_VOID_CODE)?;
+        self.primitive(b"ifhbox", IF_TEST, IF_HBOX_CODE)?;
+        self.primitive(b"ifvbox", IF_TEST, IF_VBOX_CODE)?;
+        self.primitive(b"ifx", IF_TEST, IFX_CODE)?;
+        self.primitive(b"ifeof", IF_TEST, IF_EOF_CODE)?;
+        self.primitive(b"iftrue", IF_TEST, IF_TRUE_CODE)?;
+        self.primitive(b"iffalse", IF_TEST, IF_FALSE_CODE)?;
+        self.primitive(b"ifcase", IF_TEST, IF_CASE_CODE)?;
+        self.primitive(b"ifprimitive", IF_TEST, IF_PRIMITIVE_CODE)?;
+        // `XeTeX` §526
+        self.primitive(b"fi", FI_OR_ELSE, FI_CODE)?;
+        let s = self.pool_str(b"fi");
+        self.set_text(FROZEN_FI, s);
+        let w = self.eqtb(self.cur_val);
+        self.set_eqtb(FROZEN_FI, w);
+        self.primitive(b"or", FI_OR_ELSE, OR_CODE)?;
+        self.primitive(b"else", FI_OR_ELSE, ELSE_CODE)?;
+        // `XeTeX` §588
+        self.primitive(b"nullfont", SET_FONT, NULL_FONT)?;
+        let s = self.pool_str(b"nullfont");
+        self.set_text(FROZEN_NULL_FONT, s);
+        let w = self.eqtb(self.cur_val);
+        self.set_eqtb(FROZEN_NULL_FONT, w);
+        // `XeTeX` §828
+        self.primitive(b"span", TAB_MARK, SPAN_CODE)?;
+        self.primitive(b"cr", CAR_RET, CR_CODE)?;
+        let s = self.pool_str(b"cr");
+        self.set_text(FROZEN_CR, s);
+        let w = self.eqtb(self.cur_val);
+        self.set_eqtb(FROZEN_CR, w);
+        self.primitive(b"crcr", CAR_RET, CR_CR_CODE)?;
+        let s = self.pool_str(b"endtemplate");
+        self.set_text(FROZEN_END_TEMPLATE, s);
+        let s = self.pool_str(b"endtemplate");
+        self.set_text(FROZEN_ENDV, s);
+        self.set_eq_type(FROZEN_ENDV, ENDV);
+        self.set_equiv(FROZEN_ENDV, NULL); // (`null_list`: shown as the empty list)
+        self.set_eq_level(FROZEN_ENDV, LEVEL_ONE);
+        let w = self.eqtb(FROZEN_ENDV);
+        self.set_eqtb(FROZEN_END_TEMPLATE, w);
+        self.set_eq_type(FROZEN_END_TEMPLATE, END_TEMPLATE);
+        // `XeTeX` §1037
+        self.primitive(b"pagegoal", SET_PAGE_DIMEN, 0)?;
+        self.primitive(b"pagetotal", SET_PAGE_DIMEN, 1)?;
+        self.primitive(b"pagestretch", SET_PAGE_DIMEN, 2)?;
+        self.primitive(b"pagefilstretch", SET_PAGE_DIMEN, 3)?;
+        self.primitive(b"pagefillstretch", SET_PAGE_DIMEN, 4)?;
+        self.primitive(b"pagefilllstretch", SET_PAGE_DIMEN, 5)?;
+        self.primitive(b"pageshrink", SET_PAGE_DIMEN, 6)?;
+        self.primitive(b"pagedepth", SET_PAGE_DIMEN, 7)?;
+        // `XeTeX` §1106
+        self.primitive(b"end", STOP, 0)?;
+        self.primitive(b"dump", STOP, 1)?;
+        // `XeTeX` §1112
+        self.primitive(b"hskip", HSKIP, SKIP_CODE)?;
+        self.primitive(b"hfil", HSKIP, FIL_CODE)?;
+        self.primitive(b"hfill", HSKIP, FILL_CODE)?;
+        self.primitive(b"hss", HSKIP, SS_CODE)?;
+        self.primitive(b"hfilneg", HSKIP, FIL_NEG_CODE)?;
+        self.primitive(b"vskip", VSKIP, SKIP_CODE)?;
+        self.primitive(b"vfil", VSKIP, FIL_CODE)?;
+        self.primitive(b"vfill", VSKIP, FILL_CODE)?;
+        self.primitive(b"vss", VSKIP, SS_CODE)?;
+        self.primitive(b"vfilneg", VSKIP, FIL_NEG_CODE)?;
+        self.primitive(b"mskip", MSKIP, MSKIP_CODE)?;
+        self.primitive(b"kern", KERN, EXPLICIT)?;
+        self.primitive(b"mkern", MKERN, MU_GLUE)?;
+        // `XeTeX` §1125
+        self.primitive(b"moveleft", HMOVE, 1)?;
+        self.primitive(b"moveright", HMOVE, 0)?;
+        self.primitive(b"raise", VMOVE, 1)?;
+        self.primitive(b"lower", VMOVE, 0)?;
+        self.primitive(b"box", MAKE_BOX, BOX_CODE)?;
+        self.primitive(b"copy", MAKE_BOX, COPY_CODE)?;
+        self.primitive(b"lastbox", MAKE_BOX, LAST_BOX_CODE)?;
+        self.primitive(b"vsplit", MAKE_BOX, VSPLIT_CODE)?;
+        self.primitive(b"vtop", MAKE_BOX, VTOP_CODE)?;
+        self.primitive(b"vbox", MAKE_BOX, VTOP_CODE + VMODE)?;
+        self.primitive(b"hbox", MAKE_BOX, VTOP_CODE + HMODE)?;
+        self.primitive(b"shipout", LEADER_SHIP, A_LEADERS - 1)?;
+        self.primitive(b"leaders", LEADER_SHIP, A_LEADERS)?;
+        self.primitive(b"cleaders", LEADER_SHIP, C_LEADERS)?;
+        self.primitive(b"xleaders", LEADER_SHIP, X_LEADERS)?;
+        // `XeTeX` §1142
+        self.primitive(b"indent", START_PAR, 1)?;
+        self.primitive(b"noindent", START_PAR, 0)?;
+        // `XeTeX` §1161
+        self.primitive(b"unpenalty", REMOVE_ITEM, PENALTY_NODE)?;
+        self.primitive(b"unkern", REMOVE_ITEM, KERN_NODE)?;
+        self.primitive(b"unskip", REMOVE_ITEM, GLUE_NODE)?;
+        self.primitive(b"unhbox", UN_HBOX, BOX_CODE)?;
+        self.primitive(b"unhcopy", UN_HBOX, COPY_CODE)?;
+        self.primitive(b"unvbox", UN_VBOX, BOX_CODE)?;
+        self.primitive(b"unvcopy", UN_VBOX, COPY_CODE)?;
+        // `XeTeX` §1168
+        self.primitive(b"-", DISCRETIONARY, 1)?;
+        self.primitive(b"discretionary", DISCRETIONARY, 0)?;
+        // `XeTeX` §1195
+        self.primitive(b"eqno", EQ_NO, 0)?;
+        self.primitive(b"leqno", EQ_NO, 1)?;
+        // `XeTeX` §1210
+        self.primitive(b"mathord", MATH_COMP, ORD_NOAD)?;
+        self.primitive(b"mathop", MATH_COMP, OP_NOAD)?;
+        self.primitive(b"mathbin", MATH_COMP, BIN_NOAD)?;
+        self.primitive(b"mathrel", MATH_COMP, REL_NOAD)?;
+        self.primitive(b"mathopen", MATH_COMP, OPEN_NOAD)?;
+        self.primitive(b"mathclose", MATH_COMP, CLOSE_NOAD)?;
+        self.primitive(b"mathpunct", MATH_COMP, PUNCT_NOAD)?;
+        self.primitive(b"mathinner", MATH_COMP, INNER_NOAD)?;
+        self.primitive(b"underline", MATH_COMP, UNDER_NOAD)?;
+        self.primitive(b"overline", MATH_COMP, OVER_NOAD)?;
+        self.primitive(b"displaylimits", LIMIT_SWITCH, NORMAL)?;
+        self.primitive(b"limits", LIMIT_SWITCH, LIMITS)?;
+        self.primitive(b"nolimits", LIMIT_SWITCH, NO_LIMITS)?;
+        // `XeTeX` §1223
+        self.primitive(b"displaystyle", MATH_STYLE, DISPLAY_STYLE)?;
+        self.primitive(b"textstyle", MATH_STYLE, TEXT_STYLE)?;
+        self.primitive(b"scriptstyle", MATH_STYLE, SCRIPT_STYLE)?;
+        self.primitive(b"scriptscriptstyle", MATH_STYLE, SCRIPT_SCRIPT_STYLE)?;
+        // `XeTeX` §1232
+        self.primitive(b"above", ABOVE, ABOVE_CODE)?;
+        self.primitive(b"over", ABOVE, OVER_CODE)?;
+        self.primitive(b"atop", ABOVE, ATOP_CODE)?;
+        self.primitive(b"abovewithdelims", ABOVE, DELIMITED_CODE + ABOVE_CODE)?;
+        self.primitive(b"overwithdelims", ABOVE, DELIMITED_CODE + OVER_CODE)?;
+        self.primitive(b"atopwithdelims", ABOVE, DELIMITED_CODE + ATOP_CODE)?;
+        // `XeTeX` §1242
+        self.primitive(b"left", LEFT_RIGHT, LEFT_NOAD)?;
+        self.primitive(b"right", LEFT_RIGHT, RIGHT_NOAD)?;
+        let s = self.pool_str(b"right");
+        self.set_text(FROZEN_RIGHT, s);
+        let w = self.eqtb(self.cur_val);
+        self.set_eqtb(FROZEN_RIGHT, w);
+        // `XeTeX` §1262
+        self.primitive(b"long", PREFIX, 1)?;
+        self.primitive(b"outer", PREFIX, 2)?;
+        self.primitive(b"global", PREFIX, 4)?;
+        self.primitive(b"def", DEF, 0)?;
+        self.primitive(b"gdef", DEF, 1)?;
+        self.primitive(b"edef", DEF, 2)?;
+        self.primitive(b"xdef", DEF, 3)?;
+        // `XeTeX` §1273
+        self.primitive(b"let", LET, NORMAL)?;
+        self.primitive(b"futurelet", LET, NORMAL + 1)?;
+        // `XeTeX` §1276
+        self.primitive(b"chardef", SHORTHAND_DEF, CHAR_DEF_CODE)?;
+        self.primitive(b"mathchardef", SHORTHAND_DEF, MATH_CHAR_DEF_CODE)?;
+        self.primitive(
+            b"XeTeXmathcharnumdef",
+            SHORTHAND_DEF,
+            XETEX_MATH_CHAR_NUM_DEF_CODE,
+        )?;
+        self.primitive(
+            b"Umathcharnumdef",
+            SHORTHAND_DEF,
+            XETEX_MATH_CHAR_NUM_DEF_CODE,
+        )?;
+        self.primitive(b"XeTeXmathchardef", SHORTHAND_DEF, XETEX_MATH_CHAR_DEF_CODE)?;
+        self.primitive(b"Umathchardef", SHORTHAND_DEF, XETEX_MATH_CHAR_DEF_CODE)?;
+        self.primitive(b"countdef", SHORTHAND_DEF, COUNT_DEF_CODE)?;
+        self.primitive(b"dimendef", SHORTHAND_DEF, DIMEN_DEF_CODE)?;
+        self.primitive(b"skipdef", SHORTHAND_DEF, SKIP_DEF_CODE)?;
+        self.primitive(b"muskipdef", SHORTHAND_DEF, MU_SKIP_DEF_CODE)?;
+        self.primitive(b"toksdef", SHORTHAND_DEF, TOKS_DEF_CODE)?;
+        if self.params.mltex {
+            self.primitive(b"charsubdef", SHORTHAND_DEF, CHAR_SUB_DEF_CODE)?;
+        }
+        // `XeTeX` §1284
+        self.primitive(b"catcode", DEF_CODE, CAT_CODE_BASE)?;
+        self.primitive(b"mathcode", DEF_CODE, MATH_CODE_BASE)?;
+        self.primitive(b"XeTeXmathcodenum", XETEX_DEF_CODE, MATH_CODE_BASE)?;
+        self.primitive(b"Umathcodenum", XETEX_DEF_CODE, MATH_CODE_BASE)?;
+        self.primitive(b"XeTeXmathcode", XETEX_DEF_CODE, MATH_CODE_BASE + 1)?;
+        self.primitive(b"Umathcode", XETEX_DEF_CODE, MATH_CODE_BASE + 1)?;
+        self.primitive(b"lccode", DEF_CODE, LC_CODE_BASE)?;
+        self.primitive(b"uccode", DEF_CODE, UC_CODE_BASE)?;
+        self.primitive(b"sfcode", DEF_CODE, SF_CODE_BASE)?;
+        self.primitive(b"XeTeXcharclass", XETEX_DEF_CODE, SF_CODE_BASE)?;
+        self.primitive(b"delcode", DEF_CODE, DEL_CODE_BASE)?;
+        self.primitive(b"XeTeXdelcodenum", XETEX_DEF_CODE, DEL_CODE_BASE)?;
+        self.primitive(b"Udelcodenum", XETEX_DEF_CODE, DEL_CODE_BASE)?;
+        self.primitive(b"XeTeXdelcode", XETEX_DEF_CODE, DEL_CODE_BASE + 1)?;
+        self.primitive(b"Udelcode", XETEX_DEF_CODE, DEL_CODE_BASE + 1)?;
+        self.primitive(b"textfont", DEF_FAMILY, MATH_FONT_BASE)?;
+        self.primitive(b"scriptfont", DEF_FAMILY, MATH_FONT_BASE + SCRIPT_SIZE)?;
+        self.primitive(
+            b"scriptscriptfont",
+            DEF_FAMILY,
+            MATH_FONT_BASE + SCRIPT_SCRIPT_SIZE,
+        )?;
+        // `XeTeX` §1304
+        self.primitive(b"hyphenation", HYPH_DATA, 0)?;
+        self.primitive(b"patterns", HYPH_DATA, 1)?;
+        // `XeTeX` §1308
+        self.primitive(b"hyphenchar", ASSIGN_FONT_INT, 0)?;
+        self.primitive(b"skewchar", ASSIGN_FONT_INT, 1)?;
+        self.primitive(b"lpcode", ASSIGN_FONT_INT, LP_CODE_BASE)?;
+        self.primitive(b"rpcode", ASSIGN_FONT_INT, RP_CODE_BASE)?;
+        // `XeTeX` §1316
+        self.primitive(b"batchmode", SET_INTERACTION, BATCH_MODE)?;
+        self.primitive(b"nonstopmode", SET_INTERACTION, NONSTOP_MODE)?;
+        self.primitive(b"scrollmode", SET_INTERACTION, SCROLL_MODE)?;
+        self.primitive(b"errorstopmode", SET_INTERACTION, ERROR_STOP_MODE)?;
+        // `XeTeX` §1326
+        self.primitive(b"openin", IN_STREAM, 1)?;
+        self.primitive(b"closein", IN_STREAM, 0)?;
+        // `XeTeX` §1331
+        self.primitive(b"message", MESSAGE, 0)?;
+        self.primitive(b"errmessage", MESSAGE, 1)?;
+        // `XeTeX` §1340
+        self.primitive(b"lowercase", CASE_SHIFT, LC_CODE_BASE)?;
+        self.primitive(b"uppercase", CASE_SHIFT, UC_CODE_BASE)?;
+        // `XeTeX` §1345
+        self.primitive(b"show", XRAY, SHOW_CODE)?;
+        self.primitive(b"showbox", XRAY, SHOW_BOX_CODE)?;
+        self.primitive(b"showthe", XRAY, SHOW_THE_CODE)?;
+        self.primitive(b"showlists", XRAY, SHOW_LISTS_CODE)?;
+        // `XeTeX` §1398
+        self.primitive(b"openout", EXTENSION, OPEN_NODE)?;
+        self.primitive(b"write", EXTENSION, WRITE_NODE)?;
+        self.write_loc = self.cur_val;
+        self.primitive(b"closeout", EXTENSION, CLOSE_NODE)?;
+        self.primitive(b"special", EXTENSION, SPECIAL_NODE)?;
+        let s = self.pool_str(b"special");
+        self.set_text(FROZEN_SPECIAL, s);
+        let w = self.eqtb(self.cur_val);
+        self.set_eqtb(FROZEN_SPECIAL, w);
+        self.primitive(b"immediate", EXTENSION, IMMEDIATE_CODE)?;
+        self.primitive(b"setlanguage", EXTENSION, SET_LANGUAGE_CODE)?;
+        self.primitive(b"resettimer", EXTENSION, RESET_TIMER_CODE)?;
+        self.primitive(b"setrandomseed", EXTENSION, SET_RANDOM_SEED_CODE)?;
+        // `XeTeX` §1706
+        self.primitive(b"synctex", ASSIGN_INT, INT_BASE + SYNCTEX_CODE)?;
+        self.no_new_control_sequence = true;
+        Ok(())
+    }
+
+    /// `XeTeX`: "Generate all e-TeX primitives" on entering extended mode.
+    pub(crate) fn generate_etex_prims_xetex(&mut self) -> Result<(), Jump> {
+        self.no_new_control_sequence = false;
+        // `XeTeX` §1399
+        self.primitive(b"XeTeXpicfile", EXTENSION, PIC_FILE_CODE)?;
+        self.primitive(b"XeTeXpdffile", EXTENSION, PDF_FILE_CODE)?;
+        self.primitive(b"XeTeXglyph", EXTENSION, GLYPH_CODE)?;
+        self.primitive(
+            b"XeTeXlinebreaklocale",
+            EXTENSION,
+            XETEX_LINEBREAK_LOCALE_EXTENSION_CODE,
+        )?;
+        self.primitive(b"XeTeXinterchartoks", ASSIGN_TOKS, XETEX_INTER_CHAR_LOC)?;
+        self.primitive(b"pdfsavepos", EXTENSION, PDF_SAVE_POS_NODE)?;
+        // `XeTeX` §1452
+        self.primitive(b"lastnodetype", LAST_ITEM, LAST_NODE_TYPE_CODE)?;
+        self.primitive(b"eTeXversion", LAST_ITEM, ETEX_VERSION_CODE)?;
+        self.primitive(b"eTeXrevision", CONVERT, ETEX_REVISION_CODE)?;
+        self.primitive(b"XeTeXversion", LAST_ITEM, XETEX_VERSION_CODE)?;
+        self.primitive(b"XeTeXrevision", CONVERT, XETEX_REVISION_CODE)?;
+        self.primitive(b"XeTeXcountglyphs", LAST_ITEM, XETEX_COUNT_GLYPHS_CODE)?;
+        self.primitive(
+            b"XeTeXcountvariations",
+            LAST_ITEM,
+            XETEX_COUNT_VARIATIONS_CODE,
+        )?;
+        self.primitive(b"XeTeXvariation", LAST_ITEM, XETEX_VARIATION_CODE)?;
+        self.primitive(
+            b"XeTeXfindvariationbyname",
+            LAST_ITEM,
+            XETEX_FIND_VARIATION_BY_NAME_CODE,
+        )?;
+        self.primitive(b"XeTeXvariationmin", LAST_ITEM, XETEX_VARIATION_MIN_CODE)?;
+        self.primitive(b"XeTeXvariationmax", LAST_ITEM, XETEX_VARIATION_MAX_CODE)?;
+        self.primitive(
+            b"XeTeXvariationdefault",
+            LAST_ITEM,
+            XETEX_VARIATION_DEFAULT_CODE,
+        )?;
+        self.primitive(b"XeTeXcountfeatures", LAST_ITEM, XETEX_COUNT_FEATURES_CODE)?;
+        self.primitive(b"XeTeXfeaturecode", LAST_ITEM, XETEX_FEATURE_CODE_CODE)?;
+        self.primitive(
+            b"XeTeXfindfeaturebyname",
+            LAST_ITEM,
+            XETEX_FIND_FEATURE_BY_NAME_CODE,
+        )?;
+        self.primitive(
+            b"XeTeXisexclusivefeature",
+            LAST_ITEM,
+            XETEX_IS_EXCLUSIVE_FEATURE_CODE,
+        )?;
+        self.primitive(
+            b"XeTeXcountselectors",
+            LAST_ITEM,
+            XETEX_COUNT_SELECTORS_CODE,
+        )?;
+        self.primitive(b"XeTeXselectorcode", LAST_ITEM, XETEX_SELECTOR_CODE_CODE)?;
+        self.primitive(
+            b"XeTeXfindselectorbyname",
+            LAST_ITEM,
+            XETEX_FIND_SELECTOR_BY_NAME_CODE,
+        )?;
+        self.primitive(
+            b"XeTeXisdefaultselector",
+            LAST_ITEM,
+            XETEX_IS_DEFAULT_SELECTOR_CODE,
+        )?;
+        self.primitive(b"XeTeXvariationname", CONVERT, XETEX_VARIATION_NAME_CODE)?;
+        self.primitive(b"XeTeXfeaturename", CONVERT, XETEX_FEATURE_NAME_CODE)?;
+        self.primitive(b"XeTeXselectorname", CONVERT, XETEX_SELECTOR_NAME_CODE)?;
+        self.primitive(
+            b"XeTeXOTcountscripts",
+            LAST_ITEM,
+            XETEX_OT_COUNT_SCRIPTS_CODE,
+        )?;
+        self.primitive(
+            b"XeTeXOTcountlanguages",
+            LAST_ITEM,
+            XETEX_OT_COUNT_LANGUAGES_CODE,
+        )?;
+        self.primitive(
+            b"XeTeXOTcountfeatures",
+            LAST_ITEM,
+            XETEX_OT_COUNT_FEATURES_CODE,
+        )?;
+        self.primitive(b"XeTeXOTscripttag", LAST_ITEM, XETEX_OT_SCRIPT_CODE)?;
+        self.primitive(b"XeTeXOTlanguagetag", LAST_ITEM, XETEX_OT_LANGUAGE_CODE)?;
+        self.primitive(b"XeTeXOTfeaturetag", LAST_ITEM, XETEX_OT_FEATURE_CODE)?;
+        self.primitive(b"XeTeXcharglyph", LAST_ITEM, XETEX_MAP_CHAR_TO_GLYPH_CODE)?;
+        self.primitive(b"XeTeXglyphindex", LAST_ITEM, XETEX_GLYPH_INDEX_CODE)?;
+        self.primitive(b"XeTeXglyphbounds", LAST_ITEM, XETEX_GLYPH_BOUNDS_CODE)?;
+        self.primitive(b"XeTeXglyphname", CONVERT, XETEX_GLYPH_NAME_CODE)?;
+        self.primitive(b"XeTeXfonttype", LAST_ITEM, XETEX_FONT_TYPE_CODE)?;
+        self.primitive(b"XeTeXfirstfontchar", LAST_ITEM, XETEX_FIRST_CHAR_CODE)?;
+        self.primitive(b"XeTeXlastfontchar", LAST_ITEM, XETEX_LAST_CHAR_CODE)?;
+        self.primitive(b"XeTeXpdfpagecount", LAST_ITEM, XETEX_PDF_PAGE_COUNT_CODE)?;
+        // `XeTeX` §1467
+        self.primitive(b"everyeof", ASSIGN_TOKS, EVERY_EOF_LOC)?;
+        self.primitive(
+            b"tracingassigns",
+            ASSIGN_INT,
+            INT_BASE + TRACING_ASSIGNS_CODE,
+        )?;
+        self.primitive(b"tracinggroups", ASSIGN_INT, INT_BASE + TRACING_GROUPS_CODE)?;
+        self.primitive(b"tracingifs", ASSIGN_INT, INT_BASE + TRACING_IFS_CODE)?;
+        self.primitive(
+            b"tracingscantokens",
+            ASSIGN_INT,
+            INT_BASE + TRACING_SCAN_TOKENS_CODE,
+        )?;
+        self.primitive(
+            b"tracingnesting",
+            ASSIGN_INT,
+            INT_BASE + TRACING_NESTING_CODE,
+        )?;
+        self.primitive(
+            b"predisplaydirection",
+            ASSIGN_INT,
+            INT_BASE + PRE_DISPLAY_DIRECTION_CODE,
+        )?;
+        self.primitive(b"lastlinefit", ASSIGN_INT, INT_BASE + LAST_LINE_FIT_CODE)?;
+        self.primitive(
+            b"savingvdiscards",
+            ASSIGN_INT,
+            INT_BASE + SAVING_VDISCARDS_CODE,
+        )?;
+        self.primitive(
+            b"savinghyphcodes",
+            ASSIGN_INT,
+            INT_BASE + SAVING_HYPH_CODES_CODE,
+        )?;
+        self.primitive(
+            b"ignoreprimitiveerror",
+            ASSIGN_INT,
+            INT_BASE + IGNORE_PRIMITIVE_ERROR_CODE,
+        )?;
+        // `XeTeX` §1473
+        self.primitive(b"currentgrouplevel", LAST_ITEM, CURRENT_GROUP_LEVEL_CODE)?;
+        self.primitive(b"currentgrouptype", LAST_ITEM, CURRENT_GROUP_TYPE_CODE)?;
+        // `XeTeX` §1476
+        self.primitive(b"currentiflevel", LAST_ITEM, CURRENT_IF_LEVEL_CODE)?;
+        self.primitive(b"currentiftype", LAST_ITEM, CURRENT_IF_TYPE_CODE)?;
+        self.primitive(b"currentifbranch", LAST_ITEM, CURRENT_IF_BRANCH_CODE)?;
+        // `XeTeX` §1479
+        self.primitive(b"fontcharwd", LAST_ITEM, FONT_CHAR_WD_CODE)?;
+        self.primitive(b"fontcharht", LAST_ITEM, FONT_CHAR_HT_CODE)?;
+        self.primitive(b"fontchardp", LAST_ITEM, FONT_CHAR_DP_CODE)?;
+        self.primitive(b"fontcharic", LAST_ITEM, FONT_CHAR_IC_CODE)?;
+        // `XeTeX` §1482
+        self.primitive(b"parshapelength", LAST_ITEM, PAR_SHAPE_LENGTH_CODE)?;
+        self.primitive(b"parshapeindent", LAST_ITEM, PAR_SHAPE_INDENT_CODE)?;
+        self.primitive(b"parshapedimen", LAST_ITEM, PAR_SHAPE_DIMEN_CODE)?;
+        // `XeTeX` §1485
+        self.primitive(b"showgroups", XRAY, SHOW_GROUPS)?;
+        // `XeTeX` §1494
+        self.primitive(b"showtokens", XRAY, SHOW_TOKENS)?;
+        // `XeTeX` §1496
+        self.primitive(b"unexpanded", THE, 1)?;
+        self.primitive(b"detokenize", THE, SHOW_TOKENS)?;
+        // `XeTeX` §1499
+        self.primitive(b"showifs", XRAY, SHOW_IFS)?;
+        // `XeTeX` §1502
+        self.primitive(b"interactionmode", SET_PAGE_INT, 2)?;
+        // `XeTeX` §1507
+        self.primitive(b"middle", LEFT_RIGHT, MIDDLE_NOAD)?;
+        // `XeTeX` §1511
+        self.primitive(
+            b"suppressfontnotfounderror",
+            ASSIGN_INT,
+            INT_BASE + SUPPRESS_FONTNOTFOUND_ERROR_CODE,
+        )?;
+        self.primitive(b"TeXXeTstate", ASSIGN_INT, ETEX_STATE_BASE + TEXXET_CODE)?;
+        self.primitive(
+            b"XeTeXupwardsmode",
+            ASSIGN_INT,
+            ETEX_STATE_BASE + XETEX_UPWARDS_CODE,
+        )?;
+        self.primitive(
+            b"XeTeXuseglyphmetrics",
+            ASSIGN_INT,
+            ETEX_STATE_BASE + XETEX_USE_GLYPH_METRICS_CODE,
+        )?;
+        self.primitive(
+            b"XeTeXinterchartokenstate",
+            ASSIGN_INT,
+            ETEX_STATE_BASE + XETEX_INTER_CHAR_TOKENS_CODE,
+        )?;
+        self.primitive(
+            b"XeTeXdashbreakstate",
+            ASSIGN_INT,
+            ETEX_STATE_BASE + XETEX_DASH_BREAK_CODE,
+        )?;
+        self.primitive(
+            b"XeTeXinputnormalization",
+            ASSIGN_INT,
+            ETEX_STATE_BASE + XETEX_INPUT_NORMALIZATION_CODE,
+        )?;
+        self.primitive(
+            b"XeTeXtracingfonts",
+            ASSIGN_INT,
+            ETEX_STATE_BASE + XETEX_TRACING_FONTS_CODE,
+        )?;
+        self.primitive(
+            b"XeTeXinterwordspaceshaping",
+            ASSIGN_INT,
+            ETEX_STATE_BASE + XETEX_INTERWORD_SPACE_SHAPING_CODE,
+        )?;
+        self.primitive(
+            b"XeTeXgenerateactualtext",
+            ASSIGN_INT,
+            ETEX_STATE_BASE + XETEX_GENERATE_ACTUAL_TEXT_CODE,
+        )?;
+        self.primitive(
+            b"XeTeXhyphenatablelength",
+            ASSIGN_INT,
+            ETEX_STATE_BASE + XETEX_HYPHENATABLE_LENGTH_CODE,
+        )?;
+        self.primitive(
+            b"XeTeXinputencoding",
+            EXTENSION,
+            XETEX_INPUT_ENCODING_EXTENSION_CODE,
+        )?;
+        self.primitive(
+            b"XeTeXdefaultencoding",
+            EXTENSION,
+            XETEX_DEFAULT_ENCODING_EXTENSION_CODE,
+        )?;
+        self.primitive(b"beginL", VALIGN, BEGIN_L_CODE)?;
+        self.primitive(b"endL", VALIGN, END_L_CODE)?;
+        self.primitive(b"beginR", VALIGN, BEGIN_R_CODE)?;
+        self.primitive(b"endR", VALIGN, END_R_CODE)?;
+        // `XeTeX` §1558
+        self.primitive(b"scantokens", INPUT, 2)?;
+        // `XeTeX` §1570
+        self.primitive(b"readline", READ_TO_CS, 1)?;
+        // `XeTeX` §1573
+        self.primitive(b"unless", EXPAND_AFTER, 1)?;
+        self.primitive(b"ifdefined", IF_TEST, IF_DEF_CODE)?;
+        self.primitive(b"ifcsname", IF_TEST, IF_CS_CODE)?;
+        self.primitive(b"iffontchar", IF_TEST, IF_FONT_CHAR_CODE)?;
+        self.primitive(b"ifincsname", IF_TEST, IF_IN_CSNAME_CODE)?;
+        // `XeTeX` §1581
+        self.primitive(b"protected", PREFIX, 8)?;
+        // `XeTeX` §1589
+        self.primitive(b"numexpr", LAST_ITEM, ETEX_EXPR - INT_VAL + INT_VAL)?;
+        self.primitive(b"dimexpr", LAST_ITEM, ETEX_EXPR - INT_VAL + DIMEN_VAL)?;
+        self.primitive(b"glueexpr", LAST_ITEM, ETEX_EXPR - INT_VAL + GLUE_VAL)?;
+        self.primitive(b"muexpr", LAST_ITEM, ETEX_EXPR - INT_VAL + MU_VAL)?;
+        // `XeTeX` §1612
+        self.primitive(b"gluestretchorder", LAST_ITEM, GLUE_STRETCH_ORDER_CODE)?;
+        self.primitive(b"glueshrinkorder", LAST_ITEM, GLUE_SHRINK_ORDER_CODE)?;
+        self.primitive(b"gluestretch", LAST_ITEM, GLUE_STRETCH_CODE)?;
+        self.primitive(b"glueshrink", LAST_ITEM, GLUE_SHRINK_CODE)?;
+        // `XeTeX` §1616
+        self.primitive(b"mutoglue", LAST_ITEM, MU_TO_GLUE_CODE)?;
+        self.primitive(b"gluetomu", LAST_ITEM, GLUE_TO_MU_CODE)?;
+        // `XeTeX` §1620
+        self.primitive(b"marks", MARK, MARKS_CODE)?;
+        self.primitive(b"topmarks", TOP_BOT_MARK, TOP_MARK_CODE + MARKS_CODE)?;
+        self.primitive(b"firstmarks", TOP_BOT_MARK, FIRST_MARK_CODE + MARKS_CODE)?;
+        self.primitive(b"botmarks", TOP_BOT_MARK, BOT_MARK_CODE + MARKS_CODE)?;
+        self.primitive(
+            b"splitfirstmarks",
+            TOP_BOT_MARK,
+            SPLIT_FIRST_MARK_CODE + MARKS_CODE,
+        )?;
+        self.primitive(
+            b"splitbotmarks",
+            TOP_BOT_MARK,
+            SPLIT_BOT_MARK_CODE + MARKS_CODE,
+        )?;
+        // `XeTeX` §1672
+        self.primitive(b"pagediscards", UN_VBOX, LAST_BOX_CODE)?;
+        self.primitive(b"splitdiscards", UN_VBOX, VSPLIT_CODE)?;
+        // `XeTeX` §1675
         self.primitive(b"interlinepenalties", SET_SHAPE, INTER_LINE_PENALTIES_LOC)?;
         self.primitive(b"clubpenalties", SET_SHAPE, CLUB_PENALTIES_LOC)?;
         self.primitive(b"widowpenalties", SET_SHAPE, WIDOW_PENALTIES_LOC)?;

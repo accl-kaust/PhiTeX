@@ -76,6 +76,18 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                         self.short_display_char(i32::from(g.font.0), c);
                     }
                 }
+                // `XeTeX` §201: a native word shows its text.
+                Node::Whatsit(w) if matches!(**w, Whatsit::NativeWord(_)) => {
+                    if let Whatsit::NativeWord(w) = &**w {
+                        let f = i32::from(w.font.0);
+                        if f != self.font_in_short_display {
+                            self.print_font_id(f);
+                            self.print_char(b' ');
+                            self.font_in_short_display = f;
+                        }
+                        self.print_native_word(&w.text);
+                    }
+                }
                 // §175: print a short indication of the contents of node `p`.
                 Node::Box(_)
                 | Node::Ins(_)
@@ -113,6 +125,27 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                 }
                 Node::Kern { .. } | Node::Penalty(_) | Node::MarginKern { .. } => {}
             }
+        }
+    }
+
+    /// `XeTeX` §1355 `print_native_word`: a native word's characters (a
+    /// lone surrogate as `.`).
+    pub(crate) fn print_native_word(&mut self, text: &[u16]) {
+        let mut i = 0;
+        while i < text.len() {
+            let c = u32::from(text[i]);
+            if (0xD800..=0xDBFF).contains(&c) {
+                match text.get(i + 1).map(|&u| u32::from(u)) {
+                    Some(cc) if (0xDC00..=0xDFFF).contains(&cc) => {
+                        self.print_char_x(0x1_0000 + (c - 0xD800) * 0x400 + (cc - 0xDC00));
+                        i += 1;
+                    }
+                    _ => self.print_str(b"."),
+                }
+            } else {
+                self.print_char_x(c);
+            }
+            i += 1;
         }
     }
 
@@ -778,6 +811,29 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                 self.print_mark(tokens);
             }
             Whatsit::Pdf(p) => self.display_pdf_whatsit(p),
+            // `XeTeX` §1356
+            Whatsit::NativeWord(w) => {
+                self.print_font_id(i32::from(w.font.0));
+                self.print_char(b' ');
+                self.print_native_word(&w.text);
+            }
+            Whatsit::Glyph(g) => {
+                self.print_font_id(i32::from(g.font.0));
+                self.print_str(b" glyph#");
+                self.print_int(i32::from(g.gid));
+            }
+            Whatsit::Pic(p) => {
+                self.print_esc(if p.pdf {
+                    b"XeTeXpdffile"
+                } else {
+                    b"XeTeXpicfile"
+                });
+                self.print_str(b" \"");
+                for &b in p.path.iter() {
+                    self.print_raw_char(u32::from(b), true);
+                }
+                self.print_str(b"\"");
+            }
         }
     }
 
@@ -1122,9 +1178,9 @@ mod tests {
                 Node::Mark(alloc::boxed::Box::new(Mark {
                     class: 0,
                     tokens: partex_engine::node::TokenList::shared(&[
-                        LETTER * 256 + 97,
-                        MAC_PARAM * 256 + 35,
-                        LETTER * 256 + 98,
+                        LETTER * crate::web::MAX_CHAR_VAL + 97,
+                        MAC_PARAM * crate::web::MAX_CHAR_VAL + 35,
+                        LETTER * crate::web::MAX_CHAR_VAL + 98,
                     ]),
                 })),
             ],

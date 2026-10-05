@@ -10,10 +10,10 @@
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 
-use crate::cmds::{BOX_REF, GLUE_REF, UNDEFINED_CS};
+use crate::cmds::{BOX_REF, DATA, GLUE_REF, UNDEFINED_CS};
 use crate::mem::{MemoryWord, NULL};
 use crate::web::{
-    BOX_BASE, COUNT_BASE, LEVEL_ONE, MU_SKIP_BASE, SCALED_BASE, SKIP_BASE, TOKS_BASE,
+    BOX_BASE, COUNT_BASE, LEVEL_ONE, LEVEL_ZERO, MU_SKIP_BASE, SCALED_BASE, SKIP_BASE, TOKS_BASE,
 };
 use crate::web::{BOX_VAL, DIMEN_VAL, GLUE_VAL, INT_VAL, MU_VAL, TOK_VAL};
 
@@ -38,14 +38,29 @@ pub(crate) fn reg_loc(kind: i32, n: i32) -> i32 {
     }
 }
 
-/// The kind and number of a location from [`reg_loc`] past eqtb.
+/// The kind and number of a location from [`reg_loc`] past eqtb; a wide
+/// table's location (`wide.rs`) is kind [`WIDE_KIND`] plus its table, its
+/// number the character.
 pub(crate) fn ext_reg(loc: i32) -> (i32, i32) {
+    if let Some((t, c)) = crate::wide::wide_of(loc) {
+        return (WIDE_KIND + t, c);
+    }
     ((loc - EXT_BASE) / KIND_SPAN, (loc - EXT_BASE) % KIND_SPAN)
 }
 
-/// Whether register values of `kind` are words (counts and dimens).
+/// The kind of the first wide table (past the registers' kinds).
+pub(crate) const WIDE_KIND: i32 = 8;
+
+/// Whether registers of `kind` hold token lists (`\toks`, and `XeTeX`'s
+/// `\XeTeXinterchartoks`).
+pub(crate) fn is_toks_kind(kind: i32) -> bool {
+    kind == TOK_VAL || kind == WIDE_KIND + crate::wide::INTER
+}
+
+/// Whether register values of `kind` are words (counts and dimens, and
+/// `XeTeX`'s wide `\delcode`s, which are integers as `del_code`s are).
 pub(crate) fn is_word_kind(kind: i32) -> bool {
-    kind <= DIMEN_VAL
+    kind <= DIMEN_VAL || kind == WIDE_KIND + crate::wide::DEL
 }
 
 /// A saved register: its location, value (the word and the object it
@@ -215,8 +230,31 @@ impl ExtRegs {
     }
 
     pub(crate) fn default_cell(loc: i32) -> (MemoryWord, i32) {
-        let (kind, _) = ext_reg(loc);
+        let (kind, n) = ext_reg(loc);
         let mut w = MemoryWord::default();
+        if kind >= WIDE_KIND {
+            // (`IniTeX`'s values: `XeTeX` §222, §232, §240)
+            let t = kind - WIDE_KIND;
+            match t {
+                crate::wide::ACTIVE | crate::wide::SINGLE => {
+                    w.set_b0(UNDEFINED_CS);
+                    w.set_rh(NULL);
+                    w.set_b1(LEVEL_ZERO);
+                }
+                crate::wide::INTER => {
+                    w.set_b0(UNDEFINED_CS);
+                    w.set_rh(NULL);
+                    w.set_b1(LEVEL_ONE);
+                }
+                crate::wide::DEL => w.set_int(-1),
+                _ => {
+                    w.set_b0(DATA);
+                    w.set_rh(crate::wide::initial_code(t, n));
+                    w.set_b1(LEVEL_ONE);
+                }
+            }
+            return (w, LEVEL_ONE);
+        }
         match kind {
             INT_VAL | DIMEN_VAL => {}
             GLUE_VAL | MU_VAL => {
@@ -240,7 +278,7 @@ impl ExtRegs {
     }
 
     pub fn get(&self, loc: i32) -> MemoryWord {
-        if self.dense.on {
+        if self.dense.on && loc < crate::wide::WIDE_BASE {
             return self
                 .dense_at(loc)
                 .map_or_else(|| Self::default_cell(loc).0, |c| c.word);
@@ -251,7 +289,7 @@ impl ExtRegs {
     }
 
     pub fn level(&self, loc: i32) -> i32 {
-        if self.dense.on {
+        if self.dense.on && loc < crate::wide::WIDE_BASE {
             return self.dense_at(loc).map_or(LEVEL_ONE, |c| c.level);
         }
         self.cells.get(&loc).map_or(LEVEL_ONE, |c| c.1)
@@ -267,7 +305,7 @@ impl ExtRegs {
         let c = self.cell(loc);
         c.0 = w;
         let c = *c;
-        if self.dense.on {
+        if self.dense.on && loc < crate::wide::WIDE_BASE {
             self.dense_put(loc, c);
         }
     }
@@ -276,7 +314,7 @@ impl ExtRegs {
         let c = self.cell(loc);
         c.1 = l;
         let c = *c;
-        if self.dense.on {
+        if self.dense.on && loc < crate::wide::WIDE_BASE {
             self.dense_put(loc, c);
         }
     }

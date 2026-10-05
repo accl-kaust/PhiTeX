@@ -13,12 +13,13 @@
 //! one linked list), since the order of its entries decides ties.
 
 use alloc::boxed::Box;
+use alloc::vec;
 use alloc::vec::Vec;
 
 use crate::Scaled;
 use crate::expand::{self, ExpandEnv};
 use crate::font::{LigKern, Tag};
-use crate::hyph::{MAX_WORD, Patterns, exception_key, hyphen_values};
+use crate::hyph::{Patterns, exception_key, hyphen_values};
 use crate::lr;
 use crate::margin::{self, At};
 use crate::node::{Disc, FontId, GlueSpec, Ligature, Node, Order, Whatsit, push_char};
@@ -35,6 +36,8 @@ const AWFUL_BAD: i32 = 0o7777777777;
 const MAX_HALFWORD: i32 = 0xFFF_FFFF;
 /// §549: `non_char`.
 const NON_CHAR: i32 = 256;
+/// `XeTeX`'s `non_char` (`too_big_char`).
+const XETEX_NON_CHAR: i32 = 65536;
 /// §155: kern subtypes.
 const KERN_NORMAL: u8 = 0;
 const KERN_EXPLICIT: u8 = 1;
@@ -95,6 +98,13 @@ pub struct Params {
     pub left_hyphen_min: i32,
     pub right_hyphen_min: i32,
     pub uc_hyph: bool,
+    /// The most letters a hyphenated word may have: TeX's 63, or
+    /// `XeTeX`'s `max_hyphenatable_length` (`\XeTeXhyphenatablelength`,
+    /// at most 4,095).
+    pub max_hyphenatable_length: i32,
+    /// `XeTeX`: characters run to 65,535 (`biggest_char`), so `non_char`
+    /// is 65,536, and a hyphen character may be up to 65,535.
+    pub unicode: bool,
     pub tracing: bool,
     /// pdfTeX's `\pdfprotrudechars`: characters protrude into the margins
     /// (if positive), and line breaking allows for it (above 1).
@@ -111,15 +121,15 @@ pub struct Params {
 
 /// What line breaking needs besides its parameters.
 pub trait Env: ExpandEnv {
-    /// `\lccode` of `c`.
-    fn lc_code(&self, c: u8) -> u8;
+    /// `\lccode` of `c` (in `XeTeX`, any character code).
+    fn lc_code(&self, c: u8) -> i32;
     /// `\hyphenchar` of `f`.
     fn hyphen_char(&self, f: FontId) -> i32;
     fn patterns(&self) -> &Patterns;
     /// §930: the hyphen positions of the word `key`
     /// (`hyph::exception_key`), if it is an exception.
     #[allow(clippy::ptr_arg, reason = "the map's key, looked up as it is")]
-    fn exception(&self, key: &Vec<u8>) -> Option<&[u8]>;
+    fn exception(&self, key: &Vec<u8>) -> Option<&[u16]>;
 }
 
 /// What a feasible break is at.
@@ -1760,8 +1770,14 @@ impl<E: Env> Breaker<'_, E> {
     /// §894: try to hyphenate the word following the glue at `cur_p`.
     fn try_to_hyphenate(&mut self, cur_p: usize) {
         let env = &*self.env;
+        let unicode = self.p.unicode;
+        // (`XeTeX`: `non_char` is `too_big_char`)
+        let non_char = if unicode { XETEX_NON_CHAR } else { NON_CHAR };
+        let max_len = self.p.max_hyphenatable_length;
         // (e-TeX `set_lc_code`: the language's saved codes, if any)
         let lc = |lang: i32, c: u8| env.patterns().hyph_code(lang, c, |c| env.lc_code(c));
+        // (`XeTeX`: a letter past `max_hyph_char` ends the word, §950)
+        let too_big = |h: i32| unicode && h > env.patterns().max_hyph_char;
         // §896: skip to node `ha`, or return if no hyphenation should be
         // attempted.
         let mut prev_s = Pos::node(cur_p);
@@ -1773,7 +1789,7 @@ impl<E: Env> Breaker<'_, E> {
                 Some(Atom::Char(f, ch)) => {
                     c = ch;
                     if lc(self.cur_lang, c) != 0 {
-                        if lc(self.cur_lang, c) == c || self.p.uc_hyph {
+                        if lc(self.cur_lang, c) == i32::from(c) || self.p.uc_hyph {
                             hf = f;
                             break;
                         }
@@ -1784,7 +1800,7 @@ impl<E: Env> Breaker<'_, E> {
                     if let Some(&first) = l.original.first() {
                         c = first;
                         if lc(self.cur_lang, c) != 0 {
-                            if lc(self.cur_lang, c) == c || self.p.uc_hyph {
+                            if lc(self.cur_lang, c) == i32::from(c) || self.p.uc_hyph {
                                 hf = l.font;
                                 break;
                             }
@@ -1796,6 +1812,9 @@ impl<E: Env> Breaker<'_, E> {
                 // (text-direction nodes are skipped)
                 Some(Atom::Node(Node::Math { subtype, .. })) if *subtype >= lr::L_CODE => {}
                 Some(Atom::Node(Node::Whatsit(w))) => {
+                    // (`XeTeX` §949: a native word with a letter is `ha`'s
+                    // successor here, with `hf` its font, before the
+                    // language whatsits; native words are not made yet)
                     // §1363: `adv_past`
                     if let Whatsit::Language {
                         language,
@@ -1815,13 +1834,18 @@ impl<E: Env> Breaker<'_, E> {
         }
         // done2:
         let hyf_char = env.hyphen_char(hf);
-        if !(0..=255).contains(&hyf_char) {
+        let biggest_char = if unicode { XETEX_NON_CHAR - 1 } else { 255 };
+        if !(0..=biggest_char).contains(&hyf_char) {
             return;
         }
         let ha = prev_s;
-        if self.l_hyf + self.r_hyf > 63 {
+        if self.l_hyf + self.r_hyf > max_len {
             return;
         }
+        // (`XeTeX` §944: if `ha` is a native word, here it checks that the
+        // nodes after it permit hyphenation (§945) and moves its letters
+        // to `hu` and `hc` (§946), instead of §897; native words are not
+        // made yet)
         // §897: skip to node `hb`, putting letters into `hu` and `hc`
         // (and, with origins kept, each letter's into `ho`).
         let font = env.font(hf);
@@ -1836,12 +1860,18 @@ impl<E: Env> Breaker<'_, E> {
                 _ => Org::NONE,
             }
         };
-        let mut ho = [Org::NONE; MAX_WORD + 2];
-        let mut hu = [0i32; MAX_WORD + 2];
-        let mut hc = [0u8; MAX_WORD + 2];
-        let mut hn = 0usize;
+        // (`hu[0]`, `hc[0]` and `ho[0]` are set later)
+        let mut ho = vec![Org::NONE];
+        let mut hu = vec![0i32];
+        let mut hc = vec![0i32];
+        let full = |n: usize| i32::try_from(n).is_ok_and(|n| n == max_len);
+        let font_bchar = if font.bchar >= NON_CHAR {
+            non_char
+        } else {
+            font.bchar
+        };
         let mut hb = s;
-        let mut hyf_bchar = NON_CHAR;
+        let mut hyf_bchar = non_char;
         loop {
             match atom(&self.list, s) {
                 Some(Atom::Char(f, c)) => {
@@ -1849,15 +1879,15 @@ impl<E: Env> Breaker<'_, E> {
                         break;
                     }
                     hyf_bchar = i32::from(c);
-                    if lc(self.cur_lang, c) == 0 || hn == MAX_WORD {
+                    let h = lc(self.cur_lang, c);
+                    if h == 0 || too_big(h) || full(hc.len() - 1) {
                         break;
                     }
                     hb = s;
-                    hn += 1;
-                    hu[hn] = i32::from(c);
-                    hc[hn] = lc(self.cur_lang, c);
-                    ho[hn] = org_at(s);
-                    hyf_bchar = NON_CHAR;
+                    hu.push(i32::from(c));
+                    hc.push(h);
+                    ho.push(org_at(s));
+                    hyf_bchar = non_char;
                 }
                 Some(Atom::Node(Node::Ligature(l))) => {
                     // §898: move the characters of a ligature node to `hu`
@@ -1865,41 +1895,45 @@ impl<E: Env> Breaker<'_, E> {
                     if l.font != hf {
                         break;
                     }
-                    let mut j = hn;
+                    let hn = hc.len();
                     if let Some(&first) = l.original.first() {
                         hyf_bchar = i32::from(first);
                     }
                     let mut letters = true;
                     let lo = org_at(s);
                     for &c in &l.original {
-                        if lc(self.cur_lang, c) == 0 || j == MAX_WORD {
+                        let h = lc(self.cur_lang, c);
+                        if h == 0 || too_big(h) || full(hc.len() - 1) {
                             letters = false;
                             break;
                         }
-                        j += 1;
-                        hu[j] = i32::from(c);
-                        hc[j] = lc(self.cur_lang, c);
-                        ho[j] = lo;
+                        hu.push(i32::from(c));
+                        hc.push(h);
+                        ho.push(lo);
                     }
                     if !letters {
+                        // (`hn` is not advanced)
+                        hu.truncate(hn);
+                        hc.truncate(hn);
+                        ho.truncate(hn);
                         break;
                     }
                     hb = s;
-                    hn = j;
                     hyf_bchar = if l.subtype % 2 == 1 {
-                        font.bchar
+                        font_bchar
                     } else {
-                        NON_CHAR
+                        non_char
                     };
                 }
                 Some(Atom::Node(Node::Kern { subtype, .. })) if *subtype == KERN_NORMAL => {
                     hb = s;
-                    hyf_bchar = font.bchar;
+                    hyf_bchar = font_bchar;
                 }
                 _ => break,
             }
             s = next_pos(&self.list, s);
         }
+        let hn = hc.len() - 1;
         // §899: check that the nodes following `hb` permit hyphenation and
         // that at least `l_hyf+r_hyf` letters have been found.
         let (l_hyf, r_hyf) = (
@@ -1932,11 +1966,11 @@ impl<E: Env> Breaker<'_, E> {
             s = next_pos(&self.list, s);
         }
         // done4: §895, §923: find hyphen locations for the word.
-        let mut hyf = [0u8; MAX_WORD + 2];
-        let key = exception_key(&hc[1..=hn], self.cur_lang);
+        let mut hyf = vec![0u8; hn + 2];
+        let key = exception_key(&hc[1..=hn], self.cur_lang, unicode);
         if !hyphen_values(
             env.patterns(),
-            env.exception(&key),
+            key.as_ref().and_then(|k| env.exception(k)),
             self.cur_lang,
             &hc[1..=hn],
             r_hyf,
@@ -1956,8 +1990,18 @@ impl<E: Env> Breaker<'_, E> {
             return;
         }
         // §903: replace nodes `ha..hb` by a sequence of nodes that includes
-        // the discretionary hyphens.
+        // the discretionary hyphens. (`XeTeX` §956: a native word `ha` is
+        // split at the hyphens instead, §957; native words are not made
+        // yet)
         let init_org = org_at(ha);
+        hu.push(0);
+        ho.push(Org::NONE);
+        // (`hu[0]` is a left boundary: `XeTeX`'s is `max_hyph_char`)
+        let boundary = if unicode {
+            env.patterns().max_hyph_char
+        } else {
+            NON_CHAR
+        };
         let mut w = Word {
             font: hf,
             hu,
@@ -1965,6 +2009,9 @@ impl<E: Env> Breaker<'_, E> {
             hyf,
             hn,
             hyf_char,
+            non_char,
+            boundary,
+            font_bchar,
             init_list: Vec::new(),
             init_org,
             init_lig: false,
@@ -1987,13 +2034,13 @@ impl<E: Env> Breaker<'_, E> {
                 w.init_lft = l.subtype > 1;
                 w.hu[0] = i32::from(l.ch);
                 if w.init_list.is_empty() && w.init_lft {
-                    w.hu[0] = 256;
+                    w.hu[0] = boundary;
                     w.init_lig = false;
                 } // in this case a ligature will be reconstructed from scratch
                 (ha, 0)
             }
             Some(Atom::Char(..) | Atom::Node(Node::Ligature(_))) => {
-                w.hu[0] = 256; // found2
+                w.hu[0] = boundary; // found2
                 (r, 0)
             }
             _ => {
@@ -2001,7 +2048,7 @@ impl<E: Env> Breaker<'_, E> {
                 if let Some(Atom::Node(Node::Ligature(l))) = atom(&self.list, r)
                     && l.subtype > 1
                 {
-                    w.hu[0] = 256; // found2
+                    w.hu[0] = boundary; // found2
                     (r, 0)
                 } else {
                     (r, 1)
@@ -2205,13 +2252,22 @@ fn tmp_into(list: &mut Vec<Node>, items: &[Tmp], font: FontId, mut t: Option<&mu
 /// §892, §900: a word being hyphenated.
 struct Word {
     font: FontId,
-    /// The characters, `hu[1..=hn]` (`hu[0]` the one before, or 256).
-    hu: [i32; MAX_WORD + 2],
+    /// The characters, `hu[1..=hn]` (`hu[0]` the one before, or the
+    /// boundary).
+    hu: Vec<i32>,
     /// Their origins (DESIGN 4.4; none unless origins are kept).
-    ho: [Org; MAX_WORD + 2],
-    hyf: [u8; MAX_WORD + 2],
+    ho: Vec<Org>,
+    hyf: Vec<u8>,
     hn: usize,
     hyf_char: i32,
+    /// `non_char`: 256, or `XeTeX`'s 65,536.
+    non_char: i32,
+    /// What `hu[l]` is set to for a left boundary: `non_char` in TeX,
+    /// `max_hyph_char` in `XeTeX` (§956, §970), where it is then not
+    /// `non_char`, so that `XeTeX` reconstitutes it as a character.
+    boundary: i32,
+    /// `font_bchar` of the word's font (`non_char` if none).
+    font_bchar: i32,
     init_list: Vec<u8>,
     /// The origin of `init_list`'s characters (a ligature's, or the
     /// character's).
@@ -2315,7 +2371,7 @@ impl Word {
                 });
             }
             while *l <= i {
-                let (next, hold) = self.reconstitute(font, *l, i, font.bchar, NON_CHAR);
+                let (next, hold) = self.reconstitute(font, *l, i, self.font_bchar, self.non_char);
                 *l = next + 1;
                 pre.extend(hold);
             }
@@ -2334,11 +2390,11 @@ impl Word {
                 *l -= 1;
                 c = self.hu[*l];
                 c_loc = *l;
-                self.hu[*l] = 256;
+                self.hu[*l] = self.boundary;
             }
             while *l < *j {
                 loop {
-                    let (next, hold) = self.reconstitute(font, *l, hn, bchar, NON_CHAR);
+                    let (next, hold) = self.reconstitute(font, *l, hn, bchar, self.non_char);
                     *l = next + 1;
                     if c_loc > 0 {
                         self.hu[c_loc] = c;
@@ -2352,7 +2408,7 @@ impl Word {
                 while *l > *j {
                     // §917: append characters of `hu[j..]` to `major_tail`,
                     // advancing `j`.
-                    let (next, hold) = self.reconstitute(font, *j, hn, bchar, NON_CHAR);
+                    let (next, hold) = self.reconstitute(font, *j, hn, bchar, self.non_char);
                     *j = next + 1;
                     replace.extend(hold);
                 }
@@ -2382,7 +2438,7 @@ impl Word {
         if self.hyf[j] % 2 == 1 {
             hchar
         } else {
-            NON_CHAR
+            self.non_char
         }
     }
 
@@ -2473,8 +2529,13 @@ impl Word {
             for &c in &self.init_list {
                 hold.push(Tmp::Char(c, self.init_org));
             }
-        } else if cur.cur_l < NON_CHAR {
-            hold.push(Tmp::Char(byte(cur.cur_l), self.ho[j]));
+        } else if cur.cur_l < self.non_char {
+            // (`XeTeX` appends a character node for a left boundary
+            // here, `max_hyph_char`, past its TFM fonts' characters:
+            // partex's character nodes cannot hold it, and leave it out)
+            if let Ok(c) = u8::try_from(cur.cur_l) {
+                hold.push(Tmp::Char(c, self.ho[j]));
+            }
         }
         let mut cur_rh = self.set_cur_r(&mut cur, j, n, bchar, hchar);
         'continue_: loop {
@@ -2482,7 +2543,7 @@ impl Word {
             // update the data structures, possibly advancing `j`; continue
             // until the cursor moves.
             'done: {
-                let mut k = if cur.cur_l == NON_CHAR {
+                let mut k = if cur.cur_l == self.non_char {
                     match font.bchar_label {
                         Some(k) => usize::from(k),
                         None => break 'done,
@@ -2501,25 +2562,29 @@ impl Word {
                     }
                     k
                 }; // now `k` is the starting address of the lig/kern program
-                let test_char = if cur_rh < NON_CHAR { cur_rh } else { cur.cur_r };
+                let test_char = if cur_rh < self.non_char {
+                    cur_rh
+                } else {
+                    cur.cur_r
+                };
                 loop {
                     let q = font.lig_kerns[k];
                     if i32::from(q.next) == test_char && q.skip <= LigKern::STOP {
-                        if cur_rh < NON_CHAR {
+                        if cur_rh < self.non_char {
                             self.hyphen_passed = j;
-                            hchar = NON_CHAR;
-                            cur_rh = NON_CHAR;
+                            hchar = self.non_char;
+                            cur_rh = self.non_char;
                             continue 'continue_;
                         }
-                        if hchar < NON_CHAR && self.hyf[j] % 2 == 1 {
+                        if hchar < self.non_char && self.hyf[j] % 2 == 1 {
                             self.hyphen_passed = j;
-                            hchar = NON_CHAR;
+                            hchar = self.non_char;
                         }
                         if q.op < LigKern::KERN {
                             // §911: carry out a ligature replacement,
                             // updating the cursor structure and possibly
                             // advancing `j`.
-                            if cur.cur_l == NON_CHAR {
+                            if cur.cur_l == self.non_char {
                                 cur.lft_hit = true;
                             }
                             if j == n && cur.lig_stack.is_empty() {
@@ -2539,7 +2604,7 @@ impl Word {
                                         top.0 = rem;
                                     } else if j == n {
                                         cur.lig_stack.push((rem, None));
-                                        bchar = NON_CHAR;
+                                        bchar = self.non_char;
                                     } else {
                                         cur.lig_stack.push((rem, Some(byte(self.u(j + 1)))));
                                     }
@@ -2583,10 +2648,10 @@ impl Word {
                         break 'done; // this kern will be inserted below
                     }
                     if q.skip >= LigKern::STOP {
-                        if cur_rh == NON_CHAR {
+                        if cur_rh == self.non_char {
                             break 'done;
                         }
-                        cur_rh = NON_CHAR;
+                        cur_rh = self.non_char;
                         continue 'continue_;
                     }
                     k += usize::from(q.skip) + 1;

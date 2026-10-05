@@ -3,7 +3,13 @@
 //! The section comments are where tex.web (or else pdftex.web) defines each
 //! name; values are pdfTeX's, whose layout is a superset of TeX's.
 
-#![allow(dead_code, clippy::identity_op, clippy::eq_op, clippy::double_parens)]
+#![allow(
+    dead_code,
+    unused_parens,
+    clippy::identity_op,
+    clippy::eq_op,
+    clippy::double_parens
+)]
 
 /// pdfTeX §2
 pub const ETEX_VERSION: i32 = 2;
@@ -11,8 +17,8 @@ pub const ETEX_VERSION: i32 = 2;
 pub const PDFTEX_VERSION: i32 = 140;
 /// pdfTeX §2
 pub const TEXXET_CODE: i32 = 0;
-/// pdfTeX §2
-pub const ETEX_STATES: i32 = 1;
+/// `XeTeX` §2
+pub const ETEX_STATES: i32 = 12;
 /// §6
 pub const START_OF_TEX: i32 = 1;
 /// §6
@@ -449,80 +455,80 @@ pub const MIN_INTERNAL: i32 = 68;
 pub const CHAR_GIVEN: i32 = 68;
 /// §208
 pub const MATH_GIVEN: i32 = 69;
-/// §208
-pub const LAST_ITEM: i32 = 70;
-/// §208
-pub const MAX_NON_PREFIXED_COMMAND: i32 = 70;
-/// §209
-pub const TOKS_REGISTER: i32 = 71;
-/// §209
-pub const ASSIGN_TOKS: i32 = 72;
-/// §209
-pub const ASSIGN_INT: i32 = 73;
-/// §209
-pub const ASSIGN_DIMEN: i32 = 74;
-/// §209
-pub const ASSIGN_GLUE: i32 = 75;
-/// §209
-pub const ASSIGN_MU_GLUE: i32 = 76;
-/// §209
-pub const ASSIGN_FONT_DIMEN: i32 = 77;
-/// §209
-pub const ASSIGN_FONT_INT: i32 = 78;
-/// §209
-pub const SET_AUX: i32 = 79;
-/// §209
-pub const SET_PREV_GRAF: i32 = 80;
-/// §209
-pub const SET_PAGE_DIMEN: i32 = 81;
-/// §209
-pub const SET_PAGE_INT: i32 = 82;
-/// §209
-pub const SET_BOX_DIMEN: i32 = 83;
-/// §209
-pub const SET_SHAPE: i32 = 84;
-/// §209
-pub const DEF_CODE: i32 = 85;
-/// §209
-pub const DEF_FAMILY: i32 = 86;
-/// §209
-pub const SET_FONT: i32 = 87;
-/// §209
-pub const DEF_FONT: i32 = 88;
-/// §209
-pub const REGISTER: i32 = 89;
-/// §209
-pub const MAX_INTERNAL: i32 = 89;
-/// §209
-pub const ADVANCE: i32 = 90;
-/// §209
-pub const MULTIPLY: i32 = 91;
-/// §209
-pub const DIVIDE: i32 = 92;
-/// §209
-pub const PREFIX: i32 = 93;
-/// §209
-pub const LET: i32 = 94;
-/// §209
-pub const SHORTHAND_DEF: i32 = 95;
-/// §209
-pub const READ_TO_CS: i32 = 96;
-/// §209
-pub const DEF: i32 = 97;
-/// §209
-pub const SET_BOX: i32 = 98;
-/// §209
-pub const HYPH_DATA: i32 = 99;
-/// §209
-pub const SET_INTERACTION: i32 = 100;
+/// `XeTeX` §234
+pub const LAST_ITEM: i32 = 71;
+/// `XeTeX` §234
+pub const MAX_NON_PREFIXED_COMMAND: i32 = 71;
+/// `XeTeX` §235
+pub const TOKS_REGISTER: i32 = 72;
+/// `XeTeX` §235
+pub const ASSIGN_TOKS: i32 = 73;
+/// `XeTeX` §235
+pub const ASSIGN_INT: i32 = 74;
+/// `XeTeX` §235
+pub const ASSIGN_DIMEN: i32 = 75;
+/// `XeTeX` §235
+pub const ASSIGN_GLUE: i32 = 76;
+/// `XeTeX` §235
+pub const ASSIGN_MU_GLUE: i32 = 77;
+/// `XeTeX` §235
+pub const ASSIGN_FONT_DIMEN: i32 = 78;
+/// `XeTeX` §235
+pub const ASSIGN_FONT_INT: i32 = 79;
+/// `XeTeX` §235
+pub const SET_AUX: i32 = 80;
+/// `XeTeX` §235
+pub const SET_PREV_GRAF: i32 = 81;
+/// `XeTeX` §235
+pub const SET_PAGE_DIMEN: i32 = 82;
+/// `XeTeX` §235
+pub const SET_PAGE_INT: i32 = 83;
+/// `XeTeX` §235
+pub const SET_BOX_DIMEN: i32 = 84;
+/// `XeTeX` §235
+pub const SET_SHAPE: i32 = 85;
+/// `XeTeX` §235
+pub const DEF_CODE: i32 = 86;
+/// `XeTeX` §235
+pub const DEF_FAMILY: i32 = 88;
+/// `XeTeX` §235
+pub const SET_FONT: i32 = 89;
+/// `XeTeX` §235
+pub const DEF_FONT: i32 = 90;
+/// `XeTeX` §235
+pub const REGISTER: i32 = 91;
+/// `XeTeX` §235
+pub const MAX_INTERNAL: i32 = 91;
+/// `XeTeX` §235
+pub const ADVANCE: i32 = 92;
+/// `XeTeX` §235
+pub const MULTIPLY: i32 = 93;
+/// `XeTeX` §235
+pub const DIVIDE: i32 = 94;
+/// `XeTeX` §235
+pub const PREFIX: i32 = 95;
+/// `XeTeX` §235
+pub const LET: i32 = 96;
+/// `XeTeX` §235
+pub const SHORTHAND_DEF: i32 = 97;
+/// `XeTeX` §235
+pub const READ_TO_CS: i32 = 98;
+/// `XeTeX` §235
+pub const DEF: i32 = 99;
+/// `XeTeX` §235
+pub const SET_BOX: i32 = 100;
+/// `XeTeX` §235
+pub const HYPH_DATA: i32 = 101;
+/// `XeTeX` §235
+pub const SET_INTERACTION: i32 = 102;
 /// pdfTeX §227
-pub const LETTERSPACE_FONT: i32 = 101;
+pub const LETTERSPACE_FONT: i32 = SET_INTERACTION + 1;
 /// pdfTeX §227
-pub const PDF_COPY_FONT: i32 = 102;
-/// pdfTeX §227
-pub const PARTOKEN_NAME: i32 = 103;
-/// §209
-pub const MAX_COMMAND: i32 = 103;
+pub const PDF_COPY_FONT: i32 = SET_INTERACTION + 2;
+/// `XeTeX` §235
+pub const PARTOKEN_NAME: i32 = SET_INTERACTION + 3;
+/// `XeTeX` §235
+pub const MAX_COMMAND: i32 = SET_INTERACTION + 3;
 /// §210
 pub const UNDEFINED_CS: i32 = MAX_COMMAND + 1;
 /// §210
@@ -651,14 +657,14 @@ pub const SPACE_SKIP_CODE: i32 = 12;
 pub const XSPACE_SKIP_CODE: i32 = 13;
 /// §224
 pub const PAR_FILL_SKIP_CODE: i32 = 14;
-/// §224
-pub const THIN_MU_SKIP_CODE: i32 = 15;
-/// §224
-pub const MED_MU_SKIP_CODE: i32 = 16;
-/// §224
-pub const THICK_MU_SKIP_CODE: i32 = 17;
-/// §224
-pub const GLUE_PARS: i32 = 18;
+/// `XeTeX` §250
+pub const THIN_MU_SKIP_CODE: i32 = 16;
+/// `XeTeX` §250
+pub const MED_MU_SKIP_CODE: i32 = 17;
+/// `XeTeX` §250
+pub const THICK_MU_SKIP_CODE: i32 = 18;
+/// `XeTeX` §250
+pub const GLUE_PARS: i32 = 19;
 /// §224
 pub const SKIP_BASE: i32 = GLUE_BASE + GLUE_PARS;
 /// §224
@@ -703,8 +709,8 @@ pub const PDF_TOKS: i32 = PDFTEX_FIRST_LOC + 4;
 pub const ETEX_TOKS_BASE: i32 = PDF_TOKS;
 /// pdfTeX §248
 pub const EVERY_EOF_LOC: i32 = ETEX_TOKS_BASE;
-/// pdfTeX §248
-pub const ETEX_TOKS: i32 = ETEX_TOKS_BASE + 1;
+/// `XeTeX` §256
+pub const ETEX_TOKS: i32 = XETEX_INTER_CHAR_LOC + 1;
 /// §230
 pub const TOKS_BASE: i32 = ETEX_TOKS;
 /// pdfTeX §248
@@ -731,8 +737,8 @@ pub const XCHR_CODE_BASE: i32 = XORD_CODE_BASE + 1;
 pub const XPRN_CODE_BASE: i32 = XCHR_CODE_BASE + 1;
 /// §230
 pub const MATH_FONT_BASE: i32 = XPRN_CODE_BASE + 1;
-/// §230
-pub const CAT_CODE_BASE: i32 = MATH_FONT_BASE + 48;
+/// `XeTeX` §256
+pub const CAT_CODE_BASE: i32 = MATH_FONT_BASE + NUMBER_MATH_FONTS;
 /// §230
 pub const LC_CODE_BASE: i32 = CAT_CODE_BASE + 256;
 /// §230
@@ -985,8 +991,8 @@ pub const SAVING_VDISCARDS_CODE: i32 = ETEX_INT_BASE + 7;
 pub const SAVING_HYPH_CODES_CODE: i32 = ETEX_INT_BASE + 8;
 /// pdfTeX §254
 pub const IGNORE_PRIMITIVE_ERROR_CODE: i32 = ETEX_INT_BASE + 9;
-/// pdfTeX §254
-pub const ETEX_STATE_CODE: i32 = ETEX_INT_BASE + 10;
+/// `XeTeX` §262
+pub const ETEX_STATE_CODE: i32 = ETEX_INT_BASE + 14;
 /// pdfTeX §254
 pub const ETEX_INT_PARS: i32 = ETEX_STATE_CODE + ETEX_STATES;
 /// pdfTeX §254
@@ -1131,34 +1137,34 @@ pub const MATH_SHIFT_GROUP: i32 = 15;
 pub const MATH_LEFT_GROUP: i32 = 16;
 /// §269
 pub const MAX_GROUP_CODE: i32 = 16;
-/// §289
-pub const CS_TOKEN_FLAG: i32 = 0o7777;
-/// §289
-pub const LEFT_BRACE_TOKEN: i32 = 0o0400;
-/// §289
-pub const LEFT_BRACE_LIMIT: i32 = 0o1000;
-/// §289
-pub const RIGHT_BRACE_TOKEN: i32 = 0o1000;
-/// §289
-pub const RIGHT_BRACE_LIMIT: i32 = 0o1400;
-/// §289
-pub const MATH_SHIFT_TOKEN: i32 = 0o1400;
-/// §289
-pub const TAB_TOKEN: i32 = 0o2000;
-/// §289
-pub const OUT_PARAM_TOKEN: i32 = 0o2400;
-/// §289
-pub const SPACE_TOKEN: i32 = 0o5040;
-/// §289
-pub const LETTER_TOKEN: i32 = 0o5400;
-/// §289
-pub const OTHER_TOKEN: i32 = 0o6000;
-/// §289
-pub const MATCH_TOKEN: i32 = 0o6400;
-/// §289
-pub const END_MATCH_TOKEN: i32 = 0o7000;
-/// pdfTeX §311
-pub const PROTECTED_TOKEN: i32 = 0o7001;
+/// `XeTeX` §319
+pub const CS_TOKEN_FLAG: i32 = 0x1ffffff;
+/// `XeTeX` §319
+pub const LEFT_BRACE_TOKEN: i32 = 0x200000;
+/// `XeTeX` §319
+pub const LEFT_BRACE_LIMIT: i32 = 0x400000;
+/// `XeTeX` §319
+pub const RIGHT_BRACE_TOKEN: i32 = 0x400000;
+/// `XeTeX` §319
+pub const RIGHT_BRACE_LIMIT: i32 = 0x600000;
+/// `XeTeX` §319
+pub const MATH_SHIFT_TOKEN: i32 = 0x600000;
+/// `XeTeX` §319
+pub const TAB_TOKEN: i32 = 0x800000;
+/// `XeTeX` §319
+pub const OUT_PARAM_TOKEN: i32 = 0xa00000;
+/// `XeTeX` §319
+pub const SPACE_TOKEN: i32 = 0x1400020;
+/// `XeTeX` §319
+pub const LETTER_TOKEN: i32 = 0x1600000;
+/// `XeTeX` §319
+pub const OTHER_TOKEN: i32 = 0x1800000;
+/// `XeTeX` §319
+pub const MATCH_TOKEN: i32 = 0x1a00000;
+/// `XeTeX` §319
+pub const END_MATCH_TOKEN: i32 = 0x1c00000;
+/// `XeTeX` §319
+pub const PROTECTED_TOKEN: i32 = END_MATCH_TOKEN + 1;
 /// §303
 pub const MID_LINE: i32 = 1;
 /// §303
@@ -1185,28 +1191,28 @@ pub const U_TEMPLATE: i32 = 1;
 pub const V_TEMPLATE: i32 = 2;
 /// §307
 pub const BACKED_UP: i32 = 3;
-/// §307
-pub const INSERTED: i32 = 4;
-/// §307
-pub const MACRO: i32 = 5;
-/// §307
-pub const OUTPUT_TEXT: i32 = 6;
-/// §307
-pub const EVERY_PAR_TEXT: i32 = 7;
-/// §307
-pub const EVERY_MATH_TEXT: i32 = 8;
-/// §307
-pub const EVERY_DISPLAY_TEXT: i32 = 9;
-/// §307
-pub const EVERY_HBOX_TEXT: i32 = 10;
-/// §307
-pub const EVERY_VBOX_TEXT: i32 = 11;
-/// §307
-pub const EVERY_JOB_TEXT: i32 = 12;
-/// §307
-pub const EVERY_CR_TEXT: i32 = 13;
-/// §307
-pub const MARK_TEXT: i32 = 14;
+/// `XeTeX` §337
+pub const INSERTED: i32 = 5;
+/// `XeTeX` §337
+pub const MACRO: i32 = 6;
+/// `XeTeX` §337
+pub const OUTPUT_TEXT: i32 = 7;
+/// `XeTeX` §337
+pub const EVERY_PAR_TEXT: i32 = 8;
+/// `XeTeX` §337
+pub const EVERY_MATH_TEXT: i32 = 9;
+/// `XeTeX` §337
+pub const EVERY_DISPLAY_TEXT: i32 = 10;
+/// `XeTeX` §337
+pub const EVERY_HBOX_TEXT: i32 = 11;
+/// `XeTeX` §337
+pub const EVERY_VBOX_TEXT: i32 = 12;
+/// `XeTeX` §337
+pub const EVERY_JOB_TEXT: i32 = 13;
+/// `XeTeX` §337
+pub const EVERY_CR_TEXT: i32 = 14;
+/// `XeTeX` §337
+pub const MARK_TEXT: i32 = 15;
 /// pdfTeX §329
 pub const ETEX_TEXT_OFFSET: i32 = OUTPUT_ROUTINE_LOC - OUTPUT_TEXT;
 /// pdfTeX §329
@@ -1217,8 +1223,8 @@ pub const WRITE_TEXT: i32 = TOKS_BASE - ETEX_TEXT_OFFSET;
 pub const SWITCH: i32 = 25;
 /// §341
 pub const START_CS: i32 = 26;
-/// §358
-pub const NO_EXPAND_FLAG: i32 = 257;
+/// `XeTeX` §388
+pub const NO_EXPAND_FLAG: i32 = SPECIAL_CHAR;
 /// pdfTeX §408
 pub const MARKS_CODE: i32 = 5;
 /// §382
@@ -1781,10 +1787,10 @@ pub const CRAMPED: i32 = 1;
 pub const CHOICE_NODE: i32 = UNSET_NODE + 2;
 /// §699
 pub const TEXT_SIZE: i32 = 0;
-/// §699
-pub const SCRIPT_SIZE: i32 = 16;
-/// §699
-pub const SCRIPT_SCRIPT_SIZE: i32 = 32;
+/// `XeTeX` §12
+pub const SCRIPT_SIZE: i32 = NUMBER_MATH_FAMILIES;
+/// `XeTeX` §12
+pub const SCRIPT_SCRIPT_SIZE: i32 = NUMBER_MATH_FAMILIES + NUMBER_MATH_FAMILIES;
 /// §700
 pub const TOTAL_MATHSY_PARAMS: i32 = 22;
 /// §701
@@ -1799,10 +1805,10 @@ pub const CHECK_DIMENSIONS: i32 = 82;
 pub const DELETE_Q: i32 = 83;
 /// §770
 pub const ALIGN_STACK_NODE_SIZE: i32 = 6;
-/// §780
-pub const SPAN_CODE: i32 = 256;
-/// §780
-pub const CR_CODE: i32 = 257;
+/// `XeTeX` §828
+pub const SPAN_CODE: i32 = SPECIAL_CHAR;
+/// `XeTeX` §828
+pub const CR_CODE: i32 = SPAN_CODE + 1;
 /// §780
 pub const CR_CR_CODE: i32 = CR_CODE + 1;
 /// §780
@@ -2157,3 +2163,392 @@ pub const FIRE_UP_DONE: i32 = 2;
 pub const DESTROY_MARKS: i32 = 3;
 /// pdfTeX §1842
 pub const ACTIVE_NODE_SIZE_EXTENDED: i32 = 5;
+/// `XeTeX` §319
+pub const MAX_CHAR_VAL: i32 = 0x200000;
+/// `XeTeX` §234
+pub const XETEX_MATH_GIVEN: i32 = 70;
+/// `XeTeX` §235
+pub const XETEX_DEF_CODE: i32 = 87;
+/// `XeTeX` §250
+pub const XETEX_LINEBREAK_SKIP_CODE: i32 = 15;
+/// `XeTeX` §256
+pub const XETEX_INTER_CHAR_LOC: i32 = EVERY_EOF_LOC + 1;
+/// `XeTeX` §12
+pub const NUMBER_MATH_FAMILIES: i32 = 256;
+/// `XeTeX` §12
+pub const NUMBER_MATH_FONTS: i32 =
+    NUMBER_MATH_FAMILIES + NUMBER_MATH_FAMILIES + NUMBER_MATH_FAMILIES;
+/// `XeTeX` §12
+pub const MATH_FONT_BIGGEST: i32 = NUMBER_MATH_FONTS - 1;
+/// `XeTeX` §337
+pub const BACKED_UP_CHAR: i32 = 4;
+/// `XeTeX` §337
+pub const INTER_CHAR_TEXT: i32 = XETEX_INTER_CHAR_LOC - ETEX_TEXT_OFFSET;
+/// `XeTeX` §12
+pub const TOO_BIG_CHAR: i32 = 65536;
+/// `XeTeX` §12
+pub const BIGGEST_USV: i32 = 0x10ffff;
+/// `XeTeX` §12
+pub const TOO_BIG_USV: i32 = 0x110000;
+/// `XeTeX` §12
+pub const NUMBER_USVS: i32 = 0x110000;
+/// `XeTeX` §12
+pub const SPECIAL_CHAR: i32 = 0x110001;
+/// `XeTeX` §2
+pub const XETEX_VERSION: i32 = 0;
+/// `XeTeX` §2
+pub const XETEX_DASH_BREAK_CODE: i32 = 1;
+/// `XeTeX` §2
+pub const XETEX_UPWARDS_CODE: i32 = 2;
+/// `XeTeX` §2
+pub const XETEX_USE_GLYPH_METRICS_CODE: i32 = 3;
+/// `XeTeX` §2
+pub const XETEX_INTER_CHAR_TOKENS_CODE: i32 = 4;
+/// `XeTeX` §2
+pub const XETEX_INPUT_NORMALIZATION_CODE: i32 = 5;
+/// `XeTeX` §2
+pub const XETEX_DEFAULT_INPUT_MODE_CODE: i32 = 6;
+/// `XeTeX` §2
+pub const XETEX_INPUT_MODE_AUTO: i32 = 0;
+/// `XeTeX` §2
+pub const XETEX_INPUT_MODE_UTF8: i32 = 1;
+/// `XeTeX` §2
+pub const XETEX_INPUT_MODE_UTF16BE: i32 = 2;
+/// `XeTeX` §2
+pub const XETEX_INPUT_MODE_UTF16LE: i32 = 3;
+/// `XeTeX` §2
+pub const XETEX_INPUT_MODE_RAW: i32 = 4;
+/// `XeTeX` §2
+pub const XETEX_INPUT_MODE_ICU_MAPPING: i32 = 5;
+/// `XeTeX` §2
+pub const XETEX_DEFAULT_INPUT_ENCODING_CODE: i32 = 7;
+/// `XeTeX` §2
+pub const XETEX_TRACING_FONTS_CODE: i32 = 8;
+/// `XeTeX` §2
+pub const XETEX_INTERWORD_SPACE_SHAPING_CODE: i32 = 9;
+/// `XeTeX` §2
+pub const XETEX_GENERATE_ACTUAL_TEXT_CODE: i32 = 10;
+/// `XeTeX` §2
+pub const XETEX_HYPHENATABLE_LENGTH_CODE: i32 = 11;
+/// `XeTeX` §12
+pub const BIGGEST_REG: i32 = 255;
+/// `XeTeX` §12
+pub const NUMBER_REGS: i32 = 256;
+/// `XeTeX` §12
+pub const FONT_BIGGEST: i32 = 255;
+/// `XeTeX` §12
+pub const NUMBER_FONTS: i32 = FONT_BIGGEST - FONT_BASE + 2;
+/// `XeTeX` §12
+pub const BIGGEST_LANG: i32 = 255;
+/// `XeTeX` §12
+pub const TOO_BIG_LANG: i32 = 256;
+/// `XeTeX` §12
+pub const HYPHENATABLE_LENGTH_LIMIT: i32 = 4095;
+/// `XeTeX` §80
+pub const OUTPUT_FAILURE: i32 = 4;
+/// `XeTeX` §169
+pub const NATIVE_WORD_NODE: i32 = 40;
+/// `XeTeX` §169
+pub const NATIVE_WORD_NODE_AT: i32 = 41;
+/// `XeTeX` §169
+pub const GLYPH_NODE: i32 = 42;
+/// `XeTeX` §170
+pub const PIC_NODE: i32 = 43;
+/// `XeTeX` §170
+pub const PDF_NODE: i32 = 44;
+/// `XeTeX` §179
+pub const SPACE_ADJUSTMENT: i32 = 3;
+/// `XeTeX` §258
+pub const VAR_FAM_CLASS: i32 = 7;
+/// `XeTeX` §258
+pub const ACTIVE_MATH_CHAR: i32 = 0x1fffff;
+/// `XeTeX` §262
+pub const SUPPRESS_FONTNOTFOUND_ERROR_CODE: i32 = ETEX_INT_BASE + 10;
+/// `XeTeX` §262
+pub const XETEX_LINEBREAK_LOCALE_CODE: i32 = ETEX_INT_BASE + 11;
+/// `XeTeX` §262
+pub const XETEX_LINEBREAK_PENALTY_CODE: i32 = ETEX_INT_BASE + 12;
+/// `XeTeX` §262
+pub const XETEX_PROTRUDE_CHARS_CODE: i32 = ETEX_INT_BASE + 13;
+/// `XeTeX` §447
+pub const CHAR_CLASS_LIMIT: i32 = 0x1000;
+/// `XeTeX` §447
+pub const CHAR_CLASS_IGNORED: i32 = CHAR_CLASS_LIMIT;
+/// `XeTeX` §447
+pub const CHAR_CLASS_BOUNDARY: i32 = (CHAR_CLASS_IGNORED - 1);
+/// `XeTeX` §450
+pub const XETEX_INT: i32 = ETEX_EXPR + 4;
+/// `XeTeX` §450
+pub const XETEX_VERSION_CODE: i32 = XETEX_INT + 0;
+/// `XeTeX` §450
+pub const XETEX_COUNT_GLYPHS_CODE: i32 = XETEX_INT + 1;
+/// `XeTeX` §450
+pub const XETEX_COUNT_VARIATIONS_CODE: i32 = XETEX_INT + 2;
+/// `XeTeX` §450
+pub const XETEX_VARIATION_CODE: i32 = XETEX_INT + 3;
+/// `XeTeX` §450
+pub const XETEX_FIND_VARIATION_BY_NAME_CODE: i32 = XETEX_INT + 4;
+/// `XeTeX` §450
+pub const XETEX_VARIATION_MIN_CODE: i32 = XETEX_INT + 5;
+/// `XeTeX` §450
+pub const XETEX_VARIATION_MAX_CODE: i32 = XETEX_INT + 6;
+/// `XeTeX` §450
+pub const XETEX_VARIATION_DEFAULT_CODE: i32 = XETEX_INT + 7;
+/// `XeTeX` §450
+pub const XETEX_COUNT_FEATURES_CODE: i32 = XETEX_INT + 8;
+/// `XeTeX` §450
+pub const XETEX_FEATURE_CODE_CODE: i32 = XETEX_INT + 9;
+/// `XeTeX` §450
+pub const XETEX_FIND_FEATURE_BY_NAME_CODE: i32 = XETEX_INT + 10;
+/// `XeTeX` §450
+pub const XETEX_IS_EXCLUSIVE_FEATURE_CODE: i32 = XETEX_INT + 11;
+/// `XeTeX` §450
+pub const XETEX_COUNT_SELECTORS_CODE: i32 = XETEX_INT + 12;
+/// `XeTeX` §450
+pub const XETEX_SELECTOR_CODE_CODE: i32 = XETEX_INT + 13;
+/// `XeTeX` §450
+pub const XETEX_FIND_SELECTOR_BY_NAME_CODE: i32 = XETEX_INT + 14;
+/// `XeTeX` §450
+pub const XETEX_IS_DEFAULT_SELECTOR_CODE: i32 = XETEX_INT + 15;
+/// `XeTeX` §450
+pub const XETEX_OT_COUNT_SCRIPTS_CODE: i32 = XETEX_INT + 16;
+/// `XeTeX` §450
+pub const XETEX_OT_COUNT_LANGUAGES_CODE: i32 = XETEX_INT + 17;
+/// `XeTeX` §450
+pub const XETEX_OT_COUNT_FEATURES_CODE: i32 = XETEX_INT + 18;
+/// `XeTeX` §450
+pub const XETEX_OT_SCRIPT_CODE: i32 = XETEX_INT + 19;
+/// `XeTeX` §450
+pub const XETEX_OT_LANGUAGE_CODE: i32 = XETEX_INT + 20;
+/// `XeTeX` §450
+pub const XETEX_OT_FEATURE_CODE: i32 = XETEX_INT + 21;
+/// `XeTeX` §450
+pub const XETEX_MAP_CHAR_TO_GLYPH_CODE: i32 = XETEX_INT + 22;
+/// `XeTeX` §450
+pub const XETEX_GLYPH_INDEX_CODE: i32 = XETEX_INT + 23;
+/// `XeTeX` §450
+pub const XETEX_FONT_TYPE_CODE: i32 = XETEX_INT + 24;
+/// `XeTeX` §450
+pub const XETEX_FIRST_CHAR_CODE: i32 = XETEX_INT + 25;
+/// `XeTeX` §450
+pub const XETEX_LAST_CHAR_CODE: i32 = XETEX_INT + 26;
+/// `XeTeX` §450
+pub const XETEX_PDF_PAGE_COUNT_CODE: i32 = XETEX_INT + 27;
+/// `XeTeX` §450
+pub const XETEX_LAST_ITEM_CODES: i32 = XETEX_INT + 27;
+/// `XeTeX` §450
+pub const XETEX_DIM: i32 = XETEX_LAST_ITEM_CODES + 1;
+/// `XeTeX` §450
+pub const XETEX_GLYPH_BOUNDS_CODE: i32 = XETEX_DIM + 0;
+/// `XeTeX` §450
+pub const XETEX_LAST_DIM_CODES: i32 = XETEX_DIM + 0;
+/// `XeTeX` §503
+pub const XETEX_FIRST_EXPAND_CODE: i32 = JOB_NAME_CODE + 1;
+/// `XeTeX` §503
+pub const XETEX_REVISION_CODE: i32 = XETEX_FIRST_EXPAND_CODE + 0;
+/// `XeTeX` §503
+pub const XETEX_VARIATION_NAME_CODE: i32 = XETEX_FIRST_EXPAND_CODE + 1;
+/// `XeTeX` §503
+pub const XETEX_FEATURE_NAME_CODE: i32 = XETEX_FIRST_EXPAND_CODE + 2;
+/// `XeTeX` §503
+pub const XETEX_SELECTOR_NAME_CODE: i32 = XETEX_FIRST_EXPAND_CODE + 3;
+/// `XeTeX` §503
+pub const XETEX_GLYPH_NAME_CODE: i32 = XETEX_FIRST_EXPAND_CODE + 4;
+/// `XeTeX` §503
+pub const XETEX_UCHAR_CODE: i32 = XETEX_FIRST_EXPAND_CODE + 5;
+/// `XeTeX` §503
+pub const XETEX_UCHARCAT_CODE: i32 = XETEX_FIRST_EXPAND_CODE + 6;
+/// `XeTeX` §503
+pub const XETEX_CONVERT_CODES: i32 = XETEX_FIRST_EXPAND_CODE + 7;
+/// `XeTeX` §522
+pub const IF_PRIMITIVE_CODE: i32 = 21;
+/// `XeTeX` §584
+pub const OTGR_FONT_FLAG: i32 = 0xfffe;
+/// `XeTeX` §584
+pub const AAT_FONT_FLAG: i32 = 0xffff;
+/// `XeTeX` §622
+pub const DEFINE_NATIVE_FONT: i32 = 252;
+/// `XeTeX` §622
+pub const SET_GLYPHS: i32 = 253;
+/// `XeTeX` §622
+pub const SET_TEXT_AND_GLYPHS: i32 = 254;
+/// `XeTeX` §729
+pub const FIXED_ACC: i32 = 1;
+/// `XeTeX` §729
+pub const BOTTOM_ACC: i32 = 2;
+/// `XeTeX` §742
+pub const SCRIPTPERCENTSCALEDOWN: i32 = 0;
+/// `XeTeX` §742
+pub const SCRIPTSCRIPTPERCENTSCALEDOWN: i32 = 1;
+/// `XeTeX` §742
+pub const DELIMITEDSUBFORMULAMINHEIGHT: i32 = 2;
+/// `XeTeX` §742
+pub const DISPLAYOPERATORMINHEIGHT: i32 = 3;
+/// `XeTeX` §742
+pub const MATHLEADING: i32 = 4;
+/// `XeTeX` §742
+pub const FIRSTMATHVALUERECORD: i32 = MATHLEADING;
+/// `XeTeX` §742
+pub const AXISHEIGHT: i32 = 5;
+/// `XeTeX` §742
+pub const ACCENTBASEHEIGHT: i32 = 6;
+/// `XeTeX` §742
+pub const FLATTENEDACCENTBASEHEIGHT: i32 = 7;
+/// `XeTeX` §742
+pub const SUBSCRIPTSHIFTDOWN: i32 = 8;
+/// `XeTeX` §742
+pub const SUBSCRIPTTOPMAX: i32 = 9;
+/// `XeTeX` §742
+pub const SUBSCRIPTBASELINEDROPMIN: i32 = 10;
+/// `XeTeX` §742
+pub const SUPERSCRIPTSHIFTUP: i32 = 11;
+/// `XeTeX` §742
+pub const SUPERSCRIPTSHIFTUPCRAMPED: i32 = 12;
+/// `XeTeX` §742
+pub const SUPERSCRIPTBOTTOMMIN: i32 = 13;
+/// `XeTeX` §742
+pub const SUPERSCRIPTBASELINEDROPMAX: i32 = 14;
+/// `XeTeX` §742
+pub const SUBSUPERSCRIPTGAPMIN: i32 = 15;
+/// `XeTeX` §742
+pub const SUPERSCRIPTBOTTOMMAXWITHSUBSCRIPT: i32 = 16;
+/// `XeTeX` §742
+pub const SPACEAFTERSCRIPT: i32 = 17;
+/// `XeTeX` §742
+pub const UPPERLIMITGAPMIN: i32 = 18;
+/// `XeTeX` §742
+pub const UPPERLIMITBASELINERISEMIN: i32 = 19;
+/// `XeTeX` §742
+pub const LOWERLIMITGAPMIN: i32 = 20;
+/// `XeTeX` §742
+pub const LOWERLIMITBASELINEDROPMIN: i32 = 21;
+/// `XeTeX` §742
+pub const STACKTOPSHIFTUP: i32 = 22;
+/// `XeTeX` §742
+pub const STACKTOPDISPLAYSTYLESHIFTUP: i32 = 23;
+/// `XeTeX` §742
+pub const STACKBOTTOMSHIFTDOWN: i32 = 24;
+/// `XeTeX` §742
+pub const STACKBOTTOMDISPLAYSTYLESHIFTDOWN: i32 = 25;
+/// `XeTeX` §742
+pub const STACKGAPMIN: i32 = 26;
+/// `XeTeX` §742
+pub const STACKDISPLAYSTYLEGAPMIN: i32 = 27;
+/// `XeTeX` §742
+pub const STRETCHSTACKTOPSHIFTUP: i32 = 28;
+/// `XeTeX` §742
+pub const STRETCHSTACKBOTTOMSHIFTDOWN: i32 = 29;
+/// `XeTeX` §742
+pub const STRETCHSTACKGAPABOVEMIN: i32 = 30;
+/// `XeTeX` §742
+pub const STRETCHSTACKGAPBELOWMIN: i32 = 31;
+/// `XeTeX` §742
+pub const FRACTIONNUMERATORSHIFTUP: i32 = 32;
+/// `XeTeX` §742
+pub const FRACTIONNUMERATORDISPLAYSTYLESHIFTUP: i32 = 33;
+/// `XeTeX` §742
+pub const FRACTIONDENOMINATORSHIFTDOWN: i32 = 34;
+/// `XeTeX` §742
+pub const FRACTIONDENOMINATORDISPLAYSTYLESHIFTDOWN: i32 = 35;
+/// `XeTeX` §742
+pub const FRACTIONNUMERATORGAPMIN: i32 = 36;
+/// `XeTeX` §742
+pub const FRACTIONNUMDISPLAYSTYLEGAPMIN: i32 = 37;
+/// `XeTeX` §742
+pub const FRACTIONRULETHICKNESS: i32 = 38;
+/// `XeTeX` §742
+pub const FRACTIONDENOMINATORGAPMIN: i32 = 39;
+/// `XeTeX` §742
+pub const FRACTIONDENOMDISPLAYSTYLEGAPMIN: i32 = 40;
+/// `XeTeX` §742
+pub const SKEWEDFRACTIONHORIZONTALGAP: i32 = 41;
+/// `XeTeX` §742
+pub const SKEWEDFRACTIONVERTICALGAP: i32 = 42;
+/// `XeTeX` §742
+pub const OVERBARVERTICALGAP: i32 = 43;
+/// `XeTeX` §742
+pub const OVERBARRULETHICKNESS: i32 = 44;
+/// `XeTeX` §742
+pub const OVERBAREXTRAASCENDER: i32 = 45;
+/// `XeTeX` §742
+pub const UNDERBARVERTICALGAP: i32 = 46;
+/// `XeTeX` §742
+pub const UNDERBARRULETHICKNESS: i32 = 47;
+/// `XeTeX` §742
+pub const UNDERBAREXTRADESCENDER: i32 = 48;
+/// `XeTeX` §742
+pub const RADICALVERTICALGAP: i32 = 49;
+/// `XeTeX` §742
+pub const RADICALDISPLAYSTYLEVERTICALGAP: i32 = 50;
+/// `XeTeX` §742
+pub const RADICALRULETHICKNESS: i32 = 51;
+/// `XeTeX` §742
+pub const RADICALEXTRAASCENDER: i32 = 52;
+/// `XeTeX` §742
+pub const RADICALKERNBEFOREDEGREE: i32 = 53;
+/// `XeTeX` §742
+pub const RADICALKERNAFTERDEGREE: i32 = 54;
+/// `XeTeX` §742
+pub const LASTMATHVALUERECORD: i32 = RADICALKERNAFTERDEGREE;
+/// `XeTeX` §742
+pub const RADICALDEGREEBOTTOMRAISEPERCENT: i32 = 55;
+/// `XeTeX` §742
+pub const LASTMATHCONSTANT: i32 = RADICALDEGREEBOTTOMRAISEPERCENT;
+/// `XeTeX` §804
+pub const SUP_CMD: i32 = 0;
+/// `XeTeX` §804
+pub const SUB_CMD: i32 = 1;
+/// `XeTeX` §1084
+pub const PDFBOX_CROP: i32 = 1;
+/// `XeTeX` §1084
+pub const PDFBOX_MEDIA: i32 = 2;
+/// `XeTeX` §1084
+pub const PDFBOX_BLEED: i32 = 3;
+/// `XeTeX` §1084
+pub const PDFBOX_TRIM: i32 = 4;
+/// `XeTeX` §1084
+pub const PDFBOX_ART: i32 = 5;
+/// `XeTeX` §1084
+pub const PDFBOX_NONE: i32 = 6;
+/// `XeTeX` §1276
+pub const XETEX_MATH_CHAR_NUM_DEF_CODE: i32 = 8;
+/// `XeTeX` §1276
+pub const XETEX_MATH_CHAR_DEF_CODE: i32 = 9;
+/// `XeTeX` §1398
+pub const PIC_FILE_CODE: i32 = PDFTEX_LAST_EXTENSION_CODE + 1;
+/// `XeTeX` §1398
+pub const PDF_FILE_CODE: i32 = PDFTEX_LAST_EXTENSION_CODE + 2;
+/// `XeTeX` §1398
+pub const GLYPH_CODE: i32 = PDFTEX_LAST_EXTENSION_CODE + 3;
+/// `XeTeX` §1398
+pub const XETEX_INPUT_ENCODING_EXTENSION_CODE: i32 = PDFTEX_LAST_EXTENSION_CODE + 4;
+/// `XeTeX` §1398
+pub const XETEX_DEFAULT_ENCODING_EXTENSION_CODE: i32 = PDFTEX_LAST_EXTENSION_CODE + 5;
+/// `XeTeX` §1398
+pub const XETEX_LINEBREAK_LOCALE_EXTENSION_CODE: i32 = PDFTEX_LAST_EXTENSION_CODE + 6;
+
+/// The bits of a character in a token (`XeTeX`'s 21; DESIGN 4.7).
+pub const CHAR_BITS: u32 = 21;
+/// The character bits of a character token.
+pub const CHAR_MASK: i32 = MAX_CHAR_VAL - 1;
+
+/// The token of character `chr` with command code `cmd` (§289).
+#[inline]
+#[must_use]
+pub const fn char_token(cmd: i32, chr: i32) -> i32 {
+    cmd * MAX_CHAR_VAL + chr
+}
+
+/// The command code of a character token (`t < CS_TOKEN_FLAG`).
+#[inline]
+#[must_use]
+pub const fn tok_cmd(t: i32) -> i32 {
+    t >> CHAR_BITS
+}
+
+/// The character of a character token (`t < CS_TOKEN_FLAG`).
+#[inline]
+#[must_use]
+pub const fn tok_chr(t: i32) -> i32 {
+    t & CHAR_MASK
+}

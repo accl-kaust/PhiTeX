@@ -33,8 +33,18 @@ pub enum FileKind {
     Bib,
     /// makeindex styles (`.ist`).
     Ist,
+    /// `XeTeX`: OpenType fonts (`.otf`, kpathsea's `opentype fonts`).
+    OpenType,
+    /// `XeTeX`: `TECkit` mappings (`.tec`, kpathsea's `misc fonts`).
+    MiscFonts,
+    /// `XeTeX`: the index of the installed fonts its names are looked up
+    /// in (`partex_otf::index`'s format; the name asked is ignored).
+    FontIndex,
     /// Everything else, looked up by exact name.
     Other,
+    /// `XeTeX`: the PDF written through xdvipdfmx: the bytes written are
+    /// the XDV xdvipdfmx reads (`XeTeX`'s pipe, `xdvipdfmx -q -E -o NAME`).
+    XdvPipe,
 }
 
 /// A load as [`Host::unchanged`] is asked about it: the name, its kind,
@@ -343,7 +353,11 @@ partex_engine::persist_enum!(FileKind {
     Other,
     Bst,
     Bib,
-    Ist
+    Ist,
+    OpenType,
+    MiscFonts,
+    FontIndex,
+    XdvPipe
 });
 
 /// A host with no files and no terminal: the engine that holds the

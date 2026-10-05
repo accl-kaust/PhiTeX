@@ -389,8 +389,8 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         let kind = match r.index {
             PARAMETER => FrameKind::TokenList("argument"),
             U_TEMPLATE | V_TEMPLATE => FrameKind::TokenList("template"),
-            BACKED_UP if r.loc == NULL => FrameKind::TokenList("recently read"),
-            BACKED_UP => FrameKind::TokenList("to be read again"),
+            BACKED_UP | BACKED_UP_CHAR if r.loc == NULL => FrameKind::TokenList("recently read"),
+            BACKED_UP | BACKED_UP_CHAR => FrameKind::TokenList("to be read again"),
             INSERTED => FrameKind::TokenList("inserted text"),
             MACRO => {
                 let name = self.diag_print(|t| t.sprint_cs(r.name));
@@ -406,6 +406,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             EVERY_CR_TEXT => FrameKind::TokenList("everycr"),
             MARK_TEXT => FrameKind::TokenList("mark"),
             WRITE_TEXT => FrameKind::TokenList("write"),
+            INTER_CHAR_TEXT => FrameKind::TokenList("XeTeXinterchartoks"),
             _ => FrameKind::TokenList("?"),
         };
         let list = r.list.clone().unwrap_or_default();
@@ -447,7 +448,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         // As in §318: the line ends before a final `end_line_char`.
         let start = ux(r.start);
         let limit = ux(r.limit.max(r.start - 1));
-        let end = if i32::from(self.buffer[limit]) == self.int_par(END_LINE_CHAR_CODE) {
+        let end = if crate::input::ci(self.buffer[limit]) == self.int_par(END_LINE_CHAR_CODE) {
             limit
         } else {
             limit + 1
@@ -456,12 +457,12 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         let loc = ux(r.loc.clamp(r.start, i32::try_from(end).unwrap_or(0)));
         let before = self.diag_print(|t| {
             for k in start..loc {
-                t.print(i32::from(t.buffer[k]));
+                t.print(crate::input::ci(t.buffer[k]));
             }
         });
         let after = self.diag_print(|t| {
             for k in loc..end.max(loc) {
-                t.print(i32::from(t.buffer[k]));
+                t.print(crate::input::ci(t.buffer[k]));
             }
         });
         Frame {
@@ -657,7 +658,9 @@ mod tests {
         t.interaction = SCROLL_MODE;
         t.no_new_control_sequence = false;
         let cs = |t: &mut Tex<_, _>, name: &[u8]| {
-            t.buffer[..name.len()].copy_from_slice(name);
+            for (d, &s) in t.buffer[..name.len()].iter_mut().zip(name) {
+                *d = u32::from(s);
+            }
             t.id_lookup(0, name.len()).unwrap()
         };
         let foo = cs(&mut t, b"foo");
@@ -671,7 +674,9 @@ mod tests {
         }
         let name = i32::try_from(t.make_string().unwrap()).unwrap();
         let line = b"Hello \\greet world\r";
-        t.buffer[1..=line.len()].copy_from_slice(line);
+        for (d, &s) in t.buffer[1..=line.len()].iter_mut().zip(line) {
+            *d = u32::from(s);
+        }
         t.set_int_par(END_LINE_CHAR_CODE, 13);
         t.in_open = 1;
         t.full_source_filename_stack[1] = name;
@@ -688,10 +693,10 @@ mod tests {
 
         // The macro level: `->\fooo{}` with \fooo just read.
         let rc = t.tok_from(&[
-            END_MATCH * 256,
+            END_MATCH * MAX_CHAR_VAL,
             CS_TOKEN_FLAG + fooo,
-            LEFT_BRACE * 256 + 123,
-            RIGHT_BRACE * 256 + 125,
+            LEFT_BRACE * MAX_CHAR_VAL + 123,
+            RIGHT_BRACE * MAX_CHAR_VAL + 125,
         ]);
         let after = 2; // the `{`
         t.begin_token_list(rc, MACRO).unwrap();

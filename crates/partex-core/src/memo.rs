@@ -963,8 +963,8 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                 .as_deref()
                 .map_or(&[][..], crate::tok::TokenList::tokens);
             for &t in &list[ux(s.loc)..] {
-                if s.index == MACRO && t < CS_TOKEN_FLAG && t / 0o400 == OUT_PARAM {
-                    if let Some(p) = &self.param_stack[ux(s.limit + t % 0o400 - 1)] {
+                if s.index == MACRO && t < CS_TOKEN_FLAG && tok_cmd(t) == OUT_PARAM {
+                    if let Some(p) = &self.param_stack[ux(s.limit + tok_chr(t) - 1)] {
                         out.extend_from_slice(p);
                     }
                 } else {
@@ -1186,8 +1186,8 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                 .as_deref()
                 .map_or(&[][..], crate::tok::TokenList::tokens);
             for &t in &list[ux(s.loc)..] {
-                if s.index == MACRO && t / 0o400 == OUT_PARAM {
-                    if let Some(p) = &self.param_stack[ux(s.limit + t % 0o400 - 1)] {
+                if s.index == MACRO && tok_cmd(t) == OUT_PARAM {
+                    if let Some(p) = &self.param_stack[ux(s.limit + tok_chr(t) - 1)] {
                         pending.extend_from_slice(p);
                     }
                 } else {
@@ -1254,8 +1254,9 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         match cmd {
             RELAX | IGNORE_SPACES | AFTER_ASSIGNMENT | AFTER_GROUP | BEGIN_GROUP | END_GROUP
             | LEFT_BRACE | RIGHT_BRACE | TOKS_REGISTER | ASSIGN_TOKS | ASSIGN_INT
-            | ASSIGN_DIMEN | ASSIGN_GLUE | ASSIGN_MU_GLUE | DEF_CODE | DEF_FAMILY | SET_FONT
-            | REGISTER | ADVANCE | MULTIPLY | DIVIDE | PREFIX | LET | SHORTHAND_DEF | DEF => true,
+            | ASSIGN_DIMEN | ASSIGN_GLUE | ASSIGN_MU_GLUE | DEF_CODE | XETEX_DEF_CODE
+            | DEF_FAMILY | SET_FONT | REGISTER | ADVANCE | MULTIPLY | DIVIDE | PREFIX | LET
+            | SHORTHAND_DEF | DEF => true,
             SPACER => self.mode().abs() != HMODE,
             _ => false,
         }
@@ -1342,7 +1343,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                     v.extend(self.cell_names(&[Cell::Eqtb(cs)]).concat());
                     v.push(b' ');
                 } else {
-                    v.push(u8::try_from(t % 0o400).unwrap_or(b'?'));
+                    v.push(u8::try_from(tok_chr(t)).unwrap_or(b'?'));
                 }
             }
             v

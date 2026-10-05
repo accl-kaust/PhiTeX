@@ -1227,8 +1227,11 @@ fn input_difference(new: &Engine, old: &Engine) -> String {
         return "the input differs (the stack or the files left)".to_owned();
     }
     let i = a.iter().zip(&b).take_while(|(x, y)| x == y).count();
-    let show = |v: &[u8]| {
-        String::from_utf8_lossy(&v[i.saturating_sub(20)..(i + 20).min(v.len())]).into_owned()
+    let show = |v: &[u32]| {
+        v[i.saturating_sub(20)..(i + 20).min(v.len())]
+            .iter()
+            .map(|&c| char::from_u32(c).unwrap_or('\u{FFFD}'))
+            .collect::<String>()
     };
     format!(
         "the input differs (the buffer at {i}: {:?} / {:?})",
@@ -3670,6 +3673,10 @@ fn kind_code(k: Query) -> u8 {
         Query::File(FileKind::Bst) => 10,
         Query::File(FileKind::Bib) => 11,
         Query::File(FileKind::Ist) => 12,
+        Query::File(FileKind::OpenType) => 13,
+        Query::File(FileKind::MiscFonts) => 14,
+        Query::File(FileKind::FontIndex) => 15,
+        Query::File(FileKind::XdvPipe) => 16,
     }
 }
 
@@ -3688,6 +3695,10 @@ fn kind_from_code(c: u8) -> Option<Query> {
         10 => FileKind::Bst,
         11 => FileKind::Bib,
         12 => FileKind::Ist,
+        13 => FileKind::OpenType,
+        14 => FileKind::MiscFonts,
+        15 => FileKind::FontIndex,
+        16 => FileKind::XdvPipe,
         _ => return None,
     }))
 }
