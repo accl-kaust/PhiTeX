@@ -45,6 +45,10 @@ pub enum Format {
     Bst,
     /// makeindex styles (`kpse_ist_format`).
     Ist,
+    /// `kpse_opentype_format`: OpenType fonts.
+    OpenType,
+    /// `kpse_miscfonts_format`: `XeTeX`'s `TECkit` mappings.
+    MiscFonts,
 }
 
 /// `tex-file.c`, `kpathsea_init_format`: how each format is searched.
@@ -151,6 +155,20 @@ fn format_info(f: Format) -> FormatInfo {
         Format::TrueType => FormatInfo {
             envs: &["TTFONTS", "TEXFONTS"],
             suffixes: &[".ttf", ".ttc", ".TTF", ".TTC", ".dfont"],
+            alt_suffixes: &[],
+            suffix_search_only: false,
+            default_path: "",
+        },
+        Format::OpenType => FormatInfo {
+            envs: &["OPENTYPEFONTS", "TEXFONTS"],
+            suffixes: &[".otf", ".OTF"],
+            alt_suffixes: &[],
+            suffix_search_only: false,
+            default_path: "",
+        },
+        Format::MiscFonts => FormatInfo {
+            envs: &["MISCFONTS", "TEXFONTS"],
+            suffixes: &[],
             alt_suffixes: &[],
             suffix_search_only: false,
             default_path: "",

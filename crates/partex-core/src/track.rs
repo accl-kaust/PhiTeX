@@ -172,6 +172,8 @@ pub mod font {
     /// Its number as the program made it (`FontData::num`): what DVI's
     /// font numbers are.
     pub const NUMBER: u32 = 6;
+    /// `XeTeX`: a native font's layout state (`FontData::native_dir`).
+    pub const NATIVE_DIR: u32 = 7;
     /// pdfTeX's character codes, `CODES + code` (`fonts::Code`).
     pub const CODES: u32 = 8;
     /// The fields of a slot.

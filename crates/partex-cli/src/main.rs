@@ -12,6 +12,7 @@ mod display;
 mod dvithread;
 mod eventlog;
 mod events;
+mod fontindex;
 mod heap;
 mod inotify;
 mod intervals;

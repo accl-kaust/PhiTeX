@@ -1645,7 +1645,8 @@ fn guess_script(text: &[u16]) -> Option<Tag> {
 }
 
 /// `hb_script_get_horizontal_direction(s) == HB_DIRECTION_RTL`.
-fn script_is_rtl(s: Tag) -> bool {
+#[must_use]
+pub fn script_is_rtl(s: Tag) -> bool {
     const RTL: [&[u8; 4]; 36] = [
         b"Arab", b"Hebr", b"Syrc", b"Thaa", b"Cprt", b"Khar", b"Phnx", b"Nkoo", b"Lydi", b"Avst",
         b"Armi", b"Phli", b"Prti", b"Sarb", b"Orkh", b"Samr", b"Mand", b"Merc", b"Mero", b"Mani",

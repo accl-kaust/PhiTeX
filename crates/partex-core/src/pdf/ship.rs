@@ -1954,7 +1954,11 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                 let s = self.late_text(tokens)?;
                 return self.literal(&s, SCAN_SPECIAL, true);
             }
-            Whatsit::Language { .. } => return Ok(()),
+            // (`XeTeX` has no PDF mode: its whatsits never reach here)
+            Whatsit::Language { .. }
+            | Whatsit::NativeWord(_)
+            | Whatsit::Glyph(_)
+            | Whatsit::Pic(_) => return Ok(()),
             Whatsit::Pdf(p) => &**p,
         };
         match p {

@@ -85,6 +85,20 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         aire: i32,
         s: Scaled,
     ) -> Result<i32, Jump> {
+        if self.unicode {
+            // `XeTeX` §560: a quoted name is a native font first; an
+            // unquoted one a TFM file first.
+            self.pack_file_name(nom, aire, self.cur_ext);
+            if self.xetex_state(XETEX_TRACING_FONTS_CODE) > 0 {
+                self.requested_font_diagnostic(s);
+            }
+            if self.quoted_filename {
+                let g = self.load_native_font(u, nom, aire, s)?;
+                if g != NULL_FONT {
+                    return Ok(self.font_found_diagnostic(g, false));
+                }
+            }
+        }
         // §563: open `tfm_file` for input.
         let name_too_long = self.length(ux(nom)) > 255 || self.length(ux(aire)) > 255;
         let mut file_opened = false;
@@ -103,28 +117,87 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                 file_opened = true;
                 let data: Arc<[u8]> = file.contents;
                 if let Some(g) = self.read_tfm(&data, u, nom, aire, s) {
+                    if self.unicode {
+                        return g.map(|g| self.font_found_diagnostic(g, true));
+                    }
                     return g;
                 }
             }
         }
-        // §561: report that the font won't be loaded.
-        self.start_font_error_message(u, nom, aire, s);
-        if file_opened {
-            self.print_str(b" not loadable: Bad metric (TFM) file");
-        } else if name_too_long {
-            self.print_str(b" not loadable: Metric (TFM) file name too long");
-        } else {
-            self.print_str(b" not loadable: Metric (TFM) file not found");
+        if self.unicode && !self.quoted_filename && !file_opened {
+            // (`XeTeX`: no TFM file: a native font, then)
+            self.pack_file_name(nom, aire, self.cur_ext);
+            let g = self.load_native_font(u, nom, aire, s)?;
+            if g != NULL_FONT {
+                return Ok(self.font_found_diagnostic(g, false));
+            }
         }
-        self.help(&[
-            b"I wasn't able to read the size data for this font,",
-            b"so I will ignore the font specification.",
-            b"[Wizards can fix TFM files using TFtoPL/PLtoTF.]",
-            b"You might try inserting a different font spec;",
-            b"e.g., type `I\\font<same font id>=<substitute font name>'.",
-        ]);
-        self.error()?;
+        if !self.unicode || self.int_par(SUPPRESS_FONTNOTFOUND_ERROR_CODE) == 0 {
+            // §561: report that the font won't be loaded.
+            self.start_font_error_message(u, nom, aire, s);
+            if file_opened {
+                self.print_str(b" not loadable: Bad metric (TFM) file");
+            } else if name_too_long {
+                self.print_str(b" not loadable: Metric (TFM) file name too long");
+            } else if self.unicode {
+                self.print_str(b" not loadable: Metric (TFM) file or installed font not found");
+            } else {
+                self.print_str(b" not loadable: Metric (TFM) file not found");
+            }
+            self.help(&[
+                b"I wasn't able to read the size data for this font,",
+                b"so I will ignore the font specification.",
+                b"[Wizards can fix TFM files using TFtoPL/PLtoTF.]",
+                b"You might try inserting a different font spec;",
+                b"e.g., type `I\\font<same font id>=<substitute font name>'.",
+            ]);
+            self.error()?;
+        }
+        if self.unicode {
+            return Ok(self.font_found_diagnostic(NULL_FONT, file_opened));
+        }
         Ok(NULL_FONT)
+    }
+
+    /// `XeTeX` §560: `Requested font "NAME" at S` (`\XeTeXtracingfonts`).
+    fn requested_font_diagnostic(&mut self, s: Scaled) {
+        self.begin_diagnostic();
+        self.print_nl(b"Requested font \"");
+        let name = self.name_of_file.clone();
+        for &b in &name {
+            self.print_char_x(u32::from(b));
+        }
+        self.print_char(b'"');
+        if s < 0 {
+            self.print_str(b" scaled ");
+            self.print_int(-s);
+        } else {
+            self.print_str(b" at ");
+            self.print_scaled(s);
+            self.print_str(b"pt");
+        }
+        self.end_diagnostic(false);
+    }
+
+    /// `XeTeX` §560's `done`: under `\XeTeXtracingfonts`, what was found
+    /// (`file_opened`: a TFM file, by `name_of_file`); `g` again.
+    fn font_found_diagnostic(&mut self, g: i32, file_opened: bool) -> i32 {
+        if self.xetex_state(XETEX_TRACING_FONTS_CODE) > 0 {
+            if g == NULL_FONT {
+                self.begin_diagnostic();
+                self.print_nl(b" -> font not found, using \"nullfont\"");
+                self.end_diagnostic(false);
+            } else if file_opened {
+                self.begin_diagnostic();
+                self.print_nl(b" -> ");
+                let name = self.name_of_file.clone();
+                for &b in &name {
+                    self.print_char_x(u32::from(b));
+                }
+                self.end_diagnostic(false);
+            }
+        }
+        g
     }
 
     /// §562–§576: read and check the font data; `None` is tex.web's
@@ -229,7 +302,15 @@ impl<H: Host, T: Tracker> Tex<H, T> {
     pub(crate) fn remake_font(&mut self, f: i32) {
         let data = self.fonts.tfm[fx(f)].clone();
         let size = self.fonts.get(f).size;
-        if let Ok(font) = Font::from_tfm(&data, Some(size)) {
+        if let Some(params) = self.native_params(f) {
+            // (`XeTeX`: a native font's fontdimens as loaded)
+            let had = self.fonts.params_mut(f).len();
+            let n = params.len();
+            *self.fonts.params_mut(f) = params;
+            self.fmem_ptr = self
+                .fmem_ptr
+                .saturating_sub(i32::try_from(had.saturating_sub(n)).unwrap_or(0));
+        } else if let Ok(font) = Font::from_tfm(&data, Some(size)) {
             let had = self.fonts.params_mut(f).len();
             let n = font.params.len();
             *self.fonts.params_mut(f) = font.params;
@@ -247,12 +328,24 @@ impl<H: Host, T: Tracker> Tex<H, T> {
     }
 
     /// §561: `start_font_error_message`.
-    fn start_font_error_message(&mut self, u: Pointer, nom: i32, aire: i32, s: Scaled) {
+    pub(crate) fn start_font_error_message(&mut self, u: Pointer, nom: i32, aire: i32, s: Scaled) {
         self.print_err(b"Font ");
         self.sprint_cs(u);
         self.print_char(b'=');
-        let empty = self.pool_str(b"");
-        self.print_file_name(nom, aire, empty);
+        if self.unicode {
+            // (`XeTeX`: the name as given, in its quotes)
+            let q = self.file_name_quote_char;
+            if q != 0 {
+                self.print_char_x(q);
+            }
+            self.print_file_name(nom, aire, self.cur_ext);
+            if q != 0 {
+                self.print_char_x(q);
+            }
+        } else {
+            let empty = self.pool_str(b"");
+            self.print_file_name(nom, aire, empty);
+        }
         if s >= 0 {
             self.print_str(b" at ");
             self.print_scaled(s);

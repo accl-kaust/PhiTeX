@@ -660,6 +660,10 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                         self.pdf_error(b"ext4", b"pdf node ended up in DVI mode")
                     };
                 }
+                Whatsit::NativeWord(_) | Whatsit::Glyph(_) | Whatsit::Pic(_) => {
+                    return self
+                        .pdf_error(b"XeTeX", b"XDV output is not implemented in partex yet");
+                }
             },
             Node::Glue { spec, .. } => {
                 // §625, §634: move past glue.
@@ -1159,7 +1163,10 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             Whatsit::Special { .. }
             | Whatsit::LateSpecial { .. }
             | Whatsit::Language { .. }
-            | Whatsit::Pdf(_) => return Ok(()),
+            | Whatsit::Pdf(_)
+            | Whatsit::NativeWord(_)
+            | Whatsit::Glyph(_)
+            | Whatsit::Pic(_) => return Ok(()),
         };
         // §1374: do some work that has been queued up for \write.
         let ju = ux(j);

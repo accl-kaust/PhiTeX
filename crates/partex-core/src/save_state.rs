@@ -30,6 +30,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             unicode,
             doing_special: _,
             name_scratch: _,
+            xfont: _,
             file_name_quote_char: _,
             str_pool,
             str_start,
@@ -284,7 +285,9 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             || org.is_some()
             || sync.is_some()
             || dl.is_some()
+            || fonts.native.iter().any(Option::is_some)
         {
+            // (`XeTeX`'s native fonts are not saved: `native.rs`)
             return false;
         }
         s.mark("params");
@@ -678,6 +681,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             unicode: Persist::load(l)?,
             doing_special: false,
             name_scratch: alloc::vec::Vec::new(),
+            xfont: crate::native::NativeEnv::default(),
             file_name_quote_char: 0,
             str_pool: Persist::load(l)?,
             str_start: Persist::load(l)?,

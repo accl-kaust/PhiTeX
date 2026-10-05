@@ -3673,6 +3673,9 @@ fn kind_code(k: Query) -> u8 {
         Query::File(FileKind::Bst) => 10,
         Query::File(FileKind::Bib) => 11,
         Query::File(FileKind::Ist) => 12,
+        Query::File(FileKind::OpenType) => 13,
+        Query::File(FileKind::MiscFonts) => 14,
+        Query::File(FileKind::FontIndex) => 15,
     }
 }
 
@@ -3691,6 +3694,9 @@ fn kind_from_code(c: u8) -> Option<Query> {
         10 => FileKind::Bst,
         11 => FileKind::Bib,
         12 => FileKind::Ist,
+        13 => FileKind::OpenType,
+        14 => FileKind::MiscFonts,
+        15 => FileKind::FontIndex,
         _ => return None,
     }))
 }

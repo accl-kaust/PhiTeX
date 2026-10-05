@@ -1474,6 +1474,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             unicode: _,
             doing_special: _,
             name_scratch: _,
+            xfont: _,
             file_name_quote_char: _,
             host: _,
             tracker: _,

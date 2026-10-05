@@ -33,6 +33,13 @@ pub enum FileKind {
     Bib,
     /// makeindex styles (`.ist`).
     Ist,
+    /// `XeTeX`: OpenType fonts (`.otf`, kpathsea's `opentype fonts`).
+    OpenType,
+    /// `XeTeX`: `TECkit` mappings (`.tec`, kpathsea's `misc fonts`).
+    MiscFonts,
+    /// `XeTeX`: the index of the installed fonts its names are looked up
+    /// in (`partex_otf::index`'s format; the name asked is ignored).
+    FontIndex,
     /// Everything else, looked up by exact name.
     Other,
 }
@@ -343,7 +350,10 @@ partex_engine::persist_enum!(FileKind {
     Other,
     Bst,
     Bib,
-    Ist
+    Ist,
+    OpenType,
+    MiscFonts,
+    FontIndex
 });
 
 /// A host with no files and no terminal: the engine that holds the

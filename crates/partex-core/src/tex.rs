@@ -70,6 +70,8 @@ pub struct Tex<H: Host, T: Tracker = Untracked> {
     pub(crate) doing_special: bool,
     /// Scratch for a name being looked up, in the pool's encoding.
     pub(crate) name_scratch: alloc::vec::Vec<u8>,
+    /// `XeTeX`: what finding native fonts keeps (not engine state).
+    pub(crate) xfont: crate::native::NativeEnv,
     /// `XeTeX` §548: the quote a file name being scanned is in (0: none).
     pub(crate) file_name_quote_char: u32,
 
@@ -622,6 +624,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             unicode: p.flavor == crate::params::Flavor::XeTeX,
             doing_special: false,
             name_scratch: alloc::vec::Vec::new(),
+            xfont: crate::native::NativeEnv::default(),
             file_name_quote_char: 0,
             str_pool: crate::flat::Flat::new(vec![0; pool_size.min(1 << 16) + 1]),
             str_start: crate::flat::Flat::new(vec![0; max_strings.min(1 << 12) + 1]),

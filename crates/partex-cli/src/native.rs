@@ -347,6 +347,14 @@ impl NativeHost {
             FileKind::Bst => partex_kpse::Format::Bst,
             FileKind::Bib => partex_kpse::Format::Bib,
             FileKind::Ist => partex_kpse::Format::Ist,
+            FileKind::OpenType => partex_kpse::Format::OpenType,
+            FileKind::MiscFonts => partex_kpse::Format::MiscFonts,
+            FileKind::FontIndex => {
+                return Ok(crate::fontindex::index().map(|contents| OpenedFile {
+                    name: b"<fonts>".to_vec(),
+                    contents,
+                }));
+            }
             FileKind::Other => {
                 let Some(contents) = self.read_at(name) else {
                     note(trail, name);
@@ -443,6 +451,9 @@ pub fn with_suffix(name: &[u8], kind: FileKind) -> Vec<u8> {
         | FileKind::Bst
         | FileKind::Bib
         | FileKind::Ist
+        | FileKind::OpenType
+        | FileKind::MiscFonts
+        | FileKind::FontIndex
         | FileKind::Other => b"",
     };
     let mut n = name.to_vec();
@@ -625,6 +636,9 @@ impl NativeHost {
             FileKind::Bst => partex_kpse::Format::Bst,
             FileKind::Bib => partex_kpse::Format::Bib,
             FileKind::Ist => partex_kpse::Format::Ist,
+            FileKind::OpenType => partex_kpse::Format::OpenType,
+            FileKind::MiscFonts => partex_kpse::Format::MiscFonts,
+            FileKind::FontIndex => return Some(b"<fonts>".to_vec()),
             FileKind::Other => return stamp(name).map(|_| name.to_vec()),
         };
         self.kpse.find_file(name, format, true)
