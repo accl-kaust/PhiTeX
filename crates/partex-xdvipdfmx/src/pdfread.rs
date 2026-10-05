@@ -19,6 +19,7 @@ pub struct XrefIn {
 }
 
 /// A PDF file read for its objects.
+#[derive(Clone)]
 pub struct PdfFile {
     pub ident: Vec<u8>,
     pub data: Arc<[u8]>,

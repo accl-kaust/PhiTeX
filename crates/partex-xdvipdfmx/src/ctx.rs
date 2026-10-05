@@ -30,11 +30,12 @@ pub struct DpxConf {
 }
 
 /// The whole program.
+#[derive(Clone)]
 pub struct Dpx {
     /// The objects and the writer (pdfobj.c).
     pub o: PdfOut,
     /// The host's files (dpxfile.c's kpathsea).
-    pub files: Box<dyn Files>,
+    pub files: FilesRef,
     pub conf: DpxConf,
     /// dvipdfmx.c's `dvi_filename` and `pdf_filename` (subset tags hash
     /// them; xelatex pipes the XDV in, so the first is none).
@@ -89,7 +90,7 @@ impl Dpx {
     pub fn new(files: Box<dyn Files>, deflate: crate::obj::Deflate) -> Self {
         Dpx {
             o: PdfOut::new(deflate),
-            files,
+            files: FilesRef(alloc::rc::Rc::new(core::cell::RefCell::new(files))),
             conf: DpxConf::default(),
             dvi_filename: None,
             pdf_filename: None,
@@ -117,5 +118,25 @@ impl Dpx {
             cs_type2: Default::default(),
             session: Default::default(),
         }
+    }
+}
+
+/// The host's files, shared by a session's snapshots.
+#[derive(Clone)]
+pub struct FilesRef(pub alloc::rc::Rc<core::cell::RefCell<Box<dyn Files>>>);
+
+impl FilesRef {
+    /// [`Files::find`].
+    pub fn find(
+        &mut self,
+        name: &[u8],
+        format: crate::io::Format,
+        progname: &[u8],
+    ) -> Option<alloc::vec::Vec<u8>> {
+        self.0.borrow_mut().find(name, format, progname)
+    }
+    /// [`Files::read`].
+    pub fn read(&mut self, path: &[u8]) -> Option<alloc::sync::Arc<[u8]>> {
+        self.0.borrow_mut().read(path)
     }
 }

@@ -972,7 +972,15 @@ impl Dpx {
     pub fn pdf_dev_set_dirmode(&mut self, text_dir: i32) {
         let font = self.dev.pdev.text_state.font_id;
         // (C's CURRENTFONT: fonts[font_id], NULL before any font)
-        let wmode = if font >= 0 { self.dev.pdev.fonts.get(font as usize).map_or(0, |f| f.wmode) } else { 0 };
+        let wmode = if font >= 0 {
+            self.dev
+                .pdev
+                .fonts
+                .get(font as usize)
+                .map_or(0, |f| f.wmode)
+        } else {
+            0
+        };
         let vert_font = i32::from(wmode != 0);
         let vert_dir = if self.dev.pdev.param.autorotate != 0 {
             text_dir
@@ -980,7 +988,10 @@ impl Dpx {
             vert_font
         };
         let text_rotate = (vert_font << 2) | vert_dir;
-        if font >= 0 && (font as usize) < self.dev.pdev.fonts.len() && angle_changes(text_rotate, self.dev.pdev.text_state.matrix.rotate) {
+        if font >= 0
+            && (font as usize) < self.dev.pdev.fonts.len()
+            && angle_changes(text_rotate, self.dev.pdev.text_state.matrix.rotate)
+        {
             self.dev.pdev.text_state.force_reset = true;
         }
         self.dev.pdev.text_state.matrix.rotate = text_rotate;
@@ -989,7 +1000,15 @@ impl Dpx {
 
     fn dev_set_param_autorotate(&mut self, auto_rotate: i32) {
         let font = self.dev.pdev.text_state.font_id;
-        let wmode = if font >= 0 { self.dev.pdev.fonts.get(font as usize).map_or(0, |f| f.wmode) } else { 0 };
+        let wmode = if font >= 0 {
+            self.dev
+                .pdev
+                .fonts
+                .get(font as usize)
+                .map_or(0, |f| f.wmode)
+        } else {
+            0
+        };
         let vert_font = i32::from(wmode != 0);
         let vert_dir = if auto_rotate != 0 {
             self.dev.pdev.text_state.dir_mode

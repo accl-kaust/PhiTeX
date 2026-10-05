@@ -73,6 +73,7 @@ pub struct PageOut {
 }
 
 /// A conversion in progress.
+/// A conversion in progress.
 pub struct Session {
     dpx: Box<Dpx>,
     argv: Vec<Vec<u8>>,
@@ -407,4 +408,57 @@ pub fn split_xdv(x: &[u8]) -> (usize, Vec<(usize, usize)>) {
         }
     }
     (pre, pages)
+}
+
+impl Session {
+    /// A copy of the session as it is (between pages), to go on from
+    /// later: the incremental link. A page that changed is done again
+    /// from the snapshot taken before it, then the pages after it and the
+    /// end (their object numbers follow from the pages before them); the
+    /// pages before it keep their bytes. The copy shares only the host's
+    /// files and deflater; the fonts' used-glyph tables (shared within a
+    /// session, as C shares the pointers) are copied with their sharing.
+    #[must_use]
+    pub fn snapshot(&self) -> Session {
+        let mut dpx = Box::new((*self.dpx).clone());
+        let mut map: Vec<(
+            *const core::cell::RefCell<Vec<u8>>,
+            crate::pdffont::UsedChars,
+        )> = Vec::new();
+        let mut fresh = |uc: &mut Option<crate::pdffont::UsedChars>| {
+            if let Some(old) = uc.take() {
+                let p = Rc::as_ptr(&old);
+                let new = match map.iter().find(|(q, _)| *q == p) {
+                    Some((_, n)) => n.clone(),
+                    None => {
+                        let n = Rc::new(core::cell::RefCell::new(old.borrow().clone()));
+                        map.push((p, n.clone()));
+                        n
+                    }
+                };
+                *uc = Some(new);
+            }
+        };
+        for f in &mut dpx.font.fonts {
+            fresh(&mut f.usedchars);
+            fresh(&mut f.cid.usedchars_v);
+        }
+        for f in &mut dpx.dev.pdev.fonts {
+            fresh(&mut f.used_chars);
+        }
+        Session {
+            dpx,
+            argv: self.argv.clone(),
+            page_no: self.page_no,
+            page_count: self.page_count,
+            init_paper_width: self.init_paper_width,
+            init_paper_height: self.init_paper_height,
+        }
+    }
+
+    /// The number of pages done.
+    #[must_use]
+    pub fn pages_done(&self) -> i32 {
+        self.page_no
+    }
 }

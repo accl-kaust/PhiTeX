@@ -8,8 +8,10 @@
 //! [`PdfOut::ref_obj`] does not hold its target, as in C.
 
 use alloc::boxed::Box;
+use alloc::rc::Rc;
 use alloc::vec;
 use alloc::vec::Vec;
+use core::cell::RefCell;
 
 use crate::fmt::{Buf, sprint_number};
 
@@ -52,7 +54,7 @@ pub struct DecodeParms {
     pub columns: i32,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Stream {
     pub dict: Obj,
     pub data: Vec<u8>,
@@ -73,7 +75,7 @@ pub struct Indirect {
     pub generation: u16,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub enum Data {
     Boolean(bool),
     Number(f64),
@@ -90,7 +92,7 @@ pub enum Data {
     Free,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct Slot {
     data: Data,
     label: u32,
@@ -110,6 +112,7 @@ pub struct XrefEntry {
 pub type Deflate = Box<dyn FnMut(i32, &[u8]) -> Vec<u8>>;
 
 /// The arena and the writer (`struct pdf_out`).
+#[derive(Clone)]
 pub struct PdfOut {
     slots: Vec<Slot>,
     free_slots: Vec<u32>,
@@ -138,7 +141,8 @@ pub struct PdfOut {
     current_objstm: Option<Obj>,
     free_list: Vec<u8>,
 
-    deflate: Deflate,
+    /// Shared by snapshots (none: `Default`'s writer, never deflating).
+    deflate: Option<Rc<RefCell<Deflate>>>,
     /// Files read for their objects (`pdf_file`), by number.
     pub files: Vec<crate::pdfread::PdfFile>,
     /// Where `parse_xref_table` found `trailer`.
@@ -169,7 +173,7 @@ impl PdfOut {
             xref_stream: None,
             current_objstm: None,
             free_list: Vec::new(),
-            deflate,
+            deflate: Some(Rc::new(RefCell::new(deflate))),
             files: Vec::new(),
             trailer_pos: 0,
         }
@@ -1064,7 +1068,10 @@ impl PdfOut {
             } else {
                 self.put(dict, b"Filter", name);
             }
-            filtered = (self.deflate)(self.compression_level, &filtered);
+            filtered = (self.deflate.as_ref().expect("deflater").borrow_mut())(
+                self.compression_level,
+                &filtered,
+            );
         }
         let n = self.new_number(filtered.len() as f64);
         self.put(dict, b"Length", n);
@@ -1440,6 +1447,8 @@ impl Default for PdfOut {
     /// leaves in `Dpx::o` while the objects are lent to a parser
     /// (specials.rs, `Dpx::with_dpx_unknown`). Allocates nothing.
     fn default() -> Self {
-        PdfOut::new(Box::new(|_, _| Vec::new()))
+        let mut o = PdfOut::new(Box::new(|_, _| Vec::new()));
+        o.deflate = None;
+        o
     }
 }
