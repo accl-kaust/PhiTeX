@@ -4,7 +4,7 @@ members = ["crates/*", "xtask"]
 
 [workspace.package]
 edition = "2024"
-license = "MIT OR Apache-2.0"
+license = "AGPL-3.0-or-later"
 
 [workspace.lints.rust]
 unsafe_code = "deny"
