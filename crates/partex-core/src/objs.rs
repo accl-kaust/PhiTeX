@@ -53,11 +53,13 @@ partex_engine::persist_enum!(Obj {
     Box(a0)
 });
 
-/// eqtb's objects by chunks of this many (the default, as measured on
-/// the course; the objects a region writes are scattered over the hash's
-/// places, so a chunk written holds few of them and is copied whole:
-/// smaller chunks, 128, are expected to cut those copies, not measured).
-pub(crate) const OBJ_CHUNK: usize = crate::journal::CHUNK;
+/// eqtb's objects by chunks of this many. The objects a region writes are
+/// scattered over the hash's places, so a chunk written holds few of them
+/// and is copied whole into the snapshot: at 512 (24 KB a chunk, against
+/// eqtb's words' 4 KB) those copies were 3.6 GB of the 7.8 GB the course's
+/// machine watch held after its three passes; at 128 the watch's peak
+/// went 9.9 -> 6.8 GB, its passes as fast.
+pub(crate) const OBJ_CHUNK: usize = 128;
 
 /// eqtb's objects in a [`crate::journal::JVec`]: an entry written back
 /// as it was holds the very value it held (glue by its content).

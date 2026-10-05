@@ -34,7 +34,7 @@ use crate::store;
 const MIN_BLOB: usize = 64;
 
 /// What a root holds first (its layout's version).
-const ROOT_TAG: &[u8] = b"partex machine build/12";
+const ROOT_TAG: &[u8] = b"partex machine build/13";
 
 /// The store a watch saves to, and the save running.
 pub struct Keeper {
