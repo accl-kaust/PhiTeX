@@ -355,7 +355,7 @@ impl NativeHost {
                     contents,
                 }));
             }
-            FileKind::Other => {
+            FileKind::Other | FileKind::XdvPipe => {
                 let Some(contents) = self.read_at(name) else {
                     note(trail, name);
                     return Ok(None);
@@ -454,7 +454,8 @@ pub fn with_suffix(name: &[u8], kind: FileKind) -> Vec<u8> {
         | FileKind::OpenType
         | FileKind::MiscFonts
         | FileKind::FontIndex
-        | FileKind::Other => b"",
+        | FileKind::Other
+        | FileKind::XdvPipe => b"",
     };
     let mut n = name.to_vec();
     if !suffix.is_empty() && !name.ends_with(suffix) {
@@ -639,7 +640,7 @@ impl NativeHost {
             FileKind::OpenType => partex_kpse::Format::OpenType,
             FileKind::MiscFonts => partex_kpse::Format::MiscFonts,
             FileKind::FontIndex => return Some(b"<fonts>".to_vec()),
-            FileKind::Other => return stamp(name).map(|_| name.to_vec()),
+            FileKind::Other | FileKind::XdvPipe => return stamp(name).map(|_| name.to_vec()),
         };
         self.kpse.find_file(name, format, true)
     }

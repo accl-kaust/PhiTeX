@@ -32,6 +32,12 @@ pub struct Page {
     pub items: Vec<Item>,
     /// The bytes of the page's `\special`s.
     pub specials: Vec<u8>,
+    /// `XeTeX`: the text of the special written right after `bop`
+    /// (`pdf:pagesize …`); empty for TeX.
+    pub prelude: Vec<u8>,
+    /// `XeTeX`: the bytes of the page's native glyph commands
+    /// ([`Item::Native`]).
+    pub native: Vec<u8>,
     /// Definitions of the fonts this page uses (a backend emits each font's
     /// definition once, at first use).
     pub fonts: Vec<FontDef>,
@@ -45,6 +51,8 @@ crate::persist_struct!(Page {
     v_offset,
     items,
     specials,
+    prelude,
+    native,
     fonts,
     truncated
 });
@@ -112,13 +120,26 @@ pub enum Item {
     Leaders { kind: LeaderKind, size: Scaled },
     /// A `\special`: `len` bytes at `start` of [`Page::specials`].
     Special { start: u32, len: u32 },
+    /// `XeTeX`: a native word or glyph in native font `font`: the XDV
+    /// command (`set_glyphs` or `set_text_and_glyphs`), `len` bytes at
+    /// `start` of [`Page::native`]. In an hlist it advances by `width`;
+    /// in a vlist it is set at the left edge, `height` down, then moves
+    /// down by `depth`.
+    Native {
+        font: i32,
+        width: Scaled,
+        height: Scaled,
+        depth: Scaled,
+        start: u32,
+        len: u32,
+    },
     /// The walk stopped here (a `\write` ended the job): tex.web leaves
     /// this box and those around it open, for `finish_dvi_file` to close
     /// with bare `pop`s and an `eop` (§642).
     Cut,
 }
 
-crate::persist_enum!(Item { Char { font, ch, width, raise }, Missing { font }, Move(a0), Rule { height, depth, width }, Box { vertical, width, height, depth, shift, len, display }, Edge { width, dist, rtl }, Leaders { kind, size }, Special { start, len }, Cut });
+crate::persist_enum!(Item { Char { font, ch, width, raise }, Missing { font }, Move(a0), Rule { height, depth, width }, Box { vertical, width, height, depth, shift, len, display }, Edge { width, dist, rtl }, Leaders { kind, size }, Special { start, len }, Native { font, width, height, depth, start, len }, Cut });
 
 /// What a DVI `fnt_def` says about a font (§602).
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -129,6 +150,9 @@ pub struct FontDef {
     pub design_size: Scaled,
     pub area: Vec<u8>,
     pub name: Vec<u8>,
+    /// `XeTeX`: a native font's definition (`define_native_font`'s bytes
+    /// after the font number), in place of `fnt_def`.
+    pub native: Option<Vec<u8>>,
 }
 
 crate::persist_struct!(FontDef {
@@ -137,7 +161,8 @@ crate::persist_struct!(FontDef {
     size,
     design_size,
     area,
-    name
+    name,
+    native
 });
 
 impl Page {
@@ -145,6 +170,8 @@ impl Page {
     pub fn clear(&mut self) {
         self.items.clear();
         self.specials.clear();
+        self.prelude.clear();
+        self.native.clear();
         self.fonts.clear();
         self.truncated = false;
     }
@@ -239,6 +266,20 @@ impl Page {
                 Item::Edge { width, dist, rtl } => {
                     let dir = if rtl { "rtl" } else { "ltr" };
                     let _ = writeln!(s, "{:ind$}edge {width} dist={dist} {dir}", "");
+                }
+                Item::Native {
+                    font,
+                    width,
+                    height,
+                    depth,
+                    len,
+                    ..
+                } => {
+                    let _ = writeln!(
+                        s,
+                        "{:ind$}native f{font} wd={width} ht={height} dp={depth} {len} bytes",
+                        ""
+                    );
                 }
                 Item::Cut => {
                     let _ = writeln!(s, "{:ind$}cut", "");

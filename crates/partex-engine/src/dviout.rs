@@ -23,9 +23,9 @@ const ITEM_BOUND: u64 = 48;
 /// if the page has leaders (their repetitions depend on the glue).
 #[must_use]
 pub fn page_bound(page: &Page) -> Option<u64> {
-    let mut n = 64 + page.specials.len() as u64; // `bop`, `eop`
+    let mut n = 64 + (page.specials.len() + page.prelude.len() + page.native.len()) as u64; // `bop`, `eop`
     for f in &page.fonts {
-        n += 16 + (f.area.len() + f.name.len()) as u64;
+        n += 16 + (f.area.len() + f.name.len() + f.native.as_ref().map_or(0, Vec::len)) as u64;
     }
     for item in &page.items {
         if let Item::Leaders { .. } = item {
@@ -59,6 +59,9 @@ const PRE: u8 = 247;
 const POST: u8 = 248;
 const POST_POST: u8 = 249;
 const ID_BYTE: u8 = 2;
+/// `XeTeX`: XDV's `id_byte`, and its commands.
+const XDV_ID_BYTE: u8 = 7;
+const DEFINE_NATIVE_FONT: u8 = 252;
 
 /// §171 `font_base` (internal font numbers start after it).
 const FONT_BASE: i32 = 0;
@@ -133,6 +136,8 @@ pub struct DviWriter {
     /// Font definitions by internal font number, with whether the font
     /// has been used (`font_used`, §549).
     fonts: Vec<Option<(FontDef, bool)>>,
+    /// `XeTeX`'s XDV (its `id_byte`).
+    xdv: bool,
 }
 
 crate::persist_struct!(DviWriter {
@@ -158,13 +163,24 @@ crate::persist_struct!(DviWriter {
     dvi_f,
     rtl,
     cur_s,
-    fonts
+    fonts,
+    xdv
 });
 
 impl DviWriter {
     /// A writer with tex.web's `dvi_buf_size`, having written the preamble
     /// (§617) with magnification `mag` and `comment`.
     pub fn new(buf_size: i32, mag: i32, comment: &[u8]) -> Result<Self, TooLong> {
+        Self::with_format(buf_size, mag, comment, false)
+    }
+
+    /// [`DviWriter::new`] of a DVI file, or of `XeTeX`'s XDV with `xdv`.
+    pub fn with_format(
+        buf_size: i32,
+        mag: i32,
+        comment: &[u8],
+        xdv: bool,
+    ) -> Result<Self, TooLong> {
         let mut w = Self {
             out: Vec::new(),
             buf: alloc::vec![0; usize::try_from(buf_size).unwrap_or(0) + 1],
@@ -189,9 +205,10 @@ impl DviWriter {
             rtl: false,
             cur_s: -1,
             fonts: Vec::new(),
+            xdv,
         };
         w.out_byte(PRE)?;
-        w.out_byte(ID_BYTE)?;
+        w.out_byte(w.id_byte())?;
         w.four(25_400_000)?;
         w.four(473_628_672)?; // conversion ratio for sp
         w.four(mag)?;
@@ -200,6 +217,11 @@ impl DviWriter {
             w.out_byte(c)?;
         }
         Ok(w)
+    }
+
+    /// The `id_byte` of the file.
+    fn id_byte(&self) -> u8 {
+        if self.xdv { XDV_ID_BYTE } else { ID_BYTE }
     }
 
     /// Pages written so far.
@@ -310,6 +332,14 @@ impl DviWriter {
         }
         self.four(self.last_bop)?;
         self.last_bop = page_loc;
+        if !page.prelude.is_empty() {
+            // (`XeTeX`'s pagesize special, where `bop` leaves the position)
+            self.out_byte(XXX1)?;
+            self.out_int(i32::try_from(page.prelude.len()).unwrap_or(0))?;
+            for &c in &page.prelude {
+                self.out_byte(c)?;
+            }
+        }
         self.cur_v = root.height + page.v_offset;
         let complete = self.list_out(page, 0)?;
         if complete {
@@ -351,7 +381,7 @@ impl DviWriter {
         }
         self.out_byte(POST_POST)?;
         self.four(self.last_bop)?;
-        self.out_byte(ID_BYTE)?;
+        self.out_byte(self.id_byte())?;
         let mut k = 4 + ((self.buf_size - self.ptr) % 4); // the number of 223's
         while k > 0 {
             self.out_byte(223)?;
@@ -435,6 +465,15 @@ impl DviWriter {
     /// §602
     fn font_def(&mut self, d: &FontDef) -> Result<(), TooLong> {
         let n = d.font - FONT_BASE - 1;
+        if let Some(def) = &d.native {
+            // `XeTeX`'s `dvi_native_font_def`
+            self.out_byte(DEFINE_NATIVE_FONT)?;
+            self.four(n)?;
+            for &c in def {
+                self.out_byte(c)?;
+            }
+            return Ok(());
+        }
         if d.font <= 256 + FONT_BASE {
             self.out_byte(FNT_DEF1)?;
             self.out_int(n)?;
@@ -795,6 +834,22 @@ impl DviWriter {
                     i += leader.len;
                 }
                 Item::Special { start, len } => self.special(page.special(start, len))?,
+                Item::Native {
+                    font,
+                    width,
+                    start,
+                    len,
+                    ..
+                } => {
+                    self.synch_h()?;
+                    self.synch_v()?;
+                    if font != self.dvi_f {
+                        self.change_font(font)?;
+                    }
+                    self.native(page, start, len)?;
+                    self.cur_h += width;
+                    self.dvi_h = self.cur_h;
+                }
                 Item::Cut => return Ok(false),
             }
             i += 1;
@@ -926,11 +981,39 @@ impl DviWriter {
                     i += leader.len;
                 }
                 Item::Special { start, len } => self.special(page.special(start, len))?,
+                Item::Native {
+                    font,
+                    height,
+                    depth,
+                    start,
+                    len,
+                    ..
+                } => {
+                    self.cur_v += height;
+                    self.cur_h = left_edge;
+                    self.synch_h()?;
+                    self.synch_v()?;
+                    if font != self.dvi_f {
+                        self.change_font(font)?;
+                    }
+                    self.native(page, start, len)?;
+                    self.cur_v += depth;
+                    self.cur_h = left_edge;
+                }
                 Item::Cut => return Ok(false),
             }
             i += 1;
         }
         Ok(true)
+    }
+
+    /// `XeTeX`: a native glyph command's bytes.
+    fn native(&mut self, page: &Page, start: u32, len: u32) -> Result<(), TooLong> {
+        let (a, n) = (start as usize, len as usize);
+        for i in a..a + n {
+            self.out_byte(page.native[i])?;
+        }
+        Ok(())
     }
 
     /// §633: output a rule in a vlist.

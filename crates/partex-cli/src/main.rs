@@ -312,6 +312,7 @@ fn set_option(params: &mut Params, o: &str) -> bool {
         o if o.starts_with("output-comment=") => {
             params.output_comment = Some(o[15..].into());
         }
+        "no-pdf" => params.no_pdf = true,
         _ => return false,
     }
     true
