@@ -20,6 +20,7 @@
 //! it, its readers the live steps whose last run read it, each list in
 //! the order of the steps' keys.
 
+use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 use crate::hash::hash64;
@@ -92,8 +93,9 @@ pub struct Fold<M: Machine> {
     /// last run read it from outside them, in the order of their keys. An
     /// entry is the step's id alone (4 bytes where a definition's is 24: a
     /// slot every step reads has a list as long as the fold), its key the
-    /// step's, so keys made again leave the lists as they are.
-    readers: Table<ByHash<M::Addr>, Vec<StepId>>,
+    /// step's, so keys made again leave the lists as they are; a long
+    /// list in chunks ([`Readers`]).
+    readers: Table<ByHash<M::Addr>, Readers>,
     /// How many times the keys were made again ([`Fold::renumber`]).
     pub renumbered: u32,
     /// The steps removed since [`Fold::release_removed`].
@@ -229,7 +231,14 @@ impl<M: Machine> Fold<M> {
             }
             (t.len(), n, cap)
         }
-        let (rs, rn, rc) = entries(&self.readers);
+        let (rs, rn, rc) = {
+            let (mut n, mut cap) = (0, 0);
+            for (_, v) in self.readers.iter() {
+                n += v.len();
+                cap += v.capacity();
+            }
+            (self.readers.len(), n, cap)
+        };
         // (the readers' lists by length: of a slot most steps read, a
         // list as long as the fold)
         let mut hist = [(0usize, 0usize); 6];
@@ -365,9 +374,7 @@ impl<M: Machine> Fold<M> {
         self.defs
             .values_mut()
             .for_each(|v| v.retain(|e| live(e.step)));
-        self.readers
-            .values_mut()
-            .for_each(|v| v.retain(|&s| live(s)));
+        self.readers.values_mut().for_each(|v| v.retain(live));
     }
 
     /// Remove step `id` from the fold, and its entries: as a reader of
@@ -389,7 +396,7 @@ impl<M: Machine> Fold<M> {
         let key = self.keys[id as usize];
         for a in &self.steps[id as usize].reads {
             if let Some(v) = self.readers.get_mut_by(hash64(a), |k| k.0 == *a) {
-                drop_reader(&self.keys, v, id, key);
+                v.drop(&self.keys, id, key);
             }
         }
         for a in written {
@@ -435,7 +442,9 @@ impl<M: Machine> Fold<M> {
     /// and writes, each a search in its slot's list, with nothing moved
     /// unless the run reads or defines a slot its last run did not: a slot
     /// every step reads (a catcode, `\baselineskip`) has a list as long as
-    /// the fold, and an insertion moves its tail.
+    /// the fold, kept in chunks ([`Readers`]), and an insertion moves the
+    /// tail of one chunk.
+    #[allow(clippy::too_many_lines)]
     pub(crate) fn close(
         &mut self,
         id: StepId,
@@ -469,8 +478,13 @@ impl<M: Machine> Fold<M> {
             let Fold { keys, readers, .. } = self;
             if old_reads.is_empty() {
                 for (h, a) in &reads {
-                    let v = readers.entry_by(*h, |k| k.0 == *a, || ByHash(a.clone()), Vec::new());
-                    put_reader(keys, v, id, key);
+                    let v = readers.entry_by(
+                        *h,
+                        |k| k.0 == *a,
+                        || ByHash(a.clone()),
+                        Readers::default(),
+                    );
+                    v.put(keys, id, key);
                 }
             } else {
                 let new: Vec<(u64, &M::Addr)> = reads.iter().map(|(h, a)| (*h, a)).collect();
@@ -478,16 +492,20 @@ impl<M: Machine> Fold<M> {
                 let (in_new, in_old) = (ReadSet::new(&new), ReadSet::new(&old));
                 for &(h, a) in &new {
                     if !in_old.contains(h, a) {
-                        let v =
-                            readers.entry_by(h, |k| k.0 == *a, || ByHash(a.clone()), Vec::new());
-                        put_reader(keys, v, id, key);
+                        let v = readers.entry_by(
+                            h,
+                            |k| k.0 == *a,
+                            || ByHash(a.clone()),
+                            Readers::default(),
+                        );
+                        v.put(keys, id, key);
                     }
                 }
                 for &(h, a) in &old {
                     if !in_new.contains(h, a)
                         && let Some(v) = readers.get_mut_by(h, |k| k.0 == *a)
                     {
-                        drop_reader(keys, v, id, key);
+                        v.drop(keys, id, key);
                     }
                 }
             }
@@ -677,10 +695,7 @@ impl<M: Machine> Fold<M> {
         let Some(v) = self.readers.get_by(hash64(a), |k| k.0 == *a) else {
             return Vec::new();
         };
-        let from = first_above(v, |&s| self.key_of(s), lo);
-        v[from..]
-            .iter()
-            .copied()
+        v.after(&self.keys, lo)
             .take_while(|&s| hi.is_none_or(|h| self.key_of(s) <= h))
             .collect()
     }
@@ -764,6 +779,142 @@ fn first_above<T>(v: &[T], key_of: impl Fn(&T) -> u64, key: u64) -> usize {
         .map_or(v.len(), |k| first_not_below(v, key_of, k))
 }
 
+/// A flat list of readers longer than this is kept in chunks
+/// ([`Readers`]).
+const FLAT_MAX: usize = 512;
+
+/// A chunk's length when a list is cut into chunks, and when a chunk
+/// at the end is full: one put there starts another.
+const CHUNK: usize = 512;
+
+/// A slot's readers, in the order of the steps' keys (each a [`StepId`],
+/// its key the step's). A short list is one vector. A long one, of a slot
+/// every step reads (a catcode, `\baselineskip`), is cut into chunks of
+/// at most `2 * CHUNK`. A rebuild's new step goes into the middle of the
+/// list; in one vector as long as the fold, that moved the tail at each
+/// put (a thesis's settle: 64 K steps, a few hundred such slots per new
+/// step), and now it moves at most a chunk's.
+pub(crate) enum Readers {
+    Flat(Vec<StepId>),
+    /// Each chunk not empty, in order; boxed, so a list is as big as a
+    /// vector (most slots have a few readers).
+    #[allow(
+        clippy::box_collection,
+        reason = "unboxed, every slot's list is 32 bytes, not 24"
+    )]
+    Chunks(Box<Vec<Vec<StepId>>>),
+}
+
+impl Default for Readers {
+    fn default() -> Self {
+        Readers::Flat(Vec::new())
+    }
+}
+
+impl Readers {
+    fn len(&self) -> usize {
+        match self {
+            Readers::Flat(v) => v.len(),
+            Readers::Chunks(c) => c.iter().map(Vec::len).sum(),
+        }
+    }
+
+    fn capacity(&self) -> usize {
+        match self {
+            Readers::Flat(v) => v.capacity(),
+            Readers::Chunks(c) => c.iter().map(Vec::capacity).sum(),
+        }
+    }
+
+    /// The chunk where key `key` is or goes: the first whose last key is
+    /// not below it, else the last.
+    fn chunk(chunks: &[Vec<StepId>], keys: &[u64], key: u64) -> usize {
+        chunks
+            .partition_point(|c| c.last().is_some_and(|&l| keys[l as usize] < key))
+            .min(chunks.len().saturating_sub(1))
+    }
+
+    /// Put reader `id`, whose key is `key`, in the list if it is not
+    /// there. A cold build's steps come in key order: each at the end.
+    fn put(&mut self, keys: &[u64], id: StepId, key: u64) {
+        match self {
+            Readers::Flat(v) => {
+                put_reader(keys, v, id, key);
+                if v.len() > FLAT_MAX {
+                    let chunks = v.chunks(CHUNK).map(<[StepId]>::to_vec).collect();
+                    *self = Readers::Chunks(Box::new(chunks));
+                }
+            }
+            Readers::Chunks(c) => {
+                let at = Self::chunk(c, keys, key);
+                let last = at + 1 == c.len();
+                let Some(v) = c.get_mut(at) else {
+                    c.push(alloc::vec![id]);
+                    return;
+                };
+                if last && v.len() >= CHUNK && keys[v[v.len() - 1] as usize] < key {
+                    // (past the end, the last chunk full: a new one)
+                    let mut n = Vec::with_capacity(CHUNK);
+                    n.push(id);
+                    c.push(n);
+                    return;
+                }
+                put_reader(keys, v, id, key);
+                if v.len() > 2 * CHUNK {
+                    let tail = v.split_off(CHUNK);
+                    v.shrink_to_fit();
+                    c.insert(at + 1, tail);
+                }
+            }
+        }
+    }
+
+    /// Remove reader `id`, whose key is `key`.
+    fn drop(&mut self, keys: &[u64], id: StepId, key: u64) {
+        match self {
+            Readers::Flat(v) => drop_reader(keys, v, id, key),
+            Readers::Chunks(c) => {
+                let at = Self::chunk(c, keys, key);
+                let Some(v) = c.get_mut(at) else { return };
+                drop_reader(keys, v, id, key);
+                if v.is_empty() {
+                    c.remove(at);
+                }
+            }
+        }
+    }
+
+    /// Keep the readers `keep` says to.
+    fn retain(&mut self, keep: impl Fn(StepId) -> bool) {
+        match self {
+            Readers::Flat(v) => v.retain(|&s| keep(s)),
+            Readers::Chunks(c) => {
+                for v in c.iter_mut() {
+                    v.retain(|&s| keep(s));
+                }
+                c.retain(|v| !v.is_empty());
+            }
+        }
+    }
+
+    /// The readers with keys above `lo`, in order.
+    fn after<'a>(&'a self, keys: &'a [u64], lo: u64) -> impl Iterator<Item = StepId> + 'a {
+        let key_of = |&s: &StepId| keys[s as usize];
+        let (first, rest): (&[StepId], &[Vec<StepId>]) = match self {
+            Readers::Flat(v) => (&v[first_above(v, key_of, lo)..], &[]),
+            Readers::Chunks(c) => match lo.checked_add(1) {
+                Some(k) if !c.is_empty() => {
+                    let at = Self::chunk(c, keys, k);
+                    let v = &c[at];
+                    (&v[first_above(v, key_of, lo)..], &c[at + 1..])
+                }
+                _ => (&[], &[]),
+            },
+        };
+        first.iter().chain(rest.iter().flatten()).copied()
+    }
+}
+
 /// Put reader `id`, whose key is `key`, in `v` (in the order of the
 /// steps' keys, `keys`) if it is not there. A cold build's steps come in
 /// key order: each at the end.
@@ -830,5 +981,78 @@ impl<'a, A: Eq> ReadSet<'a, A> {
             }
             p = (p + 1) & self.mask;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CHUNK, Readers, StepId};
+    use alloc::vec::Vec;
+
+    /// [`Readers`] against one sorted vector: puts at the end (a cold
+    /// build), in the middle (a rebuild's new steps), drops, retains and
+    /// ranges, past the chunks' splits.
+    #[test]
+    fn readers_as_one_list() {
+        // (step `s`'s key: the steps put first get every 1000th key, the
+        // later ones keys between them)
+        let mut keys: Vec<u64> = Vec::new();
+        let mut r = Readers::default();
+        let mut want: Vec<StepId> = Vec::new();
+        let mut seed = 0x9e37_79b9_7f4a_7c15_u64;
+        let mut rand = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        let check = |r: &Readers, want: &[StepId], keys: &[u64], lo: u64| {
+            let got: Vec<StepId> = r.after(keys, lo).collect();
+            let exp: Vec<StepId> = want
+                .iter()
+                .copied()
+                .filter(|&s| keys[s as usize] > lo)
+                .collect();
+            assert_eq!(got, exp);
+            assert_eq!(r.len(), want.len());
+        };
+        for i in 0..(5 * CHUNK as u64) {
+            keys.push((i + 1) * 1000);
+            let id = StepId::try_from(keys.len() - 1).unwrap();
+            r.put(&keys, id, keys[id as usize]);
+            want.push(id);
+        }
+        check(&r, &want, &keys, 0);
+        for round in 0..20_000 {
+            let k = rand() % (5 * CHUNK as u64 * 1000 + 2000);
+            match rand() % 3 {
+                // (keys are unique, as the fold's)
+                0 if !keys.contains(&k) => {
+                    keys.push(k);
+                    let id = StepId::try_from(keys.len() - 1).unwrap();
+                    r.put(&keys, id, k);
+                    let at = want.partition_point(|&s| keys[s as usize] < k);
+                    want.insert(at, id);
+                }
+                1 if !want.is_empty() => {
+                    let id = want[usize::try_from(rand()).unwrap() % want.len()];
+                    r.drop(&keys, id, keys[id as usize]);
+                    want.retain(|&s| s != id);
+                }
+                _ => {
+                    // (a put again of one there changes nothing)
+                    if let Some(&id) = want.first() {
+                        r.put(&keys, id, keys[id as usize]);
+                    }
+                }
+            }
+            if round % 500 == 0 {
+                check(&r, &want, &keys, k);
+            }
+        }
+        r.retain(|s| s % 3 != 0);
+        want.retain(|&s| s % 3 != 0);
+        check(&r, &want, &keys, 0);
+        check(&r, &want, &keys, u64::MAX);
     }
 }
