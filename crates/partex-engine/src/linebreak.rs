@@ -22,6 +22,7 @@ use crate::font::{LigKern, Tag};
 use crate::hyph::{Patterns, exception_key, hyphen_values};
 use crate::lr;
 use crate::margin::{self, At};
+use crate::native::NativeWord;
 use crate::node::{Disc, FontId, GlueSpec, Ligature, Node, Order, Whatsit, push_char};
 use crate::origin::{Org, OrgTable, Side, char_org, push_char_org};
 use crate::pack;
@@ -130,6 +131,44 @@ pub trait Env: ExpandEnv {
     /// (`hyph::exception_key`), if it is an exception.
     #[allow(clippy::ptr_arg, reason = "the map's key, looked up as it is")]
     fn exception(&self, key: &Vec<u8>) -> Option<&[u16]>;
+    /// `XeTeX`: `\lccode` of any character.
+    fn lc_code_usv(&self, c: i32) -> i32 {
+        u8::try_from(c).map_or(0, |c| self.lc_code(c))
+    }
+    /// `XeTeX`: a word of `text` in native font `font`, measured
+    /// (`new_native_word_node` and `set_native_metrics`).
+    fn native_word(&mut self, font: FontId, actual_text: bool, text: &[u16]) -> NativeWord {
+        NativeWord::new(font, actual_text, text.into())
+    }
+    /// `XeTeX`'s `new_native_character(f, c)`.
+    fn native_character(&mut self, font: FontId, c: i32) -> NativeWord {
+        let _ = c;
+        NativeWord::new(font, false, alloc::sync::Arc::from([]))
+    }
+}
+
+/// `XeTeX`'s `get_native_usv(p, i)`: the character at unit `i` of `text`
+/// (a surrogate pair's scalar value, or the unit).
+fn native_usv(text: &[u16], i: usize) -> i32 {
+    let u = i32::from(text[i]);
+    if (0xD800..0xDC00).contains(&u)
+        && let Some(&lo) = text.get(i + 1)
+        && (0xDC00..0xE000).contains(&i32::from(lo))
+    {
+        return 0x1_0000 + (u - 0xD800) * 0x400 + (i32::from(lo) - 0xDC00);
+    }
+    u
+}
+
+/// The native word of node `n`.
+fn native_of(n: Option<&Node>) -> Option<&NativeWord> {
+    match n {
+        Some(Node::Whatsit(w)) => match &**w {
+            Whatsit::NativeWord(w) => Some(w),
+            _ => None,
+        },
+        _ => None,
+    }
 }
 
 /// What a feasible break is at.
@@ -460,6 +499,22 @@ impl ExpState {
                     w[1] += width;
                     (0, 0)
                 }
+                // (`XeTeX`: native words, glyphs and pictures)
+                Node::Whatsit(x) => match &**x {
+                    Whatsit::NativeWord(nw) => {
+                        w[1] += nw.width;
+                        (0, 0)
+                    }
+                    Whatsit::Glyph(g) => {
+                        w[1] += g.width;
+                        (0, 0)
+                    }
+                    Whatsit::Pic(p) => {
+                        w[1] += p.width;
+                        (0, 0)
+                    }
+                    _ => return Err(Confusion(what)),
+                },
                 _ => return Err(Confusion(what)),
             };
             w[7] += st;
@@ -1783,7 +1838,8 @@ impl<E: Env> Breaker<'_, E> {
         let mut prev_s = Pos::node(cur_p);
         let mut s = Pos::node(cur_p + 1);
         let hf;
-        loop {
+        let mut native = false;
+        'skip: loop {
             let c;
             match atom(&self.list, s) {
                 Some(Atom::Char(f, ch)) => {
@@ -1812,9 +1868,28 @@ impl<E: Env> Breaker<'_, E> {
                 // (text-direction nodes are skipped)
                 Some(Atom::Node(Node::Math { subtype, .. })) if *subtype >= lr::L_CODE => {}
                 Some(Atom::Node(Node::Whatsit(w))) => {
-                    // (`XeTeX` §949: a native word with a letter is `ha`'s
-                    // successor here, with `hf` its font, before the
-                    // language whatsits; native words are not made yet)
+                    if let Whatsit::NativeWord(nw) = &**w {
+                        // `XeTeX` §949: a native word with a letter is `ha`
+                        // itself, `hf` its font; one without is passed
+                        let mut l = 0;
+                        while l < nw.text.len() {
+                            let c = native_usv(&nw.text, l);
+                            let h = env.lc_code_usv(c);
+                            if h != 0 {
+                                hf = nw.font;
+                                prev_s = s;
+                                if h == c || self.p.uc_hyph {
+                                    native = true;
+                                    break 'skip;
+                                }
+                                return;
+                            }
+                            if c >= 0x1_0000 {
+                                l += 1;
+                            }
+                            l += 1;
+                        }
+                    }
                     // §1363: `adv_past`
                     if let Whatsit::Language {
                         language,
@@ -1841,6 +1916,9 @@ impl<E: Env> Breaker<'_, E> {
         let ha = prev_s;
         if self.l_hyf + self.r_hyf > max_len {
             return;
+        }
+        if native {
+            return self.hyphenate_native(ha.node, hf, hyf_char);
         }
         // (`XeTeX` §944: if `ha` is a native word, here it checks that the
         // nodes after it permit hyphenation (§945) and moves its letters
@@ -2059,6 +2137,161 @@ impl<E: Env> Breaker<'_, E> {
         let major = w.reconstitute_word(font, j, bchar);
         self.events.append(&mut w.events);
         self.splice(start, hb, &major, hf);
+    }
+
+    /// `XeTeX` §945–§946, §956–§957: hyphenate native word `ha` (in font
+    /// `hf`): its letters are split from what precedes and follows them
+    /// (words of their own), then broken at the hyphens found, a
+    /// discretionary with the hyphen character between the pieces.
+    fn hyphenate_native(&mut self, mut ha: usize, hf: FontId, hyf_char: i32) {
+        let unicode = self.p.unicode;
+        let max_len = usize::try_from(self.p.max_hyphenatable_length).unwrap_or(0);
+        // §945: check that nodes after the native word permit hyphenation
+        let mut s = ha + 1;
+        loop {
+            match self.list.get(s) {
+                Some(Node::Glyphs(_) | Node::Ligature(_)) => {}
+                Some(Node::Kern { subtype, .. }) => {
+                    if *subtype != KERN_NORMAL {
+                        break;
+                    }
+                }
+                Some(
+                    Node::Whatsit(_)
+                    | Node::Glue { .. }
+                    | Node::Leaders(_)
+                    | Node::Penalty(_)
+                    | Node::Ins(_)
+                    | Node::Adjust(_)
+                    | Node::Mark(_),
+                ) => break,
+                _ => return,
+            }
+            s += 1;
+        }
+        // §946: prepare the native word for hyphenation
+        let mut hu = vec![0i32];
+        let mut hc = vec![0i32];
+        loop {
+            let Some(w) = native_of(self.list.get(ha)) else {
+                return;
+            };
+            let text = w.text.clone();
+            let actual_text = w.actual_text;
+            let mut split = None;
+            let mut l = 0;
+            while l < text.len() {
+                let c = native_usv(&text, l);
+                // (`set_lc_code`)
+                let h = if c > 255 {
+                    self.env.lc_code_usv(c)
+                } else {
+                    let env = &*self.env;
+                    env.patterns()
+                        .hyph_code(self.cur_lang, u8::try_from(c).unwrap_or(0), |c| {
+                            env.lc_code(c)
+                        })
+                };
+                if h == 0 {
+                    if hc.len() > 1 {
+                        // letters, then a non-letter: the rest is a word
+                        // after this one
+                        split = Some((l, false));
+                        break;
+                    }
+                } else if hc.len() == 1 && l > 0 {
+                    // the first letter after non-letters: they are a word
+                    // before, and the letters are looked at again
+                    split = Some((l, true));
+                    break;
+                } else if hc.len() - 1 == max_len {
+                    break;
+                } else if c < 0x1_0000 {
+                    hu.push(c);
+                    hc.push(h);
+                } else {
+                    hu.push((c - 0x1_0000) / 0x400 + 0xD800);
+                    hc.push((h - 0x1_0000) / 0x400 + 0xD800);
+                    hu.push(c % 0x400 + 0xDC00);
+                    hc.push(h % 0x400 + 0xDC00);
+                    l += 1;
+                }
+                l += 1;
+            }
+            let Some((l, again)) = split else {
+                break;
+            };
+            // "Split the `native_word_node` at `l` and link the second
+            // part after `ha`"
+            let tail = self.env.native_word(hf, actual_text, &text[l..]);
+            let head = self.env.native_word(hf, actual_text, &text[..l]);
+            self.list[ha] = Node::Whatsit(Box::new(Whatsit::NativeWord(head)));
+            self.list
+                .insert(ha + 1, Node::Whatsit(Box::new(Whatsit::NativeWord(tail))));
+            if !again {
+                break;
+            }
+            ha += 1;
+        }
+        // §899: at least `l_hyf+r_hyf` letters (the nodes after them were
+        // checked)
+        let hn = hc.len() - 1;
+        let (l_hyf, r_hyf) = (
+            usize::try_from(self.l_hyf).unwrap_or(0),
+            usize::try_from(self.r_hyf).unwrap_or(0),
+        );
+        if hn < l_hyf + r_hyf {
+            return;
+        }
+        // §923: find hyphen locations for the word
+        let env = &*self.env;
+        let mut hyf = vec![0u8; hn + 2];
+        let key = exception_key(&hc[1..=hn], self.cur_lang, unicode);
+        if !hyphen_values(
+            env.patterns(),
+            key.as_ref().and_then(|k| env.exception(k)),
+            self.cur_lang,
+            &hc[1..=hn],
+            r_hyf,
+            &mut hyf,
+        ) {
+            return;
+        }
+        for h in &mut hyf[..l_hyf] {
+            *h = 0;
+        }
+        for j in 0..r_hyf {
+            hyf[hn - j] = 0;
+        }
+        if !(l_hyf..=hn - r_hyf).any(|j| hyf[j] % 2 == 1) {
+            return;
+        }
+        // §957: hyphenate the native word at `ha`
+        let Some(w) = native_of(self.list.get(ha)).cloned() else {
+            return;
+        };
+        let mut new = Vec::new();
+        let mut hyphen_passed = 0;
+        for (j, &h) in hyf.iter().enumerate().take(hn - r_hyf + 1).skip(l_hyf) {
+            if h % 2 == 1 {
+                let piece = self
+                    .env
+                    .native_word(hf, w.actual_text, &w.text[hyphen_passed..j]);
+                new.push(Node::Whatsit(Box::new(Whatsit::NativeWord(piece))));
+                let hyphen = self.env.native_character(hf, hyf_char);
+                new.push(Node::Disc(Box::new(Disc {
+                    pre: vec![Node::Whatsit(Box::new(Whatsit::NativeWord(hyphen)))],
+                    ..Disc::default()
+                })));
+                hyphen_passed = j;
+            }
+        }
+        // (the last piece: to the word's end, so punctuation is kept)
+        let last = self
+            .env
+            .native_word(hf, w.actual_text, &w.text[hyphen_passed..]);
+        new.push(Node::Whatsit(Box::new(Whatsit::NativeWord(last))));
+        self.list.splice(ha..=ha, new);
     }
 
     /// Replace the atoms `from..=to` of the list by `major` (in font

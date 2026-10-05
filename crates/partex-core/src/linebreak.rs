@@ -56,6 +56,30 @@ impl<H: Host, T: Tracker> linebreak::Env for BreakEnv<'_, H, T> {
     fn exception(&self, key: &alloc::vec::Vec<u8>) -> Option<&[u16]> {
         self.0.exception(key)
     }
+    fn lc_code_usv(&self, c: i32) -> i32 {
+        self.0.lc_code(c)
+    }
+    fn native_word(
+        &mut self,
+        font: FontId,
+        actual_text: bool,
+        text: &[u16],
+    ) -> partex_engine::native::NativeWord {
+        let mut w = partex_engine::native::NativeWord::new(font, actual_text, text.into());
+        self.0.measure_native(&mut w);
+        w
+    }
+    fn native_character(&mut self, font: FontId, c: i32) -> partex_engine::native::NativeWord {
+        match self.0.new_native_character(i32::from(font.0), c) {
+            Ok(w) => w,
+            Err(j) => {
+                // (a lost character's error stopped the job: line breaking
+                // ends, and the jump is taken after it)
+                self.1.get_or_insert(j);
+                partex_engine::native::NativeWord::new(font, false, alloc::sync::Arc::from([]))
+            }
+        }
+    }
 }
 
 impl<H: Host, T: Tracker> ExpandEnv for BreakEnv<'_, H, T> {
