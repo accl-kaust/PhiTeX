@@ -7,7 +7,9 @@ use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use partex_engine::hyph::{Exceptions, Patterns, entry_version};
+use partex_engine::hyph::{
+    Exceptions, HYPHENATABLE_LENGTH_LIMIT, MAX_WORD, Patterns, entry_version,
+};
 use partex_ssa::Version;
 
 use crate::host::Host;
@@ -27,11 +29,15 @@ fn ux(a: i32) -> usize {
     usize::try_from(a).unwrap_or(0)
 }
 
-/// The hyphenation globals (§892, §900, §905, §921, §926, §943, §947, §950).
+/// `XeTeX`'s `too_big_lang`: where `max_hyph_char` starts.
+const TOO_BIG_LANG: i32 = 256;
+/// `XeTeX`'s `biggest_char`: the trie's characters are UTF-16 units.
+const BIGGEST_CHAR: i32 = 0xFFFF;
+
+/// The hyphenation globals (§892, §900, §905, §921, §926, §943, §947, §950;
+/// `hc` and `hyf` are the locals of `\patterns` and `\hyphenation`).
 #[derive(Clone)]
 pub(crate) struct HyphState {
-    pub(crate) hc: [i32; 66],
-    pub(crate) hyf: [i32; 65],
     pub(crate) cur_lang: i32,
     /// §921: the packed trie (the engine hyphenates with it).
     pub(crate) patterns: Arc<Patterns>,
@@ -61,7 +67,9 @@ pub(crate) struct HyphState {
     pub(crate) trie_hash: Vec<i32>,
     // §950
     pub(crate) trie_taken: Vec<bool>,
-    pub(crate) trie_min: [i32; 256],
+    /// (by character: TeX's 256, `XeTeX`'s up to `max_hyph_char`; made
+    /// for packing)
+    pub(crate) trie_min: Vec<i32>,
     pub(crate) trie_max: i32,
     pub(crate) trie_not_ready: bool,
     /// The patterns' version (DESIGN 7.17.12's `hyph` row): while INITEX
@@ -73,8 +81,6 @@ pub(crate) struct HyphState {
 }
 
 partex_engine::persist_struct!(HyphState {
-    hc,
-    hyf,
     cur_lang,
     patterns,
     hyph_word,
@@ -109,8 +115,6 @@ impl HyphState {
     pub(crate) fn hash_state<S: core::hash::Hasher>(&self, h: &mut S, shared: [u128; 3]) {
         use core::hash::Hash;
         let Self {
-            hc,
-            hyf,
             cur_lang,
             patterns: _,
             hyph_word: _,
@@ -136,7 +140,7 @@ impl HyphState {
             trie_not_ready,
             pat_ver: _,
         } = self;
-        (hc, hyf, cur_lang, shared, hyph_count, hyph_next).hash(h);
+        (cur_lang, shared, hyph_count, hyph_next).hash(h);
         (
             exceptions,
             trie_used,
@@ -168,8 +172,6 @@ impl HyphState {
             hyph_next = HYPH_PRIME;
         }
         Self {
-            hc: [0; 66],
-            hyf: [0; 65],
             cur_lang: 0,
             patterns: Arc::new(Patterns {
                 link: vec![0; t],
@@ -180,6 +182,7 @@ impl HyphState {
                 next: vec![0; ops],
                 op_start: vec![0; 256],
                 hyph_codes: BTreeMap::new(),
+                max_hyph_char: TOO_BIG_LANG,
             }),
             hyph_word: Arc::new(vec![0; h]),
             hyph_link: Arc::new(vec![0; h]),
@@ -200,7 +203,7 @@ impl HyphState {
             trie_ptr: 0,
             trie_hash: vec![0; bt],
             trie_taken: vec![false; bt],
-            trie_min: [0; 256],
+            trie_min: Vec::new(),
             trie_max: 0,
             trie_not_ready: true, // §951
             pat_ver: Version::node(0x7061_7400, &[]).0,
@@ -223,6 +226,7 @@ impl HyphState {
             &p.op_start,
             &p.hyph_codes,
             self.trie_used,
+            p.max_hyph_char,
         ))
         .0
     }
@@ -294,7 +298,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
     /// it is an exception: a read of the word's entry, by the word
     /// (DESIGN 7.17.12: the exceptions a persistent map by word).
     #[allow(clippy::ptr_arg, reason = "the map's key, looked up as it is")]
-    pub(crate) fn exception(&self, key: &Vec<u8>) -> Option<&[u8]> {
+    pub(crate) fn exception(&self, key: &Vec<u8>) -> Option<&[u16]> {
         let e = self.hyph.exceptions.entry(key);
         if T::VALUES {
             self.tracker.hyph_word_read(key, entry_version(e).0);
@@ -325,14 +329,27 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         self.hyph.cur_lang = if (1..=255).contains(&l) { l } else { 0 };
     }
 
+    /// The most letters a hyphenated word may have: TeX's 63, `XeTeX`'s
+    /// `max_hyphenatable_length` (`\XeTeXhyphenatablelength`, at most
+    /// `hyphenatable_length_limit`).
+    pub(crate) fn max_hyphenatable_length(&self) -> i32 {
+        if self.unicode {
+            self.eqtb_int(ETEX_STATE_BASE + XETEX_HYPHENATABLE_LENGTH_CODE)
+                .min(HYPHENATABLE_LENGTH_LIMIT)
+        } else {
+            MAX_WORD
+        }
+    }
+
     /// §934: enter new exceptions (`\hyphenation`).
     pub(crate) fn new_hyph_exceptions(&mut self) -> Result<(), Jump> {
         self.scan_left_brace()?; // a left brace must follow \hyphenation
         self.set_cur_lang();
         // §935: enter as many hyphenation exceptions as are listed, until
-        // coming to a right brace; then `return`.
-        let mut n: i32 = 0;
-        let mut p: Vec<u8> = Vec::new();
+        // coming to a right brace; then `return`. (`hc[1..=n]`: `XeTeX`'s
+        // are UTF-16 units, §991)
+        let mut hc: Vec<i32> = Vec::new();
+        let mut p: Vec<u16> = Vec::new();
         loop {
             self.get_x_token()?;
             loop {
@@ -340,21 +357,30 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                 match self.cur_cmd {
                     LETTER | OTHER_CHAR | CHAR_GIVEN => {
                         // §937: append a new letter or hyphen.
+                        let max = self.max_hyphenatable_length();
+                        let n = i32::try_from(hc.len()).unwrap_or(i32::MAX);
                         if self.cur_chr == i32::from(b'-') {
                             // §938: append the value `n` to list `p`.
-                            if n < 63 {
-                                p.push(u8::try_from(n).unwrap_or(0));
+                            if n < max {
+                                p.push(u16::try_from(n).unwrap_or(0));
                             }
-                        } else if self.hyph_code(self.cur_chr) == 0 {
-                            self.print_err(b"Not a letter");
-                            self.help(&[
-                                b"Letters in \\hyphenation words must have \\lccode>0.",
-                                b"Proceed; I'll ignore the character I just read.",
-                            ]);
-                            self.error()?;
-                        } else if n < 63 {
-                            n += 1;
-                            self.hyph.hc[ux(n)] = self.hyph_code(self.cur_chr);
+                        } else {
+                            let h = self.hyph_code(self.cur_chr);
+                            if h == 0 {
+                                self.print_err(b"Not a letter");
+                                self.help(&[
+                                    b"Letters in \\hyphenation words must have \\lccode>0.",
+                                    b"Proceed; I'll ignore the character I just read.",
+                                ]);
+                                self.error()?;
+                            } else if n < max {
+                                if h < 0x1_0000 {
+                                    hc.push(h);
+                                } else {
+                                    hc.push((h - 0x1_0000) / 0x400 + 0xD800);
+                                    hc.push(h % 0x400 + 0xDC00);
+                                }
+                            }
                         }
                     }
                     CHAR_NUM => {
@@ -364,13 +390,13 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                         continue;
                     }
                     SPACER | RIGHT_BRACE => {
-                        if n > 1 {
-                            self.enter_hyph_exception(n, core::mem::take(&mut p))?;
+                        if hc.len() > 1 {
+                            self.enter_hyph_exception(&hc, core::mem::take(&mut p))?;
                         }
                         if self.cur_cmd == RIGHT_BRACE {
                             return Ok(());
                         }
-                        n = 0;
+                        hc.clear();
                         p.clear();
                     }
                     _ => {
@@ -390,16 +416,14 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         }
     }
 
-    /// §939: enter a hyphenation exception.
-    fn enter_hyph_exception(&mut self, mut n: i32, p: Vec<u8>) -> Result<(), Jump> {
-        n += 1;
-        self.hyph.hc[ux(n)] = self.hyph.cur_lang;
-        self.str_room(ux(n))?;
+    /// §939: enter a hyphenation exception, the letters `hc[1..=n]`.
+    fn enter_hyph_exception(&mut self, hc: &[i32], p: Vec<u16>) -> Result<(), Jump> {
+        let lang = self.hyph.cur_lang;
+        self.str_room(hc.len() + 1)?;
         let mut h = 0;
-        for j in 1..=n {
-            let c = self.hyph.hc[ux(j)];
+        for &c in hc.iter().chain(core::iter::once(&lang)) {
             h = (h + h + c) % HYPH_PRIME;
-            self.append_char(u8::try_from(c).unwrap_or(0));
+            self.append_char(c.cast_unsigned());
         }
         let mut s = i32::try_from(self.make_string()?).unwrap_or(0);
         // §940: insert the pair `(s,p)` into the exception table (a read of
@@ -548,13 +572,15 @@ impl<H: Host, T: Tracker> Tex<H, T> {
 
     /// §953: pack a family into `trie`.
     fn first_fit(&mut self, p: i32) -> Result<(), Jump> {
+        // (`XeTeX`: `max_hyph_char` where TeX has 256)
+        let mhc = self.hyph.patterns.max_hyph_char;
         let c = self.hyph.trie_c[ux(p)];
         let mut z = self.hyph.trie_min[ux(c)]; // get the first conceivably good hole
         let h = 'found: loop {
             let h = z - c;
-            // §954: ensure that `trie_max>=h+256`.
-            if self.hyph.trie_max < h + 256 {
-                if self.params.trie_size <= h + 256 {
+            // §954: ensure that `trie_max>=h+max_hyph_char`.
+            if self.hyph.trie_max < h + mhc {
+                if self.params.trie_size <= h + mhc {
                     return self.overflow(b"pattern memory", self.params.trie_size);
                 }
                 loop {
@@ -566,7 +592,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                     y.pat().link[i] = v;
                     let (i, v) = (m, y.trie_max - 1); // `trie_back`
                     y.pat().op[i] = v;
-                    if y.trie_max == h + 256 {
+                    if y.trie_max == h + mhc {
                         break;
                     }
                 }
@@ -600,10 +626,15 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             y.pat().op[ux(r)] = l;
             y.pat().link[ux(l)] = r;
             y.pat().link[ux(z)] = 0;
-            if l < 256 {
-                let ll = if z < 256 { z } else { 256 };
+            if l < mhc {
+                let ll = if z < mhc { z } else { mhc };
                 loop {
-                    y.trie_min[ux(l)] = r;
+                    // (`XeTeX`'s `trie_min` ends at `biggest_char`: past
+                    // it, a pattern's character above 0xFFFF writes out
+                    // of the array, which nothing reads)
+                    if let Some(m) = y.trie_min.get_mut(ux(l)) {
+                        *m = r;
+                    }
                     l += 1;
                     if l == ll {
                         break;
@@ -670,9 +701,11 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         self.set_cur_lang();
         self.scan_left_brace()?; // a left brace must follow \patterns
         // §961: enter all of the patterns into a linked trie, until coming
-        // to a right brace.
+        // to a right brace. (`hc[1..=k]` and `hyf[0..=k]`, from 1 on
+        // with `k`)
         let mut k: i32 = 0;
-        self.hyph.hyf[0] = 0;
+        let mut hc: Vec<i32> = vec![0];
+        let mut hyf: Vec<i32> = vec![0];
         let mut digit_sensed = false;
         loop {
             self.get_x_token()?;
@@ -693,20 +726,25 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                                 self.error()?;
                             }
                         }
-                        if k < 63 {
+                        if self.unicode && self.cur_chr > self.hyph.patterns.max_hyph_char {
+                            // `XeTeX` §1016
+                            self.hyph.pat().max_hyph_char = self.cur_chr;
+                            self.patterns_wrote(Version::of(&(3u8, self.cur_chr)).0);
+                        }
+                        if k < self.max_hyphenatable_length() {
                             k += 1;
-                            self.hyph.hc[ux(k)] = self.cur_chr;
-                            self.hyph.hyf[ux(k)] = 0;
+                            hc.push(self.cur_chr);
+                            hyf.push(0);
                             digit_sensed = false;
                         }
-                    } else if k < 63 {
-                        self.hyph.hyf[ux(k)] = self.cur_chr - i32::from(b'0');
+                    } else if k < self.max_hyphenatable_length() {
+                        hyf[ux(k)] = self.cur_chr - i32::from(b'0');
                         digit_sensed = true;
                     }
                 }
                 SPACER | RIGHT_BRACE => {
                     if k > 0 {
-                        self.insert_pattern(k)?;
+                        self.insert_pattern(&mut hc, &mut hyf)?;
                     }
                     if self.cur_cmd == RIGHT_BRACE {
                         if self.int_par(SAVING_HYPH_CODES_CODE) > 0 {
@@ -715,7 +753,9 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                         return Ok(());
                     }
                     k = 0;
-                    self.hyph.hyf[0] = 0;
+                    hc.truncate(1);
+                    hyf.clear();
+                    hyf.push(0);
                     digit_sensed = false;
                 }
                 _ => {
@@ -728,11 +768,10 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         }
     }
 
-    /// e-TeX: store the current `\lccode`s for the current language.
+    /// e-TeX: store the current `\lccode`s for the current language (as
+    /// trie ops: `XeTeX`'s are 16 bits).
     fn store_hyph_codes(&mut self) {
-        let codes = (0..256)
-            .map(|c| u8::try_from(self.lc_code(c)).unwrap_or(0))
-            .collect();
+        let codes = (0..256).map(|c| self.lc_code(c) & BIGGEST_CHAR).collect();
         let lang = u8::try_from(self.hyph.cur_lang).unwrap_or(0);
         let part = Version::of(&(1u8, lang, &codes)).0;
         self.hyph.pat().hyph_codes.insert(lang, codes);
@@ -740,34 +779,37 @@ impl<H: Host, T: Tracker> Tex<H, T> {
     }
 
     /// e-TeX `set_lc_code`: the hyphenation code of `c` (the saved codes
-    /// of the current language, once the patterns are packed).
+    /// of the current language, once the patterns are packed, for
+    /// characters up to 255).
     fn hyph_code(&self, c: i32) -> i32 {
         let Ok(c) = u8::try_from(c) else {
-            return 0;
+            return self.lc_code(c);
         };
         self.patterns_read();
         if self.hyph.trie_not_ready {
             return self.lc_code(i32::from(c));
         }
-        i32::from(self.hyph.patterns.hyph_code(self.hyph.cur_lang, c, |c| {
-            u8::try_from(self.lc_code(i32::from(c))).unwrap_or(0)
-        }))
+        self.hyph
+            .patterns
+            .hyph_code(self.hyph.cur_lang, c, |c| self.lc_code(i32::from(c)))
     }
 
-    /// §963: insert a new pattern into the linked trie.
-    fn insert_pattern(&mut self, k: i32) -> Result<(), Jump> {
+    /// §963: insert a new pattern, `hc[1..=k]` with `hyf[0..=k]`, into
+    /// the linked trie.
+    fn insert_pattern(&mut self, hc: &mut [i32], hyf: &mut [i32]) -> Result<(), Jump> {
+        let k = i32::try_from(hc.len() - 1).unwrap_or(0);
         // §965: compute the trie op code, `v`, and set `l:=0`.
-        if self.hyph.hc[1] == 0 {
-            self.hyph.hyf[0] = 0;
+        if hc[1] == 0 {
+            hyf[0] = 0;
         }
-        if self.hyph.hc[ux(k)] == 0 {
-            self.hyph.hyf[ux(k)] = 0;
+        if hc[ux(k)] == 0 {
+            hyf[ux(k)] = 0;
         }
         let mut l = k;
         let mut v = MIN_TRIE_OP;
         loop {
-            if self.hyph.hyf[ux(l)] != 0 {
-                v = self.new_trie_op(k - l, self.hyph.hyf[ux(l)], v)?;
+            if hyf[ux(l)] != 0 {
+                v = self.new_trie_op(k - l, hyf[ux(l)], v)?;
             }
             if l > 0 {
                 l -= 1;
@@ -776,9 +818,10 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             }
         }
         let mut q = 0;
-        self.hyph.hc[0] = self.hyph.cur_lang;
+        hc[0] = self.hyph.cur_lang;
         while l <= k {
-            let c = self.hyph.hc[ux(l)];
+            // (`c` is an `ASCII_code`: `XeTeX`'s a UTF-16 unit)
+            let c = hc[ux(l)] & BIGGEST_CHAR;
             l += 1;
             let mut p = self.hyph.trie_l[ux(q)];
             let mut first_child = true;
@@ -809,10 +852,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             q = p; // now node `q` represents p_1...p_{l-1}
         }
         // (the pattern entered, which decides the linked trie and the ops)
-        let part = {
-            let y = &self.hyph;
-            Version::of(&(0u8, y.cur_lang, &y.hc[..=ux(k)], &y.hyf[..=ux(k)])).0
-        };
+        let part = Version::of(&(0u8, self.hyph.cur_lang, &*hc, &*hyf)).0;
         if self.hyph.trie_o[ux(q)] != MIN_TRIE_OP {
             self.print_err(b"Duplicate pattern");
             self.help(&[b"(See Appendix H.)"]);
@@ -825,6 +865,10 @@ impl<H: Host, T: Tracker> Tex<H, T> {
 
     /// §966
     pub(crate) fn init_trie(&mut self) -> Result<(), Jump> {
+        if self.unicode {
+            self.hyph.pat().max_hyph_char += 1; // `XeTeX` §1020
+        }
+        let mhc = self.hyph.patterns.max_hyph_char;
         // §952: get ready to compress the trie.
         // §945: sort the hyphenation op tables into proper order.
         let y = &mut self.hyph;
@@ -860,9 +904,8 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         for p in 0..=ux(self.hyph.trie_ptr) {
             self.hyph.trie_hash[p] = 0; // `trie_ref`
         }
-        for p in 0..256 {
-            self.hyph.trie_min[p] = i32::try_from(p).unwrap_or(0) + 1;
-        }
+        let chars = if self.unicode { BIGGEST_CHAR + 1 } else { 256 };
+        self.hyph.trie_min = (1..=chars).collect();
         self.hyph.pat().link[0] = 1;
         self.hyph.trie_max = 0;
         let root = self.hyph.trie_l[0];
@@ -873,10 +916,10 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         // §958: move the data into `trie`.
         if root == 0 {
             // no patterns were given
-            for r in 0..=256 {
+            for r in 0..=mhc {
                 self.clear_trie(r);
             }
-            self.hyph.trie_max = 256;
+            self.hyph.trie_max = mhc;
         } else {
             self.trie_fix(root); // this fixes the non-holes in `trie`
             let mut r = 0; // now we will zero out all the holes
@@ -903,6 +946,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             *v = Vec::new();
         }
         y.trie_taken = Vec::new();
+        y.trie_min = Vec::new();
         y.trie_op_hash = Vec::new();
         y.trie_op_lang = Vec::new();
         y.trie_op_val = Vec::new();

@@ -163,10 +163,14 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             out.int(x);
         }
         // pdfTeX §1654: the e-TeX mode; the optional features are off in
-        // every format.
+        // every format. (`XeTeX` §1464: "in a deliberate change from
+        // e-TeX, we allow non-zero state variables to be dumped", such as
+        // `\XeTeXhyphenatablelength`.)
         out.int(i32::from(self.etex_mode));
-        for j in 0..ETEX_STATES {
-            self.set_int_par(ETEX_STATE_CODE + j, 0);
+        if !self.unicode {
+            for j in 0..ETEX_STATES {
+                self.set_int_par(ETEX_STATE_CODE + j, 0);
+            }
         }
         out.int(i32::from(self.mltex_enabled_p));
         out.bytes(&self.xord);
@@ -332,7 +336,17 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         e.count(h.exceptions.len());
         for (word, positions) in h.exceptions.sorted() {
             e.bytes(word);
-            e.bytes(positions);
+            // (`XeTeX`'s positions go up to 4,094)
+            if self.unicode {
+                e.ints(&positions.iter().map(|&p| i32::from(p)).collect::<Vec<_>>());
+            } else {
+                e.bytes(
+                    &positions
+                        .iter()
+                        .map(|&p| u8::try_from(p).unwrap_or(0))
+                        .collect::<Vec<_>>(),
+                );
+            }
         }
         self.exceptions_wrote();
         out.bytes(&e.0);
@@ -359,11 +373,14 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         out.ints(&h.patterns.next[..ops]);
         out.ints(&h.trie_used);
         out.ints(&h.patterns.op_start);
+        if self.unicode {
+            out.int(h.patterns.max_hyph_char); // `XeTeX` §1378
+        }
         // e-TeX: the saved hyphenation codes.
         out.int(i32::try_from(h.patterns.hyph_codes.len()).unwrap_or(0));
         for (&lang, codes) in &h.patterns.hyph_codes {
             out.int(i32::from(lang));
-            out.ints(&codes.iter().map(|&c| i32::from(c)).collect::<Vec<_>>());
+            out.ints(codes);
         }
         self.print_nl(b"Hyphenation trie of length ");
         self.print_int(self.hyph.trie_max);
@@ -649,7 +666,14 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         h.exceptions.clear();
         for _ in 0..n {
             let word = d.bytes()?.to_vec();
-            let positions = d.bytes()?.to_vec();
+            let positions = if self.unicode {
+                d.ints()?
+                    .into_iter()
+                    .map(|p| u16::try_from(p).ok())
+                    .collect::<Option<Vec<_>>>()?
+            } else {
+                d.bytes()?.iter().map(|&p| u16::from(p)).collect()
+            };
             h.exceptions.insert(word, positions);
         }
         // `hyph_next`: one past the largest occupied slot, as in §1325.
@@ -682,6 +706,9 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             return None;
         }
         h.pat().op_start = op_start;
+        if self.unicode {
+            h.pat().max_hyph_char = r.int()?;
+        }
         let mut hyph_codes = alloc::collections::BTreeMap::new();
         for _ in 0..r.int_in(0, 256)? {
             let lang = u8::try_from(r.int_in(0, 255)?).ok()?;
@@ -689,13 +716,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             if codes.len() != 256 {
                 return None;
             }
-            hyph_codes.insert(
-                lang,
-                codes
-                    .iter()
-                    .map(|&c| u8::try_from(c).unwrap_or(0))
-                    .collect(),
-            );
+            hyph_codes.insert(lang, codes);
         }
         h.pat().hyph_codes = hyph_codes;
         h.trie_not_ready = false;

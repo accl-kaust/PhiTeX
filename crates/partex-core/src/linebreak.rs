@@ -39,8 +39,8 @@ impl<H: Host, T: Tracker> Fonts for BreakEnv<'_, H, T> {
 }
 
 impl<H: Host, T: Tracker> linebreak::Env for BreakEnv<'_, H, T> {
-    fn lc_code(&self, c: u8) -> u8 {
-        u8::try_from(self.0.lc_code(i32::from(c))).unwrap_or(0)
+    fn lc_code(&self, c: u8) -> i32 {
+        self.0.lc_code(i32::from(c))
     }
     fn hyphen_char(&self, f: FontId) -> i32 {
         self.0
@@ -53,7 +53,7 @@ impl<H: Host, T: Tracker> linebreak::Env for BreakEnv<'_, H, T> {
         self.0.patterns_read();
         &self.0.hyph.patterns
     }
-    fn exception(&self, key: &alloc::vec::Vec<u8>) -> Option<&[u8]> {
+    fn exception(&self, key: &alloc::vec::Vec<u8>) -> Option<&[u16]> {
         self.0.exception(key)
     }
 }
@@ -281,6 +281,8 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             left_hyphen_min: pg / 0o20000000,
             right_hyphen_min: (pg / 0o200000) % 0o100,
             uc_hyph: self.int_par(UC_HYPH_CODE) > 0,
+            max_hyphenatable_length: self.max_hyphenatable_length(),
+            unicode: self.unicode,
             tracing: self.int_par(TRACING_PARAGRAPHS_CODE) > 0,
             protrude_chars: self.int_par(PDF_PROTRUDE_CHARS_CODE),
             adjust_spacing: self.int_par(PDF_ADJUST_SPACING_CODE),

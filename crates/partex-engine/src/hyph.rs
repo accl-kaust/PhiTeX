@@ -23,8 +23,15 @@ pub struct Patterns {
     /// `op_start` by language.
     pub op_start: Vec<i32>,
     /// e-TeX: by language, the `\lccode`s saved with its patterns
-    /// (`\savinghyphcodes`); they replace `\lccode` in hyphenation.
-    pub hyph_codes: BTreeMap<u8, Vec<u8>>,
+    /// (`\savinghyphcodes`) for the characters 0–255; they replace
+    /// `\lccode` in hyphenation.
+    pub hyph_codes: BTreeMap<u8, Vec<i32>>,
+    /// `XeTeX`'s `max_hyph_char` (§1016, §1020): one more than the
+    /// largest character of a pattern once the trie is packed (at least
+    /// 257). It is the trie's span (`h+max_hyph_char` where TeX has
+    /// `h+256`), the delimiter `hc[hn+2]` and the boundary `hu[0]`. TeX's
+    /// is 256 throughout.
+    pub max_hyph_char: i32,
 }
 
 crate::persist_struct!(Patterns {
@@ -35,14 +42,16 @@ crate::persist_struct!(Patterns {
     num,
     next,
     op_start,
-    hyph_codes
+    hyph_codes,
+    max_hyph_char
 });
 
 impl Patterns {
-    /// The hyphenation code of `c` in `lang`: the saved code if the
-    /// language saved codes, else `lc_code`.
+    /// The hyphenation code of the character `c` of a TFM font in `lang`
+    /// (e-TeX's `set_lc_code`): the saved code if the language saved
+    /// codes, else `lc_code`.
     #[must_use]
-    pub fn hyph_code(&self, lang: i32, c: u8, lc_code: impl FnOnce(u8) -> u8) -> u8 {
+    pub fn hyph_code(&self, lang: i32, c: u8, lc_code: impl FnOnce(u8) -> i32) -> i32 {
         match u8::try_from(lang)
             .ok()
             .and_then(|l| self.hyph_codes.get(&l))
@@ -57,13 +66,15 @@ impl Patterns {
 /// versioned when it is made.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Positions {
-    pub at: Vec<u8>,
+    /// (below 63 in TeX; below `\XeTeXhyphenatablelength`, at most
+    /// 4,095, in `XeTeX`)
+    pub at: Vec<u16>,
     ver: Version,
 }
 
 impl Positions {
     #[must_use]
-    pub fn new(at: Vec<u8>) -> Positions {
+    pub fn new(at: Vec<u16>) -> Positions {
         let ver = Version::of(&at);
         Positions { at, ver }
     }
@@ -80,8 +91,9 @@ impl Value for Positions {
 /// its entries' as they are written.
 #[derive(Clone, Default)]
 pub struct Exceptions {
-    /// Key: the word's `\lccode`s followed by the language; value: the
-    /// positions after which a hyphen may go.
+    /// Key: the word's `\lccode`s followed by the language, as the pool
+    /// keeps the string ([`exception_key`]); value: the positions after
+    /// which a hyphen may go.
     words: PMap<Vec<u8>, Positions>,
 }
 
@@ -103,7 +115,7 @@ impl Exceptions {
     }
 
     /// Enter `key` with `positions`: the positions it had, if any.
-    pub fn insert(&mut self, key: Vec<u8>, positions: Vec<u8>) -> Option<Vec<u8>> {
+    pub fn insert(&mut self, key: Vec<u8>, positions: Vec<u16>) -> Option<Vec<u16>> {
         self.words
             .insert(key, Positions::new(positions))
             .map(|p| p.at)
@@ -131,8 +143,8 @@ impl Exceptions {
 
     /// The entries in the order of their words.
     #[must_use]
-    pub fn sorted(&self) -> Vec<(&[u8], &[u8])> {
-        let mut v: Vec<(&[u8], &[u8])> = self
+    pub fn sorted(&self) -> Vec<(&[u8], &[u16])> {
+        let mut v: Vec<(&[u8], &[u16])> = self
             .words
             .entries()
             .into_iter()
@@ -166,7 +178,7 @@ impl core::hash::Hash for Exceptions {
 
 impl crate::persist::Persist for Exceptions {
     fn save(&self, s: &mut crate::persist::Saver) {
-        let v: Vec<(Vec<u8>, Vec<u8>)> = self
+        let v: Vec<(Vec<u8>, Vec<u16>)> = self
             .sorted()
             .into_iter()
             .map(|(k, p)| (k.to_vec(), p.to_vec()))
@@ -174,7 +186,7 @@ impl crate::persist::Persist for Exceptions {
         v.save(s);
     }
     fn load(l: &mut crate::persist::Loader) -> Option<Self> {
-        let v: Vec<(Vec<u8>, Vec<u8>)> = crate::persist::Persist::load(l)?;
+        let v: Vec<(Vec<u8>, Vec<u16>)> = crate::persist::Persist::load(l)?;
         let mut e = Exceptions::default();
         for (k, p) in v {
             e.insert(k, p);
@@ -183,13 +195,40 @@ impl crate::persist::Persist for Exceptions {
     }
 }
 
-/// §930: the key of the word `word` in `lang` in the exception table.
+/// A UTF-16 unit `u` as `XeTeX`'s pool keeps it in partex: its UTF-8
+/// bytes (CESU-8, DESIGN 4.7).
+pub fn cesu8_unit(u: u16, mut put: impl FnMut(u8)) {
+    let u = u32::from(u);
+    let byte = |x: u32| u8::try_from(x & 0xFF).unwrap_or(0);
+    if u < 0x80 {
+        put(byte(u));
+    } else if u < 0x800 {
+        put(byte(0xC0 | (u >> 6)));
+        put(byte(0x80 | (u & 0x3F)));
+    } else {
+        put(byte(0xE0 | (u >> 12)));
+        put(byte(0x80 | ((u >> 6) & 0x3F)));
+        put(byte(0x80 | (u & 0x3F)));
+    }
+}
+
+/// §930: the key of the word `word` (`hc[1..hn]`) in `lang` in the
+/// exception table: the bytes of the string `\hyphenation` made for it
+/// (§939), the letters followed by the language. TeX's pool holds bytes;
+/// `XeTeX`'s (`unicode`) UTF-16 units, a word's letter above 0xFFFF
+/// stored as two (§991), so a letter of `word` past 0xFFFF matches no
+/// exception (`None`).
 #[must_use]
-pub fn exception_key(word: &[u8], lang: i32) -> Vec<u8> {
+pub fn exception_key(word: &[i32], lang: i32, unicode: bool) -> Option<Vec<u8>> {
     let mut key = Vec::with_capacity(word.len() + 1);
-    key.extend_from_slice(word);
-    key.push(u8::try_from(lang).unwrap_or(0));
-    key
+    for &c in word.iter().chain(core::iter::once(&lang)) {
+        if unicode {
+            cesu8_unit(u16::try_from(c).ok()?, |b| key.push(b));
+        } else {
+            key.push(u8::try_from(c).unwrap_or(0));
+        }
+    }
+    Some(key)
 }
 
 /// The version of a word that is no exception.
@@ -202,8 +241,12 @@ pub fn entry_version(entry: Option<&Positions>) -> Version {
     entry.map_or(NO_EXCEPTION, Value::version)
 }
 
-/// §900: the most letters a hyphenated word may have.
-pub const MAX_WORD: usize = 63;
+/// §900: the most letters a hyphenated word may have in TeX.
+pub const MAX_WORD: i32 = 63;
+
+/// `XeTeX`'s `hyphenatable_length_limit`: the most letters a hyphenated
+/// word may have, whatever `\XeTeXhyphenatablelength` says.
+pub const HYPHENATABLE_LENGTH_LIMIT: i32 = 4095;
 
 /// §923: the hyphenation values of the word `hc[1..=hn]` (`\lccode`s) in
 /// `lang`, into `hyf[0..=hn]`; `false` if the language has no patterns and
@@ -212,11 +255,11 @@ pub const MAX_WORD: usize = 63;
 #[must_use]
 pub fn hyphen_values(
     patterns: &Patterns,
-    exception: Option<&[u8]>,
+    exception: Option<&[u16]>,
     lang: i32,
-    word: &[u8],
+    word: &[i32],
     r_hyf: usize,
-    hyf: &mut [u8; MAX_WORD + 2],
+    hyf: &mut [u8],
 ) -> bool {
     let hn = word.len();
     hyf[..=hn].fill(0);
@@ -232,11 +275,11 @@ pub fn hyphen_values(
         return false; // no patterns for `cur_lang`
     }
     // `hc[0..=hn+2]` with the delimiters.
-    let mut hc = [0i32; MAX_WORD + 3];
-    for (j, &c) in word.iter().enumerate() {
-        hc[j + 1] = i32::from(c);
-    }
-    hc[hn + 2] = 256;
+    let mut hc = Vec::with_capacity(hn + 3);
+    hc.push(0);
+    hc.extend_from_slice(word);
+    hc.push(0);
+    hc.push(patterns.max_hyph_char);
     let at = |v: &Vec<i32>, i: i32| v[usize::try_from(i).unwrap_or(0)];
     for j in 0..=(hn + 1).saturating_sub(r_hyf) {
         let mut z = at(&patterns.link, lang + 1) + hc[j];
