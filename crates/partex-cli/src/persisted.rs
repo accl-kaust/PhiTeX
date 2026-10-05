@@ -407,7 +407,7 @@ fn save(dir: &std::path::Path, key: u128, b: &Build<Machine>, kept: &Mutex<Kept>
         .iter()
         .filter(|r| reused.contains_key(&r.fingerprint))
         .count();
-    match store::save(dir, key, &root, &blobs, &refs, &have) {
+    match store::save(dir, key, &root, blobs, &refs, &have) {
         Ok((now, saved)) => {
             {
                 let mut k = kept

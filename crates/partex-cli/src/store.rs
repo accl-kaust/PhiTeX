@@ -37,9 +37,13 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs::File;
+use std::hash::Hasher;
+use std::io::Write;
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
+
+use partex_core::StableHasher;
 
 /// The first bytes of a root.
 const ROOT_MAGIC: &[u8; 16] = b"partex-store/5\0\0";
@@ -338,6 +342,30 @@ pub fn open(dir: &Path, key: u128) -> Option<Opened> {
     })
 }
 
+/// Bytes of new blobs a save compresses at once before writing them.
+const SAVE_BATCH: usize = 64 << 20;
+
+/// A pack being written by a save: its file, its name (the hash of its
+/// bytes) so far, and its index.
+struct Pack {
+    file: std::io::BufWriter<File>,
+    name: StableHasher,
+    index: Vec<(u128, u64, u32)>,
+    len: u64,
+}
+
+impl Pack {
+    /// Append blob `h`, kept as `b`.
+    fn put(&mut self, h: u128, b: &[u8]) -> std::io::Result<()> {
+        self.index
+            .push((h, self.len, u32::try_from(b.len()).unwrap_or(u32::MAX)));
+        self.file.write_all(b)?;
+        self.name.write(b);
+        self.len += b.len() as u64;
+        Ok(())
+    }
+}
+
 /// What a save wrote.
 #[derive(Debug, Default)]
 pub struct Saved {
@@ -362,7 +390,7 @@ pub fn save(
     dir: &Path,
     key: u128,
     root: &[u8],
-    new: &[partex_core::persist::MerkleBlob],
+    new: Vec<partex_core::persist::MerkleBlob>,
     refs: &[u128],
     stored: &Stored,
 ) -> std::io::Result<(Stored, Saved)> {
@@ -379,19 +407,26 @@ pub fn save(
             .ok_or_else(|| std::io::Error::other("a pack's references do not read back"))?;
         &read_now
     };
-    let new_kids: HashMap<u128, &[u128], ByName> =
-        new.iter().map(|(h, _, k)| (*h, k.as_slice())).collect();
+    // (the new blobs' references apart from their bytes, which go as
+    // soon as they are written)
+    let mut fresh: Vec<(u128, Vec<u8>)> = Vec::with_capacity(new.len());
+    let mut new_kids: HashMap<u128, Vec<u128>, ByName> =
+        HashMap::with_capacity_and_hasher(new.len(), ByName::default());
+    for (h, b, k) in new {
+        fresh.push((h, b));
+        new_kids.insert(h, k);
+    }
     let kids_of = |h: &u128| -> Option<&[u128]> {
         new_kids
             .get(h)
-            .copied()
+            .map(Vec::as_slice)
             .or_else(|| old.get(h).map(|k| &k[..]))
     };
     let t_kids = t0.elapsed();
     // (what the root reaches)
     let mut live: std::collections::HashSet<u128, ByName> =
         std::collections::HashSet::with_capacity_and_hasher(
-            stored.places.len() + new.len(),
+            stored.places.len() + fresh.len(),
             ByName::default(),
         );
     let mut todo: Vec<u128> = refs.to_vec();
@@ -421,80 +456,104 @@ pub fn save(
         })
         .map(|(p, _)| *p)
         .collect();
-    let mut pack: Vec<u8> = Vec::new();
-    let mut index: Vec<(u128, u64, u32)> = Vec::new();
     let mut out = Saved {
         live: live.len(),
         phases: vec![("references", t_kids), ("liveness", t0.elapsed())],
         ..Saved::default()
     };
-    let mut put = |h: u128, b: &[u8], pack: &mut Vec<u8>| {
-        index.push((
-            h,
-            pack.len() as u64,
-            u32::try_from(b.len()).unwrap_or(u32::MAX),
-        ));
-        pack.extend_from_slice(b);
-    };
-    // (the new blobs kept, on several threads when there are many)
-    let fresh: Vec<&partex_core::persist::MerkleBlob> =
-        new.iter().filter(|(h, _, _)| live.contains(h)).collect();
     let compress = compressing();
-    let total_new: usize = fresh.iter().map(|(_, b, _)| b.len()).sum();
-    let threads = if total_new < (8 << 20) {
-        1
-    } else {
-        std::thread::available_parallelism()
-            .map_or(4, std::num::NonZero::get)
-            .min(8)
+    // The pack is written as it is made, to a temporary name: a save
+    // holds no second copy of the blobs, kept or compressed, nor the pack.
+    let tmp = dir
+        .join("packs")
+        .join(format!("save.tmp{}", std::process::id()));
+    let mut pack = Pack {
+        file: std::io::BufWriter::new(File::create(&tmp)?),
+        name: StableHasher::new(),
+        index: Vec::new(),
+        len: 0,
     };
-    let per = fresh.len().div_ceil(threads).max(1);
-    let kept: Vec<Vec<(u128, Vec<u8>)>> = std::thread::scope(|sc| {
-        let jobs: Vec<_> = fresh
-            .chunks(per)
-            .map(|part| {
-                sc.spawn(move || {
-                    part.iter()
-                        .map(|(h, b, _)| (*h, kept_form(b, compress)))
-                        .collect::<Vec<_>>()
-                })
-            })
-            .collect();
-        jobs.into_iter()
-            .map(|j| j.join().unwrap_or_default())
-            .collect()
-    });
-    for (h, k) in kept.iter().flatten() {
-        put(*h, k, &mut pack);
-        out.new_blobs += 1;
-        out.new_bytes += k.len() as u64;
-    }
-    out.new_raw_bytes = total_new as u64;
-    if kept.iter().map(Vec::len).sum::<usize>() != fresh.len() {
-        return Err(std::io::Error::other("a blob was not kept"));
-    }
-    out.phases.push(("compress", t0.elapsed()));
-    // (the live blobs of the packs let go, read back)
-    let mut files: BTreeMap<u128, File> = BTreeMap::new();
-    let mut moving: Vec<(u128, (u128, u64, u32))> = live
-        .iter()
-        .filter_map(|h| Some((*h, *stored.places.get(h)?)))
-        .filter(|(_, (p, _, _))| !keep.contains(p))
-        .collect();
-    moving.sort_unstable();
-    for (h, (p, off, len)) in moving {
-        let h = &h;
-        let f = match files.entry(p) {
-            std::collections::btree_map::Entry::Occupied(e) => e.into_mut(),
-            std::collections::btree_map::Entry::Vacant(e) => {
-                e.insert(File::open(pack_path(dir, p))?)
-            }
+    let written = (|| -> std::io::Result<()> {
+        // (the new blobs kept, compressed a batch at a time on several
+        // threads when there are many, each let go once written)
+        fresh.retain(|(h, _)| live.contains(h));
+        let total_new: usize = fresh.iter().map(|(_, b)| b.len()).sum();
+        out.new_raw_bytes = total_new as u64;
+        let threads = if total_new < (8 << 20) {
+            1
+        } else {
+            std::thread::available_parallelism()
+                .map_or(4, std::num::NonZero::get)
+                .min(8)
         };
-        let mut buf = vec![0; len as usize];
-        f.read_exact_at(&mut buf, off)?;
-        put(*h, &buf, &mut pack);
-        out.moved_bytes += u64::from(len);
+        let mut blobs = fresh.into_iter().peekable();
+        while blobs.peek().is_some() {
+            let mut batch = Vec::new();
+            let mut bytes = 0;
+            while bytes < SAVE_BATCH
+                && let Some(b) = blobs.next()
+            {
+                bytes += b.1.len();
+                batch.push(b);
+            }
+            let per = batch.len().div_ceil(threads).max(1);
+            let kept: Vec<Vec<(u128, Vec<u8>)>> = std::thread::scope(|sc| {
+                let jobs: Vec<_> = batch
+                    .chunks(per)
+                    .map(|part| {
+                        sc.spawn(move || {
+                            part.iter()
+                                .map(|(h, b)| (*h, kept_form(b, compress)))
+                                .collect::<Vec<_>>()
+                        })
+                    })
+                    .collect();
+                jobs.into_iter()
+                    .map(|j| j.join().unwrap_or_default())
+                    .collect()
+            });
+            if kept.iter().map(Vec::len).sum::<usize>() != batch.len() {
+                return Err(std::io::Error::other("a blob was not kept"));
+            }
+            drop(batch);
+            for (h, k) in kept.iter().flatten() {
+                pack.put(*h, k)?;
+                out.new_blobs += 1;
+                out.new_bytes += k.len() as u64;
+            }
+        }
+        out.phases.push(("compress", t0.elapsed()));
+        // (the live blobs of the packs let go, read back)
+        let mut files: BTreeMap<u128, File> = BTreeMap::new();
+        let mut moving: Vec<(u128, (u128, u64, u32))> = live
+            .iter()
+            .filter_map(|h| Some((*h, *stored.places.get(h)?)))
+            .filter(|(_, (p, _, _))| !keep.contains(p))
+            .collect();
+        moving.sort_unstable();
+        let mut buf = Vec::new();
+        for (h, (p, off, len)) in moving {
+            let f = match files.entry(p) {
+                std::collections::btree_map::Entry::Occupied(e) => e.into_mut(),
+                std::collections::btree_map::Entry::Vacant(e) => {
+                    e.insert(File::open(pack_path(dir, p))?)
+                }
+            };
+            buf.resize(len as usize, 0);
+            f.read_exact_at(&mut buf, off)?;
+            pack.put(h, &buf)?;
+            out.moved_bytes += u64::from(len);
+        }
+        pack.file.flush()
+    })();
+    if let Err(e) = written {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
     }
+    let Pack {
+        file, name, index, ..
+    } = pack;
+    drop(file);
     let mut places: HashMap<u128, (u128, u64, u32)> = stored
         .places
         .iter()
@@ -502,8 +561,10 @@ pub fn save(
         .map(|(h, v)| (*h, *v))
         .collect();
     let mut names: Vec<u128> = keep.iter().copied().collect();
-    if !pack.is_empty() {
-        let name = partex_core::persist::blob_hash(&pack);
+    if index.is_empty() {
+        let _ = std::fs::remove_file(&tmp);
+    } else {
+        let name = name.finish128();
         let mut idx = Vec::with_capacity(index.len() * ENTRY);
         let mut kid_bytes = Vec::new();
         for (h, off, len) in &index {
@@ -519,7 +580,9 @@ pub fn save(
         out.phases.push(("move, index", t0.elapsed()));
         // (the pack and its references before its index: an index names
         // only packs there)
-        write_atomic(&pack_path(dir, name), &pack)?;
+        std::fs::rename(&tmp, pack_path(dir, name)).inspect_err(|_| {
+            let _ = std::fs::remove_file(&tmp);
+        })?;
         write_atomic(&kids_path(dir, name), &kept_form(&kid_bytes, compress))?;
         write_atomic(&idx_path(dir, name), &idx)?;
         for (h, off, len) in index {
@@ -549,7 +612,7 @@ pub fn save(
             .keys()
             .filter_map(|h| {
                 let k = match new_kids.get(h) {
-                    Some(k) => Arc::from(*k),
+                    Some(k) => Arc::from(k.as_slice()),
                     None => old.get(h)?.clone(),
                 };
                 Some((*h, k))
@@ -637,5 +700,70 @@ pub fn collect(dir: &Path, max: u64) {
         if unnamed && t < old {
             let _ = std::fs::remove_file(p);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use partex_core::persist::blob_hash;
+
+    fn blob(bytes: Vec<u8>, kids: Vec<u128>) -> partex_core::persist::MerkleBlob {
+        (blob_hash(&bytes), bytes, kids)
+    }
+
+    /// A save writes its pack as it goes, in batches; what it saved reads
+    /// back, and a second save that refers to the first's blobs keeps them
+    /// (moving the live ones of a pack mostly dead).
+    #[test]
+    fn saves_read_back() {
+        let dir = std::env::temp_dir().join(format!("partex-store-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        // (small blobs and one past a batch, incompressible)
+        let mut x = 1u64;
+        let big: Vec<u8> = (0..SAVE_BATCH + 10)
+            .map(|_| {
+                x = x.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+                (x >> 56) as u8
+            })
+            .collect();
+        let leaf = blob(b"a leaf, referred to".repeat(20), Vec::new());
+        let large = blob(big, vec![leaf.0]);
+        let gone = blob(b"no root reaches this one".repeat(20), Vec::new());
+        let (hl, hb, hg) = (leaf.0, large.0, gone.0);
+        let (stored, saved) = save(
+            &dir,
+            1,
+            b"root one",
+            vec![leaf, large, gone],
+            &[hb],
+            &Stored::default(),
+        )
+        .unwrap();
+        assert_eq!(saved.new_blobs, 2);
+        let o = open(&dir, 1).unwrap();
+        assert_eq!(o.root, b"root one");
+        assert_eq!(o.get(hl).unwrap(), b"a leaf, referred to".repeat(20));
+        assert_eq!(o.get(hb).unwrap().len(), SAVE_BATCH + 10);
+        assert!(o.get(hg).is_none());
+        // (no temporary file left behind)
+        let names: Vec<String> = std::fs::read_dir(dir.join("packs"))
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert!(names.iter().all(|n| !n.contains(".tmp")), "{names:?}");
+        // A second save refers to the leaf only: the large blob is dead,
+        // so the first pack is mostly dead and the leaf moves.
+        let extra = blob(b"a new blob".repeat(20), vec![hl]);
+        let he = extra.0;
+        let (_, saved) = save(&dir, 1, b"root two", vec![extra], &[he], &stored).unwrap();
+        assert_eq!((saved.new_blobs, saved.packs), (1, 1));
+        assert!(saved.moved_bytes > 0);
+        let o = open(&dir, 1).unwrap();
+        assert_eq!(o.root, b"root two");
+        assert_eq!(o.get(hl).unwrap(), b"a leaf, referred to".repeat(20));
+        assert_eq!(o.get(he).unwrap(), b"a new blob".repeat(20));
+        assert!(o.get(hb).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
