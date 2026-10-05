@@ -120,6 +120,9 @@ pub struct Merkle {
     /// The blobs each value being written refers to (the root's first).
     refs: Vec<Vec<u128>>,
     min: usize,
+    /// Where each blob goes as it is made, instead of `blobs`
+    /// ([`Saver::merkle_sink`]).
+    sink: Option<Box<dyn FnMut(MerkleBlob)>>,
 }
 
 /// A blob a [`Saver::merkle`] wrote: its hash, bytes and the blobs it
@@ -218,13 +221,23 @@ impl Saver {
                 referenced: BTreeSet::new(),
                 refs: alloc::vec![Vec::new()],
                 min: min.max(17),
+                sink: None,
             }),
             ..Self::new()
         }
     }
 
-    /// The blobs of a [`Saver::merkle`] (none otherwise) and the root's
-    /// bytes.
+    /// Hand each blob of this [`Saver::merkle`] to `sink` as it is made
+    /// (children before parents, each once), rather than keeping them all
+    /// until [`Saver::into_merkle`]: a store writes them as they come.
+    pub fn merkle_sink(&mut self, sink: Box<dyn FnMut(MerkleBlob)>) {
+        if let Some(m) = &mut self.merkle {
+            m.sink = Some(sink);
+        }
+    }
+
+    /// The blobs of a [`Saver::merkle`] (none otherwise, nor those a
+    /// [`Saver::merkle_sink`] took) and the root's bytes.
     #[must_use]
     pub fn into_merkle(self) -> (Vec<MerkleBlob>, Vec<u8>) {
         (self.merkle.map(|m| m.blobs).unwrap_or_default(), self.enc.0)
@@ -475,7 +488,10 @@ impl Saver {
             if let Some(m) = &mut self.merkle {
                 m.known.insert(addr, h);
                 if !m.have.contains(&h) && m.emitted.insert(h) {
-                    m.blobs.push((h, inner, refs));
+                    match &mut m.sink {
+                        Some(sink) => sink((h, inner, refs)),
+                        None => m.blobs.push((h, inner, refs)),
+                    }
                 }
             }
             self.blob_ref_here(h);
@@ -1244,5 +1260,26 @@ mod tests {
         let (blobs, _) = s.into_merkle();
         assert!(blobs.is_empty(), "a value known is not written again");
         assert_eq!(known.len(), 1);
+    }
+
+    /// A sink takes the blobs a saver keeps without one, in the same
+    /// order, and the root is the same bytes.
+    #[test]
+    fn a_sink_takes_the_blobs_as_they_are_made() {
+        let leaf: Arc<Vec<u8>> = Arc::new(alloc::vec![7; 100]);
+        let value: Arc<Vec<Arc<Vec<u8>>>> = Arc::new(alloc::vec![leaf.clone(), leaf]);
+        let mut s = Saver::merkle(16, BTreeSet::new());
+        value.save(&mut s);
+        let (kept, root) = s.into_merkle();
+        let taken = Rc::new(core::cell::RefCell::new(Vec::new()));
+        let mut s = Saver::merkle(16, BTreeSet::new());
+        let sink = taken.clone();
+        s.merkle_sink(Box::new(move |b| sink.borrow_mut().push(b)));
+        value.save(&mut s);
+        let (left, sunk_root) = s.into_merkle();
+        assert!(left.is_empty(), "the sink took every blob");
+        assert_eq!(sunk_root, root);
+        assert_eq!(*taken.borrow(), kept);
+        assert_eq!(kept.len(), 2);
     }
 }
