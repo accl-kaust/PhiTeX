@@ -47,7 +47,8 @@ build() {
     [ -e "$f" ] || continue
     n="$(basename "$f" .tex)"; d="$out/probe"
     mkdir -p "$d"
-    "$repo/scripts/xetex/oracle.sh" --latex --no-pdf "$f" "$d" || true
+    TEXINPUTS="$repo/upstream/latex2e/base/doc:${TEXINPUTS:-}" \
+      "$repo/scripts/xetex/oracle.sh" --latex --no-pdf "$f" "$d" || true
     [ -s "$d/$n.xdv" ] && oracle_pdf "$d" "$n"
   done
   find "$out" -name '*.xdv' | wc -l
