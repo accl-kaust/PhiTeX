@@ -23,47 +23,221 @@ pub const UC_SUR_END: u32 = 0xE000;
 #[allow(non_snake_case)]
 #[must_use]
 pub fn UC_is_valid(ucv: i32) -> bool {
-    todo!()
+    !(ucv < 0 || ucv > 0x10FFFF || (0xD800..=0xDFFF).contains(&ucv))
 }
 
 /// `UC_UTF16BE_is_valid_string`: the whole of `s`.
 #[allow(non_snake_case)]
 #[must_use]
 pub fn UC_UTF16BE_is_valid_string(s: &[u8]) -> bool {
-    todo!()
+    let mut p = 0;
+    if p + 1 >= s.len() {
+        return false;
+    }
+    while p < s.len() {
+        let ucv = UC_UTF16BE_decode_char(s, &mut p);
+        if !UC_is_valid(ucv) {
+            return false;
+        }
+    }
+    true
 }
 
 /// `UC_UTF8_is_valid_string`: the whole of `s`.
 #[allow(non_snake_case)]
 #[must_use]
 pub fn UC_UTF8_is_valid_string(s: &[u8]) -> bool {
-    todo!()
+    let mut p = 0;
+    if p >= s.len() {
+        return false;
+    }
+    while p < s.len() {
+        let ucv = UC_UTF8_decode_char(s, &mut p);
+        if !UC_is_valid(ucv) {
+            return false;
+        }
+    }
+    true
 }
 
 /// `UC_UTF16BE_decode_char`: the code point at `s[*pp..]`, advancing `*pp`.
 #[allow(non_snake_case)]
 pub fn UC_UTF16BE_decode_char(s: &[u8], pp: &mut usize) -> i32 {
-    todo!()
+    let mut p = *pp;
+    let ucv: i32;
+    if p + 1 >= s.len() {
+        return -1;
+    }
+    let first = (u32::from(s[p]) << 8) | u32::from(s[p + 1]);
+    p += 2;
+    if (UC_SUR_HIGH_START..UC_SUR_LOW_START).contains(&first) {
+        if p + 1 >= s.len() {
+            return -1;
+        }
+        let second = (u32::from(s[p]) << 8) | u32::from(s[p + 1]);
+        p += 2;
+        let mut u = second & UC_SUR_MASK;
+        u |= (first & UC_SUR_MASK) << UC_SUR_SHIFT;
+        u += 0x0001_0000;
+        ucv = u as i32;
+    } else if (UC_SUR_LOW_START..UC_SUR_END).contains(&first) {
+        return -1;
+    } else {
+        ucv = first as i32;
+    }
+    *pp = p;
+    ucv
 }
 
 /// `UC_UTF16BE_encode_char`: the bytes written at `dst[*dstp..]` (0 if
 /// they do not fit).
 #[allow(non_snake_case)]
 pub fn UC_UTF16BE_encode_char(ucv: i32, dst: &mut [u8], dstp: &mut usize) -> usize {
-    todo!()
+    let p = *dstp;
+    let count;
+    if (0..=0xFFFF).contains(&ucv) {
+        if p + 2 > dst.len() {
+            return 0;
+        }
+        dst[p] = ((ucv >> 8) & 0xff) as u8;
+        dst[p + 1] = (ucv & 0xff) as u8;
+        count = 2;
+    } else if (0x01_0000..=0x10_FFFF).contains(&ucv) {
+        if p + 4 > dst.len() {
+            return 0;
+        }
+        let u = (ucv - 0x0001_0000) as u32;
+        let high = ((u >> UC_SUR_SHIFT) + UC_SUR_HIGH_START) as u16;
+        let low = ((u & UC_SUR_MASK) + UC_SUR_LOW_START) as u16;
+        dst[p] = (high >> 8) as u8;
+        dst[p + 1] = (high & 0xff) as u8;
+        dst[p + 2] = (low >> 8) as u8;
+        dst[p + 3] = (low & 0xff) as u8;
+        count = 4;
+    } else {
+        if p + 2 > dst.len() {
+            return 0;
+        }
+        dst[p] = ((UC_REPLACEMENT_CHAR >> 8) & 0xff) as u8;
+        dst[p + 1] = (UC_REPLACEMENT_CHAR & 0xff) as u8;
+        count = 2;
+    }
+    *dstp += count;
+    count
 }
 
-/// `UC_UTF8_decode_char`.
+/// `UC_UTF8_decode_char`. (C reads `*p` unchecked; at the end of `s`
+/// this returns -1 without advancing.)
 #[allow(non_snake_case)]
 pub fn UC_UTF8_decode_char(s: &[u8], pp: &mut usize) -> i32 {
-    todo!()
+    let mut p = *pp;
+    if p >= s.len() {
+        return -1;
+    }
+    let mut c = s[p];
+    p += 1;
+    let mut ucv: i32;
+    let mut nbytes: i32;
+    if c <= 0x7f {
+        ucv = i32::from(c);
+        nbytes = 0;
+    } else if (c & 0xe0) == 0xc0 {
+        ucv = i32::from(c & 31);
+        nbytes = 1;
+    } else if (c & 0xf0) == 0xe0 {
+        ucv = i32::from(c & 0x0f);
+        nbytes = 2;
+    } else if (c & 0xf8) == 0xf0 {
+        ucv = i32::from(c & 0x07);
+        nbytes = 3;
+    } else if (c & 0xfc) == 0xf8 {
+        ucv = i32::from(c & 0x03);
+        nbytes = 4;
+    } else if (c & 0xfe) == 0xfc {
+        ucv = i32::from(c & 0x01);
+        nbytes = 5;
+    } else {
+        return -1;
+    }
+    if p + nbytes as usize > s.len() {
+        return -1;
+    }
+    while nbytes > 0 {
+        nbytes -= 1;
+        c = s[p];
+        p += 1;
+        if (c & 0xc0) != 0x80 {
+            return -1;
+        }
+        ucv = (ucv << 6) | i32::from(c & 0x3f);
+    }
+    *pp = p;
+    ucv
 }
 
 /// `UC_UTF8_encode_char`: the bytes written at `dst[*dstp..]` (0 if they
 /// do not fit).
 #[allow(non_snake_case)]
 pub fn UC_UTF8_encode_char(ucv: i32, dst: &mut [u8], dstp: &mut usize) -> usize {
-    todo!()
+    let p = *dstp;
+    let mut count = 0;
+    if !UC_is_valid(ucv) {
+        return 0;
+    }
+    if ucv < 0x7f {
+        if p + 1 > dst.len() {
+            return 0;
+        }
+        dst[p] = ucv as u8;
+        count = 1;
+    } else if ucv <= 0x7ff {
+        if p + 2 > dst.len() {
+            return 0;
+        }
+        dst[p] = (0xc0 | (ucv >> 6)) as u8;
+        dst[p + 1] = (0x80 | (ucv & 0x3f)) as u8;
+        count = 2;
+    } else if ucv <= 0xffff {
+        if p + 3 > dst.len() {
+            return 0;
+        }
+        dst[p] = (0xe0 | (ucv >> 12)) as u8;
+        dst[p + 1] = (0x80 | ((ucv >> 6) & 0x3f)) as u8;
+        dst[p + 2] = (0x80 | (ucv & 0x3f)) as u8;
+        count = 3;
+    } else if ucv <= 0x1f_ffff {
+        if p + 4 > dst.len() {
+            return 0;
+        }
+        dst[p] = (0xf0 | (ucv >> 18)) as u8;
+        dst[p + 1] = (0x80 | ((ucv >> 12) & 0x3f)) as u8;
+        dst[p + 2] = (0x80 | ((ucv >> 6) & 0x3f)) as u8;
+        dst[p + 3] = (0x80 | (ucv & 0x3f)) as u8;
+        count = 4;
+    } else if ucv <= 0x3ff_ffff {
+        if p + 5 > dst.len() {
+            return 0;
+        }
+        dst[p] = (0xf8 | (ucv >> 24)) as u8;
+        dst[p + 1] = (0x80 | ((ucv >> 18) & 0x3f)) as u8;
+        dst[p + 2] = (0x80 | ((ucv >> 12) & 0x3f)) as u8;
+        dst[p + 3] = (0x80 | ((ucv >> 6) & 0x3f)) as u8;
+        dst[p + 4] = (0x80 | (ucv & 0x3f)) as u8;
+        count = 5;
+    } else {
+        if p + 6 > dst.len() {
+            return 0;
+        }
+        dst[p] = (0xfc | (ucv >> 30)) as u8;
+        dst[p + 1] = (0x80 | ((ucv >> 24) & 0x3f)) as u8;
+        dst[p + 2] = (0x80 | ((ucv >> 18) & 0x3f)) as u8;
+        dst[p + 3] = (0x80 | ((ucv >> 12) & 0x3f)) as u8;
+        dst[p + 4] = (0x80 | ((ucv >> 6) & 0x3f)) as u8;
+        dst[p + 5] = (0x80 | (ucv & 0x3f)) as u8;
+        count = 6;
+    }
+    *dstp += count;
+    count
 }
 
 /// `UC_Combine_CJK_compatibility_ideograph`: the compatibility ideograph
@@ -71,7 +245,21 @@ pub fn UC_UTF8_encode_char(ucv: i32, dst: &mut [u8], dstp: &mut usize) -> usize 
 #[allow(non_snake_case)]
 #[must_use]
 pub fn UC_Combine_CJK_compatibility_ideograph(ucv: i32, uvs: i32) -> i32 {
-    todo!()
+    let mut lower = 0usize;
+    let mut upper = CJK_COMPATIBILITY_IDEOGRAPHS.len();
+    while lower < upper {
+        let middle = (lower + upper) / 2;
+        let u = CJK_COMPATIBILITY_IDEOGRAPHS[middle][0];
+        let v = CJK_COMPATIBILITY_IDEOGRAPHS[middle][1];
+        if ucv == u && uvs == v {
+            return CJK_COMPATIBILITY_IDEOGRAPHS[middle][2];
+        } else if ucv < u || (ucv == u && uvs < v) {
+            upper = middle;
+        } else {
+            lower = middle + 1;
+        }
+    }
+    -1
 }
 
 /// The `CJK_compatibility_ideographs` table (StandardizedVariants.txt):
@@ -1080,3 +1268,41 @@ pub static CJK_COMPATIBILITY_IDEOGRAPHS: [[i32; 3]; 1002] = [
     [0x2A392, 0xFE00, 0x2F88F],
     [0x2A600, 0xFE00, 0x2FA1D],
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn utf16_round_trip() {
+        let mut b = [0u8; 4];
+        let mut p = 0;
+        assert_eq!(UC_UTF16BE_encode_char(0x1F600, &mut b, &mut p), 4);
+        assert_eq!(b, [0xD8, 0x3D, 0xDE, 0x00]);
+        let mut q = 0;
+        assert_eq!(UC_UTF16BE_decode_char(&b, &mut q), 0x1F600);
+        assert_eq!(q, 4);
+        let mut p = 0;
+        assert_eq!(UC_UTF16BE_encode_char(0x41, &mut b[..1], &mut p), 0);
+        assert!(UC_UTF16BE_is_valid_string(&[0, 0x41]));
+        assert!(!UC_UTF16BE_is_valid_string(&[0xDC, 0]));
+    }
+
+    #[test]
+    fn utf8() {
+        let mut b = [0u8; 6];
+        let mut p = 0;
+        assert_eq!(UC_UTF8_encode_char(0x7f, &mut b, &mut p), 2);
+        assert_eq!(&b[..2], &[0xC1, 0xBF]);
+        let s = "é€".as_bytes();
+        let mut q = 0;
+        assert_eq!(UC_UTF8_decode_char(s, &mut q), 0xE9);
+        assert_eq!(UC_UTF8_decode_char(s, &mut q), 0x20AC);
+        assert!(UC_UTF8_is_valid_string(s));
+        assert_eq!(
+            UC_Combine_CJK_compatibility_ideograph(0x3B9D, 0xFE01),
+            0x2F8E7
+        );
+        assert_eq!(UC_Combine_CJK_compatibility_ideograph(0x3B9D, 0xFE02), -1);
+    }
+}
