@@ -786,6 +786,40 @@ impl<H: Host, T: Tracker> Tex<H, T> {
 
     /// §252: display `eqtb[n]` symbolically.
     pub(crate) fn show_eqtb(&mut self, n: Pointer) {
+        if let Some((base, c)) = crate::wide::code_of(n) {
+            // `XeTeX`: a code past character 255 (§261, §269)
+            let name: &[u8] = match base {
+                crate::web::CAT_CODE_BASE => b"catcode",
+                crate::web::LC_CODE_BASE => b"lccode",
+                crate::web::UC_CODE_BASE => b"uccode",
+                crate::web::SF_CODE_BASE => b"sfcode",
+                crate::web::MATH_CODE_BASE => b"mathcode",
+                _ => b"delcode",
+            };
+            self.print_esc(name);
+            self.print_int(c);
+            self.print_char(b'=');
+            if base == DEL_CODE_BASE {
+                self.print_int(self.eqtb_int(n));
+            } else {
+                self.print_int(self.equiv(n));
+            }
+            return;
+        }
+        if crate::wide::is_char_cs(n) && n >= crate::wide::WIDE_BASE {
+            // `XeTeX`: an active character or a one-character name past
+            // 255 (§253)
+            self.sprint_cs(n);
+            self.print_char(b'=');
+            self.print_cmd_chr(self.eq_type(n), self.equiv(n));
+            if self.eq_type(n) >= CALL {
+                self.print_char(b':');
+                if let Some(t) = self.equiv_toks(n).cloned() {
+                    self.show_token_list(&t, NULL, 32);
+                }
+            }
+            return;
+        }
         if n >= EXT_BASE {
             // e-TeX: a register above 255
             let (kind, r) = ext_reg(n);

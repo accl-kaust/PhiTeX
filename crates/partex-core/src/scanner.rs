@@ -337,7 +337,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             }
             ACTIVE_CHAR => {
                 // §353: process an active-character control sequence.
-                self.cur_cs = self.cur_chr + ACTIVE_BASE;
+                self.cur_cs = crate::wide::active_cs(self.cur_chr);
                 let w = self.lookup_meaning(self.cur_cs);
                 self.cur_cmd = w.b0();
                 self.cur_chr = w.rh();
@@ -509,7 +509,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                     self.cur_input.loc += 1;
                     break 'start_cs;
                 }
-                self.cur_cs = SINGLE_BASE + crate::input::ci(self.buffer[loc]);
+                self.cur_cs = crate::wide::single_cs(crate::input::ci(self.buffer[loc]));
                 self.cur_input.loc += 1;
                 break 'start_cs;
             }

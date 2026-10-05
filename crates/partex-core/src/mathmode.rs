@@ -657,7 +657,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
 
     /// §1152: treat `cur_chr` as an active character.
     fn treat_as_active(&mut self) -> Result<(), Jump> {
-        self.cur_cs = self.cur_chr + ACTIVE_BASE;
+        self.cur_cs = crate::wide::active_cs(self.cur_chr);
         self.cur_cmd = self.eq_type(self.cur_cs);
         self.cur_chr = self.equiv(self.cur_cs);
         self.x_token()?;

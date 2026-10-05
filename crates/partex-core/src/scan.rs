@@ -42,6 +42,108 @@ pub(crate) fn order(o: i32) -> Order {
 }
 
 impl<H: Host, T: Tracker> Tex<H, T> {
+    /// `XeTeX` §448: fetch a character code from some table (a math code
+    /// as TeX's 15 bits, or an error).
+    fn fetch_code_xetex(&mut self, m: i32) -> Result<(), Jump> {
+        use crate::mathcodes::{
+            is_active_math_char, math_char_field, math_class_field, math_fam_field,
+        };
+        self.scan_usv_num()?;
+        let c = self.cur_val;
+        self.cur_val = if m == MATH_CODE_BASE {
+            let mut v = self.math_code(c);
+            if is_active_math_char(v) {
+                v = 0x8000;
+            } else if math_class_field(v) > 7 || math_fam_field(v) > 15 || math_char_field(v) > 255
+            {
+                self.print_err(b"Extended mathchar used as mathchar");
+                self.help(&[
+                    b"A mathchar number must be between 0 and \"7FFF.",
+                    b"I changed this one to zero.",
+                ]);
+                self.int_error(v)?;
+                v = 0;
+            }
+            if v == 0x8000 {
+                v
+            } else {
+                math_class_field(v) * 0x1000 + math_fam_field(v) * 0x100 + math_char_field(v)
+            }
+        } else if m == DEL_CODE_BASE {
+            let v = self.del_code(c);
+            if v >= 0x4000_0000 {
+                self.print_err(b"Extended delcode used as delcode");
+                self.help(&[
+                    b"A delimiter code must be between 0 and \"7FFFFFF.",
+                    b"I changed this one to zero.",
+                ]);
+                self.error()?;
+                0
+            } else {
+                v
+            }
+        } else if m < SF_CODE_BASE {
+            self.equiv(crate::wide::code_loc(m, c))
+        } else if m < MATH_CODE_BASE {
+            self.equiv(crate::wide::code_loc(m, c)) % 0x1_0000
+        } else {
+            self.eqtb_int(crate::wide::code_loc(m, c))
+        };
+        self.cur_val_level = INT_VAL;
+        Ok(())
+    }
+
+    /// `XeTeX` §447: `\the\XeTeXcharclass`, `\Umathcodenum`,
+    /// `\Udelcodenum` (and the errors of `\Umathcode`, `\Udelcode`).
+    fn fetch_xetex_def_code(&mut self, m: i32) -> Result<(), Jump> {
+        self.scan_usv_num()?;
+        let c = self.cur_val;
+        self.cur_val = if m == SF_CODE_BASE {
+            self.sf_code(c) / 0x1_0000
+        } else if m == MATH_CODE_BASE {
+            self.math_code(c)
+        } else if m == MATH_CODE_BASE + 1 {
+            self.print_err(b"Can't use \\Umathcode as a number (try \\Umathcodenum)");
+            self.help(&[
+                b"\\Umathcode is for setting a mathcode from separate values;",
+                b"use \\Umathcodenum to access them as single values.",
+            ]);
+            self.error()?;
+            0
+        } else if m == DEL_CODE_BASE {
+            self.del_code(c)
+        } else {
+            self.print_err(b"Can't use \\Udelcode as a number (try \\Udelcodenum)");
+            self.help(&[
+                b"\\Udelcode is for setting a delcode from separate values;",
+                b"use \\Udelcodenum to access them as single values.",
+            ]);
+            self.error()?;
+            0
+        };
+        self.cur_val_level = INT_VAL;
+        Ok(())
+    }
+
+    /// `XeTeX`: the character of a control sequence whose name is one
+    /// character past U+FFFF (its surrogate pair).
+    pub(crate) fn surrogate_name(&self, p: i32) -> Option<i32> {
+        if p < crate::web::HASH_BASE || p >= crate::xregs::EXT_BASE {
+            return None;
+        }
+        let m = usize::try_from(self.text(p)).ok()?;
+        if m >= self.str_ptr {
+            return None;
+        }
+        let mut u =
+            crate::strings::decode_units(&self.str_pool[self.str_start[m]..self.str_start[m + 1]]);
+        let (Some(hi), Some(lo), None) = (u.next(), u.next(), u.next()) else {
+            return None;
+        };
+        ((0xD800..=0xDBFF).contains(&hi) && (0xDC00..=0xDFFF).contains(&lo))
+            .then(|| i32::try_from(0x1_0000 + (hi - 0xD800) * 0x400 + lo - 0xDC00).unwrap_or(0))
+    }
+
     /// §404: get the next non-blank non-relax non-call token.
     pub(crate) fn get_nonblank_nonrelax_noncall(&mut self) -> Result<(), Jump> {
         loop {
@@ -157,6 +259,8 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         }
         let mut m = self.cur_chr;
         match self.cur_cmd {
+            DEF_CODE if self.unicode => self.fetch_code_xetex(m)?,
+            XETEX_DEF_CODE => self.fetch_xetex_def_code(m)?,
             DEF_CODE => {
                 // §414: fetch a character code from some table.
                 self.scan_char_num()?;
@@ -476,11 +580,107 @@ impl<H: Host, T: Tracker> Tex<H, T> {
 
     /// §433
     pub(crate) fn scan_eight_bit_int(&mut self) -> Result<(), Jump> {
+        let help: &[u8] = if self.unicode {
+            b"A register code or char class must be between 0 and 255."
+        } else {
+            b"A register number must be between 0 and 255."
+        };
         self.scan_limited_int(
             255,
             b"Bad register code",
+            [help, b"I changed this one to zero."],
+        )
+    }
+
+    /// `XeTeX` §437 `scan_usv_num`: a Unicode scalar value (TeX's
+    /// `scan_char_num` in the other flavors).
+    pub(crate) fn scan_usv_num(&mut self) -> Result<(), Jump> {
+        if !self.unicode {
+            return self.scan_char_num();
+        }
+        self.scan_limited_int(
+            BIGGEST_USV,
+            b"Bad character code",
             [
-                b"A register number must be between 0 and 255.",
+                b"A Unicode scalar value must be between 0 and \"10FFFF.",
+                b"I changed this one to zero.",
+            ],
+        )
+    }
+
+    /// `XeTeX` §436 `scan_char_class`: 0..=4096 (4096: ignored).
+    pub(crate) fn scan_char_class(&mut self) -> Result<(), Jump> {
+        self.scan_limited_int(
+            crate::web::CHAR_CLASS_LIMIT,
+            b"Bad character class",
+            [
+                b"A character class must be between 0 and 4096.",
+                b"I changed this one to zero.",
+            ],
+        )
+    }
+
+    /// `XeTeX` §436 `scan_char_class_not_ignored` (its range is the same).
+    pub(crate) fn scan_char_class_not_ignored(&mut self) -> Result<(), Jump> {
+        self.scan_limited_int(
+            crate::web::CHAR_CLASS_LIMIT,
+            b"Bad character class",
+            [
+                b"A class for inter-character transitions must be between 0 and 4095.",
+                b"I changed this one to zero.",
+            ],
+        )
+    }
+
+    /// `XeTeX` §438 `scan_xetex_math_char_int`: a `\Umathchar` number.
+    pub(crate) fn scan_xetex_math_char_int(&mut self) -> Result<(), Jump> {
+        use crate::mathcodes::{ACTIVE_MATH_CHAR, is_active_math_char, math_char_field};
+        self.scan_int()?;
+        if is_active_math_char(self.cur_val) {
+            if self.cur_val != ACTIVE_MATH_CHAR {
+                self.print_err(b"Bad active XeTeX math code");
+                self.help(&[
+                    b"Since I ignore class and family for active math chars,",
+                    b"I changed this one to \"1FFFFF.",
+                ]);
+                self.int_error(self.cur_val)?;
+                self.cur_val = ACTIVE_MATH_CHAR;
+            }
+        } else if math_char_field(self.cur_val) > BIGGEST_USV {
+            self.print_err(b"Bad XeTeX math character code");
+            self.help(&[
+                b"Since I expected a character number between 0 and \"10FFFF,",
+                b"I changed this one to zero.",
+            ]);
+            self.int_error(self.cur_val)?;
+            self.cur_val = 0;
+        }
+        Ok(())
+    }
+
+    /// `XeTeX` §438 `scan_math_class_int`: 0..=7.
+    pub(crate) fn scan_math_class_int(&mut self) -> Result<(), Jump> {
+        self.scan_limited_int(
+            7,
+            b"Bad math class",
+            [
+                b"Since I expected to read a number between 0 and 7,",
+                b"I changed this one to zero.",
+            ],
+        )
+    }
+
+    /// `XeTeX` §438 `scan_math_fam_int`: a family, 0..=255 (0..=15 in the
+    /// other flavors, as `scan_four_bit_int`).
+    pub(crate) fn scan_math_fam_int(&mut self) -> Result<(), Jump> {
+        if !self.unicode {
+            return self.scan_four_bit_int();
+        }
+        self.scan_limited_int(
+            crate::web::NUMBER_MATH_FAMILIES - 1,
+            b"Bad math family",
+            [
+                b"Since I expected to read a number between 0 and 255,",
                 b"I changed this one to zero.",
             ],
         )
@@ -497,8 +697,18 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         )
     }
 
-    /// §434
+    /// §434 (`XeTeX` §437: up to 65535)
     pub(crate) fn scan_char_num(&mut self) -> Result<(), Jump> {
+        if self.unicode {
+            return self.scan_limited_int(
+                crate::wide::XETEX_BIGGEST_CHAR,
+                b"Bad character code",
+                [
+                    b"A character number must be between 0 and 65535.",
+                    b"I changed this one to zero.",
+                ],
+            );
+        }
         self.scan_limited_int(
             255,
             b"Bad character code",
@@ -596,12 +806,25 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                         self.set_align_state(self.align_state() - 1);
                     }
                 }
+            } else if self.unicode {
+                // `XeTeX` §476 (a name of one character past U+FFFF is a
+                // multi-letter name: its surrogate pair)
+                let p = self.cur_tok - CS_TOKEN_FLAG;
+                self.cur_val = match (crate::wide::active_char(p), crate::wide::single_char(p)) {
+                    (Some(c), _) | (_, Some(c)) => c,
+                    _ => self.surrogate_name(p).unwrap_or(crate::web::TOO_BIG_USV),
+                };
             } else if self.cur_tok < CS_TOKEN_FLAG + SINGLE_BASE {
                 self.cur_val = self.cur_tok - CS_TOKEN_FLAG - ACTIVE_BASE;
             } else {
                 self.cur_val = self.cur_tok - CS_TOKEN_FLAG - SINGLE_BASE;
             }
-            if self.cur_val > 255 {
+            let biggest = if self.unicode {
+                crate::web::BIGGEST_USV
+            } else {
+                255
+            };
+            if self.cur_val > biggest {
                 self.print_err(b"Improper alphabetic constant");
                 self.help(&[
                     b"A one-character control sequence belongs after a ` mark.",

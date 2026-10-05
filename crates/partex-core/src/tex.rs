@@ -105,7 +105,7 @@ pub struct Tex<H: Host, T: Tracker = Untracked> {
     pub(crate) file_offset: i32,
     /// With the columns the link's, what printing makes (`effects/flow.rs`).
     pub(crate) flow: crate::effects::flow::Flow,
-    pub(crate) trick_buf: Vec<u8>,
+    pub(crate) trick_buf: Vec<u32>,
     pub(crate) trick_count: i32,
     pub(crate) first_count: i32,
 

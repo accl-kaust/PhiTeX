@@ -597,7 +597,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
     /// web2c's `print_buffer`: print `buffer[i]` (encTeX's `\mubytein`
     /// conversion is inactive without encTeX).
     pub(crate) fn print_buffer(&mut self, i: &mut usize) {
-        self.print(crate::input::ci(self.buffer[*i]));
+        self.print_chr(crate::input::ci(self.buffer[*i]));
         *i += 1;
     }
 
@@ -823,11 +823,16 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             (l + self.first_count - half_error_line + 3, half_error_line)
         };
         for q in p..self.first_count {
-            self.print_char(self.trick_buf[ux(q % error_line)]);
+            self.print_trick(self.trick_buf[ux(q % error_line)]);
         }
         self.print_ln();
         for _ in 0..n {
-            self.print_char(b' '); // print `n` spaces to begin line 2
+            // print `n` spaces to begin line 2 (`XeTeX`: `print_visible_char`)
+            if self.unicode {
+                self.print_raw_char(u32::from(b' '), true);
+            } else {
+                self.print_char(b' ');
+            }
         }
         let p = if m + n <= error_line {
             self.first_count + m
@@ -835,10 +840,20 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             self.first_count + (error_line - n - 3)
         };
         for q in self.first_count..p {
-            self.print_char(self.trick_buf[ux(q % error_line)]);
+            self.print_trick(self.trick_buf[ux(q % error_line)]);
         }
         if m + n > error_line {
             self.print_str(b"...");
+        }
+    }
+
+    /// §317: print a character of `trick_buf` (`XeTeX`: a scalar value,
+    /// encoded now).
+    fn print_trick(&mut self, c: u32) {
+        if self.unicode {
+            self.print_char_x(c);
+        } else {
+            self.print_char(u8::try_from(c).unwrap_or(0));
         }
     }
 

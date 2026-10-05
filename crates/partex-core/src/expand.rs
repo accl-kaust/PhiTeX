@@ -244,7 +244,8 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         } else if j == first {
             self.cur_cs = NULL_CS; // the list is empty
         } else {
-            self.cur_cs = SINGLE_BASE + crate::input::ci(self.buffer[first]); // the list has length one
+            // the list has length one
+            self.cur_cs = crate::wide::single_cs(crate::input::ci(self.buffer[first]));
         }
         Ok(())
     }

@@ -557,6 +557,18 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         // encTeX's `mubyte_cswrite` conversion needs `cs_converting`, which
         // is never set without encTeX.
         self.no_convert = false;
+        if self.unicode && crate::wide::is_char_cs(p) && p != NULL_CS && p >= ACTIVE_BASE {
+            // `XeTeX` §292: the characters printed one by one
+            if let Some(c) = crate::wide::single_char(p) {
+                self.print_esc_chr(c);
+                if self.cat_code(c) == LETTER {
+                    self.print_char(b' ');
+                }
+            } else if let Some(c) = crate::wide::active_char(p) {
+                self.print_chr(c);
+            }
+            return;
+        }
         if p < HASH_BASE {
             // single character
             if p >= SINGLE_BASE {
@@ -587,6 +599,14 @@ impl<H: Host, T: Tracker> Tex<H, T> {
 
     /// §263: print a control sequence without error checks or a space.
     pub(crate) fn sprint_cs(&mut self, p: i32) {
+        if let Some(c) = crate::wide::active_char(p).filter(|_| self.unicode) {
+            self.print_chr(c);
+            return;
+        }
+        if let Some(c) = crate::wide::single_char(p).filter(|_| self.unicode) {
+            self.print_esc_chr(c);
+            return;
+        }
         if p < HASH_BASE {
             if p < SINGLE_BASE {
                 self.print(p - ACTIVE_BASE);
@@ -603,7 +623,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
 
     /// §264: enter a primitive into eqtb (INITEX). `s` is its pool string.
     pub(crate) fn primitive(&mut self, s: &[u8], c: i32, o: i32) -> Result<(), Jump> {
-        if self.params.flavor == Flavor::PdfTex {
+        if self.params.flavor != Flavor::Tex {
             return self.pdftex_primitive(s, c, o);
         }
         if s.len() == 1 {

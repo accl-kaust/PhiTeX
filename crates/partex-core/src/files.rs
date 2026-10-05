@@ -551,7 +551,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             l = l.saturating_sub(1);
         }
         for k in 1..=l {
-            self.print(crate::input::ci(self.buffer[k]));
+            self.print_chr(crate::input::ci(self.buffer[k]));
         }
         self.print_ln(); // now the transcript file contains the first line of input
         self.set_selector(old_setting + 2); // `log_only` or `term_and_log`

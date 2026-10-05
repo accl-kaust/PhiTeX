@@ -331,7 +331,8 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         self.get_x_token()?;
         if self.cur_cmd == RELAX && self.cur_chr == NO_EXPAND_FLAG {
             self.cur_cmd = ACTIVE_CHAR;
-            self.cur_chr = self.cur_tok - CS_TOKEN_FLAG - ACTIVE_BASE;
+            self.cur_chr = crate::wide::active_char(self.cur_tok - CS_TOKEN_FLAG)
+                .unwrap_or(self.cur_tok - CS_TOKEN_FLAG - ACTIVE_BASE);
         }
         Ok(())
     }

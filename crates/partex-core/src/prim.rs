@@ -135,7 +135,9 @@ impl<H: Host, T: Tracker> Tex<H, T> {
     /// `prim_lookup(text(cur_cs))`, or of the character of a one-letter
     /// name); `undefined_primitive` for none.
     pub(crate) fn prim_of_cur_cs(&mut self) -> Result<i32, Jump> {
-        let s = if self.cur_cs < HASH_BASE {
+        let s = if let Some(c) = crate::wide::single_char(self.cur_cs) {
+            c
+        } else if self.cur_cs < HASH_BASE {
             self.cur_cs - SINGLE_BASE
         } else {
             self.text(self.cur_cs)

@@ -45,8 +45,8 @@ pub fn select(argv0: &str, mut args: Vec<String>, env: Option<&str>) -> Selectio
         .and_then(|s| s.to_str())
         .unwrap_or("partex");
     let named = |name: &str, args: Vec<String>| {
-        let xetex_dev = XETEX.contains(&name)
-            && std::env::var_os("PARTEX_XETEX").is_some_and(|v| v == "1");
+        let xetex_dev =
+            XETEX.contains(&name) && std::env::var_os("PARTEX_XETEX").is_some_and(|v| v == "1");
         if RESERVED.contains(&name) && !xetex_dev {
             Selection::Unsupported(name.to_owned())
         } else {

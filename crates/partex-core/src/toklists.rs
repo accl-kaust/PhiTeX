@@ -18,6 +18,9 @@ const ZERO_TOKEN: i32 = OTHER_TOKEN + b'0' as i32;
 impl<H: Host, T: Tracker> Tex<H, T> {
     /// §464: convert `str_pool[b..pool_ptr]` to a new token list.
     pub(crate) fn str_toks(&mut self, b: usize) -> Result<crate::tok::Tokens, Jump> {
+        if self.unicode {
+            return self.str_toks_cat(b, 0);
+        }
         self.str_room(1)?;
         // (a pooled list: the result is inserted, and given back when read)
         let end = self.pool_ptr;
@@ -30,6 +33,42 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                     SPACE_TOKEN
                 } else {
                     OTHER_TOKEN + c
+                });
+            }
+            l.remake(false);
+        }
+        self.pool_ptr = b;
+        Ok(p)
+    }
+
+    /// `XeTeX` §503 `str_toks_cat`: `str_toks` of the characters of a
+    /// string (surrogate pairs joined), each with category `cat`, or (0)
+    /// spaces as spaces and the others as other characters.
+    pub(crate) fn str_toks_cat(&mut self, b: usize, cat: i32) -> Result<crate::tok::Tokens, Jump> {
+        self.str_room(1)?;
+        let end = self.pool_ptr;
+        let chars: alloc::vec::Vec<i32> = if self.unicode {
+            crate::strings::decode_chars(&self.str_pool[b..end])
+                .map(crate::input::ci)
+                .collect()
+        } else {
+            self.str_pool[b..end]
+                .iter()
+                .map(|&c| i32::from(c))
+                .collect()
+        };
+        let mut p = self.pooled_list(|_| {});
+        if let Some(l) = alloc::sync::Arc::get_mut(&mut p) {
+            let buf = l.buffer();
+            for c in chars {
+                buf.push(if c == i32::from(b' ') && cat == 0 {
+                    SPACE_TOKEN
+                } else if cat == 0 {
+                    OTHER_TOKEN + c
+                } else if cat == ACTIVE_CHAR {
+                    CS_TOKEN_FLAG + crate::wide::active_cs(c)
+                } else {
+                    MAX_CHAR_VAL * cat + c
                 });
             }
             l.remake(false);

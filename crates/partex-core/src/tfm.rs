@@ -267,7 +267,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
     pub(crate) fn char_warning(&mut self, f: i32, c: i32) -> Result<(), Jump> {
         // (the warning prints the font's name, a part of its metrics)
         self.font_read(f, field::METRICS);
-        if self.params.flavor == crate::params::Flavor::PdfTex {
+        if self.params.flavor != crate::params::Flavor::Tex {
             return self.pdftex_char_warning(f, c);
         }
         if self.int_par(TRACING_LOST_CHARS_CODE) > 0 {
@@ -299,8 +299,17 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             self.begin_diagnostic();
             self.print_nl(b"Missing character: There is no ");
         }
-        self.print(c);
-        if lost > 2 {
+        self.print_chr(c);
+        if self.unicode {
+            // `XeTeX` §616: the code always, `U+` for a native font
+            self.print_str(b" (");
+            if self.is_native_font(f) {
+                self.print_ucs_code(c);
+            } else {
+                self.print_hex(c);
+            }
+            self.print_str(b")");
+        } else if lost > 2 {
             self.print_str(b" (");
             self.print_hex(c);
             self.print_str(b")");

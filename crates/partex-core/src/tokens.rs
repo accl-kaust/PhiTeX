@@ -38,7 +38,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
 
     /// §292: the display loop over `len` tokens, token `i` being `at(i)`.
     fn show_tokens(&mut self, len: i32, at: impl Fn(&Self, i32) -> i32, q: i32, l: i32) {
-        let mut match_chr = b'#';
+        let mut match_chr = i32::from(b'#');
         let mut n = b'0';
         let mut i = 0;
         // (a character token shown into a string being made goes in as it
@@ -68,19 +68,27 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                     | SPACER | LETTER | OTHER_CHAR
                         if to_string =>
                     {
-                        if self.pool_ptr < self.pool_size() {
-                            self.append_char(u8::try_from(c).unwrap_or(0));
+                        if self.unicode {
+                            // (`XeTeX`: UTF-16 units, as `print_char` makes them)
+                            if self.pool_ptr < self.pool_size() {
+                                self.append_char(crate::input::cu(c));
+                            }
+                            self.tally += if c >= 0x1_0000 { 2 } else { 1 };
+                        } else {
+                            if self.pool_ptr < self.pool_size() {
+                                self.append_char(u8::try_from(c).unwrap_or(0));
+                            }
+                            self.tally += 1;
                         }
-                        self.tally += 1;
                     }
                     LEFT_BRACE | RIGHT_BRACE | MATH_SHIFT | TAB_MARK | SUP_MARK | SUB_MARK
-                    | SPACER | LETTER | OTHER_CHAR => self.print(c),
+                    | SPACER | LETTER | OTHER_CHAR => self.print_chr(c),
                     MAC_PARAM => {
-                        self.print(c);
-                        self.print(c);
+                        self.print_chr(c);
+                        self.print_chr(c);
                     }
                     OUT_PARAM => {
-                        self.print(i32::from(match_chr));
+                        self.print_chr(match_chr);
                         if c <= 9 {
                             self.print_char(b'0' + u8::try_from(c).unwrap_or(0));
                         } else {
@@ -89,8 +97,8 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                         }
                     }
                     MATCH => {
-                        match_chr = u8::try_from(c).unwrap_or(0);
-                        self.print(c);
+                        match_chr = c;
+                        self.print_chr(c);
                         n += 1;
                         self.print_char(n);
                         if n > b'9' {
@@ -134,7 +142,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
     /// §298: `chr_cmd`.
     fn chr_cmd(&mut self, s: &[u8], chr_code: i32) {
         self.print_str(s);
-        self.print(chr_code);
+        self.print_chr(chr_code);
     }
 
     /// §298: symbolic printing of a command code and modifier.

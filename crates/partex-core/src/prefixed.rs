@@ -261,7 +261,9 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                 self.define_glue(a, p)?;
             }
             // §1232
+            DEF_CODE if self.unicode => self.def_code_xetex(a)?,
             DEF_CODE => self.def_code(a)?,
+            XETEX_DEF_CODE => self.xetex_def_code(a)?,
             // §1234
             DEF_FAMILY => {
                 let mut p = self.cur_chr;
@@ -390,7 +392,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                 }
             })?;
             if self.cur_cs == 0
-                || self.cur_cs > self.eqtb_top
+                || (self.cur_cs > self.eqtb_top && !crate::wide::is_char_cs(self.cur_cs))
                 || (self.cur_cs > FROZEN_CONTROL_SEQUENCE && self.cur_cs <= EQTB_SIZE)
             {
                 self.print_err(b"Missing control sequence inserted");
@@ -453,8 +455,16 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         self.scan_optional_equals()?;
         match n {
             CHAR_DEF_CODE => {
-                self.scan_char_num()?;
+                self.scan_usv_num()?;
                 self.define(a, p, CHAR_GIVEN, self.cur_val)
+            }
+            XETEX_MATH_CHAR_NUM_DEF_CODE if self.unicode => {
+                self.scan_xetex_math_char_int()?;
+                self.define(a, p, XETEX_MATH_GIVEN, self.cur_val)
+            }
+            XETEX_MATH_CHAR_DEF_CODE if self.unicode => {
+                let n = self.scan_umath_char()?;
+                self.define(a, p, XETEX_MATH_GIVEN, n)
             }
             MATH_CHAR_DEF_CODE => {
                 self.scan_fifteen_bit_int()?;
@@ -587,6 +597,107 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             self.word_define(a, p, self.cur_val)?;
         }
         Ok(())
+    }
+
+    /// `XeTeX` §1287: `\catcode` and the other codes, of any character
+    /// (the space factor keeping the class beside it, a math code
+    /// converted to `XeTeX`'s form).
+    fn def_code_xetex(&mut self, a: i32) -> Result<(), Jump> {
+        use crate::mathcodes::{ACTIVE_MATH_CHAR, set_class_field, set_family_field};
+        let n = match self.cur_chr {
+            CAT_CODE_BASE => MAX_CHAR_CODE,
+            MATH_CODE_BASE => 0o100000,
+            SF_CODE_BASE => 0o77777,
+            DEL_CODE_BASE => 0o77777777,
+            _ => BIGGEST_USV,
+        };
+        let base = self.cur_chr;
+        self.scan_usv_num()?;
+        let p = crate::wide::code_loc(base, self.cur_val);
+        self.scan_optional_equals()?;
+        self.scan_int()?;
+        if (self.cur_val < 0 && base != DEL_CODE_BASE) || self.cur_val > n {
+            self.print_err(b"Invalid code (");
+            self.print_int(self.cur_val);
+            if base == DEL_CODE_BASE {
+                self.print_str(b"), should be at most ");
+            } else {
+                self.print_str(b"), should be in the range 0..");
+            }
+            self.print_int(n);
+            self.help(&[b"I'm going to use 0 instead of that illegal code value."]);
+            self.error()?;
+            self.cur_val = 0;
+        }
+        if base == SF_CODE_BASE {
+            let class = self.equiv(p) / 0x1_0000;
+            self.define(a, p, DATA, class * 0x1_0000 + self.cur_val)
+        } else if base == MATH_CODE_BASE {
+            let v = self.cur_val;
+            self.cur_val = if v == 0x8000 {
+                ACTIVE_MATH_CHAR
+            } else {
+                set_class_field(v / 0x1000) + set_family_field((v % 0x1000) / 0x100) + v % 0x100
+            };
+            self.define(a, p, DATA, self.cur_val)
+        } else if base == DEL_CODE_BASE {
+            self.word_define(a, p, self.cur_val)
+        } else {
+            self.define(a, p, DATA, self.cur_val)
+        }
+    }
+
+    /// `XeTeX`'s class, family and character of a `\Umathchardef` or
+    /// `\Umathcode`, as one math code.
+    pub(crate) fn scan_umath_char(&mut self) -> Result<i32, Jump> {
+        self.scan_math_class_int()?;
+        let class = self.cur_val;
+        self.scan_math_fam_int()?;
+        let fam = self.cur_val;
+        self.scan_usv_num()?;
+        Ok(crate::mathcodes::math_code_of(class, fam, self.cur_val))
+    }
+
+    /// `XeTeX` §1287: `\XeTeXcharclass`, `\Umathcodenum`, `\Umathcode`,
+    /// `\Udelcodenum`, `\Udelcode`.
+    fn xetex_def_code(&mut self, a: i32) -> Result<(), Jump> {
+        let chr = self.cur_chr;
+        if chr == SF_CODE_BASE {
+            self.scan_usv_num()?;
+            let p = crate::wide::code_loc(SF_CODE_BASE, self.cur_val);
+            let n = self.sf_code(self.cur_val) % 0x1_0000;
+            self.scan_optional_equals()?;
+            self.scan_char_class()?;
+            self.define(a, p, DATA, self.cur_val * 0x1_0000 + n)
+        } else if chr == MATH_CODE_BASE {
+            self.scan_usv_num()?;
+            let p = crate::wide::code_loc(MATH_CODE_BASE, self.cur_val);
+            self.scan_optional_equals()?;
+            self.scan_xetex_math_char_int()?;
+            self.define(a, p, DATA, self.cur_val)
+        } else if chr == MATH_CODE_BASE + 1 {
+            self.scan_usv_num()?;
+            let p = crate::wide::code_loc(MATH_CODE_BASE, self.cur_val);
+            self.scan_optional_equals()?;
+            let n = self.scan_umath_char()?;
+            self.define(a, p, DATA, n)
+        } else if chr == DEL_CODE_BASE {
+            self.scan_usv_num()?;
+            let p = crate::wide::code_loc(DEL_CODE_BASE, self.cur_val);
+            self.scan_optional_equals()?;
+            self.scan_int()?; // (`scan_xetex_del_code_int`: unchecked in `XeTeX`)
+            self.word_define(a, p, self.cur_val)
+        } else {
+            self.scan_usv_num()?;
+            let p = crate::wide::code_loc(DEL_CODE_BASE, self.cur_val);
+            self.scan_optional_equals()?;
+            let mut n = 0x4000_0000; // extended delimiter code flag
+            self.scan_math_fam_int()?;
+            n += self.cur_val * 0x20_0000; // family
+            self.scan_usv_num()?;
+            n += self.cur_val; // USV
+            self.word_define(a, p, n)
+        }
     }
 
     /// §1236
@@ -827,9 +938,15 @@ impl<H: Host, T: Tracker> Tex<H, T> {
     pub(crate) fn font_identifier(&mut self) -> Result<(Pointer, i32), Jump> {
         self.get_r_token()?;
         let u = self.cur_cs;
-        let t = if u >= HASH_BASE {
+        let wide_single = crate::wide::single_char(u).filter(|&c| c >= 256);
+        let t = if let Some(c) = wide_single {
+            // (`XeTeX`'s character as a string: a string of its own here)
+            self.str_room(2)?;
+            self.append_char(crate::input::cu(c));
+            i32::try_from(self.make_string()?).unwrap_or(0)
+        } else if u >= HASH_BASE && crate::wide::active_char(u).is_none() {
             self.text(u)
-        } else if u >= SINGLE_BASE {
+        } else if u >= SINGLE_BASE && crate::wide::active_char(u).is_none() {
             if u == NULL_CS {
                 i32::try_from(self.find_pool_string(b"FONT").unwrap_or(0)).unwrap_or(0)
             } else {
@@ -839,7 +956,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             let old_setting = self.selector();
             self.set_selector(NEW_STRING);
             self.print_str(b"FONT");
-            self.print(u - ACTIVE_BASE);
+            self.print_chr(crate::wide::active_char(u).unwrap_or(u - ACTIVE_BASE));
             self.set_selector(old_setting);
             self.str_room(1)?;
             i32::try_from(self.make_string()?).unwrap_or(0)
@@ -1062,10 +1179,18 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         for t in &mut list {
             // §1289: change the case of the token, if a change is
             // appropriate.
-            if *t < CS_TOKEN_FLAG + SINGLE_BASE {
+            // (an active character's token too, wide ones apart in this
+            // layout: `XeTeX` §1343)
+            if *t < CS_TOKEN_FLAG {
                 let c = crate::web::tok_chr(*t);
-                if self.equiv(b + c) != 0 {
-                    *t = *t - c + self.equiv(b + c);
+                let e = self.equiv(crate::wide::code_loc(b, c));
+                if e != 0 {
+                    *t = *t - c + e;
+                }
+            } else if let Some(c) = crate::wide::active_char(*t - CS_TOKEN_FLAG) {
+                let e = self.equiv(crate::wide::code_loc(b, c));
+                if e != 0 {
+                    *t = CS_TOKEN_FLAG + crate::wide::active_cs(e);
                 }
             }
         }

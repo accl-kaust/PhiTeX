@@ -386,8 +386,12 @@ impl<H: Host, T: Tracker> Tex<H, T> {
     }
 
     /// §58: print one character. All printing comes through here or
-    /// `print_ln`.
+    /// `print_ln` (`XeTeX`'s characters through [`Self::print_char_x`]).
     pub(crate) fn print_char(&mut self, s: u8) {
+        if self.unicode {
+            self.print_char_x(u32::from(s));
+            return;
+        }
         if self.selector() < PSEUDO {
             self.memo.printed += 1;
         }
@@ -395,18 +399,102 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             self.print_ln();
             return;
         }
+        self.print_raw_char(u32::from(s), true);
+    }
+
+    /// `XeTeX` §59: `print_char` of a Unicode scalar value: `^^` forms for
+    /// control characters (unless `-8bit`), UTF-8 to the terminal, the log
+    /// and `\write` files (the columns counted once per character),
+    /// UTF-16 units into a new string, the value itself to `trick_buf`.
+    pub(crate) fn print_char_x(&mut self, s: u32) {
+        let sel = self.selector();
+        if sel < PSEUDO {
+            self.memo.printed += 1;
+        }
+        if sel > PSEUDO && sel != DIAG && !self.doing_special {
+            // ``printing'' to a new string: UTF-16 rather than UTF-8
+            if s >= 0x1_0000 {
+                self.print_raw_char(0xD800 + (s - 0x1_0000) / 0x400, true);
+                self.print_raw_char(0xDC00 + (s - 0x1_0000) % 0x400, true);
+            } else {
+                self.print_raw_char(s, true);
+            }
+            return;
+        }
+        if i64::from(s) == i64::from(self.new_line_char()) && sel < PSEUDO {
+            self.print_ln();
+            return;
+        }
+        let plain = !self.params.eight_bit && !self.doing_special;
+        let hex = |d: u32| {
+            if d < 10 {
+                u32::from(b'0') + d
+            } else {
+                u32::from(b'a') + d - 10
+            }
+        };
+        let caret = u32::from(b'^');
+        if s < 32 && plain {
+            self.print_raw_char(caret, true);
+            self.print_raw_char(caret, true);
+            self.print_raw_char(s + 64, true);
+        } else if s < 127 {
+            self.print_raw_char(s, true);
+        } else if s == 127 {
+            if plain {
+                self.print_raw_char(caret, true);
+                self.print_raw_char(caret, true);
+                self.print_raw_char(u32::from(b'?'), true);
+            } else {
+                self.print_raw_char(s, true);
+            }
+        } else if s < 0xA0 && plain {
+            self.print_raw_char(caret, true);
+            self.print_raw_char(caret, true);
+            self.print_raw_char(hex((s % 0x100) / 0x10), true);
+            self.print_raw_char(hex(s % 0x10), true);
+        } else if sel == PSEUDO {
+            // (not encoded in `trick_buf`: `show_context` does that)
+            self.print_raw_char(s, true);
+        } else if s < 0x800 {
+            self.print_raw_char(0xC0 + s / 0x40, false);
+            self.print_raw_char(0x80 + s % 0x40, true);
+        } else if s < 0x1_0000 {
+            self.print_raw_char(0xE0 + s / 0x1000, false);
+            self.print_raw_char(0x80 + (s % 0x1000) / 0x40, false);
+            self.print_raw_char(0x80 + s % 0x40, true);
+        } else {
+            self.print_raw_char(0xF0 + s / 0x4_0000, false);
+            self.print_raw_char(0x80 + (s % 0x4_0000) / 0x1000, false);
+            self.print_raw_char(0x80 + (s % 0x1000) / 0x40, false);
+            self.print_raw_char(0x80 + s % 0x40, true);
+        }
+    }
+
+    /// `XeTeX` §58 `print_raw_char`: one byte (a UTF-16 unit into a new
+    /// string, a scalar value into `trick_buf`) to the selector, the
+    /// columns advanced only if `incr_offset` (the last byte of a UTF-8
+    /// sequence).
+    pub(crate) fn print_raw_char(&mut self, s: u32, incr_offset: bool) {
         let selector = self.selector();
         if let Some(d) = &mut self.diag
             && (d.capturing || selector == DIAG)
         {
             // A copy for the structured diagnostic (see `diag.rs`).
-            d.buf.push(s);
+            if let Ok(b) = u8::try_from(s) {
+                d.buf.push(b);
+            }
             if self.selector() == DIAG {
                 self.tally += 1;
                 return;
             }
         }
-        let x = self.xchr[usize::from(s)];
+        // (`XeTeX`: bytes go out as they are)
+        let x = match u8::try_from(s) {
+            Ok(b) if self.unicode => b,
+            Ok(b) => self.xchr[usize::from(b)],
+            Err(_) => 0,
+        };
         let max_print_line = self.params.max_print_line;
         let mask = self.flow_mask();
         if mask != 0 {
@@ -421,10 +509,10 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                 }
             }
             self.flow_shadow(mask, &[x]);
-            if mask & 1 != 0 {
+            if mask & 1 != 0 && incr_offset {
                 self.term_offset += 1;
             }
-            if mask & 2 != 0 {
+            if mask & 2 != 0 && incr_offset {
                 self.file_offset += 1;
             }
             if mask == 3 {
@@ -449,8 +537,10 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                 self.offsets_read(true, true);
                 self.wterm(x);
                 self.wlog(x);
-                self.term_offset += 1;
-                self.file_offset += 1;
+                if incr_offset {
+                    self.term_offset += 1;
+                    self.file_offset += 1;
+                }
                 if self.term_offset == max_print_line {
                     self.wterm_cr();
                     self.term_offset = 0;
@@ -464,7 +554,9 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             LOG_ONLY => {
                 self.offsets_read(false, true);
                 self.wlog(x);
-                self.file_offset += 1;
+                if incr_offset {
+                    self.file_offset += 1;
+                }
                 self.offsets_wrote(false, true);
                 if self.file_offset == max_print_line {
                     self.print_ln();
@@ -473,7 +565,9 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             TERM_ONLY => {
                 self.offsets_read(true, false);
                 self.wterm(x);
-                self.term_offset += 1;
+                if incr_offset {
+                    self.term_offset += 1;
+                }
                 self.offsets_wrote(true, false);
                 if self.term_offset == max_print_line {
                     self.print_ln();
@@ -511,6 +605,10 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             self.print_str(QQQ); // this can't happen
             return;
         }
+        if self.unicode {
+            self.print_x(u);
+            return;
+        }
         if u >= 256 {
             self.print_pool(u);
             return;
@@ -544,6 +642,47 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         self.set_int_par(crate::eqtb::NEW_LINE_CHAR_CODE, nl);
     }
 
+    /// `XeTeX` §63 `print` of string `s` (a single-character string is
+    /// its character; a pool string's surrogate pairs are joined).
+    fn print_x(&mut self, s: usize) {
+        if s < 256 {
+            self.print_chr(i32::try_from(s).unwrap_or(0));
+            return;
+        }
+        let chars: alloc::vec::Vec<u32> =
+            crate::strings::decode_chars(&self.str_pool[self.str_start[s]..self.str_start[s + 1]])
+                .collect();
+        for c in chars {
+            self.print_char_x(c);
+        }
+    }
+
+    /// `print` of a character code `c` (TeX's `print_ASCII`): in `XeTeX`
+    /// any scalar value (§63's single-character case), else `print(c)`.
+    pub(crate) fn print_chr(&mut self, c: i32) {
+        if !self.unicode {
+            self.print(c);
+            return;
+        }
+        let Ok(u) = u32::try_from(c) else {
+            self.print_str(QQQ);
+            return;
+        };
+        if self.selector() > PSEUDO {
+            self.print_char_x(u); // internal strings are not expanded
+            return;
+        }
+        if c == self.new_line_char() && self.selector() < PSEUDO {
+            self.print_ln();
+            return;
+        }
+        let nl = self.new_line_char();
+        // Temporarily disable the new-line character.
+        self.set_int_par(crate::eqtb::NEW_LINE_CHAR_CODE, -1);
+        self.print_char_x(u);
+        self.set_int_par(crate::eqtb::NEW_LINE_CHAR_CODE, nl);
+    }
+
     /// The loop at the end of §59: `print_char` every character of `s`.
     fn print_pool(&mut self, s: usize) {
         for j in self.str_start[s]..self.str_start[s + 1] {
@@ -565,6 +704,10 @@ impl<H: Host, T: Tracker> Tex<H, T> {
 
     /// §60: print a string that may contain unprintable characters.
     pub(crate) fn slow_print(&mut self, s: i32) {
+        if self.unicode {
+            self.print(s); // (`XeTeX` §64: `slow_print` is `print`)
+            return;
+        }
         match usize::try_from(s) {
             Ok(u) if u >= 256 && u < self.str_ptr => {
                 for j in self.str_start[u]..self.str_start[u + 1] {
@@ -597,8 +740,9 @@ impl<H: Host, T: Tracker> Tex<H, T> {
     }
 
     fn new_line_plain(&mut self) {
-        // pdfTeX §62 also ends a line written to a `\write` file.
-        let write_file = self.params.flavor == Flavor::PdfTex && self.selector() < NO_PRINT;
+        // pdfTeX §62 (`XeTeX` §66) also ends a line written to a `\write`
+        // file.
+        let write_file = self.params.flavor != Flavor::Tex && self.selector() < NO_PRINT;
         if !write_file {
             let s = self.selector();
             self.offsets_read(s % 2 == 1, s >= LOG_ONLY);
@@ -615,8 +759,24 @@ impl<H: Host, T: Tracker> Tex<H, T> {
     pub(crate) fn print_esc(&mut self, s: &[u8]) {
         self.print_escape_char();
         for &c in s {
-            // `slow_print` of a pool string prints each character via `print`.
-            self.print(i32::from(c));
+            if self.unicode {
+                // (`XeTeX`'s `print` of a pool string: `print_char`)
+                self.print_char_x(u32::from(c));
+            } else {
+                // `slow_print` of a pool string prints each character via `print`.
+                self.print(i32::from(c));
+            }
+        }
+    }
+
+    /// §63 with the name of one character `c` (TeX's
+    /// `print_esc(c)` for a character).
+    pub(crate) fn print_esc_chr(&mut self, c: i32) {
+        if self.unicode {
+            self.print_escape_char();
+            self.print_chr(c);
+        } else {
+            self.print_esc_num(c);
         }
     }
 
@@ -629,9 +789,35 @@ impl<H: Host, T: Tracker> Tex<H, T> {
     fn print_escape_char(&mut self) {
         // §243: `c:=escape_char`.
         let c = self.escape_char();
-        if (0..256).contains(&c) {
+        if self.unicode {
+            // `XeTeX` §67
+            if let Ok(u) = u32::try_from(c)
+                && c <= crate::web::BIGGEST_USV
+            {
+                self.print_char_x(u);
+            }
+        } else if (0..256).contains(&c) {
             self.print(c);
         }
+    }
+
+    /// `XeTeX` §616 `print_ucs_code`: `U+` and at least four hex digits.
+    pub(crate) fn print_ucs_code(&mut self, mut n: i32) {
+        let mut k = 0;
+        self.print_str(b"U+");
+        loop {
+            self.dig[k] = u8::try_from(n % 16).unwrap_or(0);
+            n /= 16;
+            k += 1;
+            if n == 0 {
+                break;
+            }
+        }
+        while k < 4 {
+            self.dig[k] = 0; // pad to at least 4 hex digits
+            k += 1;
+        }
+        self.print_the_digs(k);
     }
 
     /// §64: print `dig[k-1]`…`dig[0]`.
@@ -736,6 +922,16 @@ impl<H: Host, T: Tracker> Tex<H, T> {
 
     /// §70: print the string being built.
     pub(crate) fn print_current_string(&mut self) {
+        if self.unicode {
+            let units: alloc::vec::Vec<u32> = crate::strings::decode_units(
+                &self.str_pool[self.str_start[self.str_ptr]..self.pool_ptr],
+            )
+            .collect();
+            for u in units {
+                self.print_char_x(u);
+            }
+            return;
+        }
         for j in self.str_start[self.str_ptr]..self.pool_ptr {
             self.print_char(self.str_pool[j]);
         }
