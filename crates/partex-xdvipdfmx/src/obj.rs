@@ -1434,3 +1434,12 @@ pub fn escape_str(b: &mut Buf, s: &[u8]) {
         escape_char(b, c);
     }
 }
+
+impl Default for PdfOut {
+    /// An empty writer whose deflater is never run: what `core::mem::take`
+    /// leaves in `Dpx::o` while the objects are lent to a parser
+    /// (specials.rs, `Dpx::with_dpx_unknown`). Allocates nothing.
+    fn default() -> Self {
+        PdfOut::new(Box::new(|_, _| Vec::new()))
+    }
+}
