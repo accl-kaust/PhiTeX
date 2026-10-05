@@ -1,3 +1,16 @@
+<p align="center">
+  <img src="assets/banner.png" alt="PhiTeX: incremental TeX, exact output. Byte-identical to pdfTeX, SSA-tracked rebuilds, Rust." width="100%">
+</p>
+
+<p align="center">
+  <a href="LICENSE"><img alt="License: AGPL-3.0-only" src="https://img.shields.io/badge/license-AGPL--3.0--only-blue.svg"></a>
+  <img alt="Rust nightly" src="https://img.shields.io/badge/rust-nightly--2026--08--08-orange.svg?logo=rust">
+  <img alt="Edition 2024" src="https://img.shields.io/badge/edition-2024-orange.svg">
+  <img alt="Output: byte-identical to pdfTeX 1.40.29" src="https://img.shields.io/badge/output-byte--identical%20to%20pdfTeX%201.40.29-success.svg">
+  <img alt="Targets: native and wasm32" src="https://img.shields.io/badge/targets-native%20%7C%20wasm32-informational.svg?logo=webassembly">
+  <img alt="unsafe: denied" src="https://img.shields.io/badge/unsafe-denied-critical.svg">
+</p>
+
 # PhiTeX
 
 A TeX engine in Rust that compiles a LaTeX document incrementally. A cold
