@@ -523,9 +523,18 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                 // e-TeX: `\iffontchar`
                 self.scan_font_ident()?;
                 let f = self.cur_val;
-                self.scan_char_num()?;
-                self.font_read(f, crate::track::font::METRICS);
-                self.fonts.get(f).glyph(self.cur_val).is_some()
+                if self.params.flavor == crate::params::Flavor::XeTeX {
+                    self.scan_usv_num()?;
+                } else {
+                    self.scan_char_num()?;
+                }
+                if let Some(nf) = self.native_font(f) {
+                    // `XeTeX`: whether the font maps it to a glyph
+                    nf.font.map_char_to_glyph(self.cur_val) > 0
+                } else {
+                    self.font_read(f, crate::track::font::METRICS);
+                    self.fonts.get(f).glyph(self.cur_val).is_some()
+                }
             }
             _ => {
                 // §509: select the appropriate case and return or `goto
