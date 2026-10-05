@@ -1638,6 +1638,80 @@ mod font_tests {
         sfont.sfnt_read_table_directory(0);
         let n = sfont.tt_read_maxp_table().num_glyphs;
         let _ = writeln!(out, "numGlyphs {n}");
+        {
+            let h = sfont.tt_read_head_table();
+            let hh = sfont.tt_read_hhea_table();
+            let o = sfont.tt_read_os2__table();
+            let nm = sfont.tt_get_ps_fontname(255);
+            let _ = writeln!(out, "psname {} {}", nm.len(), String::from_utf8_lossy(&nm));
+            let nm = sfont.tt_get_ps_fontname(8);
+            let _ = writeln!(out, "psname8 {} {}", nm.len(), String::from_utf8_lossy(&nm));
+            let _ = writeln!(
+                out,
+                "head {} {} {} {} {} {} {} {}",
+                h.units_per_em,
+                h.mac_style,
+                h.x_min,
+                h.y_min,
+                h.x_max,
+                h.y_max,
+                h.index_to_loc_format,
+                h.check_sum_adjustment
+            );
+            let _ = writeln!(
+                out,
+                "hhea {} {} {} {} {} {}",
+                hh.ascent,
+                hh.descent,
+                hh.line_gap,
+                hh.advance_width_max,
+                hh.num_of_long_hor_metrics,
+                hh.num_of_ex_side_bearings
+            );
+            let _ = writeln!(
+                out,
+                "os2 {} {} {} {} {} {} {} {} {} {} {}",
+                o.version,
+                o.x_avg_char_width,
+                o.us_weight_class,
+                o.fs_type,
+                o.s_family_class,
+                o.s_typo_ascender,
+                o.s_typo_descender,
+                o.s_typo_line_gap,
+                o.fs_selection,
+                o.sx_height,
+                o.s_cap_height
+            );
+            sfont.sfnt_locate_table(b"hmtx");
+            let m = sfont.tt_read_longMetrics(
+                n,
+                hh.num_of_long_hor_metrics,
+                hh.num_of_ex_side_bearings,
+            );
+            let mut sum: u64 = 0;
+            for x in &m {
+                sum = sum
+                    .wrapping_mul(31)
+                    .wrapping_add(u64::from(x.advance) * 7 + u64::from(x.side_bearing as u16));
+            }
+            let _ = writeln!(out, "hmtx {}", sum & 0xffff_ffff);
+            if sfont.sfnt_find_table_pos(b"vmtx") > 0 {
+                let v = sfont.tt_read_vhea_table();
+                let _ = writeln!(
+                    out,
+                    "vhea {} {}",
+                    v.num_of_long_ver_metrics, v.num_of_ex_side_bearings
+                );
+            }
+            if let Some(vo) = sfont.tt_read_VORG_table() {
+                let _ = writeln!(
+                    out,
+                    "vorg {} {}",
+                    vo.default_vert_origin_y, vo.num_vert_origin_y_metrics
+                );
+            }
+        }
         let mut uni: Option<crate::tt_cmap::TtCmap> = None;
         for (p, e) in [(3, 10), (3, 1), (0, 3), (0, 4), (1, 0), (3, 0), (0, 5)] {
             let Some(c) = sfont.tt_cmap_read(p, e) else {
@@ -1723,25 +1797,25 @@ mod font_tests {
         (
             "dejavu",
             "/usr/share/texmf-dist/fonts/truetype/public/dejavu/DejaVuSans.ttf",
-            "a3f19e6da97e27cd1d5127084e3d0de1",
+            "d21470f4cc127851afe5d8b31276623b",
             "b0e31de57cd5307954a3c54136ce68ae",
         ),
         (
             "ebgaramond",
             "/usr/share/texmf-dist/fonts/opentype/public/ebgaramond/EBGaramond-Regular.otf",
-            "f8e38ead673de4fe2f4324ea4ef2af8d",
+            "53c8ed11e55827945693e7cf5e8928a0",
             "c3133d2af9ea5c7f03dfc0b08cdfee46",
         ),
         (
             "amiri",
             "/usr/share/texmf-dist/fonts/truetype/public/amiri/Amiri-BoldItalic.ttf",
-            "1829d4c5734aabf504e17e57b966bcde",
+            "d816cc1e4dec2f453e7ad83d9586cd8d",
             "bca12f1468d2ff8ed1512e7f6e73fb16",
         ),
         (
             "spectral",
             "/usr/share/texmf-dist/fonts/truetype/production/spectral/Spectral-Regular.ttf",
-            "4e1230d2d6e50d0b86ffdb5386f0b1e7",
+            "7188377447f373854a09b700e538fbcf",
             "7b78ff83168097bf78ed628b3ed15d9c",
         ),
     ];
