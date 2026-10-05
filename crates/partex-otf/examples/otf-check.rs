@@ -1,7 +1,7 @@
 //! Checks partex-otf against the oracle's XeTeX (DESIGN 4.7).
 //!
 //!     scripts/sandbox cargo run -p partex-otf --release --example otf-check -- \
-//!         INDEX OUTDIR [metrics|shape|names] [--from N] [--count N] [--jobs N]
+//!         INDEX OUTDIR [metrics|shape|names|teckit] [--from N] [--count N] [--jobs N] [--per N]
 //!
 //! For faces of the index (`otf-index`), it writes plain XeTeX files that
 //! print into the log what XeTeX's font functions answer (fontdimens,
@@ -12,13 +12,24 @@
 //! shaped glyphs), runs `scripts/xetex/oracle.sh --no-pdf`, and compares
 //! every number with what this crate computes.
 
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_possible_wrap,
+    clippy::doc_markdown,
+    clippy::many_single_char_names,
+    clippy::too_many_lines,
+    clippy::match_same_arms,
+    clippy::unreadable_literal
+)]
+
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
 
-use partex_otf::index::{FaceEntry, FontIndex, LOADABLE, WOFF};
+use partex_otf::index::{FaceEntry, FontIndex, LOADABLE};
 use partex_otf::shape::Shaper;
 use partex_otf::xetex::{self, XeTeXFont, fontmgr::FontManager};
 use partex_otf::{FontSource, KpseFormat};
@@ -90,6 +101,21 @@ fn tagged(log: &str) -> Vec<Vec<String>> {
 type Page = Vec<(i32, Vec<(i32, i32, u16)>)>;
 
 fn xdv_pages(d: &[u8]) -> Vec<Page> {
+    xdv_parse(d).0
+}
+
+/// Per page, the (path, face index) of the font of each `set_glyphs`.
+fn xdv_page_fonts(d: &[u8]) -> Vec<Vec<(String, u32)>> {
+    xdv_parse(d).2
+}
+
+/// The pages' `set_glyphs`, and the texts of their `set_text_and_glyphs`.
+#[allow(clippy::type_complexity)]
+fn xdv_parse(d: &[u8]) -> (Vec<Page>, Vec<Vec<Vec<u16>>>, Vec<Vec<(String, u32)>>) {
+    let mut texts: Vec<Vec<Vec<u16>>> = Vec::new();
+    let mut fonts: Vec<Vec<(String, u32)>> = Vec::new();
+    let mut defs: BTreeMap<u32, (String, u32)> = BTreeMap::new();
+    let mut font = 0u32;
     let mut pages = Vec::new();
     let mut cur: Option<Page> = None;
     let mut p = 0usize;
@@ -121,6 +147,8 @@ fn xdv_pages(d: &[u8]) -> Vec<Page> {
             139 => {
                 p += 44;
                 cur = Some(Vec::new());
+                texts.push(Vec::new());
+                fonts.push(Vec::new());
             }
             140 => pages.extend(cur.take()),
             141 | 142 => {}
@@ -131,8 +159,11 @@ fn xdv_pages(d: &[u8]) -> Vec<Page> {
             157..=160 => p += (op - 156) as usize,
             162..=165 => p += (op - 161) as usize,
             167..=170 => p += (op - 166) as usize,
-            171..=234 => {}
-            235..=238 => p += (op - 234) as usize,
+            171..=234 => font = u32::from(op - 171),
+            235..=238 => {
+                font = u(p, (op - 234) as usize) as u32;
+                p += (op - 234) as usize;
+            }
             239..=242 => {
                 let n = (op - 238) as usize;
                 let k = u(p, n) as usize;
@@ -152,10 +183,13 @@ fn xdv_pages(d: &[u8]) -> Vec<Page> {
             }
             248 => break,
             252 => {
+                let k = u(p, 4) as u32;
                 p += 4 + 4;
                 let flags = u(p, 2) as u16;
                 p += 2;
                 let l = d[p] as usize;
+                let path = String::from_utf8_lossy(&d[p + 1..p + 1 + l]).into_owned();
+                defs.insert(k, (path, u(p + 1 + l, 4) as u32));
                 p += 1 + l + 4;
                 if flags & 0x0200 != 0 {
                     p += 4;
@@ -169,6 +203,10 @@ fn xdv_pages(d: &[u8]) -> Vec<Page> {
             253 | 254 => {
                 if op == 254 {
                     let l = u(p, 2) as usize;
+                    let t: Vec<u16> = (0..l).map(|i| u(p + 2 + 2 * i, 2) as u16).collect();
+                    if let Some(last) = texts.last_mut() {
+                        last.push(t);
+                    }
                     p += 2 + 2 * l;
                 }
                 let w = s(p, 4) as i32;
@@ -186,11 +224,14 @@ fn xdv_pages(d: &[u8]) -> Vec<Page> {
                 if let Some(c) = cur.as_mut() {
                     c.push((w, g));
                 }
+                if let Some(f) = fonts.last_mut() {
+                    f.push(defs.get(&font).cloned().unwrap_or_default());
+                }
             }
             _ => panic!("XDV op {op} at {}", p - 1),
         }
     }
-    pages
+    (pages, texts, fonts)
 }
 
 /// The faces to check: loadable sfnt faces this crate can open.
@@ -199,7 +240,7 @@ fn faces(index: &FontIndex) -> Vec<(usize, FaceEntry)> {
         .entries
         .iter()
         .enumerate()
-        .filter(|(_, e)| e.flags & LOADABLE != 0 && e.flags & WOFF == 0 && e.index >> 16 == 0)
+        .filter(|(_, e)| e.flags & LOADABLE != 0 && e.index >> 16 == 0)
         .map(|(i, e)| (i, e.clone()))
         .collect()
 }
@@ -603,12 +644,374 @@ fn check_shape(chunk: &[(usize, FaceEntry)], dir: &Path, n: usize) -> Tally {
     tally
 }
 
+/// Inputs for the TECkit check: ASCII transliterations and punctuation.
+const MAPPING_WORDS: &[&str] = &[
+    "``Hello''",
+    "--",
+    "---",
+    "'a'",
+    "!`",
+    "?`",
+    "<<x>>",
+    ",,",
+    "abc",
+    "ABC",
+    "0123456789",
+    "kh",
+    "sh",
+    "th",
+    "dh",
+    "gh",
+    "ch",
+    "ng",
+    "ny",
+    "a:",
+    "i:",
+    "u:",
+    ".t",
+    ".d",
+    ".s",
+    "~n",
+    "^s",
+    "_d",
+    "'a",
+    "`a",
+    "aa-i",
+    "kitAb",
+    "al-qamar",
+    "bismi",
+    "llAhi",
+    "r-ra.hmAni",
+    "ra.hiim",
+    "OM",
+    "nama.h",
+    "zivAya",
+    "k.r.s.na",
+    "j~nAna",
+    "bod",
+    "skad",
+    "bsgrubs",
+    "rgyal",
+    "'phags",
+    "dkon.mchog",
+    "x^2",
+    "a_1",
+    "1/2",
+    "3.14",
+    "A-Z",
+    "~",
+    "!",
+    "?",
+    ";",
+    "w",
+    "y",
+    "q",
+    "f",
+    "v",
+    "z",
+    "j",
+    "x",
+    "kSa",
+    "tra",
+    "jña",
+    "shrI",
+    "1234",
+    "5678",
+    "90",
+    "abcdefghijklmnopqrstuvwxyz",
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZ",
+];
+
+fn check_teckit(index: &FontIndex, dir: &Path) -> Tally {
+    let font = index
+        .entries
+        .iter()
+        .find(|e| e.path.ends_with("/FreeSerif.otf"))
+        .expect("FreeSerif in the index");
+    let mut maps: Vec<String> = Vec::new();
+    for d in std::fs::read_dir("/usr/share/texmf-dist/fonts/misc/xetex/fontmapping").unwrap() {
+        for f in std::fs::read_dir(d.unwrap().path()).unwrap() {
+            let p = f.unwrap().path();
+            if p.extension().is_some_and(|x| x == "tec") {
+                maps.push(p.file_stem().unwrap().to_string_lossy().to_string());
+            }
+        }
+    }
+    maps.sort();
+    maps.dedup();
+    let mut t = String::from(PREAMBLE);
+    t.push_str("\\XeTeXgenerateactualtext=1 \\catcode`\\^=12 \\catcode`\\_=12 \\catcode`\\~=12\n");
+    let line = MAPPING_WORDS.join(" ");
+    for m in &maps {
+        let _ = writeln!(
+            t,
+            "\\font\\x=\"{}:mapping={m}\" at 10pt \\shipout\\hbox{{\\x {line}}}",
+            spec(font)
+        );
+    }
+    t.push_str("\\end\n");
+    let path = dir.join("t0.tex");
+    std::fs::write(&path, t).unwrap();
+    let (_, xdv) = oracle(&path, dir);
+    let (_, texts, _) = xdv_parse(&xdv);
+    let mut tally = Tally::default();
+    for (m, page) in maps.iter().zip(&texts) {
+        let f = load(font, 655_360, &format!(":mapping={m}")).expect("FreeSerif loads");
+        let mine: Vec<Vec<u16>> = MAPPING_WORDS
+            .iter()
+            .map(|w| f.apply_mapping(&w.encode_utf16().collect::<Vec<_>>()))
+            // an empty word makes no glyphs and is not written
+            .filter(|w| !w.is_empty())
+            .collect();
+        *tally.checked.entry("mapping".into()).or_default() += 1;
+        *tally.checked.entry("word".into()).or_default() += page.len();
+        if *page != mine {
+            *tally.bad.entry("mapping".into()).or_default() += 1;
+            let i = page
+                .iter()
+                .zip(&mine)
+                .position(|(a, b)| a != b)
+                .unwrap_or(0);
+            tally.examples.push(format!(
+                "{m}: {} words vs {}; word {i} {:?}: oracle {:?} mine {:?}",
+                page.len(),
+                mine.len(),
+                MAPPING_WORDS.get(i),
+                page.get(i).map(|w| String::from_utf16_lossy(w)),
+                mine.get(i).map(|w| String::from_utf16_lossy(w))
+            ));
+        }
+    }
+    if texts.len() != maps.len() {
+        tally
+            .examples
+            .push(format!("{} pages for {} mappings", texts.len(), maps.len()));
+    }
+    tally
+}
+
+/// Names to look up: popular families with style variants, and names
+/// read from a sample of the index (PostScript, full, family,
+/// family-style), in a fixed order (the manager is stateful).
+fn lookup_names(index: &FontIndex) -> Vec<(String, &'static str)> {
+    use partex_otf::names::{self, xetex_decode};
+    let mut v: Vec<(String, &'static str)> = Vec::new();
+    for n in [
+        "Latin Modern Roman",
+        "Latin Modern Roman/B",
+        "Latin Modern Roman/I",
+        "Latin Modern Roman/BI",
+        "Latin Modern Roman/S=6",
+        "Latin Modern Roman/S=17",
+        "Latin Modern Mono",
+        "Latin Modern Sans/B",
+        "Latin Modern Math",
+        "TeX Gyre Termes",
+        "TeX Gyre Termes/I",
+        "TeX Gyre Pagella/BI",
+        "TeX Gyre Heros",
+        "TeX Gyre Cursor/B",
+        "Libertinus Serif",
+        "Libertinus Serif/BI",
+        "Linux Libertine O",
+        "Linux Libertine O/I",
+        "DejaVu Sans",
+        "DejaVu Serif/B",
+        "FreeSerif",
+        "FreeSans/BI",
+        "Amiri",
+        "Amiri/B",
+        "STIX Two Math",
+        "STIX Two Text/I",
+        "Fira Sans",
+        "Fira Sans/B",
+        "Source Serif Pro",
+        "EB Garamond",
+        "EB Garamond/I",
+        "Gentium Plus",
+        "Gentium Book Plus",
+        "Gentium",
+        "Junicode",
+        "Junicode/B",
+        "Charis SIL",
+        "Doulos SIL",
+        "Noto Serif",
+        "Noto Sans/I",
+        "Nonexistent Font XYZ",
+        "Latin Modern Roman-Bold",
+        "LMRoman10-Regular",
+        "lmroman10-regular",
+        "TeXGyreTermes-Regular",
+        "Cochineal",
+        "Cochineal/B",
+        "Coelacanth",
+        "Old Standard",
+        "Old Standard/I",
+        "Asana Math",
+        "XITS Math",
+        "Erewhon/B",
+        "Erewhon Math",
+    ] {
+        v.push((n.to_string(), " at 10pt"));
+    }
+    v.push(("Latin Modern Roman".into(), ""));
+    v.push(("Latin Modern Roman/I".into(), " scaled 1200"));
+    v.push(("Latin Modern Sans".into(), " at 8pt"));
+    for (i, e) in index.entries.iter().enumerate() {
+        if i % 9 != 0 || e.flags & LOADABLE == 0 {
+            continue;
+        }
+        let first = |id: u16| {
+            e.names
+                .iter()
+                .filter(|r| r.name_id == id)
+                .find_map(xetex_decode)
+                .map(|(s, _)| s)
+        };
+        if let Some(ps) = names::postscript_name(&e.names) {
+            v.push((ps, " at 10pt"));
+        }
+        if let Some(full) = first(names::FULL_NAME) {
+            v.push((full, " at 11pt"));
+        }
+        let fam = first(names::TYPOGRAPHIC_FAMILY).or_else(|| first(names::FAMILY));
+        let sty = first(names::TYPOGRAPHIC_SUBFAMILY).or_else(|| first(names::SUBFAMILY));
+        if let Some(f) = &fam {
+            v.push((f.clone(), " at 9pt"));
+            v.push((format!("{f}/I"), " at 9pt"));
+            v.push((format!("{f}/B"), " at 9pt"));
+            if let Some(s) = &sty {
+                v.push((format!("{f}-{s}"), " at 9pt"));
+            }
+        }
+    }
+    v.retain(|(n, _)| {
+        !n.contains("  ") && !n.contains(['"', '\\', '{', '}', '%', '#', '$', '&', '^', '_', '~'])
+    });
+    v
+}
+
+fn check_names(index: &FontIndex, dir: &Path) -> Tally {
+    let names = lookup_names(index);
+    let mut t = String::from(PREAMBLE);
+    t.push_str("\\suppressfontnotfounderror=1 \\XeTeXtracingfonts=1\n");
+    for (k, (n, size)) in names.iter().enumerate() {
+        let _ = writeln!(
+            t,
+            "\\font\\x=\"{n}\"{size} \\l{{N {k} \\fontname\\x}}\\shipout\\hbox{{\\x\\XeTeXglyph1}}"
+        );
+    }
+    t.push_str("\\end\n");
+    let path = dir.join("n0.tex");
+    std::fs::write(&path, t).unwrap();
+    let (log, xdv) = oracle(&path, dir);
+    // (the font's file, \fontname) per lookup; XeTeX's own `-> path`
+    // tracing prints a freed string (`getPlatformFontDesc(...).c_str()`).
+    let page_fonts = xdv_page_fonts(&xdv);
+    let mut got: Vec<(Option<String>, String)> = Vec::new();
+    for l in log.lines() {
+        if let Some(rest) = l.strip_prefix("@@N ") {
+            let name = rest.split_once(' ').map_or("", |x| x.1).to_string();
+            let file = page_fonts
+                .get(got.len())
+                .and_then(|f| f.first())
+                .map(|f| f.0.clone());
+            got.push((file, name));
+        }
+    }
+    let mut mgr = FontManager::new(Arc::new(index.clone()));
+    mgr.tracing_fonts = 1;
+    let mut tally = Tally::default();
+    for (k, (n, size)) in names.iter().enumerate() {
+        let scaled = match *size {
+            " at 10pt" => 655_360,
+            " at 11pt" => 720_896,
+            " at 9pt" => 589_824,
+            " at 8pt" => 524_288,
+            " scaled 1200" => -1200,
+            _ => -1000,
+        };
+        let (f, diags) = xetex::find_native_font(&mut mgr, &Src, n, scaled, 1);
+        let _ = diags;
+        let traced = f.as_ref().map(|f| f.path.to_string());
+        let mine = match &f {
+            Some(f) => {
+                let actual = if scaled >= 0 {
+                    scaled
+                } else if scaled == -1000 {
+                    f.design_size
+                } else {
+                    xetex::xn_over_d(f.design_size, -scaled, 1000)
+                };
+                let mut s = format!("\"{}\"", f.name_of_file);
+                if actual != f.design_size {
+                    let _ = write!(s, " at {}pt", print_scaled(actual));
+                }
+                s
+            }
+            None => String::from("nullfont"),
+        };
+        *tally.checked.entry("lookup".into()).or_default() += 1;
+        let Some((gpath, gname)) = got.get(k) else {
+            *tally.bad.entry("missing".into()).or_default() += 1;
+            continue;
+        };
+        if *gpath != traced || *gname != mine {
+            *tally.bad.entry("lookup".into()).or_default() += 1;
+            if tally.examples.len() < 40 {
+                tally.examples.push(format!(
+                    "{k} {n}{size}: oracle {gname} {gpath:?}\n    mine {mine} {traced:?}"
+                ));
+            }
+        }
+    }
+    tally
+}
+
+/// tex.web's `print_scaled` (§103).
+fn print_scaled(s: i32) -> String {
+    let mut out = String::new();
+    let mut s = s;
+    if s < 0 {
+        out.push('-');
+        s = -s;
+    }
+    let _ = write!(out, "{}", s / 65536);
+    out.push('.');
+    let mut s = 10 * (s % 65536) + 5;
+    let mut delta = 10;
+    loop {
+        if delta > 65536 {
+            s += 0o100000 - 50000;
+        }
+        out.push(char::from(b'0' + (s / 65536) as u8));
+        s = 10 * (s % 65536);
+        delta *= 10;
+        if s <= delta {
+            break;
+        }
+    }
+    out
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let index = FontIndex::from_bytes(&std::fs::read(&args[1]).expect("index")).expect("an index");
     let out = PathBuf::from(&args[2]);
     std::fs::create_dir_all(&out).unwrap();
     let mode = args.get(3).map_or("metrics", String::as_str);
+    if mode == "teckit" || mode == "names" {
+        let t = if mode == "names" {
+            check_names(&index, &out)
+        } else {
+            check_teckit(&index, &out)
+        };
+        for e in &t.examples {
+            println!("{e}");
+        }
+        println!("checked: {:?}\nmismatches: {:?}", t.checked, t.bad);
+        return;
+    }
     let opt = |name: &str, d: usize| -> usize {
         args.iter()
             .position(|a| a == name)

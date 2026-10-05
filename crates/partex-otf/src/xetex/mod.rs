@@ -333,7 +333,9 @@ fn read_tag_with_param(s: &[u8]) -> (Tag, i32) {
 }
 
 /// `splitFontName`: (name, variant, features, face index).
-fn split_font_name(name: &[u8]) -> (&[u8], Option<&[u8]>, Option<&[u8]>, u32) {
+type SplitName<'a> = (&'a [u8], Option<&'a [u8]>, Option<&'a [u8]>, u32);
+
+fn split_font_name(name: &[u8]) -> SplitName<'_> {
     let mut var: Option<usize> = None;
     let mut feat: Option<usize> = None;
     let mut index = 0u32;
@@ -558,7 +560,7 @@ pub fn find_native_font(
         }
     }
     let result = result.map(|mut f| {
-        f.name_of_file = ld.name_of_file.clone();
+        f.name_of_file.clone_from(&ld.name_of_file);
         f
     });
     (result, ld.diags)

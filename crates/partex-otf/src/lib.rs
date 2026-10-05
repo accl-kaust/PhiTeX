@@ -39,7 +39,9 @@
     clippy::unreadable_literal,
     clippy::too_many_lines,
     clippy::struct_excessive_bools,
-    clippy::missing_panics_doc
+    clippy::missing_panics_doc,
+    // Prose names programs and formats (FreeType, HarfBuzz, XeTeX, …).
+    clippy::doc_markdown
 )]
 
 extern crate alloc;

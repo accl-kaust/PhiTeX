@@ -13,13 +13,23 @@
 //! `--check-fc` compares fontconfig's family, style and full names with
 //! the ones `fontmgr::fc_names` derives from the records.
 
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_possible_wrap,
+    clippy::doc_markdown,
+    clippy::many_single_char_names,
+    clippy::too_many_lines,
+    clippy::match_same_arms,
+    clippy::unreadable_literal
+)]
+
 use std::collections::BTreeSet;
-use std::io::Read;
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::Arc;
 
-use partex_otf::index::{FaceEntry, FontIndex, LOADABLE, SFNT, WOFF};
+use partex_otf::index::{FaceEntry, FontIndex, LOADABLE, SFNT};
 use partex_otf::xetex::fontmgr::fc_names;
 
 struct FcFace {
@@ -85,80 +95,6 @@ fn fc_list(conf: &str) -> Vec<FcFace> {
         .collect()
 }
 
-fn base128(d: &[u8], p: &mut usize) -> Option<u32> {
-    let mut v: u32 = 0;
-    for _ in 0..5 {
-        let b = *d.get(*p)?;
-        *p += 1;
-        v = (v << 7) | u32::from(b & 0x7f);
-        if b & 0x80 == 0 {
-            return Some(v);
-        }
-    }
-    None
-}
-
-const WOFF2_TAGS: [&[u8; 4]; 63] = [
-    b"cmap", b"head", b"hhea", b"hmtx", b"maxp", b"name", b"OS/2", b"post", b"cvt ", b"fpgm",
-    b"glyf", b"loca", b"prep", b"CFF ", b"VORG", b"EBDT", b"EBLC", b"gasp", b"hdmx", b"kern",
-    b"LTSH", b"PCLT", b"VDMX", b"vhea", b"vmtx", b"BASE", b"GDEF", b"GPOS", b"GSUB", b"EBSC",
-    b"JSTF", b"MATH", b"CBDT", b"CBLC", b"COLR", b"CPAL", b"SVG ", b"sbix", b"acnt", b"avar",
-    b"bdat", b"bloc", b"bsln", b"cvar", b"fdsc", b"feat", b"fmtx", b"fvar", b"gvar", b"hsty",
-    b"just", b"lcar", b"mort", b"morx", b"opbd", b"prop", b"trak", b"Zapf", b"Silf", b"Glat",
-    b"Gloc", b"Feat", b"Sill",
-];
-
-/// The untransformed tables of a (single-font) WOFF2 file.
-fn woff2_tables(d: &[u8]) -> Option<Vec<([u8; 4], Vec<u8>)>> {
-    let be32 =
-        |o: usize| -> Option<u32> { Some(u32::from_be_bytes(d.get(o..o + 4)?.try_into().ok()?)) };
-    if be32(4)? == u32::from_be_bytes(*b"ttcf") {
-        return None;
-    }
-    let n = u16::from_be_bytes(d.get(12..14)?.try_into().ok()?) as usize;
-    let comp_size = be32(20)? as usize;
-    let mut p = 48;
-    let mut dir = Vec::with_capacity(n);
-    for _ in 0..n {
-        let flags = *d.get(p)?;
-        p += 1;
-        let tag: [u8; 4] = if flags & 0x3f == 0x3f {
-            let t = d.get(p..p + 4)?.try_into().ok()?;
-            p += 4;
-            t
-        } else {
-            *WOFF2_TAGS[(flags & 0x3f) as usize]
-        };
-        let version = (flags >> 6) & 3;
-        let orig = base128(d, &mut p)?;
-        let glyf_loca = &tag == b"glyf" || &tag == b"loca";
-        let transformed = if glyf_loca {
-            version == 0
-        } else {
-            version != 0
-        };
-        let len = if transformed {
-            base128(d, &mut p)?
-        } else {
-            orig
-        };
-        dir.push((tag, len as usize, transformed));
-    }
-    let mut out = Vec::new();
-    let mut dec = brotli_decompressor::Decompressor::new(d.get(p..p + comp_size)?, 4096);
-    dec.read_to_end(&mut out).ok()?;
-    let mut q = 0;
-    let mut tables = Vec::new();
-    for (tag, len, transformed) in dir {
-        let b = out.get(q..q + len)?.to_vec();
-        q += len;
-        if !transformed {
-            tables.push((tag, b));
-        }
-    }
-    Some(tables)
-}
-
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let out_path = args.get(1).expect("usage: otf-index OUT [--check-fc]");
@@ -170,25 +106,10 @@ fn main() {
     let (mut mismatches, mut woff2, mut unloadable) = (0, 0, 0);
     for f in &faces {
         let data: Arc<[u8]> = Arc::from(std::fs::read(&f.file).expect("font readable"));
-        let mut e = if partex_otf::woff::is_woff2(&data) {
+        if partex_otf::woff::is_woff2(&data) {
             woff2 += 1;
-            match woff2_tables(&data) {
-                Some(tables) => {
-                    let table = |t: u32| -> Option<&[u8]> {
-                        tables
-                            .iter()
-                            .find(|(tag, _)| u32::from_be_bytes(*tag) == t)
-                            .map(|(_, b)| &b[..])
-                    };
-                    let mut e = FaceEntry::from_tables(&f.file, f.index, true, &table);
-                    e.flags |= WOFF;
-                    e
-                }
-                None => FaceEntry::read(&f.file, data.clone(), f.index),
-            }
-        } else {
-            FaceEntry::read(&f.file, data.clone(), f.index)
-        };
+        }
+        let mut e = FaceEntry::read(&f.file, data.clone(), f.index);
         // XeTeX reads fontconfig's weight, width and slant where the face
         // gives no OS/2 weight and width.
         // fontconfig's pattern for a variable font itself.

@@ -87,14 +87,12 @@ impl<'a> Gsubgpos<'a> {
 fn bfind(d: &[u8], base: usize, n: u32, stride: usize, key: Tag) -> (bool, u32) {
     let (mut min, mut max) = (0i32, n as i32 - 1);
     while min <= max {
-        let mid = ((min as u32 + max as u32) / 2) as i32;
+        let mid = u32::midpoint(min as u32, max as u32) as i32;
         let t = rd_u32(d, base + mid as usize * stride).unwrap_or(0);
-        if key < t {
-            max = mid - 1;
-        } else if key > t {
-            min = mid + 1;
-        } else {
-            return (true, mid as u32);
+        match key.cmp(&t) {
+            core::cmp::Ordering::Less => max = mid - 1,
+            core::cmp::Ordering::Greater => min = mid + 1,
+            core::cmp::Ordering::Equal => return (true, mid as u32),
         }
     }
     (false, min as u32)

@@ -97,9 +97,9 @@ impl FaceEntry {
     #[must_use]
     pub fn read(path: &str, data: Arc<[u8]>, index: u32) -> FaceEntry {
         let loadable = Face::new(data.clone(), index).is_some();
-        let woff = crate::woff::is_woff(&data);
+        let woff = crate::woff::is_woff(&data) || crate::woff::is_woff2(&data);
         let sfnt: Arc<[u8]> = if woff {
-            crate::woff::decode(&data).map_or(data, Arc::from)
+            crate::woff::unpack(&data).map_or(data, Arc::from)
         } else {
             data
         };

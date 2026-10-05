@@ -88,10 +88,10 @@ fn fc_same(a: &str, b: &str) -> bool {
 /// Latin-1 names; `None` for the others or broken UTF-16).
 fn fc_transcode(r: &NameRecord) -> Option<String> {
     let utf16 = |b: &[u8]| -> Option<String> {
-        if b.len() % 2 != 0 {
+        if !b.len().is_multiple_of(2) {
             return None;
         }
-        let units = b.chunks_exact(2).map(|p| u16::from_be_bytes([p[0], p[1]]));
+        let units = b.as_chunks::<2>().0.iter().map(|p| u16::from_be_bytes(*p));
         char::decode_utf16(units)
             .collect::<Result<String, _>>()
             .ok()
@@ -793,7 +793,7 @@ impl FontManager {
             best = None;
             for &g in p.styles.values() {
                 let gf = &self.fonts[g];
-                if gf.is_italic == !f.is_italic {
+                if gf.is_italic != f.is_italic {
                     if p.min_weight != p.max_weight {
                         if best.is_none_or(|b| {
                             Self::weight_and_width_diff(gf, f)

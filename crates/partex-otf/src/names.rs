@@ -121,8 +121,8 @@ pub fn read_name_table(d: &[u8], ids: &[u16]) -> Vec<NameRecord> {
 #[must_use]
 pub fn read_names(data: &[u8], index: u32, ids: &[u16]) -> Vec<NameRecord> {
     let decoded;
-    let data = if crate::woff::is_woff(data) {
-        match crate::woff::decode(data) {
+    let data = if crate::woff::is_woff(data) || crate::woff::is_woff2(data) {
+        match crate::woff::unpack(data) {
             Some(d) => {
                 decoded = d;
                 &decoded[..]
@@ -179,7 +179,9 @@ pub fn postscript_name(records: &[NameRecord]) -> Option<String> {
     if let Some(w) = win {
         let s: String = records[w]
             .bytes
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .filter(|p| p[0] == 0 && is_postscript(p[1]))
             .map(|p| char::from(p[1]))
             .collect();
@@ -238,8 +240,10 @@ pub fn decode_mac_roman(b: &[u8]) -> String {
 #[must_use]
 pub fn decode_utf16be(b: &[u8]) -> String {
     let units: Vec<u16> = b
-        .chunks_exact(2)
-        .map(|p| u16::from_be_bytes([p[0], p[1]]))
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|p| u16::from_be_bytes(*p))
         .collect();
     let mut s: String = char::decode_utf16(units)
         .map(|r| r.unwrap_or('\u{FFFD}'))

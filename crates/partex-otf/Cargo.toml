@@ -13,10 +13,9 @@ read-fonts = { version = "=0.45.0", default-features = false, features = ["libm"
 skrifa = { version = "=0.48.0", default-features = false, features = ["libm"] }
 unicode-bidi = { version = "=0.3.18", default-features = false, features = ["hardcoded-data"] }
 libm = "0.2.16"
+# WOFF2 faces (TeX Live has 45; fontconfig lists Gentium's before its TTFs).
+brotli-decompressor = { version = "5.0.3", default-features = false }
 
 [lints]
 workspace = true
 
-[dev-dependencies]
-# The index builder reads WOFF2 faces' name tables.
-brotli-decompressor = "5.0.3"

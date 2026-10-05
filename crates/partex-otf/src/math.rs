@@ -44,14 +44,12 @@ fn coverage(d: &[u8], o: usize, g: u32) -> Option<u32> {
             let n = rd_u16(d, o + 2)? as i32;
             let (mut min, mut max) = (0i32, n - 1);
             while min <= max {
-                let mid = ((min as u32 + max as u32) / 2) as i32;
+                let mid = u32::midpoint(min as u32, max as u32) as i32;
                 let v = u32::from(rd_u16(d, o + 4 + 2 * mid as usize)?);
-                if g < v {
-                    max = mid - 1;
-                } else if g > v {
-                    min = mid + 1;
-                } else {
-                    return Some(mid as u32);
+                match g.cmp(&v) {
+                    core::cmp::Ordering::Less => max = mid - 1,
+                    core::cmp::Ordering::Greater => min = mid + 1,
+                    core::cmp::Ordering::Equal => return Some(mid as u32),
                 }
             }
             None
@@ -60,7 +58,7 @@ fn coverage(d: &[u8], o: usize, g: u32) -> Option<u32> {
             let n = rd_u16(d, o + 2)? as i32;
             let (mut min, mut max) = (0i32, n - 1);
             while min <= max {
-                let mid = ((min as u32 + max as u32) / 2) as i32;
+                let mid = u32::midpoint(min as u32, max as u32) as i32;
                 let r = o + 4 + 6 * mid as usize;
                 let (start, end) = (u32::from(rd_u16(d, r)?), u32::from(rd_u16(d, r + 2)?));
                 if g < start {
@@ -177,15 +175,15 @@ impl<'a> Math<'a> {
         let (mut min, mut max) = (0i32, count - 1);
         let mut pos = None;
         while min <= max {
-            let mid = ((min as u32 + max as u32) / 2) as i32;
+            let mid = u32::midpoint(min as u32, max as u32) as i32;
             let v = i32::from(rd_i16(d, k + 2 + 4 * mid as usize)?);
-            if height < v {
-                max = mid - 1;
-            } else if height > v {
-                min = mid + 1;
-            } else {
-                pos = Some(mid);
-                break;
+            match height.cmp(&v) {
+                core::cmp::Ordering::Less => max = mid - 1,
+                core::cmp::Ordering::Greater => min = mid + 1,
+                core::cmp::Ordering::Equal => {
+                    pos = Some(mid);
+                    break;
+                }
             }
         }
         let idx = match pos {

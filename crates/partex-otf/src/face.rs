@@ -42,13 +42,13 @@ pub fn content_hash(data: &[u8]) -> [u64; 2] {
     const K2: u64 = 0xC2B2_AE3D_27D4_EB4F;
     let mut a: u64 = 0x2545_F491_4F6C_DD1D ^ data.len() as u64;
     let mut b: u64 = 0x1656_67B1_9E37_79F9;
-    let mut chunks = data.chunks_exact(8);
-    for c in &mut chunks {
-        let w = u64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]);
+    let (chunks, rest) = data.as_chunks::<8>();
+    for c in chunks {
+        let w = u64::from_le_bytes(*c);
         a = (a ^ w).wrapping_mul(K1).rotate_left(29);
         b = (b.wrapping_add(w)).wrapping_mul(K2).rotate_left(31) ^ a;
     }
-    for &byte in chunks.remainder() {
+    for &byte in rest {
         a = (a ^ u64::from(byte)).wrapping_mul(K1).rotate_left(29);
         b = b.wrapping_add(u64::from(byte)).wrapping_mul(K2) ^ a;
     }
@@ -222,8 +222,8 @@ impl Face {
     #[must_use]
     pub fn with_key(data: Arc<[u8]>, index: u32, key: FaceKey) -> Option<Arc<Face>> {
         // FreeType opens a WOFF file as the sfnt it holds.
-        let data: Arc<[u8]> = if crate::woff::is_woff(&data) {
-            Arc::from(crate::woff::decode(&data)?)
+        let data: Arc<[u8]> = if crate::woff::is_woff(&data) || crate::woff::is_woff2(&data) {
+            Arc::from(crate::woff::unpack(&data)?)
         } else {
             data
         };
@@ -296,8 +296,7 @@ impl Face {
         let tt_names = post_version.is_some_and(|v| v != 0x0003_0000);
         let has_glyph_names = match outlines {
             Outlines::Cff { cid } => tt_names || !cid,
-            Outlines::Cff2 => tt_names,
-            Outlines::TrueType => tt_names,
+            Outlines::Cff2 | Outlines::TrueType => tt_names,
         };
         let hmtx = find(b"hmtx").map(|(o, l)| (o, l, n_hmetrics));
         let vmtx = match (find(b"vhea"), find(b"vmtx")) {
@@ -543,6 +542,7 @@ impl Face {
         Some(b)
     }
 
+    #[allow(clippy::single_match_else)]
     fn compute_cbox(&self, gid: u32) -> Option<BBox> {
         use skrifa::MetadataProvider;
         use skrifa::instance::{LocationRef, Size};
@@ -589,6 +589,7 @@ impl Face {
     /// `FT_Get_Glyph_Name`: the glyph's name (the CFF charset's for a CFF
     /// font, `post`'s otherwise), or `None` without names.
     #[must_use]
+    #[allow(clippy::single_match_else)]
     pub fn glyph_name(&self, gid: u32) -> Option<Vec<u8>> {
         if !self.has_glyph_names || gid >= self.num_glyphs {
             return None;
