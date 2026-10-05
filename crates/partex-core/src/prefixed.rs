@@ -491,6 +491,8 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         let p = if self.cur_cmd == TOKS_REGISTER {
             self.scan_register_num()?;
             reg_loc(TOK_VAL, self.cur_val)
+        } else if self.cur_chr == XETEX_INTER_CHAR_LOC {
+            self.scan_inter_char_loc()?
         } else {
             self.cur_chr // `p = every_par_loc` or `output_routine_loc` or …
         };
@@ -503,6 +505,9 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                 self.scan_register_num()?;
                 self.cur_cmd = ASSIGN_TOKS;
                 self.cur_chr = reg_loc(TOK_VAL, self.cur_val);
+            }
+            if self.cur_cmd == ASSIGN_TOKS && self.cur_chr == XETEX_INTER_CHAR_LOC {
+                self.cur_chr = self.scan_inter_char_loc()?;
             }
             if self.cur_cmd == ASSIGN_TOKS {
                 match self.equiv_toks(self.cur_chr).cloned() {

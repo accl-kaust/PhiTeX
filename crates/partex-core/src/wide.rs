@@ -28,6 +28,15 @@ pub(crate) const UC: i32 = 4;
 pub(crate) const SF: i32 = 5;
 pub(crate) const MATH: i32 = 6;
 pub(crate) const DEL: i32 = 7;
+/// `XeTeX`'s inter-character token lists (`\XeTeXinterchartoks`, e-TeX's
+/// sparse `inter_char_val`), one per pair of classes, past the tables.
+pub(crate) const INTER: i32 = 8;
+const INTER_BASE: i32 = WIDE_BASE + INTER * SPAN;
+
+/// The location of the inter-character tokens from class `c1` to `c2`.
+pub(crate) fn inter_char_loc(c1: i32, c2: i32) -> i32 {
+    INTER_BASE + c1 * crate::web::CHAR_CLASS_LIMIT + c2
+}
 
 /// Location of character `c` (past 255) in table `t`.
 #[inline]
@@ -38,6 +47,9 @@ pub(crate) fn wide_loc(t: i32, c: i32) -> i32 {
 /// The table and character of a wide location.
 #[inline]
 pub(crate) fn wide_of(p: i32) -> Option<(i32, i32)> {
+    if p >= INTER_BASE {
+        return Some((INTER, p - INTER_BASE));
+    }
     (p >= WIDE_BASE).then(|| ((p - WIDE_BASE) / SPAN, (p - WIDE_BASE) % SPAN))
 }
 

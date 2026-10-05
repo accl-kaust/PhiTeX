@@ -120,6 +120,7 @@ mod values;
 mod web;
 mod wide;
 mod xetex;
+mod xmain;
 mod xregs;
 
 #[cfg(test)]

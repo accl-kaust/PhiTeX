@@ -389,8 +389,8 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         let kind = match r.index {
             PARAMETER => FrameKind::TokenList("argument"),
             U_TEMPLATE | V_TEMPLATE => FrameKind::TokenList("template"),
-            BACKED_UP if r.loc == NULL => FrameKind::TokenList("recently read"),
-            BACKED_UP => FrameKind::TokenList("to be read again"),
+            BACKED_UP | BACKED_UP_CHAR if r.loc == NULL => FrameKind::TokenList("recently read"),
+            BACKED_UP | BACKED_UP_CHAR => FrameKind::TokenList("to be read again"),
             INSERTED => FrameKind::TokenList("inserted text"),
             MACRO => {
                 let name = self.diag_print(|t| t.sprint_cs(r.name));
@@ -406,6 +406,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             EVERY_CR_TEXT => FrameKind::TokenList("everycr"),
             MARK_TEXT => FrameKind::TokenList("mark"),
             WRITE_TEXT => FrameKind::TokenList("write"),
+            INTER_CHAR_TEXT => FrameKind::TokenList("XeTeXinterchartoks"),
             _ => FrameKind::TokenList("?"),
         };
         let list = r.list.clone().unwrap_or_default();

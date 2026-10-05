@@ -713,7 +713,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             match self.token_type() {
                 PARAMETER => self.print_nl(b"<argument> "),
                 U_TEMPLATE | V_TEMPLATE => self.print_nl(b"<template> "),
-                BACKED_UP => {
+                BACKED_UP | BACKED_UP_CHAR => {
                     if self.cur_input.loc == NULL {
                         self.print_nl(b"<recently read> ");
                     } else {
@@ -736,6 +736,9 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                 MARK_TEXT => self.print_nl(b"<mark> "),
                 EVERY_EOF_TEXT => self.print_nl(b"<everyeof> "),
                 WRITE_TEXT => self.print_nl(b"<write> "),
+                INTER_CHAR_TEXT if self.params.flavor == crate::params::Flavor::XeTeX => {
+                    self.print_nl(b"<XeTeXinterchartoks> ");
+                }
                 _ => self.print_nl(b"?"), // this should never happen
             }
             // §319: pseudoprint the token list.

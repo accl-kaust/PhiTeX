@@ -1254,8 +1254,9 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         match cmd {
             RELAX | IGNORE_SPACES | AFTER_ASSIGNMENT | AFTER_GROUP | BEGIN_GROUP | END_GROUP
             | LEFT_BRACE | RIGHT_BRACE | TOKS_REGISTER | ASSIGN_TOKS | ASSIGN_INT
-            | ASSIGN_DIMEN | ASSIGN_GLUE | ASSIGN_MU_GLUE | DEF_CODE | DEF_FAMILY | SET_FONT
-            | REGISTER | ADVANCE | MULTIPLY | DIVIDE | PREFIX | LET | SHORTHAND_DEF | DEF => true,
+            | ASSIGN_DIMEN | ASSIGN_GLUE | ASSIGN_MU_GLUE | DEF_CODE | XETEX_DEF_CODE
+            | DEF_FAMILY | SET_FONT | REGISTER | ADVANCE | MULTIPLY | DIVIDE | PREFIX | LET
+            | SHORTHAND_DEF | DEF => true,
             SPACER => self.mode().abs() != HMODE,
             _ => false,
         }

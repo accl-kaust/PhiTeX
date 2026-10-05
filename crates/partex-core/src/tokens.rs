@@ -145,6 +145,30 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         self.print_chr(chr_code);
     }
 
+    /// `XeTeX`'s forms of `print_cmd_chr` where two primitives mean the
+    /// same (its `\U…` names) or the meaning is no primitive's. Whether
+    /// `cmd`, `chr_code` was one.
+    fn print_cmd_chr_xetex(&mut self, cmd: i32, chr_code: i32) -> bool {
+        let name: &[u8] = match (cmd, chr_code) {
+            (XETEX_DEF_CODE, SF_CODE_BASE) => b"XeTeXcharclass",
+            (XETEX_DEF_CODE, MATH_CODE_BASE) => b"Umathcodenum",
+            (XETEX_DEF_CODE, c) if c == MATH_CODE_BASE + 1 => b"Umathcode",
+            (XETEX_DEF_CODE, DEL_CODE_BASE) => b"Udelcodenum",
+            (XETEX_DEF_CODE, _) => b"Udelcode",
+            (DELIM_NUM, 1) => b"Udelimiter",
+            (MATH_ACCENT, 1) => b"Umathaccent",
+            (MATH_CHAR_NUM, 2) => b"Umathchar",
+            (MATH_CHAR_NUM, 1) => b"Umathcharnum",
+            (RADICAL, 1) => b"Uradical",
+            (SHORTHAND_DEF, XETEX_MATH_CHAR_DEF_CODE) => b"Umathchardef",
+            (SHORTHAND_DEF, XETEX_MATH_CHAR_NUM_DEF_CODE) => b"Umathcharnumdef",
+            (ASSIGN_TOKS, XETEX_INTER_CHAR_LOC) => b"XeTeXinterchartoks",
+            _ => return false,
+        };
+        self.print_esc(name);
+        true
+    }
+
     /// §298: symbolic printing of a command code and modifier.
     pub(crate) fn print_cmd_chr(&mut self, cmd: i32, chr_code: i32) {
         let e = |t: &mut Self, s: &[u8]| t.print_esc(s);
@@ -159,9 +183,14 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             self.print_register_name(kind, n);
             return;
         }
-        if self.params.flavor == crate::params::Flavor::PdfTex {
-            // e-TeX's and pdfTeX's commands print their primitive's name,
-            // except for these forms.
+        if self.params.flavor == crate::params::Flavor::XeTeX
+            && self.print_cmd_chr_xetex(cmd, chr_code)
+        {
+            return;
+        }
+        if self.params.flavor != crate::params::Flavor::Tex {
+            // e-TeX's, pdfTeX's and `XeTeX`'s commands print their
+            // primitive's name, except for these forms.
             if cmd == IF_TEST && chr_code >= UNLESS_CODE {
                 e(self, b"unless");
                 return self.print_cmd_chr(cmd, chr_code % UNLESS_CODE);

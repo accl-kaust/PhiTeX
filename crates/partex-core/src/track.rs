@@ -347,6 +347,11 @@ pub mod scalar {
     pub const WRITE_OPEN: u16 = 32;
     /// `read_open[j]` (§480), `READ_OPEN + j` for `j` in 0..17.
     pub const READ_OPEN: u16 = 64;
+    /// `XeTeX`'s `prev_class` and `space_class` (§1034): the classes of
+    /// the character before and the last one, for its inter-character
+    /// token lists.
+    pub const PREV_CLASS: u16 = 82;
+    pub const SPACE_CLASS: u16 = 83;
     /// The results of the recorded routines, each versioned by its value
     /// (DESIGN 7.17.12's boundary rule: what is live where a routine ends
     /// is its result, `cur_box` for a pack): `hpack`'s box with what

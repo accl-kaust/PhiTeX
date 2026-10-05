@@ -299,6 +299,8 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                         // `cur_cmd=toks_register`
                         self.scan_register_num()?;
                         m = crate::xregs::reg_loc(TOK_VAL, self.cur_val);
+                    } else if m == crate::web::XETEX_INTER_CHAR_LOC {
+                        m = self.scan_inter_char_loc()?;
                     }
                     // (the list itself, a shared value: `cur_toks`)
                     self.cur_toks = self.equiv_toks(m).cloned();
@@ -633,6 +635,15 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                 b"I changed this one to zero.",
             ],
         )
+    }
+
+    /// `XeTeX`: the two classes after `\XeTeXinterchartoks`, as the
+    /// location of their token list.
+    pub(crate) fn scan_inter_char_loc(&mut self) -> Result<i32, Jump> {
+        self.scan_char_class_not_ignored()?;
+        let c1 = self.cur_val;
+        self.scan_char_class_not_ignored()?;
+        Ok(crate::wide::inter_char_loc(c1, self.cur_val))
     }
 
     /// `XeTeX` §438 `scan_xetex_math_char_int`: a `\Umathchar` number.

@@ -51,6 +51,12 @@ pub(crate) fn ext_reg(loc: i32) -> (i32, i32) {
 /// The kind of the first wide table (past the registers' kinds).
 pub(crate) const WIDE_KIND: i32 = 8;
 
+/// Whether registers of `kind` hold token lists (`\toks`, and `XeTeX`'s
+/// `\XeTeXinterchartoks`).
+pub(crate) fn is_toks_kind(kind: i32) -> bool {
+    kind == TOK_VAL || kind == WIDE_KIND + crate::wide::INTER
+}
+
 /// Whether register values of `kind` are words (counts and dimens, and
 /// `XeTeX`'s wide `\delcode`s, which are integers as `del_code`s are).
 pub(crate) fn is_word_kind(kind: i32) -> bool {
@@ -234,6 +240,11 @@ impl ExtRegs {
                     w.set_b0(UNDEFINED_CS);
                     w.set_rh(NULL);
                     w.set_b1(LEVEL_ZERO);
+                }
+                crate::wide::INTER => {
+                    w.set_b0(UNDEFINED_CS);
+                    w.set_rh(NULL);
+                    w.set_b1(LEVEL_ONE);
                 }
                 crate::wide::DEL => w.set_int(-1),
                 _ => {

@@ -820,6 +820,12 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             }
             return;
         }
+        if matches!(crate::wide::wide_of(n), Some((crate::wide::INTER, _))) {
+            // `XeTeX`: `\XeTeXinterchartoks` (`show_sa` knows not its name
+            // nor its value)
+            self.print_str(b"?=?");
+            return;
+        }
         if n >= EXT_BASE {
             // e-TeX: a register above 255
             let (kind, r) = ext_reg(n);

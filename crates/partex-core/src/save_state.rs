@@ -213,6 +213,8 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             random,
             cur_box,
             after_token,
+            prev_class,
+            space_class,
             memo,
             cs_cache: _,
             map_cache: _,
@@ -632,6 +634,9 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         cur_box.save(s);
         s.mark("after_token");
         after_token.save(s);
+        s.mark("char_classes");
+        prev_class.save(s);
+        space_class.save(s);
         s.mark("fresh_def");
         fresh_def.save(s);
         s.mark("long_help_seen");
@@ -864,6 +869,8 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             random: Persist::load(l)?,
             cur_box: Persist::load(l)?,
             after_token: Persist::load(l)?,
+            prev_class: Persist::load(l)?,
+            space_class: Persist::load(l)?,
             memo: crate::memo::Memo::new(false),
             cs_cache: crate::hash::CsCache::default(),
             map_cache: crate::fontmap::MapCache::default(),

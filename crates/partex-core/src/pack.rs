@@ -182,6 +182,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                 overfull_rule: 0,
                 texxet: t.texxet_en(),
             };
+            let list = t.merge_native_fragments(list);
             let packed = pack::hpack(list, spec, &params, &t.tracked_fonts(), adjust);
             Ok::<_, core::convert::Infallible>(t.hpacked(packed))
         });
@@ -198,6 +199,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         adjust: Option<&mut Vec<Node>>,
     ) -> Hpacked {
         let params = self.hpack_params();
+        let list = self.merge_native_fragments(list);
         let packed = pack::hpack(list, spec, &params, &self.tracked_fonts(), adjust);
         self.hpacked(packed)
     }

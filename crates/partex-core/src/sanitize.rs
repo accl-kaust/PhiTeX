@@ -35,7 +35,7 @@ use crate::track::{Cell, Tracker};
 use crate::web::{
     ACTIVE_BASE, CAT_CODE_BASE, CUR_FONT_LOC, EQTB_SIZE, ETEX_PEN_BASE, ETEX_PENS,
     FROZEN_PROTECTION, GLUE_BASE, HASH_BASE, INT_BASE, LC_CODE_BASE, LOCAL_BASE, MATH_FONT_BASE,
-    NULL_CS, PAR_SHAPE_LOC, RELAX, TOK_VAL, UNDEFINED_CONTROL_SEQUENCE, XORD_CODE_BASE,
+    NULL_CS, PAR_SHAPE_LOC, RELAX, UNDEFINED_CONTROL_SEQUENCE, XORD_CODE_BASE,
 };
 use crate::xregs::{EXT_BASE, ext_reg, is_word_kind};
 
@@ -184,10 +184,10 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             if other.xregs.get(l).bits() != w.bits() {
                 continue;
             }
-            let differs = match ext_reg(l).0 {
-                TOK_VAL | BOX_VAL | GLUE_VAL | MU_VAL => differs_at(l),
-                _ => false,
-            };
+            let kind = ext_reg(l).0;
+            let differs =
+                crate::xregs::is_toks_kind(kind) || matches!(kind, BOX_VAL | GLUE_VAL | MU_VAL);
+            let differs = differs && differs_at(l);
             if differs {
                 out.push(Cell::Eqtb(l));
             }
@@ -372,7 +372,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                 let mut o = self.xregs.obj(p).cloned();
                 if is_word_kind(kind) {
                     w.set_int(w.int() ^ 1);
-                } else if kind == TOK_VAL && o.is_some() {
+                } else if crate::xregs::is_toks_kind(kind) && o.is_some() {
                     w.set_b0(UNDEFINED_CS);
                     o = None;
                 } else if w.b0() == BOX_REF && o.is_some() {

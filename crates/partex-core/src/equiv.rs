@@ -795,6 +795,9 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             THIN_MU_SKIP_CODE => b"thinmuskip",
             MED_MU_SKIP_CODE => b"medmuskip",
             THICK_MU_SKIP_CODE => b"thickmuskip",
+            XETEX_LINEBREAK_SKIP_CODE if self.params.flavor == crate::params::Flavor::XeTeX => {
+                b"XeTeXlinebreakskip"
+            }
             _ => {
                 self.print_str(b"[unknown glue parameter!]");
                 return;
@@ -974,6 +977,21 @@ pub fn int_param_name(n: i32) -> Option<&'static [u8]> {
         SAVING_HYPH_CODES_CODE => b"savinghyphcodes",
         IGNORE_PRIMITIVE_ERROR_CODE => b"ignoreprimitiveerror",
         TEXXET_STATE_CODE => b"TeXXeTstate",
+        // `XeTeX`'s (codes no other engine uses)
+        SUPPRESS_FONTNOTFOUND_ERROR_CODE => b"suppressfontnotfounderror",
+        XETEX_LINEBREAK_PENALTY_CODE => b"XeTeXlinebreakpenalty",
+        XETEX_PROTRUDE_CHARS_CODE => b"XeTeXprotrudechars",
+        c if c == ETEX_STATE_CODE + XETEX_UPWARDS_CODE => b"XeTeXupwardsmode",
+        c if c == ETEX_STATE_CODE + XETEX_USE_GLYPH_METRICS_CODE => b"XeTeXuseglyphmetrics",
+        c if c == ETEX_STATE_CODE + XETEX_INTER_CHAR_TOKENS_CODE => b"XeTeXinterchartokenstate",
+        c if c == ETEX_STATE_CODE + XETEX_DASH_BREAK_CODE => b"XeTeXdashbreakstate",
+        c if c == ETEX_STATE_CODE + XETEX_INPUT_NORMALIZATION_CODE => b"XeTeXinputnormalization",
+        c if c == ETEX_STATE_CODE + XETEX_TRACING_FONTS_CODE => b"XeTeXtracingfonts",
+        c if c == ETEX_STATE_CODE + XETEX_INTERWORD_SPACE_SHAPING_CODE => {
+            b"XeTeXinterwordspaceshaping"
+        }
+        c if c == ETEX_STATE_CODE + XETEX_GENERATE_ACTUAL_TEXT_CODE => b"XeTeXgenerateactualtext",
+        c if c == ETEX_STATE_CODE + XETEX_HYPHENATABLE_LENGTH_CODE => b"XeTeXhyphenatablelength",
         SYNCTEX_CODE => b"synctex",
         _ => return None,
     })

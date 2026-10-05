@@ -393,6 +393,9 @@ pub struct Tex<H: Host, T: Tracker = Untracked> {
     /// §1074: the box (or leader rule) being built.
     pub(crate) cur_box: Option<Node>,
     pub(crate) after_token: i32,
+    /// `XeTeX`'s `prev_class` and `space_class` (`xmain.rs`).
+    pub(crate) prev_class: i32,
+    pub(crate) space_class: i32,
     /// Memoized macro calls (`memo.rs`).
     pub(crate) memo: crate::memo::Memo,
     /// Control sequence names by a hash of their text, to their location
@@ -807,6 +810,8 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             max_reg_help_line: b"A register number must be between 0 and 255.",
             cur_box: None,
             after_token: 0,
+            prev_class: 0,
+            space_class: 0,
             memo: crate::memo::Memo::new(p.memo),
             cs_cache: crate::hash::CsCache::default(),
             hash_memo: crate::hashmemo::HashMemo::default(),
