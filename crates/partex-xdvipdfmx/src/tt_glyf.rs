@@ -584,3 +584,157 @@ mod tests {
         assert_eq!(g.max_glyphs, 256);
     }
 }
+
+/// Subsets of a TeX Live font against xdvipdfmx's own code (a C harness
+/// over sfnt.c, tt_table.c, tt_glyf.c): `PARTEX_XPDF_DUMP=dir` writes the
+/// FontFile2 bytes and the glyph metrics for comparison.
+#[cfg(test)]
+mod font_tests {
+    extern crate std;
+
+    use super::*;
+    use crate::ctx::{Dpx, DpxConf};
+    use crate::io::{Files, Format};
+    use crate::obj::PdfOut;
+    use alloc::sync::Arc;
+    use core::fmt::Write as _;
+
+    struct NoFiles;
+    impl Files for NoFiles {
+        fn find(&mut self, _: &[u8], _: Format, _: &[u8]) -> Option<Vec<u8>> {
+            None
+        }
+        fn read(&mut self, _: &[u8]) -> Option<Arc<[u8]>> {
+            None
+        }
+    }
+
+    pub(crate) fn test_dpx() -> Dpx {
+        Dpx {
+            o: PdfOut::new(Box::new(|_, d: &[u8]| d.to_vec())),
+            files: Box::new(NoFiles),
+            conf: DpxConf::default(),
+            dvi_filename: None,
+            pdf_filename: None,
+            dvi: Default::default(),
+            dev: Default::default(),
+            doc: Default::default(),
+            draw: Default::default(),
+            color: Default::default(),
+            resource: Default::default(),
+            font: Default::default(),
+            fontmap: Default::default(),
+            tfm: Default::default(),
+            vf: Default::default(),
+            agl: Default::default(),
+            encoding: Default::default(),
+            cmap: Default::default(),
+            cid: Default::default(),
+            ximage: Default::default(),
+            spc: Default::default(),
+            pdfm: Default::default(),
+            xtx: Default::default(),
+            misc: Default::default(),
+            html: Default::default(),
+            t1_char: Default::default(),
+            cs_type2: Default::default(),
+            session: Default::default(),
+        }
+    }
+
+    /// The FontFile2 of `gids` (`identity`: new gid = gid, as cidtype2;
+    /// else 1, 2, …, as truetype), its Length1 and a metrics dump.
+    fn subset(path: &str, identity: bool, gids: &[u16]) -> Option<(Vec<u8>, String)> {
+        let data = std::fs::read(path).ok()?;
+        let mut sfont = Sfnt::sfnt_open(MemFile::new(Arc::from(data), path.as_bytes()))?;
+        sfont.sfnt_read_table_directory(0);
+        let mut g = TtGlyphs::tt_build_init();
+        for (i, &gid) in gids.iter().enumerate() {
+            g.tt_add_glyph(gid, if identity { gid } else { i as u16 + 1 });
+        }
+        sfont.tt_build_tables(&mut g);
+        let mut dump = String::new();
+        let _ = writeln!(
+            dump,
+            "num_glyphs {} last_gid {} dw {} emsize {} advh {} tsb {}",
+            g.num_glyphs, g.last_gid, g.dw, g.emsize, g.default_advh, g.default_tsb
+        );
+        for d in &g.gd {
+            let _ = writeln!(
+                dump,
+                "gd {} {} {} {} {} {}",
+                d.gid, d.ogid, d.advw, d.lsb, d.tsb, d.ury
+            );
+        }
+        for (tag, must) in crate::cidtype2::REQUIRED_TABLE {
+            sfont.sfnt_require_table(*tag, i32::from(*must));
+        }
+        let mut dpx = test_dpx();
+        let s = dpx.sfnt_create_FontFile_stream(&mut sfont)?;
+        let dict = dpx.o.stream_dict(s);
+        let l1 = dpx.o.lookup_dict(dict, b"Length1").unwrap();
+        let _ = writeln!(dump, "/Length1 {}", dpx.o.number_value(l1));
+        Some((dpx.o.stream_data(s).to_vec(), dump))
+    }
+
+    const DEJAVU: &str = "/usr/share/texmf-dist/fonts/truetype/public/dejavu/DejaVuSans.ttf";
+
+    /// The md5 of the DejaVuSans.ttf the hashes below were made from.
+    const DEJAVU_MD5: &str = "b0e31de57cd5307954a3c54136ce68ae";
+
+    /// The md5 of what the C code writes for each case.
+    const C_MD5: [(&str, &str); 3] = [
+        ("dejavu-id", "939eac881233a8a258ce5abb7ce2de8b"),
+        ("dejavu-seq", "c4fe04cef1832ca3a0e422e506236940"),
+        ("dejavu-big", "49f5c9fe1006d21e1bd5bb45d7384766"),
+    ];
+
+    fn hex(d: &[u8]) -> String {
+        let mut s = String::new();
+        for b in d {
+            let _ = write!(s, "{b:02x}");
+        }
+        s
+    }
+
+    fn cases() -> Vec<(&'static str, &'static str, bool, Vec<u16>)> {
+        let some: Vec<u16> = vec![
+            3, 36, 37, 38, 68, 69, 70, 100, 101, 150, 151, 152, 200, 201, 202, 500, 600, 1000,
+        ];
+        vec![
+            ("dejavu-id", DEJAVU, true, some.clone()),
+            ("dejavu-seq", DEJAVU, false, some),
+            ("dejavu-big", DEJAVU, true, (1..3000).collect()),
+        ]
+    }
+
+    #[test]
+    fn subsets() {
+        let dir = std::env::var("PARTEX_XPDF_DUMP").ok();
+        for (name, path, identity, gids) in cases() {
+            let Some((bytes, dump)) = subset(path, identity, &gids) else {
+                continue;
+            };
+            assert_eq!(&bytes[..4], &[0, 1, 0, 0]);
+            let font = std::fs::read(path).unwrap();
+            if hex(&partex_engine::md5::md5(&font)) == DEJAVU_MD5 {
+                let want = C_MD5.iter().find(|c| c.0 == name).unwrap().1;
+                assert_eq!(hex(&partex_engine::md5::md5(&bytes)), want, "{name}");
+            }
+            if let Some(dir) = dir.as_deref() {
+                std::fs::write(std::format!("{dir}/{name}.bin"), &bytes).unwrap();
+                std::fs::write(std::format!("{dir}/{name}.txt"), dump).unwrap();
+                let args: Vec<String> = gids.iter().map(|g| std::format!("{g}")).collect();
+                std::fs::write(
+                    std::format!("{dir}/{name}.args"),
+                    std::format!(
+                        "{path} {} {}",
+                        if identity { "i" } else { "s" },
+                        args.join(" ")
+                    ),
+                )
+                .unwrap();
+            }
+        }
+    }
+}
