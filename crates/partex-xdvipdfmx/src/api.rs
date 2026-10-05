@@ -462,3 +462,12 @@ impl Session {
         self.page_no
     }
 }
+
+impl Session {
+    /// The bytes written and not yet returned: after a call that stopped
+    /// on an error (`error!` panics), what xdvipdfmx would have left in
+    /// its output file when `ERROR` exited.
+    pub fn take_output(&mut self) -> Vec<u8> {
+        self.dpx.o.take_output()
+    }
+}

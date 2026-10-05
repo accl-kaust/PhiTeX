@@ -15,7 +15,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::process::Command;
 use std::sync::Arc;
 
-use partex_xdvipdfmx::api::{Options, Session};
+use partex_xdvipdfmx::api::{Options, Session, split_xdv};
 use partex_xdvipdfmx::io::{Files, Format};
 
 #[link(name = "z")]
@@ -50,10 +50,13 @@ fn deflate(level: i32, data: &[u8]) -> Vec<u8> {
     }
 }
 
+/// A lookup: the name, the format, the program name.
+type Query = (Vec<u8>, Format, Vec<u8>);
+
 /// kpathsea, through `kpsewhich`, its answers cached.
 #[derive(Default)]
 struct Kpsewhich {
-    found: HashMap<(Vec<u8>, Format, Vec<u8>), Option<Vec<u8>>>,
+    found: HashMap<Query, Option<Vec<u8>>>,
 }
 
 fn format_name(format: Format) -> &'static str {
@@ -130,11 +133,31 @@ fn main() {
             .and_then(|s| s.trim().parse().ok()),
         ..Options::default()
     };
-    let out = Session::convert(
-        options,
-        Box::new(Kpsewhich::default()),
-        Box::new(deflate),
-        &xdv,
-    );
-    std::io::stdout().write_all(&out).expect("stdout");
+    // Page by page, as xdvipdfmx writes: when it stops on an error
+    // (`ERROR` exits; here a panic), its output file keeps what was
+    // written until then, and so does stdout here.
+    let mut stdout = std::io::stdout();
+    let (pre, pages) = split_xdv(&xdv);
+    let mut session = None;
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        session = Some(Session::new(
+            options,
+            Box::new(Kpsewhich::default()),
+            Box::new(deflate),
+            &xdv[..pre],
+        ));
+        let s = session.as_mut().expect("session");
+        for &(a, b) in &pages {
+            let out = s.page(&xdv[a..b]);
+            stdout.write_all(&out.pdf).expect("stdout");
+        }
+        let s = session.take().expect("session");
+        stdout.write_all(&s.finish()).expect("stdout");
+    }));
+    if result.is_err() {
+        if let Some(s) = session.as_mut() {
+            stdout.write_all(&s.take_output()).expect("stdout");
+        }
+        std::process::exit(1);
+    }
 }

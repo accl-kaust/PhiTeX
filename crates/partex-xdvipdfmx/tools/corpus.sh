@@ -62,8 +62,9 @@ check() {
     d="$(dirname "$f")"; n="$(basename "$f" .xdv)"
     [ -s "$d/$n.pdf" ] || continue
     all=$((all + 1))
-    if (cd "$d" && timeout 120 "$bin" -o "$n.pdf" "$n.xdv" > "$n.out.pdf" 2> "$n.err") \
-        && cmp -s "$d/$n.pdf" "$d/$n.out.pdf"; then
+    # (an XDV xdvipdfmx stops on leaves what it wrote: compared too)
+    (cd "$d" && timeout 120 "$bin" -o "$n.pdf" "$n.xdv" > "$n.out.pdf" 2> "$n.err")
+    if cmp -s "$d/$n.pdf" "$d/$n.out.pdf"; then
       ok=$((ok + 1)); rm -f "$d/$n.err"
     else
       echo "${f#"$out"/}" >> "$out/FAIL.txt"

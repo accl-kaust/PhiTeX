@@ -1255,36 +1255,7 @@ pub(crate) mod tests {
 
     /// A `Dpx` with no files, every state at its default.
     pub(crate) fn dpx() -> Dpx {
-        Dpx {
-            o: PdfOut::new(Box::new(|_, d: &[u8]| d.to_vec())),
-            files: Box::new(NoFiles),
-            conf: Default::default(),
-            dvi_filename: None,
-            pdf_filename: None,
-            dvi: Default::default(),
-            dev: Default::default(),
-            doc: Default::default(),
-            draw: Default::default(),
-            color: Default::default(),
-            resource: Default::default(),
-            font: Default::default(),
-            fontmap: Default::default(),
-            tfm: Default::default(),
-            vf: Default::default(),
-            agl: Default::default(),
-            encoding: Default::default(),
-            cmap: Default::default(),
-            cid: Default::default(),
-            ximage: Default::default(),
-            spc: Default::default(),
-            pdfm: Default::default(),
-            xtx: Default::default(),
-            misc: Default::default(),
-            html: Default::default(),
-            t1_char: Default::default(),
-            cs_type2: Default::default(),
-            session: Default::default(),
-        }
+        Dpx::new(Box::new(NoFiles), Box::new(|_, d: &[u8]| d.to_vec()))
     }
 
     #[test]

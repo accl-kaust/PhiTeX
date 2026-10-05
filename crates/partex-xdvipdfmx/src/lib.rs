@@ -4,8 +4,8 @@
 //! `no_std` + `alloc`: files come through [`Files`], compression through
 //! the caller's deflater.
 
-// Skeleton pass: bodies are todo!() for now.
-#![allow(unused, dead_code, clippy::all, clippy::pedantic)]
+// The C names are kept (non_snake_case among them); lints to be tightened.
+#![allow(unused, dead_code, non_snake_case, clippy::all, clippy::pedantic)]
 #![no_std]
 #![allow(
     clippy::cast_possible_truncation,
