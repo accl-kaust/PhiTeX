@@ -14,6 +14,9 @@ use crate::dvithread::DviThread;
 
 pub struct NativeHost {
     files: HashMap<WriteId, File>,
+    /// `XeTeX`'s PDF files being written: the XDV piped to xdvipdfmx,
+    /// which makes the PDF when the file is closed (`FileKind::XdvPipe`).
+    pipes: HashMap<WriteId, Vec<u8>>,
     next_id: u32,
     /// The file each handle was given for, and the count of opens
     /// (`opens`) at its last open: a step that runs again opens a file on
@@ -204,6 +207,7 @@ impl NativeHost {
     pub fn new(clock: crate::clock::Clock, kpse: partex_kpse::Kpse) -> Self {
         Self {
             files: HashMap::new(),
+            pipes: HashMap::new(),
             next_id: 0,
             given: HashMap::new(),
             opens: 0,
@@ -833,12 +837,16 @@ impl Host for NativeHost {
             seen.racy.remove(&n);
             seen.again.clear();
         }
-        let file = File::create(path(&n)).ok()?;
         let id = WriteId(self.next_id);
+        if kind == FileKind::XdvPipe {
+            // (xdvipdfmx writes the file, at the end)
+            self.pipes.insert(id, Vec::new());
+        } else {
+            self.files.insert(id, File::create(path(&n)).ok()?);
+        }
         self.next_id += 1;
         self.opens += 1;
         self.given.insert(id, (n.clone(), self.opens));
-        self.files.insert(id, file);
         Some((id, n))
     }
 
@@ -857,10 +865,13 @@ impl Host for NativeHost {
             seen.racy.remove(&n);
             seen.again.clear();
         }
-        let file = File::create(path(&n)).ok()?;
+        if kind == FileKind::XdvPipe {
+            self.pipes.insert(id, Vec::new());
+        } else {
+            self.files.insert(id, File::create(path(&n)).ok()?);
+        }
         self.opens += 1;
         *at = self.opens;
-        self.files.insert(id, file);
         Some((id, n))
     }
 
@@ -905,7 +916,9 @@ impl Host for NativeHost {
     }
 
     fn write(&mut self, file: WriteId, bytes: &[u8]) {
-        if let Some(f) = self.files.get_mut(&file) {
+        if let Some(xdv) = self.pipes.get_mut(&file) {
+            xdv.extend_from_slice(bytes);
+        } else if let Some(f) = self.files.get_mut(&file) {
             // TeX has no way to report write errors; neither do we.
             let _ = f.write_all(bytes);
         }
@@ -913,6 +926,13 @@ impl Host for NativeHost {
 
     fn close(&mut self, file: WriteId) {
         self.files.remove(&file);
+        if let Some(xdv) = self.pipes.remove(&file)
+            && let Some((name, _)) = self.given.get(&file)
+        {
+            // (`xdvipdfmx -q -E -o NAME`: the name as `XeTeX` gives it)
+            let pdf = crate::dpxfiles::xdv_to_pdf(&xdv, name);
+            let _ = std::fs::write(path(name), pdf);
+        }
     }
 
     fn term_write(&mut self, bytes: &[u8]) {

@@ -9,7 +9,6 @@ mod config;
 #[cfg(feature = "deps")]
 mod deps;
 mod display;
-#[allow(dead_code, reason = "for the native host's XDV pipe, not wired yet")]
 mod dpxfiles;
 mod dvithread;
 mod eventlog;
