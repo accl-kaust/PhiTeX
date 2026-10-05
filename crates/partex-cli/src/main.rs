@@ -12,6 +12,7 @@ mod display;
 mod dvithread;
 mod eventlog;
 mod events;
+mod heap;
 mod inotify;
 mod intervals;
 mod live;
@@ -35,6 +36,10 @@ mod timeline;
 mod tokendeps;
 mod warnings;
 mod zlib;
+
+#[cfg(all(feature = "jemalloc", not(target_family = "wasm")))]
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 use partex_core::{Flavor, Params, PdftexBugs, Tex, Untracked};
 
@@ -1228,6 +1233,9 @@ fn run_ssa(mut host: native::NativeHost, params: Params, command_line: &[u8]) ->
     if std::env::var("PARTEX_SSA_RERUN_CHECK").is_ok_and(|v| v == "1") && !rerun_check(&mut tex) {
         return 3;
     }
+    // (the collector freed much of the heap while the build ran: sorted
+    // and given back now, not at the first keystrokes' allocations)
+    heap::trim();
     if std::env::var_os("PARTEX_SSA_MEM").is_some() {
         eprintln!("partex: ssa build 0: settled: {}", machinehost::rss());
     }

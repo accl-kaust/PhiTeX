@@ -1226,9 +1226,15 @@ per step and the steps' boundaries known:
 
   A kept record is still verified before use, so no policy can make a
   hit wrong. Today it collects inline, keeping the last three builds'
-  roots, when the arena has doubled (not more often: a collection in
-  the middle of a build leaves the heap full of holes, and every later
-  allocation, the link's first, pays for them). A lean record (a step's, never looked up) is kept only while
+  roots, when the arena has doubled, and when a cascade goes cold, right
+  after it retired the old steps after it (the rest of the job, run as a
+  cold build, makes their records again). Not more often: a collection
+  in the middle of a build leaves the heap full of holes among live
+  data, and every later allocation pays for them. The records' writes
+  live in chunks (`Writes`), a collection copying the kept ones into new
+  chunks and freeing the old ones whole; the native CLI has the C
+  library sort and return its free memory once the build settles
+  (`malloc_trim`). A lean record (a step's, never looked up) is kept only while
   a live step of the fold holds it: a kept build's roots keep its
   children, which a later call may hit, not it. Planned: on its own
   thread.
@@ -1574,7 +1580,10 @@ from one clean point to the next.
   the gap from the next one's for the first new step after a step run
   again, from its own predecessor's for the later ones of the run. A
   removed step's index entries go with it.
-- A step keeps its records, and the slots it read from outside it.
+- A step keeps its records, and the slots it read from outside it, each
+  as a slot id: the fold numbers each slot read once (`Fold::slot`), and
+  a slot's readers are kept by its id. A removed step's reads and
+  records go at the end of the rebuild that passed over it.
 - Each slot keeps its definitions in key order, each naming the step
   and the run that made it, and each with its readers. A step run again
   bumps its run, so its old entries are dead in place.

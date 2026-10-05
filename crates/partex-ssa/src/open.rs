@@ -740,7 +740,7 @@ impl<M: Machine> Runtime<M> {
                 }
                 Item::Call(c) => {
                     self.walk(store, *c, inside, verified)?;
-                    for (a, _) in &self.record(*c).writes {
+                    for (a, _) in self.writes(*c) {
                         inside.entry_by(hash64(a), |k| k.0 == *a, || ByHash(a.clone()), ());
                     }
                 }
@@ -781,14 +781,16 @@ impl<M: Machine> Runtime<M> {
         for a in loaded {
             self.note_loaded(&a);
         }
-        let Runtime { recs, open, .. } = self;
+        let Runtime { recs, wa, open, .. } = self;
         // (its reads from outside it are the open step's, before its
         // writes make their slots the step's own)
         if open.step.is_some() {
-            outside_reads(recs, id, &mut Table::new(), &mut |l| open.note_step_read(l));
+            outside_reads(recs, wa, id, &mut Table::new(), &mut |l| {
+                open.note_step_read(l);
+            });
         }
         let rec = recs[id as usize].as_ref().expect("a live record");
-        for (a, v) in &rec.writes {
+        for (a, v) in wa.get(rec.w) {
             store.set(a, v.clone());
             open.note_write_by(a, false);
         }
@@ -996,7 +998,7 @@ impl<M: Machine> Runtime<M> {
             args,
             result,
             reads: reads.into_iter().map(|e| (e.loc, e.ver)).collect(),
-            writes,
+            w: crate::runtime::WSpan::default(),
             items,
             cost: cost + own,
             own,
@@ -1005,7 +1007,7 @@ impl<M: Machine> Runtime<M> {
         let total = rec.cost;
         self.stats.cost_rerun += own;
         let live = self.live_records();
-        let id = self.intern(rec, rh.finish128());
+        let id = self.intern(rec, writes, rh.finish128());
         // (a frame that kept no reads: its record is never looked up)
         self.note_lean(id, self.live_records() > live, !keep);
         if self.open.frames.len() == 1 && self.open.step.is_some() {
@@ -1142,7 +1144,10 @@ impl<M: Machine> Runtime<M> {
             self.step_times[i] = Some(times);
         }
         let Runtime {
-            recs: arena, fold, ..
+            recs: arena,
+            wa,
+            fold,
+            ..
         } = self;
         fold.close(
             id,
@@ -1151,7 +1156,7 @@ impl<M: Machine> Runtime<M> {
             |r| {
                 arena[r as usize]
                     .as_ref()
-                    .map(|r| r.writes.iter().map(|w| w.0.clone()).collect())
+                    .map(|r| wa.get(r.w).iter().map(|w| w.0.clone()).collect())
                     .unwrap_or_default()
             },
             &[],
@@ -1167,7 +1172,10 @@ impl<M: Machine> Runtime<M> {
         self.open.step_read_at.clear();
         self.open.step_wrote_at = Table::new();
         let Runtime {
-            recs: arena, fold, ..
+            recs: arena,
+            wa,
+            fold,
+            ..
         } = self;
         fold.close(
             id,
@@ -1176,7 +1184,7 @@ impl<M: Machine> Runtime<M> {
             |r| {
                 arena[r as usize]
                     .as_ref()
-                    .map(|r| r.writes.iter().map(|w| w.0.clone()).collect())
+                    .map(|r| wa.get(r.w).iter().map(|w| w.0.clone()).collect())
                     .unwrap_or_default()
             },
             skip,
@@ -1345,6 +1353,7 @@ impl<M: Machine> Runtime<M> {
 /// [`Runtime::walk`]'s, given to `f` (`inside` as there).
 fn outside_reads<M: Machine>(
     recs: &[Option<Record<M>>],
+    wa: &crate::runtime::Writes<M>,
     id: RecId,
     inside: &mut Table<ByHash<M::Addr>, ()>,
     f: &mut impl FnMut(&Loc<M::Addr>),
@@ -1362,9 +1371,9 @@ fn outside_reads<M: Machine>(
                 inside.entry_by(hash64(a), |k| k.0 == *a, || ByHash(a.clone()), ());
             }
             Item::Call(c) => {
-                outside_reads(recs, *c, inside, f);
+                outside_reads(recs, wa, *c, inside, f);
                 let c = recs[*c as usize].as_ref().expect("a live record");
-                for (a, _) in &c.writes {
+                for (a, _) in wa.get(c.w) {
                     inside.entry_by(hash64(a), |k| k.0 == *a, || ByHash(a.clone()), ());
                 }
             }

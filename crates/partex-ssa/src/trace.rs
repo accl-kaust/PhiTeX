@@ -220,8 +220,8 @@ impl<M: Machine> Runtime<M> {
             name: r.name,
             status,
             reads: r.reads.iter().map(|(l, v)| (mk.loc(l), *v)).collect(),
-            writes: r
-                .writes
+            writes: self
+                .writes_of(r)
                 .iter()
                 .map(|(a, v)| ((mk.name)(a), version_opt(v.as_ref())))
                 .collect(),

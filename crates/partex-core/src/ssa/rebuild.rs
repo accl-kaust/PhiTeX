@@ -1653,8 +1653,7 @@ fn nest_whole<H: Host>(tex: &Tex<H, SsaTracker>, key: u64, next: &mut Vec<Slot>)
     let placed = later(fold, &nest, key);
     let depth = if placed {
         fold.reaching(&nest, key).map_or(0, |d| {
-            r.rt.record(d.rec)
-                .writes
+            r.rt.writes(d.rec)
                 .get(d.ix as usize)
                 .and_then(|(_, v)| nest_depth(v.as_ref()?))
                 .unwrap_or(tex.max_nest_stack + 1)
@@ -1859,7 +1858,7 @@ fn recs_writes(
 ) -> BTreeMap<Slot, Version> {
     let mut d = BTreeMap::new();
     for &r in recs {
-        for (a, v) in &rt.record(r).writes {
+        for (a, v) in rt.writes(r) {
             d.insert(*a, v.as_ref().map_or(Version::ABSENT, |v| v.0));
         }
     }
@@ -1873,7 +1872,7 @@ fn defs(rt: &partex_ssa::Runtime<TexSsa>, s: partex_ssa::fold::StepId) -> BTreeM
         return d;
     };
     for &r in &step.recs {
-        for (a, v) in &rt.record(r).writes {
+        for (a, v) in rt.writes(r) {
             // (a slot the step left as it found it is not its definition)
             if rt.fold.defines(a, s) {
                 d.insert(*a, v.as_ref().map_or(Version::ABSENT, |v| v.0));
@@ -1896,7 +1895,7 @@ fn glyph_union_now(rr: &mut Recorder) -> Option<u128> {
         let Some(d) = rt.fold.latest(&Slot(Fam::Glyphs, i64::try_from(n).ok()?)) else {
             return Some(None);
         };
-        let (_, v) = rt.record(d.rec).writes.get(d.ix as usize)?;
+        let (_, v) = rt.writes(d.rec).get(d.ix as usize)?;
         let super::SValue::Field(f) = &**v.as_ref()?.1.as_ref()? else {
             return None;
         };
@@ -2029,7 +2028,7 @@ impl GlyphCount {
 /// `key` defines it, and its version, the format's, is not kept).
 pub(super) fn reaching_version(rr: &Recorder, a: &Slot, key: u64) -> Option<Version> {
     let d = rr.rt.fold.reaching(a, key)?;
-    let (_, v) = rr.rt.record(d.rec).writes.get(d.ix as usize)?;
+    let (_, v) = rr.rt.writes(d.rec).get(d.ix as usize)?;
     Some(v.as_ref().map_or(Version::ABSENT, |v| v.0))
 }
 
@@ -2055,7 +2054,7 @@ fn value_of<H: Host>(
     rep: &mut RebuildReport,
 ) -> Option<SVal> {
     if let Some(d) = d {
-        rr.rt.record(d.rec).writes.get(d.ix as usize)?.1.clone()
+        rr.rt.writes(d.rec).get(d.ix as usize)?.1.clone()
     } else {
         rep.initial += 1;
         initial(tex, &mut rr.st.steps, a)
@@ -2073,7 +2072,7 @@ fn latest<H: Host>(
 ) -> Option<SVal> {
     match rr.rt.fold.latest(&a) {
         Some(d) if d.step == j => None,
-        Some(d) => rr.rt.record(d.rec).writes.get(d.ix as usize)?.1.clone(),
+        Some(d) => rr.rt.writes(d.rec).get(d.ix as usize)?.1.clone(),
         None => {
             rep.initial += 1;
             initial(tex, &mut rr.st.steps, a)
@@ -3655,6 +3654,9 @@ fn go_cold<H: Host>(
     for &s in rest.iter().rev() {
         retire(tex, s, dirty, rep);
     }
+    // (the retired steps' records go now: the rest of the job, run as a
+    // cold build, makes new ones in their place)
+    tex.tracker.rec.borrow_mut().rt.collect_retired();
     rep.cold += 1;
 }
 
@@ -3821,13 +3823,13 @@ fn run_step<H: Host>(
             fold.steps[p as usize]
                 .recs
                 .iter()
-                .flat_map(|&q| r.rt.record(q).writes.iter().map(|(a, _)| a))
+                .flat_map(|&q| r.rt.writes(q).iter().map(|(a, _)| a))
                 .filter(|a| predicts_alone(a))
         });
         let mut cand: Vec<Slot> = if alone {
             predict
                 .iter()
-                .flat_map(|&p| &fold.steps[p as usize].reads)
+                .flat_map(|&p| fold.reads_of(p))
                 .chain(&dirty.missed)
                 .filter(|a| a.0 == Fam::PageNode)
                 .copied()
@@ -3835,7 +3837,7 @@ fn run_step<H: Host>(
         } else {
             predict
                 .iter()
-                .flat_map(|&p| &fold.steps[p as usize].reads)
+                .flat_map(|&p| fold.reads_of(p))
                 .chain(&dirty.missed)
                 .chain(written)
                 .filter(|a| checked(a))
