@@ -6,6 +6,8 @@
 //! The `dpx_conf.verbose_level` MESGs are dropped, so `OtlGsub` methods
 //! need no `Dpx`. In/out gids stay `&mut USHORT`.
 
+#![allow(non_snake_case)]
+
 use core::cmp::Ordering;
 
 use crate::cmap::CMap;

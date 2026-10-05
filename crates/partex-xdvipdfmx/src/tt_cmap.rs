@@ -5,6 +5,8 @@
 //! `CMap_cache_add`; cached ones (`cmap_add`, the `-UCS32-Add` CMap) are
 //! named by their id (`i32`) in the CMap cache.
 
+#![allow(non_snake_case)]
+
 use crate::cff::{CffFont, FONTTYPE_CIDFONT};
 use crate::cid::CSI_UNICODE;
 use crate::cmap::CMap;

@@ -9,6 +9,8 @@
 //! A CFF in an OpenType file is read from `sfont.stream.clone()` (shares
 //! the bytes).
 
+#![allow(non_snake_case)]
+
 use crate::prelude::*;
 
 pub type BYTE = u8;

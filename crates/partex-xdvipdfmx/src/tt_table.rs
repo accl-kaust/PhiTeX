@@ -5,6 +5,8 @@
 //! `NEW`ed pointer; `tt_read_VORG_table`'s NULL is `None`). Packers are
 //! methods of the table returning the packed bytes.
 
+#![allow(non_snake_case)]
+
 use crate::prelude::*;
 use crate::sfnt::{
     BYTE, CHAR, FWord, Fixed, SHORT, Sfnt, UFWord, ULONG, USHORT, sfnt_put_short, sfnt_put_ulong,
