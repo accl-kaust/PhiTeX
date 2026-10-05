@@ -326,3 +326,24 @@ pub fn pow10(k: i32) -> f64 {
         .and_then(|t| t.parse::<f64>().ok())
         .unwrap_or(0.0)
 }
+
+impl Buf {
+    /// `%0Nx`: `v` in lowercase hex, zero-padded to `width`.
+    pub fn hex_padded(&mut self, v: u32, width: usize) {
+        let mut digits = Vec::new();
+        let mut v = v;
+        loop {
+            let d = (v & 0xf) as u8;
+            digits.push(if d < 10 { b'0' + d } else { b'a' + d - 10 });
+            v >>= 4;
+            if v == 0 {
+                break;
+            }
+        }
+        for _ in digits.len()..width {
+            self.push(b'0');
+        }
+        digits.reverse();
+        self.extend(&digits);
+    }
+}

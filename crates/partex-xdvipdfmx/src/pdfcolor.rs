@@ -418,11 +418,11 @@ impl Dpx {
         todo!()
     }
     /// `pdf_color_push`.
-    pub fn pdf_color_push(&mut self, sc: &PdfColor, fc: &PdfColor, source: i32) {
+    pub fn pdf_color_push(&mut self, sc: &PdfColor, fc: &PdfColor) {
         todo!()
     }
     /// `pdf_color_pop`.
-    pub fn pdf_color_pop(&mut self, source: i32) {
+    pub fn pdf_color_pop(&mut self) {
         todo!()
     }
     /// `pdf_color_get_current`: copies of (stroke, fill).
