@@ -823,7 +823,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
 #[cfg(test)]
 mod tests {
     use crate::testing::{engine, term_output};
-    use crate::web::{CS_TOKEN_FLAG, END_MATCH, LETTER, MATCH, OUT_PARAM};
+    use crate::web::{CS_TOKEN_FLAG, END_MATCH, LETTER, MATCH, MAX_CHAR_VAL, OUT_PARAM};
 
     /// Oracle: `\message{[\meaning\hskip][\meaning\over]...}` in INITEX and
     /// `\def\a#1#2{x#1y#2}\message{[\meaning\a]}`.
