@@ -237,76 +237,403 @@ impl<T> DpxStack<T> {
     }
 }
 
-/// `min4`.
-#[must_use]
-pub fn min4(v1: f64, v2: f64, v3: f64, v4: f64) -> f64 {
-    todo!()
-}
-
-/// `max4`.
-#[must_use]
-pub fn max4(v1: f64, v2: f64, v3: f64, v4: f64) -> f64 {
-    todo!()
-}
-
-/// `skip_white_spaces`: advances `*p` over spaces (the end of `s` is
-/// C's `endptr`, as for every `(pp, endptr)` parser).
-pub fn skip_white_spaces(s: &[u8], p: &mut usize) {
-    todo!()
-}
-
-/// `xtoi`: a hex digit's value, or -1.
+/// `xtoi` (dpxutil.c's).
 #[must_use]
 pub fn xtoi(c: u8) -> i32 {
-    todo!()
+    match c {
+        b'0'..=b'9' => i32::from(c - b'0'),
+        b'a'..=b'f' => i32::from(c) - i32::from(b'W'),
+        b'A'..=b'F' => i32::from(c) - i32::from(b'7'),
+        _ => -1,
+    }
 }
 
-/// `skip_white` (static).
-fn skip_white(s: &[u8], pp: &mut usize) {
-    todo!()
+#[must_use]
+pub fn min4(x1: f64, x2: f64, x3: f64, x4: f64) -> f64 {
+    let mut v = x1;
+    if x2 < v {
+        v = x2;
+    }
+    if x3 < v {
+        v = x3;
+    }
+    if x4 < v {
+        v = x4;
+    }
+    v
 }
 
-/// `read_c_escchar` (static): the bytes written to `r` (C's count; `r`
-/// may be none to only count).
-fn read_c_escchar(r: Option<&mut Vec<u8>>, s: &[u8], pp: &mut usize) -> i32 {
-    todo!()
+#[must_use]
+pub fn max4(x1: f64, x2: f64, x3: f64, x4: f64) -> f64 {
+    let mut v = x1;
+    if x2 > v {
+        v = x2;
+    }
+    if x3 > v {
+        v = x3;
+    }
+    if x4 > v {
+        v = x4;
+    }
+    v
 }
 
-/// `read_c_litstrc` (static): the length read, or -1 on error; `q`
-/// receives at most `len` bytes when given.
-fn read_c_litstrc(q: Option<&mut Vec<u8>>, len: i32, s: &[u8], pp: &mut usize) -> i32 {
-    todo!()
+fn skip_white(s: &[u8], p: &mut usize) {
+    while *p < s.len() && matches!(s[*p], b' ' | b'\t' | 0x0c | b'\r' | b'\n' | 0) {
+        *p += 1;
+    }
 }
 
-/// `parse_float_decimal`.
-pub fn parse_float_decimal(s: &[u8], pp: &mut usize) -> Option<Vec<u8>> {
-    todo!()
+/// `is_space` (dpxutil.h).
+#[must_use]
+pub fn is_space(c: u8) -> bool {
+    matches!(c, b' ' | b'\t' | 0x0c | b'\r' | b'\n' | 0)
 }
 
-/// `parse_c_string`.
+/// `is_delim` (dpxutil.h): with braces.
+#[must_use]
+pub fn is_delim(c: u8) -> bool {
+    matches!(
+        c,
+        b'(' | b')' | b'/' | b'<' | b'>' | b'[' | b']' | b'{' | b'}' | b'%'
+    )
+}
+
+/// `skip_white_spaces`.
+pub fn skip_white_spaces(s: &[u8], p: &mut usize) {
+    while *p < s.len() && is_space(s[*p]) {
+        *p += 1;
+    }
+}
+
+/// `dpx_util_read_length`: a length with a unit (`true` scales by
+/// `1/mag`), in big points. Returns the status and the value.
+pub fn dpx_util_read_length(mag: f64, s: &[u8], pp: &mut usize) -> (i32, f64) {
+    let mut p = *pp;
+    let Some(q) = parse_float_decimal(s, &mut p) else {
+        *pp = p;
+        return (-1, 0.0);
+    };
+    let v = crate::fmt::atof(&q);
+    let mut u = 1.0f64;
+    let mut error = 0;
+    skip_white(s, &mut p);
+    if let Some(q0) = parse_c_ident(s, &mut p) {
+        let mut q: &[u8] = &q0;
+        let owned;
+        if q.len() >= 4 && &q[..4] == b"true" {
+            u /= if mag != 0.0 { mag } else { 1.0 };
+            q = &q[4..];
+        }
+        let mut have = Some(q);
+        if q.is_empty() {
+            skip_white(s, &mut p);
+            owned = parse_c_ident(s, &mut p);
+            have = owned.as_deref();
+        }
+        if let Some(q) = have {
+            match q {
+                b"pt" => u *= 72.0 / 72.27,
+                b"in" => u *= 72.0,
+                b"cm" => u *= 72.0 / 2.54,
+                b"mm" => u *= 72.0 / 25.4,
+                b"bp" => u *= 1.0,
+                b"pc" => u *= 12.0 * 72.0 / 72.27,
+                b"dd" => u *= 1238.0 / 1157.0 * 72.0 / 72.27,
+                b"cc" => u *= 12.0 * 1238.0 / 1157.0 * 72.0 / 72.27,
+                b"sp" => u *= 72.0 / (72.27 * 65536.0),
+                _ => error = -1,
+            }
+        } else {
+            error = -1;
+        }
+    }
+    *pp = p;
+    (error, v * u)
+}
+
+/// `gmtime`: year, month, day, hour, minute, second.
+#[must_use]
+pub fn gmtime(t: i64) -> (i64, i64, i64, i64, i64, i64) {
+    let days = t.div_euclid(86400);
+    let secs = t.rem_euclid(86400);
+    // civil_from_days (Howard Hinnant)
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    (y, m, d, secs / 3600, (secs % 3600) / 60, secs % 60)
+}
+fn read_c_escchar(s: &[u8], pp: &mut usize) -> (i32, u8) {
+    let mut p = *pp;
+    let mut l = 1;
+    let mut c: i32 = 0;
+    let at = |i: usize| s.get(i).copied().unwrap_or(0);
+    match at(p) {
+        b'a' => {
+            c = 7;
+            p += 1;
+        }
+        b'b' => {
+            c = 8;
+            p += 1;
+        }
+        b'f' => {
+            c = 12;
+            p += 1;
+        }
+        b'n' => {
+            c = 10;
+            p += 1;
+        }
+        b'r' => {
+            c = 13;
+            p += 1;
+        }
+        b't' => {
+            c = 9;
+            p += 1;
+        }
+        b'v' => {
+            c = 11;
+            p += 1;
+        }
+        x @ (b'\\' | b'?' | b'\'' | b'"') => {
+            c = i32::from(x);
+            p += 1;
+        }
+        b'\n' => {
+            l = 0;
+            p += 1;
+        }
+        b'\r' => {
+            p += 1;
+            if p < s.len() && s[p] == b'\n' {
+                p += 1;
+            }
+            l = 0;
+        }
+        b'0'..=b'7' => {
+            let mut i = 0;
+            while i < 3 && p < s.len() && (b'0'..=b'7').contains(&s[p]) {
+                c = (c << 3) + i32::from(s[p] - b'0');
+                i += 1;
+                p += 1;
+            }
+        }
+        b'x' => {
+            p += 1;
+            let mut i = 0;
+            while i < 2 && p < s.len() && s[p].is_ascii_hexdigit() {
+                let ch = s[p];
+                let d = if ch.is_ascii_digit() {
+                    ch - b'0'
+                } else if ch.is_ascii_lowercase() {
+                    ch - b'a' + 10
+                } else {
+                    ch - b'A' + 10
+                };
+                c = (c << 4) + i32::from(d);
+                i += 1;
+                p += 1;
+            }
+        }
+        _ => {
+            l = 0;
+            p += 1;
+        }
+    }
+    *pp = p;
+    (l, c as u8)
+}
+
+/// `read_c_litstrc` with no buffer: the length, or a negative status.
+fn read_c_litstrc(s: &[u8], pp: &mut usize, out: Option<&mut Vec<u8>>) -> i32 {
+    let mut p = *pp;
+    let mut l = 0i32;
+    let mut st = -1; // Q_CONT
+    let mut out = out;
+    while st == -1 && p < s.len() {
+        match s[p] {
+            b'"' => {
+                st = 0;
+                p += 1;
+            }
+            b'\\' => {
+                p += 1;
+                let (n, c) = read_c_escchar(s, &mut p);
+                if n > 0
+                    && let Some(o) = out.as_deref_mut()
+                {
+                    o.push(c);
+                }
+                l += n;
+            }
+            b'\n' | b'\r' => st = -2,
+            c => {
+                if let Some(o) = out.as_deref_mut() {
+                    o.push(c);
+                }
+                l += 1;
+                p += 1;
+            }
+        }
+    }
+    *pp = p;
+    if st == 0 { l } else { st }
+}
+
+/// `parse_c_string`: a C string literal after its quote.
 pub fn parse_c_string(s: &[u8], pp: &mut usize) -> Option<Vec<u8>> {
-    todo!()
+    let mut p = *pp;
+    if p >= s.len() || s[p] != b'"' {
+        return None;
+    }
+    p += 1;
+    let mut q = None;
+    let l = read_c_litstrc(s, &mut p, None);
+    if l >= 0 {
+        let mut v = Vec::new();
+        p = *pp + 1;
+        read_c_litstrc(s, &mut p, Some(&mut v));
+        q = Some(v);
+    }
+    *pp = p;
+    q
+}
+
+fn is_c_nondigit(c: u8) -> bool {
+    c == b'_' || c.is_ascii_alphabetic()
 }
 
 /// `parse_c_ident`.
 pub fn parse_c_ident(s: &[u8], pp: &mut usize) -> Option<Vec<u8>> {
-    todo!()
+    let mut p = *pp;
+    if p >= s.len() || !is_c_nondigit(s[p]) {
+        return None;
+    }
+    while p < s.len() && (is_c_nondigit(s[p]) || s[p].is_ascii_digit()) {
+        p += 1;
+    }
+    let q = s[*pp..p].to_vec();
+    *pp = p;
+    Some(q)
 }
 
-/// `dpx_util_read_length`: status (0 ok, -1 error) and the length in
-/// big points (`mag` applied for `true` units).
-pub fn dpx_util_read_length(mag: f64, s: &[u8], pp: &mut usize) -> (i32, f64) {
-    todo!()
+/// `parse_float_decimal`.
+pub fn parse_float_decimal(s: &[u8], pp: &mut usize) -> Option<Vec<u8>> {
+    let mut p = *pp;
+    if p >= s.len() {
+        return None;
+    }
+    if s[p] == b'+' || s[p] == b'-' {
+        p += 1;
+    }
+    let mut st = 0i32;
+    let mut n = 0;
+    while p < s.len() && st >= 0 {
+        match s[p] {
+            b'+' | b'-' => {
+                if st != 2 {
+                    st = -1;
+                } else {
+                    st = 3;
+                    p += 1;
+                }
+            }
+            b'.' => {
+                if st > 0 {
+                    st = -1;
+                } else {
+                    st = 1;
+                    p += 1;
+                }
+            }
+            b'0'..=b'9' => {
+                n += 1;
+                p += 1;
+            }
+            b'E' | b'e' => {
+                if n == 0 || st == 2 {
+                    st = -1;
+                } else {
+                    st = 2;
+                    p += 1;
+                }
+            }
+            _ => st = -1,
+        }
+    }
+    let q = if n != 0 {
+        Some(s[*pp..p].to_vec())
+    } else {
+        None
+    };
+    *pp = p;
+    q
 }
 
 impl Dpx {
-    /// `dpx_util_get_unique_time_if_given`: `SOURCE_DATE_EPOCH` (with
-    /// `FORCE_SOURCE_DATE`), or `INVALID_EPOCH_VALUE`.
+    /// `dpx_util_get_unique_time_if_given`: `SOURCE_DATE_EPOCH` as the
+    /// host gave it (C reads the environment), or `INVALID_EPOCH_VALUE`.
     pub fn dpx_util_get_unique_time_if_given(&mut self) -> i64 {
-        todo!()
+        match self.session.source_date_epoch {
+            Some(e) if e >= 0 => e,
+            _ => INVALID_EPOCH_VALUE,
+        }
     }
-    /// `dpx_util_format_asn_date`: the date string (`D:YYYYMMDDhhmmss…`).
+
+    /// `dpx_util_format_asn_date`: `D:YYYYmmddHHMMSS` and, if asked, the
+    /// zone (`Z`, or `+HH'MM'`). Without `SOURCE_DATE_EPOCH` the time is
+    /// the host's local time (`session.now`, `session.utc_offset_min`).
     pub fn dpx_util_format_asn_date(&mut self, need_timezone: bool) -> Vec<u8> {
-        todo!()
+        let given = self.dpx_util_get_unique_time_if_given();
+        let (t, local) = if given == INVALID_EPOCH_VALUE {
+            (
+                self.session.now,
+                i64::from(self.session.utc_offset_min) * 60,
+            )
+        } else {
+            (given, 0)
+        };
+        let bd = gmtime(t + local);
+        let gmt = gmtime(t);
+        let mut b = crate::fmt::Buf::new();
+        b.extend(b"D:");
+        b.zero_padded(bd.0 as u64, 4);
+        for v in [bd.1, bd.2, bd.3, bd.4, bd.5] {
+            b.zero_padded(v as u64, 2);
+        }
+        // (%S may be 60 or 61 in C; never here.)
+        let mut off = 60 * (bd.3 - gmt.3) + bd.4 - gmt.4;
+        if bd.0 != gmt.0 {
+            off += if bd.0 > gmt.0 { 1440 } else { -1440 };
+        } else if (bd.1, bd.2) != (gmt.1, gmt.2) {
+            off += if (bd.1, bd.2) > (gmt.1, gmt.2) {
+                1440
+            } else {
+                -1440
+            };
+        }
+        if need_timezone {
+            if off == 0 {
+                b.push(b'Z');
+            } else {
+                let h = off / 60;
+                let m = (off - h * 60).abs();
+                b.push(if h < 0 { b'-' } else { b'+' });
+                b.zero_padded(h.unsigned_abs(), 2);
+                b.push(b'\'');
+                b.zero_padded(m as u64, 2);
+                b.push(b'\'');
+            }
+        }
+        b.0
     }
 }

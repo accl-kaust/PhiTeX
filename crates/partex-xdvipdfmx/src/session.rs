@@ -220,6 +220,12 @@ pub struct State {
     /// libpaper's `systempapername()` (`PAPERSIZE`, `/etc/papersize`),
     /// given by the host; none: `DEFAULT_PAPER_NAME`.
     pub system_paper_name: Option<Vec<u8>>,
+    /// `SOURCE_DATE_EPOCH` (C reads the environment).
+    pub source_date_epoch: Option<i64>,
+    /// The time, without `SOURCE_DATE_EPOCH` (C's `time()`), and the
+    /// local zone's offset from UTC in minutes (`localtime`).
+    pub now: i64,
+    pub utc_offset_min: i32,
 }
 
 impl Default for State {
@@ -255,6 +261,9 @@ impl Default for State {
             has_paper_option: 0,
             page_ranges: Vec::new(),
             system_paper_name: None,
+            source_date_epoch: None,
+            now: 0,
+            utc_offset_min: 0,
         }
     }
 }
