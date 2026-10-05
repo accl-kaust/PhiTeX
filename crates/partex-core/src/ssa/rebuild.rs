@@ -867,6 +867,63 @@ pub(crate) struct InputState {
     /// The top file level's entries of the per-file arrays.
     file: FileTop,
     pseudo: Vec<crate::input::PseudoFile>,
+    /// The engine's flags that expansion sets and puts back around a
+    /// scan, as they were where the step stopped.
+    scan: Scanning,
+}
+
+/// The flags tex.web sets for the length of a scan or an error and puts
+/// back after it: `\csname`'s (pdfTeX's `is_in_csname`, which
+/// `\ifincsname` reads), §305's `scanner_status` and `warning_index`,
+/// web2c's `expand_depth_count`, §256's `no_new_control_sequence`, §527's
+/// `name_in_progress`, §96's `OK_to_interrupt`, §76's `deletions_allowed`
+/// and §270's `set_box_allowed`. Not values of the families: the engine
+/// alone reads them, and a step boundary, between two commands of
+/// `main_control`, is never inside a scan, so each holds its resting
+/// value there. A run dropped inside a scan (it read a later definition,
+/// DESIGN 7.17.3) leaves them as the scan had them: the next run of a
+/// step starts from the step's own, as it starts from its input. (A run
+/// dropped inside `\csname` left `is_in_csname` set, and LaTeX's `~`,
+/// `\ifincsname` true, typeset an other `~` in the text after it.)
+#[derive(Clone, Copy)]
+struct Scanning {
+    in_csname: bool,
+    scanner_status: i32,
+    warning_index: i32,
+    expand_depth: i32,
+    no_new_cs: bool,
+    name_in_progress: bool,
+    ok_to_interrupt: bool,
+    deletions_allowed: bool,
+    set_box_allowed: bool,
+}
+
+impl Scanning {
+    fn of<H: Host, T: Tracker>(t: &Tex<H, T>) -> Self {
+        Scanning {
+            in_csname: t.is_in_csname,
+            scanner_status: t.scanner_status,
+            warning_index: t.warning_index,
+            expand_depth: t.expand_depth_count,
+            no_new_cs: t.no_new_control_sequence,
+            name_in_progress: t.name_in_progress,
+            ok_to_interrupt: t.ok_to_interrupt,
+            deletions_allowed: t.deletions_allowed,
+            set_box_allowed: t.set_box_allowed,
+        }
+    }
+
+    fn set<H: Host, T: Tracker>(self, t: &mut Tex<H, T>) {
+        t.is_in_csname = self.in_csname;
+        t.scanner_status = self.scanner_status;
+        t.warning_index = self.warning_index;
+        t.expand_depth_count = self.expand_depth;
+        t.no_new_control_sequence = self.no_new_cs;
+        t.name_in_progress = self.name_in_progress;
+        t.ok_to_interrupt = self.ok_to_interrupt;
+        t.deletions_allowed = self.deletions_allowed;
+        t.set_box_allowed = self.set_box_allowed;
+    }
 }
 
 /// The top file level's entries of the per-file arrays: its file and
@@ -912,6 +969,7 @@ impl InputState {
                 full_name: t.full_source_filename_stack.get(k).copied().unwrap_or(0),
             },
             pseudo: t.pseudo_files.clone(),
+            scan: Scanning::of(t),
         }
     }
 
@@ -948,6 +1006,7 @@ impl InputState {
         t.source_filename_stack[k] = f.name;
         t.full_source_filename_stack[k] = f.full_name;
         t.pseudo_files.clone_from(&self.pseudo);
+        self.scan.set(t);
     }
 
     /// This state in the source after `edits` (DESIGN 3.5: a position
@@ -2586,6 +2645,9 @@ pub fn rebuild<H: Host>(tex: &mut Tex<H, SsaTracker>, trace: bool, apply: bool) 
         // commands, looked at once that passes `COLD_FLOOR`)
         let mut spent = 0u64;
         let mut after: Option<u64> = None;
+        // (where the old steps after it ended, made once a run of the
+        // cascade meets none of the next `LOOK_AHEAD`: `meet_far`)
+        let mut ends: Option<Ends> = None;
         loop {
             let c0 = tex.commands();
             let moved = rep.positioned + rep.restored;
@@ -2636,8 +2698,10 @@ pub fn rebuild<H: Host>(tex: &mut Tex<H, SsaTracker>, trace: bool, apply: bool) 
                 break;
             }
             // (it ended elsewhere: at the end of an old step after it, which
-            // passes over the steps between, or it runs on)
-            if let Some((m, old_end)) = meet(tex, cur, &end) {
+            // passes over the steps between, or it runs on; the next
+            // `LOOK_AHEAD` first, then any)
+            let met = meet(tex, cur, &end).or_else(|| meet_far(tex, cur, &end, &mut ends));
+            if let Some((m, old_end)) = met {
                 let passed = {
                     let r = tex.tracker.rec.borrow();
                     let fold = &r.rt.fold;
@@ -3606,6 +3670,71 @@ fn meet<H: Host>(
     let fold = &r.rt.fold;
     let from = fold.position(cur)? + 1;
     fold.order[from..].iter().take(LOOK_AHEAD).find_map(|&s| {
+        let e = r.st.steps.end(s)?;
+        same_place(tex, end, &e).then_some((s, e))
+    })
+}
+
+/// What [`same_place`] compares first, as a key: the flags, the levels'
+/// counts, the line numbers and the top level's state and index.
+type PlaceKey = (u8, usize, usize, i32, i32, i32, i32, i32);
+
+fn place_key(e: &InputState) -> PlaceKey {
+    let flags = u8::from(e.finished)
+        | u8::from(e.fire) << 1
+        | u8::from(e.ship) << 2
+        | u8::from(e.load) << 3
+        | u8::from(e.page) << 4
+        | u8::from(e.graf) << 5;
+    (
+        flags,
+        e.in_open,
+        e.v.depth,
+        e.line,
+        e.file.line,
+        e.cur.state,
+        e.cur.index,
+        e.cur.start,
+    )
+}
+
+/// The old steps after a cascade's step, by where each ended
+/// ([`place_key`]): [`meet`] past [`LOOK_AHEAD`].
+type Ends = BTreeMap<PlaceKey, Vec<StepId>>;
+
+/// [`meet`] among every old step after `cur`, not only the next
+/// [`LOOK_AHEAD`]: a cascade that ran past them (the text of many old
+/// steps gone, as a chapter `\includeonly` leaves out) meets the old
+/// steps where its run comes back to their text, and passes over the
+/// ones between. `ends` is made at the first call of a cascade, from the
+/// old steps after `cur` then.
+fn meet_far<H: Host>(
+    tex: &Tex<H, SsaTracker>,
+    cur: StepId,
+    end: &InputState,
+    ends: &mut Option<Ends>,
+) -> Option<(StepId, InputState)> {
+    let r = tex.tracker.rec.borrow();
+    let fold = &r.rt.fold;
+    let from = fold.position(cur)? + 1;
+    let ends = ends.get_or_insert_with(|| {
+        let mut m = Ends::new();
+        for &s in &fold.order[from..] {
+            if let Some(e) = r.st.steps.end(s) {
+                m.entry(place_key(&e)).or_default().push(s);
+            }
+        }
+        m
+    });
+    // (the first one in the fold's order, live and after the run)
+    let mut at: Vec<(usize, StepId)> = ends
+        .get(&place_key(end))?
+        .iter()
+        .filter_map(|&s| Some((fold.position(s)?, s)))
+        .filter(|&(p, _)| p >= from)
+        .collect();
+    at.sort_unstable();
+    at.into_iter().find_map(|(_, s)| {
         let e = r.st.steps.end(s)?;
         same_place(tex, end, &e).then_some((s, e))
     })

@@ -562,6 +562,15 @@ because a version it read changed.
     index of the next one to read (`input::PseudoFile`).
   - Token lists are shared already. The files' read positions are an
     `Arc` of the contents plus an offset.
+  - The engine's expansion-scoped flags are part of the value too:
+    `\csname`'s and `\ifcsname`'s in-csname flag, `scanner_status` and
+    `warning_index`, the expansion depth, `no_new_control_sequence`,
+    `name_in_progress`, `OK_to_interrupt`, `deletions_allowed` and
+    `set_box_allowed`. A run stopped in the middle of an expansion
+    (a dropped run) leaves them set; re-entering at the step writes
+    back what they were there. Without that, a run dropped inside
+    `\csname` made the next run start "in a csname", and LaTeX's
+    active `~` (`\ifincsname`) typeset a literal `~`.
   - The input's value is a node's operand (3.9). Re-entering the engine
     at a node writes its levels, lines and files back into the engine's
     arrays, costing their size, only where a node is re-entered.
@@ -1636,7 +1645,10 @@ from one clean point to the next.
    end, where the line ends being the input's) goes on to the next dirty step, and runs the one after
    it again in its place if the input there is not the same. One that ended elsewhere
    (Enter pressed, a paragraph break deleted) runs on, a step at a time,
-   until one ends at an old step's start. Each new step's reads are
+   until one ends at an old step's start: any later one, not only the
+   next few (an index of the old steps' starts by place; SyncTeX's tags
+   are compared only where the input is, and only with SyncTeX on).
+   Each new step's reads are
    predicted by the old step after it, whose text it runs, and by the
    step just run, whose text is like its own where the run reads text
    the old one never read (a table of contents read for the first

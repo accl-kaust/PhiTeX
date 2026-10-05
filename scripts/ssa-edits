@@ -236,6 +236,14 @@ FATAL_EDITS = [("Hello world.", "Hello there."), ("Hello there.", "Hello world."
 # finds the name its last run entered and enters none, which changes
 # nothing for the lookups: the cold build's later trips run 30 steps at
 # most (they ran 229, every lookup woken); then a word and back
+# incsname.tex (not seeded): a paragraph made to read \\x inside \\csname,
+# whose later definition expands for ever: its run with that definition
+# stops inside the \\csname and is dropped, and its next run must not
+# start in-\\csname (an other ~ in the text); then back
+INCSNAME_EDITS = [
+    ("Second paragraph, see", "Second \\expandafter\\let\\csname z\\x\\endcsname\\relax paragraph, see"),
+    ("Second \\expandafter\\let\\csname z\\x\\endcsname\\relax paragraph, see", "Second paragraph, see"),
+]
 NAMES_RERUN_EDITS = [("Paragraph 7:", "Paragraph seven:"), ("Paragraph seven:", "Paragraph 7:")]
 # font-rerun.tex (not seeded): a macro the `.aux` defines from the second
 # trip on swaps the first two pages' fonts, so that trip's run again of
@@ -516,6 +524,7 @@ def all_cases():
         # first wrote, as the next stage's pass does with one trip a build)
         latex("fatal_end", "fatal-end.tex", "pdflatex", FATAL_EDITS, seed=0),
         latex("names", "names.tex", "pdflatex", NAMES_EDITS, seed=0),
+        latex("incsname", "incsname.tex", "pdflatex", INCSNAME_EDITS, seed=0),
         latex("names_rerun", "names-rerun.tex", "pdflatex", NAMES_RERUN_EDITS, seed=0,
               trip_steps=30),
         latex("fontid", "fontid.tex", "pdflatex", FONTID_EDITS, seed=0),
