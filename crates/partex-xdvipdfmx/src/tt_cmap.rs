@@ -1640,3 +1640,93 @@ mod tests {
         assert!(!is_PUA_or_presentation(0x41));
     }
 }
+
+/// The inverse cmaps (gid to Unicode, the ToUnicode base) of TeX Live
+/// fonts against xdvipdfmx's own `create_inverse_cmap4`/`12`.
+#[cfg(test)]
+mod font_tests {
+    extern crate std;
+
+    use super::*;
+    use alloc::string::String;
+    use alloc::sync::Arc;
+    use core::fmt::Write as _;
+
+    fn dump(path: &str) -> Option<String> {
+        let data = std::fs::read(path).ok()?;
+        let mut sfont = Sfnt::sfnt_open(MemFile::new(Arc::from(data), path.as_bytes()))?;
+        sfont.sfnt_read_table_directory(0);
+        let n = sfont.tt_read_maxp_table().num_glyphs;
+        let mut out = String::new();
+        for pe in &CMAP_PLAT_ENCS {
+            let Some(c) = sfont.tt_cmap_read(pe.platform as u16, pe.encoding as u16) else {
+                continue;
+            };
+            let mut b = vec![-1i32; n as usize];
+            let mut s = vec![-1i32; n as usize];
+            match &c.map {
+                TtCmapMap::Cmap4(m) => create_inverse_cmap4(&mut b, &mut s, n, m),
+                TtCmapMap::Cmap12(m) => create_inverse_cmap12(&mut b, &mut s, n, m),
+                _ => continue,
+            }
+            let _ = writeln!(out, "cmap {} {} {}", pe.platform, pe.encoding, c.format);
+            for gid in 0..n as usize {
+                if b[gid] != -1 || s[gid] != -1 {
+                    let _ = writeln!(out, "{gid} {} {}", b[gid], s[gid]);
+                }
+            }
+        }
+        Some(out)
+    }
+
+    fn hex(d: &[u8]) -> String {
+        let mut s = String::new();
+        for b in d {
+            let _ = write!(s, "{b:02x}");
+        }
+        s
+    }
+
+    /// (name, font, md5 of the C's output, md5 of the font).
+    const CASES: &[(&str, &str, &str, &str)] = &[
+        (
+            "dejavu",
+            "/usr/share/texmf-dist/fonts/truetype/public/dejavu/DejaVuSans.ttf",
+            "3bad7a128ccc6838f24d9f5349d29ea6",
+            "b0e31de57cd5307954a3c54136ce68ae",
+        ),
+        (
+            "ebgaramond",
+            "/usr/share/texmf-dist/fonts/opentype/public/ebgaramond/EBGaramond-Regular.otf",
+            "f5da16c1b31b902383d721c2f146200f",
+            "c3133d2af9ea5c7f03dfc0b08cdfee46",
+        ),
+        (
+            "amiri",
+            "/usr/share/texmf-dist/fonts/truetype/public/amiri/Amiri-BoldItalic.ttf",
+            "9ac54250c7284b05922e8bf512cdf1b0",
+            "bca12f1468d2ff8ed1512e7f6e73fb16",
+        ),
+    ];
+
+    #[test]
+    fn inverse_cmaps() {
+        let dir = std::env::var("PARTEX_XPDF_DUMP").ok();
+        for &(name, path, want, font_md5) in CASES {
+            let Some(out) = dump(path) else {
+                continue;
+            };
+            if let Some(dir) = dir.as_deref() {
+                std::fs::write(std::format!("{dir}/{name}.inv.txt"), &out).unwrap();
+            }
+            let font = std::fs::read(path).unwrap();
+            if !want.is_empty() && hex(&partex_engine::md5::md5(&font)) == font_md5 {
+                assert_eq!(
+                    hex(&partex_engine::md5::md5(out.as_bytes())),
+                    want,
+                    "{name}"
+                );
+            }
+        }
+    }
+}
