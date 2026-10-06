@@ -1,72 +1,101 @@
 #!/usr/bin/env python3
-"""Build Shelf: TeX Live's input files and font metrics as a static site,
-in packs, with an index from each name to its pack.
+"""Build Shelf (schema 3): TeX Live's files for the engines PhiTeX runs, in
+packs, with an index from each file's texmf path to its pack.
 
-    python3 build.py [LABEL]          # default tl2026
+    python3 build.py [LABEL]          # default tl2026; then release.py
 
 From TeX Live's own package archives (tlnet), not a local install: every
-package with files under tex/latex, tex/generic, tex/plain, fonts/tfm or
-fonts/vf is downloaded (cache/, checked against the package database's
-SHA-512, kept between runs) and only those files are taken (no documents,
-no images: what TeX reads by name).
+package with files in TREES is downloaded (cache/, checked against the
+package database's SHA-512, kept between runs) and only those files are
+taken (no documents, no images: what an engine, BibTeX or makeindex reads
+by name). The build writes build/<LABEL>/ (git-ignored); release.py makes
+a release of it (content-named packs under h/, an index, release.json):
 
-    public/<LABEL>/p/<pack>.pack   gzip of  u32 n, (u32 len, name, u32 len, bytes) x n
-    public/<LABEL>/index.tsv       name <TAB> pack, sorted: what a client looks up
-    MANIFEST.tsv                   name, package, revision, path, sha256
+    build/<LABEL>/packs/<pack>.pack   gzip of  u32 n, (u32 len, path, u32 len, bytes) x n
+    build/<LABEL>/index.tsv           path <TAB> pack <TAB> deps_pdftex <TAB> deps_xetex
+    build/<LABEL>/meta.json           {"deps": ["pdftex", "xetex"], "search": {...}}
+    MANIFEST.tsv                      path, package, revision, sha256
 
-A pack is a TeX Live package's files, as they are used together (a .sty
-with its .def, .cfg and .fd files). A package bigger than SPLIT gzipped is
-cut, so a document fetches what it reads and not the rest: its inputs by
-directory, its fonts by family (the metric's name up to the last '-', or
-its first five letters). Cloudflare Pages serves at most 20,000 files a
-deployment: the build stops above 19,000 packs.
+Every file is keyed by its texmf path (tex/latex/fontspec/fontspec.sty,
+fonts/tfm/public/lm/rm-lmr10.tfm, fonts/opentype/public/lm/lmroman10-regular.otf),
+in the index and inside packs. The one file not from a package, pdftex.map,
+is made as updmap makes it (every package's Map and MixedMap files, in
+package order) at the path updmap gives it,
+fonts/map/pdftex/updmap/pdftex.map; the map files it is made from are not
+served.
 
-Two files with one name: kpathsea's order (tex/latex, then tex/generic, then
-tex/plain; fonts/tfm, fonts/vf apart, by extension), then the path's sort.
+Search (release.json's `search`): for each engine (pdftex as pdflatex,
+xetex as xelatex, luatex as lualatex) and each kpathsea format (tex, tfm,
+vf, type1, enc, map, opentype, truetype, bst, bib, ist; lua for luatex),
+the ordered path prefixes, read from TeX Live's own texmf.cnf (the kpathsea
+package's web2c/texmf.cnf: TEXINPUTS.pdflatex, TEXINPUTS.xelatex,
+TFMFONTS, ...): its $TEXMF/... entries brace-expanded, with $progname and
+$engine put in. A name resolves to the path whose basename is the name and
+whose first matching prefix comes earliest in the list; between paths
+under the same prefix, the lexicographically smallest path wins (kpathsea
+itself takes ls-R's order there; this is deterministic). The empty
+alternative of tex/{latex,generic,} is the prefix `tex`: pdflatex finds
+tex/xelatex's files too, last, as kpathsea does.
 
-Dependencies (TRACE=path/to/trace-deps and TRACE_FMT=its pdflatex.fmt,
-from the extension's core-partex): each .sty and .cls is loaded once on the
-preview's own engine, its files read from a flat copy of the tree, and the
-packs it read (less what a bare article reads) become the index's third
-column. A client fetching a name fetches those packs too, so a package and
-everything it loads arrive in one round instead of one build per file:
+Packs: by TeX Live package, as its files are used together (a .sty with its
+.def, .cfg and .fd files). Engine-specific trees go apart, so a pdfTeX
+document never downloads them: tex/xelatex and tex/xetex in `<pkg>.x`,
+tex/lualatex and tex/luatex in `<pkg>.l` (each cut at SPLIT gzipped:
+`.x.2`, ...), OpenType and TrueType fonts in `<pkg>.o-<family>` (by family,
+the file's name up to its last '-', neighbours merged up to FONT_BIN
+gzipped, a bigger file alone). The rest of a package bigger than SPLIT
+gzipped is cut by use: its hot packs hold the files some package's load
+read (the pdfTeX trace's counts, most read first, cut at BIN), the rest go
+in cold packs by directory and font family. No pack over 20 MB (Cloudflare
+takes 25 MiB a file).
 
-    public/<LABEL>/index.tsv       name <TAB> pack [<TAB> pack,pack,...]
-
-OpenType and TrueType fonts (fonts/opentype, fonts/truetype: .otf, .ttf,
-.ttc), for XeTeX: keyed by their texmf path, not their name (names collide
-across packages; XeTeX's font index names them by path), e.g.
-fonts/opentype/public/tex-gyre/texgyrepagella-regular.otf. The client takes
-the engine's absolute path (/usr/share/texmf-dist/fonts/...) less its
-/usr/share/texmf-dist/ prefix. They are packed apart from the package's
-other files (a pdfTeX document loading the .sty never fetches them), by
-family (the file's name up to its last '-'), neighbours merged up to
-FONT_BIN gzipped; a file bigger than that is a pack of its own.
+Dependencies, a column per engine (meta.json's `deps`): for each .sty and
+.cls, the packs loading it reads on the preview's own engine, less what a
+bare article reads and its own pack, so a client fetching it fetches those
+too, in one round instead of one build per file.
+- pdftex: TRACE=path/to/trace-deps and TRACE_FMT=its pdflatex.fmt (the
+  extension's core-partex), over a flat directory of what pdflatex finds by
+  each name (the search above).
+- xetex: TRACE_XETEX and TRACE_XETEX_FMT (the same protocol, xelatex.fmt),
+  over what xelatex finds; without them the column is empty.
 
 The engine's font index (FONT_INDEX=path: the PhiTeX engine's builder over
-the same fonts/opentype and fonts/truetype tree, the name records XeTeX
-matches on): when given, served as the name FONT_INDEX_NAME in a pack of
-its own. Until that builder lands, the build has no font index.
+fonts/opentype and fonts/truetype) is served, when given, at the path
+FONT_INDEX_PATH, in a pack of its own.
 
 TL_MIRROR overrides the mirror (default: mirror.ctan.org's redirector).
 """
-import gzip, hashlib, lzma, os, re, shutil, struct, subprocess, sys, tarfile, urllib.request
+import gzip, hashlib, json, lzma, os, re, shutil, struct, subprocess, sys, tarfile, time, urllib.request
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 LABEL = sys.argv[1] if len(sys.argv) > 1 else "tl2026"
 MIRROR = os.environ.get("TL_MIRROR", "https://mirror.ctan.org/systems/texlive/tlnet").rstrip("/")
-TREES = ["tex/latex", "tex/generic", "tex/plain", "fonts/tfm", "fonts/vf", "fonts/type1", "fonts/enc", "fonts/map", "fonts/opentype", "fonts/truetype"]  # (search order)
-# (XeTeX's fonts: keyed by path, packed apart; see the module doc)
-OPEN = ("fonts/opentype/", "fonts/truetype/")
-FONT_BIN = 4 << 20  # about how big (gzipped) a pack of OpenType/TrueType fonts is
-FONT_INDEX_NAME = "partex-fonts.idx"
-# (not read by name, or not by pdfTeX: documents, images, other engines' files)
+TREES = [
+    "tex/latex", "tex/generic", "tex/plain", "tex/xelatex", "tex/xetex", "tex/lualatex", "tex/luatex",
+    "fonts/tfm", "fonts/vf", "fonts/type1", "fonts/enc", "fonts/map", "fonts/opentype", "fonts/truetype",
+    "bibtex/bst", "bibtex/csf", "bibtex/bib", "makeindex",
+]
+# (not read by name: documents, images)
 SKIP = {".pdf", ".png", ".jpg", ".jpeg", ".gif", ".svg", ".eps", ".ps", ".txt", ".md", ".html", ".log", ".zip", ".dvi"}
+OPEN = ("fonts/opentype/", "fonts/truetype/")
+XETEX = ("tex/xelatex/", "tex/xetex/")
+LUATEX = ("tex/lualatex/", "tex/luatex/")
 SPLIT = 1 << 20  # gzipped bytes above which a package is cut
 BIN = 512 << 10  # about how big (gzipped) each part of a cut package is
+FONT_BIN = 4 << 20  # about how big (gzipped) a pack of OpenType/TrueType fonts is
 CACHE = Path("cache")
+PDFTEX_MAP = "fonts/map/pdftex/updmap/pdftex.map"
+FONT_INDEX_PATH = "fonts/misc/partex/fontindex.pxfi"
+# (engine: kpathsea's progname for its LaTeX, and $engine)
+ENGINES = {"pdftex": ("pdflatex", "pdftex"), "xetex": ("xelatex", "xetex"), "luatex": ("lualatex", "luatex")}
+FORMATS = {
+    "tex": "TEXINPUTS", "tfm": "TFMFONTS", "vf": "VFFONTS", "type1": "T1FONTS", "enc": "ENCFONTS",
+    "map": "TEXFONTMAPS", "opentype": "OPENTYPEFONTS", "truetype": "TTFONTS",
+    "bst": "BSTINPUTS", "bib": "BIBINPUTS", "ist": "INDEXSTYLE",
+}
+DEPS = ["pdftex", "xetex"]  # (the index's dependency columns, in order)
 
 
 def get(url: str) -> bytes:
@@ -83,13 +112,17 @@ def wanted(path: str) -> bool:
         return path.lower().endswith((".otf", ".ttf", ".ttc"))
     if path.startswith("fonts/"):
         return path.endswith((".tfm", ".vf", ".pfb", ".enc"))
+    if path.startswith("bibtex/"):
+        return path.endswith((".bst", ".csf", ".bib"))
+    if path.startswith("makeindex/"):
+        return path.endswith(".ist")
     name = path.rsplit("/", 1)[1]
     return "." not in name or Path(name).suffix.lower() not in SKIP
 
 
-def packages(db: str) -> list[dict]:
-    """Each package with files TeX reads by name: name, revision, checksum, files."""
-    out, p = [], None
+def packages(db: str) -> tuple[list[dict], dict[str, dict]]:
+    """Each package with files we take (name, revision, checksum, files, maps), and every package by name."""
+    out, every, p = [], {}, None
     for line in db.splitlines() + [""]:
         if line.startswith("name "):
             p = {"name": line[5:], "rev": "?", "sum": None, "files": [], "maps": []}
@@ -106,14 +139,15 @@ def packages(db: str) -> list[dict]:
             if wanted(path):
                 p["files"].append(path)
         elif line == "":
+            every[p["name"]] = p
             if p["files"] and "." not in p["name"]:  # (name.arch: binaries)
                 out.append(p)
             p = None
-    return out
+    return out, every
 
 
-def fetch(p: dict) -> dict[str, bytes]:
-    """The package's files, by path, from its (cached, checked) archive."""
+def fetch(p: dict, want: set[str] | None = None) -> dict[str, bytes]:
+    """The package's files (or `want`), by path, from its (cached, checked) archive."""
     f = CACHE / f"{p['name']}.r{p['rev']}.tar.xz"
     if not f.exists():
         data = get(f"{MIRROR}/archive/{p['name']}.tar.xz")
@@ -122,13 +156,90 @@ def fetch(p: dict) -> dict[str, bytes]:
         tmp = f.with_suffix(".part")
         tmp.write_bytes(data)
         tmp.replace(f)
-    want, got = set(p["files"]), {}
+    want, got = want or set(p["files"]), {}
     with tarfile.open(f, "r:xz") as t:
         for m in t:
             name = m.name.removeprefix("texmf-dist/")
             if m.isfile() and name in want:
                 got[name] = t.extractfile(m).read()
     return got
+
+
+def expand(s: str) -> list[str]:
+    """Brace expansion, as kpathsea's: a{b,c}d -> abd, acd (nested too)."""
+    i = s.find("{")
+    if i < 0:
+        return [s]
+    depth, j, parts, start = 0, i, [], i + 1
+    while j < len(s):
+        if s[j] == "{":
+            depth += 1
+        elif s[j] == "}":
+            depth -= 1
+            if depth == 0:
+                break
+        elif s[j] == "," and depth == 1:
+            parts.append(s[start:j])
+            start = j + 1
+        j += 1
+    parts.append(s[start:j])
+    return [x for part in parts for x in expand(s[:i] + part + s[j + 1 :])]
+
+
+def search(cnf: str) -> dict[str, dict[str, list[str]]]:
+    """Each engine's path prefixes per format, from texmf.cnf (see the module doc)."""
+    var: dict[str, str] = {}
+    for line in re.sub(r"\\\n", "", cnf).splitlines():
+        line = line.split("%", 1)[0].strip()
+        m = re.match(r"([A-Za-z0-9_]+(?:\.[A-Za-z0-9_-]+)?)\s*=\s*(.*)", line)
+        if m and m.group(1) not in var:  # (kpathsea: the first definition wins)
+            var[m.group(1)] = m.group(2).strip()
+    out: dict[str, dict[str, list[str]]] = {}
+    for engine, (prog, eng) in ENGINES.items():
+        formats = dict(FORMATS, lua="LUAINPUTS") if engine == "luatex" else FORMATS
+        out[engine] = {}
+        for fmt, v in formats.items():
+            value = var.get(f"{v}.{prog}", var.get(v))
+            if value is None:
+                raise SystemExit(f"texmf.cnf: no {v}")
+            value = value.replace("$progname", prog).replace("$engine", eng)
+            prefixes: list[str] = []
+            for el in value.split(";"):
+                for x in expand(el):
+                    if not x.startswith("$TEXMF/"):  # (., $OSFONTDIR, $VARTEXFONTS: not TeX Live's tree)
+                        continue
+                    # (a // inside, scripts//lua: any directory between; kept as scripts/lua)
+                    x = re.sub(r"/+", "/", x.removeprefix("$TEXMF/")).rstrip("/")
+                    if x and x not in prefixes:
+                        prefixes.append(x)
+            out[engine][fmt] = prefixes
+    return out
+
+
+def kind(name: str) -> str:
+    """The kpathsea format a file is looked up as, by its extension."""
+    base = name.rsplit("/", 1)[-1]
+    ext = base.rsplit(".", 1)[-1].lower() if "." in base else ""
+    return {"tfm": "tfm", "vf": "vf", "pfb": "type1", "enc": "enc", "map": "map", "otf": "opentype",
+            "ttf": "truetype", "ttc": "truetype", "bst": "bst", "csf": "bst", "bib": "bib", "ist": "ist"}.get(ext, "tex")
+
+
+def resolver(paths, order: dict[str, list[str]]):
+    """(name -> the path the engine finds for it, by the module doc's rule; every name's paths)."""
+    by_name: dict[str, list[str]] = defaultdict(list)
+    for p in paths:
+        by_name[p.rsplit("/", 1)[1]].append(p)
+
+    def resolve(name: str) -> str | None:
+        prefixes = order.get(kind(name), [])
+        found = []
+        for p in by_name.get(name, []):
+            r = next((i for i, x in enumerate(prefixes) if p.startswith(x + "/")), None)
+            if r is not None:
+                found.append((r, p))
+        return min(found)[1] if found else None
+
+    return resolve, by_name
 
 
 def pack(files: list[tuple[str, bytes]]) -> bytes:
@@ -139,82 +250,105 @@ def pack(files: list[tuple[str, bytes]]) -> bytes:
     return gzip.compress(bytes(b), 9, mtime=0)
 
 
-def family(name: str) -> str:
-    """A font metric's family: its name up to the last '-' (LinLibertineT-tlf-t1.tfm: LinLibertineT-tlf), else its first five letters."""
-    stem = name.rsplit(".", 1)[0]
+def family(path: str) -> str:
+    """A font's family: its name up to the last '-' (LinLibertineT-tlf-t1.tfm: LinLibertineT-tlf), else its first five letters."""
+    stem = path.rsplit("/", 1)[-1].rsplit(".", 1)[0]
     return stem.rsplit("-", 1)[0] if "-" in stem else re.sub(r"[0-9]+$", "", stem)[:5] or stem
 
 
-def groups(pkg: str, files: list[tuple[str, str, bytes]], freq: dict[str, int]) -> dict[str, list[tuple[str, bytes]]]:
-    """The packs of one package: (path, name, bytes). A package bigger than
-    SPLIT gzipped is cut by use: its hot pack (named as the package) holds
-    the files some package's load read (the trace's counts, most read first,
-    cut at BIN), the rest go in cold packs by directory and font family.
-    OpenType and TrueType fonts go apart, in packs of their own (`opentype`)."""
-    ot = [f for f in files if f[0].startswith(OPEN)]
-    files = [f for f in files if not f[0].startswith(OPEN)]
-    out = opentype(pkg, ot)
-    if not files:
-        return out
-    return {**out, **others(pkg, files, freq)}
+def groups(pkg: str, files: list[tuple[str, bytes]], freq: dict[str, int]) -> dict[str, list[tuple[str, bytes]]]:
+    """The packs of one package, (path, bytes) each: the engine-specific
+    trees and the OpenType/TrueType fonts apart, the rest by use."""
+    parts = [
+        opentype(pkg, [f for f in files if f[0].startswith(OPEN)]),
+        apart(f"{pkg}.x", [f for f in files if f[0].startswith(XETEX)]),
+        apart(f"{pkg}.l", [f for f in files if f[0].startswith(LUATEX)]),
+        common(pkg, [f for f in files if not f[0].startswith(OPEN + XETEX + LUATEX)], freq),
+    ]
+    out: dict[str, list] = {}
+    for part in parts:
+        clash = out.keys() & part.keys()
+        if clash:
+            raise SystemExit(f"{pkg}: two packs named {sorted(clash)}")
+        out.update(part)
+    return out
 
 
-def opentype(pkg: str, files: list[tuple[str, str, bytes]]) -> dict[str, list[tuple[str, bytes]]]:
+def apart(name: str, files: list[tuple[str, bytes]]) -> dict[str, list[tuple[str, bytes]]]:
+    """Files in packs `name`, `name.2`, ..., each cut at SPLIT gzipped."""
+    out: dict[str, list] = {}
+    cur, size, k = [], 0, 1
+    for p, b in files:
+        z = len(gzip.compress(b, 1))
+        if cur and size + z > SPLIT:
+            out[name if k == 1 else f"{name}.{k}"] = cur
+            cur, size, k = [], 0, k + 1
+        cur.append((p, b))
+        size += z
+    if cur:
+        out[name if k == 1 else f"{name}.{k}"] = cur
+    return out
+
+
+def opentype(pkg: str, files: list[tuple[str, bytes]]) -> dict[str, list[tuple[str, bytes]]]:
     """One package's OpenType and TrueType fonts in packs `<pkg>.o-<family>`:
     by family, neighbours merged up to FONT_BIN gzipped, a bigger file alone."""
     fam: dict[str, list] = defaultdict(list)
-    for path, n, b in files:
-        fam[family(path.rsplit("/", 1)[1])].append((n, b))
+    for p, b in files:
+        fam[family(p)].append((p, b))
     out: dict[str, list] = {}
     cur, size, name = [], 0, None
     for key in sorted(fam):
-        for n, b in fam[key]:
+        for p, b in fam[key]:
             z = len(gzip.compress(b, 1))
             if cur and size + z > FONT_BIN:
                 out[name] = cur
                 cur, size = [], 0
             if not cur:
-                name = f"{pkg}.o-{key}"
-                k = 2
+                name, k = f"{pkg}.o-{key}", 2
                 while name in out:
                     name, k = f"{pkg}.o-{key}.{k}", k + 1
-            cur.append((n, b))
+            cur.append((p, b))
             size += z
     if cur:
         out[name] = cur
     return out
 
 
-def others(pkg: str, files: list[tuple[str, str, bytes]], freq: dict[str, int]) -> dict[str, list[tuple[str, bytes]]]:
-    """`groups` for a package's files other than OpenType and TrueType fonts."""
-    whole = {pkg: [(n, b) for _, n, b in files]}
-    if len(gzip.compress(b"".join(b for _, _, b in files), 1)) <= SPLIT:
-        return whole
-    hot = sorted((f for f in files if freq.get(f[1])), key=lambda f: (-freq[f[1]], f[1]))
+def common(pkg: str, files: list[tuple[str, bytes]], freq: dict[str, int]) -> dict[str, list[tuple[str, bytes]]]:
+    """A package's files every engine reads. Bigger than SPLIT gzipped, cut by
+    use: its hot packs (named as the package, then .hot1, ...) hold the files
+    some package's load read (the trace's counts, most read first, cut at
+    BIN), the rest go in cold packs by directory and font family."""
+    if not files:
+        return {}
+    if len(gzip.compress(b"".join(b for _, b in files), 1)) <= SPLIT:
+        return {pkg: files}
+    hot = sorted((f for f in files if freq.get(f[0])), key=lambda f: (-freq[f[0]], f[0]))
     out: dict[str, list] = {}
     cur, size, k = [], 0, 0
-    for _, n, b in hot:
+    for p, b in hot:
         z = len(gzip.compress(b, 1))
         if cur and size + z > BIN:
             out[pkg if k == 0 else f"{pkg}.hot{k}"] = cur
             cur, size, k = [], 0, k + 1
-        cur.append((n, b))
+        cur.append((p, b))
         size += z
     if cur:
         out[pkg if k == 0 else f"{pkg}.hot{k}"] = cur
-    files = [f for f in files if not freq.get(f[1])]
     keyed: dict[str, list] = defaultdict(list)
-    for path, n, b in files:
-        if path.startswith("fonts/"):
-            key = "f-" + family(n)
+    for p, b in files:
+        if freq.get(p):
+            continue
+        if p.startswith("fonts/"):
+            key = "f-" + family(p)
         else:
-            d = path.split("/")[2:-1]  # (under tex/latex/<pkg>/...)
+            d = p.split("/")[2:-1]  # (under tex/latex/<pkg>/...)
             key = "-".join(d[1:]) if len(d) > 1 else ""
-        keyed[key].append((n, b))
+        keyed[key].append((p, b))
     # (neighbouring keys merged up to about BIN gzipped: a pack per family
-    # would make tens of thousands of packs; the first key names the pack)
-    # (a key bigger than BIN itself, a font family of 60 MB, goes on in
-    # packs of its own, name.2, name.3, ...: Cloudflare takes 25 MiB a file)
+    # would make tens of thousands of packs; the first key names the pack;
+    # a key bigger than BIN itself goes on in packs of its own, name.2, ...)
     cur, size, name = [], 0, None
     for key in sorted(keyed):
         z = len(gzip.compress(b"".join(b for _, b in keyed[key]), 1))
@@ -228,33 +362,31 @@ def others(pkg: str, files: list[tuple[str, str, bytes]], freq: dict[str, int]) 
             size += z
             continue
         part = 1
-        for n, b in keyed[key]:
+        for p, b in keyed[key]:
             zb = len(gzip.compress(b, 1))
             if cur and size + zb > BIN:
                 out[name] = cur
                 part += 1
                 cur, size, name = [], 0, f"{pkg}.{key}.{part}"
-            cur.append((n, b))
+            cur.append((p, b))
             size += zb
     if cur:
         out[name] = cur
     return out
 
 
-def trace(chosen: dict, files: dict) -> dict[str, set[str]]:
-    """Each .sty and .cls (and article.cls, the baseline): the files loading it reads (TRACE, TRACE_FMT)."""
-    tool, fmt = os.environ.get("TRACE"), os.environ.get("TRACE_FMT")
+def trace(tool: str | None, fmt: str | None, flat_files: dict[str, bytes], names: list[str], what: str) -> dict[str, set[str]]:
+    """Each name (and article.cls, the baseline): the names loading it reads,
+    on `tool` with `fmt`, from a flat directory of `flat_files`."""
     if not (tool and fmt):
-        print("no TRACE/TRACE_FMT: index without dependencies", file=sys.stderr)
+        print(f"no {what} trace: its dependency column is empty", file=sys.stderr)
         return {}
-    flat = CACHE / "flat"
+    flat = CACHE / f"flat-{what}"
     if flat.exists():
         shutil.rmtree(flat)
     flat.mkdir()
-    for name, path in chosen.items():
-        if "/" not in name:  # (XeTeX's fonts, by path: pdfTeX reads none)
-            (flat / name).write_bytes(files[path][1])
-    names = sorted(n for n in chosen if n.endswith((".sty", ".cls")) and "/" not in n)
+    for name, b in flat_files.items():
+        (flat / name).write_bytes(b)
     batches = [names[i : i + 25] for i in range(0, len(names), 25)]
 
     def run(batch: list[str]) -> list[str]:
@@ -271,10 +403,10 @@ def trace(chosen: dict, files: dict) -> dict[str, set[str]]:
                 name, _, fs = line.partition("\t")
                 read[name] = set(filter(None, fs.split(",")))
             if i % 40 == 0:
-                print(f"  traced {i}/{len(batches)} batches", file=sys.stderr)
-    missing = len(names) - len(read)
+                print(f"  {what}: traced {i}/{len(batches)} batches", file=sys.stderr)
+    missing = len(set(names) - read.keys())
     if missing:
-        print(f"  {missing} names not traced (a batch timed out)", file=sys.stderr)
+        print(f"  {what}: {missing} names not traced (a batch timed out)", file=sys.stderr)
     return read
 
 
@@ -283,30 +415,33 @@ def safe(s: str) -> str:
 
 
 def main() -> None:
+    t0 = time.time()
     CACHE.mkdir(exist_ok=True)
     db = lzma.decompress(get(f"{MIRROR}/tlpkg/texlive.tlpdb.xz")).decode()
-    pkgs = packages(db)
+    pkgs, every = packages(db)
     print(f"{len(pkgs)} packages", file=sys.stderr)
     files: dict[str, tuple[dict, bytes]] = {}
     with ThreadPoolExecutor(8) as ex:
         for i, (p, got) in enumerate(zip(pkgs, ex.map(fetch, pkgs)), 1):
             for path, b in got.items():
                 files[path] = (p, b)
-            if i % 250 == 0:
+            if i % 500 == 0:
                 print(f"  {i}/{len(pkgs)}", file=sys.stderr)
-    # each name's file: the tree's order, then the path
-    rank = lambda q: (next(i for i, t in enumerate(TREES) if q.startswith(t + "/")), q)
-    chosen: dict[str, str] = {}
-    for path in sorted(files, key=rank):
-        # (XeTeX's fonts by path, the rest by name)
-        chosen.setdefault(path if path.startswith(OPEN) else path.rsplit("/", 1)[1], path)
+    print(f"fetched in {time.time() - t0:.0f} s", file=sys.stderr)
+
+    # the search orders, from TeX Live's own texmf.cnf
+    cnf = fetch(every["kpathsea"], {"web2c/texmf.cnf"})["web2c/texmf.cnf"].decode()
+    order = search(cnf)
+    for engine in order:
+        for fmt, prefixes in order[engine].items():
+            print(f"search {engine} {fmt}: {prefixes}", file=sys.stderr)
+
     # pdftex.map, as updmap makes it: every package's Map and MixedMap
     # files, in package order (a font named twice: the first wins)
     maps = {path.rsplit("/", 1)[1]: b for path, (_, b) in files.items() if path.startswith("fonts/map/")}
     seen, lines = set(), []
     # (updmap's default, pdftexDownloadBase14: the base 14 fonts embedded,
-    # URW's, from pdftex_dl14.map, ahead of everything; partex has no
-    # non-embedded fonts)
+    # URW's, from pdftex_dl14.map, ahead of everything)
     for p in [{"maps": ["pdftex_dl14.map"]}] + pkgs:
         for m in p["maps"]:
             for line in maps.get(m, b"").decode("latin-1").splitlines():
@@ -317,61 +452,95 @@ def main() -> None:
                 lines.append(line)
     pdftex_map = ("\n".join(lines) + "\n").encode("latin-1")
     print(f"pdftex.map: {len(lines)} fonts, {len(pdftex_map) / 1e6:.1f} MB", file=sys.stderr)
-    for path in [q for q in chosen.values() if q.startswith("fonts/map/")]:
-        del chosen[path.rsplit("/", 1)[1]]
-    chosen["pdftex.map"] = "fonts/map/pdftex/updmap/pdftex.map"
-    files["fonts/map/pdftex/updmap/pdftex.map"] = ({"name": "pdftex-map", "rev": "updmap"}, pdftex_map)
-    by_pkg: dict[str, list] = defaultdict(list)
-    for name, path in chosen.items():
-        p, b = files[path]
-        by_pkg[p["name"]].append((path, name, b))
-    out = Path("public") / LABEL
-    if out.exists():
-        shutil.rmtree(out)
-    (out / "p").mkdir(parents=True)
-    index, rows, sizes = [], [], []
-    read = trace(chosen, files)
-    base = read.get("article.cls", set())
+    for path in [q for q in files if q.startswith("fonts/map/")]:
+        del files[path]
+    files[PDFTEX_MAP] = ({"name": "pdftex-map", "rev": "updmap"}, pdftex_map)
+    if os.environ.get("FONT_INDEX"):
+        files[FONT_INDEX_PATH] = ({"name": "partex-fonts", "rev": "build"}, Path(os.environ["FONT_INDEX"]).read_bytes())
+
+    # what each engine finds by each name, and where tex/xelatex's and
+    # tex/xetex's names are in another tex tree too
+    res = {e: resolver(files, order[e]) for e in ("pdftex", "xetex")}
+    by_name = res["pdftex"][1]
+    clashes = []
+    for name, paths in sorted(by_name.items()):
+        xe = [p for p in paths if p.startswith(XETEX)]
+        other = [p for p in paths if p.startswith("tex/") and not p.startswith(XETEX)]
+        if xe and other:
+            clashes.append((name, res["pdftex"][0](name), res["xetex"][0](name), sorted(paths)))
+    xe_names = {p.rsplit("/", 1)[1] for p in files if p.startswith(XETEX)}
+    print(f"tex/xelatex, tex/xetex: {len(xe_names)} names, {len(clashes)} also in another tex tree:", file=sys.stderr)
+    for name, pd, xe, paths in clashes:
+        print(f"  {name}: pdftex finds {pd}, xetex {xe} (of {', '.join(paths)})", file=sys.stderr)
+
+    # the dependency columns: each engine's trace over what it finds by name
+    flats, reads = {}, {}
+    for engine, own in (("pdftex", XETEX + LUATEX), ("xetex", LUATEX)):
+        resolve, names = res[engine]
+        flats[engine] = flat = {n: p for n in names if (p := resolve(n))}
+        # (another engine's own packages: this one can't load them)
+        traced = sorted(n for n, p in flat.items() if n.endswith((".sty", ".cls")) and not p.startswith(own))
+        env = "TRACE" if engine == "pdftex" else "TRACE_XETEX"
+        t1 = time.time()
+        r = trace(os.environ.get(env), os.environ.get(env + "_FMT"), {n: files[p][1] for n, p in flat.items()}, traced, engine)
+        print(f"{engine} trace: {len(r)} of {len(traced)} names in {time.time() - t1:.0f} s", file=sys.stderr)
+        reads[engine] = {flat[n]: {flat[f] for f in fs if f in flat} for n, fs in r.items() if n in flat}
     freq: dict[str, int] = defaultdict(int)
-    for fs in read.values():
+    for fs in reads["pdftex"].values():
         for f in fs:
             freq[f] += 1
+
+    by_pkg: dict[str, list] = defaultdict(list)
+    for path, (p, b) in files.items():
+        by_pkg[p["name"]].append((path, b))
+    out = Path("build") / LABEL
+    if out.exists():
+        shutil.rmtree(out)
+    (out / "packs").mkdir(parents=True)
+    pack_of, rows, sizes = {}, [], []
     for pkg, fs in sorted(by_pkg.items()):
         fs.sort()
         for key, members in groups(pkg, fs, freq).items():
             data = pack(sorted(members))
-            (out / "p" / f"{safe(key)}.pack").write_bytes(data)
-            sizes.append((len(data), key))
-            index += [f"{n}\t{safe(key)}" for n, _ in members]
-        for path, name, b in fs:
+            (out / "packs" / f"{safe(key)}.pack").write_bytes(data)
+            sizes.append((len(data), safe(key)))
+            for path, _ in members:
+                pack_of[path] = safe(key)
+        for path, b in fs:
             p = files[path][0]
-            rows.append(f"{name}\t{pkg}\tr{p['rev']}\t{path}\t{hashlib.sha256(b).hexdigest()}")
-    # (the engine's font index, when built: a pack of its own)
-    if os.environ.get("FONT_INDEX"):
-        data = pack([(FONT_INDEX_NAME, Path(os.environ["FONT_INDEX"]).read_bytes())])
-        (out / "p" / "partex-fonts.pack").write_bytes(data)
-        sizes.append((len(data), "partex-fonts"))
-        index.append(f"{FONT_INDEX_NAME}\tpartex-fonts")
-    pack_of = dict(l.split("\t") for l in index)
-    deps = {name: sorted({pack_of[f] for f in fs - base if f in pack_of} - {pack_of.get(name)}) for name, fs in read.items()}
-    (out / "index.tsv").write_text(
-        "".join(sorted(l + ("\t" + ",".join(deps[l.split("\t")[0]]) if deps.get(l.split("\t")[0]) else "") + "\n" for l in index))
+            rows.append(f"{path}\t{pkg}\tr{p['rev']}\t{hashlib.sha256(b).hexdigest()}")
+    deps: dict[str, dict[str, list[str]]] = {}
+    for engine in DEPS:
+        r = reads[engine]
+        base = {pack_of[f] for f in r.get(flats[engine].get("article.cls", ""), set()) if f in pack_of}
+        deps[engine] = {path: sorted({pack_of[f] for f in fs if f in pack_of} - base - {pack_of.get(path)}) for path, fs in r.items()}
+    index = "".join(
+        f"{path}\t{pack_of[path]}\t" + "\t".join(",".join(deps[e].get(path, [])) for e in DEPS) + "\n" for path in sorted(pack_of)
     )
-    print(f"{sum(1 for v in deps.values() if v)} names with dependency packs", file=sys.stderr)
-    Path("MANIFEST.tsv").write_text(f"# {LABEL} from {MIRROR}\n" + "\n".join(sorted(rows)) + "\n")
+    (out / "index.tsv").write_text(index)
+    (out / "meta.json").write_text(json.dumps({"deps": DEPS, "search": order}, indent=1) + "\n")
+    Path("MANIFEST.tsv").write_text(f"# {LABEL} from {MIRROR}: path, package, revision, sha256\n" + "\n".join(sorted(rows)) + "\n")
+
+    for engine in DEPS:
+        print(f"{sum(1 for v in deps[engine].values() if v)} paths with {engine} dependency packs", file=sys.stderr)
     sizes.sort(reverse=True)
     total = sum(s for s, _ in sizes)
-    ot = [l for l in index if l.startswith(OPEN)]
-    otp = {l.split("\t")[1] for l in ot}
-    print(f"OpenType/TrueType: {len(ot)} fonts in {len(otp)} packs, {sum(s for s, k in sizes if safe(k) in otp) / 1e6:.1f} MB", file=sys.stderr)
-    print(f"{LABEL}: {len(chosen)} names in {len(sizes)} packs, {total / 1e6:.1f} MB; largest: "
+
+    def part(test, what):
+        ks = [(s, k) for s, k in sizes if test(k)]
+        print(f"  {what}: {len(ks)} packs, {sum(s for s, _ in ks) / 1e6:.1f} MB", file=sys.stderr)
+
+    part(lambda k: re.search(r"\.x(\.\d+)?$", k), "tex/xelatex, tex/xetex (.x)")
+    part(lambda k: re.search(r"\.l(\.\d+)?$", k), "tex/lualatex, tex/luatex (.l)")
+    part(lambda k: ".o-" in k, "OpenType/TrueType (.o-)")
+    print(f"{LABEL}: {len(pack_of)} paths in {len(sizes)} packs, {total / 1e6:.1f} MB, in {time.time() - t0:.0f} s; largest: "
           + ", ".join(f"{k} {s / 1e6:.1f} MB" for s, k in sizes[:5]), file=sys.stderr)
     if len(sizes) > 19_000:
         raise SystemExit(f"{len(sizes)} packs: over Cloudflare Pages' 20,000 files")
-    # (fonts: under 20 MB, well inside Cloudflare's 25 MiB a file)
     big = [k for s, k in sizes if s > 20 * 10**6]
     if big:
         raise SystemExit(f"packs over 20 MB (Cloudflare takes 25 MiB a file): {big}")
 
 
-main()
+if __name__ == "__main__":
+    main()

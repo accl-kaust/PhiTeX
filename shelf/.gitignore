@@ -3,3 +3,5 @@ __pycache__/
 cache/
 .home/
 releases/
+build/
+releases-s3/

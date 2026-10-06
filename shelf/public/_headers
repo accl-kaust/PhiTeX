@@ -7,7 +7,3 @@
 
 /tl2026/*
   Cache-Control: public, max-age=31536000, immutable
-
-# (packs are gzip files the client inflates itself: served as bytes)
-/tl2026/p/*
-  Content-Type: application/octet-stream
