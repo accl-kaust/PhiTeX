@@ -1127,22 +1127,7 @@ impl<M: Machine> Runtime<M> {
         let (id, _) = self.open.step.take()?;
         let recs = core::mem::take(&mut self.open.step_recs);
         let reads = core::mem::take(&mut self.open.step_reads);
-        if self.open.timing {
-            let wrote = core::mem::take(&mut self.open.step_wrote_at)
-                .iter()
-                .map(|(a, t)| (a.0.clone(), *t))
-                .collect();
-            let times = StepTimes {
-                began: self.open.step_began,
-                reads: core::mem::take(&mut self.open.step_read_at),
-                wrote,
-            };
-            let i = id as usize;
-            if self.step_times.len() <= i {
-                self.step_times.resize_with(i + 1, || None);
-            }
-            self.step_times[i] = Some(times);
-        }
+        self.keep_step_times(id);
         let Runtime {
             recs: arena,
             wa,
@@ -1165,12 +1150,35 @@ impl<M: Machine> Runtime<M> {
         Some(id)
     }
 
+    /// With timing on, keep the ending step `id`'s times (its reads' and
+    /// last writes'), for whichever way the step ends; else drop them.
+    fn keep_step_times(&mut self, id: StepId) {
+        if !self.open.timing {
+            self.open.step_read_at.clear();
+            self.open.step_wrote_at = Table::new();
+            return;
+        }
+        let wrote = core::mem::take(&mut self.open.step_wrote_at)
+            .iter()
+            .map(|(a, t)| (a.0.clone(), *t))
+            .collect();
+        let times = StepTimes {
+            began: self.open.step_began,
+            reads: core::mem::take(&mut self.open.step_read_at),
+            wrote,
+        };
+        let i = id as usize;
+        if self.step_times.len() <= i {
+            self.step_times.resize_with(i + 1, || None);
+        }
+        self.step_times[i] = Some(times);
+    }
+
     fn end_step_filtered(&mut self, skip: &[M::Addr]) -> Option<StepId> {
         let (id, _) = self.open.step.take()?;
         let recs = core::mem::take(&mut self.open.step_recs);
         let reads = core::mem::take(&mut self.open.step_reads);
-        self.open.step_read_at.clear();
-        self.open.step_wrote_at = Table::new();
+        self.keep_step_times(id);
         let Runtime {
             recs: arena,
             wa,
