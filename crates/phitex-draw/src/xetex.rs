@@ -64,56 +64,21 @@ impl Face {
     fn path(&self, gid: u16) -> Option<String> {
         use skrifa::MetadataProvider;
         use skrifa::instance::{LocationRef, Size};
-        use skrifa::outline::{DrawSettings, OutlinePen};
-        struct Pen(String, f32);
-        impl OutlinePen for Pen {
-            fn move_to(&mut self, x: f32, y: f32) {
-                let k = self.1;
-                let _ = write!(self.0, "M{:.0} {:.0}", x * k, y * k);
-            }
-            fn line_to(&mut self, x: f32, y: f32) {
-                let k = self.1;
-                let _ = write!(self.0, "L{:.0} {:.0}", x * k, y * k);
-            }
-            fn quad_to(&mut self, x1: f32, y1: f32, x: f32, y: f32) {
-                let k = self.1;
-                let _ = write!(
-                    self.0,
-                    "Q{:.0} {:.0} {:.0} {:.0}",
-                    x1 * k,
-                    y1 * k,
-                    x * k,
-                    y * k
-                );
-            }
-            fn curve_to(&mut self, x1: f32, y1: f32, x2: f32, y2: f32, x: f32, y: f32) {
-                let k = self.1;
-                let _ = write!(
-                    self.0,
-                    "C{:.0} {:.0} {:.0} {:.0} {:.0} {:.0}",
-                    x1 * k,
-                    y1 * k,
-                    x2 * k,
-                    y2 * k,
-                    x * k,
-                    y * k
-                );
-            }
-            fn close(&mut self) {
-                self.0.push('Z');
-            }
-        }
+        use skrifa::outline::DrawSettings;
         let f = skrifa::FontRef::from_index(&self.data, self.index).ok()?;
         let g = f
             .outline_glyphs()
             .get(skrifa::GlyphId::new(u32::from(gid)))?;
-        let mut pen = Pen(String::new(), 1000.0 / self.upem);
+        let mut pen = crate::glyphs::Pen {
+            d: String::new(),
+            k: 1000.0 / self.upem,
+        };
         g.draw(
             DrawSettings::unhinted(Size::unscaled(), LocationRef::default()),
             &mut pen,
         )
         .ok()?;
-        Some(pen.0)
+        Some(pen.d)
     }
 }
 

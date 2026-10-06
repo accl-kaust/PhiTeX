@@ -9,6 +9,7 @@
 //! `partex_engine::pdfread`, so the CLI's viewer and the extension's draw
 //! the same pages from the same functions.
 
+mod glyphs;
 mod image;
 pub mod pdfdraw;
 mod shade;
@@ -342,6 +343,68 @@ mod tests {
         // (10.33 points from the centre of a circle of 20)
         assert_eq!(px(radial, 45, 30)[..2], [132, 132]);
         assert_eq!(px(radial, 0, 0), [255, 255, 255, 255]);
+    }
+
+    /// Glyphs from outlines of fonts other than Type 1 programs: a Type 3
+    /// font's glyph procedure (its glyph space a hundredth of an em: the
+    /// path and the advance scaled to the others'; a stroke left out), a
+    /// `TrueType` program (`/FontFile2`, `DejaVu` Sans's A) and a bare CFF
+    /// one (`/FontFile3 /Type1C`, Latin Modern Roman's A).
+    #[test]
+    fn glyph_outlines() {
+        let bytes = |b: &[u8]| b.iter().map(|&c| char::from(c)).collect::<String>();
+        let ttf = bytes(include_bytes!("../tests/data/dejavu-A.ttf"));
+        let cff = bytes(include_bytes!("../tests/data/lmroman-A.cff"));
+        let stream =
+            |d: &str, s: &str| format!("<< {d} /Length {} >>\nstream\n{s}\nendstream", s.len());
+        let objs = [
+            "<< /Type /Catalog /Pages 2 0 R >>".to_owned(),
+            "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_owned(),
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 100] /Contents 4 0 R \
+             /Resources << /Font << /F1 5 0 R /F2 7 0 R /F3 9 0 R >> >> >>"
+                .to_owned(),
+            stream(
+                "",
+                "BT /F1 10 Tf 10 50 Td (AA) Tj /F2 10 Tf (A) Tj /F3 10 Tf (A) Tj ET",
+            ),
+            "<< /Type /Font /Subtype /Type3 /FontMatrix [0.01 0 0 0.01 0 0] \
+             /FontBBox [0 0 50 50] /CharProcs << /sq 6 0 R >> \
+             /Encoding << /Differences [65 /sq] >> /FirstChar 65 /Widths [50] >>"
+                .to_owned(),
+            stream(
+                "",
+                "50 0 0 0 50 50 d1 0 0 m 50 0 l 50 50 l 0 50 l h f 10 10 m 20 20 l S",
+            ),
+            "<< /Type /Font /Subtype /TrueType /BaseFont /DejaVuSans /FirstChar 65 \
+             /Widths [684] /FontDescriptor 8 0 R >>"
+                .to_owned(),
+            "<< /Type /FontDescriptor /Flags 32 /FontFile2 11 0 R >>".to_owned(),
+            "<< /Type /Font /Subtype /Type1 /BaseFont /LMRoman10-Regular /FirstChar 65 \
+             /Widths [750] /FontDescriptor 10 0 R >>"
+                .to_owned(),
+            "<< /Type /FontDescriptor /Flags 32 /FontFile3 12 0 R >>".to_owned(),
+            stream("", &ttf),
+            stream("/Subtype /Type1C", &cff),
+        ];
+        let d = crate::Pdf::open(&raw_pdf(&objs))
+            .unwrap()
+            .draw(0, &mut crate::Fonts::new())
+            .unwrap();
+        assert!(d.contains("\"0:65\":\"M0 0L500 0L500 500L0 500Z\""), "{d}");
+        assert!(d.contains("[-1,10,50,\"10 15\",\"\",0,[65,65]]"), "{d}");
+        assert!(d.contains("[-1,10,50,\"20\",\"\",1,[65]]"), "{d}");
+        assert!(d.contains("[-1,10,50,\"26.84\",\"\",2,[65]]"), "{d}");
+        assert!(
+            d.contains(
+                "\"1:65\":\"M342 632L208 269L476 269ZM286 729L398 729L676 0L573 0L507 187L178 187\
+                 L112 0L8 0Z\""
+            ),
+            "{d}"
+        );
+        assert!(
+            d.contains("\"2:65\":\"M717 0L717 31L699 31C639 31 625 38 614 71L398 696"),
+            "{d}"
+        );
     }
 
     #[test]

@@ -1,14 +1,16 @@
 //! A PDF page read back into the viewer's draw list (v2): what the page
 //! draws, for the browser to draw itself (each glyph from the PDF's own
-//! embedded Type 1 outlines, at TeX's position, with the text over it for
-//! selecting; paths for `TikZ`). No PDF renderer, no raster.
+//! embedded outlines, Type 1, `TrueType`, CFF or Type 3, at TeX's
+//! position, with the text over it for selecting; paths for `TikZ`). No
+//! PDF renderer, no raster.
 //!
 //! Read through `partex_engine::pdfread`, so any PDF pdfTeX writes reads
 //! (compressed or not, object streams, cross-reference streams): the page
 //! tree; each page's content streams (text, paths, colours, the graphics
 //! state, images, forms, clips, axial and radial shadings: `sh` and
 //! shading patterns, as images); its fonts' `/Widths`,
-//! `/ToUnicode` maps and `/FontFile` programs.
+//! `/ToUnicode` maps and `/FontFile`, `/FontFile2` and `/FontFile3`
+//! programs, Type 3 fonts' `/CharProcs`.
 //!
 //! JSON (`"v":2`), in PDF points from the page's top left:
 //! `{"v":2,"w","h","f":[font keys],"F":[outline fonts],"g":{"F:code":d},
@@ -737,10 +739,9 @@ struct Font {
     uni: HashMap<u32, String>,
     /// Computer Modern's math extension font: its big glyphs are drawn at their size.
     ex: bool,
-    /// The embedded Type 1 program and the code → glyph name the PDF uses
-    /// (the font's encoding with the font dictionary's /Differences): the
-    /// glyphs are drawn from their outlines.
-    outlines: Option<(Arc<crate::type1::Type1>, Vec<Option<String>>)>,
+    /// The glyphs' outlines, from the embedded program (or a Type 3
+    /// font's glyph procedures): the glyphs are drawn from them.
+    outlines: Option<Outlines>,
     /// The font's id on the page (`F`): its outlines' ids.
     fref: usize,
     /// A Type 0 font (`XeTeX`'s native fonts, through xdvipdfmx): its glyphs
@@ -1311,30 +1312,12 @@ impl Ctx<'_> {
                     .map(|b| cmap(&b))
                     .unwrap_or_default();
                 let ex = base.to_ascii_uppercase().contains("CMEX");
-                let outlines = (!self.runs_only)
-                    .then(|| font_program(p, &f, self.cache))
-                    .flatten()
-                    .map(|t1| {
-                        let mut names = t1.encoding.clone();
-                        if let Some(e @ O::Dict(_)) = f.get("Encoding").map(|e| p.resolve(e))
-                            && let Some(O::Arr(d)) = e.get("Differences").map(|d| p.resolve(d))
-                        {
-                            let mut code = 0usize;
-                            for o in d {
-                                match o {
-                                    O::Num(n) => code = n as usize,
-                                    O::Name(n) => {
-                                        if code < names.len() {
-                                            names[code] = Some(n.clone());
-                                        }
-                                        code += 1;
-                                    }
-                                    _ => {}
-                                }
-                            }
-                        }
-                        (t1, names)
-                    });
+                let mut widths = widths;
+                let outlines = if self.runs_only {
+                    None
+                } else {
+                    outlines(p, &f, &uni, &mut widths, self.cache)
+                };
                 let fref = self.fonts.len();
                 self.frefs.push(base.clone());
                 let cid =
@@ -1414,14 +1397,10 @@ fn draw_with(
         // (the outlines of the glyphs the page uses, by font and code)
         let mut g = String::new();
         for (fr, c) in used {
-            let Some((t1, names)) = fonts.get(fr).and_then(|f| f.outlines.as_ref()) else {
-                continue;
-            };
-            let Some(d) = names
-                .get(usize::from(c))
-                .cloned()
-                .flatten()
-                .and_then(|n| t1.path(&n))
+            let Some(d) = fonts
+                .get(fr)
+                .and_then(|f| f.outlines.as_ref())
+                .and_then(|o| o.path(c))
             else {
                 continue;
             };
@@ -2416,10 +2395,229 @@ const CMEX10: [(f64, f64); 128] = [
     (0.0, 0.6),
 ];
 
-/// The embedded Type 1 program of font dictionary `f` (`/FontDescriptor`'s
-/// `/FontFile`), parsed once per object.
-fn font_program(p: &Pdf, f: &O, cache: &mut Fonts) -> Option<Arc<crate::type1::Type1>> {
+/// A font's glyphs drawn from outlines, by code (1/1000 em, y up).
+enum Outlines {
+    /// A Type 1 program and the code → glyph name the PDF uses (the
+    /// font's encoding with the font dictionary's `/Differences`).
+    Type1(Arc<crate::type1::Type1>, Vec<Option<String>>),
+    /// A Type 3 font: each code's glyph procedure as a path.
+    Paths(Vec<Option<String>>),
+    /// A `TrueType` or `OpenType` program (`cff` false), or a bare CFF
+    /// one: its bytes and each code's glyph.
+    Sfnt {
+        data: Arc<[u8]>,
+        cff: bool,
+        gids: Vec<Option<u32>>,
+    },
+}
+
+impl Outlines {
+    fn path(&self, c: u8) -> Option<String> {
+        let c = usize::from(c);
+        match self {
+            Outlines::Type1(t1, names) => t1.path(names.get(c)?.as_deref()?),
+            Outlines::Paths(paths) => paths.get(c)?.clone(),
+            Outlines::Sfnt { data, cff, gids } => {
+                let gid = (*gids.get(c)?)?;
+                if *cff {
+                    crate::glyphs::cff_path(data, gid)
+                } else {
+                    crate::glyphs::sfnt_path(data, gid)
+                }
+            }
+        }
+    }
+}
+
+/// The glyph names font `f`'s `/Encoding` `/Differences` give codes 0–255.
+fn differences(p: &Pdf, f: &O) -> Vec<Option<String>> {
+    let mut names = vec![None; 256];
+    if let Some(e @ O::Dict(_)) = f.get("Encoding").map(|e| p.resolve(e))
+        && let Some(O::Arr(d)) = e.get("Differences").map(|d| p.resolve(d))
+    {
+        let mut code = 0usize;
+        for o in d {
+            match o {
+                O::Num(n) => code = n as usize,
+                O::Name(n) => {
+                    if code < names.len() {
+                        names[code] = Some(n.clone());
+                    }
+                    code += 1;
+                }
+                _ => {}
+            }
+        }
+    }
+    names
+}
+
+/// The outlines of simple font `f` (its `/ToUnicode` text `uni`): its
+/// embedded Type 1, `TrueType`, `OpenType` or CFF program's, or a Type 3
+/// font's glyph procedures (then its `widths`, in glyph space, are made
+/// thousandths of text space, as the others'). None: a font whose glyphs
+/// are not drawn from outlines (not embedded, a Type 3 font of bitmaps).
+fn outlines(
+    p: &Pdf,
+    f: &O,
+    uni: &HashMap<u32, String>,
+    widths: &mut [f64],
+    cache: &mut Fonts,
+) -> Option<Outlines> {
+    if matches!(f.get("Subtype"), Some(O::Name(s)) if s == "Type3") {
+        let (paths, wk) = type3(p, f)?;
+        for w in widths.iter_mut() {
+            *w *= wk;
+        }
+        return Some(Outlines::Paths(paths));
+    }
     let fd = p.resolve(f.get("FontDescriptor")?);
+    let diff = differences(p, f);
+    if let Some(t1) = font_program(p, &fd, cache) {
+        let mut names = t1.encoding.clone();
+        for (n, d) in names.iter_mut().zip(&diff) {
+            if d.is_some() {
+                n.clone_from(d);
+            }
+        }
+        return Some(Outlines::Type1(t1, names));
+    }
+    let (file, cff) = if let Some(r) = fd.get("FontFile2") {
+        (r, false)
+    } else {
+        let r = fd.get("FontFile3")?;
+        match p.resolve(r).get("Subtype") {
+            Some(O::Name(s)) if s == "Type1C" => (r, true),
+            Some(O::Name(s)) if s == "OpenType" => (r, false),
+            _ => return None,
+        }
+    };
+    let data: Arc<[u8]> = p.stream(file)?.into();
+    let gids = if cff {
+        crate::glyphs::cff_gids(&data, &|c| diff[usize::from(c)].clone())
+    } else {
+        // (`/Flags` bit 3: symbolic)
+        let flags = fd.get("Flags").and_then(O::num).unwrap_or(0.0) as i64;
+        crate::glyphs::sfnt_gids(&data, flags & 4 != 0, &|c| crate::glyphs::Code {
+            name: diff[usize::from(c)].as_deref(),
+            text: uni.get(&u32::from(c)).map(String::as_str),
+        })
+    };
+    gids.iter()
+        .any(Option::is_some)
+        .then_some(Outlines::Sfnt { data, cff, gids })
+}
+
+/// Type 3 font `f`'s glyphs: each code's glyph procedure (by its
+/// `/Differences` name in `/CharProcs`) as a path taken to 1/1000 em by
+/// the `/FontMatrix`, and how many thousandths of text space a unit of
+/// glyph space is. None: no glyph is a path (bitmaps: image masks).
+fn type3(p: &Pdf, f: &O) -> Option<(Vec<Option<String>>, f64)> {
+    let fm = match p.nums(f, "FontMatrix") {
+        Some(v) if v.len() == 6 => [v[0], v[1], v[2], v[3], v[4], v[5]],
+        _ => [0.001, 0.0, 0.0, 0.001, 0.0, 0.0],
+    };
+    let m = mul(&fm, &[1000.0, 0.0, 0.0, 1000.0, 0.0, 0.0]);
+    let procs = p.resolve(f.get("CharProcs")?);
+    let paths: Vec<Option<String>> = differences(p, f)
+        .iter()
+        .map(|n| {
+            let body = p.stream(procs.get(n.as_deref()?)?)?;
+            Some(glyph_path(&body, &m)).filter(|d| !d.is_empty())
+        })
+        .collect();
+    paths.iter().any(Option::is_some).then_some((paths, m[0]))
+}
+
+/// The shape glyph procedure `b` fills, through matrix `m` (to 1/1000 em,
+/// y up), as SVG path data. A path only stroked is left out (the glyph is
+/// drawn filled, nonzero), as is an image (a bitmap glyph).
+fn glyph_path(b: &[u8], m: &M) -> String {
+    let mut out = String::new();
+    let (mut d, mut ops) = (String::new(), Vec::new());
+    let (mut ctm, mut stack) = (*m, Vec::new());
+    let mut cur = (0.0, 0.0);
+    let mut l = Lex { b, i: 0 };
+    while let Some(o) = l.value() {
+        let O::Op(op) = o else {
+            ops.push(o);
+            continue;
+        };
+        let n = |i: usize| ops.get(i).and_then(O::num).unwrap_or(0.0);
+        let pt = |x: f64, y: f64| {
+            let (x, y) = apply(&ctm, x, y);
+            format!("{} {}", r2(x), r2(y))
+        };
+        match op.as_str() {
+            "q" => stack.push(ctm),
+            "Q" => ctm = stack.pop().unwrap_or(ctm),
+            "cm" if ops.len() >= 6 => ctm = mul(&[n(0), n(1), n(2), n(3), n(4), n(5)], &ctm),
+            "m" => {
+                cur = (n(0), n(1));
+                let _ = write!(d, "M{}", pt(n(0), n(1)));
+            }
+            "l" => {
+                cur = (n(0), n(1));
+                let _ = write!(d, "L{}", pt(n(0), n(1)));
+            }
+            "c" => {
+                cur = (n(4), n(5));
+                let _ = write!(
+                    d,
+                    "C{} {} {}",
+                    pt(n(0), n(1)),
+                    pt(n(2), n(3)),
+                    pt(n(4), n(5))
+                );
+            }
+            // (the current point the first control point)
+            "v" => {
+                let _ = write!(
+                    d,
+                    "C{} {} {}",
+                    pt(cur.0, cur.1),
+                    pt(n(0), n(1)),
+                    pt(n(2), n(3))
+                );
+                cur = (n(2), n(3));
+            }
+            // (the end point the second)
+            "y" => {
+                cur = (n(2), n(3));
+                let _ = write!(
+                    d,
+                    "C{} {} {}",
+                    pt(n(0), n(1)),
+                    pt(n(2), n(3)),
+                    pt(n(2), n(3))
+                );
+            }
+            "h" => d.push('Z'),
+            "re" => {
+                let (x, y, w, h) = (n(0), n(1), n(2), n(3));
+                cur = (x, y);
+                let _ = write!(
+                    d,
+                    "M{}L{}L{}L{}Z",
+                    pt(x, y),
+                    pt(x + w, y),
+                    pt(x + w, y + h),
+                    pt(x, y + h)
+                );
+            }
+            "f" | "F" | "f*" | "B" | "B*" | "b" | "b*" => out.push_str(&std::mem::take(&mut d)),
+            "S" | "s" | "n" => d.clear(),
+            "BI" => break,
+            _ => {}
+        }
+        ops.clear();
+    }
+    out
+}
+
+/// The Type 1 program font descriptor `fd` embeds (`/FontFile`), parsed
+/// once for its bytes in `cache`.
+fn font_program(p: &Pdf, fd: &O, cache: &mut Fonts) -> Option<Arc<crate::type1::Type1>> {
     let O::Ref(r) = fd.get("FontFile")? else {
         return None;
     };
