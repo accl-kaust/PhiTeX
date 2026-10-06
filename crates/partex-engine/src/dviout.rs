@@ -850,6 +850,20 @@ impl DviWriter {
                     self.cur_h += width;
                     self.dvi_h = self.cur_h;
                 }
+                Item::Pic {
+                    width, start, len, ..
+                } => {
+                    // `XeTeX`: "Output the whatsit node |p| in an hlist"
+                    let save_h = self.dvi_h;
+                    let save_v = self.dvi_v;
+                    self.cur_v = base_line;
+                    let edge = self.cur_h + width;
+                    self.special(page.special(start, len))?; // `pic_out`
+                    self.dvi_h = save_h;
+                    self.dvi_v = save_v;
+                    self.cur_h = edge;
+                    self.cur_v = base_line;
+                }
                 Item::Cut => return Ok(false),
             }
             i += 1;
@@ -998,6 +1012,23 @@ impl DviWriter {
                     }
                     self.native(page, start, len)?;
                     self.cur_v += depth;
+                    self.cur_h = left_edge;
+                }
+                Item::Pic {
+                    height,
+                    depth,
+                    start,
+                    len,
+                    ..
+                } => {
+                    // `XeTeX`: "Output the whatsit node |p| in a vlist"
+                    let save_h = self.dvi_h;
+                    let save_v = self.dvi_v;
+                    self.cur_v += height;
+                    self.special(page.special(start, len))?; // `pic_out`
+                    self.dvi_h = save_h;
+                    self.dvi_v = save_v;
+                    self.cur_v = save_v + depth;
                     self.cur_h = left_edge;
                 }
                 Item::Cut => return Ok(false),

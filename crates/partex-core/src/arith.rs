@@ -81,9 +81,13 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             self.print_char(b'-');
             s = s.wrapping_neg();
         }
-        self.print_int(s / UNITY);
+        // (C's compiler takes the negated value as nonnegative: the most
+        // negative one, a `D2Fix` of an infinite `XeTeX` picture, prints
+        // as `-32768.0`)
+        let u = s.cast_unsigned();
+        self.print_int((u / UNITY.cast_unsigned()).cast_signed());
         self.print_char(b'.');
-        s = 10 * (s % UNITY) + 5;
+        s = 10 * (u % UNITY.cast_unsigned()).cast_signed() + 5;
         let mut delta: Scaled = 10;
         loop {
             if delta > UNITY {

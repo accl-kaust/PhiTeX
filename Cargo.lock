@@ -161,6 +161,7 @@ dependencies = [
 name = "partex-core"
 version = "0.0.0"
 dependencies = [
+ "libm",
  "partex-bibtex",
  "partex-engine",
  "partex-incr",

@@ -729,11 +729,9 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                     advance = g.width;
                     self.glyph_item(page, g, vertical);
                 }
-                Whatsit::Pic(_) => {
-                    return self.pdf_error(
-                        b"XeTeX",
-                        b"pictures in XDV output are not implemented in partex yet",
-                    );
+                Whatsit::Pic(pic) => {
+                    advance = pic.width;
+                    pic_item(page, pic);
                 }
             },
             Node::Glue { spec, .. } => {
@@ -1434,6 +1432,63 @@ fn rule_item(this_box: &BoxNode, mut height: Scaled, mut depth: Scaled, mut widt
         depth,
         width,
     }
+}
+
+/// `XeTeX`'s `pic_out`: picture `pic`'s special (`pdf:image matrix a b c
+/// d e f page N [pagebox B] (path)`) as an item.
+fn pic_item(page: &mut Page, pic: &partex_engine::native::PicNode) {
+    use core::fmt::Write;
+    /// §103: `print_scaled`.
+    fn scaled(out: &mut alloc::string::String, mut s: Scaled) {
+        if s < 0 {
+            out.push('-');
+            s = s.wrapping_neg();
+        }
+        // (as `Tex::print_scaled`: the most negative value's digits are
+        // those of its magnitude)
+        let u = s.cast_unsigned();
+        let _ = write!(out, "{}.", u / UNITY.cast_unsigned());
+        s = 10 * (u % UNITY.cast_unsigned()).cast_signed() + 5;
+        let mut delta: Scaled = 10;
+        loop {
+            if delta > UNITY {
+                s += 0o100000 - 50000; // round the last digit
+            }
+            out.push(char::from(b'0' + u8::try_from(s / UNITY).unwrap_or(0)));
+            s = 10 * (s % UNITY);
+            delta *= 10;
+            if s <= delta {
+                break;
+            }
+        }
+    }
+    let mut s = alloc::string::String::from("pdf:image matrix ");
+    for &t in &pic.transform {
+        scaled(&mut s, t);
+        s.push(' ');
+    }
+    let _ = write!(s, "page {} ", pic.page);
+    s.push_str(match pic.pdf_box {
+        1 => "pagebox cropbox ",
+        2 => "pagebox mediabox ",
+        3 => "pagebox bleedbox ",
+        5 => "pagebox artbox ",
+        4 => "pagebox trimbox ",
+        _ => "",
+    });
+    s.push('(');
+    let start = u32::try_from(page.specials.len()).expect("page size");
+    page.specials.extend_from_slice(s.as_bytes());
+    page.specials.extend_from_slice(&pic.path);
+    page.specials.push(b')');
+    let len = u32::try_from(page.specials.len()).expect("page size") - start;
+    page.items.push(Item::Pic {
+        width: pic.width,
+        height: pic.height,
+        depth: pic.depth,
+        start,
+        len,
+    });
 }
 
 #[cfg(test)]

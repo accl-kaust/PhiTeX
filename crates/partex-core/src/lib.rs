@@ -122,6 +122,7 @@ mod web;
 mod wide;
 mod xetex;
 mod xmain;
+mod xpic;
 mod xregs;
 
 #[cfg(test)]

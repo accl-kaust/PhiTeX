@@ -642,7 +642,16 @@ impl Builder {
                     Next::Break(*pi)
                 }
             }
-            Node::Whatsit(_) | Node::Mark(_) => Next::Contribute,
+            Node::Whatsit(w) => {
+                // `XeTeX`: "Prepare to move whatsit |p| to the current page"
+                if let crate::node::Whatsit::Pic(pic) = &**w {
+                    let t = self.sf(1, acc) + self.sf(7, acc) + pic.height;
+                    self.set_sf(1, t, acc);
+                    self.set_sf(7, pic.depth, acc);
+                }
+                Next::Contribute
+            }
+            Node::Mark(_) => Next::Contribute,
             Node::Ins(_) => {
                 self.append_insertion(&mut p, env, events, acc)?;
                 Next::Contribute
