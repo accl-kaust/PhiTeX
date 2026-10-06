@@ -331,8 +331,13 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         self.get_x_token()?;
         if self.cur_cmd == RELAX && self.cur_chr == NO_EXPAND_FLAG {
             self.cur_cmd = ACTIVE_CHAR;
-            self.cur_chr = crate::wide::active_char(self.cur_tok - CS_TOKEN_FLAG)
-                .unwrap_or(self.cur_tok - CS_TOKEN_FLAG - ACTIVE_BASE);
+            self.cur_chr = match crate::wide::active_char(self.cur_tok - CS_TOKEN_FLAG) {
+                Some(c) => c,
+                // (`XeTeX`'s `cur_tok-cs_token_flag-active_base` of another
+                // control sequence is past every scalar value)
+                None if self.unicode => TOO_BIG_USV,
+                None => self.cur_tok - CS_TOKEN_FLAG - ACTIVE_BASE,
+            };
         }
         Ok(())
     }
