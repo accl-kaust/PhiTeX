@@ -13,14 +13,13 @@ DESIGN.md; this is the operating manual of the checks around it.
 
 `accl ci` submits five stages (`scripts/accl/ci.sbatch`):
 
-1. **build** (`build`, 32 CPUs): the release binary and partex's own
+1. **build** (`build`, 24 CPUs): the release binary and partex's own
    `pdflatex` and `xelatex` formats (`scripts/ci/formats.py`), and the
    format `partex build` keeps for itself.
-2. **manuals** (a 48-task array on `build`, 2 CPUs and 24 GB each, at most
-   12 at once: the `build4` QOS caps a user at 192 CPUs and 787 GB, shared
-   with the gate): the manual corpus, each task a shard of `ci/manuals.json`
+2. **manuals** (a 48-task array on `build`, 2 CPUs and 16 GB each, at most
+   28 at once): the manual corpus, each task a shard of `ci/manuals.json`
    (`scripts/ci/manuals.py run`).
-3. **torture** (`build`, 32 CPUs): trip and etrip (plain and machine mode),
+3. **torture** (`build`, 24 CPUs): trip and etrip (plain and machine mode),
    e2e (plain and machine mode), ssa-edits, the l3build suites, the escape
    tests (`scripts/ci/torture.py`).
 4. **perf** (pinned to `acclnode04`, 16 CPUs; the other stages keep off it):
@@ -28,6 +27,11 @@ DESIGN.md; this is the operating manual of the checks around it.
 5. **score** (`light`): the scoreboard, the comparison with the last main
    run, the perf history and its report (`scripts/ci/score.py`,
    `scripts/ci/report.py`). It runs no document.
+
+The CI stays under half of the `build4` quota (192 CPUs and 787 GB a
+user, shared with the gate): at most 96 CPUs at once (torture 24, perf 16,
+manuals 28 x 2), and every CI job is submitted with `--nice=1000`, below
+the gate.
 
 Everything runs in the CI image `partex-ci-2026-09-25`
 (`scripts/accl/partex-ci.def`: the partex image plus `texlive-doc` and the

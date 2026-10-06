@@ -16,13 +16,15 @@ perf=${CI_PERF_NODE:-acclnode04}
 run=${c:0:12}-$(date +%Y%m%d-%H%M%S)
 S=$CI/harness/ci.sbatch
 cd "$CI"
-sb() { sbatch --parsable --export=ALL "$@"; }
-b=$(sb -J ci-build -p build --qos=build4 -c 32 --mem=64G -t 02:00:00 "$S" build "$run" "$c")
-m=$(sb -J ci-manuals -d "afterok:$b" --array="0-${CI_SHARDS:-47}%12" -x "$perf" \
-  -p build --qos=build4 -c 2 --mem=24G -t 12:00:00 "$S" manuals "$run")
-t=$(sb -J ci-torture -d "afterok:$b" -x "$perf" -p build --qos=build4 -c 32 --mem=96G -t 08:00:00 \
+# (CI stays under half the build4 quota, 96 of 192 CPUs, and below the
+# gate in priority: torture 24 + perf 16 + manuals 28 x 2)
+sb() { sbatch --parsable --export=ALL --nice=1000 "$@"; }
+b=$(sb -J ci-build -p build --qos=build4 -c 24 --mem=48G -t 02:00:00 "$S" build "$run" "$c")
+m=$(sb -J ci-manuals -d "afterok:$b" --array="0-${CI_SHARDS:-47}%28" -x "$perf" \
+  -p build --qos=build4 -c 2 --mem=16G -t 12:00:00 "$S" manuals "$run")
+t=$(sb -J ci-torture -d "afterok:$b" -x "$perf" -p build --qos=build4 -c 24 --mem=96G -t 08:00:00 \
   "$S" torture "$run")
-p=$(sb -J ci-perf -d "afterok:$b" -w "$perf" -p build --qos=build4 -c 16 --mem=96G -t 12:00:00 \
+p=$(sb -J ci-perf -d "afterok:$b" -w "$perf" -p build --qos=build4 -c 16 --mem=64G -t 12:00:00 \
   "$S" perf "$run")
 s=$(sb -J ci-score -d "afterany:$m:$t:$p" -p light -c 2 --mem=8G -t 01:00:00 "$S" score "$run" $main)
 echo "$c $run build=$b manuals=$m torture=$t perf=$p score=$s" >> "$CI/submitted.log"

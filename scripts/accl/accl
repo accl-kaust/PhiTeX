@@ -118,7 +118,7 @@ ci_sync() {
   rsync -a "$here/ci.sbatch" "$here/backfill.sbatch" "$here/ci-submit" "$here/ci-poll" "$H:$CI/harness/"
 }
 # sb OPTS... STAGE RUN ARGS...: sbatch a stage, its job id
-sb() { ssh $H "$slurm cd $CI && sbatch --parsable $*"; }
+sb() { ssh $H "$slurm cd $CI && sbatch --parsable --nice=1000 $*"; }
 PERF_NODE=${CI_PERF_NODE:-acclnode04}
 ci_submit() {
   local main= c
@@ -157,7 +157,7 @@ case $cmd in
     l=lists/$(date +%Y%m%d-%H%M%S)-$(basename "$1")
     ssh $H "mkdir -p $CI/lists"
     scp -q "$1" "$H:$CI/$l"
-    sb -J ci-oracle --array=0-${CI_SHARDS:-63}%32 -x "$PERF_NODE" -p build --qos=build4 -c 2 --mem=6G -t 12:00:00 \
+    sb -J ci-oracle --array=0-${CI_SHARDS:-63}%24 -x "$PERF_NODE" -p build --qos=build4 -c 2 --mem=6G -t 12:00:00 \
       "\$HOME/$CI/harness/ci.sbatch" oracle "oracle-$(date +%Y%m%d-%H%M%S)" "\$HOME/$CI/$l" ;;
   ci-discover)
     ci_sync
@@ -170,7 +170,7 @@ case $cmd in
     while read -r c; do git push -q accl "$c:refs/wip/$c" 2>/dev/null || true; done < "$list"
     ssh $H "mkdir -p $CI/lists"
     scp -q "$list" "$H:$CI/lists/backfill.txt"; rm -f "$list"
-    sb -J ci-backfill --array=0-$(( $# - 1 ))%${n} -w "$PERF_NODE" -p build --qos=build4 -c 16 --mem=96G -t 12:00:00 \
+    sb -J ci-backfill --array=0-$(( $# - 1 ))%${n} -w "$PERF_NODE" -p build --qos=build4 -c 16 --mem=48G -t 12:00:00 \
       "\$HOME/$CI/harness/backfill.sbatch" ;;
   *) sed -n '2,30p' "$0"; exit 2 ;;
 esac
