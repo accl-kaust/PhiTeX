@@ -1241,6 +1241,10 @@ def main():
     if opts.case:
         cases = [c for c in cases if c.name in opts.case]
     runner = Runner(opts)
+    # (a caller that still names the binary partex, as a job script from
+    # before the rename does: the phitex next to it)
+    if not runner.bin.is_file() and runner.bin.name == "partex":
+        runner.bin = runner.bin.with_name("phitex")
     if not runner.bin.is_file():
         print(f"ssa-edits: no binary at {runner.bin}", file=sys.stderr)
         return 2
