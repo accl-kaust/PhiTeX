@@ -378,7 +378,7 @@ impl NativeHost {
             FileKind::Pict => partex_kpse::Format::Pict,
             FileKind::FontIndex => {
                 return Ok(crate::fontindex::index().map(|contents| OpenedFile {
-                    name: b"<fonts>".to_vec(),
+                    name: FONT_INDEX.to_vec(),
                     contents,
                 }));
             }
@@ -434,6 +434,20 @@ impl PageSink for NativeHost {
         let r = self.dvi().finish(mag);
         self.dvi = None;
         r
+    }
+}
+
+/// The name the index of the installed fonts is read under: no file (no
+/// path begins with a NUL), made again from fontconfig's listing.
+pub const FONT_INDEX: &[u8] = b"\0fonts";
+
+/// The contents now of an input that is no file (a name beginning with a
+/// NUL): `None` for one not known, or not to be had.
+pub fn not_a_file(name: &[u8]) -> Option<std::sync::Arc<[u8]>> {
+    if name == FONT_INDEX {
+        crate::fontindex::index()
+    } else {
+        None
     }
 }
 
@@ -678,7 +692,7 @@ impl NativeHost {
             FileKind::OpenType => partex_kpse::Format::OpenType,
             FileKind::MiscFonts => partex_kpse::Format::MiscFonts,
             FileKind::Pict => partex_kpse::Format::Pict,
-            FileKind::FontIndex => return Some(b"<fonts>".to_vec()),
+            FileKind::FontIndex => return Some(FONT_INDEX.to_vec()),
             FileKind::Other | FileKind::XdvPipe => return stamp(name).map(|_| name.to_vec()),
         };
         self.kpse.find_file(name, format, true)

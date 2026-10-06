@@ -159,16 +159,32 @@ pub fn record(dir: &Path, key: u128, build: &Build) {
 /// [`record`] as if at `now` (ns since the epoch: what is racy).
 fn record_at(dir: &Path, key: u128, build: &Build, now: i128) {
     let file = path_of(dir, key);
+    let refuse = |k: &[u8], why: &str| {
+        if std::env::var_os("PARTEX_STORE_DEBUG").is_some() {
+            eprintln!(
+                "phitex: quick: no record: {} {why}",
+                String::from_utf8_lossy(k).escape_debug()
+            );
+        }
+        let _ = std::fs::remove_file(&file);
+    };
     let mut inputs = Vec::with_capacity(build.inputs.len());
     for (k, read) in &build.inputs {
+        // (an input that is no file, such as the font index: by what it
+        // is now)
+        if k.starts_with(b"\0") {
+            if crate::native::not_a_file(k).as_deref() != Some(&read[..]) {
+                return refuse(k, "is not what was read");
+            }
+            inputs.push((k.clone(), None, hash(read)));
+            continue;
+        }
         let f = crate::native::path(k);
         let (Ok(m1), Ok(disk)) = (std::fs::metadata(&f), std::fs::read(&f)) else {
-            let _ = std::fs::remove_file(&file);
-            return;
+            return refuse(k, "cannot be read");
         };
         if disk[..] != read[..] {
-            let _ = std::fs::remove_file(&file);
-            return;
+            return refuse(k, "changed since it was read");
         }
         // (the stamp taken before the read holds only if the file did not
         // change meanwhile)
@@ -250,6 +266,12 @@ pub fn check(dir: &Path, key: u128, look: &mut dyn Look) -> Option<Hit> {
         return None;
     }
     for (k, s, h) in &r.inputs {
+        if k.starts_with(b"\0") {
+            if crate::native::not_a_file(k).is_none_or(|b| hash(&b) != *h) {
+                return None;
+            }
+            continue;
+        }
         if !holds(&crate::native::path(k), s.as_ref(), *h) {
             return None;
         }

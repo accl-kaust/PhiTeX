@@ -983,6 +983,10 @@ impl Watch {
         };
         let (mut w, out) = Self::new(native, params, command_line, between, observe);
         w.keeper = keeper;
+        // (the no-op restart's record, which the build could not write
+        // without the keeper: the next process restores from it even when
+        // the build itself cannot be saved, as XeTeX's native fonts)
+        w.record_quick(&out);
         w.save();
         (Opened::Ready(Box::new(w)), out)
     }

@@ -2078,9 +2078,21 @@ fn run_modern_xelatex(root: &Path, partex: &Path) -> Result<Vec<String>> {
             .any(|l| l.trim_start().starts_with("Finished modern-xelatex.pdf")),
         "the build did not finish"
     );
-    // (not yet: a second build of an XeTeX job runs it again instead of
-    // restoring what the first saved; a watch's rebuild is untested)
-    compare(&o, &p, true)
+    let mut diffs = compare(&o, &p, true)?;
+    // Again, nothing changed: what the first saved, restored (its inputs
+    // include the font index, which is no file)
+    let report = modern(&["build", "modern-xelatex.tex"])?;
+    ensure!(
+        report.contains("Restored"),
+        "the second build did not restore the first:\n{report}"
+    );
+    diffs.extend(
+        compare(&o, &p, true)?
+            .into_iter()
+            .map(|n| format!("restored: {n}")),
+    );
+    // (not yet: a watch's rebuild is untested)
+    Ok(diffs)
 }
 
 /// `partex watch` (machine mode, its default) of `modern.tex` against

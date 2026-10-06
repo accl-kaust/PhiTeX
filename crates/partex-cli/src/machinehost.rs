@@ -2772,7 +2772,8 @@ impl Watch {
         let all = self.tick.is_multiple_of(10);
         let init = self.b.initial().tex().host().clone();
         for key in init.served_paths() {
-            if key == CLOCK || (!all && key.starts_with(b"/")) {
+            // (the clock and the font index are no files)
+            if key.starts_with(b"\0") || (!all && key.starts_with(b"/")) {
                 continue;
             }
             let p = crate::native::path(&key);
@@ -2887,6 +2888,22 @@ impl Watch {
         }
         for key in init.served_paths() {
             if key == CLOCK {
+                continue;
+            }
+            // (an input that is no file, such as the font index: by what it
+            // is now, as a store's build may have read another)
+            if key.starts_with(b"\0") {
+                if let Some(now) = crate::native::not_a_file(&key)
+                    && init.file(&key).is_none_or(|old| *old != *now)
+                {
+                    out.push(Found {
+                        key,
+                        now,
+                        stamped: false,
+                        time: None,
+                        own: false,
+                    });
+                }
                 continue;
             }
             let p = crate::native::path(&key);
@@ -3195,21 +3212,32 @@ impl Watch {
         let (dir, key) = k.place();
         let init = self.b.initial().tex().host();
         let served = init.served_paths();
-        // (a file found where a rebuild's state says, not served from
-        // disk: no record, as its path is not known here)
-        if init
-            .overrides
-            .keys()
-            .any(|k| k.starts_with(b"\0") && !served.contains(k))
-        {
-            quick::forget(&dir, key);
-            return;
-        }
-        let inputs: Vec<(Vec<u8>, Arc<[u8]>)> = served
-            .into_iter()
-            .filter(|k| k != CLOCK)
-            .filter_map(|k| init.file(&k).map(|f| (k, f)))
+        let mut inputs: Vec<(Vec<u8>, Arc<[u8]>)> = served
+            .iter()
+            .filter(|k| *k != CLOCK)
+            .filter_map(|k| init.file(k).map(|f| (k.clone(), f)))
             .collect();
+        // (a file not found at first and found since, as a first build's
+        // .aux: an input by the path it is found at now, if that is what
+        // the build read; else no record)
+        for (k, read) in init.overrides.iter() {
+            if !k.starts_with(b"\0") || served.contains(k) {
+                continue;
+            }
+            let asked = init
+                .missed
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .get(k)
+                .cloned();
+            match asked.and_then(|(name, kind)| init.native().read_file(&name, kind)) {
+                Some(f) if f.contents[..] == read[..] => inputs.push((f.name, read.clone())),
+                _ => {
+                    quick::forget(&dir, key);
+                    return;
+                }
+            }
+        }
         let missed: Vec<(Vec<u8>, Vec<u8>, FileKind)> = init
             .missed
             .lock()
