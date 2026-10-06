@@ -214,6 +214,24 @@ impl<V: Clone> ShardMap<V> {
         self.shards.iter().map(|s| s.len()).sum()
     }
 
+    /// The value of `k`, `f()` put there first if there is none.
+    pub(crate) fn get_or_insert_with(&mut self, k: i32, f: impl FnOnce() -> V) -> &mut V {
+        Arc::make_mut(&mut self.shards[shard(k)])
+            .entry(k)
+            .or_insert_with(f)
+    }
+
+    /// The entries, by key.
+    pub(crate) fn sorted(&self) -> Vec<(i32, &V)> {
+        let mut all: Vec<(i32, &V)> = self
+            .shards
+            .iter()
+            .flat_map(|s| s.iter().map(|(&k, v)| (k, v)))
+            .collect();
+        all.sort_unstable_by_key(|e| e.0);
+        all
+    }
+
     /// The keys, in increasing order.
     pub(crate) fn keys(&self) -> Vec<i32> {
         let mut k: Vec<i32> = self.shards.iter().flat_map(|s| s.keys().copied()).collect();
