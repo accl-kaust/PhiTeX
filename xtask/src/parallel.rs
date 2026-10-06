@@ -1715,26 +1715,55 @@ fn pass0(path: &str, f0: f64, ignore: &[String]) -> Result<()> {
         })
         .collect();
     // (the steps of the outermost spans from a read of `begin` to one of
+    // `end`, and each one's part in a span, in commands into the step: a
+    // span's first step from the read of `begin`, its last to the read of
     // `end`)
-    let spans = |begin: &str, end: &str| -> Vec<bool> {
+    let spans = |begin: &str, end: &str| -> (Vec<bool>, Vec<(u32, u32)>) {
         let b = d.ix.get(begin.as_bytes()).copied();
         let e = d.ix.get(end.as_bytes()).copied();
         let mut out = vec![false; n];
+        let mut iv = vec![(0u32, 0u32); n];
         let mut depth = 0i32;
         for p in 0..n {
-            let names = &d.r_name[d.rs[p]..d.rs[p + 1]];
-            let opens = names.iter().filter(|&&x| Some(x) == b).count() as i32;
-            let closes = names.iter().filter(|&&x| Some(x) == e).count() as i32;
-            if depth > 0 || opens > 0 {
+            let at = |k: usize| if d.r_at[k] == NONE { 0 } else { d.r_at[k] };
+            let ks = d.rs[p]..d.rs[p + 1];
+            let opens: Vec<u32> = ks
+                .clone()
+                .filter(|&k| Some(d.r_name[k]) == b)
+                .map(at)
+                .collect();
+            let closes: Vec<u32> = ks.filter(|&k| Some(d.r_name[k]) == e).map(at).collect();
+            let cost = d.cost[p] as u32;
+            if depth > 0 || !opens.is_empty() {
                 out[p] = true;
+                let lo = if depth > 0 {
+                    0
+                } else {
+                    opens.iter().copied().min().unwrap_or(0)
+                };
+                let after = depth + opens.len() as i32 - closes.len() as i32;
+                let hi = if after <= 0 {
+                    closes.iter().copied().max().unwrap_or(cost).max(lo)
+                } else {
+                    cost
+                };
+                iv[p] = (lo, hi.max(lo));
             }
-            depth = (depth + opens - closes).max(0);
+            depth = (depth + opens.len() as i32 - closes.len() as i32).max(0);
         }
-        out
+        (out, iv)
     };
-    let pics = spans("\\pgfpicture", "\\endpgfpicture");
-    let examples = spans("\\codeexample", "\\endcodeexample");
+    let (pics, pics_iv) = spans("\\pgfpicture", "\\endpgfpicture");
+    let (examples, ex_iv) = spans("\\codeexample", "\\endcodeexample");
     let either: Vec<bool> = (0..n).map(|p| pics[p] || examples[p]).collect();
+    let either_iv: Vec<(u32, u32)> = (0..n)
+        .map(|p| match (pics[p], examples[p]) {
+            (true, true) => (pics_iv[p].0.min(ex_iv[p].0), pics_iv[p].1.max(ex_iv[p].1)),
+            (true, false) => pics_iv[p],
+            (false, true) => ex_iv[p],
+            (false, false) => (0, 0),
+        })
+        .collect();
     let fire_pics: Vec<bool> = (0..n).map(|p| pics[p] || fire[p]).collect();
     let share = |v: &[bool]| -> u64 { (0..n).filter(|&p| v[p]).map(|p| d.cost[p]).sum() };
     println!(
@@ -1761,17 +1790,52 @@ fn pass0(path: &str, f0: f64, ignore: &[String]) -> Result<()> {
     for &(m, mlabel) in models {
         let l = d.lags(m);
         println!("\n== {mlabel}");
-        for (label, skip, ts_always, cost0) in [
+        let none: Option<&[(u32, u32)]> = None;
+        for (label, skip, iv, ts_always, cost0) in [
             (
                 "no typesetting (output routines skipped)",
                 &fire,
+                none,
                 true,
                 Some(f0),
             ),
-            ("pictures skipped", &pics, false, None),
-            ("code examples skipped", &examples, false, None),
-            ("pictures and code examples skipped", &either, false, None),
-            ("pictures skipped, no typesetting", &fire_pics, true, None),
+            ("pictures skipped", &pics, none, false, None),
+            ("code examples skipped", &examples, none, false, None),
+            (
+                "pictures and code examples skipped",
+                &either,
+                none,
+                false,
+                None,
+            ),
+            (
+                "pictures skipped, no typesetting",
+                &fire_pics,
+                none,
+                true,
+                None,
+            ),
+            (
+                "pictures skipped, at the spans' edges",
+                &pics,
+                Some(&pics_iv[..]),
+                false,
+                None,
+            ),
+            (
+                "code examples skipped, at the spans' edges",
+                &examples,
+                Some(&ex_iv[..]),
+                false,
+                None,
+            ),
+            (
+                "pictures and code examples skipped, at the spans' edges",
+                &either,
+                Some(&either_iv[..]),
+                false,
+                None,
+            ),
         ] {
             skip_model(
                 &d,
@@ -1779,6 +1843,7 @@ fn pass0(path: &str, f0: f64, ignore: &[String]) -> Result<()> {
                 m,
                 label,
                 skip,
+                iv,
                 ts_always,
                 typeset & !ign,
                 ign,
@@ -1797,6 +1862,7 @@ fn skip_model(
     m: Model,
     label: &str,
     skip: &[bool],
+    iv: Option<&[(u32, u32)]>,
     ts_always: bool,
     typeset: u32,
     ign: u32,
@@ -1804,8 +1870,19 @@ fn skip_model(
 ) {
     let n = d.n();
     let total = d.total();
+    // (with `iv`, only the part of a skipped step in its span is skipped:
+    // a definition last written before or after it is pass 0's, and so is
+    // a read made there)
+    let in_span = |p: usize, at: u32| -> bool {
+        skip[p] && iv.is_none_or(|iv| at == NONE || (iv[p].0 <= at && at < iv[p].1))
+    };
     // (taint: 1 typesetting classes, 2 all)
     let mut taint = vec![0u8; n];
+    let suspect_w = |x: usize, c: u8, taint: &[u8]| -> bool {
+        let a = d.w_pos[x] as usize;
+        let ts = typeset >> c & 1 == 1;
+        in_span(a, d.w_at[x]) || taint[a] == 2 || (taint[a] == 1 && ts)
+    };
     let suspect = |a: usize, c: u8, taint: &[u8]| -> bool {
         let ts = typeset >> c & 1 == 1;
         skip[a] || taint[a] == 2 || (taint[a] == 1 && ts)
@@ -1822,7 +1899,7 @@ fn skip_model(
         };
         while i > 0 {
             let x = ws[i - 1] as usize;
-            if !suspect(d.w_pos[x] as usize, c, taint) {
+            if !suspect_w(x, c, taint) {
                 return Some(d.w_ver[x]);
             }
             i -= 1;
@@ -1841,7 +1918,11 @@ fn skip_model(
             let a = a as usize;
             let mis = ign >> c & 1 == 0
                 && ((ts_always && ts && a != p)
-                    || (suspect(a, c, &taint) && {
+                    || ((if w == NONE {
+                        suspect(a, c, &taint)
+                    } else {
+                        suspect_w(w as usize, c, &taint)
+                    }) && {
                         let v = if w == NONE {
                             None
                         } else {
@@ -1853,13 +1934,20 @@ fn skip_model(
                 misread[k] = true;
                 by_class[c as usize] += 1;
                 *by_name.entry(nm).or_default() += 1;
-                if !skip[p] {
+                if !in_span(p, d.r_at[k]) {
                     taint[p] = taint[p].max(if ts { 1 } else { 2 });
                 }
             }
         }
     }
-    // (phase 2, pipelined)
+    // (phase 2, pipelined: a tainted step runs again whole, a skipped one
+    // only its part in the span)
+    let part = |p: usize| -> u64 {
+        match iv {
+            Some(iv) if taint[p] == 0 => u64::from(iv[p].1 - iv[p].0),
+            _ => d.cost[p],
+        }
+    };
     let mut start = vec![0i64; n];
     let mut cp = 0u64;
     let mut work2 = 0u64;
@@ -1879,10 +1967,13 @@ fn skip_model(
             }
         }
         start[p] = s;
-        cp = cp.max(s as u64 + d.cost[p]);
-        work2 += d.cost[p];
+        cp = cp.max(s as u64 + part(p));
+        work2 += part(p);
     }
-    let skipped: u64 = (0..n).filter(|&p| skip[p]).map(|p| d.cost[p]).sum();
+    let skipped: u64 = (0..n)
+        .filter(|&p| skip[p])
+        .map(|p| iv.map_or(d.cost[p], |iv| u64::from(iv[p].1 - iv[p].0)))
+        .sum();
     let t0 = cost0.map_or((total - skipped) as f64, |f| f * total as f64);
     let again_c: u64 = (0..n)
         .filter(|&p| !skip[p] && taint[p] > 0)
