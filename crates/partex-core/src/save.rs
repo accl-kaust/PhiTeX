@@ -550,8 +550,10 @@ impl<H: Host, T: Tracker> Tex<H, T> {
     pub(crate) fn eq_word_define(&mut self, p: Pointer, w: i32) -> Result<(), Jump> {
         self.memo.wrote_local(self.cur_level());
         if !self.assignment_reads(p) {
-            // (at level one every word's level is one)
+            // (at level one every word's level is one; untraced, unless
+            // this turns \tracingassigns on)
             self.set_eqtb_int(p, w);
+            self.assign_trace(p, b"into");
             return Ok(());
         }
         let entry = self.holds_entry_value(p);

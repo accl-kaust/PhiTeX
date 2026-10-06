@@ -688,6 +688,27 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         self.set_open_parens(self.open_parens() + 1);
         self.slow_print(full);
         self.update_terminal();
+        let levels = self.int_par(TRACING_STACK_LEVELS_CODE);
+        if levels > 0 {
+            // web2c's `\tracingstacklevels` (`tracingstacklevels.ch`): the
+            // file's input level
+            self.begin_diagnostic();
+            self.print_ln();
+            self.print_char(b'~');
+            let v = self.input_ptr - 1;
+            if i32::try_from(v).is_ok_and(|v| v < levels) {
+                for _ in 0..v {
+                    self.print_char(b'.');
+                }
+            } else {
+                self.print_char(b'~');
+            }
+            self.print_str(b"INPUT ");
+            self.slow_print(self.cur_name);
+            self.slow_print(self.cur_ext);
+            self.print_ln();
+            self.end_diagnostic(false);
+        }
         self.cur_input.state = NEW_LINE;
         // (`SyncTeX`'s tag for the file: `synctex_start_input`)
         self.synctex_start_input(&full_name);

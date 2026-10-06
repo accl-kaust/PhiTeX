@@ -442,6 +442,11 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         r
     }
 
+    /// `input_ptr < tracing_stack_levels` (`tracingstacklevels.ch`).
+    pub(crate) fn input_levels_below(&self, levels: i32) -> bool {
+        i32::try_from(self.input_ptr).is_ok_and(|v| v < levels)
+    }
+
     fn macro_call_body(
         &mut self,
         pstack: &mut alloc::vec::Vec<Option<crate::tok::Tokens>>,
@@ -452,11 +457,30 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         let mut r: i32 = 0;
         let mut n = 0usize;
         if self.int_par(TRACING_MACROS_CODE) > 0 {
-            // §401: show the text of the macro being expanded.
+            // §401: show the text of the macro being expanded; web2c's
+            // `\tracingstacklevels` (`tracingstacklevels.ch`) first shows
+            // the input stack's depth, and past it only the name.
             self.begin_diagnostic();
-            self.print_ln();
-            self.print_cs(self.warning_index);
-            self.token_show(&ref_count);
+            let levels = self.int_par(TRACING_STACK_LEVELS_CODE);
+            if levels > 0 {
+                if self.input_levels_below(levels) {
+                    self.print_ln();
+                    self.print_char(b'~');
+                    for _ in 0..self.input_ptr {
+                        self.print_char(b'.');
+                    }
+                    self.print_cs(self.warning_index);
+                    self.token_show(&ref_count);
+                } else {
+                    self.print_char(b'~');
+                    self.print_char(b'~');
+                    self.print_cs(self.warning_index);
+                }
+            } else {
+                self.print_ln();
+                self.print_cs(self.warning_index);
+                self.token_show(&ref_count);
+            }
             self.end_diagnostic(false);
         }
         // (the body read in place: the list is held once, by `ref_count`)
@@ -670,7 +694,10 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                     self.arg_active = false; // the argument is taken
                     pstack.push(Some(v));
                     n += 1;
-                    if self.int_par(TRACING_MACROS_CODE) > 0 {
+                    if self.int_par(TRACING_MACROS_CODE) > 0
+                        && (self.int_par(TRACING_STACK_LEVELS_CODE) == 0
+                            || self.input_levels_below(self.int_par(TRACING_STACK_LEVELS_CODE)))
+                    {
                         self.begin_diagnostic();
                         self.print_nl(&[u8::try_from(match_chr).unwrap_or(0)]);
                         self.print_int(i32::try_from(n).unwrap_or(0));

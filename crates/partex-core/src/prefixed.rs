@@ -92,6 +92,9 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                 }
                 return self.back_error();
             }
+            if self.int_par(TRACING_COMMANDS_CODE) > 2 && self.etex_ex() {
+                self.show_cur_cmd_chr();
+            }
         }
         // §1213: discard the prefixes \long and \outer (and e-TeX's
         // \protected) if they are irrelevant.
