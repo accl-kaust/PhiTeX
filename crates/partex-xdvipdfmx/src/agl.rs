@@ -412,15 +412,16 @@ fn put_unicode_glyph(name: &[u8], dst: &mut [u8], dstp: &mut usize) -> i32 {
 
 impl Dpx {
     /// `agl_init_map`.
-    pub fn agl_init_map(&mut self) {
+    pub fn agl_init_map(&mut self) -> Result<()> {
         self.agl.aglmap = HtTable::ht_init_table();
-        self.agl_load_listfile(AGL_EXTRA_LISTFILE, 0);
-        if self.agl_load_listfile(AGL_PREDEF_LISTFILE, 1) < 0 {
+        self.agl_load_listfile(AGL_EXTRA_LISTFILE, 0)?;
+        if self.agl_load_listfile(AGL_PREDEF_LISTFILE, 1)? < 0 {
             warn!("Failed to load AGL file \"pdfglyphlist.txt\"...");
         }
-        if self.agl_load_listfile(AGL_DEFAULT_LISTFILE, 0) < 0 {
+        if self.agl_load_listfile(AGL_DEFAULT_LISTFILE, 0)? < 0 {
             warn!("Failed to load AGL file \"glyphlist.txt\"...");
         }
+        Ok(())
     }
 
     /// `agl_close_map`.
@@ -429,11 +430,11 @@ impl Dpx {
     }
 
     /// `agl_load_listfile` (static): the number of entries read, or -1.
-    fn agl_load_listfile(&mut self, filename: &[u8], is_predef: i32) -> i32 {
+    fn agl_load_listfile(&mut self, filename: &[u8], is_predef: i32) -> Result<i32> {
         use crate::parse::{parse_ident, skip_white};
         let mut count = 0;
-        let Some(mut fp) = self.dpx_open_file(filename, crate::dpxfile::ResType::Agl) else {
-            return -1;
+        let Some(mut fp) = self.dpx_open_file(filename, crate::dpxfile::ResType::Agl)? else {
+            return Ok(-1);
         };
         while let Some(mut line) = fp.mfgets(WBUF_SIZE) {
             // C works on the NUL-terminated buffer.
@@ -498,7 +499,7 @@ impl Dpx {
             }
             count += 1;
         }
-        count
+        Ok(count)
     }
 
     /// `agl_lookup_list`: a copy of the entry (with its `alternate` chain).

@@ -4,6 +4,8 @@
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
+use crate::ctx::Result;
+
 /// A file's bytes and a position.
 #[derive(Clone, Debug)]
 pub struct MemFile {
@@ -86,67 +88,72 @@ impl MemFile {
         self.pos
     }
 
-    /// `get_unsigned_byte`: panics at the end ("File ended prematurely").
-    pub fn get_unsigned_byte(&mut self) -> u8 {
+    /// `get_unsigned_byte`: "File ended prematurely" at the end.
+    pub fn get_unsigned_byte(&mut self) -> Result<u8> {
         let c = self.getc();
-        assert!(c >= 0, "File ended prematurely");
-        c as u8
-    }
-    pub fn skip_bytes(&mut self, n: usize) {
-        for _ in 0..n {
-            self.get_unsigned_byte();
+        if c < 0 {
+            crate::fatal!("File ended prematurely\n");
         }
+        Ok(c as u8)
     }
-    pub fn get_signed_byte(&mut self) -> i8 {
-        self.get_unsigned_byte() as i8
+    pub fn skip_bytes(&mut self, n: usize) -> Result<()> {
+        for _ in 0..n {
+            self.get_unsigned_byte()?;
+        }
+        Ok(())
     }
-    pub fn get_unsigned_pair(&mut self) -> u16 {
-        let a = u16::from(self.get_unsigned_byte());
-        (a << 8) | u16::from(self.get_unsigned_byte())
+    pub fn get_signed_byte(&mut self) -> Result<i8> {
+        Ok(self.get_unsigned_byte()? as i8)
     }
-    pub fn get_signed_pair(&mut self) -> i16 {
-        self.get_unsigned_pair() as i16
+    pub fn get_unsigned_pair(&mut self) -> Result<u16> {
+        let a = u16::from(self.get_unsigned_byte()?);
+        Ok((a << 8) | u16::from(self.get_unsigned_byte()?))
     }
-    pub fn get_unsigned_triple(&mut self) -> u32 {
+    pub fn get_signed_pair(&mut self) -> Result<i16> {
+        Ok(self.get_unsigned_pair()? as i16)
+    }
+    pub fn get_unsigned_triple(&mut self) -> Result<u32> {
         let mut t = 0u32;
         for _ in 0..3 {
-            t = (t << 8) | u32::from(self.get_unsigned_byte());
+            t = (t << 8) | u32::from(self.get_unsigned_byte()?);
         }
-        t
+        Ok(t)
     }
-    pub fn get_signed_triple(&mut self) -> i32 {
-        let mut t = i32::from(self.get_signed_byte());
+    pub fn get_signed_triple(&mut self) -> Result<i32> {
+        let mut t = i32::from(self.get_signed_byte()?);
         for _ in 0..2 {
-            t = (t << 8) | i32::from(self.get_unsigned_byte());
+            t = (t << 8) | i32::from(self.get_unsigned_byte()?);
         }
-        t
+        Ok(t)
     }
-    pub fn get_signed_quad(&mut self) -> i32 {
-        self.get_unsigned_quad() as i32
+    pub fn get_signed_quad(&mut self) -> Result<i32> {
+        Ok(self.get_unsigned_quad()? as i32)
     }
-    pub fn get_unsigned_quad(&mut self) -> u32 {
+    pub fn get_unsigned_quad(&mut self) -> Result<u32> {
         let mut q = 0u32;
         for _ in 0..4 {
-            q = (q << 8) | u32::from(self.get_unsigned_byte());
+            q = (q << 8) | u32::from(self.get_unsigned_byte()?);
         }
-        q
+        Ok(q)
     }
     /// `get_unsigned_num(file, num)`: `num + 1` bytes; four are signed.
-    pub fn get_unsigned_num(&mut self, num: u8) -> i32 {
-        let mut v = i32::from(self.get_unsigned_byte());
+    pub fn get_unsigned_num(&mut self, num: u8) -> Result<i32> {
+        let mut v = i32::from(self.get_unsigned_byte()?);
         if num == 3 && v > 0x7f {
             v -= 0x100;
         }
         for _ in 0..num.min(3) {
-            v = (v << 8) | i32::from(self.get_unsigned_byte());
+            v = (v << 8) | i32::from(self.get_unsigned_byte()?);
         }
-        v
+        Ok(v)
     }
     /// `get_positive_quad`.
-    pub fn get_positive_quad(&mut self, kind: &str, name: &str) -> u32 {
-        let v = self.get_signed_quad();
-        assert!(v >= 0, "Bad {kind}: negative {name}: {v}");
-        v as u32
+    pub fn get_positive_quad(&mut self, kind: &str, name: &str) -> Result<u32> {
+        let v = self.get_signed_quad()?;
+        if v < 0 {
+            crate::fatal!("Bad {kind}: negative {name}: {v}");
+        }
+        Ok(v as u32)
     }
 
     /// `mfgets`: a line without its end (at most `length - 1` bytes),

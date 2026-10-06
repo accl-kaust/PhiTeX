@@ -212,13 +212,13 @@ impl CMap {
     /// `CMap_get_profile` (C returns `maxBytesOut` for
     /// `CMAP_PROF_TYPE_OUTBYTES_MIN` too).
     #[must_use]
-    pub fn CMap_get_profile(&self, type_: i32) -> i32 {
+    pub fn CMap_get_profile(&self, type_: i32) -> Result<i32> {
         match type_ {
-            CMAP_PROF_TYPE_INBYTES_MIN => self.profile.min_bytes_in,
-            CMAP_PROF_TYPE_INBYTES_MAX => self.profile.max_bytes_in,
-            CMAP_PROF_TYPE_OUTBYTES_MIN => self.profile.max_bytes_out,
-            CMAP_PROF_TYPE_OUTBYTES_MAX => self.profile.max_bytes_out,
-            _ => error!("{}: Unrecognized profile type {}.", CMAP_DEBUG_STR, type_),
+            CMAP_PROF_TYPE_INBYTES_MIN => Ok(self.profile.min_bytes_in),
+            CMAP_PROF_TYPE_INBYTES_MAX => Ok(self.profile.max_bytes_in),
+            CMAP_PROF_TYPE_OUTBYTES_MIN => Ok(self.profile.max_bytes_out),
+            CMAP_PROF_TYPE_OUTBYTES_MAX => Ok(self.profile.max_bytes_out),
+            _ => fatal!("{}: Unrecognized profile type {}.", CMAP_DEBUG_STR, type_),
         }
     }
     /// `CMap_get_name`.
@@ -434,9 +434,9 @@ impl CMap {
         outbuf: &mut [u8],
         outpos: &mut usize,
         outbytesleft: &mut i32,
-    ) {
+    ) -> Result<()> {
         if *outbytesleft < 2 {
-            error!("{}: Buffer overflow.", CMAP_DEBUG_STR);
+            fatal!("{}: Buffer overflow.", CMAP_DEBUG_STR);
         }
         let o = *outpos;
         match self.type_ {
@@ -459,6 +459,7 @@ impl CMap {
         let len = self.bytes_consumed(&inbuf[*inpos..end]);
         *inpos = (*inpos as isize + len as isize) as usize;
         *inbytesleft -= len;
+        Ok(())
     }
     /// `bytes_consumed` (static): `instr` is C's `(instr, inbytes)`. (C's
     /// outer loop never breaks, so it is always `minBytesIn` unless a
@@ -583,7 +584,7 @@ impl Dpx {
     }
 
     /// `CMap_is_valid`: follows `use_cmap` into the cache.
-    pub fn CMap_is_valid(&self, cmap: &CMap) -> bool {
+    pub fn CMap_is_valid(&self, cmap: &CMap) -> Result<bool> {
         // Quick check
         if cmap.name.is_none()
             || cmap.type_ < CMAP_TYPE_IDENTITY
@@ -591,10 +592,10 @@ impl Dpx {
             || cmap.codespace.is_empty()
             || (cmap.type_ != CMAP_TYPE_IDENTITY && cmap.map_tbl.is_none())
         {
-            return false;
+            return Ok(false);
         }
         if let Some(id) = cmap.use_cmap {
-            let ucmap = self.CMap_cache_get(id);
+            let ucmap = self.CMap_cache_get(id)?;
             let csi1 = cmap
                 .CMap_get_CIDSysInfo()
                 .expect("CMap without CIDSystemInfo");
@@ -603,28 +604,30 @@ impl Dpx {
                 .expect("CMap without CIDSystemInfo");
             if csi1.registry != csi2.registry || csi1.ordering != csi2.ordering {
                 warn!("CIDSystemInfo mismatched");
-                return false;
+                return Ok(false);
             }
         }
-        true
+        Ok(true)
     }
 
     /// `CMap_set_usecmap`: `ucmap_id` is a cache id; `cmap` must not be
     /// borrowed from the cache (a CMap being parsed is a local, so C's
     /// `cmap == ucmap` check cannot fire).
-    pub fn CMap_set_usecmap(&self, cmap: &mut CMap, ucmap_id: i32) {
-        let ucmap = self.CMap_cache_get(ucmap_id);
+    pub fn CMap_set_usecmap(&self, cmap: &mut CMap, ucmap_id: i32) -> Result<()> {
+        let ucmap = self.CMap_cache_get(ucmap_id)?;
         // Check if ucmap have neccesary information.
-        if !self.CMap_is_valid(ucmap) {
-            error!("{}: Invalid CMap.", CMAP_DEBUG_STR);
+        if !self.CMap_is_valid(ucmap)? {
+            fatal!("{}: Invalid CMap.", CMAP_DEBUG_STR);
         }
         // CMapName of cmap can be undefined when usecmap is executed in
         // CMap parsing, and CSI too.
         if let Some(name) = &cmap.name {
             if Some(name) == ucmap.name.as_ref() {
-                error!(
+                fatal!(
                     "{}: CMap refering itself not allowed: CMap {:?} --> {:?}",
-                    CMAP_DEBUG_STR, name, ucmap.name
+                    CMAP_DEBUG_STR,
+                    name,
+                    ucmap.name
                 );
             }
         }
@@ -632,9 +635,11 @@ impl Dpx {
             if csi.registry.is_some() && csi.ordering.is_some() {
                 let ucsi = ucmap.csi.as_ref().expect("CMap without CIDSystemInfo");
                 if csi.registry != ucsi.registry || csi.ordering != ucsi.ordering {
-                    error!(
+                    fatal!(
                         "{}: CMap {:?} required by {:?} have different CSI.",
-                        CMAP_DEBUG_STR, cmap.name, ucmap.name
+                        CMAP_DEBUG_STR,
+                        cmap.name,
+                        ucmap.name
                     );
                 }
             }
@@ -644,6 +649,7 @@ impl Dpx {
             cmap.CMap_add_codespacerange(&csr.code_lo, &csr.code_hi);
         }
         cmap.use_cmap = Some(ucmap_id);
+        Ok(())
     }
 
     /// `CMap_decode_char` (see the module doc for the buffers).
@@ -656,7 +662,7 @@ impl Dpx {
         outbuf: &mut [u8],
         outpos: &mut usize,
         outbytesleft: &mut i32,
-    ) {
+    ) -> Result<()> {
         let mut p = *inpos;
         let mut c: usize = 0;
         let mut count = 0;
@@ -664,28 +670,28 @@ impl Dpx {
         // First handle some special cases:
         if cmap.type_ == CMAP_TYPE_IDENTITY {
             if (*inbytesleft) % 2 != 0 {
-                error!("{}: Invalid/truncated input string.", CMAP_DEBUG_STR);
+                fatal!("{}: Invalid/truncated input string.", CMAP_DEBUG_STR);
             }
             if *outbytesleft < 2 {
-                error!("{}: Buffer overflow.", CMAP_DEBUG_STR);
+                fatal!("{}: Buffer overflow.", CMAP_DEBUG_STR);
             }
             outbuf[*outpos..*outpos + 2].copy_from_slice(&inbuf[*inpos..*inpos + 2]);
             *inpos += 2;
             *outpos += 2;
             *outbytesleft -= 2;
             *inbytesleft -= 2;
-            return;
+            return Ok(());
         }
         let Some(root) = cmap.map_tbl.as_ref() else {
             if let Some(id) = cmap.use_cmap {
-                let u = self.CMap_cache_get(id);
-                self.CMap_decode_char(u, inbuf, inpos, inbytesleft, outbuf, outpos, outbytesleft);
+                let u = self.CMap_cache_get(id)?;
+                self.CMap_decode_char(u, inbuf, inpos, inbytesleft, outbuf, outpos, outbytesleft)?;
             } else {
                 // no mapping available in this CMap
                 warn!("No mapping available for this character.");
-                cmap.handle_undefined(inbuf, inpos, inbytesleft, outbuf, outpos, outbytesleft);
+                cmap.handle_undefined(inbuf, inpos, inbytesleft, outbuf, outpos, outbytesleft)?;
             }
-            return;
+            return Ok(());
         };
 
         let mut t: &Vec<MapDef> = root;
@@ -700,17 +706,17 @@ impl Dpx {
         }
         if LOOKUP_CONTINUE(t[c].flag) {
             // need more bytes
-            error!("{}: Premature end of input string.", CMAP_DEBUG_STR);
+            fatal!("{}: Premature end of input string.", CMAP_DEBUG_STR);
         } else if !MAP_DEFINED(t[c].flag) {
             if let Some(id) = cmap.use_cmap {
-                let u = self.CMap_cache_get(id);
-                self.CMap_decode_char(u, inbuf, inpos, inbytesleft, outbuf, outpos, outbytesleft);
+                let u = self.CMap_cache_get(id)?;
+                self.CMap_decode_char(u, inbuf, inpos, inbytesleft, outbuf, outpos, outbytesleft)?;
             } else {
                 // no mapping available in this CMap
                 warn!("No character mapping available.");
                 // We know partial match found up to `count' bytes, but we
                 // will not use this information for the sake of simplicity.
-                cmap.handle_undefined(inbuf, inpos, inbytesleft, outbuf, outpos, outbytesleft);
+                cmap.handle_undefined(inbuf, inpos, inbytesleft, outbuf, outpos, outbytesleft)?;
             }
         } else {
             match MAP_TYPE(t[c].flag) {
@@ -723,21 +729,22 @@ impl Dpx {
                         let l = len as usize;
                         outbuf[*outpos..*outpos + l].copy_from_slice(&t[c].code[..l]);
                     } else {
-                        error!("{}: Buffer overflow.", CMAP_DEBUG_STR);
+                        fatal!("{}: Buffer overflow.", CMAP_DEBUG_STR);
                     }
                     *outpos = (*outpos as isize + len as isize) as usize;
                     *outbytesleft -= len;
                 }
                 MAP_IS_NAME => {
-                    error!("{}: CharName mapping not supported.", CMAP_DEBUG_STR);
+                    fatal!("{}: CharName mapping not supported.", CMAP_DEBUG_STR);
                 }
                 _ => {
-                    error!("{}: Unknown mapping type.", CMAP_DEBUG_STR);
+                    fatal!("{}: Unknown mapping type.", CMAP_DEBUG_STR);
                 }
             }
             *inbytesleft -= count;
             *inpos = p;
         }
+        Ok(())
     }
 
     /// `CMap_decode`: the number of characters decoded.
@@ -750,7 +757,7 @@ impl Dpx {
         outbuf: &mut [u8],
         outpos: &mut usize,
         outbytesleft: &mut i32,
-    ) -> i32 {
+    ) -> Result<i32> {
         let mut count = 0;
         while *inbytesleft > 0 && *outbytesleft > 0 {
             self.CMap_decode_char(
@@ -761,19 +768,19 @@ impl Dpx {
                 outbuf,
                 outpos,
                 outbytesleft,
-            );
+            )?;
             count += 1;
         }
-        count
+        Ok(count)
     }
 
     /// `CMap_cache_init`: Identity-H (0) and Identity-V (1).
-    pub fn CMap_cache_init(&mut self) {
+    pub fn CMap_cache_init(&mut self) -> Result<()> {
         let range_min: [u8; 2] = [0x00, 0x00];
         let range_max: [u8; 2] = [0xff, 0xff];
 
         if self.cmap.cache.is_some() {
-            error!("{}: Already initialized.", CMAP_DEBUG_STR);
+            fatal!("{}: Already initialized.", CMAP_DEBUG_STR);
         }
         let mut cache = Vec::with_capacity(CMAP_CACHE_ALLOC_SIZE as usize);
 
@@ -795,36 +802,37 @@ impl Dpx {
         cache.push(c1);
 
         self.cmap.cache = Some(cache);
+        Ok(())
     }
 
     /// `CMap_cache_get`.
-    pub fn CMap_cache_get(&self, id: i32) -> &CMap {
+    pub fn CMap_cache_get(&self, id: i32) -> Result<&CMap> {
         let Some(cache) = self.cmap.cache.as_ref() else {
-            error!("{}: CMap cache not initialized.", CMAP_DEBUG_STR);
+            fatal!("{}: CMap cache not initialized.", CMAP_DEBUG_STR);
         };
         if id < 0 || id as usize >= cache.len() {
-            error!("Invalid CMap ID {}", id);
+            fatal!("Invalid CMap ID {}", id);
         }
-        &cache[id as usize]
+        Ok(&cache[id as usize])
     }
 
     /// `CMap_cache_get`, to change a cached CMap (tt_cmap.c adds to one).
-    pub fn CMap_cache_get_mut(&mut self, id: i32) -> &mut CMap {
+    pub fn CMap_cache_get_mut(&mut self, id: i32) -> Result<&mut CMap> {
         let Some(cache) = self.cmap.cache.as_mut() else {
-            error!("{}: CMap cache not initialized.", CMAP_DEBUG_STR);
+            fatal!("{}: CMap cache not initialized.", CMAP_DEBUG_STR);
         };
         if id < 0 || id as usize >= cache.len() {
-            error!("Invalid CMap ID {}", id);
+            fatal!("Invalid CMap ID {}", id);
         }
-        &mut cache[id as usize]
+        Ok(&mut cache[id as usize])
     }
 
     /// `CMap_cache_find`: the id of a cached CMap by name, else loads it
     /// (`ResType::Cmap`); -1 if not found. The new id is reserved first
     /// (as C does), the CMap parsed as a local, then stored in its slot.
-    pub fn CMap_cache_find(&mut self, cmap_name: &[u8]) -> i32 {
+    pub fn CMap_cache_find(&mut self, cmap_name: &[u8]) -> Result<i32> {
         if self.cmap.cache.is_none() {
-            self.CMap_cache_init();
+            self.CMap_cache_init()?;
         }
         {
             let cache = self.cmap.cache.as_ref().unwrap();
@@ -832,17 +840,17 @@ impl Dpx {
                 // CMapName may be undefined when processing usecmap.
                 if let Some(name) = cm.CMap_get_name() {
                     if cmap_name == name {
-                        return id as i32;
+                        return Ok(id as i32);
                     }
                 }
             }
         }
 
-        let Some(mut fp) = self.dpx_open_file(cmap_name, crate::dpxfile::ResType::Cmap) else {
-            return -1;
+        let Some(mut fp) = self.dpx_open_file(cmap_name, crate::dpxfile::ResType::Cmap)? else {
+            return Ok(-1);
         };
         if crate::cmap_read::CMap_parse_check_sig(&mut fp) < 0 {
-            return -1;
+            return Ok(-1);
         }
 
         let id = {
@@ -851,11 +859,11 @@ impl Dpx {
             cache.len() - 1
         };
         let mut cmap = CMap::CMap_new();
-        if self.CMap_parse(&mut cmap, &mut fp) < 0 {
-            error!("{}: Parsing CMap file failed.", CMAP_DEBUG_STR);
+        if self.CMap_parse(&mut cmap, &mut fp)? < 0 {
+            fatal!("{}: Parsing CMap file failed.", CMAP_DEBUG_STR);
         }
         self.cmap.cache.as_mut().unwrap()[id] = cmap;
-        id as i32
+        Ok(id as i32)
     }
 
     /// `CMap_cache_close`.
@@ -864,9 +872,9 @@ impl Dpx {
     }
 
     /// `CMap_cache_add`: takes ownership; the new id.
-    pub fn CMap_cache_add(&mut self, cmap: CMap) -> i32 {
-        if !self.CMap_is_valid(&cmap) {
-            error!("{}: Invalid CMap.", CMAP_DEBUG_STR);
+    pub fn CMap_cache_add(&mut self, cmap: CMap) -> Result<i32> {
+        if !self.CMap_is_valid(&cmap)? {
+            fatal!("{}: Invalid CMap.", CMAP_DEBUG_STR);
         }
         let cache = self
             .cmap
@@ -877,10 +885,10 @@ impl Dpx {
             let cmap_name0 = cmap.CMap_get_name();
             let cmap_name1 = cm.CMap_get_name();
             if cmap_name0 == cmap_name1 {
-                error!("{}: CMap {:?} already defined.", CMAP_DEBUG_STR, cmap_name0);
+                fatal!("{}: CMap {:?} already defined.", CMAP_DEBUG_STR, cmap_name0);
             }
         }
         cache.push(cmap);
-        (cache.len() - 1) as i32
+        Ok((cache.len() - 1) as i32)
     }
 }

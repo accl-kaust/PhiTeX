@@ -479,7 +479,15 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         let written = if self.dvi.away {
             self.page_away(page)
         } else {
-            let written = self.dvi.writer.as_mut().map_or(Ok(()), |w| w.page(&page));
+            let origins = self.xdv() && self.org.is_some();
+            let written = self.dvi.writer.as_mut().map_or(Ok(()), |w| {
+                w.log_native(origins);
+                w.page(&page)
+            });
+            if origins && let Some(w) = self.dvi.writer.as_mut() {
+                let log = w.take_native_log();
+                self.origins_xdv_page(&log);
+            }
             if written.is_ok() {
                 self.host.page_written(&page);
             }
@@ -824,7 +832,6 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         let f = i32::from(w.font.0);
         self.page_font(page, f);
         let start = u32::try_from(page.native.len()).expect("page size");
-        let out = &mut page.native;
         let glyph_array = |out: &mut Vec<u8>| {
             // `make_xdv_glyph_array_data`
             out.extend_from_slice(&w.width.to_be_bytes());
@@ -837,6 +844,16 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                 out.extend_from_slice(&g.gid.to_be_bytes());
             }
         };
+        if self.org.is_some() {
+            let h = w.org.0;
+            let handles = w
+                .glyphs
+                .iter()
+                .map(|g| if h == 0 { 0 } else { h + g.cluster })
+                .collect();
+            self.origin_xdv_item(start, handles);
+        }
+        let out = &mut page.native;
         if w.actual_text {
             if !w.text.is_empty() || !w.glyphs.is_empty() {
                 out.push(SET_TEXT_AND_GLYPHS);
@@ -872,6 +889,8 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         let f = i32::from(g.font.0);
         self.page_font(page, f);
         let start = u32::try_from(page.native.len()).expect("page size");
+        // (no source: a math glyph, `\XeTeXglyph`)
+        self.origin_xdv_item(start, alloc::vec![0]);
         let out = &mut page.native;
         out.push(SET_GLYPHS);
         out.extend_from_slice(&(if vertical { 0 } else { g.width }).to_be_bytes());

@@ -268,132 +268,132 @@ impl TtMaxpTable {
 
 impl Sfnt {
     /// `tt_read_head_table`.
-    pub fn tt_read_head_table(&mut self) -> TtHeadTable {
+    pub fn tt_read_head_table(&mut self) -> Result<TtHeadTable> {
         let mut table = TtHeadTable::default();
-        self.sfnt_locate_table(b"head");
-        table.version = self.sfnt_get_ulong();
-        table.font_revision = self.sfnt_get_ulong();
-        table.check_sum_adjustment = self.sfnt_get_ulong();
-        table.magic_number = self.sfnt_get_ulong();
-        table.flags = self.sfnt_get_ushort();
-        table.units_per_em = self.sfnt_get_ushort();
+        self.sfnt_locate_table(b"head")?;
+        table.version = self.sfnt_get_ulong()?;
+        table.font_revision = self.sfnt_get_ulong()?;
+        table.check_sum_adjustment = self.sfnt_get_ulong()?;
+        table.magic_number = self.sfnt_get_ulong()?;
+        table.flags = self.sfnt_get_ushort()?;
+        table.units_per_em = self.sfnt_get_ushort()?;
         for i in 0..8 {
-            table.created[i] = self.sfnt_get_byte();
+            table.created[i] = self.sfnt_get_byte()?;
         }
         for i in 0..8 {
-            table.modified[i] = self.sfnt_get_byte();
+            table.modified[i] = self.sfnt_get_byte()?;
         }
-        table.x_min = self.sfnt_get_short();
-        table.y_min = self.sfnt_get_short();
-        table.x_max = self.sfnt_get_short();
-        table.y_max = self.sfnt_get_short();
-        table.mac_style = self.sfnt_get_short() as USHORT;
-        table.lowest_rec_ppem = self.sfnt_get_short() as USHORT;
-        table.font_direction_hint = self.sfnt_get_short();
-        table.index_to_loc_format = self.sfnt_get_short();
-        table.glyph_data_format = self.sfnt_get_short();
-        table
+        table.x_min = self.sfnt_get_short()?;
+        table.y_min = self.sfnt_get_short()?;
+        table.x_max = self.sfnt_get_short()?;
+        table.y_max = self.sfnt_get_short()?;
+        table.mac_style = self.sfnt_get_short()? as USHORT;
+        table.lowest_rec_ppem = self.sfnt_get_short()? as USHORT;
+        table.font_direction_hint = self.sfnt_get_short()?;
+        table.index_to_loc_format = self.sfnt_get_short()?;
+        table.glyph_data_format = self.sfnt_get_short()?;
+        Ok(table)
     }
     /// `tt_read_hhea_table`.
-    pub fn tt_read_hhea_table(&mut self) -> TtHheaTable {
+    pub fn tt_read_hhea_table(&mut self) -> Result<TtHheaTable> {
         let mut table = TtHheaTable::default();
-        self.sfnt_locate_table(b"hhea");
-        table.version = self.sfnt_get_ulong();
-        table.ascent = self.sfnt_get_short();
-        table.descent = self.sfnt_get_short();
-        table.line_gap = self.sfnt_get_short();
-        table.advance_width_max = self.sfnt_get_ushort();
-        table.min_left_side_bearing = self.sfnt_get_short();
-        table.min_right_side_bearing = self.sfnt_get_short();
-        table.x_max_extent = self.sfnt_get_short();
-        table.caret_slope_rise = self.sfnt_get_short();
-        table.caret_slope_run = self.sfnt_get_short();
-        table.caret_offset = self.sfnt_get_short();
+        self.sfnt_locate_table(b"hhea")?;
+        table.version = self.sfnt_get_ulong()?;
+        table.ascent = self.sfnt_get_short()?;
+        table.descent = self.sfnt_get_short()?;
+        table.line_gap = self.sfnt_get_short()?;
+        table.advance_width_max = self.sfnt_get_ushort()?;
+        table.min_left_side_bearing = self.sfnt_get_short()?;
+        table.min_right_side_bearing = self.sfnt_get_short()?;
+        table.x_max_extent = self.sfnt_get_short()?;
+        table.caret_slope_rise = self.sfnt_get_short()?;
+        table.caret_slope_run = self.sfnt_get_short()?;
+        table.caret_offset = self.sfnt_get_short()?;
         for i in 0..4 {
-            table.reserved[i] = self.sfnt_get_short();
+            table.reserved[i] = self.sfnt_get_short()?;
         }
-        table.metric_data_format = self.sfnt_get_short();
+        table.metric_data_format = self.sfnt_get_short()?;
         if table.metric_data_format != 0 {
-            error!("unknown metricDataFormat");
+            fatal!("unknown metricDataFormat");
         }
-        table.num_of_long_hor_metrics = self.sfnt_get_ushort();
+        table.num_of_long_hor_metrics = self.sfnt_get_ushort()?;
 
         let len = self.sfnt_find_table_len(b"hmtx");
         table.num_of_ex_side_bearings =
             (len.wrapping_sub(u32::from(table.num_of_long_hor_metrics) * 4) / 2) as USHORT;
-        table
+        Ok(table)
     }
     /// `tt_read_maxp_table`.
-    pub fn tt_read_maxp_table(&mut self) -> TtMaxpTable {
+    pub fn tt_read_maxp_table(&mut self) -> Result<TtMaxpTable> {
         let mut table = TtMaxpTable::default();
-        self.sfnt_locate_table(b"maxp");
-        table.version = self.sfnt_get_ulong();
-        table.num_glyphs = self.sfnt_get_ushort();
-        table.max_points = self.sfnt_get_ushort();
-        table.max_contours = self.sfnt_get_ushort();
-        table.max_component_points = self.sfnt_get_ushort();
-        table.max_component_contours = self.sfnt_get_ushort();
-        table.max_zones = self.sfnt_get_ushort();
-        table.max_twilight_points = self.sfnt_get_ushort();
-        table.max_storage = self.sfnt_get_ushort();
-        table.max_function_defs = self.sfnt_get_ushort();
-        table.max_instruction_defs = self.sfnt_get_ushort();
-        table.max_stack_elements = self.sfnt_get_ushort();
-        table.max_size_of_instructions = self.sfnt_get_ushort();
-        table.max_component_elements = self.sfnt_get_ushort();
-        table.max_component_depth = self.sfnt_get_ushort();
-        table
+        self.sfnt_locate_table(b"maxp")?;
+        table.version = self.sfnt_get_ulong()?;
+        table.num_glyphs = self.sfnt_get_ushort()?;
+        table.max_points = self.sfnt_get_ushort()?;
+        table.max_contours = self.sfnt_get_ushort()?;
+        table.max_component_points = self.sfnt_get_ushort()?;
+        table.max_component_contours = self.sfnt_get_ushort()?;
+        table.max_zones = self.sfnt_get_ushort()?;
+        table.max_twilight_points = self.sfnt_get_ushort()?;
+        table.max_storage = self.sfnt_get_ushort()?;
+        table.max_function_defs = self.sfnt_get_ushort()?;
+        table.max_instruction_defs = self.sfnt_get_ushort()?;
+        table.max_stack_elements = self.sfnt_get_ushort()?;
+        table.max_size_of_instructions = self.sfnt_get_ushort()?;
+        table.max_component_elements = self.sfnt_get_ushort()?;
+        table.max_component_depth = self.sfnt_get_ushort()?;
+        Ok(table)
     }
     /// `tt_read_vhea_table`.
-    pub fn tt_read_vhea_table(&mut self) -> TtVheaTable {
+    pub fn tt_read_vhea_table(&mut self) -> Result<TtVheaTable> {
         let mut table = TtVheaTable::default();
-        self.sfnt_locate_table(b"vhea");
-        table.version = self.sfnt_get_ulong();
-        table.vert_typo_ascender = self.sfnt_get_short();
-        table.vert_typo_descender = self.sfnt_get_short();
-        table.vert_typo_line_gap = self.sfnt_get_short();
-        table.advance_height_max = self.sfnt_get_short(); /* ushort ? */
-        table.min_top_side_bearing = self.sfnt_get_short();
-        table.min_bottom_side_bearing = self.sfnt_get_short();
-        table.y_max_extent = self.sfnt_get_short();
-        table.caret_slope_rise = self.sfnt_get_short();
-        table.caret_slope_run = self.sfnt_get_short();
-        table.caret_offset = self.sfnt_get_short();
+        self.sfnt_locate_table(b"vhea")?;
+        table.version = self.sfnt_get_ulong()?;
+        table.vert_typo_ascender = self.sfnt_get_short()?;
+        table.vert_typo_descender = self.sfnt_get_short()?;
+        table.vert_typo_line_gap = self.sfnt_get_short()?;
+        table.advance_height_max = self.sfnt_get_short()?; /* ushort ? */
+        table.min_top_side_bearing = self.sfnt_get_short()?;
+        table.min_bottom_side_bearing = self.sfnt_get_short()?;
+        table.y_max_extent = self.sfnt_get_short()?;
+        table.caret_slope_rise = self.sfnt_get_short()?;
+        table.caret_slope_run = self.sfnt_get_short()?;
+        table.caret_offset = self.sfnt_get_short()?;
         for i in 0..4 {
-            table.reserved[i] = self.sfnt_get_short();
+            table.reserved[i] = self.sfnt_get_short()?;
         }
-        table.metric_data_format = self.sfnt_get_short();
-        table.num_of_long_ver_metrics = self.sfnt_get_ushort();
+        table.metric_data_format = self.sfnt_get_short()?;
+        table.num_of_long_ver_metrics = self.sfnt_get_ushort()?;
 
         let len = self.sfnt_find_table_len(b"vmtx");
         table.num_of_ex_side_bearings =
             (len.wrapping_sub(u32::from(table.num_of_long_ver_metrics) * 4) / 2) as USHORT;
-        table
+        Ok(table)
     }
     /// `tt_read_VORG_table`: none without a VORG table.
-    pub fn tt_read_VORG_table(&mut self) -> Option<TtVorgTable> {
+    pub fn tt_read_VORG_table(&mut self) -> Result<Option<TtVorgTable>> {
         let offset = self.sfnt_find_table_pos(b"VORG");
         if offset > 0 {
             let mut vorg = TtVorgTable::default();
-            self.sfnt_locate_table(b"VORG");
-            if self.sfnt_get_ushort() != 1 || self.sfnt_get_ushort() != 0 {
-                error!("Unsupported VORG version.");
+            self.sfnt_locate_table(b"VORG")?;
+            if self.sfnt_get_ushort()? != 1 || self.sfnt_get_ushort()? != 0 {
+                fatal!("Unsupported VORG version.");
             }
-            vorg.default_vert_origin_y = self.sfnt_get_short();
-            vorg.num_vert_origin_y_metrics = self.sfnt_get_ushort();
+            vorg.default_vert_origin_y = self.sfnt_get_short()?;
+            vorg.num_vert_origin_y_metrics = self.sfnt_get_ushort()?;
             // The vertOriginYMetrics array must be sorted in increasing
             // glyphIndex order.
             for _ in 0..vorg.num_vert_origin_y_metrics {
-                let glyph_index = self.sfnt_get_ushort();
-                let vert_origin_y = self.sfnt_get_short();
+                let glyph_index = self.sfnt_get_ushort()?;
+                let vert_origin_y = self.sfnt_get_short()?;
                 vorg.vert_origin_y_metrics.push(TtVertOriginYMetrics {
                     glyph_index,
                     vert_origin_y,
                 });
             }
-            Some(vorg)
+            Ok(Some(vorg))
         } else {
-            None
+            Ok(None)
         }
     }
     /// `tt_read_longMetrics`: `numGlyphs` entries (hmtx/vmtx), read from
@@ -403,78 +403,78 @@ impl Sfnt {
         num_glyphs: USHORT,
         num_long_metrics: USHORT,
         num_ex_side_bearings: USHORT,
-    ) -> Vec<TtLongMetrics> {
+    ) -> Result<Vec<TtLongMetrics>> {
         let mut m = Vec::with_capacity(num_glyphs as usize);
         let mut last_adv: USHORT = 0;
         let mut last_esb: SHORT = 0;
         for gid in 0..num_glyphs {
             if gid < num_long_metrics {
-                last_adv = self.sfnt_get_ushort();
+                last_adv = self.sfnt_get_ushort()?;
             }
             if i32::from(gid) < i32::from(num_long_metrics) + i32::from(num_ex_side_bearings) {
-                last_esb = self.sfnt_get_short();
+                last_esb = self.sfnt_get_short()?;
             }
             m.push(TtLongMetrics {
                 advance: last_adv,
                 side_bearing: last_esb,
             });
         }
-        m
+        Ok(m)
     }
     /// `tt_read_os2__table`: defaults when the font has no OS/2 table
     /// (C never returns NULL).
-    pub fn tt_read_os2__table(&mut self) -> TtOs2Table {
+    pub fn tt_read_os2__table(&mut self) -> Result<TtOs2Table> {
         let mut table = TtOs2Table::default();
         if self.sfnt_find_table_pos(b"OS/2") > 0 {
-            self.sfnt_locate_table(b"OS/2");
-            table.version = self.sfnt_get_ushort();
-            table.x_avg_char_width = self.sfnt_get_short();
-            table.us_weight_class = self.sfnt_get_ushort();
-            table.us_width_class = self.sfnt_get_ushort();
-            table.fs_type = self.sfnt_get_short();
-            table.y_subscript_x_size = self.sfnt_get_short();
-            table.y_subscript_y_size = self.sfnt_get_short();
-            table.y_subscript_x_offset = self.sfnt_get_short();
-            table.y_subscript_y_offset = self.sfnt_get_short();
-            table.y_superscript_x_size = self.sfnt_get_short();
-            table.y_superscript_y_size = self.sfnt_get_short();
-            table.y_superscript_x_offset = self.sfnt_get_short();
-            table.y_superscript_y_offset = self.sfnt_get_short();
-            table.y_strikeout_size = self.sfnt_get_short();
-            table.y_strikeout_position = self.sfnt_get_short();
-            table.s_family_class = self.sfnt_get_short();
+            self.sfnt_locate_table(b"OS/2")?;
+            table.version = self.sfnt_get_ushort()?;
+            table.x_avg_char_width = self.sfnt_get_short()?;
+            table.us_weight_class = self.sfnt_get_ushort()?;
+            table.us_width_class = self.sfnt_get_ushort()?;
+            table.fs_type = self.sfnt_get_short()?;
+            table.y_subscript_x_size = self.sfnt_get_short()?;
+            table.y_subscript_y_size = self.sfnt_get_short()?;
+            table.y_subscript_x_offset = self.sfnt_get_short()?;
+            table.y_subscript_y_offset = self.sfnt_get_short()?;
+            table.y_superscript_x_size = self.sfnt_get_short()?;
+            table.y_superscript_y_size = self.sfnt_get_short()?;
+            table.y_superscript_x_offset = self.sfnt_get_short()?;
+            table.y_superscript_y_offset = self.sfnt_get_short()?;
+            table.y_strikeout_size = self.sfnt_get_short()?;
+            table.y_strikeout_position = self.sfnt_get_short()?;
+            table.s_family_class = self.sfnt_get_short()?;
             for i in 0..10 {
-                table.panose[i] = self.sfnt_get_byte();
+                table.panose[i] = self.sfnt_get_byte()?;
             }
-            table.ul_unicode_range1 = self.sfnt_get_ulong();
-            table.ul_unicode_range2 = self.sfnt_get_ulong();
-            table.ul_unicode_range3 = self.sfnt_get_ulong();
-            table.ul_unicode_range4 = self.sfnt_get_ulong();
+            table.ul_unicode_range1 = self.sfnt_get_ulong()?;
+            table.ul_unicode_range2 = self.sfnt_get_ulong()?;
+            table.ul_unicode_range3 = self.sfnt_get_ulong()?;
+            table.ul_unicode_range4 = self.sfnt_get_ulong()?;
             for i in 0..4 {
-                table.ach_vend_id[i] = self.sfnt_get_char();
+                table.ach_vend_id[i] = self.sfnt_get_char()?;
             }
-            table.fs_selection = self.sfnt_get_ushort();
-            table.us_first_char_index = self.sfnt_get_ushort();
-            table.us_last_char_index = self.sfnt_get_ushort();
+            table.fs_selection = self.sfnt_get_ushort()?;
+            table.us_first_char_index = self.sfnt_get_ushort()?;
+            table.us_last_char_index = self.sfnt_get_ushort()?;
             if self.sfnt_find_table_len(b"OS/2") >= 78 {
                 // Not in Apple's original 68-byte table; Microsoft's
                 // "format 0" has them.
-                table.s_typo_ascender = self.sfnt_get_short();
-                table.s_typo_descender = self.sfnt_get_short();
-                table.s_typo_line_gap = self.sfnt_get_short();
-                table.us_win_ascent = self.sfnt_get_ushort();
-                table.us_win_descent = self.sfnt_get_ushort();
+                table.s_typo_ascender = self.sfnt_get_short()?;
+                table.s_typo_descender = self.sfnt_get_short()?;
+                table.s_typo_line_gap = self.sfnt_get_short()?;
+                table.us_win_ascent = self.sfnt_get_ushort()?;
+                table.us_win_descent = self.sfnt_get_ushort()?;
                 if table.version > 0 {
                     // Format 1 adds these two.
-                    table.ul_code_page_range1 = self.sfnt_get_ulong();
-                    table.ul_code_page_range2 = self.sfnt_get_ulong();
+                    table.ul_code_page_range1 = self.sfnt_get_ulong()?;
+                    table.ul_code_page_range2 = self.sfnt_get_ulong()?;
                     if table.version > 1 {
                         // Formats 2 and 3 add five more.
-                        table.sx_height = self.sfnt_get_short();
-                        table.s_cap_height = self.sfnt_get_short();
-                        table.us_default_char = self.sfnt_get_ushort();
-                        table.us_break_char = self.sfnt_get_ushort();
-                        table.us_max_context = self.sfnt_get_ushort();
+                        table.sx_height = self.sfnt_get_short()?;
+                        table.s_cap_height = self.sfnt_get_short()?;
+                        table.us_default_char = self.sfnt_get_ushort()?;
+                        table.us_break_char = self.sfnt_get_ushort()?;
+                        table.us_max_context = self.sfnt_get_ushort()?;
                     }
                 }
             }
@@ -493,7 +493,7 @@ impl Sfnt {
                 table.panose[i] = 0; /* All Any */
             }
         }
-        table
+        Ok(table)
     }
     /// `tt_get_name` (static): name `name_id` for the platform, encoding
     /// and language, at most `destlen - 1` bytes (C's return is the
@@ -505,27 +505,27 @@ impl Sfnt {
         enco_id: USHORT,
         lang_id: USHORT,
         name_id: USHORT,
-    ) -> Vec<u8> {
+    ) -> Result<Vec<u8>> {
         let mut length: USHORT = 0;
         let mut dest = Vec::new();
 
-        let name_offset = self.sfnt_locate_table(b"name");
+        let name_offset = self.sfnt_locate_table(b"name")?;
         let is_utf16_be = plat_id == 3 && enco_id == 1 && lang_id == 0x0409 && name_id == 6;
 
-        if self.sfnt_get_ushort() != 0 {
-            error!("Expecting zero");
+        if self.sfnt_get_ushort()? != 0 {
+            fatal!("Expecting zero");
         }
 
-        let num_names = self.sfnt_get_ushort();
-        let string_offset = self.sfnt_get_ushort();
+        let num_names = self.sfnt_get_ushort()?;
+        let string_offset = self.sfnt_get_ushort()?;
         let mut i: i32 = 0;
         while i < i32::from(num_names) {
-            let p_id = self.sfnt_get_ushort();
-            let e_id = self.sfnt_get_ushort();
-            let l_id = self.sfnt_get_ushort();
-            let n_id = self.sfnt_get_ushort();
-            length = self.sfnt_get_ushort();
-            let offset = self.sfnt_get_ushort();
+            let p_id = self.sfnt_get_ushort()?;
+            let e_id = self.sfnt_get_ushort()?;
+            let l_id = self.sfnt_get_ushort()?;
+            let n_id = self.sfnt_get_ushort()?;
+            length = self.sfnt_get_ushort()?;
+            let offset = self.sfnt_get_ushort()?;
             // Language ID value 0xffff for `accept any language ID'.
             if p_id == plat_id
                 && e_id == enco_id
@@ -549,7 +549,7 @@ impl Sfnt {
                 );
                 if is_utf16_be {
                     for _ in 0..length {
-                        dest.push((self.sfnt_get_ushort() & 0x00ff) as u8);
+                        dest.push((self.sfnt_get_ushort()? & 0x00ff) as u8);
                     }
                 } else {
                     dest = vec![0u8; length as usize];
@@ -565,34 +565,34 @@ impl Sfnt {
             length = 0;
         }
         dest.truncate(length as usize);
-        dest
+        Ok(dest)
     }
     /// `tt_get_ps_fontname`: the PostScript name, at most `destlen - 1`
     /// bytes (C's return is its length; empty = none).
-    pub fn tt_get_ps_fontname(&mut self, destlen: USHORT) -> Vec<u8> {
+    pub fn tt_get_ps_fontname(&mut self, destlen: USHORT) -> Result<Vec<u8>> {
         // First try Mac-Roman PS name and then Win-Unicode PS name.
-        let name = self.tt_get_name(destlen, 1, 0, 0, 6);
+        let name = self.tt_get_name(destlen, 1, 0, 0, 6)?;
         if !name.is_empty() {
-            return name;
+            return Ok(name);
         }
-        let name = self.tt_get_name(destlen, 3, 1, 0x409, 6);
+        let name = self.tt_get_name(destlen, 3, 1, 0x409, 6)?;
         if !name.is_empty() {
-            return name;
+            return Ok(name);
         }
-        let name = self.tt_get_name(destlen, 3, 5, 0x412, 6);
+        let name = self.tt_get_name(destlen, 3, 5, 0x412, 6)?;
         if !name.is_empty() {
-            return name;
+            return Ok(name);
         }
 
         warn!("No valid PostScript name available");
         // Workaround for some bad TTfonts: language ID 0xffff for `accept
         // any language ID'.
-        let name = self.tt_get_name(destlen, 1, 0, 0xffff, 6);
+        let name = self.tt_get_name(destlen, 1, 0, 0xffff, 6)?;
         if name.is_empty() {
             // Finally falling back to Mac Roman name field.
             return self.tt_get_name(destlen, 1, 0, 0, 1);
         }
-        name
+        Ok(name)
     }
 }
 

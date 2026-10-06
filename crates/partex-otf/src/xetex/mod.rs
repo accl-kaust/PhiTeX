@@ -182,6 +182,9 @@ pub struct NativeGlyph {
     pub x: Fixed,
     pub y: Fixed,
     pub advance: Fixed,
+    /// The UTF-16 index in the text of the first unit of the glyph's
+    /// cluster.
+    pub cluster: u32,
 }
 
 /// `measure_native_node`'s layout of a word: its glyphs and width.
@@ -1142,6 +1145,7 @@ impl XeTeXFont {
                             x: d2fix(f64::from(pos[i].0) + x),
                             y: d2fix(f64::from(pos[i].1) + y),
                             advance: d2fix(f64::from(adv[i])),
+                            cluster: g.cluster,
                         });
                     }
                     x += f64::from(pos[glyphs.len()].0);
@@ -1160,6 +1164,7 @@ impl XeTeXFont {
                         x: d2fix(f64::from(pos[i].0)),
                         y: d2fix(f64::from(pos[i].1)),
                         advance: d2fix(f64::from(adv[i])),
+                        cluster: g.cluster,
                     });
                 }
                 out.width = if glyphs.is_empty() {

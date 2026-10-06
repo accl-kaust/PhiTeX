@@ -120,7 +120,7 @@ fn read_header(fp: &mut MemFile) -> Option<HdrInfo> {
 
 /// `read_raster_rle8`: false where decoding failed. (Writes C would make
 /// past the buffer are dropped.)
-fn read_raster_rle8(data: &mut [u8], width: i32, height: i32, fp: &mut MemFile) -> bool {
+fn read_raster_rle8(data: &mut [u8], width: i32, height: i32, fp: &mut MemFile) -> Result<bool> {
     let rowbytes = width;
     data.fill(0);
     let at = |v: i32, h: i32| {
@@ -132,26 +132,26 @@ fn read_raster_rle8(data: &mut [u8], width: i32, height: i32, fp: &mut MemFile) 
         let mut h = 0;
         let mut eol = false;
         while h < width && !eol {
-            let b0 = fp.get_unsigned_byte();
-            let b1 = fp.get_unsigned_byte();
+            let b0 = fp.get_unsigned_byte()?;
+            let b1 = fp.get_unsigned_byte()?;
             let p = at(v, h);
             if b0 == 0x00 {
                 match b1 {
                     0x00 => eol = true, // EOL
                     0x01 => eoi = true, // EOI
                     0x02 => {
-                        h += i32::from(fp.get_unsigned_byte());
-                        v += i32::from(fp.get_unsigned_byte());
+                        h += i32::from(fp.get_unsigned_byte()?);
+                        v += i32::from(fp.get_unsigned_byte()?);
                     }
                     _ => {
                         h += i32::from(b1);
                         if h > width {
                             warn!("RLE decode failed...");
-                            return false;
+                            return Ok(false);
                         }
                         let s = fp.read(usize::from(b1));
                         if s.len() != usize::from(b1) {
-                            return false;
+                            return Ok(false);
                         }
                         for (k, &c) in s.iter().enumerate() {
                             if let Some(d) = data.get_mut(p.wrapping_add(k)) {
@@ -159,7 +159,7 @@ fn read_raster_rle8(data: &mut [u8], width: i32, height: i32, fp: &mut MemFile) 
                             }
                         }
                         if b1 % 2 != 0 {
-                            fp.get_unsigned_byte();
+                            fp.get_unsigned_byte()?;
                         }
                     }
                 }
@@ -167,7 +167,7 @@ fn read_raster_rle8(data: &mut [u8], width: i32, height: i32, fp: &mut MemFile) 
                 h += i32::from(b0);
                 if h > width {
                     warn!("RLE decode failed...");
-                    return false;
+                    return Ok(false);
                 }
                 for k in 0..usize::from(b0) {
                     if let Some(d) = data.get_mut(p.wrapping_add(k)) {
@@ -178,26 +178,26 @@ fn read_raster_rle8(data: &mut [u8], width: i32, height: i32, fp: &mut MemFile) 
         }
         // Check for EOL and EOI marker
         if !eol && !eoi {
-            let b0 = fp.get_unsigned_byte();
-            let b1 = fp.get_unsigned_byte();
+            let b0 = fp.get_unsigned_byte()?;
+            let b1 = fp.get_unsigned_byte()?;
             if b0 != 0x00 {
                 warn!("RLE decode failed...");
-                return false;
+                return Ok(false);
             } else if b1 == 0x01 {
                 eoi = true;
             } else if b1 != 0x00 {
                 warn!("RLE decode failed...");
-                return false;
+                return Ok(false);
             }
         }
         // next row ...
         v += 1;
     }
-    true
+    Ok(true)
 }
 
 /// `read_raster_rle4`: false where decoding failed.
-fn read_raster_rle4(data: &mut [u8], width: i32, height: i32, fp: &mut MemFile) -> bool {
+fn read_raster_rle4(data: &mut [u8], width: i32, height: i32, fp: &mut MemFile) -> Result<bool> {
     let rowbytes = (width + 1) / 2;
     data.fill(0);
     let put = |data: &mut [u8], i: usize, f: &dyn Fn(u8) -> u8| {
@@ -211,8 +211,8 @@ fn read_raster_rle4(data: &mut [u8], width: i32, height: i32, fp: &mut MemFile) 
         let mut h = 0;
         let mut eol = false;
         while h < width && !eol {
-            let b0 = fp.get_unsigned_byte();
-            let mut b1 = fp.get_unsigned_byte();
+            let b0 = fp.get_unsigned_byte()?;
+            let mut b1 = fp.get_unsigned_byte()?;
             let mut p = usize::try_from(i64::from(v) * i64::from(rowbytes) + i64::from(h / 2))
                 .unwrap_or(usize::MAX);
             if b0 == 0x00 {
@@ -220,19 +220,19 @@ fn read_raster_rle4(data: &mut [u8], width: i32, height: i32, fp: &mut MemFile) 
                     0x00 => eol = true, // EOL
                     0x01 => eoi = true, // EOI
                     0x02 => {
-                        h += i32::from(fp.get_unsigned_byte());
-                        v += i32::from(fp.get_unsigned_byte());
+                        h += i32::from(fp.get_unsigned_byte()?);
+                        v += i32::from(fp.get_unsigned_byte()?);
                     }
                     _ => {
                         if h + i32::from(b1) > width {
                             warn!("RLE decode failed...");
-                            return false;
+                            return Ok(false);
                         }
                         let nbytes = (usize::from(b1) + 1) / 2;
                         if h % 2 != 0 {
                             // starting at hi-nib
                             for _ in 0..nbytes {
-                                let b = fp.get_unsigned_byte();
+                                let b = fp.get_unsigned_byte()?;
                                 put(data, p, &|d| d | ((b >> 4) & 0x0f));
                                 p = p.wrapping_add(1);
                                 put(data, p, &|_| (b << 4) & 0xf0);
@@ -240,7 +240,7 @@ fn read_raster_rle4(data: &mut [u8], width: i32, height: i32, fp: &mut MemFile) 
                         } else {
                             let s = fp.read(nbytes);
                             if s.len() != nbytes {
-                                return false;
+                                return Ok(false);
                             }
                             for (k, &c) in s.iter().enumerate() {
                                 put(data, p.wrapping_add(k), &|_| c);
@@ -248,14 +248,14 @@ fn read_raster_rle4(data: &mut [u8], width: i32, height: i32, fp: &mut MemFile) 
                         }
                         h += i32::from(b1);
                         if nbytes % 2 != 0 {
-                            fp.get_unsigned_byte();
+                            fp.get_unsigned_byte()?;
                         }
                     }
                 }
             } else {
                 if h + i32::from(b0) > width {
                     warn!("RLE decode failed...");
-                    return false;
+                    return Ok(false);
                 }
                 let mut b0 = b0;
                 if h % 2 != 0 {
@@ -277,22 +277,22 @@ fn read_raster_rle4(data: &mut [u8], width: i32, height: i32, fp: &mut MemFile) 
         }
         // Check for EOL and EOI marker
         if !eol && !eoi {
-            let b0 = fp.get_unsigned_byte();
-            let b1 = fp.get_unsigned_byte();
+            let b0 = fp.get_unsigned_byte()?;
+            let b1 = fp.get_unsigned_byte()?;
             if b0 != 0x00 {
                 warn!("No EOL/EOI marker. RLE decode failed...");
-                return false;
+                return Ok(false);
             } else if b1 == 0x01 {
                 eoi = true;
             } else if b1 != 0x00 {
                 warn!("No EOL/EOI marker. RLE decode failed...");
-                return false;
+                return Ok(false);
             }
         }
         // next row ...
         v += 1;
     }
-    true
+    Ok(true)
 }
 
 impl Dpx {
@@ -333,11 +333,11 @@ impl Dpx {
         clippy::cast_sign_loss,
         reason = "C's conversions"
     )]
-    pub fn bmp_include_image(&mut self, xobj_id: i32, fp: &mut MemFile) -> i32 {
+    pub fn bmp_include_image(&mut self, xobj_id: i32, fp: &mut MemFile) -> Result<i32> {
         let mut info = pdf_ximage_init_image_info();
         fp.rewind();
         let Some(hdr) = read_header(fp) else {
-            return -1;
+            return Ok(-1);
         };
         (info.xdensity, info.ydensity) = self.bmp_density(&hdr);
         info.width = hdr.width as i32;
@@ -352,7 +352,7 @@ impl Dpx {
         if hdr.bit_count < 24 {
             if hdr.bit_count != 1 && hdr.bit_count != 4 && hdr.bit_count != 8 {
                 warn!("Unsupported palette size: {}", hdr.bit_count);
-                return -1;
+                return Ok(-1);
             }
             // (`unsigned int` arithmetic)
             num_palette = (hdr
@@ -369,19 +369,19 @@ impl Dpx {
             info.num_components = 3;
         } else {
             warn!("Unkown/Unsupported BMP bitCount value: {}", hdr.bit_count);
-            return -1;
+            return Ok(-1);
         }
         if info.width == 0 || info.height == 0 || num_palette < 1 {
             warn!(
                 "Invalid BMP file: width={}, height={}, #palette={num_palette}",
                 info.width, info.height
             );
-            return -1;
+            return Ok(-1);
         }
 
         // Start reading raster data
         let stream = self.o.new_stream(STREAM_COMPRESS);
-        let stream_dict = self.o.stream_dict(stream);
+        let stream_dict = self.o.stream_dict(stream)?;
 
         // Color space: Indexed or DeviceRGB
         let colorspace = if hdr.bit_count < 24 {
@@ -391,7 +391,7 @@ impl Dpx {
                 let bgrq = fp.read(psize);
                 if bgrq.len() != psize {
                     warn!("Reading file failed...");
-                    return -1;
+                    return Ok(-1);
                 }
                 // BGR data
                 palette.extend_from_slice(&[bgrq[2], bgrq[1], bgrq[0]]);
@@ -399,17 +399,17 @@ impl Dpx {
             let lookup = self.o.new_string(&palette);
             let colorspace = self.o.new_array();
             let n = self.o.new_name(b"Indexed");
-            self.o.add_array(colorspace, n);
+            self.o.add_array(colorspace, n)?;
             let n = self.o.new_name(b"DeviceRGB");
-            self.o.add_array(colorspace, n);
+            self.o.add_array(colorspace, n)?;
             let n = self.o.new_number(f64::from(num_palette - 1));
-            self.o.add_array(colorspace, n);
-            self.o.add_array(colorspace, lookup);
+            self.o.add_array(colorspace, n)?;
+            self.o.add_array(colorspace, lookup)?;
             colorspace
         } else {
             self.o.new_name(b"DeviceRGB")
         };
-        self.o.put(stream_dict, b"ColorSpace", colorspace);
+        self.o.put(stream_dict, b"ColorSpace", colorspace)?;
 
         // Raster data of BMP is four-byte aligned.
         let rowbytes = (info.width.wrapping_mul(i32::from(hdr.bit_count)) + 7) / 8;
@@ -428,30 +428,30 @@ impl Dpx {
                 let s = fp.read(dib_rowbytes);
                 if s.len() != dib_rowbytes {
                     warn!("Reading BMP raster data failed...");
-                    self.o.release(stream);
-                    return -1;
+                    self.o.release(stream)?;
+                    return Ok(-1);
                 }
                 data[n * urow..n * urow + dib_rowbytes].copy_from_slice(s);
             }
         } else if hdr.compression == DIB_COMPRESS_RLE8 || hdr.compression == DIB_COMPRESS_RLE4 {
             data = vec![0u8; urow * uheight];
             let ok = if hdr.compression == DIB_COMPRESS_RLE8 {
-                read_raster_rle8(&mut data, info.width, info.height, fp)
+                read_raster_rle8(&mut data, info.width, info.height, fp)?
             } else {
-                read_raster_rle4(&mut data, info.width, info.height, fp)
+                read_raster_rle4(&mut data, info.width, info.height, fp)?
             };
             if !ok {
                 warn!("Reading BMP raster data failed...");
-                self.o.release(stream);
-                return -1;
+                self.o.release(stream)?;
+                return Ok(-1);
             }
         } else {
             warn!(
                 "Unknown/Unsupported compression type for BMP image: {}",
                 hdr.compression
             );
-            self.o.release(stream);
-            return -1;
+            self.o.release(stream)?;
+            return Ok(-1);
         }
 
         // gbr --> rgb
@@ -463,10 +463,10 @@ impl Dpx {
 
         if flip {
             for n in (0..uheight).rev() {
-                self.o.add_stream(stream, &data[n * urow..(n + 1) * urow]);
+                self.o.add_stream(stream, &data[n * urow..(n + 1) * urow])?;
             }
         } else {
-            self.o.add_stream(stream, &data[..urow * uheight]);
+            self.o.add_stream(stream, &data[..urow * uheight])?;
         }
 
         // Predictor is usually not so efficient for indexed images.
@@ -477,10 +477,10 @@ impl Dpx {
                 info.width,
                 info.bits_per_component,
                 info.num_components,
-            );
+            )?;
         }
-        self.pdf_ximage_set_image(xobj_id, &info, stream);
+        self.pdf_ximage_set_image(xobj_id, &info, stream)?;
 
-        0
+        Ok(0)
     }
 }

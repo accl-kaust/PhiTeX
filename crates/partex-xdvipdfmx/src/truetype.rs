@@ -103,7 +103,10 @@ fn new_cmap_table() -> Vec<u8> {
 /// `agl_decompose_glyphname` (static): the count, the `_`-separated
 /// components (at most `size`; C's `nptrs`, ERROR beyond) and the suffix
 /// after the first `.` (C's `*suffix`).
-fn agl_decompose_glyphname(glyphname: &[u8], size: i32) -> (i32, Vec<Vec<u8>>, Option<Vec<u8>>) {
+fn agl_decompose_glyphname(
+    glyphname: &[u8],
+    size: i32,
+) -> Result<(i32, Vec<Vec<u8>>, Option<Vec<u8>>)> {
     let glyphname = c_str(glyphname);
     // Chop everything after the *first* dot.
     let (base, suffix) = match glyphname.iter().position(|&c| c == b'.') {
@@ -124,7 +127,7 @@ fn agl_decompose_glyphname(glyphname: &[u8], size: i32) -> (i32, Vec<Vec<u8>>, O
             break;
         }
         if n >= size {
-            error!("Uh ah..."); /* _FIXME_ */
+            fatal!("Uh ah..."); /* _FIXME_ */
         }
         nptrs.push(base[start..u].to_vec());
         p = u + 1;
@@ -133,37 +136,40 @@ fn agl_decompose_glyphname(glyphname: &[u8], size: i32) -> (i32, Vec<Vec<u8>>, O
     }
     nptrs.push(base[start..].to_vec());
 
-    (n, nptrs, suffix)
+    Ok((n, nptrs, suffix))
 }
 
 /// `select_gsub` (static): loads/selects GSUB feature `feat`; 0, or -1.
-fn select_gsub(feat: &[u8], gm: &mut GlyphMapper<'_>) -> i32 {
+fn select_gsub(feat: &[u8], gm: &mut GlyphMapper<'_>) -> Result<i32> {
     let feat = c_str(feat);
     if feat.is_empty() {
-        return -1;
+        return Ok(-1);
     }
     let Some(gsub) = gm.gsub.as_mut() else {
-        return -1;
+        return Ok(-1);
     };
 
     // First treat as is.
     let idx = gsub.otl_gsub_select(b"*", b"*", feat);
     if idx >= 0 {
-        return 0;
+        return Ok(0);
     }
 
-    let error = gsub.otl_gsub_add_feat(b"*", b"*", feat, gm.sfont);
+    let error = gsub.otl_gsub_add_feat(b"*", b"*", feat, gm.sfont)?;
     if error == 0 {
         let idx = gsub.otl_gsub_select(b"*", b"*", feat);
-        return if idx >= 0 { 0 } else { -1 };
+        return if idx >= 0 { Ok(0) } else { Ok(-1) };
     }
 
-    -1
+    Ok(-1)
 }
 
 /// `otl_gsub_apply(gm->gsub, gid)`: -1 without a GSUB.
-fn gm_apply(gm: &GlyphMapper<'_>, gid: &mut USHORT) -> i32 {
-    gm.gsub.as_ref().map_or(-1, |g| g.otl_gsub_apply(gid))
+fn gm_apply(gm: &GlyphMapper<'_>, gid: &mut USHORT) -> Result<i32> {
+    Ok(match gm.gsub.as_ref() {
+        Some(g) => g.otl_gsub_apply(gid)?,
+        None => -1,
+    })
 }
 
 /// `composeglyph` (static): ligature substitution of `glyphs` (feature
@@ -173,32 +179,32 @@ fn composeglyph(
     feat: Option<&[u8]>,
     gm: &mut GlyphMapper<'_>,
     gid: &mut USHORT,
-) -> i32 {
+) -> Result<i32> {
     let mut t = *b"    ";
 
     let mut error = match feat.map(c_str) {
         None | Some(b"") => {
             // Meaning "Unknown".
-            select_gsub(b"(?lig|lig?|?cmp|cmp?|frac|afrc)", gm)
+            select_gsub(b"(?lig|lig?|?cmp|cmp?|frac|afrc)", gm)?
         }
         Some(feat) => {
             if feat.len() > 4 {
                 -1
             } else {
                 t[..feat.len()].copy_from_slice(feat);
-                select_gsub(&t, gm)
+                select_gsub(&t, gm)?
             }
         }
     };
 
     if error == 0 {
-        error = gm
-            .gsub
-            .as_ref()
-            .map_or(-1, |g| g.otl_gsub_apply_lig(glyphs, gid));
+        error = match gm.gsub.as_ref() {
+            Some(g) => g.otl_gsub_apply_lig(glyphs, gid)?,
+            None => -1,
+        };
     }
 
-    error
+    Ok(error)
 }
 
 /// `composeuchar` (static): `composeglyph` of the gids of `unicodes`.
@@ -207,9 +213,9 @@ fn composeuchar(
     feat: Option<&[u8]>,
     gm: &mut GlyphMapper<'_>,
     gid: &mut USHORT,
-) -> i32 {
+) -> Result<i32> {
     let Some(codetogid) = gm.codetogid.as_ref() else {
-        return -1;
+        return Ok(-1);
     };
 
     let mut error = 0;
@@ -222,10 +228,10 @@ fn composeuchar(
     }
 
     if error == 0 {
-        error = composeglyph(&gids, feat, gm, gid);
+        error = composeglyph(&gids, feat, gm, gid)?;
     }
 
-    error
+    Ok(error)
 }
 
 /// `findposttable` (static): `gid` from the `post` table.
@@ -238,15 +244,15 @@ fn findposttable(glyph_name: &[u8], gid: &mut USHORT, gm: &mut GlyphMapper<'_>) 
 }
 
 /// `setup_glyph_mapper` (static): status and the mapper (C fills `gm`).
-fn setup_glyph_mapper(sfont: &mut Sfnt) -> (i32, GlyphMapper<'_>) {
-    let nametogid = sfont.tt_read_post_table();
-    let mut codetogid = sfont.tt_cmap_read(TT_WIN, TT_WIN_UCS4);
+fn setup_glyph_mapper(sfont: &mut Sfnt) -> Result<(i32, GlyphMapper<'_>)> {
+    let nametogid = sfont.tt_read_post_table()?;
+    let mut codetogid = sfont.tt_cmap_read(TT_WIN, TT_WIN_UCS4)?;
     if codetogid.is_none() {
-        codetogid = sfont.tt_cmap_read(TT_WIN, TT_WIN_UNICODE);
+        codetogid = sfont.tt_cmap_read(TT_WIN, TT_WIN_UNICODE)?;
     }
 
     if nametogid.is_none() && codetogid.is_none() {
-        return (
+        return Ok((
             -1,
             GlyphMapper {
                 codetogid,
@@ -254,10 +260,10 @@ fn setup_glyph_mapper(sfont: &mut Sfnt) -> (i32, GlyphMapper<'_>) {
                 sfont,
                 nametogid,
             },
-        );
+        ));
     }
 
-    (
+    Ok((
         0,
         GlyphMapper {
             codetogid,
@@ -265,7 +271,7 @@ fn setup_glyph_mapper(sfont: &mut Sfnt) -> (i32, GlyphMapper<'_>) {
             sfont,
             nametogid,
         },
-    )
+    ))
 }
 
 /// `clean_glyph_mapper` (static).
@@ -286,42 +292,42 @@ impl Dpx {
         index: i32,
         encoding_id: i32,
         embedding: i32,
-    ) -> i32 {
+    ) -> Result<i32> {
         let _ = encoding_id;
         let mut embedding = embedding;
 
-        let sfont = if let Some(fp) = self.dpx_open_file(ident, ResType::TtFont) {
-            Sfnt::sfnt_open(fp)
-        } else if let Some(fp) = self.dpx_open_file(ident, ResType::DFont) {
-            Sfnt::dfont_open(fp, index)
+        let sfont = if let Some(fp) = self.dpx_open_file(ident, ResType::TtFont)? {
+            Sfnt::sfnt_open(fp)?
+        } else if let Some(fp) = self.dpx_open_file(ident, ResType::DFont)? {
+            Sfnt::dfont_open(fp, index)?
         } else {
-            return -1;
+            return Ok(-1);
         };
         let Some(mut sfont) = sfont else {
             warn!("Could not open TrueType font");
-            return -1;
+            return Ok(-1);
         };
 
         let mut error = if sfont.type_ == SFNT_TYPE_TTC {
-            let offset = sfont.ttc_read_offset(index as ULONG);
+            let offset = sfont.ttc_read_offset(index as ULONG)?;
             if offset == 0 {
                 warn!("Invalid TTC index");
                 -1
             } else {
-                sfont.sfnt_read_table_directory(offset)
+                sfont.sfnt_read_table_directory(offset)?
             }
         } else {
             let offset = sfont.offset;
-            sfont.sfnt_read_table_directory(offset)
+            sfont.sfnt_read_table_directory(offset)?
         };
         if error != 0 {
-            return -1; /* Silently */
+            return Ok(-1); /* Silently */
         }
 
         // Reading fontdict before checking fonttype conflicts with PKFONT
         // because pdf_font_get_resource() always makes a dictionary.
-        let fontdict = self.pdf_font_get_resource(font_id);
-        let descriptor = self.pdf_font_get_descriptor(font_id);
+        let fontdict = self.pdf_font_get_resource(font_id)?;
+        let descriptor = self.pdf_font_get_descriptor(font_id)?;
         if embedding == 0 {
             warn!("No-embed option not supported for TrueType font");
             embedding = 1;
@@ -331,7 +337,7 @@ impl Dpx {
         {
             // C's `char fontname[256]`, zeroed.
             let mut fontname = [0u8; 256];
-            let name = sfont.tt_get_ps_fontname(255);
+            let name = sfont.tt_get_ps_fontname(255)?;
             let mut length = name.len();
             fontname[..length].copy_from_slice(&name);
             if length < 1 {
@@ -351,20 +357,20 @@ impl Dpx {
                 error = -1;
             } else {
                 self.font.fonts[font_id as usize].fontname = Some(fontname.clone());
-                match self.tt_get_fontdesc(&mut sfont, &mut embedding, -1, 1, &fontname) {
+                match self.tt_get_fontdesc(&mut sfont, &mut embedding, -1, 1, &fontname)? {
                     None => {
                         warn!("Could not obtain necessary font info");
                         error = -1;
                     }
                     Some(tmp) => {
-                        self.o.merge_dict(descriptor, tmp);
-                        self.o.release(tmp);
+                        self.o.merge_dict(descriptor, tmp)?;
+                        self.o.release(tmp)?;
                     }
                 }
             }
         }
         if error != 0 {
-            return -1;
+            return Ok(-1);
         }
 
         if embedding == 0 {
@@ -375,16 +381,16 @@ impl Dpx {
         drop(sfont);
 
         if error == 0 {
-            self.o.put_name(fontdict, b"Type", b"Font");
-            self.o.put_name(fontdict, b"Subtype", b"TrueType");
+            self.o.put_name(fontdict, b"Type", b"Font")?;
+            self.o.put_name(fontdict, b"Subtype", b"TrueType")?;
             self.font.fonts[font_id as usize].subtype = PDF_FONT_FONTTYPE_TRUETYPE;
         }
 
-        error
+        Ok(error)
     }
 
     /// `pdf_font_load_truetype`: 0, or -1 on error.
-    pub fn pdf_font_load_truetype(&mut self, font_id: i32) -> i32 {
+    pub fn pdf_font_load_truetype(&mut self, font_id: i32) -> Result<i32> {
         let (descriptor, ident, encoding_id, index, has_reference) = {
             let font = &self.font.fonts[font_id as usize];
             (
@@ -397,7 +403,7 @@ impl Dpx {
         };
 
         if !has_reference {
-            return 0;
+            return Ok(0);
         }
         let usedchars: Vec<u8> = self.font.fonts[font_id as usize]
             .usedchars
@@ -406,19 +412,19 @@ impl Dpx {
             .borrow()
             .clone();
 
-        let sfont = if let Some(fp) = self.dpx_open_file(&ident, ResType::TtFont) {
-            Sfnt::sfnt_open(fp)
-        } else if let Some(fp) = self.dpx_open_file(&ident, ResType::DFont) {
-            Sfnt::dfont_open(fp, index)
+        let sfont = if let Some(fp) = self.dpx_open_file(&ident, ResType::TtFont)? {
+            Sfnt::sfnt_open(fp)?
+        } else if let Some(fp) = self.dpx_open_file(&ident, ResType::DFont)? {
+            Sfnt::dfont_open(fp, index)?
         } else {
-            error!(
+            fatal!(
                 "Unable to open TrueType/dfont font file: {}",
                 alloc::string::String::from_utf8_lossy(&ident)
             );
         };
 
         let Some(mut sfont) = sfont else {
-            error!(
+            fatal!(
                 "Unable to open TrueType/dfont file: {}",
                 alloc::string::String::from_utf8_lossy(&ident)
             );
@@ -427,41 +433,41 @@ impl Dpx {
             && sfont.type_ != SFNT_TYPE_TTC
             && sfont.type_ != SFNT_TYPE_DFONT
         {
-            error!(
+            fatal!(
                 "Font \"{}\" not a TrueType/dfont font?",
                 alloc::string::String::from_utf8_lossy(&ident)
             );
         }
 
         let mut error = if sfont.type_ == SFNT_TYPE_TTC {
-            let offset = sfont.ttc_read_offset(index as ULONG);
+            let offset = sfont.ttc_read_offset(index as ULONG)?;
             if offset == 0 {
-                error!("Invalid TTC index");
+                fatal!("Invalid TTC index");
             }
-            sfont.sfnt_read_table_directory(offset)
+            sfont.sfnt_read_table_directory(offset)?
         } else {
             let offset = sfont.offset;
-            sfont.sfnt_read_table_directory(offset)
+            sfont.sfnt_read_table_directory(offset)?
         };
 
         if error != 0 {
-            error!("Reading SFND table dir failed... Not a TrueType font?");
+            fatal!("Reading SFND table dir failed... Not a TrueType font?");
         }
 
         // Create new TrueType cmap table with MacRoman encoding.
         if encoding_id < 0 {
-            error = self.do_builtin_encoding(font_id, &usedchars, &mut sfont);
+            error = self.do_builtin_encoding(font_id, &usedchars, &mut sfont)?;
         } else {
-            let enc_vec = self.pdf_encoding_get_encoding(encoding_id);
-            error = self.do_custom_encoding(font_id, &enc_vec, &usedchars, &mut sfont);
+            let enc_vec = self.pdf_encoding_get_encoding(encoding_id)?;
+            error = self.do_custom_encoding(font_id, &enc_vec, &usedchars, &mut sfont)?;
         }
         if error != 0 {
-            error!("Error occured while creating font subfont");
+            fatal!("Error occured while creating font subfont");
         }
 
         for (name, must_exist) in REQUIRED_TABLE {
             if sfont.sfnt_require_table(name, must_exist) < 0 {
-                error!(
+                fatal!(
                     "Required TrueType table \"{}\" does not exist in font",
                     alloc::string::String::from_utf8_lossy(name)
                 );
@@ -469,22 +475,22 @@ impl Dpx {
         }
 
         // FontFile2
-        let Some(fontfile) = self.sfnt_create_FontFile_stream(&mut sfont) else {
-            error!("Could not created FontFile stream");
+        let Some(fontfile) = self.sfnt_create_FontFile_stream(&mut sfont)? else {
+            fatal!("Could not created FontFile stream");
         };
 
         drop(sfont);
 
         let descriptor = descriptor.expect("pdf_font_load_truetype: no descriptor");
-        let r = self.o.ref_obj(fontfile);
-        self.o.put(descriptor, b"FontFile2", r); /* XXX */
-        self.o.release(fontfile);
+        let r = self.o.ref_obj(fontfile)?;
+        self.o.put(descriptor, b"FontFile2", r)?; /* XXX */
+        self.o.release(fontfile)?;
 
-        0
+        Ok(0)
     }
 
     /// `do_widths` (static): /Widths, /FirstChar, /LastChar of the font.
-    fn do_widths(&mut self, font_id: i32, widths: &mut [f64; 256]) {
+    fn do_widths(&mut self, font_id: i32, widths: &mut [f64; 256]) -> Result<()> {
         let (fontdict, usedchars, ident) = {
             let font = &self.font.fonts[font_id as usize];
             (
@@ -512,10 +518,10 @@ impl Dpx {
         }
         if firstchar > lastchar {
             warn!("No glyphs actually used???");
-            return;
+            return Ok(());
         }
 
-        self.pdf_check_tfm_widths(&ident, widths, firstchar, lastchar, &usedchars);
+        self.pdf_check_tfm_widths(&ident, widths, firstchar, lastchar, &usedchars)?;
 
         let array = self.o.new_array();
         for code in firstchar..=lastchar {
@@ -525,18 +531,19 @@ impl Dpx {
                 0.0
             };
             let n = self.o.new_number(v);
-            self.o.add_array(array, n);
+            self.o.add_array(array, n)?;
         }
-        if self.o.array_length(array) > 0 {
-            let r = self.o.ref_obj(array);
-            self.o.put(fontdict, b"Widths", r);
+        if self.o.array_length(array)? > 0 {
+            let r = self.o.ref_obj(array)?;
+            self.o.put(fontdict, b"Widths", r)?;
         }
-        self.o.release(array);
+        self.o.release(array)?;
 
         self.o
-            .put_number(fontdict, b"FirstChar", f64::from(firstchar));
+            .put_number(fontdict, b"FirstChar", f64::from(firstchar))?;
         self.o
-            .put_number(fontdict, b"LastChar", f64::from(lastchar));
+            .put_number(fontdict, b"LastChar", f64::from(lastchar))?;
+        Ok(())
     }
 
     /// The widths of the used codes (`code_to_idx` their new gids), in
@@ -559,17 +566,22 @@ impl Dpx {
     }
 
     /// `do_builtin_encoding` (static): subset by the (1,0) cmap.
-    fn do_builtin_encoding(&mut self, font_id: i32, usedchars: &[u8], sfont: &mut Sfnt) -> i32 {
+    fn do_builtin_encoding(
+        &mut self,
+        font_id: i32,
+        usedchars: &[u8],
+        sfont: &mut Sfnt,
+    ) -> Result<i32> {
         let mut code_to_idx: [USHORT; 256] = [0; 256];
 
-        let Some(ttcm) = sfont.tt_cmap_read(TT_MAC, TT_MAC_ROMAN) else {
+        let Some(ttcm) = sfont.tt_cmap_read(TT_MAC, TT_MAC_ROMAN)? else {
             warn!("Could not read Mac-Roman TrueType cmap table...");
-            return -1;
+            return Ok(-1);
         };
 
         let mut cmap_table = new_cmap_table();
 
-        let mut glyphs = TtGlyphs::tt_build_init();
+        let mut glyphs = TtGlyphs::tt_build_init()?;
 
         let mut count: i32 = 1; /* .notdef */
         for code in 0..256usize {
@@ -585,7 +597,7 @@ impl Dpx {
             } else {
                 let mut i = glyphs.tt_find_glyph(gid);
                 if i == 0 {
-                    i = glyphs.tt_add_glyph(gid, count as USHORT); /* count returned. */
+                    i = glyphs.tt_add_glyph(gid, count as USHORT)?; /* count returned. */
                 }
                 idx = i;
             }
@@ -596,19 +608,19 @@ impl Dpx {
         }
         drop(ttcm);
 
-        if sfont.tt_build_tables(&mut glyphs) < 0 {
+        if sfont.tt_build_tables(&mut glyphs)? < 0 {
             warn!("Packing TrueType font into SFNT failed!");
-            return -1;
+            return Ok(-1);
         }
 
         let mut widths = Self::tt_code_widths(usedchars, &glyphs, &code_to_idx);
-        self.do_widths(font_id, &mut widths);
+        self.do_widths(font_id, &mut widths)?;
 
         glyphs.tt_build_finish();
 
         sfont.sfnt_set_table(b"cmap", cmap_table);
 
-        0
+        Ok(0)
     }
 
     /// `do_custom_encoding` (static): subset by glyph names; `encoding` is
@@ -619,7 +631,7 @@ impl Dpx {
         encoding: &[Option<Vec<u8>>],
         usedchars: &[u8],
         sfont: &mut Sfnt,
-    ) -> i32 {
+    ) -> Result<i32> {
         let mut code_to_idx: [USHORT; 256] = [0; 256];
         // C's uninitialized `gid`: kept across codes, as in C.
         let mut gid: USHORT = 0;
@@ -627,16 +639,16 @@ impl Dpx {
         let mut glyphs;
         let cmap_table;
         {
-            let (error, mut gm) = setup_glyph_mapper(sfont);
+            let (error, mut gm) = setup_glyph_mapper(sfont)?;
             if error != 0 {
                 warn!("No post table nor Unicode cmap found in font");
                 warn!(">> I can't find glyphs without this!");
-                return -1;
+                return Ok(-1);
             }
 
             let mut table = new_cmap_table();
 
-            glyphs = TtGlyphs::tt_build_init();
+            glyphs = TtGlyphs::tt_build_init()?;
 
             let mut count: i32 = 1; /* +1 for .notdef */
             for code in 0..256usize {
@@ -648,9 +660,9 @@ impl Dpx {
                 match encoding.get(code).and_then(|e| e.as_deref()) {
                     Some(name) if c_str(name) != b".notdef" => {
                         let error = if is_comp(name) {
-                            self.findcomposite(name, &mut gid, &mut gm)
+                            self.findcomposite(name, &mut gid, &mut gm)?
                         } else {
-                            self.resolve_glyph(name, &mut gid, &mut gm)
+                            self.resolve_glyph(name, &mut gid, &mut gm)?
                         };
 
                         // Older versions of gs had problem with glyphs (other
@@ -660,7 +672,7 @@ impl Dpx {
                         }
                         let mut i = glyphs.tt_find_glyph(gid);
                         if i == 0 {
-                            i = glyphs.tt_add_glyph(gid, count as USHORT); /* count returned. */
+                            i = glyphs.tt_add_glyph(gid, count as USHORT)?; /* count returned. */
                             count += 1;
                         }
                         idx = i;
@@ -682,19 +694,19 @@ impl Dpx {
             cmap_table = table;
         }
 
-        if sfont.tt_build_tables(&mut glyphs) < 0 {
+        if sfont.tt_build_tables(&mut glyphs)? < 0 {
             warn!("Packing TrueType font into SFNT file faild...");
-            return -1;
+            return Ok(-1);
         }
 
         let mut widths = Self::tt_code_widths(usedchars, &glyphs, &code_to_idx);
-        self.do_widths(font_id, &mut widths);
+        self.do_widths(font_id, &mut widths)?;
 
         glyphs.tt_build_finish();
 
         sfont.sfnt_set_table(b"cmap", cmap_table);
 
-        0
+        Ok(0)
     }
 
     /// `selectglyph` (static): the variant of gid `in_` for `suffix`
@@ -705,7 +717,7 @@ impl Dpx {
         suffix: &[u8],
         gm: &mut GlyphMapper<'_>,
         out: &mut USHORT,
-    ) -> i32 {
+    ) -> Result<i32> {
         let mut in_ = in_;
         let mut error;
         let mut s = c_str(suffix).to_vec();
@@ -714,9 +726,9 @@ impl Dpx {
         // knows less ambiguous cases; e.g., 'sc', 'superior', etc.
         if let Some(r) = agl_suffix_to_otltag(&s) {
             // We found feature tag for 'suffix'.
-            error = select_gsub(r, gm); /* no fallback for this */
+            error = select_gsub(r, gm)?; /* no fallback for this */
             if error == 0 {
-                error = gm_apply(gm, &mut in_);
+                error = gm_apply(gm, &mut in_)?;
             }
         } else {
             // 'suffix' may represent feature tag. Try loading GSUB only
@@ -724,16 +736,16 @@ impl Dpx {
             if s.len() > 4 {
                 error = -1; /* Uh */
             } else if s.len() == 4 {
-                error = select_gsub(&s, gm);
+                error = select_gsub(&s, gm)?;
             } else {
                 // Less than 4: pad ' '.
                 let mut t = *b"    ";
                 t[..s.len()].copy_from_slice(&s);
-                error = select_gsub(&t, gm);
+                error = select_gsub(&t, gm)?;
             }
             if error == 0 {
                 // 'suffix' represents feature tag.
-                error = gm_apply(gm, &mut in_);
+                error = gm_apply(gm, &mut in_)?;
             } else {
                 // Other case: alt1, nalt10... (alternates).
                 // q = s + strlen(s) - 1; back over the digits, not to s.
@@ -753,12 +765,12 @@ impl Dpx {
                     } else {
                         // This may be alternate substitution (C pads into
                         // `t` but selects `s`).
-                        error = select_gsub(&s, gm);
+                        error = select_gsub(&s, gm)?;
                         if error == 0 {
-                            error = gm
-                                .gsub
-                                .as_ref()
-                                .map_or(-1, |g| g.otl_gsub_apply_alt(n as USHORT, &mut in_));
+                            error = match gm.gsub.as_ref() {
+                                Some(g) => g.otl_gsub_apply_alt(n as USHORT, &mut in_)?,
+                                None => -1,
+                            };
                         }
                     }
                 }
@@ -766,7 +778,7 @@ impl Dpx {
         }
 
         *out = in_;
-        error
+        Ok(error)
     }
 
     /// `findcomposite` (static): `a_b_c` names through ligatures.
@@ -775,18 +787,18 @@ impl Dpx {
         glyphname: &[u8],
         gid: &mut USHORT,
         gm: &mut GlyphMapper<'_>,
-    ) -> i32 {
+    ) -> Result<i32> {
         let mut error = findposttable(glyphname, gid, gm);
         if error == 0 {
-            return 0;
+            return Ok(0);
         }
 
         let mut gids: [USHORT; 32] = [0; 32];
-        let (n_comp, nptrs, suffix) = agl_decompose_glyphname(glyphname, 32);
+        let (n_comp, nptrs, suffix) = agl_decompose_glyphname(glyphname, 32)?;
         error = 0;
         let mut i = 0usize;
         while error == 0 && (i as i32) < n_comp {
-            error = self.resolve_glyph(&nptrs[i], &mut gids[i], gm);
+            error = self.resolve_glyph(&nptrs[i], &mut gids[i], gm)?;
             if error != 0 {
                 warn!("Could not resolve glyph ({}th component).", i);
             }
@@ -797,23 +809,23 @@ impl Dpx {
             let n = n_comp as usize;
             match suffix.as_deref() {
                 Some(s @ (b"liga" | b"dlig" | b"hlig" | b"frac" | b"ccmp" | b"afrc")) => {
-                    error = composeglyph(&gids[..n], Some(s), gm, gid);
+                    error = composeglyph(&gids[..n], Some(s), gm, gid)?;
                 }
                 _ => {
                     // First try composing glyph.
-                    error = composeglyph(&gids[..n], None, gm, gid);
+                    error = composeglyph(&gids[..n], None, gm, gid)?;
                     if error == 0 {
                         if let Some(s) = suffix.as_deref() {
                             // a_b_c.vert
                             let g = *gid;
-                            error = self.selectglyph(g, s, gm, gid);
+                            error = self.selectglyph(g, s, gm, gid)?;
                         }
                     }
                 }
             }
         }
 
-        error
+        Ok(error)
     }
 
     /// `findparanoiac` (static): AGL lookups, alternates, compositions
@@ -823,7 +835,7 @@ impl Dpx {
         glyphname: &[u8],
         gid: &mut USHORT,
         gm: &mut GlyphMapper<'_>,
-    ) -> i32 {
+    ) -> Result<i32> {
         let mut idx: USHORT = 0;
         let mut error;
 
@@ -834,13 +846,13 @@ impl Dpx {
             }
             if let Some(suffix) = a.suffix.as_deref() {
                 let name = a.name.clone().unwrap_or_default();
-                error = self.findparanoiac(&name, &mut idx, gm);
+                error = self.findparanoiac(&name, &mut idx, gm)?;
                 if error != 0 {
-                    return error;
+                    return Ok(error);
                 }
 
                 let g = idx;
-                error = self.selectglyph(g, suffix, gm, &mut idx);
+                error = self.selectglyph(g, suffix, gm, &mut idx)?;
                 if error != 0 {
                     warn!("Variant for glyph might not be found.");
                     warn!("Using glyph name without suffix instead...");
@@ -853,7 +865,7 @@ impl Dpx {
                     .tt_cmap_lookup(a.unicodes[0] as ULONG);
             } else if a.n_components > 1 {
                 let n = a.n_components as usize;
-                error = composeuchar(&a.unicodes[..n], None, gm, &mut idx);
+                error = composeuchar(&a.unicodes[..n], None, gm, &mut idx)?;
                 if self.conf.verbose_level >= 0 {
                     if error != 0 {
                         warn!("Not found...");
@@ -868,7 +880,7 @@ impl Dpx {
         }
 
         *gid = idx;
-        if idx == 0 { -1 } else { 0 }
+        if idx == 0 { Ok(-1) } else { Ok(0) }
     }
 
     /// `resolve_glyph` (static): a glyph name to a gid; status.
@@ -877,16 +889,16 @@ impl Dpx {
         glyphname: &[u8],
         gid: &mut USHORT,
         gm: &mut GlyphMapper<'_>,
-    ) -> i32 {
+    ) -> Result<i32> {
         // First the post table; then Unicode if the Windows-Unicode cmap is
         // available.
         let mut error = findposttable(glyphname, gid, gm);
         if error == 0 {
-            return 0;
+            return Ok(0);
         }
 
         if gm.codetogid.is_none() {
-            return -1;
+            return Ok(-1);
         }
 
         let (name, suffix) = agl_chop_suffix(c_str(glyphname));
@@ -901,13 +913,13 @@ impl Dpx {
                 error = if *gid == 0 { -1 } else { 0 };
             }
             Some(name) => {
-                error = self.findparanoiac(name, gid, gm);
+                error = self.findparanoiac(name, gid, gm)?;
             }
         }
         if error == 0 {
             if let Some(suffix) = suffix.as_deref() {
                 let g = *gid;
-                error = self.selectglyph(g, suffix, gm, gid);
+                error = self.selectglyph(g, suffix, gm, gid)?;
                 if error != 0 {
                     warn!("Variant for glyph might not be found.");
                     warn!("Using glyph name without suffix instead...");
@@ -916,7 +928,7 @@ impl Dpx {
             }
         }
 
-        error
+        Ok(error)
     }
 }
 
@@ -925,7 +937,7 @@ mod tests {
     use super::*;
 
     fn d(s: &[u8]) -> (i32, Vec<Vec<u8>>, Option<Vec<u8>>) {
-        agl_decompose_glyphname(s, 32)
+        agl_decompose_glyphname(s, 32).unwrap()
     }
 
     #[test]

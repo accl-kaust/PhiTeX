@@ -258,6 +258,7 @@ impl Enc {
                     self.i32(i32::from(g.gid));
                     self.i32(g.x);
                     self.i32(g.y);
+                    self.i32(i32::try_from(g.cluster).unwrap_or(i32::MAX));
                 }
             }
             Whatsit::Glyph(g) => {
@@ -688,6 +689,7 @@ impl<'a> Dec<'a> {
                         gid: u16::try_from(self.i32()?).ok()?,
                         x: self.i32()?,
                         y: self.i32()?,
+                        cluster: u32::try_from(self.i32()?).ok()?,
                     });
                 }
                 Whatsit::NativeWord(crate::native::NativeWord {
@@ -698,6 +700,7 @@ impl<'a> Dec<'a> {
                     height,
                     depth,
                     glyphs: Arc::from(glyphs),
+                    org: crate::origin::Side(0),
                 })
             }
             8 => Whatsit::Glyph(crate::native::GlyphNode {

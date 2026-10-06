@@ -150,7 +150,7 @@ fn skip_comments(s: &[u8], p: &mut usize) {
 }
 
 /// `pst_get_token`: the next token, or none at the end.
-pub fn pst_get_token(s: &[u8], p: &mut usize) -> Option<PstObj> {
+pub fn pst_get_token(s: &[u8], p: &mut usize) -> Result<Option<PstObj>> {
     use crate::pst_obj::{
         pst_new_mark, pst_parse_boolean, pst_parse_name, pst_parse_null, pst_parse_number,
         pst_parse_string,
@@ -162,7 +162,7 @@ pub fn pst_get_token(s: &[u8], p: &mut usize) -> Option<PstObj> {
     crate::dpxutil::skip_white_spaces(s, p);
     skip_comments(s, p);
     if *p >= s.len() {
-        return None;
+        return Ok(None);
     }
     let c = s[*p];
     match c {
@@ -176,25 +176,25 @@ pub fn pst_get_token(s: &[u8], p: &mut usize) -> Option<PstObj> {
         }
         b'<' => {
             if *p + 1 >= s.len() {
-                return None;
+                return Ok(None);
             }
             let c = s[*p + 1];
             if c == b'<' {
                 obj = Some(pst_new_mark());
                 *p += 2;
             } else if c.is_ascii_hexdigit() {
-                obj = pst_parse_string(s, p);
+                obj = pst_parse_string(s, p)?;
             } else if c == b'~' {
                 // ASCII85
-                obj = pst_parse_string(s, p);
+                obj = pst_parse_string(s, p)?;
             }
         }
         b'(' => {
-            obj = pst_parse_string(s, p);
+            obj = pst_parse_string(s, p)?;
         }
         b'>' => {
             if *p + 1 >= s.len() || s[*p + 1] != b'>' {
-                error!("Unexpected end of ASCII hex string marker.");
+                fatal!("Unexpected end of ASCII hex string marker.");
             } else {
                 obj = Some(PstObj::Unknown(b">>".to_vec()));
                 *p += 2;
@@ -219,7 +219,7 @@ pub fn pst_get_token(s: &[u8], p: &mut usize) -> Option<PstObj> {
         obj = pst_parse_any(s, p);
     }
 
-    obj
+    Ok(obj)
 }
 
 #[cfg(test)]
@@ -230,7 +230,7 @@ mod tests {
         let mut p = 0;
         let mut v = Vec::new();
         while p < s.len() {
-            match pst_get_token(s, &mut p) {
+            match pst_get_token(s, &mut p).unwrap() {
                 Some(t) => v.push(t),
                 None => break,
             }
@@ -277,11 +277,14 @@ mod tests {
 
     #[test]
     fn sv() {
-        assert_eq!(PstObj::Real(0.001).pst_getSV().unwrap(), b"0.001");
-        assert_eq!(PstObj::Real(123456.0).pst_getSV().unwrap(), b"1.2346e+05");
-        assert_eq!(PstObj::Real(-2.5).pst_getSV().unwrap(), b"-2.5");
-        assert_eq!(PstObj::Real(1e-5).pst_getSV().unwrap(), b"1e-05");
-        assert_eq!(PstObj::Integer(-7).pst_getSV().unwrap(), b"-7");
-        assert_eq!(PstObj::String(b"12".to_vec()).pst_getIV(), 12);
+        assert_eq!(PstObj::Real(0.001).pst_getSV().unwrap().unwrap(), b"0.001");
+        assert_eq!(
+            PstObj::Real(123456.0).pst_getSV().unwrap().unwrap(),
+            b"1.2346e+05"
+        );
+        assert_eq!(PstObj::Real(-2.5).pst_getSV().unwrap().unwrap(), b"-2.5");
+        assert_eq!(PstObj::Real(1e-5).pst_getSV().unwrap().unwrap(), b"1e-05");
+        assert_eq!(PstObj::Integer(-7).pst_getSV().unwrap().unwrap(), b"-7");
+        assert_eq!(PstObj::String(b"12".to_vec()).pst_getIV().unwrap(), 12);
     }
 }

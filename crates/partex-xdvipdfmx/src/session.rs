@@ -314,13 +314,13 @@ impl Dpx {
         self.pdf_filename = Some(p);
     }
     /// `select_paper`.
-    fn select_paper(&mut self, paperspec: &[u8]) {
+    fn select_paper(&mut self, paperspec: &[u8]) -> Result<()> {
         if let Some(pi) = paperinfo(paperspec) {
             self.session.paper_width = pi.pswidth;
             self.session.paper_height = pi.psheight;
         } else {
             let Some(comma) = paperspec.iter().position(|&c| c == b',') else {
-                crate::error!("Unrecognized paper format");
+                crate::fatal!("Unrecognized paper format");
             };
             let mut p = 0;
             let (_, w) = crate::dpxutil::dpx_util_read_length(1.0, &paperspec[..comma], &mut p);
@@ -330,13 +330,15 @@ impl Dpx {
             self.session.paper_width = w;
             self.session.paper_height = h;
             if error != 0 || w <= 0.0 || h <= 0.0 {
-                crate::error!("Invalid paper size");
+                crate::fatal!("Invalid paper size");
             }
         }
+        Ok(())
     }
     /// `select_pages` (`-s`; xelatex never passes it).
-    fn select_pages(&mut self, _pagespec: &[u8]) {
-        crate::error!("-s (page selection) is not supported");
+    fn select_pages(&mut self, _pagespec: &[u8]) -> Result<()> {
+        crate::fatal!("-s (page selection) is not supported");
+        Ok(())
     }
     /// `compute_id_string`: the MD5 of the date (no timezone), producer,
     /// DVI and PDF names.
@@ -362,7 +364,12 @@ impl Dpx {
         p
     }
     /// `do_args_first_pass`: `args[0]` is the program name (getopt's argv).
-    fn do_args_first_pass_(&mut self, args: &[Vec<u8>], _source: Option<&[u8]>, _unsafe: i32) {
+    fn do_args_first_pass_(
+        &mut self,
+        args: &[Vec<u8>],
+        _source: Option<&[u8]>,
+        _unsafe: i32,
+    ) -> Result<()> {
         for (c, optarg) in getopt(args) {
             match c {
                 132 => self.conf.compat_mode = crate::ctx::CompatMode::Compat,
@@ -375,13 +382,14 @@ impl Dpx {
                     let a = optarg.unwrap_or_default();
                     let (v, n) = crate::fmt::strtod(&a);
                     if v < 0.0 || n == 0 {
-                        crate::error!("Invalid magnification specified");
+                        crate::fatal!("Invalid magnification specified");
                     }
                     self.session.mag = v;
                 }
                 _ => {}
             }
         }
+        Ok(())
     }
     /// `do_args_second_pass`.
     pub(crate) fn do_args_second_pass(
@@ -389,7 +397,7 @@ impl Dpx {
         args: &[Vec<u8>],
         _source: Option<&[u8]>,
         unsafe_: i32,
-    ) {
+    ) -> Result<()> {
         use crate::dpxutil::dpx_util_read_length;
         for (c, optarg) in getopt(args) {
             let a = optarg.unwrap_or_default();
@@ -402,7 +410,7 @@ impl Dpx {
                 b'r' if c < 128 => {
                     self.session.font_dpi = crate::fmt::atoi(&a) as i32;
                     if self.session.font_dpi <= 0 {
-                        crate::error!("Invalid bitmap font dpi specified");
+                        crate::fatal!("Invalid bitmap font dpi specified");
                     }
                 }
                 b'g' if c < 128 => {
@@ -433,10 +441,10 @@ impl Dpx {
                     self.session.y_offset = dpx_util_read_length(1.0, &a, &mut p).1;
                 }
                 b'o' if c < 128 => self.pdf_filename = Some(a),
-                b's' if c < 128 => self.select_pages(&a),
+                b's' if c < 128 => self.select_pages(&a)?,
                 b't' if c < 128 => self.session.enable_thumbnail = 1,
                 b'p' if c < 128 => {
-                    self.select_paper(&a);
+                    self.select_paper(&a)?;
                     self.session.has_paper_option = 1;
                 }
                 b'c' if c < 128 => self.session.ignore_colors = 1,
@@ -447,11 +455,11 @@ impl Dpx {
                     } else {
                         crate::fontmap::FONTMAP_RMODE_REPLACE
                     };
-                    self.pdf_load_fontmap_file(&a, mode);
+                    self.pdf_load_fontmap_file(&a, mode)?;
                 }
                 b'i' if c < 128 => {
                     if !a.contains(&b'/') && !a.contains(&b'\\') {
-                        self.read_config_file(&a);
+                        self.read_config_file(&a)?;
                     }
                 }
                 b'V' if c < 128 => {
@@ -473,7 +481,7 @@ impl Dpx {
                 b'P' if c < 128 => {
                     let (v, n) = crate::fmt::strtol(&a, 0);
                     if n == 0 {
-                        crate::error!("Invalid encryption permission flag");
+                        crate::fatal!("Invalid encryption permission flag");
                     }
                     self.session.permission = v as u32 as i32;
                 }
@@ -481,7 +489,7 @@ impl Dpx {
                 b'C' if c < 128 => {
                     let (v, n) = crate::fmt::strtol(&a, 0);
                     if n == 0 {
-                        crate::error!("Invalid flag");
+                        crate::fatal!("Invalid flag");
                     }
                     let flags = v as u32 as i32;
                     if flags < 0 {
@@ -494,14 +502,15 @@ impl Dpx {
                 _ => {}
             }
         }
+        Ok(())
     }
     /// `cleanup`.
     fn cleanup(&mut self) {}
     /// `read_config_file`: each line `option [value]` through
     /// `do_args_second_pass`.
-    pub fn read_config_file(&mut self, config: &[u8]) {
-        let Some(mut fp) = self.dpx_open_file(config, crate::dpxfile::ResType::Text) else {
-            return;
+    pub fn read_config_file(&mut self, config: &[u8]) -> Result<()> {
+        let Some(mut fp) = self.dpx_open_file(config, crate::dpxfile::ResType::Text)? else {
+            return Ok(());
         };
         while let Some(line) = fp.mfgets(1024) {
             let mut p = 0;
@@ -524,15 +533,16 @@ impl Dpx {
                     argv.push(v.unwrap_or_default());
                 }
             }
-            self.do_args_second_pass(&argv, Some(config), 0);
+            self.do_args_second_pass(&argv, Some(config), 0)?;
         }
+        Ok(())
     }
     /// `read_config_special` (`dvipdfmx:config`): one option from
     /// `s[*pp..]`, unsafe.
-    pub fn read_config_special(&mut self, s: &[u8], pp: &mut usize) {
+    pub fn read_config_special(&mut self, s: &[u8], pp: &mut usize) -> Result<()> {
         crate::parse::skip_white(s, pp);
         if *pp >= s.len() {
-            return;
+            return Ok(());
         }
         let mut argv: Vec<Vec<u8>> = vec![b"config_special".to_vec()];
         if let Some(option) = crate::parse::parse_ident(s, pp) {
@@ -549,25 +559,28 @@ impl Dpx {
                 argv.push(v.unwrap_or_default());
             }
         }
-        self.do_args_second_pass(&argv, Some(b"config_special"), 1);
+        self.do_args_second_pass(&argv, Some(b"config_special"), 1)?;
+        Ok(())
     }
     /// `system_default`: the system paper size.
-    pub(crate) fn session_system_default(&mut self) {
+    pub(crate) fn session_system_default(&mut self) -> Result<()> {
         let name = self
             .session
             .system_paper_name
             .clone()
             .unwrap_or_else(|| DEFAULT_PAPER_NAME.to_vec());
-        self.select_paper(&name);
+        self.select_paper(&name)?;
+        Ok(())
     }
     /// `do_dvi_pages`: the whole file, linear (C's loop; the page API in
     /// `crate::api` does the same a page at a time).
-    pub fn do_dvi_pages(&mut self) {
-        crate::error!("do_dvi_pages: use crate::api::Session");
+    pub fn do_dvi_pages(&mut self) -> Result<()> {
+        crate::fatal!("do_dvi_pages: use crate::api::Session");
+        Ok(())
     }
     /// `main` (as `xdvipdfmx`, XDV in): `args` is argv; 0 on success.
-    pub fn dvipdfmx_main(&mut self, _args: &[Vec<u8>]) -> i32 {
-        crate::error!("dvipdfmx_main: use crate::api::Session");
+    pub fn dvipdfmx_main(&mut self, _args: &[Vec<u8>]) -> Result<i32> {
+        crate::fatal!("dvipdfmx_main: use crate::api::Session");
     }
 }
 
@@ -622,12 +635,14 @@ fn getopt(args: &[Vec<u8>]) -> Vec<(i32, Option<Vec<u8>>)> {
 
 impl Dpx {
     /// `do_args_first_pass` over xdvipdfmx's argv.
-    pub(crate) fn session_args_first_pass(&mut self, args: &[Vec<u8>]) {
-        self.do_args_first_pass_(args, None, 0);
+    pub(crate) fn session_args_first_pass(&mut self, args: &[Vec<u8>]) -> Result<()> {
+        self.do_args_first_pass_(args, None, 0)?;
+        Ok(())
         // (the DVI name C takes from argv is `Options::dvi_filename`)
     }
     /// `do_args_second_pass` over xdvipdfmx's argv.
-    pub(crate) fn session_args_second_pass(&mut self, args: &[Vec<u8>]) {
-        self.do_args_second_pass(args, None, 0);
+    pub(crate) fn session_args_second_pass(&mut self, args: &[Vec<u8>]) -> Result<()> {
+        self.do_args_second_pass(args, None, 0)?;
+        Ok(())
     }
 }

@@ -218,9 +218,10 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                 }
             }
             XETEX_GLYPH_BOUNDS_CODE => {
-                self.cur_val_level = DIMEN_VAL;
                 let f = self.cur_font();
-                match ot(self, f) {
+                // (a dimension, once its edge and glyph are scanned: the
+                // scans leave an integer's level)
+                let v = match ot(self, f) {
                     None => {
                         self.font_kind_error(LAST_ITEM, m, f, NOT_NATIVE)?;
                         0
@@ -242,7 +243,9 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                             0
                         }
                     }
-                }
+                };
+                self.cur_val_level = DIMEN_VAL;
+                v
             }
             _ => self.pdf_page_count()?, // `\XeTeXpdfpagecount`
         };
