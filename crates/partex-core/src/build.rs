@@ -676,11 +676,11 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         let d = self.dimen_par(SPLIT_MAX_DEPTH_CODE);
         let f = self.int_par(FLOATING_PENALTY_CODE);
         self.unsave()?;
-        let pre = if self.params.flavor != crate::params::Flavor::Tex {
+        let pre = if self.params.flavor == crate::params::Flavor::Tex {
+            false
+        } else {
             self.set_save_ptr(self.save_ptr() - 1);
             self.saved(0) != 0
-        } else {
-            false
         };
         self.set_save_ptr(self.save_ptr() - 1);
         // now `saved(0)` is the insertion number, or 255 for \vadjust

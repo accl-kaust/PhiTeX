@@ -39,7 +39,7 @@ pub struct Params {
     pub vertical: bool,
     /// `\displayindent` in displays, else 0.
     pub shift: Scaled,
-    /// e-TeX's engines (pdfTeX, XeTeX): the rows are display lines (their
+    /// e-TeX's engines (pdfTeX, `XeTeX`): the rows are display lines (their
     /// `box_lr` is `dlist`).
     pub display: bool,
     /// e-TeX's engines (a cell's `box_lr` is 0, not its span count).

@@ -1046,11 +1046,11 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             }
             self.read_font_info(u, self.cur_name, self.cur_area, s)?
         };
-        if self.params.flavor != crate::params::Flavor::Tex {
+        if self.params.flavor == crate::params::Flavor::Tex {
+            self.set_equiv(u, f);
+        } else {
             // (e-TeX defines, so that \tracingassigns shows it)
             self.define(a, u, SET_FONT, f)?;
-        } else {
-            self.set_equiv(u, f);
         }
         let w = self.eqtb(u);
         self.set_eqtb(FONT_ID_BASE + f, w);

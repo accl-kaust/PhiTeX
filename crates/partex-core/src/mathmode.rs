@@ -618,13 +618,13 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         Ok(())
     }
 
-    /// e-TeX's engines (pdfTeX, XeTeX) mark display boxes `dlist` (never
+    /// e-TeX's engines (pdfTeX, `XeTeX`) mark display boxes `dlist` (never
     /// reversed).
     fn dlist(&self) -> u8 {
-        if self.params.flavor != crate::params::Flavor::Tex {
-            lr::DLIST
-        } else {
+        if self.params.flavor == crate::params::Flavor::Tex {
             0
+        } else {
+            lr::DLIST
         }
     }
 
