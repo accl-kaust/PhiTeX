@@ -374,6 +374,44 @@ fn undotted(mut name: &[u8]) -> &[u8] {
     name
 }
 
+impl MachineHost {
+    /// The file this job wrote last under one of `names` (`same` compares
+    /// a written name with an asked one, both without a leading `./`),
+    /// read back.
+    fn written_file(
+        &mut self,
+        names: &[Option<Vec<u8>>],
+        same: impl Fn(&[u8], &[u8]) -> bool,
+    ) -> Option<OpenedFile> {
+        for n in names.iter().flatten() {
+            if let Some((&id, o)) = self
+                .opened
+                .iter()
+                .rev()
+                .find(|(_, o)| same(undotted(o), undotted(n)))
+                && let Some(w) = self.written.get(&id)
+            {
+                self.read_back.push(id);
+                // (named as kpathsea finds a file in the current
+                // directory, as the session host does; a name with a
+                // directory, as under `-output-directory`, as it is; the
+                // name written, which a case-insensitive match differs from)
+                let n = [&n[..n.len() - undotted(n).len()], undotted(o)].concat();
+                let name = if n.starts_with(b"/") || n.starts_with(b".") || n.contains(&b'/') {
+                    n
+                } else {
+                    [&b"./"[..], &n[..]].concat()
+                };
+                return Some(OpenedFile {
+                    name,
+                    contents: Arc::from(w.to_vec()),
+                });
+            }
+        }
+        None
+    }
+}
+
 impl Host for MachineHost {
     fn read_file(&mut self, name: &[u8], kind: FileKind) -> Option<OpenedFile> {
         // a file this job wrote (the last opened with that name)
@@ -384,31 +422,22 @@ impl Host for MachineHost {
             Some(name.to_vec()),
             Some(with_suffix(name, kind)),
         ];
-        for n in names.iter().flatten() {
-            if let Some((id, _)) = self
-                .opened
-                .iter()
-                .rev()
-                .find(|(_, o)| undotted(o) == undotted(n))
-                && let Some(w) = self.written.get(id)
-            {
-                self.read_back.push(*id);
-                // (named as kpathsea finds a file in the current
-                // directory, as the session host does; a name with a
-                // directory, as under `-output-directory`, as it is)
-                let name = if n.starts_with(b"/") || n.starts_with(b".") || n.contains(&b'/') {
-                    n.clone()
-                } else {
-                    [&b"./"[..], n].concat()
-                };
-                return Some(OpenedFile {
-                    name,
-                    contents: Arc::from(w.to_vec()),
-                });
-            }
+        if let Some(f) = self.written_file(&names, |o, n| o == n) {
+            return Some(f);
         }
         let found = self.native().read_file(name, kind);
         let Some(f) = found else {
+            // (kpathsea's case-insensitive search, `texmf_casefold_search`,
+            // of a name it found nowhere: a file this job wrote under
+            // another case)
+            if self.native().casefold()
+                && let Some(f) = self.written_file(&names, |o, n| {
+                    let ((od, ob), (nd, nb)) = (crate::inotify::split(o), crate::inotify::split(n));
+                    od == nd && ob.eq_ignore_ascii_case(nb)
+                })
+            {
+                return Some(f);
+            }
             // (a file not found is a cell too: absent until it appears)
             let key = miss_key(name, kind);
             if let Some(c) = self.overrides.get(&key) {

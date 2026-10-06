@@ -1,0 +1,34 @@
+% e-TeX's and web2c's behaviour pdfTeX and XeTeX share: \primitive's
+% frozen control sequence, \tracingassigns turned on, the command after
+% its prefixes, \tracingstacklevels, \vadjust pre, \special shipout,
+% \unskip and \lastbox past a final \endM, display boxes (dlist), and
+% kpathsea's case-insensitive search
+\catcode`\{=1 \catcode`\}=2 \catcode`\#=6 \catcode`\$=3 \catcode`\&=4
+\tracingonline1 \showboxdepth100 \showboxbreadth100
+\ifdefined\XeTeXversion \let\prim=\primitive \else \let\prim=\pdfprimitive \fi
+\def\relax{oops}\prim\relax
+\edef\b{\noexpand\prim\noexpand\relax}\show\b
+\tracingassigns1 \font\x=cmr10 \x \tracingassigns0
+\textfont0=\x \scriptfont0=\x \scriptscriptfont0=\x
+\textfont1=\x \scriptfont1=\x \scriptscriptfont1=\x
+\font\y=cmsy10 \textfont2=\y \scriptfont2=\y \scriptscriptfont2=\y
+\font\z=cmex10 \textfont3=\z \scriptfont3=\z \scriptscriptfont3=\z
+\hsize100pt \parfillskip0pt plus 1fil \baselineskip12pt
+{\tracingcommands3 \global\long\def\c#1{#1}\global\let\d=\c}
+\def\a#1{\b{#1}}\def\b#1{\c{#1}}
+{\tracingmacros2 \tracingstacklevels3 \a x}
+\immediate\openout1=CaseFold.tex
+\immediate\write1{\noexpand\message{case folded}}
+\immediate\closeout1
+{\tracingstacklevels2 \input casefold }
+\setbox0\vbox{\noindent A\vadjust pre{\hrule}\vadjust{\vrule}\mark{m}\vadjust pre{\kern1pt} B\par
+\hbox{C\vadjust pre{\kern2pt}\vadjust{\kern3pt}}
+\halign{#\cr D\vadjust pre{\kern4pt}\vadjust{\kern5pt}\cr}
+\noindent E$$F\vadjust pre{\kern6pt}\vadjust{\kern7pt}\eqno G\vadjust pre{\kern8pt}$$\par}
+\showbox0
+\setbox0\vbox{\TeXXeTstate=1 \noindent\beginR A\vskip0pt\endR\unskip\par
+\setbox1\hbox{\beginL B\kern1pt\endL}\unhcopy1 \unkern\showlists
+\hbox{} \beginL \hbox{X}\endL\setbox2\lastbox\showbox2 \showlists}
+\shipout\hbox{\special shipout{\the\count0}\special{plain}}
+\count0=5 \shipout\vbox{\special shipout{c=\the\count0}}
+\end

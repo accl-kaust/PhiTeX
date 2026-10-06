@@ -472,6 +472,28 @@ const CASES: &[Case] = &[
             &[MAKEINDEX, "-s", "missing.ist", "mkidx"],
         ],
     },
+    // e-TeX's and web2c's behaviour pdfTeX and XeTeX share (`\primitive`,
+    // `\tracingassigns`, `\tracingstacklevels`, `\vadjust pre`,
+    // `\special shipout`, the effective tail, display boxes) and kpathsea's
+    // case-insensitive search, in each engine
+    Case {
+        name: "etex_shared_pdftex",
+        oracle: "pdftex",
+        inputs: &["etex-shared.tex"],
+        runs: &[&["-ini", "-etex", "-interaction=nonstopmode", "etex-shared"]],
+    },
+    Case {
+        name: "etex_shared_xetex",
+        oracle: "xetex",
+        inputs: &["etex-shared.tex"],
+        runs: &[&[
+            "-ini",
+            "-etex",
+            "-interaction=nonstopmode",
+            "-no-pdf",
+            "etex-shared",
+        ]],
+    },
     // XeTeX: Unicode input, native fonts, inter-character tokens,
     // interword space shaping, the font queries, XDV output
     Case {

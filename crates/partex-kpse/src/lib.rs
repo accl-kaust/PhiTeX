@@ -1060,7 +1060,7 @@ impl Kpse {
 
     /// `texmf_casefold_search`: a name not found as it is is looked for
     /// case-insensitively in each directory searched (`pathsearch.c`).
-    fn casefold(&mut self) -> bool {
+    pub fn casefold(&mut self) -> bool {
         cnf_p(self.var_value("texmf_casefold_search").as_deref())
     }
 

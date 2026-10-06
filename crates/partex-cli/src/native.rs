@@ -510,6 +510,12 @@ impl NativeHost {
 
     /// `name` in the output directory, if there is one and `name` is
     /// relative (openclose.c).
+    /// Whether kpathsea looks for a name not found case-insensitively
+    /// (`texmf_casefold_search`).
+    pub fn casefold(&mut self) -> bool {
+        self.kpse.casefold()
+    }
+
     pub fn in_output_dir(&self, name: &[u8]) -> Option<Vec<u8>> {
         let dir = self
             .output_dir
