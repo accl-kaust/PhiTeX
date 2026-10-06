@@ -1,0 +1,33 @@
+\documentclass[11pt]{article}
+\usepackage{fontspec}
+\setmainfont{TeX Gyre Pagella}
+\setsansfont{TeX Gyre Heros}[Scale=MatchLowercase]
+\setmonofont{Latin Modern Mono}
+\newfontfamily\termes{TeX Gyre Termes}
+\usepackage{xcolor}
+\usepackage[colorlinks]{hyperref}
+\usepackage{booktabs}
+\title{XeTeX in partex}\author{Somebody}\date{1 January 2026}
+\begin{document}
+\maketitle
+\tableofcontents
+\section{Fonts}\label{sec:a}
+Pagella text with ligatures fi fl and figures 1234567890. \textsf{Heros sans}
+and \texttt{mono text}. \textit{Italic} \textbf{bold} \textsc{Small Caps}.
+{\addfontfeatures{Numbers=OldStyle}0123456789} --- en–dash, a footnote\footnote{The
+note — with “quotes”.} and a reference to Section~\ref{sec:b} on page~\pageref{sec:b}.
+\begin{itemize}
+\item First item, \emph{emphasised} and \textbf{bold}.
+\item Second \textcolor{red}{red} item.
+\end{itemize}
+\section{Hyphenation}\label{sec:b}
+\parbox{4cm}{\termes Characteristically internationalization encyclopedia
+``hyphenation'' (parenthetical) incomprehensibilities, uncharacteristically
+representational extraordinarily; co-operation—dashes—everywhere.}
+\showhyphens{internationalization incomprehensibilities}
+\begin{table}[h]\centering
+\begin{tabular}{lrc}\toprule Name & Value & Unit\\\midrule Alpha & 1.5 & m\\ Beta & 22 & s\\\bottomrule\end{tabular}
+\caption{A table}\label{tab:x}
+\end{table}
+See Table~\ref{tab:x}. Ünïcödé: ÀÉÎÕÜ àéîõü ß Œœ Ææ ł.
+\end{document}

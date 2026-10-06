@@ -45,6 +45,10 @@ pub struct MachineHost {
     lines: Arc<Mutex<Lines>>,
     /// Output files by id: the name they were opened with.
     opened: BTreeMap<u32, Vec<u8>>,
+    /// `XeTeX`'s PDF files among them: what is written is the XDV, which
+    /// xdvipdfmx makes the PDF of when the files are written out
+    /// (`FileKind::XdvPipe`).
+    piped: BTreeSet<u32>,
     /// What was written to them through the host (the `\write` files).
     written: BTreeMap<u32, WrittenBuf>,
     /// Appended to and read back since the machine last looked.
@@ -301,6 +305,7 @@ impl MachineHost {
             overrides: Arc::default(),
             lines: Arc::default(),
             opened: BTreeMap::new(),
+            piped: BTreeSet::new(),
             written: BTreeMap::new(),
             appended: BTreeMap::new(),
             read_back: Vec::new(),
@@ -452,6 +457,9 @@ impl Host for MachineHost {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(&n);
         self.opened.insert(id, n.clone());
+        if kind == FileKind::XdvPipe {
+            self.piped.insert(id);
+        }
         Some((WriteId(id), n))
     }
 
@@ -812,6 +820,7 @@ impl Linker {
             if splice && self.written.get(name) == Some(&h) {
                 continue;
             }
+            let bytes = host.piped_out(*id, name, bytes);
             let _ = std::fs::write(crate::native::path(name), &bytes);
             bytes_out += bytes.len();
             self.written.insert(name.clone(), h);
@@ -925,6 +934,7 @@ fn link_and_write(fx: &[&[partex_core::effects::Effect]], fin: &Machine) -> i32 
         if let Some(name) = host.opened.get(id)
             && !removed.contains(name)
         {
+            let bytes = host.piped_out(*id, name, bytes.into());
             let _ = std::fs::write(crate::native::path(name), bytes);
         }
     }
@@ -3106,6 +3116,7 @@ impl Watch {
                     None => continue,
                 },
             };
+            let bytes = host.piped_out(*id, name, bytes.into()).into_owned();
             files.push((name.clone(), bytes, from_link));
         }
         let main = |n: &[u8]| n.ends_with(b".pdf") || n.ends_with(b".dvi");
@@ -3174,6 +3185,7 @@ impl partex_core::machine::StoreHost for MachineHost {
             overrides,
             lines: _,
             opened,
+            piped,
             written,
             appended,
             read_back,
@@ -3191,6 +3203,7 @@ impl partex_core::machine::StoreHost for MachineHost {
         } = self;
         overrides.save(s);
         opened.save(s);
+        piped.save(s);
         written.len().save(s);
         for (id, w) in written {
             id.save(s);
@@ -3211,6 +3224,7 @@ impl partex_core::machine::StoreHost for MachineHost {
         use partex_core::persist::Persist;
         let overrides = Persist::load(l)?;
         let opened = Persist::load(l)?;
+        let piped = Persist::load(l)?;
         let n = usize::load(l)?;
         let mut written = BTreeMap::new();
         for _ in 0..n {
@@ -3227,6 +3241,7 @@ impl partex_core::machine::StoreHost for MachineHost {
             overrides,
             lines: self.lines.clone(),
             opened,
+            piped,
             written,
             appended: Persist::load(l)?,
             read_back: Persist::load(l)?,
@@ -3252,6 +3267,22 @@ impl partex_core::machine::StoreHost for MachineHost {
 }
 
 impl MachineHost {
+    /// What output file `id` (`name`) holds, written `bytes`: `XeTeX`'s
+    /// XDV made a PDF, as `xdvipdfmx -q -E -o NAME` with the XDV piped in
+    /// (`FileKind::XdvPipe`), every other file as written.
+    fn piped_out<'a>(
+        &self,
+        id: u32,
+        name: &[u8],
+        bytes: std::borrow::Cow<'a, [u8]>,
+    ) -> std::borrow::Cow<'a, [u8]> {
+        if self.piped.contains(&id) {
+            crate::dpxfiles::xdv_to_pdf(&bytes, name).into()
+        } else {
+            bytes
+        }
+    }
+
     /// Save what every clone of this host shares: the files served, the
     /// files not found, the terminal lines read.
     pub fn save_shared(&self, s: &mut partex_core::persist::Saver) {

@@ -1,0 +1,24 @@
+\catcode`\{=1 \catcode`\}=2 \catcode`\#=6 \showboxdepth=100 \showboxbreadth=100 \tracingonline1
+\font\x="[lmroman10-regular]" at 10pt \x \hyphenchar\x=`- \font\t=cmr10
+\hsize=200pt \vsize=300pt \parindent=10pt \baselineskip=12pt \tolerance=10000
+\setbox0\hbox{Hello world-wide web. Off\relax ice}\showbox0
+\setbox0\hbox{\XeTeXinterwordspaceshaping=1 AV AV Te To}\showbox0
+\XeTeXinterchartokenstate=1 \XeTeXcharclass`B=3
+\XeTeXinterchartoks 0 3 {\kern1pt\relax}\XeTeXinterchartoks 3 0 {\kern2pt\relax}
+\XeTeXinterchartoks 4095 3 {\kern3pt\relax}\XeTeXinterchartoks 3 4095 {\kern4pt\relax}
+\setbox0\hbox{aBc B}\showbox0 \showthe\XeTeXinterchartoks 0 3
+\XeTeXinterchartokenstate=0
+\setbox0\hbox{\x ab\relax cd}\showbox0
+\setbox0\hbox{\t q\x ab\relax cd\-ef}\showbox0
+\setbox0\hbox{\x ab\discretionary{x}{y}{cd}ef}\showbox0
+\XeTeXdashbreakstate=1 \setbox0\vbox{\noindent\x long^^^^2014dash^^^^2013en a-b\par}\showbox0
+\setbox0\hbox{\x \char"E9\char"1D400 x}\showbox0
+\tracinglostchars=1 \setbox0\hbox{\x a^^^^4e00b}\showbox0
+\XeTeXgenerateactualtext=1 \setbox0\hbox{\x fi}\showbox0 \XeTeXgenerateactualtext=0
+\XeTeXuseglyphmetrics=1 \setbox0\hbox{\x ace}\showbox0 \XeTeXuseglyphmetrics=0
+\message{[\the\XeTeXcountglyphs\x][\the\XeTeXOTcountscripts\x][\the\XeTeXcharglyph`a]
+  [\the\XeTeXglyphindex"a"][\XeTeXglyphname\x 36][\the\XeTeXfirstfontchar\x][\the\fontcharwd\x`A]
+  [\the\XeTeXglyphbounds1 36][\iffontchar\x"1D400 y\else n\fi][\fontname\x]}
+Hello world, this is XeTeX in partex. Off ice. {\t TFM text} more.\par
+\setbox0\vbox{\hbox{AV Te}\hbox{\x é}}\box0
+\end
