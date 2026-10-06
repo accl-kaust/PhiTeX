@@ -398,6 +398,10 @@ pub struct Tex<H: Host, T: Tracker = Untracked> {
     /// `XeTeX`'s `prev_class` and `space_class` (`xmain.rs`).
     pub(crate) prev_class: i32,
     pub(crate) space_class: i32,
+    /// `XeTeX`'s `XeTeX_default_input_mode` and `_encoding`, as an input
+    /// file's `mode` and `conv` (`input.rs`): the mode in the low byte,
+    /// the converter above it.
+    pub(crate) default_input: i32,
     /// Memoized macro calls (`memo.rs`).
     pub(crate) memo: crate::memo::Memo,
     /// Control sequence names by a hash of their text, to their location
@@ -814,6 +818,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             after_token: 0,
             prev_class: 0,
             space_class: 0,
+            default_input: 0,
             memo: crate::memo::Memo::new(p.memo),
             cs_cache: crate::hash::CsCache::default(),
             hash_memo: crate::hashmemo::HashMemo::default(),

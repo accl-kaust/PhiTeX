@@ -1131,6 +1131,11 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             {
                 self.xetex_linebreak_locale()?;
             }
+            c @ (XETEX_INPUT_ENCODING_EXTENSION_CODE | XETEX_DEFAULT_ENCODING_EXTENSION_CODE)
+                if self.params.flavor == crate::params::Flavor::XeTeX =>
+            {
+                self.xetex_encoding(c == XETEX_DEFAULT_ENCODING_EXTENSION_CODE)?;
+            }
             c if c >= PDFTEX_FIRST_EXTENSION_CODE => {
                 if !self.do_pdf_extension()? {
                     return self.pdf_error(b"ext1", b"not implemented in partex yet");

@@ -236,6 +236,19 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         self.pool_ptr += 2;
     }
 
+    /// The mode and converter a file `XeTeX` opens is read with
+    /// (`XeTeX_default_input_mode`, `_encoding`; TeX and pdfTeX read bytes).
+    pub(crate) fn default_input_mode(&mut self) -> (u8, u16) {
+        if !self.unicode {
+            return (0, 0);
+        }
+        let d = self.default_input();
+        (
+            u8::try_from(d & 0xFF).unwrap_or(0),
+            u16::try_from(d >> 8).unwrap_or(0),
+        )
+    }
+
     /// §519: `name_of_file` from area, name and extension (quotes dropped,
     /// characters through `xchr`).
     pub(crate) fn pack_file_name(&mut self, n: i32, a: i32, e: i32) {
@@ -633,9 +646,12 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                 }
                 // (glyph origins name the file as it was asked for)
                 self.origin_file_opened(&name, &full_name, &f.contents);
+                let (mode, conv) = self.default_input_mode();
                 self.input_file[self.in_open] = Some(AlphaFile {
                     data: f.contents,
                     name: found_name,
+                    mode,
+                    conv,
                     ..AlphaFile::default()
                 });
                 break;

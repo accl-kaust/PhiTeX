@@ -378,6 +378,41 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         Ok(())
     }
 
+    /// `\XeTeXinputencoding` (the current file's encoding, from its next
+    /// line) and `\XeTeXdefaultencoding` (that of files opened after).
+    pub(crate) fn xetex_encoding(&mut self, default: bool) -> Result<(), Jump> {
+        use partex_engine::web::XETEX_INPUT_MODE_AUTO;
+        // (`scan_and_pack_name`)
+        self.scan_file_name()?;
+        self.pack_file_name(self.cur_name, self.cur_area, self.cur_ext);
+        let Some(m) = self.encoding_mode_and_info() else {
+            let what: &[u8] = if default {
+                b"\\XeTeXdefaultencoding"
+            } else {
+                b"\\XeTeXinputencoding"
+            };
+            return self.pdf_error(what, b"this ICU converter is not in partex yet");
+        };
+        if default {
+            self.set_default_input(m);
+        } else if m == XETEX_INPUT_MODE_AUTO {
+            self.print_err(b"Encoding mode `auto' is not valid for \\XeTeXinputencoding");
+            self.help(&[
+                b"You can't use `auto' encoding here, only for \\XeTeXdefaultencoding.",
+                b"I'll ignore this and leave the current encoding unchanged.",
+            ]);
+            self.error()?;
+        } else if let Some(f) = self
+            .input_file
+            .get_mut(self.in_open)
+            .and_then(Option::as_mut)
+        {
+            f.mode = u8::try_from(m & 0xFF).unwrap_or(0);
+            f.conv = u16::try_from(m >> 8).unwrap_or(0);
+        }
+        Ok(())
+    }
+
     /// `\XeTeXlinebreaklocale`: the locale's name, or 0 (set as `XeTeX`
     /// sets it: in place, not saved).
     pub(crate) fn xetex_linebreak_locale(&mut self) -> Result<(), Jump> {
