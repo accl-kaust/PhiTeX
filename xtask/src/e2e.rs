@@ -546,7 +546,8 @@ const CASES: &[Case] = &[
     // TikZ through xdvipdfmx, graphicx's pictures (PNG, JPEG, BMP, PDF
     // pages), unicode-math with OpenType math fonts (one, then several by
     // range, boxes shown), polyglossia's Japanese and Chinese (ICU's line
-    // breaks); each run twice (the second reads the aux)
+    // breaks), the date of a file the job is writing (hyperxmp's); each
+    // run twice (the second reads the aux)
     Case {
         name: "xelatex",
         oracle: "xetex",
@@ -567,6 +568,7 @@ const CASES: &[Case] = &[
             "xelatex-math-body.tex",
             "xelatex-math-mix.tex",
             "xelatex-cjk.tex",
+            "xelatex-filemoddate.tex",
         ],
         runs: &[
             &[
@@ -590,6 +592,11 @@ const CASES: &[Case] = &[
                 "xelatex-math-mix",
             ],
             &["-fmt=xelatex", "-interaction=nonstopmode", "xelatex-cjk"],
+            &[
+                "-fmt=xelatex",
+                "-interaction=nonstopmode",
+                "xelatex-filemoddate",
+            ],
             &[
                 "-fmt=xelatex",
                 "-interaction=nonstopmode",
