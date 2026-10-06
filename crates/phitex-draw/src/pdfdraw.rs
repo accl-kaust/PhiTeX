@@ -278,7 +278,10 @@ fn conv(o: &pdfread::Obj) -> O {
         Obj::Stream(s) => dict(&s.dict),
         Obj::Ref(r) => O::Ref(u32::try_from(r.num).unwrap_or(0)),
         Obj::Cmd(c) => O::Op(name(c)),
-        Obj::Null | Obj::Bool(_) | Obj::Error | Obj::Eof => O::Null,
+        // (as content streams read them: `/ImageMask true` on an image
+        // `XObject` as in an inline image's `/IM true`)
+        Obj::Bool(b) => O::Op(if *b { "true" } else { "false" }.into()),
+        Obj::Null | Obj::Error | Obj::Eof => O::Null,
     }
 }
 

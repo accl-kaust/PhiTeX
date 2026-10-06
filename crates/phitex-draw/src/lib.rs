@@ -178,6 +178,94 @@ mod tests {
         );
     }
 
+    /// The PNG of data URI `uri` (as `image.rs` writes them: 8-bit RGB
+    /// or RGBA, each row filter 0): width, height and RGBA pixels.
+    fn png_rgba(uri: &str) -> (usize, usize, Vec<u8>) {
+        let b64 = uri.strip_prefix("data:image/png;base64,").unwrap();
+        let mut bytes = Vec::new();
+        let (mut acc, mut bits) = (0u32, 0);
+        for c in b64.bytes().filter(|&c| c != b'=') {
+            let v = match c {
+                b'A'..=b'Z' => c - b'A',
+                b'a'..=b'z' => c - b'a' + 26,
+                b'0'..=b'9' => c - b'0' + 52,
+                b'+' => 62,
+                _ => 63,
+            };
+            acc = (acc << 6) | u32::from(v);
+            bits += 6;
+            if bits >= 8 {
+                bits -= 8;
+                bytes.push(u8::try_from((acc >> bits) & 0xff).unwrap());
+            }
+        }
+        let be = |i: usize| u32::from_be_bytes(bytes[i..i + 4].try_into().unwrap()) as usize;
+        let (w, h, ctype) = (be(16), be(20), bytes[25]);
+        let (mut at, mut z) = (8, Vec::new());
+        while at + 8 <= bytes.len() {
+            let len = be(at);
+            if &bytes[at + 4..at + 8] == b"IDAT" {
+                z.extend_from_slice(&bytes[at + 8..at + 8 + len]);
+            }
+            at += 12 + len;
+        }
+        let rows = miniz_oxide::inflate::decompress_to_vec_zlib(&z).unwrap();
+        let n = if ctype == 6 { 4 } else { 3 };
+        let mut px = Vec::new();
+        for row in rows.chunks(1 + w * n) {
+            assert_eq!(row[0], 0);
+            for p in row[1..].chunks(n) {
+                px.extend_from_slice(&[p[0], p[1], p[2], if n == 4 { p[3] } else { 255 }]);
+            }
+        }
+        (w, h, px)
+    }
+
+    /// The data URIs in a draw list's `"I"`.
+    fn image_uris(d: &str) -> Vec<&str> {
+        d.match_indices("data:")
+            .map(|(i, _)| &d[i..i + d[i..].find('"').unwrap()])
+            .collect()
+    }
+
+    /// `/ImageMask true` on an image `XObject` (a boolean in the file's
+    /// dictionary, not a content stream's operator): a stencil, painted
+    /// in the fill colour where its bit is 0.
+    #[test]
+    fn image_masks() {
+        let content = "1 0 0 rg q 8 0 0 1 0 0 cm /Im1 Do Q";
+        let objs = [
+            "<< /Type /Catalog /Pages 2 0 R >>".to_owned(),
+            "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_owned(),
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 100] /Contents 4 0 R \
+             /Resources << /XObject << /Im1 5 0 R >> >> >>"
+                .to_owned(),
+            format!(
+                "<< /Length {} >>\nstream\n{content}\nendstream",
+                content.len()
+            ),
+            "<< /Type /XObject /Subtype /Image /Width 8 /Height 1 /ImageMask true \
+             /Length 1 >>\nstream\n\u{f}\nendstream"
+                .to_owned(),
+        ];
+        let d = crate::Pdf::open(&raw_pdf(&objs))
+            .unwrap()
+            .draw(0, &mut crate::Fonts::new())
+            .unwrap();
+        assert!(!d.contains("\"x\":"), "{d}");
+        let uris = image_uris(&d);
+        assert_eq!(uris.len(), 1, "{d}");
+        let (w, h, px) = png_rgba(uris[0]);
+        assert_eq!((w, h), (8, 1));
+        let red = [255, 0, 0, 255];
+        for (x, p) in px.chunks(4).enumerate() {
+            assert_eq!(p[3], if x < 4 { 255 } else { 0 }, "{x}");
+            if x < 4 {
+                assert_eq!(p, red);
+            }
+        }
+    }
+
     #[test]
     fn forms() {
         // (a form through its matrix, with its own fonts; a form inside
