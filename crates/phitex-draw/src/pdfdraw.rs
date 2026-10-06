@@ -255,6 +255,9 @@ impl Lex<'_> {
 /// [`O`]s. Opened once, drawn from page by page.
 pub struct Pdf {
     doc: pdfread::Doc,
+    /// (each page's object number to its index, made the first time a
+    /// link asks)
+    page_of: std::sync::OnceLock<std::collections::HashMap<u32, usize>>,
 }
 
 /// An object number as a reference (pdfTeX's and xdvipdfmx's objects are
@@ -292,7 +295,10 @@ impl Pdf {
     /// Open `data` (`None`: not a PDF that can be read).
     #[must_use]
     pub fn open(data: &Arc<[u8]>) -> Option<Self> {
-        pdfread::Doc::open(data).ok().map(|doc| Pdf { doc })
+        pdfread::Doc::open(data).ok().map(|doc| Pdf {
+            doc,
+            page_of: std::sync::OnceLock::new(),
+        })
     }
 
     /// How many pages it has.
@@ -346,6 +352,104 @@ impl Pdf {
             O::Arr(pg.media.iter().map(|&v| O::Num(v)).collect()),
         ));
         Some(O::Dict(d))
+    }
+
+    /// The page object number `r` is, by index.
+    fn page_index(&self, r: u32) -> Option<usize> {
+        self.page_of
+            .get_or_init(|| {
+                (0..self.page_count())
+                    .filter_map(|k| {
+                        let pg = self.doc.page(k + 1)?;
+                        Some((u32::try_from(pg.dict_ref.num).ok()?, k))
+                    })
+                    .collect()
+            })
+            .get(&r)
+            .copied()
+    }
+
+    /// Where a destination goes: its page (from 0) and the top it shows,
+    /// in points from the page's top (`None`: the page's top). `d` is an
+    /// array (`[page /XYZ left top zoom]`, `/FitH top`, `/FitR … top`, …)
+    /// or a name (hyperref's) looked up in the catalog.
+    fn goes(&self, d: &O, page_h: f64) -> Option<(usize, Option<f64>)> {
+        let d = self.resolve(d);
+        let a: Vec<O> = match &d {
+            O::Arr(a) => a.clone(),
+            O::Str(n) => self.doc.dest(n)?.iter().map(conv).collect(),
+            O::Name(n) => self.doc.dest(n.as_bytes())?.iter().map(conv).collect(),
+            O::Dict(_) => return self.goes(d.get("D")?, page_h),
+            _ => return None,
+        };
+        let page = match a.first()? {
+            O::Ref(r) => self.page_index(*r)?,
+            // (a remote destination's page number)
+            O::Num(n) => *n as usize,
+            _ => return None,
+        };
+        let top = match a.get(1) {
+            Some(O::Name(k)) if k == "XYZ" => a.get(3).and_then(O::num),
+            Some(O::Name(k)) if k == "FitH" || k == "FitBH" => a.get(2).and_then(O::num),
+            Some(O::Name(k)) if k == "FitR" => a.get(5).and_then(O::num),
+            _ => None,
+        };
+        Some((page, top.map(|t| r2(page_h - t))))
+    }
+
+    /// Page `page`'s links (`/Annots` of `/Subtype /Link`) as the draw
+    /// list's `"L"` entries: `[x0, y0, x1, y1, "uri"]` or `[x0, y0, x1,
+    /// y1, page, top]`, in points from the page's top left.
+    fn links(&self, page: &O, page_h: f64) -> Vec<String> {
+        let O::Arr(annots) = page.get("Annots").map_or(O::Null, |a| self.resolve(a)) else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        for a in &annots {
+            let a = self.resolve(a);
+            if !matches!(a.get("Subtype"), Some(O::Name(s)) if s == "Link") {
+                continue;
+            }
+            let Some(O::Arr(r)) = a.get("Rect").map(|r| self.resolve(r)) else {
+                continue;
+            };
+            let n: Vec<f64> = r.iter().filter_map(O::num).collect();
+            let [x0, y0, x1, y1] = n[..] else { continue };
+            let rect = format!(
+                "{},{},{},{}",
+                r2(x0.min(x1)),
+                r2(page_h - y0.max(y1)),
+                r2(x0.max(x1)),
+                r2(page_h - y0.min(y1))
+            );
+            let action = a.get("A").map(|x| self.resolve(x));
+            let to = match &action {
+                Some(act) => match act.get("S") {
+                    Some(O::Name(s)) if s == "URI" => match act.get("URI").map(|u| self.resolve(u))
+                    {
+                        Some(O::Str(u)) => Some(esc(&String::from_utf8_lossy(&u))),
+                        _ => None,
+                    },
+                    Some(O::Name(s)) if s == "GoTo" => act
+                        .get("D")
+                        .and_then(|d| self.goes(d, page_h))
+                        .map(|(p, top)| {
+                            format!("{p},{}", top.map_or("null".into(), |t| t.to_string()))
+                        }),
+                    _ => None,
+                },
+                None => a
+                    .get("Dest")
+                    .and_then(|d| self.goes(d, page_h))
+                    .map(|(p, top)| {
+                        format!("{p},{}", top.map_or("null".into(), |t| t.to_string()))
+                    }),
+            };
+            if let Some(to) = to {
+                out.push(format!("[{rect},{to}]"));
+            }
+        }
+        out
     }
 
     /// The pages, in order: each page's dictionary.
@@ -1490,6 +1594,10 @@ fn draw_with(
         }
         if out.unsupported > 0 {
             let _ = write!(tail, ",\"x\":{}", out.unsupported);
+        }
+        let links = p.links(page, h);
+        if !links.is_empty() {
+            let _ = write!(tail, ",\"L\":[{}]", links.join(","));
         }
         format!(
             "{{\"v\":2,\"w\":{},\"h\":{},\"f\":[{}],\"F\":[{}],\"g\":{{{g}}},\"t\":[{t}],\"p\":[{paths}],\"r\":[{}]{tail}}}",

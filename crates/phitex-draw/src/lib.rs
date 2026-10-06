@@ -230,6 +230,30 @@ mod tests {
             .collect()
     }
 
+    /// A page's links: a URI, and a destination on a page (its top from
+    /// the page's top), in points from the page's top left.
+    #[test]
+    fn links() {
+        let objs = [
+            "<< /Type /Catalog /Pages 2 0 R >>".to_owned(),
+            "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_owned(),
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 100] /Contents 4 0 R \
+             /Annots [<< /Type /Annot /Subtype /Link /Rect [10 10 50 20] \
+             /A << /S /URI /URI (https://example.org/) >> >> \
+             << /Type /Annot /Subtype /Link /Rect [5 5 0 0] /Dest [3 0 R /XYZ 0 80 null] >>] >>"
+                .to_owned(),
+            "<< /Length 0 >>\nstream\n\nendstream".to_owned(),
+        ];
+        let d = crate::Pdf::open(&raw_pdf(&objs))
+            .unwrap()
+            .draw(0, &mut crate::Fonts::new())
+            .unwrap();
+        assert!(
+            d.contains("\"L\":[[10,80,50,90,\"https://example.org/\"],[0,95,5,100,0,20]]"),
+            "{d}"
+        );
+    }
+
     /// A graphics state's constant alphas (`TikZ`'s `opacity`): the colours
     /// drawn as `#rrggbbaa`, back to opaque at `Q`; a blend mode is counted
     /// as not drawn, as is an operator not known.

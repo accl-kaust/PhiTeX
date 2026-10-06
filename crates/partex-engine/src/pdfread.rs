@@ -1776,6 +1776,17 @@ impl Doc {
     /// its reference).
     #[must_use]
     pub fn find_dest(&self, name: &[u8]) -> Option<usize> {
+        let a = self.dest(name)?;
+        Some(match link_dest(self, &a)? {
+            DestPage::Number => 0,
+            DestPage::Page(r) => self.find_page(r),
+        })
+    }
+
+    /// The named destination `name`'s array (`[page /XYZ left top zoom]`
+    /// and the like), from the catalog's `/Dests` or its name tree.
+    #[must_use]
+    pub fn dest(&self, name: &[u8]) -> Option<Vec<Obj>> {
         // (the catalog's dictionary is looked up with a C string)
         let cname = &name[..name.iter().position(|&c| c == 0).unwrap_or(name.len())];
         let mut dest = match &self.dests {
@@ -1788,18 +1799,14 @@ impl Doc {
             let mut touched = alloc::vec![false; self.num_objects()];
             dest = self.dest_in_tree(&Obj::Null, tree, name, &mut touched);
         }
-        let a = match dest {
-            Obj::Array(a) => a,
+        match dest {
+            Obj::Array(a) => Some(a),
             Obj::Dict(d) => match self.lookup(&d, b"D") {
-                Obj::Array(a) => a,
-                _ => return None,
+                Obj::Array(a) => Some(a),
+                _ => None,
             },
-            _ => return None,
-        };
-        Some(match link_dest(self, &a)? {
-            DestPage::Number => 0,
-            DestPage::Page(r) => self.find_page(r),
-        })
+            _ => None,
+        }
     }
 
     /// `findDestInTree`: a leaf's names in order (stopping past `name`),
