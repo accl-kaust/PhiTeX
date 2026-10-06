@@ -9,6 +9,7 @@
 //! `partex_engine::pdfread`, so the CLI's viewer and the extension's draw
 //! the same pages from the same functions.
 
+mod image;
 pub mod pdfdraw;
 pub mod type1;
 pub mod xetex;
@@ -57,11 +58,22 @@ mod tests {
             "<< /Type /Font /Subtype /Type1 /BaseFont /CMR10 /FirstChar 65 /Widths [750 708] >>"
                 .to_owned(),
         ];
+        raw_pdf(&objs)
+    }
+
+    /// A PDF of objects `objs` (numbered from 1; 1 the catalog), a char
+    /// below 256 a byte (binary streams in the tests' text).
+    fn raw_pdf(objs: &[String]) -> Arc<[u8]> {
         let mut out = b"%PDF-1.4\n".to_vec();
         let mut at = Vec::new();
         for (i, o) in objs.iter().enumerate() {
             at.push(out.len());
-            out.extend_from_slice(format!("{} 0 obj\n{o}\nendobj\n", i + 1).as_bytes());
+            out.extend_from_slice(format!("{} 0 obj\n", i + 1).as_bytes());
+            out.extend(
+                o.chars()
+                    .map(|c| u8::try_from(u32::from(c)).unwrap_or(b'?')),
+            );
+            out.extend_from_slice(b"\nendobj\n");
         }
         let xref = out.len();
         out.extend_from_slice(
@@ -115,6 +127,137 @@ mod tests {
             d,
             "{\"v\":2,\"w\":200,\"h\":100,\"f\":[\"roman\"],\"F\":[\"CMR10\"],\"g\":{},\
              \"t\":[[0,10,50,\"72 79.5\",\"AB\"],[0,10,50,\"86.58\",\"A\",0,\"#0000ff\"]],\"p\":[],\"r\":[]}"
+        );
+    }
+
+    /// The draw list's images, pinned: an image `XObject` (2×1 RGB
+    /// samples, no filter) drawn by `cm` and `Do`, then a path: `"r"`'s
+    /// entry `["id", a, b, c, d, e, f]` (an SVG unit square, row 0 on top,
+    /// to the page from its top left), its PNG in `"I"`, and `"o"`, the
+    /// paint order, since the path comes after the image.
+    #[test]
+    fn images() {
+        let content = "q 20 0 0 10 5 5 cm /Im1 Do Q 0 g 0 0 m 1 1 l S";
+        let objs = [
+            "<< /Type /Catalog /Pages 2 0 R >>".to_owned(),
+            "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_owned(),
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 100] /Contents 4 0 R \
+             /Resources << /XObject << /Im1 5 0 R >> >> >>"
+                .to_owned(),
+            format!(
+                "<< /Length {} >>\nstream\n{content}\nendstream",
+                content.len()
+            ),
+            "<< /Type /XObject /Subtype /Image /Width 2 /Height 1 /ColorSpace /DeviceRGB \
+             /BitsPerComponent 8 /Length 6 >>\nstream\n\u{ff}\u{0}\u{0}\u{0}\u{0}\u{ff}\nendstream"
+                .to_owned(),
+        ];
+        let a = raw_pdf(&objs);
+        let d = crate::Pdf::open(&a)
+            .unwrap()
+            .draw(0, &mut crate::Fonts::new())
+            .unwrap();
+        let (head, tail) = d.split_once(",\"I\":{").unwrap();
+        assert_eq!(
+            head,
+            "{\"v\":2,\"w\":200,\"h\":100,\"f\":[],\"F\":[],\"g\":{},\"t\":[],\
+             \"p\":[[\"M0 100L1 99\",null,\"#000000\",1]],\
+             \"r\":[[\"i024bae8ca2e00820\",20,0,0,10,5,85]]"
+        );
+        assert!(
+            tail.starts_with("\"i024bae8ca2e00820\":\"data:image/png;base64,iVBORw0KGgo"),
+            "{tail}"
+        );
+        assert!(tail.ends_with("},\"o\":[[1,0,1],[0,0,1]]}"), "{tail}");
+        // (an image changed under the same name changes the page's hash)
+        let mut b = objs.clone();
+        b[4] = b[4].replace("\u{ff}\u{0}\u{0}\u{0}", "\u{0}\u{0}\u{0}\u{0}");
+        assert_ne!(
+            crate::pdfdraw::hashes(&a),
+            crate::pdfdraw::hashes(&raw_pdf(&b))
+        );
+    }
+
+    #[test]
+    fn forms() {
+        // (a form through its matrix, with its own fonts; a form inside
+        // it with no resources, its parent's; a form that paints itself,
+        // stopped 16 deep and counted as not drawn)
+        let stream =
+            |d: &str, s: &str| format!("<< {d} /Length {} >>\nstream\n{s}\nendstream", s.len());
+        let objs = [
+            "<< /Type /Catalog /Pages 2 0 R >>".to_owned(),
+            "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_owned(),
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 100] /Contents 4 0 R \
+             /Resources << /XObject << /Fm1 5 0 R >> >> >>"
+                .to_owned(),
+            stream("", "q 2 0 0 2 10 10 cm /Fm1 Do Q"),
+            stream(
+                "/Type /XObject /Subtype /Form /Matrix [1 0 0 1 5 0] /Resources \
+                 << /Font << /F2 6 0 R >> /XObject << /Fm2 7 0 R /Fm3 8 0 R >> >>",
+                "0 0 1 rg 0 0 m 10 0 l 10 10 l f BT /F2 5 Tf (A) Tj ET /Fm2 Do /Fm3 Do",
+            ),
+            "<< /Type /Font /Subtype /Type1 /BaseFont /CMR10 /FirstChar 65 /Widths [750] >>"
+                .to_owned(),
+            stream("/Type /XObject /Subtype /Form", "0 g 0 0 m 1 0 l S"),
+            stream(
+                "/Type /XObject /Subtype /Form /Resources << /XObject << /Fm3 8 0 R >> >>",
+                "/Fm3 Do",
+            ),
+        ];
+        let d = crate::Pdf::open(&raw_pdf(&objs))
+            .unwrap()
+            .draw(0, &mut crate::Fonts::new())
+            .unwrap();
+        assert_eq!(
+            d,
+            "{\"v\":2,\"w\":200,\"h\":100,\"f\":[\"roman\"],\"F\":[\"CMR10\"],\"g\":{},\
+             \"t\":[[0,10,90,\"20\",\"A\",0,\"#0000ff\"]],\
+             \"p\":[[\"M20 90L40 90L40 70\",\"#0000ff\",null,2],[\"M20 90L22 90\",null,\"#000000\",2]],\
+             \"r\":[],\"o\":[[0,0,1],[2,0,1],[0,1,1]],\"x\":1}"
+        );
+    }
+
+    #[test]
+    fn clips() {
+        // (a clip, one inside it (even-odd), restored by Q; a form's /BBox)
+        let stream =
+            |d: &str, s: &str| format!("<< {d} /Length {} >>\nstream\n{s}\nendstream", s.len());
+        let objs = [
+            "<< /Type /Catalog /Pages 2 0 R >>".to_owned(),
+            "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_owned(),
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 100] /Contents 4 0 R \
+             /Resources << /Font << /F1 5 0 R >> /XObject << /Fm1 6 0 R >> >> >>"
+                .to_owned(),
+            stream(
+                "",
+                "q 0 0 50 50 re W n q 10 10 m 20 10 l 20 20 l h W* n \
+                 0 g 0 0 m 100 0 l S BT /F1 10 Tf (A) Tj ET Q 0 0 m 1 1 l S Q \
+                 /Fm1 Do 5 5 m 6 6 l S",
+            ),
+            "<< /Type /Font /Subtype /Type1 /BaseFont /CMR10 /FirstChar 65 /Widths [750] >>"
+                .to_owned(),
+            stream(
+                "/Type /XObject /Subtype /Form /BBox [0 0 10 10] /Matrix [1 0 0 1 100 0]",
+                "0 0 m 20 20 l S",
+            ),
+        ];
+        let d = crate::Pdf::open(&raw_pdf(&objs))
+            .unwrap()
+            .draw(0, &mut crate::Fonts::new())
+            .unwrap();
+        assert_eq!(
+            d,
+            "{\"v\":2,\"w\":200,\"h\":100,\"f\":[\"roman\"],\"F\":[\"CMR10\"],\"g\":{},\
+             \"t\":[[0,10,100,\"0\",\"A\",0,null,\"c1\"]],\
+             \"p\":[[\"M0 100L100 100\",null,\"#000000\",1,\"c1\"],\
+             [\"M0 100L1 99\",null,\"#000000\",1,\"c0\"],\
+             [\"M100 100L120 80\",null,\"#000000\",1,\"c2\"],\
+             [\"M5 95L6 94\",null,\"#000000\",1]],\"r\":[],\
+             \"C\":{\"c0\":[\"M0 100L50 100L50 50L0 50Z\",0],\
+             \"c1\":[\"M10 90L20 90L20 80Z\",1,\"c0\"],\
+             \"c2\":[\"M100 100L110 100L110 90L100 90Z\",0]},\
+             \"o\":[[0,0,1],[2,0,1],[0,1,3]]}"
         );
     }
 
