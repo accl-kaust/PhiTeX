@@ -24,9 +24,9 @@ usage: phitex <command> [options] [file.tex]
 
 commands:
   build    build the document to its fixpoint (BibTeX and makeindex included)
-  watch    build, then rebuild whenever an input changes (on a terminal,
-           keys: r rebuild, o open the PDF, w errors and warnings, q quit,
-           ? help)
+  watch    build, then rebuild whenever an input changes, the pages live in
+           the browser (on a terminal, keys: r rebuild, o open the viewer,
+           w errors and warnings, q quit, ? help)
   check    compile once without writing the output files
   why      why the last build ran as it did, and every warning it gave
   trace    build, writing a Chrome/Perfetto timeline (--open: open Perfetto)
@@ -35,6 +35,7 @@ commands:
   clean --all
            remove every saved build, session and record, of every document
            (the formats stay); no file needed
+  sync     sync FILE:LINE[:COL]: the watch's viewer shows that line
 
 options:
   -o, --output-dir DIR     where the outputs go (TeX's -output-directory)
@@ -48,6 +49,12 @@ options:
                            CLICOLOR_FORCE are honoured)
       --message-format F   human or json
       --open               watch: open the PDF; trace: open Perfetto
+      --no-view            watch: no live viewer in the browser (the
+                           default on a terminal; --view: anywhere)
+      --editor CMD         watch: where a double-click on a page opens its
+                           source (code, emacsclient, nvim, … or a command
+                           with {file} {line} {col}; else PHITEX_EDITOR,
+                           VISUAL, EDITOR)
       --copy-pdf[=DIR]     build, watch: copy the PDF after each successful
                            build into DIR (default: where phitex was run)
       --no-machine         watch: rebuild through checkpoints instead of the
@@ -72,6 +79,7 @@ enum Command {
     Why,
     Trace,
     Clean,
+    Sync,
 }
 
 /// The modern command line's options.
@@ -98,8 +106,13 @@ struct Options {
     no_machine: bool,
     /// `clean --all`.
     all: bool,
+    /// `--view` or `--no-view` (none: the viewer on a terminal).
+    view: Option<bool>,
+    /// `--editor`.
+    editor: Option<String>,
 }
 
+#[allow(clippy::too_many_lines, reason = "one option a line")]
 fn parse(args: &[String]) -> Result<Options, String> {
     let command = match args.first().map(String::as_str) {
         Some("build" | "b") => Command::Build,
@@ -108,6 +121,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
         Some("why") => Command::Why,
         Some("trace") => Command::Trace,
         Some("clean") => Command::Clean,
+        Some("sync") => Command::Sync,
         Some("-h" | "--help" | "help") | None => return Err(String::new()),
         Some(a) if a.starts_with('-') || a.starts_with('&') || a.starts_with('\\') => {
             return Err(format!(
@@ -133,6 +147,8 @@ fn parse(args: &[String]) -> Result<Options, String> {
         copy_pdf: None,
         no_machine: false,
         all: false,
+        view: None,
+        editor: None,
     };
     let mut it = args[1..].iter();
     while let Some(a) = it.next() {
@@ -183,6 +199,9 @@ fn parse(args: &[String]) -> Result<Options, String> {
             }
             "--no-copy-pdf" => o.copy_pdf = Some(config::CopyPdf::Off),
             "--no-machine" => o.no_machine = true,
+            "--view" => o.view = Some(true),
+            "--no-view" => o.view = Some(false),
+            "--editor" => o.editor = Some(value()?),
             "--machine" => o.no_machine = false,
             "--output" if o.command == Command::Trace => o.timeline = Some(value()?),
             "--all" if o.command == Command::Clean => o.all = true,
@@ -370,6 +389,12 @@ pub fn main(args: &[String]) -> ! {
     if o.all {
         clean_all(st);
     }
+    if o.command == Command::Sync {
+        let Some(place) = o.file.as_deref() else {
+            fail("sync: give FILE:LINE[:COL]", st.style)
+        };
+        std::process::exit(crate::view::sync_command(place));
+    }
     let target = resolve(&o).unwrap_or_else(|e| fail(&e, st.style));
     match o.command {
         Command::Build | Command::Check | Command::Trace if o.interactive => interactive(&target),
@@ -379,6 +404,7 @@ pub fn main(args: &[String]) -> ! {
         Command::Watch => watch(&o, &target, st),
         Command::Why => why(&target, st),
         Command::Clean => clean(&target, st),
+        Command::Sync => unreachable!("answered above"),
     }
 }
 
@@ -968,7 +994,7 @@ enum Input {
 
 /// What `?` shows (the status line says only `? help`).
 const KEYS: [&str; 2] = [
-    "r rebuild now · o open the PDF · w the errors and warnings · c clear the screen",
+    "r rebuild now · o open the viewer (or the PDF) · w the errors and warnings · c clear the screen",
     "q quit, after saving the build (Ctrl-C too; twice: at once) · Ctrl-Z suspend",
 ];
 
@@ -1093,16 +1119,84 @@ fn answer(
     }
 }
 
-/// How a watch shows its PDF (`o`, `--open`): the viewer `phitex.toml`
-/// names, else the desktop's (`xdg-open`). Everything that opens the PDF
-/// goes through here, so a live viewer can take its place.
+/// How a watch shows its PDF (`o`, `--open`): the live viewer in the
+/// browser (DESIGN 4.8) if it is on, else the viewer `phitex.toml` names,
+/// else the desktop's (`xdg-open`). Everything that opens the PDF goes
+/// through here.
 #[derive(Default)]
 struct Viewer {
     /// The viewer started last, and when.
     started: Option<(std::process::Child, Instant)>,
+    /// The live viewer.
+    live: Option<crate::view::View>,
 }
 
 impl Viewer {
+    /// The watch's viewer: the live one with `--view`, or by default where
+    /// standard output is a terminal and `CI` is not set (the browser
+    /// opened there, else its address shown); else the PDF's.
+    fn start(opts: &Options, ren: &Renderer) -> Viewer {
+        use std::io::IsTerminal;
+        let interactive = std::io::stdout().is_terminal() && std::env::var_os("CI").is_none();
+        if !opts.view.unwrap_or(interactive) {
+            return Viewer::default();
+        }
+        let editor = match crate::editor::Editor::configured(opts.editor.as_deref()) {
+            Ok(e) => e,
+            Err(spec) => {
+                ren.event(&format!(
+                    "`{spec}` cannot open beside the watch: a double-click shows its source here"
+                ));
+                None
+            }
+        };
+        // (kpathsea, for the viewer's text fonts)
+        let host = crate::setup().host;
+        match crate::view::View::start(host, ren.live(), editor) {
+            Ok(v) => {
+                let opened = interactive && crate::view::open_browser(v.url());
+                let how = if opened {
+                    ""
+                } else {
+                    " (open it in a browser)"
+                };
+                ren.status("Viewing", &format!("{}{how}", v.url()));
+                Viewer {
+                    started: None,
+                    live: Some(v),
+                }
+            }
+            Err(e) => {
+                ren.warn("Viewer", &format!("not started: {e}"));
+                Viewer::default()
+            }
+        }
+    }
+
+    /// A rebuild began.
+    fn building(&self) {
+        if let Some(v) = &self.live {
+            v.building(true);
+        }
+    }
+
+    /// A build is in (`outputs`: its files; begun at `t`).
+    fn built(&self, outputs: &[(Vec<u8>, usize)], history: i32, t: Instant) {
+        if let Some(v) = &self.live {
+            v.built(&crate::view::Built {
+                pdf: main_output(outputs)
+                    .filter(|p| {
+                        Path::new(p)
+                            .extension()
+                            .is_some_and(|e| e.eq_ignore_ascii_case("pdf"))
+                    })
+                    .map(PathBuf::from),
+                history,
+                ms: t.elapsed().as_secs_f64() * 1e3,
+            });
+        }
+    }
+
     /// A second press does not start a second viewer while the first
     /// still runs, nor within this long of it (`xdg-open` hands the PDF
     /// over and exits).
@@ -1111,6 +1205,11 @@ impl Viewer {
     /// Show the PDF among `outputs`, unless the viewer started for it
     /// still runs (or has just started).
     fn open(&mut self, ren: &Renderer, target: &Target, outputs: &[(Vec<u8>, usize)]) {
+        if let Some(v) = &self.live {
+            crate::view::open_browser(v.url());
+            ren.event(&format!("opening {}", v.url()));
+            return;
+        }
         let Some(pdf) = main_output(outputs) else {
             ren.event("no PDF yet");
             return;
@@ -1154,15 +1253,17 @@ fn watch(opts: &Options, target: &Target, st: Settings) -> ! {
     BUSY.store(true, std::sync::atomic::Ordering::Relaxed);
     ren.status("Compiling", &format!("{} ({})", target.file, target.engine));
     let mut sess = session(target, &ren);
+    let mut viewer = Viewer::start(opts, &ren);
     ren.set_estimate(load_estimate());
     ren.start();
     let mut between = crate::Between::default();
+    let t = Instant::now();
     let (reports, term, mut history) =
         crate::converge_saved(&mut sess, &mut between, &mut |p| ren.progress(&p));
     finish(target, &ren, &sess, &reports, &term, history, false, None);
+    viewer.built(&sess.outputs(), history, t);
     BUSY.store(false, std::sync::atomic::Ordering::Relaxed);
     save_estimate(&ren);
-    let mut viewer = Viewer::default();
     if opts.open {
         viewer.open(&ren, target, &sess.outputs());
     }
@@ -1209,6 +1310,8 @@ fn watch(opts: &Options, target: &Target, st: Settings) -> ! {
             .collect();
         BUSY.store(true, std::sync::atomic::Ordering::Relaxed);
         ren.start_rebuild();
+        viewer.building();
+        let t = Instant::now();
         let (reports, term, h) =
             crate::serve_observed(&mut sess, Some(history), true, &mut between, &mut |p| {
                 ren.progress(&p);
@@ -1217,6 +1320,7 @@ fn watch(opts: &Options, target: &Target, st: Settings) -> ! {
         history = h;
         let rebuild = Some(Rebuild { changed });
         finish(target, &ren, &sess, &reports, &term, h, false, rebuild);
+        viewer.built(&sess.outputs(), h, t);
         last = stamps(&sess);
         ren.watching(&target.file, main_output(&sess.outputs()).as_deref());
         if INTERRUPTED.load(std::sync::atomic::Ordering::Relaxed) {
@@ -1303,9 +1407,11 @@ fn machine_watch(opts: &Options, target: &Target, ren: &Renderer, rx: &mpsc::Rec
     job.host.formats = formats;
     job.host.notes = true;
     crate::make_output_dir(&job.host);
+    let mut viewer = Viewer::start(opts, ren);
     ren.set_estimate(load_estimate());
     ren.start();
     let mut between = crate::Between::default();
+    let t = Instant::now();
     let (opened, out) = crate::machinehost::Watch::open(
         job.host,
         job.params,
@@ -1317,19 +1423,21 @@ fn machine_watch(opts: &Options, target: &Target, ren: &Renderer, rx: &mpsc::Rec
     let mut history = out.history;
     let mut outputs = out.outputs.clone();
     machine_finish(target, ren, &out, None, true);
+    viewer.built(&outputs, history, t);
     save_estimate(ren);
-    let mut viewer = Viewer::default();
     if opts.open {
         viewer.open(ren, target, &out.outputs);
     }
     // (after a restart with nothing changed: the saved build, loading
     // meanwhile, and what changed since the look)
+    let t = Instant::now();
     let (mut w, since) = opened.into_watch(&mut between, &mut |p| ren.progress(&p));
     if let Some(out) = since {
         history = out.history;
         outputs.clone_from(&out.outputs);
         let changed = w.last_changes().to_vec();
         machine_finish(target, ren, &out, Some(Rebuild { changed }), true);
+        viewer.built(&outputs, history, t);
     }
     BUSY.store(false, std::sync::atomic::Ordering::Relaxed);
     w.idle();
@@ -1349,6 +1457,8 @@ fn machine_watch(opts: &Options, target: &Target, ren: &Renderer, rx: &mpsc::Rec
         }
         BUSY.store(true, std::sync::atomic::Ordering::Relaxed);
         ren.start_rebuild();
+        viewer.building();
+        let t = Instant::now();
         let out = w.rebuild(&mut between, &mut |p| ren.progress(&p));
         BUSY.store(false, std::sync::atomic::Ordering::Relaxed);
         let Some(out) = out else {
@@ -1362,6 +1472,7 @@ fn machine_watch(opts: &Options, target: &Target, ren: &Renderer, rx: &mpsc::Rec
         outputs.clone_from(&out.outputs);
         let changed = w.last_changes().to_vec();
         machine_finish(target, ren, &out, Some(Rebuild { changed }), true);
+        viewer.built(&outputs, history, t);
         w.idle();
         ren.watching(&target.file, main_output(&outputs).as_deref());
         if INTERRUPTED.load(std::sync::atomic::Ordering::Relaxed) {

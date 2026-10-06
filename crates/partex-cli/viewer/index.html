@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>partex viewer</title>
+<style>
+  :root { --bg: #e8e8ea; --bar: #f6f6f7; --ink: #333; --dim: #777; --mark: rgba(255, 196, 0, 0.35); }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #2a2b2e; --bar: #1f2023; --ink: #ddd; --dim: #999; }
+  }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--ink); font: 13px system-ui, sans-serif; }
+  #bar { position: fixed; top: 0; left: 0; right: 0; height: 28px; display: flex; align-items: center; gap: 12px;
+         padding: 0 12px; background: var(--bar); border-bottom: 1px solid rgba(0, 0, 0, 0.12); z-index: 2; }
+  #bar b { font-weight: 600; }
+  #status { color: var(--dim); }
+  #hint { margin-left: auto; color: var(--dim); }
+  #scroller { position: absolute; top: 29px; left: 0; right: 0; bottom: 0; overflow: auto; }
+  #pages { padding: 12px 0 40px; }
+  .slot { position: relative; margin: 0 auto 12px; background: #fff; box-shadow: 0 1px 4px rgba(0, 0, 0, 0.25); overflow: hidden; }
+  .slot svg { display: block; }
+  .slot svg rect.paper { fill: #fff; }
+  .slot img, .slot canvas { display: block; width: 100%; height: 100%; }
+  .mark { position: absolute; background: var(--mark); border-radius: 2px; pointer-events: none; transition: all 0.15s ease-out; }
+  .mark.fade { opacity: 0; transition: opacity 1.2s; }
+  body.stale #pages { opacity: 0.85; }
+</style>
+</head>
+<body>
+<div id="bar"><b>partex</b><span id="status">connecting…</span><span id="hint">Ctrl+wheel or + − to zoom, 0 to fit</span></div>
+<div id="scroller"><div id="pages"></div></div>
+<script type="module" src="viewer.js"></script>
+</body>
+</html>

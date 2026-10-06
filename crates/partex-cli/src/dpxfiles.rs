@@ -104,6 +104,25 @@ pub(crate) fn options(pdf_name: &[u8]) -> Options {
     }
 }
 
+/// The live viewer wants each PDF's glyph runs (DESIGN 4.8), and the last
+/// PDF's: the runs of each of its pages.
+static KEEP_RUNS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static LAST_RUNS: std::sync::Mutex<Option<Vec<Vec<partex_xdvipdfmx::api::GlyphRun>>>> =
+    std::sync::Mutex::new(None);
+
+/// Keep each PDF's glyph runs from now on, for [`take_glyph_runs`].
+pub(crate) fn keep_glyph_runs() {
+    KEEP_RUNS.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The glyph runs of the last PDF made, each page's, if kept.
+pub(crate) fn take_glyph_runs() -> Option<Vec<Vec<partex_xdvipdfmx::api::GlyphRun>>> {
+    LAST_RUNS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take()
+}
+
 /// The PDF file xelatex makes of `xdv`, and whether xdvipdfmx finished:
 /// one that stops with `ERROR` (its message printed as it prints it)
 /// leaves what it had written (`error_cleanup` does not remove it).
@@ -111,9 +130,9 @@ pub(crate) fn xdv_to_pdf(xdv: &[u8], pdf_name: &[u8]) -> (Vec<u8>, bool) {
     let (pre, pages) = partex_xdvipdfmx::api::split_xdv(xdv);
     let mut out = Vec::new();
     let mut session = None;
-    let mut runs = std::env::var("PARTEX_GLYPH_RUNS")
-        .is_ok_and(|v| v == "1")
-        .then(Vec::new);
+    let file = std::env::var("PARTEX_GLYPH_RUNS").is_ok_and(|v| v == "1");
+    let keep = KEEP_RUNS.load(std::sync::atomic::Ordering::Relaxed);
+    let mut runs = (file || keep).then(Vec::new);
     let run = || {
         let s = session.insert(Session::new(
             options(pdf_name),
@@ -132,10 +151,17 @@ pub(crate) fn xdv_to_pdf(xdv: &[u8], pdf_name: &[u8]) -> (Vec<u8>, bool) {
         Ok::<(), partex_xdvipdfmx::ctx::Fatal>(())
     };
     let done = run();
-    if let Some(r) = &runs {
+    if let Some(r) = &runs
+        && file
+    {
         let mut name = pdf_name.strip_suffix(b".pdf").unwrap_or(pdf_name).to_vec();
         name.extend_from_slice(b".glyphruns.jsonl");
         let _ = std::fs::write(crate::native::path(&name), glyph_runs_jsonl(r));
+    }
+    if keep {
+        *LAST_RUNS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = runs;
     }
     match done {
         Ok(()) => (out, true),

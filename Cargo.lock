@@ -154,6 +154,7 @@ dependencies = [
  "partex-trace",
  "partex-xdvipdfmx",
  "phitex-doc",
+ "phitex-draw",
  "tikv-jemallocator",
 ]
 
@@ -227,6 +228,15 @@ name = "phitex-doc"
 version = "0.0.0"
 dependencies = [
  "phitex-syntax",
+]
+
+[[package]]
+name = "phitex-draw"
+version = "0.0.0"
+dependencies = [
+ "partex-engine",
+ "partex-xdvipdfmx",
+ "skrifa",
 ]
 
 [[package]]
