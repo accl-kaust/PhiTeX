@@ -2692,7 +2692,20 @@ partex, the log's "Error 256 (driver return code)". Input encodings
 are XeTeX's own and ICU's stateless single-byte converters and UTF-8,
 by any ICU name (`icu_tables.rs`, generated from `uconv`).
 
-Not yet: `\XeTeXlinebreaklocale` (ICU's line breaking), ICU's
+The upstream fontspec (94 tests) and polyglossia (292, the generated
+ones included) suites run as l3build runs them (`-no-pdf`, two runs for
+polyglossia), and to PDF, with xelatex's format built by each engine:
+the logs, aux files and PDFs match but for fontspec's Graphite test.
+They found kpathsea's case-insensitive search missing, e-TeX's
+`\tracingstacklevels` and effective tail (`\unskip` past a final
+`\endM`), and pdfTeX-only gates on what XeTeX shares (display boxes'
+`dlist`, `\primitive`, `\special shipout`, `\vadjust pre`, which now
+goes before its line). Tests whose fonts TeX Live lacks (CODE2000,
+DavidCLM, Fandol, Junicode.ttf, NotoSerif-VF, Times LT Std) fail alike
+on both sides.
+
+Not yet: Graphite (`/GR`, fontspec's `Renderer=Graphite`: graphite2's
+shaping, its features and queries), `\XeTeXlinebreaklocale` (ICU's line breaking), ICU's
 multi-byte converters (GBK and the like), `\XeTeXinterwordspaceshaping`
 above 1, math codes with families of 128 and up printed as XeTeX's
 64-bit integers, the driver's status in machine mode's log, CJK
