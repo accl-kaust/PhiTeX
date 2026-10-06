@@ -58,6 +58,21 @@ enum Query {
 struct Output {
     name: Vec<u8>,
     bytes: Vec<u8>,
+    /// `XeTeX`'s PDF file: the bytes are the XDV, which xdvipdfmx makes
+    /// the file of (`FileKind::XdvPipe`, see `Output::file`).
+    piped: bool,
+}
+
+impl Output {
+    /// The file's contents: as written, or the PDF xdvipdfmx makes of a
+    /// piped XDV (`xdvipdfmx -q -E -o NAME`, the XDV piped in).
+    fn file(&self) -> std::borrow::Cow<'_, [u8]> {
+        if self.piped {
+            crate::dpxfiles::xdv_to_pdf(&self.bytes, &self.name).into()
+        } else {
+            (&self.bytes[..]).into()
+        }
+    }
 }
 
 struct Shared {
@@ -152,6 +167,7 @@ impl Logs {
                 .map(|(o, &len)| Output {
                     name: o.name.clone(),
                     bytes: o.bytes[..len.min(o.bytes.len())].to_vec(),
+                    piped: o.piped,
                 })
                 .collect(),
             term: self.term[..m.term.min(self.term.len())].to_vec(),
@@ -284,7 +300,7 @@ impl Shared {
                 if let Some(o) = self.outputs.iter().rev().find(|o| o.name == cand) {
                     return Some(OpenedFile {
                         name: o.name.clone(),
-                        contents: Arc::from(&o.bytes[..]),
+                        contents: Arc::from(&o.file()[..]),
                     });
                 }
                 if std::fs::metadata(crate::native::path(&cand)).is_ok_and(|m| m.is_file()) {
@@ -317,7 +333,7 @@ impl Shared {
     /// name: `TEXINPUTS=$PWD:`).
     fn output_file(&mut self, name: &[u8], written: &[u8], kind: FileKind) -> Option<OpenedFile> {
         let o = self.outputs.iter().rev().find(|o| o.name == written)?;
-        let contents = Arc::from(&o.bytes[..]);
+        let contents = Arc::from(&o.file()[..]);
         let out_name = o.name.clone();
         if name.starts_with(b"/") || name.starts_with(b".") {
             return Some(OpenedFile {
@@ -376,6 +392,7 @@ impl Host for SessionHost {
         sh.outputs.push(Output {
             name: n.clone(),
             bytes: Vec::new(),
+            piped: kind == FileKind::XdvPipe,
         });
         Some((id, n))
     }
@@ -826,7 +843,7 @@ const SAVED_CHECKPOINTS: usize = 8;
 
 /// The saved form's version (with the executable qualifying cache keys,
 /// this only tells the format from others under the same key).
-const SAVED_MAGIC: &[u8] = b"partex-session/1";
+const SAVED_MAGIC: &[u8] = b"partex-session/2";
 
 /// Whether two names of found files are the same file (`./x`, `x` and
 /// `$PWD/x`).
@@ -2561,6 +2578,7 @@ impl Session {
                 outputs.push(Output {
                     name: prev.name.clone(),
                     bytes: prev.bytes[..upto_len(i, &prev.bytes)].to_vec(),
+                    piped: prev.piped,
                 });
                 continue;
             };
@@ -2624,6 +2642,7 @@ impl Session {
             outputs.push(Output {
                 name: prev.name.clone(),
                 bytes,
+                piped: prev.piped,
             });
         }
         let mut term = sh.term.clone();
@@ -3298,27 +3317,28 @@ impl Session {
         let mut written = self.written.borrow_mut();
         for o in order {
             let p = crate::native::path(&o.name);
+            let bytes = o.file();
             if !fast {
-                std::fs::write(&p, &o.bytes)?;
+                std::fs::write(&p, &bytes)?;
                 continue;
             }
-            let key = (o.bytes.len(), {
+            let key = (bytes.len(), {
                 use std::hash::{Hash, Hasher};
                 let mut h = std::collections::hash_map::DefaultHasher::new();
-                o.bytes.hash(&mut h);
+                bytes.hash(&mut h);
                 h.finish()
             });
-            let there = std::fs::metadata(&p).is_ok_and(|m| m.len() == o.bytes.len() as u64);
+            let there = std::fs::metadata(&p).is_ok_and(|m| m.len() == bytes.len() as u64);
             if there && written.get(&o.name) == Some(&key) {
                 continue;
             }
             if not_main(&o) {
-                std::fs::write(&p, &o.bytes)?;
+                std::fs::write(&p, &bytes)?;
             } else {
                 let mut tmp = o.name.clone();
                 tmp.extend_from_slice(b".partex-tmp");
                 let tmp = crate::native::path(&tmp);
-                std::fs::write(&tmp, &o.bytes)?;
+                std::fs::write(&tmp, &bytes)?;
                 std::fs::rename(&tmp, &p)?;
             }
             written.insert(o.name.clone(), key);
@@ -3392,6 +3412,7 @@ impl Session {
             for o in &sh.outputs {
                 o.name.save(&mut s);
                 o.bytes.save(&mut s);
+                o.piped.save(&mut s);
             }
             sh.term.save(&mut s);
             sh.pages.save(&mut s);
@@ -3486,6 +3507,7 @@ impl Session {
             outputs.push(Output {
                 name: Persist::load(&mut l)?,
                 bytes: Persist::load(&mut l)?,
+                piped: Persist::load(&mut l)?,
             });
         }
         let term: Vec<u8> = Persist::load(&mut l)?;
