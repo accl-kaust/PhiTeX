@@ -53,6 +53,30 @@ partex_engine::persist_enum!(Obj {
     Box(a0)
 });
 
+/// eqtb's objects by chunks of this many. The objects a region writes are
+/// scattered over the hash's places, so a chunk written holds few of them
+/// and is copied whole into the snapshot: at 512 (24 KB a chunk, against
+/// eqtb's words' 4 KB) those copies were 3.6 GB of the 7.8 GB the course's
+/// machine watch held after its three passes; at 128 the watch's peak
+/// went 9.9 -> 6.8 GB, its passes as fast.
+pub(crate) const OBJ_CHUNK: usize = 128;
+
+/// eqtb's objects in a [`crate::journal::JVec`]: an entry written back
+/// as it was holds the very value it held (glue by its content).
+impl crate::journal::Elem for Option<Obj> {
+    #[inline]
+    fn same(a: &Self, b: &Self) -> bool {
+        match (a, b) {
+            (None, None) => true,
+            (Some(Obj::Toks(x)), Some(Obj::Toks(y))) => Arc::ptr_eq(x, y),
+            (Some(Obj::Glue(x)), Some(Obj::Glue(y))) => x == y,
+            (Some(Obj::Shape(x)), Some(Obj::Shape(y))) => Arc::ptr_eq(x, y),
+            (Some(Obj::Box(x)), Some(Obj::Box(y))) => Arc::ptr_eq(x, y),
+            _ => false,
+        }
+    }
+}
+
 impl Obj {
     /// The object's version (DESIGN 7.17.12): a list's, a box's, made
     /// when each was made; glue and shapes by their content (a few words).
