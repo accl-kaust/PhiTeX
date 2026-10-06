@@ -750,7 +750,7 @@ fn default_xgs(dpx: &mut Dpx) -> Result<Obj> {
 
 impl Dpx {
     /// The current graphics state (the gstate stack's top).
-    fn pdfdraw_gs(&self) -> &PdfGstate {
+    pub(crate) fn pdfdraw_gs(&self) -> &PdfGstate {
         self.draw
             .gs_stack
             .dpx_stack_top()

@@ -65,6 +65,8 @@ pub struct Dpx {
     pub t1_char: crate::t1_char::State,
     pub cs_type2: crate::cs_type2::State,
     pub session: crate::session::State,
+    /// The glyph runs (a side output).
+    pub runs: crate::glyphrun::State,
 }
 
 /// dvipdfm-x's `WARN`: dropped (the transcript is not output). The
@@ -154,6 +156,7 @@ impl Dpx {
             t1_char: Default::default(),
             cs_type2: Default::default(),
             session: Default::default(),
+            runs: Default::default(),
         }
     }
 }

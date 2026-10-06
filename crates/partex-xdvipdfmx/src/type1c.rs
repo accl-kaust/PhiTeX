@@ -110,6 +110,53 @@ impl Dpx {
 
         Ok(0)
     }
+    /// Glyph runs: the glyph name and id `pdf_font_load_type1c` draws each
+    /// code of OpenType (CFF) font `ident` with, by code: the name in
+    /// `encoding`, else in the CFF's built-in encoding, and the glyph of
+    /// that name in the charset (0 where there is none). None if the font
+    /// does not open as one.
+    pub fn t1c_code_glyphs(
+        &mut self,
+        ident: &[u8],
+        encoding: Option<&[Option<Vec<u8>>]>,
+    ) -> Result<Option<(Vec<Option<Vec<u8>>>, Vec<u16>)>> {
+        let fp = some!(self.dpx_open_file(ident, ResType::OtFont)?);
+        let mut sfont = some!(Sfnt::sfnt_open(fp)?);
+        if sfont.sfnt_read_table_directory(0)? < 0 || sfont.type_ != SFNT_TYPE_POSTSCRIPT {
+            return Ok(None);
+        }
+        let offset = sfont.sfnt_find_table_pos(b"CFF ") as i32;
+        if offset == 0 {
+            return Ok(None);
+        }
+        let mut cffont = some!(CffFont::cff_open(sfont.stream.clone(), offset, 0)?);
+        if (cffont.flag & FONTTYPE_CIDFONT) != 0 {
+            return Ok(None);
+        }
+        cffont.cff_read_charsets()?;
+        let names: Vec<Option<Vec<u8>>> = match encoding {
+            Some(e) => (0..256).map(|c| e.get(c).cloned().flatten()).collect(),
+            None => {
+                cffont.cff_read_encoding()?;
+                let mut names = vec![None; 256];
+                for (code, n) in names.iter_mut().enumerate() {
+                    let gid = cffont.cff_encoding_lookup(code as Card8)?;
+                    *n = Some(cffont.cff_get_string(cffont.cff_charsets_lookup_inverse(gid)?));
+                }
+                names
+            }
+        };
+        let mut gids = vec![0u16; 256];
+        for (g, n) in gids.iter_mut().zip(&names) {
+            if let Some(name) = n.as_deref().filter(|n| *n != b".notdef") {
+                let sid = cffont.cff_get_sid(name) as SSid;
+                *g = cffont.cff_charsets_lookup(sid)?;
+            }
+        }
+        cffont.cff_close();
+        Ok(Some((names, gids)))
+    }
+
     /// `add_SimpleMetrics` (static, prefixed: Dpx methods share a
     /// namespace): `Widths`, `FirstChar`, `LastChar` (`widths` scaled in
     /// place).

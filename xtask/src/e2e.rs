@@ -1279,6 +1279,63 @@ fn run_glyphs(root: &Path, partex: &Path) -> Result<Vec<String>> {
     Ok(diffs)
 }
 
+/// xdvipdfmx's glyph runs (`PARTEX_GLYPH_RUNS=1`) of
+/// `xelatex-runs.tex` (with the xelatex format made here), origins on:
+/// a run per origin and per code the PDF shows, where the PDF puts it,
+/// with its text as the PDF's `ToUnicode` and `/ActualText` give it
+/// (`crate::glyphruns`): native text, Type 1 fonts with built-in and
+/// `.enc` encodings, a virtual font, classic math, TrueType and OpenType
+/// map entries, leaders, colours, rotated text, right-to-left scripts.
+fn run_xelatex_runs(root: &Path, partex: &Path) -> Result<Vec<String>> {
+    let work = out_root(root).join("xelatex_runs");
+    if work.exists() {
+        fs::remove_dir_all(&work)?;
+    }
+    let p = work.join("p");
+    fs::create_dir_all(&p)?;
+    fs::copy(
+        root.join("tests/e2e/xelatex-runs.tex"),
+        p.join("xelatex-runs.tex"),
+    )?;
+    let fonts = root.join("scripts/xetex/fonts.conf");
+    let cmd = || {
+        let mut cmd = tex_compat(partex);
+        cmd.arg("-engine=xetex")
+            .env("FONTCONFIG_FILE", &fonts)
+            .env("PARTEX_XETEX", "1")
+            .env_remove("PARTEX_MACHINE")
+            .env_remove("PARTEX_SSA")
+            .env_remove("PARTEX_PERSIST");
+        cmd
+    };
+    let ini = [
+        "-ini",
+        "-etex",
+        "-interaction=nonstopmode",
+        "-jobname=xelatex",
+        "xelatex.ini",
+    ];
+    exec(cmd(), &p, &ini, "term1.txt")?;
+    let mut run = cmd();
+    run.env("PARTEX_ORIGINS", "1").env("PARTEX_GLYPH_RUNS", "1");
+    exec(
+        run,
+        &p,
+        &["-fmt=xelatex", "-interaction=nonstopmode", "xelatex-runs"],
+        "term2.txt",
+    )?;
+    let mut diffs: Vec<String> = crate::glyphruns::check(&p, "xelatex-runs")?
+        .into_iter()
+        .map(|m| format!("glyph runs: {m}"))
+        .collect();
+    diffs.extend(
+        crate::glyphruns::expect_xelatex_runs(&p)?
+            .into_iter()
+            .map(|m| format!("glyph runs: {m}")),
+    );
+    Ok(diffs)
+}
+
 /// `partex outline glyphs.tex --json` beside the plain run: its heading
 /// placed from the side file, where pdfTeX's content stream puts its
 /// title's first glyph (`I` of `Intro`, after the number and its kern).
@@ -2359,6 +2416,10 @@ pub fn run(root: &Path, args: &[String]) -> Result<()> {
     ));
     jobs.push(("modern", Box::new(move || run_modern(root, partex))));
     jobs.push(("glyphs", Box::new(move || run_glyphs(root, partex))));
+    jobs.push((
+        "xelatex_runs",
+        Box::new(move || run_xelatex_runs(root, partex)),
+    ));
     jobs.push(("synctex", Box::new(move || run_synctex(root, partex))));
     jobs.push(("display", Box::new(move || run_display(root, partex))));
     jobs.push((

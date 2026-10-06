@@ -666,8 +666,14 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                     return self.confusion(b"vlistout");
                 }
                 let f = i32::from(g.font.0);
-                for &c in g.chars() {
-                    advance += self.char_item(f, i32::from(c), page);
+                let h = g.org();
+                for (i, &c) in g.chars().iter().enumerate() {
+                    let o = if h == 0 {
+                        0
+                    } else {
+                        h + u32::try_from(i).unwrap_or(0)
+                    };
+                    advance += self.char_item(f, i32::from(c), page, o);
                 }
             }
             Node::Box(b) => {
@@ -762,7 +768,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             }
             Node::Ligature(l) if !vertical => {
                 // §652: the ligature's character.
-                advance = self.char_item(i32::from(l.font.0), i32::from(l.ch), page);
+                advance = self.char_item(i32::from(l.font.0), i32::from(l.ch), page, l.org.0);
             }
             Node::Disc(d) if !vertical => {
                 for q in &d.replace {
@@ -851,7 +857,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                 .iter()
                 .map(|g| if h == 0 { 0 } else { h + g.cluster })
                 .collect();
-            self.origin_xdv_item(start, handles);
+            self.origin_xdv_item(page.items.len(), handles);
         }
         let out = &mut page.native;
         if w.actual_text {
@@ -890,7 +896,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         self.page_font(page, f);
         let start = u32::try_from(page.native.len()).expect("page size");
         // (no source: a math glyph, `\XeTeXglyph`)
-        self.origin_xdv_item(start, alloc::vec![0]);
+        self.origin_xdv_item(page.items.len(), alloc::vec![0]);
         let out = &mut page.native;
         out.push(SET_GLYPHS);
         out.extend_from_slice(&(if vertical { 0 } else { g.width }).to_be_bytes());
@@ -907,12 +913,13 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         });
     }
 
-    /// §620: character `c` of font `f` in an hlist.
-    /// Returns its width.
-    pub(crate) fn char_item(&mut self, f: i32, c: i32, page: &mut Page) -> Scaled {
+    /// §620: character `c` of font `f` in an hlist, its origin entry `org`
+    /// (0: none). Returns its width.
+    pub(crate) fn char_item(&mut self, f: i32, c: i32, page: &mut Page, org: u32) -> Scaled {
         self.page_font(page, f);
         // N.B.: `orig_char_info`, not `char_info`
         if let Some(g) = self.fonts.get(f).glyph(c) {
+            self.origin_xdv_char(page.items.len(), f, c, org);
             page.items.push(Item::Char {
                 font: self.dvi_font_number(f),
                 ch: c,
@@ -925,14 +932,14 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             font: self.dvi_font_number(f),
         });
         if self.mltex_enabled_p {
-            self.substitution(f, c, page);
+            self.substitution(f, c, page, org);
         }
         0
     }
 
     /// Merged source: `MLTeX`'s "Output a substitution, `goto continue` if
     /// not possible", as IR items after the `Missing` one.
-    fn substitution(&mut self, f: i32, c: i32, page: &mut Page) {
+    fn substitution(&mut self, f: i32, c: i32, page: &mut Page, org: u32) {
         let fi = fx(f);
         // Get substitution information, check it, goto `found` if all is
         // ok, otherwise goto `continue`.
@@ -1015,6 +1022,9 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         } else {
             0
         };
+        let at = page.items.len();
+        self.origin_xdv_char(at + 1, f, accent_c, org);
+        self.origin_xdv_char(at + 3, f, base_c, org);
         page.items.extend([
             Item::Move(delta),
             Item::Char {

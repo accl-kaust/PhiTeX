@@ -237,9 +237,81 @@ pub(crate) struct OrgState {
     /// The codes each included PDF page shows, counted once: the file's
     /// data, the page.
     images: Vec<(Arc<[u8]>, i32, usize)>,
-    /// `XeTeX`: the XDV page being built: each native item's glyphs'
-    /// handles (0: none), by the item's start in its native bytes.
+    /// `XeTeX`: the XDV page being built: each glyph item's glyphs'
+    /// handles (0: none), by the item's index in the page's items.
     xdv_items: BTreeMap<u32, Vec<u32>>,
+    /// `XeTeX`: each TFM font xdvipdfmx draws through a virtual font, by
+    /// name (none: drawn as it is); read the first time asked.
+    xdv_vfs: BTreeMap<Vec<u8>, Option<Arc<XdvVf>>>,
+    /// `XeTeX`: the TFM names xdvipdfmx's font maps have an entry for (it
+    /// reads no virtual font for them), read the first time needed.
+    xdv_mapped: Option<alloc::collections::BTreeSet<Vec<u8>>>,
+}
+
+/// `XeTeX`: a virtual font as xdvipdfmx plays it, for the count of the
+/// glyphs a character draws: its fonts' names by number, in the order
+/// defined (the first: the packets' font when they begin), and its
+/// packets by character.
+#[derive(Debug, Default)]
+struct XdvVf {
+    fonts: Vec<(u32, Vec<u8>)>,
+    packets: BTreeMap<u32, Vec<u8>>,
+}
+
+impl XdvVf {
+    /// vf.c's reading of `data` (`read_header`, `process_vf_file`): none if
+    /// it ends early.
+    fn parse(data: &[u8]) -> Option<XdvVf> {
+        let mut p = 0;
+        let mut take = |n: usize| {
+            let b = data.get(p..p + n)?;
+            p += n;
+            Some(b)
+        };
+        let num = |b: &[u8]| b.iter().fold(0u32, |a, &c| (a << 8) | u32::from(c));
+        let mut vf = XdvVf::default();
+        if take(2)? == [247, 202] {
+            let n = usize::from(take(1)?[0]);
+            take(n + 8)?;
+        }
+        loop {
+            let code = take(1).map_or(248, |b| b[0]);
+            match code {
+                243..=246 => {
+                    let k = num(take(usize::from(code - 242))?);
+                    take(12)?;
+                    let (a, l) = {
+                        let b = take(2)?;
+                        (usize::from(b[0]), usize::from(b[1]))
+                    };
+                    take(a)?;
+                    let mut name = take(l)?.to_vec();
+                    if let Some(z) = name.iter().position(|&c| c == 0) {
+                        name.truncate(z);
+                    }
+                    vf.fonts.push((k, name));
+                }
+                0..=241 => {
+                    let ch = u32::from(take(1)?[0]);
+                    take(3)?;
+                    let pkt = take(usize::from(code))?;
+                    if code > 0 {
+                        vf.packets.insert(ch, pkt.to_vec());
+                    }
+                }
+                242 => {
+                    let len = num(take(4)?) as usize;
+                    let ch = num(take(4)?);
+                    take(4)?;
+                    let pkt = take(len)?;
+                    if len > 0 {
+                        vf.packets.insert(ch, pkt.to_vec());
+                    }
+                }
+                _ => return Some(vf),
+            }
+        }
+    }
 }
 
 /// The pages' glyph lists, and the forms' by object number.
@@ -270,6 +342,8 @@ impl OrgState {
             cached: None,
             images: Vec::new(),
             xdv_items: BTreeMap::new(),
+            xdv_vfs: BTreeMap::new(),
+            xdv_mapped: None,
         }
     }
 
@@ -1073,15 +1147,157 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             .collect()
     }
 
-    /// `XeTeX`: the native item at `start` of the XDV page being built
-    /// draws glyphs whose origins are entries `handles` (0: none).
-    pub(crate) fn origin_xdv_item(&mut self, start: u32, handles: Vec<u32>) {
+    /// `XeTeX`: glyph item `item` (its index in the page's items) of the
+    /// XDV page being built draws glyphs whose origins are entries
+    /// `handles` (0: none).
+    pub(crate) fn origin_xdv_item(&mut self, item: usize, handles: Vec<u32>) {
         if let Some(o) = self.org.as_deref_mut() {
-            o.xdv_items.insert(start, handles);
+            o.xdv_items
+                .insert(u32::try_from(item).unwrap_or(u32::MAX), handles);
         }
     }
 
-    /// `XeTeX`: the XDV page is written, its native items in the order
+    /// `XeTeX`: character `c` of TFM font `f`, its origin entry `h`, is
+    /// item `item` of the XDV page being built: an origin for each glyph
+    /// xdvipdfmx draws for it ([`Tex::xdv_char_glyphs`]).
+    pub(crate) fn origin_xdv_char(&mut self, item: usize, f: i32, c: i32, h: u32) {
+        if self.org.is_none() || !self.xdv() {
+            return;
+        }
+        let n = self.xdv_char_glyphs(f, c);
+        self.origin_xdv_item(item, alloc::vec![h; n]);
+    }
+
+    /// `XeTeX`: how many glyphs xdvipdfmx draws for character `c` of TFM
+    /// font `f`: one, or as many as a virtual font's packet sets (`set`,
+    /// `put`), each counted the same way in its own font, none for a
+    /// character it has no packet for. A font is virtual as `dvi.c`'s
+    /// `dvi_locate_font` finds it: no entry in its font maps (TeX Live's
+    /// `dvipdfmx.cfg`: `pdftex.map`, `kanjix.map`, `ckx.map`; `pdf:mapline`
+    /// and `pdf:mapfile` specials not seen) and a `.vf` file.
+    pub(crate) fn xdv_char_glyphs(&mut self, f: i32, c: i32) -> usize {
+        let name = self.font_name_bytes(f);
+        self.vf_glyphs(&name, u32::try_from(c).unwrap_or(0), 0)
+    }
+
+    fn vf_glyphs(&mut self, name: &[u8], c: u32, depth: usize) -> usize {
+        let Some(vf) = self.xdv_vf(name) else {
+            return 1;
+        };
+        // (dvi_vf_init: "Virtual fonts nested too deeply!")
+        if depth >= 16 {
+            return 0;
+        }
+        let Some(pkt) = vf.packets.get(&c) else {
+            return 0;
+        };
+        let font_of = |k: u32| vf.fonts.iter().find(|(n, _)| *n == k).map(|(_, f)| f);
+        let mut font = vf.fonts.first().map(|(_, f)| f);
+        let mut n = 0;
+        let mut p = 0;
+        let num = |p: &mut usize, k: usize| {
+            let v = pkt
+                .get(*p..*p + k)
+                .map_or(0, |b| b.iter().fold(0u32, |a, &c| (a << 8) | u32::from(c)));
+            *p += k;
+            v
+        };
+        while let Some(&op) = pkt.get(p) {
+            p += 1;
+            let ch = match op {
+                0..=127 => Some(u32::from(op)),
+                128..=130 | 133..=135 => Some(num(&mut p, usize::from((op - 128) % 5 + 1))),
+                132 | 137 => {
+                    p += 8;
+                    None
+                }
+                // (`right`, `w`, `x`, `down`, `y`, `z`: 1 to 4 bytes)
+                143..=146 | 148..=151 | 153..=156 | 157..=160 | 162..=165 | 167..=170 => {
+                    let first = match op {
+                        143..=146 => 143,
+                        148..=151 => 148,
+                        153..=156 => 153,
+                        157..=160 => 157,
+                        162..=165 => 162,
+                        _ => 167,
+                    };
+                    p += usize::from(op - first + 1);
+                    None
+                }
+                171..=234 => {
+                    font = font_of(u32::from(op - 171)).or(font);
+                    None
+                }
+                235..=238 => {
+                    let k = num(&mut p, usize::from(op - 234));
+                    font = font_of(k).or(font);
+                    None
+                }
+                239..=242 => {
+                    let len = num(&mut p, usize::from(op - 238)) as usize;
+                    p += len;
+                    None
+                }
+                138 | 141 | 142 | 147 | 152 | 161 | 166 => None,
+                // (`set4`, `put4` and the rest: xdvipdfmx stops)
+                _ => break,
+            };
+            if let (Some(ch), Some(f)) = (ch, font) {
+                let f = f.clone();
+                n += self.vf_glyphs(&f, ch, depth + 1);
+            }
+        }
+        n
+    }
+
+    /// The virtual font xdvipdfmx draws TFM font `name` through, if any.
+    fn xdv_vf(&mut self, name: &[u8]) -> Option<Arc<XdvVf>> {
+        if let Some(v) = self.org.as_deref()?.xdv_vfs.get(name) {
+            return v.clone();
+        }
+        let mut file = name.to_vec();
+        file.extend_from_slice(b".vf");
+        let vf = self
+            .host
+            .read_file(&file, crate::host::FileKind::Vf)
+            .filter(|_| !self.xdv_is_mapped(name))
+            .and_then(|f| XdvVf::parse(&f.contents))
+            .map(Arc::new);
+        let o = self.org.as_deref_mut()?;
+        o.xdv_vfs.insert(name.to_vec(), vf.clone());
+        vf
+    }
+
+    /// Whether xdvipdfmx's font maps have an entry for TFM `name` (the
+    /// first word of a line, `%` starting a comment).
+    fn xdv_is_mapped(&mut self, name: &[u8]) -> bool {
+        if self.org.as_deref().is_some_and(|o| o.xdv_mapped.is_none()) {
+            let mut names = alloc::collections::BTreeSet::new();
+            for map in [&b"pdftex.map"[..], b"kanjix.map", b"ckx.map"] {
+                let Some(f) = self.host.read_file(map, crate::host::FileKind::FontMap) else {
+                    continue;
+                };
+                for line in f.contents.split(|&c| c == b'\n' || c == b'\r') {
+                    let line = line.split(|&c| c == b'%').next().unwrap_or(&[]);
+                    if let Some(w) = line
+                        .split(|&c| c == b' ' || c == b'\t')
+                        .find(|w| !w.is_empty())
+                    {
+                        names.insert(w.to_vec());
+                    }
+                }
+            }
+            if let Some(o) = self.org.as_deref_mut() {
+                o.xdv_mapped = Some(names);
+            }
+        }
+        self.org
+            .as_deref()
+            .and_then(|o| o.xdv_mapped.as_ref())
+            .is_some_and(|m| m.contains(name))
+    }
+
+    /// `XeTeX`: the XDV page is written, its glyph items in the order
     /// `log` gives (`DviWriter::take_native_log`): its glyphs' origins as
     /// the page's stream, one per glyph xdvipdfmx draws, in its order.
     pub(crate) fn origins_xdv_page(&mut self, log: &[u32]) {

@@ -489,6 +489,71 @@ impl Dpx {
         Ok(0)
     }
 
+    /// Glyph runs: the glyph id `pdf_font_load_truetype` draws each code
+    /// of TrueType font `ident` (face `index`) with, by code: with no
+    /// encoding (`encoding` none), the code in the Mac Roman `cmap`
+    /// (`do_builtin_encoding`); else its name in `encoding`, through
+    /// `post`, the Unicode `cmap` and GSUB (`do_custom_encoding`). 0 where
+    /// none is found (C's `do_custom_encoding` keeps the previous code's
+    /// glyph then). None if the font does not open.
+    pub fn tt_code_gids(
+        &mut self,
+        ident: &[u8],
+        index: i32,
+        encoding: Option<&[Option<Vec<u8>>]>,
+    ) -> Result<Option<Vec<u16>>> {
+        let sfont = if let Some(fp) = self.dpx_open_file(ident, ResType::TtFont)? {
+            Sfnt::sfnt_open(fp)?
+        } else if let Some(fp) = self.dpx_open_file(ident, ResType::DFont)? {
+            Sfnt::dfont_open(fp, index)?
+        } else {
+            return Ok(None);
+        };
+        let mut sfont = some!(sfont);
+        if sfont.type_ != SFNT_TYPE_TRUETYPE
+            && sfont.type_ != SFNT_TYPE_TTC
+            && sfont.type_ != SFNT_TYPE_DFONT
+        {
+            return Ok(None);
+        }
+        let offset = if sfont.type_ == SFNT_TYPE_TTC {
+            sfont.ttc_read_offset(index as ULONG)?
+        } else {
+            sfont.offset
+        };
+        if sfont.sfnt_read_table_directory(offset)? != 0 {
+            return Ok(None);
+        }
+        let mut gids = vec![0u16; 256];
+        let Some(encoding) = encoding else {
+            let ttcm = some!(sfont.tt_cmap_read(TT_MAC, TT_MAC_ROMAN)?);
+            for (code, g) in gids.iter_mut().enumerate() {
+                *g = ttcm.tt_cmap_lookup(code as ULONG);
+            }
+            return Ok(Some(gids));
+        };
+        let (error, mut gm) = setup_glyph_mapper(&mut sfont)?;
+        if error != 0 {
+            return Ok(None);
+        }
+        for (code, g) in gids.iter_mut().enumerate() {
+            let Some(name) = encoding.get(code).and_then(|e| e.as_deref()) else {
+                continue;
+            };
+            if c_str(name) == b".notdef" {
+                continue;
+            }
+            let mut gid: USHORT = 0;
+            let error = if is_comp(name) {
+                self.findcomposite(name, &mut gid, &mut gm)?
+            } else {
+                self.resolve_glyph(name, &mut gid, &mut gm)?
+            };
+            *g = if error == 0 { gid } else { 0 };
+        }
+        Ok(Some(gids))
+    }
+
     /// `do_widths` (static): /Widths, /FirstChar, /LastChar of the font.
     fn do_widths(&mut self, font_id: i32, widths: &mut [f64; 256]) -> Result<()> {
         let (fontdict, usedchars, ident) = {

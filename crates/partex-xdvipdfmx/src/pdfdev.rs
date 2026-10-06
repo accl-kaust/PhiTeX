@@ -126,6 +126,22 @@ pub struct TextMatrix {
     pub rotate: i32,
 }
 
+/// The linear part `[a b c d]` of the text matrix `dev_set_text_matrix`
+/// sets for a font's `slant` and `extend` in direction `rotate`
+/// (`TEXT_WMODE_XX`; any other: all zero, as C leaves it).
+#[must_use]
+pub fn text_matrix(slant: f64, extend: f64, rotate: i32) -> [f64; 4] {
+    match rotate {
+        TEXT_WMODE_VH => [slant, 1.0, -extend, 0.0],
+        TEXT_WMODE_HV => [0.0, -extend, 1.0, -slant],
+        TEXT_WMODE_HH => [extend, 0.0, slant, 1.0],
+        TEXT_WMODE_VV => [1.0, -slant, 0.0, extend],
+        TEXT_WMODE_HD => [0.0, extend, -1.0, slant],
+        TEXT_WMODE_VD => [-1.0, slant, 0.0, -extend],
+        _ => [0.0; 4],
+    }
+}
+
 /// `struct text_state`.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct TextState {
@@ -309,46 +325,14 @@ impl Dpx {
         extend: f64,
         rotate: i32,
     ) -> Result<()> {
-        let mut tm = PdfTmatrix::default();
-        match rotate {
-            TEXT_WMODE_VH => {
-                tm.a = slant;
-                tm.b = 1.0;
-                tm.c = -extend;
-                tm.d = 0.0;
-            }
-            TEXT_WMODE_HV => {
-                tm.a = 0.0;
-                tm.b = -extend;
-                tm.c = 1.0;
-                tm.d = -slant;
-            }
-            TEXT_WMODE_HH => {
-                tm.a = extend;
-                tm.b = 0.0;
-                tm.c = slant;
-                tm.d = 1.0;
-            }
-            TEXT_WMODE_VV => {
-                tm.a = 1.0;
-                tm.b = -slant;
-                tm.c = 0.0;
-                tm.d = extend;
-            }
-            TEXT_WMODE_HD => {
-                tm.a = 0.0;
-                tm.b = extend;
-                tm.c = -1.0;
-                tm.d = slant;
-            }
-            TEXT_WMODE_VD => {
-                tm.a = -1.0;
-                tm.b = slant;
-                tm.c = 0.0;
-                tm.d = -extend;
-            }
-            _ => {}
-        }
+        let [a, b, c, d] = text_matrix(slant, extend, rotate);
+        let mut tm = PdfTmatrix {
+            a,
+            b,
+            c,
+            d,
+            ..PdfTmatrix::default()
+        };
         tm.e = f64::from(xpos) * self.dev.pdev.unit.dvi2pts;
         tm.f = f64::from(ypos) * self.dev.pdev.unit.dvi2pts;
         let mut b = Buf::new();

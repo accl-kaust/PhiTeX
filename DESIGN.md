@@ -2709,6 +2709,31 @@ goes before its line). Tests whose fonts TeX Live lacks (CODE2000,
 DavidCLM, Fandol, Junicode.ttf, NotoSerif-VF, Times LT Std) fail alike
 on both sides.
 
+**Glyph runs and origins.** Beside each page's PDF bytes, xdvipdfmx
+gives its glyph runs (`partex_xdvipdfmx::glyphrun`, a side output that
+never touches the PDF): every glyph it draws, in the content stream's
+order, a native word's glyphs and a TFM font's characters alike, a
+virtual font's characters as its base fonts' glyphs. A run has its
+source (a native font's glyph id; a Type 1 font's file and glyph name
+from the map entry's encoding or the built-in one; a TrueType or CFF
+OpenType map entry's glyph id, as the driver picks it), its place on
+the page (TeX's position through the driver's current matrix, `ctm`
+and the text matrix beside), the graphics state's fill colour, and its
+text as the PDF gives it: a word's `/ActualText` on its first glyph
+(`\XeTeXgenerateactualtext`), else the glyph's `ToUnicode` text (a
+native font's CMap made as `otf_create_ToUnicode_stream` makes it, every
+glyph taken as used; a TFM font's glyph name through the AGL). Under
+XeTeX, `Tex::origins` gives one origin per run, in order: the XDV
+writer logs the glyph items it writes (native words and glyphs,
+characters), and a character counts the glyphs xdvipdfmx draws for it
+(one, or a virtual font's packet's, read as `dvi_locate_font` decides:
+no map entry and a `.vf` file), each with the character's origin. The
+`xelatex_runs` job checks a run per origin and per code the PDF shows,
+where the PDF puts it (xdvipdfmx starts a string at TeX's position, a
+viewer advances through it by the font's `/Widths`, which differ from
+the TFM's by under a thousandth of an em a glyph), with the PDF's
+`ToUnicode` and `/ActualText` text.
+
 Not yet: Graphite (`/GR`, fontspec's `Renderer=Graphite`: graphite2's
 shaping, its features and queries), `\XeTeXlinebreaklocale` (ICU's line breaking), ICU's
 multi-byte converters (GBK and the like), `\XeTeXinterwordspaceshaping`

@@ -1658,6 +1658,24 @@ impl Dpx {
     }
 }
 
+/// Glyph runs: the built-in encoding of the Type 1 font in `fp` (its
+/// glyph names by code), as `t1_load_font` reads it, its private part not
+/// read. None if the ASCII part does not parse.
+pub fn t1_builtin_encoding(fp: &mut MemFile) -> Result<Option<Vec<Option<Vec<u8>>>>> {
+    fp.rewind();
+    let buffer = match get_pfb_segment(fp, PFB_SEG_TYPE_ASCII)? {
+        Some(b) if !b.is_empty() => b,
+        _ => return Ok(None),
+    };
+    let mut cff = CffFont::default();
+    init_cff_font(&mut cff);
+    let mut enc_vec: Vec<Option<Vec<u8>>> = vec![None; 256];
+    let mut p = 0;
+    let ok = parse_part1(&mut cff, Some(&mut enc_vec), &buffer, &mut p)? >= 0;
+    cff.cff_close();
+    Ok(ok.then_some(enc_vec))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
