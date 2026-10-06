@@ -302,8 +302,21 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         Ok(Some(b.node.share()))
     }
 
-    /// §976: the error for infinitely shrinkable glue in a split box.
+    /// §976: the error for infinitely shrinkable glue in a split box
+    /// (in pdfTeX and `XeTeX`, with bit 1 of `\ignoreprimitiveerror`, a
+    /// line of the log: `print_ignored_err`, its prefix not counted in
+    /// `file_offset`).
     fn infinite_shrink_split_error(&mut self) -> Result<(), Jump> {
+        if self.params.flavor != crate::params::Flavor::Tex
+            && self.int_par(IGNORE_PRIMITIVE_ERROR_CODE) % 2 != 0
+        {
+            let old_setting = self.selector();
+            self.set_selector(LOG_ONLY);
+            self.wlog_bytes(b"\nignored: ");
+            self.print_str(b"Infinite glue shrinkage found in box being split");
+            self.set_selector(old_setting);
+            return Ok(());
+        }
         self.print_err(b"Infinite glue shrinkage found in box being split");
         self.help(&[
             b"The box you are \\vsplitting contains some infinitely",
