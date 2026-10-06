@@ -717,6 +717,8 @@ struct G {
     fill: String,
     stroke: String,
     lw: f64,
+    /// (the clip in force: its index in `Ctx::clips`)
+    clip: Option<usize>,
     /// (the font ref)
     font: Option<usize>,
     size: f64,
@@ -735,6 +737,7 @@ impl G {
             fill: "#000000".into(),
             stroke: "#000000".into(),
             lw: 1.0,
+            clip: None,
             font: None,
             size: 10.0,
             tc: 0.0,
@@ -991,9 +994,24 @@ struct Ctx<'a> {
     text: String,
     paths: String,
     out: Out,
+    /// (clips, `C`: the path, even-odd, the clip it is inside; each once)
+    clips: Vec<(String, bool, Option<usize>)>,
+    clip_ids: HashMap<(String, bool, Option<usize>), usize>,
 }
 
 impl Ctx<'_> {
+    /// Clip path `d` (page coordinates; even-odd or not) inside clip
+    /// `parent`: its index.
+    fn clip(&mut self, d: String, evenodd: bool, parent: Option<usize>) -> usize {
+        let key = (d, evenodd, parent);
+        if let Some(&c) = self.clip_ids.get(&key) {
+            return c;
+        }
+        self.clips.push(key.clone());
+        self.clip_ids.insert(key, self.clips.len() - 1);
+        self.clips.len() - 1
+    }
+
     /// The fonts resources `res` name: name to font ref.
     fn fonts_of(&mut self, res: &O) -> HashMap<String, usize> {
         let p = self.p;
@@ -1106,6 +1124,8 @@ fn draw_with(
             text: String::new(),
             paths: String::new(),
             out: Out::default(),
+            clips: Vec::new(),
+            clip_ids: HashMap::new(),
         };
         // fonts of the page
         let fonts = ctx.fonts_of(&res);
@@ -1120,6 +1140,7 @@ fn draw_with(
             text: t,
             paths,
             mut out,
+            clips,
             ..
         } = ctx;
         let f: Vec<String> = keys.iter().map(|k| esc(k)).collect();
@@ -1177,6 +1198,20 @@ fn draw_with(
             }
             tail.push('}');
         }
+        if !clips.is_empty() {
+            tail.push_str(",\"C\":{");
+            for (i, (d, evenodd, parent)) in clips.iter().enumerate() {
+                let parent = parent.map_or(String::new(), |c| format!(",\"c{c}\""));
+                let _ = write!(
+                    tail,
+                    "{}\"c{i}\":[{},{}{parent}]",
+                    if i == 0 { "" } else { "," },
+                    esc(d),
+                    u8::from(*evenodd)
+                );
+            }
+            tail.push('}');
+        }
         if let Some(o) = order_json(&out.order) {
             let _ = write!(tail, ",\"o\":{o}");
         }
@@ -1212,6 +1247,8 @@ fn interpret(
         [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
     );
     let mut d = String::new();
+    // (`W`, `W*`: the path being made clips, from its painting operator on)
+    let mut clip_next: Option<bool> = None;
     let mut ops: Vec<O> = Vec::new();
     let mut l = Lex { b, i: 0 };
     // (device space: y down from the page's top)
@@ -1318,7 +1355,7 @@ fn interpret(
                     let lw = g.lw * ((g.ctm[0] * g.ctm[3] - g.ctm[1] * g.ctm[2]).abs().sqrt());
                     let _ = write!(
                         ctx.paths,
-                        "{}[{},{},{},{}]",
+                        "{}[{},{},{},{}{}]",
                         if ctx.paths.is_empty() { "" } else { "," },
                         esc(&d),
                         if fill { esc(&g.fill) } else { "null".into() },
@@ -1327,11 +1364,19 @@ fn interpret(
                         } else {
                             "null".into()
                         },
-                        r2(lw.max(0.1))
+                        r2(lw.max(0.1)),
+                        clip_field(g.clip)
                     );
+                }
+                if let Some(evenodd) = clip_next.take()
+                    && !d.is_empty()
+                {
+                    g.clip = Some(ctx.clip(d.clone(), evenodd, g.clip));
                 }
                 d.clear();
             }
+            "W" => clip_next = Some(false),
+            "W*" => clip_next = Some(true),
             "BT" => {
                 tm = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
                 tlm = tm;
@@ -1453,6 +1498,20 @@ fn interpret(
                         };
                         let mut fg = g.clone();
                         fg.ctm = mul(&m, &g.ctm);
+                        // (clipped to its /BBox)
+                        if let Some(O::Arr(bb)) = x.get("BBox").map(|b| p.resolve(b))
+                            && bb.len() == 4
+                        {
+                            let v = |i: usize| bb[i].num().unwrap_or(0.0);
+                            let mut c = String::new();
+                            let corners = [(v(0), v(1)), (v(2), v(1)), (v(2), v(3)), (v(0), v(3))];
+                            for (i, (x, y)) in corners.into_iter().enumerate() {
+                                let (x, y) = dev(&fg.ctm, x, y);
+                                let _ = write!(c, "{}{x} {y}", if i == 0 { "M" } else { "L" });
+                            }
+                            c.push('Z');
+                            fg.clip = Some(ctx.clip(c, false, fg.clip));
+                        }
                         if let Some(r) = x.get("Resources") {
                             let fres = p.resolve(r);
                             let ffonts = ctx.fonts_of(&fres);
@@ -1639,7 +1698,10 @@ fn show(
     // (a colour other than black: one more field, after the sixth, 0 or 1)
     let black = g.fill == "#000000";
     for (size, y, xs, txt) in runs {
-        let tail = if !black {
+        let tail = if let Some(c) = g.clip {
+            let colour = if black { "null".into() } else { esc(&g.fill) };
+            format!(",{},{colour},\"c{c}\"", u8::from(outl))
+        } else if !black {
             format!(",{},{}", u8::from(outl), esc(&g.fill))
         } else if outl {
             ",1".into()
@@ -1658,9 +1720,13 @@ fn show(
         );
         written += 1;
     }
-    // (the glyphs from outlines: [-1, size, y, xs, "", font ref, codes, colour?])
+    // (the glyphs from outlines: [-1, size, y, xs, "", font ref, codes,
+    // colour?, matrix?, clip?])
     if !codes.is_empty() {
-        let colour = if black {
+        let colour = if let Some(c) = g.clip {
+            let colour = if black { "null".into() } else { esc(&g.fill) };
+            format!(",{colour},null,\"c{c}\"")
+        } else if black {
             String::new()
         } else {
             format!(",{}", esc(&g.fill))
@@ -1794,7 +1860,7 @@ fn place_image(
     let m = [a, -b, -c, d, c + e, page_h - d - f];
     let _ = write!(
         out.r,
-        "{}[{},{},{},{},{},{},{}]",
+        "{}[{},{},{},{},{},{},{}{}]",
         if out.r.is_empty() { "" } else { "," },
         esc(&id),
         r4(m[0]),
@@ -1802,12 +1868,18 @@ fn place_image(
         r4(m[2]),
         r4(m[3]),
         r4(m[4]),
-        r4(m[5])
+        r4(m[5]),
+        clip_field(g.clip)
     );
     push_order(&mut out.order, 1, 1);
 }
 
 /// `#rrggbb` as bytes.
+/// An entry's clip field: `,"cN"`, or nothing.
+fn clip_field(c: Option<usize>) -> String {
+    c.map_or(String::new(), |c| format!(",\"c{c}\""))
+}
+
 fn hex_rgb(s: &str) -> [u8; 3] {
     let v = |i: usize| {
         s.get(i..i + 2)

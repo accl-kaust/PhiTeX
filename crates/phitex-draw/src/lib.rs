@@ -218,6 +218,49 @@ mod tests {
         );
     }
 
+    #[test]
+    fn clips() {
+        // (a clip, one inside it (even-odd), restored by Q; a form's /BBox)
+        let stream =
+            |d: &str, s: &str| format!("<< {d} /Length {} >>\nstream\n{s}\nendstream", s.len());
+        let objs = [
+            "<< /Type /Catalog /Pages 2 0 R >>".to_owned(),
+            "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_owned(),
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 100] /Contents 4 0 R \
+             /Resources << /Font << /F1 5 0 R >> /XObject << /Fm1 6 0 R >> >> >>"
+                .to_owned(),
+            stream(
+                "",
+                "q 0 0 50 50 re W n q 10 10 m 20 10 l 20 20 l h W* n \
+                 0 g 0 0 m 100 0 l S BT /F1 10 Tf (A) Tj ET Q 0 0 m 1 1 l S Q \
+                 /Fm1 Do 5 5 m 6 6 l S",
+            ),
+            "<< /Type /Font /Subtype /Type1 /BaseFont /CMR10 /FirstChar 65 /Widths [750] >>"
+                .to_owned(),
+            stream(
+                "/Type /XObject /Subtype /Form /BBox [0 0 10 10] /Matrix [1 0 0 1 100 0]",
+                "0 0 m 20 20 l S",
+            ),
+        ];
+        let d = crate::Pdf::open(&raw_pdf(&objs))
+            .unwrap()
+            .draw(0, &mut crate::Fonts::new())
+            .unwrap();
+        assert_eq!(
+            d,
+            "{\"v\":2,\"w\":200,\"h\":100,\"f\":[\"roman\"],\"F\":[\"CMR10\"],\"g\":{},\
+             \"t\":[[0,10,100,\"0\",\"A\",0,null,\"c1\"]],\
+             \"p\":[[\"M0 100L100 100\",null,\"#000000\",1,\"c1\"],\
+             [\"M0 100L1 99\",null,\"#000000\",1,\"c0\"],\
+             [\"M100 100L120 80\",null,\"#000000\",1,\"c2\"],\
+             [\"M5 95L6 94\",null,\"#000000\",1]],\"r\":[],\
+             \"C\":{\"c0\":[\"M0 100L50 100L50 50L0 50Z\",0],\
+             \"c1\":[\"M10 90L20 90L20 80Z\",1,\"c0\"],\
+             \"c2\":[\"M100 100L110 100L110 90L100 90Z\",0]},\
+             \"o\":[[0,0,1],[2,0,1],[0,1,3]]}"
+        );
+    }
+
     fn run(
         gid: u16,
         x: f64,

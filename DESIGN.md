@@ -2811,7 +2811,13 @@ anything else is decoded and encoded as a PNG (`miniz_oxide`), `/SMask`
 as its alpha, an `/ImageMask` in the fill colour. `"o"`
 (`[[list,first,count]]`, list 0 paths, 1 images, 2 text) is the paint
 order when it is not paths, images, text; `"x"` counts what is not drawn
-yet (shadings, clips). A form `XObject` is drawn in place through its
+yet (shadings). Clips (`W`, `W*`, a form's `/BBox`) are `"C"`: `{"c0":
+["d", even-odd 0 or 1, the clip it is inside?]}`, each once, its path in
+page coordinates; an entry drawn inside one names it in a last field (a
+path's fifth, an image's eighth, a text run's eighth after its outlined
+flag and colour or `null`, a glyph run's tenth after its colour and
+matrix or `null`). `XeTeX`'s glyph runs, from outside the PDF, are not
+clipped. A form `XObject` is drawn in place through its
 `/Matrix`, with its own resources (its fonts join the page's `F`, one ref
 for a font both name) or its parent's, 16 deep at most (`matplotlib`'s
 figures, `\includegraphics` of a PDF). A page's hash covers the bytes of
