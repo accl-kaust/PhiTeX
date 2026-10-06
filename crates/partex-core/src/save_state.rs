@@ -283,12 +283,14 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             org,
             sync,
             dl,
+            tap,
         } = self;
         if memo.enabled
             || effects.as_ref().is_some_and(|e| !e.is_empty())
             || org.is_some()
             || sync.is_some()
             || dl.is_some()
+            || tap.is_some()
             || fonts.native.iter().any(Option::is_some)
         {
             // (`XeTeX`'s native fonts are not saved: `native.rs`)
@@ -942,6 +944,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             org: None,
             sync: None,
             dl: None,
+            tap: None,
         })
     }
 

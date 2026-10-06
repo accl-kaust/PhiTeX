@@ -1202,10 +1202,29 @@ impl Viewer {
         }
     }
 
-    /// A build is in (`outputs`: its files; begun at `t`).
-    fn built(&self, outputs: &[(Vec<u8>, usize)], history: i32, t: Instant) {
+    /// What a build is doing (the live viewer shows it).
+    fn progress(&self, p: &crate::events::Progress) {
+        if let Some(v) = &self.live {
+            v.progress(p);
+        }
+    }
+
+    /// A build is in (`outputs`: its files; begun at `t`; `diagnostics`:
+    /// what it reported).
+    fn built(
+        &self,
+        outputs: &[(Vec<u8>, usize)],
+        history: i32,
+        t: Instant,
+        diagnostics: &[partex_core::diag::Diagnostic],
+    ) {
         if let Some(v) = &self.live {
             v.built(&crate::view::Built {
+                diagnostics: diagnostics
+                    .iter()
+                    .filter(|d| d.severity != partex_core::diag::Severity::Note)
+                    .map(crate::snippet::json)
+                    .collect(),
                 pdf: main_output(outputs)
                     .filter(|p| {
                         Path::new(p)
@@ -1280,10 +1299,12 @@ fn watch(opts: &Options, target: &Target, st: Settings) -> ! {
     ren.start();
     let mut between = crate::Between::default();
     let t = Instant::now();
-    let (reports, term, mut history) =
-        crate::converge_saved(&mut sess, &mut between, &mut |p| ren.progress(&p));
+    let (reports, term, mut history) = crate::converge_saved(&mut sess, &mut between, &mut |p| {
+        ren.progress(&p);
+        viewer.progress(&p);
+    });
     finish(target, &ren, &sess, &reports, &term, history, false, None);
-    viewer.built(&sess.outputs(), history, t);
+    viewer.built(&sess.outputs(), history, t, &sess.diagnostics());
     BUSY.store(false, std::sync::atomic::Ordering::Relaxed);
     save_estimate(&ren);
     if opts.open {
@@ -1337,12 +1358,13 @@ fn watch(opts: &Options, target: &Target, st: Settings) -> ! {
         let (reports, term, h) =
             crate::serve_observed(&mut sess, Some(history), true, &mut between, &mut |p| {
                 ren.progress(&p);
+                viewer.progress(&p);
             });
         BUSY.store(false, std::sync::atomic::Ordering::Relaxed);
         history = h;
         let rebuild = Some(Rebuild { changed });
         finish(target, &ren, &sess, &reports, &term, h, false, rebuild);
-        viewer.built(&sess.outputs(), h, t);
+        viewer.built(&sess.outputs(), h, t, &sess.diagnostics());
         last = stamps(&sess);
         ren.watching(&target.file, main_output(&sess.outputs()).as_deref());
         if INTERRUPTED.load(std::sync::atomic::Ordering::Relaxed) {
@@ -1439,13 +1461,16 @@ fn machine_watch(opts: &Options, target: &Target, ren: &Renderer, rx: &mpsc::Rec
         job.params,
         job.command_line.as_bytes(),
         &mut between,
-        &mut |p| ren.progress(&p),
+        &mut |p| {
+            ren.progress(&p);
+            viewer.progress(&p);
+        },
         true,
     );
     let mut history = out.history;
     let mut outputs = out.outputs.clone();
     machine_finish(target, ren, &out, None, true);
-    viewer.built(&outputs, history, t);
+    viewer.built(&outputs, history, t, &out.diagnostics);
     save_estimate(ren);
     if opts.open {
         viewer.open(ren, target, &out.outputs);
@@ -1453,13 +1478,16 @@ fn machine_watch(opts: &Options, target: &Target, ren: &Renderer, rx: &mpsc::Rec
     // (after a restart with nothing changed: the saved build, loading
     // meanwhile, and what changed since the look)
     let t = Instant::now();
-    let (mut w, since) = opened.into_watch(&mut between, &mut |p| ren.progress(&p));
+    let (mut w, since) = opened.into_watch(&mut between, &mut |p| {
+        ren.progress(&p);
+        viewer.progress(&p);
+    });
     if let Some(out) = since {
         history = out.history;
         outputs.clone_from(&out.outputs);
         let changed = w.last_changes().to_vec();
         machine_finish(target, ren, &out, Some(Rebuild { changed }), true);
-        viewer.built(&outputs, history, t);
+        viewer.built(&outputs, history, t, &out.diagnostics);
     }
     BUSY.store(false, std::sync::atomic::Ordering::Relaxed);
     w.idle();
@@ -1481,7 +1509,10 @@ fn machine_watch(opts: &Options, target: &Target, ren: &Renderer, rx: &mpsc::Rec
         ren.start_rebuild();
         viewer.building();
         let t = Instant::now();
-        let out = w.rebuild(&mut between, &mut |p| ren.progress(&p));
+        let out = w.rebuild(&mut between, &mut |p| {
+            ren.progress(&p);
+            viewer.progress(&p);
+        });
         BUSY.store(false, std::sync::atomic::Ordering::Relaxed);
         let Some(out) = out else {
             ren.idle();
@@ -1494,7 +1525,7 @@ fn machine_watch(opts: &Options, target: &Target, ren: &Renderer, rx: &mpsc::Rec
         outputs.clone_from(&out.outputs);
         let changed = w.last_changes().to_vec();
         machine_finish(target, ren, &out, Some(Rebuild { changed }), true);
-        viewer.built(&outputs, history, t);
+        viewer.built(&outputs, history, t, &out.diagnostics);
         w.idle();
         ren.watching(&target.file, main_output(&outputs).as_deref());
         if INTERRUPTED.load(std::sync::atomic::Ordering::Relaxed) {

@@ -38,6 +38,7 @@ pub mod effects;
 pub mod exec;
 mod flat;
 pub mod host;
+pub mod pagepdf;
 pub mod params;
 pub mod progress;
 mod skipcache;

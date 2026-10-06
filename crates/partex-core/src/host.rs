@@ -259,6 +259,19 @@ pub trait Host {
     /// to write the page again elsewhere in the file.
     fn page_written(&mut self, _page: &Page) {}
 
+    /// Whether the host wants each PDF content stream as it is shipped
+    /// ([`Host::stream_shipped`]): a viewer that draws pages while the
+    /// build runs (DESIGN 4.8). Nothing written depends on it.
+    fn wants_streams(&self) -> bool {
+        false
+    }
+
+    /// A PDF content stream was shipped (if [`Host::wants_streams`]):
+    /// page `page` (from 0, in shipping order: `\pdftotalpages` less
+    /// one), once its page object is written, or a form (`None`). A
+    /// viewer draws it through [`crate::pagepdf::page_pdf`].
+    fn stream_shipped(&mut self, _page: Option<usize>, _stream: crate::pagepdf::ShippedStream) {}
+
     /// zlib's `compress` of `data` at `level` (1–9), as pdfTeX's zlib
     /// writes it; `None` if the host has no zlib (PDF streams are then
     /// stored uncompressed).

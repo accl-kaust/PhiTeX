@@ -209,24 +209,37 @@ export class Viewer {
       this.io.unobserve(s.el);
       s.el.remove();
     }
-    for (let k = 0; k < hashes.length; k++) {
-      let s = this.slots[k];
-      if (!s) {
-        const el = document.createElement("div");
-        el.className = "slot";
-        el.dataset.k = String(k);
-        el.setAttribute("aria-label", `Page ${k + 1}`);
-        this.root.append(el);
-        s = { el, hash: hashes[k], drawn: null, img: null };
-        this.slots.push(s);
-        this.sizeSlot(s);
-        this.io.observe(el);
-      }
-      s.hash = hashes[k];
-    }
+    for (let k = 0; k < hashes.length; k++) this.slotAt(k).hash = hashes[k];
     // (asked once a layout: an ask lost, say before the session was up, goes again)
     this.asked.clear();
     this.wantVisible();
+  }
+
+  /**
+   * Page `k` is now at `hash`, the others as they are: a page shipped while
+   * the build runs, before its layout (slots added up to it, none removed),
+   * drawn when seen.
+   */
+  shipped(k: number, hash: string): void {
+    this.slotAt(k).hash = hash;
+    this.wantVisible();
+  }
+
+  /** Page `k`'s slot, made (with those before it) if there is none yet. */
+  private slotAt(k: number): Slot {
+    while (this.slots.length <= k) {
+      const n = this.slots.length;
+      const el = document.createElement("div");
+      el.className = "slot";
+      el.dataset.k = String(n);
+      el.setAttribute("aria-label", `Page ${n + 1}`);
+      this.root.append(el);
+      const s: Slot = { el, hash: "", drawn: null, img: null };
+      this.slots.push(s);
+      this.sizeSlot(s);
+      this.io.observe(el);
+    }
+    return this.slots[k];
   }
 
   /** Page `k` drawn: `img` at `hash` (the painted page of an edit, or one the viewer asked for). */

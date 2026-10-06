@@ -1781,6 +1781,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             org: _,
             sync: _,
             dl: _,
+            tap: _,
         } = self;
         let mut c = Canon::new();
         if let Some((m, s)) = memo {
