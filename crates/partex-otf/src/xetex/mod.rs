@@ -236,6 +236,10 @@ pub struct XeTeXFont {
     pub letter_space: Fixed,
     /// `loadedfontmapping`.
     pub mapping: Option<Arc<Mapping>>,
+    /// The bytes of the file `mapping` was compiled from, as the source
+    /// served them (shared with it: what a saved font keeps of its
+    /// mapping, compiled again when loaded).
+    pub mapping_file: Option<Arc<[u8]>>,
     /// `loadedfontdesignsize`.
     pub design_size: Fixed,
     /// `name_of_file` after the lookup (without the leading space): the
@@ -396,7 +400,7 @@ struct Loading<'a> {
     src: &'a dyn FontSource,
     tracing_fonts: i32,
     diags: Vec<Diagnostic>,
-    mapping: Option<Arc<Mapping>>,
+    mapping: Option<(Arc<Mapping>, Arc<[u8]>)>,
     flags: u8,
     letter_space: Fixed,
     name_of_file: String,
@@ -404,7 +408,7 @@ struct Loading<'a> {
 
 impl Loading<'_> {
     /// `load_mapping_file(s, e, 0)`.
-    fn load_mapping(&mut self, name: &[u8]) -> Option<Arc<Mapping>> {
+    fn load_mapping(&mut self, name: &[u8]) -> Option<(Arc<Mapping>, Arc<[u8]>)> {
         let mut file = lossy(name);
         file.push_str(".tec");
         let Some(path) = self.src.find_file(&file, KpseFormat::MiscFonts) else {
@@ -417,8 +421,7 @@ impl Loading<'_> {
         let cnv = self
             .src
             .read(&path)
-            .and_then(|b| Mapping::new(&b, true, true))
-            .map(Arc::new);
+            .and_then(|b| Some((Arc::new(Mapping::new(&b, true, true)?), b)));
         if cnv.is_none() {
             self.diags.push(Diagnostic::MappingNotUsable {
                 mapping: file,
@@ -743,7 +746,8 @@ fn load_ot_font(
         embolden,
         flags: ld.flags,
         letter_space: ld.letter_space,
-        mapping: ld.mapping.clone(),
+        mapping: ld.mapping.as_ref().map(|m| m.0.clone()),
+        mapping_file: ld.mapping.as_ref().map(|m| m.1.clone()),
         design_size,
         name_of_file: ld.name_of_file.clone(),
         last_script: None,

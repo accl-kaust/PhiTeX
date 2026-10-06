@@ -2018,12 +2018,20 @@ fn run_modern(root: &Path, partex: &Path) -> Result<Vec<String>> {
 /// `phitex build` and `phitex watch` with `XeTeX` (`% !TEX program =
 /// xelatex`): its format made and kept, xdvipdfmx in process; against
 /// TeX Live's `xelatex` run to its fixpoint, both seeing TeX Live's fonts
-/// only: the build must be identical.
+/// only: the build must be identical, then restored, then after an edit
+/// from the saved build. A second document in LaTeX's default font
+/// (`modern-xelatex-lm.tex`): its second pass runs again the region that
+/// loaded the font.
+#[allow(clippy::too_many_lines)] // (one scripted session, kept whole)
 fn run_modern_xelatex(root: &Path, partex: &Path) -> Result<Vec<String>> {
     let case = Converge {
         name: "modern_xelatex",
         oracle: "xelatex",
-        inputs: &["modern-xelatex.tex", "xpic-plain.png"],
+        inputs: &[
+            "modern-xelatex.tex",
+            "modern-xelatex-lm.tex",
+            "xpic-plain.png",
+        ],
         ini: &[],
         args: &["-interaction=nonstopmode"],
         job: "modern-xelatex",
@@ -2050,6 +2058,13 @@ fn run_modern_xelatex(root: &Path, partex: &Path) -> Result<Vec<String>> {
         "the case must need {} runs",
         case.passes
     );
+    let lm = Converge {
+        job: "modern-xelatex-lm",
+        watch: &["modern-xelatex-lm.aux"],
+        ..case
+    };
+    let lm_args = ["-interaction=nonstopmode", "modern-xelatex-lm.tex"];
+    oracle_passes(&lm, &o, &o, &lm_args)?;
     let env = |cmd: &mut Command| {
         cmd.env("PARTEX_CACHE_DIR", work.join("cache"))
             .env("PARTEX_STORE_DIR", work.join("store"))
@@ -2078,6 +2093,7 @@ fn run_modern_xelatex(root: &Path, partex: &Path) -> Result<Vec<String>> {
             .any(|l| l.trim_start().starts_with("Finished modern-xelatex.pdf")),
         "the build did not finish"
     );
+    modern(&["build", "modern-xelatex-lm.tex"])?;
     let mut diffs = compare(&o, &p, true)?;
     // Again, nothing changed: what the first saved, restored (its inputs
     // include the font index, which is no file)
@@ -2091,7 +2107,35 @@ fn run_modern_xelatex(root: &Path, partex: &Path) -> Result<Vec<String>> {
             .into_iter()
             .map(|n| format!("restored: {n}")),
     );
-    // (not yet: a watch's rebuild is untested)
+    // A word changed: the build loads the one saved (its native fonts
+    // opened again from the files it read) and rebuilds from it, never
+    // cold; its files must be xelatex's on the edited text.
+    let (from, to) = ("This text is at the end.", "This text is at the finish.");
+    for dir in [&o, &p] {
+        let f = dir.join("modern-xelatex.tex");
+        let text = fs::read_to_string(&f)?;
+        ensure!(text.contains(from), "the document has no `{from}`");
+        fs::write(&f, text.replacen(from, to, 1))?;
+    }
+    oracle_passes(&case, &o, &o, &args)?;
+    let mut cmd = Command::new(partex);
+    env(&mut cmd);
+    cmd.env("PARTEX_STORE_DEBUG", "1");
+    let report = exec(cmd, &p, &["build", "modern-xelatex.tex"], "term.txt")?;
+    for line in report.lines() {
+        eprintln!("    {line}");
+    }
+    ensure!(
+        report.contains("phitex: store: after the load:")
+            && !report.contains("cannot be saved")
+            && !report.contains("does not load"),
+        "the build after an edit did not load the saved build:\n{report}"
+    );
+    diffs.extend(
+        compare(&o, &p, true)?
+            .into_iter()
+            .map(|n| format!("edited: {n}")),
+    );
     Ok(diffs)
 }
 
