@@ -56,8 +56,12 @@ too, in one round instead of one build per file.
 - pdftex: TRACE=path/to/trace-deps and TRACE_FMT=its pdflatex.fmt (the
   extension's core-partex), over a flat directory of what pdflatex finds by
   each name (the search above).
-- xetex: TRACE_XETEX and TRACE_XETEX_FMT (the same protocol, xelatex.fmt),
-  over what xelatex finds; without them the column is empty.
+- xetex: TRACE_XETEX and TRACE_XETEX_FMT (the same protocol, xelatex.fmt,
+  with the engine's font index, fontindex.pxfi, beside it: the extension's
+  trace-deps runs XeTeX for an xelatex.fmt), over what xelatex finds;
+  without them the column is empty.
+A trace is kept in cache/trace-<engine>.json, by its tool, format, names and
+flat directory: the same inputs are traced once.
 
 The engine's font index (FONT_INDEX=path: the PhiTeX engine's builder over
 fonts/opentype and fonts/truetype) is served, when given, at the path
@@ -383,6 +387,21 @@ def trace(tool: str | None, fmt: str | None, flat_files: dict[str, bytes], names
     if not (tool and fmt):
         print(f"no {what} trace: its dependency column is empty", file=sys.stderr)
         return {}
+    # (kept in cache/trace-<engine>.json, by what it depends on: the tool,
+    # the format, the names and the flat directory's files; the same inputs
+    # trace once, so a rebuild for another column leaves this one as it was)
+    h = hashlib.sha256()
+    for b in (Path(tool).read_bytes(), Path(fmt).read_bytes(), "\0".join(names).encode()):
+        h.update(hashlib.sha256(b).digest())
+    for name in sorted(flat_files):
+        h.update(name.encode() + b"\0" + hashlib.sha256(flat_files[name]).digest())
+    key = h.hexdigest()
+    saved = CACHE / f"trace-{what}.json"
+    if saved.exists():
+        s = json.loads(saved.read_text())
+        if s.get("key") == key:
+            print(f"  {what}: trace from {saved}", file=sys.stderr)
+            return {n: set(fs) for n, fs in s["read"].items()}
     flat = CACHE / f"flat-{what}"
     if flat.exists():
         shutil.rmtree(flat)
@@ -409,6 +428,7 @@ def trace(tool: str | None, fmt: str | None, flat_files: dict[str, bytes], names
     missing = len(set(names) - read.keys())
     if missing:
         print(f"  {what}: {missing} names not traced (a batch timed out)", file=sys.stderr)
+    saved.write_text(json.dumps({"key": key, "read": {n: sorted(fs) for n, fs in sorted(read.items())}}))
     return read
 
 
