@@ -7,6 +7,7 @@
 //! field of the font table (`FontData::native_dir`), read and written
 //! where a word is measured.
 
+use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::sync::Arc;
@@ -15,6 +16,7 @@ use core::cell::RefCell;
 
 use partex_engine::native::{GlyphNode, NativeGlyph, NativeWord};
 use partex_engine::node::FontId;
+use partex_engine::node::{Node, Whatsit};
 use partex_otf::xetex::fontmgr::FontManager;
 use partex_otf::xetex::{Diagnostic, XeTeXFont};
 use partex_otf::{FontSource, KpseFormat};
@@ -400,6 +402,52 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             n.depth = d;
         }
         n
+    }
+
+    /// `XeTeX` §1444: implement `\XeTeXglyph`, a glyph of the current
+    /// font by its number (a paragraph started in vertical mode).
+    pub(crate) fn implement_glyph(&mut self) -> Result<(), Jump> {
+        match self.mode().abs() {
+            VMODE => {
+                self.back_input()?;
+                self.new_graf(true)
+            }
+            MMODE => self.report_illegal_case(),
+            _ => {
+                let f = self.cur_font();
+                if !self.is_native_font(f) {
+                    return self.font_kind_error(
+                        EXTENSION,
+                        GLYPH_CODE,
+                        f,
+                        b"; not a native platform font",
+                    );
+                }
+                // The node is the tail while its number is scanned.
+                let mut g = self.native_glyph_node(f, 0, false);
+                self.tail_append(Node::Whatsit(Box::new(Whatsit::Glyph(g))));
+                self.scan_int()?;
+                if self.cur_val < 0 || self.cur_val > 65535 {
+                    self.print_err(b"Bad glyph number");
+                    self.help(&[
+                        b"A glyph number must be between 0 and 65535.",
+                        b"I changed this one to zero.",
+                    ]);
+                    self.int_error(self.cur_val)?;
+                    self.cur_val = 0;
+                }
+                self.pop_tail();
+                self.font_read(f, crate::track::font::METRICS);
+                let use_glyph_metrics = self.xetex_state(XETEX_USE_GLYPH_METRICS_CODE) > 0;
+                g = self.native_glyph_node(
+                    f,
+                    u16::try_from(self.cur_val).unwrap_or(0),
+                    use_glyph_metrics,
+                );
+                self.tail_append(Node::Whatsit(Box::new(Whatsit::Glyph(g))));
+                Ok(())
+            }
+        }
     }
 
     /// `new_native_word_node` with its metrics set: a word of `text` in

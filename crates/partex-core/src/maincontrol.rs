@@ -1144,6 +1144,9 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             PIC_FILE_CODE | PDF_FILE_CODE if self.params.flavor == crate::params::Flavor::XeTeX => {
                 self.implement_picture(self.cur_chr == PDF_FILE_CODE)?;
             }
+            GLYPH_CODE if self.params.flavor == crate::params::Flavor::XeTeX => {
+                self.implement_glyph()?;
+            }
             c if c >= PDFTEX_FIRST_EXTENSION_CODE => {
                 if !self.do_pdf_extension()? {
                     return self.pdf_error(b"ext1", b"not implemented in partex yet");
