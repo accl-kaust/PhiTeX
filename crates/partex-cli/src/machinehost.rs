@@ -2894,9 +2894,28 @@ impl Watch {
             if self.stamps.get(&key) == Some(&time) {
                 continue;
             }
-            let Ok(now) = std::fs::read(&p) else {
-                self.stamps.insert(key, time);
-                continue;
+            let now = match std::fs::read(&p) {
+                Ok(now) => now,
+                // (a file read that is gone: its readers run again, and find
+                // it nowhere, as TeX would; one that comes back has a time
+                // again, and its contents are read then)
+                Err(e)
+                    if e.kind() == std::io::ErrorKind::NotFound
+                        && init.file(&key).is_some_and(|old| !old.is_empty()) =>
+                {
+                    out.push(Found {
+                        key,
+                        now: Arc::from(Vec::new()),
+                        stamped: true,
+                        time,
+                        own: false,
+                    });
+                    continue;
+                }
+                Err(_) => {
+                    self.stamps.insert(key, time);
+                    continue;
+                }
             };
             if init.file(&key).is_some_and(|old| *old == *now) {
                 self.stamps.insert(key, time);
