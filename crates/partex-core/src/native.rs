@@ -51,12 +51,19 @@ impl partex_engine::persist::Persist for NativeFont {
 }
 
 /// What finding native fonts keeps across loads: the font manager over
-/// the index (made at the first native font) and the shaper's caches.
-/// Neither is engine state: both are made again from the index.
+/// the index (made at the first native font) and the shaper's caches;
+/// and the line break rules of `\XeTeXlinebreaklocale`. None is engine
+/// state: all are made again from the index or the data.
 #[derive(Default)]
 pub(crate) struct NativeEnv {
     mgr: Option<FontManager>,
     shaper: Option<partex_otf::shape::Shaper>,
+    /// ICU's line break rules last used (`\XeTeXlinebreaklocale`), read
+    /// from the data once a rule set.
+    pub(crate) linebreak: Option<(
+        crate::icu_linebreak::RuleSet,
+        Arc<crate::icu_linebreak::Rules>,
+    )>,
 }
 
 impl Clone for NativeEnv {

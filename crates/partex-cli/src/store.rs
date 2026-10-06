@@ -2,8 +2,8 @@
 //! of their bytes, packed, and roots that name what a saved build needs.
 //!
 //! Layout under the store directory (`PARTEX_STORE_DIR`, else `store`
-//! in `partex.toml`, else `$XDG_CACHE_HOME/partex/store`, else
-//! `~/.cache/partex/store`; `PARTEX_STORE=0` turns it off):
+//! in `phitex.toml`, else `$XDG_CACHE_HOME/phitex/store`, else
+//! `~/.cache/phitex/store`; `PARTEX_STORE=0` turns it off):
 //!
 //! - `packs/<hash>.pack`: blobs one after the other; `<hash>` is that of
 //!   the pack's bytes, so a pack never changes once written. Each blob is
@@ -95,10 +95,19 @@ pub fn dir(configured: Option<&Path>) -> Option<PathBuf> {
     std::env::var_os("PARTEX_STORE_DIR")
         .map(PathBuf::from)
         .or_else(|| configured.map(Path::to_path_buf))
-        .or_else(|| {
-            std::env::var_os("XDG_CACHE_HOME").map(|d| PathBuf::from(d).join("partex/store"))
-        })
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache/partex/store")))
+        .or_else(|| crate::cache::user_cache("phitex").map(|d| d.join("store")))
+}
+
+/// Forget the build saved under `key` (`phitex clean`): its root goes,
+/// and the packs no other root names go with the next [`collect`].
+/// Whether there was one.
+pub fn forget(dir: &Path, key: u128) -> bool {
+    std::fs::remove_file(root_path(dir, key)).is_ok()
+}
+
+/// The bound on the store's size.
+pub fn max() -> u64 {
+    max_bytes()
 }
 
 fn max_bytes() -> u64 {
@@ -815,6 +824,51 @@ mod tests {
     /// A save writes its pack as it goes, in batches; what it saved reads
     /// back, and a second save that refers to the first's blobs keeps them
     /// (moving the live ones of a pack mostly dead).
+    #[test]
+    fn a_forgotten_root_is_gone_and_its_packs_with_it() {
+        let dir = std::env::temp_dir().join(format!("phitex-store-forget-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let own = blob(b"this job's only".repeat(20), Vec::new());
+        let shared = blob(b"another job's".repeat(20), Vec::new());
+        let (ho, hs) = (own.0, shared.0);
+        save(&dir, 1, b"this job", vec![own], &[ho], &Stored::default()).unwrap();
+        save(
+            &dir,
+            2,
+            b"another job",
+            vec![shared],
+            &[hs],
+            &Stored::default(),
+        )
+        .unwrap();
+        let packs = || std::fs::read_dir(dir.join("packs")).unwrap().count();
+        let before = packs();
+        assert!(forget(&dir, 1));
+        assert!(!forget(&dir, 1));
+        assert!(open(&dir, 1).is_none());
+        // (the other job's build is untouched)
+        assert_eq!(
+            open(&dir, 2).unwrap().get(hs).unwrap(),
+            b"another job's".repeat(20)
+        );
+        // (the collection takes the packs no root names, once old enough)
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(120);
+        for e in std::fs::read_dir(dir.join("packs")).unwrap() {
+            let f = File::options()
+                .append(true)
+                .open(e.unwrap().path())
+                .unwrap();
+            f.set_modified(old).unwrap();
+        }
+        collect(&dir, u64::MAX);
+        assert!(packs() < before);
+        assert_eq!(
+            open(&dir, 2).unwrap().get(hs).unwrap(),
+            b"another job's".repeat(20)
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     #[test]
     fn saves_read_back() {
         let dir = std::env::temp_dir().join(format!("partex-store-test-{}", std::process::id()));

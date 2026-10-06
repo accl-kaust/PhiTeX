@@ -1,7 +1,7 @@
 //! The modern command line's terminal (DESIGN.md 2.5): status lines like
 //! cargo's, a live line that moves while a build runs, errors as
-//! rustc-style snippets, warnings grouped at the end, and in `partex
-//! watch` one line per rebuild above a footer. Everything goes to
+//! rustc-style snippets, warnings grouped at the end, and in `phitex
+//! watch` one line per rebuild above a status line. Everything goes to
 //! standard error; the TeX transcript still goes, whole, to the `.log`
 //! file.
 //!
@@ -225,20 +225,22 @@ pub fn size(bytes: usize) -> String {
     }
 }
 
-/// A duration as people read it: `38 ms`, `1.23 s`, `12.3 s`, `2 min
-/// 05 s`.
+/// A duration as people read it: `38 ms`, `1.2 s`, `12 s`, `2:05`,
+/// `1:02:05`.
 #[must_use]
 pub fn secs(d: Duration) -> String {
     let s = d.as_secs_f64();
+    let whole = d.as_secs();
     if s < 1.0 {
         format!("{:.0} ms", s * 1e3)
     } else if s < 10.0 {
-        format!("{s:.2} s")
-    } else if s < 60.0 {
         format!("{s:.1} s")
+    } else if s < 60.0 {
+        format!("{whole} s")
+    } else if whole < 3600 {
+        format!("{}:{:02}", whole / 60, whole % 60)
     } else {
-        let whole = d.as_secs();
-        format!("{} min {:02} s", whole / 60, whole % 60)
+        format!("{}:{:02}:{:02}", whole / 3600, whole / 60 % 60, whole % 60)
     }
 }
 
@@ -264,23 +266,23 @@ pub struct End<'a> {
     pub bytes: Option<usize>,
     pub failed: bool,
     pub checked: bool,
-    /// A rebuild of `partex watch`: one line in its log.
+    /// A rebuild of `phitex watch`: one line in its log.
     pub rebuild: Option<Rebuild>,
 }
 
-/// What a rebuild of `partex watch` was for.
+/// What a rebuild of `phitex watch` was for.
 pub struct Rebuild {
     /// What changed: `paper.tex:18`.
     pub changed: Vec<String>,
 }
 
-/// How a problem is known from one build to the next (its line moves
-/// with edits above it).
-fn identities(summary: &Summary, s: Style, verbose: u8) -> (Vec<String>, Vec<String>) {
+/// How a problem is known from one build to the next: an error by its
+/// line in a watch's log, a warning by its kind and subject.
+fn identities(summary: &Summary, s: Style) -> (Vec<String>, Vec<String>) {
     let errors = summary
         .errors
         .iter()
-        .map(|d| crate::snippet::error(d, s, verbose))
+        .map(|d| crate::snippet::brief(d, s))
         .collect();
     let mut warnings = Vec::new();
     for g in &summary.groups {
@@ -296,9 +298,16 @@ fn identities(summary: &Summary, s: Style, verbose: u8) -> (Vec<String>, Vec<Str
     (errors, warnings)
 }
 
+/// Where a watch's log lines go on: after the time (`17:03:12  `).
+pub const LOG_INDENT: usize = 10;
+
+/// How many errors a watch's log shows one per line (`w` shows all).
+const BRIEF_ERRORS: usize = 3;
+
 /// The bookkeeping of the build being rendered.
 struct Run {
     started: Instant,
+    /// Passes that ran (none: the build was as the last one left it).
     passes: usize,
     /// The board when the pass began.
     pass_base: Snapshot,
@@ -313,6 +322,10 @@ struct Run {
     /// The commands its passes ran, and the job's in all (the last's).
     commands: u64,
     total: u64,
+    /// Why the pass beginning runs: the files the last one changed.
+    again: Vec<String>,
+    /// The document's pages, as the passes so far shipped them.
+    pages: u64,
     /// The problems of the last build shown (a watch shows what is new),
     /// and its counts.
     last: Option<(Vec<String>, Vec<String>)>,
@@ -326,6 +339,9 @@ pub struct Renderer {
     pub settings: Settings,
     live: Arc<Live>,
     run: Mutex<Run>,
+    /// `phitex watch`'s, and whether it reads keys: its log lines carry
+    /// the time, and its problems are counted (`w` shows them whole).
+    watch: Option<bool>,
     /// Whether the watch's plain `Watching` line was printed.
     said_watching: std::sync::atomic::AtomicBool,
 }
@@ -346,12 +362,35 @@ impl Renderer {
                 measured: None,
                 commands: 0,
                 total: 0,
+                again: Vec::new(),
+                pages: 0,
                 last: None,
                 was: Was::default(),
                 summary: None,
             }),
+            watch: None,
             said_watching: std::sync::atomic::AtomicBool::new(false),
         }
+    }
+
+    /// A renderer drawing into a buffer, and the buffer (tests): a
+    /// watch's if `watch` (reading keys).
+    #[cfg(test)]
+    #[must_use]
+    pub fn captured(settings: Settings, watch: bool) -> (Self, Arc<Mutex<Vec<u8>>>) {
+        let (live, buf) = Live::captured(settings);
+        let mut r = Self::new(settings);
+        r.live = live;
+        r.watch = watch.then_some(true);
+        (r, buf)
+    }
+
+    /// The renderer of `phitex watch` (`keys`: it reads keys).
+    #[must_use]
+    pub fn for_watch(settings: Settings, keys: bool) -> Self {
+        let mut r = Self::new(settings);
+        r.watch = Some(keys);
+        r
     }
 
     fn style(&self) -> Style {
@@ -386,6 +425,13 @@ impl Renderer {
         self.live.note(text);
     }
 
+    /// A line of a watch's log: the time, then `text` (`nothing changed`).
+    pub fn event(&self, text: &str) {
+        // (the time is as wide as the indent, less two spaces)
+        let time = self.style().dim(&clock_time(SystemTime::now()));
+        self.line(&format!("{time}  {text}"));
+    }
+
     /// A status line, its verb in yellow: something the user may want to
     /// act on.
     pub fn warn(&self, verb: &str, what: &str) {
@@ -410,9 +456,11 @@ impl Renderer {
         r.measured = None;
         r.commands = 0;
         r.total = 0;
+        r.again.clear();
+        r.pages = 0;
     }
 
-    /// A rebuild of `partex watch` begins.
+    /// A rebuild of `phitex watch` begins.
     pub fn start_rebuild(&self) {
         self.start();
         lock(&self.run).rebuild = true;
@@ -466,17 +514,29 @@ impl Renderer {
                 };
                 self.live.begin(Task::new(verb, "", true, started));
             }
+            Progress::Again(files) => {
+                // (by their names: an output directory is the same for all)
+                lock(&self.run).again = files
+                    .iter()
+                    .map(|f| f.rsplit('/').next().unwrap_or(f).to_owned())
+                    .collect();
+            }
             Progress::Phase(phase) => self.phase(*phase),
             Progress::Pass(n, report) => self.pass_ended(*n, *report),
             Progress::Tool(line) => {
-                let line = line.strip_prefix("partex: ").unwrap_or(line);
-                let (tool, rest) = line.split_once(' ').unwrap_or((line, ""));
-                if !self.settings.quiet {
-                    self.line(&format!(
-                        "{} {rest}",
-                        self.style().blue(&format!("{tool:>12}"))
-                    ));
+                let rebuild = lock(&self.run).rebuild;
+                if self.settings.quiet || (rebuild && self.settings.verbose == 0) {
+                    return;
                 }
+                let line = line
+                    .strip_prefix("phitex: ")
+                    .or_else(|| line.strip_prefix("partex: "))
+                    .unwrap_or(line);
+                let (tool, rest) = line.split_once(' ').unwrap_or((line, ""));
+                self.line(&format!(
+                    "{} {rest}",
+                    self.style().blue(&format!("{tool:>12}"))
+                ));
             }
         }
     }
@@ -506,24 +566,32 @@ impl Renderer {
 
     /// Pass `n` ended, having done `report` (`None`: nothing changed).
     fn pass_ended(&self, n: usize, report: Option<&crate::session::Report>) {
-        let s = self.style();
         let board = BOARD.snapshot();
-        let (base, rebuild, cold) = {
-            let r = lock(&self.run);
-            (r.pass_base.clone(), r.rebuild, r.cold)
+        let (base, rebuild, cold, again, doc_pages) = {
+            let mut r = lock(&self.run);
+            let again = std::mem::take(&mut r.again);
+            (r.pass_base.clone(), r.rebuild, r.cold, again, r.pages)
         };
         let pages = board.pages.saturating_sub(base.pages);
-        let Some(r) = report else {
-            if n == 1 {
-                self.status("Fresh", "nothing changed since the last build");
-            }
-            return;
-        };
+        // (a first pass that ran nothing: the saved build, or the outputs
+        // the last build left, are the result)
+        let restored = !rebuild && n == 1 && report.is_none_or(|r| r.commands == 0);
+        if restored {
+            self.status("Restored", "the saved build (nothing changed)");
+        }
+        let Some(r) = report else { return };
         {
             let mut run = lock(&self.run);
-            run.passes = n.max(1);
+            if !restored {
+                run.passes = n;
+            }
             run.commands += r.commands;
             run.total = r.total_commands;
+            run.pages = if r.commands >= r.total_commands {
+                pages
+            } else {
+                run.pages.max(pages)
+            };
         }
         if n == 1 && cold {
             lock(&self.run).measured = Some(Estimate {
@@ -532,32 +600,16 @@ impl Renderer {
                 millis: u64::try_from(r.elapsed.as_millis()).unwrap_or(u64::MAX),
             });
         }
-        if self.settings.quiet || (rebuild && self.settings.verbose == 0) {
+        if restored || self.settings.quiet || (rebuild && self.settings.verbose == 0) {
             return;
         }
-        let sep = s.sep();
-        let mut what = Vec::new();
-        if r.commands < r.total_commands {
-            what.push(format!(
-                "{} of {} commands run again",
-                thousands(r.commands),
-                thousands(r.total_commands)
-            ));
-        } else {
-            what.push(format!("{} commands", thousands(r.total_commands)));
-        }
-        if let Some(c) = r.cut_at {
-            what.push(format!("converged early at command {}", thousands(c)));
-        }
-        if pages > 0 {
-            what.push(plural(usize::try_from(pages).unwrap_or(0), "page", "pages"));
-        }
-        what.push(secs(r.elapsed));
-        self.line(&format!(
-            "{} {}",
-            s.cyan(&format!("{:>12}", format!("Pass {n}"))),
-            what.join(sep)
-        ));
+        let pass = PassLine {
+            n,
+            pages,
+            doc_pages,
+            again: &again,
+        };
+        self.line(&pass.render(r, self.style(), self.settings.verbose));
         if self.settings.verbose > 0 {
             for w in &r.why {
                 self.note(w);
@@ -565,15 +617,19 @@ impl Renderer {
         }
     }
 
-    /// `partex watch` watches `file` now: its footer (on a terminal; the
-    /// keys it reads if `keys`), or once a plain line.
-    pub fn watching(&self, file: &str, keys: bool) {
-        if !self.live.footer(file, keys)
+    /// `phitex watch` watches `file` (its output `output`) now: its status
+    /// line on a terminal, else once a plain line.
+    pub fn watching(&self, file: &str, output: Option<&str>) {
+        let keys = self.watch == Some(true);
+        if !self.live.footer(file, output, keys)
             && !self
                 .said_watching
                 .swap(true, std::sync::atomic::Ordering::Relaxed)
         {
-            self.status("Watching", &format!("{file} (q and Enter to quit)"));
+            let to = output
+                .map(|o| format!(" {} {o}", self.style().sym("→", "->")))
+                .unwrap_or_default();
+            self.status("Watching", &format!("{file}{to} (q and Enter to quit)"));
         }
     }
 
@@ -584,7 +640,7 @@ impl Renderer {
             self.note("no build yet");
             return;
         };
-        let text = self.problems(&summary, None);
+        let text = self.problems(&summary);
         if text.is_empty() {
             self.note("no errors and no warnings");
         } else {
@@ -593,77 +649,34 @@ impl Renderer {
         lock(&self.run).summary = Some(summary);
     }
 
-    /// Errors and warnings of `summary` as the terminal shows them; with
-    /// `last` (a watch's rebuild), only what is new since, and a count of
-    /// what went.
-    fn problems(&self, summary: &Summary, last: Option<&(Vec<String>, Vec<String>)>) -> String {
+    /// Errors and warnings of `summary` in full, as rustc shows its own.
+    fn problems(&self, summary: &Summary) -> String {
         let s = self.style();
         let mut out = String::new();
-        let (errors, warnings) = identities(summary, s, self.settings.verbose);
         // (the same error at the same place, once, with a count)
-        let mut shown: Vec<(&String, usize)> = Vec::new();
-        for text in &errors {
+        let mut shown: Vec<(String, usize)> = Vec::new();
+        for d in &summary.errors {
+            let text = crate::snippet::error(d, s, self.settings.verbose);
             match shown.iter_mut().find(|(t, _)| *t == text) {
                 Some((_, n)) => *n += 1,
                 None => shown.push((text, 1)),
             }
         }
         for (text, n) in shown {
-            if let Some((old, _)) = last
-                && old.contains(text)
-            {
-                // (as before: its headline)
-                let head = text.lines().next().unwrap_or_default();
-                let at = crate::term::strip(text.lines().nth(1).unwrap_or_default());
-                let at = at.trim().trim_start_matches("-->").trim();
-                let _ = writeln!(out, "{head} {}", s.dim(&format!("(as before, at {at})")));
-                continue;
-            }
-            out.push_str(text);
+            out.push_str(&text);
             if n > 1 {
                 let _ = writeln!(out, "{} {n} times", s.blue("   ="));
             }
             out.push('\n');
         }
-        match last {
-            None => {
-                for g in &summary.groups {
-                    let _ = writeln!(out, "{}", group(g, s));
-                }
-            }
-            Some((_, old)) => {
-                // (the warnings that are new, as groups)
-                let mut k = 0;
-                for g in &summary.groups {
-                    let mut new = Group {
-                        kind: g.kind,
-                        items: Vec::new(),
-                    };
-                    for i in &g.items {
-                        if !old.contains(&warnings[k]) {
-                            new.items.push(i.clone());
-                        }
-                        k += 1;
-                    }
-                    if !new.items.is_empty() {
-                        let _ = writeln!(out, "{}", group(&new, s).replacen(": ", ": new: ", 1));
-                    }
-                }
-                let gone = old.iter().filter(|w| !warnings.contains(w)).count();
-                if gone > 0 {
-                    let _ = writeln!(
-                        out,
-                        "{:>12} {}",
-                        "",
-                        s.dim(&format!("{} gone", plural(gone, "warning", "warnings")))
-                    );
-                }
-            }
+        for g in &summary.groups {
+            let _ = writeln!(out, "{}", group(g, s));
         }
         out
     }
 
-    /// The end of a build: problems, then one line on the result.
+    /// The end of a build: its problems, then one line on the result (a
+    /// watch's: its errors one per line, the rest counted).
     pub fn finish(&self, end: &End) {
         let s = self.style();
         self.live.end_now();
@@ -689,26 +702,36 @@ impl Renderer {
             };
             (t, r.last.clone(), r.was)
         };
+        let ids = identities(end.summary, s);
+        let shown = Shown {
+            s,
+            verbose: self.settings.verbose,
+            keys: self.watch == Some(true),
+        };
         if let Some(rb) = &end.rebuild {
-            // (a watch's log: the line first, then what is new)
-            out.push_str(&rebuild_line(end, rb, &totals, was, s));
-            out.push_str(&self.problems(end.summary, last.as_ref()));
+            out.push_str(&shown.rebuild_line(end, rb, &totals, was));
+            // (only the errors that are new: the line counts them all)
+            let old = last.as_ref().map_or(&[][..], |(e, _)| e.as_slice());
+            out.push_str(&shown.brief_errors(&ids.0, old));
+        } else if self.watch.is_some() {
+            out.push_str(&shown.brief_errors(&ids.0, &[]));
+            out.push_str(&shown.result_line(end, &totals, true));
         } else {
-            out.push_str(&self.problems(end.summary, None));
-            out.push_str(&result_line(end, &totals, s));
+            out.push_str(&self.problems(end.summary));
+            out.push_str(&shown.result_line(end, &totals, false));
             if end.summary.warnings() > 0 && !self.settings.quiet {
                 let _ = writeln!(
                     out,
                     "{:>12} {}",
                     "",
-                    s.dim("every warning, and why the build ran as it did: `partex why`")
+                    s.dim("every warning, and why the build ran as it did: `phitex why`")
                 );
             }
         }
         let elapsed = totals.elapsed;
         {
             let mut r = lock(&self.run);
-            r.last = Some(identities(end.summary, s, self.settings.verbose));
+            r.last = Some(ids);
             r.was = Was {
                 pages: Some(end.summary.pages),
                 warnings: Some(end.summary.warnings()),
@@ -735,18 +758,197 @@ struct Totals {
     total: u64,
 }
 
-/// The errors and warnings of `end`, counted.
-fn counts(end: &End, s: Style) -> Vec<String> {
-    let mut out = Vec::new();
-    let errors = end.summary.errors.len();
-    let warnings = end.summary.warnings();
-    if errors > 0 {
-        out.push(s.red(&plural(errors, "error", "errors")));
+/// A pass's line: `Pass 2  316 pages  1:14  (paper.toc changed)`.
+struct PassLine<'a> {
+    n: usize,
+    /// The pages it shipped out, and the document's before it.
+    pages: u64,
+    doc_pages: u64,
+    /// Why it ran: the files the pass before changed.
+    again: &'a [String],
+}
+
+impl PassLine<'_> {
+    fn render(&self, r: &crate::session::Report, s: Style, verbose: u8) -> String {
+        let mut line = s.cyan(&format!("{:>12}", format!("Pass {}", self.n)));
+        // (a pass that ran part of the job: the pages it made again)
+        let part = r.commands < r.total_commands;
+        if self.pages > 0 {
+            let pages = plural(usize::try_from(self.pages).unwrap_or(0), "page", "pages");
+            if part && self.pages < self.doc_pages {
+                let _ = write!(line, "  {pages} again");
+            } else {
+                let _ = write!(line, "  {pages}");
+            }
+        }
+        let _ = write!(line, "  {}", secs(r.elapsed));
+        if !self.again.is_empty() {
+            let why = format!("({} changed)", self.again.join(", "));
+            let _ = write!(line, "  {}", s.dim(&why));
+        }
+        if verbose > 0 {
+            let mut facts = vec![if part {
+                format!(
+                    "{} of {} commands run again",
+                    thousands(r.commands),
+                    thousands(r.total_commands)
+                )
+            } else {
+                format!("{} commands", thousands(r.total_commands))
+            }];
+            if let Some(c) = r.cut_at {
+                facts.push(format!("converged early at command {}", thousands(c)));
+            }
+            let sep = s.sep();
+            let _ = write!(line, "{}", s.dim(&format!("{sep}{}", facts.join(sep))));
+        }
+        line
     }
-    if warnings > 0 {
-        out.push(s.yellow(&plural(warnings, "warning", "warnings")));
+}
+
+/// How the end of a build is put.
+struct Shown {
+    s: Style,
+    verbose: u8,
+    /// A watch reading keys: `w` shows the problems.
+    keys: bool,
+}
+
+impl Shown {
+    /// `n` errors and `m` warnings, those there are; `(w)` after them in
+    /// a watch that reads keys.
+    fn counts(&self, errors: usize, warnings: usize, watch: bool) -> Vec<String> {
+        let s = self.s;
+        let mut out = Vec::new();
+        if errors > 0 {
+            out.push(s.red(&plural(errors, "error", "errors")));
+        }
+        if warnings > 0 {
+            out.push(s.yellow(&plural(warnings, "warning", "warnings")));
+        }
+        if watch
+            && self.keys
+            && let Some(last) = out.last_mut()
+        {
+            last.push_str(" (w)");
+        }
+        out
     }
-    out
+
+    /// The errors of `errors` not in `old`, one line each, the same one
+    /// once; past [`BRIEF_ERRORS`], a count.
+    fn brief_errors(&self, errors: &[String], old: &[String]) -> String {
+        let mut new: Vec<&String> = Vec::new();
+        for e in errors {
+            if !old.contains(e) && !new.contains(&e) {
+                new.push(e);
+            }
+        }
+        let mut out = String::new();
+        for e in new.iter().take(BRIEF_ERRORS) {
+            let _ = writeln!(out, "{:LOG_INDENT$}{e}", "");
+        }
+        if new.len() > BRIEF_ERRORS {
+            let more = format!("{} more", new.len() - BRIEF_ERRORS);
+            let key = if self.keys { " (w)" } else { "" };
+            let _ = writeln!(
+                out,
+                "{:LOG_INDENT$}{}",
+                "",
+                self.s.dim(&format!("{more}{key}"))
+            );
+        }
+        out
+    }
+
+    /// The last line of a build: `Finished paper.pdf · 12 pages · 1.2 s`.
+    fn result_line(&self, end: &End, t: &Totals, watch: bool) -> String {
+        let s = self.s;
+        let sep = s.sep();
+        let errors = end.summary.errors.len();
+        let warnings = end.summary.warnings();
+        let mut facts = Vec::new();
+        if end.failed {
+            facts = self.counts(errors, warnings, watch);
+        }
+        facts.push(plural(end.summary.pages, "page", "pages"));
+        if self.verbose > 0 {
+            if let Some(b) = end.bytes.filter(|_| !end.failed) {
+                facts.push(size(b));
+            }
+            if t.passes > 0 {
+                facts.push(plural(t.passes, "pass", "passes"));
+            }
+        }
+        facts.push(s.bold(&secs(t.elapsed)));
+        if !end.failed {
+            facts.extend(self.counts(0, warnings, watch));
+        }
+        let verb = if end.failed {
+            s.red(&format!("{:>12}", "Failed"))
+        } else if end.checked {
+            s.green(&format!("{:>12}", "Checked"))
+        } else {
+            s.green(&format!("{:>12}", "Finished"))
+        };
+        format!("{verb} {}{sep}{}\n", subject(end, s), facts.join(sep))
+    }
+
+    /// A watch's line for a rebuild: `17:03:12  paper.tex:18  ✓ 18 ms`;
+    /// its errors, and its pages and warnings if they are not as many as
+    /// the last build's (`was`); with `-v`, its passes and how much of the
+    /// job ran again.
+    fn rebuild_line(&self, end: &End, rb: &Rebuild, t: &Totals, was: Was) -> String {
+        let s = self.s;
+        let sep = s.sep();
+        let mut facts = vec![s.bold(&secs(t.elapsed))];
+        let w = end.summary.warnings();
+        let w_changed = was.warnings.is_some_and(|was| was != w) && w > 0;
+        let errors = end.summary.errors.len();
+        facts.extend(self.counts(errors, if w_changed { w } else { 0 }, true));
+        if was.warnings.is_some_and(|was| was > 0) && w == 0 {
+            facts.push(s.dim("no warnings"));
+        }
+        if was.pages.is_some_and(|p| p != end.summary.pages) {
+            facts.push(plural(end.summary.pages, "page", "pages"));
+        }
+        if self.verbose > 0 {
+            if t.passes > 1 {
+                facts.push(plural(t.passes, "pass", "passes"));
+            }
+            if t.total > 0 {
+                #[allow(clippy::cast_precision_loss)]
+                let pct = t.ran as f64 * 100.0 / t.total as f64;
+                let pct = if pct < 0.1 && t.ran > 0 {
+                    String::from("<0.1")
+                } else if pct < 10.0 {
+                    format!("{pct:.1}")
+                } else {
+                    format!("{pct:.0}")
+                };
+                facts.push(s.dim(&format!("{pct}% run again")));
+            }
+        }
+        let mark = if end.failed {
+            s.red(s.sym("✗", "x"))
+        } else {
+            s.green(s.sym("✓", "ok"))
+        };
+        let changed = if rb.changed.is_empty() {
+            String::from("rebuilt")
+        } else {
+            rb.changed.join(", ")
+        };
+        // (the marks in a column while the names are short)
+        let pad = 12usize.saturating_sub(crate::term::width(&changed));
+        format!(
+            "{}  {}{:pad$} {mark} {}\n",
+            s.dim(&clock_time(SystemTime::now())),
+            s.cyan(&changed),
+            "",
+            facts.join(sep)
+        )
+    }
 }
 
 /// The output of `end`, linked, or its file.
@@ -757,94 +959,11 @@ fn subject(end: &End, s: Style) -> String {
     }
 }
 
-/// The last line of a build: `Finished paper.pdf · 12 pages · …`.
-fn result_line(end: &End, t: &Totals, s: Style) -> String {
-    let sep = s.sep();
-    let mut facts = Vec::new();
-    if end.failed {
-        facts = counts(end, s);
-    }
-    facts.push(plural(end.summary.pages, "page", "pages"));
-    if let Some(b) = end.bytes.filter(|_| !end.failed) {
-        facts.push(size(b));
-    }
-    if t.passes > 0 {
-        facts.push(plural(t.passes, "pass", "passes"));
-    }
-    facts.push(s.bold(&secs(t.elapsed)));
-    let warnings = end.summary.warnings();
-    if !end.failed && warnings > 0 {
-        facts.push(s.yellow(&plural(warnings, "warning", "warnings")));
-    }
-    let verb = if end.failed {
-        s.red(&format!("{:>12}", "Failed"))
-    } else if end.checked {
-        s.green(&format!("{:>12}", "Checked"))
-    } else {
-        s.green(&format!("{:>12}", "Finished"))
-    };
-    format!("{verb} {}{sep}{}\n", subject(end, s), facts.join(sep))
-}
-
 /// What the last build had: a watch's line says what is not the same.
 #[derive(Clone, Copy, Default)]
 struct Was {
     pages: Option<usize>,
     warnings: Option<usize>,
-}
-
-/// A watch's line for a rebuild: `17:03:12 ↻ paper.tex:18 ✓ paper.pdf ·
-/// 18 ms · 0.8% run again`; its pages and warnings if they are not as
-/// many as the last build's (`was`).
-fn rebuild_line(end: &End, rb: &Rebuild, t: &Totals, was: Was, s: Style) -> String {
-    let sep = s.sep();
-    let mut facts = Vec::new();
-    if end.failed {
-        facts.push(s.red(&plural(end.summary.errors.len(), "error", "errors")));
-    }
-    facts.push(s.bold(&secs(t.elapsed)));
-    if was.pages != Some(end.summary.pages) {
-        facts.push(plural(end.summary.pages, "page", "pages"));
-    }
-    if t.passes > 1 {
-        facts.push(plural(t.passes, "pass", "passes"));
-    }
-    if t.total > 0 {
-        #[allow(clippy::cast_precision_loss)]
-        let pct = t.ran as f64 * 100.0 / t.total as f64;
-        let pct = if pct < 0.1 && t.ran > 0 {
-            String::from("<0.1")
-        } else if pct < 10.0 {
-            format!("{pct:.1}")
-        } else {
-            format!("{pct:.0}")
-        };
-        facts.push(s.dim(&format!("{pct}% run again")));
-    }
-    let w = end.summary.warnings();
-    if was.warnings.is_none_or(|was| was != w) && (w > 0 || was.warnings.is_some()) {
-        facts.push(s.yellow(&plural(w, "warning", "warnings")));
-    }
-    let mark = if end.failed {
-        s.red(s.sym("✗", "x"))
-    } else {
-        s.green(s.sym("✓", "ok"))
-    };
-    let changed = if rb.changed.is_empty() {
-        String::new()
-    } else {
-        format!(
-            "{} {} ",
-            s.cyan(s.sym("↻", "*")),
-            s.cyan(&rb.changed.join(", "))
-        )
-    };
-    format!(
-        "{} {changed}{mark} {}{sep}{}\n",
-        s.dim(&format!("{:>12}", clock_time(SystemTime::now()))),
-        subject(end, s),
-        facts.join(sep)
-    )
 }
 
 impl Drop for Renderer {
@@ -853,7 +972,7 @@ impl Drop for Renderer {
     }
 }
 
-/// How many items of a group the terminal shows (`partex why` shows all).
+/// How many items of a group the terminal shows (`phitex why` shows all).
 const SHOWN: usize = 3;
 
 /// A group of warnings.
@@ -875,7 +994,7 @@ pub fn group(g: &Group, s: Style) -> String {
         if g.items.len() > SHOWN {
             let _ = writeln!(
                 out,
-                "{} {} more (`partex why`)",
+                "{} {} more (`phitex why`)",
                 s.blue("   ="),
                 plural(g.items.len() - SHOWN, "warning", "warnings")
             );
@@ -1035,11 +1154,100 @@ mod tests {
         assert_eq!(size(5_000), "4.9 KB");
         assert_eq!(size(1_300_000), "1.2 MB");
         assert_eq!(secs(Duration::from_millis(38)), "38 ms");
-        assert_eq!(secs(Duration::from_millis(1234)), "1.23 s");
-        assert_eq!(secs(Duration::from_millis(12_345)), "12.3 s");
-        assert_eq!(secs(Duration::from_secs(125)), "2 min 05 s");
+        assert_eq!(secs(Duration::from_millis(1234)), "1.2 s");
+        assert_eq!(secs(Duration::from_millis(12_345)), "12 s");
+        assert_eq!(secs(Duration::from_secs(125)), "2:05");
+        assert_eq!(secs(Duration::from_secs(3725)), "1:02:05");
         assert_eq!(plural(1, "page", "pages"), "1 page");
         assert_eq!(plural(1295, "page", "pages"), "1,295 pages");
+    }
+
+    /// What a captured renderer has drawn so far, as text.
+    fn drawn(buf: &Mutex<Vec<u8>>) -> String {
+        String::from_utf8_lossy(&lock(buf)).into_owned()
+    }
+
+    /// Wait (up to 5 s) until a captured renderer has drawn `text`.
+    fn until_drawn(buf: &Mutex<Vec<u8>>, text: &str) -> String {
+        let t = Instant::now();
+        loop {
+            let out = drawn(buf);
+            if out.contains(text) || t.elapsed() > Duration::from_secs(5) {
+                return out;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    fn tty() -> Settings {
+        Settings {
+            style: Style::plain(),
+            progress: true,
+            verbose: 0,
+            quiet: false,
+        }
+    }
+
+    #[test]
+    fn a_status_line_is_erased_before_a_line_and_drawn_again() {
+        let (r, buf) = Renderer::captured(tty(), true);
+        r.watching("paper.tex", Some("out/paper.pdf"));
+        let footer = "── watching paper.tex → paper.pdf · ? help";
+        let out = until_drawn(&buf, footer);
+        // (drawn, then the cursor back at its start, where it waits)
+        assert!(
+            out.ends_with(&format!("{footer}\x1b[K\r\x1b[?2026l")),
+            "{out:?}"
+        );
+        lock(&buf).clear();
+        r.event("nothing changed");
+        let out = drawn(&buf);
+        // (from the start of the status line, all below it erased, then
+        // the line, then the status line again)
+        let at = out.find("nothing changed").unwrap();
+        assert!(out[..at].starts_with("\x1b[?2026h\r\x1b[J"), "{out:?}");
+        assert!(out[at..].contains(footer), "{out:?}");
+        r.close();
+    }
+
+    #[test]
+    fn help_is_printed_once() {
+        let (r, buf) = Renderer::captured(tty(), true);
+        let keys = ["r rebuild now", "q quit"];
+        for _ in 0..3 {
+            r.live().help(&keys);
+        }
+        assert_eq!(drawn(&buf).matches("r rebuild now").count(), 1);
+        // (again after something else was printed)
+        r.event("nothing changed");
+        r.live().help(&keys);
+        assert_eq!(drawn(&buf).matches("r rebuild now").count(), 2);
+    }
+
+    #[test]
+    fn plain_lines_when_not_a_terminal() {
+        let plain = Settings {
+            progress: false,
+            ..tty()
+        };
+        let (r, buf) = Renderer::captured(plain, true);
+        r.status("Compiling", "paper.tex (pdflatex)");
+        r.watching("paper.tex", Some("paper.pdf"));
+        r.watching("paper.tex", Some("paper.pdf"));
+        r.event("nothing changed");
+        r.live().help(&["r rebuild now"]);
+        r.close();
+        let out = drawn(&buf);
+        assert!(!out.contains('\x1b'), "{out:?}");
+        assert!(!out.contains('\r'), "{out:?}");
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines[0], "   Compiling paper.tex (pdflatex)");
+        assert_eq!(
+            lines[1],
+            "    Watching paper.tex → paper.pdf (q and Enter to quit)"
+        );
+        assert!(lines[2].ends_with("  nothing changed"), "{out}");
+        assert_eq!(lines.len(), 4, "{out}");
     }
 
     #[test]

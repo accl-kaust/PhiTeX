@@ -518,11 +518,35 @@ const CASES: &[Case] = &[
             ],
         ],
     },
+    // XeTeX's \XeTeXlinebreaklocale: ICU's line breaks by locale, with
+    // \XeTeXlinebreakpenalty and \XeTeXlinebreakskip
+    Case {
+        name: "xetex_linebreak",
+        oracle: "xetex",
+        inputs: &["xetex-linebreak.tex"],
+        runs: &[
+            &[
+                "-ini",
+                "-etex",
+                "-interaction=nonstopmode",
+                "-no-pdf",
+                "xetex-linebreak",
+            ],
+            &[
+                "-ini",
+                "-etex",
+                "-interaction=nonstopmode",
+                "-jobname=xetex-linebreak-pdf",
+                "xetex-linebreak",
+            ],
+        ],
+    },
     // xelatex, its format made here: fontspec, hyphenation of native
     // words, hyperref, polyglossia's right-to-left scripts, beamer and
     // TikZ through xdvipdfmx, graphicx's pictures (PNG, JPEG, BMP, PDF
     // pages), unicode-math with OpenType math fonts (one, then several by
-    // range, boxes shown); each run twice (the second reads the aux)
+    // range, boxes shown), polyglossia's Japanese and Chinese (ICU's line
+    // breaks); each run twice (the second reads the aux)
     Case {
         name: "xelatex",
         oracle: "xetex",
@@ -542,6 +566,7 @@ const CASES: &[Case] = &[
             "xelatex-math.tex",
             "xelatex-math-body.tex",
             "xelatex-math-mix.tex",
+            "xelatex-cjk.tex",
         ],
         runs: &[
             &[
@@ -564,6 +589,7 @@ const CASES: &[Case] = &[
                 "-interaction=nonstopmode",
                 "xelatex-math-mix",
             ],
+            &["-fmt=xelatex", "-interaction=nonstopmode", "xelatex-cjk"],
             &[
                 "-fmt=xelatex",
                 "-interaction=nonstopmode",
@@ -1810,6 +1836,7 @@ fn display_ssa(root: &Path, partex: &Path, work: &Path, diffs: &mut Vec<String>)
 /// Every file must be identical (not the terminal: the renderer's), and
 /// the renderer must name each kind of problem the document has; then a
 /// rebuild from the saved session (`-v`), `partex why` and `partex clean`.
+#[allow(clippy::too_many_lines)] // (one scripted session, kept whole)
 fn run_modern(root: &Path, partex: &Path) -> Result<Vec<String>> {
     let case = Converge {
         name: "modern",
@@ -1843,6 +1870,7 @@ fn run_modern(root: &Path, partex: &Path) -> Result<Vec<String>> {
     let modern = |args: &[&str]| -> Result<(String, String)> {
         let mut cmd = Command::new(partex);
         cmd.env("PARTEX_CACHE_DIR", work.join("cache"))
+            .env("PARTEX_STORE_DIR", work.join("store"))
             .env("PARTEX_FORMATS", &formats)
             .env("NO_COLOR", "1")
             .env_remove("PARTEX_PERSIST");
@@ -1877,14 +1905,20 @@ fn run_modern(root: &Path, partex: &Path) -> Result<Vec<String>> {
         ensure!(report.contains(want), "the report lacks `{want}`");
     }
     // (the last line: `Failed modern.tex · 1 error · 3 warnings · 1 page ·
-    // 3 passes · 0.41 s`, its separators as the locale has them)
+    // 0.41 s`, its separators as the locale has them; a line per pass)
     let last = report
         .lines()
         .find(|l| l.trim_start().starts_with("Failed modern.tex"))
         .context("the report has no `Failed modern.tex` line")?;
-    for want in ["1 error", "3 warnings", "1 page", "3 passes"] {
+    for want in ["1 error", "3 warnings", "1 page"] {
         ensure!(last.contains(want), "the last line lacks `{want}`: {last}");
     }
+    ensure!(
+        report
+            .lines()
+            .any(|l| l.trim_start().starts_with("Pass 3 ")),
+        "the report has no `Pass 3` line"
+    );
     ensure!(
         !report.contains("modern: a line from typeout"),
         "the report shows \\typeout lines without -v"
@@ -1906,10 +1940,31 @@ fn run_modern(root: &Path, partex: &Path) -> Result<Vec<String>> {
         why.contains("warning: 1 overfull \\hbox"),
         "partex why lacks the warnings"
     );
-    modern(&["clean", "modern.tex"])?;
+    let (_, report) = modern(&["clean", "modern.tex"])?;
     ensure!(
         !p.join("modern.pdf").exists() && !p.join("modern.aux").exists(),
-        "partex clean left the outputs"
+        "phitex clean left the outputs"
+    );
+    eprintln!("    {}", report.trim());
+    // After a clean, the build starts over: it runs the job, from the
+    // saved build neither (nor its record of the outputs).
+    let (_, report) = modern(&["build", "-v", "modern.tex"])?;
+    ensure!(
+        !report.contains("Restored") && report.contains("Pass 1 "),
+        "the build after `phitex clean` did not run the job:\n{report}"
+    );
+    diffs.extend(
+        compare(&o, &p, true)?
+            .into_iter()
+            .map(|n| format!("after clean: {n}")),
+    );
+    // `clean --all`: every saved build, with no file named.
+    let store = work.join("store");
+    ensure!(store.exists(), "the build saved nothing to the store");
+    let (_, report) = modern(&["clean", "--all"])?;
+    ensure!(
+        !store.exists() && report.contains("Removed every saved build"),
+        "phitex clean --all left the store:\n{report}"
     );
     Ok(diffs)
 }

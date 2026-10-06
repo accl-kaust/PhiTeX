@@ -105,6 +105,21 @@ fn frame_name(f: &Frame) -> Option<String> {
     }
 }
 
+/// Error `d` on one line, as TeX's `-file-line-error` puts it: `paper.tex:12:
+/// Undefined control sequence \fooo` (a watch's log; `w` shows it whole).
+#[must_use]
+pub fn brief(d: &Diagnostic, s: Style) -> String {
+    let (mut message, _) = message_lines(&lossy(&d.message));
+    if let Some(cs) = culprit(d) {
+        let _ = write!(message, " {cs}");
+    }
+    let at = d.frames.iter().find_map(|f| match &f.kind {
+        FrameKind::File { name, line } => Some(format!("{}:{line}", shown(name))),
+        _ => None,
+    });
+    format!("{}: {message}", s.red(at.as_deref().unwrap_or("error")))
+}
+
 /// Error `d` for the terminal; `verbose` unfolds the backtrace and adds
 /// TeX's help.
 #[must_use]

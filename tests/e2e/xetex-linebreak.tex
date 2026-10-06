@@ -1,0 +1,43 @@
+% XeTeX's \XeTeXlinebreaklocale: ICU's line breaks for the locale (its
+% rule sets: root's, Japanese and Korean's, Chinese's, the lb= variants),
+% each a \XeTeXlinebreakpenalty and \XeTeXlinebreakskip (glue only if not
+% zero_glue, the penalty if not zero or no glue); words in a native font
+% (Latin Modern: CJK glyphs missing, as in the oracle; breaks do not
+% depend on glyphs).
+\catcode`\{=1 \catcode`\}=2 \catcode`\#=6 \catcode`\^=7
+\showboxdepth=100 \showboxbreadth=100000 \tracingonline=1 \tracinglostchars=0
+\hsize=100pt \vsize=600pt \parfillskip=0pt plus 1fil \baselineskip=12pt
+\tolerance=10000 \parindent=0pt \output={\shipout\box255}
+\font\x="[lmroman10-regular.otf]" \x
+\def\t#1#2{\XeTeXlinebreaklocale "#1"\relax #2\showlists\par\showlists}
+\t{ja}{「こんにちは」、世界。ちょっと待ってください……ねえ、ゃゅょっァィ}
+\t{zh}{这是一个测试：中文、英文（English）和数字123混排。《三国演义》}
+\t{zh_TW}{這是一個測試：中文、英文（English）和數字123混排。}
+\t{ko}{한국어 문장입니다. 띄어쓰기가있습니다!}
+\t{en}{http://example.com/path?x=1&y=2 e.g. U.S.A. AT&T don't 10% $10.00-5}
+\t{th}{東京は English 123}
+\t{}{「こんにちは」、世界。}
+\t{ja@lb=loose}{ラーメン・カレー・ソバ〜！？々ゝゞヽヾーァ}
+\t{ja@lb=strict}{ラーメン・カレー・ソバ〜！？々ゝゞヽヾーァ}
+\t{zh-u-lb-normal}{价格是NT$1,234.56元，约US$40。ー〜}
+\t{en@lb=loose}{ラーメン・カレー（123）}
+\t{ja}{東京は２０２６年１０月６日（火）です。😀👍🏽𠀋𡈽}
+\XeTeXlinebreakpenalty=50
+\t{ja}{日本語の文章です。句読点、括弧（かっこ）}
+\XeTeXlinebreakskip=0pt plus 1pt
+\t{ja}{日本語の文章です。句読点、括弧（かっこ）}
+\XeTeXlinebreakpenalty=0
+\t{zh}{这是一个测试：中文、英文}
+\XeTeXlinebreakskip=0pt
+\t{zh}{这是一个测试：中文、英文}
+\XeTeXlinebreakskip=0pt plus 0fil
+\t{ja}{東京は２０２６年}
+% a name goes on over any character, to a space
+\setbox0\hbox{\XeTeXlinebreaklocale "ja"東京は２０２６年} \showbox0
+\XeTeXlinebreaklocale "ja" a\-b-c東京\-は--大阪 東 東京\par
+\begingroup \XeTeXlinebreaklocale "zh" \endgroup 中文测试。\par
+\setbox0\vbox{\XeTeXlinebreaklocale "ja" \XeTeXlinebreakskip=0pt plus 2pt
+  吾輩は猫である。名前はまだ無い。どこで生れたかとんと見当がつかぬ。何でも薄暗いじめじめした所でニャーニャー泣いていた事だけは記憶している。}
+\showbox0 \box0
+\XeTeXlinebreaklocale "" \XeTeXlinebreakskip=0pt
+\end

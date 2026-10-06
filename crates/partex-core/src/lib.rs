@@ -70,6 +70,7 @@ mod format;
 mod hash;
 mod hashmemo;
 mod hyph;
+mod icu_linebreak;
 mod icu_tables;
 mod input;
 mod journal;

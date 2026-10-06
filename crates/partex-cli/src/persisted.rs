@@ -61,12 +61,17 @@ struct Kept {
     known: Known,
 }
 
-/// The store's directory from `partex.toml` (`store = "dir"`).
+/// The store's directory from `phitex.toml` (`store = "dir"`).
 static CONFIGURED: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
 
-/// Take the store's directory from `partex.toml`.
+/// Take the store's directory from `phitex.toml`.
 pub fn configure(dir: PathBuf) {
     let _ = CONFIGURED.set(dir);
+}
+
+/// The store's directory `phitex.toml` gave, if it gave one.
+pub fn configured() -> Option<&'static std::path::Path> {
+    CONFIGURED.get().map(PathBuf::as_path)
 }
 
 /// This build of partex: its path, length and time.
@@ -112,6 +117,19 @@ fn identity(params: &Params, command_line: &[u8]) -> Option<u128> {
     )))
 }
 
+/// Forget the build saved for the job of `params` and `command_line`,
+/// and its no-op record (`phitex clean`): the store's directory, and
+/// whether there was either. The packs only it named go with the
+/// store's collection.
+pub fn forget(params: &Params, command_line: &[u8]) -> Option<(PathBuf, bool)> {
+    let k = Keeper::new(params, command_line)?;
+    let (dir, key) = k.place();
+    let root = store::forget(&dir, key);
+    let quick = super::quick::forget(&dir, key);
+    store::collect(&dir, store::max());
+    Some((dir, root || quick))
+}
+
 impl Keeper {
     /// The store's directory and this job's key in it.
     pub fn place(&self) -> (PathBuf, u128) {
@@ -120,7 +138,7 @@ impl Keeper {
 
     /// The store for this job, if it is on.
     pub fn new(params: &Params, command_line: &[u8]) -> Option<Self> {
-        let dir = store::dir(CONFIGURED.get().map(PathBuf::as_path))?;
+        let dir = store::dir(configured())?;
         Some(Self {
             dir,
             key: identity(params, command_line)?,

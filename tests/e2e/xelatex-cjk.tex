@@ -1,0 +1,25 @@
+% polyglossia's Japanese and Chinese: \XeTeXlinebreaklocale "ja" and "zh" with
+% \XeTeXlinebreakskip, ICU's line breaks (in Latin Modern: the CJK glyphs
+% are missing, as in the oracle; the breaks do not depend on them).
+\documentclass{article}
+\usepackage{polyglossia}
+\setmainlanguage{english}
+\setotherlanguage{japanese}
+\setotherlanguage{chinese}
+\setmainfont{Latin Modern Roman}
+\newfontfamily\japanesefont{Latin Modern Roman}
+\newfontfamily\chinesefont{Latin Modern Roman}
+\showboxdepth=100 \showboxbreadth=100000
+\begin{document}
+English text first.
+\textjapanese{「こんにちは」、世界。日本語の文章です。句読点、括弧（かっこ）や「かぎ括弧」も。ちょっと待ってください……ねえ、ゃゅょっァィゥェォ。東京は２０２６年１０月６日（火）です。ラーメン・カレー・ソバ〜！？}
+Back to English.
+
+\begin{japanese}
+吾輩は猫である。名前はまだ無い。どこで生れたかとんと見当がつかぬ。何でも薄暗いじめじめした所でニャーニャー泣いていた事だけは記憶している。
+\end{japanese}
+
+\textchinese{这是一个测试：中文、英文（English）和数字123混排。《三国演义》第一回——宴桃园豪杰三结义。}
+
+\setbox0\vbox{\hsize=80pt \textjapanese{吾輩は猫である。名前はまだ無い。}}\showbox0
+\end{document}

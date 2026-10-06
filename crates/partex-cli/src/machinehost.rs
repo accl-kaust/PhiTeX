@@ -3138,8 +3138,19 @@ impl Watch {
                 self.record_quick(&out);
                 return out;
             }
+            // (why the next pass runs: the job's own files this one changed)
+            let mut again: Vec<String> = found
+                .iter()
+                .map(|f| {
+                    let name = f.key.rsplit(|&c| c == 0).next().unwrap_or(&f.key);
+                    String::from_utf8_lossy(undotted(name)).into_owned()
+                })
+                .collect();
+            again.sort();
+            again.dedup();
             let changes = self.take(found);
             passes += 1;
+            observe(crate::events::Progress::Again(&again));
             observe(crate::events::Progress::PassStart(passes));
             let (line, r) = self.apply_to_the_end(changes);
             report = r;

@@ -1,6 +1,6 @@
 //! The live area of the modern command line's terminal (DESIGN.md 2.5):
 //! the line below everything printed that moves while a build runs, or
-//! the footer of `partex watch`, drawn by a thread of its own.
+//! the status line of `phitex watch`, drawn by a thread of its own.
 //!
 //! The build says what runs (a [`Task`]: a pass, a phase); the thread
 //! samples the engine's progress board (`partex_core::progress`) and
@@ -8,7 +8,10 @@
 //! is printed goes above the area: the area is cleared, the text written
 //! and the area drawn again, in one write, as one frame (synchronized
 //! output, which terminals without it ignore). The area is cut to the
-//! terminal's width, so it never wraps and a redraw always finds it.
+//! terminal's width, and the cursor waits at the start of the area, not
+//! at its end: if the area wraps after all (the terminal made narrower
+//! since, its lines reflowed), clearing from there still takes all of
+//! it, and a status line never runs into what is printed next.
 
 use std::fmt::Write as _;
 use std::io::Write as _;
@@ -25,6 +28,9 @@ const SHOW_AFTER: Duration = Duration::from_millis(150);
 
 /// How often the live line is drawn while a task runs.
 const TICK: Duration = Duration::from_millis(80);
+
+/// How often a status line looks at the terminal's width.
+const RESIZE: Duration = Duration::from_secs(1);
 
 /// What the live line shows while it runs: a pass, a phase.
 pub struct Task {
@@ -64,9 +70,11 @@ impl Task {
     }
 }
 
-/// The footer of `partex watch`, below its log.
+/// The status line of `phitex watch`, below its log.
 struct Footer {
     file: String,
+    /// The PDF it makes, by its name.
+    output: Option<String>,
     keys: bool,
 }
 
@@ -82,12 +90,25 @@ struct State {
     quit: bool,
 }
 
+/// Where the area is drawn: standard error, or a buffer (tests).
+#[derive(Default)]
+enum Out {
+    #[default]
+    Stderr,
+    #[cfg(test)]
+    Buffer(Arc<Mutex<Vec<u8>>>),
+}
+
 /// The lines below everything printed.
 #[derive(Default)]
 struct Screen {
     /// The generation of the state the area shows.
     generation: u64,
     area: Vec<String>,
+    /// The text printed last ([`Live::print_once`] does not print it
+    /// again).
+    last: String,
+    out: Out,
 }
 
 /// Synchronized output: the terminal shows a frame whole.
@@ -95,22 +116,20 @@ const SYNC_ON: &str = "\x1b[?2026h";
 const SYNC_OFF: &str = "\x1b[?2026l";
 
 impl Screen {
-    fn write(buf: &str) {
-        let mut e = std::io::stderr().lock();
-        let _ = e.write_all(buf.as_bytes());
-        let _ = e.flush();
-    }
-
-    /// Back to the start of the area's first row.
-    fn to_top(&self, buf: &mut String) {
-        if self.area.len() > 1 {
-            let _ = write!(buf, "\x1b[{}A", self.area.len() - 1);
-        }
-        if !self.area.is_empty() {
-            buf.push('\r');
+    fn write(&self, buf: &str) {
+        match &self.out {
+            Out::Stderr => {
+                let mut e = std::io::stderr().lock();
+                let _ = e.write_all(buf.as_bytes());
+                let _ = e.flush();
+            }
+            #[cfg(test)]
+            Out::Buffer(b) => lock(b).extend_from_slice(buf.as_bytes()),
         }
     }
 
+    /// The area's lines, and the cursor back at the start of the first
+    /// (where it waits: see the module's comment).
     fn push_area(buf: &mut String, area: &[String]) {
         for (i, l) in area.iter().enumerate() {
             if i > 0 {
@@ -119,15 +138,19 @@ impl Screen {
             buf.push_str(l);
             buf.push_str("\x1b[K");
         }
+        if area.len() > 1 {
+            let _ = write!(buf, "\x1b[{}A", area.len() - 1);
+        }
+        buf.push('\r');
     }
 
     /// Print `text` above the area.
-    fn print(&self, text: &str) {
+    fn print(&mut self, text: &str) {
         let mut buf = String::with_capacity(text.len() + 256);
         if !self.area.is_empty() {
+            // (from the start of the area, all of it, however it wrapped)
             buf.push_str(SYNC_ON);
-            self.to_top(&mut buf);
-            buf.push_str("\x1b[J");
+            buf.push_str("\r\x1b[J");
         }
         buf.push_str(text);
         if !text.ends_with('\n') {
@@ -137,7 +160,8 @@ impl Screen {
             Self::push_area(&mut buf, &self.area);
             buf.push_str(SYNC_OFF);
         }
-        Self::write(&buf);
+        self.write(&buf);
+        text.clone_into(&mut self.last);
     }
 
     /// Show `area` in place of the area.
@@ -146,11 +170,12 @@ impl Screen {
             return;
         }
         let mut buf = String::from(SYNC_ON);
-        self.to_top(&mut buf);
-        Self::push_area(&mut buf, &area);
-        buf.push_str("\x1b[J");
+        buf.push_str("\r\x1b[J");
+        if !area.is_empty() {
+            Self::push_area(&mut buf, &area);
+        }
         buf.push_str(SYNC_OFF);
-        Self::write(&buf);
+        self.write(&buf);
         self.area = area;
     }
 }
@@ -180,6 +205,16 @@ impl Live {
         })
     }
 
+    /// A live area drawn into a buffer, and the buffer (tests).
+    #[cfg(test)]
+    #[must_use]
+    pub fn captured(settings: Settings) -> (Arc<Self>, Arc<Mutex<Vec<u8>>>) {
+        let buf = Arc::new(Mutex::new(Vec::new()));
+        let live = Self::new(settings);
+        lock(&live.screen).out = Out::Buffer(buf.clone());
+        (live, buf)
+    }
+
     /// The render thread, started the first time something is live;
     /// whether there is one (on a terminal).
     fn started(self: &Arc<Self>) -> bool {
@@ -190,7 +225,7 @@ impl Live {
         if t.is_none() {
             let live = self.clone();
             *t = std::thread::Builder::new()
-                .name("partex-render".into())
+                .name("phitex-render".into())
                 .spawn(move || live.run())
                 .ok();
         }
@@ -217,6 +252,26 @@ impl Live {
     /// Print `text` (lines) above the area.
     pub fn print(&self, text: &str) {
         lock(&self.screen).print(text);
+    }
+
+    /// Print `text` above the area, unless it is what was printed last
+    /// (a key pressed again shows nothing new).
+    pub fn print_once(&self, text: &str) {
+        let mut sc = lock(&self.screen);
+        if sc.last != text {
+            sc.print(text);
+        }
+    }
+
+    /// The keys of a watch (`?`), dim, unless they are what was printed
+    /// last.
+    pub fn help(&self, lines: &[&str]) {
+        let s = self.settings.style;
+        let text: Vec<String> = lines
+            .iter()
+            .map(|l| format!("{:w$}{}", "", s.dim(l), w = crate::render::LOG_INDENT))
+            .collect();
+        self.print_once(&text.join("\n"));
     }
 
     /// A dim line under the status lines.
@@ -262,15 +317,18 @@ impl Live {
         self.clear();
     }
 
-    /// A watch's footer below the log (on a terminal: whether it is).
-    pub fn footer(self: &Arc<Self>, file: &str, keys: bool) -> bool {
+    /// A watch's status line below its log, for `file` and its output
+    /// `output` (on a terminal: whether it is).
+    pub fn footer(self: &Arc<Self>, file: &str, output: Option<&str>, keys: bool) -> bool {
         if !self.started() {
             return false;
         }
+        let output = output.map(|o| o.rsplit('/').next().unwrap_or(o).to_owned());
         self.update(|st| {
             st.task = None;
             st.footer = Some(Footer {
                 file: file.to_owned(),
+                output,
                 keys,
             });
         });
@@ -317,13 +375,15 @@ impl Live {
     /// The screen cleared, the area drawn again (`c`).
     pub fn clear_screen(&self) {
         let mut sc = lock(&self.screen);
-        Screen::write("\x1b[H\x1b[2J\x1b[3J");
+        sc.write("\x1b[H\x1b[2J\x1b[3J");
         let area = std::mem::take(&mut sc.area);
+        sc.last.clear();
         sc.draw(area);
     }
 
-    /// The render thread: a frame every [`TICK`] while a task runs, and
-    /// one whenever the state changes.
+    /// The render thread: a frame every [`TICK`] while a task runs, one
+    /// whenever the state changes, and one a second under a status line
+    /// (cut again to the terminal's width if that changed).
     fn run(&self) {
         // (the state drawn last: a change made while a frame was drawn
         // is drawn next, not waited for)
@@ -334,15 +394,24 @@ impl Live {
                 return;
             }
             if st.generation == seen {
-                st = if st.task.is_some() {
-                    self.wake
-                        .wait_timeout(st, TICK)
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .0
+                let wait = if st.task.is_some() {
+                    Some(TICK)
+                } else if st.footer.is_some() {
+                    Some(RESIZE)
                 } else {
-                    self.wake
+                    None
+                };
+                st = match wait {
+                    Some(t) => {
+                        self.wake
+                            .wait_timeout(st, t)
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .0
+                    }
+                    None => self
+                        .wake
                         .wait(st)
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .unwrap_or_else(std::sync::PoisonError::into_inner),
                 };
                 if st.quit {
                     return;
@@ -370,7 +439,7 @@ impl Live {
         let s = self.settings.style;
         let line = match (&st.task, &st.footer) {
             (Some(t), _) if now - t.started >= SHOW_AFTER => task_line(t, s, now, width),
-            (_, Some(f)) => footer_line(f, &st.times, s, width),
+            (_, Some(f)) => footer_line(f, &st.times, s, self.settings.verbose > 0, width),
             _ => return Vec::new(),
         };
         vec![crate::term::truncate(&line, width, s.unicode)]
@@ -557,13 +626,17 @@ fn task_line(t: &Task, s: Style, now: Instant, width: usize) -> String {
     fit(&[], 0)
 }
 
-/// The footer of a watch, at most `width` columns: the keys go from the
-/// end first, then the times.
-fn footer_line(f: &Footer, times: &[Duration], s: Style, width: usize) -> String {
-    let head = format!("{} {}", s.cyan(&format!("{:>12}", "Watching")), f.file);
+/// The status line of a watch, at most `width` columns: `── watching
+/// paper.tex → paper.pdf · ? help`; with `-v`, the last builds' times
+/// too. What does not fit goes from the end.
+fn footer_line(f: &Footer, times: &[Duration], s: Style, verbose: bool, width: usize) -> String {
     let sep = s.dim(s.sep());
+    let mut head = format!("{} watching {}", s.dim(s.sym("──", "--")), f.file);
+    if let Some(o) = &f.output {
+        let _ = write!(head, " {} {o}", s.dim(s.sym("→", "->")));
+    }
     let mut facts = Vec::new();
-    if let Some(last) = times.last() {
+    if verbose && let Some(last) = times.last() {
         let spark = if s.unicode && times.len() > 1 {
             format!("{} ", s.cyan(&sparkline(times)))
         } else {
@@ -574,34 +647,19 @@ fn footer_line(f: &Footer, times: &[Duration], s: Style, width: usize) -> String
             s.dim(&format!("last {}", secs(*last)))
         ));
     }
-    let keys = if f.keys {
-        ["r rebuild", "o open", "q quit", "w warnings", "? help"]
-            .iter()
-            .map(|k| {
-                let (key, what) = k.split_at(1);
-                format!("{}{}", s.bold(key), s.dim(what))
-            })
-            .collect::<Vec<_>>()
+    facts.push(if f.keys {
+        format!("{}{}", s.bold("?"), s.dim(" help"))
     } else {
-        vec![s.dim("q and Enter to quit")]
-    };
-    for with_times in [true, false] {
-        for n in (0..=keys.len()).rev() {
-            let mut parts: Vec<String> = Vec::new();
-            if with_times {
-                parts.extend(facts.iter().cloned());
-            }
-            if n > 0 {
-                parts.push(keys[..n].join("  "));
-            }
-            let mut line = head.clone();
-            if !parts.is_empty() {
-                line.push_str(&sep);
-                line.push_str(&parts.join(&sep));
-            }
-            if crate::term::width(&line) <= width {
-                return line;
-            }
+        s.dim("q and Enter to quit")
+    });
+    for n in (0..=facts.len()).rev() {
+        let mut line = head.clone();
+        for f in &facts[..n] {
+            line.push_str(&sep);
+            line.push_str(f);
+        }
+        if crate::term::width(&line) <= width {
+            return line;
         }
     }
     head
@@ -648,16 +706,21 @@ mod tests {
         }
         let f = Footer {
             file: "paper.tex".into(),
+            output: Some("paper.pdf".into()),
             keys: true,
         };
         let times = [Duration::from_millis(18), Duration::from_millis(400)];
         assert_eq!(
-            footer_line(&f, &times, s, 120),
-            "    Watching paper.tex · ▁█ last 400 ms · r rebuild  o open  q quit  w warnings  ? help"
+            footer_line(&f, &times, s, false, 120),
+            "── watching paper.tex → paper.pdf · ? help"
         );
-        let narrow = footer_line(&f, &times, s, 60);
-        assert!(crate::term::width(&narrow) <= 60, "{narrow}");
-        assert!(narrow.contains("r rebuild"), "{narrow}");
+        assert_eq!(
+            footer_line(&f, &times, s, true, 120),
+            "── watching paper.tex → paper.pdf · ▁█ last 400 ms · ? help"
+        );
+        let narrow = footer_line(&f, &times, s, true, 50);
+        assert!(crate::term::width(&narrow) <= 50, "{narrow}");
         assert!(narrow.contains("last 400 ms"), "{narrow}");
+        assert!(!narrow.contains("help"), "{narrow}");
     }
 }
