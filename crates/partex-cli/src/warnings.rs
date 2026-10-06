@@ -279,9 +279,19 @@ fn classify(text: &str) -> Option<(Kind, String)> {
 #[must_use]
 pub fn summarize(diags: &[Diagnostic]) -> Summary {
     let mut sum = Summary::default();
+    // (the last `! ...` a document typed out: LaTeX's missing-file error
+    // is a \typeout, then a \read the nonstop mode stops at)
+    let mut typed_error: Option<String> = None;
     for d in diags {
         match d.severity {
-            Severity::Error | Severity::Fatal => sum.errors.push(d.clone()),
+            Severity::Fatal if typed_error.is_some() => {
+                sum.errors
+                    .push(typed_out(d, typed_error.take().unwrap_or_default()));
+            }
+            Severity::Error | Severity::Fatal => {
+                typed_error = None;
+                sum.errors.push(d.clone());
+            }
             Severity::Warning => {
                 let Some(kind) = Kind::of_code(d.code) else {
                     continue;
@@ -307,6 +317,13 @@ pub fn summarize(diags: &[Diagnostic]) -> Summary {
             Severity::Note if d.code == crate::events::PAGE => sum.pages += 1,
             Severity::Note => {
                 let text = String::from_utf8_lossy(&d.message).into_owned();
+                let t = text.trim_start_matches('\n');
+                if let Some(e) = t.strip_prefix("! ") {
+                    let first = e.lines().next().unwrap_or_default();
+                    typed_error = Some(first.trim_end_matches('.').to_owned());
+                } else if !(t.trim().is_empty() || t.starts_with("Enter file name")) {
+                    typed_error = None;
+                }
                 match classify(&text) {
                     Some((_, subject)) if subject.is_empty() => {}
                     Some((kind, subject)) => {
@@ -329,6 +346,27 @@ pub fn summarize(diags: &[Diagnostic]) -> Summary {
     }
     sum.groups.sort_by_key(|g| g.kind);
     sum
+}
+
+/// A fatal stop that came of an error the document typed out (LaTeX's
+/// missing-file error, then a `\read` from the terminal in a nonstop mode):
+/// the typed error is what went wrong, at the stop's place; the stop itself
+/// becomes its help.
+fn typed_out(d: &Diagnostic, error: String) -> Diagnostic {
+    let mut e = d.clone();
+    e.code = if error.contains("not found") {
+        "file-not-found"
+    } else {
+        "latex-error"
+    };
+    let mut stop = d.message.clone();
+    for h in &d.help {
+        stop.extend_from_slice(b": ");
+        stop.extend_from_slice(h);
+    }
+    e.help = vec![stop];
+    e.message = error.into_bytes();
+    e
 }
 
 /// Add `item` to its group: box warnings each count, other warnings with

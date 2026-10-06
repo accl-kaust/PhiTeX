@@ -287,14 +287,14 @@ fn engine_name(name: &str) -> Result<String, String> {
 fn resolve(o: &Options) -> Result<Target, String> {
     let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
     let found = config::find(&cwd)?;
-    let (root, cfg) = match (&o.file, found) {
+    let (root, cfg, configured) = match (&o.file, found) {
         (None, Some((root, cfg))) => {
             std::env::set_current_dir(&root)
                 .map_err(|e| format!("can't enter {}: {e}", root.display()))?;
-            (root, cfg)
+            (root, cfg, true)
         }
-        (Some(_), Some((root, cfg))) if root == cwd => (root, cfg),
-        _ => (cwd.clone(), config::Config::default()),
+        (Some(_), Some((root, cfg))) if root == cwd => (root, cfg, true),
+        _ => (cwd.clone(), config::Config::default(), false),
     };
     if let Some(s) = &cfg.store {
         crate::machinehost::persisted::configure(root.join(s));
@@ -326,10 +326,27 @@ fn resolve(o: &Options) -> Result<Target, String> {
         Some(e) => engine_name(&e)?,
         None => config::default_engine(&text).to_owned(),
     };
+    // (without a phitex.toml, the main file's directory is the project's,
+    // as for latexmk -cd or Overleaf: TeX finds `\input{preamble}` beside
+    // `book/book.tex`; the flags' paths stay the invocation's)
+    let mut output_dir = o.output_dir.clone().or(cfg.output_dir);
+    if !configured
+        && let Some(dir) = Path::new(&file)
+            .parent()
+            .filter(|d| !d.as_os_str().is_empty())
+    {
+        let dir = dir.to_path_buf();
+        output_dir = output_dir.map(|d| cwd.join(d).to_string_lossy().into_owned());
+        std::env::set_current_dir(&dir)
+            .map_err(|e| format!("can't enter {}: {e}", dir.display()))?;
+        file = Path::new(&file)
+            .file_name()
+            .map_or(file.clone(), |f| f.to_string_lossy().into_owned());
+    }
     Ok(Target {
         file,
         engine,
-        output_dir: o.output_dir.clone().or(cfg.output_dir),
+        output_dir,
         shell_escape: o.shell_escape.or(cfg.shell_escape),
         viewer: cfg.viewer,
         copy_pdf,
