@@ -356,8 +356,10 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             self.name_in_progress = true;
             self.begin_name();
             self.get_nonblank_noncall()?;
+            // (`biggest_usv` in `XeTeX`: a name goes on over any character)
+            let biggest = if self.unicode { BIGGEST_USV } else { 255 };
             loop {
-                if self.cur_cmd > OTHER_CHAR || self.cur_chr > 255 {
+                if self.cur_cmd > OTHER_CHAR || self.cur_chr > biggest {
                     // not a character
                     self.back_input()?;
                     break;

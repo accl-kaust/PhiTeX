@@ -518,11 +518,35 @@ const CASES: &[Case] = &[
             ],
         ],
     },
+    // XeTeX's \XeTeXlinebreaklocale: ICU's line breaks by locale, with
+    // \XeTeXlinebreakpenalty and \XeTeXlinebreakskip
+    Case {
+        name: "xetex_linebreak",
+        oracle: "xetex",
+        inputs: &["xetex-linebreak.tex"],
+        runs: &[
+            &[
+                "-ini",
+                "-etex",
+                "-interaction=nonstopmode",
+                "-no-pdf",
+                "xetex-linebreak",
+            ],
+            &[
+                "-ini",
+                "-etex",
+                "-interaction=nonstopmode",
+                "-jobname=xetex-linebreak-pdf",
+                "xetex-linebreak",
+            ],
+        ],
+    },
     // xelatex, its format made here: fontspec, hyphenation of native
     // words, hyperref, polyglossia's right-to-left scripts, beamer and
     // TikZ through xdvipdfmx, graphicx's pictures (PNG, JPEG, BMP, PDF
     // pages), unicode-math with OpenType math fonts (one, then several by
-    // range, boxes shown); each run twice (the second reads the aux)
+    // range, boxes shown), polyglossia's Japanese and Chinese (ICU's line
+    // breaks); each run twice (the second reads the aux)
     Case {
         name: "xelatex",
         oracle: "xetex",
@@ -542,6 +566,7 @@ const CASES: &[Case] = &[
             "xelatex-math.tex",
             "xelatex-math-body.tex",
             "xelatex-math-mix.tex",
+            "xelatex-cjk.tex",
         ],
         runs: &[
             &[
@@ -564,6 +589,7 @@ const CASES: &[Case] = &[
                 "-interaction=nonstopmode",
                 "xelatex-math-mix",
             ],
+            &["-fmt=xelatex", "-interaction=nonstopmode", "xelatex-cjk"],
             &[
                 "-fmt=xelatex",
                 "-interaction=nonstopmode",

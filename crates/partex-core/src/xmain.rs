@@ -367,14 +367,62 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         }
     }
 
-    /// `do_locale_linebreaks`: `text` appended as a native word (as words
-    /// with breaks between, `\XeTeXlinebreaklocale` set).
+    /// `do_locale_linebreaks`: `text` appended as a native word; with
+    /// `\XeTeXlinebreaklocale` set, as the words between ICU's line
+    /// breaks for the locale, each break a `\XeTeXlinebreakpenalty` and
+    /// `\XeTeXlinebreakskip`.
     fn do_locale_linebreaks(&mut self, f: i32, text: &[u16]) -> Result<(), Jump> {
-        if self.int_par(XETEX_LINEBREAK_LOCALE_CODE) != 0 && text.len() > 1 {
-            return self.pdf_error(b"\\XeTeXlinebreaklocale", b"not implemented in partex yet");
+        let locale = self.int_par(XETEX_LINEBREAK_LOCALE_CODE);
+        if locale == 0 || text.len() == 1 {
+            let w = self.new_native_word(f, text);
+            self.tail_append(Node::Whatsit(Box::new(Whatsit::NativeWord(w))));
+            return Ok(());
         }
-        let w = self.new_native_word(f, text);
-        self.tail_append(Node::Whatsit(Box::new(Whatsit::NativeWord(w))));
+        // (`XeTeX_linebreak_skip <> zero_glue`: the pointers compared)
+        let use_skip = self
+            .glue_value(GLUE_BASE + XETEX_LINEBREAK_SKIP_CODE)
+            .lineage
+            != 0;
+        let penalty = self.int_par(XETEX_LINEBREAK_PENALTY_CODE);
+        let use_penalty = penalty != 0 || !use_skip;
+        // linebreak_start, linebreak_next: ICU's breaks for the locale
+        // (Graphite's, locale `G` in a Graphite font: no such font here)
+        let Some(set) = crate::icu_linebreak::rule_set(self.str_bytes(crate::input::ux(locale)))
+        else {
+            return self.pdf_error(
+                b"\\XeTeXlinebreaklocale",
+                b"ICU's phrase breaking (lw=phrase) is not in partex yet",
+            );
+        };
+        let rules = match &self.xfont.linebreak {
+            Some((s, r)) if *s == set => r.clone(),
+            _ => {
+                let r = alloc::sync::Arc::new(crate::icu_linebreak::Rules::new(set));
+                self.xfont.linebreak = Some((set, r.clone()));
+                r
+            }
+        };
+        let Some(breaks) = rules.breaks(text) else {
+            return self.pdf_error(
+                b"\\XeTeXlinebreaklocale",
+                b"ICU's dictionary breaking (Thai, Lao, Khmer, Myanmar) is not in partex yet",
+            );
+        };
+        let mut prev = 0;
+        for offs in breaks {
+            if prev != 0 {
+                if use_penalty {
+                    self.tail_append(Node::Penalty(penalty));
+                }
+                if use_skip {
+                    let g = self.new_param_glue(XETEX_LINEBREAK_SKIP_CODE);
+                    self.tail_append(g);
+                }
+            }
+            let w = self.new_native_word(f, &text[prev..offs]);
+            self.tail_append(Node::Whatsit(Box::new(Whatsit::NativeWord(w))));
+            prev = offs;
+        }
         Ok(())
     }
 
