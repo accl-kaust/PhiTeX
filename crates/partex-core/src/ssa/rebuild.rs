@@ -1476,6 +1476,11 @@ pub struct RebuildReport {
     /// Steps run (again, or new: `new_steps`), runs dropped for a read
     /// not predicted, old steps passed over.
     pub steps_run: usize,
+    /// Old steps run again whose definitions all came out as they were:
+    /// woken by a version that changed while the content they read did
+    /// not, or whose change stayed inside them (their pages, stores and
+    /// effects may differ).
+    pub steps_same: usize,
     pub retries: usize,
     pub new_steps: usize,
     pub removed: usize,
@@ -3073,6 +3078,7 @@ impl RebuildReport {
         self.queries += r.queries;
         self.data_edits += r.data_edits;
         self.steps_run += r.steps_run;
+        self.steps_same += r.steps_same;
         self.retries += r.retries;
         self.new_steps += r.new_steps;
         self.removed += r.removed;
@@ -4361,6 +4367,7 @@ fn run_step<H: Host>(
         );
         d
     };
+    let defs_before = rep.defs_changed;
     let mut changed = Vec::new();
     let vals = if alone {
         // (no step after it to read its definitions, and the arrays hold
@@ -4492,6 +4499,9 @@ fn run_step<H: Host>(
     };
     rep.restored += vals.len();
     put(tex, &vals);
+    if !old.is_empty() && rep.defs_changed == defs_before {
+        rep.steps_same += 1;
+    }
     if rep.trace {
         // (why a window ended: DESIGN 4.3 item 1)
         let cut = if tex.window() == 0 || !tex.window_due() {

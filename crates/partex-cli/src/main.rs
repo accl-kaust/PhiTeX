@@ -1509,7 +1509,7 @@ fn rebuild_ssa(
          the edited page ready {:.2} ms after the rebuild, files written {:.1} ms, \
          edits {}, seeds {} \
          (loads of a changed φ {}, of a changed store {}, queries answered anew {}; data edited in it {}), \
-         steps run {} (new {}, runs dropped {}, passed over {}), calls {} (fresh {}, \
+         steps run {} (new {}, definitions the same {}, runs dropped {}, passed over {}), calls {} (fresh {}, \
          hits applied {} for {} commands), \
          definitions changed {}, readers marked {} (kept {}), reads checked {}, positioned {}, \
          restored {}, from the format {}, commands {}",
@@ -1524,6 +1524,7 @@ fn rebuild_ssa(
         rr.data_edits,
         rr.steps_run,
         rr.new_steps,
+        rr.steps_same,
         rr.retries,
         rr.removed,
         s.hits + s.misses - before.hits - before.misses,

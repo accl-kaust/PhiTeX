@@ -1,0 +1,11 @@
+# Edits of the PGF manual's four chapters (bench/inputs/pgfsub.tex), in
+# bench/edits.sh's format, for bench/ssa-course.sh (MAIN=pgfsub.tex, the
+# manual's directory as COURSE). All in the tutorial chapter.
+# word: `hard` becomes `dear` in the chapter's third paragraph.
+word	pgfmanual-en-tutorial.tex|wrong angles and circles also seemed to be hard to get right.|wrong angles and circles also seemed to be dear to get right.
+# label: a \label nothing refers to, after the first paragraph's first sentence.
+label	pgfmanual-en-tutorial.tex|Karl is a math and chemistry high-school teacher.|Karl is a math and chemistry high-school teacher.\label{partex:bench}
+# tikz: a code example's grid (its code and its picture) wider.
+tikz	pgfmanual-en-tutorial.tex|\draw[step=.5cm] (-1.4,-1.4) grid (1.4,1.4);|\draw[step=.5cm] (-1.5,-1.5) grid (1.5,1.5);
+# sentence: a sentence appended to a paragraph (its lines reflow).
+sentence	pgfmanual-en-tutorial.tex|there seems to be hope yet.|there seems to be hope yet. Karl tries it.
