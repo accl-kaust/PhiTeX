@@ -193,6 +193,28 @@ struct Missed {
     files: Vec<(Vec<u8>, usize)>,
 }
 
+/// None of `m`'s candidates is a file in `dir`, as named or but for ASCII
+/// case (kpathsea looks for a name not there case-insensitively,
+/// `texmf_casefold_search`), other than the file the lookup found.
+fn none_there(dir: &[u8], m: &Missed, found: Option<&[u8]>) -> bool {
+    let is_file = |p: &[u8]| std::fs::metadata(path(p)).is_ok_and(|m| m.is_file());
+    if m.files.iter().any(|(f, _)| is_file(f)) {
+        return false;
+    }
+    let Ok(entries) = std::fs::read_dir(path(dir)) else {
+        return true;
+    };
+    entries.flatten().all(|e| {
+        let n = e.file_name().into_encoded_bytes();
+        !m.files.iter().any(|(f, at)| {
+            n.eq_ignore_ascii_case(&f[*at..]) && {
+                let p = [&f[..*at], &n[..]].concat();
+                found != Some(&p[..]) && is_file(&p)
+            }
+        })
+    })
+}
+
 /// Where the name of `p` in its directory begins.
 fn name_start(p: &[u8]) -> usize {
     p.len() - crate::inotify::split(p).1.len()
@@ -808,14 +830,12 @@ impl Host for NativeHost {
                     // (a directory with its stamp holds none of the
                     // candidates; in one changed since, each is looked at:
                     // not a file, as kpathsea's `readable_file` asks)
+                    let found = l.found.as_ref().map(|(p, ..)| &p[..]);
                     l.trail.iter().all(|m| {
                         let now = *dirs
                             .entry(m.dir)
                             .or_insert_with(|| dir_stamp(&names[m.dir as usize]));
-                        (m.kept && m.stamp == now)
-                            || m.files.iter().all(|(f, _)| {
-                                !std::fs::metadata(path(f)).is_ok_and(|m| m.is_file())
-                            })
+                        (m.kept && m.stamp == now) || none_there(&names[m.dir as usize], m, found)
                     }) && match (&l.found, last) {
                         // (found where it was, with the stamp it had just
                         // before its contents were read; two names can find

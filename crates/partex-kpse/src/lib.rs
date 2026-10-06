@@ -8,11 +8,10 @@
 //! path search itself (`pathsearch.c`).
 //!
 //! Not ported (not reachable from `tex` with TeX Live's configuration):
-//! the `aliases` database, `mktex*` file generation, case-folding search,
-//! Windows path syntax, and the compile-time defaults for paths that
-//! `texmf.cnf` always sets (only `TEXMFCNF`'s default is needed to find
-//! `texmf.cnf` in the first place, and the program formats', which name
-//! the program).
+//! the `aliases` database, `mktex*` file generation, Windows path syntax,
+//! and the compile-time defaults for paths that `texmf.cnf` always sets
+//! (only `TEXMFCNF`'s default is needed to find `texmf.cnf` in the first
+//! place, and the program formats', which name the program).
 
 use std::collections::HashMap;
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
@@ -994,13 +993,18 @@ impl Kpse {
         let mut all_absolute = true;
         for n in names {
             if absolute_p(n, true) {
-                if readable_file(n) {
-                    ret.push(n.clone());
+                // `absolute_search`
+                let found = if readable_file(n) {
+                    Some(n.clone())
+                } else {
+                    note_trail(trail, n);
+                    self.casefold().then(|| casefold_readable_file(n)).flatten()
+                };
+                if let Some(f) = found {
+                    ret.push(f);
                     if !all {
                         return self.finish_search(ret);
                     }
-                } else {
-                    note_trail(trail, n);
                 }
             } else {
                 all_absolute = false;
@@ -1021,7 +1025,22 @@ impl Kpse {
                 if allow_disk && found.as_ref().is_none_or(|f| must_exist && f.is_empty()) {
                     let dirs = self.element_dirs(&elt);
                     if !dirs.is_empty() {
-                        found = Some(dir_list_search_list(&dirs, names, all, trail));
+                        let mut f = dir_list_search_list(&dirs, names, all, &mut |p| {
+                            readable_file(p).then(|| p.to_vec()).or_else(|| {
+                                note_trail(trail, p);
+                                None
+                            })
+                        });
+                        if f.is_empty() && self.casefold() {
+                            // (still nothing: again, case-insensitively)
+                            f = dir_list_search_list(
+                                &dirs,
+                                names,
+                                all,
+                                &mut casefold_readable_file,
+                            );
+                        }
+                        found = Some(f);
                     }
                 }
                 if let Some(f) = found
@@ -1037,6 +1056,12 @@ impl Kpse {
             }
         }
         self.finish_search(ret)
+    }
+
+    /// `texmf_casefold_search`: a name not found as it is is looked for
+    /// case-insensitively in each directory searched (`pathsearch.c`).
+    fn casefold(&mut self) -> bool {
+        cnf_p(self.var_value("texmf_casefold_search").as_deref())
     }
 
     fn finish_search(&mut self, mut ret: Vec<Bytes>) -> Vec<Bytes> {
@@ -1296,12 +1321,14 @@ fn do_subdir(out: &mut Vec<Bytes>, name: &[u8], post: &[u8]) {
     }
 }
 
-/// `pathsearch.c`, `dir_list_search_list`.
+/// `pathsearch.c`, `dir_list_search_list`: `readable` is
+/// `kpathsea_readable_file` or `casefold_readable_file`, giving the name
+/// found.
 fn dir_list_search_list(
     dirs: &[Bytes],
     names: &[Bytes],
     all: bool,
-    trail: &mut Option<Vec<Bytes>>,
+    readable: &mut dyn FnMut(&[u8]) -> Option<Bytes>,
 ) -> Vec<Bytes> {
     let mut ret = Vec::new();
     for dir in dirs {
@@ -1309,18 +1336,31 @@ fn dir_list_search_list(
             if absolute_p(name, true) {
                 continue;
             }
-            let potential = [dir.as_slice(), name].concat();
-            if readable_file(&potential) {
-                ret.push(potential);
+            if let Some(found) = readable(&[dir.as_slice(), name].concat()) {
+                ret.push(found);
                 if !all {
                     return ret;
                 }
-            } else {
-                note_trail(trail, &potential);
             }
         }
     }
     ret
+}
+
+/// `pathsearch.c`, `casefold_readable_file`: the first readable file of
+/// `name`'s directory, in directory order, whose name equals its last
+/// component but for ASCII case (`strcasecmp`).
+fn casefold_readable_file(name: &[u8]) -> Option<Bytes> {
+    let base = name.rsplit(|&c| c == b'/').next().unwrap_or(name);
+    let dir = dirname(name);
+    std::fs::read_dir(os(&dir)).ok()?.flatten().find_map(|e| {
+        let n = e.file_name().into_vec();
+        if !n.eq_ignore_ascii_case(base) {
+            return None;
+        }
+        let p = [dir.as_slice(), b"/", &n].concat();
+        readable_file(&p).then_some(p)
+    })
 }
 
 /// A candidate `file` not found joins the trail.
@@ -1380,5 +1420,21 @@ mod tests {
             b"/t/fonts/tfm/public/cm/cmr10.tfm",
             b"/t/fonts//cm"
         ));
+    }
+
+    #[test]
+    fn casefolding() {
+        let dir = std::env::temp_dir().join(format!("partex-kpse-casefold-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("TeXGyre.fontspec"), b"").unwrap();
+        let d = dir.as_os_str().as_bytes();
+        let name = |n: &str| [d, b"/", n.as_bytes()].concat();
+        assert_eq!(
+            casefold_readable_file(&name("texgyre.FONTSPEC")),
+            Some(name("TeXGyre.fontspec"))
+        );
+        assert_eq!(casefold_readable_file(&name("texgyre.fontspe")), None);
+        assert_eq!(casefold_readable_file(&name("none/texgyre.fontspec")), None);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

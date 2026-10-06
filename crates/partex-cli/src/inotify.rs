@@ -45,7 +45,8 @@ pub struct Watcher {
 }
 
 /// A directory: when it was watched from (none: it is not), and the
-/// events seen in it: the last one, and the last of each name.
+/// events seen in it: the last one, and the last of each name (its ASCII
+/// case folded).
 #[derive(Default)]
 struct Dir {
     since: Option<u64>,
@@ -129,9 +130,11 @@ impl Watcher {
             return false;
         }
         d.latest <= check
-            || names
-                .into_iter()
-                .all(|n| d.last.get(n).is_none_or(|&l| l <= check))
+            || names.into_iter().all(|n| {
+                d.last
+                    .get(&n.to_ascii_lowercase())
+                    .is_none_or(|&l| l <= check)
+            })
     }
 
     /// Take the events queued since the last look.
@@ -174,7 +177,10 @@ impl Watcher {
                 for &id in ids {
                     if let Some(d) = self.dirs.get_mut(id as usize) {
                         d.latest = self.seq;
-                        d.last.insert(name.to_vec(), self.seq);
+                        // (by name with ASCII case folded: a name not there
+                        // as asked is looked for case-insensitively, as
+                        // kpathsea's `texmf_casefold_search` does)
+                        d.last.insert(name.to_ascii_lowercase(), self.seq);
                     }
                 }
                 if mask & (IN_DELETE_SELF | IN_MOVE_SELF | IN_IGNORED) != 0 {
