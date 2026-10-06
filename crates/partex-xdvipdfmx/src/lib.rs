@@ -15,6 +15,8 @@
 // The C names are kept (non_snake_case among them); lints to be tightened.
 #![allow(unused, dead_code, non_snake_case, clippy::all, clippy::pedantic)]
 #![no_std]
+// A fatal error is a value: none may be dropped.
+#![deny(unused_must_use)]
 #![allow(
     clippy::cast_possible_truncation,
     clippy::cast_possible_wrap,
@@ -114,9 +116,10 @@ pub mod prelude {
     pub use alloc::vec::Vec;
 
     pub use crate::ctx::Dpx;
+    pub use crate::ctx::{Fatal, Result};
     pub use crate::obj::{Obj, PdfOut};
     pub use crate::stream::MemFile;
-    pub use crate::{error, warn};
+    pub use crate::{fatal, some, warn};
 }
 
 /// `PDF_VERSION_MIN`, `PDF_VERSION_MAX` (pdflimits.h).

@@ -80,7 +80,7 @@ fn glyf_cmp(v1: &TtGlyphDesc, v2: &TtGlyphDesc) -> Ordering {
 impl TtGlyphs {
     /// `tt_build_init`: glyph 0 already added.
     #[must_use]
-    pub fn tt_build_init() -> TtGlyphs {
+    pub fn tt_build_init() -> Result<TtGlyphs> {
         let mut g = TtGlyphs {
             num_glyphs: 0,
             max_glyphs: 0,
@@ -92,13 +92,13 @@ impl TtGlyphs {
             gd: Vec::new(),
             used_slot: vec![0u8; 8192],
         };
-        g.tt_add_glyph(0, 0);
-        g
+        g.tt_add_glyph(0, 0)?;
+        Ok(g)
     }
     /// `tt_build_finish`.
     pub fn tt_build_finish(self) {}
     /// `find_empty_slot` (static).
-    fn find_empty_slot(&self) -> USHORT {
+    fn find_empty_slot(&self) -> Result<USHORT> {
         let mut gid: u32 = 0;
         while gid < NUM_GLYPH_LIMIT {
             if self.used_slot[(gid / 8) as usize] & (1 << (7 - (gid % 8))) == 0 {
@@ -107,17 +107,17 @@ impl TtGlyphs {
             gid += 1;
         }
         if gid == NUM_GLYPH_LIMIT {
-            error!("No empty glyph slot available.");
+            fatal!("No empty glyph slot available.");
         }
-        gid as USHORT
+        Ok(gid as USHORT)
     }
     /// `tt_add_glyph`: returns `new_gid`.
-    pub fn tt_add_glyph(&mut self, gid: USHORT, new_gid: USHORT) -> USHORT {
+    pub fn tt_add_glyph(&mut self, gid: USHORT, new_gid: USHORT) -> Result<USHORT> {
         if self.used_slot[(new_gid / 8) as usize] & (1 << (7 - (new_gid % 8))) != 0 {
             warn!("Slot {} already used.", new_gid);
         } else {
             if u32::from(self.num_glyphs) + 1 >= NUM_GLYPH_LIMIT {
-                error!("Too many glyphs.");
+                fatal!("Too many glyphs.");
             }
             if self.num_glyphs >= self.max_glyphs {
                 self.max_glyphs = self.max_glyphs.wrapping_add(GLYPH_ARRAY_ALLOC_SIZE);
@@ -135,7 +135,7 @@ impl TtGlyphs {
         if new_gid > self.last_gid {
             self.last_gid = new_gid;
         }
-        new_gid
+        Ok(new_gid)
     }
     /// `tt_get_index`: the index in `gd` of new gid `gid` (0 if absent).
     #[must_use]
@@ -171,65 +171,65 @@ impl TtGlyphs {
 fn read_metrics(
     sfont: &mut Sfnt,
     g: &mut TtGlyphs,
-) -> (
+) -> Result<(
     TtHeadTable,
     TtHheaTable,
     TtMaxpTable,
     Vec<TtLongMetrics>,
     Option<Vec<TtLongMetrics>>,
     Vec<ULONG>,
-) {
+)> {
     // unitsPerEm --> head, numHMetrics --> hhea, indexToLocFormat -->
     // head, numGlyphs --> maxp.
-    let head = sfont.tt_read_head_table();
-    let hhea = sfont.tt_read_hhea_table();
-    let maxp = sfont.tt_read_maxp_table();
+    let head = sfont.tt_read_head_table()?;
+    let hhea = sfont.tt_read_hhea_table()?;
+    let maxp = sfont.tt_read_maxp_table()?;
 
     if hhea.metric_data_format != 0 {
-        error!("Unknown metricDataFormat.");
+        fatal!("Unknown metricDataFormat.");
     }
 
     g.emsize = head.units_per_em;
 
-    sfont.sfnt_locate_table(b"hmtx");
+    sfont.sfnt_locate_table(b"hmtx")?;
     let hmtx = sfont.tt_read_longMetrics(
         maxp.num_glyphs,
         hhea.num_of_long_hor_metrics,
         hhea.num_of_ex_side_bearings,
-    );
+    )?;
 
-    let os2 = sfont.tt_read_os2__table();
+    let os2 = sfont.tt_read_os2__table()?;
     g.default_advh = (i32::from(os2.s_typo_ascender) - i32::from(os2.s_typo_descender)) as USHORT;
     g.default_tsb = (i32::from(g.default_advh) - i32::from(os2.s_typo_ascender)) as SHORT;
 
     let vmtx = if sfont.sfnt_find_table_pos(b"vmtx") > 0 {
-        let vhea = sfont.tt_read_vhea_table();
-        sfont.sfnt_locate_table(b"vmtx");
+        let vhea = sfont.tt_read_vhea_table()?;
+        sfont.sfnt_locate_table(b"vmtx")?;
         Some(sfont.tt_read_longMetrics(
             maxp.num_glyphs,
             vhea.num_of_long_ver_metrics,
             vhea.num_of_ex_side_bearings,
-        ))
+        )?)
     } else {
         None
     };
 
-    sfont.sfnt_locate_table(b"loca");
+    sfont.sfnt_locate_table(b"loca")?;
     let n = maxp.num_glyphs as usize + 1;
     let mut location: Vec<ULONG> = Vec::with_capacity(n);
     if head.index_to_loc_format == 0 {
         for _ in 0..n {
-            location.push(2 * ULONG::from(sfont.sfnt_get_ushort()));
+            location.push(2 * ULONG::from(sfont.sfnt_get_ushort()?));
         }
     } else if head.index_to_loc_format == 1 {
         for _ in 0..n {
-            location.push(sfont.sfnt_get_ulong());
+            location.push(sfont.sfnt_get_ulong()?);
         }
     } else {
-        error!("Unknown IndexToLocFormat.");
+        fatal!("Unknown IndexToLocFormat.");
     }
 
-    (head, hhea, maxp, hmtx, vmtx, location)
+    Ok((head, hhea, maxp, hmtx, vmtx, location))
 }
 
 /// The metrics of glyph `i` of `g` (original gid `gid`), as both
@@ -282,23 +282,23 @@ fn set_dw(g: &mut TtGlyphs, w_stat: &[u16]) {
 impl Sfnt {
     /// `tt_build_tables`: replaces glyf, loca, hmtx, hhea, maxp, head
     /// with the subset ones (`sfnt_set_table`); 0 (errors are ERROR).
-    pub fn tt_build_tables(&mut self, g: &mut TtGlyphs) -> i32 {
+    pub fn tt_build_tables(&mut self, g: &mut TtGlyphs) -> Result<i32> {
         if self.type_ != SFNT_TYPE_TRUETYPE
             && self.type_ != SFNT_TYPE_TTC
             && self.type_ != SFNT_TYPE_DFONT
         {
-            error!("Invalid font type");
+            fatal!("Invalid font type");
         }
 
         if u32::from(g.num_glyphs) > NUM_GLYPH_LIMIT {
-            error!("Too many glyphs.");
+            fatal!("Too many glyphs.");
         }
 
-        let (mut head, mut hhea, mut maxp, hmtx, vmtx, location) = read_metrics(self, g);
+        let (mut head, mut hhea, mut maxp, hmtx, vmtx, location) = read_metrics(self, g)?;
 
         let mut w_stat = vec![0u16; g.emsize as usize + 2];
         // Read glyf table.
-        let offset = self.sfnt_locate_table(b"glyf");
+        let offset = self.sfnt_locate_table(b"glyf")?;
         // The num_glyphs may grow when composite glyph is found. A
         // component of a composite glyph is appended to the used glyphs if
         // not already there, and the composite's program is changed to
@@ -314,7 +314,7 @@ impl Sfnt {
 
             let gid = g.gd[iu].ogid; // old gid
             if gid >= maxp.num_glyphs {
-                error!("Invalid glyph index (gid {})", gid);
+                fatal!("Invalid glyph index (gid {})", gid);
             }
 
             let len = set_glyph_metrics(g, iu, gid, &hmtx, vmtx.as_deref(), &location, &mut w_stat);
@@ -324,7 +324,7 @@ impl Sfnt {
                 // Does not contain any data.
                 continue;
             } else if len < 10 {
-                error!("Invalid TrueType glyph data (gid {}).", gid);
+                fatal!("Invalid TrueType glyph data (gid {}).", gid);
             }
 
             let mut data = vec![0u8; len as usize];
@@ -332,14 +332,14 @@ impl Sfnt {
             let mut p = 0usize;
 
             self.sfnt_seek_set(offset.wrapping_add(loc));
-            let number_of_contours = self.sfnt_get_short();
+            let number_of_contours = self.sfnt_get_short()?;
             p += sfnt_put_short(&mut data[p..], number_of_contours) as usize;
 
             // BoundingBox: FWord x 4.
-            g.gd[iu].llx = self.sfnt_get_short();
-            g.gd[iu].lly = self.sfnt_get_short();
-            g.gd[iu].urx = self.sfnt_get_short();
-            g.gd[iu].ury = self.sfnt_get_short();
+            g.gd[iu].llx = self.sfnt_get_short()?;
+            g.gd[iu].lly = self.sfnt_get_short()?;
+            g.gd[iu].urx = self.sfnt_get_short()?;
+            g.gd[iu].ury = self.sfnt_get_short()?;
             if vmtx.is_none() {
                 // vertOriginY == sTypeAscender
                 g.gd[iu].tsb = (i32::from(g.default_advh)
@@ -357,22 +357,24 @@ impl Sfnt {
             if number_of_contours < 0 {
                 loop {
                     if p >= endptr {
-                        error!("Invalid TrueType glyph data (gid {}): {} bytes", gid, len);
+                        fatal!("Invalid TrueType glyph data (gid {}): {} bytes", gid, len);
                     }
                     // Flags and gid of the component glyph are both USHORT.
                     let flags = (u16::from(data[p]) << 8) | u16::from(data[p + 1]);
                     p += 2;
                     let cgid = (u16::from(data[p]) << 8) | u16::from(data[p + 1]);
                     if cgid >= maxp.num_glyphs {
-                        error!(
+                        fatal!(
                             "Invalid gid ({} > {}) in composite glyph {}.",
-                            cgid, maxp.num_glyphs, gid
+                            cgid,
+                            maxp.num_glyphs,
+                            gid
                         );
                     }
                     let mut new_gid = g.tt_find_glyph(cgid);
                     if new_gid == 0 {
-                        let slot = g.find_empty_slot();
-                        new_gid = g.tt_add_glyph(cgid, slot);
+                        let slot = g.find_empty_slot()?;
+                        new_gid = g.tt_add_glyph(cgid, slot)?;
                     }
                     p += sfnt_put_ushort(&mut data[p..], new_gid) as usize;
                     // Just skip the rest.
@@ -509,27 +511,27 @@ impl Sfnt {
         self.sfnt_set_table(b"hhea", hhea.tt_pack_hhea_table());
         self.sfnt_set_table(b"head", head.tt_pack_head_table());
 
-        0
+        Ok(0)
     }
     /// `tt_get_metrics`: fills the metrics of `g` without building
     /// tables (CFF-based OpenType); 0.
-    pub fn tt_get_metrics(&mut self, g: &mut TtGlyphs) -> i32 {
+    pub fn tt_get_metrics(&mut self, g: &mut TtGlyphs) -> Result<i32> {
         if self.type_ != SFNT_TYPE_TRUETYPE
             && self.type_ != SFNT_TYPE_TTC
             && self.type_ != SFNT_TYPE_DFONT
         {
-            error!("Invalid font type");
+            fatal!("Invalid font type");
         }
 
-        let (_head, _hhea, maxp, hmtx, vmtx, location) = read_metrics(self, g);
+        let (_head, _hhea, maxp, hmtx, vmtx, location) = read_metrics(self, g)?;
 
         let mut w_stat = vec![0u16; g.emsize as usize + 2];
         // Read glyf table.
-        let offset = self.sfnt_locate_table(b"glyf");
+        let offset = self.sfnt_locate_table(b"glyf")?;
         for i in 0..g.num_glyphs as usize {
             let gid = g.gd[i].ogid; // old gid
             if gid >= maxp.num_glyphs {
-                error!("Invalid glyph index (gid {})", gid);
+                fatal!("Invalid glyph index (gid {})", gid);
             }
 
             let len = set_glyph_metrics(g, i, gid, &hmtx, vmtx.as_deref(), &location, &mut w_stat);
@@ -539,17 +541,17 @@ impl Sfnt {
                 // Does not contain any data.
                 continue;
             } else if len < 10 {
-                error!("Invalid TrueType glyph data (gid {}).", gid);
+                fatal!("Invalid TrueType glyph data (gid {}).", gid);
             }
 
             self.sfnt_seek_set(offset.wrapping_add(loc));
-            let _ = self.sfnt_get_short();
+            let _ = self.sfnt_get_short()?;
 
             // BoundingBox: FWord x 4.
-            g.gd[i].llx = self.sfnt_get_short();
-            g.gd[i].lly = self.sfnt_get_short();
-            g.gd[i].urx = self.sfnt_get_short();
-            g.gd[i].ury = self.sfnt_get_short();
+            g.gd[i].llx = self.sfnt_get_short()?;
+            g.gd[i].lly = self.sfnt_get_short()?;
+            g.gd[i].urx = self.sfnt_get_short()?;
+            g.gd[i].ury = self.sfnt_get_short()?;
             if vmtx.is_none() {
                 // vertOriginY == sTypeAscender
                 g.gd[i].tsb = (i32::from(g.default_advh)
@@ -560,7 +562,7 @@ impl Sfnt {
 
         set_dw(g, &w_stat);
 
-        0
+        Ok(0)
     }
 }
 
@@ -570,17 +572,17 @@ mod tests {
 
     #[test]
     fn add_and_find() {
-        let mut g = TtGlyphs::tt_build_init();
+        let mut g = TtGlyphs::tt_build_init().unwrap();
         assert_eq!(g.num_glyphs, 1);
-        assert_eq!(g.tt_add_glyph(37, 5), 5);
-        assert_eq!(g.tt_add_glyph(38, 5), 5); // slot used: not added
+        assert_eq!(g.tt_add_glyph(37, 5).unwrap(), 5);
+        assert_eq!(g.tt_add_glyph(38, 5).unwrap(), 5); // slot used: not added
         assert_eq!(g.num_glyphs, 2);
         assert_eq!(g.last_gid, 5);
         assert_eq!(g.tt_find_glyph(37), 5);
         assert_eq!(g.tt_find_glyph(38), 0);
         assert_eq!(g.tt_get_index(5), 1);
         assert_eq!(g.tt_get_index(6), 0);
-        assert_eq!(g.find_empty_slot(), 1);
+        assert_eq!(g.find_empty_slot().unwrap(), 1);
         assert_eq!(g.max_glyphs, 256);
     }
 }
@@ -617,13 +619,14 @@ mod font_tests {
     /// else 1, 2, …, as truetype), its Length1 and a metrics dump.
     fn subset(path: &str, identity: bool, gids: &[u16]) -> Option<(Vec<u8>, String)> {
         let data = std::fs::read(path).ok()?;
-        let mut sfont = Sfnt::sfnt_open(MemFile::new(Arc::from(data), path.as_bytes()))?;
-        sfont.sfnt_read_table_directory(0);
-        let mut g = TtGlyphs::tt_build_init();
+        let mut sfont = Sfnt::sfnt_open(MemFile::new(Arc::from(data), path.as_bytes())).unwrap()?;
+        sfont.sfnt_read_table_directory(0).unwrap();
+        let mut g = TtGlyphs::tt_build_init().unwrap();
         for (i, &gid) in gids.iter().enumerate() {
-            g.tt_add_glyph(gid, if identity { gid } else { i as u16 + 1 });
+            g.tt_add_glyph(gid, if identity { gid } else { i as u16 + 1 })
+                .unwrap();
         }
-        sfont.tt_build_tables(&mut g);
+        sfont.tt_build_tables(&mut g).unwrap();
         let mut dump = String::new();
         let _ = writeln!(
             dump,
@@ -641,7 +644,7 @@ mod font_tests {
             sfont.sfnt_require_table(*tag, i32::from(*must));
         }
         let mut dpx = test_dpx();
-        let s = dpx.sfnt_create_FontFile_stream(&mut sfont)?;
+        let s = dpx.sfnt_create_FontFile_stream(&mut sfont).unwrap()?;
         let dict = dpx.o.stream_dict(s);
         let l1 = dpx.o.lookup_dict(dict, b"Length1").unwrap();
         let _ = writeln!(dump, "/Length1 {}", dpx.o.number_value(l1));

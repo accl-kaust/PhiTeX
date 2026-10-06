@@ -175,10 +175,10 @@ fn page_boundary(v: i32) -> PdfPageBoundary {
 impl Dpx {
     /// `get_page_content` (static): the page's contents as one stream
     /// (an array of streams concatenated), or none.
-    pub fn get_page_content(&mut self, pf: u32, page: Obj) -> Option<Obj> {
+    pub fn get_page_content(&mut self, pf: u32, page: Obj) -> Result<Option<Obj>> {
         let _ = pf;
         let c = self.o.lookup_dict(page, b"Contents");
-        let mut contents = self.o.deref_obj(c)?;
+        let mut contents = some!(self.o.deref_obj(c)?);
 
         if self.o.is_null(Some(contents)) {
             /* empty page */
@@ -192,20 +192,20 @@ impl Dpx {
             let content_new = self.o.new_stream(STREAM_COMPRESS);
             for i in 0..self.o.array_length(contents) {
                 let item = self.o.get_array(contents, i as i32);
-                let Some(content_seg) = self.o.deref_obj(item) else {
+                let Some(content_seg) = self.o.deref_obj(item)? else {
                     warn!("Could not read page content stream.");
                     self.o.release(content_new);
                     self.o.release(contents);
-                    return None;
+                    return Ok(None);
                 };
                 if self.o.is_stream(Some(content_seg)) {
-                    self.o.concat_stream(content_new, content_seg);
+                    self.o.concat_stream(content_new, content_seg)?;
                 } else if !self.o.is_null(Some(content_seg)) {
                     warn!("Page content not a stream object. Broken PDF file?");
                     self.o.release(content_seg);
                     self.o.release(content_new);
                     self.o.release(contents);
-                    return None;
+                    return Ok(None);
                 }
                 self.o.release(content_seg);
             }
@@ -215,16 +215,16 @@ impl Dpx {
             if !self.o.is_stream(Some(contents)) {
                 warn!("Page content not a stream object. Broken PDF file?");
                 self.o.release(contents);
-                return None;
+                return Ok(None);
             }
             /* Flate the contents if necessary. */
             let content_new = self.o.new_stream(STREAM_COMPRESS);
-            self.o.concat_stream(content_new, contents);
+            self.o.concat_stream(content_new, contents)?;
             self.o.release(contents);
             contents = content_new;
         }
 
-        Some(contents)
+        Ok(Some(contents))
     }
     /// `pdf_include_page`: fills XObject `xobj_id` with page
     /// `options.page_no` of the PDF in `fp` (opened as `ident`); 0 or -1.
@@ -239,10 +239,10 @@ impl Dpx {
         fp: &mut MemFile,
         ident: &[u8],
         options: crate::pdfximage::LoadOptions,
-    ) -> i32 {
+    ) -> Result<i32> {
         let mut options = options;
-        let Some(pf) = self.o.pdf_open(Some(ident), fp.data.clone()) else {
-            return -1;
+        let Some(pf) = self.o.pdf_open(Some(ident), fp.data.clone())? else {
+            return Ok(-1);
         };
 
         let mut info = pdf_ximage_init_form_info();
@@ -256,22 +256,22 @@ impl Dpx {
             options.page_name.as_deref(),
             page_boundary(options.bbox_type),
             true,
-        );
+        )?;
         info.bbox = bbox;
         info.matrix = matrix;
 
         let Some(page) = page else {
             /* error_silent */
             self.o.release_opt(resources);
-            return -1;
+            return Ok(-1);
         };
 
         let catalog = self.o.pdf_file_catalog(pf);
         let mi = catalog.and_then(|c| self.o.lookup_dict(c, b"MarkInfo"));
-        let markinfo = self.o.deref_obj(mi);
+        let markinfo = self.o.deref_obj(mi)?;
         if let Some(markinfo) = markinfo {
             let m = self.o.lookup_dict(markinfo, b"Marked");
-            let tmp = self.o.deref_obj(m);
+            let tmp = self.o.deref_obj(m)?;
             self.o.release(markinfo);
             if !self.o.is_boolean(tmp) {
                 self.o.release_opt(tmp);
@@ -279,7 +279,7 @@ impl Dpx {
                 warn!("Cannot parse document. Broken PDF file?");
                 self.o.release_opt(resources);
                 self.o.release(page);
-                return -1;
+                return Ok(-1);
             } else if self.o.boolean_value(tmp.unwrap()) {
                 warn!("PDF file is tagged... Ignoring tags.");
             }
@@ -290,14 +290,17 @@ impl Dpx {
          * Handle page's Group
          */
         let group_obj = self.o.lookup_dict(page, b"Group");
-        let group = group_obj.and_then(|g| self.o.import_object(g));
+        let group = match group_obj {
+            Some(g) => self.o.import_object(g)?,
+            None => None,
+        };
         /*
          * Handle page content stream.
          */
-        let contents = self.get_page_content(pf, page);
+        let contents = self.get_page_content(pf, page)?;
         self.o.release(page);
         let Some(contents) = contents else {
-            error!("typecheck: Invalid object type: 0 7 (line 0)");
+            fatal!("typecheck: Invalid object type: 0 7 (line 0)");
         };
 
         /*
@@ -332,7 +335,10 @@ impl Dpx {
 
             self.o.put(contents_dict, b"Matrix", matrix);
 
-            let r = resources.and_then(|r| self.o.import_object(r));
+            let r = match resources {
+                Some(r) => self.o.import_object(r)?,
+                None => None,
+            };
             self.o.put_opt(contents_dict, b"Resources", r);
             self.o.release_opt(resources);
 
@@ -349,7 +355,7 @@ impl Dpx {
 
         self.pdf_ximage_set_form(xobj_id, &info, contents);
 
-        0
+        Ok(0)
     }
     /// `get_numbers_from_stack` (static): pops `n` numbers into
     /// `v[0..n]` (last popped first); 0 or -1. Popped objects are released.
@@ -383,11 +389,11 @@ impl Dpx {
         page_index: i32,
         x_user: f64,
         y_user: f64,
-    ) -> i32 {
+    ) -> Result<i32> {
         let mut error = 0;
 
-        let Some(pf) = self.o.pdf_open(None, fp.data.clone()) else {
-            return -1;
+        let Some(pf) = self.o.pdf_open(None, fp.data.clone())? else {
+            return Ok(-1);
         };
 
         let (_, mut m) = self.pdf_dev_currentmatrix();
@@ -396,15 +402,15 @@ impl Dpx {
         m.f += y_user;
 
         let (page_tree, _bbox, _mtrx, _) =
-            self.pdf_doc_get_page(pf, page_index, None, PdfPageBoundary::Auto, false);
+            self.pdf_doc_get_page(pf, page_index, None, PdfPageBoundary::Auto, false)?;
         let Some(page_tree) = page_tree else {
-            return -1;
+            return Ok(-1);
         };
 
-        let contents = self.get_page_content(pf, page_tree);
+        let contents = self.get_page_content(pf, page_tree)?;
         self.o.release(page_tree);
         let Some(contents) = contents else {
-            return -1;
+            return Ok(-1);
         };
 
         self.pdf_doc_add_page_content(b" ");
@@ -433,19 +439,19 @@ impl Dpx {
                 skip_white(s, &mut p);
                 if token.is_none() {
                     // C loops here for ever (nothing read, nothing skipped).
-                    error!("pdf_copy_clip: unreadable content in a nested q/Q");
+                    fatal!("pdf_copy_clip: unreadable content in a nested q/Q");
                 }
                 continue;
             }
 
             let obj = match s[p] {
                 b'-' | b'+' | b'.' | b'0'..=b'9' => self.o.parse_pdf_number(s, &mut p),
-                b'[' => self.o.parse_pdf_array(s, &mut p, None), /* No indirect reference allowed here */
+                b'[' => self.o.parse_pdf_array(s, &mut p, None)?, /* No indirect reference allowed here */
                 b'/' => self.o.parse_pdf_name(s, &mut p),
                 b'(' => self.o.parse_pdf_string(s, &mut p),
                 b'<' => {
                     if p + 1 < endptr && s[p + 1] == b'<' {
-                        self.o.parse_pdf_dict(s, &mut p, None)
+                        self.o.parse_pdf_dict(s, &mut p, None)?
                     } else {
                         self.o.parse_pdf_string(s, &mut p)
                     }
@@ -590,6 +596,6 @@ impl Dpx {
         self.o.release(contents);
         /* pdf_close(pf): nothing to do here */
 
-        error
+        Ok(error)
     }
 }

@@ -306,17 +306,18 @@ impl Dpx {
     }
 
     /// `pdf_init_fonts`.
-    pub fn pdf_init_fonts(&mut self) {
-        self.agl_init_map();
-        self.CMap_cache_init();
+    pub fn pdf_init_fonts(&mut self) -> Result<()> {
+        self.agl_init_map()?;
+        self.CMap_cache_init()?;
         self.pdf_init_encodings();
         self.font.fonts.clear();
         self.font.capacity = CACHE_ALLOC_SIZE as i32;
+        Ok(())
         // (C seeds rand() with the time: nothing here uses rand)
     }
 
     /// `pdf_close_fonts`.
-    pub fn pdf_close_fonts(&mut self) {
+    pub fn pdf_close_fonts(&mut self) -> Result<()> {
         let count = self.font.fonts.len();
         for font_id in 0..count {
             let font = &self.font.fonts[font_id];
@@ -331,25 +332,25 @@ impl Dpx {
                 continue;
             }
             let fid = font_id as i32;
-            self.try_load_ToUnicode_CMap(fid);
+            self.try_load_ToUnicode_CMap(fid)?;
             let font = &self.font.fonts[font_id];
             match font.subtype {
                 PDF_FONT_FONTTYPE_TYPE1 => {
                     if font.flags & PDF_FONT_FLAG_BASEFONT == 0 {
-                        self.pdf_font_load_type1(fid);
+                        self.pdf_font_load_type1(fid)?;
                     }
                 }
                 PDF_FONT_FONTTYPE_TYPE1C => {
-                    self.pdf_font_load_type1c(fid);
+                    self.pdf_font_load_type1c(fid)?;
                 }
                 PDF_FONT_FONTTYPE_TRUETYPE => {
-                    self.pdf_font_load_truetype(fid);
+                    self.pdf_font_load_truetype(fid)?;
                 }
                 PDF_FONT_FONTTYPE_TYPE3 => {
-                    crate::error!("PK fonts are not supported");
+                    crate::fatal!("PK fonts are not supported");
                 }
                 PDF_FONT_FONTTYPE_TYPE0 => {
-                    self.pdf_font_load_type0(fid);
+                    self.pdf_font_load_type0(fid)?;
                 }
                 _ => {}
             }
@@ -361,11 +362,11 @@ impl Dpx {
                 // nothing)
                 if let Some(uc) = font.usedchars.clone() {
                     let uc = uc.borrow();
-                    self.pdf_encoding_add_usedchars(enc, &uc);
+                    self.pdf_encoding_add_usedchars(enc, &uc)?;
                 }
             }
         }
-        self.pdf_encoding_complete();
+        self.pdf_encoding_complete()?;
         for font_id in 0..count {
             let font = &self.font.fonts[font_id];
             if font.flags & (PDF_FONT_FLAG_IS_ALIAS | PDF_FONT_FLAG_IS_REENCODE) != 0
@@ -376,7 +377,7 @@ impl Dpx {
             if font.subtype == PDF_FONT_FONTTYPE_CIDTYPE0
                 || font.subtype == PDF_FONT_FONTTYPE_CIDTYPE2
             {
-                self.pdf_font_load_cidfont(font_id as i32);
+                self.pdf_font_load_cidfont(font_id as i32)?;
             }
         }
         for font_id in 0..count {
@@ -396,9 +397,9 @@ impl Dpx {
                 && subtype != PDF_FONT_FONTTYPE_CIDTYPE2
             {
                 let resource = self.font.fonts[font_id].resource.expect("resource");
-                if let Some(enc_obj) = self.pdf_get_encoding_obj(enc) {
+                if let Some(enc_obj) = self.pdf_get_encoding_obj(enc)? {
                     if subtype == PDF_FONT_FONTTYPE_TRUETYPE {
-                        if self.pdf_encoding_is_predefined(enc) && self.o.is_name(Some(enc_obj)) {
+                        if self.pdf_encoding_is_predefined(enc)? && self.o.is_name(Some(enc_obj)) {
                             let l = self.o.link(enc_obj);
                             self.o.put(resource, b"Encoding", l);
                         }
@@ -412,7 +413,7 @@ impl Dpx {
                     }
                 }
                 if self.o.lookup_dict(resource, b"ToUnicode").is_none()
-                    && let Some(tounicode) = self.pdf_encoding_get_tounicode(enc)
+                    && let Some(tounicode) = self.pdf_encoding_get_tounicode(enc)?
                 {
                     let r = self.o.ref_obj(tounicode);
                     self.o.put(resource, b"ToUnicode", r);
@@ -427,8 +428,9 @@ impl Dpx {
         self.font.fonts.clear();
         self.font.capacity = 0;
         self.CMap_cache_close();
-        self.pdf_close_encodings();
+        self.pdf_close_encodings()?;
         self.agl_close_map();
+        Ok(())
     }
 
     /// `GET_FONT` (static): `font_id`, or the font an alias stands for
@@ -445,10 +447,11 @@ impl Dpx {
         -1
     }
 
-    fn check_id(&self, font_id: i32) {
+    fn check_id(&self, font_id: i32) -> Result<()> {
         if font_id < 0 || font_id as usize >= self.font.fonts.len() {
-            crate::error!("Invalid font ID: {}", font_id);
+            crate::fatal!("Invalid font ID: {}", font_id);
         }
+        Ok(())
     }
 
     /// `GET_FONT`, then the font a re-encoded font stands for.
@@ -461,27 +464,27 @@ impl Dpx {
     }
 
     /// `pdf_get_font_data`.
-    pub fn pdf_get_font_data(&mut self, font_id: i32) -> &mut PdfFont {
-        self.check_id(font_id);
-        &mut self.font.fonts[font_id as usize]
+    pub fn pdf_get_font_data(&mut self, font_id: i32) -> Result<&mut PdfFont> {
+        self.check_id(font_id)?;
+        Ok(&mut self.font.fonts[font_id as usize])
     }
 
     /// `pdf_get_font_ident`: a copy.
-    pub fn pdf_get_font_ident(&mut self, font_id: i32) -> Option<Vec<u8>> {
-        self.check_id(font_id);
-        self.font.fonts[font_id as usize].ident.clone()
+    pub fn pdf_get_font_ident(&mut self, font_id: i32) -> Result<Option<Vec<u8>>> {
+        self.check_id(font_id)?;
+        Ok(self.font.fonts[font_id as usize].ident.clone())
     }
 
     /// `pdf_get_font_subtype`.
-    pub fn pdf_get_font_subtype(&mut self, font_id: i32) -> i32 {
-        self.check_id(font_id);
+    pub fn pdf_get_font_subtype(&mut self, font_id: i32) -> Result<i32> {
+        self.check_id(font_id)?;
         let f = self.get_font_reencoded(font_id);
-        self.font.fonts[f].subtype
+        Ok(self.font.fonts[f].subtype)
     }
 
     /// `pdf_get_font_reference`: a new link (as in C).
-    pub fn pdf_get_font_reference(&mut self, font_id: i32) -> Obj {
-        self.check_id(font_id);
+    pub fn pdf_get_font_reference(&mut self, font_id: i32) -> Result<Obj> {
+        self.check_id(font_id)?;
         let f = self.get_font_reencoded(font_id);
         if self.font.fonts[f].reference.is_none() {
             let res = self.pdf_font_get_resource(f as i32);
@@ -493,64 +496,64 @@ impl Dpx {
             if self.o.lookup_dict(resource, b"DescendantFonts").is_none() {
                 let array = self.o.new_array();
                 let d = self.font.fonts[f].type0.descendant;
-                let r = self.pdf_get_font_reference(d);
+                let r = self.pdf_get_font_reference(d)?;
                 self.o.add_array(array, r);
                 self.o.put(resource, b"DescendantFonts", array);
             }
         }
         let r = self.font.fonts[f].reference.expect("reference");
-        self.o.link(r)
+        Ok(self.o.link(r))
     }
 
     /// `pdf_get_font_resource` (not linked).
-    pub fn pdf_get_font_resource(&mut self, font_id: i32) -> Obj {
-        self.check_id(font_id);
+    pub fn pdf_get_font_resource(&mut self, font_id: i32) -> Result<Obj> {
+        self.check_id(font_id)?;
         let f = self.get_font_reencoded(font_id);
         match self.font.fonts[f].resource {
-            Some(r) => r,
+            Some(r) => Ok(r),
             None => {
                 let d = self.o.new_dict();
                 self.font.fonts[f].resource = Some(d);
-                d
+                Ok(d)
             }
         }
     }
 
     /// `pdf_get_font_usedchars`: the shared array (made, 256 bytes, for a
     /// simple font that has none); none for a Type 0 font without one.
-    pub fn pdf_get_font_usedchars(&mut self, font_id: i32) -> Option<UsedChars> {
-        self.check_id(font_id);
+    pub fn pdf_get_font_usedchars(&mut self, font_id: i32) -> Result<Option<UsedChars>> {
+        self.check_id(font_id)?;
         let f = self.get_font_reencoded(font_id);
         let font = &mut self.font.fonts[f];
         if font.subtype != PDF_FONT_FONTTYPE_TYPE0 && font.usedchars.is_none() {
             font.usedchars = Some(Rc::new(RefCell::new(vec![0u8; 256])));
         }
-        font.usedchars.clone()
+        Ok(font.usedchars.clone())
     }
 
     /// `pdf_get_font_encoding`.
-    pub fn pdf_get_font_encoding(&mut self, font_id: i32) -> i32 {
-        self.check_id(font_id);
+    pub fn pdf_get_font_encoding(&mut self, font_id: i32) -> Result<i32> {
+        self.check_id(font_id)?;
         let f = self.GET_FONT(font_id);
-        self.font.fonts[f as usize].encoding_id
+        Ok(self.font.fonts[f as usize].encoding_id)
     }
 
     /// `pdf_get_font_wmode`.
-    pub fn pdf_get_font_wmode(&mut self, font_id: i32) -> i32 {
-        self.check_id(font_id);
+    pub fn pdf_get_font_wmode(&mut self, font_id: i32) -> Result<i32> {
+        self.check_id(font_id)?;
         let f = self.get_font_reencoded(font_id);
         let font = &self.font.fonts[f];
         if font.subtype == PDF_FONT_FONTTYPE_TYPE0 {
-            font.type0.wmode
+            Ok(font.type0.wmode)
         } else {
-            0
+            Ok(0)
         }
     }
 
     /// `pdf_font_resource_name`: `F<id>` (C writes it to `buf` and returns
     /// its length).
-    pub fn pdf_font_resource_name(&mut self, font_id: i32) -> Vec<u8> {
-        self.check_id(font_id);
+    pub fn pdf_font_resource_name(&mut self, font_id: i32) -> Result<Vec<u8>> {
+        self.check_id(font_id)?;
         let mut font_id = font_id;
         if self.font.fonts[font_id as usize].flags & PDF_FONT_FLAG_IS_ALIAS != 0 {
             font_id = self.font.fonts[font_id as usize].font_id;
@@ -562,23 +565,23 @@ impl Dpx {
         let mut b = crate::fmt::Buf::new();
         b.push(b'F');
         b.int(font_id);
-        b.0
+        Ok(b.0)
     }
 
     /// `try_load_ToUnicode_CMap` (static).
     #[allow(non_snake_case)]
-    fn try_load_ToUnicode_CMap(&mut self, font_id: i32) -> i32 {
+    fn try_load_ToUnicode_CMap(&mut self, font_id: i32) -> Result<i32> {
         let font = &self.font.fonts[font_id as usize];
         if font.subtype == PDF_FONT_FONTTYPE_TYPE0 {
-            return 0;
+            return Ok(0);
         }
         let ident = font.ident.clone().expect("ident");
         let mrec = self.pdf_lookup_fontmap_record(&ident);
         let has_tounicode = mrec.as_ref().and_then(|m| m.opt.tounicode.clone());
         let cmap_name = has_tounicode.clone().unwrap_or_else(|| ident.clone());
-        if let Some(tounicode) = self.pdf_load_ToUnicode_stream(&cmap_name) {
+        if let Some(tounicode) = self.pdf_load_ToUnicode_stream(&cmap_name)? {
             if self.o.type_of(Some(tounicode)) != crate::obj::PDF_STREAM {
-                crate::error!("Object returned by pdf_load_ToUnicode_stream() not stream object!");
+                crate::fatal!("Object returned by pdf_load_ToUnicode_stream() not stream object!");
             } else if self.o.stream_length(tounicode) > 0 {
                 let fontdict = self.pdf_font_get_resource(font_id);
                 let r = self.o.ref_obj(tounicode);
@@ -586,7 +589,7 @@ impl Dpx {
             }
             self.o.release(tounicode);
         }
-        0
+        Ok(0)
     }
 
     /// `pdf_font_findresource`: the font_id, or -1.
@@ -648,7 +651,7 @@ impl Dpx {
         ident: &[u8],
         font_scale: f64,
         mrec: Option<&FontmapRec>,
-    ) -> i32 {
+    ) -> Result<i32> {
         let mut encoding_id = -1;
         let mut cmap_id = -1;
         let fontname: Vec<u8> = match mrec {
@@ -664,7 +667,7 @@ impl Dpx {
             } else {
                 0
             };
-            cmap_id = self.otf_try_load_GID_to_CID_map(&fontname, m.opt.index, wmode);
+            cmap_id = self.otf_try_load_GID_to_CID_map(&fontname, m.opt.index, wmode)?;
         }
         if cmap_id < 0
             && let Some(m) = mrec
@@ -677,15 +680,16 @@ impl Dpx {
                     m.opt.index,
                     m.opt.otl_tags.as_deref(),
                     vert,
-                );
+                )?;
                 if cmap_id < 0 {
-                    cmap_id = self.t1_load_UnicodeCMap(&fontname, m.opt.otl_tags.as_deref(), vert);
+                    cmap_id =
+                        self.t1_load_UnicodeCMap(&fontname, m.opt.otl_tags.as_deref(), vert)?;
                 }
             } else if !contains(enc, b".enc") || contains(enc, b".cmap") {
-                cmap_id = self.CMap_cache_find(enc);
+                cmap_id = self.CMap_cache_find(enc)?;
             }
             if cmap_id < 0 {
-                encoding_id = self.pdf_encoding_findresource(enc);
+                encoding_id = self.pdf_encoding_findresource(enc)?;
             }
         }
         if let Some(m) = mrec
@@ -693,14 +697,14 @@ impl Dpx {
             && cmap_id < 0
             && encoding_id < 0
         {
-            return -1;
+            return Ok(-1);
         }
         if let Some(m) = mrec
             && cmap_id >= 0
         {
             // Composite font.
             let (csi, wmode) = {
-                let cmap = self.CMap_cache_get(cmap_id);
+                let cmap = self.CMap_cache_get(cmap_id)?;
                 let csi = if cmap.CMap_is_Identity() {
                     None
                 } else {
@@ -710,7 +714,7 @@ impl Dpx {
             };
             let count = self.font.fonts.len() as i32;
             let mut cid_id =
-                self.pdf_font_cidfont_lookup_cache(count, &fontname, csi.as_ref(), &m.opt);
+                self.pdf_font_cidfont_lookup_cache(count, &fontname, csi.as_ref(), &m.opt)?;
             if cid_id >= 0 {
                 let found = self.font.fonts.iter().position(|f| {
                     f.subtype == PDF_FONT_FONTTYPE_TYPE0
@@ -721,11 +725,11 @@ impl Dpx {
                     let font = &self.font.fonts[font_id];
                     if font.encoding_id == cmap_id {
                         if font.ident.as_deref() == Some(ident) {
-                            return font_id as i32;
+                            return Ok(font_id as i32);
                         }
-                        return self.create_font_alias(ident, font_id as i32);
+                        return Ok(self.create_font_alias(ident, font_id as i32));
                     }
-                    return self.create_font_reencoded(ident, font_id as i32, cmap_id);
+                    return Ok(self.create_font_reencoded(ident, font_id as i32, cmap_id));
                 }
             }
             if cid_id < 0 {
@@ -733,10 +737,10 @@ impl Dpx {
                 let mut cidfont = PdfFont::default();
                 pdf_init_font_struct(&mut cidfont);
                 self.font.fonts.push(cidfont);
-                if self.pdf_font_open_cidfont(cid_id, &fontname, csi.as_ref(), &m.opt) < 0 {
+                if self.pdf_font_open_cidfont(cid_id, &fontname, csi.as_ref(), &m.opt)? < 0 {
                     self.pdf_clean_font_struct(cid_id);
                     self.font.fonts.pop();
-                    return -1;
+                    return Ok(-1);
                 }
             }
             let font_id = self.font.fonts.len() as i32;
@@ -746,13 +750,13 @@ impl Dpx {
             if self.pdf_font_open_type0(font_id, cid_id, wmode) < 0 {
                 self.pdf_clean_font_struct(font_id);
                 self.font.fonts.pop();
-                return -1;
+                return Ok(-1);
             }
             let font = &mut self.font.fonts[font_id as usize];
             font.ident = Some(ident.to_vec());
             font.subtype = PDF_FONT_FONTTYPE_TYPE0;
             font.encoding_id = cmap_id;
-            font_id
+            Ok(font_id)
         } else {
             // Simple font: always embed.
             for font_id in 0..self.font.fonts.len() {
@@ -776,9 +780,9 @@ impl Dpx {
                 };
                 if hit {
                     if font.ident.as_deref() == Some(ident) {
-                        return font_id as i32;
+                        return Ok(font_id as i32);
                     }
-                    return self.create_font_alias(ident, font_id as i32);
+                    return Ok(self.create_font_alias(ident, font_id as i32));
                 }
             }
             let font_id = self.font.fonts.len() as i32;
@@ -797,36 +801,41 @@ impl Dpx {
                 i32::from(font.flags & PDF_FONT_FLAG_NOEMBED == 0),
             );
             self.font.fonts.push(font);
-            let subtype =
-                if self.pdf_font_open_type1(font_id, &fontname, index, encoding_id, embedding) >= 0
-                {
-                    PDF_FONT_FONTTYPE_TYPE1
-                } else if self.pdf_font_open_type1c(
-                    font_id,
-                    &fontname,
-                    index,
-                    encoding_id,
-                    embedding,
-                ) >= 0
-                {
-                    PDF_FONT_FONTTYPE_TYPE1C
-                } else if self.pdf_font_open_truetype(
-                    font_id,
-                    &fontname,
-                    index,
-                    encoding_id,
-                    embedding,
-                ) >= 0
-                {
-                    PDF_FONT_FONTTYPE_TRUETYPE
-                } else {
-                    // (PK fonts, pdf_font_open_pkfont: not ported)
-                    self.pdf_clean_font_struct(font_id);
-                    self.font.fonts.pop();
-                    return -1;
-                };
+            let subtype = if self.pdf_font_open_type1(
+                font_id,
+                &fontname,
+                index,
+                encoding_id,
+                embedding,
+            )? >= 0
+            {
+                PDF_FONT_FONTTYPE_TYPE1
+            } else if self.pdf_font_open_type1c(
+                font_id,
+                &fontname,
+                index,
+                encoding_id,
+                embedding,
+            )? >= 0
+            {
+                PDF_FONT_FONTTYPE_TYPE1C
+            } else if self.pdf_font_open_truetype(
+                font_id,
+                &fontname,
+                index,
+                encoding_id,
+                embedding,
+            )? >= 0
+            {
+                PDF_FONT_FONTTYPE_TRUETYPE
+            } else {
+                // (PK fonts, pdf_font_open_pkfont: not ported)
+                self.pdf_clean_font_struct(font_id);
+                self.font.fonts.pop();
+                return Ok(-1);
+            };
             self.font.fonts[font_id as usize].subtype = subtype;
-            font_id
+            Ok(font_id)
         }
     }
 
@@ -888,17 +897,17 @@ impl Dpx {
         firstchar: i32,
         lastchar: i32,
         usedchars: &[u8],
-    ) -> i32 {
+    ) -> Result<i32> {
         let tolerance = 1.0;
-        let tfm_id = self.tfm_open(ident, false);
+        let tfm_id = self.tfm_open(ident, false)?;
         if tfm_id < 0 {
-            return 0;
+            return Ok(0);
         }
         let mut sum = 0.0;
         let mut count = 0;
         for code in firstchar..=lastchar {
             if usedchars[code as usize] != 0 {
-                let width = 1000. * self.tfm_get_width(tfm_id, code);
+                let width = 1000. * self.tfm_get_width(tfm_id, code)?;
                 let mut diff = widths[code as usize] - width;
                 diff = if diff < 0.0 { -diff } else { diff };
                 if diff > tolerance {
@@ -908,9 +917,9 @@ impl Dpx {
             }
         }
         if sum > 0.5 * f64::from(count) * tolerance {
-            -1
+            Ok(-1)
         } else {
-            0
+            Ok(0)
         }
     }
 }

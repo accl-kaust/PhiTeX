@@ -200,18 +200,18 @@ pub struct TtCmap {
 }
 
 /// `read_cmap0` (static).
-fn read_cmap0(sfont: &mut Sfnt, len: ULONG) -> Option<Box<Cmap0>> {
+fn read_cmap0(sfont: &mut Sfnt, len: ULONG) -> Result<Option<Box<Cmap0>>> {
     if len < 256 {
         warn!("invalid format 0 TT cmap subtable");
-        return None;
+        return Ok(None);
     }
     let mut map = Box::new(Cmap0 {
         glyph_index_array: [0; 256],
     });
     for i in 0..256 {
-        map.glyph_index_array[i] = sfont.sfnt_get_byte();
+        map.glyph_index_array[i] = sfont.sfnt_get_byte()?;
     }
-    Some(map)
+    Ok(Some(map))
 }
 /// `lookup_cmap0` (static).
 fn lookup_cmap0(map: &Cmap0, cc: USHORT) -> USHORT {
@@ -222,10 +222,10 @@ fn lookup_cmap0(map: &Cmap0, cc: USHORT) -> USHORT {
     }
 }
 /// `read_cmap2` (static).
-fn read_cmap2(sfont: &mut Sfnt, len: ULONG) -> Option<Box<Cmap2>> {
+fn read_cmap2(sfont: &mut Sfnt, len: ULONG) -> Result<Option<Box<Cmap2>>> {
     if len < 512 {
         warn!("invalid fromt2 TT cmap subtable");
-        return None;
+        return Ok(None);
     }
 
     let mut map = Box::new(Cmap2 {
@@ -234,7 +234,7 @@ fn read_cmap2(sfont: &mut Sfnt, len: ULONG) -> Option<Box<Cmap2>> {
         glyph_index_array: Vec::new(),
     });
     for i in 0..256 {
-        map.sub_header_keys[i] = sfont.sfnt_get_ushort();
+        map.sub_header_keys[i] = sfont.sfnt_get_ushort()?;
     }
     let mut n: USHORT = 0;
     for i in 0..256 {
@@ -247,16 +247,16 @@ fn read_cmap2(sfont: &mut Sfnt, len: ULONG) -> Option<Box<Cmap2>> {
 
     if len < 512u32.wrapping_add(u32::from(n) * 8) {
         warn!("invalid/truncated format2 TT cmap subtable");
-        return None;
+        return Ok(None);
     }
 
     map.sub_headers = Vec::with_capacity(n as usize);
     for i in 0..n {
         let mut sh = SubHeader {
-            first_code: sfont.sfnt_get_ushort(),
-            entry_count: sfont.sfnt_get_ushort(),
-            id_delta: sfont.sfnt_get_short(),
-            id_range_offset: sfont.sfnt_get_ushort(),
+            first_code: sfont.sfnt_get_ushort()?,
+            entry_count: sfont.sfnt_get_ushort()?,
+            id_delta: sfont.sfnt_get_short()?,
+            id_range_offset: sfont.sfnt_get_ushort()?,
         };
         // It makes things easier to let the offset start from the
         // beginning of glyphIndexArray.
@@ -273,10 +273,10 @@ fn read_cmap2(sfont: &mut Sfnt, len: ULONG) -> Option<Box<Cmap2>> {
 
     map.glyph_index_array = Vec::with_capacity(n as usize);
     for _ in 0..n {
-        map.glyph_index_array.push(sfont.sfnt_get_ushort());
+        map.glyph_index_array.push(sfont.sfnt_get_ushort()?);
     }
 
-    Some(map)
+    Ok(Some(map))
 }
 /// `lookup_cmap2` (static).
 fn lookup_cmap2(map: &Cmap2, cc: USHORT) -> USHORT {
@@ -309,39 +309,39 @@ fn lookup_cmap2(map: &Cmap2, cc: USHORT) -> USHORT {
     idx
 }
 /// `read_cmap4` (static).
-fn read_cmap4(sfont: &mut Sfnt, len: ULONG) -> Option<Box<Cmap4>> {
+fn read_cmap4(sfont: &mut Sfnt, len: ULONG) -> Result<Option<Box<Cmap4>>> {
     if len < 8 {
         warn!("invalid format 4 TT cmap subtable");
-        return None;
+        return Ok(None);
     }
 
     let mut map = Box::new(Cmap4::default());
 
-    let mut seg_count = sfont.sfnt_get_ushort();
+    let mut seg_count = sfont.sfnt_get_ushort()?;
     map.seg_count_x2 = seg_count;
-    map.search_range = sfont.sfnt_get_ushort();
-    map.entry_selector = sfont.sfnt_get_ushort();
-    map.range_shift = sfont.sfnt_get_ushort();
+    map.search_range = sfont.sfnt_get_ushort()?;
+    map.entry_selector = sfont.sfnt_get_ushort()?;
+    map.range_shift = sfont.sfnt_get_ushort()?;
 
     seg_count /= 2;
 
-    let mut read = |sfont: &mut Sfnt, n: USHORT| -> Vec<USHORT> {
+    let read = |sfont: &mut Sfnt, n: USHORT| -> Result<Vec<USHORT>> {
         let mut v = Vec::with_capacity(n as usize);
         for _ in 0..n {
-            v.push(sfont.sfnt_get_ushort());
+            v.push(sfont.sfnt_get_ushort()?);
         }
-        v
+        Ok(v)
     };
-    map.end_count = read(sfont, seg_count);
-    map.reserved_pad = sfont.sfnt_get_ushort();
-    map.start_count = read(sfont, seg_count);
-    map.id_delta = read(sfont, seg_count);
-    map.id_range_offset = read(sfont, seg_count);
+    map.end_count = read(sfont, seg_count)?;
+    map.reserved_pad = sfont.sfnt_get_ushort()?;
+    map.start_count = read(sfont, seg_count)?;
+    map.id_delta = read(sfont, seg_count)?;
+    map.id_range_offset = read(sfont, seg_count)?;
 
     let n = (len.wrapping_sub(16).wrapping_sub(8 * u32::from(seg_count)) / 2) as USHORT;
-    map.glyph_index_array = read(sfont, n);
+    map.glyph_index_array = read(sfont, n)?;
 
-    Some(map)
+    Ok(Some(map))
 }
 /// `lookup_cmap4` (static).
 fn lookup_cmap4(map: &Cmap4, cc: USHORT) -> USHORT {
@@ -380,21 +380,21 @@ fn lookup_cmap4(map: &Cmap4, cc: USHORT) -> USHORT {
     gid
 }
 /// `read_cmap6` (static).
-fn read_cmap6(sfont: &mut Sfnt, len: ULONG) -> Option<Box<Cmap6>> {
+fn read_cmap6(sfont: &mut Sfnt, len: ULONG) -> Result<Option<Box<Cmap6>>> {
     if len < 4 {
         warn!("invalid format 6 TT cmap subtable");
-        return None;
+        return Ok(None);
     }
     let mut map = Box::new(Cmap6 {
-        first_code: sfont.sfnt_get_ushort(),
-        entry_count: sfont.sfnt_get_ushort(),
+        first_code: sfont.sfnt_get_ushort()?,
+        entry_count: sfont.sfnt_get_ushort()?,
         glyph_index_array: Vec::new(),
     });
     map.glyph_index_array = Vec::with_capacity(map.entry_count as usize);
     for _ in 0..map.entry_count {
-        map.glyph_index_array.push(sfont.sfnt_get_ushort());
+        map.glyph_index_array.push(sfont.sfnt_get_ushort()?);
     }
-    Some(map)
+    Ok(Some(map))
 }
 /// `lookup_cmap6` (static).
 fn lookup_cmap6(map: &Cmap6, cc: USHORT) -> USHORT {
@@ -405,24 +405,24 @@ fn lookup_cmap6(map: &Cmap6, cc: USHORT) -> USHORT {
     0
 }
 /// `read_cmap12` (static).
-fn read_cmap12(sfont: &mut Sfnt, len: ULONG) -> Option<Box<Cmap12>> {
+fn read_cmap12(sfont: &mut Sfnt, len: ULONG) -> Result<Option<Box<Cmap12>>> {
     if len < 4 {
         warn!("invalid format 12 TT cmap subtable");
-        return None;
+        return Ok(None);
     }
     let mut map = Box::new(Cmap12 {
-        n_groups: sfont.sfnt_get_ulong(),
+        n_groups: sfont.sfnt_get_ulong()?,
         groups: Vec::new(),
     });
     for _ in 0..map.n_groups {
         let g = CharGroup {
-            start_char_code: sfont.sfnt_get_ulong(),
-            end_char_code: sfont.sfnt_get_ulong(),
-            start_glyph_id: sfont.sfnt_get_ulong(),
+            start_char_code: sfont.sfnt_get_ulong()?,
+            end_char_code: sfont.sfnt_get_ulong()?,
+            start_glyph_id: sfont.sfnt_get_ulong()?,
         };
         map.groups.push(g);
     }
-    Some(map)
+    Ok(Some(map))
 }
 /// `lookup_cmap12` (static).
 fn lookup_cmap12(map: &Cmap12, cccc: ULONG) -> USHORT {
@@ -444,14 +444,14 @@ fn lookup_cmap12(map: &Cmap12, cccc: ULONG) -> USHORT {
     gid
 }
 /// `read_cmap14` (static).
-fn read_cmap14(sfont: &mut Sfnt, offset: ULONG, len: ULONG) -> Option<Box<Cmap14>> {
+fn read_cmap14(sfont: &mut Sfnt, offset: ULONG, len: ULONG) -> Result<Option<Box<Cmap14>>> {
     if len < 4 {
         warn!("invalid format 14 TT cmap subtable");
-        return None;
+        return Ok(None);
     }
 
     let mut map = Box::new(Cmap14 {
-        num_var_selector_records: sfont.sfnt_get_ulong(),
+        num_var_selector_records: sfont.sfnt_get_ulong()?,
         var_selector: Vec::new(),
     });
     let n = map.num_var_selector_records as usize;
@@ -460,22 +460,22 @@ fn read_cmap14(sfont: &mut Sfnt, offset: ULONG, len: ULONG) -> Option<Box<Cmap14
     // Read VariationSelector Record.
     for _ in 0..n {
         let vs = VariationSelector {
-            var_selector: sfont.sfnt_get_uint24(),
+            var_selector: sfont.sfnt_get_uint24()?,
             ..VariationSelector::default()
         };
         map.var_selector.push(vs);
-        default_uvs_offset.push(sfont.sfnt_get_ulong());
-        non_default_uvs_offset.push(sfont.sfnt_get_ulong());
+        default_uvs_offset.push(sfont.sfnt_get_ulong()?);
+        non_default_uvs_offset.push(sfont.sfnt_get_ulong()?);
     }
     for i in 0..n {
         let vs = &mut map.var_selector[i];
         // Read DefaultUVS Table.
         if default_uvs_offset[i] > 0 {
             sfont.sfnt_seek_set(offset.wrapping_add(default_uvs_offset[i]));
-            vs.num_unicode_value_ranges = sfont.sfnt_get_ulong();
+            vs.num_unicode_value_ranges = sfont.sfnt_get_ulong()?;
             for _ in 0..vs.num_unicode_value_ranges {
-                vs.ranges_start_unicode_value.push(sfont.sfnt_get_uint24());
-                vs.ranges_additional_count.push(sfont.sfnt_get_byte());
+                vs.ranges_start_unicode_value.push(sfont.sfnt_get_uint24()?);
+                vs.ranges_additional_count.push(sfont.sfnt_get_byte()?);
             }
         } else {
             vs.num_unicode_value_ranges = 0;
@@ -483,17 +483,17 @@ fn read_cmap14(sfont: &mut Sfnt, offset: ULONG, len: ULONG) -> Option<Box<Cmap14
         // Read NonDefaultUVS Table.
         if non_default_uvs_offset[i] > 0 {
             sfont.sfnt_seek_set(offset.wrapping_add(non_default_uvs_offset[i]));
-            vs.num_uvs_mappings = sfont.sfnt_get_ulong();
+            vs.num_uvs_mappings = sfont.sfnt_get_ulong()?;
             for _ in 0..vs.num_uvs_mappings {
-                vs.uvs_mappings_unicode_value.push(sfont.sfnt_get_uint24());
-                vs.uvs_mappings_glyph_id.push(sfont.sfnt_get_ushort());
+                vs.uvs_mappings_unicode_value.push(sfont.sfnt_get_uint24()?);
+                vs.uvs_mappings_glyph_id.push(sfont.sfnt_get_ushort()?);
             }
         } else {
             vs.num_uvs_mappings = 0;
         }
     }
 
-    Some(map)
+    Ok(Some(map))
 }
 /// `lookup_cmap14` (static).
 fn lookup_cmap14(
@@ -529,28 +529,28 @@ fn lookup_cmap14(
 
 impl Sfnt {
     /// `tt_cmap_read`: the subtable for `platform`/`encoding`, if any.
-    pub fn tt_cmap_read(&mut self, platform: USHORT, encoding: USHORT) -> Option<TtCmap> {
+    pub fn tt_cmap_read(&mut self, platform: USHORT, encoding: USHORT) -> Result<Option<TtCmap>> {
         let mut length: ULONG = 0;
 
-        let mut offset = self.sfnt_locate_table(b"cmap");
-        let _ = self.sfnt_get_ushort();
-        let n_subtabs = self.sfnt_get_ushort();
+        let mut offset = self.sfnt_locate_table(b"cmap")?;
+        let _ = self.sfnt_get_ushort()?;
+        let n_subtabs = self.sfnt_get_ushort()?;
 
         let mut i: USHORT = 0;
         while i < n_subtabs {
-            let p_id = self.sfnt_get_ushort();
-            let e_id = self.sfnt_get_ushort();
+            let p_id = self.sfnt_get_ushort()?;
+            let e_id = self.sfnt_get_ushort()?;
             if p_id != platform || e_id != encoding {
-                self.sfnt_get_ulong();
+                self.sfnt_get_ulong()?;
             } else {
-                offset = offset.wrapping_add(self.sfnt_get_ulong());
+                offset = offset.wrapping_add(self.sfnt_get_ulong()?);
                 break;
             }
             i += 1;
         }
 
         if i == n_subtabs {
-            return None;
+            return Ok(None);
         }
 
         let mut cmap = TtCmap {
@@ -562,42 +562,42 @@ impl Sfnt {
         };
 
         self.sfnt_seek_set(offset);
-        cmap.format = self.sfnt_get_ushort();
+        cmap.format = self.sfnt_get_ushort()?;
         // Length and version (language) are ULONG for format 8, 10, 12!
         if cmap.format <= 6 {
-            length = ULONG::from(self.sfnt_get_ushort());
-            cmap.language = ULONG::from(self.sfnt_get_ushort()); /* language (Mac) */
+            length = ULONG::from(self.sfnt_get_ushort()?);
+            cmap.language = ULONG::from(self.sfnt_get_ushort()?); /* language (Mac) */
         } else if cmap.format != 14 {
-            if self.sfnt_get_ushort() != 0 {
+            if self.sfnt_get_ushort()? != 0 {
                 // reserved - 0
                 warn!("Unrecognized cmap subtable format.");
-                return None;
+                return Ok(None);
             }
-            length = self.sfnt_get_ulong();
-            cmap.language = self.sfnt_get_ulong();
+            length = self.sfnt_get_ulong()?;
+            cmap.language = self.sfnt_get_ulong()?;
         } else {
-            length = self.sfnt_get_ulong();
+            length = self.sfnt_get_ulong()?;
             cmap.language = 0;
         }
 
         cmap.map = match cmap.format {
-            0 => read_cmap0(self, length).map_or(TtCmapMap::None, TtCmapMap::Cmap0),
-            2 => read_cmap2(self, length).map_or(TtCmapMap::None, TtCmapMap::Cmap2),
-            4 => read_cmap4(self, length).map_or(TtCmapMap::None, TtCmapMap::Cmap4),
-            6 => read_cmap6(self, length).map_or(TtCmapMap::None, TtCmapMap::Cmap6),
-            12 => read_cmap12(self, length).map_or(TtCmapMap::None, TtCmapMap::Cmap12),
-            14 => read_cmap14(self, offset, length).map_or(TtCmapMap::None, TtCmapMap::Cmap14),
+            0 => read_cmap0(self, length)?.map_or(TtCmapMap::None, TtCmapMap::Cmap0),
+            2 => read_cmap2(self, length)?.map_or(TtCmapMap::None, TtCmapMap::Cmap2),
+            4 => read_cmap4(self, length)?.map_or(TtCmapMap::None, TtCmapMap::Cmap4),
+            6 => read_cmap6(self, length)?.map_or(TtCmapMap::None, TtCmapMap::Cmap6),
+            12 => read_cmap12(self, length)?.map_or(TtCmapMap::None, TtCmapMap::Cmap12),
+            14 => read_cmap14(self, offset, length)?.map_or(TtCmapMap::None, TtCmapMap::Cmap14),
             _ => {
                 warn!("Unrecognized OpenType/TrueType cmap format.");
-                return None;
+                return Ok(None);
             }
         };
 
         if matches!(cmap.map, TtCmapMap::None) {
-            return None;
+            return Ok(None);
         }
 
-        Some(cmap)
+        Ok(Some(cmap))
     }
 }
 
@@ -746,17 +746,17 @@ fn lookup_glyph_name(
     post: Option<&TtPostTable>,
     cffont: Option<&CffFont>,
     gid: USHORT,
-) -> Option<Vec<u8>> {
+) -> Result<Option<Vec<u8>>> {
     let mut name = None;
     if let Some(post) = post {
         name = post.tt_get_glyphname(gid);
     }
     if name.is_none() {
         if let Some(cffont) = cffont {
-            name = Some(cffont.cff_get_glyphname(gid));
+            name = Some(cffont.cff_get_glyphname(gid)?);
         }
     }
-    name
+    Ok(name)
 }
 
 /// `create_inverse_cmap4` (static): fills `map_base`/`map_sub` (indexed
@@ -845,7 +845,7 @@ fn load_cmap4(
     cmap: &mut CMap,
     map_base: &mut [i32],
     map_sub: &mut [i32],
-) {
+) -> Result<()> {
     let seg_count = map.seg_count_x2 / 2;
     let mut i: i32 = i32::from(seg_count) - 1;
     while i >= 0 {
@@ -873,10 +873,10 @@ fn load_cmap4(
             if gid != 0 && gid != 0xffff {
                 // Apply GSUB features.
                 if let Some(gsub_list) = gsub_list {
-                    gsub_list.otl_gsub_apply_chain(&mut gid);
+                    gsub_list.otl_gsub_apply_chain(&mut gid)?;
                 }
                 if let Some(gsub_vert) = gsub_vert {
-                    gsub_vert.otl_gsub_apply(&mut gid);
+                    gsub_vert.otl_gsub_apply(&mut gid)?;
                 }
                 let cid = if gid < num_glyphs {
                     gid_to_cid_map[gid as usize]
@@ -898,6 +898,7 @@ fn load_cmap4(
         }
         i -= 1;
     }
+    Ok(())
 }
 
 /// `load_cmap12` (static).
@@ -910,7 +911,7 @@ fn load_cmap12(
     cmap: &mut CMap,
     map_base: &mut [i32],
     map_sub: &mut [i32],
-) {
+) -> Result<()> {
     for i in 0..map.n_groups as usize {
         let g = &map.groups[i];
         let mut ch = g.start_char_code;
@@ -918,10 +919,10 @@ fn load_cmap12(
             let d = ch.wrapping_sub(g.start_char_code) as i32;
             let mut gid = (g.start_glyph_id.wrapping_add(d as u32) & 0xffff) as USHORT;
             if let Some(gsub_list) = gsub_list {
-                gsub_list.otl_gsub_apply_chain(&mut gid);
+                gsub_list.otl_gsub_apply_chain(&mut gid)?;
             }
             if let Some(gsub_vert) = gsub_vert {
-                gsub_vert.otl_gsub_apply(&mut gid);
+                gsub_vert.otl_gsub_apply(&mut gid)?;
             }
             let cid = if gid < num_glyphs {
                 gid_to_cid_map[gid as usize]
@@ -948,6 +949,7 @@ fn load_cmap12(
             ch += 1;
         }
     }
+    Ok(())
 }
 
 /// The CMap bit `c` of `used_chars` cleared.
@@ -957,18 +959,18 @@ fn clear_used_char2(used_chars: &mut [u8], c: u16) {
 
 /// A font file opened as C's otf_* functions open it: TrueType, then
 /// OpenType, then dfont (`ttc_index`).
-fn open_sfnt(dpx: &mut Dpx, name: &[u8], ttc_index: u32) -> Option<Option<Sfnt>> {
+fn open_sfnt(dpx: &mut Dpx, name: &[u8], ttc_index: u32) -> Result<Option<Option<Sfnt>>> {
     use crate::dpxfile::ResType;
-    if let Some(fp) = dpx.dpx_open_file(name, ResType::TtFont) {
-        return Some(Sfnt::sfnt_open(fp));
+    if let Some(fp) = dpx.dpx_open_file(name, ResType::TtFont)? {
+        return Ok(Some(Sfnt::sfnt_open(fp)?));
     }
-    if let Some(fp) = dpx.dpx_open_file(name, ResType::OtFont) {
-        return Some(Sfnt::sfnt_open(fp));
+    if let Some(fp) = dpx.dpx_open_file(name, ResType::OtFont)? {
+        return Ok(Some(Sfnt::sfnt_open(fp)?));
     }
-    if let Some(fp) = dpx.dpx_open_file(name, ResType::DFont) {
-        return Some(Sfnt::dfont_open(fp, ttc_index as i32));
+    if let Some(fp) = dpx.dpx_open_file(name, ResType::DFont)? {
+        return Ok(Some(Sfnt::dfont_open(fp, ttc_index as i32)?));
     }
-    None
+    Ok(None)
 }
 
 /// `csi.registry = strdup("Adobe"); csi.ordering = strdup("Identity");
@@ -983,18 +985,18 @@ fn csi_adobe_identity() -> CidSysInfo {
 
 /// The CIDSystemInfo of a CID-keyed CFF font (its ROS, or
 /// Adobe-Identity-0).
-fn cff_csi(cffont: &CffFont) -> CidSysInfo {
+fn cff_csi(cffont: &CffFont) -> Result<CidSysInfo> {
     let topdict = cffont.topdict.as_ref().expect("CFF: no Top DICT");
     if topdict.cff_dict_known(b"ROS") == 0 {
-        csi_adobe_identity()
+        Ok(csi_adobe_identity())
     } else {
-        let reg = topdict.cff_dict_get(b"ROS", 0) as u16;
-        let ord = topdict.cff_dict_get(b"ROS", 1) as u16;
-        CidSysInfo {
+        let reg = topdict.cff_dict_get(b"ROS", 0)? as u16;
+        let ord = topdict.cff_dict_get(b"ROS", 1)? as u16;
+        Ok(CidSysInfo {
             registry: Some(cffont.cff_get_string(reg)),
             ordering: Some(cffont.cff_get_string(ord)),
-            supplement: topdict.cff_dict_get(b"ROS", 2) as i32,
-        }
+            supplement: topdict.cff_dict_get(b"ROS", 2)? as i32,
+        })
     }
 }
 
@@ -1007,7 +1009,7 @@ impl Dpx {
         cmap: &mut CMap,
         cmap_add: i32,
         used_chars: &mut [u8],
-    ) -> i32 {
+    ) -> Result<i32> {
         let mut count = 0;
         for cid in 0..65536u32 {
             if !is_used_char2(used_chars, cid) {
@@ -1019,7 +1021,7 @@ impl Dpx {
             let mut inbytesleft = 2;
             let mut outpos = 0usize;
             let mut outbytesleft = 254;
-            let add = self.CMap_cache_get(cmap_add);
+            let add = self.CMap_cache_get(cmap_add)?;
             self.CMap_decode(
                 add,
                 &inbuf,
@@ -1028,7 +1030,7 @@ impl Dpx {
                 &mut outbuf,
                 &mut outpos,
                 &mut outbytesleft,
-            );
+            )?;
             if inbytesleft == 0 {
                 let len = (254 - outbytesleft) as usize;
                 cmap.CMap_add_bfchar(&inbuf, &outbuf[..len]);
@@ -1036,7 +1038,7 @@ impl Dpx {
                 count += 1;
             }
         }
-        count
+        Ok(count)
     }
 
     /// `add_ToUnicode_via_glyph_name` (static): AGL lookups of the glyph
@@ -1049,19 +1051,19 @@ impl Dpx {
         gid_to_cid_map: &[u16],
         sfont: &mut Sfnt,
         cffont: Option<&CffFont>,
-    ) -> i32 {
+    ) -> Result<i32> {
         let mut count = 0;
 
-        let post = sfont.tt_read_post_table();
+        let post = sfont.tt_read_post_table()?;
         if post.is_none() && cffont.is_none() {
-            return count;
+            return Ok(count);
         }
 
         for gid in 0..num_glyphs {
             let cid = gid_to_cid_map[gid as usize];
             if is_used_char2(used_chars, u32::from(cid)) {
                 let mut unicodes = [0i32; MAX_UNICODES];
-                if let Some(name) = lookup_glyph_name(post.as_ref(), cffont, gid) {
+                if let Some(name) = lookup_glyph_name(post.as_ref(), cffont, gid)? {
                     let unicode_count = self.agl_get_unicodes(&name, &mut unicodes);
                     if unicode_count > 0 {
                         let n = unicode_count as usize;
@@ -1081,7 +1083,7 @@ impl Dpx {
             }
         }
 
-        count
+        Ok(count)
     }
 
     /// `create_ToUnicode_cmap` (static): the ToUnicode CMap stream;
@@ -1093,9 +1095,9 @@ impl Dpx {
         cmap_add: Option<i32>,
         used_chars: &[u8],
         sfont: &mut Sfnt,
-    ) -> Option<Obj> {
+    ) -> Result<Option<Obj>> {
         // Get num_glyphs from maxp table.
-        let num_glyphs = sfont.tt_read_maxp_table().num_glyphs;
+        let num_glyphs = sfont.tt_read_maxp_table()?.num_glyphs;
 
         // Initialize GID to Unicode mapping table.
         let mut map_base = vec![-1i32; num_glyphs as usize];
@@ -1118,11 +1120,11 @@ impl Dpx {
             let offset = sfont.sfnt_find_table_pos(b"CFF ");
             // "CFF " table must exist here. Just abort...
             if offset == 0 {
-                error!("\"CFF \" table not found. Must be found before... Can't continue.");
+                fatal!("\"CFF \" table not found. Must be found before... Can't continue.");
             }
-            let mut c =
-                CffFont::cff_open(sfont.stream.clone(), offset as i32, 0).expect("cff_open failed");
-            c.cff_read_charsets();
+            let mut c = CffFont::cff_open(sfont.stream.clone(), offset as i32, 0)?
+                .expect("cff_open failed");
+            c.cff_read_charsets()?;
             cffont = Some(c);
         }
         let is_cidfont = cffont
@@ -1167,7 +1169,7 @@ impl Dpx {
         // which can be accessed only through OT Layout GSUB table. This is
         // only available when encoding is "unicode".
         if let Some(cmap_add) = cmap_add {
-            count += self.handle_subst_glyphs(&mut cmap, cmap_add, &mut used_chars_copy);
+            count += self.handle_subst_glyphs(&mut cmap, cmap_add, &mut used_chars_copy)?;
         } else {
             // Else, try gathering information from GSUB tables.
             count += otl_gsub_add_ToUnicode(
@@ -1178,7 +1180,7 @@ impl Dpx {
                 num_glyphs,
                 &gid_to_cid_map,
                 sfont,
-            );
+            )?;
         }
         // Find Unicode mapping via PostScript glyph names...
         count += self.add_ToUnicode_via_glyph_name(
@@ -1188,7 +1190,7 @@ impl Dpx {
             &gid_to_cid_map,
             sfont,
             if is_cidfont { None } else { cffont.as_ref() },
-        );
+        )?;
         if let Some(c) = cffont {
             c.cff_close();
         }
@@ -1211,7 +1213,7 @@ impl Dpx {
         }
 
         if count < 1 {
-            None
+            Ok(None)
         } else {
             self.CMap_create_stream(&cmap)
         }
@@ -1225,36 +1227,36 @@ impl Dpx {
         ttc_index: u32,
         basefont: &[u8],
         used_chars: &[u8],
-    ) -> Option<Obj> {
+    ) -> Result<Option<Obj>> {
         let font_name = map_name;
         let mut cmap_ref: Option<Obj> = None;
 
         let mut cmap_name = basefont.to_vec();
         cmap_name.extend_from_slice(b"-UTF16");
 
-        let cmap_id = self.pdf_findresource(b"CMap", &cmap_name);
+        let cmap_id = self.pdf_findresource(b"CMap", &cmap_name)?;
         if cmap_id >= 0 {
             return self.pdf_get_resource_reference(cmap_id);
         }
 
-        let mut sfont = open_sfnt(self, font_name, ttc_index)??;
+        let mut sfont = some!(some!(open_sfnt(self, font_name, ttc_index)?));
 
         let offset: ULONG = match sfont.type_ {
             SFNT_TYPE_DFONT => sfont.offset,
             SFNT_TYPE_TTC => {
-                let offset = sfont.ttc_read_offset(ttc_index);
+                let offset = sfont.ttc_read_offset(ttc_index)?;
                 if offset == 0 {
                     warn!("Invalid TTC index for font");
-                    return None;
+                    return Ok(None);
                 }
                 offset
             }
             _ => 0,
         };
 
-        if sfont.sfnt_read_table_directory(offset) < 0 {
+        if sfont.sfnt_read_table_directory(offset)? < 0 {
             warn!("Could not read OpenType/TrueType table directory");
-            return None;
+            return Ok(None);
         }
 
         // cmap_add stores the ToUnicode mapping of unencoded glyphs reached
@@ -1263,7 +1265,7 @@ impl Dpx {
         let cmap_add = {
             let mut cmap_add_name = font_name.to_vec();
             cmap_add_name.extend_from_slice(format!(":{}-UCS32-Add", ttc_index as i32).as_bytes());
-            let cmap_add_id = self.CMap_cache_find(&cmap_add_name);
+            let cmap_add_id = self.CMap_cache_find(&cmap_add_name)?;
             if cmap_add_id < 0 {
                 None
             } else {
@@ -1273,7 +1275,7 @@ impl Dpx {
 
         let mut ttcmap = None;
         for pe in &CMAP_PLAT_ENCS {
-            let Some(t) = sfont.tt_cmap_read(pe.platform as USHORT, pe.encoding as USHORT) else {
+            let Some(t) = sfont.tt_cmap_read(pe.platform as USHORT, pe.encoding as USHORT)? else {
                 continue;
             };
             if t.format == 4 || t.format == 12 {
@@ -1284,7 +1286,7 @@ impl Dpx {
         if let Some(ttcmap) = ttcmap {
             self.CMap_set_silent(1); /* many warnings without this... */
             let cmap_obj =
-                self.create_ToUnicode_cmap(&ttcmap, &cmap_name, cmap_add, used_chars, &mut sfont);
+                self.create_ToUnicode_cmap(&ttcmap, &cmap_name, cmap_add, used_chars, &mut sfont)?;
             self.CMap_set_silent(0);
             if let Some(cmap_obj) = cmap_obj {
                 let cmap_id = self.pdf_defineresource(
@@ -1292,12 +1294,12 @@ impl Dpx {
                     Some(&cmap_name),
                     cmap_obj,
                     PDF_RES_FLUSH_IMMEDIATE,
-                );
-                cmap_ref = self.pdf_get_resource_reference(cmap_id);
+                )?;
+                cmap_ref = self.pdf_get_resource_reference(cmap_id)?;
             }
         }
 
-        cmap_ref
+        Ok(cmap_ref)
     }
 
     /// `otf_load_Unicode_CMap`: the cmap id of the Unicode input CMap of
@@ -1308,7 +1310,7 @@ impl Dpx {
         ttc_index: u32,
         otl_tags: Option<&[u8]>,
         wmode: i32,
-    ) -> i32 {
+    ) -> Result<i32> {
         // First look for cache if it was already loaded.
         let mut cmap_name = map_name.to_vec();
         let h_or_v = if wmode != 0 { "V" } else { "H" };
@@ -1319,24 +1321,24 @@ impl Dpx {
         } else {
             cmap_name.extend_from_slice(format!(":{}-UCS4-{h_or_v}", ttc_index as i32).as_bytes());
         }
-        let mut cmap_id = self.CMap_cache_find(&cmap_name);
+        let mut cmap_id = self.CMap_cache_find(&cmap_name)?;
         if cmap_id >= 0 {
-            return cmap_id;
+            return Ok(cmap_id);
         }
 
-        let Some(sfont) = open_sfnt(self, map_name, ttc_index) else {
-            return -1;
+        let Some(sfont) = open_sfnt(self, map_name, ttc_index)? else {
+            return Ok(-1);
         };
         let Some(mut sfont) = sfont else {
             warn!("Could not open OpenType/TrueType/dfont font file");
-            return -1;
+            return Ok(-1);
         };
         let offset: ULONG = match sfont.type_ {
             SFNT_TYPE_TTC => {
-                let offset = sfont.ttc_read_offset(ttc_index);
+                let offset = sfont.ttc_read_offset(ttc_index)?;
                 if offset == 0 {
                     warn!("Offset=0 returned for font, TTC_index={}", ttc_index);
-                    return -1;
+                    return Ok(-1);
                 }
                 offset
             }
@@ -1344,16 +1346,16 @@ impl Dpx {
             SFNT_TYPE_DFONT => sfont.offset,
             _ => {
                 warn!("Not a OpenType/TrueType/TTC font?");
-                return -1;
+                return Ok(-1);
             }
         };
 
-        if sfont.sfnt_read_table_directory(offset) < 0 {
+        if sfont.sfnt_read_table_directory(offset)? < 0 {
             warn!("Could not read OpenType/TrueType table directory");
-            return -1;
+            return Ok(-1);
         }
 
-        let num_glyphs: u16 = sfont.tt_read_maxp_table().num_glyphs;
+        let num_glyphs: u16 = sfont.tt_read_maxp_table()?.num_glyphs;
 
         let mut gid_to_cid_map = vec![0u16; num_glyphs as usize];
         let csi;
@@ -1362,10 +1364,11 @@ impl Dpx {
             // Possibly "CFF2" table for variable font: not supported.
             if offset == 0 {
                 warn!("PS OpenType but no \"CFF \" table.. Maybe variable font? (not supported)");
-                return -1;
+                return Ok(-1);
             }
-            let Some(mut cffont) = CffFont::cff_open(sfont.stream.clone(), offset as i32, 0) else {
-                return -1;
+            let Some(mut cffont) = CffFont::cff_open(sfont.stream.clone(), offset as i32, 0)?
+            else {
+                return Ok(-1);
             };
             if cffont.flag & FONTTYPE_CIDFONT == 0 {
                 csi = csi_adobe_identity();
@@ -1373,8 +1376,8 @@ impl Dpx {
                     gid_to_cid_map[gid as usize] = gid;
                 }
             } else {
-                csi = cff_csi(&cffont);
-                cffont.cff_read_charsets();
+                csi = cff_csi(&cffont)?;
+                cffont.cff_read_charsets()?;
                 create_GIDToCIDMap(&mut gid_to_cid_map, num_glyphs, &cffont);
             }
             cffont.cff_close();
@@ -1385,17 +1388,22 @@ impl Dpx {
             }
         }
 
-        let ttcmap = sfont
-            .tt_cmap_read(3, 10) /* Microsoft UCS4 */
-            .or_else(|| sfont.tt_cmap_read(3, 1)) /* Microsoft UCS2 */
-            .or_else(|| sfont.tt_cmap_read(0, 3)) /* Unicode 2.0 or later */
-            .or_else(|| sfont.tt_cmap_read(0, 4));
+        let mut ttcmap = sfont.tt_cmap_read(3, 10)?; /* Microsoft UCS4 */
+        if ttcmap.is_none() {
+            ttcmap = sfont.tt_cmap_read(3, 1)?; /* Microsoft UCS2 */
+        }
+        if ttcmap.is_none() {
+            ttcmap = sfont.tt_cmap_read(0, 3)?; /* Unicode 2.0 or later */
+        }
+        if ttcmap.is_none() {
+            ttcmap = sfont.tt_cmap_read(0, 4)?;
+        }
 
         if let Some(ttcmap) = ttcmap {
             let gsub_vert = if wmode == 1 {
                 let mut gsub_vert = OtlGsub::otl_gsub_new();
-                if gsub_vert.otl_gsub_add_feat(b"*", b"*", b"vrt2", &mut sfont) < 0 {
-                    if gsub_vert.otl_gsub_add_feat(b"*", b"*", b"vert", &mut sfont) < 0 {
+                if gsub_vert.otl_gsub_add_feat(b"*", b"*", b"vrt2", &mut sfont)? < 0 {
+                    if gsub_vert.otl_gsub_add_feat(b"*", b"*", b"vert", &mut sfont)? < 0 {
                         warn!("GSUB feature vrt2/vert not found.");
                         None
                     } else {
@@ -1411,7 +1419,7 @@ impl Dpx {
             };
             let gsub_list = if let Some(otl_tags) = otl_tags {
                 let mut gsub_list = OtlGsub::otl_gsub_new();
-                if gsub_list.otl_gsub_add_feat_list(otl_tags, &mut sfont) < 0 {
+                if gsub_list.otl_gsub_add_feat_list(otl_tags, &mut sfont)? < 0 {
                     warn!("Reading GSUB feature table(s) failed");
                 } else {
                     gsub_list.otl_gsub_set_chain(otl_tags);
@@ -1439,7 +1447,7 @@ impl Dpx {
                         &mut cmap,
                         &mut map_base,
                         &mut map_sub,
-                    );
+                    )?;
                 }
                 TtCmapMap::Cmap4(m) if ttcmap.format == 4 => {
                     load_cmap4(
@@ -1451,7 +1459,7 @@ impl Dpx {
                         &mut cmap,
                         &mut map_base,
                         &mut map_sub,
-                    );
+                    )?;
                 }
                 _ => {}
             }
@@ -1463,7 +1471,7 @@ impl Dpx {
                 let mut tounicode_name = map_name.to_vec();
                 tounicode_name
                     .extend_from_slice(format!(":{}-UCS32-Add", ttc_index as i32).as_bytes());
-                let mut tounicode_id = self.CMap_cache_find(&tounicode_name);
+                let mut tounicode_id = self.CMap_cache_find(&tounicode_name)?;
                 if tounicode_id < 0 {
                     let mut tounicode = CMap::CMap_new();
                     tounicode.CMap_set_name(&tounicode_name);
@@ -1472,10 +1480,10 @@ impl Dpx {
                     tounicode.CMap_add_codespacerange(&SRANGE_MIN, &SRANGE_MAX);
                     tounicode.CMap_set_CIDSysInfo(Some(&CSI_UNICODE()));
                     tounicode.CMap_add_bfchar(&SRANGE_MIN, &SRANGE_MAX);
-                    tounicode_id = self.CMap_cache_add(tounicode);
+                    tounicode_id = self.CMap_cache_add(tounicode)?;
                 }
 
-                let tounicode = self.CMap_cache_get_mut(tounicode_id);
+                let tounicode = self.CMap_cache_get_mut(tounicode_id)?;
                 for gid in 0..num_glyphs as usize {
                     let cid = gid_to_cid_map[gid];
                     if cid > 0 {
@@ -1496,10 +1504,10 @@ impl Dpx {
                     }
                 }
             }
-            cmap_id = self.CMap_cache_add(cmap);
+            cmap_id = self.CMap_cache_add(cmap)?;
         }
 
-        cmap_id
+        Ok(cmap_id)
     }
 
     /// `otf_try_load_GID_to_CID_map`: the cmap id of the GID-to-CID CMap
@@ -1509,30 +1517,30 @@ impl Dpx {
         map_name: &[u8],
         ttc_index: u32,
         wmode: i32,
-    ) -> i32 {
+    ) -> Result<i32> {
         let mut cmap_id;
 
         // Check if already loaded.
         let mut cmap_name = map_name.to_vec();
         cmap_name.extend_from_slice(format!(":{}-{}-GID", ttc_index as i32, wmode).as_bytes());
-        cmap_id = self.CMap_cache_find(&cmap_name);
+        cmap_id = self.CMap_cache_find(&cmap_name)?;
         if cmap_id >= 0 {
-            return cmap_id;
+            return Ok(cmap_id);
         }
 
-        let Some(sfont) = open_sfnt(self, map_name, ttc_index) else {
-            return -1;
+        let Some(sfont) = open_sfnt(self, map_name, ttc_index)? else {
+            return Ok(-1);
         };
         let Some(mut sfont) = sfont else {
             warn!("Could not open OpenType/TrueType/dfont font file");
-            return -1;
+            return Ok(-1);
         };
         let offset: ULONG = match sfont.type_ {
             SFNT_TYPE_TTC => {
-                let offset = sfont.ttc_read_offset(ttc_index);
+                let offset = sfont.ttc_read_offset(ttc_index)?;
                 if offset == 0 {
                     warn!("Invalid TTC index for font: {}", ttc_index);
-                    return -1;
+                    return Ok(-1);
                 }
                 offset
             }
@@ -1540,32 +1548,32 @@ impl Dpx {
             SFNT_TYPE_DFONT => sfont.offset,
             _ => {
                 warn!("Not a OpenType/TrueType/TTC font?");
-                return -1;
+                return Ok(-1);
             }
         };
 
-        if sfont.sfnt_read_table_directory(offset) < 0 {
+        if sfont.sfnt_read_table_directory(offset)? < 0 {
             warn!("Could not read OpenType/TrueType table directory");
-            return -1;
+            return Ok(-1);
         }
         if sfont.type_ != SFNT_TYPE_POSTSCRIPT {
-            return -1;
+            return Ok(-1);
         }
 
         // Read GID-to-CID mapping if CFF OpenType is found.
         let csrange: [u8; 4] = [0x00, 0x00, 0xff, 0xff];
-        let num_glyphs: u16 = sfont.tt_read_maxp_table().num_glyphs;
+        let num_glyphs: u16 = sfont.tt_read_maxp_table()?.num_glyphs;
 
         let offset = sfont.sfnt_find_table_pos(b"CFF ");
         if offset == 0 {
             warn!("PS OpenType but no \"CFF \" table.. Maybe variable font? (not supported)");
-            return -1;
+            return Ok(-1);
         }
-        let cffont = CffFont::cff_open(sfont.stream.clone(), offset as i32, 0);
+        let cffont = CffFont::cff_open(sfont.stream.clone(), offset as i32, 0)?;
         if let Some(mut cffont) = cffont {
             if cffont.flag & FONTTYPE_CIDFONT != 0 {
-                let csi = cff_csi(&cffont);
-                cffont.cff_read_charsets();
+                let csi = cff_csi(&cffont)?;
+                cffont.cff_read_charsets()?;
                 let mut gid_to_cid_map = vec![0u16; num_glyphs as usize];
                 create_GIDToCIDMap(&mut gid_to_cid_map, num_glyphs, &cffont);
                 let mut cmap = CMap::CMap_new();
@@ -1580,12 +1588,12 @@ impl Dpx {
                     let dst = [(c >> 8) as u8, (c & 0xff) as u8];
                     cmap.CMap_add_bfchar(&src, &dst);
                 }
-                cmap_id = self.CMap_cache_add(cmap);
+                cmap_id = self.CMap_cache_add(cmap)?;
             }
             cffont.cff_close();
         }
 
-        cmap_id
+        Ok(cmap_id)
     }
 }
 
@@ -1654,12 +1662,15 @@ mod font_tests {
 
     fn dump(path: &str) -> Option<String> {
         let data = std::fs::read(path).ok()?;
-        let mut sfont = Sfnt::sfnt_open(MemFile::new(Arc::from(data), path.as_bytes()))?;
-        sfont.sfnt_read_table_directory(0);
-        let n = sfont.tt_read_maxp_table().num_glyphs;
+        let mut sfont = Sfnt::sfnt_open(MemFile::new(Arc::from(data), path.as_bytes())).unwrap()?;
+        sfont.sfnt_read_table_directory(0).unwrap();
+        let n = sfont.tt_read_maxp_table().unwrap().num_glyphs;
         let mut out = String::new();
         for pe in &CMAP_PLAT_ENCS {
-            let Some(c) = sfont.tt_cmap_read(pe.platform as u16, pe.encoding as u16) else {
+            let Some(c) = sfont
+                .tt_cmap_read(pe.platform as u16, pe.encoding as u16)
+                .unwrap()
+            else {
                 continue;
             };
             let mut b = vec![-1i32; n as usize];

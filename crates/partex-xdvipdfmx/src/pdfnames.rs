@@ -213,7 +213,7 @@ impl PdfOut {
         0
     }
     /// `build_name_tree` over `first` (the leaves, sorted).
-    fn build_name_tree(&mut self, first: &mut [NamedObject], is_root: i32) -> Obj {
+    fn build_name_tree(&mut self, first: &mut [NamedObject], is_root: i32) -> Result<Obj> {
         let result = self.new_dict();
         let num_leaves = first.len();
         if is_root == 0 {
@@ -236,7 +236,7 @@ impl PdfOut {
                         self.add_array(names, r);
                     }
                     PDF_OBJ_INVALID => {
-                        crate::error!("Invalid object...: {:?}", printable_key(&cur.key))
+                        crate::fatal!("Invalid object...: {:?}", printable_key(&cur.key))
                     }
                     _ => {
                         let l = self.link(v.expect("value"));
@@ -251,18 +251,22 @@ impl PdfOut {
             for i in 0..NAME_CLUSTER as usize {
                 let start = (i * num_leaves) / NAME_CLUSTER as usize;
                 let end = ((i + 1) * num_leaves) / NAME_CLUSTER as usize;
-                let subtree = self.build_name_tree(&mut first[start..end], 0);
+                let subtree = self.build_name_tree(&mut first[start..end], 0)?;
                 let r = self.ref_obj(subtree);
                 self.add_array(kids, r);
                 self.release(subtree);
             }
             self.put(result, b"Kids", kids);
         }
-        result
+        Ok(result)
     }
     /// `flat_table`: the entries (values linked), keys replaced through
     /// `filter` (a table of string objects) when given.
-    fn flat_table(&mut self, names: &NameTree, filter: Option<&HtTable<Obj>>) -> Vec<NamedObject> {
+    fn flat_table(
+        &mut self,
+        names: &NameTree,
+        filter: Option<&HtTable<Obj>>,
+    ) -> Result<Vec<NamedObject>> {
         let mut objects = Vec::new();
         for (key, value) in names.iter() {
             let key = if let Some(f) = filter {
@@ -274,7 +278,7 @@ impl PdfOut {
                 key.to_vec()
             };
             let Some(obj) = value.object else {
-                crate::error!("flat_table: released object in a name tree");
+                crate::fatal!("flat_table: released object in a name tree");
             };
             let v = if self.is_undefined(Some(obj)) {
                 self.new_null()
@@ -286,21 +290,21 @@ impl PdfOut {
                 value: Some(v),
             });
         }
-        objects
+        Ok(objects)
     }
     /// `pdf_names_create_tree`: the tree and the entry count (`*count`).
     pub fn pdf_names_create_tree(
         &mut self,
         names: &mut NameTree,
         filter: Option<&HtTable<Obj>>,
-    ) -> (Option<Obj>, i32) {
-        let mut flat = self.flat_table(names, filter);
+    ) -> Result<(Option<Obj>, i32)> {
+        let mut flat = self.flat_table(names, filter)?;
         let count = flat.len() as i32;
         if flat.is_empty() {
-            return (None, count);
+            return Ok((None, count));
         }
         flat.sort_by(cmp_key);
-        let t = self.build_name_tree(&mut flat, 1);
-        (Some(t), count)
+        let t = self.build_name_tree(&mut flat, 1)?;
+        Ok((Some(t), count))
     }
 }

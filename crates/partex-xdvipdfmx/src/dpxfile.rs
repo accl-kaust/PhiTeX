@@ -2,8 +2,9 @@
 
 use alloc::vec::Vec;
 
-use crate::ctx::Dpx;
+use crate::ctx::{Dpx, Result};
 use crate::io::Format;
+use crate::some;
 use crate::stream::MemFile;
 
 /// `dpx_res_type`.
@@ -77,7 +78,7 @@ impl Dpx {
             .or_else(|| self.find_app_xyz(&q, b".txt", true))
     }
 
-    fn find_cmap_file(&mut self, filename: &[u8]) -> Option<Vec<u8>> {
+    fn find_cmap_file(&mut self, filename: &[u8]) -> Result<Option<Vec<u8>>> {
         let mut fqpn = self.kpse_find(filename, Format::Cmap, b"dvipdfmx");
         for fool in [&b"cmap"[..], b"tex"] {
             if fqpn.is_some() {
@@ -85,12 +86,12 @@ impl Dpx {
             }
             fqpn = self.foolsearch(fool, filename, true);
             if let Some(p) = &fqpn
-                && !self.qcheck_filetype(&p.clone(), ResType::Cmap)
+                && !self.qcheck_filetype(&p.clone(), ResType::Cmap)?
             {
                 fqpn = None;
             }
         }
-        fqpn
+        Ok(fqpn)
     }
 
     fn find_sfd_file(&mut self, filename: &[u8]) -> Option<Vec<u8>> {
@@ -121,66 +122,66 @@ impl Dpx {
     }
 
     /// `dpx_find_type1_file`.
-    pub fn dpx_find_type1_file(&mut self, filename: &[u8]) -> Option<Vec<u8>> {
-        let f = if is_absolute_path(filename) {
+    pub fn dpx_find_type1_file(&mut self, filename: &[u8]) -> Result<Option<Vec<u8>>> {
+        let f = some!(if is_absolute_path(filename) {
             Some(filename.to_vec())
         } else {
             self.kpse_find(filename, Format::Type1, b"dvipdfmx")
-        }?;
-        self.qcheck_filetype(&f, ResType::T1Font).then_some(f)
+        });
+        Ok(self.qcheck_filetype(&f, ResType::T1Font)?.then_some(f))
     }
 
     /// `dpx_find_truetype_file`.
-    pub fn dpx_find_truetype_file(&mut self, filename: &[u8]) -> Option<Vec<u8>> {
-        let f = if is_absolute_path(filename) {
+    pub fn dpx_find_truetype_file(&mut self, filename: &[u8]) -> Result<Option<Vec<u8>>> {
+        let f = some!(if is_absolute_path(filename) {
             Some(filename.to_vec())
         } else {
             self.kpse_find(filename, Format::TrueType, b"dvipdfmx")
-        }?;
-        self.qcheck_filetype(&f, ResType::TtFont).then_some(f)
+        });
+        Ok(self.qcheck_filetype(&f, ResType::TtFont)?.then_some(f))
     }
 
     /// `dpx_find_opentype_file`.
-    pub fn dpx_find_opentype_file(&mut self, filename: &[u8]) -> Option<Vec<u8>> {
+    pub fn dpx_find_opentype_file(&mut self, filename: &[u8]) -> Result<Option<Vec<u8>>> {
         let q = ensuresuffix(filename, b".otf");
         let f = if is_absolute_path(&q) {
             Some(q.clone())
         } else {
             self.kpse_find(&q, Format::OpenType, b"dvipdfmx")
         };
-        let f = f.or_else(|| self.foolsearch(b"dvipdfmx", &q, false))?;
-        self.qcheck_filetype(&f, ResType::OtFont).then_some(f)
+        let f = some!(f.or_else(|| self.foolsearch(b"dvipdfmx", &q, false)));
+        Ok(self.qcheck_filetype(&f, ResType::OtFont)?.then_some(f))
     }
 
     /// `dpx_find_dfont_file`.
-    pub fn dpx_find_dfont_file(&mut self, filename: &[u8]) -> Option<Vec<u8>> {
-        let mut f = self.kpse_find(filename, Format::TrueType, b"dvipdfmx")?;
+    pub fn dpx_find_dfont_file(&mut self, filename: &[u8]) -> Result<Option<Vec<u8>>> {
+        let mut f = some!(self.kpse_find(filename, Format::TrueType, b"dvipdfmx"));
         let len = f.len();
         if len > 6 && &f[len - 6..] != b".dfont" {
             f.extend_from_slice(b"/rsrc");
         }
-        self.qcheck_filetype(&f, ResType::DFont).then_some(f)
+        Ok(self.qcheck_filetype(&f, ResType::DFont)?.then_some(f))
     }
 
     /// `dpx_open_file`.
-    pub fn dpx_open_file(&mut self, filename: &[u8], ty: ResType) -> Option<MemFile> {
-        let fqpn = match ty {
+    pub fn dpx_open_file(&mut self, filename: &[u8], ty: ResType) -> Result<Option<MemFile>> {
+        let fqpn = some!(match ty {
             ResType::Fontmap => self.find_fontmap_file(filename),
-            ResType::T1Font => self.dpx_find_type1_file(filename),
-            ResType::TtFont => self.dpx_find_truetype_file(filename),
-            ResType::OtFont => self.dpx_find_opentype_file(filename),
+            ResType::T1Font => self.dpx_find_type1_file(filename)?,
+            ResType::TtFont => self.dpx_find_truetype_file(filename)?,
+            ResType::OtFont => self.dpx_find_opentype_file(filename)?,
             ResType::PkFont => None,
-            ResType::Cmap => self.find_cmap_file(filename),
+            ResType::Cmap => self.find_cmap_file(filename)?,
             ResType::Enc => self.find_enc_file(filename),
             ResType::Sfd => self.find_sfd_file(filename),
             ResType::Agl => self.find_agl_file(filename),
             ResType::IccProfile => self.find_iccp_file(filename),
-            ResType::DFont => self.dpx_find_dfont_file(filename),
+            ResType::DFont => self.dpx_find_dfont_file(filename)?,
             ResType::Binary => self.find_app_xyz(filename, b"", false),
             ResType::Text => self.find_app_xyz(filename, b"", true),
-        }?;
-        let data = self.files.read(&fqpn)?;
-        Some(MemFile::new(data, &fqpn))
+        });
+        let data = some!(self.files.read(&fqpn));
+        Ok(Some(MemFile::new(data, &fqpn)))
     }
 
     /// Opens a file by the path a finder returned (C's `MFOPEN`).
@@ -191,36 +192,34 @@ impl Dpx {
 
     /// `qcheck_filetype`: the file exists, is not empty, and looks like
     /// its type.
-    fn qcheck_filetype(&mut self, fqpn: &[u8], ty: ResType) -> bool {
+    fn qcheck_filetype(&mut self, fqpn: &[u8], ty: ResType) -> Result<bool> {
         let Some(data) = self.files.read(fqpn) else {
-            return false;
+            return Ok(false);
         };
         if data.is_empty() {
-            return false;
+            return Ok(false);
         }
         let d = &data[..];
         match ty {
             ResType::T1Font => {
                 if d.len() < 21 || d[0] != 0x80 || !(0..=3).contains(&(d[1] as i8)) {
-                    return false;
+                    return Ok(false);
                 }
-                d[6..].starts_with(b"%!PS-AdobeFont")
+                Ok(d[6..].starts_with(b"%!PS-AdobeFont")
                     || d[6..].starts_with(b"%!FontType1")
-                    || d[6..].starts_with(b"%!PS")
+                    || d[6..].starts_with(b"%!PS"))
             }
-            ResType::TtFont => {
-                d.len() >= 4
-                    && (&d[..4] == b"true" || &d[..4] == b"\0\x01\0\0" || &d[..4] == b"ttcf")
-            }
-            ResType::OtFont => d.len() >= 4 && &d[..4] == b"OTTO",
+            ResType::TtFont => Ok(d.len() >= 4
+                && (&d[..4] == b"true" || &d[..4] == b"\0\x01\0\0" || &d[..4] == b"ttcf")),
+            ResType::OtFont => Ok(d.len() >= 4 && &d[..4] == b"OTTO"),
             ResType::Cmap => {
                 let mut f = MemFile::new(data.clone(), fqpn);
                 let Some(mut line) = f.mfgets(128) else {
-                    return false;
+                    return Ok(false);
                 };
                 line.truncate(127);
                 if line.len() < 4 || &line[..4] != b"%!PS" {
-                    return false;
+                    return Ok(false);
                 }
                 let mut p = 4;
                 while p < line.len() && !crate::fmt::is_c_space(line[p]) {
@@ -229,28 +228,28 @@ impl Dpx {
                 while p < line.len() && (line[p] == b' ' || line[p] == b'\t') {
                     p += 1;
                 }
-                line[p..].starts_with(b"Resource-CMap")
+                Ok(line[p..].starts_with(b"Resource-CMap"))
             }
             ResType::DFont => {
                 let mut f = MemFile::new(data.clone(), fqpn);
                 if f.len() < 8 {
-                    return false;
+                    return Ok(false);
                 }
-                f.get_unsigned_quad();
-                let pos = f.get_unsigned_quad() as usize;
+                f.get_unsigned_quad()?;
+                let pos = f.get_unsigned_quad()? as usize;
                 f.seek_absolute(pos + 0x18);
-                let off = f.get_unsigned_pair() as usize;
+                let off = f.get_unsigned_pair()? as usize;
                 f.seek_absolute(pos + off);
-                let n = f.get_unsigned_pair();
+                let n = f.get_unsigned_pair()?;
                 for _ in 0..=n {
-                    if f.get_unsigned_quad() == 0x7366_6e74 {
-                        return true;
+                    if f.get_unsigned_quad()? == 0x7366_6e74 {
+                        return Ok(true);
                     }
-                    f.get_unsigned_quad();
+                    f.get_unsigned_quad()?;
                 }
-                false
+                Ok(false)
             }
-            _ => true,
+            _ => Ok(true),
         }
     }
 }

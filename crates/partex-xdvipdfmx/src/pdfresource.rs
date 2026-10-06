@@ -117,10 +117,10 @@ impl Dpx {
         resname: Option<&[u8]>,
         object: Obj,
         flags: i32,
-    ) -> i32 {
+    ) -> Result<i32> {
         let cat_id = get_category(category);
         if cat_id < 0 {
-            crate::error!("Unknown resource category: {:?}", category);
+            crate::fatal!("Unknown resource category: {:?}", category);
         }
         let c = cat_id as usize;
         let count = self.resource.resources[c].resources.len();
@@ -145,7 +145,7 @@ impl Dpx {
                     } else {
                         res.object = Some(object);
                     }
-                    return (cat_id << 16) | i as i32;
+                    return Ok((cat_id << 16) | i as i32);
                 }
             }
             res_id = count;
@@ -166,42 +166,42 @@ impl Dpx {
             res.object = Some(object);
         }
         self.resource.resources[c].resources.push(res);
-        (cat_id << 16) | res_id as i32
+        Ok((cat_id << 16) | res_id as i32)
     }
     /// `pdf_findresource`: the resource id, or -1.
-    pub fn pdf_findresource(&mut self, category: &[u8], resname: &[u8]) -> i32 {
+    pub fn pdf_findresource(&mut self, category: &[u8], resname: &[u8]) -> Result<i32> {
         let cat_id = get_category(category);
         if cat_id < 0 {
-            crate::error!("Unknown resource category: {:?}", category);
+            crate::fatal!("Unknown resource category: {:?}", category);
         }
-        self.resource.resources[cat_id as usize]
+        Ok(self.resource.resources[cat_id as usize]
             .resources
             .iter()
             .position(|r| r.ident.as_deref() == Some(resname))
-            .map_or(-1, |i| (cat_id << 16) | i as i32)
+            .map_or(-1, |i| (cat_id << 16) | i as i32))
     }
     /// `pdf_get_resource_reference`: a new link to the reference.
-    pub fn pdf_get_resource_reference(&mut self, rc_id: i32) -> Option<Obj> {
+    pub fn pdf_get_resource_reference(&mut self, rc_id: i32) -> Result<Option<Obj>> {
         let c = ((rc_id >> 16) & 0xffff) as usize;
         let r = (rc_id & 0xffff) as usize;
         if c >= PDF_NUM_RESOURCE_CATEGORIES {
-            crate::error!("Invalid category ID: {}", c);
+            crate::fatal!("Invalid category ID: {}", c);
         }
         if r >= self.resource.resources[c].resources.len() {
-            crate::error!("Invalid resource ID: {}", r);
+            crate::fatal!("Invalid resource ID: {}", r);
         }
         let res = &self.resource.resources[c].resources[r];
         let reference = match res.reference {
             Some(x) => x,
             None => {
                 let Some(ob) = res.object else {
-                    crate::error!("Undefined object...")
+                    crate::fatal!("Undefined object...")
                 };
                 let x = self.o.ref_obj(ob);
                 self.resource.resources[c].resources[r].reference = Some(x);
                 x
             }
         };
-        Some(self.o.link(reference))
+        Ok(Some(self.o.link(reference)))
     }
 }

@@ -300,20 +300,20 @@ fn cvt_a_to_tmatrix(m: &mut PdfTmatrix, s: &[u8], pp: &mut usize) -> i32 {
 
 impl Dpx {
     /// `spc_html_at_begin_page`.
-    pub fn spc_html_at_begin_page(&mut self) -> i32 {
-        spc_handler_html__bophook(self, None)
+    pub fn spc_html_at_begin_page(&mut self) -> Result<i32> {
+        Ok(spc_handler_html__bophook(self, None))
     }
     /// `spc_html_at_end_page`.
-    pub fn spc_html_at_end_page(&mut self) -> i32 {
-        spc_handler_html__eophook(self, None)
+    pub fn spc_html_at_end_page(&mut self) -> Result<i32> {
+        Ok(spc_handler_html__eophook(self, None))
     }
     /// `spc_html_at_begin_document`.
-    pub fn spc_html_at_begin_document(&mut self) -> i32 {
-        spc_handler_html__init(self)
+    pub fn spc_html_at_begin_document(&mut self) -> Result<i32> {
+        Ok(spc_handler_html__init(self))
     }
     /// `spc_html_at_end_document`.
-    pub fn spc_html_at_end_document(&mut self) -> i32 {
-        spc_handler_html__clean(self, None)
+    pub fn spc_html_at_end_document(&mut self) -> Result<i32> {
+        Ok(spc_handler_html__clean(self, None))
     }
 }
 
@@ -562,13 +562,13 @@ fn spc_html__anchor_open(dpx: &mut Dpx, spe: &mut SpcEnv, attr: Obj) -> i32 {
 }
 
 /// `spc_html__anchor_close`.
-fn spc_html__anchor_close(dpx: &mut Dpx, spe: &mut SpcEnv) -> i32 {
+fn spc_html__anchor_close(dpx: &mut Dpx, spe: &mut SpcEnv) -> Result<i32> {
     let mut error = 0;
 
     match dpx.html.pending_type {
         ANCHOR_TYPE_HREF => {
             if let Some(l) = dpx.html.link_dict {
-                dpx.spc_end_annot(spe);
+                dpx.spc_end_annot(spe)?;
                 dpx.o.release(l);
                 dpx.html.link_dict = None;
                 dpx.html.pending_type = -1;
@@ -592,7 +592,7 @@ fn spc_html__anchor_close(dpx: &mut Dpx, spe: &mut SpcEnv) -> i32 {
         }
     }
 
-    error
+    Ok(error)
 }
 
 /// `spc_html__base_empty`.
@@ -621,7 +621,7 @@ fn create_xgstate(dpx: &mut Dpx, a: f64) -> Obj {
 }
 
 /// `spc_html__img_empty` (the `ENABLE_HTML_IMG_SUPPORT` one).
-fn spc_html__img_empty(dpx: &mut Dpx, spe: &mut SpcEnv, attr: Obj) -> i32 {
+fn spc_html__img_empty(dpx: &mut Dpx, spe: &mut SpcEnv, attr: Obj) -> Result<i32> {
     let options = LoadOptions {
         page_no: 1,
         bbox_type: 0,
@@ -641,7 +641,7 @@ fn spc_html__img_empty(dpx: &mut Dpx, spe: &mut SpcEnv, attr: Obj) -> i32 {
             spe,
             format_args!("\"src\" attribute not found for \"img\" tag!"),
         );
-        return -1;
+        return Ok(-1);
     };
 
     let mut ti = TransformInfo::default();
@@ -691,11 +691,11 @@ fn spc_html__img_empty(dpx: &mut Dpx, spe: &mut SpcEnv, attr: Obj) -> i32 {
 
     if error != 0 {
         dpx.spc_warn(spe, format_args!("Error in html \"img\" tag attribute."));
-        return error;
+        return Ok(error);
     }
 
     let filename = cstr(dpx.o.string_value(src)).to_vec();
-    let id = dpx.pdf_ximage_load_image(None, &filename, options);
+    let id = dpx.pdf_ximage_load_image(None, &filename, options)?;
     if id < 0 {
         dpx.spc_warn(
             spe,
@@ -705,22 +705,22 @@ fn spc_html__img_empty(dpx: &mut Dpx, spe: &mut SpcEnv, attr: Obj) -> i32 {
     } else {
         if alpha != 0.0 {
             let dict = create_xgstate(dpx, alpha);
-            dpx.pdf_dev_xgstate_push(dict);
+            dpx.pdf_dev_xgstate_push(dict)?;
         }
         let (x, y) = (spe.x_user, spe.y_user);
-        dpx.spc_put_image(spe, id, &mut ti, x, y);
+        dpx.spc_put_image(spe, id, &mut ti, x, y)?;
         if alpha != 0.0 {
-            dpx.pdf_dev_xgstate_pop();
+            dpx.pdf_dev_xgstate_pop()?;
         }
     }
 
-    error
+    Ok(error)
 }
 
 /// `spc_handler_html_default`.
-fn spc_handler_html_default(dpx: &mut Dpx, spe: &mut SpcEnv, ap: &mut SpcArg) -> i32 {
+fn spc_handler_html_default(dpx: &mut Dpx, spe: &mut SpcEnv, ap: &mut SpcArg) -> Result<i32> {
     if ap.curptr >= ap.endptr {
-        return 0;
+        return Ok(0);
     }
 
     let attr = dpx.o.new_dict();
@@ -730,12 +730,12 @@ fn spc_handler_html_default(dpx: &mut Dpx, spe: &mut SpcEnv, ap: &mut SpcArg) ->
     };
     if error != 0 {
         dpx.o.release(attr);
-        return error;
+        return Ok(error);
     }
     match cstr(&name) {
         b"a" => match ty {
             HTML_TAG_TYPE_OPEN => error = spc_html__anchor_open(dpx, spe, attr),
-            HTML_TAG_TYPE_CLOSE => error = spc_html__anchor_close(dpx, spe),
+            HTML_TAG_TYPE_CLOSE => error = spc_html__anchor_close(dpx, spe)?,
             _ => {
                 dpx.spc_warn(spe, format_args!("Empty html anchor tag???"));
                 error = -1;
@@ -756,7 +756,7 @@ fn spc_handler_html_default(dpx: &mut Dpx, spe: &mut SpcEnv, ap: &mut SpcArg) ->
                 error = -1;
             } else {
                 // treat "open" same as "empty"
-                error = spc_html__img_empty(dpx, spe, attr);
+                error = spc_html__img_empty(dpx, spe, attr)?;
             }
         }
         _ => {}
@@ -767,7 +767,7 @@ fn spc_handler_html_default(dpx: &mut Dpx, spe: &mut SpcEnv, ap: &mut SpcArg) ->
         ap.curptr += 1;
     }
 
-    error
+    Ok(error)
 }
 
 /// `spc_html_check_special`.
@@ -785,12 +785,12 @@ pub fn spc_html_setup_handler(
     sph: &mut SpcHandler,
     spe: &mut SpcEnv,
     ap: &mut SpcArg,
-) -> i32 {
+) -> Result<i32> {
     while ap.curptr < ap.endptr && is_c_space(ap.cur()) {
         ap.curptr += 1;
     }
     if ap.curptr + 5 > ap.endptr || !ap.rest().starts_with(b"html:") {
-        return -1;
+        return Ok(-1);
     }
 
     ap.command = Some(b"");
@@ -803,7 +803,7 @@ pub fn spc_html_setup_handler(
         ap.curptr += 1;
     }
 
-    0
+    Ok(0)
 }
 
 #[cfg(test)]

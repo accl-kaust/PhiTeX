@@ -4,11 +4,13 @@
 
 use alloc::vec::Vec;
 
+use crate::ctx::Result;
 use crate::obj::{Obj, PdfOut};
+use crate::some;
 
 /// The handler of a token no PDF object begins with (spc_pdfm.c's
 /// `@name` references and the like).
-pub type Unknown<'a> = &'a mut dyn FnMut(&mut PdfOut, &[u8], &mut usize) -> Option<Obj>;
+pub type Unknown<'a> = &'a mut dyn FnMut(&mut PdfOut, &[u8], &mut usize) -> Result<Option<Obj>>;
 
 #[must_use]
 pub fn is_space(c: u8) -> bool {
@@ -442,11 +444,11 @@ impl PdfOut {
         pf: Option<u32>,
         unknown: &mut Option<Unknown<'_>>,
         tainted: bool,
-    ) -> Option<Obj> {
+    ) -> Result<Option<Obj>> {
         let mut p = *pp;
         skip_white(s, &mut p);
         if p + 4 > s.len() || s[p] != b'<' || s[p + 1] != b'<' {
-            return None;
+            return Ok(None);
         }
         p += 2;
         let result = self.new_dict();
@@ -455,23 +457,23 @@ impl PdfOut {
             skip_white(s, &mut p);
             let Some(key) = self.parse_pdf_name(s, &mut p) else {
                 self.release(result);
-                return None;
+                return Ok(None);
             };
             skip_white(s, &mut p);
-            let Some(value) = self.parse_obj_ext(s, &mut p, pf, unknown, tainted) else {
+            let Some(value) = self.parse_obj_ext(s, &mut p, pf, unknown, tainted)? else {
                 self.release(key);
                 self.release(result);
-                return None;
+                return Ok(None);
             };
             self.add_dict(result, key, Some(value));
             skip_white(s, &mut p);
         }
         if p + 2 > s.len() || s[p] != b'>' || s[p + 1] != b'>' {
             self.release(result);
-            return None;
+            return Ok(None);
         }
         *pp = p + 2;
-        Some(result)
+        Ok(Some(result))
     }
 
     fn parse_array_ext(
@@ -481,36 +483,36 @@ impl PdfOut {
         pf: Option<u32>,
         unknown: &mut Option<Unknown<'_>>,
         tainted: bool,
-    ) -> Option<Obj> {
+    ) -> Result<Option<Obj>> {
         let mut p = *pp;
         skip_white(s, &mut p);
         if p + 2 > s.len() || s[p] != b'[' {
-            return None;
+            return Ok(None);
         }
         let result = self.new_array();
         p += 1;
         skip_white(s, &mut p);
         while p < s.len() && s[p] != b']' {
-            let Some(elem) = self.parse_obj_ext(s, &mut p, pf, unknown, tainted) else {
+            let Some(elem) = self.parse_obj_ext(s, &mut p, pf, unknown, tainted)? else {
                 self.release(result);
-                return None;
+                return Ok(None);
             };
             self.add_array(result, elem);
             skip_white(s, &mut p);
         }
         if p >= s.len() || s[p] != b']' {
             self.release(result);
-            return None;
+            return Ok(None);
         }
         *pp = p + 1;
-        Some(result)
+        Ok(Some(result))
     }
 
-    fn parse_pdf_stream(&mut self, s: &[u8], pp: &mut usize, dict: Obj) -> Option<Obj> {
+    fn parse_pdf_stream(&mut self, s: &[u8], pp: &mut usize, dict: Obj) -> Result<Option<Obj>> {
         let mut p = *pp;
         skip_white(s, &mut p);
         if p + 6 > s.len() || &s[p..p + 6] != b"stream" {
-            return None;
+            return Ok(None);
         }
         p += 6;
         if p < s.len() && s[p] == b'\n' {
@@ -518,8 +520,8 @@ impl PdfOut {
         } else if p + 1 < s.len() && s[p] == b'\r' && s[p + 1] == b'\n' {
             p += 2;
         }
-        let tmp = self.lookup_dict(dict, b"Length")?;
-        let tmp2 = self.deref_obj(Some(tmp));
+        let tmp = some!(self.lookup_dict(dict, b"Length"));
+        let tmp2 = self.deref_obj(Some(tmp))?;
         let stream_length: i64 = if self.type_of(tmp2) == crate::obj::PDF_NUMBER {
             self.number_value(tmp2.expect("number")) as i64
         } else {
@@ -527,7 +529,7 @@ impl PdfOut {
         };
         self.release_opt(tmp2);
         if stream_length < 0 || p + stream_length as usize > s.len() {
-            return None;
+            return Ok(None);
         }
         let stream_length = stream_length as usize;
         let filters = self.lookup_dict(dict, b"Filter");
@@ -548,11 +550,11 @@ impl PdfOut {
         }
         if p + 9 > s.len() || &s[p..p + 9] != b"endstream" {
             self.release(result);
-            return None;
+            return Ok(None);
         }
         p += 9;
         *pp = p;
-        Some(result)
+        Ok(Some(result))
     }
 
     fn try_pdf_reference(
@@ -607,49 +609,49 @@ impl PdfOut {
         pf: Option<u32>,
         unknown: &mut Option<Unknown<'_>>,
         tainted: bool,
-    ) -> Option<Obj> {
+    ) -> Result<Option<Obj>> {
         skip_white(s, pp);
         if *pp >= s.len() {
-            return None;
+            return Ok(None);
         }
         match s[*pp] {
             b'<' => {
                 if at(s, *pp + 1) != b'<' {
-                    self.parse_pdf_hex_string(s, pp)
+                    Ok(self.parse_pdf_hex_string(s, pp))
                 } else {
-                    let result = self.parse_dict_ext(s, pp, pf, unknown, tainted);
+                    let result = self.parse_dict_ext(s, pp, pf, unknown, tainted)?;
                     skip_white(s, pp);
                     if let Some(dict) = result
                         && *pp + 15 <= s.len()
                         && &s[*pp..*pp + 6] == b"stream"
                     {
-                        let r = self.parse_pdf_stream(s, pp, dict);
+                        let r = self.parse_pdf_stream(s, pp, dict)?;
                         self.release(dict);
-                        r
+                        Ok(r)
                     } else {
-                        result
+                        Ok(result)
                     }
                 }
             }
-            b'(' => self.parse_pdf_string_t(s, pp, tainted),
+            b'(' => Ok(self.parse_pdf_string_t(s, pp, tainted)),
             b'[' => self.parse_array_ext(s, pp, pf, unknown, tainted),
-            b'/' => self.parse_pdf_name(s, pp),
-            b'n' => self.parse_pdf_null(s, pp),
-            b't' | b'f' => self.parse_pdf_boolean(s, pp),
-            b'+' | b'-' | b'.' => self.parse_pdf_number(s, pp),
+            b'/' => Ok(self.parse_pdf_name(s, pp)),
+            b'n' => Ok(self.parse_pdf_null(s, pp)),
+            b't' | b'f' => Ok(self.parse_pdf_boolean(s, pp)),
+            b'+' | b'-' | b'.' => Ok(self.parse_pdf_number(s, pp)),
             b'0'..=b'9' => {
                 if let Some(pf) = pf {
                     let mut next = *pp;
                     if let Some(r) = self.try_pdf_reference(s, *pp, &mut next, pf) {
                         *pp = next;
-                        return Some(r);
+                        return Ok(Some(r));
                     }
                 }
-                self.parse_pdf_number(s, pp)
+                Ok(self.parse_pdf_number(s, pp))
             }
             _ => match unknown {
                 Some(h) => h(self, s, pp),
-                None => None,
+                None => Ok(None),
             },
         }
     }
@@ -661,22 +663,37 @@ impl PdfOut {
         pp: &mut usize,
         pf: Option<u32>,
         mut unknown: Option<Unknown<'_>>,
-    ) -> Option<Obj> {
+    ) -> Result<Option<Obj>> {
         self.parse_obj_ext(s, pp, pf, &mut unknown, false)
     }
 
     /// `parse_pdf_object`.
-    pub fn parse_pdf_object(&mut self, s: &[u8], pp: &mut usize, pf: Option<u32>) -> Option<Obj> {
+    pub fn parse_pdf_object(
+        &mut self,
+        s: &[u8],
+        pp: &mut usize,
+        pf: Option<u32>,
+    ) -> Result<Option<Obj>> {
         self.parse_obj_ext(s, pp, pf, &mut None, false)
     }
 
     /// `parse_pdf_dict`.
-    pub fn parse_pdf_dict(&mut self, s: &[u8], pp: &mut usize, pf: Option<u32>) -> Option<Obj> {
+    pub fn parse_pdf_dict(
+        &mut self,
+        s: &[u8],
+        pp: &mut usize,
+        pf: Option<u32>,
+    ) -> Result<Option<Obj>> {
         self.parse_dict_ext(s, pp, pf, &mut None, false)
     }
 
     /// `parse_pdf_array`.
-    pub fn parse_pdf_array(&mut self, s: &[u8], pp: &mut usize, pf: Option<u32>) -> Option<Obj> {
+    pub fn parse_pdf_array(
+        &mut self,
+        s: &[u8],
+        pp: &mut usize,
+        pf: Option<u32>,
+    ) -> Result<Option<Obj>> {
         self.parse_array_ext(s, pp, pf, &mut None, false)
     }
 
@@ -687,7 +704,7 @@ impl PdfOut {
         pp: &mut usize,
         pf: Option<u32>,
         mut unknown: Option<Unknown<'_>>,
-    ) -> Option<Obj> {
+    ) -> Result<Option<Obj>> {
         self.parse_dict_ext(s, pp, pf, &mut unknown, false)
     }
 
@@ -698,7 +715,7 @@ impl PdfOut {
         pp: &mut usize,
         pf: Option<u32>,
         mut unknown: Option<Unknown<'_>>,
-    ) -> Option<Obj> {
+    ) -> Result<Option<Obj>> {
         self.parse_array_ext(s, pp, pf, &mut unknown, false)
     }
 
@@ -709,7 +726,7 @@ impl PdfOut {
         s: &[u8],
         pp: &mut usize,
         mut unknown: Option<Unknown<'_>>,
-    ) -> Option<Obj> {
+    ) -> Result<Option<Obj>> {
         self.parse_dict_ext(s, pp, None, &mut unknown, true)
     }
 }

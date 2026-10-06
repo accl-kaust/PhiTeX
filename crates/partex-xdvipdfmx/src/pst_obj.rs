@@ -28,8 +28,8 @@ use crate::pst::{
 };
 
 /// `TYPE_ERROR()`.
-fn type_error() -> ! {
-    error!("Operation not defined for this type of object.")
+fn type_error<T>() -> Result<T> {
+    fatal!("Operation not defined for this type of object.")
 }
 
 #[allow(non_snake_case)]
@@ -48,65 +48,65 @@ impl PstObj {
         }
     }
     /// `pst_length_of`.
-    pub fn pst_length_of(&self) -> i32 {
+    pub fn pst_length_of(&self) -> Result<i32> {
         match self {
             // pst_boolean_length, pst_integer_length, pst_real_length
-            PstObj::Boolean(_) | PstObj::Integer(_) | PstObj::Real(_) => type_error(),
-            PstObj::Name(v) => v.len() as i32,
-            PstObj::String(v) => v.len() as i32,
-            PstObj::Null | PstObj::Mark => type_error(),
-            PstObj::Unknown(v) => v.len() as i32,
+            PstObj::Boolean(_) | PstObj::Integer(_) | PstObj::Real(_) => return type_error()?,
+            PstObj::Name(v) => Ok(v.len() as i32),
+            PstObj::String(v) => Ok(v.len() as i32),
+            PstObj::Null | PstObj::Mark => return type_error()?,
+            PstObj::Unknown(v) => Ok(v.len() as i32),
         }
     }
     /// `pst_getIV`.
-    pub fn pst_getIV(&self) -> i32 {
+    pub fn pst_getIV(&self) -> Result<i32> {
         match self {
-            PstObj::Boolean(v) => i32::from(*v),
-            PstObj::Integer(v) => *v,
-            PstObj::Real(v) => *v as i32,
-            PstObj::Name(_) => type_error(),
-            PstObj::String(v) => pst_string_RV(v) as i32,
-            PstObj::Null | PstObj::Mark => type_error(),
+            PstObj::Boolean(v) => Ok(i32::from(*v)),
+            PstObj::Integer(v) => Ok(*v),
+            PstObj::Real(v) => Ok(*v as i32),
+            PstObj::Name(_) => return type_error()?,
+            PstObj::String(v) => Ok(pst_string_RV(v)? as i32),
+            PstObj::Null | PstObj::Mark => return type_error()?,
             PstObj::Unknown(_) => {
-                error!("Cannot convert object of type UNKNOWN to integer value.")
+                fatal!("Cannot convert object of type UNKNOWN to integer value.")
             }
         }
     }
     /// `pst_getRV`.
-    pub fn pst_getRV(&self) -> f64 {
+    pub fn pst_getRV(&self) -> Result<f64> {
         match self {
-            PstObj::Boolean(v) => f64::from(*v),
-            PstObj::Integer(v) => f64::from(*v),
-            PstObj::Real(v) => *v,
-            PstObj::Name(_) => type_error(),
+            PstObj::Boolean(v) => Ok(f64::from(*v)),
+            PstObj::Integer(v) => Ok(f64::from(*v)),
+            PstObj::Real(v) => Ok(*v),
+            PstObj::Name(_) => return type_error()?,
             PstObj::String(v) => pst_string_RV(v),
-            PstObj::Null | PstObj::Mark => type_error(),
-            PstObj::Unknown(_) => error!("Cannot convert object of type UNKNOWN to real value."),
+            PstObj::Null | PstObj::Mark => return type_error()?,
+            PstObj::Unknown(_) => fatal!("Cannot convert object of type UNKNOWN to real value."),
         }
     }
     /// `pst_getSV`: a new string (C: a NUL-terminated copy; its length is
     /// `pst_length_of`). None for an empty unknown token; null and mark
     /// are a type error.
-    pub fn pst_getSV(&self) -> Option<Vec<u8>> {
+    pub fn pst_getSV(&self) -> Result<Option<Vec<u8>>> {
         match self {
-            PstObj::Boolean(v) => Some(if *v != 0 {
+            PstObj::Boolean(v) => Ok(Some(if *v != 0 {
                 b"true".to_vec()
             } else {
                 b"false".to_vec()
-            }),
+            })),
             PstObj::Integer(v) => {
                 let mut b = Buf::new();
                 b.int(*v);
-                Some(b.0)
+                Ok(Some(b.0))
             }
-            PstObj::Real(v) => Some(sprintf_g(*v, 5)),
-            PstObj::Name(v) | PstObj::String(v) => Some(v.clone()),
-            PstObj::Null | PstObj::Mark => type_error(),
+            PstObj::Real(v) => Ok(Some(sprintf_g(*v, 5))),
+            PstObj::Name(v) | PstObj::String(v) => Ok(Some(v.clone())),
+            PstObj::Null | PstObj::Mark => return type_error()?,
             PstObj::Unknown(v) => {
                 if !v.is_empty() {
-                    Some(v.clone())
+                    Ok(Some(v.clone()))
                 } else {
-                    None
+                    Ok(None)
                 }
             }
         }
@@ -114,23 +114,23 @@ impl PstObj {
     /// `pst_data_ptr`: the bytes of a name, string or unknown token
     /// (C points into the object; for numbers and booleans C points at
     /// the binary value: empty here; null and mark are a type error).
-    pub fn pst_data_ptr(&self) -> &[u8] {
+    pub fn pst_data_ptr(&self) -> Result<&[u8]> {
         match self {
-            PstObj::Boolean(_) | PstObj::Integer(_) | PstObj::Real(_) => &[],
-            PstObj::Name(v) | PstObj::String(v) | PstObj::Unknown(v) => v,
-            PstObj::Null | PstObj::Mark => type_error(),
+            PstObj::Boolean(_) | PstObj::Integer(_) | PstObj::Real(_) => Ok(&[]),
+            PstObj::Name(v) | PstObj::String(v) | PstObj::Unknown(v) => Ok(v),
+            PstObj::Null | PstObj::Mark => return type_error()?,
         }
     }
 }
 
 /// `pst_string_RV` (static): the string read as a number.
 #[allow(non_snake_case)]
-fn pst_string_RV(v: &[u8]) -> f64 {
+fn pst_string_RV(v: &[u8]) -> Result<f64> {
     let mut p = 0;
     let nobj = pst_parse_number(v, &mut p);
     match nobj {
         Some(n) if p == v.len() => n.pst_getRV(),
-        _ => error!("Cound not convert string to real value."),
+        _ => fatal!("Cound not convert string to real value."),
     }
 }
 
@@ -419,23 +419,23 @@ pub fn pst_parse_name(s: &[u8], p: &mut usize) -> Option<PstObj> {
 }
 
 /// `pst_parse_string`: literal `(…)` or hex `<…>`.
-pub fn pst_parse_string(s: &[u8], p: &mut usize) -> Option<PstObj> {
+pub fn pst_parse_string(s: &[u8], p: &mut usize) -> Result<Option<PstObj>> {
     if *p + 2 >= s.len() {
-        None
+        Ok(None)
     } else if s[*p] == b'(' {
         match pst_string_parse_literal(s, p) {
-            Some(v) => Some(PstObj::String(v)),
-            None => error!("NULL pointer data for object type: {}", PST_TYPE_STRING),
+            Some(v) => Ok(Some(PstObj::String(v))),
+            None => fatal!("NULL pointer data for object type: {}", PST_TYPE_STRING),
         }
     } else if s[*p] == b'<' && s[*p + 1] == b'~' {
-        error!("ASCII85 string not supported yet.")
+        fatal!("ASCII85 string not supported yet.")
     } else if s[*p] == b'<' {
         match pst_string_parse_hex(s, p) {
-            Some(v) => Some(PstObj::String(v)),
-            None => error!("NULL pointer data for object type: {}", PST_TYPE_STRING),
+            Some(v) => Ok(Some(PstObj::String(v))),
+            None => fatal!("NULL pointer data for object type: {}", PST_TYPE_STRING),
         }
     } else {
-        None
+        Ok(None)
     }
 }
 

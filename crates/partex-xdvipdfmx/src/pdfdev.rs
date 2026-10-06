@@ -517,7 +517,7 @@ impl Dpx {
         self.dev.pdev.motion_state = STRING_MODE;
     }
 
-    fn pdf_dev_set_font(&mut self, font_id: i32) {
+    fn pdf_dev_set_font(&mut self, font_id: i32) -> Result<()> {
         self.pdf_dev_text_mode();
         let fi = font_id as usize;
         let (format, wmode, slant, extend) = {
@@ -544,15 +544,15 @@ impl Dpx {
         ts.matrix.rotate = text_rotate;
         if self.dev.pdev.fonts[fi].resource.is_none() {
             let id = self.dev.pdev.fonts[fi].font_id;
-            let r = self.pdf_get_font_reference(id);
+            let r = self.pdf_get_font_reference(id)?;
             self.dev.pdev.fonts[fi].resource = Some(r);
-            self.dev.pdev.fonts[fi].used_chars = self.pdf_get_font_usedchars(id);
+            self.dev.pdev.fonts[fi].used_chars = self.pdf_get_font_usedchars(id)?;
         }
         if !self.dev.pdev.fonts[fi].used_on_this_page {
             let r = self.dev.pdev.fonts[fi].resource.expect("resource");
             let l = self.o.link(r);
             let name = self.dev.pdev.fonts[fi].short_name.clone();
-            self.pdf_doc_add_page_resource(b"Font", &name, l);
+            self.pdf_doc_add_page_resource(b"Font", &name, l)?;
             self.dev.pdev.fonts[fi].used_on_this_page = true;
         }
         let font_scale = f64::from(self.dev.pdev.fonts[fi].sptsize) * self.dev.pdev.unit.dvi2pts;
@@ -581,21 +581,22 @@ impl Dpx {
         }
         self.dev.pdev.text_state.bold_param = bold;
         self.dev.pdev.text_state.font_id = font_id;
+        Ok(())
     }
 
     /// `handle_multibyte_string`: status (0, or -1 when the CMap
     /// conversion failed) and the string to show (decoded through the
     /// dev font's CMap when it has one; C's `sbuf0`).
-    fn handle_multibyte_string(&mut self, dev_font: usize, s: &[u8]) -> (i32, Vec<u8>) {
+    fn handle_multibyte_string(&mut self, dev_font: usize, s: &[u8]) -> Result<(i32, Vec<u8>)> {
         let enc_id = self.dev.pdev.fonts[dev_font].enc_id;
         if enc_id < 0 {
-            return (0, s.to_vec());
+            return Ok((0, s.to_vec()));
         }
         let mut out = vec![0u8; FORMAT_BUF_SIZE];
         let (mut inpos, mut outpos) = (0usize, 0usize);
         let mut inbytesleft = s.len() as i32;
         let mut outbytesleft = FORMAT_BUF_SIZE as i32;
-        let cmap = self.CMap_cache_get(enc_id);
+        let cmap = self.CMap_cache_get(enc_id)?;
         self.CMap_decode(
             cmap,
             s,
@@ -604,12 +605,12 @@ impl Dpx {
             &mut out,
             &mut outpos,
             &mut outbytesleft,
-        );
+        )?;
         if inbytesleft != 0 {
-            return (-1, Vec::new());
+            return Ok((-1, Vec::new()));
         }
         out.truncate(FORMAT_BUF_SIZE - outbytesleft as usize);
-        (0, out)
+        Ok((0, out))
     }
 
     /// `pdf_dev_set_string`.
@@ -620,13 +621,13 @@ impl Dpx {
         instr: &[u8],
         width: Spt,
         font_id: i32,
-    ) {
+    ) -> Result<()> {
         assert!(
             font_id >= 0 && (font_id as usize) < self.dev.pdev.fonts.len(),
             "Invalid font"
         );
         if font_id != self.dev.pdev.text_state.font_id {
-            self.pdf_dev_set_font(font_id);
+            self.pdf_dev_set_font(font_id)?;
         }
         let fi = self.dev.pdev.text_state.font_id as usize;
         let text_xorigin = self.dev.pdev.text_state.ref_x;
@@ -635,9 +636,9 @@ impl Dpx {
         let mut s: Vec<u8> = instr.to_vec();
         let used_chars = self.dev.pdev.fonts[fi].used_chars.clone();
         if format == PDF_FONTTYPE_COMPOSITE {
-            let (r, out) = self.handle_multibyte_string(fi, &s);
+            let (r, out) = self.handle_multibyte_string(fi, &s)?;
             if r < 0 {
-                crate::error!("Error in converting input string...");
+                crate::fatal!("Error in converting input string...");
             }
             s = out;
             if let Some(uc) = used_chars {
@@ -716,6 +717,7 @@ impl Dpx {
         }
         self.dev_out(&b.0);
         self.dev.pdev.text_state.offset += width;
+        Ok(())
     }
 
     /// `pdf_init_device`.
@@ -770,21 +772,23 @@ impl Dpx {
     }
 
     /// `pdf_dev_reset_color`.
-    pub fn pdf_dev_reset_color(&mut self, force: i32) {
+    pub fn pdf_dev_reset_color(&mut self, force: i32) -> Result<()> {
         let (sc, fc) = self.pdf_color_get_current();
-        self.pdf_dev_set_color(&sc, 0, force);
-        self.pdf_dev_set_color(&fc, 0x20, force);
+        self.pdf_dev_set_color(&sc, 0, force)?;
+        self.pdf_dev_set_color(&fc, 0x20, force)?;
+        Ok(())
     }
 
     /// `pdf_dev_bop`.
-    pub fn pdf_dev_bop(&mut self, m: &PdfTmatrix) {
+    pub fn pdf_dev_bop(&mut self, m: &PdfTmatrix) -> Result<()> {
         self.pdf_dev_graphics_mode();
         self.dev.pdev.text_state.force_reset = false;
         self.pdf_dev_gsave();
         self.pdf_dev_concat(m);
         self.pdf_dev_reset_fonts(1);
-        self.pdf_dev_reset_color(0);
-        self.pdf_dev_reset_xgstate(0);
+        self.pdf_dev_reset_color(0)?;
+        self.pdf_dev_reset_xgstate(0)?;
+        Ok(())
     }
 
     /// `pdf_dev_eop`.
@@ -799,7 +803,7 @@ impl Dpx {
     }
 
     /// `pdf_dev_locate_font`.
-    pub fn pdf_dev_locate_font(&mut self, font_name: &[u8], ptsize: Spt) -> i32 {
+    pub fn pdf_dev_locate_font(&mut self, font_name: &[u8], ptsize: Spt) -> Result<i32> {
         assert!(
             ptsize != 0,
             "pdf_dev_locate_font() called with the zero ptsize."
@@ -811,25 +815,25 @@ impl Dpx {
             .iter()
             .position(|f| f.tex_name == font_name && f.sptsize == ptsize)
         {
-            return i as i32;
+            return Ok(i as i32);
         }
         let mrec = self.pdf_lookup_fontmap_record(font_name);
         let scale = f64::from(ptsize) * self.dev.pdev.unit.dvi2pts;
         let mut font_id = self.pdf_font_findresource(font_name, scale);
         if font_id < 0 {
-            font_id = self.pdf_font_load_font(font_name, scale, mrec.as_ref());
+            font_id = self.pdf_font_load_font(font_name, scale, mrec.as_ref())?;
             if font_id < 0 {
-                return -1;
+                return Ok(-1);
             }
         }
-        let short_name = self.pdf_font_resource_name(font_id);
-        let format = match self.pdf_get_font_subtype(font_id) {
+        let short_name = self.pdf_font_resource_name(font_id)?;
+        let format = match self.pdf_get_font_subtype(font_id)? {
             crate::pdffont::PDF_FONT_FONTTYPE_TYPE3 => PDF_FONTTYPE_BITMAP,
             crate::pdffont::PDF_FONT_FONTTYPE_TYPE0 => PDF_FONTTYPE_COMPOSITE,
             _ => PDF_FONTTYPE_SIMPLE,
         };
-        let wmode = self.pdf_get_font_wmode(font_id);
-        let enc_id = self.pdf_get_font_encoding(font_id);
+        let wmode = self.pdf_get_font_wmode(font_id)?;
+        let enc_id = self.pdf_get_font_encoding(font_id)?;
         let (extend, slant, bold) = match &mrec {
             Some(m) => (m.opt.extend, m.opt.slant, m.opt.bold),
             None => (1.0, 0.0, 0.0),
@@ -849,7 +853,7 @@ impl Dpx {
             slant,
             bold,
         });
-        (self.dev.pdev.fonts.len() - 1) as i32
+        Ok((self.dev.pdev.fonts.len() - 1) as i32)
     }
 
     fn dev_sprint_line(&self, b: &mut Buf, width: Spt, p0x: Spt, p0y: Spt, p1x: Spt, p1y: Spt) {
@@ -1049,7 +1053,7 @@ impl Dpx {
         ti: &mut TransformInfo,
         ref_x: f64,
         ref_y: f64,
-    ) -> (i32, PdfRect) {
+    ) -> Result<(i32, PdfRect)> {
         let mut m = ti.matrix;
         m.e += ref_x;
         m.f += ref_y;
@@ -1063,13 +1067,13 @@ impl Dpx {
         }
         self.pdf_dev_graphics_mode();
         self.pdf_dev_gsave();
-        let (_, m1, r) = self.pdf_ximage_scale_image(id, ti);
+        let (_, m1, r) = self.pdf_ximage_scale_image(id, ti)?;
         crate::pdfdraw::pdf_concatmatrix(&mut m, &m1);
         self.pdf_dev_concat(&m);
         if ti.flags & INFO_DO_CLIP != 0 {
             self.pdf_dev_rectclip(r.llx, r.lly, r.urx - r.llx, r.ury - r.lly);
         }
-        let res_name = self.pdf_ximage_get_resname(id);
+        let res_name = self.pdf_ximage_get_resname(id)?;
         let mut b = Buf::new();
         b.extend(b" /");
         b.extend(&res_name);
@@ -1081,9 +1085,9 @@ impl Dpx {
             self.pdf_dev_set_rect(x, y, w, h, 0)
         };
         self.pdf_dev_grestore();
-        let r = self.pdf_ximage_get_reference(id);
-        self.pdf_doc_add_page_resource(b"XObject", &res_name, r);
-        (0, rect)
+        let r = self.pdf_ximage_get_reference(id)?;
+        self.pdf_doc_add_page_resource(b"XObject", &res_name, r)?;
+        Ok((0, rect))
     }
 
     /// `pdf_dev_begin_actualtext`.
@@ -1143,14 +1147,14 @@ impl Dpx {
     }
 
     /// `pdf_dev_font_minbytes`.
-    pub fn pdf_dev_font_minbytes(&mut self, font_id: i32) -> i32 {
+    pub fn pdf_dev_font_minbytes(&mut self, font_id: i32) -> Result<i32> {
         match self.dev.pdev.fonts.get(font_id as usize) {
             Some(f) if f.format == PDF_FONTTYPE_COMPOSITE => {
                 let enc = f.enc_id;
-                let cmap = self.CMap_cache_get(enc);
+                let cmap = self.CMap_cache_get(enc)?;
                 cmap.CMap_get_profile(crate::cmap::CMAP_PROF_TYPE_INBYTES_MIN)
             }
-            _ => 1,
+            _ => Ok(1),
         }
     }
 }

@@ -67,20 +67,20 @@ impl Dpx {
 }
 
 /// `spc_handler_xtx_scale`.
-fn spc_handler_xtx_scale(dpx: &mut Dpx, spe: &mut SpcEnv, args: &mut SpcArg) -> i32 {
+fn spc_handler_xtx_scale(dpx: &mut Dpx, spe: &mut SpcEnv, args: &mut SpcArg) -> Result<i32> {
     let mut values = [0.0f64; 2];
 
     if spc_util_read_numbers(&mut values, args) < 2 {
-        return -1;
+        return Ok(-1);
     }
     args.curptr = args.endptr;
 
     let (x, y) = (spe.x_user, spe.y_user);
-    dpx.spc_handler_xtx_do_transform(spe, x, y, values[0], 0.0, 0.0, values[1], 0.0, 0.0)
+    Ok(dpx.spc_handler_xtx_do_transform(spe, x, y, values[0], 0.0, 0.0, values[1], 0.0, 0.0))
 }
 
 /// `spc_handler_xtx_bscale`: scale without gsave/grestore.
-fn spc_handler_xtx_bscale(dpx: &mut Dpx, spe: &mut SpcEnv, args: &mut SpcArg) -> i32 {
+fn spc_handler_xtx_bscale(dpx: &mut Dpx, spe: &mut SpcEnv, args: &mut SpcArg) -> Result<i32> {
     let mut values = [0.0f64; 2];
 
     dpx.xtx.scale_factor_count += 1;
@@ -92,10 +92,10 @@ fn spc_handler_xtx_bscale(dpx: &mut Dpx, spe: &mut SpcEnv, args: &mut SpcArg) ->
             .resize((count + 16) as usize, PdfCoord::default());
     }
     if spc_util_read_numbers(&mut values, args) < 2 {
-        return -1;
+        return Ok(-1);
     }
     if libm::fabs(values[0]) < 1.0e-7 || libm::fabs(values[1]) < 1.0e-7 {
-        return -1;
+        return Ok(-1);
     }
     dpx.xtx.scale_factors[count as usize] = PdfCoord {
         x: 1.0 / values[0],
@@ -104,15 +104,15 @@ fn spc_handler_xtx_bscale(dpx: &mut Dpx, spe: &mut SpcEnv, args: &mut SpcArg) ->
     args.curptr = args.endptr;
 
     let (x, y) = (spe.x_user, spe.y_user);
-    dpx.spc_handler_xtx_do_transform(spe, x, y, values[0], 0.0, 0.0, values[1], 0.0, 0.0)
+    Ok(dpx.spc_handler_xtx_do_transform(spe, x, y, values[0], 0.0, 0.0, values[1], 0.0, 0.0))
 }
 
 /// `spc_handler_xtx_escale`.
-fn spc_handler_xtx_escale(dpx: &mut Dpx, spe: &mut SpcEnv, args: &mut SpcArg) -> i32 {
+fn spc_handler_xtx_escale(dpx: &mut Dpx, spe: &mut SpcEnv, args: &mut SpcArg) -> Result<i32> {
     let count = dpx.xtx.scale_factor_count;
     if count < 0 || count as usize >= dpx.xtx.scale_factors.len() {
         // C reads outside its array here.
-        crate::error!("x:escale without x:bscale");
+        crate::fatal!("x:escale without x:bscale");
     }
     let factor = dpx.xtx.scale_factors[count as usize];
     dpx.xtx.scale_factor_count -= 1;
@@ -120,21 +120,21 @@ fn spc_handler_xtx_escale(dpx: &mut Dpx, spe: &mut SpcEnv, args: &mut SpcArg) ->
     args.curptr = args.endptr;
 
     let (x, y) = (spe.x_user, spe.y_user);
-    dpx.spc_handler_xtx_do_transform(spe, x, y, factor.x, 0.0, 0.0, factor.y, 0.0, 0.0)
+    Ok(dpx.spc_handler_xtx_do_transform(spe, x, y, factor.x, 0.0, 0.0, factor.y, 0.0, 0.0))
 }
 
 /// `spc_handler_xtx_rotate`.
-fn spc_handler_xtx_rotate(dpx: &mut Dpx, spe: &mut SpcEnv, args: &mut SpcArg) -> i32 {
+fn spc_handler_xtx_rotate(dpx: &mut Dpx, spe: &mut SpcEnv, args: &mut SpcArg) -> Result<i32> {
     let mut value = [0.0f64; 1];
 
     if spc_util_read_numbers(&mut value, args) < 1 {
-        return -1;
+        return Ok(-1);
     }
     args.curptr = args.endptr;
 
     let value = value[0];
     let (x, y) = (spe.x_user, spe.y_user);
-    dpx.spc_handler_xtx_do_transform(
+    Ok(dpx.spc_handler_xtx_do_transform(
         spe,
         x,
         y,
@@ -144,18 +144,18 @@ fn spc_handler_xtx_rotate(dpx: &mut Dpx, spe: &mut SpcEnv, args: &mut SpcArg) ->
         libm::cos(value * M_PI / 180.0),
         0.0,
         0.0,
-    )
+    ))
 }
 
 /// `spc_handler_xtx_gsave` (also used by the dvips specials).
-pub fn spc_handler_xtx_gsave(dpx: &mut Dpx, spe: &mut SpcEnv, args: &mut SpcArg) -> i32 {
+pub fn spc_handler_xtx_gsave(dpx: &mut Dpx, spe: &mut SpcEnv, args: &mut SpcArg) -> Result<i32> {
     dpx.pdf_dev_gsave();
     dpx.spc_dup_fixed_point(spe);
-    0
+    Ok(0)
 }
 
 /// `spc_handler_xtx_grestore` (also used by the dvips specials).
-pub fn spc_handler_xtx_grestore(dpx: &mut Dpx, spe: &mut SpcEnv, args: &mut SpcArg) -> i32 {
+pub fn spc_handler_xtx_grestore(dpx: &mut Dpx, spe: &mut SpcEnv, args: &mut SpcArg) -> Result<i32> {
     dpx.pdf_dev_grestore();
     dpx.spc_pop_fixed_point(spe);
 
@@ -163,52 +163,56 @@ pub fn spc_handler_xtx_grestore(dpx: &mut Dpx, spe: &mut SpcEnv, args: &mut SpcA
     // or color change inside of the save/restore pair. We act like we
     // are starting a new page.
     dpx.pdf_dev_reset_fonts(0);
-    dpx.pdf_dev_reset_color(0);
-    dpx.pdf_dev_reset_xgstate(0);
+    dpx.pdf_dev_reset_color(0)?;
+    dpx.pdf_dev_reset_xgstate(0)?;
 
-    0
+    Ok(0)
 }
 
 /// `spc_handler_xtx_papersize` (does nothing).
-fn spc_handler_xtx_papersize(dpx: &mut Dpx, spe: &mut SpcEnv, args: &mut SpcArg) -> i32 {
-    0
+fn spc_handler_xtx_papersize(dpx: &mut Dpx, spe: &mut SpcEnv, args: &mut SpcArg) -> Result<i32> {
+    Ok(0)
 }
 
 /// `spc_handler_xtx_backgroundcolor`.
-fn spc_handler_xtx_backgroundcolor(dpx: &mut Dpx, spe: &mut SpcEnv, args: &mut SpcArg) -> i32 {
+fn spc_handler_xtx_backgroundcolor(
+    dpx: &mut Dpx,
+    spe: &mut SpcEnv,
+    args: &mut SpcArg,
+) -> Result<i32> {
     let mut colorspec = PdfColor::default();
 
-    let error = dpx.spc_util_read_colorspec(spe, &mut colorspec, args, 0);
+    let error = dpx.spc_util_read_colorspec(spe, &mut colorspec, args, 0)?;
     if error != 0 {
         dpx.spc_warn(spe, format_args!("No valid color specified?"));
     } else {
         dpx.pdf_doc_set_bgcolor(Some(&colorspec));
     }
 
-    error
+    Ok(error)
 }
 
 /// `spc_handler_xtx_fontmapline` (C's copy of `pdf:mapline`).
-fn spc_handler_xtx_fontmapline(dpx: &mut Dpx, spe: &mut SpcEnv, ap: &mut SpcArg) -> i32 {
+fn spc_handler_xtx_fontmapline(dpx: &mut Dpx, spe: &mut SpcEnv, ap: &mut SpcArg) -> Result<i32> {
     crate::spc_pdfm::spc_fontmapline(dpx, spe, ap, "fontmapline")
 }
 
 /// `spc_handler_xtx_fontmapfile` (C's copy of `pdf:mapfile`).
-fn spc_handler_xtx_fontmapfile(dpx: &mut Dpx, spe: &mut SpcEnv, args: &mut SpcArg) -> i32 {
+fn spc_handler_xtx_fontmapfile(dpx: &mut Dpx, spe: &mut SpcEnv, args: &mut SpcArg) -> Result<i32> {
     crate::spc_pdfm::spc_fontmapfile(dpx, spe, args)
 }
 
 /// `spc_handler_xtx_initoverlay`.
-fn spc_handler_xtx_initoverlay(dpx: &mut Dpx, spe: &mut SpcEnv, args: &mut SpcArg) -> i32 {
+fn spc_handler_xtx_initoverlay(dpx: &mut Dpx, spe: &mut SpcEnv, args: &mut SpcArg) -> Result<i32> {
     args.skip_white();
     if args.curptr >= args.endptr {
-        return -1;
+        return Ok(-1);
     }
     // strncpy: up to a NUL.
     dpx.xtx.overlay_name = cstr(args.rest()).to_vec();
 
     args.curptr = args.endptr;
-    0
+    Ok(0)
 }
 
 /// `strncmp(a, b, n) != 0` on C strings (`b` may end before a NUL).
@@ -227,10 +231,10 @@ fn strncmp_ne(a: &[u8], b: &[u8], n: usize) -> bool {
 }
 
 /// `spc_handler_xtx_clipoverlay`.
-fn spc_handler_xtx_clipoverlay(dpx: &mut Dpx, spe: &mut SpcEnv, args: &mut SpcArg) -> i32 {
+fn spc_handler_xtx_clipoverlay(dpx: &mut Dpx, spe: &mut SpcEnv, args: &mut SpcArg) -> Result<i32> {
     args.skip_white();
     if args.curptr >= args.endptr {
-        return -1;
+        return Ok(-1);
     }
     dpx.pdf_dev_grestore();
     dpx.pdf_dev_gsave();
@@ -240,20 +244,24 @@ fn spc_handler_xtx_clipoverlay(dpx: &mut Dpx, spe: &mut SpcEnv, args: &mut SpcAr
     }
 
     args.curptr = args.endptr;
-    0
+    Ok(0)
 }
 
 /// `spc_handler_xtx_renderingmode`.
-fn spc_handler_xtx_renderingmode(dpx: &mut Dpx, spe: &mut SpcEnv, args: &mut SpcArg) -> i32 {
+fn spc_handler_xtx_renderingmode(
+    dpx: &mut Dpx,
+    spe: &mut SpcEnv,
+    args: &mut SpcArg,
+) -> Result<i32> {
     let mut value = [0.0f64; 1];
 
     if spc_util_read_numbers(&mut value, args) < 1 {
-        return -1;
+        return Ok(-1);
     }
     let mode = value[0] as i32;
     if mode < 0 || mode > 7 {
         dpx.spc_warn(spe, format_args!("Invalid text rendering mode {}.\n", mode));
-        return -1;
+        return Ok(-1);
     }
     let work_buffer = format!(" {} Tr", mode);
     dpx.pdf_doc_add_page_content(work_buffer.as_bytes());
@@ -265,11 +273,15 @@ fn spc_handler_xtx_renderingmode(dpx: &mut Dpx, spe: &mut SpcEnv, args: &mut Spc
     }
 
     args.curptr = args.endptr;
-    0
+    Ok(0)
 }
 
 /// `spc_handler_xtx_unsupportedcolor`.
-fn spc_handler_xtx_unsupportedcolor(dpx: &mut Dpx, spe: &mut SpcEnv, args: &mut SpcArg) -> i32 {
+fn spc_handler_xtx_unsupportedcolor(
+    dpx: &mut Dpx,
+    spe: &mut SpcEnv,
+    args: &mut SpcArg,
+) -> Result<i32> {
     dpx.spc_warn(
         spe,
         format_args!(
@@ -279,11 +291,11 @@ fn spc_handler_xtx_unsupportedcolor(dpx: &mut Dpx, spe: &mut SpcEnv, args: &mut 
     );
 
     args.curptr = args.endptr;
-    0
+    Ok(0)
 }
 
 /// `spc_handler_xtx_unsupported`.
-fn spc_handler_xtx_unsupported(dpx: &mut Dpx, spe: &mut SpcEnv, args: &mut SpcArg) -> i32 {
+fn spc_handler_xtx_unsupported(dpx: &mut Dpx, spe: &mut SpcEnv, args: &mut SpcArg) -> Result<i32> {
     dpx.spc_warn(
         spe,
         format_args!(
@@ -293,7 +305,7 @@ fn spc_handler_xtx_unsupported(dpx: &mut Dpx, spe: &mut SpcEnv, args: &mut SpcAr
     );
 
     args.curptr = args.endptr;
-    0
+    Ok(0)
 }
 
 /// `xtx_handlers`.
@@ -397,13 +409,13 @@ pub fn spc_xtx_setup_handler(
     sph: &mut SpcHandler,
     spe: &mut SpcEnv,
     ap: &mut SpcArg,
-) -> i32 {
+) -> Result<i32> {
     let mut error = -1;
 
     ap.skip_white();
     if ap.curptr + 2 >= ap.endptr || !ap.rest().starts_with(b"x:") {
         dpx.spc_warn(spe, format_args!("Not x: special???"));
-        return -1;
+        return Ok(-1);
     }
     ap.curptr += 2;
 
@@ -426,7 +438,7 @@ pub fn spc_xtx_setup_handler(
         }
     }
 
-    error
+    Ok(error)
 }
 
 #[cfg(test)]

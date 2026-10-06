@@ -25,49 +25,49 @@ impl Dpx {
         index: i32,
         encoding_id: i32,
         embedding: i32,
-    ) -> i32 {
+    ) -> Result<i32> {
         let fid = font_id as usize;
         let mut embedding = embedding;
         let mut offset: ULONG = 0;
 
-        let mut fp = self.dpx_open_file(ident, ResType::OtFont);
+        let mut fp = self.dpx_open_file(ident, ResType::OtFont)?;
         if fp.is_none() {
-            fp = self.dpx_open_file(ident, ResType::TtFont);
+            fp = self.dpx_open_file(ident, ResType::TtFont)?;
         }
         let Some(fp) = fp else {
-            return -1;
+            return Ok(-1);
         };
 
-        let Some(mut sfont) = Sfnt::sfnt_open(fp) else {
-            return -1;
+        let Some(mut sfont) = Sfnt::sfnt_open(fp)? else {
+            return Ok(-1);
         };
 
         if sfont.type_ == SFNT_TYPE_TTC {
-            offset = sfont.ttc_read_offset(index as ULONG);
+            offset = sfont.ttc_read_offset(index as ULONG)?;
         }
 
         if (sfont.type_ != SFNT_TYPE_TTC && sfont.type_ != SFNT_TYPE_POSTSCRIPT)
-            || sfont.sfnt_read_table_directory(offset) < 0
+            || sfont.sfnt_read_table_directory(offset)? < 0
             || {
                 offset = sfont.sfnt_find_table_pos(b"CFF ");
                 offset == 0
             }
         {
             sfont.sfnt_close();
-            return -1;
+            return Ok(-1);
         }
 
         // (C's cff_font reads the sfnt's FILE.)
-        let Some(cffont) = CffFont::cff_open(sfont.stream.clone(), offset as i32, 0) else {
+        let Some(cffont) = CffFont::cff_open(sfont.stream.clone(), offset as i32, 0)? else {
             warn!("Could not read CFF font data.");
             sfont.sfnt_close();
-            return -1;
+            return Ok(-1);
         };
 
         if (cffont.flag & FONTTYPE_CIDFONT) != 0 {
             cffont.cff_close();
             sfont.sfnt_close();
-            return -1;
+            return Ok(-1);
         }
 
         // (cff_get_name never gives NULL.)
@@ -94,8 +94,8 @@ impl Dpx {
         let descriptor = self.pdf_font_get_descriptor(font_id);
         // Create font descriptor from OpenType tables.
         // We can also use CFF TOP DICT/Private DICT for this.
-        let Some(tmp) = self.tt_get_fontdesc(&mut sfont, &mut embedding, -1, 1, &fontname) else {
-            error!("Could not obtain neccesary font info from OpenType table.");
+        let Some(tmp) = self.tt_get_fontdesc(&mut sfont, &mut embedding, -1, 1, &fontname)? else {
+            fatal!("Could not obtain neccesary font info from OpenType table.");
         };
         self.o.merge_dict(descriptor, tmp); // copy
         self.o.release(tmp);
@@ -103,12 +103,12 @@ impl Dpx {
             // tt_get_fontdesc may have changed this
             warn!("Font embedding disallowed.");
             sfont.sfnt_close();
-            return -1;
+            return Ok(-1);
         }
 
         sfont.sfnt_close();
 
-        0
+        Ok(0)
     }
     /// `add_SimpleMetrics` (static, prefixed: Dpx methods share a
     /// namespace): `Widths`, `FirstChar`, `LastChar` (`widths` scaled in
@@ -120,7 +120,7 @@ impl Dpx {
         cffont: &CffFont,
         widths: &mut [f64],
         num_glyphs: Card16,
-    ) {
+    ) -> Result<()> {
         let firstchar: i32;
         let lastchar: i32;
 
@@ -136,7 +136,7 @@ impl Dpx {
         // given by the font matrix.
         let td = cffont.topdict.as_ref().expect("topdict");
         let scaling = if td.cff_dict_known(b"FontMatrix") != 0 {
-            1000.0 * td.cff_dict_get(b"FontMatrix", 0)
+            1000.0 * td.cff_dict_get(b"FontMatrix", 0)?
         } else {
             1.0
         };
@@ -164,13 +164,13 @@ impl Dpx {
             firstchar = fc;
             lastchar = lc;
             if firstchar > lastchar {
-                error!("No glyphs used at all!");
+                fatal!("No glyphs used at all!");
             }
             let ident = self.font.fonts[font_id as usize]
                 .ident
                 .clone()
                 .unwrap_or_default();
-            self.pdf_check_tfm_widths(&ident, widths, firstchar, lastchar, &usedchars);
+            self.pdf_check_tfm_widths(&ident, widths, firstchar, lastchar, &usedchars)?;
 
             for code in firstchar..=lastchar {
                 let v = if usedchars[code as usize] != 0 {
@@ -193,19 +193,20 @@ impl Dpx {
             .put_number(fontdict, b"FirstChar", f64::from(firstchar));
         self.o
             .put_number(fontdict, b"LastChar", f64::from(lastchar));
+        Ok(())
     }
     /// `pdf_font_load_type1c`.
-    pub fn pdf_font_load_type1c(&mut self, font_id: i32) -> i32 {
+    pub fn pdf_font_load_type1c(&mut self, font_id: i32) -> Result<i32> {
         let fid = font_id as usize;
         let mut widths = [0.0f64; 256];
         let mut ginfo = CsGinfo::default();
 
         if self.font.fonts[fid].reference.is_none() {
-            return 0;
+            return Ok(0);
         }
 
         if (self.font.fonts[fid].flags & PDF_FONT_FLAG_NOEMBED) != 0 {
-            error!("Only embedded font supported for CFF/OpenType font.");
+            fatal!("Only embedded font supported for CFF/OpenType font.");
         }
 
         let font = &self.font.fonts[fid];
@@ -218,21 +219,21 @@ impl Dpx {
         let descriptor = self.pdf_font_get_descriptor(font_id);
         let encoding_id = self.font.fonts[fid].encoding_id;
 
-        let Some(fp) = self.dpx_open_file(&ident, ResType::OtFont) else {
-            error!(
+        let Some(fp) = self.dpx_open_file(&ident, ResType::OtFont)? else {
+            fatal!(
                 "Could not open OpenType font: {}",
                 String::from_utf8_lossy(&ident)
             );
         };
 
-        let Some(mut sfont) = Sfnt::sfnt_open(fp) else {
-            error!(
+        let Some(mut sfont) = Sfnt::sfnt_open(fp)? else {
+            fatal!(
                 "Could not open OpenType font: {}",
                 String::from_utf8_lossy(&ident)
             );
         };
-        if sfont.sfnt_read_table_directory(0) < 0 {
-            error!(
+        if sfont.sfnt_read_table_directory(0)? < 0 {
+            fatal!(
                 "Could not read OpenType table directory: {}",
                 String::from_utf8_lossy(&ident)
             );
@@ -242,25 +243,25 @@ impl Dpx {
             offset = sfont.sfnt_find_table_pos(b"CFF ") as i32;
             offset == 0
         } {
-            error!("Not a CFF/OpenType font (or variable font?) (11)?");
+            fatal!("Not a CFF/OpenType font (or variable font?) (11)?");
         }
 
-        let Some(mut cffont) = CffFont::cff_open(sfont.stream.clone(), offset, 0) else {
-            error!("Could not open CFF font.");
+        let Some(mut cffont) = CffFont::cff_open(sfont.stream.clone(), offset, 0)? else {
+            fatal!("Could not open CFF font.");
         };
         if (cffont.flag & FONTTYPE_CIDFONT) != 0 {
-            error!("This is CIDFont...");
+            fatal!("This is CIDFont...");
         }
 
         let fullname = subset_fullname(&unique_tag, &fontname);
 
         // Offsets from DICTs
-        cffont.cff_read_charsets();
+        cffont.cff_read_charsets()?;
         if encoding_id < 0 {
-            cffont.cff_read_encoding();
+            cffont.cff_read_encoding()?;
         }
-        cffont.cff_read_private();
-        cffont.cff_read_subrs();
+        cffont.cff_read_private()?;
+        cffont.cff_read_subrs()?;
 
         // FIXME
         cffont._string = Some(CffIndex::cff_new_index(0));
@@ -275,22 +276,22 @@ impl Dpx {
 
         // Encoding related things.
         let enc_vec: Vec<Option<Vec<u8>>> = if encoding_id >= 0 {
-            self.pdf_encoding_get_encoding(encoding_id)
+            self.pdf_encoding_get_encoding(encoding_id)?
         } else {
             // Create enc_vec and ToUnicode CMap for built-in encoding.
             let used = usedchars.borrow().clone();
             let mut enc_vec: Vec<Option<Vec<u8>>> = vec![None; 256];
             for code in 0..256usize {
                 if used[code] != 0 {
-                    let gid = cffont.cff_encoding_lookup(code as Card8);
+                    let gid = cffont.cff_encoding_lookup(code as Card8)?;
                     enc_vec[code] =
-                        Some(cffont.cff_get_string(cffont.cff_charsets_lookup_inverse(gid)));
+                        Some(cffont.cff_get_string(cffont.cff_charsets_lookup_inverse(gid)?));
                 } else {
                     enc_vec[code] = None;
                 }
             }
             if self.o.lookup_dict(fontdict, b"ToUnicode").is_none() {
-                let tounicode = self.pdf_create_ToUnicode_CMap(&fullname, &enc_vec, Some(&used));
+                let tounicode = self.pdf_create_ToUnicode_CMap(&fullname, &enc_vec, Some(&used))?;
                 if let Some(tounicode) = tounicode {
                     let r = self.o.ref_obj(tounicode);
                     self.o.put(fontdict, b"ToUnicode", r);
@@ -323,15 +324,15 @@ impl Dpx {
 
         // Charastrings.
         let td = cffont.topdict.as_ref().expect("topdict");
-        let mut offset = td.cff_dict_get(b"CharStrings", 0) as i32;
+        let mut offset = td.cff_dict_get(b"CharStrings", 0)? as i32;
         cffont.cff_seek_set(offset as usize);
-        let cs_idx = cffont.cff_get_index_header();
+        let cs_idx = cffont.cff_get_index_header()?;
 
         // Offset is now absolute offset ... fixme
         offset = cffont.cff_tell() as i32;
         let cs_count = cs_idx.count;
         if cs_count < 2 {
-            error!("No valid charstring data found.");
+            fatal!("No valid charstring data found.");
         }
 
         // New CharStrings INDEX
@@ -345,7 +346,7 @@ impl Dpx {
         if let Some(pd) = cffont.private.first().and_then(Option::as_ref)
             && pd.cff_dict_known(b"StdVW") != 0
         {
-            let stemv = pd.cff_dict_get(b"StdVW", 0);
+            let stemv = pd.cff_dict_get(b"StdVW", 0)?;
             self.o.put_number(descriptor, b"StemV", stemv);
         }
 
@@ -353,13 +354,13 @@ impl Dpx {
         let pd = cffont.private.first().and_then(Option::as_ref);
         let default_width = match pd {
             Some(pd) if pd.cff_dict_known(b"defaultWidthX") != 0 => {
-                pd.cff_dict_get(b"defaultWidthX", 0)
+                pd.cff_dict_get(b"defaultWidthX", 0)?
             }
             _ => CFF_DEFAULTWIDTHX_DEFAULT,
         };
         let nominal_width = match pd {
             Some(pd) if pd.cff_dict_known(b"nominalWidthX") != 0 => {
-                pd.cff_dict_get(b"nominalWidthX", 0)
+                pd.cff_dict_get(b"nominalWidthX", 0)?
             }
             _ => CFF_NOMINALWIDTHX_DEFAULT,
         };
@@ -368,7 +369,7 @@ impl Dpx {
         // All Type 1 font requires .notdef glyph to be present.
         let size = cs_idx.offset[1] as i32 - cs_idx.offset[0] as i32;
         if size > CS_STR_LEN_MAX {
-            error!("Charstring too long: gid={}, {} bytes", 0, size);
+            fatal!("Charstring too long: gid={}, {} bytes", 0, size);
         }
         charstrings.offset[0] = (charstring_len + 1) as LOffset;
         cffont.cff_seek((offset + cs_idx.offset[0] as i32 - 1) as usize);
@@ -381,7 +382,7 @@ impl Dpx {
             default_width,
             nominal_width,
             Some(&mut ginfo),
-        );
+        )?;
         let notdef_width = ginfo.wx;
 
         // Subset font
@@ -428,7 +429,7 @@ impl Dpx {
             }
 
             // This is new encoding entry.
-            let gid = cffont.cff_charsets_lookup(sid_orig); // FIXME
+            let gid = cffont.cff_charsets_lookup(sid_orig)?; // FIXME
             if gid == 0 {
                 warn!("Glyph missing in font.");
                 warn!("Maybe incorrect encoding specified.");
@@ -441,7 +442,7 @@ impl Dpx {
             let g = usize::from(gid);
             let size = cs_idx.offset[g + 1] as i32 - cs_idx.offset[g] as i32;
             if size > CS_STR_LEN_MAX {
-                error!("Charstring too long: gid={}, {} bytes", gid, size);
+                fatal!("Charstring too long: gid={}, {} bytes", gid, size);
             }
 
             if charstring_len + CS_STR_LEN_MAX >= max_len {
@@ -459,7 +460,7 @@ impl Dpx {
                 default_width,
                 nominal_width,
                 Some(&mut ginfo),
-            );
+            )?;
             widths[code] = ginfo.wx;
             charset.glyphs[usize::from(charset.num_entries)] = sid;
             charset.num_entries += 1;
@@ -561,19 +562,19 @@ impl Dpx {
 
         // Force existence of Encoding.
         if td.cff_dict_known(b"Encoding") == 0 {
-            td.cff_dict_add(b"Encoding", 1);
+            td.cff_dict_add(b"Encoding", 1)?;
         }
-        topdict.offset[1] = (td.cff_dict_pack(&mut work_buffer) + 1) as LOffset;
+        topdict.offset[1] = (td.cff_dict_pack(&mut work_buffer)? + 1) as LOffset;
         let mut private_size: i32 = 0;
         if let Some(pd) = cffont.private[0].as_mut() {
             pd.cff_dict_remove(b"Subrs"); // no Subrs
-            private_size = pd.cff_dict_pack(&mut work_buffer);
+            private_size = pd.cff_dict_pack(&mut work_buffer)?;
         }
 
         // Estimate total size of fontfile.
         let mut stream_data_len: i32 = 4; // header size
 
-        stream_data_len += cffont.cff_set_name(&fullname);
+        stream_data_len += cffont.cff_set_name(&fullname)?;
 
         stream_data_len += topdict.cff_index_size();
         stream_data_len += cffont.string.as_ref().expect("string").cff_index_size();
@@ -592,13 +593,13 @@ impl Dpx {
         // Data Layout order as described in CFF spec., sec 2 "Data Layout".
         let mut offset: i32 = 0;
         // Header
-        offset += cffont.cff_put_header(&mut stream_data[offset as usize..]);
+        offset += cffont.cff_put_header(&mut stream_data[offset as usize..])?;
         // Name
         offset += cffont
             .name
             .as_ref()
             .unwrap()
-            .cff_pack_index(&mut stream_data[offset as usize..]);
+            .cff_pack_index(&mut stream_data[offset as usize..])?;
         // Top DICT
         let topdict_offset = offset;
         offset += topdict.cff_index_size();
@@ -607,38 +608,40 @@ impl Dpx {
             .string
             .as_ref()
             .unwrap()
-            .cff_pack_index(&mut stream_data[offset as usize..]);
+            .cff_pack_index(&mut stream_data[offset as usize..])?;
         // Global Subrs
         offset += cffont
             .gsubr
             .as_ref()
             .unwrap()
-            .cff_pack_index(&mut stream_data[offset as usize..]);
+            .cff_pack_index(&mut stream_data[offset as usize..])?;
         // Encoding
         let td = cffont.topdict.as_mut().unwrap();
-        td.cff_dict_set(b"Encoding", 0, f64::from(offset));
-        offset += cffont.cff_pack_encoding(&mut stream_data[offset as usize..]);
+        td.cff_dict_set(b"Encoding", 0, f64::from(offset))?;
+        offset += cffont.cff_pack_encoding(&mut stream_data[offset as usize..])?;
         // charset
         let td = cffont.topdict.as_mut().unwrap();
-        td.cff_dict_set(b"charset", 0, f64::from(offset));
-        offset += cffont.cff_pack_charsets(&mut stream_data[offset as usize..]);
+        td.cff_dict_set(b"charset", 0, f64::from(offset))?;
+        offset += cffont.cff_pack_charsets(&mut stream_data[offset as usize..])?;
         // CharStrings
         let td = cffont.topdict.as_mut().unwrap();
-        td.cff_dict_set(b"CharStrings", 0, f64::from(offset));
-        offset += charstrings
-            .cff_pack_index(&mut stream_data[offset as usize..(offset + charstring_len) as usize]);
+        td.cff_dict_set(b"CharStrings", 0, f64::from(offset))?;
+        offset += charstrings.cff_pack_index(
+            &mut stream_data[offset as usize..(offset + charstring_len) as usize],
+        )?;
         cff_release_index(charstrings);
         // Private
         let td = cffont.topdict.as_mut().unwrap();
-        td.cff_dict_set(b"Private", 1, f64::from(offset));
+        td.cff_dict_set(b"Private", 1, f64::from(offset))?;
         if let Some(pd) = cffont.private[0].as_ref()
             && private_size > 0
         {
-            private_size = pd
-                .cff_dict_pack(&mut stream_data[offset as usize..(offset + private_size) as usize]);
+            private_size = pd.cff_dict_pack(
+                &mut stream_data[offset as usize..(offset + private_size) as usize],
+            )?;
         }
         let td = cffont.topdict.as_mut().unwrap();
-        td.cff_dict_set(b"Private", 0, f64::from(private_size));
+        td.cff_dict_set(b"Private", 0, f64::from(private_size))?;
         offset += private_size;
 
         // Finally Top DICT
@@ -648,17 +651,17 @@ impl Dpx {
             .topdict
             .as_ref()
             .unwrap()
-            .cff_dict_pack(&mut topdict.data[..n]);
+            .cff_dict_pack(&mut topdict.data[..n])?;
         let size = topdict.cff_index_size();
         topdict.cff_pack_index(
             &mut stream_data[topdict_offset as usize..(topdict_offset + size) as usize],
-        );
+        )?;
         cff_release_index(topdict);
 
         // Copyright and Trademark Notice ommited.
 
         // Handle Widths in fontdict.
-        self.type1c_add_SimpleMetrics(font_id, &cffont, &mut widths, num_glyphs);
+        self.type1c_add_SimpleMetrics(font_id, &cffont, &mut widths, num_glyphs)?;
 
         // Close font
         cffont.cff_close();
@@ -679,6 +682,6 @@ impl Dpx {
         self.o.add_stream(fontfile, &stream_data[..offset as usize]);
         self.o.release(fontfile);
 
-        0
+        Ok(0)
     }
 }

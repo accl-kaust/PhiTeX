@@ -94,7 +94,7 @@ pub fn cstr(s: &[u8]) -> &[u8] {
 }
 
 /// `spc_handler_fn_ptr`.
-pub type SpcHandlerFn = fn(&mut Dpx, &mut SpcEnv, &mut SpcArg) -> i32;
+pub type SpcHandlerFn = fn(&mut Dpx, &mut SpcEnv, &mut SpcArg) -> Result<i32>;
 
 /// `struct spc_handler`. `key` empty = C's NULL.
 #[derive(Clone, Copy)]
@@ -104,11 +104,11 @@ pub struct SpcHandler {
 }
 
 /// A begin/end-of-document/page/form hook (`int (*)(void)`).
-pub type SpcHookFn = fn(&mut Dpx) -> i32;
+pub type SpcHookFn = fn(&mut Dpx) -> Result<i32>;
 /// `check_func`: does this module take the special?
 pub type SpcCheckFn = fn(&[u8]) -> bool;
 /// `setup_func`: sets `sph.exec` (and `ap.command`), advances `ap`.
-pub type SpcSetupFn = fn(&mut Dpx, &mut SpcHandler, &mut SpcEnv, &mut SpcArg) -> i32;
+pub type SpcSetupFn = fn(&mut Dpx, &mut SpcHandler, &mut SpcEnv, &mut SpcArg) -> Result<i32>;
 
 /// An entry of `known_specials`.
 #[derive(Clone, Copy)]
@@ -276,8 +276,8 @@ fn spc_unsupported_setup_handler(
     sph: &mut SpcHandler,
     spe: &mut SpcEnv,
     ap: &mut SpcArg,
-) -> i32 {
-    -1
+) -> Result<i32> {
+    Ok(-1)
 }
 
 /// `_rkeys`: reserved names of `spc_lookup_reference`/`spc_lookup_object`.
@@ -313,9 +313,9 @@ fn ispageref(key: &[u8]) -> bool {
 }
 
 /// `spc_handler_unknown`.
-fn spc_handler_unknown(dpx: &mut Dpx, spe: &mut SpcEnv, args: &mut SpcArg) -> i32 {
+fn spc_handler_unknown(dpx: &mut Dpx, spe: &mut SpcEnv, args: &mut SpcArg) -> Result<i32> {
     args.curptr = args.endptr;
-    -1
+    Ok(-1)
 }
 
 /// `check_garbage`.
@@ -331,7 +331,7 @@ fn check_garbage(args: &mut SpcArg) {
 
 /// A parser's handler of unknown tokens that needs the whole program
 /// (spc_pdfm's and spc_misc's `parse_pdf_reference`).
-pub type DpxUnknown = fn(&mut Dpx, &[u8], &mut usize) -> Option<Obj>;
+pub type DpxUnknown = fn(&mut Dpx, &[u8], &mut usize) -> Result<Option<Obj>>;
 
 impl Dpx {
     /// Runs `f` on the objects with an `Unknown` handler that calls
@@ -363,7 +363,7 @@ impl Dpx {
         s: &[u8],
         pp: &mut usize,
         unknown: DpxUnknown,
-    ) -> Option<Obj> {
+    ) -> Result<Option<Obj>> {
         self.with_dpx_unknown(unknown, |o, u| o.parse_pdf_object_ext(s, pp, None, Some(u)))
     }
 
@@ -373,7 +373,7 @@ impl Dpx {
         s: &[u8],
         pp: &mut usize,
         unknown: DpxUnknown,
-    ) -> Option<Obj> {
+    ) -> Result<Option<Obj>> {
         self.with_dpx_unknown(unknown, |o, u| o.parse_pdf_tainted_dict(s, pp, Some(u)))
     }
 
@@ -395,7 +395,7 @@ impl Dpx {
 
     /// `spc_lookup_reference`: a reference (new link) for a named object
     /// or a reserved name (`@thispage`, `@xpos`…).
-    pub fn spc_lookup_reference(&mut self, ident: &[u8]) -> Option<Obj> {
+    pub fn spc_lookup_reference(&mut self, ident: &[u8]) -> Result<Option<Obj>> {
         let key = cstr(ident);
         let k = RKEYS.iter().position(|r| *r == key).unwrap_or(RKEYS.len());
         let value = match k {
@@ -444,12 +444,12 @@ impl Dpx {
             }
         };
         if value.is_none() {
-            crate::error!(
+            crate::fatal!(
                 "Object reference {} not exist.",
                 String::from_utf8_lossy(key)
             );
         }
-        value
+        Ok(value)
     }
 
     /// `spc_lookup_object`: the object itself (not linked).
@@ -487,10 +487,10 @@ impl Dpx {
         0
     }
     /// `spc_end_annot`.
-    pub fn spc_end_annot(&mut self, spe: &mut SpcEnv) -> i32 {
+    pub fn spc_end_annot(&mut self, spe: &mut SpcEnv) -> Result<i32> {
         self.dvi_untag_depth();
-        self.pdf_doc_end_annot();
-        0
+        self.pdf_doc_end_annot()?;
+        Ok(0)
     }
     /// `spc_resume_annot`.
     pub fn spc_resume_annot(&mut self, spe: &mut SpcEnv) -> i32 {
@@ -510,30 +510,30 @@ impl Dpx {
         ident: &[u8],
         cp: PdfCoord,
         cropbox: &PdfRect,
-    ) -> i32 {
+    ) -> Result<i32> {
         let mut error = 0;
-        let xobj_id = self.pdf_doc_begin_grabbing(ident, cp.x, cp.y, cropbox);
+        let xobj_id = self.pdf_doc_begin_grabbing(ident, cp.x, cp.y, cropbox)?;
         if xobj_id < 0 {
             error = -1;
         } else {
             for ks in &KNOWN_SPECIALS {
                 if let Some(f) = ks.bofhk_func {
-                    error = f(self);
+                    error = f(self)?;
                 }
             }
         }
-        error
+        Ok(error)
     }
     /// `spc_end_form`.
-    pub fn spc_end_form(&mut self, spe: &mut SpcEnv, attr: Option<Obj>) -> i32 {
+    pub fn spc_end_form(&mut self, spe: &mut SpcEnv, attr: Option<Obj>) -> Result<i32> {
         let mut error = 0;
-        self.pdf_doc_end_grabbing(attr);
+        self.pdf_doc_end_grabbing(attr)?;
         for ks in &KNOWN_SPECIALS {
             if let Some(f) = ks.eofhk_func {
-                error = f(self);
+                error = f(self)?;
             }
         }
-        error
+        Ok(error)
     }
 
     /// `spc_is_tracking_boxes`.
@@ -572,11 +572,12 @@ impl Dpx {
         ti: &mut TransformInfo,
         xpos: f64,
         ypos: f64,
-    ) {
+    ) -> Result<()> {
         let (xoff, yoff) = self.spc_get_coord(spe);
-        let (_, rect) = self.pdf_dev_put_image(res_id, ti, xpos - xoff, ypos - yoff);
+        let (_, rect) = self.pdf_dev_put_image(res_id, ti, xpos - xoff, ypos - yoff)?;
         spe.info.rect = rect;
         spe.info.is_drawable = 1;
+        Ok(())
     }
     /// `spc_get_current_point`.
     pub fn spc_get_current_point(&mut self, spe: &mut SpcEnv) -> PdfCoord {
@@ -643,48 +644,48 @@ impl Dpx {
     }
 
     /// `spc_exec_at_begin_page`.
-    pub fn spc_exec_at_begin_page(&mut self) -> i32 {
+    pub fn spc_exec_at_begin_page(&mut self) -> Result<i32> {
         let mut error = 0;
         for ks in &KNOWN_SPECIALS {
             if let Some(f) = ks.bophk_func {
-                error = f(self);
+                error = f(self)?;
             }
         }
-        error
+        Ok(error)
     }
     /// `spc_exec_at_end_page`.
-    pub fn spc_exec_at_end_page(&mut self) -> i32 {
+    pub fn spc_exec_at_end_page(&mut self) -> Result<i32> {
         let mut error = 0;
         for ks in &KNOWN_SPECIALS {
             if let Some(f) = ks.eophk_func {
-                error = f(self);
+                error = f(self)?;
             }
         }
-        error
+        Ok(error)
     }
     /// `spc_exec_at_begin_document`.
-    pub fn spc_exec_at_begin_document(&mut self) -> i32 {
+    pub fn spc_exec_at_begin_document(&mut self) -> Result<i32> {
         let mut error = 0;
         for ks in &KNOWN_SPECIALS {
             if let Some(f) = ks.bodhk_func {
-                error = f(self);
+                error = f(self)?;
             }
         }
         self.spc.coords = crate::dpxutil::DpxStack::dpx_stack_init();
         self.spc.pt_fixee = crate::dpxutil::DpxStack::dpx_stack_init();
-        error
+        Ok(error)
     }
     /// `spc_exec_at_end_document`.
-    pub fn spc_exec_at_end_document(&mut self) -> i32 {
+    pub fn spc_exec_at_end_document(&mut self) -> Result<i32> {
         let mut error = 0;
         for ks in &KNOWN_SPECIALS {
             if let Some(f) = ks.eodhk_func {
-                error = f(self);
+                error = f(self)?;
             }
         }
         while self.spc.coords.dpx_stack_pop().is_some() {}
         while self.spc.pt_fixee.dpx_stack_pop().is_some() {}
-        error
+        Ok(error)
     }
 
     /// `spc_exec_special`: error, and C's out-parameters `is_drawable`
@@ -696,7 +697,7 @@ impl Dpx {
         x_user: f64,
         y_user: f64,
         mag: f64,
-    ) -> (i32, i32, PdfRect) {
+    ) -> Result<(i32, i32, PdfRect)> {
         let mut error = -1;
         let mut is_drawable = 0;
         let mut rect = PdfRect::default();
@@ -706,9 +707,9 @@ impl Dpx {
         for ks in &KNOWN_SPECIALS {
             let found = (ks.check_func)(buffer);
             if found {
-                error = (ks.setup_func)(self, &mut special, &mut spe, &mut args);
+                error = (ks.setup_func)(self, &mut special, &mut spe, &mut args)?;
                 if error == 0 {
-                    error = (special.exec)(self, &mut spe, &mut args);
+                    error = (special.exec)(self, &mut spe, &mut args)?;
                 }
                 if error != 0 {
                     print_error(self, ks.key, &mut spe, &mut args);
@@ -722,7 +723,7 @@ impl Dpx {
 
         check_garbage(&mut args);
 
-        (error, is_drawable, rect)
+        Ok((error, is_drawable, rect))
     }
 }
 

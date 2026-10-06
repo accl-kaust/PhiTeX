@@ -609,16 +609,16 @@ pub static CFF_STDSTR: [&[u8]; 391] = [
 use crate::cff_dict::cff_dict_unpack;
 
 /// `get_unsigned` (`get_offset`): an `n`-byte big-endian number.
-fn get_unsigned(stream: &mut MemFile, n: i32) -> u32 {
+fn get_unsigned(stream: &mut MemFile, n: i32) -> Result<u32> {
     let mut v: u32 = 0;
     let mut n = n;
     while n > 0 {
         n -= 1;
         v = v
             .wrapping_mul(0x100)
-            .wrapping_add(u32::from(stream.get_unsigned_byte()));
+            .wrapping_add(u32::from(stream.get_unsigned_byte()?));
     }
-    v
+    Ok(v)
 }
 
 impl CffFont {
@@ -628,7 +628,7 @@ impl CffFont {
 
     /// `cff_open`: the font at `offset` in `stream` (`idx` of a fontset);
     /// takes the stream (pass a clone to keep reading the file).
-    pub fn cff_open(stream: MemFile, offset: i32, idx: i32) -> Option<CffFont> {
+    pub fn cff_open(stream: MemFile, offset: i32, idx: i32) -> Result<Option<CffFont>> {
         let n = idx;
         let mut cff = CffFont {
             fontname: None,
@@ -643,12 +643,12 @@ impl CffFont {
         };
 
         cff.cff_seek_set(0);
-        cff.header.major = cff.st().get_unsigned_byte();
-        cff.header.minor = cff.st().get_unsigned_byte();
-        cff.header.hdr_size = cff.st().get_unsigned_byte();
-        cff.header.offsize = cff.st().get_unsigned_byte();
+        cff.header.major = cff.st().get_unsigned_byte()?;
+        cff.header.minor = cff.st().get_unsigned_byte()?;
+        cff.header.hdr_size = cff.st().get_unsigned_byte()?;
+        cff.header.offsize = cff.st().get_unsigned_byte()?;
         if cff.header.offsize < 1 || cff.header.offsize > 4 {
-            error!("invalid offsize data");
+            fatal!("invalid offsize data");
         }
 
         if cff.header.major > 1 || cff.header.minor > 0 {
@@ -656,16 +656,16 @@ impl CffFont {
                 "CFF: CFF version {}.{} not supported.",
                 cff.header.major, cff.header.minor
             );
-            return None;
+            return Ok(None);
         }
 
         cff.cff_seek_set(cff.header.hdr_size as usize);
 
         // Name INDEX
-        let idx = cff.cff_get_index();
+        let idx = cff.cff_get_index()?;
         if n > i32::from(idx.count) - 1 {
             warn!("CFF: Invalid CFF fontset index number.");
-            return None;
+            return Ok(None);
         }
 
         cff.name = Some(idx);
@@ -673,35 +673,35 @@ impl CffFont {
         cff.fontname = Some(cff.cff_get_name());
 
         // Top DICT INDEX
-        let idx = cff.cff_get_index();
+        let idx = cff.cff_get_index()?;
         if n > i32::from(idx.count) - 1 {
-            error!("CFF Top DICT not exist...");
+            fatal!("CFF Top DICT not exist...");
         }
         let a = idx.offset[n as usize] as usize - 1;
         let b = idx.offset[n as usize + 1] as usize - 1;
-        cff.topdict = cff_dict_unpack(&idx.data[a..b]);
+        cff.topdict = cff_dict_unpack(&idx.data[a..b])?;
         if cff.topdict.is_none() {
-            error!("Parsing CFF Top DICT data failed...");
+            fatal!("Parsing CFF Top DICT data failed...");
         }
         drop(idx);
 
         {
             let td = cff.topdict.as_ref().unwrap();
             if td.cff_dict_known(b"CharstringType") != 0
-                && td.cff_dict_get(b"CharstringType", 0) != 2.0
+                && td.cff_dict_get(b"CharstringType", 0)? != 2.0
             {
                 warn!("Only Type 2 Charstrings supported...");
-                return None;
+                return Ok(None);
             }
 
             if td.cff_dict_known(b"SyntheticBase") != 0 {
                 warn!("CFF Synthetic font not supported.");
-                return None;
+                return Ok(None);
             }
         }
 
         // String INDEX
-        cff.string = Some(cff.cff_get_index());
+        cff.string = Some(cff.cff_get_index()?);
 
         // offset to GSubr
         cff.gsubr_offset = (cff.st().tell() as i64 - i64::from(offset)) as LOffset;
@@ -711,9 +711,9 @@ impl CffFont {
             .topdict
             .as_ref()
             .unwrap()
-            .cff_dict_get(b"CharStrings", 0) as i32;
+            .cff_dict_get(b"CharStrings", 0)? as i32;
         cff.cff_seek_set(offset as usize);
-        cff.num_glyphs = cff.st().get_unsigned_pair();
+        cff.num_glyphs = cff.st().get_unsigned_pair()?;
 
         let td = cff.topdict.as_ref().unwrap();
         // Check for font type
@@ -725,7 +725,7 @@ impl CffFont {
 
         // Check for encoding
         if td.cff_dict_known(b"Encoding") != 0 {
-            let offset = td.cff_dict_get(b"Encoding", 0) as i32;
+            let offset = td.cff_dict_get(b"Encoding", 0)? as i32;
             if offset == 0 {
                 // predefined
                 cff.flag |= ENCODING_STANDARD;
@@ -739,7 +739,7 @@ impl CffFont {
         // Check for charset
         let td = cff.topdict.as_ref().unwrap();
         if td.cff_dict_known(b"charset") != 0 {
-            let offset = td.cff_dict_get(b"charset", 0) as i32;
+            let offset = td.cff_dict_get(b"charset", 0)? as i32;
             if offset == 0 {
                 // predefined
                 cff.flag |= CHARSETS_ISOADOBE;
@@ -754,7 +754,7 @@ impl CffFont {
 
         cff.cff_seek_set(cff.gsubr_offset as usize); // seek back to GSubr
 
-        Some(cff)
+        Ok(Some(cff))
     }
     /// `cff_close`.
     pub fn cff_close(self) {
@@ -779,9 +779,9 @@ impl CffFont {
     }
     /// `cff_put_header` (C also sets `header.offsize` to 4, which nothing
     /// reads after).
-    pub fn cff_put_header(&self, dest: &mut [u8]) -> i32 {
+    pub fn cff_put_header(&self, dest: &mut [u8]) -> Result<i32> {
         if dest.len() < 4 {
-            error!("Not enough space available...");
+            fatal!("Not enough space available...");
         }
         dest[0] = self.header.major;
         dest[1] = self.header.minor;
@@ -789,26 +789,26 @@ impl CffFont {
         dest[2] = 4;
         // We will set all offset (0) to four-byte integer.
         dest[3] = 4;
-        4
+        Ok(4)
     }
     /// `cff_get_index`: an INDEX with its data, at the stream position.
-    pub fn cff_get_index(&mut self) -> CffIndex {
+    pub fn cff_get_index(&mut self) -> Result<CffIndex> {
         let mut idx = CffIndex::default();
-        let count = self.st().get_unsigned_pair();
+        let count = self.st().get_unsigned_pair()?;
         idx.count = count;
         if count > 0 {
-            idx.offsize = self.st().get_unsigned_byte();
+            idx.offsize = self.st().get_unsigned_byte()?;
             if idx.offsize < 1 || idx.offsize > 4 {
-                error!("invalid offsize data");
+                fatal!("invalid offsize data");
             }
 
             idx.offset = vec![0; count as usize + 1];
             for i in 0..=count as usize {
-                idx.offset[i] = get_unsigned(self.st(), i32::from(idx.offsize));
+                idx.offset[i] = get_unsigned(self.st(), i32::from(idx.offsize))?;
             }
 
             if idx.offset[0] != 1 {
-                error!("Invalid CFF Index offset data");
+                fatal!("Invalid CFF Index offset data");
             }
 
             let length = idx.offset[count as usize].wrapping_sub(idx.offset[0]) as i32;
@@ -817,7 +817,7 @@ impl CffFont {
                 let d = self.st().read(length as usize).to_vec();
                 if d.len() != length as usize {
                     // C loops on fread for ever.
-                    error!("CFF: reading INDEX data failed");
+                    fatal!("CFF: reading INDEX data failed");
                 }
                 idx.data = d;
             }
@@ -826,35 +826,35 @@ impl CffFont {
             idx.offset = Vec::new();
             idx.data = Vec::new();
         }
-        idx
+        Ok(idx)
     }
     /// `cff_get_index_header`: an INDEX's offsets; the stream is left at
     /// its data.
-    pub fn cff_get_index_header(&mut self) -> CffIndex {
+    pub fn cff_get_index_header(&mut self) -> Result<CffIndex> {
         let mut idx = CffIndex::default();
-        let count = self.st().get_unsigned_pair();
+        let count = self.st().get_unsigned_pair()?;
         idx.count = count;
         if count > 0 {
-            idx.offsize = self.st().get_unsigned_byte();
+            idx.offsize = self.st().get_unsigned_byte()?;
             if idx.offsize < 1 || idx.offsize > 4 {
-                error!("invalid offsize data");
+                fatal!("invalid offsize data");
             }
 
             idx.offset = vec![0; count as usize + 1];
             let mut i = 0usize;
             while i < count as usize {
-                idx.offset[i] = get_unsigned(self.st(), i32::from(idx.offsize));
+                idx.offset[i] = get_unsigned(self.st(), i32::from(idx.offsize))?;
                 i += 1;
             }
             if count == 0xFFFF {
                 let p = self.cff_tell() + idx.offsize as usize;
                 self.cff_seek(p);
             } else {
-                idx.offset[i] = get_unsigned(self.st(), i32::from(idx.offsize));
+                idx.offset[i] = get_unsigned(self.st(), i32::from(idx.offsize))?;
             }
 
             if idx.offset[0] != 1 {
-                error!("cff_get_index(): invalid index data");
+                fatal!("cff_get_index(): invalid index data");
             }
 
             idx.data = Vec::new();
@@ -863,7 +863,7 @@ impl CffFont {
             idx.offset = Vec::new();
             idx.data = Vec::new();
         }
-        idx
+        Ok(idx)
     }
     /// `cff_get_name`: the font's name (a copy).
     pub fn cff_get_name(&self) -> Vec<u8> {
@@ -874,9 +874,9 @@ impl CffFont {
         idx.data[a..a + len].to_vec()
     }
     /// `cff_set_name`.
-    pub fn cff_set_name(&mut self, name: &[u8]) -> i32 {
+    pub fn cff_set_name(&mut self, name: &[u8]) -> Result<i32> {
         if name.len() > 127 {
-            error!("FontName string length too large...");
+            fatal!("FontName string length too large...");
         }
 
         self.name = Some(CffIndex {
@@ -886,23 +886,23 @@ impl CffFont {
             data: name.to_vec(), // no trailing '\0'
         });
 
-        5 + name.len() as i32
+        Ok(5 + name.len() as i32)
     }
     /// `cff_read_subrs`.
-    pub fn cff_read_subrs(&mut self) -> i32 {
+    pub fn cff_read_subrs(&mut self) -> Result<i32> {
         let mut len = 0;
 
         if (self.flag & FONTTYPE_CIDFONT) != 0 && self.fdarray.is_empty() {
-            self.cff_read_fdarray();
+            self.cff_read_fdarray()?;
         }
 
         if self.private.is_empty() {
-            self.cff_read_private();
+            self.cff_read_private()?;
         }
 
         if self.gsubr.is_none() {
             self.cff_seek_set(self.gsubr_offset as usize);
-            self.gsubr = Some(self.cff_get_index());
+            self.gsubr = Some(self.cff_get_index()?);
         }
 
         self.subrs = vec![None; self.num_fds as usize];
@@ -918,10 +918,13 @@ impl CffFont {
                     let mut offset = self.fdarray[i]
                         .as_ref()
                         .expect("Font DICT")
-                        .cff_dict_get(b"Private", 1) as i32;
-                    offset += self.private[i].as_ref().unwrap().cff_dict_get(b"Subrs", 0) as i32;
+                        .cff_dict_get(b"Private", 1)? as i32;
+                    offset += self.private[i]
+                        .as_ref()
+                        .unwrap()
+                        .cff_dict_get(b"Subrs", 0)? as i32;
                     self.cff_seek_set(offset as usize);
-                    let s = self.cff_get_index();
+                    let s = self.cff_get_index()?;
                     len += s.cff_index_size();
                     self.subrs[i] = Some(s);
                 }
@@ -934,76 +937,83 @@ impl CffFont {
             if !known {
                 self.subrs[0] = None;
             } else {
-                let mut offset = self.topdict.as_ref().unwrap().cff_dict_get(b"Private", 1) as i32;
-                offset += self.private[0].as_ref().unwrap().cff_dict_get(b"Subrs", 0) as i32;
+                let mut offset = self.topdict.as_ref().unwrap().cff_dict_get(b"Private", 1)? as i32;
+                offset += self.private[0]
+                    .as_ref()
+                    .unwrap()
+                    .cff_dict_get(b"Subrs", 0)? as i32;
                 self.cff_seek_set(offset as usize);
-                let s = self.cff_get_index();
+                let s = self.cff_get_index()?;
                 len += s.cff_index_size();
                 self.subrs[0] = Some(s);
             }
         }
 
-        len
+        Ok(len)
     }
     /// `cff_read_encoding`.
-    pub fn cff_read_encoding(&mut self) -> i32 {
+    pub fn cff_read_encoding(&mut self) -> Result<i32> {
         if self.topdict.is_none() {
-            error!("Top DICT data not found");
+            fatal!("Top DICT data not found");
         }
 
         if self.topdict.as_ref().unwrap().cff_dict_known(b"Encoding") == 0 {
             self.flag |= ENCODING_STANDARD;
             self.encoding = None;
-            return 0;
+            return Ok(0);
         }
 
-        let offset = self.topdict.as_ref().unwrap().cff_dict_get(b"Encoding", 0) as i32;
+        let offset = self
+            .topdict
+            .as_ref()
+            .unwrap()
+            .cff_dict_get(b"Encoding", 0)? as i32;
         if offset == 0 {
             // predefined
             self.flag |= ENCODING_STANDARD;
             self.encoding = None;
-            return 0;
+            return Ok(0);
         } else if offset == 1 {
             self.flag |= ENCODING_EXPERT;
             self.encoding = None;
-            return 0;
+            return Ok(0);
         }
 
         self.cff_seek_set(offset as usize);
         let mut encoding = CffEncoding::default();
-        encoding.format = self.st().get_unsigned_byte();
+        encoding.format = self.st().get_unsigned_byte()?;
         let mut length = 1;
 
         match encoding.format & !0x80 {
             0 => {
-                encoding.num_entries = self.st().get_unsigned_byte();
+                encoding.num_entries = self.st().get_unsigned_byte()?;
                 encoding.codes = vec![0; encoding.num_entries as usize];
                 for i in 0..encoding.num_entries as usize {
-                    encoding.codes[i] = self.st().get_unsigned_byte();
+                    encoding.codes[i] = self.st().get_unsigned_byte()?;
                 }
                 length += i32::from(encoding.num_entries) + 1;
             }
             1 => {
-                encoding.num_entries = self.st().get_unsigned_byte();
+                encoding.num_entries = self.st().get_unsigned_byte()?;
                 encoding.range1 = vec![CffRange1::default(); encoding.num_entries as usize];
                 for i in 0..encoding.num_entries as usize {
-                    encoding.range1[i].first = SSid::from(self.st().get_unsigned_byte());
-                    encoding.range1[i].n_left = self.st().get_unsigned_byte();
+                    encoding.range1[i].first = SSid::from(self.st().get_unsigned_byte()?);
+                    encoding.range1[i].n_left = self.st().get_unsigned_byte()?;
                 }
                 length += i32::from(encoding.num_entries) * 2 + 1;
             }
             _ => {
-                error!("Unknown Encoding format");
+                fatal!("Unknown Encoding format");
             }
         }
 
         // Supplementary data
         if (encoding.format & 0x80) != 0 {
-            encoding.num_supps = self.st().get_unsigned_byte();
+            encoding.num_supps = self.st().get_unsigned_byte()?;
             encoding.supp = vec![CffMap::default(); encoding.num_supps as usize];
             for i in 0..encoding.num_supps as usize {
-                encoding.supp[i].code = self.st().get_unsigned_byte();
-                encoding.supp[i].glyph = self.st().get_unsigned_pair(); // SID
+                encoding.supp[i].code = self.st().get_unsigned_byte()?;
+                encoding.supp[i].glyph = self.st().get_unsigned_pair()?; // SID
             }
             length += i32::from(encoding.num_supps) * 3 + 1;
         } else {
@@ -1012,19 +1022,19 @@ impl CffFont {
         }
 
         self.encoding = Some(encoding);
-        length
+        Ok(length)
     }
     /// `cff_pack_encoding`.
-    pub fn cff_pack_encoding(&self, dest: &mut [u8]) -> i32 {
+    pub fn cff_pack_encoding(&self, dest: &mut [u8]) -> Result<i32> {
         let destlen = dest.len() as i32;
         let mut len: usize = 0;
 
         if (self.flag & HAVE_STANDARD_ENCODING) != 0 || self.encoding.is_none() {
-            return 0;
+            return Ok(0);
         }
 
         if destlen < 2 {
-            error!("in cff_pack_encoding(): Buffer overflow");
+            fatal!("in cff_pack_encoding(): Buffer overflow");
         }
 
         let encoding = self.encoding.as_ref().unwrap();
@@ -1036,7 +1046,7 @@ impl CffFont {
         match encoding.format & !0x80 {
             0 => {
                 if destlen < len as i32 + i32::from(encoding.num_entries) {
-                    error!("in cff_pack_encoding(): Buffer overflow");
+                    fatal!("in cff_pack_encoding(): Buffer overflow");
                 }
                 for i in 0..encoding.num_entries as usize {
                     dest[len] = encoding.codes[i];
@@ -1045,7 +1055,7 @@ impl CffFont {
             }
             1 => {
                 if destlen < len as i32 + i32::from(encoding.num_entries) * 2 {
-                    error!("in cff_pack_encoding(): Buffer overflow");
+                    fatal!("in cff_pack_encoding(): Buffer overflow");
                 }
                 for i in 0..encoding.num_entries as usize {
                     dest[len] = (encoding.range1[i].first & 0xff) as u8;
@@ -1055,13 +1065,13 @@ impl CffFont {
                 }
             }
             _ => {
-                error!("Unknown Encoding format");
+                fatal!("Unknown Encoding format");
             }
         }
 
         if (encoding.format & 0x80) != 0 {
             if destlen < len as i32 + i32::from(encoding.num_supps) * 3 + 1 {
-                error!("in cff_pack_encoding(): Buffer overflow");
+                fatal!("in cff_pack_encoding(): Buffer overflow");
             }
             dest[len] = encoding.num_supps;
             len += 1;
@@ -1075,14 +1085,14 @@ impl CffFont {
             }
         }
 
-        len as i32
+        Ok(len as i32)
     }
     /// `cff_encoding_lookup`: the GID of `code`.
-    pub fn cff_encoding_lookup(&self, code: Card8) -> Card16 {
+    pub fn cff_encoding_lookup(&self, code: Card8) -> Result<Card16> {
         if (self.flag & (ENCODING_STANDARD | ENCODING_EXPERT)) != 0 {
-            error!("Predefined CFF encoding not supported yet");
+            fatal!("Predefined CFF encoding not supported yet");
         } else if self.encoding.is_none() {
-            error!("Encoding data not available");
+            fatal!("Encoding data not available");
         }
 
         let encoding = self.encoding.as_ref().unwrap();
@@ -1115,57 +1125,57 @@ impl CffFont {
                 }
             }
             _ => {
-                error!("Unknown Encoding format.");
+                fatal!("Unknown Encoding format.");
             }
         }
 
         // Supplementary data
         if gid == 0 && (encoding.format & 0x80) != 0 {
             if encoding.supp.is_empty() && encoding.num_supps > 0 {
-                error!("No CFF supplementary encoding data read.");
+                fatal!("No CFF supplementary encoding data read.");
             }
             for i in 0..encoding.num_supps as usize {
                 if code == encoding.supp[i].code {
-                    gid = self.cff_charsets_lookup(encoding.supp[i].glyph);
+                    gid = self.cff_charsets_lookup(encoding.supp[i].glyph)?;
                     break;
                 }
             }
         }
 
-        gid
+        Ok(gid)
     }
     /// `cff_read_charsets`.
-    pub fn cff_read_charsets(&mut self) -> i32 {
+    pub fn cff_read_charsets(&mut self) -> Result<i32> {
         if self.topdict.is_none() {
-            error!("Top DICT not available");
+            fatal!("Top DICT not available");
         }
 
         if self.topdict.as_ref().unwrap().cff_dict_known(b"charset") == 0 {
             self.flag |= CHARSETS_ISOADOBE;
             self.charsets = None;
-            return 0;
+            return Ok(0);
         }
 
-        let offset = self.topdict.as_ref().unwrap().cff_dict_get(b"charset", 0) as i32;
+        let offset = self.topdict.as_ref().unwrap().cff_dict_get(b"charset", 0)? as i32;
 
         if offset == 0 {
             // predefined
             self.flag |= CHARSETS_ISOADOBE;
             self.charsets = None;
-            return 0;
+            return Ok(0);
         } else if offset == 1 {
             self.flag |= CHARSETS_EXPERT;
             self.charsets = None;
-            return 0;
+            return Ok(0);
         } else if offset == 2 {
             self.flag |= CHARSETS_EXPSUB;
             self.charsets = None;
-            return 0;
+            return Ok(0);
         }
 
         self.cff_seek_set(offset as usize);
         let mut charset = CffCharsets::default();
-        charset.format = self.st().get_unsigned_byte();
+        charset.format = self.st().get_unsigned_byte()?;
         charset.num_entries = 0;
 
         let mut count: Card16 = self.num_glyphs.wrapping_sub(1);
@@ -1178,14 +1188,14 @@ impl CffFont {
                 charset.glyphs = vec![0; charset.num_entries as usize];
                 length += i32::from(charset.num_entries) * 2;
                 for i in 0..charset.num_entries as usize {
-                    charset.glyphs[i] = self.st().get_unsigned_pair();
+                    charset.glyphs[i] = self.st().get_unsigned_pair()?;
                 }
                 count = 0;
             }
             1 => {
                 while count > 0 && charset.num_entries < self.num_glyphs {
-                    let first = self.st().get_unsigned_pair();
-                    let n_left = self.st().get_unsigned_byte();
+                    let first = self.st().get_unsigned_pair()?;
+                    let n_left = self.st().get_unsigned_byte()?;
                     charset.range1.push(CffRange1 { first, n_left });
                     count = (i32::from(count) - (i32::from(n_left) + 1)) as Card16; // no-overrap
                     charset.num_entries += 1;
@@ -1194,8 +1204,8 @@ impl CffFont {
             }
             2 => {
                 while count > 0 && charset.num_entries < self.num_glyphs {
-                    let first = self.st().get_unsigned_pair();
-                    let n_left = self.st().get_unsigned_pair();
+                    let first = self.st().get_unsigned_pair()?;
+                    let n_left = self.st().get_unsigned_pair()?;
                     charset.range2.push(CffRange2 { first, n_left });
                     count = (i32::from(count) - (i32::from(n_left) + 1)) as Card16; // non-overrapping
                     charset.num_entries += 1;
@@ -1203,28 +1213,28 @@ impl CffFont {
                 length += i32::from(charset.num_entries) * 4;
             }
             _ => {
-                error!("Unknown Charset format");
+                fatal!("Unknown Charset format");
             }
         }
         self.charsets = Some(charset);
 
         if count > 0 {
-            error!("Charset data possibly broken");
+            fatal!("Charset data possibly broken");
         }
 
-        length
+        Ok(length)
     }
     /// `cff_pack_charsets`.
-    pub fn cff_pack_charsets(&self, dest: &mut [u8]) -> i32 {
+    pub fn cff_pack_charsets(&self, dest: &mut [u8]) -> Result<i32> {
         let destlen = dest.len() as i32;
         let mut len: usize = 0;
 
         if (self.flag & HAVE_STANDARD_CHARSETS) != 0 || self.charsets.is_none() {
-            return 0;
+            return Ok(0);
         }
 
         if destlen < 1 {
-            error!("in cff_pack_charsets(): Buffer overflow");
+            fatal!("in cff_pack_charsets(): Buffer overflow");
         }
 
         let charset = self.charsets.as_ref().unwrap();
@@ -1234,7 +1244,7 @@ impl CffFont {
         match charset.format {
             0 => {
                 if destlen < len as i32 + i32::from(charset.num_entries) * 2 {
-                    error!("in cff_pack_charsets(): Buffer overflow");
+                    fatal!("in cff_pack_charsets(): Buffer overflow");
                 }
                 for i in 0..charset.num_entries as usize {
                     let sid = charset.glyphs[i]; // or CID
@@ -1246,7 +1256,7 @@ impl CffFont {
             }
             1 => {
                 if destlen < len as i32 + i32::from(charset.num_entries) * 3 {
-                    error!("in cff_pack_charsets(): Buffer overflow");
+                    fatal!("in cff_pack_charsets(): Buffer overflow");
                 }
                 for i in 0..charset.num_entries as usize {
                     let r = charset.range1[i];
@@ -1260,7 +1270,7 @@ impl CffFont {
             }
             2 => {
                 if destlen < len as i32 + i32::from(charset.num_entries) * 4 {
-                    error!("in cff_pack_charsets(): Buffer overflow");
+                    fatal!("in cff_pack_charsets(): Buffer overflow");
                 }
                 for i in 0..charset.num_entries as usize {
                     let r = charset.range2[i];
@@ -1275,23 +1285,23 @@ impl CffFont {
                 }
             }
             _ => {
-                error!("Unknown Charset format");
+                fatal!("Unknown Charset format");
             }
         }
 
-        len as i32
+        Ok(len as i32)
     }
     /// `cff_glyph_lookup`: the GID of PS name `glyph`.
-    pub fn cff_glyph_lookup(&self, glyph: &[u8]) -> Card16 {
+    pub fn cff_glyph_lookup(&self, glyph: &[u8]) -> Result<Card16> {
         if (self.flag & (CHARSETS_ISOADOBE | CHARSETS_EXPERT | CHARSETS_EXPSUB)) != 0 {
-            error!("Predefined CFF charsets not supported yet");
+            fatal!("Predefined CFF charsets not supported yet");
         } else if self.charsets.is_none() {
-            error!("Charsets data not available");
+            fatal!("Charsets data not available");
         }
 
         // .notdef always have glyph index 0
         if glyph == b".notdef" {
-            return 0;
+            return Ok(0);
         }
 
         let charset = self.charsets.as_ref().unwrap();
@@ -1301,8 +1311,8 @@ impl CffFont {
             0 => {
                 for i in 0..charset.num_entries as usize {
                     gid = gid.wrapping_add(1);
-                    if self.cff_match_string(glyph, charset.glyphs[i]) != 0 {
-                        return gid;
+                    if self.cff_match_string(glyph, charset.glyphs[i])? != 0 {
+                        return Ok(gid);
                     }
                 }
             }
@@ -1311,8 +1321,8 @@ impl CffFont {
                     let r = charset.range1[i];
                     for n in 0..=u32::from(r.n_left) {
                         gid = gid.wrapping_add(1);
-                        if self.cff_match_string(glyph, (u32::from(r.first) + n) as SSid) != 0 {
-                            return gid;
+                        if self.cff_match_string(glyph, (u32::from(r.first) + n) as SSid)? != 0 {
+                            return Ok(gid);
                         }
                     }
                 }
@@ -1322,62 +1332,66 @@ impl CffFont {
                     let r = charset.range2[i];
                     for n in 0..=u32::from(r.n_left) {
                         gid = gid.wrapping_add(1);
-                        if self.cff_match_string(glyph, (u32::from(r.first) + n) as SSid) != 0 {
-                            return gid;
+                        if self.cff_match_string(glyph, (u32::from(r.first) + n) as SSid)? != 0 {
+                            return Ok(gid);
                         }
                     }
                 }
             }
             _ => {
-                error!("Unknown Charset format");
+                fatal!("Unknown Charset format");
             }
         }
 
-        0 // not found, returns .notdef
+        Ok(0) // not found, returns .notdef
     }
     /// `cff_get_glyphname`: the PS name of `gid` (a copy).
-    pub fn cff_get_glyphname(&self, gid: Card16) -> Vec<u8> {
-        let sid = self.cff_charsets_lookup_inverse(gid);
-        self.cff_get_string(sid)
+    pub fn cff_get_glyphname(&self, gid: Card16) -> Result<Vec<u8>> {
+        let sid = self.cff_charsets_lookup_inverse(gid)?;
+        Ok(self.cff_get_string(sid))
     }
     /// `cff_charsets_lookup`: the GID of SID/CID `cid`.
-    pub fn cff_charsets_lookup(&self, cid: Card16) -> Card16 {
+    pub fn cff_charsets_lookup(&self, cid: Card16) -> Result<Card16> {
         if (self.flag & (CHARSETS_ISOADOBE | CHARSETS_EXPERT | CHARSETS_EXPSUB)) != 0 {
-            error!("Predefined CFF charsets not supported yet");
+            fatal!("Predefined CFF charsets not supported yet");
         } else if self.charsets.is_none() {
-            error!("Charsets data not available");
+            fatal!("Charsets data not available");
         }
 
         self.charsets.as_ref().unwrap().cff_charsets_lookup_gid(cid)
     }
     /// `cff_charsets_lookup_inverse`: the SID or CID of `gid`.
-    pub fn cff_charsets_lookup_inverse(&self, gid: Card16) -> Card16 {
+    pub fn cff_charsets_lookup_inverse(&self, gid: Card16) -> Result<Card16> {
         if (self.flag & (CHARSETS_ISOADOBE | CHARSETS_EXPERT | CHARSETS_EXPSUB)) != 0 {
-            error!("Predefined CFF charsets not supported yet");
+            fatal!("Predefined CFF charsets not supported yet");
         } else if self.charsets.is_none() {
-            error!("Charsets data not available");
+            fatal!("Charsets data not available");
         }
 
         if gid == 0 {
-            return 0; // .notdef
+            return Ok(0); // .notdef
         }
 
         self.charsets.as_ref().unwrap().cff_charsets_lookup_cid(gid)
     }
     /// `cff_read_fdselect`.
-    pub fn cff_read_fdselect(&mut self) -> i32 {
+    pub fn cff_read_fdselect(&mut self) -> Result<i32> {
         if self.topdict.is_none() {
-            error!("Top DICT not available");
+            fatal!("Top DICT not available");
         }
 
         if (self.flag & FONTTYPE_CIDFONT) == 0 {
-            return 0;
+            return Ok(0);
         }
 
-        let offset = self.topdict.as_ref().unwrap().cff_dict_get(b"FDSelect", 0) as i32;
+        let offset = self
+            .topdict
+            .as_ref()
+            .unwrap()
+            .cff_dict_get(b"FDSelect", 0)? as i32;
         self.cff_seek_set(offset as usize);
         let mut fdsel = CffFdselect::default();
-        fdsel.format = self.st().get_unsigned_byte();
+        fdsel.format = self.st().get_unsigned_byte()?;
 
         let mut length = 1;
 
@@ -1386,44 +1400,44 @@ impl CffFont {
                 fdsel.num_entries = self.num_glyphs;
                 fdsel.fds = vec![0; fdsel.num_entries as usize];
                 for i in 0..fdsel.num_entries as usize {
-                    fdsel.fds[i] = self.st().get_unsigned_byte();
+                    fdsel.fds[i] = self.st().get_unsigned_byte()?;
                 }
                 length += i32::from(fdsel.num_entries);
             }
             3 => {
-                fdsel.num_entries = self.st().get_unsigned_pair();
+                fdsel.num_entries = self.st().get_unsigned_pair()?;
                 fdsel.ranges = vec![CffRange3::default(); fdsel.num_entries as usize];
                 for i in 0..fdsel.num_entries as usize {
-                    fdsel.ranges[i].first = self.st().get_unsigned_pair();
-                    fdsel.ranges[i].fd = self.st().get_unsigned_byte();
+                    fdsel.ranges[i].first = self.st().get_unsigned_pair()?;
+                    fdsel.ranges[i].fd = self.st().get_unsigned_byte()?;
                 }
                 if fdsel.ranges[0].first != 0 {
-                    error!("Range not starting with 0.");
+                    fatal!("Range not starting with 0.");
                 }
-                if self.num_glyphs != self.st().get_unsigned_pair() {
-                    error!("Sentinel value mismatched with number of glyphs.");
+                if self.num_glyphs != self.st().get_unsigned_pair()? {
+                    fatal!("Sentinel value mismatched with number of glyphs.");
                 }
                 length += i32::from(fdsel.num_entries) * 3 + 4;
             }
             _ => {
-                error!("Unknown FDSelect format.");
+                fatal!("Unknown FDSelect format.");
             }
         }
         self.fdselect = Some(fdsel);
 
-        length
+        Ok(length)
     }
     /// `cff_pack_fdselect`.
-    pub fn cff_pack_fdselect(&self, dest: &mut [u8]) -> i32 {
+    pub fn cff_pack_fdselect(&self, dest: &mut [u8]) -> Result<i32> {
         let destlen = dest.len() as i32;
         let mut len: usize = 0;
 
         let Some(fdsel) = self.fdselect.as_ref() else {
-            return 0;
+            return Ok(0);
         };
 
         if destlen < 1 {
-            error!("in cff_pack_fdselect(): Buffur overflow");
+            fatal!("in cff_pack_fdselect(): Buffur overflow");
         }
 
         dest[len] = fdsel.format;
@@ -1431,10 +1445,10 @@ impl CffFont {
         match fdsel.format {
             0 => {
                 if fdsel.num_entries != self.num_glyphs {
-                    error!("in cff_pack_fdselect(): Invalid data");
+                    fatal!("in cff_pack_fdselect(): Invalid data");
                 }
                 if destlen < len as i32 + i32::from(fdsel.num_entries) {
-                    error!("in cff_pack_fdselect(): Buffer overflow");
+                    fatal!("in cff_pack_fdselect(): Buffer overflow");
                 }
                 for i in 0..fdsel.num_entries as usize {
                     dest[len] = fdsel.fds[i];
@@ -1443,12 +1457,12 @@ impl CffFont {
             }
             3 => {
                 if destlen < len as i32 + 2 {
-                    error!("in cff_pack_fdselect(): Buffer overflow");
+                    fatal!("in cff_pack_fdselect(): Buffer overflow");
                 }
                 len += 2;
                 for i in 0..fdsel.num_entries as usize {
                     if destlen < len as i32 + 3 {
-                        error!("in cff_pack_fdselect(): Buffer overflow");
+                        fatal!("in cff_pack_fdselect(): Buffer overflow");
                     }
                     dest[len] = ((fdsel.ranges[i].first >> 8) & 0xff) as u8;
                     len += 1;
@@ -1458,7 +1472,7 @@ impl CffFont {
                     len += 1;
                 }
                 if destlen < len as i32 + 2 {
-                    error!("in cff_pack_fdselect(): Buffer overflow");
+                    fatal!("in cff_pack_fdselect(): Buffer overflow");
                 }
                 dest[len] = ((self.num_glyphs >> 8) & 0xff) as u8;
                 len += 1;
@@ -1469,20 +1483,20 @@ impl CffFont {
                 dest[2] = (n & 0xff) as u8;
             }
             _ => {
-                error!("Unknown FDSelect format.");
+                fatal!("Unknown FDSelect format.");
             }
         }
 
-        len as i32
+        Ok(len as i32)
     }
     /// `cff_fdselect_lookup`.
-    pub fn cff_fdselect_lookup(&self, gid: Card16) -> Card8 {
+    pub fn cff_fdselect_lookup(&self, gid: Card16) -> Result<Card8> {
         let Some(fdsel) = self.fdselect.as_ref() else {
-            error!("in cff_fdselect_lookup(): FDSelect not available");
+            fatal!("in cff_fdselect_lookup(): FDSelect not available");
         };
 
         if gid >= self.num_glyphs {
-            error!("in cff_fdselect_lookup(): Invalid glyph index");
+            fatal!("in cff_fdselect_lookup(): Invalid glyph index");
         }
 
         let fd: Card8 = match fdsel.format {
@@ -1502,50 +1516,50 @@ impl CffFont {
                 }
             }
             _ => {
-                error!("in cff_fdselect_lookup(): Invalid FDSelect format");
+                fatal!("in cff_fdselect_lookup(): Invalid FDSelect format");
             }
         };
 
         if fd >= self.num_fds {
-            error!("in cff_fdselect_lookup(): Invalid Font DICT index");
+            fatal!("in cff_fdselect_lookup(): Invalid Font DICT index");
         }
 
-        fd
+        Ok(fd)
     }
     /// `cff_read_fdarray`.
-    pub fn cff_read_fdarray(&mut self) -> i32 {
+    pub fn cff_read_fdarray(&mut self) -> Result<i32> {
         if self.topdict.is_none() {
-            error!("in cff_read_fdarray(): Top DICT not found");
+            fatal!("in cff_read_fdarray(): Top DICT not found");
         }
 
         if (self.flag & FONTTYPE_CIDFONT) == 0 {
-            return 0;
+            return Ok(0);
         }
 
         // must exist
-        let offset = self.topdict.as_ref().unwrap().cff_dict_get(b"FDArray", 0) as i32;
+        let offset = self.topdict.as_ref().unwrap().cff_dict_get(b"FDArray", 0)? as i32;
         self.cff_seek_set(offset as usize);
-        let idx = self.cff_get_index();
+        let idx = self.cff_get_index()?;
         self.num_fds = idx.count as Card8;
         self.fdarray = vec![None; idx.count as usize];
         for i in 0..idx.count as usize {
             let a = idx.offset[i] as usize - 1;
             let size = idx.offset[i + 1].wrapping_sub(idx.offset[i]) as i32;
             if size > 0 {
-                self.fdarray[i] = cff_dict_unpack(&idx.data[a..a + size as usize]);
+                self.fdarray[i] = cff_dict_unpack(&idx.data[a..a + size as usize])?;
             } else {
                 self.fdarray[i] = None;
             }
         }
-        idx.cff_index_size()
+        Ok(idx.cff_index_size())
     }
     /// `cff_read_private`.
-    pub fn cff_read_private(&mut self) -> i32 {
+    pub fn cff_read_private(&mut self) -> Result<i32> {
         let mut len = 0;
 
         if (self.flag & FONTTYPE_CIDFONT) != 0 {
             if self.fdarray.is_empty() {
-                self.cff_read_fdarray();
+                self.cff_read_fdarray()?;
             }
 
             self.private = vec![None; self.num_fds as usize];
@@ -1554,7 +1568,7 @@ impl CffFont {
                 let ok = match &self.fdarray[i] {
                     Some(fd) => {
                         fd.cff_dict_known(b"Private") != 0 && {
-                            size = fd.cff_dict_get(b"Private", 0) as i32;
+                            size = fd.cff_dict_get(b"Private", 0)? as i32;
                             size > 0
                         }
                     }
@@ -1564,13 +1578,13 @@ impl CffFont {
                     let offset = self.fdarray[i]
                         .as_ref()
                         .unwrap()
-                        .cff_dict_get(b"Private", 1) as i32;
+                        .cff_dict_get(b"Private", 1)? as i32;
                     self.cff_seek_set(offset as usize);
                     let data = self.cff_read_data(size as usize);
                     if data.len() != size as usize {
-                        error!("reading file failed");
+                        fatal!("reading file failed");
                     }
-                    self.private[i] = cff_dict_unpack(&data);
+                    self.private[i] = cff_dict_unpack(&data)?;
                     len += size;
                 } else {
                     self.private[i] = None;
@@ -1582,16 +1596,16 @@ impl CffFont {
             let td = self.topdict.as_ref().unwrap();
             let mut size = 0;
             if td.cff_dict_known(b"Private") != 0 && {
-                size = td.cff_dict_get(b"Private", 0) as i32;
+                size = td.cff_dict_get(b"Private", 0)? as i32;
                 size > 0
             } {
-                let offset = td.cff_dict_get(b"Private", 1) as i32;
+                let offset = td.cff_dict_get(b"Private", 1)? as i32;
                 self.cff_seek_set(offset as usize);
                 let data = self.cff_read_data(size as usize);
                 if data.len() != size as usize {
-                    error!("reading file failed");
+                    fatal!("reading file failed");
                 }
-                self.private[0] = cff_dict_unpack(&data);
+                self.private[0] = cff_dict_unpack(&data)?;
                 len += size;
             } else {
                 self.private[0] = None;
@@ -1599,7 +1613,7 @@ impl CffFont {
             }
         }
 
-        len
+        Ok(len)
     }
     /// `cff_get_string`: SID `id`'s string (a copy); C's NULL (an SID
     /// past the String INDEX) is empty here, see [`Self::cff_get_string_opt`].
@@ -1655,19 +1669,19 @@ impl CffFont {
         -1
     }
     /// `cff_match_string` (static).
-    fn cff_match_string(&self, str: &[u8], sid: SSid) -> i32 {
+    fn cff_match_string(&self, str: &[u8], sid: SSid) -> Result<i32> {
         if i32::from(sid) < CFF_STDSTR_MAX {
-            return i32::from(str == CFF_STDSTR[sid as usize]);
+            return Ok(i32::from(str == CFF_STDSTR[sid as usize]));
         }
         let i = (i32::from(sid) - CFF_STDSTR_MAX) as usize;
         let Some(s) = self.string.as_ref().filter(|s| i < s.count as usize) else {
-            error!("Invalid SID");
+            fatal!("Invalid SID");
         };
         if str.len() as u32 == s.offset[i + 1].wrapping_sub(s.offset[i]) {
             let a = s.offset[i] as usize - 1;
-            return i32::from(str == &s.data[a..a + str.len()]);
+            return Ok(i32::from(str == &s.data[a..a + str.len()]));
         }
-        0
+        Ok(0)
     }
     /// `cff_add_string`: the SID (in `_string`).
     pub fn cff_add_string(&mut self, str: &[u8], unique: i32) -> SSid {
@@ -1752,23 +1766,23 @@ impl CffIndex {
         }
     }
     /// `cff_pack_index`.
-    pub fn cff_pack_index(&self, dest: &mut [u8]) -> i32 {
+    pub fn cff_pack_index(&self, dest: &mut [u8]) -> Result<i32> {
         let destlen = dest.len() as i32;
 
         if self.count < 1 {
             if destlen < 2 {
-                error!("Not enough space available...");
+                fatal!("Not enough space available...");
             }
             dest[0] = 0;
             dest[1] = 0;
-            return 2;
+            return Ok(2);
         }
 
         let len = self.cff_index_size();
         let datalen = self.offset[self.count as usize].wrapping_sub(1);
 
         if destlen < len {
-            error!("Not enough space available...");
+            fatal!("Not enough space available...");
         }
 
         let mut d = 0usize;
@@ -1817,7 +1831,7 @@ impl CffIndex {
         let dl = datalen as usize;
         dest[d..d + dl].copy_from_slice(&self.data[..dl]);
 
-        len
+        Ok(len)
     }
 }
 
@@ -1843,11 +1857,11 @@ pub fn cff_release_fdselect(fdselect: CffFdselect) {
 
 impl CffCharsets {
     /// `cff_charsets_lookup_gid`: the GID of SID/CID `cid`.
-    pub fn cff_charsets_lookup_gid(&self, cid: Card16) -> Card16 {
+    pub fn cff_charsets_lookup_gid(&self, cid: Card16) -> Result<Card16> {
         let mut gid: Card16 = 0;
 
         if cid == 0 {
-            return 0; // GID 0 (.notdef)
+            return Ok(0); // GID 0 (.notdef)
         }
 
         match self.format {
@@ -1855,7 +1869,7 @@ impl CffCharsets {
                 for i in 0..self.num_entries as usize {
                     if cid == self.glyphs[i] {
                         gid = (i + 1) as Card16;
-                        return gid;
+                        return Ok(gid);
                     }
                 }
             }
@@ -1865,7 +1879,7 @@ impl CffCharsets {
                     if cid >= r.first && i32::from(cid) <= i32::from(r.first) + i32::from(r.n_left)
                     {
                         gid = (i32::from(gid) + i32::from(cid) - i32::from(r.first) + 1) as Card16;
-                        return gid;
+                        return Ok(gid);
                     }
                     gid = (i32::from(gid) + i32::from(r.n_left) + 1) as Card16;
                 }
@@ -1876,27 +1890,27 @@ impl CffCharsets {
                     if cid >= r.first && i32::from(cid) <= i32::from(r.first) + i32::from(r.n_left)
                     {
                         gid = (i32::from(gid) + i32::from(cid) - i32::from(r.first) + 1) as Card16;
-                        return gid;
+                        return Ok(gid);
                     }
                     gid = (i32::from(gid) + i32::from(r.n_left) + 1) as Card16;
                 }
             }
             _ => {
-                error!("Unknown Charset format");
+                fatal!("Unknown Charset format");
             }
         }
 
-        0 // not found
+        Ok(0) // not found
     }
     /// `cff_charsets_lookup_cid`: the SID/CID of `gid`.
-    pub fn cff_charsets_lookup_cid(&self, gid: Card16) -> Card16 {
+    pub fn cff_charsets_lookup_cid(&self, gid: Card16) -> Result<Card16> {
         let mut sid: Card16 = 0;
         let mut gid = gid;
 
         match self.format {
             0 => {
                 if i32::from(gid) - 1 >= i32::from(self.num_entries) {
-                    error!("Invalid GID.");
+                    fatal!("Invalid GID.");
                 }
                 sid = self.glyphs[gid as usize - 1];
             }
@@ -1912,7 +1926,7 @@ impl CffCharsets {
                     i += 1;
                 }
                 if i == self.num_entries as usize {
-                    error!("Invalid GID");
+                    fatal!("Invalid GID");
                 }
             }
             2 => {
@@ -1927,15 +1941,15 @@ impl CffCharsets {
                     i += 1;
                 }
                 if i == self.num_entries as usize {
-                    error!("Invalid GID");
+                    fatal!("Invalid GID");
                 }
             }
             _ => {
-                error!("Unknown Charset format");
+                fatal!("Unknown Charset format");
             }
         }
 
-        sid
+        Ok(sid)
     }
 }
 
@@ -1951,7 +1965,7 @@ mod tests {
         idx.data = vec![b'a', b'b', b'c'];
         assert_eq!(idx.cff_index_size(), 3 + 3 + 3);
         let mut d = [0u8; 9];
-        assert_eq!(idx.cff_pack_index(&mut d), 9);
+        assert_eq!(idx.cff_pack_index(&mut d).unwrap(), 9);
         assert_eq!(d, [0, 2, 1, 1, 3, 4, b'a', b'b', b'c']);
         let e = CffIndex::cff_new_index(0);
         assert_eq!(e.cff_index_size(), 2);
@@ -1989,11 +2003,11 @@ mod tests {
             ],
             ..CffCharsets::default()
         };
-        assert_eq!(cs.cff_charsets_lookup_gid(11), 2);
-        assert_eq!(cs.cff_charsets_lookup_gid(100), 4);
-        assert_eq!(cs.cff_charsets_lookup_gid(13), 0);
-        assert_eq!(cs.cff_charsets_lookup_cid(3), 12);
-        assert_eq!(cs.cff_charsets_lookup_cid(4), 100);
+        assert_eq!(cs.cff_charsets_lookup_gid(11).unwrap(), 2);
+        assert_eq!(cs.cff_charsets_lookup_gid(100).unwrap(), 4);
+        assert_eq!(cs.cff_charsets_lookup_gid(13).unwrap(), 0);
+        assert_eq!(cs.cff_charsets_lookup_cid(3).unwrap(), 12);
+        assert_eq!(cs.cff_charsets_lookup_cid(4).unwrap(), 100);
     }
 
     #[test]
@@ -2009,7 +2023,7 @@ mod tests {
             ..CffFont::default()
         };
         let mut d = [0u8; 11];
-        assert_eq!(cff.cff_pack_fdselect(&mut d), 11);
+        assert_eq!(cff.cff_pack_fdselect(&mut d).unwrap(), 11);
         assert_eq!(d, [3, 0, 2, 0, 0, 0, 0, 3, 1, 0, 5]);
     }
 }

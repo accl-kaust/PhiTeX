@@ -22,41 +22,41 @@ fn skip_blank(s: &[u8], pp: &mut usize) {
 }
 
 /// `spc_handler_color_push` (`color push …`).
-fn spc_handler_color_push(dpx: &mut Dpx, spe: &mut SpcEnv, args: &mut SpcArg) -> i32 {
+fn spc_handler_color_push(dpx: &mut Dpx, spe: &mut SpcEnv, args: &mut SpcArg) -> Result<i32> {
     let mut colorspec = PdfColor::default();
-    let error = dpx.spc_util_read_colorspec(spe, &mut colorspec, args, 1);
+    let error = dpx.spc_util_read_colorspec(spe, &mut colorspec, args, 1)?;
     if error == 0 {
-        dpx.pdf_color_push(&colorspec, &colorspec);
+        dpx.pdf_color_push(&colorspec, &colorspec)?;
     }
-    error
+    Ok(error)
 }
 
 /// `spc_handler_color_pop`.
-fn spc_handler_color_pop(dpx: &mut Dpx, spe: &mut SpcEnv, args: &mut SpcArg) -> i32 {
-    dpx.pdf_color_pop();
-    0
+fn spc_handler_color_pop(dpx: &mut Dpx, spe: &mut SpcEnv, args: &mut SpcArg) -> Result<i32> {
+    dpx.pdf_color_pop()?;
+    Ok(0)
 }
 
 /// `spc_handler_color_default` (`color <spec>`: as dvips, clear the
 /// stack, then set).
-fn spc_handler_color_default(dpx: &mut Dpx, spe: &mut SpcEnv, args: &mut SpcArg) -> i32 {
+fn spc_handler_color_default(dpx: &mut Dpx, spe: &mut SpcEnv, args: &mut SpcArg) -> Result<i32> {
     let mut colorspec = PdfColor::default();
-    let error = dpx.spc_util_read_colorspec(spe, &mut colorspec, args, 1);
+    let error = dpx.spc_util_read_colorspec(spe, &mut colorspec, args, 1)?;
     if error == 0 {
         dpx.pdf_color_clear_stack();
-        dpx.pdf_color_set(&colorspec, &colorspec);
+        dpx.pdf_color_set(&colorspec, &colorspec)?;
     }
-    error
+    Ok(error)
 }
 
 /// `spc_handler_background`.
-fn spc_handler_background(dpx: &mut Dpx, spe: &mut SpcEnv, args: &mut SpcArg) -> i32 {
+fn spc_handler_background(dpx: &mut Dpx, spe: &mut SpcEnv, args: &mut SpcArg) -> Result<i32> {
     let mut colorspec = PdfColor::default();
-    let error = dpx.spc_util_read_colorspec(spe, &mut colorspec, args, 1);
+    let error = dpx.spc_util_read_colorspec(spe, &mut colorspec, args, 1)?;
     if error == 0 {
         dpx.pdf_doc_set_bgcolor(Some(&colorspec));
     }
-    error
+    Ok(error)
 }
 
 /// `spc_color_check_special`.
@@ -78,7 +78,7 @@ pub fn spc_color_setup_handler(
     sph: &mut SpcHandler,
     spe: &mut SpcEnv,
     ap: &mut SpcArg,
-) -> i32 {
+) -> Result<i32> {
     {
         let (s, pp) = ap.parts();
         skip_blank(s, pp);
@@ -88,7 +88,7 @@ pub fn spc_color_setup_handler(
         parse_c_ident(s, pp)
     };
     let Some(q) = q else {
-        return -1;
+        return Ok(-1);
     };
     {
         let (s, pp) = ap.parts();
@@ -104,7 +104,7 @@ pub fn spc_color_setup_handler(
         let mut p = ap.curptr;
         let q = parse_c_ident(&ap.buf[..ap.endptr], &mut p);
         let Some(q) = q else {
-            return -1;
+            return Ok(-1);
         };
         let q = cstr(&q);
         if q == b"push" {
@@ -122,14 +122,14 @@ pub fn spc_color_setup_handler(
         }
     } else {
         dpx.spc_warn(spe, format_args!("Not color/background special?"));
-        return -1;
+        return Ok(-1);
     }
 
     {
         let (s, pp) = ap.parts();
         skip_blank(s, pp);
     }
-    0
+    Ok(0)
 }
 
 #[cfg(test)]

@@ -245,11 +245,11 @@ fn chunk_values(d: &[u8], png: &mut PngInfo) {
 /// libpng's `png_read_info` (with `png_create_read_struct` and
 /// `png_init_io` on the file from its start). pngimage.c sets no
 /// `setjmp`: a libpng error aborts the program.
-pub fn png_read_info(fp: &mut MemFile) -> PngInfo {
+pub fn png_read_info(fp: &mut MemFile) -> Result<PngInfo> {
     fp.rewind();
     let info = match png::read_info(&fp.data) {
         Ok(info) => info,
-        Err(e) => error!("libpng error: {e}"),
+        Err(e) => fatal!("libpng error: {e}"),
     };
     let mut png = PngInfo {
         out_color_type: info.color_type,
@@ -266,7 +266,7 @@ pub fn png_read_info(fp: &mut MemFile) -> PngInfo {
     };
     let data = png.data.clone();
     chunk_values(&data, &mut png);
-    png
+    Ok(png)
 }
 
 /// `PNG_ROWBYTES`.
@@ -324,14 +324,20 @@ pub fn png_read_update_info(png: &mut PngInfo) {
 /// `dest` (`height * rowbytes` bytes); libpng's `png_read_image`. (The
 /// bits past a row's last pixel, which libpng leaves as they were in
 /// `dest`, uninitialised memory in C, are 0.)
-pub fn read_image_data(png: &mut PngInfo, dest: &mut [u8], height: u32, rowbytes: u32) {
+pub fn read_image_data(
+    png: &mut PngInfo,
+    dest: &mut [u8],
+    height: u32,
+    rowbytes: u32,
+) -> Result<()> {
     let image = match png::read_image(&png.data, &png.info, png.transforms()) {
         Ok(image) => image,
-        Err(e) => error!("libpng error: {e}"),
+        Err(e) => fatal!("libpng error: {e}"),
     };
     assert_eq!(image.rowbytes, rowbytes as usize);
     let n = (height as usize) * (rowbytes as usize);
     dest[..n].copy_from_slice(&image.rows[..n]);
+    Ok(())
 }
 
 /// `INVALID_CHRM_VALUE`.
@@ -406,11 +412,11 @@ impl Dpx {
         trans_type
     }
     /// `png_include_image`: fills XObject `xobj_id`; 0 or -1.
-    pub fn png_include_image(&mut self, xobj_id: i32, fp: &mut MemFile) -> i32 {
+    pub fn png_include_image(&mut self, xobj_id: i32, fp: &mut MemFile) -> Result<i32> {
         let mut info = pdf_ximage_init_image_info();
 
         /* Read PNG info-header and get some info. */
-        let mut png = png_read_info(fp);
+        let mut png = png_read_info(fp)?;
         let color_type = png.info.color_type;
         let width = png.info.width;
         let height = png.info.height;
@@ -463,7 +469,7 @@ impl Dpx {
         let stream_dict = self.o.stream_dict(stream);
 
         let mut stream_data = vec![0u8; rowbytes.wrapping_mul(height) as usize];
-        read_image_data(&mut png, &mut stream_data, height, rowbytes);
+        read_image_data(&mut png, &mut stream_data, height, rowbytes)?;
 
         /* Non-NULL intent means there is valid sRGB chunk. */
         let intent = self.get_rendering_intent(&png);
@@ -621,14 +627,14 @@ impl Dpx {
                 info.num_components,
             );
         }
-        self.pdf_ximage_set_image(xobj_id, &info, stream);
+        self.pdf_ximage_set_image(xobj_id, &info, stream)?;
 
-        0
+        Ok(0)
     }
     /// `png_get_bbox`: status, width, height, xdensity, ydensity.
-    pub fn png_get_bbox(&mut self, fp: &mut MemFile) -> (i32, u32, u32, f64, f64) {
+    pub fn png_get_bbox(&mut self, fp: &mut MemFile) -> Result<(i32, u32, u32, f64, f64)> {
         /* Read PNG info-header and get some info. */
-        let png = png_read_info(fp);
+        let png = png_read_info(fp)?;
         let width = png.info.width;
         let height = png.info.height;
 
@@ -651,7 +657,7 @@ impl Dpx {
             )
         };
 
-        (0, width, height, xdensity, ydensity)
+        Ok((0, width, height, xdensity, ydensity))
     }
     /// `create_cspace_Indexed` (static).
     #[allow(non_snake_case)]
@@ -1110,7 +1116,7 @@ mod tests {
         png_read_update_info(png);
         let (h, rb) = (png.info.height, png.rowbytes);
         let mut d = vec![0; (h * rb) as usize];
-        read_image_data(png, &mut d, h, rb);
+        read_image_data(png, &mut d, h, rb).unwrap();
         d
     }
 
@@ -1118,27 +1124,30 @@ mod tests {
     fn e2e_files() {
         let mut srgb = png_read_info(&mut file(include_bytes!(
             "../../../tests/e2e/png-rgb8srgb.png"
-        )));
+        )))
+        .unwrap();
         assert!(srgb.valid(png::INFO_SRGB));
         assert!((0..=3).contains(&srgb.srgb_intent));
         let a = rows(&mut srgb);
         assert_eq!(srgb.rowbytes, 37 * 3);
-        let mut plain = png_read_info(&mut file(include_bytes!("../../../tests/e2e/png-rgb8.png")));
+        let mut plain =
+            png_read_info(&mut file(include_bytes!("../../../tests/e2e/png-rgb8.png"))).unwrap();
         assert!(!plain.valid(png::INFO_SRGB));
         assert_eq!(rows(&mut plain), a);
 
         let mut pal = png_read_info(&mut file(include_bytes!(
             "../../../tests/e2e/png-pal4trns.png"
-        )));
+        )))
+        .unwrap();
         assert!(pal.valid(png::INFO_TRNS) && pal.info.num_trans > 0);
         rows(&mut pal);
         assert_eq!((pal.out_bit_depth, pal.rowbytes), (4, 19));
 
         let data = include_bytes!("../../../tests/e2e/png-gray16.png");
-        let mut g16 = png_read_info(&mut file(data));
+        let mut g16 = png_read_info(&mut file(data)).unwrap();
         let wide = rows(&mut g16);
         assert_eq!(g16.rowbytes, 74);
-        let mut g8 = png_read_info(&mut file(data));
+        let mut g8 = png_read_info(&mut file(data)).unwrap();
         g8.strip_16 = true;
         let narrow = rows(&mut g8);
         assert_eq!(g8.rowbytes, 37);

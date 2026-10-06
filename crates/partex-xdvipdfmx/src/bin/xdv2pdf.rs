@@ -139,30 +139,33 @@ fn main() {
         return;
     }
     // Page by page, as xdvipdfmx writes: when it stops on an error
-    // (`ERROR` exits; here a panic), its output file keeps what was
-    // written until then, and so does stdout here.
+    // (`ERROR` prints its message and exits), its output file keeps what
+    // was written until then, and so does stdout here.
     let mut stdout = std::io::stdout();
     let (pre, pages) = split_xdv(&xdv);
-    let mut session = None;
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        session = Some(Session::new(
-            options,
-            Box::new(Kpsewhich::default()),
-            Box::new(deflate),
-            &xdv[..pre],
-        ));
-        let s = session.as_mut().expect("session");
+    let mut session = match Session::new(
+        options,
+        Box::new(Kpsewhich::default()),
+        Box::new(deflate),
+        &xdv[..pre],
+    ) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(1);
+        }
+    };
+    let result = (|| {
         for &(a, b) in &pages {
-            let out = s.page(&xdv[a..b]);
+            let out = session.page(&xdv[a..b])?;
             stdout.write_all(&out.pdf).expect("stdout");
         }
-        let s = session.take().expect("session");
-        stdout.write_all(&s.finish()).expect("stdout");
-    }));
-    if result.is_err() {
-        if let Some(s) = session.as_mut() {
-            stdout.write_all(&s.take_output()).expect("stdout");
-        }
+        stdout.write_all(&session.finish()?).expect("stdout");
+        Ok::<(), partex_xdvipdfmx::ctx::Fatal>(())
+    })();
+    if let Err(e) = result {
+        stdout.write_all(&session.written()).expect("stdout");
+        eprintln!("{e}");
         std::process::exit(1);
     }
 }
@@ -178,21 +181,22 @@ fn check_resume(options: Options, xdv: &[u8]) {
         Box::new(Kpsewhich::default()),
         Box::new(deflate),
         &xdv[..pre],
-    );
+    )
+    .expect("xdvipdfmx");
     let mut snaps = Vec::new();
     let mut outs: Vec<Vec<u8>> = Vec::new();
     for &(a, b) in &pages {
         snaps.push(s.snapshot());
-        outs.push(s.page(&xdv[a..b]).pdf);
+        outs.push(s.page(&xdv[a..b]).expect("xdvipdfmx").pdf);
     }
-    outs.push(s.finish());
+    outs.push(s.finish().expect("xdvipdfmx"));
     for (k, snap) in snaps.into_iter().enumerate() {
         let mut s = snap;
         let mut tail = Vec::new();
         for &(a, b) in &pages[k..] {
-            tail.push(s.page(&xdv[a..b]).pdf);
+            tail.push(s.page(&xdv[a..b]).expect("xdvipdfmx").pdf);
         }
-        tail.push(s.finish());
+        tail.push(s.finish().expect("xdvipdfmx"));
         if tail[..] != outs[k..] {
             eprintln!("xdv2pdf: resuming before page {} differs", k + 1);
             std::process::exit(1);

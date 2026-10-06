@@ -9,6 +9,12 @@
 //! the object streams, the xref stream, the trailer). The bytes of all
 //! the calls, concatenated, are xdvipdfmx's PDF.
 //!
+//! A fatal error (C's `ERROR`, which prints its message and exits) is an
+//! `Err(`[`Fatal`]`)`: the session is then done, and [`Session::written`]
+//! gives the rest of what xdvipdfmx had written to its output file when
+//! it exited (`error_cleanup` leaves the file). A malformed `\special`,
+//! a broken image or font file stop the run that way, never by a panic.
+//!
 //! What a page's bytes depend on (for splicing pages): the first page
 //! also writes the header (`pdf_open_document`, after the first page's
 //! specials chose the version and the paper). A page's content stream is
@@ -86,8 +92,14 @@ pub struct Session {
 
 impl Session {
     /// dvipdfmx.c's `main` up to `dvi_init` and the comment: the options,
-    /// the config file, the preamble.
-    pub fn new(options: Options, files: Box<dyn Files>, deflate: Deflate, preamble: &[u8]) -> Self {
+    /// the config file, the preamble. Nothing is written yet, so a fatal
+    /// error here leaves no output.
+    pub fn new(
+        options: Options,
+        files: Box<dyn Files>,
+        deflate: Deflate,
+        preamble: &[u8],
+    ) -> Result<Self> {
         let mut dpx = Box::new(Dpx::new(files, deflate));
         dpx.session.source_date_epoch = options.source_date_epoch;
         dpx.session.now = options.now;
@@ -102,10 +114,10 @@ impl Session {
         // (C takes the DVI name from argv; dvi_init would add `.xdv` to
         // a name without a suffix: give it with one)
         dpx.dvi_filename = options.dvi_filename.clone();
-        dpx.session_args_first_pass(&argv);
-        dpx.session_system_default();
+        dpx.session_args_first_pass(&argv)?;
+        dpx.session_system_default()?;
         dpx.pdf_init_fontmaps();
-        dpx.read_config_file(crate::session::DPX_CONFIG_FILE);
+        dpx.read_config_file(crate::session::DPX_CONFIG_FILE)?;
         dpx.session.has_paper_option = 0;
         if dpx.dvi_filename.is_some() && dpx.pdf_filename.is_none() {
             dpx.session_set_default_pdf_filename();
@@ -113,23 +125,23 @@ impl Session {
         dpx.dvi.dvi_file = Some(MemFile::new(Arc::from(preamble), b"stdin"));
         dpx.dvi.peek_after_eop = false;
         let mag = dpx.session.mag;
-        let dvi2pts = dpx.dvi_init(None, mag);
+        let dvi2pts = dpx.dvi_init(None, mag)?;
         if dvi2pts == 0.0 {
-            crate::error!("dvi_init() failed!");
+            crate::fatal!("dvi_init() failed!");
         }
-        Session {
+        Ok(Session {
             dpx,
             argv,
             page_no: 0,
             page_count: 0,
             init_paper_width: 0.0,
             init_paper_height: 0.0,
-        }
+        })
     }
 
     /// The rest of `main` once the first page is in: its specials, the
     /// options again, `pdf_open_document`, `do_dvi_pages`' start.
-    fn open(&mut self) {
+    fn open(&mut self) -> Result<()> {
         let d = &mut *self.dpx;
         let creator = d.dvi_comment();
         let mut sp = ScanSpecials {
@@ -147,7 +159,7 @@ impl Session {
                 ..ScanSpecialsExt::default()
             }),
         };
-        d.dvi_scan_specials(0, &mut sp);
+        d.dvi_scan_specials(0, &mut sp)?;
         d.session.paper_width = sp.page_width;
         d.session.paper_height = sp.page_height;
         d.session.x_offset = sp.x_offset;
@@ -160,10 +172,10 @@ impl Session {
         d.session.key_bits = ext.key_bits;
         d.session.permission = ext.permission;
         if d.session.do_encryption != 0 {
-            crate::error!("Encryption is not supported");
+            crate::fatal!("Encryption is not supported");
         }
         let argv = self.argv.clone();
-        d.session_args_second_pass(&argv);
+        d.session_args_second_pass(&argv)?;
         if d.pdf_filename.as_deref() == Some(b"-") {
             d.pdf_filename = None;
         }
@@ -212,17 +224,17 @@ impl Session {
             &id1,
             &id2,
             settings,
-        );
+        )?;
         if d.session.opt_flags & crate::session::OPT_CIDFONT_FIXEDPITCH != 0 {
             d.CIDFont_set_flags(crate::cid::CIDFONT_FORCE_FIXEDPITCH);
         }
         if d.session.opt_flags & crate::session::OPT_TPIC_TRANSPARENT_FILL != 0
             || d.session.translate_origin != 0
         {
-            crate::error!("tpic and MetaPost options are not supported");
+            crate::fatal!("tpic and MetaPost options are not supported");
         }
         // do_dvi_pages
-        d.spc_exec_at_begin_document();
+        d.spc_exec_at_begin_document()?;
         self.init_paper_width = d.session.paper_width;
         self.init_paper_height = d.session.paper_height;
         let mediabox = PdfRect {
@@ -232,15 +244,17 @@ impl Session {
             ury: d.session.paper_height,
         };
         d.pdf_doc_set_mediabox(0, &mediabox);
+        Ok(())
     }
 
     /// One page: `bytes` from after the previous page's `eop` (or the
-    /// preamble) through this page's `eop`.
-    pub fn page(&mut self, bytes: &[u8]) -> PageOut {
+    /// preamble) through this page's `eop`. After an `Err`, only
+    /// [`Session::written`] is left to call.
+    pub fn page(&mut self, bytes: &[u8]) -> Result<PageOut> {
         let first = self.page_no == 0;
         self.dpx.dvi.dvi_file = Some(MemFile::new(Arc::from(bytes), b"stdin"));
         if first {
-            self.open();
+            self.open()?;
         }
         let d = &mut *self.dpx;
         let page_no = self.page_no;
@@ -253,7 +267,7 @@ impl Session {
             landscape: d.session.landscape_mode,
             ext: None,
         };
-        d.dvi_scan_specials(page_no, &mut sp);
+        d.dvi_scan_specials(page_no, &mut sp)?;
         let (mut w, mut h) = (sp.page_width, sp.page_height);
         if sp.landscape != d.session.landscape_mode {
             core::mem::swap(&mut w, &mut h);
@@ -278,52 +292,54 @@ impl Session {
         }
         d.dvi.glyph_runs.clear();
         let (xo, yo) = (d.session.x_offset, d.session.y_offset);
-        d.dvi_do_page(page_height, xo, yo);
+        d.dvi_do_page(page_height, xo, yo)?;
         self.page_count += 1;
         self.page_no += 1;
-        PageOut {
+        Ok(PageOut {
             pdf: d.o.take_output(),
             glyph_runs: core::mem::take(&mut d.dvi.glyph_runs),
-        }
+        })
     }
 
     /// The end: `do_dvi_pages`' end, `pdf_close_document` and the rest of
-    /// `main`. The bytes written.
-    pub fn finish(mut self) -> Vec<u8> {
+    /// `main`. The bytes written. After it (`Ok` or `Err`), only
+    /// [`Session::written`] is left to call.
+    pub fn finish(&mut self) -> Result<Vec<u8>> {
         if self.page_count < 1 {
-            crate::error!("No pages fall in range!");
+            crate::fatal!("No pages fall in range!");
         }
         let d = &mut *self.dpx;
-        d.spc_exec_at_end_document();
-        d.pdf_close_document();
+        d.spc_exec_at_end_document()?;
+        d.pdf_close_document()?;
         d.pdf_close_fontmaps();
         d.dvi_close();
-        d.o.take_output()
+        Ok(d.o.take_output())
     }
 
-    /// What was written but not yet taken: the output file's rest as a
-    /// fatal error leaves it (`pdf_error_cleanup` closes the file, which
-    /// `error_cleanup` then does not remove).
+    /// What was written but not yet taken: after an `Err`, the output
+    /// file's rest as the fatal error left it (`pdf_error_cleanup` closes
+    /// the file, which `error_cleanup` then does not remove).
     pub fn written(&mut self) -> Vec<u8> {
         self.dpx.o.take_output()
     }
 
     /// A whole XDV, as [`Session::new`], [`Session::page`] for each page
-    /// and [`Session::finish`] do it.
+    /// and [`Session::finish`] do it. (On an `Err`, the bytes written
+    /// before it are dropped: [`Session`] keeps them.)
     pub fn convert(
         options: Options,
         files: Box<dyn Files>,
         deflate: Deflate,
         xdv: &[u8],
-    ) -> Vec<u8> {
+    ) -> Result<Vec<u8>> {
         let (pre, pages) = split_xdv(xdv);
-        let mut s = Session::new(options, files, deflate, &xdv[..pre]);
+        let mut s = Session::new(options, files, deflate, &xdv[..pre])?;
         let mut out = Vec::new();
         for (a, b) in pages {
-            out.extend(s.page(&xdv[a..b]).pdf);
+            out.extend(s.page(&xdv[a..b])?.pdf);
         }
-        out.extend(s.finish());
-        out
+        out.extend(s.finish()?);
+        Ok(out)
     }
 }
 
@@ -471,9 +487,7 @@ impl Session {
 }
 
 impl Session {
-    /// The bytes written and not yet returned: after a call that stopped
-    /// on an error (`error!` panics), what xdvipdfmx would have left in
-    /// its output file when `ERROR` exited.
+    /// [`Session::written`].
     pub fn take_output(&mut self) -> Vec<u8> {
         self.dpx.o.take_output()
     }

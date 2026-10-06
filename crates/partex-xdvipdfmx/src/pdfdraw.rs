@@ -740,11 +740,12 @@ impl PdfGstate {
 }
 
 /// `parse_pdf_dict` of `default_xgs`.
-fn default_xgs(dpx: &mut Dpx) -> Obj {
+fn default_xgs(dpx: &mut Dpx) -> Result<Obj> {
     let mut p = 0;
-    dpx.o
-        .parse_pdf_dict(DEFAULT_XGS, &mut p, None)
-        .expect("default ExtGState")
+    Ok(dpx
+        .o
+        .parse_pdf_dict(DEFAULT_XGS, &mut p, None)?
+        .expect("default ExtGState"))
 }
 
 impl Dpx {
@@ -897,7 +898,7 @@ impl Dpx {
         *gs = PdfGstate::default();
     }
     /// `pdf_dev_set_xgstate`.
-    fn pdf_dev_set_xgstate(&mut self, diff: Obj, accumlated: Obj) -> i32 {
+    fn pdf_dev_set_xgstate(&mut self, diff: Obj, accumlated: Obj) -> Result<i32> {
         let id = self.draw.xgs_count;
         let mut res_name = Buf::new();
         res_name.extend(b"DPX_GS");
@@ -910,7 +911,7 @@ impl Dpx {
         buf.0.truncate(63);
         self.pdf_doc_add_page_content(buf.as_bytes());
         let d = self.o.link(diff);
-        self.pdf_doc_add_page_resource(b"ExtGState", res_name.as_bytes(), d);
+        self.pdf_doc_add_page_resource(b"ExtGState", res_name.as_bytes(), d)?;
         if let Some(x) = self.pdfdraw_gs().extgstate {
             self.o.release(x);
         }
@@ -918,10 +919,10 @@ impl Dpx {
         self.pdfdraw_gs_mut().extgstate = Some(a);
         self.draw.xgs_count += 1;
 
-        0
+        Ok(0)
     }
     /// `pdf_dev_reset_xgstate`.
-    pub fn pdf_dev_reset_xgstate(&mut self, force: i32) -> i32 {
+    pub fn pdf_dev_reset_xgstate(&mut self, force: i32) -> Result<i32> {
         let mut need_reset = false;
 
         let target = if let Some(xgs) = self.draw.xgs_stack.dpx_stack_top() {
@@ -929,14 +930,14 @@ impl Dpx {
             self.o.link(a)
         } else {
             if self.pdfdraw_gs().extgstate.is_none() && force == 0 {
-                return 0;
+                return Ok(0);
             }
-            default_xgs(self)
+            default_xgs(self)?
         };
         let current = if let Some(x) = self.pdfdraw_gs().extgstate {
             self.o.link(x)
         } else {
-            default_xgs(self)
+            default_xgs(self)?
         };
 
         let diff = self.o.new_dict();
@@ -956,23 +957,23 @@ impl Dpx {
         }
         self.o.release(keys);
         if need_reset {
-            self.pdf_dev_set_xgstate(diff, target);
+            self.pdf_dev_set_xgstate(diff, target)?;
         }
         self.o.release(diff);
         self.o.release(current);
         self.o.release(target);
 
-        0
+        Ok(0)
     }
     /// `pdf_dev_xgstate_push`.
-    pub fn pdf_dev_xgstate_push(&mut self, object: Obj) {
+    pub fn pdf_dev_xgstate_push(&mut self, object: Obj) -> Result<()> {
         let accumlated = if let Some(current) = self.draw.xgs_stack.dpx_stack_top() {
             let ca = current.accumlated.expect("ExtGState");
             let a = self.o.new_dict();
             self.o.merge_dict(a, ca);
             a
         } else {
-            default_xgs(self)
+            default_xgs(self)?
         };
         self.o.merge_dict(accumlated, object);
         self.draw.xgs_stack.dpx_stack_push(XgsRes {
@@ -980,20 +981,21 @@ impl Dpx {
             accumlated: Some(accumlated),
         });
 
-        self.pdf_dev_set_xgstate(object, accumlated);
+        self.pdf_dev_set_xgstate(object, accumlated)?;
+        Ok(())
     }
     /// `pdf_dev_xgstate_pop`.
-    pub fn pdf_dev_xgstate_pop(&mut self) {
+    pub fn pdf_dev_xgstate_pop(&mut self) -> Result<()> {
         let current = self.draw.xgs_stack.dpx_stack_pop();
         let Some(current) = current else {
             warn!("Too many pop operation for ExtGState!");
-            return;
+            return Ok(());
         };
         let accumlated = if let Some(target) = self.draw.xgs_stack.dpx_stack_top() {
             let a = target.accumlated.expect("ExtGState");
             self.o.link(a)
         } else {
-            default_xgs(self)
+            default_xgs(self)?
         };
         let cobject = current.object.expect("ExtGState");
         let keys = self.o.dict_keys(cobject);
@@ -1010,13 +1012,14 @@ impl Dpx {
                 warn!("No previous ExtGState entry known, ignoring...");
             }
         }
-        self.pdf_dev_set_xgstate(revert, accumlated);
+        self.pdf_dev_set_xgstate(revert, accumlated)?;
         self.o.release(revert);
         self.o.release(keys);
         self.o.release(accumlated);
 
         self.o.release(cobject);
         self.o.release_opt(current.accumlated);
+        Ok(())
     }
     /// `pdf_dev_init_gstates`.
     pub fn pdf_dev_init_gstates(&mut self) {
@@ -1127,7 +1130,7 @@ impl Dpx {
         (0, m)
     }
     /// `pdf_dev_set_color`: `mask` 0 stroking, 0x20 non-stroking.
-    pub fn pdf_dev_set_color(&mut self, color: &PdfColor, mask: u8, force: i32) {
+    pub fn pdf_dev_set_color(&mut self, color: &PdfColor, mask: u8, force: i32) -> Result<()> {
         let differs = {
             let gs = self.pdfdraw_gs();
             let current = if mask != 0 {
@@ -1141,12 +1144,12 @@ impl Dpx {
             /* If "color" is already the current color, then do nothing
              * unless a color operator is forced
              */
-            return;
+            return Ok(());
         }
 
         self.graphics_mode();
         let mut buf = Buf::new();
-        let len = self.pdf_color_set_color(color, &mut buf, FORMAT_BUFF_LEN, mask);
+        let len = self.pdf_color_set_color(color, &mut buf, FORMAT_BUFF_LEN, mask)?;
         self.pdf_doc_add_page_content(&buf.as_bytes()[..len]); /* op: RG K G rg k g etc. */
         let gs = self.pdfdraw_gs_mut();
         let current = if mask != 0 {
@@ -1155,14 +1158,17 @@ impl Dpx {
             &mut gs.strokecolor
         };
         current.pdf_color_copycolor(color);
+        Ok(())
     }
     /// `pdf_dev_set_strokingcolor(c)`.
-    pub fn pdf_dev_set_strokingcolor(&mut self, color: &PdfColor) {
-        self.pdf_dev_set_color(color, 0, 0);
+    pub fn pdf_dev_set_strokingcolor(&mut self, color: &PdfColor) -> Result<()> {
+        self.pdf_dev_set_color(color, 0, 0)?;
+        Ok(())
     }
     /// `pdf_dev_set_nonstrokingcolor(c)`.
-    pub fn pdf_dev_set_nonstrokingcolor(&mut self, color: &PdfColor) {
-        self.pdf_dev_set_color(color, 0x20, 0);
+    pub fn pdf_dev_set_nonstrokingcolor(&mut self, color: &PdfColor) -> Result<()> {
+        self.pdf_dev_set_color(color, 0x20, 0)?;
+        Ok(())
     }
     /// `pdf_dev_concat`.
     pub fn pdf_dev_concat(&mut self, m: &PdfTmatrix) -> i32 {

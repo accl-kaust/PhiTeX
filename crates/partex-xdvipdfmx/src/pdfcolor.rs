@@ -966,7 +966,7 @@ impl Dpx {
         buf: &mut Buf,
         buffer_len: usize,
         mask: u8,
-    ) -> usize {
+    ) -> Result<usize> {
         let start = buf.len();
         {
             let mut estimate = 0usize;
@@ -976,7 +976,7 @@ impl Dpx {
             estimate += b" /DeiceGray CS".len();
             if estimate + 1 > buffer_len {
                 warn!("Not enough buffer space allocated for writing set_color op...");
-                return 0;
+                return Ok(0);
             }
         }
         let n = color.num_components.max(0) as usize;
@@ -1049,9 +1049,9 @@ impl Dpx {
                 buf.push(b'S' | mask);
                 buf.push(b'C' | mask);
                 let r = self
-                    .pdf_get_resource_reference(color.res_id)
+                    .pdf_get_resource_reference(color.res_id)?
                     .expect("pdf_color_set_color: no ColorSpace resource");
-                self.pdf_doc_add_page_resource(b"ColorSpace", &res_name, r);
+                self.pdf_doc_add_page_resource(b"ColorSpace", &res_name, r)?;
             }
             PDF_COLORSPACE_TYPE_PATTERN => {
                 if color.res_id < 0 {
@@ -1070,9 +1070,9 @@ impl Dpx {
                         sprint_value(buf, color.values[i]);
                     }
                     let r = self
-                        .pdf_get_resource_reference(color.res_id)
+                        .pdf_get_resource_reference(color.res_id)?
                         .expect("pdf_color_set_color: no ColorSpace resource");
-                    self.pdf_doc_add_page_resource(b"ColorSpace", &res_name, r);
+                    self.pdf_doc_add_page_resource(b"ColorSpace", &res_name, r)?;
                 }
                 let res_name = res_name(b"XP", color.pattern_id & 0xffff, 15);
                 buf.extend(b" /");
@@ -1083,9 +1083,9 @@ impl Dpx {
                 buf.push(b'N' | mask);
 
                 let r = self
-                    .pdf_get_resource_reference(color.pattern_id)
+                    .pdf_get_resource_reference(color.pattern_id)?
                     .expect("pdf_color_set_color: no Pattern resource");
-                self.pdf_doc_add_page_resource(b"Pattern", &res_name, r);
+                self.pdf_doc_add_page_resource(b"Pattern", &res_name, r)?;
             }
             _ => {
                 let res_name = res_name(b"XC", color.res_id & 0xffff, 7);
@@ -1102,13 +1102,13 @@ impl Dpx {
                 buf.push(b'C' | mask);
                 buf.push(b'N' | mask);
                 let r = self
-                    .pdf_get_resource_reference(color.res_id)
+                    .pdf_get_resource_reference(color.res_id)?
                     .expect("pdf_color_set_color: no ColorSpace resource");
-                self.pdf_doc_add_page_resource(b"ColorSpace", &res_name, r);
+                self.pdf_doc_add_page_resource(b"ColorSpace", &res_name, r)?;
             }
         }
 
-        buf.len() - start
+        Ok(buf.len() - start)
     }
     /// `pdf_color_clear_stack`.
     pub fn pdf_color_clear_stack(&mut self) {
@@ -1127,30 +1127,33 @@ impl Dpx {
         cs.fill[0].pdf_color_black();
     }
     /// `pdf_color_set`.
-    pub fn pdf_color_set(&mut self, sc: &PdfColor, fc: &PdfColor) {
+    pub fn pdf_color_set(&mut self, sc: &PdfColor, fc: &PdfColor) -> Result<()> {
         let cs = &mut self.color.color_stack;
         let i = cs.current as usize;
         cs.stroke[i].pdf_color_copycolor(sc);
         cs.fill[i].pdf_color_copycolor(fc);
-        self.pdf_dev_reset_color(1);
+        self.pdf_dev_reset_color(1)?;
+        Ok(())
     }
     /// `pdf_color_push`.
-    pub fn pdf_color_push(&mut self, sc: &PdfColor, fc: &PdfColor) {
+    pub fn pdf_color_push(&mut self, sc: &PdfColor, fc: &PdfColor) -> Result<()> {
         if self.color.color_stack.current >= DEV_COLOR_STACK_MAX as i32 - 1 {
             warn!("Color stack overflow. Just ignore.");
         } else {
             self.color.color_stack.current += 1;
-            self.pdf_color_set(sc, fc);
+            self.pdf_color_set(sc, fc)?;
         }
+        Ok(())
     }
     /// `pdf_color_pop`.
-    pub fn pdf_color_pop(&mut self) {
+    pub fn pdf_color_pop(&mut self) -> Result<()> {
         if self.color.color_stack.current <= 0 {
             warn!("Color stack underflow. Just ignore.");
         } else {
             self.color.color_stack.current -= 1;
-            self.pdf_dev_reset_color(1);
+            self.pdf_dev_reset_color(1)?;
         }
+        Ok(())
     }
     /// `pdf_color_get_current`: copies of (stroke, fill).
     #[must_use]

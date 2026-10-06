@@ -260,12 +260,12 @@ pub fn add_APPn_marker(
 
 /// `read_APP14_Adobe` (static): bytes read.
 #[allow(non_snake_case)]
-pub fn read_APP14_Adobe(j_info: &mut JpegInfo, fp: &mut MemFile) -> u16 {
+pub fn read_APP14_Adobe(j_info: &mut JpegInfo, fp: &mut MemFile) -> Result<u16> {
     let app_data = JpegAppnAdobe {
-        version: fp.get_unsigned_pair(),
-        flag0: fp.get_unsigned_pair(),
-        flag1: fp.get_unsigned_pair(),
-        transform: fp.get_unsigned_byte(),
+        version: fp.get_unsigned_pair()?,
+        flag0: fp.get_unsigned_pair()?,
+        flag1: fp.get_unsigned_pair()?,
+        transform: fp.get_unsigned_byte()?,
     };
 
     add_APPn_marker(
@@ -275,7 +275,7 @@ pub fn read_APP14_Adobe(j_info: &mut JpegInfo, fp: &mut MemFile) -> u16 {
         JpegAppnData::Adobe(app_data),
     );
 
-    7
+    Ok(7)
 }
 
 /// `read_exif_bytes` (static): an `n`-byte number at `buf[*p..]`,
@@ -495,13 +495,13 @@ fn exif_resolution(j_info: &mut JpegInfo, buffer: &[u8]) -> Option<()> {
 
 /// `read_APP0_JFIF` (static): bytes read.
 #[allow(non_snake_case)]
-pub fn read_APP0_JFIF(j_info: &mut JpegInfo, fp: &mut MemFile) -> usize {
-    let version = fp.get_unsigned_pair();
-    let units = fp.get_unsigned_byte();
-    let xdensity = fp.get_unsigned_pair();
-    let ydensity = fp.get_unsigned_pair();
-    let xthumbnail = fp.get_unsigned_byte();
-    let ythumbnail = fp.get_unsigned_byte();
+pub fn read_APP0_JFIF(j_info: &mut JpegInfo, fp: &mut MemFile) -> Result<usize> {
+    let version = fp.get_unsigned_pair()?;
+    let units = fp.get_unsigned_byte()?;
+    let xdensity = fp.get_unsigned_pair()?;
+    let ydensity = fp.get_unsigned_pair()?;
+    let xthumbnail = fp.get_unsigned_byte()?;
+    let ythumbnail = fp.get_unsigned_byte()?;
     let thumb_data_len = 3 * usize::from(xthumbnail) * usize::from(ythumbnail);
     let thumbnail = if thumb_data_len > 0 {
         fread_n(fp, thumb_data_len)
@@ -542,13 +542,13 @@ pub fn read_APP0_JFIF(j_info: &mut JpegInfo, fp: &mut MemFile) -> usize {
         }
     }
 
-    9 + thumb_data_len
+    Ok(9 + thumb_data_len)
 }
 
 /// `read_APP0_JFXX` (static): bytes read (skipped).
 #[allow(non_snake_case)]
-pub fn read_APP0_JFXX(fp: &mut MemFile, length: usize) -> usize {
-    fp.get_unsigned_byte();
+pub fn read_APP0_JFXX(fp: &mut MemFile, length: usize) -> Result<usize> {
+    fp.get_unsigned_byte()?;
     /* Extension Code:
      *
      * 0x10: Thumbnail coded using JPEG
@@ -559,7 +559,7 @@ pub fn read_APP0_JFXX(fp: &mut MemFile, length: usize) -> usize {
 
     /* Ignore */
 
-    length
+    Ok(length)
 }
 
 /// `read_APP1_XMP` (static): bytes read.
@@ -581,9 +581,9 @@ pub fn read_APP1_XMP(j_info: &mut JpegInfo, fp: &mut MemFile, length: usize) -> 
 
 /// `read_APP2_ICC` (static): bytes read.
 #[allow(non_snake_case)]
-pub fn read_APP2_ICC(j_info: &mut JpegInfo, fp: &mut MemFile, length: usize) -> usize {
-    let seq_id = fp.get_unsigned_byte(); /* Starting at 1 */
-    let num_chunks = fp.get_unsigned_byte();
+pub fn read_APP2_ICC(j_info: &mut JpegInfo, fp: &mut MemFile, length: usize) -> Result<usize> {
+    let seq_id = fp.get_unsigned_byte()?; /* Starting at 1 */
+    let num_chunks = fp.get_unsigned_byte()?;
     let chunk = fread_n(fp, length - 2);
     let app_data = JpegAppnIcc {
         seq_id,
@@ -598,7 +598,7 @@ pub fn read_APP2_ICC(j_info: &mut JpegInfo, fp: &mut MemFile, length: usize) -> 
         JpegAppnData::Icc(app_data),
     );
 
-    length
+    Ok(length)
 }
 
 /// `SET_SKIP`.
@@ -641,7 +641,7 @@ fn read_sig(fp: &mut MemFile, n: usize) -> Option<Vec<u8>> {
 
 /// `JPEG_scan_file` (static): 0, or -1 (not a JPEG / unsupported).
 #[allow(non_snake_case)]
-pub fn JPEG_scan_file(j_info: &mut JpegInfo, fp: &mut MemFile) -> i32 {
+pub fn JPEG_scan_file(j_info: &mut JpegInfo, fp: &mut MemFile) -> Result<i32> {
     fp.rewind();
     let mut count: i32 = 0;
     let mut found_sofn = false;
@@ -651,28 +651,28 @@ pub fn JPEG_scan_file(j_info: &mut JpegInfo, fp: &mut MemFile) -> i32 {
             break;
         }
         if marker != JM_SOI && !(JM_RST0..=JM_RST7).contains(&marker) {
-            let mut length: i32 = i32::from(fp.get_unsigned_pair()) - 2;
+            let mut length: i32 = i32::from(fp.get_unsigned_pair()?) - 2;
             match marker {
                 m if is_sofn(m) => {
-                    j_info.bits_per_component = fp.get_unsigned_byte();
-                    j_info.height = fp.get_unsigned_pair();
-                    j_info.width = fp.get_unsigned_pair();
-                    j_info.num_components = fp.get_unsigned_byte();
+                    j_info.bits_per_component = fp.get_unsigned_byte()?;
+                    j_info.height = fp.get_unsigned_pair()?;
+                    j_info.width = fp.get_unsigned_pair()?;
+                    j_info.num_components = fp.get_unsigned_byte()?;
                     found_sofn = true;
                 }
                 JM_APP0 => {
                     if length > 5 {
                         let Some(app_sig) = read_sig(fp, 5) else {
-                            return -1;
+                            return Ok(-1);
                         };
                         length -= 5;
                         if app_sig == b"JFIF\0" {
                             /* APP0 JFIF marker preserved */
                             j_info.flags |= HAVE_APPN_JFIF;
-                            length = length.wrapping_sub(read_APP0_JFIF(j_info, fp) as i32);
+                            length = length.wrapping_sub(read_APP0_JFIF(j_info, fp)? as i32);
                         } else if app_sig == b"JFXX\0" {
                             length =
-                                length.wrapping_sub(read_APP0_JFXX(fp, length as usize) as i32);
+                                length.wrapping_sub(read_APP0_JFXX(fp, length as usize)? as i32);
                             set_skip(j_info, count);
                         } else {
                             set_skip(j_info, count);
@@ -685,7 +685,7 @@ pub fn JPEG_scan_file(j_info: &mut JpegInfo, fp: &mut MemFile) -> i32 {
                 JM_APP1 => {
                     if length > 5 {
                         let Some(app_sig) = read_sig(fp, 5) else {
-                            return -1;
+                            return Ok(-1);
                         };
                         length -= 5;
                         if app_sig == b"Exif\0" {
@@ -695,7 +695,7 @@ pub fn JPEG_scan_file(j_info: &mut JpegInfo, fp: &mut MemFile) -> i32 {
                                 .wrapping_sub(read_APP1_Exif(j_info, fp, length as usize) as i32);
                         } else if app_sig == b"http:" && length > 24 {
                             let Some(app_sig) = read_sig(fp, 24) else {
-                                return -1;
+                                return Ok(-1);
                             };
                             length -= 24;
                             if app_sig == b"//ns.adobe.com/xap/1.0/\0" {
@@ -715,13 +715,13 @@ pub fn JPEG_scan_file(j_info: &mut JpegInfo, fp: &mut MemFile) -> i32 {
                 JM_APP2 => {
                     if length >= 14 {
                         let Some(app_sig) = read_sig(fp, 12) else {
-                            return -1;
+                            return Ok(-1);
                         };
                         length -= 12;
                         if app_sig == b"ICC_PROFILE\0" {
                             j_info.flags |= HAVE_APPN_ICC;
                             length = length
-                                .wrapping_sub(read_APP2_ICC(j_info, fp, length as usize) as i32);
+                                .wrapping_sub(read_APP2_ICC(j_info, fp, length as usize)? as i32);
                         }
                     }
                     seek_rel(fp, i64::from(length));
@@ -730,13 +730,13 @@ pub fn JPEG_scan_file(j_info: &mut JpegInfo, fp: &mut MemFile) -> i32 {
                 JM_APP14 => {
                     if length > 5 {
                         let Some(app_sig) = read_sig(fp, 5) else {
-                            return -1;
+                            return Ok(-1);
                         };
                         length -= 5;
                         if app_sig == b"Adobe" {
                             /* APP14 Adobe marker preserved */
                             j_info.flags |= HAVE_APPN_ADOBE;
-                            length = length.wrapping_sub(i32::from(read_APP14_Adobe(j_info, fp)));
+                            length = length.wrapping_sub(i32::from(read_APP14_Adobe(j_info, fp)?));
                         } else {
                             set_skip(j_info, count);
                         }
@@ -756,16 +756,16 @@ pub fn JPEG_scan_file(j_info: &mut JpegInfo, fp: &mut MemFile) -> i32 {
         count += 1;
     }
 
-    if found_sofn { 0 } else { -1 }
+    if found_sofn { Ok(0) } else { Ok(-1) }
 }
 
 impl Dpx {
     /// `jpeg_include_image`: fills XObject `xobj_id`; 0 or -1.
-    pub fn jpeg_include_image(&mut self, xobj_id: i32, fp: &mut MemFile) -> i32 {
+    pub fn jpeg_include_image(&mut self, xobj_id: i32, fp: &mut MemFile) -> Result<i32> {
         if check_for_jpeg(fp) == 0 {
             warn!("{JPEG_DEBUG_STR}: Not a JPEG file?");
             fp.rewind();
-            return -1;
+            return Ok(-1);
         }
         /* File position is 2 here... */
 
@@ -773,10 +773,10 @@ impl Dpx {
 
         let mut j_info = JpegInfo::jpeg_info_init();
 
-        if JPEG_scan_file(&mut j_info, fp) < 0 {
+        if JPEG_scan_file(&mut j_info, fp)? < 0 {
             warn!("{JPEG_DEBUG_STR}: Not a JPEG file?");
             j_info.jpeg_info_clear();
-            return -1;
+            return Ok(-1);
         }
 
         let colortype = match j_info.num_components {
@@ -789,7 +789,7 @@ impl Dpx {
                     info.num_components
                 );
                 j_info.jpeg_info_clear();
-                return -1;
+                return Ok(-1);
             }
         };
 
@@ -854,7 +854,7 @@ impl Dpx {
         }
 
         /* Copy file */
-        self.JPEG_copy_stream(&j_info, stream, fp);
+        self.JPEG_copy_stream(&j_info, stream, fp)?;
 
         info.width = i32::from(j_info.width);
         info.height = i32::from(j_info.height);
@@ -863,19 +863,19 @@ impl Dpx {
 
         (info.xdensity, info.ydensity) = self.jpeg_get_density(&mut j_info);
 
-        self.pdf_ximage_set_image(xobj_id, &info, stream);
+        self.pdf_ximage_set_image(xobj_id, &info, stream)?;
         j_info.jpeg_info_clear();
 
-        0
+        Ok(0)
     }
     /// `jpeg_get_bbox`: status, width, height, xdensity, ydensity.
-    pub fn jpeg_get_bbox(&mut self, fp: &mut MemFile) -> (i32, i32, i32, f64, f64) {
+    pub fn jpeg_get_bbox(&mut self, fp: &mut MemFile) -> Result<(i32, i32, i32, f64, f64)> {
         let mut j_info = JpegInfo::jpeg_info_init();
 
-        if JPEG_scan_file(&mut j_info, fp) < 0 {
+        if JPEG_scan_file(&mut j_info, fp)? < 0 {
             warn!("{JPEG_DEBUG_STR}: Not a JPEG file?");
             j_info.jpeg_info_clear();
-            return (-1, 0, 0, 0.0, 0.0);
+            return Ok((-1, 0, 0, 0.0, 0.0));
         }
 
         let width = i32::from(j_info.width);
@@ -885,7 +885,7 @@ impl Dpx {
 
         j_info.jpeg_info_clear();
 
-        (0, width, height, xd, yd)
+        Ok((0, width, height, xd, yd))
     }
     /// `jpeg_get_density` (static): xdensity, ydensity (reads
     /// `self.conf.compat_mode`; may set `j_info`'s dpi to 72).
@@ -972,7 +972,12 @@ impl Dpx {
     /// `stream`; 0 or -1. (C's `COPY_CHUNK` loops for ever on a file
     /// that ends within a chunk; here the copy stops.)
     #[allow(non_snake_case)]
-    pub fn JPEG_copy_stream(&mut self, j_info: &JpegInfo, stream: Obj, fp: &mut MemFile) -> i32 {
+    pub fn JPEG_copy_stream(
+        &mut self,
+        j_info: &JpegInfo,
+        stream: Obj,
+        fp: &mut MemFile,
+    ) -> Result<i32> {
         fp.rewind();
         let mut count: i32 = 0;
         let mut found_sofn = false;
@@ -984,7 +989,7 @@ impl Dpx {
             if marker == JM_SOI || (JM_RST0..=JM_RST7).contains(&marker) {
                 self.o.add_stream(stream, &[0xff, marker as u8]);
             } else {
-                let length: i32 = i32::from(fp.get_unsigned_pair()) - 2;
+                let length: i32 = i32::from(fp.get_unsigned_pair()?) - 2;
                 let header = [
                     0xff,
                     marker as u8,
@@ -1007,7 +1012,7 @@ impl Dpx {
         let rest = fp.read(fp.len()).to_vec();
         self.o.add_stream(stream, &rest);
 
-        if found_sofn { 0 } else { -1 }
+        if found_sofn { Ok(0) } else { Ok(-1) }
     }
     /// `COPY_CHUNK`.
     fn jpeg_copy_chunk(&mut self, fp: &mut MemFile, stream: Obj, length: i32) {
@@ -1041,7 +1046,7 @@ mod tests {
         let mut fp = MemFile::new(Arc::from(jpeg()), b"t.jpg");
         assert_eq!(check_for_jpeg(&mut fp), 1);
         let mut j = JpegInfo::jpeg_info_init();
-        assert_eq!(JPEG_scan_file(&mut j, &mut fp), 0);
+        assert_eq!(JPEG_scan_file(&mut j, &mut fp).unwrap(), 0);
         assert_eq!((j.width, j.height, j.num_components), (16, 8, 3));
         assert_eq!((j.xdpi, j.ydpi), (300.0, 300.0));
         assert_eq!(j.flags, HAVE_APPN_JFIF);

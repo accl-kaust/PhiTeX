@@ -54,25 +54,25 @@ impl Default for State {
 
 impl Dpx {
     /// `spc_misc_at_begin_document`.
-    pub fn spc_misc_at_begin_document(&mut self) -> i32 {
+    pub fn spc_misc_at_begin_document(&mut self) -> Result<i32> {
         if self.misc.fontattrs.is_none() {
             self.misc.fontattrs = Some(Vec::with_capacity(256));
         }
-        pdfcolorstack__init(self)
+        Ok(pdfcolorstack__init(self))
     }
     /// `spc_misc_at_end_document`.
-    pub fn spc_misc_at_end_document(&mut self) -> i32 {
+    pub fn spc_misc_at_end_document(&mut self) -> Result<i32> {
         if let Some(fontattrs) = self.misc.fontattrs.take() {
             for fa in fontattrs {
                 let attr = fa.attr.expect("attr");
-                process_fontattr(self, &fa.ident, fa.size, attr);
+                process_fontattr(self, &fa.ident, fa.size, attr)?;
                 self.o.release(attr);
             }
         }
-        pdfcolorstack__clean(self)
+        Ok(pdfcolorstack__clean(self))
     }
     /// `spc_misc_at_begin_page`.
-    pub fn spc_misc_at_begin_page(&mut self) -> i32 {
+    pub fn spc_misc_at_begin_page(&mut self) -> Result<i32> {
         for i in 0..PDFCOLORSTACK_MAX_STACK {
             if self.misc.stacks[i].page != 0 {
                 let litstr = self.misc.stacks[i].stack.dpx_stack_top().copied();
@@ -83,14 +83,14 @@ impl Dpx {
                 }
             }
         }
-        0
+        Ok(0)
     }
     /// `spc_misc_at_begin_form`.
-    pub fn spc_misc_at_begin_form(&mut self) -> i32 {
+    pub fn spc_misc_at_begin_form(&mut self) -> Result<i32> {
         self.spc_misc_at_begin_page()
     }
     /// `spc_misc_at_end_form`.
-    pub fn spc_misc_at_end_form(&mut self) -> i32 {
+    pub fn spc_misc_at_end_form(&mut self) -> Result<i32> {
         self.spc_misc_at_begin_page()
     }
 }
@@ -271,25 +271,25 @@ fn pdfcolorstack__pop(
 
 /// `parse_pdf_reference` (static; the `@name` callback of the parser;
 /// C's duplicate of spc_pdfm's).
-fn parse_pdf_reference(dpx: &mut Dpx, s: &[u8], pp: &mut usize) -> Option<Obj> {
+fn parse_pdf_reference(dpx: &mut Dpx, s: &[u8], pp: &mut usize) -> Result<Option<Obj>> {
     skip_white(s, pp);
     match parse_opt_ident(s, pp) {
         Some(name) => {
-            let result = dpx.spc_lookup_reference(&name);
+            let result = dpx.spc_lookup_reference(&name)?;
             if result.is_none() {
                 crate::warn!("Could not find the named reference (@{:?}).", name);
             }
-            result
+            Ok(result)
         }
         None => {
             crate::warn!("Could not find a reference name.");
-            None
+            Ok(None)
         }
     }
 }
 
 /// `process_fontattr`: merges `attr` into the font's resource dict.
-fn process_fontattr(dpx: &mut Dpx, ident: &[u8], size: f64, attr: Obj) -> i32 {
+fn process_fontattr(dpx: &mut Dpx, ident: &[u8], size: f64, attr: Obj) -> Result<i32> {
     let font_id = dpx.pdf_font_findresource(ident, size);
     if font_id < 0 {
         crate::warn!(
@@ -297,39 +297,43 @@ fn process_fontattr(dpx: &mut Dpx, ident: &[u8], size: f64, attr: Obj) -> i32 {
             ident,
             size
         );
-        return -1;
+        return Ok(-1);
     }
 
-    let fontdict = dpx.pdf_get_font_resource(font_id);
+    let fontdict = dpx.pdf_get_font_resource(font_id)?;
 
     dpx.o.merge_dict(fontdict, attr);
 
-    0
+    Ok(0)
 }
 
 /// `spc_handler_pdfcolorstackinit`.
-fn spc_handler_pdfcolorstackinit(dpx: &mut Dpx, spe: &mut SpcEnv, args: &mut SpcArg) -> i32 {
+fn spc_handler_pdfcolorstackinit(
+    dpx: &mut Dpx,
+    spe: &mut SpcEnv,
+    args: &mut SpcArg,
+) -> Result<i32> {
     let cp = PdfCoord { x: 0.0, y: 0.0 };
 
     args.skip_white();
     if args.curptr >= args.endptr {
-        return -1;
+        return Ok(-1);
     }
 
     let (status, id) = pdfcolorstack__get_id(dpx, spe, args);
     if status < 0 {
-        return -1;
+        return Ok(-1);
     }
     if id < 0 || id >= PDFCOLORSTACK_MAX_STACK as i32 {
         dpx.spc_warn(spe, format_args!("Invalid stack number specified: {}", id));
-        return -1;
+        return Ok(-1);
     }
     args.skip_white();
 
     let st = id as usize;
     if dpx.misc.stacks[st].stack.dpx_stack_depth() > 0 {
         dpx.spc_warn(spe, format_args!("Stadk ID={} already initialized?", id));
-        return -1;
+        return Ok(-1);
     }
 
     loop {
@@ -366,28 +370,28 @@ fn spc_handler_pdfcolorstackinit(dpx: &mut Dpx, spe: &mut SpcEnv, args: &mut Spc
         args.skip_white();
     } else {
         dpx.spc_warn(spe, format_args!("No valid PDF literal specified."));
-        return -1;
+        return Ok(-1);
     }
 
-    0
+    Ok(0)
 }
 
 /// `spc_handler_pdfcolorstack`.
-fn spc_handler_pdfcolorstack(dpx: &mut Dpx, spe: &mut SpcEnv, args: &mut SpcArg) -> i32 {
+fn spc_handler_pdfcolorstack(dpx: &mut Dpx, spe: &mut SpcEnv, args: &mut SpcArg) -> Result<i32> {
     let mut error = 0;
 
     args.skip_white();
     if args.curptr >= args.endptr {
-        return -1;
+        return Ok(-1);
     }
 
     let (status, id) = pdfcolorstack__get_id(dpx, spe, args);
     if status < 0 {
-        return -1;
+        return Ok(-1);
     }
     if id < 0 || id >= PDFCOLORSTACK_MAX_STACK as i32 {
         dpx.spc_warn(spe, format_args!("Invalid stack ID specified: {}", id));
-        return -1;
+        return Ok(-1);
     }
     args.skip_white();
 
@@ -397,7 +401,7 @@ fn spc_handler_pdfcolorstack(dpx: &mut Dpx, spe: &mut SpcEnv, args: &mut SpcArg)
             spe,
             format_args!("Stack ID={} not properly initialized?", id),
         );
-        return -1;
+        return Ok(-1);
     }
 
     let command = {
@@ -405,7 +409,7 @@ fn spc_handler_pdfcolorstack(dpx: &mut Dpx, spe: &mut SpcEnv, args: &mut SpcArg)
         parse_c_ident(s, pp)
     };
     let Some(command) = command else {
-        return -1;
+        return Ok(-1);
     };
 
     let cp = dpx.spc_get_current_point(spe);
@@ -427,16 +431,16 @@ fn spc_handler_pdfcolorstack(dpx: &mut Dpx, spe: &mut SpcEnv, args: &mut SpcArg)
         );
     }
 
-    error
+    Ok(error)
 }
 
 /// `spc_handler_pdffontattr`.
-fn spc_handler_pdffontattr(dpx: &mut Dpx, spe: &mut SpcEnv, ap: &mut SpcArg) -> i32 {
+fn spc_handler_pdffontattr(dpx: &mut Dpx, spe: &mut SpcEnv, ap: &mut SpcArg) -> Result<i32> {
     let mut size = 0.0;
 
     ap.skip_white();
     if ap.curptr >= ap.endptr {
-        return -1;
+        return Ok(-1);
     }
 
     let ident = {
@@ -445,7 +449,7 @@ fn spc_handler_pdffontattr(dpx: &mut Dpx, spe: &mut SpcEnv, ap: &mut SpcArg) -> 
     };
     let Some(ident) = ident else {
         dpx.spc_warn(spe, format_args!("Missing a font name."));
-        return -1;
+        return Ok(-1);
     };
     ap.skip_white();
 
@@ -456,7 +460,7 @@ fn spc_handler_pdffontattr(dpx: &mut Dpx, spe: &mut SpcEnv, ap: &mut SpcArg) -> 
         };
         if error != 0 {
             dpx.spc_warn(spe, format_args!("Font size expected but not found."));
-            return -1;
+            return Ok(-1);
         }
         size = v;
         ap.skip_white();
@@ -464,14 +468,14 @@ fn spc_handler_pdffontattr(dpx: &mut Dpx, spe: &mut SpcEnv, ap: &mut SpcArg) -> 
 
     let attr = {
         let (s, pp) = ap.parts();
-        dpx.parse_pdf_object_extended(s, pp, parse_pdf_reference)
+        dpx.parse_pdf_object_extended(s, pp, parse_pdf_reference)?
     };
     let Some(attr) = attr else {
         dpx.spc_warn(
             spe,
             format_args!("Failed to parse a PDF dictionary object: {:?}", ident),
         );
-        return -1;
+        return Ok(-1);
     };
     if !dpx.o.is_dict(Some(attr)) {
         dpx.spc_warn(
@@ -479,7 +483,7 @@ fn spc_handler_pdffontattr(dpx: &mut Dpx, spe: &mut SpcEnv, ap: &mut SpcArg) -> 
             format_args!("PDF dict expected but non-dict object found: {:?}", ident),
         );
         dpx.o.release(attr);
-        return -1;
+        return Ok(-1);
     }
     ap.skip_white();
 
@@ -492,7 +496,7 @@ fn spc_handler_pdffontattr(dpx: &mut Dpx, spe: &mut SpcEnv, ap: &mut SpcArg) -> 
             attr: Some(attr),
         });
 
-    0
+    Ok(0)
 }
 
 /// `sscanf(buf, "{%lfpt}{%lfpt}{%255[^}]}", &width, &height, filename)`:
@@ -593,7 +597,7 @@ fn mps_scan_bbox(s: &[u8], pp: &mut usize) -> (i32, PdfRect) {
 }
 
 /// `spc_handler_postscriptbox`.
-fn spc_handler_postscriptbox(dpx: &mut Dpx, spe: &mut SpcEnv, ap: &mut SpcArg) -> i32 {
+fn spc_handler_postscriptbox(dpx: &mut Dpx, spe: &mut SpcEnv, ap: &mut SpcArg) -> Result<i32> {
     let options = LoadOptions {
         page_no: 1,
         bbox_type: 0,
@@ -606,7 +610,7 @@ fn spc_handler_postscriptbox(dpx: &mut Dpx, spe: &mut SpcEnv, ap: &mut SpcArg) -
             spe,
             format_args!("No width/height/filename given for postscriptbox special."),
         );
-        return -1;
+        return Ok(-1);
     }
 
     // input is not NULL terminated
@@ -620,7 +624,7 @@ fn spc_handler_postscriptbox(dpx: &mut Dpx, spe: &mut SpcEnv, ap: &mut SpcArg) -
     let (n, width, height, filename) = scan_postscriptbox(&buf);
     if n != 3 {
         dpx.spc_warn(spe, format_args!("Syntax error in postscriptbox special?"));
-        return -1;
+        return Ok(-1);
     }
     ti.width = width;
     ti.height = height;
@@ -634,7 +638,7 @@ fn spc_handler_postscriptbox(dpx: &mut Dpx, spe: &mut SpcEnv, ap: &mut SpcArg) -
         .find(&filename, crate::io::Format::Pict, b"dvipdfmx")
     else {
         dpx.spc_warn(spe, format_args!("Image file {:?} not found.", filename));
-        return -1;
+        return Ok(-1);
     };
 
     let Some(data) = dpx.files.read(&fullname) else {
@@ -642,7 +646,7 @@ fn spc_handler_postscriptbox(dpx: &mut Dpx, spe: &mut SpcEnv, ap: &mut SpcArg) -
             spe,
             format_args!("Could not open image file: {:?}", fullname),
         );
-        return -1;
+        return Ok(-1);
     };
     let mut fp = MemFile::new(data, &fullname);
 
@@ -659,25 +663,25 @@ fn spc_handler_postscriptbox(dpx: &mut Dpx, spe: &mut SpcEnv, ap: &mut SpcArg) -
         }
     }
 
-    let form_id = dpx.pdf_ximage_load_image(None, &filename, options);
+    let form_id = dpx.pdf_ximage_load_image(None, &filename, options)?;
     if form_id < 0 {
         dpx.spc_warn(
             spe,
             format_args!("Failed to load image file: {:?}", filename),
         );
-        return -1;
+        return Ok(-1);
     }
 
     let (x, y) = (spe.x_user, spe.y_user);
-    dpx.spc_put_image(spe, form_id, &mut ti, x, y);
+    dpx.spc_put_image(spe, form_id, &mut ti, x, y)?;
 
-    0
+    Ok(0)
 }
 
 /// `spc_handler_null`: skips the rest.
-fn spc_handler_null(dpx: &mut Dpx, spe: &mut SpcEnv, args: &mut SpcArg) -> i32 {
+fn spc_handler_null(dpx: &mut Dpx, spe: &mut SpcEnv, args: &mut SpcArg) -> Result<i32> {
     args.curptr = args.endptr;
-    0
+    Ok(0)
 }
 
 /// `misc_handlers`.
@@ -737,7 +741,7 @@ pub fn spc_misc_setup_handler(
     handle: &mut SpcHandler,
     spe: &mut SpcEnv,
     args: &mut SpcArg,
-) -> i32 {
+) -> Result<i32> {
     args.skip_white();
 
     let key = args.curptr;
@@ -751,7 +755,7 @@ pub fn spc_misc_setup_handler(
 
     let keylen = args.curptr - key;
     if keylen < 1 {
-        return -1;
+        return Ok(-1);
     }
 
     for h in &MISC_HANDLERS {
@@ -763,11 +767,11 @@ pub fn spc_misc_setup_handler(
             handle.key = b"???:";
             handle.exec = h.exec;
 
-            return 0;
+            return Ok(0);
         }
     }
 
-    -1
+    Ok(-1)
 }
 
 #[cfg(test)]

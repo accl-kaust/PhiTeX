@@ -139,7 +139,7 @@ macro_rules! dst_need {
     ($s:expr, $dst:expr, $dp:expr, $n:expr) => {
         if $dst.len() < *$dp + ($n) as usize {
             $s.status = CS_BUFFER_ERROR;
-            return;
+            return Ok(());
         }
     };
 }
@@ -149,7 +149,7 @@ macro_rules! src_need {
     ($s:expr, $data:expr, $p:expr, $n:expr) => {
         if $data.len() < *$p + ($n) as usize {
             $s.status = CS_PARSE_ERROR;
-            return;
+            return Ok(());
         }
     };
 }
@@ -159,15 +159,15 @@ macro_rules! need {
     ($s:expr, $a:expr, $b:expr) => {
         if ($a as i32) < ($b as i32) {
             $s.status = CS_STACK_ERROR;
-            return;
+            return Ok(());
         }
     };
 }
 
 /// `get_subr` (static): subr `id` (bias applied) of `subr_idx`.
-fn get_subr(subr_idx: Option<&CffIndex>, id: i32) -> &[u8] {
+fn get_subr(subr_idx: Option<&CffIndex>, id: i32) -> Result<&[u8]> {
     let Some(subr_idx) = subr_idx else {
-        error!(
+        fatal!(
             "{}: Subroutine called but no subroutine found.",
             CS_TYPE2_DEBUG_STR
         );
@@ -186,21 +186,23 @@ fn get_subr(subr_idx: Option<&CffIndex>, id: i32) -> &[u8] {
     }
 
     if id > i32::from(count) {
-        error!(
+        fatal!(
             "{}: Invalid Subr index: {} (max={})",
-            CS_TYPE2_DEBUG_STR, id, count
+            CS_TYPE2_DEBUG_STR,
+            id,
+            count
         );
     }
 
     let id = id as usize;
     let len = subr_idx.offset[id + 1].wrapping_sub(subr_idx.offset[id]) as usize;
     let a = subr_idx.offset[id] as usize - 1;
-    &subr_idx.data[a..a + len]
+    Ok(&subr_idx.data[a..a + len])
 }
 
 impl State {
     /// `clear_stack` (static).
-    fn clear_stack(&mut self, dst: &mut [u8], dp: &mut usize) {
+    fn clear_stack(&mut self, dst: &mut [u8], dp: &mut usize) -> Result<()> {
         for i in 0..self.stack_top as usize {
             let value = self.arg_stack[i];
             // Nearest integer value
@@ -209,7 +211,7 @@ impl State {
                 // This number cannot be represented as a single operand. We
                 // must use `a b mul ...' or `a c div' to represent large
                 // values.
-                error!(
+                fatal!(
                     "{}: Argument value too large. (This is bug)",
                     CS_TYPE2_DEBUG_STR
                 );
@@ -250,18 +252,25 @@ impl State {
                 *dp += 3;
             } else {
                 // Shouldn't come here
-                error!("{}: Unexpected error.", CS_TYPE2_DEBUG_STR);
+                fatal!("{}: Unexpected error.", CS_TYPE2_DEBUG_STR);
             }
         }
 
         self.stack_top = 0; // clear stack
+        Ok(())
     }
 
     /// `do_operator1` (static).
     ///
     /// phase: 0 inital state; 1 hint declaration, first stack-clearing
     /// operator appeared; 2 in path construction.
-    fn do_operator1(&mut self, dst: &mut [u8], dp: &mut usize, data: &[u8], p: &mut usize) {
+    fn do_operator1(
+        &mut self,
+        dst: &mut [u8],
+        dp: &mut usize,
+        data: &[u8],
+        p: &mut usize,
+    ) -> Result<()> {
         let op = data[*p];
 
         *p += 1;
@@ -274,7 +283,7 @@ impl State {
                     self.width = self.arg_stack[0];
                 }
                 self.num_stems += self.stack_top / 2;
-                self.clear_stack(dst, dp);
+                self.clear_stack(dst, dp)?;
                 dst_need!(self, dst, dp, 1);
                 dst[*dp] = op;
                 *dp += 1;
@@ -288,7 +297,7 @@ impl State {
                     }
                     self.num_stems += self.stack_top / 2;
                 }
-                self.clear_stack(dst, dp);
+                self.clear_stack(dst, dp)?;
                 dst_need!(self, dst, dp, 1);
                 dst[*dp] = op;
                 *dp += 1;
@@ -307,7 +316,7 @@ impl State {
                     self.have_width = 1;
                     self.width = self.arg_stack[0];
                 }
-                self.clear_stack(dst, dp);
+                self.clear_stack(dst, dp)?;
                 dst_need!(self, dst, dp, 1);
                 dst[*dp] = op;
                 *dp += 1;
@@ -318,7 +327,7 @@ impl State {
                     self.have_width = 1;
                     self.width = self.arg_stack[0];
                 }
-                self.clear_stack(dst, dp);
+                self.clear_stack(dst, dp)?;
                 dst_need!(self, dst, dp, 1);
                 dst[*dp] = op;
                 *dp += 1;
@@ -328,11 +337,11 @@ impl State {
                 if self.stack_top == 1 {
                     self.have_width = 1;
                     self.width = self.arg_stack[0];
-                    self.clear_stack(dst, dp);
+                    self.clear_stack(dst, dp)?;
                 } else if self.stack_top == 4 || self.stack_top == 5 {
                     warn!("\"seac\" character deprecated in Type 2 charstring.");
                     self.status = CS_PARSE_ERROR;
-                    return;
+                    return Ok(());
                 } else if self.stack_top > 0 {
                     warn!("{}: Operand stack not empty.", CS_TYPE2_DEBUG_STR);
                 }
@@ -347,16 +356,16 @@ impl State {
                 if self.phase < 2 {
                     warn!("{}: Broken Type 2 charstring.", CS_TYPE2_DEBUG_STR);
                     self.status = CS_PARSE_ERROR;
-                    return;
+                    return Ok(());
                 }
-                self.clear_stack(dst, dp);
+                self.clear_stack(dst, dp)?;
                 dst_need!(self, dst, dp, 1);
                 dst[*dp] = op;
                 *dp += 1;
             }
             // all operotors above are stack-clearing operator; no output
             CS_RETURN | CS_CALLGSUBR | CS_CALLSUBR => {
-                error!("{}: Unexpected call(g)subr/return", CS_TYPE2_DEBUG_STR);
+                fatal!("{}: Unexpected call(g)subr/return", CS_TYPE2_DEBUG_STR);
             }
             _ => {
                 // no-op ?
@@ -367,10 +376,17 @@ impl State {
                 self.status = CS_PARSE_ERROR;
             }
         }
+        Ok(())
     }
 
     /// `do_operator2` (static). `random` is not supported (how random?).
-    fn do_operator2(&mut self, dst: &mut [u8], dp: &mut usize, data: &[u8], p: &mut usize) {
+    fn do_operator2(
+        &mut self,
+        dst: &mut [u8],
+        dp: &mut usize,
+        data: &[u8],
+        p: &mut usize,
+    ) -> Result<()> {
         *p += 1;
 
         src_need!(self, data, p, 1);
@@ -390,9 +406,9 @@ impl State {
                 if self.phase < 2 {
                     warn!("{}: Broken Type 2 charstring.", CS_TYPE2_DEBUG_STR);
                     self.status = CS_PARSE_ERROR;
-                    return;
+                    return Ok(());
                 }
-                self.clear_stack(dst, dp);
+                self.clear_stack(dst, dp)?;
                 dst_need!(self, dst, dp, 2);
                 dst[*dp] = CS_ESCAPE;
                 dst[*dp + 1] = op;
@@ -572,10 +588,11 @@ impl State {
                 self.status = CS_PARSE_ERROR;
             }
         }
+        Ok(())
     }
 
     /// `get_integer` (static): exactly the DICT encoding (except 29).
-    fn get_integer(&mut self, data: &[u8], p: &mut usize) {
+    fn get_integer(&mut self, data: &[u8], p: &mut usize) -> Result<()> {
         let mut result: i32;
         let b0 = data[*p];
 
@@ -607,16 +624,17 @@ impl State {
             *p += 1;
         } else {
             self.status = CS_PARSE_ERROR;
-            return;
+            return Ok(());
         }
 
         need!(self, CS_ARG_STACK_MAX, self.stack_top + 1);
         self.arg_stack[self.stack_top as usize] = f64::from(result);
         self.stack_top += 1;
+        Ok(())
     }
 
     /// `get_fixed` (static): a signed 16.16-bit fixed number.
-    fn get_fixed(&mut self, data: &[u8], p: &mut usize) {
+    fn get_fixed(&mut self, data: &[u8], p: &mut usize) -> Result<()> {
         *p += 1;
 
         src_need!(self, data, p, 4);
@@ -634,6 +652,7 @@ impl State {
         self.arg_stack[self.stack_top as usize] = rvalue;
         self.stack_top += 1;
         *p += 4;
+        Ok(())
     }
 
     /// `do_charstring` (static).
@@ -645,9 +664,9 @@ impl State {
         p: &mut usize,
         gsubr_idx: Option<&CffIndex>,
         subr_idx: Option<&CffIndex>,
-    ) {
+    ) -> Result<()> {
         if self.nest > CS_SUBR_NEST_MAX {
-            error!("{}: Subroutine nested too deeply.", CS_TYPE2_DEBUG_STR);
+            fatal!("{}: Subroutine nested too deeply.", CS_TYPE2_DEBUG_STR);
         }
 
         self.nest += 1;
@@ -656,7 +675,7 @@ impl State {
             let b0 = data[*p];
             if b0 == 255 {
                 // 16-bit.16-bit fixed signed number
-                self.get_fixed(data, p);
+                self.get_fixed(data, p)?;
             } else if b0 == CS_RETURN {
                 self.status = CS_SUBR_RETURN;
             } else if b0 == CS_CALLGSUBR {
@@ -664,11 +683,11 @@ impl State {
                     self.status = CS_STACK_ERROR;
                 } else {
                     self.stack_top -= 1;
-                    let subr = get_subr(gsubr_idx, self.arg_stack[self.stack_top as usize] as i32);
+                    let subr = get_subr(gsubr_idx, self.arg_stack[self.stack_top as usize] as i32)?;
                     if *dp + subr.len() > dst.len() {
-                        error!("{}: Possible buffer overflow.", CS_TYPE2_DEBUG_STR);
+                        fatal!("{}: Possible buffer overflow.", CS_TYPE2_DEBUG_STR);
                     }
-                    self.do_charstring(dst, dp, subr, &mut 0, gsubr_idx, subr_idx);
+                    self.do_charstring(dst, dp, subr, &mut 0, gsubr_idx, subr_idx)?;
                     *p += 1;
                 }
             } else if b0 == CS_CALLSUBR {
@@ -676,24 +695,24 @@ impl State {
                     self.status = CS_STACK_ERROR;
                 } else {
                     self.stack_top -= 1;
-                    let subr = get_subr(subr_idx, self.arg_stack[self.stack_top as usize] as i32);
+                    let subr = get_subr(subr_idx, self.arg_stack[self.stack_top as usize] as i32)?;
                     if dst.len() < *dp + subr.len() {
-                        error!("{}: Possible buffer overflow.", CS_TYPE2_DEBUG_STR);
+                        fatal!("{}: Possible buffer overflow.", CS_TYPE2_DEBUG_STR);
                     }
-                    self.do_charstring(dst, dp, subr, &mut 0, gsubr_idx, subr_idx);
+                    self.do_charstring(dst, dp, subr, &mut 0, gsubr_idx, subr_idx)?;
                     *p += 1;
                 }
             } else if b0 == CS_ESCAPE {
-                self.do_operator2(dst, dp, data, p);
+                self.do_operator2(dst, dp, data, p)?;
             } else if b0 < 32 && b0 != 28 {
                 // 19, 20 need mask
-                self.do_operator1(dst, dp, data, p);
+                self.do_operator1(dst, dp, data, p)?;
             } else if (b0 <= 22 && b0 >= 27) || b0 == 31 {
                 // reserved
                 self.status = CS_PARSE_ERROR; // not an error ?
             } else {
                 // integer
-                self.get_integer(data, p);
+                self.get_integer(data, p)?;
             }
         }
 
@@ -703,13 +722,16 @@ impl State {
             warn!("{}: Garbage after endchar.", CS_TYPE2_DEBUG_STR);
         } else if self.status < CS_PARSE_OK {
             // error
-            error!(
+            fatal!(
                 "{}: Parsing charstring failed: (status={}, stack={})",
-                CS_TYPE2_DEBUG_STR, self.status, self.stack_top
+                CS_TYPE2_DEBUG_STR,
+                self.status,
+                self.stack_top
             );
         }
 
         self.nest -= 1;
+        Ok(())
     }
 
     /// `cs_parse_init` (static).
@@ -734,7 +756,7 @@ impl Dpx {
         default_width: f64,
         nominal_width: f64,
         ginfo: Option<&mut CsGinfo>,
-    ) -> i32 {
+    ) -> Result<i32> {
         let st = &mut self.cs_type2;
         let mut dp = 0usize;
         let mut p = 0usize;
@@ -745,7 +767,7 @@ impl Dpx {
         st.have_width = 0;
 
         // expand call(g)subrs
-        st.do_charstring(dst, &mut dp, src, &mut p, gsubr, subr);
+        st.do_charstring(dst, &mut dp, src, &mut p, gsubr, subr)?;
 
         if let Some(ginfo) = ginfo {
             ginfo.flags = 0; // not used
@@ -756,7 +778,7 @@ impl Dpx {
             }
         }
 
-        dp as i32
+        Ok(dp as i32)
     }
 }
 
@@ -769,7 +791,8 @@ mod tests {
         let mut dst = vec![0u8; 256];
         let (mut dp, mut p) = (0, 0);
         st.cs_parse_init();
-        st.do_charstring(&mut dst, &mut dp, src, &mut p, gsubr, None);
+        st.do_charstring(&mut dst, &mut dp, src, &mut p, gsubr, None)
+            .unwrap();
         dst.truncate(dp);
         (dst, if st.have_width != 0 { st.width } else { -1.0 })
     }

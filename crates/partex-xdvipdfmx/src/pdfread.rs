@@ -5,9 +5,11 @@
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
+use crate::ctx::Result;
 use crate::fmt::{atoi, strtol};
 use crate::obj::{DecodeParms, Obj, PDF_INDIRECT, PDF_OBJ_MAX_DEPTH, PdfOut};
 use crate::parse::{parse_number, parse_unsigned, skip_white};
+use crate::some;
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct XrefIn {
@@ -118,11 +120,11 @@ fn find_xref(d: &[u8]) -> usize {
 impl PdfOut {
     /// `pdf_open`: reads the file's cross-reference and catalog. The
     /// same `ident` again gives the same file.
-    pub fn pdf_open(&mut self, ident: Option<&[u8]>, data: Arc<[u8]>) -> Option<u32> {
+    pub fn pdf_open(&mut self, ident: Option<&[u8]>, data: Arc<[u8]>) -> Result<Option<u32>> {
         if let Some(id) = ident
             && let Some(i) = self.files.iter().position(|f| f.ident == id)
         {
-            return Some(i as u32);
+            return Ok(Some(i as u32));
         }
         let version = check_for_pdf_version(&data);
         let pf = self.files.len() as u32;
@@ -134,35 +136,35 @@ impl PdfOut {
             catalog: None,
             version,
         });
-        let ok = (|| {
-            let trailer = self.read_xref(pf)?;
+        let ok = (|| -> Result<Option<()>> {
+            let trailer = some!(self.read_xref(pf)?);
             self.files[pf as usize].trailer = Some(trailer);
             if self.lookup_dict(trailer, b"Encrypt").is_some() {
-                return None;
+                return Ok(None);
             }
             let root = self.lookup_dict(trailer, b"Root");
-            let catalog = self.deref_obj(root);
+            let catalog = self.deref_obj(root)?;
             self.files[pf as usize].catalog = catalog;
             if !self.is_dict(catalog) {
-                return None;
+                return Ok(None);
             }
-            let v = self.lookup_dict(catalog?, b"Version");
-            let nv = self.deref_obj(v);
+            let v = self.lookup_dict(some!(catalog), b"Version");
+            let nv = self.deref_obj(v)?;
             if let Some(nv) = nv {
                 if !self.is_name(Some(nv)) {
                     self.release(nv);
-                    return None;
+                    return Ok(None);
                 }
                 let s = self.name_value(nv).to_vec();
                 let (major, n) = strtol(&s, 10);
                 if n == 0 || s.get(n) != Some(&b'.') {
                     self.release(nv);
-                    return None;
+                    return Ok(None);
                 }
                 let (minor, m) = strtol(&s[n + 1..], 10);
                 if m == 0 {
                     self.release(nv);
-                    return None;
+                    return Ok(None);
                 }
                 let v = (major * 10 + minor) as i32;
                 if self.files[pf as usize].version < v {
@@ -170,16 +172,16 @@ impl PdfOut {
                 }
                 self.release(nv);
             }
-            Some(())
-        })();
+            Ok(Some(()))
+        })()?;
         if ok.is_none() {
             self.pdf_file_free(pf);
             if ident.is_none() || self.files.len() as u32 == pf + 1 {
                 self.files.pop();
             }
-            return None;
+            return Ok(None);
         }
-        Some(pf)
+        Ok(Some(pf))
     }
 
     fn pdf_file_free(&mut self, pf: u32) {
@@ -215,20 +217,20 @@ impl PdfOut {
         }
     }
 
-    fn read_xref(&mut self, pf: u32) -> Option<Obj> {
+    fn read_xref(&mut self, pf: u32) -> Result<Option<Obj>> {
         let data = self.files[pf as usize].data.clone();
         let mut xref_pos = find_xref(&data);
         if xref_pos == 0 {
-            return None;
+            return Ok(None);
         }
         let mut main_trailer: Option<Obj> = None;
         while xref_pos != 0 {
             let res = self.parse_xref_table(pf, &data, xref_pos);
             let trailer;
             if res > 0 {
-                let Some(t) = self.parse_trailer(pf, &data) else {
+                let Some(t) = self.parse_trailer(pf, &data)? else {
                     self.release_opt(main_trailer);
-                    return None;
+                    return Ok(None);
                 };
                 trailer = t;
                 if main_trailer.is_none() {
@@ -238,12 +240,12 @@ impl PdfOut {
                     && self.is_number(Some(xs))
                 {
                     let pos = self.number_value(xs) as i32 as usize;
-                    if let Some(nt) = self.parse_xref_stream(pf, &data, pos) {
+                    if let Some(nt) = self.parse_xref_stream(pf, &data, pos)? {
                         self.release(nt);
                     }
                 }
             } else if res == 0
-                && let Some(t) = self.parse_xref_stream(pf, &data, xref_pos)
+                && let Some(t) = self.parse_xref_stream(pf, &data, xref_pos)?
             {
                 trailer = t;
                 if main_trailer.is_none() {
@@ -251,7 +253,7 @@ impl PdfOut {
                 }
             } else {
                 self.release_opt(main_trailer);
-                return None;
+                return Ok(None);
             }
             if let Some(prev) = self.lookup_dict(trailer, b"Prev") {
                 if self.is_number(Some(prev)) {
@@ -259,14 +261,14 @@ impl PdfOut {
                 } else {
                     self.release(trailer);
                     self.release_opt(main_trailer);
-                    return None;
+                    return Ok(None);
                 }
             } else {
                 xref_pos = 0;
             }
             self.release(trailer);
         }
-        main_trailer
+        Ok(main_trailer)
     }
 
     /// The position after the last line read, kept for `parse_trailer`.
@@ -370,38 +372,38 @@ impl PdfOut {
         1
     }
 
-    fn parse_trailer(&mut self, _pf: u32, d: &[u8]) -> Option<Obj> {
+    fn parse_trailer(&mut self, _pf: u32, d: &[u8]) -> Result<Option<Obj>> {
         let start = self.trailer_pos;
         let end = (start + 1024).min(d.len());
         let buf = &d[start..end];
         if buf.is_empty() || !buf.starts_with(b"trailer") {
-            return None;
+            return Ok(None);
         }
         let mut p = 7;
         skip_white(buf, &mut p);
         self.parse_pdf_dict(buf, &mut p, Some(_pf))
     }
 
-    fn parse_xref_stream(&mut self, pf: u32, d: &[u8], xref_pos: usize) -> Option<Obj> {
+    fn parse_xref_stream(&mut self, pf: u32, d: &[u8], xref_pos: usize) -> Result<Option<Obj>> {
         let file_size = d.len();
-        let xrefstm = self.pdf_read_object(0, 0, pf, xref_pos, file_size);
+        let xrefstm = self.pdf_read_object(0, 0, pf, xref_pos, file_size)?;
         if !self.is_stream(xrefstm) {
             self.release_opt(xrefstm);
-            return None;
+            return Ok(None);
         }
-        let xrefstm = xrefstm?;
-        let Some(tmp) = self.stream_uncompress(xrefstm) else {
+        let xrefstm = some!(xrefstm);
+        let Some(tmp) = self.stream_uncompress(xrefstm)? else {
             self.release(xrefstm);
-            return None;
+            return Ok(None);
         };
         self.release(xrefstm);
         let xrefstm = tmp;
         let sd = self.stream_dict(xrefstm);
         let trailer = self.link(sd);
-        let fail = |o: &mut PdfOut| {
+        let fail = |o: &mut PdfOut| -> Result<Option<Obj>> {
             o.release(xrefstm);
             o.release(trailer);
-            None
+            Ok(None)
         };
         let Some(size_obj) = self
             .lookup_dict(trailer, b"Size")
@@ -444,8 +446,8 @@ impl PdfOut {
                 if !self.is_number(first) || !self.is_number(sz) {
                     return fail(self);
                 }
-                let first = self.number_value(first?) as i32;
-                let sz = self.number_value(sz?) as i32;
+                let first = self.number_value(some!(first)) as i32;
+                let sz = self.number_value(some!(sz)) as i32;
                 if self.parse_xrefstm_subsec(pf, &data, &mut p, &mut length, &w, wsum, first, sz) {
                     return fail(self);
                 }
@@ -454,7 +456,7 @@ impl PdfOut {
             return fail(self);
         }
         self.release(xrefstm);
-        Some(trailer)
+        Ok(Some(trailer))
     }
 
     /// True on error.
@@ -522,58 +524,58 @@ impl PdfOut {
         pf: u32,
         offset: usize,
         limit: usize,
-    ) -> Option<Obj> {
+    ) -> Result<Option<Obj>> {
         if limit <= offset {
-            return None;
+            return Ok(None);
         }
         let data = self.files[pf as usize].data.clone();
         let buf = &data[offset..limit.min(data.len())];
         let mut q = 0;
         skip_white(buf, &mut q);
-        let sp = parse_unsigned(buf, &mut q)?;
+        let sp = some!(parse_unsigned(buf, &mut q));
         let n = atoi(&sp) as u32;
         skip_white(buf, &mut q);
-        let sp = parse_unsigned(buf, &mut q)?;
+        let sp = some!(parse_unsigned(buf, &mut q));
         let g = atoi(&sp) as u32;
         if obj_num != 0 && (n != obj_num || g != u32::from(obj_gen)) {
-            return None;
+            return Ok(None);
         }
         let mut p = q;
         skip_white(buf, &mut p);
         if !buf[p..].starts_with(b"obj") {
-            return None;
+            return Ok(None);
         }
         p += 3;
-        let result = self.parse_pdf_object(buf, &mut p, Some(pf));
+        let result = self.parse_pdf_object(buf, &mut p, Some(pf))?;
         skip_white(buf, &mut p);
         if !buf[p.min(buf.len())..].starts_with(b"endobj") {
             self.release_opt(result);
-            return None;
+            return Ok(None);
         }
-        result
+        Ok(result)
     }
 
-    fn read_objstm(&mut self, pf: u32, num: u32) -> Option<Obj> {
+    fn read_objstm(&mut self, pf: u32, num: u32) -> Result<Option<Obj>> {
         let e = self.files[pf as usize].xref[num as usize];
         let offset = e.field2 as usize;
         let limit = self.next_object_offset(pf, num);
-        let objstm = self.pdf_read_object(num, e.field3, pf, offset, limit);
-        let fail = |o: &mut PdfOut, x: Option<Obj>| {
+        let objstm = self.pdf_read_object(num, e.field3, pf, offset, limit)?;
+        let fail = |o: &mut PdfOut, x: Option<Obj>| -> Result<Option<Obj>> {
             o.release_opt(x);
-            None
+            Ok(None)
         };
         if !self.is_stream(objstm) {
             return fail(self, objstm);
         }
-        let objstm = objstm?;
-        let Some(tmp) = self.stream_uncompress(objstm) else {
+        let objstm = some!(objstm);
+        let Some(tmp) = self.stream_uncompress(objstm)? else {
             return fail(self, Some(objstm));
         };
         self.release(objstm);
         let objstm = tmp;
         let dict = self.stream_dict(objstm);
         let ty = self.lookup_dict(dict, b"Type");
-        if !self.is_name(ty) || self.name_value(ty?) != b"ObjStm" {
+        if !self.is_name(ty) || self.name_value(some!(ty)) != b"ObjStm" {
             return fail(self, Some(objstm));
         }
         let Some(n) = self
@@ -612,41 +614,41 @@ impl PdfOut {
         }
         self.stream_mut(objstm).objstm = Some(header);
         self.files[pf as usize].xref[num as usize].direct = Some(objstm);
-        Some(objstm)
+        Ok(Some(objstm))
     }
 
     /// `pdf_get_object`: a link to the object (a new null if it does
     /// not exist).
-    pub fn pdf_get_object(&mut self, pf: u32, obj_num: u32, obj_gen: u16) -> Option<Obj> {
+    pub fn pdf_get_object(&mut self, pf: u32, obj_num: u32, obj_gen: u16) -> Result<Option<Obj>> {
         if !self.files[pf as usize].checklabel(obj_num, obj_gen) {
-            return Some(self.new_null());
+            return Ok(Some(self.new_null()));
         }
         if let Some(r) = self.files[pf as usize].xref[obj_num as usize].direct {
-            return Some(self.link(r));
+            return Ok(Some(self.link(r)));
         }
         let e = self.files[pf as usize].xref[obj_num as usize];
         let result = if e.kind == 1 {
             let limit = self.next_object_offset(pf, obj_num);
-            self.pdf_read_object(obj_num, obj_gen, pf, e.field2 as usize, limit)
+            self.pdf_read_object(obj_num, obj_gen, pf, e.field2 as usize, limit)?
         } else {
             let objstm_num = e.field2;
             let index = i32::from(e.field3);
             let f = &self.files[pf as usize];
             if objstm_num as usize >= f.xref.len() || f.xref[objstm_num as usize].kind != 1 {
-                return Some(self.new_null());
+                return Ok(Some(self.new_null()));
             }
             let objstm = match f.xref[objstm_num as usize].direct {
                 Some(o) => Some(o),
-                None => self.read_objstm(pf, objstm_num),
+                None => self.read_objstm(pf, objstm_num)?,
             };
             let Some(objstm) = objstm else {
-                return Some(self.new_null());
+                return Ok(Some(self.new_null()));
             };
             let header = self.stream_mut(objstm).objstm.clone().unwrap_or_default();
             let (n, first) = (header[0], header[1]);
             let data = &header[2..];
             if index >= n || data[2 * index as usize] != obj_num as i32 {
-                return Some(self.new_null());
+                return Ok(Some(self.new_null()));
             }
             let sdata = self.stream_data(objstm).to_vec();
             let length = sdata.len();
@@ -658,19 +660,19 @@ impl PdfOut {
             };
             let slice = &sdata[..q.min(length)];
             let mut pp = p;
-            self.parse_pdf_object(slice, &mut pp, Some(pf))
+            self.parse_pdf_object(slice, &mut pp, Some(pf))?
         };
         let Some(result) = result else {
-            return Some(self.new_null());
+            return Ok(Some(self.new_null()));
         };
         let l = self.link(result);
         self.files[pf as usize].xref[obj_num as usize].direct = Some(l);
-        Some(result)
+        Ok(Some(result))
     }
 
     /// `pdf_deref_obj`: a link to the object an indirect reference
     /// leads to; none for a null or a freed object.
-    pub fn deref_obj(&mut self, obj: Option<Obj>) -> Option<Obj> {
+    pub fn deref_obj(&mut self, obj: Option<Obj>) -> Result<Option<Obj>> {
         let mut count = PDF_OBJ_MAX_DEPTH;
         let mut obj = obj.map(|o| self.link(o));
         while self.type_of(obj) == PDF_INDIRECT {
@@ -682,10 +684,10 @@ impl PdfOut {
             let ind = self.indirect(o);
             if let Some(pf) = ind.pf {
                 self.release(o);
-                obj = self.pdf_get_object(pf, ind.label, ind.generation);
+                obj = self.pdf_get_object(pf, ind.label, ind.generation)?;
             } else if self.is_freed(ind.label) {
                 self.release(o);
-                return None;
+                return Ok(None);
             } else {
                 let next = ind.obj.expect("Undefined object reference");
                 self.release(o);
@@ -698,76 +700,82 @@ impl PdfOut {
         );
         if self.is_null(obj) {
             self.release_opt(obj);
-            return None;
+            return Ok(None);
         }
-        obj
+        Ok(obj)
     }
 
     /// `pdf_import_object`.
-    pub fn import_object(&mut self, object: Obj) -> Option<Obj> {
+    pub fn import_object(&mut self, object: Obj) -> Result<Option<Obj>> {
         match self.type_of(Some(object)) {
             PDF_INDIRECT => {
                 if self.indirect(object).pf.is_some() {
                     self.import_indirect(object)
                 } else {
-                    Some(self.link(object))
+                    Ok(Some(self.link(object)))
                 }
             }
             crate::obj::PDF_STREAM => {
                 let sd = self.stream_dict(object);
-                let tmp = self.import_object(sd)?;
+                let tmp = some!(self.import_object(sd)?);
                 let imported = self.new_stream(0);
                 let isd = self.stream_dict(imported);
                 self.merge_dict(isd, tmp);
                 self.release(tmp);
                 let data = self.stream_data(object).to_vec();
                 self.add_stream(imported, &data);
-                Some(imported)
+                Ok(Some(imported))
             }
             crate::obj::PDF_DICT => {
                 let imported = self.new_dict();
                 for (k, v) in self.dict_entries(object) {
-                    let tmp = v.and_then(|v| self.import_object(v));
+                    let tmp = match v {
+                        Some(v) => self.import_object(v)?,
+                        None => None,
+                    };
                     let Some(tmp) = tmp else {
                         self.release(imported);
-                        return None;
+                        return Ok(None);
                     };
                     let k = self.link(k);
                     self.add_dict(imported, k, Some(tmp));
                 }
-                Some(imported)
+                Ok(Some(imported))
             }
             crate::obj::PDF_ARRAY => {
                 let imported = self.new_array();
                 for v in self.array_items(object) {
-                    let tmp = v.and_then(|v| self.import_object(v));
+                    let tmp = match v {
+                        Some(v) => self.import_object(v)?,
+                        None => None,
+                    };
                     let Some(tmp) = tmp else {
                         self.release(imported);
-                        return None;
+                        return Ok(None);
                     };
                     self.add_array(imported, tmp);
                 }
-                Some(imported)
+                Ok(Some(imported))
             }
-            _ => Some(self.link(object)),
+            _ => Ok(Some(self.link(object))),
         }
     }
 
-    fn import_indirect(&mut self, object: Obj) -> Option<Obj> {
+    fn import_indirect(&mut self, object: Obj) -> Result<Option<Obj>> {
         let ind = self.indirect(object);
         let pf = ind.pf.expect("file");
         if !self.files[pf as usize].checklabel(ind.label, ind.generation) {
-            return Some(self.new_null());
+            return Ok(Some(self.new_null()));
         }
         let r = self.files[pf as usize].xref[ind.label as usize].indirect;
         let r = if let Some(r) = r {
             r
         } else {
-            let obj = self.pdf_get_object(pf, ind.label, ind.generation)?;
+            let obj = some!(self.pdf_get_object(pf, ind.label, ind.generation)?);
             let reserved = self.new_null();
             let r = self.ref_obj(reserved);
             self.files[pf as usize].xref[ind.label as usize].indirect = Some(r);
-            if let Some(imported) = self.import_object(obj) {
+            if let Some(imported) = self.import_object(obj)? {
                 self.set_indirect_target(r, Some(imported));
                 let (l, g) = (self.label(reserved), self.generation(reserved));
                 self.set_label(imported, l, g);
@@ -778,25 +786,25 @@ impl PdfOut {
             self.release(obj);
             r
         };
-        Some(self.link(r))
+        Ok(Some(self.link(r)))
     }
 
     /// `pdf_concat_stream`: appends `src`'s data, decoded, to `dst`.
-    pub fn concat_stream(&mut self, dst: Obj, src: Obj) -> i32 {
+    pub fn concat_stream(&mut self, dst: Obj, src: Obj) -> Result<i32> {
         if !self.is_stream(Some(dst)) || !self.is_stream(Some(src)) {
-            return -1;
+            return Ok(-1);
         }
         let sd = self.stream_dict(src);
         let Some(filter) = self.lookup_dict(sd, b"Filter") else {
             let d = self.stream_data(src).to_vec();
             self.add_stream(dst, &d);
-            return 0;
+            return Ok(0);
         };
         let parms = if let Some(dp) = self.lookup_dict(sd, b"DecodeParms") {
-            let p = self.deref_obj(Some(dp));
+            let p = self.deref_obj(Some(dp))?;
             if p.is_none() || (!self.is_array(p) && !self.is_dict(p)) {
                 self.release_opt(p);
-                return -1;
+                return Ok(-1);
             }
             p
         } else {
@@ -809,22 +817,22 @@ impl PdfOut {
                 && (!self.is_array(Some(pa)) || self.array_length(pa) != num)
             {
                 self.release(pa);
-                return -1;
+                return Ok(-1);
             }
             for i in 0..num {
                 let Some(cur) = data.take() else { break };
                 let f = self.get_array(filter, i as i32);
-                let tmp1 = self.deref_obj(f);
+                let tmp1 = self.deref_obj(f)?;
                 let tmp2 = match parms {
                     Some(pa) => {
                         let x = self.get_array(pa, i as i32);
-                        self.deref_obj(x)
+                        self.deref_obj(x)?
                     }
                     None => None,
                 };
                 if self.is_name(tmp1) {
                     let name = self.name_value(tmp1.expect("name")).to_vec();
-                    data = self.decode_with(&name, &cur, tmp2);
+                    data = self.decode_with(&name, &cur, tmp2)?;
                 } else if self.is_null(tmp1) {
                     data = Some(cur);
                 } else {
@@ -836,7 +844,7 @@ impl PdfOut {
         } else if self.is_name(Some(filter)) {
             let name = self.name_value(filter).to_vec();
             let cur = data.take().unwrap_or_default();
-            data = self.decode_with(&name, &cur, parms);
+            data = self.decode_with(&name, &cur, parms)?;
         } else {
             data = None;
         }
@@ -844,25 +852,33 @@ impl PdfOut {
         match data {
             Some(d) => {
                 self.add_stream(dst, &d);
-                0
+                Ok(0)
             }
-            None => -1,
+            None => Ok(-1),
         }
     }
 
-    fn decode_with(&mut self, name: &[u8], data: &[u8], parm: Option<Obj>) -> Option<Vec<u8>> {
+    fn decode_with(
+        &mut self,
+        name: &[u8],
+        data: &[u8],
+        parm: Option<Obj>,
+    ) -> Result<Option<Vec<u8>>> {
         match name {
-            b"ASCIIHexDecode" => crate::filter::decode_ascii_hex(data),
-            b"ASCII85Decode" => crate::filter::decode_ascii85(data),
+            b"ASCIIHexDecode" => Ok(crate::filter::decode_ascii_hex(data)),
+            b"ASCII85Decode" => Ok(crate::filter::decode_ascii85(data)),
             b"FlateDecode" => {
-                let p = parm.map(|p| self.decode_parms_flate(p));
-                crate::filter::decode_flate(data, p.as_ref())
+                let p = match parm {
+                    Some(p) => Some(self.decode_parms_flate(p)?),
+                    None => None,
+                };
+                Ok(crate::filter::decode_flate(data, p.as_ref()))
             }
-            _ => None,
+            _ => Ok(None),
         }
     }
 
-    fn decode_parms_flate(&mut self, dict: Obj) -> DecodeParms {
+    fn decode_parms_flate(&mut self, dict: Obj) -> Result<DecodeParms> {
         let mut parms = DecodeParms {
             predictor: 1,
             colors: 1,
@@ -876,7 +892,7 @@ impl PdfOut {
             (&b"Columns"[..], 3),
         ] {
             let x = self.lookup_dict(dict, key);
-            let t = self.deref_obj(x);
+            let t = self.deref_obj(x)?;
             if let Some(t) = t {
                 let v = self.number_value(t) as i32;
                 match slot {
@@ -888,18 +904,18 @@ impl PdfOut {
                 self.release(t);
             }
         }
-        parms
+        Ok(parms)
     }
 
     /// `pdf_stream_uncompress`.
-    pub fn stream_uncompress(&mut self, src: Obj) -> Option<Obj> {
+    pub fn stream_uncompress(&mut self, src: Obj) -> Result<Option<Obj>> {
         let dst = self.new_stream(0);
         let dd = self.stream_dict(dst);
         let sd = self.stream_dict(src);
         self.merge_dict(dd, sd);
         self.remove_dict(dd, b"Length");
-        self.concat_stream(dst, src);
-        Some(dst)
+        self.concat_stream(dst, src)?;
+        Ok(Some(dst))
     }
 }
 

@@ -509,15 +509,15 @@ impl Dpx {
         colorspec: &mut PdfColor,
         args: &mut SpcArg,
         syntax: i32,
-    ) -> i32 {
+    ) -> Result<i32> {
         ap_skip_blank(args);
         if args.curptr >= args.endptr {
-            return -1;
+            return Ok(-1);
         }
 
         colorspec.pdf_color_black(); /* As initialization... */
         if syntax != 0 {
-            spc_read_color_color(self, spe, colorspec, args)
+            Ok(spc_read_color_color(self, spe, colorspec, args))
         } else {
             spc_read_color_pdf(self, spe, colorspec, args)
         }
@@ -529,19 +529,19 @@ impl Dpx {
         colorspec: &mut PdfColor,
         args: &mut SpcArg,
         defaultcolor: Option<&PdfColor>,
-    ) -> i32 {
+    ) -> Result<i32> {
         ap_skip_blank(args);
         if args.curptr >= args.endptr {
-            return -1;
+            return Ok(-1);
         }
-        let mut error = spc_read_color_pdf(self, spe, colorspec, args);
+        let mut error = spc_read_color_pdf(self, spe, colorspec, args)?;
         if error < 0
             && let Some(d) = defaultcolor
         {
             colorspec.pdf_color_copycolor(d);
             error = 0;
         }
-        error
+        Ok(error)
     }
     /// `spc_util_read_dimtrns`: `syntax` nonzero for dvips keys.
     pub fn spc_util_read_dimtrns(
@@ -690,24 +690,24 @@ fn spc_read_color_color(
 
 /// The pattern reference after a Pattern color (`@name`): its resource
 /// id, or none for C's `return -1`.
-fn read_pattern_ref(dpx: &mut Dpx, ap: &mut SpcArg) -> Option<i32> {
+fn read_pattern_ref(dpx: &mut Dpx, ap: &mut SpcArg) -> Result<Option<i32>> {
     /* reference appears */
     ap_skip_blank(ap);
     if cur(ap) != b'@' {
         warn!("An object reference expected but not found for Pattern!");
-        return None;
+        return Ok(None);
     }
     let ident = ap_opt_ident(ap);
-    let mut res_id = dpx.pdf_findresource(b"Pattern", &ident);
+    let mut res_id = dpx.pdf_findresource(b"Pattern", &ident)?;
     if res_id < 0 {
         let pattern = dpx
             .spc_lookup_object(&ident)
             .expect("Pattern object not found");
         /* Skip checking. /Type entry is optional... */
         let p = dpx.o.link(pattern);
-        res_id = dpx.pdf_defineresource(b"Pattern", Some(&ident), p, 0);
+        res_id = dpx.pdf_defineresource(b"Pattern", Some(&ident), p, 0)?;
     }
-    Some(res_id)
+    Ok(Some(res_id))
 }
 
 /// The closing `]` of a color in brackets; the error, or 0.
@@ -728,7 +728,7 @@ fn spc_read_color_pdf(
     spe: &mut SpcEnv,
     colorspec: &mut PdfColor,
     ap: &mut SpcArg,
-) -> i32 {
+) -> Result<i32> {
     let mut cv = [0.0; PDF_COLOR_COMPONENT_MAX]; /* dvipdfmx limit */
     let mut nc: i32 = -1;
     let mut ty = PDF_COLORSPACE_TYPE_INVALID;
@@ -739,17 +739,17 @@ fn spc_read_color_pdf(
     if cur(ap) == b'@' {
         let ident = ap_opt_ident(ap);
         ap_skip_blank(ap);
-        let mut res_id = dpx.pdf_findresource(b"ColorSpace", &ident);
+        let mut res_id = dpx.pdf_findresource(b"ColorSpace", &ident)?;
         {
             let cspace = dpx.spc_lookup_object(&ident);
             let Some(cspace) = cspace.filter(|&c| dpx.o.is_array(Some(c))) else {
                 warn!("Couldn't find ColorSpace resource (or not an array object?)");
-                return -1;
+                return Ok(-1);
             };
             let csname = dpx.o.get_array(cspace, 0);
             let Some(csname) = csname.filter(|&c| dpx.o.is_name(Some(c))) else {
                 warn!("Invalid ColorSpace resource found...");
-                return -1;
+                return Ok(-1);
             };
 
             match dpx.o.name_value(csname) {
@@ -784,12 +784,12 @@ fn spc_read_color_pdf(
                 }
                 _ => {
                     warn!("Specified object not a ColorSpace???");
-                    return -1;
+                    return Ok(-1);
                 }
             }
             if res_id < 0 {
                 let c = dpx.o.link(cspace);
-                res_id = dpx.pdf_defineresource(b"ColorSpace", Some(&ident), c, 0);
+                res_id = dpx.pdf_defineresource(b"ColorSpace", Some(&ident), c, 0)?;
             }
         }
 
@@ -804,7 +804,7 @@ fn spc_read_color_pdf(
             let n = spc_util_read_numbers(&mut cv[..nc as usize], ap);
             if n != nc {
                 warn!("Wrong number of color components...");
-                return -1;
+                return Ok(-1);
             }
         } else {
             nc = spc_util_read_numbers(&mut cv[..PDF_COLOR_COMPONENT_MAX], ap);
@@ -815,8 +815,8 @@ fn spc_read_color_pdf(
             colorspec.values[nc as usize] = cv[nc as usize];
         }
         if ty == PDF_COLORSPACE_TYPE_PATTERN {
-            let Some(res_id) = read_pattern_ref(dpx, ap) else {
-                return -1;
+            let Some(res_id) = read_pattern_ref(dpx, ap)? else {
+                return Ok(-1);
             };
             colorspec.pattern_id = res_id;
         }
@@ -834,7 +834,7 @@ fn spc_read_color_pdf(
         let csname = dpx.o.parse_pdf_name(&ap.buf[..end], &mut ap.curptr);
         let Some(csname) = csname else {
             warn!("Failed to read a name object while parsing colorspecification...");
-            return -1;
+            return Ok(-1);
         };
         match dpx.o.name_value(csname) {
             b"DeviceGray" => {
@@ -855,7 +855,7 @@ fn spc_read_color_pdf(
             }
             _ => {
                 warn!("Unknown ColorSpace name specified");
-                return -1;
+                return Ok(-1);
             }
         }
         dpx.o.release(csname);
@@ -871,7 +871,7 @@ fn spc_read_color_pdf(
             let n = spc_util_read_numbers(&mut cv[..nc as usize], ap);
             if n != nc {
                 warn!("Wrong number of color components for this ColorSpace...");
-                return -1;
+                return Ok(-1);
             }
         }
         colorspec.num_components = nc;
@@ -880,8 +880,8 @@ fn spc_read_color_pdf(
             colorspec.values[nc as usize] = cv[nc as usize];
         }
         if ty == PDF_COLORSPACE_TYPE_PATTERN {
-            let Some(res_id) = read_pattern_ref(dpx, ap) else {
-                return -1;
+            let Some(res_id) = read_pattern_ref(dpx, ap)? else {
+                return Ok(-1);
             };
             colorspec.pattern_id = res_id;
         }
@@ -914,7 +914,7 @@ fn spc_read_color_pdf(
                 /* Try to read the color names defined in dvipsname.def */
                 let Some(q) = ap_c_ident(ap) else {
                     dpx.spc_warn(spe, format_args!("No valid color specified?"));
-                    return -1;
+                    return Ok(-1);
                 };
                 error = pdf_color_namedcolor(colorspec, &q);
                 if error != 0 {
@@ -935,7 +935,7 @@ fn spc_read_color_pdf(
         }
     }
 
-    error
+    Ok(error)
 }
 
 /// `spc_util_read_length` (static): status and the length in bp
