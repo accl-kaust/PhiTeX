@@ -264,10 +264,10 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             DEF_CODE if self.unicode => self.def_code_xetex(a)?,
             DEF_CODE => self.def_code(a)?,
             XETEX_DEF_CODE => self.xetex_def_code(a)?,
-            // §1234
+            // §1234 (`XeTeX`: 256 families)
             DEF_FAMILY => {
                 let mut p = self.cur_chr;
-                self.scan_four_bit_int()?;
+                self.scan_math_fam_int()?;
                 p += self.cur_val;
                 self.scan_optional_equals()?;
                 self.scan_font_ident()?;

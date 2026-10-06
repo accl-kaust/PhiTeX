@@ -1273,7 +1273,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             self.cur_chr
         } else if self.cur_cmd == DEF_FAMILY {
             let m = self.cur_chr;
-            self.scan_four_bit_int()?;
+            self.scan_math_fam_int()?; // (`XeTeX`: 256 families)
             self.equiv(m + self.cur_val)
         } else {
             self.print_err(b"Missing font identifier");
