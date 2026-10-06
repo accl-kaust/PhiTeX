@@ -302,11 +302,15 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                     m.reversion();
                 }
                 if self.mode().abs() == VMODE {
+                    // (pdfTeX's and `XeTeX`'s `\vadjust pre` material
+                    // before the box, the rest after it)
+                    let (mut pre, mut post) =
+                        partex_engine::pack::split_migrated(self.adjust.take().unwrap_or_default());
+                    self.sync_list(&mut pre);
+                    self.nodes_mut().extend(pre);
                     self.append_to_vlist(Node::Box(b));
-                    if let Some(mut adjust) = self.adjust.take() {
-                        self.sync_list(&mut adjust);
-                        self.nodes_mut().extend(adjust);
-                    }
+                    self.sync_list(&mut post);
+                    self.nodes_mut().extend(post);
                     if self.mode() > 0 {
                         self.build_page()?;
                     }

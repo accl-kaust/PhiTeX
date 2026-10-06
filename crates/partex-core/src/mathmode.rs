@@ -1598,9 +1598,13 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             self.app_display(j, a, d)?;
             g2 = 0;
         }
-        // migrating material comes after equation number
-        self.sync_list(&mut adjust);
-        self.nodes_mut().extend(adjust);
+        // migrating material comes after equation number (pdfTeX's and
+        // `XeTeX`'s `\vadjust pre` material after the rest)
+        let (pre, post) = partex_engine::pack::split_migrated(adjust);
+        for mut l in [post, pre] {
+            self.sync_list(&mut l);
+            self.nodes_mut().extend(l);
+        }
         self.tail_append(Node::Penalty(self.int_par(POST_DISPLAY_PENALTY_CODE)));
         if g2 > 0 {
             let g = self.new_param_glue(g2);

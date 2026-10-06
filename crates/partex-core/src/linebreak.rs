@@ -210,11 +210,18 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                     let b = self.seal_line(b, idx);
                     idx += 1;
                     // §888: append the new box to the current vertical
-                    // list, followed by the adjustments.
+                    // list, preceded by the pre-adjustments (pdfTeX's and
+                    // `XeTeX`'s `\vadjust pre`) and followed by the
+                    // adjustments.
+                    let (mut pre, mut post) = partex_engine::pack::split_migrated(migrated);
+                    if !pre.is_empty() {
+                        self.sync_list(&mut pre);
+                        self.nodes_mut().extend(pre);
+                    }
                     self.append_to_vlist(Node::Box(b.share()));
-                    if !migrated.is_empty() {
-                        self.sync_list(&mut migrated);
-                        self.nodes_mut().extend(migrated);
+                    if !post.is_empty() {
+                        self.sync_list(&mut post);
+                        self.nodes_mut().extend(post);
                     }
                 }
                 Item::Penalty(pi) => self.nodes_mut().push(Node::Penalty(pi)),

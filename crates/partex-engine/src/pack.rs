@@ -240,7 +240,10 @@ fn width_of(n: &Node) -> Scaled {
 }
 
 /// §649: package hlist `list` as TeX's `hpack`. With `adjust`, insertions,
-/// marks and `\vadjust` material move out of the list into it (§655).
+/// marks and `\vadjust` material move out of the list into it (§655);
+/// pdfTeX's and `XeTeX`'s `\vadjust pre` material (their
+/// `pre_adjust_tail`'s) stays wrapped in its adjust node there, for
+/// [`split_migrated`].
 pub fn hpack(
     mut list: Vec<Node>,
     spec: Spec,
@@ -254,6 +257,7 @@ pub fn hpack(
         for n in list {
             match n {
                 Node::Ins(_) | Node::Mark(_) => adjust.push(n),
+                Node::Adjust(a) if a.pre => adjust.push(Node::Adjust(a)),
                 Node::Adjust(a) => adjust.extend(a.list),
                 n => kept.push(n),
             }
@@ -292,6 +296,22 @@ pub fn hpack(
         total_stretch: dims.totals.stretch,
         lr,
     }
+}
+
+/// Material `hpack` moved out of a list (§655), split into the
+/// pre-adjustment list (`\vadjust pre`), which goes before the box in the
+/// enclosing vertical list, and the rest, which goes after it.
+#[must_use]
+pub fn split_migrated(migrated: Vec<Node>) -> (Vec<Node>, Vec<Node>) {
+    let mut pre = Vec::new();
+    let mut post = Vec::with_capacity(migrated.len());
+    for n in migrated {
+        match n {
+            Node::Adjust(a) if a.pre => pre.extend(a.list),
+            n => post.push(n),
+        }
+    }
+    (pre, post)
 }
 
 /// §668: package vlist `list` as TeX's `vpackage`, with the depth at most

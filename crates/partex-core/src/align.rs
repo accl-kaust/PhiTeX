@@ -770,14 +770,15 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             let b = self.hpack(list, Spec::NATURAL, None);
             self.pop_nest();
             row = unset_row(b);
+            // (pdfTeX's and `XeTeX`'s pre-adjustments, `cur_pre_head`,
+            // before the row, the rest after it)
+            let adjust = core::mem::take(self.row_adjust_mut());
+            let (mut pre, mut post) = partex_engine::pack::split_migrated(adjust.into_vec());
+            self.sync_list(&mut pre);
+            self.nodes_mut().extend(pre);
             self.append_to_vlist(row);
-            let mut adjust = core::mem::take(self.row_adjust_mut());
-            if self.synctex_on() {
-                let mut v = adjust.into_vec();
-                self.sync_list(&mut v);
-                adjust = partex_engine::nodelist::NodeList::from_vec(v);
-            }
-            self.nodes_mut().append(&mut adjust);
+            self.sync_list(&mut post);
+            self.nodes_mut().extend(post);
         } else {
             let b = self.vpack(list, Spec::NATURAL)?;
             self.pop_nest();
