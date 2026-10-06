@@ -6,7 +6,8 @@
 //! Read through `partex_engine::pdfread`, so any PDF pdfTeX writes reads
 //! (compressed or not, object streams, cross-reference streams): the page
 //! tree; each page's content streams (text, paths, colours, the graphics
-//! state; not images, shadings, clips or forms yet); its fonts' `/Widths`,
+//! state, images, forms, clips, axial and radial shadings: `sh` and
+//! shading patterns, as images); its fonts' `/Widths`,
 //! `/ToUnicode` maps and `/FontFile` programs.
 //!
 //! JSON (`"v":2`), in PDF points from the page's top left:
@@ -504,6 +505,156 @@ impl Pdf {
         })
     }
 
+    /// The numbers of array `k` of dictionary `d`.
+    fn nums(&self, d: &O, k: &str) -> Option<Vec<f64>> {
+        match d.get(k).map(|v| self.resolve(v)) {
+            Some(O::Arr(a)) => Some(
+                a.iter()
+                    .map(|x| self.resolve(x).num().unwrap_or(0.0))
+                    .collect(),
+            ),
+            _ => None,
+        }
+    }
+
+    /// Function `o` (types 0, 2, 3, or an array of them; one input).
+    fn func(&self, o: &O, depth: u32) -> Option<crate::shade::Func> {
+        use crate::shade::Func;
+        if depth > 8 {
+            return None;
+        }
+        let d = self.resolve(o);
+        if let O::Arr(a) = &d {
+            return a
+                .iter()
+                .map(|f| self.func(f, depth + 1))
+                .collect::<Option<Vec<_>>>()
+                .map(Func::Many);
+        }
+        let domain = self
+            .nums(&d, "Domain")
+            .filter(|v| v.len() >= 2)
+            .map_or([0.0, 1.0], |v| [v[0], v[1]]);
+        let num = |k: &str| d.get(k).map(|v| self.resolve(v)).and_then(|v| v.num());
+        match num("FunctionType")? as i64 {
+            2 => Some(Func::Exp {
+                domain,
+                c0: self.nums(&d, "C0").unwrap_or_else(|| vec![0.0]),
+                c1: self.nums(&d, "C1").unwrap_or_else(|| vec![1.0]),
+                n: num("N").unwrap_or(1.0),
+            }),
+            3 => {
+                let O::Arr(fs) = d.get("Functions").map(|v| self.resolve(v))? else {
+                    return None;
+                };
+                Some(Func::Stitch {
+                    domain,
+                    fns: fs
+                        .iter()
+                        .map(|f| self.func(f, depth + 1))
+                        .collect::<Option<Vec<_>>>()?,
+                    bounds: self.nums(&d, "Bounds").unwrap_or_default(),
+                    encode: self.nums(&d, "Encode").unwrap_or_default(),
+                })
+            }
+            0 => {
+                let size = (*self.nums(&d, "Size")?.first()? as usize).clamp(1, 1 << 16);
+                let bps = num("BitsPerSample")? as usize;
+                if !matches!(bps, 1 | 2 | 4 | 8 | 12 | 16 | 24 | 32) {
+                    return None;
+                }
+                let range = self.nums(&d, "Range")?;
+                let nout = range.len() / 2;
+                let decode = self.nums(&d, "Decode").unwrap_or_else(|| range.clone());
+                let encode = self
+                    .nums(&d, "Encode")
+                    .filter(|e| e.len() >= 2)
+                    .map_or([0.0, (size - 1) as f64], |e| [e[0], e[1]]);
+                let data = self.stream(o)?;
+                let max = ((1u64 << bps) - 1) as f64;
+                let mut bit = 0usize;
+                let mut read = || {
+                    let mut v = 0u64;
+                    for _ in 0..bps {
+                        let b = data.get(bit / 8).copied().unwrap_or(0);
+                        v = (v << 1) | u64::from((b >> (7 - bit % 8)) & 1);
+                        bit += 1;
+                    }
+                    v as f64
+                };
+                let samples = (0..size)
+                    .map(|_| {
+                        (0..nout)
+                            .map(|k| {
+                                let (d0, d1) = (
+                                    decode.get(2 * k).copied().unwrap_or(0.0),
+                                    decode.get(2 * k + 1).copied().unwrap_or(1.0),
+                                );
+                                (d0 + read() * (d1 - d0) / max).clamp(
+                                    range[2 * k].min(range[2 * k + 1]),
+                                    range[2 * k].max(range[2 * k + 1]),
+                                )
+                            })
+                            .collect()
+                    })
+                    .collect();
+                Some(Func::Sampled {
+                    domain,
+                    encode,
+                    samples,
+                })
+            }
+            _ => None,
+        }
+    }
+
+    /// Shading `o` (axial or radial), its colour space and its `/BBox`.
+    fn shading(
+        &self,
+        o: &O,
+        res: &O,
+    ) -> Option<(crate::shade::Shading, crate::image::Space, Option<Vec<f64>>)> {
+        let d = self.resolve(o);
+        let radial = match d
+            .get("ShadingType")
+            .map(|t| self.resolve(t))
+            .and_then(|t| t.num())
+        {
+            Some(t) if (t - 2.0).abs() < 1e-9 => false,
+            Some(t) if (t - 3.0).abs() < 1e-9 => true,
+            _ => return None,
+        };
+        let coords = self.nums(&d, "Coords")?;
+        if coords.len() != if radial { 6 } else { 4 } {
+            return None;
+        }
+        let domain = self
+            .nums(&d, "Domain")
+            .filter(|v| v.len() >= 2)
+            .map_or([0.0, 1.0], |v| [v[0], v[1]]);
+        let extend = match d.get("Extend").map(|e| self.resolve(e)) {
+            Some(O::Arr(a)) if a.len() == 2 => {
+                let t = |o: &O| matches!(o, O::Op(t) if t == "true");
+                [t(&a[0]), t(&a[1])]
+            }
+            _ => [false, false],
+        };
+        let func = self.func(d.get("Function")?, 0)?;
+        let space = self.space(&self.resolve(d.get("ColorSpace")?), res, 0)?;
+        let bbox = self.nums(&d, "BBox").filter(|b| b.len() == 4);
+        Some((
+            crate::shade::Shading {
+                radial,
+                coords,
+                domain,
+                extend,
+                func,
+            },
+            space,
+            bbox,
+        ))
+    }
+
     /// Colour space `cs` (a name in `res`'s `/ColorSpace` too), as an
     /// image's samples read; none for one not drawn (Lab, `DeviceN`,
     /// `Separation`, a pattern).
@@ -722,6 +873,12 @@ struct G {
     lw: f64,
     /// (the clip in force: its index in `Ctx::clips`)
     clip: Option<usize>,
+    /// (a shading pattern as the fill colour: the shading, and its
+    /// space's matrix to the page: the pattern's `/Matrix` from `base`)
+    fill_pat: Option<(O, M)>,
+    /// (the matrix of the content stream's own space when it began: the
+    /// page's, or a form's at its `Do`, a pattern's space's parent)
+    base: M,
     /// (the font ref)
     font: Option<usize>,
     size: f64,
@@ -741,6 +898,8 @@ impl G {
             stroke: "#000000".into(),
             lw: 1.0,
             clip: None,
+            fill_pat: None,
+            base: [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
             font: None,
             size: 10.0,
             tc: 0.0,
@@ -985,6 +1144,7 @@ struct Ctx<'a> {
     cache: &'a mut Fonts,
     /// (`XeTeX`: the glyphs come from the glyph runs)
     runs_only: bool,
+    page_w: f64,
     page_h: f64,
     keys: Vec<&'static str>,
     frefs: Vec<String>,
@@ -1003,6 +1163,109 @@ struct Ctx<'a> {
 }
 
 impl Ctx<'_> {
+    /// The box clip `c` and those it is inside leave (x0, y0, x1, y1, page
+    /// coordinates).
+    fn clip_box(&self, c: usize) -> [f64; 4] {
+        let (d, _, parent) = &self.clips[c];
+        let mut b = path_box(d);
+        if let Some(p) = parent {
+            let q = self.clip_box(*p);
+            b = [
+                b[0].max(q[0]),
+                b[1].max(q[1]),
+                b[2].min(q[2]),
+                b[3].min(q[3]),
+            ];
+        }
+        b
+    }
+
+    /// Shading `sh` (resources `res`), its space taken to the page by `m`,
+    /// painted inside `clip`: an image of it over what it paints there.
+    fn paint_shading(&mut self, sh: &O, m: &M, clip: Option<usize>, res: &O) {
+        use crate::image::Space;
+        let Some((shading, space, bbox)) = self.p.shading(sh, res) else {
+            self.out.unsupported += 1;
+            return;
+        };
+        let page_h = self.page_h;
+        let mut b = [0.0, 0.0, self.page_w, page_h];
+        let mut cut = |q: [f64; 4]| {
+            b = [
+                b[0].max(q[0]),
+                b[1].max(q[1]),
+                b[2].min(q[2]),
+                b[3].min(q[3]),
+            ];
+        };
+        if let Some(c) = clip {
+            cut(self.clip_box(c));
+        }
+        if let Some(bb) = bbox {
+            let corners = [
+                (bb[0], bb[1]),
+                (bb[2], bb[1]),
+                (bb[2], bb[3]),
+                (bb[0], bb[3]),
+            ];
+            let pts: Vec<(f64, f64)> = corners
+                .iter()
+                .map(|&(x, y)| {
+                    let (x, y) = apply(m, x, y);
+                    (x, page_h - y)
+                })
+                .collect();
+            cut([
+                pts.iter().map(|p| p.0).fold(f64::INFINITY, f64::min),
+                pts.iter().map(|p| p.1).fold(f64::INFINITY, f64::min),
+                pts.iter().map(|p| p.0).fold(f64::NEG_INFINITY, f64::max),
+                pts.iter().map(|p| p.1).fold(f64::NEG_INFINITY, f64::max),
+            ]);
+        }
+        let (w, h) = (b[2] - b[0], b[3] - b[1]);
+        if w <= 0.0 || h <= 0.0 || !w.is_finite() || !h.is_finite() {
+            return;
+        }
+        let Some(inv) = invert(m) else { return };
+        // (1.5 pixels a point, 1024 at most a side: the browser smooths it)
+        let px = |v: f64| ((v * 1.5).ceil() as usize).clamp(1, 1024);
+        let (pw, ph) = (px(w), px(h));
+        let to = |x: f64, y: f64| apply(&inv, x, page_h - y);
+        let byte = |v: f64| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
+        let at = |c: &[f64], k: usize| c.get(k).copied().unwrap_or(0.0);
+        let rgb = |c: &[f64]| -> [u8; 3] {
+            match &space {
+                Space::Gray => [byte(at(c, 0)); 3],
+                Space::Rgb => [byte(at(c, 0)), byte(at(c, 1)), byte(at(c, 2))],
+                Space::Cmyk => crate::image::cmyk(&[
+                    byte(at(c, 0)),
+                    byte(at(c, 1)),
+                    byte(at(c, 2)),
+                    byte(at(c, 3)),
+                ]),
+                Space::Indexed(pal) => pal
+                    .get(at(c, 0).max(0.0) as usize)
+                    .copied()
+                    .unwrap_or([0, 0, 0]),
+            }
+        };
+        let rgba = shading.raster([b[0], b[1], w, h], (pw, ph), &to, &rgb);
+        let key = {
+            use std::hash::{Hash, Hasher};
+            let mut hs = std::collections::hash_map::DefaultHasher::new();
+            (&rgba, pw, ph).hash(&mut hs);
+            hs.finish()
+        };
+        let uri = self
+            .cache
+            .images
+            .entry(key)
+            .or_insert_with(|| Some(crate::image::rgba_uri(pw, ph, &rgba).into()))
+            .clone();
+        let Some(uri) = uri else { return };
+        push_image(&mut self.out, key, &uri, [w, 0.0, 0.0, h, b[0], b[1]], clip);
+    }
+
     /// Clip path `d` (page coordinates; even-odd or not) inside clip
     /// `parent`: its index.
     fn clip(&mut self, d: String, evenodd: bool, parent: Option<usize>) -> usize {
@@ -1118,6 +1381,7 @@ fn draw_with(
             p,
             cache: programs,
             runs_only,
+            page_w: w,
             page_h: h,
             keys: Vec::new(),
             frefs: Vec::new(),
@@ -1274,11 +1538,18 @@ fn interpret(
             }
             "cm" if ops.len() >= 6 => g.ctm = mul(&[n(0), n(1), n(2), n(3), n(4), n(5)], &g.ctm),
             "w" => g.lw = n(0),
-            "g" => g.fill = rgb(n(0), n(0), n(0)),
+            "g" => {
+                g.fill = rgb(n(0), n(0), n(0));
+                g.fill_pat = None;
+            }
             "G" => g.stroke = rgb(n(0), n(0), n(0)),
-            "rg" => g.fill = rgb(n(0), n(1), n(2)),
+            "rg" => {
+                g.fill = rgb(n(0), n(1), n(2));
+                g.fill_pat = None;
+            }
             "RG" => g.stroke = rgb(n(0), n(1), n(2)),
             "k" => {
+                g.fill_pat = None;
                 g.fill = rgb(
                     (1.0 - n(0)) * (1.0 - n(3)),
                     (1.0 - n(1)) * (1.0 - n(3)),
@@ -1292,18 +1563,46 @@ fn interpret(
                     (1.0 - n(2)) * (1.0 - n(3)),
                 );
             }
-            "sc" | "scn" => match ops.iter().filter(|o| o.num().is_some()).count() {
-                1 => g.fill = rgb(n(0), n(0), n(0)),
-                3 => g.fill = rgb(n(0), n(1), n(2)),
-                4 => {
-                    g.fill = rgb(
-                        (1.0 - n(0)) * (1.0 - n(3)),
-                        (1.0 - n(1)) * (1.0 - n(3)),
-                        (1.0 - n(2)) * (1.0 - n(3)),
-                    );
+            // (a pattern: a shading one paints the fills after it, in
+            // the space of the content stream it is named in)
+            "sc" | "scn" if op == "scn" && matches!(ops.last(), Some(O::Name(_))) => {
+                let pat = match ops.last() {
+                    Some(O::Name(name)) => res
+                        .get("Pattern")
+                        .map(|x| p.resolve(x))
+                        .and_then(|x| x.get(name).map(|o| p.resolve(o)))
+                        .unwrap_or(O::Null),
+                    _ => O::Null,
+                };
+                g.fill_pat = match pat.get("PatternType").and_then(O::num) {
+                    Some(t) if (t - 2.0).abs() < 1e-9 => pat.get("Shading").map(|sh| {
+                        let m = match p.nums(&pat, "Matrix") {
+                            Some(v) if v.len() == 6 => [v[0], v[1], v[2], v[3], v[4], v[5]],
+                            _ => [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+                        };
+                        (sh.clone(), mul(&m, &g.base))
+                    }),
+                    _ => {
+                        ctx.out.unsupported += 1;
+                        None
+                    }
+                };
+            }
+            "sc" | "scn" => {
+                g.fill_pat = None;
+                match ops.iter().filter(|o| o.num().is_some()).count() {
+                    1 => g.fill = rgb(n(0), n(0), n(0)),
+                    3 => g.fill = rgb(n(0), n(1), n(2)),
+                    4 => {
+                        g.fill = rgb(
+                            (1.0 - n(0)) * (1.0 - n(3)),
+                            (1.0 - n(1)) * (1.0 - n(3)),
+                            (1.0 - n(2)) * (1.0 - n(3)),
+                        );
+                    }
+                    _ => {}
                 }
-                _ => {}
-            },
+            }
             "SC" | "SCN" => match ops.iter().filter(|o| o.num().is_some()).count() {
                 1 => g.stroke = rgb(n(0), n(0), n(0)),
                 3 => g.stroke = rgb(n(0), n(1), n(2)),
@@ -1353,6 +1652,17 @@ fn interpret(
                 }
                 let fill = matches!(op.as_str(), "f" | "F" | "f*" | "B" | "B*" | "b" | "b*");
                 let stroke = matches!(op.as_str(), "S" | "s" | "B" | "B*" | "b" | "b*");
+                let fill = if fill
+                    && !d.is_empty()
+                    && let Some((sh, m)) = g.fill_pat.clone()
+                {
+                    let evenodd = matches!(op.as_str(), "f*" | "B*" | "b*");
+                    let c = ctx.clip(d.clone(), evenodd, g.clip);
+                    ctx.paint_shading(&sh, &m, Some(c), res);
+                    false
+                } else {
+                    fill
+                };
                 if (fill || stroke) && !d.is_empty() {
                     push_order(&mut ctx.out.order, 0, 1);
                     let lw = g.lw * ((g.ctm[0] * g.ctm[3] - g.ctm[1] * g.ctm[2]).abs().sqrt());
@@ -1501,6 +1811,7 @@ fn interpret(
                         };
                         let mut fg = g.clone();
                         fg.ctm = mul(&m, &g.ctm);
+                        fg.base = fg.ctm;
                         // (clipped to its /BBox)
                         if let Some(O::Arr(bb)) = x.get("BBox").map(|b| p.resolve(b))
                             && bb.len() == 4
@@ -1557,8 +1868,19 @@ fn interpret(
                 let img = p.image_inline(&O::Dict(d), data, res);
                 place_image(img, &g, page_h, ctx.cache, &mut ctx.out);
             }
-            // (shadings: not drawn yet)
-            "sh" => ctx.out.unsupported += 1,
+            "sh" => {
+                let sh = ops.first().and_then(|n| match n {
+                    O::Name(n) => res
+                        .get("Shading")
+                        .map(|x| p.resolve(x))
+                        .and_then(|x| x.get(n).cloned()),
+                    _ => None,
+                });
+                match sh {
+                    Some(sh) => ctx.paint_shading(&sh, &g.ctm, g.clip, res),
+                    None => ctx.out.unsupported += 1,
+                }
+            }
             _ => {}
         }
         ops.clear();
@@ -1855,12 +2177,24 @@ fn place_image(
         out.unsupported += 1;
         return;
     };
+    let [a, b, c, d, e, f] = g.ctm;
+    push_image(
+        out,
+        key,
+        &uri,
+        [a, -b, -c, d, c + e, page_h - d - f],
+        g.clip,
+    );
+}
+
+/// Image `key` (its data URI `uri`) placed by `m`, which takes the SVG
+/// unit square (row 0 on top) to the page from its top left, inside
+/// `clip`.
+fn push_image(out: &mut Out, key: u64, uri: &str, m: [f64; 6], clip: Option<usize>) {
     let id = format!("i{key:016x}");
     out.images
         .entry(id.clone())
-        .or_insert_with(|| uri.to_string());
-    let [a, b, c, d, e, f] = g.ctm;
-    let m = [a, -b, -c, d, c + e, page_h - d - f];
+        .or_insert_with(|| uri.to_owned());
     let _ = write!(
         out.r,
         "{}[{},{},{},{},{},{},{}{}]",
@@ -1872,9 +2206,46 @@ fn place_image(
         r4(m[3]),
         r4(m[4]),
         r4(m[5]),
-        clip_field(g.clip)
+        clip_field(clip)
     );
     push_order(&mut out.order, 1, 1);
+}
+
+/// The box of path `d` (absolute coordinates only, as the draw list's):
+/// x0, y0, x1, y1.
+fn path_box(d: &str) -> [f64; 4] {
+    let mut b = [
+        f64::INFINITY,
+        f64::INFINITY,
+        f64::NEG_INFINITY,
+        f64::NEG_INFINITY,
+    ];
+    let nums = d
+        .split(|c: char| c.is_ascii_alphabetic() || c == ' ')
+        .filter_map(|t| t.parse::<f64>().ok());
+    for (i, v) in nums.enumerate() {
+        let k = i % 2;
+        b[k] = b[k].min(v);
+        b[k + 2] = b[k + 2].max(v);
+    }
+    b
+}
+
+/// The inverse of `m` (None: it has none).
+fn invert(m: &M) -> Option<M> {
+    let [a, b, c, d, e, f] = *m;
+    let det = a * d - b * c;
+    if det.abs() < 1e-12 {
+        return None;
+    }
+    Some([
+        d / det,
+        -b / det,
+        -c / det,
+        a / det,
+        (c * f - d * e) / det,
+        (b * e - a * f) / det,
+    ])
 }
 
 /// `#rrggbb` as bytes.

@@ -11,6 +11,7 @@
 
 mod image;
 pub mod pdfdraw;
+mod shade;
 pub mod type1;
 pub mod xetex;
 
@@ -264,6 +265,83 @@ mod tests {
                 assert_eq!(p, red);
             }
         }
+    }
+
+    /// Shadings, as images over the box of the clip they paint: an
+    /// axial one by `sh` inside a clip; a radial one (a sampled function,
+    /// gray) as a pattern's fill colour, through the pattern's matrix,
+    /// clipped to the path it fills.
+    #[test]
+    fn shadings() {
+        let content = "q 10 10 100 50 re W n /Sh1 sh Q /Pattern cs /P1 scn 150 10 40 40 re f";
+        let objs = [
+            "<< /Type /Catalog /Pages 2 0 R >>".to_owned(),
+            "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_owned(),
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 100] /Contents 4 0 R \
+             /Resources << /Shading << /Sh1 5 0 R >> /Pattern << /P1 6 0 R >> >> >>"
+                .to_owned(),
+            format!(
+                "<< /Length {} >>\nstream\n{content}\nendstream",
+                content.len()
+            ),
+            "<< /ShadingType 2 /ColorSpace /DeviceRGB /Coords [10 0 110 0] /Extend [true true] \
+             /Function << /FunctionType 2 /Domain [0 1] /C0 [1 0 0] /C1 [0 0 1] /N 1 >> >>"
+                .to_owned(),
+            "<< /PatternType 2 /Matrix [1 0 0 1 170 30] /Shading << /ShadingType 3 \
+             /ColorSpace /DeviceGray /Coords [0 0 0 0 0 20] /Extend [false true] \
+             /Function 7 0 R >> >>"
+                .to_owned(),
+            "<< /FunctionType 0 /Domain [0 1] /Range [0 1] /Size [2] /BitsPerSample 8 \
+             /Length 2 >>\nstream\n\u{0}\u{ff}\nendstream"
+                .to_owned(),
+        ];
+        let d = crate::Pdf::open(&raw_pdf(&objs))
+            .unwrap()
+            .draw(0, &mut crate::Fonts::new())
+            .unwrap();
+        assert!(!d.contains("\"x\":"), "{d}");
+        let (head, tail) = d.split_once(",\"I\":{").unwrap();
+        let ids: Vec<&str> = head
+            .match_indices("[\"i")
+            .map(|(i, _)| &head[i + 2..i + 19])
+            .collect();
+        assert_eq!(
+            head,
+            format!(
+                "{{\"v\":2,\"w\":200,\"h\":100,\"f\":[],\"F\":[],\"g\":{{}},\"t\":[],\"p\":[],\
+                 \"r\":[[\"{}\",100,0,0,50,10,40,\"c0\"],[\"{}\",40,0,0,40,150,50,\"c1\"]]",
+                ids[0], ids[1]
+            )
+        );
+        assert!(
+            tail.ends_with(
+                "\"C\":{\"c0\":[\"M10 90L110 90L110 40L10 40Z\",0],\
+                 \"c1\":[\"M150 90L190 90L190 50L150 50Z\",0]}}"
+            ),
+            "{tail}"
+        );
+        let px = |uri: &str, x: usize, y: usize| {
+            let (w, _, px) = png_rgba(uri);
+            px[(y * w + x) * 4..(y * w + x) * 4 + 4].to_vec()
+        };
+        let uris = image_uris(&d);
+        let (axial, radial) = if tail.find(ids[0]) < tail.find(ids[1]) {
+            (uris[0], uris[1])
+        } else {
+            (uris[1], uris[0])
+        };
+        // (1.5 pixels a point: 150 × 75; red to blue from left to right)
+        assert_eq!(png_rgba(axial).0, 150);
+        assert_eq!(px(axial, 0, 0), [254, 0, 1, 255]);
+        assert_eq!(px(axial, 75, 30), [127, 0, 128, 255]);
+        assert_eq!(px(axial, 149, 74), [1, 0, 254, 255]);
+        // (black at the centre, white from the circle out: extended)
+        let (w, h, _) = png_rgba(radial);
+        assert_eq!((w, h), (60, 60));
+        assert!(px(radial, 30, 30)[0] < 10);
+        // (10.33 points from the centre of a circle of 20)
+        assert_eq!(px(radial, 45, 30)[..2], [132, 132]);
+        assert_eq!(px(radial, 0, 0), [255, 255, 255, 255]);
     }
 
     #[test]

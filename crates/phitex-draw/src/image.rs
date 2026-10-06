@@ -225,6 +225,11 @@ fn base64(data: &[u8], out: &mut String) {
     }
 }
 
+/// RGBA pixels `data` (`w` × `h`) as a PNG data URI.
+pub(crate) fn rgba_uri(w: usize, h: usize, data: &[u8]) -> String {
+    uri("png", &png(w, h, 6, data, None))
+}
+
 /// A PNG of 8-bit samples `data` (rows of `w` pixels of colour type
 /// `ctype`: 0 gray, 2 RGB, 6 RGBA), each row given filter 0.
 fn png(w: usize, h: usize, ctype: u8, data: &[u8], plte: Option<&[[u8; 3]]>) -> Vec<u8> {
