@@ -67,7 +67,14 @@ fn workspace_root() -> PathBuf {
 }
 
 /// Core crates that must build for `wasm32-unknown-unknown`.
-const WASM_CRATES: &[&str] = &["partex-core", "partex-incr", "partex-ssa", "partex-trace"];
+const WASM_CRATES: &[&str] = &[
+    "partex-core",
+    "partex-incr",
+    "partex-ssa",
+    "partex-trace",
+    "partex-otf",
+    "partex-xdvipdfmx",
+];
 
 fn check() -> Result<()> {
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_owned());
