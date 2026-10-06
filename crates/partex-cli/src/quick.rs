@@ -210,9 +210,10 @@ fn record_at(dir: &Path, key: u128, build: &Build, now: i128) {
     }
 }
 
-/// Forget the record of job `key` (its outputs are about to change).
-pub fn forget(dir: &Path, key: u128) {
-    let _ = std::fs::remove_file(path_of(dir, key));
+/// Forget the record of job `key` (its outputs are about to change):
+/// whether there was one.
+pub fn forget(dir: &Path, key: u128) -> bool {
+    std::fs::remove_file(path_of(dir, key)).is_ok()
 }
 
 /// A restart with nothing changed: the last result, the outputs' hashes

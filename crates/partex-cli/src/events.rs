@@ -26,6 +26,9 @@ pub enum Phase {
 pub enum Progress<'a> {
     /// Pass `n` (from 1) begins.
     PassStart(usize),
+    /// The next pass runs because the build changed these files it reads
+    /// (`paper.aux`, `paper.toc`), told just before its [`Progress::PassStart`].
+    Again(&'a [String]),
     /// Pass `n` ended: what it did, or `None` if nothing had changed.
     Pass(usize, Option<&'a crate::session::Report>),
     /// A native tool ran between passes (its report line).
