@@ -1583,7 +1583,13 @@ fn cut_timing(what: &str) -> Option<partex_core::machine::CutTiming> {
     Some(t)
 }
 
-fn switches(m: &mut TexMachine<MachineHost>) {
+/// The switches of the process, from the environment: how `Rest` and the
+/// other cells are made (`partex_core::statehash`'s and `machine`'s
+/// statics). A saved build's digest depends on them, so they are set
+/// before one is loaded (`persisted`), not only when a machine
+/// is made: else a load in a process whose environment turned one off
+/// hashed its starting state with the defaults and never matched.
+fn process_switches() {
     let off = |name: &str| std::env::var(name).is_ok_and(|v| v == "0");
     partex_core::machine::CUT_TIMING_DETAIL.store(
         std::env::var("PARTEX_CUT_TIMING").is_ok_and(|v| v == "2"),
@@ -1593,19 +1599,6 @@ fn switches(m: &mut TexMachine<MachineHost>) {
         std::env::var("PARTEX_CUT_TIMING").is_ok_and(|v| v == "1" || v == "2"),
         std::sync::atomic::Ordering::Relaxed,
     );
-    m.set_replay_exit(!off("PARTEX_MACHINE_REPLAY_EXIT"));
-    m.set_seal_lines(!off("PARTEX_MACHINE_SEAL"));
-    m.set_skips(!off("PARTEX_MACHINE_SKIPS"));
-    m.set_thaw_from(!off("PARTEX_MACHINE_THAW"));
-    let t = m.tex_mut();
-    t.set_symbolic_object_streams(!off("PARTEX_MACHINE_OBJSTM"));
-    t.set_canon_strings(!off("PARTEX_MACHINE_STRINGS"));
-    t.set_cs_by_name(!off("PARTEX_MACHINE_CSNAMES"));
-    t.set_name_cells(!off("PARTEX_MACHINE_NAMES"));
-    t.set_probe_names(!off("PARTEX_MACHINE_PROBENAMES"));
-    t.set_font_cells(!off("PARTEX_MACHINE_FONTCELLS"));
-    t.set_obj_cells(!off("PARTEX_MACHINE_OBJCELLS"));
-    t.set_virtual_objects(!off("PARTEX_MACHINE_VIRTOBJ"));
     partex_core::machine::set_soft_reads(!off("PARTEX_MACHINE_SOFTREADS"));
     partex_core::machine::set_thaw_by_content(!off("PARTEX_MACHINE_THAW_CONTENT"));
     partex_core::machine::set_keep_tracker(!off("PARTEX_MACHINE_KEEP_TRACKER"));
@@ -1631,6 +1624,25 @@ fn switches(m: &mut TexMachine<MachineHost>) {
             .iter()
             .any(|n| std::env::var(n).is_ok_and(|v| v == "1")),
     );
+}
+
+/// The switches of machine `m` (its own, and the process's).
+fn switches(m: &mut TexMachine<MachineHost>) {
+    let off = |name: &str| std::env::var(name).is_ok_and(|v| v == "0");
+    process_switches();
+    m.set_replay_exit(!off("PARTEX_MACHINE_REPLAY_EXIT"));
+    m.set_seal_lines(!off("PARTEX_MACHINE_SEAL"));
+    m.set_skips(!off("PARTEX_MACHINE_SKIPS"));
+    m.set_thaw_from(!off("PARTEX_MACHINE_THAW"));
+    let t = m.tex_mut();
+    t.set_symbolic_object_streams(!off("PARTEX_MACHINE_OBJSTM"));
+    t.set_canon_strings(!off("PARTEX_MACHINE_STRINGS"));
+    t.set_cs_by_name(!off("PARTEX_MACHINE_CSNAMES"));
+    t.set_name_cells(!off("PARTEX_MACHINE_NAMES"));
+    t.set_probe_names(!off("PARTEX_MACHINE_PROBENAMES"));
+    t.set_font_cells(!off("PARTEX_MACHINE_FONTCELLS"));
+    t.set_obj_cells(!off("PARTEX_MACHINE_OBJCELLS"));
+    t.set_virtual_objects(!off("PARTEX_MACHINE_VIRTOBJ"));
 }
 
 /// Run the job as a machine (see the module documentation).

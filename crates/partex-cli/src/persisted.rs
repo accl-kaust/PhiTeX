@@ -155,6 +155,9 @@ impl Keeper {
     #[allow(clippy::result_large_err, clippy::cast_precision_loss)] // (the host, moved back; MB)
     #[allow(clippy::too_many_lines)] // (with its timing)
     pub fn load(&mut self, native: NativeHost) -> Result<(Build<Machine>, String), NativeHost> {
+        // (the starting state's digest is checked as this process hashes
+        // `Rest`: with its switches, as the build saved hashed it)
+        super::process_switches();
         let t = Instant::now();
         let Some(opened) = store::open(&self.dir, self.key) else {
             if debug() {
