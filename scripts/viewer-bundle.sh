@@ -11,7 +11,7 @@
 set -euo pipefail
 
 # (the extension's release whose viewer this is)
-EXT_REV=v0.2.90-beta1
+EXT_REV=v0.2.93-beta4
 
 repo="$(cd "$(dirname "$0")/.." && pwd)"
 ext="${PHITEX_OVERLEAF:-$HOME/code/flinner/phitex-overleaf}"
