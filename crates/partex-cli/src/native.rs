@@ -932,14 +932,23 @@ impl Host for NativeHost {
     }
 
     fn close(&mut self, file: WriteId) {
+        self.close_pipe(file);
+    }
+
+    fn close_pipe(&mut self, file: WriteId) -> i32 {
         self.files.remove(&file);
         if let Some(xdv) = self.pipes.remove(&file)
             && let Some((name, _)) = self.given.get(&file)
         {
-            // (`xdvipdfmx -q -E -o NAME`: the name as `XeTeX` gives it)
-            let pdf = crate::dpxfiles::xdv_to_pdf(&xdv, name);
+            // (`xdvipdfmx -q -E -o NAME`: the name as `XeTeX` gives it; its
+            // exit status as `pclose` returns it)
+            let (pdf, done) = crate::dpxfiles::xdv_to_pdf(&xdv, name);
             let _ = std::fs::write(path(name), pdf);
+            if !done {
+                return 256;
+            }
         }
+        0
     }
 
     fn term_write(&mut self, bytes: &[u8]) {

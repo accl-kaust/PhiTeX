@@ -3435,7 +3435,7 @@ impl MachineHost {
         bytes: std::borrow::Cow<'a, [u8]>,
     ) -> std::borrow::Cow<'a, [u8]> {
         if self.piped.contains(&id) {
-            crate::dpxfiles::xdv_to_pdf(&bytes, name).into()
+            crate::dpxfiles::xdv_to_pdf(&bytes, name).0.into()
         } else {
             bytes
         }

@@ -80,9 +80,14 @@ macro_rules! warn {
 #[macro_export]
 macro_rules! error {
     ($($t:tt)*) => {
-        ::core::panic!($($t)*)
+        ::core::panic!("{}{}", $crate::ctx::FATAL, ::core::format_args!($($t)*))
     };
 }
+
+/// What a fatal error's panic message begins with (`ERROR`, which prints
+/// it and exits): a host catching the panic tells a fatal error, the
+/// driver's exit, from a bug.
+pub const FATAL: &str = "xdvipdfmx:fatal: ";
 
 impl Dpx {
     /// A fresh program: every C static at its initial value.

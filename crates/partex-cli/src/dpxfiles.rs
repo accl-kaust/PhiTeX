@@ -104,15 +104,41 @@ pub(crate) fn options(pdf_name: &[u8]) -> Options {
     }
 }
 
-/// The PDF xelatex makes of `xdv` (panics where xdvipdfmx stops with
-/// `ERROR`).
-pub(crate) fn xdv_to_pdf(xdv: &[u8], pdf_name: &[u8]) -> Vec<u8> {
-    Session::convert(
-        options(pdf_name),
-        Box::new(DpxFiles::default()),
-        deflate(),
-        xdv,
-    )
+/// The PDF file xelatex makes of `xdv`, and whether xdvipdfmx finished:
+/// one that stops with `ERROR` (its message printed as it prints it)
+/// leaves what it had written (`error_cleanup` does not remove it).
+pub(crate) fn xdv_to_pdf(xdv: &[u8], pdf_name: &[u8]) -> (Vec<u8>, bool) {
+    let mut out = Vec::new();
+    let mut session = None;
+    let run = || {
+        let (pre, pages) = partex_xdvipdfmx::api::split_xdv(xdv);
+        let s = session.insert(Session::new(
+            options(pdf_name),
+            Box::new(DpxFiles::default()),
+            deflate(),
+            &xdv[..pre],
+        ));
+        for (a, b) in pages {
+            out.extend(s.page(&xdv[a..b]).pdf);
+        }
+        if let Some(s) = session.take() {
+            out.extend(s.finish());
+        }
+    };
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(run)) {
+        Ok(()) => (out, true),
+        Err(e) => match e.downcast_ref::<String>() {
+            Some(m) if m.starts_with(partex_xdvipdfmx::ctx::FATAL) => {
+                // (`ERROR`'s message, then `error_cleanup`'s)
+                eprintln!("\n{m}\n\nNo output PDF file written.");
+                if let Some(s) = session.as_mut() {
+                    out.extend(s.written());
+                }
+                (out, false)
+            }
+            _ => std::panic::resume_unwind(e),
+        },
+    }
 }
 
 #[cfg(test)]

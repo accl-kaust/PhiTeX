@@ -499,7 +499,8 @@ const CASES: &[Case] = &[
     // xelatex, its format made here: fontspec, hyphenation of native
     // words, hyperref, polyglossia's right-to-left scripts, beamer and
     // TikZ through xdvipdfmx, graphicx's pictures (PNG, JPEG, BMP, PDF
-    // pages); each run twice (the second reads the aux)
+    // pages), unicode-math with OpenType math fonts (one, then several by
+    // range, boxes shown); each run twice (the second reads the aux)
     Case {
         name: "xelatex",
         oracle: "xetex",
@@ -516,6 +517,9 @@ const CASES: &[Case] = &[
             "xpic-rle8.bmp",
             "xpic-inherit.pdf",
             "xpic-three.pdf",
+            "xelatex-math.tex",
+            "xelatex-math-body.tex",
+            "xelatex-math-mix.tex",
         ],
         runs: &[
             &[
@@ -531,6 +535,9 @@ const CASES: &[Case] = &[
             &["-fmt=xelatex", "-interaction=nonstopmode", "xelatex-beamer"],
             &["-fmt=xelatex", "-interaction=nonstopmode", "xelatex-pics"],
             &["-fmt=xelatex", "-interaction=nonstopmode", "xelatex-pics"],
+            &["-fmt=xelatex", "-interaction=nonstopmode", "xelatex-math"],
+            &["-fmt=xelatex", "-interaction=nonstopmode", "xelatex-math"],
+            &["-fmt=xelatex", "-interaction=nonstopmode", "xelatex-math-mix"],
             &[
                 "-fmt=xelatex",
                 "-interaction=nonstopmode",
