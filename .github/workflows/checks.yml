@@ -1,0 +1,40 @@
+# Cheap checks on GitHub's runners (docs/ci.md): formatting, clippy (with
+# and without tracing), the wasm32 build of the core crates, the unit
+# tests. Everything that needs TeX Live or the manual corpus runs on the
+# accl cluster (scripts/accl/accl ci). No secrets, read-only token, and no
+# pull_request_target: a pull request's code never runs with privileges.
+name: checks
+on:
+  push:
+    branches: [main]
+  pull_request:
+permissions: read-all
+concurrency:
+  group: checks-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  checks:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      # (rustup reads rust-toolchain.toml: the pinned nightly, rustfmt,
+      # clippy and the wasm32 target)
+      - run: rustup show active-toolchain || rustup toolchain install
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo clippy --workspace --all-targets --features partex-cli/trace -- -D warnings
+      - run: >-
+          cargo check --target wasm32-unknown-unknown -p partex-core -p partex-incr
+          -p partex-ssa -p partex-trace -p partex-otf -p partex-xdvipdfmx
+      # (without TeX Live: the tests that compare with it skip themselves)
+      - run: cargo test --workspace --quiet

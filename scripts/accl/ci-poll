@@ -1,0 +1,14 @@
+#!/bin/bash
+# The CI on every new main commit (docs/ci.md), for cron on acclhead1:
+#
+#   */10 * * * * $HOME/code/flinner/partex-phitex-ci/harness/ci-poll
+#
+# If main's head in the accl repository has no run yet, submit one with
+# --main. Only git and sbatch run here; a lock keeps two polls apart.
+set -euo pipefail
+CI=$HOME/code/flinner/partex-phitex-ci
+exec 9>"$CI/poll.lock"
+flock -n 9 || exit 0
+c=$(git -C "$HOME/code/flinner/partex-phitex.git" rev-parse -q --verify refs/heads/main) || exit 0
+grep -q "^$c " "$CI/submitted.log" 2>/dev/null && exit 0
+"$CI/harness/ci-submit" --main "$c" >> "$CI/poll.log" 2>&1

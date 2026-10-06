@@ -9,6 +9,13 @@
 #   accl log <job>                 a job's output so far
 #   accl cancel <job>...           cancel your jobs
 #   accl snap                      only snapshot and push; prints the commit
+#   accl ci [--main] [REV]         the CI for a commit (docs/ci.md): build, the
+#                                  manuals, the engine suites, perf, the
+#                                  scoreboard; prints the run's name
+#   accl ci-wait RUN               wait for a CI run, fetch and print its scoreboard
+#   accl ci-oracle LIST            TeX Live's builds of a manual list, cached
+#   accl ci-discover               the manual candidates of the CI image
+#   accl ci-backfill N REV...      perf history for older commits (one array)
 #
 # Tasks (job.sbatch): gate | course plain|ab|ssa|rebuild|label ... |
 # edits [DOC...] | cmd <command...>. Each gets resources from its preset
@@ -99,6 +106,39 @@ wait_jobs() {
   done
 }
 
+CI=code/flinner/partex-phitex-ci
+# the harness, its data and the stage script, as this tree has them
+ci_sync() {
+  local repo
+  repo=$(git rev-parse --show-toplevel)
+  ssh $H "mkdir -p $CI/harness/ci $CI/harness/xetex $CI/harness/data $CI/runs"
+  rsync -a --delete --exclude=__pycache__ "$repo/scripts/ci/" "$H:$CI/harness/ci/"
+  rsync -a "$repo/scripts/xetex/fonts.conf" "$H:$CI/harness/xetex/"
+  rsync -a --delete "$repo/ci/" "$H:$CI/harness/data/"
+  rsync -a "$here/ci.sbatch" "$here/backfill.sbatch" "$here/ci-submit" "$here/ci-poll" "$H:$CI/harness/"
+}
+# sb OPTS... STAGE RUN ARGS...: sbatch a stage, its job id
+sb() { ssh $H "$slurm cd $CI && sbatch --parsable $*"; }
+PERF_NODE=${CI_PERF_NODE:-acclnode04}
+ci_submit() {
+  local main= c
+  [ "${1:-}" = --main ] && { main=--main; shift; }
+  [ -n "${1:-}" ] && export ACCL_COMMIT=$1
+  c=$(snap)
+  ci_sync
+  echo "accl ci: commit $c" >&2
+  ssh $H "CI_SHARDS=${CI_SHARDS:-47} CI_PERF_NODE=$PERF_NODE ${CI_MODES:+CI_MODES=$CI_MODES} \$HOME/$CI/harness/ci-submit $main $c"
+}
+ci_wait() {
+  local run=$1 j=${2:-}
+  [ -n "$j" ] && wait_jobs "$j" >/dev/null
+  mkdir -p "$runs/ci-$run"
+  rsync -a --exclude='bin/' --exclude='*.tar' "$H:$CI/runs/$run/" "$runs/ci-$run/" 2>/dev/null || true
+  rsync -a "$H:$CI/report.html" "$H:$CI/history.jsonl" "$runs/" 2>/dev/null || true
+  cat "$runs/ci-$run/summary.txt" 2>/dev/null || echo "no summary yet: $runs/ci-$run"
+  echo "scoreboard: $runs/ci-$run/scoreboard.md; report: $runs/report.html"
+}
+
 cmd=${1:-}
 shift || true
 case $cmd in
@@ -109,5 +149,24 @@ case $cmd in
   q) ssh $H "$slurm squeue -u \$USER -o '%.8i %.12j %.9T %.10M %.4C %.6m %R'" ;;
   log) ssh $H "cat code/flinner/partex-phitex-runs/partex-$1.out" ;;
   cancel) ssh $H "$slurm scancel $*" ;;
-  *) sed -n '2,24p' "$0"; exit 2 ;;
+  ci) ci_submit "$@" ;;
+  ci-wait) ci_wait "$@" ;;
+  ci-oracle)
+    ci_sync
+    scp -q "$1" "$H:$CI/harness/data/$(basename "$1")"
+    sb -J ci-oracle --array=0-${CI_SHARDS:-63}%32 -x "$PERF_NODE" -p build --qos=build4 -c 2 --mem=24G -t 12:00:00 \
+      "\$HOME/$CI/harness/ci.sbatch" oracle "oracle-$(date +%Y%m%d-%H%M%S)" "\$HOME/$CI/harness/data/$(basename "$1")" ;;
+  ci-discover)
+    ci_sync
+    sb -J ci-discover -p light -c 2 --mem=8G -t 01:00:00 "\$HOME/$CI/harness/ci.sbatch" discover discover ;;
+  ci-backfill)
+    ci_sync
+    n=$1; shift
+    list=$(mktemp)
+    for r in "$@"; do git rev-parse "$r^{commit}"; done > "$list"
+    while read -r c; do git push -q accl "$c:refs/wip/$c" 2>/dev/null || true; done < "$list"
+    scp -q "$list" "$H:$CI/harness/data/backfill.txt"; rm -f "$list"
+    sb -J ci-backfill --array=0-$(( $# - 1 ))%${n} -w "$PERF_NODE" -p build --qos=build4 -c 16 --mem=96G -t 12:00:00 \
+      "\$HOME/$CI/harness/backfill.sbatch" ;;
+  *) sed -n '2,30p' "$0"; exit 2 ;;
 esac

@@ -3,3 +3,4 @@
 /refs
 /bench/results/*.local.json
 /tools/minted-pyodide/node_modules
+__pycache__/
