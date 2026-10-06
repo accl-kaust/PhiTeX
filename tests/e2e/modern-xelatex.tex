@@ -1,0 +1,22 @@
+% `phitex build` and `phitex watch` with XeTeX: fontspec by a font's name
+% (fontconfig's list) and by its file, a figure, and references that need
+% a second pass.
+% !TEX program = xelatex
+\documentclass{article}
+\usepackage{fontspec}
+\setmainfont{TeX Gyre Pagella}
+\newfontfamily\heros{texgyreheros-regular.otf}
+\usepackage{graphicx}
+\begin{document}
+\tableofcontents
+\section{Fonts}\label{sec:fonts}
+Hello, Wörld: ünïcödé, “quotes”, ﬁne ligatures, {\heros and a sans serif}.
+See section~\ref{sec:fonts} and figure~\ref{fig:pic} on page~\pageref{fig:pic}.
+\begin{figure}[h]
+\centering
+\includegraphics[width=3cm]{xpic-plain.png}
+\caption{A picture}\label{fig:pic}
+\end{figure}
+\section{End}
+This text is at the end.
+\end{document}

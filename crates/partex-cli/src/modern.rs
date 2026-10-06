@@ -39,7 +39,8 @@ commands:
 
 options:
   -o, --output-dir DIR     where the outputs go (TeX's -output-directory)
-      --engine NAME        pdflatex (default for LaTeX), pdftex, latex or tex
+      --engine NAME        pdflatex (default for LaTeX), xelatex, pdftex, xetex,
+                           latex or tex
       --shell-escape       let \\write18 run any command (default: restricted)
       --interactive        TeX's own terminal, stopping at errors (no fixpoint)
   -v, --verbose            show \\message and \\typeout lines, and what each pass
@@ -268,13 +269,13 @@ impl Target {
     }
 }
 
-/// The engines partex has, by the names a magic comment or `phitex.toml`
+/// The engines `phitex` has, by the names a magic comment or `phitex.toml`
 /// may use.
 fn engine_name(name: &str) -> Result<String, String> {
     let n = name.trim().to_ascii_lowercase();
     match n.as_str() {
-        "pdflatex" | "latex" | "pdftex" | "tex" | "etex" => Ok(n),
-        "xelatex" | "lualatex" | "xetex" | "luatex" | "lualatex-dev" | "xelatex-dev" => {
+        "pdflatex" | "latex" | "pdftex" | "tex" | "etex" | "xelatex" | "xetex" => Ok(n),
+        "lualatex" | "luatex" | "lualatex-dev" | "xelatex-dev" => {
             Err(format!("the {n} engine is not supported yet"))
         }
         _ => Err(format!("unknown engine `{name}`")),
@@ -433,6 +434,8 @@ fn ensure_format(engine: &str, r: Option<&Renderer>) -> Option<PathBuf> {
         "etex" => ("pdftex", "*etex.ini"),
         "pdftex" => ("pdftex", "*pdfetex.ini"),
         "latex" => ("pdftex", "*latex.ini"),
+        "xetex" => ("xetex", "xetex.ini"),
+        "xelatex" => ("xetex", "xelatex.ini"),
         _ => ("pdftex", "*pdflatex.ini"),
     };
     if let Some(r) = r {
@@ -449,8 +452,10 @@ fn ensure_format(engine: &str, r: Option<&Renderer>) -> Option<PathBuf> {
         format!("-jobname={engine}"),
         format!("-output-directory={}", dir.display()),
     ];
-    if flavor == "pdftex" {
-        args.push("-translate-file=cp227.tcx".into());
+    match flavor {
+        "pdftex" => args.push("-translate-file=cp227.tcx".into()),
+        "xetex" => args.push("-etex".into()),
+        _ => {}
     }
     args.push(ini.into());
     crate::set_args(args);
@@ -1652,8 +1657,9 @@ mod tests {
             ])
         );
         assert_eq!(t.job(), "paper");
+        assert_eq!(engine_name("XeLaTeX").unwrap(), "xelatex");
         assert!(
-            engine_name("XeLaTeX")
+            engine_name("LuaLaTeX")
                 .unwrap_err()
                 .contains("not supported")
         );
