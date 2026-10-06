@@ -1186,7 +1186,12 @@ fn oracle_passes(
                 .collect::<Vec<_>>()
         };
         let before = snapshot();
-        exec(Command::new(case.oracle), o, args, "term.txt")?;
+        let mut oracle = Command::new(case.oracle);
+        if case.oracle.starts_with("xe") {
+            // (TeX Live's fonts only, as phitex is given them: DESIGN 4.7)
+            oracle.env("FONTCONFIG_FILE", xetex_fonts());
+        }
+        exec(oracle, o, args, "term.txt")?;
         passes += 1;
         if let Ok(text) = fs::read(&aux)
             && text.windows(9).any(|w| w == b"\\bibdata{")
@@ -1211,6 +1216,12 @@ fn oracle_passes(
         }
     }
     Ok((passes, bibtex_runs, makeindex_runs))
+}
+
+/// The fontconfig configuration both sides of a `XeTeX` case see: TeX
+/// Live's fonts only (DESIGN 4.7).
+fn xetex_fonts() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../scripts/xetex/fonts.conf")
 }
 
 /// Run a [`Converge`] case.
@@ -2004,6 +2015,74 @@ fn run_modern(root: &Path, partex: &Path) -> Result<Vec<String>> {
     Ok(diffs)
 }
 
+/// `phitex build` and `phitex watch` with `XeTeX` (`% !TEX program =
+/// xelatex`): its format made and kept, xdvipdfmx in process; against
+/// TeX Live's `xelatex` run to its fixpoint, both seeing TeX Live's fonts
+/// only: the build must be identical.
+fn run_modern_xelatex(root: &Path, partex: &Path) -> Result<Vec<String>> {
+    let case = Converge {
+        name: "modern_xelatex",
+        oracle: "xelatex",
+        inputs: &["modern-xelatex.tex", "xpic-plain.png"],
+        ini: &[],
+        args: &["-interaction=nonstopmode"],
+        job: "modern-xelatex",
+        watch: &["modern-xelatex.aux", "modern-xelatex.toc"],
+        passes: 2,
+        outdir: false,
+    };
+    let work = out_root(root).join(case.name);
+    if work.exists() {
+        fs::remove_dir_all(&work)?;
+    }
+    let (o, p) = (work.join("o"), work.join("p"));
+    fs::create_dir_all(&o)?;
+    fs::create_dir_all(&p)?;
+    for input in case.inputs {
+        let src = root.join("tests/e2e").join(input);
+        fs::copy(&src, o.join(input))?;
+        fs::copy(&src, p.join(input))?;
+    }
+    let args = ["-interaction=nonstopmode", "modern-xelatex.tex"];
+    let (passes, _, _) = oracle_passes(&case, &o, &o, &args)?;
+    ensure!(
+        passes >= case.passes,
+        "the case must need {} runs",
+        case.passes
+    );
+    let env = |cmd: &mut Command| {
+        cmd.env("PARTEX_CACHE_DIR", work.join("cache"))
+            .env("PARTEX_STORE_DIR", work.join("store"))
+            .env("PARTEX_FORMATS", root.join("target/e2e-formats-xelatex"))
+            .env("FONTCONFIG_FILE", xetex_fonts())
+            .env("NO_COLOR", "1")
+            .env_remove("PARTEX_PERSIST");
+    };
+    let modern = |args: &[&str]| -> Result<String> {
+        let mut cmd = Command::new(partex);
+        env(&mut cmd);
+        let err = exec(cmd, &p, args, "term.txt")?;
+        for line in err.lines() {
+            eprintln!("    {line}");
+        }
+        Ok(err)
+    };
+    let report = modern(&["build", "modern-xelatex.tex"])?;
+    ensure!(
+        report.contains("Compiling modern-xelatex.tex (xelatex)"),
+        "the magic comment did not choose xelatex"
+    );
+    ensure!(
+        report
+            .lines()
+            .any(|l| l.trim_start().starts_with("Finished modern-xelatex.pdf")),
+        "the build did not finish"
+    );
+    // (not yet: a second build of an XeTeX job runs it again instead of
+    // restoring what the first saved; a watch's rebuild is untested)
+    compare(&o, &p, true)
+}
+
 /// `partex watch` (machine mode, its default) of `modern.tex` against
 /// `pdflatex` run to its fixpoint as latexmk would: the files after the
 /// first build, and after an edit (a word, then a new forward reference),
@@ -2461,6 +2540,7 @@ fn partex_binary(root: &Path) -> Result<PathBuf> {
     Ok(root.join("target/release/phitex"))
 }
 
+#[allow(clippy::too_many_lines)] // (the list of cases)
 pub fn run(root: &Path, args: &[String]) -> Result<()> {
     let filter = args.first().map(String::as_str);
     let partex = partex_binary(root)?;
@@ -2505,6 +2585,10 @@ pub fn run(root: &Path, args: &[String]) -> Result<()> {
         Box::new(move || run_machine_edits_dvi(root, partex)),
     ));
     jobs.push(("modern", Box::new(move || run_modern(root, partex))));
+    jobs.push((
+        "modern_xelatex",
+        Box::new(move || run_modern_xelatex(root, partex)),
+    ));
     jobs.push(("glyphs", Box::new(move || run_glyphs(root, partex))));
     jobs.push((
         "xelatex_runs",

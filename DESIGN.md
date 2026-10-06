@@ -224,7 +224,11 @@ the graph of chapter 3, not from a pipeline split.
   - `clean` removes what the last build wrote and saved (`--all`:
     everything saved, for every document).
 
-  It is configured by `phitex.toml` and `% !TEX` comments.
+  It is configured by `phitex.toml` and `% !TEX` comments; the engine
+  is pdfLaTeX unless they or `--engine` say `xelatex` (XeTeX: its format
+  made in the cache as fmtutil makes it, `xetex -ini -etex
+  xelatex.ini`; xdvipdfmx in process; fonts found through fontconfig's
+  list as `xelatex` finds them, `FONTCONFIG_FILE` honoured).
 - **The terminal** is drawn from events, not from the log: warnings
   and notes come as data from the host, and LaTeX's warnings are
   grouped and deduplicated (`render.rs`, `warnings.rs`, `snippet.rs`).

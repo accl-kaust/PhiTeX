@@ -32,7 +32,8 @@ steps of it, so a build settles in one process with no separate passes.
   BibTeX/makeindex. The `.log` may differ.
 - **Speed:** a word edit in a 64-page thesis rebuilds in about 10 ms
   natively. A cold tracked build takes about 2x a plain run.
-- **Engines:** pdfTeX and TeX only; there is no XeTeX or LuaTeX.
+- **Engines:** pdfTeX and TeX, and XeTeX (`xelatex`, with xdvipdfmx in
+  process) through `phitex build` and `phitex watch`; there is no LuaTeX.
 
 ## Layout
 

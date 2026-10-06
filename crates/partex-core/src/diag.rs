@@ -455,14 +455,18 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         }
         .max(start);
         let loc = ux(r.loc.clamp(r.start, i32::try_from(end).unwrap_or(0)));
+        // (each character as §318 prints it: `XeTeX`'s beyond 255 as
+        // themselves, not as the pool's strings of those numbers)
         let before = self.diag_print(|t| {
-            for k in start..loc {
-                t.print(crate::input::ci(t.buffer[k]));
+            let mut k = start;
+            while k < loc {
+                t.print_buffer(&mut k);
             }
         });
         let after = self.diag_print(|t| {
-            for k in loc..end.max(loc) {
-                t.print(crate::input::ci(t.buffer[k]));
+            let mut k = loc;
+            while k < end {
+                t.print_buffer(&mut k);
             }
         });
         Frame {
