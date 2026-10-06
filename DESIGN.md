@@ -2675,6 +2675,31 @@ TFM font), its lookup a Host query versioned by its answer (3.4);
 xdvipdfmx's pages and its end are nodes (3.16), its subset tags values
 from first-use order.
 
+**Status (2026-10-06).** The three parts are in, and the gate runs
+XeTeX against TeX Live 2026: plain `-ini -etex` with `-no-pdf` (the XDV)
+and without (the PDF), and xelatex (its format built by both) on
+fontspec with TeX Gyre and Latin Modern faces, hyphenation, hyperref,
+polyglossia's Greek, Russian, Arabic and Hebrew, beamer with TikZ,
+graphicx's pictures (PNG, JPEG, BMP, PDF pages), and unicode-math with
+one and with several OpenType math fonts: the logs, aux files, XDV
+and PDFs byte for byte, in plain partex and in machine mode. In SSA
+mode a fonts document and an edit to it give xelatex's PDF; a cold SSA
+build costs about what a plain one does (4.4 s against 4.2 s, most of
+it the font index). The PDF is made in process: the hosts keep the XDV
+(`FileKind::XdvPipe`) and run xdvipdfmx where XeTeX closes its pipe;
+a fatal error of the driver leaves its partial file and, in plain
+partex, the log's "Error 256 (driver return code)". Input encodings
+are XeTeX's own and ICU's stateless single-byte converters and UTF-8,
+by any ICU name (`icu_tables.rs`, generated from `uconv`).
+
+Not yet: `\XeTeXglyph`, `\XeTeXlinebreaklocale` (ICU's line breaking), ICU's
+multi-byte converters (GBK and the like), `\XeTeXinterwordspaceshaping`
+above 1, math codes with families of 128 and up printed as XeTeX's
+64-bit integers, the driver's status in machine mode's log, CJK
+(no CJK fonts in the test set). TeX Live's xetex (Arch, ICU 78) itself
+crashes on any ICU converter in e-TeX mode, so ICU input can only be
+checked against `uconv`.
+
 ---
 
 ## 5. Performance, observability and the text form
