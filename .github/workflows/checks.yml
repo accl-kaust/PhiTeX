@@ -20,6 +20,9 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+      # (.cargo/config.toml links with clang and /usr/bin/mold; the runner
+      # has clang, not mold)
+      - run: sudo apt-get update -qq && sudo apt-get install -y -qq mold
       # (rustup reads rust-toolchain.toml: the pinned nightly, rustfmt,
       # clippy and the wasm32 target)
       - run: rustup show active-toolchain || rustup toolchain install

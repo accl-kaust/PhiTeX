@@ -59,6 +59,19 @@ args=(
 while IFS='=' read -r name value; do
   [[ ($name == PARTEX_* || $name == PHITEX_*) && $name != PARTEX_SANDBOX ]] && args+=(--setenv "$name" "$value")
 done < <(env)
+# One compiler cache for every worktree: sccache's server starts inside each
+# sandbox (it runs rustc, so it stays in it), over one cache directory, with
+# the worktree's own root stripped from paths so that the same crate hits
+# from any checkout. PHITEX_NO_SCCACHE=1 turns it off.
+if [ -z "${PHITEX_NO_SCCACHE:-}" ] && command -v sccache >/dev/null; then
+  cache="${SCCACHE_DIR:-$HOME/.cache/sccache}"
+  mkdir -p "$cache"
+  args+=(--bind "$cache" "$cache"
+    --setenv RUSTC_WRAPPER sccache
+    --setenv SCCACHE_DIR "$cache"
+    --setenv SCCACHE_BASEDIRS "$repo"
+    --setenv SCCACHE_CACHE_SIZE "${SCCACHE_CACHE_SIZE:-60G}")
+fi
 # A separate target directory (inside the repo) passes through too.
 [ -n "${CARGO_TARGET_DIR:-}" ] && args+=(--setenv CARGO_TARGET_DIR "$CARGO_TARGET_DIR")
 # Keep $PWD inside the repo, or a git worktree under ~/code/tmp (bound
