@@ -215,14 +215,14 @@ impl Logs {
             && !(reads && outputs && term && pages && diags)
         {
             eprintln!(
-                "partex:   effects the same: lookups {reads} ({} vs {}), outputs {outputs}, terminal {term}, pages {pages}, diagnostics {diags}",
+                "phitex:   effects the same: lookups {reads} ({} vs {}), outputs {outputs}, terminal {term}, pages {pages}, diagnostics {diags}",
                 self.reads.len(),
                 end.reads
             );
             for (i, (t, n)) in saved.reads.iter().zip(&self.reads).enumerate() {
                 if !(t.name == n.name && t.kind == n.kind && found_as(&n.found, &t.found)) {
                     eprintln!(
-                        "partex:   lookup {i}: {} {:?} / {} {:?}, found {:?} / {:?}",
+                        "phitex:   lookup {i}: {} {:?} / {} {:?}, found {:?} / {:?}",
                         String::from_utf8_lossy(&n.name),
                         n.kind,
                         String::from_utf8_lossy(&t.name),
@@ -793,10 +793,10 @@ fn pack(segments: &[Vec<u8>], pool: &partex_core::persist::Pool, stats: bool) ->
         let mut by: Vec<_> = pool.sizes.iter().flatten().collect();
         by.sort_by_key(|x| std::cmp::Reverse(x.1.1));
         for (what, (n, bytes)) in by.iter().take(12) {
-            eprintln!("partex: saved pool {bytes:>10} bytes in {n:>6} {what}");
+            eprintln!("phitex: saved pool {bytes:>10} bytes in {n:>6} {what}");
         }
         eprintln!(
-            "partex: saved logs {} bytes, checkpoints {:?} bytes, pool {} bytes in {} values",
+            "phitex: saved logs {} bytes, checkpoints {:?} bytes, pool {} bytes in {} values",
             segments[0].len(),
             segments[1..].iter().map(Vec::len).collect::<Vec<_>>(),
             pool.bytes.len(),
@@ -1060,7 +1060,7 @@ fn cheap_cutoff(
     };
     if std::env::var_os("PARTEX_WATCH_DEBUG").is_some() {
         eprintln!(
-            "partex: confirmation at command {} ({}): {:.1} ms",
+            "phitex: confirmation at command {} ({}): {:.1} ms",
             tex.commands(),
             if ok { "the same" } else { "differs" },
             t_confirm.elapsed().as_secs_f64() * 1e3
@@ -1199,7 +1199,7 @@ fn interval_has_cell(cells: &[u32], far: &[Cell], c: Cell) -> bool {
     )
 }
 
-/// What `partex why` says of a read-set cutoff at `tex` with `cells`
+/// What `phitex why` says of a read-set cutoff at `tex` with `cells`
 /// differing.
 fn cutoff_note(tex: &Engine, d: &Differs, stop: Option<u64>) -> String {
     let cells = d.tracked();
@@ -1222,7 +1222,7 @@ fn cutoff_note(tex: &Engine, d: &Differs, stop: Option<u64>) -> String {
     )
 }
 
-/// No cutoff at `tex`, for `why`: the first reason goes to `partex why`;
+/// No cutoff at `tex`, for `why`: the first reason goes to `phitex why`;
 /// `PARTEX_WATCH_DEBUG` prints each reason when it changes.
 fn refuse(tex: &Engine, p: &mut Previous, why: &str) {
     if !p.blocked_seen {
@@ -1232,7 +1232,7 @@ fn refuse(tex: &Engine, p: &mut Previous, why: &str) {
     if std::env::var_os("PARTEX_WATCH_DEBUG").is_some() {
         let short = why.split(" (").next().unwrap_or(why).to_owned();
         if p.last_refusal.as_ref() != Some(&short) {
-            eprintln!("partex: cutoff at command {}: no: {why}", tex.commands());
+            eprintln!("phitex: cutoff at command {}: no: {why}", tex.commands());
             p.last_refusal = Some(short);
         }
     }
@@ -1270,7 +1270,7 @@ fn explain_difference(new: &Engine, old: &Engine, interval: Option<&Interval>) {
         .map(|(x, _)| x.0)
         .collect();
     eprintln!(
-        "partex: at command {}, the state differs in: {}",
+        "phitex: at command {}, the state differs in: {}",
         new.commands(),
         parts.join(", ")
     );
@@ -1288,7 +1288,7 @@ fn explain_difference(new: &Engine, old: &Engine, interval: Option<&Interval>) {
             .filter(|l| olds.get(l) != news.get(l))
             .collect();
         match interval {
-            None => eprintln!("partex:   skip? no record of the interval after it"),
+            None => eprintln!("phitex:   skip? no record of the interval after it"),
             Some(iv) => {
                 let exposed: std::collections::HashSet<u32> = iv.exposed.iter().copied().collect();
                 let far: std::collections::HashSet<i32> = iv
@@ -1309,7 +1309,7 @@ fn explain_difference(new: &Engine, old: &Engine, interval: Option<&Interval>) {
                     .collect();
                 let pdf = parts.contains(&"pdf");
                 eprintln!(
-                    "partex:   skip? {} eqtb cells differ, the interval reads {} of them{}{}: {}",
+                    "phitex:   skip? {} eqtb cells differ, the interval reads {} of them{}{}: {}",
                     differ.len(),
                     read.len(),
                     if pdf {
@@ -1337,8 +1337,8 @@ fn explain_difference(new: &Engine, old: &Engine, interval: Option<&Interval>) {
             .filter(|(x, y)| x.1 != y.1)
             .map(|(x, _)| x.0)
             .collect();
-        eprintln!("partex:   pdf fields: {}", f.join(", "));
-        eprintln!("partex:   pdf objects: {}", new.pdf_objs_difference(old));
+        eprintln!("phitex:   pdf fields: {}", f.join(", "));
+        eprintln!("phitex:   pdf objects: {}", new.pdf_objs_difference(old));
     }
     if parts.contains(&"tables") {
         let old_engine = old;
@@ -1351,7 +1351,7 @@ fn explain_difference(new: &Engine, old: &Engine, interval: Option<&Interval>) {
             .collect();
         for &l in differing.iter().take(4) {
             eprintln!(
-                "partex:   {} = {:?} / {:?}",
+                "phitex:   {} = {:?} / {:?}",
                 new.eqtb_loc_name(l),
                 new.cell_raw(Cell::Eqtb(l)),
                 old_engine.cell_raw(Cell::Eqtb(l))
@@ -1359,7 +1359,7 @@ fn explain_difference(new: &Engine, old: &Engine, interval: Option<&Interval>) {
         }
         let cells: Vec<_> = differing.iter().map(|&l| new.eqtb_loc_name(l)).collect();
         eprintln!(
-            "partex:   eqtb cells ({}): {}",
+            "phitex:   eqtb cells ({}): {}",
             cells.len(),
             cells.iter().take(25).cloned().collect::<Vec<_>>().join(" ")
         );
@@ -1369,7 +1369,7 @@ fn explain_difference(new: &Engine, old: &Engine, interval: Option<&Interval>) {
 /// `PARTEX_WATCH_DEBUG`: how long since `t0`.
 fn debug_time(what: &str, t0: Instant) {
     if std::env::var_os("PARTEX_WATCH_DEBUG").is_some() {
-        eprintln!("partex: {what}: {:.1} ms", t0.elapsed().as_secs_f64() * 1e3);
+        eprintln!("phitex: {what}: {:.1} ms", t0.elapsed().as_secs_f64() * 1e3);
     }
 }
 
@@ -1606,7 +1606,7 @@ impl Session {
         }
         let refuse = |why: String| {
             if std::env::var_os("PARTEX_WATCH_DEBUG").is_some() {
-                eprintln!("partex: {why}");
+                eprintln!("phitex: {why}");
             }
             Some(why)
         };
@@ -1900,7 +1900,7 @@ impl Session {
             };
             if std::env::var_os("PARTEX_WATCH_DEBUG").is_some() {
                 eprintln!(
-                    "partex: lookup interval {}..{at} run again: {} ({:.1} ms)",
+                    "phitex: lookup interval {}..{at} run again: {} ({:.1} ms)",
                     self.checkpoints[k].0,
                     match (same_state, same_logs) {
                         (true, true) => "the same",
@@ -1910,7 +1910,7 @@ impl Session {
                     t.elapsed().as_secs_f64() * 1e3
                 );
                 if !same_state && step == Step::Checkpoint {
-                    eprintln!("partex:   {}", state_difference(&tex, &target));
+                    eprintln!("phitex:   {}", state_difference(&tex, &target));
                 }
             }
             if !same_logs {
@@ -1948,7 +1948,7 @@ impl Session {
             let want = format!("{k} 0 obj");
             if !out.bytes[at..].starts_with(want.as_bytes()) {
                 eprintln!(
-                    "partex: {what} at command {}: object {k} is not at byte {at} ({} bytes)",
+                    "phitex: {what} at command {}: object {k} is not at byte {at} ({} bytes)",
                     tex.commands(),
                     out.bytes.len()
                 );
@@ -2114,10 +2114,10 @@ impl Session {
                             let open: Vec<_> =
                                 cp.open_inputs().iter().map(|(d, p)| d.len() - p).collect();
                             eprintln!(
-                                "partex: kept checkpoint at {at}, open files with bytes left {open:?}"
+                                "phitex: kept checkpoint at {at}, open files with bytes left {open:?}"
                             );
                         }
-                        eprintln!("partex: the job ended at {}", tex.commands());
+                        eprintln!("phitex: the job ended at {}", tex.commands());
                     }
                     // (with a cut, the commands between it and where the
                     // job went on were not run)
@@ -2187,7 +2187,7 @@ impl Session {
             more.sort_unstable_by(|a, b| b.cmp(a));
             let total: usize = more.iter().map(|m| m.0).sum();
             eprintln!(
-                "partex: checkpoint at {}: {total} bytes unshared: {:?}",
+                "phitex: checkpoint at {}: {total} bytes unshared: {:?}",
                 tex.commands(),
                 &more[..more.len().min(8)]
             );
@@ -2326,7 +2326,7 @@ impl Session {
                 .min_by_key(|c| c.0.abs_diff(tex.commands()))
                 .map(|c| (c.0, c.1.position_key()));
             eprintln!(
-                "partex: at command {} no checkpoint is where this run is: {key:?}; nearest {near:?}",
+                "phitex: at command {} no checkpoint is where this run is: {key:?}; nearest {near:?}",
                 tex.commands()
             );
         }
@@ -2384,7 +2384,7 @@ impl Session {
             if debug {
                 p.explained += 1;
                 if !allowed {
-                    eprintln!("partex: (no cutoff allowed here: a later read changed)");
+                    eprintln!("phitex: (no cutoff allowed here: a later read changed)");
                 }
                 let (at, old) = (p.checkpoints[j].0, &p.checkpoints[j].1);
                 let interval = p.intervals.iter().find(|(f, _)| *f == at).map(|(_, iv)| iv);
@@ -2463,7 +2463,7 @@ impl Session {
         let deflate = |level: i32, data: &[u8]| crate::zlib::deflate_stream(level, data);
         if rec.render(deflate) != old {
             if std::env::var_os("PARTEX_WATCH_DEBUG").is_some() {
-                eprintln!("partex: object stream {} rendered otherwise", rec.num);
+                eprintln!("phitex: object stream {} rendered otherwise", rec.num);
             }
             return None;
         }
@@ -2940,7 +2940,7 @@ impl Session {
         for (i, d) in diffs.iter().enumerate() {
             if let Some(at) = d.diff {
                 eprintln!(
-                    "partex: changed read {i} {} at byte {at} ({:?}, contents at {:?})",
+                    "phitex: changed read {i} {} at byte {at} ({:?}, contents at {:?})",
                     String::from_utf8_lossy(&sh.reads[i].name),
                     sh.reads[i].kind,
                     d.replace.as_ref().map(|r| crate::intervals::file_id(&r.0))
@@ -2953,11 +2953,11 @@ impl Session {
             .map(|c| c.1.host().mark.reads)
             .collect();
         eprintln!(
-            "partex: checkpoint reads {:?}",
+            "phitex: checkpoint reads {:?}",
             &marks[..marks.len().min(40)]
         );
         eprintln!(
-            "partex: {} checkpoints, spacing {} commands, at {:?}",
+            "phitex: {} checkpoints, spacing {} commands, at {:?}",
             self.checkpoints.len(),
             self.spacing,
             self.checkpoints.iter().map(|c| c.0).collect::<Vec<_>>()
@@ -3066,7 +3066,7 @@ impl Session {
                 .collect();
             if std::env::var_os("PARTEX_WATCH_DEBUG").is_some() {
                 eprintln!(
-                    "partex:   trial from reads {lo} to {hi}: logged {} reads, saved {}; names now {:?}; then {:?}",
+                    "phitex:   trial from reads {lo} to {hi}: logged {} reads, saved {}; names now {:?}; then {:?}",
                     logs.reads.len(),
                     saved.reads.len(),
                     logs.reads
@@ -3088,7 +3088,7 @@ impl Session {
             if std::env::var_os("PARTEX_WATCH_DEBUG").is_some() {
                 let from = k.map_or(0, |k| self.checkpoints[k].0);
                 eprintln!(
-                    "partex: backdating trial {from}..{at} ({} reads blocking): {:.1} ms",
+                    "phitex: backdating trial {from}..{at} ({} reads blocking): {:.1} ms",
                     blocking.len(),
                     t.elapsed().as_secs_f64() * 1e3
                 );
@@ -3100,9 +3100,9 @@ impl Session {
                         && hash_of(t) == hash_of(&old)
                 });
             if std::env::var_os("PARTEX_WATCH_DEBUG").is_some() && !same {
-                eprintln!("partex: backdating trial differs");
+                eprintln!("phitex: backdating trial differs");
                 eprintln!(
-                    "partex:   logs the same: {same_logs}; state: {}",
+                    "phitex:   logs the same: {same_logs}; state: {}",
                     trial.as_ref().map_or_else(
                         || "no trial".to_owned(),
                         |t| format!(
@@ -3192,7 +3192,7 @@ impl Session {
         let usable =
             switch_on("PARTEX_LINE_RESUME") && self.tracker.follows_lines() && covered.is_ok();
         if let (Err(why), true) = (covered, std::env::var_os("PARTEX_WATCH_DEBUG").is_some()) {
-            eprintln!("partex: no line rules: {why}");
+            eprintln!("phitex: no line rules: {why}");
         }
         diffs
             .iter()
@@ -3239,7 +3239,7 @@ impl Session {
                 }
                 if std::env::var_os("PARTEX_WATCH_DEBUG").is_some() {
                     eprintln!(
-                        "partex: line rule: valid up to command {}, {opens} opens for lines",
+                        "phitex: line rule: valid up to command {}, {opens} opens for lines",
                         rule.until
                     );
                 }

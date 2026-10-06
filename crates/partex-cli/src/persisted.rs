@@ -158,7 +158,7 @@ impl Keeper {
         let Some(opened) = store::open(&self.dir, self.key) else {
             if debug() {
                 eprintln!(
-                    "partex: store: no saved build for this job ({:032x}) that reads back whole",
+                    "phitex: store: no saved build for this job ({:032x}) that reads back whole",
                     self.key
                 );
             }
@@ -219,7 +219,7 @@ impl Keeper {
                 return Ok((b, chunks));
             }
             let (n, bad) = partex_core::machine::check_snapshots(&b);
-            eprintln!("partex: store: {n} snapshots checked, {bad} differ");
+            eprintln!("phitex: store: {n} snapshots checked, {bad} differ");
             if bad == 0 {
                 Ok((b, chunks))
             } else {
@@ -230,7 +230,7 @@ impl Keeper {
             Ok(b) => b,
             Err(why) => {
                 if debug() {
-                    eprintln!("partex: store: the saved build does not load: {why}");
+                    eprintln!("phitex: store: the saved build does not load: {why}");
                 }
                 return Err(template.into_native());
             }
@@ -254,15 +254,15 @@ impl Keeper {
         let read = opened.read.load(std::sync::atomic::Ordering::Relaxed);
         if debug() {
             eprintln!(
-                "partex: store: load: open {:.0} ms, host {:.0} ms, root {:.0} ms,{timing}",
+                "phitex: store: load: open {:.0} ms, host {:.0} ms, root {:.0} ms,{timing}",
                 t_open.as_secs_f64() * 1e3,
                 t_shared.saturating_sub(t_open).as_secs_f64() * 1e3,
                 t_parts.saturating_sub(t_shared).as_secs_f64() * 1e3,
             );
-            eprintln!("partex: store: {:?}", partex_core::machine::census(&b));
+            eprintln!("phitex: store: {:?}", partex_core::machine::census(&b));
         }
         let line = format!(
-            "partex: machine: loaded the saved build in {:.1} ms ({:.1} ms to open): {} regions, {:.1} MB read",
+            "phitex: machine: loaded the saved build in {:.1} ms ({:.1} ms to open): {} regions, {:.1} MB read",
             t.elapsed().as_secs_f64() * 1e3,
             t_open.as_secs_f64() * 1e3,
             b.stats.regions,
@@ -361,7 +361,7 @@ impl LazyBody<MachineHost> for StoredBody {
             // read is checked: failing here means the disk failed)
             self.ctx.load(self.h).unwrap_or_else(|| {
                 panic!(
-                    "partex: a saved snapshot ({:032x}) no longer reads back from the store; rerun with PARTEX_STORE=0",
+                    "phitex: a saved snapshot ({:032x}) no longer reads back from the store; rerun with PARTEX_STORE=0",
                     self.h
                 )
             })
@@ -412,7 +412,7 @@ fn save(dir: &std::path::Path, key: u128, b: &Build<Machine>, kept: &Mutex<Kept>
         Ok(w) => std::rc::Rc::new(std::cell::RefCell::new(w)),
         Err(e) => {
             if debug() {
-                eprintln!("partex: store: saving failed: {e}");
+                eprintln!("phitex: store: saving failed: {e}");
             }
             return;
         }
@@ -425,7 +425,7 @@ fn save(dir: &std::path::Path, key: u128, b: &Build<Machine>, kept: &Mutex<Kept>
     let Some(runs) = partex_core::machine::save_build(b, &mut s, &|fp| reused.get(&fp).copied())
     else {
         if debug() {
-            eprintln!("partex: store: this build cannot be saved");
+            eprintln!("phitex: store: this build cannot be saved");
         }
         return;
     };
@@ -452,7 +452,7 @@ fn save(dir: &std::path::Path, key: u128, b: &Build<Machine>, kept: &Mutex<Kept>
             }
             if debug() {
                 eprintln!(
-                    "partex: store: saved in {:.1} ms ({:.1} ms to encode and write the new blobs, {knew} values known, {runs_reused} of {} runs as they were): {} live blobs, {} new ({:.1} MB, {:.1} MB kept), {:.1} MB moved, root {:.1} MB, {} packs",
+                    "phitex: store: saved in {:.1} ms ({:.1} ms to encode and write the new blobs, {knew} values known, {runs_reused} of {} runs as they were): {} live blobs, {} new ({:.1} MB, {:.1} MB kept), {:.1} MB moved, root {:.1} MB, {} packs",
                     t.elapsed().as_secs_f64() * 1e3,
                     t_ser.as_secs_f64() * 1e3,
                     runs.len(),
@@ -470,14 +470,14 @@ fn save(dir: &std::path::Path, key: u128, b: &Build<Machine>, kept: &Mutex<Kept>
                     .map(|(n, d)| format!("{n} {:.0}", d.as_secs_f64() * 1e3))
                     .collect();
                 eprintln!(
-                    "partex: store: writing, ms from its start: {}",
+                    "phitex: store: writing, ms from its start: {}",
                     phases.join(", ")
                 );
             }
         }
         Err(e) => {
             if debug() {
-                eprintln!("partex: store: saving failed: {e}");
+                eprintln!("phitex: store: saving failed: {e}");
             }
         }
     }
@@ -529,7 +529,7 @@ fn load_final_blob(
     partex_core::machine::check_digest(&f, d)?;
     if debug() {
         eprintln!(
-            "partex: store: final state loaded in {:.0} ms, checked in {:.0} ms",
+            "phitex: store: final state loaded in {:.0} ms, checked in {:.0} ms",
             t_load.as_secs_f64() * 1e3,
             t.elapsed().saturating_sub(t_load).as_secs_f64() * 1e3
         );
@@ -562,7 +562,7 @@ fn final_when_needed(
                     .extend(known);
                 if debug() {
                     eprintln!(
-                        "partex: store: final state waited for {:.0} ms",
+                        "phitex: store: final state waited for {:.0} ms",
                         t.elapsed().as_secs_f64() * 1e3
                     );
                 }
@@ -570,7 +570,7 @@ fn final_when_needed(
             }
             Err(why) => {
                 eprintln!(
-                    "partex: store: the saved final state does not load ({why}); running the job again for it"
+                    "phitex: store: the saved final state does not load ({why}); running the job again for it"
                 );
                 let cfg = partex_incr::build::Config::default();
                 Build::new(initial, &cfg).final_state().clone()
@@ -835,7 +835,7 @@ impl Opened {
             Ok((b, line)) => {
                 if debug() {
                     eprintln!(
-                        "partex: store: the saved build waited for {:.0} ms ({line})",
+                        "phitex: store: the saved build waited for {:.0} ms ({line})",
                         t.elapsed().as_secs_f64() * 1e3
                     );
                 }
@@ -899,7 +899,7 @@ impl Watch {
             if let Some(hit) = super::quick::check(&dir, key, &mut native) {
                 let mut out = hit.outcome;
                 out.reports = vec![format!(
-                    "partex: machine: nothing changed since the last build ({} files looked at in {:.1} ms)",
+                    "phitex: machine: nothing changed since the last build ({} files looked at in {:.1} ms)",
                     hit.looked,
                     t.elapsed().as_secs_f64() * 1e3
                 )];
@@ -928,7 +928,7 @@ impl Watch {
             }
             if debug() {
                 eprintln!(
-                    "partex: store: something changed since the last build (looked in {:.1} ms)",
+                    "phitex: store: something changed since the last build (looked in {:.1} ms)",
                     t.elapsed().as_secs_f64() * 1e3
                 );
             }
@@ -966,7 +966,7 @@ impl Watch {
                 w.b.index();
                 if debug() {
                     eprintln!(
-                        "partex: store: after the load: changes {:.0} ms, rebuild {:.0} ms, outputs {:.0} ms, index {:.0} ms",
+                        "phitex: store: after the load: changes {:.0} ms, rebuild {:.0} ms, outputs {:.0} ms, index {:.0} ms",
                         t_changes.as_secs_f64() * 1e3,
                         t_apply.saturating_sub(t_changes).as_secs_f64() * 1e3,
                         t_converge.saturating_sub(t_apply).as_secs_f64() * 1e3,

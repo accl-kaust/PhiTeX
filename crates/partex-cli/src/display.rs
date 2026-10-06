@@ -356,7 +356,7 @@ pub fn write<T: Tracker>(tex: &mut Tex<NativeHost, T>) {
     let name = tex.host().in_output_dir(&name).unwrap_or(name);
     let text = render(tex);
     eprintln!(
-        "partex: display lists: {pages} pages, {items} items made in {:.1} ms, \
+        "phitex: display lists: {pages} pages, {items} items made in {:.1} ms, \
          hashed in {:.1} ms; side file {} bytes in {:.1} ms",
         (t1 - t0).as_secs_f64() * 1e3,
         (t2 - t1).as_secs_f64() * 1e3,
@@ -365,6 +365,6 @@ pub fn write<T: Tracker>(tex: &mut Tex<NativeHost, T>) {
     );
     let path = crate::native::path(&name);
     if let Err(e) = std::fs::write(&path, text) {
-        eprintln!("partex: {}: {e}", path.display());
+        eprintln!("phitex: {}: {e}", path.display());
     }
 }

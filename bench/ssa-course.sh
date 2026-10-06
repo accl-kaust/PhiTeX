@@ -32,7 +32,7 @@
 # file and renamed over it. The process runs alone on the machine and
 # under the memory cap (scripts/heavy: HEAVY_VMEM_GB, HEAVY_TIMEOUT), in
 # the sandbox, inside GNU time for its peak RSS. The format is made by
-# the binary (BIN, default target/release/partex, built if missing), once
+# the binary (BIN, default target/release/phitex, built if missing), once
 # per binary, as
 # the course's own: `-ini -jobname=pdflatex -translate-file=cp227.tcx
 # *pdflatex.ini`, at the jobs' fixed time (it dumps `\time`, which a job
@@ -74,7 +74,7 @@ while [ $# -gt 0 ]; do
 done
 course=$(realpath "${1:-$HOME/code/tmp/np-course}")
 aux=$(realpath "${2:-$course/_out}")
-bin=${BIN:-$repo/target/release/partex}
+bin=${BIN:-$repo/target/release/phitex}
 edits=$(realpath "${EDITS:-$repo/bench/edits/course.txt}")
 main=${MAIN:-course.tex}
 job=${main%.tex}
@@ -109,9 +109,9 @@ def instructions(name):  # (perf's CSV: count,unit,event,...)
     except OSError:
         pass
     return None
-cold = re.search(r"^partex: ssa build 0: ([\d.]+) ms, (.*)$", err, re.M)
+cold = re.search(r"^(?:phitex|partex): ssa build 0: ([\d.]+) ms, (.*)$", err, re.M)
 cold_rest = cold.group(2) if cold else None
-cold_routines = re.search(r"^partex: ssa build 0 routines: (.*)$", err, re.M)
+cold_routines = re.search(r"^(?:phitex|partex): ssa build 0 routines: (.*)$", err, re.M)
 result = {
     "commit": rev, "dirty": dirty == "true",
     "date": datetime.datetime.now().astimezone().isoformat(timespec="seconds"),
@@ -124,7 +124,7 @@ result = {
     "rebuild_timeout_s": float(limit) or None,
     "cold": {
         "ms": float(cold.group(1)) if cold else None,
-        "link_ms": num(r"^partex: ssa build 0: link ([\d.]+) ms", err, float),
+        "link_ms": num(r"^(?:phitex|partex): ssa build 0: link ([\d.]+) ms", err, float),
         "commands": num(r"\bcommands (\d+)", cold_rest),
         "records": num(r"\brecords (\d+)", cold_rest),
         "records_made": made(cold_routines.group(1) if cold_routines else None),
@@ -140,9 +140,9 @@ try:
 except (OSError, ValueError):
     timed_out = None
 for k, what in enumerate(whats, 1):
-    m = re.search(rf"^partex: ssa rebuild {k}: ([\d.]+) ms \(the rebuild ([\d.]+) ms, "
+    m = re.search(rf"^(?:phitex|partex): ssa rebuild {k}: ([\d.]+) ms \(the rebuild ([\d.]+) ms, "
                   rf"the link ([\d.]+) ms\)(.*)$", err, re.M)
-    routines = re.search(rf"^partex: ssa rebuild {k} routines: (.*)$", err, re.M)
+    routines = re.search(rf"^(?:phitex|partex): ssa rebuild {k} routines: (.*)$", err, re.M)
     row = {"n": k, **what}
     if m:
         rest = m.group(4)
@@ -154,7 +154,7 @@ for k, what in enumerate(whats, 1):
                    definitions_changed=num(r"\bdefinitions changed (\d+)", rest),
                    records_made=made(routines.group(1) if routines else None),
                    instructions=instructions(str(k)))
-    stopped = re.search(rf"^partex: ssa rebuild {k}: stopped: (.*)$", err, re.M)
+    stopped = re.search(rf"^(?:phitex|partex): ssa rebuild {k}: stopped: (.*)$", err, re.M)
     if stopped:
         row["stopped"] = stopped.group(1)
     if not m and timed_out == k:

@@ -69,8 +69,8 @@ pub fn run(root: &Path, args: &[String]) -> Result<()> {
         .current_dir(root)
         .args(["build", "--release", "-p", "partex-cli"])
         .status()?;
-    ensure!(status.success(), "building partex failed");
-    let partex = root.join("target/release/partex");
+    ensure!(status.success(), "building phitex failed");
+    let partex = root.join("target/release/phitex");
     let work = root.join(if machine {
         "target/etrip-machine"
     } else {

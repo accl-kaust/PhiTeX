@@ -396,7 +396,7 @@ pub fn report<H: Host>(tex: &Tex<H, Recorder>, path: &std::path::Path) {
     fan_report(&mut out, &edges, &cell_name);
     cut_report(&mut out, &regions, &edges, &cell_name);
     if let Err(e) = std::fs::write(path, out) {
-        eprintln!("partex: cannot write {}: {e}", path.display());
+        eprintln!("phitex: cannot write {}: {e}", path.display());
     }
 }
 

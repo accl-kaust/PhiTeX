@@ -811,7 +811,7 @@ impl Linker {
             match linked {
                 Ok(l) => self.last = Some(l),
                 Err(e) => {
-                    eprintln!("partex: the link step failed: {e:?}");
+                    eprintln!("phitex: the link step failed: {e:?}");
                     std::process::exit(3);
                 }
             }
@@ -858,10 +858,10 @@ impl Linker {
         self.timed = (t_link, t_write);
         let ms = t.elapsed().as_secs_f64() * 1e3;
         if quiet {
-            eprintln!("partex: machine: the cold build's output in {ms:.1} ms");
+            eprintln!("phitex: machine: the cold build's output in {ms:.1} ms");
         } else {
             eprintln!(
-                "partex: machine: linked {} regions in {ms:.1} ms",
+                "phitex: machine: linked {} regions in {ms:.1} ms",
                 b.stats.regions
             );
         }
@@ -910,7 +910,7 @@ fn report_link(
     let ms_of = |ns: u64| ns as f64 / 1e6;
     let (t_write, bytes_out, pdf_bytes) = written;
     eprintln!(
-        "partex: machine: link timing{}: {how} ({} regions resolved, {} as last time); ms: numbering {:.1}, resolve {:.1}, layout {:.1} (object streams {:.1}, cross-reference {:.1}), lengths {:.1}, copy {:.1}; link {:.1}, files hashed and written {:.1} ({bytes_out} bytes written); the PDF {pdf_bytes} bytes",
+        "phitex: machine: link timing{}: {how} ({} regions resolved, {} as last time); ms: numbering {:.1}, resolve {:.1}, layout {:.1} (object streams {:.1}, cross-reference {:.1}), lengths {:.1}, copy {:.1}; link {:.1}, files hashed and written {:.1} ({bytes_out} bytes written); the PDF {pdf_bytes} bytes",
         if quiet { " (cold)" } else { "" },
         cache.resolved,
         cache.reused,
@@ -948,7 +948,7 @@ fn link_and_write(fx: &[&[partex_core::effects::Effect]], fin: &Machine) -> i32 
     let linked = match linked {
         Ok(l) => l,
         Err(e) => {
-            eprintln!("partex: the link step failed: {e:?}");
+            eprintln!("phitex: the link step failed: {e:?}");
             std::process::exit(3);
         }
     };
@@ -968,7 +968,7 @@ fn link_and_write(fx: &[&[partex_core::effects::Effect]], fin: &Machine) -> i32 
         }
     }
     eprintln!(
-        "partex: machine: linked {} regions in {:.1} ms",
+        "phitex: machine: linked {} regions in {:.1} ms",
         fx.len(),
         t.elapsed().as_secs_f64() * 1e3
     );
@@ -1050,13 +1050,13 @@ fn final_differences(b: &Build<Machine>, cfg: &partex_incr::build::Config) {
     );
     for (p, q) in x.iter().zip(&y) {
         if p.1 != q.1 {
-            eprintln!("partex: machine: final states differ in {}", p.0);
+            eprintln!("phitex: machine: final states differ in {}", p.0);
         }
     }
     let (bt, ft) = (b.final_state().tex(), fresh.final_state().tex());
-    eprintln!("partex: machine: final pdf: {}", bt.pdf_objs_difference(ft));
+    eprintln!("phitex: machine: final pdf: {}", bt.pdf_objs_difference(ft));
     eprintln!(
-        "partex: machine: glyphs: {}; fresh: {}",
+        "phitex: machine: glyphs: {}; fresh: {}",
         b.final_state()
             .glyph_differences(fresh.final_state(), b.traces()),
         b.final_state()
@@ -1065,7 +1065,7 @@ fn final_differences(b: &Build<Machine>, cfg: &partex_incr::build::Config) {
     {
         use partex_incr::Machine as _;
         eprintln!(
-            "partex: machine: digests {:?} {:?}",
+            "phitex: machine: digests {:?} {:?}",
             b.final_state().digest(),
             fresh.final_state().digest()
         );
@@ -1073,7 +1073,7 @@ fn final_differences(b: &Build<Machine>, cfg: &partex_incr::build::Config) {
     for c in bt.eqtb_differences(ft).into_iter().take(10) {
         if let partex_core::track::Cell::Eqtb(p) = c {
             eprintln!(
-                "partex: machine: eqtb differs: {} {:?} {:?}",
+                "phitex: machine: eqtb differs: {} {:?} {:?}",
                 bt.eqtb_loc_name(p),
                 bt.eqtb_cell_hash(p),
                 ft.eqtb_cell_hash(p)
@@ -1173,7 +1173,7 @@ fn edited_by_index(b: &Build<Machine>, spec: &str) -> (Machine, Vec<MCell>) {
     for edit in spec.split("||") {
         let mut parts = edit.splitn(3, '|');
         let (Some(path), Some(from), Some(to)) = (parts.next(), parts.next(), parts.next()) else {
-            eprintln!("partex: PARTEX_MACHINE_EDIT is path|from|to[||path|from|to...]");
+            eprintln!("phitex: PARTEX_MACHINE_EDIT is path|from|to[||path|from|to...]");
             std::process::exit(2);
         };
         let Some(key) = host
@@ -1181,7 +1181,7 @@ fn edited_by_index(b: &Build<Machine>, spec: &str) -> (Machine, Vec<MCell>) {
             .into_iter()
             .find(|p| p.ends_with(path.as_bytes()))
         else {
-            eprintln!("partex: machine: no input file ends with {path}");
+            eprintln!("phitex: machine: no input file ends with {path}");
             std::process::exit(2);
         };
         let old = new
@@ -1191,7 +1191,7 @@ fn edited_by_index(b: &Build<Machine>, spec: &str) -> (Machine, Vec<MCell>) {
             .unwrap_or_else(|| Arc::from(&b""[..]));
         let text = String::from_utf8_lossy(&old).replacen(from, to, 1);
         if text.as_bytes() == &old[..] {
-            eprintln!("partex: machine: `{from}` is not in {path}");
+            eprintln!("phitex: machine: `{from}` is not in {path}");
             std::process::exit(2);
         }
         new.tex_mut()
@@ -1224,7 +1224,7 @@ fn rounds(b: &Build<Machine>, new: &Machine, threads: usize) -> i32 {
     let t = Instant::now();
     let out = partex_incr::rounds::run_warm(new, &cfg, &partex_incr::Threads(threads), Some(&warm));
     eprintln!(
-        "partex: machine: rounds on {threads} threads in {:.2} s ({} regions merged in {:.2} s): {:?}",
+        "phitex: machine: rounds on {threads} threads in {:.2} s ({} regions merged in {:.2} s): {:?}",
         t.elapsed().as_secs_f64(),
         warm.regions(),
         merged.as_secs_f64(),
@@ -1267,14 +1267,14 @@ fn replay_differences(b: &Build<Machine>) {
             .collect();
         if !failed.is_empty() {
             eprintln!(
-                "partex: machine: a replay fails region {i}'s guards on {} cells: {:?}",
+                "phitex: machine: a replay fails region {i}'s guards on {} cells: {:?}",
                 failed.len(),
                 &failed[..failed.len().min(6)]
             );
             for c in failed.iter().take(4) {
                 if let MCell::Eqtb(p) = c {
                     eprintln!(
-                        "partex: machine:   {} replayed {} ",
+                        "phitex: machine:   {} replayed {} ",
                         s.tex().eqtb_loc_name(*p),
                         s.tex().cs_debug_at(*p)
                     );
@@ -1292,7 +1292,7 @@ fn replay_differences(b: &Build<Machine>) {
                             .and_then(|(_, v, _)| v.rest_tex())
                     {
                         eprintln!(
-                            "partex: machine:   {} really {} ",
+                            "phitex: machine:   {} really {} ",
                             e.eqtb_loc_name(*q),
                             e.cs_debug_at(*q)
                         );
@@ -1310,25 +1310,25 @@ fn replay_differences(b: &Build<Machine>) {
                     .zip(entry.rest_hash_parts())
                 {
                     if x.1 != y.1 {
-                        eprintln!("partex: machine: replayed Rest differs in {}", x.0);
+                        eprintln!("phitex: machine: replayed Rest differs in {}", x.0);
                     }
                 }
                 let (a, e) = (s.tex().input_stack_debug(), entry.input_stack_debug());
                 for (k, (x, y)) in a.iter().zip(&e).enumerate() {
                     if x != y {
-                        eprintln!("partex: machine: input record {k}: replayed {x} / real {y}");
+                        eprintln!("phitex: machine: input record {k}: replayed {x} / real {y}");
                     }
                 }
                 if a.len() != e.len() {
                     eprintln!(
-                        "partex: machine: input stacks {} / {} deep",
+                        "phitex: machine: input stacks {} / {} deep",
                         a.len(),
                         e.len()
                     );
                 }
                 for (x, y) in s.tex().pdf_hash_parts().iter().zip(entry.pdf_hash_parts()) {
                     if x.1 != y.1 {
-                        eprintln!("partex: machine: replayed pdf differs in {}", x.0);
+                        eprintln!("phitex: machine: replayed pdf differs in {}", x.0);
                     }
                 }
             }
@@ -1348,13 +1348,13 @@ fn replay_differences(b: &Build<Machine>) {
             let d = s.tex().eqtb_differences(&exit);
             if !d.is_empty() {
                 eprintln!(
-                    "partex: machine: after region {i} a replay's eqtb differs in {} cells",
+                    "phitex: machine: after region {i} a replay's eqtb differs in {} cells",
                     d.len()
                 );
                 for c in d.iter().take(4) {
                     if let partex_core::track::Cell::Eqtb(p) = c {
                         eprintln!(
-                            "partex: machine:   {}: replayed {} / exit {}; written: {}",
+                            "phitex: machine:   {}: replayed {} / exit {}; written: {}",
                             s.tex().eqtb_loc_name(*p),
                             s.tex().cs_debug_at(*p),
                             exit.cs_debug_at(*p),
@@ -1370,18 +1370,18 @@ fn replay_differences(b: &Build<Machine>) {
     for (x, y) in s.digest_parts().iter().zip(fin.digest_parts()) {
         if x.1 != y.1 {
             eprintln!(
-                "partex: machine: a replay differs from the final state in {}",
+                "phitex: machine: a replay differs from the final state in {}",
                 x.0
             );
         }
     }
     let (a, f) = (s.tex(), fin.tex());
     eprintln!(
-        "partex: machine: replayed font slots: {}",
+        "phitex: machine: replayed font slots: {}",
         a.font_slot_differences(f)
     );
     eprintln!(
-        "partex: machine: replayed fonts: {} / {} slots, order {} / {}, font_ptr {} / {}",
+        "phitex: machine: replayed fonts: {} / {} slots, order {} / {}, font_ptr {} / {}",
         a.font_slot_count(),
         f.font_slot_count(),
         a.font_order_len(),
@@ -1401,16 +1401,16 @@ fn lasting_differences(before: &Machine, after: &Machine) {
     );
     for (p, q) in x.iter().zip(&y) {
         if p.1 != q.1 {
-            eprintln!("partex: machine: the edit changed {} for good", p.0);
+            eprintln!("phitex: machine: the edit changed {} for good", p.0);
         }
     }
     eprintln!(
-        "partex: machine: before {}",
+        "phitex: machine: before {}",
         before.tex().input_files_debug()
     );
-    eprintln!("partex: machine: after {}", after.tex().input_files_debug());
+    eprintln!("phitex: machine: after {}", after.tex().input_files_debug());
     eprintln!(
-        "partex: machine: pdf {}",
+        "phitex: machine: pdf {}",
         before.tex().pdf_objs_difference(after.tex())
     );
     for (p, q) in before
@@ -1420,7 +1420,7 @@ fn lasting_differences(before: &Machine, after: &Machine) {
         .zip(&after.tex().pdf_hash_parts())
     {
         if p.1 != q.1 {
-            eprintln!("partex: machine: the edit changed pdf {} for good", p.0);
+            eprintln!("phitex: machine: the edit changed pdf {} for good", p.0);
         }
     }
 }
@@ -1434,7 +1434,7 @@ fn report_rebuild(
     stats: &impl std::fmt::Debug,
 ) -> Option<partex_core::machine::CutTiming> {
     eprintln!(
-        "partex: machine: {} in {:.3} s: {stats:?}",
+        "phitex: machine: {} in {:.3} s: {stats:?}",
         if done { "rebuilt" } else { "stopped" },
         t.elapsed().as_secs_f64(),
     );
@@ -1467,7 +1467,7 @@ fn report_keystroke(
     let inside = stats.run_ns + stats.replay_ns + stats.compare_ns + stats.other_ns;
     let parts = d(edit) + ms(inside) + d(link) + d(write);
     eprintln!(
-        "partex: machine: keystroke timeline, ms: edit applied and diffed {:.2}; start (initial state, changed cells marked) {:.2}; TeX re-run {:.2} and its {} cuts {:.2}; {} replays: restore_rest {:.2}, the rest of replay_exit (cells set, its snapshot) {:.2}, other replay (exit patches, single regions) {:.2}; compare {:.2}; splice {:.2}; old states dropped {:.2}; other {:.2}; rebuild not in its stats {:.2}; link {:.2}; write {:.2}; wall {:.2} (unaccounted {:.2}); idle work after it {:.2}",
+        "phitex: machine: keystroke timeline, ms: edit applied and diffed {:.2}; start (initial state, changed cells marked) {:.2}; TeX re-run {:.2} and its {} cuts {:.2}; {} replays: restore_rest {:.2}, the rest of replay_exit (cells set, its snapshot) {:.2}, other replay (exit patches, single regions) {:.2}; compare {:.2}; splice {:.2}; old states dropped {:.2}; other {:.2}; rebuild not in its stats {:.2}; link {:.2}; write {:.2}; wall {:.2} (unaccounted {:.2}); idle work after it {:.2}",
         d(edit),
         ms(start),
         ms(stats.run_ns.saturating_sub(run_cuts)),
@@ -1500,7 +1500,7 @@ fn cut_timing(what: &str) -> Option<partex_core::machine::CutTiming> {
     #[allow(clippy::cast_precision_loss, reason = "a report")]
     let us = |ns: u64| ns as f64 / t.cuts.max(1) as f64 / 1e3;
     eprintln!(
-        "partex: machine: cut timing, {what}: {} cuts; µs per cut: token store commit {:.1}, token store clone {:.1}, JVec commits {:.1}, Flat commits {:.1}, Rest hash {:.1}, Snapshot::of {:.1}; at the last cut {} lists, {} free, {} pooled",
+        "phitex: machine: cut timing, {what}: {} cuts; µs per cut: token store commit {:.1}, token store clone {:.1}, JVec commits {:.1}, Flat commits {:.1}, Rest hash {:.1}, Snapshot::of {:.1}; at the last cut {} lists, {} free, {} pooled",
         t.cuts,
         us(t.tok_commit),
         us(t.tok_clone),
@@ -1517,7 +1517,7 @@ fn cut_timing(what: &str) -> Option<partex_core::machine::CutTiming> {
     for (j, name) in ["eqtb", "hash", "save_stack"].iter().enumerate() {
         let v = t.jvec[j];
         eprintln!(
-            "partex: machine: cut timing, {what}: JVec {name}: µs per cut walk {:.1}, compare {:.1}, copy {:.1}; {} chunks, dirty {:.1} per cut (at most {}), copied {:.1}",
+            "phitex: machine: cut timing, {what}: JVec {name}: µs per cut walk {:.1}, compare {:.1}, copy {:.1}; {} chunks, dirty {:.1} per cut (at most {}), copied {:.1}",
             us(v[0]),
             us(v[1]),
             us(v[2]),
@@ -1528,18 +1528,18 @@ fn cut_timing(what: &str) -> Option<partex_core::machine::CutTiming> {
         );
     }
     eprintln!(
-        "partex: machine: cut timing, {what}: save_ptr at the last cut {}",
+        "phitex: machine: cut timing, {what}: save_ptr at the last cut {}",
         t.save_ptr
     );
     eprintln!(
-        "partex: machine: cut timing, {what}: Snapshot::of's clone {:.1} µs per cut",
+        "phitex: machine: cut timing, {what}: Snapshot::of's clone {:.1} µs per cut",
         us(t.clone_whole)
     );
     #[allow(clippy::cast_precision_loss, reason = "a report")]
     let per_restore = |ns: u64| ns as f64 / t.restores.max(1) as f64 / 1e3;
     for (name, v) in partex_core::machine::RESTORE_PIECES.iter().zip(t.restore) {
         eprintln!(
-            "partex: machine: cut timing, {what}: restore ({} of them): {name}: {:.1} µs per restore",
+            "phitex: machine: cut timing, {what}: restore ({} of them): {name}: {:.1} µs per restore",
             t.restores,
             per_restore(v)
         );
@@ -1548,7 +1548,7 @@ fn cut_timing(what: &str) -> Option<partex_core::machine::CutTiming> {
         #[allow(clippy::cast_precision_loss, reason = "a report")]
         let per = v as f64 / t.replays.max(1) as f64 / 1e3;
         eprintln!(
-            "partex: machine: cut timing, {what}: replay_exit ({} of them): {name}: {per:.1} µs each",
+            "phitex: machine: cut timing, {what}: replay_exit ({} of them): {name}: {per:.1} µs each",
             t.replays
         );
     }
@@ -1557,7 +1557,7 @@ fn cut_timing(what: &str) -> Option<partex_core::machine::CutTiming> {
         .zip(t.clone_groups)
     {
         eprintln!(
-            "partex: machine: cut timing, {what}: clone of {name}: {:.1} µs per cut",
+            "phitex: machine: cut timing, {what}: clone of {name}: {:.1} µs per cut",
             us(v)
         );
     }
@@ -1570,7 +1570,7 @@ fn cut_timing(what: &str) -> Option<partex_core::machine::CutTiming> {
     ];
     for (i, name) in names.iter().enumerate() {
         eprintln!(
-            "partex: machine: cut timing, {what}: Flat {name}: {:.1} µs per cut; at the last cut {} bytes, {} live",
+            "phitex: machine: cut timing, {what}: Flat {name}: {:.1} µs per cut; at the last cut {} bytes, {} live",
             us(t.flat[i]),
             t.flat_bytes[i],
             t.flat_live[i]
@@ -1643,7 +1643,7 @@ pub fn run(native: NativeHost, params: Params, command_line: &[u8]) -> i32 {
     let t = Instant::now();
     let mut b = Build::new(m, &cfg);
     eprintln!(
-        "partex: machine: built in {:.2} s: {:?}",
+        "phitex: machine: built in {:.2} s: {:?}",
         t.elapsed().as_secs_f64(),
         b.stats
     );
@@ -1680,12 +1680,12 @@ pub fn run(native: NativeHost, params: Params, command_line: &[u8]) -> i32 {
     if let Some(d) = before {
         replay_check(&b);
         b.check_replay(&d);
-        eprintln!("partex: machine: the refined regions replay to the same state");
+        eprintln!("phitex: machine: the refined regions replay to the same state");
     }
     let t = Instant::now();
     b.index();
     eprintln!(
-        "partex: machine: refined {refined} regions in {:.2} s ({phases:?} ns), {} now; indexed in {:.2} s",
+        "phitex: machine: refined {refined} regions in {:.2} s ({phases:?} ns), {} now; indexed in {:.2} s",
         refine.as_secs_f64(),
         b.stats.regions,
         t.elapsed().as_secs_f64()
@@ -1823,7 +1823,7 @@ fn between_edits(b: &mut Build<Machine>, cfg: &partex_incr::build::Config, coars
         }
         if merged > 0 {
             eprintln!(
-                "partex: machine: coarsened {merged} regions in {:.3} s, {} now",
+                "phitex: machine: coarsened {merged} regions in {:.3} s, {} now",
                 t.elapsed().as_secs_f64(),
                 b.stats.regions
             );
@@ -1831,7 +1831,7 @@ fn between_edits(b: &mut Build<Machine>, cfg: &partex_incr::build::Config, coars
     }
     drop(b.take_garbage());
     if std::env::var("PARTEX_MACHINE_RSS").is_ok_and(|v| v == "1") {
-        eprintln!("partex: machine: {}", rss());
+        eprintln!("phitex: machine: {}", rss());
     }
 }
 
@@ -1843,7 +1843,7 @@ fn print_census(b: &Build<Machine>) -> BTreeMap<partex_core::machine::Pos, u8> {
     let _ = cut_timing("cold build"); // (with the census: both are the cold build's)
     let c = b.final_state().census();
     eprintln!(
-        "partex: machine: candidates by level 0-3 {:?} (clean: {} outer, {} paragraph starts), cut at {:?}",
+        "phitex: machine: candidates by level 0-3 {:?} (clean: {} outer, {} paragraph starts), cut at {:?}",
         c.seen, c.clean[0], c.clean[1], c.cut
     );
     c.levels.clone()
@@ -1856,7 +1856,7 @@ fn dump_numbering_observers(b: &Build<Machine>) {
     for (i, t) in b.traces().enumerate() {
         if let Some((f, o, w, n)) = obs.get(&t.exit) {
             eprintln!(
-                "partex: region {i}: cost {} observes the numbering: final_num {f}, of_final {o}, whole {w}, {n} distinct",
+                "phitex: region {i}: cost {} observes the numbering: final_num {f}, of_final {o}, whole {w}, {n} distinct",
                 t.cost
             );
         }
@@ -1921,7 +1921,7 @@ fn dump_rest_differences(b: &mut Build<Machine>) {
             continue;
         };
         if hx == hy {
-            eprintln!("partex: rest at the exit of region {i}: equal");
+            eprintln!("phitex: rest at the exit of region {i}: equal");
             continue;
         }
         let (px, py) = (
@@ -1935,7 +1935,7 @@ fn dump_rest_differences(b: &mut Build<Machine>) {
             .map(|(p, _)| p.0)
             .collect();
         eprintln!(
-            "partex: rest at the exit of region {i} (line {}): [{}]; lines: {}; scalars: {}; save stack: {}; pdf: {}",
+            "phitex: rest at the exit of region {i} (line {}): [{}]; lines: {}; scalars: {}; save stack: {}; pdf: {}",
             t.exit.line,
             parts.join(", "),
             x.line_copies_difference(&y),
@@ -1967,7 +1967,7 @@ fn dump_why_dirty(b: &Build<Machine>) {
             })
             .collect();
         eprintln!(
-            "partex: dirty region {i}: {} cells of D read: {names:?}",
+            "phitex: dirty region {i}: {} cells of D read: {names:?}",
             why.len()
         );
     }
@@ -2112,7 +2112,7 @@ fn dump_audit(b: &Build<Machine>, n: usize) {
         }
         ends.truncate(8);
         eprintln!(
-            "partex: audit: rebuild {n} region {} ({} commands, old {}): {} causes [{}]{}{} differ at the end [{}{}]{}",
+            "phitex: audit: rebuild {n} region {} ({} commands, old {}): {} causes [{}]{}{} differ at the end [{}{}]{}",
             a.first,
             a.cost,
             a.old_costs[0],
@@ -2149,7 +2149,7 @@ fn dump_audit(b: &Build<Machine>, n: usize) {
         );
         for (m, c) in a.old_costs.iter().enumerate().skip(1) {
             eprintln!(
-                "partex: audit: rebuild {n} region {} (old {c}): in the span of region {}, its cause",
+                "phitex: audit: rebuild {n} region {} (old {c}): in the span of region {}, its cause",
                 a.first + m,
                 a.first
             );
@@ -2170,7 +2170,7 @@ fn dump_audit(b: &Build<Machine>, n: usize) {
         }
     }
     eprintln!(
-        "partex: audit: rebuild {n}: {} spans, {} old regions, {} commands re-run; spurious {} regions {} commands; carried {} regions {} commands",
+        "phitex: audit: rebuild {n}: {} spans, {} old regions, {} commands re-run; spurious {} regions {} commands; carried {} regions {} commands",
         b.audit.len(),
         sums[2].0,
         sums[2].1,
@@ -2184,7 +2184,7 @@ fn dump_audit(b: &Build<Machine>, n: usize) {
     ranked.sort_by(|x, y| (key(y.1), x.0).cmp(&(key(x.1), y.0)));
     for (c, t) in ranked {
         eprintln!(
-            "partex: audit: rebuild {n} cause {c}: spurious {} regions {} commands; carried {} regions {} commands (sole cause {} regions {} commands); real {} regions {} commands",
+            "phitex: audit: rebuild {n} cause {c}: spurious {} regions {} commands; carried {} regions {} commands (sole cause {} regions {} commands); real {} regions {} commands",
             t.spurious.0,
             t.spurious.1,
             t.carried.0,
@@ -2215,7 +2215,7 @@ fn dump_written(b: &Build<Machine>) {
             .collect();
         if !g.is_empty() || (!w.is_empty() && i + 12 > b.stats.regions) {
             eprintln!(
-                "partex: region {i} born {}: reads {g:?} appends {w:?}",
+                "phitex: region {i} born {}: reads {g:?} appends {w:?}",
                 t.born
             );
         }
@@ -2247,7 +2247,7 @@ fn dump_regions(b: &Build<Machine>, cold: &BTreeMap<partex_core::machine::Pos, u
     {
         let l = lines(t);
         eprintln!(
-            "partex: region {i}: cost {} guards {} writes {} lines {:?}..{:?} effects {} cut at level {}",
+            "phitex: region {i}: cost {} guards {} writes {} lines {:?}..{:?} effects {} cut at level {}",
             t.cost,
             t.guards.len(),
             t.writes.len(),
@@ -2345,7 +2345,7 @@ fn split_probe(m: &Machine) {
         .unwrap_or_default();
     let lines = split_lines(&main);
     eprintln!(
-        "partex: split: {} split lines in {main}: {lines:?}",
+        "phitex: split: {} split lines in {main}: {lines:?}",
         lines.len()
     );
     let mut m = m.clone();
@@ -2373,7 +2373,7 @@ fn split_probe(m: &Machine) {
         }
         next += 1;
         eprintln!(
-            "partex: split: line {l} at step {steps} (+{}) {:.1} s",
+            "phitex: split: line {l} at step {steps} (+{}) {:.1} s",
             steps - last_step,
             t0.elapsed().as_secs_f64()
         );
@@ -2382,7 +2382,7 @@ fn split_probe(m: &Machine) {
             if let Some(b) = base {
                 let mut g = b.clone();
                 g.adopt_position(&m);
-                eprintln!("partex: split:   vs {what}: {}", state_difference(&g, &m));
+                eprintln!("phitex: split:   vs {what}: {}", state_difference(&g, &m));
             }
         }
         if first.is_none() {
@@ -2391,7 +2391,7 @@ fn split_probe(m: &Machine) {
         prev = Some(m.clone());
     }
     eprintln!(
-        "partex: split: {steps} steps in {:.1} s",
+        "phitex: split: {steps} steps in {:.1} s",
         t0.elapsed().as_secs_f64()
     );
 }
@@ -2420,46 +2420,46 @@ impl partex_incr::Recorder<Machine> for Null {
 /// The details of the parts of `Rest` that differ (for debugging).
 fn parts_detail(old: &Machine, m: &Machine, parts: &[&str], eq: &[partex_core::track::Cell]) {
     eprintln!(
-        "partex: converge: xf {}",
+        "phitex: converge: xf {}",
         old.tex().xregs_fonts_difference(m.tex())
     );
     eprintln!(
-        "partex: converge: fonts {}",
+        "phitex: converge: fonts {}",
         old.tex().font_slot_differences(m.tex())
     );
     if !eq.is_empty() {
         eprintln!(
-            "partex: converge: eqtb {}",
+            "phitex: converge: eqtb {}",
             old.tex().eqtb_diff_detail(m.tex(), eq)
         );
     }
     if parts.contains(&"out") {
         eprintln!(
-            "partex: converge: out {}",
+            "phitex: converge: out {}",
             old.tex().pdf_out_difference(m.tex())
         );
     }
     if parts.contains(&"tables") || parts.contains(&"objs") {
         eprintln!(
-            "partex: converge: numbering {}",
+            "phitex: converge: numbering {}",
             old.tex().numbering_difference(m.tex())
         );
     }
     if parts.iter().any(|p| matches!(*p, "ship" | "objs" | "out")) {
         eprintln!(
-            "partex: converge: pdf {}",
+            "phitex: converge: pdf {}",
             old.tex().pdf_objs_difference(m.tex())
         );
     }
     if parts.iter().any(|p| p.starts_with("scalars")) {
         eprintln!(
-            "partex: converge: scalars {}",
+            "phitex: converge: scalars {}",
             old.tex().scalars_difference(m.tex())
         );
     }
     if parts.contains(&"tables") {
         eprintln!(
-            "partex: converge: save stack {}",
+            "phitex: converge: save stack {}",
             old.tex().save_stack_difference(m.tex())
         );
     }
@@ -2507,7 +2507,7 @@ fn convergence(b: &Build<Machine>, new: &Machine) {
         let eq = old.tex().eqtb_differences(m.tex());
         if let Ok(cs) = std::env::var("PARTEX_PROBE_CS") {
             eprintln!(
-                "partex: converge: \\{cs} at region {j}: old {} / new {}",
+                "phitex: converge: \\{cs} at region {j}: old {} / new {}",
                 old.tex().cs_debug(cs.as_bytes()),
                 m.tex().cs_debug(cs.as_bytes())
             );
@@ -2516,7 +2516,7 @@ fn convergence(b: &Build<Machine>, new: &Machine) {
         if vo == vn && eq.is_empty() && !glyphs {
             if first.is_some() {
                 same_run += 1;
-                eprintln!("partex: converge: region {j} at step {steps}: same");
+                eprintln!("phitex: converge: region {j} at step {steps}: same");
                 if same_run >= 3 && std::env::var("PARTEX_MACHINE_PROBE_ALL").is_err() {
                     break;
                 }
@@ -2552,20 +2552,20 @@ fn convergence(b: &Build<Machine>, new: &Machine) {
             .collect();
         if parts.contains(&"page") {
             eprintln!(
-                "partex: converge: page skeleton equal: {}",
+                "phitex: converge: page skeleton equal: {}",
                 old.tex().page_skeleton_hash() == m.tex().page_skeleton_hash()
             );
         }
         parts_detail(&old, &m, &parts, &eq);
         eprintln!(
-            "partex: converge: region {j} at step {steps} (+{}): rest [{}] eqtb {} {:?} glyphs {glyphs}",
+            "phitex: converge: region {j} at step {steps} (+{}): rest [{}] eqtb {} {:?} glyphs {glyphs}",
             steps - since,
             parts.join(", "),
             eq.len(),
             names
         );
     }
-    eprintln!("partex: converge: {steps} steps");
+    eprintln!("phitex: converge: {steps} steps");
 }
 
 /// What a watch build or rebuild did: its terminal text, history,
@@ -2598,7 +2598,7 @@ struct Found {
     own: bool,
 }
 
-/// A watch session in machine mode (the default for `partex watch`,
+/// A watch session in machine mode (the default for `phitex watch`,
 /// DESIGN.md §6.1): a recorded build, rebuilt after the files it read
 /// change, each rebuild run to its fixpoint (the job's own files it read
 /// back, BibTeX and makeindex between passes) as a further rebuild, and
@@ -2689,7 +2689,7 @@ impl Watch {
         w.cfg = cfg;
         let first = (
             format!(
-                "partex: machine: built in {:.1} ms: {} regions",
+                "phitex: machine: built in {:.1} ms: {} regions",
                 elapsed.as_secs_f64() * 1e3,
                 w.b.stats.regions
             ),
@@ -3028,7 +3028,7 @@ impl Watch {
         let elapsed = t.elapsed();
         let report = self.report(elapsed);
         let line = format!(
-            "partex: machine: {} in {:.1} ms: {} of {} regions re-run ({} changed)",
+            "phitex: machine: {} in {:.1} ms: {} of {} regions re-run ({} changed)",
             if done {
                 "rebuilt"
             } else {
@@ -3086,7 +3086,7 @@ impl Watch {
             let (term, diagnostics) = match self.write() {
                 Ok(x) => x,
                 Err(e) => {
-                    reports.push(format!("partex: writing the outputs failed: {e}"));
+                    reports.push(format!("phitex: writing the outputs failed: {e}"));
                     return self.outcome(Vec::new(), Vec::new(), reports, Some(3));
                 }
             };
@@ -3123,7 +3123,7 @@ impl Watch {
                 unsettled.dedup();
                 if !unsettled.is_empty() {
                     reports.push(format!(
-                        "partex: machine: {} still changed after {PASSES} passes",
+                        "phitex: machine: {} still changed after {PASSES} passes",
                         unsettled.join(", ")
                     ));
                 }
@@ -3340,7 +3340,7 @@ impl Watch {
         }
         if std::env::var_os("PARTEX_WATCH_DEBUG").is_some() {
             eprintln!(
-                "partex: machine: {} in {:.1} ms ({} regions resolved, {} as last time), files written in {:.1} ms",
+                "phitex: machine: {} in {:.1} ms ({} regions resolved, {} as last time), files written in {:.1} ms",
                 if reuse {
                     "the last link taken again"
                 } else {

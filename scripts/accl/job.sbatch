@@ -114,7 +114,8 @@ case $task in
   edits)
     box cargo build --release -p partex-cli -q
     status=0
-    box scripts/ssa-edits --bin target/release/partex --work "$w/edits" "$@" | tee "$r/summary.txt" || status=$?
+    bin=target/release/phitex; [ -x $bin ] || bin=target/release/partex
+    box scripts/ssa-edits --bin $bin --work "$w/edits" "$@" | tee "$r/summary.txt" || status=$?
     ;;
   cmd)
     # (the course too, as the course task has it: $w/course, $w/aux)

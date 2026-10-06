@@ -562,7 +562,7 @@ fn check(r: &Region, rep: &mut Report, debug: bool) {
         } else {
             String::new()
         };
-        eprintln!("partex sanitize: untracked read of {key}, {at} ({what}){detail}");
+        eprintln!("phitex sanitize: untracked read of {key}, {at} ({what}){detail}");
         let e = rep.reads.entry(key).or_insert((0, at.clone(), what));
         e.0 += 1;
         if found.len() == left.len() {
@@ -648,14 +648,14 @@ pub fn run(host: NativeHost, mut params: Params, command_line: &[u8]) -> i32 {
             tex = r.exit;
             if rep.checked % 100 == 0 {
                 eprintln!(
-                    "partex sanitize: {} regions checked, {} untracked reads, {:.1} s",
+                    "phitex sanitize: {} regions checked, {} untracked reads, {:.1} s",
                     rep.checked,
                     rep.reads.len(),
                     started.elapsed().as_secs_f64()
                 );
             }
             if rep.reads.len() as u64 >= stop_after {
-                eprintln!("partex sanitize: stopping after {stop_after} untracked reads");
+                eprintln!("phitex sanitize: stopping after {stop_after} untracked reads");
                 break;
             }
         }
@@ -668,7 +668,7 @@ pub fn run(host: NativeHost, mut params: Params, command_line: &[u8]) -> i32 {
 #[allow(clippy::cast_precision_loss)] // (averages)
 fn print_report(rep: &Report, took: std::time::Duration) {
     eprintln!(
-        "\npartex sanitize: {} regions, {} checked in {:.1} s; {:.0} cells read and {:.0} poisoned per region",
+        "\nphitex sanitize: {} regions, {} checked in {:.1} s; {:.0} cells read and {:.0} poisoned per region",
         rep.regions,
         rep.checked,
         took.as_secs_f64(),
@@ -676,7 +676,7 @@ fn print_report(rep: &Report, took: std::time::Duration) {
         rep.poisoned as f64 / rep.checked.max(1) as f64
     );
     eprintln!(
-        "partex sanitize: {} untracked reads, {} untracked writes",
+        "phitex sanitize: {} untracked reads, {} untracked writes",
         rep.reads.len(),
         rep.writes.len()
     );
@@ -713,14 +713,14 @@ fn print_report(rep: &Report, took: std::time::Duration) {
         }
     }
     eprintln!(
-        "partex sanitize: adapter round trip (eqtb): {} failures; {} regions wrote only eqtb cells",
+        "phitex sanitize: adapter round trip (eqtb): {} failures; {} regions wrote only eqtb cells",
         rep.round_trip.len(),
         rep.eqtb_only
     );
     for (k, (n, at)) in &rep.round_trip {
         eprintln!("  eqtb  {k}: {n} regions, first {at}");
     }
-    eprintln!("partex sanitize: untracked state changed by regions (not cells yet):");
+    eprintln!("phitex sanitize: untracked state changed by regions (not cells yet):");
     for (k, n) in &rep.sections {
         eprintln!("  {k}: {n} regions");
     }

@@ -1011,18 +1011,18 @@ class Runner:
 
 # --- results --------------------------------------------------------------
 
-COLD = re.compile(r"^partex: ssa build 0: ([\d.]+) ms, (.*)$", re.M)
-COLD_LINK = re.compile(r"^partex: ssa build 0: link ([\d.]+) ms", re.M)
+COLD = re.compile(r"^(?:phitex|partex): ssa build 0: ([\d.]+) ms, (.*)$", re.M)
+COLD_LINK = re.compile(r"^(?:phitex|partex): ssa build 0: link ([\d.]+) ms", re.M)
 # the cold build's trips, and each one's steps
-COLD_TRIPS = re.compile(r"^partex: ssa build 0: trips .*$", re.M)
+COLD_TRIPS = re.compile(r"^(?:phitex|partex): ssa build 0: trips .*$", re.M)
 TRIP_STEPS = re.compile(r"trip (\d+): (\d+) steps")
 REBUILT = re.compile(
-    r"^partex: ssa rebuild (\d+): ([\d.]+) ms \(the rebuild ([\d.]+) ms, "
+    r"^(?:phitex|partex): ssa rebuild (\d+): ([\d.]+) ms \(the rebuild ([\d.]+) ms, "
     r"the link ([\d.]+) ms\)(.*)$",
     re.M,
 )
-STOPPED = re.compile(r"^partex: ssa rebuild (\d+): stopped: (.*)$", re.M)
-PENDING = re.compile(r"^partex: ssa rebuild (\d+): stopped \((.*)\), (\d+) steps pending", re.M)
+STOPPED = re.compile(r"^(?:phitex|partex): ssa rebuild (\d+): stopped: (.*)$", re.M)
+PENDING = re.compile(r"^(?:phitex|partex): ssa rebuild (\d+): stopped \((.*)\), (\d+) steps pending", re.M)
 
 
 def count(text, name):
@@ -1136,7 +1136,7 @@ def judge(case, cdir, runs, code, err, last):
             problems.append("no report")
         if k in stopped:
             problems.append(f"stopped: {stopped[k]}")
-        if k == last and "partex: ssa: the rebuild command failed" in err:
+        if k == last and ("phitex: ssa: the rebuild command failed" in err or "partex: ssa: the rebuild command failed" in err):
             problems.append("the rebuild line failed (the snapshot or the edit)")
         if k == last and crashed:
             problems.append(f"the SSA process ended: exit {code}")
@@ -1209,8 +1209,8 @@ def main():
     )
     ap.add_argument("--case", action="append", choices=names, metavar="NAME",
                     help="run this case (repeatable; default: all)")
-    ap.add_argument("--bin", default=str(REPO / "target/release/partex"),
-                    help="the partex binary (default: target/release/partex)")
+    ap.add_argument("--bin", default=str(REPO / "target/release/phitex"),
+                    help="the phitex binary (default: target/release/phitex)")
     ap.add_argument("--work", default=str(REPO / "target/ssa-edits"),
                     help="the work directory (default: target/ssa-edits)")
     ap.add_argument("--jobs", type=int, default=8,

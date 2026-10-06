@@ -19,7 +19,9 @@ say() { echo "$*" | tee -a "$S"; }
 git worktree add -q --detach "$w/old" "$old" || exit 1
 (cd "$w/old" && cargo build --release -p partex-cli -q) || exit 1
 cargo build --release -p partex-cli -q || exit 1
-bin() { if [ "$1" = old ]; then echo "$w/old/target/release/partex"; else echo "$P/target/release/partex"; fi; }
+# (the binary: phitex, or partex in a commit from before the rename)
+rel() { if [ -x "$1/phitex" ]; then echo "$1/phitex"; else echo "$1/partex"; fi; }
+bin() { if [ "$1" = old ]; then rel "$w/old/target/release"; else echo "$P/target/release/phitex"; fi; }
 pgf=$P/upstream/pgf/doc/generic/pgf
 env0=(SOURCE_DATE_EPOCH=1700000000 FORCE_SOURCE_DATE=1 TZ=UTC)
 for which in old new; do

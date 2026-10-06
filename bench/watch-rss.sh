@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# bench/watch-rss.sh DOCDIR [BIN]: a `partex watch` session's memory and
+# bench/watch-rss.sh DOCDIR [BIN]: a `phitex watch` session's memory and
 # CPU, as a user's: the first build to its fixpoint, then EDITS one-word
 # edits each followed by its revert, then SAVES saves with nothing
 # changed, then IDLE seconds of nothing. After each step the watch is let
@@ -31,7 +31,7 @@ set -euo pipefail
 repo=$(cd "$(dirname "$0")/.." && pwd)
 [ $# -ge 1 ] || { sed -n '2,3p' "$0" >&2; exit 2; }
 doc=$(cd "$1" && pwd)
-bin=${2:-$repo/target/release/partex}
+bin=${2:-$repo/target/release/phitex}
 main=${MAIN:-course.tex}
 job=${main%.tex}
 edits=${EDITS:-20}
@@ -123,7 +123,7 @@ under() {
 pid=
 for _ in $(seq 600); do
   for p in $(under $top); do
-    [ "$(cat /proc/"$p"/comm 2>/dev/null)" = partex ] && pid=$p
+    case $(cat /proc/"$p"/comm 2>/dev/null) in phitex | partex) pid=$p ;; esac
   done
   [ -n "$pid" ] && break
   sleep 0.1

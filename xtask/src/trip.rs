@@ -39,8 +39,8 @@ pub fn run(root: &Path, args: &[String]) -> Result<()> {
         .current_dir(root)
         .args(["build", "--release", "-p", "partex-cli"])
         .status()?;
-    ensure!(status.success(), "building partex failed");
-    let partex = root.join("target/release/partex");
+    ensure!(status.success(), "building phitex failed");
+    let partex = root.join("target/release/phitex");
     let src = root.join("upstream/texlive-source/texk/web2c/triptrap");
     let refs = root.join("refs/tex/trip/trip");
     let work = root.join(if machine {

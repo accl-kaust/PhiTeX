@@ -36,8 +36,10 @@ run cargo build --release -p partex-cli -q
 # (scripts/build-pdflatex-format.sh without its sandbox: the container is one)
 shim=target/partex-shim
 mkdir -p $shim/formats
-ln -sfn "$w/partex/target/release/partex" $shim/pdftex
-ln -sfn "$w/partex/target/release/partex" $shim/pdflatex
+# (the binary: phitex, or partex in a commit from before the rename)
+rel() { if [ -x "$1/phitex" ]; then echo "$1/phitex"; else echo "$1/partex"; fi; }
+ln -sfn "$(rel "$w/partex/target/release")" $shim/pdftex
+ln -sfn "$(rel "$w/partex/target/release")" $shim/pdflatex
 run bash -c "cd $shim/formats && SOURCE_DATE_EPOCH=1700000000 TZ=UTC ../pdftex -ini \
   -interaction=nonstopmode -jobname=pdflatex -translate-file=cp227.tcx '*pdflatex.ini' >pdflatex-build.log"
 test -s $shim/formats/pdflatex.fmt

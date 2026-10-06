@@ -77,7 +77,7 @@ impl Job<'_> {
             cmd.arg(format!("-output-directory={}", o.display()));
         }
         // (partex's formats for partex only: pdflatex keeps its own)
-        if program.ends_with("partex") {
+        if program.ends_with("phitex") {
             cmd.env("TEXFORMATS", format!("{}:", self.formats.display()));
         }
         cmd.arg(self.input)
@@ -270,13 +270,13 @@ fn pgfsub(root: &Path, t: &Tools, work: &Path) -> Result<Vec<Figure>> {
 pub fn run(root: &Path, args: &[String]) -> Result<()> {
     let pgf = args.iter().any(|a| a == "--pgf");
     let t = Tools {
-        partex: root.join("target/release/partex"),
+        partex: root.join("target/release/phitex"),
         pdflatex: PathBuf::from("pdflatex"),
         formats: root.join("target/partex-shim/formats"),
     };
     ensure!(
         t.partex.exists() && t.formats.join("pdflatex.fmt").exists(),
-        "build target/release/partex and its pdflatex format first \
+        "build target/release/phitex and its pdflatex format first \
          (scripts/build-pdflatex-format.sh)"
     );
     let work = root.join("target/bench");

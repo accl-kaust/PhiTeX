@@ -1,4 +1,4 @@
-//! The modern command line: `partex build`, `partex watch`, … (DESIGN.md,
+//! The modern command line: `phitex build`, `phitex watch`, … (DESIGN.md,
 //! "Command line and terminal"). TeX's transcript and outputs are the same
 //! as in compat mode; only the terminal differs.
 //!
@@ -89,7 +89,7 @@ struct Options {
     color: ColorChoice,
     json: bool,
     open: bool,
-    /// `partex trace --output FILE`.
+    /// `phitex trace --output FILE`.
     timeline: Option<String>,
     /// `--copy-pdf[=DIR]` or `--no-copy-pdf` (a relative `DIR` is relative
     /// to the invocation directory).
@@ -211,9 +211,9 @@ struct Target {
     shell_escape: Option<bool>,
     viewer: Option<String>,
     /// The directory to copy the final PDF into after each successful
-    /// build (absolute: the build runs in `partex.toml`'s directory).
+    /// build (absolute: the build runs in `phitex.toml`'s directory).
     copy_pdf: Option<PathBuf>,
-    /// `partex watch` in machine mode: the default, unless `--no-machine`,
+    /// `phitex watch` in machine mode: the default, unless `--no-machine`,
     /// `machine = false` or `PARTEX_MACHINE=0` says otherwise.
     machine: bool,
 }
@@ -249,7 +249,7 @@ impl Target {
     }
 }
 
-/// The engines partex has, by the names a magic comment or `partex.toml`
+/// The engines partex has, by the names a magic comment or `phitex.toml`
 /// may use.
 fn engine_name(name: &str) -> Result<String, String> {
     let n = name.trim().to_ascii_lowercase();
@@ -262,7 +262,7 @@ fn engine_name(name: &str) -> Result<String, String> {
     }
 }
 
-/// Resolve what to build: the command line, then `partex.toml` (running in
+/// Resolve what to build: the command line, then `phitex.toml` (running in
 /// its directory), then the file's magic comments.
 fn resolve(o: &Options) -> Result<Target, String> {
     let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
@@ -483,7 +483,7 @@ fn main_output(outputs: &[(Vec<u8>, usize)]) -> Option<String> {
     Some(path)
 }
 
-/// `partex build` in machine mode with the store on (DESIGN.md §7.9):
+/// `phitex build` in machine mode with the store on (DESIGN.md §7.9):
 /// the build saved for the job, rebuilt after what changed since (else
 /// built afresh), then saved again, after the result: the exit status.
 fn machine_build(t: &Target, st: Settings) -> i32 {
@@ -518,12 +518,12 @@ fn machine_build(t: &Target, st: Settings) -> i32 {
     status
 }
 
-/// Whether `partex build` goes through the machine and the store.
+/// Whether `phitex build` goes through the machine and the store.
 fn machine_builds(t: &Target) -> bool {
     t.machine && crate::store::dir(None).is_some()
 }
 
-/// `partex build` (or `check`: one pass, nothing written): the exit status.
+/// `phitex build` (or `check`: one pass, nothing written): the exit status.
 fn build(t: &Target, st: Settings, check: bool) -> i32 {
     if !check && machine_builds(t) {
         return machine_build(t, st);
@@ -584,7 +584,7 @@ fn output_bytes(outputs: &[(Vec<u8>, usize)], name: Option<&str>) -> Option<usiz
     })
 }
 
-/// Render the end of a build and record it for `partex why` and `partex
+/// Render the end of a build and record it for `phitex why` and `partex
 /// clean`: the exit status.
 #[allow(clippy::too_many_arguments)]
 fn finish(
@@ -659,12 +659,12 @@ fn copy_pdf(pdf: &Path, dir: &Path) -> std::io::Result<Option<PathBuf>> {
     done.map(|()| Some(to))
 }
 
-/// Where `partex why` finds what the last build of the same job did.
+/// Where `phitex why` finds what the last build of the same job did.
 fn record_key() -> Option<u128> {
     crate::saved_session_key().map(|k| partex_core::persist_hash(&("why/1", k)))
 }
 
-/// Keep what a build did for `partex why` and `partex clean`.
+/// Keep what a build did for `phitex why` and `phitex clean`.
 fn record(
     t: &Target,
     reports: &[String],
@@ -704,7 +704,7 @@ fn last_record(t: &Target) -> Option<String> {
     String::from_utf8(text).ok()
 }
 
-/// `partex why`.
+/// `phitex why`.
 fn why(t: &Target, st: Settings) -> ! {
     let s = st.style;
     let Some(rec) = last_record(t) else {
@@ -917,7 +917,7 @@ fn tilde(path: &Path) -> String {
     path.display().to_string()
 }
 
-/// `partex trace`: build, writing the timeline.
+/// `phitex trace`: build, writing the timeline.
 fn trace(o: &Options, t: &Target, st: Settings) -> ! {
     let path = PathBuf::from(
         o.timeline
@@ -1252,7 +1252,7 @@ fn machine_finish(
         for line in &out.reports {
             let line = line
                 .strip_prefix("phitex: machine: ")
-                .or_else(|| line.strip_prefix("partex: machine: "))
+                .or_else(|| line.strip_prefix("phitex: "))
                 .unwrap_or(line);
             r.status("Machine", line);
         }

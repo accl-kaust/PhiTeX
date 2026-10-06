@@ -26,15 +26,17 @@ st='strings out of\|string characters out of\|words of memory out of\|multilette
 say() { echo "$*" | tee -a "$S"; }
 masklog() { grep -av "$st" "$1" | tail -n +2; }
 
+# (the binary: phitex, or partex in a commit from before the rename)
+rel() { if [ -x "$1/phitex" ]; then echo "$1/phitex"; else echo "$1/partex"; fi; }
 # the binaries: this checkout's, and the base's in a worktree
 cargo build --release -p partex-cli -q || { say "BUILD FAILED"; exit 1; }
-declare -A bin=([new]=$P/target/release/partex)
+declare -A bin=([new]=$P/target/release/phitex)
 whichs=(new)
 if [ "$base" != none ]; then
   git worktree add -q --detach "$w/base" "$base" || { say "NO BASE $base"; exit 1; }
   (cd "$w/base" && CARGO_TARGET_DIR=$w/base-target cargo build --release -p partex-cli -q) ||
     { say "BASE BUILD FAILED"; exit 1; }
-  bin[base]=$w/base-target/release/partex
+  bin[base]=$(rel "$w/base-target/release")
   whichs=(base new)
 fi
 say "node $(uname -n), new $(git rev-parse --short=12 HEAD), base $base, $n rebuilds, switches: $*; $(nproc) CPUs, load $(cut -d' ' -f1-3 /proc/loadavg)"

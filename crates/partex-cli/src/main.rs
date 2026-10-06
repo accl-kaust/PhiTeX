@@ -163,7 +163,7 @@ fn setup_bound_vars(kpse: &mut partex_kpse::Kpse, p: &mut Params) {
             let v = atoi(&v);
             if v < 0 || (v == 0 && *var > 0) {
                 eprintln!(
-                    "partex: Bad value ({v}) in environment or texmf.cnf for {name}, keeping {var}."
+                    "phitex: Bad value ({v}) in environment or texmf.cnf for {name}, keeping {var}."
                 );
             } else {
                 *var = i32::try_from(v).unwrap_or(i32::MAX);
@@ -174,7 +174,7 @@ fn setup_bound_vars(kpse: &mut partex_kpse::Kpse, p: &mut Params) {
 
 fn usage() -> ! {
     eprintln!(
-        "usage: partex [-engine=tex|pdftex|xetex] [-ini] [-etex] [-interaction=MODE] [-jobname=NAME] [-output-comment=S] [-shell-escape|-shell-restricted|-no-shell-escape] [-watch [-checkpoint-every=N]] [-resident] [-converge] ARGS..."
+        "usage: phitex [-engine=tex|pdftex|xetex] [-ini] [-etex] [-interaction=MODE] [-jobname=NAME] [-output-comment=S] [-shell-escape|-shell-restricted|-no-shell-escape] [-watch [-checkpoint-every=N]] [-resident] [-converge] ARGS..."
     );
     std::process::exit(2);
 }
@@ -368,7 +368,7 @@ fn parse_command_line() -> CommandLine {
         match opt {
             _ if !rest.is_empty() => rest.push(a),
             Some("version") => {
-                println!("partex {}", env!("CARGO_PKG_VERSION"));
+                println!("PhiTeX {}", env!("CARGO_PKG_VERSION"));
                 std::process::exit(0);
             }
             Some("ini") => params.ini = true,
@@ -443,7 +443,7 @@ fn pdftex_bugs() -> PdftexBugs {
         return PdftexBugs::ALL;
     };
     PdftexBugs::parse(&spec).unwrap_or_else(|name| {
-        eprintln!("partex: PARTEX_PDFTEX_BUGS: unknown pdfTeX bug `{name}`; known:");
+        eprintln!("phitex: PARTEX_PDFTEX_BUGS: unknown pdfTeX bug `{name}`; known:");
         for (n, what) in PdftexBugs::NAMES {
             eprintln!("  {n}: {what}");
         }
@@ -565,7 +565,7 @@ fn choose_command_line() {
         }
         compat::Selection::Modern(args) => modern::main(&args),
         compat::Selection::Unsupported(name) => {
-            eprintln!("partex: {name} is not supported yet");
+            eprintln!("phitex: {name} is not supported yet");
             std::process::exit(2);
         }
     }
@@ -705,7 +705,7 @@ fn main() {
         let mut tex = Tex::new(host, eventlog::Log::default(), params);
         let history = tex.run(command_line.as_bytes());
         if let Err(e) = eventlog::write(&tex, std::path::Path::new(&dir)) {
-            eprintln!("partex: the event log: {e}");
+            eprintln!("phitex: the event log: {e}");
         }
         std::process::exit(i32::from(history > 1));
     }
@@ -805,7 +805,7 @@ fn watch_job(mut params: Params, command_line: Vec<u8>, host: native::NativeHost
         }
         if let Some(line) = asked {
             // (lets a driver tell which request a report answers)
-            eprintln!("partex: done {}", line.trim());
+            eprintln!("phitex: done {}", line.trim());
         }
     }
 }
@@ -881,7 +881,7 @@ fn serve_observed(
                 reports.push(report_line(s, rep, what));
                 h = rep.history;
             }
-            None => reports.push(String::from("partex: unchanged")),
+            None => reports.push(String::from("phitex: unchanged")),
         }
         observe(events::Progress::Phase(events::Phase::Writing));
         let term = match s.write_outputs() {
@@ -897,7 +897,7 @@ fn serve_observed(
                 term
             }
             Err(e) => {
-                reports.push(format!("partex: writing the outputs failed: {e}"));
+                reports.push(format!("phitex: writing the outputs failed: {e}"));
                 return (reports, Vec::new(), 3);
             }
         };
@@ -973,7 +973,7 @@ fn converge_saved(
     let mut reports = Vec::new();
     if loaded {
         reports.push(format!(
-            "partex: loaded a saved session in {:.1} ms: {} checkpoints",
+            "phitex: loaded a saved session in {:.1} ms: {} checkpoints",
             t0.elapsed().as_secs_f64() * 1e3,
             s.checkpoints()
         ));
@@ -998,12 +998,12 @@ fn converge_saved(
             }
             if std::env::var_os("PARTEX_WATCH_DEBUG").is_some() {
                 eprintln!(
-                    "partex: save: written in {:.1} ms",
+                    "phitex: save: written in {:.1} ms",
                     t1.elapsed().as_secs_f64() * 1e3
                 );
             }
             reports.push(format!(
-                "partex: saved the session in {:.1} ms: {} bytes",
+                "phitex: saved the session in {:.1} ms: {} bytes",
                 t0.elapsed().as_secs_f64() * 1e3,
                 saved.len()
             ));
@@ -1060,7 +1060,7 @@ fn saved_session_key() -> Option<u128> {
 /// What a session's build did, as `-watch` reports it.
 fn report_line(s: &session::Session, r: &session::Report, what: &str) -> String {
     format!(
-        "partex: {what} in {:.1} ms: {} of {} commands run, {} checkpoints{}{}",
+        "phitex: {what} in {:.1} ms: {} of {} commands run, {} checkpoints{}{}",
         r.elapsed.as_secs_f64() * 1e3,
         r.commands,
         r.total_commands,
@@ -1070,7 +1070,7 @@ fn report_line(s: &session::Session, r: &session::Report, what: &str) -> String 
             .unwrap_or_default(),
         if r.history > 1 { " (with errors)" } else { "" }
     ) + &r.why.iter().fold(String::new(), |mut s, w| {
-        s.push_str("\npartex:   ");
+        s.push_str("\nphitex:   ");
         s.push_str(w);
         s
     })
@@ -1107,7 +1107,7 @@ fn deliver_effects<T: partex_core::track::Tracker>(tex: &mut Tex<native::NativeH
             }
         }
         Err(e) => {
-            eprintln!("partex: the link step failed: {e:?}");
+            eprintln!("phitex: the link step failed: {e:?}");
             std::process::exit(3);
         }
     }
@@ -1121,7 +1121,7 @@ fn rerun_check(tex: &mut Tex<native::NativeHost, partex_core::ssa::SsaTracker>) 
     let t = std::time::Instant::now();
     let c = partex_core::ssa::rerun_check(tex, true);
     eprintln!(
-        "partex: ssa rerun check: {:.1} ms, steps {}, commands {}, runs dropped {}, \
+        "phitex: ssa rerun check: {:.1} ms, steps {}, commands {}, runs dropped {}, \
          ended elsewhere {}, definitions changed {}, stores changed {}, effects changed {}",
         t.elapsed().as_secs_f64() * 1e3,
         c.steps,
@@ -1133,12 +1133,12 @@ fn rerun_check(tex: &mut Tex<native::NativeHost, partex_core::ssa::SsaTracker>) 
         c.effects_changed,
     );
     for l in &c.first {
-        eprintln!("partex: ssa rerun check: {l}");
+        eprintln!("phitex: ssa rerun check: {l}");
     }
     if c.ended_elsewhere + c.defs_changed + c.stores_changed + c.effects_changed > 0 {
         // (a step's boundary left state outside the families: the
         // harness sees the process fail)
-        eprintln!("partex: ssa rerun check: FAILED");
+        eprintln!("phitex: ssa rerun check: FAILED");
         return false;
     }
     true
@@ -1225,7 +1225,7 @@ fn run_ssa(mut host: native::NativeHost, params: Params, command_line: &[u8]) ->
         return cancelled();
     }
     if check {
-        eprintln!("partex: ssa lost writes {}", tex.lost_writes());
+        eprintln!("phitex: ssa lost writes {}", tex.lost_writes());
     }
     // (the cold build converges as latexmk would from the files on disk:
     // its trips after the first, DESIGN 3.7)
@@ -1253,31 +1253,31 @@ fn run_ssa(mut host: native::NativeHost, params: Params, command_line: &[u8]) ->
     // and given back now, not at the first keystrokes' allocations)
     heap::trim();
     if std::env::var_os("PARTEX_SSA_MEM").is_some() {
-        eprintln!("partex: ssa build 0: settled: {}", machinehost::rss());
+        eprintln!("phitex: ssa build 0: settled: {}", machinehost::rss());
     }
     let mut linker = SsaLinker::default();
     let lr = linker.link(&mut tex);
     linker.write_produced(&mut tex);
     if std::env::var_os("PARTEX_SSA_MEM").is_some() {
-        eprintln!("partex: ssa build 0: linked: {}", machinehost::rss());
+        eprintln!("phitex: ssa build 0: linked: {}", machinehost::rss());
     }
     dump_streams(&tex, 0);
     side_files_write(&mut tex);
     ready_for_rebuilds(&tex, rebuild.is_some());
     eprintln!(
-        "partex: ssa build 0: link {:.1} ms: {}; files written {:.1} ms",
+        "phitex: ssa build 0: link {:.1} ms: {}; files written {:.1} ms",
         lr.link_ms, lr.how, lr.write_ms
     );
     let mut history = r.history;
     let mut commands = r.commands;
     if let Some(s) = &settled {
         for l in &s.log {
-            eprintln!("partex: ssa build 0: {l}");
+            eprintln!("phitex: ssa build 0: {l}");
         }
         report_trips("build 0", s);
         if std::env::var_os("PARTEX_SSA_MEM").is_some() {
             eprintln!(
-                "partex: ssa build 0: memory: {}; {}",
+                "phitex: ssa build 0: memory: {}; {}",
                 tex.tracker().mem_report(),
                 machinehost::rss()
             );
@@ -1287,7 +1287,7 @@ fn run_ssa(mut host: native::NativeHost, params: Params, command_line: &[u8]) ->
             commands += s.commands;
         }
         if let Some(u) = s.unsupported {
-            eprintln!("partex: ssa build 0: stopped: {u}");
+            eprintln!("phitex: ssa build 0: stopped: {u}");
             return 3;
         }
     }
@@ -1296,7 +1296,7 @@ fn run_ssa(mut host: native::NativeHost, params: Params, command_line: &[u8]) ->
         report_read_counts(&rec);
         let s = rec.rt.stats;
         eprintln!(
-            "partex: ssa build 0: {:.1} ms, calls {} (hits {}, misses {}, fresh {}), \
+            "phitex: ssa build 0: {:.1} ms, calls {} (hits {}, misses {}, fresh {}), \
              paragraphs {} (hits {}), tokenize {} (hits {}), reads verified {}, \
              commands {} (in hit paragraphs {}), records {}, hits applied {} \
              (commands skipped {})",
@@ -1340,7 +1340,7 @@ fn run_ssa(mut host: native::NativeHost, params: Params, command_line: &[u8]) ->
         }
     }
     if std::env::var_os("PARTEX_SSA_MEM").is_some() {
-        eprintln!("partex: ssa: after the rebuilds: {}", machinehost::rss());
+        eprintln!("phitex: ssa: after the rebuilds: {}", machinehost::rss());
     }
     // (a rebuild that stopped left work: it goes on, unstopped, and the
     // files are linked, DESIGN 3.7, "A rebuild stopped")
@@ -1412,7 +1412,7 @@ fn rebuild_ssa(
             .status()
             .is_ok_and(|s| s.success());
         if !ok {
-            eprintln!("partex: ssa: the rebuild command failed");
+            eprintln!("phitex: ssa: the rebuild command failed");
             return Err(3);
         }
         tex.tracker().cancel.set(cancel_after(n));
@@ -1450,7 +1450,7 @@ fn rebuild_ssa(
         Ok(rr) => rr,
         Err(e) => {
             for l in partex_core::ssa::rebuild_log(tex) {
-                eprintln!("partex: ssa rebuild {n}: {l}");
+                eprintln!("phitex: ssa rebuild {n}: {l}");
             }
             std::panic::resume_unwind(e);
         }
@@ -1462,7 +1462,7 @@ fn rebuild_ssa(
         let lr = linker.link(tex);
         linker.write_produced(tex);
         side_files_write(tex);
-        eprintln!("partex: ssa rebuild {n} (keystroke): link: {}", lr.how);
+        eprintln!("phitex: ssa rebuild {n} (keystroke): link: {}", lr.how);
         let mut t = partex_core::ssa::Trips {
             max: trips,
             tools: &mut tools,
@@ -1471,22 +1471,22 @@ fn rebuild_ssa(
         };
         let s = partex_core::ssa::settle(tex, trace, apply, &mut t, 0, 0);
         for l in &s.log {
-            eprintln!("partex: ssa rebuild {n} idle settle: {l}");
+            eprintln!("phitex: ssa rebuild {n} idle settle: {l}");
         }
         report_trips(&format!("rebuild {n} idle settle"), &s);
     }
     for l in &rr.log {
-        eprintln!("partex: ssa rebuild {n}: {l}");
+        eprintln!("phitex: ssa rebuild {n}: {l}");
     }
     let millis = t0.elapsed().as_secs_f64() * 1e3;
     if rr.resumed {
-        eprintln!("partex: ssa rebuild {n}: continued the work a stopped rebuild left");
+        eprintln!("phitex: ssa rebuild {n}: continued the work a stopped rebuild left");
     }
     report_entry_check(tex, n);
     if let (Some(why), None) = (rr.stopped, rr.unsupported) {
         // (the link waits until the work is done)
         eprintln!(
-            "partex: ssa rebuild {n}: stopped ({why}), {} steps pending; {millis:.1} ms, \
+            "phitex: ssa rebuild {n}: stopped ({why}), {} steps pending; {millis:.1} ms, \
              steps run {}, commands {}",
             rr.pending, rr.steps_run, rr.commands
         );
@@ -1497,11 +1497,11 @@ fn rebuild_ssa(
     dump_streams(tex, n);
     side_files_write(tex);
     let link_ms = lr.link_ms;
-    eprintln!("partex: ssa rebuild {n}: link: {}", lr.how);
+    eprintln!("phitex: ssa rebuild {n}: link: {}", lr.how);
     let s = tex.tracker().rec.borrow().rt.stats;
     report_cold(n, &rr);
     eprintln!(
-        "partex: ssa rebuild {n}: {:.1} ms (the rebuild {millis:.1} ms, the link {link_ms:.1} ms), \
+        "phitex: ssa rebuild {n}: {:.1} ms (the rebuild {millis:.1} ms, the link {link_ms:.1} ms), \
          the edited page ready {:.2} ms after the rebuild, files written {:.1} ms, \
          edits {}, seeds {} \
          (loads of a changed φ {}, of a changed store {}, queries answered anew {}; data edited in it {}), \
@@ -1553,7 +1553,7 @@ fn rebuild_ssa(
         report_trips(&format!("rebuild {n}"), &rr);
     }
     if let Some(u) = rr.unsupported {
-        eprintln!("partex: ssa rebuild {n}: stopped: {u}");
+        eprintln!("phitex: ssa rebuild {n}: stopped: {u}");
         return Err(3);
     }
     write_view(tex, n);
@@ -1568,10 +1568,10 @@ fn report_entry_check(tex: &Tex<native::NativeHost, partex_core::ssa::SsaTracker
     }
     let (count, first) = partex_core::ssa::entry_check_report(tex);
     eprintln!(
-        "partex: ssa build {n}: entry check: {count} reads not as their step's definitions say"
+        "phitex: ssa build {n}: entry check: {count} reads not as their step's definitions say"
     );
     for l in first {
-        eprintln!("partex: ssa build {n}: entry check: {l}");
+        eprintln!("phitex: ssa build {n}: entry check: {l}");
     }
 }
 
@@ -1590,8 +1590,8 @@ fn write_dag(tex: &Tex<native::NativeHost, partex_core::ssa::SsaTracker>, build:
     let text = partex_core::ssa::dag(tex);
     let shown = std::path::Path::new(&path).display().to_string();
     match std::fs::write(&path, &text) {
-        Ok(()) => eprintln!("partex: ssa dag {build}: {} bytes ({shown})", text.len()),
-        Err(e) => eprintln!("partex: ssa dag {build}: {shown}: {e}"),
+        Ok(()) => eprintln!("phitex: ssa dag {build}: {} bytes ({shown})", text.len()),
+        Err(e) => eprintln!("phitex: ssa dag {build}: {shown}: {e}"),
     }
 }
 
@@ -1633,7 +1633,7 @@ fn rebuild_deadline() -> Option<partex_core::ssa::Deadline> {
 /// A cold build cancelled ([`cancel_after`]): its engine is in the
 /// middle of the job, so the run ends there.
 fn cancelled() -> i32 {
-    eprintln!("partex: ssa build 0: cancelled at a step boundary");
+    eprintln!("phitex: ssa build 0: cancelled at a step boundary");
     3
 }
 
@@ -1694,7 +1694,7 @@ fn cancel_after(build: usize) -> Option<partex_core::ssa::Cancel> {
 fn report_cold(n: usize, rr: &partex_core::ssa::RebuildReport) {
     if rr.cold > 0 {
         eprintln!(
-            "partex: ssa rebuild {n}: cold after {} cascades (the old steps after each retired)",
+            "phitex: ssa rebuild {n}: cold after {} cascades (the old steps after each retired)",
             rr.cold
         );
     }
@@ -1743,7 +1743,7 @@ fn ssa_tools(
     let mem = std::env::var_os("PARTEX_SSA_MEM").is_some();
     move |host, streams| {
         if mem {
-            eprintln!("partex: ssa: a trip's end: {}", machinehost::rss());
+            eprintln!("phitex: ssa: a trip's end: {}", machinehost::rss());
         }
         // (each stream by the path its file has, in the output directory)
         let ending = |ext: &[u8]| -> Vec<(Vec<u8>, std::sync::Arc<[u8]>)> {
@@ -1799,12 +1799,12 @@ fn report_trips(what: &str, r: &partex_core::ssa::RebuildReport) {
         )
     };
     eprintln!(
-        "partex: ssa {what}: trips {} ({state}); {}",
+        "phitex: ssa {what}: trips {} ({state}); {}",
         r.trips,
         each.join("; ")
     );
     for t in &r.tools {
-        eprintln!("partex: ssa {what}: {t}");
+        eprintln!("phitex: ssa {what}: {t}");
     }
 }
 
@@ -1856,11 +1856,11 @@ fn write_view(tex: &Tex<native::NativeHost, partex_core::ssa::SsaTracker>, build
     };
     let shown = std::path::Path::new(&path).display().to_string();
     if let Err(e) = std::fs::write(&path, &text) {
-        eprintln!("partex: ssa view {build}: {shown}: {e}");
+        eprintln!("phitex: ssa view {build}: {shown}: {e}");
         return;
     }
     eprintln!(
-        "partex: ssa view {build}: {} values, {} bytes, {ms:.1} ms, {checked} ({shown})",
+        "phitex: ssa view {build}: {} values, {} bytes, {ms:.1} ms, {checked} ({shown})",
         prog.values.len(),
         text.len(),
     );
@@ -1872,13 +1872,13 @@ fn write_view(tex: &Tex<native::NativeHost, partex_core::ssa::SsaTracker>, build
         .ok()
         .and_then(|id| partex_core::ssa::step_trace(tex, id))
     else {
-        eprintln!("partex: ssa view {build}: no live step {step}");
+        eprintln!("phitex: ssa view {build}: no live step {step}");
         return;
     };
     path.push(format!(".step{step}"));
     if let Err(e) = std::fs::write(&path, trace) {
         eprintln!(
-            "partex: ssa view {build}: {}: {e}",
+            "phitex: ssa view {build}: {}: {e}",
             std::path::Path::new(&path).display()
         );
     }
@@ -2036,7 +2036,7 @@ impl SsaLinker {
             // text again, and the next link resolves in full)
             Err(_) if virt => return self.link_full(tex, &origin),
             Err(e) => {
-                eprintln!("partex: ssa: the link step failed: {e:?}");
+                eprintln!("phitex: ssa: the link step failed: {e:?}");
                 std::process::exit(3);
             }
         };
@@ -2246,7 +2246,7 @@ impl SsaLinker {
                 return self.link_full_once(tex, origin, false);
             }
             Err(e) => {
-                eprintln!("partex: ssa: the link step failed: {e:?}");
+                eprintln!("phitex: ssa: the link step failed: {e:?}");
                 std::process::exit(3);
             }
         };
@@ -2535,7 +2535,7 @@ fn trace_ssa_link(chunks: &[(u64, partex_core::ssa::StepEffects)]) {
         }
         if !w.is_empty() || !ev.is_empty() {
             eprintln!(
-                "partex: ssa link {i} (step {}): {} writes {w:?}",
+                "phitex: ssa link {i} (step {}): {} writes {w:?}",
                 k >> 32,
                 ev.join(", ")
             );
@@ -2550,21 +2550,21 @@ fn report_check(r: &partex_core::ssa::SsaReport, rec: &partex_core::ssa::Recorde
     let mut v: Vec<_> = r.uncovered.iter().collect();
     v.sort_by(|a, b| b.1.0.cmp(&a.1.0).then(a.0.cmp(b.0)));
     eprintln!(
-        "partex: ssa check: {} rows not values yet: {}",
+        "phitex: ssa check: {} rows not values yet: {}",
         r.not_values.len(),
         r.not_values.join("; ")
     );
     eprintln!(
-        "partex: ssa check: {} hits checked, {} uncovered parts",
+        "phitex: ssa check: {} hits checked, {} uncovered parts",
         r.checked,
         v.len()
     );
     for (part, (n, first)) in v {
-        eprintln!("partex: ssa uncovered {n:7} {part} (first: {first})");
+        eprintln!("phitex: ssa uncovered {n:7} {part} (first: {first})");
     }
     let stale = &rec.st.stale;
     eprintln!(
-        "partex: ssa check: table reads whose version was not the content: {}",
+        "phitex: ssa check: table reads whose version was not the content: {}",
         if stale.is_empty() {
             "none".to_string()
         } else {
@@ -2572,10 +2572,10 @@ fn report_check(r: &partex_core::ssa::SsaReport, rec: &partex_core::ssa::Recorde
         }
     );
     for s in &rec.st.stale_first {
-        eprintln!("partex: ssa stale {s}");
+        eprintln!("phitex: ssa stale {s}");
     }
     for d in &r.write_diffs {
-        eprintln!("partex: ssa write differs {d}");
+        eprintln!("phitex: ssa write differs {d}");
     }
 }
 
@@ -2589,7 +2589,7 @@ fn report_routines(build: &str, routines: &[partex_core::ssa::RoutineCount]) {
         .filter(|(_, c)| c.calls > 0 || c.records > 0)
         .map(|(f, c)| format!("{f} {} (hits {}, records {})", c.calls, c.hits, c.records))
         .collect();
-    eprintln!("partex: ssa {build} routines: {}", routines.join(", "));
+    eprintln!("phitex: ssa {build} routines: {}", routines.join(", "));
 }
 
 fn report_read_counts(rec: &partex_core::ssa::Recorder) {
@@ -2602,7 +2602,7 @@ fn report_read_counts(rec: &partex_core::ssa::Recorder) {
             let _ = write!(line, " {}={n}/{v}", partex_core::ssa::count_name(i));
         }
     }
-    eprintln!("partex: ssa reads noted/verified by family:{line}");
+    eprintln!("phitex: ssa reads noted/verified by family:{line}");
 }
 
 fn run_memo(host: native::NativeHost, mut params: Params, command_line: &[u8]) -> i32 {
@@ -2632,12 +2632,12 @@ fn run_memo(host: native::NativeHost, mut params: Params, command_line: &[u8]) -
     side_files_write(&mut tex);
     if limit.is_some() {
         eprintln!(
-            "partex: memo last hit {}",
+            "phitex: memo last hit {}",
             String::from_utf8_lossy(&tex.memo_last_hit())
         );
     }
     if memo == "stats" || memo == "check" {
-        eprintln!("partex: memo {:?}", tex.memo_stats());
+        eprintln!("phitex: memo {:?}", tex.memo_stats());
         for (name, [calls, hits, stale, rec, bad], why) in tex.memo_defs(
             std::env::var("PARTEX_MEMO_DEFS")
                 .ok()
@@ -2645,26 +2645,26 @@ fn run_memo(host: native::NativeHost, mut params: Params, command_line: &[u8]) -
                 .unwrap_or(40),
         ) {
             eprintln!(
-                "partex: memo def {calls:9} calls {hits:8} hits {stale:8} stale {rec:7} rec {bad:3} bad {} {why}",
+                "phitex: memo def {calls:9} calls {hits:8} hits {stale:8} stale {rec:7} rec {bad:3} bad {} {why}",
                 String::from_utf8_lossy(&name)
             );
         }
         for (name, n) in tex.memo_stale_cells() {
             eprintln!(
-                "partex: memo stale {n:9} {}",
+                "phitex: memo stale {n:9} {}",
                 String::from_utf8_lossy(&name)
             );
         }
         for d in tex.memo_read_diffs() {
-            eprintln!("partex: memo {}", String::from_utf8_lossy(&d));
+            eprintln!("phitex: memo {}", String::from_utf8_lossy(&d));
         }
         for (old, new) in tex.memo_pending_diffs() {
-            eprintln!("partex: memo stored: {}", String::from_utf8_lossy(&old));
-            eprintln!("partex: memo fresh:  {}", String::from_utf8_lossy(&new));
+            eprintln!("phitex: memo stored: {}", String::from_utf8_lossy(&old));
+            eprintln!("phitex: memo fresh:  {}", String::from_utf8_lossy(&new));
         }
         for (name, what) in tex.memo_mismatches() {
             eprintln!(
-                "partex: memo check: {} differs in {what}",
+                "phitex: memo check: {} differs in {what}",
                 String::from_utf8_lossy(&name)
             );
         }

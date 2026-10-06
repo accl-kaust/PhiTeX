@@ -204,7 +204,7 @@ pub fn keys_on() -> bool {
         return false;
     };
     let watchdog = Command::new("sh")
-        .args(["-c", WATCHDOG, "partex-terminal", &saved])
+        .args(["-c", WATCHDOG, "phitex-terminal", &saved])
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .spawn()

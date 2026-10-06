@@ -36,7 +36,7 @@ options:
   --filter <re>    only tests whose id matches the regex
   --jobs <n>       parallel workers (default: available CPUs)
   --list           print the jobs without running them
-  --partex         run partex in place of the engines (as `pdftex`, `etex`,
+  --partex         run phitex in place of the engines (as `pdftex`, `etex`,
                    `pdflatex`, …, first in PATH), into target/partex-refs";
 
 #[derive(Deserialize)]
@@ -401,14 +401,14 @@ fn locations(root: &Path, partex: bool) -> Result<(Option<PathBuf>, PathBuf, Pat
     })
 }
 
-/// `target/partex-shim`: links to the release build of partex named as the
+/// `target/partex-shim`: links to the release build of phitex named as the
 /// programs l3build runs.
 fn partex_shim(root: &Path) -> Result<PathBuf> {
     let status = Command::new(env!("CARGO"))
         .current_dir(root)
         .args(["build", "--release", "-p", "partex-cli"])
         .status()?;
-    ensure!(status.success(), "building partex failed");
+    ensure!(status.success(), "building phitex failed");
     let shim = root.join("target/partex-shim");
     fs::create_dir_all(&shim)?;
     for name in ["tex", "etex", "pdftex", "latex", "pdflatex", "initex"] {
@@ -416,7 +416,7 @@ fn partex_shim(root: &Path) -> Result<PathBuf> {
         if link.symlink_metadata().is_ok() {
             fs::remove_file(&link)?;
         }
-        std::os::unix::fs::symlink(root.join("target/release/partex"), &link)?;
+        std::os::unix::fs::symlink(root.join("target/release/phitex"), &link)?;
     }
     // partex's own formats, as TeX Live's fmtutil.cnf makes them (the
     // installed ones are pdfTeX's)

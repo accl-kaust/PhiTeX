@@ -14,7 +14,7 @@
 # the SSA process's stderr, each stage's files.
 set -uo pipefail
 : "${w:?the accl workspace}" "${r:?the results directory}"
-P=$PWD; B=$P/target/release/partex; C=$w/course; A=$w/aux
+P=$PWD; B=$P/target/release/phitex; C=$w/course; A=$w/aux
 S=$r/summary.txt
 say() { echo "$*" | tee -a "$S"; }
 one=0

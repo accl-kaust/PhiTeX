@@ -7,7 +7,7 @@
 # the view, for its cost. Prints the numbers to $r/summary.txt and keeps
 # the windows of ch15 and the windows that changed.
 set -uo pipefail
-P=$w/partex; B=$P/target/release/partex; C=$w/course; A=$w/aux; S=$r/summary.txt
+P=$w/partex; B=$P/target/release/phitex; C=$w/course; A=$w/aux; S=$r/summary.txt
 say() { echo "$*" | tee -a "$S"; }
 (cd $P && cargo build --release -p partex-cli -q) || { say "BUILD FAILED"; exit 1; }
 F=$w/fmt/pdflatex

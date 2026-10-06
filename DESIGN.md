@@ -1902,7 +1902,7 @@ unit's exit differed and cutoff failed. It is removed whole, with SSA
 in check mode as the gate's second e2e mode and the edit harness moved
 into e2e.
 
-Until then it is what `partex watch` and `partex build` run, so its
+Until then it is what `phitex watch` and `phitex build` run, so its
 memory is the watch's:
 - Each region keeps a snapshot of the engine. The large tables are
   journaled vectors (`journal.rs`): a snapshot shares the chunks not
@@ -2814,7 +2814,7 @@ edit lands nearer 15–30 ms.
 ### 5.2 Observability
 
 - **Spans** on phases behind the `trace` feature, exported as Perfetto
-  JSON. `partex trace` writes them.
+  JSON. `phitex trace` writes them.
 - **The TeX-level profiler**: per control sequence, file, line and
   page.
 - **The progress board** (`partex_core::progress`, 2.5): the commands

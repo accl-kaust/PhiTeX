@@ -256,14 +256,14 @@ pub fn after_pass(runs: &mut Runs, auxes: &[(Vec<u8>, Arc<[u8]>)]) -> Vec<String
         for f in [&out.blg, &out.bbl].into_iter().flatten() {
             if let Err(e) = std::fs::write(crate::native::path(&files.at(&f.name)), &f.contents) {
                 reports.push(format!(
-                    "partex: bibtex: can't write {}: {e}",
+                    "phitex: bibtex: can't write {}: {e}",
                     String::from_utf8_lossy(&f.name)
                 ));
             }
         }
         let last_line = crate::native::tool_summary(&out.term, out.status != 0);
         reports.push(format!(
-            "partex: bibtex {} in {:.1} ms: {}",
+            "phitex: bibtex {} in {:.1} ms: {}",
             String::from_utf8_lossy(name),
             t0.elapsed().as_secs_f64() * 1e3,
             last_line

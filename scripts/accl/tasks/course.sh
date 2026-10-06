@@ -15,7 +15,9 @@
 # wall clock and peak memory of partex itself (GNU time, no wrapper).
 set -uo pipefail
 what=${1:?what}; shift
-P=$w/partex; B=$P/target/release/partex; C=$w/course; A=$w/aux
+# (the binary: phitex, or partex in a commit from before the rename)
+rel() { if [ -x "$1/phitex" ]; then echo "$1/phitex"; else echo "$1/partex"; fi; }
+P=$w/partex; B=$(rel "$P/target/release"); C=$w/course; A=$w/aux
 S=$r/summary.txt
 env0=(SOURCE_DATE_EPOCH=1758800000 FORCE_SOURCE_DATE=1)
 # statistics masked in log comparisons, as in e2e (xtask/src/mask.rs)

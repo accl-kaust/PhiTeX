@@ -172,7 +172,7 @@ pub fn invisible(
     if std::env::var_os("PARTEX_WATCH_DEBUG").is_some() {
         let all: usize = intervals.iter().map(|(_, iv)| iv.lines.len()).sum();
         eprintln!(
-            "partex: {name}: {all} line events over {} intervals; {} opens here, {} starts",
+            "phitex: {name}: {all} line events over {} intervals; {} opens here, {} starts",
             intervals.len(),
             opens,
             starts.len()

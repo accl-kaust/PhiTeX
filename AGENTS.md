@@ -44,7 +44,7 @@ documents.
 ## Compatibility
 
 - The oracle is the installed TeX Live binaries (pdfTeX 1.40.29), not
-  our own judgement. A difference from the oracle is a bug in partex.
+  our own judgement. A difference from the oracle is a bug in PhiTeX.
   Never edit expected outputs or loosen a comparison to make a test pass.
 - The PDF is byte-identical to pdfTeX's, cold and after every edit, and
   so are the files the job reads back (`.aux`, `.toc`, `.bbl`, ...). The

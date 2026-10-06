@@ -1,4 +1,4 @@
-//! `cargo xtask ssa-edits`: SSA mode's edit sequences against plain partex
+//! `cargo xtask ssa-edits`: SSA mode's edit sequences against plain phitex
 //! (DESIGN.md 4.3, item 8). The harness is `scripts/ssa-edits`, run on the
 //! release binary; the options pass through to it (`--case NAME`,
 //! `--fixpoint`, `--check`, `--env K=V`, ...). Like every run of the
@@ -16,7 +16,7 @@ pub fn run(root: &Path, args: &[String]) -> Result<()> {
         .current_dir(root)
         .args(["build", "--release", "-p", "partex-cli"])
         .status()?;
-    ensure!(status.success(), "building partex failed");
+    ensure!(status.success(), "building phitex failed");
     harness(root, args)
 }
 
@@ -29,7 +29,7 @@ pub fn harness(root: &Path, args: &[String]) -> Result<()> {
         .status()?;
     ensure!(
         status.success(),
-        "SSA mode's edit sequences differ from plain partex (or did not run)"
+        "SSA mode's edit sequences differ from plain phitex (or did not run)"
     );
     Ok(())
 }

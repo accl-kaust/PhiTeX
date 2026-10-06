@@ -27,7 +27,7 @@
 # repository or ~/code/tmp, which scripts/sandbox binds. Logs go to
 # DOCDIR/runs/bench-NAME/out/. PARTEX_* variables set by the caller pass
 # through (e.g. PARTEX_MACHINE_RENAME=1). BIN defaults to
-# target/release/partex, built in the sandbox if missing.
+# target/release/phitex, built in the sandbox if missing.
 #
 # Output: a Markdown table on stdout. Columns: the rebuild's wall time; the
 # commands re-executed (`executed_cost`); the old regions re-executed over
@@ -39,7 +39,7 @@ repo=$(cd "$(dirname "$0")/.." && pwd)
 [ $# -ge 2 ] || { sed -n '2,3p' "$0" >&2; exit 2; }
 doc=$(cd "$1" && pwd)
 edits=$(realpath "$2")
-bin=${3:-$repo/target/release/partex}
+bin=${3:-$repo/target/release/phitex}
 main=${MAIN:-course.tex}
 job=${main%.tex}
 

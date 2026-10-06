@@ -17,9 +17,11 @@ git worktree add -q --detach "$w/old" "$old" || exit 1
 (cd "$w/old" && cargo build --release -p partex-cli -q) || exit 1
 cargo build --release -p partex-cli -q || exit 1
 new=$(git rev-parse --short HEAD) old=$(git -C "$w/old" rev-parse --short HEAD)
+# (the binary: phitex, or partex in a commit from before the rename)
+rel() { if [ -x "$1/phitex" ]; then echo "$1/phitex"; else echo "$1/partex"; fi; }
 for i in $(seq "$n"); do
   for which in old new; do
-    if [ $which = old ]; then b=$w/old/target/release/partex; c=$old; else b=$P/target/release/partex; c=$new; fi
+    if [ $which = old ]; then b=$(rel "$w/old/target/release"); c=$old; else b=$P/target/release/phitex; c=$new; fi
     BIN=$b REV=$c OUT=$r/ab-$which-$i.json bench/ssa-course.sh --warm 10 --edits word \
       "$w/course" "$w/aux" >"$r/ab-$which-$i.md" 2>"$r/ab-$which-$i.err"
     echo "round $i $which ($c): exit $?" | tee -a "$r/summary.txt"

@@ -1,12 +1,12 @@
 //! Which command line an invocation speaks (DESIGN.md, "Command line and
 //! terminal").
 //!
-//! partex run under an engine's name (`tex`, `pdftex`, `pdflatex`, … as the
-//! links in `target/partex-shim` are) is that engine: web2c's command line
-//! and TeX's own terminal output, for `latexmk`, editors and scripts. Bare
-//! `partex` is the modern command line (`partex build`, `partex watch`, …),
-//! unless `--compat=NAME` (first argument) or `PARTEX_COMPAT=NAME` asks for
-//! an engine's.
+//! `phitex` run under an engine's name (`tex`, `pdftex`, `pdflatex`, … as
+//! the links in `target/partex-shim` are) is that engine: web2c's command
+//! line and TeX's own terminal output, for `latexmk`, editors and scripts.
+//! Bare `phitex` (or `partex`, its name before) is the modern command line
+//! (`phitex build`, `phitex watch`, …), unless `--compat=NAME` (first
+//! argument) or `PARTEX_COMPAT=NAME` asks for an engine's.
 
 /// What an invocation is.
 #[derive(Debug, PartialEq, Eq)]
@@ -20,7 +20,7 @@ pub enum Selection {
     Unsupported(String),
 }
 
-/// Engines whose names are reserved: invoked under one of them, partex
+/// Engines whose names are reserved: invoked under one of them, `phitex`
 /// says it cannot be that engine yet rather than running as Knuth's TeX.
 const RESERVED: &[&str] = &[
     "xetex",
@@ -36,14 +36,17 @@ const RESERVED: &[&str] = &[
 /// runs them already (development).
 const XETEX: &[&str] = &["xetex", "xelatex", "xelatex-dev"];
 
-/// How partex was invoked: `argv0` (the file name it was run as), the
+/// The names that are the modern command line, not an engine's.
+const MODERN: &[&str] = &["phitex", "partex"];
+
+/// How `phitex` was invoked: `argv0` (the file name it was run as), the
 /// arguments after it, and `PARTEX_COMPAT`.
 #[must_use]
 pub fn select(argv0: &str, mut args: Vec<String>, env: Option<&str>) -> Selection {
     let stem = std::path::Path::new(argv0)
         .file_stem()
         .and_then(|s| s.to_str())
-        .unwrap_or("partex");
+        .unwrap_or("phitex");
     let named = |name: &str, args: Vec<String>| {
         let xetex_dev =
             XETEX.contains(&name) && std::env::var_os("PARTEX_XETEX").is_some_and(|v| v == "1");
@@ -56,7 +59,7 @@ pub fn select(argv0: &str, mut args: Vec<String>, env: Option<&str>) -> Selectio
             }
         }
     };
-    if stem != "partex" {
+    if !MODERN.contains(&stem) {
         return named(stem, args);
     }
     if let Some(first) = args.first() {
@@ -108,13 +111,18 @@ mod tests {
     }
 
     #[test]
-    fn bare_partex_is_modern() {
+    fn bare_phitex_is_modern() {
         assert_eq!(
-            select("target/release/partex", v(&["build", "x.tex"]), None),
+            select("target/release/phitex", v(&["build", "x.tex"]), None),
             Selection::Modern(v(&["build", "x.tex"]))
         );
+        // (and under its name before)
         assert_eq!(
-            select("partex", v(&[]), Some("")),
+            select("/usr/local/bin/partex", v(&["watch"]), None),
+            Selection::Modern(v(&["watch"]))
+        );
+        assert_eq!(
+            select("phitex", v(&[]), Some("")),
             Selection::Modern(v(&[]))
         );
     }
@@ -126,17 +134,17 @@ mod tests {
             args: v(args),
         };
         assert_eq!(
-            select("partex", v(&["--compat=tex", "-ini", "x"]), None),
+            select("phitex", v(&["--compat=tex", "-ini", "x"]), None),
             tex(&["-ini", "x"])
         );
         assert_eq!(
-            select("partex", v(&["-compat", "tex", "x"]), None),
+            select("phitex", v(&["-compat", "tex", "x"]), None),
             tex(&["x"])
         );
-        assert_eq!(select("partex", v(&["x"]), Some("tex")), tex(&["x"]));
+        assert_eq!(select("phitex", v(&["x"]), Some("tex")), tex(&["x"]));
         // (the option wins over the environment)
         assert_eq!(
-            select("partex", v(&["--compat=tex"]), Some("pdftex")),
+            select("phitex", v(&["--compat=tex"]), Some("pdftex")),
             tex(&[])
         );
     }
@@ -148,7 +156,7 @@ mod tests {
             Selection::Unsupported("xelatex".into())
         );
         assert_eq!(
-            select("partex", v(&["--compat=lualatex"]), None),
+            select("phitex", v(&["--compat=lualatex"]), None),
             Selection::Unsupported("lualatex".into())
         );
     }

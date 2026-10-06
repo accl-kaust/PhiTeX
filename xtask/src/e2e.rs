@@ -930,7 +930,7 @@ fn run_incremental(root: &Path, partex: &Path, case: &Incremental) -> Result<Vec
             let line = line?;
             eprintln!("    {line}");
             invisible += usize::from(line.contains("read as the same tokens"));
-            if let Some(rest) = line.strip_prefix("partex: rebuilt in ") {
+            if let Some(rest) = line.strip_prefix("phitex: rebuilt in ") {
                 // "X ms: A of B commands run, ..."
                 let mut w = rest.split(' ').skip(2);
                 let ran = w.next().and_then(|n| n.parse().ok());
@@ -942,11 +942,11 @@ fn run_incremental(root: &Path, partex: &Path, case: &Incremental) -> Result<Vec
                 return Ok(());
             }
         }
-        anyhow::bail!("partex -watch stopped before `{what}`")
+        anyhow::bail!("phitex -watch stopped before `{what}`")
     };
     let mut diffs = Vec::new();
     // (-watch runs every build to its fixpoint, as -converge does)
-    wait_for("partex: built")?;
+    wait_for("phitex: built")?;
     fixpoint(oracle, &o, &args, true)?;
     diffs.extend(
         compare(&o, &p, true)?
@@ -958,7 +958,7 @@ fn run_incremental(root: &Path, partex: &Path, case: &Incremental) -> Result<Vec
             edit_file(&o, &p, file, marker, new, (i as u64 + 1) * 1000)?;
         }
         writeln!(stdin, "rebuild {i}")?;
-        wait_for(&format!("partex: done rebuild {i}"))?;
+        wait_for(&format!("phitex: done rebuild {i}"))?;
         fixpoint(oracle, &o, &args, true)?;
         diffs.extend(
             compare(&o, &p, true)?
@@ -1893,7 +1893,7 @@ fn run_modern(root: &Path, partex: &Path) -> Result<Vec<String>> {
         "the case must need {} runs",
         case.passes
     );
-    ensure!(out.is_empty(), "partex build wrote to standard output");
+    ensure!(out.is_empty(), "phitex build wrote to standard output");
     for want in [
         "error[undefined-control-sequence]: Undefined control sequence \\undefinedcontrolsequence",
         "  --> modern.tex:17:4",
@@ -1938,7 +1938,7 @@ fn run_modern(root: &Path, partex: &Path) -> Result<Vec<String>> {
     let (why, _) = modern(&["why", "modern.tex"])?;
     ensure!(
         why.contains("warning: 1 overfull \\hbox"),
-        "partex why lacks the warnings"
+        "phitex why lacks the warnings"
     );
     let (_, report) = modern(&["clean", "modern.tex"])?;
     ensure!(
@@ -2048,7 +2048,7 @@ fn run_modern_watch(root: &Path, partex: &Path, sanitize: bool) -> Result<Vec<St
         loop {
             let line = rx
                 .recv_timeout(std::time::Duration::from_secs(120))
-                .with_context(|| format!("partex watch stopped before `{until}`"))?;
+                .with_context(|| format!("phitex watch stopped before `{until}`"))?;
             eprintln!("    {line}");
             report.push_str(&line);
             report.push('\n');
@@ -2095,11 +2095,11 @@ fn run_modern_watch(root: &Path, partex: &Path, sanitize: bool) -> Result<Vec<St
     child.wait()?;
     ensure!(
         report.contains("Machine built in"),
-        "partex watch did not run in machine mode"
+        "phitex watch did not run in machine mode"
     );
     ensure!(
         report.contains("Machine rebuilt in"),
-        "partex watch did not rebuild incrementally"
+        "phitex watch did not rebuild incrementally"
     );
     Ok(diffs)
 }
@@ -2351,7 +2351,7 @@ fn run_resident(root: &Path, partex: &Path, case: &Incremental) -> Result<Vec<St
         for line in report.lines() {
             eprintln!("    {line}");
             loads += usize::from(line.contains("loaded a saved session"));
-            if let Some(rest) = line.trim_start().strip_prefix("partex: rebuilt in ") {
+            if let Some(rest) = line.trim_start().strip_prefix("phitex: rebuilt in ") {
                 let mut w = rest.split(' ').skip(2);
                 let ran: Option<u64> = w.next().and_then(|n| n.parse().ok());
                 let all: Option<u64> = w.nth(1).and_then(|n| n.parse().ok());
@@ -2422,8 +2422,8 @@ fn partex_binary(root: &Path) -> Result<PathBuf> {
         .current_dir(root)
         .args(["build", "--release", "-p", "partex-cli"])
         .status()?;
-    ensure!(status.success(), "building partex failed");
-    Ok(root.join("target/release/partex"))
+    ensure!(status.success(), "building phitex failed");
+    Ok(root.join("target/release/phitex"))
 }
 
 pub fn run(root: &Path, args: &[String]) -> Result<()> {

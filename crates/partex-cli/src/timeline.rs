@@ -142,6 +142,6 @@ pub fn finish() {
     }
     out.push_str("]}\n");
     if let Err(e) = std::fs::write(&r.path, out) {
-        eprintln!("partex: can't write the timeline {}: {e}", r.path.display());
+        eprintln!("phitex: can't write the timeline {}: {e}", r.path.display());
     }
 }

@@ -136,6 +136,6 @@ pub fn write<T: Tracker>(tex: &mut Tex<NativeHost, T>) {
     let text = render(tex);
     let path = crate::native::path(&name);
     if let Err(e) = std::fs::write(&path, text) {
-        eprintln!("partex: {}: {e}", path.display());
+        eprintln!("phitex: {}: {e}", path.display());
     }
 }

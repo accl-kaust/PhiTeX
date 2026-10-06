@@ -95,9 +95,9 @@ pub fn socket_path() -> PathBuf {
     let dir = std::env::var_os("XDG_RUNTIME_DIR").map_or_else(
         || {
             let user = std::env::var("USER").unwrap_or_default();
-            std::env::temp_dir().join(format!("partex-{user}"))
+            std::env::temp_dir().join(format!("phitex-{user}"))
         },
-        |d| PathBuf::from(d).join("partex"),
+        |d| PathBuf::from(d).join("phitex"),
     );
     dir.join(format!("{:016x}.sock", h.finish()))
 }

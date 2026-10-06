@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Run a course-scale command alone and under a memory cap:
 #
-#   scripts/heavy CMD...            e.g. scripts/heavy scripts/sandbox target/release/partex ...
+#   scripts/heavy CMD...            e.g. scripts/heavy scripts/sandbox target/release/phitex ...
 #
 # One heavy run at a time on this machine (a lock shared by every
 # worktree), virtual memory capped at HEAVY_VMEM_GB (default 40), and a

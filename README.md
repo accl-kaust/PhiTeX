@@ -40,7 +40,7 @@ steps of it, so a build settles in one process with no separate passes.
 |---|---|
 | `partex-engine`, `partex-core` | the engine: `tex.web`, e-TeX and pdfTeX, the PDF/DVI writers, and the SSA build and rebuild (`partex-core/src/ssa`) |
 | `partex-ssa` | the SSA records: steps, slots, the fold of definitions |
-| `partex-cli` | the `partex` command |
+| `partex-cli` | the `phitex` command |
 | `partex-kpse` | kpathsea file lookup |
 | `partex-bibtex`, `partex-makeindex` | BibTeX and makeindex, also as incremental build nodes |
 | `phitex-syntax`, `phitex-ir`, `phitex-doc` | the source CST, the SSA text form, the static document layer |
@@ -63,10 +63,18 @@ fonts and packages.
 
 ## Use
 
-`partex` takes pdftex's command line:
+`phitex` builds a document to its fixpoint (BibTeX and makeindex
+included), or watches it and rebuilds as it is edited:
 
-    partex -ini -jobname=pdflatex -translate-file=cp227.tcx '*pdflatex.ini'
-    partex --compat=pdftex -fmt=pdflatex -interaction=batchmode doc.tex
+    phitex build paper.tex
+    phitex watch -o out paper.tex
+    phitex clean paper.tex       # the outputs and what was saved: start over
+
+Under an engine's name, or with `--compat`, it takes that engine's
+command line:
+
+    phitex --compat=pdftex -ini -jobname=pdflatex -translate-file=cp227.tcx '*pdflatex.ini'
+    phitex --compat=pdftex -fmt=pdflatex -interaction=batchmode doc.tex
 
 For an incremental build, set `PARTEX_SSA=1`. To keep rebuilding as the
 sources change, use `-watch`.

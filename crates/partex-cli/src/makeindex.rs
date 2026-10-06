@@ -223,7 +223,7 @@ pub fn after_pass(runs: &mut Runs, idxes: &[(Vec<u8>, Arc<[u8]>)]) -> Vec<String
         reports.extend(write_outputs(&out, files));
         let last_line = crate::native::tool_summary(&out.stderr, out.status != 0);
         reports.push(format!(
-            "partex: makeindex {} in {:.1} ms: {}",
+            "phitex: makeindex {} in {:.1} ms: {}",
             String::from_utf8_lossy(name),
             t0.elapsed().as_secs_f64() * 1e3,
             last_line

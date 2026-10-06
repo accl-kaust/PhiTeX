@@ -13,7 +13,7 @@
 #
 # A WHAT given again runs again (its results in <what>.2, ...). Locally,
 # COURSE, AUX and RESULTS name the directories, and BIN the binary
-# (target/release/partex, built if missing); PRELOAD is a library the
+# (target/release/phitex, built if missing); PRELOAD is a library the
 # watches run with (libjemalloc.so for a heap profile, with MALLOC_CONF):
 #
 #   systemd-run --user --scope -q -p MemoryMax=16G -p MemorySwapMax=0 \
@@ -25,7 +25,7 @@
 # lines.
 set -uo pipefail
 P=$(pwd)
-B=${BIN:-$P/target/release/partex}
+B=${BIN:-$P/target/release/phitex}
 C=${COURSE:-${w:-}/course}
 A=${AUX:-${w:-}/aux}
 R=${RESULTS:-${r:-}}

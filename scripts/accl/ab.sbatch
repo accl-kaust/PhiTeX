@@ -19,7 +19,9 @@ done
 src=$w/$a
 key=$(sha256sum "$src/scripts/fetch-upstream.sh" | cut -c1-16)
 cp -a "$cache/upstream-$key/pgf" "$w/pgf"
-shim=$w/shim; mkdir -p $shim/formats; ln -sfn "$w/$a/target/release/partex" $shim/pdftex
+# (the binary: phitex, or partex in a commit from before the rename)
+rel() { if [ -x "$1/phitex" ]; then echo "$1/phitex"; else echo "$1/partex"; fi; }
+shim=$w/shim; mkdir -p $shim/formats; ln -sfn "$(rel "$w/$a/target/release")" $shim/pdftex
 run bash -c "cd $shim/formats && SOURCE_DATE_EPOCH=1700000000 TZ=UTC ../pdftex -ini -interaction=nonstopmode -jobname=pdflatex -translate-file=cp227.tcx '*pdflatex.ini' >/dev/null"
 env=(SOURCE_DATE_EPOCH=1700000000 FORCE_SOURCE_DATE=1 TZ=UTC)
 # settle the PGF subset's aux with pdflatex
@@ -29,7 +31,7 @@ echo "node $(hostname), $(nproc) CPUs, $n alternating runs"
 for i in $(seq $n); do
   for c in $a $b; do
     d=$w/run-$c; rm -rf $d; mkdir -p $d; cp $o/*.aux $o/*.out $o/*.toc $d/
-    t=$( { run env "${env[@]}" TEXFORMATS=$shim/formats: TEXINPUTS=$d:.: bash -c "cd $w/pgf/doc/generic/pgf && /usr/bin/time -f %e $w/$c/target/release/partex -engine=pdftex -fmt=pdflatex -interaction=batchmode -output-directory=$d $src/bench/inputs/pgfsub.tex >/dev/null" ; } 2>&1 | tail -1)
+    t=$( { run env "${env[@]}" TEXFORMATS=$shim/formats: TEXINPUTS=$d:.: bash -c "cd $w/pgf/doc/generic/pgf && /usr/bin/time -f %e $(rel $w/$c/target/release) -engine=pdftex -fmt=pdflatex -interaction=batchmode -output-directory=$d $src/bench/inputs/pgfsub.tex >/dev/null" ; } 2>&1 | tail -1)
     echo "pgfsub $c $t"
   done
 done

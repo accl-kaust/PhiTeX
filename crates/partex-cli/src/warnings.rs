@@ -70,7 +70,7 @@ impl Kind {
         matches!(self, Kind::OverfullHbox | Kind::OverfullVbox)
     }
 
-    /// A stable id (`--message-format=json`, `partex why`).
+    /// A stable id (`--message-format=json`, `phitex why`).
     pub fn code(self) -> &'static str {
         match self {
             Kind::OverfullHbox => "overfull-hbox",

@@ -135,7 +135,7 @@ fn unquote(v: &str) -> Option<String> {
     Some(out)
 }
 
-/// `phitex.toml` (or the older `partex.toml`) in `dir` or the nearest directory
+/// `phitex.toml` (or the older `phitex.toml`) in `dir` or the nearest directory
 /// above it: the directory it is in, and its settings.
 pub fn find(dir: &Path) -> Result<Option<(PathBuf, Config)>, String> {
     for d in dir.ancestors() {

@@ -14,7 +14,9 @@ file=${1:?file} old=${2:?old} new=${3:?new}
 P=$PWD
 CARGO_PROFILE_RELEASE_LTO=${LTO:-false} CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16 \
   cargo build --release -p partex-cli -q || exit 1
-B=$P/target/release/partex
+# (the binary: phitex, or partex in a commit from before the rename)
+rel() { if [ -x "$1/phitex" ]; then echo "$1/phitex"; else echo "$1/partex"; fi; }
+B=$(rel "$P/target/release")
 F=$w/fmt/pdflatex
 mkdir -p $w/fmt && (cd $w/fmt && ln -sf $B pdftex && timeout -s KILL 600 ./pdftex -ini -interaction=batchmode \
   -jobname=pdflatex -translate-file=cp227.tcx '*pdflatex.ini' >/dev/null 2>&1; rm -f pdftex)

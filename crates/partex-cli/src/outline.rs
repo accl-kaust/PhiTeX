@@ -1,4 +1,4 @@
-//! `partex outline FILE.tex`: the document's structure read from its
+//! `phitex outline FILE.tex`: the document's structure read from its
 //! source without running TeX (`phitex-doc`, DESIGN 4.3.6): the outline,
 //! labels, references, citations, the file graph and the guards, with the
 //! time it took. `--edits` times the layer's update after edits.
@@ -153,7 +153,7 @@ fn load() -> String {
         .unwrap_or_else(|| "?".to_owned())
 }
 
-/// Run `partex outline` with `args` (after `outline`).
+/// Run `phitex outline` with `args` (after `outline`).
 pub fn main(args: &[String]) -> ! {
     let o = match parse(args) {
         Ok(o) => o,
@@ -162,13 +162,13 @@ pub fn main(args: &[String]) -> ! {
                 println!("{USAGE}");
                 std::process::exit(if args.is_empty() { 2 } else { 0 });
             }
-            eprintln!("partex outline: {e}\n\n{USAGE}");
+            eprintln!("phitex outline: {e}\n\n{USAGE}");
             std::process::exit(2);
         }
     };
     let path = Path::new(&o.file);
     if !path.is_file() {
-        eprintln!("partex outline: {}: no such file", o.file);
+        eprintln!("phitex outline: {}: no such file", o.file);
         std::process::exit(2);
     }
     let root = path
@@ -256,7 +256,7 @@ pub fn main(args: &[String]) -> ! {
 
 fn compare_aux_file(p: &Project, v: &Views<'_>, aux: &str) {
     let Ok(text) = std::fs::read_to_string(aux) else {
-        eprintln!("partex outline: cannot read {aux}");
+        eprintln!("phitex outline: cannot read {aux}");
         return;
     };
     let c = compare_labels(v, &text);
@@ -289,7 +289,7 @@ fn compare_aux_file(p: &Project, v: &Views<'_>, aux: &str) {
 
 fn compare_toc_file(p: &Project, v: &Views<'_>, toc: &str) {
     let Ok(text) = std::fs::read_to_string(toc) else {
-        eprintln!("partex outline: cannot read {toc}");
+        eprintln!("phitex outline: cannot read {toc}");
         return;
     };
     let c = compare_toc(p, v, &text);
@@ -358,7 +358,7 @@ fn counts(p: &Project) -> [usize; 5] {
 
 fn run_edits(p: &mut Project, file: &str, o: &Options) {
     let Ok(text) = std::fs::read_to_string(file) else {
-        eprintln!("partex outline: cannot read {file}");
+        eprintln!("phitex outline: cannot read {file}");
         return;
     };
     println!(

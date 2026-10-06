@@ -16,7 +16,7 @@
 #       packed or numbered. This is the check for partex's fast output
 #       mode (DESIGN.md §7.15).
 #
-# Environment: PARTEX_BIN (default target/release/partex) and PARTEX_FMT
+# Environment: PARTEX_BIN (default target/release/phitex) and PARTEX_FMT
 # (the native format without .fmt, default the newest under the partex
 # cache). Runs are inside scripts/sandbox, in a work directory under
 # target/pdfcheck (or $PDFCHECK_DIR). Exit 0 when equal, 1 when not.
@@ -54,7 +54,7 @@ case "$cmd" in
     doc="$(cd "$(dirname "$1")" && pwd)/$(basename "$1")"
     engine=${2:-pdflatex}
     job=$(basename "$doc" .tex)
-    bin=${PARTEX_BIN:-$repo/target/release/partex}
+    bin=${PARTEX_BIN:-$repo/target/release/phitex}
     fmt=${PARTEX_FMT:-}
     if [ -z "$fmt" ]; then
       f=$(ls -t "${PARTEX_CACHE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/partex}"/formats-*/"$engine".fmt 2>/dev/null | head -1 || true)

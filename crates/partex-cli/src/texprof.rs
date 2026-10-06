@@ -145,7 +145,7 @@ pub fn report<H: Host>(tex: &Tex<H, Profiler>, path: &std::path::Path) {
         );
     }
     if let Err(e) = std::fs::write(path, out) {
-        eprintln!("partex: cannot write {}: {e}", path.display());
+        eprintln!("phitex: cannot write {}: {e}", path.display());
     }
 }
 

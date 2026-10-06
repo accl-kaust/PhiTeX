@@ -26,7 +26,7 @@ source_path="$repo/$source_dir"
 test -f "$source_path/$subdir/$input" || { echo "fetch upstream sources first" >&2; exit 2; }
 shim="$repo/target/partex-shim"
 test -x "$shim/pdflatex" && test -f "$shim/formats/pdflatex.fmt" || {
-  echo "build target/release/partex and its pdflatex format first" >&2
+  echo "build target/release/phitex and its pdflatex format first" >&2
   exit 2
 }
 

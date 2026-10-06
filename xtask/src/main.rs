@@ -25,16 +25,16 @@ commands:
   corpus    index test suites under upstream/ into corpus/manifest.json
   oracle    run the installed engines on the corpus, store outputs in refs/
   sections  tex.web port coverage (sections cited as `§N` under crates/)
-  e2e       compare partex with the oracle engines on end-to-end jobs
+  e2e       compare phitex with the oracle engines on end-to-end jobs
   ssa-edits the incremental cases as rebuilds of one SSA process, every stage
-            against plain partex (scripts/ssa-edits; its options pass through)
+            against plain phitex (scripts/ssa-edits; its options pass through)
   parallel  how much of an SSA build could run at once (PARTEX_SSA_DAG dumps)
   origins   check DIR/JOB.origins.jsonl against DIR/JOB.pdf and the sources
             (`--glyphs`: with glyphs.tex's expectations; `--dump`: each glyph)
   display   check DIR/JOB.display.jsonl (display lists) against DIR/JOB.pdf
-  trip      run Knuth's trip test on partex and compare with refs/tex/trip
-  etrip     run e-TeX's etrip test on partex and compare with pdfTeX's run
-  bench     time partex against pdflatex, record JSON in bench/results/ (--pgf: PGF subset)
+  trip      run Knuth's trip test on phitex and compare with refs/tex/trip
+  etrip     run e-TeX's etrip test on phitex and compare with pdfTeX's run
+  bench     time phitex against pdflatex, record JSON in bench/results/ (--pgf: PGF subset)
   check     fmt, clippy (with and without tracing), wasm32 build of core, tests";
 
 fn main() -> Result<()> {
@@ -141,7 +141,7 @@ fn check() -> Result<()> {
         // (and both in machine mode, the `partex watch` default)
         let knuth_machine = scope.spawn(|| trip::run(&root, &[String::from("--machine")]));
         let etex_machine = scope.spawn(|| etrip::run(&root, &[String::from("--machine")]));
-        // (SSA mode's edit sequences, every stage against plain partex:
+        // (SSA mode's edit sequences, every stage against plain phitex:
         // DESIGN.md 4.3, item 8)
         let ssa_edits = scope.spawn(|| ssa_edits_both(&root));
         let e2e = e2e::run(&root, &[]);

@@ -23,14 +23,16 @@ S=$r/summary.txt
 say() { echo "$*" | tee -a "$S"; }
 env0=(SOURCE_DATE_EPOCH=1758800000 FORCE_SOURCE_DATE=1 TZ=UTC)
 
+# (the binary: phitex, or partex in a commit from before the rename)
+rel() { if [ -x "$1/phitex" ]; then echo "$1/phitex"; else echo "$1/partex"; fi; }
 # the two binaries, built as the tree's profile says (fat LTO)
 mkdir -p "$w/bin"
 cargo build --release -p partex-cli -q || { say "BUILD FAILED"; exit 1; }
-cp target/release/partex "$w/bin/new"
+cp target/release/phitex "$w/bin/new"
 git -c advice.detachedHead=false worktree add -q -f "$w/base" "$base" || { say "NO BASE $base"; exit 1; }
 (cd "$w/base" && CARGO_TARGET_DIR="$w/base-target" cargo build --release -p partex-cli -q) ||
   { say "BASE BUILD FAILED"; exit 1; }
-cp "$w/base-target/release/partex" "$w/bin/base"
+cp "$(rel "$w/base-target/release")" "$w/bin/base"
 say "binaries: new $(git rev-parse --short=12 HEAD), base $(git -C "$w/base" rev-parse --short=12 HEAD)"
 
 # each binary's pdflatex format
