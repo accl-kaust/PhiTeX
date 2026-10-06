@@ -140,9 +140,53 @@ let hashes: string[] = [];
 let building = false;
 let connected = false;
 
+/** A link: [x0, y0, x1, y1, uri] or [x0, y0, x1, y1, page, top | null], in points from the page's top left. */
+type Link = [number, number, number, number, string | number, (number | null)?];
+/** Each page's size and links, from its draw list (`"L"`). */
+const pageLinks = new Map<number, { w: number; h: number; links: Link[] }>();
+
+/** The link under a pointer event, and its page. */
+function linkAt(e: MouseEvent): { k: number; h: number; l: Link } | null {
+  const el = (e.target as Element).closest<HTMLElement>(".slot");
+  if (!el) return null;
+  const k = Number(el.dataset.k);
+  const p = pageLinks.get(k);
+  if (!p?.links.length) return null;
+  const r = el.getBoundingClientRect();
+  const x = ((e.clientX - r.left) / r.width) * p.w;
+  const y = ((e.clientY - r.top) / r.height) * p.h;
+  const l = p.links.find((l) => x >= l[0] && x <= l[2] && y >= l[1] && y <= l[3]);
+  return l ? { k, h: p.h, l } : null;
+}
+
+// (a click on a link: a web address opens in a new tab (only http, https
+// and mailto: a PDF's javascript: is not followed); a place in the
+// document scrolls there)
+pagesEl.addEventListener("click", (e) => {
+  const hit = linkAt(e);
+  if (!hit) return;
+  e.preventDefault();
+  const to = hit.l[4];
+  if (typeof to === "string") {
+    if (/^(https?:|mailto:)/i.test(to)) window.open(to, "_blank", "noopener");
+    return;
+  }
+  const slot = pagesEl.querySelector<HTMLElement>(`.slot[data-k="${to}"]`);
+  if (!slot) return;
+  const top = hit.l[5];
+  const h = pageLinks.get(to)?.h ?? hit.h;
+  const at = top == null ? 0 : (top / h) * slot.offsetHeight;
+  scroller.scrollTo({ top: slot.offsetTop + at - 12, behavior: "auto" });
+});
+pagesEl.addEventListener("mousemove", (e) => {
+  const el = (e.target as Element).closest<HTMLElement>(".slot");
+  if (el) el.style.cursor = linkAt(e) ? "pointer" : "";
+});
+
 async function draw(k: number): Promise<void> {
   const r = await sock.request({ op: "png", page: k, dpi: 0 });
   if (!r.ok || !r.draws) return;
+  pageLinks.set(k, { w: r.draws.w, h: r.draws.h, links: r.draws.L ?? [] });
   if (k === 0 && r.draws.w && r.draws.w !== pageW) {
     pageW = r.draws.w;
     if (!zoom) viewer.redraw();
