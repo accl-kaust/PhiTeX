@@ -140,6 +140,12 @@ pub trait Env: ExpandEnv {
     fn native_word(&mut self, font: FontId, actual_text: bool, text: &[u16]) -> NativeWord {
         NativeWord::new(font, actual_text, text.into())
     }
+    /// `XeTeX`'s `get_cp_code(f, code, side)`: the `\lpcode` (`left`) or
+    /// `\rpcode` of a character or a native font's glyph.
+    fn cp_code(&self, f: FontId, code: u32, left: bool) -> i32 {
+        let _ = (f, code, left);
+        0
+    }
     /// `XeTeX`'s `new_native_character(f, c)`.
     fn native_character(&mut self, font: FontId, c: i32) -> NativeWord {
         let _ = c;
@@ -1062,6 +1068,31 @@ impl<E: Env> Breaker<'_, E> {
         })
     }
 
+    /// `XeTeX` §688 `char_pw` of node `n` (`left_pw` or `right_pw`): how far
+    /// its character, glyph or native word's end protrudes; and what
+    /// protrudes.
+    fn xetex_pw(&self, n: Option<&Node>, left: bool) -> (Scaled, Option<(FontId, u32)>) {
+        match n.and_then(|n| margin::xetex_code_at(n, left)) {
+            Some((f, c)) => (
+                margin::char_pw(self.env.cp_code(f, c, left), self.env.font(f).param(6)),
+                Some((f, c)),
+            ),
+            None => (0, None),
+        }
+    }
+
+    /// `XeTeX`'s `new_margin_kern` for node `n`, if it protrudes.
+    fn xetex_margin_kern(&self, n: Option<&Node>, left: bool) -> Option<Node> {
+        let (w, c) = self.xetex_pw(n, left);
+        let (font, code) = c?;
+        (w != 0).then_some(Node::MarginKern {
+            width: -w,
+            left,
+            font,
+            ch: u8::try_from(code).unwrap_or(0),
+        })
+    }
+
     /// pdfTeX's `new_margin_kern` for character `c`, if it protrudes.
     fn margin_kern(&self, c: Option<(FontId, u8)>, left: bool) -> Option<Node> {
         let w = self.char_pw(c, left);
@@ -1138,6 +1169,30 @@ impl<E: Env> Breaker<'_, E> {
     fn total_pw(&self, from: Option<usize>, cur_p: Option<usize>) -> (Scaled, Margins) {
         let list = &self.list;
         let l = from.and_then(|pb| self.passive[pb].cur_break).unwrap_or(0);
+        if self.p.unicode {
+            // `XeTeX` §877 `total_pw`: the same search, its margin
+            // characters native words' glyphs too
+            let right = match cur_p.map(|p| &list[p]) {
+                Some(Node::Disc(d)) if !d.pre.is_empty() => d.pre.last(),
+                _ => {
+                    let r = match cur_p {
+                        Some(p) => margin::prev(list, At::node(p)),
+                        None => margin::last(list),
+                    };
+                    margin::protchar_right(list, At::node(l), r, true)
+                }
+            };
+            let left = match &list[l] {
+                Node::Disc(d) if !d.post.is_empty() => d.post.first(),
+                Node::Disc(_) => {
+                    let start = At::node((l + 1).min(list.len() - 1));
+                    Some(margin::protchar_left(list, start, true, true))
+                }
+                _ => Some(margin::protchar_left(list, At::node(l), true, true)),
+            };
+            let pw = self.xetex_pw(left, true).0 + self.xetex_pw(right, false).0;
+            return (pw, [None, None]);
+        }
         // the right margin first
         let right = match cur_p.map(|p| &list[p]) {
             // a discretionary's pre-break text: its last character
@@ -1147,7 +1202,7 @@ impl<E: Env> Breaker<'_, E> {
                     Some(p) => margin::prev(list, At::node(p)),
                     None => margin::last(list),
                 };
-                margin_char(margin::protchar_right(list, At::node(l), r), false)
+                margin_char(margin::protchar_right(list, At::node(l), r, false), false)
             }
         };
         // then the left one
@@ -1158,10 +1213,13 @@ impl<E: Env> Breaker<'_, E> {
             } else {
                 // (past the nodes it replaced)
                 let start = At::node((l + 1).min(list.len() - 1));
-                margin_char(Some(margin::protchar_left(list, start, true)), true)
+                margin_char(Some(margin::protchar_left(list, start, true, false)), true)
             }
         } else {
-            margin_char(Some(margin::protchar_left(list, At::node(l), true)), true)
+            margin_char(
+                Some(margin::protchar_left(list, At::node(l), true, false)),
+                true,
+            )
         };
         let pw =
             |m: Option<(FontId, u8, bool)>, left| self.char_pw(m.map(|(f, c, _)| (f, c)), left);
@@ -1706,13 +1764,21 @@ impl<E: Env> Breaker<'_, E> {
                 // pdfTeX: a margin kern for the character that protrudes
                 // at the right, before the node at the break (or after a
                 // discretionary's pre-break text, which ends the line).
-                let (c, at) = if disc_break && !matches!(line[q], Node::Disc(_)) {
-                    (margin::char_at(&line[q], false), q + 1)
+                let (n, at) = if disc_break && !matches!(line[q], Node::Disc(_)) {
+                    (Some(&line[q]), q + 1)
                 } else {
                     let p = margin::prev(&line, At::node(q));
-                    (margin::find_protchar_right(&line, At::node(0), p), q)
+                    (
+                        margin::protchar_right(&line, At::node(0), p, self.p.unicode),
+                        q,
+                    )
                 };
-                if let Some(k) = self.margin_kern(c, false) {
+                let k = if self.p.unicode {
+                    self.xetex_margin_kern(n, false)
+                } else {
+                    self.margin_kern(n.and_then(|n| margin::char_at(n, false)), false)
+                };
+                if let Some(k) = k {
                     line.insert(at, k);
                 }
             }
@@ -1736,8 +1802,13 @@ impl<E: Env> Breaker<'_, E> {
             );
             if self.p.protrude_chars > 0 {
                 // pdfTeX: and one for the character at the left.
-                let c = margin::find_protchar_left(&line, At::node(0), false);
-                if let Some(k) = self.margin_kern(c, true) {
+                let n = margin::protchar_left(&line, At::node(0), false, self.p.unicode);
+                let k = if self.p.unicode {
+                    self.xetex_margin_kern(Some(n), true)
+                } else {
+                    self.margin_kern(margin::char_at(n, true), true)
+                };
+                if let Some(k) = k {
                     line.insert(0, k);
                 }
             }

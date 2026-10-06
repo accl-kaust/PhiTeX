@@ -28,6 +28,17 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                 self.fonts.skew_char[fx(f)]
             }
             NO_LIG_CODE => self.test_no_ligatures(f),
+            // `XeTeX` §460: `\lpcode`, `\rpcode` of a character or a
+            // native font's glyph
+            _ if self.unicode => {
+                let code = self.scan_glyph_number(f)?;
+                self.font_read(
+                    f,
+                    field::CODES + u32::from(m == partex_engine::web::RP_CODE_BASE),
+                );
+                self.fonts
+                    .cp_code(f, code, m == partex_engine::web::RP_CODE_BASE)
+            }
             _ => {
                 self.scan_char_num()?;
                 let c = self.cur_val;
@@ -68,6 +79,14 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                 self.fonts.skew_char[fx(f)] = self.cur_val;
                 self.font_wrote(f, field::SKEW_CHAR);
             }
+        } else if self.unicode {
+            // `XeTeX` §1307: for a native font the code is a glyph's
+            let code = self.scan_glyph_number(f)?;
+            self.scan_optional_equals()?;
+            self.scan_int()?;
+            let right = n == partex_engine::web::RP_CODE_BASE;
+            self.fonts.set_cp_code(f, code, right, self.cur_val);
+            self.font_wrote(f, field::CODES + u32::from(right));
         } else {
             self.scan_char_num()?;
             let c = self.cur_val;
@@ -83,6 +102,28 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             }
         }
         Ok(())
+    }
+
+    /// `XeTeX` §467 `scan_glyph_number`: in a native font, a glyph by
+    /// name (`/name`), by character (`u` and a character number) or by
+    /// number; in a TFM font a character number.
+    fn scan_glyph_number(&mut self, f: i32) -> Result<u32, Jump> {
+        let Some(nf) = self.native_font(f).cloned() else {
+            self.scan_char_num()?;
+            return Ok(self.cur_val.cast_unsigned());
+        };
+        if self.scan_keyword(b"/")? {
+            // `scan_and_pack_name`
+            self.scan_file_name()?;
+            self.pack_file_name(self.cur_name, self.cur_area, self.cur_ext);
+            self.cur_val = nf.font.map_glyph_to_index(&self.name_of_file);
+        } else if self.scan_keyword(b"u")? {
+            self.scan_char_num()?;
+            self.cur_val = nf.font.map_char_to_glyph(self.cur_val);
+        } else {
+            self.scan_int()?;
+        }
+        Ok(self.cur_val.cast_unsigned())
     }
 
     /// pdfTeX's `expand_font_name`: `f`'s name with `+e` or `-e`, a new

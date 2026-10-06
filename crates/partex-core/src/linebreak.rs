@@ -39,6 +39,13 @@ impl<H: Host, T: Tracker> Fonts for BreakEnv<'_, H, T> {
 }
 
 impl<H: Host, T: Tracker> linebreak::Env for BreakEnv<'_, H, T> {
+    fn cp_code(&self, f: FontId, code: u32, left: bool) -> i32 {
+        let f = i32::from(f.0);
+        // (a protrusion is in thousandths of the font's quad, a parameter)
+        self.0.font_read(f, field::PARAMS);
+        self.0.font_read(f, field::CODES + u32::from(!left));
+        self.0.fonts.cp_code(f, code, !left)
+    }
     fn lc_code(&self, c: u8) -> i32 {
         self.0.lc_code(i32::from(c))
     }
@@ -308,7 +315,12 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             max_hyphenatable_length: self.max_hyphenatable_length(),
             unicode: self.unicode,
             tracing: self.int_par(TRACING_PARAGRAPHS_CODE) > 0,
-            protrude_chars: self.int_par(PDF_PROTRUDE_CHARS_CODE),
+            // (`XeTeX`'s is `\XeTeXprotrudechars`)
+            protrude_chars: self.int_par(if self.unicode {
+                XETEX_PROTRUDE_CHARS_CODE
+            } else {
+                PDF_PROTRUDE_CHARS_CODE
+            }),
             adjust_spacing: self.int_par(PDF_ADJUST_SPACING_CODE),
             pack: self.hpack_params(),
             pdftex_bugs: self.params.pdftex_bugs,

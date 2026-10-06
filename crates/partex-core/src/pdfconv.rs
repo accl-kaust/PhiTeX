@@ -454,7 +454,12 @@ impl<H: Host, T: Tracker> Tex<H, T> {
     /// pdfTeX §688: `pdf_error`: a fatal error.
     pub(crate) fn pdf_error<R>(&mut self, t: &[u8], p: &[u8]) -> Result<R, Jump> {
         self.normalize_selector()?;
-        self.print_err(b"pdfTeX error");
+        // (`XeTeX` §198's is plain "Error")
+        self.print_err(if self.unicode {
+            b"Error"
+        } else {
+            b"pdfTeX error"
+        });
         if !t.is_empty() {
             self.print_str(b" (");
             self.print_str(t);

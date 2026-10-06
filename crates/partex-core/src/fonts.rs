@@ -255,7 +255,16 @@ partex_engine::persist_struct!(Expand {
 });
 
 /// The character code tables of a font, indexed by [`Code`].
-pub(crate) type Codes = [Option<Arc<[i32; 256]>>; 8];
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
+pub(crate) struct Codes {
+    tables: [Option<Arc<[i32; 256]>>; 8],
+    /// `XeTeX`'s `\lpcode` and `\rpcode` (`hz.cpp`'s maps, by code and
+    /// side: a TFM font's character or a native font's glyph, and the
+    /// value as assigned).
+    xetex: Option<Arc<alloc::collections::BTreeMap<(u32, bool), i32>>>,
+}
+
+partex_engine::persist_struct!(Codes { tables, xetex });
 
 /// pdfTeX's per-character codes of a font.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -622,7 +631,7 @@ impl FontData {
     /// An expanded font has its base font's codes (pdfTeX shares the
     /// tables).
     pub(crate) fn code(&self, f: i32, code: Code, c: u8) -> i32 {
-        self.codes[fx(self.base(f))][code as usize]
+        self.codes[fx(self.base(f))].tables[code as usize]
             .as_ref()
             .map_or(code.default(), |t| t[usize::from(c)])
     }
@@ -637,7 +646,7 @@ impl FontData {
 
     /// Whether font `f` has a table for `code`.
     pub(crate) fn has_codes(&self, f: i32, code: Code) -> bool {
-        self.codes[fx(f)][code as usize].is_some()
+        self.codes[fx(f)].tables[code as usize].is_some()
     }
 
     /// pdfTeX's `set_lp_code` …
@@ -645,8 +654,8 @@ impl FontData {
     /// nothing, so a table made by assigning defaults is the absent one).
     pub(crate) fn set_code(&mut self, f: i32, code: Code, c: u8, v: i32) {
         let (lo, hi) = code.range();
-        let t =
-            self.codes[fx(f)][code as usize].get_or_insert_with(|| Arc::new([code.default(); 256]));
+        let t = self.codes[fx(f)].tables[code as usize]
+            .get_or_insert_with(|| Arc::new([code.default(); 256]));
         let e = &mut Arc::make_mut(t)[usize::from(c)];
         let (old, new) = (*e, v.clamp(lo, hi));
         *e = new;
@@ -659,6 +668,29 @@ impl FontData {
         };
         let sum = &mut self.code_sum[fx(f)][code as usize];
         *sum = sum.wrapping_sub(entry(old)).wrapping_add(entry(new));
+    }
+
+    /// `XeTeX`'s `get_cp_code(f, code, side)`: the `\lpcode` (or
+    /// `\rpcode` if `right`) of character or glyph `code`, 0 if none was
+    /// assigned.
+    pub(crate) fn cp_code(&self, f: i32, code: u32, right: bool) -> i32 {
+        self.codes[fx(f)]
+            .xetex
+            .as_ref()
+            .and_then(|m| m.get(&(code, right)).copied())
+            .unwrap_or(0)
+    }
+
+    /// `XeTeX`'s `set_cp_code(f, code, side, v)` (any value: `XeTeX`
+    /// clamps none). The version sum moves as [`Self::set_code`]'s.
+    pub(crate) fn set_cp_code(&mut self, f: i32, code: u32, right: bool, v: i32) {
+        let m = self.codes[fx(f)].xetex.get_or_insert_with(Arc::default);
+        let old = Arc::make_mut(m).insert((code, right), v).unwrap_or(0);
+        let entry = |x: i32| {
+            if x == 0 { 0 } else { Version::of(&(code, x)).0 }
+        };
+        let sum = &mut self.code_sum[fx(f)][usize::from(right)];
+        *sum = sum.wrapping_sub(entry(old)).wrapping_add(entry(v));
     }
 
     /// The metrics of font `f`, to change (copied first if shared).

@@ -9,7 +9,7 @@
 use alloc::vec::Vec;
 
 use crate::Scaled;
-use crate::node::{FontId, Node};
+use crate::node::{FontId, Node, Whatsit};
 use crate::scaled::round_xn_over_d;
 
 /// pdfTeX's `auto_kern` kern subtype.
@@ -105,6 +105,34 @@ pub fn cp_skipable(n: &Node) -> bool {
     }
 }
 
+/// `XeTeX`'s `cp_skipable`: pdfTeX's, but no whatsit (a native word or
+/// glyph protrudes, and the others end the search).
+fn skipable(n: &Node, xetex: bool) -> bool {
+    !(xetex && matches!(n, Node::Whatsit(_))) && cp_skipable(n)
+}
+
+/// `XeTeX`'s margin character of node `n`, if it is one: a character (or
+/// a ligature's), a native word's first (`left`) or last glyph, or a
+/// glyph; its font and code (a native font's glyph).
+#[must_use]
+pub fn xetex_code_at(n: &Node, left: bool) -> Option<(FontId, u32)> {
+    match n {
+        Node::Whatsit(w) => match &**w {
+            Whatsit::NativeWord(w) => {
+                let g = if left {
+                    w.glyphs.first()
+                } else {
+                    w.glyphs.last()
+                }?;
+                Some((w.font, u32::from(g.gid)))
+            }
+            Whatsit::Glyph(g) => Some((g.font, u32::from(g.gid))),
+            _ => None,
+        },
+        n => char_at(n, left).map(|(f, c)| (f, u32::from(c))),
+    }
+}
+
 /// An hlist node with no dimensions and no list (as `\parindent=0pt`
 /// makes).
 fn empty_hbox(n: &Node) -> bool {
@@ -154,12 +182,13 @@ pub fn char_at(n: &Node, left: bool) -> Option<(FontId, u8)> {
 /// that protrudes into the left margin, if the search ends at one.
 #[must_use]
 pub fn find_protchar_left(list: &[Node], start: At, discardables: bool) -> Option<(FontId, u8)> {
-    char_at(protchar_left(list, start, discardables), true)
+    char_at(protchar_left(list, start, discardables, false), true)
 }
 
-/// The node `find_protchar_left` ends at.
+/// The node `find_protchar_left` ends at (`xetex`: `XeTeX`'s search,
+/// which no whatsit is skipped by).
 #[must_use]
-pub fn protchar_left(list: &[Node], start: At, discardables: bool) -> &Node {
+pub fn protchar_left(list: &[Node], start: At, discardables: bool, xetex: bool) -> &Node {
     let mut l = start;
     if let Some(n) = next(list, l).filter(|_| empty_hbox(get(list, l))) {
         l = n; // for a paragraph start with \parindent=0pt
@@ -182,7 +211,7 @@ pub fn protchar_left(list: &[Node], start: At, discardables: bool) -> &Node {
             cur = inner;
             l = At::node(0);
         }
-        while run && cp_skipable(get(cur, l)) {
+        while run && skipable(get(cur, l), xetex) {
             while next(cur, l).is_none()
                 && let Some((up, at)) = stack.pop()
             {
@@ -206,12 +235,12 @@ pub fn protchar_left(list: &[Node], start: At, discardables: bool) -> &Node {
 /// one.
 #[must_use]
 pub fn find_protchar_right(list: &[Node], l: At, r: Option<At>) -> Option<(FontId, u8)> {
-    protchar_right(list, l, r).and_then(|n| char_at(n, false))
+    protchar_right(list, l, r, false).and_then(|n| char_at(n, false))
 }
 
-/// The node `find_protchar_right` ends at.
+/// The node `find_protchar_right` ends at (`xetex`: `XeTeX`'s search).
 #[must_use]
-pub fn protchar_right(list: &[Node], l: At, r: Option<At>) -> Option<&Node> {
+pub fn protchar_right(list: &[Node], l: At, r: Option<At>, xetex: bool) -> Option<&Node> {
     let (mut l, mut r) = (l, r?);
     let mut cur = list;
     let mut stack: Vec<(&[Node], At, At)> = Vec::new();
@@ -224,7 +253,7 @@ pub fn protchar_right(list: &[Node], l: At, r: Option<At>) -> Option<&Node> {
             l = At::node(0);
             r = last(inner)?;
         }
-        while run && cp_skipable(get(cur, r)) {
+        while run && skipable(get(cur, r), xetex) {
             while r == l
                 && let Some((up, ul, ur)) = stack.pop()
             {
