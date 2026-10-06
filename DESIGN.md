@@ -1931,6 +1931,16 @@ memory is the watch's:
 - The job's own output files are not edits: the watch records what it
   wrote and rebuilds only for an edit; a job whose files never settle
   stops at the fifth pass with an `Unsettled` line.
+- Every region reads the lump (`Rest`), so state in it that differs
+  makes every later region run again, though few read it. The PDF
+  writer's object lists' heads, the outlines' first, last and parent and
+  the catalog's open action are cells of their own (`MCell::PdfWord`):
+  hyperref makes the outlines from the `.out` file at
+  `\begin{document}`, and one more outline shifts the outline objects'
+  numbers. Measured (2026-10-07) on the course, one `\section` added in
+  chapter 15: the second pass re-ran 70.4M commands of 70.4M (81 s), now
+  7.0M (13 s); the first pass re-runs 23.5M (35 s), from the section to
+  where the page marks agree again.
 - The store's save writes each blob to its pack as the saver makes it,
   and the blobs' references in frames: it holds the build, its copy and
   a batch, not every blob as encoded, as kept and as packed at once.

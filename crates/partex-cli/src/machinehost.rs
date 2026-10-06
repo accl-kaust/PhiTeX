@@ -1612,6 +1612,7 @@ fn switches(m: &mut TexMachine<MachineHost>) {
     partex_core::machine::set_clean_cuts(!off("PARTEX_MACHINE_CLEAN_CUTS"));
     partex_core::machine::set_page_cells(!off("PARTEX_MACHINE_PAGE_CELL"));
     partex_core::machine::set_pdf_last_cells(!off("PARTEX_MACHINE_PDF_LAST"));
+    partex_core::machine::set_pdf_word_cells(!off("PARTEX_MACHINE_PDF_WORDS"));
     partex_core::machine::set_tree_names(!off("PARTEX_MACHINE_TREE_NAMES"));
     partex_core::machine::set_num_answers(!off("PARTEX_MACHINE_NUM_ANSWERS"));
     partex_core::machine::set_canon(
@@ -1982,6 +1983,7 @@ fn dump_why_dirty(b: &Build<Machine>) {
 fn cell_kind(c: &MCell) -> String {
     match c {
         MCell::PdfLast(k) => format!("PdfLast({k})"),
+        MCell::PdfWord(k) => format!("PdfWord({k})"),
         c => {
             let s = format!("{c:?}");
             s.split('(').next().unwrap_or_default().to_owned()
@@ -2637,6 +2639,8 @@ pub struct Watch {
     /// resolved them (`PARTEX_MACHINE_LINK_CACHE=0`: none kept).
     link_cache: partex_core::effects::LinkCache,
     tick: u32,
+    /// Rebuilds audited (`PARTEX_MACHINE_AUDIT=1`), to number them.
+    audits: usize,
     /// A rebuild ran since the last [`Watch::idle`].
     idle: bool,
     /// The store the build is kept in across processes.
@@ -2724,6 +2728,7 @@ impl Watch {
             linked: None,
             link_cache: partex_core::effects::LinkCache::default(),
             tick: 0,
+            audits: 0,
             idle: false,
             keeper: None,
             last_changes: Vec::new(),
@@ -3066,6 +3071,10 @@ impl Watch {
         };
         let done = self.b.rebuild_or_stop(new, &cells, &self.cfg, &stop);
         let elapsed = t.elapsed();
+        if self.cfg.audit {
+            self.audits += 1;
+            dump_audit(&self.b, self.audits);
+        }
         let report = self.report(elapsed);
         let line = format!(
             "phitex: machine: {} in {:.1} ms: {} of {} regions re-run ({} changed)",

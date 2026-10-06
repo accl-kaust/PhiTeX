@@ -591,6 +591,10 @@ pub trait Tracker {
     /// Before a read or a write of pdfTeX's `last_item` value `k`
     /// (`pdf::PdfLast`: `\pdflastlink` and its siblings).
     fn pdf_last_access(&self, _k: u8, _write: bool) {}
+    /// Before a read or a write of the PDF writer's word `k`
+    /// (`pdf::word`: the outlines' first, last and parent, the
+    /// catalog's open action), a write if `write` (which reads it too).
+    fn pdf_word_access(&self, _k: u8, _write: bool) {}
     /// Macro `cs` is about to be expanded.
     fn macro_call(&self, _cs: i32) {}
     /// Macro `cs` has its arguments, whose tokens hash to `hash`.

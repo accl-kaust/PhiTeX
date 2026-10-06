@@ -21,6 +21,19 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         }
     }
 
+    /// Before the outlines' first, last and parent are read and set (the
+    /// tracker is told: `pdf::word`).
+    fn outline_words_access(&self) {
+        for k in [
+            super::word::FIRST_OUTLINE,
+            super::word::LAST_OUTLINE,
+            super::word::PARENT_OUTLINE,
+        ] {
+            self.tracker.pdf_word_access(k, false);
+            self.tracker.pdf_word_access(k, true);
+        }
+    }
+
     /// `outline_list_count`: the entries at `p`'s level up to `p`.
     fn outline_list_count(&self, mut p: i32) -> i32 {
         let mut k = 1;
@@ -47,6 +60,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             0
         };
         let q = self.scan_pdf_ext_toks()?;
+        self.outline_words_access();
         let j = self.pdf_new_obj(OBJ_TYPE_OTHERS, 0, 1)?;
         self.write_action(&action)?;
         self.pdf_end_obj();
@@ -131,6 +145,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
 
     /// pdfTeX §800–§801: "Output outlines"; the `/Outlines` object, or 0.
     pub(crate) fn output_outlines(&mut self) -> Result<i32, Jump> {
+        self.outline_words_access();
         if self.pdf.first_outline == 0 {
             return Ok(0);
         }

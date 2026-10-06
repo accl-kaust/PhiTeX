@@ -528,6 +528,8 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                     super::concat(&mut self.pdf.catalog_toks, &t);
                 }
                 if self.scan_keyword(b"openaction")? {
+                    self.tracker
+                        .pdf_word_access(super::word::CATALOG_OPENACTION, false);
                     if self.pdf.catalog_openaction != 0 {
                         return self
                             .pdf_error(b"ext1", b"duplicate of openaction")
@@ -536,6 +538,8 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                     let a = self.scan_action()?;
                     let o = self.pdf_new_obj(super::objtab::OBJ_TYPE_OTHERS, 0, 1)?;
                     if self.int_par(PDF_OUTPUT_CODE) > 0 {
+                        self.tracker
+                            .pdf_word_access(super::word::CATALOG_OPENACTION, true);
                         self.pdf.catalog_openaction = o;
                     }
                     self.write_action(&a)?;
