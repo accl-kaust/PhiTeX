@@ -169,6 +169,53 @@ mod tests {
             "{tail}"
         );
         assert!(tail.ends_with("},\"o\":[[1,0,1],[0,0,1]]}"), "{tail}");
+        // (an image changed under the same name changes the page's hash)
+        let mut b = objs.clone();
+        b[4] = b[4].replace("\u{ff}\u{0}\u{0}\u{0}", "\u{0}\u{0}\u{0}\u{0}");
+        assert_ne!(
+            crate::pdfdraw::hashes(&a),
+            crate::pdfdraw::hashes(&raw_pdf(&b))
+        );
+    }
+
+    #[test]
+    fn forms() {
+        // (a form through its matrix, with its own fonts; a form inside
+        // it with no resources, its parent's; a form that paints itself,
+        // stopped 16 deep and counted as not drawn)
+        let stream =
+            |d: &str, s: &str| format!("<< {d} /Length {} >>\nstream\n{s}\nendstream", s.len());
+        let objs = [
+            "<< /Type /Catalog /Pages 2 0 R >>".to_owned(),
+            "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_owned(),
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 100] /Contents 4 0 R \
+             /Resources << /XObject << /Fm1 5 0 R >> >> >>"
+                .to_owned(),
+            stream("", "q 2 0 0 2 10 10 cm /Fm1 Do Q"),
+            stream(
+                "/Type /XObject /Subtype /Form /Matrix [1 0 0 1 5 0] /Resources \
+                 << /Font << /F2 6 0 R >> /XObject << /Fm2 7 0 R /Fm3 8 0 R >> >>",
+                "0 0 1 rg 0 0 m 10 0 l 10 10 l f BT /F2 5 Tf (A) Tj ET /Fm2 Do /Fm3 Do",
+            ),
+            "<< /Type /Font /Subtype /Type1 /BaseFont /CMR10 /FirstChar 65 /Widths [750] >>"
+                .to_owned(),
+            stream("/Type /XObject /Subtype /Form", "0 g 0 0 m 1 0 l S"),
+            stream(
+                "/Type /XObject /Subtype /Form /Resources << /XObject << /Fm3 8 0 R >> >>",
+                "/Fm3 Do",
+            ),
+        ];
+        let d = crate::Pdf::open(&raw_pdf(&objs))
+            .unwrap()
+            .draw(0, &mut crate::Fonts::new())
+            .unwrap();
+        assert_eq!(
+            d,
+            "{\"v\":2,\"w\":200,\"h\":100,\"f\":[\"roman\"],\"F\":[\"CMR10\"],\"g\":{},\
+             \"t\":[[0,10,90,\"20\",\"A\",0,\"#0000ff\"]],\
+             \"p\":[[\"M20 90L40 90L40 70\",\"#0000ff\",null,2],[\"M20 90L22 90\",null,\"#000000\",2]],\
+             \"r\":[],\"o\":[[0,0,1],[2,0,1],[0,1,1]],\"x\":1}"
+        );
     }
 
     fn run(

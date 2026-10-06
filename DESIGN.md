@@ -2811,7 +2811,12 @@ anything else is decoded and encoded as a PNG (`miniz_oxide`), `/SMask`
 as its alpha, an `/ImageMask` in the fill colour. `"o"`
 (`[[list,first,count]]`, list 0 paths, 1 images, 2 text) is the paint
 order when it is not paths, images, text; `"x"` counts what is not drawn
-yet (form XObjects, shadings, clips).
+yet (shadings, clips). A form `XObject` is drawn in place through its
+`/Matrix`, with its own resources (its fonts join the page's `F`, one ref
+for a font both name) or its parent's, 16 deep at most (`matplotlib`'s
+figures, `\includegraphics` of a PDF). A page's hash covers the bytes of
+the `XObject`s it can paint, so an image or form changed under the same
+name changes the page.
 
 **Protocol.** The extension core's requests (`session.ts`'s `CoreReq`,
 `CoreRes`) as JSON: `{"id":N,"op":…}` answered `{"id":N,"ok":…,"json":…,
