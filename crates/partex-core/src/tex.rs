@@ -116,6 +116,11 @@ pub struct Tex<H: Host, T: Tracker = Untracked> {
     pub(crate) save_arith_error: bool,
     pub(crate) remainder: i32,
 
+    /// `XeTeX` §767: `cur_f`, the font of the last math character
+    /// fetched, which `XeTeX`'s math reads after the fact (whether it is
+    /// an OpenType math font); `null_font` in TeX and pdfTeX.
+    pub(crate) cur_f: i32,
+
     /// §304: the current line number in the current source file.
     pub(crate) line: i32,
 
@@ -660,6 +665,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             arith_error: false,
             save_arith_error: false,
             remainder: 0,
+            cur_f: 0,
             buffer: crate::flat::Flat::new(vec![0; buf_size + 1]),
             first: 0,
             last: 0,

@@ -1516,6 +1516,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             arith_error,
             save_arith_error,
             remainder,
+            cur_f,
             line,
             buffer,
             first,
@@ -2093,6 +2094,10 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             *first_count,
         ));
         c.put(&(*arith_error, *save_arith_error, *remainder));
+        if *cur_f != 0 {
+            // (`XeTeX`'s only)
+            c.put(cur_f);
+        }
         c.put(&(*interaction, *deletions_allowed, *set_box_allowed, *history));
         c.put(&(*error_count, help_line, *help_ptr, *use_err_help));
         c.put(&(*special_printing, *message_printing, *no_convert));

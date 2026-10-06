@@ -331,8 +331,13 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         self.get_x_token()?;
         if self.cur_cmd == RELAX && self.cur_chr == NO_EXPAND_FLAG {
             self.cur_cmd = ACTIVE_CHAR;
-            self.cur_chr = crate::wide::active_char(self.cur_tok - CS_TOKEN_FLAG)
-                .unwrap_or(self.cur_tok - CS_TOKEN_FLAG - ACTIVE_BASE);
+            self.cur_chr = match crate::wide::active_char(self.cur_tok - CS_TOKEN_FLAG) {
+                Some(c) => c,
+                // (`XeTeX`'s `cur_tok-cs_token_flag-active_base` of another
+                // control sequence is past every scalar value)
+                None if self.unicode => TOO_BIG_USV,
+                None => self.cur_tok - CS_TOKEN_FLAG - ACTIVE_BASE,
+            };
         }
         Ok(())
     }
@@ -350,15 +355,17 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         // condition.
         let b = match this_if {
             IF_CHAR_CODE | IF_CAT_CODE => {
-                // §506: test if two characters match.
+                // §506: test if two characters match (`XeTeX` §541: any
+                // scalar value is one).
+                let biggest = if self.unicode { BIGGEST_USV } else { 255 };
                 self.get_x_token_or_active_char()?;
-                let (m, n) = if self.cur_cmd > ACTIVE_CHAR || self.cur_chr > 255 {
+                let (m, n) = if self.cur_cmd > ACTIVE_CHAR || self.cur_chr > biggest {
                     (RELAX, TOO_BIG_USV) // not a character
                 } else {
                     (self.cur_cmd, self.cur_chr)
                 };
                 self.get_x_token_or_active_char()?;
-                if self.cur_cmd > ACTIVE_CHAR || self.cur_chr > 255 {
+                if self.cur_cmd > ACTIVE_CHAR || self.cur_chr > biggest {
                     self.cur_cmd = RELAX;
                     self.cur_chr = TOO_BIG_USV;
                 }

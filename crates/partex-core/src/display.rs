@@ -617,19 +617,37 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         }
     }
 
-    /// §691: print family and character.
-    pub(crate) fn print_fam_and_char(&mut self, fam: u8, ch: u8) {
+    /// §691: print family and character (`XeTeX` §733: one past the
+    /// first plane as itself).
+    pub(crate) fn print_fam_and_char(&mut self, fam: u8, ch: u32) {
         self.print_esc(b"fam");
         self.print_int(i32::from(fam));
         self.print_char(b' ');
-        self.print(i32::from(ch));
+        self.print_math_char(ch);
     }
 
-    /// §691: print a delimiter as a 24-bit hex value.
+    /// The character of a math field as §691 prints it (`print_ASCII`;
+    /// in `XeTeX` `print_char` past the first plane).
+    pub(crate) fn print_math_char(&mut self, ch: u32) {
+        match i32::try_from(ch) {
+            Ok(c) if ch < 0x1_0000 => self.print_chr(c),
+            _ => self.print_char_x(ch),
+        }
+    }
+
+    /// §691: print a delimiter as a 24-bit hex value (`XeTeX`'s 21-bit
+    /// characters may overflow it).
     pub(crate) fn print_delimiter(&mut self, d: Delim) {
-        let a = i32::from(d.small_fam) * 256 + i32::from(d.small_char);
-        let a = a * 0x1000 + i32::from(d.large_fam) * 256 + i32::from(d.large_char);
-        self.print_hex(a);
+        let a = (i32::from(d.small_fam) * 256).wrapping_add(d.small_char.cast_signed());
+        let a = a
+            .wrapping_mul(0x1000)
+            .wrapping_add(i32::from(d.large_fam) * 256)
+            .wrapping_add(d.large_char.cast_signed());
+        if a < 0 {
+            self.print_int(a); // this should never happen
+        } else {
+            self.print_hex(a);
+        }
     }
 
     /// §692: display a noad field.
@@ -688,7 +706,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                 self.print_esc(b"radical");
                 self.print_delimiter(*d);
             }
-            Kind::Accent { fam, ch } => {
+            Kind::Accent { fam, ch, .. } => {
                 self.print_esc(b"accent");
                 self.print_fam_and_char(*fam, *ch);
             }
@@ -706,9 +724,12 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             }
             Kind::Fraction { .. } => {}
         }
+        // (`XeTeX` shows an accent's subtype as an operator's)
         match p.kind {
-            Kind::Op(Limits::Limits) => self.print_esc(b"limits"),
-            Kind::Op(Limits::NoLimits) => self.print_esc(b"nolimits"),
+            Kind::Op(Limits::Limits) | Kind::Accent { sub: 1, .. } => self.print_esc(b"limits"),
+            Kind::Op(Limits::NoLimits) | Kind::Accent { sub: 2.., .. } => {
+                self.print_esc(b"nolimits");
+            }
             _ => {}
         }
         if !matches!(p.kind, Kind::Left(_) | Kind::Right(_) | Kind::Middle(_)) {

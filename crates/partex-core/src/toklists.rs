@@ -100,6 +100,22 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                 return Ok(self.tok_from(&toks));
             }
             let text = self.tokens_text(&toks);
+            if self.unicode {
+                // (`XeTeX`'s `str_toks`: the string's characters, its
+                // surrogate pairs joined)
+                let chars: alloc::vec::Vec<i32> = crate::strings::decode_chars(&text)
+                    .map(crate::input::ci)
+                    .collect();
+                return Ok(self.pooled_list(|p| {
+                    for c in chars {
+                        p.push(if c == i32::from(b' ') {
+                            SPACE_TOKEN
+                        } else {
+                            OTHER_TOKEN + c
+                        });
+                    }
+                }));
+            }
             return Ok(self.text_toks(&text));
         }
         self.get_x_token()?;

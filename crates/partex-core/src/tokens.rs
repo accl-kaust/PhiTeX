@@ -679,6 +679,14 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                 e(self, b"mathchar");
                 self.print_hex(chr_code);
             }
+            // `XeTeX` §1277
+            XETEX_MATH_GIVEN => {
+                use crate::mathcodes::{math_char_field, math_class_field, math_fam_field};
+                e(self, b"Umathchar");
+                self.print_hex(math_class_field(chr_code));
+                self.print_hex(math_fam_field(chr_code));
+                self.print_hex(math_char_field(chr_code));
+            }
             // §1231
             DEF_CODE => {
                 let s: &[u8] = if chr_code == XORD_CODE_BASE {
