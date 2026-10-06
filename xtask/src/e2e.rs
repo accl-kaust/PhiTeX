@@ -537,7 +537,11 @@ const CASES: &[Case] = &[
             &["-fmt=xelatex", "-interaction=nonstopmode", "xelatex-pics"],
             &["-fmt=xelatex", "-interaction=nonstopmode", "xelatex-math"],
             &["-fmt=xelatex", "-interaction=nonstopmode", "xelatex-math"],
-            &["-fmt=xelatex", "-interaction=nonstopmode", "xelatex-math-mix"],
+            &[
+                "-fmt=xelatex",
+                "-interaction=nonstopmode",
+                "xelatex-math-mix",
+            ],
             &[
                 "-fmt=xelatex",
                 "-interaction=nonstopmode",
