@@ -5,7 +5,7 @@ binary, no `PARTEX_*` variable) run on the same sources.
 
     scripts/sandbox scripts/ssa-edits [--case NAME]... [--bin PATH]
         [--work DIR] [--jobs N] [--fixpoint] [--check] [--env K=V]...
-        [--timeout S] [--mem-gb N] [--brief]
+        [--timeout S] [--mem-gb N] [--brief] [--workers N]
 
 (`cargo xtask ssa-edits` runs it on the release binary, and `cargo xtask
 check` with `--brief`.)
@@ -69,6 +69,10 @@ Each case runs in WORK/<case>/:
   each rebuild one trip, linked, then the idle settle, as an editor's);
 - `logs/`: each process's terminal output and stderr; `results.json` in
   WORK holds every number.
+
+`--workers N` runs the SSA process with `PHITEX_SSA_WORKERS=N` (its
+steps on N workers): every stage must still be the oracle's, byte for
+byte, as with one.
 
 The formats are built once per binary, in WORK/formats. Exits 1 if a stage
 of a case differs or its SSA process failed, 2 on a usage error.
@@ -1130,6 +1134,8 @@ def judge(case, cdir, runs, code, err, last):
             m = rebuilt[k]
             s["ms"], s["rebuild_ms"], s["link_ms"] = (float(m.group(i)) for i in (2, 3, 4))
             s["steps"] = count(m.group(5), "steps run")
+            s["steps_same"] = count(m.group(5), "definitions the same")
+            s["dropped"] = count(m.group(5), "runs dropped")
             s["commands"] = count(m.group(5), "commands")
             s["edits_seen"] = count(m.group(5), "edits")
         else:
@@ -1222,6 +1228,8 @@ def main():
     ap.add_argument("--check", action="store_true", help="the SSA process in check mode")
     ap.add_argument("--env", action="append", default=[], metavar="K=V",
                     help="a variable for the SSA process (repeatable)")
+    ap.add_argument("--workers", type=int, default=None, metavar="N",
+                    help="the SSA process's steps on N workers (PHITEX_SSA_WORKERS=N)")
     ap.add_argument("--timeout", type=int, default=600, help="seconds per process (default 600)")
     ap.add_argument("--mem-gb", type=int, default=8,
                     help="virtual memory cap per process, GB (default 8)")
@@ -1234,7 +1242,12 @@ def main():
         return 2
     if any("=" not in kv for kv in opts.env):
         ap.error("--env takes K=V")
-    ignored = sorted(k for k in os.environ if k.startswith("PARTEX_") and k != "PARTEX_SANDBOX")
+    if opts.workers is not None:
+        if opts.workers < 1:
+            ap.error("--workers takes N >= 1")
+        opts.env.append(f"PHITEX_SSA_WORKERS={opts.workers}")
+    ignored = sorted(k for k in os.environ
+                     if k.startswith(("PARTEX_", "PHITEX_")) and k != "PARTEX_SANDBOX")
     if ignored:
         print(f"ssa-edits: ignoring {', '.join(ignored)} (--env K=V passes a variable "
               "to the SSA process)", file=sys.stderr)

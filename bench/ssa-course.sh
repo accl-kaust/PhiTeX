@@ -148,6 +148,8 @@ for k, what in enumerate(whats, 1):
         rest = m.group(4)
         row.update(ms=float(m.group(1)), rebuild_ms=float(m.group(2)),
                    link_ms=float(m.group(3)), steps_run=num(r"\bsteps run (\d+)", rest),
+                   steps_same=num(r"\bdefinitions the same (\d+)", rest),
+                   runs_dropped=num(r"\bruns dropped (\d+)", rest),
                    commands=num(r"\bcommands (\d+)", rest),
                    reads_checked=num(r"\breads checked (\d+)", rest),
                    readers_marked=num(r"\breaders marked (\d+)", rest),

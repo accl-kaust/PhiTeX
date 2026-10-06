@@ -54,10 +54,10 @@ args=(
   --setenv TEXMFVAR /tmp/texmf-var
   --setenv PARTEX_SANDBOX 1
 )
-# partex's own switches (PARTEX_PERSIST_CHECK, PARTEX_WATCH_DEBUG, ...) pass
+# phitex's own switches (PARTEX_PERSIST_CHECK, PHITEX_SSA_WORKERS, ...) pass
 # through.
 while IFS='=' read -r name value; do
-  [[ $name == PARTEX_* && $name != PARTEX_SANDBOX ]] && args+=(--setenv "$name" "$value")
+  [[ ($name == PARTEX_* || $name == PHITEX_*) && $name != PARTEX_SANDBOX ]] && args+=(--setenv "$name" "$value")
 done < <(env)
 # A separate target directory (inside the repo) passes through too.
 [ -n "${CARGO_TARGET_DIR:-}" ] && args+=(--setenv CARGO_TARGET_DIR "$CARGO_TARGET_DIR")
