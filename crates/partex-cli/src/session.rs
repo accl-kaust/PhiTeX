@@ -3677,6 +3677,7 @@ fn kind_code(k: Query) -> u8 {
         Query::File(FileKind::MiscFonts) => 14,
         Query::File(FileKind::FontIndex) => 15,
         Query::File(FileKind::XdvPipe) => 16,
+        Query::File(FileKind::Pict) => 17,
     }
 }
 
@@ -3699,6 +3700,7 @@ fn kind_from_code(c: u8) -> Option<Query> {
         14 => FileKind::MiscFonts,
         15 => FileKind::FontIndex,
         16 => FileKind::XdvPipe,
+        17 => FileKind::Pict,
         _ => return None,
     }))
 }

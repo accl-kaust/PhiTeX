@@ -1,10 +1,10 @@
 //! pdfximage.c, pdfximage.h: the XObjects (images and forms) cache.
 //!
 //! A `pdf_ximage *` is an `xobj_id: i32`, the index into
-//! `self.ximage.ximages`. The loaders (pngimage, jpegimage, epdf) take the
-//! id of the entry `load_image` made and fill it with
-//! `pdf_ximage_set_image` / `pdf_ximage_set_form`. jp2image, bmpimage,
-//! mpost (MetaPost/EPS) and the `ps_include_page` distiller are not ported.
+//! `self.ximage.ximages`. The loaders (pngimage, jpegimage, bmpimage, epdf)
+//! take the id of the entry `load_image` made and fill it with
+//! `pdf_ximage_set_image` / `pdf_ximage_set_form`. jp2image, mpost
+//! (MetaPost/EPS) and the `ps_include_page` distiller are not ported.
 
 use crate::ctx::CompatMode;
 use crate::dpxutil::{max4, min4};
@@ -191,14 +191,6 @@ pub fn pdf_ximage_init_form_info() -> XformInfo {
     }
 }
 
-/// `check_for_bmp` (bmpimage.c; BMP images are not ported, but a BMP
-/// file must be told from the others).
-fn check_for_bmp(fp: &mut MemFile) -> bool {
-    fp.rewind();
-    let sig = fp.read(2);
-    sig.len() == 2 && sig[0] == b'B' && sig[1] == b'M'
-}
-
 /// `check_for_jp2` (jp2image.c, with its `check_jp___box`,
 /// `read_box_hdr` and `check_ftyp_data`; JPEG 2000 images are not
 /// ported, but a JP2 file must be told from the others). Reading past
@@ -281,7 +273,7 @@ pub fn source_image_type(fp: &mut MemFile) -> i32 {
         IMAGE_TYPE_JP2
     } else if crate::pngimage::check_for_png(fp) != 0 {
         IMAGE_TYPE_PNG
-    } else if check_for_bmp(fp) {
+    } else if crate::bmpimage::check_for_bmp(fp) {
         IMAGE_TYPE_BMP
     } else if check_for_pdf(fp) {
         IMAGE_TYPE_PDF
@@ -549,7 +541,14 @@ impl Dpx {
                     true
                 }
             }
-            IMAGE_TYPE_BMP => todo!("BMP images (bmpimage.c) are not ported"),
+            IMAGE_TYPE_BMP => {
+                if self.bmp_include_image(id, fp) < 0 {
+                    false
+                } else {
+                    self.ximage.ximages[id as usize].subtype = PDF_XOBJECT_TYPE_IMAGE;
+                    true
+                }
+            }
             IMAGE_TYPE_PDF => {
                 let mut result = self.pdf_include_page(id, fp, fullname, options.clone());
                 if result > 0 {

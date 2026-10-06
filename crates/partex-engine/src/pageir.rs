@@ -133,13 +133,25 @@ pub enum Item {
         start: u32,
         len: u32,
     },
+    /// `XeTeX`: a picture (`pic_node`, `pdf_node`): `pic_out`'s special,
+    /// `len` bytes at `start` of [`Page::specials`], written where the
+    /// picture's bottom left corner is, the DVI position then forgotten
+    /// (`dvi_h` and `dvi_v` restored). In an hlist it advances by `width`;
+    /// in a vlist it is put `height` down.
+    Pic {
+        width: Scaled,
+        height: Scaled,
+        depth: Scaled,
+        start: u32,
+        len: u32,
+    },
     /// The walk stopped here (a `\write` ended the job): tex.web leaves
     /// this box and those around it open, for `finish_dvi_file` to close
     /// with bare `pop`s and an `eop` (§642).
     Cut,
 }
 
-crate::persist_enum!(Item { Char { font, ch, width, raise }, Missing { font }, Move(a0), Rule { height, depth, width }, Box { vertical, width, height, depth, shift, len, display }, Edge { width, dist, rtl }, Leaders { kind, size }, Special { start, len }, Native { font, width, height, depth, start, len }, Cut });
+crate::persist_enum!(Item { Char { font, ch, width, raise }, Missing { font }, Move(a0), Rule { height, depth, width }, Box { vertical, width, height, depth, shift, len, display }, Edge { width, dist, rtl }, Leaders { kind, size }, Special { start, len }, Native { font, width, height, depth, start, len }, Pic { width, height, depth, start, len }, Cut });
 
 /// What a DVI `fnt_def` says about a font (§602).
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -278,6 +290,20 @@ impl Page {
                     let _ = writeln!(
                         s,
                         "{:ind$}native f{font} wd={width} ht={height} dp={depth} {len} bytes",
+                        ""
+                    );
+                }
+                Item::Pic {
+                    width,
+                    height,
+                    depth,
+                    start,
+                    len,
+                } => {
+                    let text = String::from_utf8_lossy(self.special(start, len));
+                    let _ = writeln!(
+                        s,
+                        "{:ind$}pic wd={width} ht={height} dp={depth} {text:?}",
                         ""
                     );
                 }

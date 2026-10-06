@@ -41,6 +41,7 @@ extern crate alloc;
 
 pub mod agl;
 pub mod api;
+pub mod bmpimage;
 pub mod cff;
 pub mod cff_dict;
 pub mod cid;

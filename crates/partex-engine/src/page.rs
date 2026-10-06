@@ -98,7 +98,15 @@ pub fn vert_break(list: &mut [Node], h: Scaled, d: Scaled) -> Result<VertBreak, 
                 }
             }
             Some(Node::Penalty(pi)) => Next::Break(*pi),
-            Some(Node::Whatsit(_) | Node::Mark(_) | Node::Ins(_)) => Next::NotFound,
+            Some(Node::Whatsit(w)) => {
+                // `XeTeX`: "Process whatsit |p| in |vert_break| loop"
+                if let crate::node::Whatsit::Pic(p) = &**w {
+                    ah[1] += prev_dp + p.height;
+                    prev_dp = p.depth;
+                }
+                Next::NotFound
+            }
+            Some(Node::Mark(_) | Node::Ins(_)) => Next::NotFound,
             Some(_) => return Err(Confusion("vertbreak")),
         };
         let mut update = matches!(next, Next::UpdateHeights);

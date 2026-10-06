@@ -19,6 +19,8 @@ partex-makeindex = { path = "../partex-makeindex" }
 phitex-ir = { path = "../phitex-ir" }
 # `XeTeX`'s native fonts: lookup, shaping, metrics (DESIGN 4.7).
 partex-otf = { path = "../partex-otf" }
+# `XeTeX`'s picture transforms (`make_rotation`).
+libm = "0.2.16"
 
 [lints]
 workspace = true

@@ -353,6 +353,7 @@ impl NativeHost {
             FileKind::Ist => partex_kpse::Format::Ist,
             FileKind::OpenType => partex_kpse::Format::OpenType,
             FileKind::MiscFonts => partex_kpse::Format::MiscFonts,
+            FileKind::Pict => partex_kpse::Format::Pict,
             FileKind::FontIndex => {
                 return Ok(crate::fontindex::index().map(|contents| OpenedFile {
                     name: b"<fonts>".to_vec(),
@@ -436,9 +437,13 @@ pub fn synctex_name(found: &[u8]) -> Vec<u8> {
     n
 }
 
-/// A style or database of the build's BibTeX or makeindex.
+/// A style or database of the build's BibTeX or makeindex, or `XeTeX`'s
+/// picture (`find_pic_file` asks kpathsea, not `open_input`).
 fn tool_kind(kind: FileKind) -> bool {
-    matches!(kind, FileKind::Bst | FileKind::Bib | FileKind::Ist)
+    matches!(
+        kind,
+        FileKind::Bst | FileKind::Bib | FileKind::Ist | FileKind::Pict
+    )
 }
 
 /// The name an output file gets (web2c adds the default suffix).
@@ -459,7 +464,8 @@ pub fn with_suffix(name: &[u8], kind: FileKind) -> Vec<u8> {
         | FileKind::MiscFonts
         | FileKind::FontIndex
         | FileKind::Other
-        | FileKind::XdvPipe => b"",
+        | FileKind::XdvPipe
+        | FileKind::Pict => b"",
     };
     let mut n = name.to_vec();
     if !suffix.is_empty() && !name.ends_with(suffix) {
@@ -643,6 +649,7 @@ impl NativeHost {
             FileKind::Ist => partex_kpse::Format::Ist,
             FileKind::OpenType => partex_kpse::Format::OpenType,
             FileKind::MiscFonts => partex_kpse::Format::MiscFonts,
+            FileKind::Pict => partex_kpse::Format::Pict,
             FileKind::FontIndex => return Some(b"<fonts>".to_vec()),
             FileKind::Other | FileKind::XdvPipe => return stamp(name).map(|_| name.to_vec()),
         };

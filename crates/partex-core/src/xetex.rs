@@ -244,10 +244,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                     }
                 }
             }
-            _ => {
-                // (`\XeTeXpdfpagecount`)
-                return self.pdf_error(b"XeTeX", b"not implemented in partex yet");
-            }
+            _ => self.pdf_page_count()?, // `\XeTeXpdfpagecount`
         };
         Ok(())
     }
