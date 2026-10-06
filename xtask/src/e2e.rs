@@ -2015,6 +2015,46 @@ fn run_modern(root: &Path, partex: &Path) -> Result<Vec<String>> {
     Ok(diffs)
 }
 
+/// `phitex build` with a switch of how the machine hashes its state
+/// turned off (`PARTEX_MACHINE_PDF_WORDS=0`), then an edit and a build
+/// again: the second must load the build the first saved (the switches
+/// are the process's, set before the load checks the starting state's
+/// digest), and its outputs must be a cold build's of the edited source.
+fn run_store_switches(root: &Path, partex: &Path) -> Result<Vec<String>> {
+    let work = out_root(root).join("store_switches");
+    if work.exists() {
+        fs::remove_dir_all(&work)?;
+    }
+    let (p, q) = (work.join("p"), work.join("q"));
+    fs::create_dir_all(&p)?;
+    fs::create_dir_all(&q)?;
+    let src = fs::read_to_string(root.join("tests/e2e/latexdoc.tex"))?;
+    fs::write(p.join("latexdoc.tex"), &src)?;
+    let build = |dir: &Path, store: &str| -> Result<String> {
+        let mut cmd = Command::new(partex);
+        cmd.env("PARTEX_CACHE_DIR", work.join("cache"))
+            .env("PARTEX_STORE_DIR", work.join(store))
+            .env("PARTEX_FORMATS", root.join("target/e2e-formats"))
+            .env("PARTEX_MACHINE_PDF_WORDS", "0")
+            .env("PARTEX_STORE_DEBUG", "1")
+            .env("NO_COLOR", "1")
+            .env_remove("PARTEX_PERSIST");
+        exec(cmd, dir, &["build", "latexdoc.tex"], "term.txt")
+    };
+    build(&p, "store")?;
+    let edited = src.replace("Hello, world!", "Hello, edited world!");
+    ensure!(edited != src, "the edit does not apply");
+    fs::write(p.join("latexdoc.tex"), &edited)?;
+    let err = build(&p, "store")?;
+    ensure!(
+        err.contains("phitex: store: load:") && !err.contains("does not load"),
+        "the build after the edit did not load the saved build:\n{err}"
+    );
+    fs::write(q.join("latexdoc.tex"), &edited)?;
+    build(&q, "store-cold")?;
+    compare(&q, &p, true)
+}
+
 /// `phitex build` and `phitex watch` with `XeTeX` (`% !TEX program =
 /// xelatex`): its format made and kept, xdvipdfmx in process; against
 /// TeX Live's `xelatex` run to its fixpoint, both seeing TeX Live's fonts
@@ -2597,6 +2637,10 @@ pub fn run(root: &Path, args: &[String]) -> Result<()> {
         Box::new(move || run_machine_edits_dvi(root, partex)),
     ));
     jobs.push(("modern", Box::new(move || run_modern(root, partex))));
+    jobs.push((
+        "store_switches",
+        Box::new(move || run_store_switches(root, partex)),
+    ));
     jobs.push((
         "modern_xelatex",
         Box::new(move || run_modern_xelatex(root, partex)),
