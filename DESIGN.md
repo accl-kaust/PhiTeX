@@ -2781,18 +2781,46 @@ instead of its copies, so both draw from the same functions.
 "draws":…}`. Ops: `open` and `status` (the page count and hashes),
 `pages` (the hashes), `png` (a page's draw list; the extension's name),
 `edit` (answered with the last build, the page asked drawn: the files are
-watched on disk), `origins` (empty for now). Events, unasked:
+watched on disk), `origins` (a page's glyphs and their sources, as the
+extension core's `Session::origins` gives them: `{"files":[…],"g":[[x,
+y, file, start, end, synthesized],…]}`, empty when the build records
+none), and the CLI's `source` (a double-click's source: the editor opens
+there). Events, unasked:
 `{"event":"preparing","on":…}` when a rebuild begins and ends,
 `{"event":"settled"}` when a build is in. The browser then asks for the
 hashes, draws the page in view first if it changed, then the other pages
 it shows whose hash changed; the others keep their drawing, and the
 scroll stays where it is.
 
+**Source and page.** A double-click finds the glyph nearest it (the
+extension's `sync.ts`, `nearest`) and asks `source` with its file and
+bytes; the watch shows `source: ch1.tex:12:5` and opens the editor there:
+`--editor CMD`, else `PHITEX_EDITOR`, `VISUAL`, `EDITOR` (`editor.rs`). A
+command with `{file}`, `{line}` and `{col}` runs as written; a known
+editor alone gets its preset (`code -g {file}:{line}:{col}`, `emacsclient
+-n +{line}:{col} {file}`, `nvim --server $NVIM --remote-send …`, Sublime,
+Zed, Kate, gedit, JetBrains'); a terminal editor (`vi`, `nano`) cannot
+open beside the watch, which holds the terminal, so the place is only
+shown. Forward search: `partex sync FILE:LINE[:COL]` finds the watch of
+its directory (or one above) by the address it keeps in
+`$XDG_RUNTIME_DIR/partex-view/` (a file named by the directory's hash),
+and asks `GET /TOKEN/sync?file=…&line=…`; the watch sends the line's bytes
+to the pages (`{"event":"sync",…}`), which highlight the glyphs that came
+from them (`sync.ts`'s `from`, `lineAt`, `boxes`), the page in view first.
+Both need the build's glyph origins.
+
+**XeTeX.** Its pages' glyphs come from xdvipdfmx's glyph runs (the
+extension core's `xetex::extra`, in `phitex_draw::xetex`: OpenType and
+TrueType outlines through skrifa, a TFM font's Type 1 from its `.pfb`, a
+transformed glyph alone with its matrix), the PDF giving the paths and
+rules: with a viewer on, the in-process driver keeps each page's runs for
+it (`dpxfiles::keep_glyph_runs`), which changes nothing it writes.
+
 **Page** (`crates/partex-cli/viewer/`). `index.html`, and `viewer.js`:
-the extension's `viewer.ts` and `page2.ts` at a pinned tag with the CLI's
+the extension's `viewer.ts`, `page2.ts` and `sync.ts` at a pinned tag with the CLI's
 host for them (`cli.ts`, a `ViewerHost` over the WebSocket), bundled by
 esbuild (`scripts/viewer-bundle.sh`, which takes the extension's files
-from its repository at the tag; the bundle, 11 KB, is committed and
+from its repository at the tag; the bundle, 13 KB, is committed and
 embedded, so a build needs neither node nor that repository). The text
 fonts `page2.ts` asks for (Latin Modern) are served from kpathsea. When
 the extension tags its embeddable bundle, `cli.ts` gives way to its
@@ -2804,10 +2832,8 @@ watch, sandboxed, this machine): a word edited on disk is built, hashed
 draw list (4 ms, 16 KB) is in the client 4 ms after the settle; only the
 changed page is asked for and sent (`PARTEX_VIEW_LOG=1` logs it).
 
-**Not done yet.** Source and page: double-click to the editor (glyph
-origins; the watch runtimes record none, 4.4) and forward search
-(`partex sync FILE:LINE`). XeTeX's native fonts' glyphs (the extension
-draws them from xdvipdfmx's glyph runs).
+**Not done yet.** The watch runtimes record no glyph origins (4.4), so
+double-click and forward search find nothing yet.
 
 ---
 

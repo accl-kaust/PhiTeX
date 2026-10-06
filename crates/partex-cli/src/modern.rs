@@ -31,6 +31,7 @@ commands:
   why      why the last build ran as it did, and every warning it gave
   trace    build, writing a Chrome/Perfetto timeline (--open: open Perfetto)
   clean    remove the files the last build wrote
+  sync     sync FILE:LINE[:COL]: the watch's viewer shows that line
 
 options:
   -o, --output-dir DIR     where the outputs go (TeX's -output-directory)
@@ -45,6 +46,10 @@ options:
       --open               watch: open the PDF; trace: open Perfetto
       --no-view            watch: no live viewer in the browser (the
                            default on a terminal; --view: anywhere)
+      --editor CMD         watch: where a double-click on a page opens its
+                           source (code, emacsclient, nvim, … or a command
+                           with {file} {line} {col}; else PHITEX_EDITOR,
+                           VISUAL, EDITOR)
       --copy-pdf[=DIR]     build, watch: copy the PDF after each successful
                            build into DIR (default: where partex was run)
       --no-machine         watch: rebuild through checkpoints instead of the
@@ -68,6 +73,7 @@ enum Command {
     Why,
     Trace,
     Clean,
+    Sync,
 }
 
 /// The modern command line's options.
@@ -94,6 +100,8 @@ struct Options {
     no_machine: bool,
     /// `--view` or `--no-view` (none: the viewer on a terminal).
     view: Option<bool>,
+    /// `--editor`.
+    editor: Option<String>,
 }
 
 fn parse(args: &[String]) -> Result<Options, String> {
@@ -104,6 +112,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
         Some("why") => Command::Why,
         Some("trace") => Command::Trace,
         Some("clean") => Command::Clean,
+        Some("sync") => Command::Sync,
         Some("-h" | "--help" | "help") | None => return Err(String::new()),
         Some(a) if a.starts_with('-') || a.starts_with('&') || a.starts_with('\\') => {
             return Err(format!(
@@ -129,6 +138,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
         copy_pdf: None,
         no_machine: false,
         view: None,
+        editor: None,
     };
     let mut it = args[1..].iter();
     while let Some(a) = it.next() {
@@ -181,6 +191,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
             "--no-machine" => o.no_machine = true,
             "--view" => o.view = Some(true),
             "--no-view" => o.view = Some(false),
+            "--editor" => o.editor = Some(value()?),
             "--machine" => o.no_machine = false,
             "--output" if o.command == Command::Trace => o.timeline = Some(value()?),
             "-h" | "--help" => return Err(String::new()),
@@ -363,6 +374,12 @@ pub fn main(args: &[String]) -> ! {
             std::process::exit(2);
         }
     };
+    if o.command == Command::Sync {
+        let Some(place) = o.file.as_deref() else {
+            fail("sync: give FILE:LINE[:COL]", settings(&o).style)
+        };
+        std::process::exit(crate::view::sync_command(place));
+    }
     let st = settings(&o);
     let target = resolve(&o).unwrap_or_else(|e| fail(&e, st.style));
     match o.command {
@@ -373,6 +390,7 @@ pub fn main(args: &[String]) -> ! {
         Command::Watch => watch(&o, &target, st),
         Command::Why => why(&target, st),
         Command::Clean => clean(&target, st),
+        Command::Sync => unreachable!("answered above"),
     }
 }
 
@@ -935,9 +953,18 @@ fn start_view(opts: &Options, ren: &Renderer) -> Option<crate::view::View> {
     if !opts.view.unwrap_or(interactive) {
         return None;
     }
+    let editor = match crate::editor::Editor::configured(opts.editor.as_deref()) {
+        Ok(e) => e,
+        Err(spec) => {
+            ren.note(&format!(
+                "`{spec}` cannot open beside the watch: a double-click shows its source here"
+            ));
+            None
+        }
+    };
     // (kpathsea, for the viewer's text fonts)
     let host = crate::setup().host;
-    match crate::view::View::start(host, ren.live()) {
+    match crate::view::View::start(host, ren.live(), editor) {
         Ok(v) => {
             let opened = interactive && crate::view::open_browser(v.url());
             let how = if opened {

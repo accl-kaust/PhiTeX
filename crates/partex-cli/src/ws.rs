@@ -34,12 +34,55 @@ impl Request {
         self.path.split('?').next().unwrap_or("")
     }
 
+    /// The query's parameter `name`, percent-decoded.
+    #[must_use]
+    pub fn param(&self, name: &str) -> Option<String> {
+        let q = self.path.split_once('?')?.1;
+        q.split('&').find_map(|kv| {
+            let (k, v) = kv.split_once('=').unwrap_or((kv, ""));
+            (k == name).then(|| percent_decode(v))
+        })
+    }
+
     /// Whether it asks to become a WebSocket.
     #[must_use]
     pub fn is_upgrade(&self) -> bool {
         self.header("upgrade")
             .is_some_and(|u| u.eq_ignore_ascii_case("websocket"))
     }
+}
+
+/// `s` with `%XX` and `+` decoded (invalid UTF-8 replaced).
+#[must_use]
+pub fn percent_decode(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        match b[i] {
+            b'%' => {
+                let hex = b
+                    .get(i + 1..i + 3)
+                    .and_then(|h| std::str::from_utf8(h).ok());
+                if let Some(v) = hex.and_then(|h| u8::from_str_radix(h, 16).ok()) {
+                    out.push(v);
+                    i += 3;
+                } else {
+                    out.push(b'%');
+                    i += 1;
+                }
+            }
+            b'+' => {
+                out.push(b' ');
+                i += 1;
+            }
+            c => {
+                out.push(c);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 /// Read one request (headers at most 64 KB, a body by `Content-Length` at
@@ -371,5 +414,17 @@ mod tests {
             read_message(&mut &out[..], &mut |_| {}).unwrap(),
             Message::Text("x".repeat(300))
         );
+    }
+
+    #[test]
+    fn query_params() {
+        let r = Request {
+            path: "/s/sync?file=ch%201.tex&line=12".into(),
+            ..Request::default()
+        };
+        assert_eq!(r.route(), "/s/sync");
+        assert_eq!(r.param("file").as_deref(), Some("ch 1.tex"));
+        assert_eq!(r.param("line").as_deref(), Some("12"));
+        assert_eq!(r.param("col"), None);
     }
 }

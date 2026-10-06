@@ -16,7 +16,14 @@
 //!   "draws":…}`; unasked, events `{"event":"settled"}` (a build is in:
 //!   lay out the pages again) and `{"event":"preparing","on":…}`. The
 //!   ops: `open`, `pages` (the hashes), `png` (a page's draw list, the
-//!   name kept from the extension), `status`, `origins`, `edit`.
+//!   name kept from the extension), `status`, `origins` (a page's glyphs
+//!   and their sources, when the build recorded them), `edit`; and the
+//!   CLI's `source` (a double-click's source: the editor opens there).
+//!   Forward search: `GET /TOKEN/sync?file=F&line=L` (what `partex sync
+//!   F:L` asks) pushes `{"event":"sync","file":…,"lo":…,"hi":…,"at":…}`,
+//!   the line's bytes, and the page highlights the glyphs that came from
+//!   them. The address is kept in a file per directory, for `partex sync`
+//!   ([`address_file`]).
 //! - **Page.** `viewer/index.html` and `viewer/viewer.js`, the bundle of
 //!   the extension's viewer (`viewer.ts`, `page2.ts`) and the CLI's host
 //!   (`viewer/cli.ts`), made by `scripts/viewer-bundle.sh`.
@@ -63,6 +70,109 @@ pub struct Built {
     pub ms: f64,
 }
 
+/// A build's glyph origins and where the glyphs are: what `origins`
+/// answers (`Tex::origins` and the PDF's places, as the extension core's
+/// `Session::origins`).
+pub struct Origins {
+    /// The files, by id: a project's file by its path from the watch's
+    /// directory, another as the job asked for it.
+    files: Vec<String>,
+    /// Each page's glyphs.
+    pages: Vec<Vec<Placed>>,
+}
+
+/// A glyph: x and y (PDF points from the top left), then file
+/// (`u32::MAX`: none), start, end, synthesized.
+type Placed = (f32, f32, u32, u32, u32, bool);
+
+impl Origins {
+    /// From a build's origins (its files by id, each page's glyphs in the
+    /// order the page shows them) and its PDF, in directory `root`.
+    #[allow(
+        dead_code,
+        reason = "the watch runtimes record no origins yet (DESIGN 4.8)"
+    )]
+    #[must_use]
+    pub fn of(
+        root: &std::path::Path,
+        files: &[String],
+        pages: &[Vec<partex_core::GlyphOrigin>],
+        pdf: &Arc<[u8]>,
+    ) -> Origins {
+        let files = files
+            .iter()
+            .map(|n| {
+                let n = n.strip_prefix("./").unwrap_or(n);
+                [n.to_owned(), format!("{n}.tex")]
+                    .into_iter()
+                    .find(|c| !c.starts_with('/') && root.join(c).is_file())
+                    .unwrap_or_else(|| n.to_owned())
+            })
+            .collect();
+        let doc = phitex_draw::Pdf::open(pdf);
+        #[allow(clippy::cast_possible_truncation, reason = "points, to a hundredth")]
+        let pages = pages
+            .iter()
+            .enumerate()
+            .map(|(k, os)| {
+                let places = doc.as_ref().map(|d| d.glyph_places(k)).unwrap_or_default();
+                os.iter()
+                    .enumerate()
+                    .map(|(i, o)| {
+                        let (x, y) = places.get(i).copied().unwrap_or((0.0, 0.0));
+                        (x as f32, y as f32, o.file, o.start, o.end, o.synthesized)
+                    })
+                    .collect()
+            })
+            .collect();
+        Origins { files, pages }
+    }
+}
+
+/// Where the viewer of the watch in `root` keeps its address (for
+/// `partex sync`): `$XDG_RUNTIME_DIR/partex-view/`, else the temporary
+/// directory's, a file named by the directory's hash.
+#[must_use]
+pub fn address_file(root: &std::path::Path) -> Option<PathBuf> {
+    let root = std::fs::canonicalize(root).ok()?;
+    let base = std::env::var_os("XDG_RUNTIME_DIR").map_or_else(std::env::temp_dir, PathBuf::from);
+    let h = partex_core::persist_hash(&root.to_string_lossy().as_bytes());
+    Some(base.join("partex-view").join(format!("{h:032x}")))
+}
+
+/// The line and column (from 1; the column in characters) of byte `at`
+/// of `text`.
+fn line_col(text: &[u8], at: usize) -> (usize, usize) {
+    let at = at.min(text.len());
+    let before = &text[..at];
+    let line = before.split(|&c| c == b'\n').count();
+    let start = before
+        .iter()
+        .rposition(|&c| c == b'\n')
+        .map_or(0, |p| p + 1);
+    let col = String::from_utf8_lossy(&before[start..]).chars().count() + 1;
+    (line, col)
+}
+
+/// The bytes of line `line` (from 1) of `text`, without its end, and the
+/// byte of column `col` (characters, from 1) in it.
+fn line_bytes(text: &[u8], line: usize, col: usize) -> Option<(usize, usize, usize)> {
+    let mut lo = 0;
+    for _ in 1..line {
+        lo += text.get(lo..)?.iter().position(|&c| c == b'\n')? + 1;
+    }
+    let hi = lo
+        + text[lo..]
+            .iter()
+            .position(|&c| c == b'\n')
+            .unwrap_or(text.len() - lo);
+    let at = String::from_utf8_lossy(&text[lo..hi])
+        .char_indices()
+        .nth(col.saturating_sub(1))
+        .map_or(hi, |(i, _)| lo + i);
+    Some((lo, hi, at.min(hi)))
+}
+
 /// The pages of the last build.
 #[derive(Default)]
 struct Pages {
@@ -75,6 +185,8 @@ struct Pages {
     ms: f64,
     /// Draw lists, by page hash (those of the pages there are now).
     draws: HashMap<u64, Arc<str>>,
+    /// `XeTeX`: each page's glyph runs (its glyphs are drawn from them).
+    runs: Option<Arc<Vec<Vec<partex_xdvipdfmx::api::GlyphRun>>>>,
 }
 
 /// A browser connected.
@@ -94,6 +206,8 @@ struct Shared {
     clients: Mutex<Vec<Arc<Client>>>,
     /// Parsed font programs, across pages and builds.
     fonts: Mutex<phitex_draw::Fonts>,
+    /// `XeTeX`'s glyph runs' fonts, read once.
+    faces: Mutex<phitex_draw::xetex::Faces>,
     /// The viewer's text fonts, by file name, read when first asked.
     text_fonts: Mutex<BTreeMap<String, Option<Arc<[u8]>>>>,
     /// Where the text fonts are looked up.
@@ -103,6 +217,13 @@ struct Shared {
     /// Log each page sent (`PARTEX_VIEW_LOG=1`).
     log: bool,
     building: AtomicBool,
+    /// The directory the watch runs in: the project's files are named from
+    /// it.
+    root: PathBuf,
+    /// Where a double-click's source is opened.
+    editor: Option<crate::editor::Editor>,
+    /// The last build's glyph origins, if it recorded them.
+    origins: Mutex<Option<Arc<Origins>>>,
     /// When the last build was in, to time the pages sent after it.
     built_at: Mutex<Instant>,
     sent: AtomicU64,
@@ -140,6 +261,7 @@ impl View {
     pub fn start(
         host: crate::native::NativeHost,
         live: Arc<crate::live::Live>,
+        editor: Option<crate::editor::Editor>,
     ) -> std::io::Result<View> {
         let port: u16 = std::env::var("PARTEX_VIEW_PORT")
             .ok()
@@ -152,15 +274,24 @@ impl View {
             pages: Mutex::new(Pages::default()),
             clients: Mutex::new(Vec::new()),
             fonts: Mutex::new(phitex_draw::Fonts::new()),
+            faces: Mutex::new(phitex_draw::xetex::Faces::new()),
             text_fonts: Mutex::new(BTreeMap::new()),
             host: Mutex::new(host),
             live,
             log: std::env::var("PARTEX_VIEW_LOG").is_ok_and(|v| v == "1"),
             building: AtomicBool::new(false),
+            root: std::env::current_dir()?,
+            editor,
+            origins: Mutex::new(None),
             built_at: Mutex::new(Instant::now()),
             sent: AtomicU64::new(0),
         });
+        crate::dpxfiles::keep_glyph_runs();
         let url = format!("http://127.0.0.1:{port}/{}/", shared.token);
+        if let Some(f) = address_file(&shared.root) {
+            let _ = f.parent().map(std::fs::create_dir_all);
+            let _ = std::fs::write(&f, &url);
+        }
         let s = shared.clone();
         std::thread::Builder::new()
             .name("partex-view".into())
@@ -182,6 +313,16 @@ impl View {
     #[must_use]
     pub fn url(&self) -> &str {
         &self.url
+    }
+
+    /// The last build's glyph origins (the browsers ask for them again).
+    #[allow(
+        dead_code,
+        reason = "the watch runtimes record no origins yet (DESIGN 4.8)"
+    )]
+    pub fn set_origins(&self, o: Option<Origins>) {
+        *lock(&self.shared.origins) = o.map(Arc::new);
+        broadcast(&self.shared, "{\"event\":\"switched\"}");
     }
 
     /// A rebuild began (`true`) or ended.
@@ -224,6 +365,12 @@ impl View {
             .filter(|&(k, h)| pages.hashes.get(k) != Some(h))
             .map(|(k, _)| k + 1)
             .collect();
+        // (a run's draws depend on the runs, not only on the page's content)
+        let runs = crate::dpxfiles::take_glyph_runs().map(Arc::new);
+        if runs.is_some() || pages.runs.is_some() {
+            pages.draws.clear();
+        }
+        pages.runs = runs;
         pages.draws.retain(|h, _| hashes.contains(h));
         pages.generation += 1;
         pages.pdf = data;
@@ -311,6 +458,10 @@ fn serve(s: &Arc<Shared>, conn: TcpStream) {
                 }
             }
         }
+        "sync" => {
+            let (status, text) = forward(s, &req);
+            let _ = ws::respond(&mut w, status, "text/plain; charset=utf-8", text.as_bytes());
+        }
         "ws" if req.is_upgrade() => {
             if ws::upgrade(&mut w, &req).is_ok() {
                 socket(s, w, r);
@@ -386,18 +537,31 @@ fn hashes_json(hs: &[u64]) -> String {
 /// Page `k`'s draw list and hash, drawn now or kept.
 #[allow(clippy::many_single_char_names)]
 fn draws(s: &Shared, k: usize) -> Option<(Arc<str>, u64)> {
-    let (pdf, h) = {
+    let (pdf, h, runs) = {
         let p = lock(&s.pages);
         let h = *p.hashes.get(k)?;
         if let Some(d) = p.draws.get(&h) {
             return Some((d.clone(), h));
         }
-        (p.pdf.clone()?, h)
+        (p.pdf.clone()?, h, p.runs.clone())
     };
     let t = Instant::now();
-    let d: Arc<str> = phitex_draw::Pdf::open(&pdf)?
-        .draw(k, &mut lock(&s.fonts))?
-        .into();
+    let doc = phitex_draw::Pdf::open(&pdf)?;
+    let d: Arc<str> = match &runs {
+        // (`XeTeX`: the glyphs from the runs, the fonts read from their files)
+        Some(runs) => {
+            let page = runs.get(k).map_or(&[][..], Vec::as_slice);
+            let mut faces = lock(&s.faces);
+            let mut extra = |f0: usize, height: f64| {
+                phitex_draw::xetex::extra(page, height, f0, &mut faces, &mut |f| {
+                    std::fs::read(crate::native::path(f)).ok().map(Into::into)
+                })
+            };
+            doc.draw_with(k, &mut lock(&s.fonts), Some(&mut extra))?
+        }
+        None => doc.draw(k, &mut lock(&s.fonts))?,
+    }
+    .into();
     if s.log {
         let after = lock(&s.built_at).elapsed();
         s.live.note(&format!(
@@ -467,7 +631,19 @@ fn answer(s: &Shared, req: &Value) -> String {
             }
             out.push('}');
         }
-        "origins" => out.push_str("true,\"json\":{\"files\":[],\"g\":[]}}"),
+        "origins" => {
+            let o = lock(&s.origins).clone();
+            let _ = write!(
+                out,
+                "true,\"json\":{}}}",
+                origins_json(s, o.as_deref(), page)
+            );
+        }
+        "source" => {
+            let file = req.get("file").and_then(Value::str).unwrap_or("");
+            let start = req.get("start").and_then(Value::index).unwrap_or(0);
+            let _ = write!(out, "{}}}", to_source(s, file, start));
+        }
         "set_file" | "trace" | "check" => out.push_str("true,\"json\":{\"ok\":true,\"ms\":0}}"),
         _ => {
             out.push_str("false,\"error\":");
@@ -478,6 +654,188 @@ fn answer(s: &Shared, req: &Value) -> String {
         }
     }
     out
+}
+
+/// Page `page`'s glyphs with their sources (`{"files":[…],"g":[[x, y,
+/// file, start, end, synthesized],…]}`, file -1: none), as the
+/// extension core's `origins` gives them; none without origins.
+fn origins_json(s: &Shared, o: Option<&Origins>, page: Option<usize>) -> String {
+    let (Some(o), Some(k)) = (o, page) else {
+        return "{\"files\":[],\"g\":[]}".into();
+    };
+    let mut out = String::from("{\"files\":[");
+    for (i, f) in o.files.iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        let mut b = Vec::new();
+        json_str(&mut b, f);
+        out.push_str(&String::from_utf8_lossy(&b));
+    }
+    out.push_str("],\"g\":[");
+    for (i, &(x, y, f, a, b, synth)) in o
+        .pages
+        .get(k)
+        .map_or(&[][..], Vec::as_slice)
+        .iter()
+        .enumerate()
+    {
+        if i > 0 {
+            out.push(',');
+        }
+        let f = if f == u32::MAX { -1 } else { i64::from(f) };
+        let _ = write!(out, "[{x:.2},{y:.2},{f},{a},{b},{}]", u8::from(synth));
+    }
+    out.push_str("]}");
+    let _ = s;
+    out
+}
+
+/// A double-click's source, byte `start` of `file` (from the watch's
+/// directory): shown, and opened in the editor if there is one. The
+/// reply's tail (`ok` and the rest).
+fn to_source(s: &Shared, file: &str, start: usize) -> String {
+    let path = s.root.join(file);
+    if file.is_empty() || file.starts_with('/') || file.contains("..") {
+        return "false,\"error\":\"not a file of the project\"".into();
+    }
+    let Ok(text) = std::fs::read(&path) else {
+        return "false,\"error\":\"no such file\"".into();
+    };
+    let (line, col) = line_col(&text, start);
+    let place = format!("{file}:{line}:{col}");
+    match &s.editor {
+        Some(e) => match e.open(file, line, col) {
+            Ok(()) => s
+                .live
+                .note(&format!("source: {place} (opened in the editor)")),
+            Err(err) => s.live.warn("Editor", &format!("{place}: {err}")),
+        },
+        None => s.live.note(&format!(
+            "source: {place} (--editor or PHITEX_EDITOR opens it)"
+        )),
+    }
+    let mut b = Vec::new();
+    json_str(&mut b, &place);
+    format!(
+        "true,\"json\":{{\"place\":{}}}",
+        String::from_utf8_lossy(&b)
+    )
+}
+
+/// Forward search: `sync?file=F&line=L[&col=C]`, the browsers told to
+/// show the glyphs of that line. The status and the answer.
+fn forward(s: &Shared, req: &ws::Request) -> (&'static str, String) {
+    let file = req.param("file").unwrap_or_default();
+    let line: usize = req.param("line").and_then(|l| l.parse().ok()).unwrap_or(1);
+    let col: usize = req.param("col").and_then(|c| c.parse().ok()).unwrap_or(1);
+    // (a path as given, absolute or from the directory `partex sync` ran in,
+    // named from the watch's)
+    let path = std::fs::canonicalize(&file).or_else(|_| std::fs::canonicalize(s.root.join(&file)));
+    let root = std::fs::canonicalize(&s.root).unwrap_or_else(|_| s.root.clone());
+    let Some(rel) = path.ok().and_then(|p| {
+        p.strip_prefix(&root)
+            .ok()
+            .map(|r| r.to_string_lossy().into_owned())
+    }) else {
+        return (
+            "404 Not Found",
+            format!(
+                "{file}: not a file of the project in {}\n",
+                s.root.display()
+            ),
+        );
+    };
+    let Some((lo, hi, at)) = std::fs::read(root.join(&rel))
+        .ok()
+        .and_then(|t| line_bytes(&t, line, col))
+    else {
+        return ("404 Not Found", format!("{rel}: no line {line}\n"));
+    };
+    let mut b = Vec::new();
+    json_str(&mut b, &rel);
+    let ev = format!(
+        "{{\"event\":\"sync\",\"file\":{},\"lo\":{lo},\"hi\":{hi},\"at\":{at}}}",
+        String::from_utf8_lossy(&b)
+    );
+    let n = {
+        let mut cs = lock(&s.clients);
+        cs.retain(|c| c.send(&ev));
+        cs.len()
+    };
+    if n == 0 {
+        return ("503 Service Unavailable", "no viewer is open\n".into());
+    }
+    ("200 OK", format!("{rel}:{line} shown in {n} viewer(s)\n"))
+}
+
+/// `partex sync FILE:LINE[:COL]`: the viewer of the watch running here
+/// shows that line. The exit status.
+pub fn sync_command(place: &str) -> i32 {
+    let parsed = place.rsplit_once(':').and_then(|(rest, last)| {
+        let last: usize = last.parse().ok()?;
+        Some(
+            match rest.rsplit_once(':').map(|(f, l)| (f, l.parse::<usize>())) {
+                Some((f, Ok(l))) => (f.to_owned(), l, last),
+                _ => (rest.to_owned(), last, 1),
+            },
+        )
+    });
+    let Some((file, line, col)) = parsed else {
+        eprintln!("partex sync: give FILE:LINE[:COL]");
+        return 2;
+    };
+    let file = std::fs::canonicalize(&file).map_or(file, |p| p.to_string_lossy().into_owned());
+    let here = std::env::current_dir().unwrap_or_default();
+    // (the watch of this directory, or of one above)
+    let url = here
+        .ancestors()
+        .find_map(|d| address_file(d).and_then(|f| std::fs::read_to_string(f).ok()));
+    let Some(url) = url else {
+        eprintln!("partex sync: no `partex watch` with a viewer runs here");
+        return 1;
+    };
+    let enc = |v: &str| -> String {
+        v.bytes()
+            .map(|b| {
+                if b.is_ascii_alphanumeric() || b"-_./".contains(&b) {
+                    char::from(b).to_string()
+                } else {
+                    format!("%{b:02X}")
+                }
+            })
+            .collect()
+    };
+    let Some(rest) = url.trim().strip_prefix("http://") else {
+        return 1;
+    };
+    let (addr, path) = rest.split_once('/').unwrap_or((rest, ""));
+    let req = format!(
+        "GET /{path}sync?file={}&line={line}&col={col} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n",
+        enc(&file)
+    );
+    let answer = TcpStream::connect(addr).and_then(|mut c| {
+        std::io::Write::write_all(&mut c, req.as_bytes())?;
+        let mut a = String::new();
+        std::io::Read::read_to_string(&mut c, &mut a)?;
+        Ok(a)
+    });
+    match answer {
+        Ok(a) => {
+            let (head, body) = a.split_once("\r\n\r\n").unwrap_or((&a, ""));
+            let ok = head.starts_with("HTTP/1.1 200");
+            if ok {
+                print!("{body}");
+            } else {
+                eprint!("partex sync: {body}");
+            }
+            i32::from(!ok)
+        }
+        Err(e) => {
+            eprintln!("partex sync: the watch's viewer did not answer ({e})");
+            1
+        }
+    }
 }
 
 /// Show `url` in the user's browser (`BROWSER`, else the desktop's
@@ -508,6 +866,19 @@ pub fn open_browser(url: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lines_and_columns() {
+        let t = "ab\nçd e\n\nlast".as_bytes();
+        assert_eq!(line_col(t, 0), (1, 1));
+        assert_eq!(line_col(t, 3), (2, 1));
+        // (ç is two bytes, one column)
+        assert_eq!(line_col(t, 6), (2, 3));
+        assert_eq!(line_bytes(t, 2, 3), Some((3, 8, 6)));
+        assert_eq!(line_bytes(t, 3, 1), Some((9, 9, 9)));
+        assert_eq!(line_bytes(t, 4, 9), Some((10, 14, 14)));
+        assert_eq!(line_bytes(t, 9, 1), None);
+    }
 
     #[test]
     fn page_ranges() {

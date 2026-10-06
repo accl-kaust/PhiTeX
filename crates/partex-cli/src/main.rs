@@ -11,6 +11,7 @@ mod deps;
 mod display;
 mod dpxfiles;
 mod dvithread;
+mod editor;
 mod eventlog;
 mod events;
 mod fontindex;

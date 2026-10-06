@@ -11,6 +11,18 @@
 // the bundle script: not in this repository)
 // @ts-ignore
 import { Viewer } from "./ext/viewer.ts";
+// @ts-ignore
+import { boxes, from, glyphs, lineAt, nearest } from "./ext/sync.ts";
+
+/** sync.ts's Glyph: where a glyph is on its page, and its source. */
+interface Glyph {
+  x: number;
+  y: number;
+  file: string | null;
+  start: number;
+  end: number;
+  synth: boolean;
+}
 
 /** viewer.ts's ViewerHost, the part this host gives. */
 interface ViewerHost {
@@ -19,6 +31,7 @@ interface ViewerHost {
   svg(img: unknown, cssWidth: number): string | null;
   scale(): number;
   box(d: { w: number; h: number }, cssWidth: number): [number, number];
+  dbl?(k: number, x: number, y: number): void;
 }
 
 // (page2.ts loads its text fonts from the extension's own files: here, the
@@ -89,7 +102,37 @@ const host: ViewerHost = {
   svg: () => null,
   scale: () => zoom || fitScale(),
   box: (d: { w: number; h: number }, w: number) => [Math.floor(w), Math.floor((w * d.h) / d.w)],
+  // (a double-click: the source of the glyph nearest it, opened by the watch)
+  dbl(k: number, x: number, y: number) {
+    void (async () => {
+      const g: Glyph | null = nearest(await glyphsOf(k), x, y);
+      if (g?.file) await sock.request({ op: "source", file: g.file, start: g.start, end: g.end });
+    })();
+  },
 };
+
+/** Each page's glyphs with their sources, by page and hash (asked again after a build changed the page). */
+let glyphCache = new Map<string, Glyph[]>();
+async function glyphsOf(k: number): Promise<Glyph[]> {
+  const key = `${k}:${hashes[k] ?? ""}`;
+  const have = glyphCache.get(key);
+  if (have) return have;
+  const r = await sock.request({ op: "origins", page: k });
+  const gs: Glyph[] = r.ok && r.json?.g ? glyphs(r.json, (n: string) => n) : [];
+  if (gs.length) glyphCache.set(key, gs);
+  return gs;
+}
+
+/** Forward search: the glyphs from bytes [lo, hi) of `file` (a line), the one nearest `at`'s, highlighted (the page in view first). */
+async function show(file: string, lo: number, hi: number, at: number): Promise<void> {
+  const n = hashes.length;
+  const order = [current, ...Array.from({ length: n }, (_, i) => i).filter((i) => i !== current)];
+  for (const k of order) {
+    const all = await glyphsOf(k);
+    const hit: Glyph[] = lineAt(from(all, file, lo, hi), at);
+    if (hit.length) return viewer.mark(k, boxes(hit, all));
+  }
+}
 
 const viewer = new Viewer(pagesEl, scroller, host);
 let current = 0;
@@ -125,10 +168,15 @@ function status(): void {
   document.body.classList.toggle("stale", building || !connected);
 }
 
-sock.onEvent = (e: { event: string; on?: boolean }) => {
+sock.onEvent = (e: { event: string; on?: boolean; file?: string; lo?: number; hi?: number; at?: number }) => {
   if (e.event === "settled") {
     building = false;
     void layout();
+  } else if (e.event === "switched") {
+    // (the build's glyph origins changed: asked again)
+    glyphCache = new Map();
+  } else if (e.event === "sync") {
+    void show(e.file!, e.lo!, e.hi!, e.at!);
   } else if (e.event === "preparing") {
     building = !!e.on;
     status();

@@ -8,6 +8,8 @@ description = "What a page viewer draws: a PDF page's draw list (v2) and its gly
 
 [dependencies]
 partex-engine = { path = "../partex-engine" }
+partex-xdvipdfmx = { path = "../partex-xdvipdfmx" }
+skrifa = { version = "=0.48.0", default-features = false, features = ["libm"] }
 
 [lints]
 workspace = true
