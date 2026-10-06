@@ -335,7 +335,7 @@ pub trait Env: Fonts {
     /// warning).
     fn report(&mut self, events: Vec<Event>);
     /// Whether this is `XeTeX` (whose math looks ahead at a script's
-    /// first character, §756).
+    /// first character, `XeTeX` §805).
     fn xetex(&self) -> bool {
         false
     }
