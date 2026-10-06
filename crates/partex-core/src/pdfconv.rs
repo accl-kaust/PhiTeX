@@ -83,9 +83,17 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             }
             PDF_FILE_MOD_DATE_CODE => {
                 let name = file_name(&self.scan_ext_string()?);
-                let d = self.host.file_mod_date(&name).unwrap_or_default();
-                self.clock_read(crate::track::Query::ModDate(name.into()), &d);
-                d
+                if self.writing(&name) {
+                    // (a file the job is writing changes as it runs: its
+                    // date is the job's, as with SOURCE_DATE_EPOCH)
+                    let d = self.host.creation_date();
+                    self.clock_read(crate::track::Query::Now, &d);
+                    d
+                } else {
+                    let d = self.host.file_mod_date(&name).unwrap_or_default();
+                    self.clock_read(crate::track::Query::ModDate(name.into()), &d);
+                    d
+                }
             }
             PDF_FILE_SIZE_CODE => {
                 let name = file_name(&self.scan_ext_string()?);
@@ -238,6 +246,26 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         };
         let p = self.text_toks(&out);
         self.ins_list(p)
+    }
+
+    /// Whether `name` is a file the job has open for writing: its
+    /// transcript (`\jobname.log`, which hyperxmp dates under `XeTeX`, with
+    /// no `\pdfcreationdate`) or an `\openout` stream's file. A real
+    /// run finds these on disk, dated about now; a host need not.
+    fn writing(&mut self, name: &[u8]) -> bool {
+        if self.log_opened() {
+            let job = self.job_name();
+            if name.strip_suffix(b".log") == Some(&*self.string_bytes(job)) {
+                return true;
+            }
+        }
+        (0..16u8).any(|n| {
+            // (a closed stream's name does not matter: its flag decides)
+            self.write_open(usize::from(n)) && {
+                self.out_read(n);
+                self.streams.out_name(usize::from(n)).as_deref() == Some(name)
+            }
+        })
     }
 
     /// `pdftex_banner`.
