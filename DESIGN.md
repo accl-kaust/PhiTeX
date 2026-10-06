@@ -2802,6 +2802,17 @@ extension core's `pdfdraw.rs` and `type1.rs` reading through `pdfread`
 (theirs read only an uncompressed PDF); the extension is to depend on it
 instead of its copies, so both draw from the same functions.
 
+Images (`phitex-draw`'s `image.rs`): an image XObject or an inline image
+(`BI … ID … EI`) becomes a `data:` URI in the list's `"I"` (by content
+hash, kept across pages) placed by `"r"` (`["id",a,b,c,d,e,f]`: the SVG
+unit square, row 0 on top, to the page from its top left). A JPEG passes
+through; a Flate stream with PNG predictors is wrapped as a PNG as it is;
+anything else is decoded and encoded as a PNG (`miniz_oxide`), `/SMask`
+as its alpha, an `/ImageMask` in the fill colour. `"o"`
+(`[[list,first,count]]`, list 0 paths, 1 images, 2 text) is the paint
+order when it is not paths, images, text; `"x"` counts what is not drawn
+yet (form XObjects, shadings, clips).
+
 **Protocol.** The extension core's requests (`session.ts`'s `CoreReq`,
 `CoreRes`) as JSON: `{"id":N,"op":…}` answered `{"id":N,"ok":…,"json":…,
 "draws":…}`. Ops: `open` and `status` (the page count and hashes),

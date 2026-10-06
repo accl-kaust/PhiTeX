@@ -1562,7 +1562,6 @@ impl Doc {
     /// gives nothing, as a bad one does.
     #[must_use]
     pub fn decode(&self, s: &Stream) -> Vec<u8> {
-        let mut data = self.raw(s).to_vec();
         let mut f = self.lookup(&s.dict, b"Filter");
         if f == Obj::Null {
             f = self.lookup(&s.dict, b"F");
@@ -1571,11 +1570,20 @@ impl Doc {
         if parms == Obj::Null {
             parms = self.lookup(&s.dict, b"DP");
         }
+        self.decode_with(self.raw(s), &f, &parms)
+    }
+
+    /// `data` through filters `f` (a name, an array of them, or null) with
+    /// parameters `parms`, as [`Doc::decode`] decodes a stream's bytes (an
+    /// inline image's, which no stream holds).
+    #[must_use]
+    pub fn decode_with(&self, data: &[u8], f: &Obj, parms: &Obj) -> Vec<u8> {
+        let mut data = data.to_vec();
         match f {
-            Obj::Name(n) => data = self.filter(&n, &data, &parms).unwrap_or_default(),
+            Obj::Name(n) => data = self.filter(n, &data, parms).unwrap_or_default(),
             Obj::Array(a) => {
                 for (i, x) in a.iter().enumerate() {
-                    let p = match &parms {
+                    let p = match parms {
                         Obj::Array(pa) if i < pa.len() => self.follow(&pa[i]),
                         _ => Obj::Null,
                     };

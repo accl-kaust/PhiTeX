@@ -348,6 +348,231 @@ impl Pdf {
             .filter_map(|k| self.page(k))
             .collect()
     }
+
+    /// Image `XObject` `r` (with resources `res`, for a named colour
+    /// space), and its soft mask.
+    fn image_ref(
+        &self,
+        r: u32,
+        res: &O,
+    ) -> Option<(crate::image::Image, Option<crate::image::Image>)> {
+        let pdfread::Obj::Stream(st) = self.doc.fetch(rf(r)) else {
+            return None;
+        };
+        let dict = conv(&pdfread::Obj::Dict(st.dict.clone()));
+        let raw = self.doc.raw(&st).to_vec();
+        let samples = Some(self.doc.decode(&st)).filter(|s| !s.is_empty());
+        let img = self.image(&dict, raw, samples, res)?;
+        let smask = match dict.get("SMask") {
+            Some(O::Ref(m)) => self.image_ref(*m, res).map(|(i, _)| i),
+            _ => None,
+        };
+        Some((img, smask))
+    }
+
+    /// An inline image: dictionary `d` (abbreviations allowed), bytes `raw`.
+    fn image_inline(
+        &self,
+        d: &O,
+        raw: Vec<u8>,
+        res: &O,
+    ) -> Option<(crate::image::Image, Option<crate::image::Image>)> {
+        fn expand(o: &O) -> O {
+            let name = |n: &str| -> String {
+                match n {
+                    "AHx" => "ASCIIHexDecode",
+                    "A85" => "ASCII85Decode",
+                    "LZW" => "LZWDecode",
+                    "Fl" => "FlateDecode",
+                    "RL" => "RunLengthDecode",
+                    "DCT" => "DCTDecode",
+                    "CCF" => "CCITTFaxDecode",
+                    "G" => "DeviceGray",
+                    "RGB" => "DeviceRGB",
+                    "CMYK" => "DeviceCMYK",
+                    "I" => "Indexed",
+                    n => n,
+                }
+                .to_owned()
+            };
+            match o {
+                O::Name(n) => O::Name(name(n)),
+                O::Arr(a) => O::Arr(a.iter().map(expand).collect()),
+                o => o.clone(),
+            }
+        }
+        fn to_obj(o: &O) -> pdfread::Obj {
+            match o {
+                O::Num(n) if n.fract() == 0.0 => pdfread::Obj::Int(*n as i32),
+                O::Num(n) => pdfread::Obj::Real(*n),
+                O::Name(n) => pdfread::Obj::Name(n.as_bytes().to_vec()),
+                O::Str(s) => pdfread::Obj::Str(s.clone()),
+                O::Arr(a) => pdfread::Obj::Array(a.iter().map(to_obj).collect()),
+                O::Dict(d) => pdfread::Obj::Dict(pdfread::Dict(
+                    d.iter()
+                        .map(|(k, v)| (k.as_bytes().to_vec(), to_obj(v)))
+                        .collect(),
+                )),
+                _ => pdfread::Obj::Null,
+            }
+        }
+        let O::Dict(entries) = d else { return None };
+        let long = |k: &str| -> String {
+            match k {
+                "W" => "Width",
+                "H" => "Height",
+                "BPC" => "BitsPerComponent",
+                "CS" => "ColorSpace",
+                "F" => "Filter",
+                "DP" => "DecodeParms",
+                "IM" => "ImageMask",
+                "D" => "Decode",
+                "I" => "Interpolate",
+                k => k,
+            }
+            .to_owned()
+        };
+        let dict = O::Dict(entries.iter().map(|(k, v)| (long(k), expand(v))).collect());
+        let f = dict.get("Filter").map_or(pdfread::Obj::Null, to_obj);
+        let parms = dict.get("DecodeParms").map_or(pdfread::Obj::Null, to_obj);
+        let samples = Some(self.doc.decode_with(&raw, &f, &parms)).filter(|s| !s.is_empty());
+        Some((self.image(&dict, raw, samples, res)?, None))
+    }
+
+    /// An image from its dictionary, bytes and samples.
+    fn image(
+        &self,
+        dict: &O,
+        raw: Vec<u8>,
+        samples: Option<Vec<u8>>,
+        res: &O,
+    ) -> Option<crate::image::Image> {
+        let num = |k: &str| dict.get(k).map(|o| self.resolve(o)).and_then(|o| o.num());
+        let mask = matches!(dict.get("ImageMask"), Some(O::Op(t)) if t == "true");
+        let space = if mask {
+            crate::image::Space::Gray
+        } else {
+            self.space(&self.resolve(dict.get("ColorSpace")?), res, 0)?
+        };
+        let filters = match dict.get("Filter").map(|f| self.resolve(f)) {
+            Some(O::Name(n)) => vec![n],
+            Some(O::Arr(a)) => a
+                .iter()
+                .filter_map(|f| {
+                    if let O::Name(n) = self.resolve(f) {
+                        Some(n)
+                    } else {
+                        None
+                    }
+                })
+                .collect(),
+            _ => Vec::new(),
+        };
+        let parms = match dict.get("DecodeParms").map(|d| self.resolve(d)) {
+            Some(O::Arr(a)) => a.first().map_or(O::Null, |d| self.resolve(d)),
+            Some(d) => d,
+            None => O::Null,
+        };
+        let pn = |k: &str, v: f64| parms.get(k).and_then(O::num).unwrap_or(v) as i64;
+        let bpc = if mask {
+            1
+        } else {
+            num("BitsPerComponent").unwrap_or(8.0) as usize
+        };
+        Some(crate::image::Image {
+            width: num("Width")? as usize,
+            height: num("Height")? as usize,
+            bpc,
+            space,
+            decode: match dict.get("Decode").map(|d| self.resolve(d)) {
+                Some(O::Arr(a)) => Some(a.iter().map(|x| x.num().unwrap_or(0.0)).collect()),
+                _ => None,
+            },
+            mask,
+            raw,
+            filters,
+            predictor: (
+                pn("Predictor", 1.0),
+                pn("Colors", 1.0),
+                pn("Columns", 1.0),
+                pn("BitsPerComponent", 8.0),
+            ),
+            samples,
+        })
+    }
+
+    /// Colour space `cs` (a name in `res`'s `/ColorSpace` too), as an
+    /// image's samples read; none for one not drawn (Lab, `DeviceN`,
+    /// `Separation`, a pattern).
+    fn space(&self, cs: &O, res: &O, depth: u32) -> Option<crate::image::Space> {
+        use crate::image::Space;
+        if depth > 8 {
+            return None;
+        }
+        match cs {
+            O::Name(n) => match n.as_str() {
+                "DeviceGray" | "CalGray" | "G" => Some(Space::Gray),
+                "DeviceRGB" | "CalRGB" | "RGB" => Some(Space::Rgb),
+                "DeviceCMYK" | "CMYK" => Some(Space::Cmyk),
+                n => {
+                    let named = res
+                        .get("ColorSpace")
+                        .map(|c| self.resolve(c))?
+                        .get(n)
+                        .map(|c| self.resolve(c))?;
+                    self.space(&named, res, depth + 1)
+                }
+            },
+            O::Arr(a) => {
+                let kind = match a.first() {
+                    Some(O::Name(k)) => k.as_str(),
+                    _ => return None,
+                };
+                match kind {
+                    "CalGray" => Some(Space::Gray),
+                    "CalRGB" => Some(Space::Rgb),
+                    "ICCBased" => {
+                        let d = self.resolve(a.get(1)?);
+                        match d.get("N").and_then(O::num) {
+                            Some(n) if (n - 1.0).abs() < 1e-9 => Some(Space::Gray),
+                            Some(n) if (n - 3.0).abs() < 1e-9 => Some(Space::Rgb),
+                            Some(n) if (n - 4.0).abs() < 1e-9 => Some(Space::Cmyk),
+                            _ => self.space(&self.resolve(d.get("Alternate")?), res, depth + 1),
+                        }
+                    }
+                    "Indexed" | "I" => {
+                        let base = self.space(&self.resolve(a.get(1)?), res, depth + 1)?;
+                        let hival = self.resolve(a.get(2)?).num()? as usize;
+                        let table = match a.get(3)? {
+                            O::Str(s) => s.clone(),
+                            r @ O::Ref(_) => match self.resolve(r) {
+                                O::Str(s) => s,
+                                _ => self.stream(r)?,
+                            },
+                            _ => return None,
+                        };
+                        let n = base.n();
+                        let pal = (0..=hival)
+                            .map(|i| {
+                                let e = table.get(i * n..(i + 1) * n).unwrap_or(&[]);
+                                let at = |k: usize| e.get(k).copied().unwrap_or(0);
+                                match base {
+                                    Space::Gray => [at(0), at(0), at(0)],
+                                    Space::Cmyk => {
+                                        crate::image::cmyk(&[at(0), at(1), at(2), at(3)])
+                                    }
+                                    _ => [at(0), at(1), at(2)],
+                                }
+                            })
+                            .collect();
+                        Some(Space::Indexed(pal))
+                    }
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
 }
 
 /// A font as the page uses it: its TeX name, widths, and codes as text.
@@ -510,10 +735,22 @@ fn r2(x: f64) -> f64 {
     (x * 100.0).round() / 100.0
 }
 
-/// Parsed font programs, by a hash of the font file's bytes: kept across
-/// builds (a new PDF's fonts are mostly the last one's), so drawing a page
-/// parses only fonts it has not seen.
-pub type Fonts = HashMap<u64, Option<Arc<crate::type1::Type1>>>;
+/// What drawing pages keeps across pages and builds (a new PDF's fonts
+/// and images are mostly the last one's): parsed font programs, by a hash
+/// of the font file's bytes, so drawing a page parses only fonts it has
+/// not seen; images' data URIs, by a hash of their bytes.
+#[derive(Default)]
+pub struct Fonts {
+    programs: HashMap<u64, Option<Arc<crate::type1::Type1>>>,
+    images: HashMap<u64, Option<Arc<str>>>,
+}
+
+impl Fonts {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
 
 /// A page's hash, with where its content lies in the PDF (the streams'
 /// byte ranges) and its size: what [`Pdf::hashes_since`] needs to keep it.
@@ -762,7 +999,8 @@ fn draw_with(
         // the content
         let (content, _) = page_content(p, page);
         let mut used: std::collections::BTreeSet<(usize, u8)> = std::collections::BTreeSet::new();
-        let (t, paths) = interpret(&content, &fonts, h, &mut used);
+        let mut out = Out::default();
+        let (t, paths) = interpret(p, &content, &fonts, &res, h, &mut used, programs, &mut out);
         let f: Vec<String> = keys.iter().map(|k| esc(k)).collect();
         // (the outlines of the glyphs the page uses, by font and code)
         let by_ref: HashMap<usize, &Font> = fonts.values().map(|f| (f.fref, f)).collect();
@@ -802,24 +1040,52 @@ fn draw_with(
                     t.push(',');
                 }
                 t.push_str(&e.t);
+                push_order(&mut out.order, 2, count_entries(&e.t));
             }
         }
+        let mut tail = String::new();
+        if !out.images.is_empty() {
+            tail.push_str(",\"I\":{");
+            for (i, (id, uri)) in out.images.iter().enumerate() {
+                let _ = write!(
+                    tail,
+                    "{}{}:{}",
+                    if i == 0 { "" } else { "," },
+                    esc(id),
+                    esc(uri)
+                );
+            }
+            tail.push('}');
+        }
+        if let Some(o) = order_json(&out.order) {
+            let _ = write!(tail, ",\"o\":{o}");
+        }
+        if out.unsupported > 0 {
+            let _ = write!(tail, ",\"x\":{}", out.unsupported);
+        }
         format!(
-            "{{\"v\":2,\"w\":{},\"h\":{},\"f\":[{}],\"F\":[{}],\"g\":{{{g}}},\"t\":[{t}],\"p\":[{paths}],\"r\":[]}}",
+            "{{\"v\":2,\"w\":{},\"h\":{},\"f\":[{}],\"F\":[{}],\"g\":{{{g}}},\"t\":[{t}],\"p\":[{paths}],\"r\":[{}]{tail}}}",
             r2(w),
             r2(h),
             f.join(","),
-            fr.join(",")
+            fr.join(","),
+            out.r
         )
     }
 }
 
-/// A content stream's text runs and paths, as JSON array bodies.
+/// A content stream's text runs and paths, as JSON array bodies; its
+/// images, the paint order and what it could not draw into `out`.
+#[allow(clippy::too_many_arguments)]
 fn interpret(
+    p: &Pdf,
     b: &[u8],
     fonts: &HashMap<String, Font>,
+    res: &O,
     page_h: f64,
     used: &mut std::collections::BTreeSet<(usize, u8)>,
+    cache: &mut Fonts,
+    out: &mut Out,
 ) -> (String, String) {
     let names: BTreeMap<usize, &String> = BTreeMap::new();
     let _ = names;
@@ -855,166 +1121,171 @@ fn interpret(
         let (x, y) = apply(m, x, y);
         (r2(x), r2(page_h - y))
     };
-    let mut show = |s: &[u8], g: &G, tm: &mut M, text: &mut String, kern_after: &[(usize, f64)]| {
-        let Some(fi) = g.font else { return };
-        if flist[fi].1.cid {
-            return;
-        }
-        let font = flist[fi].1;
-        let (mut xs, mut txt) = (String::new(), String::new());
-        // (runs: size, y as in the PDF, the x list, the text)
-        let mut runs: Vec<(f64, f64, String, String)> = Vec::new();
-        // (the glyphs drawn from outlines: x and code each)
-        let (mut gxs, mut codes) = (String::new(), String::new());
-        let outl = font.outlines.is_some();
-        let th = g.tz / 100.0;
-        let trm0 = mul(
-            &[g.size * th, 0.0, 0.0, g.size, 0.0, g.rise],
-            &mul(tm, &g.ctm),
-        );
-        let scale = (trm0[2] * trm0[2] + trm0[3] * trm0[3]).sqrt();
-        let (_, y0) = apply(&trm0, 0.0, 0.0);
-        let mut k = 0;
-        // (where the glyph before ended: a gap wider than a fifth of the
-        // size is a word space, which TeX sets as a kern, not a glyph)
-        let mut end: Option<f64> = None;
-        for (i, &c) in s.iter().enumerate() {
-            let trm = mul(
+    let mut show =
+        |s: &[u8], g: &G, tm: &mut M, text: &mut String, kern_after: &[(usize, f64)]| -> usize {
+            let mut written = 0;
+            let Some(fi) = g.font else { return 0 };
+            if flist[fi].1.cid {
+                return 0;
+            }
+            let font = flist[fi].1;
+            let (mut xs, mut txt) = (String::new(), String::new());
+            // (runs: size, y as in the PDF, the x list, the text)
+            let mut runs: Vec<(f64, f64, String, String)> = Vec::new();
+            // (the glyphs drawn from outlines: x and code each)
+            let (mut gxs, mut codes) = (String::new(), String::new());
+            let outl = font.outlines.is_some();
+            let th = g.tz / 100.0;
+            let trm0 = mul(
                 &[g.size * th, 0.0, 0.0, g.size, 0.0, g.rise],
                 &mul(tm, &g.ctm),
             );
-            let (x, _) = apply(&trm, 0.0, 0.0);
-            let u = font.uni.get(&u32::from(c)).cloned().unwrap_or_else(|| {
-                if (32..127).contains(&c) {
-                    char::from(c).to_string()
-                } else {
-                    String::new()
+            let scale = (trm0[2] * trm0[2] + trm0[3] * trm0[3]).sqrt();
+            let (_, y0) = apply(&trm0, 0.0, 0.0);
+            let mut k = 0;
+            // (where the glyph before ended: a gap wider than a fifth of the
+            // size is a word space, which TeX sets as a kern, not a glyph)
+            let mut end: Option<f64> = None;
+            for (i, &c) in s.iter().enumerate() {
+                let trm = mul(
+                    &[g.size * th, 0.0, 0.0, g.size, 0.0, g.rise],
+                    &mul(tm, &g.ctm),
+                );
+                let (x, _) = apply(&trm, 0.0, 0.0);
+                let u = font.uni.get(&u32::from(c)).cloned().unwrap_or_else(|| {
+                    if (32..127).contains(&c) {
+                        char::from(c).to_string()
+                    } else {
+                        String::new()
+                    }
+                });
+                if let Some(e) = end
+                    && x - e > 0.2 * scale
+                    && !u.starts_with(' ')
+                {
+                    let _ = write!(xs, " {}", r2(e));
+                    txt.push(' ');
                 }
-            });
-            if let Some(e) = end
-                && x - e > 0.2 * scale
-                && !u.starts_with(' ')
-            {
-                let _ = write!(xs, " {}", r2(e));
-                txt.push(' ');
-            }
-            let w0 = font
-                .widths
-                .get((i64::from(c) - font.first).max(0) as usize)
-                .copied()
-                .unwrap_or(0.0)
-                / 1000.0;
-            // (one glyph, several characters: a ligature is drawn as the
-            // font's ligature, else the characters share the glyph's width;
-            // variation selectors, which pdfTeX's maps add to math, dropped)
-            if outl {
-                let _ = write!(gxs, "{}{}", if gxs.is_empty() { "" } else { " " }, r2(x));
-                let _ = write!(codes, "{}{c}", if codes.is_empty() { "" } else { "," });
-                used.insert((font.fref, c));
-            }
-            let u = ligature(&u);
-            // (a big operator or delimiter from cmex: a run of its own, the
-            // character scaled to the glyph's height and depth, centred on
-            // the box TeX set; the text font's ∫ is a text-size glyph)
-            if font.ex
-                && !outl
-                && let Some(&(h, d)) = CMEX10.get(usize::from(c))
-                && h + d > 1.3
-                && !u.is_empty()
-            {
-                if !txt.is_empty() {
-                    runs.push((scale, y0, std::mem::take(&mut xs), std::mem::take(&mut txt)));
-                }
-                let big = scale * (h + d) / 1.1;
-                let (_, yb) = apply(&trm, 0.0, 0.0);
-                // (page y grows down: the box's centre, and the character's
-                // baseline about a quarter of its size below its centre)
-                let centre = page_h - yb + (d - h) / 2.0 * scale;
-                runs.push((big, page_h - (centre + 0.25 * big), r2(x).to_string(), u));
-                end = None;
                 let w0 = font
                     .widths
                     .get((i64::from(c) - font.first).max(0) as usize)
                     .copied()
                     .unwrap_or(0.0)
                     / 1000.0;
-                let mut tx = (w0 * g.size + g.tc) * th;
+                // (one glyph, several characters: a ligature is drawn as the
+                // font's ligature, else the characters share the glyph's width;
+                // variation selectors, which pdfTeX's maps add to math, dropped)
+                if outl {
+                    let _ = write!(gxs, "{}{}", if gxs.is_empty() { "" } else { " " }, r2(x));
+                    let _ = write!(codes, "{}{c}", if codes.is_empty() { "" } else { "," });
+                    used.insert((font.fref, c));
+                }
+                let u = ligature(&u);
+                // (a big operator or delimiter from cmex: a run of its own, the
+                // character scaled to the glyph's height and depth, centred on
+                // the box TeX set; the text font's ∫ is a text-size glyph)
+                if font.ex
+                    && !outl
+                    && let Some(&(h, d)) = CMEX10.get(usize::from(c))
+                    && h + d > 1.3
+                    && !u.is_empty()
+                {
+                    if !txt.is_empty() {
+                        runs.push((scale, y0, std::mem::take(&mut xs), std::mem::take(&mut txt)));
+                    }
+                    let big = scale * (h + d) / 1.1;
+                    let (_, yb) = apply(&trm, 0.0, 0.0);
+                    // (page y grows down: the box's centre, and the character's
+                    // baseline about a quarter of its size below its centre)
+                    let centre = page_h - yb + (d - h) / 2.0 * scale;
+                    runs.push((big, page_h - (centre + 0.25 * big), r2(x).to_string(), u));
+                    end = None;
+                    let w0 = font
+                        .widths
+                        .get((i64::from(c) - font.first).max(0) as usize)
+                        .copied()
+                        .unwrap_or(0.0)
+                        / 1000.0;
+                    let mut tx = (w0 * g.size + g.tc) * th;
+                    while k < kern_after.len() && kern_after[k].0 == i {
+                        tx -= kern_after[k].1 / 1000.0 * g.size * th;
+                        k += 1;
+                    }
+                    *tm = mul(&[1.0, 0.0, 0.0, 1.0, tx, 0.0], tm);
+                    continue;
+                }
+                let n = u.chars().count().max(1);
+                for (j, ch) in u.chars().enumerate() {
+                    let xj = x + w0 * g.size * th * scale / g.size.max(1e-9) * j as f64 / n as f64;
+                    let _ = write!(xs, "{}{}", if xs.is_empty() { "" } else { " " }, r2(xj));
+                    txt.push(ch);
+                }
+                let mut tx = (w0 * g.size + g.tc + if c == b' ' { g.tw } else { 0.0 }) * th;
                 while k < kern_after.len() && kern_after[k].0 == i {
                     tx -= kern_after[k].1 / 1000.0 * g.size * th;
                     k += 1;
                 }
-                *tm = mul(&[1.0, 0.0, 0.0, 1.0, tx, 0.0], tm);
-                continue;
-            }
-            let n = u.chars().count().max(1);
-            for (j, ch) in u.chars().enumerate() {
-                let xj = x + w0 * g.size * th * scale / g.size.max(1e-9) * j as f64 / n as f64;
-                let _ = write!(xs, "{}{}", if xs.is_empty() { "" } else { " " }, r2(xj));
-                txt.push(ch);
-            }
-            let mut tx = (w0 * g.size + g.tc + if c == b' ' { g.tw } else { 0.0 }) * th;
-            while k < kern_after.len() && kern_after[k].0 == i {
-                tx -= kern_after[k].1 / 1000.0 * g.size * th;
-                k += 1;
-            }
-            let (ex, _) = apply(
-                &mul(
-                    &[g.size * th, 0.0, 0.0, g.size, 0.0, g.rise],
+                let (ex, _) = apply(
                     &mul(
-                        &mul(&[1.0, 0.0, 0.0, 1.0, w0 * g.size * th, 0.0], tm),
-                        &g.ctm,
+                        &[g.size * th, 0.0, 0.0, g.size, 0.0, g.rise],
+                        &mul(
+                            &mul(&[1.0, 0.0, 0.0, 1.0, w0 * g.size * th, 0.0], tm),
+                            &g.ctm,
+                        ),
                     ),
-                ),
-                0.0,
-                0.0,
-            );
-            end = Some(ex);
-            *tm = mul(&[1.0, 0.0, 0.0, 1.0, tx, 0.0], tm);
-        }
-        if !txt.is_empty() {
-            runs.push((scale, y0, xs, txt));
-        }
-        // (a run whose glyphs are drawn from outlines is text for selection
-        // only: a sixth field, 1)
-        // (a colour other than black: one more field, after the sixth, 0 or 1)
-        let black = g.fill == "#000000";
-        for (size, y, xs, txt) in runs {
-            let tail = if !black {
-                format!(",{},{}", u8::from(outl), esc(&g.fill))
-            } else if outl {
-                ",1".into()
-            } else {
-                String::new()
-            };
-            let _ = write!(
-                text,
-                "{}[{},{},{},{},{}{tail}]",
-                if text.is_empty() { "" } else { "," },
-                font.key,
-                r2(size),
-                r2(page_h - y),
-                esc(&xs),
-                esc(&txt)
-            );
-        }
-        // (the glyphs from outlines: [-1, size, y, xs, "", font ref, codes, colour?])
-        if !codes.is_empty() {
-            let colour = if black {
-                String::new()
-            } else {
-                format!(",{}", esc(&g.fill))
-            };
-            let _ = write!(
-                text,
-                "{}[-1,{},{},{},\"\",{},[{codes}]{colour}]",
-                if text.is_empty() { "" } else { "," },
-                r2(scale),
-                r2(page_h - y0),
-                esc(&gxs),
-                font.fref
-            );
-        }
-    };
+                    0.0,
+                    0.0,
+                );
+                end = Some(ex);
+                *tm = mul(&[1.0, 0.0, 0.0, 1.0, tx, 0.0], tm);
+            }
+            if !txt.is_empty() {
+                runs.push((scale, y0, xs, txt));
+            }
+            // (a run whose glyphs are drawn from outlines is text for selection
+            // only: a sixth field, 1)
+            // (a colour other than black: one more field, after the sixth, 0 or 1)
+            let black = g.fill == "#000000";
+            for (size, y, xs, txt) in runs {
+                let tail = if !black {
+                    format!(",{},{}", u8::from(outl), esc(&g.fill))
+                } else if outl {
+                    ",1".into()
+                } else {
+                    String::new()
+                };
+                let _ = write!(
+                    text,
+                    "{}[{},{},{},{},{}{tail}]",
+                    if text.is_empty() { "" } else { "," },
+                    font.key,
+                    r2(size),
+                    r2(page_h - y),
+                    esc(&xs),
+                    esc(&txt)
+                );
+                written += 1;
+            }
+            // (the glyphs from outlines: [-1, size, y, xs, "", font ref, codes, colour?])
+            if !codes.is_empty() {
+                let colour = if black {
+                    String::new()
+                } else {
+                    format!(",{}", esc(&g.fill))
+                };
+                let _ = write!(
+                    text,
+                    "{}[-1,{},{},{},\"\",{},[{codes}]{colour}]",
+                    if text.is_empty() { "" } else { "," },
+                    r2(scale),
+                    r2(page_h - y0),
+                    esc(&gxs),
+                    font.fref
+                );
+                written += 1;
+            }
+            written
+        };
     while let Some(o) = l.value() {
         let O::Op(op) = o else {
             ops.push(o);
@@ -1110,6 +1381,7 @@ fn interpret(
                 let fill = matches!(op.as_str(), "f" | "F" | "f*" | "B" | "B*" | "b" | "b*");
                 let stroke = matches!(op.as_str(), "S" | "s" | "B" | "B*" | "b" | "b*");
                 if (fill || stroke) && !d.is_empty() {
+                    push_order(&mut out.order, 0, 1);
                     let lw = g.lw * ((g.ctm[0] * g.ctm[3] - g.ctm[1] * g.ctm[2]).abs().sqrt());
                     let _ = write!(
                         paths,
@@ -1165,7 +1437,8 @@ fn interpret(
                     tm = tlm;
                 }
                 if let Some(O::Str(s)) = ops.last() {
-                    show(s, &g, &mut tm, &mut text, &[]);
+                    let k = show(s, &g, &mut tm, &mut text, &[]);
+                    push_order(&mut out.order, 2, k);
                 }
             }
             "TJ" => {
@@ -1188,14 +1461,212 @@ fn interpret(
                             &tm,
                         );
                     }
-                    show(&s, &g, &mut tm, &mut text, &kerns);
+                    let k = show(&s, &g, &mut tm, &mut text, &kerns);
+                    push_order(&mut out.order, 2, k);
                 }
             }
+            "Do" => {
+                let xo = ops.first().and_then(|n| match n {
+                    O::Name(n) => res
+                        .get("XObject")
+                        .map(|x| p.resolve(x))
+                        .and_then(|x| x.get(n).cloned()),
+                    _ => None,
+                });
+                match xo {
+                    Some(O::Ref(r)) if matches!(p.resolve(&O::Ref(r)).get("Subtype"), Some(O::Name(t)) if t == "Image") =>
+                    {
+                        let img = p.image_ref(r, res);
+                        place_image(p, img, &g, page_h, res, cache, out);
+                    }
+                    // (forms: not drawn yet)
+                    _ => out.unsupported += 1,
+                }
+            }
+            "BI" => {
+                // (an inline image: its dictionary to `ID`, its bytes to `EI`)
+                let mut d = Vec::new();
+                while let Some(o) = l.value() {
+                    match o {
+                        O::Op(x) if x == "ID" => break,
+                        O::Name(k) => {
+                            if let Some(v) = l.value() {
+                                d.push((k, v));
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                let start = (l.i + 1).min(l.b.len());
+                let mut end = start;
+                while end + 2 <= l.b.len() {
+                    if &l.b[end..end + 2] == b"EI"
+                        && end > start
+                        && white(l.b[end - 1])
+                        && l.b.get(end + 2).is_none_or(|&c| white(c) || delim(c))
+                    {
+                        break;
+                    }
+                    end += 1;
+                }
+                let data = l.b[start..end.min(l.b.len())].to_vec();
+                l.i = (end + 2).min(l.b.len());
+                let img = p.image_inline(&O::Dict(d), data, res);
+                place_image(p, img, &g, page_h, res, cache, out);
+            }
+            // (shadings: not drawn yet)
+            "sh" => out.unsupported += 1,
             _ => {}
         }
         ops.clear();
     }
     (text, paths)
+}
+
+/// What a content stream adds besides its text and paths.
+#[derive(Default)]
+struct Out {
+    /// Images' entries (`r`), as a JSON array's body.
+    r: String,
+    /// Images' data URIs, by id.
+    images: BTreeMap<String, String>,
+    /// The paint order: runs of entries of one list (0 `p`, 1 `r`, 2 `t`).
+    order: Vec<(u8, usize)>,
+    /// What was not drawn (shadings, forms, images in a form not read).
+    unsupported: usize,
+}
+
+/// `n` more entries of list `list` painted next.
+fn push_order(order: &mut Vec<(u8, usize)>, list: u8, n: usize) {
+    if n == 0 {
+        return;
+    }
+    match order.last_mut() {
+        Some((l, k)) if *l == list => *k += n,
+        _ => order.push((list, n)),
+    }
+}
+
+/// The paint order as `[[list, first, count], …]`, if it is not each list
+/// whole in the order `p`, `r`, `t` (what no `"o"` means).
+fn order_json(order: &[(u8, usize)]) -> Option<String> {
+    if order.windows(2).all(|w| w[0].0 < w[1].0) {
+        return None;
+    }
+    let mut first = [0usize; 3];
+    let mut out = String::from("[");
+    for (i, &(l, n)) in order.iter().enumerate() {
+        let f = &mut first[usize::from(l)];
+        let _ = write!(out, "{}[{l},{},{n}]", if i == 0 { "" } else { "," }, *f);
+        *f += n;
+    }
+    out.push(']');
+    Some(out)
+}
+
+/// How many entries the JSON array body `s` holds.
+fn count_entries(s: &str) -> usize {
+    let (mut depth, mut n, mut quoted, mut escaped) = (0i32, 0, false, false);
+    for c in s.chars() {
+        if quoted {
+            match (escaped, c) {
+                (true, _) => escaped = false,
+                (false, '\\') => escaped = true,
+                (false, '"') => quoted = false,
+                _ => {}
+            }
+            continue;
+        }
+        match c {
+            '"' => quoted = true,
+            '[' | '{' => {
+                if depth == 0 {
+                    n += 1;
+                }
+                depth += 1;
+            }
+            ']' | '}' => depth -= 1,
+            _ => {}
+        }
+    }
+    n
+}
+
+/// Image `img`, painted through the current matrix: its entry, `["id",
+/// a, b, c, d, e, f]`, the matrix that takes an SVG unit square (its row
+/// 0 at the top) to the page, from its top left; its data URI kept by id.
+fn place_image(
+    p: &Pdf,
+    img: Option<(crate::image::Image, Option<crate::image::Image>)>,
+    g: &G,
+    page_h: f64,
+    res: &O,
+    cache: &mut Fonts,
+    out: &mut Out,
+) {
+    let _ = (p, res);
+    let Some((img, smask)) = img else {
+        out.unsupported += 1;
+        return;
+    };
+    let fill = hex_rgb(&g.fill);
+    let key = {
+        use std::hash::{Hash, Hasher};
+        let mut hs = std::collections::hash_map::DefaultHasher::new();
+        img.raw.hash(&mut hs);
+        smask.as_ref().map(|m| &m.raw).hash(&mut hs);
+        if img.mask {
+            fill.hash(&mut hs);
+        }
+        (img.width, img.height).hash(&mut hs);
+        hs.finish()
+    };
+    let uri = if let Some(u) = cache.images.get(&key) {
+        u.clone()
+    } else {
+        let u: Option<Arc<str>> =
+            crate::image::data_uri(&img, smask.as_ref(), fill).map(Into::into);
+        cache.images.insert(key, u.clone());
+        u
+    };
+    let Some(uri) = uri else {
+        out.unsupported += 1;
+        return;
+    };
+    let id = format!("i{key:016x}");
+    out.images
+        .entry(id.clone())
+        .or_insert_with(|| uri.to_string());
+    let [a, b, c, d, e, f] = g.ctm;
+    let m = [a, -b, -c, d, c + e, page_h - d - f];
+    let _ = write!(
+        out.r,
+        "{}[{},{},{},{},{},{},{}]",
+        if out.r.is_empty() { "" } else { "," },
+        esc(&id),
+        r4(m[0]),
+        r4(m[1]),
+        r4(m[2]),
+        r4(m[3]),
+        r4(m[4]),
+        r4(m[5])
+    );
+    push_order(&mut out.order, 1, 1);
+}
+
+/// `#rrggbb` as bytes.
+fn hex_rgb(s: &str) -> [u8; 3] {
+    let v = |i: usize| {
+        s.get(i..i + 2)
+            .and_then(|h| u8::from_str_radix(h, 16).ok())
+            .unwrap_or(0)
+    };
+    [v(1), v(3), v(5)]
+}
+
+fn r4(x: f64) -> f64 {
+    // (and -0 as 0)
+    (x * 10_000.0).round() / 10_000.0 + 0.0
 }
 
 /// `u` (a glyph's `ToUnicode` text) as one character where a font has it: the
@@ -1361,7 +1832,7 @@ fn font_program(p: &Pdf, f: &O, cache: &mut Fonts) -> Option<Arc<crate::type1::T
         b.hash(&mut hs);
         hs.finish()
     };
-    if let Some(t) = cache.get(&key) {
+    if let Some(t) = cache.programs.get(&key) {
         return t.clone();
     }
     let t = (|| {
@@ -1372,7 +1843,7 @@ fn font_program(p: &Pdf, f: &O, cache: &mut Fonts) -> Option<Arc<crate::type1::T
         } as usize;
         crate::type1::Type1::parse(&b, len1).map(Arc::new)
     })();
-    cache.insert(key, t.clone());
+    cache.programs.insert(key, t.clone());
     t
 }
 
