@@ -230,6 +230,36 @@ mod tests {
             .collect()
     }
 
+    /// A graphics state's constant alphas (`TikZ`'s `opacity`): the colours
+    /// drawn as `#rrggbbaa`, back to opaque at `Q`; a blend mode is counted
+    /// as not drawn, as is an operator not known.
+    #[test]
+    fn alphas() {
+        let content = "q /A gs 1 0 0 rg 0 0 1 RG 0 0 10 10 re B Q 0 0 10 10 re f \
+                       q /B gs 0 0 10 10 re f Q 1 0 0 1 0 0 zz";
+        let objs = [
+            "<< /Type /Catalog /Pages 2 0 R >>".to_owned(),
+            "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_owned(),
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 100] /Contents 4 0 R \
+             /Resources << /ExtGState << /A << /ca 0.5 /CA 0.25 >> /B << /BM /Multiply >> >> >> >>"
+                .to_owned(),
+            format!(
+                "<< /Length {} >>\nstream\n{content}\nendstream",
+                content.len()
+            ),
+        ];
+        let d = crate::Pdf::open(&raw_pdf(&objs))
+            .unwrap()
+            .draw(0, &mut crate::Fonts::new())
+            .unwrap();
+        assert!(d.contains("\"#ff000080\",\"#0000ff40\""), "{d}");
+        assert!(
+            d.contains("[\"M0 100L10 100L10 90L0 90Z\",\"#000000\",null"),
+            "{d}"
+        );
+        assert!(d.contains("\"x\":2"), "{d}");
+    }
+
     /// `/ImageMask true` on an image `XObject` (a boolean in the file's
     /// dictionary, not a content stream's operator): a stencil, painted
     /// in the fill colour where its bit is 0.

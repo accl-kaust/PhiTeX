@@ -888,6 +888,31 @@ struct G {
     tz: f64,
     tl: f64,
     rise: f64,
+    /// (the constant alphas of `gs`: `/ca` for filling, `/CA` for
+    /// stroking)
+    fill_alpha: f64,
+    stroke_alpha: f64,
+}
+
+impl G {
+    /// The fill colour as drawn: `#rrggbbaa` when not opaque.
+    fn fill_drawn(&self) -> String {
+        with_alpha(&self.fill, self.fill_alpha)
+    }
+    /// The stroke colour as drawn.
+    fn stroke_drawn(&self) -> String {
+        with_alpha(&self.stroke, self.stroke_alpha)
+    }
+}
+
+/// `#rrggbb` with alpha `a`: as it is when opaque, else `#rrggbbaa` (SVG
+/// and CSS colours both read it).
+fn with_alpha(c: &str, a: f64) -> String {
+    if a >= 1.0 {
+        c.to_owned()
+    } else {
+        format!("{c}{:02x}", (a.clamp(0.0, 1.0) * 255.0).round() as u8)
+    }
 }
 
 impl G {
@@ -908,6 +933,8 @@ impl G {
             tz: 100.0,
             tl: 0.0,
             rise: 0.0,
+            fill_alpha: 1.0,
+            stroke_alpha: 1.0,
         }
     }
 }
@@ -1650,9 +1677,13 @@ fn interpret(
                         "{}[{},{},{},{}{}]",
                         if ctx.paths.is_empty() { "" } else { "," },
                         esc(&d),
-                        if fill { esc(&g.fill) } else { "null".into() },
+                        if fill {
+                            esc(&g.fill_drawn())
+                        } else {
+                            "null".into()
+                        },
                         if stroke {
-                            esc(&g.stroke)
+                            esc(&g.stroke_drawn())
                         } else {
                             "null".into()
                         },
@@ -1755,6 +1786,43 @@ fn interpret(
                         );
                         push_order(&mut ctx.out.order, 2, k);
                     }
+                }
+            }
+            // (a graphics state's parameters: its constant alphas and line
+            // width drawn; a blend mode or soft mask is not)
+            "gs" => {
+                let e = ops.first().and_then(|n| match n {
+                    O::Name(n) => res
+                        .get("ExtGState")
+                        .map(|x| p.resolve(x))
+                        .and_then(|x| x.get(n).map(|e| p.resolve(e))),
+                    _ => None,
+                });
+                let Some(e) = e else {
+                    ctx.out.unsupported += 1;
+                    ops.clear();
+                    continue;
+                };
+                if let Some(a) = e.get("ca").and_then(O::num) {
+                    g.fill_alpha = a;
+                }
+                if let Some(a) = e.get("CA").and_then(O::num) {
+                    g.stroke_alpha = a;
+                }
+                if let Some(w) = e.get("LW").and_then(O::num) {
+                    g.lw = w;
+                }
+                let normal = |o: &O| matches!(o, O::Name(n) if n == "Normal" || n == "Compatible");
+                let blend = e.get("BM").map(|b| p.resolve(b)).is_some_and(|b| match &b {
+                    O::Arr(a) => !a.first().is_some_and(normal),
+                    b => !normal(b),
+                });
+                let mask = e
+                    .get("SMask")
+                    .map(|m| p.resolve(m))
+                    .is_some_and(|m| !matches!(&m, O::Name(n) if n == "None"));
+                if blend || mask {
+                    ctx.out.unsupported += 1;
                 }
             }
             "Do" => {
@@ -1860,7 +1928,28 @@ fn interpret(
                     None => ctx.out.unsupported += 1,
                 }
             }
-            _ => {}
+            // (what changes nothing drawn: marked content, compatibility
+            // sections, rendering intent, flatness, colour spaces (the
+            // colours that follow are read by their operand count), a
+            // Type 3 glyph's metrics; line caps, joins and the miter
+            // limit, drawn as SVG's defaults, are a known approximation)
+            "ET" | "BMC" | "BDC" | "EMC" | "MP" | "DP" | "BX" | "EX" | "ri" | "i" | "CS" | "cs"
+            | "d0" | "d1" | "J" | "j" | "M" => {}
+            // (a dash pattern: drawn solid; only an empty one is drawn
+            // right)
+            "d" => {
+                if !matches!(ops.first(), Some(O::Arr(a)) if a.is_empty()) {
+                    ctx.out.unsupported += 1;
+                }
+            }
+            // (text rendering modes other than filling)
+            "Tr" => {
+                if n(0) != 0.0 {
+                    ctx.out.unsupported += 1;
+                }
+            }
+            // (anything else is not drawn: counted, never silently wrong)
+            _ => ctx.out.unsupported += 1,
         }
         ops.clear();
     }
@@ -2000,13 +2089,14 @@ fn show(
     // (a run whose glyphs are drawn from outlines is text for selection
     // only: a sixth field, 1)
     // (a colour other than black: one more field, after the sixth, 0 or 1)
-    let black = g.fill == "#000000";
+    let fill = g.fill_drawn();
+    let black = fill == "#000000";
     for (size, y, xs, txt) in runs {
         let tail = if let Some(c) = g.clip {
-            let colour = if black { "null".into() } else { esc(&g.fill) };
+            let colour = if black { "null".into() } else { esc(&fill) };
             format!(",{},{colour},\"c{c}\"", u8::from(outl))
         } else if !black {
-            format!(",{},{}", u8::from(outl), esc(&g.fill))
+            format!(",{},{}", u8::from(outl), esc(&fill))
         } else if outl {
             ",1".into()
         } else {
@@ -2028,12 +2118,12 @@ fn show(
     // colour?, matrix?, clip?])
     if !codes.is_empty() {
         let colour = if let Some(c) = g.clip {
-            let colour = if black { "null".into() } else { esc(&g.fill) };
+            let colour = if black { "null".into() } else { esc(&fill) };
             format!(",{colour},null,\"c{c}\"")
         } else if black {
             String::new()
         } else {
-            format!(",{}", esc(&g.fill))
+            format!(",{}", esc(&fill))
         };
         let _ = write!(
             text,
