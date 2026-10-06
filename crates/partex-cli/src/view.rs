@@ -1,4 +1,4 @@
-//! The live viewer (DESIGN 4.8): `partex watch` serves its pages to a
+//! The live viewer (DESIGN 4.8): `phitex watch` serves its pages to a
 //! browser on 127.0.0.1, and tells it after each build which pages
 //! changed, so the browser draws again only those, where they are.
 //!
@@ -19,10 +19,10 @@
 //!   name kept from the extension), `status`, `origins` (a page's glyphs
 //!   and their sources, when the build recorded them), `edit`; and the
 //!   CLI's `source` (a double-click's source: the editor opens there).
-//!   Forward search: `GET /TOKEN/sync?file=F&line=L` (what `partex sync
+//!   Forward search: `GET /TOKEN/sync?file=F&line=L` (what `phitex sync
 //!   F:L` asks) pushes `{"event":"sync","file":…,"lo":…,"hi":…,"at":…}`,
 //!   the line's bytes, and the page highlights the glyphs that came from
-//!   them. The address is kept in a file per directory, for `partex sync`
+//!   them. The address is kept in a file per directory, for `phitex sync`
 //!   ([`address_file`]).
 //! - **Page.** `viewer/index.html` and `viewer/viewer.js`, the bundle of
 //!   the extension's viewer (`viewer.ts`, `page2.ts`) and the CLI's host
@@ -130,14 +130,14 @@ impl Origins {
 }
 
 /// Where the viewer of the watch in `root` keeps its address (for
-/// `partex sync`): `$XDG_RUNTIME_DIR/partex-view/`, else the temporary
+/// `phitex sync`): `$XDG_RUNTIME_DIR/phitex-view/`, else the temporary
 /// directory's, a file named by the directory's hash.
 #[must_use]
 pub fn address_file(root: &std::path::Path) -> Option<PathBuf> {
     let root = std::fs::canonicalize(root).ok()?;
     let base = std::env::var_os("XDG_RUNTIME_DIR").map_or_else(std::env::temp_dir, PathBuf::from);
     let h = partex_core::persist_hash(&root.to_string_lossy().as_bytes());
-    Some(base.join("partex-view").join(format!("{h:032x}")))
+    Some(base.join("phitex-view").join(format!("{h:032x}")))
 }
 
 /// The line and column (from 1; the column in characters) of byte `at`
@@ -294,7 +294,7 @@ impl View {
         }
         let s = shared.clone();
         std::thread::Builder::new()
-            .name("partex-view".into())
+            .name("phitex-view".into())
             .spawn(move || {
                 for conn in listener.incoming() {
                     let Ok(conn) = conn else { continue };
@@ -302,7 +302,7 @@ impl View {
                     let _ = conn.set_nodelay(true);
                     let s = s.clone();
                     let _ = std::thread::Builder::new()
-                        .name("partex-view-conn".into())
+                        .name("phitex-view-conn".into())
                         .spawn(move || serve(&s, conn));
                 }
             })?;
@@ -729,7 +729,7 @@ fn forward(s: &Shared, req: &ws::Request) -> (&'static str, String) {
     let file = req.param("file").unwrap_or_default();
     let line: usize = req.param("line").and_then(|l| l.parse().ok()).unwrap_or(1);
     let col: usize = req.param("col").and_then(|c| c.parse().ok()).unwrap_or(1);
-    // (a path as given, absolute or from the directory `partex sync` ran in,
+    // (a path as given, absolute or from the directory `phitex sync` ran in,
     // named from the watch's)
     let path = std::fs::canonicalize(&file).or_else(|_| std::fs::canonicalize(s.root.join(&file)));
     let root = std::fs::canonicalize(&s.root).unwrap_or_else(|_| s.root.clone());
@@ -769,7 +769,7 @@ fn forward(s: &Shared, req: &ws::Request) -> (&'static str, String) {
     ("200 OK", format!("{rel}:{line} shown in {n} viewer(s)\n"))
 }
 
-/// `partex sync FILE:LINE[:COL]`: the viewer of the watch running here
+/// `phitex sync FILE:LINE[:COL]`: the viewer of the watch running here
 /// shows that line. The exit status.
 pub fn sync_command(place: &str) -> i32 {
     let parsed = place.rsplit_once(':').and_then(|(rest, last)| {
@@ -782,7 +782,7 @@ pub fn sync_command(place: &str) -> i32 {
         )
     });
     let Some((file, line, col)) = parsed else {
-        eprintln!("partex sync: give FILE:LINE[:COL]");
+        eprintln!("phitex sync: give FILE:LINE[:COL]");
         return 2;
     };
     let file = std::fs::canonicalize(&file).map_or(file, |p| p.to_string_lossy().into_owned());
@@ -792,7 +792,7 @@ pub fn sync_command(place: &str) -> i32 {
         .ancestors()
         .find_map(|d| address_file(d).and_then(|f| std::fs::read_to_string(f).ok()));
     let Some(url) = url else {
-        eprintln!("partex sync: no `partex watch` with a viewer runs here");
+        eprintln!("phitex sync: no `phitex watch` with a viewer runs here");
         return 1;
     };
     let enc = |v: &str| -> String {
@@ -827,12 +827,12 @@ pub fn sync_command(place: &str) -> i32 {
             if ok {
                 print!("{body}");
             } else {
-                eprint!("partex sync: {body}");
+                eprint!("phitex sync: {body}");
             }
             i32::from(!ok)
         }
         Err(e) => {
-            eprintln!("partex sync: the watch's viewer did not answer ({e})");
+            eprintln!("phitex sync: the watch's viewer did not answer ({e})");
             1
         }
     }
