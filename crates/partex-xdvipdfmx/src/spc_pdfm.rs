@@ -1891,7 +1891,7 @@ pub(crate) fn spc_fontmapline(
             parse_ident(s, pp)
         };
         if let Some(map_name) = map_name {
-            dpx.pdf_remove_fontmap_record(cstr(&map_name));
+            dpx.pdf_remove_fontmap_record(cstr(&map_name))?;
         } else {
             dpx.spc_warn(spe, format_args!("Invalid fontmap line: Missing TFM name."));
             error = -1;
@@ -1911,9 +1911,9 @@ pub(crate) fn spc_fontmapline(
         } else {
             let map_name = mrec.map_name.clone().unwrap_or_default();
             if opchr == b'+' {
-                dpx.pdf_append_fontmap_record(&map_name, &mrec);
+                dpx.pdf_append_fontmap_record(&map_name, &mrec)?;
             } else {
-                dpx.pdf_insert_fontmap_record(&map_name, &mrec);
+                dpx.pdf_insert_fontmap_record(&map_name, &mrec)?;
             }
         }
         pdf_clear_fontmap_record(&mut mrec);

@@ -456,7 +456,11 @@ impl Dpx {
             };
             let (pkt, end): (Option<Rc<[u8]>>, usize) = match pkt {
                 None => {
-                    let tfm_id = self.vf.vf_fonts[v].dev_fonts[0].tfm_id;
+                    // (C dereferences the NULL font list of a VF without fonts)
+                    let Some(df) = self.vf.vf_fonts[v].dev_fonts.first() else {
+                        crate::fatal!("Invalid VF file: a character not in it, and no font.");
+                    };
+                    let tfm_id = df.tfm_id;
                     let is_jfm = self.tfm_is_jfm(tfm_id)?;
                     if is_jfm != 0
                         && ch < CHAR_INDEX_MIN

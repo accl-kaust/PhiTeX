@@ -4,7 +4,7 @@
 //! port pdfTeX uses, reads them: [`PngInfo`] holds what libpng's
 //! `png_structp` + `png_infop` tell pngimage.c. Its inflater keeps a 32 KiB
 //! window whatever the zlib header says (`PNG_MAXIMUM_INFLATE_WINDOW` on).
-//! Not in that port, and left `todo!()`: `png_set_gamma`'s correction of
+//! Not in that port, and fatal errors here: `png_set_gamma`'s correction of
 //! the samples (a PNG with only a gAMA chunk whose gamma is not about
 //! 1/2.2) and `png_set_background` (transparency before PDF 1.4).
 
@@ -300,13 +300,12 @@ fn png_gamma_correction(screen: f64, file: f64) -> bool {
 
 /// libpng's `png_read_update_info`: applies the transformations to the
 /// reported color type, depth and rowbytes.
-pub fn png_read_update_info(png: &mut PngInfo) {
+pub fn png_read_update_info(png: &mut PngInfo) -> Result<()> {
     if let Some((screen, file)) = png.set_gamma
         && png_gamma_correction(screen, file)
     {
-        todo!(
-            "png_set_gamma: partex_engine::png does not correct gamma (a PNG with only a gAMA chunk)"
-        );
+        // (not ported: libpng's gamma correction)
+        fatal!("png_set_gamma: gamma correction is not supported (a PNG with only a gAMA chunk)");
     }
     let (color_type, bit_depth) = png::output(&png.info, png.transforms());
     let channels: u32 = match color_type {
@@ -318,6 +317,7 @@ pub fn png_read_update_info(png: &mut PngInfo) {
     png.out_color_type = color_type;
     png.out_bit_depth = bit_depth;
     png.rowbytes = png_rowbytes(channels * u32::from(bit_depth), png.info.width);
+    Ok(())
 }
 
 /// `read_image_data` (static): the rows, decoded and transformed, into
@@ -355,7 +355,7 @@ fn invalid_chrm(c: &[f64; 8]) -> bool {
 
 impl Dpx {
     /// `check_transparency` (static): a `PDF_TRANS_TYPE_*`.
-    pub fn check_transparency(&mut self, png: &mut PngInfo) -> i32 {
+    pub fn check_transparency(&mut self, png: &mut PngInfo) -> Result<i32> {
         let color_type = png.info.color_type;
 
         /*
@@ -400,16 +400,15 @@ impl Dpx {
             || (self.o.check_version(1, 4) < 0 && trans_type == PDF_TRANS_TYPE_ALPHA)
         {
             /* png_set_background(white): composited with a white background */
-            todo!(
-                "png_set_background (transparency before PDF 1.3/1.4): not in partex_engine::png"
-            );
+            // (not ported: libpng's background compositing)
+            fatal!("png_set_background: transparency before PDF 1.3/1.4 is not supported");
             #[allow(unreachable_code)]
             {
                 trans_type = PDF_TRANS_TYPE_NONE;
             }
         }
 
-        trans_type
+        Ok(trans_type)
     }
     /// `png_include_image`: fills XObject `xobj_id`; 0 or -1.
     pub fn png_include_image(&mut self, xobj_id: i32, fp: &mut MemFile) -> Result<i32> {
@@ -441,9 +440,9 @@ impl Dpx {
             png.set_gamma = Some((2.2, g));
         }
 
-        let trans_type = self.check_transparency(&mut png);
+        let trans_type = self.check_transparency(&mut png)?;
         /* check_transparency() does not do updata_info() */
-        png_read_update_info(&mut png);
+        png_read_update_info(&mut png)?;
         let mut rowbytes = png.rowbytes;
 
         /* Values listed below will not be modified in the remaining process. */
@@ -1120,7 +1119,7 @@ mod tests {
     }
 
     fn rows(png: &mut PngInfo) -> Vec<u8> {
-        png_read_update_info(png);
+        png_read_update_info(png).unwrap();
         let (h, rb) = (png.info.height, png.rowbytes);
         let mut d = vec![0; (h * rb) as usize];
         read_image_data(png, &mut d, h, rb).unwrap();

@@ -535,7 +535,8 @@ impl Dpx {
                     true
                 }
             }
-            IMAGE_TYPE_JP2 => todo!("JPEG 2000 images (jp2image.c) are not ported"),
+            // (not ported: jp2image.c)
+            IMAGE_TYPE_JP2 => fatal!("JPEG 2000 images are not supported."),
             IMAGE_TYPE_PNG => {
                 if self.png_include_image(id, fp)? < 0 {
                     false
@@ -556,7 +557,7 @@ impl Dpx {
                 let mut result = self.pdf_include_page(id, fp, fullname, options.clone())?;
                 if result > 0 {
                     /* PDF version too recent */
-                    result = self.ps_include_page(id, fullname, options.clone());
+                    result = self.ps_include_page(id, fullname, options.clone())?;
                 }
                 if result < 0 {
                     false
@@ -569,7 +570,7 @@ impl Dpx {
              * case  IMAGE_TYPE_EPS:
              */
             _ => {
-                if self.ps_include_page(id, fullname, options.clone()) < 0 {
+                if self.ps_include_page(id, fullname, options.clone())? < 0 {
                     false
                 } else {
                     self.ximage.ximages[id as usize].subtype = PDF_XOBJECT_TYPE_FORM;
@@ -665,7 +666,8 @@ impl Dpx {
         let format = source_image_type(&mut fp)?;
         let page_no = options.page_no;
         if format == IMAGE_TYPE_MPS {
-            todo!("MetaPost images (mpost.c's mps_include_page) are not ported");
+            // (not ported: mpost.c's mps_include_page)
+            fatal!("MetaPost images are not supported.");
         }
         id = self.load_image(ident, Some(filename), &fullname, format, &mut fp, options)?;
 
@@ -1034,7 +1036,12 @@ impl Dpx {
     /// `ps_include_page` (static): runs the distiller on a PS/EPS file.
     /// Without a distiller template it fails, as in C; running one (an
     /// external command and a temporary file) is not ported.
-    pub fn ps_include_page(&mut self, xobj_id: i32, filename: &[u8], options: LoadOptions) -> i32 {
+    pub fn ps_include_page(
+        &mut self,
+        xobj_id: i32,
+        filename: &[u8],
+        options: LoadOptions,
+    ) -> Result<i32> {
         let _ = (xobj_id, options);
         if self.ximage.cmdtmpl.is_none() {
             warn!(
@@ -1042,9 +1049,14 @@ impl Dpx {
                 String::from_utf8_lossy(filename)
             );
             warn!(">> Please check if you have 'D' option in config file.");
-            return -1;
+            return Ok(-1);
         }
-        todo!("the distiller (an external command, dpx_file_apply_filter) is not ported")
+        // (not ported: the distiller, an external command run by
+        // dpx_file_apply_filter)
+        fatal!(
+            "Image format conversion for \"{}\" (the distiller) is not supported.",
+            String::from_utf8_lossy(filename)
+        )
     }
     /// `pdf_error_cleanup_cache`: deletes the temporary files (none here:
     /// the distiller is not ported).

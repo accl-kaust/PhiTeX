@@ -387,8 +387,9 @@ fn jfm_make_charmap(fm: &mut FontMetric, tfm: &mut TfmFont) {
     }
 }
 
-/// `tfm_unpack_arrays` (static).
-fn tfm_unpack_arrays(fm: &mut FontMetric, tfm: &mut TfmFont) {
+/// `tfm_unpack_arrays` (static). A character past 255, or an index past
+/// its table, is an error: C writes or reads past its arrays there.
+fn tfm_unpack_arrays(fm: &mut FontMetric, tfm: &mut TfmFont) -> Result<()> {
     fm.widths = vec![0; 256];
     fm.heights = vec![0; 256];
     fm.depths = vec![0; 256];
@@ -397,10 +398,23 @@ fn tfm_unpack_arrays(fm: &mut FontMetric, tfm: &mut TfmFont) {
         let width_index = (charinfo >> 24) as u16;
         let height_index = ((charinfo >> 20) & 0xf) as u8;
         let depth_index = ((charinfo >> 16) & 0xf) as u8;
-        fm.widths[i as usize] = tfm.width[width_index as usize];
-        fm.heights[i as usize] = tfm.height[height_index as usize];
-        fm.depths[i as usize] = tfm.depth[depth_index as usize];
+        let (Some(&w), Some(&h), Some(&d)) = (
+            tfm.width.get(usize::from(width_index)),
+            tfm.height.get(usize::from(height_index)),
+            tfm.depth.get(usize::from(depth_index)),
+        ) else {
+            crate::fatal!(
+                "Invalid TFM file: char {i}: an index past the width, height or depth table."
+            );
+        };
+        if i > 255 {
+            crate::fatal!("Invalid TFM file: char {i} past 255.");
+        }
+        fm.widths[i as usize] = w;
+        fm.heights[i as usize] = h;
+        fm.depths[i as usize] = d;
     }
+    Ok(())
 }
 
 /// `sput_bigendian` (static): `n` bytes of `v` into `s`.
@@ -686,7 +700,7 @@ fn read_tfm(fm: &mut FontMetric, tfm_file: &mut MemFile, tfm_file_size: i64) -> 
         tfm.depth = vec![0; tfm.ndepths as usize];
         fread_fwords(&mut tfm.depth, tfm_file)?;
     }
-    tfm_unpack_arrays(fm, &mut tfm);
+    tfm_unpack_arrays(fm, &mut tfm)?;
     tfm_unpack_header(fm, &mut tfm)?;
 
     tfm_font_clear(&mut tfm);

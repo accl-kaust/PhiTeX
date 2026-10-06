@@ -652,6 +652,8 @@ mod tests {
         // C's ERRORs
         let (e, _) = run(b"pdf:bxobj @x width 1pt height 1pt", Vec::new()).expect_err("fatal");
         assert_eq!(e.message, "A pending form XObject at the end of page.");
+        let (e, _) = run(b"pdf:bc /Pattern @nope", Vec::new()).expect_err("fatal");
+        assert_eq!(e.message, "pdf_link_obj(): passed invalid object.");
         let (e, _) = run(b"pdf:obj @z [@prevpage]", Vec::new()).expect_err("fatal");
         assert_eq!(
             e.message,

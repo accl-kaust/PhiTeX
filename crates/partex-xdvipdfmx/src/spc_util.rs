@@ -700,9 +700,10 @@ fn read_pattern_ref(dpx: &mut Dpx, ap: &mut SpcArg) -> Result<Option<i32>> {
     let ident = ap_opt_ident(ap);
     let mut res_id = dpx.pdf_findresource(b"Pattern", &ident)?;
     if res_id < 0 {
-        let pattern = dpx
-            .spc_lookup_object(&ident)?
-            .expect("Pattern object not found");
+        let Some(pattern) = dpx.spc_lookup_object(&ident)? else {
+            // (C links the NULL it found)
+            fatal!("pdf_link_obj(): passed invalid object.");
+        };
         /* Skip checking. /Type entry is optional... */
         let p = dpx.o.link(pattern)?;
         res_id = dpx.pdf_defineresource(b"Pattern", Some(&ident), p, 0)?;

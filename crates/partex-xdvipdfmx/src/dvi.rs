@@ -1104,9 +1104,9 @@ impl Dpx {
         key.extend_from_slice(&b.0);
         let mrec = match self.pdf_lookup_fontmap_record(&key) {
             Some(m) => m,
-            None => match self
-                .pdf_insert_native_fontmap_record(&path, index, layout_dir, extend, slant, embolden)
-            {
+            None => match self.pdf_insert_native_fontmap_record(
+                &path, index, layout_dir, extend, slant, embolden,
+            )? {
                 Some(m) => m,
                 None => crate::fatal!("Failed to insert font record for font"),
             },

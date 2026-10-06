@@ -4,7 +4,7 @@
 //! The map is `self.fontmap.fontmap`, an [`HtTable`] of [`FontmapRec`]s
 //! keyed by TeX font name (`None` before `pdf_init_fontmaps`). Lookups
 //! return an owned copy of the record. SFD subfonts (`foo@SFD@`) need
-//! subfont.c, which is not ported: those paths are `todo!()`.
+//! subfont.c, which is not ported: those paths are fatal errors.
 
 use crate::dpxutil::HtTable;
 use crate::prelude::*;
@@ -898,13 +898,13 @@ impl Dpx {
             let kp = mrec.map_name.clone().unwrap_or_default();
             match mode {
                 FONTMAP_RMODE_REPLACE => {
-                    self.pdf_insert_fontmap_record(&kp, &mrec);
+                    self.pdf_insert_fontmap_record(&kp, &mrec)?;
                 }
                 FONTMAP_RMODE_APPEND => {
-                    self.pdf_append_fontmap_record(&kp, &mrec);
+                    self.pdf_append_fontmap_record(&kp, &mrec)?;
                 }
                 FONTMAP_RMODE_REMOVE => {
-                    self.pdf_remove_fontmap_record(&kp);
+                    self.pdf_remove_fontmap_record(&kp)?;
                 }
                 _ => {}
             }
@@ -914,14 +914,15 @@ impl Dpx {
     }
 
     /// `pdf_append_fontmap_record`: 0 or -1.
-    pub fn pdf_append_fontmap_record(&mut self, kp: &[u8], mrec: &FontmapRec) -> i32 {
+    pub fn pdf_append_fontmap_record(&mut self, kp: &[u8], mrec: &FontmapRec) -> Result<i32> {
         if fontmap_invalid(mrec) {
             warn!("Invalid fontmap record...");
-            return -1;
+            return Ok(-1);
         }
 
         if let Some((_fnt_name, _sfd_name)) = chop_sfd_name(kp) {
-            todo!("SFD subfonts (subfont.c's sfd_get_subfont_ids) are not ported");
+            // (not ported: subfont.c)
+            fatal!("SFD subfonts are not supported.");
         }
 
         let t = self.fontmap_table();
@@ -934,18 +935,19 @@ impl Dpx {
             t.ht_insert_table(kp, m);
         }
 
-        0
+        Ok(0)
     }
 
     /// `pdf_remove_fontmap_record`: 0 or -1.
-    pub fn pdf_remove_fontmap_record(&mut self, kp: &[u8]) -> i32 {
+    pub fn pdf_remove_fontmap_record(&mut self, kp: &[u8]) -> Result<i32> {
         if let Some((_fnt_name, _sfd_name)) = chop_sfd_name(kp) {
-            todo!("SFD subfonts (subfont.c's sfd_get_subfont_ids) are not ported");
+            // (not ported: subfont.c)
+            fatal!("SFD subfonts are not supported.");
         }
 
         self.fontmap_table().ht_remove_table(kp);
 
-        0
+        Ok(0)
     }
 
     /// `pdf_insert_fontmap_record`: a copy of the record inserted, or none.
@@ -953,14 +955,15 @@ impl Dpx {
         &mut self,
         kp: &[u8],
         mrec: &FontmapRec,
-    ) -> Option<FontmapRec> {
+    ) -> Result<Option<FontmapRec>> {
         if fontmap_invalid(mrec) {
             warn!("Invalid fontmap record...");
-            return None;
+            return Ok(None);
         }
 
         if let Some((_fnt_name, _sfd_name)) = chop_sfd_name(kp) {
-            todo!("SFD subfonts (subfont.c's sfd_get_subfont_ids) are not ported");
+            // (not ported: subfont.c)
+            fatal!("SFD subfonts are not supported.");
         }
 
         let mut m = FontmapRec::default();
@@ -971,7 +974,7 @@ impl Dpx {
         let ret = m.clone();
         self.fontmap_table().ht_insert_table(kp, m);
 
-        Some(ret)
+        Ok(Some(ret))
     }
 
     /// `pdf_lookup_fontmap_record`: a copy of the record.
@@ -993,7 +996,7 @@ impl Dpx {
         extend: i32,
         slant: i32,
         embolden: i32,
-    ) -> Option<FontmapRec> {
+    ) -> Result<Option<FontmapRec>> {
         let mut fontmap_key = filename.to_vec();
         fontmap_key.extend_from_slice(
             format!(

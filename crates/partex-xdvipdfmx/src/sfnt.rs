@@ -488,7 +488,13 @@ impl Dpx {
             }
             if offset % 4 != 0 {
                 let length = 4 - (offset % 4);
-                self.o.add_stream(stream, &padbytes[..length as usize])?;
+                // (tables' lengths past `int` make the offset negative:
+                // C pads with the bytes after `padbytes`)
+                let Some(pad) = padbytes.get(..length as usize) else {
+                    self.o.release(stream)?;
+                    fatal!("Font tables too long: their offsets overflow.");
+                };
+                self.o.add_stream(stream, pad)?;
                 offset += length;
             }
             let data = sfont.directory.as_deref_mut().unwrap().tables[i]

@@ -2688,7 +2688,12 @@ build costs about what a plain one does (4.4 s against 4.2 s, most of
 it the font index). The PDF is made in process: the hosts keep the XDV
 (`FileKind::XdvPipe`) and run xdvipdfmx where XeTeX closes its pipe;
 a fatal error of the driver leaves its partial file and, in plain
-partex, the log's "Error 256 (driver return code)". Input encodings
+partex, the log's "Error 256 (driver return code)". The driver's fatal
+error (C's `ERROR`) is a value, never a panic: `Fatal`, passed up with
+`?` from where C exits to `api::Session`, so a broken `\special`, image
+or font cannot abort a wasm worker built with `panic=abort`; the
+errors C leaves undefined (a read past a table) are `Fatal` too.
+Input encodings
 are XeTeX's own and ICU's stateless single-byte converters and UTF-8,
 by any ICU name (`icu_tables.rs`, generated from `uconv`).
 

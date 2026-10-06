@@ -194,10 +194,24 @@ fn get_subr(subr_idx: Option<&CffIndex>, id: i32) -> Result<&[u8]> {
         );
     }
 
-    let id = id as usize;
-    let len = subr_idx.offset[id + 1].wrapping_sub(subr_idx.offset[id]) as usize;
-    let a = subr_idx.offset[id] as usize - 1;
-    Ok(&subr_idx.data[a..a + len])
+    // (C reads before or past its tables for a negative index, the index
+    // `count`, or offsets past the data: errors here)
+    let subr = usize::try_from(id).ok().and_then(|id| {
+        let (o0, o1) = (*subr_idx.offset.get(id)?, *subr_idx.offset.get(id + 1)?);
+        let a = (o0 as usize).checked_sub(1)?;
+        subr_idx
+            .data
+            .get(a..a.checked_add(o1.wrapping_sub(o0) as usize)?)
+    });
+    match subr {
+        Some(s) => Ok(s),
+        None => fatal!(
+            "{}: Invalid Subr index: {} (max={})",
+            CS_TYPE2_DEBUG_STR,
+            id,
+            count
+        ),
+    }
 }
 
 impl State {

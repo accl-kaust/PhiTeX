@@ -650,10 +650,9 @@ impl Dpx {
         width: Spt,
         font_id: i32,
     ) -> Result<()> {
-        assert!(
-            font_id >= 0 && (font_id as usize) < self.dev.pdev.fonts.len(),
-            "Invalid font"
-        );
+        if font_id < 0 || font_id as usize >= self.dev.pdev.fonts.len() {
+            fatal!("Invalid font: {} ({})", font_id, self.dev.pdev.fonts.len());
+        }
         if font_id != self.dev.pdev.text_state.font_id {
             self.pdf_dev_set_font(font_id)?;
         }
