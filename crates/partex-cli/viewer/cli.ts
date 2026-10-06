@@ -11,6 +11,7 @@ import { Viewer, type ViewerHost } from "../../../viewer/src/viewer.ts";
 import { boxes, from, glyphs, lineAt, nearest } from "../../../viewer/src/sync.ts";
 import { setFontBase } from "../../../viewer/src/page2.ts";
 import { VIEWER_CSS } from "../../../viewer/src/css.ts";
+import { KEYS, bindKeys } from "../../../viewer/src/keys.ts";
 
 /** sync.ts's Glyph: where a glyph is on its page, and its source. */
 interface Glyph {
@@ -75,6 +76,7 @@ const statusEl = document.getElementById("status")!;
 /** Zoom: 0 fits the page's width to the window; else CSS px per point × 96/72. */
 let zoom = 0;
 let pageW = 612;
+let pageH = 792;
 const fitScale = () => Math.max(0.2, (scroller.clientWidth - 32) / ((pageW * 96) / 72));
 
 const host: ViewerHost = {
@@ -131,6 +133,7 @@ async function draw(k: number): Promise<void> {
   if (!r.ok || !r.draws) return;
   if (k === 0 && r.draws.w && r.draws.w !== pageW) {
     pageW = r.draws.w;
+    pageH = r.draws.h || pageH;
     if (!zoom) viewer.redraw();
   }
   viewer.set(k, { draws: r.draws }, r.json?.hash ?? null);
@@ -191,11 +194,29 @@ addEventListener(
   },
   { passive: false },
 );
-addEventListener("keydown", (e) => {
-  if (e.ctrlKey || e.metaKey || e.altKey) return;
-  if (e.key === "+" || e.key === "=") zoom = Math.min(5, (zoom || fitScale()) * 1.1);
-  else if (e.key === "-") zoom = Math.max(0.25, (zoom || fitScale()) / 1.1);
-  else if (e.key === "0") zoom = 0;
-  else return;
+// (the keys: as PDF viewers have them, and vim's; `?` lists them)
+const helpEl = document.createElement("div");
+helpEl.id = "keys";
+helpEl.hidden = true;
+helpEl.innerHTML = `<b>Keys</b><table>${KEYS.map(([k, w]) => `<tr><td><kbd>${k}</kbd></td><td>${w}</td></tr>`).join("")}</table>`;
+document.body.append(helpEl);
+const setZoom = (z: number) => {
+  zoom = z;
   viewer.redraw();
+};
+bindKeys(window, {
+  get pages() {
+    return viewer.pages;
+  },
+  get page() {
+    return viewer.page;
+  },
+  goTo: (k) => viewer.goTo(k),
+  scroller,
+  zoom: (f) => setZoom(Math.min(5, Math.max(0.25, (zoom || fitScale()) * f))),
+  fitWidth: () => setZoom(0),
+  fitPage: () => setZoom(Math.max(0.2, Math.min((scroller.clientHeight - 24) / ((pageH * 96) / 72), fitScale()))),
+  help: (show) => {
+    helpEl.hidden = !show;
+  },
 });
