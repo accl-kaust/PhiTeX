@@ -374,6 +374,10 @@ impl Clone for SessionHost {
 }
 
 impl Host for SessionHost {
+    fn out_name_ok(&mut self, name: &[u8]) -> bool {
+        self.shared.borrow_mut().base.out_name_ok(name)
+    }
+
     fn read_file(&mut self, name: &[u8], kind: FileKind) -> Option<OpenedFile> {
         let mut sh = self.shared.borrow_mut();
         let found = sh.lookup(name, kind);

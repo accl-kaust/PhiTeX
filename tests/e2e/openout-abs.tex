@@ -1,0 +1,8 @@
+% \openout under openout_any = p (kpathsea's kpse_out_name_ok): a
+% relative name is written, then /tmp/partex-e2e-openout-abs is refused (TeX's "I can't write
+% on file", fatal in nonstopmode)
+\catcode`\{=1 \catcode`\}=2
+\immediate\openout1=openout-abs-ok \immediate\write1{fine}\immediate\closeout1
+\immediate\openout2=/tmp/partex-e2e-openout-abs \immediate\write2{refused}\immediate\closeout2
+\message{NOT REFUSED}
+\end

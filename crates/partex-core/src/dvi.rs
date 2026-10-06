@@ -1394,7 +1394,10 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         self.pack_file_name_bytes(name, area, ext);
         loop {
             let file = self.name_of_file.clone();
-            if let Some((id, _)) = self.open_out(&file, FileKind::Other) {
+            // (web2c: `kpse_out_name_ok`, then `a_open_out`)
+            if self.host.out_name_ok(&file)
+                && let Some((id, _)) = self.open_out(&file, FileKind::Other)
+            {
                 self.write_file[ju].id = Some(id);
                 // (the file stream `j` stores to: a store made, 7.17.5)
                 self.set_out_name(ju, Some(&file));

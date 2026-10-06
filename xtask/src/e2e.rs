@@ -104,6 +104,34 @@ const CASES: &[Case] = &[
             ],
         ],
     },
+    // \openout under openout_any = p (TeX Live's texmf.cnf default,
+    // kpathsea's `kpse_out_name_ok`): a dot file, an absolute name, one
+    // above the directory and one beginning `..` are each refused, TeX's
+    // "I can't write on file", fatal in nonstopmode
+    Case {
+        name: "openout_dot",
+        oracle: "pdftex",
+        inputs: &["openout-dot.tex"],
+        runs: &[&["-ini", "-interaction=nonstopmode", "openout-dot"]],
+    },
+    Case {
+        name: "openout_abs",
+        oracle: "pdftex",
+        inputs: &["openout-abs.tex"],
+        runs: &[&["-ini", "-interaction=nonstopmode", "openout-abs"]],
+    },
+    Case {
+        name: "openout_up",
+        oracle: "pdftex",
+        inputs: &["openout-up.tex"],
+        runs: &[&["-ini", "-interaction=nonstopmode", "openout-up"]],
+    },
+    Case {
+        name: "openout_dots",
+        oracle: "pdftex",
+        inputs: &["openout-dots.tex"],
+        runs: &[&["-ini", "-interaction=nonstopmode", "openout-dots"]],
+    },
     Case {
         name: "plain",
         oracle: "tex",
