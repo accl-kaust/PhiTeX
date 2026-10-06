@@ -134,6 +134,10 @@ impl SanHost {
 }
 
 impl Host for SanHost {
+    fn out_name_ok(&mut self, name: &[u8]) -> bool {
+        self.base.borrow_mut().out_name_ok(name)
+    }
+
     fn read_file(&mut self, name: &[u8], kind: FileKind) -> Option<OpenedFile> {
         let got = self.replay(|a| match a {
             Answer::Read(n, k, f) if n == name && *k == kind => Some(f.clone()),

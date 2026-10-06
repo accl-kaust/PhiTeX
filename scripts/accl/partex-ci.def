@@ -1,0 +1,29 @@
+# The CI image (docs/ci.md): the partex image (partex.def, built as
+# partex-2026-09-25-tools) with TeX Live's documentation tree and the
+# language collections the manuals need, from the same Arch Linux Archive
+# snapshot, so the manuals' sources are the TeX Live 2026.1 tree's own
+# (svn r78408, as the installed packages): nothing is downloaded at CI
+# time. Built by build-image.sbatch:
+#   sbatch --qos=build4 build-image.sbatch partex-ci-2026-09-25 partex-ci.def
+Bootstrap: localimage
+From: /home/mohaam0e/shared-cache/partex/partex-2026-09-25-tools.sif
+
+%post
+    set -eu
+    # (the archlinux:base image extracts no usr/share/doc: the manuals'
+    # sources are there)
+    sed -i '/^NoExtract/d' /etc/pacman.conf
+    pacman -Syy --noconfirm
+    pacman -S --noconfirm --needed texlive-doc \
+        texlive-langcjk texlive-langchinese texlive-langjapanese texlive-langkorean \
+        texlive-langcyrillic texlive-langgreek texlive-langeuropean texlive-langother \
+        texlive-langfrench texlive-langgerman texlive-langitalian texlive-langspanish \
+        texlive-langpolish texlive-langportuguese texlive-langczechslovak texlive-music \
+        texlive-games
+    test -f /usr/share/doc/texlive/generic/pgf/pgfmanual.tex
+    pacman -Scc --noconfirm
+
+%environment
+    export RUSTUP_HOME=/opt/rust/rustup
+    export PATH=/opt/rust/cargo/bin:/usr/bin/vendor_perl:$PATH
+    export LANG=C.UTF-8

@@ -496,6 +496,10 @@ impl Host for MachineHost {
         true
     }
 
+    fn out_name_ok(&mut self, name: &[u8]) -> bool {
+        self.native().out_name_ok(name)
+    }
+
     /// A command, run by the native host over the job's files: this host
     /// keeps them in memory until the link, so each name's last opened
     /// file is put on disk first; the files the command removes stay

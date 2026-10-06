@@ -1064,6 +1064,61 @@ impl Kpse {
         cnf_p(self.var_value("texmf_casefold_search").as_deref())
     }
 
+    /// `tex-file.c`, `kpathsea_out_name_ok` (TeX Live 2026, not
+    /// extended): whether a file may be written as `name`, under
+    /// `openout_any` (default `p`). `Err` holds the `openout_any` value
+    /// for the refusal's message (`Not writing to NAME (openout_any = p;
+    /// no extended check).`). Reading is never checked: as of 2026
+    /// kpathsea allows any file to be read, whatever `openin_any` says.
+    ///
+    /// # Errors
+    /// The value of `openout_any` when `name` is refused.
+    pub fn out_name_ok(&mut self, name: &[u8]) -> Result<(), Bytes> {
+        let choice = self
+            .var_value("openout_any")
+            .filter(|v| !v.is_empty())
+            .unwrap_or_else(|| b"p".to_vec());
+        if matches!(choice[0], b'a' | b'y' | b'1') {
+            return Ok(());
+        }
+        let expanded = self.expand(name);
+        // no `.rhosts`, `.ssh/`, `..x`: a dot at the start or after a
+        // `/` must begin `./` or `../`
+        for (i, &c) in name.iter().enumerate() {
+            if c != b'.' || i > 0 && name[i - 1] != b'/' {
+                continue;
+            }
+            let next = name.get(i + 1).copied();
+            let dot_slash = next == Some(b'/');
+            let dot_dot_slash = next == Some(b'.') && name.get(i + 2) == Some(&b'/');
+            if !dot_slash && !dot_dot_slash {
+                return Err(choice);
+            }
+        }
+        if matches!(choice[0], b'r' | b'n' | b'0') {
+            return Ok(());
+        }
+        if expanded.first() == Some(&b'/') {
+            // (`abs_fname_ok`: inside TEXMF_OUTPUT_DIRECTORY, from the
+            // environment only, or TEXMFOUTPUT)
+            let inside = |dir: Option<Bytes>| {
+                dir.filter(|d| !d.is_empty()).is_some_and(|d| {
+                    expanded.starts_with(&d)
+                        && (expanded.get(d.len()) == Some(&b'/') || expanded.len() == d.len())
+                })
+            };
+            let outdir = std::env::var_os("TEXMF_OUTPUT_DIRECTORY").map(OsStringExt::into_vec);
+            if !inside(outdir) && !inside(self.var_value("TEXMFOUTPUT")) {
+                return Err(choice);
+            }
+        }
+        // no `../` at the start, no `/../` anywhere
+        if name.starts_with(b"../") || name.windows(4).any(|w| w == b"/../") {
+            return Err(choice);
+        }
+        Ok(())
+    }
+
     fn finish_search(&mut self, mut ret: Vec<Bytes>) -> Vec<Bytes> {
         // `str_list_uniqify`
         let mut seen = std::collections::HashSet::new();
@@ -1420,6 +1475,25 @@ mod tests {
             b"/t/fonts/tfm/public/cm/cmr10.tfm",
             b"/t/fonts//cm"
         ));
+    }
+
+    #[test]
+    fn out_name_ok_paranoid() {
+        let mut k = Kpse::new(Path::new("/nonexistent/bin"), "pdftex", "pdftex");
+        k.env_overlay.insert(b"openout_any".to_vec(), b"p".to_vec());
+        for ok in ["x.tex", "dir/x.aux", "./x.tex", "a.b.c", "x/./y", "a..b"] {
+            assert!(k.out_name_ok(ok.as_bytes()).is_ok(), "{ok}");
+        }
+        for refused in [
+            ".tex", ".bashrc", "d/.ssh/k", "..x", "/etc/x", "../x", "a/../x", ".",
+        ] {
+            assert!(k.out_name_ok(refused.as_bytes()).is_err(), "{refused}");
+        }
+        k.env_overlay.insert(b"openout_any".to_vec(), b"r".to_vec());
+        assert!(k.out_name_ok(b"/etc/x").is_ok());
+        assert!(k.out_name_ok(b".bashrc").is_err());
+        k.env_overlay.insert(b"openout_any".to_vec(), b"a".to_vec());
+        assert!(k.out_name_ok(b".bashrc").is_ok());
     }
 
     #[test]

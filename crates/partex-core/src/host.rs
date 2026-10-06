@@ -305,6 +305,14 @@ pub trait Host {
         None
     }
 
+    /// kpathsea's `kpse_out_name_ok` (web2c's §1374): whether `\openout`
+    /// may write a file named `name`, as TeX packed it (before the output
+    /// directory), under `openout_any`. A refused name is TeX's `I can't
+    /// write on file`. The default allows any.
+    fn out_name_ok(&mut self, _name: &[u8]) -> bool {
+        true
+    }
+
     /// Whether [`Host::system`] runs commands. A host that runs none (the
     /// default, the wasm extension's) logs every `\write18` it is given
     /// with shell escape on as `disabled (restricted)`, whatever

@@ -1,0 +1,6 @@
+# Cases known to fail (docs/ci.md, "Known failures"): one per line,
+#   SUITE ID  # why, since when
+# SUITE and ID are the scoreboard's (fnmatch patterns allowed). A listed
+# case that fails does not fail the run; one that passes is reported as
+# fixed, to be removed from here. A case that passed in the last main run
+# and fails now fails the run whether listed or not.

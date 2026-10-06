@@ -1004,6 +1004,24 @@ impl Host for NativeHost {
         true
     }
 
+    /// kpathsea's `kpse_out_name_ok` under `openout_any` (default `p`):
+    /// no dot files, nothing absolute outside `TEXMF_OUTPUT_DIRECTORY` or
+    /// `TEXMFOUTPUT`, no `../`; a refusal is said on stderr, as kpathsea
+    /// says it.
+    fn out_name_ok(&mut self, name: &[u8]) -> bool {
+        match self.kpse.out_name_ok(name) {
+            Ok(()) => true,
+            Err(choice) => {
+                eprintln!(
+                    "\npartex: Not writing to {} (openout_any = {}; no extended check).",
+                    String::from_utf8_lossy(name),
+                    String::from_utf8_lossy(&choice)
+                );
+                false
+            }
+        }
+    }
+
     /// web2c's `runsystem`'s `system`: `/bin/sh -c`, with kpathsea's
     /// variables in the environment (latexminted's `latexrestricted`
     /// finds TeX Live by `SELFAUTOLOC`) and `TEXMF_OUTPUT_DIRECTORY` for
