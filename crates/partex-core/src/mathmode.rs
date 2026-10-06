@@ -7,7 +7,10 @@ use alloc::vec::Vec;
 
 use partex_engine::font::Font;
 use partex_engine::lr;
-use partex_engine::math::{self, Delim, Env, Event, Field, Item, Kind, Limits, Noad};
+use partex_engine::math::{
+    self, Delim, Env, Event, Field, FontKind, GlyphPart, Item, Kind, Limits, Noad,
+};
+use partex_engine::native::GlyphNode;
 use partex_engine::node::{BoxNode, FontId, GlueSign, GlueSpec, Node};
 use partex_engine::pack::{Fonts, Spec};
 
@@ -219,12 +222,207 @@ impl<H: Host, T: Tracker> Env for MathEnv<'_, H, T> {
             }
         }
     }
+
+    fn report(&mut self, events: Vec<Event>) {
+        if self.jump.is_none()
+            && let Err(j) = self.t.math_events(events)
+        {
+            self.jump = Some(j);
+        }
+    }
+    fn xetex(&self) -> bool {
+        self.t.unicode
+    }
+    fn cur_f(&self) -> Option<FontId> {
+        (self.t.cur_f != NULL_FONT).then(|| font_id(self.t.cur_f))
+    }
+    fn set_cur_f(&mut self, f: Option<FontId>) {
+        if self.t.unicode {
+            self.t.cur_f = f.map_or(NULL_FONT, |f| i32::from(f.0));
+        }
+    }
+    fn font_kind(&self, f: FontId) -> FontKind {
+        match self.native(f) {
+            None => FontKind::Tfm,
+            Some(n) if n.math => FontKind::OtMath,
+            Some(_) => FontKind::Ot,
+        }
+    }
+    fn native_mathsy(&self, f: FontId, k: usize) -> Scaled {
+        let size = self.t.fonts.font(f).size;
+        self.native(f).map_or(0, |n| {
+            n.font.mathsy_param(i32::try_from(k).unwrap_or(0), size)
+        })
+    }
+    fn native_mathex(&self, f: FontId, k: usize) -> Scaled {
+        let size = self.t.fonts.font(f).size;
+        self.native(f).map_or(0, |n| {
+            n.font.mathex_param(i32::try_from(k).unwrap_or(0), size)
+        })
+    }
+    fn ot_math_constant(&self, f: FontId, k: u32) -> Scaled {
+        self.native(f).map_or(0, |n| n.font.ot_math_constant(k))
+    }
+    fn map_char_to_glyph(&self, f: FontId, c: u32) -> u16 {
+        self.native(f).map_or(0, |n| {
+            glyph16(n.font.map_char_to_glyph(i32::try_from(c).unwrap_or(-1)))
+        })
+    }
+    fn native_char_glyph(&mut self, f: FontId, c: u32) -> u16 {
+        if self.jump.is_some() {
+            return 0;
+        }
+        match self
+            .t
+            .new_native_character(i32::from(f.0), i32::try_from(c).unwrap_or(0))
+        {
+            Ok(w) => w.glyphs.first().map_or(0, |g| g.gid),
+            Err(j) => {
+                self.jump = Some(j);
+                0
+            }
+        }
+    }
+    fn glyph_node(&self, f: FontId, g: u16) -> GlyphNode {
+        self.t.native_glyph_node(i32::from(f.0), g, true)
+    }
+    fn ot_math_variant(&self, f: FontId, g: u16, n: u32, horiz: bool) -> (u16, Scaled) {
+        self.native(f).map_or((g, -1), |nf| {
+            let (v, adv) = nf.font.ot_math_variant(u32::from(g), n, horiz);
+            (glyph16(i32::try_from(v).unwrap_or(0)), adv)
+        })
+    }
+    fn ot_assembly(&self, f: FontId, g: u16, horiz: bool) -> Option<Vec<GlyphPart>> {
+        let parts = self.native(f)?.font.ot_assembly(u32::from(g), horiz)?;
+        Some(
+            parts
+                .into_iter()
+                .map(|p| GlyphPart {
+                    glyph: glyph16(i32::try_from(p.glyph).unwrap_or(0)),
+                    start_connector: p.start_connector_length,
+                    end_connector: p.end_connector_length,
+                    full_advance: p.full_advance,
+                    extender: p.extender,
+                })
+                .collect(),
+        )
+    }
+    fn ot_min_connector_overlap(&self, f: FontId) -> Scaled {
+        self.native(f)
+            .map_or(0, |n| n.font.ot_min_connector_overlap())
+    }
+    fn ot_math_ital_corr(&self, f: FontId, g: u16) -> Scaled {
+        self.native(f)
+            .map_or(0, |n| n.font.ot_math_ital_corr(u32::from(g)))
+    }
+    fn ot_math_accent_pos(&self, f: FontId, g: u16) -> Scaled {
+        self.native(f).map_or(math::NO_ACCENT_POS, |n| {
+            n.font.ot_math_accent_pos(u32::from(g))
+        })
+    }
+    fn ot_math_kern(
+        &self,
+        f: FontId,
+        g: u16,
+        sf: Option<FontId>,
+        sg: u16,
+        sup: bool,
+        shift: Scaled,
+    ) -> Scaled {
+        let (Some(n), Some(s)) = (self.native(f), sf.and_then(|sf| self.native(sf))) else {
+            return 0;
+        };
+        let cmd = if sup {
+            partex_otf::xetex::ScriptKind::Sup
+        } else {
+            partex_otf::xetex::ScriptKind::Sub
+        };
+        n.font
+            .ot_math_kern(u32::from(g), &s.font, u32::from(sg), cmd, shift)
+    }
+}
+
+impl<H: Host, T: Tracker> MathEnv<'_, H, T> {
+    /// Native font `f`, its metrics read.
+    fn native(&self, f: FontId) -> Option<&crate::native::NativeFont> {
+        let n = self.t.native_font(i32::from(f.0))?;
+        self.t
+            .font_read(i32::from(f.0), crate::track::font::METRICS);
+        Some(n)
+    }
+}
+
+/// A glyph identifier as `XeTeX` keeps it (a 16-bit field).
+fn glyph16(g: i32) -> u16 {
+    u16::try_from(g & 0xFFFF).unwrap_or(0)
 }
 
 impl<H: Host, T: Tracker> Tex<H, T> {
-    /// §1151: `fam_in_range`.
+    /// §1151: `fam_in_range` (`XeTeX`: 256 families).
     fn fam_in_range(&self) -> bool {
-        (0..16).contains(&self.int_par(CUR_FAM_CODE))
+        let n = if self.unicode {
+            crate::web::NUMBER_MATH_FAMILIES
+        } else {
+            16
+        };
+        (0..n).contains(&self.int_par(CUR_FAM_CODE))
+    }
+
+    /// `XeTeX` §1208: a TeX math code of 15 bits (`\mathchar`,
+    /// `\mathchardef`, `\delimiter`'s small variant) as `XeTeX`'s.
+    fn xetex_math_code(c: i32) -> i32 {
+        crate::mathcodes::math_code_of(c / 0x1000, (c % 0x1000) / 0x100, c % 0x100)
+    }
+
+    /// `XeTeX` §1208: `\Umathchar`'s (and `\Udelimiter`'s) class, family
+    /// and scalar value, as one math code.
+    fn scan_xetex_math_char(&mut self) -> Result<i32, Jump> {
+        self.scan_math_class_int()?;
+        let class = self.cur_val;
+        self.scan_math_fam_int()?;
+        let fam = self.cur_val;
+        self.scan_usv_num()?;
+        Ok(crate::mathcodes::math_code_of(class, fam, self.cur_val))
+    }
+
+    /// `XeTeX` §1208: the math code a math command gives (the command
+    /// read: `\mathchar`, `\Umathcharnum`, `\Umathchar`, a
+    /// `\mathchardef`'d or `\Umathchardef`'d control sequence,
+    /// `\delimiter`, `\Udelimiter`).
+    pub(crate) fn scan_xetex_math_code(&mut self) -> Result<i32, Jump> {
+        Ok(match (self.cur_cmd, self.cur_chr) {
+            // `\Umathchar`, `\Udelimiter`
+            (MATH_CHAR_NUM, 2) | (DELIM_NUM, 1) => self.scan_xetex_math_char()?,
+            // `\Umathcharnum`
+            (MATH_CHAR_NUM, 1) => {
+                self.scan_xetex_math_char_int()?;
+                self.cur_val
+            }
+            (MATH_CHAR_NUM, _) => {
+                self.scan_fifteen_bit_int()?;
+                Self::xetex_math_code(self.cur_val)
+            }
+            (MATH_GIVEN, c) => Self::xetex_math_code(c),
+            (DELIM_NUM, _) => {
+                self.scan_twenty_seven_bit_int()?; // `scan_delimiter_int`
+                Self::xetex_math_code(self.cur_val / 0o10000)
+            }
+            (_, c) => c, // `XeTeX_math_given`
+        })
+    }
+
+    /// `XeTeX` §1205: the field of math code `c`.
+    fn xetex_field(&self, c: i32) -> Field {
+        use crate::mathcodes::{is_var_family, math_char_field, math_fam_field};
+        let fam = if is_var_family(c) && self.fam_in_range() {
+            self.int_par(CUR_FAM_CODE)
+        } else {
+            math_fam_field(c)
+        };
+        Field::Char {
+            fam: u8::try_from(fam).unwrap_or(0),
+            ch: math_char_field(c).cast_unsigned(),
+        }
     }
 
     /// §1136
@@ -293,6 +491,12 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             Ok(r) => r,
             Err(c) => return self.confusion(c.0.as_bytes()),
         };
+        self.math_events(events)?;
+        Ok(list)
+    }
+
+    /// What math reports on the way (§723, §581), in order.
+    fn math_events(&mut self, events: Vec<Event>) -> Result<(), Jump> {
         for e in events {
             match e {
                 Event::UndefinedFamily { size, fam, ch } => {
@@ -302,7 +506,14 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                     self.print_char(b' ');
                     self.print_int(i32::from(fam));
                     self.print_str(b" is undefined (character ");
-                    self.print(i32::from(ch)); // `print_ASCII`
+                    if ch < 0x1_0000 {
+                        self.print_math_char(ch); // `print_ASCII`
+                    } else {
+                        // (`XeTeX` prints string number `ch`: a pool
+                        // string past its first 65536)
+                        let s = usize::try_from(ch - 0x1_0000 + 256).unwrap_or(usize::MAX);
+                        self.print(i32::try_from(s).unwrap_or(i32::MAX));
+                    }
                     self.print_char(b')');
                     self.help(&[
                         b"Somewhere in the math formula just ended, you used the",
@@ -313,11 +524,11 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                     self.error()?;
                 }
                 Event::MissingChar { font, ch } => {
-                    self.char_warning(i32::from(font.0), i32::from(ch))?;
+                    self.char_warning(i32::from(font.0), ch.cast_signed())?;
                 }
             }
         }
-        Ok(list)
+        Ok(())
     }
 
     /// §1142
@@ -637,8 +848,17 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                 Seen::Node(Node::Leaders(l)) => {
                     (Self::display_glue_width(jb, &l.spec, &mut v), true)
                 }
-                // `whatsit_node`: pdfTeX counts forms and images
-                Seen::Node(Node::Whatsit(wh)) => (wh.ref_dims().map_or(0, |r| r.width), false),
+                // `whatsit_node`: pdfTeX counts forms and images; `XeTeX`
+                // §1201: native words, glyphs and pictures are visible
+                Seen::Node(Node::Whatsit(wh)) => (
+                    wh.ref_dims().map_or(0, |r| r.width),
+                    matches!(
+                        **wh,
+                        partex_engine::node::Whatsit::NativeWord(_)
+                            | partex_engine::node::Whatsit::Glyph(_)
+                            | partex_engine::node::Whatsit::Pic(_)
+                    ),
+                ),
                 Seen::Node(_) => (0, false),
             };
             if found {
@@ -675,7 +895,12 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                 match self.cur_cmd {
                     LETTER | OTHER_CHAR | CHAR_GIVEN => {
                         let m = self.math_code(self.cur_chr);
-                        if m == 0o100000 {
+                        let active = if self.unicode {
+                            crate::mathcodes::is_active_math_char(m)
+                        } else {
+                            m == 0o100000
+                        };
+                        if active {
                             self.treat_as_active()?;
                             continue 'restart;
                         }
@@ -686,6 +911,10 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                         self.cur_chr = self.cur_val;
                         self.cur_cmd = CHAR_GIVEN;
                         continue;
+                    }
+                    // `XeTeX` §1205
+                    MATH_CHAR_NUM | MATH_GIVEN | XETEX_MATH_GIVEN | DELIM_NUM if self.unicode => {
+                        c = self.scan_xetex_math_code()?;
                     }
                     MATH_CHAR_NUM => {
                         self.scan_fifteen_bit_int()?;
@@ -709,6 +938,13 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                 break 'restart;
             }
         }
+        if self.unicode {
+            let f = self.xetex_field(c);
+            if let Some(n) = self.tail_noad() {
+                *field(n, p) = f;
+            }
+            return Ok(());
+        }
         let fam = if c >= VAR_CODE && self.fam_in_range() {
             self.int_par(CUR_FAM_CODE)
         } else {
@@ -716,7 +952,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         };
         let f = Field::Char {
             fam: u8::try_from(fam).unwrap_or(0),
-            ch: u8::try_from(c % 256).unwrap_or(0),
+            ch: (c % 256).cast_unsigned(),
         };
         if let Some(n) = self.tail_noad() {
             *field(n, p) = f;
@@ -724,8 +960,23 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         Ok(())
     }
 
-    /// §1155
+    /// §1155 (`XeTeX` §1209: of `XeTeX`'s math codes)
     pub(crate) fn set_math_char(&mut self, c: i32) -> Result<(), Jump> {
+        if self.unicode {
+            use crate::mathcodes::{is_active_math_char, is_var_family, math_class_field};
+            if is_active_math_char(c) {
+                return self.treat_as_active();
+            }
+            let kind = if is_var_family(c) {
+                Kind::Ord
+            } else {
+                noad_kind(ORD_NOAD + math_class_field(c))
+            };
+            let mut n = Noad::new(kind);
+            n.nucleus = self.xetex_field(c);
+            self.push_noad(n);
+            return Ok(());
+        }
         if c >= 0o100000 {
             return self.treat_as_active();
         }
@@ -741,7 +992,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         let mut n = Noad::new(kind);
         n.nucleus = Field::Char {
             fam: u8::try_from(fam).unwrap_or(0),
-            ch: u8::try_from(c % 256).unwrap_or(0),
+            ch: (c % 256).cast_unsigned(),
         };
         self.push_noad(n);
         Ok(())
@@ -766,14 +1017,21 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         self.error()
     }
 
-    /// §1160: scan a delimiter (a 27-bit code if `r`).
+    /// §1160: scan a delimiter (a 27-bit code if `r`; `XeTeX` §1214:
+    /// `\Uradical`'s and `\Udelimiter`'s family and scalar value, one
+    /// size).
     fn scan_delimiter(&mut self, r: bool) -> Result<Delim, Jump> {
         if r {
-            self.scan_twenty_seven_bit_int()?;
+            if self.unicode && self.cur_chr == 1 {
+                self.scan_udelimiter(false)?;
+            } else {
+                self.scan_twenty_seven_bit_int()?;
+            }
         } else {
             self.get_nonblank_nonrelax_noncall()?;
             match self.cur_cmd {
                 LETTER | OTHER_CHAR => self.cur_val = self.del_code(self.cur_chr),
+                DELIM_NUM if self.unicode && self.cur_chr == 1 => self.scan_udelimiter(true)?,
                 DELIM_NUM => self.scan_twenty_seven_bit_int()?,
                 _ => self.cur_val = -1,
             }
@@ -795,12 +1053,36 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         }
         let v = self.cur_val;
         let byte = |x: i32| u8::try_from(x).unwrap_or(0);
+        if self.unicode && v >= 0x4000_0000 {
+            // an extended delimiter code, only one size
+            return Ok(Delim {
+                small_fam: byte((v / 0x20_0000) % 0x100),
+                small_char: (v % 0x20_0000).cast_unsigned(),
+                large_fam: 0,
+                large_char: 0,
+            });
+        }
         Ok(Delim {
             small_fam: byte((v / 0o4000000) % 16),
-            small_char: byte((v / 0o10000) % 256),
+            small_char: ((v / 0o10000) % 256).cast_unsigned(),
             large_fam: byte((v / 256) % 16),
-            large_char: byte(v % 256),
+            large_char: (v % 256).cast_unsigned(),
         })
+    }
+
+    /// `XeTeX` §1214: `\Udelimiter`'s (with a class, discarded) or
+    /// `\Uradical`'s family and scalar value, an extended delimiter
+    /// code in `cur_val`.
+    fn scan_udelimiter(&mut self, class: bool) -> Result<(), Jump> {
+        let mut v = 0x4000_0000; // extended delimiter code flag
+        if class {
+            self.scan_math_class_int()?;
+        }
+        self.scan_math_fam_int()?;
+        v += self.cur_val * 0x20_0000;
+        self.scan_usv_num()?;
+        self.cur_val += v;
+        Ok(())
     }
 
     /// §1163
@@ -827,9 +1109,39 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             ]);
             self.error()?;
         }
-        self.push_noad(Noad::new(Kind::Accent { fam: 0, ch: 0 }));
+        self.push_noad(Noad::new(Kind::Accent {
+            fam: 0,
+            ch: 0,
+            sub: 0,
+        }));
+        if self.unicode {
+            // `XeTeX` §1219: `\Umathaccent`'s keywords, class, family and
+            // scalar value; `\mathaccent`'s code as `XeTeX`'s
+            let mut sub = 0;
+            let c = if self.cur_chr == 1 {
+                if self.scan_keyword(b"fixed")? {
+                    sub = math::FIXED_ACC;
+                } else if self.scan_keyword(b"bottom")? {
+                    sub = math::BOTTOM_ACC;
+                    if self.scan_keyword(b"fixed")? {
+                        sub += math::FIXED_ACC;
+                    }
+                }
+                self.scan_xetex_math_char()?
+            } else {
+                self.scan_fifteen_bit_int()?;
+                Self::xetex_math_code(self.cur_val)
+            };
+            let Field::Char { fam, ch } = self.xetex_field(c) else {
+                unreachable!()
+            };
+            if let Some(n) = self.tail_noad() {
+                n.kind = Kind::Accent { fam, ch, sub };
+            }
+            return self.scan_math(NUCLEUS);
+        }
         self.scan_fifteen_bit_int()?;
-        let ch = u8::try_from(self.cur_val % 256).unwrap_or(0);
+        let ch = (self.cur_val % 256).cast_unsigned();
         let fam = if self.cur_val >= VAR_CODE && self.fam_in_range() {
             self.int_par(CUR_FAM_CODE)
         } else {
@@ -837,7 +1149,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         };
         let fam = u8::try_from(fam).unwrap_or(0);
         if let Some(n) = self.tail_noad() {
-            n.kind = Kind::Accent { fam, ch };
+            n.kind = Kind::Accent { fam, ch, sub: 0 };
         }
         self.scan_math(NUCLEUS)
     }
@@ -1086,10 +1398,14 @@ impl<H: Host, T: Tracker> Tex<H, T> {
 
     /// §1195: check that the necessary fonts for math symbols are present;
     /// if not, flush the current math lists and return true (`danger`).
+    /// (`XeTeX` §1249: an OpenType math font has them all.)
     fn check_math_fonts(&mut self) -> Result<bool, Jump> {
         let params = |t: &Self, n: i32| {
             let f = t.fam_fnt(n);
             t.font_read(f, crate::track::font::PARAMS);
+            if t.native_font(f).is_some_and(|n| n.math) {
+                return usize::MAX;
+            }
             t.fonts.get(f).params.len()
         };
         if params(self, 2 + TEXT_SIZE) < TOTAL_MATHSY_PARAMS

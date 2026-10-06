@@ -864,6 +864,29 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         let (f, c) = match self.tail_node() {
             Some(Node::Glyphs(g)) => (i32::from(g.font.0), g.chars()[g.chars().len() - 1]),
             Some(Node::Ligature(l)) => (i32::from(l.font.0), l.ch),
+            // `XeTeX` §1167: a native word's last glyph's, a glyph's
+            Some(Node::Whatsit(w)) => {
+                let italic = match &**w {
+                    partex_engine::node::Whatsit::NativeWord(w) => {
+                        self.native_font(i32::from(w.font.0)).map_or(0, |n| {
+                            w.glyphs.last().map_or(0, |g| {
+                                n.font.glyph_italic_correction(u32::from(g.gid))
+                                    + n.font.letter_space
+                            })
+                        })
+                    }
+                    partex_engine::node::Whatsit::Glyph(g) => self
+                        .native_font(i32::from(g.font.0))
+                        .map_or(0, |n| n.font.glyph_italic_correction(u32::from(g.gid))),
+                    _ => return,
+                };
+                self.tail_append(Node::Kern {
+                    width: italic,
+                    subtype: subtype(EXPLICIT),
+                    sync: partex_engine::origin::Side(0),
+                });
+                return;
+            }
             _ => return,
         };
         let italic = self.char_metrics(f, i32::from(c)).italic;

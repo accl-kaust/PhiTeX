@@ -803,9 +803,9 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             // §1046: math-only cases in non-math modes, or vice versa.
             (
                 VMODE | HMODE,
-                SUP_MARK | SUB_MARK | MATH_CHAR_NUM | MATH_GIVEN | MATH_COMP | DELIM_NUM
-                | LEFT_RIGHT | ABOVE | RADICAL | MATH_STYLE | MATH_CHOICE | VCENTER | NON_SCRIPT
-                | MKERN | LIMIT_SWITCH | MSKIP | MATH_ACCENT,
+                SUP_MARK | SUB_MARK | MATH_CHAR_NUM | MATH_GIVEN | XETEX_MATH_GIVEN | MATH_COMP
+                | DELIM_NUM | LEFT_RIGHT | ABOVE | RADICAL | MATH_STYLE | MATH_CHOICE | VCENTER
+                | NON_SCRIPT | MKERN | LIMIT_SWITCH | MSKIP | MATH_ACCENT,
             )
             | (MMODE, ENDV | PAR_END | STOP | VSKIP | UN_VBOX | VALIGN | HRULE) => {
                 self.insert_dollar_sign()?;
@@ -943,6 +943,11 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                 self.scan_char_num()?;
                 self.cur_chr = self.cur_val;
                 self.set_math_char(self.math_code(self.cur_chr))?;
+            }
+            // (`XeTeX` §1208: its math codes)
+            (MMODE, MATH_CHAR_NUM | MATH_GIVEN | XETEX_MATH_GIVEN | DELIM_NUM) if self.unicode => {
+                let c = self.scan_xetex_math_code()?;
+                self.set_math_char(c)?;
             }
             (MMODE, MATH_CHAR_NUM) => {
                 self.scan_fifteen_bit_int()?;

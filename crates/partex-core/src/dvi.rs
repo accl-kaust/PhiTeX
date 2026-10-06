@@ -886,7 +886,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             height: g.height,
             depth: g.depth,
             start,
-            len: 19,
+            len: u32::try_from(page.native.len()).expect("page size") - start,
         });
     }
 

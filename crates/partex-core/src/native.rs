@@ -13,7 +13,7 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::cell::RefCell;
 
-use partex_engine::native::{NativeGlyph, NativeWord};
+use partex_engine::native::{GlyphNode, NativeGlyph, NativeWord};
 use partex_engine::node::FontId;
 use partex_otf::xetex::fontmgr::FontManager;
 use partex_otf::xetex::{Diagnostic, XeTeXFont};
@@ -35,6 +35,8 @@ pub(crate) struct NativeFont {
     /// `height_base`, `depth_base`: the ascent and descent.
     pub(crate) height_base: Scaled,
     pub(crate) depth_base: Scaled,
+    /// Whether it is an OpenType math font (`isOpenTypeMathFont`).
+    pub(crate) math: bool,
 }
 
 /// A native font is not saved with a checkpoint ([`Tex::save_state`]
@@ -194,11 +196,8 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                 return Ok(f);
             }
         }
-        let num_font_dimens = if font.is_math_font() {
-            MATH_FONT_DIMENS
-        } else {
-            8
-        };
+        let math = font.is_math_font();
+        let num_font_dimens = if math { MATH_FONT_DIMENS } else { 8 };
         if self.font_ptr == self.params.font_max
             || self.fmem_ptr + num_font_dimens > self.params.font_mem_size
         {
@@ -251,6 +250,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             params: p.params,
             height_base: p.height_base,
             depth_base: p.depth_base,
+            math,
         }));
         self.font_named(full);
         self.font_loaded(f);
@@ -380,6 +380,26 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                 y: g.y,
             })
             .collect();
+    }
+
+    /// A `glyph_node` of glyph `g` of native font `f` measured as
+    /// `set_native_glyph_metrics(p, use_glyph_metrics)` does.
+    pub(crate) fn native_glyph_node(&self, f: i32, g: u16, use_glyph_metrics: bool) -> GlyphNode {
+        let mut n = GlyphNode {
+            font: font_id(f),
+            gid: g,
+            width: 0,
+            height: 0,
+            depth: 0,
+        };
+        if let Some(nf) = self.native_font(f) {
+            let (w, hd) = nf.font.measure_glyph(u32::from(g), use_glyph_metrics);
+            let (h, d) = hd.unwrap_or((nf.height_base, nf.depth_base));
+            n.width = w;
+            n.height = h;
+            n.depth = d;
+        }
+        n
     }
 
     /// `new_native_word_node` with its metrics set: a word of `text` in

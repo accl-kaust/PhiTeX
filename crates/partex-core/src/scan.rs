@@ -415,7 +415,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                 });
                 self.cur_val_level = DIMEN_VAL;
             }
-            CHAR_GIVEN | MATH_GIVEN => {
+            CHAR_GIVEN | MATH_GIVEN | XETEX_MATH_GIVEN => {
                 self.cur_val = self.cur_chr;
                 self.cur_val_level = INT_VAL;
             }

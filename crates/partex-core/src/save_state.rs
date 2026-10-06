@@ -55,6 +55,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             arith_error,
             save_arith_error,
             remainder,
+            cur_f,
             line,
             buffer,
             first,
@@ -342,6 +343,8 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         save_arith_error.save(s);
         s.mark("remainder");
         remainder.save(s);
+        s.mark("cur_f");
+        cur_f.save(s);
         s.mark("line");
         line.save(s);
         s.mark("buffer");
@@ -712,6 +715,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             arith_error: Persist::load(l)?,
             save_arith_error: Persist::load(l)?,
             remainder: Persist::load(l)?,
+            cur_f: Persist::load(l)?,
             line: Persist::load(l)?,
             buffer: Persist::load(l)?,
             first: Persist::load(l)?,
