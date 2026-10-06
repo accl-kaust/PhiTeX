@@ -138,6 +138,10 @@ pub struct DviWriter {
     fonts: Vec<Option<(FontDef, bool)>>,
     /// `XeTeX`'s XDV (its `id_byte`).
     xdv: bool,
+    /// When asked ([`DviWriter::log_native`]): the native items written,
+    /// each by its start in [`Page::native`], in the file's order
+    /// (leaders' boxes once per copy).
+    native_log: Option<Vec<u32>>,
 }
 
 crate::persist_struct!(DviWriter {
@@ -164,10 +168,25 @@ crate::persist_struct!(DviWriter {
     rtl,
     cur_s,
     fonts,
-    xdv
+    xdv,
+    native_log
 });
 
 impl DviWriter {
+    /// Log the native items written from now on (or stop).
+    pub fn log_native(&mut self, on: bool) {
+        self.native_log = on.then(Vec::new);
+    }
+
+    /// The native items written since the log was last taken (see
+    /// [`DviWriter::log_native`]).
+    pub fn take_native_log(&mut self) -> Vec<u32> {
+        self.native_log
+            .as_mut()
+            .map(core::mem::take)
+            .unwrap_or_default()
+    }
+
     /// A writer with tex.web's `dvi_buf_size`, having written the preamble
     /// (§617) with magnification `mag` and `comment`.
     pub fn new(buf_size: i32, mag: i32, comment: &[u8]) -> Result<Self, TooLong> {
@@ -206,6 +225,7 @@ impl DviWriter {
             cur_s: -1,
             fonts: Vec::new(),
             xdv,
+            native_log: None,
         };
         w.out_byte(PRE)?;
         w.out_byte(w.id_byte())?;
@@ -1040,6 +1060,9 @@ impl DviWriter {
 
     /// `XeTeX`: a native glyph command's bytes.
     fn native(&mut self, page: &Page, start: u32, len: u32) -> Result<(), TooLong> {
+        if let Some(l) = &mut self.native_log {
+            l.push(start);
+        }
         let (a, n) = (start as usize, len as usize);
         for i in a..a + n {
             self.out_byte(page.native[i])?;

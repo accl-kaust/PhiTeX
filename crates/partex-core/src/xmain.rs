@@ -9,6 +9,7 @@ use alloc::vec::Vec;
 
 use partex_engine::native::NativeWord;
 use partex_engine::node::{Node, Whatsit};
+use partex_engine::origin::Org;
 
 use crate::cmds::*;
 use crate::fonts::fx;
@@ -193,6 +194,9 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         let mut is_hyph = false;
         let found;
         let dash = self.xetex_state(XETEX_DASH_BREAK_CODE) > 0;
+        // (with glyph origins: each UTF-16 unit's, its character's)
+        let on = self.org.is_some();
+        let mut orgs: Vec<Org> = Vec::new();
         // collect_native: as many characters as possible in the same font
         loop {
             self.adjust_space_factor();
@@ -205,6 +209,10 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                 Inter::None => {}
             }
             text.extend(crate::native::utf16_of(self.cur_chr));
+            if on {
+                let o = self.char_org();
+                orgs.resize(text.len(), o);
+            }
             is_hyph = self.cur_chr == hyph || (dash && matches!(self.cur_chr, 0x2013 | 0x2014));
             if main_h == 0 && is_hyph {
                 main_h = text.len();
@@ -219,6 +227,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                 continue;
             }
             if self.cur_cmd == CHAR_NUM {
+                self.char_num_pending();
                 self.scan_usv_num()?;
                 self.cur_chr = self.cur_val;
                 continue;
@@ -231,9 +240,29 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             return Ok(found);
         };
         if nf.font.mapping.is_some() {
-            text = nf.font.apply_mapping(&text);
+            let mapped = nf.font.apply_mapping(&text);
+            if on {
+                // (a mapping keeps no alignment: the units it left alone
+                // at either end keep theirs, those between share all of
+                // theirs)
+                let pre = text.iter().zip(&mapped).take_while(|(a, b)| a == b).count();
+                let suf = text[pre..]
+                    .iter()
+                    .rev()
+                    .zip(mapped[pre..].iter().rev())
+                    .take_while(|(a, b)| a == b)
+                    .count();
+                let mid = &orgs[pre..orgs.len() - suf];
+                let u = mid.iter().fold(Org::NONE, |u, &o| self.org_union(u, o));
+                let mut o = orgs[..pre].to_vec();
+                o.resize(mapped.len() - suf, u);
+                o.extend_from_slice(&orgs[orgs.len() - suf..]);
+                orgs = o;
+            }
+            text = mapped;
             main_h = break_after(&text, hyph, dash).unwrap_or(0);
         }
+        let orgs_of = |a: usize, b: usize| if on { &orgs[a..b] } else { &[][..] };
         if self.int_par(TRACING_LOST_CHARS_CODE) > 0 {
             for c in char::decode_utf16(text.iter().copied()) {
                 let c = c.map_or(0xFFFD, |c| i32::try_from(u32::from(c)).unwrap_or(0));
@@ -263,16 +292,20 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                 if first && mergeable(self) {
                     // the word before and this one's first fragment, as one
                     let old = self.nodes_mut().pop();
-                    let mut s: Vec<u16> = old
-                        .as_ref()
-                        .and_then(native_word)
-                        .map_or_else(Vec::new, |w| w.text.to_vec());
+                    let old = old.as_ref().and_then(native_word);
+                    let mut s: Vec<u16> = old.map_or_else(Vec::new, |w| w.text.to_vec());
                     s.extend_from_slice(&text[temp..temp + main_h]);
-                    self.do_locale_linebreaks(f, &s)?;
+                    let mut o = old.map_or_else(Vec::new, |w| self.native_orgs(w));
+                    o.extend_from_slice(orgs_of(temp, temp + main_h));
+                    self.do_locale_linebreaks(f, &s, &o)?;
                     main_k = text.len() - main_h - temp;
                     temp = main_h;
                 } else {
-                    self.do_locale_linebreaks(f, &text[temp..temp + main_h])?;
+                    self.do_locale_linebreaks(
+                        f,
+                        &text[temp..temp + main_h],
+                        orgs_of(temp, temp + main_h),
+                    )?;
                     temp += main_h;
                     main_k -= main_h;
                 }
@@ -289,17 +322,22 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             }
         } else {
             // restricted horizontal mode: no breaks
-            let w = if mergeable(self) {
+            let mut w = if mergeable(self) {
                 let old = self.nodes_mut().pop();
-                let mut s: Vec<u16> = old
-                    .as_ref()
-                    .and_then(native_word)
-                    .map_or_else(Vec::new, |w| w.text.to_vec());
+                let old = old.as_ref().and_then(native_word);
+                let mut s: Vec<u16> = old.map_or_else(Vec::new, |w| w.text.to_vec());
                 s.extend_from_slice(&text);
-                self.new_native_word(f, &s)
+                let mut o = old.map_or_else(Vec::new, |w| self.native_orgs(w));
+                o.extend_from_slice(orgs_of(0, text.len()));
+                let mut w = self.new_native_word(f, &s);
+                w.org = self.org_run(&o);
+                w
             } else {
                 self.new_native_word(f, &text)
             };
+            if w.org.0 == 0 {
+                w.org = self.org_run(orgs_of(0, text.len()));
+            }
             self.tail_append(Node::Whatsit(Box::new(Whatsit::NativeWord(w))));
         }
         if self.xetex_state(XETEX_INTERWORD_SPACE_SHAPING_CODE) > 0 {
@@ -369,11 +407,12 @@ impl<H: Host, T: Tracker> Tex<H, T> {
 
     /// `do_locale_linebreaks`: `text` appended as a native word (as words
     /// with breaks between, `\XeTeXlinebreaklocale` set).
-    fn do_locale_linebreaks(&mut self, f: i32, text: &[u16]) -> Result<(), Jump> {
+    fn do_locale_linebreaks(&mut self, f: i32, text: &[u16], orgs: &[Org]) -> Result<(), Jump> {
         if self.int_par(XETEX_LINEBREAK_LOCALE_CODE) != 0 && text.len() > 1 {
             return self.pdf_error(b"\\XeTeXlinebreaklocale", b"not implemented in partex yet");
         }
-        let w = self.new_native_word(f, text);
+        let mut w = self.new_native_word(f, text);
+        w.org = self.org_run(orgs);
         self.tail_append(Node::Whatsit(Box::new(Whatsit::NativeWord(w))));
         Ok(())
     }
@@ -473,6 +512,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             }
             if j > i + 1 {
                 let mut text: Vec<u16> = Vec::new();
+                let mut orgs: Vec<Org> = Vec::new();
                 let mut actual_text = false;
                 for (k, n) in list[i..j].iter().enumerate() {
                     if let Some(w) = native_word(n) {
@@ -480,10 +520,12 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                             actual_text = w.actual_text;
                         }
                         text.extend_from_slice(&w.text);
+                        orgs.extend(self.native_orgs(w));
                     }
                 }
                 let mut w = NativeWord::new(font, actual_text, text.into());
                 self.measure_native(&mut w);
+                w.org = self.org_run(&orgs);
                 list.splice(i..j, [Node::Whatsit(Box::new(Whatsit::NativeWord(w)))]);
             }
             i += 1;

@@ -237,6 +237,9 @@ pub(crate) struct OrgState {
     /// The codes each included PDF page shows, counted once: the file's
     /// data, the page.
     images: Vec<(Arc<[u8]>, i32, usize)>,
+    /// `XeTeX`: the XDV page being built: each native item's glyphs'
+    /// handles (0: none), by the item's start in its native bytes.
+    xdv_items: BTreeMap<u32, Vec<u32>>,
 }
 
 /// The pages' glyph lists, and the forms' by object number.
@@ -266,6 +269,7 @@ impl OrgState {
             pending: None,
             cached: None,
             images: Vec::new(),
+            xdv_items: BTreeMap::new(),
         }
     }
 
@@ -1032,6 +1036,73 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         {
             s.push(h & (NONE_RUN - 1));
         }
+    }
+
+    /// `XeTeX`: the origins of a native word's UTF-16 units `orgs` as one
+    /// run of entries (as a glyph run's): the handle of the first, 0 if
+    /// origins are off or none has a source.
+    pub(crate) fn org_run(&mut self, orgs: &[Org]) -> partex_engine::origin::Side {
+        let Some(st) = self.org.as_deref_mut() else {
+            return partex_engine::origin::Side(0);
+        };
+        if orgs.iter().all(|o| o.is_none()) {
+            return partex_engine::origin::Side(0);
+        }
+        let mut first = 0;
+        for (i, &o) in orgs.iter().enumerate() {
+            let h = st.table.push(o);
+            if i == 0 {
+                first = h;
+            }
+        }
+        partex_engine::origin::Side(first)
+    }
+
+    /// `XeTeX`: the origins of native word `w`'s UTF-16 units (none each
+    /// when it has none; empty when origins are off).
+    pub(crate) fn native_orgs(&self, w: &partex_engine::native::NativeWord) -> Vec<Org> {
+        let Some(st) = self.org.as_deref() else {
+            return Vec::new();
+        };
+        let h = w.org.0;
+        (0..w.text.len())
+            .map(|i| match h {
+                0 => Org::NONE,
+                h => st.table.get(h + u32::try_from(i).unwrap_or(0)),
+            })
+            .collect()
+    }
+
+    /// `XeTeX`: the native item at `start` of the XDV page being built
+    /// draws glyphs whose origins are entries `handles` (0: none).
+    pub(crate) fn origin_xdv_item(&mut self, start: u32, handles: Vec<u32>) {
+        if let Some(o) = self.org.as_deref_mut() {
+            o.xdv_items.insert(start, handles);
+        }
+    }
+
+    /// `XeTeX`: the XDV page is written, its native items in the order
+    /// `log` gives (`DviWriter::take_native_log`): its glyphs' origins as
+    /// the page's stream, one per glyph xdvipdfmx draws, in its order.
+    pub(crate) fn origins_xdv_page(&mut self, log: &[u32]) {
+        let Some(items) = self
+            .org
+            .as_deref_mut()
+            .map(|o| core::mem::take(&mut o.xdv_items))
+        else {
+            return;
+        };
+        self.origins_stream_begin();
+        for s in log {
+            for &h in items.get(s).map_or(&[][..], Vec::as_slice) {
+                if h == 0 {
+                    self.origin_none(1);
+                } else {
+                    self.origin_glyph(h);
+                }
+            }
+        }
+        self.origins_stream_end(0);
     }
 
     /// The encoder writes `n` glyphs with no source.

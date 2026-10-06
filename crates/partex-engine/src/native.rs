@@ -19,6 +19,9 @@ pub struct NativeGlyph {
     pub gid: u16,
     pub x: Scaled,
     pub y: Scaled,
+    /// The UTF-16 index in the word's text of the first unit of the
+    /// glyph's cluster (the characters it was shaped from).
+    pub cluster: u32,
 }
 
 /// A `native_word_node` (subtype 40, or 41 `native_word_node_AT` when
@@ -34,6 +37,10 @@ pub struct NativeWord {
     pub depth: Scaled,
     /// The glyphs `set_native_metrics` laid out (none until measured).
     pub glyphs: Arc<[NativeGlyph]>,
+    /// The origins of the text's UTF-16 units, as a glyph run's
+    /// (`origin.rs`): entries `org..org + text.len()` of the table, 0
+    /// none; outside the word's value.
+    pub org: crate::origin::Side,
 }
 
 impl NativeWord {
@@ -48,6 +55,17 @@ impl NativeWord {
             height: 0,
             depth: 0,
             glyphs: Arc::from([]),
+            org: crate::origin::Side(0),
+        }
+    }
+
+    /// The origin handle of the text from unit `at` on (the handle of a
+    /// piece split off at `at`).
+    #[must_use]
+    pub fn org_from(&self, at: usize) -> crate::origin::Side {
+        match self.org.0 {
+            0 => crate::origin::Side(0),
+            h => crate::origin::Side(h + u32::try_from(at).unwrap_or(0)),
         }
     }
 }

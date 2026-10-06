@@ -2294,8 +2294,12 @@ impl<E: Env> Breaker<'_, E> {
             };
             // "Split the `native_word_node` at `l` and link the second
             // part after `ha`"
-            let tail = self.env.native_word(hf, actual_text, &text[l..]);
-            let head = self.env.native_word(hf, actual_text, &text[..l]);
+            let org = native_of(self.list.get(ha)).map(|w| (w.org, w.org_from(l)));
+            let mut tail = self.env.native_word(hf, actual_text, &text[l..]);
+            let mut head = self.env.native_word(hf, actual_text, &text[..l]);
+            if let Some((h, t)) = org {
+                (head.org, tail.org) = (h, t);
+            }
             self.list[ha] = Node::Whatsit(Box::new(Whatsit::NativeWord(head)));
             self.list
                 .insert(ha + 1, Node::Whatsit(Box::new(Whatsit::NativeWord(tail))));
@@ -2345,9 +2349,10 @@ impl<E: Env> Breaker<'_, E> {
         let mut hyphen_passed = 0;
         for (j, &h) in hyf.iter().enumerate().take(hn - r_hyf + 1).skip(l_hyf) {
             if h % 2 == 1 {
-                let piece = self
+                let mut piece = self
                     .env
                     .native_word(hf, w.actual_text, &w.text[hyphen_passed..j]);
+                piece.org = w.org_from(hyphen_passed);
                 new.push(Node::Whatsit(Box::new(Whatsit::NativeWord(piece))));
                 let hyphen = self.env.native_character(hf, hyf_char);
                 new.push(Node::Disc(Box::new(Disc {
@@ -2358,9 +2363,10 @@ impl<E: Env> Breaker<'_, E> {
             }
         }
         // (the last piece: to the word's end, so punctuation is kept)
-        let last = self
+        let mut last = self
             .env
             .native_word(hf, w.actual_text, &w.text[hyphen_passed..]);
+        last.org = w.org_from(hyphen_passed);
         new.push(Node::Whatsit(Box::new(Whatsit::NativeWord(last))));
         self.list.splice(ha..=ha, new);
     }

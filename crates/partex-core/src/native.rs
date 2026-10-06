@@ -380,6 +380,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                 gid: g.gid,
                 x: g.x,
                 y: g.y,
+                cluster: g.cluster,
             })
             .collect();
     }
