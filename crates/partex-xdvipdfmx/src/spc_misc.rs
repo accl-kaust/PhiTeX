@@ -66,10 +66,10 @@ impl Dpx {
             for fa in fontattrs {
                 let attr = fa.attr.expect("attr");
                 process_fontattr(self, &fa.ident, fa.size, attr)?;
-                self.o.release(attr);
+                self.o.release(attr)?;
             }
         }
-        Ok(pdfcolorstack__clean(self))
+        pdfcolorstack__clean(self)
     }
     /// `spc_misc_at_begin_page`.
     pub fn spc_misc_at_begin_page(&mut self) -> Result<i32> {
@@ -79,7 +79,7 @@ impl Dpx {
                 let cp = PdfCoord { x: 0.0, y: 0.0 };
                 let direct = self.misc.stacks[i].direct;
                 if litstr.is_some() {
-                    pdfcolorstack__set_litstr(self, cp, litstr, direct);
+                    pdfcolorstack__set_litstr(self, cp, litstr, direct)?;
                 }
             }
         }
@@ -127,19 +127,24 @@ fn pdfcolorstack__init(dpx: &mut Dpx) -> i32 {
 }
 
 /// `pdfcolorstack__clean` (releases the strings).
-fn pdfcolorstack__clean(dpx: &mut Dpx) -> i32 {
+fn pdfcolorstack__clean(dpx: &mut Dpx) -> Result<i32> {
     for i in 0..PDFCOLORSTACK_MAX_STACK {
         while let Some(litstr) = dpx.misc.stacks[i].stack.dpx_stack_pop() {
-            dpx.o.release(litstr);
+            dpx.o.release(litstr)?;
         }
     }
-    0
+    Ok(0)
 }
 
 /// `pdfcolorstack__set_litstr`.
-fn pdfcolorstack__set_litstr(dpx: &mut Dpx, cp: PdfCoord, litstr: Option<Obj>, direct: i32) {
+fn pdfcolorstack__set_litstr(
+    dpx: &mut Dpx,
+    cp: PdfCoord,
+    litstr: Option<Obj>,
+    direct: i32,
+) -> Result<()> {
     let Some(litstr) = litstr else {
-        return;
+        return Ok(());
     };
 
     let mut m = PdfTmatrix::default();
@@ -150,16 +155,17 @@ fn pdfcolorstack__set_litstr(dpx: &mut Dpx, cp: PdfCoord, litstr: Option<Obj>, d
         m.c = 0.0;
         m.e = cp.x;
         m.f = cp.y;
-        dpx.pdf_dev_concat(&m);
+        dpx.pdf_dev_concat(&m)?;
     }
-    dpx.pdf_doc_add_page_content(b" ");
-    let s = dpx.o.string_value(litstr).to_vec();
-    dpx.pdf_doc_add_page_content(&s);
+    dpx.pdf_doc_add_page_content(b" ")?;
+    let s = dpx.o.string_value(litstr)?.to_vec();
+    dpx.pdf_doc_add_page_content(&s)?;
     if direct == 0 {
         m.e = -cp.x;
         m.f = -cp.y;
-        dpx.pdf_dev_concat(&m);
+        dpx.pdf_dev_concat(&m)?;
     }
+    Ok(())
 }
 
 /// `parse_pdf_string(&args->curptr, args->endptr)`.
@@ -176,26 +182,26 @@ fn pdfcolorstack__set(
     st: usize,
     cp: PdfCoord,
     args: &mut SpcArg,
-) -> i32 {
+) -> Result<i32> {
     args.skip_white();
     if args.curptr >= args.endptr {
-        return -1;
+        return Ok(-1);
     }
 
     let Some(litstr) = dpx.misc.stacks[st].stack.dpx_stack_pop() else {
         dpx.spc_warn(spe, format_args!("Stack empty!"));
-        return -1;
+        return Ok(-1);
     };
-    dpx.o.release(litstr);
+    dpx.o.release(litstr)?;
 
     if let Some(litstr) = parse_litstr(dpx, args) {
         dpx.misc.stacks[st].stack.dpx_stack_push(litstr);
         let direct = dpx.misc.stacks[st].direct;
-        pdfcolorstack__set_litstr(dpx, cp, Some(litstr), direct);
+        pdfcolorstack__set_litstr(dpx, cp, Some(litstr), direct)?;
         args.skip_white();
     }
 
-    0
+    Ok(0)
 }
 
 /// `pdfcolorstack__push`.
@@ -205,20 +211,20 @@ fn pdfcolorstack__push(
     st: usize,
     cp: PdfCoord,
     args: &mut SpcArg,
-) -> i32 {
+) -> Result<i32> {
     args.skip_white();
     if args.curptr >= args.endptr {
-        return -1;
+        return Ok(-1);
     }
 
     if let Some(litstr) = parse_litstr(dpx, args) {
         dpx.misc.stacks[st].stack.dpx_stack_push(litstr);
         let direct = dpx.misc.stacks[st].direct;
-        pdfcolorstack__set_litstr(dpx, cp, Some(litstr), direct);
+        pdfcolorstack__set_litstr(dpx, cp, Some(litstr), direct)?;
         args.skip_white();
     }
 
-    0
+    Ok(0)
 }
 
 /// `pdfcolorstack__current`.
@@ -228,18 +234,18 @@ fn pdfcolorstack__current(
     st: usize,
     cp: PdfCoord,
     args: &mut SpcArg,
-) -> i32 {
+) -> Result<i32> {
     let litstr = dpx.misc.stacks[st].stack.dpx_stack_top().copied();
     if litstr.is_some() {
         let direct = dpx.misc.stacks[st].direct;
-        pdfcolorstack__set_litstr(dpx, cp, litstr, direct);
+        pdfcolorstack__set_litstr(dpx, cp, litstr, direct)?;
         args.skip_white();
     } else {
         dpx.spc_warn(spe, format_args!("Stack empty!"));
-        return -1;
+        return Ok(-1);
     }
 
-    0
+    Ok(0)
 }
 
 /// `pdfcolorstack__pop`.
@@ -249,24 +255,24 @@ fn pdfcolorstack__pop(
     st: usize,
     cp: PdfCoord,
     args: &mut SpcArg,
-) -> i32 {
+) -> Result<i32> {
     let error = 0;
 
     // "default" at the bottom
     if dpx.misc.stacks[st].stack.dpx_stack_depth() < 2 {
         dpx.spc_warn(spe, format_args!("Stack underflow"));
-        return -1;
+        return Ok(-1);
     }
     if let Some(litstr) = dpx.misc.stacks[st].stack.dpx_stack_pop() {
-        dpx.o.release(litstr);
+        dpx.o.release(litstr)?;
     }
     let litstr = dpx.misc.stacks[st].stack.dpx_stack_top().copied();
     if litstr.is_some() {
         let direct = dpx.misc.stacks[st].direct;
-        pdfcolorstack__set_litstr(dpx, cp, litstr, direct);
+        pdfcolorstack__set_litstr(dpx, cp, litstr, direct)?;
     }
 
-    error
+    Ok(error)
 }
 
 /// `parse_pdf_reference` (static; the `@name` callback of the parser;
@@ -302,7 +308,7 @@ fn process_fontattr(dpx: &mut Dpx, ident: &[u8], size: f64, attr: Obj) -> Result
 
     let fontdict = dpx.pdf_get_font_resource(font_id)?;
 
-    dpx.o.merge_dict(fontdict, attr);
+    dpx.o.merge_dict(fontdict, attr)?;
 
     Ok(0)
 }
@@ -365,7 +371,7 @@ fn spc_handler_pdfcolorstackinit(
         if let Some(litstr) = parse_litstr(dpx, args) {
             dpx.misc.stacks[st].stack.dpx_stack_push(litstr);
             let direct = dpx.misc.stacks[st].direct;
-            pdfcolorstack__set_litstr(dpx, cp, Some(litstr), direct);
+            pdfcolorstack__set_litstr(dpx, cp, Some(litstr), direct)?;
         }
         args.skip_white();
     } else {
@@ -414,10 +420,10 @@ fn spc_handler_pdfcolorstack(dpx: &mut Dpx, spe: &mut SpcEnv, args: &mut SpcArg)
 
     let cp = dpx.spc_get_current_point(spe);
     match cstr(&command) {
-        b"set" => error = pdfcolorstack__set(dpx, spe, st, cp, args),
-        b"push" => error = pdfcolorstack__push(dpx, spe, st, cp, args),
-        b"pop" => error = pdfcolorstack__pop(dpx, spe, st, cp, args),
-        b"current" => error = pdfcolorstack__current(dpx, spe, st, cp, args),
+        b"set" => error = pdfcolorstack__set(dpx, spe, st, cp, args)?,
+        b"push" => error = pdfcolorstack__push(dpx, spe, st, cp, args)?,
+        b"pop" => error = pdfcolorstack__pop(dpx, spe, st, cp, args)?,
+        b"current" => error = pdfcolorstack__current(dpx, spe, st, cp, args)?,
         _ => dpx.spc_warn(spe, format_args!("Unknown action: {:?}", command)),
     }
 
@@ -482,7 +488,7 @@ fn spc_handler_pdffontattr(dpx: &mut Dpx, spe: &mut SpcEnv, ap: &mut SpcArg) -> 
             spe,
             format_args!("PDF dict expected but non-dict object found: {:?}", ident),
         );
-        dpx.o.release(attr);
+        dpx.o.release(attr)?;
         return Ok(-1);
     }
     ap.skip_white();

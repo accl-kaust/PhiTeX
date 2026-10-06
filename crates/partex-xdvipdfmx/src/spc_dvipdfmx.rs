@@ -31,8 +31,8 @@ fn spc_handler_dvipdfmx_catch_phantom(
             crate::warn!("A boolean value expected but not found...");
             return Ok(-1);
         };
-        mode = i32::from(dpx.o.boolean_value(b));
-        dpx.o.release(b);
+        mode = i32::from(dpx.o.boolean_value(b)?);
+        dpx.o.release(b)?;
     }
     dpx.spc_set_linkmode(spe, mode);
 

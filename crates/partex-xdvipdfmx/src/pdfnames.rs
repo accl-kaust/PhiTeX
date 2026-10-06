@@ -78,12 +78,13 @@ pub fn cmp_key(d1: &NamedObject, d2: &NamedObject) -> core::cmp::Ordering {
 
 impl PdfOut {
     /// `hval_free`: releases an entry's objects.
-    fn hval_free(&mut self, value: ObjData) {
-        self.release_opt(value.reference);
-        self.release_opt(value.object);
+    fn hval_free(&mut self, value: ObjData) -> Result<()> {
+        self.release_opt(value.reference)?;
+        self.release_opt(value.object)?;
+        Ok(())
     }
     /// `check_objects_defined`.
-    fn check_objects_defined(&mut self, names: &mut NameTree) {
+    fn check_objects_defined(&mut self, names: &mut NameTree) -> Result<()> {
         let keys: Vec<Vec<u8>> = names
             .iter()
             .filter(|(_, v)| self.is_undefined(v.object))
@@ -91,20 +92,27 @@ impl PdfOut {
             .collect();
         for k in keys {
             let n = self.new_null();
-            self.pdf_names_add_object(names, &k, n);
+            self.pdf_names_add_object(names, &k, n)?;
         }
+        Ok(())
     }
     /// `pdf_delete_name_tree`: checks, then releases every entry.
-    pub fn pdf_delete_name_tree(&mut self, mut names: NameTree) {
-        self.check_objects_defined(&mut names);
+    pub fn pdf_delete_name_tree(&mut self, mut names: NameTree) -> Result<()> {
+        self.check_objects_defined(&mut names)?;
         for v in names.ht_clear_table() {
-            self.hval_free(v);
+            self.hval_free(v)?;
         }
+        Ok(())
     }
     /// `pdf_names_add_object`: 0, or -1 (`object` is then released).
-    pub fn pdf_names_add_object(&mut self, names: &mut NameTree, key: &[u8], object: Obj) -> i32 {
+    pub fn pdf_names_add_object(
+        &mut self,
+        names: &mut NameTree,
+        key: &[u8],
+        object: Obj,
+    ) -> Result<i32> {
         if key.is_empty() {
-            return -1;
+            return Ok(-1);
         }
         match names.ht_lookup_table_mut(key) {
             None => {
@@ -116,27 +124,27 @@ impl PdfOut {
                         closed: 0,
                     },
                 );
-                0
+                Ok(0)
             }
             Some(value) => {
                 if let Some(old) = value.object
                     && self.is_undefined(Some(old))
                 {
                     self.transfer_label(object, old);
-                    self.release(old);
+                    self.release(old)?;
                     value.object = Some(object);
-                    0
+                    Ok(0)
                 } else {
-                    self.release(object);
-                    -1
+                    self.release(object)?;
+                    Ok(-1)
                 }
             }
         }
     }
     /// `pdf_names_reserve`.
-    pub fn pdf_names_reserve(&mut self, names: &mut NameTree, key: &[u8]) -> Option<Obj> {
+    pub fn pdf_names_reserve(&mut self, names: &mut NameTree, key: &[u8]) -> Result<Option<Obj>> {
         if key.is_empty() {
-            return None;
+            return Ok(None);
         }
         match names.ht_lookup_table_mut(key) {
             None => {
@@ -149,7 +157,7 @@ impl PdfOut {
                         closed: 0,
                     },
                 );
-                Some(self.ref_obj(u))
+                Ok(Some(self.ref_obj(u)?))
             }
             Some(value) => {
                 if let Some(obj) = value.object
@@ -158,29 +166,36 @@ impl PdfOut {
                     let r = match value.reference {
                         Some(r) => r,
                         None => {
-                            let r = self.ref_obj(obj);
+                            let r = self.ref_obj(obj)?;
                             value.reference = Some(r);
                             r
                         }
                     };
-                    Some(self.link(r))
+                    Ok(Some(self.link(r)?))
                 } else {
-                    None
+                    Ok(None)
                 }
             }
         }
     }
     /// `pdf_names_lookup_reference`: a new link.
-    pub fn pdf_names_lookup_reference(&mut self, names: &mut NameTree, key: &[u8]) -> Option<Obj> {
+    pub fn pdf_names_lookup_reference(
+        &mut self,
+        names: &mut NameTree,
+        key: &[u8],
+    ) -> Result<Option<Obj>> {
         match names.ht_lookup_table_mut(key) {
             Some(value) => {
                 if value.reference.is_none()
                     && let Some(obj) = value.object
                 {
-                    value.reference = Some(self.ref_obj(obj));
+                    value.reference = Some(self.ref_obj(obj)?);
                 }
                 // (C links a NULL reference to NULL.)
-                value.reference.map(|r| self.link(r))
+                match value.reference {
+                    Some(r) => Ok(Some(self.link(r)?)),
+                    None => Ok(None),
+                }
             }
             None => self.pdf_names_reserve(names, key),
         }
@@ -195,22 +210,22 @@ impl PdfOut {
         value.object
     }
     /// `pdf_names_close_object`.
-    pub fn pdf_names_close_object(&mut self, names: &mut NameTree, key: &[u8]) -> i32 {
+    pub fn pdf_names_close_object(&mut self, names: &mut NameTree, key: &[u8]) -> Result<i32> {
         let Some(value) = names.ht_lookup_table_mut(key) else {
-            return -1;
+            return Ok(-1);
         };
         if self.is_undefined(value.object) {
-            return -1;
+            return Ok(-1);
         }
         if value.closed != 0 {
-            return -1;
+            return Ok(-1);
         }
         if value.reference.is_some() {
             let o = value.object.take();
-            self.release_opt(o);
+            self.release_opt(o)?;
         }
         value.closed = 1;
-        0
+        Ok(0)
     }
     /// `build_name_tree` over `first` (the leaves, sorted).
     fn build_name_tree(&mut self, first: &mut [NamedObject], is_root: i32) -> Result<Obj> {
@@ -219,44 +234,44 @@ impl PdfOut {
         if is_root == 0 {
             let limits = self.new_array();
             let a = self.new_string(&first[0].key);
-            self.add_array(limits, a);
+            self.add_array(limits, a)?;
             let b = self.new_string(&first[num_leaves - 1].key);
-            self.add_array(limits, b);
-            self.put(result, b"Limits", limits);
+            self.add_array(limits, b)?;
+            self.put(result, b"Limits", limits)?;
         }
         if num_leaves > 0 && num_leaves <= 2 * NAME_CLUSTER as usize {
             let names = self.new_array();
             for cur in first.iter_mut() {
                 let k = self.new_string(&cur.key);
-                self.add_array(names, k);
+                self.add_array(names, k)?;
                 let v = cur.value.take();
                 match self.type_of(v) {
                     PDF_ARRAY | PDF_DICT | PDF_STREAM | PDF_STRING => {
-                        let r = self.ref_obj(v.expect("value"));
-                        self.add_array(names, r);
+                        let r = self.ref_obj(v.expect("value"))?;
+                        self.add_array(names, r)?;
                     }
                     PDF_OBJ_INVALID => {
                         crate::fatal!("Invalid object...: {:?}", printable_key(&cur.key))
                     }
                     _ => {
-                        let l = self.link(v.expect("value"));
-                        self.add_array(names, l);
+                        let l = self.link(v.expect("value"))?;
+                        self.add_array(names, l)?;
                     }
                 }
-                self.release_opt(v);
+                self.release_opt(v)?;
             }
-            self.put(result, b"Names", names);
+            self.put(result, b"Names", names)?;
         } else if num_leaves > 0 {
             let kids = self.new_array();
             for i in 0..NAME_CLUSTER as usize {
                 let start = (i * num_leaves) / NAME_CLUSTER as usize;
                 let end = ((i + 1) * num_leaves) / NAME_CLUSTER as usize;
                 let subtree = self.build_name_tree(&mut first[start..end], 0)?;
-                let r = self.ref_obj(subtree);
-                self.add_array(kids, r);
-                self.release(subtree);
+                let r = self.ref_obj(subtree)?;
+                self.add_array(kids, r)?;
+                self.release(subtree)?;
             }
-            self.put(result, b"Kids", kids);
+            self.put(result, b"Kids", kids)?;
         }
         Ok(result)
     }
@@ -273,7 +288,7 @@ impl PdfOut {
                 let Some(&new_obj) = f.ht_lookup_table(key) else {
                     continue;
                 };
-                self.string_value(new_obj).to_vec()
+                self.string_value(new_obj)?.to_vec()
             } else {
                 key.to_vec()
             };
@@ -283,7 +298,7 @@ impl PdfOut {
             let v = if self.is_undefined(Some(obj)) {
                 self.new_null()
             } else {
-                self.link(obj)
+                self.link(obj)?
             };
             objects.push(NamedObject {
                 key,

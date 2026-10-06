@@ -363,20 +363,20 @@ impl Dpx {
             font.flags |= PDF_FONT_FLAG_BASEFONT;
         }
         {
-            let tmp = self.o.lookup_dict(fontdict, b"CIDSystemInfo");
+            let tmp = self.o.lookup_dict(fontdict, b"CIDSystemInfo")?;
             assert!(self.o.is_dict(tmp));
             let tmp = tmp.unwrap();
             let registry = self
                 .o
-                .string_value(self.o.lookup_dict(tmp, b"Registry").unwrap())
+                .string_value(self.o.lookup_dict(tmp, b"Registry")?.unwrap())?
                 .to_vec();
             let ordering = self
                 .o
-                .string_value(self.o.lookup_dict(tmp, b"Ordering").unwrap())
+                .string_value(self.o.lookup_dict(tmp, b"Ordering")?.unwrap())?
                 .to_vec();
             let supplement = self
                 .o
-                .number_value(self.o.lookup_dict(tmp, b"Supplement").unwrap())
+                .number_value(self.o.lookup_dict(tmp, b"Supplement")?.unwrap())?
                 as i32;
             let font = &mut self.font.fonts[font_id as usize];
             font.cid.csi.registry = Some(registry);
@@ -384,9 +384,9 @@ impl Dpx {
             font.cid.csi.supplement = supplement;
         }
         {
-            let tmp = self.o.lookup_dict(fontdict, b"Subtype");
+            let tmp = self.o.lookup_dict(fontdict, b"Subtype")?;
             assert!(self.o.is_name(tmp));
-            let type_ = self.o.name_value(tmp.unwrap());
+            let type_ = self.o.name_value(tmp.unwrap())?;
             let subtype = if type_ == b"CIDFontType0" {
                 PDF_FONT_FONTTYPE_CIDTYPE0
             } else if type_ == b"CIDFontType2" {
@@ -398,18 +398,18 @@ impl Dpx {
         }
 
         if self.cid.opt_flags_cidfont & CIDFONT_FORCE_FIXEDPITCH != 0 {
-            if self.o.lookup_dict(fontdict, b"W").is_some() {
-                self.o.remove_dict(fontdict, b"W");
+            if self.o.lookup_dict(fontdict, b"W")?.is_some() {
+                self.o.remove_dict(fontdict, b"W")?;
             }
-            if self.o.lookup_dict(fontdict, b"W2").is_some() {
-                self.o.remove_dict(fontdict, b"W2");
+            if self.o.lookup_dict(fontdict, b"W2")?.is_some() {
+                self.o.remove_dict(fontdict, b"W2")?;
             }
         }
 
-        self.o.put_name(fontdict, b"Type", b"Font");
-        self.o.put_name(fontdict, b"BaseFont", &fontname);
-        self.o.put_name(descriptor, b"Type", b"FontDescriptor");
-        self.o.put_name(descriptor, b"FontName", &fontname);
+        self.o.put_name(fontdict, b"Type", b"Font")?;
+        self.o.put_name(fontdict, b"BaseFont", &fontname)?;
+        self.o.put_name(descriptor, b"Type", b"FontDescriptor")?;
+        self.o.put_name(descriptor, b"FontName", &fontname)?;
 
         let font = &mut self.font.fonts[font_id as usize];
         font.resource = Some(fontdict);

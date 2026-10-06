@@ -455,7 +455,7 @@ impl Dpx {
             &mut wbuf[p..],
             (i32::from(num_kept_tables) * 16 - sr) as USHORT,
         );
-        self.o.add_stream(stream, &wbuf[..12]);
+        self.o.add_stream(stream, &wbuf[..12])?;
 
         // Compute the start of the tables (after the headers).
         let mut offset: i32 = 12 + 16 * i32::from(num_kept_tables);
@@ -471,7 +471,7 @@ impl Dpx {
                 p += sfnt_put_ulong(&mut wbuf[p..], t.check_sum) as usize;
                 p += sfnt_put_ulong(&mut wbuf[p..], offset as ULONG) as usize;
                 sfnt_put_ulong(&mut wbuf[p..], t.length);
-                self.o.add_stream(stream, &wbuf[..16]);
+                self.o.add_stream(stream, &wbuf[..16])?;
                 offset = offset.wrapping_add(t.length as i32);
             }
         }
@@ -488,7 +488,7 @@ impl Dpx {
             }
             if offset % 4 != 0 {
                 let length = 4 - (offset % 4);
-                self.o.add_stream(stream, &padbytes[..length as usize]);
+                self.o.add_stream(stream, &padbytes[..length as usize])?;
                 offset += length;
             }
             let data = sfont.directory.as_deref_mut().unwrap().tables[i]
@@ -503,24 +503,24 @@ impl Dpx {
                         let nb_read = sfont.sfnt_read(&mut wbuf[..n]);
                         if nb_read == 0 {
                             // C loops forever on a truncated file.
-                            self.o.release(stream);
+                            self.o.release(stream)?;
                             fatal!("Reading file failed...");
                         }
-                        self.o.add_stream(stream, &wbuf[..nb_read]);
+                        self.o.add_stream(stream, &wbuf[..nb_read])?;
                         length -= nb_read as i32;
                     }
                 }
                 Some(d) => {
-                    self.o.add_stream(stream, &d[..tlen as usize]);
+                    self.o.add_stream(stream, &d[..tlen as usize])?;
                 }
             }
             // Set offset for next table.
             offset = offset.wrapping_add(tlen as i32);
         }
 
-        let stream_dict = self.o.stream_dict(stream);
+        let stream_dict = self.o.stream_dict(stream)?;
         self.o
-            .put_number(stream_dict, b"Length1", f64::from(offset));
+            .put_number(stream_dict, b"Length1", f64::from(offset))?;
         Ok(Some(stream))
     }
 }

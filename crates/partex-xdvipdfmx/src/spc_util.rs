@@ -701,10 +701,10 @@ fn read_pattern_ref(dpx: &mut Dpx, ap: &mut SpcArg) -> Result<Option<i32>> {
     let mut res_id = dpx.pdf_findresource(b"Pattern", &ident)?;
     if res_id < 0 {
         let pattern = dpx
-            .spc_lookup_object(&ident)
+            .spc_lookup_object(&ident)?
             .expect("Pattern object not found");
         /* Skip checking. /Type entry is optional... */
-        let p = dpx.o.link(pattern);
+        let p = dpx.o.link(pattern)?;
         res_id = dpx.pdf_defineresource(b"Pattern", Some(&ident), p, 0)?;
     }
     Ok(Some(res_id))
@@ -741,18 +741,18 @@ fn spc_read_color_pdf(
         ap_skip_blank(ap);
         let mut res_id = dpx.pdf_findresource(b"ColorSpace", &ident)?;
         {
-            let cspace = dpx.spc_lookup_object(&ident);
+            let cspace = dpx.spc_lookup_object(&ident)?;
             let Some(cspace) = cspace.filter(|&c| dpx.o.is_array(Some(c))) else {
                 warn!("Couldn't find ColorSpace resource (or not an array object?)");
                 return Ok(-1);
             };
-            let csname = dpx.o.get_array(cspace, 0);
+            let csname = dpx.o.get_array(cspace, 0)?;
             let Some(csname) = csname.filter(|&c| dpx.o.is_name(Some(c))) else {
                 warn!("Invalid ColorSpace resource found...");
                 return Ok(-1);
             };
 
-            match dpx.o.name_value(csname) {
+            match dpx.o.name_value(csname)? {
                 b"Separation" => ty = PDF_COLORSPACE_TYPE_SEPARATION,
                 b"CalGray" => {
                     ty = PDF_COLORSPACE_TYPE_CALGRAY;
@@ -788,7 +788,7 @@ fn spc_read_color_pdf(
                 }
             }
             if res_id < 0 {
-                let c = dpx.o.link(cspace);
+                let c = dpx.o.link(cspace)?;
                 res_id = dpx.pdf_defineresource(b"ColorSpace", Some(&ident), c, 0)?;
             }
         }
@@ -836,7 +836,7 @@ fn spc_read_color_pdf(
             warn!("Failed to read a name object while parsing colorspecification...");
             return Ok(-1);
         };
-        match dpx.o.name_value(csname) {
+        match dpx.o.name_value(csname)? {
             b"DeviceGray" => {
                 ty = PDF_COLORSPACE_TYPE_DEVICEGRAY;
                 nc = 1;
@@ -858,7 +858,7 @@ fn spc_read_color_pdf(
                 return Ok(-1);
             }
         }
-        dpx.o.release(csname);
+        dpx.o.release(csname)?;
         ap_skip_blank(ap);
         colorspec.res_id = -1;
         colorspec.r#type = ty;

@@ -645,10 +645,10 @@ mod font_tests {
         }
         let mut dpx = test_dpx();
         let s = dpx.sfnt_create_FontFile_stream(&mut sfont).unwrap()?;
-        let dict = dpx.o.stream_dict(s);
-        let l1 = dpx.o.lookup_dict(dict, b"Length1").unwrap();
-        let _ = writeln!(dump, "/Length1 {}", dpx.o.number_value(l1));
-        Some((dpx.o.stream_data(s).to_vec(), dump))
+        let dict = dpx.o.stream_dict(s).unwrap();
+        let l1 = dpx.o.lookup_dict(dict, b"Length1").unwrap().unwrap();
+        let _ = writeln!(dump, "/Length1 {}", dpx.o.number_value(l1).unwrap());
+        Some((dpx.o.stream_data(s).unwrap().to_vec(), dump))
     }
 
     const DEJAVU: &str = "/usr/share/texmf-dist/fonts/truetype/public/dejavu/DejaVuSans.ttf";

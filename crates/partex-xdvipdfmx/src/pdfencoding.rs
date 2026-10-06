@@ -109,13 +109,13 @@ impl Dpx {
         {
             fatal!("Invalid encoding name for BaseEncoding");
         }
-        let differences = self.make_encoding_differences(enc_vec, baseenc_vec, is_used);
+        let differences = self.make_encoding_differences(enc_vec, baseenc_vec, is_used)?;
         if let Some(differences) = differences {
             let resource = self.o.new_dict();
             if let Some(b) = baseenc_name {
-                self.o.put_name(resource, b"BaseEncoding", b);
+                self.o.put_name(resource, b"BaseEncoding", b)?;
             }
-            self.o.put(resource, b"Differences", differences);
+            self.o.put(resource, b"Differences", differences)?;
             Ok(Some(resource))
         } else {
             Ok(baseenc_name.map(|b| self.o.new_name(b)))
@@ -123,16 +123,17 @@ impl Dpx {
     }
 
     /// `pdf_flush_encoding` (static).
-    fn pdf_flush_encoding(&mut self, enc_id: i32) {
+    fn pdf_flush_encoding(&mut self, enc_id: i32) -> Result<()> {
         let encoding = &mut self.encoding.encodings[enc_id as usize];
         let resource = encoding.resource.take();
         let tounicode = encoding.tounicode.take();
         if let Some(r) = resource {
-            self.o.release(r);
+            self.o.release(r)?;
         }
         if let Some(t) = tounicode {
-            self.o.release(t);
+            self.o.release(t)?;
         }
+        Ok(())
     }
 
     /// `pdf_clean_encoding_struct` (static).
@@ -146,7 +147,7 @@ impl Dpx {
         encoding.enc_name = Vec::new();
         encoding.glyphs = core::array::from_fn(|_| None);
         if let Some(t) = tounicode {
-            self.o.release(t);
+            self.o.release(t)?;
         }
         Ok(())
     }
@@ -157,7 +158,7 @@ impl Dpx {
         enc_vec: &[Option<Vec<u8>>],
         baseenc: Option<&[&[u8]; 256]>,
         is_used: &[u8],
-    ) -> Option<Obj> {
+    ) -> Result<Option<Obj>> {
         let mut count = 0;
         let mut skipping = true;
         let differences = self.o.new_array();
@@ -167,10 +168,10 @@ impl Dpx {
                     if baseenc.is_none_or(|b| b[code] != g.as_slice()) {
                         if skipping {
                             let n = self.o.new_number(code as f64);
-                            self.o.add_array(differences, n);
+                            self.o.add_array(differences, n)?;
                         }
                         let n = self.o.new_name(g);
-                        self.o.add_array(differences, n);
+                        self.o.add_array(differences, n)?;
                         skipping = false;
                         count += 1;
                     } else {
@@ -181,10 +182,10 @@ impl Dpx {
             }
         }
         if count == 0 {
-            self.o.release(differences);
-            return None;
+            self.o.release(differences)?;
+            return Ok(None);
         }
-        Some(differences)
+        Ok(Some(differences))
     }
 
     /// `load_encoding_file` (static): the enc_id, or -1.
@@ -208,26 +209,30 @@ impl Dpx {
         skip_white(s, &mut p);
         let Some(encoding_array) = self.o.parse_pdf_array(s, &mut p, None)? else {
             if let Some(n) = enc_name {
-                self.o.release(n);
+                self.o.release(n)?;
             }
             return Ok(-1);
         };
         let mut enc_vec: Vec<Option<Vec<u8>>> = Vec::with_capacity(256);
         for code in 0..256 {
-            let Some(g) = self.o.get_array(encoding_array, code) else {
+            let Some(g) = self.o.get_array(encoding_array, code)? else {
                 fatal!("typecheck: Invalid object type: -1 4");
             };
-            enc_vec.push(Some(self.o.name_value(g).to_vec()));
+            enc_vec.push(Some(self.o.name_value(g)?.to_vec()));
         }
-        let Some(name) = enc_name.map(|n| self.o.name_value(n).to_vec()) else {
+        let name = match enc_name {
+            Some(n) => Some(self.o.name_value(n)?.to_vec()),
+            None => None,
+        };
+        let Some(name) = name else {
             // C: strlen(NULL) in pdf_encoding_new_encoding.
             fatal!("Encoding file without a name: crash in C");
         };
         let enc_id = self.pdf_encoding_new_encoding(&name, filename, &enc_vec, 0);
         if let Some(n) = enc_name {
-            self.o.release(n);
+            self.o.release(n)?;
         }
-        self.o.release(encoding_array);
+        self.o.release(encoding_array)?;
         Ok(enc_id)
     }
 
@@ -320,7 +325,7 @@ impl Dpx {
     /// `pdf_close_encodings`.
     pub fn pdf_close_encodings(&mut self) -> Result<()> {
         for enc_id in 0..self.encoding.encodings.len() as i32 {
-            self.pdf_flush_encoding(enc_id);
+            self.pdf_flush_encoding(enc_id)?;
             self.pdf_clean_encoding_struct(enc_id)?;
         }
         self.encoding.encodings = Vec::new();
@@ -1292,16 +1297,17 @@ pub(crate) mod tests {
             )
             .unwrap()
             .unwrap();
-        let diff = d.o.lookup_dict(r, b"Differences").unwrap();
+        let diff = d.o.lookup_dict(r, b"Differences").unwrap().unwrap();
         let items: Vec<Vec<u8>> =
             d.o.array_items(diff)
+                .unwrap()
                 .into_iter()
                 .map(|o| {
                     let o = o.unwrap();
                     if d.o.is_number(Some(o)) {
-                        format!("{}", d.o.number_value(o)).into_bytes()
+                        format!("{}", d.o.number_value(o).unwrap()).into_bytes()
                     } else {
-                        d.o.name_value(o).to_vec()
+                        d.o.name_value(o).unwrap().to_vec()
                     }
                 })
                 .collect();
@@ -1312,7 +1318,7 @@ pub(crate) mod tests {
             .create_encoding_resource(&enc, Some(b"WinAnsiEncoding"), None, &[0; 256])
             .unwrap()
             .unwrap();
-        assert_eq!(d.o.name_value(r), b"WinAnsiEncoding");
+        assert_eq!(d.o.name_value(r).unwrap(), b"WinAnsiEncoding");
     }
 }
 
@@ -1351,7 +1357,7 @@ mod tounicode_tests {
             .pdf_create_ToUnicode_CMap(b"Test", &enc, Some(&used))
             .unwrap()
             .unwrap();
-        let text = String::from_utf8(d.o.stream_data(s).to_vec()).unwrap();
+        let text = String::from_utf8(d.o.stream_data(s).unwrap().to_vec()).unwrap();
         assert!(text.contains("/CMapName /Test-UTF16 def"), "{text}");
         assert!(
             text.contains("3 beginbfchar\n<0B> <FB00>\n<0C> <00660066>\n<0D> <0041>\nendbfchar\n"),

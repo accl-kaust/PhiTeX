@@ -102,7 +102,7 @@ pub(crate) fn foreach_dict(
         crate::fatal!("typecheck: Invalid object type");
     }
     let mut error = 0;
-    for (k, v) in dpx.o.dict_entries(dict) {
+    for (k, v) in dpx.o.dict_entries(dict)? {
         if error != 0 {
             break;
         }
@@ -152,11 +152,11 @@ fn calculate_size_utf16(p: &[u8]) -> Result<usize> {
 impl Dpx {
     /// `spc_pdfm_at_begin_document`.
     pub fn spc_pdfm_at_begin_document(&mut self) -> Result<i32> {
-        Ok(spc_handler_pdfm__init(self))
+        spc_handler_pdfm__init(self)
     }
     /// `spc_pdfm_at_end_document`.
     pub fn spc_pdfm_at_end_document(&mut self) -> Result<i32> {
-        Ok(spc_handler_pdfm__clean(self))
+        spc_handler_pdfm__clean(self)
     }
     /// `spc_pdfm_at_end_page`: adds `pageresources` to the page.
     pub fn spc_pdfm_at_end_page(&mut self) -> Result<i32> {
@@ -195,7 +195,7 @@ fn parse_ext(dpx: &mut Dpx, args: &mut SpcArg) -> Result<Option<Obj>> {
 }
 
 /// `spc_handler_pdfm__init`.
-fn spc_handler_pdfm__init(dpx: &mut Dpx) -> i32 {
+fn spc_handler_pdfm__init(dpx: &mut Dpx) -> Result<i32> {
     // The following dictionary entry keys are considered as keys for
     // text strings. Be sure that string object is NOT always a text
     // string.
@@ -205,46 +205,46 @@ fn spc_handler_pdfm__init(dpx: &mut Dpx) -> i32 {
     dpx.pdfm.cd.taintkeys = Some(taintkeys);
     for k in DEFAULT_TAINTKEYS {
         let n = dpx.o.new_name(k);
-        dpx.o.add_array(taintkeys, n);
+        dpx.o.add_array(taintkeys, n)?;
     }
     dpx.pdfm.pageresources = None;
-    0
+    Ok(0)
 }
 
 /// `spc_handler_pdfm__clean`.
-fn spc_handler_pdfm__clean(dpx: &mut Dpx) -> i32 {
+fn spc_handler_pdfm__clean(dpx: &mut Dpx) -> Result<i32> {
     if let Some(a) = dpx.pdfm.annot_dict {
         crate::warn!("Unbalanced bann and eann found.");
-        dpx.o.release(a);
+        dpx.o.release(a)?;
     }
     dpx.pdfm.lowest_level = 255;
     dpx.pdfm.annot_dict = None;
     if let Some(t) = dpx.pdfm.cd.taintkeys.take() {
-        dpx.o.release(t);
+        dpx.o.release(t)?;
     }
     if let Some(p) = dpx.pdfm.pageresources.take() {
-        dpx.o.release(p);
+        dpx.o.release(p)?;
     }
-    0
+    Ok(0)
 }
 
 /// `safeputresdent` (foreach callback; `dp` a dict).
-fn safeputresdent(dpx: &mut Dpx, kp: Obj, vp: Obj, dp: Obj) -> i32 {
-    let key = dpx.o.name_value(kp).to_vec();
-    if dpx.o.lookup_dict(dp, &key).is_some() {
+fn safeputresdent(dpx: &mut Dpx, kp: Obj, vp: Obj, dp: Obj) -> Result<i32> {
+    let key = dpx.o.name_value(kp)?.to_vec();
+    if dpx.o.lookup_dict(dp, &key)?.is_some() {
         crate::warn!("Object {:?} already defined in dict! (ignored)", key);
     } else {
-        let k = dpx.o.link(kp);
-        let v = dpx.o.link(vp);
-        dpx.o.add_dict(dp, k, Some(v));
+        let k = dpx.o.link(kp)?;
+        let v = dpx.o.link(vp)?;
+        dpx.o.add_dict(dp, k, Some(v))?;
     }
-    0
+    Ok(0)
 }
 
 /// `safeputresdict` (foreach callback; `dp` a dict).
 fn safeputresdict(dpx: &mut Dpx, kp: Obj, vp: Obj, dp: Obj) -> Result<i32> {
-    let key = dpx.o.name_value(kp).to_vec();
-    let mut dict = dpx.o.lookup_dict(dp, &key);
+    let key = dpx.o.name_value(kp)?.to_vec();
+    let mut dict = dpx.o.lookup_dict(dp, &key)?;
 
     // Not sure what is the best way to handle this situation
     if dpx.o.is_indirect(dict) && dpx.o.is_indirect(Some(vp)) {
@@ -254,7 +254,7 @@ fn safeputresdict(dpx: &mut Dpx, kp: Obj, vp: Obj, dp: Obj) -> Result<i32> {
         }
         // otherwise merge the content of old one (see below)
         dict = dpx.o.deref_obj(dict)?;
-        dpx.o.release_opt(dict); // decrement link count
+        dpx.o.release_opt(dict)?; // decrement link count
     }
 
     if dpx.o.type_of(Some(vp)) == PDF_INDIRECT {
@@ -263,29 +263,29 @@ fn safeputresdict(dpx: &mut Dpx, kp: Obj, vp: Obj, dp: Obj) -> Result<i32> {
             if let Some(dst) = dpx.o.deref_obj(Some(vp))? {
                 if dpx.o.type_of(Some(dst)) == PDF_DICT {
                     foreach_dict(dpx, dict, |dpx, k, v| {
-                        Ok(safeputresdent(dpx, k, v.expect("vp"), dst))
+                        safeputresdent(dpx, k, v.expect("vp"), dst)
                     })?;
-                    dpx.o.release(dst);
+                    dpx.o.release(dst)?;
                 } else {
                     crate::warn!(
                         "Invalid type (not DICT) for page/form resource dict entry: key={:?}",
                         key
                     );
-                    dpx.o.release(dst);
+                    dpx.o.release(dst)?;
                     return Ok(-1);
                 }
             }
         }
-        let v = dpx.o.link(vp);
-        dpx.o.put(dp, &key, v);
+        let v = dpx.o.link(vp)?;
+        dpx.o.put(dp, &key, v)?;
     } else if dpx.o.type_of(Some(vp)) == PDF_DICT {
         if let Some(dict) = dict {
             foreach_dict(dpx, vp, |dpx, k, v| {
-                Ok(safeputresdent(dpx, k, v.expect("vp"), dict))
+                safeputresdent(dpx, k, v.expect("vp"), dict)
             })?;
         } else {
-            let v = dpx.o.link(vp);
-            dpx.o.put(dp, &key, v);
+            let v = dpx.o.link(vp)?;
+            dpx.o.put(dp, &key, v)?;
         }
     } else {
         crate::warn!(
@@ -299,8 +299,8 @@ fn safeputresdict(dpx: &mut Dpx, kp: Obj, vp: Obj, dp: Obj) -> Result<i32> {
 
 /// `putpageresources` (foreach callback; `dp` the category name).
 fn putpageresources(dpx: &mut Dpx, kp: Obj, vp: Obj, category: &[u8]) -> Result<i32> {
-    let resource_name = dpx.o.name_value(kp).to_vec();
-    let v = dpx.o.link(vp);
+    let resource_name = dpx.o.name_value(kp)?.to_vec();
+    let v = dpx.o.link(vp)?;
     dpx.pdf_doc_add_page_resource(category, &resource_name, v)?;
     Ok(0)
 }
@@ -308,7 +308,7 @@ fn putpageresources(dpx: &mut Dpx, kp: Obj, vp: Obj, category: &[u8]) -> Result<
 /// `forallresourcecategory` (foreach callback; `dp` unused).
 fn forallresourcecategory(dpx: &mut Dpx, kp: Obj, vp: Obj) -> Result<i32> {
     let mut r = -1;
-    let category = dpx.o.name_value(kp).to_vec();
+    let category = dpx.o.name_value(kp)?.to_vec();
     match dpx.o.type_of(Some(vp)) {
         PDF_DICT => {
             r = foreach_dict(dpx, vp, |dpx, k, v| {
@@ -332,29 +332,29 @@ fn forallresourcecategory(dpx: &mut Dpx, kp: Obj, vp: Obj) -> Result<i32> {
                     let res_dict = dpx
                         .pdf_doc_current_page_resources()
                         .expect("page resources");
-                    let dict = dpx.o.lookup_dict(res_dict, &category);
+                    let dict = dpx.o.lookup_dict(res_dict, &category)?;
                     match dict {
                         None => {
-                            let v = dpx.o.link(vp);
-                            dpx.o.put(res_dict, &category, v);
+                            let v = dpx.o.link(vp)?;
+                            dpx.o.put(res_dict, &category, v)?;
                         }
                         Some(mut dict) => {
                             if dpx.o.type_of(Some(dict)) == PDF_INDIRECT {
                                 let d = dpx.o.deref_obj(Some(dict))?;
                                 // FIXME: jus to decrement link counter
-                                dpx.o.release_opt(d);
+                                dpx.o.release_opt(d)?;
                                 dict = d.expect("deref");
                             }
                             // With the below code resource dictionary is
                             // replaced by user supplied one, @res.
                             foreach_dict(dpx, dict, |dpx, k, v| {
-                                Ok(safeputresdent(dpx, k, v.expect("vp"), obj))
+                                safeputresdent(dpx, k, v.expect("vp"), obj)
                             })?;
-                            let v = dpx.o.link(vp);
-                            dpx.o.put(res_dict, &category, v);
+                            let v = dpx.o.link(vp)?;
+                            dpx.o.put(res_dict, &category, v)?;
                         }
                     }
-                    dpx.o.release(obj);
+                    dpx.o.release(obj)?;
                 }
             }
         }
@@ -371,7 +371,7 @@ fn forallresourcecategory(dpx: &mut Dpx, kp: Obj, vp: Obj) -> Result<i32> {
 /// `reencode_string_from_utf8_to_utf16be`.
 fn reencode_string_from_utf8_to_utf16be(dpx: &mut Dpx, instring: Obj) -> Result<i32> {
     let mut error = 0;
-    let strptr = dpx.o.string_value(instring).to_vec();
+    let strptr = dpx.o.string_value(instring)?.to_vec();
 
     // check if the input string is strictly ASCII
     let non_ascii = strptr.iter().filter(|&&c| c > 127).count();
@@ -401,7 +401,7 @@ fn reencode_string_from_utf8_to_utf16be(dpx: &mut Dpx, instring: Obj) -> Result<
             }
         }
         if error == 0 {
-            dpx.o.set_string(instring, &buf[..q]);
+            dpx.o.set_string(instring, &buf[..q])?;
         }
     }
     Ok(error)
@@ -417,7 +417,7 @@ fn reencode_string(dpx: &mut Dpx, cmap_id: i32, instring: Obj) -> Result<i32> {
     }
 
     if cmap_id >= 0 {
-        let inbuf = dpx.o.string_value(instring).to_vec();
+        let inbuf = dpx.o.string_value(instring)?.to_vec();
         let mut inbufleft = inbuf.len() as i32;
         let mut inbufcur = 0;
 
@@ -444,31 +444,31 @@ fn reencode_string(dpx: &mut Dpx, cmap_id: i32, instring: Obj) -> Result<i32> {
         }
         if error == 0 {
             dpx.o
-                .set_string(instring, &obuf[..(obufsize - obufleft) as usize]);
+                .set_string(instring, &obuf[..(obufsize - obufleft) as usize])?;
         }
     }
     Ok(error)
 }
 
 /// `need_reencode`.
-fn need_reencode(dpx: &mut Dpx, kp: Obj, vp: Obj, cd: &Tounicode) -> bool {
+fn need_reencode(dpx: &mut Dpx, kp: Obj, vp: Obj, cd: &Tounicode) -> Result<bool> {
     let mut r = false;
     let taintkeys = cd.taintkeys.expect("taintkeys");
-    for i in 0..dpx.o.array_length(taintkeys) {
-        let tk = dpx.o.get_array(taintkeys, i as i32).expect("taint key");
-        if dpx.o.name_value(kp) == dpx.o.name_value(tk) {
+    for i in 0..dpx.o.array_length(taintkeys)? {
+        let tk = dpx.o.get_array(taintkeys, i as i32)?.expect("taint key");
+        if dpx.o.name_value(kp)? == dpx.o.name_value(tk)? {
             r = true;
             break;
         }
     }
     if r {
         // Check UTF-16BE BOM.
-        let v = dpx.o.string_value(vp);
+        let v = dpx.o.string_value(vp)?;
         if v.len() >= 2 && &v[..2] == b"\xfe\xff" {
             r = false;
         }
     }
-    r
+    Ok(r)
 }
 
 /// `modify_strings` (foreach callback; `dp` the `struct tounicode`).
@@ -478,14 +478,14 @@ fn modify_strings(dpx: &mut Dpx, kp: Obj, vp: Obj, cd: Option<&Tounicode>) -> Re
     match dpx.o.type_of(Some(vp)) {
         PDF_STRING => {
             if let Some(cd) = cd.filter(|cd| cd.cmap_id >= 0 && cd.taintkeys.is_some()) {
-                if need_reencode(dpx, kp, vp, cd) {
+                if need_reencode(dpx, kp, vp, cd)? {
                     r = reencode_string(dpx, cd.cmap_id, vp)?;
                 }
             } else if let Some(cd) = cd.filter(|cd| {
                 (dpx.conf.compat_mode == crate::ctx::CompatMode::Xdv || dpx.conf.pdfm_str_utf8)
                     && cd.taintkeys.is_some()
             }) {
-                if need_reencode(dpx, kp, vp, cd) {
+                if need_reencode(dpx, kp, vp, cd)? {
                     r = reencode_string_from_utf8_to_utf16be(dpx, vp)?;
                 }
             }
@@ -493,14 +493,14 @@ fn modify_strings(dpx: &mut Dpx, kp: Obj, vp: Obj, cd: Option<&Tounicode>) -> Re
                 // error occured...
                 crate::warn!(
                     "Input string conversion (to UTF16BE) failed for {:?}...",
-                    dpx.o.name_value(kp)
+                    dpx.o.name_value(kp)?
                 );
             }
         }
         // Array elements are also checked.
         PDF_ARRAY => {
-            for i in 0..dpx.o.array_length(vp) {
-                if let Some(obj) = dpx.o.get_array(vp, i as i32) {
+            for i in 0..dpx.o.array_length(vp)? {
+                if let Some(obj) = dpx.o.get_array(vp, i as i32)? {
                     r = modify_strings(dpx, kp, obj, cd)?;
                 }
                 if r < 0 {
@@ -515,7 +515,7 @@ fn modify_strings(dpx: &mut Dpx, kp: Obj, vp: Obj, cd: Option<&Tounicode>) -> Re
             })?;
         }
         PDF_STREAM => {
-            let d = dpx.o.stream_dict(vp);
+            let d = dpx.o.stream_dict(vp)?;
             r = foreach_dict(dpx, d, |dpx, k, v| match v {
                 Some(v) => modify_strings(dpx, k, v, cd),
                 None => Ok(0),
@@ -546,7 +546,7 @@ fn parse_pdf_dict_with_tounicode(
             && !dpx.o.is_dict(Some(d))
         {
             crate::warn!("Dictionary type object expected but non-dictionary type found.");
-            dpx.o.release(d);
+            dpx.o.release(d)?;
             dict = None;
         }
     } else {
@@ -559,7 +559,7 @@ fn parse_pdf_dict_with_tounicode(
         if let Some(d) = dict {
             if !dpx.o.is_dict(Some(d)) {
                 crate::warn!("Dictionary type object expected but non-dictionary type found.");
-                dpx.o.release(d);
+                dpx.o.release(d)?;
                 dict = None;
             } else {
                 foreach_dict(dpx, d, |dpx, k, v| match v {
@@ -663,11 +663,11 @@ fn spc_handler_pdfm_stream_with_type(
             spe,
             format_args!("Invalid type of input string for pdf:(f)stream."),
         );
-        dpx.o.release(tmp);
+        dpx.o.release(tmp)?;
         return Ok(-1);
     }
 
-    let instring = dpx.o.string_value(tmp).to_vec();
+    let instring = dpx.o.string_value(tmp)?.to_vec();
 
     let fstream;
     match ty {
@@ -675,7 +675,7 @@ fn spc_handler_pdfm_stream_with_type(
             // An empty string's value is C's NULL.
             if instring.is_empty() {
                 dpx.spc_warn(spe, format_args!("Missing filename for pdf:fstream."));
-                dpx.o.release(tmp);
+                dpx.o.release(tmp)?;
                 return Ok(-1);
             }
             let instring = cstr(&instring);
@@ -684,13 +684,13 @@ fn spc_handler_pdfm_stream_with_type(
                 .find(instring, crate::io::Format::Pict, b"dvipdfmx")
             else {
                 dpx.spc_warn(spe, format_args!("File {:?} not found.", instring));
-                dpx.o.release(tmp);
+                dpx.o.release(tmp)?;
                 return Ok(-1);
             };
             let Some(mut fp) = dpx.dpx_open_file(&fullname, crate::dpxfile::ResType::Binary)?
             else {
                 dpx.spc_warn(spe, format_args!("Could not open file: {:?}", instring));
-                dpx.o.release(tmp);
+                dpx.o.release(tmp)?;
                 return Ok(-1);
             };
             fstream = dpx.o.new_stream(STREAM_COMPRESS);
@@ -700,19 +700,19 @@ fn spc_handler_pdfm_stream_with_type(
                 if nb_read == 0 {
                     break;
                 }
-                dpx.o.add_stream(fstream, &work_buffer[..nb_read]);
+                dpx.o.add_stream(fstream, &work_buffer[..nb_read])?;
             }
         }
         STRING_STREAM => {
             fstream = dpx.o.new_stream(STREAM_COMPRESS);
-            dpx.o.add_stream(fstream, &instring);
+            dpx.o.add_stream(fstream, &instring)?;
         }
         _ => {
-            dpx.o.release(tmp);
+            dpx.o.release(tmp)?;
             return Ok(-1);
         }
     }
-    dpx.o.release(tmp);
+    dpx.o.release(tmp)?;
 
     // Optional dict.
     //
@@ -720,12 +720,12 @@ fn spc_handler_pdfm_stream_with_type(
     args.skip_white();
 
     if args.cur() == b'<' {
-        let stream_dict = dpx.o.stream_dict(fstream);
+        let stream_dict = dpx.o.stream_dict(fstream)?;
 
         let tmp = parse_ext(dpx, args)?;
         let Some(tmp) = tmp else {
             dpx.spc_warn(spe, format_args!("Parsing dictionary failed."));
-            dpx.o.release(fstream);
+            dpx.o.release(fstream)?;
             return Ok(-1);
         };
         if !dpx.o.is_dict(Some(tmp)) {
@@ -733,21 +733,21 @@ fn spc_handler_pdfm_stream_with_type(
                 spe,
                 format_args!("Expecting dictionary type object but non-dictionary type found."),
             );
-            dpx.o.release(fstream);
-            dpx.o.release(tmp);
+            dpx.o.release(fstream)?;
+            dpx.o.release(tmp)?;
             return Ok(-1);
         }
-        if dpx.o.lookup_dict(tmp, b"Length").is_some() {
-            dpx.o.remove_dict(tmp, b"Length");
-        } else if dpx.o.lookup_dict(tmp, b"Filter").is_some() {
-            dpx.o.remove_dict(tmp, b"Filter");
+        if dpx.o.lookup_dict(tmp, b"Length")?.is_some() {
+            dpx.o.remove_dict(tmp, b"Length")?;
+        } else if dpx.o.lookup_dict(tmp, b"Filter")?.is_some() {
+            dpx.o.remove_dict(tmp, b"Filter")?;
         }
-        dpx.o.merge_dict(stream_dict, tmp);
-        dpx.o.release(tmp);
+        dpx.o.merge_dict(stream_dict, tmp)?;
+        dpx.o.release(tmp)?;
     }
 
     // Users should explicitly close this.
-    dpx.spc_push_object(spe, &ident, fstream);
+    dpx.spc_push_object(spe, &ident, fstream)?;
 
     Ok(0)
 }
@@ -756,7 +756,7 @@ fn spc_handler_pdfm_stream_with_type(
 fn spc_handler_pdfm_bop(dpx: &mut Dpx, spe: &mut SpcEnv, args: &mut SpcArg) -> Result<i32> {
     if args.curptr < args.endptr {
         let content = args.rest().to_vec();
-        dpx.pdf_doc_set_bop_content(&content);
+        dpx.pdf_doc_set_bop_content(&content)?;
     }
     args.curptr = args.endptr;
     Ok(0)
@@ -766,7 +766,7 @@ fn spc_handler_pdfm_bop(dpx: &mut Dpx, spe: &mut SpcEnv, args: &mut SpcArg) -> R
 fn spc_handler_pdfm_eop(dpx: &mut Dpx, spe: &mut SpcEnv, args: &mut SpcArg) -> Result<i32> {
     if args.curptr < args.endptr {
         let content = args.rest().to_vec();
-        dpx.pdf_doc_set_eop_content(&content);
+        dpx.pdf_doc_set_eop_content(&content)?;
     }
     args.curptr = args.endptr;
     Ok(0)
@@ -785,7 +785,7 @@ fn spc_handler_pdfm_put(dpx: &mut Dpx, spe: &mut SpcEnv, ap: &mut SpcArg) -> Res
         dpx.spc_warn(spe, format_args!("Missing object identifier."));
         return Ok(-1);
     };
-    let Some(obj1) = dpx.spc_lookup_object(&ident) else {
+    let Some(obj1) = dpx.spc_lookup_object(&ident)? else {
         dpx.spc_warn(spe, format_args!("Specified object not exist: {:?}", ident));
         return Ok(-1);
     };
@@ -815,13 +815,13 @@ fn spc_handler_pdfm_put(dpx: &mut Dpx, spe: &mut SpcEnv, ap: &mut SpcArg) -> Res
                     safeputresdict(dpx, k, v.expect("vp"), obj1)
                 })?;
             } else {
-                dpx.o.merge_dict(obj1, obj2);
+                dpx.o.merge_dict(obj1, obj2)?;
             }
         }
         PDF_STREAM => {
             if dpx.o.type_of(Some(obj2)) == PDF_DICT {
-                let d = dpx.o.stream_dict(obj1);
-                dpx.o.merge_dict(d, obj2);
+                let d = dpx.o.stream_dict(obj1)?;
+                dpx.o.merge_dict(d, obj2)?;
             } else if dpx.o.type_of(Some(obj2)) == PDF_STREAM {
                 dpx.spc_warn(
                     spe,
@@ -841,13 +841,13 @@ fn spc_handler_pdfm_put(dpx: &mut Dpx, spe: &mut SpcEnv, ap: &mut SpcArg) -> Res
         }
         PDF_ARRAY => {
             // dvipdfm
-            let l = dpx.o.link(obj2);
-            dpx.o.add_array(obj1, l);
+            let l = dpx.o.link(obj2)?;
+            dpx.o.add_array(obj1, l)?;
             while ap.curptr < ap.endptr {
                 let Some(obj3) = parse_ext(dpx, ap)? else {
                     break;
                 };
-                dpx.o.add_array(obj1, obj3);
+                dpx.o.add_array(obj1, obj3)?;
                 ap.skip_white();
             }
         }
@@ -862,7 +862,7 @@ fn spc_handler_pdfm_put(dpx: &mut Dpx, spe: &mut SpcEnv, ap: &mut SpcArg) -> Res
             error = -1;
         }
     }
-    dpx.o.release(obj2);
+    dpx.o.release(obj2)?;
 
     Ok(error)
 }
@@ -901,7 +901,7 @@ fn spc_handler_pdfm_annot(dpx: &mut Dpx, spe: &mut SpcEnv, args: &mut SpcArg) ->
     };
     if !dpx.o.is_dict(Some(annot_dict)) {
         dpx.spc_warn(spe, format_args!("Invalid type: not dictionary object."));
-        dpx.o.release(annot_dict);
+        dpx.o.release(annot_dict)?;
         return Ok(-1);
     }
 
@@ -909,14 +909,14 @@ fn spc_handler_pdfm_annot(dpx: &mut Dpx, spe: &mut SpcEnv, args: &mut SpcArg) ->
 
     // Order is important...
     if let Some(ident) = &ident {
-        let l = dpx.o.link(annot_dict);
-        dpx.spc_push_object(spe, ident, l);
+        let l = dpx.o.link(annot_dict)?;
+        dpx.spc_push_object(spe, ident, l)?;
     }
     // Add this reference.
     let page = dpx.pdf_doc_current_page_number();
     dpx.pdf_doc_add_annot(page as u32, &rect, annot_dict, 1)?;
 
-    dpx.o.release(annot_dict);
+    dpx.o.release(annot_dict)?;
 
     Ok(0)
 }
@@ -954,16 +954,16 @@ fn spc_handler_pdfm_bann(dpx: &mut Dpx, spe: &mut SpcEnv, args: &mut SpcArg) -> 
     };
     if !dpx.o.is_dict(Some(annot_dict)) {
         dpx.spc_warn(spe, format_args!("Invalid type: not a dictionary object."));
-        dpx.o.release(annot_dict);
+        dpx.o.release(annot_dict)?;
         dpx.pdfm.annot_dict = None;
         return Ok(-1);
     }
 
-    let l = dpx.o.link(annot_dict);
+    let l = dpx.o.link(annot_dict)?;
     let error = dpx.spc_begin_annot(spe, l);
     if let Some(ident) = &ident {
-        let l = dpx.o.link(annot_dict);
-        dpx.spc_push_object(spe, ident, l);
+        let l = dpx.o.link(annot_dict)?;
+        dpx.spc_push_object(spe, ident, l)?;
     }
 
     Ok(error)
@@ -981,7 +981,7 @@ fn spc_handler_pdfm_eann(dpx: &mut Dpx, spe: &mut SpcEnv, args: &mut SpcArg) -> 
 
     let error = dpx.spc_end_annot(spe)?;
 
-    dpx.o.release(annot_dict);
+    dpx.o.release(annot_dict)?;
     dpx.pdfm.annot_dict = None;
 
     Ok(error)
@@ -1111,15 +1111,15 @@ fn spc_handler_pdfm_btrans(dpx: &mut Dpx, spe: &mut SpcEnv, args: &mut SpcArg) -
     m.e += (1.0 - m.a) * cp.x - m.c * cp.y;
     m.f += (1.0 - m.d) * cp.y - m.b * cp.x;
 
-    dpx.pdf_dev_gsave();
-    dpx.pdf_dev_concat(&m);
+    dpx.pdf_dev_gsave()?;
+    dpx.pdf_dev_concat(&m)?;
 
     Ok(0)
 }
 
 /// `spc_handler_pdfm_etrans`.
 fn spc_handler_pdfm_etrans(dpx: &mut Dpx, spe: &mut SpcEnv, args: &mut SpcArg) -> Result<i32> {
-    dpx.pdf_dev_grestore();
+    dpx.pdf_dev_grestore()?;
 
     // Unfortunately, the following line is necessary in case of a color
     // change inside of the save/restore pair.
@@ -1158,7 +1158,7 @@ fn spc_handler_pdfm_outline(dpx: &mut Dpx, spe: &mut SpcEnv, args: &mut SpcArg) 
         return Ok(-1);
     };
     if !dpx.o.is_number(Some(tmp)) {
-        dpx.o.release(tmp);
+        dpx.o.release(tmp)?;
         dpx.spc_warn(
             spe,
             format_args!("Expecting number for outline item depth."),
@@ -1166,8 +1166,8 @@ fn spc_handler_pdfm_outline(dpx: &mut Dpx, spe: &mut SpcEnv, args: &mut SpcArg) 
         return Ok(-1);
     }
 
-    let mut level = dpx.o.number_value(tmp) as i32;
-    dpx.o.release(tmp);
+    let mut level = dpx.o.number_value(tmp)? as i32;
+    dpx.o.release(tmp)?;
 
     // Make sure we know where the starting level is
     dpx.pdfm.lowest_level = dpx.pdfm.lowest_level.min(level);
@@ -1187,7 +1187,7 @@ fn spc_handler_pdfm_outline(dpx: &mut Dpx, spe: &mut SpcEnv, args: &mut SpcArg) 
     } else if current_depth < level {
         while current_depth < level {
             current_depth += 1;
-            dpx.pdf_doc_bookmarks_down();
+            dpx.pdf_doc_bookmarks_down()?;
         }
     }
 
@@ -1216,9 +1216,9 @@ fn spc_handler_pdfm_article(dpx: &mut Dpx, spe: &mut SpcEnv, args: &mut SpcArg) 
         return Ok(-1);
     };
 
-    let l = dpx.o.link(info_dict);
-    dpx.pdf_doc_begin_article(cstr(&ident), Some(l));
-    dpx.spc_push_object(spe, &ident, info_dict);
+    let l = dpx.o.link(info_dict)?;
+    dpx.pdf_doc_begin_article(cstr(&ident), Some(l))?;
+    dpx.spc_push_object(spe, &ident, info_dict)?;
 
     Ok(0)
 }
@@ -1275,17 +1275,17 @@ fn spc_handler_pdfm_bead(dpx: &mut Dpx, spe: &mut SpcEnv, args: &mut SpcArg) -> 
     };
 
     // Does this article exist yet
-    if let Some(article) = dpx.spc_lookup_object(&article_name) {
-        dpx.o.merge_dict(article, article_info);
-        dpx.o.release(article_info);
+    if let Some(article) = dpx.spc_lookup_object(&article_name)? {
+        dpx.o.merge_dict(article, article_info)?;
+        dpx.o.release(article_info)?;
     } else {
-        let l = dpx.o.link(article_info);
-        dpx.pdf_doc_begin_article(cstr(&article_name), Some(l));
-        dpx.spc_push_object(spe, &article_name, article_info);
+        let l = dpx.o.link(article_info)?;
+        dpx.pdf_doc_begin_article(cstr(&article_name), Some(l))?;
+        dpx.spc_push_object(spe, &article_name, article_info)?;
     }
     let page_no = dpx.pdf_doc_current_page_number();
     let rect = set_rect_for_annot(dpx, spe, ti);
-    dpx.pdf_doc_add_bead(cstr(&article_name), None, page_no, &rect);
+    dpx.pdf_doc_add_bead(cstr(&article_name), None, page_no, &rect)?;
 
     Ok(0)
 }
@@ -1338,7 +1338,7 @@ fn spc_handler_pdfm_image(dpx: &mut Dpx, spe: &mut SpcEnv, args: &mut SpcArg) ->
     };
     if !dpx.o.is_string(Some(fspec)) {
         dpx.spc_warn(spe, format_args!("Missing filename string for pdf:image."));
-        dpx.o.release(fspec);
+        dpx.o.release(fspec)?;
         return Ok(-1);
     }
 
@@ -1347,13 +1347,13 @@ fn spc_handler_pdfm_image(dpx: &mut Dpx, spe: &mut SpcEnv, args: &mut SpcArg) ->
         options.dict = parse_ext(dpx, args)?;
     }
 
-    let filename = cstr(dpx.o.string_value(fspec)).to_vec();
+    let filename = cstr(dpx.o.string_value(fspec)?).to_vec();
     let ident_c = ident.as_deref().map(cstr);
     let xobj_id = dpx.pdf_ximage_load_image(ident_c, &filename, options)?;
 
     if xobj_id < 0 {
         dpx.spc_warn(spe, format_args!("Could not find image resource..."));
-        dpx.o.release(fspec);
+        dpx.o.release(fspec)?;
         return Ok(-1);
     }
 
@@ -1369,7 +1369,7 @@ fn spc_handler_pdfm_image(dpx: &mut Dpx, spe: &mut SpcEnv, args: &mut SpcArg) ->
         dpx.pdf_ximage_set_attr(xobj_id, 1, 1, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0)?;
     }
 
-    dpx.o.release(fspec);
+    dpx.o.release(fspec)?;
 
     Ok(0)
 }
@@ -1394,14 +1394,14 @@ fn spc_handler_pdfm_dest(dpx: &mut Dpx, spe: &mut SpcEnv, args: &mut SpcArg) -> 
             spe,
             format_args!("PDF string expected for destination name but invalid type."),
         );
-        dpx.o.release(name);
+        dpx.o.release(name)?;
         return Ok(-1);
     }
 
     let array = parse_ext(dpx, args)?;
     let Some(array) = array else {
         dpx.spc_warn(spe, format_args!("No destination specified for pdf:dest."));
-        dpx.o.release(name);
+        dpx.o.release(name)?;
         return Ok(-1);
     };
     if !dpx.o.is_array(Some(array)) {
@@ -1409,14 +1409,14 @@ fn spc_handler_pdfm_dest(dpx: &mut Dpx, spe: &mut SpcEnv, args: &mut SpcArg) -> 
             spe,
             format_args!("Destination not specified as an array object!"),
         );
-        dpx.o.release(name);
-        dpx.o.release(array);
+        dpx.o.release(name)?;
+        dpx.o.release(array)?;
         return Ok(-1);
     }
 
-    let key = dpx.o.string_value(name).to_vec();
-    dpx.pdf_doc_add_names(b"Dests", &key, array);
-    dpx.o.release(name);
+    let key = dpx.o.string_value(name)?.to_vec();
+    dpx.pdf_doc_add_names(b"Dests", &key, array)?;
+    dpx.o.release(name)?;
 
     Ok(0)
 }
@@ -1433,71 +1433,71 @@ fn spc_handler_pdfm_names(dpx: &mut Dpx, spe: &mut SpcEnv, args: &mut SpcArg) ->
     };
     if !dpx.o.is_name(Some(category)) {
         dpx.spc_warn(spe, format_args!("PDF name expected but not found."));
-        dpx.o.release(category);
+        dpx.o.release(category)?;
         return Ok(-1);
     }
-    let cat = cstr(dpx.o.name_value(category)).to_vec();
+    let cat = cstr(dpx.o.name_value(category)?).to_vec();
 
     let tmp = parse_ext(dpx, args)?;
     let Some(tmp) = tmp else {
         dpx.spc_warn(spe, format_args!("PDF object expected but not found."));
-        dpx.o.release(category);
+        dpx.o.release(category)?;
         return Ok(-1);
     };
     if dpx.o.is_array(Some(tmp)) {
-        let size = dpx.o.array_length(tmp);
+        let size = dpx.o.array_length(tmp)?;
         if size % 2 != 0 {
             dpx.spc_warn(
                 spe,
                 format_args!("Array size not multiple of 2 for pdf:names."),
             );
-            dpx.o.release(category);
-            dpx.o.release(tmp);
+            dpx.o.release(category)?;
+            dpx.o.release(tmp)?;
             return Ok(-1);
         }
 
         for i in 0..size / 2 {
-            let key = dpx.o.get_array(tmp, (2 * i) as i32);
-            let value = dpx.o.get_array(tmp, (2 * i + 1) as i32);
+            let key = dpx.o.get_array(tmp, (2 * i) as i32)?;
+            let value = dpx.o.get_array(tmp, (2 * i + 1) as i32)?;
             if !dpx.o.is_string(key) {
                 dpx.spc_warn(spe, format_args!("Name tree key must be string."));
-                dpx.o.release(category);
-                dpx.o.release(tmp);
+                dpx.o.release(category)?;
+                dpx.o.release(tmp)?;
                 return Ok(-1);
             }
-            let k = dpx.o.string_value(key.expect("key")).to_vec();
-            let v = dpx.o.link(value.expect("value"));
-            if dpx.pdf_doc_add_names(&cat, &k, v) < 0 {
+            let k = dpx.o.string_value(key.expect("key"))?.to_vec();
+            let v = dpx.o.link(value.expect("value"))?;
+            if dpx.pdf_doc_add_names(&cat, &k, v)? < 0 {
                 dpx.spc_warn(spe, format_args!("Failed to add Name tree entry..."));
-                dpx.o.release(category);
-                dpx.o.release(tmp);
+                dpx.o.release(category)?;
+                dpx.o.release(tmp)?;
                 return Ok(-1);
             }
         }
-        dpx.o.release(tmp);
+        dpx.o.release(tmp)?;
     } else if dpx.o.is_string(Some(tmp)) {
         let key = tmp;
         let Some(value) = parse_ext(dpx, args)? else {
-            dpx.o.release(category);
-            dpx.o.release(key);
+            dpx.o.release(category)?;
+            dpx.o.release(key)?;
             dpx.spc_warn(spe, format_args!("PDF object expected but not found."));
             return Ok(-1);
         };
-        let k = dpx.o.string_value(key).to_vec();
-        if dpx.pdf_doc_add_names(&cat, &k, value) < 0 {
+        let k = dpx.o.string_value(key)?.to_vec();
+        if dpx.pdf_doc_add_names(&cat, &k, value)? < 0 {
             dpx.spc_warn(spe, format_args!("Failed to add Name tree entry..."));
-            dpx.o.release(category);
-            dpx.o.release(key);
+            dpx.o.release(category)?;
+            dpx.o.release(key)?;
             return Ok(-1);
         }
-        dpx.o.release(key);
+        dpx.o.release(key)?;
     } else {
-        dpx.o.release(tmp);
-        dpx.o.release(category);
+        dpx.o.release(tmp)?;
+        dpx.o.release(category)?;
         dpx.spc_warn(spe, format_args!("Invalid object type for pdf:names."));
         return Ok(-1);
     }
-    dpx.o.release(category);
+    dpx.o.release(category)?;
 
     Ok(0)
 }
@@ -1512,9 +1512,9 @@ fn spc_handler_pdfm_docinfo(dpx: &mut Dpx, spe: &mut SpcEnv, args: &mut SpcArg) 
         return Ok(-1);
     };
 
-    let docinfo = dpx.pdf_doc_docinfo();
-    dpx.o.merge_dict(docinfo, dict);
-    dpx.o.release(dict);
+    let docinfo = dpx.pdf_doc_docinfo()?;
+    dpx.o.merge_dict(docinfo, dict)?;
+    dpx.o.release(dict)?;
 
     Ok(0)
 }
@@ -1529,16 +1529,16 @@ fn spc_handler_pdfm_docview(dpx: &mut Dpx, spe: &mut SpcEnv, args: &mut SpcArg) 
         return Ok(-1);
     };
 
-    let catalog = dpx.pdf_doc_catalog();
+    let catalog = dpx.pdf_doc_catalog()?;
     // Avoid overriding whole ViewerPreferences
-    let pref_old = dpx.o.lookup_dict(catalog, b"ViewerPreferences");
-    let pref_add = dpx.o.lookup_dict(dict, b"ViewerPreferences");
+    let pref_old = dpx.o.lookup_dict(catalog, b"ViewerPreferences")?;
+    let pref_add = dpx.o.lookup_dict(dict, b"ViewerPreferences")?;
     if let (Some(pref_old), Some(pref_add)) = (pref_old, pref_add) {
-        dpx.o.merge_dict(pref_old, pref_add);
-        dpx.o.remove_dict(dict, b"ViewerPreferences");
+        dpx.o.merge_dict(pref_old, pref_add)?;
+        dpx.o.remove_dict(dict, b"ViewerPreferences")?;
     }
-    dpx.o.merge_dict(catalog, dict);
-    dpx.o.release(dict);
+    dpx.o.merge_dict(catalog, dict)?;
+    dpx.o.release(dict)?;
 
     Ok(0)
 }
@@ -1551,7 +1551,7 @@ fn spc_handler_pdfm_close(dpx: &mut Dpx, spe: &mut SpcEnv, args: &mut SpcArg) ->
         parse_opt_ident(s, pp)
     };
     if let Some(ident) = ident {
-        dpx.spc_flush_object(spe, &ident);
+        dpx.spc_flush_object(spe, &ident)?;
     } else {
         // Close all?
         dpx.spc_warn(
@@ -1582,7 +1582,7 @@ fn spc_handler_pdfm_object(dpx: &mut Dpx, spe: &mut SpcEnv, args: &mut SpcArg) -
         );
         return Ok(-1);
     };
-    dpx.spc_push_object(spe, &ident, object);
+    dpx.spc_push_object(spe, &ident, object)?;
 
     Ok(0)
 }
@@ -1599,10 +1599,10 @@ fn spc_handler_pdfm_content(dpx: &mut Dpx, spe: &mut SpcEnv, args: &mut SpcArg) 
         dpx.pdf_sprint_matrix(&mut work_buffer, &m);
         work_buffer.extend(b" cm ");
 
-        dpx.pdf_doc_add_page_content(work_buffer.as_bytes()); // op: q cm
+        dpx.pdf_doc_add_page_content(work_buffer.as_bytes())?; // op: q cm
         let content = args.rest().to_vec();
-        dpx.pdf_doc_add_page_content(&content); // op: ANY
-        dpx.pdf_doc_add_page_content(b" Q"); // op: Q
+        dpx.pdf_doc_add_page_content(&content)?; // op: ANY
+        dpx.pdf_doc_add_page_content(b" Q")?; // op: Q
     }
     args.curptr = args.endptr;
 
@@ -1639,15 +1639,15 @@ fn spc_handler_pdfm_literal(dpx: &mut Dpx, spe: &mut SpcEnv, args: &mut SpcArg) 
             m.c = 0.0;
             m.e = cp.x;
             m.f = cp.y;
-            dpx.pdf_dev_concat(&m);
+            dpx.pdf_dev_concat(&m)?;
         }
-        dpx.pdf_doc_add_page_content(b" "); // op:
+        dpx.pdf_doc_add_page_content(b" ")?; // op:
         let content = args.rest().to_vec();
-        dpx.pdf_doc_add_page_content(&content); // op: ANY
+        dpx.pdf_doc_add_page_content(&content)?; // op: ANY
         if !direct {
             m.e = -cp.x;
             m.f = -cp.y;
-            dpx.pdf_dev_concat(&m);
+            dpx.pdf_dev_concat(&m)?;
         }
     }
 
@@ -1658,7 +1658,7 @@ fn spc_handler_pdfm_literal(dpx: &mut Dpx, spe: &mut SpcEnv, args: &mut SpcArg) 
 
 /// `spc_handler_pdfm_bcontent`.
 fn spc_handler_pdfm_bcontent(dpx: &mut Dpx, spe: &mut SpcEnv, args: &mut SpcArg) -> Result<i32> {
-    dpx.pdf_dev_gsave();
+    dpx.pdf_dev_gsave()?;
     let (xpos, ypos) = dpx.spc_get_coord(spe);
     let mut m = PdfTmatrix::default();
     pdf_setmatrix(
@@ -1670,7 +1670,7 @@ fn spc_handler_pdfm_bcontent(dpx: &mut Dpx, spe: &mut SpcEnv, args: &mut SpcArg)
         spe.x_user - xpos,
         spe.y_user - ypos,
     );
-    dpx.pdf_dev_concat(&m);
+    dpx.pdf_dev_concat(&m)?;
     let (x, y) = (spe.x_user, spe.y_user);
     dpx.spc_push_coord(spe, x, y);
 
@@ -1680,7 +1680,7 @@ fn spc_handler_pdfm_bcontent(dpx: &mut Dpx, spe: &mut SpcEnv, args: &mut SpcArg)
 /// `spc_handler_pdfm_econtent`.
 fn spc_handler_pdfm_econtent(dpx: &mut Dpx, spe: &mut SpcEnv, args: &mut SpcArg) -> Result<i32> {
     dpx.spc_pop_coord(spe);
-    dpx.pdf_dev_grestore();
+    dpx.pdf_dev_grestore()?;
     dpx.pdf_dev_reset_color(0)?;
     dpx.pdf_dev_reset_xgstate(0)?;
 
@@ -1692,9 +1692,9 @@ fn spc_handler_pdfm_code(dpx: &mut Dpx, spe: &mut SpcEnv, args: &mut SpcArg) -> 
     args.skip_white();
 
     if args.curptr < args.endptr {
-        dpx.pdf_doc_add_page_content(b" "); // op:
+        dpx.pdf_doc_add_page_content(b" ")?; // op:
         let content = args.rest().to_vec();
-        dpx.pdf_doc_add_page_content(&content); // op: ANY
+        dpx.pdf_doc_add_page_content(&content)?; // op: ANY
         args.curptr = args.endptr;
     }
 
@@ -1788,7 +1788,7 @@ fn spc_handler_pdfm_eform(dpx: &mut Dpx, spe: &mut SpcEnv, args: &mut SpcArg) ->
         if let Some(a) = attrib
             && !dpx.o.is_dict(Some(a))
         {
-            dpx.o.release(a);
+            dpx.o.release(a)?;
             attrib = None;
         }
     }
@@ -1823,7 +1823,7 @@ fn spc_handler_pdfm_uxobj(dpx: &mut Dpx, spe: &mut SpcEnv, args: &mut SpcArg) ->
 
     let mut xobj_id = dpx.pdf_ximage_findresource(ident);
     if xobj_id < 0 {
-        xobj_id = dpx.pdf_ximage_reserve(ident);
+        xobj_id = dpx.pdf_ximage_reserve(ident)?;
     }
 
     let (x, y) = (spe.x_user, spe.y_user);
@@ -2021,12 +2021,12 @@ fn spc_handler_pdfm_tounicode(dpx: &mut Dpx, spe: &mut SpcEnv, args: &mut SpcArg
         };
         if let Some(taint_keys) = taint_keys {
             if dpx.o.is_array(Some(taint_keys)) {
-                for i in 0..dpx.o.array_length(taint_keys) {
-                    let key = dpx.o.get_array(taint_keys, i as i32);
+                for i in 0..dpx.o.array_length(taint_keys)? {
+                    let key = dpx.o.get_array(taint_keys, i as i32)?;
                     if dpx.o.is_name(key) {
-                        let l = dpx.o.link(key.expect("key"));
+                        let l = dpx.o.link(key.expect("key"))?;
                         let tk = dpx.pdfm.cd.taintkeys.expect("taintkeys");
-                        dpx.o.add_array(tk, l);
+                        dpx.o.add_array(tk, l)?;
                     } else {
                         dpx.spc_warn(
                             spe,
@@ -2040,7 +2040,7 @@ fn spc_handler_pdfm_tounicode(dpx: &mut Dpx, spe: &mut SpcEnv, args: &mut SpcArg
                     format_args!("Invalid argument specified in pdf:unicode special."),
                 );
             }
-            dpx.o.release(taint_keys);
+            dpx.o.release(taint_keys)?;
         }
     }
 
@@ -2062,7 +2062,7 @@ fn spc_handler_pdfm_pageresources(
     };
 
     if let Some(old) = dpx.pdfm.pageresources {
-        dpx.o.release(old);
+        dpx.o.release(old)?;
     }
     dpx.pdfm.pageresources = Some(dict);
 
@@ -2081,7 +2081,7 @@ fn spc_handler_pdfm_bxgstate(dpx: &mut Dpx, spe: &mut SpcEnv, args: &mut SpcArg)
             spe,
             format_args!("Parsed object for ExtGState not a dictionary object!"),
         );
-        dpx.o.release(obj);
+        dpx.o.release(obj)?;
         return Ok(-1);
     }
     dpx.pdf_dev_xgstate_push(obj)?;
@@ -2102,9 +2102,9 @@ fn spc_handler_pdfm_exgstate(dpx: &mut Dpx, spe: &mut SpcEnv, args: &mut SpcArg)
 fn spc_handler_pdft_compat_page(dpx: &mut Dpx, spe: &mut SpcEnv, args: &mut SpcArg) -> Result<i32> {
     args.skip_white();
     if args.curptr < args.endptr {
-        dpx.pdf_doc_add_page_content(b" "); // op:
+        dpx.pdf_doc_add_page_content(b" ")?; // op:
         let content = args.rest().to_vec();
-        dpx.pdf_doc_add_page_content(&content); // op: ANY
+        dpx.pdf_doc_add_page_content(&content)?; // op: ANY
     }
 
     args.curptr = args.endptr;

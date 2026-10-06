@@ -455,30 +455,32 @@ impl Dpx {
     }
     /// `pdf_close_images`: flushes and releases every XObject. (No image
     /// is ever a temporary file here: the distiller is not ported.)
-    pub fn pdf_close_images(&mut self) {
+    pub fn pdf_close_images(&mut self) -> Result<()> {
         if !self.ximage.ximages.is_empty() {
             for i in 0..self.ximage.ximages.len() {
                 if self.ximage.ximages[i].attr.tempfile {
                     /* dpx_delete_temp_file(): nothing to delete here */
                     self.ximage.ximages[i].fullname = None;
                 }
-                self.pdf_clean_ximage_struct(i as i32);
+                self.pdf_clean_ximage_struct(i as i32)?;
             }
             self.ximage.ximages = Vec::new();
         }
 
         self.ximage.cmdtmpl = None;
+        Ok(())
     }
     /// `pdf_clean_ximage_struct` (static): releases the entry's objects
     /// and re-initialises it.
-    pub fn pdf_clean_ximage_struct(&mut self, xobj_id: i32) {
+    pub fn pdf_clean_ximage_struct(&mut self, xobj_id: i32) -> Result<()> {
         let old = core::mem::replace(
             &mut self.ximage.ximages[xobj_id as usize],
             PdfXimage::pdf_init_ximage_struct(),
         );
-        self.o.release_opt(old.reference);
-        self.o.release_opt(old.resource);
-        self.o.release_opt(old.attr.dict); /* unsafe? */
+        self.o.release_opt(old.reference)?;
+        self.o.release_opt(old.resource)?;
+        self.o.release_opt(old.attr.dict)?;
+        Ok(()) /* unsafe? */
     }
     /// `load_image` (static): the id, or -1. Dispatches on `format`
     /// (`IMAGE_TYPE_*`); BMP, JP2, MPS and EPS are not ported.
@@ -576,7 +578,7 @@ impl Dpx {
             }
         };
         if !ok {
-            self.pdf_clean_ximage_struct(id);
+            self.pdf_clean_ximage_struct(id)?;
             return Ok(-1);
         }
 
@@ -616,7 +618,7 @@ impl Dpx {
                 continue;
             }
             let d = x.attr.dict;
-            if self.o.compare_object(d, options.dict) != 0 {
+            if self.o.compare_object(d, options.dict)? != 0 {
                 /* ????? */
                 continue;
             }
@@ -697,7 +699,7 @@ impl Dpx {
     }
     /// The XObject's reference made through `global_names` (C's code
     /// shared by `pdf_ximage_set_image` and `_set_form`).
-    fn ximage_set_reference(&mut self, xobj_id: i32, resource: Obj) {
+    fn ximage_set_reference(&mut self, xobj_id: i32, resource: Obj) -> Result<()> {
         let i = xobj_id as usize;
         if let Some(ident) = self.ximage.ximages[i].ident.clone() {
             let mut names = self
@@ -705,28 +707,29 @@ impl Dpx {
                 .global_names
                 .take()
                 .expect("global_names not initialised");
-            let r = self.o.link(resource);
-            let error = self.o.pdf_names_add_object(&mut names, &ident, r);
+            let r = self.o.link(resource)?;
+            let error = self.o.pdf_names_add_object(&mut names, &ident, r)?;
             if let Some(old) = self.ximage.ximages[i].reference.take() {
-                self.o.release(old);
+                self.o.release(old)?;
             }
             if error != 0 {
-                let r = self.o.ref_obj(resource);
+                let r = self.o.ref_obj(resource)?;
                 self.ximage.ximages[i].reference = Some(r);
             } else {
                 /* Need to create object reference before closing it */
-                let r = self.o.pdf_names_lookup_reference(&mut names, &ident);
+                let r = self.o.pdf_names_lookup_reference(&mut names, &ident)?;
                 self.ximage.ximages[i].reference = r;
-                self.o.pdf_names_close_object(&mut names, &ident);
+                self.o.pdf_names_close_object(&mut names, &ident)?;
             }
             self.doc.global_names = Some(names);
             self.ximage.ximages[i].reserved = 0;
         } else {
-            let r = self.o.ref_obj(resource);
+            let r = self.o.ref_obj(resource)?;
             self.ximage.ximages[i].reference = Some(r);
         }
-        self.o.release(resource); /* Caller don't know we are using reference. */
+        self.o.release(resource)?; /* Caller don't know we are using reference. */
         self.ximage.ximages[i].resource = None;
+        Ok(())
     }
     /// `pdf_ximage_set_image`: `resource` is the image stream.
     pub fn pdf_ximage_set_image(
@@ -748,24 +751,24 @@ impl Dpx {
         x.attr.ydensity = info.ydensity;
         let attr_dict = x.attr.dict;
 
-        let dict = self.o.stream_dict(resource);
-        self.o.put_name(dict, b"Type", b"XObject");
-        self.o.put_name(dict, b"Subtype", b"Image");
-        self.o.put_number(dict, b"Width", f64::from(info.width));
-        self.o.put_number(dict, b"Height", f64::from(info.height));
+        let dict = self.o.stream_dict(resource)?;
+        self.o.put_name(dict, b"Type", b"XObject")?;
+        self.o.put_name(dict, b"Subtype", b"Image")?;
+        self.o.put_number(dict, b"Width", f64::from(info.width))?;
+        self.o.put_number(dict, b"Height", f64::from(info.height))?;
         if info.bits_per_component > 0 {
             /* Ignored for JPXDecode filter. FIXME */
             self.o.put_number(
                 dict,
                 b"BitsPerComponent",
                 f64::from(info.bits_per_component),
-            );
+            )?;
         }
         if let Some(d) = attr_dict {
-            self.o.merge_dict(dict, d);
+            self.o.merge_dict(dict, d)?;
         }
 
-        self.ximage_set_reference(xobj_id, resource);
+        self.ximage_set_reference(xobj_id, resource)?;
         Ok(())
     }
     /// `pdf_ximage_set_form`: `resource` is the form stream.
@@ -773,7 +776,12 @@ impl Dpx {
     /// C sets `p1.y` again where it means `p2.y`: `p1.y` is the bbox's
     /// `lly` untransformed, and `p2.y` is never set (whatever the stack
     /// held: 0 here).
-    pub fn pdf_ximage_set_form(&mut self, xobj_id: i32, info: &XformInfo, resource: Obj) {
+    pub fn pdf_ximage_set_form(
+        &mut self,
+        xobj_id: i32,
+        info: &XformInfo,
+        resource: Obj,
+    ) -> Result<()> {
         self.ximage.ximages[xobj_id as usize].subtype = PDF_XOBJECT_TYPE_FORM;
 
         /* Image's attribute "bbox" here is affected by /Rotate entry of included
@@ -807,7 +815,8 @@ impl Dpx {
         bbox.urx = max4(p1.x, p2.x, p3.x, p4.x);
         bbox.ury = max4(p1.y, p2.y, p3.y, p4.y);
 
-        self.ximage_set_reference(xobj_id, resource);
+        self.ximage_set_reference(xobj_id, resource)?;
+        Ok(())
     }
     /// `pdf_ximage_get_page`.
     pub fn pdf_ximage_get_page(&mut self, xobj_id: i32) -> i32 {
@@ -822,14 +831,14 @@ impl Dpx {
         if self.ximage.ximages[i].reference.is_none()
             && let Some(res) = self.ximage.ximages[i].resource
         {
-            let r = self.o.ref_obj(res);
+            let r = self.o.ref_obj(res)?;
             self.ximage.ximages[i].reference = Some(r);
         }
 
         let r = self.ximage.ximages[i]
             .reference
             .expect("XObject without a reference");
-        Ok(self.o.link(r))
+        self.o.link(r)
     }
     /// `pdf_ximage_defineresource`: the id. `cdata` matches `subtype`.
     pub fn pdf_ximage_defineresource(
@@ -868,7 +877,7 @@ impl Dpx {
                 self.ximage.ximages[id as usize].res_name = res_name(b"Im", id);
             }
             (PDF_XOBJECT_TYPE_FORM, XobjInfo::Form(info)) => {
-                self.pdf_ximage_set_form(id, info, resource);
+                self.pdf_ximage_set_form(id, info, resource)?;
                 self.ximage.ximages[id as usize].res_name = res_name(b"Fm", id);
             }
             _ => {
@@ -880,7 +889,7 @@ impl Dpx {
     }
     /// `pdf_ximage_reserve`: the id of a reserved (forward-referenced)
     /// XObject.
-    pub fn pdf_ximage_reserve(&mut self, ident: &[u8]) -> i32 {
+    pub fn pdf_ximage_reserve(&mut self, ident: &[u8]) -> Result<i32> {
         if self
             .ximage
             .ximages
@@ -888,7 +897,7 @@ impl Dpx {
             .any(|x| x.ident.as_deref() == Some(ident))
         {
             warn!("XObject ID already used!");
-            return -1;
+            return Ok(-1);
         }
 
         let id = self.ximage.ximages.len() as i32;
@@ -901,13 +910,13 @@ impl Dpx {
             .global_names
             .take()
             .expect("global_names not initialised");
-        x.reference = self.o.pdf_names_reserve(&mut names, ident);
+        x.reference = self.o.pdf_names_reserve(&mut names, ident)?;
         self.doc.global_names = Some(names);
         x.res_name = res_name(b"Fm", id);
         x.reserved = 1;
         self.ximage.ximages.push(x);
 
-        id
+        Ok(id)
     }
     /// `pdf_ximage_get_resname`: a copy of the resource name.
     pub fn pdf_ximage_get_resname(&mut self, xobj_id: i32) -> Result<Vec<u8>> {

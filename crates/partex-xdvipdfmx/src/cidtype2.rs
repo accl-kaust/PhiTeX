@@ -221,7 +221,7 @@ impl Dpx {
         used_chars: &[u8],
         cidtogidmap: Option<&[u8]>,
         last_cid: u16,
-    ) {
+    ) -> Result<()> {
         let mut start: i32 = 0;
         let mut prev: i32 = 0;
         let mut an_array: Option<Obj> = None;
@@ -251,16 +251,16 @@ impl Dpx {
             if width == dw {
                 if let Some(a) = an_array.take() {
                     let n = self.o.new_number(f64::from(start));
-                    self.o.add_array(w_array, n);
-                    self.o.add_array(w_array, a);
+                    self.o.add_array(w_array, n)?;
+                    self.o.add_array(w_array, a)?;
                     empty = false;
                 }
             } else {
                 if cid != prev + 1 {
                     if let Some(a) = an_array.take() {
                         let n = self.o.new_number(f64::from(start));
-                        self.o.add_array(w_array, n);
-                        self.o.add_array(w_array, a);
+                        self.o.add_array(w_array, n)?;
+                        self.o.add_array(w_array, a)?;
                         empty = false;
                     }
                 }
@@ -274,28 +274,35 @@ impl Dpx {
                     }
                 };
                 let n = self.o.new_number(width);
-                self.o.add_array(a, n);
+                self.o.add_array(a, n)?;
                 prev = cid;
             }
         }
 
         if let Some(a) = an_array {
             let n = self.o.new_number(f64::from(start));
-            self.o.add_array(w_array, n);
-            self.o.add_array(w_array, a);
+            self.o.add_array(w_array, n)?;
+            self.o.add_array(w_array, a)?;
             empty = false;
         }
 
-        self.o.put_number(fontdict, b"DW", dw);
+        self.o.put_number(fontdict, b"DW", dw)?;
         if !empty {
-            let r = self.o.ref_obj(w_array);
-            self.o.put(fontdict, b"W", r);
+            let r = self.o.ref_obj(w_array)?;
+            self.o.put(fontdict, b"W", r)?;
         }
-        self.o.release(w_array);
+        self.o.release(w_array)?;
+        Ok(())
     }
 
     /// `add_TTCIDVMetrics` (static): `/DW2`, `/W2`.
-    fn add_TTCIDVMetrics(&mut self, fontdict: Obj, g: &TtGlyphs, used_chars: &[u8], last_cid: u16) {
+    fn add_TTCIDVMetrics(
+        &mut self,
+        fontdict: Obj,
+        g: &TtGlyphs,
+        used_chars: &[u8],
+        last_cid: u16,
+    ) -> Result<()> {
         let mut empty = true;
 
         let default_vert_origin_y = pdfunit(
@@ -327,7 +334,7 @@ impl Dpx {
                     vert_origin_y,
                 ] {
                     let n = self.o.new_number(v);
-                    self.o.add_array(w2_array, n);
+                    self.o.add_array(w2_array, n)?;
                 }
                 empty = false;
             }
@@ -336,16 +343,17 @@ impl Dpx {
         if default_vert_origin_y != 880.0 || default_advance_height != 1000.0 {
             let an_array = self.o.new_array();
             let n = self.o.new_number(default_vert_origin_y);
-            self.o.add_array(an_array, n);
+            self.o.add_array(an_array, n)?;
             let n = self.o.new_number(-default_advance_height);
-            self.o.add_array(an_array, n);
-            self.o.put(fontdict, b"DW2", an_array);
+            self.o.add_array(an_array, n)?;
+            self.o.put(fontdict, b"DW2", an_array)?;
         }
         if !empty {
-            let r = self.o.ref_obj(w2_array);
-            self.o.put(fontdict, b"W2", r);
+            let r = self.o.ref_obj(w2_array)?;
+            self.o.put(fontdict, b"W2", r)?;
         }
-        self.o.release(w2_array);
+        self.o.release(w2_array)?;
+        Ok(())
     }
 
     /// `cid_to_code` (static): the code (or -1) and C's `*puvs` (a
@@ -549,8 +557,8 @@ impl Dpx {
         let descriptor = self.font.fonts[fid]
             .descriptor
             .expect("CIDFont_type2_dofont: no descriptor");
-        let r = self.o.ref_obj(descriptor);
-        self.o.put(resource, b"FontDescriptor", r);
+        let r = self.o.ref_obj(descriptor)?;
+        self.o.put(resource, b"FontDescriptor", r)?;
 
         if self.font.fonts[fid].flags & PDF_FONT_FLAG_BASEFONT != 0 {
             return Ok(0);
@@ -564,21 +572,21 @@ impl Dpx {
                 tmp,
                 b"Registry",
                 csi.registry.as_deref().unwrap_or_default(),
-            );
+            )?;
             self.o.put_string(
                 tmp,
                 b"Ordering",
                 csi.ordering.as_deref().unwrap_or_default(),
-            );
+            )?;
             self.o
-                .put_number(tmp, b"Supplement", f64::from(csi.supplement));
-            self.o.put(resource, b"CIDSystemInfo", tmp);
+                .put_number(tmp, b"Supplement", f64::from(csi.supplement))?;
+            self.o.put(resource, b"CIDSystemInfo", tmp)?;
         }
 
         let embed = self.font.fonts[fid].cid.options.embed;
         // Quick exit for non-embedded & fixed-pitch font.
         if embed == 0 && (self.cid.opt_flags_cidfont & CIDFONT_FORCE_FIXEDPITCH) != 0 {
-            self.o.put_number(resource, b"DW", 1000.0);
+            self.o.put_number(resource, b"DW", 1000.0)?;
             return Ok(0);
         }
 
@@ -841,7 +849,7 @@ impl Dpx {
 
         // DW, W, DW2, and W2
         if self.cid.opt_flags_cidfont & CIDFONT_FORCE_FIXEDPITCH != 0 {
-            self.o.put_number(resource, b"DW", 1000.0);
+            self.o.put_number(resource, b"DW", 1000.0)?;
         } else {
             self.add_TTCIDHMetrics(
                 resource,
@@ -849,9 +857,9 @@ impl Dpx {
                 &used_chars,
                 cidtogidmap.as_deref(),
                 last_cid,
-            );
+            )?;
             if self.font.fonts[fid].cid.need_vmetrics != 0 {
-                self.add_TTCIDVMetrics(resource, &glyphs, &used_chars, last_cid);
+                self.add_TTCIDVMetrics(resource, &glyphs, &used_chars, last_cid)?;
             }
         }
 
@@ -864,10 +872,10 @@ impl Dpx {
                 cidset_data[i / 8] |= 1 << (7 - i % 8);
             }
             let cidset = self.o.new_stream(STREAM_COMPRESS);
-            self.o.add_stream(cidset, &cidset_data);
-            let r = self.o.ref_obj(cidset);
-            self.o.put(descriptor, b"CIDSet", r);
-            self.o.release(cidset);
+            self.o.add_stream(cidset, &cidset_data)?;
+            let r = self.o.ref_obj(cidset)?;
+            self.o.put(descriptor, b"CIDSet", r)?;
+            self.o.release(cidset)?;
         }
 
         glyphs.tt_build_finish();
@@ -895,23 +903,23 @@ impl Dpx {
             return Ok(-1);
         };
 
-        let r = self.o.ref_obj(fontfile);
-        self.o.put(descriptor, b"FontFile2", r);
-        self.o.release(fontfile);
+        let r = self.o.ref_obj(fontfile)?;
+        self.o.put(descriptor, b"FontFile2", r)?;
+        self.o.release(fontfile)?;
 
         // CIDToGIDMap: ISO 32000-1 requires it for Type 2 CIDFonts with
         // embedded font programs.
         match cidtogidmap {
             None => {
-                self.o.put_name(resource, b"CIDToGIDMap", b"Identity");
+                self.o.put_name(resource, b"CIDToGIDMap", b"Identity")?;
             }
             Some(map) => {
                 let c2gmstream = self.o.new_stream(STREAM_COMPRESS);
                 self.o
-                    .add_stream(c2gmstream, &map[..(usize::from(last_cid) + 1) * 2]);
-                let r = self.o.ref_obj(c2gmstream);
-                self.o.put(resource, b"CIDToGIDMap", r);
-                self.o.release(c2gmstream);
+                    .add_stream(c2gmstream, &map[..(usize::from(last_cid) + 1) * 2])?;
+                let r = self.o.ref_obj(c2gmstream)?;
+                self.o.put(resource, b"CIDToGIDMap", r)?;
+                self.o.release(c2gmstream)?;
             }
         }
 
@@ -1005,8 +1013,8 @@ impl Dpx {
 
         let resource = self.o.new_dict();
         self.font.fonts[fid].resource = Some(resource);
-        self.o.put_name(resource, b"Type", b"Font");
-        self.o.put_name(resource, b"Subtype", b"CIDFontType2");
+        self.o.put_name(resource, b"Type", b"Font")?;
+        self.o.put_name(resource, b"Subtype", b"CIDFontType2")?;
 
         let descriptor = self.tt_get_fontdesc(&mut sfont, &mut opt.embed, opt.stemv, 0, name)?;
         self.font.fonts[fid].descriptor = descriptor;
@@ -1021,11 +1029,11 @@ impl Dpx {
             let mut tmp = tag.to_vec();
             tmp.push(b'+');
             tmp.extend_from_slice(&fontname);
-            self.o.put_name(descriptor, b"FontName", &tmp);
-            self.o.put_name(resource, b"BaseFont", &tmp);
+            self.o.put_name(descriptor, b"FontName", &tmp)?;
+            self.o.put_name(resource, b"BaseFont", &tmp)?;
         } else {
-            self.o.put_name(descriptor, b"FontName", &fontname);
-            self.o.put_name(resource, b"BaseFont", &fontname);
+            self.o.put_name(descriptor, b"FontName", &fontname)?;
+            self.o.put_name(resource, b"BaseFont", &fontname)?;
         }
 
         drop(sfont);

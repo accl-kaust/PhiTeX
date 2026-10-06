@@ -243,7 +243,7 @@ impl Session {
             urx: d.session.paper_width,
             ury: d.session.paper_height,
         };
-        d.pdf_doc_set_mediabox(0, &mediabox);
+        d.pdf_doc_set_mediabox(0, &mediabox)?;
         Ok(())
     }
 
@@ -288,7 +288,7 @@ impl Session {
                 urx: page_width,
                 ury: page_height,
             };
-            d.pdf_doc_set_mediabox((self.page_count + 1) as u32, &mediabox);
+            d.pdf_doc_set_mediabox((self.page_count + 1) as u32, &mediabox)?;
         }
         d.dvi.glyph_runs.clear();
         let (xo, yo) = (d.session.x_offset, d.session.y_offset);
@@ -344,24 +344,31 @@ impl Session {
 }
 
 /// An XDV's preamble's end and each page's span (from after the previous
-/// page through its `eop`); the postamble is left out.
+/// page through its `eop`); the postamble is left out, and so is a page
+/// the bytes end in (the driver then stops where C's would: at the
+/// preamble's or that page's end).
 #[must_use]
 pub fn split_xdv(x: &[u8]) -> (usize, Vec<(usize, usize)>) {
     use crate::dvi::*;
-    let be = |p: usize, n: usize| -> u32 {
-        x[p..p + n]
-            .iter()
-            .fold(0u32, |a, &b| (a << 8) | u32::from(b))
+    let be = |p: usize, n: usize| -> Option<usize> {
+        Some(
+            x.get(p..p.checked_add(n)?)?
+                .iter()
+                .fold(0usize, |a, &b| (a << 8) | usize::from(b)),
+        )
     };
     // pre i[1] num[4] den[4] mag[4] k[1] x[k]
-    let pre = 15 + x[14] as usize;
+    let pre = x
+        .get(14)
+        .map_or(x.len(), |&k| (15 + usize::from(k)).min(x.len()));
     let mut pages = Vec::new();
     let mut p = pre;
     let mut start = pre;
-    while p < x.len() {
-        let op = x[p];
-        p += 1;
-        match op {
+    // The next opcode's operands skipped: none at the end of the bytes.
+    let mut step = |p: &mut usize| -> Option<bool> {
+        let op = *x.get(*p)?;
+        *p += 1;
+        let skip = match op {
             0..=127
             | FNT_NUM_0..=FNT_NUM_63
             | NOP
@@ -372,64 +379,59 @@ pub fn split_xdv(x: &[u8]) -> (usize, Vec<(usize, usize)>) {
             | Y0
             | Z0
             | BEGIN_REFLECT
-            | END_REFLECT => {}
-            SET1..=SET4 => p += (op - SET1 + 1) as usize,
-            PUT1..=PUT4 => p += (op - PUT1 + 1) as usize,
-            RIGHT1..=RIGHT4 => p += (op - RIGHT1 + 1) as usize,
-            W1..=W4 => p += (op - W1 + 1) as usize,
-            X1..=X4 => p += (op - X1 + 1) as usize,
-            DOWN1..=DOWN4 => p += (op - DOWN1 + 1) as usize,
-            Y1..=Y4 => p += (op - Y1 + 1) as usize,
-            Z1..=Z4 => p += (op - Z1 + 1) as usize,
-            FNT1..=FNT4 => p += (op - FNT1 + 1) as usize,
-            SET_RULE | PUT_RULE => p += 8,
-            BOP => p += 44,
+            | END_REFLECT => 0,
+            SET1..=SET4 => usize::from(op - SET1 + 1),
+            PUT1..=PUT4 => usize::from(op - PUT1 + 1),
+            RIGHT1..=RIGHT4 => usize::from(op - RIGHT1 + 1),
+            W1..=W4 => usize::from(op - W1 + 1),
+            X1..=X4 => usize::from(op - X1 + 1),
+            DOWN1..=DOWN4 => usize::from(op - DOWN1 + 1),
+            Y1..=Y4 => usize::from(op - Y1 + 1),
+            Z1..=Z4 => usize::from(op - Z1 + 1),
+            FNT1..=FNT4 => usize::from(op - FNT1 + 1),
+            SET_RULE | PUT_RULE => 8,
+            BOP => 44,
             EOP => {
-                pages.push((start, p));
-                start = p;
+                pages.push((start, *p));
+                start = *p;
+                0
             }
             XXX1..=XXX4 => {
-                let n = (op - XXX1 + 1) as usize;
-                let len = be(p, n) as usize;
-                p += n + len;
+                let n = usize::from(op - XXX1 + 1);
+                n + be(*p, n)?
             }
             FNT_DEF1..=FNT_DEF4 => {
-                p += (op - FNT_DEF1 + 1) as usize + 12;
-                let (a, l) = (x[p] as usize, x[p + 1] as usize);
-                p += 2 + a + l;
+                let n = usize::from(op - FNT_DEF1 + 1) + 12;
+                let (a, l) = (be(*p + n, 1)?, be(*p + n + 1, 1)?);
+                n + 2 + a + l
             }
             XDV_NATIVE_FONT_DEF => {
-                p += 4 + 4;
-                let flags = be(p, 2) as u16;
-                p += 2;
-                let len = x[p] as usize;
-                p += 1 + len + 4;
-                for f in [
+                let flags = be(*p + 8, 2)? as u16;
+                let len = be(*p + 10, 1)?;
+                let extra = [
                     XDV_FLAG_COLORED,
                     XDV_FLAG_EXTEND,
                     XDV_FLAG_SLANT,
                     XDV_FLAG_EMBOLDEN,
-                ] {
-                    if flags & f != 0 {
-                        p += 4;
-                    }
-                }
+                ]
+                .iter()
+                .filter(|&&f| flags & f != 0)
+                .count();
+                11 + len + 4 + 4 * extra
             }
-            XDV_GLYPHS => {
-                p += 4;
-                let n = be(p, 2) as usize;
-                p += 2 + n * 10;
-            }
+            XDV_GLYPHS => 6 + be(*p + 4, 2)? * 10,
             XDV_TEXT_AND_GLYPHS => {
-                let n = be(p, 2) as usize;
-                p += 2 + n * 2 + 4;
-                let n = be(p, 2) as usize;
-                p += 2 + n * 10;
+                let n = be(*p, 2)?;
+                let q = 2 + n * 2 + 4;
+                q + 2 + be(*p + q, 2)? * 10
             }
-            PTEXDIR => p += 1,
-            _ => break, // POST
-        }
-    }
+            PTEXDIR => 1,
+            _ => return Some(false), // POST
+        };
+        *p += skip;
+        Some(true)
+    };
+    while p < x.len() && step(&mut p) == Some(true) {}
     (pre, pages)
 }
 
@@ -490,5 +492,170 @@ impl Session {
     /// [`Session::written`].
     pub fn take_output(&mut self) -> Vec<u8> {
         self.dpx.o.take_output()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! Corrupt input stops the run with an `Err` (C's `ERROR`) or C's
+    //! warning, never a panic.
+
+    use super::*;
+    use alloc::string::ToString;
+
+    /// The files by name, found as themselves.
+    struct MemFiles(Vec<(&'static [u8], Vec<u8>)>);
+
+    impl Files for MemFiles {
+        fn find(&mut self, name: &[u8], _: crate::io::Format, _: &[u8]) -> Option<Vec<u8>> {
+            self.0
+                .iter()
+                .any(|(n, _)| *n == name)
+                .then(|| name.to_vec())
+        }
+        fn read(&mut self, path: &[u8]) -> Option<Arc<[u8]>> {
+            self.0
+                .iter()
+                .find(|(n, _)| *n == path)
+                .map(|(_, d)| Arc::from(d.as_slice()))
+        }
+    }
+
+    /// An XDV preamble (`pre`, XDV id 7, TeX's units, no comment).
+    fn preamble() -> Vec<u8> {
+        let mut p = vec![crate::dvi::PRE, crate::dvi::XDV_ID];
+        p.extend(25_400_000u32.to_be_bytes());
+        p.extend(473_628_672u32.to_be_bytes());
+        p.extend(1000u32.to_be_bytes());
+        p.push(0);
+        p
+    }
+
+    /// A page (`bop` .. `eop`) with one `\special`.
+    fn page(special: &[u8]) -> Vec<u8> {
+        let mut p = vec![crate::dvi::BOP];
+        p.extend([0u8; 40]);
+        p.extend((-1i32).to_be_bytes());
+        p.push(crate::dvi::XXX4);
+        p.extend(u32::try_from(special.len()).unwrap().to_be_bytes());
+        p.extend_from_slice(special);
+        p.push(crate::dvi::EOP);
+        p
+    }
+
+    /// The fatal error of a one-page run, and the bytes written before
+    /// it.
+    fn run(
+        special: &[u8],
+        files: Vec<(&'static [u8], Vec<u8>)>,
+    ) -> Result<Vec<u8>, (Fatal, Vec<u8>)> {
+        let options = Options {
+            source_date_epoch: Some(0),
+            ..Options::default()
+        };
+        let deflate: Deflate = Box::new(|_, d: &[u8]| d.to_vec());
+        let mut s = Session::new(options, Box::new(MemFiles(files)), deflate, &preamble())
+            .map_err(|e| (e, Vec::new()))?;
+        let mut out = Vec::new();
+        let r = s.page(&page(special)).map(|p| out.extend(p.pdf));
+        match r.and_then(|()| s.finish()) {
+            Ok(rest) => {
+                out.extend(rest);
+                Ok(out)
+            }
+            Err(e) => {
+                out.extend(s.written());
+                Err((e, out))
+            }
+        }
+    }
+
+    const PNG: &[u8] = include_bytes!("../../../tests/e2e/png-rgb8.png");
+    const JPEG: &[u8] = include_bytes!("../../../tests/e2e/xpic-exif300.jpg");
+    const PDF: &[u8] = include_bytes!("../../../tests/e2e/xpic-three.pdf");
+
+    #[test]
+    fn truncated_xdv() {
+        let mut xdv = preamble();
+        xdv.extend(page(b"pdf:literal 0 g"));
+        for n in 0..xdv.len() {
+            let options = Options::default();
+            let deflate: Deflate = Box::new(|_, d: &[u8]| d.to_vec());
+            let r = Session::convert(options, Box::new(MemFiles(Vec::new())), deflate, &xdv[..n]);
+            // (no page: "No pages fall in range!"; no preamble: dvi_init's)
+            assert!(r.is_err(), "{n}");
+        }
+    }
+
+    #[test]
+    fn whole_images() {
+        for (name, data) in [(&b"a.png"[..], PNG), (b"a.jpg", JPEG), (b"a.pdf", PDF)] {
+            let mut s = b"pdf:image (".to_vec();
+            s.extend_from_slice(name);
+            s.push(b')');
+            let pdf = run(&s, vec![(name, data.to_vec())]).expect("converts");
+            assert!(pdf.starts_with(b"%PDF-1.5\n") && pdf.ends_with(b"%%EOF\n"));
+        }
+    }
+
+    #[test]
+    fn truncated_png() {
+        let (e, out) = run(
+            b"pdf:image (a.png)",
+            vec![(b"a.png", PNG[..PNG.len() / 2].to_vec())],
+        )
+        .expect_err("fatal");
+        assert_eq!(e.message, "libpng error: Read Error");
+        assert_eq!(e.to_string(), "xdvipdfmx:fatal: libpng error: Read Error");
+        // the header, written when the first page began
+        assert!(out.starts_with(b"%PDF-1.5\n"));
+    }
+
+    #[test]
+    fn truncated_jpeg() {
+        let (e, _) =
+            run(b"pdf:image (a.jpg)", vec![(b"a.jpg", JPEG[..40].to_vec())]).expect_err("fatal");
+        assert_eq!(e.message, "Image inclusion failed for \"a.jpg\"");
+    }
+
+    #[test]
+    fn bad_pdf_xref() {
+        // the xref's first entry no longer a number: no object is found
+        let at = PDF.windows(4).position(|w| w == b"xref").unwrap() + 5;
+        let mut bad = PDF.to_vec();
+        bad[at..at + 3].copy_from_slice(b"x y");
+        let (e, _) = run(b"pdf:image (a.pdf)", vec![(b"a.pdf", bad)]).expect_err("fatal");
+        assert_eq!(e.message, "Image inclusion failed for \"a.pdf\" (page=1).");
+    }
+
+    #[test]
+    fn page_out_of_range() {
+        let (e, _) =
+            run(b"pdf:image page 9 (a.pdf)", vec![(b"a.pdf", PDF.to_vec())]).expect_err("fatal");
+        assert_eq!(e.message, "Image inclusion failed for \"a.pdf\" (page=9).");
+    }
+
+    #[test]
+    fn malformed_pdf_specials() {
+        // C's warnings: the special is skipped, the run goes on
+        for s in [
+            &b"pdf:put @nothing << /A 1 >>"[..],
+            b"pdf:obj @a << /A [1 2",
+            b"pdf:literal",
+            b"pdf:bcolor [1 0",
+            b"pdf:image",
+            b"pdf:dest (x) [@thispage /XYZ",
+            b"pdf:ann width 1x << >>",
+        ] {
+            run(s, Vec::new()).unwrap_or_else(|(e, _)| panic!("{s:?}: {e}"));
+        }
+        // C's ERRORs
+        let (e, _) = run(b"pdf:bxobj @x width 1pt height 1pt", Vec::new()).expect_err("fatal");
+        assert_eq!(e.message, "A pending form XObject at the end of page.");
+        let (e, _) = run(b"pdf:obj @z [@prevpage]", Vec::new()).expect_err("fatal");
+        assert_eq!(
+            e.message,
+            "Reference to previous page, but no pages have been completed yet."
+        );
     }
 }

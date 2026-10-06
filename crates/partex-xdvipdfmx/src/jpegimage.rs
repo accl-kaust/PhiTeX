@@ -795,38 +795,38 @@ impl Dpx {
 
         /* JPEG image use DCTDecode. */
         let stream = self.o.new_stream(0);
-        let stream_dict = self.o.stream_dict(stream);
-        self.o.put_name(stream_dict, b"Filter", b"DCTDecode");
+        let stream_dict = self.o.stream_dict(stream)?;
+        self.o.put_name(stream_dict, b"Filter", b"DCTDecode")?;
 
         /* XMP Metadata */
         if self.o.check_version(1, 4) >= 0 && j_info.flags & HAVE_APPN_XMP != 0 {
-            let xmp_stream = self.JPEG_get_XMP(&j_info).unwrap();
-            let r = self.o.ref_obj(xmp_stream);
-            self.o.put(stream_dict, b"Metadata", r);
-            self.o.release(xmp_stream);
+            let xmp_stream = self.JPEG_get_XMP(&j_info)?.unwrap();
+            let r = self.o.ref_obj(xmp_stream)?;
+            self.o.put(stream_dict, b"Metadata", r)?;
+            self.o.release(xmp_stream)?;
         }
 
         /* Check embedded ICC Profile */
         let mut colorspace = None;
         if j_info.flags & HAVE_APPN_ICC != 0 {
-            let icc_stream = self.JPEG_get_iccp(&j_info);
+            let icc_stream = self.JPEG_get_iccp(&j_info)?;
             if let Some(icc_stream) = icc_stream {
-                let profile = self.o.stream_data(icc_stream).to_vec();
+                let profile = self.o.stream_data(icc_stream)?.to_vec();
                 if self.iccp_check_colorspace(colortype, &profile) < 0 {
                     colorspace = None;
                 } else {
-                    let cspc_id = self.iccp_load_profile(None, /* noname */ &profile);
+                    let cspc_id = self.iccp_load_profile(None, /* noname */ &profile)?;
                     if cspc_id < 0 {
                         colorspace = None;
                     } else {
-                        colorspace = Some(self.pdf_get_colorspace_reference(cspc_id));
+                        colorspace = Some(self.pdf_get_colorspace_reference(cspc_id)?);
                         let intent = self.iccp_get_rendering_intent(&profile);
                         if let Some(intent) = intent {
-                            self.o.put(stream_dict, b"Intent", intent);
+                            self.o.put(stream_dict, b"Intent", intent)?;
                         }
                     }
                 }
-                self.o.release(icc_stream);
+                self.o.release(icc_stream)?;
             }
         }
         /* No ICC or invalid ICC profile. */
@@ -838,7 +838,7 @@ impl Dpx {
                 _ => self.o.new_name(b"DeviceCMYK"),
             },
         };
-        self.o.put(stream_dict, b"ColorSpace", colorspace);
+        self.o.put(stream_dict, b"ColorSpace", colorspace)?;
 
         /* IS_ADOBE_CMYK */
         if j_info.flags & HAVE_APPN_ADOBE != 0 && j_info.num_components == 4 {
@@ -846,11 +846,11 @@ impl Dpx {
             let decode = self.o.new_array();
             for _ in 0..j_info.num_components {
                 let one = self.o.new_number(1.0);
-                self.o.add_array(decode, one);
+                self.o.add_array(decode, one)?;
                 let zero = self.o.new_number(0.0);
-                self.o.add_array(decode, zero);
+                self.o.add_array(decode, zero)?;
             }
-            self.o.put(stream_dict, b"Decode", decode);
+            self.o.put(stream_dict, b"Decode", decode)?;
         }
 
         /* Copy file */
@@ -909,7 +909,7 @@ impl Dpx {
     }
     /// `JPEG_get_iccp` (static): the ICC profile stream, or none.
     #[allow(non_snake_case)]
-    pub fn JPEG_get_iccp(&mut self, j_info: &JpegInfo) -> Option<Obj> {
+    pub fn JPEG_get_iccp(&mut self, j_info: &JpegInfo) -> Result<Option<Obj>> {
         let mut prev_id: i32 = 0;
         let mut num_icc_seg: i32 = -1;
 
@@ -932,33 +932,33 @@ impl Dpx {
                     "Invalid JPEG ICC chunk: {} (p:{prev_id}, n:{})",
                     icc.seq_id, icc.num_chunks
                 );
-                self.o.release(icc_stream);
-                return None;
+                self.o.release(icc_stream)?;
+                return Ok(None);
             }
-            self.o.add_stream(icc_stream, &icc.chunk);
+            self.o.add_stream(icc_stream, &icc.chunk)?;
             prev_id = i32::from(icc.seq_id);
             num_icc_seg = i32::from(icc.num_chunks);
         }
 
-        Some(icc_stream)
+        Ok(Some(icc_stream))
     }
     /// `JPEG_get_XMP` (static): the XMP metadata stream, or none.
     #[allow(non_snake_case)]
-    pub fn JPEG_get_XMP(&mut self, j_info: &JpegInfo) -> Option<Obj> {
+    pub fn JPEG_get_XMP(&mut self, j_info: &JpegInfo) -> Result<Option<Obj>> {
         let mut count = 0;
 
         /* I don't know if XMP Metadata should be compressed here.*/
         let xmp_stream = self.o.new_stream(STREAM_COMPRESS);
-        let stream_dict = self.o.stream_dict(xmp_stream);
-        self.o.put_name(stream_dict, b"Type", b"Metadata");
-        self.o.put_name(stream_dict, b"Subtype", b"XML");
+        let stream_dict = self.o.stream_dict(xmp_stream)?;
+        self.o.put_name(stream_dict, b"Type", b"Metadata")?;
+        self.o.put_name(stream_dict, b"Subtype", b"XML")?;
         for ext in &j_info.appn {
             /* Not sure for the case of multiple segments */
             if ext.marker != JM_APP1 || ext.app_sig != JpegAppnSig::Xmp {
                 continue;
             }
             if let JpegAppnData::Xmp(xmp) = &ext.app_data {
-                self.o.add_stream(xmp_stream, &xmp.packet);
+                self.o.add_stream(xmp_stream, &xmp.packet)?;
             }
             count += 1;
         }
@@ -966,7 +966,7 @@ impl Dpx {
             warn!("{JPEG_DEBUG_STR}: Multiple XMP segments found in JPEG file. (untested)");
         }
 
-        Some(xmp_stream)
+        Ok(Some(xmp_stream))
     }
     /// `JPEG_copy_stream` (static): copies the chunks not skipped into
     /// `stream`; 0 or -1. (C's `COPY_CHUNK` loops for ever on a file
@@ -987,7 +987,7 @@ impl Dpx {
                 break;
             }
             if marker == JM_SOI || (JM_RST0..=JM_RST7).contains(&marker) {
-                self.o.add_stream(stream, &[0xff, marker as u8]);
+                self.o.add_stream(stream, &[0xff, marker as u8])?;
             } else {
                 let length: i32 = i32::from(fp.get_unsigned_pair()?) - 2;
                 let header = [
@@ -997,29 +997,30 @@ impl Dpx {
                     ((length + 2) & 0xff) as u8,
                 ];
                 if is_sofn(marker) {
-                    self.o.add_stream(stream, &header);
-                    self.jpeg_copy_chunk(fp, stream, length);
+                    self.o.add_stream(stream, &header)?;
+                    self.jpeg_copy_chunk(fp, stream, length)?;
                     found_sofn = true;
                 } else if skip_chunk(j_info, count) {
                     seek_rel(fp, i64::from(length));
                 } else {
-                    self.o.add_stream(stream, &header);
-                    self.jpeg_copy_chunk(fp, stream, length);
+                    self.o.add_stream(stream, &header)?;
+                    self.jpeg_copy_chunk(fp, stream, length)?;
                 }
             }
             count += 1;
         }
         let rest = fp.read(fp.len()).to_vec();
-        self.o.add_stream(stream, &rest);
+        self.o.add_stream(stream, &rest)?;
 
         if found_sofn { Ok(0) } else { Ok(-1) }
     }
     /// `COPY_CHUNK`.
-    fn jpeg_copy_chunk(&mut self, fp: &mut MemFile, stream: Obj, length: i32) {
+    fn jpeg_copy_chunk(&mut self, fp: &mut MemFile, stream: Obj, length: i32) -> Result<()> {
         if length > 0 {
             let chunk = fp.read(length as usize).to_vec();
-            self.o.add_stream(stream, &chunk);
+            self.o.add_stream(stream, &chunk)?;
         }
+        Ok(())
     }
 }
 

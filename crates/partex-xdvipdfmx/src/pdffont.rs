@@ -242,11 +242,11 @@ impl Dpx {
     }
 
     /// `pdf_flush_font` (static).
-    fn pdf_flush_font(&mut self, font_id: i32) {
+    fn pdf_flush_font(&mut self, font_id: i32) -> Result<()> {
         let fi = font_id as usize;
         let font = &self.font.fonts[fi];
         if font.flags & (PDF_FONT_FLAG_IS_ALIAS | PDF_FONT_FLAG_IS_REENCODE) != 0 {
-            return;
+            return Ok(());
         }
         if let (Some(resource), Some(_)) = (font.resource, font.reference) {
             match font.subtype {
@@ -271,11 +271,11 @@ impl Dpx {
                         n.extend_from_slice(&fontname);
                         n
                     };
-                    self.o.put_name(resource, b"BaseFont", &name);
+                    self.o.put_name(resource, b"BaseFont", &name)?;
                     if let Some(d) = descriptor {
-                        self.o.put_name(d, b"FontName", &name);
-                        let r = self.o.ref_obj(d);
-                        self.o.put(resource, b"FontDescriptor", r);
+                        self.o.put_name(d, b"FontName", &name)?;
+                        let r = self.o.ref_obj(d)?;
+                        self.o.put(resource, b"FontDescriptor", r)?;
                     }
                 }
             }
@@ -286,9 +286,10 @@ impl Dpx {
             font.descriptor.take(),
             font.reference.take(),
         );
-        self.o.release_opt(r);
-        self.o.release_opt(d);
-        self.o.release_opt(f);
+        self.o.release_opt(r)?;
+        self.o.release_opt(d)?;
+        self.o.release_opt(f)?;
+        Ok(())
     }
 
     /// `pdf_clean_font_struct` (static).
@@ -386,7 +387,7 @@ impl Dpx {
             if font.flags & (PDF_FONT_FLAG_IS_ALIAS | PDF_FONT_FLAG_IS_REENCODE) != 0
                 || font.reference.is_none()
             {
-                self.pdf_flush_font(fid);
+                self.pdf_flush_font(fid)?;
                 self.pdf_clean_font_struct(fid);
                 continue;
             }
@@ -400,29 +401,30 @@ impl Dpx {
                 if let Some(enc_obj) = self.pdf_get_encoding_obj(enc)? {
                     if subtype == PDF_FONT_FONTTYPE_TRUETYPE {
                         if self.pdf_encoding_is_predefined(enc)? && self.o.is_name(Some(enc_obj)) {
-                            let l = self.o.link(enc_obj);
-                            self.o.put(resource, b"Encoding", l);
+                            let l = self.o.link(enc_obj)?;
+                            self.o.put(resource, b"Encoding", l)?;
                         }
                     } else {
                         let v = if self.o.is_name(Some(enc_obj)) {
-                            self.o.link(enc_obj)
+                            self.o.link(enc_obj)?
                         } else {
-                            self.o.ref_obj(enc_obj)
+                            self.o.ref_obj(enc_obj)?
                         };
-                        self.o.put(resource, b"Encoding", v);
+                        self.o.put(resource, b"Encoding", v)?;
                     }
                 }
-                if self.o.lookup_dict(resource, b"ToUnicode").is_none()
+                if self.o.lookup_dict(resource, b"ToUnicode")?.is_none()
                     && let Some(tounicode) = self.pdf_encoding_get_tounicode(enc)?
                 {
-                    let r = self.o.ref_obj(tounicode);
-                    self.o.put(resource, b"ToUnicode", r);
+                    let r = self.o.ref_obj(tounicode)?;
+                    self.o.put(resource, b"ToUnicode", r)?;
                 }
             } else if subtype == PDF_FONT_FONTTYPE_TRUETYPE {
                 let resource = self.font.fonts[font_id].resource.expect("resource");
-                self.o.put_name(resource, b"Encoding", b"MacRomanEncoding");
+                self.o
+                    .put_name(resource, b"Encoding", b"MacRomanEncoding")?;
             }
-            self.pdf_flush_font(fid);
+            self.pdf_flush_font(fid)?;
             self.pdf_clean_font_struct(fid);
         }
         self.font.fonts.clear();
@@ -487,22 +489,22 @@ impl Dpx {
         self.check_id(font_id)?;
         let f = self.get_font_reencoded(font_id);
         if self.font.fonts[f].reference.is_none() {
-            let res = self.pdf_font_get_resource(f as i32);
-            let r = self.o.ref_obj(res);
+            let res = self.pdf_font_get_resource(f as i32)?;
+            let r = self.o.ref_obj(res)?;
             self.font.fonts[f].reference = Some(r);
         }
         if self.font.fonts[f].subtype == PDF_FONT_FONTTYPE_TYPE0 {
             let resource = self.font.fonts[f].resource.expect("resource");
-            if self.o.lookup_dict(resource, b"DescendantFonts").is_none() {
+            if self.o.lookup_dict(resource, b"DescendantFonts")?.is_none() {
                 let array = self.o.new_array();
                 let d = self.font.fonts[f].type0.descendant;
                 let r = self.pdf_get_font_reference(d)?;
-                self.o.add_array(array, r);
-                self.o.put(resource, b"DescendantFonts", array);
+                self.o.add_array(array, r)?;
+                self.o.put(resource, b"DescendantFonts", array)?;
             }
         }
         let r = self.font.fonts[f].reference.expect("reference");
-        Ok(self.o.link(r))
+        self.o.link(r)
     }
 
     /// `pdf_get_font_resource` (not linked).
@@ -582,12 +584,12 @@ impl Dpx {
         if let Some(tounicode) = self.pdf_load_ToUnicode_stream(&cmap_name)? {
             if self.o.type_of(Some(tounicode)) != crate::obj::PDF_STREAM {
                 crate::fatal!("Object returned by pdf_load_ToUnicode_stream() not stream object!");
-            } else if self.o.stream_length(tounicode) > 0 {
-                let fontdict = self.pdf_font_get_resource(font_id);
-                let r = self.o.ref_obj(tounicode);
-                self.o.put(fontdict, b"ToUnicode", r);
+            } else if self.o.stream_length(tounicode)? > 0 {
+                let fontdict = self.pdf_font_get_resource(font_id)?;
+                let r = self.o.ref_obj(tounicode)?;
+                self.o.put(fontdict, b"ToUnicode", r)?;
             }
-            self.o.release(tounicode);
+            self.o.release(tounicode)?;
         }
         Ok(0)
     }
@@ -747,7 +749,7 @@ impl Dpx {
             let mut font = PdfFont::default();
             pdf_init_font_struct(&mut font);
             self.font.fonts.push(font);
-            if self.pdf_font_open_type0(font_id, cid_id, wmode) < 0 {
+            if self.pdf_font_open_type0(font_id, cid_id, wmode)? < 0 {
                 self.pdf_clean_font_struct(font_id);
                 self.font.fonts.pop();
                 return Ok(-1);
@@ -841,40 +843,40 @@ impl Dpx {
 
     /// `pdf_font_get_resource`: made (a dict with `/Type /Font` and the
     /// subtype) on first use; not linked.
-    pub fn pdf_font_get_resource(&mut self, font_id: i32) -> Obj {
+    pub fn pdf_font_get_resource(&mut self, font_id: i32) -> Result<Obj> {
         let fi = font_id as usize;
         if let Some(r) = self.font.fonts[fi].resource {
-            return r;
+            return Ok(r);
         }
         let d = self.o.new_dict();
-        self.o.put_name(d, b"Type", b"Font");
+        self.o.put_name(d, b"Type", b"Font")?;
         let _ = match self.font.fonts[fi].subtype {
             PDF_FONT_FONTTYPE_TYPE1 | PDF_FONT_FONTTYPE_TYPE1C => {
-                self.o.put_name(d, b"Subtype", b"Type1")
+                self.o.put_name(d, b"Subtype", b"Type1")?
             }
-            PDF_FONT_FONTTYPE_TYPE3 => self.o.put_name(d, b"Subtype", b"Type3"),
-            PDF_FONT_FONTTYPE_TRUETYPE => self.o.put_name(d, b"Subtype", b"TrueType"),
+            PDF_FONT_FONTTYPE_TYPE3 => self.o.put_name(d, b"Subtype", b"Type3")?,
+            PDF_FONT_FONTTYPE_TRUETYPE => self.o.put_name(d, b"Subtype", b"TrueType")?,
             _ => false,
         };
         self.font.fonts[fi].resource = Some(d);
-        d
+        Ok(d)
     }
 
     /// `pdf_font_get_descriptor`: made on first use; not linked. (C
     /// returns NULL for a Type 0 font; no caller asks for one.)
-    pub fn pdf_font_get_descriptor(&mut self, font_id: i32) -> Obj {
+    pub fn pdf_font_get_descriptor(&mut self, font_id: i32) -> Result<Obj> {
         let fi = font_id as usize;
         assert!(
             self.font.fonts[fi].subtype != PDF_FONT_FONTTYPE_TYPE0,
             "descriptor of a Type 0 font"
         );
         if let Some(d) = self.font.fonts[fi].descriptor {
-            return d;
+            return Ok(d);
         }
         let d = self.o.new_dict();
-        self.o.put_name(d, b"Type", b"FontDescriptor");
+        self.o.put_name(d, b"Type", b"FontDescriptor")?;
         self.font.fonts[fi].descriptor = Some(d);
-        d
+        Ok(d)
     }
 
     /// `pdf_font_get_uniqueTag`: the six letters (made on first use).

@@ -958,10 +958,11 @@ impl Dpx {
         Ok(())
     }
     /// `set_rule`.
-    fn set_rule(&mut self, xpos: Spt, ypos: Spt, width: Spt, height: Spt) {
+    fn set_rule(&mut self, xpos: Spt, ypos: Spt, width: Spt, height: Spt) -> Result<()> {
         let xpos = xpos.wrapping_sub(self.dvi.compensation.x);
         let ypos = ypos.wrapping_sub(self.dvi.compensation.y);
-        self.pdf_dev_set_rule(xpos, ypos, width, height);
+        self.pdf_dev_set_rule(xpos, ypos, width, height)?;
+        Ok(())
     }
     /// `calc_rect`.
     fn calc_rect(&mut self, xpos: Spt, ypos: Spt, width: Spt, height: Spt, depth: Spt) -> PdfRect {
@@ -972,7 +973,7 @@ impl Dpx {
 
     /// `dvi_do_special`.
     pub fn dvi_do_special(&mut self, buffer: &[u8]) -> Result<()> {
-        self.graphics_mode();
+        self.graphics_mode()?;
         let x_user = f64::from(self.dvi.dvi_state.h) * self.dvi.dvi2pts;
         let y_user = -f64::from(self.dvi.dvi_state.v) * self.dvi.dvi2pts;
         let mag = self.dvi_tell_mag();
@@ -1429,17 +1430,18 @@ impl Dpx {
         Ok(())
     }
     /// `dvi_rule`.
-    pub fn dvi_rule(&mut self, width: i32, height: i32) {
+    pub fn dvi_rule(&mut self, width: i32, height: i32) -> Result<()> {
         if width > 0 && height > 0 {
             let (h, v) = (self.dvi.dvi_state.h, self.dvi.dvi_state.v);
             self.do_moveto(h, v);
             match self.dvi.dvi_state.d {
-                0 => self.set_rule(h, v.wrapping_neg(), width, height),
-                1 => self.set_rule(h, v.wrapping_neg().wrapping_sub(width), height, width),
-                3 => self.set_rule(h.wrapping_sub(height), v.wrapping_neg(), height, width),
+                0 => self.set_rule(h, v.wrapping_neg(), width, height)?,
+                1 => self.set_rule(h, v.wrapping_neg().wrapping_sub(width), height, width)?,
+                3 => self.set_rule(h.wrapping_sub(height), v.wrapping_neg(), height, width)?,
                 _ => {}
             }
         }
+        Ok(())
     }
     /// `dvi_dirchg`.
     pub fn dvi_dirchg(&mut self, dir: u8) {
@@ -1447,34 +1449,36 @@ impl Dpx {
         self.pdf_dev_set_dirmode(i32::from(dir));
     }
     /// `do_setrule`.
-    fn do_setrule(&mut self) {
+    fn do_setrule(&mut self) -> Result<()> {
         let height = self.get_buffered_signed_quad();
         let width = self.get_buffered_signed_quad();
         match self.dvi.lr_mode {
             LTYPESETTING => {
-                self.dvi_rule(width, height);
+                self.dvi_rule(width, height)?;
                 self.dvi_right(width);
             }
             RTYPESETTING => {
                 self.dvi_right(width);
-                self.dvi_rule(width, height);
+                self.dvi_rule(width, height)?;
             }
             _ => self.dvi.lr_width = self.dvi.lr_width.wrapping_add(width as u32),
         }
+        Ok(())
     }
     /// `do_putrule`.
-    fn do_putrule(&mut self) {
+    fn do_putrule(&mut self) -> Result<()> {
         let height = self.get_buffered_signed_quad();
         let width = self.get_buffered_signed_quad();
         match self.dvi.lr_mode {
-            LTYPESETTING => self.dvi_rule(width, height),
+            LTYPESETTING => self.dvi_rule(width, height)?,
             RTYPESETTING => {
                 self.dvi_right(width);
-                self.dvi_rule(width, height);
+                self.dvi_rule(width, height)?;
                 self.dvi_right(width.wrapping_neg());
             }
             _ => {}
         }
+        Ok(())
     }
     /// `dvi_push`.
     pub fn dvi_push(&mut self) -> Result<()> {
@@ -1588,9 +1592,9 @@ impl Dpx {
             } else {
                 let a = d.rgba_color & 0xff;
                 let xgs_dict = self.o.new_dict();
-                self.o.put_name(xgs_dict, b"Type", b"ExtGState");
-                self.o.put_number(xgs_dict, b"ca", f64::from(a) / 255.0);
-                self.o.put_number(xgs_dict, b"CA", f64::from(a) / 255.0);
+                self.o.put_name(xgs_dict, b"Type", b"ExtGState")?;
+                self.o.put_number(xgs_dict, b"ca", f64::from(a) / 255.0)?;
+                self.o.put_number(xgs_dict, b"CA", f64::from(a) / 255.0)?;
                 self.dvi.loaded_fonts[fi].xgs_id =
                     self.pdf_defineresource(b"ExtGState", None, xgs_dict, 0)?;
             }
@@ -1739,7 +1743,7 @@ impl Dpx {
                 for _ in 0..slen {
                     unicodes.push(self.get_buffered_unsigned_pair() as u16);
                 }
-                self.pdf_dev_begin_actualtext(&unicodes);
+                self.pdf_dev_begin_actualtext(&unicodes)?;
             }
         }
         let width = self.get_buffered_signed_quad();
@@ -1776,13 +1780,13 @@ impl Dpx {
                 resname.hex_padded(cf as u32, 8);
                 let r = self.pdf_get_resource_reference(xgs_id)?.expect("reference");
                 self.pdf_doc_add_page_resource(b"ExtGState", &resname.0, r)?;
-                self.graphics_mode();
-                self.pdf_dev_gsave();
+                self.graphics_mode()?;
+                self.pdf_dev_gsave()?;
                 let mut content = crate::fmt::Buf::new();
                 content.extend(b" /");
                 content.extend(&resname.0);
                 content.extend(b" gs ");
-                self.pdf_doc_add_page_content(&content.0);
+                self.pdf_doc_add_page_content(&content.0)?;
             }
         }
         let (num_glyphs, shift_gid, font_id, size) = {
@@ -1820,13 +1824,13 @@ impl Dpx {
         }
         if rgba_used == 1 {
             if xgs_id >= 0 {
-                self.graphics_mode();
-                self.pdf_dev_grestore();
+                self.graphics_mode()?;
+                self.pdf_dev_grestore()?;
             }
             self.pdf_color_pop()?;
         }
         if do_actual_text != 0 {
-            self.pdf_dev_end_actualtext();
+            self.pdf_dev_end_actualtext()?;
         }
         if self.dvi.lr_mode == LTYPESETTING {
             self.dvi_right(width);
@@ -1929,13 +1933,13 @@ impl Dpx {
                     self.dvi_set(c)?;
                 }
                 SET4 => crate::fatal!("Multibyte (>24 bits) character not supported!"),
-                SET_RULE => self.do_setrule(),
+                SET_RULE => self.do_setrule()?,
                 PUT1 | PUT2 | PUT3 => {
                     let c = self.get_buffered_unsigned_num(opcode - PUT1);
                     self.dvi_put(c)?;
                 }
                 PUT4 => crate::fatal!("Multibyte (>24 bits) character not supported!"),
-                PUT_RULE => self.do_putrule(),
+                PUT_RULE => self.do_putrule()?,
                 NOP => {}
                 BOP => self.do_bop()?,
                 EOP => {
@@ -2108,7 +2112,12 @@ impl Dpx {
 
     /// `scan_special_encrypt` (pdf:encrypt; the values are only recorded,
     /// encryption itself is not ported): status.
-    fn scan_special_encrypt(&mut self, ext: &mut ScanSpecialsExt, s: &[u8], pp: &mut usize) -> i32 {
+    fn scan_special_encrypt(
+        &mut self,
+        ext: &mut ScanSpecialsExt,
+        s: &[u8],
+        pp: &mut usize,
+    ) -> Result<i32> {
         let mut error = 0;
         crate::parse::skip_white(s, pp);
         ext.owner_pw.clear();
@@ -2121,7 +2130,7 @@ impl Dpx {
             match &kp[..] {
                 b"ownerpw" | b"userpw" => match self.o.parse_pdf_string(s, pp) {
                     Some(obj) => {
-                        let v = self.o.string_value(obj);
+                        let v = self.o.string_value(obj)?;
                         let n = v.len().min(crate::session::MAX_PWD_LEN - 1);
                         let v = v[..n].to_vec();
                         if &kp[..] == b"ownerpw" {
@@ -2129,7 +2138,7 @@ impl Dpx {
                         } else {
                             ext.user_pw = v;
                         }
-                        self.o.release(obj);
+                        self.o.release(obj)?;
                     }
                     None => error = -1,
                 },
@@ -2137,7 +2146,7 @@ impl Dpx {
                     let obj = self.o.parse_pdf_number(s, pp);
                     match obj {
                         Some(o) if self.o.is_number(Some(o)) => {
-                            let v = self.o.number_value(o) as u32;
+                            let v = self.o.number_value(o)? as u32;
                             if &kp[..] == b"length" {
                                 ext.key_bits = v as i32;
                             } else {
@@ -2146,13 +2155,13 @@ impl Dpx {
                         }
                         _ => error = -1,
                     }
-                    self.o.release_opt(obj);
+                    self.o.release_opt(obj)?;
                 }
                 _ => error = -1,
             }
             crate::parse::skip_white(s, pp);
         }
-        error
+        Ok(error)
     }
     /// `scan_special_trailerid`: status.
     fn scan_special_trailerid(
@@ -2165,25 +2174,25 @@ impl Dpx {
         crate::parse::skip_white(s, pp);
         match self.o.parse_pdf_array(s, pp, None)? {
             Some(id_array) => {
-                if self.o.array_length(id_array) == 2 {
-                    let t1 = self.o.get_array(id_array, 0);
-                    let t2 = self.o.get_array(id_array, 1);
+                if self.o.array_length(id_array)? == 2 {
+                    let t1 = self.o.get_array(id_array, 0)?;
+                    let t2 = self.o.get_array(id_array, 1)?;
                     if self.o.is_string(t1)
-                        && self.o.string_value(t1.expect("string")).len() == 16
+                        && self.o.string_value(t1.expect("string"))?.len() == 16
                         && self.o.is_string(t2)
-                        && self.o.string_value(t2.expect("string")).len() == 16
+                        && self.o.string_value(t2.expect("string"))?.len() == 16
                     {
                         ext.id1
-                            .copy_from_slice(self.o.string_value(t1.expect("string")));
+                            .copy_from_slice(self.o.string_value(t1.expect("string"))?);
                         ext.id2
-                            .copy_from_slice(self.o.string_value(t2.expect("string")));
+                            .copy_from_slice(self.o.string_value(t2.expect("string"))?);
                     } else {
                         error = -1;
                     }
                 } else {
                     error = -1;
                 }
-                self.o.release(id_array);
+                self.o.release(id_array)?;
             }
             None => error = -1,
         }
@@ -2308,7 +2317,7 @@ impl Dpx {
             b"encrypt" if ns_pdf && sp.ext.is_some() => {
                 let mut ext = sp.ext.take().expect("ext");
                 ext.do_enc = 1;
-                error = self.scan_special_encrypt(&mut ext, s, &mut p);
+                error = self.scan_special_encrypt(&mut ext, s, &mut p)?;
                 sp.ext = Some(ext);
             }
             b"config" if ns_dvipdfmx => {

@@ -45,7 +45,7 @@ impl Dpx {
         d: f64,
         e: f64,
         f: f64,
-    ) -> i32 {
+    ) -> Result<i32> {
         // Create transformation matrix
         let mut m = PdfTmatrix {
             a,
@@ -58,11 +58,11 @@ impl Dpx {
         m.e = ((1.0 - m.a) * x_user - m.c * y_user) + e;
         m.f = ((1.0 - m.d) * y_user - m.b * x_user) + f;
 
-        self.pdf_dev_concat(&m);
+        self.pdf_dev_concat(&m)?;
         let (ptx, pty) = self.spc_get_fixed_point(spe);
         self.spc_set_fixed_point(spe, x_user - ptx, y_user - pty);
 
-        0
+        Ok(0)
     }
 }
 
@@ -76,7 +76,7 @@ fn spc_handler_xtx_scale(dpx: &mut Dpx, spe: &mut SpcEnv, args: &mut SpcArg) -> 
     args.curptr = args.endptr;
 
     let (x, y) = (spe.x_user, spe.y_user);
-    Ok(dpx.spc_handler_xtx_do_transform(spe, x, y, values[0], 0.0, 0.0, values[1], 0.0, 0.0))
+    dpx.spc_handler_xtx_do_transform(spe, x, y, values[0], 0.0, 0.0, values[1], 0.0, 0.0)
 }
 
 /// `spc_handler_xtx_bscale`: scale without gsave/grestore.
@@ -104,7 +104,7 @@ fn spc_handler_xtx_bscale(dpx: &mut Dpx, spe: &mut SpcEnv, args: &mut SpcArg) ->
     args.curptr = args.endptr;
 
     let (x, y) = (spe.x_user, spe.y_user);
-    Ok(dpx.spc_handler_xtx_do_transform(spe, x, y, values[0], 0.0, 0.0, values[1], 0.0, 0.0))
+    dpx.spc_handler_xtx_do_transform(spe, x, y, values[0], 0.0, 0.0, values[1], 0.0, 0.0)
 }
 
 /// `spc_handler_xtx_escale`.
@@ -120,7 +120,7 @@ fn spc_handler_xtx_escale(dpx: &mut Dpx, spe: &mut SpcEnv, args: &mut SpcArg) ->
     args.curptr = args.endptr;
 
     let (x, y) = (spe.x_user, spe.y_user);
-    Ok(dpx.spc_handler_xtx_do_transform(spe, x, y, factor.x, 0.0, 0.0, factor.y, 0.0, 0.0))
+    dpx.spc_handler_xtx_do_transform(spe, x, y, factor.x, 0.0, 0.0, factor.y, 0.0, 0.0)
 }
 
 /// `spc_handler_xtx_rotate`.
@@ -134,7 +134,7 @@ fn spc_handler_xtx_rotate(dpx: &mut Dpx, spe: &mut SpcEnv, args: &mut SpcArg) ->
 
     let value = value[0];
     let (x, y) = (spe.x_user, spe.y_user);
-    Ok(dpx.spc_handler_xtx_do_transform(
+    dpx.spc_handler_xtx_do_transform(
         spe,
         x,
         y,
@@ -144,19 +144,19 @@ fn spc_handler_xtx_rotate(dpx: &mut Dpx, spe: &mut SpcEnv, args: &mut SpcArg) ->
         libm::cos(value * M_PI / 180.0),
         0.0,
         0.0,
-    ))
+    )
 }
 
 /// `spc_handler_xtx_gsave` (also used by the dvips specials).
 pub fn spc_handler_xtx_gsave(dpx: &mut Dpx, spe: &mut SpcEnv, args: &mut SpcArg) -> Result<i32> {
-    dpx.pdf_dev_gsave();
+    dpx.pdf_dev_gsave()?;
     dpx.spc_dup_fixed_point(spe);
     Ok(0)
 }
 
 /// `spc_handler_xtx_grestore` (also used by the dvips specials).
 pub fn spc_handler_xtx_grestore(dpx: &mut Dpx, spe: &mut SpcEnv, args: &mut SpcArg) -> Result<i32> {
-    dpx.pdf_dev_grestore();
+    dpx.pdf_dev_grestore()?;
     dpx.spc_pop_fixed_point(spe);
 
     // Unfortunately, the following line is necessary in case of a font
@@ -236,11 +236,11 @@ fn spc_handler_xtx_clipoverlay(dpx: &mut Dpx, spe: &mut SpcEnv, args: &mut SpcAr
     if args.curptr >= args.endptr {
         return Ok(-1);
     }
-    dpx.pdf_dev_grestore();
-    dpx.pdf_dev_gsave();
+    dpx.pdf_dev_grestore()?;
+    dpx.pdf_dev_gsave()?;
     let name = &dpx.xtx.overlay_name;
     if strncmp_ne(name, args.rest(), name.len()) && strncmp_ne(b"all", args.rest(), 3) {
-        dpx.pdf_doc_add_page_content(b" 0 0 m W n");
+        dpx.pdf_doc_add_page_content(b" 0 0 m W n")?;
     }
 
     args.curptr = args.endptr;
@@ -264,12 +264,12 @@ fn spc_handler_xtx_renderingmode(
         return Ok(-1);
     }
     let work_buffer = format!(" {} Tr", mode);
-    dpx.pdf_doc_add_page_content(work_buffer.as_bytes());
+    dpx.pdf_doc_add_page_content(work_buffer.as_bytes())?;
     args.skip_white();
     if args.curptr < args.endptr {
-        dpx.pdf_doc_add_page_content(b" ");
+        dpx.pdf_doc_add_page_content(b" ")?;
         let content = args.rest().to_vec();
-        dpx.pdf_doc_add_page_content(&content);
+        dpx.pdf_doc_add_page_content(&content)?;
     }
 
     args.curptr = args.endptr;

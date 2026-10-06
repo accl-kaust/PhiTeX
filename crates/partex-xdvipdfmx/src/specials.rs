@@ -408,38 +408,38 @@ impl Dpx {
                 let cp = self.spc_dev_pos();
                 Some(self.o.new_number(crate::fmt::round_acc(cp.y, 0.01)))
             }
-            K_OBJ__THISPAGE => self.pdf_doc_this_page_ref(),
-            K_OBJ__PREVPAGE => self.pdf_doc_prev_page_ref(),
-            K_OBJ__NEXTPAGE => self.pdf_doc_next_page_ref(),
+            K_OBJ__THISPAGE => self.pdf_doc_this_page_ref()?,
+            K_OBJ__PREVPAGE => self.pdf_doc_prev_page_ref()?,
+            K_OBJ__NEXTPAGE => self.pdf_doc_next_page_ref()?,
             K_OBJ__PAGES => {
-                let o = self.pdf_doc_page_tree();
-                Some(self.o.ref_obj(o))
+                let o = self.pdf_doc_page_tree()?;
+                Some(self.o.ref_obj(o)?)
             }
             K_OBJ__NAMES => {
-                let o = self.pdf_doc_names();
-                Some(self.o.ref_obj(o))
+                let o = self.pdf_doc_names()?;
+                Some(self.o.ref_obj(o)?)
             }
             K_OBJ__RESOURCES => {
                 let o = self
                     .pdf_doc_current_page_resources()
                     .expect("page resources");
-                Some(self.o.ref_obj(o))
+                Some(self.o.ref_obj(o)?)
             }
             K_OBJ__CATALOG => {
-                let o = self.pdf_doc_catalog();
-                Some(self.o.ref_obj(o))
+                let o = self.pdf_doc_catalog()?;
+                Some(self.o.ref_obj(o)?)
             }
             K_OBJ__DOCINFO => {
-                let o = self.pdf_doc_docinfo();
-                Some(self.o.ref_obj(o))
+                let o = self.pdf_doc_docinfo()?;
+                Some(self.o.ref_obj(o)?)
             }
             _ => {
                 if ispageref(key) {
                     let n = crate::fmt::atoi(&key[4..]) as i32;
-                    self.pdf_doc_ref_page(n as u32)
+                    self.pdf_doc_ref_page(n as u32)?
                 } else {
                     let names = self.doc.global_names.as_mut().expect("global_names");
-                    self.o.pdf_names_lookup_reference(names, key)
+                    self.o.pdf_names_lookup_reference(names, key)?
                 }
             }
         };
@@ -453,28 +453,28 @@ impl Dpx {
     }
 
     /// `spc_lookup_object`: the object itself (not linked).
-    pub fn spc_lookup_object(&mut self, ident: &[u8]) -> Option<Obj> {
+    pub fn spc_lookup_object(&mut self, ident: &[u8]) -> Result<Option<Obj>> {
         let key = cstr(ident);
         let k = RKEYS.iter().position(|r| *r == key).unwrap_or(RKEYS.len());
         match k {
             K_OBJ__XPOS => {
                 let cp = self.spc_dev_pos();
-                Some(self.o.new_number(crate::fmt::round_acc(cp.x, 0.01)))
+                Ok(Some(self.o.new_number(crate::fmt::round_acc(cp.x, 0.01))))
             }
             K_OBJ__YPOS => {
                 let cp = self.spc_dev_pos();
-                Some(self.o.new_number(crate::fmt::round_acc(cp.y, 0.01)))
+                Ok(Some(self.o.new_number(crate::fmt::round_acc(cp.y, 0.01))))
             }
-            K_OBJ__THISPAGE => Some(self.pdf_doc_this_page()),
-            K_OBJ__PAGES => Some(self.pdf_doc_page_tree()),
-            K_OBJ__NAMES => Some(self.pdf_doc_names()),
-            K_OBJ__RESOURCES => self.pdf_doc_current_page_resources(),
-            K_OBJ__CATALOG => Some(self.pdf_doc_catalog()),
-            K_OBJ__DOCINFO => Some(self.pdf_doc_docinfo()),
+            K_OBJ__THISPAGE => Ok(Some(self.pdf_doc_this_page()?)),
+            K_OBJ__PAGES => Ok(Some(self.pdf_doc_page_tree()?)),
+            K_OBJ__NAMES => Ok(Some(self.pdf_doc_names()?)),
+            K_OBJ__RESOURCES => Ok(self.pdf_doc_current_page_resources()),
+            K_OBJ__CATALOG => Ok(Some(self.pdf_doc_catalog()?)),
+            K_OBJ__DOCINFO => Ok(Some(self.pdf_doc_docinfo()?)),
             // prevpage and nextpage are names here, as in C.
             _ => {
                 let names = self.doc.global_names.as_mut().expect("global_names");
-                self.o.pdf_names_lookup_object(names, key)
+                Ok(self.o.pdf_names_lookup_object(names, key))
             }
         }
     }
@@ -550,16 +550,18 @@ impl Dpx {
     }
 
     /// `spc_push_object`: to `global_names` (takes `value`).
-    pub fn spc_push_object(&mut self, spe: &mut SpcEnv, key: &[u8], value: Obj) {
+    pub fn spc_push_object(&mut self, spe: &mut SpcEnv, key: &[u8], value: Obj) -> Result<()> {
         let key = cstr(key);
         let names = self.doc.global_names.as_mut().expect("global_names");
-        self.o.pdf_names_add_object(names, key, value);
+        self.o.pdf_names_add_object(names, key, value)?;
+        Ok(())
     }
     /// `spc_flush_object`.
-    pub fn spc_flush_object(&mut self, spe: &mut SpcEnv, key: &[u8]) {
+    pub fn spc_flush_object(&mut self, spe: &mut SpcEnv, key: &[u8]) -> Result<()> {
         let key = cstr(key);
         let names = self.doc.global_names.as_mut().expect("global_names");
-        self.o.pdf_names_close_object(names, key);
+        self.o.pdf_names_close_object(names, key)?;
+        Ok(())
     }
     /// `spc_clear_objects` (does nothing).
     pub fn spc_clear_objects(&mut self, spe: &mut SpcEnv) {}

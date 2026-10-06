@@ -295,88 +295,97 @@ impl Dpx {
         }
     }
 
-    fn doc_get_page_entry(&mut self, page_no: u32) -> usize {
+    fn doc_get_page_entry(&mut self, page_no: u32) -> Result<usize> {
         let page_no = page_no as usize;
-        assert!(page_no <= 65535, "Page number too large!");
-        assert!(page_no != 0, "Invalid Page number");
+        // (C's "%ul": the number, then an "l")
+        if page_no > 65535 {
+            fatal!("Page number {}l too large!", page_no);
+        } else if page_no == 0 {
+            fatal!("Invalid Page number {}l.", page_no);
+        }
         if page_no > self.doc.pdoc.pages.entries.len() {
             self.doc_resize_page_entries(page_no + PDFDOC_PAGES_ALLOC_SIZE);
         }
-        page_no - 1
+        Ok(page_no - 1)
     }
 
-    fn pdf_doc_init_catalog(&mut self) {
+    fn pdf_doc_init_catalog(&mut self) -> Result<()> {
         self.doc.pdoc.root = DocRoot::default();
         let d = self.o.new_dict();
         self.doc.pdoc.root.dict = Some(d);
-        self.o.set_root(d);
+        self.o.set_root(d)?;
+        Ok(())
     }
 
-    fn pdf_doc_close_catalog(&mut self) {
+    fn pdf_doc_close_catalog(&mut self) -> Result<()> {
         let root = self.doc.pdoc.root.dict.expect("catalog");
         if let Some(vp) = self.doc.pdoc.root.viewerpref.take() {
-            let tmp = self.o.lookup_dict(root, b"ViewerPreferences");
+            let tmp = self.o.lookup_dict(root, b"ViewerPreferences")?;
             match tmp {
                 None => {
-                    let r = self.o.ref_obj(vp);
-                    self.o.put(root, b"ViewerPreferences", r);
+                    let r = self.o.ref_obj(vp)?;
+                    self.o.put(root, b"ViewerPreferences", r)?;
                 }
                 Some(t) if self.o.is_dict(Some(t)) => {
-                    self.o.merge_dict(vp, t);
-                    let r = self.o.ref_obj(vp);
-                    self.o.put(root, b"ViewerPreferences", r);
+                    self.o.merge_dict(vp, t)?;
+                    let r = self.o.ref_obj(vp)?;
+                    self.o.put(root, b"ViewerPreferences", r)?;
                 }
                 Some(_) => {}
             }
-            self.o.release(vp);
+            self.o.release(vp)?;
         }
         if let Some(pl) = self.doc.pdoc.root.pagelabels.take() {
-            if self.o.lookup_dict(root, b"PageLabels").is_none() {
+            if self.o.lookup_dict(root, b"PageLabels")?.is_none() {
                 let tmp = self.o.new_dict();
-                let l = self.o.link(pl);
-                self.o.put(tmp, b"Nums", l);
-                let r = self.o.ref_obj(tmp);
-                self.o.put(root, b"PageLabels", r);
-                self.o.release(tmp);
+                let l = self.o.link(pl)?;
+                self.o.put(tmp, b"Nums", l)?;
+                let r = self.o.ref_obj(tmp)?;
+                self.o.put(root, b"PageLabels", r)?;
+                self.o.release(tmp)?;
             }
-            self.o.release(pl);
+            self.o.release(pl)?;
         }
-        self.o.put_name(root, b"Type", b"Catalog");
-        self.o.release(root);
+        self.o.put_name(root, b"Type", b"Catalog")?;
+        self.o.release(root)?;
         self.doc.pdoc.root.dict = None;
+        Ok(())
     }
 
     /// `pdf_doc_set_bop_content`.
-    pub fn pdf_doc_set_bop_content(&mut self, content: &[u8]) {
+    pub fn pdf_doc_set_bop_content(&mut self, content: &[u8]) -> Result<()> {
         if let Some(b) = self.doc.pdoc.pages.bop.take() {
-            self.o.release(b);
+            self.o.release(b)?;
         }
         if !content.is_empty() {
             let s = self.o.new_stream(STREAM_COMPRESS);
-            self.o.add_stream(s, content);
+            self.o.add_stream(s, content)?;
             self.doc.pdoc.pages.bop = Some(s);
         }
+        Ok(())
     }
 
     /// `pdf_doc_set_eop_content`.
-    pub fn pdf_doc_set_eop_content(&mut self, content: &[u8]) {
+    pub fn pdf_doc_set_eop_content(&mut self, content: &[u8]) -> Result<()> {
         if let Some(b) = self.doc.pdoc.pages.eop.take() {
-            self.o.release(b);
+            self.o.release(b)?;
         }
         if !content.is_empty() {
             let s = self.o.new_stream(STREAM_COMPRESS);
-            self.o.add_stream(s, content);
+            self.o.add_stream(s, content)?;
             self.doc.pdoc.pages.eop = Some(s);
         }
+        Ok(())
     }
 
-    fn pdf_doc_init_docinfo(&mut self) {
+    fn pdf_doc_init_docinfo(&mut self) -> Result<()> {
         let d = self.o.new_dict();
         self.doc.pdoc.info = Some(d);
-        self.o.set_info(d);
+        self.o.set_info(d)?;
+        Ok(())
     }
 
-    fn pdf_doc_close_docinfo(&mut self) {
+    fn pdf_doc_close_docinfo(&mut self) -> Result<()> {
         let docinfo = self.doc.pdoc.info.expect("docinfo");
         for key in [
             &b"Title"[..],
@@ -388,25 +397,26 @@ impl Dpx {
             b"CreationDate",
             b"ModDate",
         ] {
-            if let Some(v) = self.o.lookup_dict(docinfo, key)
-                && (!self.o.is_string(Some(v)) || self.o.string_length(v) == 0)
+            if let Some(v) = self.o.lookup_dict(docinfo, key)?
+                && (!self.o.is_string(Some(v)) || self.o.string_length(v)? == 0)
             {
-                self.o.remove_dict(docinfo, key);
+                self.o.remove_dict(docinfo, key)?;
             }
         }
-        if self.o.lookup_dict(docinfo, b"Producer").is_none() {
+        if self.o.lookup_dict(docinfo, b"Producer")?.is_none() {
             let mut banner = self.session.my_name.clone();
             banner.extend_from_slice(b" (");
             banner.extend_from_slice(crate::session::VERSION);
             banner.push(b')');
-            self.o.put_string(docinfo, b"Producer", &banner);
+            self.o.put_string(docinfo, b"Producer", &banner)?;
         }
-        if self.o.lookup_dict(docinfo, b"CreationDate").is_none() {
+        if self.o.lookup_dict(docinfo, b"CreationDate")?.is_none() {
             let now = self.dpx_util_format_asn_date(true);
-            self.o.put_string(docinfo, b"CreationDate", &now);
+            self.o.put_string(docinfo, b"CreationDate", &now)?;
         }
-        self.o.release(docinfo);
+        self.o.release(docinfo)?;
         self.doc.pdoc.info = None;
+        Ok(())
     }
 
     fn pdf_doc_get_page_resources(&mut self, category: &[u8]) -> Result<Option<Obj>> {
@@ -437,16 +447,16 @@ impl Dpx {
                 }
             }
         };
-        match self.o.lookup_dict(res_dict, category) {
+        match self.o.lookup_dict(res_dict, category)? {
             None => {
                 let r = self.o.new_dict();
-                self.o.put(res_dict, category, r);
+                self.o.put(res_dict, category, r)?;
                 Ok(Some(r))
             }
             Some(r) if self.o.is_indirect(Some(r)) => {
                 let d = self.o.deref_obj(Some(r))?;
                 if let Some(d) = d {
-                    self.o.release(d);
+                    self.o.release(d)?;
                 }
                 Ok(d)
             }
@@ -464,117 +474,124 @@ impl Dpx {
         let Some(resources) = self.pdf_doc_get_page_resources(category)? else {
             return Ok(());
         };
-        if self.o.lookup_dict(resources, resource_name).is_some() {
-            self.o.release(resource_ref);
+        if self.o.lookup_dict(resources, resource_name)?.is_some() {
+            self.o.release(resource_ref)?;
         } else {
-            self.o.put(resources, resource_name, resource_ref);
+            self.o.put(resources, resource_name, resource_ref)?;
         }
         Ok(())
     }
 
-    fn doc_flush_page(&mut self, i: usize, parent_ref: Obj) {
+    fn doc_flush_page(&mut self, i: usize, parent_ref: Obj) -> Result<()> {
         let page_obj = self.doc.pdoc.pages.entries[i].page_obj.expect("page");
-        self.o.put_name(page_obj, b"Type", b"Page");
-        self.o.put(page_obj, b"Parent", parent_ref);
+        self.o.put_name(page_obj, b"Type", b"Page")?;
+        self.o.put(page_obj, b"Parent", parent_ref)?;
         if self.doc.pdoc.pages.entries[i].flags & USE_MY_MEDIABOX != 0 {
             let c = self.doc.pdoc.pages.entries[i].cropbox;
             let mb = self.o.new_array();
             for v in [c.llx, c.lly, c.urx, c.ury] {
                 let n = self.o.new_number(round_acc(v, 0.01));
-                self.o.add_array(mb, n);
+                self.o.add_array(mb, n)?;
             }
-            self.o.put(page_obj, b"MediaBox", mb);
+            self.o.put(page_obj, b"MediaBox", mb)?;
         }
         let contents_array = self.o.new_array();
         let refs = core::mem::take(&mut self.doc.pdoc.pages.entries[i].content_refs);
         if let Some(r) = refs[0] {
-            self.o.add_array(contents_array, r);
+            self.o.add_array(contents_array, r)?;
         } else if let Some(bop) = self.doc.pdoc.pages.bop
-            && self.o.stream_length(bop) > 0
+            && self.o.stream_length(bop)? > 0
         {
-            let r = self.o.ref_obj(bop);
-            self.o.add_array(contents_array, r);
+            let r = self.o.ref_obj(bop)?;
+            self.o.add_array(contents_array, r)?;
         }
         if let Some(r) = refs[1] {
-            self.o.add_array(contents_array, r);
+            self.o.add_array(contents_array, r)?;
         }
         if let Some(r) = refs[2] {
-            self.o.add_array(contents_array, r);
+            self.o.add_array(contents_array, r)?;
         }
         if let Some(r) = refs[3] {
-            self.o.add_array(contents_array, r);
+            self.o.add_array(contents_array, r)?;
         } else if let Some(eop) = self.doc.pdoc.pages.eop
-            && self.o.stream_length(eop) > 0
+            && self.o.stream_length(eop)? > 0
         {
-            let r = self.o.ref_obj(eop);
-            self.o.add_array(contents_array, r);
+            let r = self.o.ref_obj(eop)?;
+            self.o.add_array(contents_array, r)?;
         }
-        self.o.put(page_obj, b"Contents", contents_array);
+        self.o.put(page_obj, b"Contents", contents_array)?;
         if let Some(a) = self.doc.pdoc.pages.entries[i].annots.take() {
-            let r = self.o.ref_obj(a);
-            self.o.put(page_obj, b"Annots", r);
-            self.o.release(a);
+            let r = self.o.ref_obj(a)?;
+            self.o.put(page_obj, b"Annots", r)?;
+            self.o.release(a)?;
         }
         if let Some(b) = self.doc.pdoc.pages.entries[i].beads.take() {
-            let r = self.o.ref_obj(b);
-            self.o.put(page_obj, b"B", r);
-            self.o.release(b);
+            let r = self.o.ref_obj(b)?;
+            self.o.put(page_obj, b"B", r)?;
+            self.o.release(b)?;
         }
-        self.o.release(page_obj);
+        self.o.release(page_obj)?;
         let pr = self.doc.pdoc.pages.entries[i].page_ref.take();
-        self.o.release_opt(pr);
+        self.o.release_opt(pr)?;
         self.doc.pdoc.pages.entries[i].page_obj = None;
+        Ok(())
     }
 
-    fn build_page_tree(&mut self, first: usize, num_pages: usize, parent_ref: Option<Obj>) -> Obj {
+    fn build_page_tree(
+        &mut self,
+        first: usize,
+        num_pages: usize,
+        parent_ref: Option<Obj>,
+    ) -> Result<Obj> {
         let this = self.o.new_dict();
         let self_ref = if parent_ref.is_some() {
-            self.o.ref_obj(this)
+            self.o.ref_obj(this)?
         } else {
             let pages = self.doc.pdoc.root.pages.expect("pages");
-            self.o.ref_obj(pages)
+            self.o.ref_obj(pages)?
         };
-        self.o.put_name(this, b"Type", b"Pages");
-        self.o.put_number(this, b"Count", num_pages as f64);
+        self.o.put_name(this, b"Type", b"Pages")?;
+        self.o.put_number(this, b"Count", num_pages as f64)?;
         if let Some(p) = parent_ref {
-            self.o.put(this, b"Parent", p);
+            self.o.put(this, b"Parent", p)?;
         }
         let kids = self.o.new_array();
         if num_pages > 0 && num_pages <= PAGE_CLUSTER {
             for i in 0..num_pages {
                 let k = first + i;
-                self.page_kid(k, kids, self_ref);
+                self.page_kid(k, kids, self_ref)?;
             }
         } else if num_pages > 0 {
             for i in 0..PAGE_CLUSTER {
                 let start = (i * num_pages) / PAGE_CLUSTER;
                 let end = ((i + 1) * num_pages) / PAGE_CLUSTER;
                 if end - start > 1 {
-                    let l = self.o.link(self_ref);
-                    let sub = self.build_page_tree(first + start, end - start, Some(l));
-                    let r = self.o.ref_obj(sub);
-                    self.o.add_array(kids, r);
-                    self.o.release(sub);
+                    let l = self.o.link(self_ref)?;
+                    let sub = self.build_page_tree(first + start, end - start, Some(l))?;
+                    let r = self.o.ref_obj(sub)?;
+                    self.o.add_array(kids, r)?;
+                    self.o.release(sub)?;
                 } else {
-                    self.page_kid(first + start, kids, self_ref);
+                    self.page_kid(first + start, kids, self_ref)?;
                 }
             }
         }
-        self.o.put(this, b"Kids", kids);
-        self.o.release(self_ref);
-        this
+        self.o.put(this, b"Kids", kids)?;
+        self.o.release(self_ref)?;
+        Ok(this)
     }
 
-    fn page_kid(&mut self, k: usize, kids: Obj, self_ref: Obj) {
+    fn page_kid(&mut self, k: usize, kids: Obj, self_ref: Obj) -> Result<()> {
         if self.doc.pdoc.pages.entries[k].page_ref.is_none() {
             let po = self.doc.pdoc.pages.entries[k].page_obj.expect("page");
-            self.doc.pdoc.pages.entries[k].page_ref = Some(self.o.ref_obj(po));
+            self.doc.pdoc.pages.entries[k].page_ref = Some(self.o.ref_obj(po)?);
         }
         let pr = self.doc.pdoc.pages.entries[k].page_ref.expect("page ref");
-        let l = self.o.link(pr);
-        self.o.add_array(kids, l);
-        let p = self.o.link(self_ref);
-        self.doc_flush_page(k, p);
+        let l = self.o.link(pr)?;
+        self.o.add_array(kids, l)?;
+        let p = self.o.link(self_ref)?;
+        self.doc_flush_page(k, p)?;
+        Ok(())
     }
 
     fn pdf_doc_init_page_tree(&mut self, media_width: f64, media_height: f64) {
@@ -591,53 +608,54 @@ impl Dpx {
         };
     }
 
-    fn pdf_doc_close_page_tree(&mut self) {
+    fn pdf_doc_close_page_tree(&mut self) -> Result<()> {
         let count = self.doc.pdoc.pages.num_entries;
         for page_no in count + 1..=self.doc.pdoc.pages.entries.len() {
             let i = page_no - 1;
             if self.doc.pdoc.pages.entries[i].page_obj.is_some() {
                 let r = self.doc.pdoc.pages.entries[i].page_ref.take();
-                self.o.release_opt(r);
+                self.o.release_opt(r)?;
             }
             if let Some(po) = self.doc.pdoc.pages.entries[i].page_obj.take() {
-                self.o.release(po);
+                self.o.release(po)?;
             }
             if let Some(a) = self.doc.pdoc.pages.entries[i].annots.take() {
-                self.o.release(a);
+                self.o.release(a)?;
             }
             if let Some(b) = self.doc.pdoc.pages.entries[i].beads.take() {
-                self.o.release(b);
+                self.o.release(b)?;
             }
             if let Some(r) = self.doc.pdoc.pages.entries[i].resources.take() {
-                self.o.release(r);
+                self.o.release(r)?;
             }
         }
-        let root_tree = self.build_page_tree(0, count, None);
+        let root_tree = self.build_page_tree(0, count, None)?;
         let pages = self.doc.pdoc.root.pages.expect("pages");
-        self.o.merge_dict(pages, root_tree);
-        self.o.release(root_tree);
+        self.o.merge_dict(pages, root_tree)?;
+        self.o.release(root_tree)?;
         if let Some(b) = self.doc.pdoc.pages.bop.take() {
-            self.o.add_stream(b, b"\n");
-            self.o.release(b);
+            self.o.add_stream(b, b"\n")?;
+            self.o.release(b)?;
         }
         if let Some(e) = self.doc.pdoc.pages.eop.take() {
-            self.o.add_stream(e, b"\n");
-            self.o.release(e);
+            self.o.add_stream(e, b"\n")?;
+            self.o.release(e)?;
         }
         let mb = self.o.new_array();
         let m = self.doc.pdoc.pages.mediabox;
         for v in [m.llx, m.lly, m.urx, m.ury] {
             let n = self.o.new_number(round_acc(v, 0.01));
-            self.o.add_array(mb, n);
+            self.o.add_array(mb, n)?;
         }
-        self.o.put(pages, b"MediaBox", mb);
+        self.o.put(pages, b"MediaBox", mb)?;
         let root = self.doc.pdoc.root.dict.expect("catalog");
-        let r = self.o.ref_obj(pages);
-        self.o.put(root, b"Pages", r);
-        self.o.release(pages);
+        let r = self.o.ref_obj(pages)?;
+        self.o.put(root, b"Pages", r)?;
+        self.o.release(pages)?;
         self.doc.pdoc.root.pages = None;
         self.doc.pdoc.pages.entries.clear();
         self.doc.pdoc.pages.num_entries = 0;
+        Ok(())
     }
 
     fn pdf_doc_init_bookmarks(&mut self, bm_open_depth: i32) {
@@ -655,26 +673,27 @@ impl Dpx {
         self.doc.pdoc.outlines.first = Some(0);
     }
 
-    fn clean_bookmarks(&mut self, item: Option<usize>) {
+    fn clean_bookmarks(&mut self, item: Option<usize>) -> Result<()> {
         let mut item = item;
         while let Some(i) = item {
             let next = self.doc.pdoc.outlines.items[i].next;
             if let Some(d) = self.doc.pdoc.outlines.items[i].dict.take() {
-                self.o.release(d);
+                self.o.release(d)?;
             }
             let first = self.doc.pdoc.outlines.items[i].first;
             if first.is_some() {
-                self.clean_bookmarks(first);
+                self.clean_bookmarks(first)?;
             }
             item = next;
         }
+        Ok(())
     }
 
-    fn flush_bookmarks(&mut self, node: usize, parent_ref: Obj, parent_dict: Obj) -> i32 {
+    fn flush_bookmarks(&mut self, node: usize, parent_ref: Obj, parent_dict: Obj) -> Result<i32> {
         let node_dict = self.doc.pdoc.outlines.items[node].dict.expect("bookmark");
-        let mut this_ref = Some(self.o.ref_obj(node_dict));
-        let l = self.o.link(this_ref.expect("ref"));
-        self.o.put(parent_dict, b"First", l);
+        let mut this_ref = Some(self.o.ref_obj(node_dict)?);
+        let l = self.o.link(this_ref.expect("ref"))?;
+        self.o.put(parent_dict, b"First", l)?;
         let mut retval = 0;
         let mut prev_ref: Option<Obj> = None;
         let mut item = Some(node);
@@ -685,42 +704,42 @@ impl Dpx {
             if let Some(f) = self.doc.pdoc.outlines.items[i].first
                 && self.doc.pdoc.outlines.items[f].dict.is_some()
             {
-                let count = self.flush_bookmarks(f, this_ref.expect("ref"), dict);
+                let count = self.flush_bookmarks(f, this_ref.expect("ref"), dict)?;
                 if self.doc.pdoc.outlines.items[i].is_open != 0 {
-                    self.o.put_number(dict, b"Count", f64::from(count));
+                    self.o.put_number(dict, b"Count", f64::from(count))?;
                     retval += count;
                 } else {
-                    self.o.put_number(dict, b"Count", f64::from(-count));
+                    self.o.put_number(dict, b"Count", f64::from(-count))?;
                 }
             }
-            let p = self.o.link(parent_ref);
-            self.o.put(dict, b"Parent", p);
+            let p = self.o.link(parent_ref)?;
+            self.o.put(dict, b"Parent", p)?;
             if let Some(pr) = prev_ref {
-                self.o.put(dict, b"Prev", pr);
+                self.o.put(dict, b"Prev", pr)?;
             }
             let next = self.doc.pdoc.outlines.items[i].next;
             let next_ref = if let Some(n) = next
                 && let Some(nd) = self.doc.pdoc.outlines.items[n].dict
             {
-                let r = self.o.ref_obj(nd);
-                let l = self.o.link(r);
-                self.o.put(dict, b"Next", l);
+                let r = self.o.ref_obj(nd)?;
+                let l = self.o.link(r)?;
+                self.o.put(dict, b"Next", l)?;
                 Some(r)
             } else {
                 None
             };
-            self.o.release(dict);
+            self.o.release(dict)?;
             self.doc.pdoc.outlines.items[i].dict = None;
             prev_ref = this_ref;
             this_ref = next_ref;
             retval += 1;
             item = next;
         }
-        let l = self.o.link_opt(prev_ref);
-        self.o.put_opt(parent_dict, b"Last", l);
-        self.o.release_opt(prev_ref);
+        let l = self.o.link_opt(prev_ref)?;
+        self.o.put_opt(parent_dict, b"Last", l)?;
+        self.o.release_opt(prev_ref)?;
         // (C releases node->dict again: it is NULL by now)
-        retval
+        Ok(retval)
     }
 
     /// `pdf_doc_bookmarks_up`.
@@ -750,30 +769,30 @@ impl Dpx {
     }
 
     /// `pdf_doc_bookmarks_down`.
-    pub fn pdf_doc_bookmarks_down(&mut self) -> i32 {
+    pub fn pdf_doc_bookmarks_down(&mut self) -> Result<i32> {
         let item = self.doc.pdoc.outlines.current.expect("bookmark");
         if self.doc.pdoc.outlines.items[item].dict.is_none() {
             let d = self.o.new_dict();
-            self.o.put_string(d, b"Title", b"<No Title>");
+            self.o.put_string(d, b"Title", b"<No Title>")?;
             let tcolor = self.o.new_array();
             for v in [1.0, 0.0, 0.0] {
                 let n = self.o.new_number(v);
-                self.o.add_array(tcolor, n);
+                self.o.add_array(tcolor, n)?;
             }
-            let l = self.o.link(tcolor);
-            self.o.put(d, b"C", l);
-            self.o.release(tcolor);
-            self.o.put_number(d, b"F", 1.0);
+            let l = self.o.link(tcolor)?;
+            self.o.put(d, b"C", l)?;
+            self.o.release(tcolor)?;
+            self.o.put_number(d, b"F", 1.0)?;
             let action = self.o.new_dict();
-            self.o.put_name(action, b"S", b"JavaScript");
+            self.o.put_name(action, b"S", b"JavaScript")?;
             self.o.put_string(
                 action,
                 b"JS",
                 b"app.alert(\"The author of this document made this bookmark item empty!\", 3, 0)",
-            );
-            let l = self.o.link(action);
-            self.o.put(d, b"A", l);
-            self.o.release(action);
+            )?;
+            let l = self.o.link(action)?;
+            self.o.put(d, b"A", l)?;
+            self.o.release(action)?;
             self.doc.pdoc.outlines.items[item].dict = Some(d);
         }
         self.doc.pdoc.outlines.items.push(PdfOlitem {
@@ -784,7 +803,7 @@ impl Dpx {
         self.doc.pdoc.outlines.items[item].first = Some(first);
         self.doc.pdoc.outlines.current = Some(first);
         self.doc.pdoc.outlines.current_depth += 1;
-        0
+        Ok(0)
     }
 
     /// `pdf_doc_bookmarks_depth`.
@@ -830,22 +849,23 @@ impl Dpx {
         Ok(())
     }
 
-    fn pdf_doc_close_bookmarks(&mut self) {
+    fn pdf_doc_close_bookmarks(&mut self) -> Result<()> {
         let catalog = self.doc.pdoc.root.dict.expect("catalog");
         let item = self.doc.pdoc.outlines.first.expect("bookmarks");
         if self.doc.pdoc.outlines.items[item].dict.is_some() {
             let bm_root = self.o.new_dict();
-            let bm_root_ref = self.o.ref_obj(bm_root);
-            let count = self.flush_bookmarks(item, bm_root_ref, bm_root);
-            self.o.put_number(bm_root, b"Count", f64::from(count));
-            self.o.put(catalog, b"Outlines", bm_root_ref);
-            self.o.release(bm_root);
+            let bm_root_ref = self.o.ref_obj(bm_root)?;
+            let count = self.flush_bookmarks(item, bm_root_ref, bm_root)?;
+            self.o.put_number(bm_root, b"Count", f64::from(count))?;
+            self.o.put(catalog, b"Outlines", bm_root_ref)?;
+            self.o.release(bm_root)?;
         }
-        self.clean_bookmarks(Some(item));
+        self.clean_bookmarks(Some(item))?;
         self.doc.pdoc.outlines.items.clear();
         self.doc.pdoc.outlines.first = None;
         self.doc.pdoc.outlines.current = None;
         self.doc.pdoc.outlines.current_depth = 0;
+        Ok(())
     }
 
     fn pdf_doc_init_names(&mut self, check_gotos: i32) {
@@ -866,9 +886,9 @@ impl Dpx {
     }
 
     /// `pdf_doc_add_names`.
-    pub fn pdf_doc_add_names(&mut self, category: &[u8], key: &[u8], value: Obj) -> i32 {
+    pub fn pdf_doc_add_names(&mut self, category: &[u8], key: &[u8], value: Obj) -> Result<i32> {
         let Some(i) = NAME_DICT_CATEGORIES.iter().position(|&c| c == category) else {
-            return -1;
+            return Ok(-1);
         };
         let tree = self.doc.pdoc.names[i]
             .data
@@ -886,42 +906,42 @@ impl Dpx {
         let mut d = None;
         // (labels as in C: cleanup, error, undefined all release and return)
         'body: {
-            let st = self.o.lookup_dict(annot_dict, b"Subtype");
+            let st = self.o.lookup_dict(annot_dict, b"Subtype")?;
             subtype = self.o.deref_obj(st)?;
             if let Some(stv) = subtype {
                 if self.o.is_undefined(Some(stv)) || !self.o.is_name(Some(stv)) {
                     break 'body;
-                } else if self.o.name_value(stv) != b"Link" {
+                } else if self.o.name_value(stv)? != b"Link" {
                     break 'body;
                 }
             }
             let mut dict = annot_dict;
             let mut key: &[u8] = b"Dest";
-            let dv = self.o.lookup_dict(annot_dict, key);
+            let dv = self.o.lookup_dict(annot_dict, key)?;
             d = self.o.deref_obj(dv)?;
             if self.o.is_undefined(d) {
                 break 'body;
             }
-            let av = self.o.lookup_dict(annot_dict, b"A");
+            let av = self.o.lookup_dict(annot_dict, b"A")?;
             a = self.o.deref_obj(av)?;
             if let Some(av) = a {
                 if self.o.is_undefined(Some(av)) || d.is_some() || !self.o.is_dict(Some(av)) {
                     break 'body;
                 }
-                let sv = self.o.lookup_dict(av, b"S");
+                let sv = self.o.lookup_dict(av, b"S")?;
                 s = self.o.deref_obj(sv)?;
                 if self.o.is_undefined(s) || !self.o.is_name(s) {
                     break 'body;
-                } else if self.o.name_value(s.expect("name")) != b"GoTo" {
+                } else if self.o.name_value(s.expect("name"))? != b"GoTo" {
                     break 'body;
                 }
                 dict = av;
                 key = b"D";
-                let dv = self.o.lookup_dict(av, key);
+                let dv = self.o.lookup_dict(av, key)?;
                 d = self.o.deref_obj(dv)?;
             }
             let dest: Vec<u8> = if self.o.is_string(d) {
-                self.o.string_value(d.expect("string")).to_vec()
+                self.o.string_value(d.expect("string"))?.to_vec()
             } else {
                 break 'body;
             };
@@ -938,16 +958,16 @@ impl Dpx {
                 x
             };
             let key_obj = self.o.new_name(key);
-            let l = self.o.link(d_new);
+            let l = self.o.link(d_new)?;
             // (C releases key_obj when the key is new: a leak-avoiding bug
             // that frees the key now held by the dictionary; the name is
             // still written, so the bytes are the same)
-            self.o.add_dict(dict, key_obj, Some(l));
+            self.o.add_dict(dict, key_obj, Some(l))?;
         }
-        self.o.release_opt(subtype);
-        self.o.release_opt(a);
-        self.o.release_opt(s);
-        self.o.release_opt(d);
+        self.o.release_opt(subtype)?;
+        self.o.release_opt(a)?;
+        self.o.release_opt(s)?;
+        self.o.release_opt(d)?;
         Ok(())
     }
 
@@ -972,31 +992,31 @@ impl Dpx {
                         n
                     }
                 };
-                let r = self.o.ref_obj(t);
-                self.o.put(names, NAME_DICT_CATEGORIES[i], r);
-                self.o.release(t);
+                let r = self.o.ref_obj(t)?;
+                self.o.put(names, NAME_DICT_CATEGORIES[i], r)?;
+                self.o.release(t)?;
             }
-            self.o.pdf_delete_name_tree(data);
+            self.o.pdf_delete_name_tree(data)?;
         }
         if let Some(names) = self.doc.pdoc.root.names.take() {
             let root = self.doc.pdoc.root.dict.expect("catalog");
-            match self.o.lookup_dict(root, b"Names") {
+            match self.o.lookup_dict(root, b"Names")? {
                 None => {
-                    let r = self.o.ref_obj(names);
-                    self.o.put(root, b"Names", r);
+                    let r = self.o.ref_obj(names)?;
+                    self.o.put(root, b"Names", r)?;
                 }
                 Some(t) if self.o.is_dict(Some(t)) => {
-                    self.o.merge_dict(names, t);
-                    let r = self.o.ref_obj(names);
-                    self.o.put(root, b"Names", r);
+                    self.o.merge_dict(names, t)?;
+                    let r = self.o.ref_obj(names)?;
+                    self.o.put(root, b"Names", r)?;
                 }
                 Some(_) => {}
             }
-            self.o.release(names);
+            self.o.release(names)?;
         }
         self.doc.pdoc.names.clear();
         for v in self.doc.pdoc.gotos.ht_clear_table() {
-            self.o.release(v);
+            self.o.release(v)?;
         }
         Ok(())
     }
@@ -1009,7 +1029,7 @@ impl Dpx {
         annot_dict: Obj,
         new_annot: i32,
     ) -> Result<()> {
-        let i = self.doc_get_page_entry(page_no);
+        let i = self.doc_get_page_entry(page_no)?;
         let annots = match self.doc.pdoc.pages.entries[i].annots {
             Some(a) => a,
             None => {
@@ -1021,11 +1041,11 @@ impl Dpx {
         let ra = self.o.new_array();
         for v in [rect.llx, rect.lly, rect.urx, rect.ury] {
             let n = self.o.new_number(round_acc(v, 0.001));
-            self.o.add_array(ra, n);
+            self.o.add_array(ra, n)?;
         }
-        self.o.put(annot_dict, b"Rect", ra);
-        let r = self.o.ref_obj(annot_dict);
-        self.o.add_array(annots, r);
+        self.o.put(annot_dict, b"Rect", ra)?;
+        let r = self.o.ref_obj(annot_dict)?;
+        self.o.add_array(annots, r)?;
         if new_annot != 0 {
             self.pdf_doc_add_goto(annot_dict)?;
         }
@@ -1038,16 +1058,20 @@ impl Dpx {
     }
 
     /// `pdf_doc_begin_article`.
-    pub fn pdf_doc_begin_article(&mut self, article_id: &[u8], article_info: Option<Obj>) {
-        assert!(
-            !article_id.is_empty(),
-            "Article thread without internal identifier."
-        );
+    pub fn pdf_doc_begin_article(
+        &mut self,
+        article_id: &[u8],
+        article_info: Option<Obj>,
+    ) -> Result<()> {
+        if article_id.is_empty() {
+            fatal!("Article thread without internal identifier.");
+        }
         self.doc.pdoc.articles.push(PdfArticle {
             id: article_id.to_vec(),
             info: article_info,
             beads: Vec::new(),
         });
+        Ok(())
     }
 
     /// `pdf_doc_add_bead`.
@@ -1057,14 +1081,16 @@ impl Dpx {
         bead_id: Option<&[u8]>,
         page_no: i32,
         rect: &PdfRect,
-    ) {
-        let a = self
+    ) -> Result<()> {
+        let Some(a) = self
             .doc
             .pdoc
             .articles
             .iter()
             .position(|a| a.id == article_id)
-            .expect("Specified article thread that doesn't exist.");
+        else {
+            fatal!("Specified article thread that doesn't exist.");
+        };
         let article = &mut self.doc.pdoc.articles[a];
         let found = bead_id.and_then(|b| {
             article
@@ -1085,9 +1111,10 @@ impl Dpx {
         };
         article.beads[k].rect = *rect;
         article.beads[k].page_no = page_no;
+        Ok(())
     }
 
-    fn make_article(&mut self, a: usize) -> Option<Obj> {
+    fn make_article(&mut self, a: usize) -> Result<Option<Obj>> {
         let art_dict = self.o.new_dict();
         let mut first: Option<Obj> = None;
         let mut prev: Option<Obj> = None;
@@ -1101,19 +1128,19 @@ impl Dpx {
             let l = self.o.new_dict();
             last = Some(l);
             if let Some(p) = prev {
-                let r = self.o.ref_obj(l);
-                self.o.put(p, b"N", r);
-                let r = self.o.ref_obj(p);
-                self.o.put(l, b"V", r);
+                let r = self.o.ref_obj(l)?;
+                self.o.put(p, b"N", r)?;
+                let r = self.o.ref_obj(p)?;
+                self.o.put(l, b"V", r)?;
                 if Some(p) != first {
-                    self.o.release(p);
+                    self.o.release(p)?;
                 }
             } else {
                 first = Some(l);
-                let r = self.o.ref_obj(art_dict);
-                self.o.put(l, b"T", r);
+                let r = self.o.ref_obj(art_dict)?;
+                self.o.put(l, b"T", r)?;
             }
-            let pi = self.doc_get_page_entry(bead.page_no as u32);
+            let pi = self.doc_get_page_entry(bead.page_no as u32)?;
             let beads = match self.doc.pdoc.pages.entries[pi].beads {
                 Some(b) => b,
                 None => {
@@ -1123,45 +1150,45 @@ impl Dpx {
                 }
             };
             let pr = self.doc.pdoc.pages.entries[pi].page_ref;
-            let pl = self.o.link_opt(pr);
-            self.o.put_opt(l, b"P", pl);
+            let pl = self.o.link_opt(pr)?;
+            self.o.put_opt(l, b"P", pl)?;
             let rect = self.o.new_array();
             for v in [bead.rect.llx, bead.rect.lly, bead.rect.urx, bead.rect.ury] {
                 let x = self.o.new_number(round_acc(v, 0.01));
-                self.o.add_array(rect, x);
+                self.o.add_array(rect, x)?;
             }
-            self.o.put(l, b"R", rect);
-            let r = self.o.ref_obj(l);
-            self.o.add_array(beads, r);
+            self.o.put(l, b"R", rect)?;
+            let r = self.o.ref_obj(l)?;
+            self.o.add_array(beads, r)?;
             prev = Some(l);
         }
         if let (Some(f), Some(l)) = (first, last) {
-            let r = self.o.ref_obj(f);
-            self.o.put(l, b"N", r);
-            let r = self.o.ref_obj(l);
-            self.o.put(f, b"V", r);
+            let r = self.o.ref_obj(f)?;
+            self.o.put(l, b"N", r)?;
+            let r = self.o.ref_obj(l)?;
+            self.o.put(f, b"V", r)?;
             if f != l {
-                self.o.release(l);
+                self.o.release(l)?;
             }
-            let r = self.o.ref_obj(f);
-            self.o.put(art_dict, b"F", r);
+            let r = self.o.ref_obj(f)?;
+            self.o.put(art_dict, b"F", r)?;
             if let Some(info) = self.doc.pdoc.articles[a].info.take() {
-                let r = self.o.ref_obj(info);
-                self.o.put(art_dict, b"I", r);
-                self.o.release(info);
+                let r = self.o.ref_obj(info)?;
+                self.o.put(art_dict, b"I", r)?;
+                self.o.release(info)?;
             }
-            self.o.release(f);
-            Some(art_dict)
+            self.o.release(f)?;
+            Ok(Some(art_dict))
         } else {
-            self.o.release(art_dict);
-            None
+            self.o.release(art_dict)?;
+            Ok(None)
         }
     }
 
-    fn pdf_doc_close_articles(&mut self) {
+    fn pdf_doc_close_articles(&mut self) -> Result<()> {
         for a in 0..self.doc.pdoc.articles.len() {
             if !self.doc.pdoc.articles[a].beads.is_empty() {
-                let art = self.make_article(a);
+                let art = self.make_article(a)?;
                 let threads = match self.doc.pdoc.root.threads {
                     Some(t) => t,
                     None => {
@@ -1173,41 +1200,43 @@ impl Dpx {
                 // (C refers to a null article dict: `pdf_ref_obj(NULL)` is an
                 // error; never with beads)
                 let art = art.expect("article");
-                let r = self.o.ref_obj(art);
-                self.o.add_array(threads, r);
-                self.o.release(art);
+                let r = self.o.ref_obj(art)?;
+                self.o.add_array(threads, r)?;
+                self.o.release(art)?;
             }
         }
         self.doc.pdoc.articles.clear();
         if let Some(t) = self.doc.pdoc.root.threads.take() {
             let root = self.doc.pdoc.root.dict.expect("catalog");
-            let r = self.o.ref_obj(t);
-            self.o.put(root, b"Threads", r);
-            self.o.release(t);
+            let r = self.o.ref_obj(t)?;
+            self.o.put(root, b"Threads", r)?;
+            self.o.release(t)?;
         }
+        Ok(())
     }
 
     /// `pdf_doc_set_mediabox`: 0 for the root.
-    pub fn pdf_doc_set_mediabox(&mut self, page_no: u32, mediabox: &PdfRect) {
+    pub fn pdf_doc_set_mediabox(&mut self, page_no: u32, mediabox: &PdfRect) -> Result<()> {
         if page_no == 0 {
             self.doc.pdoc.pages.mediabox = *mediabox;
         } else {
-            let i = self.doc_get_page_entry(page_no);
+            let i = self.doc_get_page_entry(page_no)?;
             self.doc.pdoc.pages.entries[i].cropbox = *mediabox;
             self.doc.pdoc.pages.entries[i].flags |= USE_MY_MEDIABOX;
         }
+        Ok(())
     }
 
     /// `pdf_doc_get_mediabox`.
-    pub fn pdf_doc_get_mediabox(&mut self, page_no: u32) -> PdfRect {
+    pub fn pdf_doc_get_mediabox(&mut self, page_no: u32) -> Result<PdfRect> {
         if page_no == 0 {
-            self.doc.pdoc.pages.mediabox
+            Ok(self.doc.pdoc.pages.mediabox)
         } else {
-            let i = self.doc_get_page_entry(page_no);
+            let i = self.doc_get_page_entry(page_no)?;
             if self.doc.pdoc.pages.entries[i].flags & USE_MY_MEDIABOX != 0 {
-                self.doc.pdoc.pages.entries[i].cropbox
+                Ok(self.doc.pdoc.pages.entries[i].cropbox)
             } else {
-                self.doc.pdoc.pages.mediabox
+                Ok(self.doc.pdoc.pages.mediabox)
             }
         }
     }
@@ -1246,7 +1275,7 @@ impl Dpx {
     }
 
     /// `pdf_doc_get_dictionary`.
-    pub fn pdf_doc_get_dictionary(&mut self, category: &[u8]) -> Obj {
+    pub fn pdf_doc_get_dictionary(&mut self, category: &[u8]) -> Result<Obj> {
         let d = match category {
             b"Names" => {
                 if self.doc.pdoc.root.names.is_none() {
@@ -1279,7 +1308,13 @@ impl Dpx {
             }
             _ => None,
         };
-        d.expect("Document dict. not exist.")
+        match d {
+            Some(d) => Ok(d),
+            None => fatal!(
+                "Document dict. \"{}\" not exist. ",
+                String::from_utf8_lossy(category)
+            ),
+        }
     }
 
     /// `pdf_doc_current_page_number`.
@@ -1288,35 +1323,37 @@ impl Dpx {
     }
 
     /// `pdf_doc_ref_page`.
-    pub fn pdf_doc_ref_page(&mut self, page_no: u32) -> Option<Obj> {
-        let i = self.doc_get_page_entry(page_no);
+    pub fn pdf_doc_ref_page(&mut self, page_no: u32) -> Result<Option<Obj>> {
+        let i = self.doc_get_page_entry(page_no)?;
         if self.doc.pdoc.pages.entries[i].page_obj.is_none() {
             let po = self.o.new_dict();
             self.doc.pdoc.pages.entries[i].page_obj = Some(po);
-            self.doc.pdoc.pages.entries[i].page_ref = Some(self.o.ref_obj(po));
+            self.doc.pdoc.pages.entries[i].page_ref = Some(self.o.ref_obj(po)?);
         }
         let r = self.doc.pdoc.pages.entries[i].page_ref.expect("page ref");
-        Some(self.o.link(r))
+        Ok(Some(self.o.link(r)?))
     }
 
     /// `pdf_doc_get_reference`.
-    pub fn pdf_doc_get_reference(&mut self, category: &[u8]) -> Option<Obj> {
+    pub fn pdf_doc_get_reference(&mut self, category: &[u8]) -> Result<Option<Obj>> {
         let page_no = self.pdf_doc_current_page_number() as u32;
         match category {
             b"@THISPAGE" => self.pdf_doc_ref_page(page_no),
             b"@PREVPAGE" => {
-                assert!(
-                    page_no > 1,
-                    "Reference to previous page, but no pages have been completed yet."
-                );
+                if page_no <= 1 {
+                    fatal!("Reference to previous page, but no pages have been completed yet.");
+                }
                 self.pdf_doc_ref_page(page_no - 1)
             }
             b"@NEXTPAGE" => self.pdf_doc_ref_page(page_no + 1),
-            _ => panic!("Reference to category not exist."),
+            _ => fatal!(
+                "Reference to \"{}\" not exist. ",
+                String::from_utf8_lossy(category)
+            ),
         }
     }
 
-    fn pdf_doc_new_page(&mut self) {
+    fn pdf_doc_new_page(&mut self) -> Result<()> {
         let n = self.doc.pdoc.pages.num_entries;
         if n >= self.doc.pdoc.pages.entries.len() {
             let m = self.doc.pdoc.pages.entries.len() + PDFDOC_PAGES_ALLOC_SIZE;
@@ -1325,34 +1362,34 @@ impl Dpx {
         if self.doc.pdoc.pages.entries[n].page_ref.is_none() {
             let po = self.o.new_dict();
             self.doc.pdoc.pages.entries[n].page_obj = Some(po);
-            self.doc.pdoc.pages.entries[n].page_ref = Some(self.o.ref_obj(po));
+            self.doc.pdoc.pages.entries[n].page_ref = Some(self.o.ref_obj(po)?);
         }
         self.doc.pdoc.pages.entries[n].background = None;
         self.doc.pdoc.pages.entries[n].contents = Some(self.o.new_stream(STREAM_COMPRESS));
         self.doc.pdoc.pages.entries[n].resources = Some(self.o.new_dict());
         self.doc.pdoc.pages.entries[n].annots = None;
         self.doc.pdoc.pages.entries[n].beads = None;
+        Ok(())
     }
 
-    fn pdf_doc_finish_page(&mut self) {
-        assert!(
-            self.doc.pdoc.pending_forms.is_empty(),
-            "A pending form XObject at the end of page."
-        );
+    fn pdf_doc_finish_page(&mut self) -> Result<()> {
+        if !self.doc.pdoc.pending_forms.is_empty() {
+            fatal!("A pending form XObject at the end of page.");
+        }
         let n = self.doc.pdoc.pages.num_entries;
         if self.doc.pdoc.pages.entries[n].page_obj.is_none() {
             self.doc.pdoc.pages.entries[n].page_obj = Some(self.o.new_dict());
         }
         self.doc.pdoc.pages.entries[n].content_refs[0] = match self.doc.pdoc.pages.bop {
-            Some(b) if self.o.stream_length(b) > 0 => Some(self.o.ref_obj(b)),
+            Some(b) if self.o.stream_length(b)? > 0 => Some(self.o.ref_obj(b)?),
             _ => None,
         };
         if let Some(bg) = self.doc.pdoc.pages.entries[n].background.take() {
-            if self.o.stream_length(bg) > 0 {
-                self.doc.pdoc.pages.entries[n].content_refs[1] = Some(self.o.ref_obj(bg));
-                self.o.add_stream(bg, b"\n");
+            if self.o.stream_length(bg)? > 0 {
+                self.doc.pdoc.pages.entries[n].content_refs[1] = Some(self.o.ref_obj(bg)?);
+                self.o.add_stream(bg, b"\n")?;
             }
-            self.o.release(bg);
+            self.o.release(bg)?;
         } else {
             self.doc.pdoc.pages.entries[n].content_refs[1] = None;
         }
@@ -1360,27 +1397,28 @@ impl Dpx {
             .contents
             .take()
             .expect("contents");
-        self.doc.pdoc.pages.entries[n].content_refs[2] = Some(self.o.ref_obj(contents));
-        self.o.add_stream(contents, b"\n");
-        self.o.release(contents);
+        self.doc.pdoc.pages.entries[n].content_refs[2] = Some(self.o.ref_obj(contents)?);
+        self.o.add_stream(contents, b"\n")?;
+        self.o.release(contents)?;
         self.doc.pdoc.pages.entries[n].content_refs[3] = match self.doc.pdoc.pages.eop {
-            Some(e) if self.o.stream_length(e) > 0 => Some(self.o.ref_obj(e)),
+            Some(e) if self.o.stream_length(e)? > 0 => Some(self.o.ref_obj(e)?),
             _ => None,
         };
         if let Some(res) = self.doc.pdoc.pages.entries[n].resources.take() {
             let procset = self.o.new_array();
             for name in [&b"PDF"[..], b"Text", b"ImageC", b"ImageB", b"ImageI"] {
                 let x = self.o.new_name(name);
-                self.o.add_array(procset, x);
+                self.o.add_array(procset, x)?;
             }
-            self.o.put(res, b"ProcSet", procset);
+            self.o.put(res, b"ProcSet", procset)?;
             let po = self.doc.pdoc.pages.entries[n].page_obj.expect("page");
-            let r = self.o.ref_obj(res);
-            self.o.put(po, b"Resources", r);
-            self.o.release(res);
+            let r = self.o.ref_obj(res)?;
+            self.o.put(po, b"Resources", r)?;
+            self.o.release(res)?;
         }
         // (manual thumbnails: not supported)
         self.doc.pdoc.pages.num_entries += 1;
+        Ok(())
     }
 
     /// `pdf_doc_set_bgcolor`.
@@ -1401,18 +1439,18 @@ impl Dpx {
             return Ok(());
         }
         let page_no = self.pdf_doc_current_page_number();
-        let r = self.pdf_doc_get_mediabox(page_no as u32);
+        let r = self.pdf_doc_get_mediabox(page_no as u32)?;
         let n = self.doc.pdoc.pages.num_entries;
         if self.doc.pdoc.pages.entries[n].background.is_none() {
             self.doc.pdoc.pages.entries[n].background = Some(self.o.new_stream(STREAM_COMPRESS));
         }
         let saved = self.doc.pdoc.pages.entries[n].contents;
         self.doc.pdoc.pages.entries[n].contents = self.doc.pdoc.pages.entries[n].background;
-        self.pdf_dev_gsave();
+        self.pdf_dev_gsave()?;
         let bg = self.doc.bgcolor.clone();
         self.pdf_dev_set_nonstrokingcolor(&bg)?;
-        self.pdf_dev_rectfill(r.llx, r.lly, r.urx - r.llx, r.ury - r.lly);
-        self.pdf_dev_grestore();
+        self.pdf_dev_rectfill(r.llx, r.lly, r.urx - r.llx, r.ury - r.lly)?;
+        self.pdf_dev_grestore()?;
         self.doc.pdoc.pages.entries[n].contents = saved;
         Ok(())
     }
@@ -1427,29 +1465,30 @@ impl Dpx {
             e: x_origin,
             f: y_origin,
         };
-        self.pdf_doc_new_page();
+        self.pdf_doc_new_page()?;
         self.pdf_dev_bop(&m)?;
         Ok(())
     }
 
     /// `pdf_doc_end_page`.
     pub fn pdf_doc_end_page(&mut self) -> Result<()> {
-        self.pdf_dev_eop();
+        self.pdf_dev_eop()?;
         self.doc_fill_page_background()?;
-        self.pdf_doc_finish_page();
+        self.pdf_doc_finish_page()?;
         Ok(())
     }
 
     /// `pdf_doc_add_page_content`.
-    pub fn pdf_doc_add_page_content(&mut self, buffer: &[u8]) {
+    pub fn pdf_doc_add_page_content(&mut self, buffer: &[u8]) -> Result<()> {
         let s = if let Some(f) = self.doc.pdoc.pending_forms.last() {
             f.form.contents
         } else {
             self.doc.pdoc.pages.entries[self.doc.pdoc.pages.num_entries].contents
         };
         if let Some(s) = s {
-            self.o.add_stream(s, buffer);
+            self.o.add_stream(s, buffer)?;
         }
+        Ok(())
     }
 
     /// `pdf_open_document`.
@@ -1471,8 +1510,8 @@ impl Dpx {
             s.object.compression_level,
             s.object.enable_objstm != 0,
             s.object.enable_predictor != 0,
-        );
-        self.pdf_doc_init_catalog();
+        )?;
+        self.pdf_doc_init_catalog()?;
         self.doc.pdoc.options.annot_grow.0 = s.annot_grow_amount.0;
         self.doc.pdoc.options.annot_grow.1 = s.annot_grow_amount.1;
         self.doc.pdoc.options.outline_open_depth = s.outline_open_depth;
@@ -1480,10 +1519,10 @@ impl Dpx {
         self.pdf_init_colors();
         self.pdf_init_fonts()?;
         self.pdf_init_images();
-        self.pdf_doc_init_docinfo();
+        self.pdf_doc_init_docinfo()?;
         if let Some(c) = creator {
             let info = self.doc.pdoc.info.expect("info");
-            self.o.put_string(info, b"Creator", c);
+            self.o.put_string(info, b"Creator", c)?;
         }
         self.pdf_doc_init_bookmarks(s.outline_open_depth);
         self.pdf_doc_init_articles();
@@ -1492,7 +1531,7 @@ impl Dpx {
         self.pdf_doc_set_bgcolor(None);
         self.doc.pdoc.options.enable_manual_thumb = s.enable_manual_thumb;
         self.doc.pdoc.pending_forms.clear();
-        self.pdf_init_device(s.device.dvi2pts, s.device.precision, s.device.ignore_colors);
+        self.pdf_init_device(s.device.dvi2pts, s.device.precision, s.device.ignore_colors)?;
         self.doc.global_names = Some(crate::pdfnames::pdf_new_name_tree());
         Ok(())
     }
@@ -1500,20 +1539,20 @@ impl Dpx {
     /// `pdf_close_document`.
     pub fn pdf_close_document(&mut self) -> Result<()> {
         if let Some(g) = self.doc.global_names.take() {
-            self.o.pdf_delete_name_tree(g);
+            self.o.pdf_delete_name_tree(g)?;
         }
-        self.pdf_close_device();
-        self.pdf_doc_close_articles();
+        self.pdf_close_device()?;
+        self.pdf_doc_close_articles()?;
         self.pdf_doc_close_names()?;
-        self.pdf_doc_close_bookmarks();
-        self.pdf_doc_close_page_tree();
-        self.pdf_doc_close_docinfo();
-        self.pdf_doc_close_catalog();
-        self.pdf_close_images();
+        self.pdf_doc_close_bookmarks()?;
+        self.pdf_doc_close_page_tree()?;
+        self.pdf_doc_close_docinfo()?;
+        self.pdf_doc_close_catalog()?;
+        self.pdf_close_images()?;
         self.pdf_close_fonts()?;
-        self.pdf_close_colors();
-        self.pdf_close_resources();
-        self.o.flush();
+        self.pdf_close_colors()?;
+        self.pdf_close_resources()?;
+        self.o.flush()?;
         Ok(())
     }
 
@@ -1524,17 +1563,17 @@ impl Dpx {
         matrix: Option<&PdfTmatrix>,
         resources: Obj,
         attrib: Option<Obj>,
-    ) {
-        let d = self.o.stream_dict(xform);
-        self.o.put_name(d, b"Type", b"XObject");
-        self.o.put_name(d, b"Subtype", b"Form");
-        self.o.put_number(d, b"FormType", 1.0);
+    ) -> Result<()> {
+        let d = self.o.stream_dict(xform)?;
+        self.o.put_name(d, b"Type", b"XObject")?;
+        self.o.put_name(d, b"Subtype", b"Form")?;
+        self.o.put_number(d, b"FormType", 1.0)?;
         let t = self.o.new_array();
         for v in [bbox.llx, bbox.lly, bbox.urx, bbox.ury] {
             let n = self.o.new_number(round_acc(v, 0.001));
-            self.o.add_array(t, n);
+            self.o.add_array(t, n)?;
         }
-        self.o.put(d, b"BBox", t);
+        self.o.put(d, b"BBox", t)?;
         if let Some(m) = matrix {
             let t = self.o.new_array();
             for (v, acc) in [
@@ -1546,14 +1585,15 @@ impl Dpx {
                 (m.f, 0.001),
             ] {
                 let n = self.o.new_number(round_acc(v, acc));
-                self.o.add_array(t, n);
+                self.o.add_array(t, n)?;
             }
-            self.o.put(d, b"Matrix", t);
+            self.o.put(d, b"Matrix", t)?;
         }
         if let Some(a) = attrib {
-            self.o.merge_dict(d, a);
+            self.o.merge_dict(d, a)?;
         }
-        self.o.put(d, b"Resources", resources);
+        self.o.put(d, b"Resources", resources)?;
+        Ok(())
     }
 
     /// `pdf_doc_begin_grabbing`: the form's XObject id.
@@ -1600,7 +1640,7 @@ impl Dpx {
             f: -ref_y,
         };
         info.bbox = *cropbox;
-        let l = self.o.link(contents);
+        let l = self.o.link(contents)?;
         let xobj_id = self.pdf_ximage_defineresource(
             Some(ident),
             crate::pdfximage::PDF_XOBJECT_TYPE_FORM,
@@ -1619,28 +1659,28 @@ impl Dpx {
         let Some(node) = self.doc.pdoc.pending_forms.last().cloned() else {
             return Ok(());
         };
-        self.pdf_dev_grestore_to(node.q_depth);
+        self.pdf_dev_grestore_to(node.q_depth)?;
         let res = node.form.resources.expect("resources");
         let procset = self.o.new_array();
         for name in [&b"PDF"[..], b"Text", b"ImageC", b"ImageB", b"ImageI"] {
             let x = self.o.new_name(name);
-            self.o.add_array(procset, x);
+            self.o.add_array(procset, x)?;
         }
-        self.o.put(res, b"ProcSet", procset);
+        self.o.put(res, b"ProcSet", procset)?;
         let contents = node.form.contents.expect("contents");
-        let r = self.o.ref_obj(res);
+        let r = self.o.ref_obj(res)?;
         self.pdf_doc_make_xform(
             contents,
             &node.form.cropbox,
             Some(&node.form.matrix),
             r,
             attrib,
-        );
-        self.o.release(res);
-        self.o.release(contents);
-        self.o.release_opt(attrib);
+        )?;
+        self.o.release(res)?;
+        self.o.release(contents)?;
+        self.o.release_opt(attrib)?;
         self.doc.pdoc.pending_forms.pop();
-        self.pdf_dev_pop_gstate();
+        self.pdf_dev_pop_gstate()?;
         self.pdf_dev_reset_fonts(1);
         self.pdf_dev_reset_color(0)?;
         self.pdf_dev_reset_xgstate(0)?;
@@ -1669,7 +1709,7 @@ impl Dpx {
     pub fn pdf_doc_end_annot(&mut self) -> Result<()> {
         self.pdf_doc_break_annot()?;
         if let Some(d) = self.doc.breaking_state.annot_dict.take() {
-            self.o.release(d);
+            self.o.release(d)?;
         }
         Ok(())
     }
@@ -1679,7 +1719,7 @@ impl Dpx {
         if self.doc.breaking_state.dirty != 0 {
             let annot_dict = self.doc.breaking_state.annot_dict.expect("annotation");
             let copy = self.o.new_dict();
-            self.o.merge_dict(copy, annot_dict);
+            self.o.merge_dict(copy, annot_dict)?;
             self.doc.breaking_state.annot_dict = Some(copy);
             let mut rect = self.doc.breaking_state.rect;
             rect.llx -= self.doc.pdoc.options.annot_grow.0;
@@ -1689,7 +1729,7 @@ impl Dpx {
             let page = self.pdf_doc_current_page_number();
             let broken = self.doc.breaking_state.broken;
             self.pdf_doc_add_annot(page as u32, &rect, annot_dict, i32::from(broken == 0))?;
-            self.o.release(annot_dict);
+            self.o.release(annot_dict)?;
             self.doc.breaking_state.broken = 1;
         }
         self.reset_box();
@@ -1709,28 +1749,31 @@ impl Dpx {
     /// `pdf_doc_get_page_count`.
     pub fn pdf_doc_get_page_count(&mut self, pf: u32) -> Result<i32> {
         let catalog = self.o.pdf_file_catalog(pf);
-        let p = catalog.and_then(|c| self.o.lookup_dict(c, b"Pages"));
+        let p = match catalog {
+            Some(c) => self.o.lookup_dict(c, b"Pages")?,
+            None => None,
+        };
         let page_tree = self.o.deref_obj(p)?;
         if !self.o.is_dict(page_tree) {
             return Ok(0);
         }
-        let c = self.o.lookup_dict(page_tree.expect("dict"), b"Count");
+        let c = self.o.lookup_dict(page_tree.expect("dict"), b"Count")?;
         let tmp = self.o.deref_obj(c)?;
         if !self.o.is_number(tmp) {
-            self.o.release_opt(tmp);
+            self.o.release_opt(tmp)?;
             return Ok(0);
         }
-        let count = self.o.number_value(tmp.expect("number")) as i32;
-        self.o.release_opt(tmp);
+        let count = self.o.number_value(tmp.expect("number"))? as i32;
+        self.o.release_opt(tmp)?;
         Ok(count)
     }
 }
 
 /// Whether `a` is an array of 4 (`VALIDATE_BOX`).
-fn valid_box(o: &crate::obj::PdfOut, b: Option<Obj>) -> bool {
+fn valid_box(o: &crate::obj::PdfOut, b: Option<Obj>) -> Result<bool> {
     match b {
-        Some(x) => o.type_of(Some(x)) == PDF_ARRAY && o.array_length(x) == 4,
-        None => true,
+        Some(x) => Ok(o.type_of(Some(x)) == PDF_ARRAY && o.array_length(x)? == 4),
+        None => Ok(true),
     }
 }
 
@@ -1741,35 +1784,35 @@ fn _unused(_: &[Option<Obj>]) {
 
 impl Dpx {
     /// `pdf_doc_page_tree()`.
-    pub fn pdf_doc_page_tree(&mut self) -> Obj {
+    pub fn pdf_doc_page_tree(&mut self) -> Result<Obj> {
         self.pdf_doc_get_dictionary(b"Pages")
     }
     /// `pdf_doc_catalog()`.
-    pub fn pdf_doc_catalog(&mut self) -> Obj {
+    pub fn pdf_doc_catalog(&mut self) -> Result<Obj> {
         self.pdf_doc_get_dictionary(b"Catalog")
     }
     /// `pdf_doc_docinfo()`.
-    pub fn pdf_doc_docinfo(&mut self) -> Obj {
+    pub fn pdf_doc_docinfo(&mut self) -> Result<Obj> {
         self.pdf_doc_get_dictionary(b"Info")
     }
     /// `pdf_doc_names()`.
-    pub fn pdf_doc_names(&mut self) -> Obj {
+    pub fn pdf_doc_names(&mut self) -> Result<Obj> {
         self.pdf_doc_get_dictionary(b"Names")
     }
     /// `pdf_doc_this_page()`.
-    pub fn pdf_doc_this_page(&mut self) -> Obj {
+    pub fn pdf_doc_this_page(&mut self) -> Result<Obj> {
         self.pdf_doc_get_dictionary(b"@THISPAGE")
     }
     /// `pdf_doc_this_page_ref()`.
-    pub fn pdf_doc_this_page_ref(&mut self) -> Option<Obj> {
+    pub fn pdf_doc_this_page_ref(&mut self) -> Result<Option<Obj>> {
         self.pdf_doc_get_reference(b"@THISPAGE")
     }
     /// `pdf_doc_next_page_ref()`.
-    pub fn pdf_doc_next_page_ref(&mut self) -> Option<Obj> {
+    pub fn pdf_doc_next_page_ref(&mut self) -> Result<Option<Obj>> {
         self.pdf_doc_get_reference(b"@NEXTPAGE")
     }
     /// `pdf_doc_prev_page_ref()`.
-    pub fn pdf_doc_prev_page_ref(&mut self) -> Option<Obj> {
+    pub fn pdf_doc_prev_page_ref(&mut self) -> Result<Option<Obj>> {
         self.pdf_doc_get_reference(b"@PREVPAGE")
     }
 
@@ -1791,7 +1834,7 @@ impl Dpx {
             .into_iter()
             .flatten()
         {
-            if !self.o.is_array(Some(b)) || self.o.array_length(b) != 4 {
+            if !self.o.is_array(Some(b)) || self.o.array_length(b)? != 4 {
                 return Ok((-1, bbox));
             }
         }
@@ -1801,26 +1844,26 @@ impl Dpx {
                 .or(trim_box)
                 .or(bleed_box)
                 .unwrap_or(media_box);
-            self.o.link(b)
+            self.o.link(b)?
         } else {
             // (C links the missing boxes from the others and never
             // releases them: the leaked counts are a file's objects,
             // never written)
             let crop_box = match crop_box {
                 Some(c) => c,
-                None => self.o.link(media_box),
+                None => self.o.link(media_box)?,
             };
             let art_box = match art_box {
                 Some(c) => c,
-                None => self.o.link(crop_box),
+                None => self.o.link(crop_box)?,
             };
             let trim_box = match trim_box {
                 Some(c) => c,
-                None => self.o.link(crop_box),
+                None => self.o.link(crop_box)?,
             };
             let bleed_box = match bleed_box {
                 Some(c) => c,
-                None => self.o.link(crop_box),
+                None => self.o.link(crop_box)?,
             };
             let b = match opt_bbox {
                 PdfPageBoundary::CropBox => crop_box,
@@ -1830,36 +1873,36 @@ impl Dpx {
                 PdfPageBoundary::BleedBox => bleed_box,
                 PdfPageBoundary::Auto => crop_box,
             };
-            self.o.link(b)
+            self.o.link(b)?
         };
         for i in (0..4).rev() {
-            let e = self.o.get_array(boxo, i);
+            let e = self.o.get_array(boxo, i)?;
             let tmp = self.o.deref_obj(e)?;
             if !self.o.is_number(tmp) {
-                self.o.release_opt(tmp);
-                self.o.release(boxo);
+                self.o.release_opt(tmp)?;
+                self.o.release(boxo)?;
                 return Ok((-1, bbox));
             }
-            let x = self.o.number_value(tmp.expect("number"));
+            let x = self.o.number_value(tmp.expect("number"))?;
             match i {
                 0 => bbox.llx = x,
                 1 => bbox.lly = x,
                 2 => bbox.urx = x,
                 _ => bbox.ury = x,
             }
-            self.o.release_opt(tmp);
+            self.o.release_opt(tmp)?;
         }
         if self.conf.compat_mode == crate::ctx::CompatMode::Xdv || opt_bbox != PdfPageBoundary::Auto
         {
             for i in (0..4).rev() {
-                let e = self.o.get_array(media_box, i);
+                let e = self.o.get_array(media_box, i)?;
                 let tmp = self.o.deref_obj(e)?;
                 if !self.o.is_number(tmp) {
-                    self.o.release_opt(tmp);
-                    self.o.release(boxo);
+                    self.o.release_opt(tmp)?;
+                    self.o.release(boxo)?;
                     return Ok((-1, bbox));
                 }
-                let x = self.o.number_value(tmp.expect("number"));
+                let x = self.o.number_value(tmp.expect("number"))?;
                 match i {
                     0 => {
                         if bbox.llx < x {
@@ -1882,10 +1925,10 @@ impl Dpx {
                         }
                     }
                 }
-                self.o.release_opt(tmp);
+                self.o.release_opt(tmp)?;
             }
         }
-        self.o.release(boxo);
+        self.o.release(boxo)?;
         Ok((0, bbox))
     }
 
@@ -1894,7 +1937,7 @@ impl Dpx {
         &mut self,
         bbox: &mut PdfRect,
         rotate: Option<Obj>,
-    ) -> (i32, PdfTmatrix) {
+    ) -> Result<(i32, PdfTmatrix)> {
         let mut m = PdfTmatrix {
             a: 1.0,
             b: 0.0,
@@ -1905,11 +1948,11 @@ impl Dpx {
         };
         if let Some(r) = rotate {
             if !self.o.is_number(Some(r)) {
-                return (-1, m);
+                return Ok((-1, m));
             }
-            let deg = self.o.number_value(r);
+            let deg = self.o.number_value(r)?;
             if deg - f64::from(deg as i32) != 0.0 {
-                return (-1, m);
+                return Ok((-1, m));
             } else if deg != 0.0 {
                 let mut rot = deg as i32;
                 if rot % 90 == 0 {
@@ -1947,7 +1990,7 @@ impl Dpx {
                 }
             }
         }
-        (0, m)
+        Ok((0, m))
     }
 
     /// `get_page_properties`.
@@ -1962,10 +2005,10 @@ impl Dpx {
             (b"Rotate", &mut boxes.rotate),
             (b"Resources", &mut boxes.resources),
         ] {
-            let v = self.o.lookup_dict(pt, key);
+            let v = self.o.lookup_dict(pt, key)?;
             if let Some(tmp) = self.o.deref_obj(v)? {
                 let old = slot.replace(tmp);
-                self.o.release_opt(old);
+                self.o.release_opt(old)?;
             }
         }
         Ok(())
@@ -1974,17 +2017,17 @@ impl Dpx {
     /// `page_by_name`.
     fn page_by_name(&mut self, catalog: Obj, page_name: &[u8], boxes: &mut PdfBoxes) -> Result<()> {
         let le = |a: &[u8], b: &[u8]| strcmp_c(a, b);
-        let v = self.o.lookup_dict(catalog, b"Names");
+        let v = self.o.lookup_dict(catalog, b"Names")?;
         let names0 = self.o.deref_obj(v)?;
         if !self.o.is_dict(names0) {
-            self.o.release_opt(names0);
+            self.o.release_opt(names0)?;
             return Ok(());
         }
-        let v = self.o.lookup_dict(names0.expect("dict"), b"Dests");
+        let v = self.o.lookup_dict(names0.expect("dict"), b"Dests")?;
         let mut dests = self.o.deref_obj(v)?;
-        self.o.release_opt(names0);
+        self.o.release_opt(names0)?;
         if !self.o.is_dict(dests) {
-            self.o.release_opt(dests);
+            self.o.release_opt(dests)?;
             return Ok(());
         }
         let mut pos = [0usize; 5];
@@ -2000,49 +2043,49 @@ impl Dpx {
                 true
             } else {
                 let Some(d) = dests else { return Ok(()) };
-                let v = self.o.lookup_dict(d, b"Limits");
+                let v = self.o.lookup_dict(d, b"Limits")?;
                 let limits = self.o.deref_obj(v)?;
                 if !self.o.is_array(limits) {
-                    self.o.release_opt(limits);
+                    self.o.release_opt(limits)?;
                     return Ok(());
                 }
                 let l = limits.expect("array");
-                let e0 = self.o.get_array(l, 0);
+                let e0 = self.o.get_array(l, 0)?;
                 let start_obj = self.o.deref_obj(e0)?;
-                let e1 = self.o.get_array(l, 1);
+                let e1 = self.o.get_array(l, 1)?;
                 let end_obj = self.o.deref_obj(e1)?;
-                self.o.release(l);
+                self.o.release(l)?;
                 if !self.o.is_string(start_obj) || !self.o.is_string(end_obj) {
-                    self.o.release_opt(start_obj);
-                    self.o.release_opt(end_obj);
+                    self.o.release_opt(start_obj)?;
+                    self.o.release_opt(end_obj)?;
                     return Ok(());
                 }
-                let start = self.o.string_value(start_obj.expect("string")).to_vec();
-                let end = self.o.string_value(end_obj.expect("string")).to_vec();
-                self.o.release_opt(start_obj);
-                self.o.release_opt(end_obj);
+                let start = self.o.string_value(start_obj.expect("string"))?.to_vec();
+                let end = self.o.string_value(end_obj.expect("string"))?.to_vec();
+                self.o.release_opt(start_obj)?;
+                self.o.release_opt(end_obj)?;
                 le(page_name, &start) >= 0 && le(page_name, &end) <= 0
             };
             if recurse {
                 let d = dests.expect("dests");
-                let v = self.o.lookup_dict(d, b"Names");
+                let v = self.o.lookup_dict(d, b"Names")?;
                 let names = self.o.deref_obj(v)?;
                 if self.o.is_array(names) {
                     found_names = names;
                     break;
                 }
-                self.o.release_opt(names);
-                let v = self.o.lookup_dict(d, b"Kids");
+                self.o.release_opt(names)?;
+                let v = self.o.lookup_dict(d, b"Kids")?;
                 let kids = self.o.deref_obj(v)?;
                 if !self.o.is_array(kids) {
-                    self.o.release_opt(kids);
+                    self.o.release_opt(kids)?;
                     return Ok(());
                 }
                 let kids = kids.expect("array");
-                let kids_length = self.o.array_length(kids);
+                let kids_length = self.o.array_length(kids)?;
                 if pos[level as usize] < kids_length {
                     up_dests = dests;
-                    let e = self.o.get_array(kids, pos[level as usize] as i32);
+                    let e = self.o.get_array(kids, pos[level as usize] as i32)?;
                     dests = self.o.deref_obj(e)?;
                     level += 1;
                 }
@@ -2052,7 +2095,7 @@ impl Dpx {
                 if level >= 0 {
                     pos[level as usize] += 1;
                 }
-                self.o.release_opt(dests);
+                self.o.release_opt(dests)?;
                 dests = up_dests;
             }
             i += 1;
@@ -2060,47 +2103,47 @@ impl Dpx {
         let Some(names) = found_names else {
             return Ok(());
         };
-        let names_length = self.o.array_length(names);
+        let names_length = self.o.array_length(names)?;
         let mut page = None;
         let mut i = 0;
         while i < names_length {
-            let e = self.o.get_array(names, i as i32);
+            let e = self.o.get_array(names, i as i32)?;
             let name_obj = self.o.deref_obj(e)?;
             if !self.o.is_string(name_obj) {
-                self.o.release_opt(name_obj);
+                self.o.release_opt(name_obj)?;
                 i += 1;
                 continue;
             }
-            let name = self.o.string_value(name_obj.expect("string")).to_vec();
-            self.o.release_opt(name_obj);
+            let name = self.o.string_value(name_obj.expect("string"))?.to_vec();
+            self.o.release_opt(name_obj)?;
             if strcmp_c(page_name, &name) != 0 {
                 i += 1;
                 continue;
             }
             i += 1;
-            let e = self.o.get_array(names, i as i32);
+            let e = self.o.get_array(names, i as i32)?;
             let dest = self.o.deref_obj(e)?;
             let dest_inner = if self.o.is_dict(dest) {
-                let v = self.o.lookup_dict(dest.expect("dict"), b"D");
+                let v = self.o.lookup_dict(dest.expect("dict"), b"D")?;
                 let di = self.o.deref_obj(v)?;
-                self.o.release_opt(dest);
+                self.o.release_opt(dest)?;
                 if !self.o.is_array(di) {
-                    self.o.release_opt(di);
+                    self.o.release_opt(di)?;
                     return Ok(());
                 }
                 di
             } else if self.o.is_array(dest) {
                 dest
             } else {
-                self.o.release_opt(dest);
+                self.o.release_opt(dest)?;
                 i += 1;
                 continue;
             };
-            let e = self.o.get_array(dest_inner.expect("array"), 0);
+            let e = self.o.get_array(dest_inner.expect("array"), 0)?;
             page = self.o.deref_obj(e)?;
-            self.o.release_opt(dest_inner);
+            self.o.release_opt(dest_inner)?;
             if !self.o.is_dict(page) {
-                self.o.release_opt(page);
+                self.o.release_opt(page)?;
                 return Ok(());
             }
             break;
@@ -2118,10 +2161,10 @@ impl Dpx {
             }
             let v = self
                 .o
-                .lookup_dict(boxes.page_tree.expect("dict"), b"Parent");
+                .lookup_dict(boxes.page_tree.expect("dict"), b"Parent")?;
             boxes.page_tree = self.o.deref_obj(v)?;
             if !self.o.is_dict(boxes.page_tree) {
-                self.o.release_opt(boxes.page_tree);
+                self.o.release_opt(boxes.page_tree)?;
                 return Ok(());
             }
         }
@@ -2139,16 +2182,16 @@ impl Dpx {
         let mut page_tree = page_tree;
         let fail = |s: &mut Self, pt: Option<Obj>| s.o.release_opt(pt);
         let Some(pt0) = page_tree else { return Ok(()) };
-        let v = self.o.lookup_dict(pt0, b"Count");
+        let v = self.o.lookup_dict(pt0, b"Count")?;
         let tmp = self.o.deref_obj(v)?;
         if !self.o.is_number(tmp) {
-            self.o.release_opt(tmp);
-            return Ok(fail(self, page_tree));
+            self.o.release_opt(tmp)?;
+            return fail(self, page_tree);
         }
-        let count = self.o.number_value(tmp.expect("number")) as i32;
-        self.o.release_opt(tmp);
+        let count = self.o.number_value(tmp.expect("number"))? as i32;
+        self.o.release_opt(tmp)?;
         if page_no <= 0 || page_no > count {
-            return Ok(fail(self, page_tree));
+            return fail(self, page_tree);
         }
         let mut depth = crate::obj::PDF_OBJ_MAX_DEPTH;
         let mut page_idx = page_no - 1;
@@ -2161,33 +2204,33 @@ impl Dpx {
             }
             boxes.page_tree = page_tree;
             self.get_page_properties(boxes)?;
-            let v = self.o.lookup_dict(page_tree.expect("dict"), b"Kids");
+            let v = self.o.lookup_dict(page_tree.expect("dict"), b"Kids")?;
             let kids = self.o.deref_obj(v)?;
             let Some(kids) = kids else { break };
             if !self.o.is_array(Some(kids)) {
-                self.o.release(kids);
-                return Ok(fail(self, page_tree));
+                self.o.release(kids)?;
+                return fail(self, page_tree);
             }
-            kids_length = self.o.array_length(kids);
+            kids_length = self.o.array_length(kids)?;
             i = 0;
             while i < kids_length {
-                self.o.release_opt(page_tree);
-                let e = self.o.get_array(kids, i as i32);
+                self.o.release_opt(page_tree)?;
+                let e = self.o.get_array(kids, i as i32)?;
                 page_tree = self.o.deref_obj(e)?;
                 if !self.o.is_dict(page_tree) {
-                    return Ok(fail(self, page_tree));
+                    return fail(self, page_tree);
                 }
-                let v = self.o.lookup_dict(page_tree.expect("dict"), b"Count");
+                let v = self.o.lookup_dict(page_tree.expect("dict"), b"Count")?;
                 let tmp = self.o.deref_obj(v)?;
                 let count = if self.o.is_number(tmp) {
-                    let c = self.o.number_value(tmp.expect("number")) as i32;
-                    self.o.release_opt(tmp);
+                    let c = self.o.number_value(tmp.expect("number"))? as i32;
+                    self.o.release_opt(tmp)?;
                     c
                 } else if tmp.is_none() {
                     1
                 } else {
-                    self.o.release_opt(tmp);
-                    return Ok(fail(self, page_tree));
+                    self.o.release_opt(tmp)?;
+                    return fail(self, page_tree);
                 };
                 if page_idx < count {
                     break;
@@ -2195,10 +2238,10 @@ impl Dpx {
                 page_idx -= count;
                 i += 1;
             }
-            self.o.release(kids);
+            self.o.release(kids)?;
         }
         if depth == 0 || kids_length == i {
-            return Ok(fail(self, page_tree));
+            return fail(self, page_tree);
         }
         boxes.page_tree = page_tree;
         Ok(())
@@ -2225,7 +2268,7 @@ impl Dpx {
             if let Some(name) = page_name {
                 self.page_by_name(catalog, name, &mut boxes)?;
             } else if page_no > 0 {
-                let v = self.o.lookup_dict(catalog, b"Pages");
+                let v = self.o.lookup_dict(catalog, b"Pages")?;
                 let pt = self.o.deref_obj(v)?;
                 self.page_by_number(pt, page_no, &mut boxes)?;
             } else {
@@ -2237,7 +2280,7 @@ impl Dpx {
                 break 'get false;
             }
             if want_resources {
-                resources = self.o.link_opt(boxes.resources);
+                resources = self.o.link_opt(boxes.resources)?;
             }
             let (e, b) = self.set_bounding_box(
                 opt_bbox,
@@ -2251,12 +2294,12 @@ impl Dpx {
             if e != 0 {
                 break 'get false;
             }
-            let (e, m) = self.set_transform_matrix(&mut bbox, boxes.rotate);
+            let (e, m) = self.set_transform_matrix(&mut bbox, boxes.rotate)?;
             matrix = m;
             e == 0
         };
         if !ok {
-            self.o.release_opt(page_tree);
+            self.o.release_opt(page_tree)?;
             page_tree = None;
         }
         for b in [
@@ -2268,7 +2311,7 @@ impl Dpx {
             boxes.rotate,
             boxes.resources,
         ] {
-            self.o.release_opt(b);
+            self.o.release_opt(b)?;
         }
         Ok((page_tree, bbox, matrix, resources))
     }

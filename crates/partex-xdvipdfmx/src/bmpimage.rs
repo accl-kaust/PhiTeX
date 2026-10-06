@@ -381,7 +381,7 @@ impl Dpx {
 
         // Start reading raster data
         let stream = self.o.new_stream(STREAM_COMPRESS);
-        let stream_dict = self.o.stream_dict(stream);
+        let stream_dict = self.o.stream_dict(stream)?;
 
         // Color space: Indexed or DeviceRGB
         let colorspace = if hdr.bit_count < 24 {
@@ -399,17 +399,17 @@ impl Dpx {
             let lookup = self.o.new_string(&palette);
             let colorspace = self.o.new_array();
             let n = self.o.new_name(b"Indexed");
-            self.o.add_array(colorspace, n);
+            self.o.add_array(colorspace, n)?;
             let n = self.o.new_name(b"DeviceRGB");
-            self.o.add_array(colorspace, n);
+            self.o.add_array(colorspace, n)?;
             let n = self.o.new_number(f64::from(num_palette - 1));
-            self.o.add_array(colorspace, n);
-            self.o.add_array(colorspace, lookup);
+            self.o.add_array(colorspace, n)?;
+            self.o.add_array(colorspace, lookup)?;
             colorspace
         } else {
             self.o.new_name(b"DeviceRGB")
         };
-        self.o.put(stream_dict, b"ColorSpace", colorspace);
+        self.o.put(stream_dict, b"ColorSpace", colorspace)?;
 
         // Raster data of BMP is four-byte aligned.
         let rowbytes = (info.width.wrapping_mul(i32::from(hdr.bit_count)) + 7) / 8;
@@ -428,7 +428,7 @@ impl Dpx {
                 let s = fp.read(dib_rowbytes);
                 if s.len() != dib_rowbytes {
                     warn!("Reading BMP raster data failed...");
-                    self.o.release(stream);
+                    self.o.release(stream)?;
                     return Ok(-1);
                 }
                 data[n * urow..n * urow + dib_rowbytes].copy_from_slice(s);
@@ -442,7 +442,7 @@ impl Dpx {
             };
             if !ok {
                 warn!("Reading BMP raster data failed...");
-                self.o.release(stream);
+                self.o.release(stream)?;
                 return Ok(-1);
             }
         } else {
@@ -450,7 +450,7 @@ impl Dpx {
                 "Unknown/Unsupported compression type for BMP image: {}",
                 hdr.compression
             );
-            self.o.release(stream);
+            self.o.release(stream)?;
             return Ok(-1);
         }
 
@@ -463,10 +463,10 @@ impl Dpx {
 
         if flip {
             for n in (0..uheight).rev() {
-                self.o.add_stream(stream, &data[n * urow..(n + 1) * urow]);
+                self.o.add_stream(stream, &data[n * urow..(n + 1) * urow])?;
             }
         } else {
-            self.o.add_stream(stream, &data[..urow * uheight]);
+            self.o.add_stream(stream, &data[..urow * uheight])?;
         }
 
         // Predictor is usually not so efficient for indexed images.
@@ -477,7 +477,7 @@ impl Dpx {
                 info.width,
                 info.bits_per_component,
                 info.num_components,
-            );
+            )?;
         }
         self.pdf_ximage_set_image(xobj_id, &info, stream)?;
 

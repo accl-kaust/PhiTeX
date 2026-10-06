@@ -60,7 +60,7 @@ impl Dpx {
         let pdfunit = |v: f64| round_acc((1000.0 * v) / upem, 1.0);
 
         let descriptor = self.o.new_dict();
-        self.o.put_name(descriptor, b"Type", b"FontDescriptor");
+        self.o.put_name(descriptor, b"Type", b"FontDescriptor")?;
 
         if *embed != 0 {
             // License: the least restrictive license granted takes
@@ -86,34 +86,34 @@ impl Dpx {
             descriptor,
             b"Ascent",
             pdfunit(f64::from(os2.s_typo_ascender)),
-        );
+        )?;
         self.o.put_number(
             descriptor,
             b"Descent",
             pdfunit(f64::from(os2.s_typo_descender)),
-        );
+        )?;
         if stemv < 0 {
             // Not given by the option '-v'.
             let w = f64::from(os2.us_weight_class) / 65.0;
             stemv = (w * w + 50.0) as i32;
         }
-        self.o.put_number(descriptor, b"StemV", f64::from(stemv));
+        self.o.put_number(descriptor, b"StemV", f64::from(stemv))?;
         if os2.version == 0x0002 {
             self.o.put_number(
                 descriptor,
                 b"CapHeight",
                 pdfunit(f64::from(os2.s_cap_height)),
-            );
+            )?;
             // Optional.
             self.o
-                .put_number(descriptor, b"XHeight", pdfunit(f64::from(os2.sx_height)));
+                .put_number(descriptor, b"XHeight", pdfunit(f64::from(os2.sx_height)))?;
         } else {
             // Arbitrary.
             self.o.put_number(
                 descriptor,
                 b"CapHeight",
                 pdfunit(f64::from(os2.s_typo_ascender)),
-            );
+            )?;
         }
         // Optional.
         if os2.x_avg_char_width != 0 {
@@ -121,20 +121,20 @@ impl Dpx {
                 descriptor,
                 b"AvgWidth",
                 pdfunit(f64::from(os2.x_avg_char_width)),
-            );
+            )?;
         }
 
         // BoundingBox (array).
         let bbox = self.o.new_array();
         for v in [head.x_min, head.y_min, head.x_max, head.y_max] {
             let n = self.o.new_number(pdfunit(f64::from(v)));
-            self.o.add_array(bbox, n);
+            self.o.add_array(bbox, n)?;
         }
-        self.o.put(descriptor, b"FontBBox", bbox);
+        self.o.put(descriptor, b"FontBBox", bbox)?;
 
         // post
         self.o
-            .put_number(descriptor, b"ItalicAngle", fixed(post.italic_angle));
+            .put_number(descriptor, b"ItalicAngle", fixed(post.italic_angle))?;
 
         // Flags.
         if os2.fs_selection & (1 << 0) != 0 {
@@ -153,7 +153,7 @@ impl Dpx {
             flag |= FIXEDWIDTH;
         }
 
-        self.o.put_number(descriptor, b"Flags", f64::from(flag));
+        self.o.put_number(descriptor, b"Flags", f64::from(flag))?;
 
         // Insert panose if you want.
         if type_ == 0 {
@@ -164,8 +164,8 @@ impl Dpx {
             panose[2..].copy_from_slice(&os2.panose);
 
             let styledict = self.o.new_dict();
-            self.o.put_string(styledict, b"Panose", &panose);
-            self.o.put(descriptor, b"Style", styledict);
+            self.o.put_string(styledict, b"Panose", &panose)?;
+            self.o.put(descriptor, b"Style", styledict)?;
         }
 
         Ok(Some(descriptor))

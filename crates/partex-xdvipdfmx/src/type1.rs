@@ -201,10 +201,14 @@ impl Dpx {
 
         // Use "space", "H", "p", and "b" for various values. Those
         // characters should not "seac". (no accent)
-        let cs = cffont.cstrings.as_ref().expect("cstrings");
-        let subrs = cffont.subrs.first().and_then(Option::as_ref);
         // (cff_glyph_lookup is a card16: not found is .notdef, gid 0.)
         let gid = i32::from(cffont.cff_glyph_lookup(b"space")?);
+        // (C reads `cffont->cstrings->count` from here on: a font without
+        // CharStrings is an error, not a NULL dereference.)
+        let Some(cs) = cffont.cstrings.as_ref() else {
+            fatal!("No CharStrings found in Type 1 font.");
+        };
+        let subrs = cffont.subrs.first().and_then(Option::as_ref);
         if gid >= 0 && gid < i32::from(cs.count) {
             self.t1char_get_metrics(charstring(cs, gid as usize), subrs, Some(&mut gm))?;
             defaultwidth = gm.wx;
@@ -254,7 +258,7 @@ impl Dpx {
         }
 
         let fontname = self.font.fonts[font_id as usize].fontname.clone();
-        let descriptor = self.pdf_font_get_descriptor(font_id);
+        let descriptor = self.pdf_font_get_descriptor(font_id)?;
 
         if fontname.as_deref().is_some_and(|f| !strstr(f, b"Sans")) {
             flags |= FONT_FLAG_SERIF;
@@ -264,12 +268,12 @@ impl Dpx {
         }
         flags |= FONT_FLAG_SYMBOLIC; // FIXME
 
-        self.o.put_number(descriptor, b"CapHeight", capheight);
-        self.o.put_number(descriptor, b"Ascent", ascent);
-        self.o.put_number(descriptor, b"Descent", descent);
-        self.o.put_number(descriptor, b"ItalicAngle", italicangle);
-        self.o.put_number(descriptor, b"StemV", stemv);
-        self.o.put_number(descriptor, b"Flags", f64::from(flags));
+        self.o.put_number(descriptor, b"CapHeight", capheight)?;
+        self.o.put_number(descriptor, b"Ascent", ascent)?;
+        self.o.put_number(descriptor, b"Descent", descent)?;
+        self.o.put_number(descriptor, b"ItalicAngle", italicangle)?;
+        self.o.put_number(descriptor, b"StemV", stemv)?;
+        self.o.put_number(descriptor, b"Flags", f64::from(flags))?;
         Ok(())
     }
     /// `add_metrics` (static, prefixed): `Widths`, `FirstChar`, `LastChar`.
@@ -281,8 +285,8 @@ impl Dpx {
         widths: &[f64],
         num_glyphs: i32,
     ) -> Result<()> {
-        let fontdict = self.pdf_font_get_resource(font_id);
-        let descriptor = self.pdf_font_get_descriptor(font_id);
+        let fontdict = self.pdf_font_get_resource(font_id)?;
+        let descriptor = self.pdf_font_get_descriptor(font_id)?;
         let usedchars = self.font.fonts[font_id as usize]
             .usedchars
             .clone()
@@ -313,11 +317,11 @@ impl Dpx {
         for i in 0..4 {
             let val = td.cff_dict_get(b"FontBBox", i)?;
             let n = self.o.new_number(round_acc(val, 1.0));
-            self.o.add_array(array, n);
+            self.o.add_array(array, n)?;
         }
-        let l = self.o.link(array);
-        self.o.put(descriptor, b"FontBBox", l);
-        self.o.release(array);
+        let l = self.o.link(array)?;
+        self.o.put(descriptor, b"FontBBox", l)?;
+        self.o.release(array)?;
 
         let array = self.o.new_array();
         if num_glyphs <= 1 {
@@ -325,7 +329,7 @@ impl Dpx {
             firstchar = 0;
             lastchar = 0;
             let n = self.o.new_number(0.0);
-            self.o.add_array(array, n);
+            self.o.add_array(array, n)?;
         } else {
             let (mut fc, mut lc) = (255, 0);
             for code in 0..256 {
@@ -344,7 +348,7 @@ impl Dpx {
             lastchar = lc;
             if firstchar > lastchar {
                 warn!("No glyphs actually used???");
-                self.o.release(array);
+                self.o.release(array)?;
                 return Ok(());
             }
 
@@ -361,20 +365,20 @@ impl Dpx {
                     0.0
                 };
                 let n = self.o.new_number(v);
-                self.o.add_array(array, n);
+                self.o.add_array(array, n)?;
             }
         }
 
-        if self.o.array_length(array) > 0 {
-            let r = self.o.ref_obj(array);
-            self.o.put(fontdict, b"Widths", r);
+        if self.o.array_length(array)? > 0 {
+            let r = self.o.ref_obj(array)?;
+            self.o.put(fontdict, b"Widths", r)?;
         }
-        self.o.release(array);
+        self.o.release(array)?;
 
         self.o
-            .put_number(fontdict, b"FirstChar", f64::from(firstchar));
+            .put_number(fontdict, b"FirstChar", f64::from(firstchar))?;
         self.o
-            .put_number(fontdict, b"LastChar", f64::from(lastchar));
+            .put_number(fontdict, b"LastChar", f64::from(lastchar))?;
         Ok(())
     }
     /// `write_fontfile` (static, prefixed, the non-LIBDPX one): the
@@ -387,7 +391,7 @@ impl Dpx {
     ) -> Result<i32> {
         let mut wbuf = [0u8; WBUF_SIZE];
 
-        let descriptor = self.pdf_font_get_descriptor(font_id);
+        let descriptor = self.pdf_font_get_descriptor(font_id)?;
 
         let mut topdict_idx = CffIndex::cff_new_index(1);
         // Force existence of Encoding.
@@ -493,16 +497,17 @@ impl Dpx {
 
         // Flush Font File
         let fontfile = self.o.new_stream(STREAM_COMPRESS);
-        let stream_dict = self.o.stream_dict(fontfile);
-        let r = self.o.ref_obj(fontfile);
-        self.o.put(descriptor, b"FontFile3", r);
-        self.o.put_name(stream_dict, b"Subtype", b"Type1C");
-        self.o.add_stream(fontfile, &stream_data[..offset as usize]);
-        self.o.release(fontfile);
+        let stream_dict = self.o.stream_dict(fontfile)?;
+        let r = self.o.ref_obj(fontfile)?;
+        self.o.put(descriptor, b"FontFile3", r)?;
+        self.o.put_name(stream_dict, b"Subtype", b"Type1C")?;
+        self.o
+            .add_stream(fontfile, &stream_data[..offset as usize])?;
+        self.o.release(fontfile)?;
         if self.o.check_version(2, 0) < 0 {
             let cs = pdfcharset.expect("pdfcharset");
-            let data = self.o.stream_data(cs).to_vec();
-            self.o.put_string(descriptor, b"CharSet", &data);
+            let data = self.o.stream_data(cs)?.to_vec();
+            self.o.put_string(descriptor, b"CharSet", &data)?;
         }
 
         Ok(offset)
@@ -515,7 +520,7 @@ impl Dpx {
             return Ok(0);
         }
 
-        let fontdict = self.pdf_font_get_resource(font_id);
+        let fontdict = self.pdf_font_get_resource(font_id)?;
         let font = &self.font.fonts[fid];
         let encoding_id = font.encoding_id;
         let usedchars = font.usedchars.clone().expect("usedchars");
@@ -555,13 +560,13 @@ impl Dpx {
         } else {
             let enc_vec = builtin.take().unwrap();
             // Create enc_vec and ToUnicode CMap for built-in encoding.
-            if self.o.lookup_dict(fontdict, b"ToUnicode").is_none() {
+            if self.o.lookup_dict(fontdict, b"ToUnicode")?.is_none() {
                 let used = usedchars.borrow().clone();
                 let tounicode = self.pdf_create_ToUnicode_CMap(&fullname, &enc_vec, Some(&used))?;
                 if let Some(tounicode) = tounicode {
-                    let r = self.o.ref_obj(tounicode);
-                    self.o.put(fontdict, b"ToUnicode", r);
-                    self.o.release(tounicode);
+                    let r = self.o.ref_obj(tounicode)?;
+                    self.o.put(fontdict, b"ToUnicode", r)?;
+                    self.o.release(tounicode)?;
                 }
             }
             enc_vec
@@ -662,8 +667,8 @@ impl Dpx {
                     num_glyphs += 1;
 
                     // CharSet is actually string object.
-                    self.o.add_stream(pdfcharset, b"/");
-                    self.o.add_stream(pdfcharset, glyph);
+                    self.o.add_stream(pdfcharset, b"/")?;
+                    self.o.add_stream(pdfcharset, glyph)?;
                 }
             }
             if encoding.num_supps > 0 {
@@ -749,8 +754,8 @@ impl Dpx {
                             cffont.cff_get_seac_sid(name) as SSid;
                         charset.num_entries += 1;
                         // CharSet is actually string object.
-                        self.o.add_stream(pdfcharset, b"/");
-                        self.o.add_stream(pdfcharset, name);
+                        self.o.add_stream(pdfcharset, b"/")?;
+                        self.o.add_stream(pdfcharset, name)?;
                     }
 
                     let mut i = 0;
@@ -768,8 +773,8 @@ impl Dpx {
                             cffont.cff_get_seac_sid(name) as SSid;
                         charset.num_entries += 1;
                         // CharSet is actually string object.
-                        self.o.add_stream(pdfcharset, b"/");
-                        self.o.add_stream(pdfcharset, name);
+                        self.o.add_stream(pdfcharset, b"/")?;
+                        self.o.add_stream(pdfcharset, name)?;
                     }
                 }
                 widths[g] = gm.wx;
@@ -805,7 +810,7 @@ impl Dpx {
 
         let _offset = self.type1_write_fontfile(font_id, &mut cffont, Some(pdfcharset))?;
 
-        self.o.release(pdfcharset);
+        self.o.release(pdfcharset)?;
 
         cffont.cff_close();
 

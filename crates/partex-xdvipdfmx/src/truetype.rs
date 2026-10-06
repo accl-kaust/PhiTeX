@@ -326,8 +326,8 @@ impl Dpx {
 
         // Reading fontdict before checking fonttype conflicts with PKFONT
         // because pdf_font_get_resource() always makes a dictionary.
-        let fontdict = self.pdf_font_get_resource(font_id);
-        let descriptor = self.pdf_font_get_descriptor(font_id);
+        let fontdict = self.pdf_font_get_resource(font_id)?;
+        let descriptor = self.pdf_font_get_descriptor(font_id)?;
         if embedding == 0 {
             warn!("No-embed option not supported for TrueType font");
             embedding = 1;
@@ -363,8 +363,8 @@ impl Dpx {
                         error = -1;
                     }
                     Some(tmp) => {
-                        self.o.merge_dict(descriptor, tmp);
-                        self.o.release(tmp);
+                        self.o.merge_dict(descriptor, tmp)?;
+                        self.o.release(tmp)?;
                     }
                 }
             }
@@ -381,8 +381,8 @@ impl Dpx {
         drop(sfont);
 
         if error == 0 {
-            self.o.put_name(fontdict, b"Type", b"Font");
-            self.o.put_name(fontdict, b"Subtype", b"TrueType");
+            self.o.put_name(fontdict, b"Type", b"Font")?;
+            self.o.put_name(fontdict, b"Subtype", b"TrueType")?;
             self.font.fonts[font_id as usize].subtype = PDF_FONT_FONTTYPE_TRUETYPE;
         }
 
@@ -482,9 +482,9 @@ impl Dpx {
         drop(sfont);
 
         let descriptor = descriptor.expect("pdf_font_load_truetype: no descriptor");
-        let r = self.o.ref_obj(fontfile);
-        self.o.put(descriptor, b"FontFile2", r); /* XXX */
-        self.o.release(fontfile);
+        let r = self.o.ref_obj(fontfile)?;
+        self.o.put(descriptor, b"FontFile2", r)?; /* XXX */
+        self.o.release(fontfile)?;
 
         Ok(0)
     }
@@ -531,18 +531,18 @@ impl Dpx {
                 0.0
             };
             let n = self.o.new_number(v);
-            self.o.add_array(array, n);
+            self.o.add_array(array, n)?;
         }
-        if self.o.array_length(array) > 0 {
-            let r = self.o.ref_obj(array);
-            self.o.put(fontdict, b"Widths", r);
+        if self.o.array_length(array)? > 0 {
+            let r = self.o.ref_obj(array)?;
+            self.o.put(fontdict, b"Widths", r)?;
         }
-        self.o.release(array);
+        self.o.release(array)?;
 
         self.o
-            .put_number(fontdict, b"FirstChar", f64::from(firstchar));
+            .put_number(fontdict, b"FirstChar", f64::from(firstchar))?;
         self.o
-            .put_number(fontdict, b"LastChar", f64::from(lastchar));
+            .put_number(fontdict, b"LastChar", f64::from(lastchar))?;
         Ok(())
     }
 

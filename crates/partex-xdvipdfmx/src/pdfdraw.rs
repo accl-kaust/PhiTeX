@@ -764,7 +764,12 @@ impl Dpx {
     }
 
     /// `pdf_dev__rectshape`: `m` optional.
-    fn pdf_dev__rectshape(&mut self, r: &PdfRect, m: Option<&PdfTmatrix>, opchr: u8) -> i32 {
+    fn pdf_dev__rectshape(
+        &mut self,
+        r: &PdfRect,
+        m: Option<&PdfTmatrix>,
+        opchr: u8,
+    ) -> Result<i32> {
         assert!(pt_op_valid(opchr));
 
         let isclip = opchr == b'W';
@@ -777,17 +782,17 @@ impl Dpx {
         if let Some(m) = m
             && (isclip || invertible_matrix(m) == 0)
         {
-            return -1;
+            return Ok(-1);
         }
 
-        self.graphics_mode();
+        self.graphics_mode()?;
 
         if !isclip {
-            self.pdf_dev_gsave();
+            self.pdf_dev_gsave()?;
         }
-        self.pdf_dev_newpath();
+        self.pdf_dev_newpath()?;
         if !isclip && let Some(m) = m {
-            self.pdf_dev_concat(m);
+            self.pdf_dev_concat(m)?;
         }
 
         let p = PdfCoord { x: r.llx, y: r.lly };
@@ -806,27 +811,27 @@ impl Dpx {
         buf.push(b' ');
         buf.push(opchr);
 
-        self.pdf_doc_add_page_content(buf.as_bytes());
+        self.pdf_doc_add_page_content(buf.as_bytes())?;
 
         if isclip {
-            self.pdf_dev_newpath();
+            self.pdf_dev_newpath()?;
         } else {
-            self.pdf_dev_grestore();
+            self.pdf_dev_grestore()?;
         }
 
-        0
+        Ok(0)
     }
     /// `pdf_dev__flushpath` on the current gstate's path.
-    fn pdf_dev__flushpath(&mut self, opchr: u8, rule: i32, ignore_rule: i32) -> i32 {
+    fn pdf_dev__flushpath(&mut self, opchr: u8, rule: i32, ignore_rule: i32) -> Result<i32> {
         assert!(pt_op_valid(opchr));
         let b_len = FORMAT_BUFF_LEN;
 
         if self.pdfdraw_gs().path.pa_length() <= 0 {
-            return 0;
+            return Ok(0);
         }
         let pa = self.pdfdraw_gs().path.clone();
 
-        self.graphics_mode();
+        self.graphics_mode()?;
         let mut b = Buf::new();
         let isrect = pa.pdf_path__isarect(ignore_rule);
         if isrect != 0 {
@@ -845,7 +850,7 @@ impl Dpx {
             b.push(b' ');
             b.push(b'r');
             b.push(b'e');
-            self.pdf_doc_add_page_content(b.as_bytes()); /* op: re */
+            self.pdf_doc_add_page_content(b.as_bytes())?; /* op: re */
             b = Buf::new();
         } else {
             for pe in &pa.path {
@@ -857,12 +862,12 @@ impl Dpx {
                 b.push(b' ');
                 b.push(pe.pe_opchr());
                 if b.len() + 128 > b_len {
-                    self.pdf_doc_add_page_content(b.as_bytes()); /* op: m l c v y h */
+                    self.pdf_doc_add_page_content(b.as_bytes())?; /* op: m l c v y h */
                     b = Buf::new();
                 }
             }
             if !b.is_empty() {
-                self.pdf_doc_add_page_content(b.as_bytes()); /* op: m l c v y h */
+                self.pdf_doc_add_page_content(b.as_bytes())?; /* op: m l c v y h */
                 b = Buf::new();
             }
         }
@@ -873,9 +878,9 @@ impl Dpx {
             b.push(b'*');
         }
 
-        self.pdf_doc_add_page_content(b.as_bytes()); /* op: f F s S b B W f* F* s* S* b* B* W* */
+        self.pdf_doc_add_page_content(b.as_bytes())?; /* op: f F s S b B W f* F* s* S* b* B* W* */
 
-        0
+        Ok(0)
     }
     /// `init_xgstate`.
     fn init_xgstate(&mut self) {
@@ -883,19 +888,21 @@ impl Dpx {
         self.draw.xgs_count = 0;
     }
     /// `clear_xgstate`.
-    fn clear_xgstate(&mut self) {
+    fn clear_xgstate(&mut self) -> Result<()> {
         while let Some(xgs) = self.draw.xgs_stack.dpx_stack_pop() {
-            self.o.release_opt(xgs.object);
-            self.o.release_opt(xgs.accumlated);
+            self.o.release_opt(xgs.object)?;
+            self.o.release_opt(xgs.accumlated)?;
         }
+        Ok(())
     }
     /// `clear_a_gstate`: releases its objects.
-    fn clear_a_gstate(&mut self, gs: &mut PdfGstate) {
+    fn clear_a_gstate(&mut self, gs: &mut PdfGstate) -> Result<()> {
         gs.path.clear_a_path();
         if let Some(x) = gs.extgstate {
-            self.o.release(x);
+            self.o.release(x)?;
         }
         *gs = PdfGstate::default();
+        Ok(())
     }
     /// `pdf_dev_set_xgstate`.
     fn pdf_dev_set_xgstate(&mut self, diff: Obj, accumlated: Obj) -> Result<i32> {
@@ -909,13 +916,13 @@ impl Dpx {
         buf.extend(res_name.as_bytes());
         buf.extend(b" gs");
         buf.0.truncate(63);
-        self.pdf_doc_add_page_content(buf.as_bytes());
-        let d = self.o.link(diff);
+        self.pdf_doc_add_page_content(buf.as_bytes())?;
+        let d = self.o.link(diff)?;
         self.pdf_doc_add_page_resource(b"ExtGState", res_name.as_bytes(), d)?;
         if let Some(x) = self.pdfdraw_gs().extgstate {
-            self.o.release(x);
+            self.o.release(x)?;
         }
-        let a = self.o.link(accumlated);
+        let a = self.o.link(accumlated)?;
         self.pdfdraw_gs_mut().extgstate = Some(a);
         self.draw.xgs_count += 1;
 
@@ -927,7 +934,7 @@ impl Dpx {
 
         let target = if let Some(xgs) = self.draw.xgs_stack.dpx_stack_top() {
             let a = xgs.accumlated.expect("ExtGState");
-            self.o.link(a)
+            self.o.link(a)?
         } else {
             if self.pdfdraw_gs().extgstate.is_none() && force == 0 {
                 return Ok(0);
@@ -935,33 +942,33 @@ impl Dpx {
             default_xgs(self)?
         };
         let current = if let Some(x) = self.pdfdraw_gs().extgstate {
-            self.o.link(x)
+            self.o.link(x)?
         } else {
             default_xgs(self)?
         };
 
         let diff = self.o.new_dict();
-        let keys = self.o.dict_keys(target);
-        for i in 0..self.o.array_length(keys) {
-            let key = self.o.get_array(keys, i as i32).unwrap();
-            let name = self.o.name_value(key).to_vec();
-            let value1 = self.o.lookup_dict(target, &name);
-            let value2 = self.o.lookup_dict(current, &name);
-            let is_diff = self.o.compare_object(value1, value2);
+        let keys = self.o.dict_keys(target)?;
+        for i in 0..self.o.array_length(keys)? {
+            let key = self.o.get_array(keys, i as i32)?.unwrap();
+            let name = self.o.name_value(key)?.to_vec();
+            let value1 = self.o.lookup_dict(target, &name)?;
+            let value2 = self.o.lookup_dict(current, &name)?;
+            let is_diff = self.o.compare_object(value1, value2)?;
             if is_diff != 0 {
-                let k = self.o.link(key);
-                let v = self.o.link_opt(value1);
-                self.o.add_dict(diff, k, v);
+                let k = self.o.link(key)?;
+                let v = self.o.link_opt(value1)?;
+                self.o.add_dict(diff, k, v)?;
                 need_reset = true;
             }
         }
-        self.o.release(keys);
+        self.o.release(keys)?;
         if need_reset {
             self.pdf_dev_set_xgstate(diff, target)?;
         }
-        self.o.release(diff);
-        self.o.release(current);
-        self.o.release(target);
+        self.o.release(diff)?;
+        self.o.release(current)?;
+        self.o.release(target)?;
 
         Ok(0)
     }
@@ -970,12 +977,12 @@ impl Dpx {
         let accumlated = if let Some(current) = self.draw.xgs_stack.dpx_stack_top() {
             let ca = current.accumlated.expect("ExtGState");
             let a = self.o.new_dict();
-            self.o.merge_dict(a, ca);
+            self.o.merge_dict(a, ca)?;
             a
         } else {
             default_xgs(self)?
         };
-        self.o.merge_dict(accumlated, object);
+        self.o.merge_dict(accumlated, object)?;
         self.draw.xgs_stack.dpx_stack_push(XgsRes {
             object: Some(object),
             accumlated: Some(accumlated),
@@ -993,32 +1000,32 @@ impl Dpx {
         };
         let accumlated = if let Some(target) = self.draw.xgs_stack.dpx_stack_top() {
             let a = target.accumlated.expect("ExtGState");
-            self.o.link(a)
+            self.o.link(a)?
         } else {
             default_xgs(self)?
         };
         let cobject = current.object.expect("ExtGState");
-        let keys = self.o.dict_keys(cobject);
+        let keys = self.o.dict_keys(cobject)?;
         let revert = self.o.new_dict();
-        for i in 0..self.o.array_length(keys) {
-            let key = self.o.get_array(keys, i as i32).unwrap();
-            let name = self.o.name_value(key).to_vec();
-            let value = self.o.lookup_dict(accumlated, &name);
+        for i in 0..self.o.array_length(keys)? {
+            let key = self.o.get_array(keys, i as i32)?.unwrap();
+            let name = self.o.name_value(key)?.to_vec();
+            let value = self.o.lookup_dict(accumlated, &name)?;
             if let Some(value) = value {
-                let k = self.o.link(key);
-                let v = self.o.link(value);
-                self.o.add_dict(revert, k, Some(v));
+                let k = self.o.link(key)?;
+                let v = self.o.link(value)?;
+                self.o.add_dict(revert, k, Some(v))?;
             } else {
                 warn!("No previous ExtGState entry known, ignoring...");
             }
         }
         self.pdf_dev_set_xgstate(revert, accumlated)?;
-        self.o.release(revert);
-        self.o.release(keys);
-        self.o.release(accumlated);
+        self.o.release(revert)?;
+        self.o.release(keys)?;
+        self.o.release(accumlated)?;
 
-        self.o.release(cobject);
-        self.o.release_opt(current.accumlated);
+        self.o.release(cobject)?;
+        self.o.release_opt(current.accumlated)?;
         Ok(())
     }
     /// `pdf_dev_init_gstates`.
@@ -1032,46 +1039,47 @@ impl Dpx {
         self.init_xgstate();
     }
     /// `pdf_dev_clear_gstates`.
-    pub fn pdf_dev_clear_gstates(&mut self) {
+    pub fn pdf_dev_clear_gstates(&mut self) -> Result<()> {
         if self.draw.gs_stack.dpx_stack_depth() > 1 {
             /* at least 1 elem. */
             warn!("GS stack depth is not zero at the end of the document.");
         }
 
         while let Some(mut gs) = self.draw.gs_stack.dpx_stack_pop() {
-            self.clear_a_gstate(&mut gs);
+            self.clear_a_gstate(&mut gs)?;
         }
 
-        self.clear_xgstate();
+        self.clear_xgstate()?;
+        Ok(())
     }
     /// `pdf_dev_gsave`.
-    pub fn pdf_dev_gsave(&mut self) -> i32 {
+    pub fn pdf_dev_gsave(&mut self) -> Result<i32> {
         let mut gs1 = PdfGstate::default();
         gs1.init_a_gstate();
         gs1.copy_a_gstate(self.pdfdraw_gs());
-        gs1.extgstate = self.o.link_opt(gs1.extgstate);
+        gs1.extgstate = self.o.link_opt(gs1.extgstate)?;
         self.draw.gs_stack.dpx_stack_push(gs1);
 
-        self.pdf_doc_add_page_content(b" q"); /* op: q */
+        self.pdf_doc_add_page_content(b" q")?; /* op: q */
 
-        0
+        Ok(0)
     }
     /// `pdf_dev_grestore`.
-    pub fn pdf_dev_grestore(&mut self) -> i32 {
+    pub fn pdf_dev_grestore(&mut self) -> Result<i32> {
         if self.draw.gs_stack.dpx_stack_depth() <= 1 {
             /* Initial state at bottom */
             warn!("Too many grestores.");
-            return -1;
+            return Ok(-1);
         }
 
         let mut gs = self.draw.gs_stack.dpx_stack_pop().unwrap();
-        self.clear_a_gstate(&mut gs);
+        self.clear_a_gstate(&mut gs)?;
 
-        self.pdf_doc_add_page_content(b" Q"); /* op: Q */
+        self.pdf_doc_add_page_content(b" Q")?; /* op: Q */
 
         self.pdf_dev_reset_fonts(0);
 
-        0
+        Ok(0)
     }
     /// `pdf_dev_push_gstate`.
     pub fn pdf_dev_push_gstate(&mut self) -> i32 {
@@ -1084,17 +1092,17 @@ impl Dpx {
         0
     }
     /// `pdf_dev_pop_gstate`.
-    pub fn pdf_dev_pop_gstate(&mut self) -> i32 {
+    pub fn pdf_dev_pop_gstate(&mut self) -> Result<i32> {
         if self.draw.gs_stack.dpx_stack_depth() <= 1 {
             /* Initial state at bottom */
             warn!("Too many grestores.");
-            return -1;
+            return Ok(-1);
         }
 
         let mut gs = self.draw.gs_stack.dpx_stack_pop().unwrap();
-        self.clear_a_gstate(&mut gs);
+        self.clear_a_gstate(&mut gs)?;
 
-        0
+        Ok(0)
     }
     /// `pdf_dev_current_depth`.
     #[must_use]
@@ -1102,7 +1110,7 @@ impl Dpx {
         self.draw.gs_stack.dpx_stack_depth() - 1 /* 0 means initial state */
     }
     /// `pdf_dev_grestore_to`.
-    pub fn pdf_dev_grestore_to(&mut self, depth: i32) {
+    pub fn pdf_dev_grestore_to(&mut self, depth: i32) -> Result<()> {
         assert!(depth >= 0);
 
         if self.draw.gs_stack.dpx_stack_depth() > depth + 1 {
@@ -1110,11 +1118,12 @@ impl Dpx {
         }
 
         while self.draw.gs_stack.dpx_stack_depth() > depth + 1 {
-            self.pdf_doc_add_page_content(b" Q"); /* op: Q */
+            self.pdf_doc_add_page_content(b" Q")?; /* op: Q */
             let mut gs = self.draw.gs_stack.dpx_stack_pop().unwrap();
-            self.clear_a_gstate(&mut gs);
+            self.clear_a_gstate(&mut gs)?;
         }
         self.pdf_dev_reset_fonts(0);
+        Ok(())
     }
     /// `pdf_dev_currentpoint`: status and the point.
     #[must_use]
@@ -1147,10 +1156,10 @@ impl Dpx {
             return Ok(());
         }
 
-        self.graphics_mode();
+        self.graphics_mode()?;
         let mut buf = Buf::new();
         let len = self.pdf_color_set_color(color, &mut buf, FORMAT_BUFF_LEN, mask)?;
-        self.pdf_doc_add_page_content(&buf.as_bytes()[..len]); /* op: RG K G rg k g etc. */
+        self.pdf_doc_add_page_content(&buf.as_bytes()[..len])?; /* op: RG K G rg k g etc. */
         let gs = self.pdfdraw_gs_mut();
         let current = if mask != 0 {
             &mut gs.fillcolor
@@ -1171,14 +1180,14 @@ impl Dpx {
         Ok(())
     }
     /// `pdf_dev_concat`.
-    pub fn pdf_dev_concat(&mut self, m: &PdfTmatrix) -> i32 {
+    pub fn pdf_dev_concat(&mut self, m: &PdfTmatrix) -> Result<i32> {
         /* Adobe Reader erases page content if there are
          * non invertible transformation.
          */
         if det_p(m).abs() < OUR_EPSILON {
             warn!("Transformation matrix not invertible.");
             warn!("--- M = [{} {} {} {} {} {}]", m.a, m.b, m.c, m.d, m.e, m.f);
-            return -1;
+            return Ok(-1);
         }
 
         if (m.a - 1.0).abs() > OUR_EPSILON
@@ -1194,7 +1203,7 @@ impl Dpx {
             buf.push(b' ');
             buf.push(b'c');
             buf.push(b'm');
-            self.pdf_doc_add_page_content(buf.as_bytes()); /* op: cm */
+            self.pdf_doc_add_page_content(buf.as_bytes())?; /* op: cm */
 
             pdf_concatmatrix(&mut self.pdfdraw_gs_mut().matrix, m);
         }
@@ -1204,119 +1213,119 @@ impl Dpx {
         gs.path.pdf_path__transform(&w);
         pdf_coord__transform(&mut gs.cp, &w);
 
-        0
+        Ok(0)
     }
     /// `pdf_dev_setmiterlimit`.
-    pub fn pdf_dev_setmiterlimit(&mut self, mlimit: f64) -> i32 {
+    pub fn pdf_dev_setmiterlimit(&mut self, mlimit: f64) -> Result<i32> {
         if self.pdfdraw_gs().miterlimit != mlimit {
             let mut buf = Buf::new();
             buf.push(b' ');
             self.pdf_sprint_length(&mut buf, mlimit);
             buf.push(b' ');
             buf.push(b'M');
-            self.pdf_doc_add_page_content(buf.as_bytes()); /* op: M */
+            self.pdf_doc_add_page_content(buf.as_bytes())?; /* op: M */
             self.pdfdraw_gs_mut().miterlimit = mlimit;
         }
 
-        0
+        Ok(0)
     }
     /// `pdf_dev_setlinecap`.
-    pub fn pdf_dev_setlinecap(&mut self, capstyle: i32) -> i32 {
+    pub fn pdf_dev_setlinecap(&mut self, capstyle: i32) -> Result<i32> {
         if self.pdfdraw_gs().linecap != capstyle {
             let mut buf = Buf::new();
             buf.push(b' ');
             buf.int(capstyle);
             buf.extend(b" J");
-            self.pdf_doc_add_page_content(buf.as_bytes()); /* op: J */
+            self.pdf_doc_add_page_content(buf.as_bytes())?; /* op: J */
             self.pdfdraw_gs_mut().linecap = capstyle;
         }
 
-        0
+        Ok(0)
     }
     /// `pdf_dev_setlinejoin`.
-    pub fn pdf_dev_setlinejoin(&mut self, joinstyle: i32) -> i32 {
+    pub fn pdf_dev_setlinejoin(&mut self, joinstyle: i32) -> Result<i32> {
         if self.pdfdraw_gs().linejoin != joinstyle {
             let mut buf = Buf::new();
             buf.push(b' ');
             buf.int(joinstyle);
             buf.extend(b" j");
-            self.pdf_doc_add_page_content(buf.as_bytes()); /* op: j */
+            self.pdf_doc_add_page_content(buf.as_bytes())?; /* op: j */
             self.pdfdraw_gs_mut().linejoin = joinstyle;
         }
 
-        0
+        Ok(0)
     }
     /// `pdf_dev_setlinewidth`.
-    pub fn pdf_dev_setlinewidth(&mut self, width: f64) -> i32 {
+    pub fn pdf_dev_setlinewidth(&mut self, width: f64) -> Result<i32> {
         if self.pdfdraw_gs().linewidth != width {
             let mut buf = Buf::new();
             buf.push(b' ');
             self.pdf_sprint_length(&mut buf, width);
             buf.push(b' ');
             buf.push(b'w');
-            self.pdf_doc_add_page_content(buf.as_bytes()); /* op: w */
+            self.pdf_doc_add_page_content(buf.as_bytes())?; /* op: w */
             self.pdfdraw_gs_mut().linewidth = width;
         }
 
-        0
+        Ok(0)
     }
     /// `pdf_dev_setdash` (`count` = `pattern.len()`; C writes past the
     /// gstate's `PDF_DASH_SIZE_MAX` entries for a longer pattern, here
     /// they are printed but not kept).
-    pub fn pdf_dev_setdash(&mut self, pattern: &[f64], offset: f64) -> i32 {
+    pub fn pdf_dev_setdash(&mut self, pattern: &[f64], offset: f64) -> Result<i32> {
         let gs = self.pdfdraw_gs_mut();
         gs.linedash.num_dash = pattern.len() as i32;
         gs.linedash.offset = offset;
-        self.pdf_doc_add_page_content(b" ["); /* op: */
+        self.pdf_doc_add_page_content(b" [")?; /* op: */
         for (i, &p) in pattern.iter().enumerate() {
             let mut buf = Buf::new();
             buf.push(b' ');
             self.pdf_sprint_length(&mut buf, p);
-            self.pdf_doc_add_page_content(buf.as_bytes()); /* op: */
+            self.pdf_doc_add_page_content(buf.as_bytes())?; /* op: */
             if i < PDF_DASH_SIZE_MAX {
                 self.pdfdraw_gs_mut().linedash.pattern[i] = p;
             }
         }
-        self.pdf_doc_add_page_content(b"] "); /* op: */
+        self.pdf_doc_add_page_content(b"] ")?; /* op: */
         let mut buf = Buf::new();
         self.pdf_sprint_length(&mut buf, offset);
-        self.pdf_doc_add_page_content(buf.as_bytes()); /* op: */
-        self.pdf_doc_add_page_content(b" d"); /* op: d */
+        self.pdf_doc_add_page_content(buf.as_bytes())?; /* op: */
+        self.pdf_doc_add_page_content(b" d")?; /* op: d */
 
-        0
+        Ok(0)
     }
     /// `pdf_dev_clip`.
-    pub fn pdf_dev_clip(&mut self) -> i32 {
+    pub fn pdf_dev_clip(&mut self) -> Result<i32> {
         self.pdf_dev__flushpath(b'W', PDF_FILL_RULE_NONZERO, 0)
     }
     /// `pdf_dev_eoclip`.
-    pub fn pdf_dev_eoclip(&mut self) -> i32 {
+    pub fn pdf_dev_eoclip(&mut self) -> Result<i32> {
         self.pdf_dev__flushpath(b'W', PDF_FILL_RULE_EVENODD, 0)
     }
     /// `pdf_dev_flushpath`.
-    pub fn pdf_dev_flushpath(&mut self, p_op: u8, fill_rule: i32) -> i32 {
+    pub fn pdf_dev_flushpath(&mut self, p_op: u8, fill_rule: i32) -> Result<i32> {
         /* last arg 'ignore_rule' is only for single object
          * that can be converted to a rect where fill rule
          * is inessential.
          */
-        let error = self.pdf_dev__flushpath(p_op, fill_rule, 1);
+        let error = self.pdf_dev__flushpath(p_op, fill_rule, 1)?;
         let gs = self.pdfdraw_gs_mut();
         gs.path.pdf_path__clearpath();
 
         gs.flags &= !GS_FLAG_CURRENTPOINT_SET;
 
-        error
+        Ok(error)
     }
     /// `pdf_dev_newpath`.
-    pub fn pdf_dev_newpath(&mut self) -> i32 {
+    pub fn pdf_dev_newpath(&mut self) -> Result<i32> {
         let p = &mut self.pdfdraw_gs_mut().path;
         if p.pa_length() > 0 {
             p.pdf_path__clearpath();
         }
         /* The following is required for "newpath" operator in mpost.c. */
-        self.pdf_doc_add_page_content(b" n"); /* op: n */
+        self.pdf_doc_add_page_content(b" n")?; /* op: n */
 
-        0
+        Ok(0)
     }
     /// `pdf_dev_moveto`.
     pub fn pdf_dev_moveto(&mut self, x: f64, y: f64) -> i32 {
@@ -1475,7 +1484,7 @@ impl Dpx {
         w: f64,
         h: f64,
         m: Option<&PdfTmatrix>,
-    ) -> i32 {
+    ) -> Result<i32> {
         let r = PdfRect {
             llx: x,
             lly: y,
@@ -1486,7 +1495,7 @@ impl Dpx {
         self.pdf_dev__rectshape(&r, m, b'S')
     }
     /// `pdf_dev_rectfill`.
-    pub fn pdf_dev_rectfill(&mut self, x: f64, y: f64, w: f64, h: f64) -> i32 {
+    pub fn pdf_dev_rectfill(&mut self, x: f64, y: f64, w: f64, h: f64) -> Result<i32> {
         let r = PdfRect {
             llx: x,
             lly: y,
@@ -1497,7 +1506,7 @@ impl Dpx {
         self.pdf_dev__rectshape(&r, None, b'f')
     }
     /// `pdf_dev_rectclip`.
-    pub fn pdf_dev_rectclip(&mut self, x: f64, y: f64, w: f64, h: f64) -> i32 {
+    pub fn pdf_dev_rectclip(&mut self, x: f64, y: f64, w: f64, h: f64) -> Result<i32> {
         let r = PdfRect {
             llx: x,
             lly: y,

@@ -367,7 +367,7 @@ impl Dpx {
         let width = get_pkt_signed_num(s, start, 3)?;
         let w = crate::stream::sqxfw(ptsize, width);
         let h = crate::stream::sqxfw(ptsize, height);
-        self.dvi_rule(w, h);
+        self.dvi_rule(w, h)?;
         Ok(())
     }
 
@@ -376,7 +376,7 @@ impl Dpx {
         let height = get_pkt_signed_num(s, start, 3)?;
         let s_width = crate::stream::sqxfw(ptsize, get_pkt_signed_num(s, start, 3)?);
         let h = crate::stream::sqxfw(ptsize, height);
-        self.dvi_rule(s_width, h);
+        self.dvi_rule(s_width, h)?;
         self.dvi_right(s_width);
         Ok(())
     }

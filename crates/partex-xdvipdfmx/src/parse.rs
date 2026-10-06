@@ -456,20 +456,20 @@ impl PdfOut {
         while p < s.len() && s[p] != b'>' {
             skip_white(s, &mut p);
             let Some(key) = self.parse_pdf_name(s, &mut p) else {
-                self.release(result);
+                self.release(result)?;
                 return Ok(None);
             };
             skip_white(s, &mut p);
             let Some(value) = self.parse_obj_ext(s, &mut p, pf, unknown, tainted)? else {
-                self.release(key);
-                self.release(result);
+                self.release(key)?;
+                self.release(result)?;
                 return Ok(None);
             };
-            self.add_dict(result, key, Some(value));
+            self.add_dict(result, key, Some(value))?;
             skip_white(s, &mut p);
         }
         if p + 2 > s.len() || s[p] != b'>' || s[p + 1] != b'>' {
-            self.release(result);
+            self.release(result)?;
             return Ok(None);
         }
         *pp = p + 2;
@@ -494,14 +494,14 @@ impl PdfOut {
         skip_white(s, &mut p);
         while p < s.len() && s[p] != b']' {
             let Some(elem) = self.parse_obj_ext(s, &mut p, pf, unknown, tainted)? else {
-                self.release(result);
+                self.release(result)?;
                 return Ok(None);
             };
-            self.add_array(result, elem);
+            self.add_array(result, elem)?;
             skip_white(s, &mut p);
         }
         if p >= s.len() || s[p] != b']' {
-            self.release(result);
+            self.release(result)?;
             return Ok(None);
         }
         *pp = p + 1;
@@ -520,27 +520,27 @@ impl PdfOut {
         } else if p + 1 < s.len() && s[p] == b'\r' && s[p + 1] == b'\n' {
             p += 2;
         }
-        let tmp = some!(self.lookup_dict(dict, b"Length"));
+        let tmp = some!(self.lookup_dict(dict, b"Length")?);
         let tmp2 = self.deref_obj(Some(tmp))?;
         let stream_length: i64 = if self.type_of(tmp2) == crate::obj::PDF_NUMBER {
-            self.number_value(tmp2.expect("number")) as i64
+            self.number_value(tmp2.expect("number"))? as i64
         } else {
             -1
         };
-        self.release_opt(tmp2);
+        self.release_opt(tmp2)?;
         if stream_length < 0 || p + stream_length as usize > s.len() {
             return Ok(None);
         }
         let stream_length = stream_length as usize;
-        let filters = self.lookup_dict(dict, b"Filter");
+        let filters = self.lookup_dict(dict, b"Filter")?;
         let result = if filters.is_none() && stream_length > 10 {
             self.new_stream(crate::obj::STREAM_COMPRESS)
         } else {
             self.new_stream(0)
         };
-        let sd = self.stream_dict(result);
-        self.merge_dict(sd, dict);
-        self.add_stream(result, &s[p..p + stream_length]);
+        let sd = self.stream_dict(result)?;
+        self.merge_dict(sd, dict)?;
+        self.add_stream(result, &s[p..p + stream_length])?;
         p += stream_length;
         if p < s.len() && s[p] == b'\r' {
             p += 1;
@@ -549,7 +549,7 @@ impl PdfOut {
             p += 1;
         }
         if p + 9 > s.len() || &s[p..p + 9] != b"endstream" {
-            self.release(result);
+            self.release(result)?;
             return Ok(None);
         }
         p += 9;
@@ -626,7 +626,7 @@ impl PdfOut {
                         && &s[*pp..*pp + 6] == b"stream"
                     {
                         let r = self.parse_pdf_stream(s, pp, dict)?;
-                        self.release(dict);
+                        self.release(dict)?;
                         Ok(r)
                     } else {
                         Ok(result)

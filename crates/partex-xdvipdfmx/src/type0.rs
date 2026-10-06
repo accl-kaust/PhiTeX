@@ -92,7 +92,7 @@ impl Dpx {
                 None => self.o.new_name(b"Identity-H"),
             };
             let resource = self.font.fonts[font_id as usize].resource.unwrap();
-            self.o.put(resource, b"ToUnicode", tounicode);
+            self.o.put(resource, b"ToUnicode", tounicode)?;
             return Ok(());
         }
 
@@ -149,7 +149,7 @@ impl Dpx {
 
         if let Some(tounicode) = tounicode {
             let resource = self.font.fonts[font_id as usize].resource.unwrap();
-            self.o.put(resource, b"ToUnicode", tounicode);
+            self.o.put(resource, b"ToUnicode", tounicode)?;
         } else {
             warn!("Failed to load ToUnicode CMap for font");
         }
@@ -164,16 +164,16 @@ impl Dpx {
 
         // FIXME: Should move to pdffont.c
         let resource = self.font.fonts[font_id as usize].resource.unwrap();
-        if self.o.lookup_dict(resource, b"ToUnicode").is_none() {
+        if self.o.lookup_dict(resource, b"ToUnicode")?.is_none() {
             self.Type0Font_attach_ToUnicode_stream(font_id)?;
         }
         Ok(())
     }
 
     /// `pdf_font_open_type0`: 0, or -1 when `cid_id < 0`.
-    pub fn pdf_font_open_type0(&mut self, font_id: i32, cid_id: i32, wmode: i32) -> i32 {
+    pub fn pdf_font_open_type0(&mut self, font_id: i32, cid_id: i32, wmode: i32) -> Result<i32> {
         if cid_id < 0 {
-            return -1;
+            return Ok(-1);
         }
 
         {
@@ -241,13 +241,13 @@ impl Dpx {
 
         let resource = self.o.new_dict();
         self.font.fonts[font_id as usize].resource = Some(resource);
-        self.o.put_name(resource, b"Type", b"Font");
-        self.o.put_name(resource, b"Subtype", b"Type0");
+        self.o.put_name(resource, b"Type", b"Font")?;
+        self.o.put_name(resource, b"Subtype", b"Type0")?;
         let fname = self.font.fonts[font_id as usize]
             .fontname
             .clone()
             .unwrap_or_default();
-        self.o.put_name(resource, b"BaseFont", &fname);
+        self.o.put_name(resource, b"BaseFont", &fname)?;
         self.o.put_name(
             resource,
             b"Encoding",
@@ -256,16 +256,16 @@ impl Dpx {
             } else {
                 b"Identity-H"
             },
-        );
+        )?;
 
-        0
+        Ok(0)
     }
 
     /// `create_dummy_CMap` (static): the Adobe-Identity-UCS2 stream.
-    fn create_dummy_CMap(&mut self) -> Obj {
+    fn create_dummy_CMap(&mut self) -> Result<Obj> {
         let stream = self.o.new_stream(crate::obj::STREAM_COMPRESS);
-        self.o.add_stream(stream, CMAP_PART0);
-        self.o.add_stream(stream, CMAP_PART1);
+        self.o.add_stream(stream, CMAP_PART0)?;
+        self.o.add_stream(stream, CMAP_PART1)?;
         let range = |b: &mut Vec<u8>, i: i32| {
             // "<%02X00> <%02XFF> <%02X00>\n"
             b.push(b'<');
@@ -276,38 +276,38 @@ impl Dpx {
             hex2(b, i);
             b.extend_from_slice(b"00>\n");
         };
-        self.o.add_stream(stream, b"\n100 beginbfrange\n");
+        self.o.add_stream(stream, b"\n100 beginbfrange\n")?;
         for i in 0..0x64 {
             let mut buf = Vec::new();
             range(&mut buf, i);
-            self.o.add_stream(stream, &buf);
+            self.o.add_stream(stream, &buf)?;
         }
-        self.o.add_stream(stream, b"endbfrange\n\n");
+        self.o.add_stream(stream, b"endbfrange\n\n")?;
 
-        self.o.add_stream(stream, b"\n100 beginbfrange\n");
+        self.o.add_stream(stream, b"\n100 beginbfrange\n")?;
         for i in 0x64..0xc8 {
             let mut buf = Vec::new();
             range(&mut buf, i);
-            self.o.add_stream(stream, &buf);
+            self.o.add_stream(stream, &buf)?;
         }
-        self.o.add_stream(stream, b"endbfrange\n\n");
+        self.o.add_stream(stream, b"endbfrange\n\n")?;
 
-        self.o.add_stream(stream, b"\n48 beginbfrange\n");
+        self.o.add_stream(stream, b"\n48 beginbfrange\n")?;
         for i in 0xc8..=0xd7 {
             let mut buf = Vec::new();
             range(&mut buf, i);
-            self.o.add_stream(stream, &buf);
+            self.o.add_stream(stream, &buf)?;
         }
         for i in 0xe0..=0xff {
             let mut buf = Vec::new();
             range(&mut buf, i);
-            self.o.add_stream(stream, &buf);
+            self.o.add_stream(stream, &buf)?;
         }
-        self.o.add_stream(stream, b"endbfrange\n\n");
+        self.o.add_stream(stream, b"endbfrange\n\n")?;
 
-        self.o.add_stream(stream, CMAP_PART3);
+        self.o.add_stream(stream, CMAP_PART3)?;
 
-        stream
+        Ok(stream)
     }
 
     /// `pdf_read_ToUnicode_file` (static): a reference to the "CMap"
@@ -316,7 +316,7 @@ impl Dpx {
         let mut res_id = self.pdf_findresource(b"CMap", cmap_name)?;
         if res_id < 0 {
             let stream = if cmap_name == b"Adobe-Identity-UCS2" {
-                Some(self.create_dummy_CMap())
+                Some(self.create_dummy_CMap()?)
             } else {
                 self.pdf_load_ToUnicode_stream(cmap_name)?
             };

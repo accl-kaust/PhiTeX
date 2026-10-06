@@ -91,14 +91,14 @@ impl Dpx {
         }
         self.font.fonts[fid].subtype = PDF_FONT_FONTTYPE_TYPE1C;
 
-        let descriptor = self.pdf_font_get_descriptor(font_id);
+        let descriptor = self.pdf_font_get_descriptor(font_id)?;
         // Create font descriptor from OpenType tables.
         // We can also use CFF TOP DICT/Private DICT for this.
         let Some(tmp) = self.tt_get_fontdesc(&mut sfont, &mut embedding, -1, 1, &fontname)? else {
             fatal!("Could not obtain neccesary font info from OpenType table.");
         };
-        self.o.merge_dict(descriptor, tmp); // copy
-        self.o.release(tmp);
+        self.o.merge_dict(descriptor, tmp)?; // copy
+        self.o.release(tmp)?;
         if embedding == 0 {
             // tt_get_fontdesc may have changed this
             warn!("Font embedding disallowed.");
@@ -124,7 +124,7 @@ impl Dpx {
         let firstchar: i32;
         let lastchar: i32;
 
-        let fontdict = self.pdf_font_get_resource(font_id);
+        let fontdict = self.pdf_font_get_resource(font_id)?;
         let usedchars = self.font.fonts[font_id as usize]
             .usedchars
             .clone()
@@ -147,7 +147,7 @@ impl Dpx {
             firstchar = 0;
             lastchar = 0;
             let n = self.o.new_number(0.0);
-            self.o.add_array(array, n);
+            self.o.add_array(array, n)?;
         } else {
             let (mut fc, mut lc) = (255, 0);
             for code in 0..256 {
@@ -179,20 +179,20 @@ impl Dpx {
                     0.0
                 };
                 let n = self.o.new_number(v);
-                self.o.add_array(array, n);
+                self.o.add_array(array, n)?;
             }
         }
 
-        if self.o.array_length(array) > 0 {
-            let r = self.o.ref_obj(array);
-            self.o.put(fontdict, b"Widths", r);
+        if self.o.array_length(array)? > 0 {
+            let r = self.o.ref_obj(array)?;
+            self.o.put(fontdict, b"Widths", r)?;
         }
-        self.o.release(array);
+        self.o.release(array)?;
 
         self.o
-            .put_number(fontdict, b"FirstChar", f64::from(firstchar));
+            .put_number(fontdict, b"FirstChar", f64::from(firstchar))?;
         self.o
-            .put_number(fontdict, b"LastChar", f64::from(lastchar));
+            .put_number(fontdict, b"LastChar", f64::from(lastchar))?;
         Ok(())
     }
     /// `pdf_font_load_type1c`.
@@ -215,8 +215,8 @@ impl Dpx {
         let ident = font.filename.clone().expect("filename");
         let unique_tag = self.pdf_font_get_uniqueTag(font_id);
 
-        let fontdict = self.pdf_font_get_resource(font_id);
-        let descriptor = self.pdf_font_get_descriptor(font_id);
+        let fontdict = self.pdf_font_get_resource(font_id)?;
+        let descriptor = self.pdf_font_get_descriptor(font_id)?;
         let encoding_id = self.font.fonts[fid].encoding_id;
 
         let Some(fp) = self.dpx_open_file(&ident, ResType::OtFont)? else {
@@ -290,12 +290,12 @@ impl Dpx {
                     enc_vec[code] = None;
                 }
             }
-            if self.o.lookup_dict(fontdict, b"ToUnicode").is_none() {
+            if self.o.lookup_dict(fontdict, b"ToUnicode")?.is_none() {
                 let tounicode = self.pdf_create_ToUnicode_CMap(&fullname, &enc_vec, Some(&used))?;
                 if let Some(tounicode) = tounicode {
-                    let r = self.o.ref_obj(tounicode);
-                    self.o.put(fontdict, b"ToUnicode", r);
-                    self.o.release(tounicode);
+                    let r = self.o.ref_obj(tounicode)?;
+                    self.o.put(fontdict, b"ToUnicode", r)?;
+                    self.o.release(tounicode)?;
                 }
             }
             enc_vec
@@ -347,7 +347,7 @@ impl Dpx {
             && pd.cff_dict_known(b"StdVW") != 0
         {
             let stemv = pd.cff_dict_get(b"StdVW", 0)?;
-            self.o.put_number(descriptor, b"StemV", stemv);
+            self.o.put_number(descriptor, b"StemV", stemv)?;
         }
 
         // Widths
@@ -436,8 +436,8 @@ impl Dpx {
                 usedchars.borrow_mut()[code] = 0; // Set unused for writing correct encoding
                 continue;
             }
-            self.o.add_stream(pdfcharset, b"/");
-            self.o.add_stream(pdfcharset, name);
+            self.o.add_stream(pdfcharset, b"/")?;
+            self.o.add_stream(pdfcharset, name)?;
 
             let g = usize::from(gid);
             let size = cs_idx.offset[g + 1] as i32 - cs_idx.offset[g] as i32;
@@ -669,18 +669,19 @@ impl Dpx {
 
         // CharSet
         if self.o.check_version(2, 0) < 0 {
-            let data = self.o.stream_data(pdfcharset).to_vec();
-            self.o.put_string(descriptor, b"CharSet", &data);
+            let data = self.o.stream_data(pdfcharset)?.to_vec();
+            self.o.put_string(descriptor, b"CharSet", &data)?;
         }
-        self.o.release(pdfcharset);
+        self.o.release(pdfcharset)?;
         // Write PDF FontFile data.
         let fontfile = self.o.new_stream(STREAM_COMPRESS);
-        let stream_dict = self.o.stream_dict(fontfile);
-        let r = self.o.ref_obj(fontfile);
-        self.o.put(descriptor, b"FontFile3", r);
-        self.o.put_name(stream_dict, b"Subtype", b"Type1C");
-        self.o.add_stream(fontfile, &stream_data[..offset as usize]);
-        self.o.release(fontfile);
+        let stream_dict = self.o.stream_dict(fontfile)?;
+        let r = self.o.ref_obj(fontfile)?;
+        self.o.put(descriptor, b"FontFile3", r)?;
+        self.o.put_name(stream_dict, b"Subtype", b"Type1C")?;
+        self.o
+            .add_stream(fontfile, &stream_data[..offset as usize])?;
+        self.o.release(fontfile)?;
 
         Ok(0)
     }

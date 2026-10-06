@@ -13,6 +13,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::cell::RefCell;
 
+use crate::ctx::Result;
 use crate::fmt::{Buf, sprint_number};
 
 /// A handle on an object of the arena.
@@ -343,61 +344,77 @@ impl PdfOut {
     }
 
     #[must_use]
-    pub fn boolean_value(&self, o: Obj) -> bool {
+    pub fn boolean_value(&self, o: Obj) -> Result<bool> {
         match self.data(o) {
-            Data::Boolean(b) => *b,
-            _ => typecheck(),
+            Data::Boolean(b) => Ok(*b),
+            _ => self.typecheck(o, PDF_BOOLEAN, 1068),
         }
     }
     #[must_use]
-    pub fn number_value(&self, o: Obj) -> f64 {
+    pub fn number_value(&self, o: Obj) -> Result<f64> {
         match self.data(o) {
-            Data::Number(v) => *v,
-            _ => typecheck(),
+            Data::Number(v) => Ok(*v),
+            _ => self.typecheck(o, PDF_NUMBER, 1123),
         }
     }
-    pub fn set_number(&mut self, o: Obj, v: f64) {
+    pub fn set_number(&mut self, o: Obj, v: f64) -> Result<()> {
         match self.data_mut(o) {
             Data::Number(x) => *x = v,
-            _ => typecheck(),
+            _ => return self.typecheck(o, PDF_NUMBER, 1112),
         }
+        Ok(())
     }
     #[must_use]
-    pub fn string_value(&self, o: Obj) -> &[u8] {
+    pub fn string_value(&self, o: Obj) -> Result<&[u8]> {
         match self.data(o) {
-            Data::Str(s) => s,
-            _ => typecheck(),
+            Data::Str(s) => Ok(s),
+            _ => self.typecheck(o, PDF_STRING, 1159),
         }
     }
-    #[must_use]
-    pub fn string_length(&self, o: Obj) -> usize {
-        self.string_value(o).len()
+    pub fn string_length(&self, o: Obj) -> Result<usize> {
+        match self.data(o) {
+            Data::Str(s) => Ok(s.len()),
+            _ => self.typecheck(o, PDF_STRING, 1171),
+        }
     }
-    pub fn set_string(&mut self, o: Obj, v: &[u8]) {
+    pub fn set_string(&mut self, o: Obj, v: &[u8]) -> Result<()> {
         match self.data_mut(o) {
             Data::Str(s) => *s = v.to_vec(),
-            _ => typecheck(),
+            _ => return self.typecheck(o, PDF_STRING, 1311),
         }
+        Ok(())
     }
-    #[must_use]
-    pub fn name_value(&self, o: Obj) -> &[u8] {
+    pub fn name_value(&self, o: Obj) -> Result<&[u8]> {
         match self.data(o) {
-            Data::Name(s) => s,
-            _ => typecheck(),
+            Data::Name(s) => Ok(s),
+            _ => self.typecheck(o, PDF_NAME, 1408),
         }
     }
 
-    /// `pdf_link_obj`.
-    pub fn link(&mut self, o: Obj) -> Obj {
-        assert!(
-            !matches!(self.data(o), Data::Free),
-            "pdf_link_obj(): invalid object"
-        );
-        self.slot_mut(o).refcount += 1;
-        o
+    /// `TYPECHECK(o, t)` at pdfobj.c's line `line` (C prints it with
+    /// the object's type and exits).
+    fn typecheck<T>(&self, o: Obj, t: i32, line: u32) -> Result<T> {
+        crate::fatal!(
+            "typecheck: Invalid object type: {} {} (line {})",
+            self.type_of(Some(o)),
+            t,
+            line
+        )
     }
-    pub fn link_opt(&mut self, o: Option<Obj>) -> Option<Obj> {
-        o.map(|o| self.link(o))
+
+    /// `pdf_link_obj`.
+    pub fn link(&mut self, o: Obj) -> Result<Obj> {
+        if matches!(self.data(o), Data::Free) {
+            crate::fatal!("pdf_link_obj(): passed invalid object.");
+        }
+        self.slot_mut(o).refcount += 1;
+        Ok(o)
+    }
+    pub fn link_opt(&mut self, o: Option<Obj>) -> Result<Option<Obj>> {
+        match o {
+            Some(o) => Ok(Some(self.link(o)?)),
+            None => Ok(None),
+        }
     }
 
     /// `pdf_transfer_label`.
@@ -412,26 +429,27 @@ impl PdfOut {
         s.generation = 0;
     }
 
-    fn label_obj(&mut self, o: Obj) {
+    fn label_obj(&mut self, o: Obj) -> Result<()> {
         if self.slot(o).label == 0 {
-            assert!(
-                self.next_label != PDF_NUM_INDIRECT_MAX,
-                "Number of indirect object has reached its maximum value!"
-            );
+            if self.next_label == PDF_NUM_INDIRECT_MAX {
+                crate::fatal!("Number of indirect object has reached its maximum value!");
+            }
             let l = self.next_label;
             self.next_label += 1;
             let s = self.slot_mut(o);
             s.label = l;
             s.generation = 0;
         }
+        Ok(())
     }
 
     /// `pdf_ref_obj`.
-    pub fn ref_obj(&mut self, o: Obj) -> Obj {
-        assert!(
-            self.slot(o).refcount > 0,
-            "Trying to refer already released object!!!"
-        );
+    pub fn ref_obj(&mut self, o: Obj) -> Result<Obj> {
+        if self.slot(o).refcount == 0 {
+            // (after "Trying to refer already released object!!!" and
+            // the object, on the terminal)
+            crate::fatal!("Cannot continue...");
+        }
         if self.is_indirect(Some(o)) {
             self.link(o)
         } else {
@@ -439,16 +457,16 @@ impl PdfOut {
         }
     }
 
-    fn new_ref(&mut self, o: Obj) -> Obj {
+    fn new_ref(&mut self, o: Obj) -> Result<Obj> {
         if self.slot(o).label == 0 {
-            self.label_obj(o);
+            self.label_obj(o)?;
         }
         let (label, generation) = (self.slot(o).label, self.slot(o).generation);
         let r = self.new_indirect(None, label, generation);
         if let Data::Indirect(i) = self.data_mut(r) {
             i.obj = Some(o);
         }
-        r
+        Ok(r)
     }
 
     /// The object an indirect object of this output points to.
@@ -475,81 +493,91 @@ impl PdfOut {
 
     // Arrays.
 
-    pub fn add_array(&mut self, a: Obj, o: Obj) {
+    pub fn add_array(&mut self, a: Obj, o: Obj) -> Result<()> {
         match self.data_mut(a) {
             Data::Array(v) => v.push(Some(o)),
-            _ => typecheck(),
+            _ => return self.typecheck(a, PDF_ARRAY, 1515),
         }
+        Ok(())
     }
     /// `pdf_add_array` with a C null pointer allowed.
-    pub fn add_array_opt(&mut self, a: Obj, o: Option<Obj>) {
+    pub fn add_array_opt(&mut self, a: Obj, o: Option<Obj>) -> Result<()> {
         match self.data_mut(a) {
             Data::Array(v) => v.push(o),
-            _ => typecheck(),
+            _ => return self.typecheck(a, PDF_ARRAY, 1515),
         }
+        Ok(())
     }
-    pub fn unshift_array(&mut self, a: Obj, o: Obj) {
+    pub fn unshift_array(&mut self, a: Obj, o: Obj) -> Result<()> {
         match self.data_mut(a) {
             Data::Array(v) => v.insert(0, Some(o)),
-            _ => typecheck(),
+            _ => return self.typecheck(a, PDF_ARRAY, 1589),
         }
+        Ok(())
     }
     /// `pdf_get_array`: a negative index counts from the end.
     #[must_use]
-    pub fn get_array(&self, a: Obj, idx: i32) -> Option<Obj> {
+    pub fn get_array(&self, a: Obj, idx: i32) -> Result<Option<Obj>> {
         match self.data(a) {
-            Data::Array(v) => {
-                if idx < 0 {
-                    let i = v.len().checked_add_signed(idx as isize)?;
-                    v.get(i).copied().flatten()
-                } else {
-                    v.get(idx as usize).copied().flatten()
-                }
-            }
-            _ => typecheck(),
+            Data::Array(v) => Ok(if idx < 0 {
+                v.len()
+                    .checked_add_signed(idx as isize)
+                    .and_then(|i| v.get(i).copied().flatten())
+            } else {
+                v.get(idx as usize).copied().flatten()
+            }),
+            _ => self.typecheck(a, PDF_ARRAY, 1466),
         }
     }
-    #[must_use]
-    pub fn array_length(&self, a: Obj) -> usize {
+    pub fn array_length(&self, a: Obj) -> Result<usize> {
         match self.data(a) {
-            Data::Array(v) => v.len(),
-            _ => typecheck(),
+            Data::Array(v) => Ok(v.len()),
+            _ => self.typecheck(a, PDF_ARRAY, 1483),
         }
     }
-    #[must_use]
-    pub fn array_items(&self, a: Obj) -> Vec<Option<Obj>> {
+    /// The elements (C walks them with `pdf_array_length` and
+    /// `pdf_get_array`).
+    pub fn array_items(&self, a: Obj) -> Result<Vec<Option<Obj>>> {
         match self.data(a) {
-            Data::Array(v) => v.clone(),
-            _ => typecheck(),
+            Data::Array(v) => Ok(v.clone()),
+            _ => self.typecheck(a, PDF_ARRAY, 1483),
         }
     }
     /// Removes and returns the last element (`pdf_pop_array`'s use).
-    pub fn pop_array(&mut self, a: Obj) -> Option<Obj> {
+    pub fn pop_array(&mut self, a: Obj) -> Result<Option<Obj>> {
         match self.data_mut(a) {
-            Data::Array(v) => v.pop().flatten(),
-            _ => typecheck(),
+            Data::Array(v) => Ok(v.pop().flatten()),
+            _ => self.typecheck(a, PDF_ARRAY, 1608),
         }
     }
     /// Replaces element `i` (the caller releases the old one).
-    pub fn put_array_raw(&mut self, a: Obj, i: usize, o: Option<Obj>) -> Option<Obj> {
+    pub fn put_array_raw(&mut self, a: Obj, i: usize, o: Option<Obj>) -> Result<Option<Obj>> {
         match self.data_mut(a) {
-            Data::Array(v) => core::mem::replace(&mut v[i], o),
-            _ => typecheck(),
+            Data::Array(v) => Ok(core::mem::replace(&mut v[i], o)),
+            _ => self.typecheck(a, PDF_ARRAY, 1535),
         }
     }
 
     // Dictionaries.
 
     /// `pdf_add_dict`: returns whether the key was there already.
-    pub fn add_dict(&mut self, d: Obj, key: Obj, value: Option<Obj>) -> bool {
+    pub fn add_dict(&mut self, d: Obj, key: Obj, value: Option<Obj>) -> Result<bool> {
         let found = {
-            let kname = self.name_value(key);
             let Data::Dict(entries) = self.data(d) else {
-                typecheck()
+                return self.typecheck(d, PDF_DICT, 1684);
             };
-            entries
-                .iter()
-                .position(|&(k, _)| self.name_value(k) == kname)
+            if !matches!(self.data(key), Data::Name(_)) {
+                return self.typecheck(key, PDF_NAME, 1685);
+            }
+            let kname = self.name_value(key)?;
+            let mut found = None;
+            for (i, &(k, _)) in entries.iter().enumerate() {
+                if self.name_value(k)? == kname {
+                    found = Some(i);
+                    break;
+                }
+            }
+            found
         };
         if let Some(i) = found {
             let old = {
@@ -558,85 +586,95 @@ impl PdfOut {
                 };
                 core::mem::replace(&mut entries[i].1, value)
             };
-            self.release_opt(old);
-            self.release(key);
-            true
+            self.release_opt(old)?;
+            self.release(key)?;
+            Ok(true)
         } else {
             let Data::Dict(entries) = self.data_mut(d) else {
                 unreachable!()
             };
             entries.push((key, value));
-            false
+            Ok(false)
         }
     }
     /// `pdf_add_dict(d, pdf_new_name(key), value)`.
-    pub fn put(&mut self, d: Obj, key: &[u8], value: Obj) -> bool {
+    pub fn put(&mut self, d: Obj, key: &[u8], value: Obj) -> Result<bool> {
         let k = self.new_name(key);
         self.add_dict(d, k, Some(value))
     }
-    pub fn put_opt(&mut self, d: Obj, key: &[u8], value: Option<Obj>) -> bool {
+    pub fn put_opt(&mut self, d: Obj, key: &[u8], value: Option<Obj>) -> Result<bool> {
         let k = self.new_name(key);
         self.add_dict(d, k, value)
     }
-    pub fn put_name(&mut self, d: Obj, key: &[u8], value: &[u8]) -> bool {
+    pub fn put_name(&mut self, d: Obj, key: &[u8], value: &[u8]) -> Result<bool> {
         let v = self.new_name(value);
         self.put(d, key, v)
     }
-    pub fn put_number(&mut self, d: Obj, key: &[u8], value: f64) -> bool {
+    pub fn put_number(&mut self, d: Obj, key: &[u8], value: f64) -> Result<bool> {
         let v = self.new_number(value);
         self.put(d, key, v)
     }
-    pub fn put_string(&mut self, d: Obj, key: &[u8], value: &[u8]) -> bool {
+    pub fn put_string(&mut self, d: Obj, key: &[u8], value: &[u8]) -> Result<bool> {
         let v = self.new_string(value);
         self.put(d, key, v)
     }
-    pub fn put_boolean(&mut self, d: Obj, key: &[u8], value: bool) -> bool {
+    pub fn put_boolean(&mut self, d: Obj, key: &[u8], value: bool) -> Result<bool> {
         let v = self.new_boolean(value);
         self.put(d, key, v)
     }
 
     /// `pdf_lookup_dict`.
     #[must_use]
-    pub fn lookup_dict(&self, d: Obj, name: &[u8]) -> Option<Obj> {
+    pub fn lookup_dict(&self, d: Obj, name: &[u8]) -> Result<Option<Obj>> {
         match self.data(d) {
-            Data::Dict(entries) => entries
-                .iter()
-                .find(|&&(k, _)| self.name_value(k) == name)
-                .and_then(|&(_, v)| v),
-            _ => typecheck(),
+            Data::Dict(entries) => {
+                for &(k, v) in entries {
+                    if self.name_value(k)? == name {
+                        return Ok(v);
+                    }
+                }
+                Ok(None)
+            }
+            _ => self.typecheck(d, PDF_DICT, 1806),
         }
     }
     /// The entries, in order (`pdf_foreach_dict`).
-    #[must_use]
-    pub fn dict_entries(&self, d: Obj) -> Vec<(Obj, Option<Obj>)> {
+    pub fn dict_entries(&self, d: Obj) -> Result<Vec<(Obj, Option<Obj>)>> {
         match self.data(d) {
-            Data::Dict(entries) => entries.clone(),
-            _ => typecheck(),
+            Data::Dict(entries) => Ok(entries.clone()),
+            _ => self.typecheck(d, PDF_DICT, 1786),
         }
     }
     /// `pdf_dict_keys`: a new array of new names.
-    pub fn dict_keys(&mut self, d: Obj) -> Obj {
-        let names: Vec<Vec<u8>> = self
-            .dict_entries(d)
-            .iter()
-            .map(|&(k, _)| self.name_value(k).to_vec())
-            .collect();
+    pub fn dict_keys(&mut self, d: Obj) -> Result<Obj> {
+        if !matches!(self.data(d), Data::Dict(_)) {
+            return self.typecheck(d, PDF_DICT, 1826);
+        }
+        let mut names: Vec<Vec<u8>> = Vec::new();
+        for (k, _) in self.dict_entries(d)? {
+            names.push(self.name_value(k)?.to_vec());
+        }
         let keys = self.new_array();
         for n in names {
             let k = self.new_name(&n);
-            self.add_array(keys, k);
+            self.add_array(keys, k)?;
         }
-        keys
+        Ok(keys)
     }
     /// `pdf_remove_dict`.
-    pub fn remove_dict(&mut self, d: Obj, name: &[u8]) {
+    pub fn remove_dict(&mut self, d: Obj, name: &[u8]) -> Result<()> {
         let found = {
             let Data::Dict(entries) = self.data(d) else {
-                typecheck()
+                return self.typecheck(d, PDF_DICT, 1845);
             };
-            entries
-                .iter()
-                .position(|&(k, _)| self.name_value(k) == name)
+            let mut found = None;
+            for (i, &(k, _)) in entries.iter().enumerate() {
+                if self.name_value(k)? == name {
+                    found = Some(i);
+                    break;
+                }
+            }
+            found
         };
         if let Some(i) = found {
             let (k, v) = {
@@ -645,50 +683,61 @@ impl PdfOut {
                 };
                 entries.remove(i)
             };
-            self.release(k);
-            self.release_opt(v);
+            self.release(k)?;
+            self.release_opt(v)?;
         }
+        Ok(())
     }
     /// `pdf_merge_dict`.
-    pub fn merge_dict(&mut self, d1: Obj, d2: Obj) {
-        for (k, v) in self.dict_entries(d2) {
-            let k = self.link(k);
-            let v = self.link_opt(v);
-            self.add_dict(d1, k, v);
+    pub fn merge_dict(&mut self, d1: Obj, d2: Obj) -> Result<()> {
+        if !matches!(self.data(d1), Data::Dict(_)) {
+            return self.typecheck(d1, PDF_DICT, 1767);
         }
+        if !matches!(self.data(d2), Data::Dict(_)) {
+            return self.typecheck(d2, PDF_DICT, 1768);
+        }
+        for (k, v) in self.dict_entries(d2)? {
+            let k = self.link(k)?;
+            let v = self.link_opt(v)?;
+            self.add_dict(d1, k, v)?;
+        }
+        Ok(())
     }
 
     // Streams.
 
-    fn stream(&self, s: Obj) -> &Stream {
+    /// The stream `s`, as the C function at pdfobj.c's `line` checks it.
+    fn stream(&self, s: Obj, line: u32) -> Result<&Stream> {
         match self.data(s) {
-            Data::Stream(st) => st,
-            _ => typecheck(),
+            Data::Stream(st) => Ok(st),
+            _ => self.typecheck(s, PDF_STREAM, line),
         }
     }
-    pub fn stream_mut(&mut self, s: Obj) -> &mut Stream {
+    /// [`PdfOut::stream`], mutable.
+    pub fn stream_mut(&mut self, s: Obj, line: u32) -> Result<&mut Stream> {
+        if !matches!(self.data(s), Data::Stream(_)) {
+            return self.typecheck(s, PDF_STREAM, line);
+        }
         match self.data_mut(s) {
-            Data::Stream(st) => st,
-            _ => typecheck(),
+            Data::Stream(st) => Ok(st),
+            _ => unreachable!(),
         }
     }
-    #[must_use]
-    pub fn stream_dict(&self, s: Obj) -> Obj {
-        self.stream(s).dict
+    pub fn stream_dict(&self, s: Obj) -> Result<Obj> {
+        Ok(self.stream(s, 2378)?.dict)
     }
-    #[must_use]
-    pub fn stream_data(&self, s: Obj) -> &[u8] {
-        &self.stream(s).data
+    pub fn stream_data(&self, s: Obj) -> Result<&[u8]> {
+        Ok(&self.stream(s, 2390)?.data)
     }
-    #[must_use]
-    pub fn stream_length(&self, s: Obj) -> usize {
-        self.stream(s).data.len()
+    pub fn stream_length(&self, s: Obj) -> Result<usize> {
+        Ok(self.stream(s, 2402)?.data.len())
     }
-    pub fn add_stream(&mut self, s: Obj, bytes: &[u8]) {
+    pub fn add_stream(&mut self, s: Obj, bytes: &[u8]) -> Result<()> {
         if bytes.is_empty() {
-            return;
+            return Ok(());
         }
-        self.stream_mut(s).data.extend_from_slice(bytes);
+        self.stream_mut(s, 2428)?.data.extend_from_slice(bytes);
+        Ok(())
     }
     pub fn stream_set_predictor(
         &mut self,
@@ -697,11 +746,11 @@ impl PdfOut {
         columns: i32,
         bpc: i32,
         colors: i32,
-    ) {
+    ) -> Result<()> {
         if !self.is_stream(Some(s)) || columns < 0 || bpc < 0 || colors < 0 {
-            return;
+            return Ok(());
         }
-        let st = self.stream_mut(s);
+        let st = self.stream_mut(s, 0)?;
         st.parms = DecodeParms {
             predictor,
             colors,
@@ -709,20 +758,22 @@ impl PdfOut {
             columns,
         };
         st.flags |= STREAM_USE_PREDICTOR;
+        Ok(())
     }
 
     // ---------------------------------------------------------------
     // Release, and writing what is released.
 
     /// `pdf_release_obj`.
-    pub fn release(&mut self, o: Obj) {
-        assert!(
-            self.slot(o).refcount > 0 && !matches!(self.data(o), Data::Free),
-            "pdf_release_obj: Called with invalid object."
-        );
+    pub fn release(&mut self, o: Obj) -> Result<()> {
+        if self.slot(o).refcount <= 0 || matches!(self.data(o), Data::Free) {
+            // (after the object's address, type and count, on the
+            // terminal)
+            crate::fatal!("pdf_release_obj:  Called with invalid object.");
+        }
         self.slot_mut(o).refcount -= 1;
         if self.slot(o).refcount != 0 {
-            return;
+            return Ok(());
         }
         let label = self.slot(o).label;
         if label != 0 {
@@ -734,19 +785,20 @@ impl PdfOut {
                     || (self.enable_encrypt && flags & OBJ_NO_ENCRYPT != 0)
                     || self.slot(o).generation != 0
                 {
-                    self.flush_obj(o);
+                    self.flush_obj(o)?;
                 } else {
                     let objstm = if let Some(s) = self.current_objstm {
                         s
                     } else {
                         let s = self.new_stream(STREAM_COMPRESS);
-                        self.stream_mut(s).objstm = Some(vec![0; 2 * OBJSTM_MAX_OBJS as usize + 2]);
-                        self.label_obj(s);
+                        self.stream_mut(s, 2411)?.objstm =
+                            Some(vec![0; 2 * OBJSTM_MAX_OBJS as usize + 2]);
+                        self.label_obj(s)?;
                         self.current_objstm = Some(s);
                         s
                     };
-                    if self.add_objstm(objstm, o) == OBJSTM_MAX_OBJS {
-                        self.release_objstm(objstm);
+                    if self.add_objstm(objstm, o)? == OBJSTM_MAX_OBJS {
+                        self.release_objstm(objstm)?;
                         self.current_objstm = None;
                     }
                 }
@@ -756,25 +808,27 @@ impl PdfOut {
         match data {
             Data::Array(v) => {
                 for x in v.into_iter().flatten() {
-                    self.release(x);
+                    self.release(x)?;
                 }
             }
             Data::Dict(v) => {
                 for (k, x) in v {
-                    self.release(k);
-                    self.release_opt(x);
+                    self.release(k)?;
+                    self.release_opt(x)?;
                 }
             }
-            Data::Stream(s) => self.release(s.dict),
+            Data::Stream(s) => self.release(s.dict)?,
             _ => {}
         }
         self.free_slots.push(o.0);
+        Ok(())
     }
 
-    pub fn release_opt(&mut self, o: Option<Obj>) {
+    pub fn release_opt(&mut self, o: Option<Obj>) -> Result<()> {
         if let Some(o) = o {
-            self.release(o);
+            self.release(o)?;
         }
+        Ok(())
     }
 
     fn mark_freed(&mut self, label: u32) {
@@ -804,7 +858,7 @@ impl PdfOut {
         };
     }
 
-    fn flush_obj(&mut self, o: Obj) {
+    fn flush_obj(&mut self, o: Obj) -> Result<()> {
         let (label, generation) = (self.slot(o).label, self.slot(o).generation);
         self.add_xref_entry(label, 1, self.file_position as u32, generation);
         let mut b = Buf::new();
@@ -812,17 +866,18 @@ impl PdfOut {
         b.push(b' ');
         b.uint(u32::from(generation));
         b.extend(b" obj\n");
-        self.out_str(&b.0);
-        self.write_obj(Some(o));
-        self.out_str(b"\nendobj\n");
+        self.out_str(&b.0)?;
+        self.write_obj(Some(o))?;
+        self.out_str(b"\nendobj\n")?;
+        Ok(())
     }
 
-    fn add_objstm(&mut self, objstm: Obj, o: Obj) -> i32 {
+    fn add_objstm(&mut self, objstm: Obj, o: Obj) -> Result<i32> {
         let label = self.slot(o).label;
-        let len = self.stream_length(objstm) as i32;
+        let len = self.stream_length(objstm)? as i32;
         let pos = {
             let data = self
-                .stream_mut(objstm)
+                .stream_mut(objstm, 3158)?
                 .objstm
                 .as_mut()
                 .expect("object stream");
@@ -835,15 +890,15 @@ impl PdfOut {
         let objstm_label = self.slot(objstm).label;
         self.add_xref_entry(label, 2, objstm_label, (pos - 1) as u16);
         self.output_stream = Some(objstm);
-        self.write_obj(Some(o));
-        self.out_char(b'\n');
+        self.write_obj(Some(o))?;
+        self.out_char(b'\n')?;
         self.output_stream = None;
-        pos
+        Ok(pos)
     }
 
-    fn release_objstm(&mut self, objstm: Obj) {
+    fn release_objstm(&mut self, objstm: Obj) -> Result<()> {
         let (data, old) = {
-            let st = self.stream_mut(objstm);
+            let st = self.stream_mut(objstm, 2418)?;
             (
                 st.objstm.clone().expect("object stream"),
                 core::mem::take(&mut st.data),
@@ -855,21 +910,22 @@ impl PdfOut {
             head.int(*v);
             head.push(b' ');
         }
-        self.stream_mut(objstm).data = head.0;
-        let dict = self.stream_dict(objstm);
-        self.put_name(dict, b"Type", b"ObjStm");
-        self.put_number(dict, b"N", pos as f64);
-        let first = self.stream_length(objstm) as f64;
-        self.put_number(dict, b"First", first);
-        self.add_stream(objstm, &old);
-        self.release(objstm);
+        self.stream_mut(objstm, 2411)?.data = head.0;
+        let dict = self.stream_dict(objstm)?;
+        self.put_name(dict, b"Type", b"ObjStm")?;
+        self.put_number(dict, b"N", pos as f64)?;
+        let first = self.stream_length(objstm)? as f64;
+        self.put_number(dict, b"First", first)?;
+        self.add_stream(objstm, &old)?;
+        self.release(objstm)?;
+        Ok(())
     }
 
     // The output.
 
-    fn out_char(&mut self, c: u8) {
+    fn out_char(&mut self, c: u8) -> Result<()> {
         if let Some(s) = self.output_stream {
-            self.add_stream(s, &[c]);
+            self.add_stream(s, &[c])?;
         } else {
             self.out.push(c);
             self.file_position += 1;
@@ -879,17 +935,19 @@ impl PdfOut {
                 self.line_position += 1;
             }
         }
+        Ok(())
     }
 
-    fn out_xchar(&mut self, c: u8) {
+    fn out_xchar(&mut self, c: u8) -> Result<()> {
         const X: &[u8; 16] = b"0123456789abcdef";
-        self.out_char(X[(c >> 4) as usize]);
-        self.out_char(X[(c & 15) as usize]);
+        self.out_char(X[(c >> 4) as usize])?;
+        self.out_char(X[(c & 15) as usize])?;
+        Ok(())
     }
 
-    fn out_str(&mut self, s: &[u8]) {
+    fn out_str(&mut self, s: &[u8]) -> Result<()> {
         if let Some(st) = self.output_stream {
-            self.add_stream(st, s);
+            self.add_stream(st, s)?;
         } else {
             self.out.extend_from_slice(s);
             self.file_position += s.len();
@@ -898,59 +956,61 @@ impl PdfOut {
                 self.line_position = 0;
             }
         }
+        Ok(())
     }
 
-    fn out_white(&mut self) {
+    fn out_white(&mut self) -> Result<()> {
         if self.line_position >= 80 {
-            self.out_char(b'\n');
+            self.out_char(b'\n')?;
         } else {
-            self.out_char(b' ');
+            self.out_char(b' ')?;
         }
+        Ok(())
     }
 
-    fn write_obj(&mut self, o: Option<Obj>) {
+    fn write_obj(&mut self, o: Option<Obj>) -> Result<()> {
         let Some(o) = o else {
-            self.out_str(b"null");
-            return;
+            self.out_str(b"null")?;
+            return Ok(());
         };
         match self.type_of(Some(o)) {
             PDF_BOOLEAN => {
-                if self.boolean_value(o) {
-                    self.out_str(b"true");
+                if self.boolean_value(o)? {
+                    self.out_str(b"true")?;
                 } else {
-                    self.out_str(b"false");
+                    self.out_str(b"false")?;
                 }
             }
             PDF_NUMBER => {
                 let mut b = Buf::new();
-                sprint_number(&mut b, self.number_value(o));
-                self.out_str(&b.0);
+                sprint_number(&mut b, self.number_value(o)?);
+                self.out_str(&b.0)?;
             }
             PDF_STRING => {
-                let s = self.string_value(o).to_vec();
-                self.write_string(&s);
+                let s = self.string_value(o)?.to_vec();
+                self.write_string(&s)?;
             }
             PDF_NAME => {
-                let s = self.name_value(o).to_vec();
-                self.write_name(&s);
+                let s = self.name_value(o)?.to_vec();
+                self.write_name(&s)?;
             }
             PDF_ARRAY => {
-                self.out_char(b'[');
-                let items = self.array_items(o);
+                self.out_char(b'[')?;
+                let items = self.array_items(o)?;
                 let mut type1 = PDF_UNDEFINED;
                 for x in items.into_iter().flatten() {
                     let type2 = self.type_of(Some(x));
                     if type1 != PDF_UNDEFINED && need_white(type1, type2) {
-                        self.out_white();
+                        self.out_white()?;
                     }
                     type1 = type2;
-                    self.write_obj(Some(x));
+                    self.write_obj(Some(x))?;
                 }
-                self.out_char(b']');
+                self.out_char(b']')?;
             }
-            PDF_DICT => self.write_dict(o),
-            PDF_STREAM => self.write_stream(o),
-            PDF_NULL => self.out_str(b"null"),
+            PDF_DICT => self.write_dict(o)?,
+            PDF_STREAM => self.write_stream(o)?,
+            PDF_NULL => self.out_str(b"null")?,
             PDF_INDIRECT => {
                 let i = self.indirect(o);
                 debug_assert!(i.pf.is_none());
@@ -959,83 +1019,87 @@ impl PdfOut {
                 b.push(b' ');
                 b.uint(u32::from(i.generation));
                 b.extend(b" R");
-                self.out_str(&b.0);
+                self.out_str(&b.0)?;
             }
             t => panic!("pdf_write_obj: Invalid object, type = {t}"),
         }
+        Ok(())
     }
 
-    fn write_dict(&mut self, d: Obj) {
-        self.out_str(b"<<");
-        for (k, v) in self.dict_entries(d) {
-            self.write_obj(Some(k));
+    fn write_dict(&mut self, d: Obj) -> Result<()> {
+        self.out_str(b"<<")?;
+        for (k, v) in self.dict_entries(d)? {
+            self.write_obj(Some(k))?;
             let t = self.type_of(v);
             // (a C null value is written as null; its "type" for spacing
             // is that of the null pointer, which crashes in C: never seen)
             if need_white(PDF_NAME, if v.is_some() { t } else { PDF_NULL }) {
-                self.out_white();
+                self.out_white()?;
             }
-            self.write_obj(v);
+            self.write_obj(v)?;
         }
-        self.out_str(b">>");
+        self.out_str(b">>")?;
+        Ok(())
     }
 
-    fn write_string(&mut self, s: &[u8]) {
+    fn write_string(&mut self, s: &[u8]) -> Result<()> {
         let nescc = s.iter().filter(|&&c| !(32..=126).contains(&c)).count();
         if nescc > s.len() / 3 {
-            self.out_char(b'<');
+            self.out_char(b'<')?;
             for &c in s {
-                self.out_xchar(c);
+                self.out_xchar(c)?;
             }
-            self.out_char(b'>');
+            self.out_char(b'>')?;
         } else {
-            self.out_char(b'(');
+            self.out_char(b'(')?;
             for &c in s {
                 let mut b = Buf::new();
                 escape_char(&mut b, c);
-                self.out_str(&b.0);
+                self.out_str(&b.0)?;
             }
-            self.out_char(b')');
+            self.out_char(b')')?;
         }
+        Ok(())
     }
 
-    fn write_name(&mut self, s: &[u8]) {
-        self.out_char(b'/');
+    fn write_name(&mut self, s: &[u8]) -> Result<()> {
+        self.out_char(b'/')?;
         for &c in s {
             if !(b'!'..=b'~').contains(&c) || c == b'#' || is_name_delim(c) {
-                self.out_char(b'#');
-                self.out_xchar(c);
+                self.out_char(b'#')?;
+                self.out_xchar(c)?;
             } else {
-                self.out_char(c);
+                self.out_char(c)?;
             }
         }
+        Ok(())
     }
 
-    fn write_stream(&mut self, s: Obj) {
-        let dict = self.stream_dict(s);
-        let mut filtered = self.stream_data(s).to_vec();
-        if let Some(t) = self.lookup_dict(dict, b"Type")
-            && self.name_value(t) == b"Metadata"
+    fn write_stream(&mut self, s: Obj) -> Result<()> {
+        let dict = self.stream_dict(s)?;
+        let mut filtered = self.stream_data(s)?.to_vec();
+        if let Some(t) = self.lookup_dict(dict, b"Type")?
+            && self.name_value(t)? == b"Metadata"
         {
-            self.stream_mut(s).flags &= !STREAM_COMPRESS;
+            self.stream_mut(s, 0)?.flags &= !STREAM_COMPRESS;
         }
         let (flags, parms) = {
-            let st = self.stream(s);
+            let st = self.stream(s, 0)?;
             (st.flags, st.parms)
         };
         if !filtered.is_empty() && flags & STREAM_COMPRESS != 0 && self.compression_level > 0 {
             if self.use_predictor
                 && flags & STREAM_USE_PREDICTOR != 0
-                && self.lookup_dict(dict, b"DecodeParms").is_none()
+                && self.lookup_dict(dict, b"DecodeParms")?.is_none()
             {
                 let bits_per_pixel = parms.colors * parms.bits_per_component;
                 let len = (parms.columns * bits_per_pixel + 7) / 8;
                 let rows = filtered.len() as i32 / len;
                 let p = self.new_dict();
-                self.put_number(p, b"BitsPerComponent", f64::from(parms.bits_per_component));
-                self.put_number(p, b"Colors", f64::from(parms.colors));
-                self.put_number(p, b"Columns", f64::from(parms.columns));
-                self.put_number(p, b"Predictor", f64::from(parms.predictor));
+                self.put_number(p, b"BitsPerComponent", f64::from(parms.bits_per_component))?;
+                self.put_number(p, b"Colors", f64::from(parms.colors))?;
+                self.put_number(p, b"Columns", f64::from(parms.columns))?;
+                self.put_number(p, b"Predictor", f64::from(parms.predictor))?;
                 let filtered2 = match parms.predictor {
                     2 => Some(crate::filter::tiff2_apply(
                         &filtered,
@@ -1055,18 +1119,18 @@ impl PdfOut {
                 };
                 if let Some(f2) = filtered2 {
                     filtered = f2;
-                    self.put(dict, b"DecodeParms", p);
+                    self.put(dict, b"DecodeParms", p)?;
                 } else {
                     // (C leaks the dictionary; it is not written)
-                    self.release(p);
+                    self.release(p)?;
                 }
             }
-            let filters = self.lookup_dict(dict, b"Filter");
+            let filters = self.lookup_dict(dict, b"Filter")?;
             let name = self.new_name(b"FlateDecode");
             if let Some(f) = filters {
-                self.unshift_array(f, name);
+                self.unshift_array(f, name)?;
             } else {
-                self.put(dict, b"Filter", name);
+                self.put(dict, b"Filter", name)?;
             }
             filtered = (self.deflate.as_ref().expect("deflater").borrow_mut())(
                 self.compression_level,
@@ -1074,14 +1138,15 @@ impl PdfOut {
             );
         }
         let n = self.new_number(filtered.len() as f64);
-        self.put(dict, b"Length", n);
-        self.write_obj(Some(dict));
-        self.out_str(b"\nstream\n");
+        self.put(dict, b"Length", n)?;
+        self.write_obj(Some(dict))?;
+        self.out_str(b"\nstream\n")?;
         if !filtered.is_empty() {
-            self.out_str(&filtered);
+            self.out_str(&filtered)?;
         }
-        self.out_str(b"\n");
-        self.out_str(b"endstream");
+        self.out_str(b"\n")?;
+        self.out_str(b"endstream")?;
+        Ok(())
     }
 
     // ---------------------------------------------------------------
@@ -1097,7 +1162,7 @@ impl PdfOut {
         compression_level: i32,
         enable_objstm: bool,
         enable_predictor: bool,
-    ) {
+    ) -> Result<()> {
         let version = ver_major * 10 + ver_minor;
         if (crate::PDF_VERSION_MIN..=crate::PDF_VERSION_MAX).contains(&version) {
             self.version_major = ver_major;
@@ -1111,8 +1176,8 @@ impl PdfOut {
         if self.check_version(1, 5) == 0 && enable_objstm {
             let xs = self.new_stream(STREAM_COMPRESS);
             self.set_flags(xs, OBJ_NO_ENCRYPT);
-            let t = self.stream_dict(xs);
-            self.put_name(t, b"Type", b"XRef");
+            let t = self.stream_dict(xs)?;
+            self.put_name(t, b"Type", b"XRef")?;
             self.xref_stream = Some(xs);
             self.trailer = Some(t);
             self.use_objstm = true;
@@ -1122,23 +1187,24 @@ impl PdfOut {
             self.use_objstm = false;
         }
         self.open = true;
-        self.out_str(b"%PDF-");
+        self.out_str(b"%PDF-")?;
         let v = [
             b'0' + self.version_major as u8,
             b'.',
             b'0' + self.version_minor as u8,
             b'\n',
         ];
-        self.out_str(&v);
-        self.out_str(BINARY_MARKER);
+        self.out_str(&v)?;
+        self.out_str(BINARY_MARKER)?;
         let ids = self.new_array();
         let a = self.new_string(id1);
-        self.add_array(ids, a);
+        self.add_array(ids, a)?;
         let b = self.new_string(id2);
-        self.add_array(ids, b);
+        self.add_array(ids, b)?;
         let t = self.trailer.expect("trailer");
-        self.put(t, b"ID", ids);
+        self.put(t, b"ID", ids)?;
         self.use_predictor = enable_predictor;
+        Ok(())
     }
 
     #[must_use]
@@ -1161,68 +1227,71 @@ impl PdfOut {
         }
     }
 
-    pub fn set_root(&mut self, o: Obj) {
+    pub fn set_root(&mut self, o: Obj) -> Result<()> {
         let t = self.trailer.expect("trailer");
         assert!(
-            self.lookup_dict(t, b"Root").is_none(),
+            self.lookup_dict(t, b"Root")?.is_none(),
             "Root object already set!"
         );
-        let r = self.ref_obj(o);
-        self.put(t, b"Root", r);
+        let r = self.ref_obj(o)?;
+        self.put(t, b"Root", r)?;
+        Ok(())
     }
 
-    pub fn set_info(&mut self, o: Obj) {
+    pub fn set_info(&mut self, o: Obj) -> Result<()> {
         let t = self.trailer.expect("trailer");
         assert!(
-            self.lookup_dict(t, b"Info").is_none(),
+            self.lookup_dict(t, b"Info")?.is_none(),
             "Info object already set!"
         );
-        let r = self.ref_obj(o);
-        self.put(t, b"Info", r);
+        let r = self.ref_obj(o)?;
+        self.put(t, b"Info", r)?;
+        Ok(())
     }
 
     /// `pdf_out_flush`: the last object stream, the cross-reference
     /// section and the trailer.
-    pub fn flush(&mut self) {
+    pub fn flush(&mut self) -> Result<()> {
         if !self.open {
-            return;
+            return Ok(());
         }
         if let Some(s) = self.current_objstm.take() {
-            self.release_objstm(s);
+            self.release_objstm(s)?;
         }
         if let Some(xs) = self.xref_stream {
-            self.label_obj(xs);
+            self.label_obj(xs)?;
         }
         self.startxref = self.file_position as u32;
         let t = self.trailer.expect("trailer");
-        self.put_number(t, b"Size", f64::from(self.next_label));
+        self.put_number(t, b"Size", f64::from(self.next_label))?;
         if self.xref_stream.is_some() {
-            self.dump_xref_stream();
+            self.dump_xref_stream()?;
         } else {
-            self.dump_xref_table();
-            self.out_str(b"trailer\n");
-            self.write_dict(t);
-            self.release(t);
+            self.dump_xref_table()?;
+            self.out_str(b"trailer\n")?;
+            self.write_dict(t)?;
+            self.release(t)?;
             self.trailer = None;
-            self.out_char(b'\n');
+            self.out_char(b'\n')?;
         }
         self.xref.clear();
-        self.out_str(b"startxref\n");
+        self.out_str(b"startxref\n")?;
         let mut b = Buf::new();
         b.uint(self.startxref);
         b.push(b'\n');
-        self.out_str(&b.0);
-        self.out_str(b"%%EOF\n");
+        self.out_str(&b.0)?;
+        self.out_str(b"%%EOF\n")?;
         self.open = false;
+        Ok(())
     }
 
-    fn dump_xref_table(&mut self) {
-        self.out_str(b"xref\n");
+    fn dump_xref_table(&mut self) -> Result<()> {
+        self.out_str(b"xref\n")?;
         let mut b = Buf::new();
         b.extend(b"0 ");
         b.uint(self.next_label);
         b.push(b'\n');
-        self.out_str(&b.0);
+        self.out_str(&b.0)?;
         for i in 0..self.next_label as usize {
             let e = self.xref.get(i).copied().unwrap_or_default();
             assert!(
@@ -1237,11 +1306,12 @@ impl PdfOut {
             b.push(b' ');
             b.push(if e.kind != 0 { b'n' } else { b'f' });
             b.extend(b" \n");
-            self.out_str(&b.0);
+            self.out_str(&b.0)?;
         }
+        Ok(())
     }
 
-    fn dump_xref_stream(&mut self) {
+    fn dump_xref_stream(&mut self) -> Result<()> {
         let xs = self.xref_stream.expect("xref stream");
         let mut pos = self.startxref;
         let mut poslen = 1usize;
@@ -1255,10 +1325,10 @@ impl PdfOut {
         let w = self.new_array();
         for v in [1.0, poslen as f64, 2.0] {
             let n = self.new_number(v);
-            self.add_array(w, n);
+            self.add_array(w, n)?;
         }
         let t = self.trailer.expect("trailer");
-        self.put(t, b"W", w);
+        self.put(t, b"W", w)?;
         let label = self.next_label - 1;
         self.add_xref_entry(label, 1, self.startxref, 0);
         for i in 0..self.next_label as usize {
@@ -1272,10 +1342,11 @@ impl PdfOut {
             }
             buf[poslen + 1] = (e.field3 >> 8) as u8;
             buf[poslen + 2] = e.field3 as u8;
-            self.add_stream(xs, &buf[..poslen + 3]);
+            self.add_stream(xs, &buf[..poslen + 3])?;
         }
-        self.release(xs);
+        self.release(xs)?;
         self.xref_stream = None;
+        Ok(())
     }
 
     /// Takes what was written since the last call.
@@ -1293,90 +1364,92 @@ impl PdfOut {
     }
 
     /// 0 if equal.
-    pub fn compare_object(&mut self, o1: Option<Obj>, o2: Option<Obj>) -> i32 {
+    pub fn compare_object(&mut self, o1: Option<Obj>, o2: Option<Obj>) -> Result<i32> {
         let (o1, o2) = match (o1, o2) {
-            (None, None) => return 0,
+            (None, None) => return Ok(0),
             (Some(a), Some(b)) => (a, b),
-            _ => return 1,
+            _ => return Ok(1),
         };
         if self.type_of(Some(o1)) != self.type_of(Some(o2)) {
-            return 1;
+            return Ok(1);
         }
         match self.type_of(Some(o1)) {
-            PDF_BOOLEAN => i32::from(self.boolean_value(o1)) - i32::from(self.boolean_value(o2)),
+            PDF_BOOLEAN => {
+                Ok(i32::from(self.boolean_value(o1)?) - i32::from(self.boolean_value(o2)?))
+            }
             PDF_NUMBER => {
-                let (a, b) = (self.number_value(o1), self.number_value(o2));
+                let (a, b) = (self.number_value(o1)?, self.number_value(o2)?);
                 if a < b {
-                    -1
+                    Ok(-1)
                 } else if a > b {
-                    1
+                    Ok(1)
                 } else {
-                    0
+                    Ok(0)
                 }
             }
             PDF_STRING => {
-                let (a, b) = (self.string_value(o1), self.string_value(o2));
+                let (a, b) = (self.string_value(o1)?, self.string_value(o2)?);
                 match a.len().cmp(&b.len()) {
-                    core::cmp::Ordering::Less => -1,
-                    core::cmp::Ordering::Greater => 1,
-                    core::cmp::Ordering::Equal => memcmp(a, b),
+                    core::cmp::Ordering::Less => Ok(-1),
+                    core::cmp::Ordering::Greater => Ok(1),
+                    core::cmp::Ordering::Equal => Ok(memcmp(a, b)),
                 }
             }
-            PDF_NAME => memcmp(self.name_value(o1), self.name_value(o2)),
-            PDF_NULL => 0,
-            PDF_INDIRECT => i32::from(self.compare_reference(o1, o2)),
+            PDF_NAME => Ok(memcmp(self.name_value(o1)?, self.name_value(o2)?)),
+            PDF_NULL => Ok(0),
+            PDF_INDIRECT => Ok(i32::from(self.compare_reference(o1, o2))),
             PDF_ARRAY => {
-                let (n1, n2) = (self.array_length(o1), self.array_length(o2));
+                let (n1, n2) = (self.array_length(o1)?, self.array_length(o2)?);
                 if n1 < n2 {
-                    return -1;
+                    return Ok(-1);
                 } else if n1 > n2 {
-                    return 1;
+                    return Ok(1);
                 }
                 let mut r = 0;
                 for i in 0..n1 {
                     if r != 0 {
                         break;
                     }
-                    let v1 = self.get_array(o1, i as i32);
-                    let v2 = self.get_array(o2, i as i32);
-                    r = self.compare_object(v1, v2);
+                    let v1 = self.get_array(o1, i as i32)?;
+                    let v2 = self.get_array(o2, i as i32)?;
+                    r = self.compare_object(v1, v2)?;
                 }
-                r
+                Ok(r)
             }
             PDF_DICT => {
-                let k1 = self.dict_keys(o1);
-                let k2 = self.dict_keys(o2);
-                let mut r = self.compare_object(Some(k1), Some(k2));
+                let k1 = self.dict_keys(o1)?;
+                let k2 = self.dict_keys(o2)?;
+                let mut r = self.compare_object(Some(k1), Some(k2))?;
                 if r == 0 {
-                    for i in 0..self.array_length(k1) {
+                    for i in 0..self.array_length(k1)? {
                         if r != 0 {
                             break;
                         }
-                        let key = self.get_array(k1, i as i32).expect("key");
-                        let name = self.name_value(key).to_vec();
-                        let v1 = self.lookup_dict(o1, &name);
-                        let v2 = self.lookup_dict(o2, &name);
-                        r = self.compare_object(v1, v2);
+                        let key = self.get_array(k1, i as i32)?.expect("key");
+                        let name = self.name_value(key)?.to_vec();
+                        let v1 = self.lookup_dict(o1, &name)?;
+                        let v2 = self.lookup_dict(o2, &name)?;
+                        r = self.compare_object(v1, v2)?;
                     }
                 }
-                self.release(k1);
-                self.release(k2);
-                r
+                self.release(k1)?;
+                self.release(k2)?;
+                Ok(r)
             }
             PDF_STREAM => {
-                let (d1, d2) = (self.stream_dict(o1), self.stream_dict(o2));
-                let mut r = self.compare_object(Some(d1), Some(d2));
+                let (d1, d2) = (self.stream_dict(o1)?, self.stream_dict(o2)?);
+                let mut r = self.compare_object(Some(d1), Some(d2))?;
                 if r == 0 {
-                    let (l1, l2) = (self.stream_length(o1), self.stream_length(o2));
+                    let (l1, l2) = (self.stream_length(o1)?, self.stream_length(o2)?);
                     r = match l1.cmp(&l2) {
                         core::cmp::Ordering::Less => -1,
                         core::cmp::Ordering::Greater => 1,
                         core::cmp::Ordering::Equal => 0,
                     };
                 }
-                r
+                Ok(r)
             }
-            _ => 1,
+            _ => Ok(1),
         }
     }
 }
