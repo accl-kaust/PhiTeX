@@ -4,6 +4,7 @@ use alloc::boxed::Box;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
+use partex_engine::lr;
 use partex_engine::math::{Field, Item, Kind, Noad};
 use partex_engine::node::{
     Adjust, BoxNode, Disc, GlueSpec, Ins, LeaderNode, Leaders, Mark, Node, Order,
@@ -401,17 +402,17 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                         b"This \\lastbox will therefore be void.",
                     ]);
                     self.error()?;
-                } else if let Some(Node::Box(_)) = self.nodes().last() {
-                    // §1081: remove the last box (a box in a
-                    // discretionary's replacement is not the last node).
-                    if let Some(Node::Box(mut b)) = self.nodes_mut().pop() {
-                        if b.shift != 0 {
-                            let m = Arc::make_mut(&mut b);
-                            m.shift = 0;
-                            m.reversion();
-                        }
-                        self.cur_box = Some(Node::Box(b));
+                } else if let Some(Node::Box(mut b)) =
+                    self.take_effective_tail(|n| matches!(n, Node::Box(_)))?
+                {
+                    // §1081: remove the last box (e-TeX: the effective tail;
+                    // a box in a discretionary's replacement stays).
+                    if b.shift != 0 {
+                        let m = Arc::make_mut(&mut b);
+                        m.shift = 0;
+                        m.reversion();
                     }
+                    self.cur_box = Some(Node::Box(b));
                 }
             }
             VSPLIT_CODE => {
@@ -799,16 +800,54 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             }
             return Ok(());
         }
-        // A node in a discretionary's replacement stays (§1105).
-        let in_disc = matches!(self.tail_item(), Some(Node::Disc(d)) if !d.replace.is_empty());
-        if !in_disc
-            && self
-                .tail_node()
-                .is_some_and(|n| node_type(n) == self.cur_chr)
-        {
-            self.pop_tail();
+        if self.mode().abs() == MMODE {
+            // A node in a discretionary's replacement stays (§1105).
+            let in_disc = matches!(self.tail_item(), Some(Node::Disc(d)) if !d.replace.is_empty());
+            if !in_disc
+                && self
+                    .tail_node()
+                    .is_some_and(|n| node_type(n) == self.cur_chr)
+            {
+                self.pop_tail();
+            }
+        } else {
+            let c = self.cur_chr;
+            self.take_effective_tail(|n| node_type(n) == c)?;
         }
         Ok(())
+    }
+
+    /// e-TeX's `find_effective_tail` and `fetch_effective_tail` (§1080,
+    /// §1105): the last node of the current (not math) list, or the one
+    /// before a final `\endM`, removed if `wanted` takes it; a `\beginM`
+    /// just before it goes too, with the `\endM`. A node a discretionary
+    /// replaces stays.
+    fn take_effective_tail(
+        &mut self,
+        wanted: impl FnOnce(&Node) -> bool,
+    ) -> Result<Option<Node>, Jump> {
+        let is_m = |n: Option<&Node>, code: u8| matches!(n, Some(Node::Math { subtype, .. }) if *subtype == code);
+        let list = self.nodes();
+        let end_m = is_m(list.last(), lr::END_M_CODE);
+        let Some(tx) = list.len().checked_sub(1 + usize::from(end_m)) else {
+            return Ok(None);
+        };
+        match list.get(tx) {
+            Some(Node::Disc(d)) if !d.replace.is_empty() => return Ok(None),
+            Some(n) if wanted(n) => {}
+            _ => return Ok(None),
+        }
+        let fm = tx > 0 && is_m(list.get(tx - 1), lr::BEGIN_M_CODE);
+        if fm && !end_m {
+            return self.confusion(b"tail1");
+        }
+        let nodes = self.nodes_mut();
+        let found = nodes.remove(tx);
+        if fm {
+            // (r -> p=begin_M -> tx -> q=end_M: all three go)
+            nodes.truncate(tx - 1);
+        }
+        Ok(Some(found))
     }
 
     /// §1110
