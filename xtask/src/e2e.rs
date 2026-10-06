@@ -498,7 +498,8 @@ const CASES: &[Case] = &[
     },
     // xelatex, its format made here: fontspec, hyphenation of native
     // words, hyperref, polyglossia's right-to-left scripts, beamer and
-    // TikZ through xdvipdfmx; each run twice (the second reads the aux)
+    // TikZ through xdvipdfmx, graphicx's pictures (PNG, JPEG, BMP, PDF
+    // pages); each run twice (the second reads the aux)
     Case {
         name: "xelatex",
         oracle: "xetex",
@@ -506,6 +507,15 @@ const CASES: &[Case] = &[
             "xelatex-fonts.tex",
             "xelatex-lang.tex",
             "xelatex-beamer.tex",
+            "xelatex-pics.tex",
+            "xpic-plain.png",
+            "xpic-dpi300.png",
+            "xpic-jfif200.jpg",
+            "xpic-exif300.jpg",
+            "xpic-big24.bmp",
+            "xpic-rle8.bmp",
+            "xpic-inherit.pdf",
+            "xpic-three.pdf",
         ],
         runs: &[
             &[
@@ -519,7 +529,8 @@ const CASES: &[Case] = &[
             &["-fmt=xelatex", "-interaction=nonstopmode", "xelatex-fonts"],
             &["-fmt=xelatex", "-interaction=nonstopmode", "xelatex-lang"],
             &["-fmt=xelatex", "-interaction=nonstopmode", "xelatex-beamer"],
-            &["-fmt=xelatex", "-interaction=nonstopmode", "xelatex-beamer"],
+            &["-fmt=xelatex", "-interaction=nonstopmode", "xelatex-pics"],
+            &["-fmt=xelatex", "-interaction=nonstopmode", "xelatex-pics"],
             &[
                 "-fmt=xelatex",
                 "-interaction=nonstopmode",
