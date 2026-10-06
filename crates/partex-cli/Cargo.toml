@@ -30,6 +30,7 @@ partex-kpse = { path = "../partex-kpse" }
 partex-trace = { path = "../partex-trace" }
 partex-xdvipdfmx = { path = "../partex-xdvipdfmx" }
 phitex-doc = { path = "../phitex-doc" }
+phitex-draw = { path = "../phitex-draw" }
 
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
 tikv-jemallocator = { version = "0.6", optional = true }

@@ -1,0 +1,13 @@
+[package]
+name = "phitex-draw"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "What a page viewer draws: a PDF page's draw list (v2) and its glyphs' places, as the PhiTeX viewer consumes them"
+
+[dependencies]
+partex-engine = { path = "../partex-engine" }
+
+[lints]
+workspace = true

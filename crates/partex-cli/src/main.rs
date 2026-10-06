@@ -17,6 +17,7 @@ mod fontindex;
 mod heap;
 mod inotify;
 mod intervals;
+mod json;
 mod live;
 mod lz;
 mod machinehost;
@@ -36,7 +37,9 @@ mod term;
 mod texprof;
 mod timeline;
 mod tokendeps;
+mod view;
 mod warnings;
+mod ws;
 mod zlib;
 
 #[cfg(all(feature = "jemalloc", not(target_family = "wasm")))]

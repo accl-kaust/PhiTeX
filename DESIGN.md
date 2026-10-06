@@ -2743,6 +2743,72 @@ above 1, math codes with families of 128 and up printed as XeTeX's
 crashes on any ICU converter in e-TeX mode, so ICU input can only be
 checked against `uconv`.
 
+### 4.8 The live viewer (2026-10-06)
+
+`partex watch` shows the document in the browser as it is built, instead
+of an external PDF viewer reloading the whole file. It is the Overleaf
+extension's viewer, not a second one.
+
+**When.** On by default where standard output is a terminal and `CI` is
+not set; `--view` turns it on anywhere, `--no-view` off (the old
+behaviour: `--open` opens the PDF once). The browser is opened once
+(`BROWSER`, else `xdg-open`/`open`) where interactive; the address is
+printed in any case (`Viewing http://127.0.0.1:PORT/TOKEN/`). The PDF and
+every other output are written as before: the viewer reads the PDF back
+after the build, and no build reads anything of it.
+
+**Server** (`view.rs`, `ws.rs`, `json.rs`; `std` only). A thread accepts
+on 127.0.0.1 at a free port (`PARTEX_VIEW_PORT` to choose), a thread per
+connection: HTTP/1.1, and a WebSocket (RFC 6455; SHA-1 and base64 for the
+handshake) on `/TOKEN/ws`. Every path begins with a random token (128
+bits from `/dev/urandom`), so another page in the browser cannot read the
+document. `TCP_NODELAY`: the small frames go at once.
+
+**Pages** (`phitex_draw`). After each build the PDF is opened
+(`partex_engine::pdfread`, any PDF: compressed streams, object streams)
+and each page hashed: its decoded content and size, kept for the pages
+whose content streams lie wholly before the first byte that changed
+(`Pdf::hashes_since`). A page's draw list is made when the browser asks
+for it and kept by hash. The draw list is the extension's v2 (`Draws2`
+in its `page2.ts`): glyphs as `<use>`s of their embedded Type 1 outlines,
+the text over them for selecting, TikZ's paths. `phitex-draw` is the
+extension core's `pdfdraw.rs` and `type1.rs` reading through `pdfread`
+(theirs read only an uncompressed PDF); the extension is to depend on it
+instead of its copies, so both draw from the same functions.
+
+**Protocol.** The extension core's requests (`session.ts`'s `CoreReq`,
+`CoreRes`) as JSON: `{"id":N,"op":…}` answered `{"id":N,"ok":…,"json":…,
+"draws":…}`. Ops: `open` and `status` (the page count and hashes),
+`pages` (the hashes), `png` (a page's draw list; the extension's name),
+`edit` (answered with the last build, the page asked drawn: the files are
+watched on disk), `origins` (empty for now). Events, unasked:
+`{"event":"preparing","on":…}` when a rebuild begins and ends,
+`{"event":"settled"}` when a build is in. The browser then asks for the
+hashes, draws the page in view first if it changed, then the other pages
+it shows whose hash changed; the others keep their drawing, and the
+scroll stays where it is.
+
+**Page** (`crates/partex-cli/viewer/`). `index.html`, and `viewer.js`:
+the extension's `viewer.ts` and `page2.ts` at a pinned tag with the CLI's
+host for them (`cli.ts`, a `ViewerHost` over the WebSocket), bundled by
+esbuild (`scripts/viewer-bundle.sh`, which takes the extension's files
+from its repository at the tag; the bundle, 11 KB, is committed and
+embedded, so a build needs neither node nor that repository). The text
+fonts `page2.ts` asks for (Latin Modern) are served from kpathsea. When
+the extension tags its embeddable bundle, `cli.ts` gives way to its
+`PreviewSession` over the same protocol.
+
+**Measured** (a three-page article with a second file, machine-mode
+watch, sandboxed, this machine): a word edited on disk is built, hashed
+(0.3 ms) and settled 125–200 ms after the write, and the changed page's
+draw list (4 ms, 16 KB) is in the client 4 ms after the settle; only the
+changed page is asked for and sent (`PARTEX_VIEW_LOG=1` logs it).
+
+**Not done yet.** Source and page: double-click to the editor (glyph
+origins; the watch runtimes record none, 4.4) and forward search
+(`partex sync FILE:LINE`). XeTeX's native fonts' glyphs (the extension
+draws them from xdvipdfmx's glyph runs).
+
 ---
 
 ## 5. Performance, observability and the text form
