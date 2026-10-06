@@ -1,0 +1,16 @@
+\documentclass{article}
+\usepackage{amsmath}
+\usepackage{mathtools}
+\usepackage[math-style=ISO,bold-style=ISO]{unicode-math}
+\setmathfont{Latin Modern Math}
+\setmathfont[range=\mathscr]{XITS Math}
+\setmathfont[range={"222B-"2233},Scale=1.1]{TeX Gyre Pagella Math}
+\setmathfont[range=\mathfrak]{STIX Two Math}
+\begin{document}
+\showboxdepth=10000 \showboxbreadth=100000
+\def\S#1{\setbox0\hbox{#1}\showbox0 \box0\par}
+\S{$\mathscr{A}\mathscr{L} x + \int_0^1 \oint \mathfrak{g} \alpha\beta\Gamma \symbf{\alpha} \mathbf{A}$}
+\S{$\displaystyle\int_0^\infty e^{-x^2}\,dx = \frac{\sqrt{\pi}}{2} \iint_{\mathscr{D}} f \mathrlap{x}y \coloneqq z$}
+\S{$\left( \int \frac{\mathscr{A}}{B} \right)^{2}_{i} \overbrace{\mathfrak{a}+\mathfrak{b}}^{n}$}
+\[ \int_{-\infty}^{\infty}\!\!\int \frac{\partial^2 f}{\partial x\,\partial y}\,dx\,dy \qquad \sum_{k=0}^{\infty} \binom{n}{k} \]
+\end{document}
