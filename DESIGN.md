@@ -116,6 +116,14 @@ listed in `partex_engine::bugs::PdftexBugs`, and switchable with
 - The gate is `scripts/sandbox cargo xtask check`: fmt, clippy, the
   wasm build, trip, etrip, e2e and SSA mode's edit sequences
   (`ssa-edits`).
+- The CI (`docs/ci.md`, `scripts/accl/accl ci`) adds, on the accl
+  cluster, the manual corpus (TeX Live's own documentation sources,
+  TeX Live's engine to a settled fixpoint against partex's plain,
+  `build`, machine and SSA modes, the PDF and the files read back byte
+  for byte), the l3build suites, escape tests, and measured runs against
+  TeX Live on a pinned node with their history; its scoreboard fails on
+  a new failure, a regression against the last main run, or a perf
+  regression.
 
 ---
 

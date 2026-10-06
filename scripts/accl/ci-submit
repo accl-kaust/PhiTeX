@@ -18,9 +18,9 @@ S=$CI/harness/ci.sbatch
 cd "$CI"
 sb() { sbatch --parsable --export=ALL "$@"; }
 b=$(sb -J ci-build -p build --qos=build4 -c 32 --mem=64G -t 02:00:00 "$S" build "$run" "$c")
-m=$(sb -J ci-manuals -d "afterok:$b" --array="0-${CI_SHARDS:-47}%24" -x "$perf" \
-  -p build --qos=build4 -c 4 --mem=48G -t 08:00:00 "$S" manuals "$run")
-t=$(sb -J ci-torture -d "afterok:$b" -x "$perf" -p build --qos=build4 -c 48 --mem=160G -t 08:00:00 \
+m=$(sb -J ci-manuals -d "afterok:$b" --array="0-${CI_SHARDS:-47}%12" -x "$perf" \
+  -p build --qos=build4 -c 2 --mem=24G -t 12:00:00 "$S" manuals "$run")
+t=$(sb -J ci-torture -d "afterok:$b" -x "$perf" -p build --qos=build4 -c 32 --mem=96G -t 08:00:00 \
   "$S" torture "$run")
 p=$(sb -J ci-perf -d "afterok:$b" -w "$perf" -p build --qos=build4 -c 16 --mem=96G -t 12:00:00 \
   "$S" perf "$run")

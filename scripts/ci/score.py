@@ -185,7 +185,7 @@ def main():
             history.append(json.loads(line))
         except ValueError:
             pass
-    mains = [h for h in history if h.get("main") and h.get("docs") and h.get("commit") != commit
+    mains = [h for h in history if h.get("main") and not h.get("imported") and h.get("docs") and h.get("commit") != commit
              and (not date or (h.get("date") or "") <= date)]
     perf_base = max(mains, key=lambda h: h.get("date") or "", default=None)
     pc = perf_compare(perf, perf_base)

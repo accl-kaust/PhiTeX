@@ -19,24 +19,27 @@ SERIES = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4"]
 SERIES_DARK = ["#3987e5", "#d95926", "#199e70", "#c98500", "#d55181"]
 
 # (title, unit, log scale, [(label, metric, scale)])
+# (title, unit, log scale, [(label, metric, scale, colour slot)]): a slot
+# per side (TeX Live 0, plain 1, build 2, machine 3, SSA 4), the same in
+# every chart
 CHARTS = [
     ("Cold build to the fixpoint", "s", False, [
-        ("TeX Live", "texlive.cold_s", 1), ("partex plain", "plain.cold_s", 1),
-        ("partex build", "build.cold_s", 1), ("partex machine", "machine.cold_s", 1),
-        ("partex SSA", "ssa.wall_s", 1)]),
+        ("TeX Live", "texlive.cold_s", 1, 0), ("partex plain", "plain.cold_s", 1, 1),
+        ("partex build", "build.cold_s", 1, 2), ("partex machine", "machine.cold_s", 1, 3),
+        ("partex SSA", "ssa.wall_s", 1, 4)]),
     ("A word edit, to the fixpoint", "s, log scale", True, [
-        ("TeX Live rerun", "texlive.edit_s", 1), ("partex SSA rebuild", "ssa.edit_ms", 0.001),
-        ("partex machine, unchanged", "machine.warm_s", 1)]),
+        ("TeX Live rerun", "texlive.edit_s", 1, 0), ("partex machine, unchanged", "machine.warm_s", 1, 3),
+        ("partex SSA rebuild", "ssa.edit_ms", 0.001, 4)]),
     ("One pass over settled files", "s", False, [
-        ("TeX Live", "texlive.pass_s", 1), ("partex plain", "plain.pass_s", 1)]),
+        ("TeX Live", "texlive.pass_s", 1, 0), ("partex plain", "plain.pass_s", 1, 1)]),
     ("Peak memory", "MB", False, [
-        ("TeX Live", "texlive.cold_rss_kib", 1 / 1024), ("partex plain", "plain.cold_rss_kib", 1 / 1024),
-        ("partex machine", "machine.cold_rss_kib", 1 / 1024), ("partex SSA", "ssa.rss_kib", 1 / 1024)]),
+        ("TeX Live", "texlive.cold_rss_kib", 1 / 1024, 0), ("partex plain", "plain.cold_rss_kib", 1 / 1024, 1),
+        ("partex machine", "machine.cold_rss_kib", 1 / 1024, 3), ("partex SSA", "ssa.rss_kib", 1 / 1024, 4)]),
     ("partex / TeX Live", "ratio, log scale", True, [
-        ("plain cold / TeX Live cold", ("plain.cold_s", "texlive.cold_s"), 1),
-        ("SSA cold / TeX Live cold", ("ssa.wall_s", "texlive.cold_s"), 1),
-        ("SSA edit / TeX Live edit", ("ssa.edit_ms", "texlive.edit_s"), 0.001),
-        ("plain pass / TeX Live pass", ("plain.pass_s", "texlive.pass_s"), 1)]),
+        ("plain cold / TeX Live cold", ("plain.cold_s", "texlive.cold_s"), 1, 1),
+        ("plain pass / TeX Live pass", ("plain.pass_s", "texlive.pass_s"), 1, 2),
+        ("SSA cold / TeX Live cold", ("ssa.wall_s", "texlive.cold_s"), 1, 3),
+        ("SSA edit / TeX Live edit", ("ssa.edit_ms", "texlive.edit_s"), 0.001, 4)]),
 ]
 
 W, H, PL, PR, PT, PB = 640, 260, 56, 12, 14, 34
@@ -93,7 +96,7 @@ def chart(entries, did, title, unit, log, series):
     pts = []  # (series index, x index, median, lo, hi, entry)
     for xi, e in enumerate(entries):
         doc = (e.get("docs") or {}).get(did) or {}
-        for si, (_, metric, scale) in enumerate(series):
+        for si, (_, metric, scale, _slot) in enumerate(series):
             v = value(doc, metric, scale)
             if v and (not log or v[1] > 0):
                 pts.append((si, xi, *v, e))
@@ -124,26 +127,28 @@ def chart(entries, did, title, unit, log, series):
     every = max(1, len(entries) // 8)
     for xi, e in enumerate(entries):
         if xi % every == 0 or xi == len(entries) - 1:
-            s.append(f'<text class="tick" x="{X(xi):.1f}" y="{H - PB + 16}" text-anchor="middle">{esc((e.get("commit") or "")[:7])}</text>')
+            anchor = "end" if xi == len(entries) - 1 and xi else "middle"
+            s.append(f'<text class="tick" x="{X(xi):.1f}" y="{H - PB + 16}" text-anchor="{anchor}">{esc((e.get("commit") or "")[:7])}</text>')
     for si in range(len(series)):
+        cl = series[si][3]
         mine = [p for p in pts if p[0] == si]
         if not mine:
             continue
         if len(mine) > 1:
             d = " ".join(f"{'M' if k == 0 else 'L'}{X(p[1]):.1f},{Y(p[2]):.1f}" for k, p in enumerate(mine))
-            s.append(f'<path class="line s{si}" d="{d}"/>')
+            s.append(f'<path class="line s{cl}" d="{d}"/>')
         for p in mine:
             e = p[5]
             if p[4] > p[3]:
-                s.append(f'<line class="range s{si}" x1="{X(p[1]):.1f}" x2="{X(p[1]):.1f}" y1="{Y(p[3]):.1f}" y2="{Y(p[4]):.1f}"/>')
+                s.append(f'<line class="range s{cl}" x1="{X(p[1]):.1f}" x2="{X(p[1]):.1f}" y1="{Y(p[3]):.1f}" y2="{Y(p[4]):.1f}"/>')
             tip = (f"{series[si][0]}: {fmt(p[2])} {unit.split(',')[0]}"
                    + (f" (range {fmt(p[3])}–{fmt(p[4])})" if p[4] > p[3] else "")
                    + f"\n{(e.get('commit') or '')[:12]} · {(e.get('date') or '')[:10]} · {e.get('node') or '?'}"
                    + (" · backfill" if e.get("backfill") else "") + f"\n{e.get('subject') or ''}"[:300])
-            s.append(f'<circle class="dot s{si}" cx="{X(p[1]):.1f}" cy="{Y(p[2]):.1f}" r="4" data-tip="{esc(tip)}"/>')
+            s.append(f'<circle class="dot s{cl}" cx="{X(p[1]):.1f}" cy="{Y(p[2]):.1f}" r="4" data-tip="{esc(tip)}"/>')
     s.append("</svg>")
-    legend = "".join(f'<span class="key"><i class="sw s{si}"></i>{esc(lbl)}</span>'
-                     for si, (lbl, _, _) in enumerate(series) if any(p[0] == si for p in pts))
+    legend = "".join(f'<span class="key"><i class="sw s{cl}"></i>{esc(lbl)}</span>'
+                     for si, (lbl, _, _, cl) in enumerate(series) if any(p[0] == si for p in pts))
     return (f'<figure><figcaption><b>{esc(title)}</b> <span class="unit">{esc(unit)}</span></figcaption>'
             f'<div class="legend">{legend}</div>{"".join(s)}</figure>')
 
@@ -235,7 +240,7 @@ def write(history, out):
         cases = sorted({c for e in ssa for c in e["ssa_edits"]} - {"(all cases)"})
         fake = [{**e, "docs": {"ssa-edits": {c: {"median": v["median_ms"], "min": v["median_ms"], "max": v["median_ms"]}
                                               for c, v in e["ssa_edits"].items()}}} for e in ssa]
-        series = [("all cases (median of medians)", "(all cases)", 1)] + [(c, c, 1) for c in cases[:4]]
+        series = [("all cases (median of medians)", "(all cases)", 1, 0)] + [(c, c, 1, i + 1) for i, c in enumerate(cases[:4])]
         parts.append("<h2>ssa-edits: rebuild time per case (median, ms)</h2><div class=grid2>"
                      + chart(fake, "ssa-edits", "SSA rebuilds of the edit harness", "ms, log scale", True, series) + "</div>")
     parts.append(f"<div id=tip></div><script>{JS}</script></main></body></html>")

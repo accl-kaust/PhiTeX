@@ -1,6 +1,6 @@
 #!/bin/bash
 # The perf history's backfill (docs/ci.md), one array task per commit of
-# $CI/harness/data/backfill.txt, on the perf node: the commit built in the
+# $CI/lists/backfill.txt, on the perf node: the commit built in the
 # CI container, its formats made, perf.py run (the harness of the tree that
 # submitted it, not the commit's), and the medians appended to
 # $CI/history.jsonl as a main entry marked `backfill`. A commit that does
@@ -11,7 +11,7 @@ CI=$HOME/code/flinner/partex-phitex-ci
 image=${CI_IMAGE:-partex-ci-2026-09-25}
 sif=$HOME/shared-cache/partex/$image.sif
 cache=$HOME/shared-cache/partex
-commit=$(sed -n "$(( SLURM_ARRAY_TASK_ID + 1 ))p" "$CI/harness/data/backfill.txt")
+commit=$(sed -n "$(( SLURM_ARRAY_TASK_ID + 1 ))p" "$CI/lists/backfill.txt")
 run=backfill-${commit:0:12}
 R=$CI/runs/$run
 w=/tmp/$USER-${SLURM_JOB_ID}-${SLURM_ARRAY_TASK_ID}

@@ -153,9 +153,12 @@ case $cmd in
   ci-wait) ci_wait "$@" ;;
   ci-oracle)
     ci_sync
-    scp -q "$1" "$H:$CI/harness/data/$(basename "$1")"
-    sb -J ci-oracle --array=0-${CI_SHARDS:-63}%32 -x "$PERF_NODE" -p build --qos=build4 -c 2 --mem=24G -t 12:00:00 \
-      "\$HOME/$CI/harness/ci.sbatch" oracle "oracle-$(date +%Y%m%d-%H%M%S)" "\$HOME/$CI/harness/data/$(basename "$1")" ;;
+    # (the list beside the harness, not in it: a sync would remove it)
+    l=lists/$(date +%Y%m%d-%H%M%S)-$(basename "$1")
+    ssh $H "mkdir -p $CI/lists"
+    scp -q "$1" "$H:$CI/$l"
+    sb -J ci-oracle --array=0-${CI_SHARDS:-63}%32 -x "$PERF_NODE" -p build --qos=build4 -c 2 --mem=6G -t 12:00:00 \
+      "\$HOME/$CI/harness/ci.sbatch" oracle "oracle-$(date +%Y%m%d-%H%M%S)" "\$HOME/$CI/$l" ;;
   ci-discover)
     ci_sync
     sb -J ci-discover -p light -c 2 --mem=8G -t 01:00:00 "\$HOME/$CI/harness/ci.sbatch" discover discover ;;
@@ -165,7 +168,8 @@ case $cmd in
     list=$(mktemp)
     for r in "$@"; do git rev-parse "$r^{commit}"; done > "$list"
     while read -r c; do git push -q accl "$c:refs/wip/$c" 2>/dev/null || true; done < "$list"
-    scp -q "$list" "$H:$CI/harness/data/backfill.txt"; rm -f "$list"
+    ssh $H "mkdir -p $CI/lists"
+    scp -q "$list" "$H:$CI/lists/backfill.txt"; rm -f "$list"
     sb -J ci-backfill --array=0-$(( $# - 1 ))%${n} -w "$PERF_NODE" -p build --qos=build4 -c 16 --mem=96G -t 12:00:00 \
       "\$HOME/$CI/harness/backfill.sbatch" ;;
   *) sed -n '2,30p' "$0"; exit 2 ;;
