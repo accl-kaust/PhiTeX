@@ -61,7 +61,8 @@ use regex::Regex;
 
 const USAGE: &str = "\
 usage: cargo xtask parallel cold DAG [--log LOG]... [--segments REGEX]
-       cargo xtask parallel rebuild DAG.K DAG.N [--log LOG]... [--show N]";
+       cargo xtask parallel rebuild DAG.K DAG.N [--log LOG]... [--show N]
+       cargo xtask parallel pass0 DAG [--pass0-cost F] [--ignore CLASS]...";
 
 /// No step, no write, no time.
 const NONE: u32 = u32::MAX;
@@ -1656,6 +1657,287 @@ fn cold(path: &str, logs: &[String], seg_re: &str) -> Result<()> {
     Ok(())
 }
 
+/// Speculation from a cheap first pass (`pass0`): a sequential pass 0
+/// runs the build but skips some of its work (a set of steps), taking a
+/// skipped step's exports to be its entry state; then phase 2 runs the
+/// skipped steps, and every step pass 0 ran from a mispredicted state,
+/// on workers from pass 0's entry states, pipelined (a mispredicted read
+/// waits for its definition), and commits in order.
+///
+/// A read is mispredicted if pass 0 saw another version: its definition
+/// is a skipped or tainted step's, and the last definition of the name by
+/// a step pass 0 ran right (what pass 0 saw) has another version. A step
+/// that misread a definition of a typesetting class (the page builder,
+/// the nest, the PDF writer and fonts, call results, marks, the `\write`
+/// streams) is tainted in those classes only (typesetting does not feed
+/// expansion back, but through such a read); one that misread any other
+/// class, in all. Skipped sets: the output routines' steps with the
+/// typesetting classes always mispredicted (pass 0 does no typesetting);
+/// the steps of each span between a read of a begin and of an end
+/// macro (a picture, a code example: pass 0 jumps over it); both.
+///
+/// Projections on `P` workers: Brent's `max(cp, w/P) <= T <= w/P + cp`
+/// after pass 0, pass 0's cost the commands it runs (`--pass0-cost F`:
+/// for the typesetting set, the share of the build outside typesetting).
+fn pass0(path: &str, f0: f64, ignore: &[String]) -> Result<()> {
+    let mut ign = 0u32;
+    for c in ignore {
+        ign |= 1
+            << CLASSES
+                .iter()
+                .position(|k| k.starts_with(c.as_str()))
+                .with_context(|| format!("--ignore {c}: no such class"))?;
+    }
+    if ign != 0 {
+        println!("classes never mispredicted: {}", mask_names(ign).join(", "));
+    }
+    let d = Dag::open(Path::new(path))?;
+    let n = d.n();
+    if n == 0 {
+        bail!("{path}: no steps");
+    }
+    let total = d.total();
+    let typeset = bit("page builder")
+        | bit("current list (nest)")
+        | bit("PDF writer and fonts")
+        | bit("call results")
+        | bit("marks")
+        | bit("\\write streams");
+    let ship: Vec<u32> = ["pdf.ship", "dvi.ship", "dvi.out"]
+        .iter()
+        .filter_map(|n| d.ix.get(n.as_bytes()).copied())
+        .collect();
+    let fire: Vec<bool> = (0..n)
+        .map(|p| {
+            d.w_name[d.ws[p]..d.ws[p + 1]]
+                .iter()
+                .any(|nm| ship.contains(nm))
+        })
+        .collect();
+    // (the steps of the outermost spans from a read of `begin` to one of
+    // `end`)
+    let spans = |begin: &str, end: &str| -> Vec<bool> {
+        let b = d.ix.get(begin.as_bytes()).copied();
+        let e = d.ix.get(end.as_bytes()).copied();
+        let mut out = vec![false; n];
+        let mut depth = 0i32;
+        for p in 0..n {
+            let names = &d.r_name[d.rs[p]..d.rs[p + 1]];
+            let opens = names.iter().filter(|&&x| Some(x) == b).count() as i32;
+            let closes = names.iter().filter(|&&x| Some(x) == e).count() as i32;
+            if depth > 0 || opens > 0 {
+                out[p] = true;
+            }
+            depth = (depth + opens - closes).max(0);
+        }
+        out
+    };
+    let pics = spans("\\pgfpicture", "\\endpgfpicture");
+    let examples = spans("\\codeexample", "\\endcodeexample");
+    let either: Vec<bool> = (0..n).map(|p| pics[p] || examples[p]).collect();
+    let fire_pics: Vec<bool> = (0..n).map(|p| pics[p] || fire[p]).collect();
+    let share = |v: &[bool]| -> u64 { (0..n).filter(|&p| v[p]).map(|p| d.cost[p]).sum() };
+    println!(
+        "steps {}, commands {}, the costliest step {}; output routines' steps {} ({:.1}% of the \
+         commands); pictures' {} ({:.1}%); code examples' {} ({:.1}%)",
+        fmt(n as u64),
+        fmt(total),
+        fmt(d.cost.iter().copied().max().unwrap_or(0)),
+        fmt(fire.iter().filter(|&&f| f).count() as u64),
+        100.0 * share(&fire) as f64 / total as f64,
+        fmt(pics.iter().filter(|&&f| f).count() as u64),
+        100.0 * share(&pics) as f64 / total as f64,
+        fmt(examples.iter().filter(|&&f| f).count() as u64),
+        100.0 * share(&examples) as f64 / total as f64,
+    );
+    let models: &[(Model, &str)] = if ign == 0 {
+        &[
+            (Model::SoftReads, "soft reads"),
+            (Model::Blind, "blind writes"),
+        ]
+    } else {
+        &[(Model::Blind, "blind writes")]
+    };
+    for &(m, mlabel) in models {
+        let l = d.lags(m);
+        println!("\n== {mlabel}");
+        for (label, skip, ts_always, cost0) in [
+            (
+                "no typesetting (output routines skipped)",
+                &fire,
+                true,
+                Some(f0),
+            ),
+            ("pictures skipped", &pics, false, None),
+            ("code examples skipped", &examples, false, None),
+            ("pictures and code examples skipped", &either, false, None),
+            ("pictures skipped, no typesetting", &fire_pics, true, None),
+        ] {
+            skip_model(
+                &d,
+                &l,
+                m,
+                label,
+                skip,
+                ts_always,
+                typeset & !ign,
+                ign,
+                cost0,
+            );
+        }
+    }
+    Ok(())
+}
+
+/// One pass-0 model (see [`pass0`]).
+#[allow(clippy::too_many_arguments)]
+fn skip_model(
+    d: &Dag,
+    l: &Lags,
+    m: Model,
+    label: &str,
+    skip: &[bool],
+    ts_always: bool,
+    typeset: u32,
+    ign: u32,
+    cost0: Option<f64>,
+) {
+    let n = d.n();
+    let total = d.total();
+    // (taint: 1 typesetting classes, 2 all)
+    let mut taint = vec![0u8; n];
+    let suspect = |a: usize, c: u8, taint: &[u8]| -> bool {
+        let ts = typeset >> c & 1 == 1;
+        skip[a] || taint[a] == 2 || (taint[a] == 1 && ts)
+    };
+    // (what pass 0 saw for definition `w` of `nm` made at `a`: the version
+    // of the last definition before it by a step it ran right)
+    let seen = |nm: u32, w: u32, taint: &[u8]| -> Option<u64> {
+        let ws = &d.d_w[d.dn[nm as usize]..d.dn[nm as usize + 1]];
+        let c = d.cls[nm as usize];
+        let mut i = if w == NONE {
+            ws.len()
+        } else {
+            ws.partition_point(|&x| x < w)
+        };
+        while i > 0 {
+            let x = ws[i - 1] as usize;
+            if !suspect(d.w_pos[x] as usize, c, taint) {
+                return Some(d.w_ver[x]);
+            }
+            i -= 1;
+        }
+        None
+    };
+    let mut misread = vec![false; d.r_name.len()];
+    let mut by_class = [0u64; 21];
+    let mut by_name: FxMap<u32, u64> = FxMap::default();
+    for p in 0..n {
+        for k in d.rs[p]..d.rs[p + 1] {
+            let Some((a, w)) = d.kept(k, m) else { continue };
+            let nm = d.r_name[k];
+            let c = d.cls[nm as usize];
+            let ts = typeset >> c & 1 == 1;
+            let a = a as usize;
+            let mis = ign >> c & 1 == 0
+                && ((ts_always && ts && a != p)
+                    || (suspect(a, c, &taint) && {
+                        let v = if w == NONE {
+                            None
+                        } else {
+                            Some(d.w_ver[w as usize])
+                        };
+                        v.is_none() || seen(nm, w, &taint) != v
+                    }));
+            if mis {
+                misread[k] = true;
+                by_class[c as usize] += 1;
+                *by_name.entry(nm).or_default() += 1;
+                if !skip[p] {
+                    taint[p] = taint[p].max(if ts { 1 } else { 2 });
+                }
+            }
+        }
+    }
+    // (phase 2, pipelined)
+    let mut start = vec![0i64; n];
+    let mut cp = 0u64;
+    let mut work2 = 0u64;
+    let mut again = 0usize;
+    for p in 0..n {
+        if !skip[p] && taint[p] == 0 {
+            continue;
+        }
+        if !skip[p] {
+            again += 1;
+        }
+        let mut s = 0i64;
+        for i in l.off[p]..l.off[p + 1] {
+            if misread[l.read[i] as usize] {
+                let a = l.from[i] as usize;
+                s = s.max(start[a] + i64::from(l.lag[i]));
+            }
+        }
+        start[p] = s;
+        cp = cp.max(s as u64 + d.cost[p]);
+        work2 += d.cost[p];
+    }
+    let skipped: u64 = (0..n).filter(|&p| skip[p]).map(|p| d.cost[p]).sum();
+    let t0 = cost0.map_or((total - skipped) as f64, |f| f * total as f64);
+    let again_c: u64 = (0..n)
+        .filter(|&p| !skip[p] && taint[p] > 0)
+        .map(|p| d.cost[p])
+        .sum();
+    println!(
+        "  {label}: pass 0 runs {:.1}% of the commands; {} reads mispredicted; {} steps run again \
+         ({:.1}% of the commands); phase 2 work {} ({:.1}%), critical path {}",
+        100.0 * t0 / total as f64,
+        fmt(by_class.iter().sum()),
+        fmt(again as u64),
+        100.0 * again_c as f64 / total as f64,
+        fmt(work2),
+        100.0 * work2 as f64 / total as f64,
+        fmt(cp)
+    );
+    let mut cs: Vec<usize> = (0..21).filter(|&k| by_class[k] > 0).collect();
+    cs.sort_unstable_by_key(|&k| Reverse(by_class[k]));
+    println!(
+        "    misread classes: {}",
+        cs.iter()
+            .take(8)
+            .map(|&k| format!("{} {}", CLASSES[k], fmt(by_class[k])))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    let mut ns: Vec<(u32, u64)> = by_name.into_iter().collect();
+    ns.sort_unstable_by_key(|x| Reverse(x.1));
+    println!(
+        "    misread names: {}",
+        ns.iter()
+            .take(10)
+            .map(|(nm, k)| format!("{} {}", d.names[*nm as usize], fmt(*k)))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    let mut line = format!(
+        "    speedup (pass 0 then phase 2): unbounded workers {}x (phase 2 alone {}x); Brent's range \
+         on P workers:",
+        ratio(total, t0 as u64 + cp),
+        ratio(total, cp)
+    );
+    for p in [8u64, 16, 32, 64] {
+        let lo = t0 + cp.max(work2 / p) as f64;
+        let hi = t0 + (work2 / p + cp) as f64;
+        let _ = write!(
+            line,
+            " {p}: {:.2}-{:.2}x;",
+            total as f64 / hi,
+            total as f64 / lo
+        );
+    }
+    println!("{line}");
+}
+
 /// Whether the step at position `p` of `new`, run from its entry state in
 /// `old`, reads what it reads in `new`: the first read that differs, or
 /// `None` (as `scripts/ssa-parallel.py`'s `validated`).
@@ -1897,12 +2179,16 @@ pub fn run(args: &[String]) -> Result<()> {
     let mut logs: Vec<String> = Vec::new();
     let mut seg_re = String::from(r"\.tex$");
     let mut show = 30usize;
+    let mut f0 = 0.0f64;
+    let mut ignore: Vec<String> = Vec::new();
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
             "--log" => logs.push(it.next().context("--log FILE")?.clone()),
             "--segments" => seg_re.clone_from(it.next().context("--segments REGEX")?),
             "--show" => show = it.next().context("--show N")?.parse()?,
+            "--pass0-cost" => f0 = it.next().context("--pass0-cost F")?.parse()?,
+            "--ignore" => ignore.push(it.next().context("--ignore CLASS")?.clone()),
             "-h" | "--help" => {
                 println!("{USAGE}");
                 return Ok(());
@@ -1918,6 +2204,7 @@ pub fn run(args: &[String]) -> Result<()> {
     {
         ["cold", dag] => cold(dag, &logs, &seg_re),
         ["rebuild", old, new] => rebuild(old, new, &logs, show),
+        ["pass0", dag] => pass0(dag, f0, &ignore),
         _ => bail!("{USAGE}"),
     }
 }
