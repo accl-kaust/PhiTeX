@@ -1096,6 +1096,25 @@ impl Dpx {
         used_chars: &[u8],
         sfont: &mut Sfnt,
     ) -> Result<Option<Obj>> {
+        let (cmap, count, _) =
+            self.build_ToUnicode_cmap(ttcmap, cmap_name, cmap_add, used_chars, sfont)?;
+        if count < 1 {
+            Ok(None)
+        } else {
+            self.CMap_create_stream(&cmap)
+        }
+    }
+
+    /// `create_ToUnicode_cmap`'s CMap, before it is a stream: the CMap,
+    /// the count of its entries and the font's GID to CID map.
+    fn build_ToUnicode_cmap(
+        &mut self,
+        ttcmap: &TtCmap,
+        cmap_name: &[u8],
+        cmap_add: Option<i32>,
+        used_chars: &[u8],
+        sfont: &mut Sfnt,
+    ) -> Result<(CMap, i32, Vec<u16>)> {
         // Get num_glyphs from maxp table.
         let num_glyphs = sfont.tt_read_maxp_table()?.num_glyphs;
 
@@ -1212,11 +1231,7 @@ impl Dpx {
             }
         }
 
-        if count < 1 {
-            Ok(None)
-        } else {
-            self.CMap_create_stream(&cmap)
-        }
+        Ok((cmap, count, gid_to_cid_map))
     }
 
     /// `otf_create_ToUnicode_stream`: a reference to the
@@ -1239,6 +1254,35 @@ impl Dpx {
             return self.pdf_get_resource_reference(cmap_id);
         }
 
+        let (mut sfont, cmap_add, ttcmap) = some!(self.tounicode_sources(font_name, ttc_index)?);
+        if let Some(ttcmap) = ttcmap {
+            self.CMap_set_silent(1); /* many warnings without this... */
+            let cmap_obj =
+                self.create_ToUnicode_cmap(&ttcmap, &cmap_name, cmap_add, used_chars, &mut sfont)?;
+            self.CMap_set_silent(0);
+            if let Some(cmap_obj) = cmap_obj {
+                let cmap_id = self.pdf_defineresource(
+                    b"CMap",
+                    Some(&cmap_name),
+                    cmap_obj,
+                    PDF_RES_FLUSH_IMMEDIATE,
+                )?;
+                cmap_ref = self.pdf_get_resource_reference(cmap_id)?;
+            }
+        }
+
+        Ok(cmap_ref)
+    }
+
+    /// What `otf_create_ToUnicode_stream` reads for `map_name`: the font
+    /// (its table directory read), the `cmap_add` CMap of its unencoded
+    /// glyphs, if cached, and its Unicode `cmap` subtable (format 4 or
+    /// 12), if any. None where it gives up.
+    fn tounicode_sources(
+        &mut self,
+        font_name: &[u8],
+        ttc_index: u32,
+    ) -> Result<Option<(Sfnt, Option<i32>, Option<TtCmap>)>> {
         let mut sfont = some!(some!(open_sfnt(self, font_name, ttc_index)?));
 
         let offset: ULONG = match sfont.type_ {
@@ -1283,23 +1327,40 @@ impl Dpx {
                 break;
             }
         }
-        if let Some(ttcmap) = ttcmap {
-            self.CMap_set_silent(1); /* many warnings without this... */
-            let cmap_obj =
-                self.create_ToUnicode_cmap(&ttcmap, &cmap_name, cmap_add, used_chars, &mut sfont)?;
-            self.CMap_set_silent(0);
-            if let Some(cmap_obj) = cmap_obj {
-                let cmap_id = self.pdf_defineresource(
-                    b"CMap",
-                    Some(&cmap_name),
-                    cmap_obj,
-                    PDF_RES_FLUSH_IMMEDIATE,
-                )?;
-                cmap_ref = self.pdf_get_resource_reference(cmap_id)?;
-            }
-        }
+        Ok(Some((sfont, cmap_add, ttcmap)))
+    }
 
-        Ok(cmap_ref)
+    /// Glyph runs: the text the ToUnicode CMap that
+    /// `otf_create_ToUnicode_stream` makes for `map_name` gives each
+    /// glyph, by glyph id, every glyph taken as used (an entry depends on
+    /// its own glyph only: the CMap a PDF gets has the same entries for
+    /// the glyphs it uses). None if it would make none.
+    pub fn otf_tounicode_texts(
+        &mut self,
+        map_name: &[u8],
+        ttc_index: u32,
+    ) -> Result<Option<Vec<Option<String>>>> {
+        let (mut sfont, cmap_add, ttcmap) = some!(self.tounicode_sources(map_name, ttc_index)?);
+        let ttcmap = some!(ttcmap);
+        let used = vec![0xffu8; 8192];
+        let silent = self.cmap.silent;
+        self.CMap_set_silent(1);
+        let built = self.build_ToUnicode_cmap(&ttcmap, b"runs-UTF16", cmap_add, &used, &mut sfont);
+        self.CMap_set_silent(silent);
+        let (cmap, _, gid_to_cid) = built?;
+        Ok(Some(
+            gid_to_cid
+                .iter()
+                .map(|&cid| {
+                    let u = cmap.lookup_code(&cid.to_be_bytes())?;
+                    let units: Vec<u16> = u
+                        .chunks_exact(2)
+                        .map(|p| u16::from_be_bytes([p[0], p[1]]))
+                        .collect();
+                    (!units.is_empty()).then(|| String::from_utf16_lossy(&units))
+                })
+                .collect(),
+        ))
     }
 
     /// `otf_load_Unicode_CMap`: the cmap id of the Unicode input CMap of

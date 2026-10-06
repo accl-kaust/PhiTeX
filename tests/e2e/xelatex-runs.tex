@@ -1,0 +1,35 @@
+\documentclass{article}
+\usepackage{fontspec}
+\usepackage{xcolor}
+\usepackage{graphicx}
+\newfontfamily\arabicfont[Script=Arabic]{Amiri}
+\newfontfamily\hebrewfont[Script=Hebrew]{Libertinus Serif}
+\newfontfamily\bluefont[Color=0000FF]{Latin Modern Roman}
+\font\arvo=Arvo-tlf-ot1 at 10pt
+\font\bodoni=md-grbr7m at 10pt
+\TeXXeTstate=1
+\begin{document}
+Native: office \textcolor{red}{red} \textcolor[cmyk]{0,1,1,0}{cmyk}
+\textcolor[gray]{0.5}{gray} {\bluefont blue}.
+
+{\fontencoding{OT1}\fontfamily{cmr}\selectfont Type 1: ffi Effect \"a
+\textcolor{blue}{blue}}
+
+{\fontencoding{T1}\fontfamily{ptm}\selectfont A virtual font: fi ``q''}
+
+Classic math: $\sum_{i=1}^n x_i^2 \le \int_0^1 f(t)\,dt$.
+
+\rotatebox{30}{\fontencoding{OT1}\fontfamily{cmr}\selectfont Rotated}
+\rotatebox{-45}{native} \scalebox{2}[1]{wide} \reflectbox{mirror}
+
+\noindent{\fontencoding{OT1}\fontfamily{cmr}\selectfont
+\leaders\hbox to 1em{\hss.\hss}\hskip 3cm} and \leaders\hbox to 1em{\hss-\hss}\hskip 2cm
+
+{\arvo TrueType Arvo} {\bodoni OpenType Bodoni}
+
+{\XeTeXgenerateactualtext=1 Actual text: office}
+
+{\arabicfont\beginR السلام عليكم\endR} {\hebrewfont\beginR שלום עולם\endR}
+
+{\XeTeXgenerateactualtext=1 \arabicfont\beginR مرحبا\endR}
+\end{document}

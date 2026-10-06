@@ -457,7 +457,7 @@ impl Dpx {
     }
 
     /// `GET_FONT`, then the font a re-encoded font stands for.
-    fn get_font_reencoded(&self, font_id: i32) -> usize {
+    pub(crate) fn get_font_reencoded(&self, font_id: i32) -> usize {
         let mut f = self.GET_FONT(font_id);
         if self.font.fonts[f as usize].flags & PDF_FONT_FLAG_IS_REENCODE != 0 {
             f = self.GET_FONT(self.font.fonts[f as usize].font_id);

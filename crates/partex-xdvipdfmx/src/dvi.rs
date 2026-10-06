@@ -360,8 +360,6 @@ pub struct State {
     /// Whether `dvi_do_page` looks past EOP for the postamble (C, linear;
     /// the page API checks for it itself).
     pub peek_after_eop: bool,
-    /// The glyph runs of the page being done (`do_glyphs`).
-    pub glyph_runs: Vec<GlyphRun>,
 }
 
 impl Default for State {
@@ -408,27 +406,8 @@ impl Default for State {
             num_saved_fonts: 0,
             buffered_page: -1,
             peek_after_eop: true,
-            glyph_runs: Vec::new(),
         }
     }
-}
-
-/// A glyph XeTeX placed (`XDV_GLYPHS`), as the page shows it: a side
-/// output of [`Dpx::dvi_do_page`].
-#[derive(Clone, Debug, PartialEq)]
-pub struct GlyphRun {
-    /// The font file (absolute path) and face index.
-    pub font_file: Vec<u8>,
-    pub face_index: u32,
-    /// The glyph id (in the font file).
-    pub glyph: u16,
-    /// The glyph's origin in the page's default user space (bp), and its
-    /// size (bp).
-    pub x: f64,
-    pub y: f64,
-    pub size: f64,
-    /// RGBA (the font's colour; opaque black when it has none).
-    pub rgba: u32,
 }
 
 impl Dpx {
@@ -1365,6 +1344,7 @@ impl Dpx {
                 let cbytes = (minbytes as usize).max(n);
                 let (h, v) = (self.dvi.dvi_state.h, self.dvi.dvi_state.v);
                 self.set_string(h, v.wrapping_neg(), &wbuf[4 - cbytes..], width, font_id)?;
+                self.record_glyph_run(cf, ch as u32, h, v.wrapping_neg(), 0xff);
                 if self.dvi_is_tracking_boxes() {
                     let height = self.tfm_get_fw_height(tfm_id, ch)?;
                     let depth = self.tfm_get_fw_depth(tfm_id, ch)?;
@@ -1379,6 +1359,7 @@ impl Dpx {
                 let font_id = self.dvi.loaded_fonts[cf].font_id;
                 let (h, v) = (self.dvi.dvi_state.h, self.dvi.dvi_state.v);
                 self.set_string(h, v.wrapping_neg(), &wbuf, width, font_id)?;
+                self.record_glyph_run(cf, ch as u32, h, v.wrapping_neg(), 0xff);
                 if self.dvi_is_tracking_boxes() {
                     let g = self.dvi.loaded_fonts[cf].gm[ch as usize];
                     let rect = self.calc_rect(h, v.wrapping_neg(), width, g.ascent, g.descent);
@@ -1415,6 +1396,7 @@ impl Dpx {
                 let cbytes = (minbytes as usize).max(n);
                 let (h, v) = (self.dvi.dvi_state.h, self.dvi.dvi_state.v);
                 self.set_string(h, v.wrapping_neg(), &wbuf[4 - cbytes..], width, font_id)?;
+                self.record_glyph_run(cf, ch as u32, h, v.wrapping_neg(), 0xff);
                 if self.dvi_is_tracking_boxes() {
                     let height = self.tfm_get_fw_height(tfm_id, ch)?;
                     let depth = self.tfm_get_fw_depth(tfm_id, ch)?;
@@ -1744,6 +1726,7 @@ impl Dpx {
                     unicodes.push(self.get_buffered_unsigned_pair() as u16);
                 }
                 self.pdf_dev_begin_actualtext(&unicodes)?;
+                self.glyph_runs_span(&unicodes);
             }
         }
         let width = self.get_buffered_signed_quad();
@@ -1789,9 +1772,15 @@ impl Dpx {
                 self.pdf_doc_add_page_content(&content.0)?;
             }
         }
-        let (num_glyphs, shift_gid, font_id, size) = {
+        let (num_glyphs, shift_gid, font_id) = {
             let f = &self.dvi.loaded_fonts[cf];
-            (f.num_glyphs, f.shift_gid, f.font_id, f.size)
+            (f.num_glyphs, f.shift_gid, f.font_id)
+        };
+        // (the glyph runs' alpha: the font's colour's)
+        let alpha = if rgba_used == 1 {
+            rgba_color as u8
+        } else {
+            0xff
         };
         for i in 0..slen {
             let mut glyph_id = self.get_buffered_unsigned_pair() as u16;
@@ -1819,8 +1808,8 @@ impl Dpx {
                 h.wrapping_add(xloc[i]),
                 v.wrapping_neg().wrapping_sub(yloc[i]),
             );
-            self.record_glyph_run(cf, glyph_id, x, y, size, rgba_used, rgba_color);
             self.set_string(x, y, &wbuf, advance, font_id)?;
+            self.record_glyph_run(cf, u32::from(glyph_id), x, y, alpha);
         }
         if rgba_used == 1 {
             if xgs_id >= 0 {
@@ -1831,42 +1820,12 @@ impl Dpx {
         }
         if do_actual_text != 0 {
             self.pdf_dev_end_actualtext()?;
+            self.glyph_runs_span_end();
         }
         if self.dvi.lr_mode == LTYPESETTING {
             self.dvi_right(width);
         }
         Ok(())
-    }
-
-    /// The side output: a glyph of a native font at DVI position
-    /// (`x`, `y`) (y up), in the page's default user space.
-    fn record_glyph_run(
-        &mut self,
-        cf: usize,
-        glyph: u16,
-        x: Spt,
-        y: Spt,
-        size: Spt,
-        rgba_used: u8,
-        rgba: u32,
-    ) {
-        let lf = &self.dvi.loaded_fonts[cf];
-        if lf.type_ != NATIVE {
-            return;
-        }
-        let (d, mag) = (self.dvi.dvi2pts, self.dvi.total_mag);
-        let run = GlyphRun {
-            font_file: lf.native_path.clone(),
-            face_index: lf.face_index,
-            glyph,
-            x: self.dvi.dev_origin_x
-                + mag * (f64::from(x.wrapping_sub(self.dvi.compensation.x)) * d),
-            y: self.dvi.dev_origin_y
-                + mag * (f64::from(y.wrapping_sub(self.dvi.compensation.y)) * d),
-            size: mag * f64::from(size) * d,
-            rgba: if rgba_used == 1 { rgba } else { 0x0000_00ff },
-        };
-        self.dvi.glyph_runs.push(run);
     }
 
     /// `check_postamble`.

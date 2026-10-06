@@ -183,6 +183,25 @@ pub struct CMap {
 }
 
 impl CMap {
+    /// The code `src` maps to in this CMap's own table (a ToUnicode
+    /// CMap's UTF-16BE), if it defines one (glyph runs; `use_cmap` not
+    /// followed).
+    #[must_use]
+    pub fn lookup_code(&self, src: &[u8]) -> Option<&[u8]> {
+        let mut t = self.map_tbl.as_ref()?;
+        for (i, &c) in src.iter().enumerate() {
+            let e = t.get(c as usize)?;
+            if LOOKUP_END(e.flag) {
+                return (i + 1 == src.len()
+                    && MAP_DEFINED(e.flag)
+                    && MAP_TYPE(e.flag) == MAP_IS_CODE)
+                    .then(|| &e.code[..(e.len.max(0) as usize).min(e.code.len())]);
+            }
+            t = e.next.as_ref()?;
+        }
+        None
+    }
+
     /// `CMap_new`.
     #[must_use]
     pub fn CMap_new() -> CMap {

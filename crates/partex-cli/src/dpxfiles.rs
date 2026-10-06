@@ -111,6 +111,9 @@ pub(crate) fn xdv_to_pdf(xdv: &[u8], pdf_name: &[u8]) -> (Vec<u8>, bool) {
     let (pre, pages) = partex_xdvipdfmx::api::split_xdv(xdv);
     let mut out = Vec::new();
     let mut session = None;
+    let mut runs = std::env::var("PARTEX_GLYPH_RUNS")
+        .is_ok_and(|v| v == "1")
+        .then(Vec::new);
     let run = || {
         let s = session.insert(Session::new(
             options(pdf_name),
@@ -119,12 +122,22 @@ pub(crate) fn xdv_to_pdf(xdv: &[u8], pdf_name: &[u8]) -> (Vec<u8>, bool) {
             &xdv[..pre],
         )?);
         for (a, b) in pages {
-            out.extend(s.page(&xdv[a..b])?.pdf);
+            let page = s.page(&xdv[a..b])?;
+            out.extend(page.pdf);
+            if let Some(r) = runs.as_mut() {
+                r.push(page.glyph_runs);
+            }
         }
         out.extend(s.finish()?);
         Ok::<(), partex_xdvipdfmx::ctx::Fatal>(())
     };
-    match run() {
+    let done = run();
+    if let Some(r) = &runs {
+        let mut name = pdf_name.strip_suffix(b".pdf").unwrap_or(pdf_name).to_vec();
+        name.extend_from_slice(b".glyphruns.jsonl");
+        let _ = std::fs::write(crate::native::path(&name), glyph_runs_jsonl(r));
+    }
+    match done {
         Ok(()) => (out, true),
         Err(e) => {
             // (`ERROR`'s message, then `error_cleanup`'s)
@@ -135,6 +148,123 @@ pub(crate) fn xdv_to_pdf(xdv: &[u8], pdf_name: &[u8]) -> (Vec<u8>, bool) {
             (out, false)
         }
     }
+}
+
+/// `PARTEX_GLYPH_RUNS=1`: each page's glyph runs, a line per page,
+/// `{"page":N,"runs":[...]}` (`N` from 1), each run an object of
+/// `partex_xdvipdfmx::glyphrun::GlyphRun`'s fields (the source's kind
+/// and fields beside them, names and paths as text).
+fn glyph_runs_jsonl(pages: &[Vec<partex_xdvipdfmx::api::GlyphRun>]) -> Vec<u8> {
+    use std::io::Write;
+    let mut out = Vec::new();
+    for (n, runs) in pages.iter().enumerate() {
+        let _ = write!(out, "{{\"page\":{},\"runs\":[", n + 1);
+        for (i, r) in runs.iter().enumerate() {
+            if i > 0 {
+                out.push(b',');
+            }
+            out.extend_from_slice(b"{\"source\":");
+            source_json(&mut out, &r.source);
+            let _ = write!(
+                out,
+                ",\"x\":{},\"y\":{},\"size\":{},\"ctm\":",
+                r.x, r.y, r.size
+            );
+            nums_json(&mut out, &r.ctm);
+            out.extend_from_slice(b",\"tm\":");
+            nums_json(&mut out, &r.tm);
+            let _ = write!(out, ",\"rgba\":{},\"color\":", r.rgba);
+            color_json(&mut out, &r.color);
+            if let Some(t) = &r.text {
+                out.extend_from_slice(b",\"text\":");
+                crate::origins::json_str(&mut out, t);
+            }
+            let _ = write!(
+                out,
+                ",\"cluster\":{},\"actual_text\":{}}}",
+                r.cluster, r.actual_text
+            );
+        }
+        out.extend_from_slice(b"]}\n");
+    }
+    out
+}
+
+/// Bytes (a path, a glyph name) as a JSON string.
+fn bytes_json(out: &mut Vec<u8>, b: &[u8]) {
+    crate::origins::json_str(out, &String::from_utf8_lossy(b));
+}
+
+/// Numbers as a JSON array.
+fn nums_json(out: &mut Vec<u8>, v: &[f64]) {
+    use std::io::Write;
+    out.push(b'[');
+    for (i, x) in v.iter().enumerate() {
+        let _ = write!(out, "{}{x}", if i > 0 { "," } else { "" });
+    }
+    out.push(b']');
+}
+
+/// A glyph run's source: its kind, then its fields.
+fn source_json(out: &mut Vec<u8>, source: &partex_xdvipdfmx::api::GlyphSource) {
+    use partex_xdvipdfmx::api::GlyphSource;
+    use std::io::Write;
+    let (kind, file) = match source {
+        GlyphSource::Native { font_file, .. } => ("native", font_file),
+        GlyphSource::Type1 { font_file, .. } => ("type1", font_file),
+        GlyphSource::TrueType { font_file, .. } => ("truetype", font_file),
+        GlyphSource::OpenType { font_file, .. } => ("opentype", font_file),
+        GlyphSource::Other { font_file, .. } => ("other", font_file),
+    };
+    let _ = write!(out, "\"{kind}\",\"font_file\":");
+    bytes_json(out, file);
+    match source {
+        GlyphSource::Native {
+            face_index, gid, ..
+        }
+        | GlyphSource::TrueType {
+            face_index, gid, ..
+        }
+        | GlyphSource::OpenType {
+            face_index, gid, ..
+        } => {
+            let _ = write!(out, ",\"face_index\":{face_index},\"gid\":{gid}");
+        }
+        GlyphSource::Type1 {
+            glyph_name, code, ..
+        } => {
+            out.extend_from_slice(b",\"glyph_name\":");
+            bytes_json(out, glyph_name);
+            let _ = write!(out, ",\"code\":{code}");
+        }
+        GlyphSource::Other { code, .. } => {
+            let _ = write!(out, ",\"code\":{code}");
+        }
+    }
+}
+
+/// A colour: `{"SPACE":[components]}` (a spot colour's name beside).
+fn color_json(out: &mut Vec<u8>, color: &partex_xdvipdfmx::api::ColorSpec) {
+    use partex_xdvipdfmx::api::ColorSpec;
+    let (space, comps): (&str, &[f64]) = match color {
+        ColorSpec::Gray(g) => ("gray", core::slice::from_ref(g)),
+        ColorSpec::Rgb(v) => ("rgb", v),
+        ColorSpec::Cmyk(v) => ("cmyk", v),
+        ColorSpec::Spot { tint, .. } => ("spot", core::slice::from_ref(tint)),
+        ColorSpec::Other(v) => ("other", v),
+    };
+    out.extend_from_slice(b"{\"");
+    out.extend_from_slice(space.as_bytes());
+    out.extend_from_slice(b"\":");
+    nums_json(out, comps);
+    if let ColorSpec::Spot {
+        name: Some(name), ..
+    } = color
+    {
+        out.extend_from_slice(b",\"name\":");
+        crate::origins::json_str(out, name);
+    }
+    out.push(b'}');
 }
 
 #[cfg(test)]

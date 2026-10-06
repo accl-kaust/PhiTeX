@@ -29,7 +29,8 @@
 
 use alloc::sync::Arc;
 
-use crate::dvi::{GlyphRun, ScanSpecials, ScanSpecialsExt};
+use crate::dvi::{ScanSpecials, ScanSpecialsExt};
+pub use crate::glyphrun::{ColorSpec, GlyphRun, GlyphSource};
 use crate::io::Files;
 use crate::obj::Deflate;
 use crate::pdfdev::PdfRect;
@@ -74,7 +75,7 @@ impl Default for Options {
 pub struct PageOut {
     /// The PDF bytes written during the call.
     pub pdf: Vec<u8>,
-    /// The page's glyphs (native fonts).
+    /// The page's glyphs, as [`crate::glyphrun`] describes them.
     pub glyph_runs: Vec<GlyphRun>,
 }
 
@@ -290,14 +291,14 @@ impl Session {
             };
             d.pdf_doc_set_mediabox((self.page_count + 1) as u32, &mediabox)?;
         }
-        d.dvi.glyph_runs.clear();
+        d.runs.page_begin();
         let (xo, yo) = (d.session.x_offset, d.session.y_offset);
         d.dvi_do_page(page_height, xo, yo)?;
         self.page_count += 1;
         self.page_no += 1;
         Ok(PageOut {
             pdf: d.o.take_output(),
-            glyph_runs: core::mem::take(&mut d.dvi.glyph_runs),
+            glyph_runs: core::mem::take(&mut d.runs.runs),
         })
     }
 

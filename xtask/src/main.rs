@@ -5,6 +5,7 @@ mod corpus;
 mod display;
 mod e2e;
 mod etrip;
+mod glyphruns;
 mod mask;
 mod oracle;
 mod origins;
@@ -48,6 +49,7 @@ fn main() -> Result<()> {
         Some("ssa-edits") => ssa_edits::run(&workspace_root(), &args[1..]),
         Some("parallel") => parallel::run(&args[1..]),
         Some("origins") => origins::run(&args[1..]),
+        Some("glyphruns") => glyphruns::run(&args[1..]),
         Some("display") => display::run(&args[1..]),
         Some("trip") => trip::run(&workspace_root(), &args[1..]),
         Some("etrip") => etrip::run(&workspace_root(), &args[1..]),

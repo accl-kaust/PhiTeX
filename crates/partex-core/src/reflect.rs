@@ -23,7 +23,8 @@ use partex_engine::node::{BoxNode, LeaderNode, Node};
 #[derive(Clone, Copy)]
 enum Ent<'a> {
     Node(&'a Node),
-    Char(i32, u8),
+    /// A character: its font, its code, its origin entry.
+    Char(i32, u8, u32),
     /// A math node (its subtype flipped inside a reflected segment).
     Math {
         width: Scaled,
@@ -126,7 +127,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         while let Some(e) = rest.pop() {
             w.h += match e {
                 Ent::Node(n) => self.node_item(this_box, n, glue, page, leaders)?,
-                Ent::Char(f, c) => self.char_item(f, i32::from(c), page),
+                Ent::Char(f, c, o) => self.char_item(f, i32::from(c), page, o),
                 Ent::Move(d) => {
                     page.items.push(Item::Move(d));
                     d
@@ -222,17 +223,23 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             let (e, width) = match p {
                 Ent::Node(Node::Glyphs(g)) => {
                     let f = i32::from(g.font.0);
-                    for &c in g.chars() {
+                    let h = g.org();
+                    for (i, &c) in g.chars().iter().enumerate() {
                         w.h += self.char_width(f, c);
-                        l.push(Ent::Char(f, c));
+                        let o = if h == 0 {
+                            0
+                        } else {
+                            h + u32::try_from(i).unwrap_or(0)
+                        };
+                        l.push(Ent::Char(f, c, o));
                     }
                     continue;
                 }
                 Ent::Node(Node::Ligature(x)) => {
                     let f = i32::from(x.font.0);
-                    (Ent::Char(f, x.ch), self.char_width(f, x.ch))
+                    (Ent::Char(f, x.ch, x.org.0), self.char_width(f, x.ch))
                 }
-                Ent::Char(f, c) => (p, self.char_width(f, c)),
+                Ent::Char(f, c, _) => (p, self.char_width(f, c)),
                 Ent::Node(Node::Box(b)) => (p, b.width),
                 Ent::Node(Node::Rule { width, .. }) => (p, *width),
                 Ent::Node(Node::Kern { width, .. }) => (Ent::Move(*width), *width),

@@ -138,9 +138,10 @@ pub struct DviWriter {
     fonts: Vec<Option<(FontDef, bool)>>,
     /// `XeTeX`'s XDV (its `id_byte`).
     xdv: bool,
-    /// When asked ([`DviWriter::log_native`]): the native items written,
-    /// each by its start in [`Page::native`], in the file's order
-    /// (leaders' boxes once per copy).
+    /// When asked ([`DviWriter::log_native`]): the glyph items written
+    /// (native words and glyphs, characters set), each by its index in
+    /// [`Page::items`], in the file's order (leaders' boxes once per
+    /// copy).
     native_log: Option<Vec<u32>>,
 }
 
@@ -173,12 +174,12 @@ crate::persist_struct!(DviWriter {
 });
 
 impl DviWriter {
-    /// Log the native items written from now on (or stop).
+    /// Log the glyph items written from now on (or stop).
     pub fn log_native(&mut self, on: bool) {
         self.native_log = on.then(Vec::new);
     }
 
-    /// The native items written since the log was last taken (see
+    /// The glyph items written since the log was last taken (see
     /// [`DviWriter::log_native`]).
     pub fn take_native_log(&mut self) -> Vec<u32> {
         self.native_log
@@ -765,6 +766,7 @@ impl DviWriter {
                     } else {
                         self.set_char(ch)?;
                     }
+                    self.log_item(i);
                     self.cur_h += width;
                     self.dvi_h = self.cur_h;
                 }
@@ -866,6 +868,7 @@ impl DviWriter {
                     if font != self.dvi_f {
                         self.change_font(font)?;
                     }
+                    self.log_item(i);
                     self.native(page, start, len)?;
                     self.cur_h += width;
                     self.dvi_h = self.cur_h;
@@ -1030,6 +1033,7 @@ impl DviWriter {
                     if font != self.dvi_f {
                         self.change_font(font)?;
                     }
+                    self.log_item(i);
                     self.native(page, start, len)?;
                     self.cur_v += depth;
                     self.cur_h = left_edge;
@@ -1058,11 +1062,15 @@ impl DviWriter {
         Ok(true)
     }
 
+    /// Item `i`, a glyph item, is written (the log's, if asked).
+    fn log_item(&mut self, i: usize) {
+        if let Some(l) = &mut self.native_log {
+            l.push(u32::try_from(i).unwrap_or(u32::MAX));
+        }
+    }
+
     /// `XeTeX`: a native glyph command's bytes.
     fn native(&mut self, page: &Page, start: u32, len: u32) -> Result<(), TooLong> {
-        if let Some(l) = &mut self.native_log {
-            l.push(start);
-        }
         let (a, n) = (start as usize, len as usize);
         for i in a..a + n {
             self.out_byte(page.native[i])?;

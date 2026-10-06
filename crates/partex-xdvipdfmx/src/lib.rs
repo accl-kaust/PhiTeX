@@ -61,6 +61,7 @@ pub mod epdf;
 pub mod filter;
 pub mod fmt;
 pub mod fontmap;
+pub mod glyphrun;
 pub mod io;
 pub mod jpegimage;
 pub mod obj;
