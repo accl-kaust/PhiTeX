@@ -976,6 +976,9 @@ pub struct FontSlot {
     codes: crate::fonts::Codes,
     expand: crate::fonts::Expand,
     pdf: crate::pdf::ship::PdfFont,
+    /// `XeTeX`: the native font in the slot, and its direction state.
+    native: Option<Arc<crate::native::NativeFont>>,
+    native_dir: u32,
 }
 
 impl<H: Host, T: Tracker> Tex<H, T> {
@@ -1019,6 +1022,9 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                     fonts.skew_char[i],
                     &fonts.codes[i],
                     fonts.expand[i],
+                    // (a native font is its identity's; its direction
+                    // state is not)
+                    fonts.native_dir[i],
                 )
                     .hash(&mut h);
                 self.string_bytes(fonts.name[i]).hash(&mut h);
@@ -1053,6 +1059,8 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             codes: fonts.codes[i].clone(),
             expand: fonts.expand[i],
             pdf,
+            native: fonts.native[i].clone(),
+            native_dir: fonts.native_dir[i],
         })
     }
 
@@ -1084,6 +1092,8 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         fonts.expand[i] = v.expand;
         fonts.ident[i] = v.ident;
         fonts.retagged[i] = v.retagged;
+        fonts.native[i].clone_from(&v.native);
+        fonts.native_dir[i] = v.native_dir;
         let pf = &mut self.pdf.ship.fonts;
         if pf.len() <= i {
             pf.resize(i + 1, crate::pdf::ship::PdfFont::default());

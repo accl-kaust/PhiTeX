@@ -1,0 +1,10 @@
+% `phitex build` with XeTeX and LaTeX's default font, Latin Modern: the
+% second pass (the aux changed) runs again the region that loaded it.
+% !TEX program = xelatex
+\documentclass{article}
+\usepackage{fontspec}
+\begin{document}
+Plain text in Latin Modern.\label{lm}
+
+More text, on page~\pageref{lm}.
+\end{document}

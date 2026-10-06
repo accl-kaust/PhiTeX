@@ -289,9 +289,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             || org.is_some()
             || sync.is_some()
             || dl.is_some()
-            || fonts.native.iter().any(Option::is_some)
         {
-            // (`XeTeX`'s native fonts are not saved: `native.rs`)
             return false;
         }
         s.mark("params");

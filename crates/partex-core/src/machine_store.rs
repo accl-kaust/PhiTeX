@@ -94,7 +94,9 @@ partex_engine::persist_struct!(FontSlot {
     skew_char,
     codes,
     expand,
-    pdf
+    pdf,
+    native,
+    native_dir
 });
 
 partex_engine::persist_struct!(CellValue {
@@ -1118,6 +1120,8 @@ mod tests {
                 codes: crate::fonts::Codes::default(),
                 expand: crate::fonts::Expand::default(),
                 pdf: crate::pdf::ship::PdfFont::default(),
+                native: None,
+                native_dir: 0,
             })),
             V::FontOrder(Arc::new(vec![3, 4])),
             V::Dests(Arc::new(vec![(Arc::from(&b"dest"[..]), 13)])),

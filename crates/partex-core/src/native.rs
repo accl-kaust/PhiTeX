@@ -17,6 +17,7 @@ use core::cell::RefCell;
 use partex_engine::native::{GlyphNode, NativeGlyph, NativeWord};
 use partex_engine::node::FontId;
 use partex_engine::node::{Node, Whatsit};
+use partex_engine::persist::Persist;
 use partex_otf::xetex::fontmgr::FontManager;
 use partex_otf::xetex::{Diagnostic, XeTeXFont};
 use partex_otf::{FontSource, KpseFormat};
@@ -41,19 +42,156 @@ pub(crate) struct NativeFont {
     pub(crate) math: bool,
 }
 
-/// A native font is not saved with a checkpoint ([`Tex::save_state`]
-/// refuses a state that holds one): nothing to load.
-impl partex_engine::persist::Persist for NativeFont {
-    fn save(&self, _s: &mut partex_engine::persist::Saver) {}
-    fn load(_l: &mut partex_engine::persist::Loader) -> Option<Self> {
-        None
+impl core::fmt::Debug for NativeFont {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "NativeFont({:?})", self.font.name_of_file)
+    }
+}
+
+/// A native font is saved by reference to its files: the face's bytes
+/// and the mapping's are the `Arc`s the host served (shared values: in a
+/// store, the content-addressed blobs of the files served, kept once
+/// however many states and fonts hold them, as a TFM font's bytes are),
+/// with the face's index and content key and what loading computed
+/// (features, sizes, colour, fontdimens) as values. Loading parses the
+/// face and compiles the mapping again; the shaper's caches are made
+/// again as they are used.
+impl Persist for NativeFont {
+    fn save(&self, s: &mut partex_engine::persist::Saver) {
+        let NativeFont {
+            font,
+            params,
+            height_base,
+            depth_base,
+            math,
+        } = self;
+        let XeTeXFont {
+            face,
+            path,
+            index,
+            point_size,
+            scaled_size,
+            script,
+            language,
+            features,
+            req_engine,
+            rgba,
+            extend,
+            slant,
+            embolden,
+            flags,
+            letter_space,
+            // (compiled again from its file)
+            mapping: _,
+            mapping_file,
+            design_size,
+            name_of_file,
+            last_script,
+        } = font;
+        let key = face.key();
+        face.data().save(s);
+        (face.index(), key.hash[0], key.hash[1], key.len, key.index).save(s);
+        String::from(&**path).save(s);
+        index.save(s);
+        point_size.save(s);
+        scaled_size.save(s);
+        script.save(s);
+        language.save(s);
+        features.len().save(s);
+        for f in features {
+            (f.tag, f.value, f.start, f.end).save(s);
+        }
+        req_engine.save(s);
+        rgba.save(s);
+        extend.save(s);
+        slant.save(s);
+        embolden.save(s);
+        flags.save(s);
+        letter_space.save(s);
+        mapping_file.save(s);
+        design_size.save(s);
+        name_of_file.save(s);
+        last_script.save(s);
+        params.save(s);
+        height_base.save(s);
+        depth_base.save(s);
+        math.save(s);
+    }
+
+    fn load(l: &mut partex_engine::persist::Loader) -> Option<Self> {
+        let data: Arc<[u8]> = Persist::load(l)?;
+        let (face_index, h0, h1, len, key_index) = Persist::load(l)?;
+        let key = partex_otf::face::FaceKey {
+            hash: [h0, h1],
+            len,
+            index: key_index,
+        };
+        let face = partex_otf::face::Face::with_key(data, face_index, key)?;
+        let path: String = Persist::load(l)?;
+        let index = Persist::load(l)?;
+        let point_size = Persist::load(l)?;
+        let scaled_size = Persist::load(l)?;
+        let script = Persist::load(l)?;
+        let language = Persist::load(l)?;
+        let n: usize = Persist::load(l)?;
+        let mut features = Vec::new();
+        for _ in 0..n {
+            let (tag, value, start, end) = Persist::load(l)?;
+            features.push(partex_otf::shape::Feature {
+                tag,
+                value,
+                start,
+                end,
+            });
+        }
+        let req_engine = Persist::load(l)?;
+        let rgba = Persist::load(l)?;
+        let extend = Persist::load(l)?;
+        let slant = Persist::load(l)?;
+        let embolden = Persist::load(l)?;
+        let flags = Persist::load(l)?;
+        let letter_space = Persist::load(l)?;
+        let mapping_file: Option<Arc<[u8]>> = Persist::load(l)?;
+        let mapping = match &mapping_file {
+            Some(b) => Some(Arc::new(partex_otf::teckit::Mapping::new(b, true, true)?)),
+            None => None,
+        };
+        Some(NativeFont {
+            font: XeTeXFont {
+                face,
+                path: Arc::from(path.as_str()),
+                index,
+                point_size,
+                scaled_size,
+                script,
+                language,
+                features,
+                req_engine,
+                rgba,
+                extend,
+                slant,
+                embolden,
+                flags,
+                letter_space,
+                mapping,
+                mapping_file,
+                design_size: Persist::load(l)?,
+                name_of_file: Persist::load(l)?,
+                last_script: Persist::load(l)?,
+            },
+            params: Persist::load(l)?,
+            height_base: Persist::load(l)?,
+            depth_base: Persist::load(l)?,
+            math: Persist::load(l)?,
+        })
     }
 }
 
 /// What finding native fonts keeps across loads: the font manager over
 /// the index (made at the first native font) and the shaper's caches;
 /// and the line break rules of `\XeTeXlinebreaklocale`. None is engine
-/// state: all are made again from the index or the data.
+/// state: all are made again from the index or the data, by a clone of
+/// the engine as by a state loaded (neither saved nor cloned).
 #[derive(Default)]
 pub(crate) struct NativeEnv {
     mgr: Option<FontManager>,
@@ -521,5 +659,96 @@ pub(crate) fn utf16_of(c: i32) -> Vec<u16> {
         ]
     } else {
         alloc::vec![u16::try_from(c).unwrap_or(0)]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testing::TestHost;
+    use crate::track::Untracked;
+    use partex_engine::persist::{Loader, Saver};
+
+    const TTF: &[u8] = include_bytes!("../../phitex-draw/tests/data/dejavu-A.ttf");
+
+    /// `[dejavu-A.ttf]` at 10 pt with features, loaded as
+    /// `load_native_font` loads it.
+    fn native(host: &mut TestHost) -> NativeFont {
+        let src = Source {
+            host: RefCell::new(host),
+            tracker: &Untracked,
+            found: RefCell::new(BTreeMap::new()),
+        };
+        let mut mgr = FontManager::new(Arc::default());
+        let (f, _) = partex_otf::xetex::find_native_font(
+            &mut mgr,
+            &src,
+            "[dejavu-A.ttf]:+kern;color=FF000080;letterspace=2",
+            10 << 16,
+            0,
+        );
+        NativeFont {
+            font: f.expect("the font loads"),
+            params: alloc::vec![1, 2, 3],
+            height_base: 7,
+            depth_base: -2,
+            math: false,
+        }
+    }
+
+    /// A native font is saved by reference to the file the host served
+    /// (one shared value with it, not a copy per font) and loads as it
+    /// was: the same face, fields and shaping, shared as it was shared.
+    #[test]
+    fn native_fonts_round_trip() {
+        let mut h = TestHost::default();
+        h.files.insert(b"dejavu-A.ttf".to_vec(), TTF.to_vec());
+        let nf = Arc::new(native(&mut h));
+        let file = nf.font.face.data().clone();
+        let mut s = Saver::new();
+        (file.clone(), nf.clone(), nf.clone()).save(&mut s);
+        let bytes = s.into_bytes();
+        assert!(
+            bytes.len() < TTF.len() + 1000,
+            "the font's bytes were saved again"
+        );
+        let mut l = Loader::new(&bytes);
+        let (f, a, b): (Arc<[u8]>, Arc<NativeFont>, Arc<NativeFont>) =
+            Persist::load(&mut l).expect("the font loads");
+        assert!(l.at_end());
+        assert!(Arc::ptr_eq(&a, &b));
+        assert!(Arc::ptr_eq(&f, a.font.face.data()));
+        let (x, y) = (&nf.font, &a.font);
+        assert_eq!(x.face.key(), y.face.key());
+        assert_eq!(
+            (
+                &*x.path,
+                x.index,
+                x.scaled_size,
+                x.rgba,
+                x.flags,
+                x.letter_space
+            ),
+            (
+                &*y.path,
+                y.index,
+                y.scaled_size,
+                y.rgba,
+                y.flags,
+                y.letter_space
+            )
+        );
+        assert_eq!(x.features, y.features);
+        assert_eq!(x.name_of_file, y.name_of_file);
+        assert_eq!(
+            (&nf.params, nf.height_base, nf.depth_base),
+            (&a.params, a.height_base, a.depth_base)
+        );
+        let mut shaper = partex_otf::shape::Shaper::new();
+        let text = [0x41, 0x41];
+        assert_eq!(
+            x.layout(&mut shaper, &text, false, x.letter_space),
+            y.layout(&mut shaper, &text, false, y.letter_space)
+        );
     }
 }

@@ -2782,6 +2782,24 @@ viewer advances through it by the font's `/Widths`, which differ from
 the TFM's by under a thousandth of an em a glyph), with the PDF's
 `ToUnicode` and `/ActualText` text.
 
+**Saved builds.** A machine-mode XeTeX build is saved to the store and
+loaded by the next process like a pdfTeX one (2026-10-07; before, a
+state holding a native font was refused, and every edit between two
+processes built cold). A native font is saved by reference to its
+files, as a TFM font's bytes are: the face's and the mapping's bytes
+are the shared values the host served, in the store the
+content-addressed blobs of the files served, kept once however many
+states and fonts hold them; the face's index and content key and what
+loading computed (features, sizes, colour, fontdimens) are values.
+Loading parses the face and compiles the mapping again. A font file
+changed on disk is an edit like any input: the regions that read it
+run again, and the states after them hold the new face. The font
+manager and the shaper's caches are not state, made again as a clone of
+the engine makes them. A font's slot as a machine cell (`FontSlot`)
+carries the native font and its direction state: without them a region
+run again from a pass's start lost the default font of `xelatex`
+(`[lmroman10-regular]`), and every character was missing from it.
+
 Not yet: Graphite (`/GR`, fontspec's `Renderer=Graphite`: graphite2's
 shaping, its features and queries), `\XeTeXlinebreaklocale` (ICU's line breaking), ICU's
 multi-byte converters (GBK and the like), `\XeTeXinterwordspaceshaping`
