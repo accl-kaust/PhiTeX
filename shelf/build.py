@@ -63,7 +63,9 @@ The engine's font index (FONT_INDEX=path: the PhiTeX engine's builder over
 fonts/opentype and fonts/truetype) is served, when given, at the path
 FONT_INDEX_PATH, in a pack of its own.
 
-TL_MIRROR overrides the mirror (default: mirror.ctan.org's redirector).
+PACK_JOBS: packages packed at once (default: every core); the packs are
+the same whatever it is. TL_MIRROR overrides the mirror (default:
+mirror.ctan.org's redirector).
 """
 import gzip, hashlib, json, lzma, os, re, shutil, struct, subprocess, sys, tarfile, time, urllib.request
 from collections import defaultdict
@@ -497,18 +499,31 @@ def main() -> None:
     if out.exists():
         shutil.rmtree(out)
     (out / "packs").mkdir(parents=True)
-    pack_of, rows, sizes = {}, [], []
-    for pkg, fs in sorted(by_pkg.items()):
+    # (each package packed apart, PACK_JOBS at once (default: every core;
+    # zlib lets go of the GIL): a worker writes its packs and returns only
+    # their names, sizes and paths, merged in package order, so the build
+    # is the same whatever the count)
+    def pack_one(item):
+        pkg, fs = item
         fs.sort()
+        made = []
         for key, members in groups(pkg, fs, freq).items():
             data = pack(sorted(members))
             (out / "packs" / f"{safe(key)}.pack").write_bytes(data)
-            sizes.append((len(data), safe(key)))
-            for path, _ in members:
-                pack_of[path] = safe(key)
-        for path, b in fs:
-            p = files[path][0]
-            rows.append(f"{path}\t{pkg}\tr{p['rev']}\t{hashlib.sha256(b).hexdigest()}")
+            made.append((safe(key), len(data), [path for path, _ in members]))
+        rows = [f"{path}\t{pkg}\tr{files[path][0]['rev']}\t{hashlib.sha256(b).hexdigest()}" for path, b in fs]
+        return made, rows
+
+    t1 = time.time()
+    pack_of, rows, sizes = {}, [], []
+    with ThreadPoolExecutor(int(os.environ.get("PACK_JOBS", "0")) or os.cpu_count()) as ex:
+        for made, prows in ex.map(pack_one, sorted(by_pkg.items())):
+            for key, size, paths in made:
+                sizes.append((size, key))
+                for path in paths:
+                    pack_of[path] = key
+            rows += prows
+    print(f"packed in {time.time() - t1:.0f} s", file=sys.stderr)
     deps: dict[str, dict[str, list[str]]] = {}
     for engine in DEPS:
         r = reads[engine]
