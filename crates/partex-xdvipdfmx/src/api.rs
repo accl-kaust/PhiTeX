@@ -301,6 +301,13 @@ impl Session {
         d.o.take_output()
     }
 
+    /// What was written but not yet taken: the output file's rest as a
+    /// fatal error leaves it (`pdf_error_cleanup` closes the file, which
+    /// `error_cleanup` then does not remove).
+    pub fn written(&mut self) -> Vec<u8> {
+        self.dpx.o.take_output()
+    }
+
     /// A whole XDV, as [`Session::new`], [`Session::page`] for each page
     /// and [`Session::finish`] do it.
     pub fn convert(

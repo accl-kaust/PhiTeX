@@ -68,7 +68,9 @@ impl Output {
     /// piped XDV (`xdvipdfmx -q -E -o NAME`, the XDV piped in).
     fn file(&self) -> std::borrow::Cow<'_, [u8]> {
         if self.piped {
-            crate::dpxfiles::xdv_to_pdf(&self.bytes, &self.name).into()
+            crate::dpxfiles::xdv_to_pdf(&self.bytes, &self.name)
+                .0
+                .into()
         } else {
             (&self.bytes[..]).into()
         }

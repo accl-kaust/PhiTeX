@@ -194,6 +194,12 @@ pub trait Host {
     }
     fn write(&mut self, file: WriteId, bytes: &[u8]);
     fn close(&mut self, file: WriteId);
+    /// Close `file`, a pipe to a program (`XeTeX`'s XDV to xdvipdfmx,
+    /// `FileKind::XdvPipe`): its exit status as `pclose` returns it.
+    fn close_pipe(&mut self, file: WriteId) -> i32 {
+        self.close(file);
+        0
+    }
 
     /// Terminal output (TeX's `term_out`).
     fn term_write(&mut self, bytes: &[u8]);

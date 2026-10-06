@@ -1042,6 +1042,26 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         let Some(Ok(summary)) = summary else {
             return self.dvi_too_long();
         };
+        let piped = self.xdv() && !self.params.no_pdf;
+        if piped && let Some(id) = self.dvi.file.take() {
+            // (`XeTeX`: `dvi_close` first, the driver's status shown)
+            let k = if self.effects.is_none() {
+                self.host.close_pipe(id)
+            } else {
+                self.out_close(id);
+                0
+            };
+            if k != 0 {
+                self.print_nl(b"Error ");
+                self.print_int(k);
+                self.print_str(b" (driver return code) generating output;");
+                self.print_nl(b"file ");
+                self.print_file_name(0, self.output_file_name(), 0);
+                self.print_str(b" may not be valid.");
+                self.set_history(OUTPUT_FAILURE);
+                return Ok(());
+            }
+        }
         self.print_nl(b"Output written on ");
         self.print_file_name(0, self.output_file_name(), 0);
         self.print_str(b" (");
@@ -1051,7 +1071,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         } else {
             self.print_str(b" pages");
         }
-        if self.xdv() && !self.params.no_pdf {
+        if piped {
             // (`XeTeX`: the PDF's size is xdvipdfmx's)
             self.print_str(b").");
         } else {
