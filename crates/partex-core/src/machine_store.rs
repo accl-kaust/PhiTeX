@@ -66,6 +66,7 @@ partex_engine::persist_enum!(MCell {
     FinalNum(a0),
     OfFinal(a0),
     NumState,
+    PdfWord(a0),
 });
 
 partex_engine::persist_struct!(PageValue { builder, list });
@@ -788,6 +789,7 @@ pub fn census<H: StoreHost + 'static>(b: &Build<TexMachine<H>>) -> BTreeMap<&'st
                 MCell::Positions => "g.positions",
                 MCell::Page => "g.page",
                 MCell::PdfLast(_) => "g.pdf last",
+                MCell::PdfWord(_) => "g.pdf word",
                 MCell::FinalNum(_) => "g.final num",
                 MCell::OfFinal(_) => "g.of final",
                 MCell::NumState => "g.num state",
@@ -980,6 +982,7 @@ mod tests {
             MCell::Positions,
             MCell::Page,
             MCell::PdfLast(6),
+            MCell::PdfWord(4),
             MCell::FinalNum(7),
             MCell::OfFinal(8),
             MCell::NumState,
@@ -1009,6 +1012,7 @@ mod tests {
                 MCell::Positions => 19,
                 MCell::Page => 20,
                 MCell::PdfLast(_) => 21,
+                MCell::PdfWord(_) => 25,
                 MCell::FinalNum(_) => 22,
                 MCell::OfFinal(_) => 23,
                 MCell::NumState => 24,
@@ -1029,7 +1033,7 @@ mod tests {
                 MCell::FontOrder => 18,
             });
         }
-        assert_eq!(kinds.len(), 25, "a sample of every kind of cell");
+        assert_eq!(kinds.len(), 26, "a sample of every kind of cell");
         v
     }
 

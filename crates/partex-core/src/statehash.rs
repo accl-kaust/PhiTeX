@@ -69,6 +69,17 @@ pub static PAGE_CELLS: core::sync::atomic::AtomicBool = core::sync::atomic::Atom
 pub static PDF_LAST_CELLS: core::sync::atomic::AtomicBool =
     core::sync::atomic::AtomicBool::new(true);
 
+/// Whether a machine's `Rest` leaves out the PDF writer's words that
+/// only a few routines touch (`pdf::word`: the object lists' heads, the
+/// outlines' first, last and parent, the catalog's open action): they are
+/// then cells of their own (`MCell::PdfWord`, `machine.rs`). Every region
+/// reads `Rest`, so a word in it that differs (an outline added from the
+/// `.out` file at `\begin{document}` shifts the outlines' numbers) made
+/// every region after it run again, though none but the job's end reads
+/// it. The host's switch, `PARTEX_MACHINE_PDF_WORDS=0` turns it off.
+pub static PDF_WORD_CELLS: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(true);
+
 /// Hashes state, numbering the ids it meets.
 struct Canon<'a> {
     h: StableHasher,
@@ -778,6 +789,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         let first_word =
             |f: &alloc::string::String| f.split_whitespace().next().unwrap_or_default().to_string();
         let last_cells = PDF_LAST_CELLS.load(core::sync::atomic::Ordering::Relaxed);
+        let word_cells = PDF_WORD_CELLS.load(core::sync::atomic::Ordering::Relaxed);
         for ((name, x), (_, y)) in self.rest_hash_parts().iter().zip(other.rest_hash_parts()) {
             if *x == y {
                 continue;
@@ -791,7 +803,16 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                         // leaves them out, `WithoutLast`)
                         let last =
                             part.starts_with("last_") && *part != "last_match" || *part == "retval";
-                        if *a == b || (last && last_cells) {
+                        // (and with the writer's words as cells, those,
+                        // `WithoutCells`)
+                        let word = matches!(
+                            *part,
+                            "first_outline"
+                                | "last_outline"
+                                | "parent_outline"
+                                | "catalog_openaction"
+                        );
+                        if *a == b || (last && last_cells) || (word && word_cells) {
                             continue;
                         }
                         let before = out.len();
@@ -815,6 +836,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                             ),
                             "objs" => out.extend(
                                 (0..self.pdf.objs.head.len())
+                                    .filter(|_| !(word_cells && self.pdf.objs.log.on))
                                     .filter(|&t| self.pdf.objs.head[t] != other.pdf.objs.head[t])
                                     .map(|t| alloc::format!("pdf.objs.head[{t}]")),
                             ),
@@ -2150,13 +2172,13 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         c.put(tounicode);
         c.put(&(fontmap, fonts_mapped));
         c.section("font maps", parts);
-        if scope == Scope::Rest
-            && c.served.is_some()
-            && PDF_LAST_CELLS.load(core::sync::atomic::Ordering::Relaxed)
-        {
+        let last = PDF_LAST_CELLS.load(core::sync::atomic::Ordering::Relaxed);
+        let words = PDF_WORD_CELLS.load(core::sync::atomic::Ordering::Relaxed);
+        if scope == Scope::Rest && c.served.is_some() && (last || words) {
             // (with them as cells, a machine's `Rest` has no `\pdflast…`
-            // values: `MCell::PdfLast` holds them)
-            c.put(&crate::pdf::WithoutLast(pdf));
+            // values, `MCell::PdfLast` holds them, and none of the
+            // writer's words, `MCell::PdfWord` holds them)
+            c.put(&crate::pdf::WithoutCells { pdf, last, words });
         } else {
             c.put(pdf);
         }

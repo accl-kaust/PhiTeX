@@ -534,6 +534,10 @@ pub(crate) struct ObjLog {
     pub(crate) observers: (u32, u32, u32, alloc::collections::BTreeSet<i32>),
     /// `objs` sized since the log was made ([`ObjTab::reserve_log`]).
     sized: bool,
+    /// The lists' heads (`MCell::PdfWord`, `pdf::word`): bit `t` if the
+    /// head of type `t` was read first, bit `16 + t` once written
+    /// ([`ObjTab::head`], [`ObjTab::set_head`]).
+    heads: core::sync::atomic::AtomicU32,
 }
 
 impl Clone for ObjLog {
@@ -678,6 +682,48 @@ impl Walk {
 }
 
 impl ObjTab {
+    /// The head of the list of type `t`, read (logged with a machine).
+    pub(crate) fn head(&self, t: usize) -> i32 {
+        if self.log.on {
+            use core::sync::atomic::Ordering::Relaxed;
+            let v = self.log.heads.load(Relaxed);
+            if v & (1 << (16 + t)) == 0 {
+                self.log.heads.store(v | (1 << t), Relaxed);
+            }
+        }
+        self.head[t]
+    }
+
+    /// Set the head of the list of type `t` (logged with a machine).
+    pub(crate) fn set_head(&mut self, t: usize, k: i32) {
+        if self.log.on {
+            *self.log.heads.get_mut() |= 1 << (16 + t);
+        }
+        self.head[t] = k;
+    }
+
+    /// The lists' heads read first and written since the last call (by
+    /// bit: type `t` is bit `t`), and none since.
+    pub(crate) fn take_heads(&mut self) -> (u16, u16) {
+        let v = core::mem::take(self.log.heads.get_mut());
+        #[allow(clippy::cast_possible_truncation)] // (the halves)
+        (v as u16, (v >> 16) as u16)
+    }
+
+    /// The table hashed as [`Hash`] does, without the lists' heads while
+    /// they are cells of their own (`log.on`: a machine's `Rest`,
+    /// `pdf::WithoutCells`).
+    pub(crate) fn hash_without_heads<S: core::hash::Hasher>(&self, h: &mut S) {
+        use core::hash::Hash;
+        if !self.log.on {
+            self.hash(h);
+        } else if self.virt {
+            self.symbolic.hash(h);
+        } else {
+            (self.tab.len(), self.obj_ptr, self.symbolic).hash(h);
+        }
+    }
+
     /// `sys_obj_ptr`: the last object, object streams included.
     pub(crate) fn sys_obj_ptr(&self) -> i32 {
         i32::try_from(self.tab.len() - 1).unwrap_or(i32::MAX)
@@ -695,7 +741,7 @@ impl ObjTab {
     /// A walk along the list of type `t` ([`Walk`]).
     pub(crate) fn walk(&self, t: usize) -> Walk {
         Walk {
-            at: self.head[t],
+            at: self.head(t),
             started: false,
             left: self.len(),
         }
@@ -1331,10 +1377,10 @@ impl ObjTab {
         if t == OBJ_TYPE_PAGE {
             // pages are kept in decreasing order of their numbers
             let n = i.num();
-            let mut p = self.head[t];
+            let mut p = self.head(t);
             if p == 0 || self.get(p).info.num() < n {
                 self.get_mut(k).link = p;
-                self.head[t] = k;
+                self.set_head(t, k);
             } else {
                 let mut q = p;
                 let mut left = self.len();
@@ -1351,8 +1397,8 @@ impl ObjTab {
                 self.get_mut(k).link = p;
             }
         } else if t != OBJ_TYPE_OTHERS {
-            self.get_mut(k).link = self.head[t];
-            self.head[t] = k;
+            self.get_mut(k).link = self.head(t);
+            self.set_head(t, k);
             if t == OBJ_TYPE_DEST
                 && !self.ssa.on
                 && let Id::Name(s) = i

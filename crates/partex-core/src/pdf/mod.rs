@@ -272,11 +272,18 @@ impl PdfState {
     }
 }
 
-/// The PDF state hashed without the [`PdfLast`] values (a machine's
-/// `Rest` with them as cells), in the derived order otherwise.
-pub(crate) struct WithoutLast<'a>(pub &'a PdfState);
+/// The PDF state as a machine's `Rest` hashes it: without the
+/// [`PdfLast`] values if `last`, and without the writer's words
+/// ([`word`]: the object lists' heads, if the object table's entries are
+/// cells, the outlines' first, last and parent, the catalog's open
+/// action) if `words`; in the derived order otherwise.
+pub(crate) struct WithoutCells<'a> {
+    pub pdf: &'a PdfState,
+    pub last: bool,
+    pub words: bool,
+}
 
-impl core::hash::Hash for WithoutLast<'_> {
+impl core::hash::Hash for WithoutCells<'_> {
     fn hash<S: core::hash::Hasher>(&self, h: &mut S) {
         let PdfState {
             last_match,
@@ -285,16 +292,16 @@ impl core::hash::Hash for WithoutLast<'_> {
             obj_count,
             xform_count,
             ximage_count,
-            last_obj: _,
-            last_xform: _,
-            last_ximage: _,
-            last_ximage_pages: _,
-            last_ximage_colordepth: _,
-            last_annot: _,
-            last_link: _,
-            last_x_pos: _,
-            last_y_pos: _,
-            retval: _,
+            last_obj,
+            last_xform,
+            last_ximage,
+            last_ximage_pages,
+            last_ximage_colordepth,
+            last_annot,
+            last_link,
+            last_x_pos,
+            last_y_pos,
+            retval,
             info_toks,
             catalog_toks,
             catalog_openaction,
@@ -312,18 +319,75 @@ impl core::hash::Hash for WithoutLast<'_> {
             fontw,
             epdf,
             scope: _,
-        } = self.0;
-        (last_match, objs, out, obj_count, xform_count, ximage_count).hash(h);
-        (info_toks, catalog_toks, catalog_openaction, names_toks).hash(h);
-        (trailer_toks, trailer_id_toks, first_outline, last_outline).hash(h);
-        (
-            parent_outline,
-            space_font_name,
-            font_attr,
-            nobuiltin_tounicode,
-        )
-            .hash(h);
+        } = self.pdf;
+        last_match.hash(h);
+        if self.words {
+            objs.hash_without_heads(h);
+        } else {
+            objs.hash(h);
+        }
+        (out, obj_count, xform_count, ximage_count).hash(h);
+        if !self.last {
+            (last_obj, last_xform, last_ximage, last_ximage_pages).hash(h);
+            (last_ximage_colordepth, last_annot, last_link).hash(h);
+            (last_x_pos, last_y_pos, retval).hash(h);
+        }
+        (info_toks, catalog_toks, names_toks).hash(h);
+        (trailer_toks, trailer_id_toks).hash(h);
+        if !self.words {
+            (
+                catalog_openaction,
+                first_outline,
+                last_outline,
+                parent_outline,
+            )
+                .hash(h);
+        }
+        (space_font_name, font_attr, nobuiltin_tounicode).hash(h);
         (stacks, ship, fontw, epdf).hash(h);
+    }
+}
+
+/// The PDF writer's words that are a machine's cells of their own
+/// (`MCell::PdfWord`, `statehash::PDF_WORD_CELLS`): the object lists'
+/// heads (`HEADS` of them, type `t` is word `t`, while the object
+/// table's entries are cells), the outlines' first, last and parent, and
+/// the catalog's open action. Each is read and written by a few routines
+/// only (`\pdfoutline`, `\pdfcatalog`, an object made of a listed type,
+/// the job's end), and none of them is read by the text in between.
+pub mod word {
+    /// The object lists' heads: words `0..HEADS`.
+    pub const HEADS: u8 = 11;
+    pub const FIRST_OUTLINE: u8 = 11;
+    pub const LAST_OUTLINE: u8 = 12;
+    pub const PARENT_OUTLINE: u8 = 13;
+    pub const CATALOG_OPENACTION: u8 = 14;
+    /// The words end here.
+    pub const COUNT: u8 = 15;
+}
+
+impl PdfState {
+    /// Word `k` ([`word`]).
+    #[must_use]
+    pub fn word(&self, k: u8) -> i32 {
+        match k {
+            word::FIRST_OUTLINE => self.first_outline,
+            word::LAST_OUTLINE => self.last_outline,
+            word::PARENT_OUTLINE => self.parent_outline,
+            word::CATALOG_OPENACTION => self.catalog_openaction,
+            t => self.objs.head[usize::from(t)],
+        }
+    }
+
+    /// Word `k` ([`word`]), to set.
+    pub fn word_mut(&mut self, k: u8) -> &mut i32 {
+        match k {
+            word::FIRST_OUTLINE => &mut self.first_outline,
+            word::LAST_OUTLINE => &mut self.last_outline,
+            word::PARENT_OUTLINE => &mut self.parent_outline,
+            word::CATALOG_OPENACTION => &mut self.catalog_openaction,
+            t => &mut self.objs.head[usize::from(t)],
+        }
     }
 }
 

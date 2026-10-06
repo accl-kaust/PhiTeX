@@ -297,6 +297,10 @@ pub struct CellTracker {
     /// The `\pdflast…` values (`MCell::PdfLast`): bit `k` if value `k`
     /// was read first, bit `16 + k` once written.
     pdf_last: core::sync::atomic::AtomicU32,
+    /// The PDF writer's words (`MCell::PdfWord`) the tracker is told of
+    /// (`pdf::word`; the lists' heads are the object table's to log):
+    /// bit `k` if word `k` was read first, bit `16 + k` once written.
+    pdf_words: core::sync::atomic::AtomicU32,
 }
 
 /// What a tracker's slot stands for.
@@ -410,6 +414,25 @@ pub fn set_pdf_last_cells(on: bool) {
 
 fn pdf_last_cells() -> bool {
     crate::statehash::PDF_LAST_CELLS.load(Relaxed)
+}
+
+/// Whether the PDF writer's words that few routines touch (`pdf::word`)
+/// are cells of their own ([`MCell::PdfWord`]) and not `Rest`'s (on by
+/// default, `PARTEX_MACHINE_PDF_WORDS=0` turns it off).
+pub fn set_pdf_word_cells(on: bool) {
+    crate::statehash::PDF_WORD_CELLS.store(on, Relaxed);
+}
+
+fn pdf_word_cells() -> bool {
+    crate::statehash::PDF_WORD_CELLS.load(Relaxed)
+}
+
+/// Whether word `k` of `t`'s PDF writer is a cell of its own: a list's
+/// head only while the object table's entries are cells.
+fn pdf_word_is_cell<H: Host, T: Tracker>(t: &Tex<H, T>, k: u8) -> bool {
+    pdf_word_cells()
+        && k < crate::pdf::word::COUNT
+        && (k >= crate::pdf::word::HEADS || t.pdf.objs.log.on)
 }
 
 /// The version of an answer of the numbering (`FinalNum`, `OfFinal`,
@@ -690,6 +713,15 @@ impl CellTracker {
         self.softs.clear();
         self.page.store(0, Relaxed);
         self.pdf_last.store(0, Relaxed);
+        self.pdf_words.store(0, Relaxed);
+    }
+
+    /// The PDF writer's words the region read first, and those it wrote
+    /// (by bit: word `k` is bit `k`; the lists' heads are not here).
+    fn pdf_words_touched(&self) -> (u16, u16) {
+        let v = self.pdf_words.load(Relaxed);
+        #[allow(clippy::cast_possible_truncation)] // (the halves)
+        (v as u16, (v >> 16) as u16)
     }
 
     /// The `\pdflast…` values the region read first, and those it wrote
@@ -766,6 +798,17 @@ impl Tracker for CellTracker {
             self.pdf_last.store(v | w, Relaxed);
         } else if v & w == 0 {
             self.pdf_last.store(v | r, Relaxed);
+        }
+    }
+
+    #[inline]
+    fn pdf_word_access(&self, k: u8, write: bool) {
+        let v = self.pdf_words.load(Relaxed);
+        let (r, w) = (1u32 << k, 1u32 << (16 + k));
+        if write {
+            self.pdf_words.store(v | w, Relaxed);
+        } else if v & w == 0 {
+            self.pdf_words.store(v | r, Relaxed);
         }
     }
 
@@ -1379,6 +1422,11 @@ pub enum MCell {
     /// siblings), read where `\pdflast…` reads it and written where the
     /// object is made; `Rest` then leaves it out.
     PdfLast(u8),
+    /// With them as cells (`statehash::PDF_WORD_CELLS`): the PDF writer's
+    /// word `k` (`pdf::word`: an object list's head, the outlines' first,
+    /// last and parent, the catalog's open action), read and written
+    /// where the writer's routines touch it; `Rest` then leaves it out.
+    PdfWord(u8),
     /// A sealed line's contents (`seal.rs`), by key (its high and low
     /// halves: a `u128` would align every cell, and so every guard, write
     /// and index entry, to 16 bytes).
@@ -2812,6 +2860,14 @@ impl<H: CellHost> TexMachine<H> {
             }
         }
         if keep_eqtb {
+            // (and the writer's words that are cells)
+            for k in 0..crate::pdf::word::COUNT {
+                if pdf_word_is_cell(&self.tex, k) {
+                    *new.pdf.word_mut(k) = self.tex.pdf.word(k);
+                }
+            }
+        }
+        if keep_eqtb {
             // (the sealed lines are cells of their own: this state's)
             new.seals = self.tex.seals.clone();
             if new.pdf.objs.log.on {
@@ -2907,6 +2963,7 @@ impl<H: CellHost> TexMachine<H> {
             MCell::Positions => position_cells(),
             MCell::Page => page_cells(),
             MCell::PdfLast(_) => pdf_last_cells(),
+            MCell::PdfWord(k) => pdf_word_is_cell(&self.tex, *k),
             _ => true,
         }
     }
@@ -2948,6 +3005,11 @@ impl<H: CellHost> TexMachine<H> {
         if pdf_last_cells() {
             for k in crate::pdf::PdfLast::ALL {
                 h.write_u128(pdf_last_version(self.tex.pdf.last(k)));
+            }
+        }
+        for k in 0..crate::pdf::word::COUNT {
+            if pdf_word_is_cell(&self.tex, k) {
+                h.write_u128(pdf_last_version(self.tex.pdf.word(k)));
             }
         }
         part(&mut parts, "rest", &mut h);
@@ -3465,6 +3527,20 @@ impl<H: CellHost> Machine for TexMachine<H> {
                 r.read(&MCell::PdfLast(k), Some(&MValue::version(v)));
             }
         }
+        // The writer's words: read (at the entry) where read first,
+        // written where set (the lists' heads as the object table logged
+        // them).
+        let (words_read, words_written) = {
+            let (r, w) = self.tex.tracker.pdf_words_touched();
+            let (hr, hw) = self.tex.pdf.objs.take_heads();
+            (r | hr, w | hw)
+        };
+        for k in 0..crate::pdf::word::COUNT {
+            if words_read & (1 << k) != 0 && pdf_word_is_cell(&self.tex, k) {
+                let v = pdf_last_version(entry.tex.pdf.word(k));
+                r.read(&MCell::PdfWord(k), Some(&MValue::version(v)));
+            }
+        }
         self.tex.tracker.clear();
         self.opened.clear();
         // the exit, which the runtime reads next, and the next region's
@@ -3491,6 +3567,11 @@ impl<H: CellHost> Machine for TexMachine<H> {
         for k in 0..u8::try_from(crate::pdf::PdfLast::ALL.len()).unwrap_or(0) {
             if last_written & (1 << k) != 0 {
                 write(r, MCell::PdfLast(k));
+            }
+        }
+        for k in 0..crate::pdf::word::COUNT {
+            if words_written & (1 << k) != 0 && pdf_word_is_cell(&self.tex, k) {
+                write(r, MCell::PdfWord(k));
             }
         }
         if any {
@@ -3619,6 +3700,13 @@ impl<H: CellHost> Machine for TexMachine<H> {
             ))),
             MCell::PdfLast(k) => pdf_last_cells().then(|| {
                 let v = self.tex.pdf.last(pdf_last_of(*k));
+                MValue {
+                    version: pdf_last_version(v),
+                    v: V::Int(v),
+                }
+            }),
+            MCell::PdfWord(k) => pdf_word_is_cell(&self.tex, *k).then(|| {
+                let v = self.tex.pdf.word(*k);
                 MValue {
                     version: pdf_last_version(v),
                     v: V::Int(v),
@@ -3757,6 +3845,7 @@ impl<H: CellHost> Machine for TexMachine<H> {
             (MCell::Positions, Some(V::Positions(p))) => self.set_positions(&p),
             (MCell::Page, Some(V::Page(p))) => self.tex.page = p.builder(),
             (MCell::PdfLast(k), Some(V::Int(v))) => *self.tex.pdf.last_mut(pdf_last_of(*k)) = v,
+            (MCell::PdfWord(k), Some(V::Int(v))) => *self.tex.pdf.word_mut(*k) = v,
             (MCell::Sealed(hi, lo), Some(V::Sealed(x))) => {
                 self.tex.seals.insert(seal_key(*hi, *lo), x);
             }
@@ -4054,6 +4143,7 @@ impl<H: CellHost> Machine for TexMachine<H> {
             | MCell::Positions
             | MCell::Page
             | MCell::PdfLast(_)
+            | MCell::PdfWord(_)
             | MCell::Sealed(..)
             | MCell::Written(_)
             | MCell::Obj(_)

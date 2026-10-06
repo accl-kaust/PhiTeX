@@ -94,6 +94,7 @@ fn identity(params: &Params, command_line: &[u8]) -> Option<u128> {
     let quiet = |k: &str| {
         k.starts_with("PARTEX_STORE")
             || k.starts_with("PARTEX_WATCH")
+            || k == "PARTEX_MACHINE_AUDIT"
             || matches!(
                 k,
                 "PARTEX_CACHE_DIR" | "PARTEX_REPORT" | "SOURCE_DATE_EPOCH" | "FORCE_SOURCE_DATE"

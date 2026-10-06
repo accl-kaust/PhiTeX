@@ -152,6 +152,8 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             if let Some(t) = self.pdf.catalog_toks.take() {
                 self.pdf_print_text_ln(&t);
             }
+            self.tracker
+                .pdf_word_access(super::word::CATALOG_OPENACTION, false);
             if self.pdf.catalog_openaction != 0 {
                 let a = self.pdf.catalog_openaction;
                 self.pdf.out.indirect_ln(b"OpenAction", a);
@@ -273,7 +275,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
 
     /// "Check for non-existing pages".
     fn check_nonexisting_pages(&mut self) {
-        let mut k = self.pdf.objs.head[OBJ_TYPE_PAGE];
+        let mut k = self.pdf.objs.head(OBJ_TYPE_PAGE);
         while k != 0 && self.pdf.objs.get(k).aux == Aux::None {
             self.pdf_warning(b"dest", b"Page ", true, false);
             let n = self.pdf.objs.get(k).info.num();
@@ -283,14 +285,14 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             self.print_ln();
             k = self.pdf.objs.get(k).link;
         }
-        self.pdf.objs.head[OBJ_TYPE_PAGE] = k;
+        self.pdf.objs.set_head(OBJ_TYPE_PAGE, k);
     }
 
     /// "Reverse the linked list of Page and Pages objects"; returns
     /// `pages_tail`.
     fn reverse_page_lists(&mut self) -> i32 {
         let reverse = |t: &mut super::objtab::ObjTab, ty: usize| {
-            let mut k = t.head[ty];
+            let mut k = t.head(ty);
             let mut l = 0;
             while k != 0 {
                 let i = t.get(k).link;
@@ -298,10 +300,10 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                 l = k;
                 k = i;
             }
-            t.head[ty] = l;
+            t.set_head(ty, l);
         };
         reverse(&mut self.pdf.objs, OBJ_TYPE_PAGE);
-        let tail = self.pdf.objs.head[OBJ_TYPE_PAGES];
+        let tail = self.pdf.objs.head(OBJ_TYPE_PAGES);
         reverse(&mut self.pdf.objs, OBJ_TYPE_PAGES);
         tail
     }
@@ -334,7 +336,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                 self.print_ln();
                 self.pdf_begin_obj(k, 1)?;
                 self.pdf.out.out(b'[');
-                let p = self.pdf.objs.head[OBJ_TYPE_PAGE];
+                let p = self.pdf.objs.head(OBJ_TYPE_PAGE);
                 self.pdf.out.objnum(p);
                 self.pdf.out.print_ln(b" 0 R /Fit]");
                 self.pdf_end_obj();
@@ -409,8 +411,8 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         let a = self.pdf.objs.sys_obj_ptr() + 1;
         // (virtual numbers: the nodes made here, which `l < a` tells)
         let mut made = alloc::collections::BTreeSet::new();
-        let mut l = self.pdf.objs.head[OBJ_TYPE_PAGES];
-        let mut k = self.pdf.objs.head[OBJ_TYPE_PAGE];
+        let mut l = self.pdf.objs.head(OBJ_TYPE_PAGES);
+        let mut k = self.pdf.objs.head(OBJ_TYPE_PAGE);
         let mut b = 0;
         loop {
             let mut i = 0;
@@ -468,8 +470,8 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                 self.pdf.out.remove_last_space();
                 self.pdf.out.print_ln(b"]");
                 if k == 0 {
-                    k = self.pdf.objs.head[OBJ_TYPE_PAGES];
-                    self.pdf.objs.head[OBJ_TYPE_PAGES] = 0;
+                    k = self.pdf.objs.head(OBJ_TYPE_PAGES);
+                    self.pdf.objs.set_head(OBJ_TYPE_PAGES, 0);
                 }
                 if is_root
                     && let Some(s) = self.toks_loc_string(PDF_PAGES_ATTR_LOC)
