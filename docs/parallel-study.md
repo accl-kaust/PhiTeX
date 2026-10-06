@@ -7,6 +7,34 @@ the step-graph work of 2026-10-02/03 (`PARTEX_SSA_DAG`,
 `scripts/ssa-parallel.py`, `cargo xtask parallel`), and does not repeat
 it.
 
+## Summary
+
+- **Profile (m).** The manual's plain cold build takes 336 s, the same
+  as pdfTeX (328 s). **98.2% is expansion and main control.** Ship-out,
+  PDF and deflate take 1.3%, line breaking, packing and the page
+  builder 0.5%. On a text-heavy article, ship-out and PDF take 27% and
+  line breaking 8%. The SSA build costs 2.28× the time and 11.8× the
+  memory of a plain one.
+- **Parallelism (p, m).** Without speculation the step graph is one
+  chain (1.00×). With the previous build's carries, 99.999% of the
+  steps validate. The bound is then the work divided by the largest
+  step, and the in-order commit caps it at about 86× (e). Projected:
+  **3.3× at 8 workers, 6.4× at 16, 12× at 32, 21× at 64 against
+  plain** (e).
+- **A cheap pass 0 (m on the step graph, e as a design).** A pass 0
+  that skips typesetting costs 98% of the build and never pays. A pass
+  0 that jumps over pictures and code examples costs 4–5%. Its
+  phase 2 gives **2.95× unbounded, 2.2× at 8 workers** (blind writes),
+  or **4.0× / 2.7×** once the cursors and allocators are predicted. It
+  is bounded by chains inside long runs of pictures.
+- **Pipeline parallelism** (expansion on one thread, output on others):
+  ≤1.02× on the manual, ≤1.37× on text (e from the profile).
+- **Recommended:** speculation at clean top-level points with an
+  in-order commit (DESIGN 3.10, the paragraph-level DFG). Carries come
+  first from the previous build, then from a skeleton pass 0. Stages:
+  content versions → clean boundaries → **worker shell + parallel warm
+  re-run** (the first real speedup) → output pipeline → skeleton pass 0.
+
 **Measured vs estimated.** A number marked *(m)* was measured for this
 study. *(p)* means measured earlier (the LOG entries of 2026-10-02 and
 2026-10-03, quoted here). *(e)* means estimated, with the assumption
@@ -107,8 +135,8 @@ What serializes it, by family (p, plus this study's pgfsub graph):
   typesetting classes alone (page builder, nest, PDF writer and fonts,
   marks, `\write` streams) leave a phase-2 critical path of 44,592
   commands out of 39.7 M on pgfsub: **890×**, pipelined, blind writes
-  (m). Under soft reads the chain through `nest`/`list.mode` limits it
-  to 2.94× (m). `\count0` and page numbers are not the serial part.
+  (m, on the untimed dump, see section 3). Under soft reads the chain
+  through `nest`/`list.mode` limits it to 2.94× (m). `\count0` and page numbers are not the serial part.
 - **Cursors and LaTeX scratch**: the save stack, conditionals,
   `align_state`, `\reserved@a`, `\@currenvir`. Scoped definitions
   (blind writes) and soft reads (TODO 2) remove most of them.
@@ -142,58 +170,81 @@ pass 0 ran from a mispredicted state, each from pass 0's carry. Steps
 commit in order, and a step whose reads validate is kept. Phase 2 is
 pipelined: a mispredicted read waits for its definition.
 
-`cargo xtask parallel pass0 DAG` (new, commit `4b82547`) models this on
-a step graph. A read is mispredicted when its definition comes from a
-skipped or tainted step **and** has a different version from the last
-definition that pass 0 ran correctly (versions are content: 1,563 of
-2,419 definitions of `\catcode13` share one version). A misread of a
-typesetting class taints only the reader's typesetting classes. Any
-other misread taints the reader entirely, and taint spreads through
-later reads. Projections use Brent's range: pass 0 time + max(cp, w/P)
-up to pass 0 time + w/P + cp.
+`cargo xtask parallel pass0 DAG` (new: commits `4b82547`, `ff53c1c`)
+models this on a step graph. A read is mispredicted when its definition
+comes from a skipped or tainted step **and** has a different version
+from the last definition that pass 0 ran correctly (versions are
+content: 1,563 of 2,419 definitions of `\catcode13` share one version).
+A misread of a typesetting class taints only the reader's typesetting
+classes. Any other misread taints the reader entirely, and taint spreads
+through later reads. "At the spans' edges": a span's first and last
+step skip only their part inside the span, by the reads' and writes'
+times, as nodes cut at `\begin`/`\end` would. Projections use Brent's
+range: pass 0 time + max(cp, w/P) up to pass 0 time + w/P + cp.
+
+**A fix on the way** (commit `b270a0b`). The dump lost the times of
+every step that ended through `end_step_soft` with slots filtered out.
+On pgfsub, 84% of the reads and 89% of the writes had no time, so
+"pipelined" schedules were mostly whole-step ones. The numbers below
+come from the fixed dump (0 untimed). The whole-manual pipelined
+figures of 2026-10-03 (section 2) were probably affected the same way
+and should be measured again.
 
 ### pgfsub, measured on its step graph (m; the scheme itself is e)
 
 Pictures (from a read of `\pgfpicture` to one of `\endpgfpicture`,
 outermost) cover 82.5% of the commands. Code examples cover 61.2%.
-Output-routine steps cover 0.4%.
+Output-routine steps cover 0.4%. Runs of consecutive picture steps
+reach 6.5 M, 3.8 M and 2.1 M commands (median 12 K; an awk estimate
+over the dump).
 
 | pass 0 skips | pass 0 cost | re-run (share of commands) | phase-2 critical path | speedup, unbounded workers | 8 workers | 64 workers |
 |---|---:|---:|---:|---:|---:|---:|
 | *soft reads* | | | | | | |
-| typesetting (output routines; typesetting classes mispredicted) | 98.2% (measured profile) | 99.6% | 39.3 M | 0.51× | 0.48–0.51× | 0.50–0.51× |
-| pictures | 17.5% | 16.3% | 39.2 M | 0.86× | 0.78–0.86× | 0.85–0.86× |
-| pictures + code examples | 4.2% | 3.0% | 39.2 M | 0.97× | 0.87–0.97× | 0.96–0.97× |
+| typesetting (output routines; typesetting classes mispredicted) | 98.2% (measured profile) | 99.6% | 39.1 M | 0.51× | 0.48–0.51× | 0.50–0.51× |
+| pictures | 17.5% | 16.3% | 39.0 M | 0.86× | 0.78–0.86× | 0.85–0.86× |
+| pictures + code examples, at the spans' edges | 4.9% | 3.0% | 39.0 M | 0.97× | 0.87–0.97× | 0.95–0.97× |
 | *blind writes* | | | | | | |
-| typesetting | 98.2% | 99.6% | 23.7 M | 0.63× | 0.59–0.63× | 0.63× |
-| pictures | 17.5% | 16.3% | 23.9 M | 1.29× | 1.11–1.29× | 1.26–1.29× |
-| code examples | 38.8% | 20.2% | 20.0 M | 1.12× | 1.00–1.12× | 1.10–1.12× |
-| pictures + code examples | 4.2% | 3.0% | 23.9 M | 1.55× | 1.30–1.55× | 1.51–1.55× |
+| typesetting | 98.2% | 99.6% | 11.7 M | 0.78× | 0.71–0.78× | 0.77–0.78× |
+| pictures | 17.5% | 16.3% | 11.8 M | 2.12× | 1.68–2.12× | 2.05–2.12× |
+| code examples | 38.8% | 20.2% | 10.1 M | 1.56× | 1.34–1.56× | 1.53–1.56× |
+| pictures + code examples | 4.2% | 3.0% | 11.8 M | 2.95× | 2.16–2.95× | 2.82–2.95× |
+| pictures + code examples, at the spans' edges | 4.9% | 3.0% | 11.5 M | 2.96× | 2.17–2.96× | 2.83–2.96× |
 | *blind writes, cursors and allocators taken as predicted* (save stack, conditionals, engine scalars, nest, hash, allocators) | | | | | | |
-| typesetting | 98.2% | 98.4% | 17.7 M | 0.70× | 0.64–0.70× | 0.69–0.70× |
-| pictures | 17.5% | 16.3% | 17.6 M | 1.62× | 1.35–1.62× | 1.58–1.62× |
-| pictures + code examples | 4.2% | 3.0% | 17.6 M | **2.06×** | 1.64–2.06× | 2.00–2.06× |
+| typesetting | 98.2% | 98.4% | 8.1 M | 0.84× | 0.76–0.84× | 0.83–0.84× |
+| pictures | 17.5% | 16.3% | 8.1 M | 2.63× | 1.98–2.63× | 2.52–2.63× |
+| pictures, no typesetting either | 17.5% | 16.4% | 7.6 M | 2.74× | 2.04–2.74× | 2.63–2.74× |
+| pictures + code examples | 4.2% | 3.0% | 8.1 M | **4.04×** | 2.70–4.04× | 3.80–4.04× |
+| pictures + code examples, at the spans' edges | 4.9% | 3.0% | 8.5 M | 3.81× | 2.59–3.81× | 3.60–3.81× |
+
+Phase 2 alone, if pass 0 were free, reaches 3.4× (blind writes) and
+4.9× (cursors and allocators predicted) (m).
 
 How to read it:
 - **Pass 0 can be cheap.** Jumping over pictures and code examples
-  leaves 4.2% of the commands, and only 3% of the steps pass 0 runs
-  need running again.
-- **Phase 2 is still a chain**, about 45–60% of the work at this grain.
-  After the cursors, what remains misread is catcodes (`\catcode13`,
-  `92`, `123`, `125`, `32`: the code examples' verbatim reading), NFSS
-  (`\f@size`, `\f@encoding`, `\size@update`), `\par`, macros and
-  parameters. Part of this is real: consecutive windows of one picture
-  depend on each other, and pictures inherit the code example's
-  catcodes. Part is the grain: a step is a window of ≤4,096 commands
-  cut by count, so a span's first and last windows also hold text
-  outside it, and skipping them throws away work that pass 0 could do
-  exactly. The model is therefore pessimistic for a design with nodes
-  at clean points (`\begin`/`\end` of the environment, top-level
-  paragraph ends), which the step graph cannot express.
+  leaves 4.2–4.9% of the commands, and only 3% of the steps pass 0
+  runs need running again.
+- **Phase 2 is still a chain**: 8–12 M commands out of 39.7 M. Under
+  soft reads it is the whole build: the save and restore reads, the
+  nest. Once the cursors are gone, what remains misread is catcodes
+  (`\catcode13`, `92`, `123`, `125`, `32`: the code examples' verbatim
+  reading, read by the next window of the same span), NFSS (`\f@size`,
+  `\f@encoding`), `\par`, macros and parameters. Most of this is real
+  and inside spans: consecutive windows of one picture or code example
+  depend on each other, and a run of pictures reaches 6.5 M commands.
+  Cutting at the spans' edges changes little (2.95× → 2.96×). The chain
+  is inside the spans, not at their boundaries.
+- **So the skeleton scheme is bounded by the largest span** (about
+  4–6×, the size of the longest picture run) unless a picture's
+  interior is itself split by a deeper speculation, for example
+  per-path or per-node commands inside a `tikzpicture`, which this
+  study did not model.
 - **Skipping typesetting does not pay on this document.** Its pass 0
-  is the whole build (98.2%). With free carries, typesetting alone
-  allows 890× (section 2), but nothing makes those carries cheap
-  except doing the expansion.
+  is the whole build (98.2%). With free carries, an earlier version of
+  the model on the untimed dump gave typesetting alone 890× (blind
+  writes) and 2.94× (soft reads, the `nest` chain): the typesetting
+  state is not the serial part. But nothing makes the other carries
+  cheap except doing the expansion.
 
 **Projections with the previous build's carries (e).** Assume 99.999%
 validate (p), a largest step of 4,096 commands, workers running tracked
@@ -279,8 +330,11 @@ shell (cursors, input stack, nest, scratch) and a log.
   2. **a skeleton pass 0** for a cold first build. It jumps over
      self-contained spans whose body is grabbed as tokens (pictures,
      code examples, floats) and takes each span's exports to be its
-     entry state. It is cheap (4.2% of the commands on pgfsub), but at
-     today's grain phase 2 is bounded at 1.3–2.1×.
+     entry state. It is cheap (4.2–4.9% of the commands on pgfsub), and
+     it gives 2.95× unbounded, 2.2× at 8 workers (blind writes), or 4.0×
+     and 2.7× with the cursors and allocators predicted. The longest run
+     of pictures bounds it at about 4–6×, unless pictures are split
+     inside.
   3. not "pass 0 = expansion without typesetting": on expansion-bound
      documents it is the whole build.
 - **Freeze point as a parameter.** A run may freeze at any point it
@@ -296,8 +350,9 @@ shell (cursors, input stack, nest, scratch) and a log.
   allocators) make carries look mispredicted when they are right.
 - The serial commit (about 1.2% of plain on the manual, e) caps the
   speedup near 86×.
-- A cold first build stays mostly sequential until stage 3 is shown
-  to work at clean grain.
+- A cold first build gets at most about 3–4× from the skeleton pass
+  (m, models). Beyond that, the interiors of long pictures must be
+  speculated too.
 - Per-worker shells need every accessor to take an explicit state view.
   This is a large mechanical change (260 fields).
 - Memory of the SSA records (11× plain) is already the larger cost,
@@ -309,20 +364,20 @@ shell (cursors, input stack, nest, scratch) and a log.
 |---|---|---|---|
 | 0 (done) | the measurements here; `xtask parallel pass0`; `scripts/perf-phases.py` | | |
 | 1 | **Content versions for restores and allocators** (TODO 2's soft reads; hash/string/font/object names by content). Re-measure the warm and pass-0 models. | Validation that should hold does hold: `label` 4 → ≥146 of 247 (p). Pass-0 phase 2 shortens (m after) | days |
-| 2 | **Clean boundaries.** Cut steps at top-level paragraph ends and environment `\begin`/`\end` at brace depth 0 (windows only inside, as now). Dump the graph and re-run `pass0`. | Decides whether the skeleton pass 0 beats about 2× | days |
+| 2 | **Clean boundaries.** Cut steps at top-level paragraph ends and environment `\begin`/`\end` at brace depth 0 (windows only inside, as now). Dump the graph and re-run `pass0`. | The cursors stop chaining: pass 0 plus phase 2 moves from 2.95× toward the 4.0× of the cursors-predicted model (m after) | days |
 | 3 | **Worker shell + parallel warm re-run.** A step runs against a read-only view (DESIGN 3.10 index, or the JVec CoW view *if the user accepts it*) with a private shell and log. A rebuild's dirty steps, and a latexmk trip after the first, run through `Executor::map` from their recorded carries and commit in order with validation. **Smallest step with a real measured speedup**: the second trip of the manual. | 3.3× at 8 workers, 6.4× at 16, 12× at 32 against plain (e) | 2–4 weeks |
 | 4 | **Ship-out/PDF/deflate pipeline thread** for plain and SSA builds. | ≤1.37× text, ≤1.02× manual (e) | days |
-| 5 | **Skeleton pass 0** for cold first builds, on stage 2's boundaries. | Decided by stage 2's measurement; today ≤2.06× (m, window grain) | weeks |
+| 5 | **Skeleton pass 0** for cold first builds, on stage 2's boundaries. | pgfsub today: 2.2–3.0× at 8 workers, ≤4.0× unbounded (m on the graph); more needs pictures split inside | weeks |
 
 ## 7. How to reproduce
 
     # plain build, profile, phases
     perf record -F 197 -g --call-graph fp -o perf.data -- partex --compat=pdftex -fmt=pdflatex pgfmanual
     perf script -i perf.data -F comm,ip,sym --no-inline | scripts/perf-phases.py
-    # step graph of pgfsub (95 s, 3.3 GB; dump 0.98 GB)
+    # step graph of pgfsub (117 s, 3.9 GB with b270a0b's times)
     PARTEX_SSA=1 PARTEX_SSA_TRIPS=1 PARTEX_SSA_DAG=sub.dag partex --compat=pdftex -fmt=pdflatex pgfsub
     # pass-0 models (about 5 minutes on pgfsub)
-    cargo xtask parallel pass0 sub.dag --pass0-cost 0.982
+    cargo xtask parallel pass0 sub.dag --pass0-cost 0.982   # about 8 minutes
     cargo xtask parallel pass0 sub.dag --pass0-cost 0.982 --ignore "save stack" \
       --ignore conditionals --ignore "engine scalars" --ignore "current list" \
       --ignore "hash table" --ignore allocators
