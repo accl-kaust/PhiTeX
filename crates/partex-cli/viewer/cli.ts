@@ -1,18 +1,16 @@
-// The live viewer's page in the CLI (DESIGN 4.8): the Overleaf extension's
-// Viewer (viewer.ts, page2.ts: pages stacked, each drawn from its draw list
-// and drawn again only when its hash changes) behind a ViewerHost that asks
-// `partex watch` for the pages over a WebSocket, as the extension's session
-// asks its core (session.ts's CoreReq ops: pages, png, status).
+// The live viewer's page in the CLI (DESIGN 4.8): the renderer (viewer/src:
+// viewer.ts, page2.ts: pages stacked, each drawn from its draw list and
+// drawn again only when its hash changes; the Overleaf extension draws its
+// pages with the same code) behind a ViewerHost that asks `phitex watch`
+// for the pages over a WebSocket, as the extension's session asks its core
+// (CoreReq ops: pages, png, status).
 //
-// Bundled with the extension's sources at a pinned tag by
-// scripts/viewer-bundle.sh into viewer.js.
+// Bundled by scripts/viewer-bundle.sh into viewer.js.
 
-// (./ext/ is the extension's extension/src/ at the pinned tag, put there by
-// the bundle script: not in this repository)
-// @ts-ignore
-import { Viewer } from "./ext/viewer.ts";
-// @ts-ignore
-import { boxes, from, glyphs, lineAt, nearest } from "./ext/sync.ts";
+import { Viewer, type ViewerHost } from "../../../viewer/src/viewer.ts";
+import { boxes, from, glyphs, lineAt, nearest } from "../../../viewer/src/sync.ts";
+import { setFontBase } from "../../../viewer/src/page2.ts";
+import { VIEWER_CSS } from "../../../viewer/src/css.ts";
 
 /** sync.ts's Glyph: where a glyph is on its page, and its source. */
 interface Glyph {
@@ -24,21 +22,9 @@ interface Glyph {
   synth: boolean;
 }
 
-/** viewer.ts's ViewerHost, the part this host gives. */
-interface ViewerHost {
-  need(k: number): void;
-  inView(k: number): void;
-  svg(img: unknown, cssWidth: number): string | null;
-  scale(): number;
-  box(d: { w: number; h: number }, cssWidth: number): [number, number];
-  dbl?(k: number, x: number, y: number): void;
-}
-
-// (page2.ts loads its text fonts from the extension's own files: here, the
-// server's)
-(globalThis as unknown as { chrome: unknown }).chrome = {
-  runtime: { getURL: (p: string) => new URL(p, location.href).href },
-};
+// (the text fonts, from the server; the renderer's CSS)
+setFontBase(new URL("fonts/", location.href).href);
+document.head.append(Object.assign(document.createElement("style"), { textContent: VIEWER_CSS }));
 
 type Reply = { id: number; ok: boolean; json?: any; draws?: any; error?: string };
 
@@ -140,53 +126,9 @@ let hashes: string[] = [];
 let building = false;
 let connected = false;
 
-/** A link: [x0, y0, x1, y1, uri] or [x0, y0, x1, y1, page, top | null], in points from the page's top left. */
-type Link = [number, number, number, number, string | number, (number | null)?];
-/** Each page's size and links, from its draw list (`"L"`). */
-const pageLinks = new Map<number, { w: number; h: number; links: Link[] }>();
-
-/** The link under a pointer event, and its page. */
-function linkAt(e: MouseEvent): { k: number; h: number; l: Link } | null {
-  const el = (e.target as Element).closest<HTMLElement>(".slot");
-  if (!el) return null;
-  const k = Number(el.dataset.k);
-  const p = pageLinks.get(k);
-  if (!p?.links.length) return null;
-  const r = el.getBoundingClientRect();
-  const x = ((e.clientX - r.left) / r.width) * p.w;
-  const y = ((e.clientY - r.top) / r.height) * p.h;
-  const l = p.links.find((l) => x >= l[0] && x <= l[2] && y >= l[1] && y <= l[3]);
-  return l ? { k, h: p.h, l } : null;
-}
-
-// (a click on a link: a web address opens in a new tab (only http, https
-// and mailto: a PDF's javascript: is not followed); a place in the
-// document scrolls there)
-pagesEl.addEventListener("click", (e) => {
-  const hit = linkAt(e);
-  if (!hit) return;
-  e.preventDefault();
-  const to = hit.l[4];
-  if (typeof to === "string") {
-    if (/^(https?:|mailto:)/i.test(to)) window.open(to, "_blank", "noopener");
-    return;
-  }
-  const slot = pagesEl.querySelector<HTMLElement>(`.slot[data-k="${to}"]`);
-  if (!slot) return;
-  const top = hit.l[5];
-  const h = pageLinks.get(to)?.h ?? hit.h;
-  const at = top == null ? 0 : (top / h) * slot.offsetHeight;
-  scroller.scrollTo({ top: slot.offsetTop + at - 12, behavior: "auto" });
-});
-pagesEl.addEventListener("mousemove", (e) => {
-  const el = (e.target as Element).closest<HTMLElement>(".slot");
-  if (el) el.style.cursor = linkAt(e) ? "pointer" : "";
-});
-
 async function draw(k: number): Promise<void> {
   const r = await sock.request({ op: "png", page: k, dpi: 0 });
   if (!r.ok || !r.draws) return;
-  pageLinks.set(k, { w: r.draws.w, h: r.draws.h, links: r.draws.L ?? [] });
   if (k === 0 && r.draws.w && r.draws.w !== pageW) {
     pageW = r.draws.w;
     if (!zoom) viewer.redraw();

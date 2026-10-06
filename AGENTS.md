@@ -37,6 +37,12 @@ documents.
   versions, tag releases or adopt another scheme.
 - `scripts/sandbox` shares one sccache cache among all worktrees (the
   server runs inside the sandbox). `PHITEX_NO_SCCACHE=1` turns it off.
+- The draw list's renderer lives here, in `viewer/src` (viewer.ts,
+  page2.ts, sync.ts, css.ts): `phitex watch` bundles it
+  (`scripts/viewer-bundle.sh`, its bundle committed and checked in CI),
+  and the Overleaf extension copies it from the PhiTeX commit it pins.
+  Change the draw list (phitex-draw) and its rendering together, here;
+  never copy the renderer back from the extension.
 
 ## Sandbox
 
