@@ -1830,4 +1830,55 @@ mod tests {
         m.set(&MCell::PdfLast(6), Some(after));
         assert_eq!(m.tex.pdf.last_link, 17);
     }
+
+    /// The save stack is hashed as TeX can still use it: a location
+    /// saved again in one group after a `\global` assignment leaves its
+    /// earlier entries dead (§282–§283), and a group's entries for
+    /// distinct locations restore in any order. Two stacks that differ
+    /// only so hash alike, `Rest` and the whole state, and end the group
+    /// alike; a live entry that differs tells them apart.
+    #[test]
+    fn dead_save_stack_entries_do_not_count() {
+        use crate::web::{COUNT_BASE, LEVEL_ONE};
+        let (p, q) = (COUNT_BASE + 10, COUNT_BASE + 11);
+        // (a group whose entries for `p` are `steps`' saves: `None` a
+        // `\global` assignment, `Some(v)` a local one; then `q` locally)
+        let run = |steps: &[Option<i32>], q_first: bool| {
+            let mut t = engine(1);
+            t.new_save_level(1).unwrap();
+            if q_first {
+                t.eq_word_define(q, 9).unwrap();
+            }
+            for (k, s) in steps.iter().enumerate() {
+                match s {
+                    Some(v) => t.eq_word_define(p, *v).unwrap(),
+                    None => t.geq_word_define(p, 100 + i32::try_from(k).unwrap()),
+                }
+            }
+            if !q_first {
+                t.eq_word_define(q, 9).unwrap();
+            }
+            t
+        };
+        let served = |_: &[u8]| true;
+        let hashes = |t: &Tex<H0, CellTracker>| (t.rest_hash_served(&served), t.state_hash());
+        // (the global value saved last is 103 in both: the entries of
+        // `p` below it are dead)
+        let a = run(&[Some(1), None, Some(2), None, Some(3)], false);
+        let b = run(&[Some(1), Some(7), Some(2), None, Some(3)], true);
+        assert!(a.save_ptr > b.save_ptr, "a holds more entries");
+        assert_eq!(hashes(&a), hashes(&b), "the same live entries");
+        // (another global value saved: a live entry differs)
+        let c = run(&[Some(1), None, Some(2), Some(5), None, Some(3)], false);
+        assert_ne!(hashes(&a).0, hashes(&c).0, "a live entry differs");
+        // and the group's end leaves them alike
+        let end = |mut t: Tex<H0, CellTracker>| {
+            t.unsave().unwrap();
+            assert_eq!(t.cur_level, LEVEL_ONE);
+            let at = |l: i32| t.eqtb[usize::try_from(l).unwrap()].int();
+            assert_eq!((at(p), at(q)), (103, 0));
+        };
+        end(a);
+        end(b);
+    }
 }

@@ -80,6 +80,151 @@ pub static PDF_LAST_CELLS: core::sync::atomic::AtomicBool =
 pub static PDF_WORD_CELLS: core::sync::atomic::AtomicBool =
     core::sync::atomic::AtomicBool::new(true);
 
+/// The save stack as TeX can still use it, for the state hash. A frame
+/// (the entries a group's end pops, §282) may hold several entries for
+/// one location: a location saved, assigned `\global`ly (its level then
+/// `level_one`) and assigned locally again is saved again at the same
+/// level (§279), and LaTeX does that at the document's level for every
+/// `\color`, label or size change. The group's end restores the topmost
+/// entry of each location first, which leaves the location at
+/// `level_one` (what was saved again was a global value), so every
+/// entry below it is retained, its value thrown away (§283): dead. Two
+/// stacks that differ in dead entries, or in the order of one frame's
+/// entries for distinct locations (whose restores touch distinct
+/// places), behave alike, but for `\tracingrestores` lines in the log;
+/// so the hash leaves dead entries out, takes a frame's entries as a set,
+/// and counts positions (`save_ptr`, `cur_boundary`, a boundary's link,
+/// `grp_stack`) by the live entries below them.
+///
+/// Only the entries that hold a saved word (`restore_old_value`, marked
+/// in `save_eqtb`) are told apart: every other word (a `restore_zero`,
+/// `insert_token` or `restore_sa` entry, or a value a construction keeps
+/// below its group's boundary, `saved(k)`) is hashed as it is, in order.
+/// An entry that is saved again holds a `level_one` word, so it is never
+/// a `restore_zero` one; a `restore_zero` entry below it stays (hashed,
+/// though dead).
+struct SaveCanon {
+    /// The level boundaries, from the bottom (the chain from
+    /// `cur_boundary`, §274).
+    boundaries: alloc::vec::Vec<usize>,
+    /// Whether word `p` holds a saved word (with its entry above it).
+    eqtb: alloc::vec::Vec<bool>,
+    /// Whether word `p` is live.
+    live: alloc::vec::Vec<bool>,
+    /// The live words below `p`.
+    below: alloc::vec::Vec<i32>,
+    top: usize,
+}
+
+/// A frame of [`SaveCanon`]: its words `start..end` and the boundary
+/// above them (none for the top frame).
+struct Frame {
+    start: usize,
+    end: usize,
+    boundary: Option<usize>,
+}
+
+impl SaveCanon {
+    fn of(
+        stack: &crate::journal::JVec<MemoryWord>,
+        save_ptr: i32,
+        save_eqtb: &[bool],
+        cur_boundary: i32,
+        cur_level: i32,
+    ) -> Self {
+        let top = usize::try_from(save_ptr).unwrap_or(0).min(stack.len());
+        // (one boundary per group open, §274: `cur_level - level_one`)
+        let mut boundaries = alloc::vec::Vec::new();
+        let mut b = cur_boundary;
+        for _ in crate::web::LEVEL_ONE..cur_level {
+            match usize::try_from(b) {
+                Ok(u) if u < top && boundaries.last().is_none_or(|&l| u < l) => {
+                    boundaries.push(u);
+                    b = stack[u].rh();
+                }
+                _ => break,
+            }
+        }
+        boundaries.reverse();
+        let eqtb: alloc::vec::Vec<bool> = (0..top)
+            .map(|p| p + 1 < top && save_eqtb.get(p).copied().unwrap_or(false))
+            .collect();
+        let mut live = alloc::vec![true; top];
+        let mut s = Self {
+            boundaries,
+            eqtb,
+            live: alloc::vec::Vec::new(),
+            below: alloc::vec::Vec::new(),
+            top,
+        };
+        for f in s.frames() {
+            // (from the top down: an entry below a later one of its
+            // location is dead)
+            let mut seen = alloc::collections::BTreeSet::new();
+            let mut pairs = alloc::vec::Vec::new();
+            let mut p = f.start;
+            while p < f.end {
+                if s.eqtb[p] {
+                    pairs.push(p);
+                    p += 2;
+                } else {
+                    p += 1;
+                }
+            }
+            for &p in pairs.iter().rev() {
+                if !seen.insert(stack[p + 1].rh()) {
+                    live[p] = false;
+                    live[p + 1] = false;
+                }
+            }
+        }
+        let mut below = alloc::vec::Vec::with_capacity(top + 1);
+        let mut n = 0i32;
+        for &l in &live {
+            below.push(n);
+            n += i32::from(l);
+        }
+        below.push(n);
+        s.live = live;
+        s.below = below;
+        s
+    }
+
+    fn flagged(&self, p: usize) -> bool {
+        self.eqtb[p]
+    }
+
+    /// Position `p` counted by the live words below it (as it is past
+    /// the stack's top: not a position of it).
+    fn rank(&self, p: i32) -> i32 {
+        match usize::try_from(p) {
+            Ok(u) if u <= self.top => self.below[u],
+            _ => p,
+        }
+    }
+
+    /// The frames, from the bottom: the words below the first boundary,
+    /// then between each boundary and the next.
+    fn frames(&self) -> alloc::vec::Vec<Frame> {
+        let mut v = alloc::vec::Vec::with_capacity(self.boundaries.len() + 1);
+        let mut start = 0;
+        for &b in &self.boundaries {
+            v.push(Frame {
+                start,
+                end: b,
+                boundary: Some(b),
+            });
+            start = b + 1;
+        }
+        v.push(Frame {
+            start,
+            end: self.top,
+            boundary: None,
+        });
+        v
+    }
+}
+
 /// Hashes state, numbering the ids it meets.
 struct Canon<'a> {
     h: StableHasher,
@@ -1852,18 +1997,36 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             }
         }
         c.section("tables: xregs", parts);
-        c.put(save_ptr);
-        let top = usize::try_from(*save_ptr).unwrap_or(0);
-        for p in 0..top {
-            if save_eqtb.get(p).copied().unwrap_or(false) {
-                // the saved value of the location in the entry above it
-                let loc = save_stack[p + 1].rh();
+        // (the save stack as TeX can still use it: `SaveCanon`)
+        let saves = SaveCanon::of(save_stack, *save_ptr, save_eqtb, *cur_boundary, *cur_level);
+        c.put(&saves.rank(*save_ptr));
+        for frame in saves.frames() {
+            let mut pairs = alloc::vec::Vec::new();
+            let mut p = frame.start;
+            while p < frame.end {
+                if saves.flagged(p) {
+                    if saves.live[p] {
+                        pairs.push((save_stack[p + 1].rh(), p));
+                    }
+                    p += 2;
+                } else {
+                    c.put(&save_stack[p].bits());
+                    p += 1;
+                }
+            }
+            // (a frame's restores of distinct locations, in any order)
+            pairs.sort_unstable();
+            c.put(&pairs.len());
+            for (loc, p) in pairs {
+                c.put(&(loc, save_stack[p + 1].b1()));
                 c.word(loc, save_stack[p], save_obj.get(p).and_then(Option::as_ref));
-            } else {
-                c.put(&save_stack[p].bits());
+            }
+            if let Some(b) = frame.boundary {
+                // (its index is the boundary below, which the frames say)
+                c.put(&(save_stack[b].b0(), save_stack[b].b1()));
             }
         }
-        c.put(&(*cur_level, *cur_group, *cur_boundary, *mag_set));
+        c.put(&(*cur_level, *cur_group, saves.rank(*cur_boundary), *mag_set));
         c.section("tables", parts);
 
         // Strings and fonts.
@@ -1980,6 +2143,9 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             })
         };
         c.put(&input_file.iter().map(left).collect::<alloc::vec::Vec<_>>());
+        // (the boundaries the files began at, as the save stack's frames
+        // count them)
+        let grp_ranks: alloc::vec::Vec<i32> = grp_stack.iter().map(|&b| saves.rank(b)).collect();
         if cells {
             c.put(&read_file.iter().map(left).collect::<alloc::vec::Vec<_>>());
             c.put(read_open);
@@ -1990,7 +2156,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             let live = (*in_open + 1).min(line_stack.len());
             c.put(&(
                 &line_stack[..if positions { 0 } else { live }],
-                &grp_stack[..live],
+                &grp_ranks[..live],
                 &if_stack[..live],
                 &eof_seen[..live],
                 pseudo_files,
@@ -2002,7 +2168,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                 c.sref(s);
             }
         } else {
-            c.put(&(line_stack, grp_stack, if_stack, eof_seen, pseudo_files));
+            c.put(&(line_stack, &grp_ranks, if_stack, eof_seen, pseudo_files));
             c.put(&(source_filename_stack, full_source_filename_stack));
         }
         c.section("input: files", parts);
