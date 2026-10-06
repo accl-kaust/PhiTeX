@@ -304,24 +304,24 @@ impl Dpx {
     }
 
     /// `pdf_font_load_cidfont`.
-    pub fn pdf_font_load_cidfont(&mut self, font_id: i32) {
+    pub fn pdf_font_load_cidfont(&mut self, font_id: i32) -> Result<()> {
         if font_id < 0 || self.font.fonts[font_id as usize].reference.is_none() {
-            return;
+            return Ok(());
         }
 
         let mut error = 0;
         match self.font.fonts[font_id as usize].subtype {
             PDF_FONT_FONTTYPE_CIDTYPE0 => match self.source_font_type(font_id) {
-                PDF_FONT_FONTTYPE_TYPE1 => error = self.CIDFont_type0_t1dofont(font_id),
-                PDF_FONT_FONTTYPE_TYPE1C => error = self.CIDFont_type0_t1cdofont(font_id),
-                _ => error = self.CIDFont_type0_dofont(font_id),
+                PDF_FONT_FONTTYPE_TYPE1 => error = self.CIDFont_type0_t1dofont(font_id)?,
+                PDF_FONT_FONTTYPE_TYPE1C => error = self.CIDFont_type0_t1cdofont(font_id)?,
+                _ => error = self.CIDFont_type0_dofont(font_id)?,
             },
-            PDF_FONT_FONTTYPE_CIDTYPE2 => error = self.CIDFont_type2_dofont(font_id),
+            PDF_FONT_FONTTYPE_CIDTYPE2 => error = self.CIDFont_type2_dofont(font_id)?,
             _ => {}
         }
 
         if error != 0 {
-            error!(
+            fatal!(
                 "Error occurred while loading font: {}",
                 String::from_utf8_lossy(
                     self.font.fonts[font_id as usize]
@@ -331,15 +331,16 @@ impl Dpx {
                 )
             );
         }
+        Ok(())
     }
 
     /// `CIDFont_base_open` (static): one of `CID_BASEFONT`, or -1.
-    fn CIDFont_base_open(&mut self, font_id: i32, name: &[u8], opt: &mut CidOpt) -> i32 {
+    fn CIDFont_base_open(&mut self, font_id: i32, name: &[u8], opt: &mut CidOpt) -> Result<i32> {
         let Some(idx) = CID_BASEFONT.iter().position(|&(fontname, _, _)| {
             name == fontname
                 || (name.len() + 5 == fontname.len() && name == &fontname[..fontname.len() - 5])
         }) else {
-            return -1;
+            return Ok(-1);
         };
 
         let mut fontname = name.to_vec();
@@ -350,8 +351,8 @@ impl Dpx {
             _ => {}
         }
         let (_, dict_src, desc_src) = CID_BASEFONT[idx];
-        let fontdict = self.o.parse_pdf_dict(dict_src, &mut 0, None);
-        let descriptor = self.o.parse_pdf_dict(desc_src, &mut 0, None);
+        let fontdict = self.o.parse_pdf_dict(dict_src, &mut 0, None)?;
+        let descriptor = self.o.parse_pdf_dict(desc_src, &mut 0, None)?;
         let (Some(fontdict), Some(descriptor)) = (fontdict, descriptor) else {
             panic!("CIDFont_base_open: parse failed");
         };
@@ -362,20 +363,20 @@ impl Dpx {
             font.flags |= PDF_FONT_FLAG_BASEFONT;
         }
         {
-            let tmp = self.o.lookup_dict(fontdict, b"CIDSystemInfo");
+            let tmp = self.o.lookup_dict(fontdict, b"CIDSystemInfo")?;
             assert!(self.o.is_dict(tmp));
             let tmp = tmp.unwrap();
             let registry = self
                 .o
-                .string_value(self.o.lookup_dict(tmp, b"Registry").unwrap())
+                .string_value(self.o.lookup_dict(tmp, b"Registry")?.unwrap())?
                 .to_vec();
             let ordering = self
                 .o
-                .string_value(self.o.lookup_dict(tmp, b"Ordering").unwrap())
+                .string_value(self.o.lookup_dict(tmp, b"Ordering")?.unwrap())?
                 .to_vec();
             let supplement = self
                 .o
-                .number_value(self.o.lookup_dict(tmp, b"Supplement").unwrap())
+                .number_value(self.o.lookup_dict(tmp, b"Supplement")?.unwrap())?
                 as i32;
             let font = &mut self.font.fonts[font_id as usize];
             font.cid.csi.registry = Some(registry);
@@ -383,32 +384,32 @@ impl Dpx {
             font.cid.csi.supplement = supplement;
         }
         {
-            let tmp = self.o.lookup_dict(fontdict, b"Subtype");
+            let tmp = self.o.lookup_dict(fontdict, b"Subtype")?;
             assert!(self.o.is_name(tmp));
-            let type_ = self.o.name_value(tmp.unwrap());
+            let type_ = self.o.name_value(tmp.unwrap())?;
             let subtype = if type_ == b"CIDFontType0" {
                 PDF_FONT_FONTTYPE_CIDTYPE0
             } else if type_ == b"CIDFontType2" {
                 PDF_FONT_FONTTYPE_CIDTYPE2
             } else {
-                error!("Unknown CIDFontType \"{}\"", String::from_utf8_lossy(type_));
+                fatal!("Unknown CIDFontType \"{}\"", String::from_utf8_lossy(type_));
             };
             self.font.fonts[font_id as usize].subtype = subtype;
         }
 
         if self.cid.opt_flags_cidfont & CIDFONT_FORCE_FIXEDPITCH != 0 {
-            if self.o.lookup_dict(fontdict, b"W").is_some() {
-                self.o.remove_dict(fontdict, b"W");
+            if self.o.lookup_dict(fontdict, b"W")?.is_some() {
+                self.o.remove_dict(fontdict, b"W")?;
             }
-            if self.o.lookup_dict(fontdict, b"W2").is_some() {
-                self.o.remove_dict(fontdict, b"W2");
+            if self.o.lookup_dict(fontdict, b"W2")?.is_some() {
+                self.o.remove_dict(fontdict, b"W2")?;
             }
         }
 
-        self.o.put_name(fontdict, b"Type", b"Font");
-        self.o.put_name(fontdict, b"BaseFont", &fontname);
-        self.o.put_name(descriptor, b"Type", b"FontDescriptor");
-        self.o.put_name(descriptor, b"FontName", &fontname);
+        self.o.put_name(fontdict, b"Type", b"Font")?;
+        self.o.put_name(fontdict, b"BaseFont", &fontname)?;
+        self.o.put_name(descriptor, b"Type", b"FontDescriptor")?;
+        self.o.put_name(descriptor, b"FontName", &fontname)?;
 
         let font = &mut self.font.fonts[font_id as usize];
         font.resource = Some(fontdict);
@@ -416,7 +417,7 @@ impl Dpx {
 
         opt.embed = 0;
 
-        0
+        Ok(0)
     }
 
     /// The `cid_opt` C builds from the map record (and the CMap's CSI).
@@ -425,7 +426,7 @@ impl Dpx {
         map_name: &[u8],
         cmap_csi: Option<&CidSysInfo>,
         fmap_opt: &FontmapOpt,
-    ) -> (CidOpt, i32) {
+    ) -> Result<(CidOpt, i32)> {
         let mut opt = CidOpt {
             style: fmap_opt.style,
             embed: if fmap_opt.flags & FONTMAP_OPT_NOEMBED != 0 {
@@ -436,7 +437,7 @@ impl Dpx {
             csi: CidSysInfo::default(),
             stemv: 0,
         };
-        let mut has_csi = self.get_cidsysinfo(&mut opt.csi, map_name, Some(fmap_opt));
+        let mut has_csi = self.get_cidsysinfo(&mut opt.csi, map_name, Some(fmap_opt))?;
         opt.stemv = fmap_opt.stemv;
 
         if has_csi == 0
@@ -449,7 +450,7 @@ impl Dpx {
             opt.csi.supplement = cmap_csi.supplement;
             has_csi = 1;
         }
-        (opt, has_csi)
+        Ok((opt, has_csi))
     }
 
     /// `pdf_font_cidfont_lookup_cache`: among `self.font.fonts[..count]`,
@@ -461,8 +462,8 @@ impl Dpx {
         map_name: &[u8],
         cmap_csi: Option<&CidSysInfo>,
         fmap_opt: &FontmapOpt,
-    ) -> i32 {
-        let (opt, has_csi) = self.cid_make_opt(map_name, cmap_csi, fmap_opt);
+    ) -> Result<i32> {
+        let (opt, has_csi) = self.cid_make_opt(map_name, cmap_csi, fmap_opt)?;
 
         // Here, we do not compare font->ident and map_name because of
         // implicit CIDSystemInfo supplied by CMap for TrueType.
@@ -511,7 +512,7 @@ impl Dpx {
             font_id += 1;
         }
 
-        if font_id < count { font_id } else { -1 }
+        if font_id < count { Ok(font_id) } else { Ok(-1) }
     }
 
     /// `pdf_font_open_cidfont`: 0, or -1 if no loader opened it.
@@ -521,17 +522,17 @@ impl Dpx {
         map_name: &[u8],
         cmap_csi: Option<&CidSysInfo>,
         fmap_opt: &FontmapOpt,
-    ) -> i32 {
-        let (mut opt, _has_csi) = self.cid_make_opt(map_name, cmap_csi, fmap_opt);
+    ) -> Result<i32> {
+        let (mut opt, _has_csi) = self.cid_make_opt(map_name, cmap_csi, fmap_opt)?;
         let index = fmap_opt.index as i32;
 
-        if self.CIDFont_type0_open(font_id, map_name, index, &mut opt) < 0
-            && self.CIDFont_type2_open(font_id, map_name, index, &mut opt) < 0
-            && self.CIDFont_type0_open_from_t1(font_id, map_name, index, &mut opt) < 0
-            && self.CIDFont_type0_open_from_t1c(font_id, map_name, index, &mut opt) < 0
-            && self.CIDFont_base_open(font_id, map_name, &mut opt) < 0
+        if self.CIDFont_type0_open(font_id, map_name, index, &mut opt)? < 0
+            && self.CIDFont_type2_open(font_id, map_name, index, &mut opt)? < 0
+            && self.CIDFont_type0_open_from_t1(font_id, map_name, index, &mut opt)? < 0
+            && self.CIDFont_type0_open_from_t1c(font_id, map_name, index, &mut opt)? < 0
+            && self.CIDFont_base_open(font_id, map_name, &mut opt)? < 0
         {
-            return -1;
+            return Ok(-1);
         }
 
         let font = &mut self.font.fonts[font_id as usize];
@@ -546,7 +547,7 @@ impl Dpx {
                     || font.cid.csi.ordering != cmap_csi.ordering
                 {
                     warn!("Inconsistent ROS found:\n");
-                    error!("Incompatible CMap specified for this font.");
+                    fatal!("Incompatible CMap specified for this font.");
                 }
                 if font.cid.csi.supplement < cmap_csi.supplement {
                     font.cid.csi.supplement = cmap_csi.supplement;
@@ -566,7 +567,7 @@ impl Dpx {
             }
         }
 
-        0
+        Ok(0)
     }
 
     /// `get_cidsysinfo` (static): `has_csi` (0/1), filling `csi` from
@@ -576,7 +577,7 @@ impl Dpx {
         csi: &mut CidSysInfo,
         map_name: &[u8],
         fmap_opt: Option<&FontmapOpt>,
-    ) -> i32 {
+    ) -> Result<i32> {
         let mut has_csi = 0;
         let mut csi_idx: i32 = -1;
 
@@ -588,10 +589,10 @@ impl Dpx {
         };
 
         let Some(fmap_opt) = fmap_opt else {
-            return 0;
+            return Ok(0);
         };
         let Some(charcoll) = fmap_opt.charcoll.as_deref() else {
-            return 0;
+            return Ok(0);
         };
 
         // First try alias for standard one.
@@ -614,29 +615,29 @@ impl Dpx {
             }
         }
         if has_csi == 0 {
-            let bad = || -> ! {
-                error!(
+            let bad = || Fatal {
+                message: format!(
                     "String can't be converted to REGISTRY-ORDERING-SUPPLEMENT: {}",
                     String::from_utf8_lossy(charcoll)
-                )
+                ),
             };
             // Full REGISTRY-ORDERING-SUPPLEMENT
             let Some(p0) = charcoll.iter().position(|&c| c == b'-') else {
-                bad()
+                return Err(bad());
             };
             if p0 + 1 >= charcoll.len() {
-                bad();
+                return Err(bad());
             }
             let p = p0 + 1;
             let Some(q0) = charcoll[p..].iter().position(|&c| c == b'-').map(|x| x + p) else {
-                bad()
+                return Err(bad());
             };
             if q0 + 1 >= charcoll.len() {
-                bad();
+                return Err(bad());
             }
             let q = q0 + 1;
             if !charcoll[q].is_ascii_digit() {
-                bad();
+                return Err(bad());
             }
 
             csi.registry = Some(charcoll[..p0].to_vec());
@@ -668,7 +669,7 @@ impl Dpx {
             );
         }
 
-        has_csi
+        Ok(has_csi)
     }
 }
 

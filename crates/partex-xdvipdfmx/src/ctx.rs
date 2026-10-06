@@ -76,18 +76,50 @@ macro_rules! warn {
     }};
 }
 
-/// dvipdfm-x's `ERROR`: the run stops.
+/// dvipdfm-x's `ERROR`: the run stops. Returns `Err(`[`Fatal`]`)` from
+/// the enclosing function, which every caller up to [`crate::api`]
+/// passes on with `?`, so nothing after it runs, as after C's `exit`.
 #[macro_export]
-macro_rules! error {
+macro_rules! fatal {
     ($($t:tt)*) => {
-        ::core::panic!("{}{}", $crate::ctx::FATAL, ::core::format_args!($($t)*))
+        return ::core::result::Result::Err($crate::ctx::Fatal {
+            message: ::alloc::format!($($t)*),
+        })
     };
 }
 
-/// What a fatal error's panic message begins with (`ERROR`, which prints
-/// it and exits): a host catching the panic tells a fatal error, the
-/// driver's exit, from a bug.
+/// `?` on an `Option` in a function that returns `Result<Option<_>>`:
+/// `None` returns `Ok(None)` (C's NULL).
+#[macro_export]
+macro_rules! some {
+    ($e:expr) => {
+        match $e {
+            ::core::option::Option::Some(v) => v,
+            ::core::option::Option::None => return ::core::result::Result::Ok(None),
+        }
+    };
+}
+
+/// What `ERROR` prints its message after (its `exit` follows).
 pub const FATAL: &str = "xdvipdfmx:fatal: ";
+
+/// A fatal error (`ERROR`): the run stopped. `message` is what C prints
+/// after [`FATAL`]; displayed, it is the whole line.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Fatal {
+    pub message: alloc::string::String,
+}
+
+impl core::fmt::Display for Fatal {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "{FATAL}{}", self.message)
+    }
+}
+
+impl core::error::Error for Fatal {}
+
+/// A result whose error is a [`Fatal`] one.
+pub type Result<T, E = Fatal> = core::result::Result<T, E>;
 
 impl Dpx {
     /// A fresh program: every C static at its initial value.

@@ -323,7 +323,7 @@ fn add_dict(dict: &mut CffDict, st: &mut DictStack, data: &[u8], p: &mut usize, 
 }
 
 /// `cff_dict_unpack`: `data` ends at C's `endptr`; none on error.
-pub fn cff_dict_unpack(data: &[u8]) -> Option<CffDict> {
+pub fn cff_dict_unpack(data: &[u8]) -> Result<Option<CffDict>> {
     let mut status = CFF_PARSE_OK;
     let mut st = DictStack::default();
     let end = data.len();
@@ -360,30 +360,30 @@ pub fn cff_dict_unpack(data: &[u8]) -> Option<CffDict> {
     }
 
     if status != CFF_PARSE_OK {
-        error!("CFF: Parsing CFF DICT failed. (error={})", status);
+        fatal!("CFF: Parsing CFF DICT failed. (error={})", status);
     } else if st.stack_top != 0 {
         warn!("CFF: Garbage in CFF DICT data.");
         st.stack_top = 0;
     }
 
-    Some(dict)
+    Ok(Some(dict))
 }
 
 /// `pack_integer` (static): bytes written.
-fn pack_integer(dest: &mut [u8], value: i32) -> i32 {
+fn pack_integer(dest: &mut [u8], value: i32) -> Result<i32> {
     let destlen = dest.len();
     let mut value = value;
     let len;
 
     if (-107..=107).contains(&value) {
         if destlen < 1 {
-            error!("CFF: Buffer overflow.");
+            fatal!("CFF: Buffer overflow.");
         }
         dest[0] = ((value + 139) & 0xff) as u8;
         len = 1;
     } else if (108..=1131).contains(&value) {
         if destlen < 2 {
-            error!("CFF: Buffer overflow.");
+            fatal!("CFF: Buffer overflow.");
         }
         value = 0xf700 + value - 108;
         dest[0] = ((value >> 8) & 0xff) as u8;
@@ -391,7 +391,7 @@ fn pack_integer(dest: &mut [u8], value: i32) -> i32 {
         len = 2;
     } else if (-1131..=-108).contains(&value) {
         if destlen < 2 {
-            error!("CFF: Buffer overflow.");
+            fatal!("CFF: Buffer overflow.");
         }
         value = 0xfb00 - value - 108;
         dest[0] = ((value >> 8) & 0xff) as u8;
@@ -400,7 +400,7 @@ fn pack_integer(dest: &mut [u8], value: i32) -> i32 {
     } else if (-32768..=32767).contains(&value) {
         // shortint
         if destlen < 3 {
-            error!("CFF: Buffer overflow.");
+            fatal!("CFF: Buffer overflow.");
         }
         dest[0] = 28;
         dest[1] = ((value >> 8) & 0xff) as u8;
@@ -409,7 +409,7 @@ fn pack_integer(dest: &mut [u8], value: i32) -> i32 {
     } else {
         // longint
         if destlen < 5 {
-            error!("CFF: Buffer overflow.");
+            fatal!("CFF: Buffer overflow.");
         }
         dest[0] = 29;
         dest[1] = ((value >> 24) & 0xff) as u8;
@@ -419,7 +419,7 @@ fn pack_integer(dest: &mut [u8], value: i32) -> i32 {
         len = 5;
     }
 
-    len
+    Ok(len)
 }
 
 /// C's `sprintf("%.*g", prec, value)` for a finite `value`.
@@ -482,20 +482,20 @@ pub fn sprintf_g(value: f64, prec: usize) -> Vec<u8> {
 }
 
 /// `pack_real` (static): bytes written.
-fn pack_real(dest: &mut [u8], value: f64) -> i32 {
+fn pack_real(dest: &mut [u8], value: f64) -> Result<i32> {
     let destlen = dest.len() as i32;
     let mut value = value;
     let mut pos: i32 = 2;
 
     if destlen < 2 {
-        error!("CFF: Buffer overflow.");
+        fatal!("CFF: Buffer overflow.");
     }
 
     dest[0] = 30;
 
     if value == 0.0 {
         dest[1] = 0x0f;
-        return 2;
+        return Ok(2);
     }
 
     if value < 0.0 {
@@ -523,11 +523,11 @@ fn pack_real(dest: &mut [u8], value: f64) -> i32 {
                 0x0b
             };
         } else {
-            error!("CFF: Invalid character.");
+            fatal!("CFF: Invalid character.");
         }
 
         if destlen < pos / 2 + 1 {
-            error!("CFF: Buffer overflow.");
+            fatal!("CFF: Buffer overflow.");
         }
 
         if pos % 2 != 0 {
@@ -544,24 +544,24 @@ fn pack_real(dest: &mut [u8], value: f64) -> i32 {
         pos += 1;
     } else {
         if destlen < pos / 2 + 1 {
-            error!("CFF: Buffer overflow.");
+            fatal!("CFF: Buffer overflow.");
         }
         dest[(pos / 2) as usize] = 0xff;
         pos += 2;
     }
 
-    pos / 2
+    Ok(pos / 2)
 }
 
 /// `cff_dict_put_number` (static): bytes written.
-fn cff_dict_put_number(value: f64, dest: &mut [u8], ty: i32) -> i32 {
+fn cff_dict_put_number(value: f64, dest: &mut [u8], ty: i32) -> Result<i32> {
     let len;
     let nearint = libm::floor(value + 0.5);
     // set offset to longint
     if ty == CFF_TYPE_OFFSET {
         let lvalue = value as i32;
         if dest.len() < 5 {
-            error!("CFF: Buffer overflow.");
+            fatal!("CFF: Buffer overflow.");
         }
         dest[0] = 29;
         dest[1] = ((lvalue >> 24) & 0xff) as u8;
@@ -574,17 +574,17 @@ fn cff_dict_put_number(value: f64, dest: &mut [u8], ty: i32) -> i32 {
         || libm::fabs(value - nearint) > 1.0e-5
     {
         // real
-        len = pack_real(dest, value);
+        len = pack_real(dest, value)?;
     } else {
         // integer
-        len = pack_integer(dest, nearint as i32);
+        len = pack_integer(dest, nearint as i32)?;
     }
 
-    len
+    Ok(len)
 }
 
 /// `put_dict_entry` (static): bytes written.
-fn put_dict_entry(de: &CffDictEntry, dest: &mut [u8]) -> i32 {
+fn put_dict_entry(de: &CffDictEntry, dest: &mut [u8]) -> Result<i32> {
     let destlen = dest.len() as i32;
     let mut len: i32 = 0;
 
@@ -597,27 +597,27 @@ fn put_dict_entry(de: &CffDictEntry, dest: &mut [u8]) -> i32 {
             CFF_TYPE_NUMBER
         };
         for i in 0..de.count as usize {
-            len += cff_dict_put_number(de.values[i], &mut dest[len as usize..], ty);
+            len += cff_dict_put_number(de.values[i], &mut dest[len as usize..], ty)?;
         }
         if id >= 0 && (id as usize) < CFF_LAST_DICT_OP1 {
             if len + 1 > destlen {
-                error!("CFF: Buffer overflow.");
+                fatal!("CFF: Buffer overflow.");
             }
             dest[len as usize] = id as u8;
             len += 1;
         } else if id >= 0 && (id as usize) < CFF_LAST_DICT_OP {
             if len + 2 > destlen {
-                error!("in cff_dict_pack(): Buffer overflow");
+                fatal!("in cff_dict_pack(): Buffer overflow");
             }
             dest[len as usize] = 12;
             dest[len as usize + 1] = (id as usize - CFF_LAST_DICT_OP1) as u8;
             len += 2;
         } else {
-            error!("CFF: Invalid CFF DICT operator ID.");
+            fatal!("CFF: Invalid CFF DICT operator ID.");
         }
     }
 
-    len
+    Ok(len)
 }
 
 /// `dict_operator`'s id of `key`, as `cff_dict_add` looks it up.
@@ -634,37 +634,37 @@ fn op_id(key: &[u8]) -> usize {
 
 impl CffDict {
     /// `cff_dict_pack`: bytes written.
-    pub fn cff_dict_pack(&self, dest: &mut [u8]) -> i32 {
+    pub fn cff_dict_pack(&self, dest: &mut [u8]) -> Result<i32> {
         let mut len: i32 = 0;
 
         for i in 0..self.count as usize {
             if self.entries[i].key == b"ROS" {
-                len += put_dict_entry(&self.entries[i], dest);
+                len += put_dict_entry(&self.entries[i], dest)?;
                 break;
             }
         }
         for i in 0..self.count as usize {
             if self.entries[i].key != b"ROS" {
-                len += put_dict_entry(&self.entries[i], &mut dest[len as usize..]);
+                len += put_dict_entry(&self.entries[i], &mut dest[len as usize..])?;
             }
         }
 
-        len
+        Ok(len)
     }
     /// `cff_dict_add`.
-    pub fn cff_dict_add(&mut self, key: &[u8], count: i32) {
+    pub fn cff_dict_add(&mut self, key: &[u8], count: i32) -> Result<()> {
         let id = op_id(key);
 
         if id == CFF_LAST_DICT_OP {
-            error!("CFF: Unknown CFF DICT operator.");
+            fatal!("CFF: Unknown CFF DICT operator.");
         }
 
         for i in 0..self.count as usize {
             if self.entries[i].id == id as i32 {
                 if self.entries[i].count != count {
-                    error!("CFF: Inconsistent DICT argument number.");
+                    fatal!("CFF: Inconsistent DICT argument number.");
                 }
-                return;
+                return Ok(());
             }
         }
 
@@ -683,6 +683,7 @@ impl CffDict {
             },
         });
         self.count += 1;
+        Ok(())
     }
     /// `cff_dict_remove`.
     pub fn cff_dict_remove(&mut self, key: &[u8]) {
@@ -703,7 +704,7 @@ impl CffDict {
         0
     }
     /// `cff_dict_get`.
-    pub fn cff_dict_get(&self, key: &[u8], idx: i32) -> f64 {
+    pub fn cff_dict_get(&self, key: &[u8], idx: i32) -> Result<f64> {
         let mut value = 0.0;
         let mut i = 0usize;
         while i < self.count as usize {
@@ -711,7 +712,7 @@ impl CffDict {
                 if self.entries[i].count > idx {
                     value = self.entries[i].values[idx as usize];
                 } else {
-                    error!("CFF: Invalid index number.");
+                    fatal!("CFF: Invalid index number.");
                 }
                 break;
             }
@@ -719,23 +720,23 @@ impl CffDict {
         }
 
         if i == self.count as usize {
-            error!(
+            fatal!(
                 "CFF: DICT entry \"{}\" not found.",
                 core::str::from_utf8(key).unwrap_or("?")
             );
         }
 
-        value
+        Ok(value)
     }
     /// `cff_dict_set`.
-    pub fn cff_dict_set(&mut self, key: &[u8], idx: i32, value: f64) {
+    pub fn cff_dict_set(&mut self, key: &[u8], idx: i32, value: f64) -> Result<()> {
         let mut i = 0usize;
         while i < self.count as usize {
             if key == self.entries[i].key {
                 if self.entries[i].count > idx {
                     self.entries[i].values[idx as usize] = value;
                 } else {
-                    error!("CFF: Invalid index number.");
+                    fatal!("CFF: Invalid index number.");
                 }
                 break;
             }
@@ -743,11 +744,12 @@ impl CffDict {
         }
 
         if i == self.count as usize {
-            error!(
+            fatal!(
                 "CFF: DICT entry \"{}\" not found.",
                 core::str::from_utf8(key).unwrap_or("?")
             );
         }
+        Ok(())
     }
 }
 
@@ -777,7 +779,7 @@ mod tests {
 
     fn packr(v: f64) -> Vec<u8> {
         let mut d = [0u8; 32];
-        let n = pack_real(&mut d, v);
+        let n = pack_real(&mut d, v).unwrap();
         d[..n as usize].to_vec()
     }
 
@@ -810,31 +812,31 @@ mod tests {
     #[test]
     fn integers_and_unpack() {
         let mut d = [0u8; 8];
-        assert_eq!(pack_integer(&mut d, 0), 1);
+        assert_eq!(pack_integer(&mut d, 0).unwrap(), 1);
         assert_eq!(d[0], 139);
-        assert_eq!(pack_integer(&mut d, 1000), 2);
+        assert_eq!(pack_integer(&mut d, 1000).unwrap(), 2);
         assert_eq!(&d[..2], &[0xfa, 0x7c]);
-        assert_eq!(pack_integer(&mut d, -1000), 2);
+        assert_eq!(pack_integer(&mut d, -1000).unwrap(), 2);
         assert_eq!(&d[..2], &[0xfe, 0x7c]);
-        assert_eq!(pack_integer(&mut d, 5000), 3);
+        assert_eq!(pack_integer(&mut d, 5000).unwrap(), 3);
         assert_eq!(&d[..3], &[28, 0x13, 0x88]);
-        assert_eq!(pack_integer(&mut d, 100000), 5);
+        assert_eq!(pack_integer(&mut d, 100000).unwrap(), 5);
         assert_eq!(&d[..5], &[29, 0, 1, 0x86, 0xa0]);
 
         // FontBBox [-50 -100 1000 900], ItalicAngle -2.25, Private 20 300
         let src = [
             89, 39, 0xfa, 0x7c, 0xfa, 0x18, 5, 30, 0xe2, 0xa2, 0x5f, 12, 2, 159, 0xf7, 0xc0, 18,
         ];
-        let dict = cff_dict_unpack(&src).unwrap();
+        let dict = cff_dict_unpack(&src).unwrap().unwrap();
         assert_eq!(dict.count, 3);
-        assert_eq!(dict.cff_dict_get(b"FontBBox", 0), -50.0);
-        assert_eq!(dict.cff_dict_get(b"FontBBox", 1), -100.0);
-        assert_eq!(dict.cff_dict_get(b"FontBBox", 2), 1000.0);
-        assert_eq!(dict.cff_dict_get(b"FontBBox", 3), 900.0);
-        assert_eq!(dict.cff_dict_get(b"ItalicAngle", 0), -2.25);
-        assert_eq!(dict.cff_dict_get(b"Private", 1), 300.0);
+        assert_eq!(dict.cff_dict_get(b"FontBBox", 0).unwrap(), -50.0);
+        assert_eq!(dict.cff_dict_get(b"FontBBox", 1).unwrap(), -100.0);
+        assert_eq!(dict.cff_dict_get(b"FontBBox", 2).unwrap(), 1000.0);
+        assert_eq!(dict.cff_dict_get(b"FontBBox", 3).unwrap(), 900.0);
+        assert_eq!(dict.cff_dict_get(b"ItalicAngle", 0).unwrap(), -2.25);
+        assert_eq!(dict.cff_dict_get(b"Private", 1).unwrap(), 300.0);
         let mut out = [0u8; 64];
-        let n = dict.cff_dict_pack(&mut out) as usize;
+        let n = dict.cff_dict_pack(&mut out).unwrap() as usize;
         // Private is packed as two longints.
         let mut want = src[..13].to_vec();
         want.extend_from_slice(&[29, 0, 0, 0, 20, 29, 0, 0, 1, 44, 18]);

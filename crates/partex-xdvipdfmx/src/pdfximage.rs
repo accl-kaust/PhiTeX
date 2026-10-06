@@ -195,7 +195,7 @@ pub fn pdf_ximage_init_form_info() -> XformInfo {
 /// `read_box_hdr` and `check_ftyp_data`; JPEG 2000 images are not
 /// ported, but a JP2 file must be told from the others). Reading past
 /// the end stops the run, as numbers.c's readers do.
-fn check_for_jp2(fp: &mut MemFile) -> bool {
+fn check_for_jp2(fp: &mut MemFile) -> Result<bool> {
     const JP2_BOX_JP__: u32 = 0x6a50_2020;
     const JP2_BOX_FTYP: u32 = 0x6674_7970;
     const FTYP_BR_JP2_: u32 = 0x6a70_3220;
@@ -205,51 +205,51 @@ fn check_for_jp2(fp: &mut MemFile) -> bool {
     fp.rewind();
 
     /* JPEG 2000 Singature box */
-    if fp.get_unsigned_quad() != 0x0c
-        || fp.get_unsigned_quad() != JP2_BOX_JP__
-        || fp.get_unsigned_quad() != 0x0D0A_870A
+    if fp.get_unsigned_quad()? != 0x0c
+        || fp.get_unsigned_quad()? != JP2_BOX_JP__
+        || fp.get_unsigned_quad()? != 0x0D0A_870A
     {
-        return false;
+        return Ok(false);
     }
 
     /* File Type box shall immediately follow */
-    let mut lbox = fp.get_unsigned_quad();
-    let tbox = fp.get_unsigned_quad();
+    let mut lbox = fp.get_unsigned_quad()?;
+    let tbox = fp.get_unsigned_quad()?;
     let mut len: u32 = 8;
     if lbox == 1 {
-        if fp.get_unsigned_quad() != 0 {
-            error!("JPEG2000: LBox value in JP2 file >32 bits.\nI can't handle this!");
+        if fp.get_unsigned_quad()? != 0 {
+            fatal!("JPEG2000: LBox value in JP2 file >32 bits.\nI can't handle this!");
         }
-        lbox = fp.get_unsigned_quad();
+        lbox = fp.get_unsigned_quad()?;
         len += 8;
     }
     if tbox != JP2_BOX_FTYP {
-        return false;
+        return Ok(false);
     }
     let mut size = lbox.wrapping_sub(len);
-    let br = fp.get_unsigned_quad();
+    let br = fp.get_unsigned_quad()?;
     size = size.wrapping_sub(4);
     /* MinV = */
-    fp.get_unsigned_quad();
+    fp.get_unsigned_quad()?;
     size = size.wrapping_sub(4);
     match br {
         FTYP_BR_JP2_ => {
             fp.seek_relative(size as i32 as isize);
-            true
+            Ok(true)
         }
         FTYP_BR_JPX_ => {
             let mut supported = false;
             while size > 0 {
-                if fp.get_unsigned_quad() == FTYP_CL_JPXB {
+                if fp.get_unsigned_quad()? == FTYP_CL_JPXB {
                     supported = true;
                 }
                 size = size.wrapping_sub(4);
             }
-            supported
+            Ok(supported)
         }
         _ => {
             fp.seek_relative(size as i32 as isize);
-            false
+            Ok(false)
         }
     }
 }
@@ -261,7 +261,7 @@ fn check_for_pdf(fp: &mut MemFile) -> bool {
 }
 
 /// `source_image_type` (static): an `IMAGE_TYPE_*`; rewinds `fp`.
-pub fn source_image_type(fp: &mut MemFile) -> i32 {
+pub fn source_image_type(fp: &mut MemFile) -> Result<i32> {
     fp.rewind();
     /*
      * Make sure we check for PS *after* checking for MP since
@@ -269,7 +269,7 @@ pub fn source_image_type(fp: &mut MemFile) -> i32 {
      */
     let format = if crate::jpegimage::check_for_jpeg(fp) != 0 {
         IMAGE_TYPE_JPEG
-    } else if check_for_jp2(fp) {
+    } else if check_for_jp2(fp)? {
         IMAGE_TYPE_JP2
     } else if crate::pngimage::check_for_png(fp) != 0 {
         IMAGE_TYPE_PNG
@@ -286,7 +286,7 @@ pub fn source_image_type(fp: &mut MemFile) -> i32 {
     };
     fp.rewind();
 
-    format
+    Ok(format)
 }
 
 /// `WORK_BUFFER_SIZE` (mfileio.h).
@@ -443,10 +443,11 @@ fn res_name(prefix: &[u8], id: i32) -> Vec<u8> {
 
 impl Dpx {
     /// `CHECK_ID`.
-    fn ximage_check_id(&self, id: i32) {
+    fn ximage_check_id(&self, id: i32) -> Result<()> {
         if id < 0 || id as usize >= self.ximage.ximages.len() {
-            error!("Invalid XObject ID: {id}");
+            fatal!("Invalid XObject ID: {id}");
         }
+        Ok(())
     }
     /// `pdf_init_images`.
     pub fn pdf_init_images(&mut self) {
@@ -454,30 +455,32 @@ impl Dpx {
     }
     /// `pdf_close_images`: flushes and releases every XObject. (No image
     /// is ever a temporary file here: the distiller is not ported.)
-    pub fn pdf_close_images(&mut self) {
+    pub fn pdf_close_images(&mut self) -> Result<()> {
         if !self.ximage.ximages.is_empty() {
             for i in 0..self.ximage.ximages.len() {
                 if self.ximage.ximages[i].attr.tempfile {
                     /* dpx_delete_temp_file(): nothing to delete here */
                     self.ximage.ximages[i].fullname = None;
                 }
-                self.pdf_clean_ximage_struct(i as i32);
+                self.pdf_clean_ximage_struct(i as i32)?;
             }
             self.ximage.ximages = Vec::new();
         }
 
         self.ximage.cmdtmpl = None;
+        Ok(())
     }
     /// `pdf_clean_ximage_struct` (static): releases the entry's objects
     /// and re-initialises it.
-    pub fn pdf_clean_ximage_struct(&mut self, xobj_id: i32) {
+    pub fn pdf_clean_ximage_struct(&mut self, xobj_id: i32) -> Result<()> {
         let old = core::mem::replace(
             &mut self.ximage.ximages[xobj_id as usize],
             PdfXimage::pdf_init_ximage_struct(),
         );
-        self.o.release_opt(old.reference);
-        self.o.release_opt(old.resource);
-        self.o.release_opt(old.attr.dict); /* unsafe? */
+        self.o.release_opt(old.reference)?;
+        self.o.release_opt(old.resource)?;
+        self.o.release_opt(old.attr.dict)?;
+        Ok(()) /* unsafe? */
     }
     /// `load_image` (static): the id, or -1. Dispatches on `format`
     /// (`IMAGE_TYPE_*`); BMP, JP2, MPS and EPS are not ported.
@@ -489,7 +492,7 @@ impl Dpx {
         format: i32,
         fp: &mut MemFile,
         options: LoadOptions,
-    ) -> i32 {
+    ) -> Result<i32> {
         let mut id: i32 = -1;
         let mut reserved = false;
 
@@ -525,16 +528,17 @@ impl Dpx {
 
         let ok = match format {
             IMAGE_TYPE_JPEG => {
-                if self.jpeg_include_image(id, fp) < 0 {
+                if self.jpeg_include_image(id, fp)? < 0 {
                     false
                 } else {
                     self.ximage.ximages[id as usize].subtype = PDF_XOBJECT_TYPE_IMAGE;
                     true
                 }
             }
-            IMAGE_TYPE_JP2 => todo!("JPEG 2000 images (jp2image.c) are not ported"),
+            // (not ported: jp2image.c)
+            IMAGE_TYPE_JP2 => fatal!("JPEG 2000 images are not supported."),
             IMAGE_TYPE_PNG => {
-                if self.png_include_image(id, fp) < 0 {
+                if self.png_include_image(id, fp)? < 0 {
                     false
                 } else {
                     self.ximage.ximages[id as usize].subtype = PDF_XOBJECT_TYPE_IMAGE;
@@ -542,7 +546,7 @@ impl Dpx {
                 }
             }
             IMAGE_TYPE_BMP => {
-                if self.bmp_include_image(id, fp) < 0 {
+                if self.bmp_include_image(id, fp)? < 0 {
                     false
                 } else {
                     self.ximage.ximages[id as usize].subtype = PDF_XOBJECT_TYPE_IMAGE;
@@ -550,10 +554,10 @@ impl Dpx {
                 }
             }
             IMAGE_TYPE_PDF => {
-                let mut result = self.pdf_include_page(id, fp, fullname, options.clone());
+                let mut result = self.pdf_include_page(id, fp, fullname, options.clone())?;
                 if result > 0 {
                     /* PDF version too recent */
-                    result = self.ps_include_page(id, fullname, options.clone());
+                    result = self.ps_include_page(id, fullname, options.clone())?;
                 }
                 if result < 0 {
                     false
@@ -566,7 +570,7 @@ impl Dpx {
              * case  IMAGE_TYPE_EPS:
              */
             _ => {
-                if self.ps_include_page(id, fullname, options.clone()) < 0 {
+                if self.ps_include_page(id, fullname, options.clone())? < 0 {
                     false
                 } else {
                     self.ximage.ximages[id as usize].subtype = PDF_XOBJECT_TYPE_FORM;
@@ -575,8 +579,8 @@ impl Dpx {
             }
         };
         if !ok {
-            self.pdf_clean_ximage_struct(id);
-            return -1;
+            self.pdf_clean_ximage_struct(id)?;
+            return Ok(-1);
         }
 
         let x = &mut self.ximage.ximages[id as usize];
@@ -584,11 +588,11 @@ impl Dpx {
             PDF_XOBJECT_TYPE_IMAGE => x.res_name = res_name(b"Im", id),
             PDF_XOBJECT_TYPE_FORM => x.res_name = res_name(b"Fm", id),
             t => {
-                error!("Unknown XObject subtype: {t}");
+                fatal!("Unknown XObject subtype: {t}");
             }
         }
 
-        id
+        Ok(id)
     }
     /// `pdf_ximage_load_image`: the id, or -1.
     pub fn pdf_ximage_load_image(
@@ -596,7 +600,7 @@ impl Dpx {
         ident: Option<&[u8]>,
         filename: &[u8],
         options: LoadOptions,
-    ) -> i32 {
+    ) -> Result<i32> {
         let mut id: i32 = -1;
         let mut f: Option<Vec<u8>> = None;
 
@@ -615,7 +619,7 @@ impl Dpx {
                 continue;
             }
             let d = x.attr.dict;
-            if self.o.compare_object(d, options.dict) != 0 {
+            if self.o.compare_object(d, options.dict)? != 0 {
                 /* ????? */
                 continue;
             }
@@ -623,7 +627,7 @@ impl Dpx {
                 continue;
             }
 
-            return id;
+            return Ok(id);
         }
         let fullname = if let Some(f) = f {
             /* we already have converted this file; f is the temporary file name */
@@ -636,12 +640,12 @@ impl Dpx {
                     if self.conf.compat_mode == CompatMode::Compat {
                         warn!("Image inclusion failed. Could not find file");
                     } else {
-                        error!(
+                        fatal!(
                             "Image inclusion failed. Could not find file: {}",
                             String::from_utf8_lossy(filename)
                         );
                     }
-                    return -1;
+                    return Ok(-1);
                 }
             }
         };
@@ -650,39 +654,40 @@ impl Dpx {
             if self.conf.compat_mode == CompatMode::Compat {
                 warn!("Error opening image file");
             } else {
-                error!(
+                fatal!(
                     "Error opening image file \"{}\".",
                     String::from_utf8_lossy(filename)
                 );
             }
-            return -1;
+            return Ok(-1);
         };
         let mut fp = MemFile::new(data, &fullname);
 
-        let format = source_image_type(&mut fp);
+        let format = source_image_type(&mut fp)?;
         let page_no = options.page_no;
         if format == IMAGE_TYPE_MPS {
-            todo!("MetaPost images (mpost.c's mps_include_page) are not ported");
+            // (not ported: mpost.c's mps_include_page)
+            fatal!("MetaPost images are not supported.");
         }
-        id = self.load_image(ident, Some(filename), &fullname, format, &mut fp, options);
+        id = self.load_image(ident, Some(filename), &fullname, format, &mut fp, options)?;
 
         if id < 0 {
             if self.conf.compat_mode == CompatMode::Compat {
                 warn!("Image inclusion failed (page={page_no}).");
             } else if format == IMAGE_TYPE_PDF || format == IMAGE_TYPE_EPS {
-                error!(
+                fatal!(
                     "Image inclusion failed for \"{}\" (page={page_no}).",
                     String::from_utf8_lossy(filename)
                 );
             } else {
-                error!(
+                fatal!(
                     "Image inclusion failed for \"{}\"",
                     String::from_utf8_lossy(filename)
                 );
             }
         }
 
-        id
+        Ok(id)
     }
     /// `pdf_ximage_findresource`: the id, or -1.
     pub fn pdf_ximage_findresource(&mut self, ident: &[u8]) -> i32 {
@@ -696,7 +701,7 @@ impl Dpx {
     }
     /// The XObject's reference made through `global_names` (C's code
     /// shared by `pdf_ximage_set_image` and `_set_form`).
-    fn ximage_set_reference(&mut self, xobj_id: i32, resource: Obj) {
+    fn ximage_set_reference(&mut self, xobj_id: i32, resource: Obj) -> Result<()> {
         let i = xobj_id as usize;
         if let Some(ident) = self.ximage.ximages[i].ident.clone() {
             let mut names = self
@@ -704,33 +709,39 @@ impl Dpx {
                 .global_names
                 .take()
                 .expect("global_names not initialised");
-            let r = self.o.link(resource);
-            let error = self.o.pdf_names_add_object(&mut names, &ident, r);
+            let r = self.o.link(resource)?;
+            let error = self.o.pdf_names_add_object(&mut names, &ident, r)?;
             if let Some(old) = self.ximage.ximages[i].reference.take() {
-                self.o.release(old);
+                self.o.release(old)?;
             }
             if error != 0 {
-                let r = self.o.ref_obj(resource);
+                let r = self.o.ref_obj(resource)?;
                 self.ximage.ximages[i].reference = Some(r);
             } else {
                 /* Need to create object reference before closing it */
-                let r = self.o.pdf_names_lookup_reference(&mut names, &ident);
+                let r = self.o.pdf_names_lookup_reference(&mut names, &ident)?;
                 self.ximage.ximages[i].reference = r;
-                self.o.pdf_names_close_object(&mut names, &ident);
+                self.o.pdf_names_close_object(&mut names, &ident)?;
             }
             self.doc.global_names = Some(names);
             self.ximage.ximages[i].reserved = 0;
         } else {
-            let r = self.o.ref_obj(resource);
+            let r = self.o.ref_obj(resource)?;
             self.ximage.ximages[i].reference = Some(r);
         }
-        self.o.release(resource); /* Caller don't know we are using reference. */
+        self.o.release(resource)?; /* Caller don't know we are using reference. */
         self.ximage.ximages[i].resource = None;
+        Ok(())
     }
     /// `pdf_ximage_set_image`: `resource` is the image stream.
-    pub fn pdf_ximage_set_image(&mut self, xobj_id: i32, info: &XimageInfo, resource: Obj) {
+    pub fn pdf_ximage_set_image(
+        &mut self,
+        xobj_id: i32,
+        info: &XimageInfo,
+        resource: Obj,
+    ) -> Result<()> {
         if !self.o.is_stream(Some(resource)) {
-            error!("Image XObject must be of stream type.");
+            fatal!("Image XObject must be of stream type.");
         }
 
         let x = &mut self.ximage.ximages[xobj_id as usize];
@@ -742,31 +753,37 @@ impl Dpx {
         x.attr.ydensity = info.ydensity;
         let attr_dict = x.attr.dict;
 
-        let dict = self.o.stream_dict(resource);
-        self.o.put_name(dict, b"Type", b"XObject");
-        self.o.put_name(dict, b"Subtype", b"Image");
-        self.o.put_number(dict, b"Width", f64::from(info.width));
-        self.o.put_number(dict, b"Height", f64::from(info.height));
+        let dict = self.o.stream_dict(resource)?;
+        self.o.put_name(dict, b"Type", b"XObject")?;
+        self.o.put_name(dict, b"Subtype", b"Image")?;
+        self.o.put_number(dict, b"Width", f64::from(info.width))?;
+        self.o.put_number(dict, b"Height", f64::from(info.height))?;
         if info.bits_per_component > 0 {
             /* Ignored for JPXDecode filter. FIXME */
             self.o.put_number(
                 dict,
                 b"BitsPerComponent",
                 f64::from(info.bits_per_component),
-            );
+            )?;
         }
         if let Some(d) = attr_dict {
-            self.o.merge_dict(dict, d);
+            self.o.merge_dict(dict, d)?;
         }
 
-        self.ximage_set_reference(xobj_id, resource);
+        self.ximage_set_reference(xobj_id, resource)?;
+        Ok(())
     }
     /// `pdf_ximage_set_form`: `resource` is the form stream.
     ///
     /// C sets `p1.y` again where it means `p2.y`: `p1.y` is the bbox's
     /// `lly` untransformed, and `p2.y` is never set (whatever the stack
     /// held: 0 here).
-    pub fn pdf_ximage_set_form(&mut self, xobj_id: i32, info: &XformInfo, resource: Obj) {
+    pub fn pdf_ximage_set_form(
+        &mut self,
+        xobj_id: i32,
+        info: &XformInfo,
+        resource: Obj,
+    ) -> Result<()> {
         self.ximage.ximages[xobj_id as usize].subtype = PDF_XOBJECT_TYPE_FORM;
 
         /* Image's attribute "bbox" here is affected by /Rotate entry of included
@@ -800,7 +817,8 @@ impl Dpx {
         bbox.urx = max4(p1.x, p2.x, p3.x, p4.x);
         bbox.ury = max4(p1.y, p2.y, p3.y, p4.y);
 
-        self.ximage_set_reference(xobj_id, resource);
+        self.ximage_set_reference(xobj_id, resource)?;
+        Ok(())
     }
     /// `pdf_ximage_get_page`.
     pub fn pdf_ximage_get_page(&mut self, xobj_id: i32) -> i32 {
@@ -808,14 +826,14 @@ impl Dpx {
     }
     /// `pdf_ximage_get_reference`: a new link to the reference (made if
     /// none yet).
-    pub fn pdf_ximage_get_reference(&mut self, xobj_id: i32) -> Obj {
-        self.ximage_check_id(xobj_id);
+    pub fn pdf_ximage_get_reference(&mut self, xobj_id: i32) -> Result<Obj> {
+        self.ximage_check_id(xobj_id)?;
 
         let i = xobj_id as usize;
         if self.ximage.ximages[i].reference.is_none()
             && let Some(res) = self.ximage.ximages[i].resource
         {
-            let r = self.o.ref_obj(res);
+            let r = self.o.ref_obj(res)?;
             self.ximage.ximages[i].reference = Some(r);
         }
 
@@ -831,7 +849,7 @@ impl Dpx {
         subtype: i32,
         cdata: &XobjInfo,
         resource: Obj,
-    ) -> i32 {
+    ) -> Result<i32> {
         let mut id: i32 = -1;
         let mut reserved = false;
 
@@ -857,23 +875,23 @@ impl Dpx {
 
         match (subtype, cdata) {
             (PDF_XOBJECT_TYPE_IMAGE, XobjInfo::Image(info)) => {
-                self.pdf_ximage_set_image(id, info, resource);
+                self.pdf_ximage_set_image(id, info, resource)?;
                 self.ximage.ximages[id as usize].res_name = res_name(b"Im", id);
             }
             (PDF_XOBJECT_TYPE_FORM, XobjInfo::Form(info)) => {
-                self.pdf_ximage_set_form(id, info, resource);
+                self.pdf_ximage_set_form(id, info, resource)?;
                 self.ximage.ximages[id as usize].res_name = res_name(b"Fm", id);
             }
             _ => {
-                error!("Unknown XObject subtype: {subtype}");
+                fatal!("Unknown XObject subtype: {subtype}");
             }
         }
 
-        id
+        Ok(id)
     }
     /// `pdf_ximage_reserve`: the id of a reserved (forward-referenced)
     /// XObject.
-    pub fn pdf_ximage_reserve(&mut self, ident: &[u8]) -> i32 {
+    pub fn pdf_ximage_reserve(&mut self, ident: &[u8]) -> Result<i32> {
         if self
             .ximage
             .ximages
@@ -881,7 +899,7 @@ impl Dpx {
             .any(|x| x.ident.as_deref() == Some(ident))
         {
             warn!("XObject ID already used!");
-            return -1;
+            return Ok(-1);
         }
 
         let id = self.ximage.ximages.len() as i32;
@@ -894,25 +912,25 @@ impl Dpx {
             .global_names
             .take()
             .expect("global_names not initialised");
-        x.reference = self.o.pdf_names_reserve(&mut names, ident);
+        x.reference = self.o.pdf_names_reserve(&mut names, ident)?;
         self.doc.global_names = Some(names);
         x.res_name = res_name(b"Fm", id);
         x.reserved = 1;
         self.ximage.ximages.push(x);
 
-        id
+        Ok(id)
     }
     /// `pdf_ximage_get_resname`: a copy of the resource name.
-    pub fn pdf_ximage_get_resname(&mut self, xobj_id: i32) -> Vec<u8> {
-        self.ximage_check_id(xobj_id);
+    pub fn pdf_ximage_get_resname(&mut self, xobj_id: i32) -> Result<Vec<u8>> {
+        self.ximage_check_id(xobj_id)?;
 
-        self.ximage.ximages[xobj_id as usize].res_name.clone()
+        Ok(self.ximage.ximages[xobj_id as usize].res_name.clone())
     }
     /// `pdf_ximage_get_subtype`.
-    pub fn pdf_ximage_get_subtype(&mut self, xobj_id: i32) -> i32 {
-        self.ximage_check_id(xobj_id);
+    pub fn pdf_ximage_get_subtype(&mut self, xobj_id: i32) -> Result<i32> {
+        self.ximage_check_id(xobj_id)?;
 
-        self.ximage.ximages[xobj_id as usize].subtype
+        Ok(self.ximage.ximages[xobj_id as usize].subtype)
     }
     /// `pdf_ximage_set_attr`.
     pub fn pdf_ximage_set_attr(
@@ -926,8 +944,8 @@ impl Dpx {
         lly: f64,
         urx: f64,
         ury: f64,
-    ) {
-        self.ximage_check_id(xobj_id);
+    ) -> Result<()> {
+        self.ximage_check_id(xobj_id)?;
 
         let a = &mut self.ximage.ximages[xobj_id as usize].attr;
         a.width = width;
@@ -938,6 +956,7 @@ impl Dpx {
         a.bbox.lly = lly;
         a.bbox.urx = urx;
         a.bbox.ury = ury;
+        Ok(())
     }
     /// `pdf_ximage_scale_image`: status, the matrix `M` and the clipping
     /// rectangle `r`, from the special's `p`.
@@ -945,8 +964,8 @@ impl Dpx {
         &mut self,
         xobj_id: i32,
         p: &TransformInfo,
-    ) -> (i32, PdfTmatrix, PdfRect) {
-        self.ximage_check_id(xobj_id);
+    ) -> Result<(i32, PdfTmatrix, PdfRect)> {
+        self.ximage_check_id(xobj_id)?;
 
         let x = &self.ximage.ximages[xobj_id as usize];
         let mut m = PdfTmatrix {
@@ -1001,7 +1020,7 @@ impl Dpx {
             }
         }
 
-        (0, m, r)
+        Ok((0, m, r))
     }
     /// `set_distiller_template`.
     pub fn set_distiller_template(&mut self, s: Option<&[u8]>) {
@@ -1017,7 +1036,12 @@ impl Dpx {
     /// `ps_include_page` (static): runs the distiller on a PS/EPS file.
     /// Without a distiller template it fails, as in C; running one (an
     /// external command and a temporary file) is not ported.
-    pub fn ps_include_page(&mut self, xobj_id: i32, filename: &[u8], options: LoadOptions) -> i32 {
+    pub fn ps_include_page(
+        &mut self,
+        xobj_id: i32,
+        filename: &[u8],
+        options: LoadOptions,
+    ) -> Result<i32> {
         let _ = (xobj_id, options);
         if self.ximage.cmdtmpl.is_none() {
             warn!(
@@ -1025,9 +1049,14 @@ impl Dpx {
                 String::from_utf8_lossy(filename)
             );
             warn!(">> Please check if you have 'D' option in config file.");
-            return -1;
+            return Ok(-1);
         }
-        todo!("the distiller (an external command, dpx_file_apply_filter) is not ported")
+        // (not ported: the distiller, an external command run by
+        // dpx_file_apply_filter)
+        fatal!(
+            "Image format conversion for \"{}\" (the distiller) is not supported.",
+            String::from_utf8_lossy(filename)
+        )
     }
     /// `pdf_error_cleanup_cache`: deletes the temporary files (none here:
     /// the distiller is not ported).
@@ -1063,27 +1092,27 @@ mod tests {
     #[test]
     fn image_types() {
         assert_eq!(
-            source_image_type(&mut mem(b"\xff\xd8\xff\xe0rest")),
+            source_image_type(&mut mem(b"\xff\xd8\xff\xe0rest")).unwrap(),
             IMAGE_TYPE_JPEG
         );
         assert_eq!(
-            source_image_type(&mut mem(b"%PDF-1.5\n%...")),
+            source_image_type(&mut mem(b"%PDF-1.5\n%...")).unwrap(),
             IMAGE_TYPE_PDF
         );
         assert_eq!(
-            source_image_type(&mut mem(b"BMxxxxxxxxxxxxxx")),
+            source_image_type(&mut mem(b"BMxxxxxxxxxxxxxx")).unwrap(),
             IMAGE_TYPE_BMP
         );
         assert_eq!(
-            source_image_type(&mut mem(b"%!PS-Adobe-3.0\n%%Creator: MetaPost 2.0\n")),
+            source_image_type(&mut mem(b"%!PS-Adobe-3.0\n%%Creator: MetaPost 2.0\n")).unwrap(),
             IMAGE_TYPE_MPS
         );
         assert_eq!(
-            source_image_type(&mut mem(b"%!PS-Adobe-3.0 EPSF\n")),
+            source_image_type(&mut mem(b"%!PS-Adobe-3.0 EPSF\n")).unwrap(),
             IMAGE_TYPE_EPS
         );
         assert_eq!(
-            source_image_type(&mut mem(b"hello world, nothing")),
+            source_image_type(&mut mem(b"hello world, nothing")).unwrap(),
             IMAGE_TYPE_UNKNOWN
         );
     }

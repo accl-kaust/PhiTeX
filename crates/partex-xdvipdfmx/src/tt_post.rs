@@ -39,13 +39,13 @@ fn c_str(s: &[u8]) -> &[u8] {
 }
 
 /// `read_v2_post_names` (static): 0, or -1 for an invalid table.
-fn read_v2_post_names(post: &mut TtPostTable, sfont: &mut Sfnt) -> i32 {
-    post.number_of_glyphs = sfont.sfnt_get_ushort();
+fn read_v2_post_names(post: &mut TtPostTable, sfont: &mut Sfnt) -> Result<i32> {
+    post.number_of_glyphs = sfont.sfnt_get_ushort()?;
 
     let mut indices: Vec<USHORT> = Vec::with_capacity(post.number_of_glyphs as usize);
     let mut maxidx: USHORT = 257;
     for _ in 0..post.number_of_glyphs {
-        let idx = sfont.sfnt_get_ushort();
+        let idx = sfont.sfnt_get_ushort()?;
         if idx >= 258 && idx > maxidx {
             maxidx = idx;
         }
@@ -59,7 +59,7 @@ fn read_v2_post_names(post: &mut TtPostTable, sfont: &mut Sfnt) -> i32 {
         post.names = Vec::with_capacity(post.count as usize);
         for _ in 0..post.count {
             // Read Pascal strings.
-            let len = sfont.sfnt_get_byte() as usize;
+            let len = sfont.sfnt_get_byte()? as usize;
             if len > 0 {
                 let mut name = vec![0u8; len];
                 sfont.sfnt_read(&mut name);
@@ -87,29 +87,29 @@ fn read_v2_post_names(post: &mut TtPostTable, sfont: &mut Sfnt) -> i32 {
                 idx,
                 i32::from(post.count) + 258
             );
-            return -1;
+            return Ok(-1);
         }
     }
 
-    0
+    Ok(0)
 }
 
 impl Sfnt {
     /// `tt_read_post_table`: none for an invalid version 2.0 table
     /// (`sfnt_locate_table` ERRORs without one).
-    pub fn tt_read_post_table(&mut self) -> Option<TtPostTable> {
-        self.sfnt_locate_table(b"post");
+    pub fn tt_read_post_table(&mut self) -> Result<Option<TtPostTable>> {
+        self.sfnt_locate_table(b"post")?;
 
         let mut post = TtPostTable {
-            version: self.sfnt_get_ulong(),             /* Fixed */
-            italic_angle: self.sfnt_get_ulong(),        /* Fixed */
-            underline_position: self.sfnt_get_short(),  /* FWord */
-            underline_thickness: self.sfnt_get_short(), /* FWord */
-            is_fixed_pitch: self.sfnt_get_ulong(),
-            min_mem_type42: self.sfnt_get_ulong(),
-            max_mem_type42: self.sfnt_get_ulong(),
-            min_mem_type1: self.sfnt_get_ulong(),
-            max_mem_type1: self.sfnt_get_ulong(),
+            version: self.sfnt_get_ulong()?,             /* Fixed */
+            italic_angle: self.sfnt_get_ulong()?,        /* Fixed */
+            underline_position: self.sfnt_get_short()?,  /* FWord */
+            underline_thickness: self.sfnt_get_short()?, /* FWord */
+            is_fixed_pitch: self.sfnt_get_ulong()?,
+            min_mem_type42: self.sfnt_get_ulong()?,
+            max_mem_type42: self.sfnt_get_ulong()?,
+            min_mem_type1: self.sfnt_get_ulong()?,
+            max_mem_type1: self.sfnt_get_ulong()?,
             number_of_glyphs: 0,
             glyph_name_ptr: Vec::new(),
             count: 0,
@@ -122,9 +122,9 @@ impl Sfnt {
         } else if post.version == 0x0002_8000 {
             warn!("TrueType 'post' version 2.5 found (deprecated)");
         } else if post.version == 0x0002_0000 {
-            if read_v2_post_names(&mut post, self) < 0 {
+            if read_v2_post_names(&mut post, self)? < 0 {
                 warn!("Invalid version 2.0 'post' table");
-                return None;
+                return Ok(None);
             }
         } else if post.version == 0x0003_0000 || post.version == 0x0004_0000 {
             // No glyph names provided / Apple format for printer-based
@@ -136,7 +136,7 @@ impl Sfnt {
             );
         }
 
-        Some(post)
+        Ok(Some(post))
     }
 }
 

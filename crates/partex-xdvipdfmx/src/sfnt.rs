@@ -190,7 +190,7 @@ fn find_table_index(td: Option<&SfntTableDirectory>, tag: &[u8]) -> i32 {
 impl Sfnt {
     /// `sfnt_open`: takes the file over. C never returns NULL: a file that
     /// is no sfnt gets type 0.
-    pub fn sfnt_open(fp: MemFile) -> Option<Sfnt> {
+    pub fn sfnt_open(fp: MemFile) -> Result<Option<Sfnt>> {
         let mut sfont = Sfnt {
             type_: 0,
             directory: None,
@@ -198,7 +198,7 @@ impl Sfnt {
             offset: 0,
         };
         sfont.stream.rewind();
-        let type_ = sfont.sfnt_get_ulong();
+        let type_ = sfont.sfnt_get_ulong()?;
         if type_ == SFNT_TRUETYPE || type_ == SFNT_MAC_TRUE {
             sfont.type_ = SFNT_TYPE_TRUETYPE;
         } else if type_ == SFNT_OPENTYPE {
@@ -211,11 +211,11 @@ impl Sfnt {
         sfont.stream.rewind();
         sfont.directory = None;
         sfont.offset = 0;
-        Some(sfont)
+        Ok(Some(sfont))
     }
     /// `dfont_open`: the `index`th sfnt resource of a Mac dfont; none if
     /// it has no `sfnt` resource.
-    pub fn dfont_open(fp: MemFile, index: i32) -> Option<Sfnt> {
+    pub fn dfont_open(fp: MemFile, index: i32) -> Result<Option<Sfnt>> {
         let mut sfont = Sfnt {
             type_: 0,
             directory: None,
@@ -223,12 +223,12 @@ impl Sfnt {
             offset: 0,
         };
         sfont.stream.rewind();
-        let rdata_pos = sfont.sfnt_get_ulong();
-        let map_pos = sfont.sfnt_get_ulong();
+        let rdata_pos = sfont.sfnt_get_ulong()?;
+        let map_pos = sfont.sfnt_get_ulong()?;
         sfont.sfnt_seek_set(map_pos.wrapping_add(0x18));
-        let tags_pos = map_pos.wrapping_add(ULONG::from(sfont.sfnt_get_ushort()));
+        let tags_pos = map_pos.wrapping_add(ULONG::from(sfont.sfnt_get_ushort()?));
         sfont.sfnt_seek_set(tags_pos);
-        let tags_num = sfont.sfnt_get_ushort();
+        let tags_num = sfont.sfnt_get_ushort()?;
 
         let mut types_num: USHORT = 0;
         let mut types_pos: ULONG = 0;
@@ -238,9 +238,9 @@ impl Sfnt {
             if i > tags_num {
                 break;
             }
-            let tag = sfont.sfnt_get_ulong(); /* tag name */
-            types_num = sfont.sfnt_get_ushort(); /* typefaces number */
-            types_pos = tags_pos.wrapping_add(ULONG::from(sfont.sfnt_get_ushort()));
+            let tag = sfont.sfnt_get_ulong()?; /* tag name */
+            types_num = sfont.sfnt_get_ushort()?; /* typefaces number */
+            types_pos = tags_pos.wrapping_add(ULONG::from(sfont.sfnt_get_ushort()?));
             if tag == 0x7366_6e74 {
                 /* "sfnt" */
                 break;
@@ -248,12 +248,12 @@ impl Sfnt {
             i = i.wrapping_add(1);
         }
         if i > tags_num {
-            return None;
+            return Ok(None);
         }
 
         sfont.sfnt_seek_set(types_pos);
         if index > i32::from(types_num) {
-            error!("Invalid index {} for dfont.", index);
+            fatal!("Invalid index {} for dfont.", index);
         }
 
         let mut res_pos: ULONG = 0;
@@ -262,10 +262,10 @@ impl Sfnt {
             if i > types_num {
                 break;
             }
-            let _ = sfont.sfnt_get_ushort(); /* resource id */
-            let _ = sfont.sfnt_get_ushort(); /* resource name position */
-            res_pos = sfont.sfnt_get_ulong(); /* resource flag + offset */
-            sfont.sfnt_get_ulong(); /* mbz */
+            let _ = sfont.sfnt_get_ushort()?; /* resource id */
+            let _ = sfont.sfnt_get_ushort()?; /* resource name position */
+            res_pos = sfont.sfnt_get_ulong()?; /* resource flag + offset */
+            sfont.sfnt_get_ulong()?; /* mbz */
             if i32::from(i) == index {
                 break;
             }
@@ -278,37 +278,37 @@ impl Sfnt {
         sfont.offset = (res_pos & 0x00ff_ffff)
             .wrapping_add(rdata_pos)
             .wrapping_add(4);
-        Some(sfont)
+        Ok(Some(sfont))
     }
     /// `sfnt_close`.
     pub fn sfnt_close(self) {}
 
     /// `sfnt_get_byte`.
-    pub fn sfnt_get_byte(&mut self) -> BYTE {
+    pub fn sfnt_get_byte(&mut self) -> Result<BYTE> {
         self.stream.get_unsigned_byte()
     }
     /// `sfnt_get_char`.
-    pub fn sfnt_get_char(&mut self) -> CHAR {
+    pub fn sfnt_get_char(&mut self) -> Result<CHAR> {
         self.stream.get_signed_byte()
     }
     /// `sfnt_get_ushort`.
-    pub fn sfnt_get_ushort(&mut self) -> USHORT {
+    pub fn sfnt_get_ushort(&mut self) -> Result<USHORT> {
         self.stream.get_unsigned_pair()
     }
     /// `sfnt_get_short`.
-    pub fn sfnt_get_short(&mut self) -> SHORT {
+    pub fn sfnt_get_short(&mut self) -> Result<SHORT> {
         self.stream.get_signed_pair()
     }
     /// `sfnt_get_ulong`.
-    pub fn sfnt_get_ulong(&mut self) -> ULONG {
+    pub fn sfnt_get_ulong(&mut self) -> Result<ULONG> {
         self.stream.get_unsigned_quad()
     }
     /// `sfnt_get_long`.
-    pub fn sfnt_get_long(&mut self) -> LONG {
+    pub fn sfnt_get_long(&mut self) -> Result<LONG> {
         self.stream.get_signed_quad()
     }
     /// `sfnt_get_uint24`.
-    pub fn sfnt_get_uint24(&mut self) -> ULONG {
+    pub fn sfnt_get_uint24(&mut self) -> Result<ULONG> {
         self.stream.get_unsigned_triple()
     }
     /// `sfnt_seek_set`.
@@ -321,25 +321,25 @@ impl Sfnt {
     }
 
     /// `sfnt_read_table_directory`: 0, or -1 on error.
-    pub fn sfnt_read_table_directory(&mut self, offset: ULONG) -> i32 {
+    pub fn sfnt_read_table_directory(&mut self, offset: ULONG) -> Result<i32> {
         self.directory = None;
         self.sfnt_seek_set(offset);
         let mut td = SfntTableDirectory {
-            version: self.sfnt_get_ulong(),
-            num_tables: self.sfnt_get_ushort(),
-            search_range: self.sfnt_get_ushort(),
-            entry_selector: self.sfnt_get_ushort(),
-            range_shift: self.sfnt_get_ushort(),
+            version: self.sfnt_get_ulong()?,
+            num_tables: self.sfnt_get_ushort()?,
+            search_range: self.sfnt_get_ushort()?,
+            entry_selector: self.sfnt_get_ushort()?,
+            range_shift: self.sfnt_get_ushort()?,
             ..SfntTableDirectory::default()
         };
         td.flags = vec![0; td.num_tables as usize];
         td.tables = Vec::with_capacity(td.num_tables as usize);
         for _ in 0..td.num_tables {
-            let u_tag = self.sfnt_get_ulong();
+            let u_tag = self.sfnt_get_ulong()?;
             let tag = convert_tag(u_tag);
-            let check_sum = self.sfnt_get_ulong();
-            let offset = self.sfnt_get_ulong().wrapping_add(self.offset);
-            let length = self.sfnt_get_ulong();
+            let check_sum = self.sfnt_get_ulong()?;
+            let offset = self.sfnt_get_ulong()?.wrapping_add(self.offset);
+            let length = self.sfnt_get_ulong()?;
             td.tables.push(SfntTable {
                 tag,
                 check_sum,
@@ -350,7 +350,7 @@ impl Sfnt {
         }
         td.num_kept_tables = 0;
         self.directory = Some(Box::new(td));
-        0
+        Ok(0)
     }
     /// `sfnt_find_table_len`: 0 if absent.
     pub fn sfnt_find_table_len(&self, tag: &[u8]) -> ULONG {
@@ -374,13 +374,13 @@ impl Sfnt {
     }
     /// `sfnt_locate_table`: seeks to the table and returns its offset
     /// (ERROR if absent).
-    pub fn sfnt_locate_table(&mut self, tag: &[u8]) -> ULONG {
+    pub fn sfnt_locate_table(&mut self, tag: &[u8]) -> Result<ULONG> {
         let offset = self.sfnt_find_table_pos(tag);
         if offset == 0 {
-            error!("sfnt: table not found...");
+            fatal!("sfnt: table not found...");
         }
         self.sfnt_seek_set(offset);
-        offset
+        Ok(offset)
     }
     /// `sfnt_set_table`: `length` is `data.len()`. A new table also gets a
     /// flag (C does not grow `flags`, and reads past it).
@@ -429,7 +429,7 @@ impl Sfnt {
 impl Dpx {
     /// `sfnt_create_FontFile_stream`: the tables kept, in directory order,
     /// each on a 4-byte boundary (zero padded); `/Length1` the total.
-    pub fn sfnt_create_FontFile_stream(&mut self, sfont: &mut Sfnt) -> Option<Obj> {
+    pub fn sfnt_create_FontFile_stream(&mut self, sfont: &mut Sfnt) -> Result<Option<Obj>> {
         let stream = self.o.new_stream(crate::obj::STREAM_COMPRESS);
         let mut wbuf = [0u8; 1024];
 
@@ -455,7 +455,7 @@ impl Dpx {
             &mut wbuf[p..],
             (i32::from(num_kept_tables) * 16 - sr) as USHORT,
         );
-        self.o.add_stream(stream, &wbuf[..12]);
+        self.o.add_stream(stream, &wbuf[..12])?;
 
         // Compute the start of the tables (after the headers).
         let mut offset: i32 = 12 + 16 * i32::from(num_kept_tables);
@@ -471,7 +471,7 @@ impl Dpx {
                 p += sfnt_put_ulong(&mut wbuf[p..], t.check_sum) as usize;
                 p += sfnt_put_ulong(&mut wbuf[p..], offset as ULONG) as usize;
                 sfnt_put_ulong(&mut wbuf[p..], t.length);
-                self.o.add_stream(stream, &wbuf[..16]);
+                self.o.add_stream(stream, &wbuf[..16])?;
                 offset = offset.wrapping_add(t.length as i32);
             }
         }
@@ -488,7 +488,13 @@ impl Dpx {
             }
             if offset % 4 != 0 {
                 let length = 4 - (offset % 4);
-                self.o.add_stream(stream, &padbytes[..length as usize]);
+                // (tables' lengths past `int` make the offset negative:
+                // C pads with the bytes after `padbytes`)
+                let Some(pad) = padbytes.get(..length as usize) else {
+                    self.o.release(stream)?;
+                    fatal!("Font tables too long: their offsets overflow.");
+                };
+                self.o.add_stream(stream, pad)?;
                 offset += length;
             }
             let data = sfont.directory.as_deref_mut().unwrap().tables[i]
@@ -503,25 +509,25 @@ impl Dpx {
                         let nb_read = sfont.sfnt_read(&mut wbuf[..n]);
                         if nb_read == 0 {
                             // C loops forever on a truncated file.
-                            self.o.release(stream);
-                            error!("Reading file failed...");
+                            self.o.release(stream)?;
+                            fatal!("Reading file failed...");
                         }
-                        self.o.add_stream(stream, &wbuf[..nb_read]);
+                        self.o.add_stream(stream, &wbuf[..nb_read])?;
                         length -= nb_read as i32;
                     }
                 }
                 Some(d) => {
-                    self.o.add_stream(stream, &d[..tlen as usize]);
+                    self.o.add_stream(stream, &d[..tlen as usize])?;
                 }
             }
             // Set offset for next table.
             offset = offset.wrapping_add(tlen as i32);
         }
 
-        let stream_dict = self.o.stream_dict(stream);
+        let stream_dict = self.o.stream_dict(stream)?;
         self.o
-            .put_number(stream_dict, b"Length1", f64::from(offset));
-        Some(stream)
+            .put_number(stream_dict, b"Length1", f64::from(offset))?;
+        Ok(Some(stream))
     }
 }
 

@@ -77,21 +77,23 @@ pub fn get_category(category: &[u8]) -> i32 {
 
 impl Dpx {
     /// `pdf_flush_resource`: releases its reference and object.
-    fn pdf_flush_resource(&mut self, cat_id: usize, res_id: usize) {
+    fn pdf_flush_resource(&mut self, cat_id: usize, res_id: usize) -> Result<()> {
         let res = &mut self.resource.resources[cat_id].resources[res_id];
         let (r, o) = (res.reference.take(), res.object.take());
-        self.o.release_opt(r);
-        self.o.release_opt(o);
+        self.o.release_opt(r)?;
+        self.o.release_opt(o)?;
+        Ok(())
     }
     /// `pdf_clean_resource`.
-    fn pdf_clean_resource(&mut self, cat_id: usize, res_id: usize) {
+    fn pdf_clean_resource(&mut self, cat_id: usize, res_id: usize) -> Result<()> {
         let res = &mut self.resource.resources[cat_id].resources[res_id];
         let (r, o) = (res.reference.take(), res.object.take());
         res.ident = None;
         res.category = -1;
         res.flags = 0;
-        self.o.release_opt(r);
-        self.o.release_opt(o);
+        self.o.release_opt(r)?;
+        self.o.release_opt(o)?;
+        Ok(())
     }
     /// `pdf_init_resources`.
     pub fn pdf_init_resources(&mut self) {
@@ -100,14 +102,15 @@ impl Dpx {
         }
     }
     /// `pdf_close_resources`.
-    pub fn pdf_close_resources(&mut self) {
+    pub fn pdf_close_resources(&mut self) -> Result<()> {
         for i in 0..PDF_NUM_RESOURCE_CATEGORIES {
             for j in 0..self.resource.resources[i].resources.len() {
-                self.pdf_flush_resource(i, j);
-                self.pdf_clean_resource(i, j);
+                self.pdf_flush_resource(i, j)?;
+                self.pdf_clean_resource(i, j)?;
             }
             self.resource.resources[i].resources.clear();
         }
+        Ok(())
     }
     /// `pdf_defineresource`: the resource id (`object` is owned by the
     /// cache).
@@ -117,10 +120,10 @@ impl Dpx {
         resname: Option<&[u8]>,
         object: Obj,
         flags: i32,
-    ) -> i32 {
+    ) -> Result<i32> {
         let cat_id = get_category(category);
         if cat_id < 0 {
-            crate::error!("Unknown resource category: {:?}", category);
+            crate::fatal!("Unknown resource category: {:?}", category);
         }
         let c = cat_id as usize;
         let count = self.resource.resources[c].resources.len();
@@ -130,10 +133,10 @@ impl Dpx {
                 // (C's strcmp with an unnamed resource's NULL ident would
                 // crash; such a resource never matches here.)
                 if self.resource.resources[c].resources[i].ident.as_deref() == Some(name) {
-                    self.pdf_flush_resource(c, i);
+                    self.pdf_flush_resource(c, i)?;
                     let reference = if flags & PDF_RES_FLUSH_IMMEDIATE != 0 {
-                        let r = self.o.ref_obj(object);
-                        self.o.release(object);
+                        let r = self.o.ref_obj(object)?;
+                        self.o.release(object)?;
                         Some(r)
                     } else {
                         None
@@ -145,7 +148,7 @@ impl Dpx {
                     } else {
                         res.object = Some(object);
                     }
-                    return (cat_id << 16) | i as i32;
+                    return Ok((cat_id << 16) | i as i32);
                 }
             }
             res_id = count;
@@ -160,48 +163,48 @@ impl Dpx {
         res.category = cat_id;
         res.flags = flags;
         if flags & PDF_RES_FLUSH_IMMEDIATE != 0 {
-            res.reference = Some(self.o.ref_obj(object));
-            self.o.release(object);
+            res.reference = Some(self.o.ref_obj(object)?);
+            self.o.release(object)?;
         } else {
             res.object = Some(object);
         }
         self.resource.resources[c].resources.push(res);
-        (cat_id << 16) | res_id as i32
+        Ok((cat_id << 16) | res_id as i32)
     }
     /// `pdf_findresource`: the resource id, or -1.
-    pub fn pdf_findresource(&mut self, category: &[u8], resname: &[u8]) -> i32 {
+    pub fn pdf_findresource(&mut self, category: &[u8], resname: &[u8]) -> Result<i32> {
         let cat_id = get_category(category);
         if cat_id < 0 {
-            crate::error!("Unknown resource category: {:?}", category);
+            crate::fatal!("Unknown resource category: {:?}", category);
         }
-        self.resource.resources[cat_id as usize]
+        Ok(self.resource.resources[cat_id as usize]
             .resources
             .iter()
             .position(|r| r.ident.as_deref() == Some(resname))
-            .map_or(-1, |i| (cat_id << 16) | i as i32)
+            .map_or(-1, |i| (cat_id << 16) | i as i32))
     }
     /// `pdf_get_resource_reference`: a new link to the reference.
-    pub fn pdf_get_resource_reference(&mut self, rc_id: i32) -> Option<Obj> {
+    pub fn pdf_get_resource_reference(&mut self, rc_id: i32) -> Result<Option<Obj>> {
         let c = ((rc_id >> 16) & 0xffff) as usize;
         let r = (rc_id & 0xffff) as usize;
         if c >= PDF_NUM_RESOURCE_CATEGORIES {
-            crate::error!("Invalid category ID: {}", c);
+            crate::fatal!("Invalid category ID: {}", c);
         }
         if r >= self.resource.resources[c].resources.len() {
-            crate::error!("Invalid resource ID: {}", r);
+            crate::fatal!("Invalid resource ID: {}", r);
         }
         let res = &self.resource.resources[c].resources[r];
         let reference = match res.reference {
             Some(x) => x,
             None => {
                 let Some(ob) = res.object else {
-                    crate::error!("Undefined object...")
+                    crate::fatal!("Undefined object...")
                 };
-                let x = self.o.ref_obj(ob);
+                let x = self.o.ref_obj(ob)?;
                 self.resource.resources[c].resources[r].reference = Some(x);
                 x
             }
         };
-        Some(self.o.link(reference))
+        Ok(Some(self.o.link(reference)?))
     }
 }

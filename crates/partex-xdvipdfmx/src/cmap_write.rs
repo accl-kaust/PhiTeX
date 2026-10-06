@@ -46,9 +46,10 @@ impl Sbuf {
         self.curptr += s.len();
     }
     /// `sputx(c, &(wbuf->curptr), wbuf->limptr)`.
-    fn putx(&mut self, c: u8) {
+    fn putx(&mut self, c: u8) -> Result<()> {
         let end = self.limptr;
-        sputx(c, &mut self.buf, &mut self.curptr, end);
+        sputx(c, &mut self.buf, &mut self.curptr, end)?;
+        Ok(())
     }
     /// The bytes written (`wbuf->buf` to `wbuf->curptr`).
     fn written(&self) -> &[u8] {
@@ -82,16 +83,16 @@ fn block_count(mtab: &[MapDef], c: i32) -> i32 {
 }
 
 /// `sputx`: two uppercase hex digits at `buf[*s..]` (error past `end`).
-fn sputx(c: u8, buf: &mut [u8], s: &mut usize, end: usize) -> i32 {
+fn sputx(c: u8, buf: &mut [u8], s: &mut usize, end: usize) -> Result<i32> {
     let hi = c >> 4;
     let lo = c & 0x0f;
     if *s + 2 > end {
-        error!("Buffer overflow.");
+        fatal!("Buffer overflow.");
     }
     buf[*s] = if hi < 10 { hi + b'0' } else { hi + b'7' };
     buf[*s + 1] = if lo < 10 { lo + b'0' } else { lo + b'7' };
     *s += 2;
-    2
+    Ok(2)
 }
 
 /// `write_string` (duplicated from pdfobj.c): a PDF literal string (C
@@ -128,7 +129,7 @@ fn is_delim(c: u8) -> bool {
 }
 
 /// `write_name`: a PDF name (`#xx` escapes; C stops at a NUL).
-fn write_name(buf: &mut [u8], outptr: &mut usize, endptr: usize, name_data: &[u8]) {
+fn write_name(buf: &mut [u8], outptr: &mut usize, endptr: usize, name_data: &[u8]) -> Result<()> {
     buf[*outptr] = b'/';
     *outptr += 1;
     for &c in name_data.iter().take_while(|&&c| c != 0) {
@@ -137,31 +138,34 @@ fn write_name(buf: &mut [u8], outptr: &mut usize, endptr: usize, name_data: &[u8
             // "space" is here.
             buf[*outptr] = b'#';
             *outptr += 1;
-            sputx(c, buf, outptr, endptr);
+            sputx(c, buf, outptr, endptr)?;
         } else {
             buf[*outptr] = c;
             *outptr += 1;
         }
     }
+    Ok(())
 }
 
 impl Dpx {
     /// `pdf_add_stream(stream, fmt_buf)` of `"%d <word>\n"`.
-    fn cmap_write_count(&mut self, stream: Obj, n: i32, word: &[u8]) {
+    fn cmap_write_count(&mut self, stream: Obj, n: i32, word: &[u8]) -> Result<()> {
         let mut b = Buf::new();
         b.int(n);
         b.push(b' ');
         b.extend(word);
         b.push(b'\n');
-        self.o.add_stream(stream, b.as_bytes());
+        self.o.add_stream(stream, b.as_bytes())?;
+        Ok(())
     }
 
     /// The bfchar flush: `count beginbfchar`, `wbuf`, `endbfchar`.
-    fn cmap_write_flush_bfchar(&mut self, stream: Obj, count: i32, wbuf: &mut Sbuf) {
-        self.cmap_write_count(stream, count, b"beginbfchar");
-        self.o.add_stream(stream, wbuf.written());
+    fn cmap_write_flush_bfchar(&mut self, stream: Obj, count: i32, wbuf: &mut Sbuf) -> Result<()> {
+        self.cmap_write_count(stream, count, b"beginbfchar")?;
+        self.o.add_stream(stream, wbuf.written())?;
         wbuf.curptr = 0;
-        self.o.add_stream(stream, b"endbfchar\n");
+        self.o.add_stream(stream, b"endbfchar\n")?;
+        Ok(())
     }
 
     /// `write_map`: `mtab` a 256-entry table, `codestr[..depth]` the code
@@ -174,7 +178,7 @@ impl Dpx {
         depth: i32,
         wbuf: &mut Sbuf,
         stream: Obj,
-    ) -> i32 {
+    ) -> Result<i32> {
         let mut count = count;
         let d = depth as usize;
         // (start, count)
@@ -186,7 +190,7 @@ impl Dpx {
             let e = &mtab[c as usize];
             if LOOKUP_CONTINUE(e.flag) {
                 let mtab1 = e.next.as_ref().expect("CMap table without next");
-                count = self.write_map(mtab1, count, codestr, depth + 1, wbuf, stream);
+                count = self.write_map(mtab1, count, codestr, depth + 1, wbuf, stream)?;
             } else if MAP_DEFINED(e.flag) {
                 match MAP_TYPE(e.flag) {
                     MAP_IS_CID | MAP_IS_CODE => {
@@ -197,13 +201,13 @@ impl Dpx {
                         } else {
                             wbuf.put(b'<');
                             for i in 0..=d {
-                                wbuf.putx(codestr[i]);
+                                wbuf.putx(codestr[i])?;
                             }
                             wbuf.put(b'>');
                             wbuf.put(b' ');
                             wbuf.put(b'<');
                             for i in 0..e.len as usize {
-                                wbuf.putx(e.code[i]);
+                                wbuf.putx(e.code[i])?;
                             }
                             wbuf.put(b'>');
                             wbuf.put(b'\n');
@@ -211,11 +215,11 @@ impl Dpx {
                         }
                     }
                     MAP_IS_NAME => {
-                        error!("{}: Unexpected error...", CMAP_DEBUG_STR);
+                        fatal!("{}: Unexpected error...", CMAP_DEBUG_STR);
                     }
                     MAP_IS_NOTDEF => {}
                     t => {
-                        error!("{}: Unknown mapping type: {}", CMAP_DEBUG_STR, t);
+                        fatal!("{}: Unknown mapping type: {}", CMAP_DEBUG_STR, t);
                     }
                 }
             }
@@ -223,9 +227,9 @@ impl Dpx {
             // Flush if necessary
             if count >= 100 || wbuf.curptr >= wbuf.limptr {
                 if count > 100 {
-                    error!("Unexpected error....: {}", count);
+                    fatal!("Unexpected error....: {}", count);
                 }
-                self.cmap_write_flush_bfchar(stream, count, wbuf);
+                self.cmap_write_flush_bfchar(stream, count, wbuf)?;
                 count = 0;
             }
             c += 1;
@@ -233,57 +237,57 @@ impl Dpx {
 
         if !blocks.is_empty() {
             if count > 0 {
-                self.cmap_write_flush_bfchar(stream, count, wbuf);
+                self.cmap_write_flush_bfchar(stream, count, wbuf)?;
                 count = 0;
             }
-            self.cmap_write_count(stream, blocks.len() as i32, b"beginbfrange");
+            self.cmap_write_count(stream, blocks.len() as i32, b"beginbfrange")?;
             for &(start, bcount) in &blocks {
                 let c = start;
                 wbuf.put(b'<');
                 for j in 0..d {
-                    wbuf.putx(codestr[j]);
+                    wbuf.putx(codestr[j])?;
                 }
-                wbuf.putx(c as u8);
+                wbuf.putx(c as u8)?;
                 wbuf.put(b'>');
                 wbuf.put(b' ');
                 wbuf.put(b'<');
                 for j in 0..d {
-                    wbuf.putx(codestr[j]);
+                    wbuf.putx(codestr[j])?;
                 }
-                wbuf.putx((c + bcount) as u8);
+                wbuf.putx((c + bcount) as u8)?;
                 wbuf.put(b'>');
                 wbuf.put(b' ');
                 wbuf.put(b'<');
                 let e = &mtab[c as usize];
                 for j in 0..e.len as usize {
-                    wbuf.putx(e.code[j]);
+                    wbuf.putx(e.code[j])?;
                 }
                 wbuf.put(b'>');
                 wbuf.put(b'\n');
             }
-            self.o.add_stream(stream, wbuf.written());
+            self.o.add_stream(stream, wbuf.written())?;
             wbuf.curptr = 0;
-            self.o.add_stream(stream, b"endbfrange\n");
+            self.o.add_stream(stream, b"endbfrange\n")?;
         }
 
-        count
+        Ok(count)
     }
 
     /// `CMap_create_stream`: none for an invalid CMap. A `use_cmap` is an
     /// error (as in C: "UseCMap found (not supported yet)", the code after
     /// it is unreachable). Pass a CMap not borrowed from `self` (clone it
     /// out of the cache if needed).
-    pub fn CMap_create_stream(&mut self, cmap: &CMap) -> Option<Obj> {
-        if !self.CMap_is_valid(cmap) {
+    pub fn CMap_create_stream(&mut self, cmap: &CMap) -> Result<Option<Obj>> {
+        if !self.CMap_is_valid(cmap)? {
             warn!("Invalid CMap");
-            return None;
+            return Ok(None);
         }
         if cmap.type_ == CMAP_TYPE_IDENTITY {
-            return None;
+            return Ok(None);
         }
 
         let stream = self.o.new_stream(STREAM_COMPRESS);
-        let stream_dict = self.o.stream_dict(stream);
+        let stream_dict = self.o.stream_dict(stream)?;
 
         let csi = match cmap.CMap_get_CIDSysInfo() {
             Some(csi) => csi.clone(),
@@ -301,22 +305,22 @@ impl Dpx {
 
         if cmap.type_ != CMAP_TYPE_TO_UNICODE {
             let csi_dict = self.o.new_dict();
-            self.o.put_string(csi_dict, b"Registry", cstr(&registry));
-            self.o.put_string(csi_dict, b"Ordering", cstr(&ordering));
+            self.o.put_string(csi_dict, b"Registry", cstr(&registry))?;
+            self.o.put_string(csi_dict, b"Ordering", cstr(&ordering))?;
             self.o
-                .put_number(csi_dict, b"Supplement", f64::from(csi.supplement));
-            self.o.put_name(stream_dict, b"Type", b"CMap");
-            self.o.put_name(stream_dict, b"CMapName", cstr(&name));
-            self.o.put(stream_dict, b"CIDSystemInfo", csi_dict);
+                .put_number(csi_dict, b"Supplement", f64::from(csi.supplement))?;
+            self.o.put_name(stream_dict, b"Type", b"CMap")?;
+            self.o.put_name(stream_dict, b"CMapName", cstr(&name))?;
+            self.o.put(stream_dict, b"CIDSystemInfo", csi_dict)?;
             if cmap.wmode != 0 {
                 self.o
-                    .put_number(stream_dict, b"WMode", f64::from(cmap.wmode));
+                    .put_number(stream_dict, b"WMode", f64::from(cmap.wmode))?;
             }
         }
 
         // TODO: Predefined CMaps need not to be embedded.
         if cmap.use_cmap.is_some() {
-            error!("UseCMap found (not supported yet)...");
+            fatal!("UseCMap found (not supported yet)...");
         }
 
         let max_in = cmap.profile.max_bytes_in;
@@ -329,11 +333,11 @@ impl Dpx {
         let mut codestr = vec![0u8; max_in.max(0) as usize];
 
         // Start CMap
-        self.o.add_stream(stream, CMAP_BEGIN);
+        self.o.add_stream(stream, CMAP_BEGIN)?;
 
         wbuf.puts(b"/CMapName ");
         let lim = wbuf.limptr;
-        write_name(&mut wbuf.buf, &mut wbuf.curptr, lim, &name);
+        write_name(&mut wbuf.buf, &mut wbuf.curptr, lim, &name)?;
         wbuf.puts(b" def\n");
         let mut b = Buf::new();
         let _ = write!(b, "/CMapType {} def\n", cmap.type_);
@@ -354,7 +358,7 @@ impl Dpx {
         let mut b = Buf::new();
         let _ = write!(b, "  /Supplement {}\n>> def\n", csi.supplement);
         wbuf.puts(b.as_bytes());
-        self.o.add_stream(stream, wbuf.written());
+        self.o.add_stream(stream, wbuf.written())?;
         wbuf.curptr = 0;
 
         // codespacerange
@@ -364,39 +368,39 @@ impl Dpx {
         for r in &cmap.codespace {
             wbuf.put(b'<');
             for j in 0..r.dim as usize {
-                wbuf.putx(r.code_lo[j]);
+                wbuf.putx(r.code_lo[j])?;
             }
             wbuf.put(b'>');
             wbuf.put(b' ');
             wbuf.put(b'<');
             for j in 0..r.dim as usize {
-                wbuf.putx(r.code_hi[j]);
+                wbuf.putx(r.code_hi[j])?;
             }
             wbuf.put(b'>');
             wbuf.put(b'\n');
         }
-        self.o.add_stream(stream, wbuf.written());
+        self.o.add_stream(stream, wbuf.written())?;
         wbuf.curptr = 0;
-        self.o.add_stream(stream, b"endcodespacerange\n");
+        self.o.add_stream(stream, b"endcodespacerange\n")?;
 
         // CMap body
         if let Some(tbl) = cmap.map_tbl.as_ref() {
-            let count = self.write_map(tbl, 0, &mut codestr, 0, &mut wbuf, stream); // Top node
+            let count = self.write_map(tbl, 0, &mut codestr, 0, &mut wbuf, stream)?; // Top node
             if count > 0 {
                 // Flush
                 if count > 100 {
-                    error!("Unexpected error....: {}", count);
+                    fatal!("Unexpected error....: {}", count);
                 }
-                self.cmap_write_count(stream, count, b"beginbfchar");
-                self.o.add_stream(stream, wbuf.written());
-                self.o.add_stream(stream, b"endbfchar\n");
+                self.cmap_write_count(stream, count, b"beginbfchar")?;
+                self.o.add_stream(stream, wbuf.written())?;
+                self.o.add_stream(stream, b"endbfchar\n")?;
                 wbuf.curptr = 0;
             }
         }
         // End CMap
-        self.o.add_stream(stream, CMAP_END);
+        self.o.add_stream(stream, CMAP_END)?;
 
-        Some(stream)
+        Ok(Some(stream))
     }
 }
 
@@ -446,8 +450,8 @@ mod tests {
         }
         c.CMap_add_bfchar(&[0x50], &[0x00, 0x50, 0x00, 0x60]);
         c.CMap_add_bfchar(&[0x60], &[0x00, 0x61]);
-        let s = d.CMap_create_stream(&c).unwrap();
-        let text = d.o.stream_data(s).to_vec();
+        let s = d.CMap_create_stream(&c).unwrap().unwrap();
+        let text = d.o.stream_data(s).unwrap().to_vec();
         let want: &[u8] = b"/CIDInit /ProcSet findresource begin\n12 dict begin\nbegincmap\n\
 /CMapName /Test def\n/CMapType 2 def\n/CIDSystemInfo <<\n  /Registry (Adobe)\n  /Ordering (UCS)\n  /Supplement 0\n>> def\n\
 1 begincodespacerange\n<00> <FF>\nendcodespacerange\n\
@@ -468,8 +472,8 @@ endcmap\nCMapName currentdict /CMap defineresource pop\nend\nend\n";
             let v = u16::from(b) * 2;
             c.CMap_add_bfchar(&[b], &v.to_be_bytes());
         }
-        let s = d.CMap_create_stream(&c).unwrap();
-        let text = String::from(core::str::from_utf8(d.o.stream_data(s)).unwrap());
+        let s = d.CMap_create_stream(&c).unwrap().unwrap();
+        let text = String::from(core::str::from_utf8(d.o.stream_data(s).unwrap()).unwrap());
         let a = text.find("100 beginbfchar\n<00> <0000>\n").unwrap();
         let b = text
             .find("endbfchar\n50 beginbfchar\n<64> <00C8>\n")
@@ -482,7 +486,7 @@ endcmap\nCMapName currentdict /CMap defineresource pop\nend\nend\n";
     fn name_and_string_escapes() {
         let mut buf = vec![0u8; 64];
         let mut p = 0;
-        write_name(&mut buf, &mut p, 64, b"A B#(\x80");
+        write_name(&mut buf, &mut p, 64, b"A B#(\x80").unwrap();
         write_string(&mut buf, &mut p, 64, b"a(b)\\\x01");
         assert_eq!(&buf[..p], b"/A#20B#23#28#80(a\\(b\\)\\\\\\001)");
     }
@@ -490,13 +494,14 @@ endcmap\nCMapName currentdict /CMap defineresource pop\nend\nend\n";
     #[test]
     fn decode_identity_and_cid() {
         let mut d = dpx();
-        d.CMap_cache_init();
+        d.CMap_cache_init().unwrap();
         let input = [0x00u8, 0x41, 0x01, 0x02];
         let mut out = [0u8; 4];
         let (mut ip, mut il, mut op, mut ol) = (0usize, 4i32, 0usize, 4i32);
         let n = {
-            let id = d.CMap_cache_get(0);
+            let id = d.CMap_cache_get(0).unwrap();
             d.CMap_decode(id, &input, &mut ip, &mut il, &mut out, &mut op, &mut ol)
+                .unwrap()
         };
         assert_eq!((n, ip, il, op, ol), (2, 4, 0, 4, 0));
         assert_eq!(out, input);
@@ -511,7 +516,9 @@ endcmap\nCMapName currentdict /CMap defineresource pop\nend\nend\n";
         let input = [0x41u8, 0x81, 0x41, 0x7f];
         let mut out = [0u8; 6];
         let (mut ip, mut il, mut op, mut ol) = (0usize, 4i32, 0usize, 6i32);
-        let n = d.CMap_decode(&c, &input, &mut ip, &mut il, &mut out, &mut op, &mut ol);
+        let n = d
+            .CMap_decode(&c, &input, &mut ip, &mut il, &mut out, &mut op, &mut ol)
+            .unwrap();
         assert_eq!(n, 3);
         assert_eq!(out, [0, 34, 0x02, 0x7a, 0, 0]); // 0x7f undefined: notdef
         assert_eq!((ip, il, op, ol), (4, 0, 6, 0));

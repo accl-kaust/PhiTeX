@@ -766,14 +766,14 @@ impl Dpx {
         }
     }
     /// `iccp_load_profile`: the colorspace id, or -1.
-    pub fn iccp_load_profile(&mut self, ident: Option<&[u8]>, profile: &[u8]) -> i32 {
+    pub fn iccp_load_profile(&mut self, ident: Option<&[u8]>, profile: &[u8]) -> Result<i32> {
         let mut icch = IccHeader::default();
         icch.iccp_init_icc_header();
         if self.iccp_unpack_header(&mut icch, profile, 1) < 0 {
             /* check size */
             warn!("Invalid ICC profile header");
             self.print_iccp_header(&icch, None);
-            return -1;
+            return Ok(-1);
         }
 
         if self.iccp_version_supported((icch.version >> 24) & 0xff, (icch.version >> 16) & 0xff)
@@ -782,13 +782,13 @@ impl Dpx {
             warn!("ICC profile format spec. version not supported in current PDF version setting.");
             warn!("ICC profile not embedded.");
             self.print_iccp_header(&icch, None);
-            return -1;
+            return Ok(-1);
         }
 
         if self.iccp_dev_class_allowed(icch.dev_class) == 0 {
             warn!("Unsupported ICC Profile Device Class:");
             self.print_iccp_header(&icch, None);
-            return -1;
+            return Ok(-1);
         }
 
         let colorspace = if icch.color_space == str2icc_sig(b"RGB ") {
@@ -800,14 +800,14 @@ impl Dpx {
         } else {
             warn!("Unsupported input color space.");
             self.print_iccp_header(&icch, None);
-            return -1;
+            return Ok(-1);
         };
 
         let checksum = iccp_get_checksum(profile);
         if icch.id != NULLBYTES16 && icch.id != checksum {
             warn!("Invalid ICC profile: Inconsistent checksum.");
             self.print_iccp_header(&icch, Some(&checksum));
-            return -1;
+            return Ok(-1);
         }
 
         let mut cdata = IccbasedCdata::default();
@@ -818,7 +818,7 @@ impl Dpx {
         let cspc_id =
             self.pdf_colorspace_findresource(ident, PDF_COLORSPACE_TYPE_ICCBASED, Some(&cdata));
         if cspc_id >= 0 {
-            return cspc_id;
+            return Ok(cspc_id);
         }
         if self.conf.verbose_level > 1 {
             self.print_iccp_header(&icch, Some(&checksum));
@@ -828,23 +828,23 @@ impl Dpx {
 
         let stream = self.o.new_stream(crate::obj::STREAM_COMPRESS);
         let n = self.o.new_name(b"ICCBased");
-        self.o.add_array(resource, n);
-        let r = self.o.ref_obj(stream);
-        self.o.add_array(resource, r);
+        self.o.add_array(resource, n)?;
+        let r = self.o.ref_obj(stream)?;
+        self.o.add_array(resource, r)?;
 
-        let stream_dict = self.o.stream_dict(stream);
+        let stream_dict = self.o.stream_dict(stream)?;
         let n = f64::from(get_num_components_iccbased(&cdata));
-        self.o.put_number(stream_dict, b"N", n);
+        self.o.put_number(stream_dict, b"N", n)?;
 
-        self.o.add_stream(stream, profile);
-        self.o.release(stream);
+        self.o.add_stream(stream, profile)?;
+        self.o.release(stream)?;
 
-        self.pdf_colorspace_defineresource(
+        Ok(self.pdf_colorspace_defineresource(
             ident,
             PDF_COLORSPACE_TYPE_ICCBASED,
             Some(cdata),
             resource,
-        )
+        ))
     }
     /// `pdf_colorspace_findresource`: the id, or -1.
     fn pdf_colorspace_findresource(
@@ -879,13 +879,13 @@ impl Dpx {
         -1 /* not found */
     }
     /// `pdf_clean_colorspace_struct`: releases its objects.
-    fn pdf_clean_colorspace_struct(&mut self, colorspace: &mut PdfColorspace) {
+    fn pdf_clean_colorspace_struct(&mut self, colorspace: &mut PdfColorspace) -> Result<()> {
         colorspace.ident = None;
         if let Some(r) = colorspace.resource.take() {
-            self.o.release(r);
+            self.o.release(r)?;
         }
         if let Some(r) = colorspace.reference.take() {
-            self.o.release(r);
+            self.o.release(r)?;
         }
 
         if let Some(cdata) = &colorspace.cdata
@@ -895,15 +895,17 @@ impl Dpx {
         }
         colorspace.cdata = None;
         colorspace.subtype = PDF_COLORSPACE_TYPE_INVALID;
+        Ok(())
     }
     /// `pdf_flush_colorspace`: releases its objects.
-    fn pdf_flush_colorspace(&mut self, colorspace: &mut PdfColorspace) {
+    fn pdf_flush_colorspace(&mut self, colorspace: &mut PdfColorspace) -> Result<()> {
         if let Some(r) = colorspace.resource.take() {
-            self.o.release(r);
+            self.o.release(r)?;
         }
         if let Some(r) = colorspace.reference.take() {
-            self.o.release(r);
+            self.o.release(r)?;
         }
+        Ok(())
     }
     /// `pdf_colorspace_defineresource`: the new id.
     fn pdf_colorspace_defineresource(
@@ -929,15 +931,15 @@ impl Dpx {
         cspc_id
     }
     /// `pdf_get_colorspace_reference`.
-    pub fn pdf_get_colorspace_reference(&mut self, cspc_id: i32) -> Obj {
+    pub fn pdf_get_colorspace_reference(&mut self, cspc_id: i32) -> Result<Obj> {
         let i = cspc_id as usize;
         if self.color.cspc_cache[i].reference.is_none() {
             let resource = self.color.cspc_cache[i]
                 .resource
                 .expect("pdf_get_colorspace_reference: no resource");
-            let r = self.o.ref_obj(resource);
+            let r = self.o.ref_obj(resource)?;
             self.color.cspc_cache[i].reference = Some(r);
-            self.o.release(resource); /* .... */
+            self.o.release(resource)?; /* .... */
             self.color.cspc_cache[i].resource = None;
         }
 
@@ -949,12 +951,13 @@ impl Dpx {
         self.color.cspc_cache = Vec::new();
     }
     /// `pdf_close_colors`.
-    pub fn pdf_close_colors(&mut self) {
+    pub fn pdf_close_colors(&mut self) -> Result<()> {
         let mut cache = core::mem::take(&mut self.color.cspc_cache);
         for colorspace in &mut cache {
-            self.pdf_flush_colorspace(colorspace);
-            self.pdf_clean_colorspace_struct(colorspace);
+            self.pdf_flush_colorspace(colorspace)?;
+            self.pdf_clean_colorspace_struct(colorspace)?;
         }
+        Ok(())
     }
     /// `pdf_color_set_color`: appends the operators (`mask` 0 or 0x20);
     /// bytes written. A `Dpx` method: the colorspace and pattern cases
@@ -966,7 +969,7 @@ impl Dpx {
         buf: &mut Buf,
         buffer_len: usize,
         mask: u8,
-    ) -> usize {
+    ) -> Result<usize> {
         let start = buf.len();
         {
             let mut estimate = 0usize;
@@ -976,7 +979,7 @@ impl Dpx {
             estimate += b" /DeiceGray CS".len();
             if estimate + 1 > buffer_len {
                 warn!("Not enough buffer space allocated for writing set_color op...");
-                return 0;
+                return Ok(0);
             }
         }
         let n = color.num_components.max(0) as usize;
@@ -1049,9 +1052,9 @@ impl Dpx {
                 buf.push(b'S' | mask);
                 buf.push(b'C' | mask);
                 let r = self
-                    .pdf_get_resource_reference(color.res_id)
+                    .pdf_get_resource_reference(color.res_id)?
                     .expect("pdf_color_set_color: no ColorSpace resource");
-                self.pdf_doc_add_page_resource(b"ColorSpace", &res_name, r);
+                self.pdf_doc_add_page_resource(b"ColorSpace", &res_name, r)?;
             }
             PDF_COLORSPACE_TYPE_PATTERN => {
                 if color.res_id < 0 {
@@ -1070,9 +1073,9 @@ impl Dpx {
                         sprint_value(buf, color.values[i]);
                     }
                     let r = self
-                        .pdf_get_resource_reference(color.res_id)
+                        .pdf_get_resource_reference(color.res_id)?
                         .expect("pdf_color_set_color: no ColorSpace resource");
-                    self.pdf_doc_add_page_resource(b"ColorSpace", &res_name, r);
+                    self.pdf_doc_add_page_resource(b"ColorSpace", &res_name, r)?;
                 }
                 let res_name = res_name(b"XP", color.pattern_id & 0xffff, 15);
                 buf.extend(b" /");
@@ -1083,9 +1086,9 @@ impl Dpx {
                 buf.push(b'N' | mask);
 
                 let r = self
-                    .pdf_get_resource_reference(color.pattern_id)
+                    .pdf_get_resource_reference(color.pattern_id)?
                     .expect("pdf_color_set_color: no Pattern resource");
-                self.pdf_doc_add_page_resource(b"Pattern", &res_name, r);
+                self.pdf_doc_add_page_resource(b"Pattern", &res_name, r)?;
             }
             _ => {
                 let res_name = res_name(b"XC", color.res_id & 0xffff, 7);
@@ -1102,13 +1105,13 @@ impl Dpx {
                 buf.push(b'C' | mask);
                 buf.push(b'N' | mask);
                 let r = self
-                    .pdf_get_resource_reference(color.res_id)
+                    .pdf_get_resource_reference(color.res_id)?
                     .expect("pdf_color_set_color: no ColorSpace resource");
-                self.pdf_doc_add_page_resource(b"ColorSpace", &res_name, r);
+                self.pdf_doc_add_page_resource(b"ColorSpace", &res_name, r)?;
             }
         }
 
-        buf.len() - start
+        Ok(buf.len() - start)
     }
     /// `pdf_color_clear_stack`.
     pub fn pdf_color_clear_stack(&mut self) {
@@ -1127,30 +1130,33 @@ impl Dpx {
         cs.fill[0].pdf_color_black();
     }
     /// `pdf_color_set`.
-    pub fn pdf_color_set(&mut self, sc: &PdfColor, fc: &PdfColor) {
+    pub fn pdf_color_set(&mut self, sc: &PdfColor, fc: &PdfColor) -> Result<()> {
         let cs = &mut self.color.color_stack;
         let i = cs.current as usize;
         cs.stroke[i].pdf_color_copycolor(sc);
         cs.fill[i].pdf_color_copycolor(fc);
-        self.pdf_dev_reset_color(1);
+        self.pdf_dev_reset_color(1)?;
+        Ok(())
     }
     /// `pdf_color_push`.
-    pub fn pdf_color_push(&mut self, sc: &PdfColor, fc: &PdfColor) {
+    pub fn pdf_color_push(&mut self, sc: &PdfColor, fc: &PdfColor) -> Result<()> {
         if self.color.color_stack.current >= DEV_COLOR_STACK_MAX as i32 - 1 {
             warn!("Color stack overflow. Just ignore.");
         } else {
             self.color.color_stack.current += 1;
-            self.pdf_color_set(sc, fc);
+            self.pdf_color_set(sc, fc)?;
         }
+        Ok(())
     }
     /// `pdf_color_pop`.
-    pub fn pdf_color_pop(&mut self) {
+    pub fn pdf_color_pop(&mut self) -> Result<()> {
         if self.color.color_stack.current <= 0 {
             warn!("Color stack underflow. Just ignore.");
         } else {
             self.color.color_stack.current -= 1;
-            self.pdf_dev_reset_color(1);
+            self.pdf_dev_reset_color(1)?;
         }
+        Ok(())
     }
     /// `pdf_color_get_current`: copies of (stroke, fill).
     #[must_use]

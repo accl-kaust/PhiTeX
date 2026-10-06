@@ -9,13 +9,17 @@ use crate::prelude::*;
 use crate::specials::{SpcArg, SpcEnv, SpcHandler, cstr};
 
 /// `spc_handler_null`: skips the rest.
-fn spc_handler_null(dpx: &mut Dpx, spe: &mut SpcEnv, args: &mut SpcArg) -> i32 {
+fn spc_handler_null(dpx: &mut Dpx, spe: &mut SpcEnv, args: &mut SpcArg) -> Result<i32> {
     args.curptr = args.endptr;
-    0
+    Ok(0)
 }
 
 /// `spc_handler_dvipdfmx_catch_phantom`.
-fn spc_handler_dvipdfmx_catch_phantom(dpx: &mut Dpx, spe: &mut SpcEnv, args: &mut SpcArg) -> i32 {
+fn spc_handler_dvipdfmx_catch_phantom(
+    dpx: &mut Dpx,
+    spe: &mut SpcEnv,
+    args: &mut SpcArg,
+) -> Result<i32> {
     args.skip_white();
     let mode;
     {
@@ -25,10 +29,10 @@ fn spc_handler_dvipdfmx_catch_phantom(dpx: &mut Dpx, spe: &mut SpcEnv, args: &mu
         };
         let Some(b) = b else {
             crate::warn!("A boolean value expected but not found...");
-            return -1;
+            return Ok(-1);
         };
-        mode = i32::from(dpx.o.boolean_value(b));
-        dpx.o.release(b);
+        mode = i32::from(dpx.o.boolean_value(b)?);
+        dpx.o.release(b)?;
     }
     dpx.spc_set_linkmode(spe, mode);
 
@@ -38,7 +42,7 @@ fn spc_handler_dvipdfmx_catch_phantom(dpx: &mut Dpx, spe: &mut SpcEnv, args: &mu
         ti.transform_info_clear();
         let error = dpx.spc_util_read_dimtrns(spe, &mut ti, args, 0);
         if error != 0 {
-            return -1;
+            return Ok(-1);
         }
         if ti.flags & INFO_HAS_HEIGHT != 0 {
             dpx.spc_set_phantom(spe, ti.height, ti.depth);
@@ -46,7 +50,7 @@ fn spc_handler_dvipdfmx_catch_phantom(dpx: &mut Dpx, spe: &mut SpcEnv, args: &mu
         args.skip_white();
     }
 
-    0
+    Ok(0)
 }
 
 /// `dvipdfmx_handlers`.
@@ -75,13 +79,13 @@ pub fn spc_dvipdfmx_setup_handler(
     sph: &mut SpcHandler,
     spe: &mut SpcEnv,
     ap: &mut SpcArg,
-) -> i32 {
+) -> Result<i32> {
     let mut error = -1;
 
     ap.skip_white();
     if ap.curptr + 9 >= ap.endptr || !ap.rest().starts_with(b"dvipdfmx:") {
         dpx.spc_warn(spe, format_args!("Not dvipdfmx: special???"));
-        return -1;
+        return Ok(-1);
     }
     ap.curptr += 9;
 
@@ -104,7 +108,7 @@ pub fn spc_dvipdfmx_setup_handler(
         }
     }
 
-    error
+    Ok(error)
 }
 
 #[cfg(test)]

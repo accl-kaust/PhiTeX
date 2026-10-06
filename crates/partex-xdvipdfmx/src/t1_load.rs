@@ -578,14 +578,20 @@ fn t1_decrypt_in_place(key: u16, buf: &mut [u8]) {
 }
 
 /// `MATCH_NAME` (C dereferences a NULL token; none here does not match).
-fn match_name(t: Option<&PstObj>, n: &[u8]) -> bool {
-    t.is_some_and(|t| t.is_name() && t.pst_length_of() as usize == n.len() && t.pst_data_ptr() == n)
+fn match_name(t: Option<&PstObj>, n: &[u8]) -> Result<bool> {
+    Ok(match t {
+        Some(t) => t.is_name() && t.pst_length_of()? as usize == n.len() && t.pst_data_ptr()? == n,
+        None => false,
+    })
 }
 
 /// `MATCH_OP` (C dereferences a NULL token; none here does not match).
-fn match_op(t: Option<&PstObj>, n: &[u8]) -> bool {
-    t.is_some_and(|t| {
-        t.is_unknown() && t.pst_length_of() as usize == n.len() && t.pst_data_ptr() == n
+fn match_op(t: Option<&PstObj>, n: &[u8]) -> Result<bool> {
+    Ok(match t {
+        Some(t) => {
+            t.is_unknown() && t.pst_length_of()? as usize == n.len() && t.pst_data_ptr()? == n
+        }
+        None => false,
     })
 }
 
@@ -617,89 +623,89 @@ fn cstr(mut v: Vec<u8>) -> Vec<u8> {
 }
 
 /// `get_next_key` (static).
-fn get_next_key(s: &[u8], p: &mut usize) -> Option<Vec<u8>> {
+fn get_next_key(s: &[u8], p: &mut usize) -> Result<Option<Vec<u8>>> {
     let mut key = None;
 
     while *p < s.len() {
-        let Some(tok) = pst_get_token(s, p) else {
+        let Some(tok) = pst_get_token(s, p)? else {
             break;
         };
         if tok.is_name() {
-            key = tok.pst_getSV();
+            key = tok.pst_getSV()?;
             break;
         }
     }
 
-    key
+    Ok(key)
 }
 
 /// `seek_operator` (static): 0 found, -1 not.
-fn seek_operator(s: &[u8], p: &mut usize, op: &[u8]) -> i32 {
+fn seek_operator(s: &[u8], p: &mut usize, op: &[u8]) -> Result<i32> {
     let mut tok: Option<PstObj> = None;
 
     while *p < s.len() {
-        tok = pst_get_token(s, p);
+        tok = pst_get_token(s, p)?;
         if tok.is_none() {
             break;
         }
-        if match_op(tok.as_ref(), op) {
+        if match_op(tok.as_ref(), op)? {
             break;
         }
         tok = None;
     }
 
     if tok.is_none() {
-        return -1;
+        return Ok(-1);
     }
 
-    0
+    Ok(0)
 }
 
 /// `parse_svalue` (static): status and the value.
-fn parse_svalue(s: &[u8], p: &mut usize) -> (i32, Option<Vec<u8>>) {
-    let Some(tok) = pst_get_token(s, p) else {
-        return (-1, None);
+fn parse_svalue(s: &[u8], p: &mut usize) -> Result<(i32, Option<Vec<u8>>)> {
+    let Some(tok) = pst_get_token(s, p)? else {
+        return Ok((-1, None));
     };
     if tok.is_name() || tok.is_string() {
-        (1, tok.pst_getSV().map(cstr))
+        Ok((1, tok.pst_getSV()?.map(cstr)))
     } else {
-        (-1, None)
+        Ok((-1, None))
     }
 }
 
 /// `parse_bvalue` (static): status and the value.
-fn parse_bvalue(s: &[u8], p: &mut usize) -> (i32, f64) {
-    let Some(tok) = pst_get_token(s, p) else {
-        return (-1, 0.0);
+fn parse_bvalue(s: &[u8], p: &mut usize) -> Result<(i32, f64)> {
+    let Some(tok) = pst_get_token(s, p)? else {
+        return Ok((-1, 0.0));
     };
     if tok.is_boolean() {
-        (1, f64::from(tok.pst_getIV()))
+        Ok((1, f64::from(tok.pst_getIV()?)))
     } else {
-        (-1, 0.0)
+        Ok((-1, 0.0))
     }
 }
 
 /// `parse_nvalue` (static): the count read (or < 0) into `value`
 /// (at most `max`).
-fn parse_nvalue(s: &[u8], p: &mut usize, value: &mut [f64], max: i32) -> i32 {
+fn parse_nvalue(s: &[u8], p: &mut usize, value: &mut [f64], max: i32) -> Result<i32> {
     let mut argn = 0;
 
-    let mut tok = pst_get_token(s, p);
+    let mut tok = pst_get_token(s, p)?;
     let Some(t) = &tok else {
-        return -1;
+        return Ok(-1);
     };
     // All array elements must be numeric token. (ATM compatible)
     if t.is_number() && max > 0 {
-        value[0] = t.pst_getRV();
+        value[0] = t.pst_getRV()?;
         argn = 1;
     } else if t.is_mark() {
         // It does not distinguish '[' and '{'...
         tok = None;
         while *p < s.len() {
-            tok = pst_get_token(s, p);
+            tok = pst_get_token(s, p)?;
             match &tok {
                 Some(t) if t.is_number() && argn < max => {
-                    value[argn as usize] = t.pst_getRV();
+                    value[argn as usize] = t.pst_getRV()?;
                     argn += 1;
                     tok = None;
                 }
@@ -707,14 +713,14 @@ fn parse_nvalue(s: &[u8], p: &mut usize, value: &mut [f64], max: i32) -> i32 {
             }
         }
         if tok.is_none() {
-            return -1;
+            return Ok(-1);
         }
-        if !match_op(tok.as_ref(), b"]") && !match_op(tok.as_ref(), b"}") {
+        if !match_op(tok.as_ref(), b"]")? && !match_op(tok.as_ref(), b"}")? {
             argn = -1;
         }
     }
 
-    argn
+    Ok(argn)
 }
 
 /// `xstrdup(enc_vec[n])` (kpathsea's crashes on NULL; none stays none).
@@ -724,32 +730,32 @@ fn dup_name(v: &Option<Vec<u8>>) -> Option<Vec<u8>> {
 
 /// `try_put_or_putinterval` (static): "dup num num getinterval num exch
 /// putinterval" or "dup num exch num get put".
-fn try_put_or_putinterval(enc_vec: &mut [Option<Vec<u8>>], s: &[u8], p: &mut usize) -> i32 {
-    let tok = pst_get_token(s, p);
+fn try_put_or_putinterval(enc_vec: &mut [Option<Vec<u8>>], s: &[u8], p: &mut usize) -> Result<i32> {
+    let tok = pst_get_token(s, p)?;
     let num1 = iv(tok.as_ref());
     if !is_integer(tok.as_ref()) || num1 > 255 || num1 < 0 {
-        return -1;
+        return Ok(-1);
     }
 
-    let tok = pst_get_token(s, p);
+    let tok = pst_get_token(s, p)?;
     if tok.is_none() {
-        return -1;
-    } else if match_op(tok.as_ref(), b"exch") {
+        return Ok(-1);
+    } else if match_op(tok.as_ref(), b"exch")? {
         // dup num exch num get put
-        let tok = pst_get_token(s, p);
+        let tok = pst_get_token(s, p)?;
         let num2 = iv(tok.as_ref());
         if !is_integer(tok.as_ref()) || num2 > 255 || num2 < 0 {
-            return -1;
+            return Ok(-1);
         }
 
-        let tok = pst_get_token(s, p);
-        if !match_op(tok.as_ref(), b"get") {
-            return -1;
+        let tok = pst_get_token(s, p)?;
+        if !match_op(tok.as_ref(), b"get")? {
+            return Ok(-1);
         }
 
-        let tok = pst_get_token(s, p);
-        if !match_op(tok.as_ref(), b"put") {
-            return -1;
+        let tok = pst_get_token(s, p)?;
+        if !match_op(tok.as_ref(), b"put")? {
+            return Ok(-1);
         }
 
         enc_vec[num1 as usize] = dup_name(&enc_vec[num2 as usize]);
@@ -759,25 +765,25 @@ fn try_put_or_putinterval(enc_vec: &mut [Option<Vec<u8>>], s: &[u8], p: &mut usi
     } {
         let num2 = iv(tok.as_ref());
 
-        let tok = pst_get_token(s, p);
-        if !match_op(tok.as_ref(), b"getinterval") {
-            return -1;
+        let tok = pst_get_token(s, p)?;
+        if !match_op(tok.as_ref(), b"getinterval")? {
+            return Ok(-1);
         }
 
-        let tok = pst_get_token(s, p);
+        let tok = pst_get_token(s, p)?;
         let num3 = iv(tok.as_ref());
         if !is_integer(tok.as_ref()) || num3 + num2 > 255 || num3 < 0 {
-            return -1;
+            return Ok(-1);
         }
 
-        let tok = pst_get_token(s, p);
-        if !match_op(tok.as_ref(), b"exch") {
-            return -1;
+        let tok = pst_get_token(s, p)?;
+        if !match_op(tok.as_ref(), b"exch")? {
+            return Ok(-1);
         }
 
-        let tok = pst_get_token(s, p);
-        if !match_op(tok.as_ref(), b"putinterval") {
-            return -1;
+        let tok = pst_get_token(s, p)?;
+        if !match_op(tok.as_ref(), b"putinterval")? {
+            return Ok(-1);
         }
 
         for i in 0..num2 {
@@ -790,14 +796,18 @@ fn try_put_or_putinterval(enc_vec: &mut [Option<Vec<u8>>], s: &[u8], p: &mut usi
             }
         }
     } else {
-        return -1;
+        return Ok(-1);
     }
 
-    0
+    Ok(0)
 }
 
 /// `parse_encoding` (static).
-fn parse_encoding(mut enc_vec: Option<&mut [Option<Vec<u8>>]>, s: &[u8], p: &mut usize) -> i32 {
+fn parse_encoding(
+    mut enc_vec: Option<&mut [Option<Vec<u8>>]>,
+    s: &[u8],
+    p: &mut usize,
+) -> Result<i32> {
     //  StandardEncoding def
     // or
     //  ISOLatin1Encoding def
@@ -806,8 +816,8 @@ fn parse_encoding(mut enc_vec: Option<&mut [Option<Vec<u8>>]>, s: &[u8], p: &mut
     //  dup int name put
     //  ...
     //  [readonly] def
-    let tok = pst_get_token(s, p);
-    if match_op(tok.as_ref(), b"StandardEncoding") {
+    let tok = pst_get_token(s, p)?;
+    if match_op(tok.as_ref(), b"StandardEncoding")? {
         if let Some(enc_vec) = enc_vec {
             for code in 0..256 {
                 enc_vec[code] = if STANDARD_ENCODING[code] != b".notdef" {
@@ -817,7 +827,7 @@ fn parse_encoding(mut enc_vec: Option<&mut [Option<Vec<u8>>]>, s: &[u8], p: &mut
                 };
             }
         }
-    } else if match_op(tok.as_ref(), b"ISOLatin1Encoding") {
+    } else if match_op(tok.as_ref(), b"ISOLatin1Encoding")? {
         if let Some(enc_vec) = enc_vec {
             for code in 0..256 {
                 enc_vec[code] = if ISO_LATIN1_ENCODING[code] != b".notdef" {
@@ -827,32 +837,32 @@ fn parse_encoding(mut enc_vec: Option<&mut [Option<Vec<u8>>]>, s: &[u8], p: &mut
                 };
             }
         }
-    } else if match_op(tok.as_ref(), b"ExpertEncoding") {
+    } else if match_op(tok.as_ref(), b"ExpertEncoding")? {
         if enc_vec.is_some() {
             warn!("ExpertEncoding not supported.");
-            return -1;
+            return Ok(-1);
         }
         // Not supported yet.
     } else {
-        seek_operator(s, p, b"array");
+        seek_operator(s, p, b"array")?;
         // Pick all seaquences that matches "dup n /Name put" until
         // occurrence of "def" or "readonly".
         while *p < s.len() {
-            let tok = pst_get_token(s, p);
+            let tok = pst_get_token(s, p)?;
             if tok.is_none() {
                 break;
             }
-            if match_op(tok.as_ref(), b"def") || match_op(tok.as_ref(), b"readonly") {
+            if match_op(tok.as_ref(), b"def")? || match_op(tok.as_ref(), b"readonly")? {
                 break;
-            } else if !match_op(tok.as_ref(), b"dup") {
+            } else if !match_op(tok.as_ref(), b"dup")? {
                 continue;
             }
 
             // cmctt10.pfb for examples contains the following PS code
             //     dup num num getinterval num exch putinterval
             //     dup num exch num get put
-            let tok = pst_get_token(s, p);
-            if match_op(tok.as_ref(), b"dup") {
+            let tok = pst_get_token(s, p)?;
+            if match_op(tok.as_ref(), b"dup")? {
                 // possibly putinterval type
                 match enc_vec.as_deref_mut() {
                     None => {
@@ -861,7 +871,7 @@ fn parse_encoding(mut enc_vec: Option<&mut [Option<Vec<u8>>]>, s: &[u8], p: &mut
                         );
                     }
                     Some(enc_vec) => {
-                        try_put_or_putinterval(enc_vec, s, p);
+                        try_put_or_putinterval(enc_vec, s, p)?;
                     }
                 }
                 continue;
@@ -871,16 +881,16 @@ fn parse_encoding(mut enc_vec: Option<&mut [Option<Vec<u8>>]>, s: &[u8], p: &mut
                 continue;
             }
 
-            let tok = pst_get_token(s, p);
+            let tok = pst_get_token(s, p)?;
             if !is_name(tok.as_ref()) {
                 continue;
             }
             if let Some(enc_vec) = enc_vec.as_deref_mut() {
-                enc_vec[code as usize] = tok.as_ref().and_then(PstObj::pst_getSV);
+                enc_vec[code as usize] = tok.as_ref().map(PstObj::pst_getSV).transpose()?.flatten();
             }
 
-            let tok = pst_get_token(s, p);
-            if !match_op(tok.as_ref(), b"put") {
+            let tok = pst_get_token(s, p)?;
+            if !match_op(tok.as_ref(), b"put")? {
                 // (C dereferences a NULL enc_vec here.)
                 if let Some(enc_vec) = enc_vec.as_deref_mut() {
                     enc_vec[code as usize] = None;
@@ -890,7 +900,7 @@ fn parse_encoding(mut enc_vec: Option<&mut [Option<Vec<u8>>]>, s: &[u8], p: &mut
         }
     }
 
-    0
+    Ok(0)
 }
 
 /// `CHECK_ARGN_EQ(n)`, `CHECK_ARGN_GE(n)`: false (C returns -1).
@@ -925,75 +935,75 @@ fn parse_part1(
     mut enc_vec: Option<&mut [Option<Vec<u8>>]>,
     s: &[u8],
     p: &mut usize,
-) -> i32 {
+) -> Result<i32> {
     let mut argv = [0.0f64; MAX_ARGS];
 
     // We skip PostScript code inserted before the beginning of font
     // dictionary so that parser will not be confused with it. See
     // LMRoman10-Regular (lmr10.pfb) for example.
-    if seek_operator(s, p, b"begin") < 0 {
-        return -1;
+    if seek_operator(s, p, b"begin")? < 0 {
+        return Ok(-1);
     }
 
     while *p < s.len() {
-        let Some(key) = get_next_key(s, p) else {
+        let Some(key) = get_next_key(s, p)? else {
             break;
         };
         let k = key.as_slice();
         if k == b"Encoding" {
-            if parse_encoding(enc_vec.as_deref_mut(), s, p) < 0 {
-                return -1;
+            if parse_encoding(enc_vec.as_deref_mut(), s, p)? < 0 {
+                return Ok(-1);
             }
         } else if k == b"FontName" {
-            let (argn, strval) = parse_svalue(s, p);
+            let (argn, strval) = parse_svalue(s, p)?;
             if !check_argn_eq(argn, 1) {
-                return -1;
+                return Ok(-1);
             }
             let mut strval = strval.unwrap_or_default();
             if strval.len() > TYPE1_NAME_LEN_MAX {
                 warn!("FontName too long: ({} bytes)", strval.len());
                 strval.truncate(TYPE1_NAME_LEN_MAX);
             }
-            font.cff_set_name(&strval);
+            font.cff_set_name(&strval)?;
         } else if k == b"FontType" {
-            let argn = parse_nvalue(s, p, &mut argv, 1);
+            let argn = parse_nvalue(s, p, &mut argv, 1)?;
             if !check_argn_eq(argn, 1) {
-                return -1;
+                return Ok(-1);
             }
             if argv[0] != 1.0 {
                 warn!("FontType {} not supported.", argv[0] as i32);
-                return -1;
+                return Ok(-1);
             }
         } else if k == b"ItalicAngle" || k == b"StrokeWidth" || k == b"PaintType" {
-            let argn = parse_nvalue(s, p, &mut argv, 1);
+            let argn = parse_nvalue(s, p, &mut argv, 1)?;
             if !check_argn_eq(argn, 1) {
-                return -1;
+                return Ok(-1);
             }
             if argv[0] != 0.0 {
-                topdict(font).cff_dict_add(k, 1);
-                topdict(font).cff_dict_set(k, 0, argv[0]);
+                topdict(font).cff_dict_add(k, 1)?;
+                topdict(font).cff_dict_set(k, 0, argv[0])?;
             }
         } else if k == b"UnderLinePosition" || k == b"UnderLineThickness" {
-            let argn = parse_nvalue(s, p, &mut argv, 1);
+            let argn = parse_nvalue(s, p, &mut argv, 1)?;
             if !check_argn_eq(argn, 1) {
-                return -1;
+                return Ok(-1);
             }
-            topdict(font).cff_dict_add(k, 1);
-            topdict(font).cff_dict_set(k, 0, argv[0]);
+            topdict(font).cff_dict_add(k, 1)?;
+            topdict(font).cff_dict_set(k, 0, argv[0])?;
         } else if k == b"FontBBox" {
-            let mut argn = parse_nvalue(s, p, &mut argv, 4);
+            let mut argn = parse_nvalue(s, p, &mut argv, 4)?;
             if !check_argn_eq(argn, 4) {
-                return -1;
+                return Ok(-1);
             }
-            topdict(font).cff_dict_add(k, 4);
+            topdict(font).cff_dict_add(k, 4)?;
             while argn > 0 {
                 argn -= 1;
-                topdict(font).cff_dict_set(k, argn, argv[argn as usize]);
+                topdict(font).cff_dict_set(k, argn, argv[argn as usize])?;
             }
         } else if k == b"FontMatrix" {
-            let mut argn = parse_nvalue(s, p, &mut argv, 6);
+            let mut argn = parse_nvalue(s, p, &mut argv, 6)?;
             if !check_argn_eq(argn, 6) {
-                return -1;
+                return Ok(-1);
             }
             if argv[0] != 0.001
                 || argv[1] != 0.0
@@ -1002,10 +1012,10 @@ fn parse_part1(
                 || argv[4] != 0.0
                 || argv[5] != 0.0
             {
-                topdict(font).cff_dict_add(k, 6);
+                topdict(font).cff_dict_add(k, 6)?;
                 while argn > 0 {
                     argn -= 1;
-                    topdict(font).cff_dict_set(k, argn, argv[argn as usize]);
+                    topdict(font).cff_dict_set(k, argn, argv[argn as usize])?;
                 }
             }
         } else if k == b"version"
@@ -1016,45 +1026,45 @@ fn parse_part1(
             || k == b"Copyright"
         {
             // FontInfo
-            let (argn, strval) = parse_svalue(s, p);
+            let (argn, strval) = parse_svalue(s, p)?;
             if !check_argn_eq(argn, 1) {
-                return -1;
+                return Ok(-1);
             }
             let strval = strval.unwrap_or_default();
-            topdict(font).cff_dict_add(k, 1);
+            topdict(font).cff_dict_add(k, 1)?;
             let mut sid = font.cff_get_sid(&strval) as SSid;
             if i32::from(sid) == CFF_STRING_NOTDEF {
                 sid = font.cff_add_string(&strval, 0); // FIXME
             }
             // We don't care about duplicate strings here since later a
             // subset font of this font will be generated.
-            topdict(font).cff_dict_set(k, 0, f64::from(sid));
+            topdict(font).cff_dict_set(k, 0, f64::from(sid))?;
         } else if k == b"IsFixedPitch" {
-            let (argn, v) = parse_bvalue(s, p);
+            let (argn, v) = parse_bvalue(s, p)?;
             argv[0] = v;
             if !check_argn_eq(argn, 1) {
-                return -1;
+                return Ok(-1);
             }
             if argv[0] != 0.0 {
-                private0(font).cff_dict_add(k, 1);
-                private0(font).cff_dict_set(k, 0, 1.0);
+                private0(font).cff_dict_add(k, 1)?;
+                private0(font).cff_dict_set(k, 0, 1.0)?;
             }
         }
     }
 
-    0
+    Ok(0)
 }
 
 /// `get_pfb_segment` (static): the segment (C's `*length` = its len),
 /// or none.
-fn get_pfb_segment(fp: &mut MemFile, expected_type: i32) -> Option<Vec<u8>> {
+fn get_pfb_segment(fp: &mut MemFile, expected_type: i32) -> Result<Option<Vec<u8>>> {
     let mut buffer: Vec<u8> = Vec::new();
     loop {
         let ch = fp.getc();
         if ch < 0 {
             break;
         } else if ch != 128 {
-            error!("Not a pfb file?");
+            fatal!("Not a pfb file?");
         }
         let ch = fp.getc();
         if ch < 0 || ch != expected_type {
@@ -1065,7 +1075,7 @@ fn get_pfb_segment(fp: &mut MemFile, expected_type: i32) -> Option<Vec<u8>> {
         for i in 0..4 {
             let ch = fp.getc();
             if ch < 0 {
-                return None;
+                return Ok(None);
             }
             slen = slen.wrapping_add(ch << (8 * i));
         }
@@ -1076,17 +1086,17 @@ fn get_pfb_segment(fp: &mut MemFile, expected_type: i32) -> Option<Vec<u8>> {
             let rlen = fp.read_into(&mut buffer[bytesread..bytesread + slen as usize]);
             if rlen == 0 {
                 // C's fread loop never ends on a short file.
-                return None;
+                return Ok(None);
             }
             slen -= rlen as i32;
             bytesread += rlen;
         }
     }
     if buffer.is_empty() {
-        error!("PFB segment length zero?");
+        fatal!("PFB segment length zero?");
     }
 
-    Some(buffer)
+    Ok(Some(buffer))
 }
 
 /// `init_cff_font` (static).
@@ -1163,28 +1173,28 @@ pub fn t1_get_standard_glyph(code: i32) -> Option<&'static [u8]> {
 
 /// `t1_get_fontname`: status (0 ok, -1) and the FontName (C's buffer,
 /// empty if none was found).
-pub fn t1_get_fontname(fp: &mut MemFile) -> (i32, Vec<u8>) {
+pub fn t1_get_fontname(fp: &mut MemFile) -> Result<(i32, Vec<u8>)> {
     let mut fontname = Vec::new();
     let mut fn_found = false;
 
     fp.rewind();
-    let buffer = match get_pfb_segment(fp, PFB_SEG_TYPE_ASCII) {
+    let buffer = match get_pfb_segment(fp, PFB_SEG_TYPE_ASCII)? {
         Some(b) if !b.is_empty() => b,
-        _ => error!("Reading PFB (ASCII part) file failed."),
+        _ => fatal!("Reading PFB (ASCII part) file failed."),
     };
     let s = buffer.as_slice();
     let mut p = 0;
 
-    if seek_operator(s, &mut p, b"begin") < 0 {
-        return (-1, fontname);
+    if seek_operator(s, &mut p, b"begin")? < 0 {
+        return Ok((-1, fontname));
     }
 
     while !fn_found && p < s.len() {
-        let Some(key) = get_next_key(s, &mut p) else {
+        let Some(key) = get_next_key(s, &mut p)? else {
             break;
         };
         if key == b"FontName" {
-            let (st, strval) = parse_svalue(s, &mut p);
+            let (st, strval) = parse_svalue(s, &mut p)?;
             if st == 1 {
                 let mut strval = strval.unwrap_or_default();
                 if strval.len() > TYPE1_NAME_LEN_MAX {
@@ -1197,7 +1207,7 @@ pub fn t1_get_fontname(fp: &mut MemFile) -> (i32, Vec<u8>) {
         }
     }
 
-    (0, fontname)
+    Ok((0, fontname))
 }
 
 impl Dpx {
@@ -1209,23 +1219,23 @@ impl Dpx {
         p: &mut usize,
         len_iv: i32,
         mode: i32,
-    ) -> i32 {
-        let tok = pst_get_token(s, p);
+    ) -> Result<i32> {
+        let tok = pst_get_token(s, p)?;
         if !is_integer(tok.as_ref()) || iv(tok.as_ref()) < 0 {
             warn!("Parsing Subrs failed.");
-            return -1;
+            return Ok(-1);
         }
 
         let count = iv(tok.as_ref());
 
         if count == 0 {
             font.subrs[0] = None;
-            return 0;
+            return Ok(0);
         }
 
-        let tok = pst_get_token(s, p);
-        if !match_op(tok.as_ref(), b"array") {
-            return -1;
+        let tok = pst_get_token(s, p)?;
+        if !match_op(tok.as_ref(), b"array")? {
+            return Ok(-1);
         }
 
         let mut max_size: i32;
@@ -1248,45 +1258,45 @@ impl Dpx {
         // dup subr# n-bytes RD n-binary-bytes NP
         let mut i = 0;
         while i < count {
-            let tok = pst_get_token(s, p);
+            let tok = pst_get_token(s, p)?;
             if tok.is_none() {
-                return -1;
-            } else if match_op(tok.as_ref(), b"ND")
-                || match_op(tok.as_ref(), b"|-")
-                || match_op(tok.as_ref(), b"def")
+                return Ok(-1);
+            } else if match_op(tok.as_ref(), b"ND")?
+                || match_op(tok.as_ref(), b"|-")?
+                || match_op(tok.as_ref(), b"def")?
             {
                 break;
-            } else if !match_op(tok.as_ref(), b"dup") {
+            } else if !match_op(tok.as_ref(), b"dup")? {
                 continue;
             }
 
             // Found "dup"
-            let tok = pst_get_token(s, p);
+            let tok = pst_get_token(s, p)?;
             if !is_integer(tok.as_ref()) || iv(tok.as_ref()) < 0 || iv(tok.as_ref()) >= count {
-                return -1;
+                return Ok(-1);
             }
             let idx = iv(tok.as_ref()) as usize;
 
-            let tok = pst_get_token(s, p);
+            let tok = pst_get_token(s, p)?;
             if !is_integer(tok.as_ref())
                 || iv(tok.as_ref()) < 0
                 || iv(tok.as_ref()) > T1_CS_STR_LEN_MAX
             {
-                return -1;
+                return Ok(-1);
             }
             let len = iv(tok.as_ref());
 
-            let tok = pst_get_token(s, p);
-            if !match_op(tok.as_ref(), b"RD")
-                && !match_op(tok.as_ref(), b"-|")
-                && seek_operator(s, p, b"readstring") < 0
+            let tok = pst_get_token(s, p)?;
+            if !match_op(tok.as_ref(), b"RD")?
+                && !match_op(tok.as_ref(), b"-|")?
+                && seek_operator(s, p, b"readstring")? < 0
             {
-                return -1;
+                return Ok(-1);
             }
 
             *p += 1;
             if *p + len as usize >= s.len() {
-                return -1;
+                return Ok(-1);
             }
             if mode != 1 {
                 if offset + len >= max_size {
@@ -1340,7 +1350,7 @@ impl Dpx {
             }
         }
 
-        0
+        Ok(0)
     }
     /// `parse_charstrings` (static, prefixed).
     fn t1_load_parse_charstrings(
@@ -1350,17 +1360,17 @@ impl Dpx {
         p: &mut usize,
         len_iv: i32,
         mode: i32,
-    ) -> i32 {
+    ) -> Result<i32> {
         // /CharStrings n dict dup begin
         // /GlyphName n-bytes RD -n-binary-bytes- ND
         // ...
         // end
         //  - stack - ... /CharStrings dict
-        let tok = pst_get_token(s, p);
+        let tok = pst_get_token(s, p)?;
         if !is_integer(tok.as_ref()) || iv(tok.as_ref()) < 0 || iv(tok.as_ref()) > CFF_GLYPH_MAX {
-            let _s = tok.as_ref().and_then(PstObj::pst_getSV);
+            let _s = tok.as_ref().map(PstObj::pst_getSV).transpose()?.flatten();
             warn!("Ignores non dict \"/CharStrings ...\"");
-            return 0;
+            return Ok(0);
         }
         let count = iv(tok.as_ref());
 
@@ -1388,15 +1398,15 @@ impl Dpx {
         let mut have_notdef = false; // .notdef must be at gid = 0 in CFF
 
         font.is_notdef_notzero = 0;
-        seek_operator(s, p, b"begin");
+        seek_operator(s, p, b"begin")?;
         let mut i = 0;
         while i < count {
             // BUG-20061126 (by ChoF):
             // Some fonts (e.g., belleek/blsy.pfb) does not have the correct
             // number of glyphs. Modify the codes even to work with these
             // broken fonts.
-            let tok = pst_get_token(s, p);
-            let glyph_name = tok.as_ref().and_then(PstObj::pst_getSV);
+            let tok = pst_get_token(s, p)?;
+            let glyph_name = tok.as_ref().map(PstObj::pst_getSV).transpose()?.flatten();
 
             if i == 0 && glyph_name.as_deref().is_some_and(|g| g != b".notdef") {
                 font.is_notdef_notzero = 1;
@@ -1405,7 +1415,7 @@ impl Dpx {
             let gid: i32;
             if is_name(tok.as_ref()) {
                 let Some(g) = glyph_name.as_deref() else {
-                    return -1;
+                    return Ok(-1);
                 };
                 if g == b".notdef" {
                     gid = 0;
@@ -1414,7 +1424,7 @@ impl Dpx {
                     gid = i;
                 } else if i == count - 1 {
                     warn!("No .notdef glyph???");
-                    return -1;
+                    return Ok(-1);
                 } else {
                     gid = i + 1;
                 }
@@ -1423,7 +1433,7 @@ impl Dpx {
             {
                 break;
             } else {
-                return -1;
+                return Ok(-1);
             }
 
             if gid > 0 {
@@ -1433,25 +1443,25 @@ impl Dpx {
             // We don't care about duplicate strings here since later a
             // subset font of this font will be generated.
 
-            let tok = pst_get_token(s, p);
+            let tok = pst_get_token(s, p)?;
             if !is_integer(tok.as_ref())
                 || iv(tok.as_ref()) < 0
                 || iv(tok.as_ref()) > T1_CS_STR_LEN_MAX
             {
-                return -1;
+                return Ok(-1);
             }
             let len = iv(tok.as_ref());
 
-            let tok = pst_get_token(s, p);
-            if !match_op(tok.as_ref(), b"RD")
-                && !match_op(tok.as_ref(), b"-|")
-                && seek_operator(s, p, b"readstring") < 0
+            let tok = pst_get_token(s, p)?;
+            if !match_op(tok.as_ref(), b"RD")?
+                && !match_op(tok.as_ref(), b"-|")?
+                && seek_operator(s, p, b"readstring")? < 0
             {
-                return -1;
+                return Ok(-1);
             }
 
             if *p + len as usize + 1 >= s.len() {
-                return -1;
+                return Ok(-1);
             }
             if mode != 1 {
                 let charstrings = font.cstrings.as_mut().unwrap();
@@ -1500,9 +1510,9 @@ impl Dpx {
             }
             *p += len as usize;
 
-            let tok = pst_get_token(s, p);
-            if !match_op(tok.as_ref(), b"ND") && !match_op(tok.as_ref(), b"|-") {
-                return -1;
+            let tok = pst_get_token(s, p)?;
+            if !match_op(tok.as_ref(), b"ND")? && !match_op(tok.as_ref(), b"|-")? {
+                return Ok(-1);
             }
             i += 1;
         }
@@ -1511,7 +1521,7 @@ impl Dpx {
         }
         font.num_glyphs = count as Card16;
 
-        0
+        Ok(0)
     }
     /// `parse_part2` (static, prefixed).
     fn t1_load_parse_part2(
@@ -1520,28 +1530,28 @@ impl Dpx {
         s: &[u8],
         p: &mut usize,
         mode: i32,
-    ) -> i32 {
+    ) -> Result<i32> {
         let mut argv = [0.0f64; MAX_ARGS];
         let mut len_iv = 4;
 
         while *p < s.len() {
-            let Some(key) = get_next_key(s, p) else {
+            let Some(key) = get_next_key(s, p)? else {
                 break;
             };
             let k = key.as_slice();
             if k == b"Subrs" {
                 // levIV must appear before Subrs
-                if self.t1_load_parse_subrs(font, s, p, len_iv, mode) < 0 {
-                    return -1;
+                if self.t1_load_parse_subrs(font, s, p, len_iv, mode)? < 0 {
+                    return Ok(-1);
                 }
             } else if k == b"CharStrings" {
-                if self.t1_load_parse_charstrings(font, s, p, len_iv, mode) < 0 {
-                    return -1;
+                if self.t1_load_parse_charstrings(font, s, p, len_iv, mode)? < 0 {
+                    return Ok(-1);
                 }
             } else if k == b"lenIV" {
-                let argn = parse_nvalue(s, p, &mut argv, 1);
+                let argn = parse_nvalue(s, p, &mut argv, 1)?;
                 if !check_argn_eq(argn, 1) {
-                    return -1;
+                    return Ok(-1);
                 }
                 len_iv = argv[0] as i32;
             } else if k == b"BlueValues"
@@ -1552,11 +1562,11 @@ impl Dpx {
                 || k == b"StemSnapV"
             {
                 // Operand values are delta in CFF font dictionary encoding.
-                let mut argn = parse_nvalue(s, p, &mut argv, MAX_ARGS as i32);
+                let mut argn = parse_nvalue(s, p, &mut argv, MAX_ARGS as i32)?;
                 if !check_argn_ge(argn, 0) {
-                    return -1;
+                    return Ok(-1);
                 }
-                private0(font).cff_dict_add(k, argn);
+                private0(font).cff_dict_add(k, argn)?;
                 while argn > 0 {
                     argn -= 1;
                     let a = argn as usize;
@@ -1565,7 +1575,7 @@ impl Dpx {
                     } else {
                         argv[a] - argv[a - 1]
                     };
-                    private0(font).cff_dict_set(k, argn, v);
+                    private0(font).cff_dict_set(k, argn, v)?;
                 }
             } else if k == b"StdHW"
                 || k == b"StdVW"
@@ -1577,27 +1587,27 @@ impl Dpx {
             {
                 // Value of StdHW and StdVW is described as an array in the
                 // Type 1 Font Specification but is a number in CFF format.
-                let argn = parse_nvalue(s, p, &mut argv, 1);
+                let argn = parse_nvalue(s, p, &mut argv, 1)?;
                 if !check_argn_eq(argn, 1) {
-                    return -1;
+                    return Ok(-1);
                 }
-                private0(font).cff_dict_add(k, 1);
-                private0(font).cff_dict_set(k, 0, argv[0]);
+                private0(font).cff_dict_add(k, 1)?;
+                private0(font).cff_dict_set(k, 0, argv[0])?;
             } else if k == b"ForceBold" {
-                let (argn, v) = parse_bvalue(s, p);
+                let (argn, v) = parse_bvalue(s, p)?;
                 argv[0] = v;
                 if !check_argn_eq(argn, 1) {
-                    return -1;
+                    return Ok(-1);
                 }
                 if argv[0] != 0.0 {
-                    private0(font).cff_dict_add(k, 1);
-                    private0(font).cff_dict_set(k, 0, 1.0);
+                    private0(font).cff_dict_add(k, 1)?;
+                    private0(font).cff_dict_set(k, 0, 1.0)?;
                 }
             }
             // MinFeature, RndStemUp, UniqueID, Password ignored.
         }
 
-        0
+        Ok(0)
     }
     /// `t1_load_font`: the font as CFF (`mode` 1: metrics only, no
     /// charstrings kept).
@@ -1606,37 +1616,37 @@ impl Dpx {
         enc_vec: Option<&mut [Option<Vec<u8>>]>,
         mode: i32,
         fp: &mut MemFile,
-    ) -> Option<CffFont> {
+    ) -> Result<Option<CffFont>> {
         fp.rewind();
         // ASCII section
-        let buffer = match get_pfb_segment(fp, PFB_SEG_TYPE_ASCII) {
+        let buffer = match get_pfb_segment(fp, PFB_SEG_TYPE_ASCII)? {
             Some(b) if !b.is_empty() => b,
-            _ => error!("Reading PFB (ASCII part) file failed."),
+            _ => fatal!("Reading PFB (ASCII part) file failed."),
         };
 
         let mut cff = CffFont::default();
         init_cff_font(&mut cff);
 
         let mut p = 0;
-        if parse_part1(&mut cff, enc_vec, &buffer, &mut p) < 0 {
+        if parse_part1(&mut cff, enc_vec, &buffer, &mut p)? < 0 {
             cff.cff_close();
-            error!("Reading PFB (ASCII part) file failed.");
+            fatal!("Reading PFB (ASCII part) file failed.");
         }
         drop(buffer);
 
         // Binary section
-        let mut buffer = match get_pfb_segment(fp, PFB_SEG_TYPE_BINARY) {
+        let mut buffer = match get_pfb_segment(fp, PFB_SEG_TYPE_BINARY)? {
             Some(b) if !b.is_empty() => b,
             _ => {
                 cff.cff_close();
-                error!("Reading PFB (BINARY part) file failed.");
+                fatal!("Reading PFB (BINARY part) file failed.");
             }
         };
         t1_decrypt_in_place(T1_EEKEY, &mut buffer);
         let mut p = 4;
-        if self.t1_load_parse_part2(&mut cff, &buffer, &mut p, mode) < 0 {
+        if self.t1_load_parse_part2(&mut cff, &buffer, &mut p, mode)? < 0 {
             cff.cff_close();
-            error!("Reading PFB (BINARY part) file failed.");
+            fatal!("Reading PFB (BINARY part) file failed.");
         }
         drop(buffer);
 
@@ -1644,7 +1654,7 @@ impl Dpx {
 
         // Remaining section ignored.
 
-        Some(cff)
+        Ok(Some(cff))
     }
 }
 
@@ -1688,8 +1698,8 @@ mod tests {
         enc[10] = Some(b"ten".to_vec());
         enc[12] = Some(b"twelve".to_vec());
         let mut p = 0;
-        assert_eq!(get_next_key(src, &mut p).unwrap(), b"Encoding");
-        assert_eq!(parse_encoding(Some(&mut enc), src, &mut p), 0);
+        assert_eq!(get_next_key(src, &mut p).unwrap().unwrap(), b"Encoding");
+        assert_eq!(parse_encoding(Some(&mut enc), src, &mut p).unwrap(), 0);
         assert_eq!(enc[0].as_deref(), Some(&b"Gamma"[..]));
         assert_eq!(enc[65].as_deref(), Some(&b"A"[..]));
         assert_eq!(enc[66], None);
@@ -1702,7 +1712,7 @@ mod tests {
 
         let mut p = 0;
         let src = b" StandardEncoding def";
-        assert_eq!(parse_encoding(Some(&mut enc), src, &mut p), 0);
+        assert_eq!(parse_encoding(Some(&mut enc), src, &mut p).unwrap(), 0);
         assert_eq!(enc[0], None);
         assert_eq!(enc[0xe1].as_deref(), Some(&b"AE"[..]));
     }
@@ -1712,19 +1722,22 @@ mod tests {
         let src = b"[-10 -250 1000 900] readonly {0.001 0 0 0.001 0 0} [1 2 /x] 7 true (str)";
         let mut p = 0;
         let mut v = [0.0; MAX_ARGS];
-        assert_eq!(parse_nvalue(src, &mut p, &mut v, 4), 4);
+        assert_eq!(parse_nvalue(src, &mut p, &mut v, 4).unwrap(), 4);
         assert_eq!(&v[..4], &[-10.0, -250.0, 1000.0, 900.0]);
-        assert_eq!(seek_operator(src, &mut p, b"readonly"), 0);
-        assert_eq!(parse_nvalue(src, &mut p, &mut v, 6), 6);
+        assert_eq!(seek_operator(src, &mut p, b"readonly").unwrap(), 0);
+        assert_eq!(parse_nvalue(src, &mut p, &mut v, 6).unwrap(), 6);
         assert_eq!(v[0], 0.001);
-        assert_eq!(parse_nvalue(src, &mut p, &mut v, 6), -1);
+        assert_eq!(parse_nvalue(src, &mut p, &mut v, 6).unwrap(), -1);
         // The "]" after the name is a token of its own.
-        assert_eq!(parse_nvalue(src, &mut p, &mut v, 1), 0);
-        assert_eq!(parse_nvalue(src, &mut p, &mut v, 1), 1);
+        assert_eq!(parse_nvalue(src, &mut p, &mut v, 1).unwrap(), 0);
+        assert_eq!(parse_nvalue(src, &mut p, &mut v, 1).unwrap(), 1);
         assert_eq!(v[0], 7.0);
-        assert_eq!(parse_bvalue(src, &mut p), (1, 1.0));
-        assert_eq!(parse_svalue(src, &mut p), (1, Some(b"str".to_vec())));
-        assert_eq!(seek_operator(src, &mut p, b"def"), -1);
+        assert_eq!(parse_bvalue(src, &mut p).unwrap(), (1, 1.0));
+        assert_eq!(
+            parse_svalue(src, &mut p).unwrap(),
+            (1, Some(b"str".to_vec()))
+        );
+        assert_eq!(seek_operator(src, &mut p, b"def").unwrap(), -1);
     }
 
     #[test]
@@ -1738,13 +1751,17 @@ mod tests {
         let mut fp = MemFile::new(Arc::from(data), b"x.pfb");
         assert_eq!(is_pfb(&mut fp), 1);
         fp.rewind();
-        let a = get_pfb_segment(&mut fp, PFB_SEG_TYPE_ASCII).unwrap();
+        let a = get_pfb_segment(&mut fp, PFB_SEG_TYPE_ASCII)
+            .unwrap()
+            .unwrap();
         assert_eq!(a.len(), 54);
         assert_eq!(
-            get_pfb_segment(&mut fp, PFB_SEG_TYPE_BINARY).unwrap(),
+            get_pfb_segment(&mut fp, PFB_SEG_TYPE_BINARY)
+                .unwrap()
+                .unwrap(),
             [0xaa, 0xbb]
         );
         // The FontName is looked for after "begin".
-        assert_eq!(t1_get_fontname(&mut fp), (0, Vec::new()));
+        assert_eq!(t1_get_fontname(&mut fp).unwrap(), (0, Vec::new()));
     }
 }

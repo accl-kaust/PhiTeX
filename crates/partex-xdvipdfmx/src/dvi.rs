@@ -462,25 +462,25 @@ impl Dpx {
     }
 
     /// `get_and_buffer_unsigned_byte` (from `dvi_file`).
-    fn get_and_buffer_unsigned_byte(&mut self) -> i32 {
+    fn get_and_buffer_unsigned_byte(&mut self) -> Result<i32> {
         let ch = self.dvi_file().getc();
         if ch < 0 {
-            crate::error!("File ended prematurely");
+            crate::fatal!("File ended prematurely");
         }
         self.buf_put(ch as u8);
-        ch
+        Ok(ch)
     }
     /// `get_and_buffer_unsigned_pair`.
-    fn get_and_buffer_unsigned_pair(&mut self) -> u32 {
-        let pair = self.get_and_buffer_unsigned_byte() as u32;
-        (pair << 8) | self.get_and_buffer_unsigned_byte() as u32
+    fn get_and_buffer_unsigned_pair(&mut self) -> Result<u32> {
+        let pair = self.get_and_buffer_unsigned_byte()? as u32;
+        Ok((pair << 8) | self.get_and_buffer_unsigned_byte()? as u32)
     }
     /// `get_and_buffer_bytes`.
-    fn get_and_buffer_bytes(&mut self, count: u32) {
+    fn get_and_buffer_bytes(&mut self, count: u32) -> Result<()> {
         let f = self.dvi.dvi_file.as_mut().expect("DVI file");
         let data = f.read(count as usize).to_vec();
         if data.len() != count as usize {
-            crate::error!("File ended prematurely");
+            crate::fatal!("File ended prematurely");
         }
         let i = self.dvi.dvi_page_buf_index as usize;
         if i + data.len() > self.dvi.dvi_page_buffer.len() {
@@ -490,6 +490,7 @@ impl Dpx {
         }
         self.dvi.dvi_page_buffer[i..i + data.len()].copy_from_slice(&data);
         self.dvi.dvi_page_buf_index += count;
+        Ok(())
     }
     /// `get_buffered_unsigned_byte`.
     fn get_buffered_unsigned_byte(&mut self) -> i32 {
@@ -542,34 +543,37 @@ impl Dpx {
     }
 
     /// `check_id_bytes`.
-    fn check_id_bytes(&mut self) {
+    fn check_id_bytes(&mut self) -> Result<()> {
         let (pre, post) = (self.dvi.pre_id_byte, self.dvi.post_id_byte);
         if pre != post && (pre != i32::from(DVI_ID) || post != i32::from(DVIV_ID)) {
-            crate::error!(
+            crate::fatal!(
                 "Inconsistent DVI id_bytes {} (pre) and {} (post)",
                 pre,
                 post
             );
         }
+        Ok(())
     }
     /// `need_XeTeX`.
-    fn need_xetex(&mut self, c: i32) {
+    fn need_xetex(&mut self, c: i32) -> Result<()> {
         if self.conf.compat_mode != crate::ctx::CompatMode::Xdv {
-            crate::error!("DVI opcode {} only valid for XeTeX", c);
+            crate::fatal!("DVI opcode {} only valid for XeTeX", c);
         }
+        Ok(())
     }
     /// `need_pTeX`.
-    fn need_ptex(&mut self, c: i32) {
+    fn need_ptex(&mut self, c: i32) -> Result<()> {
         if self.dvi.is_ptex == 0 {
-            crate::error!("DVI opcode {} only valid for Ascii pTeX", c);
+            crate::fatal!("DVI opcode {} only valid for Ascii pTeX", c);
         }
         self.dvi.has_ptex = 1;
+        Ok(())
     }
     /// `find_post`: the postamble's location.
-    fn find_post(&mut self) -> i32 {
+    fn find_post(&mut self) -> Result<i32> {
         let size = self.dvi_file().len();
         if size > 0x7fff_ffff {
-            crate::error!("DVI file size exceeds 31-bit");
+            crate::fatal!("DVI file size exceeds 31-bit");
         }
         self.dvi.dvi_file_size = size as u32;
         let mut current = size as i64;
@@ -589,7 +593,7 @@ impl Dpx {
                 || ch == i32::from(XDV_ID)
                 || ch == i32::from(XDV_ID_OLD))
         {
-            crate::error!("{}", core::str::from_utf8(INVALID_SIGNATURE).unwrap_or(""));
+            crate::fatal!("{}", core::str::from_utf8(INVALID_SIGNATURE).unwrap_or(""));
         }
         self.dvi.post_id_byte = ch;
         if ch == i32::from(XDV_ID) || ch == i32::from(XDV_ID_OLD) {
@@ -600,41 +604,42 @@ impl Dpx {
         current -= 5;
         self.dvi_file().seek_absolute(current as usize);
         if self.dvi_file().getc() != i32::from(POST_POST) {
-            crate::error!("Found where post_post opcode should be");
+            crate::fatal!("Found where post_post opcode should be");
         }
-        let current = self.dvi_file().get_signed_quad();
+        let current = self.dvi_file().get_signed_quad()?;
         self.dvi_file().seek_absolute(current as usize);
         if self.dvi_file().getc() != i32::from(POST) {
-            crate::error!("Found where post opcode should be");
+            crate::fatal!("Found where post opcode should be");
         }
         self.dvi_file().seek_absolute(0);
-        if self.dvi_file().get_unsigned_byte() != PRE {
-            crate::error!("Found where PRE was expected");
+        if self.dvi_file().get_unsigned_byte()? != PRE {
+            crate::fatal!("Found where PRE was expected");
         }
-        let ch = self.dvi_file().get_unsigned_byte();
+        let ch = self.dvi_file().get_unsigned_byte()?;
         if !(ch == DVI_ID || ch == XDV_ID || ch == XDV_ID_OLD) {
-            crate::error!("DVI ID = {}", ch);
+            crate::fatal!("DVI ID = {}", ch);
         }
         self.dvi.pre_id_byte = i32::from(ch);
-        self.check_id_bytes();
-        current
+        self.check_id_bytes()?;
+        Ok(current)
     }
     /// `get_page_info`.
-    fn get_page_info(&mut self, post_location: i32) {
+    fn get_page_info(&mut self, post_location: i32) -> Result<()> {
         self.dvi_file().seek_absolute(post_location as usize + 27);
-        let n = u32::from(self.dvi_file().get_unsigned_pair());
+        let n = u32::from(self.dvi_file().get_unsigned_pair()?);
         if n == 0 {
-            crate::error!("Page count is 0!");
+            crate::fatal!("Page count is 0!");
         }
         self.dvi.num_pages = n;
         let mut page_loc = vec![0i32; n as usize];
         self.dvi_file().seek_absolute(post_location as usize + 1);
-        page_loc[n as usize - 1] = self.dvi_file().get_unsigned_quad() as i32;
+        page_loc[n as usize - 1] = self.dvi_file().get_unsigned_quad()? as i32;
         for i in (0..n as usize - 1).rev() {
             self.dvi_file().seek_absolute(page_loc[i + 1] as usize + 41);
-            page_loc[i] = self.dvi_file().get_unsigned_quad() as i32;
+            page_loc[i] = self.dvi_file().get_unsigned_quad()? as i32;
         }
         self.dvi.page_loc = page_loc;
+        Ok(())
     }
     /// `dvi_tell_mag`.
     pub fn dvi_tell_mag(&mut self) -> f64 {
@@ -648,42 +653,44 @@ impl Dpx {
         self.dvi.dvi2pts *= 72.0 / 254000.0;
     }
     /// `get_dvi_info`.
-    fn get_dvi_info(&mut self, post_location: i32) {
+    fn get_dvi_info(&mut self, post_location: i32) -> Result<()> {
         self.dvi_file().seek_absolute(post_location as usize + 5);
-        self.dvi.dvi_info.unit_num = self.dvi_file().get_unsigned_quad();
-        self.dvi.dvi_info.unit_den = self.dvi_file().get_unsigned_quad();
-        self.dvi.dvi_info.mag = self.dvi_file().get_unsigned_quad();
-        self.dvi.dvi_info.media_height = self.dvi_file().get_unsigned_quad();
-        self.dvi.dvi_info.media_width = self.dvi_file().get_unsigned_quad();
-        self.dvi.dvi_info.stackdepth = u32::from(self.dvi_file().get_unsigned_pair());
+        self.dvi.dvi_info.unit_num = self.dvi_file().get_unsigned_quad()?;
+        self.dvi.dvi_info.unit_den = self.dvi_file().get_unsigned_quad()?;
+        self.dvi.dvi_info.mag = self.dvi_file().get_unsigned_quad()?;
+        self.dvi.dvi_info.media_height = self.dvi_file().get_unsigned_quad()?;
+        self.dvi.dvi_info.media_width = self.dvi_file().get_unsigned_quad()?;
+        self.dvi.dvi_info.stackdepth = u32::from(self.dvi_file().get_unsigned_pair()?);
         if self.dvi.dvi_info.stackdepth as usize > DVI_STACK_DEPTH_MAX {
-            crate::error!("Capacity exceeded.");
+            crate::fatal!("Capacity exceeded.");
         }
+        Ok(())
     }
     /// `get_preamble_dvi_info`.
-    fn get_preamble_dvi_info(&mut self) {
-        if self.dvi_file().get_unsigned_byte() != PRE {
-            crate::error!("Found where PRE was expected");
+    fn get_preamble_dvi_info(&mut self) -> Result<()> {
+        if self.dvi_file().get_unsigned_byte()? != PRE {
+            crate::fatal!("Found where PRE was expected");
         }
-        let ch = self.dvi_file().get_unsigned_byte();
+        let ch = self.dvi_file().get_unsigned_byte()?;
         if !(ch == DVI_ID || ch == XDV_ID || ch == XDV_ID_OLD) {
-            crate::error!("DVI ID = {}", ch);
+            crate::fatal!("DVI ID = {}", ch);
         }
         self.dvi.pre_id_byte = i32::from(ch);
         if ch == XDV_ID || ch == XDV_ID_OLD {
             self.conf.compat_mode = crate::ctx::CompatMode::Xdv;
         }
         self.dvi.is_ptex = i32::from(ch == DVI_ID);
-        self.dvi.dvi_info.unit_num = self.dvi_file().get_positive_quad("DVI", "unit_num");
-        self.dvi.dvi_info.unit_den = self.dvi_file().get_positive_quad("DVI", "unit_den");
-        self.dvi.dvi_info.mag = self.dvi_file().get_positive_quad("DVI", "mag");
-        let n = self.dvi_file().get_unsigned_byte() as usize;
+        self.dvi.dvi_info.unit_num = self.dvi_file().get_positive_quad("DVI", "unit_num")?;
+        self.dvi.dvi_info.unit_den = self.dvi_file().get_positive_quad("DVI", "unit_den")?;
+        self.dvi.dvi_info.mag = self.dvi_file().get_positive_quad("DVI", "mag")?;
+        let n = self.dvi_file().get_unsigned_byte()? as usize;
         let c = self.dvi_file().read(n).to_vec();
         if c.len() != n {
-            crate::error!("{}", core::str::from_utf8(INVALID_SIGNATURE).unwrap_or(""));
+            crate::fatal!("{}", core::str::from_utf8(INVALID_SIGNATURE).unwrap_or(""));
         }
         self.dvi.dvi_info.comment = c;
         self.dvi.num_pages = 0x7FF_FFFF;
+        Ok(())
     }
     /// `dvi_comment`: a copy of `dvi_info.comment`.
     pub fn dvi_comment(&mut self) -> Vec<u8> {
@@ -700,14 +707,14 @@ impl Dpx {
         font_name: &[u8],
         point_size: u32,
         design_size: u32,
-    ) {
+    ) -> Result<()> {
         let mut index: u32 = 0;
         let mut embolden: i32 = 0;
         let mut slant: i32 = 0;
         let mut extend: i32 = 0x0001_0000;
         let file_name = &font_name[1..];
         let Some(q) = file_name.iter().position(|&c| c == b']') else {
-            crate::error!("Syntax error in dvilua fnt_def: no ']' found in font name.");
+            crate::fatal!("Syntax error in dvilua fnt_def: no ']' found in font name.");
         };
         let rest = &file_name[q + 1..];
         let fname = file_name[..q].to_vec();
@@ -723,7 +730,7 @@ impl Dpx {
                     .position(|&c| c == b'=')
                     .map(|k| p + k)
                 else {
-                    crate::error!("Syntax error in dvilua fnt_def: not in key=value format");
+                    crate::fatal!("Syntax error in dvilua fnt_def: not in key=value format");
                 };
                 let key = &rest[p..kv];
                 let val = &rest[kv + 1..delim];
@@ -756,25 +763,26 @@ impl Dpx {
             embolden,
             font_id: 0,
         });
+        Ok(())
     }
     /// `read_font_record`.
-    fn read_font_record(&mut self, tex_id: i32) {
+    fn read_font_record(&mut self, tex_id: i32) -> Result<()> {
         let f = self.dvi_file();
-        let checksum = f.get_unsigned_quad();
-        let point_size = f.get_positive_quad("DVI", "point_size");
-        let design_size = f.get_positive_quad("DVI", "design_size");
-        let dir_length = f.get_unsigned_byte() as usize;
-        let name_length = f.get_unsigned_byte() as usize;
+        let checksum = f.get_unsigned_quad()?;
+        let point_size = f.get_positive_quad("DVI", "point_size")?;
+        let design_size = f.get_positive_quad("DVI", "design_size")?;
+        let dir_length = f.get_unsigned_byte()? as usize;
+        let name_length = f.get_unsigned_byte()? as usize;
         if f.read(dir_length).len() != dir_length {
-            crate::error!("{}", core::str::from_utf8(INVALID_SIGNATURE).unwrap_or(""));
+            crate::fatal!("{}", core::str::from_utf8(INVALID_SIGNATURE).unwrap_or(""));
         }
         let font_name = f.read(name_length).to_vec();
         if font_name.len() != name_length {
-            crate::error!("{}", core::str::from_utf8(INVALID_SIGNATURE).unwrap_or(""));
+            crate::fatal!("{}", core::str::from_utf8(INVALID_SIGNATURE).unwrap_or(""));
         }
         if checksum == SIG_DVILUA_FNT_DEF && name_length > 0 && font_name[0] == b'[' {
-            self.proc_dvilua_font_record(tex_id, &font_name, point_size, design_size);
-            return;
+            self.proc_dvilua_font_record(tex_id, &font_name, point_size, design_size)?;
+            return Ok(());
         }
         self.dvi.def_fonts.push(FontDef {
             tex_id,
@@ -792,18 +800,19 @@ impl Dpx {
             embolden: 0,
             font_id: 0,
         });
+        Ok(())
     }
     /// `read_native_font_record`.
-    fn read_native_font_record(&mut self, tex_id: i32) {
+    fn read_native_font_record(&mut self, tex_id: i32) -> Result<()> {
         let f = self.dvi_file();
-        let point_size = f.get_positive_quad("DVI", "point_size");
-        let flags = f.get_unsigned_pair();
-        let len = f.get_unsigned_byte() as usize;
+        let point_size = f.get_positive_quad("DVI", "point_size")?;
+        let flags = f.get_unsigned_pair()?;
+        let len = f.get_unsigned_byte()? as usize;
         let font_name = f.read(len).to_vec();
         if font_name.len() != len {
-            crate::error!("{}", core::str::from_utf8(INVALID_SIGNATURE).unwrap_or(""));
+            crate::fatal!("{}", core::str::from_utf8(INVALID_SIGNATURE).unwrap_or(""));
         }
-        let index = f.get_positive_quad("DVI", "index");
+        let index = f.get_positive_quad("DVI", "index")?;
         let mut d = FontDef {
             tex_id,
             font_name,
@@ -824,51 +833,54 @@ impl Dpx {
             d.layout_dir = 1;
         }
         if flags & XDV_FLAG_COLORED != 0 {
-            d.rgba_color = f.get_unsigned_quad();
+            d.rgba_color = f.get_unsigned_quad()?;
             d.rgba_used = 1;
         }
         if flags & XDV_FLAG_EXTEND != 0 {
-            d.extend = f.get_signed_quad();
+            d.extend = f.get_signed_quad()?;
         }
         if flags & XDV_FLAG_SLANT != 0 {
-            d.slant = f.get_signed_quad();
+            d.slant = f.get_signed_quad()?;
         }
         if flags & XDV_FLAG_EMBOLDEN != 0 {
-            d.embolden = f.get_signed_quad();
+            d.embolden = f.get_signed_quad()?;
         }
         self.dvi.def_fonts.push(d);
+        Ok(())
     }
     /// `get_dvi_fonts`.
-    fn get_dvi_fonts(&mut self, post_location: i32) {
+    fn get_dvi_fonts(&mut self, post_location: i32) -> Result<()> {
         self.dvi_file().seek_absolute(post_location as usize + 29);
         loop {
-            let code = self.dvi_file().get_unsigned_byte();
+            let code = self.dvi_file().get_unsigned_byte()?;
             if code == POST_POST {
                 break;
             }
             match code {
                 FNT_DEF1..=FNT_DEF4 => {
-                    let id = self.dvi_file().get_unsigned_num(code - FNT_DEF1);
-                    self.read_font_record(id);
+                    let id = self.dvi_file().get_unsigned_num(code - FNT_DEF1)?;
+                    self.read_font_record(id)?;
                 }
                 XDV_NATIVE_FONT_DEF => {
-                    self.need_xetex(i32::from(code));
-                    let id = self.dvi_file().get_signed_quad();
-                    self.read_native_font_record(id);
+                    self.need_xetex(i32::from(code))?;
+                    let id = self.dvi_file().get_signed_quad()?;
+                    self.read_native_font_record(id)?;
                 }
-                _ => crate::error!("{}", core::str::from_utf8(INVALID_SIGNATURE).unwrap_or("")),
+                _ => crate::fatal!("{}", core::str::from_utf8(INVALID_SIGNATURE).unwrap_or("")),
             }
         }
+        Ok(())
     }
     /// `get_comment`.
-    fn get_comment(&mut self) {
+    fn get_comment(&mut self) -> Result<()> {
         self.dvi_file().seek_absolute(14);
-        let n = self.dvi_file().get_unsigned_byte() as usize;
+        let n = self.dvi_file().get_unsigned_byte()? as usize;
         let c = self.dvi_file().read(n).to_vec();
         if c.len() != n {
-            crate::error!("{}", core::str::from_utf8(INVALID_SIGNATURE).unwrap_or(""));
+            crate::fatal!("{}", core::str::from_utf8(INVALID_SIGNATURE).unwrap_or(""));
         }
         self.dvi.dvi_info.comment = c;
+        Ok(())
     }
 
     /// `clear_state`.
@@ -879,14 +891,15 @@ impl Dpx {
         self.dvi.current_font = -1;
     }
     /// `dvi_mark_depth`.
-    fn dvi_mark_depth(&mut self) {
+    fn dvi_mark_depth(&mut self) -> Result<()> {
         if self.dvi.link_annot != 0
             && self.dvi.marked_depth as i32 == self.dvi.tagged_depth
             && self.dvi.dvi_stack_depth as i32 == self.dvi.tagged_depth - 1
         {
-            self.pdf_doc_break_annot();
+            self.pdf_doc_break_annot()?;
         }
         self.dvi.marked_depth = self.dvi.dvi_stack_depth;
+        Ok(())
     }
     /// `dvi_tag_depth`.
     pub fn dvi_tag_depth(&mut self) {
@@ -931,16 +944,25 @@ impl Dpx {
     }
 
     /// `set_string`.
-    fn set_string(&mut self, xpos: Spt, ypos: Spt, instr: &[u8], width: Spt, font_id: i32) {
+    fn set_string(
+        &mut self,
+        xpos: Spt,
+        ypos: Spt,
+        instr: &[u8],
+        width: Spt,
+        font_id: i32,
+    ) -> Result<()> {
         let xpos = xpos.wrapping_sub(self.dvi.compensation.x);
         let ypos = ypos.wrapping_sub(self.dvi.compensation.y);
-        self.pdf_dev_set_string(xpos, ypos, instr, width, font_id);
+        self.pdf_dev_set_string(xpos, ypos, instr, width, font_id)?;
+        Ok(())
     }
     /// `set_rule`.
-    fn set_rule(&mut self, xpos: Spt, ypos: Spt, width: Spt, height: Spt) {
+    fn set_rule(&mut self, xpos: Spt, ypos: Spt, width: Spt, height: Spt) -> Result<()> {
         let xpos = xpos.wrapping_sub(self.dvi.compensation.x);
         let ypos = ypos.wrapping_sub(self.dvi.compensation.y);
-        self.pdf_dev_set_rule(xpos, ypos, width, height);
+        self.pdf_dev_set_rule(xpos, ypos, width, height)?;
+        Ok(())
     }
     /// `calc_rect`.
     fn calc_rect(&mut self, xpos: Spt, ypos: Spt, width: Spt, height: Spt, depth: Spt) -> PdfRect {
@@ -950,25 +972,26 @@ impl Dpx {
     }
 
     /// `dvi_do_special`.
-    pub fn dvi_do_special(&mut self, buffer: &[u8]) {
-        self.graphics_mode();
+    pub fn dvi_do_special(&mut self, buffer: &[u8]) -> Result<()> {
+        self.graphics_mode()?;
         let x_user = f64::from(self.dvi.dvi_state.h) * self.dvi.dvi2pts;
         let y_user = -f64::from(self.dvi.dvi_state.v) * self.dvi.dvi2pts;
         let mag = self.dvi_tell_mag();
-        let (r, is_drawable, rect) = self.spc_exec_special(buffer, x_user, y_user, mag);
+        let (r, is_drawable, rect) = self.spc_exec_special(buffer, x_user, y_user, mag)?;
         if r < 0 {
-            return;
+            return Ok(());
         }
         if self.dvi_is_tracking_boxes() && is_drawable != 0 {
             self.pdf_doc_expand_box(&rect);
         }
+        Ok(())
     }
     /// `dvi_unit_size`.
     pub fn dvi_unit_size(&mut self) -> f64 {
         self.dvi.dvi2pts
     }
     /// `dvi_locate_font`: the index into `loaded_fonts` (C's `cur_id`).
-    pub fn dvi_locate_font(&mut self, tfm_name: &[u8], ptsize: Spt) -> i32 {
+    pub fn dvi_locate_font(&mut self, tfm_name: &[u8], ptsize: Spt) -> Result<i32> {
         let cur_id = self.dvi.loaded_fonts.len();
         self.dvi.loaded_fonts.push(LoadedFont::default());
         let mrec = self.pdf_lookup_fontmap_record(tfm_name);
@@ -977,9 +1000,9 @@ impl Dpx {
             && m.charmap.sfd_name.is_some()
             && m.charmap.subfont_id.is_some()
         {
-            crate::error!("Subfonts (SFD) are not supported");
+            crate::fatal!("Subfonts (SFD) are not supported");
         }
-        let tfm_id = self.tfm_open(tfm_name, true);
+        let tfm_id = self.tfm_open(tfm_name, true)?;
         {
             let lf = &mut self.dvi.loaded_fonts[cur_id];
             *lf = LoadedFont::default();
@@ -989,21 +1012,21 @@ impl Dpx {
             lf.source = VF;
         }
         if mrec.is_none() {
-            let font_id = self.vf_locate_font(tfm_name, ptsize);
+            let font_id = self.vf_locate_font(tfm_name, ptsize)?;
             if font_id >= 0 {
                 let lf = &mut self.dvi.loaded_fonts[cur_id];
                 lf.type_ = VIRTUAL;
                 lf.font_id = font_id;
-                return cur_id as i32;
+                return Ok(cur_id as i32);
             }
         }
         let name: Vec<u8> = match mrec.as_ref().and_then(|m| m.map_name.clone()) {
             Some(n) => n,
             None => tfm_name.to_vec(),
         };
-        let font_id = self.pdf_dev_locate_font(&name, ptsize);
+        let font_id = self.pdf_dev_locate_font(&name, ptsize)?;
         if font_id < 0 {
-            crate::error!(
+            crate::fatal!(
                 "Cannot proceed without .vf or \"physical\" font for PDF output... ({})",
                 alloc::string::String::from_utf8_lossy(tfm_name)
             );
@@ -1028,14 +1051,14 @@ impl Dpx {
                 is_unicode = ENC_UTF16;
             }
         }
-        let minbytes = self.pdf_dev_font_minbytes(font_id);
+        let minbytes = self.pdf_dev_font_minbytes(font_id)?;
         let lf = &mut self.dvi.loaded_fonts[cur_id];
         lf.padbytes = padbytes;
         lf.is_unicode = is_unicode;
         lf.minbytes = minbytes.min(4);
         lf.type_ = PHYSICAL;
         lf.font_id = font_id;
-        cur_id as i32
+        Ok(cur_id as i32)
     }
     /// `dvi_locate_native_font`.
     fn dvi_locate_native_font(
@@ -1047,18 +1070,18 @@ impl Dpx {
         extend: i32,
         slant: i32,
         embolden: i32,
-    ) -> i32 {
-        let (path, is_dfont, is_type1) = if let Some(p) = self.dpx_find_dfont_file(filename) {
+    ) -> Result<i32> {
+        let (path, is_dfont, is_type1) = if let Some(p) = self.dpx_find_dfont_file(filename)? {
             (p, true, false)
-        } else if let Some(p) = self.dpx_find_type1_file(filename) {
+        } else if let Some(p) = self.dpx_find_type1_file(filename)? {
             (p, false, true)
-        } else if let Some(p) = self
-            .dpx_find_opentype_file(filename)
-            .or_else(|| self.dpx_find_truetype_file(filename))
-        {
+        } else if let Some(p) = match self.dpx_find_opentype_file(filename)? {
+            Some(p) => Some(p),
+            None => self.dpx_find_truetype_file(filename)?,
+        } {
             (p, false, false)
         } else {
-            crate::error!(
+            crate::fatal!(
                 "Cannot proceed without the font: {}",
                 alloc::string::String::from_utf8_lossy(filename)
             );
@@ -1081,15 +1104,15 @@ impl Dpx {
         key.extend_from_slice(&b.0);
         let mrec = match self.pdf_lookup_fontmap_record(&key) {
             Some(m) => m,
-            None => match self
-                .pdf_insert_native_fontmap_record(&path, index, layout_dir, extend, slant, embolden)
-            {
+            None => match self.pdf_insert_native_fontmap_record(
+                &path, index, layout_dir, extend, slant, embolden,
+            )? {
                 Some(m) => m,
-                None => crate::error!("Failed to insert font record for font"),
+                None => crate::fatal!("Failed to insert font record for font"),
             },
         };
-        let font_id = self.pdf_dev_locate_font(&key, ptsize);
-        let minbytes = self.pdf_dev_font_minbytes(font_id);
+        let font_id = self.pdf_dev_locate_font(&key, ptsize)?;
+        let minbytes = self.pdf_dev_font_minbytes(font_id)?;
         {
             let lf = &mut self.dvi.loaded_fonts[cur_id];
             lf.font_id = font_id;
@@ -1101,15 +1124,16 @@ impl Dpx {
         }
         let ext = mrec.opt.extend;
         if is_type1 {
-            let Some(mut fp) = self.dpx_open_file(filename, crate::dpxfile::ResType::T1Font) else {
-                return -1;
+            let Some(mut fp) = self.dpx_open_file(filename, crate::dpxfile::ResType::T1Font)?
+            else {
+                return Ok(-1);
             };
             if crate::t1_load::is_pfb(&mut fp) == 0 {
-                crate::error!("Failed to read Type 1 font");
+                crate::fatal!("Failed to read Type 1 font");
             }
             let mut enc_vec: Vec<Option<Vec<u8>>> = vec![None; 256];
-            let Some(cffont) = self.t1_load_font(Some(&mut enc_vec), 0, &mut fp) else {
-                crate::error!("Failed to read Type 1 font");
+            let Some(cffont) = self.t1_load_font(Some(&mut enc_vec), 0, &mut fp)? else {
+                crate::fatal!("Failed to read Type 1 font");
             };
             let num_glyphs = cffont.num_glyphs;
             let shift = cffont.is_notdef_notzero;
@@ -1125,7 +1149,7 @@ impl Dpx {
                 let end = cstrings.offset[g + 1] as usize - 1;
                 let mut ginfo = crate::t1_char::T1Ginfo::default();
                 let subrs = cffont.subrs.first().and_then(Option::as_ref);
-                self.t1char_get_metrics(&cstrings.data[start..end], subrs, Some(&mut ginfo));
+                self.t1char_get_metrics(&cstrings.data[start..end], subrs, Some(&mut ginfo))?;
                 let advance = if layout_dir == 0 { ginfo.wx } else { ginfo.wy };
                 let ascent = ginfo.bbox.ury;
                 let descent = ginfo.bbox.lly;
@@ -1140,48 +1164,48 @@ impl Dpx {
             lf.gm = gm;
         } else {
             let Some(data) = self.files.read(&path) else {
-                crate::error!("Cannot proceed without the font");
+                crate::fatal!("Cannot proceed without the font");
             };
             let fp = MemFile::new(data, &path);
             let sfont = if is_dfont {
-                crate::sfnt::Sfnt::dfont_open(fp, index as i32)
+                crate::sfnt::Sfnt::dfont_open(fp, index as i32)?
             } else {
-                crate::sfnt::Sfnt::sfnt_open(fp)
+                crate::sfnt::Sfnt::sfnt_open(fp)?
             };
             let Some(mut sfont) = sfont else {
-                crate::error!("Failed to open the font");
+                crate::fatal!("Failed to open the font");
             };
             let offset = if sfont.type_ == crate::sfnt::SFNT_TYPE_TTC {
-                sfont.ttc_read_offset(index)
+                sfont.ttc_read_offset(index)?
             } else if sfont.type_ == crate::sfnt::SFNT_TYPE_DFONT {
                 sfont.offset
             } else {
                 0
             };
-            sfont.sfnt_read_table_directory(offset);
-            let head = sfont.tt_read_head_table();
-            let maxp = sfont.tt_read_maxp_table();
-            let hhea = sfont.tt_read_hhea_table();
+            sfont.sfnt_read_table_directory(offset)?;
+            let head = sfont.tt_read_head_table()?;
+            let maxp = sfont.tt_read_maxp_table()?;
+            let hhea = sfont.tt_read_hhea_table()?;
             let size = f64::from(ptsize);
             let upem = f64::from(head.units_per_em);
             let ascent = (size * (f64::from(hhea.ascent) / upem)) as Spt;
             let descent = (size * (f64::from(hhea.descent) / upem)) as Spt;
             let num_glyphs = maxp.num_glyphs;
             let metrics = if layout_dir == 1 && sfont.sfnt_find_table_pos(b"vmtx") > 0 {
-                let vhea = sfont.tt_read_vhea_table();
-                sfont.sfnt_locate_table(b"vmtx");
+                let vhea = sfont.tt_read_vhea_table()?;
+                sfont.sfnt_locate_table(b"vmtx")?;
                 sfont.tt_read_longMetrics(
                     num_glyphs,
                     vhea.num_of_long_ver_metrics,
                     vhea.num_of_ex_side_bearings,
-                )
+                )?
             } else {
-                sfont.sfnt_locate_table(b"hmtx");
+                sfont.sfnt_locate_table(b"hmtx")?;
                 sfont.tt_read_longMetrics(
                     num_glyphs,
                     hhea.num_of_long_hor_metrics,
                     hhea.num_of_ex_side_bearings,
-                )
+                )?
             };
             let mut gm = vec![Gm::default(); num_glyphs as usize];
             for i in 0..num_glyphs as usize {
@@ -1198,7 +1222,7 @@ impl Dpx {
         lf.extend = mrec.opt.extend as f32;
         lf.slant = mrec.opt.slant as f32;
         lf.embolden = mrec.opt.bold as f32;
-        cur_id as i32
+        Ok(cur_id as i32)
     }
 
     /// `dvi_dev_xpos`.
@@ -1272,13 +1296,13 @@ impl Dpx {
     }
 
     /// The code bytes `dvi_set`/`dvi_put` show for `ch` (`wbuf`, `n`).
-    fn char_bytes(&mut self, font: usize, ch: i32) -> ([u8; 4], usize) {
+    fn char_bytes(&mut self, font: usize, ch: i32) -> Result<([u8; 4], usize)> {
         let lf = &self.dvi.loaded_fonts[font];
         let mut wbuf = lf.padbytes;
         let n;
         if ch > 65535 {
             let (is_unicode, tfm_id) = (lf.is_unicode, lf.tfm_id);
-            if is_unicode == ENC_UTF16 && self.tfm_is_jfm(tfm_id) != 0 {
+            if is_unicode == ENC_UTF16 && self.tfm_is_jfm(tfm_id)? != 0 {
                 let hs = utf32_to_utf16_hs(ch as u32);
                 let ls = utf32_to_utf16_ls(ch as u32);
                 wbuf = [(hs >> 8) as u8, hs as u8, (ls >> 8) as u8, ls as u8];
@@ -1296,18 +1320,18 @@ impl Dpx {
             wbuf[3] = ch as u8;
             n = 2;
         } else if lf.subfont_id >= 0 {
-            crate::error!("Subfonts (SFD) are not supported");
+            crate::fatal!("Subfonts (SFD) are not supported");
         } else {
             wbuf[3] = ch as u8;
             n = 1;
         }
-        (wbuf, n)
+        Ok((wbuf, n))
     }
 
     /// `dvi_set`.
-    pub fn dvi_set(&mut self, ch: i32) {
+    pub fn dvi_set(&mut self, ch: i32) -> Result<()> {
         if self.dvi.current_font < 0 {
-            crate::error!("No font selected!");
+            crate::fatal!("No font selected!");
         }
         let cf = self.dvi.current_font as usize;
         let (ftype, num_glyphs, tfm_id, size) = {
@@ -1318,32 +1342,32 @@ impl Dpx {
             if ch >= 0 && ch < i32::from(num_glyphs) {
                 self.dvi.loaded_fonts[cf].gm[ch as usize].advance
             } else {
-                return;
+                return Ok(());
             }
         } else {
-            let w = self.tfm_get_fw_width(tfm_id, ch);
+            let w = self.tfm_get_fw_width(tfm_id, ch)?;
             crate::stream::sqxfw(size, w)
         };
         if self.dvi.lr_mode >= SKIMMING {
             self.dvi.lr_width = self.dvi.lr_width.wrapping_add(width as u32);
-            return;
+            return Ok(());
         }
         if self.dvi.lr_mode == RTYPESETTING {
             self.dvi_right(width);
         }
         match ftype {
             PHYSICAL => {
-                let (wbuf, n) = self.char_bytes(cf, ch);
+                let (wbuf, n) = self.char_bytes(cf, ch)?;
                 let (minbytes, font_id) = (
                     self.dvi.loaded_fonts[cf].minbytes,
                     self.dvi.loaded_fonts[cf].font_id,
                 );
                 let cbytes = (minbytes as usize).max(n);
                 let (h, v) = (self.dvi.dvi_state.h, self.dvi.dvi_state.v);
-                self.set_string(h, v.wrapping_neg(), &wbuf[4 - cbytes..], width, font_id);
+                self.set_string(h, v.wrapping_neg(), &wbuf[4 - cbytes..], width, font_id)?;
                 if self.dvi_is_tracking_boxes() {
-                    let height = self.tfm_get_fw_height(tfm_id, ch);
-                    let depth = self.tfm_get_fw_depth(tfm_id, ch);
+                    let height = self.tfm_get_fw_height(tfm_id, ch)?;
+                    let depth = self.tfm_get_fw_depth(tfm_id, ch)?;
                     let height = crate::stream::sqxfw(size, height);
                     let depth = crate::stream::sqxfw(size, depth);
                     let rect = self.calc_rect(h, v.wrapping_neg(), width, height, depth);
@@ -1354,7 +1378,7 @@ impl Dpx {
                 let wbuf = [(ch >> 8) as u8, ch as u8];
                 let font_id = self.dvi.loaded_fonts[cf].font_id;
                 let (h, v) = (self.dvi.dvi_state.h, self.dvi.dvi_state.v);
-                self.set_string(h, v.wrapping_neg(), &wbuf, width, font_id);
+                self.set_string(h, v.wrapping_neg(), &wbuf, width, font_id)?;
                 if self.dvi_is_tracking_boxes() {
                     let g = self.dvi.loaded_fonts[cf].gm[ch as usize];
                     let rect = self.calc_rect(h, v.wrapping_neg(), width, g.ascent, g.descent);
@@ -1363,18 +1387,19 @@ impl Dpx {
             }
             VIRTUAL => {
                 let font_id = self.dvi.loaded_fonts[cf].font_id;
-                self.vf_set_char(ch, font_id);
+                self.vf_set_char(ch, font_id)?;
             }
             _ => {}
         }
         if self.dvi.lr_mode == LTYPESETTING {
             self.dvi_right(width);
         }
+        Ok(())
     }
     /// `dvi_put`.
-    pub fn dvi_put(&mut self, ch: i32) {
+    pub fn dvi_put(&mut self, ch: i32) -> Result<()> {
         if self.dvi.current_font < 0 {
-            crate::error!("No font selected!");
+            crate::fatal!("No font selected!");
         }
         let cf = self.dvi.current_font as usize;
         let (ftype, tfm_id, size, font_id) = {
@@ -1383,38 +1408,40 @@ impl Dpx {
         };
         match ftype {
             PHYSICAL => {
-                let w = self.tfm_get_fw_width(tfm_id, ch);
+                let w = self.tfm_get_fw_width(tfm_id, ch)?;
                 let width = crate::stream::sqxfw(size, w);
-                let (wbuf, n) = self.char_bytes(cf, ch);
+                let (wbuf, n) = self.char_bytes(cf, ch)?;
                 let minbytes = self.dvi.loaded_fonts[cf].minbytes;
                 let cbytes = (minbytes as usize).max(n);
                 let (h, v) = (self.dvi.dvi_state.h, self.dvi.dvi_state.v);
-                self.set_string(h, v.wrapping_neg(), &wbuf[4 - cbytes..], width, font_id);
+                self.set_string(h, v.wrapping_neg(), &wbuf[4 - cbytes..], width, font_id)?;
                 if self.dvi_is_tracking_boxes() {
-                    let height = self.tfm_get_fw_height(tfm_id, ch);
-                    let depth = self.tfm_get_fw_depth(tfm_id, ch);
+                    let height = self.tfm_get_fw_height(tfm_id, ch)?;
+                    let depth = self.tfm_get_fw_depth(tfm_id, ch)?;
                     let height = crate::stream::sqxfw(size, height);
                     let depth = crate::stream::sqxfw(size, depth);
                     let rect = self.calc_rect(h, v.wrapping_neg(), width, height, depth);
                     self.pdf_doc_expand_box(&rect);
                 }
             }
-            VIRTUAL => self.vf_set_char(ch, font_id),
+            VIRTUAL => self.vf_set_char(ch, font_id)?,
             _ => {}
         }
+        Ok(())
     }
     /// `dvi_rule`.
-    pub fn dvi_rule(&mut self, width: i32, height: i32) {
+    pub fn dvi_rule(&mut self, width: i32, height: i32) -> Result<()> {
         if width > 0 && height > 0 {
             let (h, v) = (self.dvi.dvi_state.h, self.dvi.dvi_state.v);
             self.do_moveto(h, v);
             match self.dvi.dvi_state.d {
-                0 => self.set_rule(h, v.wrapping_neg(), width, height),
-                1 => self.set_rule(h, v.wrapping_neg().wrapping_sub(width), height, width),
-                3 => self.set_rule(h.wrapping_sub(height), v.wrapping_neg(), height, width),
+                0 => self.set_rule(h, v.wrapping_neg(), width, height)?,
+                1 => self.set_rule(h, v.wrapping_neg().wrapping_sub(width), height, width)?,
+                3 => self.set_rule(h.wrapping_sub(height), v.wrapping_neg(), height, width)?,
                 _ => {}
             }
         }
+        Ok(())
     }
     /// `dvi_dirchg`.
     pub fn dvi_dirchg(&mut self, dir: u8) {
@@ -1422,54 +1449,58 @@ impl Dpx {
         self.pdf_dev_set_dirmode(i32::from(dir));
     }
     /// `do_setrule`.
-    fn do_setrule(&mut self) {
+    fn do_setrule(&mut self) -> Result<()> {
         let height = self.get_buffered_signed_quad();
         let width = self.get_buffered_signed_quad();
         match self.dvi.lr_mode {
             LTYPESETTING => {
-                self.dvi_rule(width, height);
+                self.dvi_rule(width, height)?;
                 self.dvi_right(width);
             }
             RTYPESETTING => {
                 self.dvi_right(width);
-                self.dvi_rule(width, height);
+                self.dvi_rule(width, height)?;
             }
             _ => self.dvi.lr_width = self.dvi.lr_width.wrapping_add(width as u32),
         }
+        Ok(())
     }
     /// `do_putrule`.
-    fn do_putrule(&mut self) {
+    fn do_putrule(&mut self) -> Result<()> {
         let height = self.get_buffered_signed_quad();
         let width = self.get_buffered_signed_quad();
         match self.dvi.lr_mode {
-            LTYPESETTING => self.dvi_rule(width, height),
+            LTYPESETTING => self.dvi_rule(width, height)?,
             RTYPESETTING => {
                 self.dvi_right(width);
-                self.dvi_rule(width, height);
+                self.dvi_rule(width, height)?;
                 self.dvi_right(width.wrapping_neg());
             }
             _ => {}
         }
+        Ok(())
     }
     /// `dvi_push`.
-    pub fn dvi_push(&mut self) {
+    pub fn dvi_push(&mut self) -> Result<()> {
         if self.dvi.dvi_stack_depth as usize >= DVI_STACK_DEPTH_MAX {
-            crate::error!("DVI stack exceeded limit.");
+            crate::fatal!("DVI stack exceeded limit.");
         }
         let d = self.dvi.dvi_stack_depth as usize;
         self.dvi.dvi_stack[d] = self.dvi.dvi_state;
         self.dvi.dvi_stack_depth += 1;
+        Ok(())
     }
     /// `dvi_pop`.
-    pub fn dvi_pop(&mut self) {
+    pub fn dvi_pop(&mut self) -> Result<()> {
         if self.dvi.dvi_stack_depth == 0 {
-            crate::error!("Tried to pop an empty stack.");
+            crate::fatal!("Tried to pop an empty stack.");
         }
         self.dvi.dvi_stack_depth -= 1;
         self.dvi.dvi_state = self.dvi.dvi_stack[self.dvi.dvi_stack_depth as usize];
         let (h, v) = (self.dvi.dvi_state.h, self.dvi.dvi_state.v);
         self.do_moveto(h, v);
         self.pdf_dev_set_dirmode(self.dvi.dvi_state.d as i32);
+        Ok(())
     }
     /// `dvi_w`.
     pub fn dvi_w(&mut self, ch: i32) {
@@ -1508,30 +1539,32 @@ impl Dpx {
         self.dvi_down(self.dvi.dvi_state.z);
     }
     /// `skip_fntdef`.
-    fn skip_fntdef(&mut self) {
+    fn skip_fntdef(&mut self) -> Result<()> {
         let f = self.dvi_file();
-        f.skip_bytes(12);
-        let area_len = f.get_unsigned_byte() as usize;
-        let name_len = f.get_unsigned_byte() as usize;
-        f.skip_bytes(area_len + name_len);
+        f.skip_bytes(12)?;
+        let area_len = f.get_unsigned_byte()? as usize;
+        let name_len = f.get_unsigned_byte()? as usize;
+        f.skip_bytes(area_len + name_len)?;
+        Ok(())
     }
     /// `do_fntdef`.
-    fn do_fntdef(&mut self, tex_id: i32) {
+    fn do_fntdef(&mut self, tex_id: i32) -> Result<()> {
         if self.dvi.linear != 0 {
-            self.read_font_record(tex_id);
+            self.read_font_record(tex_id)?;
         } else {
-            self.skip_fntdef();
+            self.skip_fntdef()?;
         }
         self.dvi.dvi_page_buf_index -= 1;
+        Ok(())
     }
     /// `dvi_set_font`.
     pub fn dvi_set_font(&mut self, font_id: i32) {
         self.dvi.current_font = font_id;
     }
     /// `do_fnt`.
-    fn do_fnt(&mut self, tex_id: i32) {
+    fn do_fnt(&mut self, tex_id: i32) -> Result<()> {
         let Some(i) = self.dvi.def_fonts.iter().position(|d| d.tex_id == tex_id) else {
-            crate::error!(
+            crate::fatal!(
                 "Tried to select a font that hasn't been defined: id={}",
                 tex_id
             );
@@ -1547,9 +1580,9 @@ impl Dpx {
                     d.extend,
                     d.slant,
                     d.embolden,
-                )
+                )?
             } else {
-                self.dvi_locate_font(&d.font_name, d.point_size)
+                self.dvi_locate_font(&d.font_name, d.point_size)?
             };
             let fi = font_id as usize;
             self.dvi.loaded_fonts[fi].rgba_color = d.rgba_color;
@@ -1559,48 +1592,52 @@ impl Dpx {
             } else {
                 let a = d.rgba_color & 0xff;
                 let xgs_dict = self.o.new_dict();
-                self.o.put_name(xgs_dict, b"Type", b"ExtGState");
-                self.o.put_number(xgs_dict, b"ca", f64::from(a) / 255.0);
-                self.o.put_number(xgs_dict, b"CA", f64::from(a) / 255.0);
+                self.o.put_name(xgs_dict, b"Type", b"ExtGState")?;
+                self.o.put_number(xgs_dict, b"ca", f64::from(a) / 255.0)?;
+                self.o.put_number(xgs_dict, b"CA", f64::from(a) / 255.0)?;
                 self.dvi.loaded_fonts[fi].xgs_id =
-                    self.pdf_defineresource(b"ExtGState", None, xgs_dict, 0);
+                    self.pdf_defineresource(b"ExtGState", None, xgs_dict, 0)?;
             }
             self.dvi.loaded_fonts[fi].source = DVI;
             self.dvi.def_fonts[i].used = 1;
             self.dvi.def_fonts[i].font_id = font_id;
         }
         self.dvi.current_font = self.dvi.def_fonts[i].font_id;
+        Ok(())
     }
     /// `do_xxx`.
-    fn do_xxx(&mut self, size: i32) {
+    fn do_xxx(&mut self, size: i32) -> Result<()> {
         let start = self.dvi.dvi_page_buf_index as usize;
         if self.dvi.lr_mode < SKIMMING {
             let buf = self.dvi.dvi_page_buffer[start..start + size as usize].to_vec();
-            self.dvi_do_special(&buf);
+            self.dvi_do_special(&buf)?;
         }
         self.dvi.dvi_page_buf_index += size as u32;
+        Ok(())
     }
     /// `do_bop`.
-    fn do_bop(&mut self) {
+    fn do_bop(&mut self) -> Result<()> {
         if self.dvi.processing_page != 0 {
-            crate::error!("Got a bop in the middle of a page!");
+            crate::fatal!("Got a bop in the middle of a page!");
         }
         self.dvi.dvi_page_buf_index += 44;
         self.clear_state();
         self.dvi.processing_page = 1;
         let mag = self.dvi_tell_mag();
         let (ox, oy) = (self.dvi.dev_origin_x, self.dvi.dev_origin_y);
-        self.pdf_doc_begin_page(mag, ox, oy);
-        self.spc_exec_at_begin_page();
+        self.pdf_doc_begin_page(mag, ox, oy)?;
+        self.spc_exec_at_begin_page()?;
+        Ok(())
     }
     /// `do_eop`.
-    fn do_eop(&mut self) {
+    fn do_eop(&mut self) -> Result<()> {
         self.dvi.processing_page = 0;
         if self.dvi.dvi_stack_depth != 0 {
-            crate::error!("DVI stack depth is not zero at end of page");
+            crate::fatal!("DVI stack depth is not zero at end of page");
         }
-        self.spc_exec_at_end_page();
-        self.pdf_doc_end_page();
+        self.spc_exec_at_end_page()?;
+        self.pdf_doc_end_page()?;
+        Ok(())
     }
     /// `do_dir`.
     fn do_dir(&mut self) {
@@ -1608,21 +1645,23 @@ impl Dpx {
         self.pdf_dev_set_dirmode(self.dvi.dvi_state.d as i32);
     }
     /// `lr_width_push`.
-    fn lr_width_push(&mut self) {
+    fn lr_width_push(&mut self) -> Result<()> {
         if self.dvi.lr_width_stack_depth as usize >= DVI_STACK_DEPTH_MAX {
-            crate::error!("Segment width stack exceeded limit.");
+            crate::fatal!("Segment width stack exceeded limit.");
         }
         let d = self.dvi.lr_width_stack_depth as usize;
         self.dvi.lr_width_stack[d] = self.dvi.lr_width;
         self.dvi.lr_width_stack_depth += 1;
+        Ok(())
     }
     /// `lr_width_pop`.
-    fn lr_width_pop(&mut self) {
+    fn lr_width_pop(&mut self) -> Result<()> {
         if self.dvi.lr_width_stack_depth == 0 {
-            crate::error!("Tried to pop an empty segment width stack.");
+            crate::fatal!("Tried to pop an empty segment width stack.");
         }
         self.dvi.lr_width_stack_depth -= 1;
         self.dvi.lr_width = self.dvi.lr_width_stack[self.dvi.lr_width_stack_depth as usize];
+        Ok(())
     }
     /// `dvi_begin_reflect`.
     fn dvi_begin_reflect(&mut self) {
@@ -1637,30 +1676,31 @@ impl Dpx {
         }
     }
     /// `dvi_end_reflect`.
-    fn dvi_end_reflect(&mut self) {
+    fn dvi_end_reflect(&mut self) -> Result<()> {
         match self.dvi.lr_mode {
             SKIMMING => {
                 self.dvi.current_font = self.dvi.lr_state.font;
                 self.dvi.dvi_page_buf_index = self.dvi.lr_state.buf_index;
                 self.dvi.lr_mode = LTYPESETTING + RTYPESETTING - self.dvi.lr_state.state;
                 self.dvi_right((self.dvi.lr_width as i32).wrapping_neg());
-                self.lr_width_push();
+                self.lr_width_push()?;
             }
             LTYPESETTING | RTYPESETTING => {
-                self.lr_width_pop();
+                self.lr_width_pop()?;
                 self.dvi_right((self.dvi.lr_width as i32).wrapping_neg());
                 self.dvi.lr_mode = LTYPESETTING + RTYPESETTING - self.dvi.lr_mode;
             }
             _ => self.dvi.lr_mode -= 1,
         }
+        Ok(())
     }
     /// `skip_native_font_def`.
-    fn skip_native_font_def(&mut self) {
+    fn skip_native_font_def(&mut self) -> Result<()> {
         let f = self.dvi_file();
-        f.skip_bytes(4);
-        let flags = f.get_unsigned_pair();
-        let name_length = f.get_unsigned_byte() as usize;
-        f.skip_bytes(name_length + 4);
+        f.skip_bytes(4)?;
+        let flags = f.get_unsigned_pair()?;
+        let name_length = f.get_unsigned_byte()? as usize;
+        f.skip_bytes(name_length + 4)?;
         for flag in [
             XDV_FLAG_COLORED,
             XDV_FLAG_EXTEND,
@@ -1668,18 +1708,20 @@ impl Dpx {
             XDV_FLAG_EMBOLDEN,
         ] {
             if flags & flag != 0 {
-                f.skip_bytes(4);
+                f.skip_bytes(4)?;
             }
         }
+        Ok(())
     }
     /// `do_native_font_def`.
-    fn do_native_font_def(&mut self, tex_id: i32) {
+    fn do_native_font_def(&mut self, tex_id: i32) -> Result<()> {
         if self.dvi.linear != 0 {
-            self.read_native_font_record(tex_id);
+            self.read_native_font_record(tex_id)?;
         } else {
-            self.skip_native_font_def();
+            self.skip_native_font_def()?;
         }
         self.dvi.dvi_page_buf_index -= 1;
+        Ok(())
     }
     /// `skip_glyphs`.
     fn skip_glyphs(&mut self) {
@@ -1687,9 +1729,9 @@ impl Dpx {
         self.dvi.dvi_page_buf_index += slen * 10;
     }
     /// `do_glyphs`.
-    fn do_glyphs(&mut self, do_actual_text: i32) {
+    fn do_glyphs(&mut self, do_actual_text: i32) -> Result<()> {
         if self.dvi.current_font < 0 {
-            crate::error!("No font selected!");
+            crate::fatal!("No font selected!");
         }
         let cf = self.dvi.current_font as usize;
         if do_actual_text != 0 {
@@ -1701,14 +1743,14 @@ impl Dpx {
                 for _ in 0..slen {
                     unicodes.push(self.get_buffered_unsigned_pair() as u16);
                 }
-                self.pdf_dev_begin_actualtext(&unicodes);
+                self.pdf_dev_begin_actualtext(&unicodes)?;
             }
         }
         let width = self.get_buffered_signed_quad();
         if self.dvi.lr_mode >= SKIMMING {
             self.dvi.lr_width = self.dvi.lr_width.wrapping_add(width as u32);
             self.skip_glyphs();
-            return;
+            return Ok(());
         }
         if self.dvi.lr_mode == RTYPESETTING {
             self.dvi_right(width);
@@ -1731,20 +1773,20 @@ impl Dpx {
                 f64::from((rgba_color >> 16) as u8) / 255.0,
                 f64::from((rgba_color >> 8) as u8) / 255.0,
             );
-            self.pdf_color_push(&color, &color);
+            self.pdf_color_push(&color, &color)?;
             if xgs_id >= 0 {
                 let mut resname = crate::fmt::Buf::new();
                 resname.extend(b"Xtx_Gs_");
                 resname.hex_padded(cf as u32, 8);
-                let r = self.pdf_get_resource_reference(xgs_id).expect("reference");
-                self.pdf_doc_add_page_resource(b"ExtGState", &resname.0, r);
-                self.graphics_mode();
-                self.pdf_dev_gsave();
+                let r = self.pdf_get_resource_reference(xgs_id)?.expect("reference");
+                self.pdf_doc_add_page_resource(b"ExtGState", &resname.0, r)?;
+                self.graphics_mode()?;
+                self.pdf_dev_gsave()?;
                 let mut content = crate::fmt::Buf::new();
                 content.extend(b" /");
                 content.extend(&resname.0);
                 content.extend(b" gs ");
-                self.pdf_doc_add_page_content(&content.0);
+                self.pdf_doc_add_page_content(&content.0)?;
             }
         }
         let (num_glyphs, shift_gid, font_id, size) = {
@@ -1778,21 +1820,22 @@ impl Dpx {
                 v.wrapping_neg().wrapping_sub(yloc[i]),
             );
             self.record_glyph_run(cf, glyph_id, x, y, size, rgba_used, rgba_color);
-            self.set_string(x, y, &wbuf, advance, font_id);
+            self.set_string(x, y, &wbuf, advance, font_id)?;
         }
         if rgba_used == 1 {
             if xgs_id >= 0 {
-                self.graphics_mode();
-                self.pdf_dev_grestore();
+                self.graphics_mode()?;
+                self.pdf_dev_grestore()?;
             }
-            self.pdf_color_pop();
+            self.pdf_color_pop()?;
         }
         if do_actual_text != 0 {
-            self.pdf_dev_end_actualtext();
+            self.pdf_dev_end_actualtext()?;
         }
         if self.dvi.lr_mode == LTYPESETTING {
             self.dvi_right(width);
         }
+        Ok(())
     }
 
     /// The side output: a glyph of a native font at DVI position
@@ -1827,43 +1870,49 @@ impl Dpx {
     }
 
     /// `check_postamble`.
-    fn check_postamble(&mut self) {
-        self.dvi_file().skip_bytes(28);
+    fn check_postamble(&mut self) -> Result<()> {
+        self.dvi_file().skip_bytes(28)?;
         loop {
-            let code = self.dvi_file().get_unsigned_byte();
+            let code = self.dvi_file().get_unsigned_byte()?;
             if code == POST_POST {
                 break;
             }
             match code {
                 FNT_DEF1..=FNT_DEF4 => {
-                    self.dvi_file().skip_bytes((code + 1 - FNT_DEF1) as usize);
-                    self.skip_fntdef();
+                    self.dvi_file().skip_bytes((code + 1 - FNT_DEF1) as usize)?;
+                    self.skip_fntdef()?;
                 }
                 XDV_NATIVE_FONT_DEF => {
-                    self.dvi_file().skip_bytes(4);
-                    self.skip_native_font_def();
+                    self.dvi_file().skip_bytes(4)?;
+                    self.skip_native_font_def()?;
                 }
-                _ => crate::error!("Unexpected op code ({}) in postamble", code),
+                _ => crate::fatal!("Unexpected op code ({}) in postamble", code),
             }
         }
-        self.dvi_file().skip_bytes(4);
-        let post_id_byte = self.dvi_file().get_unsigned_byte();
+        self.dvi_file().skip_bytes(4)?;
+        let post_id_byte = self.dvi_file().get_unsigned_byte()?;
         self.dvi.post_id_byte = i32::from(post_id_byte);
         if !(post_id_byte == DVI_ID
             || post_id_byte == DVIV_ID
             || post_id_byte == XDV_ID
             || post_id_byte == XDV_ID_OLD)
         {
-            crate::error!("DVI ID = {}", post_id_byte);
+            crate::fatal!("DVI ID = {}", post_id_byte);
         }
-        self.check_id_bytes();
+        self.check_id_bytes()?;
         if self.dvi.has_ptex != 0 && post_id_byte != DVIV_ID {
-            crate::error!("Saw opcode {} in DVI file not for Ascii pTeX", PTEXDIR);
+            crate::fatal!("Saw opcode {} in DVI file not for Ascii pTeX", PTEXDIR);
         }
         self.dvi.num_pages = 0;
+        Ok(())
     }
     /// `dvi_do_page`.
-    pub fn dvi_do_page(&mut self, page_paper_height: f64, hmargin: f64, vmargin: f64) {
+    pub fn dvi_do_page(
+        &mut self,
+        page_paper_height: f64,
+        hmargin: f64,
+        vmargin: f64,
+    ) -> Result<()> {
         self.dvi.dvi_page_buf_index = 0;
         self.dvi.dev_origin_x = hmargin;
         self.dvi.dev_origin_y = page_paper_height - vmargin;
@@ -1871,53 +1920,53 @@ impl Dpx {
         loop {
             let opcode = self.get_buffered_unsigned_byte() as u8;
             if opcode <= SET_CHAR_127 {
-                self.dvi_set(i32::from(opcode));
+                self.dvi_set(i32::from(opcode))?;
                 continue;
             }
             if (FNT_NUM_0..=FNT_NUM_63).contains(&opcode) {
-                self.do_fnt(i32::from(opcode - FNT_NUM_0));
+                self.do_fnt(i32::from(opcode - FNT_NUM_0))?;
                 continue;
             }
             match opcode {
                 SET1 | SET2 | SET3 => {
                     let c = self.get_buffered_unsigned_num(opcode - SET1);
-                    self.dvi_set(c);
+                    self.dvi_set(c)?;
                 }
-                SET4 => crate::error!("Multibyte (>24 bits) character not supported!"),
-                SET_RULE => self.do_setrule(),
+                SET4 => crate::fatal!("Multibyte (>24 bits) character not supported!"),
+                SET_RULE => self.do_setrule()?,
                 PUT1 | PUT2 | PUT3 => {
                     let c = self.get_buffered_unsigned_num(opcode - PUT1);
-                    self.dvi_put(c);
+                    self.dvi_put(c)?;
                 }
-                PUT4 => crate::error!("Multibyte (>24 bits) character not supported!"),
-                PUT_RULE => self.do_putrule(),
+                PUT4 => crate::fatal!("Multibyte (>24 bits) character not supported!"),
+                PUT_RULE => self.do_putrule()?,
                 NOP => {}
-                BOP => self.do_bop(),
+                BOP => self.do_bop()?,
                 EOP => {
-                    self.do_eop();
+                    self.do_eop()?;
                     if self.dvi.linear != 0 && self.dvi.peek_after_eop {
-                        let c = self.dvi_file().get_unsigned_byte();
+                        let c = self.dvi_file().get_unsigned_byte()?;
                         if c == POST {
-                            self.check_postamble();
+                            self.check_postamble()?;
                         } else {
                             self.dvi_file().ungetc();
                         }
                     }
-                    return;
+                    return Ok(());
                 }
                 PUSH => {
-                    self.dvi_push();
+                    self.dvi_push()?;
                     if self.dvi.lr_mode >= SKIMMING {
-                        self.lr_width_push();
+                        self.lr_width_push()?;
                     }
-                    self.dvi_mark_depth();
+                    self.dvi_mark_depth()?;
                 }
                 POP => {
-                    self.dvi_pop();
+                    self.dvi_pop()?;
                     if self.dvi.lr_mode >= SKIMMING {
-                        self.lr_width_pop();
+                        self.lr_width_pop()?;
                     }
-                    self.dvi_mark_depth();
+                    self.dvi_mark_depth()?;
                 }
                 RIGHT1..=RIGHT4 => {
                     let v = self.get_buffered_signed_num(opcode - RIGHT1);
@@ -1949,74 +1998,75 @@ impl Dpx {
                 }
                 FNT1..=FNT4 => {
                     let v = self.get_buffered_unsigned_num(opcode - FNT1);
-                    self.do_fnt(v);
+                    self.do_fnt(v)?;
                 }
                 XXX1..=XXX4 => {
                     let size = self.get_buffered_unsigned_num(opcode - XXX1);
                     if size >= 0 {
-                        self.do_xxx(size);
+                        self.do_xxx(size)?;
                     }
                 }
                 FNT_DEF1..=FNT_DEF4 => {}
                 PTEXDIR => {
-                    self.need_ptex(i32::from(opcode));
+                    self.need_ptex(i32::from(opcode))?;
                     self.do_dir();
                 }
                 XDV_GLYPHS => {
-                    self.need_xetex(i32::from(opcode));
-                    self.do_glyphs(0);
+                    self.need_xetex(i32::from(opcode))?;
+                    self.do_glyphs(0)?;
                 }
                 XDV_TEXT_AND_GLYPHS => {
-                    self.need_xetex(i32::from(opcode));
-                    self.do_glyphs(1);
+                    self.need_xetex(i32::from(opcode))?;
+                    self.do_glyphs(1)?;
                 }
-                XDV_NATIVE_FONT_DEF => self.need_xetex(i32::from(opcode)),
+                XDV_NATIVE_FONT_DEF => self.need_xetex(i32::from(opcode))?,
                 BEGIN_REFLECT => {
-                    self.need_xetex(i32::from(opcode));
+                    self.need_xetex(i32::from(opcode))?;
                     self.dvi_begin_reflect();
                 }
                 END_REFLECT => {
-                    self.need_xetex(i32::from(opcode));
-                    self.dvi_end_reflect();
+                    self.need_xetex(i32::from(opcode))?;
+                    self.dvi_end_reflect()?;
                 }
                 POST if self.dvi.linear != 0 && self.dvi.processing_page == 0 => {
                     self.dvi.num_pages = 0;
-                    return;
+                    return Ok(());
                 }
                 PRE | POST | POST_POST => {
-                    crate::error!("Unexpected preamble or postamble in dvi file")
+                    crate::fatal!("Unexpected preamble or postamble in dvi file")
                 }
-                _ => crate::error!("Unexpected opcode or DVI file ended prematurely"),
+                _ => crate::fatal!("Unexpected opcode or DVI file ended prematurely"),
             }
         }
+        Ok(())
     }
     /// `dvi_init`: the scale (dvi2pts). `dvi_filename` none: the XDV is
     /// already in `self.dvi.dvi_file` (C's stdin, linear processing).
-    pub fn dvi_init(&mut self, dvi_filename: Option<&[u8]>, mag: f64) -> f64 {
+    pub fn dvi_init(&mut self, dvi_filename: Option<&[u8]>, mag: f64) -> Result<f64> {
         if dvi_filename.is_none() {
             self.dvi.linear = 1;
-            self.get_preamble_dvi_info();
+            self.get_preamble_dvi_info()?;
             self.do_scales(mag);
             if !self.dvi_file().eof() {
-                let c = self.dvi_file().get_unsigned_byte();
+                let c = self.dvi_file().get_unsigned_byte()?;
                 if c == POST {
-                    self.check_postamble();
+                    self.check_postamble()?;
                 } else {
                     self.dvi_file().ungetc();
                 }
             }
         } else {
-            let post_location = self.find_post();
-            self.get_dvi_info(post_location);
+            let post_location = self.find_post()?;
+            self.get_dvi_info(post_location)?;
             self.do_scales(mag);
-            self.get_page_info(post_location);
-            self.get_comment();
-            self.get_dvi_fonts(post_location);
+            self.get_page_info(post_location)?;
+            self.get_comment()?;
+            self.get_dvi_fonts(post_location)?;
         }
         self.clear_state();
         self.dvi.dvi_page_buffer = vec![0; DVI_PAGE_BUF_CHUNK as usize];
         self.dvi.dvi_page_buf_size = DVI_PAGE_BUF_CHUNK;
-        self.dvi.dvi2pts
+        Ok(self.dvi.dvi2pts)
     }
     /// `dvi_close`.
     pub fn dvi_close(&mut self) {
@@ -2031,8 +2081,8 @@ impl Dpx {
         self.dvi.dvi_page_buf_size = 0;
     }
     /// `dvi_vf_init`.
-    pub fn dvi_vf_init(&mut self, dev_font_id: i32) {
-        self.dvi_push();
+    pub fn dvi_vf_init(&mut self, dev_font_id: i32) -> Result<()> {
+        self.dvi_push()?;
         let st = &mut self.dvi.dvi_state;
         st.w = 0;
         st.x = 0;
@@ -2043,24 +2093,31 @@ impl Dpx {
             self.dvi.saved_dvi_font[n] = self.dvi.current_font;
             self.dvi.num_saved_fonts += 1;
         } else {
-            crate::error!("Virtual fonts nested too deeply!");
+            crate::fatal!("Virtual fonts nested too deeply!");
         }
         self.dvi.current_font = dev_font_id;
+        Ok(())
     }
     /// `dvi_vf_finish`.
-    pub fn dvi_vf_finish(&mut self) {
-        self.dvi_pop();
+    pub fn dvi_vf_finish(&mut self) -> Result<()> {
+        self.dvi_pop()?;
         if self.dvi.num_saved_fonts > 0 {
             self.dvi.num_saved_fonts -= 1;
             self.dvi.current_font = self.dvi.saved_dvi_font[self.dvi.num_saved_fonts as usize];
         } else {
-            crate::error!("Tried to pop an empty font stack");
+            crate::fatal!("Tried to pop an empty font stack");
         }
+        Ok(())
     }
 
     /// `scan_special_encrypt` (pdf:encrypt; the values are only recorded,
     /// encryption itself is not ported): status.
-    fn scan_special_encrypt(&mut self, ext: &mut ScanSpecialsExt, s: &[u8], pp: &mut usize) -> i32 {
+    fn scan_special_encrypt(
+        &mut self,
+        ext: &mut ScanSpecialsExt,
+        s: &[u8],
+        pp: &mut usize,
+    ) -> Result<i32> {
         let mut error = 0;
         crate::parse::skip_white(s, pp);
         ext.owner_pw.clear();
@@ -2073,7 +2130,7 @@ impl Dpx {
             match &kp[..] {
                 b"ownerpw" | b"userpw" => match self.o.parse_pdf_string(s, pp) {
                     Some(obj) => {
-                        let v = self.o.string_value(obj);
+                        let v = self.o.string_value(obj)?;
                         let n = v.len().min(crate::session::MAX_PWD_LEN - 1);
                         let v = v[..n].to_vec();
                         if &kp[..] == b"ownerpw" {
@@ -2081,7 +2138,7 @@ impl Dpx {
                         } else {
                             ext.user_pw = v;
                         }
-                        self.o.release(obj);
+                        self.o.release(obj)?;
                     }
                     None => error = -1,
                 },
@@ -2089,7 +2146,7 @@ impl Dpx {
                     let obj = self.o.parse_pdf_number(s, pp);
                     match obj {
                         Some(o) if self.o.is_number(Some(o)) => {
-                            let v = self.o.number_value(o) as u32;
+                            let v = self.o.number_value(o)? as u32;
                             if &kp[..] == b"length" {
                                 ext.key_bits = v as i32;
                             } else {
@@ -2098,13 +2155,13 @@ impl Dpx {
                         }
                         _ => error = -1,
                     }
-                    self.o.release_opt(obj);
+                    self.o.release_opt(obj)?;
                 }
                 _ => error = -1,
             }
             crate::parse::skip_white(s, pp);
         }
-        error
+        Ok(error)
     }
     /// `scan_special_trailerid`: status.
     fn scan_special_trailerid(
@@ -2112,38 +2169,38 @@ impl Dpx {
         ext: &mut ScanSpecialsExt,
         s: &[u8],
         pp: &mut usize,
-    ) -> i32 {
+    ) -> Result<i32> {
         let mut error = 0;
         crate::parse::skip_white(s, pp);
-        match self.o.parse_pdf_array(s, pp, None) {
+        match self.o.parse_pdf_array(s, pp, None)? {
             Some(id_array) => {
-                if self.o.array_length(id_array) == 2 {
-                    let t1 = self.o.get_array(id_array, 0);
-                    let t2 = self.o.get_array(id_array, 1);
+                if self.o.array_length(id_array)? == 2 {
+                    let t1 = self.o.get_array(id_array, 0)?;
+                    let t2 = self.o.get_array(id_array, 1)?;
                     if self.o.is_string(t1)
-                        && self.o.string_value(t1.expect("string")).len() == 16
+                        && self.o.string_value(t1.expect("string"))?.len() == 16
                         && self.o.is_string(t2)
-                        && self.o.string_value(t2.expect("string")).len() == 16
+                        && self.o.string_value(t2.expect("string"))?.len() == 16
                     {
                         ext.id1
-                            .copy_from_slice(self.o.string_value(t1.expect("string")));
+                            .copy_from_slice(self.o.string_value(t1.expect("string"))?);
                         ext.id2
-                            .copy_from_slice(self.o.string_value(t2.expect("string")));
+                            .copy_from_slice(self.o.string_value(t2.expect("string"))?);
                     } else {
                         error = -1;
                     }
                 } else {
                     error = -1;
                 }
-                self.o.release(id_array);
+                self.o.release(id_array)?;
             }
             None => error = -1,
         }
         crate::parse::skip_white(s, pp);
-        error
+        Ok(error)
     }
     /// `scan_special`: status; `buf` is the special's bytes.
-    fn scan_special(&mut self, sp: &mut ScanSpecials, buf: &[u8]) -> i32 {
+    fn scan_special(&mut self, sp: &mut ScanSpecials, buf: &[u8]) -> Result<i32> {
         use crate::dpxutil::{dpx_util_read_length, parse_c_ident, parse_float_decimal};
         let s = buf;
         let mut p = 0usize;
@@ -2171,7 +2228,7 @@ impl Dpx {
         }
         sw(&mut p);
         let at = |p: usize| s.get(p).copied().unwrap_or(0);
-        let Some(q) = q else { return error };
+        let Some(q) = q else { return Ok(error) };
         let mag = self.dvi_tell_mag();
         match &q[..] {
             b"landscape" => sp.landscape = 1,
@@ -2260,40 +2317,40 @@ impl Dpx {
             b"encrypt" if ns_pdf && sp.ext.is_some() => {
                 let mut ext = sp.ext.take().expect("ext");
                 ext.do_enc = 1;
-                error = self.scan_special_encrypt(&mut ext, s, &mut p);
+                error = self.scan_special_encrypt(&mut ext, s, &mut p)?;
                 sp.ext = Some(ext);
             }
             b"config" if ns_dvipdfmx => {
-                self.read_config_special(s, &mut p);
+                self.read_config_special(s, &mut p)?;
             }
             b"trailerid" if ns_pdf && sp.ext.is_some() => {
                 let mut ext = sp.ext.take().expect("ext");
-                error = self.scan_special_trailerid(&mut ext, s, &mut p);
+                error = self.scan_special_trailerid(&mut ext, s, &mut p)?;
                 ext.has_id = i32::from(error == 0);
                 sp.ext = Some(ext);
             }
             _ => {}
         }
-        error
+        Ok(error)
     }
     /// `dvi_scan_specials`: page sizes, offsets, landscape (and on the
     /// first page the version, encryption, trailer ID) from the page's
     /// specials, updating `sp`.
-    pub fn dvi_scan_specials(&mut self, page_no: i32, sp: &mut ScanSpecials) {
+    pub fn dvi_scan_specials(&mut self, page_no: i32, sp: &mut ScanSpecials) -> Result<()> {
         if page_no == self.dvi.buffered_page || self.dvi.num_pages == 0 {
-            return;
+            return Ok(());
         }
         self.dvi.buffered_page = page_no;
         self.dvi.dvi_page_buf_index = 0;
         if self.dvi.linear == 0 {
             if page_no as u32 >= self.dvi.num_pages {
-                crate::error!("Invalid page number: {}", page_no);
+                crate::fatal!("Invalid page number: {}", page_no);
             }
             let offset = self.dvi.page_loc[page_no as usize];
             self.dvi_file().seek_absolute(offset as usize);
         }
         loop {
-            let opcode = self.get_and_buffer_unsigned_byte() as u8;
+            let opcode = self.get_and_buffer_unsigned_byte()? as u8;
             if opcode == EOP {
                 break;
             }
@@ -2302,18 +2359,18 @@ impl Dpx {
             }
             match opcode {
                 XXX1..=XXX4 => {
-                    let mut size = self.get_and_buffer_unsigned_byte() as u32;
+                    let mut size = self.get_and_buffer_unsigned_byte()? as u32;
                     for _ in XXX1..opcode {
                         size = size
                             .wrapping_mul(0x100)
-                            .wrapping_add(self.get_and_buffer_unsigned_byte() as u32);
+                            .wrapping_add(self.get_and_buffer_unsigned_byte()? as u32);
                     }
                     let f = self.dvi.dvi_file.as_mut().expect("DVI file");
                     let data = f.read(size as usize).to_vec();
                     if data.len() != size as usize {
-                        crate::error!("Reading DVI file failed!");
+                        crate::fatal!("Reading DVI file failed!");
                     }
-                    self.scan_special(sp, &data);
+                    self.scan_special(sp, &data)?;
                     let i = self.dvi.dvi_page_buf_index as usize;
                     if i + data.len() > self.dvi.dvi_page_buffer.len() {
                         self.dvi
@@ -2323,52 +2380,53 @@ impl Dpx {
                     self.dvi.dvi_page_buffer[i..i + data.len()].copy_from_slice(&data);
                     self.dvi.dvi_page_buf_index += size;
                 }
-                BOP => self.get_and_buffer_bytes(44),
+                BOP => self.get_and_buffer_bytes(44)?,
                 NOP | PUSH | POP | W0 | X0 | Y0 | Z0 => {}
                 SET1 | PUT1 | RIGHT1 | DOWN1 | W1 | X1 | Y1 | Z1 | FNT1 => {
-                    self.get_and_buffer_bytes(1)
+                    self.get_and_buffer_bytes(1)?
                 }
                 SET2 | PUT2 | RIGHT2 | DOWN2 | W2 | X2 | Y2 | Z2 | FNT2 => {
-                    self.get_and_buffer_bytes(2)
+                    self.get_and_buffer_bytes(2)?
                 }
                 SET3 | PUT3 | RIGHT3 | DOWN3 | W3 | X3 | Y3 | Z3 | FNT3 => {
-                    self.get_and_buffer_bytes(3)
+                    self.get_and_buffer_bytes(3)?
                 }
                 SET4 | PUT4 | RIGHT4 | DOWN4 | W4 | X4 | Y4 | Z4 | FNT4 => {
-                    self.get_and_buffer_bytes(4)
+                    self.get_and_buffer_bytes(4)?
                 }
-                SET_RULE | PUT_RULE => self.get_and_buffer_bytes(8),
+                SET_RULE | PUT_RULE => self.get_and_buffer_bytes(8)?,
                 FNT_DEF1..=FNT_DEF4 => {
-                    let id = self.dvi_file().get_unsigned_num(opcode - FNT_DEF1);
-                    self.do_fntdef(id);
+                    let id = self.dvi_file().get_unsigned_num(opcode - FNT_DEF1)?;
+                    self.do_fntdef(id)?;
                 }
                 XDV_GLYPHS => {
-                    self.need_xetex(i32::from(opcode));
-                    self.get_and_buffer_bytes(4);
-                    let len = self.get_and_buffer_unsigned_pair();
-                    self.get_and_buffer_bytes(len * 10);
+                    self.need_xetex(i32::from(opcode))?;
+                    self.get_and_buffer_bytes(4)?;
+                    let len = self.get_and_buffer_unsigned_pair()?;
+                    self.get_and_buffer_bytes(len * 10)?;
                 }
                 XDV_TEXT_AND_GLYPHS => {
-                    self.need_xetex(i32::from(opcode));
-                    let len = self.get_and_buffer_unsigned_pair();
-                    self.get_and_buffer_bytes(len * 2);
-                    self.get_and_buffer_bytes(4);
-                    let len = self.get_and_buffer_unsigned_pair();
-                    self.get_and_buffer_bytes(len * 10);
+                    self.need_xetex(i32::from(opcode))?;
+                    let len = self.get_and_buffer_unsigned_pair()?;
+                    self.get_and_buffer_bytes(len * 2)?;
+                    self.get_and_buffer_bytes(4)?;
+                    let len = self.get_and_buffer_unsigned_pair()?;
+                    self.get_and_buffer_bytes(len * 10)?;
                 }
                 XDV_NATIVE_FONT_DEF => {
-                    self.need_xetex(i32::from(opcode));
-                    let id = self.dvi_file().get_signed_quad();
-                    self.do_native_font_def(id);
+                    self.need_xetex(i32::from(opcode))?;
+                    let id = self.dvi_file().get_signed_quad()?;
+                    self.do_native_font_def(id)?;
                 }
-                BEGIN_REFLECT | END_REFLECT => self.need_xetex(i32::from(opcode)),
+                BEGIN_REFLECT | END_REFLECT => self.need_xetex(i32::from(opcode))?,
                 PTEXDIR => {
-                    self.need_ptex(i32::from(opcode));
-                    self.get_and_buffer_bytes(1);
+                    self.need_ptex(i32::from(opcode))?;
+                    self.get_and_buffer_bytes(1)?;
                 }
-                POST if self.dvi.linear != 0 && self.dvi.dvi_page_buf_index == 1 => return,
-                _ => crate::error!("Unexpected opcode {}", opcode),
+                POST if self.dvi.linear != 0 && self.dvi.dvi_page_buf_index == 1 => return Ok(()),
+                _ => crate::fatal!("Unexpected opcode {}", opcode),
             }
         }
+        Ok(())
     }
 }

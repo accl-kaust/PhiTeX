@@ -174,16 +174,21 @@ enum MapType {
 impl Dpx {
     /// `find_tocode_cmap` (static): `<reg>-<ord>-<pdfname>` from
     /// `KNOWN_ENCODINGS[select]`; a cache id, or -1 (C's NULL).
-    fn find_tocode_cmap(&mut self, reg: Option<&[u8]>, ord: Option<&[u8]>, select: i32) -> i32 {
+    fn find_tocode_cmap(
+        &mut self,
+        reg: Option<&[u8]>,
+        ord: Option<&[u8]>,
+        select: i32,
+    ) -> Result<i32> {
         let mut cmap_id = -1;
 
         let (Some(reg), Some(ord)) = (reg, ord) else {
             warn!("Character set unknown.");
-            return -1;
+            return Ok(-1);
         };
         if select < 0 || select > KNOWN_ENCODINGS_MAX {
             warn!("Character set unknown.");
-            return -1;
+            return Ok(-1);
         }
 
         let pdfnames = KNOWN_ENCODINGS[select as usize].2;
@@ -197,15 +202,15 @@ impl Dpx {
             cmap_name.extend_from_slice(ord);
             cmap_name.push(b'-');
             cmap_name.extend_from_slice(append);
-            cmap_id = self.CMap_cache_find(&cmap_name);
+            cmap_id = self.CMap_cache_find(&cmap_name)?;
             i += 1;
         }
         if cmap_id < 0 {
             warn!("Could not find CID-to-Code mapping.");
-            return -1;
+            return Ok(-1);
         }
 
-        cmap_id
+        Ok(cmap_id)
     }
 
     /// `add_TTCIDHMetrics` (static): `/DW`, `/W`.
@@ -216,7 +221,7 @@ impl Dpx {
         used_chars: &[u8],
         cidtogidmap: Option<&[u8]>,
         last_cid: u16,
-    ) {
+    ) -> Result<()> {
         let mut start: i32 = 0;
         let mut prev: i32 = 0;
         let mut an_array: Option<Obj> = None;
@@ -246,16 +251,16 @@ impl Dpx {
             if width == dw {
                 if let Some(a) = an_array.take() {
                     let n = self.o.new_number(f64::from(start));
-                    self.o.add_array(w_array, n);
-                    self.o.add_array(w_array, a);
+                    self.o.add_array(w_array, n)?;
+                    self.o.add_array(w_array, a)?;
                     empty = false;
                 }
             } else {
                 if cid != prev + 1 {
                     if let Some(a) = an_array.take() {
                         let n = self.o.new_number(f64::from(start));
-                        self.o.add_array(w_array, n);
-                        self.o.add_array(w_array, a);
+                        self.o.add_array(w_array, n)?;
+                        self.o.add_array(w_array, a)?;
                         empty = false;
                     }
                 }
@@ -269,28 +274,35 @@ impl Dpx {
                     }
                 };
                 let n = self.o.new_number(width);
-                self.o.add_array(a, n);
+                self.o.add_array(a, n)?;
                 prev = cid;
             }
         }
 
         if let Some(a) = an_array {
             let n = self.o.new_number(f64::from(start));
-            self.o.add_array(w_array, n);
-            self.o.add_array(w_array, a);
+            self.o.add_array(w_array, n)?;
+            self.o.add_array(w_array, a)?;
             empty = false;
         }
 
-        self.o.put_number(fontdict, b"DW", dw);
+        self.o.put_number(fontdict, b"DW", dw)?;
         if !empty {
-            let r = self.o.ref_obj(w_array);
-            self.o.put(fontdict, b"W", r);
+            let r = self.o.ref_obj(w_array)?;
+            self.o.put(fontdict, b"W", r)?;
         }
-        self.o.release(w_array);
+        self.o.release(w_array)?;
+        Ok(())
     }
 
     /// `add_TTCIDVMetrics` (static): `/DW2`, `/W2`.
-    fn add_TTCIDVMetrics(&mut self, fontdict: Obj, g: &TtGlyphs, used_chars: &[u8], last_cid: u16) {
+    fn add_TTCIDVMetrics(
+        &mut self,
+        fontdict: Obj,
+        g: &TtGlyphs,
+        used_chars: &[u8],
+        last_cid: u16,
+    ) -> Result<()> {
         let mut empty = true;
 
         let default_vert_origin_y = pdfunit(
@@ -322,7 +334,7 @@ impl Dpx {
                     vert_origin_y,
                 ] {
                     let n = self.o.new_number(v);
-                    self.o.add_array(w2_array, n);
+                    self.o.add_array(w2_array, n)?;
                 }
                 empty = false;
             }
@@ -331,25 +343,26 @@ impl Dpx {
         if default_vert_origin_y != 880.0 || default_advance_height != 1000.0 {
             let an_array = self.o.new_array();
             let n = self.o.new_number(default_vert_origin_y);
-            self.o.add_array(an_array, n);
+            self.o.add_array(an_array, n)?;
             let n = self.o.new_number(-default_advance_height);
-            self.o.add_array(an_array, n);
-            self.o.put(fontdict, b"DW2", an_array);
+            self.o.add_array(an_array, n)?;
+            self.o.put(fontdict, b"DW2", an_array)?;
         }
         if !empty {
-            let r = self.o.ref_obj(w2_array);
-            self.o.put(fontdict, b"W2", r);
+            let r = self.o.ref_obj(w2_array)?;
+            self.o.put(fontdict, b"W2", r)?;
         }
-        self.o.release(w2_array);
+        self.o.release(w2_array)?;
+        Ok(())
     }
 
     /// `cid_to_code` (static): the code (or -1) and C's `*puvs` (a
     /// variation selector, or -1). `cmap` none returns `cid`.
-    fn cid_to_code(&self, cmap: Option<&CMap>, cid: Cid, unicode_cmap: i32) -> (i32, i32) {
+    fn cid_to_code(&self, cmap: Option<&CMap>, cid: Cid, unicode_cmap: i32) -> Result<(i32, i32)> {
         let mut puvs = -1;
 
         let Some(cmap) = cmap else {
-            return (i32::from(cid), puvs);
+            return Ok((i32::from(cid), puvs));
         };
 
         let inbuf = [(cid >> 8) as u8, (cid & 0xff) as u8];
@@ -367,22 +380,22 @@ impl Dpx {
             &mut outbuf,
             &mut outpos,
             &mut outbytesleft,
-        );
+        )?;
 
         if inbytesleft != 0 {
-            return (-1, puvs);
+            return Ok((-1, puvs));
         } else if outbytesleft == 31 {
-            return (i32::from(outbuf[0]), puvs);
+            return Ok((i32::from(outbuf[0]), puvs));
         } else if outbytesleft == 30 {
-            return ((i32::from(outbuf[0]) << 8) | i32::from(outbuf[1]), puvs);
+            return Ok(((i32::from(outbuf[0]) << 8) | i32::from(outbuf[1]), puvs));
         } else if outbytesleft == 28 && unicode_cmap == 0 {
-            return (
+            return Ok((
                 ((u32::from(outbuf[0]) << 24)
                     | (u32::from(outbuf[1]) << 16)
                     | (u32::from(outbuf[2]) << 8)
                     | u32::from(outbuf[3])) as i32,
                 puvs,
-            );
+            ));
         } else if (outbytesleft == 28 || outbytesleft == 26 || outbytesleft == 24)
             && unicode_cmap != 0
         {
@@ -392,7 +405,7 @@ impl Dpx {
             let mut p = 0usize;
             let uc = UC_UTF16BE_decode_char(s, &mut p);
             if p == endptr {
-                return (uc, puvs); /* single Unicode characters */
+                return Ok((uc, puvs)); /* single Unicode characters */
             }
             // Check following Variation Selectors.
             let uvs = UC_UTF16BE_decode_char(s, &mut p);
@@ -400,28 +413,28 @@ impl Dpx {
                 if (0xfe00..=0xfe0f).contains(&uvs) {
                     // Standardized Variation Sequence.
                     puvs = uvs;
-                    return (uc, puvs);
+                    return Ok((uc, puvs));
                 } else if (0xe0100..=0xe01ef).contains(&uvs) {
                     // Ideographic Variation Sequence.
                     puvs = uvs;
-                    return (uc, puvs);
+                    return Ok((uc, puvs));
                 } else if uvs == 0x3099 || uvs == 0x309a {
                     // Combining Katakana-Hiragana (Semi-)Voiced Sound Mark.
                     puvs = uvs;
-                    return (uc, puvs);
+                    return Ok((uc, puvs));
                 }
             }
             warn!("CID={} mapped to non-single Unicode characters...", cid);
-            return (-1, puvs);
+            return Ok((-1, puvs));
         }
 
-        (-1, puvs)
+        Ok((-1, puvs))
     }
 
     /// `cid_to_gid` (static): `cmap` none returns `cid`.
-    fn cid_to_gid(&self, cmap: Option<&CMap>, cid: Cid) -> u16 {
+    fn cid_to_gid(&self, cmap: Option<&CMap>, cid: Cid) -> Result<u16> {
         let Some(cmap) = cmap else {
-            return cid;
+            return Ok(cid);
         };
 
         let inbuf = [(cid >> 8) as u8, (cid & 0xff) as u8];
@@ -439,13 +452,13 @@ impl Dpx {
             &mut outbuf,
             &mut outpos,
             &mut outbytesleft,
-        );
+        )?;
 
         if inbytesleft != 0 || outbytesleft != 0 {
-            return 0;
+            return Ok(0);
         }
 
-        (u16::from(outbuf[0]) << 8) | u16::from(outbuf[1])
+        Ok((u16::from(outbuf[0]) << 8) | u16::from(outbuf[1]))
     }
 
     /// The gid of `cid` (and its code, for C's warnings), the part of the
@@ -459,9 +472,9 @@ impl Dpx {
         ttcmap_uvs: Option<&TtCmap>,
         unicode_cmap: i32,
         cid: Cid,
-    ) -> (i32, u16) {
+    ) -> Result<(i32, u16)> {
         let cmap = if cmap_id >= 0 {
-            Some(self.CMap_cache_get(cmap_id))
+            Some(self.CMap_cache_get(cmap_id)?)
         } else {
             None
         };
@@ -473,11 +486,11 @@ impl Dpx {
                 code = i32::from(cid);
             }
             MapType::ViaCidToGid => {
-                gid = self.cid_to_gid(cmap, cid);
+                gid = self.cid_to_gid(cmap, cid)?;
                 code = i32::from(cid);
             }
             MapType::ViaCidToCode => {
-                let (c, uvs) = self.cid_to_code(cmap, cid, unicode_cmap);
+                let (c, uvs) = self.cid_to_code(cmap, cid, unicode_cmap)?;
                 code = c;
                 if code < 0 {
                     warn!("Unable to map CID to code: CID={}", cid);
@@ -526,16 +539,16 @@ impl Dpx {
         if gid == 0 && code >= 0 {
             warn!("Glyph missing in font. (CID={}, code=0x{:04x})", cid, code);
         }
-        (code, gid)
+        Ok((code, gid))
     }
 
     /// `CIDFont_type2_dofont`.
-    pub fn CIDFont_type2_dofont(&mut self, font_id: i32) -> i32 {
+    pub fn CIDFont_type2_dofont(&mut self, font_id: i32) -> Result<i32> {
         let fid = font_id as usize;
         let mut unicode_cmap = 0;
 
         if self.font.fonts[fid].reference.is_none() {
-            return 0;
+            return Ok(0);
         }
 
         let resource = self.font.fonts[fid]
@@ -544,11 +557,11 @@ impl Dpx {
         let descriptor = self.font.fonts[fid]
             .descriptor
             .expect("CIDFont_type2_dofont: no descriptor");
-        let r = self.o.ref_obj(descriptor);
-        self.o.put(resource, b"FontDescriptor", r);
+        let r = self.o.ref_obj(descriptor)?;
+        self.o.put(resource, b"FontDescriptor", r)?;
 
         if self.font.fonts[fid].flags & PDF_FONT_FLAG_BASEFONT != 0 {
-            return 0;
+            return Ok(0);
         }
 
         // CIDSystemInfo comes here since Supplement can be increased.
@@ -559,65 +572,65 @@ impl Dpx {
                 tmp,
                 b"Registry",
                 csi.registry.as_deref().unwrap_or_default(),
-            );
+            )?;
             self.o.put_string(
                 tmp,
                 b"Ordering",
                 csi.ordering.as_deref().unwrap_or_default(),
-            );
+            )?;
             self.o
-                .put_number(tmp, b"Supplement", f64::from(csi.supplement));
-            self.o.put(resource, b"CIDSystemInfo", tmp);
+                .put_number(tmp, b"Supplement", f64::from(csi.supplement))?;
+            self.o.put(resource, b"CIDSystemInfo", tmp)?;
         }
 
         let embed = self.font.fonts[fid].cid.options.embed;
         // Quick exit for non-embedded & fixed-pitch font.
         if embed == 0 && (self.cid.opt_flags_cidfont & CIDFONT_FORCE_FIXEDPITCH) != 0 {
-            self.o.put_number(resource, b"DW", 1000.0);
-            return 0;
+            self.o.put_number(resource, b"DW", 1000.0)?;
+            return Ok(0);
         }
 
         let filename = self.font.fonts[fid].filename.clone().unwrap_or_default();
         let index = self.font.fonts[fid].index;
-        let sfont = if let Some(fp) = self.dpx_open_file(&filename, ResType::TtFont) {
-            Sfnt::sfnt_open(fp)
-        } else if let Some(fp) = self.dpx_open_file(&filename, ResType::DFont) {
-            Sfnt::dfont_open(fp, index as i32)
+        let sfont = if let Some(fp) = self.dpx_open_file(&filename, ResType::TtFont)? {
+            Sfnt::sfnt_open(fp)?
+        } else if let Some(fp) = self.dpx_open_file(&filename, ResType::DFont)? {
+            Sfnt::dfont_open(fp, index as i32)?
         } else {
             warn!("Could not open TTF/dfont file");
-            return -1;
+            return Ok(-1);
         };
         let Some(mut sfont) = sfont else {
             warn!("Could not open TTF file");
-            return -1;
+            return Ok(-1);
         };
 
         let offset = match sfont.type_ {
             SFNT_TYPE_TTC => {
-                let offset = sfont.ttc_read_offset(index);
+                let offset = sfont.ttc_read_offset(index)?;
                 if offset == 0 {
                     warn!("Invalid TTC index");
-                    return -1;
+                    return Ok(-1);
                 }
                 offset
             }
             SFNT_TYPE_TRUETYPE => {
                 if index > 0 {
                     warn!("Found TrueType font file while expecting TTC file");
-                    return -1;
+                    return Ok(-1);
                 }
                 0
             }
             SFNT_TYPE_DFONT => sfont.offset,
             _ => {
                 warn!("Not a TrueType/TTC font?");
-                return -1;
+                return Ok(-1);
             }
         };
 
-        if sfont.sfnt_read_table_directory(offset) < 0 {
+        if sfont.sfnt_read_table_directory(offset)? < 0 {
             warn!("Could not read TrueType table directory");
-            return -1;
+            return Ok(-1);
         }
 
         // Adobe-Identity means font's internal glyph ordering here.
@@ -637,7 +650,7 @@ impl Dpx {
                 cmap_name.extend_from_slice(
                     self.font.fonts[fid].fontname.as_deref().unwrap_or_default(),
                 );
-                let id = self.CMap_cache_find(&cmap_name);
+                let id = self.CMap_cache_find(&cmap_name)?;
                 if id >= 0 {
                     cmap_id = id;
                     maptype = MapType::ViaCidToGid;
@@ -650,7 +663,7 @@ impl Dpx {
                 let mut i = 0;
                 while i <= KNOWN_ENCODINGS_MAX {
                     let (platform, encoding, _) = KNOWN_ENCODINGS[i as usize];
-                    ttcmap = sfont.tt_cmap_read(platform, encoding);
+                    ttcmap = sfont.tt_cmap_read(platform, encoding)?;
                     if ttcmap.is_some() {
                         break;
                     }
@@ -659,11 +672,11 @@ impl Dpx {
                 if ttcmap.is_none() {
                     warn!("No usable TrueType cmap table found for font.");
                     warn!("Cannot continue without this...");
-                    return -1;
+                    return Ok(-1);
                 } else if i <= WIN_UCS_INDEX_MAX {
                     unicode_cmap = 1;
                     // Unicode Variation Sequences.
-                    ttcmap_uvs = sfont.tt_cmap_read(0, 5);
+                    ttcmap_uvs = sfont.tt_cmap_read(0, 5)?;
                 } else {
                     unicode_cmap = 0;
                 }
@@ -672,15 +685,15 @@ impl Dpx {
                     cmap_id = -1;
                 } else {
                     cmap_id =
-                        self.find_tocode_cmap(csi.registry.as_deref(), csi.ordering.as_deref(), i);
+                        self.find_tocode_cmap(csi.registry.as_deref(), csi.ordering.as_deref(), i)?;
                     if cmap_id < 0 {
-                        return -1;
+                        return Ok(-1);
                     }
                 }
             }
         }
 
-        let mut glyphs = TtGlyphs::tt_build_init();
+        let mut glyphs = TtGlyphs::tt_build_init()?;
 
         let mut last_cid: u32 = 0;
         let mut num_glyphs: u16 = 1; /* .notdef */
@@ -747,9 +760,9 @@ impl Dpx {
                     ttcmap_uvs.as_ref(),
                     unicode_cmap,
                     cid,
-                );
+                )?;
                 // TODO: duplicated glyph
-                glyphs.tt_add_glyph(gid, cid);
+                glyphs.tt_add_glyph(gid, cid)?;
                 num_glyphs = num_glyphs.wrapping_add(1);
             }
         }
@@ -761,8 +774,8 @@ impl Dpx {
                 None
             } else {
                 let mut gsub_list = OtlGsub::otl_gsub_new();
-                if gsub_list.otl_gsub_add_feat(b"*", b"*", b"vrt2", &mut sfont) < 0 {
-                    if gsub_list.otl_gsub_add_feat(b"*", b"*", b"vert", &mut sfont) < 0 {
+                if gsub_list.otl_gsub_add_feat(b"*", b"*", b"vrt2", &mut sfont)? < 0 {
+                    if gsub_list.otl_gsub_add_feat(b"*", b"*", b"vert", &mut sfont)? < 0 {
                         warn!("GSUB feature vrt2/vert not found.");
                         None
                     } else {
@@ -796,14 +809,14 @@ impl Dpx {
                     ttcmap_uvs.as_ref(),
                     unicode_cmap,
                     cid,
-                );
+                )?;
                 if gid != 0 {
                     if let Some(gsub_list) = gsub_list.as_ref() {
-                        gsub_list.otl_gsub_apply(&mut gid);
+                        gsub_list.otl_gsub_apply(&mut gid)?;
                     }
                 }
 
-                glyphs.tt_add_glyph(gid, cid);
+                glyphs.tt_add_glyph(gid, cid)?;
 
                 if let Some(h) = h_used_chars.as_ref() {
                     // Merge vertical used_chars to horizontal.
@@ -825,18 +838,18 @@ impl Dpx {
         drop(ttcmap_uvs);
 
         if embed != 0 {
-            if sfont.tt_build_tables(&mut glyphs) < 0 {
+            if sfont.tt_build_tables(&mut glyphs)? < 0 {
                 warn!("Could not created FontFile stream.");
-                return -1;
+                return Ok(-1);
             }
-        } else if sfont.tt_get_metrics(&mut glyphs) < 0 {
+        } else if sfont.tt_get_metrics(&mut glyphs)? < 0 {
             warn!("Reading glyph metrics failed...");
-            return -1;
+            return Ok(-1);
         }
 
         // DW, W, DW2, and W2
         if self.cid.opt_flags_cidfont & CIDFONT_FORCE_FIXEDPITCH != 0 {
-            self.o.put_number(resource, b"DW", 1000.0);
+            self.o.put_number(resource, b"DW", 1000.0)?;
         } else {
             self.add_TTCIDHMetrics(
                 resource,
@@ -844,9 +857,9 @@ impl Dpx {
                 &used_chars,
                 cidtogidmap.as_deref(),
                 last_cid,
-            );
+            )?;
             if self.font.fonts[fid].cid.need_vmetrics != 0 {
-                self.add_TTCIDVMetrics(resource, &glyphs, &used_chars, last_cid);
+                self.add_TTCIDVMetrics(resource, &glyphs, &used_chars, last_cid)?;
             }
         }
 
@@ -859,59 +872,59 @@ impl Dpx {
                 cidset_data[i / 8] |= 1 << (7 - i % 8);
             }
             let cidset = self.o.new_stream(STREAM_COMPRESS);
-            self.o.add_stream(cidset, &cidset_data);
-            let r = self.o.ref_obj(cidset);
-            self.o.put(descriptor, b"CIDSet", r);
-            self.o.release(cidset);
+            self.o.add_stream(cidset, &cidset_data)?;
+            let r = self.o.ref_obj(cidset)?;
+            self.o.put(descriptor, b"CIDSet", r)?;
+            self.o.release(cidset)?;
         }
 
         glyphs.tt_build_finish();
 
         // Finish here if not embedded.
         if embed == 0 {
-            return 0;
+            return Ok(0);
         }
 
         // Create font file.
         for &(name, must_exist) in REQUIRED_TABLE {
             if sfont.sfnt_require_table(name, i32::from(must_exist)) < 0 {
                 warn!("Some required TrueType table does not exist.");
-                return -1;
+                return Ok(-1);
             }
         }
 
         // FontFile2
-        let fontfile = self.sfnt_create_FontFile_stream(&mut sfont);
+        let fontfile = self.sfnt_create_FontFile_stream(&mut sfont)?;
 
         drop(sfont);
 
         let Some(fontfile) = fontfile else {
             warn!("Could not created FontFile stream.");
-            return -1;
+            return Ok(-1);
         };
 
-        let r = self.o.ref_obj(fontfile);
-        self.o.put(descriptor, b"FontFile2", r);
-        self.o.release(fontfile);
+        let r = self.o.ref_obj(fontfile)?;
+        self.o.put(descriptor, b"FontFile2", r)?;
+        self.o.release(fontfile)?;
 
         // CIDToGIDMap: ISO 32000-1 requires it for Type 2 CIDFonts with
         // embedded font programs.
         match cidtogidmap {
             None => {
-                self.o.put_name(resource, b"CIDToGIDMap", b"Identity");
+                self.o.put_name(resource, b"CIDToGIDMap", b"Identity")?;
             }
             Some(map) => {
                 let c2gmstream = self.o.new_stream(STREAM_COMPRESS);
                 self.o
-                    .add_stream(c2gmstream, &map[..(usize::from(last_cid) + 1) * 2]);
-                let r = self.o.ref_obj(c2gmstream);
-                self.o.put(resource, b"CIDToGIDMap", r);
-                self.o.release(c2gmstream);
+                    .add_stream(c2gmstream, &map[..(usize::from(last_cid) + 1) * 2])?;
+                let r = self.o.ref_obj(c2gmstream)?;
+                self.o.put(resource, b"CIDToGIDMap", r)?;
+                self.o.release(c2gmstream)?;
             }
         }
 
         let _ = num_glyphs;
-        0
+        Ok(0)
     }
 
     /// `CIDFont_type2_open`: 0, or -1 if `name` is not a TrueType font.
@@ -921,47 +934,47 @@ impl Dpx {
         name: &[u8],
         index: i32,
         opt: &mut CidOpt,
-    ) -> i32 {
+    ) -> Result<i32> {
         let fid = font_id as usize;
 
-        let sfont = if let Some(fp) = self.dpx_open_file(name, ResType::TtFont) {
-            Sfnt::sfnt_open(fp)
-        } else if let Some(fp) = self.dpx_open_file(name, ResType::DFont) {
-            Sfnt::dfont_open(fp, index)
+        let sfont = if let Some(fp) = self.dpx_open_file(name, ResType::TtFont)? {
+            Sfnt::sfnt_open(fp)?
+        } else if let Some(fp) = self.dpx_open_file(name, ResType::DFont)? {
+            Sfnt::dfont_open(fp, index)?
         } else {
-            return -1;
+            return Ok(-1);
         };
         let Some(mut sfont) = sfont else {
-            return -1;
+            return Ok(-1);
         };
 
         let offset = match sfont.type_ {
-            SFNT_TYPE_TTC => sfont.ttc_read_offset(index as u32),
+            SFNT_TYPE_TTC => sfont.ttc_read_offset(index as u32)?,
             SFNT_TYPE_TRUETYPE => {
                 if index > 0 {
                     warn!("Invalid TTC index (not TTC font)");
-                    return -1;
+                    return Ok(-1);
                 }
                 0
             }
             SFNT_TYPE_DFONT => sfont.offset,
-            _ => return -1,
+            _ => return Ok(-1),
         };
 
-        if sfont.sfnt_read_table_directory(offset) < 0 {
+        if sfont.sfnt_read_table_directory(offset)? < 0 {
             warn!("Reading TrueType table directory failed");
-            return -1;
+            return Ok(-1);
         }
 
         // Ignore TrueType Collection with CFF table.
         if sfont.type_ == SFNT_TYPE_TTC && sfont.sfnt_find_table_pos(b"CFF ") != 0 {
-            return -1;
+            return Ok(-1);
         }
 
         let mut fontname;
         {
             // MAC-ROMAN-EN-POSTSCRIPT or WIN-UNICODE-EN(US)-POSTSCRIPT
-            let mut shortname = sfont.tt_get_ps_fontname(PDF_NAME_LEN_MAX as u16);
+            let mut shortname = sfont.tt_get_ps_fontname(PDF_NAME_LEN_MAX as u16)?;
             let mut namelen = shortname.len() as i32;
             if namelen == 0 {
                 let n = name.iter().position(|&c| c == 0).unwrap_or(name.len());
@@ -971,7 +984,7 @@ impl Dpx {
             // For SJIS, UTF-16, ... string.
             let error = validate_name(&mut shortname, namelen);
             if error != 0 {
-                return -1;
+                return Ok(-1);
             }
             fontname = shortname;
         }
@@ -1000,14 +1013,14 @@ impl Dpx {
 
         let resource = self.o.new_dict();
         self.font.fonts[fid].resource = Some(resource);
-        self.o.put_name(resource, b"Type", b"Font");
-        self.o.put_name(resource, b"Subtype", b"CIDFontType2");
+        self.o.put_name(resource, b"Type", b"Font")?;
+        self.o.put_name(resource, b"Subtype", b"CIDFontType2")?;
 
-        let descriptor = self.tt_get_fontdesc(&mut sfont, &mut opt.embed, opt.stemv, 0, name);
+        let descriptor = self.tt_get_fontdesc(&mut sfont, &mut opt.embed, opt.stemv, 0, name)?;
         self.font.fonts[fid].descriptor = descriptor;
         let Some(descriptor) = descriptor else {
             warn!("Could not obtain necessary font info");
-            return -1;
+            return Ok(-1);
         };
 
         if opt.embed != 0 {
@@ -1016,11 +1029,11 @@ impl Dpx {
             let mut tmp = tag.to_vec();
             tmp.push(b'+');
             tmp.extend_from_slice(&fontname);
-            self.o.put_name(descriptor, b"FontName", &tmp);
-            self.o.put_name(resource, b"BaseFont", &tmp);
+            self.o.put_name(descriptor, b"FontName", &tmp)?;
+            self.o.put_name(resource, b"BaseFont", &tmp)?;
         } else {
-            self.o.put_name(descriptor, b"FontName", &fontname);
-            self.o.put_name(resource, b"BaseFont", &fontname);
+            self.o.put_name(descriptor, b"FontName", &fontname)?;
+            self.o.put_name(resource, b"BaseFont", &fontname)?;
         }
 
         drop(sfont);
@@ -1028,7 +1041,7 @@ impl Dpx {
         // Don't write fontdict here: /Supplement in /CIDSystemInfo may
         // change.
 
-        0
+        Ok(0)
     }
 }
 

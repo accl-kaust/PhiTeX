@@ -4,7 +4,7 @@
 //! port pdfTeX uses, reads them: [`PngInfo`] holds what libpng's
 //! `png_structp` + `png_infop` tell pngimage.c. Its inflater keeps a 32 KiB
 //! window whatever the zlib header says (`PNG_MAXIMUM_INFLATE_WINDOW` on).
-//! Not in that port, and left `todo!()`: `png_set_gamma`'s correction of
+//! Not in that port, and fatal errors here: `png_set_gamma`'s correction of
 //! the samples (a PNG with only a gAMA chunk whose gamma is not about
 //! 1/2.2) and `png_set_background` (transparency before PDF 1.4).
 
@@ -245,11 +245,11 @@ fn chunk_values(d: &[u8], png: &mut PngInfo) {
 /// libpng's `png_read_info` (with `png_create_read_struct` and
 /// `png_init_io` on the file from its start). pngimage.c sets no
 /// `setjmp`: a libpng error aborts the program.
-pub fn png_read_info(fp: &mut MemFile) -> PngInfo {
+pub fn png_read_info(fp: &mut MemFile) -> Result<PngInfo> {
     fp.rewind();
     let info = match png::read_info(&fp.data) {
         Ok(info) => info,
-        Err(e) => error!("libpng error: {e}"),
+        Err(e) => fatal!("libpng error: {e}"),
     };
     let mut png = PngInfo {
         out_color_type: info.color_type,
@@ -266,7 +266,7 @@ pub fn png_read_info(fp: &mut MemFile) -> PngInfo {
     };
     let data = png.data.clone();
     chunk_values(&data, &mut png);
-    png
+    Ok(png)
 }
 
 /// `PNG_ROWBYTES`.
@@ -300,13 +300,12 @@ fn png_gamma_correction(screen: f64, file: f64) -> bool {
 
 /// libpng's `png_read_update_info`: applies the transformations to the
 /// reported color type, depth and rowbytes.
-pub fn png_read_update_info(png: &mut PngInfo) {
+pub fn png_read_update_info(png: &mut PngInfo) -> Result<()> {
     if let Some((screen, file)) = png.set_gamma
         && png_gamma_correction(screen, file)
     {
-        todo!(
-            "png_set_gamma: partex_engine::png does not correct gamma (a PNG with only a gAMA chunk)"
-        );
+        // (not ported: libpng's gamma correction)
+        fatal!("png_set_gamma: gamma correction is not supported (a PNG with only a gAMA chunk)");
     }
     let (color_type, bit_depth) = png::output(&png.info, png.transforms());
     let channels: u32 = match color_type {
@@ -318,20 +317,27 @@ pub fn png_read_update_info(png: &mut PngInfo) {
     png.out_color_type = color_type;
     png.out_bit_depth = bit_depth;
     png.rowbytes = png_rowbytes(channels * u32::from(bit_depth), png.info.width);
+    Ok(())
 }
 
 /// `read_image_data` (static): the rows, decoded and transformed, into
 /// `dest` (`height * rowbytes` bytes); libpng's `png_read_image`. (The
 /// bits past a row's last pixel, which libpng leaves as they were in
 /// `dest`, uninitialised memory in C, are 0.)
-pub fn read_image_data(png: &mut PngInfo, dest: &mut [u8], height: u32, rowbytes: u32) {
+pub fn read_image_data(
+    png: &mut PngInfo,
+    dest: &mut [u8],
+    height: u32,
+    rowbytes: u32,
+) -> Result<()> {
     let image = match png::read_image(&png.data, &png.info, png.transforms()) {
         Ok(image) => image,
-        Err(e) => error!("libpng error: {e}"),
+        Err(e) => fatal!("libpng error: {e}"),
     };
     assert_eq!(image.rowbytes, rowbytes as usize);
     let n = (height as usize) * (rowbytes as usize);
     dest[..n].copy_from_slice(&image.rows[..n]);
+    Ok(())
 }
 
 /// `INVALID_CHRM_VALUE`.
@@ -349,7 +355,7 @@ fn invalid_chrm(c: &[f64; 8]) -> bool {
 
 impl Dpx {
     /// `check_transparency` (static): a `PDF_TRANS_TYPE_*`.
-    pub fn check_transparency(&mut self, png: &mut PngInfo) -> i32 {
+    pub fn check_transparency(&mut self, png: &mut PngInfo) -> Result<i32> {
         let color_type = png.info.color_type;
 
         /*
@@ -394,23 +400,22 @@ impl Dpx {
             || (self.o.check_version(1, 4) < 0 && trans_type == PDF_TRANS_TYPE_ALPHA)
         {
             /* png_set_background(white): composited with a white background */
-            todo!(
-                "png_set_background (transparency before PDF 1.3/1.4): not in partex_engine::png"
-            );
+            // (not ported: libpng's background compositing)
+            fatal!("png_set_background: transparency before PDF 1.3/1.4 is not supported");
             #[allow(unreachable_code)]
             {
                 trans_type = PDF_TRANS_TYPE_NONE;
             }
         }
 
-        trans_type
+        Ok(trans_type)
     }
     /// `png_include_image`: fills XObject `xobj_id`; 0 or -1.
-    pub fn png_include_image(&mut self, xobj_id: i32, fp: &mut MemFile) -> i32 {
+    pub fn png_include_image(&mut self, xobj_id: i32, fp: &mut MemFile) -> Result<i32> {
         let mut info = pdf_ximage_init_image_info();
 
         /* Read PNG info-header and get some info. */
-        let mut png = png_read_info(fp);
+        let mut png = png_read_info(fp)?;
         let color_type = png.info.color_type;
         let width = png.info.width;
         let height = png.info.height;
@@ -435,9 +440,9 @@ impl Dpx {
             png.set_gamma = Some((2.2, g));
         }
 
-        let trans_type = self.check_transparency(&mut png);
+        let trans_type = self.check_transparency(&mut png)?;
         /* check_transparency() does not do updata_info() */
-        png_read_update_info(&mut png);
+        png_read_update_info(&mut png)?;
         let mut rowbytes = png.rowbytes;
 
         /* Values listed below will not be modified in the remaining process. */
@@ -460,31 +465,31 @@ impl Dpx {
         }
 
         let stream = self.o.new_stream(STREAM_COMPRESS);
-        let stream_dict = self.o.stream_dict(stream);
+        let stream_dict = self.o.stream_dict(stream)?;
 
         let mut stream_data = vec![0u8; rowbytes.wrapping_mul(height) as usize];
-        read_image_data(&mut png, &mut stream_data, height, rowbytes);
+        read_image_data(&mut png, &mut stream_data, height, rowbytes)?;
 
         /* Non-NULL intent means there is valid sRGB chunk. */
         let intent = self.get_rendering_intent(&png);
         if let Some(intent) = intent {
-            self.o.put(stream_dict, b"Intent", intent);
+            self.o.put(stream_dict, b"Intent", intent)?;
         }
 
         let mut colorspace = None;
         let mut mask = None;
         match color_type {
             PNG_COLOR_TYPE_PALETTE => {
-                colorspace = self.create_cspace_Indexed(&png);
+                colorspace = self.create_cspace_Indexed(&png)?;
 
                 match trans_type {
                     PDF_TRANS_TYPE_BINARY => {
                         /* Color-key masking */
-                        mask = self.create_ckey_mask(&png);
+                        mask = self.create_ckey_mask(&png)?;
                     }
                     PDF_TRANS_TYPE_ALPHA => {
                         /* Soft mask */
-                        mask = self.create_soft_mask(&png, &stream_data, width, height);
+                        mask = self.create_soft_mask(&png, &stream_data, width, height)?;
                     }
                     _ => {
                         /* Nothing to be done here.
@@ -496,21 +501,21 @@ impl Dpx {
             }
             PNG_COLOR_TYPE_RGB | PNG_COLOR_TYPE_RGB_ALPHA => {
                 colorspace = if png.valid(png::INFO_ICCP) {
-                    self.create_cspace_ICCBased(&png)
+                    self.create_cspace_ICCBased(&png)?
                 } else if intent.is_some() {
-                    self.create_cspace_sRGB(&png)
+                    self.create_cspace_sRGB(&png)?
                 } else {
-                    self.create_cspace_CalRGB(&png)
+                    self.create_cspace_CalRGB(&png)?
                 };
                 if colorspace.is_none() {
                     colorspace = Some(self.o.new_name(b"DeviceRGB"));
                 }
 
                 mask = match trans_type {
-                    PDF_TRANS_TYPE_BINARY => self.create_ckey_mask(&png),
+                    PDF_TRANS_TYPE_BINARY => self.create_ckey_mask(&png)?,
                     /* rowbytes changes 4 to 3 at here */
                     PDF_TRANS_TYPE_ALPHA => {
-                        self.strip_soft_mask(&png, &mut stream_data, &mut rowbytes, width, height)
+                        self.strip_soft_mask(&png, &mut stream_data, &mut rowbytes, width, height)?
                     }
                     _ => None,
                 };
@@ -518,20 +523,20 @@ impl Dpx {
             }
             PNG_COLOR_TYPE_GRAY | PNG_COLOR_TYPE_GRAY_ALPHA => {
                 colorspace = if png.valid(png::INFO_ICCP) {
-                    self.create_cspace_ICCBased(&png)
+                    self.create_cspace_ICCBased(&png)?
                 } else if intent.is_some() {
-                    self.create_cspace_sRGB(&png)
+                    self.create_cspace_sRGB(&png)?
                 } else {
-                    self.create_cspace_CalGray(&png)
+                    self.create_cspace_CalGray(&png)?
                 };
                 if colorspace.is_none() {
                     colorspace = Some(self.o.new_name(b"DeviceGray"));
                 }
 
                 mask = match trans_type {
-                    PDF_TRANS_TYPE_BINARY => self.create_ckey_mask(&png),
+                    PDF_TRANS_TYPE_BINARY => self.create_ckey_mask(&png)?,
                     PDF_TRANS_TYPE_ALPHA => {
-                        self.strip_soft_mask(&png, &mut stream_data, &mut rowbytes, width, height)
+                        self.strip_soft_mask(&png, &mut stream_data, &mut rowbytes, width, height)?
                     }
                     _ => None,
                 };
@@ -541,26 +546,26 @@ impl Dpx {
                 warn!("{PNG_DEBUG_STR}: Unknown PNG colortype {color_type}.");
             }
         }
-        self.o.put_opt(stream_dict, b"ColorSpace", colorspace);
+        self.o.put_opt(stream_dict, b"ColorSpace", colorspace)?;
 
         let n = rowbytes.wrapping_mul(height) as usize;
-        self.o.add_stream(stream, &stream_data[..n]);
+        self.o.add_stream(stream, &stream_data[..n])?;
         drop(stream_data);
 
         if let Some(mask) = mask {
             if trans_type == PDF_TRANS_TYPE_BINARY {
-                self.o.put(stream_dict, b"Mask", mask);
+                self.o.put(stream_dict, b"Mask", mask)?;
             } else if trans_type == PDF_TRANS_TYPE_ALPHA {
                 if info.bits_per_component >= 8 && info.width > 64 {
                     self.o
-                        .stream_set_predictor(mask, 2, info.width, info.bits_per_component, 1);
+                        .stream_set_predictor(mask, 2, info.width, info.bits_per_component, 1)?;
                 }
-                let r = self.o.ref_obj(mask);
-                self.o.put(stream_dict, b"SMask", r);
-                self.o.release(mask);
+                let r = self.o.ref_obj(mask)?;
+                self.o.put(stream_dict, b"SMask", r)?;
+                self.o.release(mask)?;
             } else {
                 warn!("{PNG_DEBUG_STR}: Unknown transparency type...???");
-                self.o.release(mask);
+                self.o.release(mask)?;
             }
         }
 
@@ -595,13 +600,13 @@ impl Dpx {
                          * and scan for that.
                          */
                         let xmp_stream = self.o.new_stream(STREAM_COMPRESS);
-                        let xmp_stream_dict = self.o.stream_dict(xmp_stream);
-                        self.o.put_name(xmp_stream_dict, b"Type", b"Metadata");
-                        self.o.put_name(xmp_stream_dict, b"Subtype", b"XML");
-                        self.o.add_stream(xmp_stream, &t.text[..t.itxt_length]);
-                        let r = self.o.ref_obj(xmp_stream);
-                        self.o.put(stream_dict, b"Metadata", r);
-                        self.o.release(xmp_stream);
+                        let xmp_stream_dict = self.o.stream_dict(xmp_stream)?;
+                        self.o.put_name(xmp_stream_dict, b"Type", b"Metadata")?;
+                        self.o.put_name(xmp_stream_dict, b"Subtype", b"XML")?;
+                        self.o.add_stream(xmp_stream, &t.text[..t.itxt_length])?;
+                        let r = self.o.ref_obj(xmp_stream)?;
+                        self.o.put(stream_dict, b"Metadata", r)?;
+                        self.o.release(xmp_stream)?;
                         have_xmp = true;
                     }
                 }
@@ -619,16 +624,16 @@ impl Dpx {
                 info.width,
                 info.bits_per_component,
                 info.num_components,
-            );
+            )?;
         }
-        self.pdf_ximage_set_image(xobj_id, &info, stream);
+        self.pdf_ximage_set_image(xobj_id, &info, stream)?;
 
-        0
+        Ok(0)
     }
     /// `png_get_bbox`: status, width, height, xdensity, ydensity.
-    pub fn png_get_bbox(&mut self, fp: &mut MemFile) -> (i32, u32, u32, f64, f64) {
+    pub fn png_get_bbox(&mut self, fp: &mut MemFile) -> Result<(i32, u32, u32, f64, f64)> {
         /* Read PNG info-header and get some info. */
-        let png = png_read_info(fp);
+        let png = png_read_info(fp)?;
         let width = png.info.width;
         let height = png.info.height;
 
@@ -651,14 +656,14 @@ impl Dpx {
             )
         };
 
-        (0, width, height, xdensity, ydensity)
+        Ok((0, width, height, xdensity, ydensity))
     }
     /// `create_cspace_Indexed` (static).
     #[allow(non_snake_case)]
-    pub fn create_cspace_Indexed(&mut self, png: &PngInfo) -> Option<Obj> {
+    pub fn create_cspace_Indexed(&mut self, png: &PngInfo) -> Result<Option<Obj>> {
         if !png.valid(png::INFO_PLTE) || png.info.palette.is_empty() {
             warn!("{PNG_DEBUG_STR}: PNG does not have valid PLTE chunk.");
-            return None;
+            return Ok(None);
         }
         let plte = &png.info.palette;
         let num_plte = plte.len();
@@ -666,14 +671,14 @@ impl Dpx {
         /* Order is important. */
         let colorspace = self.o.new_array();
         let n = self.o.new_name(b"Indexed");
-        self.o.add_array(colorspace, n);
+        self.o.add_array(colorspace, n)?;
 
         let base = if png.valid(png::INFO_ICCP) {
-            self.create_cspace_ICCBased(png)
+            self.create_cspace_ICCBased(png)?
         } else if png.valid(png::INFO_SRGB) {
-            self.create_cspace_sRGB(png)
+            self.create_cspace_sRGB(png)?
         } else {
-            self.create_cspace_CalRGB(png)
+            self.create_cspace_CalRGB(png)?
         };
 
         let base = match base {
@@ -681,58 +686,63 @@ impl Dpx {
             None => self.o.new_name(b"DeviceRGB"),
         };
 
-        self.o.add_array(colorspace, base);
+        self.o.add_array(colorspace, base)?;
         let n = self.o.new_number((num_plte as i32 - 1) as f64);
-        self.o.add_array(colorspace, n);
+        self.o.add_array(colorspace, n)?;
         let data: Vec<u8> = plte.iter().flat_map(|c| c.iter().copied()).collect();
         let lookup = self.o.new_string(&data);
-        self.o.add_array(colorspace, lookup);
+        self.o.add_array(colorspace, lookup)?;
 
-        Some(colorspace)
+        Ok(Some(colorspace))
     }
     /// `create_cspace_CalRGB` (static).
     #[allow(non_snake_case)]
-    pub fn create_cspace_CalRGB(&mut self, png: &PngInfo) -> Option<Obj> {
+    pub fn create_cspace_CalRGB(&mut self, png: &PngInfo) -> Result<Option<Obj>> {
         self.png_create_cspace_cal(png, PNG_COLOR_TYPE_RGB, b"CalRGB")
     }
     /// `create_cspace_CalGray` (static).
     #[allow(non_snake_case)]
-    pub fn create_cspace_CalGray(&mut self, png: &PngInfo) -> Option<Obj> {
+    pub fn create_cspace_CalGray(&mut self, png: &PngInfo) -> Result<Option<Obj>> {
         self.png_create_cspace_cal(png, PNG_COLOR_TYPE_GRAY, b"CalGray")
     }
     /// The body of `create_cspace_CalRGB` and `create_cspace_CalGray`.
-    fn png_create_cspace_cal(&mut self, png: &PngInfo, color_type: u8, name: &[u8]) -> Option<Obj> {
+    fn png_create_cspace_cal(
+        &mut self,
+        png: &PngInfo,
+        color_type: u8,
+        name: &[u8],
+    ) -> Result<Option<Obj>> {
         if !png.valid(png::INFO_CHRM) {
-            return None;
+            return Ok(None);
         }
 
         let c = png.chrm;
         if invalid_chrm(&c) {
             warn!("{PNG_DEBUG_STR}: Invalid cHRM chunk parameters found.");
-            return None;
+            return Ok(None);
         }
 
         let g = if png.valid(png::INFO_GAMA) {
             let g = png.gamma();
             if g < 1.0e-2 {
                 warn!("{PNG_DEBUG_STR}: Unusual Gamma value: 1.0 / {g}");
-                return None;
+                return Ok(None);
             }
             1.0 / g /* Gamma is inverted. */
         } else {
             DPX_PNG_DEFAULT_GAMMA
         };
 
-        let cal_param = self.make_param_Cal(
+        let cal_param = some!(self.make_param_Cal(
             color_type, g, c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7],
-        )?;
+        )?);
 
         let colorspace = self.o.new_array();
         let n = self.o.new_name(name);
-        self.o.add_array(colorspace, n);
-        self.o.add_array(colorspace, cal_param);
+        self.o.add_array(colorspace, n)?;
+        self.o.add_array(colorspace, cal_param)?;
 
-        Some(colorspace)
+        Ok(Some(colorspace))
     }
     /// `make_param_Cal` (static).
     #[allow(non_snake_case)]
@@ -748,7 +758,7 @@ impl Dpx {
         yg: f64,
         xb: f64,
         yb: f64,
-    ) -> Option<Obj> {
+    ) -> Result<Option<Obj>> {
         /*
          * TODO: Check validity
          *
@@ -770,7 +780,7 @@ impl Dpx {
         let det = xr * (yg * zb - zg * yb) - xg * (yr * zb - zr * yb) + xb * (yr * zg - zr * yg);
         if det.abs() < 1.0e-10 {
             warn!("Non invertible matrix: Maybe invalid value(s) specified in cHRM chunk.");
-            return None;
+            return Ok(None);
         }
         let fr = (x_w * (yg * zb - zg * yb) - xg * (zb - z_w * yb) + xb * (zg - z_w * yg)) / det;
         let fg = (xr * (zb - z_w * yb) - x_w * (yr * zb - zr * yb) + xb * (yr * z_w - zr)) / det;
@@ -781,7 +791,7 @@ impl Dpx {
 
         if g < 1.0e-2 {
             warn!("Unusual Gamma specified: 1.0 / {g}");
-            return None;
+            return Ok(None);
         }
 
         let cal_param = self.o.new_dict();
@@ -791,9 +801,9 @@ impl Dpx {
         let white_point = self.o.new_array();
         for v in [x_w, y_w, z_w] {
             let n = self.o.new_number(round(v));
-            self.o.add_array(white_point, n);
+            self.o.add_array(white_point, n)?;
         }
-        self.o.put(cal_param, b"WhitePoint", white_point);
+        self.o.put(cal_param, b"WhitePoint", white_point)?;
 
         /* Matrix - default: Identity */
         if color_type & PNG_COLOR_MASK_COLOR != 0 {
@@ -801,52 +811,52 @@ impl Dpx {
                 let dev_gamma = self.o.new_array();
                 for _ in 0..3 {
                     let n = self.o.new_number(round(g));
-                    self.o.add_array(dev_gamma, n);
+                    self.o.add_array(dev_gamma, n)?;
                 }
-                self.o.put(cal_param, b"Gamma", dev_gamma);
+                self.o.put(cal_param, b"Gamma", dev_gamma)?;
             }
 
             let matrix = self.o.new_array();
             for v in [x_r, y_r, z_r, x_g, y_g, z_g, x_b, y_b, z_b] {
                 let n = self.o.new_number(round(v));
-                self.o.add_array(matrix, n);
+                self.o.add_array(matrix, n)?;
             }
-            self.o.put(cal_param, b"Matrix", matrix);
+            self.o.put(cal_param, b"Matrix", matrix)?;
         } else {
             /* Gray */
             if g != 1.0 {
-                self.o.put_number(cal_param, b"Gamma", round(g));
+                self.o.put_number(cal_param, b"Gamma", round(g))?;
             }
         }
 
-        Some(cal_param)
+        Ok(Some(cal_param))
     }
     /// `create_cspace_sRGB` (static).
     #[allow(non_snake_case)]
-    pub fn create_cspace_sRGB(&mut self, png: &PngInfo) -> Option<Obj> {
+    pub fn create_cspace_sRGB(&mut self, png: &PngInfo) -> Result<Option<Obj>> {
         let color_type = png.info.color_type;
 
         /* Parameters taken from PNG spec. section 4.2.2.3. */
-        let cal_param = self.make_param_Cal(
+        let cal_param = some!(self.make_param_Cal(
             color_type, 2.2, 0.3127, 0.329, 0.64, 0.33, 0.3, 0.6, 0.15, 0.06,
-        )?;
+        )?);
 
         let colorspace = self.o.new_array();
 
         match color_type {
             PNG_COLOR_TYPE_RGB | PNG_COLOR_TYPE_RGB_ALPHA | PNG_COLOR_TYPE_PALETTE => {
                 let n = self.o.new_name(b"CalRGB");
-                self.o.add_array(colorspace, n);
+                self.o.add_array(colorspace, n)?;
             }
             PNG_COLOR_TYPE_GRAY | PNG_COLOR_TYPE_GRAY_ALPHA => {
                 let n = self.o.new_name(b"CalGray");
-                self.o.add_array(colorspace, n);
+                self.o.add_array(colorspace, n)?;
             }
             _ => {}
         }
-        self.o.add_array(colorspace, cal_param);
+        self.o.add_array(colorspace, cal_param)?;
 
-        Some(colorspace)
+        Ok(Some(colorspace))
     }
     /// `get_rendering_intent` (static).
     pub fn get_rendering_intent(&mut self, png: &PngInfo) -> Option<Obj> {
@@ -866,11 +876,11 @@ impl Dpx {
     }
     /// `create_cspace_ICCBased` (static).
     #[allow(non_snake_case)]
-    pub fn create_cspace_ICCBased(&mut self, png: &PngInfo) -> Option<Obj> {
+    pub fn create_cspace_ICCBased(&mut self, png: &PngInfo) -> Result<Option<Obj>> {
         if !png.valid(png::INFO_ICCP) {
-            return None;
+            return Ok(None);
         }
-        let (name, profile) = png.iccp.as_ref()?;
+        let (name, profile) = some!(png.iccp.as_ref());
 
         let color_type = png.info.color_type;
 
@@ -881,40 +891,41 @@ impl Dpx {
         };
 
         if self.iccp_check_colorspace(colortype, profile) < 0 {
-            None
+            Ok(None)
         } else {
-            let csp_id = self.iccp_load_profile(Some(name), profile);
+            let csp_id = self.iccp_load_profile(Some(name), profile)?;
             if csp_id < 0 {
-                None
+                Ok(None)
             } else {
-                Some(self.pdf_get_colorspace_reference(csp_id))
+                Ok(Some(self.pdf_get_colorspace_reference(csp_id)?))
             }
         }
 
         /* Rendering intent ... */
     }
     /// `create_ckey_mask` (static).
-    pub fn create_ckey_mask(&mut self, png: &PngInfo) -> Option<Obj> {
+    pub fn create_ckey_mask(&mut self, png: &PngInfo) -> Result<Option<Obj>> {
         if !png.valid(png::INFO_TRNS) {
             warn!("{PNG_DEBUG_STR}: PNG does not have valid tRNS chunk!");
-            return None;
+            return Ok(None);
         }
 
         let colorkeys = self.o.new_array();
         let color_type = png.info.color_type;
         let colors = png.info.trans_color;
 
-        let mut add = |dpx: &mut Dpx, v: f64| {
+        let add = |dpx: &mut Dpx, v: f64| -> Result<()> {
             let n = dpx.o.new_number(v);
-            dpx.o.add_array(colorkeys, n);
+            dpx.o.add_array(colorkeys, n)?;
+            Ok(())
         };
         match color_type {
             PNG_COLOR_TYPE_PALETTE => {
                 let trans = &png.info.trans_alpha;
                 for i in 0..usize::from(png.info.num_trans) {
                     if trans[i] == 0x00 {
-                        add(self, i as f64);
-                        add(self, i as f64);
+                        add(self, i as f64)?;
+                        add(self, i as f64)?;
                     } else if trans[i] != 0xff {
                         warn!("{PNG_DEBUG_STR}: You found a bug in pngimage.c.");
                     }
@@ -922,22 +933,22 @@ impl Dpx {
             }
             PNG_COLOR_TYPE_RGB => {
                 for c in [colors[1], colors[2], colors[3]] {
-                    add(self, f64::from(c));
-                    add(self, f64::from(c));
+                    add(self, f64::from(c))?;
+                    add(self, f64::from(c))?;
                 }
             }
             PNG_COLOR_TYPE_GRAY => {
-                add(self, f64::from(colors[0]));
-                add(self, f64::from(colors[0]));
+                add(self, f64::from(colors[0]))?;
+                add(self, f64::from(colors[0]))?;
             }
             _ => {
                 warn!("{PNG_DEBUG_STR}: You found a bug in pngimage.c.");
-                self.o.release(colorkeys);
-                return None;
+                self.o.release(colorkeys)?;
+                return Ok(None);
             }
         }
 
-        Some(colorkeys)
+        Ok(Some(colorkeys))
     }
     /// `create_soft_mask` (static): for palette images. (As in C, the
     /// samples are read as one stream of bits, rows' padding included.)
@@ -947,10 +958,10 @@ impl Dpx {
         image_data: &[u8],
         width: u32,
         height: u32,
-    ) -> Option<Obj> {
+    ) -> Result<Option<Obj>> {
         if !png.valid(png::INFO_TRNS) {
             warn!("{PNG_DEBUG_STR}: PNG does not have valid tRNS chunk but tRNS is requested.");
-            return None;
+            return Ok(None);
         }
         let trans = &png.info.trans_alpha;
         let num_trans = u32::from(png.info.num_trans);
@@ -959,15 +970,15 @@ impl Dpx {
         let shift: u32 = 8 - bpc;
 
         let smask = self.o.new_stream(STREAM_COMPRESS);
-        let dict = self.o.stream_dict(smask);
+        let dict = self.o.stream_dict(smask)?;
         let n = width.wrapping_mul(height);
         let mut smask_data = vec![0u8; n as usize];
-        self.o.put_name(dict, b"Type", b"XObject");
-        self.o.put_name(dict, b"Subtype", b"Image");
-        self.o.put_number(dict, b"Width", f64::from(width));
-        self.o.put_number(dict, b"Height", f64::from(height));
-        self.o.put_name(dict, b"ColorSpace", b"DeviceGray");
-        self.o.put_number(dict, b"BitsPerComponent", 8.0);
+        self.o.put_name(dict, b"Type", b"XObject")?;
+        self.o.put_name(dict, b"Subtype", b"Image")?;
+        self.o.put_number(dict, b"Width", f64::from(width))?;
+        self.o.put_number(dict, b"Height", f64::from(height))?;
+        self.o.put_name(dict, b"ColorSpace", b"DeviceGray")?;
+        self.o.put_number(dict, b"BitsPerComponent", 8.0)?;
         for i in 0..n {
             /* data is packed for 1/2/4 bpc formats, msb first */
             let bi = bpc.wrapping_mul(i);
@@ -979,9 +990,9 @@ impl Dpx {
                 0xff
             };
         }
-        self.o.add_stream(smask, &smask_data);
+        self.o.add_stream(smask, &smask_data)?;
 
-        Some(smask)
+        Ok(Some(smask))
     }
     /// `strip_soft_mask` (static): the alpha channel as an SMask; strips it
     /// from `image_data` in place and updates `rowbytes`.
@@ -992,7 +1003,7 @@ impl Dpx {
         rowbytes: &mut u32,
         width: u32,
         height: u32,
-    ) -> Option<Obj> {
+    ) -> Result<Option<Obj>> {
         let color_type = png.out_color_type;
         let bpc = u32::from(png.out_bit_depth);
         let bps: u32 = if color_type & PNG_COLOR_MASK_COLOR != 0 {
@@ -1005,17 +1016,18 @@ impl Dpx {
         if u64::from(*rowbytes) != u64::from(bps) * u64::from(width) {
             /* Something wrong */
             warn!("{PNG_DEBUG_STR}: Inconsistent rowbytes value.");
-            return None;
+            return Ok(None);
         }
 
         let smask = self.o.new_stream(STREAM_COMPRESS);
-        let dict = self.o.stream_dict(smask);
-        self.o.put_name(dict, b"Type", b"XObject");
-        self.o.put_name(dict, b"Subtype", b"Image");
-        self.o.put_number(dict, b"Width", f64::from(width));
-        self.o.put_number(dict, b"Height", f64::from(height));
-        self.o.put_name(dict, b"ColorSpace", b"DeviceGray");
-        self.o.put_number(dict, b"BitsPerComponent", f64::from(bpc));
+        let dict = self.o.stream_dict(smask)?;
+        self.o.put_name(dict, b"Type", b"XObject")?;
+        self.o.put_name(dict, b"Subtype", b"Image")?;
+        self.o.put_number(dict, b"Width", f64::from(width))?;
+        self.o.put_number(dict, b"Height", f64::from(height))?;
+        self.o.put_name(dict, b"ColorSpace", b"DeviceGray")?;
+        self.o
+            .put_number(dict, b"BitsPerComponent", f64::from(bpc))?;
 
         let n = (width as usize) * (height as usize);
         let mut smask_data = vec![0u8; (bpc as usize / 8) * n];
@@ -1057,14 +1069,14 @@ impl Dpx {
             }
             _ => {
                 warn!("You found a bug in pngimage.c!");
-                self.o.release(smask);
-                return None;
+                self.o.release(smask)?;
+                return Ok(None);
             }
         }
 
-        self.o.add_stream(smask, &smask_data);
+        self.o.add_stream(smask, &smask_data)?;
 
-        Some(smask)
+        Ok(Some(smask))
     }
 }
 
@@ -1107,10 +1119,10 @@ mod tests {
     }
 
     fn rows(png: &mut PngInfo) -> Vec<u8> {
-        png_read_update_info(png);
+        png_read_update_info(png).unwrap();
         let (h, rb) = (png.info.height, png.rowbytes);
         let mut d = vec![0; (h * rb) as usize];
-        read_image_data(png, &mut d, h, rb);
+        read_image_data(png, &mut d, h, rb).unwrap();
         d
     }
 
@@ -1118,27 +1130,30 @@ mod tests {
     fn e2e_files() {
         let mut srgb = png_read_info(&mut file(include_bytes!(
             "../../../tests/e2e/png-rgb8srgb.png"
-        )));
+        )))
+        .unwrap();
         assert!(srgb.valid(png::INFO_SRGB));
         assert!((0..=3).contains(&srgb.srgb_intent));
         let a = rows(&mut srgb);
         assert_eq!(srgb.rowbytes, 37 * 3);
-        let mut plain = png_read_info(&mut file(include_bytes!("../../../tests/e2e/png-rgb8.png")));
+        let mut plain =
+            png_read_info(&mut file(include_bytes!("../../../tests/e2e/png-rgb8.png"))).unwrap();
         assert!(!plain.valid(png::INFO_SRGB));
         assert_eq!(rows(&mut plain), a);
 
         let mut pal = png_read_info(&mut file(include_bytes!(
             "../../../tests/e2e/png-pal4trns.png"
-        )));
+        )))
+        .unwrap();
         assert!(pal.valid(png::INFO_TRNS) && pal.info.num_trans > 0);
         rows(&mut pal);
         assert_eq!((pal.out_bit_depth, pal.rowbytes), (4, 19));
 
         let data = include_bytes!("../../../tests/e2e/png-gray16.png");
-        let mut g16 = png_read_info(&mut file(data));
+        let mut g16 = png_read_info(&mut file(data)).unwrap();
         let wide = rows(&mut g16);
         assert_eq!(g16.rowbytes, 74);
-        let mut g8 = png_read_info(&mut file(data));
+        let mut g8 = png_read_info(&mut file(data)).unwrap();
         g8.strip_16 = true;
         let narrow = rows(&mut g8);
         assert_eq!(g8.rowbytes, 37);

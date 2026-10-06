@@ -300,19 +300,19 @@ fn cvt_a_to_tmatrix(m: &mut PdfTmatrix, s: &[u8], pp: &mut usize) -> i32 {
 
 impl Dpx {
     /// `spc_html_at_begin_page`.
-    pub fn spc_html_at_begin_page(&mut self) -> i32 {
-        spc_handler_html__bophook(self, None)
+    pub fn spc_html_at_begin_page(&mut self) -> Result<i32> {
+        Ok(spc_handler_html__bophook(self, None))
     }
     /// `spc_html_at_end_page`.
-    pub fn spc_html_at_end_page(&mut self) -> i32 {
-        spc_handler_html__eophook(self, None)
+    pub fn spc_html_at_end_page(&mut self) -> Result<i32> {
+        Ok(spc_handler_html__eophook(self, None))
     }
     /// `spc_html_at_begin_document`.
-    pub fn spc_html_at_begin_document(&mut self) -> i32 {
-        spc_handler_html__init(self)
+    pub fn spc_html_at_begin_document(&mut self) -> Result<i32> {
+        Ok(spc_handler_html__init(self))
     }
     /// `spc_html_at_end_document`.
-    pub fn spc_html_at_end_document(&mut self) -> i32 {
+    pub fn spc_html_at_end_document(&mut self) -> Result<i32> {
         spc_handler_html__clean(self, None)
     }
 }
@@ -324,7 +324,12 @@ fn is_delim(c: u8) -> bool {
 
 /// `read_html_tag` (static): status, the tag name (downcased), and
 /// its type (`HTML_TAG_TYPE_*`); attributes go into `attr`.
-fn read_html_tag(dpx: &mut Dpx, attr: Obj, s: &[u8], pp: &mut usize) -> (i32, Vec<u8>, i32) {
+fn read_html_tag(
+    dpx: &mut Dpx,
+    attr: Obj,
+    s: &[u8],
+    pp: &mut usize,
+) -> Result<(i32, Vec<u8>, i32)> {
     let mut p = *pp;
     let mut error = 0;
     let mut name = Vec::new();
@@ -334,7 +339,7 @@ fn read_html_tag(dpx: &mut Dpx, attr: Obj, s: &[u8], pp: &mut usize) -> (i32, Ve
         p += 1;
     }
     if p >= s.len() || s[p] != b'<' {
-        return (-1, name, ty);
+        return Ok((-1, name, ty));
     }
 
     ty = HTML_TAG_TYPE_OPEN;
@@ -356,7 +361,7 @@ fn read_html_tag(dpx: &mut Dpx, attr: Obj, s: &[u8], pp: &mut usize) -> (i32, Ve
     }
     if name.is_empty() || p == s.len() || !is_delim(s[p]) {
         *pp = p;
-        return (-1, name, ty);
+        return Ok((-1, name, ty));
     }
 
     while p < s.len() && is_c_space(s[p]) {
@@ -373,7 +378,7 @@ fn read_html_tag(dpx: &mut Dpx, attr: Obj, s: &[u8], pp: &mut usize) -> (i32, Ve
             v.push(0);
             let k = dpx.o.new_name(cstr(&kp));
             let v = dpx.o.new_string(&v);
-            dpx.o.add_dict(attr, k, Some(v));
+            dpx.o.add_dict(attr, k, Some(v))?;
         }
         while p < s.len() && is_c_space(s[p]) {
             p += 1;
@@ -381,7 +386,7 @@ fn read_html_tag(dpx: &mut Dpx, attr: Obj, s: &[u8], pp: &mut usize) -> (i32, Ve
     }
     if error != 0 {
         *pp = p;
-        return (error, name, ty);
+        return Ok((error, name, ty));
     }
 
     if p < s.len() && s[p] == b'/' {
@@ -393,13 +398,13 @@ fn read_html_tag(dpx: &mut Dpx, attr: Obj, s: &[u8], pp: &mut usize) -> (i32, Ve
     }
     if p == s.len() || s[p] != b'>' {
         *pp = p;
-        return (-1, name, ty);
+        return Ok((-1, name, ty));
     }
     p += 1;
 
     downcasify(&mut name);
     *pp = p;
-    (0, name, ty)
+    Ok((0, name, ty))
 }
 
 /// `spc_handler_html__init`.
@@ -411,7 +416,7 @@ fn spc_handler_html__init(dpx: &mut Dpx) -> i32 {
 }
 
 /// `spc_handler_html__clean` (`spe` may be none).
-fn spc_handler_html__clean(dpx: &mut Dpx, spe: Option<&mut SpcEnv>) -> i32 {
+fn spc_handler_html__clean(dpx: &mut Dpx, spe: Option<&mut SpcEnv>) -> Result<i32> {
     dpx.html.baseurl = None;
 
     if dpx.html.pending_type >= 0 || dpx.html.link_dict.is_some() {
@@ -419,14 +424,14 @@ fn spc_handler_html__clean(dpx: &mut Dpx, spe: Option<&mut SpcEnv>) -> i32 {
     }
 
     if let Some(l) = dpx.html.link_dict {
-        dpx.o.release(l);
+        dpx.o.release(l)?;
     }
 
     dpx.html.pending_type = -1;
     dpx.html.baseurl = None;
     dpx.html.link_dict = None;
 
-    0
+    Ok(0)
 }
 
 /// `spc_handler_html__bophook`.
@@ -446,46 +451,46 @@ fn spc_handler_html__eophook(dpx: &mut Dpx, spe: Option<&mut SpcEnv>) -> i32 {
 }
 
 /// `html_open_link`.
-fn html_open_link(dpx: &mut Dpx, spe: &mut SpcEnv, name: &[u8]) -> i32 {
+fn html_open_link(dpx: &mut Dpx, spe: &mut SpcEnv, name: &[u8]) -> Result<i32> {
     // Should be checked somewhere else
     assert!(dpx.html.link_dict.is_none());
 
     let link_dict = dpx.o.new_dict();
     dpx.html.link_dict = Some(link_dict);
-    dpx.o.put_name(link_dict, b"Type", b"Annot");
-    dpx.o.put_name(link_dict, b"Subtype", b"Link");
+    dpx.o.put_name(link_dict, b"Type", b"Annot")?;
+    dpx.o.put_name(link_dict, b"Subtype", b"Link")?;
 
     let color = dpx.o.new_array();
     for v in [0.0, 0.0, 1.0] {
         let n = dpx.o.new_number(v);
-        dpx.o.add_array(color, n);
+        dpx.o.add_array(color, n)?;
     }
-    dpx.o.put(link_dict, b"C", color);
+    dpx.o.put(link_dict, b"C", color)?;
 
     let url = fqurl(dpx.html.baseurl.as_deref(), name);
     if url.first() == Some(&b'#') {
-        dpx.o.put_string(link_dict, b"Dest", &url[1..]);
+        dpx.o.put_string(link_dict, b"Dest", &url[1..])?;
     } else {
         // Assume this is URL
         let action = dpx.o.new_dict();
-        dpx.o.put_name(action, b"Type", b"Action");
-        dpx.o.put_name(action, b"S", b"URI");
-        dpx.o.put_string(action, b"URI", &url);
-        let l = dpx.o.link(action);
-        dpx.o.put(link_dict, b"A", l);
-        dpx.o.release(action);
+        dpx.o.put_name(action, b"Type", b"Action")?;
+        dpx.o.put_name(action, b"S", b"URI")?;
+        dpx.o.put_string(action, b"URI", &url)?;
+        let l = dpx.o.link(action)?;
+        dpx.o.put(link_dict, b"A", l)?;
+        dpx.o.release(action)?;
     }
 
-    let l = dpx.o.link(link_dict);
+    let l = dpx.o.link(link_dict)?;
     dpx.spc_begin_annot(spe, l);
 
     dpx.html.pending_type = ANCHOR_TYPE_HREF;
 
-    0
+    Ok(0)
 }
 
 /// `html_open_dest`.
-fn html_open_dest(dpx: &mut Dpx, spe: &mut SpcEnv, name: &[u8]) -> i32 {
+fn html_open_dest(dpx: &mut Dpx, spe: &mut SpcEnv, name: &[u8]) -> Result<i32> {
     let mut cp = PdfCoord {
         x: spe.x_user,
         y: spe.y_user,
@@ -493,20 +498,20 @@ fn html_open_dest(dpx: &mut Dpx, spe: &mut SpcEnv, name: &[u8]) -> i32 {
     dpx.pdf_dev_transform(&mut cp, None);
 
     // Otherwise must be bug
-    let page_ref = dpx.pdf_doc_this_page_ref().expect("page_ref");
+    let page_ref = dpx.pdf_doc_this_page_ref()?.expect("page_ref");
 
     let array = dpx.o.new_array();
-    dpx.o.add_array(array, page_ref);
+    dpx.o.add_array(array, page_ref)?;
     let xyz = dpx.o.new_name(b"XYZ");
-    dpx.o.add_array(array, xyz);
+    dpx.o.add_array(array, xyz)?;
     let null = dpx.o.new_null();
-    dpx.o.add_array(array, null);
+    dpx.o.add_array(array, null)?;
     let top = dpx.o.new_number(cp.y + 24.0);
-    dpx.o.add_array(array, top);
+    dpx.o.add_array(array, top)?;
     let null = dpx.o.new_null();
-    dpx.o.add_array(array, null);
+    dpx.o.add_array(array, null)?;
 
-    let error = dpx.pdf_doc_add_names(b"Dests", name, array);
+    let error = dpx.pdf_doc_add_names(b"Dests", name, array)?;
 
     if error != 0 {
         dpx.spc_warn(
@@ -517,7 +522,7 @@ fn html_open_dest(dpx: &mut Dpx, spe: &mut SpcEnv, name: &[u8]) -> i32 {
 
     dpx.html.pending_type = ANCHOR_TYPE_NAME;
 
-    error
+    Ok(error)
 }
 
 /// `ANCHOR_STARTED`.
@@ -526,29 +531,29 @@ fn anchor_started(dpx: &Dpx) -> bool {
 }
 
 /// `spc_html__anchor_open`.
-fn spc_html__anchor_open(dpx: &mut Dpx, spe: &mut SpcEnv, attr: Obj) -> i32 {
+fn spc_html__anchor_open(dpx: &mut Dpx, spe: &mut SpcEnv, attr: Obj) -> Result<i32> {
     if anchor_started(dpx) {
         dpx.spc_warn(spe, format_args!("Nested html anchors found!"));
-        return -1;
+        return Ok(-1);
     }
 
-    let href = dpx.o.lookup_dict(attr, b"href");
-    let name = dpx.o.lookup_dict(attr, b"name");
+    let href = dpx.o.lookup_dict(attr, b"href")?;
+    let name = dpx.o.lookup_dict(attr, b"name")?;
     match (href, name) {
         (Some(_), Some(_)) => {
             dpx.spc_warn(
                 spe,
                 format_args!("Sorry, you can't have both \"href\" and \"name\" in anchor tag..."),
             );
-            -1
+            Ok(-1)
         }
         (Some(href), None) => {
-            let v = cstr(dpx.o.string_value(href)).to_vec();
+            let v = cstr(dpx.o.string_value(href)?).to_vec();
             html_open_link(dpx, spe, &v)
         }
         (None, Some(name)) => {
             // name
-            let v = cstr(dpx.o.string_value(name)).to_vec();
+            let v = cstr(dpx.o.string_value(name)?).to_vec();
             html_open_dest(dpx, spe, &v)
         }
         (None, None) => {
@@ -556,20 +561,20 @@ fn spc_html__anchor_open(dpx: &mut Dpx, spe: &mut SpcEnv, attr: Obj) -> i32 {
                 spe,
                 format_args!("You should have \"href\" or \"name\" in anchor tag!"),
             );
-            -1
+            Ok(-1)
         }
     }
 }
 
 /// `spc_html__anchor_close`.
-fn spc_html__anchor_close(dpx: &mut Dpx, spe: &mut SpcEnv) -> i32 {
+fn spc_html__anchor_close(dpx: &mut Dpx, spe: &mut SpcEnv) -> Result<i32> {
     let mut error = 0;
 
     match dpx.html.pending_type {
         ANCHOR_TYPE_HREF => {
             if let Some(l) = dpx.html.link_dict {
-                dpx.spc_end_annot(spe);
-                dpx.o.release(l);
+                dpx.spc_end_annot(spe)?;
+                dpx.o.release(l)?;
                 dpx.html.link_dict = None;
                 dpx.html.pending_type = -1;
             } else {
@@ -592,36 +597,36 @@ fn spc_html__anchor_close(dpx: &mut Dpx, spe: &mut SpcEnv) -> i32 {
         }
     }
 
-    error
+    Ok(error)
 }
 
 /// `spc_html__base_empty`.
-fn spc_html__base_empty(dpx: &mut Dpx, spe: &mut SpcEnv, attr: Obj) -> i32 {
-    let Some(href) = dpx.o.lookup_dict(attr, b"href") else {
+fn spc_html__base_empty(dpx: &mut Dpx, spe: &mut SpcEnv, attr: Obj) -> Result<i32> {
+    let Some(href) = dpx.o.lookup_dict(attr, b"href")? else {
         dpx.spc_warn(spe, format_args!("\"href\" not found for \"base\" tag!"));
-        return -1;
+        return Ok(-1);
     };
 
-    let vp = cstr(dpx.o.string_value(href)).to_vec();
+    let vp = cstr(dpx.o.string_value(href)?).to_vec();
     if let Some(old) = &dpx.html.baseurl {
         crate::warn!("\"baseurl\" changed: {:?} --> {:?}", old, vp);
     }
     dpx.html.baseurl = Some(vp);
 
-    0
+    Ok(0)
 }
 
 /// `create_xgstate`: an ExtGState with `ca` = `a` (20260113 sets no
 /// `CA`).
-fn create_xgstate(dpx: &mut Dpx, a: f64) -> Obj {
+fn create_xgstate(dpx: &mut Dpx, a: f64) -> Result<Obj> {
     let dict = dpx.o.new_dict();
-    dpx.o.put_name(dict, b"Type", b"ExtGState");
-    dpx.o.put_number(dict, b"ca", a);
-    dict
+    dpx.o.put_name(dict, b"Type", b"ExtGState")?;
+    dpx.o.put_number(dict, b"ca", a)?;
+    Ok(dict)
 }
 
 /// `spc_html__img_empty` (the `ENABLE_HTML_IMG_SUPPORT` one).
-fn spc_html__img_empty(dpx: &mut Dpx, spe: &mut SpcEnv, attr: Obj) -> i32 {
+fn spc_html__img_empty(dpx: &mut Dpx, spe: &mut SpcEnv, attr: Obj) -> Result<i32> {
     let options = LoadOptions {
         page_no: 1,
         bbox_type: 0,
@@ -636,35 +641,35 @@ fn spc_html__img_empty(dpx: &mut Dpx, spe: &mut SpcEnv, attr: Obj) -> i32 {
         format_args!("html \"img\" tag found (not completed, plese don't use!)."),
     );
 
-    let Some(src) = dpx.o.lookup_dict(attr, b"src") else {
+    let Some(src) = dpx.o.lookup_dict(attr, b"src")? else {
         dpx.spc_warn(
             spe,
             format_args!("\"src\" attribute not found for \"img\" tag!"),
         );
-        return -1;
+        return Ok(-1);
     };
 
     let mut ti = TransformInfo::default();
     ti.transform_info_clear();
-    if let Some(obj) = dpx.o.lookup_dict(attr, b"width") {
-        ti.width = atopt(dpx.o.string_value(obj));
+    if let Some(obj) = dpx.o.lookup_dict(attr, b"width")? {
+        ti.width = atopt(dpx.o.string_value(obj)?);
         ti.flags |= INFO_HAS_WIDTH;
     }
-    if let Some(obj) = dpx.o.lookup_dict(attr, b"height") {
-        ti.height = atopt(dpx.o.string_value(obj));
+    if let Some(obj) = dpx.o.lookup_dict(attr, b"height")? {
+        ti.height = atopt(dpx.o.string_value(obj)?);
         ti.flags |= INFO_HAS_HEIGHT;
     }
 
-    if let Some(obj) = dpx.o.lookup_dict(attr, b"svg:opacity") {
-        alpha = crate::fmt::atof(cstr(dpx.o.string_value(obj)));
+    if let Some(obj) = dpx.o.lookup_dict(attr, b"svg:opacity")? {
+        alpha = crate::fmt::atof(cstr(dpx.o.string_value(obj)?));
         if !(0.0..=1.0).contains(&alpha) {
-            crate::warn!("Invalid opacity value: {:?}", dpx.o.string_value(obj));
+            crate::warn!("Invalid opacity value: {:?}", dpx.o.string_value(obj)?);
             alpha = 1.0;
         }
     }
 
-    if let Some(obj) = dpx.o.lookup_dict(attr, b"svg:transform") {
-        let s = cstr(dpx.o.string_value(obj)).to_vec();
+    if let Some(obj) = dpx.o.lookup_dict(attr, b"svg:transform")? {
+        let s = cstr(dpx.o.string_value(obj)?).to_vec();
         let mut p = 0;
         while p < s.len() && is_c_space(s[p]) {
             p += 1;
@@ -691,11 +696,11 @@ fn spc_html__img_empty(dpx: &mut Dpx, spe: &mut SpcEnv, attr: Obj) -> i32 {
 
     if error != 0 {
         dpx.spc_warn(spe, format_args!("Error in html \"img\" tag attribute."));
-        return error;
+        return Ok(error);
     }
 
-    let filename = cstr(dpx.o.string_value(src)).to_vec();
-    let id = dpx.pdf_ximage_load_image(None, &filename, options);
+    let filename = cstr(dpx.o.string_value(src)?).to_vec();
+    let id = dpx.pdf_ximage_load_image(None, &filename, options)?;
     if id < 0 {
         dpx.spc_warn(
             spe,
@@ -704,38 +709,38 @@ fn spc_html__img_empty(dpx: &mut Dpx, spe: &mut SpcEnv, attr: Obj) -> i32 {
         error = -1;
     } else {
         if alpha != 0.0 {
-            let dict = create_xgstate(dpx, alpha);
-            dpx.pdf_dev_xgstate_push(dict);
+            let dict = create_xgstate(dpx, alpha)?;
+            dpx.pdf_dev_xgstate_push(dict)?;
         }
         let (x, y) = (spe.x_user, spe.y_user);
-        dpx.spc_put_image(spe, id, &mut ti, x, y);
+        dpx.spc_put_image(spe, id, &mut ti, x, y)?;
         if alpha != 0.0 {
-            dpx.pdf_dev_xgstate_pop();
+            dpx.pdf_dev_xgstate_pop()?;
         }
     }
 
-    error
+    Ok(error)
 }
 
 /// `spc_handler_html_default`.
-fn spc_handler_html_default(dpx: &mut Dpx, spe: &mut SpcEnv, ap: &mut SpcArg) -> i32 {
+fn spc_handler_html_default(dpx: &mut Dpx, spe: &mut SpcEnv, ap: &mut SpcArg) -> Result<i32> {
     if ap.curptr >= ap.endptr {
-        return 0;
+        return Ok(0);
     }
 
     let attr = dpx.o.new_dict();
     let (mut error, name, ty) = {
         let (s, pp) = ap.parts();
-        read_html_tag(dpx, attr, s, pp)
+        read_html_tag(dpx, attr, s, pp)?
     };
     if error != 0 {
-        dpx.o.release(attr);
-        return error;
+        dpx.o.release(attr)?;
+        return Ok(error);
     }
     match cstr(&name) {
         b"a" => match ty {
-            HTML_TAG_TYPE_OPEN => error = spc_html__anchor_open(dpx, spe, attr),
-            HTML_TAG_TYPE_CLOSE => error = spc_html__anchor_close(dpx, spe),
+            HTML_TAG_TYPE_OPEN => error = spc_html__anchor_open(dpx, spe, attr)?,
+            HTML_TAG_TYPE_CLOSE => error = spc_html__anchor_close(dpx, spe)?,
             _ => {
                 dpx.spc_warn(spe, format_args!("Empty html anchor tag???"));
                 error = -1;
@@ -747,7 +752,7 @@ fn spc_handler_html_default(dpx: &mut Dpx, spe: &mut SpcEnv, ap: &mut SpcArg) ->
                 error = -1;
             } else {
                 // treat "open" same as "empty"
-                error = spc_html__base_empty(dpx, spe, attr);
+                error = spc_html__base_empty(dpx, spe, attr)?;
             }
         }
         b"img" => {
@@ -756,18 +761,18 @@ fn spc_handler_html_default(dpx: &mut Dpx, spe: &mut SpcEnv, ap: &mut SpcArg) ->
                 error = -1;
             } else {
                 // treat "open" same as "empty"
-                error = spc_html__img_empty(dpx, spe, attr);
+                error = spc_html__img_empty(dpx, spe, attr)?;
             }
         }
         _ => {}
     }
-    dpx.o.release(attr);
+    dpx.o.release(attr)?;
 
     while ap.curptr < ap.endptr && is_c_space(ap.cur()) {
         ap.curptr += 1;
     }
 
-    error
+    Ok(error)
 }
 
 /// `spc_html_check_special`.
@@ -785,12 +790,12 @@ pub fn spc_html_setup_handler(
     sph: &mut SpcHandler,
     spe: &mut SpcEnv,
     ap: &mut SpcArg,
-) -> i32 {
+) -> Result<i32> {
     while ap.curptr < ap.endptr && is_c_space(ap.cur()) {
         ap.curptr += 1;
     }
     if ap.curptr + 5 > ap.endptr || !ap.rest().starts_with(b"html:") {
-        return -1;
+        return Ok(-1);
     }
 
     ap.command = Some(b"");
@@ -803,7 +808,7 @@ pub fn spc_html_setup_handler(
         ap.curptr += 1;
     }
 
-    0
+    Ok(0)
 }
 
 #[cfg(test)]

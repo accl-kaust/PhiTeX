@@ -235,8 +235,9 @@ pub fn rotate_text(m: i32) -> bool {
 }
 
 impl Dpx {
-    fn dev_out(&mut self, s: &[u8]) {
-        self.pdf_doc_add_page_content(s);
+    fn dev_out(&mut self, s: &[u8]) -> Result<()> {
+        self.pdf_doc_add_page_content(s)?;
+        Ok(())
     }
 
     fn bpt2spt(&self, b: f64) -> Spt {
@@ -300,7 +301,14 @@ impl Dpx {
         p_dtoa(buf, v, DEV_PRECISION_MAX as usize);
     }
 
-    fn dev_set_text_matrix(&mut self, xpos: Spt, ypos: Spt, slant: f64, extend: f64, rotate: i32) {
+    fn dev_set_text_matrix(
+        &mut self,
+        xpos: Spt,
+        ypos: Spt,
+        slant: f64,
+        extend: f64,
+        rotate: i32,
+    ) -> Result<()> {
         let mut tm = PdfTmatrix::default();
         match rotate {
             TEXT_WMODE_VH => {
@@ -347,33 +355,35 @@ impl Dpx {
         b.push(b' ');
         self.pdf_sprint_matrix(&mut b, &tm);
         b.extend(b" Tm");
-        self.dev_out(&b.0);
+        self.dev_out(&b.0)?;
         let ts = &mut self.dev.pdev.text_state;
         ts.ref_x = xpos;
         ts.ref_y = ypos;
         ts.matrix.slant = slant;
         ts.matrix.extend = extend;
         ts.matrix.rotate = rotate;
+        Ok(())
     }
 
-    fn reset_text_state(&mut self) {
-        self.dev_out(b" BT");
+    fn reset_text_state(&mut self) -> Result<()> {
+        self.dev_out(b" BT")?;
         let ts = self.dev.pdev.text_state;
         if ts.force_reset
             || ts.matrix.slant != 0.0
             || ts.matrix.extend != 1.0
             || rotate_text(ts.matrix.rotate)
         {
-            self.dev_set_text_matrix(0, 0, ts.matrix.slant, ts.matrix.extend, ts.matrix.rotate);
+            self.dev_set_text_matrix(0, 0, ts.matrix.slant, ts.matrix.extend, ts.matrix.rotate)?;
         }
         let ts = &mut self.dev.pdev.text_state;
         ts.ref_x = 0;
         ts.ref_y = 0;
         ts.offset = 0;
         ts.force_reset = false;
+        Ok(())
     }
 
-    fn pdf_dev_text_mode(&mut self) {
+    fn pdf_dev_text_mode(&mut self) -> Result<()> {
         match self.dev.pdev.motion_state {
             TEXT_MODE => {}
             STRING_MODE => {
@@ -382,16 +392,17 @@ impl Dpx {
                 } else {
                     b")]TJ"
                 };
-                self.dev_out(s);
+                self.dev_out(s)?;
             }
-            GRAPHICS_MODE => self.reset_text_state(),
+            GRAPHICS_MODE => self.reset_text_state()?,
             _ => {}
         }
         self.dev.pdev.motion_state = TEXT_MODE;
         self.dev.pdev.text_state.offset = 0;
+        Ok(())
     }
 
-    fn pdf_dev_graphics_mode(&mut self) {
+    fn pdf_dev_graphics_mode(&mut self) -> Result<()> {
         match self.dev.pdev.motion_state {
             GRAPHICS_MODE => {}
             STRING_MODE | TEXT_MODE => {
@@ -401,22 +412,30 @@ impl Dpx {
                     } else {
                         b")]TJ"
                     };
-                    self.dev_out(s);
+                    self.dev_out(s)?;
                 }
                 if self.dev.pdev.text_state.bold_param != 0.0 {
-                    self.dev_out(b" 0 Tr");
+                    self.dev_out(b" 0 Tr")?;
                     self.dev.pdev.text_state.bold_param = 0.0;
                 }
-                self.dev_out(b" ET");
+                self.dev_out(b" ET")?;
                 self.dev.pdev.text_state.force_reset = false;
                 self.dev.pdev.text_state.font_id = -1;
             }
             _ => {}
         }
         self.dev.pdev.motion_state = GRAPHICS_MODE;
+        Ok(())
     }
 
-    fn start_string(&mut self, xpos: Spt, ypos: Spt, slant: f64, extend: f64, rotate: i32) {
+    fn start_string(
+        &mut self,
+        xpos: Spt,
+        ypos: Spt,
+        slant: f64,
+        extend: f64,
+        rotate: i32,
+    ) -> Result<()> {
         let delx = xpos - self.dev.pdev.text_state.ref_x;
         let dely = ypos - self.dev.pdev.text_state.ref_y;
         let (mut error_delx, mut error_dely) = (0, 0);
@@ -479,46 +498,55 @@ impl Dpx {
             }
             _ => {}
         }
-        self.dev_out(&b.0);
+        self.dev_out(&b.0)?;
         let s: &[u8] = if self.dev.pdev.text_state.is_mb {
             b" Td[<"
         } else {
             b" Td[("
         };
-        self.dev_out(s);
+        self.dev_out(s)?;
         let ts = &mut self.dev.pdev.text_state;
         ts.ref_x = xpos - error_delx;
         ts.ref_y = ypos - error_dely;
         ts.offset = 0;
+        Ok(())
     }
 
-    fn pdf_dev_string_mode(&mut self, xpos: Spt, ypos: Spt, slant: f64, extend: f64, rotate: i32) {
+    fn pdf_dev_string_mode(
+        &mut self,
+        xpos: Spt,
+        ypos: Spt,
+        slant: f64,
+        extend: f64,
+        rotate: i32,
+    ) -> Result<()> {
         match self.dev.pdev.motion_state {
             STRING_MODE => {}
             GRAPHICS_MODE | TEXT_MODE => {
                 if self.dev.pdev.motion_state == GRAPHICS_MODE {
-                    self.reset_text_state();
+                    self.reset_text_state()?;
                 }
                 if self.dev.pdev.text_state.force_reset {
-                    self.dev_set_text_matrix(xpos, ypos, slant, extend, rotate);
+                    self.dev_set_text_matrix(xpos, ypos, slant, extend, rotate)?;
                     let s: &[u8] = if self.dev.pdev.text_state.is_mb {
                         b"[<"
                     } else {
                         b"[("
                     };
-                    self.dev_out(s);
+                    self.dev_out(s)?;
                     self.dev.pdev.text_state.force_reset = false;
                 } else {
-                    self.start_string(xpos, ypos, slant, extend, rotate);
+                    self.start_string(xpos, ypos, slant, extend, rotate)?;
                 }
             }
             _ => {}
         }
         self.dev.pdev.motion_state = STRING_MODE;
+        Ok(())
     }
 
-    fn pdf_dev_set_font(&mut self, font_id: i32) {
-        self.pdf_dev_text_mode();
+    fn pdf_dev_set_font(&mut self, font_id: i32) -> Result<()> {
+        self.pdf_dev_text_mode()?;
         let fi = font_id as usize;
         let (format, wmode, slant, extend) = {
             let f = &self.dev.pdev.fonts[fi];
@@ -544,15 +572,15 @@ impl Dpx {
         ts.matrix.rotate = text_rotate;
         if self.dev.pdev.fonts[fi].resource.is_none() {
             let id = self.dev.pdev.fonts[fi].font_id;
-            let r = self.pdf_get_font_reference(id);
+            let r = self.pdf_get_font_reference(id)?;
             self.dev.pdev.fonts[fi].resource = Some(r);
-            self.dev.pdev.fonts[fi].used_chars = self.pdf_get_font_usedchars(id);
+            self.dev.pdev.fonts[fi].used_chars = self.pdf_get_font_usedchars(id)?;
         }
         if !self.dev.pdev.fonts[fi].used_on_this_page {
             let r = self.dev.pdev.fonts[fi].resource.expect("resource");
-            let l = self.o.link(r);
+            let l = self.o.link(r)?;
             let name = self.dev.pdev.fonts[fi].short_name.clone();
-            self.pdf_doc_add_page_resource(b"Font", &name, l);
+            self.pdf_doc_add_page_resource(b"Font", &name, l)?;
             self.dev.pdev.fonts[fi].used_on_this_page = true;
         }
         let font_scale = f64::from(self.dev.pdev.fonts[fi].sptsize) * self.dev.pdev.unit.dvi2pts;
@@ -566,7 +594,7 @@ impl Dpx {
             (self.dev.pdev.unit.precision + 1).min(DEV_PRECISION_MAX) as usize,
         );
         b.extend(b" Tf");
-        self.dev_out(&b.0);
+        self.dev_out(&b.0)?;
         let bold = self.dev.pdev.fonts[fi].bold;
         if bold > 0.0 || bold != self.dev.pdev.text_state.bold_param {
             let mut b = Buf::new();
@@ -577,25 +605,26 @@ impl Dpx {
                 b.fixed(bold, 6);
                 b.extend(b" w");
             }
-            self.dev_out(&b.0);
+            self.dev_out(&b.0)?;
         }
         self.dev.pdev.text_state.bold_param = bold;
         self.dev.pdev.text_state.font_id = font_id;
+        Ok(())
     }
 
     /// `handle_multibyte_string`: status (0, or -1 when the CMap
     /// conversion failed) and the string to show (decoded through the
     /// dev font's CMap when it has one; C's `sbuf0`).
-    fn handle_multibyte_string(&mut self, dev_font: usize, s: &[u8]) -> (i32, Vec<u8>) {
+    fn handle_multibyte_string(&mut self, dev_font: usize, s: &[u8]) -> Result<(i32, Vec<u8>)> {
         let enc_id = self.dev.pdev.fonts[dev_font].enc_id;
         if enc_id < 0 {
-            return (0, s.to_vec());
+            return Ok((0, s.to_vec()));
         }
         let mut out = vec![0u8; FORMAT_BUF_SIZE];
         let (mut inpos, mut outpos) = (0usize, 0usize);
         let mut inbytesleft = s.len() as i32;
         let mut outbytesleft = FORMAT_BUF_SIZE as i32;
-        let cmap = self.CMap_cache_get(enc_id);
+        let cmap = self.CMap_cache_get(enc_id)?;
         self.CMap_decode(
             cmap,
             s,
@@ -604,12 +633,12 @@ impl Dpx {
             &mut out,
             &mut outpos,
             &mut outbytesleft,
-        );
+        )?;
         if inbytesleft != 0 {
-            return (-1, Vec::new());
+            return Ok((-1, Vec::new()));
         }
         out.truncate(FORMAT_BUF_SIZE - outbytesleft as usize);
-        (0, out)
+        Ok((0, out))
     }
 
     /// `pdf_dev_set_string`.
@@ -620,13 +649,12 @@ impl Dpx {
         instr: &[u8],
         width: Spt,
         font_id: i32,
-    ) {
-        assert!(
-            font_id >= 0 && (font_id as usize) < self.dev.pdev.fonts.len(),
-            "Invalid font"
-        );
+    ) -> Result<()> {
+        if font_id < 0 || font_id as usize >= self.dev.pdev.fonts.len() {
+            fatal!("Invalid font: {} ({})", font_id, self.dev.pdev.fonts.len());
+        }
         if font_id != self.dev.pdev.text_state.font_id {
-            self.pdf_dev_set_font(font_id);
+            self.pdf_dev_set_font(font_id)?;
         }
         let fi = self.dev.pdev.text_state.font_id as usize;
         let text_xorigin = self.dev.pdev.text_state.ref_x;
@@ -635,9 +663,9 @@ impl Dpx {
         let mut s: Vec<u8> = instr.to_vec();
         let used_chars = self.dev.pdev.fonts[fi].used_chars.clone();
         if format == PDF_FONTTYPE_COMPOSITE {
-            let (r, out) = self.handle_multibyte_string(fi, &s);
+            let (r, out) = self.handle_multibyte_string(fi, &s)?;
             if r < 0 {
-                crate::error!("Error in converting input string...");
+                crate::fatal!("Error in converting input string...");
             }
             s = out;
             if let Some(uc) = used_chars {
@@ -673,7 +701,7 @@ impl Dpx {
             || delv.abs() > self.dev.pdev.unit.min_bp_val
             || delh.abs() > word_space_max
         {
-            self.pdf_dev_text_mode();
+            self.pdf_dev_text_mode()?;
             0
         } else {
             (1000.0 / extend * f64::from(delh) / f64::from(sptsize)) as Spt
@@ -681,7 +709,7 @@ impl Dpx {
         let mut b = Buf::new();
         if self.dev.pdev.motion_state != STRING_MODE {
             let rotate = self.dev.pdev.text_state.matrix.rotate;
-            self.pdf_dev_string_mode(xpos, ypos, slant, extend, rotate);
+            self.pdf_dev_string_mode(xpos, ypos, slant, extend, rotate)?;
         } else if kern != 0 {
             self.dev.pdev.text_state.offset -=
                 (f64::from(kern) * extend * (f64::from(sptsize) / 1000.0)) as Spt;
@@ -693,7 +721,7 @@ impl Dpx {
                 b.int(kern);
             }
             b.push(if is_mb { b'<' } else { b'(' });
-            self.dev_out(&b.0);
+            self.dev_out(&b.0)?;
             b = Buf::new();
         }
         if self.dev.pdev.text_state.is_mb {
@@ -714,12 +742,18 @@ impl Dpx {
         } else {
             crate::obj::escape_str(&mut b, &s);
         }
-        self.dev_out(&b.0);
+        self.dev_out(&b.0)?;
         self.dev.pdev.text_state.offset += width;
+        Ok(())
     }
 
     /// `pdf_init_device`.
-    pub fn pdf_init_device(&mut self, dvi2pts: f64, precision: i32, black_and_white: i32) {
+    pub fn pdf_init_device(
+        &mut self,
+        dvi2pts: f64,
+        precision: i32,
+        black_and_white: i32,
+    ) -> Result<()> {
         let d = &mut self.dev.pdev;
         d.motion_state = GRAPHICS_MODE;
         d.param.autorotate = 1;
@@ -738,19 +772,21 @@ impl Dpx {
             d.unit.min_bp_val = -d.unit.min_bp_val;
         }
         d.param.colormode = i32::from(black_and_white == 0);
-        self.pdf_dev_graphics_mode();
+        self.pdf_dev_graphics_mode()?;
         self.pdf_color_clear_stack();
         self.pdf_dev_init_gstates();
         self.dev.pdev.fonts.clear();
+        Ok(())
     }
 
     /// `pdf_close_device`.
-    pub fn pdf_close_device(&mut self) {
+    pub fn pdf_close_device(&mut self) -> Result<()> {
         let fonts = core::mem::take(&mut self.dev.pdev.fonts);
         for f in fonts {
-            self.o.release_opt(f.resource);
+            self.o.release_opt(f.resource)?;
         }
-        self.pdf_dev_clear_gstates();
+        self.pdf_dev_clear_gstates()?;
+        Ok(())
     }
 
     /// `pdf_dev_reset_fonts`.
@@ -770,40 +806,42 @@ impl Dpx {
     }
 
     /// `pdf_dev_reset_color`.
-    pub fn pdf_dev_reset_color(&mut self, force: i32) {
+    pub fn pdf_dev_reset_color(&mut self, force: i32) -> Result<()> {
         let (sc, fc) = self.pdf_color_get_current();
-        self.pdf_dev_set_color(&sc, 0, force);
-        self.pdf_dev_set_color(&fc, 0x20, force);
+        self.pdf_dev_set_color(&sc, 0, force)?;
+        self.pdf_dev_set_color(&fc, 0x20, force)?;
+        Ok(())
     }
 
     /// `pdf_dev_bop`.
-    pub fn pdf_dev_bop(&mut self, m: &PdfTmatrix) {
-        self.pdf_dev_graphics_mode();
+    pub fn pdf_dev_bop(&mut self, m: &PdfTmatrix) -> Result<()> {
+        self.pdf_dev_graphics_mode()?;
         self.dev.pdev.text_state.force_reset = false;
-        self.pdf_dev_gsave();
-        self.pdf_dev_concat(m);
+        self.pdf_dev_gsave()?;
+        self.pdf_dev_concat(m)?;
         self.pdf_dev_reset_fonts(1);
-        self.pdf_dev_reset_color(0);
-        self.pdf_dev_reset_xgstate(0);
+        self.pdf_dev_reset_color(0)?;
+        self.pdf_dev_reset_xgstate(0)?;
+        Ok(())
     }
 
     /// `pdf_dev_eop`.
-    pub fn pdf_dev_eop(&mut self) {
-        self.pdf_dev_graphics_mode();
+    pub fn pdf_dev_eop(&mut self) -> Result<()> {
+        self.pdf_dev_graphics_mode()?;
         let depth = self.pdf_dev_current_depth();
         if depth != 1 {
-            self.pdf_dev_grestore_to(0);
+            self.pdf_dev_grestore_to(0)?;
         } else {
-            self.pdf_dev_grestore();
+            self.pdf_dev_grestore()?;
         }
+        Ok(())
     }
 
     /// `pdf_dev_locate_font`.
-    pub fn pdf_dev_locate_font(&mut self, font_name: &[u8], ptsize: Spt) -> i32 {
-        assert!(
-            ptsize != 0,
-            "pdf_dev_locate_font() called with the zero ptsize."
-        );
+    pub fn pdf_dev_locate_font(&mut self, font_name: &[u8], ptsize: Spt) -> Result<i32> {
+        if ptsize == 0 {
+            fatal!("pdf_dev_locate_font() called with the zero ptsize.");
+        }
         if let Some(i) = self
             .dev
             .pdev
@@ -811,25 +849,25 @@ impl Dpx {
             .iter()
             .position(|f| f.tex_name == font_name && f.sptsize == ptsize)
         {
-            return i as i32;
+            return Ok(i as i32);
         }
         let mrec = self.pdf_lookup_fontmap_record(font_name);
         let scale = f64::from(ptsize) * self.dev.pdev.unit.dvi2pts;
         let mut font_id = self.pdf_font_findresource(font_name, scale);
         if font_id < 0 {
-            font_id = self.pdf_font_load_font(font_name, scale, mrec.as_ref());
+            font_id = self.pdf_font_load_font(font_name, scale, mrec.as_ref())?;
             if font_id < 0 {
-                return -1;
+                return Ok(-1);
             }
         }
-        let short_name = self.pdf_font_resource_name(font_id);
-        let format = match self.pdf_get_font_subtype(font_id) {
+        let short_name = self.pdf_font_resource_name(font_id)?;
+        let format = match self.pdf_get_font_subtype(font_id)? {
             crate::pdffont::PDF_FONT_FONTTYPE_TYPE3 => PDF_FONTTYPE_BITMAP,
             crate::pdffont::PDF_FONT_FONTTYPE_TYPE0 => PDF_FONTTYPE_COMPOSITE,
             _ => PDF_FONTTYPE_SIMPLE,
         };
-        let wmode = self.pdf_get_font_wmode(font_id);
-        let enc_id = self.pdf_get_font_encoding(font_id);
+        let wmode = self.pdf_get_font_wmode(font_id)?;
+        let enc_id = self.pdf_get_font_encoding(font_id)?;
         let (extend, slant, bold) = match &mrec {
             Some(m) => (m.opt.extend, m.opt.slant, m.opt.bold),
             None => (1.0, 0.0, 0.0),
@@ -849,7 +887,7 @@ impl Dpx {
             slant,
             bold,
         });
-        (self.dev.pdev.fonts.len() - 1) as i32
+        Ok((self.dev.pdev.fonts.len() - 1) as i32)
     }
 
     fn dev_sprint_line(&self, b: &mut Buf, width: Spt, p0x: Spt, p0y: Spt, p1x: Spt, p1y: Spt) {
@@ -871,8 +909,14 @@ impl Dpx {
     }
 
     /// `pdf_dev_set_rule`.
-    pub fn pdf_dev_set_rule(&mut self, xpos: Spt, ypos: Spt, width: Spt, height: Spt) {
-        self.pdf_dev_graphics_mode();
+    pub fn pdf_dev_set_rule(
+        &mut self,
+        xpos: Spt,
+        ypos: Spt,
+        width: Spt,
+        height: Spt,
+    ) -> Result<()> {
+        self.pdf_dev_graphics_mode()?;
         let mut b = Buf::new();
         b.extend(b" q ");
         let width_in_bp = f64::from(width.min(height)) * self.dev.pdev.unit.dvi2pts;
@@ -906,7 +950,8 @@ impl Dpx {
             );
         }
         b.extend(b" Q");
-        self.dev_out(&b.0);
+        self.dev_out(&b.0)?;
+        Ok(())
     }
 
     /// `pdf_dev_set_rect`: a box in device space.
@@ -1049,7 +1094,7 @@ impl Dpx {
         ti: &mut TransformInfo,
         ref_x: f64,
         ref_y: f64,
-    ) -> (i32, PdfRect) {
+    ) -> Result<(i32, PdfRect)> {
         let mut m = ti.matrix;
         m.e += ref_x;
         m.f += ref_y;
@@ -1061,38 +1106,38 @@ impl Dpx {
             m.c = m.d;
             m.d = tmp;
         }
-        self.pdf_dev_graphics_mode();
-        self.pdf_dev_gsave();
-        let (_, m1, r) = self.pdf_ximage_scale_image(id, ti);
+        self.pdf_dev_graphics_mode()?;
+        self.pdf_dev_gsave()?;
+        let (_, m1, r) = self.pdf_ximage_scale_image(id, ti)?;
         crate::pdfdraw::pdf_concatmatrix(&mut m, &m1);
-        self.pdf_dev_concat(&m);
+        self.pdf_dev_concat(&m)?;
         if ti.flags & INFO_DO_CLIP != 0 {
-            self.pdf_dev_rectclip(r.llx, r.lly, r.urx - r.llx, r.ury - r.lly);
+            self.pdf_dev_rectclip(r.llx, r.lly, r.urx - r.llx, r.ury - r.lly)?;
         }
-        let res_name = self.pdf_ximage_get_resname(id);
+        let res_name = self.pdf_ximage_get_resname(id)?;
         let mut b = Buf::new();
         b.extend(b" /");
         b.extend(&res_name);
         b.extend(b" Do");
-        self.dev_out(&b.0);
+        self.dev_out(&b.0)?;
         let rect = {
             let (x, y) = (self.bpt2spt(r.llx), self.bpt2spt(r.lly));
             let (w, h) = (self.bpt2spt(r.urx - r.llx), self.bpt2spt(r.ury - r.lly));
             self.pdf_dev_set_rect(x, y, w, h, 0)
         };
-        self.pdf_dev_grestore();
-        let r = self.pdf_ximage_get_reference(id);
-        self.pdf_doc_add_page_resource(b"XObject", &res_name, r);
-        (0, rect)
+        self.pdf_dev_grestore()?;
+        let r = self.pdf_ximage_get_reference(id)?;
+        self.pdf_doc_add_page_resource(b"XObject", &res_name, r)?;
+        Ok((0, rect))
     }
 
     /// `pdf_dev_begin_actualtext`.
-    pub fn pdf_dev_begin_actualtext(&mut self, unicodes: &[u16]) {
+    pub fn pdf_dev_begin_actualtext(&mut self, unicodes: &[u16]) -> Result<()> {
         let pdf_doc_enc = !unicodes.iter().any(|&u| u > 0xff || (u > 0x7f && u < 0xa1));
-        self.pdf_dev_graphics_mode();
-        self.dev_out(b"\n/Span << /ActualText (");
+        self.pdf_dev_graphics_mode()?;
+        self.dev_out(b"\n/Span << /ActualText (")?;
         if !pdf_doc_enc {
-            self.dev_out(b"\xFE\xFF");
+            self.dev_out(b"\xFE\xFF")?;
         }
         for &u in unicodes {
             let s = [(u >> 8) as u8, u as u8];
@@ -1110,20 +1155,23 @@ impl Dpx {
                     b.push(c);
                 }
             }
-            self.dev_out(&b.0);
+            self.dev_out(&b.0)?;
         }
-        self.dev_out(b") >> BDC");
+        self.dev_out(b") >> BDC")?;
+        Ok(())
     }
 
     /// `pdf_dev_end_actualtext`.
-    pub fn pdf_dev_end_actualtext(&mut self) {
-        self.pdf_dev_graphics_mode();
-        self.dev_out(b" EMC");
+    pub fn pdf_dev_end_actualtext(&mut self) -> Result<()> {
+        self.pdf_dev_graphics_mode()?;
+        self.dev_out(b" EMC")?;
+        Ok(())
     }
 
     /// `graphics_mode`.
-    pub fn graphics_mode(&mut self) {
-        self.pdf_dev_graphics_mode();
+    pub fn graphics_mode(&mut self) -> Result<()> {
+        self.pdf_dev_graphics_mode()?;
+        Ok(())
     }
 
     /// `dev_unit_dviunit`.
@@ -1143,14 +1191,14 @@ impl Dpx {
     }
 
     /// `pdf_dev_font_minbytes`.
-    pub fn pdf_dev_font_minbytes(&mut self, font_id: i32) -> i32 {
+    pub fn pdf_dev_font_minbytes(&mut self, font_id: i32) -> Result<i32> {
         match self.dev.pdev.fonts.get(font_id as usize) {
             Some(f) if f.format == PDF_FONTTYPE_COMPOSITE => {
                 let enc = f.enc_id;
-                let cmap = self.CMap_cache_get(enc);
+                let cmap = self.CMap_cache_get(enc)?;
                 cmap.CMap_get_profile(crate::cmap::CMAP_PROF_TYPE_INBYTES_MIN)
             }
-            _ => 1,
+            _ => Ok(1),
         }
     }
 }

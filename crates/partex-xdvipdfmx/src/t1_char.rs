@@ -396,7 +396,7 @@ impl State {
         self.ps_arg_stack[self.ps_stack_top as usize]
     }
     /// `do_operator1` (static).
-    fn do_operator1(&mut self, cd: &mut T1Chardesc, data: &[u8], p: &mut usize) {
+    fn do_operator1(&mut self, cd: &mut T1Chardesc, data: &[u8], p: &mut usize) -> Result<()> {
         let mut op = i32::from(data[*p]);
 
         *p += 1;
@@ -414,7 +414,7 @@ impl State {
             }
             CS_HSBW => {
                 if !self.checkstack(2) {
-                    return;
+                    return Ok(());
                 }
                 cd.sbw.wx = self.pop();
                 cd.sbw.wy = 0.0;
@@ -425,7 +425,7 @@ impl State {
             }
             CS_HSTEM | CS_VSTEM => {
                 if !self.checkstack(2) {
-                    return;
+                    return Ok(());
                 }
                 let top = self.cs_stack_top as usize;
                 let stem_id = add_stem(
@@ -437,7 +437,7 @@ impl State {
                 if stem_id < 0 {
                     warn!("Too many hints...");
                     self.status = CS_PARSE_ERROR;
-                    return;
+                    return Ok(());
                 }
                 // Put stem_id onto the stack...
                 self.push(f64::from(stem_id));
@@ -447,7 +447,7 @@ impl State {
             CS_RMOVETO => {
                 // Reference point is (0, 0) in Type 2 charstring.
                 if !self.checkstack(2) {
-                    return;
+                    return Ok(());
                 }
                 if self.phase < T1_CS_PHASE_PATH {
                     let top = self.cs_stack_top as usize;
@@ -459,7 +459,7 @@ impl State {
             }
             CS_HMOVETO | CS_VMOVETO => {
                 if !self.checkstack(1) {
-                    return;
+                    return Ok(());
                 }
                 let mut argn = 1;
                 if self.phase < T1_CS_PHASE_PATH {
@@ -495,28 +495,28 @@ impl State {
             // above oprators are candidate for first stack-clearing operator
             CS_RLINETO => {
                 if !self.checkstack(2) {
-                    return;
+                    return Ok(());
                 }
                 self.add_path(cd, op, 2);
                 self.cs_stack_top = 0;
             }
             CS_HLINETO | CS_VLINETO => {
                 if !self.checkstack(1) {
-                    return;
+                    return Ok(());
                 }
                 self.add_path(cd, op, 1);
                 self.cs_stack_top = 0;
             }
             CS_RRCURVETO => {
                 if !self.checkstack(6) {
-                    return;
+                    return Ok(());
                 }
                 self.add_path(cd, op, 6);
                 self.cs_stack_top = 0;
             }
             CS_VHCURVETO | CS_HVCURVETO => {
                 if !self.checkstack(4) {
-                    return;
+                    return Ok(());
                 }
                 self.add_path(cd, op, 4);
                 self.cs_stack_top = 0;
@@ -525,7 +525,7 @@ impl State {
             // no output
             CS_RETURN => {}
             CS_CALLSUBR => {
-                error!("Unexpected callsubr.");
+                fatal!("Unexpected callsubr.");
             }
             _ => {
                 // no-op ?
@@ -533,6 +533,7 @@ impl State {
                 self.status = CS_PARSE_ERROR;
             }
         }
+        Ok(())
     }
     /// `do_othersubr0` (static): six control points marked as
     /// `CS_FLEX_CTRL` made a flex path.
@@ -703,19 +704,19 @@ impl State {
         cd.flags |= T1_CS_FLAG_USE_CNTRMASK;
     }
     /// `do_callothersubr` (static).
-    fn do_callothersubr(&mut self, cd: &mut T1Chardesc) {
+    fn do_callothersubr(&mut self, cd: &mut T1Chardesc) -> Result<()> {
         if !self.checkstack(2) {
-            return;
+            return Ok(());
         }
         let subrno = self.pop() as i32;
         let mut argn = self.pop() as i32;
 
         if !self.checkstack(argn) {
-            return;
+            return Ok(());
         }
         if self.ps_stack_top + argn > PS_ARG_STACK_MAX as i32 {
             self.status = CS_PARSE_ERROR;
-            return;
+            return Ok(());
         }
         while argn > 0 {
             argn -= 1;
@@ -731,17 +732,18 @@ impl State {
             3 => self.do_othersubr3(cd),
             12 => self.do_othersubr12(),
             13 => self.do_othersubr13(cd),
-            _ => error!("Unknown othersubr #{}.", subrno),
+            _ => fatal!("Unknown othersubr #{}.", subrno),
         }
+        Ok(())
     }
     /// `do_operator2` (static).
-    fn do_operator2(&mut self, cd: &mut T1Chardesc, data: &[u8], p: &mut usize) {
+    fn do_operator2(&mut self, cd: &mut T1Chardesc, data: &[u8], p: &mut usize) -> Result<()> {
         *p += 1;
 
         // SRC_NEED(endptr, *data + 1)
         if data.len() < *p + 1 {
             self.status = CS_PARSE_ERROR;
-            return;
+            return Ok(());
         }
 
         let op = i32::from(data[*p]);
@@ -750,7 +752,7 @@ impl State {
         match op {
             CS_SBW => {
                 if !self.checkstack(4) {
-                    return;
+                    return Ok(());
                 }
                 cd.sbw.wy = self.pop();
                 cd.sbw.wx = self.pop();
@@ -763,7 +765,7 @@ impl State {
                 //  The counter control can be used for hstem3 and vstem3
                 //  operator if LanguageGroup is not equal to 1.
                 if !self.checkstack(6) {
-                    return;
+                    return Ok(());
                 }
                 for i in (0..=2usize).rev() {
                     let top = self.cs_stack_top as usize;
@@ -776,7 +778,7 @@ impl State {
                     if stem_id < 0 {
                         warn!("Too many hints...");
                         self.status = CS_PARSE_ERROR;
-                        return;
+                        return Ok(());
                     }
                     // Put stem_id onto the stack...
                     self.push(f64::from(stem_id));
@@ -787,7 +789,7 @@ impl State {
             }
             CS_SETCURRENTPOINT => {
                 if !self.checkstack(2) {
-                    return;
+                    return Ok(());
                 }
                 // noop
                 self.cs_stack_top = 0;
@@ -798,12 +800,12 @@ impl State {
                 // BuildChar operand stack.
                 if self.ps_stack_top < 1 {
                     self.status = CS_PARSE_ERROR;
-                    return;
+                    return Ok(());
                 }
                 // LIMITCHECK(1)
                 if self.cs_stack_top + 1 > CS_ARG_STACK_MAX as i32 {
                     self.status = CS_STACK_ERROR;
-                    return;
+                    return Ok(());
                 }
                 let v = self.ps_pop();
                 self.push(v);
@@ -814,18 +816,18 @@ impl State {
             CS_DIV => {
                 // TODO: check overflow
                 if !self.checkstack(2) {
-                    return;
+                    return Ok(());
                 }
                 let top = self.cs_stack_top as usize;
                 self.cs_arg_stack[top - 2] /= self.cs_arg_stack[top - 1];
                 self.cs_stack_top -= 1;
             }
             CS_CALLOTHERSUBR => {
-                self.do_callothersubr(cd);
+                self.do_callothersubr(cd)?;
             }
             CS_SEAC => {
                 if !self.checkstack(5) {
-                    return;
+                    return Ok(());
                 }
                 cd.flags |= T1_CS_FLAG_USE_SEAC;
                 cd.seac.achar = self.pop() as i32 as Card8;
@@ -844,9 +846,16 @@ impl State {
                 self.status = CS_PARSE_ERROR;
             }
         }
+        Ok(())
     }
     /// `put_numbers` (static): Type 2 5-bytes encoding used.
-    fn put_numbers(&mut self, argv: &[f64], argn: i32, dst: &mut [u8], dp: &mut usize) {
+    fn put_numbers(
+        &mut self,
+        argv: &[f64],
+        argn: i32,
+        dst: &mut [u8],
+        dp: &mut usize,
+    ) -> Result<()> {
         let limit = dst.len();
         for i in 0..argn.max(0) as usize {
             let value = argv[i];
@@ -856,12 +865,12 @@ impl State {
                 // This number cannot be represented as a single operand.
                 // We must use `a b mul ...' or `a c div' to represent large
                 // values.
-                error!("Argument value too large. (This is bug)");
+                fatal!("Argument value too large. (This is bug)");
             } else if libm::fabs(value - f64::from(ivalue)) > 3.0e-5 {
                 // 16.16-bit signed fixed value
                 if limit < *dp + 5 {
                     self.status = CS_BUFFER_ERROR;
-                    return;
+                    return Ok(());
                 }
                 dst[*dp] = 255;
                 ivalue = libm::floor(value) as i32; // mantissa
@@ -875,14 +884,14 @@ impl State {
             } else if (-107..=107).contains(&ivalue) {
                 if limit < *dp + 1 {
                     self.status = CS_BUFFER_ERROR;
-                    return;
+                    return Ok(());
                 }
                 dst[*dp] = (ivalue + 139) as u8;
                 *dp += 1;
             } else if (108..=1131).contains(&ivalue) {
                 if limit < *dp + 2 {
                     self.status = CS_BUFFER_ERROR;
-                    return;
+                    return Ok(());
                 }
                 ivalue = 0xf700 + ivalue - 108;
                 dst[*dp] = ((ivalue >> 8) & 0xff) as u8;
@@ -891,7 +900,7 @@ impl State {
             } else if (-1131..=-108).contains(&ivalue) {
                 if limit < *dp + 2 {
                     self.status = CS_BUFFER_ERROR;
-                    return;
+                    return Ok(());
                 }
                 ivalue = 0xfb00 - ivalue - 108;
                 dst[*dp] = ((ivalue >> 8) & 0xff) as u8;
@@ -901,7 +910,7 @@ impl State {
                 // shortint
                 if limit < *dp + 3 {
                     self.status = CS_BUFFER_ERROR;
-                    return;
+                    return Ok(());
                 }
                 dst[*dp] = 28;
                 dst[*dp + 1] = ((ivalue >> 8) & 0xff) as u8;
@@ -909,9 +918,10 @@ impl State {
                 *dp += 3;
             } else {
                 // Shouldn't come here
-                error!("Unexpected error.");
+                fatal!("Unexpected error.");
             }
         }
+        Ok(())
     }
     /// `get_integer` (static).
     fn get_integer(&mut self, data: &[u8], p: &mut usize) {
@@ -998,9 +1008,9 @@ impl State {
         data: &[u8],
         p: &mut usize,
         subrs: Option<&CffIndex>,
-    ) {
+    ) -> Result<()> {
         if self.nest > CS_SUBR_NEST_MAX {
-            error!("Subroutine nested too deeply.");
+            fatal!("Subroutine nested too deeply.");
         }
 
         self.nest += 1;
@@ -1016,21 +1026,21 @@ impl State {
                 } else {
                     let idx = self.pop() as i32;
                     let Some(subrs) = subrs.filter(|s| idx < i32::from(s.count)) else {
-                        error!("Invalid Subr#.");
+                        fatal!("Invalid Subr#.");
                     };
                     let idx = idx as usize;
                     let start = subrs.offset[idx] as usize - 1;
                     let len = (subrs.offset[idx + 1] - subrs.offset[idx]) as usize;
                     let subr = &subrs.data[start..start + len];
                     let mut sp = 0;
-                    self.t1char_build_charpath(cd, subr, &mut sp, Some(subrs));
+                    self.t1char_build_charpath(cd, subr, &mut sp, Some(subrs))?;
                     *p += 1;
                 }
             } else if b0 == CS_ESCAPE {
-                self.do_operator2(cd, data, p);
+                self.do_operator2(cd, data, p)?;
             } else if b0 < 32 && b0 != 28 {
                 // 19, 20 need mask
-                self.do_operator1(cd, data, p);
+                self.do_operator1(cd, data, p)?;
             } else if (b0 <= 22 && b0 >= 27) || b0 == 31 {
                 // reserved
                 self.status = CS_PARSE_ERROR; // not an error ?
@@ -1048,18 +1058,20 @@ impl State {
             }
         } else if self.status < CS_PARSE_OK {
             // error
-            error!(
+            fatal!(
                 "Parsing charstring failed: (status={}, stack={})",
-                self.status, self.cs_stack_top
+                self.status,
+                self.cs_stack_top
             );
         }
 
         self.nest -= 1;
+        Ok(())
     }
     /// `do_postproc` (static): calculate BoundingBox and compress path.
-    fn do_postproc(&mut self, cd: &mut T1Chardesc) {
+    fn do_postproc(&mut self, cd: &mut T1Chardesc) -> Result<()> {
         if cd.charpath.is_empty() {
-            return;
+            return Ok(());
         }
 
         // Set dummy large value.
@@ -1233,7 +1245,7 @@ impl State {
                     // noop
                 }
                 _ => {
-                    error!("Unexpected Type 2 charstring command {}.", cur.type_);
+                    fatal!("Unexpected Type 2 charstring command {}.", cur.type_);
                 }
             }
             if !merged {
@@ -1251,6 +1263,7 @@ impl State {
             cd.bbox.lly = cd.sbw.wy;
             cd.bbox.ury = cd.sbw.wy;
         }
+        Ok(())
     }
     /// `t1char_encode_charpath` (static): the charpath as a Type 2
     /// charstring; bytes written to `dst` (C's `dst` .. `endptr`).
@@ -1260,20 +1273,22 @@ impl State {
         default_width: f64,
         nominal_width: f64,
         dst: &mut [u8],
-    ) -> i32 {
+    ) -> Result<i32> {
         let endptr = dst.len();
         let mut dp: usize = 0;
         // CHECK_BUFFER(n)
-        let check_buffer = |dp: usize, n: usize| {
+        let check_buffer = |dp: usize, n: usize| -> Result<()> {
             if dp + n >= endptr {
-                error!("Buffer overflow.");
+                fatal!("Buffer overflow.");
             }
+            Ok(())
         };
         // CHECK_STATUS()
-        fn check_status(st: &State) {
+        fn check_status(st: &State) -> Result<()> {
             if st.status != CS_PARSE_OK {
-                error!("Charstring encoder error: {}", st.status);
+                fatal!("Charstring encoder error: {}", st.status);
             }
+            Ok(())
         }
         let use_hintmask = (cd.flags & T1_CS_FLAG_USE_HINTMASK) != 0;
         let mut curr: usize = 0;
@@ -1283,8 +1298,8 @@ impl State {
         // Advance Width
         if cd.sbw.wx != default_width {
             let wx = [cd.sbw.wx - nominal_width];
-            self.put_numbers(&wx, 1, dst, &mut dp);
-            check_status(self);
+            self.put_numbers(&wx, 1, dst, &mut dp)?;
+            check_status(self)?;
         }
         // Hint Declaration
         {
@@ -1302,11 +1317,11 @@ impl State {
                     cd.stems[i].pos - (cd.stems[i - 1].pos + cd.stems[i - 1].del)
                 };
                 stem[1] = cd.stems[i].del;
-                self.put_numbers(&stem, 2, dst, &mut dp);
-                check_status(self);
+                self.put_numbers(&stem, 2, dst, &mut dp)?;
+                check_status(self)?;
                 reset = false;
                 if 2 * num_hstems > CS_ARG_STACK_MAX as i32 - 3 {
-                    check_buffer(dp, 1);
+                    check_buffer(dp, 1)?;
                     dst[dp] = (if use_hintmask { CS_HSTEMHM } else { CS_HSTEM }) as u8;
                     dp += 1;
                     reset = true;
@@ -1314,7 +1329,7 @@ impl State {
                 i += 1;
             }
             if !reset {
-                check_buffer(dp, 1);
+                check_buffer(dp, 1)?;
                 dst[dp] = (if use_hintmask { CS_HSTEMHM } else { CS_HSTEM }) as u8;
                 dp += 1;
             }
@@ -1328,18 +1343,18 @@ impl State {
                         cd.stems[i].pos - (cd.stems[i - 1].pos + cd.stems[i - 1].del)
                     };
                     stem[1] = cd.stems[i].del;
-                    self.put_numbers(&stem, 2, dst, &mut dp);
-                    check_status(self);
+                    self.put_numbers(&stem, 2, dst, &mut dp)?;
+                    check_status(self)?;
                     reset = false;
                     if 2 * num_vstems > CS_ARG_STACK_MAX as i32 - 3 {
-                        check_buffer(dp, 1);
+                        check_buffer(dp, 1)?;
                         dst[dp] = (if use_hintmask { CS_VSTEMHM } else { CS_VSTEM }) as u8;
                         dp += 1;
                         reset = true;
                     }
                 }
                 if !reset {
-                    check_buffer(dp, 1);
+                    check_buffer(dp, 1)?;
                     if use_hintmask || (cd.flags & T1_CS_FLAG_USE_CNTRMASK) != 0 {
                         // The vstem hint operator can be ommited if hstem and
                         // vstem hints are both declared at the beginning of a
@@ -1371,7 +1386,7 @@ impl State {
                         curr += 1;
                     }
                     if use_hintmask {
-                        check_buffer(dp, nmask + 1);
+                        check_buffer(dp, nmask + 1)?;
                         dst[dp] = CS_HINTMASK as u8;
                         dp += 1;
                         dst[dp..dp + nmask].copy_from_slice(&hintmask[..nmask]);
@@ -1386,7 +1401,7 @@ impl State {
                         assert!(stem_idx < cd.num_stems);
                         cntrmask[(stem_idx / 8) as usize] |= (1i32 << (7 - (stem_idx % 8))) as u8;
                     }
-                    check_buffer(dp, nmask + 1);
+                    check_buffer(dp, nmask + 1)?;
                     dst[dp] = CS_CNTRMASK as u8;
                     dp += 1;
                     dst[dp..dp + nmask].copy_from_slice(&cntrmask[..nmask]);
@@ -1396,25 +1411,25 @@ impl State {
                 CS_RMOVETO | CS_HMOVETO | CS_VMOVETO | CS_RLINETO | CS_HLINETO | CS_VLINETO
                 | CS_RRCURVETO | CS_HVCURVETO | CS_VHCURVETO | CS_RLINECURVE | CS_RCURVELINE => {
                     let c = &cd.charpath[curr];
-                    self.put_numbers(&c.args, c.num_args, dst, &mut dp);
-                    check_status(self);
-                    check_buffer(dp, 1);
+                    self.put_numbers(&c.args, c.num_args, dst, &mut dp)?;
+                    check_status(self)?;
+                    check_buffer(dp, 1)?;
                     dst[dp] = c.type_ as u8;
                     dp += 1;
                     curr += 1;
                 }
                 CS_FLEX | CS_HFLEX | CS_HFLEX1 => {
                     let c = &cd.charpath[curr];
-                    self.put_numbers(&c.args, c.num_args, dst, &mut dp);
-                    check_status(self);
-                    check_buffer(dp, 2);
+                    self.put_numbers(&c.args, c.num_args, dst, &mut dp)?;
+                    check_status(self)?;
+                    check_buffer(dp, 2)?;
                     dst[dp] = CS_ESCAPE as u8;
                     dst[dp + 1] = c.type_ as u8;
                     dp += 2;
                     curr += 1;
                 }
                 t => {
-                    error!("Unknown Type 2 charstring command: {}", t);
+                    fatal!("Unknown Type 2 charstring command: {}", t);
                 }
             }
         }
@@ -1427,18 +1442,18 @@ impl State {
                 f64::from(cd.seac.bchar),
                 f64::from(cd.seac.achar),
             ];
-            self.put_numbers(&seac, 4, dst, &mut dp);
-            check_status(self);
-            check_buffer(dp, 2);
+            self.put_numbers(&seac, 4, dst, &mut dp)?;
+            check_status(self)?;
+            check_buffer(dp, 2)?;
             warn!(
                 "Obsolete four arguments of \"endchar\" will be used for Type 1 \"seac\" operator."
             );
         }
-        check_buffer(dp, 1);
+        check_buffer(dp, 1)?;
         dst[dp] = CS_ENDCHAR as u8;
         dp += 1;
 
-        dp as i32
+        Ok(dp as i32)
     }
 }
 
@@ -1471,7 +1486,7 @@ impl Dpx {
         src: &[u8],
         subrs: Option<&CffIndex>,
         ginfo: Option<&mut T1Ginfo>,
-    ) -> i32 {
+    ) -> Result<i32> {
         let st = &mut self.t1_char;
         let mut t1char = T1Chardesc::default();
         let cd = &mut t1char;
@@ -1480,18 +1495,18 @@ impl Dpx {
         st.reset_state();
         st.cs_stack_top = 0;
         let mut p = 0;
-        st.t1char_build_charpath(cd, src, &mut p, subrs);
+        st.t1char_build_charpath(cd, src, &mut p, subrs)?;
         if st.cs_stack_top != 0 || st.ps_stack_top != 0 {
             warn!(
                 "Stack not empty. ({}, {})",
                 st.cs_stack_top, st.ps_stack_top
             );
         }
-        st.do_postproc(cd);
+        st.do_postproc(cd)?;
         set_ginfo(cd, ginfo);
         release_charpath(cd);
 
-        0
+        Ok(0)
     }
     /// `t1char_convert_charstring`: Type 1 `src` as Type 2 into `dst`
     /// (`dstlen` = `dst.len()`); the bytes written.
@@ -1503,7 +1518,7 @@ impl Dpx {
         default_width: f64,
         nominal_width: f64,
         ginfo: Option<&mut T1Ginfo>,
-    ) -> i32 {
+    ) -> Result<i32> {
         let st = &mut self.t1_char;
         let mut t1char = T1Chardesc::default();
         let cd = &mut t1char;
@@ -1512,22 +1527,22 @@ impl Dpx {
         st.reset_state();
         st.cs_stack_top = 0;
         let mut p = 0;
-        st.t1char_build_charpath(cd, src, &mut p, subrs);
+        st.t1char_build_charpath(cd, src, &mut p, subrs)?;
         if st.cs_stack_top != 0 || st.ps_stack_top != 0 {
             warn!(
                 "Stack not empty. ({}, {})",
                 st.cs_stack_top, st.ps_stack_top
             );
         }
-        st.do_postproc(cd);
+        st.do_postproc(cd)?;
         sort_stems(cd);
 
-        let length = st.t1char_encode_charpath(cd, default_width, nominal_width, dst);
+        let length = st.t1char_encode_charpath(cd, default_width, nominal_width, dst)?;
 
         set_ginfo(cd, ginfo);
         release_charpath(cd);
 
-        length
+        Ok(length)
     }
 }
 
@@ -1542,11 +1557,14 @@ mod tests {
         st.reset_state();
         st.cs_stack_top = 0;
         let mut p = 0;
-        st.t1char_build_charpath(&mut cd, src, &mut p, None);
-        st.do_postproc(&mut cd);
+        st.t1char_build_charpath(&mut cd, src, &mut p, None)
+            .unwrap();
+        st.do_postproc(&mut cd).unwrap();
         sort_stems(&mut cd);
         let mut dst = [0u8; 256];
-        let n = st.t1char_encode_charpath(&mut cd, dw, nw, &mut dst);
+        let n = st
+            .t1char_encode_charpath(&mut cd, dw, nw, &mut dst)
+            .unwrap();
         (dst[..n as usize].to_vec(), st, cd)
     }
 
@@ -1579,7 +1597,8 @@ mod tests {
         let mut st = State::default();
         let mut dst = [0u8; 16];
         let mut dp = 0;
-        st.put_numbers(&[0.5, -1131.0, 2000.0], 3, &mut dst, &mut dp);
+        st.put_numbers(&[0.5, -1131.0, 2000.0], 3, &mut dst, &mut dp)
+            .unwrap();
         assert_eq!(&dst[..dp], [255, 0, 0, 0x80, 0, 0xfe, 0xff, 28, 0x07, 0xd0]);
     }
 }
