@@ -111,6 +111,8 @@ fn step_name(p: &Node, after: After, page: &Builder) -> u32 {
     match p {
         Node::Box(_) | Node::Rule { .. } if started => BOX,
         Node::Box(_) | Node::Rule { .. } => contents,
+        // (`XeTeX`'s picture: §1002's totals, without the contents)
+        Node::Whatsit(w) if matches!(**w, partex_engine::node::Whatsit::Pic(_)) => HEIGHTS,
         Node::Whatsit(_) | Node::Mark(_) => CONTRIBUTE,
         Node::Glue { .. } | Node::Leaders(_) | Node::Kern { .. } | Node::Penalty(_) if !started => {
             contents

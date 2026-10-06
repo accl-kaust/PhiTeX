@@ -472,6 +472,74 @@ const CASES: &[Case] = &[
             &[MAKEINDEX, "-s", "missing.ist", "mkidx"],
         ],
     },
+    // XeTeX: Unicode input, native fonts, inter-character tokens,
+    // interword space shaping, the font queries, XDV output
+    Case {
+        name: "xetex_plain",
+        oracle: "xetex",
+        inputs: &["xetex-plain.tex"],
+        runs: &[
+            &[
+                "-ini",
+                "-etex",
+                "-interaction=nonstopmode",
+                "-output-comment=partex",
+                "-no-pdf",
+                "xetex-plain",
+            ],
+            &[
+                "-ini",
+                "-etex",
+                "-interaction=nonstopmode",
+                "-jobname=xetex-plain-pdf",
+                "xetex-plain",
+            ],
+        ],
+    },
+    // xelatex, its format made here: fontspec, hyphenation of native
+    // words, hyperref, polyglossia's right-to-left scripts, beamer and
+    // TikZ through xdvipdfmx, graphicx's pictures (PNG, JPEG, BMP, PDF
+    // pages); each run twice (the second reads the aux)
+    Case {
+        name: "xelatex",
+        oracle: "xetex",
+        inputs: &[
+            "xelatex-fonts.tex",
+            "xelatex-lang.tex",
+            "xelatex-beamer.tex",
+            "xelatex-pics.tex",
+            "xpic-plain.png",
+            "xpic-dpi300.png",
+            "xpic-jfif200.jpg",
+            "xpic-exif300.jpg",
+            "xpic-big24.bmp",
+            "xpic-rle8.bmp",
+            "xpic-inherit.pdf",
+            "xpic-three.pdf",
+        ],
+        runs: &[
+            &[
+                "-ini",
+                "-etex",
+                "-interaction=nonstopmode",
+                "-jobname=xelatex",
+                "xelatex.ini",
+            ],
+            &["-fmt=xelatex", "-interaction=nonstopmode", "xelatex-fonts"],
+            &["-fmt=xelatex", "-interaction=nonstopmode", "xelatex-fonts"],
+            &["-fmt=xelatex", "-interaction=nonstopmode", "xelatex-lang"],
+            &["-fmt=xelatex", "-interaction=nonstopmode", "xelatex-beamer"],
+            &["-fmt=xelatex", "-interaction=nonstopmode", "xelatex-pics"],
+            &["-fmt=xelatex", "-interaction=nonstopmode", "xelatex-pics"],
+            &[
+                "-fmt=xelatex",
+                "-interaction=nonstopmode",
+                "-no-pdf",
+                "-jobname=xelatex-fonts-xdv",
+                "xelatex-fonts",
+            ],
+        ],
+    },
 ];
 
 /// A job built by `partex -watch`, with edits `(file, marker, replacement)`
@@ -2339,8 +2407,15 @@ fn run_case(root: &Path, partex: &Path, case: &Case) -> Result<Vec<String>> {
             exec(cmd, &p, &args[1..], &term)?;
             continue;
         }
-        exec(Command::new(case.oracle), &o, args, &term)?;
+        let mut oracle = Command::new(case.oracle);
         let mut cmd = tex_compat(partex);
+        if case.oracle == "xetex" {
+            // (TeX Live's fonts only, on both sides: DESIGN 4.7)
+            let fonts = root.join("scripts/xetex/fonts.conf");
+            oracle.env("FONTCONFIG_FILE", &fonts);
+            cmd.env("FONTCONFIG_FILE", &fonts).env("PARTEX_XETEX", "1");
+        }
+        exec(oracle, &o, args, &term)?;
         cmd.arg(format!("-engine={}", case.oracle));
         exec(cmd, &p, args, &term)?;
     }

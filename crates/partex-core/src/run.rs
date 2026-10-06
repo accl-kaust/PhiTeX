@@ -481,7 +481,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                 let n = usize::try_from(self.param_ptr).unwrap_or(0);
                 self.param_stack[..n] == other.param_stack[..n]
             };
-        jvecs && flats && self.eqtb_obj == other.eqtb_obj
+        jvecs && flats && self.eqtb_obj.iter().eq(other.eqtb_obj.iter())
     }
 
     /// The `JVec`s and `Flat`s thawed by rebasing `old`'s running vectors
@@ -489,6 +489,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
     /// thawed anew).
     fn thaw_vectors_from(&mut self, old: &mut Self) {
         self.eqtb.thaw_from(&mut old.eqtb);
+        self.eqtb_obj.thaw_from(&mut old.eqtb_obj);
         self.hash.thaw_from(&mut old.hash);
         self.save_stack.thaw_from(&mut old.save_stack);
         self.str_pool.thaw_from(&mut old.str_pool);
@@ -509,10 +510,12 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         let t1 = clock();
         if from {
             self.eqtb.thaw_from(&mut old.eqtb);
+            self.eqtb_obj.thaw_from(&mut old.eqtb_obj);
             self.hash.thaw_from(&mut old.hash);
             self.save_stack.thaw_from(&mut old.save_stack);
         }
         self.eqtb.thaw();
+        self.eqtb_obj.thaw();
         self.hash.thaw();
         self.save_stack.thaw();
         let t2 = clock();
@@ -531,6 +534,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
 
     pub(crate) fn thaw(&mut self) {
         self.eqtb.thaw();
+        self.eqtb_obj.thaw();
         self.hash.thaw();
         self.save_stack.thaw();
         self.str_pool.thaw();
@@ -559,6 +563,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
     /// Make the running state the base the next clones share.
     pub(crate) fn commit(&mut self) {
         self.eqtb.commit();
+        self.eqtb_obj.commit();
         self.hash.commit();
         self.save_stack.commit();
         self.commit_flats();

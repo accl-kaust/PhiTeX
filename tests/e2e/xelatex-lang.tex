@@ -1,0 +1,19 @@
+\documentclass{article}
+\usepackage{polyglossia}
+\setdefaultlanguage{english}
+\setotherlanguages{greek,russian,arabic,hebrew}
+\setmainfont{Libertinus Serif}
+\newfontfamily\arabicfont[Script=Arabic]{Amiri}
+\newfontfamily\hebrewfont[Script=Hebrew]{Libertinus Serif}
+\begin{document}
+English text. \textgreek{Ελληνικά κείμενο με τόνους.} \textrussian{Русский текст, ёжик.}
+
+\begin{arabic}
+مرحبا بالعالم، هذا نص عربي للاختبار ١٢٣.
+\end{arabic}
+
+\begin{hebrew}
+שלום עולם, זה טקסט בעברית.
+\end{hebrew}
+Back to English with fi ligature.
+\end{document}

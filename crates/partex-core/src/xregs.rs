@@ -83,8 +83,9 @@ partex_engine::persist_struct!(Saved {
 #[derive(Clone, Default)]
 pub(crate) struct ExtRegs {
     /// Value and level (the level of a word register; the others keep it
-    /// in the word, as eqtb does).
-    cells: BTreeMap<i32, (MemoryWord, i32)>,
+    /// in the word, as eqtb does), in shared shards (a checkpoint's copy
+    /// shares them: `XeTeX`'s wide code tables hold tens of thousands).
+    cells: crate::cow::ShardMap<(MemoryWord, i32)>,
     /// The objects the token, box and glue registers hold (`objs.rs`).
     objs: BTreeMap<i32, crate::objs::Obj>,
     /// e-TeX's `sa_chain` and `sa_level`: saved at the innermost level
@@ -297,8 +298,7 @@ impl ExtRegs {
 
     fn cell(&mut self, loc: i32) -> &mut (MemoryWord, i32) {
         self.cells
-            .entry(loc)
-            .or_insert_with(|| Self::default_cell(loc))
+            .get_or_insert_with(loc, || Self::default_cell(loc))
     }
 
     pub fn set(&mut self, loc: i32, w: MemoryWord) {
@@ -344,10 +344,13 @@ impl ExtRegs {
     /// All registers that differ from the default (for formats).
     /// The locations of the registers set (to a default value too).
     pub fn locs(&self) -> impl Iterator<Item = i32> + '_ {
-        self.cells.keys().copied()
+        self.cells.keys().into_iter()
     }
 
     pub fn cells(&self) -> impl Iterator<Item = (i32, MemoryWord, i32)> + '_ {
-        self.cells.iter().map(|(&l, &(w, x))| (l, w, x))
+        self.cells
+            .sorted()
+            .into_iter()
+            .map(|(l, &(w, x))| (l, w, x))
     }
 }

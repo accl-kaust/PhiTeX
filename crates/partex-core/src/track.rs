@@ -352,6 +352,8 @@ pub mod scalar {
     /// token lists.
     pub const PREV_CLASS: u16 = 82;
     pub const SPACE_CLASS: u16 = 83;
+    /// `XeTeX`'s default input mode and encoding (`Tex::default_input`).
+    pub const DEFAULT_INPUT: u16 = 84;
     /// The results of the recorded routines, each versioned by its value
     /// (DESIGN 7.17.12's boundary rule: what is live where a routine ends
     /// is its result, `cur_box` for a pack): `hpack`'s box with what

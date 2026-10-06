@@ -34,7 +34,7 @@ use crate::store;
 const MIN_BLOB: usize = 64;
 
 /// What a root holds first (its layout's version).
-const ROOT_TAG: &[u8] = b"partex machine build/11";
+const ROOT_TAG: &[u8] = b"partex machine build/14";
 
 /// The store a watch saves to, and the save running.
 pub struct Keeper {
@@ -389,7 +389,19 @@ fn save(dir: &std::path::Path, key: u128, b: &Build<Machine>, kept: &Mutex<Kept>
     let reused: std::collections::HashMap<u128, u128> =
         chunks.iter().map(|c| (c.fingerprint, c.hash)).collect();
     let knew = known.len();
+    // (the blobs written to the store's new pack as they are made)
+    let pack = match store::PackWriter::new(dir) {
+        Ok(w) => std::rc::Rc::new(std::cell::RefCell::new(w)),
+        Err(e) => {
+            if debug() {
+                eprintln!("partex: store: saving failed: {e}");
+            }
+            return;
+        }
+    };
     let mut s = Saver::merkle_known(MIN_BLOB, have.hashes(), known);
+    let sink = pack.clone();
+    s.merkle_sink(Box::new(move |b| sink.borrow_mut().add(b)));
     s.raw(ROOT_TAG);
     b.initial().tex().host().save_shared(&mut s);
     let Some(runs) = partex_core::machine::save_build(b, &mut s, &|fp| reused.get(&fp).copied())
@@ -401,13 +413,16 @@ fn save(dir: &std::path::Path, key: u128, b: &Build<Machine>, kept: &Mutex<Kept>
     };
     let refs = s.merkle_roots();
     let next_known = s.take_known();
-    let (blobs, root) = s.into_merkle();
+    let (_, root) = s.into_merkle();
     let t_ser = t.elapsed();
+    let Ok(pack) = std::rc::Rc::try_unwrap(pack).map(std::cell::RefCell::into_inner) else {
+        unreachable!("the saver, which held the pack's other handle, is gone");
+    };
     let runs_reused = runs
         .iter()
         .filter(|r| reused.contains_key(&r.fingerprint))
         .count();
-    match store::save(dir, key, &root, &blobs, &refs, &have) {
+    match pack.finish(key, &root, &refs, &have) {
         Ok((now, saved)) => {
             {
                 let mut k = kept
@@ -419,7 +434,7 @@ fn save(dir: &std::path::Path, key: u128, b: &Build<Machine>, kept: &Mutex<Kept>
             }
             if debug() {
                 eprintln!(
-                    "partex: store: saved in {:.1} ms ({:.1} ms to encode, {knew} values known, {runs_reused} of {} runs as they were): {} live blobs, {} new ({:.1} MB, {:.1} MB kept), {:.1} MB moved, root {:.1} MB, {} packs",
+                    "partex: store: saved in {:.1} ms ({:.1} ms to encode and write the new blobs, {knew} values known, {runs_reused} of {} runs as they were): {} live blobs, {} new ({:.1} MB, {:.1} MB kept), {:.1} MB moved, root {:.1} MB, {} packs",
                     t.elapsed().as_secs_f64() * 1e3,
                     t_ser.as_secs_f64() * 1e3,
                     runs.len(),
@@ -915,7 +930,8 @@ impl Watch {
                 w.keeper = keeper;
                 observe(crate::events::Progress::PassStart(1));
                 let t = Instant::now();
-                let changes = w.changes(true, true);
+                let found = w.changes();
+                let changes = w.take(found);
                 let t_changes = t.elapsed();
                 let generation = w.b.generation();
                 let edited = !changes.is_empty();

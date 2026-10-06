@@ -45,6 +45,10 @@ pub struct MachineHost {
     lines: Arc<Mutex<Lines>>,
     /// Output files by id: the name they were opened with.
     opened: BTreeMap<u32, Vec<u8>>,
+    /// `XeTeX`'s PDF files among them: what is written is the XDV, which
+    /// xdvipdfmx makes the PDF of when the files are written out
+    /// (`FileKind::XdvPipe`).
+    piped: BTreeSet<u32>,
     /// What was written to them through the host (the `\write` files).
     written: BTreeMap<u32, WrittenBuf>,
     /// Appended to and read back since the machine last looked.
@@ -301,6 +305,7 @@ impl MachineHost {
             overrides: Arc::default(),
             lines: Arc::default(),
             opened: BTreeMap::new(),
+            piped: BTreeSet::new(),
             written: BTreeMap::new(),
             appended: BTreeMap::new(),
             read_back: Vec::new(),
@@ -452,6 +457,9 @@ impl Host for MachineHost {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(&n);
         self.opened.insert(id, n.clone());
+        if kind == FileKind::XdvPipe {
+            self.piped.insert(id);
+        }
         Some((WriteId(id), n))
     }
 
@@ -812,6 +820,7 @@ impl Linker {
             if splice && self.written.get(name) == Some(&h) {
                 continue;
             }
+            let bytes = host.piped_out(*id, name, bytes);
             let _ = std::fs::write(crate::native::path(name), &bytes);
             bytes_out += bytes.len();
             self.written.insert(name.clone(), h);
@@ -925,6 +934,7 @@ fn link_and_write(fx: &[&[partex_core::effects::Effect]], fin: &Machine) -> i32 
         if let Some(name) = host.opened.get(id)
             && !removed.contains(name)
         {
+            let bytes = host.piped_out(*id, name, bytes.into());
             let _ = std::fs::write(crate::native::path(name), bytes);
         }
     }
@@ -2539,6 +2549,24 @@ pub struct Outcome {
     pub diagnostics: Vec<partex_core::diag::Diagnostic>,
     pub outputs: Vec<(Vec<u8>, usize)>,
     pub reports: Vec<String>,
+    /// The job's own files it read that its last pass still changed, after
+    /// [`PASSES`] passes (empty: it reached its fixpoint).
+    pub unsettled: Vec<String>,
+}
+
+/// A file that differs on disk from what the build read
+/// ([`Watch::changes`]).
+struct Found {
+    key: Vec<u8>,
+    now: Arc<[u8]>,
+    /// Whether it takes a stamp once applied (a file read; not a file
+    /// not found before, nor the clock), and the modification time it
+    /// was read at.
+    stamped: bool,
+    time: Option<std::time::SystemTime>,
+    /// As the watch last wrote it: the job's own file (a pass's `.aux`),
+    /// not an edit.
+    own: bool,
 }
 
 /// A watch session in machine mode (the default for `partex watch`,
@@ -2550,10 +2578,21 @@ pub struct Watch {
     b: Build<Machine>,
     cfg: partex_incr::build::Config,
     coarsen: u32,
-    /// Each input's modification time when last looked at.
+    /// Each input's modification time when its contents were last found
+    /// to be what the build read, or applied (a file the job read and the
+    /// watch wrote since keeps its stamp until a rebuild applies it).
     stamps: BTreeMap<Vec<u8>, Option<std::time::SystemTime>>,
     /// The bytes last written to each output file (by [`quick::hash`]).
     written: BTreeMap<Vec<u8>, u128>,
+    /// The files this watch wrote, by their real paths: the hash of the
+    /// bytes and the modification time they got. A file the job reads
+    /// that is as the watch last wrote it is the job's own (a pass's
+    /// `.aux`), never an edit: it is applied with the next edit, and a
+    /// job that does not settle in [`PASSES`] does not rebuild again for
+    /// it ([`Watch::changed`]).
+    own: BTreeMap<std::path::PathBuf, (u128, Option<std::time::SystemTime>)>,
+    /// The real paths of the files the build read, by key, once found.
+    real: BTreeMap<Vec<u8>, std::path::PathBuf>,
     /// The no-op restart's record being written ([`quick::record`]).
     quick: Option<std::thread::JoinHandle<()>>,
     /// The linked outputs of the last pass: name to bytes.
@@ -2575,7 +2614,21 @@ pub struct Watch {
 }
 
 /// Passes of a watch rebuild at most (as `-converge`).
-const PASSES: usize = 5;
+pub const PASSES: usize = 5;
+
+/// The real path of the file named `name` (a key of a file read, or a
+/// name written or found), if there is one, kept in `real` once found.
+fn real_path(
+    real: &mut BTreeMap<Vec<u8>, std::path::PathBuf>,
+    name: &[u8],
+) -> Option<std::path::PathBuf> {
+    if let Some(r) = real.get(name) {
+        return Some(r.clone());
+    }
+    let r = std::fs::canonicalize(crate::native::path(name)).ok()?;
+    real.insert(name.to_vec(), r.clone());
+    Some(r)
+}
 
 impl Watch {
     /// Build the job, to its fixpoint, and write its outputs.
@@ -2631,6 +2684,8 @@ impl Watch {
             coarsen,
             stamps: BTreeMap::new(),
             written: BTreeMap::new(),
+            own: BTreeMap::new(),
+            real: BTreeMap::new(),
             quick: None,
             files: Vec::new(),
             linked: None,
@@ -2675,30 +2730,66 @@ impl Watch {
             .collect()
     }
 
-    /// Whether an input changed on disk (by modification time; the files
-    /// under absolute paths, the TeX tree's, and the files not found
-    /// every tenth call).
+    /// Whether an input was edited on disk (by modification time; the
+    /// files under absolute paths, the TeX tree's, and the files not
+    /// found every tenth call). The job's own files as the watch wrote
+    /// them are not edits.
     pub fn changed(&mut self) -> bool {
         self.tick = self.tick.wrapping_add(1);
         let all = self.tick.is_multiple_of(10);
-        !self.changes(all, false).is_empty()
+        let init = self.b.initial().tex().host().clone();
+        for key in init.served_paths() {
+            if key == CLOCK || (!all && key.starts_with(b"/")) {
+                continue;
+            }
+            let p = crate::native::path(&key);
+            let time = std::fs::metadata(&p).and_then(|m| m.modified()).ok();
+            match self.stamps.get(&key).copied() {
+                None => {
+                    self.stamps.insert(key, time);
+                }
+                Some(seen) if seen == time => {}
+                // (as the watch wrote it, by its time)
+                Some(_) if time.is_some() && self.own_at(&key, time) => {}
+                Some(_) => return true,
+            }
+        }
+        if all {
+            for (_, (name, kind)) in Self::missed(&init) {
+                if let Some(f) = init.native().read_file(&name, kind)
+                    && !self.own_bytes(&f.name, &f.contents)
+                {
+                    return true;
+                }
+            }
+        }
+        false
     }
 
-    /// Rebuild after the inputs changed, to the fixpoint. A newer edit
-    /// that arrives while it runs stops it at the next region boundary
-    /// (DESIGN.md §7.11), and it goes on from there with that edit too:
-    /// the outputs are written only from a rebuild that ran to its end
-    /// (`PARTEX_WATCH_CANCEL=0`: each edit's rebuild runs to its end).
+    /// Rebuild after an input was edited, to the fixpoint (the job's own
+    /// files as the watch wrote them, if the last rebuild did not settle,
+    /// applied with the edits). A newer edit that arrives while it runs
+    /// stops it at the next region boundary (DESIGN.md §7.11), and it goes
+    /// on from there with that edit too: the outputs are written only from
+    /// a rebuild that ran to its end (`PARTEX_WATCH_CANCEL=0`: each edit's
+    /// rebuild runs to its end). `None` if nothing was edited.
     pub fn rebuild(
         &mut self,
         between: &mut crate::Between,
         observe: &mut dyn FnMut(crate::events::Progress),
     ) -> Option<Outcome> {
-        let changes = self.changes(true, true);
-        if changes.is_empty() {
+        let found = self.changes();
+        // (none, or only the job's own files: they wait for an edit)
+        if found.iter().all(|f| f.own) {
             return None;
         }
-        self.last_changes = self.describe(&changes);
+        let edits: Vec<(Vec<u8>, Arc<[u8]>)> = found
+            .iter()
+            .filter(|f| !f.own)
+            .map(|f| (f.key.clone(), f.now.clone()))
+            .collect();
+        self.last_changes = self.describe(&edits);
+        let changes = self.take(found);
         observe(crate::events::Progress::PassStart(1));
         let first = self.apply_to_the_end(changes);
         Some(self.converge(first, between, observe))
@@ -2724,66 +2815,114 @@ impl Watch {
             }
             // (what changed since: nothing, if only a time did; the rebuild
             // then goes on from where it stopped)
-            changes = self.changes(true, true);
+            let found = self.changes();
+            changes = self.take(found);
         }
     }
 
-    /// The inputs that differ on disk from what the build read: path
-    /// keys and their contents now (`all`: the TeX tree's and the files
-    /// not found too; `read`: their contents, else only whether any did,
-    /// by time). Updates the times seen.
-    fn changes(&mut self, all: bool, read: bool) -> Vec<(Vec<u8>, Arc<[u8]>)> {
+    /// The files not found that a rebuild's starting state does not serve
+    /// yet, by key: the name and kind looked for.
+    fn missed(init: &MachineHost) -> Missed {
+        init.missed
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .filter(|(k, _)| !init.overrides.contains_key(*k))
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect()
+    }
+
+    /// The inputs that differ on disk from what the build read: the clock,
+    /// the files read (those whose modification time is not their stamp,
+    /// read whole; the TeX tree's too) and the files not found that now
+    /// are, each marked if the watch wrote it so. The files found as the
+    /// build read them are stamped; the others are stamped when applied
+    /// ([`Watch::take`]).
+    fn changes(&mut self) -> Vec<Found> {
         let init = self.b.initial().tex().host().clone();
         let mut out = Vec::new();
-        if all
-            && read
-            && let Some(old) = init.file(CLOCK)
+        if let Some(old) = init.file(CLOCK)
             && let Some(now) = Clock::since(&old, &mut init.native())
         {
-            out.push((CLOCK.to_vec(), Arc::from(now)));
+            out.push(Found {
+                key: CLOCK.to_vec(),
+                now: Arc::from(now),
+                stamped: false,
+                time: None,
+                own: false,
+            });
         }
         for key in init.served_paths() {
-            if key == CLOCK || (!all && key.starts_with(b"/")) {
+            if key == CLOCK {
                 continue;
             }
             let p = crate::native::path(&key);
             let time = std::fs::metadata(&p).and_then(|m| m.modified()).ok();
-            let seen = self.stamps.get(&key).copied();
-            if seen == Some(time) {
+            if self.stamps.get(&key) == Some(&time) {
                 continue;
             }
-            if !read {
-                if seen.is_some() {
-                    return vec![(key, Arc::from(&b""[..]))];
-                }
+            let Ok(now) = std::fs::read(&p) else {
+                self.stamps.insert(key, time);
+                continue;
+            };
+            if init.file(&key).is_some_and(|old| *old == *now) {
                 self.stamps.insert(key, time);
                 continue;
             }
-            self.stamps.insert(key.clone(), time);
-            let Ok(now) = std::fs::read(&p) else { continue };
-            if init.file(&key).is_none_or(|old| *old != *now) {
-                out.push((key, Arc::from(now)));
-            }
+            let own = self.own_bytes(&key, &now);
+            out.push(Found {
+                key,
+                now: Arc::from(now),
+                stamped: true,
+                time,
+                own,
+            });
         }
-        if all {
-            let missed: Missed = init
-                .missed
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .clone();
-            for (key, (name, kind)) in missed {
-                if init.overrides.contains_key(&key) {
-                    continue;
-                }
-                if let Some(f) = init.native().read_file(&name, kind) {
-                    if !read {
-                        return vec![(key, f.contents)];
-                    }
-                    out.push((key, f.contents));
-                }
+        for (key, (name, kind)) in Self::missed(&init) {
+            if let Some(f) = init.native().read_file(&name, kind) {
+                let own = self.own_bytes(&f.name, &f.contents);
+                out.push(Found {
+                    key,
+                    now: f.contents,
+                    stamped: false,
+                    time: None,
+                    own,
+                });
             }
         }
         out
+    }
+
+    /// `found`, to apply: each stamped with the time it was read at.
+    fn take(&mut self, found: Vec<Found>) -> Vec<(Vec<u8>, Arc<[u8]>)> {
+        found
+            .into_iter()
+            .map(|f| {
+                if f.stamped {
+                    self.stamps.insert(f.key.clone(), f.time);
+                }
+                (f.key, f.now)
+            })
+            .collect()
+    }
+
+    /// Whether the file named `name` has the modification time the watch
+    /// gave it when it last wrote it.
+    fn own_at(&mut self, name: &[u8], time: Option<std::time::SystemTime>) -> bool {
+        real_path(&mut self.real, name)
+            .and_then(|r| self.own.get(&r))
+            .is_some_and(|(_, t)| *t == time)
+    }
+
+    /// Whether `bytes`, the contents of the file named `name`, are what the
+    /// watch last wrote to it.
+    fn own_bytes(&mut self, name: &[u8], bytes: &[u8]) -> bool {
+        let Some(r) = real_path(&mut self.real, name) else {
+            return false;
+        };
+        self.own
+            .get(&r)
+            .is_some_and(|(h, _)| *h == quick::hash(bytes))
     }
 
     /// What the last build or rebuild ran, as a session reports it
@@ -2938,16 +3077,39 @@ impl Watch {
                 observe(crate::events::Progress::Tool(t));
             }
             reports.extend(tools);
-            let changes = if passes < PASSES {
-                self.changes(true, true)
-            } else {
-                Vec::new()
-            };
-            if changes.is_empty() {
+            if passes == PASSES {
+                // (the job's own files it read that this pass changed are
+                // left for the next edit; an edit made meanwhile is not
+                // stamped, so the watch sees it)
+                let mut unsettled: Vec<String> = self
+                    .changes()
+                    .into_iter()
+                    .filter(|f| f.own)
+                    .map(|f| {
+                        let name = f.key.rsplit(|&c| c == 0).next().unwrap_or(&f.key);
+                        String::from_utf8_lossy(undotted(name)).into_owned()
+                    })
+                    .collect();
+                unsettled.sort();
+                unsettled.dedup();
+                if !unsettled.is_empty() {
+                    reports.push(format!(
+                        "partex: machine: {} still changed after {PASSES} passes",
+                        unsettled.join(", ")
+                    ));
+                }
+                let mut out = self.outcome(term, diagnostics, reports, None);
+                out.unsettled = unsettled;
+                self.record_quick(&out);
+                return out;
+            }
+            let found = self.changes();
+            if found.is_empty() {
                 let out = self.outcome(term, diagnostics, reports, None);
                 self.record_quick(&out);
                 return out;
             }
+            let changes = self.take(found);
             passes += 1;
             observe(crate::events::Progress::PassStart(passes));
             let (line, r) = self.apply_to_the_end(changes);
@@ -3032,6 +3194,7 @@ impl Watch {
                 .map(|(n, b)| (n.clone(), b.len()))
                 .collect(),
             reports,
+            unsettled: Vec::new(),
         }
     }
 
@@ -3106,6 +3269,7 @@ impl Watch {
                     None => continue,
                 },
             };
+            let bytes = host.piped_out(*id, name, bytes.into()).into_owned();
             files.push((name.clone(), bytes, from_link));
         }
         let main = |n: &[u8]| n.ends_with(b".pdf") || n.ends_with(b".dvi");
@@ -3128,6 +3292,11 @@ impl Watch {
                 std::fs::write(&p, bytes)?;
             }
             self.written.insert(name.clone(), h);
+            // (the job's own file from now on, while it stays as written)
+            let time = std::fs::metadata(&p).and_then(|m| m.modified()).ok();
+            if let Some(real) = real_path(&mut self.real, name) {
+                self.own.insert(real, (h, time));
+            }
         }
         if std::env::var_os("PARTEX_WATCH_DEBUG").is_some() {
             eprintln!(
@@ -3174,6 +3343,7 @@ impl partex_core::machine::StoreHost for MachineHost {
             overrides,
             lines: _,
             opened,
+            piped,
             written,
             appended,
             read_back,
@@ -3191,6 +3361,7 @@ impl partex_core::machine::StoreHost for MachineHost {
         } = self;
         overrides.save(s);
         opened.save(s);
+        piped.save(s);
         written.len().save(s);
         for (id, w) in written {
             id.save(s);
@@ -3211,6 +3382,7 @@ impl partex_core::machine::StoreHost for MachineHost {
         use partex_core::persist::Persist;
         let overrides = Persist::load(l)?;
         let opened = Persist::load(l)?;
+        let piped = Persist::load(l)?;
         let n = usize::load(l)?;
         let mut written = BTreeMap::new();
         for _ in 0..n {
@@ -3227,6 +3399,7 @@ impl partex_core::machine::StoreHost for MachineHost {
             overrides,
             lines: self.lines.clone(),
             opened,
+            piped,
             written,
             appended: Persist::load(l)?,
             read_back: Persist::load(l)?,
@@ -3252,6 +3425,22 @@ impl partex_core::machine::StoreHost for MachineHost {
 }
 
 impl MachineHost {
+    /// What output file `id` (`name`) holds, written `bytes`: `XeTeX`'s
+    /// XDV made a PDF, as `xdvipdfmx -q -E -o NAME` with the XDV piped in
+    /// (`FileKind::XdvPipe`), every other file as written.
+    fn piped_out<'a>(
+        &self,
+        id: u32,
+        name: &[u8],
+        bytes: std::borrow::Cow<'a, [u8]>,
+    ) -> std::borrow::Cow<'a, [u8]> {
+        if self.piped.contains(&id) {
+            crate::dpxfiles::xdv_to_pdf(&bytes, name).into()
+        } else {
+            bytes
+        }
+    }
+
     /// Save what every clone of this host shares: the files served, the
     /// files not found, the terminal lines read.
     pub fn save_shared(&self, s: &mut partex_core::persist::Saver) {

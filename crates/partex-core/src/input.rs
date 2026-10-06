@@ -221,6 +221,9 @@ pub(crate) struct AlphaFile {
     /// first line), UTF-8, UTF-16BE, UTF-16LE or bytes. Unused by TeX and
     /// pdfTeX, which read bytes.
     pub(crate) mode: u8,
+    /// Its ICU converter in mode `XETEX_INPUT_MODE_ICU_MAPPING`: a table of
+    /// `icu_tables::SBCS` plus one, or `icu_tables::UTF8`.
+    pub(crate) conv: u16,
 }
 
 partex_engine::persist_struct!(AlphaFile {
@@ -233,7 +236,8 @@ partex_engine::persist_struct!(AlphaFile {
     name,
     call,
     synctex_tag,
-    mode
+    mode,
+    conv
 });
 
 impl<H: Host, T: Tracker> Tex<H, T> {
@@ -483,9 +487,12 @@ impl<H: Host, T: Tracker> Tex<H, T> {
     /// at LF or CR, a CR's LF is skipped; trailing spaces are removed.
     fn input_ln_unicode(&mut self, f: &mut AlphaFile) -> Result<bool, Jump> {
         use partex_engine::web::{
-            XETEX_INPUT_MODE_AUTO, XETEX_INPUT_MODE_UTF8, XETEX_INPUT_MODE_UTF16BE,
-            XETEX_INPUT_MODE_UTF16LE,
+            XETEX_INPUT_MODE_AUTO, XETEX_INPUT_MODE_ICU_MAPPING, XETEX_INPUT_MODE_UTF8,
+            XETEX_INPUT_MODE_UTF16BE, XETEX_INPUT_MODE_UTF16LE,
         };
+        if i32::from(f.mode) == XETEX_INPUT_MODE_ICU_MAPPING {
+            return self.input_ln_icu(f);
+        }
         let buf_size = self.buffer.len() - 1;
         self.last = self.first;
         let data = f.data.clone();
@@ -555,6 +562,118 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             self.last -= 1;
         }
         Ok(true)
+    }
+
+    /// `XeTeX`'s `input_line` in mode `ICUMAPPING`: the bytes up to LF or
+    /// CR (a CR's LF skipped at the next line), then converted, by the
+    /// file's converter (ICU's: a byte it does not map, or a malformed
+    /// UTF-8 sequence, becomes its substitute, no warning).
+    fn input_ln_icu(&mut self, f: &mut AlphaFile) -> Result<bool, Jump> {
+        let buf_size = self.buffer.len() - 1;
+        self.last = self.first;
+        let data = f.data.clone();
+        if T::LINES && self.log_lines && !f.name.is_empty() {
+            self.line_log.push((f.name.clone(), f.lines));
+        }
+        let mut i = f.pos;
+        if i >= data.len() {
+            return Ok(false);
+        }
+        f.lines += 1;
+        let start = i;
+        while i < data.len() && data[i] != b'\n' && data[i] != b'\r' {
+            i += 1;
+        }
+        let line = &data[start..i];
+        if i < data.len() {
+            i += 1;
+            if data[i - 1] == b'\r' && data.get(i) == Some(&b'\n') {
+                i += 1;
+            }
+        }
+        f.pos = i;
+        let put = |t: &mut Self, c: u32| -> Result<(), Jump> {
+            if t.last >= buf_size {
+                return t.buffer_overflow();
+            }
+            t.buffer[t.last] = c;
+            t.last += 1;
+            Ok(())
+        };
+        if f.conv == crate::icu_tables::UTF8 {
+            for chunk in line.utf8_chunks() {
+                for c in chunk.valid().chars() {
+                    put(self, u32::from(c))?;
+                }
+                if !chunk.invalid().is_empty() {
+                    put(self, 0xFFFD)?;
+                }
+            }
+        } else {
+            let table = crate::icu_tables::SBCS.get(usize::from(f.conv).wrapping_sub(1));
+            for &b in line {
+                put(
+                    self,
+                    table.map_or(u32::from(b), |t| u32::from(t[usize::from(b)])),
+                )?;
+            }
+        }
+        self.buffer[self.last] = u32::from(b' ');
+        if self.last >= self.max_buf_stack {
+            self.max_buf_stack = self.last;
+        }
+        while self.last > self.first && self.buffer[self.last - 1] == u32::from(b' ') {
+            self.last -= 1;
+        }
+        Ok(true)
+    }
+
+    /// `XeTeX`'s `get_encoding_mode_and_info`: what the name `name_of_file`
+    /// holds opens, as `Tex::default_input` (`None`: an ICU converter
+    /// partex does not have). An unknown name is read as bytes, with a
+    /// diagnostic.
+    pub(crate) fn encoding_mode_and_info(&mut self) -> Option<i32> {
+        use partex_engine::web::{
+            XETEX_INPUT_MODE_AUTO, XETEX_INPUT_MODE_ICU_MAPPING, XETEX_INPUT_MODE_RAW,
+            XETEX_INPUT_MODE_UTF8, XETEX_INPUT_MODE_UTF16BE, XETEX_INPUT_MODE_UTF16LE,
+        };
+        let name = self.name_of_file.clone();
+        let builtin = [
+            (&b"auto"[..], XETEX_INPUT_MODE_AUTO),
+            (b"utf8", XETEX_INPUT_MODE_UTF8),
+            // (the host's byte order)
+            (b"utf16", XETEX_INPUT_MODE_UTF16LE),
+            (b"utf16be", XETEX_INPUT_MODE_UTF16BE),
+            (b"utf16le", XETEX_INPUT_MODE_UTF16LE),
+            (b"bytes", XETEX_INPUT_MODE_RAW),
+        ];
+        if let Some(&(_, m)) = builtin.iter().find(|(n, _)| n.eq_ignore_ascii_case(&name)) {
+            return Some(m);
+        }
+        let key = norm_encoding_name(&name);
+        let found = crate::icu_tables::NAMES
+            .binary_search_by(|(n, _)| n.as_bytes().cmp(&key))
+            .ok()
+            .map(|k| crate::icu_tables::NAMES[k].1);
+        match found {
+            Some(crate::icu_tables::OTHER) => None,
+            Some(c) => {
+                let conv = if c == crate::icu_tables::UTF8 {
+                    c
+                } else {
+                    c + 1
+                };
+                Some(XETEX_INPUT_MODE_ICU_MAPPING | (i32::from(conv) << 8))
+            }
+            None => {
+                self.begin_diagnostic();
+                self.print_nl(b"Unknown encoding `");
+                self.print_str(&name);
+                self.print_str(b"'; reading as raw bytes");
+                self.end_diagnostic(true);
+                Some(XETEX_INPUT_MODE_RAW)
+            }
+        }
     }
 
     /// `XeTeX` §744 `bad_utf8_warning`.
@@ -1236,6 +1355,30 @@ impl<H: Host, T: Tracker> Tex<H, T> {
 
 /// `XeTeX`'s `u_open_in` sniffing: the input mode of a file starting with
 /// `data`, and the bytes of its byte-order mark to skip.
+/// An encoding's name as ICU compares names (`ucnv_io_stripASCIIForCompare`):
+/// letters in lower case and digits, a zero not after a digit and before
+/// one dropped, all else dropped.
+fn norm_encoding_name(name: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(name.len());
+    let mut after_digit = false;
+    for (i, &c) in name.iter().enumerate() {
+        match c {
+            b'a'..=b'z' | b'A'..=b'Z' => {
+                out.push(c.to_ascii_lowercase());
+                after_digit = false;
+            }
+            b'0' if !after_digit && name.get(i + 1).is_some_and(u8::is_ascii_digit) => {}
+            b'0' => out.push(c),
+            b'1'..=b'9' => {
+                out.push(c);
+                after_digit = true;
+            }
+            _ => after_digit = false,
+        }
+    }
+    out
+}
+
 fn sniff_input_mode(data: &[u8]) -> (i32, usize) {
     use partex_engine::web::{
         XETEX_INPUT_MODE_UTF8, XETEX_INPUT_MODE_UTF16BE, XETEX_INPUT_MODE_UTF16LE,
@@ -1352,5 +1495,26 @@ mod tests {
         t.line = 5;
         let out = term_output(&mut t, Tex::show_context);
         assert_eq!(out, b"l.5 \\showbox2\n             ");
+    }
+
+    #[test]
+    fn encoding_names_as_icu_compares_them() {
+        assert_eq!(
+            super::norm_encoding_name(b"ISO_8859-01:1987"),
+            b"iso885911987"
+        );
+        assert_eq!(super::norm_encoding_name(b"Windows-1252"), b"windows1252");
+        assert_eq!(super::norm_encoding_name(b"cp01250"), b"cp1250");
+        let conv = |n: &[u8]| {
+            let k = super::norm_encoding_name(n);
+            let i = crate::icu_tables::NAMES
+                .binary_search_by(|(m, _)| m.as_bytes().cmp(&k))
+                .unwrap();
+            crate::icu_tables::NAMES[i].1
+        };
+        let t = |n: &[u8]| &crate::icu_tables::SBCS[usize::from(conv(n))];
+        assert_eq!((t(b"latin1")[0xE9], t(b"cp1252")[0x80]), (0xE9, 0x20AC));
+        assert_eq!(conv(b"UTF-8"), crate::icu_tables::UTF8);
+        assert_eq!(conv(b"GBK"), crate::icu_tables::OTHER);
     }
 }

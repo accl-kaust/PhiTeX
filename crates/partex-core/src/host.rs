@@ -45,6 +45,10 @@ pub enum FileKind {
     /// `XeTeX`: the PDF written through xdvipdfmx: the bytes written are
     /// the XDV xdvipdfmx reads (`XeTeX`'s pipe, `xdvipdfmx -q -E -o NAME`).
     XdvPipe,
+    /// `XeTeX`: pictures (`\XeTeXpicfile`, `\XeTeXpdffile`: kpathsea's
+    /// `graphic/figure`), looked up by kpathsea alone, not in the output
+    /// directory first.
+    Pict,
 }
 
 /// A load as [`Host::unchanged`] is asked about it: the name, its kind,
@@ -357,7 +361,8 @@ partex_engine::persist_enum!(FileKind {
     OpenType,
     MiscFonts,
     FontIndex,
-    XdvPipe
+    XdvPipe,
+    Pict
 });
 
 /// A host with no files and no terminal: the engine that holds the

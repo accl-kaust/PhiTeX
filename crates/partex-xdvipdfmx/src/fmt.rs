@@ -81,7 +81,9 @@ const P10: [i32; 10] = [
 
 /// `p_dtoa` (pdfdev.c): at most `prec` decimals, trailing zeros cut,
 /// `0` for zero. A negative number that rounds to zero prints `0`, and
-/// one between -1 and 0 prints without its leading zero (`-.5`).
+/// one between -1 and 0 prints without its leading zero (`-.5`). A NaN
+/// prints as C prints it: glibc's `nan` (`-nan` with its sign bit), then
+/// the digits of `INT_MIN`, x86's `(int32_t)` of it, as characters.
 pub fn p_dtoa(b: &mut Buf, value: f64, prec: usize) {
     let start = b.0.len();
     let mut value = value;
@@ -89,14 +91,29 @@ pub fn p_dtoa(b: &mut Buf, value: f64, prec: usize) {
         value = -value;
         b.push(b'-');
     }
+    // (`modf`)
     let mut i = libm::trunc(value);
-    let f = value - i;
-    let mut g = (f * f64::from(P10[prec]) + 0.5) as i32;
+    let f = if value.is_infinite() { 0.0 } else { value - i };
+    let v = f * f64::from(P10[prec]) + 0.5;
+    #[allow(clippy::cast_possible_truncation, reason = "checked to fit")]
+    let mut g = if v.is_nan() || v >= 2_147_483_648.0 || v <= -2_147_483_649.0 {
+        i32::MIN
+    } else {
+        v as i32
+    };
     if g == P10[prec] {
         g = 0;
         i += 1.0;
     }
-    if i != 0.0 {
+    if i.is_nan() {
+        b.extend(if i.is_sign_negative() {
+            b"-nan"
+        } else {
+            b"nan"
+        });
+    } else if i.is_infinite() {
+        b.extend(b"inf");
+    } else if i != 0.0 {
         let _ = write!(b, "{i:.0}");
     } else if g == 0 {
         b.0.truncate(start);
@@ -109,7 +126,9 @@ pub fn p_dtoa(b: &mut Buf, value: f64, prec: usize) {
         let mut j = prec;
         while j > 0 {
             j -= 1;
-            b.0[at + j] = b'0' + (g % 10) as u8;
+            #[allow(clippy::cast_sign_loss, reason = "C's char arithmetic")]
+            let c = (i32::from(b'0') + g % 10) as u8;
+            b.0[at + j] = c;
             g /= 10;
         }
         while b.0.last() == Some(&b'0') {
@@ -345,5 +364,26 @@ impl Buf {
         }
         digits.reverse();
         self.extend(&digits);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn dtoa(v: f64) -> Vec<u8> {
+        let mut b = Buf::new();
+        p_dtoa(&mut b, v, 3);
+        b.0
+    }
+
+    #[test]
+    fn dtoa_as_c() {
+        assert_eq!(dtoa(1.25), b"1.25");
+        assert_eq!(dtoa(-0.5), b"-.5");
+        assert_eq!(dtoa(-0.0001), b"0");
+        assert_eq!(dtoa(f64::INFINITY), b"inf");
+        assert_eq!(dtoa(f64::NEG_INFINITY), b"-inf");
+        assert_eq!(dtoa(-f64::NAN), b"-nan.*,(");
     }
 }

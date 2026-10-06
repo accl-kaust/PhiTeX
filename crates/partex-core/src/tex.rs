@@ -164,8 +164,11 @@ pub struct Tex<H: Host, T: Tracker = Untracked> {
     // name.
     pub(crate) eqtb: crate::journal::JVec<MemoryWord>,
     /// The objects eqtb's entries hold beside their words (`objs.rs`),
-    /// by location below the registers above 255.
-    pub(crate) eqtb_obj: Vec<Option<crate::objs::Obj>>,
+    /// by location below the registers above 255: journaled as eqtb is,
+    /// so a snapshot copies the chunks written since the last one, not
+    /// the whole table (it spans the hash's extra places too: 16.8 MB on
+    /// a LaTeX format, copied by each of a course's 589 snapshots).
+    pub(crate) eqtb_obj: crate::journal::JVec<Option<crate::objs::Obj>, { crate::objs::OBJ_CHUNK }>,
     /// The next glue lineage (`objs.rs`: glue's identity, as data).
     pub(crate) glue_lineage: u64,
     /// `xeq_level[int_base..=eqtb_size]`, stored from index 0.
@@ -401,6 +404,10 @@ pub struct Tex<H: Host, T: Tracker = Untracked> {
     /// `XeTeX`'s `prev_class` and `space_class` (`xmain.rs`).
     pub(crate) prev_class: i32,
     pub(crate) space_class: i32,
+    /// `XeTeX`'s `XeTeX_default_input_mode` and `_encoding`, as an input
+    /// file's `mode` and `conv` (`input.rs`): the mode in the low byte,
+    /// the converter above it.
+    pub(crate) default_input: i32,
     /// Memoized macro calls (`memo.rs`).
     pub(crate) memo: crate::memo::Memo,
     /// Control sequence names by a hash of their text, to their location
@@ -684,7 +691,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             cur_list: ListStateRecord::default(),
             shown_mode: 0,
             eqtb: crate::journal::JVec::from_elem(MemoryWord::default(), eqtb_words),
-            eqtb_obj: vec![None; eqtb_words],
+            eqtb_obj: crate::journal::JVec::from_elem(None, eqtb_words),
             glue_lineage: 0,
             xeq_level: vec![0; usize::try_from(EQTB_SIZE - crate::eqtb::INT_BASE + 1).unwrap_or(0)],
             eqtb_top,
@@ -818,6 +825,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             after_token: 0,
             prev_class: 0,
             space_class: 0,
+            default_input: 0,
             memo: crate::memo::Memo::new(p.memo),
             cs_cache: crate::hash::CsCache::default(),
             hash_memo: crate::hashmemo::HashMemo::default(),

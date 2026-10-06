@@ -1113,9 +1113,12 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                 }
                 // (the file value: its contents' version, made at the load)
                 self.read_file_loaded(n, &f.contents);
+                let (mode, conv) = self.default_input_mode();
                 self.read_file[n] = Some(AlphaFile {
                     data: f.contents,
                     name,
+                    mode,
+                    conv,
                     ..AlphaFile::default()
                 });
                 self.set_read_open(n, JUST_OPEN);

@@ -1876,6 +1876,27 @@ unit's exit differed and cutoff failed. It is removed whole, with SSA
 in check mode as the gate's second e2e mode and the edit harness moved
 into e2e.
 
+Until then it is what `partex watch` and `partex build` run, so its
+memory is the watch's:
+- Each region keeps a snapshot of the engine. The large tables are
+  journaled vectors (`journal.rs`): a snapshot shares the chunks not
+  written since the last one and copies the others whole, so a region
+  costs the chunks it wrote. Its writes are scattered over the hash's
+  places, a few per chunk, so chunks are small: 512 words (4 KB) for
+  eqtb, the hash and the save stack, 128 objects (6 KB) for eqtb's
+  objects. Smaller word chunks save little and make the store's save
+  slower (more blobs, less compressible).
+- A rebuild records at the fine grain where it re-executes, and holds
+  the regions it replaces until it splices them out. A pass that runs
+  the whole job again (the course's second, from no `.aux`) takes the
+  build from 2.0 to 6.4 GB.
+- The job's own output files are not edits: the watch records what it
+  wrote and rebuilds only for an edit; a job whose files never settle
+  stops at the fifth pass with an `Unsettled` line.
+- The store's save writes each blob to its pack as the saver makes it,
+  and the blobs' references in frames: it holds the build, its copy and
+  a batch, not every blob as encoded, as kept and as packed at once.
+
 ### 4.2 The work, in order
 
 Each item's form is written here before its code. Items that depend on

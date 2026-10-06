@@ -70,6 +70,7 @@ mod format;
 mod hash;
 mod hashmemo;
 mod hyph;
+mod icu_tables;
 mod input;
 mod journal;
 mod linebreak;
@@ -121,6 +122,7 @@ mod web;
 mod wide;
 mod xetex;
 mod xmain;
+mod xpic;
 mod xregs;
 
 #[cfg(test)]

@@ -492,7 +492,7 @@ fn machine_build(t: &Target, st: Settings) -> i32 {
         &mut |p| ren.progress(&p),
         false,
     );
-    let status = machine_finish(t, &ren, &out, None);
+    let status = machine_finish(t, &ren, &out, None, false);
     save_estimate(&ren);
     ren.progress(&crate::events::Progress::Phase(
         crate::events::Phase::Saving,
@@ -1041,6 +1041,7 @@ fn machine_finish(
     r: &Renderer,
     out: &crate::machinehost::Outcome,
     rebuild: Option<Rebuild>,
+    watching: bool,
 ) -> i32 {
     let summary = crate::warnings::summarize(&out.diagnostics);
     let failed = out.history > 1;
@@ -1059,6 +1060,23 @@ fn machine_finish(
         for line in &out.reports {
             r.status("Machine", line.trim_start_matches("partex: machine: "));
         }
+    }
+    if !out.unsettled.is_empty() {
+        // (as latexmk's "Rerun": the job's own files did not reach their
+        // fixpoint; a watch rebuilds again only for an edit)
+        r.warn(
+            "Unsettled",
+            &format!(
+                "{} still changed after {} passes{}",
+                out.unsettled.join(", "),
+                crate::machinehost::PASSES,
+                if watching {
+                    "; waiting for an edit"
+                } else {
+                    ""
+                }
+            ),
+        );
     }
     record(t, &out.reports, &summary, &out.outputs);
     if !failed {
@@ -1102,7 +1120,7 @@ fn machine_watch(opts: &Options, target: &Target, st: Settings) -> ! {
     );
     let mut history = out.history;
     let mut outputs = out.outputs.clone();
-    machine_finish(target, &ren, &out, None);
+    machine_finish(target, &ren, &out, None, true);
     save_estimate(&ren);
     if opts.open {
         open_output(target, &out.outputs);
@@ -1114,7 +1132,7 @@ fn machine_watch(opts: &Options, target: &Target, st: Settings) -> ! {
         history = out.history;
         outputs.clone_from(&out.outputs);
         let changed = w.last_changes().to_vec();
-        machine_finish(target, &ren, &out, Some(Rebuild { changed }));
+        machine_finish(target, &ren, &out, Some(Rebuild { changed }), true);
     }
     w.idle();
     let keys = st.progress && term::keys_on();
@@ -1149,7 +1167,7 @@ fn machine_watch(opts: &Options, target: &Target, st: Settings) -> ! {
         history = out.history;
         outputs.clone_from(&out.outputs);
         let changed = w.last_changes().to_vec();
-        machine_finish(target, &ren, &out, Some(Rebuild { changed }));
+        machine_finish(target, &ren, &out, Some(Rebuild { changed }), true);
         w.idle();
         ren.watching(&target.file, keys);
         if INTERRUPTED.load(std::sync::atomic::Ordering::Relaxed) {

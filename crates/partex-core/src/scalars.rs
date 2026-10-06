@@ -60,6 +60,7 @@ scalar_rows! {
     after_token, set_after_token, after_token, scalar::AFTER_TOKEN, i32;
     prev_class, set_prev_class, prev_class, scalar::PREV_CLASS, i32;
     space_class, set_space_class, space_class, scalar::SPACE_CLASS, i32;
+    default_input, set_default_input, default_input, scalar::DEFAULT_INPUT, i32;
     long_help_seen, set_long_help_seen, long_help_seen, scalar::LONG_HELP_SEEN, bool;
     log_opened, set_log_opened, log_opened, scalar::LOG_OPENED, bool;
     open_parens, set_open_parens, open_parens, scalar::OPEN_PARENS, i32;
@@ -171,7 +172,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         if !T::VALUES {
             return;
         }
-        let rows: [(u16, i32); 28] = [
+        let rows: [(u16, i32); 29] = [
             (
                 scalar::GLUE_LINEAGE,
                 i32::try_from(self.glue_lineage).unwrap_or(i32::MAX),
@@ -192,6 +193,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             (scalar::AFTER_TOKEN, self.after_token),
             (scalar::PREV_CLASS, self.prev_class),
             (scalar::SPACE_CLASS, self.space_class),
+            (scalar::DEFAULT_INPUT, self.default_input),
             (scalar::LONG_HELP_SEEN, i32::from(self.long_help_seen)),
             (scalar::LOG_OPENED, i32::from(self.log_opened)),
             (scalar::OPEN_PARENS, self.open_parens),

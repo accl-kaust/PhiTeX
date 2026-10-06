@@ -927,6 +927,25 @@ impl<H: Host, T: Tracker> Tex<H, T> {
     /// §448: set `cur_val` to a dimension. `shortcut`: `cur_val` already
     /// holds an integer to be multiplied by the units.
     pub(crate) fn scan_dimen(&mut self, mu: bool, inf: bool, shortcut: bool) -> Result<(), Jump> {
+        self.xetex_scan_dimen(mu, inf, shortcut, true)
+    }
+
+    /// `XeTeX`'s `scan_decimal`: set `cur_val` to a decimal fraction, a
+    /// dimension without units.
+    pub(crate) fn scan_decimal(&mut self) -> Result<(), Jump> {
+        self.xetex_scan_dimen(false, false, false, false)
+    }
+
+    /// `XeTeX`'s `xetex_scan_dimen`: §448, the units scanned only if
+    /// `requires_units`.
+    #[allow(clippy::fn_params_excessive_bools, reason = "XeTeX's parameters")]
+    fn xetex_scan_dimen(
+        &mut self,
+        mu: bool,
+        inf: bool,
+        shortcut: bool,
+        requires_units: bool,
+    ) -> Result<(), Jump> {
         let mut f = 0;
         self.arith_error = false;
         self.cur_order = NORMAL;
@@ -977,24 +996,32 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                 negative = !negative;
                 self.cur_val = -self.cur_val;
             }
-            // §453: scan units and set `cur_val` to x*(cur_val+f/2^16).
-            match self.scan_units(mu, inf, &mut f)? {
-                Units::AttachSign => {}
-                u => {
-                    if let Units::AttachFraction = u {
-                        if self.cur_val >= 0o40000 {
-                            self.arith_error = true;
-                        } else {
-                            self.cur_val = self.cur_val * UNITY + f;
+            if requires_units {
+                // §453: scan units and set `cur_val` to x*(cur_val+f/2^16).
+                match self.scan_units(mu, inf, &mut f)? {
+                    Units::AttachSign => {}
+                    u => {
+                        if let Units::AttachFraction = u {
+                            if self.cur_val >= 0o40000 {
+                                self.arith_error = true;
+                            } else {
+                                self.cur_val = self.cur_val * UNITY + f;
+                            }
                         }
+                        // done:
+                        self.scan_optional_space()?;
                     }
-                    // done:
-                    self.scan_optional_space()?;
                 }
+            } else if self.cur_val >= 0o40000 {
+                self.arith_error = true;
+            } else {
+                self.cur_val = self.cur_val * UNITY + f;
             }
         }
         // attach_sign:
-        if self.arith_error || self.cur_val.abs() >= 0o10000000000 {
+        // (the most negative value, a `D2Fix` of an infinite `XeTeX` picture,
+        // is too large too)
+        if self.arith_error || self.cur_val.unsigned_abs() >= 0o10000000000 {
             // §460: report that this dimension is out of range.
             self.print_err(b"Dimension too large");
             self.help(&[

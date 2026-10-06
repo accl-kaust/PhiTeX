@@ -44,13 +44,28 @@ pub struct Saver {
     kept: Vec<Box<dyn Any>>,
     /// Those that may go to another thread, by address (what a
     /// [`Known`] hands on).
-    pinned: BTreeMap<(usize, usize), Box<dyn Any + Send>>,
+    pinned: BTreeMap<(usize, usize), Box<dyn Held>>,
+}
+
+/// A value a [`Known`] keeps alive: a clone of an `Arc` that holds it.
+pub trait Held: Send {
+    /// Whether nothing but this handle holds the value (a value the build
+    /// no longer has, which no save meets again).
+    fn alone(&self) -> bool;
+}
+
+impl<T: ?Sized + Send + Sync + 'static> Held for Arc<T> {
+    fn alone(&self) -> bool {
+        // (a weak handle does not keep it: it fails to upgrade once this
+        // one goes)
+        Arc::strong_count(self) == 1
+    }
 }
 
 /// How [`Saver::share`] keeps a shared value alive.
 pub enum Pin {
     /// A handle that may go to another thread (an `Arc`'s clone).
-    Send(Box<dyn Any + Send>),
+    Send(Box<dyn Held>),
     /// One that may not (an `Rc`'s).
     Local(Box<dyn Any>),
     /// None needed: the value outlives the saver, and is not handed on.
@@ -60,11 +75,12 @@ pub enum Pin {
 /// Blobs by the address of the value each holds, with those values kept
 /// alive (so the addresses stay theirs, and an `Arc` shared by the handle
 /// is not changed in place): a [`Saver::merkle`] given them names such a
-/// value by its blob without writing it again. From the last save
-/// ([`Saver::into_known`]) or load ([`Loader::into_known`]).
+/// value by its blob without writing it again, and lets go of those
+/// nothing else holds any more ([`Saver::merkle_known`]). From the last
+/// save ([`Saver::take_known`]) or load ([`Loader::take_known`]).
 #[derive(Default)]
 pub struct Known {
-    map: BTreeMap<(usize, usize), (u128, Box<dyn Any + Send>)>,
+    map: BTreeMap<(usize, usize), (u128, Box<dyn Held>)>,
 }
 
 impl Known {
@@ -104,6 +120,9 @@ pub struct Merkle {
     /// The blobs each value being written refers to (the root's first).
     refs: Vec<Vec<u128>>,
     min: usize,
+    /// Where each blob goes as it is made, instead of `blobs`
+    /// ([`Saver::merkle_sink`]).
+    sink: Option<Box<dyn FnMut(MerkleBlob)>>,
 }
 
 /// A blob a [`Saver::merkle`] wrote: its hash, bytes and the blobs it
@@ -147,16 +166,26 @@ impl Saver {
     }
 
     /// [`Saver::merkle`] knowing `known`'s values' blobs (those `have`
-    /// holds).
+    /// holds), but for the values nothing else holds any more: those are
+    /// let go (a value goes with the last handle on it, its address with
+    /// it; a value only another such value held goes too). Otherwise
+    /// every value ever saved would stay alive as long as the store keeps
+    /// its blob, each save adding the values the build replaced since.
     #[must_use]
     pub fn merkle_known(min: usize, have: BTreeSet<u128>, known: Known) -> Self {
         let mut s = Self::merkle(min, have);
         if let Some(m) = &mut s.merkle {
-            for (addr, (h, pin)) in known.map {
-                if m.have.contains(&h) {
-                    m.known.insert(addr, h);
-                    s.pinned.insert(addr, pin);
+            let mut map = known.map;
+            loop {
+                let before = map.len();
+                map.retain(|_, (h, pin)| m.have.contains(h) && !pin.alone());
+                if map.len() == before {
+                    break;
                 }
+            }
+            for (addr, (h, pin)) in map {
+                m.known.insert(addr, h);
+                s.pinned.insert(addr, pin);
             }
         }
         s
@@ -192,13 +221,23 @@ impl Saver {
                 referenced: BTreeSet::new(),
                 refs: alloc::vec![Vec::new()],
                 min: min.max(17),
+                sink: None,
             }),
             ..Self::new()
         }
     }
 
-    /// The blobs of a [`Saver::merkle`] (none otherwise) and the root's
-    /// bytes.
+    /// Hand each blob of this [`Saver::merkle`] to `sink` as it is made
+    /// (children before parents, each once), rather than keeping them all
+    /// until [`Saver::into_merkle`]: a store writes them as they come.
+    pub fn merkle_sink(&mut self, sink: Box<dyn FnMut(MerkleBlob)>) {
+        if let Some(m) = &mut self.merkle {
+            m.sink = Some(sink);
+        }
+    }
+
+    /// The blobs of a [`Saver::merkle`] (none otherwise, nor those a
+    /// [`Saver::merkle_sink`] took) and the root's bytes.
     #[must_use]
     pub fn into_merkle(self) -> (Vec<MerkleBlob>, Vec<u8>) {
         (self.merkle.map(|m| m.blobs).unwrap_or_default(), self.enc.0)
@@ -449,7 +488,10 @@ impl Saver {
             if let Some(m) = &mut self.merkle {
                 m.known.insert(addr, h);
                 if !m.have.contains(&h) && m.emitted.insert(h) {
-                    m.blobs.push((h, inner, refs));
+                    match &mut m.sink {
+                        Some(sink) => sink((h, inner, refs)),
+                        None => m.blobs.push((h, inner, refs)),
+                    }
                 }
             }
             self.blob_ref_here(h);
@@ -472,7 +514,7 @@ pub type Fetch<'f> = &'f dyn Fn(u128) -> Option<Vec<u8>>;
 
 /// What a [`Loader::merkle`] notes of the blobs it loaded: each value's
 /// address and blob, with the value.
-type Noted = Vec<((usize, usize), u128, Box<dyn Any + Send>)>;
+type Noted = Vec<((usize, usize), u128, Box<dyn Held>)>;
 
 /// The blobs a [`Loader::merkle`] has loaded, by hash and type (values
 /// of two types can have the same bytes). `Send`, so that loading can go
@@ -611,7 +653,7 @@ impl<'a> Loader<'a> {
 
     /// Note that `v`, at `addr` (of `len`), is the value the last shared
     /// value loaded was, if it came from a blob (see [`Known`]).
-    pub fn note<P: Clone + Send + 'static>(&mut self, addr: usize, len: usize, v: &P) {
+    pub fn note<P: Held + Clone + 'static>(&mut self, addr: usize, len: usize, v: &P) {
         if let Some(h) = self.last_blob.take() {
             self.noted.push(((addr, len), h, Box::new(v.clone())));
         }
@@ -1183,5 +1225,61 @@ impl Persist for crate::node::BoxNode {
     }
     fn load(l: &mut Loader) -> Option<Self> {
         l.dec.box_node()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Two values saved, the build keeping one: the next save knows the
+    /// one kept (not written again) and lets the other go, with a value
+    /// that only the other held.
+    #[test]
+    fn known_lets_go_of_what_the_build_dropped() {
+        let kept: Arc<Vec<u8>> = Arc::new(alloc::vec![7; 100]);
+        let inner: Arc<Vec<u8>> = Arc::new(alloc::vec![9; 100]);
+        let dropped: Arc<Vec<Arc<Vec<u8>>>> = Arc::new(alloc::vec![inner.clone()]);
+        let inner_weak = Arc::downgrade(&inner);
+        drop(inner);
+        let mut s = Saver::merkle(16, BTreeSet::new());
+        kept.save(&mut s);
+        dropped.save(&mut s);
+        let known = s.take_known();
+        let (blobs, _) = s.into_merkle();
+        assert_eq!(known.len(), 3);
+        let have: BTreeSet<u128> = blobs.iter().map(|b| b.0).collect();
+        drop(dropped);
+        // (the inner value is still held, by its pin and the outer pin's
+        // value: both go)
+        assert!(inner_weak.upgrade().is_some());
+        let mut s = Saver::merkle_known(16, have, known);
+        assert!(inner_weak.upgrade().is_none());
+        kept.save(&mut s);
+        let known = s.take_known();
+        let (blobs, _) = s.into_merkle();
+        assert!(blobs.is_empty(), "a value known is not written again");
+        assert_eq!(known.len(), 1);
+    }
+
+    /// A sink takes the blobs a saver keeps without one, in the same
+    /// order, and the root is the same bytes.
+    #[test]
+    fn a_sink_takes_the_blobs_as_they_are_made() {
+        let leaf: Arc<Vec<u8>> = Arc::new(alloc::vec![7; 100]);
+        let value: Arc<Vec<Arc<Vec<u8>>>> = Arc::new(alloc::vec![leaf.clone(), leaf]);
+        let mut s = Saver::merkle(16, BTreeSet::new());
+        value.save(&mut s);
+        let (kept, root) = s.into_merkle();
+        let taken = Rc::new(core::cell::RefCell::new(Vec::new()));
+        let mut s = Saver::merkle(16, BTreeSet::new());
+        let sink = taken.clone();
+        s.merkle_sink(Box::new(move |b| sink.borrow_mut().push(b)));
+        value.save(&mut s);
+        let (left, sunk_root) = s.into_merkle();
+        assert!(left.is_empty(), "the sink took every blob");
+        assert_eq!(sunk_root, root);
+        assert_eq!(*taken.borrow(), kept);
+        assert_eq!(kept.len(), 2);
     }
 }

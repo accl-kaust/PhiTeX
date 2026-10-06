@@ -1679,6 +1679,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             after_token,
             prev_class,
             space_class,
+            default_input,
             memo: _,
             cs_cache: _,
             map_cache: _,
@@ -2142,7 +2143,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         c.put(&(*pack_begin_line, *etex_mode, epoch, *is_in_csname));
         c.put(&(*max_reg_num, max_reg_help_line));
         c.put(&(*after_token, *long_help_seen, *cancel_boundary, diag));
-        c.put(&(*prev_class, *space_class));
+        c.put(&(*prev_class, *space_class, *default_input));
         c.put(&(*seal_lines, *seal_at, *ship_stop, *par_start, *fire_pending));
         c.section("scalars", parts);
         // (a persistent map: its hash is its version, made at each write)
