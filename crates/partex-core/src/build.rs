@@ -649,8 +649,8 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         }
         self.set_saved(0, self.cur_val);
         self.set_save_ptr(self.save_ptr() + 1);
-        if self.params.flavor == crate::params::Flavor::PdfTex {
-            // pdfTeX: `\vadjust pre`.
+        if self.params.flavor != crate::params::Flavor::Tex {
+            // pdfTeX and `XeTeX`: `\vadjust pre`.
             let pre = self.cur_cmd == VADJUST && self.scan_keyword(b"pre")?;
             self.set_saved(0, i32::from(pre));
             self.set_save_ptr(self.save_ptr() + 1);
@@ -671,7 +671,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         let d = self.dimen_par(SPLIT_MAX_DEPTH_CODE);
         let f = self.int_par(FLOATING_PENALTY_CODE);
         self.unsave()?;
-        let pre = if self.params.flavor == crate::params::Flavor::PdfTex {
+        let pre = if self.params.flavor != crate::params::Flavor::Tex {
             self.set_save_ptr(self.save_ptr() - 1);
             self.saved(0) != 0
         } else {

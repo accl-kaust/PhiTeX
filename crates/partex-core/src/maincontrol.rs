@@ -1190,9 +1190,9 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             }
             _ => {
                 // §1354: implement \special. (encTeX's `\specialout` and
-                // `\mubyteout` marks are not kept.) pdfTeX §1534:
-                // `\special shipout` is expanded when shipped.
-                if self.params.flavor == crate::params::Flavor::PdfTex
+                // `\mubyteout` marks are not kept.) pdfTeX §1534 (and
+                // `XeTeX`'s): `\special shipout` is expanded when shipped.
+                if self.params.flavor != crate::params::Flavor::Tex
                     && self.scan_keyword(b"shipout")?
                 {
                     self.scan_toks(false, false)?;

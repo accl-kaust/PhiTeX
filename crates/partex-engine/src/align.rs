@@ -39,10 +39,11 @@ pub struct Params {
     pub vertical: bool,
     /// `\displayindent` in displays, else 0.
     pub shift: Scaled,
-    /// pdfTeX: the rows are display lines (their `box_lr` is `dlist`).
+    /// e-TeX's engines (pdfTeX, XeTeX): the rows are display lines (their
+    /// `box_lr` is `dlist`).
     pub display: bool,
-    /// pdfTeX (a cell's `box_lr` is 0, not its span count).
-    pub pdftex: bool,
+    /// e-TeX's engines (a cell's `box_lr` is 0, not its span count).
+    pub etex: bool,
 }
 
 fn unset_node(width: Scaled, height: Scaled) -> Node {
@@ -294,8 +295,8 @@ fn set_unset_box(
             glue_set: 0.0,
             glue_sign: GlueSign::Normal,
             glue_order: Order::Normal,
-            subtype: if params.pdftex {
-                0 // (pdfTeX clears the span count, for `ship_out`)
+            subtype: if params.etex {
+                0 // (e-TeX clears the span count, for `ship_out`)
             } else {
                 u8::try_from(r.span_count).unwrap_or(0)
             },

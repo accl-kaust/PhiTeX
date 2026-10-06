@@ -106,13 +106,17 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         self.set_eq_type(FROZEN_DONT_EXPAND, DONT_EXPAND);
         let s = self.pool_str(b"notexpanded:");
         self.set_text(FROZEN_DONT_EXPAND, s);
-        if self.params.flavor == Flavor::PdfTex {
-            // pdfTeX §277
+        if self.params.flavor != Flavor::Tex {
+            // pdfTeX §277 (`XeTeX`'s is the same, but for the name)
             self.prims.used = PRIM_SIZE; // nothing is used
             self.set_eq_type(FROZEN_PRIMITIVE, IGNORE_SPACES);
             self.set_equiv(FROZEN_PRIMITIVE, 1);
             self.set_eq_level(FROZEN_PRIMITIVE, LEVEL_ONE);
-            let s = self.pool_str(b"pdfprimitive");
+            let s = self.pool_str(if self.params.flavor == Flavor::XeTeX {
+                b"primitive"
+            } else {
+                b"pdfprimitive"
+            });
             self.set_text(FROZEN_PRIMITIVE, s);
         }
     }

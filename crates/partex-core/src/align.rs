@@ -811,14 +811,14 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         let mut tabskips = level.tabskips.glue;
         self.set_save_ptr(self.save_ptr() - 2);
         let vertical = self.mode() != -VMODE;
-        let pdftex = self.params.flavor == crate::params::Flavor::PdfTex;
+        let etex = self.params.flavor != crate::params::Flavor::Tex;
         let params = align::Params {
             vertical,
-            display: pdftex
+            display: etex
                 && !vertical
                 && self.nest_ptr() > 0
                 && self.level_mode(self.nest_ptr() - 1) == MMODE,
-            pdftex,
+            etex,
             shift: o,
         };
         // §801–§803

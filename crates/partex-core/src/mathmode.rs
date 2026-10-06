@@ -618,9 +618,10 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         Ok(())
     }
 
-    /// pdfTeX marks display boxes `dlist` (never reversed).
+    /// e-TeX's engines (pdfTeX, XeTeX) mark display boxes `dlist` (never
+    /// reversed).
     fn dlist(&self) -> u8 {
-        if self.params.flavor == crate::params::Flavor::PdfTex {
+        if self.params.flavor != crate::params::Flavor::Tex {
             lr::DLIST
         } else {
             0
@@ -766,7 +767,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
     /// before the display (-1: right-to-left).
     fn natural_width_of_last_line(&mut self, jb: &BoxNode, x: i32) -> Scaled {
         let quad = self.font_param(QUAD_CODE, self.cur_font());
-        let pdftex = self.params.flavor == crate::params::Flavor::PdfTex;
+        let etex = self.params.flavor != crate::params::Flavor::Tex;
         let texxet = self.texxet_en();
         // tex.web has a discretionary's replaced nodes after it.
         let mut nodes: VecDeque<Seen> = VecDeque::with_capacity(jb.list.len() + 2);
@@ -816,7 +817,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                 }
                 Seen::Node(Node::Box(b)) => (b.width, true),
                 Seen::Node(Node::Rule { width, .. }) => (*width, true),
-                Seen::Node(Node::Math { width, subtype, .. }) if pdftex => {
+                Seen::Node(Node::Math { width, subtype, .. }) if etex => {
                     let s = *subtype;
                     if texxet {
                         if lr::is_end(s) {

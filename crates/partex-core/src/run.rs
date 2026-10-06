@@ -624,8 +624,9 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         }
         // `initialize` (§8): the global variables got their starting values
         // in `Tex::new`; now the INITEX table entries.
-        if self.params.flavor == crate::params::Flavor::PdfTex {
-            // pdfTeX: the timer starts (a read of the host's clock)
+        if self.params.flavor != crate::params::Flavor::Tex {
+            // pdfTeX and `XeTeX`: the timer starts (a read of the host's
+            // clock)
             let e = self.host.seconds_and_micros();
             self.clock_read(crate::track::Query::TimerStart, &e);
             self.set_epoch(e);
@@ -717,8 +718,8 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         }
         self.fix_date_and_time();
         self.fonts.used.fill(false);
-        if self.params.flavor == crate::params::Flavor::PdfTex {
-            // pdfTeX: the default random seed
+        if self.params.flavor != crate::params::Flavor::Tex {
+            // pdfTeX and `XeTeX`: the default random seed
             let (s, m) = self.epoch();
             self.random.random_seed = m.wrapping_mul(1000).wrapping_add(s % 1_000_000);
             self.random.init_randoms(self.random.random_seed);
