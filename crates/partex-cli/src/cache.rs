@@ -1,6 +1,6 @@
 //! The on-disk cache behind `Host::cache_get`/`cache_put`: one file per
-//! key under `$PARTEX_CACHE_DIR`, else `$XDG_CACHE_HOME/partex`, else
-//! `~/.cache/partex`. `PARTEX_CACHE=0` turns it off.
+//! key under `$PARTEX_CACHE_DIR`, else `$XDG_CACHE_HOME/phitex`, else
+//! `~/.cache/phitex`. `PARTEX_CACHE=0` turns it off.
 //!
 //! Keys are qualified by this executable (its path, length and time):
 //! a value is only read back by the build that wrote it, so the layout of
@@ -24,12 +24,7 @@ fn setup() -> Option<&'static (PathBuf, u128)> {
             }
             let dir = std::env::var_os("PARTEX_CACHE_DIR")
                 .map(PathBuf::from)
-                .or_else(|| {
-                    std::env::var_os("XDG_CACHE_HOME").map(|d| PathBuf::from(d).join("partex"))
-                })
-                .or_else(|| {
-                    std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache/partex"))
-                })?;
+                .or_else(|| user_cache("phitex"))?;
             let exe = std::env::current_exe().ok()?;
             let meta = std::fs::metadata(&exe).ok()?;
             let time = meta
@@ -43,6 +38,29 @@ fn setup() -> Option<&'static (PathBuf, u128)> {
             Some((dir, build))
         })
         .as_ref()
+}
+
+/// `name` in the user's cache directory (`$XDG_CACHE_HOME`, else
+/// `~/.cache`).
+pub fn user_cache(name: &str) -> Option<PathBuf> {
+    std::env::var_os("XDG_CACHE_HOME")
+        .map(|d| PathBuf::from(d).join(name))
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache").join(name)))
+}
+
+/// The cache directory, if caching is on.
+pub fn dir() -> Option<PathBuf> {
+    setup().map(|(d, _)| d.clone())
+}
+
+/// The cache directory of the builds named partex, which a build named
+/// phitex never reads (`phitex clean --all` removes it), unless
+/// `PARTEX_CACHE_DIR` names the directory.
+pub fn legacy_dir() -> Option<PathBuf> {
+    if std::env::var_os("PARTEX_CACHE_DIR").is_some() {
+        return None;
+    }
+    user_cache("partex").filter(|d| d.is_dir())
 }
 
 /// The file of `key`, if caching is on.

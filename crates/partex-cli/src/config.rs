@@ -1,9 +1,9 @@
 //! What the modern command line builds (DESIGN.md, "Command line and
-//! terminal"): `partex.toml` if there is one, else the file named on the
+//! terminal"): `phitex.toml` if there is one, else the file named on the
 //! command line, with the `% !TEX program` and `% !TEX root` magic
 //! comments its first lines may hold.
 //!
-//! `partex.toml` is read as the small subset of TOML it needs: `key =
+//! `phitex.toml` is read as the small subset of TOML it needs: `key =
 //! value` lines with quoted strings, booleans and integers, `#` comments,
 //! and `[build]` (or any other) table headers, which are ignored.
 
@@ -20,16 +20,16 @@ pub struct Config {
     /// Where the outputs go (`-output-directory`).
     pub output_dir: Option<String>,
     pub shell_escape: Option<bool>,
-    /// A program to show the PDF with (`partex watch --open`).
+    /// A program to show the PDF with (`phitex watch --open`).
     pub viewer: Option<String>,
     /// Where to copy the final PDF after each successful build (`copy-pdf
     /// = true | "dir"`).
     pub copy_pdf: Option<CopyPdf>,
-    /// `partex watch` in machine mode (`machine = false`: the session
+    /// `phitex watch` in machine mode (`machine = false`: the session
     /// path).
     pub machine: Option<bool>,
     /// Where machine-mode builds are kept across processes (`store =
-    /// "dir"`, relative to `partex.toml`'s directory; DESIGN.md §7.9).
+    /// "dir"`, relative to `phitex.toml`'s directory; DESIGN.md §7.9).
     pub store: Option<String>,
 }
 
@@ -38,16 +38,20 @@ pub struct Config {
 pub enum CopyPdf {
     /// `false`: don't copy.
     Off,
-    /// `true`: into the directory partex was invoked from.
+    /// `true`: into the directory phitex was invoked from.
     Invocation,
-    /// A directory; a relative one is relative to `partex.toml`'s.
+    /// A directory; a relative one is relative to `phitex.toml`'s.
     Dir(String),
 }
 
 /// The name of the configuration file.
-pub const FILE: &str = "partex.toml";
+pub const FILE: &str = "phitex.toml";
 
-/// Parse `partex.toml`'s `text`.
+/// Its name in the builds named partex, still read where there is no
+/// [`FILE`].
+const LEGACY: &str = "partex.toml";
+
+/// Parse `phitex.toml`'s `text`.
 pub fn parse(text: &str) -> Result<Config, String> {
     let mut c = Config::default();
     for (n, line) in text.lines().enumerate() {
@@ -131,13 +135,16 @@ fn unquote(v: &str) -> Option<String> {
     Some(out)
 }
 
-/// `partex.toml` in `dir` or the nearest directory above it: the
-/// directory it is in, and its settings.
+/// `phitex.toml` (or the older `partex.toml`) in `dir` or the nearest directory
+/// above it: the directory it is in, and its settings.
 pub fn find(dir: &Path) -> Result<Option<(PathBuf, Config)>, String> {
     for d in dir.ancestors() {
-        let f = d.join(FILE);
-        if let Ok(text) = std::fs::read_to_string(&f) {
-            return parse(&text).map(|c| Some((d.to_path_buf(), c)));
+        for name in [FILE, LEGACY] {
+            if let Ok(text) = std::fs::read_to_string(d.join(name)) {
+                return parse(&text)
+                    .map(|c| Some((d.to_path_buf(), c)))
+                    .map_err(|e| e.replacen(FILE, name, 1));
+            }
         }
     }
     Ok(None)
@@ -229,7 +236,7 @@ mod tests {
         assert!(parse("copy-pdf = yes").is_err());
         assert_eq!(
             parse("mian = \"x\"").unwrap_err(),
-            "partex.toml:1: unknown key `mian`"
+            "phitex.toml:1: unknown key `mian`"
         );
         assert!(parse("main = paper.tex").is_err());
     }

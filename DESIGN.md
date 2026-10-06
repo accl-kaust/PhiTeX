@@ -206,16 +206,17 @@ the graph of chapter 3, not from a pipeline split.
   message, help, the whole input stack as frames, and suggestions. It
   is rendered rustc-style.
 - **Command lines.** Under an engine's name (`pdflatex`, `tex`, …) or
-  with `partex --compat=NAME`, partex speaks that engine's web2c
-  command line. Bare `partex` is the modern command line:
+  with `phitex --compat=NAME`, PhiTeX speaks that engine's web2c
+  command line. Bare `phitex` is the modern command line:
   - `build` runs to the fixpoint, with BibTeX and makeindex in process;
   - `watch` is the watch loop;
   - `check` makes one pass without writing;
   - `why` says what the last build did;
   - `trace` writes a Perfetto timeline;
-  - `clean` removes what the last build wrote.
+  - `clean` removes what the last build wrote and saved (`--all`:
+    everything saved, for every document).
 
-  It is configured by `partex.toml` and `% !TEX` comments.
+  It is configured by `phitex.toml` and `% !TEX` comments.
 - **The terminal** is drawn from events, not from the log: warnings
   and notes come as data from the host, and LaTeX's warnings are
   grouped and deduplicated (`render.rs`, `warnings.rs`, `snippet.rs`).
@@ -230,20 +231,45 @@ the graph of chapter 3, not from a pipeline split.
     it, so it changes no output. A build from the start shows a bar and
     the time left from the last such build's totals, kept in the cache.
     A build quicker than 150 ms never shows the line.
-  - *The result* is one line: `Finished paper.pdf · 12 pages · 84 KB ·
-    2 passes · 1.31 s`, the file a hyperlink (OSC 8) where the terminal
-    has them.
-  - *`partex watch`* logs a line per rebuild (the time, the file and
-    line that changed, the result, the share of the commands run
-    again), the errors that are new in full and the warnings that are
-    new, under a footer (the last builds' times as a sparkline, the
-    keys). On a terminal in the foreground it reads keys (`r` rebuild,
-    `o` open, `w` warnings, `c` clear, `q` quit) with echo, line
-    editing and the signal keys off: Ctrl-C stops the watch after
-    saving its build (twice: at once), Ctrl-Z suspends it. A watchdog
-    `sh`, waiting on a pipe, restores the terminal's modes and cursor
-    if partex dies first. partex takes no dependency for this: the
-    terminal's size and modes are `stty`'s.
+  - *The passes* are a line each, with few numbers: `Pass 2  316
+    pages  1:14  (paper.toc changed)`, the files the pass before
+    changed being why it ran (a pass that ran part of the job says the
+    pages it made again). `-v` adds the commands run (again) and why.
+    A first pass that ran nothing says `Restored the saved build
+    (nothing changed)`.
+  - *The result* is one line: `Finished paper.pdf · 12 pages · 1.3 s`,
+    the file a hyperlink (OSC 8) where the terminal has them; `-v` adds
+    the size and the passes.
+  - *`phitex watch`* logs a line per rebuild: `18:51:14  ch05.tex:5
+    ✓ 228 ms · 2 warnings (w)`, the time, the file and line that
+    changed, the result, its time, and the errors and warnings counted
+    when they are not as many as before; each new error on a line of
+    its own, as TeX's `-file-line-error` puts it (`ch05.tex:7:
+    Undefined control sequence \foo`). `w` shows them all, rustc-style.
+    Below the log a status line, `── watching paper.tex → paper.pdf ·
+    ? help`, is drawn in place (`-v`: the last builds' times as a
+    sparkline). The cursor waits at the start of the status line, not
+    at its end, so that clearing it before a line is printed above
+    takes all of it even after it wrapped (a terminal made narrower
+    reflows it); it is cut to the terminal's width, looked at once a
+    second. On a terminal in the foreground the watch reads keys from
+    its start, the first build included (`?` help, `r` rebuild, `o`
+    open, `w` errors and warnings, `c` clear, `q` quit), with echo,
+    line editing and the signal keys off: a key pressed while a build
+    runs is not echoed into the live line, and keys pressed meanwhile
+    are answered once, not once a press (help is not printed again
+    while it is the last thing shown; the viewer is not started again
+    while it runs). Ctrl-C stops the watch after saving its build
+    (twice: at once), Ctrl-Z suspends it. A watchdog `sh`, waiting on a
+    pipe, restores the terminal's modes and cursor if PhiTeX dies
+    first. PhiTeX takes no dependency for this: the terminal's size and
+    modes are `stty`'s.
+  - *`phitex clean`* removes the job's outputs, its saved session, and
+    its saved build and no-op record in the store (the packs only it
+    named go with the store's collection), so the next build starts
+    over; it says how much the store keeps for other documents.
+    `phitex clean --all` removes the whole store and every saved
+    session and record (the formats stay).
   - Elsewhere (a pipe, a file, CI) the same lines come out plain, as
     they happen, and nothing is redrawn. `--color`, `NO_COLOR`,
     `CLICOLOR_FORCE` and `CLICOLOR` choose the colours.

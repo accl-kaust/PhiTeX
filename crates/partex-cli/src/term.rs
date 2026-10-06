@@ -346,6 +346,7 @@ fn escape_len(s: &str) -> usize {
 }
 
 /// `s` without its escape sequences.
+#[cfg(test)]
 #[must_use]
 pub fn strip(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
