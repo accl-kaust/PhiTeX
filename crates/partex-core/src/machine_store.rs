@@ -65,11 +65,12 @@ partex_engine::persist_enum!(MCell {
     PdfLast(a0),
     FinalNum(a0),
     OfFinal(a0),
-    NumState,
+    NumState(a0),
     PdfWord(a0),
     Marks,
     Origin(a0),
     IntCmp(a0, a1, a2, a3),
+    ObjCount,
 });
 
 partex_engine::persist_struct!(PageValue { builder, list });
@@ -834,9 +835,10 @@ pub fn census<H: StoreHost + 'static>(b: &Build<TexMachine<H>>) -> BTreeMap<&'st
                 MCell::Marks => "g.marks",
                 MCell::FinalNum(_) => "g.final num",
                 MCell::OfFinal(_) => "g.of final",
-                MCell::NumState => "g.num state",
+                MCell::NumState(_) => "g.num state",
                 MCell::Origin(_) => "g.origin",
                 MCell::IntCmp(..) => "g.int cmp",
+                MCell::ObjCount => "g.obj count",
                 MCell::Sealed(..) => "g.sealed",
                 MCell::Written(_) => "g.written",
                 MCell::Eqtb(p) if *p >= crate::xregs::EXT_BASE => "g.xreg",
@@ -1031,9 +1033,10 @@ mod tests {
             MCell::Marks,
             MCell::FinalNum(7),
             MCell::OfFinal(8),
-            MCell::NumState,
+            MCell::NumState(3),
             MCell::Origin(187),
             MCell::IntCmp(187, 5, b'<', 99_999),
+            MCell::ObjCount,
             MCell::Sealed(1, 2),
             MCell::Written(4),
             MCell::Eqtb(5),
@@ -1064,9 +1067,10 @@ mod tests {
                 MCell::Marks => 26,
                 MCell::FinalNum(_) => 22,
                 MCell::OfFinal(_) => 23,
-                MCell::NumState => 24,
+                MCell::NumState(_) => 24,
                 MCell::Origin(_) => 27,
                 MCell::IntCmp(..) => 28,
+                MCell::ObjCount => 29,
                 MCell::Sealed(..) => 5,
                 MCell::Written(_) => 6,
                 // (a register above 255 is an eqtb cell past eqtb)
@@ -1084,7 +1088,7 @@ mod tests {
                 MCell::FontOrder => 18,
             });
         }
-        assert_eq!(kinds.len(), 29, "a sample of every kind of cell");
+        assert_eq!(kinds.len(), 30, "a sample of every kind of cell");
         v
     }
 

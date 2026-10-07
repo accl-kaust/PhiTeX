@@ -2014,6 +2014,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             seal_log: _,
             stop_before_ship: _,
             ship_stop,
+            stop_after_ship: _,
             // (SSA mode's switch and stop, never a machine's)
             stop_after_load: _,
             load_stop: _,

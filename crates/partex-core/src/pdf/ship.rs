@@ -755,8 +755,11 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             let mut w = self.pdf.objs.walk(super::objtab::OBJ_TYPE_FONT);
             while let Some(i) = w.next(&self.pdf.objs) {
                 let k = self.pdf.objs.get(i).info.num();
+                // (the same map line: pdfTeX compares the entries' pointers;
+                // an entry is a value here, which a restored or loaded
+                // state holds in an `Arc` of its own)
                 let same_map = match (&map, &self.fm_entry(k)) {
-                    (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+                    (Some(a), Some(b)) => Arc::ptr_eq(a, b) || a == b,
                     _ => false,
                 };
                 let k_name = self.font_name_bytes(k);

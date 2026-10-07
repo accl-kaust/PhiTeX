@@ -273,9 +273,100 @@ impl WrittenBuf {
 #[derive(Default)]
 pub struct MemoStore {
     map: Mutex<BTreeMap<u128, partex_core::host::Memo>>,
+    deflated: Mutex<Deflated>,
+}
+
+/// The streams the link compressed, by their contents (`Host::deflate`):
+/// a page's content stream is compressed again only when its bytes
+/// change. Kept across processes in the store (`Watch`'s
+/// `deflated_file`): a build after an edit compresses only the pages that
+/// changed, as a watch does.
+#[derive(Default)]
+struct Deflated {
+    /// The file the table is kept in, and whether it was read.
+    file: Option<std::path::PathBuf>,
+    read: bool,
+    /// Each stream compressed (by its key), and whether this process
+    /// used it: those are kept.
+    streams: BTreeMap<u128, (Arc<[u8]>, bool)>,
+    /// The bytes of the streams used.
+    used: usize,
+}
+
+/// The bound on the bytes of compressed streams kept for the next
+/// process.
+const DEFLATED_MAX: usize = 1 << 29;
+
+impl Deflated {
+    /// The table kept in `file`, read once.
+    fn read(&mut self) {
+        if self.read {
+            return;
+        }
+        self.read = true;
+        let Some(bytes) = self.file.as_ref().and_then(|f| std::fs::read(f).ok()) else {
+            return;
+        };
+        // (each stream: its key, its length, its bytes; a short file
+        // ends the table where it breaks)
+        let mut rest = &bytes[..];
+        while rest.len() >= 20 {
+            let key = u128::from_le_bytes(rest[..16].try_into().unwrap_or_default());
+            let n = u32::from_le_bytes(rest[16..20].try_into().unwrap_or_default()) as usize;
+            let Some(z) = rest.get(20..20 + n) else { break };
+            self.streams.entry(key).or_insert((Arc::from(z), false));
+            rest = &rest[20 + n..];
+        }
+    }
+
+    /// Stream `key`, marked used.
+    fn get(&mut self, key: u128) -> Option<Arc<[u8]>> {
+        self.read();
+        let (z, used) = self.streams.get_mut(&key)?;
+        if !*used {
+            *used = true;
+            self.used += z.len();
+        }
+        Some(z.clone())
+    }
+
+    fn put(&mut self, key: u128, z: Arc<[u8]>) {
+        let n = z.len();
+        if self.used + n <= DEFLATED_MAX
+            && self.streams.insert(key, (z, true)).is_none_or(|(_, u)| !u)
+        {
+            self.used += n;
+        }
+    }
+
+    /// Write the streams used to the file (whole: renamed into place).
+    fn write(&self) {
+        let Some(file) = &self.file else { return };
+        let mut out = Vec::with_capacity(self.used + 20 * self.streams.len());
+        for (key, (z, used)) in &self.streams {
+            if *used && let Ok(n) = u32::try_from(z.len()) {
+                out.extend_from_slice(&key.to_le_bytes());
+                out.extend_from_slice(&n.to_le_bytes());
+                out.extend_from_slice(z);
+            }
+        }
+        if let Some(dir) = file.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let tmp = file.with_extension(format!("tmp{}", std::process::id()));
+        if std::fs::write(&tmp, &out).is_ok() && std::fs::rename(&tmp, file).is_err() {
+            let _ = std::fs::remove_file(&tmp);
+        }
+    }
 }
 
 impl MemoStore {
+    fn deflated(&self) -> std::sync::MutexGuard<'_, Deflated> {
+        self.deflated
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     fn get(&self, key: u128) -> Option<partex_core::host::Memo> {
         self.map
             .lock()
@@ -298,6 +389,25 @@ impl MemoStore {
 }
 
 impl MachineHost {
+    /// Keep the streams compressed in `file` across processes
+    /// ([`Deflated`]): read before the first stream is compressed.
+    fn keep_deflated(&self, file: std::path::PathBuf) {
+        if let Some(memo) = &self.memo {
+            let mut d = memo.deflated();
+            if d.file.as_ref() != Some(&file) {
+                d.file = Some(file);
+                d.read = false;
+            }
+        }
+    }
+
+    /// Write the streams this process used to the file they are kept in.
+    fn write_deflated(&self) {
+        if let Some(memo) = &self.memo {
+            memo.deflated().write();
+        }
+    }
+
     fn new(mut native: NativeHost) -> Self {
         let clock = Clock::read(&mut native);
         let (now, epoch) = (clock.now, clock.epoch);
@@ -577,16 +687,17 @@ impl Host for MachineHost {
     }
 
     fn deflate(&mut self, level: i32, data: &[u8]) -> Option<Vec<u8>> {
-        // (content-keyed: a page or font shipped again compresses alike)
+        // (content-keyed: a page or font shipped again compresses alike,
+        // in this process or, through the store, the next)
         let Some(memo) = &self.memo else {
             return crate::zlib::deflate_stream(level, data);
         };
         let key = partex_core::StableHasher::of(&(b"deflate", level, data));
-        if let Some(z) = memo.get(key).and_then(|m| m.downcast::<Vec<u8>>().ok()) {
-            return Some((*z).clone());
+        if let Some(z) = memo.deflated().get(key) {
+            return Some(z.to_vec());
         }
         let z = crate::zlib::deflate_stream(level, data)?;
-        memo.put(key, Arc::new(z.clone()));
+        memo.deflated().put(key, Arc::from(&z[..]));
         Some(z)
     }
 
@@ -1619,6 +1730,7 @@ fn process_switches() {
     partex_core::machine::set_pdf_word_cells(!off("PARTEX_MACHINE_PDF_WORDS"));
     partex_core::machine::set_mark_cells(!off("PARTEX_MACHINE_MARKS"));
     partex_core::machine::set_relocate(!off("PARTEX_MACHINE_RELOCATE"));
+    partex_core::machine::set_ship_layer(!off("PARTEX_MACHINE_SHIP_LAYER"));
     partex_core::machine::set_tree_names(!off("PARTEX_MACHINE_TREE_NAMES"));
     partex_core::machine::set_num_answers(!off("PARTEX_MACHINE_NUM_ANSWERS"));
     partex_core::machine::set_canon(
@@ -2061,7 +2173,7 @@ fn rest_fields(
 /// class (a span with two causes counts for both; `sole`: its only
 /// cause). The rebuild compares a span as a whole, so its later regions
 /// take its first region's cause.
-#[allow(clippy::too_many_lines)] // (one report)
+#[allow(clippy::too_many_lines, clippy::cast_precision_loss)] // (one report)
 fn dump_audit(b: &Build<Machine>, n: usize) {
     #[derive(Default)]
     struct Tally {
@@ -2069,6 +2181,18 @@ fn dump_audit(b: &Build<Machine>, n: usize) {
         carried: (usize, u64),
         sole: (usize, u64),
         real: (usize, u64),
+    }
+    // (the regions run again that observed the numbering, and how)
+    let obs = &b.final_state().census().observers;
+    for (i, t) in b.traces().enumerate() {
+        if t.born == b.generation()
+            && let Some((f, o, w, k)) = obs.get(&t.exit)
+        {
+            eprintln!(
+                "phitex: audit: rebuild {n} new region {i} (cost {}) observed the numbering: final_num {f}, of_final {o}, whole {w}, {k} distinct",
+                t.cost
+            );
+        }
     }
     for (i, why, c) in &b.unrelocated {
         let what = match c {
@@ -2236,7 +2360,7 @@ fn dump_audit(b: &Build<Machine>, n: usize) {
         }
     }
     eprintln!(
-        "phitex: audit: rebuild {n}: {} spans, {} old regions, {} commands re-run; spurious {} regions {} commands; carried {} regions {} commands; relocated {} regions",
+        "phitex: audit: rebuild {n}: {} spans, {} old regions, {} commands re-run; spurious {} regions {} commands; carried {} regions {} commands; relocated {} regions; ms: run {:.0}, replay {:.0} ({} restores), compare {:.0}, other {:.0}",
         b.audit.len(),
         sums[2].0,
         sums[2].1,
@@ -2244,7 +2368,12 @@ fn dump_audit(b: &Build<Machine>, n: usize) {
         sums[0].1,
         sums[1].0,
         sums[1].1,
-        b.stats.relocated_regions
+        b.stats.relocated_regions,
+        b.stats.run_ns as f64 / 1e6,
+        b.stats.replay_ns as f64 / 1e6,
+        b.stats.restores,
+        b.stats.compare_ns as f64 / 1e6,
+        b.stats.other_ns as f64 / 1e6,
     );
     let mut ranked: Vec<(&String, &Tally)> = tally.iter().collect();
     let key = |t: &Tally| (t.spurious.1 + t.carried.1, t.real.1);
@@ -3463,6 +3592,9 @@ impl Watch {
     fn link(&mut self, touched: Option<&std::collections::BTreeSet<u64>>) -> std::io::Result<()> {
         let threads = partex_incr::Threads::available();
         let mut deflating = self.b.final_state().tex().host().clone();
+        if let Some(file) = self.deflated_file() {
+            deflating.keep_deflated(file);
+        }
         let mut deflate = |level, data: &[u8]| deflating.deflate(level, data);
         let cached = !std::env::var("PARTEX_MACHINE_LINK_CACHE").is_ok_and(|v| v == "0");
         let linked = if cached {

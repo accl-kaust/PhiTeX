@@ -464,12 +464,15 @@ fn record_with<M: Machine, R: RegionRecorder<M>>(
                     out.push(rec.cut(m));
                     return (out, Stop::Synced(j), total);
                 }
-                // The chooser: cut past `file_cut` at a file edge or a
-                // clean point (level 2 or 3), once the region is big
-                // enough at any candidate of level 1 or more, or anywhere
-                // past twice the grain.
+                // The chooser: cut at a layer's edge always, past
+                // `file_cut` at a file edge or a clean point (level 2 or
+                // 3), once the region is big enough at any candidate of
+                // level 1 or more, or anywhere past twice the grain.
                 let file = level >= 2 && grain.file_cut > 0 && cost >= grain.file_cut;
-                if file || (cost >= g && (level > 0 || cost >= 2 * g)) {
+                if level >= crate::machine::LAYER
+                    || file
+                    || (cost >= g && (level > 0 || cost >= 2 * g))
+                {
                     total += cost;
                     m.prepare_cut(&mut rec);
                     out.push(rec.cut(m));
@@ -851,7 +854,7 @@ impl<M: Machine> Build<M> {
             let mut j = i + 1;
             while j < keys.len() {
                 let t = &self.seq[&keys[j]];
-                if t.born > old || acc.cost() + t.cost > grain {
+                if t.born > old || acc.cost() + t.cost > grain || M::layer_edge(&t.entry) {
                     break;
                 }
                 let k0 = keys[i];
@@ -1408,7 +1411,19 @@ impl<M: Machine> Build<M> {
                         delta,
                     })
                     .collect();
-                let r = self.relocate_region(k, &d, &sh, generation);
+                // (answers about a cell of D are checked relocated at the
+                // region's entry: S there first)
+                let t = &self.seq[&k];
+                if t.guards
+                    .iter()
+                    .any(|(g, _)| M::derived(g).is_some_and(|src| d.contains_key(&src)))
+                    && let Some(p) = pending.take()
+                {
+                    let t0 = now();
+                    stats.restores += usize::from(self.replay_span(&mut s, p, k, &d, &moved));
+                    stats.replay_ns += now() - t0;
+                }
+                let r = self.relocate_region(&mut s, k, &d, &sh, generation);
                 if cfg.audit
                     && let Err((why, c)) = &r
                 {
@@ -1724,7 +1739,18 @@ impl<M: Machine> Build<M> {
             .collect();
         match span.as_slice() {
             [] => {}
-            [t] => t.apply(s, &[]),
+            [t] => {
+                // (its writes, then what differs from the old run after it
+                // that setting its writes, a machine state among them, set
+                // back to the old run's values: `exit_patch`)
+                let patch = self.exit_patch(s, (from, to), (t.born, t.moved != 0), d);
+                t.apply(s, &[]);
+                for (c, v) in patch {
+                    if !M::accumulates(&c) {
+                        s.set(&c, v);
+                    }
+                }
+            }
             [.., last]
                 if s.replay_exit(
                     &span,
@@ -1747,10 +1773,16 @@ impl<M: Machine> Build<M> {
                         }
                     }
                 }
+                let patch = self.exit_patch(s, (from, to), (last.born, last.moved != 0), d);
                 let writes: Vec<(&M::Cell, &M::Value)> = writes.into_iter().collect();
                 s.set_all(&writes);
                 for (c, v) in adds {
                     s.set(c, Some(v.clone()));
+                }
+                for (c, v) in patch {
+                    if !M::accumulates(&c) {
+                        s.set(&c, v);
+                    }
                 }
                 s.seek(&last.exit);
             }
@@ -1805,6 +1837,7 @@ impl<M: Machine> Build<M> {
     /// ([`Build::unrelocated`]).
     fn relocate_region(
         &self,
+        m: &mut M,
         k: u64,
         d: &BTreeMap<M::Cell, Option<M::Value>>,
         sh: &[Shift<M::Cell>],
@@ -1817,9 +1850,25 @@ impl<M: Machine> Build<M> {
             if !t.holes.is_empty() {
                 return Err(fail("holes"));
             }
+            if let Some(src) = M::derived(c)
+                && d.contains_key(&src)
+            {
+                // (an answer about a cell that differs: renamed and
+                // relocated, and checked at the entry, where `m` is)
+                let (g, w) = m.relocate_answer(c, *v, sh).ok_or_else(|| fail("answer"))?;
+                guards.push((g, w));
+                continue;
+            }
             if let Some(nv) = d.get(c) {
                 if M::accumulates(c) {
-                    return Err(fail("accumulates"));
+                    // (read only through its answers, checked above: its
+                    // guard takes the value it has now, as a region kept by
+                    // its answers does)
+                    if !t.answered(c) {
+                        return Err(fail("accumulates"));
+                    }
+                    guards.push((c.clone(), version_of(&m.get(c))));
+                    continue;
                 }
                 let nv = nv.as_ref().ok_or_else(|| fail("absent"))?;
                 let old = self.old_value_before(c, k).ok_or_else(|| fail("absent"))?;
@@ -1829,7 +1878,7 @@ impl<M: Machine> Build<M> {
                 if version_of(&Some(&old)) != *v {
                     return Err(fail("unknown"));
                 }
-                let want = match M::relocate_value(c, &old, sh) {
+                let want = match m.relocate_value(c, &old, sh) {
                     Ok(Some(x)) => version_of(&Some(&x)),
                     Ok(None) => *v,
                     Err(()) => return Err(fail("guard")),
@@ -1850,7 +1899,7 @@ impl<M: Machine> Build<M> {
         guards.dedup_by(|a, b| a.0 == b.0);
         let mut writes = Vec::with_capacity(t.writes.len());
         for (c, v, ver) in &t.writes {
-            match M::relocate_value(c, v, sh) {
+            match m.relocate_value(c, v, sh) {
                 Ok(None) => writes.push((c.clone(), v.clone(), *ver)),
                 Ok(Some(nv)) if !M::accumulates(c) => {
                     let h = version_of(&Some(&nv));

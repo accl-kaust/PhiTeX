@@ -366,6 +366,11 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                 }
             } else if let Node::Box(b) = cur_box {
                 self.ship_out(&b)?;
+                if self.stop_after_ship {
+                    // (a machine's page layer: the region that shipped
+                    // ends with the command, `run.rs`)
+                    self.ship_stop = 2;
+                }
             }
         }
         Ok(())

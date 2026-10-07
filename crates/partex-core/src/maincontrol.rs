@@ -134,6 +134,9 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                         // (resumed: this command was counted)
                         self.at_checkpoint = false;
                         self.load_stop = 0;
+                        if self.ship_stop == 3 {
+                            self.ship_stop = 0;
+                        }
                         if core::mem::take(&mut self.graf_stop) {
                             // (a paragraph's lines go on here, on the line
                             // its level began on (`CleanPoint::Graf`, or the
@@ -190,6 +193,13 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                                 self.at_checkpoint = true;
                                 return Err(Jump::Checkpoint);
                             }
+                        }
+                        if self.ship_stop == 2 {
+                            // (a `\shipout` was the command before: the
+                            // page layer's boundary, `Tex::stopped_after_ship`)
+                            self.ship_stop = 3;
+                            self.at_checkpoint = true;
+                            return Err(Jump::Checkpoint);
                         }
                         if self.load_stop == 1 {
                             // (the command before read a file whole: a step

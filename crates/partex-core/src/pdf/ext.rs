@@ -356,7 +356,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             PDF_REFOBJ_NODE => {
                 // pdfTeX §1546
                 self.check_pdfoutput(b"\\pdfrefobj", true)?;
-                self.scan_int()?;
+                self.scan_obj_number()?;
                 let n = self.given_obj(self.cur_val);
                 self.pdf_check_obj(OBJ_TYPE_OBJ, n)?;
                 self.append_whatsit(|_| Ok(Some(PdfWhatsit::RefObj { objnum: n })))?;
@@ -373,7 +373,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                     b"\\pdfrefximage"
                 };
                 self.check_pdfoutput(name, true)?;
-                self.scan_int()?;
+                self.scan_obj_number()?;
                 let n = self.given_obj(self.cur_val);
                 self.pdf_check_obj(
                     if form {
@@ -684,7 +684,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         }
         let mut k = -1;
         if self.scan_keyword(b"useobjnum")? {
-            self.scan_int()?;
+            self.scan_obj_number()?;
             k = self.given_obj(self.cur_val);
             if k <= 0 || !self.obj_in_range(k) || self.pdf.objs.get(k).aux != Aux::None {
                 self.pdf_warning(
@@ -766,7 +766,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             return self.scan_optional_space();
         }
         let k = if self.scan_keyword(b"useobjnum")? {
-            self.scan_int()?;
+            self.scan_obj_number()?;
             let k = self.given_obj(self.cur_val);
             if k <= 0 || !self.obj_in_range(k) || self.pdf.objs.get(k).aux != Aux::None {
                 return self.pdf_error(b"ext1", b"invalid object number");

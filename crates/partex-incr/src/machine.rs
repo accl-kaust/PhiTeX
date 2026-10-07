@@ -7,6 +7,11 @@ use core::hash::Hash;
 use crate::hash::Version;
 use crate::link::LinkCtx;
 
+/// The candidate level of a *layer* edge ([`Step::Candidate`]): a region
+/// is always cut there, whatever its cost (TeX: just before and just
+/// after a page's shipout, which is then a region of its own).
+pub const LAYER: u8 = 4;
+
 /// What one [`Machine::step`] did.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Step {
@@ -14,7 +19,8 @@ pub enum Step {
     Continue,
     /// Ran; the machine is now at a candidate boundary of the given
     /// level (0 finest; higher levels are coarser, preferred cuts: a
-    /// blank line, a section, a file edge).
+    /// blank line, a section, a file edge; [`LAYER`] and above: always a
+    /// cut).
     Candidate(u8),
     /// The program has ended.
     Halt,
@@ -123,6 +129,13 @@ pub trait Machine: Clone + Send + Sync {
     /// against the others as its number does against theirs.
     fn dense_cell(_c: &Self::Cell) -> Option<u32> {
         None
+    }
+
+    /// Whether `b` is a [`LAYER`] edge (a region is always cut there):
+    /// [`crate::Build::coarsen`] merges no regions across one. By default
+    /// none is.
+    fn layer_edge(_b: &Self::Boundary) -> bool {
+        false
     }
 
     /// A region ends here: the runtime is about to read the cells the
@@ -234,12 +247,28 @@ pub trait Machine: Clone + Send + Sync {
         c.clone()
     }
 
+    /// Derived guard `c` ([`Machine::derived`]) holding `v`, an answer
+    /// about the numbers themselves, as a run whose numbers moved by
+    /// `shifts` would have recorded it (the question renamed, the answer
+    /// relocated), if `self`, the state at the region's entry, answers
+    /// so: the guard as it holds there. `None` if it does not or cannot
+    /// be told (the region then runs). By default `None`.
+    fn relocate_answer(
+        &mut self,
+        _c: &Self::Cell,
+        _v: Version,
+        _shifts: &[Shift<Self::Cell>],
+    ) -> Option<(Self::Cell, Version)> {
+        None
+    }
+
     /// Value `v` of cell `c` with every number of a moving origin
     /// relocated by `shifts`: `Ok(None)` if it holds none, `Err` if the
     /// machine cannot tell or relocate it (the region then runs). By
     /// default `Err`: no relocation.
     #[allow(clippy::result_unit_err)]
     fn relocate_value(
+        &mut self,
         _c: &Self::Cell,
         _v: &Self::Value,
         _shifts: &[Shift<Self::Cell>],

@@ -1280,9 +1280,26 @@ impl Watch {
         }
     }
 
+    /// The file the link's compressed streams are kept in across
+    /// processes (`PARTEX_DEFLATED=0`: none): the store's, by the build's
+    /// key.
+    pub(super) fn deflated_file(&self) -> Option<std::path::PathBuf> {
+        if std::env::var_os("PARTEX_DEFLATED").is_some_and(|v| v == "0") {
+            return None;
+        }
+        let (dir, key) = self.keeper.as_ref()?.place();
+        Some(dir.join("deflated").join(format!("{key:032x}")))
+    }
+
     /// Finish saving: at the end of the process, after the result.
     pub fn finish_saving(&mut self) {
         self.finish_quick();
+        if let Some(file) = self.deflated_file() {
+            // (a cold build links before it has a keeper)
+            let host = self.b.final_state().tex().host();
+            host.keep_deflated(file);
+            host.write_deflated();
+        }
         if let Some(k) = &mut self.keeper {
             k.finish(&self.b, self.cfg.grain);
         }

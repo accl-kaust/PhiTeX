@@ -244,6 +244,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             seal_log: _,
             stop_before_ship: _,
             ship_stop: _,
+            stop_after_ship: _,
             stop_after_load: _,
             load_stop: _,
             defer_page: _,
@@ -915,6 +916,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             seal_log: alloc::vec::Vec::new(),
             stop_before_ship: false,
             ship_stop: 0,
+            stop_after_ship: false,
             stop_after_load: false,
             load_stop: 0,
             defer_page: false,
@@ -1016,6 +1018,8 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         self.stop_before_ship.save(s);
         s.mark("x.ship_stop");
         self.ship_stop.save(s);
+        s.mark("x.stop_after_ship");
+        self.stop_after_ship.save(s);
         s.mark("x.par_start");
         self.par_start.save(s);
         s.mark("x.fire_pending");
@@ -1063,6 +1067,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         self.seal_log = Persist::load(l)?;
         self.stop_before_ship = Persist::load(l)?;
         self.ship_stop = Persist::load(l)?;
+        self.stop_after_ship = Persist::load(l)?;
         self.par_start = Persist::load(l)?;
         self.fire_pending = Persist::load(l)?;
         self.defer_fire = Persist::load(l)?;

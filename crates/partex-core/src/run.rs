@@ -427,6 +427,19 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         self.ship_stop == 1
     }
 
+    /// Stop (or not) for a checkpoint at the command after each
+    /// `\shipout` (a machine's page layer: the shipout is a region of its
+    /// own, between this stop and the one before it).
+    pub fn set_stop_after_ship(&mut self, on: bool) {
+        self.stop_after_ship = on;
+    }
+
+    /// Whether the job stopped at the command after a `\shipout`.
+    #[must_use]
+    pub fn stopped_after_ship(&self) -> bool {
+        self.ship_stop == 3
+    }
+
     /// The number of commands main control has begun so far.
     pub fn commands(&self) -> u64 {
         self.commands
