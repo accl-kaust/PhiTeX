@@ -154,7 +154,7 @@ fn sealed_row(k: u128) -> u64 {
 }
 
 /// Does `n`, or anything inside it, hold a sealed line?
-fn has_sealed(n: &Node) -> bool {
+pub(crate) fn has_sealed(n: &Node) -> bool {
     match n {
         Node::Box(b) => b.seal.is_some() || b.list.iter().any(has_sealed),
         Node::Leaders(l) => has_sealed(&l.leader),

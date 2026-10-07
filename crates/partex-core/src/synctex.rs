@@ -1055,36 +1055,91 @@ pub struct File {
     pub bytes: Option<Vec<u8>>,
 }
 
+/// A build's `SyncTeX` file before it is gzipped: its names (as
+/// [`File`]'s), its text (none: no file), and whether it is gzipped.
+#[derive(Clone, Debug)]
+pub struct Rendered {
+    pub name: Vec<u8>,
+    pub other: Vec<u8>,
+    pub text: Option<Vec<u8>>,
+    pub gzip: bool,
+}
+
+impl Rendered {
+    /// The file, gzipped if it is to be, `deflate` being zlib's at level 6
+    /// in its zlib wrapper (the host's).
+    pub fn file(self, deflate: &mut dyn FnMut(&[u8]) -> Option<Vec<u8>>) -> File {
+        let gz = self.gzip;
+        let bytes = self.text.and_then(|text| {
+            if gz {
+                deflate(&text).and_then(|d| gzip(&text, &d))
+            } else {
+                Some(text)
+            }
+        });
+        File {
+            name: self.name,
+            other: self.other,
+            bytes,
+        }
+    }
+}
+
 /// The `SyncTeX` file of a build from its `events` in program order (a
 /// machine-mode build's regions', DESIGN 4.5), as pdfTeX's controller
 /// writes it for command line option `cli` ([`NO_OPTION`]: none, the
-/// document set `\synctex`) and job `job`: the places are inline
-/// (`Side::INLINE`), and `deflate` is zlib's at level 6 in its zlib
-/// wrapper (the host's).
+/// document set `\synctex`) and job `job`, before it is gzipped
+/// ([`Rendered::file`]): the places are inline (`Side::INLINE`).
 pub fn render<'a>(
     cli: i32,
     job: &[u8],
     log_opened: bool,
     events: impl IntoIterator<Item = &'a Event>,
-    deflate: &mut dyn FnMut(&[u8]) -> Option<Vec<u8>>,
-) -> File {
+) -> Rendered {
+    render_numbered(cli, job, log_opened, events, &|n| n)
+}
+
+/// [`render`], each form's object number given by `num` (virtual object
+/// numbers: the link's).
+fn render_numbered<'a>(
+    cli: i32,
+    job: &[u8],
+    log_opened: bool,
+    events: impl IntoIterator<Item = &'a Event>,
+    num: &dyn Fn(i32) -> i32,
+) -> Rendered {
     let mut m = Machine::new(cli);
     m.read_option();
     m.job = Some(job.to_vec());
     let mut place = |h: Side| h.place().unwrap_or((0, 0));
     for e in events {
-        m.feed(e, &mut place);
+        match *e {
+            Event::RefForm { objnum, h, v } => m.feed(
+                &Event::RefForm {
+                    objnum: num(objnum),
+                    h,
+                    v,
+                },
+                &mut place,
+            ),
+            Event::Form { form, value } => m.feed(
+                &Event::Form {
+                    form: num(form),
+                    value,
+                },
+                &mut place,
+            ),
+            _ => m.feed(e, &mut place),
+        }
     }
     let f = m.terminate(log_opened);
     let (name, other) = file_names(job, f.gz_name);
-    let bytes = f.text.and_then(|text| {
-        if f.gzip {
-            deflate(&text).and_then(|d| gzip(&text, &d))
-        } else {
-            Some(text)
-        }
-    });
-    File { name, other, bytes }
+    Rendered {
+        name,
+        other,
+        text: f.text,
+        gzip: f.gzip,
+    }
 }
 
 /// `Tex::sync`.
@@ -1465,12 +1520,55 @@ impl<H: Host, T: Tracker> Tex<H, T> {
     }
 
     /// A copy of `list` (`\copy`, `\unhcopy`, `\unvcopy`): its rules made
-    /// now (pdfTeX copies every node's place but a rule's).
+    /// now (pdfTeX copies every node's place but a rule's), sealed lines
+    /// with rules inside opened first (machine mode's lines, `seal.rs`:
+    /// the copy shares the key of the line's contents, which keep the
+    /// rules' places).
     #[inline]
     pub(crate) fn sync_copied(&mut self, list: &mut [Node]) {
-        if self.sync.is_some() && has_rule(list) {
+        if self.sync.is_none() {
+            return;
+        }
+        if self.seal_lines && list.iter().any(crate::seal::has_sealed) {
+            self.unseal_ruled(list);
+        }
+        if has_rule(list) {
             let s = self.sync_here();
             replace_rules(list, s);
+        }
+    }
+
+    /// Open the sealed lines of `list` whose contents hold a rule or a
+    /// sealed line (each read: whether it holds one is what the copy's
+    /// records depend on).
+    fn unseal_ruled(&mut self, list: &mut [Node]) {
+        for n in list.iter_mut() {
+            if !crate::seal::has_sealed(n) {
+                continue;
+            }
+            match n {
+                Node::Box(b) => {
+                    if let Some(k) = b.seal {
+                        let c = self.sealed_content(k);
+                        if (has_rule(&c.list) || c.list.iter().any(crate::seal::has_sealed))
+                            && let Some(mut u) = self.unsealed_box(b)
+                        {
+                            self.unseal_ruled(&mut u.list);
+                            u.reversion();
+                            *b = Arc::new(u);
+                        }
+                    } else {
+                        let b = Arc::make_mut(b);
+                        self.unseal_ruled(&mut b.list);
+                        b.reversion();
+                    }
+                }
+                Node::Leaders(l) => self.unseal_ruled(core::slice::from_mut(&mut l.leader)),
+                Node::Ins(i) => self.unseal_ruled(&mut i.list),
+                Node::Adjust(a) => self.unseal_ruled(&mut a.list),
+                Node::Unset(u) => self.unseal_ruled(&mut u.list),
+                _ => {}
+            }
         }
     }
 
@@ -1909,26 +2007,37 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         Some(File { name, other, bytes })
     }
 
-    /// Machine mode: the build's `SyncTeX` file from its regions' `events`
-    /// in program order ([`render`]) for job `job` (the log's name without
+    /// Machine mode: the build's `SyncTeX` file from its regions' effects
+    /// `chunks` in program order ([`render`]) for job `job` (the log's name without
     /// `.log`: the job's, in the output directory) with `SyncTeX` as this
-    /// state, the build's final one, has it; `deflate` is zlib's at level
-    /// 6 in its zlib wrapper. Without `SyncTeX`, no file: the names an
+    /// state, the build's final one, has it. Without `SyncTeX`, no file:
+    /// the names an
     /// earlier run's would have, to remove (as `synctexterminate`).
-    pub fn synctex_regions_file<'a>(
+    pub fn synctex_regions_file(
         &self,
         job: &[u8],
-        events: impl IntoIterator<Item = &'a Event>,
-        deflate: &mut dyn FnMut(&[u8]) -> Option<Vec<u8>>,
-    ) -> File {
+        chunks: &[&[crate::effects::Effect]],
+    ) -> Rendered {
         if let Some(cli) = self.synctex_option() {
-            return render(cli, job, true, events, deflate);
+            // (forms' object numbers as the link numbers them)
+            let numbering = crate::effects::numbering_of(chunks).map(|(n, _)| n);
+            let num = |v: i32| numbering.as_ref().map_or(v, |n| n.of(v));
+            let events = chunks
+                .iter()
+                .flat_map(|c| c.iter())
+                .filter_map(|e| match e {
+                    crate::effects::Effect::Synctex(v) => Some(v.iter()),
+                    _ => None,
+                })
+                .flatten();
+            return render_numbered(cli, job, true, events, &num);
         }
         let (name, other) = file_names(job, true);
-        File {
+        Rendered {
             name,
             other,
-            bytes: None,
+            text: None,
+            gzip: true,
         }
     }
 

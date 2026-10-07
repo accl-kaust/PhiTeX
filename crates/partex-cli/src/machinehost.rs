@@ -1067,33 +1067,44 @@ fn report_link(
     );
 }
 
-/// A `SyncTeX` file's name, the other kind's, and its bytes (none: no
-/// file).
-type SyncFile = (Vec<u8>, Vec<u8>, Option<Vec<u8>>);
-
 /// The build's `SyncTeX` file (DESIGN 4.5): its regions' events rendered
-/// as the final state ends the job, its names in the output directory:
-/// the file's, the other kind's (an earlier run's, removed), and its bytes
-/// (none: no file, both removed). `None` without a job name.
-pub(crate) fn synctex_file(b: &Build<Machine>) -> Option<SyncFile> {
+/// as the final state ends the job, not gzipped yet, its names in the
+/// output directory. `None` without a log (no job name).
+pub(crate) fn synctex_text(b: &Build<Machine>) -> Option<partex_core::synctex::Rendered> {
     let fin = b.final_state().tex();
-    let events = b
-        .traces()
-        .flat_map(|t| t.effects.iter())
-        .filter_map(|e| match e {
-            partex_core::effects::Effect::Synctex(v) => Some(v.iter()),
-            _ => None,
-        })
-        .flatten();
+    let chunks: Vec<&[partex_core::effects::Effect]> =
+        b.traces().map(|t| t.effects.as_slice()).collect();
     // (the job's name as its log has it, in the output directory: the
     // final state's own strings may not be loaded yet)
     let host = fin.host();
     let log = host.opened.values().find(|n| n.ends_with(b".log"))?;
     let job = &log[..log.len() - 4];
-    let f = fin.synctex_regions_file(job, events, &mut |text| {
-        crate::zlib::deflate_once(6, text)
-    });
-    Some((f.name, f.other, f.bytes))
+    Some(fin.synctex_regions_file(job, &chunks))
+}
+
+/// Put rendered `SyncTeX` file `r` on disk: the other kind's removed (or
+/// both, with no file), gzipped as zlib writes it, renamed into place
+/// whole, unless its text is `last`'s (by its hash). The new hash.
+fn put_synctex(r: partex_core::synctex::Rendered, last: Option<u128>) -> Option<u128> {
+    let remove = |n: &[u8]| {
+        let p = crate::native::path(n);
+        if p.exists() {
+            let _ = std::fs::remove_file(p);
+        }
+    };
+    remove(&r.other);
+    let Some(text) = &r.text else {
+        remove(&r.name);
+        return None;
+    };
+    let h = quick::hash(text);
+    let p = crate::native::path(&r.name);
+    if last == Some(h) && p.exists() {
+        return last;
+    }
+    let f = r.file(&mut |t| crate::zlib::deflate_once(6, t));
+    let _ = write_whole(&p, &f.bytes?);
+    Some(h)
 }
 
 /// Write `bytes` to `path` whole: renamed into place, so a reader never
@@ -1104,28 +1115,10 @@ fn write_whole(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
     std::fs::rename(&tmp, path)
 }
 
-/// Write the build's `SyncTeX` file ([`synctex_file`]) and remove the
-/// other kind's (or both, with no file); `last` is the hash of the bytes
-/// last written, which are not written again. The new hash.
+/// Write the build's `SyncTeX` file ([`synctex_text`], [`put_synctex`]);
+/// `last` is the hash of the text last written. The new hash.
 fn write_synctex(b: &Build<Machine>, last: Option<u128>) -> Option<u128> {
-    let (name, other, bytes) = synctex_file(b)?;
-    let remove = |n: &[u8]| {
-        let p = crate::native::path(n);
-        if p.exists() {
-            let _ = std::fs::remove_file(p);
-        }
-    };
-    remove(&other);
-    let Some(bytes) = bytes else {
-        remove(&name);
-        return None;
-    };
-    let h = quick::hash(&bytes);
-    let p = crate::native::path(&name);
-    if last != Some(h) || !p.exists() {
-        let _ = write_whole(&p, &bytes);
-    }
-    Some(h)
+    put_synctex(synctex_text(b)?, last)
 }
 
 /// Link a build's output and write its files; the job's `history`.
@@ -2919,9 +2912,11 @@ pub struct Watch {
     /// What the last rebuild's edits changed: each file, and the first
     /// line it changed at (`paper.tex:18`).
     last_changes: Vec<String>,
-    /// The `SyncTeX` file as the last link's regions made it
-    /// ([`synctex_file`]).
-    synctex: Option<SyncFile>,
+    /// The `SyncTeX` file: the hash of its text as last written, its name
+    /// (none: no file), and the thread writing it.
+    synctex: Option<u128>,
+    synctex_name: Option<Vec<u8>>,
+    synctex_job: Option<std::thread::JoinHandle<Option<u128>>>,
 }
 
 /// Passes of a watch rebuild at most (as `-converge`).
@@ -3008,7 +3003,17 @@ impl Watch {
             keeper: None,
             last_changes: Vec::new(),
             synctex: None,
+            synctex_name: None,
+            synctex_job: None,
         }
+    }
+
+    /// Wait for the `SyncTeX` file being written: the hash of its text.
+    pub fn join_synctex(&mut self) -> Option<u128> {
+        if let Some(j) = self.synctex_job.take() {
+            self.synctex = j.join().ok().flatten();
+        }
+        self.synctex
     }
 
     /// What the last rebuild's edits changed: each file, and the first
@@ -3666,6 +3671,7 @@ impl Watch {
                 .files
                 .iter()
                 .map(|(n, b)| (n.clone(), b.len()))
+                .chain(self.synctex_name.iter().map(|n| (n.clone(), 0)))
                 .collect(),
             reports,
             unsettled: Vec::new(),
@@ -3729,6 +3735,16 @@ impl Watch {
             && !std::env::var("PARTEX_MACHINE_LINK_REUSE").is_ok_and(|v| v == "0");
         // (the regions put in since the last link: those resolved again)
         let touched = self.b.take_touched();
+        // (the `SyncTeX` file, rendered from the regions' events, again
+        // only when they changed; gzipped and written on a thread of its
+        // own while the link runs, waited for before the write returns)
+        if !reuse || self.synctex_name.is_none() {
+            let last = self.join_synctex();
+            if let Some(r) = synctex_text(&self.b) {
+                self.synctex_name = r.text.is_some().then(|| r.name.clone());
+                self.synctex_job = Some(std::thread::spawn(move || put_synctex(r, last)));
+            }
+        }
         if !reuse {
             self.link(touched.as_ref())?;
         }
@@ -3749,29 +3765,7 @@ impl Watch {
             let bytes = host.piped_out(*id, name, bytes.into()).into_owned();
             files.push((name.clone(), bytes, from_link));
         }
-        // (the `SyncTeX` file, rendered from the regions' events: again only
-        // when they changed)
-        if !reuse || self.synctex.is_none() {
-            self.synctex = synctex_file(&self.b);
-        }
-        if let Some((name, other, bytes)) = &self.synctex {
-            for n in [Some(other), bytes.is_none().then_some(name)]
-                .into_iter()
-                .flatten()
-            {
-                let p = crate::native::path(n);
-                if p.exists() {
-                    std::fs::remove_file(&p)?;
-                }
-            }
-            if let Some(b) = bytes {
-                files.push((name.clone(), b.clone(), true));
-            }
-        }
         let main = |n: &[u8]| n.ends_with(b".pdf") || n.ends_with(b".dvi");
-        // (renamed into place whole: a viewer or an editor reads them as
-        // they change)
-        let whole = |n: &[u8]| main(n) || n.ends_with(b".synctex.gz") || n.ends_with(b".synctex");
         files.sort_by_key(|(n, _, _)| !main(n));
         for (name, bytes, from_link) in &files {
             let p = crate::native::path(name);
@@ -3783,7 +3777,7 @@ impl Watch {
             if self.written.get(name) == Some(&h) && p.exists() {
                 continue;
             }
-            if whole(name) {
+            if main(name) {
                 write_whole(&p, bytes)?;
             } else {
                 std::fs::write(&p, bytes)?;
@@ -3811,6 +3805,9 @@ impl Watch {
         }
         let files: Vec<(Vec<u8>, Vec<u8>)> = files.into_iter().map(|(n, b, _)| (n, b)).collect();
         self.files = files;
+        if let Some(j) = self.synctex_job.take() {
+            self.synctex = j.join().ok().flatten();
+        }
         // (a page shipped is a note, as a session logs it)
         let mut diagnostics = linked.diagnostics.clone();
         if self.b.final_state().tex().host().notes() {

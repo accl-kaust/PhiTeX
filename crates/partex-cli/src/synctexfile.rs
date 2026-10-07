@@ -72,8 +72,8 @@ fn place(rest: &[u8], last_v: i64) -> Option<(i32, i32, i64, i64)> {
 
 /// Read a `SyncTeX` file's text: its inputs, and each sheet's records of
 /// boxes, runs of characters, kerns, glue, math nodes and rules (not those
-/// of forms), placed as pdfTeX places the page (`Magnification`, `Unit`,
-/// its origin an inch from the top left).
+/// of forms), in PDF points from the page's top left (`Magnification`,
+/// `Unit`).
 #[must_use]
 pub fn parse(text: &[u8]) -> Sync {
     let mut sync = Sync::default();
@@ -129,9 +129,10 @@ pub fn parse(text: &[u8]) -> Sync {
                 let (Some(at), 0) = (page, forms) else {
                     continue;
                 };
-                // (scaled points to PDF points, from the page's origin)
+                // (scaled points to PDF points: pdfTeX's walk counts from
+                // the page's top left, its origin's inch included)
                 #[allow(clippy::cast_precision_loss, reason = "points")]
-                let pt = |d: i64| d as f64 * unit * mag / 1000.0 / 65536.0 * 72.0 / 72.27 + 72.0;
+                let pt = |d: i64| d as f64 * unit * mag / 1000.0 / 65536.0 * 72.0 / 72.27;
                 sync.pages[at].push(Record {
                     tag,
                     line: line_no,
@@ -158,9 +159,9 @@ mod tests {
         assert_eq!(s.pages[0].len(), 3);
         let x = s.pages[0][2];
         assert_eq!((x.tag, x.line), (3, 7));
-        assert!((x.x - (2.0 * 72.0 / 72.27 + 72.0)).abs() < 1e-9);
+        assert!((x.x - 2.0 * 72.0 / 72.27).abs() < 1e-9);
         // (a compressed v is the last record's)
-        assert!((s.pages[0][1].y - 72.0).abs() < 1e-9);
+        assert!(s.pages[0][1].y.abs() < 1e-9);
         // (a form's records are not the page's)
         assert_eq!(s.pages[1].len(), 1);
         assert_eq!(s.pages[1][0].line, 10);

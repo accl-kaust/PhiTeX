@@ -228,7 +228,8 @@ the graph of chapter 3, not from a pipeline split.
 - **Command lines.** Under an engine's name (`pdflatex`, `tex`, …) or
   with `phitex --compat=NAME`, PhiTeX speaks that engine's web2c
   command line. Bare `phitex` is the modern command line:
-  - `build` runs to the fixpoint, with BibTeX and makeindex in process;
+  - `build` runs to the fixpoint, with BibTeX and makeindex in process,
+    and writes `<job>.synctex.gz` (4.5; `--no-synctex` not);
   - `watch` is the watch loop (`--ssa`: on the SSA runtime, 4.9);
   - `check` makes one pass without writing;
   - `why` says what the last build did;
@@ -2712,11 +2713,100 @@ track `cur_h` and `cur_v` as tex.web's `hlist_out` and `vlist_out` do
 walk's events, a sheet begun before "Completed box being shipped out"
 and ended after the memory statistics, and `Output:dvi` with offsets of
 1in (4736287sp) while pdfTeX's `pdf_output_value` is not positive. A
-session or persisted build with `SyncTeX` (saving one is refused):
-nodes' `Side` handles in the node codec, the places table, the
-controller's state and the steps' events would all have to be saved.
-The cost off and on is measured by `scripts/accl/tasks/synctex-ab.sh`
-(measured 2026-10-03).
+checkpoint session with `SyncTeX` (saving one is refused; `phitex
+build` and `watch` give it none). The cost off and on is measured by
+`scripts/accl/tasks/synctex-ab.sh` (measured 2026-10-03).
+
+**Machine mode** (2026-10-07). `phitex build` and `phitex watch` write
+`<job>.synctex.gz` by default, as `pdflatex -synctex=1` does (the
+engine command line gets `-synctex=1`; `--no-synctex` or `synctex =
+false` in `phitex.toml` leave it out, `--synctex` puts it back; the
+checkpoint sessions, `--no-machine`, never get it). `phitex clean`
+removes it.
+- *Places are values.* In machine mode a node's place is no table's
+  handle but the place itself, an *inline* `Side`
+  (`Side::INLINE`: `0xC000_0000`, the file's tag in 10 bits, the line
+  in 20, each saturated). It is equal, hashed (a box's own place in its
+  version too) and saved as the value it is: by `Persist for Side` and
+  by the node codec (tag 16 and the place before a rule, glue, leaders,
+  kern, math or unset node; a box's in its glue sign's top bit), so a
+  snapshot, a region's writes and the store carry it. A node made at
+  another line is another value: a region that made it again differs
+  from its old run until the page that holds it is shipped. A box
+  placed after it was versioned is versioned again. SSA's handles
+  (`Side::HASHED` below `INLINE`) are as before.
+- *No line moves.* SSA moves a reused step's lines through the edits
+  (`Edit::pos`); the machine needs no such map. A region depends on the
+  `Line` cells it read, by absolute line number, so a line inserted or
+  removed makes every later region of that file run again, and a node
+  placed at a moved line is a different value wherever it is held; a
+  region reused read the same lines at the same numbers, and its places
+  are right as they are. `PARTEX_MACHINE_RENAME=1`, which renames lines
+  so that such regions are reused, is off with `-synctex` (their nodes
+  would keep the lines they were placed at).
+- *Events are the regions' effects* (`Effect::Synctex`, as SSA's steps
+  have them), with the controller's flags a scalar row as in SSA mode.
+  The walk numbers its nodes from each ship's start (only told apart
+  within a ship), so a shipout region run again makes equal events. A
+  page whose boxes were reused but whose shipout region ran again (the
+  shipout layer, 4.1) reads its boxes from the state, places included.
+  The final region prints `SyncTeX written on …` from the flags.
+- *After each link* (each build and each settled pass), the regions'
+  events in program order are fed to a new controller
+  (`synctex::render`), the text gzipped as zlib's `gzopen` writes it
+  (`zlib::deflate_once`: no state kept to resume from), and written
+  renamed into place whole; again only when a region's effects changed
+  (an inline place is part of an event's equality). The job's name is
+  its log's (the final state's own strings may not be loaded yet). The
+  compat path (`PARTEX_MACHINE=1 phitex --compat=pdftex -synctex=N`)
+  writes it the same way.
+- *The store.* A machine state with `SyncTeX` from the command line is
+  saved (its places are in its nodes and its events in the traces): the
+  state's option is saved with it and the controller made again on load;
+  `phitex build` after a restart writes the same file. The events cost
+  the store a few bytes each, in the traces' blobs, not in the
+  snapshots. A document that turns `\synctex` on itself, with no
+  `-synctex`, works in a process, but its build is not saved.
+- *Found on the way*, in every mode: e-TeX's `hlist_out` makes a math
+  node a kern once it is out ("Adjust the LR stack"), so in a leader
+  box output again (a table of contents' dots) pdfTeX records it as a
+  kern; partex recorded `$` each time.
+- *Byte identity.* e2e `modern_synctex`: `include.tex` (three chapter
+  files) built by `phitex build` and by `pdflatex -synctex=1` in one
+  directory, run to its fixpoint: cold, then from the saved build after
+  a word typed, a comment line inserted (every later line of the chapter
+  moves, its boxes the same), a paragraph added (later pages move) and
+  the line taken out again: the `.synctex.gz` and the PDF identical each
+  time. The other `modern` cases' oracles run `-synctex=1` too (their
+  `.synctex.gz` compared with the directory masked), and `synctex` passes
+  with `PARTEX_MACHINE=1`. On the user's 323-page course (local), the
+  machine's file is a plain run's byte for byte, cold and after an edit
+  in `ch00.tex` from the saved build (the PDF too); against `pdflatex
+  -synctex=1` the plain run's and the machine's differ in 156 of 620k
+  lines, from one engine bug that is not SyncTeX's (below).
+- *Found on the way*, machine mode only: a `\copy` of a box holding
+  sealed lines (`seal.rs`) shares their contents, so their rules kept
+  their places; a copy opens the sealed lines whose contents hold a rule
+  (each read). A form's reference (`f`) is the link's object number, not
+  the virtual one (`numbering_of`).
+- *Cost* (the course, local, a loaded machine, `perf stat` and alternate
+  runs): a cold `phitex build` 441.3G instructions against 434.0G with
+  `--no-synctex` (+1.7%; wall within the machine's noise, 74–93 s both);
+  the `ch00.tex` edit from the saved build 26.2G against 22.4G
+  instructions, 4.2 s against 3.9 s (rendering 620k records and
+  compressing 16.5 MB, on a thread while the link runs); the store 321 MB
+  against 313 MB (+2.6%); `course.synctex.gz` 3.3 MB.
+- *Not done.* A line whose characters font expansion stretched exactly
+  to its width but for a few scaled points can be packed with `glue set
+  0.0001` where pdfTeX's `hpack` leaves the glue unset (seen in a
+  `tcolorbox` paragraph of the course with `microtype`; a box of
+  `\hsize=407.9008pt` with newpxtext, the paragraph's characters
+  expanded by +1, kerns between them and a right margin kern). The PDF is
+  the same (the difference is below a `TJ` unit), but e-TeX's
+  `hlist_out` then turns that line's glue into kerns, and the
+  `.synctex.gz` records `k` for pdfTeX's `g`, 16 sp further on per glue.
+  A pdfTeX-mode engine bug in `expand.rs`/`pack.rs` (the expanded widths'
+  sum), not SyncTeX's; the repro is the course's (private) text.
 
 ### 4.6 Display lists: each page's drawing without the PDF (2026-10-03)
 
@@ -3269,8 +3359,17 @@ watch, sandboxed, this machine): a word edited on disk is built, hashed
 draw list (4 ms, 16 KB) is in the client 4 ms after the settle; only the
 changed page is asked for and sent (`PARTEX_VIEW_LOG=1` logs it).
 
-**Not done yet.** The watch runtimes record no glyph origins (4.4), so
-double-click and forward search find nothing yet.
+**Origins in the watch** (2026-10-07). `watch --ssa` records glyph
+origins (4.4) when a viewer runs and gives them to the viewer after
+each link (`Origins::of`). The machine watch places the glyphs by its
+`SyncTeX` file (4.5, `Origins::from_synctex`, `synctexfile.rs`): each
+glyph the PDF shows (`glyph_places`) has the line of the record that
+ends its run of characters (the first `x`, `g`, `k`, `$`, box or rule
+record at or after it on its baseline, else the last before it), its
+bytes the line's as the file is on disk. Line-level, as every SyncTeX
+editor has it: a double-click opens the line, `phitex sync` highlights
+the glyphs of the line. Both are made per page when first asked, on a
+thread after the build (`switched` tells the browser to ask again).
 
 ### 4.9 `phitex watch --ssa` (experimental, 2026-10-07)
 
@@ -3312,6 +3411,10 @@ PDF), `--copy-pdf`, `-o`, `phitex why`'s record. It keeps no store: each
 - *Cold again.* A rebuild the runtime cannot make (`unsupported`), or a
   trip past its deadline (the last cold build's time, at least a second;
   `PARTEX_SSA_DEADLINE_MS`, `0`: none), is built cold.
+- *SyncTeX.* The steps' events are rendered after each link
+  (`Tex::synctex_file`) and `<job>.synctex.gz` renamed into place whole;
+  with a viewer, glyph origins are recorded for double-click and
+  `phitex sync` (4.8).
 - *Files.* The SSA link (`SsaLinker`) writes them, each renamed into place
   whole in the watch (`atomic`: the bytes before the first change read
   back, the link's after): the PDF on disk is always complete. The

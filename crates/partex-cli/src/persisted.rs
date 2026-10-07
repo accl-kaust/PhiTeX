@@ -1294,6 +1294,7 @@ impl Watch {
     /// Finish saving: at the end of the process, after the result.
     pub fn finish_saving(&mut self) {
         self.finish_quick();
+        self.join_synctex();
         if let Some(file) = self.deflated_file() {
             // (a cold build links before it has a keeper)
             let host = self.b.final_state().tex().host();

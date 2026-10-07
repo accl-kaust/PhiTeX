@@ -1471,6 +1471,24 @@ mod tests {
         assert_eq!(line_bytes(t, 9, 1), None);
     }
 
+    /// A glyph's source is the record that ends its run on its baseline,
+    /// else the last before it there; a line's bytes without its end.
+    #[test]
+    fn glyphs_by_records() {
+        let recs: Vec<Record> = vec![
+            (50.0, 100.0, 0, 0, 9),
+            (80.0, 100.2, 0, 10, 19),
+            (30.0, 120.0, 0, 20, 29),
+        ];
+        assert_eq!(nearest_record(&recs, 40.0, 100.0).map(|r| r.3), Some(0));
+        assert_eq!(nearest_record(&recs, 60.0, 100.0).map(|r| r.3), Some(10));
+        assert_eq!(nearest_record(&recs, 90.0, 100.0).map(|r| r.3), Some(10));
+        assert_eq!(nearest_record(&recs, 10.0, 120.0).map(|r| r.3), Some(20));
+        assert_eq!(nearest_record(&recs, 10.0, 140.0), None);
+        assert_eq!(line_starts(b"ab\ncd\n"), vec![0, 3, 6, 7]);
+        assert_eq!(line_starts(b"ab"), vec![0, 3]);
+    }
+
     #[test]
     fn page_ranges() {
         assert_eq!(ranges(&[1, 3, 4, 5, 7, 8]), "1, 3–5, 7–8");
