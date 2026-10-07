@@ -1019,7 +1019,12 @@ fn answer(s: &Shared, req: &Value) -> String {
         "source" => {
             let file = req.get("file").and_then(Value::str).unwrap_or("");
             let start = req.get("start").and_then(Value::index).unwrap_or(0);
-            let _ = write!(out, "{}}}", to_source(s, file, start));
+            // (an error's place: a line and column, not a byte)
+            let at = req
+                .get("line")
+                .and_then(Value::index)
+                .map(|l| (l, req.get("col").and_then(Value::index).unwrap_or(1)));
+            let _ = write!(out, "{}}}", to_source(s, file, start, at));
         }
         "diagnostics" => {
             let d = lock(&s.diagnostics).clone();
@@ -1073,9 +1078,9 @@ fn origins_json(s: &Shared, o: Option<&Origins>, page: Option<usize>) -> String 
 }
 
 /// A double-click's source, byte `start` of `file` (from the watch's
-/// directory): shown, and opened in the editor if there is one. The
-/// reply's tail (`ok` and the rest).
-fn to_source(s: &Shared, file: &str, start: usize) -> String {
+/// directory), or an error's line and column `at`: shown, and opened in
+/// the editor if there is one. The reply's tail (`ok` and the rest).
+fn to_source(s: &Shared, file: &str, start: usize, at: Option<(usize, usize)>) -> String {
     let path = s.root.join(file);
     if file.is_empty() || file.starts_with('/') || file.contains("..") {
         return "false,\"error\":\"not a file of the project\"".into();
@@ -1083,7 +1088,7 @@ fn to_source(s: &Shared, file: &str, start: usize) -> String {
     let Ok(text) = std::fs::read(&path) else {
         return "false,\"error\":\"no such file\"".into();
     };
-    let (line, col) = line_col(&text, start);
+    let (line, col) = at.unwrap_or_else(|| line_col(&text, start));
     let place = format!("{file}:{line}:{col}");
     match &s.editor {
         Some(e) => match e.open(file, line, col) {
