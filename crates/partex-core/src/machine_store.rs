@@ -67,6 +67,7 @@ partex_engine::persist_enum!(MCell {
     OfFinal(a0),
     NumState,
     PdfWord(a0),
+    Marks,
 });
 
 partex_engine::persist_struct!(PageValue { builder, list });
@@ -286,6 +287,10 @@ fn save_value<H: StoreHost + 'static>(v: &MValue<H>, s: &mut Saver, ok: &mut boo
             s.enc.u8(17);
             p.save(s);
         }
+        V::Marks(m) => {
+            s.enc.u8(18);
+            m.save(s);
+        }
     }
 }
 
@@ -313,6 +318,7 @@ fn load_value<H: StoreHost + 'static>(l: &mut Loader, cx: &Cx<H>) -> Option<MVal
         15 => V::FontOrder(Persist::load(l)?),
         16 => V::Positions(Persist::load(l)?),
         17 => V::Page(Persist::load(l)?),
+        18 => V::Marks(Persist::load(l)?),
         _ => return None,
     };
     Some(MValue { version, v })
@@ -792,6 +798,7 @@ pub fn census<H: StoreHost + 'static>(b: &Build<TexMachine<H>>) -> BTreeMap<&'st
                 MCell::Page => "g.page",
                 MCell::PdfLast(_) => "g.pdf last",
                 MCell::PdfWord(_) => "g.pdf word",
+                MCell::Marks => "g.marks",
                 MCell::FinalNum(_) => "g.final num",
                 MCell::OfFinal(_) => "g.of final",
                 MCell::NumState => "g.num state",
@@ -822,6 +829,7 @@ pub fn census<H: StoreHost + 'static>(b: &Build<TexMachine<H>>) -> BTreeMap<&'st
                 V::Line => "line",
                 V::Positions(_) => "positions",
                 V::Page(_) => "page",
+                V::Marks(_) => "marks",
                 V::Glyphs(_) => "glyphs",
                 V::Sealed(_) => "sealed",
                 V::Written(_) => "written",
@@ -985,6 +993,7 @@ mod tests {
             MCell::Page,
             MCell::PdfLast(6),
             MCell::PdfWord(4),
+            MCell::Marks,
             MCell::FinalNum(7),
             MCell::OfFinal(8),
             MCell::NumState,
@@ -1015,6 +1024,7 @@ mod tests {
                 MCell::Page => 20,
                 MCell::PdfLast(_) => 21,
                 MCell::PdfWord(_) => 25,
+                MCell::Marks => 26,
                 MCell::FinalNum(_) => 22,
                 MCell::OfFinal(_) => 23,
                 MCell::NumState => 24,
@@ -1035,7 +1045,7 @@ mod tests {
                 MCell::FontOrder => 18,
             });
         }
-        assert_eq!(kinds.len(), 26, "a sample of every kind of cell");
+        assert_eq!(kinds.len(), 27, "a sample of every kind of cell");
         v
     }
 
@@ -1097,6 +1107,20 @@ mod tests {
                     ),
                 ],
             })),
+            V::Marks(Arc::new(
+                [(
+                    0,
+                    [
+                        None,
+                        Some(Arc::new(crate::tok::TokenList::new(vec![65, 66], false))),
+                        None,
+                        None,
+                        None,
+                    ],
+                )]
+                .into_iter()
+                .collect(),
+            )),
             V::Glyphs(Arc::new(vec![[1, 2, 3, 4]])),
             V::Sealed(Arc::new(crate::seal::Sealed::new(
                 0.5,
@@ -1153,9 +1177,10 @@ mod tests {
                 V::FontOrder(_) => 15,
                 V::Positions(_) => 16,
                 V::Page(_) => 17,
+                V::Marks(_) => 18,
             });
         }
-        assert_eq!(kinds.len(), 18, "a sample of every kind of value");
+        assert_eq!(kinds.len(), 19, "a sample of every kind of value");
         assert!(
             v.len() > kinds.len(),
             "and a value naming a list, as a register above 255's does"
@@ -1259,7 +1284,7 @@ mod tests {
             .keys()
             .filter(|k| !k.starts_with("g.") && **k != "guards")
             .count();
-        assert_eq!(values, 18, "{m:?}");
+        assert_eq!(values, 19, "{m:?}");
     }
 
     #[test]
@@ -1829,5 +1854,88 @@ mod tests {
         assert_eq!(m.tex.pdf.last_link, 0);
         m.set(&MCell::PdfLast(6), Some(after));
         assert_eq!(m.tex.pdf.last_link, 17);
+    }
+
+    /// With the marks as a cell (the default), `Rest` has no marks:
+    /// `MCell::Marks` tells two states apart that differ only in them,
+    /// and setting it gives them back. The tracker's marks: a write reads
+    /// first, and a region's end forgets them.
+    #[test]
+    fn the_marks_leave_rest_as_a_cell_of_their_own() {
+        use crate::track::Tracker;
+        use partex_incr::Machine;
+        let t = CellTracker::default();
+        assert_eq!(t.marks_touched(), (false, false));
+        t.mark_access(true);
+        t.mark_access(false);
+        assert_eq!(t.marks_touched(), (true, true));
+        t.clear();
+        assert_eq!(t.marks_touched(), (false, false));
+        let _switches = Switches::take();
+        let mut m = TexMachine::new(engine(1), b"");
+        let served = |_: &[u8]| true;
+        let rest = m.tex.rest_hash_served(&served);
+        let before = m.get(&MCell::Marks).expect("a value");
+        let list = Arc::new(crate::tok::TokenList::new(vec![65, 66], false));
+        m.tex.cur_mark.entry(3).or_default()[2] = Some(list);
+        assert_eq!(rest, m.tex.rest_hash_served(&served), "not in `Rest`");
+        let after = m.get(&MCell::Marks).expect("a value");
+        assert_ne!(before, after, "in `Marks`");
+        m.set(&MCell::Marks, Some(before.clone()));
+        assert!(m.tex.cur_mark.is_empty());
+        assert_eq!(m.get(&MCell::Marks), Some(before));
+        m.set(&MCell::Marks, Some(after.clone()));
+        assert_eq!(m.get(&MCell::Marks), Some(after));
+    }
+
+    /// The save stack is hashed as TeX can still use it: a location
+    /// saved again in one group after a `\global` assignment leaves its
+    /// earlier entries dead (§282–§283), and a group's entries for
+    /// distinct locations restore in any order. Two stacks that differ
+    /// only so hash alike, `Rest` and the whole state, and end the group
+    /// alike; a live entry that differs tells them apart.
+    #[test]
+    fn dead_save_stack_entries_do_not_count() {
+        use crate::web::{COUNT_BASE, LEVEL_ONE};
+        let (p, q) = (COUNT_BASE + 10, COUNT_BASE + 11);
+        // (a group whose entries for `p` are `steps`' saves: `None` a
+        // `\global` assignment, `Some(v)` a local one; then `q` locally)
+        let run = |steps: &[Option<i32>], q_first: bool| {
+            let mut t = engine(1);
+            t.new_save_level(1).unwrap();
+            if q_first {
+                t.eq_word_define(q, 9).unwrap();
+            }
+            for (k, s) in steps.iter().enumerate() {
+                match s {
+                    Some(v) => t.eq_word_define(p, *v).unwrap(),
+                    None => t.geq_word_define(p, 100 + i32::try_from(k).unwrap()),
+                }
+            }
+            if !q_first {
+                t.eq_word_define(q, 9).unwrap();
+            }
+            t
+        };
+        let served = |_: &[u8]| true;
+        let hashes = |t: &Tex<H0, CellTracker>| (t.rest_hash_served(&served), t.state_hash());
+        // (the global value saved last is 103 in both: the entries of
+        // `p` below it are dead)
+        let a = run(&[Some(1), None, Some(2), None, Some(3)], false);
+        let b = run(&[Some(1), Some(7), Some(2), None, Some(3)], true);
+        assert!(a.save_ptr > b.save_ptr, "a holds more entries");
+        assert_eq!(hashes(&a), hashes(&b), "the same live entries");
+        // (another global value saved: a live entry differs)
+        let c = run(&[Some(1), None, Some(2), Some(5), None, Some(3)], false);
+        assert_ne!(hashes(&a).0, hashes(&c).0, "a live entry differs");
+        // and the group's end leaves them alike
+        let end = |mut t: Tex<H0, CellTracker>| {
+            t.unsave().unwrap();
+            assert_eq!(t.cur_level, LEVEL_ONE);
+            let at = |l: i32| t.eqtb[usize::try_from(l).unwrap()].int();
+            assert_eq!((at(p), at(q)), (103, 0));
+        };
+        end(a);
+        end(b);
     }
 }

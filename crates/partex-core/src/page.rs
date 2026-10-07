@@ -223,6 +223,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
 
     #[inline]
     fn mark_read(&self, class: i32, t: i32) {
+        self.tracker.mark_access(false);
         if T::VALUES {
             self.tracker
                 .value_read(Self::mark_row(class, t), || self.mark_version(class, t));
@@ -231,6 +232,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
 
     #[inline]
     fn mark_wrote(&self, class: i32, t: i32) {
+        self.tracker.mark_access(true);
         if T::VALUES {
             self.tracker.value_wrote(Self::mark_row(class, t));
         }
@@ -248,6 +250,8 @@ impl<H: Host, T: Tracker> Tex<H, T> {
     /// §977: extract a page of height `h` from box `n`.
     pub(crate) fn vsplit(&mut self, n: i32, h: Scaled) -> Result<Option<Arc<BoxNode>>, Jump> {
         self.split_discards_mut().clear();
+        // (which classes there are decides what is cleared, even none)
+        self.tracker.mark_access(true);
         let classes: alloc::vec::Vec<i32> = self.cur_mark.keys().copied().collect();
         for &c in &classes {
             if let Some(m) = self.cur_mark.get_mut(&c) {
@@ -947,6 +951,8 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                 }
             }
         }
+        // (§1012: the marks move on, whichever classes there are)
+        self.tracker.mark_access(true);
         for c in self
             .cur_mark
             .keys()

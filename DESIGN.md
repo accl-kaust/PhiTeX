@@ -1941,6 +1941,75 @@ memory is the watch's:
   chapter 15: the second pass re-ran 70.4M commands of 70.4M (81 s), now
   7.0M (13 s); the first pass re-runs 23.5M (35 s), from the section to
   where the page marks agree again.
+- The current marks (`cur_mark`, every class) are a cell of their own
+  (`MCell::Marks`), read where TeX reads them (`\topmarks` and its
+  siblings, `fire_up`, `\vsplit`, which change them all and so read
+  them first) and not `Rest`'s.
+- The save stack is hashed as TeX can still use it (`SaveCanon`,
+  `statehash.rs`): a location saved, assigned `\global` and assigned
+  locally again in one group is saved again at the same level (§279);
+  the group's end restores the topmost entry first, which leaves the
+  location at `level_one`, so the entries below it are retained, their
+  values thrown away (§282–§283): dead. LaTeX does that at the
+  document's level for every `\color`, label or size change, and an
+  added `\section` left 32 more entries for the rest of the document.
+  The hash takes the stack frame by frame (the boundaries' chain): dead
+  `restore_old_value` entries left out, a frame's live restore entries
+  as a set by location (restores of distinct places commute), every
+  other word in order, positions (`save_ptr`, `cur_boundary`, a
+  boundary's link, `grp_stack`) counted by the live words below them.
+  Two states that hash alike behave alike but for `\tracingrestores`
+  lines in the log. Measured (2026-10-07) on the course's added
+  `\section`: the dead entries are not what is left. The new run's
+  document-level frames hold *live* entries the old run's never get
+  (`\current@color`; `\@currsize`, `\delayed@f@adjustment`, `\par`,
+  `\reset@equation`), with those locations at the frame's level where
+  the old run has them lower. If such an entry saves the value its
+  location holds (a local assignment that put back the same value), it
+  is a no-op: the state equals one with no entry and the location at
+  the saved level (a later local assignment there saves the same word,
+  the group's end restores the same word). A canonical form for that
+  must cover the eqtb cell's level too (a cell's value carries it), so
+  it is not built.
+- *Relocatable values* (designed, not built). Some counters only number
+  things: LaTeX's mark ids (`\g__mark_int`, in every `\marks` text and
+  in the `\g__mark_…_tl` the output routine keeps), pgf's
+  `\pgf@sys@id@current@id`, hyperref's anchor counter. An added
+  `\section` adds two marks, so every later mark id is 2 higher: the
+  marks, the output routine's copies and count 187 differ in every
+  later region (each region of the course's grain holds a page and its
+  output routine), and pass 1 re-runs every page after the edit
+  although no page prints an id. Finer cells cannot help: the values
+  really differ. The fix is the virtual PDF object numbers (3.12)
+  made general:
+  - a value is *relocatable* where every use only copies it, compares
+    it for equality with a value of the same counter, or keys a name
+    with it, and an ordering test or arithmetic gives the same answer
+    for both runs; a use that shows its digits (typeset in a box,
+    `\write`, `\message`, a `\special` or a PDF string) makes it real;
+  - relocatability is decided from the uses, never from names: the
+    digits `\the` or `\number` makes of a register carry their origin
+    (the register and its value, as token origins do for SyncTeX,
+    4.4) through copies (`\edef`, `\marks`, `\let`, `\toks`), and the
+    observing primitives report an observation of an origin as a read
+    of its value (a derived guard, as `FinalNum` asks the numbering: an
+    answer checked, not a version), while copies, `\ifx` between lists
+    of the same origins and a macro that discards an argument do not;
+  - a region whose entry differs from its old run's only by one offset
+    `d` on the values of one origin, and which observed none of them,
+    is reused, its written cells shifted by `d` where they hold that
+    origin's digits (the old run recorded where);
+  - the first region to differ (the one that adds the marks) runs, and
+    from there each region's guards on the counter and on the cells
+    holding its digits compare modulo the offset.
+  For the marks every later use is a copy, `\tl_if_eq` (equality),
+  `\tl_if_empty` or `\__mark_value:nn`, which discards the id; the
+  counter's wrap test (`< 99999`) answers the same. Measured
+  (2026-10-07): pass 1 after the added `\section` re-runs 23.5M
+  commands over 142 regions, on 85e7d32 and with the marks as a cell
+  and the save stack's canonical form alike (PDF identical to a cold
+  build); a `\section*` or a paragraph added, which add no mark,
+  re-runs 0.77M (8 regions) on both.
 - The store's save writes each blob to its pack as the saver makes it,
   and the blobs' references in frames: it holds the build, its copy and
   a batch, not every blob as encoded, as kept and as packed at once.

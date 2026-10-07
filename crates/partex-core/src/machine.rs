@@ -294,6 +294,9 @@ pub struct CellTracker {
     /// The page builder's state (`MCell::Page`): `READ` if read first,
     /// `WRITTEN` once written.
     page: AtomicU8,
+    /// The current marks (`MCell::Marks`): `READ` if read first,
+    /// `WRITTEN` once written.
+    marks: AtomicU8,
     /// The `\pdflast…` values (`MCell::PdfLast`): bit `k` if value `k`
     /// was read first, bit `16 + k` once written.
     pdf_last: core::sync::atomic::AtomicU32,
@@ -386,6 +389,25 @@ pub fn set_page_cells(on: bool) {
 
 fn page_cells() -> bool {
     crate::statehash::PAGE_CELLS.load(Relaxed)
+}
+
+/// Whether the current marks are a cell of their own ([`MCell::Marks`])
+/// and not `Rest`'s (on by default, `PARTEX_MACHINE_MARKS=0` turns it
+/// off).
+pub fn set_mark_cells(on: bool) {
+    crate::statehash::MARK_CELLS.store(on, Relaxed);
+}
+
+fn mark_cells() -> bool {
+    crate::statehash::MARK_CELLS.load(Relaxed)
+}
+
+/// The current marks, by class (`Tex::cur_mark`).
+pub type MarkMap = alloc::collections::BTreeMap<i32, [Option<crate::tok::Tokens>; 5]>;
+
+/// `MCell::Marks`'s version: the marks' by content.
+fn marks_version(m: &MarkMap) -> u128 {
+    StableHasher::of(&(b"marks", m))
 }
 
 /// Whether a region that asks the numbering for single numbers guards
@@ -712,6 +734,7 @@ impl CellTracker {
         self.writes.clear();
         self.softs.clear();
         self.page.store(0, Relaxed);
+        self.marks.store(0, Relaxed);
         self.pdf_last.store(0, Relaxed);
         self.pdf_words.store(0, Relaxed);
     }
@@ -736,6 +759,13 @@ impl CellTracker {
     /// it, and whether it wrote it.
     fn page_touched(&self) -> (bool, bool) {
         let v = self.page.load(Relaxed);
+        (v & READ != 0, v & WRITTEN != 0)
+    }
+
+    /// Whether the region read the current marks before writing them,
+    /// and whether it wrote them.
+    fn marks_touched(&self) -> (bool, bool) {
+        let v = self.marks.load(Relaxed);
         (v & READ != 0, v & WRITTEN != 0)
     }
 
@@ -809,6 +839,16 @@ impl Tracker for CellTracker {
             self.pdf_words.store(v | w, Relaxed);
         } else if v & w == 0 {
             self.pdf_words.store(v | r, Relaxed);
+        }
+    }
+
+    #[inline]
+    fn mark_access(&self, write: bool) {
+        let v = self.marks.load(Relaxed);
+        if v & WRITTEN == 0 {
+            // (a write reads first: the marks are changed, not replaced)
+            let w = if write { WRITTEN } else { 0 };
+            self.marks.store(v | READ | w, Relaxed);
         }
     }
 
@@ -1437,6 +1477,11 @@ pub enum MCell {
     /// last and parent, the catalog's open action), read and written
     /// where the writer's routines touch it; `Rest` then leaves it out.
     PdfWord(u8),
+    /// With them as a cell (`statehash::MARK_CELLS`): the current marks
+    /// of every class (`cur_mark`, §382), read where TeX reads them
+    /// (`\topmarks` and its siblings, `fire_up`, `\vsplit`) and written
+    /// where they change; `Rest` then leaves them out.
+    Marks,
     /// A sealed line's contents (`seal.rs`), by key (its high and low
     /// halves: a `u128` would align every cell, and so every guard, write
     /// and index entry, to 16 bytes).
@@ -1575,6 +1620,8 @@ enum V<H: CellHost> {
     Line,
     Positions(Arc<Positions>),
     Page(Arc<PageValue>),
+    /// The current marks.
+    Marks(Arc<MarkMap>),
     /// Glyphs used, by font (to add).
     Glyphs(Arc<Vec<[u64; 4]>>),
     Sealed(Arc<crate::seal::Sealed>),
@@ -1922,6 +1969,7 @@ impl<H: CellHost> Clone for MValue<H> {
             V::Line => V::Line,
             V::Positions(p) => V::Positions(p.clone()),
             V::Page(p) => V::Page(p.clone()),
+            V::Marks(m) => V::Marks(m.clone()),
             V::Glyphs(g) => V::Glyphs(g.clone()),
             V::Sealed(x) => V::Sealed(x.clone()),
             V::Written(x) => V::Written(x.clone()),
@@ -1964,6 +2012,7 @@ impl<H: CellHost> core::fmt::Debug for MValue<H> {
             V::Line => "line",
             V::Positions(_) => "positions",
             V::Page(_) => "page",
+            V::Marks(_) => "marks",
             V::Glyphs(_) => "glyphs",
             V::Sealed(_) => "sealed",
             V::Written(_) => "written",
@@ -2863,6 +2912,10 @@ impl<H: CellHost> TexMachine<H> {
             // state's)
             new.page = core::mem::take(&mut self.tex.page);
         }
+        if keep_eqtb && mark_cells() {
+            // (and the current marks)
+            new.cur_mark = core::mem::take(&mut self.tex.cur_mark);
+        }
         if keep_eqtb && pdf_last_cells() {
             // (and the `\pdflast…` values)
             for k in crate::pdf::PdfLast::ALL {
@@ -2972,6 +3025,7 @@ impl<H: CellHost> TexMachine<H> {
             // cells)
             MCell::Positions => position_cells(),
             MCell::Page => page_cells(),
+            MCell::Marks => mark_cells(),
             MCell::PdfLast(_) => pdf_last_cells(),
             MCell::PdfWord(k) => pdf_word_is_cell(&self.tex, *k),
             _ => true,
@@ -3011,6 +3065,9 @@ impl<H: CellHost> TexMachine<H> {
         }
         if page_cells() {
             h.write_u128(self.tex_page_version());
+        }
+        if mark_cells() {
+            h.write_u128(marks_version(&self.tex.cur_mark));
         }
         if pdf_last_cells() {
             for k in crate::pdf::PdfLast::ALL {
@@ -3524,6 +3581,17 @@ impl<H: CellHost> Machine for TexMachine<H> {
         if page_read {
             r.read(&MCell::Page, Some(&MValue::version(entry.page_version)));
         }
+        // The current marks: read (at the entry) where read first,
+        // written where changed.
+        let (marks_read, marks_written) = if mark_cells() {
+            self.tex.tracker.marks_touched()
+        } else {
+            (false, false)
+        };
+        if marks_read {
+            let v = marks_version(&entry.tex.cur_mark);
+            r.read(&MCell::Marks, Some(&MValue::version(v)));
+        }
         // The `\pdflast…` values: read (at the entry) where read first,
         // written where made.
         let (last_read, last_written) = if pdf_last_cells() {
@@ -3573,6 +3641,9 @@ impl<H: CellHost> Machine for TexMachine<H> {
         }
         if page_written {
             write(r, MCell::Page);
+        }
+        if marks_written {
+            write(r, MCell::Marks);
         }
         for k in 0..u8::try_from(crate::pdf::PdfLast::ALL.len()).unwrap_or(0) {
             if last_written & (1 << k) != 0 {
@@ -3724,6 +3795,10 @@ impl<H: CellHost> Machine for TexMachine<H> {
             }),
             // (from the snapshot of the state now, whose chunks it
             // shares, if there is one)
+            MCell::Marks => mark_cells().then(|| MValue {
+                version: marks_version(&self.tex.cur_mark),
+                v: V::Marks(Arc::new(self.tex.cur_mark.clone())),
+            }),
             MCell::Page => page_cells().then(|| {
                 if let Some(s) = self.snapshot_now() {
                     return MValue {
@@ -3854,6 +3929,7 @@ impl<H: CellHost> Machine for TexMachine<H> {
             }
             (MCell::Positions, Some(V::Positions(p))) => self.set_positions(&p),
             (MCell::Page, Some(V::Page(p))) => self.tex.page = p.builder(),
+            (MCell::Marks, Some(V::Marks(m))) => self.tex.cur_mark = Arc::unwrap_or_clone(m),
             (MCell::PdfLast(k), Some(V::Int(v))) => *self.tex.pdf.last_mut(pdf_last_of(*k)) = v,
             (MCell::PdfWord(k), Some(V::Int(v))) => *self.tex.pdf.word_mut(*k) = v,
             (MCell::Sealed(hi, lo), Some(V::Sealed(x))) => {
@@ -4152,6 +4228,7 @@ impl<H: CellHost> Machine for TexMachine<H> {
             | MCell::Line(..)
             | MCell::Positions
             | MCell::Page
+            | MCell::Marks
             | MCell::PdfLast(_)
             | MCell::PdfWord(_)
             | MCell::Sealed(..)

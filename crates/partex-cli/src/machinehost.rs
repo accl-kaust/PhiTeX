@@ -1614,6 +1614,7 @@ fn process_switches() {
     partex_core::machine::set_page_cells(!off("PARTEX_MACHINE_PAGE_CELL"));
     partex_core::machine::set_pdf_last_cells(!off("PARTEX_MACHINE_PDF_LAST"));
     partex_core::machine::set_pdf_word_cells(!off("PARTEX_MACHINE_PDF_WORDS"));
+    partex_core::machine::set_mark_cells(!off("PARTEX_MACHINE_MARKS"));
     partex_core::machine::set_tree_names(!off("PARTEX_MACHINE_TREE_NAMES"));
     partex_core::machine::set_num_answers(!off("PARTEX_MACHINE_NUM_ANSWERS"));
     partex_core::machine::set_canon(
@@ -2023,7 +2024,16 @@ fn rest_fields(
         old.and_then(MValue::rest_tex),
         new.and_then(MValue::rest_tex),
     ) {
-        (Some(o), Some(m)) => o.rest_field_differences(&m).into_iter().collect(),
+        (Some(o), Some(m)) => {
+            // (the files a machine serves by lines, as it hashes `Rest`)
+            let host = o.host().clone();
+            let served = |n: &[u8]| {
+                !n.is_empty()
+                    && host.file(n).is_some()
+                    && !partex_core::machine::CellHost::reads_back(&host, n)
+            };
+            o.rest_field_differences(&m, &served).into_iter().collect()
+        }
         _ => BTreeSet::new(),
     }
 }
@@ -2061,6 +2071,8 @@ fn dump_audit(b: &Build<Machine>, n: usize) {
     for a in &b.audit {
         let mut causes: Vec<String> = Vec::new();
         let mut shown: Vec<String> = Vec::new();
+        // (where the save stacks differ, if they do at the entry)
+        let mut tables = String::new();
         if !a.synced {
             causes.push("unsynced".to_owned());
         }
@@ -2073,6 +2085,16 @@ fn dump_audit(b: &Build<Machine>, n: usize) {
                     if fields.is_empty() {
                         // (the version differs, no part does)
                         causes.push("Rest(no part)".to_owned());
+                    }
+                    if fields.contains("rest.tables")
+                        && let (Some(o), Some(m)) = (
+                            old.as_ref()
+                                .and_then(partex_core::machine::MValue::rest_tex),
+                            new.as_ref()
+                                .and_then(partex_core::machine::MValue::rest_tex),
+                        )
+                    {
+                        tables = format!(" save stack {{{}}}", o.save_stack_difference(&m));
                     }
                     causes.extend(fields.iter().cloned());
                     rest_entry = Some((old, new, fields));
@@ -2138,7 +2160,7 @@ fn dump_audit(b: &Build<Machine>, n: usize) {
         }
         ends.truncate(8);
         eprintln!(
-            "phitex: audit: rebuild {n} region {} ({} commands, old {}): {} causes [{}]{}{} differ at the end [{}{}]{}",
+            "phitex: audit: rebuild {n} region {} ({} commands, old {}): {} causes [{}]{}{} differ at the end [{}{}]{}{}",
             a.first,
             a.cost,
             a.old_costs[0],
@@ -2172,6 +2194,7 @@ fn dump_audit(b: &Build<Machine>, n: usize) {
             } else {
                 " effects differ"
             },
+            tables,
         );
         for (m, c) in a.old_costs.iter().enumerate().skip(1) {
             eprintln!(
