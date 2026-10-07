@@ -2658,6 +2658,16 @@ impl Tracker for SsaTracker {
         out
     }
 
+    fn seal_missing(&self) -> bool {
+        // (a worker's table holds the lines its placing gave it: a line its
+        // old run did not read, as the build's run would place it on a
+        // miss, is not there; the step runs at its turn)
+        self.worker.as_ref().is_some_and(|w| {
+            w.taint("a sealed line not placed");
+            true
+        })
+    }
+
     fn font_loaded(&self, f: i32) {
         if let Some(w) = &self.worker {
             // (the font's arrays are not values a commit can put in place)

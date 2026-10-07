@@ -1450,7 +1450,16 @@ a contribution appended (an effect), and the page builder as its own
 steps that take the contributions in order. Then a paragraph's validity
 does not depend on where the page broke before it. On the course before
 relocation, A's rounds made the label edit's rebuild slower than in
-turn: 27 s against 9.5 s.
+turn: 27 s against 9.5 s. After it, at N=8 on the same box, the
+rebuilds were still slower than in turn:
+- label: 18.3 s against 9.5 s;
+- ch00: 7.4 s against 4.8 s;
+- section: 46.9 s against 31.8 s.
+
+Most of the runs not taken were "its start moved" and "a font loaded".
+A worker's run that reads a sealed line its placing did not give it is
+tainted (`Tracker::seal_missing`). The build's own engine still asserts
+that every line is in the table.
 
 ### 3.11 Records, memory and sessions
 

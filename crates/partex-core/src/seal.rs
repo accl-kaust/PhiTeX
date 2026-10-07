@@ -173,19 +173,21 @@ impl<H: Host, T: Tracker> Tex<H, T> {
 
     /// The contents of the sealed line `k`, logged as read (a read of its
     /// slot, `track::Row::Sealed`, for a tracker that keeps versions).
-    pub(crate) fn sealed_content(&mut self, k: u128) -> Arc<Sealed> {
-        let s = self
-            .seals
-            .get(k)
-            .cloned()
-            .expect("a sealed line is in the table");
+    /// None only on a worker's view (`ssa/par.rs`), whose table holds the
+    /// lines placed for its run: one it was not given taints the run,
+    /// which is not taken ([`Tracker::seal_missing`]).
+    pub(crate) fn sealed_content(&mut self, k: u128) -> Option<Arc<Sealed>> {
+        let Some(s) = self.seals.get(k).cloned() else {
+            assert!(self.tracker.seal_missing(), "a sealed line is in the table");
+            return None;
+        };
         if T::VALUES {
             self.tracker
                 .value_read(crate::track::Row::Sealed(sealed_row(k)), || s.version());
         } else {
             self.seal_log.push((k, Some(s.version())));
         }
-        s
+        Some(s)
     }
 
     /// A step begins (SSA mode): the paragraphs it breaks are counted
@@ -265,7 +267,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
     /// Box `b` with its contents, if it is a sealed line (read).
     pub(crate) fn unsealed_box(&mut self, b: &BoxNode) -> Option<BoxNode> {
         let k = b.seal?;
-        let s = self.sealed_content(k);
+        let s = self.sealed_content(k)?;
         let mut u = b.clone();
         u.seal = None;
         u.glue_set = s.glue_set;
