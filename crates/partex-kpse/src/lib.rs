@@ -1408,14 +1408,52 @@ fn dir_list_search_list(
 fn casefold_readable_file(name: &[u8]) -> Option<Bytes> {
     let base = name.rsplit(|&c| c == b'/').next().unwrap_or(name);
     let dir = dirname(name);
-    std::fs::read_dir(os(&dir)).ok()?.flatten().find_map(|e| {
-        let n = e.file_name().into_vec();
+    dir_names(&dir)?.iter().find_map(|n| {
         if !n.eq_ignore_ascii_case(base) {
             return None;
         }
-        let p = [dir.as_slice(), b"/", &n].concat();
+        let p = [dir.as_slice(), b"/", n].concat();
         readable_file(&p).then_some(p)
     })
+}
+
+/// The names in directory `dir`, in `readdir` order. A name not found
+/// looks through its directories case-insensitively, each a `readdir`;
+/// a run that looks up the same missing names again (an SSA rebuild's
+/// ship-out asking for each font's `.vf`, `\IfFileExists`) reads the
+/// listing kept while the directory's modification time is the same.
+/// A listing is kept only once that time is settled, two seconds in the
+/// past when it was made (git's racy-timestamp rule): an entry made in
+/// the same clock tick as the listing can leave the time as it was.
+fn dir_names(dir: &[u8]) -> Option<std::rc::Rc<[Bytes]>> {
+    use std::time::{Duration, SystemTime};
+    /// Each directory's listing, with the modification time it was made at.
+    type Listed = HashMap<Bytes, (SystemTime, std::rc::Rc<[Bytes]>)>;
+    thread_local! {
+        static LISTED: std::cell::RefCell<Listed> = std::cell::RefCell::new(HashMap::new());
+    }
+    let mtime = std::fs::metadata(os(dir)).ok()?.modified().ok()?;
+    if let Some(names) = LISTED.with_borrow(|m| {
+        m.get(dir)
+            .filter(|(t, _)| *t == mtime)
+            .map(|(_, n)| n.clone())
+    }) {
+        return Some(names);
+    }
+    let now = SystemTime::now();
+    let names: std::rc::Rc<[Bytes]> = std::fs::read_dir(os(dir))
+        .ok()?
+        .flatten()
+        .map(|e| e.file_name().into_vec())
+        .collect();
+    LISTED.with_borrow_mut(|m| {
+        if mtime + Duration::from_secs(2) < now {
+            m.insert(dir.to_vec(), (mtime, names.clone()));
+        } else {
+            m.remove(dir);
+        }
+    });
+    Some(names)
 }
 
 /// A candidate `file` not found joins the trail.
