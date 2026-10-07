@@ -13,6 +13,8 @@ use std::sync::atomic::AtomicBool;
 use std::sync::mpsc;
 use std::time::{Duration, Instant, SystemTime};
 
+mod ssawatch;
+
 use crate::config;
 use crate::render::{End, Estimate, Rebuild, Renderer, Settings, Style};
 use crate::term::{self, ColorChoice};
@@ -60,6 +62,11 @@ options:
                            build into DIR (default: where phitex was run)
       --no-machine         watch: rebuild through checkpoints instead of the
                            machine runtime (also PARTEX_MACHINE=0)
+      --ssa                watch (experimental): rebuild on the dynamic-SSA
+                           runtime, the Overleaf extension's engine: an edit
+                           runs one pass and shows its pages, the passes
+                           after it settle while idle. It keeps no store:
+                           each watch --ssa starts with a cold build
   -V, --version
   -h, --help
 
@@ -67,6 +74,7 @@ Without a file, `phitex.toml` (here or above) names it:
     main = \"paper.tex\"   engine = \"pdflatex\"   output-dir = \"out\"
     copy-pdf = true   (or a directory, relative to phitex.toml's)
     machine = false   (watch: the checkpoint rebuilds, as --no-machine)
+    ssa = true        (watch: the dynamic-SSA runtime, as --ssa)
 A `% !TEX program = …` or `% !TEX root = …` comment in the file is honoured.
 
 For TeX's own command line use `phitex --compat=pdftex …` (or `tex`), or
@@ -105,6 +113,8 @@ struct Options {
     copy_pdf: Option<config::CopyPdf>,
     /// `--no-machine`.
     no_machine: bool,
+    /// `--ssa`.
+    ssa: bool,
     /// `clean --all`.
     all: bool,
     /// `--view` or `--no-view` (none: the viewer on a terminal).
@@ -147,6 +157,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
         timeline: None,
         copy_pdf: None,
         no_machine: false,
+        ssa: false,
         all: false,
         view: None,
         editor: None,
@@ -200,6 +211,8 @@ fn parse(args: &[String]) -> Result<Options, String> {
             }
             "--no-copy-pdf" => o.copy_pdf = Some(config::CopyPdf::Off),
             "--no-machine" => o.no_machine = true,
+            "--ssa" => o.ssa = true,
+            "--no-ssa" => o.ssa = false,
             "--view" => o.view = Some(true),
             "--no-view" => o.view = Some(false),
             "--editor" => o.editor = Some(value()?),
@@ -236,6 +249,8 @@ struct Target {
     /// `phitex watch` in machine mode: the default, unless `--no-machine`,
     /// `machine = false` or `PARTEX_MACHINE=0` says otherwise.
     machine: bool,
+    /// `phitex watch` on the dynamic-SSA runtime (`--ssa`, `ssa = true`).
+    ssa: bool,
 }
 
 impl Target {
@@ -353,6 +368,7 @@ fn resolve(o: &Options) -> Result<Target, String> {
         machine: !o.no_machine
             && cfg.machine != Some(false)
             && !std::env::var("PARTEX_MACHINE").is_ok_and(|v| v == "0"),
+        ssa: o.ssa || cfg.ssa == Some(true),
     })
 }
 
@@ -1270,6 +1286,26 @@ impl Viewer {
         }
     }
 
+    /// Pass `pass` of the build running wrote `outputs`, and passes may
+    /// follow: its PDF is shown while they run.
+    fn pass_written(&self, outputs: &[(Vec<u8>, usize)], pass: usize) {
+        if let Some(v) = &self.live {
+            v.set_pdf(Self::pdf(outputs));
+            v.settling(pass);
+        }
+    }
+
+    /// The PDF among `outputs`.
+    fn pdf(outputs: &[(Vec<u8>, usize)]) -> Option<PathBuf> {
+        main_output(outputs)
+            .filter(|p| {
+                Path::new(p)
+                    .extension()
+                    .is_some_and(|e| e.eq_ignore_ascii_case("pdf"))
+            })
+            .map(PathBuf::from)
+    }
+
     /// A second press does not start a second viewer while the first
     /// still runs, nor within this long of it (`xdg-open` hands the PDF
     /// over and exits).
@@ -1320,6 +1356,9 @@ fn watch(opts: &Options, target: &Target, st: Settings) -> ! {
     let ren = Renderer::for_watch(st, keys);
     let (tx, rx) = mpsc::channel();
     read_input(keys, ren.live(), tx);
+    if target.ssa {
+        ssawatch::watch(opts, target, &ren, &rx);
+    }
     if target.machine {
         machine_watch(opts, target, &ren, &rx);
     }
@@ -1474,6 +1513,11 @@ fn machine_finish(
     });
     if r.verbose() {
         for line in &out.reports {
+            // (`watch --ssa`'s lines are the SSA runtime's)
+            if let Some(line) = line.strip_prefix("phitex: ssa: ") {
+                r.status("SSA", line);
+                continue;
+            }
             let line = line
                 .strip_prefix("phitex: machine: ")
                 .or_else(|| line.strip_prefix("phitex: "))
@@ -1688,6 +1732,7 @@ mod tests {
             viewer: Some("true".into()),
             copy_pdf: None,
             machine: true,
+            ssa: false,
         };
         let outputs = vec![(b"out/paper.pdf".to_vec(), 100)];
         let mut viewer = Viewer::default();
@@ -1755,6 +1800,7 @@ mod tests {
         let o = parse(&v(&["build", "--copy-pdf=../pdfs"])).unwrap();
         assert_eq!(o.copy_pdf, Some(config::CopyPdf::Dir("../pdfs".into())));
         assert!(parse(&v(&["build", "--copy-pdf="])).is_err());
+        assert!(parse(&v(&["watch", "--ssa", "paper.tex"])).unwrap().ssa);
         assert!(
             parse(&v(&["-ini"]))
                 .unwrap_err()
@@ -1772,6 +1818,7 @@ mod tests {
             viewer: None,
             copy_pdf: None,
             machine: true,
+            ssa: false,
         };
         assert_eq!(
             t.engine_args("nonstopmode"),
