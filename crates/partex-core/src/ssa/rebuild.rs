@@ -1054,6 +1054,12 @@ pub(crate) struct InputState {
     /// Stopped at a paragraph's start (`CleanPoint::Graf`), or before the
     /// page builder `new_graf` deferred.
     graf: bool,
+    /// A paragraph began and its first candidate boundary is still to
+    /// come (`Tex::par_start`): a step that ended before it (the page
+    /// builder `new_graf` deferred, a fire it made) leaves it set, and the
+    /// next step's first candidate is the paragraph's start. Its own, not
+    /// what the run before on the engine (or a worker's view) left.
+    par_start: bool,
     /// An `\endinput` waits for its line's end (§362): live at a
     /// window's boundary (DESIGN 4.3 item 1).
     force_eof: bool,
@@ -1154,6 +1160,7 @@ impl InputState {
             load: t.load_stop == 2,
             page: t.page_pending,
             graf: t.graf_stop,
+            par_start: t.par_start,
             force_eof: t.force_eof,
             line: t.line,
             top: (v.from..t.first.max(t.last)).map(|i| t.buffer[i]).collect(),
@@ -1349,6 +1356,7 @@ impl InputState {
         t.load_stop = if self.load { 2 } else { 0 };
         t.page_pending = self.page;
         t.graf_stop = self.graf;
+        t.par_start = self.par_start;
         t.force_eof = self.force_eof;
         t.line = self.line;
         t.cur_input = self.cur.clone();
@@ -1500,6 +1508,7 @@ fn same_place<H: Host, T: Tracker>(t: &Tex<H, T>, a: &InputState, b: &InputState
         && a.load == b.load
         && a.page == b.page
         && a.graf == b.graf
+        && a.par_start == b.par_start
         && a.in_open == b.in_open
         && a.line == b.line
         && a.file.line == b.file.line
@@ -4321,7 +4330,8 @@ fn place_key(e: &InputState) -> PlaceKey {
         | u8::from(e.ship) << 2
         | u8::from(e.load) << 3
         | u8::from(e.page) << 4
-        | u8::from(e.graf) << 5;
+        | u8::from(e.graf) << 5
+        | u8::from(e.par_start) << 6;
     (
         flags,
         e.in_open,

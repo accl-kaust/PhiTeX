@@ -1870,7 +1870,12 @@ from one clean point to the next.
      the page a line early (`ssa-edits` case `pagetail`; the course's
      section added and taken away left a page a line short);
    - the input is set to the previous step's result (3.5), mapped
-     through the edits.
+     through the edits, with the flags of where it stopped, a
+     paragraph's first boundary still to come (`par_start`) among them:
+     a step that ended before it (the page builder `new_graf`
+     deferred) leaves it set for the next one, and a run on a worker's
+     view, which another step left it set on, ended at a paragraph's
+     start it was not at (`par_edits`).
 3. The step runs, applying the hits of the calls that apply (3.4). If
    it read a slot a later definition holds and that was not placed, its
    run is dropped and made again with that slot placed. A run that
