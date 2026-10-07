@@ -1959,18 +1959,24 @@ memory is the watch's:
   other word in order, positions (`save_ptr`, `cur_boundary`, a
   boundary's link, `grp_stack`) counted by the live words below them.
   Two states that hash alike behave alike but for `\tracingrestores`
-  lines in the log. Measured (2026-10-07) on the course's added
-  `\section`: the dead entries are not what is left. The new run's
-  document-level frames hold *live* entries the old run's never get
-  (`\current@color`; `\@currsize`, `\delayed@f@adjustment`, `\par`,
-  `\reset@equation`), with those locations at the frame's level where
-  the old run has them lower. If such an entry saves the value its
-  location holds (a local assignment that put back the same value), it
-  is a no-op: the state equals one with no entry and the location at
-  the saved level (a later local assignment there saves the same word,
-  the group's end restores the same word). A canonical form for that
-  must cover the eqtb cell's level too (a cell's value carries it), so
-  it is not built.
+  lines in the log.
+- At each cut, the machine also makes the save stack canonical in the
+  state (`Tex::canonicalize_save_stack`, off while `\tracingrestores`
+  is on): dead entries are removed, and so are *no-op* entries, which
+  saved the value their location holds now while the location is at
+  the entry's level (changed in the group and changed back): the
+  location is set to the saved level instead. A later local
+  assignment at that level saves the same word again, a `\global` one
+  leaves `level_one` either way, and the group's end puts back the same
+  value at the same level. The level is part of the location's eqtb
+  cell, so this cannot be a hash-only form: the cell and `Rest` must
+  agree. A construction's `saved(k)` words are written whole (only their
+  `int` is read; the rest kept the slot's earlier contents, which
+  differ between runs). Measured (2026-10-07) on the course's added
+  `\section`: the edited run kept five such entries for the rest of the
+  document (`\current@color`, `\@currsize`, `\delayed@f@adjustment`,
+  `\par`, `\reset@equation`, each changed and set back at the
+  document's level), and raw words with stale halves.
 - *Relocatable values* (designed, not built). Some counters only number
   things: LaTeX's mark ids (`\g__mark_int`, in every `\marks` text and
   in the `\g__mark_…_tl` the output routine keeps), pgf's
@@ -2004,12 +2010,25 @@ memory is the watch's:
     holding its digits compare modulo the offset.
   For the marks every later use is a copy, `\tl_if_eq` (equality),
   `\tl_if_empty` or `\__mark_value:nn`, which discards the id; the
-  counter's wrap test (`< 99999`) answers the same. Measured
-  (2026-10-07): pass 1 after the added `\section` re-runs 23.5M
-  commands over 142 regions, on 85e7d32 and with the marks as a cell
-  and the save stack's canonical form alike (PDF identical to a cold
-  build); a `\section*` or a paragraph added, which add no mark,
-  re-runs 0.77M (8 regions) on both.
+  counter's wrap test (`< 99999`) answers the same. Building it needs
+  each token to carry its origin through the input stack, macro
+  parameters and the lists `\edef` and `\marks` make, and every
+  consumer of tokens (main control's characters, `\write`, the
+  scanners of numbers, delimited parameters) to report an observation:
+  not built.
+- Measured (2026-10-07), the course, one `\section` and a paragraph
+  added in chapter 15, `phitex build` from the saved build (commands
+  re-run; the edit build's PDF identical to a cold build's):
+
+  | | pass 1 | pass 2 |
+  |---|---|---|
+  | main 85e7d32 | 23.52M, 142 regions | 6.97M |
+  | marks a cell, save stack canonical | 8.34M, 68 regions | 1.57M |
+
+  What is left of pass 1: the mark ids (the marks, count 187 and the
+  `\g__mark_…_tl` differ in every later page's output routine) and the
+  pages near the section until their breaks agree. A `\section*` or a
+  paragraph added re-runs 0.77M (8 regions).
 - The store's save writes each blob to its pack as the saver makes it,
   and the blobs' references in frames: it holds the build, its copy and
   a batch, not every blob as encoded, as kept and as packed at once.
