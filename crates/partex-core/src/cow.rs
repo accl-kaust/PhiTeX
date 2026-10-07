@@ -240,25 +240,24 @@ impl<V: Clone> ShardMap<V> {
     }
 }
 
-/// Saved as the map it is (the shards are how it is kept).
+/// Saved as its shards, shared as they are in memory (a snapshot that
+/// changed a shard costs that shard; `persist::save_seq`).
 impl<V: Clone + partex_engine::persist::Persist + Send + Sync + 'static>
     partex_engine::persist::Persist for ShardMap<V>
 {
     fn save(&self, s: &mut partex_engine::persist::Saver) {
-        let all: alloc::collections::BTreeMap<i32, V> = self
-            .shards
-            .iter()
-            .flat_map(|m| m.iter().map(|(k, v)| (*k, v.clone())))
-            .collect();
-        all.save(s);
+        partex_engine::persist::save_seq(&self.shards, s);
     }
     fn load(l: &mut partex_engine::persist::Loader) -> Option<Self> {
-        let all: alloc::collections::BTreeMap<i32, V> = partex_engine::persist::Persist::load(l)?;
-        let mut m = Self::default();
-        for (k, v) in all {
-            m.insert(k, v);
-        }
-        Some(m)
+        let shards: Vec<Arc<alloc::collections::BTreeMap<i32, V>>> =
+            partex_engine::persist::load_seq(l)?;
+        // (each key in its shard: what the map's lookups assume)
+        let ok = shards.len() == SHARDS
+            && shards
+                .iter()
+                .enumerate()
+                .all(|(i, m)| m.keys().all(|&k| shard(k) == i));
+        ok.then_some(Self { shards })
     }
 }
 

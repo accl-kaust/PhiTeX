@@ -322,16 +322,37 @@ impl Log {
     }
 }
 
+partex_engine::persist_struct!(Counters {
+    sys,
+    obj_ptr,
+    cur,
+    idx,
+    streams
+});
+
+/// Saved as it is kept: its full chunks shared (`persist::save_seq`: a
+/// snapshot's log costs the chunks filled since the last), the chunk
+/// being filled, the hash and the counters.
 impl partex_engine::persist::Persist for Log {
     fn save(&self, s: &mut partex_engine::persist::Saver) {
-        self.since(0).save(s);
+        partex_engine::persist::save_seq(&self.full, s);
+        self.tail.save(s);
+        self.hash.save(s);
+        self.counters.save(s);
     }
     fn load(l: &mut partex_engine::persist::Loader) -> Option<Self> {
-        let mut log = Self::default();
-        for e in alloc::vec::Vec::<NumEvent>::load(l)? {
-            log.push(e);
+        let full: alloc::vec::Vec<alloc::sync::Arc<[NumEvent]>> =
+            partex_engine::persist::load_seq(l)?;
+        let tail: alloc::vec::Vec<NumEvent> = partex_engine::persist::Persist::load(l)?;
+        if full.iter().any(|c| c.len() != CHUNK) || tail.len() >= CHUNK {
+            return None;
         }
-        Some(log)
+        Some(Self {
+            full,
+            tail,
+            hash: partex_engine::persist::Persist::load(l)?,
+            counters: partex_engine::persist::Persist::load(l)?,
+        })
     }
 }
 

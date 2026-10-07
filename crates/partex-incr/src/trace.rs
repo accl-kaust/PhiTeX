@@ -111,63 +111,8 @@ impl<M: Machine> Trace<M> {
         next: &Self,
         entry: &dyn Fn(&M::Cell) -> Option<Version>,
     ) -> Option<Self> {
-        debug_assert!(self.holes.is_empty() && next.holes.is_empty());
-        let mut guards: BTreeMap<M::Cell, Version> = self.guards.iter().cloned().collect();
-        let wrote = |c: &M::Cell| self.writes.binary_search_by(|(w, _, _)| w.cmp(c)).is_ok();
-        for (c, v) in &next.guards {
-            if M::derived(c).is_some_and(|src| wrote(&src)) {
-                // (a question about a cell this region added to: its
-                // answer at the composed entry is unknown, so the
-                // composed region reads the source whole, below)
-                continue;
-            }
-            if !wrote(c) {
-                guards.entry(c.clone()).or_insert(*v);
-            } else if M::accumulates(c) && !guards.contains_key(c) {
-                guards.insert(c.clone(), entry(c)?);
-            }
-        }
-        // The composed region reads a source only through questions if
-        // each part that reads it does, and the second asks none about
-        // what the first added to: otherwise it reads it whole.
-        let sources: alloc::collections::BTreeSet<M::Cell> = self
-            .guards
-            .iter()
-            .chain(&next.guards)
-            .filter_map(|(c, _)| M::derived(c))
-            .collect();
-        for src in sources {
-            let part = |t: &Self| !t.reads(&src) || t.answered(&src);
-            let asked_after = wrote(&src) && next.reads(&src);
-            if !(part(self) && part(next)) || asked_after {
-                guards.retain(|c, _| M::derived(c).as_ref() != Some(&src));
-            }
-        }
-        let mut writes: BTreeMap<M::Cell, (M::Value, Version)> = self
-            .writes
-            .iter()
-            .map(|(c, v, h)| (c.clone(), (v.clone(), *h)))
-            .collect();
-        for (c, v, h) in &next.writes {
-            let v = match writes.get(c) {
-                Some((a, _)) if M::accumulates(c) => M::combine(c, a, v),
-                _ => v.clone(),
-            };
-            writes.insert(c.clone(), (v, *h));
-        }
-        let mut effects = self.effects.clone();
-        effects.extend(next.effects.iter().cloned());
-        Some(Self {
-            entry: self.entry.clone(),
-            exit: next.exit.clone(),
-            guards: guards.into_iter().collect(),
-            writes: writes.into_iter().map(|(c, (v, h))| (c, v, h)).collect(),
-            effects,
-            holes: Vec::new(),
-            allocs: self.allocs + next.allocs,
-            cost: self.cost + next.cost,
-            born: self.born.min(next.born),
-        })
+        let mut c = Composer::new(self);
+        c.push(next, entry).then(|| c.finish())
     }
 
     /// [`Trace::compose_with`] for machines without accumulating cells.
@@ -179,6 +124,133 @@ impl<M: Machine> Trace<M> {
     pub fn compose(&self, next: &Self) -> Self {
         self.compose_with(next, &|_| None)
             .expect("no accumulating cell read after it was added to")
+    }
+}
+
+/// A trace composed region by region ([`Trace::compose_with`] of each
+/// next region in turn), its guards and writes kept as maps from one
+/// region to the next rather than made again from vectors at each (a
+/// run of regions merged costs the regions, not their number times the
+/// run).
+pub struct Composer<M: Machine> {
+    first: Trace<M>,
+    guards: BTreeMap<M::Cell, Version>,
+    writes: BTreeMap<M::Cell, (M::Value, Version)>,
+    /// The sources the guards ask about ([`Machine::derived`] of each).
+    asked: BTreeSet<M::Cell>,
+}
+
+impl<M: Machine> Composer<M> {
+    /// The composition of `first` alone.
+    #[must_use]
+    pub fn new(first: &Trace<M>) -> Self {
+        let mut t = first.clone();
+        let guards: BTreeMap<M::Cell, Version> =
+            core::mem::take(&mut t.guards).into_iter().collect();
+        let writes = core::mem::take(&mut t.writes)
+            .into_iter()
+            .map(|(c, v, h)| (c, (v, h)))
+            .collect();
+        let asked = guards.keys().filter_map(M::derived).collect();
+        Self {
+            first: t,
+            guards,
+            writes,
+            asked,
+        }
+    }
+
+    /// The cost so far.
+    #[must_use]
+    pub fn cost(&self) -> u64 {
+        self.first.cost
+    }
+
+    /// Compose `next` after what is composed so far, as
+    /// [`Trace::compose_with`] does: `false` (and nothing changed) if it
+    /// cannot be.
+    pub fn push(&mut self, next: &Trace<M>, entry: &dyn Fn(&M::Cell) -> Option<Version>) -> bool {
+        debug_assert!(self.first.holes.is_empty() && next.holes.is_empty());
+        let wrote = |c: &M::Cell| self.writes.contains_key(c);
+        // (the guards `next` adds, each cell once in it: decided against
+        // the guards before it)
+        let mut added: Vec<(M::Cell, Version)> = Vec::new();
+        for (c, v) in &next.guards {
+            if M::derived(c).is_some_and(|src| wrote(&src)) {
+                // (a question about a cell this region added to: its
+                // answer at the composed entry is unknown, so the
+                // composed region reads the source whole, below)
+                continue;
+            }
+            if !wrote(c) {
+                if !self.guards.contains_key(c) {
+                    added.push((c.clone(), *v));
+                }
+            } else if M::accumulates(c) && !self.guards.contains_key(c) {
+                let Some(e) = entry(c) else {
+                    return false;
+                };
+                added.push((c.clone(), e));
+            }
+        }
+        // The composed region reads a source only through questions if
+        // each part that reads it does, and the second asks none about
+        // what the first added to: otherwise it reads it whole.
+        let theirs: BTreeSet<M::Cell> = next
+            .guards
+            .iter()
+            .filter_map(|(c, _)| M::derived(c))
+            .collect();
+        let whole: BTreeSet<M::Cell> = self
+            .asked
+            .union(&theirs)
+            .filter(|src| {
+                let mine = !self.guards.contains_key(*src) || self.asked.contains(*src);
+                let next_part = !next.reads(src) || theirs.contains(*src);
+                let asked_after = wrote(src) && next.reads(src);
+                !(mine && next_part) || asked_after
+            })
+            .cloned()
+            .collect();
+        for (c, v) in added {
+            if let Some(src) = M::derived(&c) {
+                self.asked.insert(src);
+            }
+            self.guards.insert(c, v);
+        }
+        if !whole.is_empty() {
+            self.guards
+                .retain(|c, _| M::derived(c).as_ref().is_none_or(|s| !whole.contains(s)));
+            self.asked.retain(|s| !whole.contains(s));
+        }
+        for (c, v, h) in &next.writes {
+            let v = match self.writes.get(c) {
+                Some((a, _)) if M::accumulates(c) => M::combine(c, a, v),
+                _ => v.clone(),
+            };
+            self.writes.insert(c.clone(), (v, *h));
+        }
+        let t = &mut self.first;
+        t.exit = next.exit.clone();
+        t.effects.extend(next.effects.iter().cloned());
+        t.allocs += next.allocs;
+        t.cost += next.cost;
+        t.born = t.born.min(next.born);
+        true
+    }
+
+    /// The trace composed.
+    #[must_use]
+    pub fn finish(self) -> Trace<M> {
+        Trace {
+            guards: self.guards.into_iter().collect(),
+            writes: self
+                .writes
+                .into_iter()
+                .map(|(c, (v, h))| (c, v, h))
+                .collect(),
+            ..self.first
+        }
     }
 }
 

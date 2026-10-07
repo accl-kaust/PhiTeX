@@ -800,7 +800,26 @@ impl<M: Machine> Build<M> {
         let Some(&old) = self.settled.iter().rev().nth(keep as usize) else {
             return 0;
         };
-        self.index();
+        // (a build not indexed, a copy to save, is not indexed for this:
+        // a merge asks only for the writers of accumulating cells)
+        let acc_writers: Option<BTreeMap<M::Cell, Vec<u64>>> = (!self.indexed).then(|| {
+            let mut m: BTreeMap<M::Cell, Vec<u64>> = BTreeMap::new();
+            for (k, t) in &self.seq {
+                for (c, _, _) in t.writes.iter().filter(|(c, _, _)| M::accumulates(c)) {
+                    m.entry(c.clone()).or_default().push(*k);
+                }
+            }
+            m
+        });
+        let last_writer = |c: &M::Cell, j: u64| -> Option<u64> {
+            match &acc_writers {
+                Some(m) => m.get(c).and_then(|ks| {
+                    let i = ks.partition_point(|k| *k < j);
+                    i.checked_sub(1).map(|i| ks[i])
+                }),
+                None => self.last_writer(c, Some(j)),
+            }
+        };
         let keys: Vec<u64> = self.seq.keys().copied().collect();
         let mut splices: Vec<(u64, Option<u64>, Vec<Trace<M>>)> = Vec::new();
         let mut i = 0;
@@ -810,23 +829,22 @@ impl<M: Machine> Build<M> {
                 i += 1;
                 continue;
             }
-            let mut acc = first.clone();
+            let mut acc = crate::trace::Composer::new(first);
             let mut j = i + 1;
             while j < keys.len() {
                 let t = &self.seq[&keys[j]];
-                if t.born > old || acc.cost + t.cost > grain {
+                if t.born > old || acc.cost() + t.cost > grain {
                     break;
                 }
                 let k0 = keys[i];
-                let entry = |c: &M::Cell| self.known_old_version_before(c, Some(k0));
-                let Some(next) = acc.compose_with(t, &entry) else {
+                let entry = |c: &M::Cell| self.known_old_version_after(c, last_writer(c, k0));
+                if !acc.push(t, &entry) {
                     break;
-                };
-                acc = next;
+                }
                 j += 1;
             }
             if j > i + 1 {
-                splices.push((keys[i], keys.get(j).copied(), alloc::vec![acc]));
+                splices.push((keys[i], keys.get(j).copied(), alloc::vec![acc.finish()]));
             }
             i = j;
         }
@@ -1071,18 +1089,24 @@ impl<M: Machine> Build<M> {
         }
     }
 
-    /// The old run's version of `c` just before region `j` (at the end if
-    /// `None`).
-    fn old_version_before(&self, c: &M::Cell, j: Option<u64>) -> Version {
+    /// The key of the last region before `j` (all of them: `None`) that
+    /// writes `c`, by the writers' index.
+    fn last_writer(&self, c: &M::Cell, j: Option<u64>) -> Option<u64> {
         let w = self.writers.get(c);
         let last = match j {
             Some(j) => w.and_then(|w| w.range(..j).next_back()),
             None => w.and_then(|w| w.iter().next_back()),
         };
+        last.map(|(k, ())| *k)
+    }
+
+    /// The version of `c` after region `last` wrote it (`None`: the
+    /// starting state's).
+    fn old_version_after(&self, c: &M::Cell, last: Option<u64>) -> Version {
         last.map_or_else(
             || version_of(&self.initial.get(c)),
-            |(k, ())| {
-                let w = &self.seq[k].writes;
+            |k| {
+                let w = &self.seq[&k].writes;
                 let i = w
                     .binary_search_by(|(x, _, _)| x.cmp(c))
                     .expect("a writer's trace writes the cell");
@@ -1105,25 +1129,26 @@ impl<M: Machine> Build<M> {
         }
     }
 
-    /// [`Build::old_version_before`], if the regions know it. An
+    /// The old run's version of `c` just before region `j` (at the end if
+    /// `None`), if the regions know it. An
     /// accumulating cell's version is its whole value, and a region kept
     /// from before the last rebuild in which that value differed recorded
     /// the whole value of its own run, not of the run it is now part of
     /// (the value it added is the same, as it ran the same).
     fn known_old_version_before(&self, c: &M::Cell, j: Option<u64>) -> Option<Version> {
+        self.known_old_version_after(c, self.last_writer(c, j))
+    }
+
+    /// [`Build::known_old_version_before`] the region whose key is `last`
+    /// (`None`: before every region) wrote `c` last.
+    fn known_old_version_after(&self, c: &M::Cell, last: Option<u64>) -> Option<Version> {
         if M::accumulates(c)
             && let Some(&since) = self.changed.get(c)
+            && last.is_some_and(|k| self.seq[&k].born < since)
         {
-            let w = self.writers.get(c);
-            let last = match j {
-                Some(j) => w.and_then(|w| w.range(..j).next_back()),
-                None => w.and_then(|w| w.iter().next_back()),
-            };
-            if last.is_some_and(|(k, ())| self.seq[k].born < since) {
-                return None;
-            }
+            return None;
         }
-        Some(self.old_version_before(c, j))
+        Some(self.old_version_after(c, last))
     }
 
     /// Rebuild after an edit: `new_initial` is the new starting state,

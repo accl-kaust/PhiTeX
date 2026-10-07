@@ -321,31 +321,90 @@ impl Code {
     }
 }
 
-partex_engine::persist_struct!(FontData {
-    metrics,
-    tfm,
-    name,
-    area,
-    glue,
-    used,
-    hyphen_char,
-    skew_char,
-    codes,
-    expand,
-    order,
-    rank,
-    expanded,
-    ident,
-    retagged,
-    order_hash,
-    idv,
-    remade,
-    code_sum,
-    num,
-    count,
-    native,
-    native_dir
-});
+/// Saved with its tables by slot in chunks named by their contents
+/// (`persist::save_chunked`): the arrays are copied whole when one font
+/// changes, and a snapshot then costs the chunks that changed, not every
+/// slot's entries (on the course, 260 KB a copy).
+impl partex_engine::persist::Persist for FontData {
+    fn save(&self, s: &mut partex_engine::persist::Saver) {
+        let Self {
+            metrics,
+            tfm,
+            name,
+            area,
+            glue,
+            used,
+            hyphen_char,
+            skew_char,
+            codes,
+            expand,
+            order,
+            rank,
+            expanded,
+            ident,
+            retagged,
+            order_hash,
+            idv,
+            remade,
+            code_sum,
+            num,
+            count,
+            native,
+            native_dir,
+        } = self;
+        partex_engine::persist::save_chunked(metrics, s);
+        partex_engine::persist::save_chunked(tfm, s);
+        partex_engine::persist::save_chunked(name, s);
+        partex_engine::persist::save_chunked(area, s);
+        partex_engine::persist::save_chunked(glue, s);
+        partex_engine::persist::save_chunked(used, s);
+        partex_engine::persist::save_chunked(hyphen_char, s);
+        partex_engine::persist::save_chunked(skew_char, s);
+        partex_engine::persist::save_chunked(codes, s);
+        partex_engine::persist::save_chunked(expand, s);
+        order.save(s);
+        partex_engine::persist::save_chunked(rank, s);
+        expanded.save(s);
+        partex_engine::persist::save_chunked(ident, s);
+        partex_engine::persist::save_chunked(retagged, s);
+        order_hash.save(s);
+        partex_engine::persist::save_chunked(idv, s);
+        partex_engine::persist::save_chunked(remade, s);
+        partex_engine::persist::save_chunked(code_sum, s);
+        partex_engine::persist::save_chunked(num, s);
+        count.save(s);
+        partex_engine::persist::save_chunked(native, s);
+        partex_engine::persist::save_chunked(native_dir, s);
+    }
+    fn load(l: &mut partex_engine::persist::Loader) -> Option<Self> {
+        use partex_engine::persist::Persist;
+        Some(Self {
+            metrics: partex_engine::persist::load_chunked(l)?,
+            tfm: partex_engine::persist::load_chunked(l)?,
+            name: partex_engine::persist::load_chunked(l)?,
+            area: partex_engine::persist::load_chunked(l)?,
+            glue: partex_engine::persist::load_chunked(l)?,
+            used: partex_engine::persist::load_chunked(l)?,
+            hyphen_char: partex_engine::persist::load_chunked(l)?,
+            skew_char: partex_engine::persist::load_chunked(l)?,
+            codes: partex_engine::persist::load_chunked(l)?,
+            expand: partex_engine::persist::load_chunked(l)?,
+            order: Persist::load(l)?,
+            rank: partex_engine::persist::load_chunked(l)?,
+            expanded: Persist::load(l)?,
+            ident: partex_engine::persist::load_chunked(l)?,
+            retagged: partex_engine::persist::load_chunked(l)?,
+            order_hash: Persist::load(l)?,
+            idv: partex_engine::persist::load_chunked(l)?,
+            remade: partex_engine::persist::load_chunked(l)?,
+            code_sum: partex_engine::persist::load_chunked(l)?,
+            num: partex_engine::persist::load_chunked(l)?,
+            count: Persist::load(l)?,
+            native: partex_engine::persist::load_chunked(l)?,
+            native_dir: partex_engine::persist::load_chunked(l)?,
+        })
+    }
+}
 
 impl FontArrays {
     pub(crate) fn new(font_max: i32) -> Self {

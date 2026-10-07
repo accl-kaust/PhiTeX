@@ -122,6 +122,7 @@ partex_engine::persist_enum!(Named {
 /// Save an engine with the machine's extras and its host's own state;
 /// `false` if it cannot be saved.
 fn save_tex<H: StoreHost>(tex: &Tex<H, CellTracker>, s: &mut Saver) -> bool {
+    s.mark("host");
     tex.host.save_own(s);
     tex.save_state(s) && tex.save_machine_extras(s)
 }
@@ -148,6 +149,7 @@ fn save_snapshot<H: StoreHost + 'static>(snap: &Arc<Snapshot<H>>, s: &mut Saver,
         || partex_engine::persist::Pin::Send(alloc::boxed::Box::new(snap.clone())),
         |s| {
             *ok &= save_tex(&snap.tex, s);
+            s.mark("lists");
             snap.lists.0.save(s);
             snap.started.save(s);
             snap.halted.save(s);
@@ -326,6 +328,7 @@ fn load_value<H: StoreHost + 'static>(l: &mut Loader, cx: &Cx<H>) -> Option<MVal
 
 /// Save a region's trace.
 fn save_trace<H: StoreHost + 'static>(t: &Trace<TexMachine<H>>, s: &mut Saver, ok: &mut bool) {
+    s.mark("t.entry");
     t.entry.save(s);
     t.exit.save(s);
     t.guards.len().save(s);
@@ -333,13 +336,16 @@ fn save_trace<H: StoreHost + 'static>(t: &Trace<TexMachine<H>>, s: &mut Saver, o
         c.save(s);
         v.0.save(s);
     }
+    s.mark("t.writes");
     t.writes.len().save(s);
     for (c, v, ver) in &t.writes {
         c.save(s);
         save_value(v, s, ok);
         ver.0.save(s);
     }
+    s.mark("t.effects");
     t.effects.save(s);
+    s.mark("t.holes");
     t.holes.save(s);
     t.allocs.save(s);
     t.cost.save(s);
@@ -406,6 +412,7 @@ impl<H: StoreHost + 'static> TexMachine<H> {
             census: _, // (diagnostics: not kept)
         } = self;
         let mut ok = save_tex(tex, s);
+        s.mark("m.rest");
         command_line.save(s);
         (*started, *halted, *fresh, *at_boundary).save(s);
         file_at.save(s);
@@ -527,12 +534,57 @@ fn ends_chunk(k: u64, len: usize) -> bool {
 const FINAL_PART: usize = usize::MAX - 1;
 const CHUNK_PART: usize = usize::MAX - 2;
 
+/// The runs of regions a build is saved in ([`save_build`]): each run's
+/// fingerprint and where it is in the build's regions.
+#[must_use]
+pub fn runs<H: StoreHost + 'static>(
+    b: &Build<TexMachine<H>>,
+) -> Vec<(u128, core::ops::Range<usize>)> {
+    let (_, _, seq, _, _) = b.parts();
+    let mut out = Vec::new();
+    let mut start = 0;
+    for (i, (k, _)) in seq.iter().enumerate() {
+        if ends_chunk(*k, i + 1 - start) || i + 1 == seq.len() {
+            out.push((fingerprint(&seq[start..=i]), start..i + 1));
+            start = i + 1;
+        }
+    }
+    out
+}
+
+/// Save `run`, regions of a build ([`runs`]), as a shared value of its own (in
+/// a [`Saver::merkle`], a blob: [`save_build`] refers to it, or a saver
+/// forked from its saver makes it apart, `Saver::merkle_fork`): its blob,
+/// or `None` if it cannot be saved.
+pub fn save_run<H: StoreHost + 'static>(
+    run: &[(u64, &Trace<TexMachine<H>>)],
+    s: &mut Saver,
+) -> Option<u128> {
+    let mut ok = true;
+    let addr = core::ptr::from_ref(run[0].1) as usize;
+    s.share(
+        addr,
+        CHUNK_PART,
+        "regions",
+        || partex_engine::persist::Pin::None,
+        |s| {
+            run.len().save(s);
+            for (k, t) in run {
+                k.save(s);
+                save_trace(t, s, &mut ok);
+            }
+        },
+    );
+    let h = s.merkle_hash_of(addr, CHUNK_PART).unwrap_or(0);
+    ok.then_some(h)
+}
+
 /// Save a build: its starting state and its digest; its final state and
-/// digest, and its regions in runs, each shared (in a [`Saver::merkle`],
-/// blobs of their own, loaded apart: [`load_parts`]); its rebuilds'
-/// bookkeeping. `reuse`: the blob a run of this fingerprint was saved as
-/// before (then referred to, not written again). `None` if the build
-/// cannot be saved; else its runs.
+/// digest, and its regions in runs ([`runs`]), each shared (in a
+/// [`Saver::merkle`], blobs of their own, loaded apart: [`load_parts`]);
+/// its rebuilds' bookkeeping. `reuse`: the blob a run of this
+/// fingerprint was saved as (before, or apart: then referred to, not
+/// written again). `None` if the build cannot be saved; else its runs.
 pub fn save_build<H: StoreHost + 'static>(
     b: &Build<TexMachine<H>>,
     s: &mut Saver,
@@ -552,36 +604,16 @@ pub fn save_build<H: StoreHost + 'static>(
             fin.digest().0.save(s);
         },
     );
-    let mut runs: Vec<&RunOf<'_, H>> = Vec::new();
-    let mut start = 0;
-    for (i, (k, _)) in seq.iter().enumerate() {
-        if ends_chunk(*k, i + 1 - start) || i + 1 == seq.len() {
-            runs.push(&seq[start..=i]);
-            start = i + 1;
-        }
-    }
+    let runs = runs(b);
     runs.len().save(s);
     let mut out = Vec::with_capacity(runs.len());
-    for run in runs {
-        let fp = fingerprint(run);
+    for (fp, at) in runs {
         let hash = if let Some(h) = reuse(fp).filter(|&h| s.blob_ref(h)) {
             h
         } else {
-            let addr = core::ptr::from_ref(run[0].1) as usize;
-            s.share(
-                addr,
-                CHUNK_PART,
-                "regions",
-                || partex_engine::persist::Pin::None,
-                |s| {
-                    run.len().save(s);
-                    for (k, t) in run {
-                        k.save(s);
-                        save_trace(t, s, &mut ok);
-                    }
-                },
-            );
-            s.merkle_hash_of(addr, CHUNK_PART).unwrap_or(0)
+            let h = save_run(&seq[at], s);
+            ok &= h.is_some();
+            h.unwrap_or(0)
         };
         out.push(SavedChunk {
             fingerprint: fp,
@@ -595,9 +627,6 @@ pub fn save_build<H: StoreHost + 'static>(
 
 /// Regions with their keys, in order.
 pub type Regions<H> = Vec<(u64, Trace<TexMachine<H>>)>;
-
-/// A run of regions saved as one part.
-type RunOf<'a, H> = [(u64, &'a Trace<TexMachine<H>>)];
 
 /// A part of a saved build: here, or a blob of the store to load it
 /// from (with [`load_final`] or [`load_chunk`], on any thread).
