@@ -97,9 +97,21 @@ pub(crate) struct JVec<T, const C: usize = CHUNK> {
     dirty: Vec<u64>,
     len: usize,
     frozen: bool,
+    /// A worker's view (DESIGN 3.10, "Per worker"): a checkpoint that runs
+    /// on in its chunks, never flat, a write copying the one chunk it
+    /// lands in ([`JVec::cow_clone`]).
+    cow: bool,
 }
 
 impl<T: Elem, const C: usize> JVec<T, C> {
+    /// A worker's view of the contents ([`JVec::cow`]): the chunks shared
+    /// with `self` until written.
+    pub(crate) fn cow_clone(&self) -> Self {
+        let mut c = self.clone();
+        c.cow = true;
+        c
+    }
+
     /// log2 of `C`.
     const BITS: usize = {
         assert!(
@@ -121,6 +133,7 @@ impl<T: Elem, const C: usize> JVec<T, C> {
             dirty: alloc::vec![0; n.div_ceil(C).div_ceil(8)],
             len: n,
             frozen: false,
+            cow: false,
         }
     }
 
@@ -275,7 +288,8 @@ impl<T: Elem, const C: usize> JVec<T, C> {
 
     /// A checkpoint goes on: its contents flat again.
     pub(crate) fn thaw(&mut self) {
-        if !self.frozen {
+        // (a worker's view runs on in its chunks)
+        if !self.frozen || self.cow {
             return;
         }
         let mut live = Vec::with_capacity(self.len);
@@ -295,7 +309,7 @@ impl<T: Elem, const C: usize> JVec<T, C> {
     /// only the others are copied (DESIGN.md §7.16.3, a restore rebases).
     /// `old` is left empty.
     pub(crate) fn thaw_from(&mut self, old: &mut Self) {
-        if !self.frozen {
+        if !self.frozen || self.cow {
             return;
         }
         if !rebase() || old.frozen || old.len != self.len {
@@ -410,6 +424,12 @@ impl<T: Elem, const C: usize> JVec<T, C> {
     /// Set `self[at..at + src.len()]`.
     pub(crate) fn copy_from(&mut self, at: usize, src: &[T]) {
         assert!(at + src.len() <= self.len, "copy out of range");
+        if self.cow {
+            for (k, x) in src.iter().enumerate() {
+                self[at + k].clone_from(x);
+            }
+            return;
+        }
         self.thaw();
         self.live[at..at + src.len()].clone_from_slice(src);
         if !src.is_empty() {
@@ -435,6 +455,7 @@ impl<T: Elem, const C: usize> Clone for JVec<T, C> {
             dirty: Vec::new(),
             len: self.len,
             frozen: true,
+            cow: false,
         }
     }
 }
@@ -454,10 +475,22 @@ impl<T: Elem, const C: usize> IndexMut<usize> for JVec<T, C> {
     #[inline]
     fn index_mut(&mut self, i: usize) -> &mut T {
         if self.frozen {
+            if self.cow {
+                return self.cow_at(i);
+            }
             self.thaw();
         }
         self.mark(i);
         &mut self.live[i]
+    }
+}
+
+impl<T: Elem, const C: usize> JVec<T, C> {
+    /// Element `i` of a worker's view to change: its chunk its own.
+    #[cold]
+    #[inline(never)]
+    fn cow_at(&mut self, i: usize) -> &mut T {
+        &mut Arc::make_mut(&mut self.base[i >> Self::BITS])[i & Self::MASK]
     }
 }
 
@@ -482,6 +515,7 @@ impl<T: Elem + partex_engine::persist::Persist + Send + Sync + 'static, const C:
             dirty: Vec::new(),
             len,
             frozen: true,
+            cow: false,
         })
     }
 }

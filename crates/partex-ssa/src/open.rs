@@ -209,6 +209,14 @@ pub(crate) struct Open<M: Machine> {
     /// (debug) writes made while no step was open.
     pub(crate) stepless_writes: u64,
     pub(crate) step_reads: Vec<(u64, M::Addr)>,
+    /// With versions kept ([`Runtime::keep_step_versions`], a worker's
+    /// run, DESIGN 3.10, "Commit"): the version each read of
+    /// `step_reads` found, in the same order; the version of the read
+    /// being noted; and each soft read's version, for the read the
+    /// step's end may make of it ([`Open::force_step_read`]).
+    pub(crate) step_vers: Option<Vec<Version>>,
+    cur_ver: Version,
+    soft_vers: Table<ByHash<M::Addr>, Version>,
     pub(crate) step_recs: Vec<RecId>,
     /// Timing ([`StepTimes`], a measurement, off unless asked for): the
     /// engine's clock, when the open step began, when it made each read
@@ -216,8 +224,8 @@ pub(crate) struct Open<M: Machine> {
     pub(crate) timing: bool,
     pub(crate) clock: u64,
     step_began: u64,
-    step_read_at: Vec<u64>,
-    step_wrote_at: Table<ByHash<M::Addr>, u64>,
+    pub(crate) step_read_at: Vec<u64>,
+    pub(crate) step_wrote_at: Table<ByHash<M::Addr>, u64>,
 }
 
 impl<M: Machine> Open<M> {
@@ -240,6 +248,9 @@ impl<M: Machine> Open<M> {
             root_writes: 0,
             stepless_writes: 0,
             step_reads: Vec::new(),
+            step_vers: None,
+            cur_ver: Version::ABSENT,
+            soft_vers: Table::new(),
             step_recs: Vec::new(),
             timing: false,
             clock: 0,
@@ -265,12 +276,16 @@ impl<M: Machine> Open<M> {
         let dense = core::mem::take(&mut self.dense);
         let dpos = core::mem::take(&mut self.dpos);
         let (timing, clock, serial) = (self.timing, self.clock, self.serial);
+        let versions = self.step_vers.is_some();
         *self = Open::new();
         self.dense = dense;
         self.dpos = dpos;
         self.timing = timing;
         self.clock = clock;
         self.serial = serial;
+        if versions {
+            self.step_vers = Some(Vec::new());
+        }
     }
 
     /// A fresh trip ([`Open::renew`]), its vectors sized like the last
@@ -286,6 +301,9 @@ impl<M: Machine> Open<M> {
     #[inline]
     fn push_step_read(&mut self, ha: u64, a: &M::Addr) {
         self.step_reads.push((ha, a.clone()));
+        if let Some(v) = &mut self.step_vers {
+            v.push(self.cur_ver);
+        }
         if self.timing {
             self.step_read_at.push(self.clock);
         }
@@ -312,6 +330,18 @@ impl<M: Machine> Open<M> {
     /// record, and never its parent's.
     #[inline]
     pub(crate) fn note_read_with(&mut self, loc: &Loc<M::Addr>, ver: impl FnOnce() -> Version) {
+        if self.step_vers.is_some() {
+            // (a worker's run: each read's version made, for the reads of
+            // its step from outside it, which the commit compares)
+            let v = ver();
+            self.cur_ver = v;
+            return self.note_read_inner(loc, || v);
+        }
+        self.note_read_inner(loc, ver);
+    }
+
+    #[inline]
+    fn note_read_inner(&mut self, loc: &Loc<M::Addr>, ver: impl FnOnce() -> Version) {
         let Some(top) = self.frames.last() else {
             return;
         };
@@ -473,10 +503,20 @@ impl<M: Machine> Open<M> {
         )
     }
 
+    /// A step begins or its run is dropped: no versions of its reads yet.
+    fn clear_step_versions(&mut self) {
+        if let Some(v) = &mut self.step_vers {
+            v.clear();
+            if !self.soft_vers.is_empty() {
+                self.soft_vers = Table::new();
+            }
+        }
+    }
+
     /// `a` read by the open step from outside it, made at a soft read
     /// before the step wrote it ([`Runtime::end_step_soft`]): recorded
     /// once, whatever the step wrote since.
-    fn force_step_read(&mut self, a: &M::Addr) {
+    pub(crate) fn force_step_read(&mut self, a: &M::Addr) {
         // (the caller passes only slots not read yet)
         let step = self.step.map_or(0, |s| s.1);
         if step == 0 {
@@ -485,7 +525,16 @@ impl<M: Machine> Open<M> {
         if let Some((f, i)) = M::dense(a) {
             dense_at(&mut self.dense, f, i).s = step;
         }
-        self.push_step_read(hash64(a), a);
+        let ha = hash64(a);
+        if self.step_vers.is_some() {
+            // (the version the soft read found: the step's entry value)
+            self.cur_ver = self
+                .soft_vers
+                .get_by(ha, |k| k.0 == *a)
+                .copied()
+                .unwrap_or(Version::ABSENT);
+        }
+        self.push_step_read(ha, a);
     }
 
     /// The running call wrote `a`.
@@ -1084,6 +1133,7 @@ impl<M: Machine> Runtime<M> {
             st.serial = self.open.serial;
         }
         self.open.step_reads.clear();
+        self.open.clear_step_versions();
         self.open.step_recs.clear();
         self.open.step_began = self.open.clock;
         self.open.step_read_at.clear();
@@ -1116,6 +1166,7 @@ impl<M: Machine> Runtime<M> {
     pub fn abort_step(&mut self) {
         self.open.step = None;
         self.open.step_reads.clear();
+        self.open.clear_step_versions();
         self.open.step_recs.clear();
         self.open.step_read_at.clear();
         self.open.step_wrote_at = Table::new();
@@ -1219,7 +1270,30 @@ impl<M: Machine> Runtime<M> {
         self.open.soft_new = false;
         self.open.note_read_with(loc, || ver);
         self.open.soft = false;
+        if self.open.soft_new && self.open.step_vers.is_some() {
+            // (the version it found, the step's entry value, kept for the
+            // read the step's end may make of it)
+            let a = loc.addr();
+            self.open
+                .soft_vers
+                .entry_by(hash64(a), |k| k.0 == *a, || ByHash(a.clone()), ver);
+        }
         self.open.soft_new
+    }
+
+    /// Keep (or not) the version of each read of a step from outside it
+    /// ([`Runtime::open_step_versions`]): a worker's run, which a commit
+    /// in order compares with what its reads find there (DESIGN 3.10,
+    /// "Commit"). Every read's version is made while it is on.
+    pub fn keep_step_versions(&mut self, on: bool) {
+        self.open.step_vers = on.then(Vec::new);
+    }
+
+    /// With [`Runtime::keep_step_versions`], the open step's reads from
+    /// outside it with the versions they found, in order.
+    pub fn open_step_versions(&self) -> impl Iterator<Item = (&M::Addr, Version)> {
+        let v = self.open.step_vers.as_deref().unwrap_or_default();
+        self.open.step_reads.iter().zip(v).map(|((_, a), v)| (a, *v))
     }
 
     /// End the open step as [`Runtime::end_step`] does, its soft reads

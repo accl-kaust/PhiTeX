@@ -59,6 +59,11 @@ pub struct Step<A> {
     /// Whether it is in the fold (a rebuild removes the steps it passes
     /// over when it ends a step elsewhere).
     pub live: bool,
+    /// What its runs name what they make by (the keys of the lines they
+    /// seal): its id, or for a step a worker ran first, the name the
+    /// worker gave it (DESIGN 3.10, "Cold builds"), so that each run of
+    /// the step makes the same names.
+    pub salt: u64,
 }
 
 /// An entry of a slot's definitions: step `step`'s write at `ix` of its
@@ -352,6 +357,7 @@ impl<M: Machine> Fold<M> {
             run: 0,
             serial: 0,
             live: true,
+            salt: u64::from(id),
         });
         self.keys.push(key);
         let s = id as usize;
