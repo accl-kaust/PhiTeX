@@ -416,6 +416,17 @@ impl<M: Machine> Runtime<M> {
         }
     }
 
+    /// The open trip's dense slots' tables taken out (a finished run's,
+    /// passed to the next: `open::Dense`).
+    pub fn take_dense(&mut self) -> crate::open::Dense {
+        self.open.take_dense()
+    }
+
+    /// Dense tables from a finished run put in, before a trip opens.
+    pub fn put_dense(&mut self, d: crate::open::Dense) {
+        self.open.put_dense(d);
+    }
+
     /// Records alive in the arena.
     #[must_use]
     pub fn live_records(&self) -> usize {

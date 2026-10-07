@@ -139,9 +139,36 @@ pub struct Par {
     pub cold: core::cell::Cell<bool>,
     /// The trackers of the workers, between rounds.
     pub(super) shells: RefCell<Vec<super::SsaTracker>>,
+    /// The stamp arrays of the workers' trackers, between runs: as many
+    /// as run at once, however many runs wait for their turns
+    /// ([`Par::stamps_back`]).
+    pub(super) stamps: RefCell<Vec<super::Stamps>>,
     /// What the rounds did: steps run on workers, taken at their commit,
     /// run again at their turn (and why), and the commands each.
     pub stats: RefCell<ParStats>,
+}
+
+impl Par {
+    /// A finished run's tracker's stamp arrays back in the pool (as many
+    /// as two a worker, the most a round runs): a run waiting for its
+    /// turn keeps its records, not arrays of the tables' size.
+    pub(super) fn stamps_back(&self, t: &mut super::SsaTracker) {
+        let s = t.take_stamps();
+        let mut pool = self.stamps.borrow_mut();
+        if pool.len() < 2 * self.workers.get() {
+            pool.push(s);
+        }
+    }
+
+    /// A shell about to run gets stamp arrays from the pool, if it has
+    /// none (they are sized to the view after the fork).
+    pub(super) fn stamps_out(&self, t: &mut super::SsaTracker) {
+        if !t.has_stamps()
+            && let Some(s) = self.stamps.borrow_mut().pop()
+        {
+            t.put_stamps(s);
+        }
+    }
 }
 
 /// What a build's workers did (the reports' numbers).
@@ -163,6 +190,9 @@ pub struct ParStats {
     /// Time making the workers' views, and waiting for the rounds.
     pub fork_ns: u64,
     pub round_ns: u64,
+    /// The most runs held at once, waiting for their steps' turns (each
+    /// holds its tracker: the memory the workers' runs keep).
+    pub held_max: u64,
 }
 
 impl ParStats {

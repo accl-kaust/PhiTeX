@@ -1217,7 +1217,7 @@ fn report_workers(what: &str, t: &partex_core::ssa::SsaTracker) {
     eprintln!(
         "phitex: ssa {what}: workers {}: rounds {}, passes {}, first provisional page {}, \
          ({:.1} ms waited, views {:.1} ms), runs {}, \
-         taken {} ({} commands), not taken {} ({} commands), why {:?}",
+         taken {} ({} commands), not taken {} ({} commands), held at most {}, why {:?}",
         t.par.workers.get(),
         s.rounds,
         s.passes,
@@ -1232,6 +1232,7 @@ fn report_workers(what: &str, t: &partex_core::ssa::SsaTracker) {
         s.commands_taken,
         s.rerun,
         s.commands_wasted,
+        s.held_max,
         s.why
     );
 }

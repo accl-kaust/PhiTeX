@@ -1579,6 +1579,20 @@ pub type Deadline = (fn() -> u64, u64);
 /// `true` stops the build there.
 pub type Cancel = fn() -> bool;
 
+/// A tracker's stamp arrays of the tables' size (the tables, the classes,
+/// the save stack's reads and writes, its recorder's dense slots), out of
+/// it: what a worker's tracker holds only while it runs
+/// ([`SsaTracker::take_stamps`]).
+pub(crate) struct Stamps {
+    tables: [Vec<core::cell::Cell<u32>>; 15],
+    classes: Vec<core::cell::Cell<u32>>,
+    saves: Vec<core::cell::Cell<u32>>,
+    save_writes: Vec<core::cell::Cell<u32>>,
+    generation: u32,
+    /// The recorder's dense slots' tables.
+    dense: partex_ssa::open::Dense,
+}
+
 /// The engine's tracker that records into the runtime.
 ///
 /// A read of a table slot is noted once per call: the slot's stamp is the
@@ -1971,6 +1985,38 @@ impl SsaTracker {
     pub fn boundary(&self) {
         self.generation
             .set(self.generation.get().wrapping_add(1).max(1));
+    }
+
+    /// The stamp arrays of the tables' size, taken out (a run held for
+    /// its step's turn needs none: they go back to the workers' pool,
+    /// `par::Par::stamps`), with the generation they were stamped up to.
+    pub(crate) fn take_stamps(&mut self) -> Stamps {
+        use core::mem::take;
+        Stamps {
+            tables: take(&mut self.stamps),
+            classes: take(&mut self.cstamps),
+            saves: take(&mut self.sstamps),
+            save_writes: take(&mut self.swstamps),
+            generation: self.generation.get(),
+            dense: self.rec.get_mut().rt.take_dense(),
+        }
+    }
+
+    /// Whether it holds its stamp arrays.
+    pub(crate) fn has_stamps(&self) -> bool {
+        !self.stamps[0].is_empty()
+    }
+
+    /// Stamp arrays from the pool put in: the generation moved past
+    /// theirs and its own, so every stamp in them is stale.
+    pub(crate) fn put_stamps(&mut self, s: Stamps) {
+        self.stamps = s.tables;
+        self.cstamps = s.classes;
+        self.sstamps = s.saves;
+        self.swstamps = s.save_writes;
+        self.rec.get_mut().rt.put_dense(s.dense);
+        self.generation.set(self.generation.get().max(s.generation));
+        self.boundary();
     }
 
     fn wstamp(&self, s: Slot) -> Option<&core::cell::Cell<u32>> {

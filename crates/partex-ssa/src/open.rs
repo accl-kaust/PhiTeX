@@ -187,6 +187,16 @@ pub enum Found<A> {
     Miss(Loc<A>),
 }
 
+/// A recorder's dense slots' tables ([`Open`]'s, of the tables' size as
+/// far as a trip touched them) and the serial they were stamped up to,
+/// out of it: the workers' recorders hold them only while they run, and
+/// pass them on ([`Runtime::take_dense`]).
+pub struct Dense {
+    stamps: Vec<Vec<Stamp>>,
+    pos: Vec<Vec<Pos>>,
+    serial: u64,
+}
+
 /// The recorder's state for one trip of an open build.
 pub(crate) struct Open<M: Machine> {
     wser: Table<ByHash<M::Addr>, (Stamp, Pos)>,
@@ -299,6 +309,25 @@ impl<M: Machine> Open<M> {
         if versions {
             self.step_vers = Some(Vec::new());
         }
+    }
+
+    /// The dense slots' tables taken out, with the serial they were
+    /// stamped up to ([`Dense`]).
+    pub(crate) fn take_dense(&mut self) -> Dense {
+        Dense {
+            stamps: core::mem::take(&mut self.dense),
+            pos: core::mem::take(&mut self.dpos),
+            serial: self.serial,
+        }
+    }
+
+    /// Dense tables put in between trips: the serial goes on from theirs
+    /// or its own, the later, so every stamp in them is older than the
+    /// next trip's frames and steps (as [`Open::renew`] keeps them).
+    pub(crate) fn put_dense(&mut self, d: Dense) {
+        self.dense = d.stamps;
+        self.dpos = d.pos;
+        self.serial = self.serial.max(d.serial);
     }
 
     /// A fresh trip ([`Open::renew`]), its vectors sized like the last

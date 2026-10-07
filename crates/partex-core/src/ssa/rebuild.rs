@@ -5274,6 +5274,31 @@ impl Spec {
         #[cfg(not(feature = "std"))]
         let _ = tex;
     }
+
+    /// Drop the runs whose steps will not have a turn: no longer dirty
+    /// (kept, met, retired) and not the step whose turn it is. Held, they
+    /// would keep their trackers to the rebuild's end.
+    #[cfg(feature = "std")]
+    fn prune<H: Host>(&mut self, tex: &Tex<H, SsaTracker>, j: StepId, dirty: &Dirty) {
+        let gone: Vec<StepId> = self
+            .ran
+            .keys()
+            .copied()
+            .filter(|&s| s != j && !dirty.why.contains_key(&s))
+            .collect();
+        for s in gone {
+            let Some(a) = self.ran.remove(&s) else {
+                continue;
+            };
+            let mut st = tex.tracker.par.stats.borrow_mut();
+            match &a.done.ran {
+                Ok(r) => st.not_taken("its step not run again", r.commands),
+                Err(_) => st.tainted += 1,
+            }
+            drop(st);
+            recycle(tex, a.done);
+        }
+    }
 }
 
 /// A worker's tracker back among the shells.
@@ -5285,7 +5310,10 @@ fn recycle<H: Host>(tex: &Tex<H, SsaTracker>, d: super::par::Done) {
 /// A worker's tracker back among the shells (as many as two a worker).
 #[cfg(feature = "std")]
 pub(super) fn recycle_tracker<H: Host>(tex: &Tex<H, SsaTracker>, t: Option<Box<SsaTracker>>) {
-    if let Some(t) = t {
+    if let Some(mut t) = t {
+        if t.has_stamps() {
+            tex.tracker.par.stamps_back(&mut t);
+        }
         let mut shells = tex.tracker.par.shells.borrow_mut();
         if shells.len() < 2 * tex.tracker.par.workers.get() {
             shells.push(*t);
@@ -5308,6 +5336,7 @@ fn speculate<H: Host>(
 ) {
     use super::par;
     let workers = tex.tracker.par.workers.get();
+    spec.prune(tex, j, dirty);
     if spec.ran.contains_key(&j) {
         return;
     }
@@ -5333,9 +5362,15 @@ fn speculate<H: Host>(
                 })
             })
         };
+        // (a round of at most two a worker, and with the runs held for
+        // their turns at most four a worker: what bounds the memory the
+        // runs keep)
+        let room = (workers * 4)
+            .saturating_sub(spec.ran.len())
+            .min(workers * 2);
         let mut c = alloc::vec![j];
         for (s, _) in dirty.steps() {
-            if c.len() >= workers * 2 {
+            if c.len() >= room {
                 break;
             }
             if s == j
@@ -5422,6 +5457,7 @@ fn speculate<H: Host>(
             .borrow_mut()
             .pop()
             .unwrap_or_else(|| SsaTracker::new(Recorder::new()));
+        tex.tracker.par.stamps_out(&mut shell);
         {
             let r = tex.tracker.rec.borrow();
             let salt = u32::try_from(r.rt.fold.steps[s as usize].salt).unwrap_or(s);
@@ -5464,12 +5500,13 @@ fn speculate<H: Host>(
     }
     let n = jobs.len() as u64;
     let t = std::time::Instant::now();
-    let dones = par::round(&mut tex.host, jobs, workers, tx, &rx, &replies);
+    let mut dones = par::round(&mut tex.host, jobs, workers, tx, &rx, &replies);
     tex.tracker.par.stats.borrow_mut().round_ns +=
         u64::try_from(t.elapsed().as_nanos()).unwrap_or(u64::MAX);
-    for d in dones.iter().flatten() {
-        if let Some(t) = &d.tracker {
+    for d in dones.iter_mut().flatten() {
+        if let Some(t) = &mut d.tracker {
             t.rec.borrow_mut().st.base = None;
+            tex.tracker.par.stamps_back(t);
         }
     }
     par::Base::restore(base, &mut tex.tracker.rec.borrow_mut().st);
@@ -5492,6 +5529,8 @@ fn speculate<H: Host>(
             );
         }
     }
+    let mut st = tex.tracker.par.stats.borrow_mut();
+    st.held_max = st.held_max.max(spec.ran.len() as u64);
 }
 
 /// Why a worker's run cannot be taken by what it wrote, if it cannot:

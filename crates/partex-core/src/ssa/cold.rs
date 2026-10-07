@@ -397,6 +397,7 @@ impl Cold {
                 .borrow_mut()
                 .pop()
                 .unwrap_or_else(|| SsaTracker::new(Recorder::new()));
+            tex.tracker.par.stamps_out(&mut shell);
             {
                 let r = tex.tracker.rec.borrow();
                 par::prepare(&mut shell, &tex.tracker, &r, snap, u64::MAX, 0);
@@ -433,14 +434,16 @@ impl Cold {
         let t0 = self.t0;
         let mut first: Option<u64> = None;
         let t = std::time::Instant::now();
-        let dones = par::chunk_round(&mut tex.host, jobs, workers, tx, &rx, &replies, &mut || {
-            if first.is_none() {
-                first = t0.map(|t| u64::try_from(t.elapsed().as_nanos()).unwrap_or(u64::MAX));
-            }
-        });
-        for d in dones.iter().flatten() {
-            if let Some(t) = &d.tracker {
+        let mut dones =
+            par::chunk_round(&mut tex.host, jobs, workers, tx, &rx, &replies, &mut || {
+                if first.is_none() {
+                    first = t0.map(|t| u64::try_from(t.elapsed().as_nanos()).unwrap_or(u64::MAX));
+                }
+            });
+        for d in dones.iter_mut().flatten() {
+            if let Some(t) = &mut d.tracker {
                 t.rec.borrow_mut().st.base = None;
+                tex.tracker.par.stamps_back(t);
             }
         }
         par::Base::restore(base, &mut tex.tracker.rec.borrow_mut().st);
