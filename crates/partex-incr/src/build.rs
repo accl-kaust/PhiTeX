@@ -794,23 +794,22 @@ impl<M: Machine> Build<M> {
                 i += 1;
                 continue;
             }
-            let mut acc = first.clone();
+            let mut acc = crate::trace::Composer::new(first);
             let mut j = i + 1;
             while j < keys.len() {
                 let t = &self.seq[&keys[j]];
-                if t.born > old || acc.cost + t.cost > grain {
+                if t.born > old || acc.cost() + t.cost > grain {
                     break;
                 }
                 let k0 = keys[i];
                 let entry = |c: &M::Cell| self.known_old_version_before(c, Some(k0));
-                let Some(next) = acc.compose_with(t, &entry) else {
+                if !acc.push(t, &entry) {
                     break;
-                };
-                acc = next;
+                }
                 j += 1;
             }
             if j > i + 1 {
-                splices.push((keys[i], keys.get(j).copied(), alloc::vec![acc]));
+                splices.push((keys[i], keys.get(j).copied(), alloc::vec![acc.finish()]));
             }
             i = j;
         }
