@@ -44,9 +44,12 @@ use crate::run::{CleanPoint, Step};
 use crate::tex::Tex;
 use crate::track::{Cell, LineCodes, Output, Row, Tracker, line_tokens};
 
+mod par;
 mod rebuild;
 mod tools;
 mod view;
+
+pub use par::{Par, ParStats};
 
 pub(crate) use rebuild::{Edits, edits_from};
 pub use rebuild::{
@@ -1002,6 +1005,11 @@ pub struct Versions {
     rev: u64,
     /// The build, which tags revisions.
     epoch: u64,
+    /// A worker's versions (`par.rs`): a table slot with none has the
+    /// version its content gives, as a [`STALE`] one, made when wanted
+    /// (every table slot's version is its content's, check mode's test),
+    /// so a worker's versions start empty.
+    lazy: bool,
 }
 
 /// A table slot whose version its content gives, made when wanted
@@ -1034,13 +1042,35 @@ impl Versions {
     /// `content` now (and kept).
     #[inline]
     fn fresh_at(&mut self, f: usize, i: usize, content: impl FnOnce() -> u128) -> Option<Version> {
-        let v = *self.table[f].get(i)?;
-        if v == STALE {
+        let Some(&v) = self.table[f].get(i) else {
+            return self.lazy.then(|| self.lazy_at(f, i, content));
+        };
+        if v == STALE || (v == 0 && self.lazy) {
             let v = content() | 1;
             self.table[f][i] = v;
             return Some(Version(v));
         }
         (v != 0).then_some(Version(v))
+    }
+
+    /// A worker's [`Versions::fresh_at`] of a slot past its table.
+    #[cold]
+    fn lazy_at(&mut self, f: usize, i: usize, content: impl FnOnce() -> u128) -> Version {
+        let v = content() | 1;
+        self.set_at(f, i, v);
+        Version(v)
+    }
+
+    /// A worker's versions (`par.rs`): its tables empty, made from the
+    /// contents as wanted; the revisions the build's (`base`'s).
+    pub(crate) fn worker_of(base: &Versions) -> Versions {
+        Versions {
+            table: Default::default(),
+            revs: base.revs.clone(),
+            rev: base.rev,
+            epoch: base.epoch,
+            lazy: true,
+        }
     }
 
     /// Whether table slot `s` is [`STALE`].
@@ -1173,6 +1203,12 @@ pub struct RecState {
     /// The exceptions' words looked up or entered ([`Fam::HyphWord`]).
     words: Vec<Vec<u8>>,
     words_ix: BTreeMap<Vec<u8>, u32>,
+    /// A worker's recorder (`par.rs`): the build's tables, which these
+    /// read through (the tables above then hold the worker's own entries,
+    /// numbered after the base's), and the base's loads whose version or
+    /// kind the worker's run changed.
+    pub(crate) base: Option<alloc::sync::Arc<par::Base>>,
+    load_sets: BTreeMap<u32, (Version, crate::host::FileKind)>,
     /// The calls opened through `Tracker::call_begin` by routine
     /// ([`Func::ALL`]'s order): this build's calls and hits, and the
     /// records made.
@@ -1310,15 +1346,6 @@ fn outputs(rt: &Runtime<TexSsa>, id: RecId) -> Vec<(Version, String)> {
 }
 
 impl RecState {
-    /// The exception's word `key` as an address ([`Fam::HyphWord`]).
-    fn word(&mut self, key: &[u8]) -> u32 {
-        let (id, fresh) = Recorder::intern(&mut self.words_ix, self.words.len(), key);
-        if fresh {
-            self.words.push(key.to_vec());
-        }
-        id
-    }
-
     /// Check mode's test of a hit: the writes of its record `hit` against
     /// those of the body that ran, `body`, slot by slot (what an applied
     /// hit would store is what the body stored).
@@ -1469,19 +1496,6 @@ impl Recorder {
         }
     }
 
-    fn intern_codes(&mut self, c: &LineCodes) -> u32 {
-        let key = Version::of(c).0;
-        if let Some(&i) = self.st.codes_ix.get(&key) {
-            return i;
-        }
-        let i = u32::try_from(self.st.codes.len())
-            .unwrap_or(EOF - 1)
-            .min(EOF - 1);
-        self.st.codes.push(c.clone());
-        self.st.codes_ix.insert(key, i);
-        i
-    }
-
     fn intern(ix: &mut BTreeMap<Vec<u8>, u32>, len: usize, name: &[u8]) -> (u32, bool) {
         if let Some(&i) = ix.get(name) {
             return (i, false);
@@ -1534,8 +1548,8 @@ impl Recorder {
         }
         match codes {
             Some(c) => {
-                let id = self.intern_codes(c);
-                let v = tokens_version(line, &self.st.codes[id as usize]);
+                let id = self.st.codes_id(c);
+                let v = tokens_version(line, c);
                 self.note(src_slot(j, id, k), v);
             }
             None => self.note(src_slot(j, BYTES, k), bytes_version(line)),
@@ -1698,6 +1712,12 @@ pub struct SsaTracker {
     /// (a file the link rewrote) are found by comparing them. The last
     /// few (`SsaTracker::contents_version`).
     load_versions: RefCell<Vec<(alloc::sync::Arc<[u8]>, Version)>>,
+    /// A worker's tracker (`par.rs`): what of the build it reads, and
+    /// what its run did that the build cannot take.
+    pub(crate) worker: Option<alloc::boxed::Box<par::Worker>>,
+    /// The build's workers (`par.rs`): how many, and their trackers,
+    /// kept between rounds (their stamps' arrays are the tables' size).
+    pub par: par::Par,
 }
 
 impl SsaTracker {
@@ -1766,23 +1786,27 @@ impl SsaTracker {
         };
         let rr = &mut *r;
         let v = contents.map_or(Version::ABSENT, |c| self.contents_version(c));
-        let (id, fresh) = Recorder::intern(&mut rr.st.loads_ix, rr.st.loads.len(), name);
-        if fresh {
-            rr.st.loads.push((name.to_vec(), v, kind));
-        } else {
-            rr.st.loads[id as usize].1 = v;
-            rr.st.loads[id as usize].2 = kind;
+        let (id, fresh) = rr.st.load_id(name, v, kind);
+        if !fresh {
+            rr.st.set_load(id, v, kind);
         }
         if whole {
             rr.st.steps.read_whole(id);
         }
         // (whether it read the φ, not the build's own store: DESIGN 7.17.3,
         // "A load reads the store, not the file")
-        let key = rr
-            .rt
-            .open_step_id()
-            .map(|j| rr.rt.fold.steps[j as usize].key);
-        let phi = key.is_none_or(|k| rr.st.steps.reads_phi(&rr.rt.fold, id, k));
+        let key = self.open_key_of(rr);
+        let phi = match &self.worker {
+            // (a worker's run: a load of a name the build stores reads the
+            // stores, which are the build's)
+            Some(w) => {
+                if key.is_some() && w.stored.contains(&id) {
+                    w.taint("a load of a name the build stores");
+                }
+                true
+            }
+            None => key.is_none_or(|k| rr.st.steps.reads_phi(&rr.rt.fold, id, k)),
+        };
         if let Some(c) = contents {
             rr.st.steps.loaded(id, c, phi);
         }
@@ -1796,12 +1820,40 @@ impl SsaTracker {
         if let (Some(src), Some(c)) = (rr.st.src.as_mut(), contents) {
             src.opened.push(c.as_ptr() as usize);
         }
-        let v = if rr.st.written.contains(name) {
+        let v = if rr.st.is_written(name) {
             rr.st.vers.revision(Slot(Fam::Unknown, 0))
         } else {
             v
         };
         rr.note(Slot(Fam::Load, i64::from(id)), v);
+    }
+
+    /// Name `id` entered at hash slot `p` by the step at `key` (a
+    /// worker's run taken at its commit: what [`Tracker::name_made`]
+    /// keeps in the build).
+    pub(crate) fn note_made(&self, key: u64, p: i32, id: u32) {
+        let Ok(i) = usize::try_from(p) else { return };
+        let mut at = self.made_at.borrow_mut();
+        if at.len() <= i {
+            at.resize(i + 1, 0);
+        }
+        let mut made = self.made.borrow_mut();
+        if at[i] == 0 {
+            made.push((key, id));
+            at[i] = u32::try_from(made.len()).unwrap_or(u32::MAX);
+        } else {
+            made[at[i] as usize - 1] = (key, id);
+        }
+    }
+
+    /// The key of the step open, if one is: in the fold, or for a
+    /// worker's run, the step's in the build's fold.
+    fn open_key_of(&self, r: &Recorder) -> Option<u64> {
+        let id = r.rt.open_step_id()?;
+        match &self.worker {
+            Some(w) => Some(w.key.get()),
+            None => r.rt.fold.steps.get(id as usize).map(|s| s.key),
+        }
     }
 
     /// Whether a step's frame keeps its own reads.
@@ -1860,6 +1912,8 @@ impl SsaTracker {
             soft_kept: core::cell::Cell::new(0),
             soft_read: core::cell::Cell::new(0),
             load_versions: RefCell::new(Vec::new()),
+            worker: None,
+            par: par::Par::default(),
         }
     }
 
@@ -1962,15 +2016,32 @@ impl SsaTracker {
     /// before a `\bibcite` read from the `.aux`, whose name the first trip
     /// entered at `\end{document}`).
     fn name_defined(&self, r: &mut Recorder, p: i32) {
-        let Some(k) = usize::try_from(p)
-            .ok()
-            .and_then(|i| self.made_at.borrow().get(i).copied())
-            .filter(|&k| k > 0)
-        else {
+        // (a worker's run: the build's names as the round began, and the
+        // step's key in the build's fold)
+        let (k, key) = match &self.worker {
+            Some(w) => {
+                w.asked_made.borrow_mut().push(p);
+                (
+                    usize::try_from(p)
+                        .ok()
+                        .and_then(|i| w.made_at.get(i).copied()),
+                    w.key.get(),
+                )
+            }
+            None => (
+                usize::try_from(p)
+                    .ok()
+                    .and_then(|i| self.made_at.borrow().get(i).copied()),
+                Self::open_key(r),
+            ),
+        };
+        let Some(k) = k.filter(|&k| k > 0) else {
             return;
         };
-        let key = Self::open_key(r);
-        let m = self.made.borrow()[k as usize - 1];
+        let m = match &self.worker {
+            Some(w) => w.made[k as usize - 1],
+            None => self.made.borrow()[k as usize - 1],
+        };
         // (every write by a step before the one that entered it: a run
         // dropped and made again writes it again)
         if key != 0 && key < m.0 {
@@ -2246,6 +2317,17 @@ impl SsaTracker {
     }
 
     fn end_step_inner(&self, r: &mut Recorder, save_ptr: i32) -> Option<partex_ssa::fold::StepId> {
+        let (read, skip) = self.step_end_softs(r, save_ptr);
+        if read.is_empty() && skip.is_empty() {
+            return r.rt.end_step();
+        }
+        r.rt.end_step_soft(&read, &skip)
+    }
+
+    /// The open step's soft reads settled at its end ([`SsaTracker::end_step`]):
+    /// the slots whose entry values it left saved (reads of it), and those
+    /// it left as it found them or wrote dead (not its definitions).
+    pub(crate) fn step_end_softs(&self, r: &mut Recorder, save_ptr: i32) -> (Vec<Slot>, Vec<Slot>) {
         let saved = core::mem::take(&mut *self.entry_saves.borrow_mut());
         let undone = core::mem::take(&mut *self.undone.borrow_mut());
         let dead: Vec<Slot> = if DEAD_SAVES.load(core::sync::atomic::Ordering::Relaxed) {
@@ -2261,7 +2343,7 @@ impl SsaTracker {
             Vec::new()
         };
         if saved.is_empty() && undone.is_empty() && dead.is_empty() {
-            return r.rt.end_step();
+            return (Vec::new(), Vec::new());
         }
         let mut read: Vec<Slot> = saved.iter().map(|e| e.0).collect();
         read.sort_unstable();
@@ -2279,7 +2361,7 @@ impl SsaTracker {
             skip.dedup();
         }
         self.soft_read.set(self.soft_read.get() + read.len() as u64);
-        r.rt.end_step_soft(&read, &skip)
+        (read, skip)
     }
 
     /// The open step's run dropped: its soft reads with it.
@@ -2569,6 +2651,11 @@ impl Tracker for SsaTracker {
     }
 
     fn font_loaded(&self, f: i32) {
+        if let Some(w) = &self.worker {
+            // (the font's arrays are not values a commit can put in place)
+            w.taint("a font loaded");
+            return;
+        }
         let Ok(r) = self.rec.try_borrow() else { return };
         let Some((sid, ser)) = r.rt.open_step_serial() else {
             return;
@@ -2584,6 +2671,9 @@ impl Tracker for SsaTracker {
     }
 
     fn font_visible(&self, f: i32) -> bool {
+        if let Some(w) = &self.worker {
+            return w.font_visible(f);
+        }
         let Ok(r) = self.rec.try_borrow() else {
             return true;
         };
@@ -2594,6 +2684,9 @@ impl Tracker for SsaTracker {
     }
 
     fn font_newest(&self, f: i32) -> Option<bool> {
+        if let Some(w) = &self.worker {
+            return w.font_newest(f);
+        }
         let r = self.rec.try_borrow().ok()?;
         r.rt.open_step_serial()?;
         // (the newest of the fonts made by now, by their makers' places
@@ -2623,10 +2716,18 @@ impl Tracker for SsaTracker {
     #[inline]
     fn stop_due(&self, n: u64) -> bool {
         n > self.stop_after.get()
-            && self
-                .rec
-                .try_borrow_mut()
-                .is_ok_and(|mut r| rebuild::read_later(&mut r))
+            && match &self.worker {
+                // (a worker's run past its budget: a state it was wrongly
+                // given may run away where the build's would not)
+                Some(w) => {
+                    w.taint("a run past its budget");
+                    true
+                }
+                None => self
+                    .rec
+                    .try_borrow_mut()
+                    .is_ok_and(|mut r| rebuild::read_later(&mut r)),
+            }
     }
 
     #[inline]
@@ -2642,6 +2743,16 @@ impl Tracker for SsaTracker {
         if calls & 0xffff != 0 {
             return false;
         }
+        if let Some(w) = &self.worker {
+            // (a worker's run: 2^24 calls with no command, or one told to
+            // stop, stops; the build runs the step at its turn)
+            if calls >= 1 << 24 || w.cancelled() {
+                w.taint("an expansion that ran away");
+                self.stop_after.set(0);
+                return true;
+            }
+            return false;
+        }
         let stop = self
             .rec
             .try_borrow_mut()
@@ -2654,12 +2765,9 @@ impl Tracker for SsaTracker {
     }
 
     fn step_salt(&self) -> u64 {
-        // (the step's id: its key moves when the fold is numbered again)
-        self.rec
-            .try_borrow()
-            .ok()
-            .and_then(|r| r.rt.open_step_id())
-            .map_or(0, u64::from)
+        // (the step's salt, its id but for a step a worker ran first:
+        // its key moves when the fold is numbered again)
+        u64::from(self.open_step().unwrap_or(0))
     }
 
     #[inline(always)]
@@ -2753,19 +2861,46 @@ impl Tracker for SsaTracker {
     }
 
     fn open_step(&self) -> Option<u32> {
-        self.rec.try_borrow().ok()?.rt.open_step_id()
+        // (named by its salt: its id, or the name a worker gave a step it
+        // ran first, `par.rs`)
+        let r = self.rec.try_borrow().ok()?;
+        let id = r.rt.open_step_id()?;
+        if let Some(w) = &self.worker {
+            return Some(w.salt.get());
+        }
+        Some(
+            r.rt.fold
+                .steps
+                .get(id as usize)
+                .map_or(id, |s| u32::try_from(s.salt).unwrap_or(id)),
+        )
     }
 
     fn steps_before(&self) -> Option<Vec<u32>> {
+        if let Some(w) = &self.worker {
+            // (the steps before it in the build's fold, which the commit
+            // does not compare)
+            w.taint("the steps before it observed");
+            return None;
+        }
         let r = self.rec.try_borrow().ok()?;
         let id = r.rt.open_step_id()?;
         let f = &r.rt.fold;
         let key = f.steps.get(id as usize)?.key;
         let at = f.order.partition_point(|&s| f.steps[s as usize].key < key);
-        Some(f.order[..at].to_vec())
+        Some(
+            f.order[..at]
+                .iter()
+                .map(|&s| u32::try_from(f.steps[s as usize].salt).unwrap_or(s))
+                .collect(),
+        )
     }
 
     fn glyphs_united(&self, union: u128) {
+        if let Some(w) = &self.worker {
+            w.taint("the job's end");
+            return;
+        }
         if let Ok(mut r) = self.rec.try_borrow_mut() {
             r.st.steps.glyphs_united(union);
         } else {
@@ -2930,10 +3065,7 @@ impl Tracker for SsaTracker {
             return;
         }
         let rr = &mut *r;
-        let (id, fresh) = Recorder::intern(&mut rr.st.searches_ix, rr.st.searches.len(), name);
-        if fresh {
-            rr.st.searches.push(name.to_vec());
-        }
+        let id = rr.st.search_id(name);
         rr.note(Slot(Fam::Search, i64::from(id)), Version::of(&found));
     }
 
@@ -3106,9 +3238,11 @@ impl Tracker for SsaTracker {
             return;
         }
         let rr = &mut *r;
-        let (id, fresh) = Recorder::intern(&mut rr.st.names_ix, rr.st.names.len(), name);
-        if fresh {
-            rr.st.names.push(name.to_vec());
+        let id = rr.st.name_id(name);
+        if let Some(w) = &self.worker {
+            // (the build takes it at the step's commit, at its key)
+            w.made_names.borrow_mut().push((p, id));
+            return;
         }
         let key = Self::open_key(rr);
         let Ok(i) = usize::try_from(p) else { return };
@@ -3133,10 +3267,7 @@ impl Tracker for SsaTracker {
             return;
         }
         let rr = &mut *r;
-        let (id, fresh) = Recorder::intern(&mut rr.st.names_ix, rr.st.names.len(), name);
-        if fresh {
-            rr.st.names.push(name.to_vec());
-        }
+        let id = rr.st.name_id(name);
         rr.note(Slot(Fam::Name, i64::from(id)), Version::of(&found));
     }
 
@@ -3196,7 +3327,14 @@ impl Tracker for SsaTracker {
 
     fn stored(&self, name: &[u8]) -> Option<Option<alloc::sync::Arc<[u8]>>> {
         let r = self.rec.try_borrow().ok()?;
-        let id = *r.st.loads_ix.get(name)?;
+        let id = r.st.load_ix(name)?;
+        if let Some(w) = &self.worker {
+            // (a load of a name the build stores reads the build's stores)
+            if r.rt.open_step_id().is_some() && w.stored.contains(&id) {
+                w.taint("a load of a name the build stores");
+            }
+            return None;
+        }
         let key = r.rt.fold.steps[r.rt.open_step_id()? as usize].key;
         r.st.steps.served(&r.rt.fold, id, key)
     }
@@ -3207,12 +3345,9 @@ impl Tracker for SsaTracker {
         };
         let rr = &mut *r;
         rr.st.written.insert(name.to_vec());
-        let (id, fresh) = Recorder::intern(&mut rr.st.loads_ix, rr.st.loads.len(), name);
-        if fresh {
-            rr.st
-                .loads
-                .push((name.to_vec(), Version::ABSENT, crate::host::FileKind::Tex));
-        }
+        let (id, _) = rr
+            .st
+            .load_id(name, Version::ABSENT, crate::host::FileKind::Tex);
         let a = Slot(Fam::Load, i64::from(id));
         if rr.on {
             rr.flush_output();
@@ -3222,6 +3357,10 @@ impl Tracker for SsaTracker {
     }
 
     fn stores_reaching(&self) -> Vec<(Vec<u8>, alloc::sync::Arc<[u8]>)> {
+        if let Some(w) = &self.worker {
+            w.taint("a command run");
+            return Vec::new();
+        }
         let Ok(r) = self.rec.try_borrow() else {
             return Vec::new();
         };
@@ -3237,6 +3376,10 @@ impl Tracker for SsaTracker {
     }
 
     fn command_wrote(&self, name: &[u8], contents: &[u8]) {
+        if let Some(w) = &self.worker {
+            w.taint("a command run");
+            return;
+        }
         let Ok(mut r) = self.rec.try_borrow_mut() else {
             self.lost.set(self.lost.get() + 1);
             return;
@@ -3271,19 +3414,27 @@ impl Tracker for SsaTracker {
     }
 
     fn run_doomed(&self) -> bool {
+        if let Some(w) = &self.worker {
+            w.taint("a command run");
+            return true;
+        }
         self.rec
             .try_borrow_mut()
             .is_ok_and(|mut r| rebuild::read_later(&mut r))
     }
 
     fn command_removed(&self, name: &[u8]) {
+        if let Some(w) = &self.worker {
+            w.taint("a command run");
+            return;
+        }
         let Ok(mut r) = self.rec.try_borrow_mut() else {
             self.lost.set(self.lost.get() + 1);
             return;
         };
         let rr = &mut *r;
         // (a name no step loaded or stored is nothing the build reads)
-        let Some(&id) = rr.st.loads_ix.get(name) else {
+        let Some(id) = rr.st.load_ix(name) else {
             return;
         };
         rr.st.written.insert(name.to_vec());
@@ -3306,7 +3457,7 @@ impl Tracker for SsaTracker {
         }
         // (the file's address, by name as a load names it, `Fam::Load`: a
         // file's store and its loads are one address, 7.17.5)
-        if let Some(&id) = rr.st.loads_ix.get(name) {
+        if let Some(id) = rr.st.load_ix(name) {
             let a = Slot(Fam::Load, i64::from(id));
             // (in program order with the effects before it)
             rr.flush_output();
@@ -3516,8 +3667,7 @@ impl View<'_> {
             EOF => Version::of(&4u8),
             c => self
                 .rec
-                .codes
-                .get(c as usize)
+                .code(c as usize)
                 .map_or(Version::of(&5u8), |c| tokens_version(line, c)),
         }
     }
@@ -3532,7 +3682,7 @@ impl Store<TexSsa> for View<'_> {
         match s.0 {
             Fam::Search => usize::try_from(s.1)
                 .ok()
-                .and_then(|i| rec.searches.get(i))
+                .and_then(|i| rec.search_at(i))
                 .map_or(Version::of(&8u8), |n| Version::of(&self.tex.search(n))),
             Fam::Eqtb
             | Fam::Hash
@@ -3584,22 +3734,20 @@ impl Store<TexSsa> for View<'_> {
             }
             Fam::Name => usize::try_from(s.1)
                 .ok()
-                .and_then(|i| rec.names.get(i))
+                .and_then(|i| rec.name_at(i))
                 .map_or(Version::of(&6u8), |n| Version::of(&self.tex.lookup(n))),
             Fam::HyphWord => usize::try_from(s.1)
                 .ok()
-                .and_then(|i| rec.words.get(i))
+                .and_then(|i| rec.word_at(i))
                 .map_or(Version::of(&9u8), |w| Version(self.tex.hyph_word(w))),
             Fam::Page => Version(self.tex.page_ver(u8::try_from(s.1).unwrap_or(0))),
             Fam::PageNode => Version(
                 self.tex
                     .page_node_ver(usize::try_from(s.1).unwrap_or(usize::MAX)),
             ),
-            Fam::Load => match usize::try_from(s.1).ok().and_then(|i| rec.loads.get(i)) {
-                Some((n, ..)) if rec.written.contains(n) => {
-                    rec.vers.revision(Slot(Fam::Unknown, 0))
-                }
-                Some((_, v, _)) => *v,
+            Fam::Load => match usize::try_from(s.1).ok().and_then(|i| rec.load_at(i)) {
+                Some((n, ..)) if rec.is_written(n) => rec.vers.revision(Slot(Fam::Unknown, 0)),
+                Some((_, v, _)) => v,
                 None => Version::of(&7u8),
             },
             _ => rec.vers.revision(s),

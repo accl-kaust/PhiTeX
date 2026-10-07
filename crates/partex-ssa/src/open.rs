@@ -1306,7 +1306,11 @@ impl<M: Machine> Runtime<M> {
     /// outside it with the versions they found, in order.
     pub fn open_step_versions(&self) -> impl Iterator<Item = (&M::Addr, Version)> {
         let v = self.open.step_vers.as_deref().unwrap_or_default();
-        self.open.step_reads.iter().zip(v).map(|((_, a), v)| (a, *v))
+        self.open
+            .step_reads
+            .iter()
+            .zip(v)
+            .map(|((_, a), v)| (a, *v))
     }
 
     /// End the open step as [`Runtime::end_step`] does, its soft reads

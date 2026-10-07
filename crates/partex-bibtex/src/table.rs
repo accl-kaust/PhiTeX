@@ -8,11 +8,12 @@
 //! statistics come out the same.
 
 use alloc::collections::BTreeMap;
-use alloc::rc::Rc;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 
-/// A string value.
-pub type Str = Rc<[u8]>;
+/// A string value (shared across threads: a build's session moves with
+/// its recorder to a worker's thread).
+pub type Str = Arc<[u8]>;
 
 /// A location in the table (0 is never one).
 pub type Loc = u32;

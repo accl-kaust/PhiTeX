@@ -1199,6 +1199,28 @@ fn ssa_window() -> u64 {
         .unwrap_or(4096)
 }
 
+/// What the workers did since the last report (`PHITEX_SSA_WORKERS`
+/// above 1): rounds, steps run on them, taken at their commits, run
+/// again (and why), and the commands each.
+fn report_workers(what: &str, t: &partex_core::ssa::SsaTracker) {
+    if t.par.workers.get() <= 1 {
+        return;
+    }
+    let s = core::mem::take(&mut *t.par.stats.borrow_mut());
+    eprintln!(
+        "phitex: ssa {what}: workers {}: rounds {}, runs {}, taken {} ({} commands), \
+         not taken {} ({} commands), why {:?}",
+        t.par.workers.get(),
+        s.rounds,
+        s.runs,
+        s.taken,
+        s.commands_taken,
+        s.rerun,
+        s.commands_wasted,
+        s.why
+    );
+}
+
 /// The SSA build's tracker, as the environment sets it up.
 fn ssa_tracker() -> partex_core::ssa::SsaTracker {
     use partex_core::ssa::{Recorder, SsaTracker};
@@ -1217,6 +1239,24 @@ fn ssa_tracker() -> partex_core::ssa::SsaTracker {
         .set(std::env::var("PARTEX_SSA_KEEP_COMPLETE").is_ok_and(|v| v == "1"));
     // (the steps' reads and writes timed, for the graph `write_dag` prints)
     tracker.set_timed(std::env::var_os("PARTEX_SSA_DAG").is_some());
+    // (a rebuild's steps on this many workers, DESIGN 3.10; 1: in turn)
+    let workers = ["PHITEX_SSA_WORKERS", "PARTEX_SSA_WORKERS"]
+        .iter()
+        .find_map(|k| std::env::var(k).ok()?.parse::<usize>().ok())
+        .unwrap_or(1);
+    tracker.par.workers.set(workers.max(1));
+    // (`STEP,ROUND`: the fewest commands a step, and a round, ran for it
+    // to go to workers; `0,0` sends every dirty step, a test's)
+    if let Some((a, b)) = std::env::var("PHITEX_SSA_SPEC_MIN")
+        .ok()
+        .and_then(|v| {
+            v.split_once(',')
+                .map(|(a, b)| (a.parse().ok(), b.parse().ok()))
+        })
+        .and_then(|(a, b)| Some((a?, b?)))
+    {
+        tracker.par.thresholds.set(Some((a, b)));
+    }
     // (a rebuild runs this many commands at most: past them it stops, as
     // one it cannot make, its trace printed)
     if let Some(b) = std::env::var("PARTEX_SSA_REBUILD_BUDGET")
@@ -1581,6 +1621,7 @@ fn rebuild_ssa(
         rr.initial,
         rr.commands,
     );
+    report_workers(&format!("rebuild {n}"), tex.tracker());
     {
         // (the rebuild's own calls, by routine)
         let now = tex.tracker().rec.borrow().st.routines;

@@ -59,7 +59,12 @@ impl<M: Machine> StepExport<M> {
     pub fn versioned(&self) -> impl Iterator<Item = (&M::Addr, Version)> {
         self.reads
             .iter()
-            .zip(self.vers.iter().copied().chain(core::iter::repeat(Version::ABSENT)))
+            .zip(
+                self.vers
+                    .iter()
+                    .copied()
+                    .chain(core::iter::repeat(Version::ABSENT)),
+            )
             .map(|((_, a), v)| (a, v))
     }
 
@@ -100,11 +105,7 @@ impl<M: Machine> Runtime<M> {
         if !read.is_empty() {
             let have: alloc::collections::BTreeSet<&M::Addr> =
                 self.open.step_reads.iter().map(|(_, a)| a).collect();
-            let new: Vec<M::Addr> = read
-                .iter()
-                .filter(|a| !have.contains(a))
-                .cloned()
-                .collect();
+            let new: Vec<M::Addr> = read.iter().filter(|a| !have.contains(a)).cloned().collect();
             for a in &new {
                 self.open.force_step_read(a);
             }
