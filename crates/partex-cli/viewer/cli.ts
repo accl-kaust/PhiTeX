@@ -212,6 +212,7 @@ bindKeys(window, {
     return viewer.page;
   },
   goTo: (k) => viewer.goTo(k),
+  turn: (n) => viewer.turn(n),
   scroller,
   zoom: (f) => setZoom(Math.min(5, Math.max(0.25, (zoom || fitScale()) * f))),
   fitWidth: () => setZoom(0),
