@@ -440,8 +440,15 @@ impl PackWriter {
                 .join(format!("save-{what}.tmp{}", std::process::id()))
         };
         let tmp = (tmp("pack"), tmp("kids"));
-        let file = std::io::BufWriter::new(File::create(&tmp.0)?);
-        let kids_file = std::io::BufWriter::new(File::create(&tmp.1)?);
+        // (each locked while this save writes it: a collection removes
+        // the temporary files no live save holds, those of a save killed)
+        let locked = |p: &Path| -> std::io::Result<File> {
+            let f = File::create(p)?;
+            f.lock()?;
+            Ok(f)
+        };
+        let file = std::io::BufWriter::new(locked(&tmp.0)?);
+        let kids_file = std::io::BufWriter::new(locked(&tmp.1)?);
         Ok(Self {
             dir: dir.to_path_buf(),
             t0: std::time::Instant::now(),
@@ -812,6 +819,8 @@ pub fn collect(dir: &Path, max: u64) {
         (bytes, named) = size(&roots, &heads);
     }
     let old = std::time::SystemTime::now() - std::time::Duration::from_secs(60);
+    sweep(&dir.join("packs"), old);
+    sweep(&dir.join("roots"), old);
     for (t, _, p) in packs {
         let unnamed = p
             .file_stem()
@@ -822,10 +831,55 @@ pub fn collect(dir: &Path, max: u64) {
     }
 }
 
+/// Remove the temporary files in `d` that a save or a write left when it
+/// was killed: those older than `old` that no live save holds locked (a
+/// save's pack and references are locked while it writes them; a whole
+/// file written at once, `write_atomic`'s, is renamed within moments).
+fn sweep(d: &Path, old: std::time::SystemTime) {
+    let Ok(es) = std::fs::read_dir(d) else {
+        return;
+    };
+    for e in es.filter_map(Result::ok) {
+        if !e.file_name().to_string_lossy().contains(".tmp") {
+            continue;
+        }
+        let stale = e
+            .metadata()
+            .and_then(|m| m.modified())
+            .is_ok_and(|t| t < old);
+        // (the lock taken, no save holds it: removed while it is held)
+        if stale
+            && let Ok(f) = File::open(e.path())
+            && f.try_lock().is_ok()
+        {
+            let _ = std::fs::remove_file(e.path());
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use partex_core::persist::blob_hash;
+
+    /// A save killed leaves its temporary files, which a collection
+    /// removes once they are stale; a save running keeps its own.
+    #[test]
+    fn a_killed_saves_files_are_collected() {
+        let dir = std::env::temp_dir().join(format!("phitex-store-tmp-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let running = PackWriter::new(&dir).unwrap();
+        let left = dir.join("packs").join("save-pack.tmp1");
+        std::fs::write(&left, b"half a pack").unwrap();
+        let later = std::time::SystemTime::now() + std::time::Duration::from_secs(3600);
+        sweep(&dir.join("packs"), later);
+        assert!(!left.exists());
+        let (pack, kids) = running.tmp.clone().unwrap();
+        assert!(pack.exists() && kids.exists());
+        drop(running);
+        assert!(!pack.exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// Write a root `key` for `root`, which refers to blobs `refs`: those of
     /// `new` (not stored yet, each with the blobs it refers to) and of
