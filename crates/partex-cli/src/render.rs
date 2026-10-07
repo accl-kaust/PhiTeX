@@ -538,6 +538,36 @@ impl Renderer {
                     self.style().blue(&format!("{tool:>12}"))
                 ));
             }
+            Progress::Superseded(changed) => {
+                // (the build starts again: its passes and commands from
+                // here, its time from the first save it serves)
+                {
+                    let mut r = lock(&self.run);
+                    r.passes = 0;
+                    r.commands = 0;
+                    r.again.clear();
+                }
+                if self.settings.quiet {
+                    return;
+                }
+                let what = if changed.is_empty() {
+                    String::from("a newer save")
+                } else {
+                    changed.join(", ")
+                };
+                self.event(&format!(
+                    "{} {}",
+                    self.style().yellow("superseded by"),
+                    self.style().cyan(&what)
+                ));
+            }
+            Progress::Settling(n) => {
+                if self.settings.verbose > 0 && !self.settings.quiet {
+                    self.note(&format!(
+                        "pass {n} written; settling the job's own files (a save preempts it)"
+                    ));
+                }
+            }
         }
     }
 

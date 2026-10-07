@@ -131,6 +131,9 @@ const viewer = new Viewer(pagesEl, scroller, host);
 let current = 0;
 let hashes: string[] = [];
 let building = false;
+// (what the build running is doing beyond typesetting: a newer save
+// superseded it, or its first pass is shown while the job settles)
+let doing = "";
 let connected = false;
 
 async function draw(k: number): Promise<void> {
@@ -170,7 +173,7 @@ function status(): void {
   else if (building) {
     const p = progress;
     const secs = p ? ` · ${(p.ms / 1000).toFixed(1)} s` : "";
-    [cls, text] = ["busy", p ? `pass ${p.pass} · ${p.phase}${p.pages ? ` · ${p.pages} page${p.pages === 1 ? "" : "s"}` : ""}${secs}` : "building…"];
+    [cls, text] = ["busy", doing && !p ? `${doing}…` : p ? `${doing ? `${doing} · ` : ""}pass ${p.pass} · ${p.phase}${p.pages ? ` · ${p.pages} page${p.pages === 1 ? "" : "s"}` : ""}${secs}` : "building…"];
   } else if (found.errors) [cls, text] = ["bad", `${found.errors} error${found.errors === 1 ? "" : "s"}${found.warnings ? ` · ${found.warnings} warning${found.warnings === 1 ? "" : "s"}` : ""}`];
   else if (found.warnings) [cls, text] = ["warn", `built${lastMs != null ? ` in ${(lastMs / 1000).toFixed(1)} s` : ""} · ${found.warnings} warning${found.warnings === 1 ? "" : "s"}`];
   else [cls, text] = ["ok", `built${lastMs != null ? ` in ${(lastMs / 1000).toFixed(1)} s` : ""}`];
@@ -188,7 +191,7 @@ function diagnosed(items: Problem[]): void {
   status();
 }
 
-sock.onEvent = (e: { event: string; on?: boolean; file?: string; lo?: number; hi?: number; at?: number; k?: number; hash?: string; pages?: number; pass?: number; phase?: string; ms?: number; items?: Problem[] }) => {
+sock.onEvent = (e: { event: string; on?: boolean; file?: string; lo?: number; hi?: number; at?: number; k?: number; hash?: string; pages?: number; settling?: boolean; pass?: number; phase?: string; ms?: number; items?: Problem[] }) => {
   if (e.event === "page") {
     // (a page shipped while the build runs: shown before the build is in,
     // the PDF's page replacing it when it settles)
@@ -201,14 +204,26 @@ sock.onEvent = (e: { event: string; on?: boolean; file?: string; lo?: number; hi
   } else if (e.event === "progress") {
     building = true;
     progress = { pass: e.pass ?? 1, pages: e.pages ?? 0, phase: e.phase ?? "", ms: e.ms ?? 0 };
+    // (the pass under way says it all; a superseding save stays named)
+    if (!doing.startsWith("superseded")) doing = "";
+    else doing = "superseded";
     status();
   } else if (e.event === "diagnostics") {
     diagnosed(e.items ?? []);
   } else if (e.event === "settled") {
-    building = false;
-    if (progress) lastMs = progress.ms;
-    progress = null;
+    // (a pass shown while the job's own files settle: still building)
+    building = !!e.settling;
+    doing = e.settling ? `settling (pass ${(e.pass ?? 1) + 1})` : "";
+    if (!e.settling) {
+      if (progress) lastMs = progress.ms;
+      progress = null;
+    }
     void layout();
+  } else if (e.event === "superseded") {
+    building = true;
+    doing = "superseded by a newer save: rebuilding";
+    progress = null;
+    status();
   } else if (e.event === "switched") {
     // (the build's glyph origins changed: asked again)
     glyphCache = new Map();
@@ -216,6 +231,7 @@ sock.onEvent = (e: { event: string; on?: boolean; file?: string; lo?: number; hi
     void show(e.file!, e.lo!, e.hi!, e.at!);
   } else if (e.event === "preparing") {
     building = !!e.on;
+    doing = "";
     status();
   }
 };
