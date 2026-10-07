@@ -603,10 +603,13 @@ impl Saver {
     /// copies, the same chunk of a table saved again unchanged, are one
     /// blob), else in place. Loaded with [`Loader::share`].
     pub fn share_content(&mut self, what: &'static str, save: impl FnOnce(&mut Self)) {
-        // (no address: a key no value has, so later values' ids are those
-        // the loader gives them)
+        // (no address: a key no value has, each its own)
         let key = (self.anonymous, usize::MAX);
         self.anonymous += 1;
+        if self.merkle.is_none() {
+            self.share(key.0, key.1, what, || Pin::None, save);
+            return;
+        }
         let outer_enc = core::mem::take(&mut self.enc.0);
         let outer_shared = core::mem::take(&mut self.shared);
         if let Some(m) = &mut self.merkle {
@@ -1680,6 +1683,65 @@ mod tests {
         let (blobs, _) = s.into_merkle();
         assert!(blobs.is_empty(), "a value known is not written again");
         assert_eq!(known.len(), 1);
+    }
+
+    /// A table in chunks and a sequence in a tree round-trip in every
+    /// kind of saver, a shared value after them keeping its id; in a
+    /// merkle saver a table saved twice is written once, and a sequence
+    /// saved again with one value changed writes that value and the
+    /// nodes above it only.
+    #[test]
+    fn chunked_tables_and_sequences_round_trip() {
+        let table: Vec<u32> = (0..1000).collect();
+        let seq: Vec<Arc<Vec<u8>>> = (0..2000u16)
+            .map(|i| Arc::new(i.to_le_bytes().repeat(40)))
+            .collect();
+        let shared: Arc<Vec<u8>> = Arc::new(alloc::vec![5; 3]);
+        let save = |s: &mut Saver| {
+            save_chunked(&table, s);
+            save_seq(&seq, s);
+            shared.save(s);
+            save_chunked(&table, s);
+            save_seq(&seq, s);
+            shared.save(s);
+        };
+        let check = |l: &mut Loader| {
+            for _ in 0..2 {
+                assert_eq!(load_chunked::<u32>(l).unwrap(), table);
+                let got: Vec<Arc<Vec<u8>>> = load_seq(l).unwrap();
+                assert_eq!(got, seq);
+                assert_eq!(*Arc::<Vec<u8>>::load(l).unwrap(), alloc::vec![5; 3]);
+            }
+        };
+        let mut s = Saver::new();
+        save(&mut s);
+        let bytes = s.into_bytes();
+        check(&mut Loader::new(&bytes));
+        let mut s = Saver::pooled();
+        save(&mut s);
+        let seg = s.take_segment();
+        let pool = s.into_pool();
+        check(&mut Loader::pooled(
+            &seg,
+            &pool.bytes,
+            &pool.spans,
+            Vec::new(),
+        ));
+        let mut s = Saver::merkle(16, BTreeSet::new());
+        save(&mut s);
+        let (blobs, root) = s.into_merkle();
+        let all: BTreeMap<u128, Vec<u8>> = blobs.iter().map(|b| (b.0, b.1.clone())).collect();
+        assert_eq!(blobs.len(), all.len(), "each blob once");
+        let fetch = |h: u128| all.get(&h).cloned();
+        check(&mut Loader::merkle(&root, &fetch, Loaded::new()));
+        // (one value changed: itself, its node and the root's list)
+        let mut s = Saver::merkle(16, all.keys().copied().collect());
+        let mut changed = seq.clone();
+        changed[1234] = Arc::new(alloc::vec![1; 50]);
+        save_seq(&seq, &mut s);
+        save_seq(&changed, &mut s);
+        let (blobs, _) = s.into_merkle();
+        assert_eq!(blobs.len(), 3);
     }
 
     /// A sink takes the blobs a saver keeps without one, in the same
