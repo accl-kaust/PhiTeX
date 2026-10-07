@@ -110,11 +110,12 @@ impl Inputs {
     /// After a link: each file the build read as it read it (its stamp
     /// just before, its bytes: a save after that is an edit, even one made
     /// while the build ran), and the job's own files as the link left them
-    /// (not edits). A file the host kept nothing of (too new when read) is
-    /// looked at as edited, and the rebuild finds whether it was.
+    /// (not edits). A file the host kept nothing of (its times under 2 s
+    /// old when read: a project just copied) is taken as it is now.
     fn refresh(&mut self, host: &NativeHost) {
         for p in host.read_paths() {
             let ours = project(&p) && !host.is_output(&p);
+            let known = self.files.contains_key(&p);
             let seen = self.files.entry(p.clone()).or_insert(Seen {
                 stamp: None,
                 bytes: None,
@@ -122,6 +123,12 @@ impl Inputs {
             if let Some((stamp, bytes)) = host.read_as(&p) {
                 seen.stamp = Some(stamp);
                 seen.bytes = ours.then_some(bytes);
+            } else if !known {
+                seen.stamp = crate::native::stamp(&p);
+                seen.bytes = ours
+                    .then(|| std::fs::read(crate::native::path(&p)).ok())
+                    .flatten()
+                    .map(Arc::from);
             }
             if host.as_written(&p) {
                 seen.stamp = crate::native::stamp(&p);
@@ -247,6 +254,8 @@ struct Ssa {
     first: Option<Instant>,
     steps: usize,
     commands: u64,
+    /// The trips whose files the last link wrote.
+    passes: usize,
     /// The commands of the last cold build's first trip: the job's, which
     /// a rebuild's pass line counts its own against.
     job_commands: u64,
@@ -297,6 +306,7 @@ impl Ssa {
             first: None,
             steps: 0,
             commands: 0,
+            passes: 0,
             job_commands: 0,
             debug: std::env::var_os("PARTEX_WATCH_DEBUG").is_some(),
         }
@@ -508,6 +518,7 @@ impl Ssa {
         let mut settled = false;
         loop {
             self.link(ren, viewer);
+            self.passes = k;
             if settled || k >= self.bound {
                 return End::Done {
                     passes: k,
@@ -590,6 +601,9 @@ impl Ssa {
             };
             match end {
                 End::Done { passes, unsettled } => break (passes, unsettled),
+                // (a cold build whose settling a save that changed nothing
+                // stopped: its files are written)
+                End::Nothing if first_cold => break (self.passes, Vec::new()),
                 End::Nothing => return None,
                 End::Superseded => {
                     let host = self.tex.as_ref().map(Tex::host);
