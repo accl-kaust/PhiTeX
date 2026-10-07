@@ -560,7 +560,18 @@ impl Canon<'_> {
             self.sref(name);
         }
         if state == TOKEN_LIST {
-            self.tok(list.as_ref());
+            if r.holds_param() {
+                // (the parameter it reads, by its place: the parameters are
+                // hashed with the scanner's state)
+                self.put(&(3u8, start));
+            } else if r.holds_token() {
+                // (as the pooled list of that token alone would be)
+                let mut l = partex_engine::node::TokenList::new(alloc::vec![start], false);
+                l.remake(false);
+                self.tok(Some(&alloc::sync::Arc::new(l)));
+            } else {
+                self.tok(list.as_ref());
+            }
             self.put(&loc); // (an index into the list)
         } else {
             self.put(&(start, loc)); // (buffer positions)

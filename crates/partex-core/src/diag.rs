@@ -409,7 +409,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             INTER_CHAR_TEXT => FrameKind::TokenList("XeTeXinterchartoks"),
             _ => FrameKind::TokenList("?"),
         };
-        let list = r.list.clone().unwrap_or_default();
+        let list = r.tokens_in(&self.param_stack).to_vec();
         let mut split = None;
         let text = self.diag_print(|t| {
             t.trick_count = 1_000_000;

@@ -117,11 +117,18 @@ impl<H: Host, T: Tracker> Tex<H, T> {
     #[inline(always)]
     #[allow(clippy::inline_always, reason = "the token path")]
     pub(crate) fn cur_tok_and_next(&self) -> (i32, i32) {
-        let l = self
-            .cur_input
-            .list
-            .as_deref()
-            .map_or(&[][..], TokenList::tokens);
+        let r = &self.cur_input;
+        // (a level being read with no list of its own holds its token,
+        // `back_input`, or reads a parameter in place: `InStateRecord`)
+        let l: &[i32] = match &r.list {
+            Some(l) => l.tokens(),
+            None if r.index != crate::web::PARAMETER => return (r.start, crate::mem::NULL),
+            None => self
+                .param_stack
+                .get(crate::input::ux(r.start))
+                .and_then(Option::as_ref)
+                .map_or(&[], |l| l.tokens()),
+        };
         let i = crate::input::ux(self.cur_input.loc);
         let t = l[i];
         let next = if i + 1 < l.len() {
@@ -135,12 +142,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
     /// The token at `loc` of the current level's list.
     #[inline]
     pub(crate) fn cur_tok_at(&self, loc: i32) -> i32 {
-        let l = self
-            .cur_input
-            .list
-            .as_deref()
-            .map_or(&[][..], TokenList::tokens);
-        l[crate::input::ux(loc)]
+        self.cur_input.tokens_in(&self.param_stack)[crate::input::ux(loc)]
     }
 }
 
@@ -159,13 +161,17 @@ impl<H: Host, T: Tracker> Tex<H, T> {
     /// changed in place; the pooled one is reused when no one else holds
     /// it).
     pub(crate) fn insert_front(&mut self, t: i32) {
+        // (a level holding its token, `back_input`, holds a list now)
+        let held = self.cur_input.holds_token().then_some(self.cur_input.start);
         let old = self.cur_input.list.take().unwrap_or_default();
         let new = self.pooled_list(|b| {
             b.push(t);
+            b.extend(held);
             b.extend_from_slice(old.tokens());
         });
         self.release_list(old);
         self.cur_input.list = Some(new);
+        self.cur_input.start = 0;
         self.cur_input.loc = 0;
     }
 }

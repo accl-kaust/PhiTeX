@@ -241,10 +241,17 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                         RIGHT_BRACE => self.set_align_state(self.align_state() - 1),
                         OUT_PARAM => {
                             // §359: insert macro parameter and restart.
-                            let p = self.param_stack[ux(self.cur_input.limit + self.cur_chr - 1)]
-                                .clone()
-                                .unwrap_or_default();
-                            self.begin_token_list(p, PARAMETER)?;
+                            // (read in place: `InStateRecord::holds_param`)
+                            let k = self.cur_input.limit + self.cur_chr - 1;
+                            let empty = self.param_stack[ux(k)]
+                                .as_ref()
+                                .is_none_or(|l| l.is_empty());
+                            self.push_input()?;
+                            self.cur_input.state = TOKEN_LIST;
+                            self.cur_input.list = None;
+                            self.cur_input.start = k;
+                            self.cur_input.index = PARAMETER;
+                            self.cur_input.loc = if empty { NULL } else { 0 };
                             self.memo.param_pushed(self.input_ptr - 1);
                             continue 'restart;
                         }

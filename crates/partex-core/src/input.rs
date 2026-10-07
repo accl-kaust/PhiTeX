@@ -16,7 +16,10 @@ use crate::web::*;
 
 /// §300: one level of the input stack. A token-list level holds its list,
 /// a shared value (DESIGN 7.17.12); `loc` is the index of the next token
-/// in it, `NULL` once it is read.
+/// in it, `NULL` once it is read. A level that backs up one token
+/// (§325, `back_input`, the commonest level of all) holds no list: the
+/// token is its `start` ([`InStateRecord::tokens`]), which tex.web's
+/// token-list levels leave unused here.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
 pub struct InStateRecord {
     pub list: Option<partex_engine::node::Tokens>,
@@ -26,6 +29,77 @@ pub struct InStateRecord {
     pub loc: i32,
     pub limit: i32,
     pub name: i32,
+}
+
+impl InStateRecord {
+    /// A level backing up one token, held in `start` (no list).
+    #[inline(always)]
+    #[allow(clippy::inline_always, reason = "the token path")]
+    #[must_use]
+    pub fn holds_token(&self) -> bool {
+        self.list.is_none()
+            && self.state == TOKEN_LIST
+            && (BACKED_UP..=INSERTED).contains(&self.index)
+    }
+
+    /// A parameter level (§359) that reads parameter `start` of the
+    /// parameter stack in place (no list of its own, no reference
+    /// counted: the parameter outlives the level, which is above its
+    /// macro's).
+    #[inline(always)]
+    #[allow(clippy::inline_always, reason = "the token path")]
+    #[must_use]
+    pub fn holds_param(&self) -> bool {
+        self.list.is_none() && self.state == TOKEN_LIST && self.index == PARAMETER
+    }
+
+    /// The list a token-list level reads: its own, or the parameter's
+    /// ([`InStateRecord::holds_param`]; `params` is the parameter stack).
+    #[inline(always)]
+    #[allow(clippy::inline_always, reason = "the token path")]
+    #[must_use]
+    pub fn list_in<'a>(&'a self, params: &'a [Option<Tokens>]) -> Option<&'a Tokens> {
+        match &self.list {
+            Some(l) => Some(l),
+            None if self.holds_param() => params.get(ux(self.start)).and_then(Option::as_ref),
+            None => None,
+        }
+    }
+
+    /// The tokens a token-list level reads: its list's, the parameter's
+    /// it reads in place, or the one token it holds itself
+    /// ([`InStateRecord::holds_token`]); none for a level with neither.
+    #[inline(always)]
+    #[allow(clippy::inline_always, reason = "the token path")]
+    #[must_use]
+    pub fn tokens_in<'a>(&'a self, params: &'a [Option<Tokens>]) -> &'a [i32] {
+        match &self.list {
+            Some(l) => l.tokens(),
+            None if self.holds_token() => core::slice::from_ref(&self.start),
+            None => self.list_in(params).map_or(&[], |l| l.tokens()),
+        }
+    }
+
+    /// Whether `self` and `o` read the same tokens, each with its own
+    /// parameter stack (compared apart): a level holding a token is the
+    /// same as one holding a list of it alone, and parameter levels
+    /// reading in place are the same if they read the same parameter.
+    #[must_use]
+    pub fn same_list(&self, o: &Self) -> bool {
+        match (&self.list, &o.list) {
+            (Some(a), Some(b)) => a == b,
+            (None, None) if self.holds_param() || o.holds_param() => {
+                self.holds_param() == o.holds_param() && self.start == o.start
+            }
+            (a, b) => {
+                !self.holds_param()
+                    && !o.holds_param()
+                    && self.tokens_in(&[]) == o.tokens_in(&[])
+                    && a.as_ref().is_none_or(|l| !l.protected())
+                    && b.as_ref().is_none_or(|l| !l.protected())
+            }
+        }
+    }
 }
 
 partex_engine::persist_struct!(InStateRecord {
@@ -862,7 +936,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             }
             // §319: pseudoprint the token list.
             l = self.begin_pseudoprint();
-            let list = self.cur_input.list.clone().unwrap_or_default();
+            let list = self.cur_input.tokens_in(&self.param_stack).to_vec();
             self.show_token_list(&list, self.cur_input.loc, 100_000);
         } else {
             // §313: print location of current line.
@@ -1244,10 +1318,17 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         // (a pooled list: `tok.rs`, `pooled_list`; a tagged token as it
         // was read, `reloc.rs`)
         let t = self.take_raw_tok();
-        let mut p = self.pooled_list(|b| b.push(t));
-        if !o.is_none() {
-            self.give_org(&mut p, &[o]);
-        }
+        // (a plain token, the common case, held by the level itself; a
+        // tagged one, `reloc.rs`, or one with its origin, in a list)
+        let p = if o.is_none() && !is_tagged(t) {
+            None
+        } else {
+            let mut p = self.pooled_list(|b| b.push(t));
+            if !o.is_none() {
+                self.give_org(&mut p, &[o]);
+            }
+            Some(p)
+        };
         if self.cur_tok < RIGHT_BRACE_LIMIT {
             if self.cur_tok < LEFT_BRACE_LIMIT {
                 self.set_align_state(self.align_state() - 1);
@@ -1257,8 +1338,8 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         }
         self.push_input()?;
         self.cur_input.state = TOKEN_LIST;
-        self.cur_input.start = 0;
-        self.cur_input.list = Some(p);
+        self.cur_input.start = if p.is_none() { t } else { 0 };
+        self.cur_input.list = p;
         self.cur_input.index = BACKED_UP;
         self.cur_input.loc = 0; // that was `back_list(p)`, without procedure overhead
         Ok(())

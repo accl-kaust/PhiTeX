@@ -829,7 +829,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         if self.cur_input.state != TOKEN_LIST {
             return self.file_token_org(want);
         }
-        let Some(l) = self.cur_input.list.as_deref() else {
+        let Some(l) = self.cur_input.list_in(&self.param_stack) else {
             return Org::NONE;
         };
         let h = l.org();
