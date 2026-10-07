@@ -3250,6 +3250,16 @@ PDF), `--copy-pdf`, `-o`, `phitex why`'s record. It keeps no store: each
   settled against `pdflatex` run to its fixpoint) and
   `modern_watch_ssa_preempt` (a save 0.6 s into a long rebuild supersedes
   it within 2 s; the PDF never torn; settled as a cold build).
+- *Known SSA-runtime issue* (not the watch's; open). On the user's
+  323-page course, deleting "This course exists" from `ch00.tex` line 3
+  and rebuilding gives a PDF whose font numbers (`/F326` for `/F329`,
+  `/F336` for `/F370`) differ from one plain pass from the same files;
+  the `.aux`, `.toc` and `.out` are the same. The CLI's harness does the
+  same without the watch (`PARTEX_SSA=1`, `PARTEX_SSA_TRIPS=1`,
+  `PARTEX_SSA_REBUILD="sed -i '3s/This course exists//' ch00.tex"`,
+  compared with one plain pass), also with `PARTEX_SSA_FONT_REFS=0`, on
+  main 86eaad7. Until it is fixed, `watch --ssa`'s settled PDF can differ
+  from a cold build's in its font numbers after such an edit.
 
 ---
 
