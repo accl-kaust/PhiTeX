@@ -106,6 +106,10 @@ pub fn get(key: u128) -> Option<Vec<u8>> {
 }
 
 /// The bound on the directory's size.
+pub fn max() -> u64 {
+    max_bytes()
+}
+
 fn max_bytes() -> u64 {
     std::env::var("PARTEX_CACHE_MAX")
         .ok()
@@ -113,8 +117,10 @@ fn max_bytes() -> u64 {
         .unwrap_or(2 << 30)
 }
 
-/// Remove the least recently used files of `dir` until it holds at most
-/// `max` bytes (files being written, `*.tmp*`, are left alone).
+/// Remove the files of `dir` unused for the store's age bound
+/// ([`crate::store::max_age`]), then the least recently used until it
+/// holds at most `max` bytes (files being written, `*.tmp*`, are left
+/// alone).
 fn collect(dir: &std::path::Path, max: u64) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
@@ -127,6 +133,11 @@ fn collect(dir: &std::path::Path, max: u64) {
             m.is_file().then(|| (m.modified().ok(), m.len(), e.path()))
         })
         .collect();
+    if let Some(age) = crate::store::max_age() {
+        let stale = std::time::SystemTime::now() - age;
+        files
+            .retain(|(t, _, p)| !(t.is_some_and(|t| t < stale) && std::fs::remove_file(p).is_ok()));
+    }
     let mut total: u64 = files.iter().map(|f| f.1).sum();
     if total <= max {
         return;

@@ -117,6 +117,16 @@ fn max_bytes() -> u64 {
         .unwrap_or(4 << 30)
 }
 
+/// How long a saved build or cached value is kept unused
+/// (`PARTEX_STORE_DAYS` days, 30 by default; 0 for ever).
+pub fn max_age() -> Option<std::time::Duration> {
+    let days: u64 = std::env::var("PARTEX_STORE_DAYS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(30);
+    (days > 0).then(|| std::time::Duration::from_secs(days * 24 * 3600))
+}
+
 fn hex(h: u128) -> String {
     format!("{h:032x}")
 }
@@ -776,6 +786,16 @@ pub fn collect(dir: &Path, max: u64) {
     order.sort_by(|&a, &b| roots[a].cmp(&roots[b]));
     let mut heads: Vec<Vec<String>> = order.iter().map(|&i| heads[i].clone()).collect();
     roots = order.iter().map(|&i| roots[i].clone()).collect();
+    // (a saved build unused for the age bound goes whatever the size:
+    // the documents not built for a month are not kept for ever)
+    if let Some(age) = max_age() {
+        let stale = std::time::SystemTime::now() - age;
+        while roots.first().is_some_and(|r| r.0 < stale) {
+            let (_, _, p) = roots.remove(0);
+            heads.remove(0);
+            let _ = std::fs::remove_file(p);
+        }
+    }
     let (mut bytes, mut named) = size(&roots, &heads);
     while bytes > max && !roots.is_empty() {
         let (_, _, p) = roots.remove(0);
@@ -865,6 +885,33 @@ mod tests {
         assert_eq!(
             open(&dir, 2).unwrap().get(hs).unwrap(),
             b"another job's".repeat(20)
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A saved build unused for longer than the age bound goes at the next
+    /// collection, however small the store; one used recently stays.
+    #[test]
+    fn an_old_saved_build_expires() {
+        let dir = std::env::temp_dir().join(format!("phitex-store-age-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let a = blob(b"an old document".repeat(20), Vec::new());
+        let b = blob(b"a recent document".repeat(20), Vec::new());
+        let (ha, hb) = (a.0, b.0);
+        save(&dir, 1, b"old", vec![a], &[ha], &Stored::default()).unwrap();
+        save(&dir, 2, b"recent", vec![b], &[hb], &Stored::default()).unwrap();
+        let days = max_age().expect("the default bound").as_secs() + 3600;
+        let f = File::options()
+            .append(true)
+            .open(root_path(&dir, 1))
+            .unwrap();
+        f.set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(days))
+            .unwrap();
+        collect(&dir, u64::MAX);
+        assert!(open(&dir, 1).is_none());
+        assert_eq!(
+            open(&dir, 2).unwrap().get(hb).unwrap(),
+            b"a recent document".repeat(20)
         );
         std::fs::remove_dir_all(&dir).unwrap();
     }

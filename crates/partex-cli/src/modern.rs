@@ -561,6 +561,7 @@ fn machine_build(t: &Target, st: Settings) -> i32 {
     ));
     w.finish_saving();
     ren.idle();
+    store_hint(&ren);
     // (the build is not torn down: the process ends)
     std::mem::forget(w);
     status
@@ -937,6 +938,37 @@ fn and_list(items: &[String]) -> String {
         [one] => one.clone(),
         [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
     }
+}
+
+/// After a build is saved (a `build`'s end, a watch's quit): what the
+/// store and the cache keep for every document, how they clean
+/// themselves, and the commands that clean them now.
+fn store_hint(ren: &Renderer) {
+    use std::fmt::Write as _;
+    let size = |b: u64| crate::render::size(usize::try_from(b).unwrap_or(usize::MAX));
+    let store = crate::store::dir(crate::machinehost::persisted::configured());
+    let kept = store.as_deref().map_or(0, bytes_under)
+        + crate::cache::dir().as_deref().map_or(0, bytes_under);
+    if kept == 0 {
+        return;
+    }
+    let age = crate::store::max_age().map_or(String::new(), |a| {
+        format!(", unused for {} days removed", a.as_secs() / (24 * 3600))
+    });
+    let mut text = format!(
+        "{} of saved builds and caches ({} at most{age}) · `phitex clean` this document · `phitex clean --all` every one",
+        size(kept),
+        size(crate::store::max() + crate::cache::max())
+    );
+    if let Some(old) = crate::cache::legacy_dir() {
+        let _ = write!(
+            text,
+            " (and {} unused, of the builds named partex, in {})",
+            size(bytes_under(&old)),
+            tilde(&old)
+        );
+    }
+    ren.status("Kept", &text);
 }
 
 /// The bytes of the files under `path`: one walk, their lengths only.
@@ -1413,6 +1445,8 @@ fn machine_quit(ren: &Renderer, w: &mut crate::machinehost::Watch, history: i32)
         crate::events::Phase::Saving,
     ));
     w.finish_saving();
+    ren.idle();
+    store_hint(ren);
     ren.close();
     term::exit(i32::from(history > 1));
 }
