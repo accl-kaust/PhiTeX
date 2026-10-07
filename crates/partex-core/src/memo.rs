@@ -958,10 +958,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             if s.loc == NULL {
                 continue;
             }
-            let list = s
-                .list
-                .as_deref()
-                .map_or(&[][..], crate::tok::TokenList::tokens);
+            let list = s.tokens_in(&self.param_stack);
             for &t in &list[ux(s.loc)..] {
                 if s.index == MACRO && t < CS_TOKEN_FLAG && tok_cmd(t) == OUT_PARAM {
                     if let Some(p) = &self.param_stack[ux(s.limit + tok_chr(t) - 1)] {
@@ -1181,10 +1178,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             if s.loc == NULL {
                 continue;
             }
-            let list = s
-                .list
-                .as_deref()
-                .map_or(&[][..], crate::tok::TokenList::tokens);
+            let list = s.tokens_in(&self.param_stack);
             for &t in &list[ux(s.loc)..] {
                 if s.index == MACRO && tok_cmd(t) == OUT_PARAM {
                     if let Some(p) = &self.param_stack[ux(s.limit + tok_chr(t) - 1)] {

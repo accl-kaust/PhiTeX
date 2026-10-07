@@ -112,8 +112,9 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         };
         if T::VALUES {
             self.tracker.read_value(Cell::Eqtb(p), w.bits());
-            self.tracker
-                .read_content(Cell::Eqtb(p), || self.eqtb_content_by_tokens(p));
+            self.tracker.read_eqtb(Cell::Eqtb(p), |by_tokens| {
+                self.eqtb_content_of(p, by_tokens)
+            });
         }
         if self.memo.recording() {
             self.memo_read_eqtb(p, w);
@@ -127,8 +128,9 @@ impl<H: Host, T: Tracker> Tex<H, T> {
     pub(crate) fn report_eqtb_read(&self, p: i32) {
         self.tracker.read(Cell::Eqtb(p));
         if T::VALUES {
-            self.tracker
-                .read_content(Cell::Eqtb(p), || self.eqtb_content_by_tokens(p));
+            self.tracker.read_eqtb(Cell::Eqtb(p), |by_tokens| {
+                self.eqtb_content_of(p, by_tokens)
+            });
         }
     }
 
@@ -303,7 +305,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
     #[inline(never)]
     pub(crate) fn wrote_eqtb(&self, p: i32) {
         self.tracker
-            .wrote(Cell::Eqtb(p), self.cell_content(Cell::Eqtb(p)));
+            .wrote_eqtb(Cell::Eqtb(p), || self.cell_content(Cell::Eqtb(p)));
     }
 
     /// A control sequence changed what it is to a skipped conditional
@@ -490,8 +492,9 @@ impl<H: Host, T: Tracker> Tex<H, T> {
     pub(crate) fn xeq_level(&self, p: i32) -> i32 {
         self.tracker.read(Cell::Eqtb(p));
         if T::VALUES {
-            self.tracker
-                .read_content(Cell::Eqtb(p), || self.eqtb_content_by_tokens(p));
+            self.tracker.read_eqtb(Cell::Eqtb(p), |by_tokens| {
+                self.eqtb_content_of(p, by_tokens)
+            });
         }
         if p >= EXT_BASE {
             return self.xregs.level(p);

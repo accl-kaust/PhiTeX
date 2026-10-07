@@ -129,9 +129,12 @@ case $task in
     box scripts/ssa-edits --bin $bin --work "$w/edits" "$@" | tee "$r/summary.txt" || status=$?
     ;;
   cmd)
-    # (the course too, as the course task has it: $w/course, $w/aux)
-    cp -a "$HOME/code/tmp/np-course/src" "$w/course"
-    cp -a "$HOME/code/tmp/np-course/aux" "$w/aux"
+    # (the course too, as the course task has it: $w/course, $w/aux;
+    # ACCL_COURSE, passed with `--export=ALL,ACCL_COURSE=DIR` in ACCL_OPTS,
+    # names another copy with the same src/ and aux/)
+    course=${ACCL_COURSE:-$HOME/code/tmp/np-course}
+    cp -a "$course/src" "$w/course"
+    cp -a "$course/aux" "$w/aux"
     status=0
     box "$@" || status=$?
     ;;
