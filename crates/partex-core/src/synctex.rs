@@ -861,6 +861,13 @@ impl Places {
         if h.0 == Side::NONE.0 {
             return NOWHERE;
         }
+        if let Some((tag, line)) = h.place() {
+            return Made {
+                tag,
+                line,
+                data: u32::MAX,
+            };
+        }
         let i = (h.0 & !Side::HASHED) as usize;
         self.entries.get(i).copied().unwrap_or(NOWHERE)
     }
@@ -895,7 +902,7 @@ pub(crate) struct SyncState {
 }
 
 impl SyncState {
-    fn new(cli: i32) -> Self {
+    pub(crate) fn new(cli: i32) -> Self {
         SyncState {
             machine: Machine::new(cli),
             cli,
@@ -911,6 +918,17 @@ impl SyncState {
             in_run: false,
             again: 0,
         }
+    }
+
+    /// Whether `SyncTeX` is on from the command line (not turned on by
+    /// the document's `\synctex`).
+    pub(crate) fn by_command_line(&self) -> bool {
+        self.cli != NO_OPTION
+    }
+
+    /// The command line's option.
+    pub(crate) fn option(&self) -> i32 {
+        self.cli
     }
 
     fn id(&mut self) -> u32 {
@@ -1005,6 +1023,125 @@ impl SyncState {
     }
 }
 
+/// Whether the file's name ends `.gz` for command line option `cli`
+/// (`synctexterminate`: not for `-synctex=-N` nor with bit 2).
+fn names_gz(cli: i32) -> bool {
+    cli == NO_OPTION || (cli >= 0 && cli & 2 == 0)
+}
+
+/// Whether job name `job` is quoted (`"my file"`, `synctex_dot_open`).
+fn quoted_name(job: &[u8]) -> bool {
+    job.len() > 1 && job[0] == b'"' && job[job.len() - 1] == b'"'
+}
+
+/// The `SyncTeX` file of job `job` (its name, unquoted, without its
+/// extension), gzipped or not: its name, and the other's (`.gz` or not).
+#[must_use]
+pub fn file_names(job: &[u8], gz_name: bool) -> (Vec<u8>, Vec<u8>) {
+    let mut base: Vec<u8> = job.iter().copied().filter(|&c| c != b'"').collect();
+    base.extend_from_slice(b".synctex");
+    let mut gz = base.clone();
+    gz.extend_from_slice(b".gz");
+    if gz_name { (gz, base) } else { (base, gz) }
+}
+
+/// A build's `SyncTeX` file: its name, the name of the other kind an
+/// earlier run may have left (to remove), and its bytes (none: no file,
+/// and both removed, as `synctexterminate` leaves it).
+#[derive(Clone, Debug)]
+pub struct File {
+    pub name: Vec<u8>,
+    pub other: Vec<u8>,
+    pub bytes: Option<Vec<u8>>,
+}
+
+/// A build's `SyncTeX` file before it is gzipped: its names (as
+/// [`File`]'s), its text (none: no file), and whether it is gzipped.
+#[derive(Clone, Debug)]
+pub struct Rendered {
+    pub name: Vec<u8>,
+    pub other: Vec<u8>,
+    pub text: Option<Vec<u8>>,
+    pub gzip: bool,
+}
+
+impl Rendered {
+    /// The file, gzipped if it is to be, `deflate` being zlib's at level 6
+    /// in its zlib wrapper (the host's).
+    pub fn file(self, deflate: &mut dyn FnMut(&[u8]) -> Option<Vec<u8>>) -> File {
+        let gz = self.gzip;
+        let bytes = self.text.and_then(|text| {
+            if gz {
+                deflate(&text).and_then(|d| gzip(&text, &d))
+            } else {
+                Some(text)
+            }
+        });
+        File {
+            name: self.name,
+            other: self.other,
+            bytes,
+        }
+    }
+}
+
+/// The `SyncTeX` file of a build from its `events` in program order (a
+/// machine-mode build's regions', DESIGN 4.5), as pdfTeX's controller
+/// writes it for command line option `cli` ([`NO_OPTION`]: none, the
+/// document set `\synctex`) and job `job`, before it is gzipped
+/// ([`Rendered::file`]): the places are inline (`Side::INLINE`).
+pub fn render<'a>(
+    cli: i32,
+    job: &[u8],
+    log_opened: bool,
+    events: impl IntoIterator<Item = &'a Event>,
+) -> Rendered {
+    render_numbered(cli, job, log_opened, events, &|n| n)
+}
+
+/// [`render`], each form's object number given by `num` (virtual object
+/// numbers: the link's).
+fn render_numbered<'a>(
+    cli: i32,
+    job: &[u8],
+    log_opened: bool,
+    events: impl IntoIterator<Item = &'a Event>,
+    num: &dyn Fn(i32) -> i32,
+) -> Rendered {
+    let mut m = Machine::new(cli);
+    m.read_option();
+    m.job = Some(job.to_vec());
+    let mut place = |h: Side| h.place().unwrap_or((0, 0));
+    for e in events {
+        match *e {
+            Event::RefForm { objnum, h, v } => m.feed(
+                &Event::RefForm {
+                    objnum: num(objnum),
+                    h,
+                    v,
+                },
+                &mut place,
+            ),
+            Event::Form { form, value } => m.feed(
+                &Event::Form {
+                    form: num(form),
+                    value,
+                },
+                &mut place,
+            ),
+            _ => m.feed(e, &mut place),
+        }
+    }
+    let f = m.terminate(log_opened);
+    let (name, other) = file_names(job, f.gz_name);
+    Rendered {
+        name,
+        other,
+        text: f.text,
+        gzip: f.gzip,
+    }
+}
+
 /// `Tex::sync`.
 pub(crate) type State = Option<alloc::boxed::Box<SyncState>>;
 
@@ -1079,6 +1216,11 @@ fn place_box(b: &mut BoxNode, s: Side) {
         b.sync = s;
     }
     place_list(&mut b.list, s);
+    // (an inline place is part of the box's value: a box versioned
+    // already is versioned again)
+    if s.is_inline() && b.ver != 0 {
+        b.reversion();
+    }
 }
 
 /// Give place `s` to each rule of `list` (inside boxes too): a copy's.
@@ -1088,7 +1230,11 @@ fn replace_rules(list: &mut [Node], s: Side) {
             Node::Rule { sync, .. } => *sync = s,
             Node::Box(b) => {
                 if has_rule(&b.list) {
-                    replace_rules(&mut Arc::make_mut(b).list, s);
+                    let b = Arc::make_mut(b);
+                    replace_rules(&mut b.list, s);
+                    if s.is_inline() && b.ver != 0 {
+                        b.reversion();
+                    }
                 }
             }
             Node::Leaders(l) => replace_rules(core::slice::from_mut(&mut l.leader), s),
@@ -1219,16 +1365,15 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         }
     }
 
-    /// Event `e` for the controller: fed to it now, or, in SSA mode, an
-    /// effect of the step (rendered by [`Tex::synctex_write`]; the step
-    /// prints the controller's warnings, `synctex_flags_step`).
+    /// Event `e` for the controller: fed to it now, or, with effects on
+    /// (SSA and machine mode), an effect of the step or region (rendered
+    /// after the link: [`Tex::synctex_write`], [`render`]; the step prints
+    /// the controller's warnings, `synctex_flags_step`).
     fn synctex_event(&mut self, e: Event) {
-        if T::VALUES && self.effects.is_some() {
+        if self.effects.is_some() {
             self.synctex_flags_step(&e);
         }
-        if T::VALUES
-            && let Some(fx) = &mut self.effects
-        {
+        if let Some(fx) = &mut self.effects {
             if let Some(crate::effects::Effect::Synctex(v)) = fx.last_mut() {
                 v.push(e);
             } else {
@@ -1309,6 +1454,14 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         };
         let line = self.line;
         let addr = data.map_or(0, |d| d.as_ptr() as usize);
+        // (machine mode: the place itself, a value, `Side::INLINE`)
+        if !T::VALUES && self.effects.is_some() {
+            return if self.sync.is_some() {
+                Side::inline(tag, line)
+            } else {
+                Side(0)
+            };
+        }
         let Some(st) = self.sync.as_deref_mut() else {
             return Side(0);
         };
@@ -1367,12 +1520,58 @@ impl<H: Host, T: Tracker> Tex<H, T> {
     }
 
     /// A copy of `list` (`\copy`, `\unhcopy`, `\unvcopy`): its rules made
-    /// now (pdfTeX copies every node's place but a rule's).
+    /// now (pdfTeX copies every node's place but a rule's), sealed lines
+    /// with rules inside opened first (machine mode's lines, `seal.rs`:
+    /// the copy shares the key of the line's contents, which keep the
+    /// rules' places).
     #[inline]
     pub(crate) fn sync_copied(&mut self, list: &mut [Node]) {
-        if self.sync.is_some() && has_rule(list) {
+        if self.sync.is_none() {
+            return;
+        }
+        if self.seal_lines && list.iter().any(crate::seal::has_sealed) {
+            self.unseal_ruled(list);
+        }
+        if has_rule(list) {
             let s = self.sync_here();
             replace_rules(list, s);
+        }
+    }
+
+    /// Open the sealed lines of `list` whose contents hold a rule or a
+    /// sealed line (each read: whether it holds one is what the copy's
+    /// records depend on).
+    fn unseal_ruled(&mut self, list: &mut [Node]) {
+        for n in list.iter_mut() {
+            if !crate::seal::has_sealed(n) {
+                continue;
+            }
+            match n {
+                Node::Box(b) => {
+                    if let Some(k) = b.seal {
+                        // (None: a worker's run, tainted, not taken)
+                        let Some(c) = self.sealed_content(k) else {
+                            continue;
+                        };
+                        if (has_rule(&c.list) || c.list.iter().any(crate::seal::has_sealed))
+                            && let Some(mut u) = self.unsealed_box(b)
+                        {
+                            self.unseal_ruled(&mut u.list);
+                            u.reversion();
+                            *b = Arc::new(u);
+                        }
+                    } else {
+                        let b = Arc::make_mut(b);
+                        self.unseal_ruled(&mut b.list);
+                        b.reversion();
+                    }
+                }
+                Node::Leaders(l) => self.unseal_ruled(core::slice::from_mut(&mut l.leader)),
+                Node::Ins(i) => self.unseal_ruled(&mut i.list),
+                Node::Adjust(a) => self.unseal_ruled(&mut a.list),
+                Node::Unset(u) => self.unseal_ruled(&mut u.list),
+                _ => {}
+            }
         }
     }
 
@@ -1386,6 +1585,9 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         st.in_run = false;
         st.boxes.clear();
         st.again = 0;
+        // (the walk's nodes numbered from each ship's start: only told
+        // apart within it, and a ship made again makes the same events)
+        st.next_id = 0;
         let value = self.int_par(partex_engine::web::SYNCTEX_CODE);
         let e = if shipping_page {
             Event::Sheet {
@@ -1517,6 +1719,20 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         self.synctex_event(Event::Math { id, sync, h, v });
     }
 
+    /// Math node `sync` of `width` in an hlist: with e-TeX's mode
+    /// (`converts`) a kern once output, so recorded as one in a leader
+    /// box output again (`synctexkern`).
+    pub(crate) fn synctex_math_moved(&mut self, sync: Side, width: i32, converts: bool) {
+        let Some(st) = self.sync.as_deref_mut() else {
+            return;
+        };
+        if converts && st.again > 0 {
+            self.synctex_kern(sync, width);
+        } else {
+            self.synctex_math(sync);
+        }
+    }
+
     /// Glue in an hlist, moved past (`synctexhorizontalruleorglue`).
     pub(crate) fn synctex_glue(&mut self, sync: Side) {
         let Some(st) = self.sync.as_deref_mut() else {
@@ -1617,6 +1833,10 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             }
             return;
         }
+        if !T::VALUES && self.effects.is_some() {
+            self.synctex_terminate_regions(log_opened);
+            return;
+        }
         let (f, quoted) = if T::VALUES {
             match self.synctex_render(log_opened) {
                 Some(r) => r,
@@ -1664,15 +1884,46 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         }
     }
 
+    /// Machine mode's `synctexterminate`: the file is the build's, rendered
+    /// from its regions' events after the link ([`render`]); here only the
+    /// message, if the controller's flags say a sheet made it ready and
+    /// nothing turned it off.
+    fn synctex_terminate_regions(&mut self, log_opened: bool) {
+        let flags = self.synctex_flags();
+        let Some(cli) = self.sync.as_deref().map(|st| st.cli) else {
+            return;
+        };
+        if !log_opened || flags & FLAG_READY == 0 || flags & FLAG_OFF != 0 {
+            return;
+        }
+        let f = Finish {
+            text: None,
+            gzip: cli == NO_OPTION || cli >= 0,
+            gz_name: names_gz(cli),
+        };
+        let Some((name, _)) = self.synctex_names(&f) else {
+            return;
+        };
+        let quoted = self.job_name_bytes().is_some_and(|j| quoted_name(&j));
+        let printed = self.host.output_name(&name, crate::host::FileKind::Other);
+        if self.interaction() > crate::web::BATCH_MODE {
+            let mut m = b"\nSyncTeX written on ".to_vec();
+            if quoted {
+                m.push(b'"');
+                m.extend_from_slice(&printed);
+                m.push(b'"');
+            } else {
+                m.extend_from_slice(&printed);
+                m.push(b'.');
+            }
+            self.term_bytes(&m);
+        }
+    }
+
     /// The file's name as `f` has it, and the other one's (`.gz` or not),
     /// from the log's name (the job's, unquoted, without its extension).
     fn synctex_names(&self, f: &Finish) -> Option<(Vec<u8>, Vec<u8>)> {
-        let job = self.job_name_bytes()?;
-        let mut base: Vec<u8> = job.into_iter().filter(|&c| c != b'"').collect();
-        base.extend_from_slice(b".synctex");
-        let mut gz = base.clone();
-        gz.extend_from_slice(b".gz");
-        Some(if f.gz_name { (gz, base) } else { (base, gz) })
+        Some(file_names(&self.job_name_bytes()?, f.gz_name))
     }
 
     /// The file's bytes (none: no file), gzipped if `f` says so.
@@ -1730,25 +1981,74 @@ impl<H: Host, T: Tracker> Tex<H, T> {
     /// build is linked. Nothing in a plain run, whose file is written at
     /// its end.
     pub fn synctex_write(&mut self) {
-        if !T::VALUES || self.sync.is_none() {
-            return;
-        }
-        let log_opened = self.log_opened;
-        let Some((f, _)) = self.synctex_render(log_opened) else {
+        let Some(f) = self.synctex_file() else {
             return;
         };
-        let Some((name, other)) = self.synctex_names(&f) else {
+        self.host.remove_output(&f.other);
+        let Some(bytes) = f.bytes else {
+            self.host.remove_output(&f.name);
             return;
         };
-        self.host.remove_output(&other);
-        let Some(bytes) = self.synctex_bytes(f) else {
-            self.host.remove_output(&name);
-            return;
-        };
-        if let Some((id, _)) = self.host.open_write(&name, crate::host::FileKind::Other) {
+        if let Some((id, _)) = self.host.open_write(&f.name, crate::host::FileKind::Other) {
             self.host.write(id, &bytes);
             self.host.close(id);
         }
+    }
+
+    /// SSA mode: the build's `SyncTeX` file as [`Tex::synctex_write`]
+    /// writes it, for a host that writes it itself (renamed into place
+    /// whole: `phitex watch --ssa`). `None` in a plain run, or without
+    /// `SyncTeX`.
+    pub fn synctex_file(&mut self) -> Option<File> {
+        if !T::VALUES || self.sync.is_none() {
+            return None;
+        }
+        let log_opened = self.log_opened;
+        let (f, _) = self.synctex_render(log_opened)?;
+        let (name, other) = self.synctex_names(&f)?;
+        let bytes = self.synctex_bytes(f);
+        Some(File { name, other, bytes })
+    }
+
+    /// Machine mode: the build's `SyncTeX` file from its regions' effects
+    /// `chunks` in program order ([`render`]) for job `job` (the log's name without
+    /// `.log`: the job's, in the output directory) with `SyncTeX` as this
+    /// state, the build's final one, has it. Without `SyncTeX`, no file:
+    /// the names an
+    /// earlier run's would have, to remove (as `synctexterminate`).
+    pub fn synctex_regions_file(
+        &self,
+        job: &[u8],
+        chunks: &[&[crate::effects::Effect]],
+    ) -> Rendered {
+        if let Some(cli) = self.synctex_option() {
+            // (forms' object numbers as the link numbers them)
+            let numbering = crate::effects::numbering_of(chunks).map(|(n, _)| n);
+            let num = |v: i32| numbering.as_ref().map_or(v, |n| n.of(v));
+            let events = chunks
+                .iter()
+                .flat_map(|c| c.iter())
+                .filter_map(|e| match e {
+                    crate::effects::Effect::Synctex(v) => Some(v.iter()),
+                    _ => None,
+                })
+                .flatten();
+            return render_numbered(cli, job, true, events, &num);
+        }
+        let (name, other) = file_names(job, true);
+        Rendered {
+            name,
+            other,
+            text: None,
+            gzip: true,
+        }
+    }
+
+    /// The command line's `-synctex` option, if `SyncTeX` was asked for
+    /// ([`NO_OPTION`]: by the document's `\synctex`).
+    #[must_use]
+    pub fn synctex_option(&self) -> Option<i32> {
+        self.sync.as_deref().map(|st| st.cli)
     }
 }
 

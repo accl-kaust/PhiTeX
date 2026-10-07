@@ -34,6 +34,9 @@ pub struct Config {
     /// Where machine-mode builds are kept across processes (`store =
     /// "dir"`, relative to `phitex.toml`'s directory; DESIGN.md §7.9).
     pub store: Option<String>,
+    /// Whether `phitex build` and `phitex watch` write `<job>.synctex.gz`
+    /// (`synctex = false`: not; on by default, DESIGN 4.5).
+    pub synctex: Option<bool>,
 }
 
 /// `copy-pdf`'s value.
@@ -88,6 +91,7 @@ pub fn parse(text: &str) -> Result<Config, String> {
             "machine" => c.machine = Some(boolean()?),
             "ssa" => c.ssa = Some(boolean()?),
             "store" => c.store = Some(string()?),
+            "synctex" => c.synctex = Some(boolean()?),
             "copy-pdf" | "copy_pdf" => {
                 c.copy_pdf = Some(match value {
                     "true" => CopyPdf::Invocation,
@@ -222,9 +226,11 @@ mod tests {
                 machine: None,
                 ssa: None,
                 store: None,
+                synctex: None,
             }
         );
         assert_eq!(parse("ssa = true").unwrap().ssa, Some(true));
+        assert_eq!(parse("synctex = false").unwrap().synctex, Some(false));
         assert_eq!(
             parse("copy-pdf = true").unwrap().copy_pdf,
             Some(CopyPdf::Invocation)

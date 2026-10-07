@@ -62,11 +62,18 @@ impl Enc {
         }
         self.0
             .extend_from_slice(&b.glue_set.to_bits().to_le_bytes());
-        self.u8(match b.glue_sign {
+        // (an inline `SyncTeX` place: the sign's top bit, then the place)
+        let sign = match b.glue_sign {
             GlueSign::Normal => 0,
             GlueSign::Stretching => 1,
             GlueSign::Shrinking => 2,
-        });
+        };
+        if b.sync.is_inline() {
+            self.u8(sign | 0x80);
+            self.i32(b.sync.0.cast_signed());
+        } else {
+            self.u8(sign);
+        }
         self.order(b.glue_order);
         // (a sealed box: the subtype's top bit, then the key)
         match b.seal {
@@ -85,6 +92,13 @@ impl Enc {
         }
     }
     pub fn node(&mut self, n: &Node) {
+        // (an inline `SyncTeX` place of a rule, glue, leaders, kern, math
+        // or unset node: tag 16 and the place before the node; a box's is
+        // in its own encoding)
+        if let Some(sync) = inline_place(n) {
+            self.u8(16);
+            self.i32(sync.0.cast_signed());
+        }
         match n {
             Node::Glyphs(g) => {
                 self.u8(0);
@@ -487,11 +501,17 @@ impl<'a> Dec<'a> {
         let depth = self.scaled()?;
         let shift = self.scaled()?;
         let glue_set = f64::from_bits(u64::from_le_bytes(self.take(8)?.try_into().ok()?));
-        let glue_sign = match self.u8()? {
+        let sign = self.u8()?;
+        let glue_sign = match sign & 0x7f {
             0 => GlueSign::Normal,
             1 => GlueSign::Stretching,
             2 => GlueSign::Shrinking,
             _ => return None,
+        };
+        let sync = if sign & 0x80 == 0 {
+            crate::origin::Side(0)
+        } else {
+            crate::origin::Side(self.i32()?.cast_unsigned())
         };
         let glue_order = self.order()?;
         let subtype = self.u8()?;
@@ -513,7 +533,7 @@ impl<'a> Dec<'a> {
             list: self.list()?,
             seal,
             ver: 0,
-            sync: crate::origin::Side(0),
+            sync,
         })
     }
     pub fn list(&mut self) -> Option<Vec<Node>> {
@@ -543,6 +563,13 @@ impl<'a> Dec<'a> {
         Some(Arc::new(crate::node::TokenList::new(self.ints()?, false)))
     }
     pub fn node(&mut self) -> Option<Node> {
+        if self.data.get(self.pos) == Some(&16) {
+            self.pos += 1;
+            let sync = crate::origin::Side(self.i32()?.cast_unsigned());
+            let mut n = self.node()?;
+            set_place(&mut n, sync)?;
+            return Some(n);
+        }
         Some(match self.u8()? {
             0 => {
                 let font = self.font()?;
@@ -848,6 +875,36 @@ impl<'a> Dec<'a> {
             _ => return None,
         })
     }
+}
+
+/// The inline `SyncTeX` place of a node that has one outside a box's
+/// encoding (`origin::Side::INLINE`).
+fn inline_place(n: &Node) -> Option<crate::origin::Side> {
+    let s = match n {
+        Node::Rule { sync, .. }
+        | Node::Glue { sync, .. }
+        | Node::Kern { sync, .. }
+        | Node::Math { sync, .. } => *sync,
+        Node::Leaders(l) => l.sync,
+        Node::Unset(u) => u.sync,
+        _ => return None,
+    };
+    s.is_inline().then_some(s)
+}
+
+/// Give a decoded node the inline place encoded before it (`None`: a node
+/// that has none).
+fn set_place(n: &mut Node, s: crate::origin::Side) -> Option<()> {
+    match n {
+        Node::Rule { sync, .. }
+        | Node::Glue { sync, .. }
+        | Node::Kern { sync, .. }
+        | Node::Math { sync, .. } => *sync = s,
+        Node::Leaders(l) => l.sync = s,
+        Node::Unset(u) => u.sync = s,
+        _ => return None,
+    }
+    Some(())
 }
 
 #[cfg(test)]

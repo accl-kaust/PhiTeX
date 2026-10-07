@@ -34,7 +34,7 @@ use crate::store;
 const MIN_BLOB: usize = 64;
 
 /// What a root holds first (its layout's version).
-const ROOT_TAG: &[u8] = b"partex machine build/15";
+const ROOT_TAG: &[u8] = b"partex machine build/16";
 
 /// The store a watch saves to, and the save running.
 pub struct Keeper {
@@ -1294,6 +1294,7 @@ impl Watch {
     /// Finish saving: at the end of the process, after the result.
     pub fn finish_saving(&mut self) {
         self.finish_quick();
+        self.join_synctex();
         if let Some(file) = self.deflated_file() {
             // (a cold build links before it has a keeper)
             let host = self.b.final_state().tex().host();

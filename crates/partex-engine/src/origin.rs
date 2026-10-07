@@ -82,7 +82,8 @@ pub struct Place {
 /// of the node's value, so any two are equal, and none is hashed but a
 /// handle of the [`Side::HASHED`] range (`SyncTeX`'s places in SSA mode:
 /// a node made again is then another version, so what holds it is made
-/// again too, with its place).
+/// again too, with its place), and none is a value but an inline place
+/// ([`Side::INLINE`], `SyncTeX`'s places in machine mode).
 #[derive(Clone, Copy, Default, Debug)]
 pub struct Side(pub u32);
 
@@ -92,11 +93,52 @@ impl Side {
     pub const NONE: Side = Side(0x7fff_ffff);
     /// The handles from here on are hashed.
     pub const HASHED: u32 = 0x8000_0000;
+    /// The handles from here on are places themselves, no table's
+    /// entries (`SyncTeX` in machine mode): a file's tag in the 10 bits
+    /// after these two and a line in the low 20 ([`Side::inline`]). Such a
+    /// place is part of the node's value (equal, hashed and saved as it
+    /// is), so a node made at another line is another value, and a
+    /// snapshot or a store keeps it.
+    pub const INLINE: u32 = 0xc000_0000;
+    const TAG_BITS: u32 = 10;
+    const LINE_BITS: u32 = 20;
+
+    /// The place `(tag, line)` as a handle of its own (each saturated to
+    /// its bits).
+    #[must_use]
+    pub fn inline(tag: i32, line: i32) -> Side {
+        let max_tag = (1 << Self::TAG_BITS) - 1;
+        let max_line = (1 << Self::LINE_BITS) - 1;
+        let t = u32::try_from(tag.clamp(0, max_tag)).unwrap_or(0);
+        let l = u32::try_from(line.clamp(0, max_line)).unwrap_or(0);
+        Side(Self::INLINE | (t << Self::LINE_BITS) | l)
+    }
+
+    /// Whether the handle is a place itself ([`Side::inline`]).
+    #[inline]
+    #[must_use]
+    pub fn is_inline(self) -> bool {
+        self.0 >= Self::INLINE
+    }
+
+    /// The place an inline handle is: its tag and line.
+    #[must_use]
+    pub fn place(self) -> Option<(i32, i32)> {
+        if !self.is_inline() {
+            return None;
+        }
+        let v = self.0 & !Self::INLINE;
+        let tag = i32::try_from(v >> Self::LINE_BITS).unwrap_or(0);
+        let line = i32::try_from(v & ((1 << Self::LINE_BITS) - 1)).unwrap_or(0);
+        Some((tag, line))
+    }
 }
 
+/// Handles are equal but inline places, which are values.
 impl PartialEq for Side {
-    fn eq(&self, _: &Self) -> bool {
-        true
+    #[inline]
+    fn eq(&self, o: &Self) -> bool {
+        !(self.is_inline() || o.is_inline()) || self.0 == o.0
     }
 }
 
@@ -111,11 +153,23 @@ impl core::hash::Hash for Side {
     }
 }
 
-/// A handle means nothing outside the run that made it: none is saved.
+/// A handle means nothing outside the run that made it: none is saved,
+/// but an inline place, which is a value ([`Side::INLINE`]).
 impl crate::persist::Persist for Side {
-    fn save(&self, _: &mut crate::persist::Saver) {}
-    fn load(_: &mut crate::persist::Loader) -> Option<Self> {
-        Some(Side(0))
+    fn save(&self, s: &mut crate::persist::Saver) {
+        if self.is_inline() {
+            s.enc.u8(1);
+            s.enc.i32(self.0.cast_signed());
+        } else {
+            s.enc.u8(0);
+        }
+    }
+    fn load(l: &mut crate::persist::Loader) -> Option<Self> {
+        Some(match l.dec.u8()? {
+            0 => Side(0),
+            1 => Side(l.dec.i32()?.cast_unsigned()),
+            _ => return None,
+        })
     }
 }
 

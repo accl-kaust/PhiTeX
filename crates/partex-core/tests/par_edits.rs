@@ -9,6 +9,7 @@
 #![cfg(feature = "std")]
 
 use std::collections::BTreeMap;
+use std::fmt::Write as _;
 use std::sync::Arc;
 
 use partex_core::diag::Diagnostic;
@@ -112,7 +113,7 @@ fn para(r: &mut Rng, i: usize) -> String {
         p.push_str(WORDS[r.below(WORDS.len())]);
         p.push(' ');
     }
-    p.push_str(&format!("\\x\\ {i} \\the\\count1."));
+    let _ = write!(p, "\\x\\ {i} \\the\\count1.");
     p
 }
 
