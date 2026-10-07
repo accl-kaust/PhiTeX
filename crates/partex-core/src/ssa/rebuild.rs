@@ -1217,9 +1217,9 @@ fn same_input<H: Host, T: Tracker>(t: &Tex<H, T>, a: &InputState, b: &InputState
         && a.first == b.first
         && a.last == b.last
         && a.cur.limit == b.cur.limit
-        && a.cur.list == b.cur.list
+        && a.cur.same_list(&b.cur)
         && same_chain(a.v.levels.as_ref(), b.v.levels.as_ref(), |x, y| {
-            x.list == y.list && x.limit == y.limit
+            x.same_list(y) && x.limit == y.limit
         })
         && a.v.np == b.v.np
         && same_chain(a.v.params.as_ref(), b.v.params.as_ref(), |x, y| x == y)

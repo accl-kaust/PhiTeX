@@ -30,70 +30,97 @@ impl partex_ssa::Value for CondRecord {
     }
 }
 
-/// §489: the condition stack as a value (DESIGN 7.17.12, `cond_stack`): a
-/// persistent stack (`partex-ssa`'s `PStack`), each record versioned when
-/// pushed, so the stack's version is made at the push and a copy is O(1).
+/// §489: the condition stack as a value (DESIGN 7.17.12, `cond_stack`):
+/// the records, and beside them the version of each prefix (`vers[i]`
+/// the stack's with `recs[..=i]`, as `partex-ssa`'s `PStack` makes it).
+/// A run that keeps no versions pushes without making them; a tracker
+/// that keeps them makes each at its push, so the stack's version stays
+/// O(1). A push is a store into a vector, never an allocation.
 #[derive(Clone, Default)]
-pub(crate) struct CondStack(partex_ssa::PStack<CondRecord>);
+pub(crate) struct CondStack {
+    recs: alloc::vec::Vec<CondRecord>,
+    /// The versions made so far: a prefix of `recs`'.
+    vers: alloc::vec::Vec<partex_ssa::Version>,
+}
+
+/// `PStack`'s version of the empty stack.
+const EMPTY: partex_ssa::Version = partex_ssa::Version(0x7374_6163_6b00_0000_0000_0000_0000_0000);
+
+/// The version of a stack of version `below` with `r` pushed (`PStack`'s).
+fn pushed(below: partex_ssa::Version, r: &CondRecord) -> partex_ssa::Version {
+    use partex_ssa::Value;
+    partex_ssa::Version::node(0x7075_7368, &[below, r.version()])
+}
 
 impl CondStack {
     pub(crate) fn len(&self) -> usize {
-        self.0.len()
+        self.recs.len()
     }
     pub(crate) fn is_empty(&self) -> bool {
-        self.0.is_empty()
+        self.recs.is_empty()
     }
-    pub(crate) fn push(&mut self, r: CondRecord) {
-        self.0 = self.0.push(r);
+    /// Push `r`; with `versioned`, its version is made now.
+    #[inline]
+    pub(crate) fn push(&mut self, r: CondRecord, versioned: bool) {
+        self.recs.push(r);
+        if versioned {
+            self.make_versions();
+        }
     }
+    /// The versions not made yet, made.
+    fn make_versions(&mut self) {
+        while self.vers.len() < self.recs.len() {
+            let below = self.vers.last().copied().unwrap_or(EMPTY);
+            let v = pushed(below, &self.recs[self.vers.len()]);
+            self.vers.push(v);
+        }
+    }
+    #[inline]
     pub(crate) fn pop(&mut self) -> Option<CondRecord> {
-        let (r, rest) = self.0.pop()?;
-        self.0 = rest;
+        let r = self.recs.pop()?;
+        self.vers.truncate(self.recs.len());
         Some(r)
     }
-    /// The stack's version (O(1)).
+    /// The stack's version (O(1) where the versions were made at the
+    /// pushes).
     pub(crate) fn version(&self) -> partex_ssa::Version {
-        self.0.version()
+        let mut v = self.vers.last().copied().unwrap_or(EMPTY);
+        for r in &self.recs[self.vers.len()..] {
+            v = pushed(v, r);
+        }
+        v
     }
     /// The records from the bottom up.
     pub(crate) fn to_vec(&self) -> alloc::vec::Vec<CondRecord> {
-        let mut v: alloc::vec::Vec<CondRecord> = self.0.iter().copied().collect();
-        v.reverse();
-        v
+        self.recs.clone()
     }
     pub(crate) fn from_vec(v: &[CondRecord]) -> Self {
-        let mut s = CondStack::default();
-        for &r in v {
-            s.push(r);
-        }
+        let mut s = CondStack {
+            recs: v.to_vec(),
+            vers: alloc::vec::Vec::new(),
+        };
+        s.make_versions();
         s
     }
     /// The records from the bottom up.
-    pub(crate) fn iter(&self) -> impl Iterator<Item = CondRecord> {
-        self.to_vec().into_iter()
+    pub(crate) fn iter(&self) -> impl Iterator<Item = CondRecord> + '_ {
+        self.recs.iter().copied()
     }
     /// Record `i` from the bottom.
     pub(crate) fn get(&self, i: usize) -> Option<CondRecord> {
-        let n = self.len();
-        if i >= n {
-            return None;
-        }
-        self.0.iter().nth(n - 1 - i).copied()
+        self.recs.get(i).copied()
     }
-    /// Record `i` from the bottom with its limit changed: the records above
-    /// it pushed again (a value is not changed in place).
+    /// Record `i` from the bottom with its limit changed (the versions
+    /// from it up made again, where they were made).
     pub(crate) fn set_limit(&mut self, i: usize, limit: i32) -> bool {
-        let mut above = alloc::vec::Vec::new();
-        while self.len() > i + 1 {
-            above.push(self.pop().expect("a record"));
-        }
-        let Some(mut r) = self.pop() else {
+        let Some(r) = self.recs.get_mut(i) else {
             return false;
         };
         r.limit = limit;
-        self.push(r);
-        while let Some(a) = above.pop() {
-            self.push(a);
+        let versioned = self.vers.len() == self.recs.len();
+        self.vers.truncate(i);
+        if versioned {
+            self.make_versions();
         }
         true
     }
@@ -102,8 +129,7 @@ impl CondStack {
 impl core::ops::Index<usize> for CondStack {
     type Output = CondRecord;
     fn index(&self, i: usize) -> &CondRecord {
-        let n = self.len();
-        self.0.iter().nth(n - 1 - i).expect("a condition record")
+        &self.recs[i]
     }
 }
 
@@ -284,11 +310,14 @@ impl<H: Host, T: Tracker> Tex<H, T> {
     /// §495: push the condition stack.
     fn push_cond(&mut self) {
         self.cond_read();
-        self.cond_stack.push(CondRecord {
-            limit: self.if_limit,
-            cur_if: self.cur_if,
-            line: self.if_line,
-        });
+        self.cond_stack.push(
+            CondRecord {
+                limit: self.if_limit,
+                cur_if: self.cur_if,
+                line: self.if_line,
+            },
+            T::VALUES,
+        );
         self.cur_if = self.cur_chr;
         self.if_limit = IF_CODE;
         self.if_line = self.line;

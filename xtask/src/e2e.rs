@@ -755,6 +755,24 @@ const INCREMENTAL: &[Incremental] = &[
         pdf: true,
         by: By::Watch,
     },
+    // plain's `\bye` ships the last page and ends the job in one expansion
+    // (in SSA mode, one step: the end of the job's objects must not be
+    // named as that step's own).
+    Incremental {
+        name: "bye",
+        inputs: &["bye.tex"],
+        job: "bye",
+        edits: &[
+            ("bye.tex", "% edit-2", r"\para{Added}"),
+            ("bye.tex", "% edit-1", r"\para{Middle}"),
+            ("bye.tex", "First", "Initial"),
+            ("bye.tex", r"\para{Added}", "% edit-2"),
+        ],
+        cutoffs: 0,
+        invisible: 0,
+        pdf: true,
+        by: By::Watch,
+    },
     Incremental {
         name: "incremental",
         inputs: &["incr.tex", "incr-part.tex"],

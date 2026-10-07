@@ -1,0 +1,19 @@
+% The job's end in the step that shipped the last page (`partex -watch`,
+% see xtask/src/e2e.rs, case bye; and `scripts/ssa-edits`): plain's
+% `\bye`, `\par\vfill\supereject\end`, fires the output routine for the
+% last page and ends the job in the same expansion, so in SSA mode in one
+% step. The end of the job's objects (the catalog, the pages tree) were
+% named by the step's count begun again, as the page's own: the link
+% found no place for one of them. Edits: the last page, the first, back.
+\pdfoutput=1 \pdfminorversion=5 \pdfobjcompresslevel=2 \pdfcompresslevel=9
+\def\para#1{#1 words on a page of plain \TeX, shipped by the output
+  routine.\par}
+\para{First}
+\para{Second}
+\vfill\eject
+\para{Third}
+% edit-1
+\para{Fourth}
+\para{Last}
+% edit-2
+\bye

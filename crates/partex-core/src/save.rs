@@ -482,7 +482,9 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                 // only if the group outlives the region, `Tracker::soft_read`;
                 // a trace would print it)
                 self.tracker
-                    .soft_read(crate::track::Cell::Eqtb(p), self.cur_level());
+                    .soft_read_eqtb(crate::track::Cell::Eqtb(p), self.cur_level(), || {
+                        self.cell_content(crate::track::Cell::Eqtb(p))
+                    });
             } else {
                 self.report_eqtb_read(p);
             }
