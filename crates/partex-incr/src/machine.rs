@@ -46,6 +46,24 @@ impl Affine {
     }
 }
 
+/// A relocation of the numbers one origin cell gives out (`DESIGN.md`
+/// 4.1, relocatable values): those above `base` moved by `delta`, which
+/// is positive (so that the relocation keeps numbers apart and in order).
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Shift<C> {
+    pub cell: C,
+    pub base: i64,
+    pub delta: i64,
+}
+
+impl<C> Shift<C> {
+    /// Number `x`, relocated.
+    #[must_use]
+    pub fn map(&self, x: i64) -> i64 {
+        if x > self.base { x + self.delta } else { x }
+    }
+}
+
 /// The answer to [`Recorder::force`].
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Forced<V> {
@@ -190,6 +208,43 @@ pub trait Machine: Clone + Send + Sync {
     /// ordered maps. Cells without one are recorded in maps.
     fn index(_c: &Self::Cell) -> Option<u32> {
         None
+    }
+
+    /// Relocatable values (`DESIGN.md` 4.1): if `c` is an *origin* cell,
+    /// a counter whose numbers the program may only copy, compare and
+    /// shift, the number it holds in `v`. A rebuild that finds an origin
+    /// differing by a positive amount after a re-run span relocates the
+    /// regions after it that differ only by the shift ([`Shift`]). By
+    /// default none is.
+    fn origin_number(_c: &Self::Cell, _v: Option<&Self::Value>) -> Option<i64> {
+        None
+    }
+
+    /// Whether guard `c` (a guard on the numbers themselves, which always
+    /// holds as such: an origin used as a number, an answer about one)
+    /// still holds for a region relocated by `shifts`. By default yes.
+    fn guard_relocates(_c: &Self::Cell, _shifts: &[Shift<Self::Cell>]) -> bool {
+        true
+    }
+
+    /// Guard `c` of a region relocated by `shifts`, as the relocated
+    /// region would have recorded it (an answer about a number names the
+    /// number). By default `c`.
+    fn relocate_guard(c: &Self::Cell, _shifts: &[Shift<Self::Cell>]) -> Self::Cell {
+        c.clone()
+    }
+
+    /// Value `v` of cell `c` with every number of a moving origin
+    /// relocated by `shifts`: `Ok(None)` if it holds none, `Err` if the
+    /// machine cannot tell or relocate it (the region then runs). By
+    /// default `Err`: no relocation.
+    #[allow(clippy::result_unit_err)]
+    fn relocate_value(
+        _c: &Self::Cell,
+        _v: &Self::Value,
+        _shifts: &[Shift<Self::Cell>],
+    ) -> Result<Option<Self::Value>, ()> {
+        Err(())
     }
 
     /// The value that makes cell `c` hold hole `h`, if `c` can hold one.

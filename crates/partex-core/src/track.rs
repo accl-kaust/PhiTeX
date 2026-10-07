@@ -598,6 +598,14 @@ pub trait Tracker {
     /// Before a read or a write of the current marks (`cur_mark`, §382,
     /// any class), a write if `write` (which reads them too).
     fn mark_access(&self, _write: bool) {}
+    /// Relocatable numbers (`reloc.rs`): the job used a number of origin
+    /// `origin` (count register `origin`) as a number: what it does then
+    /// depends on the number itself.
+    fn observe(&self, _origin: i32) {}
+    /// Relocatable numbers: `\ifnum` compared `x`, a number of origin
+    /// `origin`, with the constant `y` (`rel`: `<`, `=` or `>`) and found
+    /// `answer`: what the job depends on, not the number.
+    fn int_answer(&self, _origin: i32, _x: i32, _rel: u8, _y: i32, _answer: bool) {}
     /// Macro `cs` is about to be expanded.
     fn macro_call(&self, _cs: i32) {}
     /// Macro `cs` has its arguments, whose tokens hash to `hash`.

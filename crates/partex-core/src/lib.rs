@@ -98,6 +98,7 @@ mod print;
 mod random;
 mod reflect;
 mod relaxed;
+pub mod reloc;
 mod run;
 mod sanitize;
 pub use sanitize::{mask_statistics, statistics_line};

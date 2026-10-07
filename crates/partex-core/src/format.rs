@@ -208,7 +208,14 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                 crate::objs::Obj::Toks(t) => {
                     e.u8(0);
                     e.u8(u8::from(t.protected()));
-                    e.ints(t.tokens());
+                    // (a format holds plain digits: `reloc.rs`)
+                    if t.tokens().iter().any(|&x| crate::web::is_tagged(x)) {
+                        let plain: Vec<i32> =
+                            t.tokens().iter().map(|&x| crate::web::untag(x)).collect();
+                        e.ints(&plain);
+                    } else {
+                        e.ints(t.tokens());
+                    }
                 }
                 crate::objs::Obj::Glue(g) => {
                     e.u8(1);

@@ -250,6 +250,10 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         level: i32,
         negative: bool,
     ) -> Result<(), Jump> {
+        // (whether the caller takes the value's origin, and the origin:
+        // `reloc.rs`)
+        let want = core::mem::take(&mut self.want_origin);
+        let mut origin = crate::reloc::NO_ORIGIN;
         if self.cur_cmd == IGNORE_SPACES && self.cur_chr == 1 {
             // pdfTeX §439: trap unexpandable primitives
             self.reset_primitive_tok()?;
@@ -314,7 +318,8 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                 }
             }
             ASSIGN_INT => {
-                self.cur_val = self.eqtb_int(m);
+                self.cur_val = self.eqtb_int_quiet(m);
+                origin = crate::reloc::origin_of_loc(m).unwrap_or(crate::reloc::NO_ORIGIN);
                 self.cur_val_level = INT_VAL;
             }
             ASSIGN_DIMEN => {
@@ -436,13 +441,22 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                 // §427: fetch a register.
                 self.scan_register_num()?;
                 match m {
-                    INT_VAL => self.cur_val = self.count(self.cur_val),
+                    INT_VAL => {
+                        let loc = crate::xregs::reg_loc(INT_VAL, self.cur_val);
+                        self.cur_val = self.eqtb_int_quiet(loc);
+                        origin =
+                            crate::reloc::origin_of_loc(loc).unwrap_or(crate::reloc::NO_ORIGIN);
+                    }
                     DIMEN_VAL => self.cur_val = self.dimen(self.cur_val),
                     _ => self.fetch_glue(crate::xregs::reg_loc(m, self.cur_val)),
                 }
                 self.cur_val_level = m;
             }
-            LAST_ITEM => self.fetch_last_item()?,
+            LAST_ITEM => {
+                self.expr_origin = crate::reloc::NO_ORIGIN;
+                self.fetch_last_item()?;
+                origin = core::mem::replace(&mut self.expr_origin, crate::reloc::NO_ORIGIN);
+            }
             _ => {
                 // §428: complain that \the can't do this; give zero result.
                 self.print_err(b"You can't use `");
@@ -463,6 +477,16 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                 self.mu_error()?;
             }
             self.cur_val_level -= 1;
+        }
+        // (the value's origin, for a caller that takes it: an integer as it
+        // is, never negated; `reloc.rs`)
+        self.cur_val_origin = crate::reloc::NO_ORIGIN;
+        if origin != crate::reloc::NO_ORIGIN {
+            if negative || self.cur_val_level != INT_VAL {
+                self.observe_origin(origin);
+            } else {
+                self.settle_origin(origin, want);
+            }
         }
         // §430: negate `cur_val` if `negative`.
         if negative {
@@ -801,6 +825,9 @@ impl<H: Host, T: Tracker> Tex<H, T> {
 
     /// §440: set `cur_val` to an integer.
     pub(crate) fn scan_int(&mut self) -> Result<(), Jump> {
+        // (whether the caller takes the origin of the value, `reloc.rs`:
+        // taken before the sign's expansion can scan anything else)
+        let want = core::mem::take(&mut self.int_origin_req);
         self.radix = 0;
         let mut ok_so_far = true;
         let negative = self.scan_sign()?;
@@ -808,6 +835,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             // pdfTeX §466
             self.reset_primitive_tok()?;
         }
+        self.cur_val_origin = crate::reloc::NO_ORIGIN;
         if self.cur_tok == ALPHA_TOKEN {
             // §442: scan an alphabetic character code into `cur_val`.
             self.get_token()?; // suppress macro expansion
@@ -850,7 +878,17 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                 self.scan_optional_space()?;
             }
         } else if self.cur_cmd >= MIN_INTERNAL && self.cur_cmd <= MAX_INTERNAL {
+            self.want_origin = want && !negative;
             self.scan_something_internal(INT_VAL, false)?;
+            if negative && self.cur_val_origin != crate::reloc::NO_ORIGIN {
+                // (a number negated: not a relocatable one)
+                self.observe_origin(self.cur_val_origin);
+                self.cur_val_origin = crate::reloc::NO_ORIGIN;
+            }
+            if negative {
+                self.cur_val = -self.cur_val;
+            }
+            return Ok(());
         } else {
             // §444: scan a numeric constant.
             self.radix = 10;
@@ -866,6 +904,11 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             }
             let mut vacuous = true;
             self.cur_val = 0;
+            // (a number written with the tagged digits of one origin, as
+            // `\the` made them, keeps that origin for a caller that takes
+            // it: `reloc.rs`)
+            let mut track = want && self.radix == 10;
+            let mut num_origin = crate::reloc::NO_ORIGIN;
             // §445: accumulate the constant until `cur_tok` is not a
             // suitable digit.
             loop {
@@ -883,6 +926,9 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                 } else {
                     break;
                 };
+                if track {
+                    track = self.track_tagged_digit(&mut num_origin, vacuous);
+                }
                 vacuous = false;
                 if self.cur_val >= m && (self.cur_val > m || d > 7 || self.radix != 10) {
                     if ok_so_far {
@@ -911,6 +957,13 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                 self.back_error()?;
             } else if self.cur_cmd != SPACER {
                 self.back_input()?;
+            }
+            if num_origin != crate::reloc::NO_ORIGIN {
+                if track && ok_so_far && !negative {
+                    self.cur_val_origin = num_origin;
+                } else {
+                    self.observe_origin(num_origin);
+                }
             }
         }
         if negative {

@@ -580,6 +580,39 @@ enum Scope {
     Rest,
 }
 
+/// [`Tex::eqtb_content`] of eqtb location `p` holding word `w` and
+/// object `o`, at the level `level` gives (asked only for a word that
+/// has one); `list_versions`: lists by their versions (`Tracker::VALUES`).
+pub(crate) fn eqtb_content_parts(
+    p: i32,
+    w: MemoryWord,
+    o: Option<&Obj>,
+    level: impl FnOnce() -> i32,
+    list_versions: bool,
+    by_tokens: bool,
+) -> u128 {
+    use crate::web::{ETEX_PEN_BASE, OUTPUT_ROUTINE_LOC};
+    use crate::xregs::EXT_BASE;
+    let mut c = Canon::new();
+    // (a list the entry names is a value with its version: combined)
+    c.list_versions = list_versions;
+    c.list_by_tokens = by_tokens;
+    let toks = (OUTPUT_ROUTINE_LOC..ETEX_PEN_BASE).contains(&p)
+        || (p >= EXT_BASE && crate::xregs::is_toks_kind(ext_reg(p).0));
+    if toks {
+        c.put(&(w.b0(), w.b1()));
+        c.tok(o.and_then(Obj::toks));
+    } else if p >= EXT_BASE {
+        c.ext_word(p, w, o);
+    } else {
+        c.word(p, w, o);
+    }
+    if p >= INT_BASE && (p <= EQTB_SIZE || (p >= EXT_BASE && is_word_kind(ext_reg(p).0))) {
+        c.put(&level());
+    }
+    c.h.finish128()
+}
+
 impl<H: Host, T: Tracker> Tex<H, T> {
     /// The hash of everything the rest of the job depends on (see the
     /// module documentation). Files being read contribute how much of
@@ -1235,33 +1268,14 @@ impl<H: Host, T: Tracker> Tex<H, T> {
     }
 
     fn eqtb_content_with(&self, p: i32, w: MemoryWord, by_tokens: bool) -> u128 {
-        use crate::web::{ETEX_PEN_BASE, OUTPUT_ROUTINE_LOC};
-        use crate::xregs::EXT_BASE;
-        let mut c = Canon::new();
-        // (a list the entry names is a value with its version: combined)
-        c.list_versions = T::VALUES;
-        c.list_by_tokens = by_tokens;
-        {
-            {
-                let toks = (OUTPUT_ROUTINE_LOC..ETEX_PEN_BASE).contains(&p)
-                    || (p >= EXT_BASE && crate::xregs::is_toks_kind(ext_reg(p).0));
-                let o = self.peek_obj(p);
-                if toks {
-                    c.put(&(w.b0(), w.b1()));
-                    c.tok(o.and_then(Obj::toks));
-                } else if p >= EXT_BASE {
-                    c.ext_word(p, w, o);
-                } else {
-                    c.word(p, w, o);
-                }
-                if p >= INT_BASE
-                    && (p <= EQTB_SIZE || (p >= EXT_BASE && is_word_kind(ext_reg(p).0)))
-                {
-                    c.put(&self.peek_xeq_level(p));
-                }
-            }
-        }
-        c.h.finish128()
+        eqtb_content_parts(
+            p,
+            w,
+            self.peek_obj(p),
+            || self.peek_xeq_level(p),
+            T::VALUES,
+            by_tokens,
+        )
     }
 
     /// The locations of the registers above 255 that differ from their
@@ -1644,7 +1658,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             .find(|(b, _)| loc >= *b)
             .copied()
             .unwrap_or((0, "?"));
-        if base == COUNT_BASE {
+        if base == COUNT_BASE || base == crate::xregs::EXT_BASE {
             // (the control sequences that name the register)
             let names: alloc::vec::Vec<alloc::string::String> = (HASH_BASE
                 ..UNDEFINED_CONTROL_SEQUENCE)
@@ -1873,6 +1887,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             cur_chr,
             cur_cs,
             cur_tok,
+            cur_raw,
             input_stack,
             input_ptr,
             max_in_stack: _,
@@ -2010,6 +2025,15 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             fire_pending,
             // (a switch)
             defer_fire: _,
+            tags_on: _,
+            // (scratch between two commands: a pending tag is flushed at a
+            // cut, the origins are taken where they are made)
+            tag_pending: _,
+            want_origin: _,
+            int_origin_req: _,
+            cur_val_origin: _,
+            expr_origin: _,
+            affine_count: _,
             // (scheduling: where windows end, DESIGN 4.3 item 1)
             window: _,
             window_start: _,
@@ -2445,7 +2469,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             None => c.put(&0u8),
         }
         c.section("scalars: flags", parts);
-        c.put(&(*cur_cmd, *cur_chr, *cur_cs, *cur_tok));
+        c.put(&(*cur_cmd, *cur_chr, *cur_cs, *cur_tok, *cur_raw));
         c.put(&(*expand_depth_count, *cur_val_level, *radix, *cur_order));
         c.section("scalars: current token", parts);
         c.put(&(*out_rtl, *lr_problems, *last_badness, *output_active));

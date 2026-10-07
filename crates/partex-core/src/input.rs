@@ -1241,8 +1241,9 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         {
             self.end_token_list()?; // conserve stack space
         }
-        // (a pooled list: `tok.rs`, `pooled_list`)
-        let t = self.cur_tok;
+        // (a pooled list: `tok.rs`, `pooled_list`; a tagged token as it
+        // was read, `reloc.rs`)
+        let t = self.take_raw_tok();
         let mut p = self.pooled_list(|b| b.push(t));
         if !o.is_none() {
             self.give_org(&mut p, &[o]);

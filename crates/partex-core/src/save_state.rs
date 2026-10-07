@@ -253,6 +253,14 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             par_start: _,
             fire_pending: _,
             defer_fire: _,
+            tags_on: _,
+            cur_raw,
+            tag_pending: _,
+            want_origin: _,
+            int_origin_req: _,
+            cur_val_origin: _,
+            expr_origin: _,
+            affine_count: _,
             window: _,
             window_start: _,
             window_cut: _,
@@ -479,6 +487,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         cur_cs.save(s);
         s.mark("cur_tok");
         cur_tok.save(s);
+        cur_raw.save(s);
         s.mark("input_stack");
         input_stack.save(s);
         s.mark("input_ptr");
@@ -786,6 +795,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             cur_chr: Persist::load(l)?,
             cur_cs: Persist::load(l)?,
             cur_tok: Persist::load(l)?,
+            cur_raw: Persist::load(l)?,
             input_stack: Persist::load(l)?,
             input_ptr: Persist::load(l)?,
             max_in_stack: Persist::load(l)?,
@@ -914,6 +924,13 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             par_start: false,
             fire_pending: false,
             defer_fire: false,
+            tags_on: false,
+            tag_pending: 0,
+            want_origin: false,
+            int_origin_req: false,
+            cur_val_origin: crate::reloc::NO_ORIGIN,
+            expr_origin: crate::reloc::NO_ORIGIN,
+            affine_count: 0,
             window: 0,
             window_start: 0,
             window_cut: None,
@@ -1005,6 +1022,8 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         self.fire_pending.save(s);
         s.mark("x.defer_fire");
         self.defer_fire.save(s);
+        s.mark("x.tags_on");
+        self.tags_on.save(s);
         s.mark("x.stop_at");
         self.stop_at.save(s);
         s.mark("x.stop_at_candidate");
@@ -1047,6 +1066,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         self.par_start = Persist::load(l)?;
         self.fire_pending = Persist::load(l)?;
         self.defer_fire = Persist::load(l)?;
+        self.tags_on = Persist::load(l)?;
         self.stop_at = Persist::load(l)?;
         self.stop_at_candidate = Persist::load(l)?;
         self.dense = Persist::load(l)?;

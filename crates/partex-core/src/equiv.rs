@@ -470,6 +470,15 @@ impl<H: Host, T: Tracker> Tex<H, T> {
     /// `eqtb[p].int` / `.sc` (regions 5 and 6).
     #[inline]
     pub(crate) fn eqtb_int(&self, p: i32) -> i32 {
+        if self.tags_on {
+            // (a count register's value used as it is: `reloc.rs`)
+            self.note_count_read(p);
+        }
+        self.eqtb(p).int()
+    }
+    /// `eqtb_int` for a read that keeps the value's origin
+    /// (`scan_something_internal`, `\advance`; `reloc.rs`).
+    pub(crate) fn eqtb_int_quiet(&self, p: i32) -> i32 {
         self.eqtb(p).int()
     }
     #[inline]

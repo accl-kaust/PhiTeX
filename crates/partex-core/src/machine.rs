@@ -304,6 +304,8 @@ pub struct CellTracker {
     /// (`pdf::word`; the lists' heads are the object table's to log):
     /// bit `k` if word `k` was read first, bit `16 + k` once written.
     pdf_words: core::sync::atomic::AtomicU32,
+    /// Relocatable numbers (`reloc.rs`).
+    reloc: RelocLog,
 }
 
 /// What a tracker's slot stands for.
@@ -400,6 +402,130 @@ pub fn set_mark_cells(on: bool) {
 
 fn mark_cells() -> bool {
     crate::statehash::MARK_CELLS.load(Relaxed)
+}
+
+#[path = "machine_reloc.rs"]
+mod machine_reloc;
+
+/// Whether machines number with relocatable numbers (`reloc.rs`: tagged
+/// digits, `MCell::Origin` and `MCell::IntCmp` guards; on by default,
+/// `PARTEX_MACHINE_RELOCATE=0` turns it off).
+static RELOCATE: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(true);
+
+/// Turn [`RELOCATE`] on or off for the machines made after.
+pub fn set_relocate(on: bool) {
+    RELOCATE.store(on, Relaxed);
+}
+
+/// An origin that stands for all of them (`MCell::Origin`): a region
+/// whose answers overflowed the tracker's log.
+pub const ANY_ORIGIN: i32 = -1;
+
+/// The version of every `MCell::Origin` guard (the guard always holds).
+const ORIGIN_VERSION: u128 = 0x6f72_6967_696e;
+
+/// The version of an `MCell::IntCmp` guard: its answer, made from the
+/// cell itself.
+fn int_cmp_version(x: i32, rel: u8, y: i32) -> u128 {
+    let answer = match rel {
+        crate::reloc::SHIFT => true,
+        b'<' => x < y,
+        b'>' => x > y,
+        _ => x == y,
+    };
+    0x696e_7463_6d70_0000 | u128::from(answer)
+}
+
+/// What a region did with relocatable numbers (`reloc.rs`): the origins
+/// it observed, and the answers it depends on.
+#[derive(Default)]
+struct RelocLog {
+    /// Origins observed, by bit.
+    seen: Vec<crate::relaxed::U64>,
+    observed: Log<i32>,
+    /// (origin and `x`, `rel` and `y`, the answer)
+    answers: Log<(u64, u64, u32)>,
+    /// An answer did not fit: the region observed every origin.
+    overflow: Flag,
+}
+
+/// An answer about a number (`MCell::IntCmp`): origin, `x`, `rel`, `y`.
+type IntAnswer = (i32, i32, u8, i32);
+
+/// Room for the answers of one step.
+const ANSWERS_PER_STEP: usize = 1 << 14;
+
+impl RelocLog {
+    fn reserve(&mut self) {
+        let n = usize::try_from(crate::web::TAG_ORIGINS).unwrap_or(0) + 1;
+        if self.seen.len() < n.div_ceil(64) {
+            self.seen.resize_with(n.div_ceil(64), Default::default);
+            self.observed.reserve(n);
+        }
+        self.answers.reserve(self.answers.len() + ANSWERS_PER_STEP);
+    }
+
+    #[inline]
+    fn observe(&self, o: i32) {
+        let Ok(i) = usize::try_from(o) else {
+            return;
+        };
+        match self.seen.get(i / 64) {
+            Some(w) => {
+                let b = 1u64 << (i % 64);
+                let v = w.get();
+                if v & b == 0 {
+                    w.set(v | b);
+                    if !self.observed.push(o) {
+                        self.overflow.set(true);
+                    }
+                }
+            }
+            None => self.overflow.set(true),
+        }
+    }
+
+    #[inline]
+    fn answer(&self, o: i32, x: i32, rel: u8, y: i32) {
+        let a = (u64::from(o.cast_unsigned()) << 32) | u64::from(x.cast_unsigned());
+        let b = (u64::from(rel) << 32) | u64::from(y.cast_unsigned());
+        if !self.answers.last_is(|l| l.0 == a && l.1 == b) && !self.answers.push((a, b, 0)) {
+            self.overflow.set(true);
+        }
+    }
+
+    /// The origins observed and the answers (origin, `x`, `rel`, `y`),
+    /// sorted, and whether the log overflowed; then forget them.
+    #[allow(clippy::cast_possible_truncation)] // (the halves)
+    fn take(&self) -> (Vec<i32>, Vec<IntAnswer>, bool) {
+        let mut obs = self.observed.to_vec();
+        for &o in &obs {
+            if let Some(w) = usize::try_from(o).ok().and_then(|i| self.seen.get(i / 64)) {
+                w.set(0);
+            }
+        }
+        obs.sort_unstable();
+        let mut ans: Vec<IntAnswer> = self
+            .answers
+            .to_vec()
+            .into_iter()
+            .map(|(a, b, _)| {
+                (
+                    ((a >> 32) as u32).cast_signed(),
+                    (a as u32).cast_signed(),
+                    (b >> 32) as u8,
+                    (b as u32).cast_signed(),
+                )
+            })
+            .collect();
+        ans.sort_unstable();
+        ans.dedup();
+        self.observed.clear();
+        self.answers.clear();
+        let overflow = self.overflow.get();
+        self.overflow.set(false);
+        (obs, ans, overflow)
+    }
 }
 
 /// The current marks, by class (`Tex::cur_mark`).
@@ -608,6 +734,7 @@ impl CellTracker {
     /// Room for eqtb locations below `n` and the registers above 255, and
     /// with names as cells, `links` hash slots' links.
     fn reserve(&mut self, n: usize, links: usize, fonts: usize) {
+        self.reloc.reserve();
         self.xbase = n;
         self.lbase = if links > 0 { n + XREG_SLOTS } else { 0 };
         let n = n + XREG_SLOTS + links;
@@ -737,6 +864,7 @@ impl CellTracker {
         self.marks.store(0, Relaxed);
         self.pdf_last.store(0, Relaxed);
         self.pdf_words.store(0, Relaxed);
+        let _ = self.reloc.take();
     }
 
     /// The PDF writer's words the region read first, and those it wrote
@@ -819,6 +947,16 @@ impl CellTracker {
 impl Tracker for CellTracker {
     const LINES: bool = true;
     const CHANGED_IDS: bool = true;
+
+    #[inline]
+    fn observe(&self, origin: i32) {
+        self.reloc.observe(origin);
+    }
+
+    #[inline]
+    fn int_answer(&self, origin: i32, x: i32, rel: u8, y: i32, _answer: bool) {
+        self.reloc.answer(origin, x, rel, y);
+    }
 
     #[inline]
     fn pdf_last_access(&self, k: u8, write: bool) {
@@ -1242,6 +1380,30 @@ pub struct CellValue {
     name: Option<Arc<[u8]>>,
 }
 
+impl Named {
+    /// The object an entry of this value holds.
+    fn obj(&self) -> Option<crate::objs::Obj> {
+        match self {
+            Named::Nothing => None,
+            Named::List {
+                toks,
+                protected,
+                interned: _,
+            } => Some(crate::objs::Obj::Toks(Arc::new(
+                crate::tok::TokenList::new(toks.to_vec(), *protected),
+            ))),
+            Named::Glue(g, lineage) => {
+                (!g.shared_zero).then_some(crate::objs::Obj::Glue(crate::objs::Glue {
+                    spec: *g,
+                    lineage: *lineage,
+                }))
+            }
+            Named::Shape(s) => s.clone().map(|s| crate::objs::Obj::Shape(Arc::new(s))),
+            Named::Box(b) => b.clone().map(crate::objs::Obj::Box),
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 enum Named {
     Nothing,
@@ -1404,24 +1566,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
     /// state's stores).
     pub(crate) fn import_cell(&mut self, p: i32, v: &CellValue) {
         self.thaw();
-        let obj = match &v.named {
-            Named::Nothing => None,
-            Named::List {
-                toks,
-                protected,
-                interned: _,
-            } => Some(crate::objs::Obj::Toks(Arc::new(
-                crate::tok::TokenList::new(toks.to_vec(), *protected),
-            ))),
-            Named::Glue(g, lineage) => {
-                (!g.shared_zero).then_some(crate::objs::Obj::Glue(crate::objs::Glue {
-                    spec: *g,
-                    lineage: *lineage,
-                }))
-            }
-            Named::Shape(s) => s.clone().map(|s| crate::objs::Obj::Shape(Arc::new(s))),
-            Named::Box(b) => b.clone().map(crate::objs::Obj::Box),
-        };
+        let obj = v.named.obj();
         if let Some(name) = &v.name {
             self.set_slot_name(p, name);
         }
@@ -1539,6 +1684,18 @@ pub enum MCell {
     /// numbers the objects a region makes take, a question about
     /// `Numbering`, as `FinalNum`.
     NumState,
+    /// Relocatable numbers (`reloc.rs`): the region used a number of
+    /// origin `.0` (count register `.0`; [`ANY_ORIGIN`]: any) as a
+    /// number. Never written; `get` answers it the same always, so it
+    /// never makes a region dirty: a rebuild that would reuse the region
+    /// with its numbers relocated checks that the origin does not move.
+    Origin(i32),
+    /// Relocatable numbers: an answer the region depends on about number
+    /// `.1` of origin `.0`: that `.1 .2 .3` (`<`, `=` or `>`) is what it
+    /// was, or (`reloc::SHIFT`) that `.1` and `.1 + .3` move alike. As
+    /// `Origin`, never written and always holding; a rebuild that would
+    /// relocate the region checks it with `.1` relocated.
+    IntCmp(i32, i32, u8, i32),
 }
 
 impl MCell {
@@ -2304,6 +2461,7 @@ impl<H: CellHost> TexMachine<H> {
     /// turned on.
     pub fn new(mut tex: Tex<H, CellTracker>, command_line: &[u8]) -> Self {
         tex.set_effects(true);
+        tex.set_tags(RELOCATE.load(Relaxed));
         tex.set_seal_lines(true);
         tex.set_stop_before_ship(true);
         tex.log_lines = true;
@@ -3565,6 +3723,27 @@ impl<H: CellHost> Machine for TexMachine<H> {
         let used = core::mem::take(&mut self.tex.glyphs_used);
         let any = used.iter().any(|g| *g != [0; 4]);
         self.glyphs = Arc::new(used);
+        // Relocatable numbers: a tag left pending is observed here, and
+        // the raw token is forgotten (the next `get_next` would); then the
+        // origins observed and the answers, as guards that always hold.
+        if self.tex.tags_on {
+            self.tex.flush_tag();
+            self.tex.cur_raw = 0;
+        }
+        let (observed, answers, overflow) = self.tex.tracker.reloc.take();
+        if overflow {
+            r.read(
+                &MCell::Origin(ANY_ORIGIN),
+                Some(&MValue::version(ORIGIN_VERSION)),
+            );
+        }
+        for o in observed {
+            r.read(&MCell::Origin(o), Some(&MValue::version(ORIGIN_VERSION)));
+        }
+        for (o, x, rel, y) in answers {
+            let v = int_cmp_version(x, rel, y);
+            r.read(&MCell::IntCmp(o, x, rel, y), Some(&MValue::version(v)));
+        }
         if CANON.load(Relaxed) == 1 {
             // (at a cut: both the exit snapshot and the run going on hold
             // the dead state's initial values)
@@ -3778,6 +3957,8 @@ impl<H: CellHost> Machine for TexMachine<H> {
             MCell::OfFinal(n) => Some(MValue::version(num_answer_version(
                 self.tex.pdf.objs.peek_of_final(*n),
             ))),
+            MCell::Origin(_) => Some(MValue::version(ORIGIN_VERSION)),
+            MCell::IntCmp(_, x, rel, y) => Some(MValue::version(int_cmp_version(*x, *rel, *y))),
             MCell::NumState => Some(MValue::version(num_answer_version(
                 self.tex.pdf.objs.alog.counters,
             ))),
@@ -3901,7 +4082,9 @@ impl<H: CellHost> Machine for TexMachine<H> {
                 | MCell::FontName(_)
                 | MCell::FinalNum(_)
                 | MCell::OfFinal(_)
-                | MCell::NumState,
+                | MCell::NumState
+                | MCell::Origin(_)
+                | MCell::IntCmp(..),
                 _,
             )
             | (
@@ -4080,6 +4263,26 @@ impl<H: CellHost> Machine for TexMachine<H> {
         )
     }
 
+    fn origin_number(c: &MCell, v: Option<&MValue<H>>) -> Option<i64> {
+        machine_reloc::origin_number(c, v)
+    }
+
+    fn guard_relocates(c: &MCell, shifts: &[partex_incr::Shift<MCell>]) -> bool {
+        machine_reloc::guard_relocates(c, shifts)
+    }
+
+    fn relocate_guard(c: &MCell, shifts: &[partex_incr::Shift<MCell>]) -> MCell {
+        machine_reloc::relocate_guard(c, shifts)
+    }
+
+    fn relocate_value(
+        c: &MCell,
+        v: &MValue<H>,
+        shifts: &[partex_incr::Shift<MCell>],
+    ) -> Result<Option<MValue<H>>, ()> {
+        machine_reloc::relocate_value(c, v, shifts)
+    }
+
     fn derived(c: &MCell) -> Option<MCell> {
         matches!(c, MCell::FinalNum(_) | MCell::OfFinal(_) | MCell::NumState)
             .then_some(MCell::Numbering)
@@ -4241,7 +4444,9 @@ impl<H: CellHost> Machine for TexMachine<H> {
             | MCell::Numbering
             | MCell::FinalNum(_)
             | MCell::OfFinal(_)
-            | MCell::NumState => None,
+            | MCell::NumState
+            | MCell::Origin(_)
+            | MCell::IntCmp(..) => None,
         }
     }
 }

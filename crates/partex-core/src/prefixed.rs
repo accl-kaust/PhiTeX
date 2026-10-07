@@ -749,7 +749,16 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                     self.scan_normal_dimen()?;
                 }
                 if q == ADVANCE {
-                    self.cur_val = self.cur_val.wrapping_add(self.eqtb_int(l));
+                    // (a count register advanced by a constant keeps its
+                    // origin's numbers relocatable: `reloc.rs`)
+                    let e = if p == INT_VAL {
+                        let e = self.eqtb_int_quiet(l);
+                        self.note_count_shift(l, e, self.cur_val);
+                        e
+                    } else {
+                        self.eqtb_int(l)
+                    };
+                    self.cur_val = self.cur_val.wrapping_add(e);
                 }
             } else {
                 self.scan_glue(p)?;
@@ -830,6 +839,9 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             return self.error();
         }
         if p < GLUE_VAL {
+            if q == ADVANCE && p == INT_VAL && self.tags_on {
+                self.affine_count = l;
+            }
             self.word_define(a, l, self.cur_val)
         } else {
             self.trap_zero_glue();
@@ -1196,7 +1208,12 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                 let c = crate::web::tok_chr(*t);
                 let e = self.equiv(crate::wide::code_loc(b, c));
                 if e != 0 {
-                    *t = *t - c + e;
+                    // (a tagged digit changed is a digit no more: the
+                    // number decided, `reloc.rs`)
+                    if let Some((o, ..)) = crate::web::tag_of(*t) {
+                        self.observe_origin(o);
+                    }
+                    *t = crate::web::untag(*t) - c + e;
                 }
             } else if let Some(c) = crate::wide::active_char(*t - CS_TOKEN_FLAG) {
                 let e = self.equiv(crate::wide::code_loc(b, c));

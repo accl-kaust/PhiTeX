@@ -553,6 +553,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
 
     /// §278
     pub(crate) fn eq_word_define(&mut self, p: Pointer, w: i32) -> Result<(), Jump> {
+        self.note_count_write(p);
         self.memo.wrote_local(self.cur_level());
         if !self.assignment_reads(p) {
             // (at level one every word's level is one; untraced, unless
@@ -599,6 +600,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
 
     /// §279: global `eq_word_define`.
     pub(crate) fn geq_word_define(&mut self, p: Pointer, w: i32) {
+        self.note_count_write(p);
         self.memo.wrote_global(p);
         self.assign_trace(p, b"globally changing");
         self.set_eqtb_int(p, w);
@@ -774,6 +776,41 @@ impl<H: Host, T: Tracker> Tex<H, T> {
     /// they were; only `\tracingrestores` would show the difference (the
     /// stack is left as it is while it is on). Reads the locations it
     /// compares, and writes those whose level it sets.
+    /// The values the save stack holds of count registers (a group's
+    /// end restores them): location and value (relocatable numbers,
+    /// `reloc.rs`).
+    pub(crate) fn saved_counts(&self) -> alloc::vec::Vec<(i32, i32)> {
+        let saves = crate::statehash::SaveCanon::of(
+            &self.save_stack,
+            self.save_ptr,
+            &self.save_eqtb,
+            self.cur_boundary,
+            self.cur_level,
+        );
+        let mut out = alloc::vec::Vec::new();
+        for f in saves.frames() {
+            let mut p = f.start;
+            while p < f.end {
+                if !saves.flagged(p) {
+                    p += 1;
+                    continue;
+                }
+                let at = Self::sx(i32::try_from(p + 1).unwrap_or(0));
+                let loc = self.save_stack[at].rh();
+                if crate::reloc::origin_of_loc(loc).is_some() {
+                    out.push((loc, self.save_stack[p].int()));
+                }
+                p += 2;
+            }
+        }
+        for s in &self.xregs.chain {
+            if crate::reloc::origin_of_loc(s.loc).is_some() {
+                out.push((s.loc, s.word.int()));
+            }
+        }
+        out
+    }
+
     pub(crate) fn canonicalize_save_stack(&mut self) {
         if self.int_par(TRACING_RESTORES_CODE) > 0 {
             return;

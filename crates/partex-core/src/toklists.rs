@@ -119,7 +119,15 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             return Ok(self.text_toks(&text));
         }
         self.get_x_token()?;
+        self.want_origin = self.tags_on;
         self.scan_something_internal(TOK_VAL, false)?;
+        let origin = core::mem::replace(&mut self.cur_val_origin, crate::reloc::NO_ORIGIN);
+        if self.cur_val_level == INT_VAL
+            && let Some(digits) = self.origin_digits(origin, self.cur_val)
+        {
+            // (a count register's value: tagged digits, `reloc.rs`)
+            return Ok(self.make_list(digits));
+        }
         if self.cur_val_level >= IDENT_VAL {
             // §466: copy the token list.
             if self.cur_val_level == IDENT_VAL {
@@ -169,8 +177,10 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             return self.pdftex_conv_toks(c);
         }
         // §471: scan the argument for command `c`.
+        let mut origin = crate::reloc::NO_ORIGIN;
         match c {
-            NUMBER_CODE | ROMAN_NUMERAL_CODE => self.scan_int()?,
+            NUMBER_CODE => origin = self.scan_int_origin()?,
+            ROMAN_NUMERAL_CODE => self.scan_int()?,
             STRING_CODE | MEANING_CODE => {
                 let save_scanner_status = self.scanner_status;
                 self.scanner_status = NORMAL;
@@ -184,6 +194,11 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                     self.open_log_file()?;
                 }
             }
+        }
+        if let Some(digits) = self.origin_digits(origin, self.cur_val) {
+            // (a count register's value: tagged digits, `reloc.rs`)
+            let p = self.make_list(digits);
+            return self.ins_list(p);
         }
         let old_setting = self.selector();
         self.set_selector(NEW_STRING);
@@ -263,7 +278,10 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                     self.tokens_only(Self::get_token)?;
                     if self.cur_tok < LEFT_BRACE_LIMIT {
                         hash_brace = self.cur_tok;
-                        self.def_ref.push(self.cur_tok);
+                        {
+                            let t = self.take_raw_tok();
+                            self.def_ref.push(t);
+                        }
                         self.def_ref.push(END_MATCH_TOKEN);
                         done = true;
                         break;
@@ -288,7 +306,10 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                     }
                     self.cur_tok = s;
                 }
-                self.def_ref.push(self.cur_tok);
+                {
+                    let t = self.take_raw_tok();
+                    self.def_ref.push(t);
+                }
             }
             if !done {
                 // done1:
@@ -375,7 +396,10 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                         }
                     }
                 }
-                self.def_ref.push(self.cur_tok);
+                {
+                    let t = self.take_raw_tok();
+                    self.def_ref.push(t);
+                }
             }
         }
         // found:

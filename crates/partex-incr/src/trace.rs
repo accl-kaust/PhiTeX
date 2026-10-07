@@ -38,6 +38,9 @@ pub struct Trace<M: Machine> {
     /// machine keeps of its exit state for [`crate::Machine::replay_exit`]
     /// holds that run's values of the cells no region wrote.
     pub born: u32,
+    /// The last rebuild that relocated it (`Machine::relocate_value`; 0:
+    /// none): the exit state kept holds its writes as they were before.
+    pub moved: u32,
 }
 
 impl<M: Machine> Trace<M> {
@@ -236,6 +239,7 @@ impl<M: Machine> Composer<M> {
         t.allocs += next.allocs;
         t.cost += next.cost;
         t.born = t.born.min(next.born);
+        t.moved = t.moved.max(next.moved);
         true
     }
 
@@ -369,6 +373,7 @@ impl<M: Machine> Recording<M> {
             allocs: self.allocs,
             cost: self.cost,
             born: 0,
+            moved: 0,
         }
     }
 }
@@ -575,6 +580,7 @@ impl<M: Machine> RegionRecorder<M> for FlatRecording<M> {
             allocs: core::mem::take(&mut self.allocs),
             cost: core::mem::take(&mut self.cost),
             born: 0,
+            moved: 0,
         }
     }
 }

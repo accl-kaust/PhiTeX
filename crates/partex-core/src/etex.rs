@@ -282,7 +282,8 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                     }
                 }
             }
-            self.def_ref.push(self.cur_tok);
+            let t = self.take_raw_tok();
+            self.def_ref.push(t);
         }
         let toks = core::mem::replace(&mut self.def_ref, d);
         (self.scanner_status, self.warning_index) = (s, w);

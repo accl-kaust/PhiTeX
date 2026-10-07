@@ -98,7 +98,8 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             EXPAND_AFTER => {
                 // §368: expand the token after the next token.
                 self.get_token()?;
-                let t = self.cur_tok;
+                // (a tagged token as it was read: backed up below)
+                let t = self.take_raw_tok();
                 // (with glyph origins: `t`'s, before the input moves on)
                 let t_org = self.back_org();
                 self.get_token()?;
@@ -523,6 +524,18 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                     r = s;
                     m = 0;
                 }
+                // (a tagged digit read here is compared with the delimiter:
+                // the number decides where it has digits, `reloc.rs`)
+                let delim_digits = self.tags_on && {
+                    let mut k = if s == NULL { r } else { s };
+                    let mut digit = false;
+                    while !is_match(info(self, k)) && crate::input::ux(k) < body.len() {
+                        let u = untag(info(self, k));
+                        digit |= (ZERO_TOKEN..=ZERO_TOKEN + 9).contains(&u);
+                        k += 1;
+                    }
+                    digit
+                };
                 // §392: scan a parameter until its delimiter string has
                 // been found; or, if `s=null`, simply scan the delimiter
                 // string.
@@ -530,10 +543,13 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                     // (a run up to the delimiter at once, `bulk.rs`)
                     if s == r && s != NULL && self.bulk_on() && !is_match(info(self, r)) {
                         let par_ends = self.long_state != LONG_CALL;
-                        m += self.bulk_level0(arg, info(self, r), par_ends);
+                        m += self.bulk_level0(arg, untag(info(self, r)), par_ends);
                     }
                     self.get_token()?; // set `cur_tok` to the next token of input
-                    if self.cur_tok == info(self, r) {
+                    if delim_digits && self.tag_pending != 0 {
+                        self.flush_tag();
+                    }
+                    if self.cur_tok == untag(info(self, r)) {
                         // §394: advance `r`; `goto found` if the parameter
                         // delimiter has been fully matched, otherwise
                         // `goto continue`.
@@ -572,13 +588,13 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                             let mut v = s;
                             loop {
                                 if u == r {
-                                    if self.cur_tok != info(self, v) {
+                                    if self.cur_tok != untag(info(self, v)) {
                                         break; // done
                                     }
                                     r = v + 1;
                                     continue 'continue_;
                                 }
-                                if info(self, u) != info(self, v) {
+                                if untag(info(self, u)) != untag(info(self, v)) {
                                     break; // done
                                 }
                                 u += 1;
@@ -606,7 +622,10 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                                 if on {
                                     self.arg_org();
                                 }
-                                self.arg_list.push(self.cur_tok);
+                                {
+                                    let t = self.take_raw_tok();
+                                    self.arg_list.push(t);
+                                }
                                 // (the group's inside at once, `bulk.rs`)
                                 self.bulk_group(arg, &mut unbalance, how);
                                 self.get_token()?;
@@ -627,7 +646,10 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                             if on {
                                 self.arg_org();
                             }
-                            self.arg_list.push(self.cur_tok);
+                            {
+                                let t = self.take_raw_tok();
+                                self.arg_list.push(t);
+                            }
                         } else {
                             // §395: report an extra right brace and
                             // `goto continue`.
@@ -662,7 +684,10 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                         if on {
                             self.arg_org();
                         }
-                        self.arg_list.push(self.cur_tok);
+                        {
+                            let t = self.take_raw_tok();
+                            self.arg_list.push(t);
+                        }
                     }
                     m += 1;
                     if info(self, r) > END_MATCH_TOKEN || info(self, r) < MATCH_TOKEN {
