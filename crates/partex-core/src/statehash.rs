@@ -560,7 +560,18 @@ impl Canon<'_> {
             self.sref(name);
         }
         if state == TOKEN_LIST {
-            self.tok(list.as_ref());
+            if r.holds_param() {
+                // (the parameter it reads, by its place: the parameters are
+                // hashed with the scanner's state)
+                self.put(&(3u8, start));
+            } else if r.holds_token() {
+                // (as the pooled list of that token alone would be)
+                let mut l = partex_engine::node::TokenList::new(alloc::vec![start], false);
+                l.remake(false);
+                self.tok(Some(&alloc::sync::Arc::new(l)));
+            } else {
+                self.tok(list.as_ref());
+            }
             self.put(&loc); // (an index into the list)
         } else {
             self.put(&(start, loc)); // (buffer positions)
@@ -1265,6 +1276,12 @@ impl<H: Host, T: Tracker> Tex<H, T> {
     #[must_use]
     pub(crate) fn eqtb_content_by_tokens(&self, p: i32) -> u128 {
         self.eqtb_content_with(p, self.peek_eqtb(p), true)
+    }
+
+    /// [`Tex::eqtb_content_by_tokens`] of eqtb location `p` with
+    /// `by_tokens`, else [`Tex::cell_content`]'s.
+    pub(crate) fn eqtb_content_of(&self, p: i32, by_tokens: bool) -> u128 {
+        self.eqtb_content_with(p, self.peek_eqtb(p), by_tokens)
     }
 
     fn eqtb_content_with(&self, p: i32, w: MemoryWord, by_tokens: bool) -> u128 {

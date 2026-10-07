@@ -184,6 +184,13 @@ the graph of chapter 3, not from a pipeline split.
   for a control sequence at hash slot `p`. Token lists are immutable,
   shared `Arc` values (`Tokens`), each carrying a polynomial hash of
   its tokens kept at every write.
+  - An input level that reads a list holds it, with two exceptions that
+    count no reference: a level that backs up one token (§325, the
+    commonest level of all) holds the token itself, and a parameter
+    level (§359) reads its parameter in place on the parameter stack,
+    which outlives it (`InStateRecord::holds_token`, `holds_param`).
+    Both are read through `InStateRecord::tokens_in`, and a state hash
+    sees them as the lists they stand for.
   - Planned: `Token(u32)`, with a control sequence as an interned name,
     and 21-bit characters for XeTeX and LuaTeX.
 - **Nodes.**
@@ -194,7 +201,12 @@ the graph of chapter 3, not from a pipeline split.
     split canonically.
 - **Tables.** eqtb, the hash, `xeq_level` and the registers above 255
   are flat arrays. Beside each is a version array, set by the writing
-  accessor from the content written (3.2).
+  accessor from the content written (3.2). An eqtb entry's is only
+  marked at the write and made from the content when it is first
+  wanted (a read from outside the call, a step's definitions): the
+  content then is the content written, since every change of it comes
+  through the accessor (check mode makes the version at the write, and
+  tests that).
 - **Fonts and formats.** TFM files are parsed once into shared fonts,
   with each character's metrics resolved at load. Formats are partex's
   own serialization (`codec.rs`).
@@ -1596,7 +1608,9 @@ and a stub language with property tests is another.
 serial. A read in a frame is the frame's own read if the slot's last
 write came before the frame began; otherwise the frame, or a child,
 wrote the slot, and the read is internal. A read is noted once per call
-through per-slot stamps (a *slot* is the code's word for an address).
+through per-slot stamps (a *slot* is the code's word for an address),
+and an eqtb entry's version, made when wanted, only for a read that is
+recorded (not for one of a slot the call wrote).
 Families that are dense arrays (eqtb, the hash, the fonts) keep their
 stamps in arrays, so the engine's hot path hashes nothing. The arrays
 and the serial outlive a trip: a stamp left by an earlier trip is older

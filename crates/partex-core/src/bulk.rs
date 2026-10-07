@@ -62,7 +62,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             && !self.memo.recording()
             // (with glyph origins, a list whose tokens carry them, an
             // argument's, is read a token at a time: `srcmap.rs`)
-            && (self.org.is_none() || self.cur_input.list.as_deref().is_none_or(|l| l.org() == 0))
+            && (self.org.is_none() || self.cur_input.list_in(&self.param_stack).is_none_or(|l| l.org() == 0))
     }
 
     /// Whether control sequence token `t` is stored as it is read, as
@@ -115,7 +115,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
     fn bulk_group_run(&mut self, dst: Dst, unbalance: &mut i32, how: Absorb) -> usize {
         // (the list read in place: no reference counted)
         let loc = crate::input::ux(self.cur_input.loc);
-        let toks: &[i32] = self.cur_input.list.as_deref().map_or(&[], |l| l.tokens());
+        let toks: &[i32] = self.cur_input.tokens_in(&self.param_stack);
         let n = toks.len();
         let mut align = self.align_state();
         let mut u = *unbalance;
@@ -177,7 +177,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
     fn bulk_level0_run(&mut self, dst: Dst, delim: i32, par_ends: bool) -> usize {
         // (the list read in place: no reference counted)
         let loc = crate::input::ux(self.cur_input.loc);
-        let toks: &[i32] = self.cur_input.list.as_deref().map_or(&[], |l| l.tokens());
+        let toks: &[i32] = self.cur_input.tokens_in(&self.param_stack);
         let n = toks.len();
         let align = self.align_state();
         let how = Absorb::Arg { par_ends };
@@ -220,7 +220,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
     fn bulk_chars_run(&mut self, name: &mut alloc::vec::Vec<i32>) {
         // (the list read in place: no reference counted)
         let loc = crate::input::ux(self.cur_input.loc);
-        let toks: &[i32] = self.cur_input.list.as_deref().map_or(&[], |l| l.tokens());
+        let toks: &[i32] = self.cur_input.tokens_in(&self.param_stack);
         let n = toks.len();
         let mut align = self.align_state();
         let mut k = loc;
@@ -246,11 +246,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
     /// and read (the list has `n`).
     fn bulk_take(&mut self, dst: Dst, a: usize, b: usize, n: usize) {
         if b > a {
-            let src = self
-                .cur_input
-                .list
-                .as_deref()
-                .map_or(&[][..], |l| l.tokens());
+            let src = self.cur_input.tokens_in(&self.param_stack);
             match dst {
                 Dst::Arg => self.arg_list.extend_from_slice(&src[a..b]),
                 Dst::Def => self.def_ref.extend_from_slice(&src[a..b]),
@@ -286,7 +282,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
     fn bulk_skip_run(&mut self) {
         // (the list read in place: no reference counted)
         let loc = crate::input::ux(self.cur_input.loc);
-        let toks: &[i32] = self.cur_input.list.as_deref().map_or(&[], |l| l.tokens());
+        let toks: &[i32] = self.cur_input.tokens_in(&self.param_stack);
         let n = toks.len();
         let mut align = self.align_state();
         let mut k = loc;
