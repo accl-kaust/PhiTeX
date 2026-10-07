@@ -229,6 +229,8 @@ fn several_edits_at_once() {
 #[test]
 fn stopped_rebuilds_then_one_to_the_end_match_scratch() {
     let mut stopped = 0;
+    // (stopped inside a span, which was given up)
+    let mut inside = 0;
     let mut in_a_row = 0;
     // (links taken again: the build said no effect changed)
     let mut same = 0;
@@ -270,6 +272,9 @@ fn stopped_rebuilds_then_one_to_the_end_match_scratch() {
                             );
                         }
                         stopped += 1;
+                        if b.stats.given_up_cost > 0 {
+                            inside += 1;
+                        }
                         run += 1;
                         if run > 1 {
                             in_a_row += 1;
@@ -318,8 +323,8 @@ fn stopped_rebuilds_then_one_to_the_end_match_scratch() {
         }
     }
     assert!(
-        stopped > 1000 && in_a_row > 300 && same > 100,
-        "{stopped} rebuilds stopped, {in_a_row} after another, {same} links taken again"
+        stopped > 1000 && inside > 100 && in_a_row > 300 && same > 100,
+        "{stopped} rebuilds stopped ({inside} inside a span), {in_a_row} after another, {same} links taken again"
     );
 }
 

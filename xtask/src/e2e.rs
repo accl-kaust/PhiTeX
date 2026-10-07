@@ -2314,6 +2314,236 @@ fn run_modern_watch(root: &Path, partex: &Path, sanitize: bool) -> Result<Vec<St
     Ok(diffs)
 }
 
+/// A long document for [`run_modern_watch_preempt`]: a table of contents,
+/// `sections` sections of `paras` paragraphs of words, each section
+/// referring to the next (so an edit that moves pages makes the job's own
+/// files settle over passes).
+fn preempt_document(sections: usize, paras: usize) -> String {
+    use std::fmt::Write as _;
+    const WORDS: [&str; 16] = [
+        "pin",
+        "gradient",
+        "corner",
+        "connection",
+        "length",
+        "slope",
+        "update",
+        "coefficient",
+        "position",
+        "line",
+        "placement",
+        "net",
+        "cell",
+        "row",
+        "wire",
+        "pull",
+    ];
+    let mut t = String::from("\\documentclass{article}\n\\begin{document}\n\\tableofcontents\n\n");
+    let mut k = 0usize;
+    for s in 1..=sections {
+        let _ = write!(t, "\\section{{Part {s}}}\\label{{sec:{s}}}\n\n");
+        for p in 0..paras {
+            for w in 0..60 {
+                k = k.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+                t.push_str(WORDS[(k >> 16) % WORDS.len()]);
+                t.push(if w == 59 { '.' } else { ' ' });
+            }
+            if p == 0 {
+                let _ = write!(t, " See section~\\ref{{sec:{}}}.", s % sections + 1);
+            }
+            t.push_str("\n\n");
+        }
+    }
+    t.push_str("\\end{document}\n");
+    t
+}
+
+/// A save while `phitex watch` rebuilds (DESIGN 4.8, "A save during a
+/// rebuild"), in machine mode (its default) and with checkpoints
+/// (`--no-machine`): a long document is edited where every later page
+/// moves (a long rebuild, its passes settling the table of contents and
+/// the references), and saved again a moment later. The newer save must
+/// supersede the rebuild under way quickly (machine mode at a region
+/// boundary; checkpoints at the next pass), the PDF on disk must be a
+/// complete PDF whenever it is looked at, and once settled every file must
+/// be pdfLaTeX's run to its fixpoint on the final source, as a cold build
+/// gives it.
+#[allow(clippy::too_many_lines)] // (one scripted session, kept whole)
+fn run_modern_watch_preempt(root: &Path, partex: &Path, machine: bool) -> Result<Vec<String>> {
+    let case = Converge {
+        name: if machine {
+            "modern_watch_preempt"
+        } else {
+            "modern_watch_preempt_checkpoints"
+        },
+        oracle: "pdflatex",
+        inputs: &[],
+        ini: &[],
+        args: &["-interaction=nonstopmode"],
+        job: "preempt",
+        watch: &["preempt.aux", "preempt.toc"],
+        passes: 2,
+        outdir: false,
+    };
+    let work = out_root(root).join(case.name);
+    if work.exists() {
+        fs::remove_dir_all(&work)?;
+    }
+    let (o, p) = (work.join("o"), work.join("p"));
+    fs::create_dir_all(&o)?;
+    fs::create_dir_all(&p)?;
+    let text = preempt_document(150, 14);
+    for d in [&o, &p] {
+        fs::write(d.join("preempt.tex"), &text)?;
+    }
+    let args = ["-interaction=nonstopmode", "preempt.tex"];
+    oracle_passes(&case, &o, &o, &args)?;
+    let mut cmd = Command::new(partex);
+    cmd.env("PARTEX_CACHE_DIR", work.join("cache"))
+        // (its own: other cases may be making theirs at the same time)
+        .env("PARTEX_FORMATS", root.join("target/e2e-formats-preempt"))
+        .env("NO_COLOR", "1")
+        .env("SOURCE_DATE_EPOCH", "1758800000")
+        .env("FORCE_SOURCE_DATE", "1")
+        .env_remove("PARTEX_PERSIST")
+        .env_remove("PARTEX_MACHINE")
+        .current_dir(&p)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped());
+    if machine {
+        cmd.args(["watch", "-v", "--no-view", "preempt.tex"]);
+    } else {
+        cmd.args(["watch", "-v", "--no-view", "--no-machine", "preempt.tex"]);
+    }
+    let mut child = cmd.spawn()?;
+    let (tx, rx) = std::sync::mpsc::channel();
+    let err = child.stderr.take().context("the watch's stderr")?;
+    std::thread::spawn(move || {
+        for line in std::io::BufReader::new(err).lines() {
+            let Ok(line) = line else { break };
+            if tx.send((std::time::Instant::now(), line)).is_err() {
+                break;
+            }
+        }
+    });
+    let mut report = String::new();
+    let mut next = |what: &str| -> Result<(std::time::Instant, String)> {
+        let (t, line) = rx
+            .recv_timeout(std::time::Duration::from_secs(300))
+            .with_context(|| format!("phitex watch stopped before {what}"))?;
+        report.push_str(&line);
+        report.push('\n');
+        Ok((t, line))
+    };
+    while !next("`Watching`")?.1.contains("Watching") {}
+    let mut diffs: Vec<String> = compare(&o, &p, true)?
+        .into_iter()
+        .map(|n| format!("build: {n}"))
+        .collect();
+    // (the PDF, whenever it is looked at while the watch works: complete)
+    let pdf = p.join("preempt.pdf");
+    let looking = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let looker = {
+        let (pdf, looking) = (pdf.clone(), looking.clone());
+        std::thread::spawn(move || {
+            let mut torn = 0usize;
+            let mut looks = 0usize;
+            while looking.load(std::sync::atomic::Ordering::Relaxed) {
+                if let Ok(b) = fs::read(&pdf) {
+                    looks += 1;
+                    let end = b.trim_ascii_end();
+                    if !b.starts_with(b"%PDF-") || !end.ends_with(b"%%EOF") {
+                        torn += 1;
+                    }
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            (looks, torn)
+        })
+    };
+    let edits = [
+        // (a paragraph in the first section: every later page moves)
+        (
+            "\\section{Part 1}\\label{sec:1}\n\n",
+            "\\section{Part 1}\\label{sec:1}\n\nA new first paragraph, long enough to move every later line of the document down by a few lines, so that every page after it changes.\n\n",
+        ),
+        // (and, a moment later, a word in the second)
+        ("\\section{Part 2}", "\\section{Second part}"),
+    ];
+    let mut saved = Vec::new();
+    for (i, (marker, new)) in edits.iter().enumerate() {
+        for dir in [&o, &p] {
+            let f = dir.join("preempt.tex");
+            let text = fs::read_to_string(&f)?;
+            ensure!(text.contains(marker), "preempt.tex has no `{marker}`");
+            // (as editors save: a watcher never sees half a file)
+            let tmp = dir.join("preempt.tex.new");
+            fs::write(&tmp, text.replacen(marker, new, 1))?;
+            fs::rename(&tmp, &f)?;
+        }
+        saved.push(std::time::Instant::now());
+        if i == 0 {
+            std::thread::sleep(std::time::Duration::from_millis(600));
+        }
+    }
+    // (until the rebuild's line, `HH:MM:SS  preempt.tex:N  ✓ …`, and no
+    // line for a while after it: the job settled)
+    let mut superseded = None;
+    let mut settled = false;
+    loop {
+        let wait = std::time::Duration::from_secs(if settled { 5 } else { 300 });
+        let (t, line) = match rx.recv_timeout(wait) {
+            Ok(x) => x,
+            Err(_) if settled => break,
+            Err(e) => anyhow::bail!("phitex watch stopped before the rebuild's end: {e}\n{report}"),
+        };
+        eprintln!("    {line}");
+        report.push_str(&line);
+        report.push('\n');
+        if superseded.is_none() && line.contains("superseded by") {
+            superseded = Some(t);
+        }
+        let rebuilt = line.len() > 10
+            && line.as_bytes()[2] == b':'
+            && (line.contains('✓') || line.contains('✗'));
+        settled |= rebuilt && t > saved[1];
+    }
+    looking.store(false, std::sync::atomic::Ordering::Relaxed);
+    let (looks, torn) = looker
+        .join()
+        .map_err(|_| anyhow::anyhow!("the looker panicked"))?;
+    if let Some(mut stdin) = child.stdin.take() {
+        writeln!(stdin, "q")?;
+    }
+    child.wait()?;
+    let superseded = superseded.with_context(|| {
+        format!("no `superseded by` line: the second save did not supersede the rebuild\n{report}")
+    })?;
+    ensure!(superseded > saved[1], "superseded before the second save");
+    let took = superseded - saved[1];
+    eprintln!(
+        "    (superseded {:.0} ms after the second save; the PDF looked at {looks} times)",
+        took.as_secs_f64() * 1e3
+    );
+    // (machine mode stops at the next region boundary: well within a
+    // second even here; checkpoints at the next pass)
+    let bound = if machine { 2.0 } else { 120.0 };
+    ensure!(
+        took.as_secs_f64() < bound,
+        "the second save superseded the rebuild only after {:.1} s",
+        took.as_secs_f64()
+    );
+    ensure!(torn == 0, "the PDF was incomplete {torn} of {looks} times");
+    oracle_passes(&case, &o, &o, &args)?;
+    diffs.extend(
+        compare(&o, &p, true)?
+            .into_iter()
+            .map(|n| format!("settled: {n}")),
+    );
+    Ok(diffs)
+}
+
 /// Machine-mode rebuilds (`PARTEX_MACHINE=1`, DESIGN.md §7.4, §7.11) of
 /// `edits.tex` (40 sections of random words, so lines and pages break
 /// unevenly, one paragraph per line) under an output directory, edited
@@ -2703,6 +2933,14 @@ pub fn run(root: &Path, args: &[String]) -> Result<()> {
     jobs.push((
         "modern_watch_sanitized",
         Box::new(move || run_modern_watch(root, partex, true)),
+    ));
+    jobs.push((
+        "modern_watch_preempt",
+        Box::new(move || run_modern_watch_preempt(root, partex, true)),
+    ));
+    jobs.push((
+        "modern_watch_preempt_checkpoints",
+        Box::new(move || run_modern_watch_preempt(root, partex, false)),
     ));
     jobs.retain(|(name, _)| filter.is_none_or(|f| name.contains(f)));
     let ran = jobs.len();

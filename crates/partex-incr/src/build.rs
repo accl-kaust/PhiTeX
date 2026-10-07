@@ -114,6 +114,8 @@ pub struct Stats {
     pub recorded_regions: usize,
     /// Cost units executed.
     pub executed_cost: u64,
+    /// Of them, those of a span given up by a stop inside it (not kept).
+    pub given_up_cost: u64,
     /// Old regions replayed one by one.
     pub replayed_regions: usize,
     /// Spans of clean regions replayed by restoring the old run's state
@@ -377,23 +379,27 @@ type RefineJob<'a, M> = (
 enum Stop {
     Halted,
     Synced(u64),
+    /// `stop` said so after a region was cut: the span is not over.
+    Stopped,
 }
 
 /// Run `m`, recording regions of about `grain` cost, until it halts or
 /// `sync` names the old region whose entry it has reached; flat recording
-/// if `flat`.
+/// if `flat`. After each region cut (not at a sync), `stop` is asked
+/// whether to give up the span ([`Stop::Stopped`]).
 fn record_span<M: Machine>(
     m: &mut M,
     grain: Grain,
     flat: bool,
     sync: impl FnMut(&M::Boundary) -> Option<u64>,
+    stop: &dyn Fn() -> bool,
 ) -> (Vec<Trace<M>>, Stop, u64) {
     if flat {
         let rec = FlatRecording::new(m.at());
-        record_with(m, grain, sync, rec)
+        record_with(m, grain, sync, stop, rec)
     } else {
         let rec = Recording::new(m.at(), OnForce::Suspend);
-        record_with(m, grain, sync, rec)
+        record_with(m, grain, sync, stop, rec)
     }
 }
 
@@ -423,6 +429,7 @@ fn record_with<M: Machine, R: RegionRecorder<M>>(
     m: &mut M,
     grain: Grain,
     mut sync: impl FnMut(&M::Boundary) -> Option<u64>,
+    stop: &dyn Fn() -> bool,
     mut rec: R,
 ) -> (Vec<Trace<M>>, Stop, u64) {
     let mut out = Vec::new();
@@ -451,6 +458,9 @@ fn record_with<M: Machine, R: RegionRecorder<M>>(
                     m.prepare_cut(&mut rec);
                     out.push(rec.cut(m));
                     g = g.saturating_mul(grain.grow).min(grain.max.max(grain.first));
+                    if stop() {
+                        return (out, Stop::Stopped, total);
+                    }
                 }
             }
             Step::Halt => {
@@ -474,6 +484,7 @@ impl<M: Machine> Build<M> {
             Grain::fixed(cfg.grain, cfg.file_cut),
             cfg.flat,
             |_| None,
+            &|| false,
         );
         let mut b = Self {
             initial,
@@ -733,14 +744,19 @@ impl<M: Machine> Build<M> {
                 }
             }
             let last = next.is_none();
-            let (traces, stop, cost) = record_span(&mut m, Grain::fixed(grain, 0), flat, |b| {
-                (!last && *b == old.exit).then_some(0)
-            });
+            let (traces, stop, cost) = record_span(
+                &mut m,
+                Grain::fixed(grain, 0),
+                flat,
+                |b| (!last && *b == old.exit).then_some(0),
+                &|| false,
+            );
             // (it ended where the region did, in the same state: a
             // position met twice would stop it early)
             let ok = match stop {
                 Stop::Synced(_) => !last,
                 Stop::Halted => last,
+                Stop::Stopped => false,
             } && cost == old.cost
                 && old
                     .writes
@@ -1124,7 +1140,12 @@ impl<M: Machine> Build<M> {
 
     /// [`Build::rebuild`], stopping early if `stop` says so when asked:
     /// between re-executed spans, at an old region's boundary, once one
-    /// span re-ran (so a stream of edits still moves on). A stopped
+    /// span re-ran (so a stream of edits still moves on); and inside a
+    /// span, after each region it cut, unless the last stop's frontier is
+    /// still ahead: the span is then given up (what it ran is dropped, a
+    /// newer edit may change it anyway) and the walk stops at the old
+    /// region it began at, so that a long span (a page-numbering cascade
+    /// over a chapter) does not hold the newer edit back. A stopped
     /// rebuild keeps what it re-ran, takes `new_initial` as its starting
     /// state, and records where it stopped (the frontier): the next
     /// rebuild goes on from there with its own changes, and its final
@@ -1384,25 +1405,43 @@ impl<M: Machine> Build<M> {
                 max: cfg.grain,
                 file_cut: cfg.file_cut,
             };
-            let (traces, stop, cost) = record_span(&mut s, grain, cfg.flat, |b| {
-                if !cfg.early_cutoff {
-                    return None;
-                }
-                entries
-                    .get(b)
-                    .and_then(|ks| ks.range(k + 1..).next().map(|e| e.0))
-            });
+            // (a stop inside the span gives it up: what it ran is not kept,
+            // and the walk stops at its first region, as at the top of the
+            // loop; not while the last stop's frontier is ahead, whose cells
+            // this span's comparison takes up)
+            let may_stop = frontier.is_none();
+            let span_stop = || may_stop && stop();
+            let (traces, stop_, cost) = record_span(
+                &mut s,
+                grain,
+                cfg.flat,
+                |b| {
+                    if !cfg.early_cutoff {
+                        return None;
+                    }
+                    entries
+                        .get(b)
+                        .and_then(|ks| ks.range(k + 1..).next().map(|e| e.0))
+                },
+                &span_stop,
+            );
             stats.executed_cost += cost;
             stats.run_ns += now() - t;
+            if matches!(stop_, Stop::Stopped) {
+                stats.given_up_cost += cost;
+                stopped_at = Some(k);
+                break;
+            }
             if cfg.clock.is_some() {
                 stats
                     .spans
                     .push((self.seq.range(..k).count(), cost, now() - t));
             }
             let t = now();
-            let j = match stop {
+            let j = match stop_ {
                 Stop::Synced(j) => Some(j),
                 Stop::Halted => None,
+                Stop::Stopped => unreachable!("a span given up is not spliced"),
             };
             let old_span: Vec<&Trace<M>> = match j {
                 Some(j) => self.seq.range(k..j).map(|(_, t)| t).collect(),

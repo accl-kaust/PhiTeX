@@ -867,6 +867,22 @@ fn serve_observed(
     between: &mut Between,
     observe: &mut dyn FnMut(events::Progress),
 ) -> (Vec<String>, Vec<u8>, i32) {
+    serve_watched(s, history, converge, between, observe, &mut Vec::new)
+}
+
+/// [`serve_observed`] for a watch: before each pass that settles the
+/// job's own files, `edited` names the files saved since (`ch05.tex`);
+/// if any, the build is superseded and the pass is the first of the
+/// rebuild for them (with the job's files as the last pass left them),
+/// so a save is taken up at the next pass, not after the job settled.
+fn serve_watched(
+    s: &mut session::Session,
+    history: Option<i32>,
+    converge: bool,
+    between: &mut Between,
+    observe: &mut dyn FnMut(events::Progress),
+    edited: &mut dyn FnMut() -> Vec<String>,
+) -> (Vec<String>, Vec<u8>, i32) {
     let mut reports = Vec::new();
     let mut h = history.unwrap_or(0);
     observe(events::Progress::PassStart(1));
@@ -924,9 +940,34 @@ fn serve_observed(
         if !converge || r.is_none() || passes == PASSES {
             return (reports, term, h);
         }
-        passes += 1;
-        observe(events::Progress::PassStart(passes));
-        r = s.rebuild().map(|r| ("converged a pass", r));
+        // (the pass's PDF is complete: shown while the next settles)
+        observe(events::Progress::Settling(passes));
+        // (what the tools wrote is the job's own, not a save)
+        let tooled: Vec<std::path::PathBuf> = std::mem::take(&mut between.bib.written)
+            .into_iter()
+            .chain(std::mem::take(&mut between.idx.written))
+            .map(|(p, _)| p)
+            .collect();
+        let plain = |p: &std::path::Path| p.strip_prefix(".").unwrap_or(p).to_path_buf();
+        let saved: Vec<String> = edited()
+            .into_iter()
+            .filter(|s| {
+                !tooled
+                    .iter()
+                    .any(|t| plain(t) == plain(std::path::Path::new(s)))
+            })
+            .collect();
+        let what = if saved.is_empty() {
+            passes += 1;
+            observe(events::Progress::PassStart(passes));
+            "converged a pass"
+        } else {
+            observe(events::Progress::Superseded(&saved));
+            passes = 1;
+            observe(events::Progress::PassStart(1));
+            "rebuilt"
+        };
+        r = s.rebuild().map(|r| (what, r));
     }
 }
 

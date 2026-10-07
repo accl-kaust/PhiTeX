@@ -1387,11 +1387,18 @@ fn watch(opts: &Options, target: &Target, st: Settings) -> ! {
         ren.start_rebuild();
         viewer.building();
         let t = Instant::now();
-        let (reports, term, h) =
-            crate::serve_observed(&mut sess, Some(history), true, &mut between, &mut |p| {
+        let mut edited = saved_since(&sess, now);
+        let (reports, term, h) = crate::serve_watched(
+            &mut sess,
+            Some(history),
+            true,
+            &mut between,
+            &mut |p| {
                 ren.progress(&p);
                 viewer.progress(&p);
-            });
+            },
+            &mut edited,
+        );
         BUSY.store(false, std::sync::atomic::Ordering::Relaxed);
         history = h;
         let rebuild = Some(Rebuild { changed });
@@ -1404,6 +1411,43 @@ fn watch(opts: &Options, target: &Target, st: Settings) -> ! {
             term::exit(i32::from(history > 1));
         }
     }
+}
+
+/// What a watch asks between the passes of a rebuild of `sess` (inputs
+/// with their stamps `now`, as it began): the files saved since, not the
+/// job's own (a save while the job's own files settle supersedes the
+/// passes left), each named once a save.
+fn saved_since(
+    sess: &crate::session::Session,
+    now: Vec<(PathBuf, Option<SystemTime>)>,
+) -> impl FnMut() -> Vec<String> + use<> {
+    let outputs: Vec<PathBuf> = sess
+        .outputs()
+        .iter()
+        .map(|(n, _)| crate::native::path(n))
+        .collect();
+    let mut seen: Vec<(PathBuf, Option<SystemTime>)> = now
+        .into_iter()
+        .filter(|(p, _)| !outputs.iter().any(|o| same_file(o, p)))
+        .collect();
+    move || {
+        let mut saved = Vec::new();
+        for (p, time) in &mut seen {
+            let t = std::fs::metadata(&*p).and_then(|m| m.modified()).ok();
+            if t != *time {
+                *time = t;
+                let p = p.display().to_string();
+                saved.push(p.strip_prefix("./").map_or(p.clone(), str::to_owned));
+            }
+        }
+        saved
+    }
+}
+
+/// Whether `a` and `b` name the same file (`./x.aux` and `x.aux`).
+fn same_file(a: &Path, b: &Path) -> bool {
+    let strip = |p: &Path| p.strip_prefix(".").unwrap_or(p).to_path_buf();
+    strip(a) == strip(b)
 }
 
 /// Render the end of a machine-mode build (as [`finish`] does a

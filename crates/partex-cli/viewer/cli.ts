@@ -126,6 +126,9 @@ const viewer = new Viewer(pagesEl, scroller, host);
 let current = 0;
 let hashes: string[] = [];
 let building = false;
+// (what the build running is doing beyond typesetting: a newer save
+// superseded it, or its first pass is shown while the job settles)
+let doing = "";
 let connected = false;
 
 async function draw(k: number): Promise<void> {
@@ -157,15 +160,15 @@ function status(): void {
     ? "not connected to partex watch (retrying)"
     : building
       ? n
-        ? `building… (page ${current + 1} of ${n} so far)`
-        : "building…"
+        ? `${doing || "building"}… (page ${current + 1} of ${n} so far)`
+        : `${doing || "building"}…`
       : n
         ? `page ${current + 1} of ${n}`
         : "no pages yet";
   document.body.classList.toggle("stale", building || !connected);
 }
 
-sock.onEvent = (e: { event: string; on?: boolean; file?: string; lo?: number; hi?: number; at?: number; k?: number; hash?: string; pages?: number }) => {
+sock.onEvent = (e: { event: string; on?: boolean; settling?: boolean; pass?: number; file?: string; lo?: number; hi?: number; at?: number; k?: number; hash?: string; pages?: number }) => {
   if (e.event === "page") {
     // (a page shipped while the build runs: shown before the build is in,
     // the PDF's page replacing it when it settles)
@@ -180,8 +183,14 @@ sock.onEvent = (e: { event: string; on?: boolean; file?: string; lo?: number; hi
     // overlay are to come; logged for now)
     console.log("partex", e);
   } else if (e.event === "settled") {
-    building = false;
+    // (a pass shown while the job's own files settle: still building)
+    building = !!e.settling;
+    doing = e.settling ? `settling (pass ${(e.pass ?? 1) + 1})` : "";
     void layout();
+  } else if (e.event === "superseded") {
+    building = true;
+    doing = "superseded by a newer save: rebuilding";
+    status();
   } else if (e.event === "switched") {
     // (the build's glyph origins changed: asked again)
     glyphCache = new Map();
@@ -189,6 +198,7 @@ sock.onEvent = (e: { event: string; on?: boolean; file?: string; lo?: number; hi
     void show(e.file!, e.lo!, e.hi!, e.at!);
   } else if (e.event === "preparing") {
     building = !!e.on;
+    doing = "";
     status();
   }
 };

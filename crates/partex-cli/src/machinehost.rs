@@ -34,8 +34,11 @@ type Files = BTreeMap<Vec<u8>, Arc<[u8]>>;
 /// Files not found, by cell key: the name and kind looked for.
 type Missed = BTreeMap<Vec<u8>, (Vec<u8>, FileKind)>;
 /// Where the lines of the files served begin, by name (with the contents
-/// they were found in).
-type Lines = BTreeMap<Vec<u8>, partex_core::machine::FileLines>;
+/// they were found in): the last two contents of each, as a rebuild asks
+/// for the lines of the old and the new contents in turn (an edit that
+/// moved every later line compares each, which would otherwise find the
+/// lines of the whole file again for each line).
+type Lines = BTreeMap<Vec<u8>, Vec<partex_core::machine::FileLines>>;
 
 #[derive(Clone)]
 pub struct MachineHost {
@@ -674,13 +677,13 @@ impl CellHost for MachineHost {
             .lines
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some((d, starts)) = lines.get(path)
-            && Arc::ptr_eq(d, &data)
-        {
+        let kept = lines.entry(path.to_vec()).or_default();
+        if let Some((_, starts)) = kept.iter().find(|(d, _)| Arc::ptr_eq(d, &data)) {
             return Some((data, starts.clone()));
         }
         let starts = partex_core::machine::line_starts(&data);
-        lines.insert(path.to_vec(), (data.clone(), starts.clone()));
+        kept.insert(0, (data.clone(), starts.clone()));
+        kept.truncate(2);
         Some((data, starts))
     }
 
@@ -2873,19 +2876,23 @@ impl Watch {
         self.last_changes = self.describe(&edits);
         let changes = self.take(found);
         observe(crate::events::Progress::PassStart(1));
-        let first = self.apply_to_the_end(changes);
+        let (first, _) = self.apply_to_the_end(changes, observe);
         Some(self.converge(first, between, observe))
     }
 
     /// [`Watch::apply`], stopped for each newer edit that arrives while it
     /// runs and gone on with it, until one runs to its end
-    /// (`PARTEX_WATCH_CANCEL=0`: the first runs to its end).
+    /// (`PARTEX_WATCH_CANCEL=0`: the first runs to its end). Whether a
+    /// newer edit superseded it (told to `observe`; the pass is then the
+    /// first of a new rebuild, [`Watch::last_changes`] its edits).
     fn apply_to_the_end(
         &mut self,
         mut changes: Vec<(Vec<u8>, Arc<[u8]>)>,
-    ) -> (String, crate::session::Report) {
+        observe: &mut dyn FnMut(crate::events::Progress),
+    ) -> ((String, crate::session::Report), bool) {
         let stoppable = !std::env::var("PARTEX_WATCH_CANCEL").is_ok_and(|v| v == "0");
         let mut lines = Vec::new();
+        let mut superseded = false;
         loop {
             let (line, report, done) = self.apply_or_stop(&changes, stoppable);
             if !done && std::env::var_os("PARTEX_WATCH_DEBUG").is_some() {
@@ -2893,13 +2900,38 @@ impl Watch {
             }
             lines.push(line);
             if done {
-                return (lines.join("\n"), report);
+                return ((lines.join("\n"), report), superseded);
             }
             // (what changed since: nothing, if only a time did; the rebuild
             // then goes on from where it stopped)
             let found = self.changes();
+            self.supersede(&found, observe);
+            superseded |= found.iter().any(|f| !f.own);
             changes = self.take(found);
         }
+    }
+
+    /// If `found` has an edit (not only the job's own files), the build
+    /// under way is superseded: its edits become the rebuild's, and
+    /// `observe` is told, then that pass 1 begins again.
+    fn supersede(&mut self, found: &[Found], observe: &mut dyn FnMut(crate::events::Progress)) {
+        let edits: Vec<(Vec<u8>, Arc<[u8]>)> = found
+            .iter()
+            .filter(|f| !f.own)
+            .map(|f| (f.key.clone(), f.now.clone()))
+            .collect();
+        if edits.is_empty() {
+            return;
+        }
+        self.last_changes = self.describe(&edits);
+        if std::env::var_os("PARTEX_WATCH_DEBUG").is_some() {
+            eprintln!(
+                "phitex: machine: superseded by {}",
+                self.last_changes.join(", ")
+            );
+        }
+        observe(crate::events::Progress::Superseded(&self.last_changes));
+        observe(crate::events::Progress::PassStart(1));
     }
 
     /// The files not found that a rebuild's starting state does not serve
@@ -3103,17 +3135,54 @@ impl Watch {
                 .unwrap_or(50),
         );
         let looked = std::cell::Cell::new(Instant::now());
+        // (the looks, and when one found a newer edit)
+        let looks = std::cell::Cell::new(0u32);
+        let found = std::cell::Cell::new(None);
         let stop = || {
             if !stoppable || looked.get().elapsed() < every {
                 return false;
             }
             looked.set(Instant::now());
-            watched
+            looks.set(looks.get() + 1);
+            let edited = watched
                 .iter()
-                .any(|(p, t)| std::fs::metadata(p).and_then(|m| m.modified()).ok() != *t)
+                .any(|(p, t)| std::fs::metadata(p).and_then(|m| m.modified()).ok() != *t);
+            if edited {
+                found.set(Some(t.elapsed()));
+            }
+            edited
         };
+        let before = t.elapsed();
         let done = self.b.rebuild_or_stop(new, &cells, &self.cfg, &stop);
         let elapsed = t.elapsed();
+        if let Some(at) = found.get()
+            && std::env::var_os("PARTEX_WATCH_DEBUG").is_some()
+        {
+            eprintln!(
+                "phitex: machine: a newer edit found at {:.1} ms (look {}), the rebuild stopped at {:.1} ms{}",
+                at.as_secs_f64() * 1e3,
+                looks.get(),
+                elapsed.as_secs_f64() * 1e3,
+                if self.b.stats.given_up_cost > 0 {
+                    format!(
+                        ", a span given up after {} commands",
+                        self.b.stats.given_up_cost
+                    )
+                } else {
+                    String::new()
+                }
+            );
+            let st = &self.b.stats;
+            let ms = |ns: u64| std::time::Duration::from_nanos(ns).as_secs_f64() * 1e3;
+            eprintln!(
+                "phitex: machine: (run {:.1} ms, replay {:.1} ms, start {:.1} ms, splice {:.1} ms; before the rebuild {:.1} ms)",
+                ms(st.run_ns),
+                ms(st.replay_ns),
+                ms(st.other_parts_ns[0]),
+                ms(st.other_parts_ns[1]),
+                before.as_secs_f64() * 1e3
+            );
+        }
         if self.cfg.audit {
             self.audits += 1;
             dump_audit(&self.b, self.audits);
@@ -3198,6 +3267,7 @@ impl Watch {
                 observe(crate::events::Progress::Tool(t));
             }
             reports.extend(tools);
+            self.own_tools(between);
             if passes == PASSES {
                 // (the job's own files it read that this pass changed are
                 // left for the next edit; an edit made meanwhile is not
@@ -3230,6 +3300,11 @@ impl Watch {
                 self.record_quick(&out);
                 return out;
             }
+            // (the pass's PDF is complete: shown while the next settles)
+            observe(crate::events::Progress::Settling(passes));
+            // (a save since: this pass is the first of its rebuild, with the
+            // job's own files as this one left them)
+            let edited = found.iter().any(|f| !f.own);
             // (why the next pass runs: the job's own files this one changed)
             let mut again: Vec<String> = found
                 .iter()
@@ -3240,13 +3315,39 @@ impl Watch {
                 .collect();
             again.sort();
             again.dedup();
+            if edited {
+                self.supersede(&found, observe);
+                passes = 1;
+            } else {
+                passes += 1;
+                observe(crate::events::Progress::Again(&again));
+                observe(crate::events::Progress::PassStart(passes));
+            }
             let changes = self.take(found);
-            passes += 1;
-            observe(crate::events::Progress::Again(&again));
-            observe(crate::events::Progress::PassStart(passes));
-            let (line, r) = self.apply_to_the_end(changes);
+            let ((line, r), superseded) = self.apply_to_the_end(changes, observe);
+            if superseded {
+                passes = 1;
+            }
             report = r;
-            reports.push(line.replace("rebuilt", "converged a pass"));
+            reports.push(if edited || superseded {
+                line
+            } else {
+                line.replace("rebuilt", "converged a pass")
+            });
+        }
+    }
+
+    /// What the tools (BibTeX, makeindex) wrote since, taken from
+    /// `between`: the job's own files, as what the link wrote, not edits.
+    fn own_tools(&mut self, between: &mut crate::Between) {
+        let tooled = std::mem::take(&mut between.bib.written)
+            .into_iter()
+            .chain(std::mem::take(&mut between.idx.written));
+        for (p, h) in tooled {
+            let time = std::fs::metadata(&p).and_then(|m| m.modified()).ok();
+            if let Ok(real) = std::fs::canonicalize(&p) {
+                self.own.insert(real, (h, time));
+            }
         }
     }
 

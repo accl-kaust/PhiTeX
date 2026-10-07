@@ -258,6 +258,9 @@ the graph of chapter 3, not from a pipeline split.
     when they are not as many as before; each new error on a line of
     its own, as TeX's `-file-line-error` puts it (`ch05.tex:7:
     Undefined control sequence \foo`). `w` shows them all, rustc-style.
+    A save while a rebuild runs supersedes it (4.1, "A save during a
+    rebuild"): `18:52:01  superseded by ch05.tex:31`, and the one line
+    when the newest save's build is in.
     Below the log a status line, `── watching paper.tex → paper.pdf ·
     ? help`, is drawn in place (`-v`: the last builds' times as a
     sparkline). The cursor waits at the start of the status line, not
@@ -2013,6 +2016,41 @@ memory is the watch's:
 - The store's save writes each blob to its pack as the saver makes it,
   and the blobs' references in frames: it holds the build, its copy and
   a batch, not every blob as encoded, as kept and as packed at once.
+- *A save during a rebuild* (2026-10-07) supersedes it. The rebuild asks
+  whether an input it watches changed on disk (by modification time, at
+  most every `PARTEX_WATCH_POLL_MS`, 50 ms) between re-executed spans and,
+  now, inside a span after each region it cuts (`record_span`'s `stop`):
+  a span is the whole cascade from a dirty region to where the state
+  meets an old region again, which on the course is a chapter's page
+  numbering (35 s). A stop inside a span gives that span up (what it ran
+  is dropped: the newer edit may change it) and stops the walk at the old
+  region it began at, the frontier, exactly as a stop between spans does;
+  the spans before it are kept, and the next rebuild goes on from there
+  with the newer edit too. Not while the last stop's frontier is still
+  ahead (its cells are compared where the walk reaches it). The watch
+  then reports the rebuild `superseded` (the terminal's `superseded by
+  ch05.tex:31`, the viewer's `superseded` event) and starts pass 1 again.
+  Each pass writes its outputs (the PDF renamed into place: always a
+  complete PDF of some state) and is shown (`settling`); the passes that
+  settle the job's own files (`.aux`, `.toc`, BibTeX, makeindex) are
+  preempted the same way, a save between them making the next pass the
+  first of a new rebuild (the pass bound counts from it, so the result is
+  still the fixpoint, a cold build's). The checkpoint sessions
+  (`--no-machine`) take a save at the next pass only: a pass stopped
+  halfway would have to put the session back as it was before it.
+  Measured (2026-10-07, fastdev builds, this machine, from the save to the
+  stop that starts the new rebuild): a paragraph added at the start of a
+  280-page one-file document (e2e's `preempt.tex`), saved again 0.6 s
+  later, 3.07 s on 71a348e, 51 ms now. Most of those 3 s were spent before
+  the first span: the changed lines' cells compared old against new, each
+  finding the whole file's line starts again, as the host's line cache
+  held one contents per file and the rebuild asks for the old and the new
+  in turn (now it keeps the last two: the same edit's rebuild is 2.6 s
+  shorter). On the course, whose chapters are files of a few hundred
+  lines, a section added in ch05 or ch15 and a word saved 5, 10 or 20 s
+  later: the spans are short, and the stop came 0.22–0.76 s after the save
+  before, 0.23–0.36 s now; the settled PDF, `.aux`, `.toc` and `.out` are
+  a cold build's byte for byte.
 
 ### 4.2 The work, in order
 
@@ -2994,6 +3032,14 @@ code, message, notes, help, suggestions, file, line, col, the excerpt and
 the span the carets mark, the macro context, the files it was included
 from, a box warning's report), the structured diagnostics the terminal
 shows, not its text; the `diagnostics` op gives the last build's again.
+
+A save while a build runs supersedes it (4.1, "A save during a rebuild"):
+`{"event":"superseded"}`, the progress's phase `superseded`, then the new
+pass's `progress` and `page` events. A pass after which the job's own
+files still change is shown as a build is, with `{"event":"settled",
+"settling":true,"pass":N}`: the browser lays the pages out again and stays
+`building` (its status says `settling (pass N+1)…`) until the plain
+`settled`.
 
 **Source and page.** A double-click finds the glyph nearest it (the
 extension's `sync.ts`, `nearest`) and asks `source` with its file and

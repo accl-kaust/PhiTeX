@@ -166,10 +166,17 @@ impl Files for KpseFiles {
     }
 }
 
-/// Write the files a run produced; an error line if one can't be.
-fn write_outputs(out: &partex_makeindex::Outcome, files: &KpseFiles) -> Option<String> {
+/// Write the files a run produced, each into `written`; an error line if
+/// one can't be.
+fn write_outputs(
+    out: &partex_makeindex::Outcome,
+    files: &KpseFiles,
+    written: &mut Vec<(std::path::PathBuf, u128)>,
+) -> Option<String> {
     for f in [&out.ind, &out.ilg].into_iter().flatten() {
-        if let Err(e) = std::fs::write(crate::native::path(&files.at(&f.name)), &f.contents) {
+        let p = crate::native::path(&files.at(&f.name));
+        written.push((p.clone(), crate::machinehost::quick::hash(&f.contents)));
+        if let Err(e) = std::fs::write(p, &f.contents) {
             return Some(format!(
                 "makeindex: can't write {}: {e}",
                 String::from_utf8_lossy(&f.name)
@@ -185,6 +192,9 @@ pub struct Runs {
     files: Option<KpseFiles>,
     /// For each `.idx` file, the lookups its last run made.
     last: HashMap<Vec<u8>, Vec<Lookup>>,
+    /// The files the runs wrote, with their bytes' hashes, until taken (a
+    /// watch: the job's own files, not edits).
+    pub written: Vec<(std::path::PathBuf, u128)>,
 }
 
 /// After a pass of a converging build (its outputs written): run
@@ -194,6 +204,7 @@ pub struct Runs {
 /// run.
 pub fn after_pass(runs: &mut Runs, idxes: &[(Vec<u8>, Arc<[u8]>)]) -> Vec<String> {
     let mut reports = Vec::new();
+    let mut written = Vec::new();
     let served: HashMap<Vec<u8>, Arc<[u8]>> = idxes.iter().cloned().collect();
     for (name, _) in idxes {
         let files = runs.files.get_or_insert_with(|| KpseFiles {
@@ -220,7 +231,7 @@ pub fn after_pass(runs: &mut Runs, idxes: &[(Vec<u8>, Arc<[u8]>)]) -> Vec<String
         let out = partex_makeindex::run(&[base], &version(), files);
         runs.last
             .insert(name.clone(), std::mem::take(&mut files.read));
-        reports.extend(write_outputs(&out, files));
+        reports.extend(write_outputs(&out, files, &mut written));
         let last_line = crate::native::tool_summary(&out.stderr, out.status != 0);
         reports.push(format!(
             "phitex: makeindex {} in {:.1} ms: {}",
@@ -229,6 +240,7 @@ pub fn after_pass(runs: &mut Runs, idxes: &[(Vec<u8>, Arc<[u8]>)]) -> Vec<String
             last_line
         ));
     }
+    runs.written.extend(written);
     reports
 }
 
@@ -252,7 +264,7 @@ pub fn main() -> ! {
         served: HashMap::new(),
     };
     let out = partex_makeindex::run(&args, &version(), &mut files);
-    let err = write_outputs(&out, &files);
+    let err = write_outputs(&out, &files, &mut Vec::new());
     let _ = std::io::stdout().write_all(&out.stdout);
     let _ = std::io::stdout().flush();
     let _ = std::io::stderr().write_all(&out.stderr);
