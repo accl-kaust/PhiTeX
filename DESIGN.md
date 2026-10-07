@@ -2875,10 +2875,56 @@ y, file, start, end, synthesized],…]}`, empty when the build records
 none), and the CLI's `source` (a double-click's source: the editor opens
 there). Events, unasked:
 `{"event":"preparing","on":…}` when a rebuild begins and ends,
-`{"event":"settled"}` when a build is in. The browser then asks for the
+`{"event":"settled"}` when a build is in, `{"event":"page",…}` while it
+runs, `progress` and `diagnostics` (below). The browser then asks for the
 hashes, draws the page in view first if it changed, then the other pages
 it shows whose hash changed; the others keep their drawing, and the
 scroll stays where it is.
+
+**Pages while the build runs** (2026-10-07). A cold build of a long
+document (a 323-page course book: 50 s) showed nothing until its PDF was
+in; now each page appears as it is shipped. The PDF cannot be read before
+it ends: its fonts are subset and written at the job's end, its page tree
+and cross-reference table last, and a machine-mode build links the whole
+file only then. Its parts that draw a page exist at shipout, though: the
+ship keeps them for display lists (4.6), the stream's bytes as the PDF
+holds them and what its resources name (`Shipped`). A host that asks
+(`Host::wants_streams`: the watch's, with a viewer) gets each stream as it
+ends (`Host::stream_shipped`: a page once its page object is written, as
+page `\pdftotalpages − 1`; a form at once), and draws it from a PDF of its
+own (`partex_core::pagepdf::page_pdf`: the stream, its forms, its JPEG
+images, its fonts with the whole Type 1 programs and encodings their map
+entries name) through the same `phitex-draw` that draws the finished PDF.
+No second renderer, nothing the build reads or writes changes (the record
+is the one display lists make, kept on the side, never in a snapshot).
+The engine only queues the stream; a viewer thread hashes it (the reader's
+page hash, of the page's own PDF) and, if it differs from the last build's
+page, pushes `{"event":"page","k":…,"hash":…,"pages":…}` with a
+provisional hash (never a built page's), at once in a cold build, after
+250 ms in a rebuild (one that is in by then shows only its PDF's pages: an
+edit's page is not drawn twice). The browser adds the page (`Viewer.
+shipped`, slots added, none removed: a second pass ships its pages again
+over the first's, without a flicker) and asks for it when it is in view;
+the build's PDF, when it is in, replaces the pages by its hashes. Drawn
+from the shipped stream, a page has the PDF's glyphs (the same outlines
+from the whole programs), places and paths; it lacks its links (the
+annotations are written apart), its PNG and PDF images, `\pdfpageresources`'
+graphics states, and the `/ToUnicode` text of symbol fonts (selection
+text), which the PDF's page brings. `XeTeX` (xdvipdfmx after the job)
+shows its pages when the build is in, as before. A 59-page `article`
+(debug build, 3 passes, 36 s): pages arrive one by one from 13 s on, the
+last of pass 1 10 s before the build is in.
+
+**Status** (for an in-page status and error overlay to come). While a
+build runs, `{"event":"progress","pass":N,"pages":K,"phase":…,"ms":T}` (its
+pass, the pages it shipped in it, `typesetting`, `finishing`, `loading`,
+`linking`, …, the time since it began), when it changed, ten a second at
+most; when it is in, `{"event":"diagnostics","items":[…]}` before
+`settled`, its errors and warnings as `snippet::json` gives them (severity,
+code, message, notes, help, suggestions, file, line, col, the excerpt and
+the span the carets mark, the macro context, the files it was included
+from, a box warning's report), the structured diagnostics the terminal
+shows, not its text; the `diagnostics` op gives the last build's again.
 
 **Source and page.** A double-click finds the glyph nearest it (the
 extension's `sync.ts`, `nearest`) and asks `source` with its file and

@@ -2359,7 +2359,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             return self.pdftex_fail(None, m.as_bytes());
         }
         // (display lists: the stream as written, and its box)
-        if self.display_lists_on() {
+        if self.display_lists_on() || self.host.wants_streams() {
             let (w, h) = if shipping_page {
                 (self.pdf.ship.page_width, self.pdf.ship.page_height)
             } else {

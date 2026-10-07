@@ -246,7 +246,7 @@ impl Shipped {
     }
 
     /// The box and the turn the PDF gives this stream's page (or form).
-    fn media(&self) -> ([f64; 4], i32) {
+    pub(crate) fn media(&self) -> ([f64; 4], i32) {
         let given = (!self.attr.is_empty())
             .then(|| after(&self.attr, b"/MediaBox"))
             .flatten();
@@ -796,6 +796,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
 
     /// A content stream begins (a page's or a form's).
     pub(crate) fn display_stream_begin(&mut self) {
+        self.tap = None;
         if let Some(d) = self.dl.as_deref_mut() {
             d.spans.clear();
             d.page = None;
@@ -820,7 +821,8 @@ impl<H: Host, T: Tracker> Tex<H, T> {
     /// and its height plus depth `h`). Its record is made: a form's kept
     /// now, a page's once its page object is written.
     pub(crate) fn display_stream_end(&mut self, form: i32, w: Scaled, h: Scaled) {
-        if self.dl.is_none() {
+        let tap = self.host.wants_streams();
+        if self.dl.is_none() && !tap {
             return;
         }
         let Some(bytes) = self.pdf.out.stream_bytes() else {
@@ -878,18 +880,32 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         bbox.extend_from_slice(&bp_text(w, dd));
         bbox.push(b' ');
         bbox.extend_from_slice(&bp_text(h, dd));
-        let Some(d) = self.dl.as_deref_mut() else {
-            return;
-        };
         let rec = Shipped {
             form,
             bytes: bytes.into(),
-            literals: core::mem::take(&mut d.spans).into(),
+            literals: self
+                .dl
+                .as_deref_mut()
+                .map(|d| core::mem::take(&mut d.spans))
+                .unwrap_or_default()
+                .into(),
             fonts: fonts.into(),
             forms: forms.into(),
             images: images.into(),
             bbox,
             attr: Vec::new(),
+        };
+        // (a viewer's: a form at once, a page with its attributes)
+        if tap {
+            if form == 0 {
+                self.tap = Some(alloc::boxed::Box::new(rec.clone()));
+            } else {
+                let s = crate::pagepdf::ShippedStream(Arc::new(rec.clone()));
+                self.host.stream_shipped(None, s);
+            }
+        }
+        let Some(d) = self.dl.as_deref_mut() else {
+            return;
         };
         if form == 0 {
             d.page = Some(rec);
@@ -901,6 +917,12 @@ impl<H: Host, T: Tracker> Tex<H, T> {
     /// The page object is written, with `\pdfpageattr`'s text `attr`: the
     /// page's record is kept.
     pub(crate) fn display_page_object(&mut self, attr: Option<&[u8]>) {
+        if let Some(mut rec) = self.tap.take() {
+            rec.attr = attr.unwrap_or_default().to_vec();
+            let page = usize::try_from(self.pdf.ship.total_pages - 1).unwrap_or(0);
+            let s = crate::pagepdf::ShippedStream(Arc::new(*rec));
+            self.host.stream_shipped(Some(page), s);
+        }
         let Some(mut rec) = self.dl.as_deref_mut().and_then(|d| d.page.take()) else {
             return;
         };

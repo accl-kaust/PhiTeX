@@ -10,6 +10,19 @@
 //!   each page's hash (`phitex_draw`, its content and size), and a page's
 //!   draw list (`Draws2`, `"v":2`) when the browser asks for it, kept by
 //!   hash. A build reads nothing of this: the PDF is written as before.
+//! - **Pages while the build runs.** Each page the engine ships comes here
+//!   as it is shipped (`Host::stream_shipped`, [`shipped`]), its stream
+//!   and resources, and is drawn from a PDF of its own
+//!   (`partex_core::pagepdf`) by the same reader: a page that differs from
+//!   the last build's is pushed (`{"event":"page","k":…,"hash":…,
+//!   "pages":…}`) with a provisional hash, so the browser shows it while
+//!   later pages are typeset; the build's PDF, when it is in, replaces it.
+//! - **Status.** While a build runs, `{"event":"progress","pass":N,
+//!   "pages":K,"phase":…,"ms":T}` (the pass, the pages it shipped so far,
+//!   what it does, the time since it began), at most ten a second; when it
+//!   is in, `{"event":"diagnostics","items":[…]}` (its errors and
+//!   warnings, `snippet::json`'s), before `settled`, and the `diagnostics`
+//!   op gives the last build's again.
 //! - **Protocol.** The Overleaf extension's core requests (its
 //!   `session.ts` `CoreReq` and `CoreRes`) as JSON over the WebSocket: a
 //!   request `{"id":N,"op":…}`, its reply `{"id":N,"ok":…,"json":…,
@@ -34,8 +47,10 @@ use std::io::BufReader;
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
-use std::time::Instant;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError, mpsc};
+use std::time::{Duration, Instant};
+
+use partex_core::pagepdf::ShippedStream;
 
 use crate::json::{self, Value};
 use crate::origins::json_str;
@@ -68,6 +83,20 @@ pub struct Built {
     pub history: i32,
     /// How long the build took.
     pub ms: f64,
+    /// Its errors and warnings, as JSON (`snippet::json`).
+    pub diagnostics: Vec<String>,
+}
+
+/// What the build running is doing, for the `progress` event.
+#[derive(Clone, Default, PartialEq)]
+struct Status {
+    /// The pass (from 1; 0 before the first begins).
+    pass: usize,
+    /// What it does (`typesetting`, `loading`, `linking`, …).
+    phase: &'static str,
+    /// The engine's pages shipped when the pass began (`progress::BOARD`'s
+    /// count is the process's).
+    pages_base: u64,
 }
 
 /// A build's glyph origins and where the glyphs are: what `origins`
@@ -173,6 +202,57 @@ fn line_bytes(text: &[u8], line: usize, col: usize) -> Option<(usize, usize, usi
     Some((lo, hi, at.min(hi)))
 }
 
+/// Whether pages are wanted as they are shipped (a viewer runs).
+static TAPPING: AtomicBool = AtomicBool::new(false);
+/// The build the pages shipped belong to (one more at each build's start
+/// and end: a page of a build that ended is dropped).
+static SERIAL: AtomicU64 = AtomicU64::new(0);
+/// Where the pages shipped go: the viewer's thread that hashes them.
+static TAP: Mutex<Option<mpsc::Sender<Tapped>>> = Mutex::new(None);
+
+/// A stream shipped, of build `serial`: page `page`, or a form.
+struct Tapped {
+    serial: u64,
+    page: Option<usize>,
+    stream: ShippedStream,
+}
+
+/// Whether the hosts hand the viewer each stream as it is shipped
+/// (`Host::wants_streams`).
+pub fn tapping() -> bool {
+    TAPPING.load(Ordering::Relaxed)
+}
+
+/// A stream shipped by the build running (`Host::stream_shipped`): page
+/// `page` (from 0), or a form. Only queued: the engine goes on at once.
+pub fn shipped(page: Option<usize>, stream: ShippedStream) {
+    if let Some(tx) = lock(&TAP).as_ref() {
+        let serial = SERIAL.load(Ordering::Relaxed);
+        let _ = tx.send(Tapped {
+            serial,
+            page,
+            stream,
+        });
+    }
+}
+
+/// How long a rebuild runs before the pages it ships are shown: one that
+/// is in by then shows only its PDF's (a cold build's are shown at once).
+const LIVE_AFTER: Duration = Duration::from_millis(250);
+
+/// A page shipped by the build running, not yet in a PDF.
+struct Live {
+    /// Its hash as the browsers see it: the PDF reader's of its own PDF,
+    /// marked as provisional (never a built page's).
+    hash: u64,
+    page: ShippedStream,
+    /// The forms it draws (theirs too), as they were when it was shipped.
+    forms: Arc<HashMap<i32, ShippedStream>>,
+}
+
+/// A file by its name and kind.
+type FileKey = (Vec<u8>, partex_core::FileKind);
+
 /// The pages of the last build.
 #[derive(Default)]
 struct Pages {
@@ -187,6 +267,48 @@ struct Pages {
     draws: HashMap<u64, Arc<str>>,
     /// `XeTeX`: each page's glyph runs (its glyphs are drawn from them).
     runs: Option<Arc<Vec<Vec<partex_xdvipdfmx::api::GlyphRun>>>>,
+    /// The pages the build running shipped that differ from the last
+    /// build's, by page; shown once `live_open`.
+    live: Vec<Option<Live>>,
+    live_open: bool,
+    /// When the build running began.
+    started: Option<Instant>,
+}
+
+impl Pages {
+    /// Page `k`'s hash as the browsers see it: the build running's, if it
+    /// shipped the page differently and it is shown, else the last
+    /// build's.
+    fn shown(&self, k: usize) -> Option<u64> {
+        self.live_page(k)
+            .map(|l| l.hash)
+            .or_else(|| self.hashes.get(k).copied())
+    }
+
+    /// Page `k` of the build running, if it is shown.
+    fn live_page(&self, k: usize) -> Option<&Live> {
+        self.live_open
+            .then(|| self.live.get(k).and_then(Option::as_ref))
+            .flatten()
+    }
+
+    /// Every page's hash as the browsers see it (pages the build running
+    /// shipped past the last build's end included; 0: none yet).
+    fn shown_all(&self) -> Vec<u64> {
+        let n = if self.live_open {
+            self.hashes.len().max(self.live.len())
+        } else {
+            self.hashes.len()
+        };
+        (0..n).map(|k| self.shown(k).unwrap_or(0)).collect()
+    }
+
+    /// A build begins: nothing of it shown yet.
+    fn begin(&mut self) {
+        self.live.clear();
+        self.live_open = false;
+        self.started = Some(Instant::now());
+    }
 }
 
 /// A browser connected.
@@ -206,6 +328,9 @@ struct Shared {
     clients: Mutex<Vec<Arc<Client>>>,
     /// Parsed font programs, across pages and builds.
     fonts: Mutex<phitex_draw::Fonts>,
+    /// The files pages shipped while the build runs need (their fonts'
+    /// programs and encodings), read once.
+    files: Mutex<HashMap<FileKey, Option<Arc<[u8]>>>>,
     /// `XeTeX`'s glyph runs' fonts, read once.
     faces: Mutex<phitex_draw::xetex::Faces>,
     /// The viewer's text fonts, by file name, read when first asked.
@@ -226,6 +351,10 @@ struct Shared {
     origins: Mutex<Option<Arc<Origins>>>,
     /// When the last build was in, to time the pages sent after it.
     built_at: Mutex<Instant>,
+    /// What the build running is doing, and the last `progress` sent.
+    status: Mutex<(Status, Option<String>)>,
+    /// The last build's diagnostics, a JSON array.
+    diagnostics: Mutex<Arc<str>>,
     sent: AtomicU64,
 }
 
@@ -269,11 +398,15 @@ impl View {
             .unwrap_or(0);
         let listener = TcpListener::bind(("127.0.0.1", port))?;
         let port = listener.local_addr()?.port();
+        let mut pages = Pages::default();
+        // (the first build begins now)
+        pages.begin();
         let shared = Arc::new(Shared {
             token: token(),
-            pages: Mutex::new(Pages::default()),
+            pages: Mutex::new(pages),
             clients: Mutex::new(Vec::new()),
             fonts: Mutex::new(phitex_draw::Fonts::new()),
+            files: Mutex::new(HashMap::new()),
             faces: Mutex::new(phitex_draw::xetex::Faces::new()),
             text_fonts: Mutex::new(BTreeMap::new()),
             host: Mutex::new(host),
@@ -285,6 +418,8 @@ impl View {
             origins: Mutex::new(None),
             built_at: Mutex::new(Instant::now()),
             sent: AtomicU64::new(0),
+            status: Mutex::new((Status::default(), None)),
+            diagnostics: Mutex::new(Arc::from("[]")),
         });
         crate::dpxfiles::keep_glyph_runs();
         let url = format!("http://127.0.0.1:{port}/{}/", shared.token);
@@ -292,6 +427,17 @@ impl View {
             let _ = f.parent().map(std::fs::create_dir_all);
             let _ = std::fs::write(&f, &url);
         }
+        let (tx, rx) = mpsc::channel();
+        let s = shared.clone();
+        std::thread::Builder::new()
+            .name("phitex-view-pages".into())
+            .spawn(move || live_pages(&s, &rx))?;
+        *lock(&TAP) = Some(tx);
+        TAPPING.store(true, Ordering::Relaxed);
+        let s = shared.clone();
+        std::thread::Builder::new()
+            .name("phitex-view-progress".into())
+            .spawn(move || progress_ticks(&s))?;
         let s = shared.clone();
         std::thread::Builder::new()
             .name("phitex-view".into())
@@ -325,8 +471,38 @@ impl View {
         broadcast(&self.shared, "{\"event\":\"switched\"}");
     }
 
+    /// What the build running is doing (`events::Progress`): sent to the
+    /// browsers by the progress thread, at most ten times a second.
+    pub fn progress(&self, p: &crate::events::Progress) {
+        use crate::events::{Phase, Progress};
+        let mut st = lock(&self.shared.status);
+        match p {
+            Progress::PassStart(n) => {
+                st.0.pass = *n;
+                st.0.phase = "typesetting";
+                st.0.pages_base = partex_core::progress::BOARD.snapshot().pages;
+            }
+            Progress::Tool(_) => st.0.phase = "tool",
+            Progress::Phase(ph) => {
+                st.0.phase = match ph {
+                    Phase::Cold => "typesetting",
+                    Phase::Loading => "loading",
+                    Phase::Linking => "linking",
+                    Phase::Writing => "writing",
+                    Phase::Saving => "saving",
+                };
+            }
+            Progress::Again(_) | Progress::Pass(..) => {}
+        }
+    }
+
     /// A rebuild began (`true`) or ended.
     pub fn building(&self, on: bool) {
+        if on {
+            SERIAL.fetch_add(1, Ordering::Relaxed);
+            lock(&self.shared.pages).begin();
+            *lock(&self.shared.status) = (Status::default(), None);
+        }
         self.shared.building.store(on, Ordering::Relaxed);
         broadcast(
             &self.shared,
@@ -338,6 +514,8 @@ impl View {
     /// browsers told (they ask for the pages that changed).
     pub fn built(&self, b: &Built) {
         let t = Instant::now();
+        // (the pages shipped since are this build's, in its PDF)
+        SERIAL.fetch_add(1, Ordering::Relaxed);
         let data: Option<Arc<[u8]>> = b
             .pdf
             .as_ref()
@@ -377,6 +555,9 @@ impl View {
         pages.sums = sums;
         pages.history = b.history;
         pages.ms = b.ms;
+        pages.live.clear();
+        pages.live_open = false;
+        pages.started = None;
         let n = hashes.len();
         pages.hashes = hashes;
         drop(pages);
@@ -389,7 +570,49 @@ impl View {
                 t.elapsed().as_secs_f64() * 1e3
             ));
         }
+        let items: Arc<str> = format!("[{}]", b.diagnostics.join(",")).into();
+        *lock(&self.shared.diagnostics) = items.clone();
+        *lock(&self.shared.status) = (Status::default(), None);
+        broadcast(
+            &self.shared,
+            &format!("{{\"event\":\"diagnostics\",\"items\":{items}}}"),
+        );
         broadcast(&self.shared, "{\"event\":\"settled\"}");
+    }
+}
+
+/// The progress thread: while a build runs, what it is doing pushed to
+/// the browsers when it changed, ten times a second at most.
+fn progress_ticks(s: &Shared) {
+    loop {
+        std::thread::sleep(Duration::from_millis(100));
+        let Some(started) = lock(&s.pages).started else {
+            continue;
+        };
+        let board = partex_core::progress::BOARD.snapshot();
+        let mut st = lock(&s.status);
+        let phase = if board.finishing && st.0.phase == "typesetting" {
+            "finishing"
+        } else if st.0.phase.is_empty() {
+            "typesetting"
+        } else {
+            st.0.phase
+        };
+        let pages = board.pages.saturating_sub(st.0.pages_base);
+        let key = format!("{}:{pages}:{phase}", st.0.pass);
+        if st.1.as_deref() == Some(key.as_str()) {
+            continue;
+        }
+        st.1 = Some(key);
+        let pass = st.0.pass.max(1);
+        drop(st);
+        broadcast(
+            s,
+            &format!(
+                "{{\"event\":\"progress\",\"pass\":{pass},\"pages\":{pages},\"phase\":\"{phase}\",\"ms\":{:.0}}}",
+                started.elapsed().as_secs_f64() * 1e3
+            ),
+        );
     }
 }
 
@@ -537,16 +760,33 @@ fn hashes_json(hs: &[u64]) -> String {
 /// Page `k`'s draw list and hash, drawn now or kept.
 #[allow(clippy::many_single_char_names)]
 fn draws(s: &Shared, k: usize) -> Option<(Arc<str>, u64)> {
-    let (pdf, h, runs) = {
+    let (pdf, h, runs, live) = {
         let p = lock(&s.pages);
-        let h = *p.hashes.get(k)?;
+        let h = p.shown(k)?;
         if let Some(d) = p.draws.get(&h) {
             return Some((d.clone(), h));
         }
-        (p.pdf.clone()?, h, p.runs.clone())
+        match p.live_page(k) {
+            Some(l) => (None, h, None, Some((l.page.clone(), l.forms.clone()))),
+            None => (Some(p.pdf.clone()?), h, p.runs.clone(), None),
+        }
     };
     let t = Instant::now();
-    let doc = phitex_draw::Pdf::open(&pdf)?;
+    // (`at`: the page in the PDF drawn)
+    let (doc, at) = match (&pdf, live) {
+        (Some(pdf), _) => (phitex_draw::Pdf::open(pdf)?, k),
+        (None, Some((page, forms))) => {
+            // (a page of the build running: from a PDF of its own, its
+            // fonts' whole programs read here)
+            let bytes = partex_core::pagepdf::page_pdf(
+                &page,
+                &|n| forms.get(&n).cloned(),
+                &mut |name, kind| read_file(s, name, kind),
+            );
+            (phitex_draw::Pdf::open(&bytes.into())?, 0)
+        }
+        (None, None) => return None,
+    };
     let d: Arc<str> = match &runs {
         // (`XeTeX`: the glyphs from the runs, the fonts read from their files)
         Some(runs) => {
@@ -557,24 +797,161 @@ fn draws(s: &Shared, k: usize) -> Option<(Arc<str>, u64)> {
                     std::fs::read(crate::native::path(f)).ok().map(Into::into)
                 })
             };
-            doc.draw_with(k, &mut lock(&s.fonts), Some(&mut extra))?
+            doc.draw_with(at, &mut lock(&s.fonts), Some(&mut extra))?
         }
-        None => doc.draw(k, &mut lock(&s.fonts))?,
+        None => doc.draw(at, &mut lock(&s.fonts))?,
     }
     .into();
     if s.log {
         let after = lock(&s.built_at).elapsed();
         s.live.note(&format!(
-            "viewer: page {} ({h:016x}) drawn in {:.1} ms, {} KB, sent {:.0} ms after the build",
+            "viewer: page {} ({h:016x}) drawn in {:.1} ms, {} KB, sent {:.0} ms after {}",
             k + 1,
             t.elapsed().as_secs_f64() * 1e3,
             d.len() / 1024,
-            after.as_secs_f64() * 1e3
+            after.as_secs_f64() * 1e3,
+            if pdf.is_some() {
+                "the build"
+            } else {
+                "the last build (shipped, the build running)"
+            }
         ));
     }
     s.sent.fetch_add(1, Ordering::Relaxed);
     lock(&s.pages).draws.insert(h, d.clone());
     Some((d, h))
+}
+
+/// A file a page shipped while the build runs needs (a font's program or
+/// encoding), found as the build finds it, read once.
+fn read_file(s: &Shared, name: &[u8], kind: partex_core::FileKind) -> Option<Arc<[u8]>> {
+    let key = (name.to_vec(), kind);
+    if let Some(f) = lock(&s.files).get(&key) {
+        return f.clone();
+    }
+    let f = partex_core::Host::read_file(&mut *lock(&s.host), name, kind).map(|f| f.contents);
+    lock(&s.files).insert(key, f.clone());
+    f
+}
+
+/// The viewer's thread for the pages shipped while a build runs: each
+/// form kept, each page hashed (the PDF reader's hash of a PDF of its own,
+/// without its fonts' programs, which no page's hash covers), and a page
+/// that differs from the last build's pushed to the browsers, once the
+/// build has run [`LIVE_AFTER`] (a cold build's at once).
+fn live_pages(s: &Shared, rx: &mpsc::Receiver<Tapped>) {
+    let mut forms: HashMap<i32, ShippedStream> = HashMap::new();
+    loop {
+        // (a rebuild's pages wait until it has run long enough)
+        let wait = {
+            let p = lock(&s.pages);
+            match p.started {
+                Some(t) if !p.live_open && p.live.iter().any(Option::is_some) => {
+                    Some(LIVE_AFTER.saturating_sub(t.elapsed()))
+                }
+                _ => None,
+            }
+        };
+        let got = match wait {
+            Some(w) => rx.recv_timeout(w),
+            None => rx.recv().map_err(|_| mpsc::RecvTimeoutError::Disconnected),
+        };
+        let tapped = match got {
+            Ok(t) => Some(t),
+            Err(mpsc::RecvTimeoutError::Timeout) => None,
+            Err(mpsc::RecvTimeoutError::Disconnected) => return,
+        };
+        if let Some(t) = tapped
+            && t.serial == SERIAL.load(Ordering::Relaxed)
+        {
+            match (t.page, t.stream.form()) {
+                (Some(k), _) => live_page(s, &forms, k, t.stream),
+                (None, Some(n)) => {
+                    forms.insert(n, t.stream);
+                }
+                (None, None) => {}
+            }
+        }
+        open_live(s);
+    }
+}
+
+/// Page `k`, shipped by the build running: kept and pushed if it differs
+/// from the last build's.
+#[allow(clippy::many_single_char_names)]
+fn live_page(s: &Shared, forms: &HashMap<i32, ShippedStream>, k: usize, page: ShippedStream) {
+    // (the forms it draws, theirs too, as they are now)
+    let mut mine = HashMap::new();
+    let mut todo: Vec<i32> = page.forms().collect();
+    while let Some(n) = todo.pop() {
+        if mine.contains_key(&n) {
+            continue;
+        }
+        if let Some(f) = forms.get(&n) {
+            todo.extend(f.forms());
+            mine.insert(n, f.clone());
+        }
+    }
+    let bytes = partex_core::pagepdf::page_pdf(&page, &|n| mine.get(&n).cloned(), &mut |_, _| None);
+    let Some(h) = phitex_draw::Pdf::open(&bytes.into()).and_then(|d| d.hashes().first().copied())
+    else {
+        return;
+    };
+    let mut p = lock(&s.pages);
+    let before = p.shown(k);
+    let live = (p.hashes.get(k) != Some(&h)).then(|| Live {
+        // (never a built page's hash: the PDF's page replaces it)
+        #[allow(clippy::cast_possible_truncation, reason = "a hash's low half")]
+        hash: partex_core::persist_hash(&(h, "shipped")) as u64,
+        page,
+        forms: Arc::new(mine),
+    });
+    if p.live.len() <= k {
+        p.live.resize_with(k + 1, || None);
+    }
+    p.live[k] = live;
+    let after = p.shown(k);
+    if p.live_open && after != before {
+        let n = p.shown_all().len();
+        let started = p.started;
+        drop(p);
+        push_page(s, k, after.unwrap_or(0), n, started);
+    }
+}
+
+/// The pages shipped by the build running shown, once it has run
+/// [`LIVE_AFTER`] (a cold build's at once): each pushed.
+fn open_live(s: &Shared) {
+    let mut p = lock(&s.pages);
+    let due = p.started.is_some_and(|t| t.elapsed() >= LIVE_AFTER) || p.hashes.is_empty();
+    if p.live_open || !due || p.live.iter().all(Option::is_none) {
+        return;
+    }
+    p.live_open = true;
+    let n = p.shown_all().len();
+    let ks: Vec<(usize, u64)> = (0..p.live.len())
+        .filter_map(|k| p.live_page(k).map(|l| (k, l.hash)))
+        .collect();
+    let started = p.started;
+    drop(p);
+    for (k, h) in ks {
+        push_page(s, k, h, n, started);
+    }
+}
+
+/// Tell the browsers page `k` is now at hash `h`, of `n` pages.
+fn push_page(s: &Shared, k: usize, h: u64, n: usize, started: Option<Instant>) {
+    if s.log {
+        s.live.note(&format!(
+            "viewer: page {} shipped, {:.0} ms into the build",
+            k + 1,
+            started.map_or(0.0, |t| t.elapsed().as_secs_f64() * 1e3)
+        ));
+    }
+    broadcast(
+        s,
+        &format!("{{\"event\":\"page\",\"k\":{k},\"hash\":\"{h:016x}\",\"pages\":{n}}}"),
+    );
 }
 
 /// The reply to request `req` (`session.ts`'s `CoreRes`, with its `id`).
@@ -584,7 +961,7 @@ fn answer(s: &Shared, req: &Value) -> String {
     let page = req.get("page").and_then(Value::index);
     let state = || {
         let p = lock(&s.pages);
-        (p.hashes.clone(), p.history, p.ms)
+        (p.shown_all(), p.history, p.ms)
     };
     let mut out = format!("{{\"id\":{id},\"ok\":");
     match op {
@@ -643,6 +1020,10 @@ fn answer(s: &Shared, req: &Value) -> String {
             let file = req.get("file").and_then(Value::str).unwrap_or("");
             let start = req.get("start").and_then(Value::index).unwrap_or(0);
             let _ = write!(out, "{}}}", to_source(s, file, start));
+        }
+        "diagnostics" => {
+            let d = lock(&s.diagnostics).clone();
+            let _ = write!(out, "true,\"json\":{{\"items\":{d}}}}}");
         }
         "set_file" | "trace" | "check" => out.push_str("true,\"json\":{\"ok\":true,\"ms\":0}}"),
         _ => {

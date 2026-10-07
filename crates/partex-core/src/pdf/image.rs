@@ -25,8 +25,8 @@ pub(crate) const IMAGE_COLOR_B: i32 = 1;
 pub(crate) const IMAGE_COLOR_C: i32 = 2;
 pub(crate) const IMAGE_COLOR_I: i32 = 4;
 
-const JPG_GRAY: u8 = 1;
-const JPG_RGB: u8 = 3;
+pub(crate) const JPG_GRAY: u8 = 1;
+pub(crate) const JPG_RGB: u8 = 3;
 const JPG_CMYK: u8 = 4;
 
 /// A read image (`image_entry` with its JPEG part).

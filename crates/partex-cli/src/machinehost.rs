@@ -413,6 +413,14 @@ impl MachineHost {
 }
 
 impl Host for MachineHost {
+    fn wants_streams(&self) -> bool {
+        crate::view::tapping()
+    }
+
+    fn stream_shipped(&mut self, page: Option<usize>, stream: partex_core::pagepdf::ShippedStream) {
+        crate::view::shipped(page, stream);
+    }
+
     fn read_file(&mut self, name: &[u8], kind: FileKind) -> Option<OpenedFile> {
         // a file this job wrote (the last opened with that name)
         let out = self.native().in_output_dir(name);

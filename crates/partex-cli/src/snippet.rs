@@ -201,6 +201,113 @@ pub fn error(d: &Diagnostic, s: Style, verbose: u8) -> String {
     out
 }
 
+/// `s` as a JSON string.
+fn js(s: &str) -> String {
+    let mut b = Vec::new();
+    crate::origins::json_str(&mut b, s);
+    String::from_utf8_lossy(&b).into_owned()
+}
+
+/// Strings as a JSON array.
+fn js_all<T: AsRef<[u8]>>(xs: &[T]) -> String {
+    let v: Vec<String> = xs.iter().map(|x| js(&lossy(x.as_ref()))).collect();
+    format!("[{}]", v.join(","))
+}
+
+/// Diagnostic `d` as JSON, what [`error`] shows of it (the live viewer's
+/// `diagnostics` event): `severity`, `code`, `message` (its first line,
+/// with the control sequence it is about), `notes` (the message's other
+/// lines), `help`, `suggestions`, where it is (`file`, `line`, `col`
+/// from 1, or `null`), the `excerpt` (`{"text", "start", "len"}`: the
+/// line, and the characters the carets mark), the macro `context`
+/// (`[{"name", "before", "after"}]`, outermost first), the files it was
+/// `included` from (`[{"file", "line"}]`), and an over- or underfull
+/// box's report (`box`: `{"lines": [a, b], "amount", "excerpt"}`).
+#[must_use]
+pub fn json(d: &Diagnostic) -> String {
+    let sev = match d.severity {
+        Severity::Fatal => "fatal",
+        Severity::Warning => "warning",
+        Severity::Note => "note",
+        Severity::Error => "error",
+    };
+    let (mut message, notes) = message_lines(&lossy(&d.message));
+    if let Some(cs) = culprit(d) {
+        let _ = write!(message, " {cs}");
+    }
+    let primary = d
+        .frames
+        .iter()
+        .position(|f| matches!(f.kind, FrameKind::File { .. } | FrameKind::Terminal { .. }));
+    let (mut file, mut line, mut col, mut excerpt) = (
+        "null".to_owned(),
+        "null".to_owned(),
+        "null".to_owned(),
+        "null".to_owned(),
+    );
+    let (macros, outer) = match primary {
+        Some(i) => {
+            let f = &d.frames[i];
+            let before = lossy(&f.before);
+            let (start, len) = span(d, &before, &d.frames[..i]);
+            if let FrameKind::File { name, line: l } = &f.kind {
+                file = js(&shown(name));
+                line = l.to_string();
+            }
+            col = (start + 1).to_string();
+            let text = format!("{before}{}", lossy(&f.after));
+            let len = len.min(text.chars().count().saturating_sub(start)).max(1);
+            excerpt = format!("{{\"text\":{},\"start\":{start},\"len\":{len}}}", js(&text));
+            (&d.frames[..i], &d.frames[i + 1..])
+        }
+        None => (&d.frames[..], &d.frames[d.frames.len()..]),
+    };
+    let context: Vec<String> = macros
+        .iter()
+        .rev()
+        .filter_map(|g| {
+            frame_name(g).map(|n| {
+                format!(
+                    "{{\"name\":{},\"before\":{},\"after\":{}}}",
+                    js(&n),
+                    js(&lossy(&g.before)),
+                    js(&lossy(&g.after))
+                )
+            })
+        })
+        .collect();
+    let included: Vec<String> = outer
+        .iter()
+        .filter_map(|g| match &g.kind {
+            FrameKind::File { name, line } => {
+                Some(format!("{{\"file\":{},\"line\":{line}}}", js(&shown(name))))
+            }
+            _ => None,
+        })
+        .collect();
+    let boxed = d.boxed.as_ref().map_or("null".to_owned(), |b| {
+        format!(
+            "{{\"lines\":[{},{}],\"amount\":{},\"excerpt\":{}}}",
+            b.lines.0,
+            b.lines.1,
+            b.amount,
+            js(&lossy(&b.excerpt))
+        )
+    });
+    format!(
+        "{{\"severity\":\"{sev}\",\"code\":{},\"message\":{},\"notes\":{},\"help\":{},\
+         \"suggestions\":{},\"file\":{file},\"line\":{line},\"col\":{col},\"excerpt\":{excerpt},\
+         \"context\":[{}],\"included\":[{}],\"box\":{boxed}}}",
+        js(code(d)),
+        js(&message),
+        js_all(&notes),
+        js_all(&d.help),
+        js_all(&suggestions(d)),
+        context.join(","),
+        included.join(",")
+    )
+}
+
 /// What the carets mark in `before` (the line as far as TeX read it),
 /// in characters: the control sequence an error is about where the line
 /// has it, else the call of the macro the error happened in (`macros`,
@@ -417,6 +524,22 @@ mod tests {
         let v = error(&undefined(), Style::plain(), 1);
         assert!(v.contains("   = in \\greet: `->\\fooo ` | ``\n"), "{v}");
         assert!(v.contains("   = help: The control sequence at the end of the top line\n"));
+    }
+
+    /// The JSON of the live viewer's `diagnostics` event: what the
+    /// terminal shows, as fields.
+    #[test]
+    fn as_json() {
+        assert_eq!(
+            json(&undefined()),
+            "{\"severity\":\"error\",\"code\":\"undefined-control-sequence\",\
+             \"message\":\"Undefined control sequence \\\\fooo\",\"notes\":[],\
+             \"help\":[\"The control sequence at the end of the top line\"],\
+             \"suggestions\":[\"foo\"],\"file\":\"paper.tex\",\"line\":12,\"col\":7,\
+             \"excerpt\":{\"text\":\"Hello \\\\greet world\",\"start\":6,\"len\":6},\
+             \"context\":[{\"name\":\"\\\\greet\",\"before\":\"->\\\\fooo \",\"after\":\"\"}],\
+             \"included\":[],\"box\":null}"
+        );
     }
 
     #[test]

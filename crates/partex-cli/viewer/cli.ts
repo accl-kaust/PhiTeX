@@ -153,12 +153,33 @@ async function layout(): Promise<void> {
 
 function status(): void {
   const n = hashes.length;
-  statusEl.textContent = !connected ? "not connected to partex watch (retrying)" : building ? "building…" : n ? `page ${current + 1} of ${n}` : "no pages yet";
+  statusEl.textContent = !connected
+    ? "not connected to partex watch (retrying)"
+    : building
+      ? n
+        ? `building… (page ${current + 1} of ${n} so far)`
+        : "building…"
+      : n
+        ? `page ${current + 1} of ${n}`
+        : "no pages yet";
   document.body.classList.toggle("stale", building || !connected);
 }
 
-sock.onEvent = (e: { event: string; on?: boolean; file?: string; lo?: number; hi?: number; at?: number }) => {
-  if (e.event === "settled") {
+sock.onEvent = (e: { event: string; on?: boolean; file?: string; lo?: number; hi?: number; at?: number; k?: number; hash?: string; pages?: number }) => {
+  if (e.event === "page") {
+    // (a page shipped while the build runs: shown before the build is in,
+    // the PDF's page replacing it when it settles)
+    building = true;
+    const k = e.k!;
+    while (hashes.length < Math.max(k + 1, e.pages ?? 0)) hashes.push("");
+    hashes[k] = e.hash!;
+    viewer.shipped(k, e.hash!);
+    status();
+  } else if (e.event === "progress" || e.event === "diagnostics") {
+    // (the build's status and its errors: the status pill and the error
+    // overlay are to come; logged for now)
+    console.log("partex", e);
+  } else if (e.event === "settled") {
     building = false;
     void layout();
   } else if (e.event === "switched") {

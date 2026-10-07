@@ -412,6 +412,14 @@ impl Host for SessionHost {
 
     fn close(&mut self, _file: WriteId) {}
 
+    fn wants_streams(&self) -> bool {
+        crate::view::tapping()
+    }
+
+    fn stream_shipped(&mut self, page: Option<usize>, stream: partex_core::pagepdf::ShippedStream) {
+        crate::view::shipped(page, stream);
+    }
+
     fn page_written(&mut self, page: &Page) {
         self.shared.borrow_mut().pages.push(page.clone());
     }

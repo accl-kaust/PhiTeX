@@ -577,6 +577,9 @@ pub struct Tex<H: Host, T: Tracker = Untracked> {
     /// open stream's literals, the streams shipped (without a recorder),
     /// and what the queries made. `None`: off, and free.
     pub(crate) dl: Option<alloc::boxed::Box<crate::displist::DlState>>,
+    /// A page's stream for [`Host::stream_shipped`], from its stream's end
+    /// until its page object is written (never held at a snapshot).
+    pub(crate) tap: Option<alloc::boxed::Box<crate::displist::Shipped>>,
 }
 
 /// web2c's `const_chk` bounds (merged §11): (inf, sup) per parameter.
@@ -890,6 +893,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             org: None,
             sync: None,
             dl: None,
+            tap: None,
             params: p,
         }
     }
