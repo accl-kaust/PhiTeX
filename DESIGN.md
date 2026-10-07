@@ -1462,6 +1462,41 @@ A worker's run that reads a sealed line its placing did not give it is
 tainted (`Tracker::seal_missing`). The build's own engine still asserts
 that every line is in the table.
 
+**Memory.** A worker's view is a CoW fork: the tables are shared
+chunks, and a view costs little. What a run keeps is its tracker. Each
+tracker carries stamp arrays of the tables' size: the eqtb's, the
+hash's twice, the classes', the save stack's, and its recorder's dense
+slots, grown to the highest slot touched (32 bytes a slot). That comes
+to about 30 MB a tracker. A run finished early waits in `Spec` for its
+step's turn, tracker and all. Nothing bounded those runs. A round at a
+step's turn sent the next dirty steps not yet held, so the held runs
+went on growing. A run whose step was kept, met or retired, and so
+never had a turn, stayed until the rebuild's end. On the book with
+every dirty step sent, 54 runs were held at N=2 and 113 at N=8. The
+course's section edit held hundreds (accl: 44.8 GB at N=8 against
+3.98 GB at N=1). The cure has three parts:
+- the held runs and a new round together are at most four a worker,
+  and a round is at most two;
+- at each turn, a held run whose step is no longer dirty is dropped
+  ("its step not run again");
+- a finished run's stamp arrays go back to a pool (`Par::stamps`, at
+  most two a worker), so only running trackers hold them. A pooled
+  array has stamps of another tracker's generation and serial, so the
+  tracker taking it moves its generation and serial past both, and every
+  stamp is stale.
+
+On the book (every dirty step sent), the peak was:
+- N=2: 2.10 GB before, 0.66 GB after;
+- N=8: 3.97 GB before, 1.16 GB after;
+- N=16: 1.86 GB after;
+- N=1: 0.41 GB.
+
+The course's par.txt edits at N=8 (local) peaked at 5.17 GB. What is
+left grows with the runs in flight, about 45 MB each. Stamp arrays
+allocated in chunks as touched would cut that further. They would add
+a branch to every noted read on the build's own engine, so this was not
+done.
+
 ### 3.11 Records, memory and sessions
 
 - A session is the last build's records and the values they reference,

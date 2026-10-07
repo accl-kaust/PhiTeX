@@ -46,7 +46,7 @@ if command -v pdflatex >/dev/null; then
     (cd "$src" && pdflatex -interaction=batchmode -output-directory="$w/pdflatex-$doc" "$main" \
       </dev/null >/dev/null 2>&1)
     t1=$(date +%s.%N)
-    echo "pdflatex $doc: $(echo "$t1 - $t0" | bc) s (one pass)" | tee -a "$r/summary.txt"
+    echo "pdflatex $doc: $(awk "BEGIN { printf \"%.1f\", $t1 - $t0 }") s (one pass)" | tee -a "$r/summary.txt"
   done
 fi
 
