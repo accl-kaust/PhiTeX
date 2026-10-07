@@ -1,0 +1,11 @@
+# The parallel rebuilds' edits of the course (bench/edits.sh's format,
+# for bench/ssa-course.sh): a word, a label, a chapter's opening words,
+# and a section added; each followed by its revert.
+# word: `expensive` becomes `dear` (ch15 line 31).
+word	ch15.tex|If we make a violation expensive but|If we make a violation dear but
+# label: \label{partex:bench} after the sentence that ends a paragraph (ch15 line 31).
+label	ch15.tex|the numerical cost of reducing it.|the numerical cost of reducing it.\label{partex:bench}
+# ch00: "This course exists" deleted from ch00's first paragraph (line 3): every page after it may move.
+ch00	ch00.tex|This course exists to make seven|to make seven
+# section: a \section with a sentence added before ch15's second section (line 39): the numbers after it move.
+section	ch15.tex|\section{What a quadratic penalty buys}|\section{A bench section}<NL>A sentence of the bench section.<NL><NL>\section{What a quadratic penalty buys}

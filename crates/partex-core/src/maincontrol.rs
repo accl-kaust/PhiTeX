@@ -694,11 +694,21 @@ impl<H: Host, T: Tracker> Tex<H, T> {
     fn font_space_glue(&mut self) -> GlueSpec {
         let f = self.cur_font();
         self.tracker.read(crate::track::Cell::Font(f));
-        self.font_read(f, crate::track::font::GLUE);
+        // (the glue is made from the font's spaces, `\fontdimen` 2 to 4,
+        // and dropped when one is assigned, §578: what it reads is those,
+        // made or not, except that XeTeX reads whether it was made,
+        // `xmain.rs`)
+        if self.unicode {
+            self.font_read(f, crate::track::font::GLUE);
+        } else {
+            self.font_read(f, crate::track::font::PARAMS);
+        }
         if let Some(g) = self.fonts.glue[fx(f)] {
             return g;
         }
-        self.font_read(f, crate::track::font::PARAMS);
+        if self.unicode {
+            self.font_read(f, crate::track::font::PARAMS);
+        }
         let font = self.fonts.get(f);
         let g = GlueSpec {
             width: font.param(ux(SPACE_CODE)),

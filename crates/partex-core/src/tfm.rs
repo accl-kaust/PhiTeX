@@ -76,6 +76,39 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         c
     }
 
+    /// The TFM font `name` (in `area`) at `size` loaded, unless it is: a
+    /// font a cold build's runs loaded, loaded before them (`ssa/cold.rs`),
+    /// so that each run's `\font` finds it loaded (§1260) as a run after
+    /// the one that loaded it does. Whether it is loaded now.
+    pub(crate) fn preload_font(&mut self, name: &[u8], area: &[u8], size: Scaled) -> bool {
+        if self.unicode || size <= 0 {
+            return false;
+        }
+        let found = self.fonts.loaded_fonts().into_iter().any(|f| {
+            let i = fx(f);
+            self.str_bytes(ux(self.fonts.name[i])) == name
+                && self.str_bytes(ux(self.fonts.area[i])) == area
+                && self.fonts.get(f).size == size
+        });
+        if found {
+            return true;
+        }
+        let string = |t: &mut Self, b: &[u8]| -> Option<i32> {
+            t.str_room(b.len()).ok()?;
+            for &c in b {
+                t.append_char(c);
+            }
+            t.slow_make_string().ok()
+        };
+        let (Some(nom), Some(aire)) = (string(self, name), string(self, area)) else {
+            return false;
+        };
+        let f = self
+            .read_font_info(crate::web::NULL_CS, nom, aire, size)
+            .unwrap_or(crate::web::NULL_FONT);
+        f != crate::web::NULL_FONT
+    }
+
     /// §560: input a TFM file for `\font u=nom at s` (`s` < 0 means
     /// `scaled -s`, -1000 the design size). Returns the font or `null_font`.
     pub(crate) fn read_font_info(

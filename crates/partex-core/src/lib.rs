@@ -29,6 +29,10 @@
 )]
 
 extern crate alloc;
+// (the build's steps on threads, `ssa/par.rs`; without it they run in
+// turn, as on wasm)
+#[cfg(feature = "std")]
+extern crate std;
 
 pub use partex_engine::{dviout, pageir, persist};
 
@@ -67,6 +71,7 @@ mod files;
 mod fontexp;
 mod fontmap;
 mod fonts;
+mod fork;
 mod format;
 mod hash;
 mod hashmemo;

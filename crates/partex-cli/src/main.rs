@@ -1205,6 +1205,40 @@ fn ssa_window() -> u64 {
         .unwrap_or(4096)
 }
 
+/// What the workers did since the last report (`PHITEX_SSA_WORKERS`
+/// above 1): rounds, steps run on them, taken at their commits, run
+/// again (and why), and the commands each.
+#[allow(
+    clippy::cast_precision_loss,
+    reason = "nanoseconds shown as milliseconds"
+)]
+fn report_workers(what: &str, t: &partex_core::ssa::SsaTracker) {
+    if t.par.workers.get() <= 1 {
+        return;
+    }
+    let s = core::mem::take(&mut *t.par.stats.borrow_mut());
+    eprintln!(
+        "phitex: ssa {what}: workers {}: rounds {}, passes {}, first provisional page {}, \
+         ({:.1} ms waited, views {:.1} ms), runs {}, \
+         taken {} ({} commands), not taken {} ({} commands), why {:?}",
+        t.par.workers.get(),
+        s.rounds,
+        s.passes,
+        s.first_page_ns.map_or_else(
+            || String::from("-"),
+            |n| format!("{:.1} ms", n as f64 / 1e6)
+        ),
+        s.round_ns as f64 / 1e6,
+        s.fork_ns as f64 / 1e6,
+        s.runs,
+        s.taken,
+        s.commands_taken,
+        s.rerun,
+        s.commands_wasted,
+        s.why
+    );
+}
+
 /// The SSA build's tracker, as the environment sets it up.
 fn ssa_tracker() -> partex_core::ssa::SsaTracker {
     use partex_core::ssa::{Recorder, SsaTracker};
@@ -1212,8 +1246,6 @@ fn ssa_tracker() -> partex_core::ssa::SsaTracker {
     // item 2; `=0`: every routine's, and the steps' own reads)
     let mut tracker = SsaTracker::new(Recorder::new());
     tracker.set_lean(!std::env::var("PARTEX_SSA_LEAN").is_ok_and(|v| v == "0"));
-    // (the names a run makes placed by name, DESIGN 3.9's allocators)
-    tracker.set_names_by_name(std::env::var("PARTEX_SSA_NAMES").is_ok_and(|v| v == "1"));
     tracker.cancel.set(cancel_after(0));
     // (a trip that ends fatally keeps the last complete trip's streams,
     // as an editor wants, not pdfTeX's cut `.aux`: DESIGN 3.7, "A trip
@@ -1223,6 +1255,36 @@ fn ssa_tracker() -> partex_core::ssa::SsaTracker {
         .set(std::env::var("PARTEX_SSA_KEEP_COMPLETE").is_ok_and(|v| v == "1"));
     // (the steps' reads and writes timed, for the graph `write_dag` prints)
     tracker.set_timed(std::env::var_os("PARTEX_SSA_DAG").is_some());
+    // (a rebuild's steps on this many workers, DESIGN 3.10; 1: in turn)
+    let workers = ["PHITEX_SSA_WORKERS", "PARTEX_SSA_WORKERS"]
+        .iter()
+        .find_map(|k| std::env::var(k).ok()?.parse::<usize>().ok())
+        .unwrap_or(1);
+    tracker.par.workers.set(workers.max(1));
+    // (the names a run makes placed by name, DESIGN 3.9's allocators: a
+    // worker's run's names then go where they go whatever names the runs
+    // before it made, and its count of them relocates, DESIGN "Parallel
+    // builds"; off by default: where a name goes shows in the DVI's and
+    // PDF's font order and in the log)
+    tracker.set_names_by_name(std::env::var("PARTEX_SSA_NAMES").is_ok_and(|v| v == "1"));
+    // (and a cold build's paragraphs on them, `PHITEX_SSA_COLD=1`: exact,
+    // but not yet faster than a build in turn, DESIGN "Parallel builds")
+    tracker
+        .par
+        .cold
+        .set(std::env::var("PHITEX_SSA_COLD").is_ok_and(|v| v == "1"));
+    // (`STEP,ROUND`: the fewest commands a step, and a round, ran for it
+    // to go to workers; `0,0` sends every dirty step, a test's)
+    if let Some((a, b)) = std::env::var("PHITEX_SSA_SPEC_MIN")
+        .ok()
+        .and_then(|v| {
+            v.split_once(',')
+                .map(|(a, b)| (a.parse().ok(), b.parse().ok()))
+        })
+        .and_then(|(a, b)| Some((a?, b?)))
+    {
+        tracker.par.thresholds.set(Some((a, b)));
+    }
     // (a rebuild runs this many commands at most: past them it stops, as
     // one it cannot make, its trace printed)
     if let Some(b) = std::env::var("PARTEX_SSA_REBUILD_BUDGET")
@@ -1368,6 +1430,7 @@ fn run_ssa(mut host: native::NativeHost, params: Params, command_line: &[u8]) ->
             r.commands_skipped,
         );
         report_routines("build 0", &r.routines);
+        report_workers("build 0", tex.tracker());
         if check {
             report_check(&r, &rec);
         }
@@ -1587,6 +1650,7 @@ fn rebuild_ssa(
         rr.initial,
         rr.commands,
     );
+    report_workers(&format!("rebuild {n}"), tex.tracker());
     {
         // (the rebuild's own calls, by routine)
         let now = tex.tracker().rec.borrow().st.routines;

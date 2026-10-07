@@ -498,6 +498,12 @@ pub trait Tracker {
     fn row_wrote(&self, _row: Row, _version: u128) {}
     /// Font slot `f` was made (loaded, expanded, copied) by the run now.
     fn font_loaded(&self, _f: i32) {}
+    /// A sealed line not in the table was read: whether the run goes on
+    /// without it (a worker's, tainted: `ssa/par.rs`); else the engine
+    /// stops, the table being wrong.
+    fn seal_missing(&self) -> bool {
+        false
+    }
     /// Whether loaded font `f` is one the program has made by now, for
     /// `\font`'s search of the fonts loaded (§1260): a rebuild's step run
     /// again does not find what a later step, or its own older run, made.

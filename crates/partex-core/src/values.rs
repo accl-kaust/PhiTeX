@@ -18,7 +18,7 @@ use crate::track::Tracker;
 
 /// A field's value, by the field's own type.
 #[derive(Clone)]
-pub(crate) struct Field(Arc<dyn Any>);
+pub(crate) struct Field(Arc<dyn Any + Send + Sync>);
 
 impl fmt::Debug for Field {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -27,7 +27,7 @@ impl fmt::Debug for Field {
 }
 
 impl Field {
-    fn of<T: Clone + 'static>(v: &T) -> Field {
+    fn of<T: Clone + Send + Sync + 'static>(v: &T) -> Field {
         Field(Arc::new(v.clone()))
     }
 

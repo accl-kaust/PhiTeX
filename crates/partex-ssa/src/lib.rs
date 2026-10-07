@@ -31,6 +31,7 @@ extern crate alloc;
 #[cfg(feature = "std")]
 extern crate std;
 
+pub mod export;
 pub mod fold;
 pub mod hash;
 pub mod machine;

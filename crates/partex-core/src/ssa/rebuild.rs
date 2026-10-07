@@ -156,6 +156,174 @@ pub(crate) struct Steps {
     /// with that count then: made again only when the count moved.
     store_changes: BTreeMap<u32, u64>,
     trip_values: TripValues,
+    /// A worker's steps (`par.rs`): the build's data ids end at
+    /// `data_base` (its own data are numbered after), and each data its
+    /// run loaded, in order, for the commit to load in the build: the
+    /// name's load id, the data and whether it was the file.
+    data_base: u32,
+    loaded_log: Option<Vec<LoadedData>>,
+}
+
+/// A data a worker's run loaded (`Steps::loaded_log`): the name's load
+/// id, the data, whether it was the file, and its id in the worker.
+type LoadedData = (u32, Arc<[u8]>, bool, u32);
+
+/// A worker's run's logs of its step (`par.rs`): what [`step_closed`]
+/// takes from the open step, and what the run added to the steps'
+/// tables, for the commit to put in the build's.
+pub(super) struct StepLogs {
+    stores: Vec<StoreEv>,
+    loads: Vec<LoadSeen>,
+    queries: Vec<(Query, u128)>,
+    lines: Vec<(u32, usize, usize)>,
+    numbers: BTreeSet<(usize, usize)>,
+    pub(super) chunks: Vec<StepEffects>,
+    whole: Vec<u32>,
+    loaded: Vec<(u32, Arc<[u8]>, bool, u32)>,
+    data_base: u32,
+}
+
+impl StepLogs {
+    /// Whether the run loaded or stored a name in `ids`.
+    pub(super) fn touches(&self, ids: impl Fn(u32) -> bool) -> bool {
+        self.stores.iter().any(|e| ids(e.id())) || self.loads.iter().any(|l| ids(l.id))
+    }
+
+    /// Whether the run stored to a name or opened one for storing.
+    pub(super) fn stores(&self) -> bool {
+        !self.stores.is_empty()
+    }
+
+    /// The load ids in the logs, mapped by `f` (a worker's own ids to the
+    /// build's).
+    pub(super) fn map_loads(&mut self, f: impl Fn(u32) -> u32) {
+        for e in &mut self.stores {
+            match e {
+                StoreEv::Open(i)
+                | StoreEv::Remove(i)
+                | StoreEv::Line(i, _)
+                | StoreEv::Made(i, _) => {
+                    *i = f(*i);
+                }
+            }
+        }
+        for l in &mut self.loads {
+            l.id = f(l.id);
+        }
+        for w in &mut self.whole {
+            *w = f(*w);
+        }
+        for l in &mut self.loaded {
+            l.0 = f(l.0);
+        }
+    }
+}
+
+impl Steps {
+    /// A worker's steps: the build's data by address (`steps`), its own
+    /// numbered after them, nothing else.
+    pub(super) fn worker_of(steps: &Steps) -> Steps {
+        Steps {
+            ids: steps.ids.clone(),
+            data_base: u32::try_from(steps.datas.len()).unwrap_or(u32::MAX),
+            loaded_log: Some(Vec::new()),
+            ..Steps::default()
+        }
+    }
+
+    /// A worker's run of a step ended: its logs, taken.
+    pub(super) fn take_logs(&mut self) -> StepLogs {
+        StepLogs {
+            stores: core::mem::take(&mut self.cur_stores),
+            loads: core::mem::take(&mut self.cur_loads),
+            queries: core::mem::take(&mut self.cur_queries),
+            lines: core::mem::take(&mut self.step_lines),
+            numbers: core::mem::take(&mut self.step_numbers),
+            chunks: core::mem::take(&mut self.cur_chunks),
+            whole: core::mem::take(&mut self.whole).into_iter().collect(),
+            loaded: self
+                .loaded_log
+                .as_mut()
+                .map(core::mem::take)
+                .unwrap_or_default(),
+            data_base: self.data_base,
+        }
+    }
+
+    /// A worker's run of a step committed: its logs as the open step's,
+    /// and its tables' additions made in the build's (the data it loaded
+    /// loaded here, its lines' data ids mapped to them).
+    pub(super) fn put_logs(&mut self, logs: StepLogs) {
+        let mut map: BTreeMap<u32, u32> = BTreeMap::new();
+        for (id, data, file, local) in logs.loaded {
+            let d = self.loaded(id, &data, file);
+            if local >= logs.data_base {
+                map.insert(local, d);
+            }
+        }
+        self.whole.extend(logs.whole);
+        for e in &logs.stores {
+            if !matches!(e, StoreEv::Line(..)) {
+                self.stored.insert(e.id());
+            }
+        }
+        self.cur_stores = logs.stores;
+        self.cur_loads = logs.loads;
+        self.cur_queries = logs.queries;
+        self.step_lines = logs
+            .lines
+            .into_iter()
+            .map(|(d, a, b)| {
+                (
+                    if d >= logs.data_base {
+                        map.get(&d).copied().unwrap_or(d)
+                    } else {
+                        d
+                    },
+                    a,
+                    b,
+                )
+            })
+            .collect();
+        self.step_numbers = logs.numbers;
+        self.cur_chunks = logs.chunks;
+    }
+
+    /// The open step's reopen list (the files its last run opened), as a
+    /// worker's run of step `j` gets it.
+    pub(super) fn reopen_of(&self, j: StepId) -> Vec<(Vec<u8>, FileKind, crate::host::WriteId)> {
+        let mut v = Vec::new();
+        for e in self
+            .effects
+            .get(j as usize)
+            .into_iter()
+            .flatten()
+            .flat_map(|c| c.1.iter())
+        {
+            if let crate::effects::Effect::Open { file, name, kind } = e {
+                v.push((name.clone(), *kind, *file));
+            }
+        }
+        v
+    }
+
+    /// Give a worker's run its reopen list ([`Steps::reopen_of`]).
+    pub(super) fn set_reopen(&mut self, v: Vec<(Vec<u8>, FileKind, crate::host::WriteId)>) {
+        self.reopen = v;
+    }
+
+    /// The load ids of the names the job stores.
+    pub(super) fn stored_ids(&self) -> BTreeSet<u32> {
+        self.stored.clone()
+    }
+
+    /// Which result of step `s`'s runs [`Steps::end`] gives now: the edits
+    /// before it was taken, and its address (a commit's test that the
+    /// input a worker's run began at is still the step's).
+    pub(super) fn end_tag(&self, s: StepId) -> Option<(usize, usize, usize)> {
+        let (n, i) = self.inputs.get(s as usize)?.as_ref()?;
+        Some((*n, Arc::as_ptr(i) as usize, self.edits.len()))
+    }
 }
 
 /// What the steps' own records hold, roughly, in bytes by part (a
@@ -309,8 +477,14 @@ impl Steps {
             self.files.resize(i + 1, None);
         }
         self.files[i] = Some(data.clone());
-        let n = u32::try_from(self.datas.len()).unwrap_or(u32::MAX);
+        let n = u32::try_from(self.datas.len())
+            .unwrap_or(u32::MAX)
+            .saturating_add(self.data_base);
         let d = *self.ids.entry(data.as_ptr() as usize).or_insert(n);
+        if let Some(l) = &mut self.loaded_log {
+            // (a worker's run: the commit loads it in the build)
+            l.push((id, data.clone(), file, d));
+        }
         if d == n {
             self.datas.push(Data {
                 name: id,
@@ -1028,8 +1202,148 @@ impl InputState {
         k
     }
 
+    /// Whether the job ended in the step this state ends.
+    pub(super) fn finished(&self) -> bool {
+        self.finished
+    }
+
+    /// The main file's line this state is at (`main`: the main file's
+    /// data, which level 1 reads): its own line if the main file is the
+    /// top file level, else the line level 1 was at when level 2 opened.
+    pub(super) fn main_line(&self, main: &Arc<[u8]>) -> Option<i32> {
+        let f = if self.in_open == 1 {
+            self.file.file.as_ref()
+        } else {
+            self.v.files.files.get(1)?.as_ref()
+        }?;
+        if !Arc::ptr_eq(&f.data, main) {
+            return None;
+        }
+        match self.in_open {
+            1 => Some(self.line),
+            2 => Some(self.file.line),
+            _ => self.v.files.lines.get(2).copied(),
+        }
+    }
+
+    /// The bytes of the line the top file level last read (where a chunk
+    /// may begin: `cold.rs`), if the main file is the top level.
+    fn last_line<'a>(&self, main: &'a Arc<[u8]>) -> Option<&'a [u8]> {
+        let f = self.file.file.as_ref()?;
+        if self.in_open != 1 || !Arc::ptr_eq(&f.data, main) || f.line_from > f.pos {
+            return None;
+        }
+        let (end, _) = line_bounds(main, f.line_from);
+        main.get(f.line_from..end)
+    }
+
+    /// Whether this state is at the end of a line of the main file read
+    /// whole, the main file the top level, at line `line` or past it (a
+    /// chunk's end: `cold.rs`).
+    pub(super) fn ends_line(&self, main: &Arc<[u8]>, line: i32) -> bool {
+        // (the terminal's level below the main file's, no other)
+        self.in_open == 1
+            && self.v.depth <= 1
+            && self.cur.state != crate::web::TOKEN_LIST
+            && self.cur.loc > self.cur.limit
+            && self.main_line(main).is_some_and(|l| l >= line)
+    }
+
+    /// This state with the strings a worker's run made numbered as the
+    /// build numbers them ([`super::par::Remap::shift_strings`]): its file
+    /// levels' names.
+    #[cfg(feature = "std")]
+    pub(super) fn shift_strings(&mut self, map: &super::par::Remap) {
+        let s = |n: i32| i32::try_from(map.string(i64::from(n))).unwrap_or(n);
+        // (a file level's name is its file's name, a string; a token list
+        // level's is a meaning's place)
+        let file = |r: &InStateRecord| r.state != crate::web::TOKEN_LIST && r.name > 19;
+        if file(&self.cur) {
+            self.cur.name = s(self.cur.name);
+        }
+        self.file.name = s(self.file.name);
+        self.file.full_name = s(self.file.full_name);
+        let moves = |r: &InStateRecord| file(r) && s(r.name) != r.name;
+        let mut chain = Vec::new();
+        let mut at = self.v.levels.as_deref();
+        while let Some(c) = at {
+            chain.push(c.item.clone());
+            at = c.below.as_deref();
+        }
+        if chain.iter().any(moves) {
+            let mut below: Option<Arc<crate::input::Chain<InStateRecord>>> = None;
+            for mut item in chain.into_iter().rev() {
+                if file(&item) {
+                    item.name = s(item.name);
+                }
+                below = Some(Arc::new(crate::input::Chain { item, below }));
+            }
+            self.v.levels = below;
+        }
+        let f = &self.v.files;
+        if f.names.iter().chain(&f.full_names).any(|&n| s(n) != n) {
+            let mut g = (**f).clone();
+            for n in g.names.iter_mut().chain(g.full_names.iter_mut()) {
+                *n = s(*n);
+            }
+            self.v.files = Arc::new(g);
+        }
+    }
+
+    /// This state, the main file the top file level at a line's end, moved
+    /// to before line `line` (from 1) of it: the line before that one just
+    /// read whole, as this state has read its own (`cold.rs`, a chunk's
+    /// start). The buffer holds that line, as its reading leaves it
+    /// (§362: its characters, then the end-of-line character).
+    pub(super) fn moved_to(&self, main: &Arc<[u8]>, line: i32) -> Option<InputState> {
+        let here = self.last_line(main)?;
+        if self.v.depth > 1
+            || self.cur.state == crate::web::TOKEN_LIST
+            || self.cur.loc <= self.cur.limit
+            || line < 2
+        {
+            return None;
+        }
+        // (where each line begins)
+        let mut starts = alloc::vec![0usize];
+        let mut at = 0;
+        while at < main.len() && starts.len() <= usize::try_from(line).ok()? {
+            at = line_bounds(main, at).1;
+            starts.push(at);
+        }
+        let l = usize::try_from(line).ok()?;
+        let (from, pos) = (*starts.get(l - 2)?, *starts.get(l - 1)?);
+        let (end, _) = line_bounds(main, from);
+        let text = main.get(from..end)?;
+        let mut s = self.clone();
+        if text != here {
+            // (the other line in the buffer: its characters where this
+            // state's are, the end-of-line character after them, if the
+            // line has one)
+            let start = usize::try_from(self.cur.start).ok()?;
+            let had = usize::try_from(self.cur.limit - self.cur.start).ok()?;
+            if start != self.v.from || had != here.len() {
+                return None;
+            }
+            let eol = self.top.get(had).copied();
+            let n = i32::try_from(text.len()).ok()?;
+            s.top = text.iter().map(|&b| u32::from(b)).chain(eol).collect();
+            s.cur.limit = self.cur.start + n;
+            s.cur.loc = s.cur.limit + (self.cur.loc - self.cur.limit);
+            s.last = start + text.len();
+            s.first = s.last + 1;
+        }
+        let f = s.file.file.as_mut()?;
+        let d = line - 1 - self.line;
+        f.pos = pos;
+        f.line_from = from;
+        f.lines = u32::try_from(i64::from(f.lines) + i64::from(d)).ok()?;
+        s.line = line - 1;
+        Some(s)
+    }
+
     /// Put the input where this state has it.
-    fn set<H: Host, T: Tracker>(&self, t: &mut Tex<H, T>) {
+    pub(super) fn set<H: Host, T: Tracker>(&self, t: &mut Tex<H, T>) {
         t.fire_pending = self.fire;
         t.ship_stop = u8::from(self.ship);
         t.load_stop = if self.load { 2 } else { 0 };
@@ -1231,6 +1545,16 @@ fn same_input<H: Host, T: Tracker>(t: &Tex<H, T>, a: &InputState, b: &InputState
         && same_str(t, x.full_name, y.full_name)
         && (t.sync.is_none() || same_tags(a, b))
         && lower
+}
+
+/// Whether a step that began at `a` began where the input now is, `b`:
+/// the same place and the same input (`cold.rs`).
+pub(super) fn same_start<H: Host, T: Tracker>(
+    t: &Tex<H, T>,
+    a: &InputState,
+    b: &InputState,
+) -> bool {
+    same_place(t, a, b) && same_input(t, a, b)
 }
 
 /// An edit of a data (7.17.3, "an edit is of a data"): runs of changed
@@ -1572,7 +1896,7 @@ pub struct RebuildReport {
 impl InputState {
     /// A short view: the level, the line, where the top file is, the
     /// offset in the buffer's line.
-    fn brief(&self) -> alloc::string::String {
+    pub(super) fn brief(&self) -> alloc::string::String {
         let pos = self.file.file.as_ref().map_or(0, |f| f.pos);
         alloc::format!(
             "level {} line {} pos {} loc {} state {}{}{}{}{}{}{}",
@@ -1653,14 +1977,14 @@ pub(super) fn font_id_slot(p: i64) -> bool {
 /// Whether a run's read of `a` is checked against the definitions
 /// reaching it: a positioned slot's, or a meaning's class
 /// ([`Fam::Class`]), whose value the meaning holds ([`placed_as`]).
-fn checked(a: &Slot) -> bool {
+pub(super) fn checked(a: &Slot) -> bool {
     positioned(a) || a.0 == Fam::Class
 }
 
 /// The slot placed for a read of `a`: a meaning's class
 /// ([`Fam::Class`]) is the meaning's (`eqtb[p]`, which a rebuild puts
 /// back, the class with it); any other slot itself.
-fn placed_as(a: &Slot) -> Slot {
+pub(super) fn placed_as(a: &Slot) -> Slot {
     if a.0 == Fam::Class {
         Slot(Fam::Eqtb, a.1)
     } else {
@@ -1670,7 +1994,7 @@ fn placed_as(a: &Slot) -> Slot {
 
 /// Whether a definition at or after `key` defines `a`: the arrays then
 /// hold a value the step at `key` must not read.
-fn later(fold: &Fold<TexSsa>, a: &Slot, key: u64) -> bool {
+pub(super) fn later(fold: &Fold<TexSsa>, a: &Slot, key: u64) -> bool {
     // (a page node always: the engine holds the list, not the nodes
     // past its length, 7.17.3 item 5)
     a.0 == Fam::PageNode || fold.latest(a).is_some_and(|d| d.key >= key)
@@ -1986,7 +2310,10 @@ fn recs_writes(
 }
 
 /// Step `s`'s definitions, as the index holds them.
-fn defs(rt: &partex_ssa::Runtime<TexSsa>, s: partex_ssa::fold::StepId) -> BTreeMap<Slot, Version> {
+pub(super) fn defs(
+    rt: &partex_ssa::Runtime<TexSsa>,
+    s: partex_ssa::fold::StepId,
+) -> BTreeMap<Slot, Version> {
     let mut d = BTreeMap::new();
     let Some(step) = rt.fold.steps.get(s as usize) else {
         return d;
@@ -2152,6 +2479,23 @@ pub(super) fn reaching_version(rr: &Recorder, a: &Slot, key: u64) -> Option<Vers
     Some(v.as_ref().map_or(Version::ABSENT, |v| v.0))
 }
 
+/// [`reaching_version`], or for a slot no step of the fold defines, the
+/// version of the format's value the arrays hold (as a run reading it
+/// found it).
+fn reaching_or_format<H: Host>(
+    tex: &Tex<H, SsaTracker>,
+    rr: &Recorder,
+    a: &Slot,
+    key: u64,
+) -> Option<Version> {
+    reaching_version(rr, a, key).or_else(|| {
+        rr.rt.fold.latest(a).is_none().then(|| {
+            let view = super::View { tex, rec: &rr.st };
+            partex_ssa::Store::version(&view, &partex_ssa::Loc::State(*a))
+        })
+    })
+}
+
 /// The value of `a` that reaches `key`: the definition before it, or the
 /// format's.
 fn reaching<H: Host>(
@@ -2203,7 +2547,11 @@ fn latest<H: Host>(
 /// What slot `a` holds before any step defines it: the format's
 /// definition (DESIGN 7.17.3, "Not built": the first step's definitions
 /// are the format's).
-fn initial<H: Host>(tex: &Tex<H, SsaTracker>, steps: &mut Steps, a: Slot) -> Option<SVal> {
+pub(super) fn initial<H: Host>(
+    tex: &Tex<H, SsaTracker>,
+    steps: &mut Steps,
+    a: Slot,
+) -> Option<SVal> {
     if steps.format.is_none() {
         let mut f = Tex::format_value(tex.params.clone(), tex.format_data.as_deref())?;
         // (as the build set it up before its first step: with effects on,
@@ -2225,7 +2573,7 @@ fn initial<H: Host>(tex: &Tex<H, SsaTracker>, steps: &mut Steps, a: Slot) -> Opt
 
 /// Store `vals` in the engine's arrays (each one field, the value shared),
 /// an eqtb entry from the format versioned by its content.
-fn put<H: Host>(tex: &mut Tex<H, SsaTracker>, vals: &[(Slot, SVal)]) {
+pub(super) fn put<H: Host>(tex: &mut Tex<H, SsaTracker>, vals: &[(Slot, SVal)]) {
     if vals.is_empty() {
         return;
     }
@@ -2620,8 +2968,89 @@ pub fn rebuild<H: Host>(tex: &mut Tex<H, SsaTracker>, trace: bool, apply: bool) 
     tex.tracker.apply.set(apply);
     let applied = (tex.tracker.applied.get(), tex.tracker.skipped.get());
     tex.tracker.boundary();
+    let (mut dirty, mut rep) = run_dirty(tex, dirty, rep, budget_from);
+    if rep.stopped.is_some() && rep.unsupported.is_none() && !dirty.is_empty() {
+        // (the work left: the next rebuild takes it up)
+        dirty.anchor = None;
+        rep.pending = dirty.len();
+        if rep.trace {
+            note(
+                tex,
+                alloc::format!(
+                    "stopped ({}): {} steps pending",
+                    rep.stopped.unwrap_or_default(),
+                    rep.pending
+                ),
+            );
+        }
+        let mut r = tex.tracker.rec.borrow_mut();
+        let s = &mut r.st.steps;
+        let phi = s.phi.clone().unwrap_or_default();
+        s.pending = Some(Pending { dirty, phi });
+    } else {
+        // (a stop with nothing left is a trip that ended)
+        rep.stopped = None;
+    }
+    tex.tracker.flush_effects();
+    {
+        let mut r = tex.tracker.rec.borrow_mut();
+        r.flush_output();
+        r.on = false;
+        r.rt.close_trip();
+    }
+    rep.commands = tex.commands() - c0;
+    rep.applied = tex.tracker.applied.get() - applied.0;
+    rep.skipped = tex.tracker.skipped.get() - applied.1;
+    tex.tracker.apply.set(false);
+    // (the arrays hold the latest definitions: `history` is the job's)
+    rep.history = tex.history;
+    rep.log = rebuild_log(tex);
+    {
+        // (the φ this trip read, kept for the next trip's names that no
+        // live step opens)
+        let mut r = tex.tracker.rec.borrow_mut();
+        let s = &mut r.st.steps;
+        if let Some(p) = s.phi.take() {
+            s.last_phi = p;
+        }
+        // (the steps this rebuild passed over: what they read and made)
+        r.rt.fold.release_removed();
+    }
+    // (a trip that reached the job's end, normally or fatally: a stopped
+    // one is not a trip that ended, and keeps what was published)
+    if rep.stopped.is_none() && rep.unsupported.is_none() {
+        trip_ended(tex, false);
+    }
+    rep
+}
+
+/// The dirty steps run in program order, each from where the step before
+/// it ended (7.17.3 items 2 to 4, [`run_step`]), the steps their runs
+/// change made dirty in turn, until none is (a rebuild's work, and a cold
+/// build's correction, `cold.rs`), or the work stops (its budget, its
+/// deadline, cancelled; `budget_from` the commands the budget counts
+/// from). What is left dirty, and the report.
+pub(super) fn run_dirty<H: Host>(
+    tex: &mut Tex<H, SsaTracker>,
+    mut dirty: Dirty,
+    mut rep: RebuildReport,
+    budget_from: u64,
+) -> (Dirty, RebuildReport) {
     let mut srep = SsaReport::default();
+    // (the steps' runs on workers, waiting for their turns: `par.rs`)
+    let speculating = may_speculate(tex);
+    #[cfg(not(feature = "std"))]
+    let _ = speculating;
+    let mut spec = Spec::default();
     while let Some((j, why)) = dirty.pop_first() {
+        // (a cold build's step after a gap no run met: it runs, from where
+        // the step before it ended)
+        #[cfg(feature = "std")]
+        let why = if dirty.starts.remove(&j).is_some() {
+            None
+        } else {
+            why
+        };
         let (prev, mut target, whyn) = {
             let r = tex.tracker.rec.borrow();
             let fold = &r.rt.fold;
@@ -2635,10 +3064,15 @@ pub fn rebuild<H: Host>(tex: &mut Tex<H, SsaTracker>, trace: bool, apply: bool) 
                     let key = fold.steps[j as usize].key;
                     reads
                         .iter()
-                        .filter(|(a, v)| reaching_version(&r, a, key) != Some(*v))
+                        .filter(|(a, v)| reaching_or_format(tex, &r, a, key) != Some(*v))
                         .take(8)
-                        .map(|(a, _)| {
-                            alloc::format!("{a}={}", super::view::trace_name(tex, &r.st, *a))
+                        .map(|(a, v)| {
+                            alloc::format!(
+                                "{a}={} ({:04x} read, {:04x} reaching)",
+                                super::view::trace_name(tex, &r.st, *a),
+                                v.0 & 0xffff,
+                                reaching_or_format(tex, &r, a, key).map_or(0, |x| x.0 & 0xffff)
+                            )
                         })
                         .collect::<Vec<_>>()
                         .join(" ")
@@ -2651,11 +3085,15 @@ pub fn rebuild<H: Host>(tex: &mut Tex<H, SsaTracker>, trace: bool, apply: bool) 
                 let key = fold.steps[j as usize].key;
                 if reads
                     .iter()
-                    .all(|(a, v)| reaching_version(&r, a, key) == Some(*v))
+                    .all(|(a, v)| reaching_or_format(tex, &r, a, key) == Some(*v))
                 {
                     rep.readers_kept += 1;
+                    drop(r);
+                    #[cfg(feature = "std")]
+                    if let Some(e) = dirty.held.remove(&j) {
+                        super::par::replay_events(&mut tex.host, e);
+                    }
                     if rep.trace {
-                        drop(r);
                         note(
                             tex,
                             alloc::format!(
@@ -2678,6 +3116,9 @@ pub fn rebuild<H: Host>(tex: &mut Tex<H, SsaTracker>, trace: bool, apply: bool) 
         if let Some(w) = whyn {
             note(tex, alloc::format!("step {j} runs for: {w}"));
         }
+        // (its run again says what the host is to see)
+        #[cfg(feature = "std")]
+        dirty.held.remove(&j);
         let Some(mut input) = tex.tracker.rec.borrow().st.steps.end(prev) else {
             rep.unsupported = Some("a step with no result");
             break;
@@ -2715,12 +3156,47 @@ pub fn rebuild<H: Host>(tex: &mut Tex<H, SsaTracker>, trace: bool, apply: bool) 
         // (where the old steps after it ended, made once a run of the
         // cascade meets none of the next `LOOK_AHEAD`: `meet_far`)
         let mut ends: Option<Ends> = None;
+        // (its run on a worker, if a round made one: DESIGN 3.10)
+        #[cfg(feature = "std")]
+        let mut worker_run = if speculating {
+            speculate(tex, j, &dirty, &mut rep, &mut spec);
+            spec.ran.remove(&j)
+        } else {
+            None
+        };
         loop {
             let c0 = tex.commands();
             let moved = rep.positioned + rep.restored;
-            let end = run_step(
-                tex, cur, &predict, &writes, &input, &mut dirty, &mut rep, &mut srep,
-            );
+            #[cfg(feature = "std")]
+            let taken = match worker_run.take() {
+                Some(a) => match commit(tex, j, prev, a, &mut dirty, &mut rep) {
+                    Ok(e) => {
+                        if rep.trace {
+                            note(tex, alloc::format!("step {j} taken from a worker's run"));
+                        }
+                        Some(e)
+                    }
+                    Err((why, c)) => {
+                        if rep.trace {
+                            note(
+                                tex,
+                                alloc::format!("step {j}: its worker's run not taken: {why}"),
+                            );
+                        }
+                        tex.tracker.par.stats.borrow_mut().not_taken(why, c);
+                        None
+                    }
+                },
+                None => None,
+            };
+            #[cfg(not(feature = "std"))]
+            let taken: Option<InputState> = None;
+            let end = match taken {
+                Some(e) => e,
+                None => run_step(
+                    tex, cur, &predict, &writes, &input, &mut dirty, &mut rep, &mut srep,
+                ),
+            };
             spent += tex.commands() - c0 + ((rep.positioned + rep.restored - moved) / 2) as u64;
             // (past its budget, its deadline, or cancelled: it stops once
             // this step's run is placed, below, its work kept, DESIGN 3.7,
@@ -2767,6 +3243,27 @@ pub fn rebuild<H: Host>(tex: &mut Tex<H, SsaTracker>, trace: bool, apply: bool) 
             // (it ended elsewhere: at the end of an old step after it, which
             // passes over the steps between, or it runs on; the next
             // `LOOK_AHEAD` first, then any)
+            // (it ended where a cold build's step after a gap began: the gap
+            // is run, the old steps between are passed over, and that step
+            // is looked at in its turn)
+            #[cfg(feature = "std")]
+            if let Some(k) = dirty.meet_start(tex, cur, &end, LOOK_AHEAD) {
+                let passed = {
+                    let r = tex.tracker.rec.borrow();
+                    let fold = &r.rt.fold;
+                    let from = fold.position(cur).unwrap_or(0) + 1;
+                    let to = fold.position(k).unwrap_or(from);
+                    fold.order[from..to].to_vec()
+                };
+                for s in passed {
+                    retire(tex, s, &mut dirty, &mut rep);
+                }
+                dirty.starts.remove(&k);
+                if rep.trace {
+                    note(tex, alloc::format!("  met the start of step {k}"));
+                }
+                break;
+            }
             let met = meet(tex, cur, &end).or_else(|| meet_far(tex, cur, &end, &mut ends));
             if let Some((m, old_end)) = met {
                 let passed = {
@@ -2827,6 +3324,7 @@ pub fn rebuild<H: Host>(tex: &mut Tex<H, SsaTracker>, trace: bool, apply: bool) 
             if spent > COLD_FLOOR && spent > *after.get_or_insert_with(|| commands_after(tex, cur))
             {
                 go_cold(tex, cur, &mut dirty, &mut rep);
+                spec.clear(tex);
                 after = Some(u64::MAX);
                 // (and it runs to the job's end: the old step's end it was
                 // to meet is gone with the steps after it; a run coming
@@ -2876,59 +3374,8 @@ pub fn rebuild<H: Host>(tex: &mut Tex<H, SsaTracker>, trace: bool, apply: bool) 
             break;
         }
     }
-    if rep.stopped.is_some() && rep.unsupported.is_none() && !dirty.is_empty() {
-        // (the work left: the next rebuild takes it up)
-        dirty.anchor = None;
-        rep.pending = dirty.len();
-        if rep.trace {
-            note(
-                tex,
-                alloc::format!(
-                    "stopped ({}): {} steps pending",
-                    rep.stopped.unwrap_or_default(),
-                    rep.pending
-                ),
-            );
-        }
-        let mut r = tex.tracker.rec.borrow_mut();
-        let s = &mut r.st.steps;
-        let phi = s.phi.clone().unwrap_or_default();
-        s.pending = Some(Pending { dirty, phi });
-    } else {
-        // (a stop with nothing left is a trip that ended)
-        rep.stopped = None;
-    }
-    tex.tracker.flush_effects();
-    {
-        let mut r = tex.tracker.rec.borrow_mut();
-        r.flush_output();
-        r.on = false;
-        r.rt.close_trip();
-    }
-    rep.commands = tex.commands() - c0;
-    rep.applied = tex.tracker.applied.get() - applied.0;
-    rep.skipped = tex.tracker.skipped.get() - applied.1;
-    tex.tracker.apply.set(false);
-    // (the arrays hold the latest definitions: `history` is the job's)
-    rep.history = tex.history;
-    rep.log = rebuild_log(tex);
-    {
-        // (the φ this trip read, kept for the next trip's names that no
-        // live step opens)
-        let mut r = tex.tracker.rec.borrow_mut();
-        let s = &mut r.st.steps;
-        if let Some(p) = s.phi.take() {
-            s.last_phi = p;
-        }
-        // (the steps this rebuild passed over: what they read and made)
-        r.rt.fold.release_removed();
-    }
-    // (a trip that reached the job's end, normally or fatally: a stopped
-    // one is not a trip that ended, and keeps what was published)
-    if rep.stopped.is_none() && rep.unsupported.is_none() {
-        trip_ended(tex, false);
-    }
-    rep
+    spec.clear(tex);
+    (dirty, rep)
 }
 
 /// A trip ended (DESIGN 3.7, "A trip that ended fatally"): with
@@ -3701,6 +4148,15 @@ pub(crate) struct Dirty {
     /// earliest): where the run is in the old run's text, for the new
     /// steps after it (with windows, the rebuild's `ahead`).
     anchor: Option<StepId>,
+    /// A cold build's guessed steps' host events, said if the step is
+    /// kept ([`Dirty::mark_cold`]).
+    #[cfg(feature = "std")]
+    held: BTreeMap<StepId, Vec<super::par::HostEvent>>,
+    /// A cold build's guessed steps whose runs began after a gap, where
+    /// each began: one the rebuild's runs through the gap have not met
+    /// runs again ([`Dirty::meet_start`]).
+    #[cfg(feature = "std")]
+    starts: BTreeMap<StepId, InputState>,
 }
 
 /// The slots [`Dirty::missed`] keeps at most.
@@ -3759,8 +4215,53 @@ impl Dirty {
             .collect();
     }
 
-    fn len(&self) -> usize {
+    pub(super) fn len(&self) -> usize {
         self.order.len()
+    }
+
+    /// Step `s`, at `key`, runs (`cold.rs`: a guessed step that does not
+    /// hold).
+    pub(super) fn mark_step(&mut self, key: u64, s: StepId) {
+        self.mark(key, s);
+    }
+
+    /// A cold build's guessed step dirty ([`cold_guess`]): with the reads
+    /// that held otherwise, kept if they reach it as it read them, its
+    /// run's events then said.
+    #[cfg(feature = "std")]
+    pub(super) fn mark_cold(&mut self, d: ColdDirty) {
+        self.order.insert(d.key, d.id);
+        if d.why.is_some() && !d.events.is_empty() {
+            self.held.insert(d.id, d.events);
+        }
+        if let Some(s) = d.start {
+            self.starts.insert(d.id, s);
+        }
+        self.why.insert(d.id, d.why);
+    }
+
+    /// The first of the `n` steps after `cur` in `fold` whose run began
+    /// after a gap ([`Dirty::mark_cold`]) where a run of the rebuild
+    /// ended, `end`: the gap is run.
+    #[cfg(feature = "std")]
+    fn meet_start<H: Host>(
+        &self,
+        tex: &Tex<H, SsaTracker>,
+        cur: StepId,
+        end: &InputState,
+        n: usize,
+    ) -> Option<StepId> {
+        if self.starts.is_empty() {
+            return None;
+        }
+        let r = tex.tracker.rec.borrow();
+        let fold = &r.rt.fold;
+        let from = fold.position(cur)? + 1;
+        fold.order[from..].iter().take(n).copied().find(|s| {
+            self.starts
+                .get(s)
+                .is_some_and(|st| same_start(tex, st, end))
+        })
     }
 
     fn is_empty(&self) -> bool {
@@ -3768,7 +4269,7 @@ impl Dirty {
     }
 
     /// The dirty steps and their keys, in key order.
-    fn steps(&self) -> impl Iterator<Item = (StepId, u64)> + '_ {
+    pub(super) fn steps(&self) -> impl Iterator<Item = (StepId, u64)> + '_ {
         self.order.iter().map(|(&k, &s)| (s, k))
     }
 }
@@ -3994,7 +4495,7 @@ fn retire<H: Host>(
 /// The loads after `key` of the names in `ids`, which a step stored to
 /// differently, that read the build's own store: dirty (7.17.3, "A load
 /// reads the store"). The loads that read the φ wait for the next trip.
-fn mark_store_readers(
+pub(super) fn mark_store_readers(
     rr: &Recorder,
     ids: &[u32],
     key: u64,
@@ -4028,7 +4529,7 @@ fn mark_store_readers(
 /// Drop the outputs a run left (one dropped, or none at a step's start):
 /// the files it opened are closed, as no link writes them, and the next
 /// run opens them on their handles again ([`Steps::reopen`]).
-fn drop_outputs<H: Host>(tex: &mut Tex<H, SsaTracker>) {
+pub(super) fn drop_outputs<H: Host>(tex: &mut Tex<H, SsaTracker>) {
     let fx = tex.take_effects();
     let chunks = core::mem::take(&mut tex.tracker.rec.borrow_mut().st.steps.cur_chunks);
     for e in fx.iter().chain(chunks.iter().flat_map(|c| c.1.iter())) {
@@ -4060,118 +4561,28 @@ fn run_step<H: Host>(
         note(tex, alloc::format!("step {j} begins at {}", input.brief()));
     }
     let c0 = tex.commands();
-    #[allow(clippy::type_complexity)]
-    let (key, old, mut found, budget, alone): (
-        u64,
-        BTreeMap<Slot, Version>,
-        Vec<(Slot, Option<Def>)>,
-        u64,
-        bool,
-    ) = {
-        let r = tex.tracker.rec.borrow();
-        let fold = &r.rt.fold;
-        let key = fold.steps[j as usize].key;
-        let old = defs(&r.rt, j);
-        // (a new step the fold's last, as a cascade gone cold makes them:
-        // no definition is later than it, so the arrays hold what reaches
-        // it, as in a cold build, but for the page's nodes, which they
-        // hold only up to the list's length: those alone are placed,
-        // checked and put back; an old step's own old definitions are
-        // later than it)
-        let alone = old.is_empty() && fold.order.last() == Some(&j);
-        // (each with the definition that reaches the step, found where the
-        // test for a later one looked)
-        // (a name the old run made, as a loop's points, is read by a new
-        // run that finds it made: the old run's writes predict it)
-        let written = writes.iter().flat_map(|&p| {
-            fold.steps[p as usize]
-                .recs
-                .iter()
-                .flat_map(|&q| r.rt.writes(q).iter().map(|(a, _)| a))
-                .filter(|a| predicts_alone(a))
-        });
-        let mut cand: Vec<Slot> = if alone {
-            predict
-                .iter()
-                .flat_map(|&p| fold.reads_of(p))
-                .chain(&dirty.missed)
-                .filter(|a| a.0 == Fam::PageNode)
-                .copied()
-                .collect()
-        } else {
-            predict
-                .iter()
-                .flat_map(|&p| fold.reads_of(p))
-                .chain(&dirty.missed)
-                .chain(written)
-                .filter(|a| checked(a))
-                .map(placed_as)
-                .collect()
-        };
-        if predict.len() > 1 || !writes.is_empty() || !dirty.missed.is_empty() {
-            // (the steps predicting it read much the same slots: each
-            // looked up once)
-            cand.sort_unstable();
-            cand.dedup();
-        }
-        let reads = cand
-            .into_iter()
-            .filter_map(|a| {
-                if a.0 == Fam::PageNode {
-                    Some((a, fold.reaching(&a, key)))
-                } else {
-                    fold.reaching_if_later(&a, key).map(|d| (a, d))
-                }
-            })
-            .collect();
-        // (a run past it that read a later definition stops: [`Watch`])
-        let last = predict
-            .iter()
-            .filter_map(|&p| r.st.step_commands.get(p as usize).copied())
-            .max();
-        let budget = last.unwrap_or(0).saturating_mul(2).saturating_add(10_000);
-        (key, old, reads, budget, alone)
-    };
-    let mut next = Vec::new();
-    if !alone {
-        save_stack_whole(tex, key, &mut next, rep);
-        nest_whole(tex, key, &mut next);
-        if tex.window() > 0 {
-            window_whole(tex, key, &mut next);
-        }
-    }
+    let Placing {
+        key,
+        old,
+        mut found,
+        budget,
+        alone,
+        mut next,
+    } = placing(tex, j, predict, writes, dirty, rep);
     let mut set: BTreeSet<Slot> = BTreeSet::new();
     let mut touched: BTreeSet<Slot> = BTreeSet::new();
     let mut objs_placed = false;
     let finished = loop {
-        // (the object table placed whole with its lists' heads or the
-        // fonts' state: [`objs_whole`])
-        if !alone && !objs_placed && found.iter().map(|(a, _)| a).chain(&next).any(object_table) {
-            objs_placed = true;
-            objs_whole(tex, key, &mut next, rep);
-        }
-        // the definitions that reach the step, where a later one is in
-        // the arrays
-        let vals = {
-            let mut r = tex.tracker.rec.borrow_mut();
-            let rr = &mut *r;
-            let mut vals = Vec::with_capacity(found.len() + next.len());
-            for (a, d) in found.drain(..) {
-                if set.insert(a)
-                    && let Some(v) = value_of(tex, rr, a, d, rep)
-                {
-                    vals.push((a, v));
-                }
-            }
-            for a in next.drain(..) {
-                if set.insert(a)
-                    && let Some(v) = reaching(tex, rr, a, key, rep)
-                {
-                    vals.push((a, v));
-                }
-            }
-            vals
-        };
+        let vals = place_values(
+            tex,
+            key,
+            alone,
+            &mut found,
+            &mut next,
+            &mut set,
+            &mut objs_placed,
+            rep,
+        );
         rep.positioned += vals.len();
         put(tex, &vals);
         input.set(tex);
@@ -4405,6 +4816,217 @@ fn run_step<H: Host>(
         );
         d
     };
+    after_close(
+        tex,
+        Closing {
+            j,
+            key,
+            old,
+            new,
+            alone,
+            set,
+            touched,
+            predict,
+            c0,
+        },
+        dirty,
+        rep,
+    )
+}
+
+/// Where a step's run is placed ([`placing`]): its key, its old
+/// definitions, the slots its last run and the runs predicting it read
+/// whose definition reaching it a later one hides (with that one), its
+/// budget of commands, whether it is the fold's last new step (`alone`:
+/// the arrays hold what reaches it), and the slots placed whole (the
+/// save stack, the nest, a window's state).
+pub(super) struct Placing {
+    pub(super) key: u64,
+    pub(super) old: BTreeMap<Slot, Version>,
+    pub(super) found: Vec<(Slot, Option<Def>)>,
+    pub(super) budget: u64,
+    pub(super) alone: bool,
+    pub(super) next: Vec<Slot>,
+}
+
+/// Where step `j`'s run is placed, predicted by the steps `predict` and
+/// the writes of `writes` ([`run_step`]).
+pub(super) fn placing<H: Host>(
+    tex: &mut Tex<H, SsaTracker>,
+    j: StepId,
+    predict: &[StepId],
+    writes: &[StepId],
+    dirty: &Dirty,
+    rep: &mut RebuildReport,
+) -> Placing {
+    #[allow(clippy::type_complexity)]
+    let (key, old, found, budget, alone): (
+        u64,
+        BTreeMap<Slot, Version>,
+        Vec<(Slot, Option<Def>)>,
+        u64,
+        bool,
+    ) = {
+        let r = tex.tracker.rec.borrow();
+        let fold = &r.rt.fold;
+        let key = fold.steps[j as usize].key;
+        let old = defs(&r.rt, j);
+        // (a new step the fold's last, as a cascade gone cold makes them:
+        // no definition is later than it, so the arrays hold what reaches
+        // it, as in a cold build, but for the page's nodes, which they
+        // hold only up to the list's length: those alone are placed,
+        // checked and put back; an old step's own old definitions are
+        // later than it)
+        let alone = old.is_empty() && fold.order.last() == Some(&j);
+        // (each with the definition that reaches the step, found where the
+        // test for a later one looked)
+        // (a name the old run made, as a loop's points, is read by a new
+        // run that finds it made: the old run's writes predict it)
+        let written = writes.iter().flat_map(|&p| {
+            fold.steps[p as usize]
+                .recs
+                .iter()
+                .flat_map(|&q| r.rt.writes(q).iter().map(|(a, _)| a))
+                .filter(|a| predicts_alone(a))
+        });
+        let mut cand: Vec<Slot> = if alone {
+            predict
+                .iter()
+                .flat_map(|&p| fold.reads_of(p))
+                .chain(&dirty.missed)
+                .filter(|a| a.0 == Fam::PageNode)
+                .copied()
+                .collect()
+        } else {
+            predict
+                .iter()
+                .flat_map(|&p| fold.reads_of(p))
+                .chain(&dirty.missed)
+                .chain(written)
+                .filter(|a| checked(a))
+                .map(placed_as)
+                .collect()
+        };
+        if predict.len() > 1 || !writes.is_empty() || !dirty.missed.is_empty() {
+            // (the steps predicting it read much the same slots: each
+            // looked up once)
+            cand.sort_unstable();
+            cand.dedup();
+        }
+        let reads = cand
+            .into_iter()
+            .filter_map(|a| {
+                if a.0 == Fam::PageNode {
+                    Some((a, fold.reaching(&a, key)))
+                } else {
+                    fold.reaching_if_later(&a, key).map(|d| (a, d))
+                }
+            })
+            .collect();
+        // (a run past it that read a later definition stops: [`Watch`])
+        let last = predict
+            .iter()
+            .filter_map(|&p| r.st.step_commands.get(p as usize).copied())
+            .max();
+        let budget = last.unwrap_or(0).saturating_mul(2).saturating_add(10_000);
+        (key, old, reads, budget, alone)
+    };
+    let mut next = Vec::new();
+    if !alone {
+        save_stack_whole(tex, key, &mut next, rep);
+        nest_whole(tex, key, &mut next);
+        if tex.window() > 0 {
+            window_whole(tex, key, &mut next);
+        }
+    }
+    Placing {
+        key,
+        old,
+        found,
+        budget,
+        alone,
+        next,
+    }
+}
+
+/// The values a step's run is placed at ([`run_step`]): the definitions
+/// reaching it of the slots in `found` and `next` not `set` yet, where a
+/// later definition holds the arrays (`set` takes them), and the object
+/// table whole with its lists' heads or the fonts' state the first time
+/// they are among them ([`objs_whole`]).
+#[allow(clippy::too_many_arguments)]
+pub(super) fn place_values<H: Host>(
+    tex: &mut Tex<H, SsaTracker>,
+    key: u64,
+    alone: bool,
+    found: &mut Vec<(Slot, Option<Def>)>,
+    next: &mut Vec<Slot>,
+    set: &mut BTreeSet<Slot>,
+    objs_placed: &mut bool,
+    rep: &mut RebuildReport,
+) -> Vec<(Slot, SVal)> {
+    // (the object table placed whole with its lists' heads or the fonts'
+    // state: [`objs_whole`])
+    if !alone && !*objs_placed && found.iter().map(|(a, _)| a).chain(&*next).any(object_table) {
+        *objs_placed = true;
+        objs_whole(tex, key, next, rep);
+    }
+    // the definitions that reach the step, where a later one is in the
+    // arrays
+    let mut r = tex.tracker.rec.borrow_mut();
+    let rr = &mut *r;
+    let mut vals = Vec::with_capacity(found.len() + next.len());
+    for (a, d) in found.drain(..) {
+        if set.insert(a)
+            && let Some(v) = value_of(tex, rr, a, d, rep)
+        {
+            vals.push((a, v));
+        }
+    }
+    for a in next.drain(..) {
+        if set.insert(a)
+            && let Some(v) = reaching(tex, rr, a, key, rep)
+        {
+            vals.push((a, v));
+        }
+    }
+    vals
+}
+
+/// What [`after_close`] needs of a step's run closed in the fold.
+pub(super) struct Closing<'a> {
+    pub(super) j: StepId,
+    pub(super) key: u64,
+    pub(super) old: BTreeMap<Slot, Version>,
+    pub(super) new: BTreeMap<Slot, Version>,
+    pub(super) alone: bool,
+    pub(super) set: BTreeSet<Slot>,
+    pub(super) touched: BTreeSet<Slot>,
+    pub(super) predict: &'a [StepId],
+    pub(super) c0: u64,
+}
+
+/// A step's run closed in the fold (its definitions `new` in place of
+/// `old`): the readers of each definition that changed marked dirty, up
+/// to the slot's next definition, and the arrays holding the latest
+/// definitions again. Its result ([`run_step`]).
+pub(super) fn after_close<H: Host>(
+    tex: &mut Tex<H, SsaTracker>,
+    c: Closing<'_>,
+    dirty: &mut Dirty,
+    rep: &mut RebuildReport,
+) -> InputState {
+    let Closing {
+        j,
+        key,
+        old,
+        new,
+        alone,
+        set,
+        mut touched,
+        predict,
+        c0,
+    } = c;
     let defs_before = rep.defs_changed;
     let mut changed = Vec::new();
     let vals = if alone {
@@ -4587,4 +5209,981 @@ pub(crate) fn edits_from(rec: &Recorder, k: usize) -> Edits {
             (e.old.clone(), e.new.clone(), hunks)
         })
         .collect()
+}
+
+/// A step's run on a worker, waiting for the step's turn (DESIGN 3.10,
+/// "Commit"): the step before it and that step's result when its round
+/// began (the run began there), the build's tables' lengths then (the
+/// worker's own ids are numbered from them), the fold's numbering then,
+/// and the run.
+#[cfg(feature = "std")]
+struct Ahead {
+    prev: StepId,
+    tag: (usize, usize, usize),
+    lens: super::par::BaseLens,
+    renumbered: u32,
+    done: super::par::Done,
+}
+
+/// A rebuild's runs on workers, by step.
+#[cfg(feature = "std")]
+#[derive(Default)]
+pub(super) struct Spec {
+    ran: BTreeMap<StepId, Ahead>,
+}
+
+#[cfg(not(feature = "std"))]
+#[derive(Default)]
+pub(super) struct Spec;
+
+/// The fewest commands a step's last run ran for it to go to a worker,
+/// and the fewest a round's steps ran together: a smaller round costs
+/// more than it saves.
+#[cfg(feature = "std")]
+const SPEC_MIN: u64 = 64;
+#[cfg(feature = "std")]
+const ROUND_MIN: u64 = 4_000;
+
+/// Whether this build's steps may run on workers: more than one, and
+/// none of what a worker's run cannot hand over (check mode, the entry
+/// check, `SyncTeX`, display lists, glyph origins, timing).
+pub(super) fn may_speculate<H: Host>(tex: &Tex<H, SsaTracker>) -> bool {
+    tex.tracker.par.workers.get() > 1
+        && cfg!(feature = "std")
+        && !tex.tracker.check
+        && !tex.tracker.timed
+        && !super::ENTRY_CHECK.load(core::sync::atomic::Ordering::Relaxed)
+        && !tex.synctex_on()
+        && tex.dl.is_none()
+        && tex.org.is_none()
+}
+
+impl Spec {
+    /// Drop every run waiting (the steps they ran are gone).
+    fn clear<H: Host>(&mut self, tex: &Tex<H, SsaTracker>) {
+        #[cfg(feature = "std")]
+        for (_, a) in core::mem::take(&mut self.ran) {
+            let mut st = tex.tracker.par.stats.borrow_mut();
+            match &a.done.ran {
+                Ok(r) => st.not_taken("its step gone", r.commands),
+                Err(_) => st.tainted += 1,
+            }
+            drop(st);
+            recycle(tex, a.done);
+        }
+        #[cfg(not(feature = "std"))]
+        let _ = tex;
+    }
+}
+
+/// A worker's tracker back among the shells.
+#[cfg(feature = "std")]
+fn recycle<H: Host>(tex: &Tex<H, SsaTracker>, d: super::par::Done) {
+    recycle_tracker(tex, d.tracker);
+}
+
+/// A worker's tracker back among the shells (as many as two a worker).
+#[cfg(feature = "std")]
+pub(super) fn recycle_tracker<H: Host>(tex: &Tex<H, SsaTracker>, t: Option<Box<SsaTracker>>) {
+    if let Some(t) = t {
+        let mut shells = tex.tracker.par.shells.borrow_mut();
+        if shells.len() < 2 * tex.tracker.par.workers.get() {
+            shells.push(*t);
+        }
+    }
+}
+
+/// A round (DESIGN 3.10, "Threads"): step `j`, whose turn it is, and the
+/// dirty steps after it, up to twice the workers, each run on a worker
+/// from the entry its old run predicts (the step before it's result,
+/// the definitions reaching it placed), all at once; the runs wait in
+/// `spec` for their steps' turns.
+#[cfg(feature = "std")]
+fn speculate<H: Host>(
+    tex: &mut Tex<H, SsaTracker>,
+    j: StepId,
+    dirty: &Dirty,
+    rep: &mut RebuildReport,
+    spec: &mut Spec,
+) {
+    use super::par;
+    let workers = tex.tracker.par.workers.get();
+    if spec.ran.contains_key(&j) {
+        return;
+    }
+    let (spec_min, round_min) = tex
+        .tracker
+        .par
+        .thresholds
+        .get()
+        .unwrap_or((SPEC_MIN, ROUND_MIN));
+    let cands: Vec<StepId> = {
+        let r = tex.tracker.rec.borrow();
+        let fold = &r.rt.fold;
+        let cost = |s: StepId| r.st.step_commands.get(s as usize).copied().unwrap_or(0);
+        // (a step its marks will keep, each definition reaching it as it
+        // read it: none of its run is wanted)
+        let kept = |s: StepId| {
+            let key = fold.steps[s as usize].key;
+            dirty.why.get(&s).is_some_and(|w| {
+                w.as_ref().is_some_and(|reads| {
+                    reads
+                        .iter()
+                        .all(|(a, v)| reaching_version(&r, a, key) == Some(*v))
+                })
+            })
+        };
+        let mut c = alloc::vec![j];
+        for (s, _) in dirty.steps() {
+            if c.len() >= workers * 2 {
+                break;
+            }
+            if s == j
+                || spec.ran.contains_key(&s)
+                || !fold.steps[s as usize].live
+                || cost(s) < spec_min
+                || kept(s)
+            {
+                continue;
+            }
+            c.push(s);
+        }
+        let total: u64 = c.iter().map(|&s| cost(s)).sum();
+        if c.len() < 2 || total < round_min {
+            return;
+        }
+        c
+    };
+    let snap = {
+        let r = tex.tracker.rec.borrow();
+        par::Snapshot::take(&tex.tracker, &r)
+    };
+    // (the tables' chunks written since the last snapshot made shared
+    // once, not copied for each view)
+    tex.eqtb.commit();
+    tex.eqtb_obj.commit();
+    tex.hash.commit();
+    tex.save_stack.commit();
+    let (tx, rx) = std::sync::mpsc::channel::<par::Msg>();
+    let mut replies = Vec::new();
+    let mut jobs = Vec::new();
+    let mut meta = Vec::new();
+    let renumbered = tex.tracker.rec.borrow().rt.fold.renumbered;
+    for s in cands {
+        let start = {
+            let r = tex.tracker.rec.borrow();
+            let fold = &r.rt.fold;
+            fold.position(s)
+                .filter(|&p| p > 0)
+                .map(|p| fold.order[p - 1])
+                .and_then(|prev| Some((prev, r.st.steps.end(prev)?, r.st.steps.end_tag(prev)?)))
+        };
+        let Some((prev, input, tag)) = start else {
+            continue;
+        };
+        let Placing {
+            key,
+            mut found,
+            budget,
+            alone,
+            mut next,
+            ..
+        } = placing(tex, s, &[s], &[], dirty, rep);
+        if alone {
+            continue;
+        }
+        let mut set = BTreeSet::new();
+        let mut objs = false;
+        let vals = place_values(
+            tex, key, alone, &mut found, &mut next, &mut set, &mut objs, rep,
+        );
+        // (a stream's file is put in the source as it is now by the
+        // build's edits, which a worker has not)
+        if vals.iter().any(|(a, _)| a.0 == Fam::Read) {
+            continue;
+        }
+        let (rtx, rrx) = std::sync::mpsc::channel();
+        let host = par::WorkerHost {
+            job: jobs.len(),
+            ask: tx.clone(),
+            reply: rrx,
+            now: tex.host.now(),
+            notes: tex.host.notes(),
+            streams: tex.host.wants_streams(),
+            commands: tex.host.runs_commands(),
+            events: Vec::new(),
+            tainted: None,
+            provisional: false,
+        };
+        let mut shell = tex
+            .tracker
+            .par
+            .shells
+            .borrow_mut()
+            .pop()
+            .unwrap_or_else(|| SsaTracker::new(Recorder::new()));
+        {
+            let r = tex.tracker.rec.borrow();
+            let salt = u32::try_from(r.rt.fold.steps[s as usize].salt).unwrap_or(s);
+            par::prepare(&mut shell, &tex.tracker, &r, &snap, key, salt);
+        }
+        let t = std::time::Instant::now();
+        let mut fork = tex.fork_with(host, shell);
+        tex.tracker.par.stats.borrow_mut().fork_ns +=
+            u64::try_from(t.elapsed().as_nanos()).unwrap_or(u64::MAX);
+        let hash = usize::try_from(crate::web::HASH_BASE).unwrap_or(0) + fork.hash.len();
+        if fork.tracker.stamps[0].len() != fork.eqtb.len()
+            || fork.tracker.stamps[1].len() != hash
+            || fork.tracker.sstamps.len() != fork.save_stack.len() + 16
+        {
+            fork.size_stamps();
+        }
+        replies.push(rtx);
+        meta.push((s, prev, tag));
+        jobs.push(par::Job {
+            idx: jobs.len(),
+            j: s,
+            tex: fork,
+            vals,
+            input,
+            budget,
+        });
+    }
+    if jobs.len() < 2 {
+        for job in jobs {
+            let mut t = job.tex;
+            let tr = core::mem::replace(&mut t.tracker, SsaTracker::new(Recorder::new()));
+            recycle_tracker(tex, Some(Box::new(tr)));
+        }
+        return;
+    }
+    let base = Arc::new(par::Base::lend(&mut tex.tracker.rec.borrow_mut().st));
+    let lens = base.lens();
+    for job in &jobs {
+        job.tex.tracker.rec.borrow_mut().st.base = Some(base.clone());
+    }
+    let n = jobs.len() as u64;
+    let t = std::time::Instant::now();
+    let dones = par::round(&mut tex.host, jobs, workers, tx, &rx, &replies);
+    tex.tracker.par.stats.borrow_mut().round_ns +=
+        u64::try_from(t.elapsed().as_nanos()).unwrap_or(u64::MAX);
+    for d in dones.iter().flatten() {
+        if let Some(t) = &d.tracker {
+            t.rec.borrow_mut().st.base = None;
+        }
+    }
+    par::Base::restore(base, &mut tex.tracker.rec.borrow_mut().st);
+    {
+        let mut st = tex.tracker.par.stats.borrow_mut();
+        st.rounds += 1;
+        st.runs += n;
+    }
+    for (d, (s, prev, tag)) in dones.into_iter().zip(meta) {
+        if let Some(done) = d {
+            spec.ran.insert(
+                s,
+                Ahead {
+                    prev,
+                    tag,
+                    lens,
+                    renumbered,
+                    done,
+                },
+            );
+        }
+    }
+}
+
+/// Why a worker's run cannot be taken by what it wrote, if it cannot:
+/// what is not put back by position must be the hash's and the pool's
+/// entries and their allocators (from where the build's are), the
+/// meanings' classes or the names, each with its value.
+#[cfg(feature = "std")]
+fn untakeable<H: Host>(tex: &Tex<H, SsaTracker>, ran: &super::par::Ran) -> Option<&'static str> {
+    // (the pool's end may differ: the run's strings move,
+    // `par::Remap::shift_strings`)
+    // (and with names placed by name, the count of the names in the
+    // extra region: `par::Remap::shift_names`)
+    let moved = tex.hash_used != ran.hash_used
+        || (!tex.tracker.names_by_name && tex.hash_high != ran.hash_high);
+    ran.export.writes().iter().find_map(|(a, v)| {
+        if positioned(a) {
+            if a.0 == Fam::Dvi {
+                Some("the DVI writer")
+            } else {
+                v.is_none().then_some("a write's value let go")
+            }
+        } else {
+            match a.0 {
+                Fam::Font if font_glue(a) && !tex.unicode => None,
+                Fam::Hash | Fam::HashNext | Fam::Pool | Fam::Alloc if v.is_none() => {
+                    Some("a write's value let go")
+                }
+                Fam::Hash | Fam::HashNext | Fam::Pool | Fam::Alloc if moved => {
+                    Some("the allocators moved")
+                }
+                Fam::Class | Fam::Name | Fam::Hash | Fam::HashNext | Fam::Pool | Fam::Alloc => None,
+                f => Some(cannot_take(f)),
+            }
+        }
+    })
+}
+
+/// Whether `a` is a font's interword glue: made from its `\fontdimen`s
+/// 2 to 4 when first wanted, and dropped when one of them is assigned
+/// (TeX §578), so a run that made it does as one that found it made.
+/// pdfTeX reads the `\fontdimen`s for it, not whether it was made
+/// (`Tex::font_space_glue`): its write is not one the build must take,
+/// which makes it again where it wants it. (`XeTeX`'s space adjustment
+/// reads whether it was made, `xmain.rs`.)
+#[cfg(feature = "std")]
+fn font_glue(a: &Slot) -> bool {
+    use crate::track::font;
+    a.0 == Fam::Font && a.1 % i64::from(font::FIELDS) == i64::from(font::GLUE)
+}
+
+/// The first of a run's reads `reads` (slot, version found) and meanings'
+/// classes `classes` that finds otherwise where the build is now, by its
+/// family (the reports' reason); `None` when every one holds.
+#[cfg(feature = "std")]
+fn first_miss<H: Host>(
+    tex: &Tex<H, SsaTracker>,
+    reads: &[(Slot, Version)],
+    classes: &[(i32, u8)],
+) -> Option<&'static str> {
+    let r = tex.tracker.rec.borrow();
+    let view = super::View { tex, rec: &r.st };
+    reads
+        .iter()
+        .find(|(a, v)| {
+            !matches!(a.0, Fam::Source | Fam::Line | Fam::Class)
+                && partex_ssa::Store::version(&view, &partex_ssa::Loc::State(*a)) != *v
+        })
+        .map(|(a, _)| found_otherwise(a))
+        .or_else(|| {
+            classes
+                .iter()
+                .any(|&(p, c)| tex.token_class_of(p) != c)
+                .then_some("a meaning's class found otherwise")
+        })
+}
+
+/// Why a read of `a` does not hold, by its family.
+#[cfg(feature = "std")]
+fn found_otherwise(a: &Slot) -> &'static str {
+    use crate::track::scalar::{HASH_HIGH, HASH_USED, STR_TOP};
+    match a.0 {
+        Fam::Eqtb => "an eqtb entry found otherwise",
+        Fam::Hash | Fam::HashNext => "a hash slot found otherwise",
+        Fam::Pool => "a string found otherwise",
+        Fam::Alloc if a.1 == i64::from(STR_TOP) => "the strings' end found otherwise",
+        Fam::Alloc if a.1 == i64::from(HASH_USED) || a.1 == i64::from(HASH_HIGH) => {
+            "the hash's end found otherwise"
+        }
+        Fam::Alloc => "a scalar found otherwise",
+        Fam::Name => "a name's place found otherwise",
+        Fam::Search => "a search found otherwise",
+        Fam::Load => "a file found otherwise",
+        Fam::List => "the nest found otherwise",
+        Fam::Save => "the save stack found otherwise",
+        Fam::Page | Fam::PageNode => "the page found otherwise",
+        Fam::Cond => "the conditionals found otherwise",
+        Fam::Mark => "a mark found otherwise",
+        Fam::Pdf | Fam::PdfObj | Fam::PdfName | Fam::PdfNum => "the PDF writer found otherwise",
+        Fam::Font | Fam::FontTable => "a font found otherwise",
+        Fam::Glyphs => "glyphs found otherwise",
+        Fam::Out | Fam::Read => "a stream found otherwise",
+        _ => "a read found otherwise",
+    }
+}
+
+/// Why a run's write of family `f` cannot be taken.
+#[cfg(feature = "std")]
+fn cannot_take(f: Fam) -> &'static str {
+    match f {
+        Fam::Font | Fam::FontTable => "a font's field written",
+        Fam::Hyph | Fam::HyphWord => "hyphenation written",
+        Fam::Str => "a string's search written",
+        Fam::Unknown => "a write of no family",
+        _ => "a write the build cannot take",
+    }
+}
+
+/// What of `writes` is not put back by position, to store in the build's
+/// arrays: the pool's strings in order, then the allocators (the glues'
+/// lineage only forward), then the hash.
+#[cfg(feature = "std")]
+fn unpositioned<H: Host>(
+    tex: &Tex<H, SsaTracker>,
+    writes: &[(Slot, Option<SVal>)],
+) -> Vec<(Slot, SVal)> {
+    use crate::track::scalar::GLUE_LINEAGE;
+    let rank = |a: &Slot| match a.0 {
+        Fam::Pool => 0,
+        Fam::Alloc => 1,
+        _ => 2,
+    };
+    let mut kept: Vec<(Slot, SVal)> = writes
+        .iter()
+        .filter(|(a, _)| {
+            !positioned(a) && matches!(a.0, Fam::Hash | Fam::HashNext | Fam::Pool | Fam::Alloc)
+        })
+        .filter_map(|(a, v)| Some((*a, v.clone()?)))
+        .collect();
+    kept.sort_by_key(|(a, _)| (rank(a), a.1));
+    let lineage = Slot(Fam::Alloc, i64::from(GLUE_LINEAGE));
+    let now = super::scalar_get(tex, GLUE_LINEAGE).unwrap_or(0);
+    kept.retain(|(a, v)| {
+        *a != lineage || !matches!(v.1.as_deref(), Some(super::SValue::Int(x)) if *x <= now)
+    });
+    kept
+}
+
+/// A cold build's guessed step taken into the fold as the build's next
+/// (`cold.rs`, DESIGN 3.10, "Cold builds"): its records, its definitions
+/// in the arrays (those the build can take), the input left where it
+/// ended, as if the build had run it. Its key and id if it is dirty: it
+/// did not begin where the build's input was, or read a slot holding
+/// otherwise there, or wrote what the build cannot take as it is. `w` is
+/// the worker's tracker (its tables, its answers), `lens` the build's
+/// tables' lengths when its run began.
+///
+/// A dirty step that only read slots holding otherwise comes with those
+/// reads ([`Why`]) and its run's host events: what holds there may be an
+/// earlier step's that is not yet the build's (a run cut short, a group
+/// it left open), and once the rebuild has made the steps before it
+/// exact, it is kept if each reaches it as it read it (`run_dirty`),
+/// its events said then.
+#[cfg(feature = "std")]
+pub(super) fn cold_guess<H: Host>(
+    tex: &mut Tex<H, SsaTracker>,
+    w: &SsaTracker,
+    lens: super::par::BaseLens,
+    s: super::par::ChunkStep,
+) -> Option<ColdDirty> {
+    use super::par;
+    let here = InputState::of(tex, false);
+    // (a run's first step after a gap: where it began, for the rebuild's
+    // runs through the gap to meet)
+    let gap = (!same_start(tex, &s.start, &here)).then(|| s.start.clone());
+    let mut why = gap.is_some().then_some("its start is not the build's");
+    // (what only a run again settles: else its reads, looked at again)
+    let mut hard = false;
+    {
+        let r = tex.tracker.rec.borrow();
+        if !w
+            .worker
+            .as_deref()
+            // (the step goes in last: after every step of the fold)
+            .is_some_and(|wk| par::answers_hold(&tex.tracker, &r, wk, u64::MAX))
+        {
+            why = why.or(Some("the fonts' or the names' makers moved"));
+            hard = true;
+        }
+    }
+    let cannot = untakeable(tex, &s.ran);
+    hard |= cannot.is_some();
+    why = why.or(cannot);
+    let map = {
+        let wr = w.rec.borrow();
+        let mut r = tex.tracker.rec.borrow_mut();
+        let mut m = par::Remap::new(&wr.st, lens, &mut r.st);
+        relocate(tex, &mut m, &s.ran);
+        m
+    };
+    let reads: Vec<(Slot, Version)> = s
+        .ran
+        .export
+        .versioned()
+        .map(|(a, v)| {
+            let b = map.slot(*a);
+            (b, map.read_version(&b, v))
+        })
+        .collect();
+    // (only reads holding otherwise, or its start: those reads, to look at
+    // again once the start is met)
+    let mut misses: Why = None;
+    if !hard {
+        why = why.or_else(|| first_miss(tex, &reads, &s.ran.classes));
+        if why.is_some()
+            && !s
+                .ran
+                .classes
+                .iter()
+                .any(|&(p, c)| tex.token_class_of(p) != c)
+        {
+            misses = Some(missed_reads(tex, &reads));
+        }
+    }
+    let par::ChunkStep {
+        ran,
+        salt,
+        made,
+        load_sets,
+        written,
+        events,
+        ..
+    } = s;
+    let par::Ran {
+        mut export,
+        mut end,
+        mut logs,
+        commands,
+        generation,
+        ..
+    } = ran;
+    map.export(&mut export);
+    patch_nest(tex, &mut export);
+    end.shift_strings(&map);
+    logs.map_loads(|i| map.load(i));
+    let writes: Vec<(Slot, Option<SVal>)> = export.writes();
+    let (key, id) = {
+        let mut r = tex.tracker.rec.borrow_mut();
+        let rr = &mut *r;
+        let id = rr.rt.begin_step();
+        if let Some(st) = rr.rt.fold.steps.get_mut(id as usize) {
+            st.salt = u64::from(salt);
+        }
+        rr.st.steps.run_begins(None);
+        rr.rt.import_step(id, export);
+        rr.st.steps.put_logs(logs);
+        for (l, (v, k)) in load_sets {
+            rr.st.set_load(map.load(l), v, k);
+        }
+        rr.st.written.extend(written);
+        rr.st.generation += generation;
+        let c = &mut rr.st.step_commands;
+        if c.len() <= id as usize {
+            c.resize(id as usize + 1, 0);
+        }
+        c[id as usize] = commands;
+        let key = rr.rt.fold.steps[id as usize].key;
+        step_closed(rr, id, end.clone());
+        (key, id)
+    };
+    for (p, n) in made {
+        tex.tracker.note_made(key, p, map.name(n));
+    }
+    tex.commands += commands;
+    // (what the host is to see happen, for a step that holds: a dirty
+    // one's run again says it, or the rebuild once it is kept)
+    let mut held = Vec::new();
+    if why.is_none() {
+        super::par::replay_events(&mut tex.host, events);
+    } else if misses.is_some() {
+        held = events;
+    }
+    // (the arrays as its run here would leave them: what is not put back
+    // by position only if the build can take it as it is)
+    if cannot.is_none() {
+        let kept = unpositioned(tex, &writes);
+        put(tex, &kept);
+    }
+    let mine: Vec<(Slot, SVal)> = writes
+        .into_iter()
+        .filter(|(a, _)| positioned(a))
+        .filter_map(|(a, v)| Some((a, v?)))
+        .collect();
+    put(tex, &mine);
+    end.set(tex);
+    tex.at_checkpoint = true;
+    let mut st = tex.tracker.par.stats.borrow_mut();
+    match why {
+        None => {
+            st.taken += 1;
+            st.commands_taken += commands;
+            None
+        }
+        Some(w) => {
+            st.not_taken(w, commands);
+            Some(ColdDirty {
+                key,
+                id,
+                why: misses,
+                events: held,
+                start: gap,
+            })
+        }
+    }
+}
+
+/// A worker's run `x` with the nest it left given the build's fields
+/// where it wrote none. The nest's value (`list::COUNT`) holds the
+/// enclosing levels whole, but a level's fields are slots of their own,
+/// which a step that pushes a level does not read (`nest.rs`): a run made
+/// elsewhere (from a cold build's base, from a predicted entry) left the
+/// fields it did not touch as it found them there, which the build's may
+/// not be. Its own writes stand; the rest are the build's, as a run here
+/// would have left them.
+#[cfg(feature = "std")]
+fn patch_nest<H: Host>(tex: &Tex<H, SsaTracker>, x: &mut partex_ssa::export::StepExport<TexSsa>) {
+    use crate::track::list::{COUNT, STRIDE};
+    let nest = Slot(Fam::List, i64::from(COUNT));
+    if !x
+        .recs
+        .iter()
+        .any(|r| r.writes.iter().any(|(a, _)| *a == nest))
+    {
+        return;
+    }
+    let written: BTreeSet<i64> = x
+        .recs
+        .iter()
+        .flat_map(|r| r.writes.iter())
+        .filter(|(a, _)| a.0 == Fam::List)
+        .map(|(a, _)| a.1)
+        .collect();
+    for r in &mut x.recs {
+        for (a, v) in &mut r.writes {
+            if *a != nest {
+                continue;
+            }
+            let Some(sv) = v.as_ref() else { continue };
+            let Some(super::SValue::Nest(n)) = sv.1.as_deref() else {
+                continue;
+            };
+            let mut m = n.clone();
+            let mut changed = false;
+            for (d, rec) in m.iter_mut().enumerate() {
+                let Some(src) = tex.level_at_depth(d) else {
+                    continue;
+                };
+                for f in 0..COUNT {
+                    let i = i64::from(u32::try_from(d).unwrap_or(u32::MAX) * STRIDE + u32::from(f));
+                    if written.contains(&i) {
+                        continue;
+                    }
+                    if crate::nest::field_version(rec, f) != crate::nest::field_version(src, f) {
+                        crate::nest::copy_field(rec, src, f);
+                        changed = true;
+                    }
+                }
+            }
+            if changed {
+                *v = Some(SVal(sv.0, Some(Arc::new(super::SValue::Nest(m)))));
+            }
+        }
+    }
+}
+
+/// A cold build's guessed step that is dirty ([`cold_guess`]).
+#[cfg(feature = "std")]
+pub(super) struct ColdDirty {
+    pub(super) key: u64,
+    pub(super) id: StepId,
+    /// The reads that held otherwise, if nothing else made it dirty.
+    pub(super) why: Why,
+    /// Its run's host events, with `why`.
+    pub(super) events: Vec<super::par::HostEvent>,
+    /// Where its run began, if not where the step before it ended.
+    pub(super) start: Option<InputState>,
+}
+
+/// A worker's run `ran` relocated where the build is (DESIGN "Parallel
+/// builds", relocation): its strings numbered from the build's pool's
+/// end, and with names placed by name, its count of the names in the
+/// hash's extra region moved by the build's.
+#[cfg(feature = "std")]
+fn relocate<H: Host>(tex: &Tex<H, SsaTracker>, map: &mut super::par::Remap, ran: &super::par::Ran) {
+    let to = strings_end(&ran.export.writes(), ran.str_ptr);
+    map.shift_strings(ran.str_ptr, to, tex.str_ptr);
+    if tex.tracker.names_by_name {
+        map.shift_names(i64::from(tex.hash_high) - i64::from(ran.hash_high));
+    }
+}
+
+/// Where the pool ends after a run that began with it ending at `from`,
+/// by its writes: past the last string it wrote, or where it left the
+/// pool's end.
+#[cfg(feature = "std")]
+fn strings_end(writes: &[(Slot, Option<SVal>)], from: usize) -> usize {
+    use crate::track::scalar::STR_TOP;
+    writes.iter().fold(from, |end, (a, v)| match a.0 {
+        Fam::Pool => end.max(usize::try_from(a.1 + 1).unwrap_or(0)),
+        Fam::Alloc if a.1 == i64::from(STR_TOP) => match v.as_ref().and_then(|v| v.1.as_deref()) {
+            Some(super::SValue::Int(x)) => end.max(usize::try_from(*x).unwrap_or(0)),
+            _ => end,
+        },
+        _ => end,
+    })
+}
+
+/// Each of `reads` that holds otherwise where the build is now (the
+/// families [`first_miss`] looks at).
+#[cfg(feature = "std")]
+fn missed_reads<H: Host>(
+    tex: &Tex<H, SsaTracker>,
+    reads: &[(Slot, Version)],
+) -> Vec<(Slot, Version)> {
+    let r = tex.tracker.rec.borrow();
+    let view = super::View { tex, rec: &r.st };
+    reads
+        .iter()
+        .filter(|(a, v)| {
+            !matches!(a.0, Fam::Source | Fam::Line | Fam::Class)
+                && partex_ssa::Store::version(&view, &partex_ssa::Loc::State(*a)) != *v
+        })
+        .copied()
+        .collect()
+}
+
+/// Where the fold's last live step ended (`cold.rs`).
+#[cfg(feature = "std")]
+pub(super) fn fold_tail<H: Host>(tex: &Tex<H, SsaTracker>) -> Option<InputState> {
+    let r = tex.tracker.rec.borrow();
+    let s = *r.rt.fold.order.last()?;
+    r.st.steps.end(s)
+}
+
+/// The slots `set` (placed for a run that did not happen) back at their
+/// latest definitions.
+#[cfg(feature = "std")]
+fn unplace<H: Host>(tex: &mut Tex<H, SsaTracker>, set: &BTreeSet<Slot>, rep: &mut RebuildReport) {
+    let vals = {
+        let mut r = tex.tracker.rec.borrow_mut();
+        let rr = &mut *r;
+        with_levels(tex, set.iter().copied(), |a| {
+            latest(tex, rr, a, StepId::MAX, rep)
+        })
+    };
+    put(tex, &vals);
+}
+
+/// Step `j`'s turn, its run made on a worker (`a`): taken as its run if
+/// each slot it read from outside it holds there what it read, once the
+/// build has placed it as its own run would be placed (DESIGN 3.10,
+/// "Commit"), as a run of the step made here (`run_step`) is taken; the
+/// step's result. `Err`: why not; the step then runs here.
+#[cfg(feature = "std")]
+fn commit<H: Host>(
+    tex: &mut Tex<H, SsaTracker>,
+    j: StepId,
+    prev: StepId,
+    a: Ahead,
+    dirty: &mut Dirty,
+    rep: &mut RebuildReport,
+) -> Result<InputState, (&'static str, u64)> {
+    use super::par;
+    let Ahead {
+        prev: p0,
+        tag,
+        lens,
+        renumbered,
+        done,
+    } = a;
+    let par::Done {
+        tracker: w,
+        events,
+        ran,
+        ..
+    } = done;
+    let w = w.ok_or(("a panic", 0))?;
+    let ran = match ran {
+        Ok(r) => r,
+        Err(e) => {
+            recycle_tracker(tex, Some(w));
+            return Err((e, 0));
+        }
+    };
+    let cost = ran.commands;
+    let shell = |tex: &Tex<H, SsaTracker>, w: Box<SsaTracker>| recycle_tracker(tex, Some(w));
+    let checked_start = {
+        let r = tex.tracker.rec.borrow();
+        if p0 != prev || r.st.steps.end_tag(prev) != Some(tag) {
+            Err("its start moved")
+        } else if r.rt.fold.renumbered != renumbered {
+            Err("the keys made again")
+        } else if !w.worker.as_deref().is_some_and(|wk| {
+            let key = r.rt.fold.steps.get(j as usize).map_or(0, |s| s.key);
+            par::answers_hold(&tex.tracker, &r, wk, key)
+        }) {
+            Err("the fonts' or the names' makers moved")
+        } else {
+            Ok(())
+        }
+    };
+    if let Err(e) = checked_start {
+        shell(tex, w);
+        return Err((e, cost));
+    }
+    if let Some(e) = untakeable(tex, &ran) {
+        shell(tex, w);
+        return Err((e, cost));
+    }
+    let map = {
+        let wr = w.rec.borrow();
+        let mut r = tex.tracker.rec.borrow_mut();
+        let mut m = par::Remap::new(&wr.st, lens, &mut r.st);
+        relocate(tex, &mut m, &ran);
+        m
+    };
+    // placed as its run here would be, the misses its run would meet
+    // placed too
+    let Placing {
+        key,
+        old,
+        mut found,
+        alone,
+        mut next,
+        ..
+    } = placing(tex, j, &[j], &[], dirty, rep);
+    if alone {
+        shell(tex, w);
+        return Err(("the fold's last step", cost));
+    }
+    let reads: Vec<(Slot, Version)> = ran
+        .export
+        .versioned()
+        .map(|(a, v)| {
+            let b = map.slot(*a);
+            (b, map.read_version(&b, v))
+        })
+        .collect();
+    let mut set = BTreeSet::new();
+    let mut objs = false;
+    let mut left = true;
+    for _ in 0..8 {
+        let vals = place_values(
+            tex, key, false, &mut found, &mut next, &mut set, &mut objs, rep,
+        );
+        rep.positioned += vals.len();
+        put(tex, &vals);
+        let r = tex.tracker.rec.borrow();
+        let fold = &r.rt.fold;
+        let classes = ran
+            .classes
+            .iter()
+            .map(|&(p, _)| Slot(Fam::Eqtb, i64::from(p)));
+        let mut miss: Vec<Slot> = reads
+            .iter()
+            .map(|x| x.0)
+            .chain(classes)
+            .filter(|a| checked(a) && !set.contains(&placed_as(a)) && later(fold, a, key))
+            .map(|a| placed_as(&a))
+            .collect();
+        if miss.is_empty() {
+            left = false;
+            break;
+        }
+        miss.sort_unstable();
+        miss.dedup();
+        next = miss;
+    }
+    let miss = if left {
+        Some("it read later definitions")
+    } else {
+        first_miss(tex, &reads, &ran.classes)
+    };
+    if let Some(why) = miss {
+        unplace(tex, &set, rep);
+        shell(tex, w);
+        return Err((why, cost));
+    }
+    // taken: as `run_step` closes a run made here
+    rep.steps_run += 1;
+    let c0 = tex.commands();
+    drop_outputs(tex);
+    tex.log_file.buf.clear();
+    for f in &mut tex.write_file {
+        f.buf.clear();
+    }
+    let par::Ran {
+        mut export,
+        mut end,
+        mut logs,
+        commands,
+        generation,
+        ..
+    } = ran;
+    map.export(&mut export);
+    patch_nest(tex, &mut export);
+    end.shift_strings(&map);
+    logs.map_loads(|i| map.load(i));
+    // (the slots it wrote that no later step defines: the arrays hold its
+    // values, as its run here would leave them; and what is not put back
+    // by position: the pool's strings in order, then the allocators and
+    // the hash)
+    let writes: Vec<(Slot, Option<SVal>)> = export.writes();
+    let kept = unpositioned(tex, &writes);
+    let (wst_sets, wst_written, made_names) = {
+        let wr = w.rec.borrow();
+        let made: Vec<(i32, u32)> = w
+            .worker
+            .as_deref()
+            .map(|wk| wk.made_names.borrow().clone())
+            .unwrap_or_default();
+        (wr.st.load_sets.clone(), wr.st.written.clone(), made)
+    };
+    {
+        let mut r = tex.tracker.rec.borrow_mut();
+        let rr = &mut *r;
+        rr.rt.rerun_step(j);
+        rr.st.steps.run_begins(Some(j));
+        rr.rt.import_step(j, export);
+        rr.st.steps.put_logs(logs);
+        for (id, (v, k)) in wst_sets {
+            rr.st.set_load(map.load(id), v, k);
+        }
+        rr.st.written.extend(wst_written);
+        rr.st.generation += generation;
+        let c = &mut rr.st.step_commands;
+        if c.len() <= j as usize {
+            c.resize(j as usize + 1, 0);
+        }
+        c[j as usize] = commands;
+    }
+    for (p, id) in made_names {
+        tex.tracker.note_made(key, p, map.name(id));
+    }
+    tex.commands += commands;
+    super::par::replay_events(&mut tex.host, events);
+    put(tex, &kept);
+    let new = {
+        let mut r = tex.tracker.rec.borrow_mut();
+        let rr = &mut *r;
+        let d = defs(&rr.rt, j);
+        let stores = step_closed(rr, j, end);
+        mark_store_readers(rr, &stores, key, dirty, rep);
+        rr.st.steps.glyph_dirty.extend(
+            old.keys()
+                .chain(d.keys())
+                .filter(|a| a.0 == Fam::Glyphs)
+                .map(|a| a.1),
+        );
+        d
+    };
+    // (its definitions no later step's hides: in the arrays, as its run
+    // here leaves them)
+    let mine: Vec<(Slot, SVal)> = {
+        let r = tex.tracker.rec.borrow();
+        let fold = &r.rt.fold;
+        writes
+            .into_iter()
+            .filter(|(a, _)| positioned(a) && fold.latest(a).is_some_and(|d| d.step == j))
+            .filter_map(|(a, v)| Some((a, v?)))
+            .collect()
+    };
+    put(tex, &mine);
+    {
+        let mut st = tex.tracker.par.stats.borrow_mut();
+        st.taken += 1;
+        st.commands_taken += commands;
+    }
+    shell(tex, w);
+    Ok(after_close(
+        tex,
+        Closing {
+            j,
+            key,
+            old,
+            new,
+            alone: false,
+            set,
+            touched: BTreeSet::new(),
+            predict: &[j],
+            c0,
+        },
+        dirty,
+        rep,
+    ))
 }

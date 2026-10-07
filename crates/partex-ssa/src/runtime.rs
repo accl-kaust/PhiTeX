@@ -332,13 +332,13 @@ pub struct Runtime<M: Machine> {
     pub(crate) recs: Vec<Option<Record<M>>>,
     /// The records' writes.
     pub(crate) wa: Writes<M>,
-    free: Vec<RecId>,
+    pub(crate) free: Vec<RecId>,
     pub(crate) memo: Table<Version, Cands>,
-    dedup: Table<Version, RecId>,
-    roots: VecDeque<Vec<RecId>>,
+    pub(crate) dedup: Table<Version, RecId>,
+    pub(crate) roots: VecDeque<Vec<RecId>>,
     streams: PMap<M::Addr, Stream<M::Val>>,
-    live: usize,
-    live_after_gc: usize,
+    pub(crate) live: usize,
+    pub(crate) live_after_gc: usize,
     pub stats: Stats,
     pub(crate) start_phi: PMap<M::Addr, Stream<M::Val>>,
     pub(crate) log: Vec<TripLog<M>>,
@@ -349,14 +349,14 @@ pub struct Runtime<M: Machine> {
     pub fold: crate::fold::Fold<M>,
     /// Per record: its subtree has no effects or stores, so the link
     /// passes it without reading it.
-    inert: Vec<bool>,
+    pub(crate) inert: Vec<bool>,
     /// Per record: it is never looked up (a lean frame's,
     /// [`Runtime::begin_lean`]: a step's), so a kept build's roots do not
     /// keep it, only its children ([`Runtime::collect`]).
-    lean: Vec<bool>,
+    pub(crate) lean: Vec<bool>,
     /// Per lean record: the step whose run made it, and whether another
     /// step's run made it too ([`Runtime::bare_writes`]).
-    owner: Vec<(u32, bool)>,
+    pub(crate) owner: Vec<(u32, bool)>,
     /// What the collections let go (a report: `PARTEX_SSA_MEM`): lean
     /// records and their writes, then the others'.
     freed: [(usize, usize); 2],
@@ -738,13 +738,25 @@ impl<M: Machine> Runtime<M> {
         writes: Vec<(M::Addr, Option<M::Val>)>,
         reads: u128,
     ) -> RecId {
+        rec.content = self.content_of(&rec, &writes, reads);
+        self.place(rec, writes)
+    }
+
+    /// A finished record's content version, its identity in the arena
+    /// ([`Runtime::intern`]): `reads` as there, its children in the arena.
+    fn content_of(
+        &self,
+        rec: &Record<M>,
+        writes: &[(M::Addr, Option<M::Val>)],
+        reads: u128,
+    ) -> Version {
         let mut h = Stable::new();
         h.word128(rec.name.0);
         h.word128(rec.result.version().0);
         h.word(rec.reads.len() as u64);
         h.word128(reads);
         h.word(writes.len() as u64);
-        for (a, v) in &writes {
+        for (a, v) in writes {
             h.word(hash64(a));
             h.word128(version_opt(v.as_ref()).0);
         }
@@ -771,7 +783,16 @@ impl<M: Machine> Runtime<M> {
                 }
             }
         }
-        rec.content = Version(h.finish128());
+        Version(h.finish128())
+    }
+
+    /// Put record `rec`, its content version made ([`Runtime::content_of`]),
+    /// in the arena, or find its equal.
+    pub(crate) fn place(
+        &mut self,
+        mut rec: Record<M>,
+        writes: Vec<(M::Addr, Option<M::Val>)>,
+    ) -> RecId {
         let step = self.open.step.map_or(u32::MAX, |s| s.0);
         if let Some(&id) = self.dedup.get(&rec.content) {
             // (a lean record whose writes let their contents go, made

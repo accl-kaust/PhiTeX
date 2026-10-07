@@ -21,6 +21,14 @@ phitex-ir = { path = "../phitex-ir" }
 partex-otf = { path = "../partex-otf" }
 # `XeTeX`'s picture transforms (`make_rotation`).
 libm = "0.2.16"
+# A cold build's paragraphs, the CST's (`ssa/cold.rs`, with `std`).
+phitex-syntax = { path = "../phitex-syntax", optional = true }
+
+[features]
+# `std` threads: an SSA build's steps on workers (`ssa/par.rs`, and a
+# cold build's paragraphs, `ssa/cold.rs`). Without it the crate is
+# `no_std` + `alloc` (wasm) and the steps run in turn.
+std = ["dep:phitex-syntax"]
 
 [lints]
 workspace = true
