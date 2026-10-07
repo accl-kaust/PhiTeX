@@ -3261,6 +3261,30 @@ PDF), `--copy-pdf`, `-o`, `phitex why`'s record. It keeps no store: each
   main 86eaad7. Until it is fixed, `watch --ssa`'s settled PDF can differ
   from a cold build's in its font numbers after such an edit.
 
+**Measured** (2026-10-07, accl job 7355, one node of 48 cores to itself,
+release build, the user's 323-page course with its settled `.aux`; two
+sessions of each, alternating; times from the save, renamed into place,
+to the rebuild's line; peak RSS of the watch after each step):
+
+| | machine `watch` | `watch --ssa` |
+|---|---|---|
+| cold build (to `Watching`) | 59.6 / 46.1 s, 2.8 GB | 82.1 / 74.8 s, 3.0 GB |
+| ch00: "This course exists" deleted (1 pass) | 2.35 / 2.18 s (rebuild 0.67 / 0.61 s) | 5.44 / 4.89 s (rebuild 4.3 / 3.9 s) |
+| ch15: a `\section` added: first pages | 14.2 / 12.5 s | 3.2 / 3.0 s |
+| ch15: settled (2 passes) | 20.6 / 18.4 s, 4.4 GB | 22.7 / 21.9 s, 3.5 GB |
+
+The machine watch's cold build saves no store here (a fresh cache);
+`--ssa`'s first trip runs the job once more slowly than a plain run (71M
+commands recorded). An edit's first pages come from one trip: the ch00
+edit, which moves no page, costs 789 steps (666k commands) on SSA against
+29 regions on the machine; the `\section`, which moves every later page
+of the chapter, shows its pages after 3 s on SSA (one trip),
+where the machine runs its first pass to the end of the cascade (12–14 s)
+before it writes a page. The settling trip (the `.aux`, `.toc` and `.out`
+changed) then costs both about as much. The settled files equal a cold
+`phitex build` of the final source, but for the font numbers above in
+`--ssa`'s PDF.
+
 ---
 
 ## 5. Performance, observability and the text form
