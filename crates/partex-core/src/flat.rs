@@ -415,15 +415,15 @@ impl<T: Copy + PartialEq + Default + partex_engine::persist::Persist + Send + Sy
 {
     fn save(&self, s: &mut partex_engine::persist::Saver) {
         if let Some(f) = &self.frozen {
-            f.parts.save(s);
+            partex_engine::persist::save_seq(&f.parts, s);
             f.len.save(s);
         } else {
-            self.shadow.refreshed(&self.live).parts.save(s);
+            partex_engine::persist::save_seq(&self.shadow.refreshed(&self.live).parts, s);
             self.live.len().save(s);
         }
     }
     fn load(l: &mut partex_engine::persist::Loader) -> Option<Self> {
-        let parts: Vec<Arc<[T]>> = partex_engine::persist::Persist::load(l)?;
+        let parts: Vec<Arc<[T]>> = partex_engine::persist::load_seq(l)?;
         // (the length: a checkpoint's parts hold its live prefix only)
         let len = partex_engine::persist::Persist::load(l)?;
         Some(Self {

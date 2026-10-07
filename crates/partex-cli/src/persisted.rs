@@ -34,7 +34,7 @@ use crate::store;
 const MIN_BLOB: usize = 64;
 
 /// What a root holds first (its layout's version).
-const ROOT_TAG: &[u8] = b"partex machine build/14";
+const ROOT_TAG: &[u8] = b"partex machine build/15";
 
 /// The store a watch saves to, and the save running.
 pub struct Keeper {
@@ -389,7 +389,6 @@ fn copy_build(b: &Build<Machine>) -> Build<Machine> {
 /// writing only what the store lacks, and encoding only what the last
 /// save or load did not know (runs of regions unchanged since are
 /// referred to by their blobs; values it knew by their addresses).
-#[allow(clippy::cast_precision_loss)] // (MB)
 fn save(dir: &std::path::Path, key: u128, b: &Build<Machine>, kept: &Mutex<Kept>) {
     let t = Instant::now();
     let (have, chunks, known) = {
@@ -422,6 +421,10 @@ fn save(dir: &std::path::Path, key: u128, b: &Build<Machine>, kept: &Mutex<Kept>
         }
     };
     let mut s = Saver::merkle_known(MIN_BLOB, have.hashes(), known);
+    let stats = std::env::var_os("PARTEX_STORE_DEBUG").is_some_and(|v| v == "2");
+    if stats {
+        s.merkle_stats();
+    }
     let sink = pack.clone();
     s.merkle_sink(Box::new(move |b| sink.borrow_mut().add(b)));
     s.raw(ROOT_TAG);
@@ -434,6 +437,9 @@ fn save(dir: &std::path::Path, key: u128, b: &Build<Machine>, kept: &Mutex<Kept>
         return;
     };
     let refs = s.merkle_roots();
+    if let Some(st) = s.take_merkle_stats() {
+        print_stats(&st);
+    }
     let next_known = s.take_known();
     let (_, root) = s.into_merkle();
     let t_ser = t.elapsed();
@@ -455,28 +461,7 @@ fn save(dir: &std::path::Path, key: u128, b: &Build<Machine>, kept: &Mutex<Kept>
                 k.known = next_known;
             }
             if debug() {
-                eprintln!(
-                    "phitex: store: saved in {:.1} ms ({:.1} ms to encode and write the new blobs, {knew} values known, {runs_reused} of {} runs as they were): {} live blobs, {} new ({:.1} MB, {:.1} MB kept), {:.1} MB moved, root {:.1} MB, {} packs",
-                    t.elapsed().as_secs_f64() * 1e3,
-                    t_ser.as_secs_f64() * 1e3,
-                    runs.len(),
-                    saved.live,
-                    saved.new_blobs,
-                    saved.new_raw_bytes as f64 / 1e6,
-                    saved.new_bytes as f64 / 1e6,
-                    saved.moved_bytes as f64 / 1e6,
-                    saved.root_bytes as f64 / 1e6,
-                    saved.packs,
-                );
-                let phases: Vec<String> = saved
-                    .phases
-                    .iter()
-                    .map(|(n, d)| format!("{n} {:.0}", d.as_secs_f64() * 1e3))
-                    .collect();
-                eprintln!(
-                    "phitex: store: writing, ms from its start: {}",
-                    phases.join(", ")
-                );
+                print_saved(&saved, t.elapsed(), t_ser, knew, runs_reused, runs.len());
             }
         }
         Err(e) => {
@@ -484,6 +469,95 @@ fn save(dir: &std::path::Path, key: u128, b: &Build<Machine>, kept: &Mutex<Kept>
                 eprintln!("phitex: store: saving failed: {e}");
             }
         }
+    }
+}
+
+/// What a save wrote, and its phases' times (`PARTEX_STORE_DEBUG`).
+#[allow(clippy::cast_precision_loss)] // (MB)
+fn print_saved(
+    saved: &store::Saved,
+    total: std::time::Duration,
+    t_ser: std::time::Duration,
+    knew: usize,
+    runs_reused: usize,
+    runs: usize,
+) {
+    eprintln!(
+        "phitex: store: saved in {:.1} ms ({:.1} ms to encode and write the new blobs, {knew} values known, {runs_reused} of {runs} runs as they were): {} live blobs, {} new ({:.1} MB, {:.1} MB kept), {:.1} MB moved, root {:.1} MB, {} packs",
+        total.as_secs_f64() * 1e3,
+        t_ser.as_secs_f64() * 1e3,
+        saved.live,
+        saved.new_blobs,
+        saved.new_raw_bytes as f64 / 1e6,
+        saved.new_bytes as f64 / 1e6,
+        saved.moved_bytes as f64 / 1e6,
+        saved.root_bytes as f64 / 1e6,
+        saved.packs,
+    );
+    let phases: Vec<String> = saved
+        .phases
+        .iter()
+        .map(|(n, d)| format!("{n} {:.0}", d.as_secs_f64() * 1e3))
+        .collect();
+    eprintln!(
+        "phitex: store: writing, ms from its start: {}; of the blobs' {:.0} ms, {:.0} keeping and {:.0} writing",
+        phases.join(", "),
+        t_ser.as_secs_f64() * 1e3,
+        saved.keeping.as_secs_f64() * 1e3,
+        saved.writing.as_secs_f64() * 1e3,
+    );
+}
+
+/// What the blobs a save wrote hold (`PARTEX_STORE_DEBUG=2`).
+#[allow(clippy::cast_precision_loss)] // (MB)
+fn print_stats(st: &partex_core::persist::Stats) {
+    let mut by: std::collections::BTreeMap<&str, partex_core::persist::StatRow> =
+        std::collections::BTreeMap::new();
+    for ((what, part), r) in &st.rows {
+        let e = by.entry(what).or_default();
+        if part.is_empty() {
+            e.new += r.new;
+            e.refs += r.refs;
+            e.same += r.same;
+            e.same_bytes += r.same_bytes;
+            e.known += r.known;
+            e.inline += r.inline;
+            e.inline_bytes += r.inline_bytes;
+        }
+        e.new_bytes += r.new_bytes;
+    }
+    let mut rows: Vec<_> = by.into_iter().collect();
+    rows.sort_by_key(|(_, r)| std::cmp::Reverse(r.new_bytes));
+    eprintln!(
+        "phitex: store: by type: new blobs, MB, refs (MB of them), same content (MB), known, inline (MB)"
+    );
+    for (what, r) in &rows {
+        eprintln!(
+            "  {:>8} {:>9.1} {:>10} ({:>7.1}) {:>8} ({:>7.1}) {:>9} {:>9} ({:>6.1})  {what}",
+            r.new,
+            r.new_bytes as f64 / 1e6,
+            r.refs,
+            r.refs as f64 * 17.0 / 1e6,
+            r.same,
+            r.same_bytes as f64 / 1e6,
+            r.known,
+            r.inline,
+            r.inline_bytes as f64 / 1e6,
+        );
+    }
+    let mut parts: Vec<_> = st
+        .rows
+        .iter()
+        .filter(|((_, p), r)| !p.is_empty() && r.new_bytes > 100_000)
+        .collect();
+    parts.sort_by_key(|(_, r)| std::cmp::Reverse(r.new_bytes));
+    eprintln!("phitex: store: by part (over 0.1 MB): MB, blobs");
+    for ((what, part), r) in parts.iter().take(60) {
+        eprintln!(
+            "  {:>9.1} {:>8}  {what} / {part}",
+            r.new_bytes as f64 / 1e6,
+            r.new
+        );
     }
 }
 

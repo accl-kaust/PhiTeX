@@ -382,6 +382,10 @@ pub struct Saved {
     pub live: usize,
     /// When each phase ended, from the start (for `PARTEX_STORE_DEBUG`).
     pub phases: Vec<(&'static str, std::time::Duration)>,
+    /// Time spent keeping (compressing) the new blobs' batches, and
+    /// writing them, while the saver waited.
+    pub keeping: std::time::Duration,
+    pub writing: std::time::Duration,
 }
 
 /// Bytes of references a save gathers into a frame of a pack's `.kids`
@@ -486,6 +490,7 @@ impl PackWriter {
         };
         let per = batch.len().div_ceil(threads).max(1);
         let compress = self.compress;
+        let t = std::time::Instant::now();
         let kept: Vec<Vec<(u128, Vec<u8>)>> = std::thread::scope(|sc| {
             let jobs: Vec<_> = batch
                 .chunks(per)
@@ -506,6 +511,8 @@ impl PackWriter {
             return;
         }
         drop(batch);
+        self.out.keeping += t.elapsed();
+        let t = std::time::Instant::now();
         for (h, k) in kept.iter().flatten() {
             let kids = self.kids.get(h).cloned().unwrap_or_default();
             if let Err(e) = self.put(*h, k, &kids) {
@@ -515,6 +522,7 @@ impl PackWriter {
             self.out.new_blobs += 1;
             self.out.new_bytes += k.len() as u64;
         }
+        self.out.writing += t.elapsed();
     }
 
     /// Append blob `h`, kept as `b`, which refers to `kids`.

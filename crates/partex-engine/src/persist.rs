@@ -123,6 +123,37 @@ pub struct Merkle {
     /// Where each blob goes as it is made, instead of `blobs`
     /// ([`Saver::merkle_sink`]).
     sink: Option<Box<dyn FnMut(MerkleBlob)>>,
+    /// With [`Saver::merkle_stats`]: what the blobs hold.
+    stats: Option<Stats>,
+}
+
+/// What a [`Saver::merkle`]'s blobs hold, by the type of the shared value
+/// and the part ([`Saver::mark`]) of it the bytes are in
+/// ([`Saver::merkle_stats`]).
+#[derive(Default)]
+pub struct Stats {
+    pub rows: BTreeMap<(&'static str, &'static str), StatRow>,
+    /// The parts begun in each value being written (the root's first).
+    marks: Vec<Vec<(&'static str, usize)>>,
+}
+
+/// A row of [`Stats`].
+#[derive(Default, Clone, Copy)]
+pub struct StatRow {
+    /// New blobs, and their bytes (of this part).
+    pub new: u64,
+    pub new_bytes: u64,
+    /// References to blobs in the new blobs' bytes.
+    pub refs: u64,
+    /// Blobs encoded again whose bytes were a blob already (another
+    /// value, equal), and their bytes.
+    pub same: u64,
+    pub same_bytes: u64,
+    /// Values known by address (not encoded).
+    pub known: u64,
+    /// Small values written inline, and their bytes.
+    pub inline: u64,
+    pub inline_bytes: u64,
 }
 
 /// A blob a [`Saver::merkle`] wrote: its hash, bytes and the blobs it
@@ -222,6 +253,7 @@ impl Saver {
                 refs: alloc::vec![Vec::new()],
                 min: min.max(17),
                 sink: None,
+                stats: None,
             }),
             ..Self::new()
         }
@@ -350,6 +382,34 @@ impl Saver {
         if let Some(v) = &mut self.sizes {
             v.push((name, at));
         }
+        if let Some(st) = self.merkle.as_mut().and_then(|m| m.stats.as_mut())
+            && let Some(top) = st.marks.last_mut()
+        {
+            top.push((name, at));
+        }
+    }
+
+    /// Count what this [`Saver::merkle`]'s blobs hold ([`Stats`]).
+    pub fn merkle_stats(&mut self) {
+        if let Some(m) = &mut self.merkle {
+            m.stats = Some(Stats {
+                rows: BTreeMap::new(),
+                marks: alloc::vec![Vec::new()],
+            });
+        }
+    }
+
+    /// What [`Saver::merkle_stats`] counted, the root's bytes included
+    /// (as type `root`).
+    #[must_use]
+    pub fn take_merkle_stats(&mut self) -> Option<Stats> {
+        let len = self.enc.0.len();
+        let m = self.merkle.as_mut()?;
+        let refs = m.refs.first().map_or(0, Vec::len);
+        let mut st = m.stats.take()?;
+        let marks = st.marks.pop().unwrap_or_default();
+        st.count_parts("root", &marks, len, refs);
+        Some(st)
     }
 
     /// Bytes written by each named part, summed over its occurrences,
@@ -408,7 +468,7 @@ impl Saver {
     ) {
         let addr = (addr, len);
         if self.merkle.is_some() {
-            self.share_merkle(addr, keep, save);
+            self.share_merkle(addr, what, keep, save);
             return;
         }
         if let Some(&id) = self.shared.get(&addr) {
@@ -452,6 +512,7 @@ impl Saver {
     fn share_merkle(
         &mut self,
         addr: (usize, usize),
+        what: &'static str,
         keep: impl FnOnce() -> Pin,
         save: impl FnOnce(&mut Self),
     ) {
@@ -460,6 +521,9 @@ impl Saver {
             .as_ref()
             .and_then(|m| m.known.get(&addr).copied());
         if let Some(h) = known {
+            if let Some(st) = self.merkle.as_mut().and_then(|m| m.stats.as_mut()) {
+                st.rows.entry((what, "")).or_default().known += 1;
+            }
             self.blob_ref_here(h);
             return;
         }
@@ -473,6 +537,9 @@ impl Saver {
         let outer_shared = core::mem::take(&mut self.shared);
         if let Some(m) = &mut self.merkle {
             m.refs.push(Vec::new());
+            if let Some(st) = &mut m.stats {
+                st.marks.push(Vec::new());
+            }
         }
         save(self);
         let inner = core::mem::replace(&mut self.enc.0, outer_enc);
@@ -483,6 +550,25 @@ impl Saver {
             .and_then(|m| m.refs.pop())
             .unwrap_or_default();
         let min = self.merkle.as_ref().map_or(usize::MAX, |m| m.min);
+        if let Some(m) = &mut self.merkle
+            && let Some(st) = &mut m.stats
+        {
+            let marks = st.marks.pop().unwrap_or_default();
+            if inner.len() < min {
+                let r = st.rows.entry((what, "")).or_default();
+                r.inline += 1;
+                r.inline_bytes += inner.len() as u64;
+            } else {
+                let h = blob_hash(&inner);
+                if m.have.contains(&h) || m.emitted.contains(&h) {
+                    let r = st.rows.entry((what, "")).or_default();
+                    r.same += 1;
+                    r.same_bytes += inner.len() as u64;
+                } else {
+                    st.count_parts(what, &marks, inner.len(), refs.len());
+                }
+            }
+        }
         if inner.len() >= min {
             let h = blob_hash(&inner);
             if let Some(m) = &mut self.merkle {
@@ -505,6 +591,30 @@ impl Saver {
             self.enc.u8(3);
             save_len(inner.len(), self);
             self.raw(&inner);
+        }
+    }
+}
+
+impl Stats {
+    /// Count a new blob of type `what`, of `len` bytes holding `refs`
+    /// references, in its parts `marks`.
+    fn count_parts(
+        &mut self,
+        what: &'static str,
+        marks: &[(&'static str, usize)],
+        len: usize,
+        refs: usize,
+    ) {
+        let r = self.rows.entry((what, "")).or_default();
+        r.new += 1;
+        r.refs += refs as u64;
+        let first = marks.first().map_or(len, |m| m.1);
+        r.new_bytes += first as u64;
+        for (i, (name, at)) in marks.iter().enumerate() {
+            let end = marks.get(i + 1).map_or(len, |n| n.1);
+            let r = self.rows.entry((what, name)).or_default();
+            r.new += 1;
+            r.new_bytes += (end - at) as u64;
         }
     }
 }
@@ -894,6 +1004,114 @@ impl Persist for () {
     fn load(_: &mut Loader) -> Option<Self> {
         Some(())
     }
+}
+
+/// A shared value's address: what names it while it is alive (see
+/// [`save_seq`]).
+pub trait Addressed {
+    fn address(&self) -> usize;
+}
+
+impl<T: ?Sized> Addressed for Arc<T> {
+    fn address(&self) -> usize {
+        Arc::as_ptr(self).cast::<()>() as usize
+    }
+}
+
+/// Children per node of a [`save_seq`] tree.
+const SEQ_FANOUT: usize = 32;
+
+/// The span of the root's children in a [`save_seq`] tree of `n`
+/// elements: the least power of [`SEQ_FANOUT`] with at most that many
+/// children.
+fn seq_span(n: usize) -> usize {
+    let mut span: usize = 1;
+    while span.saturating_mul(SEQ_FANOUT) < n {
+        span *= SEQ_FANOUT;
+    }
+    span
+}
+
+/// Save a sequence of shared values (the chunks of a vector kept in
+/// shared chunks) as a tree: nodes of [`SEQ_FANOUT`] children, each node
+/// a shared value named by the addresses of the values under it. A
+/// sequence saved again with most of its values the same (the next
+/// snapshot of a table that changed a few chunks) refers to the nodes it
+/// has in common (in a [`Saver::merkle`], blobs written once) and writes
+/// only the nodes on the paths to what changed: a save costs what
+/// changed, as the snapshot does in memory, not a reference per value.
+/// The values are kept alive while the saver is (as every shared value
+/// it writes), so an address names one value for the whole save.
+pub fn save_seq<A: Persist + Addressed>(items: &[A], s: &mut Saver) {
+    save_len(items.len(), s);
+    save_seq_level(items, seq_span(items.len()), s);
+}
+
+fn save_seq_level<A: Persist + Addressed>(items: &[A], span: usize, s: &mut Saver) {
+    if span == 1 {
+        for x in items {
+            x.save(s);
+        }
+        return;
+    }
+    for c in items.chunks(span) {
+        use core::hash::Hasher as _;
+        let mut h = crate::stablehash::StableHasher::new();
+        h.write_usize(span);
+        h.write_usize(c.len());
+        for x in c {
+            h.write_usize(x.address());
+        }
+        let k = h.finish128();
+        // (a key no allocation has: its length has the top bit set)
+        #[allow(clippy::cast_possible_truncation)] // (the hash's halves)
+        let (addr, len) = (k as usize, ((k >> 64) as usize) | !(usize::MAX >> 1));
+        s.share(
+            addr,
+            len,
+            "sequence",
+            || Pin::None,
+            |s| save_seq_level(c, span / SEQ_FANOUT, s),
+        );
+    }
+}
+
+/// A sequence [`save_seq`] saved (its nodes shared between the sequences
+/// a loader loads, as they were saved).
+pub fn load_seq<A: Persist + Clone + Send + Sync + 'static>(l: &mut Loader) -> Option<Vec<A>> {
+    let n = usize::load(l)?;
+    let mut out = Vec::with_capacity(n.min(1 << 20));
+    load_seq_level(l, n, seq_span(n), &mut out)?;
+    Some(out)
+}
+
+fn load_seq_level<A: Persist + Clone + Send + Sync + 'static>(
+    l: &mut Loader,
+    n: usize,
+    span: usize,
+    out: &mut Vec<A>,
+) -> Option<()> {
+    if span == 1 {
+        for _ in 0..n {
+            out.push(A::load(l)?);
+        }
+        return Some(());
+    }
+    let mut left = n;
+    while left > 0 {
+        let k = left.min(span);
+        let node: Arc<[A]> = l.share(|l| {
+            let mut v = Vec::with_capacity(k.min(1 << 20));
+            load_seq_level(l, k, span / SEQ_FANOUT, &mut v)?;
+            Some(Arc::from(v))
+        })?;
+        if node.len() != k {
+            return None;
+        }
+        out.extend(node.iter().cloned());
+        left -= k;
+    }
+    Some(())
 }
 
 /// A length.

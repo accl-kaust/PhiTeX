@@ -122,6 +122,7 @@ partex_engine::persist_enum!(Named {
 /// Save an engine with the machine's extras and its host's own state;
 /// `false` if it cannot be saved.
 fn save_tex<H: StoreHost>(tex: &Tex<H, CellTracker>, s: &mut Saver) -> bool {
+    s.mark("host");
     tex.host.save_own(s);
     tex.save_state(s) && tex.save_machine_extras(s)
 }
@@ -148,6 +149,7 @@ fn save_snapshot<H: StoreHost + 'static>(snap: &Arc<Snapshot<H>>, s: &mut Saver,
         || partex_engine::persist::Pin::Send(alloc::boxed::Box::new(snap.clone())),
         |s| {
             *ok &= save_tex(&snap.tex, s);
+            s.mark("lists");
             snap.lists.0.save(s);
             snap.started.save(s);
             snap.halted.save(s);
@@ -326,6 +328,7 @@ fn load_value<H: StoreHost + 'static>(l: &mut Loader, cx: &Cx<H>) -> Option<MVal
 
 /// Save a region's trace.
 fn save_trace<H: StoreHost + 'static>(t: &Trace<TexMachine<H>>, s: &mut Saver, ok: &mut bool) {
+    s.mark("t.entry");
     t.entry.save(s);
     t.exit.save(s);
     t.guards.len().save(s);
@@ -333,13 +336,16 @@ fn save_trace<H: StoreHost + 'static>(t: &Trace<TexMachine<H>>, s: &mut Saver, o
         c.save(s);
         v.0.save(s);
     }
+    s.mark("t.writes");
     t.writes.len().save(s);
     for (c, v, ver) in &t.writes {
         c.save(s);
         save_value(v, s, ok);
         ver.0.save(s);
     }
+    s.mark("t.effects");
     t.effects.save(s);
+    s.mark("t.holes");
     t.holes.save(s);
     t.allocs.save(s);
     t.cost.save(s);
@@ -406,6 +412,7 @@ impl<H: StoreHost + 'static> TexMachine<H> {
             census: _, // (diagnostics: not kept)
         } = self;
         let mut ok = save_tex(tex, s);
+        s.mark("m.rest");
         command_line.save(s);
         (*started, *halted, *fresh, *at_boundary).save(s);
         file_at.save(s);
