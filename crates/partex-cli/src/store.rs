@@ -469,7 +469,10 @@ impl PackWriter {
     }
 
     /// Add a new blob (each once: a blob added again is not written again).
-    pub fn add(&mut self, (h, bytes, kids): partex_core::persist::MerkleBlob) {
+    pub fn add(&mut self, (h, bytes, mut kids): partex_core::persist::MerkleBlob) {
+        // (each once: what a blob keeps alive, not where it refers to it)
+        kids.sort_unstable();
+        kids.dedup();
         if self.kids.insert(h, Arc::from(kids)).is_some() {
             return;
         }

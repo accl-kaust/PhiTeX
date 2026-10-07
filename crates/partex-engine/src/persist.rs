@@ -42,6 +42,9 @@ pub struct Saver {
     /// its address to the next, which would then be written as a
     /// reference to the first.
     kept: Vec<Box<dyn Any>>,
+    /// Values written by [`Saver::share_content`] so far (each counts as
+    /// a shared value, as the loader counts it).
+    anonymous: usize,
     /// Those that may go to another thread, by address (what a
     /// [`Known`] hands on).
     pinned: BTreeMap<(usize, usize), Box<dyn Held>>,
@@ -111,9 +114,12 @@ pub struct Merkle {
     /// each once, with its hash and the blobs it refers to.
     pub blobs: Vec<MerkleBlob>,
     /// Blobs the caller already has (not written again).
-    pub have: BTreeSet<u128>,
+    pub have: Arc<BTreeSet<u128>>,
     /// Shared values written so far, by address: their hashes.
     known: BTreeMap<(usize, usize), u128>,
+    /// Shared values known before this saver began (the last save's or
+    /// load's, or the saver this one was forked from), by address.
+    prior: Arc<BTreeMap<(usize, usize), u128>>,
     emitted: BTreeSet<u128>,
     /// Blobs of the store referred to whole ([`Saver::blob_ref`]).
     referenced: BTreeSet<u128>,
@@ -156,6 +162,86 @@ pub struct StatRow {
     pub inline_bytes: u64,
 }
 
+impl Merkle {
+    /// The blob of the shared value at `addr`, if this saver knows it.
+    fn hash_of(&self, addr: (usize, usize)) -> Option<u128> {
+        self.known
+            .get(&addr)
+            .or_else(|| self.prior.get(&addr))
+            .copied()
+    }
+}
+
+/// What a [`Saver::merkle`] hands a saver on another thread
+/// ([`Saver::merkle_fork`], [`Saver::forked`]): the blobs the store has
+/// and the values it knows, by address (the values themselves kept alive
+/// by it, which outlives the fork).
+#[derive(Clone)]
+pub struct Fork {
+    min: usize,
+    have: Arc<BTreeSet<u128>>,
+    prior: Arc<BTreeMap<(usize, usize), u128>>,
+}
+
+/// What a forked saver did, for the saver it was forked from
+/// ([`Saver::into_joined`], [`Saver::merkle_join`]): the blobs it made
+/// and the values it wrote, by address, with them.
+pub struct Joined {
+    emitted: BTreeSet<u128>,
+    known: Known,
+}
+
+impl Saver {
+    /// What a saver on another thread needs to do part of this one's
+    /// work: its blobs written by it go to its own sink; its results come
+    /// back with [`Saver::merkle_join`]. The blobs a forked saver makes
+    /// are those this saver would make (a blob's bytes depend on its
+    /// value only), so work split over forks writes the same store.
+    #[must_use]
+    pub fn merkle_fork(&self) -> Option<Fork> {
+        let m = self.merkle.as_ref()?;
+        let mut prior = (*m.prior).clone();
+        prior.extend(m.known.iter().map(|(a, h)| (*a, *h)));
+        Some(Fork {
+            min: m.min,
+            have: m.have.clone(),
+            prior: Arc::new(prior),
+        })
+    }
+
+    /// A saver doing part of the work of the saver `f` was forked from.
+    #[must_use]
+    pub fn forked(f: &Fork) -> Self {
+        let mut s = Self::merkle(f.min, BTreeSet::new());
+        if let Some(m) = &mut s.merkle {
+            m.have = f.have.clone();
+            m.prior = f.prior.clone();
+        }
+        s
+    }
+
+    /// This forked saver's results, for [`Saver::merkle_join`].
+    #[must_use]
+    pub fn into_joined(mut self) -> Joined {
+        let known = self.take_known();
+        let emitted = self.merkle.map(|m| m.emitted).unwrap_or_default();
+        Joined { emitted, known }
+    }
+
+    /// Take a fork's results: its blobs count as made here (referred to,
+    /// not made again), and the values it wrote as known.
+    pub fn merkle_join(&mut self, j: Joined) {
+        let Some(m) = &mut self.merkle else {
+            return;
+        };
+        m.emitted.extend(j.emitted);
+        for (addr, (h, pin)) in j.known.map {
+            m.known.insert(addr, h);
+            self.pinned.insert(addr, pin);
+        }
+    }
+}
+
 /// A blob a [`Saver::merkle`] wrote: its hash, bytes and the blobs it
 /// refers to (what it keeps alive in a store).
 pub type MerkleBlob = (u128, Vec<u8>, Vec<u128>);
@@ -192,6 +278,7 @@ impl Saver {
             pool: None,
             merkle: None,
             kept: Vec::new(),
+            anonymous: 0,
             pinned: BTreeMap::new(),
         }
     }
@@ -214,10 +301,12 @@ impl Saver {
                     break;
                 }
             }
+            let mut prior = BTreeMap::new();
             for (addr, (h, pin)) in map {
-                m.known.insert(addr, h);
+                prior.insert(addr, h);
                 s.pinned.insert(addr, pin);
             }
+            m.prior = Arc::new(prior);
         }
         s
     }
@@ -233,7 +322,7 @@ impl Saver {
         Known {
             map: pinned
                 .into_iter()
-                .filter_map(|(addr, pin)| m.known.get(&addr).map(|&h| (addr, (h, pin))))
+                .filter_map(|(addr, pin)| m.hash_of(addr).map(|h| (addr, (h, pin))))
                 .collect(),
         }
     }
@@ -246,8 +335,9 @@ impl Saver {
         Self {
             merkle: Some(Merkle {
                 blobs: Vec::new(),
-                have,
+                have: Arc::new(have),
                 known: BTreeMap::new(),
+                prior: Arc::default(),
                 emitted: BTreeSet::new(),
                 referenced: BTreeSet::new(),
                 refs: alloc::vec![Vec::new()],
@@ -288,7 +378,7 @@ impl Saver {
     /// The blob of the shared value at `addr` (of `len`) written so far.
     #[must_use]
     pub fn merkle_hash_of(&self, addr: usize, len: usize) -> Option<u128> {
-        self.merkle.as_ref()?.known.get(&(addr, len)).copied()
+        self.merkle.as_ref()?.hash_of((addr, len))
     }
 
     fn keep(&mut self, addr: (usize, usize), pin: Pin) {
@@ -408,7 +498,9 @@ impl Saver {
         let refs = m.refs.first().map_or(0, Vec::len);
         let mut st = m.stats.take()?;
         let marks = st.marks.pop().unwrap_or_default();
-        st.count_parts("root", &marks, len, refs);
+        if len > 0 {
+            st.count_parts("root", &marks, len, refs);
+        }
         Some(st)
     }
 
@@ -506,6 +598,73 @@ impl Saver {
 }
 
 impl Saver {
+    /// A value that is not shared in memory, written as a shared value
+    /// named by its bytes alone: in a [`Saver::merkle`], a blob (equal
+    /// copies, the same chunk of a table saved again unchanged, are one
+    /// blob), else in place. Loaded with [`Loader::share`].
+    pub fn share_content(&mut self, what: &'static str, save: impl FnOnce(&mut Self)) {
+        // (no address: a key no value has, so later values' ids are those
+        // the loader gives them)
+        let key = (self.anonymous, usize::MAX);
+        self.anonymous += 1;
+        let outer_enc = core::mem::take(&mut self.enc.0);
+        let outer_shared = core::mem::take(&mut self.shared);
+        if let Some(m) = &mut self.merkle {
+            m.refs.push(Vec::new());
+            if let Some(st) = &mut m.stats {
+                st.marks.push(Vec::new());
+            }
+        }
+        save(self);
+        let inner = core::mem::replace(&mut self.enc.0, outer_enc);
+        self.shared = outer_shared;
+        let min = self.merkle.as_ref().map_or(usize::MAX, |m| m.min);
+        let refs = self
+            .merkle
+            .as_mut()
+            .and_then(|m| m.refs.pop())
+            .unwrap_or_default();
+        if let Some(m) = &mut self.merkle
+            && let Some(st) = &mut m.stats
+        {
+            let marks = st.marks.pop().unwrap_or_default();
+            if inner.len() < min {
+                let r = st.rows.entry((what, "")).or_default();
+                r.inline += 1;
+                r.inline_bytes += inner.len() as u64;
+            } else if m.have.contains(&blob_hash(&inner)) || m.emitted.contains(&blob_hash(&inner))
+            {
+                let r = st.rows.entry((what, "")).or_default();
+                r.same += 1;
+                r.same_bytes += inner.len() as u64;
+            } else {
+                st.count_parts(what, &marks, inner.len(), refs.len());
+            }
+        }
+        if inner.len() >= min {
+            let h = blob_hash(&inner);
+            if let Some(m) = &mut self.merkle
+                && !m.have.contains(&h)
+                && m.emitted.insert(h)
+            {
+                match &mut m.sink {
+                    Some(sink) => sink((h, inner, refs)),
+                    None => m.blobs.push((h, inner, refs)),
+                }
+            }
+            self.blob_ref_here(h);
+            return;
+        }
+        if let Some(top) = self.merkle.as_mut().and_then(|m| m.refs.last_mut()) {
+            top.extend(refs);
+        }
+        let id = u32::try_from(self.shared.len()).unwrap_or(u32::MAX);
+        self.shared.insert(key, id);
+        self.enc.u8(3);
+        save_len(inner.len(), self);
+        self.raw(&inner);
+    }
+
     /// [`Saver::share`] in a [`Saver::merkle`]: tag 2 and the hash of a
     /// blob, tag 1 and the id of a small value this blob wrote before, or
     /// tag 3, a length and a small value's bytes (its own ids from 0).
@@ -516,10 +675,7 @@ impl Saver {
         keep: impl FnOnce() -> Pin,
         save: impl FnOnce(&mut Self),
     ) {
-        let known = self
-            .merkle
-            .as_ref()
-            .and_then(|m| m.known.get(&addr).copied());
+        let known = self.merkle.as_ref().and_then(|m| m.hash_of(addr));
         if let Some(h) = known {
             if let Some(st) = self.merkle.as_mut().and_then(|m| m.stats.as_mut()) {
                 st.rows.entry((what, "")).or_default().known += 1;
@@ -596,6 +752,21 @@ impl Saver {
 }
 
 impl Stats {
+    /// Add `o`'s counts (a forked saver's).
+    pub fn merge(&mut self, o: Stats) {
+        for (k, r) in o.rows {
+            let e = self.rows.entry(k).or_default();
+            e.new += r.new;
+            e.new_bytes += r.new_bytes;
+            e.refs += r.refs;
+            e.same += r.same;
+            e.same_bytes += r.same_bytes;
+            e.known += r.known;
+            e.inline += r.inline;
+            e.inline_bytes += r.inline_bytes;
+        }
+    }
+
     /// Count a new blob of type `what`, of `len` bytes holding `refs`
     /// references, in its parts `marks`.
     fn count_parts(
@@ -1112,6 +1283,37 @@ fn load_seq_level<A: Persist + Clone + Send + Sync + 'static>(
         left -= k;
     }
     Some(())
+}
+
+/// Elements per chunk of a [`save_chunked`] table.
+const TABLE_CHUNK: usize = 64;
+
+/// Save a table that is not shared in memory but changes little from
+/// one save to the next (a font table copied whole when one font
+/// changes) in chunks of [`TABLE_CHUNK`], each named by its bytes
+/// ([`Saver::share_content`]): a copy that changed a few elements costs
+/// their chunks.
+pub fn save_chunked<T: Persist>(items: &[T], s: &mut Saver) {
+    save_len(items.len(), s);
+    for c in items.chunks(TABLE_CHUNK) {
+        s.share_content("table chunk", |s| T::save_slice(c, s));
+    }
+}
+
+/// A table [`save_chunked`] saved (its chunks shared between the tables
+/// a loader loads, as they were saved).
+pub fn load_chunked<T: Persist + Clone + Send + Sync + 'static>(l: &mut Loader) -> Option<Vec<T>> {
+    let n = usize::load(l)?;
+    let mut out = Vec::with_capacity(n.min(1 << 20));
+    while out.len() < n {
+        let k = (n - out.len()).min(TABLE_CHUNK);
+        let c: Arc<[T]> = l.share(|l| Some(Arc::from(T::load_vec(k, l)?)))?;
+        if c.len() != k {
+            return None;
+        }
+        out.extend(c.iter().cloned());
+    }
+    Some(out)
 }
 
 /// A length.

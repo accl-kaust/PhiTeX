@@ -324,8 +324,20 @@ fn coarsen(b: &mut Build<Machine>, grain: u64) {
     if std::env::var_os("PARTEX_STORE_COARSEN").is_some_and(|v| v == "0") {
         return;
     }
-    b.coarsen(grain, 0);
+    let t = Instant::now();
+    b.index();
+    let t_ix = t.elapsed();
+    let n = b.coarsen(grain, 0);
+    let t_merge = t.elapsed();
     drop(b.take_garbage());
+    if debug() {
+        eprintln!(
+            "phitex: store: regions merged for the save in {:.0} ms (indexed in {:.0} ms, {n} merged in {:.0} ms)",
+            t.elapsed().as_secs_f64() * 1e3,
+            t_ix.as_secs_f64() * 1e3,
+            t_merge.saturating_sub(t_ix).as_secs_f64() * 1e3,
+        );
+    }
 }
 
 /// Where snapshots kept in the store are loaded from when first used.
@@ -385,6 +397,114 @@ fn copy_build(b: &Build<Machine>) -> Build<Machine> {
     )
 }
 
+/// The blobs of the runs of `b` that `reused` lacks, encoded by savers
+/// forked from `s` on threads of their own (`PARTEX_STORE_THREADS`, else
+/// up to 8), each given consecutive runs: by fingerprint, with what each
+/// saver did (for `s` to join) and counted. `None` if a run cannot be
+/// saved.
+type Made = (
+    std::collections::HashMap<u128, u128>,
+    Vec<partex_core::persist::Joined>,
+    Vec<partex_core::persist::Stats>,
+);
+
+/// What a saver on a thread of [`save_runs`] made: its runs' blobs by
+/// fingerprint, what it did and counted.
+type Share = (
+    Vec<(u128, u128)>,
+    partex_core::persist::Joined,
+    Option<partex_core::persist::Stats>,
+);
+
+fn save_runs(
+    b: &Build<Machine>,
+    s: &Saver,
+    reused: &std::collections::HashMap<u128, u128>,
+    stats: bool,
+    sink: &(dyn Fn(&mut Saver) + Sync),
+) -> Option<Made> {
+    let fork = s.merkle_fork()?;
+    let (_, _, seq, _, _) = b.parts();
+    let seq = &seq;
+    let todo: Vec<(u128, std::ops::Range<usize>)> = partex_core::machine::runs(b)
+        .into_iter()
+        .filter(|(fp, _)| !reused.contains_key(fp))
+        .collect();
+    let threads = std::env::var("PARTEX_STORE_THREADS")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or_else(|| {
+            std::thread::available_parallelism()
+                .map_or(4, std::num::NonZero::get)
+                .min(8)
+        })
+        .clamp(1, todo.len().max(1));
+    // (the runs cut into `threads` parts of about as many regions)
+    let total: usize = todo.iter().map(|(_, r)| r.len()).sum();
+    let mut parts: Vec<Vec<(u128, std::ops::Range<usize>)>> = vec![Vec::new()];
+    let mut acc = 0;
+    for r in todo {
+        acc += r.1.len();
+        parts.last_mut().expect("a part").push(r);
+        if acc * threads >= total * parts.len() && parts.len() < threads {
+            parts.push(Vec::new());
+        }
+    }
+    let done: Vec<Option<Share>> = std::thread::scope(|sc| {
+        let jobs: Vec<_> = parts
+            .iter()
+            .map(|part| {
+                let fork = &fork;
+                sc.spawn(move || {
+                    let mut w = Saver::forked(fork);
+                    if stats {
+                        w.merkle_stats();
+                    }
+                    sink(&mut w);
+                    let mut out = Vec::with_capacity(part.len());
+                    for (fp, at) in part {
+                        out.push((
+                            *fp,
+                            partex_core::machine::save_run(&seq[at.clone()], &mut w)?,
+                        ));
+                    }
+                    let st = w.take_merkle_stats();
+                    Some((out, w.into_joined(), st))
+                })
+            })
+            .collect();
+        jobs.into_iter().map(|j| j.join().ok().flatten()).collect()
+    });
+    let mut made = std::collections::HashMap::new();
+    let mut joined = Vec::new();
+    let mut st = Vec::new();
+    for d in done {
+        let (out, j, s) = d?;
+        made.extend(out);
+        joined.push(j);
+        st.extend(s);
+    }
+    Some((made, joined, st))
+}
+
+/// A thread writing the blobs sent to it to `pack`, which it gives back
+/// at their end.
+fn spawn_writer(
+    mut pack: store::PackWriter,
+) -> (
+    std::sync::mpsc::SyncSender<partex_core::persist::MerkleBlob>,
+    JoinHandle<store::PackWriter>,
+) {
+    let (tx, rx) = std::sync::mpsc::sync_channel(1 << 12);
+    let writer = std::thread::spawn(move || {
+        for b in rx {
+            pack.add(b);
+        }
+        pack
+    });
+    (tx, writer)
+}
+
 /// Save `b` to the store (errors are reported, not fatal: it is a cache):
 /// writing only what the store lacks, and encoding only what the last
 /// save or load did not know (runs of regions unchanged since are
@@ -410,9 +530,10 @@ fn save(dir: &std::path::Path, key: u128, b: &Build<Machine>, kept: &Mutex<Kept>
     let reused: std::collections::HashMap<u128, u128> =
         chunks.iter().map(|c| (c.fingerprint, c.hash)).collect();
     let knew = known.len();
-    // (the blobs written to the store's new pack as they are made)
+    // (the blobs written to the store's new pack as they are made, on a
+    // thread of its own: compressed and written while the savers encode)
     let pack = match store::PackWriter::new(dir) {
-        Ok(w) => std::rc::Rc::new(std::cell::RefCell::new(w)),
+        Ok(w) => w,
         Err(e) => {
             if debug() {
                 eprintln!("phitex: store: saving failed: {e}");
@@ -420,32 +541,55 @@ fn save(dir: &std::path::Path, key: u128, b: &Build<Machine>, kept: &Mutex<Kept>
             return;
         }
     };
+    let (tx, writer) = spawn_writer(pack);
+    let sink = |s: &mut Saver| {
+        let tx = tx.clone();
+        s.merkle_sink(Box::new(move |b| {
+            // (a writer gone has failed: its error is reported at its end)
+            let _ = tx.send(b);
+        }));
+    };
     let mut s = Saver::merkle_known(MIN_BLOB, have.hashes(), known);
     let stats = std::env::var_os("PARTEX_STORE_DEBUG").is_some_and(|v| v == "2");
     if stats {
         s.merkle_stats();
     }
-    let sink = pack.clone();
-    s.merkle_sink(Box::new(move |b| sink.borrow_mut().add(b)));
+    sink(&mut s);
     s.raw(ROOT_TAG);
     b.initial().tex().host().save_shared(&mut s);
-    let Some(runs) = partex_core::machine::save_build(b, &mut s, &|fp| reused.get(&fp).copied())
-    else {
+    // The runs not saved before, encoded on several threads (each a run
+    // of consecutive runs, which share most of their values), then the
+    // rest, referring to them.
+    let saved = save_runs(b, &s, &reused, stats, &sink).and_then(|(made, joined, st)| {
+        for j in joined {
+            s.merkle_join(j);
+        }
+        let reuse = |fp: u128| reused.get(&fp).or_else(|| made.get(&fp)).copied();
+        Some((partex_core::machine::save_build(b, &mut s, &reuse)?, st))
+    });
+    let Some((runs, worker_stats)) = saved else {
         if debug() {
             eprintln!("phitex: store: this build cannot be saved");
         }
         return;
     };
     let refs = s.merkle_roots();
-    if let Some(st) = s.take_merkle_stats() {
+    if let Some(mut st) = s.take_merkle_stats() {
+        for w in worker_stats {
+            st.merge(w);
+        }
         print_stats(&st);
     }
     let next_known = s.take_known();
     let (_, root) = s.into_merkle();
-    let t_ser = t.elapsed();
-    let Ok(pack) = std::rc::Rc::try_unwrap(pack).map(std::cell::RefCell::into_inner) else {
-        unreachable!("the saver, which held the pack's other handle, is gone");
+    drop(tx);
+    let Ok(pack) = writer.join() else {
+        if debug() {
+            eprintln!("phitex: store: saving failed: the writer's thread failed");
+        }
+        return;
     };
+    let t_ser = t.elapsed();
     let runs_reused = runs
         .iter()
         .filter(|r| reused.contains_key(&r.fingerprint))
