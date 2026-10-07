@@ -3569,6 +3569,8 @@ impl<H: CellHost> Machine for TexMachine<H> {
             // (at a cut: both the exit snapshot and the run going on hold
             // the dead state's initial values)
             canonicalize_dead(&mut self.tex, false);
+            // (and the save stack without its dead and no-op entries)
+            self.tex.canonicalize_save_stack();
         }
         let writes = self.tex.tracker.written();
         // The page builder's state: read (at the entry) where it was read
