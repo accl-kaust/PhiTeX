@@ -2050,11 +2050,21 @@ memory is the watch's:
   |---|---|---|
   | main 85e7d32 | 23.52M, 142 regions | 6.97M |
   | marks a cell, save stack canonical | 8.34M, 68 regions | 1.57M |
+  | relocatable values off (`PARTEX_MACHINE_RELOCATE=0`) | 8.34M, 68 regions | 1.57M |
+  | relocatable values | 6.47M, 55 regions (13 relocated) | 1.57M |
 
-  What is left of pass 1: the mark ids (the marks, count 187 and the
-  `\g__mark_…_tl` differ in every later page's output routine) and the
-  pages near the section until their breaks agree. A `\section*` or a
-  paragraph added re-runs 0.77M (8 regions).
+  What is left of pass 1 with relocatable values: chapter 15's rest up
+  to the next file (0.70M), the pages after the section to the chapter's
+  end (0.48M), one region that reads the PDF numbering whole (0.30M), the
+  last region (0.07M), and 42 regions (4.92M) that each ship a page with
+  a bookmark: hyperref writes every bookmark's sequence number
+  (`\c@bookmark@seq@number`) into `course.out` (`% <n>` after
+  `\BOOKMARK`), expanded at the shipout, and an added `\section` moves
+  every later one. That is a value shown, so a read: those regions run,
+  though only their `\write`'s bytes change; a region of its own for the
+  shipout would re-run only that (4.2's page builder layer). Taking chapter 0's
+  first words out re-runs 0.38M (4 regions), no second pass; both edits'
+  PDFs are identical to a cold build's.
 - The store's save writes each blob to its pack as the saver makes it,
   and the blobs' references in frames: it holds the build, its copy and
   a batch, not every blob as encoded, as kept and as packed at once.
