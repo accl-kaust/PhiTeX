@@ -97,21 +97,67 @@ pub struct Font {
     pub bchar_label: Option<u16>,
 }
 
-crate::persist_struct!(Font {
-    check,
-    design_size,
-    size,
-    bc,
-    ec,
-    glyphs,
-    lig_kerns,
-    kerns,
-    extensibles,
-    params,
-    bchar,
-    false_bchar,
-    bchar_label
-});
+/// Saved with its tables in chunks named by their contents
+/// (`persist::save_chunked`): a font changed in place (its `\fontdimen`s,
+/// a character's tag) is a copy, and a copy then costs what changed.
+impl crate::persist::Persist for Font {
+    fn save(&self, s: &mut crate::persist::Saver) {
+        use crate::persist::save_chunked;
+        let Self {
+            check,
+            design_size,
+            size,
+            bc,
+            ec,
+            glyphs,
+            lig_kerns,
+            kerns,
+            extensibles,
+            params,
+            bchar,
+            false_bchar,
+            bchar_label,
+        } = self;
+        check.save(s);
+        for x in [design_size, size, bc, ec] {
+            x.save(s);
+        }
+        save_chunked(glyphs, s);
+        save_chunked(lig_kerns, s);
+        save_chunked(kerns, s);
+        save_chunked(extensibles, s);
+        params.save(s);
+        for x in [bchar, false_bchar] {
+            x.save(s);
+        }
+        bchar_label.save(s);
+    }
+    fn load(l: &mut crate::persist::Loader) -> Option<Self> {
+        use crate::persist::{Persist, load_chunked};
+        let check = Persist::load(l)?;
+        let (design_size, size, bc, ec) = Persist::load(l)?;
+        let glyphs = load_chunked(l)?;
+        let lig_kerns = load_chunked(l)?;
+        let kerns = load_chunked(l)?;
+        let extensibles = load_chunked(l)?;
+        let (params, bchar, false_bchar, bchar_label) = Persist::load(l)?;
+        Some(Self {
+            check,
+            design_size,
+            size,
+            bc,
+            ec,
+            glyphs,
+            lig_kerns,
+            kerns,
+            extensibles,
+            params,
+            bchar,
+            false_bchar,
+            bchar_label,
+        })
+    }
+}
 
 /// Metrics of one existing character.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
