@@ -70,7 +70,9 @@ fn doc(paras: &[String], x: &str) -> String {
          \\baselineskip=12pt \\tolerance=10000 \\output={\\shipout\\box255}\n\
          \\def\\greet#1{Hello #1.}\n\\count1=5\n",
     );
-    s.push_str(&format!("\\def\\x{{{x}}}\n\n"));
+    s.push_str("\\def\\x{");
+    s.push_str(x);
+    s.push_str("}\n\n");
     for p in paras {
         s.push_str(p);
         s.push_str("\n\n");
@@ -90,7 +92,7 @@ impl Rng {
         self.0
     }
     fn below(&mut self, n: usize) -> usize {
-        (self.next() % n as u64) as usize
+        usize::try_from(self.next() % u64::try_from(n).unwrap_or(1)).unwrap_or(0)
     }
 }
 
@@ -186,7 +188,7 @@ fn workers_rebuild_as_one_does() {
                 );
                 let got = outputs(tex);
                 taken += tex.tracker().par.stats.borrow().taken;
-                *tex.tracker().par.stats.borrow_mut() = Default::default();
+                *tex.tracker().par.stats.borrow_mut() = partex_core::ssa::ParStats::default();
                 match &want {
                     None => want = Some(got),
                     Some(w) => {

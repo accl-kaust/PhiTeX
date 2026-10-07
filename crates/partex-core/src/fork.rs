@@ -238,6 +238,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             seal_log: self.seal_log.clone(),
             stop_before_ship: self.stop_before_ship,
             ship_stop: self.ship_stop,
+            stop_after_ship: self.stop_after_ship,
             stop_after_load: self.stop_after_load,
             load_stop: self.load_stop,
             defer_page: self.defer_page,

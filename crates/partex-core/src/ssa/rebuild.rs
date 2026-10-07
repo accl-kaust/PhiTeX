@@ -161,8 +161,12 @@ pub(crate) struct Steps {
     /// run loaded, in order, for the commit to load in the build: the
     /// name's load id, the data and whether it was the file.
     data_base: u32,
-    loaded_log: Option<Vec<(u32, Arc<[u8]>, bool, u32)>>,
+    loaded_log: Option<Vec<LoadedData>>,
 }
+
+/// A data a worker's run loaded (`Steps::loaded_log`): the name's load
+/// id, the data, whether it was the file, and its id in the worker.
+type LoadedData = (u32, Arc<[u8]>, bool, u32);
 
 /// A worker's run's logs of its step (`par.rs`): what [`step_closed`]
 /// takes from the open step, and what the run added to the steps'
@@ -1545,7 +1549,11 @@ fn same_input<H: Host, T: Tracker>(t: &Tex<H, T>, a: &InputState, b: &InputState
 
 /// Whether a step that began at `a` began where the input now is, `b`:
 /// the same place and the same input (`cold.rs`).
-pub(super) fn same_start<H: Host, T: Tracker>(t: &Tex<H, T>, a: &InputState, b: &InputState) -> bool {
+pub(super) fn same_start<H: Host, T: Tracker>(
+    t: &Tex<H, T>,
+    a: &InputState,
+    b: &InputState,
+) -> bool {
     same_place(t, a, b) && same_input(t, a, b)
 }
 
@@ -4249,11 +4257,11 @@ impl Dirty {
         let r = tex.tracker.rec.borrow();
         let fold = &r.rt.fold;
         let from = fold.position(cur)? + 1;
-        fold.order[from..]
-            .iter()
-            .take(n)
-            .copied()
-            .find(|s| self.starts.get(s).is_some_and(|st| same_start(tex, st, end)))
+        fold.order[from..].iter().take(n).copied().find(|s| {
+            self.starts
+                .get(s)
+                .is_some_and(|st| same_start(tex, st, end))
+        })
     }
 
     fn is_empty(&self) -> bool {
@@ -5507,7 +5515,6 @@ fn untakeable<H: Host>(tex: &Tex<H, SsaTracker>, ran: &super::par::Ran) -> Optio
             }
         } else {
             match a.0 {
-                Fam::Class | Fam::Name => None,
                 Fam::Font if font_glue(a) && !tex.unicode => None,
                 Fam::Hash | Fam::HashNext | Fam::Pool | Fam::Alloc if v.is_none() => {
                     Some("a write's value let go")
@@ -5515,7 +5522,7 @@ fn untakeable<H: Host>(tex: &Tex<H, SsaTracker>, ran: &super::par::Ran) -> Optio
                 Fam::Hash | Fam::HashNext | Fam::Pool | Fam::Alloc if moved => {
                     Some("the allocators moved")
                 }
-                Fam::Hash | Fam::HashNext | Fam::Pool | Fam::Alloc => None,
+                Fam::Class | Fam::Name | Fam::Hash | Fam::HashNext | Fam::Pool | Fam::Alloc => None,
                 f => Some(cannot_take(f)),
             }
         }
@@ -5527,7 +5534,7 @@ fn untakeable<H: Host>(tex: &Tex<H, SsaTracker>, ran: &super::par::Ran) -> Optio
 /// (TeX §578), so a run that made it does as one that found it made.
 /// pdfTeX reads the `\fontdimen`s for it, not whether it was made
 /// (`Tex::font_space_glue`): its write is not one the build must take,
-/// which makes it again where it wants it. (XeTeX's space adjustment
+/// which makes it again where it wants it. (`XeTeX`'s space adjustment
 /// reads whether it was made, `xmain.rs`.)
 #[cfg(feature = "std")]
 fn font_glue(a: &Slot) -> bool {
@@ -5545,10 +5552,7 @@ fn first_miss<H: Host>(
     classes: &[(i32, u8)],
 ) -> Option<&'static str> {
     let r = tex.tracker.rec.borrow();
-    let view = super::View {
-        tex: &*tex,
-        rec: &r.st,
-    };
+    let view = super::View { tex, rec: &r.st };
     reads
         .iter()
         .find(|(a, v)| {
@@ -5701,7 +5705,13 @@ pub(super) fn cold_guess<H: Host>(
     let mut misses: Why = None;
     if !hard {
         why = why.or_else(|| first_miss(tex, &reads, &s.ran.classes));
-        if why.is_some() && !s.ran.classes.iter().any(|&(p, c)| tex.token_class_of(p) != c) {
+        if why.is_some()
+            && !s
+                .ran
+                .classes
+                .iter()
+                .any(|&(p, c)| tex.token_class_of(p) != c)
+        {
             misses = Some(missed_reads(tex, &reads));
         }
     }
@@ -5809,7 +5819,11 @@ pub(super) fn cold_guess<H: Host>(
 fn patch_nest<H: Host>(tex: &Tex<H, SsaTracker>, x: &mut partex_ssa::export::StepExport<TexSsa>) {
     use crate::track::list::{COUNT, STRIDE};
     let nest = Slot(Fam::List, i64::from(COUNT));
-    if !x.recs.iter().any(|r| r.writes.iter().any(|(a, _)| *a == nest)) {
+    if !x
+        .recs
+        .iter()
+        .any(|r| r.writes.iter().any(|(a, _)| *a == nest))
+    {
         return;
     }
     let written: BTreeSet<i64> = x
@@ -5902,10 +5916,7 @@ fn missed_reads<H: Host>(
     reads: &[(Slot, Version)],
 ) -> Vec<(Slot, Version)> {
     let r = tex.tracker.rec.borrow();
-    let view = super::View {
-        tex: &*tex,
-        rec: &r.st,
-    };
+    let view = super::View { tex, rec: &r.st };
     reads
         .iter()
         .filter(|(a, v)| {

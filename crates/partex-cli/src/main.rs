@@ -1205,6 +1205,10 @@ fn ssa_window() -> u64 {
 /// What the workers did since the last report (`PHITEX_SSA_WORKERS`
 /// above 1): rounds, steps run on them, taken at their commits, run
 /// again (and why), and the commands each.
+#[allow(
+    clippy::cast_precision_loss,
+    reason = "nanoseconds shown as milliseconds"
+)]
 fn report_workers(what: &str, t: &partex_core::ssa::SsaTracker) {
     if t.par.workers.get() <= 1 {
         return;
@@ -1217,8 +1221,10 @@ fn report_workers(what: &str, t: &partex_core::ssa::SsaTracker) {
         t.par.workers.get(),
         s.rounds,
         s.passes,
-        s.first_page_ns
-            .map_or_else(|| String::from("-"), |n| format!("{:.1} ms", n as f64 / 1e6)),
+        s.first_page_ns.map_or_else(
+            || String::from("-"),
+            |n| format!("{:.1} ms", n as f64 / 1e6)
+        ),
         s.round_ns as f64 / 1e6,
         s.fork_ns as f64 / 1e6,
         s.runs,
@@ -1252,15 +1258,12 @@ fn ssa_tracker() -> partex_core::ssa::SsaTracker {
         .find_map(|k| std::env::var(k).ok()?.parse::<usize>().ok())
         .unwrap_or(1);
     tracker.par.workers.set(workers.max(1));
-    // (the names a run makes placed by name, DESIGN 3.9's allocators:
-    // with workers, so that a run's names go where they go whatever names
-    // the runs before it made, DESIGN "Parallel builds"; `=0`, `=1`: off,
-    // on)
-    tracker.set_names_by_name(match std::env::var("PARTEX_SSA_NAMES").as_deref() {
-        Ok("1") => true,
-        Ok("0") => false,
-        _ => workers > 1,
-    });
+    // (the names a run makes placed by name, DESIGN 3.9's allocators: a
+    // worker's run's names then go where they go whatever names the runs
+    // before it made, and its count of them relocates, DESIGN "Parallel
+    // builds"; off by default: where a name goes shows in the DVI's and
+    // PDF's font order and in the log)
+    tracker.set_names_by_name(std::env::var("PARTEX_SSA_NAMES").is_ok_and(|v| v == "1"));
     // (and a cold build's paragraphs on them, `PHITEX_SSA_COLD=1`: exact,
     // but not yet faster than a build in turn, DESIGN "Parallel builds")
     tracker

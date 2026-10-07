@@ -82,8 +82,9 @@ fn paragraphs(src: &[u8], after: i32) -> Vec<i32> {
     let mut at = 0usize;
     for &end in tree.para_ends() {
         // (where the paragraph after this one begins: its first line)
-        line += i32::try_from(src[at..end.min(src.len())].iter().filter(|&&b| b == b'\n').count())
-            .unwrap_or(i32::MAX);
+        line += src[at..end.min(src.len())]
+            .iter()
+            .fold(0i32, |n, &b| n + i32::from(b == b'\n'));
         at = end.min(src.len());
         if at >= src.len() {
             break;
@@ -118,7 +119,12 @@ impl Cold {
         // (once: what follows is the job's)
         self.off = true;
         let line = here.main_line(&main)?;
-        let starts: Vec<i32> = self.paras.iter().copied().filter(|&l| l > line + 1).collect();
+        let starts: Vec<i32> = self
+            .paras
+            .iter()
+            .copied()
+            .filter(|&l| l > line + 1)
+            .collect();
         if starts.is_empty() {
             return None;
         }
@@ -132,15 +138,10 @@ impl Cold {
             return false;
         };
         let data = f.data.clone();
-        let mut line = 1i32;
-        let mut begin = None;
-        for l in data.split(|&b| b == b'\n') {
-            if l.trim_ascii_start().starts_with(b"\\begin{document}") {
-                begin = Some(line);
-                break;
-            }
-            line += 1;
-        }
+        let begin = (1i32..)
+            .zip(data.split(|&b| b == b'\n'))
+            .find(|(_, l)| l.trim_ascii_start().starts_with(b"\\begin{document}"))
+            .map(|(n, _)| n);
         let Some(begin) = begin else {
             return false;
         };
@@ -209,7 +210,11 @@ impl Cold {
     /// The job from the base on, by `plan`: the runs made on workers, their
     /// steps taken into the fold, the dirty ones run again until none is.
     /// The job's `history`.
-    pub(super) fn build<H: Host>(&mut self, tex: &mut Tex<H, SsaTracker>, plan: Plan) -> Option<i32> {
+    pub(super) fn build<H: Host>(
+        &mut self,
+        tex: &mut Tex<H, SsaTracker>,
+        plan: Plan,
+    ) -> Option<i32> {
         let Plan { main, runs: plan } = plan;
         let main = &main;
         // (every run from the base: a view of the engine there, kept for
@@ -468,7 +473,9 @@ impl Cold {
                 std::eprintln!(
                     "phitex: cold: a run: {} steps from {}, {:?}",
                     d.steps.len(),
-                    d.steps.first().map_or_else(alloc::string::String::new, |s| s.start.brief()),
+                    d.steps
+                        .first()
+                        .map_or_else(alloc::string::String::new, |s| s.start.brief()),
                     d.why
                 );
             }

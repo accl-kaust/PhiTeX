@@ -316,7 +316,9 @@ impl Remap {
     /// `from..=to`, moves.
     fn pool_end(&self, s: i64) -> i64 {
         match self.strs {
-            Some((from, to, by)) if usize::try_from(s).is_ok_and(|s| s >= from && s <= to) => s + by,
+            Some((from, to, by)) if usize::try_from(s).is_ok_and(|s| s >= from && s <= to) => {
+                s + by
+            }
             _ => s,
         }
     }
@@ -364,7 +366,11 @@ impl Remap {
             return false;
         }
         let top = a.0 == Fam::Alloc && a.1 == i64::from(crate::track::scalar::STR_TOP);
-        let n = if top { self.pool_end(x) } else { self.string(x) };
+        let n = if top {
+            self.pool_end(x)
+        } else {
+            self.string(x)
+        };
         if n == x {
             return false;
         }
@@ -524,22 +530,17 @@ impl Remap {
                 }
             }
             for it in &mut r.items {
-                match it {
-                    partex_ssa::runtime::Item::Open(a) | partex_ssa::runtime::Item::Wrote(a) => {
-                        let b = self.slot(*a);
-                        moved |= b != *a;
-                        *a = b;
-                    }
-                    partex_ssa::runtime::Item::Store(a, _) => {
-                        let b = self.slot(*a);
-                        moved |= b != *a;
-                        *a = b;
-                    }
-                    _ => {}
+                if let partex_ssa::runtime::Item::Open(a)
+                | partex_ssa::runtime::Item::Wrote(a)
+                | partex_ssa::runtime::Item::Store(a, _) = it
+                {
+                    let b = self.slot(*a);
+                    moved |= b != *a;
+                    *a = b;
                 }
             }
             if moved {
-                r.content = Version::of(&(0x7265_6d61_70u64, r.content.0, self.ver()));
+                r.content = Version::of(&(0x0072_656d_6170_u64, r.content.0, self.ver()));
             }
             renamed.push(moved);
         }
@@ -1116,12 +1117,11 @@ impl crate::host::Host for WorkerHost {
         name: &[u8],
         kind: crate::host::FileKind,
     ) -> Option<crate::host::OpenedFile> {
-        match self.asked(Ask::Read(name.to_vec(), kind)) {
-            Some(Reply::File(f)) => f,
-            _ => {
-                self.taint("the host gone");
-                None
-            }
+        if let Some(Reply::File(f)) = self.asked(Ask::Read(name.to_vec(), kind)) {
+            f
+        } else {
+            self.taint("the host gone");
+            None
         }
     }
     fn open_write(
@@ -1151,12 +1151,11 @@ impl crate::host::Host for WorkerHost {
         None
     }
     fn written_name(&mut self, name: &[u8]) -> Vec<u8> {
-        match self.asked(Ask::WrittenName(name.to_vec())) {
-            Some(Reply::Name(n)) => n,
-            _ => {
-                self.taint("the host gone");
-                name.to_vec()
-            }
+        if let Some(Reply::Name(n)) = self.asked(Ask::WrittenName(name.to_vec())) {
+            n
+        } else {
+            self.taint("the host gone");
+            name.to_vec()
         }
     }
     fn output_edited(&mut self, _name: &[u8]) -> bool {
@@ -1219,12 +1218,11 @@ impl crate::host::Host for WorkerHost {
         self.events.push(HostEvent::Stream(page, stream));
     }
     fn deflate(&mut self, level: i32, data: &[u8]) -> Option<Vec<u8>> {
-        match self.asked(Ask::Deflate(level, data.to_vec())) {
-            Some(Reply::Bytes(b)) => b,
-            _ => {
-                self.taint("the host gone");
-                None
-            }
+        if let Some(Reply::Bytes(b)) = self.asked(Ask::Deflate(level, data.to_vec())) {
+            b
+        } else {
+            self.taint("the host gone");
+            None
         }
     }
     fn cached(&mut self, key: u128) -> Option<crate::host::Memo> {
@@ -1263,12 +1261,11 @@ impl crate::host::Host for WorkerHost {
         self.events.push(HostEvent::RemoveOutput(name.to_vec()));
     }
     fn output_name(&mut self, name: &[u8], kind: crate::host::FileKind) -> Vec<u8> {
-        match self.asked(Ask::OutputName(name.to_vec(), kind)) {
-            Some(Reply::Name(n)) => n,
-            _ => {
-                self.taint("the host gone");
-                name.to_vec()
-            }
+        if let Some(Reply::Name(n)) = self.asked(Ask::OutputName(name.to_vec(), kind)) {
+            n
+        } else {
+            self.taint("the host gone");
+            name.to_vec()
         }
     }
 }
@@ -1512,6 +1509,7 @@ pub(super) struct ChunkDone {
 }
 
 /// The count registers 0 to 255 of `tex`.
+#[cfg(feature = "std")]
 pub(super) fn counts<H: crate::host::Host, T: crate::track::Tracker>(tex: &Tex<H, T>) -> Vec<i32> {
     (0..256)
         .map(|r| tex.peek_eqtb(crate::web::COUNT_BASE + r).int())
@@ -1576,10 +1574,7 @@ fn run_chunk(job: ChunkJob) -> ChunkDone {
                     .unwrap_or_default();
                 let (load_sets, written) = {
                     let mut r = tex.tracker.rec.borrow_mut();
-                    (
-                        core::mem::take(&mut r.st.load_sets),
-                        r.st.written.clone(),
-                    )
+                    (core::mem::take(&mut r.st.load_sets), r.st.written.clone())
                 };
                 let events = core::mem::take(&mut tex.host.events);
                 steps.push(ChunkStep {

@@ -1325,6 +1325,133 @@ per step and the steps' boundaries known:
   (`\@savsf`) and a definition a re-run does not make again (a font
   loaded, a name entered) each fail a validation that should hold.
 
+#### Parallel builds, as built
+
+`PHITEX_SSA_WORKERS=N` (default 1: the build in turn, byte for byte).
+`ssa/par.rs` holds the workers, `ssa/rebuild.rs` the commits, and
+`ssa/cold.rs` the cold build.
+
+**A worker** runs on a view of the engine: a copy-on-write fork
+(`Tex::fork_with`; eqtb, objects, hash and save stack shared by chunks).
+It has a tracker of its own whose tables read through the build's (a
+`Base` lent for the round), and its interned ids are renamed at the
+commit (`Remap`). Its host asks the build's thread for file reads,
+deflate and memos. Opening a file for writing, running a command and an
+output's edit *taint* the run, which is then not taken. So do loading a
+font, a budget, a runaway expansion and the job's end. Panics are
+caught: the step runs in turn. The threads are scoped, each with a 32 MB
+stack.
+
+**A: a rebuild's dirty steps on workers.** When a dirty step is popped, a
+round runs it and the next dirty steps at once, each from the entry its
+old run predicts. Commits go in program order, in `commit`. A run is
+taken only if all of these hold:
+- its start is the step's (the end tag and the renumbering are unchanged);
+- the fonts' and names' makers answer as they did, compared by
+  visibility at the step's key (keys are made again as steps go in);
+- its writes can be taken;
+- once placed as `run_step` would place it, every read from outside the
+  step finds the version it read.
+
+The taken run's records are imported and `after_close` marks the readers
+of the definitions that changed. Any other run is dropped, and the step
+runs in turn. Early cutoff stands. A step's result depends only on what
+it read, so the schedule changes the wasted work, never the outputs.
+
+**B: a cold build's paragraphs on workers** (`PHITEX_SSA_COLD=1`, off by
+default).
+1. The build runs in turn to the end of the main file's line after
+   `\begin{document}` (the base).
+2. The rest of the main file is cut at its CST paragraphs
+   (`phitex-syntax`), each a run from the base, its input moved to the
+   paragraph's line.
+3. *Discovery*, round 1, is wide and shallow: every run, 12 steps at
+   most. The TFM fonts the runs load are loaded in the base's step, as
+   `\font` there would load them, so that a run's `\font` finds them
+   loaded (§1260) as a run after the one that loaded them does. The PDF
+   is opened there too: a run's first page would open it.
+4. Then every run goes to its paragraph's end, in batches of 2N, each
+   batch taken in as it ends: records wait, never views.
+5. Each step goes into the fold in source order (`cold_guess`). It is
+   dirty if any of these holds:
+   - its start is not where the step before it ended (a gap: a run cut
+     short);
+   - a read finds otherwise where the build is (wrong numbers are
+     allowed);
+   - a maker moved;
+   - a write cannot be taken.
+
+   A dirty step that only read otherwise keeps those reads and its run's
+   host events. Once the steps before it are exact, `run_dirty` keeps it
+   if each read reaches it at the version it read, and says its events
+   then. A rebuild's run through a gap stops where the next run began
+   (`Dirty::meet_start`).
+6. The rebuild (`run_dirty`, with call hits applied) corrects the fold to
+   its fixed point, which is the build's.
+
+**Relocation** (`Remap::shift_strings`, `shift_names`). A run's
+strings, made from the pool's end where it began, are numbered from the
+build's pool's end. The number moves with the string in each place that
+holds it:
+- the pool's slots;
+- its end (`str_ptr`, read and written, decoded from its version);
+- a name's text (whose version is its bytes');
+- a search's answer;
+- the input's file names (`InputState::shift_strings`).
+
+With names placed by name (`PARTEX_SSA_NAMES=1`, DESIGN 3.9), the
+count of the extra region's names (`hash_high`) is a count only, and it
+moves too. That mode is off by default: where a name goes shows in the
+DVI's and the PDF's font order and in the log (ssa-edits' `names`,
+`fontnum`, `includeonly` and `bibtex` cases differ under it), so a run
+that made a name in the extra region is not taken unless the counts
+agree. TeX shows a string by its bytes; nothing reads its number but to
+copy or compare it.
+
+**A worker's nest** (`patch_nest`). The nest's value holds the enclosing
+levels whole, but each level's fields are slots of their own, which
+pushing a level does not read. A run made elsewhere left the fields it
+did not touch as it found them there. At the commit those fields are
+the build's, as a run here would leave them; its own writes stand.
+Without this a paragraph's interline glue came from the base's
+`\prevdepth`.
+
+**pdfTeX's interword glue** (`font_space_glue`) is read through the
+`\fontdimen`s it is made from: a run that made it does as one that
+found it made. XeTeX reads whether it was made.
+
+**Output contract.** A parallel build's output may differ from a build in
+turn's in:
+- the PDF's object numbers and their order, and the xref's layout;
+- the resource names (`/F…`, `/Im…`, `/Fm…`), since the fonts discovery
+  loads are numbered in another order;
+- the order of objects.
+
+It must match exactly in:
+- page rendering: glyphs, positions, paths, images, links and their
+  targets;
+- `ToUnicode`, the outline and the destinations;
+- every non-PDF output (`.aux`, `.toc`, `.out`, `.bbl`, `.idx`, …);
+- the log's errors and warnings.
+
+The check is `phitex-draw`'s `same` example, which compares every
+page's draw list and the outline, plus the other files byte for byte.
+N=1 stays byte-identical. The log's statistics (strings, names, fonts
+loaded) may differ.
+
+**Measured** (2026-10-07, local, loaded box, fastdev). On an 8-chapter
+book (474 steps), B is exact: pages alike, `.aux` and `.toc` the same.
+It is not faster: N=1 builds in 2.44 s, N=8 in about 6 s. Of 732 steps
+taken in, 722 are dirty, almost all because a read of the nest found
+otherwise: the contribution list, `\prevdepth` and the page builder's
+state. A paragraph's step reads the vertical list it appends to. The
+next step for B is the layering 4.1 describes: a paragraph's lines as
+a contribution appended (an effect), and the page builder as its own
+steps that take the contributions in order. Then a paragraph's validity
+does not depend on where the page broke before it. On the course before
+relocation, A's rounds made the label edit's rebuild slower than in
+turn: 27 s against 9.5 s.
+
 ### 3.11 Records, memory and sessions
 
 - A session is the last build's records and the values they reference,
