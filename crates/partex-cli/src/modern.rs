@@ -67,6 +67,10 @@ options:
                            runs one pass and shows its pages, the passes
                            after it settle while idle. It keeps no store:
                            each watch --ssa starts with a cold build
+      --no-synctex         build, watch: no <job>.synctex.gz (written by
+                           default, as pdflatex -synctex=1 writes it, for
+                           an editor's forward and inverse search;
+                           --synctex: on again)
   -V, --version
   -h, --help
 
@@ -75,6 +79,7 @@ Without a file, `phitex.toml` (here or above) names it:
     copy-pdf = true   (or a directory, relative to phitex.toml's)
     machine = false   (watch: the checkpoint rebuilds, as --no-machine)
     ssa = true        (watch: the dynamic-SSA runtime, as --ssa)
+    synctex = false   (no <job>.synctex.gz, as --no-synctex)
 A `% !TEX program = …` or `% !TEX root = …` comment in the file is honoured.
 
 For TeX's own command line use `phitex --compat=pdftex …` (or `tex`), or
@@ -121,6 +126,8 @@ struct Options {
     view: Option<bool>,
     /// `--editor`.
     editor: Option<String>,
+    /// `--synctex` or `--no-synctex` (none: `phitex.toml`'s, else on).
+    synctex: Option<bool>,
 }
 
 #[allow(clippy::too_many_lines, reason = "one option a line")]
@@ -161,6 +168,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
         all: false,
         view: None,
         editor: None,
+        synctex: None,
     };
     let mut it = args[1..].iter();
     while let Some(a) = it.next() {
@@ -216,6 +224,8 @@ fn parse(args: &[String]) -> Result<Options, String> {
             "--view" => o.view = Some(true),
             "--no-view" => o.view = Some(false),
             "--editor" => o.editor = Some(value()?),
+            "--synctex" => o.synctex = Some(true),
+            "--no-synctex" => o.synctex = Some(false),
             "--machine" => o.no_machine = false,
             "--output" if o.command == Command::Trace => o.timeline = Some(value()?),
             "--all" if o.command == Command::Clean => o.all = true,
@@ -251,6 +261,9 @@ struct Target {
     machine: bool,
     /// `phitex watch` on the dynamic-SSA runtime (`--ssa`, `ssa = true`).
     ssa: bool,
+    /// Whether the build writes `<job>.synctex.gz` (`-synctex=1`; unless
+    /// `--no-synctex` or `synctex = false`).
+    synctex: bool,
 }
 
 impl Target {
@@ -268,9 +281,18 @@ impl Target {
         }
     }
 
-    /// The engine command line a compat invocation would get.
+    /// The engine command line a compat invocation would get: with
+    /// `-synctex=1` unless `SyncTeX` is off.
     fn engine_args(&self, interaction: &str) -> Vec<String> {
+        self.engine_args_with(interaction, self.synctex)
+    }
+
+    /// The engine command line, with `-synctex=1` if `synctex`.
+    fn engine_args_with(&self, interaction: &str, synctex: bool) -> Vec<String> {
         let mut a = vec![self.engine.clone(), format!("-interaction={interaction}")];
+        if synctex {
+            a.push("-synctex=1".into());
+        }
         if let Some(d) = &self.output_dir {
             a.push(format!("-output-directory={d}"));
         }
@@ -358,6 +380,10 @@ fn resolve(o: &Options) -> Result<Target, String> {
             .file_name()
             .map_or(file.clone(), |f| f.to_string_lossy().into_owned());
     }
+    let machine = !o.no_machine
+        && cfg.machine != Some(false)
+        && !std::env::var("PARTEX_MACHINE").is_ok_and(|v| v == "0");
+    let ssa = o.ssa || cfg.ssa == Some(true);
     Ok(Target {
         file,
         engine,
@@ -365,10 +391,11 @@ fn resolve(o: &Options) -> Result<Target, String> {
         shell_escape: o.shell_escape.or(cfg.shell_escape),
         viewer: cfg.viewer,
         copy_pdf,
-        machine: !o.no_machine
-            && cfg.machine != Some(false)
-            && !std::env::var("PARTEX_MACHINE").is_ok_and(|v| v == "0"),
-        ssa: o.ssa || cfg.ssa == Some(true),
+        machine,
+        ssa,
+        // (the runtimes that keep it: the machine's and the SSA watch's;
+        // not a checkpoint session's, `session`)
+        synctex: o.synctex.or(cfg.synctex).unwrap_or(true) && (machine || ssa),
     })
 }
 
@@ -517,7 +544,8 @@ fn ensure_format(engine: &str, r: Option<&Renderer>) -> Option<PathBuf> {
 /// A session for target `t`, rendering to `r`.
 fn session(t: &Target, r: &Renderer) -> crate::session::Session {
     let formats = ensure_format(&t.engine, Some(r));
-    crate::set_args(t.engine_args("nonstopmode"));
+    // (no `SyncTeX`: a checkpoint session cannot keep it, DESIGN 4.5)
+    crate::set_args(t.engine_args_with("nonstopmode", false));
     let mut job = crate::setup();
     job.host.formats = formats;
     job.host.notes = true;
@@ -824,8 +852,24 @@ fn clean(t: &Target, st: Settings) -> ! {
     if files.is_empty() {
         let job = t.job();
         for ext in [
-            "aux", "log", "toc", "lof", "lot", "out", "bbl", "blg", "idx", "ind", "ilg", "pdf",
-            "dvi", "nav", "snm", "vrb",
+            "aux",
+            "log",
+            "toc",
+            "lof",
+            "lot",
+            "out",
+            "bbl",
+            "blg",
+            "idx",
+            "ind",
+            "ilg",
+            "pdf",
+            "dvi",
+            "nav",
+            "snm",
+            "vrb",
+            "synctex.gz",
+            "synctex",
         ] {
             files.push(t.output(&format!("{job}.{ext}")));
         }
@@ -1199,6 +1243,9 @@ struct Viewer {
     started: Option<(std::process::Child, Instant)>,
     /// The live viewer.
     live: Option<crate::view::View>,
+    /// The build gives the viewer its glyph origins itself (`watch
+    /// --ssa`); else they are made from its `SyncTeX` file.
+    glyph_origins: bool,
 }
 
 impl Viewer {
@@ -1234,6 +1281,7 @@ impl Viewer {
                 Viewer {
                     started: None,
                     live: Some(v),
+                    glyph_origins: false,
                 }
             }
             Err(e) => {
@@ -1283,6 +1331,24 @@ impl Viewer {
                 history,
                 ms: t.elapsed().as_secs_f64() * 1e3,
             });
+            // (double-click and `phitex sync`: the glyphs placed by the
+            // build's `SyncTeX` file, DESIGN 4.8)
+            let synctex = outputs
+                .iter()
+                .map(|(n, _)| String::from_utf8_lossy(n).replace("//", "/"))
+                .find(|n| n.ends_with(".synctex.gz") || n.ends_with(".synctex"));
+            if !self.glyph_origins
+                && let (Some(sync), Some(pdf)) = (synctex, Self::pdf(outputs))
+            {
+                v.set_origins_from_synctex(PathBuf::from(sync), pdf);
+            }
+        }
+    }
+
+    /// The build's glyph origins, as it recorded them (`watch --ssa`).
+    fn set_origins(&self, o: crate::view::Origins) {
+        if let Some(v) = &self.live {
+            v.set_origins(Some(o));
         }
     }
 

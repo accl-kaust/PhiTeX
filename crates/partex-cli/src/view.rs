@@ -101,50 +101,126 @@ struct Status {
 
 /// A build's glyph origins and where the glyphs are: what `origins`
 /// answers (`Tex::origins` and the PDF's places, as the extension core's
-/// `Session::origins`).
+/// `Session::origins`), or the same made from its `SyncTeX` file
+/// ([`Origins::from_synctex`]): each page's glyphs placed when first
+/// asked.
 pub struct Origins {
     /// The files, by id: a project's file by its path from the watch's
     /// directory, another as the job asked for it.
     files: Vec<String>,
-    /// Each page's glyphs.
-    pages: Vec<Vec<Placed>>,
+    /// The PDF the glyphs are placed in.
+    pdf: Arc<[u8]>,
+    /// Each page's sources.
+    sources: Sources,
+    /// Each page's glyphs, once placed.
+    placed: Mutex<HashMap<usize, Arc<Vec<Placed>>>>,
 }
+
+/// Where a build's glyphs come from.
+enum Sources {
+    /// Each page's glyph origins, in the order the page shows its glyphs.
+    Glyphs(Vec<Vec<partex_core::GlyphOrigin>>),
+    /// Each page's `SyncTeX` records with a place in a file: a glyph's
+    /// source is the line of the first record after it on its baseline.
+    Sync(Vec<Vec<Record>>),
+}
+
+/// A `SyncTeX` record on a page: x and y (PDF points from the top left),
+/// file (by id), the bytes of its line.
+type Record = (f32, f32, u32, u32, u32);
 
 /// A glyph: x and y (PDF points from the top left), then file
 /// (`u32::MAX`: none), start, end, synthesized.
 type Placed = (f32, f32, u32, u32, u32, bool);
 
+/// The name a project's file is shown by: from `root`, with `.tex` if
+/// that is the file (none: as given).
+fn project_name(root: &std::path::Path, n: &str) -> String {
+    let n = n.strip_prefix("./").unwrap_or(n);
+    let rel = std::path::Path::new(n)
+        .strip_prefix(root)
+        .ok()
+        .map(|r| r.to_string_lossy().into_owned());
+    let n = rel.as_deref().unwrap_or(n);
+    let n = n.strip_prefix("./").unwrap_or(n);
+    [n.to_owned(), format!("{n}.tex")]
+        .into_iter()
+        .find(|c| !c.starts_with('/') && root.join(c).is_file())
+        .unwrap_or_else(|| n.to_owned())
+}
+
 impl Origins {
     /// From a build's origins (its files by id, each page's glyphs in the
     /// order the page shows them) and its PDF, in directory `root`.
-    #[allow(
-        dead_code,
-        reason = "the watch runtimes record no origins yet (DESIGN 4.8)"
-    )]
     #[must_use]
     pub fn of(
         root: &std::path::Path,
         files: &[String],
-        pages: &[Vec<partex_core::GlyphOrigin>],
-        pdf: &Arc<[u8]>,
+        pages: Vec<Vec<partex_core::GlyphOrigin>>,
+        pdf: Arc<[u8]>,
     ) -> Origins {
-        let files = files
-            .iter()
-            .map(|n| {
-                let n = n.strip_prefix("./").unwrap_or(n);
-                [n.to_owned(), format!("{n}.tex")]
-                    .into_iter()
-                    .find(|c| !c.starts_with('/') && root.join(c).is_file())
-                    .unwrap_or_else(|| n.to_owned())
-            })
-            .collect();
-        let doc = phitex_draw::Pdf::open(pdf);
+        Origins {
+            files: files.iter().map(|n| project_name(root, n)).collect(),
+            pdf,
+            sources: Sources::Glyphs(pages),
+            placed: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// From a build's `SyncTeX` file (`text`, ungzipped) and its PDF, in
+    /// directory `root`: each glyph's source is the line of the record
+    /// that ends its run of characters (the first on its baseline at or
+    /// after it), the line's bytes as they are on disk.
+    #[must_use]
+    pub fn from_synctex(root: &std::path::Path, text: &[u8], pdf: Arc<[u8]>) -> Origins {
+        let sync = crate::synctexfile::parse(text);
+        let mut files = Vec::new();
+        let mut ids = HashMap::new();
+        let mut starts: HashMap<i32, Option<(u32, Vec<usize>)>> = HashMap::new();
+        let mut pages = Vec::new();
+        for page in &sync.pages {
+            let mut recs = Vec::new();
+            for r in page {
+                let line = starts.entry(r.tag).or_insert_with(|| {
+                    let name = sync.inputs.get(&r.tag)?;
+                    let shown = project_name(root, &String::from_utf8_lossy(name));
+                    let text = std::fs::read(root.join(&shown)).ok()?;
+                    let id = *ids.entry(shown.clone()).or_insert_with(|| {
+                        files.push(shown);
+                        u32::try_from(files.len() - 1).unwrap_or(u32::MAX)
+                    });
+                    Some((id, line_starts(&text)))
+                });
+                let Some((id, ls)) = line else { continue };
+                let l = usize::try_from(r.line).unwrap_or(0);
+                let (Some(&lo), Some(&hi)) = (ls.get(l.wrapping_sub(1)), ls.get(l)) else {
+                    continue;
+                };
+                let n = |v: usize| u32::try_from(v).unwrap_or(u32::MAX);
+                #[allow(clippy::cast_possible_truncation, reason = "points")]
+                recs.push((r.x as f32, r.y as f32, *id, n(lo), n(hi.saturating_sub(1))));
+            }
+            pages.push(recs);
+        }
+        Origins {
+            files,
+            pdf,
+            sources: Sources::Sync(pages),
+            placed: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Page `k`'s glyphs, placed the first time asked.
+    fn page(&self, k: usize) -> Arc<Vec<Placed>> {
+        if let Some(p) = lock(&self.placed).get(&k) {
+            return p.clone();
+        }
+        let places = phitex_draw::Pdf::open(&self.pdf)
+            .map(|d| d.glyph_places(k))
+            .unwrap_or_default();
         #[allow(clippy::cast_possible_truncation, reason = "points, to a hundredth")]
-        let pages = pages
-            .iter()
-            .enumerate()
-            .map(|(k, os)| {
-                let places = doc.as_ref().map(|d| d.glyph_places(k)).unwrap_or_default();
+        let placed: Vec<Placed> = match &self.sources {
+            Sources::Glyphs(pages) => pages.get(k).map_or_else(Vec::new, |os| {
                 os.iter()
                     .enumerate()
                     .map(|(i, o)| {
@@ -152,10 +228,52 @@ impl Origins {
                         (x as f32, y as f32, o.file, o.start, o.end, o.synthesized)
                     })
                     .collect()
-            })
-            .collect();
-        Origins { files, pages }
+            }),
+            Sources::Sync(pages) => {
+                let recs = pages.get(k).map_or(&[][..], Vec::as_slice);
+                places
+                    .iter()
+                    .map(|&(x, y)| {
+                        let (x, y) = (x as f32, y as f32);
+                        match nearest_record(recs, x, y) {
+                            Some(&(_, _, f, a, b)) => (x, y, f, a, b, false),
+                            None => (x, y, u32::MAX, 0, 0, false),
+                        }
+                    })
+                    .collect()
+            }
+        };
+        let placed = Arc::new(placed);
+        lock(&self.placed).insert(k, placed.clone());
+        placed
     }
+}
+
+/// Where each line of `text` starts, and its end.
+fn line_starts(text: &[u8]) -> Vec<usize> {
+    let mut v = vec![0];
+    v.extend(
+        text.iter()
+            .enumerate()
+            .filter(|&(_, &c)| c == b'\n')
+            .map(|(i, _)| i + 1),
+    );
+    if v.last() != Some(&(text.len() + 1)) {
+        v.push(text.len() + 1);
+    }
+    v
+}
+
+/// The record a glyph at `(x, y)` came from: on its baseline, the first
+/// at or after it (the end of its run of characters, or the glue after
+/// it), else the last before it; else none.
+fn nearest_record(recs: &[Record], x: f32, y: f32) -> Option<&Record> {
+    let on = |r: &&Record| (r.1 - y).abs() < 1.0;
+    recs.iter()
+        .filter(on)
+        .filter(|r| r.0 >= x - 0.5)
+        .min_by(|a, b| a.0.total_cmp(&b.0))
+        .or_else(|| recs.iter().filter(on).max_by(|a, b| a.0.total_cmp(&b.0)))
 }
 
 /// Where the viewer of the watch in `root` keeps its address (for
@@ -347,8 +465,10 @@ struct Shared {
     root: PathBuf,
     /// Where a double-click's source is opened.
     editor: Option<crate::editor::Editor>,
-    /// The last build's glyph origins, if it recorded them.
+    /// The last build's glyph origins, if it recorded them, and how many
+    /// were set (the last one made wins).
     origins: Mutex<Option<Arc<Origins>>>,
+    origins_made: AtomicU64,
     /// When the last build was in, to time the pages sent after it.
     built_at: Mutex<Instant>,
     /// What the build running is doing, and the last `progress` sent.
@@ -418,6 +538,7 @@ impl View {
             root: std::env::current_dir()?,
             editor,
             origins: Mutex::new(None),
+            origins_made: AtomicU64::new(0),
             built_at: Mutex::new(Instant::now()),
             sent: AtomicU64::new(0),
             status: Mutex::new((Status::default(), None)),
@@ -465,13 +586,31 @@ impl View {
     }
 
     /// The last build's glyph origins (the browsers ask for them again).
-    #[allow(
-        dead_code,
-        reason = "the watch runtimes record no origins yet (DESIGN 4.8)"
-    )]
     pub fn set_origins(&self, o: Option<Origins>) {
+        self.shared.origins_made.fetch_add(1, Ordering::Relaxed);
         *lock(&self.shared.origins) = o.map(Arc::new);
         broadcast(&self.shared, "{\"event\":\"switched\"}");
+    }
+
+    /// The last build's glyph origins from its `SyncTeX` file and its PDF
+    /// ([`Origins::from_synctex`]), read on a thread of its own; none if
+    /// either cannot be read. Origins set since win.
+    pub fn set_origins_from_synctex(&self, synctex: PathBuf, pdf: PathBuf) {
+        let made = self.shared.origins_made.fetch_add(1, Ordering::Relaxed) + 1;
+        let s = self.shared.clone();
+        let _ = std::thread::Builder::new()
+            .name("phitex-view-origins".into())
+            .spawn(move || {
+                let o = std::fs::read(&synctex)
+                    .ok()
+                    .and_then(|b| crate::synctexfile::text(&b))
+                    .zip(std::fs::read(&pdf).ok())
+                    .map(|(text, pdf)| Origins::from_synctex(&s.root, &text, pdf.into()));
+                if s.origins_made.load(Ordering::Relaxed) == made {
+                    *lock(&s.origins) = o.map(Arc::new);
+                    broadcast(&s, "{\"event\":\"switched\"}");
+                }
+            });
     }
 
     /// What the build running is doing (`events::Progress`): sent to the
@@ -1131,13 +1270,7 @@ fn origins_json(s: &Shared, o: Option<&Origins>, page: Option<usize>) -> String 
         out.push_str(&String::from_utf8_lossy(&b));
     }
     out.push_str("],\"g\":[");
-    for (i, &(x, y, f, a, b, synth)) in o
-        .pages
-        .get(k)
-        .map_or(&[][..], Vec::as_slice)
-        .iter()
-        .enumerate()
-    {
+    for (i, &(x, y, f, a, b, synth)) in o.page(k).iter().enumerate() {
         if i > 0 {
             out.push(',');
         }

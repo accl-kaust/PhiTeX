@@ -260,6 +260,46 @@ struct Ssa {
     /// a rebuild's pass line counts its own against.
     job_commands: u64,
     debug: bool,
+    /// Glyph origins recorded, for the live viewer's double-click and
+    /// `phitex sync` (only with a viewer: they cost).
+    origins: bool,
+    /// The hash of the `SyncTeX` file last written.
+    synctex: Option<u128>,
+}
+
+/// Write the build's `SyncTeX` file (`Tex::synctex_file`) renamed into
+/// place whole, unless its bytes are `last`'s (their hash), and remove the
+/// other kind's (or both, with no file); the file is the link's output.
+/// The new hash.
+fn write_synctex(
+    tex: &mut SsaTex,
+    linker: &mut crate::SsaLinker,
+    last: Option<u128>,
+) -> Option<u128> {
+    let f = tex.synctex_file()?;
+    let host = tex.host_mut();
+    let at = |n: &[u8]| host.in_output_dir(n).unwrap_or_else(|| n.to_vec());
+    let (name, other) = (at(&f.name), at(&f.other));
+    for n in [Some(&other), f.bytes.is_none().then_some(&name)]
+        .into_iter()
+        .flatten()
+    {
+        let p = crate::native::path(n);
+        if p.exists() {
+            let _ = std::fs::remove_file(p);
+        }
+        linker.outputs.remove(n);
+    }
+    let bytes = f.bytes?;
+    let h = partex_core::StableHasher::of(&bytes[..]);
+    if last != Some(h) || !crate::native::path(&name).exists() {
+        if crate::write_atomic(&crate::native::path(&name), &bytes).is_err() {
+            return None;
+        }
+        host.note_written(&name);
+    }
+    linker.outputs.insert(name, bytes.len());
+    Some(h)
 }
 
 /// Tell the renderer and the viewer.
@@ -309,6 +349,8 @@ impl Ssa {
             passes: 0,
             job_commands: 0,
             debug: std::env::var_os("PARTEX_WATCH_DEBUG").is_some(),
+            origins: false,
+            synctex: None,
         }
     }
 
@@ -391,6 +433,7 @@ impl Ssa {
         }
         let lr = self.linker.link(tex);
         self.linker.write_produced(tex);
+        self.synctex = write_synctex(tex, &mut self.linker, self.synctex);
         if self.debug {
             eprintln!("phitex: ssa watch: link {:.1} ms: {}", lr.link_ms, lr.how);
         }
@@ -411,6 +454,22 @@ impl Ssa {
             }));
         self.inputs.refresh(host);
         self.first.get_or_insert_with(Instant::now);
+        if self.origins {
+            let tex = self.tex.as_mut().expect("an engine");
+            let pdf = self
+                .linker
+                .outputs
+                .keys()
+                .find(|n| n.ends_with(b".pdf"))
+                .and_then(|n| std::fs::read(crate::native::path(n)).ok());
+            if let Some(pdf) = pdf
+                && let Ok(root) = std::env::current_dir()
+            {
+                let files = tex.origin_files();
+                let pages = tex.origin_pages();
+                viewer.set_origins(crate::view::Origins::of(&root, &files, pages, pdf.into()));
+            }
+        }
     }
 
     /// The files the links wrote that are there, with their lengths.
@@ -440,6 +499,13 @@ impl Ssa {
         let t = Instant::now();
         let mut tex = Tex::new(host, crate::ssa_tracker(), self.params.clone());
         tex.set_window(crate::ssa_window());
+        // (the steps' `SyncTeX` events, rendered after each link; glyph
+        // origins for the viewer)
+        crate::origins::setup_synctex(&mut tex);
+        if self.origins {
+            tex.set_origins(true);
+        }
+        self.synctex = None;
         // (a cold build runs to its first trip's end: a save meanwhile is
         // taken by the trips after it)
         tex.tracker().cancel.set(None);
@@ -680,6 +746,9 @@ pub(super) fn watch(
     POLL_NS.store(u64::try_from(poll.as_nanos()).unwrap_or(u64::MAX), Relaxed);
     let mut w = Ssa::new(formats);
     let mut viewer = Viewer::start(opts, ren);
+    // (the viewer's glyphs placed by the build's own origins)
+    w.origins = viewer.live.is_some();
+    viewer.glyph_origins = w.origins;
     ren.set_estimate(load_estimate());
     ren.start();
     let t = Instant::now();

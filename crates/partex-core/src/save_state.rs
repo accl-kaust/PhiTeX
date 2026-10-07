@@ -288,21 +288,37 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             diag,
             effects,
             // (glyph origins, `SyncTeX` and display lists: a session's side
-            // channels, not saved; a state recording them is not saved)
+            // channels, not saved; a state recording them is not saved, but
+            // a machine's with `SyncTeX` from the command line: its places
+            // are inline, in the nodes, and its events are the regions'
+            // effects, so it holds nothing of its own; the loader's engine
+            // brings its own, `TexMachine::restore_rest`)
             org,
             sync,
             dl,
             tap,
         } = self;
+        let regions_sync = !T::VALUES
+            && effects.is_some()
+            && sync
+                .as_deref()
+                .is_some_and(crate::synctex::SyncState::from_command_line);
         if memo.enabled
             || effects.as_ref().is_some_and(|e| !e.is_empty())
             || org.is_some()
-            || sync.is_some()
+            || (sync.is_some() && !regions_sync)
             || dl.is_some()
             || tap.is_some()
         {
             return false;
         }
+        s.mark("synctex");
+        let sync_cli: Option<i32> = if regions_sync {
+            sync.as_deref().map(crate::synctex::SyncState::option)
+        } else {
+            None
+        };
+        sync_cli.save(s);
         s.mark("params");
         params.save(s);
         s.mark("xord");
@@ -690,6 +706,8 @@ impl<H: Host, T: Tracker> Tex<H, T> {
 
     /// An engine in the state `l` holds, with this host and tracker.
     pub fn load_state(l: &mut Loader, host: H, tracker: T) -> Option<Self> {
+        // (a machine's `SyncTeX` from the command line: on again)
+        let sync_cli: Option<i32> = Persist::load(l)?;
         Some(Tex {
             host,
             tracker,
@@ -959,7 +977,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             diag: Persist::load(l)?,
             effects: bool::load(l)?.then(alloc::vec::Vec::new),
             org: None,
-            sync: None,
+            sync: sync_cli.map(|c| alloc::boxed::Box::new(crate::synctex::SyncState::new(c))),
             dl: None,
             tap: None,
         })

@@ -33,6 +33,7 @@ mod sanitize;
 mod session;
 mod snippet;
 mod store;
+mod synctexfile;
 mod term;
 #[cfg(feature = "deps")]
 mod texprof;
@@ -367,6 +368,8 @@ fn parse_command_line() -> CommandLine {
     let mut default_translate = None;
     let mut output_dir =
         std::env::var_os("TEXMF_OUTPUT_DIRECTORY").map(std::ffi::OsString::into_encoded_bytes);
+    // (each command line its own: `-synctex` as this one says)
+    origins::clear_synctex();
     for a in joined_args(args().into_iter().skip(1)) {
         let opt = a.strip_prefix("--").or_else(|| a.strip_prefix('-'));
         match opt {

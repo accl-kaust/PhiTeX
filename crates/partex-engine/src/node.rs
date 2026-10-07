@@ -260,7 +260,8 @@ pub struct BoxNode {
     /// A box changed after that (`\\wd`, a shift) is versioned again
     /// ([`BoxNode::reversion`]).
     pub ver: u128,
-    /// Where it was made, for `SyncTeX` (not part of its value).
+    /// Where it was made, for `SyncTeX` (not part of its value, but an
+    /// inline place: `Side::INLINE`).
     pub sync: crate::origin::Side,
 }
 
@@ -278,6 +279,7 @@ impl PartialEq for BoxNode {
             && self.subtype == o.subtype
             && self.list == o.list
             && self.seal == o.seal
+            && self.sync == o.sync
     }
 }
 
@@ -324,6 +326,10 @@ impl BoxNode {
         self.list.hash(h);
         if let Some(k) = self.seal {
             k.hash(h);
+        }
+        // (an inline place is the box's value: `SyncTeX` in machine mode)
+        if self.sync.is_inline() {
+            self.sync.hash(h);
         }
     }
 }
@@ -851,7 +857,8 @@ pub struct Unset {
     pub stretch_order: Order,
     pub shrink_order: Order,
     pub list: Vec<Node>,
-    /// Where it was made, for `SyncTeX` (not part of its value).
+    /// Where it was made, for `SyncTeX` (not part of its value, but an
+    /// inline place: `Side::INLINE`).
     pub sync: crate::origin::Side,
 }
 

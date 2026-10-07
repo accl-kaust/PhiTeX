@@ -64,7 +64,25 @@ pub fn setup<T: Tracker>(tex: &mut Tex<NativeHost, T>) {
     if wanted() {
         tex.set_origins(true);
     }
-    if let Some(n) = SYNCTEX.lock().ok().and_then(|s| *s) {
+    setup_synctex(tex);
+}
+
+/// No `-synctex` (a command line parsed anew).
+pub fn clear_synctex() {
+    if let Ok(mut s) = SYNCTEX.lock() {
+        *s = None;
+    }
+}
+
+/// The command line's `-synctex=N`, if given.
+pub fn synctex_option() -> Option<i32> {
+    SYNCTEX.lock().ok().and_then(|s| *s)
+}
+
+/// Turn `SyncTeX` on for `tex` if the command line asks for it (any host:
+/// machine mode's too, whose regions record its events).
+pub fn setup_synctex<H: partex_core::Host, T: Tracker>(tex: &mut Tex<H, T>) {
+    if let Some(n) = synctex_option() {
         tex.set_synctex(n);
     }
 }

@@ -132,6 +132,13 @@ thread_local! {
         const { std::cell::RefCell::new(std::collections::VecDeque::new()) };
 }
 
+/// zlib's compression of `data` at `level` from the start, never kept to
+/// resume from (a large file written once a build: the `SyncTeX` file),
+/// or `None` if zlib fails.
+pub fn deflate_once(level: i32, data: &[u8]) -> Option<Vec<u8>> {
+    compress(level, data, None, PIECE, false).map(|d| d.out)
+}
+
 /// zlib's compression of `data` at `level`, or `None` if zlib fails.
 ///
 /// Resuming ([`resume_streams`]): a stream compressed before, its bytes

@@ -617,6 +617,15 @@ impl Host for MachineHost {
         true
     }
 
+    fn synctex_name(&mut self, found: &[u8]) -> Vec<u8> {
+        crate::native::synctex_name(found)
+    }
+
+    fn output_name(&mut self, name: &[u8], kind: FileKind) -> Vec<u8> {
+        let n = with_suffix(name, kind);
+        self.native().in_output_dir(&n).unwrap_or(n)
+    }
+
     fn out_name_ok(&mut self, name: &[u8]) -> bool {
         self.native().out_name_ok(name)
     }
@@ -869,6 +878,8 @@ struct Linker {
     written: BTreeMap<Vec<u8>, u128>,
     /// The last link's time, and its write's.
     timed: (std::time::Duration, std::time::Duration),
+    /// The hash of the `SyncTeX` file last written.
+    synctex: Option<u128>,
 }
 
 impl Linker {
@@ -980,6 +991,9 @@ impl Linker {
             bytes_out += bytes.len();
             self.written.insert(name.clone(), h);
         }
+        if !reuse || self.synctex.is_none() {
+            self.synctex = write_synctex(b, self.synctex);
+        }
         let t_write = t_write.elapsed();
         self.timed = (t_link, t_write);
         let ms = t.elapsed().as_secs_f64() * 1e3;
@@ -1052,8 +1066,61 @@ fn report_link(
     );
 }
 
+/// The build's `SyncTeX` file (DESIGN 4.5): its regions' events rendered
+/// as the final state ends the job, its names in the output directory:
+/// the file's, the other kind's (an earlier run's, removed), and its bytes
+/// (none: no file, both removed). `None` without a job name.
+pub(crate) fn synctex_file(b: &Build<Machine>) -> Option<(Vec<u8>, Vec<u8>, Option<Vec<u8>>)> {
+    let fin = b.final_state().tex();
+    let events = b
+        .traces()
+        .flat_map(|t| t.effects.iter())
+        .filter_map(|e| match e {
+            partex_core::effects::Effect::Synctex(v) => Some(v.iter()),
+            _ => None,
+        })
+        .flatten();
+    let f = fin.synctex_regions_file(events, &mut |text| crate::zlib::deflate_once(6, text))?;
+    let native = fin.host().native();
+    let at = |n: Vec<u8>| native.in_output_dir(&n).unwrap_or(n);
+    Some((at(f.name), at(f.other), f.bytes))
+}
+
+/// Write `bytes` to `path` whole: renamed into place, so a reader never
+/// finds half a file.
+fn write_whole(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    let tmp = path.with_extension("partex-tmp");
+    std::fs::write(&tmp, bytes)?;
+    std::fs::rename(&tmp, path)
+}
+
+/// Write the build's `SyncTeX` file ([`synctex_file`]) and remove the
+/// other kind's (or both, with no file); `last` is the hash of the bytes
+/// last written, which are not written again. The new hash.
+fn write_synctex(b: &Build<Machine>, last: Option<u128>) -> Option<u128> {
+    let (name, other, bytes) = synctex_file(b)?;
+    let remove = |n: &[u8]| {
+        let p = crate::native::path(n);
+        if p.exists() {
+            let _ = std::fs::remove_file(p);
+        }
+    };
+    remove(&other);
+    let Some(bytes) = bytes else {
+        remove(&name);
+        return None;
+    };
+    let h = quick::hash(&bytes);
+    let p = crate::native::path(&name);
+    if last != Some(h) || !p.exists() {
+        let _ = write_whole(&p, &bytes);
+    }
+    Some(h)
+}
+
 /// Link a build's output and write its files; the job's `history`.
 fn write_outputs(b: &Build<Machine>) -> i32 {
+    write_synctex(b, None);
     let fx: Vec<&[partex_core::effects::Effect]> =
         b.traces().map(|t| t.effects.as_slice()).collect();
     link_and_write(&fx, b.final_state())
@@ -1740,8 +1807,11 @@ fn process_switches() {
             u8::from(!off("PARTEX_MACHINE_CANON"))
         },
     );
+    // (not with `SyncTeX`: a renamed region's nodes would keep the lines
+    // they were placed at, DESIGN 4.5)
     partex_core::machine::set_position_cells(
-        std::env::var("PARTEX_MACHINE_RENAME").is_ok_and(|v| v == "1"),
+        std::env::var("PARTEX_MACHINE_RENAME").is_ok_and(|v| v == "1")
+            && crate::origins::synctex_option().is_none(),
     );
     partex_core::machine::set_known_rest(
         !off("PARTEX_MACHINE_KNOWN_REST"),
@@ -1775,7 +1845,8 @@ fn switches(m: &mut TexMachine<MachineHost>) {
 pub fn run(native: NativeHost, params: Params, command_line: &[u8]) -> i32 {
     let cfg = config();
     let host = MachineHost::new(native);
-    let tex = Tex::new(host, CellTracker::default(), params);
+    let mut tex = Tex::new(host, CellTracker::default(), params);
+    crate::origins::setup_synctex(&mut tex);
     let mut m = TexMachine::new(tex, command_line);
     switches(&mut m);
     if std::env::var("PARTEX_MACHINE_SPLITPROBE").is_ok_and(|v| v == "1") {
@@ -2838,6 +2909,9 @@ pub struct Watch {
     /// What the last rebuild's edits changed: each file, and the first
     /// line it changed at (`paper.tex:18`).
     last_changes: Vec<String>,
+    /// The `SyncTeX` file as the last link's regions made it
+    /// ([`synctex_file`]).
+    synctex: Option<(Vec<u8>, Vec<u8>, Option<Vec<u8>>)>,
 }
 
 /// Passes of a watch rebuild at most (as `-converge`).
@@ -2868,7 +2942,8 @@ impl Watch {
     ) -> (Self, Outcome) {
         let cfg = config();
         let host = MachineHost::new(native);
-        let tex = Tex::new(host, CellTracker::default(), params);
+        let mut tex = Tex::new(host, CellTracker::default(), params);
+        crate::origins::setup_synctex(&mut tex);
         let mut m = TexMachine::new(tex, command_line);
         switches(&mut m);
         observe(crate::events::Progress::PassStart(1));
@@ -2922,6 +2997,7 @@ impl Watch {
             idle: false,
             keeper: None,
             last_changes: Vec::new(),
+            synctex: None,
         }
     }
 
@@ -3663,7 +3739,29 @@ impl Watch {
             let bytes = host.piped_out(*id, name, bytes.into()).into_owned();
             files.push((name.clone(), bytes, from_link));
         }
+        // (the `SyncTeX` file, rendered from the regions' events: again only
+        // when they changed)
+        if !reuse || self.synctex.is_none() {
+            self.synctex = synctex_file(&self.b);
+        }
+        if let Some((name, other, bytes)) = &self.synctex {
+            for n in [Some(other), bytes.is_none().then_some(name)]
+                .into_iter()
+                .flatten()
+            {
+                let p = crate::native::path(n);
+                if p.exists() {
+                    std::fs::remove_file(&p)?;
+                }
+            }
+            if let Some(b) = bytes {
+                files.push((name.clone(), b.clone(), true));
+            }
+        }
         let main = |n: &[u8]| n.ends_with(b".pdf") || n.ends_with(b".dvi");
+        // (renamed into place whole: a viewer or an editor reads them as
+        // they change)
+        let whole = |n: &[u8]| main(n) || n.ends_with(b".synctex.gz") || n.ends_with(b".synctex");
         files.sort_by_key(|(n, _, _)| !main(n));
         for (name, bytes, from_link) in &files {
             let p = crate::native::path(name);
@@ -3675,10 +3773,8 @@ impl Watch {
             if self.written.get(name) == Some(&h) && p.exists() {
                 continue;
             }
-            if main(name) {
-                let tmp = p.with_extension("partex-tmp");
-                std::fs::write(&tmp, bytes)?;
-                std::fs::rename(&tmp, &p)?;
+            if whole(name) {
+                write_whole(&p, bytes)?;
             } else {
                 std::fs::write(&p, bytes)?;
             }

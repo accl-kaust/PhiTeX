@@ -1567,11 +1567,9 @@ const SYNCTEX_INPUTS: [&str; 5] = [
 /// itself with no option, and `glyphs.tex` (LaTeX, run twice) with
 /// `-synctex=1`; then TeX Live's `synctex view` (every line of each
 /// source) and `synctex edit` (a grid of points on each page) asked of
-/// both sides' files, their answers compared. Plain mode's only.
+/// both sides' files, their answers compared. With `PARTEX_MACHINE=1`, the
+/// machine's file, rendered from its regions' events after the link.
 fn run_synctex(root: &Path, partex: &Path) -> Result<Vec<String>> {
-    if std::env::var_os("PARTEX_MACHINE").is_some() {
-        return Ok(Vec::new());
-    }
     let work = out_root(root).join("synctex");
     if work.exists() {
         fs::remove_dir_all(&work)?;
@@ -1925,8 +1923,8 @@ fn run_modern(root: &Path, partex: &Path) -> Result<Vec<String>> {
         fs::copy(&src, o.join(input))?;
         fs::copy(&src, p.join(input))?;
     }
-    // (as `partex build modern.tex` gives it to TeX)
-    let args = ["-interaction=nonstopmode", "modern.tex"];
+    // (as `partex build modern.tex` gives it to TeX: `SyncTeX` on)
+    let args = ["-interaction=nonstopmode", "-synctex=1", "modern.tex"];
     let (passes, bibtex_runs, _) = oracle_passes(&case, &o, &o, &args)?;
     let _ = fs::remove_file(o.join("bibterm.txt"));
     // (its formats outlive the case: making pdflatex's takes a while)
@@ -2006,7 +2004,9 @@ fn run_modern(root: &Path, partex: &Path) -> Result<Vec<String>> {
     );
     let (_, report) = modern(&["clean", "modern.tex"])?;
     ensure!(
-        !p.join("modern.pdf").exists() && !p.join("modern.aux").exists(),
+        !p.join("modern.pdf").exists()
+            && !p.join("modern.aux").exists()
+            && !p.join("modern.synctex.gz").exists(),
         "phitex clean left the outputs"
     );
     eprintln!("    {}", report.trim());
@@ -2030,6 +2030,150 @@ fn run_modern(root: &Path, partex: &Path) -> Result<Vec<String>> {
         !store.exists() && report.contains("Removed every saved build"),
         "phitex clean --all left the store:\n{report}"
     );
+    Ok(diffs)
+}
+
+/// `phitex build`'s `SyncTeX` file (DESIGN 4.5, written by default)
+/// against `pdflatex -synctex=1`'s, byte for byte: both in one directory
+/// (the file names its inputs by their absolute paths), the oracle run to
+/// its fixpoint. `include.tex`'s chapters are files of their own (their
+/// tags). A cold build, then edits built from the saved build, each
+/// against the oracle on the edited text: a word (no line moves), a line
+/// inserted (every later line of the chapter moves, its boxes the same),
+/// a paragraph added (later pages move), and the inserted line taken out
+/// again. The PDF and the job's own files are compared too.
+#[allow(clippy::too_many_lines)] // (one scripted session, kept whole)
+fn run_modern_synctex(root: &Path, partex: &Path) -> Result<Vec<String>> {
+    let work = out_root(root).join("modern_synctex");
+    if work.exists() {
+        fs::remove_dir_all(&work)?;
+    }
+    let run = work.join("run");
+    fs::create_dir_all(&run)?;
+    fs::create_dir_all(work.join("none"))?;
+    let inputs = [
+        "include.tex",
+        "incl-ch1.tex",
+        "incl-ch2.tex",
+        "incl-ch3.tex",
+    ];
+    for i in inputs {
+        fs::copy(root.join("tests/e2e").join(i), run.join(i))?;
+    }
+    let formats = out_root(root).join("e2e-formats-synctex");
+    let job_files = |dir: &Path| -> Result<Vec<String>> {
+        let mut v = Vec::new();
+        for e in fs::read_dir(dir)? {
+            let n = e?.file_name().to_string_lossy().into_owned();
+            let ours = n.starts_with("include.") || n.starts_with("incl-ch");
+            if ours && !n.ends_with(".tex") {
+                v.push(n);
+            }
+        }
+        Ok(v)
+    };
+    // (the job's outputs in `run` copied to `to`)
+    let keep = |to: &Path| -> Result<()> {
+        fs::create_dir_all(to)?;
+        for n in job_files(&run)? {
+            fs::copy(run.join(&n), to.join(&n))?;
+        }
+        Ok(())
+    };
+    // (`run` with the job's outputs as `from` holds them, and no others)
+    let restore = |from: &Path| -> Result<()> {
+        for n in job_files(&run)? {
+            fs::remove_file(run.join(&n))?;
+        }
+        for e in fs::read_dir(from)? {
+            let e = e?;
+            fs::copy(e.path(), run.join(e.file_name()))?;
+        }
+        Ok(())
+    };
+    let phitex = || -> Result<String> {
+        let mut cmd = Command::new(partex);
+        cmd.env("PARTEX_CACHE_DIR", work.join("cache"))
+            .env("PARTEX_STORE_DIR", work.join("store"))
+            .env("PARTEX_FORMATS", &formats)
+            .env("PARTEX_STORE_DEBUG", "1")
+            .env("NO_COLOR", "1")
+            .env_remove("PARTEX_PERSIST")
+            .env_remove("PARTEX_MACHINE");
+        exec(cmd, &run, &["build", "include.tex"], "term.txt")
+    };
+    let case = Converge {
+        name: "modern_synctex",
+        oracle: "pdflatex",
+        inputs: &[],
+        ini: &[],
+        args: &[],
+        job: "include",
+        watch: &[
+            "include.aux",
+            "include.toc",
+            "incl-ch1.aux",
+            "incl-ch2.aux",
+            "incl-ch3.aux",
+        ],
+        passes: 2,
+        outdir: false,
+    };
+    let args = ["-interaction=nonstopmode", "-synctex=1", "include.tex"];
+    let edits = [
+        ("incl-ch2.tex", "Ch2s1p1 ", "Ch2s1p1 typed "),
+        (
+            "incl-ch1.tex",
+            "\\section{Section 1.2}\\label{s:1.2}\n",
+            "\\section{Section 1.2}\\label{s:1.2}\n% a line of its own\n",
+        ),
+        (
+            "incl-ch3.tex",
+            "\\section{Section 3.2}",
+            "A paragraph of its own, long enough to move what follows it on its page and the pages after it.\n\n\\section{Section 3.2}",
+        ),
+        ("incl-ch1.tex", "% a line of its own\n", ""),
+    ];
+    let mut diffs = Vec::new();
+    for step in 0..=edits.len() {
+        let what = if step == 0 {
+            "cold".to_owned()
+        } else {
+            let (file, marker, new) = edits[step - 1];
+            let f = run.join(file);
+            let text = fs::read_to_string(&f)?;
+            ensure!(text.contains(marker), "{file} has no `{marker}`");
+            // (as editors save: never half a file)
+            let tmp = run.join(".edit.tmp");
+            fs::write(&tmp, text.replacen(marker, new, 1))?;
+            fs::rename(&tmp, &f)?;
+            format!("edit {step}")
+        };
+        let (o, p) = (work.join(format!("o{step}")), work.join(format!("p{step}")));
+        let err = phitex()?;
+        if step > 0 {
+            ensure!(
+                err.contains("phitex: store: load:") && !err.contains("does not load"),
+                "{what}: the build did not load the saved build:\n{err}"
+            );
+        }
+        ensure!(
+            run.join("include.synctex.gz").exists(),
+            "{what}: phitex build wrote no include.synctex.gz"
+        );
+        keep(&p)?;
+        if step == 0 {
+            // (the oracle from no file of the job's, as the cold build)
+            restore(&work.join("none"))?;
+        }
+        oracle_passes(&case, &run, &run, &args)?;
+        keep(&o)?;
+        // (the next build finds the files as phitex left them)
+        restore(&p)?;
+        let mut found = compare(&o, &p, true)?;
+        found.retain(|n| !n.ends_with(".log"));
+        diffs.extend(found.into_iter().map(|n| format!("{what}: {n}")));
+    }
     Ok(diffs)
 }
 
@@ -2264,7 +2408,8 @@ fn run_modern_watch(root: &Path, partex: &Path, mode: WatchMode) -> Result<Vec<S
         fs::copy(&src, o.join(input))?;
         fs::copy(&src, p.join(input))?;
     }
-    let args = ["-interaction=nonstopmode", "modern.tex"];
+    // (`SyncTeX` on, as `phitex watch` has it)
+    let args = ["-interaction=nonstopmode", "-synctex=1", "modern.tex"];
     oracle_passes(&case, &o, &o, &args)?;
     let _ = fs::remove_file(o.join("bibterm.txt"));
     let mut child = Command::new(partex)
@@ -2449,8 +2594,14 @@ fn run_modern_watch_preempt(root: &Path, partex: &Path, mode: WatchMode) -> Resu
     for d in [&o, &p] {
         fs::write(d.join("preempt.tex"), &text)?;
     }
-    let args = ["-interaction=nonstopmode", "preempt.tex"];
-    oracle_passes(&case, &o, &o, &args)?;
+    // (`SyncTeX` on, as `phitex watch` has it; not the checkpoint
+    // sessions')
+    let args: &[&str] = if mode == WatchMode::Checkpoints {
+        &["-interaction=nonstopmode", "preempt.tex"]
+    } else {
+        &["-interaction=nonstopmode", "-synctex=1", "preempt.tex"]
+    };
+    oracle_passes(&case, &o, &o, args)?;
     let mut cmd = Command::new(partex);
     cmd.env("PARTEX_CACHE_DIR", work.join("cache"))
         // (its own: other cases may be making theirs at the same time)
@@ -2606,7 +2757,7 @@ fn run_modern_watch_preempt(root: &Path, partex: &Path, mode: WatchMode) -> Resu
         took.as_secs_f64()
     );
     ensure!(torn == 0, "the PDF was incomplete {torn} of {looks} times");
-    oracle_passes(&case, &o, &o, &args)?;
+    oracle_passes(&case, &o, &o, args)?;
     diffs.extend(
         compare(&o, &p, true)?
             .into_iter()
@@ -2983,6 +3134,10 @@ pub fn run(root: &Path, args: &[String]) -> Result<()> {
     ));
     jobs.push(("modern", Box::new(move || run_modern(root, partex))));
     jobs.push((
+        "modern_synctex",
+        Box::new(move || run_modern_synctex(root, partex)),
+    ));
+    jobs.push((
         "store_switches",
         Box::new(move || run_store_switches(root, partex)),
     ));
@@ -3152,6 +3307,12 @@ fn compare(o: &Path, p: &Path, no_term: bool) -> Result<Vec<String>> {
             {
                 mask(&a) == mask(&b)
             }
+            // (each side's directory is in its inputs' names: the texts
+            // with it masked; `modern_synctex` compares bytes, both sides
+            // in one directory)
+            (Ok(a), Ok(b)) if n.ends_with(".synctex.gz") && a != b => {
+                synctex_masked(&a, o) == synctex_masked(&b, p) && synctex_masked(&a, o).is_some()
+            }
             (Ok(a), Ok(b)) => a == b,
             _ => false,
         };
@@ -3160,6 +3321,30 @@ fn compare(o: &Path, p: &Path, no_term: bool) -> Result<Vec<String>> {
         }
     }
     Ok(diffs)
+}
+
+/// A `SyncTeX` file's text with directory `dir` in its inputs' names, and
+/// the byte counts of its anchors, masked (none: not a gzip file).
+fn synctex_masked(gz: &[u8], dir: &Path) -> Option<String> {
+    let body = gz.get(10..gz.len().checked_sub(8)?)?;
+    let mut text = Vec::new();
+    if !partex_engine::inflate::inflate_raw(body, &mut text) {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&text);
+    let dir = dir.to_string_lossy();
+    Some(
+        text.lines()
+            .map(|l| {
+                if l.starts_with('!') {
+                    "!N".to_owned()
+                } else {
+                    l.replace(&*dir, "DIR")
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+    )
 }
 
 fn skip_line(b: &[u8]) -> &[u8] {
