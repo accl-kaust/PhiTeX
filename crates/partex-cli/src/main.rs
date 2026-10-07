@@ -614,6 +614,9 @@ fn debug_switches() {
     if std::env::var("PARTEX_SSA_FLOW").is_ok_and(|v| v == "0") {
         partex_core::ssa::FLOW.store(false, std::sync::atomic::Ordering::Relaxed);
     }
+    if std::env::var("PARTEX_SSA_LAZY_VERSIONS").is_ok_and(|v| v == "0") {
+        partex_core::ssa::LAZY_VERSIONS.store(false, std::sync::atomic::Ordering::Relaxed);
+    }
     if std::env::var("PARTEX_SSA_DEAD_SAVES").is_ok_and(|v| v == "0") {
         partex_core::ssa::DEAD_SAVES.store(false, std::sync::atomic::Ordering::Relaxed);
     }
