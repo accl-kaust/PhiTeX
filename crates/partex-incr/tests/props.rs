@@ -285,6 +285,13 @@ fn stopped_rebuilds_then_one_to_the_end_match_scratch() {
                 assert!(b.rebuild_or_stop(p.machine(), &changed, cfg, &|| false));
                 assert!(b.settled());
                 let effects_changed = b.take_effects_changed();
+                if r.below(4) == 0 {
+                    coarsens_unindexed_as_indexed(
+                        &b,
+                        cfg.grain,
+                        &format!("seed {seed}, config {ci}"),
+                    );
+                }
                 if r.below(2) == 0 {
                     // (while no edit waits: fine regions merged back, the
                     // same effects)
@@ -321,6 +328,38 @@ fn stopped_rebuilds_then_one_to_the_end_match_scratch() {
         stopped > 1000 && in_a_row > 300 && same > 100,
         "{stopped} rebuilds stopped, {in_a_row} after another, {same} links taken again"
     );
+}
+
+/// A copy of `b` not indexed (as a save's) merges its regions as an
+/// indexed one does.
+fn coarsens_unindexed_as_indexed(b: &Build<partex_incr::stub::Stub>, grain: u64, what: &str) {
+    let copy = || {
+        let (initial, fin, seq, generation, changed) = b.parts();
+        let seq = seq.into_iter().map(|(k, t)| (k, t.clone())).collect();
+        Build::from_parts(
+            initial.clone(),
+            fin.clone(),
+            seq,
+            generation,
+            changed.clone(),
+        )
+    };
+    let (mut plain_copy, mut indexed) = (copy(), copy());
+    indexed.index();
+    plain_copy.coarsen(grain, 0);
+    indexed.coarsen(grain, 0);
+    let shape = |b: &Build<partex_incr::stub::Stub>| -> Vec<String> {
+        b.traces()
+            .map(|t| {
+                let writes: Vec<_> = t.writes.iter().map(|(c, _, v)| (c, v)).collect();
+                format!(
+                    "{:?} {:?} {:?} {writes:?} {}",
+                    t.entry, t.exit, t.guards, t.cost
+                )
+            })
+            .collect()
+    };
+    assert_eq!(shape(&plain_copy), shape(&indexed), "{what}");
 }
 
 fn check_rounds<E: Executor>(p: &Program, exec: &E, what: &str) {

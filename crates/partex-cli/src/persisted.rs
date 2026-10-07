@@ -325,17 +325,14 @@ fn coarsen(b: &mut Build<Machine>, grain: u64) {
         return;
     }
     let t = Instant::now();
-    b.index();
-    let t_ix = t.elapsed();
+    // (the copy is not indexed: a merge asks only for the writers of the
+    // few accumulating cells, which it finds without the indexes)
     let n = b.coarsen(grain, 0);
-    let t_merge = t.elapsed();
     drop(b.take_garbage());
     if debug() {
         eprintln!(
-            "phitex: store: regions merged for the save in {:.0} ms (indexed in {:.0} ms, {n} merged in {:.0} ms)",
+            "phitex: store: {n} regions merged for the save in {:.0} ms",
             t.elapsed().as_secs_f64() * 1e3,
-            t_ix.as_secs_f64() * 1e3,
-            t_merge.saturating_sub(t_ix).as_secs_f64() * 1e3,
         );
     }
 }
@@ -505,6 +502,37 @@ fn spawn_writer(
     (tx, writer)
 }
 
+/// Encode `b` into `s`: its runs not in `reused` on threads of their own
+/// ([`save_runs`]), joined, then the rest. Its runs as saved and what the
+/// threads counted; `None` if it cannot be saved.
+fn encode(
+    b: &Build<Machine>,
+    s: &mut Saver,
+    reused: &std::collections::HashMap<u128, u128>,
+    stats: bool,
+    sink: &(dyn Fn(&mut Saver) + Sync),
+) -> Option<(Vec<SavedChunk>, Vec<partex_core::persist::Stats>)> {
+    let t = Instant::now();
+    let (made, joined, st) = save_runs(b, s, reused, stats, sink)?;
+    let t_runs = t.elapsed();
+    for j in joined {
+        s.merkle_join(j);
+    }
+    let t_join = t.elapsed();
+    let reuse = |fp: u128| reused.get(&fp).or_else(|| made.get(&fp)).copied();
+    let runs = partex_core::machine::save_build(b, s, &reuse)?;
+    if debug() {
+        let ms = |d: std::time::Duration| d.as_secs_f64() * 1e3;
+        eprintln!(
+            "phitex: store: encoded, ms: the runs {:.0}, joined {:.0}, the rest {:.0}",
+            ms(t_runs),
+            ms(t_join.saturating_sub(t_runs)),
+            ms(t.elapsed().saturating_sub(t_join))
+        );
+    }
+    Some((runs, st))
+}
+
 /// Save `b` to the store (errors are reported, not fatal: it is a cache):
 /// writing only what the store lacks, and encoding only what the last
 /// save or load did not know (runs of regions unchanged since are
@@ -560,13 +588,7 @@ fn save(dir: &std::path::Path, key: u128, b: &Build<Machine>, kept: &Mutex<Kept>
     // The runs not saved before, encoded on several threads (each a run
     // of consecutive runs, which share most of their values), then the
     // rest, referring to them.
-    let saved = save_runs(b, &s, &reused, stats, &sink).and_then(|(made, joined, st)| {
-        for j in joined {
-            s.merkle_join(j);
-        }
-        let reuse = |fp: u128| reused.get(&fp).or_else(|| made.get(&fp)).copied();
-        Some((partex_core::machine::save_build(b, &mut s, &reuse)?, st))
-    });
+    let saved = encode(b, &mut s, &reused, stats, &sink);
     let Some((runs, worker_stats)) = saved else {
         if debug() {
             eprintln!("phitex: store: this build cannot be saved");
