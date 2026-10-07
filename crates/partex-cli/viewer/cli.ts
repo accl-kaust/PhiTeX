@@ -13,6 +13,7 @@ import { setFontBase } from "../../../viewer/src/page2.ts";
 import { VIEWER_CSS } from "../../../viewer/src/css.ts";
 import { KEYS, bindKeys } from "../../../viewer/src/keys.ts";
 import { PROBLEMS_CSS, Problems, counts, type Problem } from "../../../viewer/src/problems.ts";
+import { OUTLINE_CSS, Outline, type Entry } from "../../../viewer/src/outline.ts";
 
 /** sync.ts's Glyph: where a glyph is on its page, and its source. */
 interface Glyph {
@@ -26,7 +27,7 @@ interface Glyph {
 
 // (the text fonts, from the server; the renderer's CSS)
 setFontBase(new URL("fonts/", location.href).href);
-document.head.append(Object.assign(document.createElement("style"), { textContent: VIEWER_CSS + PROBLEMS_CSS }));
+document.head.append(Object.assign(document.createElement("style"), { textContent: VIEWER_CSS + PROBLEMS_CSS + OUTLINE_CSS }));
 
 type Reply = { id: number; ok: boolean; json?: any; draws?: any; error?: string };
 
@@ -72,6 +73,30 @@ class Socket {
 const sock = new Socket();
 const pagesEl = document.getElementById("pages")!;
 const scroller = document.getElementById("scroller")!;
+// (the contents beside the pages: the PDF's outline, `t` or the bar's button shows or hides it, remembered)
+const contents = new Outline(document.getElementById("side")!, { goToPlace: (k, top) => viewer.goToPlace(k, top) });
+const sideOn = (on: boolean) => {
+  document.body.classList.toggle("side", on);
+  try {
+    localStorage.setItem("phitex.side", on ? "1" : "0");
+  } catch {}
+  if (!zoom) resize();
+};
+document.getElementById("toc")!.addEventListener("click", () => sideOn(!document.body.classList.contains("side")));
+// (shown unless it was hidden last time)
+try {
+  document.body.classList.toggle("side", localStorage.getItem("phitex.side") !== "0");
+} catch {
+  document.body.classList.add("side");
+}
+/** The last build's outline, asked again after each build. */
+async function outlined(): Promise<void> {
+  const r = await sock.request({ op: "outline" });
+  if (r.ok) {
+    contents.set((r.json?.items ?? []) as Entry[]);
+    contents.at(current);
+  }
+}
 const statusEl = document.getElementById("status")!;
 const pillEl = document.getElementById("pill")!;
 // (the build's errors over the pages; a place clicked opens in the editor, as a double-click on the page does)
@@ -90,6 +115,7 @@ const host: ViewerHost = {
   },
   inView(k: number) {
     current = k;
+    contents.at(k);
     status();
   },
   svg: () => null,
@@ -211,6 +237,7 @@ sock.onEvent = (e: { event: string; on?: boolean; file?: string; lo?: number; hi
   } else if (e.event === "diagnostics") {
     diagnosed(e.items ?? []);
   } else if (e.event === "settled") {
+    void outlined();
     // (a pass shown while the job's own files settle: still building)
     building = !!e.settling;
     doing = e.settling ? `settling (pass ${(e.pass ?? 1) + 1})` : "";
@@ -238,6 +265,7 @@ sock.onEvent = (e: { event: string; on?: boolean; file?: string; lo?: number; hi
 sock.onOpen = () => {
   connected = true;
   void layout();
+  void outlined();
   // (the last build's problems: a page opened after it settled has had no event)
   void sock.request({ op: "diagnostics" }).then((r) => r.ok && diagnosed(r.json?.items ?? []));
 };
@@ -275,7 +303,7 @@ addEventListener(
 const helpEl = document.createElement("div");
 helpEl.id = "keys";
 helpEl.hidden = true;
-helpEl.innerHTML = `<b>Keys</b><table>${[...KEYS, ["e", "the build's errors and warnings"] as [string, string]].map(([k, w]) => `<tr><td><kbd>${k}</kbd></td><td>${w}</td></tr>`).join("")}</table>`;
+helpEl.innerHTML = `<b>Keys</b><table>${[...KEYS, ["e", "the build's errors and warnings"] as [string, string], ["t", "the contents beside the pages"] as [string, string]].map(([k, w]) => `<tr><td><kbd>${k}</kbd></td><td>${w}</td></tr>`).join("")}</table>`;
 document.body.append(helpEl);
 // (the problems' keys, before the pages' own: `e` shows or hides them, Esc closes them)
 addEventListener(
@@ -284,6 +312,7 @@ addEventListener(
     if (e.ctrlKey || e.altKey || e.metaKey || (e.target as HTMLElement | null)?.closest?.("input, textarea, select")) return;
     if (e.key === "Escape" && problems.shown) problems.close();
     else if (e.key === "e") problems.toggle();
+    else if (e.key === "t") sideOn(!document.body.classList.contains("side"));
     else return;
     e.preventDefault();
     e.stopImmediatePropagation();
