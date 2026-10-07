@@ -215,37 +215,37 @@ impl Origins {
         if let Some(p) = lock(&self.placed).get(&k) {
             return p.clone();
         }
-        let places = phitex_draw::Pdf::open(&self.pdf)
+        let spots = phitex_draw::Pdf::open(&self.pdf)
             .map(|d| d.glyph_places(k))
             .unwrap_or_default();
         #[allow(clippy::cast_possible_truncation, reason = "points, to a hundredth")]
-        let placed: Vec<Placed> = match &self.sources {
+        let glyphs: Vec<Placed> = match &self.sources {
             Sources::Glyphs(pages) => pages.get(k).map_or_else(Vec::new, |os| {
                 os.iter()
                     .enumerate()
                     .map(|(i, o)| {
-                        let (x, y) = places.get(i).copied().unwrap_or((0.0, 0.0));
+                        let (x, y) = spots.get(i).copied().unwrap_or((0.0, 0.0));
                         (x as f32, y as f32, o.file, o.start, o.end, o.synthesized)
                     })
                     .collect()
             }),
             Sources::Sync(pages) => {
                 let recs = pages.get(k).map_or(&[][..], Vec::as_slice);
-                places
+                spots
                     .iter()
                     .map(|&(x, y)| {
                         let (x, y) = (x as f32, y as f32);
                         match nearest_record(recs, x, y) {
-                            Some(&(_, _, f, a, b)) => (x, y, f, a, b, false),
+                            Some(&(_, _, file, start, end)) => (x, y, file, start, end, false),
                             None => (x, y, u32::MAX, 0, 0, false),
                         }
                     })
                     .collect()
             }
         };
-        let placed = Arc::new(placed);
-        lock(&self.placed).insert(k, placed.clone());
-        placed
+        let glyphs = Arc::new(glyphs);
+        lock(&self.placed).insert(k, glyphs.clone());
+        glyphs
     }
 }
 

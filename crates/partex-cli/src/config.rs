@@ -226,9 +226,11 @@ mod tests {
                 machine: None,
                 ssa: None,
                 store: None,
+                synctex: None,
             }
         );
         assert_eq!(parse("ssa = true").unwrap().ssa, Some(true));
+        assert_eq!(parse("synctex = false").unwrap().synctex, Some(false));
         assert_eq!(
             parse("copy-pdf = true").unwrap().copy_pdf,
             Some(CopyPdf::Invocation)

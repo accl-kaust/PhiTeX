@@ -223,6 +223,7 @@ enum End {
 }
 
 /// The watch's build on the SSA runtime.
+#[allow(clippy::struct_excessive_bools, reason = "its switches")]
 struct Ssa {
     params: partex_core::Params,
     command_line: Vec<u8>,

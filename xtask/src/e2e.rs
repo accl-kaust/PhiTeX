@@ -2066,7 +2066,7 @@ fn run_modern_synctex(root: &Path, partex: &Path) -> Result<Vec<String>> {
         for e in fs::read_dir(dir)? {
             let n = e?.file_name().to_string_lossy().into_owned();
             let ours = n.starts_with("include.") || n.starts_with("incl-ch");
-            if ours && !n.ends_with(".tex") {
+            if ours && Path::new(&n).extension().is_none_or(|e| e != "tex") {
                 v.push(n);
             }
         }
@@ -2171,7 +2171,7 @@ fn run_modern_synctex(root: &Path, partex: &Path) -> Result<Vec<String>> {
         // (the next build finds the files as phitex left them)
         restore(&p)?;
         let mut found = compare(&o, &p, true)?;
-        found.retain(|n| !n.ends_with(".log"));
+        found.retain(|n| Path::new(n).extension().is_none_or(|e| e != "log"));
         diffs.extend(found.into_iter().map(|n| format!("{what}: {n}")));
     }
     Ok(diffs)

@@ -302,7 +302,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             && effects.is_some()
             && sync
                 .as_deref()
-                .is_some_and(crate::synctex::SyncState::from_command_line);
+                .is_some_and(crate::synctex::SyncState::by_command_line);
         if memo.enabled
             || effects.as_ref().is_some_and(|e| !e.is_empty())
             || org.is_some()

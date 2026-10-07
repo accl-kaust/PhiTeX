@@ -922,7 +922,7 @@ impl SyncState {
 
     /// Whether `SyncTeX` is on from the command line (not turned on by
     /// the document's `\synctex`).
-    pub(crate) fn from_command_line(&self) -> bool {
+    pub(crate) fn by_command_line(&self) -> bool {
         self.cli != NO_OPTION
     }
 
@@ -1618,6 +1618,20 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         self.synctex_event(Event::Math { id, sync, h, v });
     }
 
+    /// Math node `sync` of `width` in an hlist: with e-TeX's mode
+    /// (`converts`) a kern once output, so recorded as one in a leader
+    /// box output again (`synctexkern`).
+    pub(crate) fn synctex_math_moved(&mut self, sync: Side, width: i32, converts: bool) {
+        let Some(st) = self.sync.as_deref_mut() else {
+            return;
+        };
+        if converts && st.again > 0 {
+            self.synctex_kern(sync, width);
+        } else {
+            self.synctex_math(sync);
+        }
+    }
+
     /// Glue in an hlist, moved past (`synctexhorizontalruleorglue`).
     pub(crate) fn synctex_glue(&mut self, sync: Side) {
         let Some(st) = self.sync.as_deref_mut() else {
@@ -1896,28 +1910,26 @@ impl<H: Host, T: Tracker> Tex<H, T> {
     }
 
     /// Machine mode: the build's `SyncTeX` file from its regions' `events`
-    /// in program order ([`render`]), as this state, the build's final
-    /// one, ends the job (its job's name, whether its log was opened),
-    /// `deflate` zlib's at level 6 in its zlib wrapper. Without `SyncTeX`,
-    /// no file: the names an earlier run's would have, to remove (as
-    /// `synctexterminate`). `None` without a job name.
+    /// in program order ([`render`]) for job `job` (the log's name without
+    /// `.log`: the job's, in the output directory) with `SyncTeX` as this
+    /// state, the build's final one, has it; `deflate` is zlib's at level
+    /// 6 in its zlib wrapper. Without `SyncTeX`, no file: the names an
+    /// earlier run's would have, to remove (as `synctexterminate`).
     pub fn synctex_regions_file<'a>(
         &self,
+        job: &[u8],
         events: impl IntoIterator<Item = &'a Event>,
         deflate: &mut dyn FnMut(&[u8]) -> Option<Vec<u8>>,
-    ) -> Option<File> {
-        let job = self.job_name_bytes()?;
-        Some(match self.synctex_option() {
-            Some(cli) => render(cli, &job, self.log_opened, events, deflate),
-            None => {
-                let (name, other) = file_names(&job, true);
-                File {
-                    name,
-                    other,
-                    bytes: None,
-                }
-            }
-        })
+    ) -> File {
+        if let Some(cli) = self.synctex_option() {
+            return render(cli, job, true, events, deflate);
+        }
+        let (name, other) = file_names(job, true);
+        File {
+            name,
+            other,
+            bytes: None,
+        }
     }
 
     /// The command line's `-synctex` option, if `SyncTeX` was asked for

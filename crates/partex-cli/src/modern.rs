@@ -1799,6 +1799,7 @@ mod tests {
             copy_pdf: None,
             machine: true,
             ssa: false,
+            synctex: true,
         };
         let outputs = vec![(b"out/paper.pdf".to_vec(), 100)];
         let mut viewer = Viewer::default();
@@ -1885,15 +1886,21 @@ mod tests {
             copy_pdf: None,
             machine: true,
             ssa: false,
+            synctex: true,
         };
         assert_eq!(
             t.engine_args("nonstopmode"),
             v(&[
                 "pdflatex",
                 "-interaction=nonstopmode",
+                "-synctex=1",
                 "-output-directory=out",
                 "paper.tex"
             ])
+        );
+        assert!(
+            !t.engine_args_with("nonstopmode", false)
+                .contains(&"-synctex=1".to_owned())
         );
         assert_eq!(t.job(), "paper");
         assert_eq!(engine_name("XeLaTeX").unwrap(), "xelatex");

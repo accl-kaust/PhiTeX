@@ -913,6 +913,7 @@ impl Linker {
     /// Link `b`'s output and write what changed; the job's `history`. The
     /// message is `bench/edits.sh`'s link column unless `quiet` (the cold
     /// build's link, which a watch makes before the first edit).
+    #[allow(clippy::too_many_lines, reason = "the link, its files and its report")]
     fn link_write(&mut self, b: &mut Build<Machine>, quiet: bool) -> i32 {
         let splice = !std::env::var("PARTEX_LINK_SPLICE").is_ok_and(|v| v == "0");
         let t = Instant::now();
@@ -1066,11 +1067,15 @@ fn report_link(
     );
 }
 
+/// A `SyncTeX` file's name, the other kind's, and its bytes (none: no
+/// file).
+type SyncFile = (Vec<u8>, Vec<u8>, Option<Vec<u8>>);
+
 /// The build's `SyncTeX` file (DESIGN 4.5): its regions' events rendered
 /// as the final state ends the job, its names in the output directory:
 /// the file's, the other kind's (an earlier run's, removed), and its bytes
 /// (none: no file, both removed). `None` without a job name.
-pub(crate) fn synctex_file(b: &Build<Machine>) -> Option<(Vec<u8>, Vec<u8>, Option<Vec<u8>>)> {
+pub(crate) fn synctex_file(b: &Build<Machine>) -> Option<SyncFile> {
     let fin = b.final_state().tex();
     let events = b
         .traces()
@@ -1080,10 +1085,15 @@ pub(crate) fn synctex_file(b: &Build<Machine>) -> Option<(Vec<u8>, Vec<u8>, Opti
             _ => None,
         })
         .flatten();
-    let f = fin.synctex_regions_file(events, &mut |text| crate::zlib::deflate_once(6, text))?;
-    let native = fin.host().native();
-    let at = |n: Vec<u8>| native.in_output_dir(&n).unwrap_or(n);
-    Some((at(f.name), at(f.other), f.bytes))
+    // (the job's name as its log has it, in the output directory: the
+    // final state's own strings may not be loaded yet)
+    let host = fin.host();
+    let log = host.opened.values().find(|n| n.ends_with(b".log"))?;
+    let job = &log[..log.len() - 4];
+    let f = fin.synctex_regions_file(job, events, &mut |text| {
+        crate::zlib::deflate_once(6, text)
+    });
+    Some((f.name, f.other, f.bytes))
 }
 
 /// Write `bytes` to `path` whole: renamed into place, so a reader never
@@ -2911,7 +2921,7 @@ pub struct Watch {
     last_changes: Vec<String>,
     /// The `SyncTeX` file as the last link's regions made it
     /// ([`synctex_file`]).
-    synctex: Option<(Vec<u8>, Vec<u8>, Option<Vec<u8>>)>,
+    synctex: Option<SyncFile>,
 }
 
 /// Passes of a watch rebuild at most (as `-converge`).

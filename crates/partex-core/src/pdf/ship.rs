@@ -1747,7 +1747,11 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                 subtype,
                 sync,
             } => {
-                self.synctex_math(*sync);
+                // (e-TeX's `hlist_out` makes a math node a kern once it
+                // is out: "Adjust the LR stack for the `hlist_out`
+                // routine"; a leader box output again has the kern)
+                let converts = self.etex_ex();
+                self.synctex_math_moved(*sync, *width, converts);
                 if *subtype >= partex_engine::lr::L_CODE {
                     return self.pdf_error(
                         b"ext4",
