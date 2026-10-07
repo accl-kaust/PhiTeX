@@ -31,6 +31,14 @@
   body.building #bar::after { opacity: 1; animation: sweep 1.2s ease-in-out infinite; }
   @keyframes sweep { from { left: -30%; } to { left: 100%; } }
   #scroller { position: absolute; top: 29px; left: 0; right: 0; bottom: 0; overflow: auto; }
+  /* (the contents beside the pages) */
+  #side { position: absolute; top: 29px; left: 0; bottom: 0; width: 280px; display: none; background: var(--bar);
+          border-right: 1px solid rgba(0, 0, 0, 0.12); overflow: auto; }
+  body.side #side { display: block; }
+  body.side #scroller { left: 281px; }
+  #toc { border: 0; background: none; color: var(--ink); font: inherit; padding: 2px 6px; border-radius: 4px; cursor: pointer; }
+  #toc:hover, body.side #toc { background: rgba(127, 127, 127, 0.16); }
+  @media (max-width: 700px) { body.side #side { width: 100%; z-index: 2; } }
   #pages { padding: 12px 0 40px; }
   .slot { position: relative; margin: 0 auto 12px; background: #fff; box-shadow: 0 1px 4px rgba(0, 0, 0, 0.25); overflow: hidden; }
   .slot svg { display: block; }
@@ -47,8 +55,8 @@
 </style>
 </head>
 <body>
-<div id="bar"><b>phitex</b><span id="pill" class="off">connecting…</span><span id="status"></span><span id="hint">? for keys · e for errors · Ctrl+wheel to zoom</span></div>
-<div id="scroller"><div id="pages"></div></div>
+<div id="bar"><button type="button" id="toc" title="Contents (t)">☰</button><b>phitex</b><span id="pill" class="off">connecting…</span><span id="status"></span><span id="hint">? for keys · t contents · e errors · Ctrl+wheel to zoom</span></div>
+<nav id="side"></nav><div id="scroller"><div id="pages"></div></div>
 <script type="module" src="viewer.js"></script>
 </body>
 </html>
