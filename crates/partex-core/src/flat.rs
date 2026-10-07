@@ -279,8 +279,14 @@ impl<T: Copy + PartialEq + Default> Flat<T> {
             return Cow::Borrowed(&[]);
         }
         let (pa, pb) = (a / size, (b - 1) / size);
-        if pa == pb && b <= f.covered() {
-            return Cow::Borrowed(&f.parts[pa][a % size..=(b - 1) % size]);
+        // (in one part that holds them: part `k` holds elements from
+        // `k * size`, as `get_all` reads them; not the parts' sum of
+        // lengths, which walked them all, a string's name at every look)
+        if pa == pb
+            && let Some(p) = f.parts.get(pa)
+            && (b - 1) % size < p.len()
+        {
+            return Cow::Borrowed(&p[a % size..=(b - 1) % size]);
         }
         Cow::Owned((a..b).map(|i| self.get_all(i)).collect())
     }
