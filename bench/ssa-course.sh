@@ -56,10 +56,10 @@
 # edits' medians; the peak RSS; the load before and after; and whether
 # the final outputs, every edit reverted, are the cold build's: the files
 # the job reads back byte for byte, the PDF byte for byte or else page
-# by page as pdftoppm renders it (fonts may take other resource names
-# after rebuilds), the log not compared. NOTE=... adds a note to the
-# JSON. Exit 1 if the process failed. HEAVY=0 runs it without
-# scripts/heavy: for a small document only (COURSE, MAIN, EDITS).
+# by page as pdftoppm (or Ghostscript) renders it (fonts may take other
+# resource names after rebuilds), the log not compared. NOTE=... adds a
+# note to the JSON. Exit 1 if the process failed. HEAVY=0 runs it
+# without scripts/heavy: for a small document only (COURSE, MAIN, EDITS).
 set -euo pipefail
 
 repo=$(cd "$(dirname "$0")/.." && pwd)
@@ -186,16 +186,22 @@ for kind, rows in (("edit", [r for r in warm if not r["revert"]]),
 # pages when its bytes differ (an SSA build's fonts may take other
 # resource names, `/F86` for `/F90`, after rebuilds that loaded fonts
 # in another order)
-def rendered(a, b):
+def rendered(a, b):  # (pdftoppm's pages, or Ghostscript's where it is not)
     import shutil, subprocess, tempfile
-    if not shutil.which("pdftoppm"):
-        return False
+    def render(p, out):
+        if shutil.which("pdftoppm"):
+            cmd = ["pdftoppm", "-r", "50", "-gray", p, os.path.join(out, "p")]
+        elif shutil.which("gs"):
+            cmd = ["gs", "-q", "-dNOPAUSE", "-dBATCH", "-dSAFER", "-sDEVICE=pnggray", "-r50",
+                   "-o", os.path.join(out, "p%05d.png"), p]
+        else:
+            return False
+        return subprocess.run(cmd, capture_output=True).returncode == 0
     with tempfile.TemporaryDirectory(dir=d) as t:
         pages = []
         for k, p in enumerate((a, b)):
             os.mkdir(os.path.join(t, str(k)))
-            if subprocess.run(["pdftoppm", "-r", "50", "-gray", p, os.path.join(t, str(k), "p")],
-                              capture_output=True).returncode != 0:
+            if not render(p, os.path.join(t, str(k))):
                 return False
             pages.append(sorted(os.listdir(os.path.join(t, str(k)))))
         return pages[0] == pages[1] and all(
