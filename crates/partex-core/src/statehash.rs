@@ -225,6 +225,15 @@ impl SaveCanon {
     }
 }
 
+/// Whether a machine's `Rest` leaves out the current marks (`cur_mark`,
+/// §382, every class): they are then a cell of their own
+/// (`MCell::Marks`, `machine.rs`), read where TeX reads them (`\topmarks`
+/// and its siblings, the page builder's `fire_up`, `\vsplit`). A mark's
+/// text differs after an edit for as long as the page's marks do (LaTeX
+/// numbers its marks), and every region read it through `Rest`. The
+/// host's switch, `PARTEX_MACHINE_MARKS=0` turns it off.
+pub static MARK_CELLS: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(true);
+
 /// Hashes state, numbering the ids it meets.
 struct Canon<'a> {
     h: StableHasher,
@@ -863,28 +872,86 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             self.cur_boundary,
             other.cur_boundary
         )];
-        let top = usize::try_from(a.min(b)).unwrap_or(0);
+        // (frame by frame, as the state hash takes them: `SaveCanon`)
+        let (x, y) = (self.save_frames(), other.save_frames());
         let mut n = 0;
-        for p in 0..top {
-            let (x, y) = (self.save_stack[p], other.save_stack[p]);
-            let (ex, ey) = (
-                self.save_eqtb.get(p).copied().unwrap_or(false),
-                other.save_eqtb.get(p).copied().unwrap_or(false),
-            );
-            if x.bits() != y.bits() || ex != ey {
-                n += 1;
-                if n <= 6 {
-                    let what = if ex {
-                        self.eqtb_loc_name(self.save_stack[p + 1].rh())
-                    } else {
-                        alloc::format!("word {:x}/{:x}", x.bits(), y.bits())
-                    };
-                    out.push(alloc::format!("entry {p}: {what}"));
-                }
+        for (k, (f, g)) in x.iter().zip(&y).enumerate() {
+            if f == g {
+                continue;
+            }
+            n += 1;
+            if n <= 3 {
+                let only = |f: &alloc::vec::Vec<alloc::string::String>,
+                            g: &alloc::vec::Vec<alloc::string::String>| {
+                    f.iter()
+                        .filter(|e| !g.contains(e))
+                        .take(4)
+                        .cloned()
+                        .collect::<alloc::vec::Vec<_>>()
+                        .join(" ")
+                };
+                out.push(alloc::format!(
+                    "frame {k}: {} live words/{}: only here [{}], only there [{}]",
+                    f.len(),
+                    g.len(),
+                    only(f, g),
+                    only(g, f)
+                ));
             }
         }
-        out.push(alloc::format!("{n} entries differ"));
+        if x.len() != y.len() {
+            out.push(alloc::format!("{}/{} frames", x.len(), y.len()));
+        }
+        out.push(alloc::format!("{n} frames differ"));
         out.join("; ")
+    }
+
+    /// The save stack's frames as the state hash takes them
+    /// (`SaveCanon`), each a list of its live words: a restore entry by
+    /// its location's name and a hash of its value, any other word as it
+    /// is (for debugging).
+    fn save_frames(&self) -> alloc::vec::Vec<alloc::vec::Vec<alloc::string::String>> {
+        let saves = SaveCanon::of(
+            &self.save_stack,
+            self.save_ptr,
+            &self.save_eqtb,
+            self.cur_boundary,
+            self.cur_level,
+        );
+        let mut v = alloc::vec::Vec::new();
+        for frame in saves.frames() {
+            let mut words = alloc::vec::Vec::new();
+            let mut pairs = alloc::vec::Vec::new();
+            let mut p = frame.start;
+            while p < frame.end {
+                if saves.flagged(p) {
+                    if saves.live[p] {
+                        let loc = self.save_stack[p + 1].rh();
+                        let mut c = Canon::new();
+                        c.put(&self.save_stack[p + 1].b1());
+                        c.word(
+                            loc,
+                            self.save_stack[p],
+                            self.save_obj.get(p).and_then(Option::as_ref),
+                        );
+                        let h = c.h.finish128() % 0xffff_ffff;
+                        pairs.push(alloc::format!("{}={h:x}", self.eqtb_loc_name(loc)));
+                    }
+                    p += 2;
+                } else {
+                    words.push(alloc::format!("w{:x}", self.save_stack[p].bits()));
+                    p += 1;
+                }
+            }
+            pairs.sort_unstable();
+            words.extend(pairs);
+            if let Some(b) = frame.boundary {
+                let w = self.save_stack[b];
+                words.push(alloc::format!("boundary {}", w.b1()));
+            }
+            v.push(words);
+        }
+        v
     }
 
     /// The page builder's list hashed with the contents of the hboxes on
@@ -928,14 +995,23 @@ impl<H: Host, T: Tracker> Tex<H, T> {
     /// it differs and its part's hash does (a part may compare a field
     /// its hash leaves out).
     #[must_use]
-    pub fn rest_field_differences(&self, other: &Self) -> alloc::vec::Vec<alloc::string::String> {
+    pub fn rest_field_differences(
+        &self,
+        other: &Self,
+        served: &Served<'_>,
+    ) -> alloc::vec::Vec<alloc::string::String> {
         use alloc::string::ToString;
         let mut out = alloc::vec::Vec::new();
         let first_word =
             |f: &alloc::string::String| f.split_whitespace().next().unwrap_or_default().to_string();
         let last_cells = PDF_LAST_CELLS.load(core::sync::atomic::Ordering::Relaxed);
         let word_cells = PDF_WORD_CELLS.load(core::sync::atomic::Ordering::Relaxed);
-        for ((name, x), (_, y)) in self.rest_hash_parts().iter().zip(other.rest_hash_parts()) {
+        // (as a machine hashes `Rest`: without the cells it leaves out)
+        let (mine, theirs) = (
+            self.rest_hash_parts_served(served),
+            other.rest_hash_parts_served(served),
+        );
+        for ((name, x), (_, y)) in mine.iter().zip(theirs) {
             if *x == y {
                 continue;
             }
@@ -2228,7 +2304,14 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         }
         c.put(&(arg_list, *arg_active, preamble_list, *preamble_active));
         c.section("alignments", parts);
-        c.put(cur_mark);
+        // (with the marks as a cell, a machine's `Rest` has none:
+        // `MCell::Marks` holds them)
+        if !(scope == Scope::Rest
+            && c.served.is_some()
+            && MARK_CELLS.load(core::sync::atomic::Ordering::Relaxed))
+        {
+            c.put(cur_mark);
+        }
         c.section("marks", parts);
         let words = if canon {
             // (the exception words are strings the run may have made)

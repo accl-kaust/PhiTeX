@@ -595,6 +595,9 @@ pub trait Tracker {
     /// (`pdf::word`: the outlines' first, last and parent, the
     /// catalog's open action), a write if `write` (which reads it too).
     fn pdf_word_access(&self, _k: u8, _write: bool) {}
+    /// Before a read or a write of the current marks (`cur_mark`, §382,
+    /// any class), a write if `write` (which reads them too).
+    fn mark_access(&self, _write: bool) {}
     /// Macro `cs` is about to be expanded.
     fn macro_call(&self, _cs: i32) {}
     /// Macro `cs` has its arguments, whose tokens hash to `hash`.
