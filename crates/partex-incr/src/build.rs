@@ -119,6 +119,8 @@ pub struct Stats {
     pub recorded_regions: usize,
     /// Cost units executed.
     pub executed_cost: u64,
+    /// Of them, those of a span given up by a stop inside it (not kept).
+    pub given_up_cost: u64,
     /// Old regions replayed one by one.
     pub replayed_regions: usize,
     /// Spans of clean regions replayed by restoring the old run's state
@@ -393,23 +395,27 @@ type RefineJob<'a, M> = (
 enum Stop {
     Halted,
     Synced(u64),
+    /// `stop` said so after a region was cut: the span is not over.
+    Stopped,
 }
 
 /// Run `m`, recording regions of about `grain` cost, until it halts or
 /// `sync` names the old region whose entry it has reached; flat recording
-/// if `flat`.
+/// if `flat`. After each region cut (not at a sync), `stop` is asked
+/// whether to give up the span ([`Stop::Stopped`]).
 fn record_span<M: Machine>(
     m: &mut M,
     grain: Grain,
     flat: bool,
     sync: impl FnMut(&M::Boundary) -> Option<u64>,
+    stop: &dyn Fn() -> bool,
 ) -> (Vec<Trace<M>>, Stop, u64) {
     if flat {
         let rec = FlatRecording::new(m.at());
-        record_with(m, grain, sync, rec)
+        record_with(m, grain, sync, stop, rec)
     } else {
         let rec = Recording::new(m.at(), OnForce::Suspend);
-        record_with(m, grain, sync, rec)
+        record_with(m, grain, sync, stop, rec)
     }
 }
 
@@ -439,6 +445,7 @@ fn record_with<M: Machine, R: RegionRecorder<M>>(
     m: &mut M,
     grain: Grain,
     mut sync: impl FnMut(&M::Boundary) -> Option<u64>,
+    stop: &dyn Fn() -> bool,
     mut rec: R,
 ) -> (Vec<Trace<M>>, Stop, u64) {
     let mut out = Vec::new();
@@ -467,6 +474,9 @@ fn record_with<M: Machine, R: RegionRecorder<M>>(
                     m.prepare_cut(&mut rec);
                     out.push(rec.cut(m));
                     g = g.saturating_mul(grain.grow).min(grain.max.max(grain.first));
+                    if stop() {
+                        return (out, Stop::Stopped, total);
+                    }
                 }
             }
             Step::Halt => {
@@ -490,6 +500,7 @@ impl<M: Machine> Build<M> {
             Grain::fixed(cfg.grain, cfg.file_cut),
             cfg.flat,
             |_| None,
+            &|| false,
         );
         let mut b = Self {
             initial,
@@ -751,14 +762,19 @@ impl<M: Machine> Build<M> {
                 }
             }
             let last = next.is_none();
-            let (traces, stop, cost) = record_span(&mut m, Grain::fixed(grain, 0), flat, |b| {
-                (!last && *b == old.exit).then_some(0)
-            });
+            let (traces, stop, cost) = record_span(
+                &mut m,
+                Grain::fixed(grain, 0),
+                flat,
+                |b| (!last && *b == old.exit).then_some(0),
+                &|| false,
+            );
             // (it ended where the region did, in the same state: a
             // position met twice would stop it early)
             let ok = match stop {
                 Stop::Synced(_) => !last,
                 Stop::Halted => last,
+                Stop::Stopped => false,
             } && cost == old.cost
                 && old
                     .writes
@@ -802,7 +818,26 @@ impl<M: Machine> Build<M> {
         let Some(&old) = self.settled.iter().rev().nth(keep as usize) else {
             return 0;
         };
-        self.index();
+        // (a build not indexed, a copy to save, is not indexed for this:
+        // a merge asks only for the writers of accumulating cells)
+        let acc_writers: Option<BTreeMap<M::Cell, Vec<u64>>> = (!self.indexed).then(|| {
+            let mut m: BTreeMap<M::Cell, Vec<u64>> = BTreeMap::new();
+            for (k, t) in &self.seq {
+                for (c, _, _) in t.writes.iter().filter(|(c, _, _)| M::accumulates(c)) {
+                    m.entry(c.clone()).or_default().push(*k);
+                }
+            }
+            m
+        });
+        let last_writer = |c: &M::Cell, j: u64| -> Option<u64> {
+            match &acc_writers {
+                Some(m) => m.get(c).and_then(|ks| {
+                    let i = ks.partition_point(|k| *k < j);
+                    i.checked_sub(1).map(|i| ks[i])
+                }),
+                None => self.last_writer(c, Some(j)),
+            }
+        };
         let keys: Vec<u64> = self.seq.keys().copied().collect();
         let mut splices: Vec<(u64, Option<u64>, Vec<Trace<M>>)> = Vec::new();
         let mut i = 0;
@@ -812,23 +847,22 @@ impl<M: Machine> Build<M> {
                 i += 1;
                 continue;
             }
-            let mut acc = first.clone();
+            let mut acc = crate::trace::Composer::new(first);
             let mut j = i + 1;
             while j < keys.len() {
                 let t = &self.seq[&keys[j]];
-                if t.born > old || acc.cost + t.cost > grain {
+                if t.born > old || acc.cost() + t.cost > grain {
                     break;
                 }
                 let k0 = keys[i];
-                let entry = |c: &M::Cell| self.known_old_version_before(c, Some(k0));
-                let Some(next) = acc.compose_with(t, &entry) else {
+                let entry = |c: &M::Cell| self.known_old_version_after(c, last_writer(c, k0));
+                if !acc.push(t, &entry) {
                     break;
-                };
-                acc = next;
+                }
                 j += 1;
             }
             if j > i + 1 {
-                splices.push((keys[i], keys.get(j).copied(), alloc::vec![acc]));
+                splices.push((keys[i], keys.get(j).copied(), alloc::vec![acc.finish()]));
             }
             i = j;
         }
@@ -1073,18 +1107,24 @@ impl<M: Machine> Build<M> {
         }
     }
 
-    /// The old run's version of `c` just before region `j` (at the end if
-    /// `None`).
-    fn old_version_before(&self, c: &M::Cell, j: Option<u64>) -> Version {
+    /// The key of the last region before `j` (all of them: `None`) that
+    /// writes `c`, by the writers' index.
+    fn last_writer(&self, c: &M::Cell, j: Option<u64>) -> Option<u64> {
         let w = self.writers.get(c);
         let last = match j {
             Some(j) => w.and_then(|w| w.range(..j).next_back()),
             None => w.and_then(|w| w.iter().next_back()),
         };
+        last.map(|(k, ())| *k)
+    }
+
+    /// The version of `c` after region `last` wrote it (`None`: the
+    /// starting state's).
+    fn old_version_after(&self, c: &M::Cell, last: Option<u64>) -> Version {
         last.map_or_else(
             || version_of(&self.initial.get(c)),
-            |(k, ())| {
-                let w = &self.seq[k].writes;
+            |k| {
+                let w = &self.seq[&k].writes;
                 let i = w
                     .binary_search_by(|(x, _, _)| x.cmp(c))
                     .expect("a writer's trace writes the cell");
@@ -1107,25 +1147,26 @@ impl<M: Machine> Build<M> {
         }
     }
 
-    /// [`Build::old_version_before`], if the regions know it. An
+    /// The old run's version of `c` just before region `j` (at the end if
+    /// `None`), if the regions know it. An
     /// accumulating cell's version is its whole value, and a region kept
     /// from before the last rebuild in which that value differed recorded
     /// the whole value of its own run, not of the run it is now part of
     /// (the value it added is the same, as it ran the same).
     fn known_old_version_before(&self, c: &M::Cell, j: Option<u64>) -> Option<Version> {
+        self.known_old_version_after(c, self.last_writer(c, j))
+    }
+
+    /// [`Build::known_old_version_before`] the region whose key is `last`
+    /// (`None`: before every region) wrote `c` last.
+    fn known_old_version_after(&self, c: &M::Cell, last: Option<u64>) -> Option<Version> {
         if M::accumulates(c)
             && let Some(&since) = self.changed.get(c)
+            && last.is_some_and(|k| self.seq[&k].born < since)
         {
-            let w = self.writers.get(c);
-            let last = match j {
-                Some(j) => w.and_then(|w| w.range(..j).next_back()),
-                None => w.and_then(|w| w.iter().next_back()),
-            };
-            if last.is_some_and(|(k, ())| self.seq[k].born < since) {
-                return None;
-            }
+            return None;
         }
-        Some(self.old_version_before(c, j))
+        Some(self.old_version_after(c, last))
     }
 
     /// Rebuild after an edit: `new_initial` is the new starting state,
@@ -1142,7 +1183,12 @@ impl<M: Machine> Build<M> {
 
     /// [`Build::rebuild`], stopping early if `stop` says so when asked:
     /// between re-executed spans, at an old region's boundary, once one
-    /// span re-ran (so a stream of edits still moves on). A stopped
+    /// span re-ran (so a stream of edits still moves on); and inside a
+    /// span, after each region it cut, unless the last stop's frontier is
+    /// still ahead: the span is then given up (what it ran is dropped, a
+    /// newer edit may change it anyway) and the walk stops at the old
+    /// region it began at, so that a long span (a page-numbering cascade
+    /// over a chapter) does not hold the newer edit back. A stopped
     /// rebuild keeps what it re-ran, takes `new_initial` as its starting
     /// state, and records where it stopped (the frontier): the next
     /// rebuild goes on from there with its own changes, and its final
@@ -1448,25 +1494,43 @@ impl<M: Machine> Build<M> {
                 max: cfg.grain,
                 file_cut: cfg.file_cut,
             };
-            let (traces, stop, cost) = record_span(&mut s, grain, cfg.flat, |b| {
-                if !cfg.early_cutoff {
-                    return None;
-                }
-                entries
-                    .get(b)
-                    .and_then(|ks| ks.range(k + 1..).next().map(|e| e.0))
-            });
+            // (a stop inside the span gives it up: what it ran is not kept,
+            // and the walk stops at its first region, as at the top of the
+            // loop; not while the last stop's frontier is ahead, whose cells
+            // this span's comparison takes up)
+            let may_stop = frontier.is_none();
+            let span_stop = || may_stop && stop();
+            let (traces, stop_, cost) = record_span(
+                &mut s,
+                grain,
+                cfg.flat,
+                |b| {
+                    if !cfg.early_cutoff {
+                        return None;
+                    }
+                    entries
+                        .get(b)
+                        .and_then(|ks| ks.range(k + 1..).next().map(|e| e.0))
+                },
+                &span_stop,
+            );
             stats.executed_cost += cost;
             stats.run_ns += now() - t;
+            if matches!(stop_, Stop::Stopped) {
+                stats.given_up_cost += cost;
+                stopped_at = Some(k);
+                break;
+            }
             if cfg.clock.is_some() {
                 stats
                     .spans
                     .push((self.seq.range(..k).count(), cost, now() - t));
             }
             let t = now();
-            let j = match stop {
+            let j = match stop_ {
                 Stop::Synced(j) => Some(j),
                 Stop::Halted => None,
+                Stop::Stopped => unreachable!("a span given up is not spliced"),
             };
             let old_span: Vec<&Trace<M>> = match j {
                 Some(j) => self.seq.range(k..j).map(|(_, t)| t).collect(),

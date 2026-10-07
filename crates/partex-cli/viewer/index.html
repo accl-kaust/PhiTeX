@@ -15,6 +15,21 @@
   #bar b { font-weight: 600; }
   #status { color: var(--dim); }
   #hint { margin-left: auto; color: var(--dim); }
+  /* (the engine's status: what it does now, else how the last build went; a click shows the problems) */
+  #pill { display: inline-flex; align-items: center; gap: 6px; padding: 1px 9px 1px 7px; border-radius: 999px; font-size: 12px;
+          background: rgba(127, 127, 127, 0.14); color: var(--ink); cursor: default; white-space: nowrap; font-variant-numeric: tabular-nums; }
+  #pill::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--dim); flex: none; }
+  #pill.ok::before { background: #30a46c; }
+  #pill.warn::before { background: #f5a524; }
+  #pill.bad { background: rgba(229, 72, 77, 0.16); cursor: pointer; }
+  #pill.warn { cursor: pointer; }
+  #pill.bad::before { background: #e5484d; }
+  #pill.busy::before { background: #3e63dd; animation: pulse 1s ease-in-out infinite; }
+  @keyframes pulse { 50% { opacity: 0.3; } }
+  /* (a build running: a bar sweeping under the top bar) */
+  #bar::after { content: ""; position: absolute; left: 0; bottom: -1px; height: 2px; width: 30%; background: #3e63dd; opacity: 0; }
+  body.building #bar::after { opacity: 1; animation: sweep 1.2s ease-in-out infinite; }
+  @keyframes sweep { from { left: -30%; } to { left: 100%; } }
   #scroller { position: absolute; top: 29px; left: 0; right: 0; bottom: 0; overflow: auto; }
   #pages { padding: 12px 0 40px; }
   .slot { position: relative; margin: 0 auto 12px; background: #fff; box-shadow: 0 1px 4px rgba(0, 0, 0, 0.25); overflow: hidden; }
@@ -32,7 +47,7 @@
 </style>
 </head>
 <body>
-<div id="bar"><b>phitex</b><span id="status">connecting…</span><span id="hint">? for keys · Ctrl+wheel to zoom</span></div>
+<div id="bar"><b>phitex</b><span id="pill" class="off">connecting…</span><span id="status"></span><span id="hint">? for keys · e for errors · Ctrl+wheel to zoom</span></div>
 <div id="scroller"><div id="pages"></div></div>
 <script type="module" src="viewer.js"></script>
 </body>

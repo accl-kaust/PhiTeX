@@ -12,6 +12,7 @@ import { boxes, from, glyphs, lineAt, nearest } from "../../../viewer/src/sync.t
 import { setFontBase } from "../../../viewer/src/page2.ts";
 import { VIEWER_CSS } from "../../../viewer/src/css.ts";
 import { KEYS, bindKeys } from "../../../viewer/src/keys.ts";
+import { PROBLEMS_CSS, Problems, counts, type Problem } from "../../../viewer/src/problems.ts";
 
 /** sync.ts's Glyph: where a glyph is on its page, and its source. */
 interface Glyph {
@@ -25,7 +26,7 @@ interface Glyph {
 
 // (the text fonts, from the server; the renderer's CSS)
 setFontBase(new URL("fonts/", location.href).href);
-document.head.append(Object.assign(document.createElement("style"), { textContent: VIEWER_CSS }));
+document.head.append(Object.assign(document.createElement("style"), { textContent: VIEWER_CSS + PROBLEMS_CSS }));
 
 type Reply = { id: number; ok: boolean; json?: any; draws?: any; error?: string };
 
@@ -72,6 +73,10 @@ const sock = new Socket();
 const pagesEl = document.getElementById("pages")!;
 const scroller = document.getElementById("scroller")!;
 const statusEl = document.getElementById("status")!;
+const pillEl = document.getElementById("pill")!;
+// (the build's errors over the pages; a place clicked opens in the editor, as a double-click on the page does)
+const problems = new Problems(document.body, (file, line, col) => void sock.request({ op: "source", file, line, col }));
+pillEl.addEventListener("click", () => (found.errors || found.warnings) && problems.toggle());
 
 /** Zoom: 0 fits the page's width to the window; else CSS px per point × 96/72. */
 let zoom = 0;
@@ -126,6 +131,9 @@ const viewer = new Viewer(pagesEl, scroller, host);
 let current = 0;
 let hashes: string[] = [];
 let building = false;
+// (what the build running is doing beyond typesetting: a newer save
+// superseded it, or its first pass is shown while the job settles)
+let doing = "";
 let connected = false;
 
 async function draw(k: number): Promise<void> {
@@ -151,21 +159,39 @@ async function layout(): Promise<void> {
   status();
 }
 
+/** The build running now (its last `progress` event), the last build's time, its problems counted. */
+let progress: { pass: number; pages: number; phase: string; ms: number } | null = null;
+let lastMs: number | null = null;
+let found = { errors: 0, warnings: 0 };
+
 function status(): void {
   const n = hashes.length;
-  statusEl.textContent = !connected
-    ? "not connected to partex watch (retrying)"
-    : building
-      ? n
-        ? `building… (page ${current + 1} of ${n} so far)`
-        : "building…"
-      : n
-        ? `page ${current + 1} of ${n}`
-        : "no pages yet";
+  statusEl.textContent = !connected ? "" : n ? `page ${current + 1} of ${n}` : "no pages yet";
+  // (the pill: what the engine does now, else how the last build went)
+  let cls: string, text: string;
+  if (!connected) [cls, text] = ["off", "not connected to phitex watch (retrying)"];
+  else if (building) {
+    const p = progress;
+    const secs = p ? ` · ${(p.ms / 1000).toFixed(1)} s` : "";
+    [cls, text] = ["busy", doing && !p ? `${doing}…` : p ? `${doing ? `${doing} · ` : ""}pass ${p.pass} · ${p.phase}${p.pages ? ` · ${p.pages} page${p.pages === 1 ? "" : "s"}` : ""}${secs}` : "building…"];
+  } else if (found.errors) [cls, text] = ["bad", `${found.errors} error${found.errors === 1 ? "" : "s"}${found.warnings ? ` · ${found.warnings} warning${found.warnings === 1 ? "" : "s"}` : ""}`];
+  else if (found.warnings) [cls, text] = ["warn", `built${lastMs != null ? ` in ${(lastMs / 1000).toFixed(1)} s` : ""} · ${found.warnings} warning${found.warnings === 1 ? "" : "s"}`];
+  else [cls, text] = ["ok", `built${lastMs != null ? ` in ${(lastMs / 1000).toFixed(1)} s` : ""}`];
+  pillEl.className = cls;
+  pillEl.textContent = text;
+  pillEl.title = found.errors || found.warnings ? "Show the build's problems (e)" : "";
   document.body.classList.toggle("stale", building || !connected);
+  document.body.classList.toggle("building", building && connected);
 }
 
-sock.onEvent = (e: { event: string; on?: boolean; file?: string; lo?: number; hi?: number; at?: number; k?: number; hash?: string; pages?: number }) => {
+/** A build's diagnostics: counted on the pill, shown over the pages if there are errors. */
+function diagnosed(items: Problem[]): void {
+  found = counts(items);
+  problems.set(items);
+  status();
+}
+
+sock.onEvent = (e: { event: string; on?: boolean; file?: string; lo?: number; hi?: number; at?: number; k?: number; hash?: string; pages?: number; settling?: boolean; pass?: number; phase?: string; ms?: number; items?: Problem[] }) => {
   if (e.event === "page") {
     // (a page shipped while the build runs: shown before the build is in,
     // the PDF's page replacing it when it settles)
@@ -175,13 +201,29 @@ sock.onEvent = (e: { event: string; on?: boolean; file?: string; lo?: number; hi
     hashes[k] = e.hash!;
     viewer.shipped(k, e.hash!);
     status();
-  } else if (e.event === "progress" || e.event === "diagnostics") {
-    // (the build's status and its errors: the status pill and the error
-    // overlay are to come; logged for now)
-    console.log("partex", e);
+  } else if (e.event === "progress") {
+    building = true;
+    progress = { pass: e.pass ?? 1, pages: e.pages ?? 0, phase: e.phase ?? "", ms: e.ms ?? 0 };
+    // (the pass under way says it all; a superseding save stays named)
+    if (!doing.startsWith("superseded")) doing = "";
+    else doing = "superseded";
+    status();
+  } else if (e.event === "diagnostics") {
+    diagnosed(e.items ?? []);
   } else if (e.event === "settled") {
-    building = false;
+    // (a pass shown while the job's own files settle: still building)
+    building = !!e.settling;
+    doing = e.settling ? `settling (pass ${(e.pass ?? 1) + 1})` : "";
+    if (!e.settling) {
+      if (progress) lastMs = progress.ms;
+      progress = null;
+    }
     void layout();
+  } else if (e.event === "superseded") {
+    building = true;
+    doing = "superseded by a newer save: rebuilding";
+    progress = null;
+    status();
   } else if (e.event === "switched") {
     // (the build's glyph origins changed: asked again)
     glyphCache = new Map();
@@ -189,12 +231,15 @@ sock.onEvent = (e: { event: string; on?: boolean; file?: string; lo?: number; hi
     void show(e.file!, e.lo!, e.hi!, e.at!);
   } else if (e.event === "preparing") {
     building = !!e.on;
+    doing = "";
     status();
   }
 };
 sock.onOpen = () => {
   connected = true;
   void layout();
+  // (the last build's problems: a page opened after it settled has had no event)
+  void sock.request({ op: "diagnostics" }).then((r) => r.ok && diagnosed(r.json?.items ?? []));
 };
 sock.onClose = () => {
   connected = false;
@@ -202,16 +247,27 @@ sock.onClose = () => {
 };
 sock.connect();
 
+// (pages sized again at most once a frame, however many wheel or resize events come in it)
+let sizing = 0;
+const resize = () => {
+  if (!sizing)
+    sizing = requestAnimationFrame(() => {
+      sizing = 0;
+      viewer.redraw();
+    });
+};
 addEventListener("resize", () => {
-  if (!zoom) viewer.redraw();
+  if (!zoom) resize();
 });
 addEventListener(
   "wheel",
   (e) => {
     if (!e.ctrlKey) return;
     e.preventDefault();
-    zoom = Math.min(5, Math.max(0.25, (zoom || fitScale()) * (e.deltaY < 0 ? 1.1 : 1 / 1.1)));
-    viewer.redraw();
+    // (by how far the wheel or the pinch went: a touchpad sends many small steps)
+    const px = e.deltaMode === 1 ? e.deltaY * 16 : e.deltaY;
+    zoom = Math.min(5, Math.max(0.25, (zoom || fitScale()) * Math.exp(-px / 400)));
+    resize();
   },
   { passive: false },
 );
@@ -219,11 +275,24 @@ addEventListener(
 const helpEl = document.createElement("div");
 helpEl.id = "keys";
 helpEl.hidden = true;
-helpEl.innerHTML = `<b>Keys</b><table>${KEYS.map(([k, w]) => `<tr><td><kbd>${k}</kbd></td><td>${w}</td></tr>`).join("")}</table>`;
+helpEl.innerHTML = `<b>Keys</b><table>${[...KEYS, ["e", "the build's errors and warnings"] as [string, string]].map(([k, w]) => `<tr><td><kbd>${k}</kbd></td><td>${w}</td></tr>`).join("")}</table>`;
 document.body.append(helpEl);
+// (the problems' keys, before the pages' own: `e` shows or hides them, Esc closes them)
+addEventListener(
+  "keydown",
+  (e) => {
+    if (e.ctrlKey || e.altKey || e.metaKey || (e.target as HTMLElement | null)?.closest?.("input, textarea, select")) return;
+    if (e.key === "Escape" && problems.shown) problems.close();
+    else if (e.key === "e") problems.toggle();
+    else return;
+    e.preventDefault();
+    e.stopImmediatePropagation();
+  },
+  { capture: true },
+);
 const setZoom = (z: number) => {
   zoom = z;
-  viewer.redraw();
+  resize();
 };
 bindKeys(window, {
   get pages() {

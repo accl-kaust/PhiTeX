@@ -31,8 +31,17 @@ fn random_program(seed: u64, max_len: usize) -> (Rng, Shape, Program) {
 
 /// A random program, with the accumulator (`mark`, `fonts`) if `acc`.
 fn random_program_with(seed: u64, max_len: usize, acc: bool) -> (Rng, Shape, Program) {
+    random_program_ids(seed, max_len, acc, false)
+}
+
+/// [`random_program_with`], giving out ids (`next`, relocatable values)
+/// if `ids`.
+fn random_program_ids(seed: u64, max_len: usize, acc: bool, ids: bool) -> (Rng, Shape, Program) {
     let mut r = Rng(seed);
-    let s = shape(&mut r, acc);
+    let s = Shape {
+        ids,
+        ..shape(&mut r, acc)
+    };
     let len = r.below(max_len);
     let p = Program::from_text(&generate::program(&mut r, len, &s));
     (r, s, p)
@@ -209,13 +218,7 @@ fn rebuilds_with_relocated_ids_match_scratch() {
     let mut relocated = 0;
     for seed in 0..150 {
         for (ci, cfg) in build_configs().iter().enumerate() {
-            let mut r = Rng(seed + 50_000);
-            let s = Shape {
-                ids: true,
-                ..shape(&mut r, false)
-            };
-            let len = r.below(90);
-            let mut p = Program::from_text(&generate::program(&mut r, len, &s));
+            let (mut r, s, mut p) = random_program_ids(seed + 50_000, 90, false, true);
             let mut b = Build::new(p.machine(), cfg);
             for e in 0..8 {
                 let changed = generate::edit(&mut r, &mut p, &s);
@@ -307,6 +310,8 @@ fn several_edits_at_once() {
 #[test]
 fn stopped_rebuilds_then_one_to_the_end_match_scratch() {
     let mut stopped = 0;
+    // (stopped inside a span, which was given up)
+    let mut inside = 0;
     let mut in_a_row = 0;
     // (links taken again: the build said no effect changed)
     let mut same = 0;
@@ -315,15 +320,8 @@ fn stopped_rebuilds_then_one_to_the_end_match_scratch() {
             // (every other program with the accumulator, every third one
             // giving out ids: relocated regions spliced in by a stopped
             // rebuild and merged by `coarsen`)
-            let (mut r, s, p) = random_program_with(seed + 20_000, 90, seed % 2 == 1);
-            let (s, mut p) = if seed % 3 == 2 {
-                let s = Shape { ids: true, ..s };
-                let len = r.below(90);
-                let q = Program::from_text(&generate::program(&mut r, len, &s));
-                (s, q)
-            } else {
-                (s, p)
-            };
+            let (mut r, s, mut p) =
+                random_program_ids(seed + 20_000, 90, seed % 2 == 1, seed % 3 == 2);
             let mut b = Build::new(p.machine(), cfg);
             let mut last = Vec::new();
             assert!(b.take_effects_changed());
@@ -358,6 +356,9 @@ fn stopped_rebuilds_then_one_to_the_end_match_scratch() {
                             );
                         }
                         stopped += 1;
+                        if b.stats.given_up_cost > 0 {
+                            inside += 1;
+                        }
                         run += 1;
                         if run > 1 {
                             in_a_row += 1;
@@ -373,6 +374,13 @@ fn stopped_rebuilds_then_one_to_the_end_match_scratch() {
                 assert!(b.rebuild_or_stop(p.machine(), &changed, cfg, &|| false));
                 assert!(b.settled());
                 let effects_changed = b.take_effects_changed();
+                if r.below(4) == 0 {
+                    coarsens_unindexed_as_indexed(
+                        &b,
+                        cfg.grain,
+                        &format!("seed {seed}, config {ci}"),
+                    );
+                }
                 if r.below(2) == 0 {
                     // (while no edit waits: fine regions merged back, the
                     // same effects)
@@ -406,9 +414,41 @@ fn stopped_rebuilds_then_one_to_the_end_match_scratch() {
         }
     }
     assert!(
-        stopped > 1000 && in_a_row > 300 && same > 100,
-        "{stopped} rebuilds stopped, {in_a_row} after another, {same} links taken again"
+        stopped > 1000 && inside > 100 && in_a_row > 300 && same > 100,
+        "{stopped} rebuilds stopped ({inside} inside a span), {in_a_row} after another, {same} links taken again"
     );
+}
+
+/// A copy of `b` not indexed (as a save's) merges its regions as an
+/// indexed one does.
+fn coarsens_unindexed_as_indexed(b: &Build<partex_incr::stub::Stub>, grain: u64, what: &str) {
+    let copy = || {
+        let (initial, fin, seq, generation, changed) = b.parts();
+        let seq = seq.into_iter().map(|(k, t)| (k, t.clone())).collect();
+        Build::from_parts(
+            initial.clone(),
+            fin.clone(),
+            seq,
+            generation,
+            changed.clone(),
+        )
+    };
+    let (mut plain_copy, mut indexed) = (copy(), copy());
+    indexed.index();
+    plain_copy.coarsen(grain, 0);
+    indexed.coarsen(grain, 0);
+    let shape = |b: &Build<partex_incr::stub::Stub>| -> Vec<String> {
+        b.traces()
+            .map(|t| {
+                let writes: Vec<_> = t.writes.iter().map(|(c, _, v)| (c, v)).collect();
+                format!(
+                    "{:?} {:?} {:?} {writes:?} {}",
+                    t.entry, t.exit, t.guards, t.cost
+                )
+            })
+            .collect()
+    };
+    assert_eq!(shape(&plain_copy), shape(&indexed), "{what}");
 }
 
 fn check_rounds<E: Executor>(p: &Program, exec: &E, what: &str) {

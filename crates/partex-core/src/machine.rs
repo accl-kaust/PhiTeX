@@ -71,7 +71,7 @@ mod store;
 pub use store::{
     Cx, MakeLazy, Part, Parts, Regions, SavedChunk, StoreHost, assemble, assemble_later, census,
     check_digest, check_snapshots, chunk_of, load_build, load_chunk, load_final, load_parts,
-    load_snapshot_body, save_build,
+    load_snapshot_body, runs, save_build, save_run,
 };
 
 /// A file's contents with where its lines begin ([`line_starts`]).

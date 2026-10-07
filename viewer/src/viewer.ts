@@ -287,11 +287,24 @@ export class Viewer {
     this.wantVisible();
   }
 
-  /** The zoom changed: every drawn page again, at its new size. */
+  /**
+   * The zoom changed: each page at its new size, the view kept on the same
+   * place of the page in view. A page drawn from a draw list scales as it
+   * is (its drawing and its picture fill the slot), so only pages of other
+   * kinds are drawn again: a zoom touches no page's drawing.
+   */
   redraw(): void {
+    const at = this.slots[this.current];
+    const v = this.scroller.getBoundingClientRect();
+    const before = at?.el.getBoundingClientRect();
+    const frac = before?.height ? (v.top - before.top) / before.height : 0;
     for (const s of this.slots) {
       this.sizeSlot(s);
-      if (s.img) this.paint(s);
+      if (s.img && !("draws" in s.img && (s.img.draws as unknown as Draws2).v === 2)) this.paint(s);
+    }
+    if (at) {
+      const b = at.el.getBoundingClientRect();
+      this.scroller.scrollTop += b.top + frac * b.height - v.top;
     }
   }
 

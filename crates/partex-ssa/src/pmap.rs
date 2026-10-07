@@ -17,16 +17,20 @@ use crate::value::Value;
 const BITS: u32 = 5;
 const MASK: u64 = 31;
 
+/// An entry of a [`Node`].
 #[derive(Clone)]
-enum Entry<K, V> {
+pub enum Entry<K, V> {
     Leaf(u128, K, V),
     Sub(Arc<HNode<K, V>>),
     /// Keys whose 64-bit hashes are equal.
     Collide(Vec<(u128, K, V)>),
 }
 
+/// A node of a [`PMap`]'s trie (what keeps a map outside the process node
+/// by node, so that maps sharing nodes in memory share them there:
+/// [`PMap::root`], [`PMap::from_root`]).
 #[derive(Clone)]
-struct HNode<K, V> {
+pub struct HNode<K, V> {
     bitmap: u32,
     entries: Vec<Entry<K, V>>,
     sum: u128,
@@ -170,6 +174,73 @@ impl<K: Clone + Eq + Hash, V: Value> PMap<K, V> {
             walk(r, &mut out);
         }
         out
+    }
+}
+
+/// The map's trie, node by node, for its persistence: a map kept
+/// outside the process as its nodes, shared as they are in memory, and
+/// made again from them ([`PMap::from_root`]).
+impl<K: Clone + Eq + Hash, V: Value> PMap<K, V> {
+    /// The root node (none if the map is empty).
+    #[must_use]
+    pub fn root(&self) -> Option<&Arc<HNode<K, V>>> {
+        self.root.as_ref()
+    }
+
+    /// The map of root `root`, which holds `len` entries (`None` if it
+    /// is empty and `len` is not, or the other way round).
+    #[must_use]
+    pub fn from_root(root: Option<Arc<HNode<K, V>>>, len: usize) -> Option<Self> {
+        ((len > 0) == root.is_some()).then_some(PMap { root, len })
+    }
+}
+
+impl<K: Clone + Eq + Hash, V: Value> HNode<K, V> {
+    /// A node of these entries, in the order of their slots (`bitmap`'s
+    /// bits): `None` if their number is not the bitmap's.
+    #[must_use]
+    pub fn from_parts(bitmap: u32, entries: Vec<Entry<K, V>>) -> Option<Self> {
+        if bitmap.count_ones() as usize != entries.len() {
+            return None;
+        }
+        let sum = entries
+            .iter()
+            .fold(0u128, |a, e| a.wrapping_add(entry_sum(e)));
+        Some(HNode {
+            bitmap,
+            entries,
+            sum,
+        })
+    }
+
+    /// Which slots hold an entry.
+    #[must_use]
+    pub fn bitmap(&self) -> u32 {
+        self.bitmap
+    }
+
+    /// The entries, in the order of their slots.
+    #[must_use]
+    pub fn entries(&self) -> &[Entry<K, V>] {
+        &self.entries
+    }
+}
+
+impl<K: Hash, V> Entry<K, V> {
+    /// A leaf binding `k` to `v`.
+    #[must_use]
+    pub fn leaf(k: K, v: V) -> Self {
+        Entry::Leaf(Version::of(&k).0, k, v)
+    }
+
+    /// Keys whose hashes collide, bound to their values.
+    #[must_use]
+    pub fn collide(kvs: Vec<(K, V)>) -> Self {
+        Entry::Collide(
+            kvs.into_iter()
+                .map(|(k, v)| (Version::of(&k).0, k, v))
+                .collect(),
+        )
     }
 }
 

@@ -461,19 +461,21 @@ impl<T: Elem, const C: usize> IndexMut<usize> for JVec<T, C> {
     }
 }
 
-/// Saved as its chunks (which saved checkpoints share, as in memory);
-/// loaded as a checkpoint, flat again when it resumes.
+/// Saved as its chunks (which saved checkpoints share, as in memory), in
+/// a tree of nodes shared as the chunks are (`persist::save_seq`: a
+/// checkpoint that wrote a few chunks costs those and their paths, not a
+/// reference per chunk); loaded as a checkpoint, flat again when it
+/// resumes.
 impl<T: Elem + partex_engine::persist::Persist + Send + Sync + 'static, const C: usize>
     partex_engine::persist::Persist for JVec<T, C>
 {
     fn save(&self, s: &mut partex_engine::persist::Saver) {
-        self.frozen_chunks().save(s);
+        partex_engine::persist::save_seq(&self.frozen_chunks(), s);
         self.len.save(s);
     }
     fn load(l: &mut partex_engine::persist::Loader) -> Option<Self> {
-        use partex_engine::persist::Persist;
-        let base: Vec<Arc<[T; C]>> = Persist::load(l)?;
-        let len = usize::load(l)?;
+        let base: Vec<Arc<[T; C]>> = partex_engine::persist::load_seq(l)?;
+        let len = <usize as partex_engine::persist::Persist>::load(l)?;
         (base.len() == len.div_ceil(C)).then_some(Self {
             live: Vec::new(),
             base,

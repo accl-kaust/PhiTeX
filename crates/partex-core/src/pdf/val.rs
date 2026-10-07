@@ -297,29 +297,104 @@ where
     }
 }
 
+/// Saved as its trie's nodes, each shared (a node kept by several
+/// snapshots is saved once: a snapshot of a map that changed a few
+/// entries costs the nodes on their paths, and a map that did not change,
+/// a reference); each entry's version made again when loaded.
 impl<K, V> partex_engine::persist::Persist for VMap<K, V>
 where
-    K: Clone + Eq + Hash + Ord + partex_engine::persist::Persist,
-    V: Clone + Hash + partex_engine::persist::Persist,
+    K: Clone + Eq + Hash + Ord + partex_engine::persist::Persist + Send + Sync + 'static,
+    V: Clone + Hash + partex_engine::persist::Persist + Send + Sync + 'static,
 {
     fn save(&self, s: &mut partex_engine::persist::Saver) {
-        let e = self.sorted();
-        e.len().save(s);
-        for (k, v) in e {
-            k.save(s);
-            v.save(s);
+        self.len().save(s);
+        if let Some(r) = self.0.root() {
+            save_node(r, s);
         }
     }
     fn load(l: &mut partex_engine::persist::Loader) -> Option<Self> {
         let n = usize::load(l)?;
-        let mut m = Self::default();
-        for _ in 0..n {
-            let k = K::load(l)?;
-            let v = V::load(l)?;
-            m.insert(k, v);
-        }
-        Some(m)
+        let root = if n > 0 { Some(load_node(l)?) } else { None };
+        Some(Self(PMap::from_root(root, n)?))
     }
+}
+
+type MapNode<K, V> = partex_ssa::pmap::HNode<K, Ver<V>>;
+
+/// A [`VMap`]'s node: its slots, then each entry (a leaf, a node below,
+/// or keys whose hashes collide).
+fn save_node<K, V>(n: &Arc<MapNode<K, V>>, s: &mut partex_engine::persist::Saver)
+where
+    K: Clone + Eq + Hash + partex_engine::persist::Persist + Send + Sync + 'static,
+    V: Clone + Hash + partex_engine::persist::Persist + Send + Sync + 'static,
+{
+    use partex_engine::persist::{Persist, Pin};
+    use partex_ssa::pmap::Entry;
+    s.share(
+        Arc::as_ptr(n).cast::<()>() as usize,
+        1,
+        "map node",
+        || Pin::Send(alloc::boxed::Box::new(n.clone())),
+        |s| {
+            n.bitmap().save(s);
+            for e in n.entries() {
+                match e {
+                    Entry::Leaf(_, k, v) => {
+                        s.enc.u8(0);
+                        k.save(s);
+                        v.v.save(s);
+                    }
+                    Entry::Sub(sub) => {
+                        s.enc.u8(1);
+                        save_node(sub, s);
+                    }
+                    Entry::Collide(xs) => {
+                        s.enc.u8(2);
+                        xs.len().save(s);
+                        for (_, k, v) in xs {
+                            k.save(s);
+                            v.v.save(s);
+                        }
+                    }
+                }
+            }
+        },
+    );
+}
+
+fn load_node<K, V>(l: &mut partex_engine::persist::Loader) -> Option<Arc<MapNode<K, V>>>
+where
+    K: Clone + Eq + Hash + partex_engine::persist::Persist + Send + Sync + 'static,
+    V: Clone + Hash + partex_engine::persist::Persist + Send + Sync + 'static,
+{
+    use partex_engine::persist::Persist;
+    use partex_ssa::pmap::{Entry, HNode};
+    let n = l.share(|l| {
+        let bitmap = u32::load(l)?;
+        let mut entries = Vec::with_capacity(bitmap.count_ones() as usize);
+        for _ in 0..bitmap.count_ones() {
+            entries.push(match l.dec.u8()? {
+                0 => {
+                    let k = K::load(l)?;
+                    Entry::leaf(k, Ver::new(V::load(l)?))
+                }
+                1 => Entry::Sub(load_node(l)?),
+                2 => {
+                    let m = usize::load(l)?;
+                    let mut kvs = Vec::with_capacity(m.min(64));
+                    for _ in 0..m {
+                        let k = K::load(l)?;
+                        kvs.push((k, Ver::new(V::load(l)?)));
+                    }
+                    Entry::collide(kvs)
+                }
+                _ => return None,
+            });
+        }
+        Some(Arc::new(HNode::from_parts(bitmap, entries)?))
+    })?;
+    l.note(Arc::as_ptr(&n).cast::<()>() as usize, 1, &n);
+    Some(n)
 }
 
 /// A persistent set, versioned as [`VMap`].
@@ -385,7 +460,7 @@ impl<K: Clone + Eq + Hash + Ord + core::fmt::Debug> core::fmt::Debug for VSet<K>
 
 impl<K> partex_engine::persist::Persist for VSet<K>
 where
-    K: Clone + Eq + Hash + Ord + partex_engine::persist::Persist,
+    K: Clone + Eq + Hash + Ord + partex_engine::persist::Persist + Send + Sync + 'static,
 {
     fn save(&self, s: &mut partex_engine::persist::Saver) {
         self.0.save(s);
@@ -691,20 +766,40 @@ impl<T: Element + core::fmt::Debug> core::fmt::Debug for VTab<T> {
     }
 }
 
-impl<T: Element + partex_engine::persist::Persist> partex_engine::persist::Persist for VTab<T> {
+/// Saved as it is kept: its chunks, shared (`persist::save_seq`: a
+/// snapshot of a table that changed a few elements costs their chunks),
+/// each element with its version, and the table's sum. A table with
+/// elements changed since its last settle is saved settled.
+impl<T: Element + partex_engine::persist::Persist + Send + Sync + 'static>
+    partex_engine::persist::Persist for VTab<T>
+{
     fn save(&self, s: &mut partex_engine::persist::Saver) {
-        self.len.save(s);
-        for e in self {
-            e.save(s);
+        if !self.dirty.is_empty() {
+            let mut t = self.clone();
+            t.settle();
+            t.save(s);
+            return;
         }
+        partex_engine::persist::save_seq(&self.chunks, s);
+        self.len.save(s);
+        self.sum.save(s);
     }
     fn load(l: &mut partex_engine::persist::Loader) -> Option<Self> {
-        let n = usize::load(l)?;
-        let mut t = Self::default();
-        for _ in 0..n {
-            t.push(T::load(l)?);
-        }
-        Some(t)
+        let chunks: Vec<Chunk<T>> = partex_engine::persist::load_seq(l)?;
+        let len = usize::load(l)?;
+        let sum = u128::load(l)?;
+        // (every chunk full but the last, which is not empty)
+        let shaped = chunks.len() == len.div_ceil(CHUNK)
+            && chunks
+                .iter()
+                .enumerate()
+                .all(|(i, c)| c.len() == (len - i * CHUNK).min(CHUNK));
+        shaped.then(|| Self {
+            chunks: Arc::new(chunks),
+            len,
+            sum,
+            dirty: Vec::new(),
+        })
     }
 }
 
@@ -849,12 +944,32 @@ impl<T: core::fmt::Debug> core::fmt::Debug for Val<T> {
     }
 }
 
-impl<T: partex_engine::persist::Persist> partex_engine::persist::Persist for Val<T> {
+/// Saved as the shared value it is (each once, however many snapshots
+/// hold it) with its parts' versions; loaded shared, as it was.
+impl<T: Record + partex_engine::persist::Persist + Send + Sync + 'static>
+    partex_engine::persist::Persist for Val<T>
+{
     fn save(&self, s: &mut partex_engine::persist::Saver) {
-        (**self).save(s);
+        let a = match (&self.shared, &self.own) {
+            (Some((a, _)), _) => a.clone(),
+            (None, Some(b)) => Arc::new((**b).clone()),
+            (None, None) => unreachable!("a value"),
+        };
+        a.save(s);
+        for i in 0..T::PARTS {
+            self.version(i).save(s);
+        }
     }
     fn load(l: &mut partex_engine::persist::Loader) -> Option<Self> {
-        Some(Val::new(T::load(l)?))
+        let a = Arc::<T>::load(l)?;
+        let mut v = [0; 4];
+        for x in v.iter_mut().take(T::PARTS) {
+            *x = u128::load(l)?;
+        }
+        Some(Val {
+            own: None,
+            shared: Some((a, v)),
+        })
     }
 }
 

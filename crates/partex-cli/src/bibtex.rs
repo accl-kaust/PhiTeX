@@ -200,6 +200,9 @@ pub struct Runs {
     /// For each `.aux` file, whether it asks for BibTeX (`\bibdata`), with
     /// the contents that answer is of.
     asks: HashMap<Vec<u8>, (Arc<[u8]>, bool)>,
+    /// The files the runs wrote, with their bytes' hashes, until taken (a
+    /// watch: the job's own files, not edits).
+    pub written: Vec<(std::path::PathBuf, u128)>,
 }
 
 /// After a pass of a converging build (its outputs written): run BibTeX
@@ -209,6 +212,7 @@ pub struct Runs {
 /// path (the others, from disk). A report line for each run.
 pub fn after_pass(runs: &mut Runs, auxes: &[(Vec<u8>, Arc<[u8]>)]) -> Vec<String> {
     let mut reports = Vec::new();
+    let mut written = Vec::new();
     let served: HashMap<Vec<u8>, Arc<[u8]>> = auxes.iter().cloned().collect();
     for (name, contents) in auxes {
         let asks = match runs.asks.get(name) {
@@ -254,7 +258,9 @@ pub fn after_pass(runs: &mut Runs, auxes: &[(Vec<u8>, Arc<[u8]>)]) -> Vec<String
         runs.last
             .insert(name.clone(), std::mem::take(&mut files.read));
         for f in [&out.blg, &out.bbl].into_iter().flatten() {
-            if let Err(e) = std::fs::write(crate::native::path(&files.at(&f.name)), &f.contents) {
+            let p = crate::native::path(&files.at(&f.name));
+            written.push((p.clone(), crate::machinehost::quick::hash(&f.contents)));
+            if let Err(e) = std::fs::write(p, &f.contents) {
                 reports.push(format!(
                     "phitex: bibtex: can't write {}: {e}",
                     String::from_utf8_lossy(&f.name)
@@ -269,6 +275,7 @@ pub fn after_pass(runs: &mut Runs, auxes: &[(Vec<u8>, Arc<[u8]>)]) -> Vec<String
             last_line
         ));
     }
+    runs.written.extend(written);
     reports
 }
 

@@ -34,7 +34,7 @@ use crate::store;
 const MIN_BLOB: usize = 64;
 
 /// What a root holds first (its layout's version).
-const ROOT_TAG: &[u8] = b"partex machine build/14";
+const ROOT_TAG: &[u8] = b"partex machine build/15";
 
 /// The store a watch saves to, and the save running.
 pub struct Keeper {
@@ -293,7 +293,14 @@ impl Keeper {
         }
         self.dirty = false;
         self.saved = Some(b.generation());
+        let t = Instant::now();
         let mut copy = copy_build(b);
+        if debug() {
+            eprintln!(
+                "phitex: store: the build copied for the save in {:.0} ms",
+                t.elapsed().as_secs_f64() * 1e3
+            );
+        }
         let (dir, key, kept) = (self.dir.clone(), self.key, self.kept.clone());
         self.saving = Some(std::thread::spawn(move || {
             coarsen(&mut copy, grain);
@@ -324,8 +331,17 @@ fn coarsen(b: &mut Build<Machine>, grain: u64) {
     if std::env::var_os("PARTEX_STORE_COARSEN").is_some_and(|v| v == "0") {
         return;
     }
-    b.coarsen(grain, 0);
+    let t = Instant::now();
+    // (the copy is not indexed: a merge asks only for the writers of the
+    // few accumulating cells, which it finds without the indexes)
+    let n = b.coarsen(grain, 0);
     drop(b.take_garbage());
+    if debug() {
+        eprintln!(
+            "phitex: store: {n} regions merged for the save in {:.0} ms",
+            t.elapsed().as_secs_f64() * 1e3,
+        );
+    }
 }
 
 /// Where snapshots kept in the store are loaded from when first used.
@@ -385,11 +401,167 @@ fn copy_build(b: &Build<Machine>) -> Build<Machine> {
     )
 }
 
+/// The blobs of the runs of `b` that `reused` lacks, encoded by savers
+/// forked from `s` on threads of their own (`PARTEX_STORE_THREADS`, else
+/// up to 8), each given consecutive runs: by fingerprint, with what each
+/// saver did (for `s` to join) and counted. `None` if a run cannot be
+/// saved.
+type Made = (
+    std::collections::HashMap<u128, u128>,
+    Vec<partex_core::persist::Joined>,
+    Vec<partex_core::persist::Stats>,
+);
+
+/// What a saver on a thread of [`save_runs`] made: its runs' blobs by
+/// fingerprint, what it did and counted.
+type Share = (
+    Vec<(u128, u128)>,
+    partex_core::persist::Joined,
+    Option<partex_core::persist::Stats>,
+);
+
+fn save_runs(
+    b: &Build<Machine>,
+    s: &Saver,
+    reused: &std::collections::HashMap<u128, u128>,
+    stats: bool,
+    sink: &(dyn Fn(&mut Saver) + Sync),
+) -> Option<Made> {
+    let fork = s.merkle_fork()?;
+    let (_, _, seq, _, _) = b.parts();
+    let seq = &seq;
+    let todo: Vec<(u128, std::ops::Range<usize>)> = partex_core::machine::runs(b)
+        .into_iter()
+        .filter(|(fp, _)| !reused.contains_key(fp))
+        .collect();
+    let threads = std::env::var("PARTEX_STORE_THREADS")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or_else(|| {
+            std::thread::available_parallelism()
+                .map_or(4, std::num::NonZero::get)
+                .min(8)
+        })
+        .clamp(1, todo.len().max(1));
+    // (the runs cut into parts of consecutive runs, about as many regions
+    // each, four a thread: each thread takes the next part left, so one
+    // whose parts are slower takes fewer)
+    let total: usize = todo.iter().map(|(_, r)| r.len()).sum();
+    let cuts = threads * 4;
+    let mut parts: Vec<Vec<(u128, std::ops::Range<usize>)>> = vec![Vec::new()];
+    let mut acc = 0;
+    for r in todo {
+        acc += r.1.len();
+        parts.last_mut().expect("a part").push(r);
+        if acc * cuts >= total * parts.len() && parts.len() < cuts {
+            parts.push(Vec::new());
+        }
+    }
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let done: Vec<Option<Share>> = std::thread::scope(|sc| {
+        let jobs: Vec<_> = (0..threads)
+            .map(|_| {
+                let (fork, parts, next) = (&fork, &parts, &next);
+                sc.spawn(move || {
+                    let started = Instant::now();
+                    let mut w = Saver::forked(fork);
+                    if stats {
+                        w.merkle_stats();
+                    }
+                    sink(&mut w);
+                    let mut out = Vec::new();
+                    let mut regions = 0;
+                    loop {
+                        let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        let Some(part) = parts.get(i) else { break };
+                        for (fp, at) in part {
+                            regions += at.len();
+                            out.push((
+                                *fp,
+                                partex_core::machine::save_run(&seq[at.clone()], &mut w)?,
+                            ));
+                        }
+                    }
+                    let st = w.take_merkle_stats();
+                    let joined = w.into_joined();
+                    if debug() {
+                        eprintln!(
+                            "phitex: store: a saver's {} runs ({regions} regions) in {:.0} ms",
+                            out.len(),
+                            started.elapsed().as_secs_f64() * 1e3
+                        );
+                    }
+                    Some((out, joined, st))
+                })
+            })
+            .collect();
+        jobs.into_iter().map(|j| j.join().ok().flatten()).collect()
+    });
+    let mut made = std::collections::HashMap::new();
+    let mut joined = Vec::new();
+    let mut st = Vec::new();
+    for d in done {
+        let (out, j, s) = d?;
+        made.extend(out);
+        joined.push(j);
+        st.extend(s);
+    }
+    Some((made, joined, st))
+}
+
+/// A thread writing the blobs sent to it to `pack`, which it gives back
+/// at their end.
+fn spawn_writer(
+    mut pack: store::PackWriter,
+) -> (
+    std::sync::mpsc::SyncSender<store::Kept>,
+    JoinHandle<store::PackWriter>,
+) {
+    let (tx, rx) = std::sync::mpsc::sync_channel(1 << 12);
+    let writer = std::thread::spawn(move || {
+        for b in rx {
+            pack.add_kept(b);
+        }
+        pack
+    });
+    (tx, writer)
+}
+
+/// Encode `b` into `s`: its runs not in `reused` on threads of their own
+/// ([`save_runs`]), joined, then the rest. Its runs as saved and what the
+/// threads counted; `None` if it cannot be saved.
+fn encode(
+    b: &Build<Machine>,
+    s: &mut Saver,
+    reused: &std::collections::HashMap<u128, u128>,
+    stats: bool,
+    sink: &(dyn Fn(&mut Saver) + Sync),
+) -> Option<(Vec<SavedChunk>, Vec<partex_core::persist::Stats>)> {
+    let t = Instant::now();
+    let (made, joined, st) = save_runs(b, s, reused, stats, sink)?;
+    let t_runs = t.elapsed();
+    for j in joined {
+        s.merkle_join(j);
+    }
+    let t_join = t.elapsed();
+    let reuse = |fp: u128| reused.get(&fp).or_else(|| made.get(&fp)).copied();
+    let runs = partex_core::machine::save_build(b, s, &reuse)?;
+    if debug() {
+        let ms = |d: std::time::Duration| d.as_secs_f64() * 1e3;
+        eprintln!(
+            "phitex: store: encoded, ms: the runs {:.0}, joined {:.0}, the rest {:.0}",
+            ms(t_runs),
+            ms(t_join.saturating_sub(t_runs)),
+            ms(t.elapsed().saturating_sub(t_join))
+        );
+    }
+    Some((runs, st))
+}
+
 /// Save `b` to the store (errors are reported, not fatal: it is a cache):
 /// writing only what the store lacks, and encoding only what the last
 /// save or load did not know (runs of regions unchanged since are
 /// referred to by their blobs; values it knew by their addresses).
-#[allow(clippy::cast_precision_loss)] // (MB)
 fn save(dir: &std::path::Path, key: u128, b: &Build<Machine>, kept: &Mutex<Kept>) {
     let t = Instant::now();
     let (have, chunks, known) = {
@@ -411,9 +583,10 @@ fn save(dir: &std::path::Path, key: u128, b: &Build<Machine>, kept: &Mutex<Kept>
     let reused: std::collections::HashMap<u128, u128> =
         chunks.iter().map(|c| (c.fingerprint, c.hash)).collect();
     let knew = known.len();
-    // (the blobs written to the store's new pack as they are made)
+    // (the blobs written to the store's new pack as they are made, on a
+    // thread of its own: compressed and written while the savers encode)
     let pack = match store::PackWriter::new(dir) {
-        Ok(w) => std::rc::Rc::new(std::cell::RefCell::new(w)),
+        Ok(w) => w,
         Err(e) => {
             if debug() {
                 eprintln!("phitex: store: saving failed: {e}");
@@ -421,25 +594,58 @@ fn save(dir: &std::path::Path, key: u128, b: &Build<Machine>, kept: &Mutex<Kept>
             return;
         }
     };
+    let (tx, writer) = spawn_writer(pack);
+    // (how long the savers waited for the writer, in µs)
+    let waited = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let sink = |s: &mut Saver| {
+        let (tx, waited) = (tx.clone(), waited.clone());
+        s.merkle_sink(Box::new(move |b| {
+            // (compressed here, on the saver's thread)
+            let b = store::kept(b);
+            let t = Instant::now();
+            // (a writer gone has failed: its error is reported at its end)
+            let _ = tx.send(b);
+            let us = u64::try_from(t.elapsed().as_micros()).unwrap_or(u64::MAX);
+            waited.fetch_add(us, std::sync::atomic::Ordering::Relaxed);
+        }));
+    };
     let mut s = Saver::merkle_known(MIN_BLOB, have.hashes(), known);
-    let sink = pack.clone();
-    s.merkle_sink(Box::new(move |b| sink.borrow_mut().add(b)));
+    let stats = std::env::var_os("PARTEX_STORE_DEBUG").is_some_and(|v| v == "2");
+    if stats {
+        s.merkle_stats();
+    }
+    sink(&mut s);
     s.raw(ROOT_TAG);
     b.initial().tex().host().save_shared(&mut s);
-    let Some(runs) = partex_core::machine::save_build(b, &mut s, &|fp| reused.get(&fp).copied())
-    else {
+    // The runs not saved before, encoded on several threads (each a run
+    // of consecutive runs, which share most of their values), then the
+    // rest, referring to them.
+    let saved = encode(b, &mut s, &reused, stats, &sink);
+    let Some((runs, worker_stats)) = saved else {
         if debug() {
             eprintln!("phitex: store: this build cannot be saved");
         }
         return;
     };
     let refs = s.merkle_roots();
+    if let Some(mut st) = s.take_merkle_stats() {
+        for w in worker_stats {
+            st.merge(w);
+        }
+        print_stats(&st);
+    }
     let next_known = s.take_known();
     let (_, root) = s.into_merkle();
-    let t_ser = t.elapsed();
-    let Ok(pack) = std::rc::Rc::try_unwrap(pack).map(std::cell::RefCell::into_inner) else {
-        unreachable!("the saver, which held the pack's other handle, is gone");
+    drop(tx);
+    let Ok(pack) = writer.join() else {
+        if debug() {
+            eprintln!("phitex: store: saving failed: the writer's thread failed");
+        }
+        return;
     };
+    let t_ser = t.elapsed();
+    let waited =
+        std::time::Duration::from_micros(waited.load(std::sync::atomic::Ordering::Relaxed));
     let runs_reused = runs
         .iter()
         .filter(|r| reused.contains_key(&r.fingerprint))
@@ -455,28 +661,8 @@ fn save(dir: &std::path::Path, key: u128, b: &Build<Machine>, kept: &Mutex<Kept>
                 k.known = next_known;
             }
             if debug() {
-                eprintln!(
-                    "phitex: store: saved in {:.1} ms ({:.1} ms to encode and write the new blobs, {knew} values known, {runs_reused} of {} runs as they were): {} live blobs, {} new ({:.1} MB, {:.1} MB kept), {:.1} MB moved, root {:.1} MB, {} packs",
-                    t.elapsed().as_secs_f64() * 1e3,
-                    t_ser.as_secs_f64() * 1e3,
-                    runs.len(),
-                    saved.live,
-                    saved.new_blobs,
-                    saved.new_raw_bytes as f64 / 1e6,
-                    saved.new_bytes as f64 / 1e6,
-                    saved.moved_bytes as f64 / 1e6,
-                    saved.root_bytes as f64 / 1e6,
-                    saved.packs,
-                );
-                let phases: Vec<String> = saved
-                    .phases
-                    .iter()
-                    .map(|(n, d)| format!("{n} {:.0}", d.as_secs_f64() * 1e3))
-                    .collect();
-                eprintln!(
-                    "phitex: store: writing, ms from its start: {}",
-                    phases.join(", ")
-                );
+                let times = (t.elapsed(), t_ser, waited);
+                print_saved(&saved, times, knew, runs_reused, runs.len());
             }
         }
         Err(e) => {
@@ -484,6 +670,98 @@ fn save(dir: &std::path::Path, key: u128, b: &Build<Machine>, kept: &Mutex<Kept>
                 eprintln!("phitex: store: saving failed: {e}");
             }
         }
+    }
+}
+
+/// What a save wrote, and its phases' times (`PARTEX_STORE_DEBUG`).
+#[allow(clippy::cast_precision_loss)] // (MB)
+fn print_saved(
+    saved: &store::Saved,
+    (total, t_ser, waited): (
+        std::time::Duration,
+        std::time::Duration,
+        std::time::Duration,
+    ),
+    knew: usize,
+    runs_reused: usize,
+    runs: usize,
+) {
+    eprintln!(
+        "phitex: store: saved in {:.1} ms ({:.1} ms to encode and write the new blobs, {knew} values known, {runs_reused} of {runs} runs as they were): {} live blobs, {} new ({:.1} MB, {:.1} MB kept), {:.1} MB moved, root {:.1} MB, {} packs",
+        total.as_secs_f64() * 1e3,
+        t_ser.as_secs_f64() * 1e3,
+        saved.live,
+        saved.new_blobs,
+        saved.new_raw_bytes as f64 / 1e6,
+        saved.new_bytes as f64 / 1e6,
+        saved.moved_bytes as f64 / 1e6,
+        saved.root_bytes as f64 / 1e6,
+        saved.packs,
+    );
+    let phases: Vec<String> = saved
+        .phases
+        .iter()
+        .map(|(n, d)| format!("{n} {:.0}", d.as_secs_f64() * 1e3))
+        .collect();
+    eprintln!(
+        "phitex: store: writing, ms from its start: {}; of the blobs' {:.0} ms, {:.0} writing (the savers waited {:.0} for it)",
+        phases.join(", "),
+        t_ser.as_secs_f64() * 1e3,
+        saved.writing.as_secs_f64() * 1e3,
+        waited.as_secs_f64() * 1e3,
+    );
+}
+
+/// What the blobs a save wrote hold (`PARTEX_STORE_DEBUG=2`).
+#[allow(clippy::cast_precision_loss)] // (MB)
+fn print_stats(st: &partex_core::persist::Stats) {
+    let mut by: std::collections::BTreeMap<&str, partex_core::persist::StatRow> =
+        std::collections::BTreeMap::new();
+    for ((what, part), r) in &st.rows {
+        let e = by.entry(what).or_default();
+        if part.is_empty() {
+            e.new += r.new;
+            e.refs += r.refs;
+            e.same += r.same;
+            e.same_bytes += r.same_bytes;
+            e.known += r.known;
+            e.inline += r.inline;
+            e.inline_bytes += r.inline_bytes;
+        }
+        e.new_bytes += r.new_bytes;
+    }
+    let mut rows: Vec<_> = by.into_iter().collect();
+    rows.sort_by_key(|(_, r)| std::cmp::Reverse(r.new_bytes));
+    eprintln!(
+        "phitex: store: by type: new blobs, MB, refs (MB of them), same content (MB), known, inline (MB)"
+    );
+    for (what, r) in &rows {
+        eprintln!(
+            "  {:>8} {:>9.1} {:>10} ({:>7.1}) {:>8} ({:>7.1}) {:>9} {:>9} ({:>6.1})  {what}",
+            r.new,
+            r.new_bytes as f64 / 1e6,
+            r.refs,
+            r.refs as f64 * 17.0 / 1e6,
+            r.same,
+            r.same_bytes as f64 / 1e6,
+            r.known,
+            r.inline,
+            r.inline_bytes as f64 / 1e6,
+        );
+    }
+    let mut parts: Vec<_> = st
+        .rows
+        .iter()
+        .filter(|((_, p), r)| !p.is_empty() && r.new_bytes > 100_000)
+        .collect();
+    parts.sort_by_key(|(_, r)| std::cmp::Reverse(r.new_bytes));
+    eprintln!("phitex: store: by part (over 0.1 MB): MB, blobs");
+    for ((what, part), r) in parts.iter().take(60) {
+        eprintln!(
+            "  {:>9.1} {:>8}  {what} / {part}",
+            r.new_bytes as f64 / 1e6,
+            r.new
+        );
     }
 }
 

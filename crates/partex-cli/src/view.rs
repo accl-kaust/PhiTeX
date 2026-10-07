@@ -355,6 +355,8 @@ struct Shared {
     status: Mutex<(Status, Option<String>)>,
     /// The last build's diagnostics, a JSON array.
     diagnostics: Mutex<Arc<str>>,
+    /// The PDF the builds write (a pass that settles is shown from it).
+    pdf_path: Mutex<Option<PathBuf>>,
     sent: AtomicU64,
 }
 
@@ -420,6 +422,7 @@ impl View {
             sent: AtomicU64::new(0),
             status: Mutex::new((Status::default(), None)),
             diagnostics: Mutex::new(Arc::from("[]")),
+            pdf_path: Mutex::new(None),
         });
         crate::dpxfiles::keep_glyph_runs();
         let url = format!("http://127.0.0.1:{port}/{}/", shared.token);
@@ -492,7 +495,14 @@ impl View {
                     Phase::Saving => "saving",
                 };
             }
-            Progress::Again(_) | Progress::Pass(..) => {}
+            Progress::Superseded(_) => st.0.phase = "superseded",
+            Progress::Again(_) | Progress::Pass(..) | Progress::Settling(_) => {}
+        }
+        drop(st);
+        match p {
+            Progress::Superseded(_) => self.superseded(),
+            Progress::Settling(n) => self.settling(*n),
+            _ => {}
         }
     }
 
@@ -513,14 +523,67 @@ impl View {
     /// A build is in: its PDF read back, the pages' hashes made, and the
     /// browsers told (they ask for the pages that changed).
     pub fn built(&self, b: &Built) {
+        lock(&self.shared.pdf_path).clone_from(&b.pdf);
+        self.read_pdf(b.pdf.as_ref(), b.history, b.ms);
+        let items: Arc<str> = format!("[{}]", b.diagnostics.join(",")).into();
+        *lock(&self.shared.diagnostics) = items.clone();
+        *lock(&self.shared.status) = (Status::default(), None);
+        broadcast(
+            &self.shared,
+            &format!("{{\"event\":\"diagnostics\",\"items\":{items}}}"),
+        );
+        broadcast(&self.shared, "{\"event\":\"settled\"}");
+    }
+
+    /// Pass `pass` of the build running wrote its outputs, and passes
+    /// follow to settle it: its PDF (complete, of the build so far) is
+    /// shown as a build's is, the browsers told it is settling (they ask
+    /// for the pages that changed and stay `building`), and the next
+    /// pass's pages are shown as they ship.
+    pub fn settling(&self, pass: usize) {
+        let pdf = lock(&self.shared.pdf_path).clone();
+        let Some(pdf) = pdf else { return };
+        let (history, ms) = {
+            let p = lock(&self.shared.pages);
+            (
+                p.history,
+                p.started.map_or(0.0, |t| t.elapsed().as_secs_f64() * 1e3),
+            )
+        };
+        let started = lock(&self.shared.pages).started;
+        self.read_pdf(Some(&pdf), history, ms);
+        // (still building: the progress goes on from when it began)
+        {
+            let mut p = lock(&self.shared.pages);
+            p.begin();
+            p.started = started.or(p.started);
+        }
+        broadcast(
+            &self.shared,
+            &format!("{{\"event\":\"settled\",\"settling\":true,\"pass\":{pass}}}"),
+        );
+    }
+
+    /// A newer save stopped the build running: the browsers are told,
+    /// and what it shipped of its pass is no longer shown.
+    pub fn superseded(&self) {
+        {
+            let mut p = lock(&self.shared.pages);
+            let started = p.started;
+            p.begin();
+            p.started = started.or(p.started);
+        }
+        SERIAL.fetch_add(1, Ordering::Relaxed);
+        broadcast(&self.shared, "{\"event\":\"superseded\"}");
+    }
+
+    /// Read the PDF at `pdf` back and hash its pages (the build's
+    /// `history`, after `ms`): the pages the browsers are to ask for.
+    fn read_pdf(&self, pdf: Option<&PathBuf>, history: i32, ms: f64) {
         let t = Instant::now();
         // (the pages shipped since are this build's, in its PDF)
         SERIAL.fetch_add(1, Ordering::Relaxed);
-        let data: Option<Arc<[u8]>> = b
-            .pdf
-            .as_ref()
-            .and_then(|p| std::fs::read(p).ok())
-            .map(Into::into);
+        let data: Option<Arc<[u8]>> = pdf.and_then(|p| std::fs::read(p).ok()).map(Into::into);
         let mut pages = lock(&self.shared.pages);
         let first = match (&pages.pdf, &data) {
             (Some(old), Some(new)) => Some(
@@ -553,8 +616,8 @@ impl View {
         pages.generation += 1;
         pages.pdf = data;
         pages.sums = sums;
-        pages.history = b.history;
-        pages.ms = b.ms;
+        pages.history = history;
+        pages.ms = ms;
         pages.live.clear();
         pages.live_open = false;
         pages.started = None;
@@ -570,14 +633,6 @@ impl View {
                 t.elapsed().as_secs_f64() * 1e3
             ));
         }
-        let items: Arc<str> = format!("[{}]", b.diagnostics.join(",")).into();
-        *lock(&self.shared.diagnostics) = items.clone();
-        *lock(&self.shared.status) = (Status::default(), None);
-        broadcast(
-            &self.shared,
-            &format!("{{\"event\":\"diagnostics\",\"items\":{items}}}"),
-        );
-        broadcast(&self.shared, "{\"event\":\"settled\"}");
     }
 }
 
@@ -1019,7 +1074,12 @@ fn answer(s: &Shared, req: &Value) -> String {
         "source" => {
             let file = req.get("file").and_then(Value::str).unwrap_or("");
             let start = req.get("start").and_then(Value::index).unwrap_or(0);
-            let _ = write!(out, "{}}}", to_source(s, file, start));
+            // (an error's place: a line and column, not a byte)
+            let at = req
+                .get("line")
+                .and_then(Value::index)
+                .map(|l| (l, req.get("col").and_then(Value::index).unwrap_or(1)));
+            let _ = write!(out, "{}}}", to_source(s, file, start, at));
         }
         "diagnostics" => {
             let d = lock(&s.diagnostics).clone();
@@ -1073,9 +1133,9 @@ fn origins_json(s: &Shared, o: Option<&Origins>, page: Option<usize>) -> String 
 }
 
 /// A double-click's source, byte `start` of `file` (from the watch's
-/// directory): shown, and opened in the editor if there is one. The
-/// reply's tail (`ok` and the rest).
-fn to_source(s: &Shared, file: &str, start: usize) -> String {
+/// directory), or an error's line and column `at`: shown, and opened in
+/// the editor if there is one. The reply's tail (`ok` and the rest).
+fn to_source(s: &Shared, file: &str, start: usize, at: Option<(usize, usize)>) -> String {
     let path = s.root.join(file);
     if file.is_empty() || file.starts_with('/') || file.contains("..") {
         return "false,\"error\":\"not a file of the project\"".into();
@@ -1083,7 +1143,7 @@ fn to_source(s: &Shared, file: &str, start: usize) -> String {
     let Ok(text) = std::fs::read(&path) else {
         return "false,\"error\":\"no such file\"".into();
     };
-    let (line, col) = line_col(&text, start);
+    let (line, col) = at.unwrap_or_else(|| line_col(&text, start));
     let place = format!("{file}:{line}:{col}");
     match &s.editor {
         Some(e) => match e.open(file, line, col) {

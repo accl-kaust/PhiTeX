@@ -35,6 +35,15 @@ pub enum Progress<'a> {
     Tool(&'a str),
     /// The build is now doing this.
     Phase(Phase),
+    /// A newer save stopped the pass under way (at a region boundary, at
+    /// a checkpoint, or between passes): the build starts again from pass
+    /// 1 with these edits too (`ch05.tex:31`), keeping the work still
+    /// valid.
+    Superseded(&'a [String]),
+    /// Pass `n`'s outputs are written (a complete PDF of the build so
+    /// far, to show) and more passes follow to settle the job's own files
+    /// (`.aux`, `.toc`, BibTeX, makeindex); a newer save preempts them.
+    Settling(usize),
 }
 
 /// The code of the note a session logs for each page shipped out (its
