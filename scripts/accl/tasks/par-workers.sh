@@ -5,6 +5,9 @@
 #
 #   par-workers.sh [WORKERS...]   (default 1 8 16 48)
 #
+# DOCS (default `course pgf`) names the documents; the course's edits
+# (bench/edits/par.txt) are the course copy's that `ACCL_COURSE` names.
+#
 # For each worker count N: the course and pgfsub, each a cold build and
 # its edits (bench/edits/par.txt, bench/edits/pgfsub.txt) as the rebuilds
 # of one process, with the rebuilds' steps on N workers (A); then the
@@ -66,10 +69,8 @@ run() { # run DOC MODE N
     | tee -a "$r/summary.txt"
 }
 for n in "${ns[@]}"; do
-  run course a "$n"
-  run pgf a "$n"
-  if [ "$n" -gt 1 ]; then
-    run course b "$n"
-    run pgf b "$n"
-  fi
+  for doc in ${DOCS:-course pgf}; do
+    run "$doc" a "$n"
+    [ "$n" -gt 1 ] && run "$doc" b "$n"
+  done
 done
