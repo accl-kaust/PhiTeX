@@ -2032,9 +2032,60 @@ memory is the watch's:
   `\g__mark_…_tl` differ in every later page's output routine) and the
   pages near the section until their breaks agree. A `\section*` or a
   paragraph added re-runs 0.77M (8 regions).
-- The store's save writes each blob to its pack as the saver makes it,
-  and the blobs' references in frames: it holds the build, its copy and
-  a batch, not every blob as encoded, as kept and as packed at once.
+- The store's save writes each blob to its pack as the saver that made
+  it compresses it. A pack's references are in frames. A save holds the
+  build and its copy, not every blob as encoded, as kept and as packed
+  at once.
+- *A saved snapshot shares what it shares in memory* (2026-10-07).
+  Before, each of the course's 3466 snapshots was saved nearly whole:
+  522 KB each, 1810 of the save's 2764 MB. The PDF writer's tables
+  (VTab, VMap, Val, the object table's shards) and
+  `\pdfglyphtounicode`'s map (4.5k names, set once) went out flat in
+  every snapshot. Every chunked vector went out as one reference per
+  chunk: eqtb's objects alone have 5000 chunks. That came to 31M
+  references, 527 MB of hashes in the blobs, and as many again in the
+  `.kids` (542 MB beside a 1.29 GB pack). Now each is saved as it is
+  kept:
+  - a list of shared chunks (JVec, Flat, the object log, ShardMap,
+    VTab) is a tree of nodes of 32 (`persist::save_seq`), each node
+    named by the addresses under it, so a snapshot that wrote a few
+    chunks costs those chunks and their paths;
+  - a map is saved as its trie's nodes;
+  - a record is saved as its `Arc`;
+  - a table copied whole when one entry changes (the fonts' arrays, a
+    font's metrics) is saved in chunks of 64 named by their contents
+    (`save_chunked`).
+  Chunks named by content inside JVec chunks (eight blocks of 64)
+  were tried: 29% fewer raw bytes, but only 5% fewer once compressed,
+  and 38% more blobs. Not kept.
+  A pack refers to its own blobs by their place in its index, not by
+  hash.
+  The runs of regions are encoded by savers forked from the save's
+  (`Saver::merkle_fork`), on up to 8 threads that take parts of
+  consecutive runs from a queue. A blob's bytes depend on its value
+  only, so the store is the same with any number of threads. Each
+  saver compresses its blobs, and a writer thread only writes them.
+  The copy's regions are merged without indexing it: only the
+  accumulating cells' writers are looked up. Each run is composed in
+  maps kept from one region to the next (`Composer`).
+  Measured on accl, the course (299 pages there), against main
+  baceb6f; the PDFs are identical:
+
+  | | before | after |
+  |---|---|---|
+  | cold: merge before the save | ~4.5 s | 1.7 s |
+  | cold: save | 18.4 s | 3.5 s |
+  | cold: raw / kept | 2536 / 1171 MB | 934 / 357 MB |
+  | `.kids` | 500 MB | 11 MB |
+  | store after cold build | 1.68 GB | 0.38 GB |
+  | ch00 edit: save (+ merge) | 1.10 s | 0.81 s (+0.23 s) |
+  | ch00 edit: build wall | 4.37 s | 3.85 s |
+  | load | 0.43 s | 0.43 s |
+
+  On the user's 323-page copy (local, loaded machine), the merge and
+  save after a cold build took 2.0 + 6.0 s; the user had seen 48.5 s.
+  The store is 0.44 GB, down from 2.0 GB. The ch00 edit build takes
+  4.6 s in all, with 1.2 s of save after its result.
 - *A save during a rebuild* (2026-10-07) supersedes it. The rebuild asks
   whether an input it watches changed on disk (by modification time, at
   most every `PARTEX_WATCH_POLL_MS`, 50 ms) between re-executed spans and,
