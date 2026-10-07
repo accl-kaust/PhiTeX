@@ -202,16 +202,27 @@ sock.onClose = () => {
 };
 sock.connect();
 
+// (pages sized again at most once a frame, however many wheel or resize events come in it)
+let sizing = 0;
+const resize = () => {
+  if (!sizing)
+    sizing = requestAnimationFrame(() => {
+      sizing = 0;
+      viewer.redraw();
+    });
+};
 addEventListener("resize", () => {
-  if (!zoom) viewer.redraw();
+  if (!zoom) resize();
 });
 addEventListener(
   "wheel",
   (e) => {
     if (!e.ctrlKey) return;
     e.preventDefault();
-    zoom = Math.min(5, Math.max(0.25, (zoom || fitScale()) * (e.deltaY < 0 ? 1.1 : 1 / 1.1)));
-    viewer.redraw();
+    // (by how far the wheel or the pinch went: a touchpad sends many small steps)
+    const px = e.deltaMode === 1 ? e.deltaY * 16 : e.deltaY;
+    zoom = Math.min(5, Math.max(0.25, (zoom || fitScale()) * Math.exp(-px / 400)));
+    resize();
   },
   { passive: false },
 );
@@ -223,7 +234,7 @@ helpEl.innerHTML = `<b>Keys</b><table>${KEYS.map(([k, w]) => `<tr><td><kbd>${k}<
 document.body.append(helpEl);
 const setZoom = (z: number) => {
   zoom = z;
-  viewer.redraw();
+  resize();
 };
 bindKeys(window, {
   get pages() {
