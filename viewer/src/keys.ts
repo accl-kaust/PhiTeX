@@ -9,6 +9,8 @@ export interface KeyTarget {
   readonly page: number;
   /** Scroll page `k` into view. */
   goTo(k: number): void;
+  /** Turn `n` pages from the one at the view's top (back if negative). */
+  turn(n: number): void;
   /** The scrolling element. */
   scroller: HTMLElement;
   /** Zoom by `factor`; fit the page's width; fit the whole page. */
@@ -46,7 +48,7 @@ export function bindKeys(on: Window | HTMLElement, t: KeyTarget): () => void {
   let g = false;
   let helping = false;
   const times = () => Math.max(1, Number(count) || 1);
-  const page = (delta: number) => t.goTo(Math.max(0, Math.min(t.pages - 1, t.page + delta)));
+  const page = (delta: number) => t.turn(delta);
   const by = (dx: number, dy: number) => t.scroller.scrollBy({ left: dx, top: dy, behavior: "auto" });
   const handler = (ev: Event) => {
     const e = ev as KeyboardEvent;

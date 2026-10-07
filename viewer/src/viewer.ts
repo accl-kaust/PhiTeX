@@ -40,7 +40,6 @@ export class Viewer {
   private slots: Slot[] = [];
   private size = LETTER;
   private visible = new Set<number>();
-  private ratios = new Map<number, number>();
   private current = 0;
   private io: IntersectionObserver;
   private asked = new Set<string>();
@@ -54,6 +53,15 @@ export class Viewer {
     this.host = host;
     // (a screen above and below: drawn before they scroll in)
     this.io = new IntersectionObserver((es) => this.seen(es), { root: scroller, rootMargin: "100% 0px", threshold: [0, 0.25, 0.5, 0.75, 1] });
+    // (the page in view, as the view scrolls: once a frame)
+    let frame = 0;
+    scroller.addEventListener("scroll", () => {
+      if (!frame)
+        frame = requestAnimationFrame(() => {
+          frame = 0;
+          this.measure();
+        });
+    }, { passive: true });
     // (text selected on the pages: its boxes, for the editor to select the source)
     const pick = () =>
       setTimeout(() => {
@@ -291,7 +299,8 @@ export class Viewer {
   goTo(k: number): void {
     const s = this.slots[Math.max(0, Math.min(k, this.slots.length - 1))];
     if (!s) return;
-    this.scroller.scrollTo({ top: s.el.offsetTop - 12, behavior: "auto" });
+    const top = s.el.getBoundingClientRect().top - this.scroller.getBoundingClientRect().top + this.scroller.scrollTop;
+    this.scroller.scrollTo({ top: top - 12, behavior: "auto" });
   }
 
   private sizeSlot(s: Slot): void {
@@ -342,30 +351,50 @@ export class Viewer {
     s.el.replaceChildren(im);
   }
 
+  /** Turn `n` pages (back if negative) from the page at the view's top, as a PDF viewer's Page Down / Page Up: back from inside a page goes to its own top first. */
+  turn(n: number): void {
+    const v = this.scroller.getBoundingClientRect();
+    // (where each page's top is, in the scroller's coordinates: measured now)
+    const top = (k: number) => this.slots[k].el.getBoundingClientRect().top - v.top + this.scroller.scrollTop;
+    const at = this.scroller.scrollTop + 12;
+    let lo = 0, hi = this.slots.length - 1;
+    if (hi < 0) return;
+    // (the last page whose top is at or above the view's top, with goTo's 12 px)
+    while (lo < hi) {
+      const mid = (lo + hi + 1) >> 1;
+      if (top(mid) <= at + 1) lo = mid;
+      else hi = mid - 1;
+    }
+    this.goTo(n < 0 && top(lo) < at - 1 ? lo + n + 1 : lo + n);
+  }
+
   private seen(es: IntersectionObserverEntry[]): void {
     for (const e of es) {
       const k = Number((e.target as HTMLElement).dataset.k);
       if (e.isIntersecting) this.visible.add(k);
       else this.visible.delete(k);
-      // (how much of it is on screen, not in the margin: the page "in view")
-      const r = e.rootBounds;
-      const b = e.boundingClientRect;
-      const onScreen = r ? Math.max(0, Math.min(b.bottom, r.bottom) - Math.max(b.top, r.top)) : 0;
-      this.ratios.set(k, onScreen);
     }
-    let best = this.current, most = -1;
+    this.measure();
+    this.wantVisible();
+  }
+
+  /** The page most on screen, measured now (the observer only reports crossings of its thresholds, in a root grown by its margin). */
+  private measure(): void {
+    const v = this.scroller.getBoundingClientRect();
+    let best = this.current, most = 0;
     for (const k of this.visible) {
-      const v = this.ratios.get(k) ?? 0;
-      if (v > most) {
-        most = v;
+      const b = this.slots[k]?.el.getBoundingClientRect();
+      if (!b) continue;
+      const on = Math.min(b.bottom, v.bottom) - Math.max(b.top, v.top);
+      if (on > most) {
+        most = on;
         best = k;
       }
     }
-    if (best !== this.current && most > 0) {
+    if (best !== this.current) {
       this.current = best;
       this.host.inView(best);
     }
-    this.wantVisible();
   }
 
   /** Ask for each visible page not drawn at its hash (once per hash). */
