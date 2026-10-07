@@ -42,11 +42,10 @@ export class Problems {
   private items: Problem[] = [];
   /** The errors last closed by hand: not opened again until they change. */
   private dismissed = "";
+  private open: (file: string, line: number, col: number) => void;
 
-  constructor(
-    root: HTMLElement,
-    private open: (file: string, line: number, col: number) => void,
-  ) {
+  constructor(root: HTMLElement, open: (file: string, line: number, col: number) => void) {
+    this.open = open;
     this.el = document.createElement("div");
     this.el.className = "phx-problems";
     this.el.hidden = true;

@@ -26,11 +26,10 @@ export class Outline {
   private marked: HTMLElement | null = null;
   /** Folded parts, by their titles' path: kept when a build changes the outline. */
   private folded = new Set<string>();
+  private place: Place;
 
-  constructor(
-    root: HTMLElement,
-    private place: Place,
-  ) {
+  constructor(root: HTMLElement, place: Place) {
+    this.place = place;
     this.el = document.createElement("nav");
     this.el.className = "phx-outline";
     this.el.setAttribute("aria-label", "Contents");
