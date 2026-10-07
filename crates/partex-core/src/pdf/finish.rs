@@ -102,12 +102,23 @@ impl<H: Host, T: Tracker> Tex<H, T> {
     /// table of the writer).
     pub(crate) fn finish_pdf_file(&mut self) -> Result<(), Jump> {
         use super::val::PDF_ALL;
-        self.writer_scope(PDF_ALL, PDF_ALL, Self::finish_pdf_file_now)
+        // (SSA mode: the objects the end of the job makes are named by its
+        // seed and their order from here, as an applied call's are, not by
+        // the step's count: the job may end in the step that shipped the
+        // last page (plain's `\bye`, whose `\supereject` fires the output
+        // routine in the same expansion as its `\end`), whose objects took
+        // the first counts, and the step's count begun again named the
+        // catalog and the pages tree as the page's own objects, so the
+        // link found no mark for one of them)
+        let seq = self.pdf.objs.ssa_call_seed(u128::from(END_OF_JOB_SEED));
+        let r = self.writer_scope(PDF_ALL, PDF_ALL, Self::finish_pdf_file_now);
+        self.pdf.objs.ssa_call_seed_end(seq);
+        r
     }
 
     fn finish_pdf_file_now(&mut self) -> Result<(), Jump> {
         crate::progress::BOARD.phase(crate::progress::Phase::FinishPdf);
-        if self.pdf.objs.virt {
+        if self.pdf.objs.virt && !self.pdf.objs.ssa.on {
             // (machine mode: the objects the end of the job makes are
             // named by their order from here, not by where the input is,
             // which in LaTeX is the `.aux` read back at `\end{document}`,
