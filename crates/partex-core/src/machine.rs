@@ -417,6 +417,27 @@ pub fn set_relocate(on: bool) {
     RELOCATE.store(on, Relaxed);
 }
 
+/// Whether a page's shipout is a region of its own (the page layer: a
+/// region is cut just before each `\shipout` and just after it; on by
+/// default, `PARTEX_MACHINE_SHIP_LAYER=0` turns it off).
+static SHIP_LAYER: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(true);
+
+/// Turn [`SHIP_LAYER`] on or off for the machines made after.
+pub fn set_ship_layer(on: bool) {
+    SHIP_LAYER.store(on, Relaxed);
+}
+
+/// A position's key, its lowest bit saying whether it is a page layer's
+/// edge (`Machine::layer_edge`).
+fn layer_key(h: u128, layer: bool) -> u128 {
+    (h & !1) | u128::from(layer)
+}
+
+/// The version of `MCell::ObjCount` holding `n`.
+fn obj_count_version(n: i32) -> u128 {
+    StableHasher::of(&(b"objcount", n))
+}
+
 /// An origin that stands for all of them (`MCell::Origin`): a region
 /// whose answers overflowed the tracker's log.
 pub const ANY_ORIGIN: i32 = -1;
@@ -587,6 +608,46 @@ fn pdf_word_is_cell<H: Host, T: Tracker>(t: &Tex<H, T>, k: u8) -> bool {
 /// `NumState`).
 fn num_answer_version<T: Hash>(v: T) -> u128 {
     StableHasher::of(&(b"num", v))
+}
+
+/// The version of a `MCell::FinalNum` answer: the number itself, under a
+/// tag (a relocation reads it back: `machine_reloc.rs`).
+fn final_num_version(n: i32) -> u128 {
+    (0x4649_4e41_4c00_u128 << 64) | u128::from(n.cast_unsigned())
+}
+
+/// The version of a `MCell::NumState(starts)` answer: the counters a
+/// region that writes `starts` objects to object streams depends on
+/// (a relocation reads them back: `machine_reloc.rs`). `sys` and
+/// `obj_ptr` as they are; of the open stream only whether there is one
+/// and, if one of those objects can fill it, its last index: a stream
+/// that does not fill in the region opens no stream in it, wherever its
+/// boundary is. The stream count numbers nothing.
+fn num_state_version(c: crate::pdf::vnum::Counters, starts: i32) -> u128 {
+    let w = |x: i32| u128::from(x.cast_unsigned());
+    let room = c.cur != 0 && c.idx.saturating_add(starts) <= crate::pdf::out::PDF_OS_MAX_OBJS - 2;
+    let idx = if c.cur == 0 || room {
+        u128::from(u16::MAX)
+    } else {
+        u128::from(u16::try_from(c.idx).unwrap_or(u16::MAX - 1))
+    };
+    (w(c.sys) << 96) | (w(c.obj_ptr) << 64) | (u128::from(c.cur != 0) << 32) | idx
+}
+
+/// [`num_state_version`]'s `sys` and `obj_ptr`, and its version with
+/// them replaced.
+#[allow(clippy::cast_possible_truncation)] // (the fields)
+fn num_state_counts(v: u128) -> (i32, i32) {
+    (
+        ((v >> 96) as u32).cast_signed(),
+        ((v >> 64) as u32).cast_signed(),
+    )
+}
+
+fn num_state_with_counts(v: u128, sys: i32, obj_ptr: i32) -> u128 {
+    (u128::from(sys.cast_unsigned()) << 96)
+        | (u128::from(obj_ptr.cast_unsigned()) << 64)
+        | (v & u128::from(u64::MAX))
 }
 
 /// Whether a machine sets the state that is dead at a clean point to its
@@ -1682,8 +1743,9 @@ pub enum MCell {
     OfFinal(i32),
     /// The numbering's counters, not its names (`vnum::Counters`): what
     /// numbers the objects a region makes take, a question about
-    /// `Numbering`, as `FinalNum`.
-    NumState,
+    /// `Numbering`, as `FinalNum`; `.0` objects of the region go to
+    /// object streams (`num_state_version`).
+    NumState(i32),
     /// Relocatable numbers (`reloc.rs`): the region used a number of
     /// origin `.0` (count register `.0`; [`ANY_ORIGIN`]: any) as a
     /// number. Never written; `get` answers it the same always, so it
@@ -1696,6 +1758,12 @@ pub enum MCell {
     /// `Origin`, never written and always holding; a rebuild that would
     /// relocate the region checks it with `.1` relocated.
     IntCmp(i32, i32, u8, i32),
+    /// Relocatable values: pdfTeX's object counter as the numbering
+    /// stands (`Counters::sys`), the origin cell of the object numbers TeX
+    /// sees (`reloc::NUM_ORIGIN`). Written where a region made objects;
+    /// read by none (a region reads the numbering through its answers);
+    /// setting it does nothing (the numbering sets it).
+    ObjCount,
 }
 
 impl MCell {
@@ -2407,12 +2475,13 @@ pub struct TexMachine<H: CellHost> {
 /// summary print it).
 #[derive(Clone, Debug, Default)]
 pub struct Census {
-    /// Candidates returned, by level (0–3).
-    pub seen: [u64; 4],
+    /// Candidates returned, by level (0–3, and 4: a shipout's edges,
+    /// `partex_incr::LAYER`).
+    pub seen: [u64; 5],
     /// The clean points among them: outer ones, paragraph starts.
     pub clean: [u64; 2],
     /// Regions cut at one, by its level.
-    pub cut: [u64; 4],
+    pub cut: [u64; 5],
     /// The level of each cut, by the region's exit (its `at`).
     pub levels: alloc::collections::BTreeMap<Pos, u8>,
     /// Who observed the numbering in each region that did, by the
@@ -2464,6 +2533,7 @@ impl<H: CellHost> TexMachine<H> {
         tex.set_tags(RELOCATE.load(Relaxed));
         tex.set_seal_lines(true);
         tex.set_stop_before_ship(true);
+        tex.set_stop_after_ship(SHIP_LAYER.load(Relaxed));
         tex.log_lines = true;
         Self {
             tex,
@@ -2649,6 +2719,25 @@ impl<H: CellHost> TexMachine<H> {
         (self.started, self.halted).hash(&mut h);
         if position_cells() {
             // (a `Rest` without line numbers is another kind of value)
+            h.write_u8(1);
+        }
+        h.finish128()
+    }
+
+    /// `Rest`'s version of snapshot `s`, made as a cut makes it, with
+    /// this machine's state hash memo (a relocated `Rest`: `machine_reloc.rs`).
+    fn rest_version_of_snapshot(&mut self, s: &Snapshot<H>) -> u128 {
+        let mut e = s.engine();
+        e.hash_memo = core::mem::take(&mut self.tex.hash_memo);
+        let host = e.host.clone();
+        let served = |n: &[u8]| Self::serves(&host, n);
+        let state = e.rest_hash_memo(&served);
+        self.tex.hash_memo = core::mem::take(&mut e.hash_memo);
+        let mut h = StableHasher::new();
+        h.write_u128(state);
+        h.write_u128(e.host.digest());
+        (s.started, s.halted).hash(&mut h);
+        if position_cells() {
             h.write_u8(1);
         }
         h.finish128()
@@ -2907,6 +2996,10 @@ impl<H: CellHost> TexMachine<H> {
         let mut h = StableHasher::new();
         if t.stopped_before_ship() {
             (b"ship", self.started, t.in_open, t.line, t.shipped).hash(&mut h);
+            return h.finish128();
+        }
+        if t.stopped_after_ship() {
+            (b"shipped", self.started, t.in_open, t.line, t.shipped).hash(&mut h);
             return h.finish128();
         }
         (self.started, self.halted, t.in_open, t.input_ptr, t.line).hash(&mut h);
@@ -3434,7 +3527,10 @@ impl<H: CellHost> Machine for TexMachine<H> {
                 Step::Halt
             }
             run::Step::Checkpoint => {
-                if self.tex.cur_input.state == TOKEN_LIST && !self.tex.stopped_before_ship() {
+                // (a shipout's edges, inside the output routine as a rule:
+                // the page layer's, a region of its own between them)
+                let ship = self.tex.stopped_before_ship() || self.tex.stopped_after_ship();
+                if self.tex.cur_input.state == TOKEN_LIST && !ship {
                     return Step::Continue;
                 }
                 // a boundary: a new region may begin after it, most at a
@@ -3451,7 +3547,9 @@ impl<H: CellHost> Machine for TexMachine<H> {
                 if let Some(k) = clean {
                     self.census.clean[k as usize] += 1;
                 }
-                let level = if clean.is_some() {
+                let level = if ship && self.tex.stop_after_ship {
+                    partex_incr::LAYER
+                } else if clean.is_some() {
                     3
                 } else if edge {
                     2
@@ -3584,6 +3682,7 @@ impl<H: CellHost> Machine for TexMachine<H> {
         };
         let whole = core::mem::take(&mut self.tex.pdf.objs.log.forced);
         let answers = core::mem::take(&mut self.tex.pdf.objs.log.answers);
+        let answered_at = core::mem::take(&mut self.tex.pdf.objs.log.answered_at);
         if whole || !answers.is_empty() {
             // (the whole numbering: the guard a rebuild finds the region
             // by, and the one that decides for a region that read it
@@ -3606,6 +3705,18 @@ impl<H: CellHost> Machine for TexMachine<H> {
                     _ => None,
                 })
                 .collect();
+            // (the objects to object streams before the last answer: what
+            // the answers depend on of the streams)
+            let upto = answered_at
+                .saturating_sub(entry.tex.pdf.objs.alog.len())
+                .min(added.len());
+            let starts = i32::try_from(
+                added[..upto]
+                    .iter()
+                    .filter(|e| matches!(e, crate::pdf::vnum::NumEvent::Start))
+                    .count(),
+            )
+            .unwrap_or(i32::MAX);
             let entry_sys = entry.tex.pdf.objs.alog.counters.sys;
             let mut state = false;
             let mut guards: alloc::collections::BTreeMap<MCell, u128> =
@@ -3616,7 +3727,7 @@ impl<H: CellHost> Machine for TexMachine<H> {
                         if own.contains(&k) {
                             state = true;
                         } else {
-                            guards.insert(MCell::FinalNum(k), num_answer_version(n));
+                            guards.insert(MCell::FinalNum(k), final_num_version(n));
                         }
                     }
                     crate::pdf::objtab::NumAnswer::Of(n, v) => {
@@ -3630,8 +3741,8 @@ impl<H: CellHost> Machine for TexMachine<H> {
             }
             if state {
                 guards.insert(
-                    MCell::NumState,
-                    num_answer_version(entry.tex.pdf.objs.alog.counters),
+                    MCell::NumState(starts),
+                    num_state_version(entry.tex.pdf.objs.alog.counters, starts),
                 );
             }
             // (this branch is the only place derived guards on the
@@ -3850,6 +3961,9 @@ impl<H: CellHost> Machine for TexMachine<H> {
         }
         if numbered {
             write(r, MCell::Numbering);
+            if self.tex.tags_on {
+                write(r, MCell::ObjCount);
+            }
         }
         if dested {
             write(r, MCell::Dests);
@@ -3951,7 +4065,7 @@ impl<H: CellHost> Machine for TexMachine<H> {
                     v: V::Positions(Arc::new(p)),
                 }
             }),
-            MCell::FinalNum(k) => Some(MValue::version(num_answer_version(
+            MCell::FinalNum(k) => Some(MValue::version(final_num_version(
                 self.tex.pdf.objs.peek_final_num(*k),
             ))),
             MCell::OfFinal(n) => Some(MValue::version(num_answer_version(
@@ -3959,9 +4073,14 @@ impl<H: CellHost> Machine for TexMachine<H> {
             ))),
             MCell::Origin(_) => Some(MValue::version(ORIGIN_VERSION)),
             MCell::IntCmp(_, x, rel, y) => Some(MValue::version(int_cmp_version(*x, *rel, *y))),
-            MCell::NumState => Some(MValue::version(num_answer_version(
+            MCell::NumState(starts) => Some(MValue::version(num_state_version(
                 self.tex.pdf.objs.alog.counters,
+                *starts,
             ))),
+            MCell::ObjCount => Some(MValue {
+                version: obj_count_version(self.tex.pdf.objs.alog.counters.sys),
+                v: V::Int(self.tex.pdf.objs.alog.counters.sys),
+            }),
             MCell::PdfLast(k) => pdf_last_cells().then(|| {
                 let v = self.tex.pdf.last(pdf_last_of(*k));
                 MValue {
@@ -4082,9 +4201,10 @@ impl<H: CellHost> Machine for TexMachine<H> {
                 | MCell::FontName(_)
                 | MCell::FinalNum(_)
                 | MCell::OfFinal(_)
-                | MCell::NumState
+                | MCell::NumState(_)
                 | MCell::Origin(_)
-                | MCell::IntCmp(..),
+                | MCell::IntCmp(..)
+                | MCell::ObjCount,
                 _,
             )
             | (
@@ -4189,7 +4309,16 @@ impl<H: CellHost> Machine for TexMachine<H> {
             // output routine and the pages shipped, not by token lists)
             (b"ship", self.started, t.in_open, t.shipped).hash(&mut h);
             return Pos {
-                key: h.finish128(),
+                key: layer_key(h.finish128(), t.stop_after_ship),
+                file: self.file_below(),
+                line: t.line,
+            };
+        }
+        if t.stopped_after_ship() {
+            // (after it: the same, the page just shipped counted)
+            (b"shipped", self.started, t.in_open, t.shipped).hash(&mut h);
+            return Pos {
+                key: layer_key(h.finish128(), true),
                 file: self.file_below(),
                 line: t.line,
             };
@@ -4206,10 +4335,14 @@ impl<H: CellHost> Machine for TexMachine<H> {
             0
         };
         Pos {
-            key: h.finish128(),
+            key: layer_key(h.finish128(), false),
             file,
             line: t.line,
         }
+    }
+
+    fn layer_edge(b: &Pos) -> bool {
+        b.key & 1 == 1
     }
 
     fn seek(&mut self, _b: &Pos) {
@@ -4275,17 +4408,30 @@ impl<H: CellHost> Machine for TexMachine<H> {
         machine_reloc::relocate_guard(c, shifts)
     }
 
+    fn relocate_answer(
+        &mut self,
+        c: &MCell,
+        v: Version,
+        shifts: &[partex_incr::Shift<MCell>],
+    ) -> Option<(MCell, Version)> {
+        machine_reloc::relocate_answer(self, c, v, shifts)
+    }
+
     fn relocate_value(
+        &mut self,
         c: &MCell,
         v: &MValue<H>,
         shifts: &[partex_incr::Shift<MCell>],
     ) -> Result<Option<MValue<H>>, ()> {
-        machine_reloc::relocate_value(c, v, shifts)
+        machine_reloc::relocate_value(self, c, v, shifts)
     }
 
     fn derived(c: &MCell) -> Option<MCell> {
-        matches!(c, MCell::FinalNum(_) | MCell::OfFinal(_) | MCell::NumState)
-            .then_some(MCell::Numbering)
+        matches!(
+            c,
+            MCell::FinalNum(_) | MCell::OfFinal(_) | MCell::NumState(_)
+        )
+        .then_some(MCell::Numbering)
     }
 
     fn replay_exit(
@@ -4444,9 +4590,10 @@ impl<H: CellHost> Machine for TexMachine<H> {
             | MCell::Numbering
             | MCell::FinalNum(_)
             | MCell::OfFinal(_)
-            | MCell::NumState
+            | MCell::NumState(_)
             | MCell::Origin(_)
-            | MCell::IntCmp(..) => None,
+            | MCell::IntCmp(..)
+            | MCell::ObjCount => None,
         }
     }
 }

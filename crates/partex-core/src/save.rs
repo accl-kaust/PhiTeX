@@ -778,6 +778,49 @@ impl<H: Host, T: Tracker> Tex<H, T> {
     /// they were; only `\tracingrestores` would show the difference (the
     /// stack is left as it is while it is on). Reads the locations it
     /// compares, and writes those whose level it sets.
+    /// The values the save stack holds of count registers changed by `f`
+    /// (location, value: the new value, if it changes); whether any did
+    /// (relocatable numbers, `reloc.rs`).
+    pub(crate) fn map_saved_counts(&mut self, f: &dyn Fn(i32, i32) -> Option<i32>) -> bool {
+        let saves = crate::statehash::SaveCanon::of(
+            &self.save_stack,
+            self.save_ptr,
+            &self.save_eqtb,
+            self.cur_boundary,
+            self.cur_level,
+        );
+        let mut changed = false;
+        for fr in saves.frames() {
+            let mut p = fr.start;
+            while p < fr.end {
+                if !saves.flagged(p) {
+                    p += 1;
+                    continue;
+                }
+                let at = Self::sx(i32::try_from(p + 1).unwrap_or(0));
+                let loc = self.save_stack[at].rh();
+                if crate::reloc::origin_of_loc(loc).is_some()
+                    && let Some(v) = f(loc, self.save_stack[p].int())
+                {
+                    let mut w = self.save_stack[p];
+                    w.set_int(v);
+                    self.save_stack[p] = w;
+                    changed = true;
+                }
+                p += 2;
+            }
+        }
+        for s in &mut self.xregs.chain {
+            if crate::reloc::origin_of_loc(s.loc).is_some()
+                && let Some(v) = f(s.loc, s.word.int())
+            {
+                s.word.set_int(v);
+                changed = true;
+            }
+        }
+        changed
+    }
+
     /// The values the save stack holds of count registers (a group's
     /// end restores them): location and value (relocatable numbers,
     /// `reloc.rs`).

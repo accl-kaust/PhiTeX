@@ -1568,6 +1568,7 @@ accessor.
 | `PARTEX_SSA_SOFT_READS=0`, `PARTEX_SSA_CLASS_READS=0` | a local assignment reads the value it replaces; a lookup that stores a token reads its meaning (3.12) |
 | `PARTEX_SSA_SOFT_PLACE=0` | a soft-read slot's level and value decide its save and assignment as the arrays hold them (3.12) |
 | `PARTEX_SSA_DEAD_SAVES=0` | every save stack entry a step writes is its definition (3.12) |
+| `PARTEX_SSA_LAZY_VERSIONS=0` | an eqtb entry's version made at each write, not when wanted (2.4) |
 | `PARTEX_SSA_VOBJ=0` | the PDF object table one slot, pdfTeX's numbers as made (3.12, "Virtual PDF object numbers") |
 | `PARTEX_SSA_FONT_REFS=0` | a font's `/F` number is its place in the engine's table, which keeps the fonts an older run loaded, not the link's (3.8) |
 | `PARTEX_SSA_FLOW=0` | the log's and the terminal's columns are slots each printing step reads and writes, not the link's (3.8) |
@@ -2079,6 +2080,76 @@ memory is the watch's:
   shipout would re-run only that (4.2's page builder layer). Taking chapter 0's
   first words out re-runs 0.38M (4 regions), no second pass; both edits'
   PDFs are identical to a cold build's.
+- *The page builder and the PDF writer as layers* (2026-10-07).
+  - *A shipout is a region of its own.* The machine stops before a
+    `\shipout` and, with `stop_after_ship`, right after it (`ship_stop`
+    2, then 3 at the checkpoint): a candidate of level `LAYER` (4), cut
+    always, whose key's low bit marks it (`Machine::layer_edge`) so the
+    store's coarsening never merges across it. A page's shipout region
+    reads its box tree and the few values it shows (page number,
+    bookmark sequence numbers, marks); the regions that only built the
+    boxes keep their guards, so when only a shown value moves the
+    shipout alone runs again.
+  - *`Rest` relocates.* A shipout run again leaves `Rest` with shifted
+    tagged digits (the lists, the save stack and its saved counts,
+    `save.rs`' `map_saved_counts`): the old snapshot is relocated
+    (`machine_reloc.rs`' `shift_snapshot`), versioned by the machine's
+    hash memo, and compared as any relocated value is.
+  - *Object numbers are an origin.* `NUM_ORIGIN` (the ext register
+    below the tag origins), held by `MCell::ObjCount` (the numbering's
+    `sys` counter, written at a cut of a region that numbered):
+    `\pdflastobj`, `\pdflastxform`, `\pdflastximage`, `\pdflastannot`
+    and `\pdflastlink` give tagged digits, and an object number given
+    back (`\pdfrefobj`, `\pdfrefxform`, …) scanned with its origin is
+    a copy, not an observation. The numbering's answers relocate
+    (`Machine::relocate_answer`): `FinalNum` and `NumState` keep only a
+    hash, so the machine moves the answer it gives now back (each
+    number the shift may have taken there) and compares the hash;
+    `OfFinal(n)` is renamed and must name the same virtual id.
+    `NumState(starts)` holds `sys`, `obj_ptr` and, of the open object
+    stream, only whether there is one and, if one of the `starts`
+    objects written to streams before the region's last answer can fill
+    it, its index: a stream boundary elsewhere does not move the numbers
+    the region saw.
+  - *Font map entries compare by value* (`pdf_init_font`): pointer
+    identity made a relocated region's font differ from a re-run's
+    (chapter 0's edit re-ran 42M commands, with 90 more objects).
+  - *The link's compressed streams persist.* The link already numbers
+    objects, names font resources and assigns subsets at link time in
+    pdfTeX's order from the virtual ids, and takes a region's resolved
+    effects from the last link when they and the numbers they write are
+    the same (`LinkCache`). What a new process paid was compression:
+    every content stream again. `Host::deflate` keeps each compressed
+    stream by its contents' hash, and `Watch` keeps those the process
+    used in the store (`deflated/<key>`, written at the end of the
+    process, `PARTEX_DEFLATED=0` off): an edit build compresses only the
+    pages whose bytes changed (the first link 740 ms → 54 ms).
+  - Measured, the course, `phitex build` from the saved build (commands
+    re-run; each edit build's PDF identical to a cold build's):
+
+    | | pass 1 | pass 2 | wall |
+    |---|---|---|---|
+    | `\section` added, before (5d9b894) | 6.47M (13 relocated) | 1.57M | 26.2 s |
+    | `\section` added, layers | 1.10M (147 relocated) | 1.20M | 18.8 s |
+    | chapter 0's first words, before | 0.38M, 4 regions | — | 5.53 s |
+    | chapter 0's first words, layers | 0.26M, 2 pages | — | 5.33 s |
+    | cold build, before | | | 183–216 s |
+    | cold build, layers | | | 178–214 s |
+
+    (The layers' row is with main's expansion speedup merged; the edit
+    builds spend little of their time running commands. Chapter 0's edit
+    renames font resources, `/F329` → `/F331` as a cold build does, so
+    every page's bytes change and its link compresses them all: 620 ms.)
+
+    Pass 1 of the section edit: the edited section (0.63M, two regions,
+    and the last region), the output routine of the 13 pages to the
+    chapter's end, whose breaks moved with the added lines (0.47M), and
+    104 shipouts of one command each (every later page with a bookmark
+    or a moved mark id: its shipout alone). Pass 2: the table of contents' pages, and two regions of pgf
+    shadings (0.56M) whose `\pdflastxform` answer moved by a shift that
+    is not the one the rebuild holds (an object stream opened in one run
+    and not the other moves later numbers by one less): checked, so
+    they run.
 - The store's save writes each blob to its pack as the saver that made
   it compresses it. A pack's references are in frames. A save holds the
   build and its copy, not every blob as encoded, as kept and as packed

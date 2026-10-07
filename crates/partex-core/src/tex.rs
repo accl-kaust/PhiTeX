@@ -470,9 +470,11 @@ pub struct Tex<H: Host, T: Tracker = Untracked> {
     /// Stop before `\shipout` (a machine's region boundary: the region
     /// that ships a page reads its lines, the one before does not), and
     /// whether the `\shipout` about to be read again is the one stopped
-    /// before (1).
+    /// before (1); with `stop_after_ship` (a machine's page layer), a
+    /// `\shipout` just done (2) and main control stopped after it (3).
     pub(crate) stop_before_ship: bool,
     pub(crate) ship_stop: u8,
+    pub(crate) stop_after_ship: bool,
     /// Stop at the command after one that read a file whole by name (SSA
     /// mode: `\pdffilesize`, which LaTeX's `\IfFileExists` asks), and
     /// whether one did (1) or main control stopped there (2).
@@ -877,6 +879,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             seal_log: Vec::new(),
             stop_before_ship: false,
             ship_stop: 0,
+            stop_after_ship: false,
             stop_after_load: false,
             load_stop: 0,
             defer_page: false,

@@ -527,6 +527,9 @@ pub(crate) struct ObjLog {
     /// region guards instead of the whole numbering, unless it also read
     /// it whole (`forced`).
     pub(crate) answers: Vec<NumAnswer>,
+    /// The numbering's log length (`alog`) at the last answer: what the
+    /// answers depend on of the events the region added.
+    pub(crate) answered_at: usize,
     /// Who observed the numbering since the last region's end (a
     /// diagnostic, `PARTEX_MACHINE_PARTS=9`): `final_num` calls, `of_final`
     /// calls, whole readings (`numbers`, the job's end), and the distinct
@@ -889,6 +892,7 @@ impl ObjTab {
         let n = self.numbering_whole(false).of(k);
         if self.answers_on() && !self.ssa.on {
             self.log.answers.push(NumAnswer::Final(k, n));
+            self.log.answered_at = self.alog.len();
         }
         n
     }
@@ -929,6 +933,7 @@ impl ObjTab {
             let v = self.numbering_whole(false).vid.get(&n).copied();
             if self.answers_on() && !self.ssa.on {
                 self.log.answers.push(NumAnswer::Of(n, v));
+                self.log.answered_at = self.alog.len();
             }
             v
         } else {

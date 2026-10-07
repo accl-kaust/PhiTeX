@@ -49,6 +49,13 @@ use crate::web::{
 /// No origin (`Tex::cur_val_origin`).
 pub(crate) const NO_ORIGIN: i32 = -1;
 
+/// The origin of pdfTeX's object numbers TeX sees (`\pdflastobj` and its
+/// siblings: virtual numbers, `pdf/vnum.rs`): an object added before
+/// moves every later number, as a count register's do (the machine's
+/// `MCell::ObjCount` is its cell). A count register of this number or
+/// above is no origin.
+pub const NUM_ORIGIN: i32 = TAG_ORIGINS - 1;
+
 /// The relation of an answer ([`Tracker::int_answer`]) that says a
 /// number `x` had `y` added: it holds where `x` and `x + y` move alike.
 pub const SHIFT: u8 = b'+';
@@ -77,7 +84,7 @@ pub fn origin_of_loc(loc: i32) -> Option<i32> {
     }
     if loc >= crate::xregs::EXT_BASE && crate::wide::wide_of(loc).is_none() {
         let (kind, n) = crate::xregs::ext_reg(loc);
-        if kind == INT_VAL {
+        if kind == INT_VAL && n < NUM_ORIGIN {
             return Some(n);
         }
     }
@@ -393,6 +400,27 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         if self.tags_on && c != 0 {
             self.tracker.int_answer(o, x, SHIFT, c, true);
         }
+    }
+
+    /// `cur_val` is about to be one of pdfTeX's object numbers
+    /// (`\pdflastobj` and its siblings, virtual numbers): its origin is
+    /// [`NUM_ORIGIN`] (`scan_something_internal` takes it).
+    pub(crate) fn num_origin(&mut self) {
+        if self.tags_on && self.pdf.objs.virt {
+            self.expr_origin = NUM_ORIGIN;
+        }
+    }
+
+    /// A number naming an object (`\pdfrefobj`, `\pdfrefxform`, a
+    /// `useobjnum`): `scan_int`'s, read with its origin. A number made of
+    /// `\pdflast…`'s digits is not observed: the object it names is the
+    /// numbering's answer (`MCell::OfFinal`), which a relocation renames.
+    pub(crate) fn scan_obj_number(&mut self) -> Result<(), Jump> {
+        let o = self.scan_int_origin()?;
+        if o != NO_ORIGIN && o != NUM_ORIGIN {
+            self.observe_origin(o);
+        }
+        Ok(())
     }
 
     /// An assignment of `loc`: an observation of its origin unless it is

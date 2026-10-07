@@ -908,7 +908,12 @@ impl Machine for Stub {
         }
     }
 
-    fn relocate_value(c: &Cell, v: &Val, shifts: &[Shift<Cell>]) -> Result<Option<Val>, ()> {
+    fn relocate_value(
+        &mut self,
+        c: &Cell,
+        v: &Val,
+        shifts: &[Shift<Cell>],
+    ) -> Result<Option<Val>, ()> {
         let moved = |o: u8, n: i64| shift_of(shifts, o).map(|s| s.map(n)).filter(|&m| m != n);
         match (c, v) {
             (Cell::Var(x), Val::Int(n)) => Ok(moved(*x, *n).map(Val::Int)),

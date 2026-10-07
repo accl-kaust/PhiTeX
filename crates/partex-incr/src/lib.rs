@@ -55,7 +55,7 @@ pub use exec::Threads;
 pub use exec::{Executor, Sequential};
 pub use hash::{Version, version_of};
 pub use link::{Chunk, LinkCtx, link};
-pub use machine::{Affine, Forced, Hole, Machine, Recorder, Shift, Split, Step};
+pub use machine::{Affine, Forced, Hole, LAYER, Machine, Recorder, Shift, Split, Step};
 pub use trace::Trace;
 
 use alloc::vec::Vec;

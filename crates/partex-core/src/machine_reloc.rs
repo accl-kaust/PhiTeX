@@ -14,7 +14,7 @@ use partex_incr::Shift;
 
 use super::{
     CellHost, CellTracker, CellValue, LIST_CHUNK, MCell, MValue, MarkMap, Named, PageValue,
-    SnapBody, V, is_cs_slot, mark_cells, marks_version, page_cells, page_version,
+    SnapBody, V, is_cs_slot, mark_cells, marks_version, page_version,
 };
 use crate::mem::MemoryWord;
 use crate::reloc::{Shifts, origin_of_loc, shift_tokens};
@@ -27,6 +27,7 @@ pub(super) fn shifts_of(sh: &[Shift<MCell>]) -> Shifts {
         sh.iter()
             .filter_map(|s| match s.cell {
                 MCell::Eqtb(p) => origin_of_loc(p).map(|o| (o, s.base, s.delta)),
+                MCell::ObjCount => Some((crate::reloc::NUM_ORIGIN, s.base, s.delta)),
                 _ => None,
             })
             .collect(),
@@ -150,64 +151,129 @@ fn shift_page(pv: &PageValue, s: &Shifts) -> Result<Option<PageValue>, ()> {
     }))
 }
 
-/// Whether a snapshot's `Rest` (the engine but its cells) holds a number
-/// that moves: in its input, a list being built, the save stack, the
-/// marks or the page when they are not cells, a box or math being
-/// built, an alignment.
-fn snapshot_moves<H: CellHost>(b: &SnapBody<H>, s: &Shifts) -> bool {
+/// A snapshot's `Rest` (the engine but its cells) with every moving
+/// number relocated: in its input, the lists being built, the save stack
+/// (its saved lists, boxes and count values), the marks or the page when
+/// they are not cells, a box being built, what migrates. `Ok(None)` if it
+/// holds none; `Err` if math or an alignment is being built (not walked).
+fn shift_snapshot<H: CellHost>(b: &SnapBody<H>, s: &Shifts) -> Result<Option<SnapBody<H>>, ()> {
     let t = &b.tex;
-    let toks = |x: Option<&Tokens>| x.is_some_and(|x| toks_move(x.tokens(), s));
-    let level = |r: &crate::input::InStateRecord| r.state == TOKEN_LIST && toks(r.list.as_ref());
-    if level(&t.cur_input) || t.input_stack.iter().any(level) {
-        return true;
+    if !t.cur_list.mlist.is_empty()
+        || t.nest.iter().any(|r| !r.mlist.is_empty())
+        || !t.align.stack.is_empty()
+        || !t.align.cur.columns.is_empty()
+    {
+        return Err(());
     }
-    if t.param_stack.iter().any(|x| toks(x.as_ref())) || toks(t.cur_toks.as_ref()) {
-        return true;
+    let mut new: Option<crate::tex::Tex<H, CellTracker>> = None;
+    macro_rules! tex {
+        () => {
+            new.get_or_insert_with(|| t.clone())
+        };
     }
-    if toks_move(&t.def_ref, s) || toks_move(&t.arg_list, s) || toks_move(&t.preamble_list, s) {
-        return true;
-    }
-    let obj_moves = |o: &Option<crate::objs::Obj>| match o {
-        Some(crate::objs::Obj::Toks(x)) => toks_move(x.tokens(), s),
-        Some(crate::objs::Obj::Box(x)) => nodes_move(&[Node::Box(x.clone())], s),
-        _ => false,
+    let level = |r: &crate::input::InStateRecord| -> Result<Option<Tokens>, ()> {
+        match &r.list {
+            Some(l) if r.state == TOKEN_LIST => shift_list(l, s),
+            _ => Ok(None),
+        }
     };
-    if t.save_obj.iter().any(obj_moves) {
-        return true;
+    if let Some(l) = level(&t.cur_input)? {
+        tex!().cur_input.list = Some(l);
+    }
+    for (i, r) in t.input_stack.iter().enumerate() {
+        if let Some(l) = level(r)? {
+            tex!().input_stack[i].list = Some(l);
+        }
+    }
+    for (i, p) in t.param_stack.iter().enumerate() {
+        if let Some(p) = p
+            && let Some(l) = shift_list(p, s)?
+        {
+            tex!().param_stack[i] = Some(l);
+        }
+    }
+    if let Some(c) = &t.cur_toks
+        && let Some(l) = shift_list(c, s)?
+    {
+        tex!().cur_toks = Some(l);
+    }
+    if let Some(v) = shift_tokens(&t.def_ref, s)? {
+        tex!().def_ref = v;
+    }
+    if let Some(v) = shift_tokens(&t.arg_list, s)? {
+        tex!().arg_list = v;
+    }
+    if let Some(v) = shift_tokens(&t.preamble_list, s)? {
+        tex!().preamble_list = v;
+    }
+    for (i, o) in t.save_obj.iter().enumerate() {
+        let n = match o {
+            Some(crate::objs::Obj::Toks(x)) => shift_list(x, s)?.map(crate::objs::Obj::Toks),
+            Some(crate::objs::Obj::Box(x)) => {
+                match nodetoks::map_node(&Node::Box(x.clone()), &mut |l| shift_list(l, s))? {
+                    Some(Node::Box(nb)) => Some(crate::objs::Obj::Box(nb)),
+                    _ => None,
+                }
+            }
+            _ => None,
+        };
+        if n.is_some() {
+            tex!().save_obj[i] = n;
+        }
     }
     // (a count register's value a group's end restores)
+    let moved = |loc: i32, v: i32| {
+        let o = origin_of_loc(loc)?;
+        let w = s.map(o, i64::from(v));
+        (w != i64::from(v)).then(|| i32::try_from(w).ok()).flatten()
+    };
     if t.saved_counts()
         .into_iter()
-        .any(|(loc, v)| origin_of_loc(loc).is_some_and(|o| s.map(o, i64::from(v)) != i64::from(v)))
+        .any(|(l, v)| moved(l, v).is_some())
     {
-        return true;
+        tex!().map_saved_counts(&moved);
     }
-    if !mark_cells() && t.cur_mark.values().flatten().any(|x| toks(x.as_ref())) {
-        return true;
+    if !mark_cells() {
+        for (k, marks) in &t.cur_mark {
+            for (i, m) in marks.iter().enumerate() {
+                if let Some(m) = m
+                    && let Some(l) = shift_list(m, s)?
+                    && let Some(e) = tex!().cur_mark.get_mut(k)
+                {
+                    e[i] = Some(l);
+                }
+            }
+        }
     }
+    if let Some(n) = &t.cur_box
+        && let Some(m) = nodetoks::map_node(n, &mut |l| shift_list(l, s))?
+    {
+        tex!().cur_box = Some(m);
+    }
+    if let Some(v) = &t.adjust
+        && let Some(m) = shift_nodes(v, s)?
+    {
+        tex!().adjust = Some(m);
+    }
+    if let Some(m) = shift_nodes(&t.split_discards.to_vec(), s)? {
+        tex!().split_discards = partex_engine::nodelist::NodeList::from_vec(m);
+    }
+    if let Some(m) = shift_nodes(&t.page.discards.to_vec(), s)? {
+        tex!().page.discards = partex_engine::nodelist::NodeList::from_vec(m);
+    }
+    let mut lists: Option<Vec<Vec<Arc<[Node]>>>> = None;
     for (i, l) in b.lists.0.iter().enumerate() {
-        if i == 0 && page_cells() {
-            continue;
-        }
-        if nodes_move(&l.concat(), s) {
-            return true;
+        if let Some(m) = shift_nodes(&l.concat(), s)? {
+            lists.get_or_insert_with(|| b.lists.0.clone())[i] =
+                m.chunks(LIST_CHUNK).map(Arc::from).collect();
         }
     }
-    if !page_cells() && nodes_move(&t.page.discards.to_vec(), s) {
-        return true;
+    if new.is_none() && lists.is_none() {
+        return Ok(None);
     }
-    if !t.cur_list.mlist.is_empty() || t.nest.iter().any(|r| !r.mlist.is_empty()) {
-        return true;
-    }
-    if t.cur_box
-        .as_ref()
-        .is_some_and(|n| nodes_move(core::slice::from_ref(n), s))
-        || t.adjust.as_ref().is_some_and(|v| nodes_move(v, s))
-        || nodes_move(&t.split_discards.to_vec(), s)
-    {
-        return true;
-    }
-    !t.align.stack.is_empty() || !t.align.cur.columns.is_empty()
+    let tex = new.unwrap_or_else(|| t.clone());
+    let lists = super::Lists(lists.unwrap_or_else(|| b.lists.0.clone()));
+    Ok(Some(SnapBody::new(tex, lists, b.started, b.halted)))
 }
 
 /// Whether a PDF object table entry holds a number that moves.
@@ -241,8 +307,10 @@ fn entry_moves(e: &crate::pdf::objtab::Entry, s: &Shifts) -> bool {
     }
 }
 
-/// `Machine::relocate_value` for [`super::TexMachine`].
+/// `Machine::relocate_value` for [`super::TexMachine`] `m` (whose state
+/// hash memo hashes a relocated `Rest`).
 pub(super) fn relocate_value<H: CellHost>(
+    m: &mut super::TexMachine<H>,
     c: &MCell,
     v: &MValue<H>,
     sh: &[Shift<MCell>],
@@ -257,6 +325,18 @@ pub(super) fn relocate_value<H: CellHost>(
     match (c, &v.v) {
         (MCell::Eqtb(p), V::Word(cv)) => cell(*p, cv),
         (MCell::Eqtb(p), V::Lazy(snap, q)) => cell(*p, &snap.tex.export_cell(*q)),
+        (MCell::ObjCount, V::Int(n)) => {
+            let x = s.map(crate::reloc::NUM_ORIGIN, i64::from(*n));
+            if x == i64::from(*n) {
+                Ok(None)
+            } else {
+                let x = i32::try_from(x).map_err(|_| ())?;
+                Ok(Some(MValue {
+                    version: super::obj_count_version(x),
+                    v: V::Int(x),
+                }))
+            }
+        }
         (MCell::Marks, V::Marks(m)) => Ok(shift_marks(m, &s)?.map(|n| MValue {
             version: marks_version(&n),
             v: V::Marks(Arc::new(n)),
@@ -265,13 +345,13 @@ pub(super) fn relocate_value<H: CellHost>(
             version: page_version(&n.builder, n.list.iter().map(|c| &c[..])),
             v: V::Page(Arc::new(n)),
         })),
-        (MCell::Rest, V::Rest(snap)) => {
-            if snapshot_moves(snap, &s) {
-                Err(())
-            } else {
-                Ok(None)
+        (MCell::Rest, V::Rest(snap)) => Ok(shift_snapshot(snap, &s)?.map(|body| {
+            let snap = super::Snapshot::here(body);
+            MValue {
+                version: m.rest_version_of_snapshot(&snap),
+                v: V::Rest(Arc::new(snap)),
             }
-        }
+        })),
         (MCell::Sealed(..), V::Sealed(x)) => {
             if nodes_move(&x.list, &s) {
                 Err(())
@@ -305,6 +385,9 @@ pub(super) fn relocate_value<H: CellHost>(
 /// `Machine::origin_number` for [`super::TexMachine`]: a count register's
 /// number.
 pub(super) fn origin_number<H: CellHost>(c: &MCell, v: Option<&MValue<H>>) -> Option<i64> {
+    if let (MCell::ObjCount, Some(V::Int(n))) = (c, v.map(|v| &v.v)) {
+        return Some(i64::from(*n));
+    }
     let MCell::Eqtb(p) = c else {
         return None;
     };
@@ -346,4 +429,64 @@ pub(super) fn relocate_guard(c: &MCell, sh: &[Shift<MCell>]) -> MCell {
         }
         _ => c.clone(),
     }
+}
+
+/// `Machine::relocate_answer` for [`super::TexMachine`]: an answer about
+/// the numbering (`FinalNum`, `OfFinal`, `NumState`) as a run whose object
+/// numbers moved by `sh` would have recorded it, if `m` (at the region's
+/// entry) answers so, with the guard as `m` holds it. A guard keeps only
+/// a hash of its answer, so the answer `m` gives now is moved back (each
+/// number it may have come from) and hashed.
+pub(super) fn relocate_answer<H: CellHost>(
+    m: &mut super::TexMachine<H>,
+    c: &MCell,
+    v: partex_incr::Version,
+    sh: &[Shift<MCell>],
+) -> Option<(MCell, partex_incr::Version)> {
+    use partex_incr::Machine as _;
+    let s = shifts_of(sh);
+    let o = crate::reloc::NUM_ORIGIN;
+    let map = |n: i32| i32::try_from(s.map(o, i64::from(n))).ok();
+    // (the numbers `map` takes to `y`: itself, or itself less the shift)
+    let back = |y: i32| -> Vec<i32> {
+        let mut xs: Vec<i32> =
+            s.0.iter()
+                .filter(|x| x.0 == o)
+                .filter_map(|x| i32::try_from(i64::from(y) - x.2).ok())
+                .collect();
+        xs.push(y);
+        xs.retain(|&x| map(x) == Some(y));
+        xs.sort_unstable();
+        xs.dedup();
+        xs
+    };
+    let held = |raw: u128| partex_incr::version_of(&Some(MValue::<H>::version(raw)));
+    let g = match c {
+        MCell::OfFinal(n) => MCell::OfFinal(map(*n)?),
+        _ => c.clone(),
+    };
+    let now = m.get(&g)?;
+    let w = partex_incr::version_of(&Some(&now));
+    let was = match c {
+        // (a virtual id: the same in both runs)
+        MCell::OfFinal(_) => w == v,
+        MCell::FinalNum(_) => {
+            #[allow(clippy::cast_possible_truncation)] // (the number)
+            let n = (now.version as u32).cast_signed();
+            super::final_num_version(n) == now.version
+                && back(n)
+                    .into_iter()
+                    .any(|x| held(super::final_num_version(x)) == v)
+        }
+        MCell::NumState(_) => {
+            let (sys, obj_ptr) = super::num_state_counts(now.version);
+            back(sys).into_iter().any(|xs| {
+                back(obj_ptr)
+                    .into_iter()
+                    .any(|xo| held(super::num_state_with_counts(now.version, xs, xo)) == v)
+            })
+        }
+        _ => false,
+    };
+    was.then_some((g, w))
 }

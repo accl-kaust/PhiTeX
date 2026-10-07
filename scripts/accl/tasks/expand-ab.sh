@@ -77,7 +77,8 @@ run() {
     build) rm -rf "$w/cache-$which"
       ev+=(PARTEX_CACHE_DIR="$w/cache-$which" PARTEX_STORE_DIR="$w/cache-$which/store"
         PARTEX_FORMATS="$w/modern-fmt-$which" NO_COLOR=1)
-      cmd=("$B" build -q -o "$O" "$M") ;;
+      # (the engine named: pgfsub.tex has no \documentclass of its own)
+      cmd=("$B" build -q --engine "$(fmt "$d")" -o "$O" "$M") ;;
   esac
   (cd "$S" && /usr/bin/time -f '%e %M' -o "$O/.time" timeout -s KILL 7200 env "${ev[@]}" "${cmd[@]}" \
     </dev/null >"$O/.term" 2>"$O/.err")

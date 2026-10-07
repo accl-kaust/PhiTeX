@@ -207,6 +207,12 @@ pub static SOFT_PLACE: core::sync::atomic::AtomicBool = core::sync::atomic::Atom
 /// Off (`PARTEX_SSA_DEAD_SAVES=0`), every entry written is a definition.
 pub static DEAD_SAVES: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(true);
 
+/// An eqtb entry's version made when it is wanted, not at each write
+/// ([`Tracker::wrote_eqtb`], `STALE`). Off (`PARTEX_SSA_LAZY_VERSIONS=0`),
+/// at each write, as check mode makes it.
+pub static LAZY_VERSIONS: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(true);
+
 /// Virtual PDF object numbers (DESIGN 3.12, "PDF object numbers"): each
 /// object's entry, lookup tree entry and step's numbering events a slot
 /// of its own, the numbers the link's. Off (`PARTEX_SSA_VOBJ=0`), the
@@ -2813,7 +2819,7 @@ impl Tracker for SsaTracker {
     /// that a store bypassing the accessor leaves it behind the content)
     fn wrote_eqtb(&self, cell: Cell, content: impl FnOnce() -> u128) {
         if let Ok(mut r) = self.rec.try_borrow_mut() {
-            if self.check {
+            if self.check || !LAZY_VERSIONS.load(core::sync::atomic::Ordering::Relaxed) {
                 r.st.vers.set(Slot::of(cell), content());
             } else {
                 r.st.vers.set_stale(Slot::of(cell));
