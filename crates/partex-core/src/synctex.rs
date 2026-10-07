@@ -1549,7 +1549,10 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             match n {
                 Node::Box(b) => {
                     if let Some(k) = b.seal {
-                        let c = self.sealed_content(k);
+                        // (None: a worker's run, tainted, not taken)
+                        let Some(c) = self.sealed_content(k) else {
+                            continue;
+                        };
                         if (has_rule(&c.list) || c.list.iter().any(crate::seal::has_sealed))
                             && let Some(mut u) = self.unsealed_box(b)
                         {
