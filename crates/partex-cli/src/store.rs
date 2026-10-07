@@ -382,9 +382,7 @@ pub struct Saved {
     pub live: usize,
     /// When each phase ended, from the start (for `PARTEX_STORE_DEBUG`).
     pub phases: Vec<(&'static str, std::time::Duration)>,
-    /// Time spent keeping (compressing) the new blobs' batches, and
-    /// writing them, while the saver waited.
-    pub keeping: std::time::Duration,
+    /// Time spent writing the new blobs.
     pub writing: std::time::Duration,
 }
 
@@ -392,17 +390,27 @@ pub struct Saved {
 /// file (in the tests, little: a test's references span frames).
 const KIDS_FRAME: usize = if cfg!(test) { 64 } else { 4 << 20 };
 
-/// Bytes of new blobs a save compresses at once before writing them (in
-/// the tests, little: a test's blobs span batches, in little space).
-const SAVE_BATCH: usize = if cfg!(test) { 1 << 16 } else { 64 << 20 };
+/// A blob as a pack keeps it ([`kept`]): its hash, its bytes as kept,
+/// their length as they are, and the blobs it refers to, each once.
+pub type Kept = (u128, Vec<u8>, usize, Vec<u128>);
+
+/// Blob `b` as a pack keeps it: compressed (by the thread that made it,
+/// before it goes to the pack's writer), its references each once (what
+/// it keeps alive, not where it refers to them).
+#[must_use]
+pub fn kept((h, bytes, mut kids): partex_core::persist::MerkleBlob) -> Kept {
+    kids.sort_unstable();
+    kids.dedup();
+    (h, kept_form(&bytes, compressing()), bytes.len(), kids)
+}
 
 /// A save's new pack, written as its blobs come (a [`Saver::merkle`]'s
-/// sink, [`PackWriter::add`]), to a temporary file: a batch of
-/// [`SAVE_BATCH`] bytes compressed at a time, on several threads when it
-/// is large, each blob let go once written. A save then holds each blob
-/// once, and only until its batch is written, not every blob as encoded,
-/// as kept and as the pack at once. [`PackWriter::finish`] writes the
-/// root; a writer dropped before that leaves nothing behind.
+/// sink, `PackWriter::add`, or [`PackWriter::add_kept`] of blobs kept
+/// by the threads that made them), to a temporary file, each blob let go
+/// once written: a save holds each blob only until it is written, not
+/// every blob as encoded, as kept and as the pack at once.
+/// [`PackWriter::finish`] writes the root; a writer dropped before that
+/// leaves nothing behind.
 ///
 /// [`Saver::merkle`]: partex_core::persist::Saver::merkle
 pub struct PackWriter {
@@ -421,9 +429,6 @@ pub struct PackWriter {
     len: u64,
     /// What each new blob refers to.
     kids: Kids,
-    batch: Vec<(u128, Vec<u8>)>,
-    batch_bytes: usize,
-    compress: bool,
     /// The first write that failed (the rest are not tried).
     error: Option<std::io::Error>,
     out: Saved,
@@ -460,79 +465,33 @@ impl PackWriter {
             index: Vec::new(),
             len: 0,
             kids: Kids::with_hasher(ByName::default()),
-            batch: Vec::new(),
-            batch_bytes: 0,
-            compress: compressing(),
             error: None,
             out: Saved::default(),
         })
     }
 
     /// Add a new blob (each once: a blob added again is not written again).
-    pub fn add(&mut self, (h, bytes, mut kids): partex_core::persist::MerkleBlob) {
-        // (each once: what a blob keeps alive, not where it refers to it)
-        kids.sort_unstable();
-        kids.dedup();
-        if self.kids.insert(h, Arc::from(kids)).is_some() {
-            return;
-        }
-        self.out.new_raw_bytes += bytes.len() as u64;
-        self.batch_bytes += bytes.len();
-        self.batch.push((h, bytes));
-        if self.batch_bytes >= SAVE_BATCH {
-            self.write_batch();
-        }
+    #[cfg(test)]
+    pub fn add(&mut self, b: partex_core::persist::MerkleBlob) {
+        self.add_kept(kept(b));
     }
 
-    /// Compress the batch and write it to the pack.
-    fn write_batch(&mut self) {
-        let batch = std::mem::take(&mut self.batch);
-        let bytes = std::mem::take(&mut self.batch_bytes);
-        if batch.is_empty() || self.error.is_some() {
+    /// Add a new blob as kept ([`kept`]), each once.
+    pub fn add_kept(&mut self, (h, k, raw, kids): Kept) {
+        if self.error.is_some() || self.kids.contains_key(&h) {
             return;
         }
-        let threads = if bytes < (8 << 20) {
-            1
-        } else {
-            std::thread::available_parallelism()
-                .map_or(4, std::num::NonZero::get)
-                .min(8)
-        };
-        let per = batch.len().div_ceil(threads).max(1);
-        let compress = self.compress;
+        let kids: Arc<[u128]> = Arc::from(kids);
+        self.kids.insert(h, kids.clone());
         let t = std::time::Instant::now();
-        let kept: Vec<Vec<(u128, Vec<u8>)>> = std::thread::scope(|sc| {
-            let jobs: Vec<_> = batch
-                .chunks(per)
-                .map(|part| {
-                    sc.spawn(move || {
-                        part.iter()
-                            .map(|(h, b)| (*h, kept_form(b, compress)))
-                            .collect::<Vec<_>>()
-                    })
-                })
-                .collect();
-            jobs.into_iter()
-                .map(|j| j.join().unwrap_or_default())
-                .collect()
-        });
-        if kept.iter().map(Vec::len).sum::<usize>() != batch.len() {
-            self.error = Some(std::io::Error::other("a blob was not kept"));
+        if let Err(e) = self.put(h, &k, &kids) {
+            self.error = Some(e);
             return;
-        }
-        drop(batch);
-        self.out.keeping += t.elapsed();
-        let t = std::time::Instant::now();
-        for (h, k) in kept.iter().flatten() {
-            let kids = self.kids.get(h).cloned().unwrap_or_default();
-            if let Err(e) = self.put(*h, k, &kids) {
-                self.error = Some(e);
-                return;
-            }
-            self.out.new_blobs += 1;
-            self.out.new_bytes += k.len() as u64;
         }
         self.out.writing += t.elapsed();
+        self.out.new_raw_bytes += raw as u64;
+        self.out.new_blobs += 1;
+        self.out.new_bytes += k.len() as u64;
     }
 
     /// Append blob `h`, kept as `b`, which refers to `kids`.
@@ -558,7 +517,7 @@ impl PackWriter {
         if self.frame.is_empty() {
             return Ok(());
         }
-        let k = kept_form(&self.frame, self.compress);
+        let k = kept_form(&self.frame, compressing());
         self.frame.clear();
         self.kids_file
             .write_all(&u32::try_from(k.len()).unwrap_or(u32::MAX).to_le_bytes())?;
@@ -585,7 +544,6 @@ impl PackWriter {
         refs: &[u128],
         stored: &Stored,
     ) -> std::io::Result<(Stored, Saved)> {
-        self.write_batch();
         if let Some(e) = self.error.take() {
             self.discard();
             return Err(e);
@@ -985,9 +943,9 @@ mod tests {
     fn saves_read_back() {
         let dir = std::env::temp_dir().join(format!("partex-store-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        // (small blobs and one past a batch, incompressible)
+        // (small blobs and a large one, incompressible)
         let mut x = 1u64;
-        let big: Vec<u8> = (0..SAVE_BATCH + 10)
+        let big: Vec<u8> = (0..(1 << 17) + 10)
             .map(|_| {
                 x = x.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
                 (x >> 56) as u8
@@ -1012,7 +970,7 @@ mod tests {
         let o = open(&dir, 1).unwrap();
         assert_eq!(o.root, b"root one");
         assert_eq!(o.get(hl).unwrap(), b"a leaf, referred to".repeat(20));
-        assert_eq!(o.get(hb).unwrap().len(), SAVE_BATCH + 10);
+        assert_eq!(o.get(hb).unwrap().len(), (1 << 17) + 10);
         // (no temporary file left behind)
         let names: Vec<String> = std::fs::read_dir(dir.join("packs"))
             .unwrap()

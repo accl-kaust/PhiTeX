@@ -293,7 +293,14 @@ impl Keeper {
         }
         self.dirty = false;
         self.saved = Some(b.generation());
+        let t = Instant::now();
         let mut copy = copy_build(b);
+        if debug() {
+            eprintln!(
+                "phitex: store: the build copied for the save in {:.0} ms",
+                t.elapsed().as_secs_f64() * 1e3
+            );
+        }
         let (dir, key, kept) = (self.dir.clone(), self.key, self.kept.clone());
         self.saving = Some(std::thread::spawn(move || {
             coarsen(&mut copy, grain);
@@ -436,37 +443,55 @@ fn save_runs(
                 .min(8)
         })
         .clamp(1, todo.len().max(1));
-    // (the runs cut into `threads` parts of about as many regions)
+    // (the runs cut into parts of consecutive runs, about as many regions
+    // each, four a thread: each thread takes the next part left, so one
+    // whose parts are slower takes fewer)
     let total: usize = todo.iter().map(|(_, r)| r.len()).sum();
+    let cuts = threads * 4;
     let mut parts: Vec<Vec<(u128, std::ops::Range<usize>)>> = vec![Vec::new()];
     let mut acc = 0;
     for r in todo {
         acc += r.1.len();
         parts.last_mut().expect("a part").push(r);
-        if acc * threads >= total * parts.len() && parts.len() < threads {
+        if acc * cuts >= total * parts.len() && parts.len() < cuts {
             parts.push(Vec::new());
         }
     }
+    let next = std::sync::atomic::AtomicUsize::new(0);
     let done: Vec<Option<Share>> = std::thread::scope(|sc| {
-        let jobs: Vec<_> = parts
-            .iter()
-            .map(|part| {
-                let fork = &fork;
+        let jobs: Vec<_> = (0..threads)
+            .map(|_| {
+                let (fork, parts, next) = (&fork, &parts, &next);
                 sc.spawn(move || {
+                    let started = Instant::now();
                     let mut w = Saver::forked(fork);
                     if stats {
                         w.merkle_stats();
                     }
                     sink(&mut w);
-                    let mut out = Vec::with_capacity(part.len());
-                    for (fp, at) in part {
-                        out.push((
-                            *fp,
-                            partex_core::machine::save_run(&seq[at.clone()], &mut w)?,
-                        ));
+                    let mut out = Vec::new();
+                    let mut regions = 0;
+                    loop {
+                        let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        let Some(part) = parts.get(i) else { break };
+                        for (fp, at) in part {
+                            regions += at.len();
+                            out.push((
+                                *fp,
+                                partex_core::machine::save_run(&seq[at.clone()], &mut w)?,
+                            ));
+                        }
                     }
                     let st = w.take_merkle_stats();
-                    Some((out, w.into_joined(), st))
+                    let joined = w.into_joined();
+                    if debug() {
+                        eprintln!(
+                            "phitex: store: a saver's {} runs ({regions} regions) in {:.0} ms",
+                            out.len(),
+                            started.elapsed().as_secs_f64() * 1e3
+                        );
+                    }
+                    Some((out, joined, st))
                 })
             })
             .collect();
@@ -489,13 +514,13 @@ fn save_runs(
 fn spawn_writer(
     mut pack: store::PackWriter,
 ) -> (
-    std::sync::mpsc::SyncSender<partex_core::persist::MerkleBlob>,
+    std::sync::mpsc::SyncSender<store::Kept>,
     JoinHandle<store::PackWriter>,
 ) {
     let (tx, rx) = std::sync::mpsc::sync_channel(1 << 12);
     let writer = std::thread::spawn(move || {
         for b in rx {
-            pack.add(b);
+            pack.add_kept(b);
         }
         pack
     });
@@ -570,11 +595,18 @@ fn save(dir: &std::path::Path, key: u128, b: &Build<Machine>, kept: &Mutex<Kept>
         }
     };
     let (tx, writer) = spawn_writer(pack);
+    // (how long the savers waited for the writer, in µs)
+    let waited = Arc::new(std::sync::atomic::AtomicU64::new(0));
     let sink = |s: &mut Saver| {
-        let tx = tx.clone();
+        let (tx, waited) = (tx.clone(), waited.clone());
         s.merkle_sink(Box::new(move |b| {
+            // (compressed here, on the saver's thread)
+            let b = store::kept(b);
+            let t = Instant::now();
             // (a writer gone has failed: its error is reported at its end)
             let _ = tx.send(b);
+            let us = u64::try_from(t.elapsed().as_micros()).unwrap_or(u64::MAX);
+            waited.fetch_add(us, std::sync::atomic::Ordering::Relaxed);
         }));
     };
     let mut s = Saver::merkle_known(MIN_BLOB, have.hashes(), known);
@@ -612,6 +644,8 @@ fn save(dir: &std::path::Path, key: u128, b: &Build<Machine>, kept: &Mutex<Kept>
         return;
     };
     let t_ser = t.elapsed();
+    let waited =
+        std::time::Duration::from_micros(waited.load(std::sync::atomic::Ordering::Relaxed));
     let runs_reused = runs
         .iter()
         .filter(|r| reused.contains_key(&r.fingerprint))
@@ -627,7 +661,8 @@ fn save(dir: &std::path::Path, key: u128, b: &Build<Machine>, kept: &Mutex<Kept>
                 k.known = next_known;
             }
             if debug() {
-                print_saved(&saved, t.elapsed(), t_ser, knew, runs_reused, runs.len());
+                let times = (t.elapsed(), t_ser, waited);
+                print_saved(&saved, times, knew, runs_reused, runs.len());
             }
         }
         Err(e) => {
@@ -642,8 +677,11 @@ fn save(dir: &std::path::Path, key: u128, b: &Build<Machine>, kept: &Mutex<Kept>
 #[allow(clippy::cast_precision_loss)] // (MB)
 fn print_saved(
     saved: &store::Saved,
-    total: std::time::Duration,
-    t_ser: std::time::Duration,
+    (total, t_ser, waited): (
+        std::time::Duration,
+        std::time::Duration,
+        std::time::Duration,
+    ),
     knew: usize,
     runs_reused: usize,
     runs: usize,
@@ -666,11 +704,11 @@ fn print_saved(
         .map(|(n, d)| format!("{n} {:.0}", d.as_secs_f64() * 1e3))
         .collect();
     eprintln!(
-        "phitex: store: writing, ms from its start: {}; of the blobs' {:.0} ms, {:.0} keeping and {:.0} writing",
+        "phitex: store: writing, ms from its start: {}; of the blobs' {:.0} ms, {:.0} writing (the savers waited {:.0} for it)",
         phases.join(", "),
         t_ser.as_secs_f64() * 1e3,
-        saved.keeping.as_secs_f64() * 1e3,
         saved.writing.as_secs_f64() * 1e3,
+        waited.as_secs_f64() * 1e3,
     );
 }
 
