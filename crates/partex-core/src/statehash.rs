@@ -1278,6 +1278,12 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         self.eqtb_content_with(p, self.peek_eqtb(p), true)
     }
 
+    /// [`Tex::eqtb_content_by_tokens`] of eqtb location `p` with
+    /// `by_tokens`, else [`Tex::cell_content`]'s.
+    pub(crate) fn eqtb_content_of(&self, p: i32, by_tokens: bool) -> u128 {
+        self.eqtb_content_with(p, self.peek_eqtb(p), by_tokens)
+    }
+
     fn eqtb_content_with(&self, p: i32, w: MemoryWord, by_tokens: bool) -> u128 {
         eqtb_content_parts(
             p,

@@ -116,9 +116,22 @@ struct Pos {
     ix: u32,
 }
 
-/// Slot `i` of family `f` in a dense array, grown as needed.
-#[inline]
+/// Slot `i` of family `f` in a dense array, grown as needed (the growth
+/// out of line: every noted read and write comes here, 200M times on the
+/// PGF subset, and the arrays are grown once).
+#[inline(always)]
+#[allow(clippy::inline_always, reason = "every noted read and write")]
 fn dense_at<T: Copy + Default>(v: &mut Vec<Vec<T>>, f: usize, i: usize) -> &mut T {
+    if f < v.len() && i < v[f].len() {
+        return &mut v[f][i];
+    }
+    dense_grow(v, f, i)
+}
+
+/// [`dense_at`] of a slot past the arrays: grown to hold it.
+#[cold]
+#[inline(never)]
+fn dense_grow<T: Copy + Default>(v: &mut Vec<Vec<T>>, f: usize, i: usize) -> &mut T {
     if f >= v.len() {
         v.resize_with(f + 1, Vec::new);
     }

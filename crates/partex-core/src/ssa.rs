@@ -847,6 +847,7 @@ impl Machine for TexSsa {
         SVal::ver(Version::ABSENT)
     }
 
+    #[inline]
     fn dense(a: &Slot) -> Option<(usize, usize)> {
         let f = match a.0 {
             // (each table a family of its own: two tables in one would
@@ -993,7 +994,8 @@ fn table_at(f: Fam, a: i64) -> Option<(usize, usize)> {
 #[derive(Default)]
 pub struct Versions {
     /// Content versions of the table slots, by [`table_at`] (0: not
-    /// versioned yet).
+    /// versioned yet; [`STALE`]: an eqtb entry written since its version
+    /// was last made, which its content gives when wanted).
     table: [Vec<u128>; 15],
     /// Revisions of the other families' slots.
     revs: BTreeMap<Slot, u64>,
@@ -1001,6 +1003,13 @@ pub struct Versions {
     /// The build, which tags revisions.
     epoch: u64,
 }
+
+/// A table slot whose version its content gives, made when wanted
+/// ([`Tracker::wrote_eqtb`]): an eqtb entry is written some 44M times on
+/// the PGF subset and its version wanted far fewer (a read from outside
+/// the call, a step's definitions). Every version made has its low bit
+/// set, so this is none of them.
+const STALE: u128 = 2;
 
 impl Versions {
     fn revision(&self, s: Slot) -> Version {
@@ -1018,7 +1027,36 @@ impl Versions {
     #[inline]
     fn known_at(&self, f: usize, i: usize) -> Option<Version> {
         let v = *self.table[f].get(i)?;
+        (v != 0 && v != STALE).then_some(Version(v))
+    }
+
+    /// [`Versions::known_at`], the version of a slot [`STALE`] made by
+    /// `content` now (and kept).
+    #[inline]
+    fn fresh_at(&mut self, f: usize, i: usize, content: impl FnOnce() -> u128) -> Option<Version> {
+        let v = *self.table[f].get(i)?;
+        if v == STALE {
+            let v = content() | 1;
+            self.table[f][i] = v;
+            return Some(Version(v));
+        }
         (v != 0).then_some(Version(v))
+    }
+
+    /// Whether table slot `s` is [`STALE`].
+    fn stale(&self, s: Slot) -> bool {
+        s.0 == Fam::Eqtb
+            && table_at(s.0, s.1).is_some_and(|(f, i)| self.table[f].get(i) == Some(&STALE))
+    }
+
+    /// Table slot `s` was written: its version is made from its content
+    /// when wanted ([`STALE`]).
+    #[inline]
+    fn set_stale(&mut self, s: Slot) {
+        if let Some((f, i)) = table_at(s.0, s.1) {
+            self.set_at(f, i, 0);
+            self.table[f][i] = STALE;
+        }
     }
 
     /// A write of `s`: a table slot's version comes with [`Versions::set`]
@@ -1963,7 +2001,7 @@ impl SsaTracker {
         clippy::inline_always,
         reason = "every read of a table slot: a call that only tested the stamp was 5% of a keystroke"
     )]
-    fn read_slot(&self, s: Slot, content: impl FnOnce() -> u128) {
+    fn read_slot(&self, s: Slot, content: impl Fn(bool) -> u128) {
         // (the slot's table and index, found once for its stamp and its
         // version)
         let at = table_at(s.0, s.1);
@@ -1981,7 +2019,7 @@ impl SsaTracker {
         s: Slot,
         at: Option<(usize, usize)>,
         stamp: Option<&core::cell::Cell<u32>>,
-        content: impl FnOnce() -> u128,
+        content: impl Fn(bool) -> u128,
     ) {
         let generation = self.generation.get();
         let Ok(mut r) = self.rec.try_borrow_mut() else {
@@ -1990,12 +2028,28 @@ impl SsaTracker {
         if !r.on {
             return;
         }
-        // (every slot has the version its last writer made; none: a slot
-        // past the tables, which no write reaches, never equal)
+        // (every slot has the version its last writer made, or its
+        // content gives it, [`STALE`]; none: a slot past the tables, which
+        // no write reaches, never equal)
+        if !self.check && !ENTRY_CHECK.load(core::sync::atomic::Ordering::Relaxed) {
+            // (the version made only if the read is recorded: a read of a
+            // slot the call wrote is not)
+            r.st.noted[count_ix(s)] += 1;
+            let r = &mut *r;
+            let vers = &mut r.st.vers;
+            r.rt.note_read_with(&Loc::State(s), || {
+                at.and_then(|(f, i)| vers.fresh_at(f, i, || content(false)))
+                    .unwrap_or_else(|| vers.revision(s))
+            });
+            if let Some(c) = stamp {
+                c.set(generation);
+            }
+            return;
+        }
         let v = at
-            .and_then(|(f, i)| r.st.vers.known_at(f, i))
+            .and_then(|(f, i)| r.st.vers.fresh_at(f, i, || content(false)))
             .unwrap_or_else(|| r.st.vers.revision(s));
-        if self.check && Version(content() | 1) != v {
+        if self.check && Version(content(true) | 1) != v {
             // (the test of 7.17.12's convention: a store that bypassed its
             // accessor leaves the version behind the content)
             *r.st.stale.entry(s.0).or_default() += 1;
@@ -2634,13 +2688,46 @@ impl Tracker for SsaTracker {
     #[inline(always)]
     #[allow(clippy::inline_always, reason = "only `read_slot`'s test")]
     fn read_content(&self, cell: Cell, content: impl FnOnce() -> u128) {
+        // (no version of these is made late: `content` only for check mode)
+        let content = core::cell::Cell::new(Some(content));
+        self.read_slot(Slot::of(cell), |_| content.take().map_or(0, |f| f()));
+    }
+
+    #[inline(always)]
+    #[allow(clippy::inline_always, reason = "only `read_slot`'s test")]
+    fn read_eqtb(&self, cell: Cell, content: impl Fn(bool) -> u128) {
         self.read_slot(Slot::of(cell), content);
+    }
+
+    /// (the version made when wanted, [`STALE`]; in check mode now, so
+    /// that a store bypassing the accessor leaves it behind the content)
+    fn wrote_eqtb(&self, cell: Cell, content: impl FnOnce() -> u128) {
+        if let Ok(mut r) = self.rec.try_borrow_mut() {
+            if self.check {
+                r.st.vers.set(Slot::of(cell), content());
+            } else {
+                r.st.vers.set_stale(Slot::of(cell));
+            }
+        } else {
+            self.lost.set(self.lost.get() + 1);
+        }
+    }
+
+    fn soft_read_eqtb(&self, cell: Cell, level: i32, content: impl FnOnce() -> u128) {
+        if let Ok(mut r) = self.rec.try_borrow_mut()
+            && r.on
+            && let Some((f, i)) = table_at(Slot::of(cell).0, Slot::of(cell).1)
+        {
+            r.st.vers.fresh_at(f, i, content);
+        }
+        self.soft_read(cell, level);
     }
 
     #[inline(always)]
     #[allow(clippy::inline_always, reason = "only `read_slot`'s test")]
     fn row_read(&self, row: Row, content: impl FnOnce() -> u128) {
-        self.read_slot(Slot::row(row), content);
+        let content = core::cell::Cell::new(Some(content));
+        self.read_slot(Slot::row(row), |_| content.take().map_or(0, |f| f()));
     }
 
     #[inline(always)]
@@ -3288,6 +3375,9 @@ pub trait EngineView {
     fn pdf_cell_ver(&self, s: Slot) -> u128;
     /// The class of control sequence `p`'s meaning ([`Fam::Class`]).
     fn token_class_of(&self, p: i32) -> u8;
+    /// Eqtb entry `p`'s content version (`Tex::cell_content`): what its
+    /// last write left ([`Tracker::wrote_eqtb`]).
+    fn eqtb_ver(&self, p: i32) -> u128;
     /// The value slot `s` holds now (the families whose values the
     /// engine can put back; none for a read-only one).
     #[allow(private_interfaces, reason = "the values are the engine's")]
@@ -3353,6 +3443,9 @@ impl<H: Host, T: Tracker> EngineView for Tex<H, T> {
     }
     fn token_class_of(&self, p: i32) -> u8 {
         Tex::token_class_of(self, p)
+    }
+    fn eqtb_ver(&self, p: i32) -> u128 {
+        self.cell_content(crate::track::Cell::Eqtb(p))
     }
     fn pdf_cell_ver(&self, s: Slot) -> u128 {
         let o = &self.pdf.objs;
@@ -3454,7 +3547,14 @@ impl Store<TexSsa> for View<'_> {
             | Fam::Out
             | Fam::Read
             | Fam::Random
-            | Fam::Glyphs => rec.vers.known(s).unwrap_or_else(|| rec.vers.revision(s)),
+            | Fam::Glyphs => rec.vers.known(s).unwrap_or_else(|| {
+                if rec.vers.stale(s) {
+                    // (an eqtb entry's, made from its content now: [`STALE`])
+                    Version(self.tex.eqtb_ver(i32::try_from(s.1).unwrap_or(0)) | 1)
+                } else {
+                    rec.vers.revision(s)
+                }
+            }),
             Fam::Source => self.source(s),
             Fam::Save => Version(self.tex.save_version(s.1)),
             Fam::Cond => Version(self.tex.cond_ver()),
@@ -3512,7 +3612,8 @@ impl Store<TexSsa> for View<'_> {
         // word, object and kind)
         // (a version made from the value's content, not a revision: an
         // eqtb entry's when its table has one, a save stack entry's)
-        let content = a.0 == Fam::Save || a.0 == Fam::Eqtb && self.rec.vers.known(*a) == Some(v);
+        let content = a.0 == Fam::Save
+            || a.0 == Fam::Eqtb && (self.rec.vers.stale(*a) || self.rec.vers.known(*a) == Some(v));
         let x = self
             .tex
             .value_of(*a)

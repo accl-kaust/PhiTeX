@@ -427,6 +427,11 @@ pub trait Tracker {
     fn soft_read(&self, cell: Cell, _level: i32) {
         self.read(cell);
     }
+    /// [`Tracker::soft_read`] of eqtb entry `cell`, its content version
+    /// given by `content` as [`Tracker::wrote_eqtb`]'s.
+    fn soft_read_eqtb(&self, cell: Cell, level: i32, _content: impl FnOnce() -> u128) {
+        self.soft_read(cell, level);
+    }
     /// Whether `cell` holds the value the open step began with, assigned
     /// locally at group level `level` in a group the step opened: a value
     /// from before the group, which a consistent state gives a level
@@ -468,6 +473,22 @@ pub trait Tracker {
     /// 7.17.12: a table keeps a version array beside its entries; an equal
     /// write gives the same version, which is backdating).
     fn wrote(&self, _cell: Cell, _version: u128) {}
+    /// (With [`Tracker::VALUES`].) [`Tracker::wrote`] of eqtb entry
+    /// `cell`, its content version given by `content` (`Tex::cell_content`):
+    /// made now, or by a tracker whose versions follow the content when
+    /// the version is wanted (`content` holds the same then: every change
+    /// of the entry's content comes through this hook, check mode's test).
+    fn wrote_eqtb(&self, cell: Cell, content: impl FnOnce() -> u128) {
+        self.wrote(cell, content());
+    }
+    /// (With [`Tracker::VALUES`].) [`Tracker::read_content`] of eqtb entry
+    /// `cell`: `content(false)` its content version as
+    /// [`Tracker::wrote_eqtb`]'s `content` makes it, `content(true)` the
+    /// same with the versions of the lists it names made from their tokens
+    /// (check mode's test).
+    fn read_eqtb(&self, cell: Cell, content: impl Fn(bool) -> u128) {
+        self.read_content(cell, || content(true));
+    }
     /// (With [`Tracker::VALUES`].) A read of table row `row` ([`Row`]):
     /// `content` gives its content version, for check mode's test of the
     /// version its last write made.
