@@ -773,6 +773,24 @@ const INCREMENTAL: &[Incremental] = &[
         pdf: true,
         by: By::Watch,
     },
+    // A page step that reads the page's tail and not its length: the
+    // deferred page builder whose first contribution is a `\parskip` glue
+    // fires the page; with a line gone above it the glue is the best
+    // break, and the tail placed for its run must be the one reaching it,
+    // not the job's end's empty list (the page broke a line early).
+    Incremental {
+        name: "pagetail",
+        inputs: &["pagetail.tex"],
+        job: "pagetail",
+        edits: &[
+            ("pagetail.tex", r"Line one.\par", "% gone"),
+            ("pagetail.tex", "% gone", r"Line one.\par"),
+        ],
+        cutoffs: 0,
+        invisible: 0,
+        pdf: true,
+        by: By::Watch,
+    },
     Incremental {
         name: "incremental",
         inputs: &["incr.tex", "incr-part.tex"],

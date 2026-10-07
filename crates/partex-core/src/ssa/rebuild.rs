@@ -4971,6 +4971,20 @@ pub(super) fn place_values<H: Host>(
         *objs_placed = true;
         objs_whole(tex, key, next, rep);
     }
+    // (the page's tail and its nodes are its list's: placed with the
+    // length that reaches the step, put before them. A step that fires
+    // the page on a glue reads the tail and not the length; the tail put
+    // alone on a list of another length, the job's end's empty one, is
+    // lost, and so is a tail put before the length that the run reads
+    // after it, 7.17.3 item 5)
+    let len = Slot(Fam::Page, i64::from(crate::track::page::LIST_LEN));
+    if !set.contains(&len)
+        && !next.contains(&len)
+        && !found.iter().any(|(a, _)| *a == len)
+        && found.iter().map(|(a, _)| a).chain(&*next).any(of_page_list)
+    {
+        next.push(len);
+    }
     // the definitions that reach the step, where a later one is in the
     // arrays
     let mut r = tex.tracker.rec.borrow_mut();
@@ -4991,6 +5005,12 @@ pub(super) fn place_values<H: Host>(
         }
     }
     vals
+}
+
+/// Whether slot `a` is held by the page's list (its tail, a node), so is
+/// placed with the list's length ([`place_values`]).
+fn of_page_list(a: &Slot) -> bool {
+    a.0 == Fam::PageNode || *a == Slot(Fam::Page, i64::from(crate::track::page::LIST_TAIL))
 }
 
 /// What [`after_close`] needs of a step's run closed in the fold.

@@ -1860,7 +1860,15 @@ from one clean point to the next.
      for a window (4.3 item 1), the conditionals and `align_state`
      are placed whole too;
    - the page list's length, its tail, and the nodes the step reads are
-     placed;
+     placed, the tail and the nodes always with the length, put before
+     them (`place_values`): the tail is a stand-in of its kind at the
+     list's end, so put alone on the arrays' list (the job's end's,
+     empty) it was lost, and a length put after it, for a run that read
+     the length later, made the tail a stand-in's. A step that fires
+     the page on a glue reads the tail and not the length; run again
+     where the glue no longer fires, it found no break there and broke
+     the page a line early (`ssa-edits` case `pagetail`; the course's
+     section added and taken away left a page a line short);
    - the input is set to the previous step's result (3.5), mapped
      through the edits.
 3. The step runs, applying the hits of the calls that apply (3.4). If
