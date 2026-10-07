@@ -54,10 +54,12 @@
 # bench/results/<commit>-ssa-course-<host>.json): per rebuild, its ms (rebuild,
 # link), counts and instructions; the cold build's; the warm `word`
 # edits' medians; the peak RSS; the load before and after; and whether
-# the final outputs, every edit reverted, are the cold build's byte for
-# byte (the log masked as e2e masks it). NOTE=... adds a note to the
-# JSON. Exit 1 if the process failed. HEAVY=0 runs it without
-# scripts/heavy: for a small document only (COURSE, MAIN, EDITS).
+# the final outputs, every edit reverted, are the cold build's: the files
+# the job reads back byte for byte, the PDF byte for byte or else page
+# by page as pdftoppm (or Ghostscript) renders it (fonts may take other
+# resource names after rebuilds), the log not compared. NOTE=... adds a
+# note to the JSON. Exit 1 if the process failed. HEAVY=0 runs it
+# without scripts/heavy: for a small document only (COURSE, MAIN, EDITS).
 set -euo pipefail
 
 repo=$(cd "$(dirname "$0")/.." && pwd)
@@ -178,32 +180,45 @@ for kind, rows in (("edit", [r for r in warm if not r["revert"]]),
             "instructions": insn,
             "median_instructions": statistics.median(insn) if insn else None,
         }
-# the final outputs against the cold build's (every edit reverted)
-masks = [re.compile(p, re.M) for p in (
-    rb"^ \d+ strings? out of \d+$", rb"^ \d+ string characters out of \d+$",
-    rb"^ \d+ multiletter control sequences out of \d+\+\d+$",
-    rb"^ \d+ words of font info for \d+ fonts?, out of \d+ for \d+$",
-    rb"^ \d+ hyphenation exceptions? out of \d+$",
-    rb"^ \d+i,\d+n,\d+p,\d+b,\d+s stack positions out of .*$",
-    rb"\d+ words of memory out of \d+",
-    rb"^ \d+ words of extra memory for PDF output out of \d+ \(max\. \d+\)$")]
-def masked(b):
-    b = b[b.find(b"\n") + 1:]
-    for p in masks:
-        b = p.sub(b"MASKED", b)
-    return b
+# the final outputs against the cold build's (every edit reverted): the
+# files the job reads back byte for byte; the log not (it need not
+# match: its statistics and the PDF's size); the PDF by its rendered
+# pages when its bytes differ (an SSA build's fonts may take other
+# resource names, `/F86` for `/F90`, after rebuilds that loaded fonts
+# in another order)
+def rendered(a, b):  # (pdftoppm's pages, or Ghostscript's where it is not)
+    import shutil, subprocess, tempfile
+    def render(p, out):
+        if shutil.which("pdftoppm"):
+            cmd = ["pdftoppm", "-r", "50", "-gray", p, os.path.join(out, "p")]
+        elif shutil.which("gs"):
+            cmd = ["gs", "-q", "-dNOPAUSE", "-dBATCH", "-dSAFER", "-sDEVICE=pnggray", "-r50",
+                   "-o", os.path.join(out, "p%05d.png"), p]
+        else:
+            return False
+        return subprocess.run(cmd, capture_output=True).returncode == 0
+    with tempfile.TemporaryDirectory(dir=d) as t:
+        pages = []
+        for k, p in enumerate((a, b)):
+            os.mkdir(os.path.join(t, str(k)))
+            if not render(p, os.path.join(t, str(k))):
+                return False
+            pages.append(sorted(os.listdir(os.path.join(t, str(k)))))
+        return pages[0] == pages[1] and all(
+            open(os.path.join(t, "0", n), "rb").read() == open(os.path.join(t, "1", n), "rb").read()
+            for n in pages[0])
 cold_dir, final_dir = os.path.join(d, "plan", "cold"), os.path.join(d, "run", "out")
 if os.path.isdir(cold_dir) and all("ms" in r for r in result["rebuilds"]):
     differ = []
     for f in sorted(set(os.listdir(cold_dir)) | set(os.listdir(final_dir))):
         a, b = os.path.join(cold_dir, f), os.path.join(final_dir, f)
+        if f.endswith(".log"):
+            continue
         if not (os.path.isfile(a) and os.path.isfile(b)):
             differ.append(f)
             continue
-        x, y = open(a, "rb").read(), open(b, "rb").read()
-        if f.endswith(".log"):
-            x, y = masked(x), masked(y)
-        if x != y:
+        if open(a, "rb").read() != open(b, "rb").read() and not (
+                f.endswith(".pdf") and rendered(a, b)):
             differ.append(f)
     result["final_differs_from_cold"] = differ
 if cold:  # (a run that never built is not a measurement)

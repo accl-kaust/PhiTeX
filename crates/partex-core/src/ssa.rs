@@ -4283,6 +4283,10 @@ fn open_paragraph<H: Host>(
         // (a step that begins after a paragraph's start)
         args.push(Version::of(&0x6772_6166u32));
     }
+    if tex.par_start {
+        // (a step that begins before a paragraph's first boundary)
+        args.push(Version::of(&0x7061_7273u32));
+    }
     let mut r = tex.tracker.rec.borrow_mut();
     let rr = &mut *r;
     // (with `SyncTeX`, no step is taken from another's record: its nodes'

@@ -1,0 +1,23 @@
+% A page step that reads the page's tail and not its length (`scripts/ssa-edits`,
+% case pagetail; xtask/src/e2e.rs): \many runs over 64 commands between
+% two paragraphs, so the second paragraph's page builder is a step of its
+% own, its first contribution the \parskip glue. With five lines before it
+% the page is overfull there and the step fires the page, reading whether
+% the page's last node precedes a break and not how long the list is.
+% With the first line gone the step runs again and the glue is the best
+% break: the tail it reads must be the one that reaches it, a line, not
+% the job's end's empty list.
+\pdfoutput=1 \pdfminorversion=5 \pdfobjcompresslevel=2 \pdfcompresslevel=9
+\hsize=200pt \vsize=50pt \maxdepth=2pt \topskip=10pt \baselineskip=12pt
+\parskip=0pt plus 2pt \parindent=0pt
+\def\ten{\relax\relax\relax\relax\relax\relax\relax\relax\relax\relax}
+\def\many{\ten\ten\ten\ten\ten\ten\ten\ten}
+Line one.\par
+Line two.\par
+Line three.\par
+Line four.\par
+Line five.\par
+\many
+Line six.\par
+Line seven.\par
+\bye
