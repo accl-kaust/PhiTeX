@@ -1568,6 +1568,7 @@ accessor.
 | `PARTEX_SSA_SOFT_READS=0`, `PARTEX_SSA_CLASS_READS=0` | a local assignment reads the value it replaces; a lookup that stores a token reads its meaning (3.12) |
 | `PARTEX_SSA_SOFT_PLACE=0` | a soft-read slot's level and value decide its save and assignment as the arrays hold them (3.12) |
 | `PARTEX_SSA_DEAD_SAVES=0` | every save stack entry a step writes is its definition (3.12) |
+| `PARTEX_SSA_LAZY_VERSIONS=0` | an eqtb entry's version made at each write, not when wanted (2.4) |
 | `PARTEX_SSA_VOBJ=0` | the PDF object table one slot, pdfTeX's numbers as made (3.12, "Virtual PDF object numbers") |
 | `PARTEX_SSA_FONT_REFS=0` | a font's `/F` number is its place in the engine's table, which keeps the fonts an older run loaded, not the link's (3.8) |
 | `PARTEX_SSA_FLOW=0` | the log's and the terminal's columns are slots each printing step reads and writes, not the link's (3.8) |
