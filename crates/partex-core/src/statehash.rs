@@ -103,14 +103,14 @@ pub static PDF_WORD_CELLS: core::sync::atomic::AtomicBool =
 /// An entry that is saved again holds a `level_one` word, so it is never
 /// a `restore_zero` one; a `restore_zero` entry below it stays (hashed,
 /// though dead).
-struct SaveCanon {
+pub(crate) struct SaveCanon {
     /// The level boundaries, from the bottom (the chain from
     /// `cur_boundary`, §274).
     boundaries: alloc::vec::Vec<usize>,
     /// Whether word `p` holds a saved word (with its entry above it).
     eqtb: alloc::vec::Vec<bool>,
     /// Whether word `p` is live.
-    live: alloc::vec::Vec<bool>,
+    pub(crate) live: alloc::vec::Vec<bool>,
     /// The live words below `p`.
     below: alloc::vec::Vec<i32>,
     top: usize,
@@ -118,14 +118,14 @@ struct SaveCanon {
 
 /// A frame of [`SaveCanon`]: its words `start..end` and the boundary
 /// above them (none for the top frame).
-struct Frame {
-    start: usize,
-    end: usize,
-    boundary: Option<usize>,
+pub(crate) struct Frame {
+    pub(crate) start: usize,
+    pub(crate) end: usize,
+    pub(crate) boundary: Option<usize>,
 }
 
 impl SaveCanon {
-    fn of(
+    pub(crate) fn of(
         stack: &crate::journal::JVec<MemoryWord>,
         save_ptr: i32,
         save_eqtb: &[bool],
@@ -190,7 +190,7 @@ impl SaveCanon {
         s
     }
 
-    fn flagged(&self, p: usize) -> bool {
+    pub(crate) fn flagged(&self, p: usize) -> bool {
         self.eqtb[p]
     }
 
@@ -205,7 +205,7 @@ impl SaveCanon {
 
     /// The frames, from the bottom: the words below the first boundary,
     /// then between each boundary and the next.
-    fn frames(&self) -> alloc::vec::Vec<Frame> {
+    pub(crate) fn frames(&self) -> alloc::vec::Vec<Frame> {
         let mut v = alloc::vec::Vec::with_capacity(self.boundaries.len() + 1);
         let mut start = 0;
         for &b in &self.boundaries {
@@ -906,6 +906,37 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         out.join("; ")
     }
 
+    /// The hash of the value an eqtb word (or a saved copy) of `loc`
+    /// holds, its level left out.
+    pub(crate) fn value_hash(loc: i32, mut w: MemoryWord, o: Option<&Obj>) -> u128 {
+        if !(INT_BASE..=EQTB_SIZE).contains(&loc) {
+            w.set_b1(0);
+        }
+        let mut c = Canon::new();
+        c.word(loc, w, o);
+        c.h.finish128()
+    }
+
+    /// Location `loc`'s value's hash ([`Self::value_hash`]) and level now.
+    fn eqtb_value_and_level(&self, loc: i32) -> (u128, i32) {
+        let Ok(i) = usize::try_from(loc) else {
+            return (0, -1);
+        };
+        if i >= self.eqtb.len() {
+            return (0, -1);
+        }
+        let w = self.eqtb[i];
+        let level = if (INT_BASE..=EQTB_SIZE).contains(&loc) {
+            self.peek_xeq_level(loc)
+        } else {
+            w.b1()
+        };
+        (
+            Self::value_hash(loc, w, self.eqtb_obj.get(i).and_then(Option::as_ref)),
+            level,
+        )
+    }
+
     /// The save stack's frames as the state hash takes them
     /// (`SaveCanon`), each a list of its live words: a restore entry by
     /// its location's name and a hash of its value, any other word as it
@@ -935,7 +966,20 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                             self.save_obj.get(p).and_then(Option::as_ref),
                         );
                         let h = c.h.finish128() % 0xffff_ffff;
-                        pairs.push(alloc::format!("{}={h:x}", self.eqtb_loc_name(loc)));
+                        // (the saved value against the location's now,
+                        // levels apart: `=` if the same value)
+                        let (now, level) = self.eqtb_value_and_level(loc);
+                        let saved = Self::value_hash(
+                            loc,
+                            self.save_stack[p],
+                            self.save_obj.get(p).and_then(Option::as_ref),
+                        );
+                        pairs.push(alloc::format!(
+                            "{}={h:x}[L{}->{level}{}]",
+                            self.eqtb_loc_name(loc),
+                            self.save_stack[p + 1].b1(),
+                            if saved == now { "=" } else { "!=" }
+                        ));
                     }
                     p += 2;
                 } else {

@@ -1938,4 +1938,31 @@ mod tests {
         end(a);
         end(b);
     }
+
+    /// At a cut the save stack loses its dead and no-op entries: a
+    /// location changed in a group and changed back holds the value its
+    /// entry saved, and the state is then the one where it never changed
+    /// (no entry, the location at its old level); one that still differs
+    /// keeps its entry.
+    #[test]
+    fn no_op_save_entries_go_at_a_cut() {
+        use crate::web::{COUNT_BASE, LEVEL_ONE};
+        let (p, q) = (COUNT_BASE + 10, COUNT_BASE + 11);
+        let mut a = engine(1);
+        a.new_save_level(1).unwrap();
+        let fresh = a.save_ptr;
+        a.eq_word_define(p, 5).unwrap();
+        a.eq_word_define(p, 0).unwrap();
+        a.eq_word_define(q, 7).unwrap();
+        a.canonicalize_save_stack();
+        let mut b = engine(1);
+        b.new_save_level(1).unwrap();
+        b.eq_word_define(q, 7).unwrap();
+        assert_eq!(a.save_ptr, fresh + 2, "the entry of `q` only");
+        assert_eq!(a.peek_xeq_level(p), LEVEL_ONE);
+        assert_eq!(a.state_hash(), b.state_hash());
+        a.unsave().unwrap();
+        let at = |t: &Tex<H0, CellTracker>, l: i32| t.eqtb[usize::try_from(l).unwrap()].int();
+        assert_eq!((at(&a, p), at(&a, q)), (0, 0));
+    }
 }

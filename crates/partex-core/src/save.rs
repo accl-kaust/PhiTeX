@@ -2,7 +2,7 @@
 //! (§252), which `restore_trace` uses.
 
 use crate::host::Host;
-use crate::mem::{NULL, Pointer};
+use crate::mem::{MemoryWord, NULL, Pointer};
 use crate::objs::Obj;
 use crate::tex::{Jump, Tex};
 use crate::track::Tracker;
@@ -211,7 +211,12 @@ impl<H: Host, T: Tracker> Tex<H, T> {
     pub(crate) fn set_saved(&mut self, k: i32, v: i32) {
         let p = self.save_ptr() + k;
         self.mark_save(p, false);
-        self.save_stack[Self::sx(p)].set_int(v);
+        // (the whole word: only its `int` is ever read, and the rest of it
+        // would keep what the slot held before, which differs between two
+        // runs that reach the same state)
+        let mut w = MemoryWord::default();
+        w.set_int(v);
+        self.save_stack[Self::sx(p)] = w;
     }
 
     /// Record whether save stack slot `p` holds a copy of an eqtb word
@@ -747,6 +752,142 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             self.memo_group_closed(group, below_after.unwrap_or(self.input_ptr));
         }
         Ok(())
+    }
+
+    /// Machine mode, at a cut: make the save stack canonical, as the
+    /// group ends will use it (`statehash::SaveCanon`):
+    /// - an entry below a later one of its location in its frame is dead
+    ///   (§282–§283: the later one leaves the location at `level_one`,
+    ///   so this one is retained, its value thrown away): removed;
+    /// - an entry that saved the value its location holds now, which is
+    ///   at the entry's level (assigned there since), is a no-op: the
+    ///   group's end would put back the same value at the saved level.
+    ///   It is removed and the location set to the saved level now: a
+    ///   later local assignment at the frame's level saves the same word
+    ///   again, a `\global` one leaves `level_one` either way, and an
+    ///   inner group saves and restores what is there.
+    ///
+    /// Such entries come from the history, not the state: a `\color` or
+    /// size changed and changed back at the document's level leaves one
+    /// for the rest of the document, and an edit that adds one makes
+    /// every later state differ from the old run's. The values are as
+    /// they were; only `\tracingrestores` would show the difference (the
+    /// stack is left as it is while it is on). Reads the locations it
+    /// compares, and writes those whose level it sets.
+    pub(crate) fn canonicalize_save_stack(&mut self) {
+        if self.int_par(TRACING_RESTORES_CODE) > 0 {
+            return;
+        }
+        let saves = crate::statehash::SaveCanon::of(
+            &self.save_stack,
+            self.save_ptr,
+            &self.save_eqtb,
+            self.cur_boundary,
+            self.cur_level,
+        );
+        let top = usize::try_from(self.save_ptr).unwrap_or(0);
+        let mut remove = alloc::vec![false; top];
+        let mut levels = alloc::vec::Vec::new();
+        let mut any = false;
+        for (i, f) in saves.frames().iter().enumerate() {
+            let level = LEVEL_ONE + i32::try_from(i).unwrap_or(i32::MAX - 1);
+            let mut p = f.start;
+            while p < f.end {
+                if !saves.flagged(p) {
+                    p += 1;
+                    continue;
+                }
+                let at = Self::sx(i32::try_from(p + 1).unwrap_or(0));
+                let (loc, saved_level) = (self.save_stack[at].rh(), self.save_stack[at].b1());
+                let dead = !saves.live[p];
+                let word = (INT_BASE..=EQTB_SIZE).contains(&loc);
+                let now = if word {
+                    self.peek_xeq_level(loc)
+                } else {
+                    self.peek_eqtb(loc).b1()
+                };
+                let noop = !dead && now == level && saved_level != level && {
+                    self.report_eqtb_read(loc);
+                    let saved = Self::value_hash(
+                        loc,
+                        self.save_stack[p],
+                        self.save_obj.get(p).and_then(Option::as_ref),
+                    );
+                    saved == Self::value_hash(loc, self.peek_eqtb(loc), self.peek_obj(loc))
+                };
+                if dead || noop {
+                    remove[p] = true;
+                    remove[p + 1] = true;
+                    any = true;
+                }
+                if noop {
+                    levels.push((loc, saved_level, word));
+                }
+                p += 2;
+            }
+        }
+        if !any {
+            return;
+        }
+        for (loc, l, word) in levels {
+            if word {
+                self.set_xeq_level(loc, l);
+            } else {
+                let mut w = self.peek_eqtb(loc);
+                w.set_b1(l);
+                let o = self.peek_obj(loc).cloned();
+                self.set_eqtb_entry(loc, w, o);
+            }
+        }
+        // (the words left, moved down; positions by the words below them)
+        let mut below = alloc::vec::Vec::with_capacity(top + 1);
+        let mut n = 0usize;
+        for &r in &remove {
+            below.push(n);
+            n += usize::from(!r);
+        }
+        below.push(n);
+        let new_pos = |q: i32| -> i32 {
+            match usize::try_from(q) {
+                Ok(u) if u <= top => i32::try_from(below[u]).unwrap_or(q),
+                _ => q,
+            }
+        };
+        let boundaries: alloc::collections::BTreeSet<usize> =
+            saves.frames().iter().filter_map(|f| f.boundary).collect();
+        for q in 0..top {
+            if remove[q] {
+                continue;
+            }
+            let to = below[q];
+            let mut w = self.save_stack[q];
+            if boundaries.contains(&q) {
+                w.set_rh(new_pos(w.rh()));
+            }
+            let eqtb = self.save_eqtb.get(q).copied().unwrap_or(false);
+            let obj = self.save_obj.get_mut(q).and_then(Option::take);
+            self.save_stack[to] = w;
+            if to < self.save_eqtb.len() {
+                self.save_eqtb[to] = eqtb;
+            }
+            if to < self.save_obj.len() {
+                self.save_obj[to] = obj;
+            }
+            self.save_wrote(i32::try_from(to).unwrap_or(0));
+        }
+        for q in n..top {
+            if q < self.save_eqtb.len() {
+                self.save_eqtb[q] = false;
+            }
+            if let Some(o) = self.save_obj.get_mut(q) {
+                *o = None;
+            }
+        }
+        self.cur_boundary = new_pos(self.cur_boundary);
+        self.save_ptr = i32::try_from(n).unwrap_or(0);
+        for g in &mut self.grp_stack {
+            *g = new_pos(*g);
+        }
     }
 
     /// §284: `eqtb[p]` has just been restored or retained.
