@@ -18,7 +18,7 @@
 #   accl ci-backfill N REV...      perf history for older commits (one array)
 #
 # Tasks (job.sbatch): gate | course plain|ab|ssa|rebuild|label ... |
-# edits [DOC...] | cmd <command...>. Each gets resources from its preset
+# edits [DOC...] | watch [COURSE] [runs] | cmd <command...>. Each gets resources from its preset
 # below; ACCL_OPTS adds or overrides sbatch options (for example
 # ACCL_OPTS="-c 16 -t 1:00:00"); ACCL_COMMIT=<rev> submits that commit
 # instead of a snapshot of the tree.
@@ -44,6 +44,7 @@ preset() {
         *) echo "-p build --qos=build4 -c 8 --mem=48G -t 03:00:00" ;;
       esac ;;
     edits) echo "-p build --qos=build4 -c 8 --mem=32G -t 01:30:00" ;;
+    watch) echo "-p build --qos=build4 -c 8 --mem=96G -t 03:00:00" ;;
     *) echo "-p build --qos=build4 -c 16 --mem=64G -t 02:00:00" ;;
   esac
 }

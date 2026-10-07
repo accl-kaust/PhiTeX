@@ -52,6 +52,17 @@ pub struct NativeHost {
     /// An SSA build's commands as nodes ([`Commands`]); `None`: each
     /// `\write18` runs (a plain run, as pdfTeX's).
     pub commands: Option<Commands>,
+    /// The terminal's text and the diagnostics kept instead of printed
+    /// (`phitex watch --ssa`: its renderer draws the terminal from them).
+    pub capture: Option<Captured>,
+}
+
+/// What a capturing [`NativeHost`] kept: the terminal's text and the
+/// diagnostics the engine (an SSA build's link) handed it.
+#[derive(Default)]
+pub struct Captured {
+    pub term: Vec<u8>,
+    pub diagnostics: Vec<partex_core::diag::Diagnostic>,
 }
 
 /// `\write18`'s commands in an SSA build (DESIGN 3.7, "Commands"), as
@@ -247,7 +258,79 @@ impl NativeHost {
                 .then(Seen::default),
             outputs: HashMap::new(),
             commands: None,
+            capture: None,
         }
+    }
+
+    /// The paths of the files the job's lookups found (each once), as the
+    /// last lookup of each name found them: what a watch looks at (none
+    /// with `PARTEX_STAT_CACHE=0`).
+    pub fn read_paths(&self) -> Vec<Vec<u8>> {
+        let Some(seen) = &self.seen else {
+            return Vec::new();
+        };
+        let mut out: Vec<Vec<u8>> = seen
+            .lookups
+            .values()
+            .flatten()
+            .filter_map(|(_, l)| l.found.as_ref().map(|(p, ..)| p.clone()))
+            // (the font index is no file)
+            .filter(|p| !p.starts_with(b"\0"))
+            .collect();
+        out.sort();
+        out.dedup();
+        out
+    }
+
+    /// The file at `p` as the job last read it: its stamp taken just
+    /// before, and its bytes (none if the host keeps neither, as for a
+    /// file under 2 s old read outside an SSA session's checks).
+    pub fn read_as(&self, p: &[u8]) -> Option<(Stamp, std::sync::Arc<[u8]>)> {
+        let seen = self.seen.as_ref()?;
+        seen.files
+            .get(p)
+            .or_else(|| seen.racy.get(p))
+            .map(|(s, c)| (*s, c.clone()))
+    }
+
+    /// A file a lookup looked for under a relative path and did not find
+    /// that is there now, not one the link wrote (`\IfFileExists` of a
+    /// file made since): the first such path.
+    pub fn appeared(&self) -> Option<Vec<u8>> {
+        let seen = self.seen.as_ref()?;
+        seen.lookups
+            .values()
+            .flatten()
+            .flat_map(|(_, l)| l.trail.iter())
+            .flat_map(|m| m.files.iter())
+            .map(|(f, _)| f)
+            .filter(|f| !f.starts_with(b"/"))
+            .find(|f| std::fs::metadata(path(f)).is_ok_and(|m| m.is_file()) && !self.is_output(f))
+            .cloned()
+    }
+
+    /// Whether the link wrote the file at `p` (`./x.aux` is `x.aux`).
+    pub fn is_output(&self, p: &[u8]) -> bool {
+        self.output_stamp(p).is_some()
+    }
+
+    /// Whether the file at `p` is as the link last left it: the job's own
+    /// file, not an edit.
+    pub fn as_written(&self, p: &[u8]) -> bool {
+        self.output_stamp(p)
+            .is_some_and(|s| stamp(p).as_ref() == Some(s))
+    }
+
+    /// The stamp the link left the file at `p` with.
+    fn output_stamp(&self, p: &[u8]) -> Option<&Stamp> {
+        let bare = |p: &'_ [u8]| -> Vec<u8> { p.strip_prefix(b"./").unwrap_or(p).to_vec() };
+        let want = bare(p);
+        self.outputs.get(p).or_else(|| {
+            self.outputs
+                .iter()
+                .find(|(k, _)| bare(k) == want)
+                .map(|(_, s)| s)
+        })
     }
 
     /// The run of an SSA build's command whose key ran before
@@ -992,9 +1075,31 @@ impl Host for NativeHost {
     }
 
     fn term_write(&mut self, bytes: &[u8]) {
+        if let Some(c) = &mut self.capture {
+            c.term.extend_from_slice(bytes);
+            return;
+        }
         let mut out = std::io::stdout().lock();
         let _ = out.write_all(bytes);
         let _ = out.flush();
+    }
+
+    fn diagnostic(&mut self, d: &partex_core::diag::Diagnostic) {
+        if let Some(c) = &mut self.capture {
+            c.diagnostics.push(d.clone());
+        }
+    }
+
+    fn notes(&self) -> bool {
+        self.notes
+    }
+
+    fn wants_streams(&self) -> bool {
+        crate::view::tapping()
+    }
+
+    fn stream_shipped(&mut self, page: Option<usize>, stream: partex_core::pagepdf::ShippedStream) {
+        crate::view::shipped(page, stream);
     }
 
     fn term_read_line(&mut self) -> Option<Vec<u8>> {

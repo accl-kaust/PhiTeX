@@ -28,6 +28,9 @@ pub struct Config {
     /// `phitex watch` in machine mode (`machine = false`: the session
     /// path).
     pub machine: Option<bool>,
+    /// `phitex watch` on the dynamic-SSA runtime (`ssa = true`, as
+    /// `--ssa`; experimental).
+    pub ssa: Option<bool>,
     /// Where machine-mode builds are kept across processes (`store =
     /// "dir"`, relative to `phitex.toml`'s directory; DESIGN.md §7.9).
     pub store: Option<String>,
@@ -83,6 +86,7 @@ pub fn parse(text: &str) -> Result<Config, String> {
             "shell-escape" | "shell_escape" => c.shell_escape = Some(boolean()?),
             "viewer" => c.viewer = Some(string()?),
             "machine" => c.machine = Some(boolean()?),
+            "ssa" => c.ssa = Some(boolean()?),
             "store" => c.store = Some(string()?),
             "copy-pdf" | "copy_pdf" => {
                 c.copy_pdf = Some(match value {
@@ -216,9 +220,11 @@ mod tests {
                 viewer: Some("zathura".into()),
                 copy_pdf: None,
                 machine: None,
+                ssa: None,
                 store: None,
             }
         );
+        assert_eq!(parse("ssa = true").unwrap().ssa, Some(true));
         assert_eq!(
             parse("copy-pdf = true").unwrap().copy_pdf,
             Some(CopyPdf::Invocation)

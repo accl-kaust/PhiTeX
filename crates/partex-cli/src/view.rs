@@ -564,6 +564,12 @@ impl View {
         );
     }
 
+    /// Where the build running writes its PDF, before it is in (a pass
+    /// that settles shows it: [`View::settling`]).
+    pub fn set_pdf(&self, pdf: Option<PathBuf>) {
+        *lock(&self.shared.pdf_path) = pdf;
+    }
+
     /// A newer save stopped the build running: the browsers are told,
     /// and what it shipped of its pass is no longer shown.
     pub fn superseded(&self) {
