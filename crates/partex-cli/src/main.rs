@@ -1208,10 +1208,16 @@ fn report_workers(what: &str, t: &partex_core::ssa::SsaTracker) {
     }
     let s = core::mem::take(&mut *t.par.stats.borrow_mut());
     eprintln!(
-        "phitex: ssa {what}: workers {}: rounds {}, runs {}, taken {} ({} commands), \
-         not taken {} ({} commands), why {:?}",
+        "phitex: ssa {what}: workers {}: rounds {}, passes {}, first provisional page {}, \
+         ({:.1} ms waited, views {:.1} ms), runs {}, \
+         taken {} ({} commands), not taken {} ({} commands), why {:?}",
         t.par.workers.get(),
         s.rounds,
+        s.passes,
+        s.first_page_ns
+            .map_or_else(|| String::from("-"), |n| format!("{:.1} ms", n as f64 / 1e6)),
+        s.round_ns as f64 / 1e6,
+        s.fork_ns as f64 / 1e6,
         s.runs,
         s.taken,
         s.commands_taken,
@@ -1228,8 +1234,6 @@ fn ssa_tracker() -> partex_core::ssa::SsaTracker {
     // item 2; `=0`: every routine's, and the steps' own reads)
     let mut tracker = SsaTracker::new(Recorder::new());
     tracker.set_lean(!std::env::var("PARTEX_SSA_LEAN").is_ok_and(|v| v == "0"));
-    // (the names a run makes placed by name, DESIGN 3.9's allocators)
-    tracker.set_names_by_name(std::env::var("PARTEX_SSA_NAMES").is_ok_and(|v| v == "1"));
     tracker.cancel.set(cancel_after(0));
     // (a trip that ends fatally keeps the last complete trip's streams,
     // as an editor wants, not pdfTeX's cut `.aux`: DESIGN 3.7, "A trip
@@ -1245,6 +1249,21 @@ fn ssa_tracker() -> partex_core::ssa::SsaTracker {
         .find_map(|k| std::env::var(k).ok()?.parse::<usize>().ok())
         .unwrap_or(1);
     tracker.par.workers.set(workers.max(1));
+    // (the names a run makes placed by name, DESIGN 3.9's allocators:
+    // with workers, so that a run's names go where they go whatever names
+    // the runs before it made, DESIGN "Parallel builds"; `=0`, `=1`: off,
+    // on)
+    tracker.set_names_by_name(match std::env::var("PARTEX_SSA_NAMES").as_deref() {
+        Ok("1") => true,
+        Ok("0") => false,
+        _ => workers > 1,
+    });
+    // (and a cold build's paragraphs on them, `PHITEX_SSA_COLD=1`: exact,
+    // but not yet faster than a build in turn, DESIGN "Parallel builds")
+    tracker
+        .par
+        .cold
+        .set(std::env::var("PHITEX_SSA_COLD").is_ok_and(|v| v == "1"));
     // (`STEP,ROUND`: the fewest commands a step, and a round, ran for it
     // to go to workers; `0,0` sends every dirty step, a test's)
     if let Some((a, b)) = std::env::var("PHITEX_SSA_SPEC_MIN")
@@ -1402,6 +1421,7 @@ fn run_ssa(mut host: native::NativeHost, params: Params, command_line: &[u8]) ->
             r.commands_skipped,
         );
         report_routines("build 0", &r.routines);
+        report_workers("build 0", tex.tracker());
         if check {
             report_check(&r, &rec);
         }

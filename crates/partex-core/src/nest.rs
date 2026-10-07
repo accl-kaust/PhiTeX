@@ -84,6 +84,27 @@ pub(crate) fn field_version(l: &ListStateRecord, f: u8) -> u128 {
     }
 }
 
+/// Field `f` of level `src` into level `dst` ([`field_version`]'s
+/// fields): a worker's run's nest given the build's fields it did not
+/// write (`ssa/rebuild.rs`, `patch_nest`).
+pub(crate) fn copy_field(dst: &mut ListStateRecord, src: &ListStateRecord, f: u8) {
+    use crate::track::list::*;
+    match f {
+        LIST => dst.list = src.list.clone(),
+        MLIST => dst.mlist.clone_from(&src.mlist),
+        MODE => dst.mode = src.mode,
+        PG => dst.pg = src.pg,
+        ML => dst.ml = src.ml,
+        PREV_DEPTH => dst.prev_depth = src.prev_depth,
+        SPACE_FACTOR => dst.space_factor = src.space_factor,
+        CLANG => dst.clang = src.clang,
+        INCOMPLEAT => dst.incompleat.clone_from(&src.incompleat),
+        MIDDLE => dst.middle = src.middle,
+        LR_SAVE => dst.lr_save.clone_from(&src.lr_save),
+        _ => dst.lr_box.clone_from(&src.lr_box),
+    }
+}
+
 impl<H: Host, T: Tracker> Tex<H, T> {
     // §213: the fields of each level of the nest as values (DESIGN
     // 7.17.12, the `cur_list` row), by depth (`track::list::slot`): each

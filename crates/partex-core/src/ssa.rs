@@ -44,6 +44,8 @@ use crate::run::{CleanPoint, Step};
 use crate::tex::Tex;
 use crate::track::{Cell, LineCodes, Output, Row, Tracker, line_tokens};
 
+#[cfg(feature = "std")]
+mod cold;
 mod par;
 mod rebuild;
 mod tools;
@@ -3963,6 +3965,10 @@ pub fn run_applying<H: Host>(
     });
     // (the job's start is the first window's: DESIGN 4.3 item 1)
     tex.begin_window();
+    // (its chunks on workers: DESIGN 3.10, "Cold builds", `cold.rs`)
+    #[cfg(feature = "std")]
+    let mut cold = (!check && tex.tracker.par.cold.get() && rebuild::may_speculate(tex))
+        .then(cold::Cold::default);
     let mut step = tex.start(command_line);
     loop {
         match step {
@@ -3972,7 +3978,26 @@ pub fn run_applying<H: Host>(
                         rep.cancelled = true;
                         break;
                     }
+                    // (at the base, before its step ends: what the runs
+                    // would each make first, made in it, `Cold::prepare`)
+                    #[cfg(feature = "std")]
+                    let base = cold.as_mut().and_then(|c| {
+                        let plan = c.at_base(tex)?;
+                        c.prepare(tex, &plan);
+                        Some(plan)
+                    });
                     close_paragraph(tex, &mut open, &mut rep, Close::Step);
+                    // (the rest of the job built on workers and made exact:
+                    // its last step the job's end, or the build goes on
+                    // from the fold's last one)
+                    #[cfg(feature = "std")]
+                    if let Some(plan) = base
+                        && let Some(c) = cold.as_mut()
+                        && let Some(h) = c.build(tex, plan)
+                    {
+                        rep.history = h;
+                        break;
+                    }
                     open = Some(open_paragraph(tex, check, &mut rep, None));
                 }
                 step = tex.resume();

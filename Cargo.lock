@@ -186,6 +186,7 @@ dependencies = [
  "partex-ssa",
  "partex-trace",
  "phitex-ir",
+ "phitex-syntax",
 ]
 
 [[package]]

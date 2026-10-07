@@ -28,7 +28,7 @@ use partex_ssa::fold::StepId;
 
 #[cfg(feature = "std")]
 use super::Step;
-use super::{Fam, LineCodes, RecState, Recorder, Slot, SsaTracker, TexSsa};
+use super::{Fam, LineCodes, RecState, Recorder, SVal, Slot, SsaTracker, TexSsa};
 #[cfg(feature = "std")]
 use crate::tex::Tex;
 
@@ -134,6 +134,9 @@ pub struct Par {
     /// worker, and the fewest a round's steps ran together (`None`: the
     /// defaults; 0 and 0 send every dirty step, a test's).
     pub thresholds: core::cell::Cell<Option<(u64, u64)>>,
+    /// A cold build's chunks on the workers too (`cold.rs`; on unless
+    /// turned off).
+    pub cold: core::cell::Cell<bool>,
     /// The trackers of the workers, between rounds.
     pub(super) shells: RefCell<Vec<super::SsaTracker>>,
     /// What the rounds did: steps run on workers, taken at their commit,
@@ -157,6 +160,9 @@ pub struct ParStats {
     /// build's start) a worker first shipped a page.
     pub passes: u64,
     pub first_page_ns: Option<u64>,
+    /// Time making the workers' views, and waiting for the rounds.
+    pub fork_ns: u64,
+    pub round_ns: u64,
 }
 
 impl ParStats {
@@ -266,22 +272,131 @@ pub(super) struct Remap {
     loads: BTreeMap<u32, u32>,
     searches: BTreeMap<u32, u32>,
     words: BTreeMap<u32, u32>,
+    /// The strings the run made, `from..to`, shifted `by` ([`Remap::shift_strings`]).
+    strs: Option<(usize, usize, i64)>,
+    /// How many more names the build's extra region holds than the run's
+    /// did when it began ([`Remap::shift_names`]).
+    high: i64,
+}
+
+/// Relocatable strings (DESIGN "Parallel builds", relocation): a run that
+/// began with the pool's end at `from` and made strings `from..to` is
+/// taken where the build's pool ends elsewhere, its strings numbered from
+/// there. Where a run has a string's number, as a value it copies and
+/// compares, the number moves with the string: the pool's slots, its end
+/// (`str_ptr`, read where the run made its first string, written where it
+/// left it), a name's text (`text(p)`, whose version is its bytes'), a
+/// search's answer, and the input's file names. Anything that shows a
+/// string's number itself would be a read of it; TeX shows strings by
+/// their bytes.
+impl Remap {
+    /// The strings `from..to` the run made, numbered from `at` here.
+    pub(super) fn shift_strings(&mut self, from: usize, to: usize, at: usize) {
+        let by = i64::try_from(at).unwrap_or(0) - i64::try_from(from).unwrap_or(0);
+        self.strs = (by != 0).then_some((from, to.max(from), by));
+    }
+
+    /// With names placed by name (`SsaTracker::names_by_name`), the count
+    /// of the names in the hash's extra region (`hash_high`) is a count
+    /// only, read by nothing but its overflow: a run's moves by the names
+    /// the build holds there beyond those the run began with, `by`.
+    pub(super) fn shift_names(&mut self, by: i64) {
+        self.high = by;
+    }
+
+    /// String number `s`, as the build numbers it.
+    pub(super) fn string(&self, s: i64) -> i64 {
+        match self.strs {
+            Some((from, to, by)) if usize::try_from(s).is_ok_and(|s| s >= from && s < to) => s + by,
+            _ => s,
+        }
+    }
+
+    /// The pool's end `s` (`str_ptr`), as the build's: one of the run's,
+    /// `from..=to`, moves.
+    fn pool_end(&self, s: i64) -> i64 {
+        match self.strs {
+            Some((from, to, by)) if usize::try_from(s).is_ok_and(|s| s >= from && s <= to) => s + by,
+            _ => s,
+        }
+    }
+
+    /// The version `v` a read of `a` found, as the build's strings give it.
+    pub(super) fn read_version(&self, a: &Slot, v: Version) -> Version {
+        let Some((from, to, _)) = self.strs else {
+            return v;
+        };
+        match a.0 {
+            Fam::Alloc if a.1 == i64::from(crate::track::scalar::STR_TOP) => {
+                let n = i64::try_from(v.0 >> 1).unwrap_or(0);
+                let m = usize::try_from(self.pool_end(n)).unwrap_or(0);
+                Version(crate::track::scalar_version(m) | (v.0 & 1))
+            }
+            Fam::Search => (from..to)
+                .find(|&s| Version::of(&i32::try_from(s).unwrap_or(0)) == v)
+                .map_or(v, |s| {
+                    let n = self.string(i64::try_from(s).unwrap_or(0));
+                    Version::of(&i32::try_from(n).unwrap_or(0))
+                }),
+            _ => v,
+        }
+    }
+
+    /// The value `v` a run's write of `a` left, as the build's strings
+    /// give it: whether it moved.
+    fn write_value(&self, a: &Slot, v: &mut SVal) -> bool {
+        let Some(&super::SValue::Int(x)) = v.1.as_deref() else {
+            return false;
+        };
+        let x = i64::from(x);
+        if a.0 == Fam::Alloc && a.1 == i64::from(crate::track::scalar::HASH_HIGH) {
+            if self.high == 0 {
+                return false;
+            }
+            let n = i32::try_from(x + self.high).unwrap_or(0);
+            *v = SVal(
+                Version(crate::track::scalar_version_i32(n) | (v.0.0 & 1)),
+                Some(Arc::new(super::SValue::Int(n))),
+            );
+            return true;
+        }
+        if self.strs.is_none() {
+            return false;
+        }
+        let top = a.0 == Fam::Alloc && a.1 == i64::from(crate::track::scalar::STR_TOP);
+        let n = if top { self.pool_end(x) } else { self.string(x) };
+        if n == x {
+            return false;
+        }
+        let n32 = i32::try_from(n).unwrap_or(0);
+        match a.0 {
+            Fam::Alloc if top => {
+                let m = usize::try_from(n).unwrap_or(0);
+                *v = SVal(
+                    Version(crate::track::scalar_version(m) | (v.0.0 & 1)),
+                    Some(Arc::new(super::SValue::Int(n32))),
+                );
+                true
+            }
+            // (a name's text: its version is its bytes', the same)
+            Fam::Hash => {
+                *v = SVal(v.0, Some(Arc::new(super::SValue::Int(n32))));
+                true
+            }
+            _ => false,
+        }
+    }
 }
 
 impl Remap {
-    /// The worker's tables `w` (numbered from `lens`) in the build's `st`;
-    /// `Err` if the worker loaded a file the build has never loaded.
-    pub(super) fn new(
-        w: &RecState,
-        lens: BaseLens,
-        st: &mut RecState,
-    ) -> Result<Remap, &'static str> {
+    /// The worker's tables `w` (numbered from `lens`) in the build's `st`.
+    pub(super) fn new(w: &RecState, lens: BaseLens, st: &mut RecState) -> Remap {
         let id = |from: usize, i: usize| u32::try_from(from + i).unwrap_or(u32::MAX);
         let mut m = Remap::default();
-        for (i, (name, ..)) in w.loads.iter().enumerate() {
-            let Some(b) = st.load_ix(name) else {
-                return Err("a file new to the build");
-            };
+        // (a file new to the build: its load made, at the version and as
+        // the kind the worker found)
+        for (i, (name, v, kind)) in w.loads.iter().enumerate() {
+            let b = st.load_id(name, *v, *kind).0;
             m.loads.insert(id(lens.loads, i), b);
         }
         for (i, c) in w.codes.iter().enumerate() {
@@ -301,7 +416,7 @@ impl Remap {
         m.loads.retain(|a, b| a != b);
         m.searches.retain(|a, b| a != b);
         m.words.retain(|a, b| a != b);
-        Ok(m)
+        m
     }
 
     /// Whether it renames nothing.
@@ -311,6 +426,8 @@ impl Remap {
             && self.loads.is_empty()
             && self.searches.is_empty()
             && self.words.is_empty()
+            && self.strs.is_none()
+            && self.high == 0
     }
 
     /// The renaming's version: a record renamed is the same record only
@@ -322,6 +439,8 @@ impl Remap {
             &self.loads,
             &self.searches,
             &self.words,
+            self.strs,
+            self.high,
         ))
         .0
     }
@@ -349,6 +468,7 @@ impl Remap {
             Fam::Load => by(&self.loads),
             Fam::Search => by(&self.searches),
             Fam::HyphWord => by(&self.words),
+            Fam::Pool => Slot(a.0, self.string(a.1)),
             Fam::Source => {
                 let c = u32::try_from((a.1 >> 32) & 0xff_ffff).unwrap_or(0);
                 match self.codes.get(&c) {
@@ -387,13 +507,21 @@ impl Remap {
             let mut moved = r.items.iter().any(|it| {
                 matches!(it, partex_ssa::runtime::Item::Call(c) if renamed.get(*c as usize).copied().unwrap_or(false))
             });
-            for (l, _) in &mut r.reads {
+            for (l, v) in &mut r.reads {
                 moved |= loc(l);
+                if let partex_ssa::Loc::State(a) = l {
+                    let w = self.read_version(a, *v);
+                    moved |= w != *v;
+                    *v = w;
+                }
             }
-            for (a, _) in &mut r.writes {
+            for (a, v) in &mut r.writes {
                 let b = self.slot(*a);
                 moved |= b != *a;
                 *a = b;
+                if let Some(v) = v {
+                    moved |= self.write_value(a, v);
+                }
             }
             for it in &mut r.items {
                 match it {
@@ -415,11 +543,14 @@ impl Remap {
             }
             renamed.push(moved);
         }
-        for (h, a) in &mut x.reads {
+        for (i, (h, a)) in x.reads.iter_mut().enumerate() {
             let b = self.slot(*a);
             if b != *a {
                 *a = b;
                 *h = partex_ssa::hash::hash64(a);
+            }
+            if let Some(v) = x.vers.get_mut(i) {
+                *v = self.read_version(a, *v);
             }
         }
         for a in &mut x.skip {
@@ -662,20 +793,42 @@ pub(super) fn fonts_at(t: &SsaTracker, rr: &Recorder) -> Vec<FontAt> {
 
 /// Whether the build's answers to what a worker's run asked of it (the
 /// fonts' makers, the names' makers) are still the round's.
-pub(super) fn answers_hold(t: &SsaTracker, rr: &Recorder, w: &Worker) -> bool {
-    if w.asked_fonts.get() && fonts_at(t, rr) != *w.fonts {
-        return false;
+/// The fonts are compared by what a run asks of them, for the step at
+/// `key` now and the run's then: whether each is visible
+/// ([`Worker::font_visible`]) and its place among those made: keys are
+/// made again as steps go into the fold (`Fold::renumber`), in the same
+/// order.
+pub(super) fn answers_hold(t: &SsaTracker, rr: &Recorder, w: &Worker, key: u64) -> bool {
+    if w.asked_fonts.get() {
+        let now = fonts_at(t, rr);
+        let seen = |x: &FontAt, k: u64| x.is_none_or(|(m, _, live)| live && m < k);
+        let place = |x: &FontAt| x.map(|(_, n, _)| n);
+        if now.len() != w.fonts.len()
+            || now
+                .iter()
+                .zip(w.fonts.iter())
+                .any(|(a, b)| seen(a, key) != seen(b, w.key.get()) || place(a) != place(b))
+        {
+            return false;
+        }
     }
+    // (a name's maker, by what `SsaTracker::name_defined` does with it:
+    // the name it makes where a step after the one asking entered it)
     let at = t.made_at.borrow();
     let made = t.made.borrow();
     w.asked_made.borrow().iter().all(|&p| {
         let Ok(i) = usize::try_from(p) else {
             return true;
         };
-        let now = at.get(i).copied().unwrap_or(0);
-        let then = w.made_at.get(i).copied().unwrap_or(0);
-        let maker = |m: &[(u64, u32)], k: u32| (k > 0).then(|| m.get(k as usize - 1).copied());
-        (now > 0) == (then > 0) && maker(&made, now) == maker(&w.made, then)
+        let makes = |at: &[u32], made: &[(u64, u32)], k: u64| {
+            at.get(i)
+                .copied()
+                .filter(|&m| m > 0)
+                .and_then(|m| made.get(m as usize - 1))
+                .filter(|&&(mk, _)| k != 0 && k < mk)
+                .map(|&(_, id)| id)
+        };
+        makes(&at, &made, key) == makes(&w.made_at, &w.made, w.key.get())
     })
 }
 
@@ -765,9 +918,6 @@ fn run_on(
     tex.thaw();
     super::rebuild::put(tex, vals);
     input.set(tex);
-    // (the meanings as the run begins, shared: a meaning whose class it
-    // read and which it wrote is checked as it found it)
-    let entry = tex.eqtb.clone();
     tex.at_checkpoint = true;
     if let Some(e) = tex.effects.as_mut() {
         e.clear();
@@ -776,6 +926,16 @@ fn run_on(
     for f in &mut tex.write_file {
         f.buf.clear();
     }
+    run_here(tex, budget)
+}
+
+/// A step run on a worker's view where its input and state now are,
+/// ended at the clean point that ends it ([`run_on`], [`run_chunk`]).
+#[cfg(feature = "std")]
+fn run_here(tex: &mut Tex<WorkerHost, SsaTracker>, budget: u64) -> Result<Ran, &'static str> {
+    // (the meanings as the run begins, shared: a meaning whose class it
+    // read and which it wrote is checked as it found it)
+    let entry = tex.eqtb.clone();
     let (str_ptr, hash_used, hash_high) = (tex.str_ptr, tex.hash_used, tex.hash_high);
     let g0 = tex.tracker.rec.borrow().st.generation;
     let c0 = tex.commands();
@@ -863,13 +1023,25 @@ pub(super) struct Job {
     pub(super) budget: u64,
 }
 
-/// A job's end: its step, the worker's view (none if the run panicked),
-/// and its run, or why it cannot be taken.
+/// A job's end: its step, the worker's tracker (its tables, its
+/// answers: none if the run panicked) and its host's events, and its
+/// run, or why it cannot be taken. The view itself is let go on the
+/// worker's thread.
 #[cfg(feature = "std")]
 pub(super) struct Done {
     pub(super) j: StepId,
-    pub(super) tex: Option<alloc::boxed::Box<Tex<WorkerHost, SsaTracker>>>,
+    pub(super) tracker: Option<alloc::boxed::Box<SsaTracker>>,
+    pub(super) events: Vec<HostEvent>,
     pub(super) ran: Result<Ran, &'static str>,
+}
+
+/// A worker's view let go, its tracker and its host's events kept.
+#[cfg(feature = "std")]
+fn let_go(mut tex: Tex<WorkerHost, SsaTracker>) -> (alloc::boxed::Box<SsaTracker>, Vec<HostEvent>) {
+    let t = core::mem::replace(&mut tex.tracker, SsaTracker::new(Recorder::new()));
+    let events = core::mem::take(&mut tex.host.events);
+    drop(tex);
+    (alloc::boxed::Box::new(t), events)
 }
 
 /// What a worker's run asks of the build's host, which the build's thread
@@ -882,6 +1054,9 @@ pub(super) enum Ask {
     Cache(u128, crate::host::Memo),
     OutputName(Vec<u8>, crate::host::FileKind),
     WrittenName(Vec<u8>),
+    /// A page a cold build's chunk shipped, shown provisionally (DESIGN
+    /// 4.8's viewer): its step's commit shows it again, as built.
+    Shipped(Option<usize>, crate::pagepdf::ShippedStream),
 }
 
 /// The build's answer to an [`Ask`].
@@ -897,7 +1072,7 @@ pub(super) enum Reply {
 #[cfg(feature = "std")]
 pub(super) enum Msg {
     Ask(usize, Ask),
-    Done(usize, Done),
+    Done(usize, alloc::boxed::Box<dyn core::any::Any + Send>),
 }
 
 /// A worker's host: files read and streams compressed by the build's
@@ -916,6 +1091,8 @@ pub(super) struct WorkerHost {
     pub(super) commands: bool,
     pub(super) events: Vec<HostEvent>,
     pub(super) tainted: Option<&'static str>,
+    /// A cold build's chunk: its pages shown at once, provisionally.
+    pub(super) provisional: bool,
 }
 
 #[cfg(feature = "std")]
@@ -1034,6 +1211,11 @@ impl crate::host::Host for WorkerHost {
         self.streams
     }
     fn stream_shipped(&mut self, page: Option<usize>, stream: crate::pagepdf::ShippedStream) {
+        if self.provisional {
+            let _ = self
+                .ask
+                .send(Msg::Ask(self.job, Ask::Shipped(page, stream.clone())));
+        }
         self.events.push(HostEvent::Stream(page, stream));
     }
     fn deflate(&mut self, level: i32, data: &[u8]) -> Option<Vec<u8>> {
@@ -1105,6 +1287,10 @@ fn serve<H: crate::host::Host>(host: &mut H, a: Ask) -> Option<Reply> {
         }
         Ask::OutputName(n, k) => Reply::Name(host.output_name(&n, k)),
         Ask::WrittenName(n) => Reply::Name(host.written_name(&n)),
+        Ask::Shipped(p, s) => {
+            host.stream_shipped(p, s);
+            return None;
+        }
     })
 }
 
@@ -1149,10 +1335,65 @@ pub(super) fn round<H: crate::host::Host>(
     rx: &std::sync::mpsc::Receiver<Msg>,
     replies: &[std::sync::mpsc::Sender<Reply>],
 ) -> Vec<Option<Done>> {
+    let jobs = jobs.into_iter().map(|j| (j.idx, j)).collect();
+    run_threads(
+        host,
+        jobs,
+        threads,
+        tx,
+        rx,
+        replies,
+        |job: Job| {
+            let Job {
+                j,
+                mut tex,
+                vals,
+                input,
+                budget,
+                ..
+            } = job;
+            let ran = run_on(&mut tex, &vals, &input, budget);
+            let (tracker, events) = let_go(tex);
+            Done {
+                j,
+                tracker: Some(tracker),
+                events,
+                ran,
+            }
+        },
+        |job: &Job| (job.j, ()),
+        |(j, ()): (StepId, ())| Done {
+            j,
+            tracker: None,
+            events: Vec::new(),
+            ran: Err("a panic"),
+        },
+        &mut || {},
+    )
+}
+
+/// Run `jobs` (each with its place in the round) on `threads` threads,
+/// each by `run`, the build's thread answering their asks of its host
+/// meanwhile; each job's end in the jobs' order, `lost` of what `keep`
+/// kept of a job whose run panicked.
+#[cfg(feature = "std")]
+#[allow(clippy::too_many_arguments)]
+fn run_threads<H: crate::host::Host, J: Send, D: Send + 'static, K: Send>(
+    host: &mut H,
+    jobs: Vec<(usize, J)>,
+    threads: usize,
+    tx: std::sync::mpsc::Sender<Msg>,
+    rx: &std::sync::mpsc::Receiver<Msg>,
+    replies: &[std::sync::mpsc::Sender<Reply>],
+    run: fn(J) -> D,
+    keep: fn(&J) -> K,
+    lost: fn(K) -> D,
+    on_ship: &mut dyn FnMut(),
+) -> Vec<Option<D>> {
     let n = jobs.len();
     quiet_workers();
-    let mut out: Vec<Option<Done>> = (0..n).map(|_| None).collect();
-    let queue = std::sync::Mutex::new(jobs.into_iter().rev().collect::<Vec<Job>>());
+    let mut out: Vec<Option<D>> = (0..n).map(|_| None).collect();
+    let queue = std::sync::Mutex::new(jobs.into_iter().rev().collect::<Vec<(usize, J)>>());
     std::thread::scope(|sc| {
         let mut started = 0usize;
         for _ in 0..threads.clamp(1, n.max(1)) {
@@ -1167,30 +1408,11 @@ pub(super) fn round<H: crate::host::Host>(
                             .lock()
                             .unwrap_or_else(std::sync::PoisonError::into_inner)
                             .pop();
-                        let Some(job) = job else { break };
-                        let (idx, j) = (job.idx, job.j);
-                        let d = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                            let Job {
-                                j,
-                                mut tex,
-                                vals,
-                                input,
-                                budget,
-                                ..
-                            } = job;
-                            let ran = run_on(&mut tex, &vals, &input, budget);
-                            Done {
-                                j,
-                                tex: Some(alloc::boxed::Box::new(tex)),
-                                ran,
-                            }
-                        }))
-                        .unwrap_or(Done {
-                            j,
-                            tex: None,
-                            ran: Err("a panic"),
-                        });
-                        if tx.send(Msg::Done(idx, d)).is_err() {
+                        let Some((idx, job)) = job else { break };
+                        let k = keep(&job);
+                        let d = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(job)))
+                            .unwrap_or_else(|_| lost(k));
+                        if tx.send(Msg::Done(idx, alloc::boxed::Box::new(d))).is_err() {
                             break;
                         }
                     }
@@ -1204,17 +1426,13 @@ pub(super) fn round<H: crate::host::Host>(
         let mut left = n;
         if started == 0 {
             // (no thread: each step runs at its turn)
-            for job in queue
+            for (idx, job) in queue
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .drain(..)
             {
-                if let Some(o) = out.get_mut(job.idx) {
-                    *o = Some(Done {
-                        j: job.j,
-                        tex: Some(alloc::boxed::Box::new(job.tex)),
-                        ran: Err("no thread"),
-                    });
+                if let Some(o) = out.get_mut(idx) {
+                    *o = Some(lost(keep(&job)));
                 }
             }
             left = 0;
@@ -1222,6 +1440,9 @@ pub(super) fn round<H: crate::host::Host>(
         while left > 0 {
             match rx.recv() {
                 Ok(Msg::Ask(i, a)) => {
+                    if matches!(a, Ask::Shipped(..)) {
+                        on_ship();
+                    }
                     if let Some(r) = serve(host, a)
                         && let Some(s) = replies.get(i)
                     {
@@ -1229,8 +1450,8 @@ pub(super) fn round<H: crate::host::Host>(
                     }
                 }
                 Ok(Msg::Done(i, d)) => {
-                    if let Some(o) = out.get_mut(i) {
-                        *o = Some(d);
+                    if let (Some(o), Ok(d)) = (out.get_mut(i), d.downcast::<D>()) {
+                        *o = Some(*d);
                     }
                     left -= 1;
                 }
@@ -1239,6 +1460,210 @@ pub(super) fn round<H: crate::host::Host>(
         }
     });
     out
+}
+
+/// A step of a cold build's chunk, run on a worker (`cold.rs`): where it
+/// began, its run, its salt, and what its tracker and its host kept of
+/// it (the names it entered, the loads it found otherwise, the files it
+/// opened for writing, the host's events).
+#[cfg(feature = "std")]
+pub(super) struct ChunkStep {
+    pub(super) start: super::rebuild::InputState,
+    /// The count registers where it began.
+    pub(super) counts: Vec<i32>,
+    pub(super) ran: Ran,
+    pub(super) salt: u32,
+    pub(super) made: Vec<(i32, u32)>,
+    pub(super) load_sets: BTreeMap<u32, (Version, crate::host::FileKind)>,
+    pub(super) written: BTreeSet<Vec<u8>>,
+    pub(super) events: Vec<HostEvent>,
+}
+
+/// A cold build's chunk for a worker (`cold.rs`): the worker's view, the
+/// count registers set on it (eqtb's place, the value), where it begins,
+/// the main file and its line past which a step's end ends the chunk,
+/// the build's counter of salts, and the most steps it runs.
+#[cfg(feature = "std")]
+pub(super) struct ChunkJob {
+    pub(super) tex: Tex<WorkerHost, SsaTracker>,
+    pub(super) fix: Vec<(i32, i32)>,
+    pub(super) input: super::rebuild::InputState,
+    pub(super) main: Arc<[u8]>,
+    pub(super) stop: i32,
+    pub(super) salts: Arc<core::sync::atomic::AtomicU32>,
+    pub(super) max: usize,
+    /// The base's last font: those after it the run loaded.
+    pub(super) fonts_from: i32,
+}
+
+/// A chunk's run: the worker's tracker (none if it panicked), its steps
+/// in order, why it stopped before its end (if it did), and the count
+/// registers where it began and where it stopped.
+#[cfg(feature = "std")]
+pub(super) struct ChunkDone {
+    pub(super) tracker: Option<alloc::boxed::Box<SsaTracker>>,
+    pub(super) steps: Vec<ChunkStep>,
+    pub(super) why: Option<&'static str>,
+    pub(super) entry: Vec<i32>,
+    pub(super) exit: Vec<i32>,
+    /// The TFM fonts it loaded, if a font it loaded stopped it: each one's
+    /// name, area and size (`Tex::preload_font`).
+    pub(super) fonts: Vec<(Vec<u8>, Vec<u8>, i32)>,
+}
+
+/// The count registers 0 to 255 of `tex`.
+pub(super) fn counts<H: crate::host::Host, T: crate::track::Tracker>(tex: &Tex<H, T>) -> Vec<i32> {
+    (0..256)
+        .map(|r| tex.peek_eqtb(crate::web::COUNT_BASE + r).int())
+        .collect()
+}
+
+/// Run a chunk (DESIGN 3.10, "Cold builds"): from its start, step after
+/// step, each exported, until a step ends at or past the chunk's last
+/// line, the job ends, or a run cannot be taken.
+#[cfg(feature = "std")]
+fn run_chunk(job: ChunkJob) -> ChunkDone {
+    let ChunkJob {
+        mut tex,
+        fix,
+        input,
+        main,
+        stop,
+        salts,
+        max,
+        fonts_from,
+    } = job;
+    tex.thaw();
+    for (p, v) in fix {
+        let Ok(i) = usize::try_from(p) else { continue };
+        let mut w = tex.eqtb[i];
+        w.set_int(v);
+        tex.eqtb[i] = w;
+        tex.tracker
+            .rec
+            .borrow_mut()
+            .st
+            .vers
+            .set_stale(Slot(Fam::Eqtb, i64::from(p)));
+    }
+    input.set(&mut tex);
+    tex.at_checkpoint = true;
+    if let Some(e) = tex.effects.as_mut() {
+        e.clear();
+    }
+    tex.log_file.buf.clear();
+    for f in &mut tex.write_file {
+        f.buf.clear();
+    }
+    let entry = counts(&tex);
+    let mut at = entry.clone();
+    let mut steps = Vec::new();
+    let mut start = input;
+    let mut why = None;
+    while steps.len() < max {
+        let salt = 0x8000_0000 | (salts.fetch_add(1, Ordering::Relaxed) & 0x7fff_ffff);
+        if let Some(w) = tex.tracker.worker.as_deref() {
+            w.salt.set(salt);
+        }
+        match run_here(&mut tex, u64::MAX >> 2) {
+            Ok(ran) => {
+                let end = ran.end.clone();
+                let made = tex
+                    .tracker
+                    .worker
+                    .as_deref()
+                    .map(|w| core::mem::take(&mut *w.made_names.borrow_mut()))
+                    .unwrap_or_default();
+                let (load_sets, written) = {
+                    let mut r = tex.tracker.rec.borrow_mut();
+                    (
+                        core::mem::take(&mut r.st.load_sets),
+                        r.st.written.clone(),
+                    )
+                };
+                let events = core::mem::take(&mut tex.host.events);
+                steps.push(ChunkStep {
+                    start,
+                    counts: at,
+                    ran,
+                    salt,
+                    made,
+                    load_sets,
+                    written,
+                    events,
+                });
+                if end.finished() || end.ends_line(&main, stop) {
+                    break;
+                }
+                start = end;
+                at = counts(&tex);
+            }
+            Err(e) => {
+                why = Some(e);
+                break;
+            }
+        }
+    }
+    let exit = counts(&tex);
+    // (the fonts it loaded past the base's, for the build to load first)
+    let fonts = if why == Some("a font loaded") && !tex.unicode {
+        (fonts_from + 1..=tex.font_ptr)
+            .map(|f| {
+                let i = crate::fonts::fx(f);
+                let bytes = |s: i32| tex.str_bytes(usize::try_from(s).unwrap_or(0)).to_vec();
+                (
+                    bytes(tex.fonts.name[i]),
+                    bytes(tex.fonts.area[i]),
+                    tex.fonts.get(f).size,
+                )
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let (tracker, _) = let_go(tex);
+    ChunkDone {
+        tracker: Some(tracker),
+        steps,
+        why,
+        entry,
+        exit,
+        fonts,
+    }
+}
+
+/// Run a cold build's chunks on `threads` threads ([`run_threads`]),
+/// their pages shown provisionally as they ship (`on_ship` told).
+#[cfg(feature = "std")]
+pub(super) fn chunk_round<H: crate::host::Host>(
+    host: &mut H,
+    jobs: Vec<ChunkJob>,
+    threads: usize,
+    tx: std::sync::mpsc::Sender<Msg>,
+    rx: &std::sync::mpsc::Receiver<Msg>,
+    replies: &[std::sync::mpsc::Sender<Reply>],
+    on_ship: &mut dyn FnMut(),
+) -> Vec<Option<ChunkDone>> {
+    let jobs = jobs.into_iter().enumerate().collect();
+    run_threads(
+        host,
+        jobs,
+        threads,
+        tx,
+        rx,
+        replies,
+        run_chunk,
+        |_: &ChunkJob| (),
+        |()| ChunkDone {
+            tracker: None,
+            steps: Vec::new(),
+            why: Some("a panic"),
+            entry: Vec::new(),
+            exit: Vec::new(),
+            fonts: Vec::new(),
+        },
+        on_ship,
+    )
 }
 
 /// Replay a committed run's host events on the build's host.
