@@ -183,7 +183,9 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         let how = Absorb::Arg { par_ends };
         let mut k = loc;
         while let Some(&t) = toks.get(k) {
-            if t == delim {
+            // (a tagged digit is compared as its digit, token by token:
+            // `reloc.rs`)
+            if t == delim || is_tagged(t) {
                 break;
             }
             if t >= CS_TOKEN_FLAG {
@@ -224,7 +226,9 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         let mut k = loc;
         while let Some(&t) = toks.get(k) {
             match tok_cmd(t) {
-                _ if t >= CS_TOKEN_FLAG => break,
+                // (a name made of a tagged digit observes it, token by
+                // token: `reloc.rs`)
+                _ if t >= CS_TOKEN_FLAG || is_tagged(t) => break,
                 LEFT_BRACE => align += 1,
                 RIGHT_BRACE => align -= 1,
                 OUT_PARAM => break,

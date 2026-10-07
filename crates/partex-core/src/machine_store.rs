@@ -68,6 +68,8 @@ partex_engine::persist_enum!(MCell {
     NumState,
     PdfWord(a0),
     Marks,
+    Origin(a0),
+    IntCmp(a0, a1, a2, a3),
 });
 
 partex_engine::persist_struct!(PageValue { builder, list });
@@ -344,6 +346,7 @@ fn save_trace<H: StoreHost + 'static>(t: &Trace<TexMachine<H>>, s: &mut Saver, o
     t.allocs.save(s);
     t.cost.save(s);
     t.born.save(s);
+    t.moved.save(s);
 }
 
 fn load_trace<H: StoreHost + 'static>(l: &mut Loader, cx: &Cx<H>) -> Option<Trace<TexMachine<H>>> {
@@ -371,6 +374,7 @@ fn load_trace<H: StoreHost + 'static>(l: &mut Loader, cx: &Cx<H>) -> Option<Trac
         allocs: Persist::load(l)?,
         cost: Persist::load(l)?,
         born: Persist::load(l)?,
+        moved: Persist::load(l)?,
     })
 }
 
@@ -802,6 +806,8 @@ pub fn census<H: StoreHost + 'static>(b: &Build<TexMachine<H>>) -> BTreeMap<&'st
                 MCell::FinalNum(_) => "g.final num",
                 MCell::OfFinal(_) => "g.of final",
                 MCell::NumState => "g.num state",
+                MCell::Origin(_) => "g.origin",
+                MCell::IntCmp(..) => "g.int cmp",
                 MCell::Sealed(..) => "g.sealed",
                 MCell::Written(_) => "g.written",
                 MCell::Eqtb(p) if *p >= crate::xregs::EXT_BASE => "g.xreg",
@@ -997,6 +1003,8 @@ mod tests {
             MCell::FinalNum(7),
             MCell::OfFinal(8),
             MCell::NumState,
+            MCell::Origin(187),
+            MCell::IntCmp(187, 5, b'<', 99_999),
             MCell::Sealed(1, 2),
             MCell::Written(4),
             MCell::Eqtb(5),
@@ -1028,6 +1036,8 @@ mod tests {
                 MCell::FinalNum(_) => 22,
                 MCell::OfFinal(_) => 23,
                 MCell::NumState => 24,
+                MCell::Origin(_) => 27,
+                MCell::IntCmp(..) => 28,
                 MCell::Sealed(..) => 5,
                 MCell::Written(_) => 6,
                 // (a register above 255 is an eqtb cell past eqtb)
@@ -1045,7 +1055,7 @@ mod tests {
                 MCell::FontOrder => 18,
             });
         }
-        assert_eq!(kinds.len(), 27, "a sample of every kind of cell");
+        assert_eq!(kinds.len(), 29, "a sample of every kind of cell");
         v
     }
 
@@ -1227,6 +1237,7 @@ mod tests {
             allocs: 4,
             cost: 5,
             born: 1,
+            moved: 0,
         };
         let changed = cells.iter().map(|c| (c.clone(), 1)).collect();
         Build::from_parts(

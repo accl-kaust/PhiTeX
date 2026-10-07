@@ -491,7 +491,10 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                         break;
                     }
                 } else if self.cur_cmd != SPACER || !self.preamble_list.is_empty() {
-                    self.preamble_list.push(self.cur_tok);
+                    {
+                        let t = self.take_raw_tok();
+                        self.preamble_list.push(t);
+                    }
                 }
             }
             let u = core::mem::take(&mut self.preamble_list);
@@ -518,7 +521,10 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                     self.error()?;
                     continue;
                 }
-                self.preamble_list.push(self.cur_tok);
+                {
+                    let t = self.take_raw_tok();
+                    self.preamble_list.push(t);
+                }
             }
             self.preamble_list.push(END_TEMPLATE_TOKEN); // put \endtemplate at the end
             let v = core::mem::take(&mut self.preamble_list);

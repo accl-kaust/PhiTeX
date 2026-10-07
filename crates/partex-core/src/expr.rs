@@ -8,6 +8,7 @@
 //! expression an arithmetic overflow (zero, after an error).
 
 use crate::pdf::PdfLast;
+use crate::reloc::NO_ORIGIN;
 use alloc::vec::Vec;
 
 use partex_engine::node::{GlueSpec, Node, Order};
@@ -128,9 +129,24 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         };
         let mut stack: Vec<Frame> = Vec::new();
         let (mut r, mut s, mut e, mut t, mut n);
+        // (relocatable numbers, `reloc.rs`: the origin of the expression
+        // and of its current term while each is a count register plus
+        // constants; anything else done with one observes it)
+        let tags = self.tags_on;
+        let (mut e_org, mut t_org) = (NO_ORIGIN, NO_ORIGIN);
+        // (and the value of the origin's number in each)
+        let (mut e_val, mut t_val, mut f_val) = (0, 0, 0);
+        let observe = |t: &Self, o: i32| {
+            if o != NO_ORIGIN {
+                t.observe_origin(o);
+            }
+        };
         let e = 'done: loop {
             // restart:
             (r, s, e, t, n) = (Op::None, Op::None, zero(l), zero(l), 0);
+            observe(self, e_org);
+            observe(self, t_org);
+            (e_org, t_org) = (NO_ORIGIN, NO_ORIGIN);
             'term: loop {
                 // continue: scan a factor `f` of type `o`, or start a
                 // subexpression
@@ -149,7 +165,13 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                     continue 'done;
                 }
                 self.back_input()?;
+                let mut f_org = NO_ORIGIN;
                 let mut f = match o {
+                    INT_VAL if tags && stack.is_empty() && l == INT_VAL => {
+                        f_org = self.scan_int_origin()?;
+                        f_val = self.cur_val;
+                        Val::N(self.cur_val)
+                    }
                     INT_VAL => {
                         self.scan_int()?;
                         Val::N(self.cur_val)
@@ -216,6 +238,16 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                     // evaluate the current term
                     let mut overflow = false;
                     let err = &mut overflow;
+                    if s == Op::None {
+                        t_org = f_org;
+                        t_val = f_val;
+                    } else {
+                        // (a factor, or a term multiplied or divided)
+                        observe(self, f_org);
+                        observe(self, t_org);
+                        t_org = NO_ORIGIN;
+                    }
+                    f_org = NO_ORIGIN;
                     match s {
                         Op::None => {
                             t = match f {
@@ -271,9 +303,26 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                     self.arith_error |= overflow;
                     if o > Op::Sub {
                         s = o;
+                        if t_org != NO_ORIGIN {
+                            // (the term is multiplied or divided next)
+                            observe(self, t_org);
+                            t_org = NO_ORIGIN;
+                        }
                     } else {
                         // evaluate the current expression
                         s = Op::None;
+                        match (r, t_org) {
+                            (_, NO_ORIGIN) => {}
+                            (Op::None, o) => (e_org, e_val) = (o, t_val),
+                            (Op::Add, o) if e_org == NO_ORIGIN => (e_org, e_val) = (o, t_val),
+                            (_, o) => {
+                                // (subtracted, or a second origin)
+                                observe(self, o);
+                                observe(self, e_org);
+                                e_org = NO_ORIGIN;
+                            }
+                        }
+                        t_org = NO_ORIGIN;
                         let neg = r == Op::Sub;
                         let mut overflow = false;
                         let err = &mut overflow;
@@ -311,6 +360,9 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                     let Some(p) = stack.pop() else {
                         break 'done e;
                     };
+                    // (a subexpression's numbers were observed inside it)
+                    observe(self, e_org);
+                    e_org = NO_ORIGIN;
                     // pop the expression stack and `goto found`
                     f = e;
                     (l, s, r, e, t, n) = (p.level, p.s, p.r, p.e, p.t, p.n);
@@ -318,6 +370,17 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             }
         };
         self.expand_depth_count -= 1;
+        // (the expression's origin, for `scan_something_internal`)
+        if l == INT_VAL && !b {
+            if e_org != NO_ORIGIN
+                && let Val::N(v) = e
+            {
+                self.note_shift(e_org, e_val, v.wrapping_sub(e_val));
+            }
+            self.expr_origin = e_org;
+        } else {
+            observe(self, e_org);
+        }
         let mut e = e;
         if b {
             self.print_err(b"Arithmetic overflow");

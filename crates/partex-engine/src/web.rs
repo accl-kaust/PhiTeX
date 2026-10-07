@@ -2546,9 +2546,68 @@ pub const fn tok_cmd(t: i32) -> i32 {
     t >> CHAR_BITS
 }
 
-/// The character of a character token (`t < CS_TOKEN_FLAG`).
+/// The character of a character token (`t < CS_TOKEN_FLAG`): a tagged
+/// digit's digit ([`TAG_BASE`]).
 #[inline]
 #[must_use]
 pub const fn tok_chr(t: i32) -> i32 {
-    t & CHAR_MASK
+    let c = t & CHAR_MASK;
+    if c >= TAG_BASE {
+        b'0' as i32 + (c & 15)
+    } else {
+        c
+    }
+}
+
+/// Relocatable numbers (DESIGN 4.1): a digit that `\the` or `\number`
+/// made of a count register's value is a *tagged* token, a character
+/// token of category 12 whose character code is past Unicode: from
+/// `TAG_BASE`, the register's number (its *origin*) times 32, 16 on the
+/// number's first digit, and the digit. [`tok_chr`] gives the digit, so
+/// TeX reads a digit; what the job does with it decides whether the
+/// number may be relocated (`reloc.rs`).
+pub const TAG_BASE: i32 = 0x11_0000;
+/// The origins a tag can name (registers `0..TAG_ORIGINS`).
+pub const TAG_ORIGINS: i32 = (MAX_CHAR_VAL - TAG_BASE) >> 5;
+/// The first tagged token.
+pub const TAG_MIN_TOKEN: i32 = OTHER_TOKEN + TAG_BASE;
+/// Past the last tagged token.
+pub const TAG_END_TOKEN: i32 = OTHER_TOKEN + MAX_CHAR_VAL;
+
+/// The tagged token of digit `digit` of a number of origin `origin`
+/// (its first digit if `first`).
+#[inline]
+#[must_use]
+pub const fn tagged_digit(origin: i32, first: bool, digit: i32) -> i32 {
+    TAG_MIN_TOKEN + (origin << 5) + if first { 16 } else { 0 } + digit
+}
+
+/// Whether `t` is a tagged token.
+#[inline]
+#[must_use]
+pub const fn is_tagged(t: i32) -> bool {
+    t >= TAG_MIN_TOKEN && t < TAG_END_TOKEN
+}
+
+/// A tagged token's origin, first-digit flag and digit.
+#[inline]
+#[must_use]
+pub const fn tag_of(t: i32) -> Option<(i32, bool, i32)> {
+    if is_tagged(t) {
+        let x = t - TAG_MIN_TOKEN;
+        Some((x >> 5, x & 16 != 0, x & 15))
+    } else {
+        None
+    }
+}
+
+/// `t` as TeX reads it: a tagged digit as the plain digit.
+#[inline]
+#[must_use]
+pub const fn untag(t: i32) -> i32 {
+    if is_tagged(t) {
+        OTHER_TOKEN + tok_chr(t)
+    } else {
+        t
+    }
 }

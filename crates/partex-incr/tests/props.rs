@@ -21,6 +21,7 @@ fn shape(r: &mut Rng, acc: bool) -> Shape {
         work: 0,
         raw: r.below(3) > 0,
         acc,
+        ids: false,
     }
 }
 
@@ -199,6 +200,83 @@ fn incremental_rebuilds(acc: bool) {
     assert_eq!(checked, 150 * build_configs().len() * edits);
 }
 
+/// Random programs that give out ids (`next`, relocatable values,
+/// `DESIGN.md` 4.1) and copy them, under random edits: every rebuild the
+/// same as a fresh build (the sanitizer checks the chain of regions too,
+/// relocated ones included) and as the oracle.
+#[test]
+fn rebuilds_with_relocated_ids_match_scratch() {
+    let mut relocated = 0;
+    for seed in 0..150 {
+        for (ci, cfg) in build_configs().iter().enumerate() {
+            let mut r = Rng(seed + 50_000);
+            let s = Shape {
+                ids: true,
+                ..shape(&mut r, false)
+            };
+            let len = r.below(90);
+            let mut p = Program::from_text(&generate::program(&mut r, len, &s));
+            let mut b = Build::new(p.machine(), cfg);
+            for e in 0..8 {
+                let changed = generate::edit(&mut r, &mut p, &s);
+                b.rebuild(p.machine(), &changed, cfg);
+                relocated += b.stats.relocated_regions;
+                let (digest, want) = plain(&p);
+                assert_eq!(oracle(&p), want);
+                assert_eq!(
+                    b.output(&Sequential),
+                    want,
+                    "seed {seed}, config {ci}, edit {e}\n{}",
+                    p.text()
+                );
+                assert_eq!(
+                    b.final_state().digest(),
+                    digest,
+                    "seed {seed}, config {ci}, edit {e}"
+                );
+            }
+        }
+    }
+    assert!(relocated > 0, "no region was relocated");
+}
+
+/// A `next` added early moves every later id: the regions after it that
+/// only give out and copy ids are relocated, not run again, and the
+/// output is the oracle's.
+#[test]
+fn an_id_added_early_relocates_the_regions_after_it() {
+    let mut src = String::from("set x0 0\nnext x1 x0\n\n");
+    for i in 0..40 {
+        let _ = write!(
+            src,
+            "next x{} x0\ncopy x{} x{}\nwork 200\n\n",
+            1 + i % 3,
+            4 + i % 3,
+            1 + i % 3
+        );
+    }
+    src.push_str("label L0 x4\nref L0\nemit x5\n");
+    let mut p = Program::from_text(&src);
+    let cfg = build::Config {
+        sanitize: true,
+        grain: 64,
+        fine_grain: 64,
+        ..build::Config::default()
+    };
+    let mut b = Build::new(p.machine(), &cfg);
+    let first = p.ids()[1];
+    let changed = p.insert_after(Some(first), "next x2 x0");
+    b.rebuild(p.machine(), &changed, &cfg);
+    assert_eq!(b.output(&Sequential), oracle(&p));
+    assert!(
+        b.stats.relocated_regions >= 30,
+        "relocated {} of {} regions: {:?}",
+        b.stats.relocated_regions,
+        b.stats.regions,
+        b.stats
+    );
+}
+
 #[test]
 fn several_edits_at_once() {
     for seed in 0..200 {
@@ -234,8 +312,18 @@ fn stopped_rebuilds_then_one_to_the_end_match_scratch() {
     let mut same = 0;
     for seed in 0..300 {
         for (ci, cfg) in build_configs().iter().enumerate() {
-            // (every other program with the accumulator)
-            let (mut r, s, mut p) = random_program_with(seed + 20_000, 90, seed % 2 == 1);
+            // (every other program with the accumulator, every third one
+            // giving out ids: relocated regions spliced in by a stopped
+            // rebuild and merged by `coarsen`)
+            let (mut r, s, p) = random_program_with(seed + 20_000, 90, seed % 2 == 1);
+            let (s, mut p) = if seed % 3 == 2 {
+                let s = Shape { ids: true, ..s };
+                let len = r.below(90);
+                let q = Program::from_text(&generate::program(&mut r, len, &s));
+                (s, q)
+            } else {
+                (s, p)
+            };
             let mut b = Build::new(p.machine(), cfg);
             let mut last = Vec::new();
             assert!(b.take_effects_changed());
@@ -442,6 +530,7 @@ fn big_program(len: usize) -> Program {
         work: 0,
         raw: false,
         acc: false,
+        ids: false,
     };
     Program::from_text(&generate::program(&mut r, len, &s))
 }

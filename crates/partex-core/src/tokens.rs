@@ -62,6 +62,11 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             } else {
                 let m = tok_cmd(t);
                 let c = tok_chr(t);
+                if let Some((o, ..)) = tag_of(t) {
+                    // (a number shown: what is shown depends on it,
+                    // `reloc.rs`)
+                    self.observe_origin(o);
+                }
                 // §294: display the token (m, c).
                 match m {
                     LEFT_BRACE | RIGHT_BRACE | MATH_SHIFT | TAB_MARK | SUP_MARK | SUB_MARK

@@ -377,14 +377,16 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             }
             IF_INT_CODE | IF_DIM_CODE => {
                 // §503: test relation between integers or dimensions.
+                // (an integer's origin: the answer is what depends on it,
+                // `reloc.rs`)
                 let scan = |t: &mut Self| {
                     if this_if == IF_INT_CODE {
-                        t.scan_int()
+                        t.scan_int_origin()
                     } else {
-                        t.scan_normal_dimen()
+                        t.scan_normal_dimen().map(|()| crate::reloc::NO_ORIGIN)
                     }
                 };
-                scan(self)?;
+                let o1 = scan(self)?;
                 let n = self.cur_val;
                 self.get_nonblank_noncall()?;
                 let r = if self.cur_tok >= OTHER_TOKEN + i32::from(b'<')
@@ -398,12 +400,15 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                     self.back_error()?;
                     i32::from(b'=')
                 };
-                scan(self)?;
-                match u8::try_from(r).unwrap_or(b'=') {
+                let o2 = scan(self)?;
+                let rel = u8::try_from(r).unwrap_or(b'=');
+                let answer = match rel {
                     b'<' => n < self.cur_val,
                     b'=' => n == self.cur_val,
                     _ => n > self.cur_val,
-                }
+                };
+                self.note_int_answer(o1, n, rel, o2, self.cur_val, answer);
+                answer
             }
             IF_ODD_CODE => {
                 // §504: test if an integer is odd.
@@ -444,7 +449,19 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                         self.equiv_toks(self.cur_cs).cloned(),
                         self.equiv_toks(n).cloned(),
                     );
-                    p == q
+                    match (&p, &q) {
+                        // (a tagged digit is its digit, `reloc.rs`: the
+                        // answer depends on the numbers where one faces a
+                        // plain digit or another origin's)
+                        (Some(a), Some(b)) if p != q => {
+                            let (eq, seen) = crate::reloc::tagged_eq(a.tokens(), b.tokens());
+                            for o in seen {
+                                self.observe_origin(o);
+                            }
+                            eq && a.protected() == b.protected()
+                        }
+                        _ => p == q,
+                    }
                 };
                 self.scanner_status = save_scanner_status;
                 b

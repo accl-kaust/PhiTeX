@@ -22,6 +22,7 @@
 //! | `mark 3` | add glyph 3 to the glyphs used (an accumulator, as TeX's glyphs used by pages shipped) |
 //! | `fonts` | output the glyphs used so far (as TeX's fonts written at the end read them) |
 //! | `has 3` | output whether glyph 3 was used so far: a question about the accumulator (a derived cell, as TeX's final number of one object is a question about the numbering) |
+//! | `next x3 x5` | `x5 := x5 + 1; x3 := x5` as an *id* of origin `x5` (`Machine::origin_number`): copying it keeps it an id; any other use reads it as a number (as TeX's mark ids, `DESIGN.md` 4.1) |
 //! | `raw` / `endraw` | between them lines are output verbatim, not run: a mode that changes how later text is read, like a catcode change |
 //! | blank / `section` | coarser candidate boundaries (levels 1 and 2) |
 //!
@@ -35,7 +36,14 @@ use core::hash::{Hash, Hasher};
 
 use crate::hash::{Version, version_of};
 use crate::link::LinkCtx;
-use crate::machine::{Affine, Forced, Hole, Machine, Recorder, Split, Step};
+use crate::machine::{Affine, Forced, Hole, Machine, Recorder, Shift, Split, Step};
+
+/// The relocation of origin `x{o}` among `shifts` (one that moves).
+fn shift_of(shifts: &[Shift<Cell>], o: u8) -> Option<&Shift<Cell>> {
+    shifts
+        .iter()
+        .find(|s| s.cell == Cell::Var(o) && s.delta != 0)
+}
 
 pub type LineId = u32;
 pub const VARS: usize = 64;
@@ -76,6 +84,8 @@ pub enum Val {
     Raw(bool),
     Line(Arc<LineData>),
     Used(Used),
+    /// An id given out by origin `.0` (`next`): the number `.1`.
+    Id(u8, i64),
 }
 
 /// The accumulator's value (as TeX's `Glyphs`): its version is the whole
@@ -109,6 +119,12 @@ pub enum Cell {
     /// Whether glyph `g` was used: a question about `Used`
     /// ([`Machine::derived`]).
     UsedHas(u8),
+    /// Ids of origin `x.0` were used as numbers: a guard that always
+    /// holds, and blocks a relocation of that origin.
+    Observed(u8),
+    /// `next` advanced origin `x.0` from `.1` by `.2`: a guard that always
+    /// holds, and holds relocated where `.1` and `.1 + .2` move alike.
+    Shift(u8, i64, i64),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -150,6 +166,7 @@ pub enum Stmt {
     Mark(u8),
     Fonts,
     Has(u8),
+    Next(u8, u8),
     Bad,
 }
 
@@ -206,6 +223,7 @@ fn parse_code(text: &str, start: usize) -> Option<Stmt> {
         "mark" => Stmt::Mark(w.next()?.parse().ok().filter(|&g: &u8| g < 32)?),
         "fonts" => Stmt::Fonts,
         "has" => Stmt::Has(w.next()?.parse().ok().filter(|&g: &u8| g < 32)?),
+        "next" => Stmt::Next(var(w.next()?)?, var(w.next()?)?),
         "if" => {
             let x = var(w.next()?)?;
             if w.next()? != ">" {
@@ -504,7 +522,18 @@ impl Stub {
         self.pc = self.pc.and_then(|id| map.get(&id).copied());
     }
 
+    /// Read `x`. A number read is used as one: every variable is an
+    /// origin (`next`), whose numbers are then observed.
     fn var<R: Recorder<Self>>(&self, r: &mut R, x: u8) -> Option<Val> {
+        let v = self.var_raw(r, x);
+        if matches!(v, Some(Val::Int(_))) {
+            r.read(&Cell::Observed(x), Some(&Val::Raw(true)));
+        }
+        v
+    }
+
+    /// Read `x`, a number not observed (`next` advancing its origin).
+    fn var_raw<R: Recorder<Self>>(&self, r: &mut R, x: u8) -> Option<Val> {
         let v = &self.vars[usize::from(x)];
         r.read(&Cell::Var(x), v.as_ref());
         v.clone()
@@ -514,6 +543,10 @@ impl Stub {
     fn int<R: Recorder<Self>>(r: &mut R, v: Option<&Val>) -> Result<i64, Suspend> {
         match v {
             Some(Val::Int(i)) => Ok(*i),
+            Some(Val::Id(o, n)) => {
+                r.read(&Cell::Observed(*o), Some(&Val::Raw(true)));
+                Ok(*n)
+            }
             Some(Val::Sym(a)) => match r.force(a.hole) {
                 Forced::Value(Val::Int(g)) => Ok(g.wrapping_add(a.k)),
                 Forced::Value(_) => Ok(a.k),
@@ -523,7 +556,16 @@ impl Stub {
         }
     }
 
+    /// Set `c` to `v`. A variable set is an origin given a number (not by
+    /// `next`): observed.
     fn put<R: Recorder<Self>>(&mut self, r: &mut R, c: &Cell, v: Val) {
+        if let Cell::Var(x) = *c {
+            r.read(&Cell::Observed(x), Some(&Val::Raw(true)));
+        }
+        self.put_raw(r, c, v);
+    }
+
+    fn put_raw<R: Recorder<Self>>(&mut self, r: &mut R, c: &Cell, v: Val) {
         r.write(c, &v);
         match *c {
             Cell::Var(x) => self.vars[usize::from(x)] = Some(v),
@@ -531,7 +573,9 @@ impl Stub {
             Cell::Mode => self.raw = v == Val::Raw(true),
             Cell::Line(_) => unreachable!("programs do not write their source"),
             Cell::Used => unreachable!("the accumulator is written when a region is cut"),
-            Cell::UsedHas(_) => unreachable!("a question is not written"),
+            Cell::UsedHas(_) | Cell::Observed(_) | Cell::Shift(..) => {
+                unreachable!("a question is not written")
+            }
         }
     }
 
@@ -554,6 +598,7 @@ impl Stub {
                 let v = match self.var(r, x) {
                     Some(Val::Int(a)) => Val::Int(a.wrapping_add(1)),
                     Some(Val::Sym(a)) => Val::Sym(a.plus(1)),
+                    v @ Some(Val::Id(..)) => Val::Int(Self::int(r, v.as_ref())?.wrapping_add(1)),
                     _ => Val::Int(1),
                 };
                 self.put(r, &Cell::Var(x), v);
@@ -619,6 +664,16 @@ impl Stub {
             Stmt::Has(g) => {
                 self.region.asked |= 1 << g;
                 r.effect(Effect::Has(self.used & (1 << g) != 0));
+            }
+            Stmt::Next(x, o) => {
+                let v = self.var_raw(r, o);
+                let a = Self::int(r, v.as_ref())?;
+                r.read(&Cell::Shift(o, a, 1), Some(&Val::Raw(true)));
+                let n = a.wrapping_add(1);
+                self.put_raw(r, &Cell::Var(o), Val::Int(n));
+                if x != o {
+                    self.put(r, &Cell::Var(x), Val::Id(o, n));
+                }
             }
         }
         Ok(())
@@ -695,6 +750,7 @@ impl Machine for Stub {
                 added: self.region.added,
             })),
             Cell::UsedHas(g) => Some(Val::Int(i64::from(self.used >> g & 1))),
+            Cell::Observed(_) | Cell::Shift(..) => Some(Val::Raw(true)),
         }
     }
 
@@ -721,7 +777,7 @@ impl Machine for Stub {
                 }
             }
             // (a question: setting it does nothing)
-            Cell::UsedHas(_) => {}
+            Cell::UsedHas(_) | Cell::Observed(_) | Cell::Shift(..) => {}
         }
     }
 
@@ -793,7 +849,7 @@ impl Machine for Stub {
                 out.extend_from_slice(&text.as_bytes()[*from as usize..]);
             }
             Effect::Ref(l) => match &cx.final_state.labels[usize::from(*l)] {
-                Some(Val::Int(v)) => push_int(out, *v),
+                Some(Val::Int(v) | Val::Id(_, v)) => push_int(out, *v),
                 None => out.extend_from_slice(b"??"),
                 Some(_) => out.push(b'?'),
             },
@@ -822,8 +878,46 @@ impl Machine for Stub {
             Cell::Mode => 512,
             Cell::Used => 513,
             Cell::UsedHas(g) => 514 + u32::from(g),
+            Cell::Observed(o) => 600 + u32::from(o),
             Cell::Line(id) => 1024 + id,
+            Cell::Shift(..) => return None,
         })
+    }
+
+    fn origin_number(c: &Cell, v: Option<&Val>) -> Option<i64> {
+        match (c, v) {
+            (Cell::Var(_), Some(Val::Int(n))) => Some(*n),
+            _ => None,
+        }
+    }
+
+    fn guard_relocates(c: &Cell, shifts: &[Shift<Cell>]) -> bool {
+        match *c {
+            Cell::Observed(o) => shift_of(shifts, o).is_none(),
+            Cell::Shift(o, x, k) => {
+                shift_of(shifts, o).is_none_or(|s| s.map(x) + k == s.map(x + k))
+            }
+            _ => true,
+        }
+    }
+
+    fn relocate_guard(c: &Cell, shifts: &[Shift<Cell>]) -> Cell {
+        match *c {
+            Cell::Shift(o, x, k) => Cell::Shift(o, shift_of(shifts, o).map_or(x, |s| s.map(x)), k),
+            _ => c.clone(),
+        }
+    }
+
+    fn relocate_value(c: &Cell, v: &Val, shifts: &[Shift<Cell>]) -> Result<Option<Val>, ()> {
+        let moved = |o: u8, n: i64| shift_of(shifts, o).map(|s| s.map(n)).filter(|&m| m != n);
+        match (c, v) {
+            (Cell::Var(x), Val::Int(n)) => Ok(moved(*x, *n).map(Val::Int)),
+            (Cell::Var(_) | Cell::Label(_), Val::Id(o, n)) => {
+                Ok(moved(*o, *n).map(|m| Val::Id(*o, m)))
+            }
+            (Cell::Var(_) | Cell::Label(_), Val::Sym(_)) => Err(()),
+            _ => Ok(None),
+        }
     }
 
     fn hole_value(c: &Cell, h: Hole) -> Option<Val> {
@@ -954,6 +1048,10 @@ pub fn oracle(p: &Program) -> Vec<u8> {
             } else {
                 b"has 0"
             }),
+            Stmt::Next(x, o) => {
+                vars[usize::from(o)] = vars[usize::from(o)].wrapping_add(1);
+                vars[usize::from(x)] = vars[usize::from(o)];
+            }
         }
     }
     let mut st = St {
@@ -1028,6 +1126,8 @@ pub mod generate {
         pub raw: bool,
         /// Whether `mark` and `fonts` (the accumulator) appear.
         pub acc: bool,
+        /// Whether `next` (ids, relocatable values) appears.
+        pub ids: bool,
     }
 
     impl Default for Shape {
@@ -1038,6 +1138,7 @@ pub mod generate {
                 work: 0,
                 raw: true,
                 acc: false,
+                ids: false,
             }
         }
     }
@@ -1051,6 +1152,14 @@ pub mod generate {
         let x = |r: &mut Rng| format!("x{}", r.below(s.vars));
         let l = |r: &mut Rng| format!("L{}", r.below(s.labels));
         let n = |r: &mut Rng| i64::try_from(r.below(21)).expect("small") - 5;
+        if s.ids && r.below(4) == 0 {
+            // (one origin, ids copied more often than used)
+            return match r.below(5) {
+                0 | 1 => format!("next {} x0", x(r)),
+                2 | 3 => format!("copy {} {}", x(r), x(r)),
+                _ => format!("label {} {}", l(r), x(r)),
+            };
+        }
         if s.acc && r.below(6) == 0 {
             // (few glyphs, so edits add and take back the same ones)
             return match r.below(4) {

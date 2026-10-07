@@ -1977,45 +1977,68 @@ memory is the watch's:
   document (`\current@color`, `\@currsize`, `\delayed@f@adjustment`,
   `\par`, `\reset@equation`, each changed and set back at the
   document's level), and raw words with stale halves.
-- *Relocatable values* (designed, not built). Some counters only number
-  things: LaTeX's mark ids (`\g__mark_int`, in every `\marks` text and
-  in the `\g__mark_…_tl` the output routine keeps), pgf's
-  `\pgf@sys@id@current@id`, hyperref's anchor counter. An added
-  `\section` adds two marks, so every later mark id is 2 higher: the
-  marks, the output routine's copies and count 187 differ in every
-  later region (each region of the course's grain holds a page and its
-  output routine), and pass 1 re-runs every page after the edit
-  although no page prints an id. Finer cells cannot help: the values
-  really differ. The fix is the virtual PDF object numbers (3.12)
-  made general:
-  - a value is *relocatable* where every use only copies it, compares
-    it for equality with a value of the same counter, or keys a name
-    with it, and an ordering test or arithmetic gives the same answer
-    for both runs; a use that shows its digits (typeset in a box,
-    `\write`, `\message`, a `\special` or a PDF string) makes it real;
-  - relocatability is decided from the uses, never from names: the
-    digits `\the` or `\number` makes of a register carry their origin
-    (the register and its value, as token origins do for SyncTeX,
-    4.4) through copies (`\edef`, `\marks`, `\let`, `\toks`), and the
-    observing primitives report an observation of an origin as a read
-    of its value (a derived guard, as `FinalNum` asks the numbering: an
-    answer checked, not a version), while copies, `\ifx` between lists
-    of the same origins and a macro that discards an argument do not;
-  - a region whose entry differs from its old run's only by one offset
-    `d` on the values of one origin, and which observed none of them,
-    is reused, its written cells shifted by `d` where they hold that
-    origin's digits (the old run recorded where);
-  - the first region to differ (the one that adds the marks) runs, and
-    from there each region's guards on the counter and on the cells
-    holding its digits compare modulo the offset.
-  For the marks every later use is a copy, `\tl_if_eq` (equality),
-  `\tl_if_empty` or `\__mark_value:nn`, which discards the id; the
-  counter's wrap test (`< 99999`) answers the same. Building it needs
-  each token to carry its origin through the input stack, macro
-  parameters and the lists `\edef` and `\marks` make, and every
-  consumer of tokens (main control's characters, `\write`, the
-  scanners of numbers, delimited parameters) to report an observation:
-  not built.
+- *Relocatable values* (built: `reloc.rs`, `machine_reloc.rs`,
+  `partex-incr`'s `Machine::origin_number` and its siblings). Some
+  counters only number things: LaTeX's mark ids (`\g__mark_int`, in
+  every `\marks` text and in the `\g__mark_…_tl` the output routine
+  keeps). An added `\section` adds two marks, so every later mark id is
+  2 higher and every later page's output routine state differs, though
+  no page prints an id. A rebuild reuses a region whose values differ
+  from its old run's only by such a shift, with what it wrote shifted
+  the same way; every value it reads otherwise must equal its old run's
+  (the read set, as before).
+  - *Origins.* Every count register is an origin. The digits `\the` and
+    `\number` make of one read as it is are *tagged* tokens (category
+    12, a character code past Unicode: `TAG_BASE`, the origin, whether
+    the digit is a number's first, the digit). `tok_chr` reads them as
+    their digits, so TeX runs as with plain digits; only a machine turns
+    them on (`Tex::set_tags`, never in INITEX, and a format holds plain
+    digits).
+  - *Copies keep them.* `get_next` keeps the token as it is in its list
+    (`cur_raw`); a macro's arguments, a body or text scanned, a preamble
+    and a token backed up store it as it is. A digit read for any other
+    use is an *observation* of its origin (the job used the number), at
+    the next token or at the region's end. Lists read without
+    `get_next` observe themselves: printing (`\write`, `\message`,
+    `\meaning`, `\detokenize`, a `\special`, a PDF string: anything that
+    shows a value reads it), `\ifx` on macros where a tagged digit faces
+    a plain one or another origin's, a delimiter of digits, a case
+    change. A count register read as a number, or assigned other than
+    by `\advance` by a constant, is observed.
+  - *Answers.* `\ifnum` on a number of one origin and a constant
+    records its answer (`MCell::IntCmp`); on two numbers of one origin
+    nothing (the shift keeps their order). `\advance` by a constant
+    and `\numexpr` sums with constants keep the origin and record that
+    `x` and `x + c` must move alike (`reloc::SHIFT`). A number written
+    in tagged digits of one origin, scanned by a caller that takes
+    origins, keeps its origin.
+  - *Guards.* A region's observed origins (`MCell::Origin`) and answers
+    are guards that always hold: they never make a region dirty, and
+    are checked only to relocate it.
+  - *The rebuild.* After a re-run span, an origin cell that holds a
+    larger number than the old run's there has moved: numbers above its
+    old value at the span's start move by the difference (`Shift`; a
+    positive shift keeps numbers distinct and in order). A dirty region
+    whose differing guards each hold the old value relocated, whose
+    other guards hold relocated (no moving origin observed, every
+    answer the same with `x` relocated), and whose writes all relocate,
+    is reused: its trace relocated (writes shifted and re-versioned,
+    guards re-versioned, answers renamed), applied as a clean region
+    would be (`replay_span` takes the relocated trace), the cells whose
+    values moved entering D and marking their readers. Its exit state
+    kept is the old run's, whose own writes then are patched as well
+    (`Trace::moved`). The machine relocates eqtb words (a count
+    register's number, a macro's or token register's list, a box
+    register's box), the marks and the page's list; `Rest`, sealed
+    lines and PDF objects relocate only if they hold no moving number
+    (checked: the input stack, lists being built, the save stack and
+    its saved count values, alignments). Validation is by value: a
+    region is relocated only if the relocated old values are the new
+    ones, so a wrong base or an origin used in a way the engine does not
+    see as a copy costs a re-run, never a wrong result, as long as every
+    use of a number that is not a copy is observed.
+  - The stub machine has ids too (`next`), and the property tests
+    relocate under random edits (`rebuilds_with_relocated_ids_match_scratch`).
 - Measured (2026-10-07), the course, one `\section` and a paragraph
   added in chapter 15, `phitex build` from the saved build (commands
   re-run; the edit build's PDF identical to a cold build's):

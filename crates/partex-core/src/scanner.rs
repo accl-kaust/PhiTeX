@@ -138,6 +138,14 @@ impl<H: Host, T: Tracker> Tex<H, T> {
     #[inline(always)]
     #[allow(clippy::inline_always, reason = "measured: 6% of the PGF subset")]
     pub(crate) fn get_next(&mut self) -> Result<(), Jump> {
+        if self.cur_raw != 0 {
+            // (the tagged token read before was used as it was read: an
+            // observation, unless it was stored or backed up; `reloc.rs`)
+            self.cur_raw = 0;
+            if self.tag_pending != 0 {
+                self.flush_tag();
+            }
+        }
         if self.cur_input.state == TOKEN_LIST
             && self.cur_input.loc != NULL
             && !self.memo.recording()
@@ -168,6 +176,9 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                     self.cur_cs = 0;
                     self.cur_cmd = cmd;
                     self.cur_chr = tok_chr(t);
+                    if is_tagged(t) {
+                        self.read_tagged(t);
+                    }
                     return Ok(());
                 }
             }
@@ -222,6 +233,9 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                 } else {
                     self.cur_cmd = tok_cmd(t);
                     self.cur_chr = tok_chr(t);
+                    if is_tagged(t) {
+                        self.read_tagged(t);
+                    }
                     match self.cur_cmd {
                         LEFT_BRACE => self.set_align_state(self.align_state() + 1),
                         RIGHT_BRACE => self.set_align_state(self.align_state() - 1),

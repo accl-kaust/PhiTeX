@@ -500,6 +500,28 @@ pub struct Tex<H: Host, T: Tracker = Untracked> {
     /// Defer the page builder's fires to the next `big_switch` (an SSA
     /// build's steps, `ssa.rs`).
     pub(crate) defer_fire: bool,
+    /// Relocatable numbers (DESIGN 4.1, `reloc.rs`): whether `\the` and
+    /// `\number` tag the digits they make of a count register (the
+    /// machine's switch).
+    pub(crate) tags_on: bool,
+    /// The tagged token `get_next` read last, as its list holds it (0:
+    /// none since): what a copy of `cur_tok` stores.
+    pub(crate) cur_raw: i32,
+    /// The origin of a tagged token read and not yet stored or backed up,
+    /// plus one (0: none): an observation when the next token is read or
+    /// the region ends.
+    pub(crate) tag_pending: i32,
+    /// `scan_something_internal`'s caller takes the origin of `cur_val`
+    /// (`cur_val_origin`); `scan_int`'s caller does (`int_origin_req`).
+    pub(crate) want_origin: bool,
+    pub(crate) int_origin_req: bool,
+    /// The origin of `cur_val` (`reloc::NO_ORIGIN`: none), and of the
+    /// expression `scan_expr` just evaluated.
+    pub(crate) cur_val_origin: i32,
+    pub(crate) expr_origin: i32,
+    /// The count register `\advance` is about to assign its sum (0: none):
+    /// an affine write, no observation.
+    pub(crate) affine_count: i32,
     /// Windows (DESIGN 4.3 item 1): the commands after which the next
     /// boundary ends the open window (0: no windows, the clean points of
     /// [`Tex::clean_point`]); the command counter where the open window
@@ -864,6 +886,14 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             par_start: false,
             fire_pending: false,
             defer_fire: false,
+            tags_on: false,
+            cur_raw: 0,
+            tag_pending: 0,
+            want_origin: false,
+            int_origin_req: false,
+            cur_val_origin: crate::reloc::NO_ORIGIN,
+            expr_origin: crate::reloc::NO_ORIGIN,
+            affine_count: 0,
             window: 0,
             window_start: 0,
             window_cut: None,

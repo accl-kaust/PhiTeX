@@ -1615,6 +1615,7 @@ fn process_switches() {
     partex_core::machine::set_pdf_last_cells(!off("PARTEX_MACHINE_PDF_LAST"));
     partex_core::machine::set_pdf_word_cells(!off("PARTEX_MACHINE_PDF_WORDS"));
     partex_core::machine::set_mark_cells(!off("PARTEX_MACHINE_MARKS"));
+    partex_core::machine::set_relocate(!off("PARTEX_MACHINE_RELOCATE"));
     partex_core::machine::set_tree_names(!off("PARTEX_MACHINE_TREE_NAMES"));
     partex_core::machine::set_num_answers(!off("PARTEX_MACHINE_NUM_ANSWERS"));
     partex_core::machine::set_canon(
@@ -2066,6 +2067,19 @@ fn dump_audit(b: &Build<Machine>, n: usize) {
         sole: (usize, u64),
         real: (usize, u64),
     }
+    for (i, why, c) in &b.unrelocated {
+        let what = match c {
+            MCell::Eqtb(p) => format!("eqtb {}", b.final_state().tex().eqtb_loc_name(*p)),
+            MCell::Origin(o) if *o >= 0 => format!(
+                "Origin({o}) {}",
+                b.final_state()
+                    .tex()
+                    .eqtb_loc_name(partex_core::reloc::loc_of_origin(*o))
+            ),
+            c => format!("{c:?}"),
+        };
+        eprintln!("phitex: audit: rebuild {n} region {i} not relocated: {why} {what}");
+    }
     let mut tally: BTreeMap<String, Tally> = BTreeMap::new();
     let mut sums = [(0usize, 0u64); 3]; // (spurious, carried, all)
     for a in &b.audit {
@@ -2219,14 +2233,15 @@ fn dump_audit(b: &Build<Machine>, n: usize) {
         }
     }
     eprintln!(
-        "phitex: audit: rebuild {n}: {} spans, {} old regions, {} commands re-run; spurious {} regions {} commands; carried {} regions {} commands",
+        "phitex: audit: rebuild {n}: {} spans, {} old regions, {} commands re-run; spurious {} regions {} commands; carried {} regions {} commands; relocated {} regions",
         b.audit.len(),
         sums[2].0,
         sums[2].1,
         sums[0].0,
         sums[0].1,
         sums[1].0,
-        sums[1].1
+        sums[1].1,
+        b.stats.relocated_regions
     );
     let mut ranked: Vec<(&String, &Tally)> = tally.iter().collect();
     let key = |t: &Tally| (t.spurious.1 + t.carried.1, t.real.1);

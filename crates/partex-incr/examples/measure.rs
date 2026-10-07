@@ -263,6 +263,7 @@ fn main() {
         work,
         raw: false,
         acc: false,
+        ids: false,
     };
     let mut r = Rng(42);
     let random = Program::from_text(&generate::program(&mut r, lines, &shape));

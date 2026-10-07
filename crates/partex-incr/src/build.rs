@@ -29,7 +29,7 @@ use alloc::vec::Vec;
 use crate::exec::Executor;
 use crate::hash::{Version, version_of};
 use crate::link::{Chunk, link};
-use crate::machine::{Machine, Step};
+use crate::machine::{Machine, Shift, Step};
 use crate::trace::{FlatRecording, OnForce, Recording, RegionRecorder, Trace};
 
 /// The switches of incremental builds. Every one off gives the same
@@ -81,6 +81,10 @@ pub struct Config {
     /// ([`Build::audit`]; a diagnostic: the rebuild is the same either
     /// way).
     pub audit: bool,
+    /// Relocatable values (`DESIGN.md` 4.1): a region that differs from
+    /// its old run only by numbers an origin gave out, shifted, is reused
+    /// with its writes relocated ([`Machine::origin_number`]).
+    pub relocate: bool,
 }
 
 impl Default for Config {
@@ -98,6 +102,7 @@ impl Default for Config {
             flat: true,
             clock: None,
             audit: false,
+            relocate: true,
         }
     }
 }
@@ -121,6 +126,8 @@ pub struct Stats {
     pub restores: usize,
     /// Old regions taken as they were by the final cutoff.
     pub reused_regions: usize,
+    /// Old regions reused relocated (`Config::relocate`).
+    pub relocated_regions: usize,
     /// Regions whose keys were renumbered (the order-maintenance fallback).
     pub relabeled: usize,
     /// With a clock, nanoseconds spent re-executing, replaying clean
@@ -140,6 +147,10 @@ pub struct Stats {
 }
 
 const SPACING: u64 = 1 << 32;
+
+/// An old span `[from, to)` (to the end: `None`) and the traces that
+/// replace it.
+type Splice<M> = (u64, Option<u64>, Vec<Trace<M>>);
 
 /// A state that may still be on its way (a saved build's final state,
 /// loading on another thread): made when first needed.
@@ -214,6 +225,11 @@ pub struct Build<M: Machine> {
     pub why_dirty: Vec<(usize, Vec<M::Cell>)>,
     /// With [`Config::audit`], each span the last rebuild re-executed.
     pub audit: Vec<Audit<M>>,
+    /// With [`Config::audit`], each region the last rebuild could not
+    /// relocate (its index) and why: the cell, and whether its guard
+    /// held relocated (`guard`), it was used as a number (`observed`) or
+    /// its write cannot be relocated (`write`).
+    pub unrelocated: Vec<(usize, &'static str, M::Cell)>,
     /// What the last build or rebuild did.
     pub stats: Stats,
     /// Where a rebuild stopped early ([`Build::rebuild_or_stop`]): the
@@ -487,6 +503,7 @@ impl<M: Machine> Build<M> {
             changed: BTreeMap::new(),
             garbage: Garbage::default(),
             why_dirty: Vec::new(),
+            unrelocated: Vec::new(),
             audit: Vec::new(),
             frontier: None,
             settled: alloc::vec![0],
@@ -592,6 +609,7 @@ impl<M: Machine> Build<M> {
             changed,
             garbage: Garbage::default(),
             why_dirty: Vec::new(),
+            unrelocated: Vec::new(),
             audit: Vec::new(),
             frontier: None,
             // (a build loaded knows no rebuilds before its own)
@@ -1153,6 +1171,7 @@ impl<M: Machine> Build<M> {
         self.garbage = Garbage::default();
         self.why_dirty.clear();
         self.audit.clear();
+        self.unrelocated.clear();
         self.generation += 1;
         let generation = self.generation;
         let old_regions = self.seq.len();
@@ -1190,6 +1209,11 @@ impl<M: Machine> Build<M> {
         let mut frontier_key: Option<u64> = None;
         let mut unsettled: BTreeSet<M::Cell> = BTreeSet::new();
         let mut stopped_at = None;
+        // Relocatable values: the origins that moved (the old number
+        // from which they move, and by how much), and the regions reused
+        // relocated, by key.
+        let mut shifts: BTreeMap<M::Cell, (i64, i64)> = BTreeMap::new();
+        let mut moved: BTreeMap<u64, Trace<M>> = BTreeMap::new();
         while let Some(c_key) = cur {
             if frontier.is_none() && !splices.is_empty() && stop() {
                 stopped_at = Some(c_key);
@@ -1216,7 +1240,7 @@ impl<M: Machine> Build<M> {
                 }
                 if let Some(q) = pending.take() {
                     let t = now();
-                    stats.restores += usize::from(self.replay_span(&mut s, q, p, &d));
+                    stats.restores += usize::from(self.replay_span(&mut s, q, p, &d, &moved));
                     stats.replay_ns += now() - t;
                 }
                 for c in cells {
@@ -1258,7 +1282,7 @@ impl<M: Machine> Build<M> {
                 self.forget_written_in(&mut d, c_key, u64::MAX);
                 stats.replayed_regions += self.seq.range(c_key..).count();
                 let from = pending.take().unwrap_or(c_key);
-                stats.restores += usize::from(self.replay_span(&mut s, from, u64::MAX, &d));
+                stats.restores += usize::from(self.replay_span(&mut s, from, u64::MAX, &d, &moved));
                 break;
             };
             // The clean regions before k are replayed (later).
@@ -1287,7 +1311,7 @@ impl<M: Machine> Build<M> {
                 if acc.iter().all(|c| M::accumulates(c)) {
                     if let Some(p) = pending.take() {
                         let t = now();
-                        stats.restores += usize::from(self.replay_span(&mut s, p, k, &d));
+                        stats.restores += usize::from(self.replay_span(&mut s, p, k, &d, &moved));
                         stats.replay_ns += now() - t;
                     }
                     // (its guards hold: the versions it read, not the old
@@ -1326,6 +1350,46 @@ impl<M: Machine> Build<M> {
                     }
                 }
             }
+            if is_dirty && synced && cfg.relocate && !shifts.is_empty() && !self.forced.contains(&k)
+            {
+                // Relocatable values: dirty only by numbers that moved,
+                // and using none as a number: reused, relocated.
+                let sh: Vec<Shift<M::Cell>> = shifts
+                    .iter()
+                    .map(|(c, &(base, delta))| Shift {
+                        cell: c.clone(),
+                        base,
+                        delta,
+                    })
+                    .collect();
+                let r = self.relocate_region(k, &d, &sh, generation);
+                if cfg.audit
+                    && let Err((why, c)) = &r
+                {
+                    let i = self.seq.range(..k).count();
+                    self.unrelocated.push((i, why, c.clone()));
+                }
+                if let Ok(t2) = r {
+                    let t = &self.seq[&k];
+                    for ((c, _, old), (_, v, new)) in t.writes.iter().zip(&t2.writes) {
+                        if M::accumulates(c) {
+                            continue;
+                        }
+                        if old == new {
+                            d.remove(c);
+                        } else {
+                            self.mark(&mut dirty, c, k + 1);
+                            changed.insert(c.clone());
+                            d.insert(c.clone(), Some(v.clone()));
+                        }
+                    }
+                    moved.insert(k, t2);
+                    pending.get_or_insert(k);
+                    stats.relocated_regions += 1;
+                    cur = self.seq.range(k + 1..).next().map(|(k, _)| *k);
+                    continue;
+                }
+            }
             if !is_dirty {
                 // Marked, but what made it dirty was overwritten since.
                 forget_written(&mut d, t);
@@ -1356,7 +1420,7 @@ impl<M: Machine> Build<M> {
             }
             if let Some(p) = pending.take() {
                 let t = now();
-                stats.restores += usize::from(self.replay_span(&mut s, p, k, &d));
+                stats.restores += usize::from(self.replay_span(&mut s, p, k, &d, &moved));
                 stats.replay_ns += now() - t;
             }
             // (the audit: the cells of D the region read, with their
@@ -1451,6 +1515,9 @@ impl<M: Machine> Build<M> {
                 if settled {
                     unsettled.remove(c);
                 }
+                if cfg.relocate {
+                    self.note_shift(&mut shifts, c, nv.as_ref(), k, j, settled);
+                }
                 if settled && self.known_old_version_before(c, j) == Some(version_of(&nv)) {
                     d.remove(c);
                 } else {
@@ -1518,6 +1585,7 @@ impl<M: Machine> Build<M> {
                 self.changed.insert(c, generation);
             }
             let t = now();
+            self.merge_moved(&mut splices, moved);
             let key = self.splice_keeping(splices, &mut stats, Some(at));
             stats.other_parts_ns[1] = now() - t;
             debug_assert!(key.is_some(), "the region a rebuild stopped at is kept");
@@ -1533,7 +1601,7 @@ impl<M: Machine> Build<M> {
             && let Some(p) = pending.take()
         {
             let t = now();
-            stats.restores += usize::from(self.replay_span(&mut s, p, u64::MAX, &d));
+            stats.restores += usize::from(self.replay_span(&mut s, p, u64::MAX, &d, &moved));
             stats.replay_ns += now() - t;
         }
         let s = final_state.unwrap_or(s);
@@ -1541,6 +1609,7 @@ impl<M: Machine> Build<M> {
             self.changed.insert(c, generation);
         }
         let t = now();
+        self.merge_moved(&mut splices, moved);
         self.splice(splices, &mut stats);
         stats.other_parts_ns[1] = now() - t;
         let t = now();
@@ -1556,7 +1625,11 @@ impl<M: Machine> Build<M> {
         stats.other_ns =
             (now() - start).saturating_sub(stats.run_ns + stats.replay_ns + stats.compare_ns);
         debug_assert!(
-            stats.reused_regions + stats.replayed_regions + stats.dirty_regions <= old_regions
+            stats.reused_regions
+                + stats.replayed_regions
+                + stats.relocated_regions
+                + stats.dirty_regions
+                <= old_regions
         );
         self.stats = stats;
         if cfg.sanitize {
@@ -1577,15 +1650,23 @@ impl<M: Machine> Build<M> {
         from: u64,
         to: u64,
         d: &BTreeMap<M::Cell, Option<M::Value>>,
+        moved: &BTreeMap<u64, Trace<M>>,
     ) -> bool {
-        let span: Vec<&Trace<M>> = self.seq.range(from..to).map(|(_, t)| t).collect();
+        // (a region reused relocated, as relocated)
+        let span: Vec<&Trace<M>> = self
+            .seq
+            .range(from..to)
+            .map(|(k, t)| moved.get(k).unwrap_or(t))
+            .collect();
         match span.as_slice() {
             [] => {}
             [t] => t.apply(s, &[]),
             [.., last]
                 if s.replay_exit(
                     &span,
-                    &mut self.exit_patch(s, (from, to), last.born, d).iter(),
+                    &mut self
+                        .exit_patch(s, (from, to), (last.born, last.moved != 0), d)
+                        .iter(),
                 ) =>
             {
                 return true;
@@ -1613,6 +1694,134 @@ impl<M: Machine> Build<M> {
         false
     }
 
+    /// Relocatable values: origin cell `c` holds `nv` after a span that
+    /// ran from `k` up to `j`: if the old run's number there is smaller,
+    /// the numbers above the old number at `k` moved by the difference
+    /// (kept if it moved by as much already); else it moves no more.
+    fn note_shift(
+        &self,
+        shifts: &mut BTreeMap<M::Cell, (i64, i64)>,
+        c: &M::Cell,
+        nv: Option<&M::Value>,
+        k: u64,
+        j: Option<u64>,
+        settled: bool,
+    ) {
+        let Some(n) = M::origin_number(c, nv) else {
+            return;
+        };
+        let old = settled
+            .then(|| self.old_value_before(c, j.unwrap_or(u64::MAX)))
+            .and_then(|v| M::origin_number(c, v.as_ref()));
+        match old {
+            Some(o) if n > o => {
+                let delta = n - o;
+                if shifts.get(c).is_none_or(|&(_, d)| d != delta) {
+                    let base = M::origin_number(c, self.old_value_before(c, k).as_ref());
+                    match base {
+                        Some(base) => {
+                            shifts.insert(c.clone(), (base, delta));
+                        }
+                        None => {
+                            shifts.remove(c);
+                        }
+                    }
+                }
+            }
+            _ => {
+                shifts.remove(c);
+            }
+        }
+    }
+
+    /// Relocatable values: region `k` relocated by `sh`, if every guard
+    /// it has on a cell of `d` holds there the old run's value relocated,
+    /// every other guard holds relocated (`Machine::guard_relocates`), and
+    /// every write relocates; else why not, and the cell
+    /// ([`Build::unrelocated`]).
+    fn relocate_region(
+        &self,
+        k: u64,
+        d: &BTreeMap<M::Cell, Option<M::Value>>,
+        sh: &[Shift<M::Cell>],
+        generation: u32,
+    ) -> Result<Trace<M>, (&'static str, M::Cell)> {
+        let t = &self.seq[&k];
+        let mut guards = Vec::with_capacity(t.guards.len());
+        for (c, v) in &t.guards {
+            let fail = |why| (why, c.clone());
+            if !t.holes.is_empty() {
+                return Err(fail("holes"));
+            }
+            if let Some(nv) = d.get(c) {
+                if M::accumulates(c) {
+                    return Err(fail("accumulates"));
+                }
+                let nv = nv.as_ref().ok_or_else(|| fail("absent"))?;
+                let old = self.old_value_before(c, k).ok_or_else(|| fail("absent"))?;
+                // (the old value the region read, as its guard says: past
+                // the frontier of a stopped rebuild, the regions before it
+                // are this run's, and the old run's value is not known)
+                if version_of(&Some(&old)) != *v {
+                    return Err(fail("unknown"));
+                }
+                let want = match M::relocate_value(c, &old, sh) {
+                    Ok(Some(x)) => version_of(&Some(&x)),
+                    Ok(None) => *v,
+                    Err(()) => return Err(fail("guard")),
+                };
+                let have = version_of(&Some(nv));
+                if want != have {
+                    return Err(fail("guard"));
+                }
+                guards.push((c.clone(), have));
+            } else {
+                if !M::guard_relocates(c, sh) {
+                    return Err(fail("observed"));
+                }
+                guards.push((M::relocate_guard(c, sh), *v));
+            }
+        }
+        guards.sort_by(|a, b| a.0.cmp(&b.0));
+        guards.dedup_by(|a, b| a.0 == b.0);
+        let mut writes = Vec::with_capacity(t.writes.len());
+        for (c, v, ver) in &t.writes {
+            match M::relocate_value(c, v, sh) {
+                Ok(None) => writes.push((c.clone(), v.clone(), *ver)),
+                Ok(Some(nv)) if !M::accumulates(c) => {
+                    let h = version_of(&Some(&nv));
+                    writes.push((c.clone(), nv, h));
+                }
+                _ => return Err(("write", c.clone())),
+            }
+        }
+        Ok(Trace {
+            entry: t.entry.clone(),
+            exit: t.exit.clone(),
+            guards,
+            writes,
+            effects: t.effects.clone(),
+            holes: Vec::new(),
+            allocs: t.allocs,
+            cost: t.cost,
+            born: t.born,
+            moved: generation,
+        })
+    }
+
+    /// The regions reused relocated, as splices of one region each, put
+    /// among `splices` in order.
+    fn merge_moved(&self, splices: &mut Vec<Splice<M>>, moved: BTreeMap<u64, Trace<M>>) {
+        if moved.is_empty() {
+            return;
+        }
+        for (k, t) in moved {
+            let next = self.seq.range(k + 1..).next().map(|(k, _)| *k);
+            splices.push((k, next, alloc::vec![t]));
+        }
+        splices.sort_by_key(|s| s.0);
+    }
+
     /// [`forget_written`] for the clean regions `[from, to)`, by the
     /// writers index.
     fn forget_written_in(&self, d: &mut BTreeMap<M::Cell, Option<M::Value>>, from: u64, to: u64) {
@@ -1633,11 +1842,15 @@ impl<M: Machine> Build<M> {
     /// index, not by looking through the span's regions (cells that
     /// differed accumulate over a session, and spans grow with the
     /// document).
+    ///
+    /// A last region relocated since it was recorded (`moved`): the state
+    /// kept holds its writes as they were then, so its own writes are
+    /// patched too.
     fn exit_patch(
         &self,
         s: &M,
         (from, to): (u64, u64),
-        born: u32,
+        (born, moved): (u32, bool),
         d: &BTreeMap<M::Cell, Option<M::Value>>,
     ) -> BTreeMap<M::Cell, Option<M::Value>> {
         let last_key = self.seq.range(from..to).next_back().map(|(k, _)| *k);
@@ -1650,7 +1863,7 @@ impl<M: Machine> Build<M> {
                 .writers
                 .get(c)
                 .and_then(|w| w.range(from..to).next_back().map(|(k, ())| *k));
-            if writer.is_some() && writer == last_key {
+            if writer.is_some() && writer == last_key && !moved {
                 // (the state kept is the last region's: its own write)
                 continue;
             }
