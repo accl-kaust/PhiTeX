@@ -230,6 +230,28 @@ mod tests {
             .collect()
     }
 
+    /// The outline: titles (`PDFDocEncoding`, UTF-16 after its mark), each
+    /// item's page and top, kids in order, one going nowhere.
+    #[test]
+    fn outline() {
+        let objs = [
+            "<< /Type /Catalog /Pages 2 0 R /Outlines 5 0 R >>".to_owned(),
+            "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_owned(),
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 100] /Contents 4 0 R >>".to_owned(),
+            "<< /Length 0 >>\nstream\n\nendstream".to_owned(),
+            "<< /First 6 0 R /Last 7 0 R >>".to_owned(),
+            "<< /Title (Intro) /Dest [3 0 R /XYZ 0 80 null] /Next 7 0 R /First 8 0 R >>".to_owned(),
+            "<< /Title (End) >>".to_owned(),
+            "<< /Title <FEFF00C9> /A << /S /GoTo /D [3 0 R /Fit] >> >>".to_owned(),
+        ];
+        let p = crate::Pdf::open(&raw_pdf(&objs)).unwrap();
+        assert_eq!(
+            p.outline(),
+            "[{\"t\":\"Intro\",\"p\":0,\"y\":20,\"k\":[{\"t\":\"\u{c9}\",\"p\":0,\"y\":null,\"k\":[]}]},\
+             {\"t\":\"End\",\"p\":null,\"y\":null,\"k\":[]}]"
+        );
+    }
+
     /// A page's links: a URI, and a destination on a page (its top from
     /// the page's top), in points from the page's top left.
     #[test]

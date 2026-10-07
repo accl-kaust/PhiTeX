@@ -373,13 +373,13 @@ impl Pdf {
     /// in points from the page's top (`None`: the page's top). `d` is an
     /// array (`[page /XYZ left top zoom]`, `/FitH top`, `/FitR … top`, …)
     /// or a name (hyperref's) looked up in the catalog.
-    fn goes(&self, d: &O, page_h: f64) -> Option<(usize, Option<f64>)> {
+    fn goes(&self, d: &O) -> Option<(usize, Option<f64>)> {
         let d = self.resolve(d);
         let a: Vec<O> = match &d {
             O::Arr(a) => a.clone(),
             O::Str(n) => self.doc.dest(n)?.iter().map(conv).collect(),
             O::Name(n) => self.doc.dest(n.as_bytes())?.iter().map(conv).collect(),
-            O::Dict(_) => return self.goes(d.get("D")?, page_h),
+            O::Dict(_) => return self.goes(d.get("D")?),
             _ => return None,
         };
         let page = match a.first()? {
@@ -394,7 +394,9 @@ impl Pdf {
             Some(O::Name(k)) if k == "FitR" => a.get(5).and_then(O::num),
             _ => None,
         };
-        Some((page, top.map(|t| r2(page_h - t))))
+        // (the top from the top of the page it is on)
+        let h = self.page(page).map_or(792.0, |p| size(&p).1);
+        Some((page, top.map(|t| r2(h - t))))
     }
 
     /// Page `page`'s links (`/Annots` of `/Subtype /Link`) as the draw
@@ -430,26 +432,82 @@ impl Pdf {
                         Some(O::Str(u)) => Some(esc(&String::from_utf8_lossy(&u))),
                         _ => None,
                     },
-                    Some(O::Name(s)) if s == "GoTo" => act
-                        .get("D")
-                        .and_then(|d| self.goes(d, page_h))
-                        .map(|(p, top)| {
+                    Some(O::Name(s)) if s == "GoTo" => {
+                        act.get("D").and_then(|d| self.goes(d)).map(|(p, top)| {
                             format!("{p},{}", top.map_or("null".into(), |t| t.to_string()))
-                        }),
+                        })
+                    }
                     _ => None,
                 },
-                None => a
-                    .get("Dest")
-                    .and_then(|d| self.goes(d, page_h))
-                    .map(|(p, top)| {
-                        format!("{p},{}", top.map_or("null".into(), |t| t.to_string()))
-                    }),
+                None => a.get("Dest").and_then(|d| self.goes(d)).map(|(p, top)| {
+                    format!("{p},{}", top.map_or("null".into(), |t| t.to_string()))
+                }),
             };
             if let Some(to) = to {
                 out.push(format!("[{rect},{to}]"));
             }
         }
         out
+    }
+
+    /// The document's outline (its bookmarks, hyperref's from the
+    /// sectioning) as JSON: `[{"t": title, "p": page, "y": top | null,
+    /// "k": [children]}]`, page from 0, top in points from that page's top
+    /// (an entry going nowhere: `"p": null`). Empty: `[]`.
+    #[must_use]
+    pub fn outline(&self) -> String {
+        let root = conv(&pdfread::Obj::Dict(self.doc.trailer.clone()));
+        let first = root
+            .get("Root")
+            .map(|r| self.resolve(r))
+            .and_then(|c| c.get("Outlines").map(|o| self.resolve(o)))
+            .and_then(|o| o.get("First").cloned());
+        let mut seen = std::collections::HashSet::new();
+        let mut out = String::new();
+        self.outline_items(first.as_ref(), &mut seen, &mut out);
+        out
+    }
+
+    /// The items from `first` on, along its `/Next`, each with its kids
+    /// (`seen`: each item once, against loops).
+    fn outline_items(
+        &self,
+        first: Option<&O>,
+        seen: &mut std::collections::HashSet<u32>,
+        out: &mut String,
+    ) {
+        out.push('[');
+        let mut at = first.cloned();
+        let mut n = 0;
+        while let Some(O::Ref(r)) = at {
+            if !seen.insert(r) {
+                break;
+            }
+            let item = self.resolve(&O::Ref(r));
+            let title = match item.get("Title").map(|t| self.resolve(t)) {
+                Some(O::Str(s)) => text_string(&s),
+                _ => String::new(),
+            };
+            let to = match item.get("A").map(|a| self.resolve(a)) {
+                Some(a) if matches!(a.get("S"), Some(O::Name(s)) if s == "GoTo") => {
+                    a.get("D").and_then(|d| self.goes(d))
+                }
+                Some(_) => None,
+                None => item.get("Dest").and_then(|d| self.goes(d)),
+            };
+            let (p, y) = to.map_or(("null".into(), "null".into()), |(p, y)| {
+                (p.to_string(), y.map_or("null".into(), |y| y.to_string()))
+            });
+            if n > 0 {
+                out.push(',');
+            }
+            let _ = write!(out, "{{\"t\":{},\"p\":{p},\"y\":{y},\"k\":", esc(&title));
+            self.outline_items(item.get("First"), seen, out);
+            out.push('}');
+            n += 1;
+            at = item.get("Next").cloned();
+        }
+        out.push(']');
     }
 
     /// The pages, in order: each page's dictionary.
@@ -1040,6 +1098,19 @@ impl G {
             fill_alpha: 1.0,
             stroke_alpha: 1.0,
         }
+    }
+}
+
+/// A PDF text string (a bookmark's title): UTF-16BE after its byte order
+/// mark (hyperref's with `unicode`), else `PDFDocEncoding`, read as Latin-1
+/// (where the two differ, in 0x18–0x1F and 0x80–0xA0, a few punctuation
+/// marks).
+fn text_string(s: &[u8]) -> String {
+    match s.strip_prefix(&[0xfe, 0xff]) {
+        Some(u) => char::decode_utf16(u.as_chunks::<2>().0.iter().map(|c| u16::from_be_bytes(*c)))
+            .map(|c| c.unwrap_or(char::REPLACEMENT_CHARACTER))
+            .collect(),
+        None => s.iter().map(|&b| char::from(b)).collect(),
     }
 }
 

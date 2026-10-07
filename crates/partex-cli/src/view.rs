@@ -1085,6 +1085,17 @@ fn answer(s: &Shared, req: &Value) -> String {
             let d = lock(&s.diagnostics).clone();
             let _ = write!(out, "true,\"json\":{{\"items\":{d}}}}}");
         }
+        // (the document's outline, its bookmarks, from the last build's
+        // PDF: `[{"t":title,"p":page,"y":top,"k":[…]}]`, for a contents
+        // sidebar; `[]` if it has none or there is no PDF yet)
+        "outline" => {
+            let pdf = lock(&s.pages).pdf.clone();
+            let items = pdf
+                .as_ref()
+                .and_then(phitex_draw::Pdf::open)
+                .map_or_else(|| "[]".to_owned(), |d| d.outline());
+            let _ = write!(out, "true,\"json\":{{\"items\":{items}}}}}");
+        }
         "set_file" | "trace" | "check" => out.push_str("true,\"json\":{\"ok\":true,\"ms\":0}}"),
         _ => {
             out.push_str("false,\"error\":");
