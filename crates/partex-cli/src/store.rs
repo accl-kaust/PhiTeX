@@ -13,7 +13,9 @@
 //! - `packs/<hash>.idx`: the pack's index, a blob hash, offset and length
 //!   per blob (16 + 8 + 4 bytes each).
 //! - `packs/<hash>.kids`: the blobs each of the pack's blobs refers to,
-//!   in the index's order (a count, then their hashes), in frames of
+//!   in the index's order (a count, then each blob: one written before it
+//!   in the same pack by its place in the index, others by their hashes;
+//!   LEB128 numbers, a place `2i`, a hash `1` and its 16 bytes), in frames of
 //!   about 4 MB, each a length and then its bytes kept as a blob is,
 //!   compressed or not (a save writes them as it goes): what a blob keeps
 //!   alive. A save keeps the blobs its root reaches, so a part saved
@@ -47,7 +49,7 @@ use std::sync::{Arc, OnceLock};
 use partex_core::StableHasher;
 
 /// The first bytes of a root.
-const ROOT_MAGIC: &[u8; 16] = b"partex-store/6\0\0";
+const ROOT_MAGIC: &[u8; 16] = b"partex-store/7\0\0";
 
 /// A blob as kept in a pack (see the module's comment).
 fn kept_form(b: &[u8], compress: bool) -> Vec<u8> {
@@ -277,8 +279,8 @@ fn kids_path(dir: &Path, name: u128) -> PathBuf {
 fn read_kids(dir: &Path, name: u128) -> Option<Vec<(u128, Vec<u128>)>> {
     let idx = read_index(dir, name)?;
     let file = std::fs::read(kids_path(dir, name)).ok()?;
-    let mut out = Vec::with_capacity(idx.len());
-    let mut hashes = idx.into_iter().map(|(h, _, _)| h);
+    let hashes: Vec<u128> = idx.into_iter().map(|(h, _, _)| h).collect();
+    let mut out: Vec<(u128, Vec<u128>)> = Vec::with_capacity(hashes.len());
     let mut f = 0;
     while f < file.len() {
         let len = u32::from_le_bytes(file.get(f..f + 4)?.try_into().ok()?) as usize;
@@ -286,20 +288,50 @@ fn read_kids(dir: &Path, name: u128) -> Option<Vec<(u128, Vec<u128>)>> {
         f += 4 + len;
         let mut at = 0;
         while at < b.len() {
-            let n = u32::from_le_bytes(b.get(at..at + 4)?.try_into().ok()?) as usize;
-            at += 4;
-            let kids = b
-                .get(at..at + n.checked_mul(16)?)?
-                .as_chunks::<16>()
-                .0
-                .iter()
-                .map(|c| u128::from_le_bytes(*c))
-                .collect();
-            at += n * 16;
-            out.push((hashes.next()?, kids));
+            let count = usize::try_from(leb(&b, &mut at)?).ok()?;
+            let mut kids = Vec::with_capacity(count.min(1 << 16));
+            for _ in 0..count {
+                let code = leb(&b, &mut at)?;
+                kids.push(if code == 1 {
+                    let hash = u128::from_le_bytes(b.get(at..at + 16)?.try_into().ok()?);
+                    at += 16;
+                    hash
+                } else {
+                    // (a blob before this one in the pack)
+                    let i = usize::try_from(code / 2).ok()?;
+                    (code % 2 == 0 && i < out.len()).then(|| hashes[i])?
+                });
+            }
+            out.push((*hashes.get(out.len())?, kids));
         }
     }
-    hashes.next().is_none().then_some(out)
+    (out.len() == hashes.len()).then_some(out)
+}
+
+/// A LEB128 number at `at` in `b` (moved past it).
+fn leb(b: &[u8], at: &mut usize) -> Option<u64> {
+    let mut n: u64 = 0;
+    let mut shift = 0;
+    loop {
+        let c = *b.get(*at)?;
+        *at += 1;
+        n |= u64::from(c & 0x7f).checked_shl(shift)?;
+        if c < 0x80 {
+            return Some(n);
+        }
+        shift += 7;
+    }
+}
+
+/// `n` as LEB128 at the end of `out`.
+fn put_leb(out: &mut Vec<u8>, mut n: u64) {
+    while n >= 0x80 {
+        #[allow(clippy::cast_possible_truncation)] // (the low seven bits)
+        out.push((n as u8) | 0x80);
+        n >>= 7;
+    }
+    #[allow(clippy::cast_possible_truncation)] // (less than 0x80)
+    out.push(n as u8);
 }
 
 fn root_path(dir: &Path, key: u128) -> PathBuf {
@@ -429,6 +461,8 @@ pub struct PackWriter {
     len: u64,
     /// What each new blob refers to.
     kids: Kids,
+    /// Each blob written so far, by its place in the index.
+    places: HashMap<u128, u32, ByName>,
     /// The first write that failed (the rest are not tried).
     error: Option<std::io::Error>,
     out: Saved,
@@ -465,6 +499,7 @@ impl PackWriter {
             index: Vec::new(),
             len: 0,
             kids: Kids::with_hasher(ByName::default()),
+            places: HashMap::with_hasher(ByName::default()),
             error: None,
             out: Saved::default(),
         })
@@ -496,15 +531,23 @@ impl PackWriter {
 
     /// Append blob `h`, kept as `b`, which refers to `kids`.
     fn put(&mut self, h: u128, b: &[u8], kids: &[u128]) -> std::io::Result<()> {
+        self.places
+            .insert(h, u32::try_from(self.index.len()).unwrap_or(u32::MAX));
         self.index
             .push((h, self.len, u32::try_from(b.len()).unwrap_or(u32::MAX)));
         self.file.write_all(b)?;
         self.name.write(b);
         self.len += b.len() as u64;
-        self.frame
-            .extend_from_slice(&u32::try_from(kids.len()).unwrap_or(0).to_le_bytes());
+        put_leb(&mut self.frame, kids.len() as u64);
         for k in kids {
-            self.frame.extend_from_slice(&k.to_le_bytes());
+            // (a blob of this pack by its place, 4 bytes or fewer, not 16)
+            match self.places.get(k) {
+                Some(&i) if *k != h => put_leb(&mut self.frame, 2 * u64::from(i)),
+                _ => {
+                    put_leb(&mut self.frame, 1);
+                    self.frame.extend_from_slice(&k.to_le_bytes());
+                }
+            }
         }
         if self.frame.len() >= KIDS_FRAME {
             self.write_frame()?;
