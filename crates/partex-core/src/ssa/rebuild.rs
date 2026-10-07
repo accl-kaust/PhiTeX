@@ -724,6 +724,12 @@ impl Steps {
         (!rest.is_empty()).then(|| (d.name, d.bytes.clone(), f.line_from, rest.to_vec()))
     }
 
+    /// [`place_key`] of [`Steps::end`]`(s)`, made without its copy.
+    fn end_key(&self, s: StepId) -> Option<PlaceKey> {
+        let (g, e) = self.inputs.get(s as usize)?.as_ref()?;
+        Some(e.mapped_key(&self.edits[*g..]))
+    }
+
     /// Step `s`'s result, in the source as it is now.
     fn end(&self, s: StepId) -> Option<InputState> {
         let (g, e) = self.inputs.get(s as usize)?.as_ref()?;
@@ -1002,6 +1008,26 @@ impl InputState {
         lower.chain([self.file.file.as_ref()])
     }
 
+    /// [`place_key`] of [`InputState::mapped`], made without the copy:
+    /// of the levels only the top two's line numbers are in the key.
+    fn mapped_key(&self, edits: &[Edit]) -> PlaceKey {
+        let mut k = place_key(self);
+        let mut top = self.file.file.clone();
+        let mut below = self
+            .in_open
+            .checked_sub(1)
+            .and_then(|j| self.v.files.files.get(j).cloned().flatten());
+        for e in edits {
+            if let Some(f) = top.as_mut().filter(|f| Arc::ptr_eq(&f.data, &e.old)) {
+                k.3 += e.map_file(f);
+            }
+            if let Some(f) = below.as_mut().filter(|f| Arc::ptr_eq(&f.data, &e.old)) {
+                k.4 += e.map_file(f);
+            }
+        }
+        k
+    }
+
     /// Put the input where this state has it.
     fn set<H: Host, T: Tracker>(&self, t: &mut Tex<H, T>) {
         t.fire_pending = self.fire;
@@ -1038,6 +1064,17 @@ impl InputState {
         let mut s = self.clone();
         for e in edits {
             for j in 0..=s.in_open {
+                // (each edit applies to the data it replaced; a level it
+                // does not apply to leaves the shared levels unshared)
+                let applies = if j == s.in_open {
+                    s.file.file.as_ref()
+                } else {
+                    s.v.files.files[j].as_ref()
+                }
+                .is_some_and(|f| Arc::ptr_eq(&f.data, &e.old));
+                if !applies {
+                    continue;
+                }
                 let at = if j == s.in_open {
                     s.file.file.as_mut()
                 } else {
@@ -1046,10 +1083,6 @@ impl InputState {
                 let Some(f) = at else {
                     continue;
                 };
-                // (each edit applies to the data it replaced)
-                if !Arc::ptr_eq(&f.data, &e.old) {
-                    continue;
-                }
                 let d = e.map_file(f);
                 // (the line of level j is the line number saved when the
                 // level above it opened)
@@ -3766,7 +3799,12 @@ fn meet<H: Host>(
     let r = tex.tracker.rec.borrow();
     let fold = &r.rt.fold;
     let from = fold.position(cur)? + 1;
+    // (the key first: [`same_place`] compares it before the rest)
+    let key = place_key(end);
     fold.order[from..].iter().take(LOOK_AHEAD).find_map(|&s| {
+        if r.st.steps.end_key(s)? != key {
+            return None;
+        }
         let e = r.st.steps.end(s)?;
         same_place(tex, end, &e).then_some((s, e))
     })
@@ -3817,8 +3855,8 @@ fn meet_far<H: Host>(
     let ends = ends.get_or_insert_with(|| {
         let mut m = Ends::new();
         for &s in &fold.order[from..] {
-            if let Some(e) = r.st.steps.end(s) {
-                m.entry(place_key(&e)).or_default().push(s);
+            if let Some(k) = r.st.steps.end_key(s) {
+                m.entry(k).or_default().push(s);
             }
         }
         m
