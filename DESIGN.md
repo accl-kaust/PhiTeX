@@ -217,7 +217,7 @@ the graph of chapter 3, not from a pipeline split.
   with `phitex --compat=NAME`, PhiTeX speaks that engine's web2c
   command line. Bare `phitex` is the modern command line:
   - `build` runs to the fixpoint, with BibTeX and makeindex in process;
-  - `watch` is the watch loop;
+  - `watch` is the watch loop (`--ssa`: on the SSA runtime, 4.9);
   - `check` makes one pass without writing;
   - `why` says what the last build did;
   - `trace` writes a Perfetto timeline;
@@ -3186,6 +3186,56 @@ changed page is asked for and sent (`PARTEX_VIEW_LOG=1` logs it).
 
 **Not done yet.** The watch runtimes record no glyph origins (4.4), so
 double-click and forward search find nothing yet.
+
+### 4.9 `phitex watch --ssa` (experimental, 2026-10-07)
+
+`phitex watch --ssa` (or `ssa = true` in `phitex.toml`) rebuilds on the
+dynamic-SSA runtime (3, `partex_core::ssa`), the engine the Overleaf
+extension runs, instead of machine mode (`modern/ssawatch.rs`). Everything
+around the runtime is the machine watch's: the terminal's lines (a rebuild
+line per save, `-v`'s `SSA built in …`/`SSA rebuilt in …` reports), the
+keys, the viewer and its events (4.8), the contents sidebar (read from the
+PDF), `--copy-pdf`, `-o`, `phitex why`'s record. It keeps no store: each
+`watch --ssa` starts with a cold SSA build, and says so in one line.
+
+- *The cold build* is the job on the runtime (`ssa::run_applying`), then
+  the trips that settle the job's own files (3.7, BibTeX and makeindex as
+  the build's nodes), driven one at a time (`ssa::settle` bounded to one
+  more trip, called again until it settles or `PARTEX_SSA_TRIPS` trips,
+  5): each trip is linked, written and shown as a machine watch's pass is
+  (`Progress::Settling`, the viewer's `settled` with `settling`). A trip's
+  end is idempotent (`trip_end` compares with the φ the trip read), so the
+  trips one at a time are the trips `settle` would run at once.
+- *An edit* is one trip (`ssa::rebuild_trips` with one trip at most, as
+  the extension's keystroke): its files are written and its pages shown
+  at once; the trips that follow run after it while nothing newer is
+  saved, as the extension's idle settle (`settle_idle`).
+- *Edits* are found by the files the build read (`NativeHost::read_paths`,
+  each with the stamp and bytes it was read with, `read_as`), polled every
+  `PARTEX_WATCH_POLL_MS` (50 ms; the TeX tree's files and the files not
+  found that appear every tenth look); the job's own files as the link
+  wrote them are not edits (`NativeHost::as_written`). The rebuild itself
+  finds what changed, by the host's checks of the loads (3.7).
+- *A newer save* stops the trip under way at the next step boundary:
+  `SsaTracker::cancel` is a poll of the project's inputs' stamps (at most
+  every poll period), and the stopped trip's work is pending (3.7, "A
+  rebuild stopped"); the watch says `superseded by FILE:LINE` and the next
+  rebuild goes on with that work and the new edit. Between trips a save is
+  looked for before the next begins. A cold build's first trip is not
+  stopped (a cancelled cold build would have to start over); a save during
+  it is found by its stamp afterwards.
+- *Cold again.* A rebuild the runtime cannot make (`unsupported`), or a
+  trip past its deadline (the last cold build's time, at least a second;
+  `PARTEX_SSA_DEADLINE_MS`, `0`: none), is built cold.
+- *Files.* The SSA link (`SsaLinker`) writes them, each renamed into place
+  whole in the watch (`atomic`: the bytes before the first change read
+  back, the link's after): the PDF on disk is always complete. The
+  terminal's text and the diagnostics are captured from the link
+  (`NativeHost::capture`), the pages counted from it.
+- *Tests.* e2e's `modern_watch_ssa` (three edits during the watch, each
+  settled against `pdflatex` run to its fixpoint) and
+  `modern_watch_ssa_preempt` (a save 0.6 s into a long rebuild supersedes
+  it within 2 s; the PDF never torn; settled as a cold build).
 
 ---
 

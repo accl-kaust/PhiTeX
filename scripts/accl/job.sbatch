@@ -8,6 +8,8 @@
 #   gate                 fmt --check, clippy -D warnings, cargo xtask check
 #   course <what> [...]  the course: plain | ssa | rebuild | label (tasks/course.sh)
 #   edits [ARGS...]      the SSA edit harness (scripts/ssa-edits ARGS)
+#   watch [COURSE] [N]   `phitex watch` against `watch --ssa` on the course
+#                        (tasks/watch.sh), N sessions each
 #   cmd <command...>     any command in the checkout (the course in $w/course,
 #                        its aux files in $w/aux; $w and $r are exported)
 #
@@ -110,6 +112,15 @@ case $task in
     cp -a "$HOME/code/tmp/np-course/aux" "$w/aux"
     status=0
     box "$w/tasks/course.sh" "$@" || status=$?
+    ;;
+  watch)
+    # (`phitex watch` and `watch --ssa` head to head, tasks/watch.sh; the
+    # course from ~/code/tmp/<first argument>, np-course/src by default)
+    box cargo build --release -p partex-cli -q
+    cp -a "$HOME/code/tmp/${1:-np-course/src}" "$w/course"
+    shift || true
+    status=0
+    box "$w/tasks/watch.sh" "$@" || status=$?
     ;;
   edits)
     box cargo build --release -p partex-cli -q

@@ -2197,18 +2197,52 @@ fn run_modern_xelatex(root: &Path, partex: &Path) -> Result<Vec<String>> {
     Ok(diffs)
 }
 
-/// `partex watch` (machine mode, its default) of `modern.tex` against
-/// `pdflatex` run to its fixpoint as latexmk would: the files after the
-/// first build, and after an edit (a word, then a new forward reference),
-/// must be identical; the watch must say it runs as a machine.
+/// How a watch case runs `phitex watch`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum WatchMode {
+    /// Machine mode, its default.
+    Machine,
+    /// Machine mode with the sanitizer.
+    Sanitized,
+    /// The checkpoint sessions (`--no-machine`).
+    Checkpoints,
+    /// The dynamic-SSA runtime (`--ssa`).
+    Ssa,
+}
+
+impl WatchMode {
+    /// The case's name, `base` with the mode's suffix.
+    fn name(self, base: &str) -> &'static str {
+        match (base, self) {
+            ("modern_watch", WatchMode::Machine) => "modern_watch",
+            ("modern_watch", WatchMode::Sanitized) => "modern_watch_sanitized",
+            ("modern_watch", _) => "modern_watch_ssa",
+            (_, WatchMode::Machine | WatchMode::Sanitized) => "modern_watch_preempt",
+            (_, WatchMode::Checkpoints) => "modern_watch_preempt_checkpoints",
+            (_, WatchMode::Ssa) => "modern_watch_ssa_preempt",
+        }
+    }
+
+    /// The `-v` report line of a rebuild, and of the first build.
+    fn reports(self) -> (&'static str, &'static str) {
+        match self {
+            WatchMode::Ssa => ("SSA rebuilt in", "SSA built in"),
+            _ => ("Machine rebuilt in", "Machine built in"),
+        }
+    }
+}
+
+/// `partex watch` (machine mode, its default; or on the SSA runtime,
+/// `--ssa`) of `modern.tex` against `pdflatex` run to its fixpoint as
+/// latexmk would: the files after the first build, and after an edit (a
+/// word, then a new forward reference), must be identical; the watch must
+/// say it runs as a machine (or on the SSA runtime).
 #[allow(clippy::too_many_lines)] // (one scripted session, kept whole)
-fn run_modern_watch(root: &Path, partex: &Path, sanitize: bool) -> Result<Vec<String>> {
+fn run_modern_watch(root: &Path, partex: &Path, mode: WatchMode) -> Result<Vec<String>> {
+    let sanitize = mode == WatchMode::Sanitized;
+    let (rebuilt, built) = mode.reports();
     let case = Converge {
-        name: if sanitize {
-            "modern_watch_sanitized"
-        } else {
-            "modern_watch"
-        },
+        name: mode.name("modern_watch"),
         oracle: "pdflatex",
         inputs: &["modern.tex"],
         ini: &[],
@@ -2238,10 +2272,10 @@ fn run_modern_watch(root: &Path, partex: &Path, sanitize: bool) -> Result<Vec<St
         // (its own: `modern` may be making its formats at the same time)
         .env(
             "PARTEX_FORMATS",
-            root.join(if sanitize {
-                "target/e2e-formats-watch-sanitized"
-            } else {
-                "target/e2e-formats-watch"
+            root.join(match mode {
+                WatchMode::Sanitized => "target/e2e-formats-watch-sanitized",
+                WatchMode::Ssa => "target/e2e-formats-watch-ssa",
+                _ => "target/e2e-formats-watch",
             }),
         )
         .env("NO_COLOR", "1")
@@ -2254,7 +2288,11 @@ fn run_modern_watch(root: &Path, partex: &Path, sanitize: bool) -> Result<Vec<St
         // build of the same inputs)
         .env("PARTEX_MACHINE_SANITIZE", if sanitize { "1" } else { "0" })
         .current_dir(&p)
-        .args(["watch", "-v", "modern.tex"])
+        .args(if mode == WatchMode::Ssa {
+            &["watch", "--ssa", "-v", "modern.tex"][..]
+        } else {
+            &["watch", "-v", "modern.tex"][..]
+        })
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
@@ -2310,7 +2348,7 @@ fn run_modern_watch(root: &Path, partex: &Path, sanitize: bool) -> Result<Vec<St
         }
         oracle_passes(&case, &o, &o, &args)?;
         let _ = fs::remove_file(o.join("bibterm.txt"));
-        wait("Machine rebuilt in")?;
+        wait(rebuilt)?;
         diffs.extend(
             compare(&o, &p, true)?
                 .into_iter()
@@ -2322,11 +2360,11 @@ fn run_modern_watch(root: &Path, partex: &Path, sanitize: bool) -> Result<Vec<St
     }
     child.wait()?;
     ensure!(
-        report.contains("Machine built in"),
-        "phitex watch did not run in machine mode"
+        report.contains(built),
+        "phitex watch did not run in its mode (no `{built}`)"
     );
     ensure!(
-        report.contains("Machine rebuilt in"),
+        report.contains(rebuilt),
         "phitex watch did not rebuild incrementally"
     );
     Ok(diffs)
@@ -2377,23 +2415,20 @@ fn preempt_document(sections: usize, paras: usize) -> String {
 }
 
 /// A save while `phitex watch` rebuilds (DESIGN 4.8, "A save during a
-/// rebuild"), in machine mode (its default) and with checkpoints
-/// (`--no-machine`): a long document is edited where every later page
-/// moves (a long rebuild, its passes settling the table of contents and
-/// the references), and saved again a moment later. The newer save must
-/// supersede the rebuild under way quickly (machine mode at a region
+/// rebuild"), in machine mode (its default), with checkpoints
+/// (`--no-machine`) and on the SSA runtime (`--ssa`): a long document is
+/// edited where every later page moves (a long rebuild, its passes
+/// settling the table of contents and the references), and saved again a
+/// moment later. The newer save must supersede the rebuild under way
+/// quickly (machine mode at a region boundary, SSA mode at a step
 /// boundary; checkpoints at the next pass), the PDF on disk must be a
 /// complete PDF whenever it is looked at, and once settled every file must
 /// be pdfLaTeX's run to its fixpoint on the final source, as a cold build
 /// gives it.
 #[allow(clippy::too_many_lines)] // (one scripted session, kept whole)
-fn run_modern_watch_preempt(root: &Path, partex: &Path, machine: bool) -> Result<Vec<String>> {
+fn run_modern_watch_preempt(root: &Path, partex: &Path, mode: WatchMode) -> Result<Vec<String>> {
     let case = Converge {
-        name: if machine {
-            "modern_watch_preempt"
-        } else {
-            "modern_watch_preempt_checkpoints"
-        },
+        name: mode.name("modern_watch_preempt"),
         oracle: "pdflatex",
         inputs: &[],
         ini: &[],
@@ -2419,7 +2454,14 @@ fn run_modern_watch_preempt(root: &Path, partex: &Path, machine: bool) -> Result
     let mut cmd = Command::new(partex);
     cmd.env("PARTEX_CACHE_DIR", work.join("cache"))
         // (its own: other cases may be making theirs at the same time)
-        .env("PARTEX_FORMATS", root.join("target/e2e-formats-preempt"))
+        .env(
+            "PARTEX_FORMATS",
+            root.join(if mode == WatchMode::Ssa {
+                "target/e2e-formats-preempt-ssa"
+            } else {
+                "target/e2e-formats-preempt"
+            }),
+        )
         .env("NO_COLOR", "1")
         .env("SOURCE_DATE_EPOCH", "1758800000")
         .env("FORCE_SOURCE_DATE", "1")
@@ -2429,10 +2471,16 @@ fn run_modern_watch_preempt(root: &Path, partex: &Path, machine: bool) -> Result
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
-    if machine {
-        cmd.args(["watch", "-v", "--no-view", "preempt.tex"]);
-    } else {
-        cmd.args(["watch", "-v", "--no-view", "--no-machine", "preempt.tex"]);
+    match mode {
+        WatchMode::Checkpoints => {
+            cmd.args(["watch", "-v", "--no-view", "--no-machine", "preempt.tex"]);
+        }
+        WatchMode::Ssa => {
+            cmd.args(["watch", "--ssa", "-v", "--no-view", "preempt.tex"]);
+        }
+        WatchMode::Machine | WatchMode::Sanitized => {
+            cmd.args(["watch", "-v", "--no-view", "preempt.tex"]);
+        }
     }
     let mut child = cmd.spawn()?;
     let (tx, rx) = std::sync::mpsc::channel();
@@ -2544,9 +2592,14 @@ fn run_modern_watch_preempt(root: &Path, partex: &Path, machine: bool) -> Result
         "    (superseded {:.0} ms after the second save; the PDF looked at {looks} times)",
         took.as_secs_f64() * 1e3
     );
-    // (machine mode stops at the next region boundary: well within a
-    // second even here; checkpoints at the next pass)
-    let bound = if machine { 2.0 } else { 120.0 };
+    // (machine mode stops at the next region boundary, SSA mode at the
+    // next step boundary: well within a second even here; checkpoints at
+    // the next pass)
+    let bound = if mode == WatchMode::Checkpoints {
+        120.0
+    } else {
+        2.0
+    };
     ensure!(
         took.as_secs_f64() < bound,
         "the second save superseded the rebuild only after {:.1} s",
@@ -2944,22 +2997,18 @@ pub fn run(root: &Path, args: &[String]) -> Result<()> {
     ));
     jobs.push(("synctex", Box::new(move || run_synctex(root, partex))));
     jobs.push(("display", Box::new(move || run_display(root, partex))));
-    jobs.push((
-        "modern_watch",
-        Box::new(move || run_modern_watch(root, partex, false)),
-    ));
-    jobs.push((
-        "modern_watch_sanitized",
-        Box::new(move || run_modern_watch(root, partex, true)),
-    ));
-    jobs.push((
-        "modern_watch_preempt",
-        Box::new(move || run_modern_watch_preempt(root, partex, true)),
-    ));
-    jobs.push((
-        "modern_watch_preempt_checkpoints",
-        Box::new(move || run_modern_watch_preempt(root, partex, false)),
-    ));
+    for mode in [WatchMode::Machine, WatchMode::Sanitized, WatchMode::Ssa] {
+        jobs.push((
+            mode.name("modern_watch"),
+            Box::new(move || run_modern_watch(root, partex, mode)),
+        ));
+    }
+    for mode in [WatchMode::Machine, WatchMode::Checkpoints, WatchMode::Ssa] {
+        jobs.push((
+            mode.name("modern_watch_preempt"),
+            Box::new(move || run_modern_watch_preempt(root, partex, mode)),
+        ));
+    }
     jobs.retain(|(name, _)| filter.is_none_or(|f| name.contains(f)));
     let ran = jobs.len();
     let width = std::thread::available_parallelism().map_or(4, std::num::NonZero::get);

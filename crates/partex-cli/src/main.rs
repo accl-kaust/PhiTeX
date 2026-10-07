@@ -1971,6 +1971,27 @@ struct SsaLinker {
     /// The last spliced link's times in ns: every step's chunks gathered
     /// (a full resolution), and the resolution with it.
     virt_ns: (u64, u64),
+    /// Each file written into place whole, through a file beside it
+    /// renamed over it (`phitex watch --ssa`: a reader, the viewer, never
+    /// sees half a PDF), not patched from its first changed byte.
+    atomic: bool,
+    /// The files the links wrote, by the name each was written under, with
+    /// its length; the streams `write_produced` wrote too.
+    outputs: std::collections::BTreeMap<Vec<u8>, usize>,
+    /// The pages of the last link, by `\count0`.
+    pages: Vec<i32>,
+}
+
+/// Write `bytes` to the file at `path` through a file beside it renamed
+/// over it: a reader finds the old file or the new, whole.
+fn write_atomic(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    let mut tmp = path.as_os_str().to_owned();
+    tmp.push(".phitex-new");
+    let tmp = std::path::PathBuf::from(tmp);
+    std::fs::write(&tmp, bytes)?;
+    std::fs::rename(&tmp, path).inspect_err(|_| {
+        let _ = std::fs::remove_file(&tmp);
+    })
 }
 
 /// What a link cost, for the reports.
@@ -2011,6 +2032,7 @@ impl SsaLinker {
             let n = host.in_output_dir(&name).unwrap_or(name);
             let p = native::path(&n);
             let _ = match &bytes {
+                Some(b) if self.atomic => write_atomic(&p, b),
                 Some(b) => std::fs::write(&p, b),
                 None => std::fs::remove_file(&p),
             };
@@ -2023,10 +2045,19 @@ impl SsaLinker {
                 continue;
             }
             let host = tex.host_mut();
-            if let Some((w, written)) = host.open_write(&name, partex_core::host::FileKind::Other) {
+            if self.atomic {
+                let n = host.in_output_dir(&name).unwrap_or_else(|| name.clone());
+                if write_atomic(&native::path(&n), &bytes).is_ok() {
+                    host.note_written(&n);
+                    self.outputs.insert(n, bytes.len());
+                }
+            } else if let Some((w, written)) =
+                host.open_write(&name, partex_core::host::FileKind::Other)
+            {
                 host.write(w, &bytes);
                 host.close(w);
                 host.note_written(&written);
+                self.outputs.insert(written, bytes.len());
             }
             self.produced.insert(name, v);
         }
@@ -2097,6 +2128,7 @@ impl SsaLinker {
         remove_files(host, &removed);
         host.term_write(&out.term);
         self.splice.each_diagnostic(&mut |d| host.diagnostic(d));
+        self.pages = self.splice.pages();
         let t_end = clock();
         let st = self.splice.stats;
         let checked = check.then(|| ms(t_check - t_link));
@@ -2309,6 +2341,7 @@ impl SsaLinker {
         for d in &l.diagnostics {
             host.diagnostic(d);
         }
+        self.pages.clone_from(&l.pages);
         let t_end = origin.elapsed();
         LinkReport {
             how: format!(
@@ -2456,6 +2489,38 @@ impl SsaLinker {
                 (true, Some(x)) => x,
                 (false, _) => 0,
             };
+            if self.atomic {
+                // (the bytes before the first change as they are on disk,
+                // then the link's: the whole file, renamed into place)
+                let keep = usize::try_from(from).unwrap_or(usize::MAX);
+                let mut buf = if from > 0 {
+                    std::fs::read(&path).unwrap_or_default()
+                } else {
+                    Vec::new()
+                };
+                let from = if buf.len() >= keep { from } else { 0 };
+                buf.truncate(usize::try_from(from).unwrap_or(usize::MAX));
+                self.splice
+                    .write_from(id, from, &mut |b| buf.extend_from_slice(b));
+                buf.truncate(usize::try_from(len).unwrap_or(usize::MAX));
+                if write_atomic(&path, &buf).is_err() {
+                    continue;
+                }
+                if from > 0 {
+                    w.patched += 1;
+                } else {
+                    w.whole += 1;
+                }
+                w.bytes += len - from;
+                let t = std::fs::metadata(&path)
+                    .ok()
+                    .and_then(|m| m.modified().ok());
+                host.note_written(&at);
+                self.outputs
+                    .insert(at, usize::try_from(len).unwrap_or(usize::MAX));
+                self.written.insert(name, (id, len, t));
+                continue;
+            }
             let file = if from == 0 {
                 std::fs::File::create(&path)
             } else {
@@ -2484,6 +2549,8 @@ impl SsaLinker {
             let t = file.metadata().ok().and_then(|m| m.modified().ok());
             drop(file);
             host.note_written(&at);
+            self.outputs
+                .insert(at, usize::try_from(len).unwrap_or(usize::MAX));
             self.written.insert(name, (id, len, t));
         }
         w
@@ -2499,10 +2566,18 @@ impl SsaLinker {
         let (mut files, mut bytes_out) = (0, 0);
         for (name, id, kind, _) in self.names(host, &l.opened) {
             let bytes = l.files.get(&id).map_or(&[][..], Vec::as_slice);
-            if let Some((w, written)) = host.open_write(&name, kind) {
+            if self.atomic && kind != partex_core::host::FileKind::XdvPipe {
+                let n = native::with_suffix(&name, kind);
+                let at = host.in_output_dir(&n).unwrap_or(n);
+                if write_atomic(&native::path(&at), bytes).is_ok() {
+                    host.note_written(&at);
+                    self.outputs.insert(at, bytes.len());
+                }
+            } else if let Some((w, written)) = host.open_write(&name, kind) {
                 host.write(w, bytes);
                 host.close(w);
                 host.note_written(&written);
+                self.outputs.insert(written, bytes.len());
             }
             files += 1;
             bytes_out += bytes.len();
