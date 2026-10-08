@@ -4160,6 +4160,30 @@ pub struct NameId(u32);         // interned from a 64-bit content hash of the sp
 - Forces it: `\def`, `\let`, registers, catcodes as names; groups that
   open in one paragraph and close in another; `\global`.
 
+**The name index, as built (checkpoint 3b).**
+- *One record per definition.* `NameTab::recs` holds 32-byte records:
+  name, step, ordinal in the step, source, selector, group and global.
+  A step's definitions are a range of it, and each name's list holds
+  4-byte indices into it, in position order. A step whose definitions
+  change gets a new range; the old one stays until compaction rebuilds
+  the records and remaps the lists. An import (a segment's name read
+  from before it) is a record at the root that no step holds.
+- *Lists in runs.* Each name's definition and reader lists are blocks
+  of at most 256 entries with their start indices (`graph/runs.rs`).
+  Finding a place is a binary search over the blocks and then inside
+  one. Inserting or removing moves at most one block's entries plus
+  the block starts after it. So a name read or defined a million times
+  costs O(log R + 256) per change, not O(R).
+- *Bounded re-resolution.* After a definition of `m` changes at `p`, the
+  only readers that can resolve differently are those before the next
+  definition of `m`, in a later anchor, that is alive to the end
+  (global, or in no group): every reader past it reaches it or a later
+  one. Only that run of readers is visited. A name with no reader after
+  `p` costs one comparison.
+- *Reader entries leave where they are.* When a node's operands change
+  or it is removed, its entries are found by anchor and removed, rather
+  than the whole list being pruned at the run's end.
+
 ### 7.6 Persistent sequences and scans (primitives 4 and 5)
 
 ```rust
@@ -4695,6 +4719,46 @@ constant and the step), whether or not it is kept.
     are the byte diet: one definition record indexed by the name
     lists, a 40-byte step record, and narrower headers. They cut the
     graft and the cold build alike.
+
+### 7.19 Measured (checkpoint 3b, the name index and the diet)
+
+On accl, the same benches as 7.18.
+
+| | before (7.18) | now | target |
+|---|---|---|---|
+| first edit in a sealed run, 1 M steps, max | 45 ms | 1.09 ms | ≤ 2 ms: met |
+| the same, median | 839 µs | 132 µs | |
+| second edit beside it, median | 40 µs | 9 µs | |
+| cold build k = 10, sequential | 70.8 ns/node | 71.9 ns/node | ≤ 50: missed |
+| cold build k = 20 | 53.3 | 56.0 | |
+| W = 4, k = 10 | 3.38× | 3.29× | |
+| W = 8, k = 10 | 3.58× | 6.29× | ≥ 4.8×: met |
+| W = 8, k = 20 | 4.71× | 6.96× | |
+| retained, 1 M steps sealed | 1.7 B/node | 1.5 B/node | |
+
+- *The 45 ms* was not the name lists alone. At 1 M steps `Seq::diff`
+  fell back to element-by-element comparison whenever a splice had
+  changed a subtree's shape (69 ms for one edit). It now walks both
+  trees with a stack per side and skips subtrees shared by pointer at
+  any depth. A splice copies only its path, so that is O(log n). The
+  rest was the O(R) list shifts (now runs) and the first edit after a
+  compaction rebuilding the step index (compaction now keeps it).
+- *W = 8:* the graft lost its per-read re-resolution: a segment's reads
+  from before it all resolve as at its start, so each name is resolved
+  once. Definitions now cost one 32-byte record plus a 4-byte index
+  instead of 72 bytes.
+- *Cold build:* 8,600 instructions per k = 10 step, at IPC about 3 on
+  accl. Where they go:
+  - emissions: about 320 each (12 per step: records, eager
+    evaluation 80, sweep visit 36);
+  - the step's own work: about 2,000 (its node and record, the
+    successor's, operands and reverse edges, a definition, a reader
+    entry, three name lookups at 125 each).
+
+  50 ns/node would mean about 6,000 instructions a step. The remaining
+  cuts are each a few percent (smaller emission records, a sweep that
+  skips leaves done at emission, a cheaper `Args::get`), so it is not
+  pursued until the TeX layer's step shapes say which costs matter.
 
 ### 7.17 Dependencies
 
