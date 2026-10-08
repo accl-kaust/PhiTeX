@@ -164,6 +164,9 @@ fn main() {
     for _ in 0..runs {
         let mut g: Graph<B> = Graph::new();
         g.cfg.workers = w;
+        if std::env::var("RESERVE").is_ok() {
+            g.reserve(2 * n + 16, 4 * n);
+        }
         let input = g.input(V::S(Box::new(s.clone())));
         let init = g.input(V::Nil);
         let t = Instant::now();

@@ -3444,12 +3444,6 @@ struct Grafting<L: Lang> {
     ended: bool,
 }
 
-/// A segment's private graph, its unfold, and how its chain ended.
-struct SegOut<L: Lang> {
-    g: Graph<L>,
-    u: u32,
-}
-
 impl<L: Lang> Graph<L> {
     /// Speculative entry (DESIGN 7.4): the chain of `u` stopped at its
     /// first entry; run a segment from each entry on the workers, graft
@@ -3525,7 +3519,7 @@ impl<L: Lang> Graph<L> {
             p.unfolds[pui].start = Some((seg.2, seg.0));
             p.unfolds[pui].stop = seg.1;
             p.run();
-            SegOut { g: p, u: pu }
+            p.pack(pu)
         };
         let mut st = Grafting {
             tail: parked.s,
@@ -3559,13 +3553,24 @@ impl<L: Lang> Graph<L> {
                     });
                 }
                 drop(tx);
-                let mut waiting: std::collections::BTreeMap<usize, SegOut<L>> =
+                let mut waiting: std::collections::BTreeMap<usize, Pack<L>> =
                     std::collections::BTreeMap::new();
                 let mut want = 0;
                 for (k, out) in rx {
                     waiting.insert(k, out);
                     while let Some(o) = waiting.remove(&want) {
-                        self.graft_next(u, &mut st, &o);
+                        if want == 0 {
+                            // (room for the segments to come, as big as the
+                            // first: the tables then grow without copying)
+                            let n = segs.len();
+                            self.n.h.reserve(n * o.hdrs.len());
+                            self.n.val.reserve(n * o.vals.len());
+                            self.n.opds.reserve(n * o.opds.len());
+                            self.n.revs.reserve(n * o.opds.len());
+                            self.steps.reserve(n * o.steps.len());
+                            self.step_defs.reserve(n * o.defs.len());
+                        }
+                        self.graft_next(u, &mut st, o);
                         want += 1;
                     }
                 }
@@ -3575,12 +3580,12 @@ impl<L: Lang> Graph<L> {
         }
         for seg in &segs {
             let o = job(seg);
-            self.graft_next(u, &mut st, &o);
+            self.graft_next(u, &mut st, o);
         }
         self.arrive(u, ui, st);
     }
 
-    fn graft_next(&mut self, u: u32, st: &mut Grafting<L>, out: &SegOut<L>) {
+    fn graft_next(&mut self, u: u32, st: &mut Grafting<L>, out: Pack<L>) {
         if st.ended {
             return;
         }
@@ -3650,272 +3655,489 @@ impl<L: Lang> Graph<L> {
         self.names.readers.push(Vec::new());
         id
     }
+}
 
-    /// Graft a segment's steps (and everything under them) after `tail`,
-    /// the last step of `u`: the first and last steps grafted, and where
-    /// the segment stopped (`None`: it ended).
+/// A segment made ready to graft, on the worker that ran it (DESIGN
+/// 7.15): its nodes under its unfold numbered from 0 in their order,
+/// every reference inside it relative, values moved out; what crosses
+/// its edge listed apart. Grafting it is then an append with the ids
+/// shifted.
+struct Pack<L: Lang> {
+    hdrs: Vec<Hdr<L::Op>>,
+    vals: Vec<L::Val>,
+    /// Operands: `src` relative with [`REL`] set, or [`NONE`]; `name`
+    /// the segment's.
+    opds: Vec<Opd>,
+    /// Operands that are the unfold's operand `k` here.
+    outer: Vec<(u32, u16)>,
+    /// Operands read from before the segment by name: (operand, its
+    /// node, the version it read there).
+    named: Vec<(u32, u32, Ver)>,
+    steps: Vec<StepInfo>,
+    unfolds: Vec<UnfoldInfo<L::Val>>,
+    scans: Vec<ScanInfo<L::Val>>,
+    defs: Vec<DefRec>,
+    closes: Vec<(u32, Vec<u64>)>,
+    groups: Vec<(u64, Group)>,
+    /// Nodes the registries list (cross reads, chain and family reads,
+    /// classes but pure).
+    regs: Vec<u32>,
+    fams: Vec<(u32, u32)>,
+    /// The top steps, in chain order.
+    tops: Vec<u32>,
+    spell: Vec<Box<[u8]>>,
+    end: Option<Parked>,
+    depth: u16,
+}
+
+/// A relative id in a [`Pack`] (where an absolute one may stand too).
+const REL: u32 = 0x8000_0000;
+/// The segment's unfold, in a [`Pack`].
+const UP: u32 = NONE - 1;
+
+impl<L: Lang> Graph<L> {
+    /// This segment graph, made ready to graft (on its worker).
     #[allow(clippy::too_many_lines, reason = "one pass per table, in order")]
-    fn graft(&mut self, u: u32, tail: u32, out: &SegOut<L>) -> Option<(u32, u32, Option<Parked>)> {
-        let p = &out.g;
-        let pu = out.u;
-        let psteps = p.children(pu);
-        if psteps.is_empty() {
-            return None;
-        }
-        let ui = self.n.h[u as usize].aux as usize;
-        let mut map = SegMap(vec![NONE; p.n.h.len()]);
-        // the segment's root inputs are the unfold's operands here
-        let puo = p.n.opds_of(pu);
-        let uo: Vec<Opd> = self.n.opds_of(u).to_vec();
-        let mut outer: Map<u32, Opd> = Map::default();
-        for (k, o) in puo.iter().enumerate() {
-            outer.insert(o.src, uo[k]);
-        }
-        let imports: Map<u32, u64> = p.imports.iter().map(|(&h, &n)| (n, h)).collect();
-        let names: Vec<u32> = (0..p.names.spell.len())
-            .map(|m| self.intern(&p.names.spell[m]))
-            .collect();
-        // allocate, in order
-        let mut order: Vec<u32> = Vec::new();
-        let mut firsts: Map<u32, u32> = Map::default();
-        let mut last = tail;
-        for &ps in &psteps {
-            let ord = self.step_ord(u, last, NONE);
-            let ms = self.copy_node(p, ps, u, ord);
-            self.n.h[last as usize].next = ms;
-            last = ms;
-            map.insert(ps, ms);
-            order.push(ps);
-            let mut stack = vec![ps];
-            while let Some(x) = stack.pop() {
-                let kids = p.children(x);
-                let mut prev_m = NONE;
-                for &c in &kids {
-                    let mc = self.copy_node(p, c, map[&x], p.n.h[c as usize].ord);
-                    map.insert(c, mc);
-                    order.push(c);
-                    if prev_m == NONE {
-                        firsts.insert(map[&x], mc);
-                    } else {
-                        self.n.h[prev_m as usize].next = mc;
-                    }
-                    prev_m = mc;
-                }
-                stack.extend(kids.iter().rev());
+    #[allow(clippy::cast_possible_truncation, reason = "ids and arenas fit u32")]
+    fn pack(mut self, pu: u32) -> Pack<L> {
+        let p = &mut self;
+        let np = p.n.h.len();
+        let dpu = p.n.h[pu as usize].depth;
+        let mut map = vec![NONE; np];
+        let mut k = 0u32;
+        for (x, h) in p.n.h.iter().enumerate().skip(1) {
+            if h.flags & DEAD == 0 && h.depth > dpu {
+                map[x] = k;
+                k += 1;
             }
         }
-        self.n.h[last as usize].next = NONE;
-        let remap_grp = |g: u64, map: &SegMap| -> u64 {
-            if g == NOGROUP {
-                return g;
+        debug_assert!(k < REL, "a segment of fewer than 2^31 nodes");
+        let rel = |x: u32| -> u32 {
+            if x == NONE {
+                NONE
+            } else if x == pu {
+                UP
+            } else {
+                map[x as usize]
             }
-            let st = (g >> 32) as u32;
-            map.get(&st)
-                .map_or(g, |&m| (u64::from(m) << 32) | (g & 0xffff_ffff))
         };
-        // groups first (definitions' lives depend on them)
-        for (&g, gr) in &p.groups {
-            let st = (g >> 32) as u32;
-            if !map.contains_key(&st) {
+        let inside = |x: u32| x != NONE && x != pu && map[x as usize] != NONE;
+        let encg = |g: u64| -> u64 {
+            let hi = (g >> 32) as u32;
+            if g == NOGROUP || !inside(hi) {
+                g
+            } else {
+                (u64::from(map[hi as usize] | REL) << 32) | (g & 0xffff_ffff)
+            }
+        };
+        let puo = p.n.opds_of(pu).to_vec();
+        let mut pval = std::mem::take(&mut p.n.val);
+        let count = k as usize;
+        let mut pk = Pack {
+            hdrs: Vec::with_capacity(count),
+            vals: Vec::with_capacity(count),
+            opds: Vec::new(),
+            outer: Vec::new(),
+            named: Vec::new(),
+            steps: Vec::new(),
+            unfolds: Vec::new(),
+            scans: Vec::new(),
+            defs: Vec::new(),
+            closes: Vec::new(),
+            groups: Vec::new(),
+            regs: Vec::new(),
+            fams: Vec::new(),
+            tops: Vec::new(),
+            spell: Vec::new(),
+            end: None,
+            depth: dpu,
+        };
+        for x in 1..np {
+            let r = map[x];
+            if r == NONE {
                 continue;
             }
-            let ng = Group {
-                parent: remap_grp(gr.parent, &map),
-                close: gr.close.map(|c| Pos {
-                    parent: map.get(&c.parent).copied().unwrap_or(c.parent),
-                    ord: c.ord,
-                }),
-                names: gr.names.iter().map(|&m| names[m as usize]).collect(),
-            };
-            self.groups.insert(remap_grp(g, &map), ng);
-        }
-        // side tables and definitions
-        let mut dirty: Vec<u32> = Vec::new();
-        for &x in &order {
-            let mx = map[&x];
-            let xu = x as usize;
-            match p.n.h[xu].kind {
+            let mut h = p.n.h[x];
+            h.parent = rel(h.parent);
+            h.next = rel(h.next);
+            h.flags &= !(DIRTY | QUEUED);
+            h.rd = NONE;
+            let a0 = pk.opds.len() as u32;
+            let (pa0, pan) = (p.n.h[x].a0 as usize, p.n.h[x].an as usize);
+            for o in &p.n.opds[pa0..pa0 + pan] {
+                let i = pk.opds.len() as u32;
+                if inside(o.src) {
+                    pk.opds.push(Opd {
+                        src: map[o.src as usize] | REL,
+                        sel: o.sel,
+                        name: o.name,
+                    });
+                } else if let Some(kk) = puo.iter().position(|u| u.src == o.src && o.src != NONE)
+                    && o.name == NONE
+                {
+                    pk.opds.push(Opd {
+                        src: NONE,
+                        sel: o.sel,
+                        name: NONE,
+                    });
+                    pk.outer.push((i, kk as u16));
+                } else if o.name == NONE {
+                    debug_assert!(
+                        o.src == NONE,
+                        "a segment reads only itself, its inputs and names"
+                    );
+                    pk.opds.push(*o);
+                } else {
+                    // (from before the segment: what it read there, a root
+                    // of the segment's graph, whose value stays in `pval`)
+                    let was = if o.src == NONE {
+                        p.n.absent.ver()
+                    } else {
+                        o.sel.ver(&pval[o.src as usize])
+                    };
+                    pk.opds.push(Opd {
+                        src: NONE,
+                        sel: o.sel,
+                        name: o.name,
+                    });
+                    pk.named.push((i, r, was));
+                }
+            }
+            h.a0 = a0;
+            match h.kind {
                 Kind::Step => {
-                    let si = &p.steps[p.n.h[xu].aux as usize];
-                    let owner = self.n.h[mx as usize].parent;
-                    let defs: Vec<DefRec> = p.step_defs[si.d0 as usize..(si.d0 + si.dn) as usize]
-                        .iter()
-                        .map(|d| DefRec {
-                            name: names[d.name as usize],
+                    let si = &p.steps[h.aux as usize];
+                    let d0 = pk.defs.len() as u32;
+                    for d in &p.step_defs[si.d0 as usize..(si.d0 + si.dn) as usize] {
+                        pk.defs.push(DefRec {
+                            name: d.name,
                             sub: d.sub,
-                            src: if d.src == NONE {
-                                NONE
+                            src: if inside(d.src) {
+                                map[d.src as usize] | REL
                             } else {
-                                map.get(&d.src).copied().unwrap_or(NONE)
+                                NONE
                             },
                             sel: d.sel,
-                            group: remap_grp(d.group, &map),
+                            group: encg(d.group),
                             global: d.global,
-                        })
-                        .collect();
-                    let info = StepInfo {
-                        unfold: owner,
-                        first: firsts.get(&mx).copied().unwrap_or(NONE),
+                        });
+                    }
+                    pk.steps.push(StepInfo {
+                        unfold: rel(si.unfold),
+                        first: rel(si.first),
                         key: si.key,
                         at: si.at,
                         took: si.took,
-                        grp_in: remap_grp(si.grp_in, &map),
+                        grp_in: encg(si.grp_in),
                         in_ver: si.in_ver,
-                        d0: u32::try_from(self.step_defs.len()).expect("definitions fit u32"),
+                        d0,
                         dn: si.dn,
-                    };
-                    if let Some(cl) = p.closes.get(&x) {
-                        self.closes
-                            .insert(mx, cl.iter().map(|&g| remap_grp(g, &map)).collect());
+                    });
+                    if let Some(cl) = p.closes.get(&(x as u32)) {
+                        pk.closes.push((r, cl.iter().map(|&g| encg(g)).collect()));
                     }
-                    for d in &defs {
-                        let e = DefEntry {
-                            pos: Pos {
-                                parent: mx,
-                                ord: d.sub,
-                            },
-                            src: d.src,
-                            sel: d.sel,
-                            group: d.group,
-                            global: d.global,
-                        };
-                        self.insert_def(d.name, e);
-                    }
-                    let oi = self.n.h[owner as usize].aux as usize;
-                    if self.unfolds[oi].indexed {
-                        self.unfolds[oi].keys.insert(info.key, mx);
-                        if info.took > 0 {
-                            self.unfolds[oi].owners.insert(info.at, mx);
-                        }
-                    }
-                    self.n.h[mx as usize].aux = self.steps.len() as u64;
-                    self.steps.push(info);
-                    self.step_defs.extend(defs);
+                    h.aux = (pk.steps.len() - 1) as u64;
                 }
                 Kind::Unfold => {
-                    let pi = &p.unfolds[p.n.h[xu].aux as usize];
-                    self.n.h[mx as usize].aux = self.unfolds.len() as u64;
-                    self.unfolds.push(UnfoldInfo {
-                        first: firsts.get(&mx).copied().unwrap_or(NONE),
+                    let pi = &mut p.unfolds[h.aux as usize];
+                    pk.unfolds.push(UnfoldInfo {
+                        first: rel(pi.first),
                         indexed: false,
                         keys: Map::default(),
                         owners: Map::default(),
-                        input: pi.input.clone(),
+                        input: pi.input.take(),
                         args_ver: pi.args_ver,
                         hunk_end: None,
-                        grp0: remap_grp(pi.grp0, &map),
+                        grp0: encg(pi.grp0),
                         stop: None,
                         parked: None,
                         start: None,
                     });
+                    h.aux = (pk.unfolds.len() - 1) as u64;
                 }
                 Kind::Scan => {
-                    let pi = &p.scans[p.n.h[xu].aux as usize];
-                    self.n.h[mx as usize].aux = self.scans.len() as u64;
-                    self.scans.push(ScanInfo {
-                        input: pi.input.clone(),
-                        states: pi.states.clone(),
-                        outs: pi.outs.clone(),
+                    let pi = &mut p.scans[h.aux as usize];
+                    pk.scans.push(ScanInfo {
+                        input: std::mem::take(&mut pi.input),
+                        states: std::mem::take(&mut pi.states),
+                        outs: std::mem::take(&mut pi.outs),
                         init_ver: pi.init_ver,
                         args_ver: pi.args_ver,
                         done: pi.done,
                     });
+                    h.aux = (pk.scans.len() - 1) as u64;
                 }
                 _ => {}
             }
+            if h.class == 4
+                && let Some(&f) = p.n.fams.get(&(x as u32))
+            {
+                pk.fams.push((r, f));
+            }
+            if h.class != 0 || matches!(h.kind, Kind::Cross | Kind::ChainRead | Kind::Family) {
+                pk.regs.push(r);
+            }
+            pk.hdrs.push(h);
+            pk.vals.push(std::mem::take(&mut pval[x]));
         }
-        // (nested unfolds' keys and owners, now that their steps have ids)
-        for &x in &order {
-            if p.n.h[x as usize].kind == Kind::Step {
-                let mx = map[&x];
-                let owner = self.n.h[mx as usize].parent;
-                if owner != u {
-                    let si = &self.steps[self.n.h[mx as usize].aux as usize];
-                    let (k, a, t) = (si.key, si.at, si.took);
-                    let oi = self.n.h[owner as usize].aux as usize;
-                    if self.unfolds[oi].indexed {
-                        self.unfolds[oi].keys.insert(k, mx);
-                        if t > 0 {
-                            self.unfolds[oi].owners.insert(a, mx);
-                        }
-                    }
+        let mut c = p.first(pu);
+        while c != NONE {
+            pk.tops.push(map[c as usize]);
+            c = p.n.h[c as usize].next;
+        }
+        for (&g, gr) in &p.groups {
+            if !inside((g >> 32) as u32) {
+                continue;
+            }
+            pk.groups.push((
+                encg(g),
+                Group {
+                    parent: encg(gr.parent),
+                    close: gr.close.map(|c| Pos {
+                        parent: rel(c.parent),
+                        ord: c.ord,
+                    }),
+                    names: gr.names.clone(),
+                },
+            ));
+        }
+        let pui = p.n.h[pu as usize].aux as usize;
+        pk.end = p.unfolds[pui].parked.map(|e| Parked {
+            s: map[e.s as usize],
+            grp: encg(e.grp),
+            ..e
+        });
+        pk.spell = std::mem::take(&mut p.names.spell);
+        pk
+    }
+
+    /// Graft a packed segment's steps (and everything under them) after
+    /// `tail`, the last step of `u`: the first and last steps grafted, and
+    /// where the segment stopped (`None`: it ended).
+    #[allow(clippy::too_many_lines, reason = "one pass per table, in order")]
+    #[allow(clippy::cast_possible_truncation, reason = "ids and arenas fit u32")]
+    fn graft(&mut self, u: u32, tail: u32, pk: Pack<L>) -> Option<(u32, u32, Option<Parked>)> {
+        if pk.tops.is_empty() {
+            return None;
+        }
+        let base = self.n.h.len() as u32;
+        let ob = self.n.opds.len() as u32;
+        let (sb, ub, cb) = (self.steps.len(), self.unfolds.len(), self.scans.len());
+        let db = self.step_defs.len() as u32;
+        let du = self.n.h[u as usize].depth;
+        let count = pk.hdrs.len();
+        self.rep.created += count as u64;
+        let names: Vec<u32> = pk.spell.iter().map(|sp| self.intern(sp)).collect();
+        let dec = |x: u32| -> u32 {
+            if x == NONE {
+                NONE
+            } else if x == UP {
+                u
+            } else {
+                x + base
+            }
+        };
+        let decs = |x: u32| -> u32 {
+            if x != NONE && x & REL != 0 {
+                (x & !REL) + base
+            } else {
+                x
+            }
+        };
+        let decg = |g: u64| -> u64 {
+            let hi = (g >> 32) as u32;
+            if g == NOGROUP || hi & REL == 0 {
+                g
+            } else {
+                (u64::from((hi & !REL) + base) << 32) | (g & 0xffff_ffff)
+            }
+        };
+        // headers and values, appended
+        let pd = pk.depth;
+        self.n.h.extend(pk.hdrs.iter().map(|&h| {
+            let mut h = h;
+            h.parent = dec(h.parent);
+            h.next = dec(h.next);
+            h.a0 += ob;
+            h.depth = h.depth - pd + du;
+            h.aux += match h.kind {
+                Kind::Step => sb as u64,
+                Kind::Unfold => ub as u64,
+                Kind::Scan => cb as u64,
+                _ => 0,
+            };
+            h
+        }));
+        self.n.val.extend(pk.vals);
+        for (r, f) in pk.fams {
+            self.n.fams.insert(r + base, f);
+        }
+        // the kinds' tables
+        self.steps.extend(pk.steps.into_iter().map(|si| StepInfo {
+            unfold: dec(si.unfold),
+            first: dec(si.first),
+            grp_in: decg(si.grp_in),
+            d0: si.d0 + db,
+            ..si
+        }));
+        self.unfolds
+            .extend(pk.unfolds.into_iter().map(|ui| UnfoldInfo {
+                first: dec(ui.first),
+                grp0: decg(ui.grp0),
+                ..ui
+            }));
+        self.scans.extend(pk.scans);
+        // the top steps' labels after `tail`, in chain order
+        let first = pk.tops[0] + base;
+        let mut last = tail;
+        self.n.h[tail as usize].next = first;
+        for &r in &pk.tops {
+            let s = r + base;
+            let ord = self.step_ord(u, last, NONE);
+            self.n.h[s as usize].ord = ord;
+            last = s;
+        }
+        // groups (definitions' lives depend on them)
+        for (g, gr) in pk.groups {
+            let ng = Group {
+                parent: decg(gr.parent),
+                close: gr.close.map(|c| Pos {
+                    parent: dec(c.parent),
+                    ord: c.ord,
+                }),
+                names: gr.names.iter().map(|&m| names[m as usize]).collect(),
+            };
+            self.groups.insert(decg(g), ng);
+        }
+        for (r, cl) in pk.closes {
+            self.closes
+                .insert(r + base, cl.into_iter().map(decg).collect());
+        }
+        // operands: inside shifted, the unfold's operands, names from
+        // before the segment resolved here and checked against what the
+        // segment read
+        let uo: Vec<Opd> = self.n.opds_of(u).to_vec();
+        self.n.opds.extend(pk.opds.iter().map(|o| Opd {
+            src: decs(o.src),
+            sel: o.sel,
+            name: if o.name == NONE {
+                NONE
+            } else {
+                names[o.name as usize]
+            },
+        }));
+        for (i, k) in pk.outer {
+            let o = &mut self.n.opds[(ob + i) as usize];
+            let x = uo[k as usize];
+            *o = Opd {
+                src: x.src,
+                sel: if o.sel.is_whole() { x.sel } else { o.sel },
+                name: NONE,
+            };
+        }
+        // (the first step reads the step before it here)
+        let fa0 = self.n.h[first as usize].a0 as usize;
+        self.n.opds[fa0] = Opd {
+            src: tail,
+            sel: Sel::WHOLE,
+            name: NONE,
+        };
+        let mut dirty: Vec<u32> = Vec::new();
+        for (i, r, was) in pk.named {
+            let m = r + base;
+            let at = self.n.pos(m);
+            let name = self.n.opds[(ob + i) as usize].name;
+            let o = resolve(&self.n, &self.names, &self.groups, name, at);
+            if self.n.read_ver(&o) != was && dirty.last() != Some(&m) {
+                dirty.push(m);
+            }
+            self.n.opds[(ob + i) as usize] = o;
+        }
+        // reverse edges, readers and definitions, node by node
+        for m in base..base + count as u32 {
+            let mu = m as usize;
+            let (a0, an, era) = (self.n.h[mu].a0, self.n.h[mu].an, self.n.h[mu].era);
+            for k in a0..a0 + u32::from(an) {
+                let o = self.n.opds[k as usize];
+                if o.src != NONE {
+                    let r = self.n.revs.len() as u32;
+                    let s = o.src as usize;
+                    self.n.revs.push(Rev {
+                        node: m,
+                        era,
+                        next: self.n.h[s].rd,
+                    });
+                    self.n.h[s].rd = r;
                 }
             }
         }
-        let _ = ui;
-        // operands: inside the segment mapped, the unfold's own operands, and
-        // names from outside resolved here (checked against what the segment
-        // read)
-        for &x in &order {
-            let mx = map[&x];
-            let at = self.n.pos(mx);
-            let mut os: Vec<Opd> = Vec::new();
-            let mut stale = false;
-            for o in p.n.opds_of(x) {
-                let name = if o.name == NONE {
-                    NONE
-                } else {
-                    names[o.name as usize]
-                };
-                let read_ver = p.n.read_ver(o);
-                let mo = if o.src != NONE
-                    && !imports.contains_key(&o.src)
-                    && !outer.contains_key(&o.src)
-                {
-                    Opd {
-                        src: map[&o.src],
-                        sel: o.sel,
-                        name,
-                    }
-                } else if let Some(&uo) = outer.get(&o.src).filter(|_| name == NONE) {
-                    Opd {
-                        src: uo.src,
-                        sel: if o.sel.is_whole() { uo.sel } else { o.sel },
-                        name: NONE,
-                    }
-                } else if name == NONE {
-                    *o
-                } else {
-                    // (from outside the segment: a name)
-                    let r = resolve(&self.n, &self.names, &self.groups, name, at);
-                    if self.n.read_ver(&r) != read_ver {
-                        stale = true;
-                    }
-                    r
-                };
-                os.push(mo);
+        for m in base..base + count as u32 {
+            let mu = m as usize;
+            let (a0, an, era) = (self.n.h[mu].a0, self.n.h[mu].an, self.n.h[mu].era);
+            for k in a0..a0 + u32::from(an) {
+                let o = self.n.opds[k as usize];
+                if o.name != NONE {
+                    let a = self.anchor(m);
+                    self.insert_reader(o.name, (a, m, era));
+                }
             }
-            self.set_opds(mx, &os);
-            if stale {
-                dirty.push(mx);
+        }
+        for m in base..base + count as u32 {
+            let mu = m as usize;
+            if self.n.h[mu].kind == Kind::Step {
+                let si = self.n.h[mu].aux as usize;
+                let (d0, dn) = (self.steps[si].d0 - db, self.steps[si].dn);
+                for d in &pk.defs[d0 as usize..(d0 + dn) as usize] {
+                    let rec = DefRec {
+                        name: names[d.name as usize],
+                        sub: d.sub,
+                        src: decs(d.src),
+                        sel: d.sel,
+                        group: decg(d.group),
+                        global: d.global,
+                    };
+                    self.insert_def(
+                        rec.name,
+                        DefEntry {
+                            pos: Pos {
+                                parent: m,
+                                ord: rec.sub,
+                            },
+                            src: rec.src,
+                            sel: rec.sel,
+                            group: rec.group,
+                            global: rec.global,
+                        },
+                    );
+                    self.step_defs.push(rec);
+                }
             }
         }
         // registries
         let mut chains: Vec<u32> = Vec::new();
-        for &x in &order {
-            let mx = map[&x];
-            match self.n.h[mx as usize].kind {
-                Kind::Cross => self
-                    .crosses
-                    .entry(self.n.h[mx as usize].aux)
-                    .or_default()
-                    .push(mx),
+        for r in pk.regs {
+            let m = r + base;
+            let mu = m as usize;
+            match self.n.h[mu].kind {
+                Kind::Cross => self.crosses.entry(self.n.h[mu].aux).or_default().push(m),
                 Kind::ChainRead => self
                     .chain_readers
-                    .entry(self.n.h[mx as usize].aux as u32)
+                    .entry(self.n.h[mu].aux as u32)
                     .or_default()
-                    .push(mx),
+                    .push(m),
                 Kind::Family => self
                     .fam_readers
-                    .entry(self.n.h[mx as usize].aux as u32)
+                    .entry(self.n.h[mu].aux as u32)
                     .or_default()
-                    .push(mx),
+                    .push(m),
                 _ => {}
             }
-            if let Class::Effect(c) = self.n.class(mx) {
-                chains.push(c.0);
+            if self.n.h[mu].class != 0 {
+                if let Class::Effect(c) = self.n.class(m) {
+                    chains.push(c.0);
+                }
+                self.register_class(m);
             }
-            self.register_class(mx);
         }
         chains.sort_unstable();
         chains.dedup();
@@ -3926,61 +4148,11 @@ impl<L: Lang> Graph<L> {
             self.rep.woken += 1;
             self.push_dirty(d);
         }
-        // (the first step reads the step before it here)
-        let first = map[&psteps[0]];
-        let mut os: Vec<Opd> = self.n.opds_of(first).to_vec();
-        os[0] = Opd {
-            src: tail,
-            sel: Sel::WHOLE,
-            name: NONE,
-        };
-        self.set_opds(first, &os);
-        let pui = p.n.h[pu as usize].aux as usize;
-        let end = p.unfolds[pui].parked.map(|pk| Parked {
-            s: map[&pk.s],
-            grp: remap_grp(pk.grp, &map),
-            ..pk
+        let end = pk.end.map(|e| Parked {
+            s: e.s + base,
+            grp: decg(e.grp),
+            ..e
         });
         Some((first, last, end))
-    }
-
-    /// A copy of a segment's node here, under `parent` at `ord`.
-    fn copy_node(&mut self, p: &Graph<L>, x: u32, parent: u32, ord: u64) -> u32 {
-        let xu = x as usize;
-        let m = self.alloc(
-            p.n.h[xu].kind,
-            p.n.h[xu].op,
-            p.n.class(x),
-            parent,
-            ord,
-            p.n.h[xu].key,
-            p.n.h[xu].aux,
-        );
-        self.n.val[m as usize] = p.n.val[xu].clone();
-        m
-    }
-}
-
-/// A segment's node ids to this graph's.
-struct SegMap(Vec<u32>);
-
-impl SegMap {
-    fn insert(&mut self, k: u32, v: u32) {
-        self.0[k as usize] = v;
-    }
-    #[allow(clippy::trivially_copy_pass_by_ref, reason = "a map's shape")]
-    fn get(&self, k: &u32) -> Option<&u32> {
-        self.0.get(*k as usize).filter(|&&v| v != NONE)
-    }
-    #[allow(clippy::trivially_copy_pass_by_ref, reason = "a map's shape")]
-    fn contains_key(&self, k: &u32) -> bool {
-        self.get(k).is_some()
-    }
-}
-
-impl std::ops::Index<&u32> for SegMap {
-    type Output = u32;
-    fn index(&self, k: &u32) -> &u32 {
-        self.get(k).expect("mapped")
     }
 }
