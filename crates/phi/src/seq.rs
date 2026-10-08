@@ -518,15 +518,29 @@ impl<T: Value, M: Measure<T>> Seq<T, M> {
     #[must_use]
     pub fn diff(&self, old: &Self) -> Hunk {
         let (n, m) = (self.len(), old.len());
-        let prefix = match (&self.root, &old.root) {
+        let mut prefix = match (&self.root, &old.root) {
             (Some(a), Some(b)) => common(a, b, Side::Front).min(n).min(m),
             _ => 0,
         };
+        // (where the trees' shapes part, element by element to the edit)
+        for ((i, x), (j, y)) in self.iter_from(prefix).zip(old.iter_from(prefix)) {
+            if i != j || x.ver() != y.ver() {
+                break;
+            }
+            prefix += 1;
+        }
         let room = n.min(m) - prefix;
-        let suffix = match (&self.root, &old.root) {
+        let mut suffix = match (&self.root, &old.root) {
             (Some(a), Some(b)) => common(a, b, Side::Back).min(room),
             _ => 0,
         };
+        while suffix < room {
+            let (x, y) = (self.get(n - 1 - suffix), old.get(m - 1 - suffix));
+            match (x, y) {
+                (Some((i, x)), Some((j, y))) if i == j && x.ver() == y.ver() => suffix += 1,
+                _ => break,
+            }
+        }
         Hunk { prefix, suffix }
     }
 }

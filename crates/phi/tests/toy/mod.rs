@@ -257,6 +257,29 @@ impl Lang for Toy {
         TV::Seq(items)
     }
 
+    fn entries(op: Op, input: &TV, _a: &Args<'_, Self>) -> Vec<phi::Entry<TV>> {
+        // (after each `\par` of the document: a paragraph starts with
+        // nothing pending)
+        let (Op::Doc, TV::Seq(s)) = (op, input) else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        for (i, (_, t)) in s.iter().enumerate() {
+            if let TV::Tok(Tok::Cs(c)) = t
+                && &**c == "par"
+                && let Some((id, _)) = s.get(i + 1)
+            {
+                let key = phi::ver::hash64(&(id.0, &Vec::<Tok>::new()));
+                out.push(phi::Entry {
+                    at: i + 1,
+                    key,
+                    guess: Some(TV::st(St::default())),
+                });
+            }
+        }
+        out
+    }
+
     fn fmt_op(op: Op) -> String {
         match op {
             Op::Push(_) => "Push".into(),
