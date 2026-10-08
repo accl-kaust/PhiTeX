@@ -1,0 +1,34 @@
+\documentclass{article}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\begin{document}
+See Figure~\ref{fig:a} and Table~\ref{tab:b}.
+\begin{figure}[ht]
+  \centering
+  \includegraphics[width=0.35\textwidth]{example-image-a}
+  \caption{The first image, new caption.}\label{fig:a}
+\end{figure}
+\begin{table}[ht]
+  \centering
+  \begin{tabular}{lrr}
+    \toprule
+    Name & Value & Error \\
+    \midrule
+    alpha & 1.5 & 0.1 \\
+    gamma & 3.0 & 0.3 \\
+    delta & 4.0 & 0.4 \\
+    \bottomrule
+  \end{tabular}
+  \caption{Results, revised}\label{tab:b}
+\end{table}
+\begin{table}[h]
+  \centering
+  \begin{tabular}{|c|c|}
+    \hline
+    new & table \\
+    \hline
+  \end{tabular}
+  \caption{A new table.}
+\end{table}
+Closing text.
+\end{document}

@@ -1,0 +1,30 @@
+\documentclass{article}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\begin{document}
+See Figure~\ref{fig:a} and Table~\ref{tab:b}.
+\begin{figure}[ht]
+  \centering
+  \includegraphics[width=0.3\textwidth]{example-image-a}
+  \caption{The first image, old caption.}\label{fig:a}
+\end{figure}
+\begin{table}[ht]
+  \centering
+  \begin{tabular}{lrr}
+    \toprule
+    Name & Value & Error \\
+    \midrule
+    alpha & 1.0 & 0.1 \\
+    beta & 2.0 & 0.2 \\
+    gamma & 3.0 & 0.3 \\
+    \bottomrule
+  \end{tabular}
+  \caption{Results}\label{tab:b}
+\end{table}
+\begin{figure}[ht]
+  \centering
+  \includegraphics[width=0.2\textwidth]{example-image-b}
+  \caption{A figure that is deleted.}
+\end{figure}
+Closing text.
+\end{document}
