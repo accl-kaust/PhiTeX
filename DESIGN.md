@@ -3984,6 +3984,68 @@ pub enum Arg<'s> { Local(Local<'s>), Up(u16), Name(NameId), Field(Local<'s>, u32
   subgraph and the rest of the document must be found again, not
   rebuilt.
 
+**The state stays small.** Anything addressable by name is a name,
+never part of a step's state. The state holds only what has no name:
+TeX's mode, the pending input, the conditional and group depth. A
+small state is what makes convergence come early and speculative entry
+(below) predict exactly. `Config::debug` reports each unfold's state
+size per step (`Value::bytes`, mean and max), so the client can be
+held to the rule.
+
+**Speculative entry** (the unfold's parallelism). One chain is
+sequential: on a cold build its critical path would be the whole
+document. So the chain is also started at later points from predicted
+states, and the real chain accepts each speculated suffix when it
+arrives with the same state. That is the convergence check above,
+reused.
+
+```rust
+pub struct Entry<V> { pub at: usize, pub key: u64, pub guess: Option<V> }
+// in Lang:
+fn entries(op: Self::Op, input: &Self::Val, args: Args<'_, Self>) -> Vec<Entry<Self::Val>>;
+```
+
+- *Proposals.* For an unfold built cold, or whose input changed past
+  its old steps, the core asks `L::entries`: element indices where a
+  step may start (TeX: paragraph or block boundaries of the source),
+  each with the key the step there would have.
+- *Predictions,* in order:
+  - the state of the old step with that key (in a session the old
+    steps are there; across sessions the memo store keeps
+    `(unfold key, step key) → state`, 7.8);
+  - else the client's `guess`;
+  - else none, and the entry is not used.
+
+  With names out of the state, the state at a paragraph boundary is
+  small and often exactly the guess.
+- *Segments.* Each used entry starts a *segment*: a chain from its
+  predicted state that runs until its cursor reaches the next used
+  entry's element. Workers run segments in parallel, each into a
+  private buffer of steps and children (the graph is only read). A
+  segment ends with the state it reached at the next entry, a better
+  prediction for that entry than the guess.
+- *Names read in a segment* resolve first in the segment's own
+  definitions, else against the index as committed when the segment
+  started (the last build's, or the segments committed so far). Each
+  read records the definition it reached and its version (or
+  "undefined").
+- *Arrival.* Segments are committed in order. When the real chain (the
+  committed segments before) reaches an entry:
+  - same cursor and same state version: the segment is accepted whole.
+    Its recorded name reads are checked again at their positions in
+    the committed index. A read that now reaches a definition with
+    another version wakes the step that made it, as a rebuild would.
+  - otherwise the prediction was wrong: the segment's steps become the
+    "old" steps of a rebuild. The first one runs again from the arrival
+    state; children are matched by key, and the chain stops at the
+    first step whose state converges with the segment's. A guess wrong
+    only in what a paragraph's end resets costs one or two steps.
+- *Rounds.* After a round, every segment whose arrival state is now
+  known and differs from its prediction is run again, in parallel. The
+  steps that the real chain reached decide the result, so the result
+  is the sequential one (7.12). The test: a cold build of many
+  independent paragraphs at W workers is faster than at one, and equal.
+
 ### 7.5 Names: reaching definitions with scopes (part of primitives 3 and 5)
 
 A step's state is not an environment threaded through every step:
@@ -4007,8 +4069,27 @@ pub struct NameId(u32);         // interned from a 64-bit content hash of the sp
   woken when that value changes (field-level, 7.2). Inserting or
   removing a definition, or moving a group's close, re-resolves the
   readers of `n` in the affected range: those whose old definition's
-  range it cuts. They are found through the old definitions' reader
-  lists.
+  range it cuts.
+- **The cost of a new definition** (a `\def` added early, shadowing
+  readers of `\foo` across the document).
+  - A definition's readers are kept as a run sorted by position, and a
+    reader reaches its definition through the run.
+  - Inserting a definition of `n` at `p` splits the runs of the
+    definitions alive at `p`: at most one per open group level, so in
+    practice one. The part after `p`, up to the next definition of `n`
+    alive there, moves to the new definition. That is O(log R) for R
+    readers, not O(R).
+  - Readers are woken only if the new value's version differs from
+    the old one's. A definition with an equal value costs the split
+    and nothing else.
+  - A different value wakes exactly the readers after `p` that it
+    shadows. Each now reads something else, which is the edit's
+    inherent reach, not overhead.
+  - Removing a definition merges its run back into the one before.
+    Moving a group's close splits or merges at the close.
+  - Checkpoint 2 implements this with sorted vectors (an O(R) move);
+    the run tree comes with checkpoint 3's memory work. The bench
+    `shadow` measures the move.
 - Name ids are interned from a stable 64-bit hash of the spelling. The
   table is the core's, never seen by an op, so the numbering does not
   affect results.
@@ -4082,8 +4163,12 @@ impl<T: Value, M: Measure<T>> Seq<T, M> {
   3. compares each read slot's prediction with what was published;
   4. for each mismatch, sets the `Cross` nodes' value and wakes their
      readers: only the slice that reads the slot runs again;
-  5. repeats until no slot changes, at most `max_iters` (default 5),
-     else stops and reports the oscillating slots (3.9's bound).
+  5. repeats until no slot changes, at most `max_iters` (default 5).
+     If a slot still changes after that, the run ends with a
+     diagnostic, `Report::oscillating`: each slot with the versions it
+     took, in order, and the nodes that published them. A run that did
+     not converge says so, and the result is never silently
+     truncated.
 
   A correct prediction costs no extra iteration, and the tests count
   them.
@@ -4205,6 +4290,37 @@ The graph is one arena, struct of arrays, indexed by `NodeId(u32)`:
   tens of ns per node evaluated (leaf, cold, sequential), tens of bytes
   per unfolded node, 10⁸ nodes at checkpoint 3.
 
+**Retained memory** (designed before checkpoint 3). At 64 B a node, 10⁸
+nodes are 6.4 GB: too much for a laptop or wasm. Once evaluated, most of
+the graph is kept only for rebuilds, and a rebuild needs much less than
+the evaluation made. Three tiers:
+- *Live:* every column. The regions an edit touched lately, and
+  anything with a cross-region reader still being propagated.
+- *Version-only leaves.* A pure, cheap leaf (its op says so) drops its
+  value and keeps its op, its operands and an 8-byte version. When it is
+  read, it is recomputed from its operands, recursively through other
+  version-only leaves, so a fold bounds the depth. When it is woken,
+  the new value is compared with the kept version. 64 bits suffice for
+  this comparison: a false "equal" needs a 2⁻⁶⁴ collision between a
+  node's own successive values. The memo's keys stay 128-bit. About
+  24 B a leaf.
+- *Sealed regions.* A step whose region is done (its steps folded,
+  7.10) keeps only:
+  - its entry state (for re-entry);
+  - its net definitions;
+  - its outside reads (name, the definition reached, version) for
+    waking;
+  - its effects' payloads and its output state.
+
+  The interior is dropped. When the region is woken it runs again from
+  its entry state, keys matching nothing (there is nothing to match),
+  and it can be sealed again. A paragraph of 1,000 command nodes keeps a
+  few hundred bytes, under 1 B per original node.
+- *Target:* at most 16 B per original node retained on average, live
+  tier included, and below 2 GB for the course. This is measured
+  against the TeX layer's node counts when they come; the core reports
+  bytes by tier (`Graph::mem`).
+
 ### 7.12 The scheduler (primitive 7)
 
 - **Sequential** (the default, and wasm's): a cold build evaluates in
@@ -4235,6 +4351,9 @@ The graph is one arena, struct of arrays, indexed by `NodeId(u32)`:
   fixed point is unique, so any schedule ends in the sequential result.
   The order only changes the wasted work. Tests compare the two runs'
   values, chains and slots.
+- **Cold builds** are wide through speculative entry (7.4): round one
+  runs a segment per entry on the workers, and the commit walks them in
+  order, accepting the segments whose arrival state matches.
 - Forces it: a preamble `\def` wakes thousands of paragraphs at once;
   a cold build is wide only if later chapters run from predicted states
   (the last build's), validated as the chain reaches them; a keystroke
@@ -4272,7 +4391,24 @@ Benches (criterion, `crates/phi/benches/phi.rs`): build+evaluate N
 leaves; rebuild after one leaf edit; scan resume; parallel scaling;
 memory per node (counted, not timed).
 
-### 7.14 Dependencies
+### 7.14 The text form
+
+Every IR has a canonical text form that round-trips (5.3), and so does
+the graph. `Graph::to_text` prints one node per line in position order,
+indented by region:
+
+```text
+%12 = step #a41f(%3, @foo:%7) ; st=…        key, operands, names read and where they resolved
+  %13 = leaf add(%12.1, 4) = 7               a child: op, operands (.f a field), value
+  def \foo = %13 [g2]                        a definition and its group
+```
+
+Ops and values print and parse through `Lang` hooks (`fmt_op`,
+`parse_op`, `fmt_val`, `parse_val`). `Dump::parse(to_text(g))` gives
+the same text and values again, which a test checks after random edits.
+It is the debugging view, and it comes with checkpoint 2.
+
+### 7.15 Dependencies
 
 - `criterion` (dev only, default features off): asked for, and the
   repo has no bench harness to reuse.
