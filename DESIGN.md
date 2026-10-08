@@ -2603,54 +2603,37 @@ The design is enforced by code, not described.
   evaluation; folding; both gates green; time and memory against current
   SSA and machine mode.
 
-**Integration plan.** Estimates are agent-hours, honest and uncertain.
-The core's API (`Lang`, steps, names, `Seq`, `emit_scan`, chains) is
-assumed stable from its checkpoint 3a.
+**Integration plan.** The change is one-shot: every primitive and all
+engine state go on the core behind `PHITEX_SSA_PURE=1`, delivered whole
+once both gates and the structural tests pass. There is no
+LaTeX-specific code: LaTeX is macros on primitives. The order of work
+below is by engine state and primitive group. The tests listed are the
+ones that turn green as coverage grows. Estimates are agent-hours,
+honest and uncertain, and assume the core's API (`Lang`, steps, names,
+`Seq`, `emit_scan`, chains, `Publish`/`Cross`) is stable from its
+checkpoint 3a.
 
-1. *`Lang` for TeX, the shell* (8–12 h). Implement `Val`, `Op`,
-   `eval`, `step`, `scan` over the existing engine, the engine running
-   one step at a time inside `step`:
-   - `Tex<H, T>` with a tracker whose reads and writes resolve through
-     the core's names: eqtb, registers above 255, fonts' fields and
-     catcodes become names;
-   - the step state is the input chain (3.5's value), the nest and the
-     cond stack;
-   - the debug-build enforcer (3.17.8).
-2. *Plain TeX cold, exact* (10–16 h). Main control as an unfold of
-   steps:
-   - groups as `open_group`/`close_group` (the save stack's restores
-     become no-ops in pure mode);
-   - conditionals with φ;
-   - expandable primitives as nodes;
-   - `\write`, `\openout` and shipout on chains.
+| # | state and primitives moved onto the core | turns green | hours |
+|---|---|---|---|
+| 1 | `Lang` for TeX: `step` runs one command; the step state (input chain, nest, cond stack); the debug-build enforcer | — | 8–12 |
+| 2 | registers and eqtb as names (meanings, registers, parameters, codes, registers above 255, fonts' fields) | trip's assignments | 6–10 |
+| 3 | expansion and macros: a macro call as a step, expandable primitives as nodes, `\csname` names and absence | plain macro tests | 6–10 |
+| 4 | catcodes and tokenisation: lines as source, the cursor relative, `\scantokens`, `\endlinechar` | plain e2e (no typesetting) | 4–8 |
+| 5 | groups and the save stack as scopes; `ftergroup`, `fterassignment` as pending input | trip, etrip groups | 4–8 |
+| 6 | conditionals and φ, flip convergence | conditionals tests | 4–6 |
+| 7 | boxes and lists as `Seq`s with field-level values (metrics and identity, dimensions and contents) | box tests | 8–12 |
+| 8 | paragraphs: `line_break` as a scan, hyphenation per word, interline glue as a node | the word-edit structural test | 10–16 |
+| 9 | page builder, output routine (an unfold), inserts, marks | plain e2e cases; the `\pageref`, no-page-operand tests | 10–16 |
+| 10 | alignments (preamble value, column-width scan) | `align.tex`, tables | 6–10 |
+| 11 | math (noads `Seq`, `mlist_to_hlist` pure, displays) | `math.tex`, `display*.tex` | 6–10 |
+| 12 | e-TeX extras (`\scantokens`, `\interactionmode`, sparse registers, `\showgroups`, …) | etrip | 4–8 |
+| 13 | `\write`, `\openout`, `\openin`, `\input`, `\write18`, files as chains; per-entry `.aux`/`.toc` slots and the rerun check | LaTeX e2e, ssa-edits `--fixpoint`, `bibtex`/`makeindex` cases | 10–16 |
+| 14 | pdfTeX extras and the PDF writer on chains (objects, fonts, images, annotations, segmented streams) | PDF e2e, the course, pgfsub | 10–16 |
+| 15 | parallel evaluation, folding and sealing, the preamble memo; timings and memory | both gates on accl | 12–20 |
 
-   Gate: e2e plain cases byte-identical.
-3. *Rebuilds* (10–16 h). Convergence of the unfold after an edit; the
-   edit harness on plain cases matching cold builds; the structural
-   tests (3.17.8). This is checkpoint 2.
-4. *Field-level typesetting* (12–20 h).
-   - `line_break` as an `emit_scan` with its DP state as values, and
-     hyphenation per word;
-   - the page builder as a scan;
-   - the interline glue as its own node;
-   - characters and boxes with metrics and identity fields;
-   - segmented page streams in the link.
-
-   Gate: the `\pageref` and word tests.
-5. *LaTeX and the cross-run slots* (16–24 h).
-   - Per-entry `.aux` slots, `\r@K` names predicted, the rerun check;
-   - the output routine as an unfold;
-   - inserts, marks and alignments;
-   - the tools (3.16) on chains.
-
-   Gate: the LaTeX e2e cases, then the course and pgfsub exact, and the
-   edit harness with `--fixpoint`.
-6. *Parallel, folding, sealing, the preamble memo* (12–20 h). This is
-   checkpoint 3, with both gates green and timings against current SSA
-   and machine mode.
-
-That is about 70–110 agent-hours in all, with checkpoint 2 at about
-30–45.
+That is about 110–180 agent-hours in all. The spread is mostly items
+9, 13 and 14, where the old mode's exactness fixes (3.2, 3.8, 3.12)
+must be carried over as fields and chains.
 
 **Risks.**
 1. Memory: 196 M nodes on the course. Without sealing and the stronger

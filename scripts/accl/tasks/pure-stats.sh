@@ -134,7 +134,9 @@ for doc in "${docs[@]}"; do
   setup "$doc"
   S=$w/src-$doc
   echo "== $doc ($MAIN)" | tee -a "$r/summary.txt"
-  # the model, strict, split; names for the projections
+  # the model, strict, split; names for the projections (DIFFS_ONLY=1:
+  # only the edits)
+  if [ -z "${DIFFS_ONLY:-}" ]; then
   trace "$S" "$o/vn" PARTEX_PURE_VN=1 PARTEX_PURE_NAMES="$o/names.tsv" &
   trace "$S" "$o/strict" &
   trace "$S" "$o/split" PARTEX_PURE_VN=1 PARTEX_PURE_SPLIT=1 &
@@ -146,6 +148,7 @@ for doc in "${docs[@]}"; do
       PARTEX_PURE_FIELDS="$o/fields-$c.txt" &
   done
   wait
+  fi
   # the edits, traced
   E1=$w/edit-word-$doc E2=$w/edit-ref-$doc
   cp -a "$S" "$E1" && edit_word "$E1"
@@ -160,7 +163,7 @@ for doc in "${docs[@]}"; do
   python3 scripts/pure-diff.py "$w/t0-$doc" "$w/t1-$doc" >"$o/diff-word.txt" 2>&1
   python3 scripts/pure-diff.py "$w/t0-$doc" "$w/t2-$doc" >"$o/diff-ref.txt" 2>&1
   rm -f "$w"/t[012]-"$doc".*
-  python3 scripts/pure-report.py "$o"/vn.json "$o"/strict.json "$o"/split.json "$o"/spec.json \
+  [ -z "${DIFFS_ONLY:-}" ] && python3 scripts/pure-report.py "$o"/vn.json "$o"/strict.json "$o"/split.json "$o"/spec.json \
     "$o"/proj-*.json >"$o/report.txt" 2>&1
   {
     grep -h '^==\|^critical\|^setup\|^the body\|^page chain\|^body nodes\|^memory' "$o/report.txt"
