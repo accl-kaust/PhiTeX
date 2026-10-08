@@ -113,6 +113,17 @@ function place(file: string, line: number | null, col: number | null, text?: str
   return `<a href="#" class="phx-place" data-file="${esc(file)}" data-line="${line ?? 1}" data-col="${col ?? 1}">${esc(text ?? `${file}${line ? `:${line}` : ""}${col ? `:${col}` : ""}`)}</a>`;
 }
 
+/** One problem's card (the CLI's panel, and the Overleaf-style panel's diagnostics drawer). */
+export function problemHtml(p: Problem): string {
+  return item(p);
+}
+
+/** A problem as diagnostics.ts's Diagnostic, the whole problem kept for the drawer to show. */
+export function asDiagnostic(p: Problem): { severity: "error" | "warning" | "info"; code: string; message: string; file?: string; line?: number; problem: Problem } {
+  const severity = p.severity === "fatal" || p.severity === "error" ? "error" : p.severity === "warning" ? "warning" : "info";
+  return { severity, code: p.code, message: p.message, file: p.file ?? undefined, line: p.line ?? undefined, problem: p };
+}
+
 function item(p: Problem): string {
   const sev = p.severity === "fatal" ? "error" : p.severity;
   const where = p.file ? place(p.file, p.line, p.col) : "";

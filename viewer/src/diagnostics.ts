@@ -4,6 +4,8 @@
 // incomplete input (an open group runs to the end), so these say *why* the
 // preview looks as it does, at the line to look at. Pure: no DOM.
 
+import type { Problem } from "./problems.ts";
+
 export type Severity = "error" | "warning" | "info";
 
 export interface Diagnostic {
@@ -16,6 +18,8 @@ export interface Diagnostic {
   line?: number;
   /** More, shown under the message as is (TeX's own context lines). */
   detail?: string;
+  /** The whole problem, when the build told it (`phitex watch`'s diagnostics): shown as its card. */
+  problem?: Problem;
 }
 
 /** The build's first TeX error, as the core reads it off the terminal. */

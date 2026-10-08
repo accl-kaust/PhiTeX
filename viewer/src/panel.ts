@@ -13,6 +13,7 @@ import type { PackageState } from "./packages.ts";
 import { ENGINES, errorNeeds, type Engine } from "./engines.ts";
 import { Viewer } from "./viewer.ts";
 import { VIEWER_CSS } from "./css.ts";
+import { PROBLEMS_CSS, problemHtml } from "./problems.ts";
 import { REPORT_TO } from "./report.ts";
 
 /** How long a build may ship no page before the last good one is dimmed (typing through `{`). */
@@ -333,6 +334,9 @@ button.btn:hover { background: var(--accent2); }
 .sum .caret { margin-left: auto; transition: transform .15s; }
 .win.diags-open .sum .caret { transform: rotate(90deg); }
 .body { position: relative; flex: 1; min-height: 0; display: flex; flex-direction: column; }
+/* (a problem told whole, in the drawer: problems.ts's card, as a row) */
+.diags .phx-inline { margin: 0; padding: 0; border-radius: 0; border-top: 0; box-shadow: none; max-width: none; list-style: none; }
+.diags .phx-inline li { border-bottom: 1px solid #2c2e33; }
 .diags { position: absolute; z-index: 2; left: 0; right: 0; top: 0; max-height: 50%; overflow: auto; background: var(--light);
   border-bottom: 1px solid var(--divider); box-shadow: 0 6px 16px rgba(27,34,44,.18); display: none; }
 .win.diags-open .diags { display: block; }
@@ -574,7 +578,7 @@ export class Panel {
     const w = (this.words = { ...OVERLEAF_WORDS, ...opts.words });
     const host = document.createElement("phitex-preview");
     this.root = host.attachShadow({ mode: "open" });
-    this.root.innerHTML = (`<style>${VIEWER_CSS}${CSS}</style>
+    this.root.innerHTML = (`<style>${VIEWER_CSS}${PROBLEMS_CSS}${CSS}</style>
 <div class="win" role="dialog" aria-label="PhiTeX preview">
   <header>
     <span class="icon" aria-hidden="true">preview</span>
@@ -671,11 +675,17 @@ export class Panel {
       this.save();
     };
     this.$("#diags").onclick = (e) => {
+      // (a problem card's place)
+      const at = (e.target as HTMLElement).closest<HTMLElement>(".phx-place[data-file]");
+      if (at) {
+        e.preventDefault();
+        return ev.onGoto(at.dataset.file!, Number(at.dataset.line) || 1);
+      }
       const d = (e.target as HTMLElement).closest<HTMLElement>(".diag[data-line]");
       if (d) ev.onGoto(d.dataset.file!, Number(d.dataset.line));
     };
     const sum = this.$("#sum");
-    sum.onclick = () => this.diagsOpen(!this.win.classList.contains("diags-open"));
+    sum.onclick = () => this.diagnostics();
     sum.onkeydown = (e) => (e.key === "Enter" || e.key === " ") && (e.preventDefault(), sum.click());
     this.$("#stage").addEventListener("pointerdown", () => {
       this.diagsOpen(false);
@@ -983,6 +993,15 @@ export class Panel {
     const list = this.$("#diags");
     list.innerHTML = "";
     for (const d of diags.slice(0, 50)) {
+      // (a problem the build told whole: its card, its places links)
+      if (d.problem) {
+        const card = document.createElement("ol");
+        card.className = "phx-card phx-inline";
+        card.setAttribute("role", "listitem");
+        card.innerHTML = problemHtml(d.problem);
+        list.append(card);
+        continue;
+      }
       const row = document.createElement("div");
       row.className = `diag ${d.severity}`;
       row.setAttribute("role", "listitem");
@@ -1025,6 +1044,11 @@ export class Panel {
       .map((k) => `<span class="n ${k}">${icon(k, 14)}${count(k)}</span>`)
       .join("") + `<span class="first"></span>${icon("chevron_right", 16).replace('class="icon"', 'class="icon caret"')}`;
     if (diags[0]) sum.querySelector(".first")!.textContent = diags[0].message;
+    // (problems told whole, as the CLI's are: the drawer opens by itself
+    // when their errors change, unless these were closed by hand)
+    const errs = JSON.stringify(diags.filter((d) => d.problem && d.severity === "error").map((d) => [d.message, d.file, d.line]));
+    if (errs !== "[]" && errs !== this.errsClosed) this.diagsOpen(true);
+    if (errs === "[]") this.errsClosed = "";
     this.stale(s);
     queueMicrotask(() => this.emit());
   }
@@ -1259,8 +1283,12 @@ export class Panel {
     this.zoomTo(String(next ?? now));
   }
 
+  /** The errors last closed by hand (the drawer opens again when they change). */
+  private errsClosed = "";
+
   /** The diagnostics drawer. */
   diagnostics(on = !this.win.classList.contains("diags-open")): void {
+    if (!on) this.errsClosed = JSON.stringify((this.lastStatus?.diagnostics ?? []).filter((d) => d.problem && d.severity === "error").map((d) => [d.message, d.file, d.line]));
     this.diagsOpen(on);
     this.emit();
   }
