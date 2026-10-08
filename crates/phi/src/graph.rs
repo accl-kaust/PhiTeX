@@ -3862,6 +3862,12 @@ struct Pack<L: Lang> {
     /// classes but pure).
     regs: Vec<u32>,
     fams: Vec<(u32, u32)>,
+    /// Name readers (the segment's name, the node), by name then node,
+    /// and definitions (the name, the index in `defs`, the step), by name
+    /// then index: each name's are appended in one go when they come
+    /// after its list's last.
+    rnames: Vec<(u32, u32)>,
+    dorder: Vec<(u32, u32, u32)>,
     /// The top steps, in chain order.
     tops: Vec<u32>,
     spell: Vec<Box<[u8]>>,
@@ -3926,6 +3932,8 @@ impl<L: Lang> Graph<L> {
             groups: Vec::new(),
             regs: Vec::new(),
             fams: Vec::new(),
+            rnames: Vec::new(),
+            dorder: Vec::new(),
             tops: Vec::new(),
             spell: Vec::new(),
             end: None,
@@ -3945,6 +3953,9 @@ impl<L: Lang> Graph<L> {
             let (pa0, pan) = (p.n.h[x].a0 as usize, p.n.h[x].an as usize);
             for o in &p.n.opds[pa0..pa0 + pan] {
                 let i = pk.opds.len() as u32;
+                if o.name != NONE {
+                    pk.rnames.push((o.name, r));
+                }
                 if inside(o.src) {
                     pk.opds.push(Opd {
                         src: map[o.src as usize] | REL,
@@ -3988,6 +3999,7 @@ impl<L: Lang> Graph<L> {
                     let si = &p.steps[h.aux as usize];
                     let d0 = pk.defs.len() as u32;
                     for d in &p.step_defs[si.d0 as usize..(si.d0 + si.dn) as usize] {
+                        pk.dorder.push((d.name, pk.defs.len() as u32, r));
                         pk.defs.push(DefRec {
                             name: d.name,
                             sub: d.sub,
@@ -4083,6 +4095,8 @@ impl<L: Lang> Graph<L> {
                 },
             ));
         }
+        pk.rnames.sort_unstable();
+        pk.dorder.sort_unstable();
         let pui = p.n.h[pu as usize].aux as usize;
         pk.end = p.unfolds[pui].parked.map(|e| Parked {
             s: map[e.s as usize],
@@ -4256,47 +4270,81 @@ impl<L: Lang> Graph<L> {
                 }
             }
         }
-        for m in base..base + count as u32 {
-            let mu = m as usize;
-            let (a0, an, era) = (self.n.h[mu].a0, self.n.h[mu].an, self.n.h[mu].era);
-            for k in a0..a0 + u32::from(an) {
-                let o = self.n.opds[k as usize];
-                if o.name != NONE {
-                    let a = self.anchor(m);
-                    self.insert_reader(o.name, (a, m, era));
+        // readers, a name at a time: appended when they come after its
+        // list's last (a graft at the end, the usual case)
+        let mut i = 0;
+        while i < pk.rnames.len() {
+            let pm = pk.rnames[i].0;
+            let mut j = i;
+            while j < pk.rnames.len() && pk.rnames[j].0 == pm {
+                j += 1;
+            }
+            let m = names[pm as usize];
+            let es: Vec<(u32, u32, u32)> = pk.rnames[i..j]
+                .iter()
+                .map(|&(_, r)| {
+                    let x = r + base;
+                    (self.anchor(x), x, self.n.h[x as usize].era)
+                })
+                .collect();
+            let list = &self.names.readers[m as usize];
+            let fast = self.names.rpend[m as usize].is_empty()
+                && list.last().is_none_or(|l| {
+                    self.n.cmp_pos(self.n.pos(l.0), self.n.pos(es[0].0)) != Ordering::Greater
+                });
+            if fast {
+                self.names.readers[m as usize].extend(es);
+            } else {
+                for e in es {
+                    self.insert_reader(m, e);
                 }
             }
+            i = j;
         }
-        for m in base..base + count as u32 {
-            let mu = m as usize;
-            if self.n.h[mu].kind == Kind::Step {
-                let si = self.n.h[mu].aux as usize;
-                let (d0, dn) = (self.steps[si].d0 - db, self.steps[si].dn);
-                for d in &pk.defs[d0 as usize..(d0 + dn) as usize] {
-                    let rec = DefRec {
-                        name: names[d.name as usize],
-                        sub: d.sub,
+        // definitions: the steps' records, then the name index a name at
+        // a time
+        self.step_defs.extend(pk.defs.iter().map(|d| DefRec {
+            name: names[d.name as usize],
+            src: decs(d.src),
+            group: decg(d.group),
+            ..*d
+        }));
+        let mut i = 0;
+        while i < pk.dorder.len() {
+            let pm = pk.dorder[i].0;
+            let mut j = i;
+            while j < pk.dorder.len() && pk.dorder[j].0 == pm {
+                j += 1;
+            }
+            let m = names[pm as usize];
+            let es: Vec<DefEntry> = pk.dorder[i..j]
+                .iter()
+                .map(|&(_, di, rs)| {
+                    let d = &pk.defs[di as usize];
+                    DefEntry {
+                        pos: Pos {
+                            parent: rs + base,
+                            ord: d.sub,
+                        },
                         src: decs(d.src),
                         sel: d.sel,
                         group: decg(d.group),
                         global: d.global,
-                    };
-                    self.insert_def(
-                        rec.name,
-                        DefEntry {
-                            pos: Pos {
-                                parent: m,
-                                ord: rec.sub,
-                            },
-                            src: rec.src,
-                            sel: rec.sel,
-                            group: rec.group,
-                            global: rec.global,
-                        },
-                    );
-                    self.step_defs.push(rec);
+                    }
+                })
+                .collect();
+            let list = &self.names.defs[m as usize];
+            let fast = list
+                .last()
+                .is_none_or(|l| self.n.cmp_pos(l.pos, es[0].pos) == Ordering::Less);
+            if fast {
+                self.names.defs[m as usize].extend(es);
+            } else {
+                for e in es {
+                    self.insert_def(m, e);
                 }
             }
+            i = j;
         }
         // registries
         let mut chains: Vec<u32> = Vec::new();

@@ -172,6 +172,7 @@ fn main() {
     for _ in 0..runs {
         let mut g: Graph<B> = Graph::new();
         g.cfg.workers = w;
+        g.cfg.debug = std::env::var("DEBUG").is_ok();
         if std::env::var("RESERVE").is_ok() {
             g.reserve(2 * n + 16, 4 * n);
         }
@@ -192,6 +193,9 @@ fn main() {
         );
         g.run();
         best = best.min(t.elapsed().as_secs_f64());
+        if g.cfg.debug {
+            eprintln!("interiors (op, steps, max, p99): {:?}", g.interior_sizes());
+        }
         let (_, b) = g.mem();
         if w == 1 {
             eprintln!("{:.1} B/node live", b as f64 / (n * per) as f64);
