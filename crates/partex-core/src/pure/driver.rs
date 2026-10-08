@@ -53,7 +53,9 @@ impl<H: Host + 'static> Build<H> {
             Run::Checkpoint => None,
             Run::Finished(h) => Some(h),
         };
-        let base = tex.fork_with(NoHost, PureTracker::default());
+        let mut base = tex.fork_with(NoHost, PureTracker::default());
+        // (its tables flat, to be read: a checkpoint left them frozen)
+        base.thaw();
         let (st, v) = PState::of(&mut tex, b"", done0);
         let mut g: Graph<TexLang<H>> = Graph::new();
         g.cfg.workers = workers.max(1);
@@ -68,6 +70,8 @@ impl<H: Host + 'static> Build<H> {
                 at: Some(phi::Ver(v)),
                 stats: Stats::default(),
                 defined: std::collections::HashSet::new(),
+                last: None,
+                last_defs: std::collections::HashMap::new(),
             }),
             lines: Vec::new(),
             next_id: 1,

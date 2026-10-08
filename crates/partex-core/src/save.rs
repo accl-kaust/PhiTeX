@@ -646,9 +646,6 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             return self.confusion(b"curlevel");
         }
         let group = self.cur_group();
-        if T::PURE {
-            self.tracker.pure_group(false);
-        }
         // (the input level below the `\aftergroup` tokens, for a memo
         // recording; `back_input` may first end finished lists)
         let mut below_after = None;
@@ -751,6 +748,11 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         }
         if T::SOFT_READS {
             self.tracker.group_end(self.cur_level() + 1);
+        }
+        // (pure SSA: the group ends after its restores, which read the
+        // values inside it)
+        if T::PURE {
+            self.tracker.pure_group(false);
         }
         if self.int_par(TRACING_GROUPS_CODE) > 0 {
             self.group_trace(true);

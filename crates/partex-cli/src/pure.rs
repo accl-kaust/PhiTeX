@@ -61,11 +61,13 @@ fn report(n: usize, b: &mut Build<native::NativeHost>, rep: &phi::Report, ms: f6
     let s = b.engine().stats;
     let (live, _) = b.g.mem();
     eprintln!(
-        "phitex: pure ssa build {n}: {ms:.1} ms; steps run {} (runs {}, names loaded {}), \
+        "phitex: pure ssa build {n}: {ms:.1} ms; steps run {} (placed {}, frontiers whole {}, since {}, names loaded {}), \
          reads {}, definitions {}, groups {}, effect steps {}; core: steps {} evals {} \
          woken {} created {} removed {} iterations {}; live nodes {live}",
         s.steps,
+        s.placed,
         s.runs,
+        s.since,
         s.loaded,
         s.reads,
         s.defs,

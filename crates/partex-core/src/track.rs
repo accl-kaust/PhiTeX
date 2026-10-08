@@ -428,7 +428,7 @@ pub trait Tracker {
     /// They change nothing the engine does.
     const PURE: bool = false;
     /// (With [`Tracker::PURE`].) A group begins (`open`, §274) or ends
-    /// (§281, before its restores).
+    /// (§281, after its restores, which read the values inside it).
     fn pure_group(&self, _open: bool) {}
     /// (With [`Tracker::PURE`].) The next write of eqtb entry `p` is a
     /// global assignment (§279).

@@ -161,10 +161,15 @@ pub static DOC: RwLock<Option<Arc<Doc>>> = RwLock::new(None);
 #[derive(Default, Clone, Copy, Debug)]
 pub struct Stats {
     pub steps: u64,
-    /// Runs begun (a step not after the one the engine just ran): the
-    /// frontier made complete there.
+    /// Steps whose state was put in the engine (not the one it was in).
+    pub placed: u64,
+    /// Frontiers made whole (`defined_reaching`): a run begun where no
+    /// step the engine ran is before it.
     pub runs: u64,
-    /// Names put in the engine at the runs' starts.
+    /// Frontiers brought on from the step the engine ran last
+    /// (`defined_since`).
+    pub since: u64,
+    /// Names put in the engine to make the frontiers.
     pub loaded: u64,
     pub reads: u64,
     pub defs: u64,
@@ -183,6 +188,10 @@ pub struct Engine<H: Host> {
     /// Every slot a step of this engine defined (W=1: every name with a
     /// definition; the frontier's complement holds the format's values).
     pub(crate) defined: HashSet<Slot>,
+    /// The start of the step the engine ran last, and the versions of
+    /// what it defined (in the engine's arrays already).
+    pub(crate) last: Option<phi::Here>,
+    pub(crate) last_defs: HashMap<Slot, Version>,
 }
 
 std::thread_local! {
@@ -214,13 +223,59 @@ fn with_engine<H: Host + 'static, R>(f: impl FnOnce(&mut Engine<H>) -> R) -> R {
     })
 }
 
+/// The families, in the order their names spell them.
+const FAMS: [Fam; 33] = [
+    Fam::Eqtb,
+    Fam::Hash,
+    Fam::HashNext,
+    Fam::Font,
+    Fam::FontTable,
+    Fam::Read,
+    Fam::Out,
+    Fam::Random,
+    Fam::Str,
+    Fam::Source,
+    Fam::Line,
+    Fam::Name,
+    Fam::Load,
+    Fam::Search,
+    Fam::Pool,
+    Fam::Alloc,
+    Fam::Unknown,
+    Fam::List,
+    Fam::Save,
+    Fam::Hyph,
+    Fam::Glyphs,
+    Fam::HyphWord,
+    Fam::Pdf,
+    Fam::Dvi,
+    Fam::Page,
+    Fam::Cond,
+    Fam::Mark,
+    Fam::PageNode,
+    Fam::Sealed,
+    Fam::Class,
+    Fam::PdfObj,
+    Fam::PdfName,
+    Fam::PdfNum,
+];
+
 /// The core's name of slot `s`.
 fn spelling(s: Slot) -> [u8; 10] {
     let mut b = [0u8; 10];
     b[0] = 0xfe;
-    b[1] = s.0 as u8;
+    b[1] = u8::try_from(FAMS.iter().position(|f| *f == s.0).unwrap_or(0xff)).unwrap_or(0xff);
     b[2..].copy_from_slice(&s.1.to_le_bytes());
     b
+}
+
+/// The slot a name spells, if it is one.
+fn slot_of(sp: &[u8]) -> Option<Slot> {
+    if sp.len() != 10 || sp[0] != 0xfe {
+        return None;
+    }
+    let f = *FAMS.get(usize::from(sp[1]))?;
+    Some(Slot(f, i64::from_le_bytes(sp[2..].try_into().ok()?)))
 }
 
 /// Slot `s`'s value and version in `t` now.
@@ -289,14 +344,16 @@ fn command<H: Host + 'static>(st: &Val, cx: &mut StepCx<'_, TexLang<H>>) -> Step
     };
     with_engine::<H, _>(|e| {
         e.stats.steps += 1;
+        // (the engine's arrays made the frontier at this step: the names
+        // defined since the step it ran last, or every name)
+        frontier(e, cx);
         if e.at != Some(*sv) {
-            // (a run begins here: its frontier, the engine's arrays, made
-            // complete at the step's place, then the state)
-            start_run(e, cx);
+            e.stats.placed += 1;
             ps.set(&mut e.tex);
-            place_main(&mut e.tex, &doc, idx0);
-            e.tex.at_checkpoint = true;
         }
+        place_main(&mut e.tex, &doc, idx0);
+        e.tex.at_checkpoint = true;
+        e.last = Some(cx.here());
         e.tex.tracker.log.borrow_mut().clear();
         e.tex.tracker.file_ends.borrow_mut().clear();
         let r = e.tex.resume();
@@ -306,19 +363,57 @@ fn command<H: Host + 'static>(st: &Val, cx: &mut StepCx<'_, TexLang<H>>) -> Step
     })
 }
 
-/// A run begins at this step (not the one the engine just ran): every
-/// name a step of the build defined put in the engine as the definition
-/// reaching here has it (or the format's value), so that the arrays are
-/// the run's frontier, exact from its first command on.
-fn start_run<H: Host + 'static>(e: &mut Engine<H>, cx: &mut StepCx<'_, TexLang<H>>) {
-    e.stats.runs += 1;
-    let mut vals: Vec<(Slot, SVal)> = Vec::with_capacity(e.defined.len());
-    let defined: Vec<Slot> = e.defined.iter().copied().collect();
-    for s in defined {
-        let n = cx.name(&spelling(s));
-        if let Some(v) = core_value(e, cx, n, s) {
-            vals.push((s, v));
+/// Make the engine's arrays the frontier at this step (the run's: every
+/// name as the definition reaching here has it, or the format's value),
+/// from where they are: after the step the engine ran last, the names
+/// defined since it (`defined_since`: its own definitions and those of
+/// the steps between, and the names of groups closed between); else (a
+/// run begins elsewhere) every name the build defined. Not recorded as
+/// reads: the step's reads are registered after it runs.
+fn frontier<H: Host + 'static>(e: &mut Engine<H>, cx: &mut StepCx<'_, TexLang<H>>) {
+    let since = e.last.and_then(|p0| cx.defined_since(p0));
+    let mut vals: Vec<(Slot, SVal)> = Vec::new();
+    let put = |e: &mut Engine<H>, s: Slot, v: Option<&Val>, vals: &mut Vec<(Slot, SVal)>| {
+        let x = match v {
+            Some(Val::Slot(x)) => x.clone(),
+            Some(v) => panic!("pure SSA: name {s:?} holds {v:?}"),
+            None => match value_of(&e.base, s) {
+                Some(x) => x,
+                None => return,
+            },
+        };
+        // (a value the step before made: in place already)
+        if e.last_defs.get(&s) == Some(&x.0) {
+            return;
         }
+        vals.push((s, x));
+    };
+    if let Some(list) = since {
+        e.stats.since += 1;
+        for (n, v) in list {
+            let Some(s) = slot_of(cx.spelling(n)) else {
+                continue;
+            };
+            put(e, s, v.as_deref(), &mut vals);
+        }
+    } else {
+        e.stats.runs += 1;
+        let all = cx.defined_reaching();
+        let mut seen: HashSet<Slot> = HashSet::with_capacity(all.len());
+        for (n, v) in all {
+            let Some(s) = slot_of(cx.spelling(n)) else {
+                continue;
+            };
+            seen.insert(s);
+            put(e, s, Some(&*v), &mut vals);
+        }
+        // (a name the engine holds a later definition of, none reaching
+        // here: the format's value)
+        let defined: Vec<Slot> = e.defined.iter().copied().filter(|s| !seen.contains(s)).collect();
+        for s in defined {
+            put(e, s, None, &mut vals);
+        }
+        e.last_defs.clear();
     }
     e.stats.loaded += vals.len() as u64;
     vals.sort_by_key(|(s, _)| rank(s));
@@ -372,6 +467,16 @@ fn finish<H: Host + 'static>(
     cx: &mut StepCx<'_, TexLang<H>>,
 ) -> Step<Val> {
     use super::tracker::{Kind, kind};
+    e.last_defs.clear();
+    if *DEBUG {
+        std::eprintln!(
+            "pure step {} (line {}, commands {}): {:?}",
+            e.stats.steps,
+            e.tex.line,
+            e.tex.commands(),
+            log
+        );
+    }
     // (each slot's last write and last restore)
     let mut last_w: HashMap<Slot, usize> = HashMap::new();
     let mut last_r: HashMap<Slot, usize> = HashMap::new();
@@ -403,7 +508,7 @@ fn finish<H: Host + 'static>(
                     "pure SSA: the enforcer: {s:?} read {v:x}, the definition reaching it is {want:x}"
                 );
             }
-            Ev::Write(s, global) => {
+            Ev::Write(s, _) => {
                 written.insert(s);
                 if kind(s) == Kind::Name {
                     e.defined.insert(s);
@@ -418,9 +523,10 @@ fn finish<H: Host + 'static>(
                     continue;
                 };
                 e.stats.defs += 1;
+                e.last_defs.insert(s, v.0);
                 let n = cx.name(&spelling(s));
                 let l = cx.lit(Val::Slot(v));
-                cx.define(n, Arg::Local(l), global);
+                cx.define(n, Arg::Local(l), global_now(&e.tex, s));
             }
             Ev::Restore(_) => {}
             Ev::Open => {
@@ -527,4 +633,25 @@ impl<H: Host + 'static> Lang for TexLang<H> {
     fn op_tag(op: Op) -> u64 {
         phi::ver::hash64(&alloc::format!("tex/{op:?}"))
     }
+}
+
+/// `PHITEX_PURE_DEBUG=1`: each step's accesses on stderr.
+static DEBUG: std::sync::LazyLock<bool> =
+    std::sync::LazyLock::new(|| std::env::var("PHITEX_PURE_DEBUG").is_ok_and(|v| v == "1"));
+
+/// Whether slot `s`'s value now is global: an eqtb entry at level one
+/// (assigned `\global`, or at the job's level, where the two are one),
+/// as the save stack decides at a group's end (§283); any other name's
+/// value is (no group puts it back).
+fn global_now<H: Host>(t: &Tex<H, PureTracker>, s: Slot) -> bool {
+    if s.0 != Fam::Eqtb {
+        return true;
+    }
+    let p = i32::try_from(s.1).unwrap_or(0);
+    let level = if crate::ssa::word_level(p) {
+        t.peek_xeq_level(p)
+    } else {
+        i32::from(t.peek_eqtb(p).b1())
+    };
+    level <= crate::web::LEVEL_ONE
 }

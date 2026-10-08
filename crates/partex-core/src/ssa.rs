@@ -4850,7 +4850,7 @@ fn scalar_set<H: Host, T: Tracker>(t: &mut Tex<H, T>, k: u16, v: i32) {
 
 /// Whether eqtb location `p`'s level is in `xeq_level` (regions 5 and 6,
 /// and the count and dimen registers above 255).
-fn word_level(p: i32) -> bool {
+pub(crate) fn word_level(p: i32) -> bool {
     use crate::xregs::{EXT_BASE, ext_reg, is_word_kind};
     if p >= EXT_BASE {
         return is_word_kind(ext_reg(p).0);
