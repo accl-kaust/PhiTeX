@@ -116,6 +116,9 @@ impl<L: Lang> Graph<L> {
                 if ids {
                     let _ = write!(out, " #{:x} at {}", si.key, si.at.0);
                 }
+                if self.sealed(n) {
+                    out.push_str(" sealed");
+                }
                 let _ = write!(out, " took {}", si.took);
             }
             _ => {}

@@ -59,6 +59,7 @@ impl Hasher for Fx {
 }
 
 pub(crate) type Map<K, V> = StdMap<K, V, BuildHasherDefault<Fx>>;
+pub(crate) type Set<K> = std::collections::HashSet<K, BuildHasherDefault<Fx>>;
 
 pub(crate) const NONE: u32 = u32::MAX;
 const ROOT: u32 = 0;
@@ -91,6 +92,11 @@ pub enum Kind {
 const DIRTY: u8 = 1;
 const QUEUED: u8 = 2;
 const DEAD: u8 = 4;
+/// A step that is a sealed region (DESIGN 7.11): a run of steps folded.
+const SEALED: u8 = 8;
+
+mod compact;
+mod seal;
 
 /// An operand: what it reads (`src`, through `sel`), and the name it
 /// was resolved from, if any.
@@ -118,7 +124,7 @@ pub(crate) struct Pos {
     pub ord: u64,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Copy, Debug)]
 struct DefRec {
     name: u32,
     sub: u64,
@@ -145,6 +151,12 @@ pub(crate) struct StepInfo {
     /// Its definitions: a range of `Graph::step_defs`.
     d0: u32,
     dn: u32,
+    /// The run (`Graph::epoch`) it last ran in.
+    pub ran: u32,
+    /// Its emissions when it last ran (a sealed region: its steps').
+    pub work: u32,
+    /// A sealed region: the steps folded (0: a step).
+    pub folded: u32,
 }
 
 pub(crate) struct UnfoldInfo<V> {
@@ -194,7 +206,7 @@ pub(crate) struct ScanInfo<V> {
     pub done: bool,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Copy, Debug)]
 struct DefEntry {
     pos: Pos,
     src: u32,
@@ -213,6 +225,11 @@ struct NameTab {
     /// anchor's position (a top-level step or root node, whose order
     /// never changes); stale entries pruned at the run's end.
     readers: Vec<Vec<(u32, u32, u32)>>,
+    /// Readers not in order yet (one placed in the middle waits here, so
+    /// a run of them costs one merge, not a shift each), and the names
+    /// that have some.
+    rpend: Vec<Vec<(u32, u32, u32)>>,
+    rpend_names: Vec<u32>,
     /// Names whose reader lists hold stale entries.
     prune: Vec<u32>,
     pruned: Vec<bool>,
@@ -236,6 +253,8 @@ pub struct Report {
     pub scanned: u64,
     pub created: u64,
     pub removed: u64,
+    /// Steps folded into sealed regions.
+    pub sealed: u64,
     /// Nodes woken by a change they read.
     pub woken: u64,
     /// Runs of the cross-run loop beyond the first.
@@ -271,6 +290,14 @@ pub struct Config {
     /// Keep every emission as a node (the text form shows them, check
     /// mode re-evaluates them); off, a step's pure interior is transient.
     pub keep_interior: bool,
+    /// Seal settled runs of root unfolds' steps after each run, about
+    /// this many steps a run (0: never; DESIGN 7.11).
+    pub seal: u32,
+    /// A sealed run's bound in emissions: what its first edit re-runs.
+    pub seal_max: u32,
+    /// Runs a step must stay quiet before it is sealed again, once it
+    /// ran after the first build (an edited region stays live).
+    pub seal_quiet: u32,
 }
 
 impl Default for Config {
@@ -282,6 +309,9 @@ impl Default for Config {
             workers: 1,
             segment: false,
             keep_interior: false,
+            seal: 0,
+            seal_max: 4096,
+            seal_quiet: 16,
         }
     }
 }
@@ -1195,6 +1225,11 @@ pub struct Graph<L: Lang> {
     root_first: u32,
     /// Where the last step ended: its unfold, cursor and input index.
     hint: (u32, ElemId, usize),
+    /// Runs so far (a step's `ran` is the run it last ran in).
+    epoch: u32,
+    /// Steps that ran after the first build, with the run at which they
+    /// will have been quiet long enough to be sealed (in that order).
+    hot: std::collections::VecDeque<(u32, u32)>,
     /// The input leaf the last step ran in.
     lcache: Option<Leaf<L::Val>>,
     /// Steps' definitions (each step a range), and the groups each step
@@ -1268,6 +1303,8 @@ impl<L: Lang> Graph<L> {
             keymap: Map::default(),
             root_first: NONE,
             hint: (NONE, END, 0),
+            epoch: 0,
+            hot: std::collections::VecDeque::new(),
             lcache: None,
             step_defs: Vec::new(),
             closes: Map::default(),
@@ -1547,11 +1584,18 @@ impl<L: Lang> Graph<L> {
                 continue;
             }
             let new = &self.n.val[n as usize];
-            let changed = self
-                .n
-                .opds_of(r)
-                .iter()
-                .any(|o| o.src == n && o.sel.ver(old) != o.sel.ver(new));
+            // (a step reads the state before it against the one it ran
+            // from: a step inserted before it that ends in that same state
+            // changes nothing for it)
+            let step = self.n.h[ru].kind == Kind::Step;
+            let changed = self.n.opds_of(r).iter().enumerate().any(|(k, o)| {
+                o.src == n
+                    && if step && k == 0 {
+                        self.steps[self.n.h[ru].aux as usize].in_ver != new.ver()
+                    } else {
+                        o.sel.ver(old) != o.sel.ver(new)
+                    }
+            });
             if changed {
                 self.rep.woken += 1;
                 self.push_dirty(r);
@@ -2042,6 +2086,9 @@ impl<L: Lang> Graph<L> {
             in_ver: Ver::ABSENT,
             d0: 0,
             dn: 0,
+            ran: self.epoch,
+            work: 0,
+            folded: 0,
         });
         if prev == NONE {
             self.n.h[s as usize].next = self.first(u);
@@ -2080,7 +2127,10 @@ impl<L: Lang> Graph<L> {
         }
         let hi = self.n.h[after as usize].ord;
         if hi - lo > 1 {
-            return lo + (hi - lo) / 2;
+            // (a run of insertions after one step takes small gaps, so
+            // many fit before a relabel)
+            let gap = hi - lo;
+            return lo + if gap > 1 << 17 { 1 << 16 } else { gap / 2 };
         }
         // (no room: spread every step of `u` again, keeping the order)
         let mut c = self.first(u);
@@ -2112,6 +2162,9 @@ impl<L: Lang> Graph<L> {
     #[allow(clippy::too_many_lines)]
     fn run_step(&mut self, s: u32) -> Option<u32> {
         self.rep.steps += 1;
+        // (a sealed region runs again as its first step: the steps after
+        // it are made again until one meets the step that followed it)
+        self.n.h[s as usize].flags &= !SEALED;
         let si = self.n.h[s as usize].aux as usize;
         let u = self.steps[si].unfold;
         let ui = self.n.h[u as usize].aux as usize;
@@ -2191,6 +2244,7 @@ impl<L: Lang> Graph<L> {
             self.names.spell.push(sp);
             self.names.defs.push(Vec::new());
             self.names.readers.push(Vec::new());
+            self.names.rpend.push(Vec::new());
         }
         // which emissions become nodes ("big"); the rest is the sweep's
         let ids = self.match_children(s);
@@ -2228,9 +2282,17 @@ impl<L: Lang> Graph<L> {
                 self.unfolds[ui].owners.insert(at, s);
             }
         }
+        let work = u32::try_from(self.em.specs.len()).expect("emissions fit u32");
+        let epoch = self.epoch;
         let st_info = &mut self.steps[si];
         st_info.took = took;
         st_info.in_ver = in_ver;
+        st_info.ran = epoch;
+        st_info.work = work;
+        st_info.folded = 0;
+        if epoch > 1 && self.cfg.seal > 0 {
+            self.hot.push_back((epoch + self.cfg.seal_quiet, s));
+        }
         match res {
             Step::Done(v) => {
                 self.set_val(s, v.clone());
@@ -2826,6 +2888,7 @@ impl<L: Lang> Graph<L> {
     /// Readers of name `m` after `from` resolved again; those whose value
     /// changed are woken.
     fn reresolve(&mut self, m: u32, from: Pos) {
+        self.flush_readers(m);
         let rs = std::mem::take(&mut self.names.readers[m as usize]);
         let af = self.anchor_pos(from);
         let k0 = rs.partition_point(|e| self.n.cmp_pos(self.n.pos(e.0), af) == Ordering::Less);
@@ -2865,18 +2928,53 @@ impl<L: Lang> Graph<L> {
         }
     }
 
-    /// A reader of name `m`, in its anchor's place (at the end, mostly).
+    /// A reader of name `m`, in its anchor's place: at the end, mostly;
+    /// else it waits in `rpend` for the next merge.
     fn insert_reader(&mut self, m: u32, e: (u32, u32, u32)) {
         let list = &self.names.readers[m as usize];
         let ap = self.n.pos(e.0);
-        let k = match list.last() {
-            None => 0,
-            Some(l) if l.0 == e.0 || self.n.cmp_pos(self.n.pos(l.0), ap) != Ordering::Greater => {
-                list.len()
-            }
-            _ => list.partition_point(|x| self.n.cmp_pos(self.n.pos(x.0), ap) != Ordering::Greater),
+        let at_end = match list.last() {
+            None => true,
+            Some(l) => l.0 == e.0 || self.n.cmp_pos(self.n.pos(l.0), ap) != Ordering::Greater,
         };
-        self.names.readers[m as usize].insert(k, e);
+        if at_end && self.names.rpend[m as usize].is_empty() {
+            self.names.readers[m as usize].push(e);
+        } else {
+            if self.names.rpend[m as usize].is_empty() {
+                self.names.rpend_names.push(m);
+            }
+            self.names.rpend[m as usize].push(e);
+        }
+    }
+
+    /// Name `m`'s waiting readers merged into its list, in order.
+    pub(crate) fn flush_readers(&mut self, m: u32) {
+        let mut add = std::mem::take(&mut self.names.rpend[m as usize]);
+        if add.is_empty() {
+            return;
+        }
+        let g = &self.n;
+        add.sort_by(|a, b| g.cmp_pos(g.pos(a.0), g.pos(b.0)));
+        let old = std::mem::take(&mut self.names.readers[m as usize]);
+        let mut new = Vec::with_capacity(old.len() + add.len());
+        let mut a = add.into_iter().peekable();
+        for e in old {
+            while let Some(x) = a.peek()
+                && g.cmp_pos(g.pos(x.0), g.pos(e.0)) == Ordering::Less
+            {
+                new.push(a.next().expect("peeked"));
+            }
+            new.push(e);
+        }
+        new.extend(a);
+        self.names.readers[m as usize] = new;
+    }
+
+    /// Every name's waiting readers merged.
+    pub(crate) fn flush_all_readers(&mut self) {
+        for m in std::mem::take(&mut self.names.rpend_names) {
+            self.flush_readers(m);
+        }
     }
 
     /// A definition of name `m`, in its place (at the end, mostly).
@@ -3097,6 +3195,7 @@ impl<L: Lang> Graph<L> {
     /// cross-run slots to their fixed point.
     pub fn run(&mut self) -> Report {
         self.rep = Report::default();
+        self.epoch += 1;
         self.scan_runs.clear();
         let mut hist: Map<u64, Vec<Ver>> = Map::default();
         loop {
@@ -3177,6 +3276,8 @@ impl<L: Lang> Graph<L> {
         }
         if self.cfg.check {
             self.check();
+        } else if !self.cfg.segment {
+            self.seal_due_now();
         }
         self.tidy();
         self.rep.clone()
@@ -3203,6 +3304,7 @@ impl<L: Lang> Graph<L> {
         for v in self.fam_readers.values_mut() {
             v.retain(|&x| !dead(&self.n, x));
         }
+        self.flush_all_readers();
         for m in std::mem::take(&mut self.names.prune) {
             self.names.pruned[m as usize] = false;
             let g = &self.n;
@@ -3215,6 +3317,9 @@ impl<L: Lang> Graph<L> {
             self.set_first(n, NONE);
             self.n.val[n as usize] = L::Val::default();
             self.free.push(n);
+        }
+        if self.cfg.seal > 0 && !self.cfg.segment {
+            self.compact_if_sparse();
         }
     }
 
@@ -3352,6 +3457,11 @@ impl<L: Lang> Graph<L> {
     }
 
     /// A step's definitions: (source, selector, name, global).
+    /// Whether step `s` is a sealed region.
+    pub(crate) fn sealed(&self, s: u32) -> bool {
+        self.n.h[s as usize].flags & SEALED != 0
+    }
+
     pub(crate) fn step_defs(&self, s: u32) -> Vec<(u32, Sel, u32, bool)> {
         let si = &self.steps[self.n.h[s as usize].aux as usize];
         self.step_defs[si.d0 as usize..(si.d0 + si.dn) as usize]
@@ -3653,6 +3763,7 @@ impl<L: Lang> Graph<L> {
         self.names.spell.push(sp.into());
         self.names.defs.push(Vec::new());
         self.names.readers.push(Vec::new());
+        self.names.rpend.push(Vec::new());
         id
     }
 }
@@ -3832,6 +3943,9 @@ impl<L: Lang> Graph<L> {
                         in_ver: si.in_ver,
                         d0,
                         dn: si.dn,
+                        ran: 0,
+                        work: si.work,
+                        folded: 0,
                     });
                     if let Some(cl) = p.closes.get(&(x as u32)) {
                         pk.closes.push((r, cl.iter().map(|&g| encg(g)).collect()));
@@ -3973,7 +4087,9 @@ impl<L: Lang> Graph<L> {
             self.n.fams.insert(r + base, f);
         }
         // the kinds' tables
+        let epoch = self.epoch;
         self.steps.extend(pk.steps.into_iter().map(|si| StepInfo {
+            ran: epoch,
             unfold: dec(si.unfold),
             first: dec(si.first),
             grp_in: decg(si.grp_in),

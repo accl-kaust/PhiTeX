@@ -249,3 +249,45 @@ fn renaming_a_toc_entry_runs_one_line() {
     assert_eq!(r.iterations, 0, "{r:?}");
     assert_eq!(d.g.scanned(Op::TocLine), 0);
 }
+
+/// A woken sealed region unseals and stays live (DESIGN 7.11): the
+/// first edit in it re-runs the region, the next edit there re-runs
+/// exactly the steps it would with sealing off.
+#[test]
+fn a_second_edit_in_a_sealed_region_is_step_precise() {
+    let mut src = String::new();
+    for p in 0..300 {
+        for w in 0..12 {
+            src += &format!("w{p}x{w} ");
+        }
+        src += "\\par ";
+    }
+    let mut a = Doc::new(ids(lex(&src)));
+    a.g.cfg.seal = 4;
+    let r0 = a.g.run();
+    assert!(r0.sealed > 1000, "{r0:?}");
+    let mut b = Doc::new(ids(lex(&src)));
+    b.g.run();
+    let at = 150 * 13 + 5;
+    a.splice(at, 1, lex("other"));
+    b.splice(at, 1, lex("other"));
+    let (ra, rb) = (a.g.run(), b.g.run());
+    assert!(
+        ra.steps >= rb.steps,
+        "first edit: sealed {ra:?}, live {rb:?}"
+    );
+    eprintln!("first edit: sealed {} steps, live {}", ra.steps, rb.steps);
+    assert_eq!(a.observe(), b.observe());
+    a.splice(at + 2, 1, lex("again"));
+    b.splice(at + 2, 1, lex("again"));
+    let (ra, rb) = (a.g.run(), b.g.run());
+    assert_eq!(
+        ra.steps, rb.steps,
+        "second edit: sealed {ra:?}, live {rb:?}"
+    );
+    assert_eq!(
+        ra.evals, rb.evals,
+        "second edit: sealed {ra:?}, live {rb:?}"
+    );
+    assert_eq!(a.observe(), b.observe());
+}

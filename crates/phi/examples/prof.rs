@@ -161,6 +161,14 @@ fn main() {
         .ok()
         .and_then(|r| r.parse().ok())
         .unwrap_or(7);
+    // (logical nodes a step: its leaves, its constant, the step)
+    let per: usize = if std::env::var("K20").is_ok() {
+        22
+    } else if std::env::var("K1").is_ok() {
+        3
+    } else {
+        12
+    };
     for _ in 0..runs {
         let mut g: Graph<B> = Graph::new();
         g.cfg.workers = w;
@@ -186,12 +194,70 @@ fn main() {
         best = best.min(t.elapsed().as_secs_f64());
         let (_, b) = g.mem();
         if w == 1 {
-            eprintln!("{:.1} B/node", b as f64 / (n * 12) as f64);
+            eprintln!("{:.1} B/node live", b as f64 / (n * per) as f64);
+        }
+        if let Some(f) = std::env::var("SEAL").ok().and_then(|v| v.parse().ok()) {
+            g.cfg.seal = f;
+            let t = Instant::now();
+            let sealed = if f > 0 { g.seal() } else { 0 };
+            let ts = t.elapsed().as_secs_f64();
+            let (_, b) = g.mem();
+            let mut runs = g.sealed_runs();
+            runs.sort_unstable();
+            let k = runs.len().max(1);
+            let mean = runs.iter().map(|r| r.0 as f64).sum::<f64>() / k as f64;
+            let meanw = runs.iter().map(|r| r.1 as f64).sum::<f64>() / k as f64;
+            let p99 = runs.get(k * 99 / 100).copied().unwrap_or_default();
+            let max = runs.iter().map(|r| r.1).max().unwrap_or(0);
+            eprintln!(
+                "sealed {} steps in {} runs ({:.1} ms, {:.1} ns/node): steps/run mean {mean:.1} p99 {} max {}; nodes/run mean {meanw:.0} max {max}; {:.1} B/node retained",
+                sealed,
+                runs.len(),
+                ts * 1e3,
+                ts * 1e9 / (n * per) as f64,
+                p99.0,
+                runs.last().map_or(0, |r| r.0),
+                b as f64 / (n * per) as f64
+            );
+            // first edits, each in another sealed run, then a second edit
+            // beside each first
+            let mut cur = s.clone();
+            let (mut first, mut second) = (Vec::new(), Vec::new());
+            let (mut fs, mut ss) = (0u64, 0u64);
+            let ne: usize = std::env::var("EDITS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(50);
+            for e in 0..ne {
+                let at = 1000 + e * (n - 2000) / ne;
+                for (k, out, st) in [(at, &mut first, &mut fs), (at + 2, &mut second, &mut ss)] {
+                    cur = cur.splice(k, 1, [(ElemId(k as u64 + 1), V::I(1000 + e as i64))]);
+                    g.set(input, V::S(Box::new(cur.clone())));
+                    let t = Instant::now();
+                    let r = g.run();
+                    out.push(t.elapsed().as_secs_f64() * 1e6);
+                    *st += r.steps;
+                    if std::env::var("TRACE").is_ok() {
+                        eprintln!("edit at {k}: {r:?}");
+                    }
+                }
+            }
+            let stat = |v: &mut Vec<f64>| {
+                v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                (v[v.len() / 2], v[v.len() - 1])
+            };
+            let (fm, fx) = stat(&mut first);
+            let (sm, sx) = stat(&mut second);
+            eprintln!(
+                "first edit in a sealed run: median {fm:.0} us max {fx:.0} us ({:.1} steps); second edit beside it: median {sm:.0} us max {sx:.0} us ({:.1} steps)",
+                fs as f64 / ne as f64,
+                ss as f64 / ne as f64
+            );
         }
     }
     println!(
         "{n} steps, {w} workers: {:.1} ms, {:.1} ns/node",
         best * 1e3,
-        best * 1e9 / (n * 12) as f64
+        best * 1e9 / (n * per) as f64
     );
 }

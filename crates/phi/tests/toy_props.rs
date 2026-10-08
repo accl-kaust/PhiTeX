@@ -198,3 +198,60 @@ fn random_edits_equal_fresh_builds() {
         }
     }
 }
+
+/// With sealed regions (DESIGN 7.11): runs of steps folded after every
+/// run, woken folds run again. What the document makes equals a fresh
+/// build's, unsealed and checked.
+fn run_seed_sealed(seed: u64, len: usize, edits: usize, f: u32) {
+    let mut r = Rng(seed.wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1);
+    let mut d = Doc::new(ids(random_doc(&mut r, len)));
+    d.g.cfg.seal = f;
+    let mut sealed = d.g.run().sealed;
+    // (compacted after every run, whether sparse or not)
+    d.g.compact();
+    assert_eq!(
+        d.observe(),
+        fresh(&d).observe(),
+        "seed {seed}: cold, sealed"
+    );
+    for e in 0..edits {
+        let k = 1 + r.below(3);
+        for _ in 0..k {
+            edit(&mut r, &mut d);
+        }
+        let rep = d.g.run();
+        sealed += rep.sealed;
+        d.g.compact();
+        let text = d.g.to_text();
+        let dump = phi::Dump::parse(&text, <Toy as phi::Lang>::parse_val).expect("parses");
+        assert_eq!(dump.to_text(), text);
+        let fr = fresh(&d);
+        if d.observe() != fr.observe() {
+            let src: Vec<String> = d.toks.iter().map(|t| t.1.text()).collect();
+            if let Ok(dir) = std::env::var("PHI_DUMP") {
+                std::fs::write(format!("{dir}/inc.txt"), d.g.to_text_ids()).unwrap();
+                std::fs::write(format!("{dir}/fresh.txt"), fr.g.to_text_ids()).unwrap();
+            }
+            panic!(
+                "seed {seed}, edit {e}, sealed every {f}: {}\nincremental:\n{}fresh:\n{}",
+                src.join(" "),
+                d.observe(),
+                fr.observe()
+            );
+        }
+    }
+    if std::env::var("PHI_TRACE").is_ok() {
+        eprintln!("seed {seed}: {sealed} steps sealed");
+    }
+    assert!(sealed > 0, "seed {seed}: nothing sealed");
+}
+
+#[test]
+fn sealed_random_edits_equal_fresh_builds() {
+    let only: Option<u64> = std::env::var("PHI_SEED").ok().and_then(|s| s.parse().ok());
+    for seed in 1..=40 {
+        if only.is_none_or(|o| o == seed) {
+            run_seed_sealed(seed, 60, 40, 1 + (seed % 4) as u32);
+        }
+    }
+}
