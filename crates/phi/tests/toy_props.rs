@@ -2,6 +2,8 @@
 
 mod toy;
 
+use phi::Lang as _;
+
 use toy::*;
 
 struct Rng(u64);
@@ -136,6 +138,15 @@ fn run_seed(seed: u64, len: usize, edits: usize) {
             eprintln!("edit {e}: {} edits; toks[4..8] = {:?}", k, &d.toks[4..8.min(d.toks.len())]);
         }
         let rep = d.g.run();
+        // the text form round-trips, values included where the client parses them
+        let text = d.g.to_text();
+        let dump = phi::Dump::parse(&text, <Toy as phi::Lang>::parse_val).expect("parses");
+        assert_eq!(dump.to_text(), text);
+        for l in &dump.lines {
+            if let phi::Line::Node { val, parsed: Some(v), .. } = l {
+                assert_eq!(&<Toy as phi::Lang>::fmt_val(v), val);
+            }
+        }
         if std::env::var("PHI_DUMP").is_ok() {
             eprintln!("edit {e}: {rep:?} slot j = {:?}", d.g.slot(phi::Slot(phi::ver::hash64("j"))));
         }

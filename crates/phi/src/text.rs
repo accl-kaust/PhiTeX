@@ -138,3 +138,169 @@ impl<L: Lang> Graph<L> {
         let _ = self.n.val[u].ver();
     }
 }
+
+/// One line of the text form, parsed.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Line<V> {
+    Node {
+        depth: usize,
+        num: usize,
+        /// Kind, class, op and step details, as printed.
+        head: String,
+        /// Operands: (`@name:` if read by name, the node's number or
+        /// `None` if undefined, the field if any).
+        opds: Vec<(Option<String>, Option<usize>, Option<u32>)>,
+        val: String,
+        /// The value, if the client parses its text.
+        parsed: Option<V>,
+    },
+    Def {
+        depth: usize,
+        name: String,
+        src: Option<usize>,
+        field: Option<u32>,
+        global: bool,
+    },
+}
+
+/// The text form parsed back: printing it gives the same text.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Dump<V> {
+    pub lines: Vec<Line<V>>,
+}
+
+fn parse_opd(s: &str) -> Option<(Option<String>, Option<usize>, Option<u32>)> {
+    let (name, rest) = match s.strip_prefix('@') {
+        Some(r) => {
+            let (n, r) = r.rsplit_once(':')?;
+            (Some(n.to_string()), r)
+        }
+        None => (None, s),
+    };
+    let (node, field) = match rest.split_once('.') {
+        Some((a, f)) => (a, Some(f.parse().ok()?)),
+        None => (rest, None),
+    };
+    let src = if node == "undef" {
+        None
+    } else {
+        Some(node.strip_prefix('%')?.parse().ok()?)
+    };
+    Some((name, src, field))
+}
+
+fn print_opd(o: &(Option<String>, Option<usize>, Option<u32>)) -> String {
+    let mut s = String::new();
+    if let Some(n) = &o.0 {
+        let _ = write!(s, "@{n}:");
+    }
+    match o.1 {
+        Some(k) => {
+            let _ = write!(s, "%{k}");
+        }
+        None => s.push_str("undef"),
+    }
+    if let Some(f) = o.2 {
+        let _ = write!(s, ".{f}");
+    }
+    s
+}
+
+impl<V> Dump<V> {
+    /// Parse the text form. Values are parsed with `parse` where it can.
+    pub fn parse(text: &str, parse: impl Fn(&str) -> Option<V>) -> Result<Self, String> {
+        let mut lines = Vec::new();
+        for (k, l) in text.lines().enumerate() {
+            let body = l.trim_start_matches(' ');
+            let indent = l.len() - body.len();
+            if indent % 2 != 0 {
+                return Err(format!("line {}: odd indent", k + 1));
+            }
+            if let Some(d) = body.strip_prefix("def @") {
+                let (name, rest) = d.split_once(" = ").ok_or(format!("line {}: def", k + 1))?;
+                let (o, global) = match rest.strip_suffix(" global") {
+                    Some(o) => (o, true),
+                    None => (rest, false),
+                };
+                let (_, src, field) = parse_opd(o).ok_or(format!("line {}: operand", k + 1))?;
+                lines.push(Line::Def {
+                    depth: indent / 2,
+                    name: name.to_string(),
+                    src,
+                    field,
+                    global,
+                });
+                continue;
+            }
+            let rest = body.strip_prefix('%').ok_or(format!("line {}: no node", k + 1))?;
+            let (num, rest) = rest.split_once(" = ").ok_or(format!("line {}: no '='", k + 1))?;
+            let num: usize = num.parse().map_err(|_| format!("line {}: number", k + 1))?;
+            let (desc, val) = rest.split_once(" = ").ok_or(format!("line {}: no value", k + 1))?;
+            let (head, opds) = match desc.strip_suffix(')').and_then(|d| d.rsplit_once('(')) {
+                Some((h, os)) => {
+                    let opds = os
+                        .split(", ")
+                        .map(|o| parse_opd(o).ok_or(format!("line {}: operand {o}", k + 1)))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    (h.to_string(), opds)
+                }
+                None => (desc.to_string(), Vec::new()),
+            };
+            lines.push(Line::Node {
+                depth: indent / 2 + 1,
+                num,
+                head,
+                opds,
+                val: val.to_string(),
+                parsed: parse(val),
+            });
+        }
+        Ok(Dump { lines })
+    }
+
+    /// The text again.
+    #[must_use]
+    pub fn to_text(&self) -> String {
+        let mut out = String::new();
+        for l in &self.lines {
+            match l {
+                Line::Node {
+                    depth,
+                    num,
+                    head,
+                    opds,
+                    val,
+                    ..
+                } => {
+                    for _ in 1..*depth {
+                        out.push_str("  ");
+                    }
+                    let _ = write!(out, "%{num} = {head}");
+                    if !opds.is_empty() {
+                        let os: Vec<String> = opds.iter().map(print_opd).collect();
+                        let _ = write!(out, "({})", os.join(", "));
+                    }
+                    let _ = writeln!(out, " = {val}");
+                }
+                Line::Def {
+                    depth,
+                    name,
+                    src,
+                    field,
+                    global,
+                } => {
+                    for _ in 0..*depth {
+                        out.push_str("  ");
+                    }
+                    let _ = writeln!(
+                        out,
+                        "def @{name} = {}{}",
+                        print_opd(&(None, *src, *field)),
+                        if *global { " global" } else { "" }
+                    );
+                }
+            }
+        }
+        out
+    }
+}

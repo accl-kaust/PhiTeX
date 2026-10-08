@@ -11,7 +11,7 @@
 pub mod graph;
 pub mod lang;
 pub mod seq;
-mod text;
+pub mod text;
 pub mod value;
 pub mod ver;
 
@@ -19,4 +19,5 @@ pub use graph::{Arg, Args, Config, END, Graph, Kind, Local, NameId, NodeId, Repo
 pub use lang::{Chain, Class, Entry, Fam, Lang, Slot, Step};
 pub use seq::{ElemId, Hunk, Measure, Seq};
 pub use value::{Proj, Sel, Value};
+pub use text::{Dump, Line};
 pub use ver::Ver;

@@ -301,6 +301,21 @@ impl Lang for Toy {
         }
     }
 
+    fn parse_val(s: &str) -> Option<TV> {
+        if s == "Unit" {
+            return Some(TV::Unit);
+        }
+        if let Some(n) = s.strip_prefix("Int(").and_then(|r| r.strip_suffix(')')) {
+            return n.parse().ok().map(TV::Int);
+        }
+        let r = s.strip_prefix("Word(\"")?.strip_suffix(')')?;
+        let (w, n) = r.rsplit_once("\", ")?;
+        if w.contains(['\\', '"']) {
+            return None;
+        }
+        Some(TV::Word(w.into(), n.parse().ok()?))
+    }
+
     fn op_tag(op: Op) -> u64 {
         phi::ver::hash64(&format!("{op:?}"))
     }
