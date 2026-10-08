@@ -14,6 +14,8 @@ import { ENGINES, errorNeeds, type Engine } from "./engines.ts";
 import { Viewer } from "./viewer.ts";
 import { VIEWER_CSS } from "./css.ts";
 import { PROBLEMS_CSS, problemHtml } from "./problems.ts";
+import { OUTLINE_CSS, Outline, type Entry } from "./outline.ts";
+import { KEYS, bindKeys } from "./keys.ts";
 import { REPORT_TO } from "./report.ts";
 
 /** How long a build may ship no page before the last good one is dimmed (typing through `{`). */
@@ -145,6 +147,10 @@ export interface PanelOptions {
   pdfjs?: boolean;
   /** One of the host's own files by its path (the license): its address (default: the path as it is). */
   fileUrl?(path: string): string;
+  /** The document's contents beside the pages (outline.ts: the host gives them, `outline`), `t` or ☰ to show or hide. */
+  outline?: boolean;
+  /** The pages' keys (keys.ts: PDF viewers' and vim's, `?` lists them), and `e` for the problems; where the page owns the keyboard (the CLI's), not under an editor. */
+  keys?: boolean;
 }
 
 /** Where the panel keeps its preferences (chrome.storage.local in the extension). */
@@ -334,6 +340,13 @@ button.btn:hover { background: var(--accent2); }
 .sum .caret { margin-left: auto; transition: transform .15s; }
 .win.diags-open .sum .caret { transform: rotate(90deg); }
 .body { position: relative; flex: 1; min-height: 0; display: flex; flex-direction: column; }
+/* (the contents beside the pages: PanelOptions.outline) */
+.win.has-side .body { flex-direction: row; }
+.side { display: none; flex: none; width: 240px; overflow: auto; background: var(--light); border-right: 1px solid var(--light3); color: var(--fg); }
+.win.side-on .side { display: block; }
+.keyhelp { position: absolute; z-index: 6; top: 12px; right: 12px; padding: 10px 14px; border-radius: 10px; background: rgb(27 34 44 / 96%); color: #fff; font-size: 12px; box-shadow: 0 8px 24px rgba(0,0,0,.4); }
+.keyhelp td { padding: 1px 8px 1px 0; vertical-align: top; }
+.keyhelp kbd { font: 11px ui-monospace, monospace; background: rgb(255 255 255 / 12%); border-radius: 4px; padding: 1px 5px; }
 /* (a problem told whole, in the drawer: problems.ts's card, as a row) */
 .diags .phx-inline { margin: 0; padding: 0; border-radius: 0; border-top: 0; box-shadow: none; max-width: none; list-style: none; }
 .diags .phx-inline li { border-bottom: 1px solid #2c2e33; }
@@ -578,7 +591,7 @@ export class Panel {
     const w = (this.words = { ...OVERLEAF_WORDS, ...opts.words });
     const host = document.createElement("phitex-preview");
     this.root = host.attachShadow({ mode: "open" });
-    this.root.innerHTML = (`<style>${VIEWER_CSS}${PROBLEMS_CSS}${CSS}</style>
+    this.root.innerHTML = (`<style>${VIEWER_CSS}${PROBLEMS_CSS}${OUTLINE_CSS}${CSS}</style>
 <div class="win" role="dialog" aria-label="PhiTeX preview">
   <header>
     <span class="icon" aria-hidden="true">preview</span>
@@ -624,6 +637,8 @@ export class Panel {
     <div class="about" id="about" role="dialog" aria-label="About the PhiTeX preview">
       ${w.about}
     </div>
+    <nav class="side" id="side" aria-label="Contents"></nav>
+    <div class="keyhelp" id="keyhelp" role="dialog" aria-label="Keys" hidden></div>
     <div class="stage" id="stage"><div class="approx" id="approx"></div><div class="banner" id="banner"></div><div class="empty" id="empty"><div class="load"><div class="steps"><span class="now">Project read</span><i></i><span>Packages</span><i></i><span>Typesetting</span></div><h3>Reading the project…</h3><div class="bar busy"><i></i></div></div></div><div class="viewer" id="viewer"></div></div>
   </div>
   <footer><span class="lat" id="lat" title="Click for details">–</span><span class="grow"></span><span class="msg" id="msg">all local</span></footer>
@@ -703,6 +718,7 @@ export class Panel {
       need: (k) => ev.onNeed?.(k),
       inView: (k) => {
         this.at = k;
+        this.contents?.at(k);
         this.nav();
         ev.onPage(k);
       },
@@ -713,6 +729,7 @@ export class Panel {
       selected: (sel) => ev.onSelectPage?.(sel),
       link: ev.onLink ? (u) => ev.onLink!(u) : undefined,
     });
+    this.extras(opts);
     // (keep it on screen when the window shrinks)
     window.addEventListener("resize", () => this.place());
     new ResizeObserver(() => {
@@ -1281,6 +1298,91 @@ export class Panel {
     const now = this.scale();
     const next = dir > 0 ? steps.find((z) => z > now + 0.01) : [...steps].reverse().find((z) => z < now - 0.01);
     this.zoomTo(String(next ?? now));
+  }
+
+  /** The contents beside the pages (PanelOptions.outline). */
+  private contents?: Outline;
+
+  /** The document's outline (its PDF's bookmarks), from the host after each build. */
+  outline(items: Entry[]): void {
+    this.contents?.set(items);
+    this.contents?.at(this.at);
+  }
+
+  /** The contents shown or hidden (remembered on this machine). */
+  side(on = !this.win.classList.contains("side-on")): void {
+    if (!this.contents) return;
+    this.win.classList.toggle("side-on", on);
+    try {
+      localStorage.setItem("phitex.side", on ? "1" : "0");
+    } catch {
+      /* (no storage: not remembered) */
+    }
+    if (this.prefs.zoom === "fit") this.redraw();
+  }
+
+  /** The contents and the keys, as the host asked (PanelOptions). */
+  private extras(opts: PanelOptions): void {
+    if (opts.outline) {
+      this.win.classList.add("has-side");
+      this.contents = new Outline(this.$("#side"), { goToPlace: (k, top) => this.viewer.goToPlace(k, top) });
+      const b = document.createElement("button");
+      b.className = "ib";
+      b.title = "Contents (t)";
+      b.setAttribute("aria-label", "Contents");
+      b.textContent = "☰";
+      b.onclick = () => this.side();
+      this.$("header .title").before(b);
+      let on = true;
+      try {
+        on = localStorage.getItem("phitex.side") !== "0";
+      } catch {
+        /* (shown) */
+      }
+      this.win.classList.toggle("side-on", on);
+    }
+    if (!opts.keys) return;
+    const help = this.$("#keyhelp");
+    const extra: [string, string][] = [["e", "the build's errors and warnings"], ...(opts.outline ? ([["t", "the contents beside the pages"]] as [string, string][]) : [])];
+    help.innerHTML = `<b>Keys</b><table>${[...KEYS, ...extra].map(([k, w]) => `<tr><td><kbd>${k}</kbd></td><td>${w}</td></tr>`).join("")}</table>`;
+    // (the problems' and the contents' keys first: Esc closes the drawer before anything else)
+    addEventListener(
+      "keydown",
+      (e) => {
+        if (e.ctrlKey || e.altKey || e.metaKey || (e.target as HTMLElement | null)?.closest?.("input, textarea, select, [contenteditable=true]")) return;
+        const drawer = this.win.classList.contains("diags-open");
+        if (e.key === "Escape" && drawer) this.diagnostics(false);
+        else if (e.key === "e") this.diagnostics();
+        else if (e.key === "t" && this.contents) this.side();
+        else return;
+        e.preventDefault();
+        e.stopImmediatePropagation();
+      },
+      { capture: true },
+    );
+    const stage = this.$("#stage");
+    const pageH = () => {
+      const d = this.last && "draws" in this.last ? this.last.draws : null;
+      return (d?.h ?? 792) * (96 / 72);
+    };
+    const panel = this;
+    bindKeys(window, {
+      get pages() {
+        return panel.viewer.pages;
+      },
+      get page() {
+        return panel.viewer.page;
+      },
+      goTo: (k) => this.viewer.goTo(k),
+      turn: (n) => this.viewer.turn(n),
+      scroller: stage,
+      zoom: (f) => this.zoomTo(String(Math.min(5, Math.max(0.25, this.scale() * f)))),
+      fitWidth: () => this.zoomTo("fit"),
+      fitPage: () => this.zoomTo(String(Math.max(0.2, Math.min((stage.clientHeight - 24) / pageH(), this.scale())))),
+      help: (show) => {
+        help.hidden = !show;
+      },
+    });
   }
 
   /** The errors last closed by hand (the drawer opens again when they change). */
