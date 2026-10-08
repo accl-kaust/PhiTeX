@@ -179,6 +179,7 @@ impl<L: Lang, const P: bool> Graph<L, P> {
         if self.hook.auto.len() > 0 && !self.hook.memo_on {
             self.set_memo_budget(self.cfg.auto_memo_bytes);
         }
+        self.hook.settle();
         if self.cfg.seal > 0 {
             self.tune_sealing(&mut t);
         }

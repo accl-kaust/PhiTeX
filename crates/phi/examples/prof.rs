@@ -53,6 +53,8 @@ enum O {
 struct B<const X: bool>;
 
 /// (read once: an environment lookup a step would cost ~10 ns/node)
+static LEAFHEAVY: std::sync::LazyLock<Option<u64>> =
+    std::sync::LazyLock::new(|| std::env::var("LEAFHEAVY").ok().and_then(|v| v.parse().ok()));
 static HEAVY: std::sync::LazyLock<Option<u64>> =
     std::sync::LazyLock::new(|| std::env::var("HEAVY").ok().and_then(|v| v.parse().ok()));
 /// (set in main: a hook the core calls per leaf must be a plain load)
@@ -64,7 +66,19 @@ impl<const X: bool> Lang for B<X> {
     type Op = O;
     fn eval(op: O, a: &Args<'_, Self>) -> V {
         match op {
-            O::Add => V::I((0..a.len()).map(|i| a.get(i).i()).sum::<i64>() & 0xffff),
+            O::Add => {
+                // (LEAFHEAVY=n: a leaf that costs about n ns more)
+                if X && let Some(n) = *LEAFHEAVY {
+                    let mut h = a.get(1).i() as u64;
+                    for i in 0..n {
+                        h = std::hint::black_box(
+                            h.wrapping_mul(0x9e37_79b9_7f4a_7c15).rotate_left(7) ^ i,
+                        );
+                    }
+                    std::hint::black_box(h);
+                }
+                V::I((0..a.len()).map(|i| a.get(i).i()).sum::<i64>() & 0xffff)
+            }
             _ => V::Nil,
         }
     }
@@ -183,17 +197,19 @@ impl<const X: bool> Lang for B<X> {
 fn main() {
     CSE.store(std::env::var("CSE").is_ok(), Relaxed);
     MEMO.store(std::env::var("MEMO").is_ok(), Relaxed);
-    if ["HEAVY", "CSE", "MEMO", "PRE"]
+    let x = ["HEAVY", "CSE", "MEMO", "PRE", "LEAFHEAVY", "TUNE"]
         .iter()
-        .any(|v| std::env::var(v).is_ok())
-    {
-        run::<true>();
-    } else {
-        run::<false>();
+        .any(|v| std::env::var(v).is_ok());
+    // (PROFILE: a Graph<_, true>)
+    match (x, std::env::var("PROFILE").is_ok()) {
+        (false, false) => run::<false, false>(),
+        (false, true) => run::<false, true>(),
+        (true, false) => run::<true, false>(),
+        (true, true) => run::<true, true>(),
     }
 }
 
-fn run<const X: bool>() {
+fn run<const X: bool, const P: bool>() {
     let n: usize = std::env::args()
         .nth(1)
         .and_then(|a| a.parse().ok())
@@ -221,7 +237,7 @@ fn run<const X: bool>() {
         12
     };
     for _ in 0..runs {
-        let mut g: Graph<B<X>> = Graph::new();
+        let mut g: Graph<B<X>, P> = Graph::new();
         g.cfg.workers = w;
         g.cfg.debug = std::env::var("DEBUG").is_ok();
         if MEMO.load(Relaxed) {
@@ -247,6 +263,20 @@ fn run<const X: bool>() {
         );
         g.run();
         best = best.min(t.elapsed().as_secs_f64());
+        if P && std::env::var("SHOW").is_ok() {
+            let t = Instant::now();
+            let rep = g.profile();
+            eprintln!("profile() {:.2} ms", t.elapsed().as_secs_f64() * 1e3);
+            for (o, st) in rep.ops.iter().take(4) {
+                eprintln!(
+                    "  {o:?}: evals ~{} (timed {}), mean {:.1} ns, steps {}",
+                    st.evals,
+                    st.timed,
+                    st.mean_ns(),
+                    st.steps
+                );
+            }
+        }
         if MEMO.load(Relaxed) {
             eprintln!("memo (entries, bytes, probes, hits): {:?}", g.memo_stats());
         }
@@ -262,7 +292,11 @@ fn run<const X: bool>() {
             if std::env::var("PRE").is_ok() {
                 // (a preamble edit: every step re-runs)
                 let mut cur = s.clone();
-                for e in 0..3i64 {
+                let tune = std::env::var("TUNE").is_ok();
+                if tune {
+                    eprintln!("tune: {:?}", g.tune());
+                }
+                for e in 0..if tune { 6i64 } else { 3 } {
                     cur = cur.splice(0, 1, [(ElemId(1), V::I(500 + e))]);
                     g.set(input, V::S(Box::new(cur.clone())));
                     let t = Instant::now();
@@ -274,6 +308,16 @@ fn run<const X: bool>() {
                         r.dry_runs,
                         r.dry_used
                     );
+                    if tune {
+                        let tu = g.tune();
+                        eprintln!(
+                            "tune: memo in {:?} out {:?} watched {:?}; store {:?}",
+                            tu.memo_in,
+                            tu.memo_out,
+                            tu.watched,
+                            g.memo_stats()
+                        );
+                    }
                 }
             }
             let t = Instant::now();

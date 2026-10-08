@@ -264,6 +264,7 @@ impl<L: Lang, const P: bool> Graph<L, P> {
     /// If a worker panicked holding the store.
     pub fn set_memo_budget(&mut self, bytes: usize) {
         self.hook.memo_on = bytes > 0;
+        self.hook.settle();
         let mut m = self.hook.memo.lock().expect("the memo store");
         m.budget = bytes;
         if m.bytes() > bytes {

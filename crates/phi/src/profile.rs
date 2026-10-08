@@ -14,7 +14,7 @@ use crate::graph::{Map, Set};
 use crate::ver::Ver;
 
 /// Evaluations a sample stands for, on average.
-pub const SAMPLE: u32 = 32;
+pub const SAMPLE: u32 = 128;
 
 /// What kind of node an op was seen on (bits: it may be several).
 pub const LEAF: u8 = 1;
@@ -419,6 +419,18 @@ impl Default for Tick {
 }
 
 impl Tick {
+    /// Counts an evaluation that is not a sample, or says it is one
+    /// (then `next` draws the next interval).
+    #[inline]
+    pub(crate) fn due(&mut self) -> bool {
+        if self.left > 1 {
+            self.left -= 1;
+            false
+        } else {
+            true
+        }
+    }
+
     /// Whether this evaluation is a sample: the evaluations it stands for
     /// (0: not a sample).
     #[inline]

@@ -529,6 +529,16 @@ pub(crate) struct Hook<L: Lang> {
     pub(crate) auto: OpSet<L::Op>,
     /// Ops whose evaluations' keys the profile looks at.
     pub(crate) watch: OpSet<L::Op>,
+    /// No store and nothing watched: only the profile's samples go
+    /// through the hook (`Hook::settle` keeps it).
+    pub(crate) plain: bool,
+}
+
+impl<L: Lang> Hook<L> {
+    /// `plain` brought up to date.
+    pub(crate) fn settle(&mut self) {
+        self.plain = !self.memo_on && self.watch.len() == 0;
+    }
 }
 
 impl<L: Lang> Default for Hook<L> {
@@ -539,6 +549,7 @@ impl<L: Lang> Default for Hook<L> {
             prof: false,
             auto: OpSet::default(),
             watch: OpSet::default(),
+            plain: true,
         }
     }
 }
@@ -551,6 +562,7 @@ impl<L: Lang> Clone for Hook<L> {
             prof: self.prof,
             auto: self.auto.clone(),
             watch: self.watch.clone(),
+            plain: self.plain,
         }
     }
 }
@@ -609,9 +621,22 @@ pub(crate) fn now() -> Option<std::time::Instant> {
     }
 }
 
-/// Nanoseconds since `t`, saturated.
+/// Nanoseconds since `t`, saturated, less what reading the clock twice
+/// costs (measured once: the median of 101 empty timings).
 pub(crate) fn ns_since(t: std::time::Instant) -> u32 {
-    u32::try_from(t.elapsed().as_nanos()).unwrap_or(u32::MAX)
+    static COST: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    let ns = u32::try_from(t.elapsed().as_nanos()).unwrap_or(u32::MAX);
+    let cost = *COST.get_or_init(|| {
+        let mut v: Vec<u32> = (0..101)
+            .map(|_| {
+                let t = std::time::Instant::now();
+                u32::try_from(t.elapsed().as_nanos()).unwrap_or(u32::MAX)
+            })
+            .collect();
+        v.sort_unstable();
+        v[50]
+    });
+    ns.saturating_sub(cost)
 }
 
 /// Leaf `op` evaluated; with a hook, through it (the memo store, the
@@ -625,6 +650,14 @@ fn eval_op<L: Lang>(
 ) -> (L::Val, Option<Ev<L::Op>>) {
     match hook {
         None => (L::eval(op, args), None),
+        // (profiling alone, and not a sample: the countdown only)
+        Some(h) if h.plain => {
+            if tick.due() {
+                eval_hooked(h, tick, op, args)
+            } else {
+                (L::eval(op, args), None)
+            }
+        }
         Some(h) => eval_hooked(h, tick, op, args),
     }
 }
