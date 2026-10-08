@@ -3850,8 +3850,9 @@ pub enum Sel { Whole, Field(u32), Name(NameId) }    // what an operand reads
   whose operands changed but whose result is equal stops propagation.
 - An operand reads `(node, Sel)`. When a node's value changes from `old`
   to `new`, each reader is woken only if `old.field_ver(f) !=
-  new.field_ver(f)` for the field it reads. The old value is held only
-  during that comparison.
+  new.field_ver(f)` for the field it reads (inside a region by the
+  in-order sweep, across regions by reader lists, 7.11). The old value
+  is held only during that comparison.
 - Forces it: the page builder reads a box's height and depth, not its
   list; a glyph's metrics, not its identity; a step reads `\foo`, not
   the whole environment.
