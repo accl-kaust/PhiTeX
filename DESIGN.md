@@ -2082,6 +2082,587 @@ between trips instead (the reference); `PARTEX_SSA_TOOLS=0` none.
   of one entry parses the databases or the `.idx` again, linear and a
   few milliseconds); makeindex's sort is whole by its nature.
 
+### 3.17 Pure SSA (decided 2026-10-08)
+
+SSA mode as built (3.15) versions the state but keeps an opaque unit
+of work: a *step*, a window of about 4,096 commands of the imperative
+engine, mutating its state in place, kept or re-run whole. That is
+memoisation over chunks, not SSA, and it has three measured costs:
+- false dependencies: a step that spans a paragraph and the page builder
+  reads the page as a whole, so parallel SSA gains nothing (8 workers
+  are slower than 1 on the course);
+- over-running: a one-word edit runs about 4,096 commands again;
+- seam bugs: state put back wrong at a step's boundary (the page tail,
+  dc035b1).
+
+Pure SSA replaces it as the model. Every TeX command is a node whose
+operands are the exact values it reads and whose results are new
+values; a rebuild is dataflow with an equality cutoff; coarsening is a
+separate pass that never changes meaning. There are no windows, no
+hand-placed cuts and no restores.
+
+The machinery is not TeX's. A TeX-agnostic core, `crates/phi` (its own
+DESIGN §7; another agent builds it), provides:
+- content-addressed values with fields;
+- nodes with purity classes;
+- steps inside an unfold over an input `Seq` with stable keys;
+- names, as an index of reaching definitions with scopes;
+- persistent sequences, and the convergent scan `emit_scan`;
+- effect chains, and the cross-run fixed point (`Publish`/`Cross`);
+- the scheduler, the memo store, and DCE/CSE/folding.
+
+This section is the TeX layer on it. Part (a) states what TeX needs
+from the core, with the sizes measured. Part (b) states the TeX ops and
+value kinds, and how the engine's mutable state becomes values.
+
+#### 3.17.1 The model
+
+- **A step is one TeX command.** It runs from main control's
+  `big_switch` to the next `reswitch` (§1030). A word's characters are
+  one step, since the main loop (§1034) runs them without returning.
+  - A step's interior is transient: its expansion's intermediate tokens,
+    the scanners' scratch.
+  - Its results are the values it defines, and the step state it
+    leaves.
+- **A macro call is a step that emits nothing.** It rewrites the
+  pending input (§389). The meaning it read is an operand of the nodes
+  that run its body's tokens, so an edit to a macro re-evaluates exactly
+  its call sites.
+- **Expandable primitives are nodes:** `\the`, `\number`, `\csname`,
+  `\if…`, `\expandafter`, `\noexpand`, the marks and `\input`. Each is a
+  node of the step that expands it, its result a token list.
+- **Anything addressable by name is a name** in the core's index:
+  - every eqtb entry: meanings, registers, parameters, codes, catcodes,
+    fonts;
+  - e-TeX's registers above 255;
+  - each font's settable fields (`\fontdimen`, `\hyphenchar`, …);
+  - each hyphenation exception word, and the patterns;
+  - each `\write` and `\openin` stream;
+  - each mark class's current marks;
+  - each per-entry cross-run slot (3.17.5).
+  A read resolves (name, timestamp) to the reaching definition. A local
+  assignment is `define(n, v, local)` and `\global` is
+  `define(n, v, global)`. `{`/`\begingroup` is `open_group` and its end
+  is `close_group`: **a group's end emits nothing**, and later reads
+  reach the definition from before the group. TeX's save stack (§268),
+  `eq_level` and `xeq_level` are the core's scopes, not values.
+- **The step state is only what TeX threads sequentially.** Measured
+  sizes at a paragraph boundary are in 3.17.6.
+  - The pending input and expansion stack: the input levels as shared
+    `Arc` chains (3.5), each token list a shared value, files by
+    position; `align_state`; the conditional stack (each entry its
+    test's node and the arm taken).
+  - The mode, and the current list being built: the nest. Each level is
+    a fresh value at `push_nest`, and its list is a `Seq` of items
+    appended by its steps.
+  - The cursor in the source.
+  - The group stack's shape: kind and boundary, as the core's scopes.
+- **Purity classes.**
+  - *Pure:* expansion, `\the`, arithmetic, a character's metrics and
+    identity, lig/kern, hyphenation, `hpack`, `vpack`, `line_break`,
+    math lists to hlists, pgfmath (as macros: pure steps).
+  - *Effectful on a named chain:* each `\openout` file's lines, `.aux`,
+    `.toc`, `.idx`, the log and terminal (a flow, 3.8), the PDF objects
+    and the shipouts, `\write18` (a barrier on every file chain).
+  - *Cross-run:* a read of the last run's stream entries (3.17.5), a
+    loop-carried φ.
+- **Identity is content.** A node's version is the hash of its op and
+  its operands' versions. That gives memoised expansion and CSE across a
+  document and across documents (3.17.7).
+
+#### 3.17.2 Field-level values (the user's first requirement)
+
+A value is read by field, and an edit splices exactly the value that
+changed. Each value kind declares its fields:
+
+| value | fields | read by |
+|---|---|---|
+| character (glyph) | metrics (wd, ht, dp, ic, lig/kern class); identity (code, font) | line breaker, packs: metrics; hyphenation: letters (code where `\lccode`≠0, font's `\hyphenchar`); shipout: identity |
+| box | dimensions (wd, ht, dp, shift, glue set); contents (`Seq` of items) | vertical lists, page builder, `\wd`: dimensions; shipout, `\unhbox`, `\showbox`: contents |
+| glue, kern, penalty, rule | the spec | everything |
+| mark, `\write`, `\special` | tokens | the page builder (a mark's place), the output routine, shipout |
+| allocated thing (register by `\newcount`, `\newwrite` stream, PDF object, font id, hyperref anchor) | identity; ordinal | uses that need *which* one (`\foo=5`, `\advance\foo`, `\the\foo`'s contents, an object reference): identity; numeric reads (`\the\allocationnumber`, `\ifnum\count10`, the log, the PDF writer's numbering): ordinal |
+| macro meaning | parameter text, body, flags | its call sites |
+| hook (`\g@addto@macro`, lthooks, expl3 seq/clist/prop appends) | an append-only `Seq` | only its consumer reads the whole |
+| cross-run entry (`\newlabel{K}`) | number, page, title, anchor, type | `\ref`: number; `\pageref`: page; hyperref: anchor |
+
+There are no special mechanisms for counters, allocation or offsets.
+Allocation is an ordinary chain, `%n₂ = %n₁ + 1`. An insertion upstream
+changes ordinals, wakes the ordinal's readers, and stops at the
+identity's.
+- **A `\pageref` from 184 to 185** changes the identity of one
+  character. Its width is equal (CM digits are 0.5em), so the line
+  breaker, the line's dimensions and the page builder are untouched.
+  What changes is the glyph inside the line and that line's segment of
+  the page's content stream.
+- **Line breaking is resumable and convergent** (`emit_scan`).
+  Knuth–Plass (§813–§890) is a DP over the paragraph's items. Its state
+  is a value:
+  - the active list, each node with its position, line number, fitness,
+    total demerits, and the break before it;
+  - the background and active widths;
+  - the pass (first, second, emergency).
+
+  An edit at item *i* resumes from the state before *i*, which is equal
+  to the old run's. The scan stops where the state after an item equals
+  the old run's at the same item (same active nodes, same totals), and
+  the old breaks after that point are reused. A word's hyphen positions
+  are a value of its letters, the language and the patterns only
+  (§923). The second pass reads the words' hyphenation values, never the
+  words.
+- **The page builder is resumable the same way.** It is a scan over the
+  contributions `Seq` (§980–§1028). Its state is a value: `page_so_far`,
+  the insertions' state, the best break so far, `last_glue` and its
+  kin. It resumes at the changed contribution and converges when a page
+  ends at the same place with an equal state.
+- **PDF output is segmented.** A page's content stream is a `Seq` of
+  segments, one per line box and per float or figure box. A changed
+  glyph rewrites its segment only. The link (3.8) already splices chunks
+  and keeps offsets in a Fenwick tree; the segment is the new grain.
+
+#### 3.17.3 TeX constructs mapped to the core (part b)
+
+- **Characters and words.** A word step appends its items to the
+  paragraph's `Seq`: glyph runs with lig/kern resolved (§1034–§1040). It
+  reads the font's metrics fields, `\sfcode`, and the space factor the
+  step before it left. The space factor is the one sequential value of a
+  paragraph: a word step reads it and the following space step reads
+  the word's.
+  - The append does not read the list.
+  - Lig/kern across a word boundary (the main loop's look at the tail,
+    §1034's `cur_l`) reads the tail item only.
+- **Paragraphs.**
+  - `new_graf` (§1091) pushes a fresh level: an empty list, the space
+    factor set to 1000, and `\everypar` read. None of it reads the
+    previous paragraph's list.
+  - `\par` (§1096) is `line_break(items' fields)`. That is a node over
+    the paragraph's `Seq`, field-level, resumable. Its result is the
+    lines, each a box whose dimensions and contents are separate fields.
+  - **The interline glue is a node of its own** (§679):
+    `glue(prevdepth, first line's height)`. The line breaker never
+    reads `\prevdepth`. The engine's `append_to_vlist` does, which
+    chains every paragraph's line breaker to the paragraph before. On
+    the synthetic article that one read took the critical path from 2.2x
+    to 5.1x of the work.
+- **The page builder** is the scan above, over the main vertical list's
+  contributions, a `Seq` that paragraph and vertical steps append to.
+  Whether a contribution fires a page is its step of the scan. When it
+  fires, the output routine (§1012–§1028) is an *unfold* whose input is
+  `\output`'s tokens with `\box255`, the inserts' boxes and the marks as
+  operands. Its steps are page-chain nodes. What it puts back goes in
+  front of the contributions (§1026).
+  - **A paragraph's nodes have no operand from the page chain** unless
+    TeX reads one: `\pagetotal`, `\pagegoal` and their kin;
+    `\outputpenalty`, `\insertpenalties` and `\deadcycles`; `\vsplit` of
+    a page box; and in vertical mode with no contributions,
+    `\lastskip`, `\lastpenalty`, `\lastkern` and `\lastnodetype`, which
+    read the page builder's `last_glue` and its kin (§424). LaTeX's
+    `\addvspace` reads `\lastskip`, so each `\section` reads the page
+    chain's tail. That read is predicted (the last contribution, no fire
+    since) and verified when the scan reaches it.
+- **Conditionals.** The test is a node. Only the taken arm is unfolded;
+  the other is a value holding its skipped text. At `\fi` each name the
+  arm *defined*, and that still reaches `\fi`, gets
+  `φ(test, then, else)`. A name the arm's groups restored gets none.
+  - A test that flips re-evaluates its region: the arm's steps are new,
+    keyed by (parent, key), and the unfold converges where the key, the
+    input cursor and the state version meet the old run's again.
+  - For parallel evaluation a test's outcome is predicted (the last
+    build's) and verified.
+- **`\csname`** computes a name. Its node reads the tokens. The name it
+  makes is an address like any other, never a spelling: `\r@foo` is a
+  name of the index. A lookup that does not find a name (`\ifcsname`,
+  §372) reads the name's *absence*, a definition of "undefined" made at
+  the name's first creation (3.2, "A name is made where its meaning is
+  first defined").
+- **Groups and the save stack.** These are scopes in the core.
+  `\aftergroup` tokens are step state: they are pending input at the
+  group's end (§326), part of the input operand of the step that closes
+  the group. `\afterassignment`'s token (§1269) is pending input too.
+  Box, alignment and math groups keep their context (`saved(k)`, §645)
+  as operands of the step that closes them.
+- **Alignments** (§768–§812). The preamble is a value (templates,
+  tabskips). Each row is a step sequence over its cells, and each cell
+  an unfold of `u_j`, the cell's tokens and `v_j`. `fin_align`'s column
+  widths are a scan over the rows' unset widths, and the rows' packing
+  reads that value. A cell edit that leaves its column's maximum
+  re-packs its row only.
+- **Math** (§680–§767). A math list is a `Seq` of noads. `mlist_to_hlist`
+  is pure over the noads' fields and the math fonts' parameters. A
+  display's `\predisplaysize` reads the line before it (§1146), an
+  operand of the display only.
+- **Inserts and marks.** `\insert` appends an insertion item; its
+  height, depth and class are fields read by the page builder, its
+  contents by the output routine. `\mark` appends a mark item; the page
+  builder's scan carries first, bottom and top marks per class as fields
+  of its state.
+- **The output routine.** As above: an unfold under `output_active`,
+  in a group (its locals end at its `}`, §1100). Its globals
+  (`\c@page`, LaTeX's float lists, `\@colht`, …) are ordinary
+  definitions. A body step reading them is a true page-chain dependency,
+  and is measured in 3.17.6.
+- **`\write`, `\openout`, `\closeout`.** These are effects on the
+  stream's chain. A non-immediate `\write` is a whatsit item whose
+  tokens are expanded at shipout (§1370), a page-chain node. `\openin`
+  and `\read` of a file this run writes are an edge on that file's
+  chain (3.7). `\write18` is a barrier on every file chain. `\input`
+  pushes a file level whose lines are the cursor's source: a load
+  (3.7), keyed by name.
+- **`\the`, `\number`, `\romannumeral`** read their operand's fields: a
+  register's value, a font's field, a box's dimension. Their result is
+  a token list. With equal results, propagation stops there.
+- **Scanning numbers and dimensions** reads tokens, including expanded
+  ones, inside the step. It is interior, transient.
+- **Errors.** An error message is an effect on the log chain. Its
+  context lines are a read of the source position (a value, 3.2:
+  "Positions are data").
+
+#### 3.17.4 Rebuilds, trips and parallelism
+
+- **A rebuild is dataflow.** An edit changes source lines (3.5), and
+  the steps that read the changed tokens re-evaluate. Each result that
+  comes out equal stops propagation. A step whose input consumption
+  changed (Enter pressed, an argument grown) makes the unfold
+  re-evaluate on until it converges with the old run: the same key, the
+  same cursor and an equal state version.
+- **Trips stay the cross-run fixed point.** A stream's entries are
+  `Publish`ed at the trip's end. A read of the last run's entry is a
+  `Cross` slot, predicted from the last build (persisted) and verified
+  at the end. A misprediction wakes only the reading slice (3.17.5).
+- **What replaces what.**
+  - The fold's steps, windows and clean points (3.15, 4.3) go.
+  - The definition index survives as the core's names, and the
+    readers-by-definition walk as its scheduler.
+  - The link (3.8), the tools as nodes (3.16), trips (3.7) and virtual
+    object numbers (3.12) are reused, re-keyed to nodes.
+  - `SsaTracker` becomes the debug-build enforcer (3.17.8).
+- **Parallelism falls out of the DAG.** The core's scheduler runs ready
+  nodes. For a cold build it starts unfolds speculatively from predicted
+  states: the last build's, or the CST's paragraph boundaries at brace
+  depth 0. Each is validated when its predecessors settle. The
+  measured bound is the critical path below.
+
+#### 3.17.5 Cross-run values, per entry
+
+Cross-run values are keyed by entry and value, never by file. The
+`.aux`, `.toc`, `.lof`, `.lot`, `.idx`, `.glo` and `.bcf` *files* are
+output only: a write chain committed at the end, byte for byte as the
+gate requires. Nothing in the build depends on a file as a whole.
+- **One slot per entry, keyed as LaTeX keys it.**
+  - `\newlabel{K}{{number}{page}{title}{anchor}{type}}` is slot `K`,
+    with its five fields separate.
+  - `\bibcite{K}{label}` is slot `K`.
+  - Each `\contentsline` written through `\@writefile{toc}` (and lof,
+    lot, idx, glo) is an entry in an ordered `Seq` of slots, keyed by
+    its stable identity (the sectioning command's node key).
+- **The definitions LaTeX makes from them** (it runs the `.aux` at
+  `\begin{document}` and again at `\end{document}`) map to per-entry
+  definitions in the name index: `\r@K` is a definition of name `\r@K`
+  whose fields are slot `K`'s. Each is predicted from the last build, so
+  a reader of `\r@K` depends on that one name.
+- **`\ref{K}`** reads `K.number`; **`\pageref{K}`** reads `K.page`;
+  **`\cite{K}`** reads `\b@K`. Moving another label wakes nothing that
+  reads `K`.
+- **The TOC** is typeset by a scan over its entry `Seq`. Renaming one
+  section re-typesets one TOC line, then the usual stop: a line of
+  equal dimensions ends it.
+- **Unknown packages' lines** follow a generic rule: one slot per
+  `\write` line to a re-read stream, keyed by (stream, the macro the line
+  calls, its first argument), its other arguments its fields. A line
+  that calls no macro is keyed by its place in the stream's `Seq`.
+- **The rerun check** (`\end{document}`'s "Label(s) may have changed",
+  `\@testdef`) reads every slot's value from both runs. It is a node over
+  the slots' versions, an effect on the log only, and the trip's
+  convergence test is the same comparison per slot.
+
+#### 3.17.6 What the TeX layer needs from the core (part a), with sizes
+
+Measured 2026-10-08 by the pure SSA tracer (`PARTEX_PURE=FILE`,
+`crates/partex-cli/src/purestats.rs`), an observer of a plain build
+whose hooks (`Tracker::PURE`) change no output. Job 7536 on accl (job
+script `scripts/accl/tasks/pure-stats.sh`), commit 51e03c2.
+
+How the tracer models the graph:
+- nodes are 3.17.1's: commands, expandable primitives, recorded calls
+  and `build_page`;
+- edges go to scope-aware reaching definitions, and appends do not read
+  the list;
+- conditionals: the arm depends on its test, with a φ at `\fi`;
+- structural reads (save stack, nest depth, cond stack, the hash's
+  bookkeeping) are counted but are not edges;
+- value numbering is on: an equal-content definition is the earlier
+  one, as the core's content versions make it;
+- *split* means the effect chains are split and the interline glue is
+  its own node;
+- a node's *cost* is its events (reads, writes and structural accesses)
+  plus one.
+
+| | course | pgfsub | TikZ (petals) |
+|---|---|---|---|
+| nodes | 196.2 M | 105.5 M | 390 K |
+| events (work) | 4.71 G | 2.58 G | 11.6 M |
+| macro calls (steps that emit nothing) | 79.5 M | 42.5 M | 242 K |
+| conditionals / φ | 31.6 M / 84.0 M | 19.2 M / 43.4 M | 79 K / 104 K |
+| operands / definitions | 1.07 G / 76.6 M | 586 M / 43.4 M | 2.23 M / 747 K |
+| critical path, split (events) | 9.34 M (504x) | 2.98 M (866x) | 677 K (17x) |
+| the same, not split | 44.8 M (105x) | 12.3 M (210x) | 677 K |
+| strict (no value numbering; footnote) | 1.12 G (4.2x) | 634 M (4.1x) | 3.95 M (2.9x) |
+| setup (before the first `\shipout`): work, path | 319 M, 1.48 M (216x) | 460 M, 1.33 M | 11.4 M, 676 K (17x) |
+| page chain: work, own path | 82 M (1.8%), 2.97 M | 15 M (0.6%), 0.96 M | 131 K, 8 K |
+| body nodes reading a page-chain definition | 261 K (0.135%) | 7 K (0.007%) | 38 |
+| memory, unfolded / folded (3.17.7) | 25.4 GB / 20.2 GB | 13.7 GB / 11.1 GB | 63 MB / 51 MB |
+
+Nodes by kind on the course (nodes, operands):
+
+| kind | nodes | operands |
+|---|---|---|
+| `\expandafter` | 48.1 M | 142 M |
+| `\if…` | 31.6 M | 151 M |
+| `\fi`/`\else` | 26.5 M | 66 M |
+| `\let` | 19.2 M | 182 M |
+| `\def` | 17.1 M | 162 M |
+| `\csname` | 9.1 M | 44 M |
+| `\relax` | 7.0 M | |
+| `\toks`/token assignment | 5.0 M | |
+| `\the` | 4.5 M | |
+| grouping, `{`/`}` | 2.3 M each | |
+
+Expansion dominates: pgfplots and pgfkeys, a document's own code.
+Typesetting nodes are a few percent.
+
+What these say:
+- **The page chain is not the bottleneck.** It is 1.8% of the course's
+  work, and its own path is 3.0 M events. Body nodes that read a
+  page-chain definition are 0.135%. Most are the outer list's and the
+  output routine's push of nest level 1 (`list:162`, `list:130`: an
+  output-routine level reusing a slot that a body box's level used, an
+  equal-value redefinition), `\c@page`, and LaTeX's `\if@newlist`,
+  which `\everypar` reads.
+- **The body is wide.**
+  - Course: after the setup the path grows 7.9 M events for 4.39 G of
+    work (558x).
+  - Synthetic article: the per-paragraph chains are the space factor and
+    the main loop's tail reads, local to a paragraph.
+  - Before the interline-glue split, `\prevdepth` chained every
+    paragraph (2.2x on the synthetic article, 105x on the course).
+- **The setup is the serial part.**
+  - Course: path 1.48 M events of 319 M setup work (216x).
+  - TikZ: 676 K of 11.4 M (17x).
+  - The projections that treat allocator ordinals, hook appends and
+    catcodes by 3.17.2's fields change the path by under 0.1%
+    (`scripts/pure-fields.py`; the address lists come from the names
+    the run read).
+  - The walk of the TikZ setup's path attributes 97% of its events to
+    one node. One command's step is that big: a huge `\edef` or `\xdef`
+    in pgfkeys or pgfmath, which expands for 650 K events. That is not a
+    dependency; it is a step's interior, and is listed as a hard case in
+    (a).
+  - The preamble's reuse across builds is the content-addressed memo
+    (3.17.7), not parallelism.
+- **Edits**, field-level re-evaluation from two traces diffed
+  (`scripts/pure-diff.py`, low..high over unversioned operands; segments
+  = lines whose contents changed). The current SSA columns are rebuilds
+  of one trip:
+
+  | edit | pure SSA (nodes; segments) | current SSA (steps; commands) |
+  |---|---|---|
+  | synthetic, `\pageref` 15→16 | 22..25; 1 | — |
+  | synthetic, a word (reflows) | 70..73; 6 | — |
+  | TikZ, `\ref` 2→3 | 22..29; 1 | 11; 325 |
+  | TikZ, a word at `\begin{document}` | 140..147; 1 | 16,829; 91,390 |
+  | course, `\ref` 0.3→0.4 (`.aux`) | pending (rerun) | 1,377; 871 K (4.4 s) |
+  | course, word | pending (rerun) | 10; 1,671 |
+  | pgfsub, word | pending (rerun) | 6; 402 |
+
+  In both `\ref` cases no line breaker and no page-builder node is
+  re-evaluated.
+
+**What the TeX layer needs from the core:**
+1. Steps of about 10–100 events: 196 M nodes on the course. A node's
+   record must be small. Unfolded, the course's graph is 25 GB at 56 B a
+   node, 8 B an operand and 24 B a definition, against 0.2 GB for the
+   plain build. So the core's sealing of quiet regions and folding are
+   required, not optional, and a step's interior must stay transient (no
+   leaves kept).
+2. Names: about 0.4 M distinct names live at once, with 76.6 M
+   definitions. Value numbering by content version must hold for names,
+   lists and step state alike: without it the course is 4.2x serial
+   instead of 504x.
+3. A step state at a paragraph boundary of:
+   - the input chain (shared, made per file level: 3.5's measured
+     0.33 µs a command);
+   - the nest, one level (the vertical list's cursor in the
+     contributions `Seq`);
+   - the cond stack: 0 to 2 entries at the course's paragraph starts;
+   - the group shape: LaTeX's `document` group plus environments, 1 to
+     4 frames.
+
+   About 100–300 B plus shared pointers.
+4. Hard cases:
+   - *a conditional flipping:* re-unfold its arm and converge after
+     `\fi`;
+   - *`\csname`:* computed names, and absence as a definition;
+   - *the save stack:* scopes with `\global` inside, and `\aftergroup`
+     as pending input;
+   - *the output routine:* an unfold opened by a scan step, its group
+     closing in a later step;
+   - *alignments:* the column-width scan over rows, and `\span`/`\omit`
+     changing templates;
+   - *the `.aux` loop:* `Cross` slots per entry, with the rerun check;
+   - *huge single steps:* one `\edef` or `\xdef` that expands for
+     hundreds of thousands of events (pgfkeys, pgfmath). A step's
+     interior that big needs sub-step memoisation, the expansion of a
+     macro call keyed by its meaning and arguments, or it re-runs whole;
+   - *main-loop tail reads:* lig/kern with the previous item, read as
+     the tail item only.
+
+#### 3.17.7 Folding and the passes the model enables
+
+- **Folding** coarsens the graph without changing meaning. A fold
+  makes a run of nodes one node. Its operands are the union of the
+  members' operands from outside the run; its results are the members'
+  definitions that reach past it.
+- **The proof obligation:** no reader outside the fold may gain a
+  dependency it lacked. The rule built: the fold is a chain (each
+  member reads a definition of the member before it) of one class
+  (body, or page chain: never both), and only its last member's
+  definitions are read outside it. Every outside reader then already
+  depended on every member through the chain.
+- **Measured:** 1.36 nodes a fold on the course, 25.4 → 20.2 GB.
+  Expansion steps are not chains (a `\def` does not read the `\let`
+  before it), so this rule alone is weak.
+- **Next rule to measure: a pure expansion region.** A run of pure nodes
+  all of whose outside readers read only the run's last definitions.
+  Its argument is the same; its check needs the readers, done by the
+  tracer's cut detection (`fold_cuts`).
+- **Sealing** (the core's) is the larger saving: a region with no
+  pending readers keeps only its results.
+
+**Passes this model enables:**
+
+| pass | why the model supports it |
+|---|---|
+| dead-value elimination | definitions with no readers (the course's 76.6 M, most overwritten within their group) are dropped at sealing |
+| copy propagation | `\let` (19.2 M on the course) is an edge to the same value: the node can be removed, the readers pointed at its operand |
+| memoised expansion | a macro call's expansion is keyed by its meaning's and arguments' versions (3.6), across documents too: an equal preamble reuses its whole setup |
+| effect-chain splitting | streams are named chains (3.17.1); splitting them took the course from 105x to 504x |
+| counter scans | allocation and counters as `%n₂ = %n₁ + 1` chains with identity/ordinal fields: a scan, and an insertion upstream shifts ordinals only |
+| `\ref` speculation | `Cross` slots predicted from the last build and verified (3.17.5) |
+| resumable page builder | 3.17.2's scan |
+| segmented PDF streams | 3.17.2's segments |
+| specialisation of hot macros | a function value carries its specialised body (3.6) |
+
+**The preamble as a memo.** The setup is 7% of the course's work
+(319 M events) and 98% of a TikZ figure's. It is a function of its
+source, the format and the files it reads. Its node keys are content,
+so an equal preamble (the same text, the same files by stamp) finds the
+last build's results in the memo store, as a whole or step by step
+until the first difference. Package loads are sequential in TeX, but
+what they define is mostly independent: the setup's path is 216x
+shorter than its work on the course and 17x on TikZ. The longest single
+contributors are single huge steps (3.17.6, item 4), not dependencies.
+
+#### 3.17.8 Enforcement and structural tests
+
+The design is enforced by code, not described.
+- **The invariant:** a node reads only its declared operands and writes
+  only its declared results. Any other engine state access is a hard
+  error in debug and test builds. The engine's accessors already report
+  every read and write (3.2, 3.15). In pure mode, a debug build's
+  tracker checks each access against the running node's declared
+  operand and result sets, and panics on any other.
+- **Structural tests** (`tests/pure/`, plain TeX and LaTeX, synthetic):
+  - a `\pageref` going from 184 to 185 (same width) re-evaluates only
+    the glyph value or values and that page stream's segment; the
+    paragraph's line-break node and the page-builder nodes are not
+    re-evaluated;
+  - a one-word edit resumes the line-break DP at the changed item, and
+    stops at convergence;
+  - a paragraph with no `\pagetotal`-style read has no operand from the
+    page chain.
+
+  They assert on the graph (which nodes ran), not on outputs. The
+  tracer's diff (`scripts/pure-diff.py`) is their measuring tool until
+  the graph exists.
+- **No windows and no hand-placed cuts.** The step is the command, and
+  coarsening is only in the folding pass, each rule with its
+  no-new-dependency argument (3.17.7). A grep test fails on
+  `PARTEX_SSA_WINDOW`, `CleanPoint` or a stop at a command count in the
+  pure path.
+
+#### 3.17.9 Migration
+
+- The new mode is behind `PHITEX_SSA_PURE=1`. The old SSA mode (3.15)
+  is untouched until the new one passes everything: e2e, ssa-edits with
+  `--fixpoint`, the course, pgfsub, and the trips.
+- *Checkpoint 2:* plain TeX documents as a pure graph, cold and with
+  rebuilds. The engine reads names through the core's index, steps
+  unfold over the input, and line breaking and the page builder are
+  scans.
+- *Checkpoint 3:* LaTeX, the course, pgfsub and trips; parallel
+  evaluation; folding; both gates green; time and memory against current
+  SSA and machine mode.
+
+**Integration plan.** Estimates are agent-hours, honest and uncertain.
+The core's API (`Lang`, steps, names, `Seq`, `emit_scan`, chains) is
+assumed stable from its checkpoint 3a.
+
+1. *`Lang` for TeX, the shell* (8–12 h). Implement `Val`, `Op`,
+   `eval`, `step`, `scan` over the existing engine, the engine running
+   one step at a time inside `step`:
+   - `Tex<H, T>` with a tracker whose reads and writes resolve through
+     the core's names: eqtb, registers above 255, fonts' fields and
+     catcodes become names;
+   - the step state is the input chain (3.5's value), the nest and the
+     cond stack;
+   - the debug-build enforcer (3.17.8).
+2. *Plain TeX cold, exact* (10–16 h). Main control as an unfold of
+   steps:
+   - groups as `open_group`/`close_group` (the save stack's restores
+     become no-ops in pure mode);
+   - conditionals with φ;
+   - expandable primitives as nodes;
+   - `\write`, `\openout` and shipout on chains.
+
+   Gate: e2e plain cases byte-identical.
+3. *Rebuilds* (10–16 h). Convergence of the unfold after an edit; the
+   edit harness on plain cases matching cold builds; the structural
+   tests (3.17.8). This is checkpoint 2.
+4. *Field-level typesetting* (12–20 h).
+   - `line_break` as an `emit_scan` with its DP state as values, and
+     hyphenation per word;
+   - the page builder as a scan;
+   - the interline glue as its own node;
+   - characters and boxes with metrics and identity fields;
+   - segmented page streams in the link.
+
+   Gate: the `\pageref` and word tests.
+5. *LaTeX and the cross-run slots* (16–24 h).
+   - Per-entry `.aux` slots, `\r@K` names predicted, the rerun check;
+   - the output routine as an unfold;
+   - inserts, marks and alignments;
+   - the tools (3.16) on chains.
+
+   Gate: the LaTeX e2e cases, then the course and pgfsub exact, and the
+   edit harness with `--fixpoint`.
+6. *Parallel, folding, sealing, the preamble memo* (12–20 h). This is
+   checkpoint 3, with both gates green and timings against current SSA
+   and machine mode.
+
+That is about 70–110 agent-hours in all, with checkpoint 2 at about
+30–45.
+
+**Risks.**
+1. Memory: 196 M nodes on the course. Without sealing and the stronger
+   fold rules the graph does not fit in a session (25 GB unfolded).
+2. Huge single steps (pgfkeys `\edef`s of 650 K events) need sub-step
+   memoisation, or a TikZ edit re-runs them whole.
+3. Exactness at the seams the old mode fixed one by one (fonts' numbers,
+   names made late, virtual object numbers, the log's flow). They carry
+   over as fields and chains, but each must be re-proved under the
+   e2e and edit gates.
+4. The core's API changing under the TeX layer.
+
 ---
 
 ## 4. Where the code stands, and the work
