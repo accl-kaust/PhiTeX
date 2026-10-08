@@ -408,7 +408,7 @@ impl Rd<'_, '_> {
             _ => None,
         }
     }
-    fn peek(&self) -> Option<Tok> {
+    fn peek(&mut self) -> Option<Tok> {
         if self.at < self.pending.len() {
             return Some(self.pending[self.at].clone());
         }

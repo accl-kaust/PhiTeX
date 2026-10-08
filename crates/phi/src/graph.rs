@@ -140,17 +140,20 @@ pub(crate) struct StepInfo {
     /// Input elements consumed.
     pub took: u32,
     pub grp_in: u64,
-    pub grp_out: u64,
     /// The version of the state it ran from.
     pub in_ver: Ver,
-    defs: Vec<DefRec>,
-    opened: Vec<u64>,
-    closed: Vec<u64>,
+    /// Its definitions: a range of `Graph::step_defs`.
+    d0: u32,
+    dn: u32,
 }
 
 pub(crate) struct UnfoldInfo<V> {
     /// Its first step.
     pub first: u32,
+    /// Whether `keys` and `owners` are kept up to date: they are built
+    /// the first time a resync or an input edit needs them, so a cold
+    /// build pays nothing for them.
+    pub indexed: bool,
     pub keys: Map<u64, u32>,
     /// Each input element that starts a step's consumption → the step.
     pub owners: Map<ElemId, u32>,
@@ -252,6 +255,7 @@ pub struct Report {
 
 /// Switches.
 #[derive(Clone, Debug)]
+#[allow(clippy::struct_excessive_bools, reason = "independent switches")]
 pub struct Config {
     /// Bound on cross-run iterations.
     pub max_iters: u32,
@@ -415,38 +419,34 @@ impl<L: Lang> Nodes<L> {
     pub(crate) fn is_dead(&self, n: u32) -> bool {
         self.h[n as usize].flags & DEAD != 0
     }
-
 }
 
 /// The operand values an op sees.
 pub struct Args<'a, L: Lang> {
     g: &'a Nodes<L>,
     opds: &'a [Opd],
-    /// In a step's sweep: its operands as references into the sweep's
-    /// buffer or the graph.
-    refs: &'a [ARef],
-    buf: &'a [L::Val],
+    /// In a step's sweep: the emission's operands, the step's ids (`NONE`
+    /// for the interior, whose values are in the buffer), the buffer, and
+    /// the operands resolved outside the step.
+    sweep: Option<Sweep<'a, L>>,
 }
 
-/// An operand in a sweep: a member's value in the buffer, or a node's.
-#[derive(Clone, Copy)]
-pub(crate) enum ARef {
-    Buf(u32, Sel),
-    Node(Opd),
-}
+type Sweep<'a, L> = (&'a [SArg], &'a [u32], &'a [<L as Lang>::Val], &'a [Opd]);
 
 impl<'a, L: Lang> Args<'a, L> {
     fn of(g: &'a Nodes<L>, opds: &'a [Opd]) -> Self {
         Args {
             g,
             opds,
-            refs: &[],
-            buf: &[],
+            sweep: None,
         }
     }
     #[must_use]
     pub fn len(&self) -> usize {
-        if self.refs.is_empty() { self.opds.len() } else { self.refs.len() }
+        match self.sweep {
+            None => self.opds.len(),
+            Some((sa, ..)) => sa.len(),
+        }
     }
     #[must_use]
     pub fn is_empty(&self) -> bool {
@@ -459,12 +459,19 @@ impl<'a, L: Lang> Args<'a, L> {
     /// If there is no operand `i`.
     #[must_use]
     pub fn get(&self, i: usize) -> Proj<'a, L::Val> {
-        if self.refs.is_empty() {
+        let Some((sa, ids, buf, ext)) = self.sweep else {
             return self.g.read(&self.opds[i]);
-        }
-        match self.refs[i] {
-            ARef::Node(o) => self.g.read(&o),
-            ARef::Buf(k, sel) => project(&self.buf[k as usize], sel, &self.g.absent),
+        };
+        match sa[i] {
+            SArg::Local(ix, sel) => {
+                let x = ids.get(ix as usize).copied().unwrap_or(NONE);
+                if x == NONE {
+                    project(&buf[ix as usize], sel, &self.g.absent)
+                } else {
+                    project(&self.g.val[x as usize], sel, &self.g.absent)
+                }
+            }
+            _ => self.g.read(&ext[i]),
         }
     }
 }
@@ -497,16 +504,32 @@ enum SArg {
     Name(u32),
 }
 
-struct Spec<V, O> {
+struct Spec<O> {
     kind: Kind,
-    op: O,
-    class: Class,
-    key: u32,
+    /// The class's tag (its payload in `aux`, an entry's family in `fam`).
+    ctag: u8,
     args: (u32, u16),
-    lit: Option<V>,
+    key: u32,
+    sub: u32,
+    fam: u32,
+    op: O,
+    /// The class's payload, or the kind's (slot, chain), or a constant's
+    /// index in `Emit::lits`.
     aux: u64,
-    sub: u64,
     grp: u64,
+}
+
+impl<O> Spec<O> {
+    fn class(&self) -> Class {
+        match self.ctag {
+            0 => Class::Pure,
+            #[allow(clippy::cast_possible_truncation)]
+            1 => Class::Effect(Chain(self.aux as u32)),
+            2 => Class::Barrier,
+            3 => Class::Publish(Slot(self.aux)),
+            _ => Class::Entry(Fam(self.fam), Slot(self.aux)),
+        }
+    }
 }
 
 enum Event {
@@ -517,7 +540,14 @@ enum Event {
 
 /// A step's emissions.
 struct Emit<L: Lang> {
-    specs: Vec<Spec<L::Val, L::Op>>,
+    specs: Vec<Spec<L::Op>>,
+    lits: Vec<L::Val>,
+    /// Each emission's value, evaluated as it is emitted where it can be
+    /// (`done`), and the operands it read from outside the step, by
+    /// operand position.
+    vals: Vec<L::Val>,
+    done: Vec<bool>,
+    xopds: Vec<Opd>,
     args: Vec<SArg>,
     defs: Vec<(u32, SArg, bool, u64, u64)>,
     events: Vec<(Event, u64)>,
@@ -531,6 +561,10 @@ impl<L: Lang> Default for Emit<L> {
     fn default() -> Self {
         Emit {
             specs: Vec::new(),
+            lits: Vec::new(),
+            vals: Vec::new(),
+            done: Vec::new(),
+            xopds: Vec::new(),
             args: Vec::new(),
             defs: Vec::new(),
             events: Vec::new(),
@@ -545,6 +579,10 @@ impl<L: Lang> Default for Emit<L> {
 impl<L: Lang> Emit<L> {
     fn clear(&mut self) {
         self.specs.clear();
+        self.lits.clear();
+        self.vals.clear();
+        self.done.clear();
+        self.xopds.clear();
         self.args.clear();
         self.defs.clear();
         self.events.clear();
@@ -565,6 +603,9 @@ pub struct StepCx<'s, L: Lang> {
     input: Option<&'s Seq<L::Val>>,
     idx: usize,
     start: usize,
+    /// The leaf around `idx`, and its first element's index.
+    leaf: &'s [(ElemId, L::Val)],
+    lbase: usize,
     step: u32,
     pos: Pos,
     grp: u64,
@@ -584,29 +625,36 @@ impl<'s, L: Lang> StepCx<'s, L> {
         }
     }
 
+    /// Element `i` of the input, through the cached leaf.
+    #[inline]
+    fn elem(&mut self, i: usize) -> Option<&'s (ElemId, L::Val)> {
+        if i < self.lbase || i >= self.lbase + self.leaf.len() {
+            let (leaf, base) = self.input?.leaf_at(i)?;
+            self.leaf = leaf;
+            self.lbase = base;
+        }
+        self.leaf.get(i - self.lbase)
+    }
+
     /// Consume the next input element.
     #[allow(
         clippy::should_implement_trait,
         reason = "a cursor, not an iterator: it records what it consumed"
     )]
     pub fn next(&mut self) -> Option<&'s L::Val> {
-        let x = self.input?.get(self.idx)?.1;
+        let x = &self.elem(self.idx)?.1;
         self.idx += 1;
         Some(x)
     }
 
     /// The input element `k` ahead, not consumed.
-    #[must_use]
-    pub fn peek(&self, k: usize) -> Option<&'s L::Val> {
-        Some(self.input?.get(self.idx + k)?.1)
+    pub fn peek(&mut self, k: usize) -> Option<&'s L::Val> {
+        Some(&self.elem(self.idx + k)?.1)
     }
 
     /// The identity of the next input element ([`END`] past the last).
-    #[must_use]
-    pub fn cursor(&self) -> ElemId {
-        self.input
-            .and_then(|s| s.get(self.idx))
-            .map_or(END, |e| e.0)
+    pub fn cursor(&mut self) -> ElemId {
+        self.elem(self.idx).map_or(END, |e| e.0)
     }
 
     /// The elements consumed so far by this step.
@@ -636,7 +684,8 @@ impl<'s, L: Lang> StepCx<'s, L> {
         // (its own definitions first: a constant's value is known now)
         if let Some(d) = self.em.defs.iter().rev().find(|d| d.0 == n.0)
             && let SArg::Local(ix, sel) = d.1
-            && let Some(v) = &self.em.specs[ix as usize].lit
+            && self.em.specs[ix as usize].kind == Kind::Const
+            && let Some(v) = self.em.lits.get(self.em.specs[ix as usize].aux as usize)
         {
             debug_assert!(sel.is_whole());
             // (a constant of this step: the borrow ends with the step's
@@ -694,6 +743,17 @@ impl<'s, L: Lang> StepCx<'s, L> {
             self.em.args.push(s);
         }
         let ix = u32::try_from(self.em.specs.len()).expect("specs fit u32");
+        let (ctag, mut aux, fam) = match class {
+            Class::Pure => (0, aux, 0),
+            Class::Effect(c) => (1, u64::from(c.0), 0),
+            Class::Barrier => (2, aux, 0),
+            Class::Publish(s) => (3, s.0, 0),
+            Class::Entry(f, s) => (4, s.0, f.0),
+        };
+        if let Some(v) = lit {
+            aux = self.em.lits.len() as u64;
+            self.em.lits.push(v);
+        }
         let key = match self.em.next_key.take() {
             // (explicit keys and ordinals apart)
             Some(k) => {
@@ -707,22 +767,147 @@ impl<'s, L: Lang> StepCx<'s, L> {
         self.em.sub += 1;
         self.em.specs.push(Spec {
             kind,
-            op,
-            class,
-            key,
+            ctag,
             args: (
                 a0,
                 u16::try_from(args.len()).expect("at most 65535 operands"),
             ),
-            lit,
+            key,
+            sub: u32::try_from(sub).expect("emissions fit u32"),
+            fam,
+            op,
             aux,
-            sub,
             grp: self.grp,
         });
+        self.em.vals.push(L::Val::default());
+        self.em.done.push(false);
+        self.em.xopds.resize(
+            self.em.args.len(),
+            Opd {
+                src: NONE,
+                sel: Sel::WHOLE,
+                name: NONE,
+            },
+        );
+        match kind {
+            Kind::Const => {
+                let v = std::mem::take(&mut self.em.lits[aux as usize]);
+                self.em.vals[ix as usize] = v;
+                self.em.done[ix as usize] = true;
+            }
+            Kind::Leaf => self.eval_now(ix as usize),
+            _ => {}
+        }
         Local {
             ix,
             _brand: PhantomData,
         }
+    }
+
+    /// Evaluate emission `ix` now, if all it reads is known: emissions
+    /// already evaluated, nodes, and names as they are here (this step's
+    /// own definitions and closed groups taken into account). Otherwise
+    /// it waits for the sweep.
+    fn eval_now(&mut self, ix: usize) {
+        let (a0, an) = {
+            let sp = &self.em.specs[ix];
+            (sp.args.0 as usize, sp.args.1 as usize)
+        };
+        for a in a0..a0 + an {
+            match self.em.args[a] {
+                SArg::Local(j, _) => {
+                    if !self.em.done[j as usize] {
+                        return;
+                    }
+                }
+                SArg::Node(src, sel) => {
+                    self.em.xopds[a] = Opd {
+                        src,
+                        sel,
+                        name: NONE,
+                    }
+                }
+                SArg::Name(m) => match self.own_def(m) {
+                    Some(SArg::Local(j, sel)) => {
+                        if !self.em.done[j as usize] {
+                            return;
+                        }
+                        // (this step's own definition: read in the step)
+                        self.em.args[a] = SArg::Local(j, sel);
+                    }
+                    Some(SArg::Node(src, sel)) => {
+                        self.em.xopds[a] = Opd {
+                            src,
+                            sel,
+                            name: NONE,
+                        }
+                    }
+                    Some(SArg::Name(_)) => return,
+                    None => {
+                        let o = if (m as usize) < self.names.defs.len() {
+                            self.resolve_here(m)
+                        } else {
+                            Opd {
+                                src: NONE,
+                                sel: Sel::WHOLE,
+                                name: m,
+                            }
+                        };
+                        if o.src == NONE && self.ext.is_some() {
+                            // (an import of a segment: made in the sweep)
+                            return;
+                        }
+                        self.em.xopds[a] = o;
+                    }
+                },
+            }
+        }
+        let v = {
+            let em = &*self.em;
+            let args = Args {
+                g: self.g,
+                opds: &[],
+                sweep: Some((&em.args[a0..a0 + an], &[], &em.vals, &em.xopds[a0..a0 + an])),
+            };
+            L::eval(em.specs[ix].op, &args)
+        };
+        self.em.vals[ix] = v;
+        self.em.done[ix] = true;
+    }
+
+    /// This step's own definition of `m` alive here, if any.
+    fn own_def(&self, m: u32) -> Option<SArg> {
+        for &(n, a, global, sub, grp) in self.em.defs.iter().rev() {
+            if n != m {
+                continue;
+            }
+            let closed = !global
+                && grp != NOGROUP
+                && self
+                    .em
+                    .events
+                    .iter()
+                    .any(|(e, esub)| matches!(e, Event::Close(g) if *g == grp) && *esub > sub);
+            if !closed {
+                return Some(a);
+            }
+        }
+        None
+    }
+
+    /// Name `m` as it is at this step's start, but for the groups this
+    /// step has closed so far.
+    fn resolve_here(&self, m: u32) -> Opd {
+        let closed: Vec<u64> = self
+            .em
+            .events
+            .iter()
+            .filter_map(|(e, _)| match e {
+                Event::Close(g) => Some(*g),
+                Event::Open(..) => None,
+            })
+            .collect();
+        resolve_with(self.g, self.names, self.groups, m, self.pos, &closed)
     }
 
     /// The next node emitted is keyed by `k` instead of its ordinal.
@@ -839,6 +1024,46 @@ impl<'s, L: Lang> StepCx<'s, L> {
     }
 }
 
+/// [`resolve`], with the groups in `closed` closed too.
+fn resolve_with<L: Lang>(
+    g: &Nodes<L>,
+    names: &NameTab,
+    groups: &Map<u64, Group>,
+    m: u32,
+    at: Pos,
+    closed: &[u64],
+) -> Opd {
+    if closed.is_empty() {
+        return resolve(g, names, groups, m, at);
+    }
+    let none = Opd {
+        src: NONE,
+        sel: Sel::WHOLE,
+        name: m,
+    };
+    let Some(defs) = names.defs.get(m as usize) else {
+        return none;
+    };
+    let k = defs.partition_point(|d| g.cmp_pos(d.pos, at) == Ordering::Less);
+    for d in defs[..k].iter().rev() {
+        let alive = d.global
+            || d.group == NOGROUP
+            || (!closed.contains(&d.group)
+                && groups
+                    .get(&d.group)
+                    .and_then(|x| x.close)
+                    .is_none_or(|c| g.cmp_pos(c, at) == Ordering::Greater));
+        if alive {
+            return Opd {
+                src: d.src,
+                sel: d.sel,
+                name: m,
+            };
+        }
+    }
+    none
+}
+
 /// Where name `m` at `at` resolves: the latest definition before `at`
 /// alive there.
 fn resolve<L: Lang>(
@@ -908,14 +1133,20 @@ pub struct Graph<L: Lang> {
     keymap: Map<u32, u32>,
     /// The root region's first node.
     root_first: u32,
+    /// Where the last step ended: its unfold, cursor and input index.
+    hint: (u32, ElemId, usize),
+    /// Steps' definitions (each step a range), and the groups each step
+    /// closed.
+    step_defs: Vec<DefRec>,
+    closes: Map<u32, Vec<u64>>,
     /// Scratch buffers, reused so the hot path allocates nothing.
     sc_opds: Vec<Opd>,
     sc_ids: Vec<u32>,
     sc_gone: Vec<u32>,
     sc_big: Vec<bool>,
-    sc_buf: Vec<L::Val>,
-    sc_refs: Vec<ARef>,
     sc_copds: Vec<Opd>,
+    sc_defs: Vec<DefRec>,
+    sc_touched: Vec<u32>,
     /// Debug: interior sizes of each step, by the step's op.
     interior: Map<u64, Vec<u32>>,
     /// Speculative entries proposed for a cold unfold.
@@ -975,13 +1206,16 @@ impl<L: Lang> Graph<L> {
             em: Emit::default(),
             keymap: Map::default(),
             root_first: NONE,
+            hint: (NONE, END, 0),
+            step_defs: Vec::new(),
+            closes: Map::default(),
             sc_opds: Vec::new(),
             sc_ids: Vec::new(),
             sc_gone: Vec::new(),
             sc_big: Vec::new(),
-            sc_buf: Vec::new(),
-            sc_refs: Vec::new(),
             sc_copds: Vec::new(),
+            sc_defs: Vec::new(),
+            sc_touched: Vec::new(),
             interior: Map::default(),
             entries: Map::default(),
             ext: None,
@@ -1399,6 +1633,7 @@ impl<L: Lang> Graph<L> {
                 self.n.h[u].aux = self.unfolds.len() as u64;
                 self.unfolds.push(UnfoldInfo {
                     first: NONE,
+                    indexed: false,
                     keys: Map::default(),
                     owners: Map::default(),
                     input: None,
@@ -1660,6 +1895,7 @@ impl<L: Lang> Graph<L> {
             let h = input.diff(&old);
             self.unfolds[ui].hunk_end = Some(input.len() - h.suffix);
             self.hunks.push(u);
+            self.index_steps(u);
             let mut s = first;
             let mut i = h.prefix;
             while i > 0 {
@@ -1684,7 +1920,34 @@ impl<L: Lang> Graph<L> {
             }
         }
         self.unfolds[ui].input = Some(input);
+        // (input indices may have moved)
+        self.hint = (NONE, END, 0);
         start
+    }
+
+    /// Build unfold `u`'s key and owner maps if they are not kept yet.
+    fn index_steps(&mut self, u: u32) {
+        let ui = self.n.h[u as usize].aux as usize;
+        if self.unfolds[ui].indexed {
+            return;
+        }
+        let mut keys = std::mem::take(&mut self.unfolds[ui].keys);
+        let mut owners = std::mem::take(&mut self.unfolds[ui].owners);
+        keys.clear();
+        owners.clear();
+        let mut c = self.unfolds[ui].first;
+        while c != NONE {
+            let si = &self.steps[self.n.h[c as usize].aux as usize];
+            keys.insert(si.key, c);
+            if si.took > 0 {
+                owners.insert(si.at, c);
+            }
+            c = self.n.h[c as usize].next;
+        }
+        let info = &mut self.unfolds[ui];
+        info.keys = keys;
+        info.owners = owners;
+        info.indexed = true;
     }
 
     /// A new step of unfold `u` after `prev` (`NONE`: the first).
@@ -1715,11 +1978,9 @@ impl<L: Lang> Graph<L> {
             at,
             took: 0,
             grp_in: grp,
-            grp_out: grp,
             in_ver: Ver::ABSENT,
-            defs: Vec::new(),
-            opened: Vec::new(),
-            closed: Vec::new(),
+            d0: 0,
+            dn: 0,
         });
         if prev == NONE {
             self.n.h[s as usize].next = self.first(u);
@@ -1728,7 +1989,9 @@ impl<L: Lang> Graph<L> {
             self.n.h[s as usize].next = after;
             self.n.h[prev as usize].next = s;
         }
-        self.unfolds[ui].keys.insert(key, s);
+        if self.unfolds[ui].indexed {
+            self.unfolds[ui].keys.insert(key, s);
+        }
         self.set_opds(s, &[opd0]);
         if after != NONE {
             // (the old successor now follows the new step)
@@ -1796,6 +2059,8 @@ impl<L: Lang> Graph<L> {
         let start = match &input {
             None => 0,
             Some(inp) if at == END => inp.len(),
+            // (the step before this one just ended here)
+            Some(_) if self.hint.0 == u && self.hint.1 == at => self.hint.2,
             Some(inp) => inp.index_of(at).unwrap_or(inp.len()),
         };
         let prev_o = self.n.opds_of(s)[0];
@@ -1819,6 +2084,8 @@ impl<L: Lang> Graph<L> {
                 input: input.as_ref(),
                 idx: start,
                 start,
+                leaf: &[],
+                lbase: 0,
                 step: s,
                 pos: n.pos(s),
                 grp: steps[si].grp_in,
@@ -1878,16 +2145,18 @@ impl<L: Lang> Graph<L> {
         self.sc_opds = os;
         // its input range
         let took = u32::try_from(idx - start).expect("took fits u32");
+        self.hint = (u, end_cursor, idx);
         let old_at = self.steps[si].at;
-        if self.steps[si].took > 0 && self.unfolds[ui].owners.get(&old_at) == Some(&s) {
-            self.unfolds[ui].owners.remove(&old_at);
-        }
-        if took > 0 {
-            self.unfolds[ui].owners.insert(at, s);
+        if self.unfolds[ui].indexed {
+            if self.steps[si].took > 0 && self.unfolds[ui].owners.get(&old_at) == Some(&s) {
+                self.unfolds[ui].owners.remove(&old_at);
+            }
+            if took > 0 {
+                self.unfolds[ui].owners.insert(at, s);
+            }
         }
         let st_info = &mut self.steps[si];
         st_info.took = took;
-        st_info.grp_out = grp_out;
         st_info.in_ver = in_ver;
         match res {
             Step::Done(v) => {
@@ -1962,7 +2231,11 @@ impl<L: Lang> Graph<L> {
             let qi = self.n.h[q as usize].aux as usize;
             return (self.steps[qi].in_ver != ver || !input_ok).then_some(q);
         }
-        if let Some(&j) = self.unfolds[ui].keys.get(&key)
+        if q != NONE {
+            self.index_steps(u);
+        }
+        if q != NONE
+            && let Some(&j) = self.unfolds[ui].keys.get(&key)
             && j != s
             && !self.n.is_dead(j)
             && self.n.h[j as usize].parent == u
@@ -2009,7 +2282,7 @@ impl<L: Lang> Graph<L> {
         big.clear();
         let em = &self.em;
         big.extend(em.specs.iter().map(|sp| {
-            self.cfg.keep_interior || !matches!(sp.kind, Kind::Leaf | Kind::Const) || sp.class != Class::Pure
+            self.cfg.keep_interior || !matches!(sp.kind, Kind::Leaf | Kind::Const) || sp.ctag != 0
         }));
         for d in &em.defs {
             if let SArg::Local(ix, _) = d.1 {
@@ -2050,18 +2323,24 @@ impl<L: Lang> Graph<L> {
                 continue;
             }
             // (an explicit key, else the ordinal among the big ones)
-            let key = if sp.key & 0x8000_0000 != 0 { sp.key } else { nbig };
+            let key = if sp.key & 0x8000_0000 != 0 {
+                sp.key
+            } else {
+                nbig
+            };
             nbig += 1;
             let cand = self.keymap.remove(&key);
             let reuse = cand.filter(|&o| {
                 let u = o as usize;
                 self.n.h[u].kind == sp.kind
                     && self.n.h[u].op == sp.op
-                    && self.n.class(o) == sp.class
+                    && self.n.class(o) == sp.class()
                     && {
                         // (an unfold's or scan's table index is its aux)
-                        matches!(sp.kind, Kind::Unfold | Kind::Scan | Kind::Leaf | Kind::Const)
-                            || self.n.h[u].aux == sp.aux
+                        matches!(
+                            sp.kind,
+                            Kind::Unfold | Kind::Scan | Kind::Leaf | Kind::Const
+                        ) || self.n.h[u].aux == sp.aux
                     }
             });
             if reuse.is_none()
@@ -2070,7 +2349,7 @@ impl<L: Lang> Graph<L> {
                 gone.push(o);
             }
             let id = if let Some(o) = reuse {
-                self.n.h[o as usize].ord = sp.sub;
+                self.n.h[o as usize].ord = u64::from(sp.sub);
                 if sp.kind == Kind::Unfold {
                     let ui = self.n.h[o as usize].aux as usize;
                     if self.unfolds[ui].grp0 != sp.grp {
@@ -2086,7 +2365,15 @@ impl<L: Lang> Graph<L> {
                 o
             } else {
                 self.grp_hint = sp.grp;
-                let o = self.alloc(sp.kind, sp.op, sp.class, s, sp.sub, key, sp.aux);
+                let o = self.alloc(
+                    sp.kind,
+                    sp.op,
+                    sp.class(),
+                    s,
+                    u64::from(sp.sub),
+                    key,
+                    sp.aux,
+                );
                 self.n.h[o as usize].flags |= DIRTY;
                 self.register(o);
                 o
@@ -2127,89 +2414,108 @@ impl<L: Lang> Graph<L> {
     fn sweep(&mut self, s: u32, ids: &[u32], os: &mut Vec<Opd>) {
         let specs = std::mem::take(&mut self.em.specs);
         let eargs = std::mem::take(&mut self.em.args);
-        let mut buf = std::mem::take(&mut self.sc_buf);
-        buf.clear();
-        buf.resize_with(specs.len(), L::Val::default);
-        let mut refs = std::mem::take(&mut self.sc_refs);
+        // (the emissions evaluated as they were emitted have their values
+        // here already; the rest are evaluated here, in order)
+        let mut buf = std::mem::take(&mut self.em.vals);
+        let done = std::mem::take(&mut self.em.done);
+        let mut ext = std::mem::take(&mut self.em.xopds);
         let mut copds = std::mem::take(&mut self.sc_copds);
         let mut interior = 0u32;
         for (i, sp) in specs.iter().enumerate() {
             let id = ids[i];
-            let at = Pos { parent: s, ord: sp.sub };
-            refs.clear();
-            for k in 0..sp.args.1 {
-                let a = eargs[(sp.args.0 + u32::from(k)) as usize];
-                let r = match a {
+            let (a0, an) = (sp.args.0 as usize, sp.args.1 as usize);
+            let leaf = sp.kind == Kind::Leaf;
+            for a in a0..a0 + an {
+                match eargs[a] {
                     SArg::Local(ix, sel) => {
+                        // (a member whose value comes from outside the step:
+                        // a leaf of the step reads it, so the step does)
                         let x = ids[ix as usize];
-                        if x == NONE {
-                            ARef::Buf(ix, sel)
-                        } else {
-                            let o = Opd { src: x, sel, name: NONE };
-                            // (a member whose value comes from outside the
-                            // step: the step reads it)
-                            if matches!(
+                        if leaf
+                            && x != NONE
+                            && matches!(
                                 self.n.h[x as usize].kind,
-                                Kind::Unfold | Kind::Scan | Kind::Cross | Kind::ChainRead | Kind::Family
-                            ) && sp.kind == Kind::Leaf
-                            {
-                                os.push(o);
-                            }
-                            ARef::Node(o)
+                                Kind::Unfold
+                                    | Kind::Scan
+                                    | Kind::Cross
+                                    | Kind::ChainRead
+                                    | Kind::Family
+                            )
+                        {
+                            os.push(Opd {
+                                src: x,
+                                sel,
+                                name: NONE,
+                            });
                         }
                     }
                     SArg::Node(src, sel) => {
-                        let o = Opd { src, sel, name: NONE };
-                        if id == NONE || sp.kind == Kind::Leaf {
+                        let o = Opd {
+                            src,
+                            sel,
+                            name: NONE,
+                        };
+                        ext[a] = o;
+                        if leaf {
                             os.push(o);
                         }
-                        ARef::Node(o)
                     }
                     SArg::Name(m) => {
-                        let o = self.resolve_or_import(m, at);
-                        if id == NONE || sp.kind == Kind::Leaf {
+                        let o = if done[i] && ext[a].name == m && ext[a].src != NONE {
+                            ext[a]
+                        } else {
+                            self.resolve_or_import(
+                                m,
+                                Pos {
+                                    parent: s,
+                                    ord: u64::from(sp.sub),
+                                },
+                            )
+                        };
+                        ext[a] = o;
+                        if leaf {
                             os.push(o);
                         }
-                        ARef::Node(o)
                     }
-                };
-                refs.push(r);
+                }
             }
             match sp.kind {
                 Kind::Const => {
-                    let v = sp.lit.clone().unwrap_or_default();
-                    if id == NONE {
-                        buf[i] = v;
-                    } else {
-                        self.set_val(id, v);
+                    if id != NONE {
+                        self.set_val(id, buf[i].clone());
                         self.n.h[id as usize].flags &= !DIRTY;
                     }
                 }
                 Kind::Leaf => {
-                    let v = {
-                        let args = Args {
-                            g: &self.n,
-                            opds: &[],
-                            refs: &refs,
-                            buf: &buf,
+                    if !done[i] {
+                        let v = {
+                            let args = Args {
+                                g: &self.n,
+                                opds: &[],
+                                sweep: Some((&eargs[a0..a0 + an], ids, &buf, &ext[a0..a0 + an])),
+                            };
+                            L::eval(sp.op, &args)
                         };
-                        L::eval(sp.op, &args)
-                    };
+                        buf[i] = v;
+                    }
                     self.rep.evals += 1;
                     if id == NONE {
                         interior += 1;
-                        buf[i] = v;
                     } else {
                         self.n.h[id as usize].flags &= !DIRTY;
-                        self.set_val(id, v);
+                        self.set_val(id, buf[i].clone());
                     }
                 }
                 Kind::Unfold | Kind::Scan => {
                     // (its operands are nodes: what it reads, it reads itself)
                     copds.clear();
-                    copds.extend(refs.iter().map(|r| match *r {
-                        ARef::Node(o) => o,
-                        ARef::Buf(..) => unreachable!("a creator's operands are big"),
+                    copds.extend((a0..a0 + an).map(|a| match eargs[a] {
+                        SArg::Local(ix, sel) => Opd {
+                            src: ids[ix as usize],
+                            sel,
+                            name: NONE,
+                        },
+                        _ => ext[a],
                     }));
                     if self.n.opds_of(id) != copds.as_slice() {
                         self.set_opds(id, &copds);
@@ -2239,8 +2545,9 @@ impl<L: Lang> Graph<L> {
         }
         self.em.specs = specs;
         self.em.args = eargs;
-        self.sc_buf = buf;
-        self.sc_refs = refs;
+        self.em.vals = buf;
+        self.em.done = done;
+        self.em.xopds = ext;
         self.sc_copds = copds;
     }
 
@@ -2293,14 +2600,12 @@ impl<L: Lang> Graph<L> {
         );
         resolve(&self.n, &self.names, &self.groups, m, at)
     }
-
 }
 
 impl<L: Lang> Graph<L> {
     /// The step's scope events, applied to the group table.
     fn apply_groups(&mut self, s: u32, si: usize) {
         let events = std::mem::take(&mut self.em.events);
-        let mut opened = Vec::new();
         let mut closed = Vec::new();
         for (e, sub) in &events {
             match *e {
@@ -2313,7 +2618,6 @@ impl<L: Lang> Graph<L> {
                             names: Vec::new(),
                         })
                         .parent = p;
-                    opened.push(g);
                 }
                 Event::Close(g) => {
                     if g == NOGROUP {
@@ -2342,7 +2646,8 @@ impl<L: Lang> Graph<L> {
                 }
             }
         }
-        let old_closed = std::mem::take(&mut self.steps[si].closed);
+        let _ = si;
+        let old_closed = self.closes.remove(&s).unwrap_or_default();
         for g in old_closed {
             if closed.contains(&g) {
                 continue;
@@ -2355,8 +2660,9 @@ impl<L: Lang> Graph<L> {
                 self.reresolve_group(g, c);
             }
         }
-        self.steps[si].opened = opened;
-        self.steps[si].closed = closed;
+        if !closed.is_empty() {
+            self.closes.insert(s, closed);
+        }
         self.em.events = events;
     }
 
@@ -2374,29 +2680,33 @@ impl<L: Lang> Graph<L> {
     /// The step's definitions, applied to the name index.
     fn apply_defs(&mut self, s: u32, si: usize, ids: &[u32]) {
         let defs = std::mem::take(&mut self.em.defs);
-        let new: Vec<DefRec> = defs
-            .iter()
-            .map(|&(m, a, global, sub, grp)| {
-                let o = self.sarg(
-                    a,
-                    ids,
-                    Pos {
-                        parent: s,
-                        ord: sub,
-                    },
-                );
-                DefRec {
-                    name: m,
-                    sub,
-                    src: o.src,
-                    sel: o.sel,
-                    group: grp,
-                    global,
-                }
-            })
-            .collect();
+        if defs.is_empty() && self.steps[si].dn == 0 {
+            self.em.defs = defs;
+            return;
+        }
+        let mut new = std::mem::take(&mut self.sc_defs);
+        new.clear();
+        new.extend(defs.iter().map(|&(m, a, global, sub, grp)| {
+            let o = self.sarg(
+                a,
+                ids,
+                Pos {
+                    parent: s,
+                    ord: sub,
+                },
+            );
+            DefRec {
+                name: m,
+                sub,
+                src: o.src,
+                sel: o.sel,
+                group: grp,
+                global,
+            }
+        }));
         self.em.defs = defs;
-        let old = std::mem::take(&mut self.steps[si].defs);
+        let (d0, dn) = (self.steps[si].d0 as usize, self.steps[si].dn as usize);
+        let old = &self.step_defs[d0..d0 + dn];
         let same = old.len() == new.len()
             && old.iter().zip(&new).all(|(a, b)| {
                 a.name == b.name
@@ -2407,10 +2717,12 @@ impl<L: Lang> Graph<L> {
                     && a.global == b.global
             });
         if same {
-            self.steps[si].defs = new;
+            self.sc_defs = new;
             return;
         }
-        let mut touched: Vec<u32> = Vec::new();
+        let old = old.to_vec();
+        let mut touched = std::mem::take(&mut self.sc_touched);
+        touched.clear();
         for d in &old {
             self.remove_def(
                 d.name,
@@ -2442,13 +2754,17 @@ impl<L: Lang> Graph<L> {
             }
             touched.push(d.name);
         }
-        self.steps[si].defs = new;
+        self.steps[si].d0 = u32::try_from(self.step_defs.len()).expect("definitions fit u32");
+        self.steps[si].dn = u32::try_from(new.len()).expect("definitions fit u32");
+        self.step_defs.extend_from_slice(&new);
+        self.sc_defs = new;
         touched.sort_unstable();
         touched.dedup();
         let from = self.n.pos(s);
-        for m in touched {
+        for &m in &touched {
             self.reresolve(m, from);
         }
+        self.sc_touched = touched;
     }
 
     /// Readers of name `m` after `from` resolved again; those whose value
@@ -2554,13 +2870,17 @@ impl<L: Lang> Graph<L> {
             let su = self.steps[si].unfold;
             let ui = self.n.h[su as usize].aux as usize;
             let (key, at) = (self.steps[si].key, self.steps[si].at);
-            if self.unfolds[ui].keys.get(&key) == Some(&n) {
-                self.unfolds[ui].keys.remove(&key);
+            if self.unfolds[ui].indexed {
+                if self.unfolds[ui].keys.get(&key) == Some(&n) {
+                    self.unfolds[ui].keys.remove(&key);
+                }
+                if self.unfolds[ui].owners.get(&at) == Some(&n) {
+                    self.unfolds[ui].owners.remove(&at);
+                }
             }
-            if self.unfolds[ui].owners.get(&at) == Some(&n) {
-                self.unfolds[ui].owners.remove(&at);
-            }
-            let defs = std::mem::take(&mut self.steps[si].defs);
+            let (d0, dn) = (self.steps[si].d0 as usize, self.steps[si].dn as usize);
+            self.steps[si].dn = 0;
+            let defs = self.step_defs[d0..d0 + dn].to_vec();
             let from = self.n.pos(n);
             let mut touched = Vec::new();
             for d in &defs {
@@ -2578,7 +2898,7 @@ impl<L: Lang> Graph<L> {
             for m in touched {
                 self.reresolve(m, from);
             }
-            for g in std::mem::take(&mut self.steps[si].closed) {
+            for g in self.closes.remove(&n).unwrap_or_default() {
                 if let Some(gr) = self.groups.get_mut(&g)
                     && let Some(c) = gr.close
                     && c.parent == n
@@ -2973,8 +3293,8 @@ impl<L: Lang> Graph<L> {
 
     /// A step's definitions: (source, selector, name, global).
     pub(crate) fn step_defs(&self, s: u32) -> Vec<(u32, Sel, u32, bool)> {
-        self.steps[self.n.h[s as usize].aux as usize]
-            .defs
+        let si = &self.steps[self.n.h[s as usize].aux as usize];
+        self.step_defs[si.d0 as usize..(si.d0 + si.dn) as usize]
             .iter()
             .map(|d| (d.src, d.sel, d.name, d.global))
             .collect()
@@ -3030,10 +3350,20 @@ impl<L: Lang> Graph<L> {
         let n = &self.n;
         let cols = n.h.len() * (size_of::<Hdr<L::Op>>() + size_of::<L::Val>());
         let arenas = n.opds.len() * size_of::<Opd>() + n.revs.len() * size_of::<Rev>();
-        let steps = self.steps.len() * size_of::<StepInfo>()
-            + self.steps.iter().map(|s| s.defs.len() * size_of::<DefRec>()).sum::<usize>();
-        let names: usize = self.names.defs.iter().map(|d| d.len() * size_of::<DefEntry>()).sum::<usize>()
-            + self.names.readers.iter().map(|r| r.len() * 12).sum::<usize>();
+        let steps =
+            self.steps.len() * size_of::<StepInfo>() + self.step_defs.len() * size_of::<DefRec>();
+        let names: usize = self
+            .names
+            .defs
+            .iter()
+            .map(|d| d.len() * size_of::<DefEntry>())
+            .sum::<usize>()
+            + self
+                .names
+                .readers
+                .iter()
+                .map(|r| r.len() * 12)
+                .sum::<usize>();
         (self.live(), cols + arenas + steps + names)
     }
 
@@ -3214,7 +3544,9 @@ impl<L: Lang> Graph<L> {
                 // (a step an earlier arrival's resync removed has no successor)
                 Some(p) if self.n.is_dead(p.s) => {}
                 Some(p) => {
-                    if let Some(x) = self.successor(p.s, u, ui, p.key, p.cursor, p.idx, p.grp, p.ver) {
+                    if let Some(x) =
+                        self.successor(p.s, u, ui, p.key, p.cursor, p.idx, p.grp, p.ver)
+                    {
                         self.push_dirty(x);
                     }
                 }
@@ -3342,8 +3674,7 @@ impl<L: Lang> Graph<L> {
                 Kind::Step => {
                     let si = &p.steps[p.n.h[xu].aux as usize];
                     let owner = self.n.h[mx as usize].parent;
-                    let defs: Vec<DefRec> = si
-                        .defs
+                    let defs: Vec<DefRec> = p.step_defs[si.d0 as usize..(si.d0 + si.dn) as usize]
                         .iter()
                         .map(|d| DefRec {
                             name: names[d.name as usize],
@@ -3365,13 +3696,15 @@ impl<L: Lang> Graph<L> {
                         at: si.at,
                         took: si.took,
                         grp_in: remap_grp(si.grp_in, &map),
-                        grp_out: remap_grp(si.grp_out, &map),
                         in_ver: si.in_ver,
-                        defs,
-                        opened: si.opened.iter().map(|&g| remap_grp(g, &map)).collect(),
-                        closed: si.closed.iter().map(|&g| remap_grp(g, &map)).collect(),
+                        d0: u32::try_from(self.step_defs.len()).expect("definitions fit u32"),
+                        dn: si.dn,
                     };
-                    for d in &info.defs {
+                    if let Some(cl) = p.closes.get(&x) {
+                        self.closes
+                            .insert(mx, cl.iter().map(|&g| remap_grp(g, &map)).collect());
+                    }
+                    for d in &defs {
                         let e = DefEntry {
                             pos: Pos {
                                 parent: mx,
@@ -3385,18 +3718,22 @@ impl<L: Lang> Graph<L> {
                         self.insert_def(d.name, e);
                     }
                     let oi = self.n.h[owner as usize].aux as usize;
-                    self.unfolds[oi].keys.insert(info.key, mx);
-                    if info.took > 0 {
-                        self.unfolds[oi].owners.insert(info.at, mx);
+                    if self.unfolds[oi].indexed {
+                        self.unfolds[oi].keys.insert(info.key, mx);
+                        if info.took > 0 {
+                            self.unfolds[oi].owners.insert(info.at, mx);
+                        }
                     }
                     self.n.h[mx as usize].aux = self.steps.len() as u64;
                     self.steps.push(info);
+                    self.step_defs.extend(defs);
                 }
                 Kind::Unfold => {
                     let pi = &p.unfolds[p.n.h[xu].aux as usize];
                     self.n.h[mx as usize].aux = self.unfolds.len() as u64;
                     self.unfolds.push(UnfoldInfo {
                         first: firsts.get(&mx).copied().unwrap_or(NONE),
+                        indexed: false,
                         keys: Map::default(),
                         owners: Map::default(),
                         input: pi.input.clone(),
@@ -3432,9 +3769,11 @@ impl<L: Lang> Graph<L> {
                     let si = &self.steps[self.n.h[mx as usize].aux as usize];
                     let (k, a, t) = (si.key, si.at, si.took);
                     let oi = self.n.h[owner as usize].aux as usize;
-                    self.unfolds[oi].keys.insert(k, mx);
-                    if t > 0 {
-                        self.unfolds[oi].owners.insert(a, mx);
+                    if self.unfolds[oi].indexed {
+                        self.unfolds[oi].keys.insert(k, mx);
+                        if t > 0 {
+                            self.unfolds[oi].owners.insert(a, mx);
+                        }
                     }
                 }
             }

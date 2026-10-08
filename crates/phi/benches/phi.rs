@@ -15,7 +15,8 @@ enum V {
     #[default]
     Nil,
     I(i64),
-    S(Seq<V>),
+    /// (boxed: a value is 16 bytes)
+    S(Box<Seq<V>>),
 }
 
 impl Value for V {
@@ -42,10 +43,11 @@ enum O {
     #[default]
     Nop,
     Add,
-    /// An unfold: each step consumes one element and emits `k` leaves,
-    /// the first reading name `acc` (defined by the first step only, so
-    /// steps do not chain), the last defining name `out`.
-    Para(u32),
+    /// An unfold: each step consumes one element and emits ten (twenty)
+    /// leaves, the first reading name `acc` (defined by the first step
+    /// only, so steps do not chain), the last defining name `out`.
+    Para10,
+    Para20,
     /// A scan: greedy line filling (converges soon after an edit).
     Mod,
 }
@@ -62,7 +64,11 @@ impl Lang for B {
         }
     }
     fn step(op: O, st: &V, _a: &Args<'_, Self>, cx: &mut StepCx<'_, Self>) -> Step<V> {
-        let O::Para(k) = op else { unreachable!() };
+        let k = match op {
+            O::Para10 => 10,
+            O::Para20 => 20,
+            _ => unreachable!(),
+        };
         let Some(x) = cx.next().cloned() else {
             return Step::Done(st.clone());
         };
@@ -73,7 +79,11 @@ impl Lang for B {
             let c = cx.lit(x.clone());
             cx.define(solo, Arg::Local(c), false);
         }
-        let acc = if matches!(x, V::I(-1)) { solo } else { cx.name(b"acc") };
+        let acc = if matches!(x, V::I(-1)) {
+            solo
+        } else {
+            cx.name(b"acc")
+        };
         let out = cx.name(b"out");
         let c = cx.lit(x);
         let mut last = cx.leaf(O::Add, Class::Pure, &[Arg::Name(acc), Arg::Local(c)]);
@@ -103,23 +113,24 @@ impl Lang for B {
     }
     fn as_seq(v: &V) -> Option<&Seq<V>> {
         match v {
-            V::S(s) => Some(s),
+            V::S(s) => Some(&**s),
             _ => None,
         }
     }
     fn chain_val(items: Seq<V>) -> V {
-        V::S(items)
+        V::S(Box::new(items))
     }
     fn op_tag(op: O) -> u64 {
         match op {
             O::Nop => 0,
             O::Add => 1,
-            O::Para(k) => 2 | u64::from(k) << 8,
+            O::Para10 => 2,
+            O::Para20 => 4,
             O::Mod => 3,
         }
     }
     fn entries(op: O, input: &V, _a: &Args<'_, Self>) -> Vec<phi::Entry<V>> {
-        let (O::Para(_), V::S(s)) = (op, input) else {
+        let (O::Para10 | O::Para20, V::S(s)) = (op, input) else {
             return Vec::new();
         };
         // (every 64 elements)
@@ -165,9 +176,14 @@ fn unfold_over(s: Seq<V>, k: u32, workers: usize) -> (Graph<B>, phi::NodeId, phi
     let mut g: Graph<B> = Graph::new();
     g.cfg.workers = workers;
     g.reserve(n * (k as usize + 2) + 8, n * (2 * k as usize + 2));
-    let input = g.input(V::S(s));
+    let input = g.input(V::S(Box::new(s)));
     let init = g.input(V::Nil);
-    let u = g.unfold(O::Para(k), input, init, &[]);
+    let u = g.unfold(
+        if k == 20 { O::Para20 } else { O::Para10 },
+        input,
+        init,
+        &[],
+    );
     g.run();
     (g, input, u)
 }
@@ -214,7 +230,9 @@ fn rebuild(c: &mut Criterion) {
         })
     });
     // a name read by one leaf of one 10-leaf step: its definition changes
-    let mut xs: Vec<(ElemId, V)> = (0..100_000).map(|i| (ElemId(i as u64 + 1), V::I((i * 7919 % 101) as i64))).collect();
+    let mut xs: Vec<(ElemId, V)> = (0..100_000)
+        .map(|i| (ElemId(i as u64 + 1), V::I((i * 7919 % 101) as i64)))
+        .collect();
     xs[50_000].1 = V::I(-1);
     let solo_base = Seq::from_vec(xs);
     let (mut g, input, _) = unfold_over(solo_base.clone(), 10, 1);
@@ -223,7 +241,7 @@ fn rebuild(c: &mut Criterion) {
         b.iter(|| {
             k += 1;
             let s = solo_base.splice(0, 1, [(ElemId(1), V::I(k % 50))]);
-            g.set(input, V::S(s));
+            g.set(input, V::S(Box::new(s)));
             black_box(g.run().evals)
         })
     });
@@ -235,7 +253,7 @@ fn rebuild(c: &mut Criterion) {
         b.iter(|| {
             k += 1;
             let s = base.splice(50_000, 1, [(ElemId(50_001), V::I(k % 50))]);
-            g.set(input, V::S(s));
+            g.set(input, V::S(Box::new(s)));
             black_box(g.run().steps)
         })
     });
@@ -248,7 +266,7 @@ fn scan(c: &mut Criterion) {
     let n = 1_000_000;
     let mut g: Graph<B> = Graph::new();
     let base = elems(n);
-    let input = g.input(V::S(base.clone()));
+    let input = g.input(V::S(Box::new(base.clone())));
     let init = g.input(V::I(0));
     g.scan(O::Mod, (input, Sel::WHOLE), init, &[]);
     g.run();
@@ -257,7 +275,7 @@ fn scan(c: &mut Criterion) {
         b.iter(|| {
             k += 1;
             let s = base.splice(n / 2, 1, [(ElemId(n as u64 / 2 + 1), V::I(k % 50))]);
-            g.set(input, V::S(s));
+            g.set(input, V::S(Box::new(s)));
             black_box(g.run().scanned)
         })
     });
@@ -287,9 +305,17 @@ fn memory(_c: &mut Criterion) {
     );
     let (g, _, _) = unfold(100_000, 10, 1);
     let (n, b) = g.mem();
+    // (a step makes 12 nodes: itself, a constant and ten leaves; most are
+    // transient)
+    let logical = 100_000 * 12;
     eprintln!(
-        "memory: unfold k=10: {n} nodes, {b} bytes, {:.1} B/node",
-        b as f64 / n as f64
+        "memory: unfold k=10: {n} nodes kept of {logical}, {b} bytes, {:.1} B/node",
+        b as f64 / f64::from(logical)
+    );
+    eprintln!(
+        "sizes: V {} B, O {} B",
+        std::mem::size_of::<V>(),
+        std::mem::size_of::<O>()
     );
 }
 

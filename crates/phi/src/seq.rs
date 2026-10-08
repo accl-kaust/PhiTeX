@@ -378,6 +378,31 @@ impl<T: Value, M: Measure<T>> Seq<T, M> {
         })
     }
 
+    /// The leaf holding element `i`: its elements and the index of its
+    /// first (for cursors that step through a leaf without descending).
+    #[must_use]
+    pub fn leaf_at(&self, mut i: usize) -> Option<(&[(ElemId, T)], usize)> {
+        let mut n: &Node<T, M> = self.root.as_ref()?;
+        if i >= n.len {
+            return None;
+        }
+        let mut base = 0;
+        loop {
+            match &n.kind {
+                Kind::Leaf(xs) => return Some((xs, base)),
+                Kind::Inner(ks) => {
+                    let mut k = 0;
+                    while i >= ks[k].len {
+                        i -= ks[k].len;
+                        base += ks[k].len;
+                        k += 1;
+                    }
+                    n = &ks[k];
+                }
+            }
+        }
+    }
+
     /// The index of the element with identity `id`, in a sequence whose
     /// identities increase (an unfold's input), O(log n).
     #[must_use]
