@@ -10,22 +10,6 @@ use partex_core::Tex;
 
 use crate::native;
 
-/// The main file of `command_line`: its last word that is not a format
-/// (`&name`) or TeX code, as given or with `.tex`, and its bytes.
-fn main_file(command_line: &[u8]) -> Option<(Vec<u8>, Vec<u8>)> {
-    let s = String::from_utf8_lossy(command_line);
-    let w = s
-        .split_whitespace()
-        .rev()
-        .find(|w| !w.starts_with('&') && !w.starts_with('\\'))?;
-    for name in [w.to_string(), format!("{w}.tex")] {
-        if let Ok(b) = std::fs::read(&name) {
-            return Some((name.into_bytes(), b));
-        }
-    }
-    None
-}
-
 /// Link `b`'s effects and write its files, the terminal's text and the
 /// diagnostics.
 fn link(b: &mut Build<native::NativeHost>, linker: &mut crate::SsaLinker) -> String {
@@ -62,7 +46,7 @@ fn report(n: usize, b: &mut Build<native::NativeHost>, rep: &phi::Report, ms: f6
     let (live, _) = b.g.mem();
     eprintln!(
         "phitex: pure ssa build {n}: {ms:.1} ms; steps run {} (placed {}, frontiers whole {}, since {}, names loaded {}), \
-         reads {}, definitions {}, groups {}, effect steps {}; core: steps {} evals {} \
+         reads {}, definitions {}, groups {}, effect steps {}, file calls {}; core: steps {} evals {} \
          woken {} created {} removed {} iterations {}; live nodes {live}",
         s.steps,
         s.placed,
@@ -73,6 +57,7 @@ fn report(n: usize, b: &mut Build<native::NativeHost>, rep: &phi::Report, ms: f6
         s.defs,
         s.groups,
         s.effects,
+        s.calls,
         rep.steps,
         rep.evals,
         rep.woken,
@@ -89,17 +74,13 @@ fn report(n: usize, b: &mut Build<native::NativeHost>, rep: &phi::Report, ms: f6
 /// The build; its history.
 pub fn run(mut host: native::NativeHost, params: Params, command_line: &[u8]) -> i32 {
     host.commands = Some(native::Commands::default());
-    let Some((_, main)) = main_file(command_line) else {
-        eprintln!("phitex: pure ssa: no main file in the command line");
-        return 3;
-    };
     let workers = ["PHITEX_SSA_WORKERS", "PARTEX_SSA_WORKERS"]
         .iter()
         .find_map(|k| std::env::var(k).ok()?.parse::<usize>().ok())
         .unwrap_or(1);
     let t0 = std::time::Instant::now();
     let tex = Tex::new(host, PureTracker::default(), params);
-    let mut b = Build::new(tex, command_line, &main, workers);
+    let mut b = Build::new(tex, command_line, workers);
     let rep = b.run();
     let ms = t0.elapsed().as_secs_f64() * 1e3;
     let mut linker = crate::SsaLinker::default();
@@ -119,13 +100,10 @@ pub fn run(mut host: native::NativeHost, params: Params, command_line: &[u8]) ->
             eprintln!("phitex: pure ssa: the rebuild command failed");
             return 3;
         }
-        let Some((_, main)) = main_file(command_line) else {
-            eprintln!("phitex: pure ssa: the main file is gone");
-            return 3;
-        };
         let t0 = std::time::Instant::now();
         b.engine().stats = partex_core::pure::Stats::default();
-        b.edit(&main);
+        let fr = b.refresh();
+        eprintln!("phitex: pure ssa build {}: files changed {}, removed {}", n + 1, fr.changed, fr.removed);
         let rep = b.run();
         let ms = t0.elapsed().as_secs_f64() * 1e3;
         let how = link(&mut b, &mut linker);

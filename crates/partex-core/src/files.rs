@@ -608,6 +608,10 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             None => found,
         };
         let contents = found.as_ref().map(|f| &f.contents);
+        if T::PURE {
+            self.tracker
+                .pure_load(name, found.as_ref().map(|f| (&f.name[..], &f.contents)), lines);
+        }
         if lines {
             self.tracker.load_lines(name, FileKind::Tex, contents);
         } else {

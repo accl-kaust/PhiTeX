@@ -1412,7 +1412,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             if T::PURE
                 && let Some(f) = &self.input_file[index]
             {
-                self.tracker.pure_file_end(&f.name, f.lines);
+                self.tracker.pure_file_end(index, &f.name, f.lines);
             }
             self.input_file[index] = None; // forget it
             if T::VALUES {

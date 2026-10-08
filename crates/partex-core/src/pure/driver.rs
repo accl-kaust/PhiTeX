@@ -1,45 +1,45 @@
-//! The build on the φ core: the graph over the document's lines, a cold
-//! build, an edit and a rebuild, and what the build made (its effects in
+//! The build on the φ core: the job's unfold, a cold build, a rebuild
+//! after the files changed, and what the build made (its effects in
 //! program order, its history).
 
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use std::collections::HashMap;
 
-use phi::{ElemId, Graph, NodeId, Seq};
+use phi::{Graph, NodeId, Seq, Ver};
 
 use crate::effects::Effect;
-use crate::host::{Host, NoHost};
+use crate::host::{FileKind, Host, NoHost};
 use crate::run::Step as Run;
 use crate::tex::Tex;
 
-use super::lang::{DOC, Doc, Engine, OUTPUT, Op, Stats, TexLang, Val, install, uninstall};
+use super::files::{FileDoc, all, key, key_hash, set_doc};
+use super::lang::{Engine, OUTPUT, Op, Stats, TexLang, Val, install, uninstall};
 use super::state::PState;
 use super::tracker::PureTracker;
 
 /// A pure SSA build.
 pub struct Build<H: Host + 'static> {
     pub g: Graph<TexLang<H>>,
-    input: NodeId,
     doc: NodeId,
-    out: NodeId,
     engine: Option<Engine<H>>,
-    /// The main file's lines: identity and bytes.
-    lines: Vec<(ElemId, Arc<[u8]>)>,
-    /// The next identity a new line takes.
-    next_id: u64,
-    name: Option<Arc<[u8]>>,
     /// The effects of the job's start (before its first command).
     pub fx0: Vec<Effect>,
     /// The job ended before its first command.
     done0: Option<i32>,
 }
 
+/// What a refresh of the files found.
+#[derive(Default, Debug, Clone, Copy)]
+pub struct Refresh {
+    pub changed: usize,
+    pub removed: usize,
+}
+
 impl<H: Host + 'static> Build<H> {
-    /// A build of the job `command_line` whose main file holds `main`
-    /// (the core's input): the engine set up and run to its first
-    /// command (the format loaded), the graph made.
-    pub fn new(mut tex: Tex<H, PureTracker>, command_line: &[u8], main: &[u8], workers: usize) -> Self {
+    /// A build of the job `command_line`: the engine set up and run to
+    /// its first command (the format loaded), the graph made. The files
+    /// the job reads are found by its steps.
+    pub fn new(mut tex: Tex<H, PureTracker>, command_line: &[u8], workers: usize) -> Self {
         // (the files are linked from the steps' effects)
         tex.set_effects(true);
         // (boxes carry versions, made when each becomes a shared value)
@@ -57,96 +57,86 @@ impl<H: Host + 'static> Build<H> {
         // (its tables flat, to be read: a checkpoint left them frozen)
         base.thaw();
         let (st, v) = PState::of(&mut tex, b"", done0);
+        tex.tracker.file_ends.borrow_mut().clear();
         let mut g: Graph<TexLang<H>> = Graph::new();
         g.cfg.workers = workers.max(1);
-        let mut b = Build {
+        // (the job's own input is the terminal's line, in the state: the
+        // unfold reads no elements; its files are calls)
+        let input = g.input(Val::Lines(Seq::new(), Ver::of(&0u8)));
+        // (a file the terminal's line named, opened before the first
+        // command (§1337): a source, which the job's first step calls)
+        let mut first = None;
+        for l in tex.tracker.loads.borrow_mut().drain(..) {
+            let (Some((name, bytes)), true) = (&l.found, l.lines) else {
+                continue;
+            };
+            let j = tex.in_open;
+            if j > 0
+                && tex.input_file[j]
+                    .as_ref()
+                    .is_some_and(|f| Arc::ptr_eq(&f.data, bytes))
+            {
+                let k = key(&l.name);
+                let h = key_hash(&k);
+                let d = FileDoc::new(&l.name, name, bytes.clone(), None);
+                g.source(&k, d.value.clone());
+                set_doc(h, Some(d));
+                first = Some((h, u16::try_from(j).expect("input levels fit u16")));
+            }
+        }
+        let st = Arc::new(st);
+        let init = g.input(match first {
+            Some((h, j)) => Val::Enter(st, Ver(v), h, j),
+            None => Val::State(st, Ver(v)),
+        });
+        let doc = g.unfold(Op::Main, input, init, &[]);
+        let _ = g.chain_read(OUTPUT);
+        Build {
             g,
-            input: NodeId(0),
-            doc: NodeId(0),
-            out: NodeId(0),
+            doc,
             engine: Some(Engine {
                 tex,
                 base,
-                at: Some(phi::Ver(v)),
+                at: Some(Ver(v)),
                 stats: Stats::default(),
                 defined: std::collections::HashSet::new(),
                 last: None,
                 last_defs: std::collections::HashMap::new(),
             }),
-            lines: Vec::new(),
-            next_id: 1,
-            name: None,
             fx0,
             done0,
-        };
-        let seq = b.set_lines(main);
-        b.input = b.g.input(Val::Lines(seq));
-        let init = b.g.input(Val::State(Arc::new(st), phi::Ver(v)));
-        b.doc = b.g.unfold(Op::Main, b.input, init, &[]);
-        b.out = b.g.chain_read(OUTPUT);
-        b
+        }
     }
 
-    /// The main file's lines as `main` has them: the lines kept from the
-    /// last text keep their identities (a common prefix and suffix), the
-    /// others take new ones between them.
-    fn set_lines(&mut self, main: &[u8]) -> Seq<Val> {
-        let ranges = Doc::lines(main);
-        let new: Vec<Arc<[u8]>> = ranges.iter().map(|r| Arc::from(&main[r.clone()])).collect();
-        let old = core::mem::take(&mut self.lines);
-        let pre = old
-            .iter()
-            .zip(&new)
-            .take_while(|(a, b)| a.1[..] == b[..])
-            .count();
-        let suf = old[pre..]
-            .iter()
-            .rev()
-            .zip(new[pre..].iter().rev())
-            .take_while(|(a, b)| a.1[..] == b[..])
-            .count();
-        let mut lines: Vec<(ElemId, Arc<[u8]>)> = Vec::with_capacity(new.len());
-        lines.extend(old[..pre].iter().cloned());
-        for l in &new[pre..new.len() - suf] {
-            lines.push((ElemId(self.next_id << 8), l.clone()));
-            self.next_id += 1;
+    /// Each file the build has, as the host has it now: a changed one's
+    /// source set (its lines' identities kept where the lines are the
+    /// same), a gone one's removed. The engine's arrays are a cache no
+    /// longer: the next step makes its frontier afresh.
+    pub fn refresh(&mut self) -> Refresh {
+        let mut rep = Refresh::default();
+        let e = self.engine.as_mut().expect("pure SSA: the engine");
+        for (h, d) in all() {
+            let k = key(&d.asked);
+            debug_assert_eq!(key_hash(&k), h);
+            match e.tex.host.read_file(&d.asked, FileKind::Tex) {
+                Some(f) if f.contents[..] == d.bytes[..] && f.name[..] == d.name[..] => {}
+                Some(f) => {
+                    let nd = FileDoc::new(&d.asked, &f.name, f.contents.clone(), Some(&d));
+                    self.g.source(&k, nd.value.clone());
+                    set_doc(h, Some(nd));
+                    rep.changed += 1;
+                }
+                None => {
+                    self.g.remove_source(&k);
+                    set_doc(h, None);
+                    rep.removed += 1;
+                }
+            }
         }
-        lines.extend(old[old.len() - suf..].iter().cloned());
-        self.lines = lines;
-        let mut starts = Vec::with_capacity(ranges.len() + 1);
-        let mut index = HashMap::with_capacity(ranges.len());
-        for (i, r) in ranges.iter().enumerate() {
-            starts.push(r.start);
-            index.insert(self.lines[i].0, i);
-        }
-        starts.push(main.len());
-        let doc = Doc {
-            name: self.name.clone().unwrap_or_else(|| Arc::from(&b""[..])),
-            name_cell: std::sync::OnceLock::new(),
-            bytes: Arc::from(main),
-            starts,
-            index,
-        };
-        if let Some(n) = &self.name {
-            let _ = doc.name_cell.set(n.clone());
-        }
-        *DOC.write().expect("pure SSA: the document") = Some(Arc::new(doc));
-        Seq::from_vec(
-            self.lines
-                .iter()
-                .map(|(id, l)| (*id, Val::Line(l.clone(), phi::Ver::of(&l[..]))))
-                .collect(),
-        )
-    }
-
-    /// The main file edited to `main`.
-    pub fn edit(&mut self, main: &[u8]) {
-        let seq = self.set_lines(main);
-        self.g.set(self.input, Val::Lines(seq));
-        if let Some(e) = self.engine.as_mut() {
-            // (the engine's arrays are a cache: its state is checked again)
-            e.at = None;
-        }
+        e.at = None;
+        e.last = None;
+        e.last_defs.clear();
+        rep
     }
 
     /// Run the graph to quiescence.
@@ -154,12 +144,6 @@ impl<H: Host + 'static> Build<H> {
         install(self.engine.take().expect("pure SSA: the engine"));
         let rep = self.g.run();
         self.engine = uninstall();
-        if self.name.is_none() {
-            self.name = DOC
-                .read()
-                .ok()
-                .and_then(|d| d.as_ref().and_then(|d| d.name_cell.get().cloned()));
-        }
         rep
     }
 

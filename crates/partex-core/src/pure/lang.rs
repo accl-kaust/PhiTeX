@@ -19,6 +19,7 @@ use crate::ssa::{Fam, SVal, Slot, Versions, set_value, slot_value};
 use crate::tex::Tex;
 use partex_ssa::Version;
 
+use super::files::FileDoc;
 use super::state::PState;
 use super::tracker::{Ev, PureTracker};
 use super::version::slot_version;
@@ -31,8 +32,9 @@ pub const OUTPUT: phi::Chain = phi::Chain(0);
 pub enum Val {
     #[default]
     Unit,
-    /// The document's lines (the unfold's input).
-    Lines(Seq<Val>),
+    /// A file's lines (a source, an unfold's input), versioned by the
+    /// file's bytes.
+    Lines(Seq<Val>, Ver),
     /// A line of the document, with its end.
     Line(Arc<[u8]>, Ver),
     /// A step's state.
@@ -45,19 +47,24 @@ pub enum Val {
     Done(i32),
     /// A chain's payloads.
     Chain(Seq<Val>),
+    /// The job's state where it began reading file `h` at input level
+    /// `level` before its first command (the terminal's line named it):
+    /// the job's first step calls the file.
+    Enter(Arc<PState>, Ver, u64, u16),
 }
 
 impl core::fmt::Debug for Val {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Val::Unit => write!(f, "Unit"),
-            Val::Lines(s) => write!(f, "Lines({})", s.len()),
+            Val::Lines(s, _) => write!(f, "Lines({})", s.len()),
             Val::Line(l, _) => write!(f, "Line({:?})", alloc::string::String::from_utf8_lossy(l)),
             Val::State(s, v) => write!(f, "State({s:?}, {:x})", v.0 & 0xffff_ffff),
             Val::Slot(s) => write!(f, "Slot({:x})", s.0.0 & 0xffff_ffff),
             Val::Fx(x, _) => write!(f, "Fx({})", x.len()),
             Val::Done(h) => write!(f, "Done({h})"),
             Val::Chain(s) => write!(f, "Chain({})", s.len()),
+            Val::Enter(_, v, h, l) => write!(f, "Enter({:x}, {h:x}, {l})", v.0 & 0xffff_ffff),
         }
     }
 }
@@ -74,11 +81,11 @@ impl Value for Val {
     fn ver(&self) -> Ver {
         match self {
             Val::Unit => Ver::of(&0u8),
-            Val::Lines(s) => Ver::node(1, &[s.ver()]),
-            Val::Line(_, v) | Val::State(_, v) | Val::Fx(_, v) => *v,
+            Val::Line(_, v) | Val::Lines(_, v) | Val::State(_, v) | Val::Fx(_, v) => *v,
             Val::Slot(s) => Ver(s.0.0),
             Val::Done(h) => Ver::of(&(7u8, *h)),
             Val::Chain(s) => Ver::node(8, &[s.ver()]),
+            Val::Enter(_, v, h, l) => Ver::node(9, &[*v, Ver::of(&(*h, *l))]),
         }
     }
 }
@@ -92,70 +99,11 @@ pub enum Op {
     Main,
     /// A step's effects (operand 0) on [`OUTPUT`].
     Fx,
+    /// A file read by `\\input` (its key's number), at input level
+    /// `level`: a step a command, while the level reads it.
+    File(u64, u16),
 }
 
-/// The document's main file as the core has it (set by the driver before
-/// a run): its bytes, where each line starts, its lines' identities.
-pub struct Doc {
-    /// The file's name as the host resolved it (`AlphaFile::name`), if
-    /// known when the run began.
-    pub name: Arc<[u8]>,
-    /// The name, learnt when the engine first opens a file holding
-    /// [`Doc::bytes`].
-    pub name_cell: std::sync::OnceLock<Arc<[u8]>>,
-    pub bytes: Arc<[u8]>,
-    /// Line `i` starts at `starts[i]`; one more entry, the file's end.
-    pub starts: Vec<usize>,
-    /// Each line's index by its identity.
-    pub index: HashMap<ElemId, usize>,
-}
-
-impl Doc {
-    /// The main file's name (empty before it is known).
-    #[must_use]
-    pub fn main(&self) -> &[u8] {
-        self.name_cell.get().map_or(&self.name[..], |n| &n[..])
-    }
-
-    /// Learn the main file's name from `t`'s open files.
-    fn learn<H: Host>(&self, t: &Tex<H, PureTracker>) {
-        if self.name_cell.get().is_some() {
-            return;
-        }
-        if let Some(f) = t.input_file[..=t.in_open]
-            .iter()
-            .flatten()
-            .find(|f| f.data[..] == self.bytes[..])
-        {
-            let _ = self.name_cell.set(f.name.clone());
-        }
-    }
-
-    /// The lines of `bytes` as `input_ln` reads them (each to its end of
-    /// line, CR LF one end), with identities `ids` (one per line).
-    #[must_use]
-    pub fn lines(bytes: &[u8]) -> Vec<core::ops::Range<usize>> {
-        let mut out = Vec::new();
-        let mut i = 0;
-        while i < bytes.len() {
-            let b = i;
-            while i < bytes.len() && bytes[i] != b'\n' && bytes[i] != b'\r' {
-                i += 1;
-            }
-            if i < bytes.len() {
-                if bytes[i] == b'\r' && bytes.get(i + 1) == Some(&b'\n') {
-                    i += 1;
-                }
-                i += 1;
-            }
-            out.push(b..i);
-        }
-        out
-    }
-}
-
-/// The document of the run in progress.
-pub static DOC: RwLock<Option<Arc<Doc>>> = RwLock::new(None);
 
 /// What the steps count (the report's).
 #[derive(Default, Clone, Copy, Debug)]
@@ -175,6 +123,8 @@ pub struct Stats {
     pub defs: u64,
     pub groups: u64,
     pub effects: u64,
+    /// Files called (`\\input` levels).
+    pub calls: u64,
 }
 
 /// The engine of this thread and what goes with it.
@@ -300,47 +250,62 @@ fn rank(a: &Slot) -> u8 {
 /// The TeX layer.
 pub struct TexLang<H>(PhantomData<H>);
 
-/// The main file's line count read so far in `t` (its level, or where it
-/// ended in the step), if open.
-fn main_lines<H: Host>(t: &Tex<H, PureTracker>, main: &[u8]) -> Option<u32> {
-    t.input_file[..=t.in_open]
-        .iter()
-        .flatten()
-        .find(|f| &f.name[..] == main)
-        .map(|f| f.lines)
-}
+/// The file an unfold reads, and its input level, if it is a file's.
+type Reading = Option<(Arc<FileDoc>, usize)>;
 
-/// Put the core's document at the main file's levels in `t`, read up to
-/// line `idx`.
-fn place_main<H: Host>(t: &mut Tex<H, PureTracker>, doc: &Doc, idx: usize) {
-    let k = t.in_open;
-    for f in t.input_file[..=k].iter_mut().flatten() {
-        if f.name[..] == *doc.main() {
-            f.data = doc.bytes.clone();
-            f.pos = doc.starts[idx.min(doc.starts.len() - 1)];
-            f.lines = u32::try_from(idx).unwrap_or(u32::MAX);
-        }
-    }
+/// Place file `d` at its level in `t`: the source's bytes, read up to
+/// line `idx` (the first step of a file's unfold begins after its first
+/// line, which the `\input` that called it read).
+fn place_file<H: Host>(t: &mut Tex<H, PureTracker>, d: &FileDoc, level: usize, idx: usize) {
+    let n = d.starts.len() - 1;
+    let at = if idx == 0 { n.min(1) } else { idx };
+    let f = t
+        .input_file
+        .get_mut(level)
+        .and_then(Option::as_mut)
+        .filter(|f| f.name[..] == d.name[..])
+        .expect("pure SSA: a file's unfold at a level that does not read it");
+    f.data = d.bytes.clone();
+    f.pos = d.starts[at.min(n)];
+    f.lines = u32::try_from(at).unwrap_or(u32::MAX);
 }
 
 /// A step: one command.
-fn command<H: Host + 'static>(st: &Val, cx: &mut StepCx<'_, TexLang<H>>) -> Step<Val> {
+fn command<H: Host + 'static>(op: Op, st: &Val, cx: &mut StepCx<'_, TexLang<H>>) -> Step<Val> {
+    if let Val::Enter(ps, v, h, level) = st {
+        // (the file the job began reading before its first command)
+        let d = super::files::doc(*h).expect("pure SSA: the first file");
+        let src = cx
+            .source(&super::files::key(&d.asked))
+            .expect("pure SSA: the first file's source");
+        let init = cx.lit(Val::State(ps.clone(), *v));
+        cx.call(Op::File(*h, *level), src, Arg::Local(init), &[]);
+        return Step::Call {
+            key: phi::ver::hash64(&(0x656e_7465u32, *h)),
+        };
+    }
+    if let Val::Done(h) = st {
+        // (the job ended in a file this unfold called)
+        return Step::Done(Val::Done(*h));
+    }
     let Val::State(ps, sv) = st else {
         panic!("pure SSA: a step's state is {st:?}");
     };
     if let Some(h) = ps.finished {
         return Step::Done(Val::Done(h));
     }
-    let doc = DOC
-        .read()
-        .expect("pure SSA: the document")
-        .clone()
-        .expect("pure SSA: no document");
+    let file: Reading = match op {
+        Op::File(h, level) => Some((
+            super::files::doc(h).expect("pure SSA: a file's unfold with no file"),
+            usize::from(level),
+        )),
+        _ => None,
+    };
     let cur = cx.cursor();
-    let idx0 = if cur == phi::END {
-        doc.starts.len() - 1
-    } else {
-        *doc.index.get(&cur).expect("pure SSA: a cursor not in the document")
+    let idx0 = match &file {
+        None => 0,
+        Some((d, _)) if cur == phi::END => d.starts.len() - 1,
+        Some((d, _)) => *d.index.get(&cur).expect("pure SSA: a cursor not in the file"),
     };
     with_engine::<H, _>(|e| {
         e.stats.steps += 1;
@@ -351,15 +316,18 @@ fn command<H: Host + 'static>(st: &Val, cx: &mut StepCx<'_, TexLang<H>>) -> Step
             e.stats.placed += 1;
             ps.set(&mut e.tex);
         }
-        place_main(&mut e.tex, &doc, idx0);
+        if let Some((d, level)) = &file {
+            place_file(&mut e.tex, d, *level, idx0);
+        }
         e.tex.at_checkpoint = true;
         e.last = Some(cx.here());
         e.tex.tracker.log.borrow_mut().clear();
         e.tex.tracker.file_ends.borrow_mut().clear();
+        e.tex.tracker.loads.borrow_mut().clear();
         let r = e.tex.resume();
         let fx = e.tex.take_effects();
         let log = core::mem::take(&mut *e.tex.tracker.log.borrow_mut());
-        finish(e, &doc, idx0, r, fx, &log, ps, cx)
+        finish(e, file.as_ref(), idx0, r, fx, &log, ps, cx)
     })
 }
 
@@ -458,7 +426,7 @@ fn core_version<H: Host + 'static>(
 /// consume the lines it read, emit its effects, and the next state.
 fn finish<H: Host + 'static>(
     e: &mut Engine<H>,
-    doc: &Doc,
+    file: Option<&(Arc<FileDoc>, usize)>,
     idx0: usize,
     r: Run,
     fx: Vec<Effect>,
@@ -538,22 +506,64 @@ fn finish<H: Host + 'static>(
             }
         }
     }
-    // the lines of the main file it read
-    doc.learn(&e.tex);
-    let ended = e
-        .tex
-        .tracker
-        .file_ends
-        .borrow()
-        .iter()
-        .rev()
-        .find(|(n, _)| n[..] == *doc.main())
-        .map(|(_, l)| *l);
-    let now = main_lines(&e.tex, doc.main()).or(ended);
-    if let Some(l) = now {
-        let l = usize::try_from(l).unwrap_or(usize::MAX);
-        for _ in idx0..l {
-            cx.next();
+    // the files it looked up: sources; an `\input` level it opened, left
+    // reading at the top, a call of the file's unfold
+    let loads = core::mem::take(&mut *e.tex.tracker.loads.borrow_mut());
+    let mut call: Option<(Arg<'_>, u64, usize)> = None;
+    for l in &loads {
+        let k = super::files::key(&l.name);
+        let Some((name, bytes)) = &l.found else {
+            // (absent: a file that appears wakes the step)
+            let _ = cx.source(&k);
+            continue;
+        };
+        let h = super::files::key_hash(&k);
+        let d = super::files::doc_or_insert(h, || FileDoc::new(&l.name, name, bytes.clone(), None));
+        assert!(
+            d.bytes[..] == bytes[..],
+            "pure SSA: the host gave {} other bytes than the build's source",
+            alloc::string::String::from_utf8_lossy(name)
+        );
+        let arg = cx.source_or_insert(&k, d.value.clone());
+        let t = &e.tex;
+        let j = t.in_open;
+        if l.lines
+            && j > 0
+            && t.input_file[j]
+                .as_ref()
+                .is_some_and(|f| Arc::ptr_eq(&f.data, bytes))
+        {
+            call = Some((arg, h, j));
+        }
+    }
+    // the lines of its own file it read, and whether the file's level
+    // ended
+    let mut done = false;
+    if let Some((d, level)) = file {
+        let t = &e.tex;
+        let open = t
+            .input_file
+            .get(*level)
+            .and_then(Option::as_ref)
+            .filter(|f| *level <= t.in_open && f.name[..] == d.name[..]);
+        let read = match open {
+            Some(f) => Some(f.lines),
+            None => {
+                done = true;
+                t.tracker
+                    .file_ends
+                    .borrow()
+                    .iter()
+                    .rev()
+                    .find(|(j, n, _)| *j == *level && n[..] == d.name[..])
+                    .map(|x| x.2)
+            }
+        };
+        if let Some(l) = read {
+            let l = usize::try_from(l).unwrap_or(usize::MAX);
+            for _ in idx0..l {
+                cx.next();
+            }
         }
     }
     if !fx.is_empty() {
@@ -566,7 +576,8 @@ fn finish<H: Host + 'static>(
         Run::Checkpoint => None,
         Run::Finished(h) => Some(h),
     };
-    let (mut ps, v) = PState::of(&mut e.tex, doc.main(), finished);
+    let main = file.map_or(&b""[..], |(d, _)| &d.name[..]);
+    let (mut ps, v) = PState::of(&mut e.tex, main, finished);
     let ver = Ver(v);
     e.at = Some(ver);
     // (the next step's key: where it begins, a token list's place by its
@@ -587,10 +598,23 @@ fn finish<H: Host + 'static>(
     ps.kbase = base;
     ps.k = k;
     let key = phi::ver::hash64(&(base, k));
-    Step::Next {
-        st: Val::State(Arc::new(ps), ver),
-        key,
+    let st = Val::State(Arc::new(ps), ver);
+    if done {
+        assert!(call.is_none(), "pure SSA: a file ended and another began in one command");
+        return Step::Done(st);
     }
+    if let Some((arg, h, j)) = call {
+        e.stats.calls += 1;
+        let init = cx.lit(st);
+        cx.call(
+            Op::File(h, u16::try_from(j).expect("input levels fit u16")),
+            arg,
+            Arg::Local(init),
+            &[],
+        );
+        return Step::Call { key };
+    }
+    Step::Next { st, key }
 }
 
 /// Effects' version: their content, as the old SSA mode's chunks
@@ -614,14 +638,14 @@ impl<H: Host + 'static> Lang for TexLang<H> {
 
     fn step(op: Op, st: &Val, _args: &Args<'_, Self>, cx: &mut StepCx<'_, Self>) -> Step<Val> {
         match op {
-            Op::Main => command::<H>(st, cx),
+            Op::Main | Op::File(..) => command::<H>(op, st, cx),
             _ => unimplemented!("{op:?} is not an unfold"),
         }
     }
 
     fn as_seq(v: &Val) -> Option<&Seq<Val>> {
         match v {
-            Val::Lines(s) | Val::Chain(s) => Some(s),
+            Val::Lines(s, _) | Val::Chain(s) => Some(s),
             _ => None,
         }
     }

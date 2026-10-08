@@ -56,9 +56,10 @@ args=(
 )
 # phitex's own switches (PARTEX_PERSIST_CHECK, PHITEX_SSA_WORKERS, ...) pass
 # through.
-while IFS='=' read -r name value; do
-  [[ ($name == PARTEX_* || $name == PHITEX_*) && $name != PARTEX_SANDBOX ]] && args+=(--setenv "$name" "$value")
-done < <(env)
+# (by name: a value may hold newlines, `PARTEX_SSA_REBUILD`'s commands)
+for name in $(compgen -e); do
+  [[ ($name == PARTEX_* || $name == PHITEX_*) && $name != PARTEX_SANDBOX ]] && args+=(--setenv "$name" "${!name}")
+done
 # One compiler cache for every worktree: sccache's server starts inside each
 # sandbox (it runs rustc, so it stays in it), over one cache directory, with
 # the worktree's own root stripped from paths so that the same crate hits

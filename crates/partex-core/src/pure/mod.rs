@@ -15,8 +15,9 @@ mod version;
 mod lang;
 mod state;
 
-pub use lang::{DOC, Doc, Engine, OUTPUT, Op, Stats, TexLang, Val, install, uninstall};
+pub use lang::{Engine, OUTPUT, Op, Stats, TexLang, Val, install, uninstall};
 pub use state::PState;
 pub use tracker::PureTracker;
 mod driver;
-pub use driver::Build;
+pub use driver::{Build, Refresh};
+mod files;

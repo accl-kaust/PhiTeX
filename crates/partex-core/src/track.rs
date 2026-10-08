@@ -435,7 +435,11 @@ pub trait Tracker {
     fn pure_global(&self, _p: i32) {}
     /// (With [`Tracker::PURE`].) The file level reading the file named
     /// `name` ends, `lines` of its lines read (§362, `end_file_reading`).
-    fn pure_file_end(&self, _name: &[u8], _lines: u32) {}
+    fn pure_file_end(&self, _level: usize, _name: &[u8], _lines: u32) {}
+    /// (With [`Tracker::PURE`].) File `name` was looked up to be read
+    /// (by `lines`: `\\input`, `\\openin`; or whole): the name the host
+    /// found it by and its contents, if found.
+    fn pure_load(&self, _name: &[u8], _found: Option<(&[u8], &alloc::sync::Arc<[u8]>)>, _lines: bool) {}
     /// (With [`Tracker::PURE`].) Main control begins a command (§1030),
     /// inside the output routine if `output`.
     fn pure_begin(&self, _output: bool) {}

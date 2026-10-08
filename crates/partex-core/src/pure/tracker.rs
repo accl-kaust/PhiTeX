@@ -81,7 +81,18 @@ pub struct PureTracker {
     /// Families seen that this layer does not version (for the report).
     pub(crate) other: RefCell<Vec<Fam>>,
     /// The file levels that ended: each file's name and lines read.
-    pub(crate) file_ends: RefCell<Vec<(Vec<u8>, u32)>>,
+    pub(crate) file_ends: RefCell<Vec<(usize, Vec<u8>, u32)>>,
+    /// The files looked up to be read (`Tracker::pure_load`).
+    pub(crate) loads: RefCell<Vec<Load>>,
+}
+
+/// A file looked up: the name asked for, the name found and the
+/// contents, and whether it is read by lines.
+#[derive(Clone, Debug)]
+pub(crate) struct Load {
+    pub(crate) name: Vec<u8>,
+    pub(crate) found: Option<(alloc::sync::Arc<[u8]>, alloc::sync::Arc<[u8]>)>,
+    pub(crate) lines: bool,
 }
 
 impl PureTracker {
@@ -169,8 +180,15 @@ impl Tracker for PureTracker {
     fn pure_global(&self, p: i32) {
         self.global.set(Some(p));
     }
-    fn pure_file_end(&self, name: &[u8], lines: u32) {
-        self.file_ends.borrow_mut().push((name.to_vec(), lines));
+    fn pure_file_end(&self, level: usize, name: &[u8], lines: u32) {
+        self.file_ends.borrow_mut().push((level, name.to_vec(), lines));
+    }
+    fn pure_load(&self, name: &[u8], found: Option<(&[u8], &alloc::sync::Arc<[u8]>)>, lines: bool) {
+        self.loads.borrow_mut().push(Load {
+            name: name.to_vec(),
+            found: found.map(|(n, c)| (alloc::sync::Arc::from(n), c.clone())),
+            lines,
+        });
     }
 }
 
