@@ -23,6 +23,11 @@ const usesMinted = (t: string) => /\\(usepackage|RequirePackage)\s*(\[[^\]]*\])?
 import { boxes, from, glyphs, lineAt, nearest, wordBytes, type Glyph } from "./sync.ts";
 import { diagnose, type Diagnostic, type TexError } from "./diagnostics.ts";
 import { DELIVERED, isPackageFile, referenced, noPackages, type PackageSource, type PackageState } from "./packages.ts";
+import { asDiagnostic, type Problem } from "./problems.ts";
+import type { Entry } from "./outline.ts";
+
+/** The events Options.remote's host tells (WatchEvent), routed to onWatch. */
+const WATCH = new Set(["page", "progress", "diagnostics", "settled", "superseded", "sync"]);
 
 /** An editor. Edits are sequential (each against the text just before it), in UTF-16. */
 export interface EditorHost {
@@ -112,7 +117,21 @@ export type StreamEvent =
   | { event: "progress"; phase: string; pass?: number; pages: number; ms?: number }
   | { event: "done"; ok: boolean; json?: any; error?: string };
 
-export type CoreEvent = StreamEvent | { event: "fetching"; pack: string; name: string; failed?: boolean } | { event: "preparing"; on: boolean } | { event: "settled" } | { event: "switched" } | { event: "release"; release?: { release: string; min_extension?: string; notice?: string | null } };
+/**
+ * `phitex watch`'s events, the host building from disk (Options.remote,
+ * crates/partex-cli/src/view.rs): a page shipped while the build runs, how
+ * far it is, its problems, the build in (or a pass of it, settling), a
+ * newer save superseding it, and a forward search's place.
+ */
+export type WatchEvent =
+  | { event: "page"; k: number; hash: string; pages?: number }
+  | { event: "progress"; pass?: number; pages?: number; phase?: string; ms?: number }
+  | { event: "diagnostics"; items: Problem[] }
+  | { event: "settled"; settling?: boolean; pass?: number }
+  | { event: "superseded" }
+  | { event: "sync"; file: string; lo: number; hi: number; at: number };
+
+export type CoreEvent = StreamEvent | WatchEvent | { event: "fetching"; pack: string; name: string; failed?: boolean } | { event: "preparing"; on: boolean } | { event: "settled" } | { event: "switched" } | { event: "release"; release?: { release: string; min_extension?: string; notice?: string | null } };
 
 export interface CoreTransport {
   request(req: CoreReq): Promise<CoreRes>;
@@ -154,6 +173,8 @@ export interface PreviewSink {
    * (a plain rebuild); then "ready", once.
    */
   warmup?(w: { state: "preparing" | "ready"; since?: number; slow?: boolean }): void;
+  /** The document's outline (its PDF's bookmarks), after each build: Options.remote's, the `outline` op's. */
+  outline?(items: Entry[]): void;
   /** A streamed open: the pages shipped so far (null: it ended). */
   streaming?(s: { pages: number; phase: string } | null): void;
   /** A repaint is on screen, `ms` after the keystroke that made it. */
@@ -192,6 +213,12 @@ export interface Options {
    * not at all; absent, such a project isn't built.
    */
   shims?: (main: string | undefined) => Promise<Record<string, string> | null>;
+  /**
+   * The host builds from disk (`phitex watch`): no project sent, no edits;
+   * the pages, problems and outline as its events tell; a double-click's
+   * source opened by it (`source`, bytes of the file as it is on disk).
+   */
+  remote?: { source(file: string, start: number, end: number): void };
   /** Schedules a flush (default: the next task). */
   schedule?: (f: () => void) => void;
   now?: () => number;
@@ -307,6 +334,7 @@ export class PreviewSession {
     // held is gone, "no such handle". Reopened here, a few times at most,
     // since a panic a build always hits would loop)
     core.onEvent?.((e) => {
+      if (this.o.remote && "event" in e && WATCH.has(e.event)) return this.onWatch(e as WatchEvent);
       if (e.event === "preparing") return this.sink.preparing?.(e.on);
       // (references settled after one-trip keystrokes: the pages that changed drawn again)
       // (the two-worker start: the SSA worker took over; its glyphs' sources are its own)
@@ -321,7 +349,7 @@ export class PreviewSession {
         return;
       }
       if (e.event === "fetching") this.onFetching(e);
-      if (e.event === "page" || e.event === "progress" || e.event === "done") this.onStream(e);
+      if (e.event === "page" || e.event === "progress" || e.event === "done") this.onStream(e as StreamEvent);
     });
     this.core = {
       request: async (r) => {
@@ -419,6 +447,10 @@ export class PreviewSession {
   }
 
   async start(): Promise<void> {
+    if (this.o.remote) {
+      this.opened = true;
+      return this.watchJoined();
+    }
     const files = await this.host.loadProject();
     // (a file the editor already announced keeps the editor's text)
     for (const [f, t] of Object.entries(files)) if (!(f in this.files)) this.files[f] = t;
@@ -592,6 +624,7 @@ export class PreviewSession {
   private pending?: number;
 
   private status(pending?: number, undefinedNames?: string[]): void {
+    if (this.o.remote) return this.sink.status({ pages: this.pages, main: this.main, file: null, diagnostics: this.watchDiags });
     this.pending = pending;
     // (the source scan is O(project): at most once a second)
     if (undefinedNames) this.undefinedNames = undefinedNames;
@@ -776,6 +809,7 @@ export class PreviewSession {
   /** Everything again, for a view that just joined (a detached PDF tab). */
   async resync(): Promise<void> {
     if (!this.opened) return;
+    if (this.o.remote) return this.watchJoined();
     this.sink.mains?.(Object.keys(this.files).filter((f) => f.endsWith(".tex")), this.main);
     this.status(this.pending);
     await (this.sink.layout ? this.layout() : this.showPage());
@@ -872,6 +906,8 @@ export class PreviewSession {
     // (the job's names: "main" for main.tex, "ch/intro.tex", "article.cls")
     const path = (n: string) => {
       n = n.replace(/^\.\//, "");
+      // (the host's names, as they are on its disk)
+      if (this.o.remote) return n;
       return n in this.files ? n : n + ".tex" in this.files ? n + ".tex" : null;
     };
     const gs = glyphs(r.json, path);
@@ -887,6 +923,7 @@ export class PreviewSession {
     const g = nearest(this.cached(k) ?? (await this.glyphsOf(k)), x, y);
     this.tr("sync→source", { k, x, y, g });
     if (!g?.file) return;
+    if (this.o.remote) return this.o.remote.source(g.file, g.start, g.end);
     const t = this.files[g.file];
     this.sink.goto?.(g.file, charOffset(t, g.start), charOffset(t, g.end));
   }
@@ -933,6 +970,7 @@ export class PreviewSession {
     if (!best) return;
     const [file, { lo, hi }] = best;
     const t = this.files[file];
+    if (t === undefined) return;
     this.sink.goto?.(file, charOffset(t, lo), charOffset(t, hi), false);
   }
 
@@ -1102,6 +1140,78 @@ export class PreviewSession {
    * The pending/undefined scan flattens the whole program (3 ms at 180 KB,
    * ten times an edit): once the edits have settled, at most every 300 ms.
    */
+  /** `phitex watch`'s last build's problems (Options.remote), as diagnostics. */
+  private watchDiags: Diagnostic[] = [];
+  /** A build of the watch's under way (its progress told, not yet settled). */
+  private watchBuilding = false;
+
+  private watchBusy(on: boolean): void {
+    if (on === this.watchBuilding) return;
+    this.watchBuilding = on;
+    this.sink.busy?.(on);
+    if (!on) this.sink.streaming?.(null);
+  }
+
+  /** The watch joined (or joined again): its pages, outline and last problems. */
+  private async watchJoined(): Promise<void> {
+    await this.layout();
+    void this.watchOutline();
+    const r = await this.core.request({ op: "diagnostics" } as never);
+    if (r.ok) this.onWatch({ event: "diagnostics", items: (r.json?.items ?? []) as Problem[] });
+  }
+
+  private async watchOutline(): Promise<void> {
+    if (!this.sink.outline) return;
+    const r = await this.core.request({ op: "outline" } as never);
+    if (r.ok) this.sink.outline((r.json?.items ?? []) as Entry[]);
+  }
+
+  private onWatch(e: WatchEvent): void {
+    switch (e.event) {
+      case "page": {
+        // (a page shipped while the build runs: shown before the build is in,
+        // the PDF's page replacing it when it settles)
+        this.watchBusy(true);
+        const hs = [...this.hashes];
+        while (hs.length < Math.max(e.k + 1, e.pages ?? 0)) hs.push("");
+        hs[e.k] = e.hash;
+        this.hashes = hs;
+        this.setPages(hs.length);
+        this.sink.layout?.(hs);
+        return;
+      }
+      case "progress":
+        this.watchBusy(true);
+        this.sink.streaming?.({ pages: e.pages ?? 0, phase: e.phase ?? "typesetting" });
+        return;
+      case "superseded":
+        this.watchBusy(true);
+        return;
+      case "diagnostics":
+        this.watchDiags = e.items.map(asDiagnostic);
+        this.status();
+        return;
+      case "settled":
+        // (a pass shown while the job's own files settle: still building)
+        if (!e.settling) this.watchBusy(false);
+        this.chain = this.chain.then(() => this.layout()).then(() => this.watchOutline());
+        return;
+      case "sync":
+        void this.syncTo(e.file, e.lo, e.hi, e.at);
+        return;
+    }
+  }
+
+  /** Forward search: bytes [lo, hi) of `file` (a line), the glyphs from it nearest `at`'s highlighted, the page in view tried first. */
+  private async syncTo(file: string, lo: number, hi: number, at: number): Promise<void> {
+    const n = this.hashes.length;
+    for (const k of [this.page, ...Array.from({ length: n }, (_, i) => i).filter((i) => i !== this.page)]) {
+      const all = this.cached(k) ?? (await this.glyphsOf(k));
+      const hit = lineAt(from(all, file, lo, hi), at);
+      if (hit.length) return this.sink.mark?.(k, boxes(hit, all), true);
+    }
+  }
+
   private statusSoon(): void {
     if (this.statusTimer) return;
     this.statusTimer = setTimeout(async () => {
