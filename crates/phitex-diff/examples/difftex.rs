@@ -1,9 +1,11 @@
 //! Dev tool: diff two project folders, print the marked-up `.tex` (and,
 //! with `--changes`, the change list on stderr).
 //!
-//!     scripts/sandbox cargo run -q -p phitex-diff --example difftex -- OLD NEW [MAIN] [--cfont] [--color] [--changes]
+//!     scripts/sandbox cargo run -q -p phitex-diff --example difftex -- OLD NEW [MAIN] [--type=T] [--subtype=S] [--add-color=C] [--del-color=C] [--driver=D] [--changes]
+//!
+//! (`--cfont` and `--color` are `--type=CFONT` and `--subtype=COLOR`.)
 
-use phitex_diff::{Dir, Markup, Options, Subtype, diff};
+use phitex_diff::{Color, Dir, Driver, Markup, Options, Subtype, diff};
 use std::path::PathBuf;
 
 fn main() {
@@ -11,9 +13,32 @@ fn main() {
     let mut opts = Options::default();
     let mut changes = false;
     for a in std::env::args().skip(1) {
-        match a.as_str() {
+        let bad = |what: &str| -> ! {
+            eprintln!("difftex: {what}");
+            std::process::exit(2)
+        };
+        let (flag, value) = a.split_once('=').unwrap_or((a.as_str(), ""));
+        match flag {
             "--cfont" => opts.markup = Markup::Cfont,
             "--color" => opts.subtype = Subtype::Color,
+            "--type" => {
+                opts.markup =
+                    Markup::parse(value).unwrap_or_else(|| bad(&format!("no type {value}")));
+            }
+            "--subtype" => {
+                opts.subtype =
+                    Subtype::parse(value).unwrap_or_else(|| bad(&format!("no subtype {value}")));
+            }
+            "--add-color" => opts.add_color = Some(Color::parse(value).unwrap_or_else(|e| bad(&e))),
+            "--del-color" => opts.del_color = Some(Color::parse(value).unwrap_or_else(|e| bad(&e))),
+            "--driver" => {
+                opts.driver = match value {
+                    "pdftex" => Driver::Pdftex,
+                    "xetex" => Driver::Xetex,
+                    "dvips" => Driver::Dvips,
+                    _ => bad(&format!("no driver {value}")),
+                };
+            }
             "--changes" => changes = true,
             _ => pos.push(a),
         }

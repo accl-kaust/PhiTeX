@@ -3709,9 +3709,38 @@ release build (48 to 135 units; 664 s before, 673 s after, fresh target
 directory, no sccache, this loaded machine: within noise, gix building
 beside the long `partex-core` and LTO chain).
 
-*Phase 2* (not built): the watch and the extension keep a `Baseline` (the
-old version flattened and read) and diff each build's new text against
-it; `Tree::edit`'s splice says which paragraphs to read again.
+*Markup options* (2026-10-09). `Options` has latexdiff's `--type`
+(`Markup`: UNDERLINE, CTRADITIONAL, TRADITIONAL, CFONT, FONTSTRIKE,
+CCHANGEBAR, CFONTCHBAR, CULINECHBAR, CHANGEBAR, INVISIBLE, BOLD) and
+`--subtype` (`Subtype`: SAFE, COLOR, MARGIN, LABEL, ZLABEL,
+ONLYCHANGEDPAGE; DVIPSCOL, dvips only, is not there), their definitions
+copied from latexdiff.pl (checked against it); changebar's `--driver`
+(`Driver`); and colors for added and deleted text (`Color`: an xcolor name
+or expression, or `#RRGGBB`, nothing else), which load xcolor where
+latexdiff loads color and make the type's and subtype's blue and red
+`DIFaddcolor` and `DIFdelcolor` (no colors: latexdiff's preamble as it
+is). In a float, TRADITIONAL's deleted text is shown small, not in a
+footnote. `tests/styles.sh` compiles every type, subtype and some colors
+on five corpus pairs with stock pdflatex: 95 of 100 compile. The five:
+LABEL and ONLYCHANGEDPAGE before a booktabs rule (`\DIFaddendFL` is a
+`\label` there, before `\bottomrule`: latexdiff's own failure), and
+(C)TRADITIONAL's footnote in deleted display math.
+
+*Phase 2: the live diff* (`live.rs`, 2026-10-09). `Live` keeps a
+`Baseline` and the last new version, and diffs each new flattened version
+again only where it changed: the edit (where the text differs from the
+last) applied to the new body's CST, the paragraphs its splice changed
+read into tokens again with those read together (a *unit*, which no token
+crosses; an opener with no closer reads on to one that appears), the
+alignment kept as segments (matched chunks, or runs with their markup and
+changes) and aligned again only around the edit, between the matched
+chunks beside it. An edit outside the body, or one that can move where it
+ends, is diffed whole. A one-word edit in a 200-paragraph document reads
+one paragraph and diffs one chunk (`Stats`, asserted); 2880 random edits
+of the corpus give the whole diff's text and changes each time. `places`
+puts each change at its markup's first glyph (glyph origins or SyncTeX),
+`changes_json` is the list the watch and the extension send. Not built
+yet: the watch's second job and keys, the viewer's Diff panel.
 
 ---
 
