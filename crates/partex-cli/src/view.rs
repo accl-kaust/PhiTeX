@@ -1083,13 +1083,20 @@ fn live_page(s: &Shared, forms: &HashMap<i32, ShippedStream>, k: usize, page: Sh
     // (the forms it draws, theirs too, as they are now)
     let mut mine = HashMap::new();
     let mut todo: Vec<i32> = page.forms().collect();
+    // (drawn from its streams alone as the PDF draws it: then its hash is
+    // the PDF's page's, `Shipments::page_pdf`)
+    let mut whole = page.whole();
     while let Some(n) = todo.pop() {
         if mine.contains_key(&n) {
             continue;
         }
-        if let Some(f) = forms.get(&n) {
-            todo.extend(f.forms());
-            mine.insert(n, f.clone());
+        match forms.get(&n) {
+            Some(f) => {
+                whole &= f.whole();
+                todo.extend(f.forms());
+                mine.insert(n, f.clone());
+            }
+            None => whole = false,
         }
     }
     let bytes = partex_core::pagepdf::page_pdf(&page, &|n| mine.get(&n).cloned(), &mut |_, _| None);
@@ -1100,9 +1107,15 @@ fn live_page(s: &Shared, forms: &HashMap<i32, ShippedStream>, k: usize, page: Sh
     let mut p = lock(&s.pages);
     let before = p.shown(k);
     let live = (p.hashes.get(k) != Some(&h)).then(|| Live {
-        // (never a built page's hash: the PDF's page replaces it)
+        // (a whole page's hash is the one the PDF's page will have, so it
+        // is not drawn again when the build is in; any other's is never a
+        // built page's: the PDF's page replaces it)
         #[allow(clippy::cast_possible_truncation, reason = "a hash's low half")]
-        hash: partex_core::persist_hash(&(h, "shipped")) as u64,
+        hash: if whole {
+            h
+        } else {
+            partex_core::persist_hash(&(h, "shipped")) as u64
+        },
         page,
         forms: Arc::new(mine),
     });

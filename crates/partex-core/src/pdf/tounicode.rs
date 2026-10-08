@@ -275,6 +275,19 @@ fn cmap(
     o
 }
 
+/// The `CMap` stream's text `write_tounicode` writes for a font's glyph
+/// `names` (TFM `tfm`, encoding file `enc` or the program's own), from
+/// `tree`, without its warnings (a page's own PDF's, `pagepdf.rs`).
+pub(crate) fn cmap_for(
+    names: &[Vec<u8>],
+    tfm: &[u8],
+    enc: Option<&[u8]>,
+    tree: &crate::pdfconv::ToUnicodeTable,
+) -> Vec<u8> {
+    let (name, _) = cmap_name(tfm, enc);
+    cmap(names, tfm, &name, tree)
+}
+
 impl<H: Host, T: Tracker> Tex<H, T> {
     /// `write_tounicode`: the `CMap` object, or 0 (with `\pdfgentounicode`
     /// then off) if no `\pdfglyphtounicode` was given.
