@@ -37,6 +37,15 @@
 //!   the line's bytes, and the page highlights the glyphs that came from
 //!   them. The address is kept in a file per directory, for `phitex sync`
 //!   ([`address_file`]).
+//! - **Diff.** The watch's diff against a past version (DESIGN 4.10) is
+//!   driven as the Overleaf panel's compare is (`DiffRunner`): the ops
+//!   `diff_start`, `diff_show`, `diff_goto`, `diff_step`, `diff_download`,
+//!   `diff_restyle`, `diff_stop` are handed to the watch ([`Ask`]); `diff`
+//!   answers its state (the baseline, the changes with their places, the
+//!   look), pushed as `{"event":"diff","diff":…}` when it changes, and
+//!   `diff_log` the repository's commits for a picker
+//!   (`viewer/src/commits.ts`). A change gone to is shown by a `sync`
+//!   event with its `page` and `y`.
 //! - **Page.** `viewer/index.html` and `viewer/viewer.js`, the bundle of
 //!   the extension's viewer (`viewer.ts`, `page2.ts`) and the CLI's host
 //!   (`viewer/cli.ts`), made by `scripts/viewer-bundle.sh`.
@@ -494,17 +503,44 @@ struct Shared {
     wake: Mutex<Option<Box<dyn Fn() + Send>>>,
 }
 
-/// What a browser asks the watch for (its diff panel).
+/// What a browser asks the watch for: its diff, as the Overleaf panel's
+/// compare drives one (`DiffRunner`: start, show, goto, download,
+/// restyle, stop).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Ask {
+    /// Diff `to` (none: the working tree) against `from`, and show it.
+    Start { from: String, to: Option<String> },
     /// The diff shown (`true`) or the document.
     Show(bool),
+    /// Change `k` (from 1).
+    Goto(usize),
     /// The next change (`true`) or the previous one.
     Step(bool),
-    /// Diff against this revision.
-    Baseline(String),
-    /// The diff written beside the outputs.
-    Write,
+    /// The diff's PDF or marked-up text (none: both) written beside the
+    /// outputs.
+    Download(Option<Download>),
+    /// How changes look.
+    Restyle(Look),
+    /// The diff dropped, the document shown.
+    Stop,
+}
+
+/// What of the diff is written out.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Download {
+    Pdf,
+    Tex,
+}
+
+/// How changes look, as asked (the panel's `DiffLook`): latexdiff's markup
+/// type and subtype by name (any case), the colors of added and deleted
+/// text (empty: latexdiff's).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Look {
+    pub markup: Option<String>,
+    pub subtype: Option<String>,
+    pub add: Option<String>,
+    pub del: Option<String>,
 }
 
 /// The live viewer of a watch.
@@ -1343,17 +1379,40 @@ fn answer(s: &Shared, req: &Value) -> String {
                 }
             }
         }
-        "diff_show" | "diff_step" | "diff_base" | "diff_write" => {
-            let flag = |k: &str| req.get(k).and_then(Value::bool).unwrap_or(true);
+        // (what the panel asks of the diff: `diff_start {rev, to?}`,
+        // `diff_show {which: "diff"|"current"}`, `diff_goto {k}` (from 1),
+        // `diff_step {forward}`, `diff_download {what?: "pdf"|"tex"}`
+        // (written beside the outputs), `diff_restyle {markup, subtype,
+        // add_color, del_color}`, `diff_stop`; `diff` answers the look)
+        "diff_start" | "diff_show" | "diff_goto" | "diff_step" | "diff_download"
+        | "diff_restyle" | "diff_stop" => {
+            let text = |k: &str| req.get(k).and_then(Value::str).map(str::to_owned);
+            let rev = |k: &str| text(k).filter(|r| !r.is_empty() && !r.starts_with('-'));
             let ask = match op {
-                "diff_show" => Some(Ask::Show(flag("on"))),
-                "diff_step" => Some(Ask::Step(flag("forward"))),
-                "diff_write" => Some(Ask::Write),
-                _ => req
-                    .get("rev")
-                    .and_then(Value::str)
-                    .filter(|r| !r.is_empty() && !r.starts_with('-'))
-                    .map(|r| Ask::Baseline(r.to_owned())),
+                "diff_start" => rev("rev").map(|from| Ask::Start {
+                    from,
+                    to: rev("to"),
+                }),
+                "diff_show" => Some(Ask::Show(text("which").map_or_else(
+                    || req.get("on").and_then(Value::bool).unwrap_or(true),
+                    |w| w == "diff",
+                ))),
+                "diff_goto" => req.get("k").and_then(Value::index).map(Ask::Goto),
+                "diff_step" => Some(Ask::Step(
+                    req.get("forward").and_then(Value::bool).unwrap_or(true),
+                )),
+                "diff_download" => Some(Ask::Download(match text("what").as_deref() {
+                    Some("pdf") => Some(Download::Pdf),
+                    Some("tex") => Some(Download::Tex),
+                    _ => None,
+                })),
+                "diff_restyle" => Some(Ask::Restyle(Look {
+                    markup: text("markup"),
+                    subtype: text("subtype"),
+                    add: text("add_color"),
+                    del: text("del_color"),
+                })),
+                _ => Some(Ask::Stop),
             };
             match ask {
                 Some(a) => {
@@ -1363,7 +1422,7 @@ fn answer(s: &Shared, req: &Value) -> String {
                     }
                     out.push_str("true,\"json\":{}}");
                 }
-                None => out.push_str("false,\"error\":\"no revision\"}"),
+                None => out.push_str("false,\"error\":\"no revision or change given\"}"),
             }
         }
         "set_file" | "trace" | "check" => out.push_str("true,\"json\":{\"ok\":true,\"ms\":0}}"),

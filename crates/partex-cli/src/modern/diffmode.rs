@@ -28,6 +28,7 @@ use phitex_diff::{Baseline, ChangeKind, Dir, Flat, Live, Place};
 use super::{BUSY, Input, Target, Viewer, main_output};
 use crate::machinehost::{Outcome, Watch};
 use crate::render::{End, Rebuild, Renderer};
+use crate::view::Ask;
 
 /// Where the diff job's files go, in the project's directory.
 pub(super) const DIR: &str = ".phitex-diff";
@@ -43,6 +44,9 @@ struct Base {
     /// (a1b2c3d)`).
     rev: String,
     label: String,
+    /// The version diffed, if not the working tree (a commit): read
+    /// once.
+    to: Option<(String, phitex_git::Snapshot)>,
     live: Live,
     /// The working tree's files the last diff read, with their
     /// modification times then (empty: not diffed yet).
@@ -144,28 +148,31 @@ impl Diff {
 
     /// Diff against `rev` from now on.
     fn set_baseline(&mut self, rev: &str) -> Result<(), String> {
+        self.set_range(rev, None)
+    }
+
+    /// Diff `to` (none: the working tree) against `rev` from now on.
+    fn set_range(&mut self, rev: &str, to: Option<&str>) -> Result<(), String> {
         let repo = self
             .repo
             .as_ref()
             .ok_or("not in a git repository: there is no past version to diff against")?;
         let snap = repo.snapshot(rev).map_err(|e| e.to_string())?;
+        let to = match to {
+            Some(t) => Some((t.to_owned(), repo.snapshot(t).map_err(|e| e.to_string())?)),
+            None => None,
+        };
         // (a main file the old version has not: everything added)
         let base = Baseline::new(&snap, &self.main, &self.opts)
             .unwrap_or_else(|_| Baseline::from_flat(Flat::default(), &self.opts));
-        let label = match snap.commit() {
-            Some(id) => {
-                let short = id.to_hex_with_len(7).to_string();
-                if short.starts_with(rev) || rev.starts_with(&short) {
-                    short
-                } else {
-                    format!("{rev} ({short})")
-                }
-            }
-            None => "the index".into(),
-        };
+        let mut label = name(rev, &snap);
+        if let Some((t, s)) = &to {
+            label = format!("{label}..{}", name(t, s));
+        }
         self.base = Some(Base {
             rev: rev.to_owned(),
             label,
+            to,
             live: Live::new(base),
             stamps: Vec::new(),
         });
@@ -200,6 +207,15 @@ impl Diff {
         if !base.stamps.is_empty() && base.stamps.iter().all(|(p, t)| stamp(p) == *t) {
             return false;
         }
+        if let Some((_, snap)) = &base.to {
+            // (a commit's: diffed once, its job's files all that changes)
+            if !base.live.out().tex.is_empty() {
+                return false;
+            }
+            let flat = phitex_diff::flatten(snap, &self.main).unwrap_or_default();
+            let out = base.live.update(&flat);
+            return write_if_new(&tex, &out.tex, ren);
+        }
         let flat = match phitex_diff::flatten(&Dir(PathBuf::from(".")), &self.main) {
             Ok(f) => f,
             Err(e) => {
@@ -213,15 +229,30 @@ impl Diff {
             .map(|f| (PathBuf::from(f), stamp(Path::new(f))))
             .collect();
         let out = base.live.update(&flat);
-        if std::fs::read(&tex).is_ok_and(|t| t == out.tex.as_bytes()) {
-            return false;
+        write_if_new(&tex, &out.tex, ren)
+    }
+
+    /// How changes look from now on (the baseline read again with it).
+    fn set_look(&mut self, look: &crate::view::Look) -> Result<(), String> {
+        let color = |c: &Option<String>| match c.as_deref().map(str::trim) {
+            None | Some("") => Ok(None),
+            Some(c) => phitex_diff::Color::parse(c).map(Some),
+        };
+        let mut opts = self.opts.clone();
+        if let Some(m) = &look.markup {
+            opts.markup = phitex_diff::Markup::parse(m).ok_or(format!("no markup type {m}"))?;
         }
-        let _ = std::fs::create_dir_all(DIR);
-        if let Err(e) = std::fs::write(&tex, &out.tex) {
-            ren.warn("Diff", &format!("can't write {tex}: {e}"));
-            return false;
+        if let Some(t) = &look.subtype {
+            opts.subtype = phitex_diff::Subtype::parse(t).ok_or(format!("no subtype {t}"))?;
         }
-        true
+        opts.add_color = color(&look.add)?;
+        opts.del_color = color(&look.del)?;
+        self.opts = opts;
+        if let Some(b) = &self.base {
+            let (rev, to) = (b.rev.clone(), b.to.as_ref().map(|t| t.0.clone()));
+            self.set_range(&rev, to.as_deref())?;
+        }
+        Ok(())
     }
 
     /// Whether the diff is out of date: a file it read changed, or one
@@ -458,6 +489,12 @@ impl Diff {
 
     /// Go to the next change (`forward`) or the previous one.
     fn step(&mut self, forward: bool, ren: &Renderer, viewer: &Viewer) {
+        self.go(Err(forward), ren, viewer);
+    }
+
+    /// Go to change `to` (`Ok`: its index; `Err`: the next one, or the
+    /// previous one).
+    fn go(&mut self, to: Result<usize, bool>, ren: &Renderer, viewer: &Viewer) {
         if !self.shown || self.out.is_none() {
             ren.event("no diff shown (d shows it)");
             return;
@@ -469,11 +506,12 @@ impl Diff {
             ren.event(&format!("no changes against {}", base.label));
             return;
         }
-        let k = match (self.cursor, forward) {
-            (None, true) => 0,
-            (None, false) => n - 1,
-            (Some(k), true) => (k + 1) % n,
-            (Some(k), false) => (k + n - 1) % n,
+        let k = match (self.cursor, to) {
+            (_, Ok(k)) => k.min(n - 1),
+            (None, Err(true)) => 0,
+            (None, Err(false)) => n - 1,
+            (Some(k), Err(true)) => (k + 1) % n,
+            (Some(k), Err(false)) => (k + n - 1) % n,
         };
         self.cursor = Some(k);
         let c = &changes[k];
@@ -525,6 +563,19 @@ impl Diff {
     /// `D`: the diff written beside the outputs, `<job>-diff.tex` and its
     /// PDF (built first if it is out of date).
     fn write_out(&mut self, target: &Target, ren: &Renderer, viewer: &Viewer) {
+        self.download(None, target, ren, viewer);
+    }
+
+    /// The diff's PDF or marked-up text (none: both) written beside the
+    /// outputs.
+    fn download(
+        &mut self,
+        what: Option<crate::view::Download>,
+        target: &Target,
+        ren: &Renderer,
+        viewer: &Viewer,
+    ) {
+        use crate::view::Download;
         if !self.ensure_baseline(ren) {
             return;
         }
@@ -533,11 +584,15 @@ impl Diff {
         let mut wrote = Vec::new();
         let tex = self.tex();
         let to = target.output(&format!("{}.tex", self.job));
-        match std::fs::copy(&tex, &to) {
-            Ok(_) => wrote.push(to.display().to_string()),
-            Err(e) => ren.warn("Diff", &format!("can't write {}: {e}", to.display())),
+        if what != Some(Download::Pdf) {
+            match std::fs::copy(&tex, &to) {
+                Ok(_) => wrote.push(to.display().to_string()),
+                Err(e) => ren.warn("Diff", &format!("can't write {}: {e}", to.display())),
+            }
         }
-        if let Some(pdf) = main_output(&out.outputs) {
+        if what != Some(Download::Tex)
+            && let Some(pdf) = main_output(&out.outputs)
+        {
             let name = Path::new(&pdf)
                 .file_name()
                 .map(PathBuf::from)
@@ -659,7 +714,21 @@ impl Diff {
         viewer: &Viewer,
         main: (&Outcome, Instant),
     ) {
-        match self.set_baseline(rev) {
+        self.choose_range(rev, None, target, ren, viewer, main);
+    }
+
+    /// Diff `to` (none: the working tree) against `rev` from now on, and
+    /// show the diff.
+    fn choose_range(
+        &mut self,
+        rev: &str,
+        to: Option<&str>,
+        target: &Target,
+        ren: &Renderer,
+        viewer: &Viewer,
+        main: (&Outcome, Instant),
+    ) {
+        match self.set_range(rev, to) {
             Ok(()) => {
                 let label = self.base.as_ref().map_or("", |b| &b.label);
                 ren.event(&format!("diffing against {label}"));
@@ -709,11 +778,41 @@ impl Diff {
         let Some(v) = &viewer.live else { return };
         for ask in v.take_asks() {
             match ask {
-                crate::view::Ask::Show(on) => self.show(on, target, ren, viewer, main),
-                crate::view::Ask::Step(forward) => self.step(forward, ren, viewer),
-                crate::view::Ask::Baseline(rev) => self.choose(&rev, target, ren, viewer, main),
-                crate::view::Ask::Write => self.write_out(target, ren, viewer),
+                Ask::Start { from, to } => {
+                    self.choose_range(&from, to.as_deref(), target, ren, viewer, main);
+                }
+                Ask::Show(on) => self.show(on, target, ren, viewer, main),
+                Ask::Goto(k) => self.go(Ok(k.saturating_sub(1)), ren, viewer),
+                Ask::Step(forward) => self.step(forward, ren, viewer),
+                Ask::Download(what) => self.download(what, target, ren, viewer),
+                Ask::Restyle(look) => match self.set_look(&look) {
+                    Ok(()) if self.shown => self.show(true, target, ren, viewer, main),
+                    Ok(()) => v.set_diff(&self.state_json()),
+                    Err(e) => ren.warn("Diff", &e),
+                },
+                Ask::Stop => self.stop(target, ren, viewer, main),
             }
+        }
+    }
+
+    /// The diff dropped (its job too): the document shown.
+    fn stop(
+        &mut self,
+        target: &Target,
+        ren: &Renderer,
+        viewer: &Viewer,
+        main: (&Outcome, Instant),
+    ) {
+        if self.shown {
+            self.show(false, target, ren, viewer, main);
+        }
+        self.base = None;
+        self.watch = None;
+        self.out = None;
+        self.places.clear();
+        self.cursor = None;
+        if let Some(v) = &viewer.live {
+            v.set_diff(&self.state_json());
         }
     }
 
@@ -732,14 +831,81 @@ impl Diff {
                 &self.places,
             ));
         }
+        if let Some((t, _)) = self.base.as_ref().and_then(|b| b.to.as_ref()) {
+            s.push_str(",\"to\":");
+            json_str(&mut s, t);
+        }
         if let Some(k) = self.cursor {
             let _ = write!(s, ",\"at\":{k}");
         }
+        let o = &self.opts;
+        let _ = write!(
+            s,
+            ",\"look\":{{\"markup\":\"{}\",\"subtype\":\"{}\"",
+            o.markup.name().to_ascii_lowercase(),
+            o.subtype.name().to_ascii_lowercase()
+        );
+        for (k, c) in [("add_color", &o.add_color), ("del_color", &o.del_color)] {
+            if let Some(c) = c {
+                let _ = write!(s, ",\"{k}\":");
+                json_str(&mut s, c.as_str());
+            }
+        }
+        let names = |v: &mut String, ns: Vec<&str>| {
+            v.push('[');
+            v.push_str(
+                &ns.iter()
+                    .map(|n| format!("\"{}\"", n.to_ascii_lowercase()))
+                    .collect::<Vec<_>>()
+                    .join(","),
+            );
+            v.push(']');
+        };
+        s.push_str("},\"markups\":");
+        names(
+            &mut s,
+            phitex_diff::Markup::ALL.iter().map(|m| m.name()).collect(),
+        );
+        s.push_str(",\"subtypes\":");
+        names(
+            &mut s,
+            phitex_diff::Subtype::ALL.iter().map(|m| m.name()).collect(),
+        );
         s.push_str(",\"file\":");
         json_str(&mut s, &self.tex());
         s.push('}');
         s
     }
+}
+
+/// How a revision and its snapshot are named: its short hash, after the
+/// revision if that is not a hash (`HEAD~2 (a1b2c3d)`).
+fn name(rev: &str, snap: &phitex_git::Snapshot) -> String {
+    match snap.commit() {
+        Some(id) => {
+            let short = id.to_hex_with_len(7).to_string();
+            if short.starts_with(rev) || rev.starts_with(&short) {
+                short
+            } else {
+                format!("{rev} ({short})")
+            }
+        }
+        None => "the index".into(),
+    }
+}
+
+/// Write `text` to `path` unless it is there already: whether it was
+/// written.
+fn write_if_new(path: &str, text: &str, ren: &Renderer) -> bool {
+    if std::fs::read(path).is_ok_and(|t| t == text.as_bytes()) {
+        return false;
+    }
+    let _ = std::fs::create_dir_all(DIR);
+    if let Err(e) = std::fs::write(path, text) {
+        ren.warn("Diff", &format!("can't write {path}: {e}"));
+        return false;
+    }
+    true
 }
 
 /// `t` as a JSON string, onto `s`.
