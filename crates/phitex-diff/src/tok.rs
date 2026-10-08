@@ -62,6 +62,18 @@ pub fn lexemes(text: &str, a: usize, b: usize) -> Vec<Lx> {
     out
 }
 
+/// The lexemes of paragraphs `paras` (CST paragraph nodes, whose text is
+/// `text` from its start), as [`lexemes`] reads them in a whole text.
+pub fn lexemes_of<'g>(paras: impl IntoIterator<Item = &'g Green>, text: &str) -> Vec<Lx> {
+    let mut out = Vec::new();
+    let mut at = 0;
+    for g in paras {
+        put(g.children(), at, text, &mut out);
+        at += g.len();
+    }
+    out
+}
+
 /// The lexemes of green nodes `kids` at `at`.
 fn put(kids: &[Green], at: usize, text: &str, out: &mut Vec<Lx>) {
     let mut pos = at;
@@ -350,12 +362,18 @@ impl<'a> Reader<'a> {
                     k -= 1;
                 }
                 let line_start = k > 0 && matches!(lx[k - 1], Lx::Nl(..) | Lx::Comment(..));
-                let kind = if nls >= 2 || (nls == 1 && line_start) {
-                    Kind::Par
+                if nls >= 2 || (nls == 1 && line_start) {
+                    // (a blank line ends at its last line end, where the CST
+                    // cuts a paragraph: the white space after it begins the
+                    // next one, so that a paragraph reads alike alone)
+                    let last = (p.i..q)
+                        .rev()
+                        .find(|&k| matches!(lx[k], Lx::Nl(..)))
+                        .unwrap_or(q - 1);
+                    (Kind::Par, Pos::at(last + 1), None)
                 } else {
-                    Kind::Ws
-                };
-                (kind, Pos::at(q), None)
+                    (Kind::Ws, Pos::at(q), None)
+                }
             }
             Lx::Word(..) => (Kind::Word, next, None),
             Lx::Char(a, b) => match self.s(*a, *b) {

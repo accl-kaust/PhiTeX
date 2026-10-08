@@ -23,6 +23,7 @@
 //! against (phase 2, the live diff, re-diffs only what an edit touched).
 
 pub mod flatten;
+pub mod live;
 pub mod myers;
 pub mod sig;
 pub mod tok;
@@ -33,6 +34,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 
 pub use flatten::{Flat, flatten};
+pub use live::{Live, Place, Stats, changes_json, places};
 pub use sig::{Class, EnvKind, EnvSig, Sig, Signatures};
 
 /// A set of files: a project, at one version. Paths are relative to the
@@ -321,8 +323,41 @@ impl Baseline {
     pub fn diff_flat(&self, new: &Flat) -> DiffOut {
         let nb = find_body(&new.text);
         let preamble = &new.text[..nb.begin];
-        // (the table: latexdiff's, the new preamble's definitions, the
-        // caller's; what only the old preamble defines is unsafe deleted)
+        let sigs = self.signatures(preamble);
+        let old_text = &self.flat.text;
+        let ob = self.body;
+        let read = |text: &str, b: Body| {
+            let r = tok::Reader { text, sigs: &sigs };
+            r.seq(&tok::lexemes(text, b.start, b.end))
+        };
+        let old_toks = read(old_text, ob);
+        let new_toks = read(&new.text, nb);
+        let amsmath = loads(preamble, &["amsmath", "mathtools"]);
+        let mut em = emit::Em::new(old_text, &new.text, &sigs, amsmath);
+        em.out.push_str(&self.head(new, nb));
+        em.body(&old_toks, &new_toks, ob.end, nb.end);
+        em.push(&new.text[nb.end..]);
+        let (tex, raw) = em.finish();
+        let changes = raw
+            .iter()
+            .map(|c| {
+                let new_loc = locate(new, c.new);
+                self.change(
+                    c,
+                    new_loc,
+                    new.text[c.new.0..c.new.1].to_owned(),
+                    c.section.clone(),
+                    c.out.0..c.out.1,
+                )
+            })
+            .collect();
+        DiffOut { tex, changes }
+    }
+
+    /// The signature table for a new version whose preamble is `preamble`:
+    /// latexdiff's, the new preamble's definitions, the caller's; what
+    /// only the old preamble defines is unsafe deleted.
+    fn signatures(&self, preamble: &str) -> Signatures {
         let mut sigs = Signatures::latexdiff();
         let new_learned = sigs.learn(preamble);
         sigs.set_old_only(&self.learned, &new_learned);
@@ -342,50 +377,65 @@ impl Baseline {
             let spec = sigs.cmd(n).map(|s| s.spec).unwrap_or_default();
             sigs.define(n, Sig::new(&spec, Class::Unsafe));
         }
-        let old_text = &self.flat.text;
-        let ob = self.body;
-        let read = |text: &str, b: Body| {
-            let r = tok::Reader { text, sigs: &sigs };
-            r.seq(&tok::lexemes(text, b.start, b.end))
+        sigs
+    }
+
+    /// The output before the body: the new preamble, latexdiff's
+    /// definitions at its end, `\begin{document}`.
+    fn head(&self, new: &Flat, nb: Body) -> String {
+        let mut s = String::from(&new.text[..nb.begin]);
+        s.push_str(&dif_preamble(&self.opts, &new.text[..nb.begin]));
+        s.push_str(&new.text[nb.begin..nb.start]);
+        s
+    }
+
+    /// The old side's tokens, read with `sigs`.
+    fn old_tokens(&self, sigs: &Signatures) -> Vec<tok::Tok> {
+        let r = tok::Reader {
+            text: &self.flat.text,
+            sigs,
         };
-        let old_toks = read(old_text, ob);
-        let new_toks = read(&new.text, nb);
-        let amsmath = loads(preamble, &["amsmath", "mathtools"]);
-        let mut em = emit::Em::new(old_text, &new.text, &sigs, amsmath);
-        em.out.push_str(&new.text[..nb.begin]);
-        em.out.push_str(&dif_preamble(&self.opts, preamble));
-        em.out.push_str(&new.text[nb.begin..nb.start]);
-        em.body(&old_toks, &new_toks, ob.end, nb.end);
-        em.push(&new.text[nb.end..]);
-        let (tex, raw) = em.finish();
-        let changes = raw
-            .iter()
-            .map(|c| {
-                let kind = match (c.old.0 < c.old.1, c.new.0 < c.new.1) {
-                    (true, true) => ChangeKind::Change,
-                    (true, false) => ChangeKind::Del,
-                    _ => ChangeKind::Add,
-                };
-                let loc = |f: &Flat, r: (usize, usize)| {
-                    let (file, start, end) = f.locate_range(r.0, r.1);
-                    Loc {
-                        file: f.files.get(file).cloned().unwrap_or_default(),
-                        start,
-                        end,
-                    }
-                };
-                Change {
-                    kind,
-                    old: loc(&self.flat, c.old),
-                    new: loc(new, c.new),
-                    old_text: old_text[c.old.0..c.old.1].to_owned(),
-                    new_text: new.text[c.new.0..c.new.1].to_owned(),
-                    section: c.section.clone(),
-                    out: c.out.0..c.out.1,
-                }
-            })
-            .collect();
-        DiffOut { tex, changes }
+        r.seq(&tok::lexemes(
+            &self.flat.text,
+            self.body.start,
+            self.body.end,
+        ))
+    }
+
+    /// A change, from its raw form (the old side in flat offsets) and its
+    /// new side placed.
+    fn change(
+        &self,
+        c: &emit::RawChange,
+        new: Loc,
+        new_text: String,
+        section: Option<String>,
+        out: std::ops::Range<usize>,
+    ) -> Change {
+        let kind = match (c.old.0 < c.old.1, c.new.0 < c.new.1) {
+            (true, true) => ChangeKind::Change,
+            (true, false) => ChangeKind::Del,
+            _ => ChangeKind::Add,
+        };
+        Change {
+            kind,
+            old: locate(&self.flat, c.old),
+            new,
+            old_text: self.flat.text[c.old.0..c.old.1].to_owned(),
+            new_text,
+            section,
+            out,
+        }
+    }
+}
+
+/// Flat range `r` of `f`, as a file and a range in it.
+fn locate(f: &Flat, r: (usize, usize)) -> Loc {
+    let (file, start, end) = f.locate_range(r.0, r.1);
+    Loc {
+        file: f.files.get(file).cloned().unwrap_or_default(),
+        start,
+        end,
     }
 }
 
