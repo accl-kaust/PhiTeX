@@ -1321,6 +1321,18 @@ export class Panel {
     if (this.prefs.zoom === "fit") this.redraw();
   }
 
+  /** A button of the host's in the header, before the page controls (the CLI's Compare). */
+  headerButton(label: string, title: string, onclick: (b: HTMLButtonElement) => void): HTMLButtonElement {
+    const b = document.createElement("button");
+    b.className = "ib";
+    b.style.cssText = "width:auto;padding:0 8px;font-size:12px";
+    b.title = title;
+    b.textContent = label;
+    b.onclick = () => onclick(b);
+    this.$("header .grow").after(b);
+    return b;
+  }
+
   /** The contents and the keys, as the host asked (PanelOptions). */
   private extras(opts: PanelOptions): void {
     if (opts.outline) {

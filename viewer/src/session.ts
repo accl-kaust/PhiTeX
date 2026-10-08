@@ -129,7 +129,7 @@ export type WatchEvent =
   | { event: "diagnostics"; items: Problem[] }
   | { event: "settled"; settling?: boolean; pass?: number }
   | { event: "superseded" }
-  | { event: "sync"; file: string; lo: number; hi: number; at: number };
+  | { event: "sync"; file: string; lo: number; hi: number; at: number; page?: number; y?: number };
 
 export type CoreEvent = StreamEvent | WatchEvent | { event: "fetching"; pack: string; name: string; failed?: boolean } | { event: "preparing"; on: boolean } | { event: "settled" } | { event: "switched" } | { event: "release"; release?: { release: string; min_extension?: string; notice?: string | null } };
 
@@ -1198,15 +1198,16 @@ export class PreviewSession {
         this.chain = this.chain.then(() => this.layout()).then(() => (this.status(), this.watchOutline()));
         return;
       case "sync":
-        void this.syncTo(e.file, e.lo, e.hi, e.at);
+        void this.syncTo(e.file, e.lo, e.hi, e.at, e.page);
         return;
     }
   }
 
   /** Forward search: bytes [lo, hi) of `file` (a line), the glyphs from it nearest `at`'s highlighted, the page in view tried first. */
-  private async syncTo(file: string, lo: number, hi: number, at: number): Promise<void> {
+  private async syncTo(file: string, lo: number, hi: number, at: number, hint?: number): Promise<void> {
     const n = this.hashes.length;
-    for (const k of [this.page, ...Array.from({ length: n }, (_, i) => i).filter((i) => i !== this.page)]) {
+    const first = hint ?? this.page;
+    for (const k of [first, ...Array.from({ length: n }, (_, i) => i).filter((i) => i !== first)]) {
       const all = this.cached(k) ?? (await this.glyphsOf(k));
       const hit = lineAt(from(all, file, lo, hi), at);
       if (hit.length) return this.sink.mark?.(k, boxes(hit, all), true);
