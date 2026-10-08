@@ -166,6 +166,15 @@ pub enum Op {
     Pair,
     /// A table of contents line per entry (a scan).
     TocLine,
+    /// A page label: (the page, its digits' count).
+    PageRec,
+    /// Operand 0, counted (`USEW`): what reads a width.
+    UseW,
+}
+
+thread_local! {
+    /// `Op::UseW` evaluations on this thread.
+    pub static USEW: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
 pub struct Toy;
@@ -210,6 +219,14 @@ impl Lang for Toy {
             Op::Double => TV::Int(a.get(0).int() * 2),
             Op::Nop => TV::Unit,
             Op::Pair => TV::rec((0..a.len()).map(|i| a.get(i).clone()).collect()),
+            Op::PageRec => {
+                let p = a.get(0).int();
+                TV::rec(vec![TV::Int(p), TV::Int(p.to_string().len() as i64)])
+            }
+            Op::UseW => {
+                USEW.with(|c| c.set(c.get() + 1));
+                a.get(0).clone()
+            }
             _ => unreachable!("{op:?}"),
         }
     }
@@ -681,6 +698,38 @@ fn step(op: Op, mut st: St, cx: &mut StepCx<'_, Toy>) -> Step<TV> {
                     .scan(Op::TocLine, Arg::Local(f), Arg::Local(init), &[]);
                 let w = rd.cx.leaf(Op::BoxWord, Class::Pure, &[Arg::Local(s)]);
                 word(op, par, &mut rd, Arg::Local(w), here);
+            }
+            "pagelabel" => {
+                // (\label with the page's width beside it)
+                let k = rd.word();
+                rd.cx.leaf(
+                    Op::PageRec,
+                    Class::Publish(Slot(phi::ver::hash64(&k))),
+                    &[Arg::Name(count)],
+                );
+            }
+            "pageref" => {
+                // (shows the page; `pr` is the whole record)
+                let k = rd.word();
+                let c = rd.cx.cross(Slot(phi::ver::hash64(&k)));
+                let s = rd.cx.leaf(Op::Show, Class::Pure, &[Arg::Field(c, 0)]);
+                let pr = rd.cx.name(b"pr");
+                rd.cx.define(pr, Arg::Local(c), true);
+                word(op, par, &mut rd, Arg::Local(s), here);
+            }
+            "copypr" => {
+                // (`pr2`: a copy of `pr`, the whole record)
+                let pr = rd.cx.name(b"pr");
+                let x = rd.cx.leaf(Op::Id, Class::Pure, &[Arg::Name(pr)]);
+                let pr2 = rd.cx.name(b"pr2");
+                rd.cx.define(pr2, Arg::Local(x), true);
+            }
+            "usew" => {
+                // (reads the width only: field 1 of `pr2`)
+                let pr2 = rd.cx.name(b"pr2");
+                let y = rd.cx.leaf(Op::UseW, Class::Pure, &[Arg::NameField(pr2, 1)]);
+                let w2 = rd.cx.name(b"w2");
+                rd.cx.define(w2, Arg::Local(y), true);
             }
             "ref" => {
                 let k = rd.word();

@@ -95,6 +95,7 @@ const DEAD: u8 = 4;
 /// A step that is a sealed region (DESIGN 7.11): a run of steps folded.
 const SEALED: u8 = 8;
 
+mod check;
 mod compact;
 mod seal;
 
@@ -525,13 +526,32 @@ pub enum Arg<'s> {
     UpField(u16, u32),
     /// A name, resolved at the emitted node's position.
     Name(NameId),
+    /// Field `f` of what a name reaches: its reader is woken only when
+    /// that field changes.
+    NameField(NameId, u32),
 }
 
 #[derive(Clone, Copy)]
 enum SArg {
     Local(u32, Sel),
     Node(u32, Sel),
-    Name(u32),
+    /// A name, and the reader's own field of it (`NOX`: none).
+    Name(u32, u32),
+}
+
+/// No field of the reader's own on a name (`SArg::Name`).
+const NOX: u32 = u32::MAX;
+
+fn extra(x: u32) -> Option<u32> {
+    (x != NOX).then_some(x)
+}
+
+/// A name's resolution, with the reader's own field on top.
+fn with_extra(mut o: Opd, x: u32) -> Opd {
+    if o.src != NONE {
+        o.sel = o.sel.then(extra(x));
+    }
+    o
 }
 
 /// An emission's operand, and what it resolved to outside the step.
@@ -782,7 +802,8 @@ impl<'s, L: Lang> StepCx<'s, L> {
                 debug_assert!(o.sel.is_whole());
                 SArg::Node(o.src, Sel::field(f))
             }
-            Arg::Name(n) => SArg::Name(n.0),
+            Arg::Name(n) => SArg::Name(n.0, NOX),
+            Arg::NameField(n, f) => SArg::Name(n.0, f),
         }
     }
 
@@ -816,7 +837,7 @@ impl<'s, L: Lang> StepCx<'s, L> {
                     sel,
                     name: NONE,
                 },
-                SArg::Name(_) => {
+                SArg::Name(..) => {
                     named = true;
                     NOOPD
                 }
@@ -910,15 +931,16 @@ impl<'s, L: Lang> StepCx<'s, L> {
                         name: NONE,
                     };
                 }
-                SArg::Name(m) => match self.own_def(m) {
+                SArg::Name(m, x) => match self.own_def(m) {
                     Some(SArg::Local(j, sel)) => {
                         if !self.em.specs[j as usize].done {
                             return;
                         }
                         // (this step's own definition: read in the step)
-                        self.em.args[a].a = SArg::Local(j, sel);
+                        self.em.args[a].a = SArg::Local(j, sel.then(extra(x)));
                     }
                     Some(SArg::Node(src, sel)) => {
+                        let sel = sel.then(extra(x));
                         self.em.args[a] = EArg {
                             a: SArg::Node(src, sel),
                             o: Opd {
@@ -928,10 +950,10 @@ impl<'s, L: Lang> StepCx<'s, L> {
                             },
                         };
                     }
-                    Some(SArg::Name(_)) => return,
+                    Some(SArg::Name(..)) => return,
                     None => {
                         let o = if (m as usize) < self.names.defs.len() {
-                            self.resolve_here(m)
+                            with_extra(self.resolve_here(m), x)
                         } else {
                             Opd {
                                 src: NONE,
@@ -1242,9 +1264,8 @@ pub struct Graph<L: Lang> {
     sc_gone: Vec<u32>,
     sc_copds: Vec<Opd>,
     sc_defs: Vec<DefRec>,
-    sc_touched: Vec<u32>,
     /// Debug: interior sizes of each step, by the step's op.
-    interior: Map<u64, Vec<u32>>,
+    interior: Map<u64, (L::Op, Vec<u32>)>,
     /// Speculative entries proposed for a cold unfold.
     entries: Map<u32, Vec<crate::lang::Entry<L::Val>>>,
     /// A segment's names from the graph it was entered from: the value
@@ -1313,7 +1334,6 @@ impl<L: Lang> Graph<L> {
             sc_gone: Vec::new(),
             sc_copds: Vec::new(),
             sc_defs: Vec::new(),
-            sc_touched: Vec::new(),
             interior: Map::default(),
             entries: Map::default(),
             ext: None,
@@ -2250,7 +2270,7 @@ impl<L: Lang> Graph<L> {
         let ids = self.match_children(s);
         self.grp_hint = NOGROUP;
         self.apply_groups(s, si);
-        self.apply_defs(s, si, &ids);
+        let touched = self.apply_defs(s, si, &ids);
         // the step's own operands: its state, then the names it read, then
         // what its interior read from outside (added by the sweep)
         let mut os = std::mem::take(&mut self.sc_opds);
@@ -2267,6 +2287,14 @@ impl<L: Lang> Graph<L> {
         }
         self.em.reads = reads;
         self.sweep(s, &ids, &mut os);
+        // (readers of what the step defines, now that its sources have
+        // their values)
+        if !touched.is_empty() {
+            let from = self.n.pos(s);
+            for m in touched {
+                self.reresolve(m, from);
+            }
+        }
         self.sc_ids = ids;
         self.set_opds(s, &os);
         self.sc_opds = os;
@@ -2584,13 +2612,16 @@ impl<L: Lang> Graph<L> {
                             os.push(o);
                         }
                     }
-                    SArg::Name(m) => {
-                        let o = self.resolve_or_import(
-                            m,
-                            Pos {
-                                parent: s,
-                                ord: u64::from(sp.sub),
-                            },
+                    SArg::Name(m, x) => {
+                        let o = with_extra(
+                            self.resolve_or_import(
+                                m,
+                                Pos {
+                                    parent: s,
+                                    ord: u64::from(sp.sub),
+                                },
+                            ),
+                            x,
                         );
                         eargs[a].o = o;
                         if leaf {
@@ -2660,8 +2691,20 @@ impl<L: Lang> Graph<L> {
             }
         }
         if self.cfg.debug {
-            let op = L::op_tag(self.n.h[s as usize].op);
-            self.interior.entry(op).or_default().push(interior);
+            let op = self.n.h[s as usize].op;
+            // (constants count too: every emission that is not a node)
+            let consts = specs
+                .iter()
+                .zip(ids)
+                .filter(|(sp, id)| sp.kind == Kind::Const && **id == NONE)
+                .count();
+            #[allow(clippy::cast_possible_truncation, reason = "emissions fit u32")]
+            let n = interior + consts as u32;
+            self.interior
+                .entry(L::op_tag(op))
+                .or_insert_with(|| (op, Vec::new()))
+                .1
+                .push(n);
         }
         self.em.specs = specs;
         self.em.args = eargs;
@@ -2681,7 +2724,7 @@ impl<L: Lang> Graph<L> {
                 sel,
                 name: NONE,
             },
-            SArg::Name(m) => self.resolve_or_import(m, at),
+            SArg::Name(m, x) => with_extra(self.resolve_or_import(m, at), x),
         }
     }
 
@@ -2796,11 +2839,13 @@ impl<L: Lang> Graph<L> {
     }
 
     /// The step's definitions, applied to the name index.
-    fn apply_defs(&mut self, s: u32, si: usize, ids: &[u32]) {
+    /// The names whose readers must be resolved again (after the
+    /// sweep: a new source has its value then).
+    fn apply_defs(&mut self, s: u32, si: usize, ids: &[u32]) -> Vec<u32> {
         let defs = std::mem::take(&mut self.em.defs);
         if defs.is_empty() && self.steps[si].dn == 0 {
             self.em.defs = defs;
-            return;
+            return Vec::new();
         }
         let mut new = std::mem::take(&mut self.sc_defs);
         new.clear();
@@ -2836,11 +2881,10 @@ impl<L: Lang> Graph<L> {
             });
         if same {
             self.sc_defs = new;
-            return;
+            return Vec::new();
         }
         let old = old.to_vec();
-        let mut touched = std::mem::take(&mut self.sc_touched);
-        touched.clear();
+        let mut touched = Vec::new();
         for d in &old {
             self.remove_def(
                 d.name,
@@ -2878,11 +2922,7 @@ impl<L: Lang> Graph<L> {
         self.sc_defs = new;
         touched.sort_unstable();
         touched.dedup();
-        let from = self.n.pos(s);
-        for &m in &touched {
-            self.reresolve(m, from);
-        }
-        self.sc_touched = touched;
+        touched
     }
 
     /// Readers of name `m` after `from` resolved again; those whose value
@@ -2907,7 +2947,10 @@ impl<L: Lang> Graph<L> {
                 if o.name != m {
                     continue;
                 }
-                let nw = resolve(&self.n, &self.names, &self.groups, m, at);
+                let nw = with_extra(
+                    resolve(&self.n, &self.names, &self.groups, m, at),
+                    o.sel.extra().unwrap_or(NOX),
+                );
                 if nw.src != o.src || nw.sel != o.sel {
                     let ov = self.n.read_ver(&o);
                     self.n.opds[a0 + k] = nw;
@@ -3376,7 +3419,10 @@ impl<L: Lang> Graph<L> {
             for o in self.n.opds_of(n32) {
                 if o.name != NONE {
                     let at = self.n.pos(n32);
-                    let want = resolve(&self.n, &self.names, &self.groups, o.name, at);
+                    let want = with_extra(
+                        resolve(&self.n, &self.names, &self.groups, o.name, at),
+                        o.sel.extra().unwrap_or(NOX),
+                    );
                     assert!(
                         want.src == o.src && want.sel == o.sel,
                         "check: node %{n} reads name {} at %{} but it resolves to %{}",
@@ -3387,6 +3433,7 @@ impl<L: Lang> Graph<L> {
                 }
             }
         }
+        self.check_steps();
     }
 
     // ---- reading the results ----
@@ -3415,6 +3462,27 @@ impl<L: Lang> Graph<L> {
     /// Predict slot `s` (a cold start from a persisted run).
     pub fn predict(&mut self, s: Slot, v: L::Val) {
         std::sync::Arc::make_mut(&mut self.pred).insert(s.0, v);
+    }
+
+    /// Step interiors by op (`Config::debug`): for each op, the steps
+    /// run, and their transient emissions' count at most and at the 99th
+    /// percentile. An op whose interior grows with its input breaks the
+    /// rule on `Lang::step`: what can grow is a nested unfold, scan or
+    /// sequence.
+    #[must_use]
+    pub fn interior_sizes(&self) -> Vec<(L::Op, usize, u32, u32)> {
+        let mut out: Vec<(L::Op, usize, u32, u32)> = self
+            .interior
+            .values()
+            .map(|(op, v)| {
+                let mut v = v.clone();
+                v.sort_unstable();
+                let n = v.len();
+                (*op, n, v[n - 1], v[(n * 99 / 100).min(n - 1)])
+            })
+            .collect();
+        out.sort_by_key(|x| L::op_tag(x.0));
+        out
     }
 
     /// The number of live nodes.
@@ -3456,12 +3524,12 @@ impl<L: Lang> Graph<L> {
         self.names.spell[m as usize].to_vec()
     }
 
-    /// A step's definitions: (source, selector, name, global).
     /// Whether step `s` is a sealed region.
     pub(crate) fn sealed(&self, s: u32) -> bool {
         self.n.h[s as usize].flags & SEALED != 0
     }
 
+    /// A step's definitions: (source, selector, name, global).
     pub(crate) fn step_defs(&self, s: u32) -> Vec<(u32, Sel, u32, bool)> {
         let si = &self.steps[self.n.h[s as usize].aux as usize];
         self.step_defs[si.d0 as usize..(si.d0 + si.dn) as usize]
@@ -4163,7 +4231,8 @@ impl<L: Lang> Graph<L> {
             let m = r + base;
             let at = self.n.pos(m);
             let name = self.n.opds[(ob + i) as usize].name;
-            let o = resolve(&self.n, &self.names, &self.groups, name, at);
+            let x = self.n.opds[(ob + i) as usize].sel.extra().unwrap_or(NOX);
+            let o = with_extra(resolve(&self.n, &self.names, &self.groups, name, at), x);
             if self.n.read_ver(&o) != was && dirty.last() != Some(&m) {
                 dirty.push(m);
             }

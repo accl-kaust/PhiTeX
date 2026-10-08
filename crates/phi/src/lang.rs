@@ -77,6 +77,15 @@ pub trait Lang: Sized + 'static {
 
     /// One step of an unfold: from the state, the unfold's operands and
     /// what it reads through `cx`, the next state or the result.
+    ///
+    /// **A step's interior is bounded by construction** (DESIGN 7.4): what
+    /// one step emits must not grow with the input. Its pure leaves and
+    /// constants are transient (evaluated in a buffer, never nodes), so a
+    /// change to any of them runs the whole step again; anything that can
+    /// grow (a paragraph's words, a box's contents, a list) is a nested
+    /// unfold, a scan, or a sequence value, each a node with its own
+    /// incremental story. `Graph::interior_sizes` reports each op's
+    /// interiors (`Config::debug`).
     fn step(
         op: Self::Op,
         st: &Self::Val,

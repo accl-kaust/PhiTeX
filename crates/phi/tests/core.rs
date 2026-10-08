@@ -291,3 +291,68 @@ fn a_second_edit_in_a_sealed_region_is_step_precise() {
     );
     assert_eq!(a.observe(), b.observe());
 }
+
+/// A `\pageref`-like slot changes a digit with an equal width: the step
+/// that shows the page runs again; what reads only the width (a field of
+/// a definition two steps on) does not, across a step's edge and across a
+/// sealed region's (its net definitions keep their fields' versions).
+#[test]
+fn an_equal_width_page_change_stops_at_the_width() {
+    for seal in [0, 2] {
+        let mut src =
+            String::from(r"\step \step \step X \pagelabel{k} \pageref{k} \copypr a b \par ");
+        src += r"c \usew d e f g h \par ";
+        for i in 0..20 {
+            src += &format!("w{i} x{i} y{i} z{i} \\par ");
+        }
+        let mut d = Doc::new(ids(lex(&src)));
+        d.g.cfg.seal = seal;
+        d.g.run();
+        let k = Slot(phi::ver::hash64("k"));
+        assert_eq!(d.g.slot(k).field(0).map(|v| v.int()), Some(3));
+        if seal > 0 {
+            assert!(d.g.to_text().contains("sealed"), "nothing sealed");
+        }
+        let before = toy::USEW.with(|c| c.get());
+        d.splice(3, 1, lex(r"\step"));
+        let r = d.g.run();
+        assert_eq!(d.g.slot(k).field(0).map(|v| v.int()), Some(4));
+        assert_eq!(
+            toy::USEW.with(|c| c.get()),
+            before,
+            "seal {seal}: the width's reader ran again: {r:?}"
+        );
+        let mut f = Doc::new(d.toks.clone());
+        f.g.run();
+        assert_eq!(d.observe(), f.observe(), "seal {seal}");
+    }
+}
+
+/// Step interiors are reported by op (debug), and bounded: a paragraph ten
+/// or a hundred times longer gives the same largest interior.
+#[test]
+fn interiors_are_reported_and_bounded() {
+    let mut maxes = Vec::new();
+    for words in [10, 100, 1000] {
+        let mut src = String::from(r"\def\a{x y} \step ");
+        for w in 0..words {
+            src += &format!("w{w} ");
+            if w % 7 == 0 {
+                src += r"\a \the\count { \def\b{z} \b } ";
+            }
+        }
+        src += r"\par \section{s} \toc \par";
+        let mut d = Doc::new(ids(lex(&src)));
+        d.g.cfg.debug = true;
+        d.g.run();
+        let sizes = d.g.interior_sizes();
+        let doc = sizes
+            .iter()
+            .find(|x| x.0 == Op::Doc)
+            .expect("the document's steps");
+        assert!(doc.1 >= words, "{sizes:?}");
+        assert!(doc.3 <= doc.2, "{sizes:?}");
+        maxes.push(doc.2);
+    }
+    assert!(maxes.windows(2).all(|w| w[0] == w[1]), "{maxes:?}");
+}

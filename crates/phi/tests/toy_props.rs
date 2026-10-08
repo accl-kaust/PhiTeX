@@ -128,9 +128,14 @@ fn edit(r: &mut Rng, d: &mut Doc) {
 }
 
 fn run_seed(seed: u64, len: usize, edits: usize) {
+    run_seed_with(seed, len, edits, false);
+}
+
+fn run_seed_with(seed: u64, len: usize, edits: usize, keep: bool) {
     let mut r = Rng(seed.wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1);
     let mut d = Doc::new(ids(random_doc(&mut r, len)));
     d.g.cfg.check = true;
+    d.g.cfg.keep_interior = keep;
     d.g.run();
     assert_eq!(d.observe(), fresh(&d).observe(), "seed {seed}: cold");
     for e in 0..edits {
@@ -168,7 +173,7 @@ fn run_seed(seed: u64, len: usize, edits: usize) {
         }
         let f = fresh(&d);
         let src: Vec<String> = d.toks.iter().map(|t| t.1.text()).collect();
-        if d.observe() != f.observe() || d.g.to_text() != f.g.to_text() {
+        if d.observe() != f.observe() || (!keep && d.g.to_text() != f.g.to_text()) {
             let (a, b) = (d.g.to_text(), f.g.to_text());
             if let Ok(dir) = std::env::var("PHI_DUMP") {
                 std::fs::write(format!("{dir}/inc.txt"), &a).unwrap();
@@ -253,5 +258,14 @@ fn sealed_random_edits_equal_fresh_builds() {
         if only.is_none_or(|o| o == seed) {
             run_seed_sealed(seed, 60, 40, 1 + (seed % 4) as u32);
         }
+    }
+}
+
+/// Interiors kept (every emission a node) with check mode: each step runs
+/// again dry after every run and every leaf of it is compared.
+#[test]
+fn kept_interiors_check_every_leaf() {
+    for seed in 1..=12 {
+        run_seed_with(seed, 60, 30, true);
     }
 }
