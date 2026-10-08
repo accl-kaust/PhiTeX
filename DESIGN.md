@@ -147,6 +147,9 @@ crates/
                  command line, watch sessions, the host
   partex-incr    the old region runtime of machine mode (4.1), to be
                  removed but for its Executor
+  phitex-diff    latexdiff, natively: two versions in, the marked-up
+                 document and the change list out (4.10)
+  phitex-git     past versions read from git (gitoxide), for phitex-diff
 xtask/           corpus, oracle runs, trip, etrip, e2e, masking, checks
 ```
 
@@ -3642,6 +3645,72 @@ before it writes a page. The settling trip (the `.aux`, `.toc` and `.out`
 changed) then costs both about as much. The settled files equal a cold
 `phitex build` of the final source, but for the font numbers above in
 `--ssa`'s PDF.
+
+### 4.10 latexdiff, natively (phase 1, 2026-10-08)
+
+`phitex-diff` compares two versions of a project and writes what latexdiff
+writes: the new version, flattened, with the old one's differences marked
+(`\DIFadd{…}`, `\DIFdel{…}`, `\DIFaddbegin`/`\DIFaddend`, the `FL` forms in
+floats and alignments), and latexdiff's definitions in the preamble; and
+the list of changes (kind; file and byte range on each side; the text on
+each side; the section of the new version it is in; where its markup is
+in the output). It depends on `phitex-syntax` alone (wasm, the extension,
+and the CLI alike); `phitex-git` reads past versions from git (gitoxide,
+`default-features = false`, features `sha1` and `revision`: rev-parse,
+refs, commits, trees, the index; no checkout, no network).
+
+- *Flattening.* Each side follows its own `\input`/`\include` graph (as
+  latexdiff `--flatten`), with a map back to each file's bytes: a file the
+  new version no longer inputs is deleted text where it was input, a new
+  one added.
+- *Tokens.* The CST's paragraphs are read again into a tree of tokens:
+  words, commands with the arguments their signature says, math as a unit,
+  environments with their bodies, alignment rows. The signature table is
+  latexdiff's lists (`SAFECMD`, `TEXTCMD`, `CONTEXT1/2CMD`, `MATHENV`,
+  `MATHARRENV`, `FLOATENV`, `PICTUREENV`, `LISTENV`, `COUNTERCMD`, the
+  cite family it puts in `\mbox`), extended from the preambles
+  (`\newcommand` and friends: arity, and safe if the body is), and by the
+  caller. A command defined only by the old preamble is unsafe deleted.
+- *Diff.* Paragraphs (runs to a blank line) are aligned first; each run of
+  paragraphs that differ is diffed by tokens, patience diff over Myers'
+  (linear space, an edit budget past which a run is a rewrite). In a run
+  of changes, nodes with the same prefix (a command and its other
+  arguments, an environment's `\begin`, a row's columns) are paired and
+  diffed inside. Common runs under three words between long changes are
+  merged into them (latexdiff's `MINWORDSBLOCK`).
+- *Markup only where it compiles.* Unsafe deleted text is commented out
+  (`%DIFDELCMD <`), unsafe added text stays outside the markup; a deleted
+  counting command steps its counter back; a deleted `\caption` shows its
+  text only; display math is coarse (old struck out as an unnumbered
+  `displaymath`/`align*`/`eqnarray*`, labels commented out; new added
+  cell by cell); a deleted row of a kept table is shown, struck out;
+  verbatim and pictures are never marked inside; comments are left as
+  they are.
+- *Tests.* Unit tests and `tests/corpus.rs` (16 synthetic pairs: word
+  edits, paragraphs, sections, cites and refs, inline and display math,
+  floats and tables, lists, footnotes, multi-file, verbatim, comments,
+  macros, hyperref, a rewrite, a new document) always run.
+  `tests/compile.sh` compiles each pair's diff with stock pdflatex and
+  runs Perl latexdiff on it to compare; `tests/fuzz.sh` diffs random
+  edits of the corpus and compiles them.
+
+**Measured** (2026-10-08, this machine): all 16 pairs compile (latexdiff:
+15, it breaks a booktabs table with `\DIFaddendFL \bottomrule`); the text
+marked is latexdiff's in 5, and elsewhere differs in granularity only
+(latexdiff marks letters in a one-word change, `Intro[+duction+]`, and
+inside equations; the old side of a changed verbatim is not shown). Of
+300 random pairs, every diff compiles where both versions do (278); 3 of
+the 289 whose new version compiles fail, each with an old version that
+does not compile (a second seed: 280 of 280, and 4 of 294, the same).
+A 3 MB document diffs in 0.6 s (release, this machine, flattening and
+I/O included). The two crates add 87 crates to `partex-cli`'s clean
+release build (48 to 135 units; 664 s before, 673 s after, fresh target
+directory, no sccache, this loaded machine: within noise, gix building
+beside the long `partex-core` and LTO chain).
+
+*Phase 2* (not built): the watch and the extension keep a `Baseline` (the
+old version flattened and read) and diff each build's new text against
+it; `Tree::edit`'s splice says which paragraphs to read again.
 
 ---
 

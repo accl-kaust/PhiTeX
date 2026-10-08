@@ -32,6 +32,10 @@ partex-trace = { path = "../partex-trace" }
 partex-xdvipdfmx = { path = "../partex-xdvipdfmx" }
 phitex-doc = { path = "../phitex-doc" }
 phitex-draw = { path = "../phitex-draw" }
+# (the diff against a past version, latexdiff's markup; phase 2: the
+# watch's diff mode, DESIGN 4.10)
+phitex-diff = { path = "../phitex-diff" }
+phitex-git = { path = "../phitex-git" }
 
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
 tikv-jemallocator = { version = "0.6", optional = true }
