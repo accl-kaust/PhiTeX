@@ -3998,6 +3998,52 @@ small state is what makes convergence come early and speculative entry
 size per step (`Value::bytes`, mean and max), so the client can be
 held to the rule.
 
+**Transient interiors** (checkpoint 3a, as built). A step's pure
+leaves and constants are not nodes. The step runs into an emission
+buffer, and only *big* emissions become its members:
+- the sources of its definitions;
+- whatever is not pure (effects, barriers, publishers, entries);
+- creators (nested unfolds and scans), and the members they read;
+- cross, chain and family reads.
+
+The rest is evaluated in the buffer (most of it eagerly, as it is
+emitted) and dropped. The step's own operands are its state before it,
+the names it read, and every read its interior made from outside it,
+each with the field it read. Any change to them runs the step again,
+whole.
+
+- *The rule on `Lang::step`:* a step's interior is bounded by
+  construction. Anything that can grow with the input (a paragraph's
+  words, a box's contents, a list) is a nested unfold, a scan or a
+  sequence value, each a node with its own incremental behaviour.
+  `Config::debug` reports each op's interiors (`Graph::interior_sizes`:
+  steps, max, p99), so a client is held to it. The toy's and the bench
+  client's interiors do not grow with paragraph length (test
+  `interiors_are_reported_and_bounded`: 10, 100 and 1,000 words a
+  paragraph, same max).
+- *Nothing is lost at a step's edges.* Definitions' sources are members
+  with values, so field-level versions hold across a step's boundary.
+  A reader that wants one field of a name reads it with
+  `Arg::NameField(n, f)`. Its operand's selector has two levels (the
+  definition's own field, then the reader's), and re-resolution keeps
+  the reader's level. The test `an_equal_width_page_change_stops_at_the_width`:
+  a `\pageref`-like slot changes a digit at equal width. The step that
+  shows the page runs again; a step two definitions on that reads only
+  the width does not, with or without sealing.
+- *Readers of what a step defines* are resolved again after its sweep,
+  when a new source has its value. Before that, a new source read as
+  the default value and woke its readers.
+- *Check mode with interiors kept.* `Config::keep_interior` makes every
+  emission a member (the text form then shows them). Check mode runs
+  every live step again, dry, from the state before it. It compares the
+  output state, the members in order (kind, op and value) and the
+  definitions, so with interiors kept every leaf is compared (test
+  `kept_interiors_check_every_leaf`, 12 random-edit seeds).
+- *A step woken through its state* compares the new state with the one
+  it ran from (`in_ver`), not with the old value of the node before it.
+  So a step inserted before it that ends in the same state changes
+  nothing for it.
+
 **Speculative entry** (the unfold's parallelism). One chain is
 sequential: on a cold build its critical path would be the whole
 document. So the chain is also started at later points from predicted
@@ -4359,6 +4405,66 @@ the evaluation made. Three tiers:
   against the TeX layer's node counts when they come; the core reports
   bytes by tier (`Graph::mem`).
 
+**Sealed regions, as built (checkpoint 3a).** `Config::seal = F`
+turns sealing on. A sealed region is the first step of a run of a root
+unfold's steps, flagged and holding:
+- its entry: the first step's key, cursor, group and the version of the
+  state it ran from;
+- its output state (as its value);
+- its net definitions, with their sources kept as its members;
+- its reads from outside (deduplicated, each with its field);
+- its input length and its steps' and emissions' counts.
+
+Everything else of the run is dropped, and compaction frees it.
+
+- *Which runs.* A run holds only steps whose members are pure leaves
+  and constants. An effect, a publisher, a creator or a cross read
+  ends it, so a paragraph's end with its line breaker stays live.
+- *Cuts.* A run is cut only where the group in force is the one it
+  started in. Then no group the run opened is still open after it, and
+  no group open before it closes inside it. Groups opened and closed
+  inside are dropped with it. Among those balanced points a cut is made
+  where the step's identity (key, cursor) hashes to one in F
+  (content-defined, so a fresh build and an edited one cut alike).
+- *The bound* is in emissions, not steps: `Config::seal_max = 4096`.
+  Rationale: a first edit in a sealed region re-runs it whole. At the
+  measured 60–80 ns per emission that is at most about 0.3 ms, under 2%
+  of a 16.7 ms frame, leaving the frame to the edit itself and to
+  layout. Measured on the bench client (F = 16, 100 k steps): runs of
+  16 steps on average, p99 65, max 117; 178 emissions on average, max
+  1,287.
+- *A woken region unseals.* It runs again as its first step (`run_step`
+  clears the flag), and the steps after it are made again until one
+  meets the step that followed the region. Those steps are live and
+  stay live: a step that ran after the first build is sealed again only
+  after `Config::seal_quiet = 16` runs without running. A queue of such
+  steps, by the run they become due, drives a local pass: back to the
+  stretch's start (through each step's state operand) and forward to
+  the next sealed region. So only the first edit in a region pays for
+  it. The next edit there re-runs exactly the steps it would with
+  sealing off (test `a_second_edit_in_a_sealed_region_is_step_precise`:
+  equal step and evaluation counts).
+- *Fields at the edge.* A region's net definitions keep their sources'
+  values, so a reader of one field of them is woken only when that
+  field changes (the equal-width `\pageref` test, sealed).
+- *The name index.* A whole pass rebuilds each touched name's
+  definition and reader lists in one merge. A local pass splices the
+  run's range (from its first step to the node after it) in place.
+  Readers that land out of order during a run wait in a per-name buffer
+  and are merged once per run, not shifted in one by one.
+- *Compaction* (`Graph::compact`, run after sealing when at least half
+  the node table is dead): live nodes are moved into holes from the
+  top, the tables truncated, and the operand, reverse-edge and
+  definition arenas rebuilt from the live nodes. Root-level nodes never
+  move (the client holds their ids). Group ids embed their opening
+  step's id: they are remapped, and a dead step's slot that still names
+  a referenced group is not reused.
+- Equality: with sealing on (F = 1–4) and compaction after every run,
+  40 random-edit seeds give the same observable results as fresh
+  unsealed builds checked in full (`sealed_random_edits_equal_fresh_builds`).
+  The text form can differ: where a fresh build cuts and where an
+  edited one re-sealed are both valid.
+
 ### 7.12 The scheduler (primitive 7)
 
 - **Sequential** (the default, and wasm's): a cold build evaluates in
@@ -4470,6 +4576,22 @@ It is the debugging view, and it comes with checkpoint 2.
   A segment whose chain ended (`Done`) ends the unfold there.
 - Segments keep the main graph's slot and family predictions and never
   run the cross-run loop themselves.
+- *Bulk-append grafting* (checkpoint 3a). The worker that ran a segment
+  also packs it (`Graph::pack`). The nodes under its unfold are
+  renumbered from 0 in their order, every reference inside is made
+  relative, and values and the kinds' tables are moved out. What
+  crosses the segment's edge is listed apart:
+  - its operands that are the unfold's;
+  - its reads by name from before it, with the version each read;
+  - its readers and definitions by name.
+
+  The main thread appends: headers with ids shifted, values extended,
+  each name's readers and definitions appended in one go when they come
+  after the list's last. Then it fixes the listed edge operands, the
+  first step's state operand and the top steps' labels. The first
+  segment's sizes reserve the tables for the rest. The graft costs
+  about one store per byte the main graph keeps; that, with the page
+  faults on fresh table memory, is what still bounds W = 8 (7.18).
 - The parked step's group is remapped as well. Before that fix, a
   mismatched arrival resynchronised under a group id of another step,
   and a local definition outlived its group (found by the random test
@@ -4517,6 +4639,62 @@ unfold whose steps emit ten leaves and define one name.
 - *Rebuilds* are where the design pays. A changed element of a 100 k
   step unfold runs two steps, and a changed element of a 1 M scan steps
   to convergence, independent of size.
+
+### 7.18 Measured (checkpoint 3a)
+
+On accl (EPYC 7763, one node, 16 CPUs). The bench client is as in
+7.16: a node is a logical node (each step's ten or twenty leaves, its
+constant and the step), whether or not it is kept.
+
+| | k = 10 | k = 20 | target |
+|---|---|---|---|
+| cold build, 100 k steps, sequential | 84.9 ms, 70.8 ns/node | 117 ms, 53.3 ns/node | ≤ 50 ns: missed |
+| W = 2 | 48.3 ms (1.76×) | 64.5 ms (1.82×) | |
+| W = 4 | 25.1 ms (3.38×) | 35.6 ms (3.29×) | ≥ 2.4×: met |
+| W = 8 | 23.7 ms (3.58×) | 24.9 ms (4.71×) | ≥ 4.8×: missed |
+| live memory | 29.7 B/node | 16.2 B/node | ≤ 32: met |
+| retained (sealed, F = 16, compacted) | 1.7 B/node | 0.9 B/node | ≤ 16: met |
+| sealing pass | 12.9 ms (10.8 ns/node) | 12.4 ms | |
+
+- The toy client, 800 paragraphs: 88.7 ms in turn, 27.7 ms at W = 4
+  (3.20×) and 15.7 ms at W = 8 (5.67×), equal to the sequential build.
+- At 1 M steps (k = 10): 74 ns/node cold, 1.7 B/node retained,
+  sealing 13.2 ns/node.
+- *Sealed runs* (k = 10, 100 k): 6,177 runs, 16.2 steps on average,
+  p99 65, max 117; 178 emissions on average, max 1,287.
+- *Edits*, each changing one input element:
+  - with sealing off: median 3 µs (2 steps);
+  - a first edit in a sealed run: median 102 µs, max 487 µs (28 steps
+    on average);
+  - a second edit beside it: median 8 µs.
+
+  At 1 M steps the first edit's median is 839 µs and its max 45 ms. The
+  name index's sorted lists shift on each insertion, which is O(list):
+  that is the checkpoint-3b item "reader runs in O(log R)".
+- *Trade-off of transient interiors* (criterion, accl):
+  - one changed step of 100 k: 5.13 µs at checkpoint 2, 3.86 µs now;
+  - a name read by one leaf of a ten-leaf step: 3.78 µs (7.6 µs
+    locally before);
+  - one leaf of 1 M root leaves: 62 → 59 ns.
+
+  The cost is that a changed leaf re-runs its step: ten leaves, not one.
+- *Interiors* (`interior_sizes`): the bench client's step has 10
+  transient emissions (max and p99). The toy's are the same for 10,
+  100 and 1,000 words a paragraph.
+- *What bounds the misses.*
+  - Cold build: about 6,700 instructions a step at k = 10 (accl IPC
+    about 2.5). A leaf costs about 450 instructions (emission record,
+    eager evaluation, sweep visit). A step's fixed part is about 2,000:
+    three name lookups, a node and its step record, its definition,
+    operands, reverse edges and a reader entry. Page faults on fresh
+    table memory are 5–10%.
+  - W = 8: the main thread's graft, about 22 ms per 100 k steps. It
+    writes about 390 bytes a step: two 64-byte headers, a 64-byte step
+    record, values, operands, reverse edges, and a definition kept
+    twice (step record and name index, 40 bytes each). The next steps
+    are the byte diet: one definition record indexed by the name
+    lists, a 40-byte step record, and narrower headers. They cut the
+    graft and the cold build alike.
 
 ### 7.17 Dependencies
 

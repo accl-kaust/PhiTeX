@@ -75,13 +75,18 @@ fn speculative_entry_is_faster() {
     let src = doc(800);
     let mut best1 = f64::MAX;
     let mut best4 = f64::MAX;
+    let mut best8 = f64::MAX;
     for _ in 0..3 {
         best1 = best1.min(build(&src, 1).1);
         best4 = best4.min(build(&src, 4).1);
+        if threads >= 8 {
+            best8 = best8.min(build(&src, 8).1);
+        }
     }
     eprintln!(
-        "cold build: 1 worker {best1:.3} s, 4 workers {best4:.3} s ({:.2}x)",
-        best1 / best4
+        "cold build: 1 worker {best1:.4} s, 4 workers {best4:.4} s ({:.2}x), 8 workers {best8:.4} s ({:.2}x)",
+        best1 / best4,
+        best1 / best8
     );
     assert!(
         best4 < best1 * 0.8,
