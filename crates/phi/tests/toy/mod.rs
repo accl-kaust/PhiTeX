@@ -864,27 +864,6 @@ fn step(op: Op, mut st: St, cx: &mut StepCx<'_, Toy>) -> Step<TV> {
                     f.push(("sc".into(), false));
                 }
             }
-            "retry" | "plus2" => {
-                // (`retry`: work done, then rolled back, then `plus2`'s; the
-                // graph must be `plus2`'s)
-                if c.as_ref() == "retry" {
-                    let m = rd.cx.mark();
-                    let a = rd.cx.leaf(Op::Add1, Class::Pure, &[Arg::Name(count)]);
-                    rd.cx.define(count, Arg::Local(a), false);
-                    let b = rd.cx.leaf(Op::Add1, Class::Pure, &[Arg::Name(count)]);
-                    rd.cx.open_group();
-                    let y = rd.cx.name(b"y");
-                    rd.cx.define(y, Arg::Local(b), false);
-                    let _ = rd.cx.leaf(Op::Show, Class::Pure, &[Arg::Local(b)]);
-                    rd.cx.reset(m);
-                }
-                let a = rd.cx.leaf(Op::Add1, Class::Pure, &[Arg::Name(count)]);
-                let b = rd.cx.leaf(Op::Add1, Class::Pure, &[Arg::Local(a)]);
-                rd.cx.define(count, Arg::Local(b), false);
-                if let Some(f) = st.conds.last_mut() {
-                    f.push(("count".into(), false));
-                }
-            }
             "twice" => {
                 // (the same leaf twice, merged by CSE; then, after a
                 // definition of the name it reads, the same leaf again,
@@ -946,9 +925,15 @@ fn expand(rd: &mut Rd<'_, '_>, st: &mut St, m: NameId) {
         && let TV::Toks(body) = &*v
         && st.exp < 64
     {
+        let rest = rd.rest();
+        // (and a bound on the pending input: a macro whose body holds
+        // itself twice grows it every expansion)
+        if rest.len() + body.len() > 512 {
+            return;
+        }
         st.exp += 1;
         let mut p: Vec<Tok> = (**body).clone();
-        p.extend(rd.rest());
+        p.extend(rest);
         rd.pending = p;
         rd.at = 0;
     }

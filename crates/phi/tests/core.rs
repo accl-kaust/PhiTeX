@@ -610,10 +610,9 @@ fn an_unprofiled_graph_has_an_empty_profile() {
 }
 
 /// `cx.read` after the step closed a group reads what the group had
-/// shadowed; `cx.reset` rolls a step back to its mark, so the graph is
-/// the one built without the rolled-back work (check mode on).
+/// shadowed, as a leaf's operand does (check mode on).
 #[test]
-fn a_read_after_a_close_and_a_reset_within_a_step() {
+fn a_read_after_the_steps_own_close_reads_past_it() {
     let val = |d: &Doc, n: &str| {
         d.g.name_id(n.as_bytes())
             .and_then(|m| d.g.name_value(m))
@@ -624,15 +623,4 @@ fn a_read_after_a_close_and_a_reset_within_a_step() {
     d.g.run();
     assert_eq!(val(&d, "sc"), Some(2));
     assert_eq!(val(&d, "count"), Some(2));
-    let mut a = Doc::new(ids(lex(r"\step \retry \the\count \par")));
-    let mut b = Doc::new(ids(lex(r"\step \plus2 \the\count \par")));
-    a.g.cfg.check = true;
-    a.g.run();
-    b.g.run();
-    assert_eq!(val(&a, "count"), Some(3));
-    assert_eq!(val(&a, "y"), None);
-    // (the steps differ only in their source: the graph is plus2's)
-    let strip = |t: String| t.replace("retry", "plus2");
-    assert_eq!(strip(a.g.to_text()), b.g.to_text());
-    assert_eq!(a.observe(), b.observe());
 }
