@@ -4940,8 +4940,8 @@ about 10^8 nodes.
   run in parallel, but the coordinator grafts them one after another,
   and at this size the graft and the memory bandwidth dominate. A
   parallel graft is the next lever if the 10^8 cold build matters.
-- Preamble edit with parallel rounds (20k steps re-run, about 25 us an
-  op): 589 ms at W=1, 199 ms at W=4, 111 ms at W=8 (5.3x). Every
+- Preamble edit with parallel rounds (20k steps re-run, about 29 us a
+  step): 589 ms at W=1, 199 ms at W=4, 111 ms at W=8 (5.3x). Every
   outcome was used (19,999 of 19,999).
 - Memo, every Add memoized (1M steps): 136.6 ns/node against 77.5, at
   10M probes and 99.99% hits. A probe costs about 60 ns on accl.
