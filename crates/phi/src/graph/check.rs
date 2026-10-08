@@ -14,7 +14,7 @@ use crate::lang::{Lang, Step};
 use crate::seq::ElemId;
 use crate::value::Value;
 
-impl<L: Lang> Graph<L> {
+impl<L: Lang, const P: bool> Graph<L, P> {
     /// Every live step run again and compared (sealed regions are not:
     /// their interiors are gone by design).
     pub(super) fn check_steps(&self) {
@@ -59,26 +59,28 @@ impl<L: Lang> Graph<L> {
                 opened: 0,
                 em: &mut em,
                 ext: None,
+                ext_spell: None,
+                steps: &self.steps,
+                unfolds: &self.unfolds,
+                closes: &self.closes,
                 keep: self.cfg.keep_interior,
                 cancel: &self.cancel,
-                memo: self.memo_on.then_some(&*self.memo),
+                hook: None,
+                tick: crate::profile::Tick::default(),
                 _brand: PhantomData,
             };
             let args = Args::of(&self.n, &uo[2..]);
             let st = self.n.read(&prev_o);
             L::step(self.n.h[s as usize].op, &st, &args, &mut cx)
         };
-        let out = match &res {
-            Step::Next { st, .. } | Step::Done(st) => st.ver(),
-        };
-        assert!(
-            out == self.n.val[s as usize].ver(),
-            "check: step %{s} makes {:?} but holds {:?}",
-            match res {
-                Step::Next { st, .. } | Step::Done(st) => st,
-            },
-            self.n.val[s as usize]
-        );
+        // (a call's result is the called unfold's value, checked with it)
+        if let Step::Next { st, .. } | Step::Done(st) = &res {
+            assert!(
+                st.ver() == self.n.val[s as usize].ver(),
+                "check: step %{s} makes {st:?} but holds {:?}",
+                self.n.val[s as usize]
+            );
+        }
         // its members, in order: the big emissions
         let kids = self.children(s);
         let mut bigs = em.bigs.clone();

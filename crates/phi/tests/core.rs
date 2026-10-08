@@ -513,3 +513,286 @@ fn equal_leaves_of_a_step_are_one_and_a_definition_parts_them() {
     assert_eq!(d.observe(), f.observe());
     assert_eq!(d.g.to_text(), f.g.to_text());
 }
+
+/// The profile (DESIGN 7.21): steps and their re-runs on edits by op,
+/// regions that re-ran, sampled leaf costs; a snapshot that a later
+/// graph loads; `tune` does nothing while work is queued, and its memo
+/// opt-in keeps every value (check mode on).
+#[test]
+fn a_profiled_graph_reports_and_tunes_without_changing_results() {
+    let mut src = String::new();
+    for p in 0..200 {
+        src += &format!(r"w{p} \step \the\count x{p} \par ");
+    }
+    let mut d: DocP<true> = DocP::new(ids(lex(&src)));
+    d.g.cfg.check = true;
+    d.g.cfg.memo_probe_ns = 0;
+    d.g.cfg.tune_min_samples = 1;
+    d.g.cfg.tune_min_keyed = 4;
+    d.g.run();
+    let rep = d.g.profile();
+    let doc = rep
+        .ops
+        .iter()
+        .find(|(o, _)| *o == Op::Doc)
+        .map(|x| x.1.clone())
+        .expect("the document's steps");
+    assert!(doc.steps > 500 && doc.reruns == 0, "{doc:?}");
+    assert!(
+        rep.ops.iter().any(|(_, s)| s.timed > 0 && s.evals > 0),
+        "{:?}",
+        rep.ops
+    );
+    // edits: the edited paragraph's steps re-run, as a region
+    for k in 0..6 {
+        let at = d.toks.iter().position(|t| t.1.text() == "w7").expect("w7");
+        d.splice(at, 1, lex(&format!("w7{k} \\step")));
+        d.g.run();
+        let at = d
+            .toks
+            .iter()
+            .position(|t| t.1.text() == format!("w7{k}"))
+            .expect("edit");
+        d.splice(at, 2, lex("w7"));
+        assert!(d.g.tune().busy, "work is queued");
+        d.g.run();
+        d.g.tune();
+    }
+    let rep = d.g.profile();
+    let doc = rep
+        .ops
+        .iter()
+        .find(|(o, _)| *o == Op::Doc)
+        .expect("doc")
+        .1
+        .clone();
+    assert!(doc.reruns > 0, "{doc:?}");
+    assert!(
+        !rep.regions.is_empty() && rep.regions[0].1.runs >= 2,
+        "{:?}",
+        rep.regions
+    );
+    let mut f = Doc::new(d.toks.clone());
+    f.g.run();
+    assert_eq!(d.observe(), f.observe());
+    // the snapshot round-trips and a later graph starts from it
+    let snap = d.g.snapshot();
+    let back = phi::profile::Snapshot::from_bytes(&snap.to_bytes()).expect("a snapshot");
+    assert_eq!(back, snap);
+    let mut e: DocP<true> = DocP::new(d.toks.clone());
+    e.g.load_profile(&back);
+    e.g.run();
+    let t = e.g.tune();
+    let memo_before = snap.ops.iter().filter(|o| o.memo).count();
+    assert!(t.memo_in.len() >= memo_before.min(1), "{t:?}");
+    let rep = e.g.profile();
+    let doc = rep
+        .ops
+        .iter()
+        .find(|(o, _)| *o == Op::Doc)
+        .expect("doc")
+        .1
+        .clone();
+    assert!(
+        doc.reruns > 0 && doc.steps > 1000,
+        "the earlier session's counts: {doc:?}"
+    );
+    assert_eq!(e.observe(), f.observe());
+}
+
+/// A graph that does not profile reports nothing and `tune` does nothing.
+#[test]
+fn an_unprofiled_graph_has_an_empty_profile() {
+    let mut d = Doc::new(ids(lex(r"a \step b \par")));
+    d.g.run();
+    assert!(d.g.profile().ops.is_empty());
+    assert_eq!(d.g.tune(), phi::profile::Tuned::default());
+}
+
+/// `cx.read` after the step closed a group reads what the group had
+/// shadowed, as a leaf's operand does (check mode on).
+#[test]
+fn a_read_after_the_steps_own_close_reads_past_it() {
+    let val = |d: &Doc, n: &str| {
+        d.g.name_id(n.as_bytes())
+            .and_then(|m| d.g.name_value(m))
+            .map(|v| v.int())
+    };
+    let mut d = Doc::new(ids(lex(r"\step \step \scoped \par")));
+    d.g.cfg.check = true;
+    d.g.run();
+    assert_eq!(val(&d, "sc"), Some(2));
+    assert_eq!(val(&d, "count"), Some(2));
+}
+
+/// `defined_reaching` lists every name a definition reaches, unrecorded;
+/// `defined_since(p0)` the names whose reaching definition may have
+/// changed since an earlier step: a group closing in between ends the
+/// definitions made in it, even one made before `p0`, and `\\gdef` reaches
+/// past its group. An edit that removes `p0`'s step makes it `None`.
+#[test]
+fn the_names_reaching_a_step_and_those_defined_since_an_earlier_one() {
+    let src = r"\def\a{1} { \def\b{2} \here \def\c{3} \gdef\d{4} } \since \reach \par";
+    let mut d = Doc::new(ids(lex(src)));
+    d.g.cfg.check = true;
+    d.g.run();
+    let mut since = SINCE
+        .with(|c| c.borrow().clone())
+        .expect("p0 is a step before");
+    since.sort();
+    assert_eq!(
+        since,
+        vec![
+            ("b".to_string(), None),
+            ("c".to_string(), None),
+            ("d".to_string(), Some("4".to_string()))
+        ]
+    );
+    let mut reach = REACH.with(|c| c.borrow().clone());
+    reach.sort();
+    assert_eq!(
+        reach,
+        vec![
+            ("a".to_string(), "1".to_string()),
+            ("d".to_string(), "4".to_string())
+        ]
+    );
+    // (unrecorded: the step does not read `a`, so a new `a` does not run it)
+    let at = d.toks.iter().position(|t| t.1.text() == "1").expect("1");
+    d.splice(at, 1, lex("9"));
+    let r = d.g.run();
+    assert!(r.steps <= 2, "{r:?}");
+    // the step at p0 removed: None
+    let at = d
+        .toks
+        .iter()
+        .position(|t| t.1.text() == "\\here")
+        .expect("here");
+    d.splice(at, 1, vec![]);
+    let at = d
+        .toks
+        .iter()
+        .position(|t| t.1.text() == "\\since")
+        .expect("since");
+    d.splice(at, 1, lex("\\since \\relax"));
+    d.g.run();
+    assert_eq!(SINCE.with(|c| c.borrow().clone()), None);
+}
+
+/// A document with named sources (files) set before it runs.
+fn with_files(src: &str, files: &[(&str, &str)], workers: usize) -> Doc {
+    let mut g: Graph<Toy> = Graph::new();
+    g.cfg.workers = workers;
+    g.cfg.check = workers == 1;
+    for (k, f) in files {
+        // (a file's tokens have identities of their own, apart from the
+        // document's)
+        let toks: Vec<(ElemId, Tok)> = lex(f)
+            .into_iter()
+            .enumerate()
+            .map(|(i, t)| (ElemId(((i as u64 + 1) << 20) | (1 << 60)), t))
+            .collect();
+        g.source(k.as_bytes(), TV::Seq(seq_of(&toks)));
+    }
+    Doc::with(ids(lex(src)), g)
+}
+
+fn file_toks(f: &str) -> Vec<(ElemId, Tok)> {
+    lex(f)
+        .into_iter()
+        .enumerate()
+        .map(|(i, t)| (ElemId(((i as u64 + 1) << 20) | (1 << 60)), t))
+        .collect()
+}
+
+/// Named sources and continuation calls (DESIGN 7.22): `\input{f}` calls
+/// the file's unfold and the document goes on from its last state; an
+/// edit inside the file re-runs the file from the edit and stops where
+/// it converges; a file whose last state changed resumes the document
+/// after the call; a file appearing wakes its `\iffileexists` reader.
+#[test]
+fn an_input_file_is_a_call_the_document_resumes_after() {
+    let main = r"a b \input{f} c d \par e \the\count \par";
+    let f = r"x y \step \par w1 w2 w3 w4 w5 \par z";
+    let mut d = with_files(main, &[("f", f)], 1);
+    d.g.run();
+    let count = |d: &Doc| {
+        d.g.name_id(b"count")
+            .and_then(|m| d.g.name_value(m))
+            .map(|v| v.int())
+    };
+    assert_eq!(count(&d), Some(1), "the file's \\step");
+    let fresh = |d: &Doc, f: &str| {
+        let mut e = with_files(main, &[("f", f)], 1);
+        e.toks = d.toks.clone();
+        e.g.set(e.input, TV::Seq(seq_of(&e.toks)));
+        e.g.run();
+        e
+    };
+    assert_eq!(d.observe(), fresh(&d, f).observe());
+    // an edit inside the file, its last state the same: the file's steps
+    // from the edit to where they converge, and the document's call step
+    let fnode = d.g.source(b"f", TV::Seq(seq_of(&file_toks(f))));
+    let f2 = r"x y \step \par w1 w2 W3 w4 w5 \par z";
+    d.g.set(fnode, TV::Seq(seq_of(&file_toks(f2))));
+    let r = d.g.run();
+    assert!(r.steps <= 6, "{r:?}");
+    assert_eq!(d.observe(), fresh(&d, f2).observe());
+    // a last state that changed (an open conditional at the file's end):
+    // the document resumes after the call
+    let f3 = r"x y \step \par w1 w2 W3 w4 w5 \par z \ifzero\count p \else q";
+    d.g.set(fnode, TV::Seq(seq_of(&file_toks(f3))));
+    let r3 = d.g.run();
+    assert!(r3.steps > r.steps, "{r3:?}");
+    assert_eq!(d.observe(), fresh(&d, f3).observe());
+    // a file appearing and going: its reader runs again each time
+    let mut e = with_files(r"\iffileexists{g}", &[], 1);
+    e.g.run();
+    let par = |d: &Doc| {
+        d.g.name_id(b"par@")
+            .and_then(|m| d.g.name_value(m))
+            .map(|v| format!("{v:?}"))
+            .unwrap_or_default()
+    };
+    let before = par(&e);
+    assert!(before.contains("\"no\""), "{before}");
+    e.g.source(b"g", TV::Seq(seq_of(&file_toks("hello"))));
+    let r = e.g.run();
+    assert!(r.steps >= 1, "{r:?}");
+    assert!(par(&e).contains("\"yes\""), "woken: {}", par(&e));
+    assert!(e.g.remove_source(b"g"));
+    e.g.run();
+    let mut f0 = with_files(r"\iffileexists{g}", &[], 1);
+    f0.g.run();
+    assert_eq!(e.observe(), f0.observe());
+}
+
+/// Speculative entry with calls: a book whose chapters are `\input`s,
+/// built cold with workers, equals the sequential build.
+#[test]
+fn chapters_called_from_a_book_build_in_parallel_as_in_turn() {
+    let main = r"\input{c1} \par \input{c2} \par \input{c3} \par end \par";
+    let mut chapters = Vec::new();
+    for c in 1..=3 {
+        let mut s = String::new();
+        for p in 0..30 {
+            s += &format!(r"c{c}w{p} \step more words here \par ");
+        }
+        chapters.push((format!("c{c}"), s));
+    }
+    let files: Vec<(&str, &str)> = chapters
+        .iter()
+        .map(|(k, s)| (k.as_str(), s.as_str()))
+        .collect();
+    let mut a = with_files(main, &files, 1);
+    a.g.run();
+    let mut b = with_files(main, &files, 3);
+    b.g.run();
+    assert_eq!(a.g.to_text(), b.g.to_text());
+    assert_eq!(a.observe(), b.observe());
+    let count =
+        a.g.name_id(b"count")
+            .and_then(|m| a.g.name_value(m))
+            .map(|v| v.int());
+    assert_eq!(count, Some(90));
+}

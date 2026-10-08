@@ -9,7 +9,7 @@ use crate::graph::{Graph, Kind, NONE, Opd};
 use crate::lang::{Class, Lang};
 use crate::value::Value;
 
-impl<L: Lang> Graph<L> {
+impl<L: Lang, const P: bool> Graph<L, P> {
     /// The canonical text of the graph. Element identities and keys are
     /// left out: they decide reuse, never values ([`Graph::to_text_ids`]
     /// shows them).

@@ -80,6 +80,8 @@ pub struct Memo<V, E: Evict = Lru> {
     /// Probes, and the ones that found an entry.
     pub probes: u64,
     pub hits: u64,
+    /// Probes and hits per op (by `Lang::op_tag`), for the profile.
+    pub(crate) per_tag: HashMap<u64, (u64, u64)>,
 }
 
 impl<V: Clone> Default for Memo<V, Lru> {
@@ -101,6 +103,7 @@ impl<V: Clone, E: Evict> Memo<V, E> {
             evict,
             probes: 0,
             hits: 0,
+            per_tag: HashMap::default(),
         }
     }
 
@@ -126,6 +129,13 @@ impl<V: Clone, E: Evict> Memo<V, E> {
         self.hits += 1;
         self.evict.touch(k, *b);
         Some(v)
+    }
+
+    /// A probe for op `tag` counted (a hit or not).
+    pub(crate) fn note(&mut self, tag: u64, hit: bool) {
+        let e = self.per_tag.entry(tag).or_default();
+        e.0 += 1;
+        e.1 += u64::from(hit);
     }
 
     /// Store `v` under `k` (`bytes`: what it holds), dropping the

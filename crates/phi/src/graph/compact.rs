@@ -7,7 +7,7 @@
 use super::{DEAD, DefRec, Graph, Kind, NOGROUP, NONE, Opd, Pos, Rev, Set, StepInfo};
 use crate::lang::Lang;
 
-impl<L: Lang> Graph<L> {
+impl<L: Lang, const P: bool> Graph<L, P> {
     /// Compact if at least half the node table is dead.
     pub(super) fn compact_if_sparse(&mut self) {
         let dead = self.free.len();

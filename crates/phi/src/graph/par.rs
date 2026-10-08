@@ -52,7 +52,7 @@ pub(super) struct Dry<L: Lang> {
     at: ElemId,
 }
 
-impl<L: Lang> Graph<L> {
+impl<L: Lang, const P: bool> Graph<L, P> {
     /// Step `s`'s op run against the graph as it is, read only.
     pub(super) fn dry_step(&self, s: u32, mut em: Emit<L>) -> Dry<L> {
         em.clear();
@@ -85,9 +85,14 @@ impl<L: Lang> Graph<L> {
                 opened: 0,
                 em: &mut em,
                 ext: self.ext.as_deref(),
+                ext_spell: self.ext_spell.as_deref().map(Vec::as_slice),
+                steps: &self.steps,
+                unfolds: &self.unfolds,
+                closes: &self.closes,
                 keep: self.cfg.keep_interior,
                 cancel: &self.cancel,
-                memo: self.memo_on.then_some(&*self.memo),
+                hook: (P || self.hook.memo_on).then_some(&self.hook),
+                tick: self.tick,
                 _brand: PhantomData,
             };
             let args = Args::of(&self.n, &uo[2..]);
@@ -262,8 +267,9 @@ impl<L: Lang> Graph<L> {
     ///
     /// If a worker panicked holding the store.
     pub fn set_memo_budget(&mut self, bytes: usize) {
-        self.memo_on = bytes > 0;
-        let mut m = self.memo.lock().expect("the memo store");
+        self.hook.memo_on = bytes > 0;
+        self.hook.settle();
+        let mut m = self.hook.memo.lock().expect("the memo store");
         m.budget = bytes;
         if m.bytes() > bytes {
             *m = Memo::default();
@@ -277,7 +283,7 @@ impl<L: Lang> Graph<L> {
     ///
     /// If a worker panicked holding the store.
     pub fn memo_stats(&self) -> (usize, usize, u64, u64) {
-        let m = self.memo.lock().expect("the memo store");
+        let m = self.hook.memo.lock().expect("the memo store");
         (m.len(), m.bytes(), m.probes, m.hits)
     }
 
@@ -288,7 +294,11 @@ impl<L: Lang> Graph<L> {
     /// If a worker panicked holding the store.
     pub fn save_memo<C: Codec<L::Val>>(&self, c: &C) -> Vec<u8> {
         let mut out = Vec::new();
-        self.memo.lock().expect("the memo store").save(c, &mut out);
+        self.hook
+            .memo
+            .lock()
+            .expect("the memo store")
+            .save(c, &mut out);
         out
     }
 
@@ -302,7 +312,7 @@ impl<L: Lang> Graph<L> {
     ///
     /// If a worker panicked holding the store.
     pub fn load_memo<C: Codec<L::Val>>(&mut self, c: &C, img: &[u8]) -> Result<(), MemoError> {
-        self.memo.lock().expect("the memo store").load(c, img)
+        self.hook.memo.lock().expect("the memo store").load(c, img)
     }
 
     /// The flag that cancels a run (another thread may set it; the run

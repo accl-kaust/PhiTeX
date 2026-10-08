@@ -55,6 +55,12 @@ pub enum Step<V> {
     Next { st: V, key: u64 },
     /// The unfold's result.
     Done(V),
+    /// Go on after the unfold this step called (`StepCx::call`): its
+    /// result is this step's value and the next step's state, and the
+    /// next step has this key. A continuation call: `\\input` and
+    /// `\\include`, whose file is a nested unfold the document resumes
+    /// after.
+    Call { key: u64 },
 }
 
 /// A place a speculative segment may start (DESIGN 7.4).

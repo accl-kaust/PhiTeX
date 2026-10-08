@@ -58,7 +58,30 @@ const SNIPPETS: &[&str] = &[
     "\\addto{h}{q}",
     "\\usehook{h}",
     "\\twice",
+    "\\scoped",
+    "{ \\def\\x{7} \\scoped }",
+    "\\input{f}",
+    "\\input{g}",
+    "\\iffileexists{f}",
+    "\\iffileexists{nof}",
 ];
+
+/// The files every random document can `\\input`: `f` (a paragraph,
+/// a definition and a `\\step`) and `g` (an open conditional: the
+/// document goes on in it).
+fn files<const P: bool>(g: &mut phi::Graph<Toy, P>) {
+    for (k, src) in [
+        ("f", r"in1 \def\x{fx} \step \par in2"),
+        ("g", r"g1 \ifzero\count gy \else gn"),
+    ] {
+        let toks: Vec<(phi::ElemId, Tok)> = lex(src)
+            .into_iter()
+            .enumerate()
+            .map(|(i, t)| (phi::ElemId(((i as u64 + 1) << 20) | (1 << 60)), t))
+            .collect();
+        g.source(k.as_bytes(), TV::Seq(seq_of(&toks)));
+    }
+}
 
 fn snippet(r: &mut Rng) -> Vec<Tok> {
     lex(SNIPPETS[r.below(SNIPPETS.len())])
@@ -74,10 +97,12 @@ fn random_doc(r: &mut Rng, n: usize) -> Vec<Tok> {
 
 fn fresh(d: &Doc) -> Doc {
     let mut f = Doc::new(d.toks.clone());
+    files(&mut f.g);
     f.g.cfg.check = true;
     f.g.run();
     // parallel (speculative entry at every paragraph) equals in turn
     let mut p = Doc::new(d.toks.clone());
+    files(&mut p.g);
     p.g.cfg.workers = 3;
     p.g.cfg.check = true;
     p.g.run();
@@ -99,7 +124,7 @@ fn fresh(d: &Doc) -> Doc {
     if p.observe() != f.observe() {
         let src: Vec<String> = d.toks.iter().map(|t| t.1.text()).collect();
         eprintln!("SRC {}", src.join(" "));
-        for n in ["a", "b", "x", "y", "count"] {
+        for n in ["a", "b", "x", "y", "count", "par@"] {
             if let (Some(i), Some(j)) = (p.g.name_id(n.as_bytes()), f.g.name_id(n.as_bytes())) {
                 eprintln!(
                     "{n} parallel:\n{}in turn:\n{}",
@@ -138,16 +163,34 @@ fn run_seed(seed: u64, len: usize, edits: usize) {
 fn run_seed_with(seed: u64, len: usize, edits: usize, keep: bool) {
     let mut r = Rng(seed.wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1);
     let mut d = Doc::new(ids(random_doc(&mut r, len)));
+    files(&mut d.g);
     d.g.cfg.check = true;
     d.g.cfg.keep_interior = keep;
     // (the same document rebuilt with parallel rounds: equal after each edit)
     let mut dp = Doc::new(d.toks.clone());
+    files(&mut dp.g);
     dp.g.cfg.workers = 2;
     dp.g.cfg.round_min_ns = 0;
     dp.g.cfg.check = true;
     dp.g.cfg.keep_interior = keep;
     // (with a small memo store: hits, misses and evictions all exact)
     dp.g.set_memo_budget(4096);
+    // (and profiled, tuned when idle after every run: auto memo opt-in
+    // with the probe cost set so it opts in, keeps and opts out, profile
+    // driven sealing; check mode on)
+    let mut dt: DocP<true> = DocP::new(d.toks.clone());
+    files(&mut dt.g);
+    dt.g.cfg.check = true;
+    dt.g.cfg.keep_interior = keep;
+    dt.g.cfg.memo_probe_ns = [0, 40, 400][(seed % 3) as usize];
+    dt.g.cfg.tune_min_samples = 1;
+    dt.g.cfg.tune_min_keyed = 4;
+    dt.g.cfg.auto_memo_bytes = 1 << 14;
+    dt.g.cfg.seal = 2 + (seed % 3) as u32;
+    dt.g.cfg.seal_quiet = 2;
+    dt.g.cfg.hot_runs = 2;
+    dt.g.run();
+    dt.g.tune();
     dp.g.run();
     d.g.run();
     assert_eq!(d.observe(), fresh(&d).observe(), "seed {seed}: cold");
@@ -168,6 +211,21 @@ fn run_seed_with(seed: u64, len: usize, edits: usize, keep: bool) {
         dp.g.set(dp.input, TV::Seq(seq_of(&dp.toks)));
         let rp = dp.g.run();
         DRY.with(|c| c.set(c.get() + rp.dry_used));
+        dt.toks = d.toks.clone();
+        dt.g.set(dt.input, TV::Seq(seq_of(&dt.toks)));
+        dt.g.run();
+        let tu = dt.g.tune();
+        TUNED.with(|c| {
+            let mut c = c.borrow_mut();
+            c.0 += tu.memo_in.len() as u64;
+            c.1 += tu.memo_out.len() as u64;
+            c.2 += tu.sealed;
+        });
+        assert_eq!(
+            dt.observe(),
+            d.observe(),
+            "seed {seed}, edit {e}: profiled and tuned differs"
+        );
         assert_eq!(
             dp.g.to_text(),
             d.g.to_text(),
@@ -223,6 +281,8 @@ fn run_seed_with(seed: u64, len: usize, edits: usize, keep: bool) {
 
 thread_local! {
     static DRY: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// What `tune` did: memo opt-ins, opt-outs, steps sealed.
+    static TUNED: std::cell::RefCell<(u64, u64, u64)> = const { std::cell::RefCell::new((0, 0, 0)) };
 }
 
 #[test]
@@ -237,6 +297,12 @@ fn random_edits_equal_fresh_builds() {
         let used = DRY.with(|c| c.get());
         eprintln!("dry outcomes used: {used}");
         assert!(used > 0, "no parallel round's outcome was used");
+        let t = TUNED.with(|c| *c.borrow());
+        eprintln!(
+            "tune: {} memo opt-ins, {} opt-outs, {} steps sealed",
+            t.0, t.1, t.2
+        );
+        assert!(t.0 > 0 && t.1 > 0 && t.2 > 0, "tune did not act: {t:?}");
     }
 }
 
@@ -246,6 +312,7 @@ fn random_edits_equal_fresh_builds() {
 fn run_seed_sealed(seed: u64, len: usize, edits: usize, f: u32) {
     let mut r = Rng(seed.wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1);
     let mut d = Doc::new(ids(random_doc(&mut r, len)));
+    files(&mut d.g);
     d.g.cfg.seal = f;
     let mut sealed = d.g.run().sealed;
     // (compacted after every run, whether sparse or not)

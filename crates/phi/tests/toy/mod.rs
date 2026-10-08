@@ -177,13 +177,24 @@ pub enum Op {
     UseW,
     /// The words of a hook (an append list), joined; counted (`USEH`).
     Hook,
+    /// An `\\input` file (a called unfold): as the document, its result
+    /// its last state, which the document goes on from.
+    File,
 }
+
+/// Names with their values shown (`None`: undefined).
+pub type Shown = Vec<(String, Option<String>)>;
 
 thread_local! {
     /// `Op::UseW` evaluations on this thread.
     pub static USEW: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     /// `Op::Hook` evaluations on this thread.
     pub static USEH: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// `\\here`'s position, and what `\\since` and `\\reach` saw (the
+    /// names `a`, `b`, `c`, `d`, `count` only, with their values shown).
+    pub static HERE: std::cell::Cell<Option<phi::Here>> = const { std::cell::Cell::new(None) };
+    pub static SINCE: std::cell::RefCell<Option<Shown>> = const { std::cell::RefCell::new(None) };
+    pub static REACH: std::cell::RefCell<Vec<(String, String)>> = const { std::cell::RefCell::new(Vec::new()) };
     /// Line breaker scan elements stepped on this thread.
     pub static BRK: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
@@ -606,6 +617,8 @@ fn step(op: Op, mut st: St, cx: &mut StepCx<'_, Toy>) -> Step<TV> {
     let Some(t) = rd.next() else {
         return if matches!(op, Op::Box(_)) {
             Step::Done(TV::Int(st.width))
+        } else if op == Op::File {
+            Step::Done(TV::st(st))
         } else {
             Step::Done(TV::Unit)
         };
@@ -621,6 +634,7 @@ fn step(op: Op, mut st: St, cx: &mut StepCx<'_, Toy>) -> Step<TV> {
         rd.cx.define(par, Arg::Local(p), true);
     }
     let here = rd.cx.cursor().0 ^ (rd.at as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+    let mut called = false;
     match t {
         Tok::Word(w) => {
             if matches!(op, Op::Box(_)) {
@@ -635,7 +649,7 @@ fn step(op: Op, mut st: St, cx: &mut StepCx<'_, Toy>) -> Step<TV> {
         Tok::Close => rd.cx.close_group(),
         Tok::Cs(c) => match &*c {
             "par" => {
-                if op == Op::Doc {
+                if matches!(op, Op::Doc | Op::File) {
                     let init = rd.cx.lit(dp_init());
                     let w = rd.cx.lit(TV::Int(WIDTH));
                     let lines = rd.cx.scan(
@@ -849,6 +863,79 @@ fn step(op: Op, mut st: St, cx: &mut StepCx<'_, Toy>) -> Step<TV> {
                 let pr2 = rd.cx.name(b"pr2");
                 rd.cx.define(pr2, Arg::Local(x), true);
             }
+            "here" => {
+                let h = rd.cx.here();
+                HERE.with(|c| c.set(Some(h)));
+            }
+            "since" | "reach" => {
+                let ids: Vec<(String, NameId)> = ["a", "b", "c", "d", "count"]
+                    .iter()
+                    .map(|n| (n.to_string(), rd.cx.name(n.as_bytes())))
+                    .collect();
+                let show = |v: &TV| match v {
+                    TV::Toks(t) => t.iter().map(Tok::text).collect::<Vec<_>>().join(" "),
+                    v => format!("{}", v.int()),
+                };
+                let spell = |m: NameId| ids.iter().find(|x| x.1 == m).map(|x| x.0.clone());
+                if c.as_ref() == "since" {
+                    let r = HERE.with(|c| c.get()).and_then(|h| rd.cx.defined_since(h));
+                    let r = r.map(|l| {
+                        l.into_iter()
+                            .filter_map(|(m, v)| Some((spell(m)?, v.map(|v| show(&v)))))
+                            .collect::<Vec<_>>()
+                    });
+                    SINCE.with(|c| *c.borrow_mut() = r);
+                } else {
+                    let r: Vec<(String, String)> = rd
+                        .cx
+                        .defined_reaching()
+                        .into_iter()
+                        .filter_map(|(m, v)| Some((spell(m)?, show(&v))))
+                        .collect();
+                    REACH.with(|c| *c.borrow_mut() = r);
+                }
+            }
+            "input" => {
+                // (a file, read as a named source: a continuation call, from
+                // input the document read itself, not a macro's)
+                let f = rd.word();
+                if rd.rest().is_empty()
+                    && let Some(src) = rd.cx.source(f.as_bytes())
+                {
+                    let init = rd.cx.lit(TV::st(St {
+                        conds: st.conds.clone(),
+                        width: st.width,
+                        ..St::default()
+                    }));
+                    rd.cx.call(Op::File, src, Arg::Local(init), &[]);
+                    called = true;
+                }
+            }
+            "iffileexists" => {
+                let f = rd.word();
+                let w = if rd.cx.source(f.as_bytes()).is_some() {
+                    "yes"
+                } else {
+                    "no"
+                };
+                let l = rd.cx.lit(TV::Word(w.into(), w.len() as i64));
+                word(op, par, &mut rd, Arg::Local(l), here);
+            }
+            "scoped" => {
+                // (a group opened, `count` redefined in it and closed, all in
+                // this step; then `count` read: the outer one, in `sc`)
+                rd.cx.open_group();
+                let k = rd.cx.lit(TV::Int(999));
+                rd.cx.define(count, Arg::Local(k), false);
+                rd.cx.close_group();
+                let v = rd.cx.read(count).map_or(-1, |v| v.int());
+                let l = rd.cx.lit(TV::Int(v));
+                let sc = rd.cx.name(b"sc");
+                rd.cx.define(sc, Arg::Local(l), false);
+                if let Some(f) = st.conds.last_mut() {
+                    f.push(("sc".into(), false));
+                }
+            }
             "twice" => {
                 // (the same leaf twice, merged by CSE; then, after a
                 // definition of the name it reads, the same leaf again,
@@ -897,6 +984,9 @@ fn step(op: Op, mut st: St, cx: &mut StepCx<'_, Toy>) -> Step<TV> {
         let cur = rd.cx.cursor().0;
         phi::ver::hash64(&(cur, &rest))
     };
+    if called {
+        return Step::Call { key };
+    }
     st.pending = rest;
     Step::Next {
         st: TV::st(st),
@@ -910,18 +1000,28 @@ fn expand(rd: &mut Rd<'_, '_>, st: &mut St, m: NameId) {
         && let TV::Toks(body) = &*v
         && st.exp < 64
     {
+        let rest = rd.rest();
+        // (and a bound on the pending input: a macro whose body holds
+        // itself twice grows it every expansion)
+        if rest.len() + body.len() > 512 {
+            return;
+        }
         st.exp += 1;
         let mut p: Vec<Tok> = (**body).clone();
-        p.extend(rd.rest());
+        p.extend(rest);
         rd.pending = p;
         rd.at = 0;
     }
 }
 
 /// A document: its tokens with identities, and the graph built over it.
-pub struct Doc {
+/// The plain document.
+pub type Doc = DocP<false>;
+
+/// A document over a graph that profiles (`P`) or not.
+pub struct DocP<const P: bool> {
     pub toks: Vec<(ElemId, Tok)>,
-    pub g: Graph<Toy>,
+    pub g: Graph<Toy, P>,
     pub input: NodeId,
     pub doc: NodeId,
     pub pages: NodeId,
@@ -931,12 +1031,12 @@ pub fn seq_of(toks: &[(ElemId, Tok)]) -> Seq<TV> {
     Seq::from_vec(toks.iter().map(|(i, t)| (*i, TV::Tok(t.clone()))).collect())
 }
 
-impl Doc {
-    pub fn new(toks: Vec<(ElemId, Tok)>) -> Doc {
+impl<const P: bool> DocP<P> {
+    pub fn new(toks: Vec<(ElemId, Tok)>) -> Self {
         Self::with(toks, Graph::new())
     }
 
-    pub fn with(toks: Vec<(ElemId, Tok)>, mut g: Graph<Toy>) -> Doc {
+    pub fn with(toks: Vec<(ElemId, Tok)>, mut g: Graph<Toy, P>) -> Self {
         let input = g.input(TV::Seq(seq_of(&toks)));
         let init = g.input(TV::st(St::default()));
         let doc = g.unfold(Op::Doc, input, init, &[]);
@@ -944,7 +1044,7 @@ impl Doc {
         let h = g.input(TV::Int(HEIGHT));
         let z = g.input(TV::Int(0));
         let pages = g.scan(Op::Page, (vl, Sel::WHOLE), z, &[h]);
-        Doc {
+        DocP {
             toks,
             g,
             input,

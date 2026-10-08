@@ -148,6 +148,9 @@ crates/
                  command line, watch sessions, the host
   partex-incr    the old region runtime of machine mode (4.1), to be
                  removed but for its Executor
+  phitex-diff    latexdiff, natively: two versions in, the marked-up
+                 document and the change list out (4.10)
+  phitex-git     past versions read from git (gitoxide), for phitex-diff
 xtask/           corpus, oracle runs, trip, etrip, e2e, masking, checks
 ```
 
@@ -4213,6 +4216,72 @@ changed) then costs both about as much. The settled files equal a cold
 `phitex build` of the final source, but for the font numbers above in
 `--ssa`'s PDF.
 
+### 4.10 latexdiff, natively (phase 1, 2026-10-08)
+
+`phitex-diff` compares two versions of a project and writes what latexdiff
+writes: the new version, flattened, with the old one's differences marked
+(`\DIFadd{…}`, `\DIFdel{…}`, `\DIFaddbegin`/`\DIFaddend`, the `FL` forms in
+floats and alignments), and latexdiff's definitions in the preamble; and
+the list of changes (kind; file and byte range on each side; the text on
+each side; the section of the new version it is in; where its markup is
+in the output). It depends on `phitex-syntax` alone (wasm, the extension,
+and the CLI alike); `phitex-git` reads past versions from git (gitoxide,
+`default-features = false`, features `sha1` and `revision`: rev-parse,
+refs, commits, trees, the index; no checkout, no network).
+
+- *Flattening.* Each side follows its own `\input`/`\include` graph (as
+  latexdiff `--flatten`), with a map back to each file's bytes: a file the
+  new version no longer inputs is deleted text where it was input, a new
+  one added.
+- *Tokens.* The CST's paragraphs are read again into a tree of tokens:
+  words, commands with the arguments their signature says, math as a unit,
+  environments with their bodies, alignment rows. The signature table is
+  latexdiff's lists (`SAFECMD`, `TEXTCMD`, `CONTEXT1/2CMD`, `MATHENV`,
+  `MATHARRENV`, `FLOATENV`, `PICTUREENV`, `LISTENV`, `COUNTERCMD`, the
+  cite family it puts in `\mbox`), extended from the preambles
+  (`\newcommand` and friends: arity, and safe if the body is), and by the
+  caller. A command defined only by the old preamble is unsafe deleted.
+- *Diff.* Paragraphs (runs to a blank line) are aligned first; each run of
+  paragraphs that differ is diffed by tokens, patience diff over Myers'
+  (linear space, an edit budget past which a run is a rewrite). In a run
+  of changes, nodes with the same prefix (a command and its other
+  arguments, an environment's `\begin`, a row's columns) are paired and
+  diffed inside. Common runs under three words between long changes are
+  merged into them (latexdiff's `MINWORDSBLOCK`).
+- *Markup only where it compiles.* Unsafe deleted text is commented out
+  (`%DIFDELCMD <`), unsafe added text stays outside the markup; a deleted
+  counting command steps its counter back; a deleted `\caption` shows its
+  text only; display math is coarse (old struck out as an unnumbered
+  `displaymath`/`align*`/`eqnarray*`, labels commented out; new added
+  cell by cell); a deleted row of a kept table is shown, struck out;
+  verbatim and pictures are never marked inside; comments are left as
+  they are.
+- *Tests.* Unit tests and `tests/corpus.rs` (16 synthetic pairs: word
+  edits, paragraphs, sections, cites and refs, inline and display math,
+  floats and tables, lists, footnotes, multi-file, verbatim, comments,
+  macros, hyperref, a rewrite, a new document) always run.
+  `tests/compile.sh` compiles each pair's diff with stock pdflatex and
+  runs Perl latexdiff on it to compare; `tests/fuzz.sh` diffs random
+  edits of the corpus and compiles them.
+
+**Measured** (2026-10-08, this machine): all 16 pairs compile (latexdiff:
+15, it breaks a booktabs table with `\DIFaddendFL \bottomrule`); the text
+marked is latexdiff's in 5, and elsewhere differs in granularity only
+(latexdiff marks letters in a one-word change, `Intro[+duction+]`, and
+inside equations; the old side of a changed verbatim is not shown). Of
+300 random pairs, every diff compiles where both versions do (278); 3 of
+the 289 whose new version compiles fail, each with an old version that
+does not compile (a second seed: 280 of 280, and 4 of 294, the same).
+A 3 MB document diffs in 0.6 s (release, this machine, flattening and
+I/O included). The two crates add 87 crates to `partex-cli`'s clean
+release build (48 to 135 units; 664 s before, 673 s after, fresh target
+directory, no sccache, this loaded machine: within noise, gix building
+beside the long `partex-core` and LTO chain).
+
+*Phase 2* (not built): the watch and the extension keep a `Baseline` (the
+old version flattened and read) and diff each build's new text against
+it; `Tree::edit`'s splice says which paragraphs to read again.
+
 ---
 
 ## 5. Performance, observability and the text form
@@ -5535,6 +5604,182 @@ What the 10^8 runs found, all fixed:
    is 72.3 -> 75.8 ns/node (K10) and 54.1 -> 55.3 (K20) on accl,
    +1.6% instructions. That is the cost of the rounds, cancellation,
    appends, memo and CSE plumbing.
+
+### 7.21 Profiles and tier 2 (`profile.rs`, `graph/tune.rs`)
+
+A `Graph<L, true>` profiles; `Graph<L>` (`P = false`, the default)
+compiles the profile out.
+
+**What a profile records.**
+
+- Per op, by the op value and with `Lang::op_tag` as its stable
+  identity:
+  - leaf and scan-element evaluations and their mean cost;
+  - steps run, and of those the ones run on an edit (after the first
+    build);
+  - memo store probes and hits (counted per tag by the store);
+  - CSE probes and merges;
+  - for watched ops, the evaluations whose key was seen before (the
+    reuse a memo would find);
+  - whether the op was ever emitted with a class other than `Pure`.
+- Per region (a step's key): re-runs on edits, and the last run.
+
+**How it is cheap.** Evaluations are sampled at random intervals, one in
+128 on average.
+
+- An unsampled evaluation costs an inlined countdown and a branch.
+- A sampled one is timed (the clock's own cost is measured once and
+  taken off) and stands for its interval, so counts are estimates and
+  means are unbiased.
+- Steps are counted exactly, through a one-op accumulator.
+- `Graph::profile()` reports the ops by estimated total time and the 64
+  regions that re-ran most.
+- `snapshot()` gives a `Snapshot` keyed by tag, with a byte image
+  (`phiprof1`). `load_profile` adds it to a later session: its ops count
+  once seen by tag, its regions at once, and its memo decisions are
+  applied by the next `tune`.
+
+**Tier 2: `Graph::tune()`.** The client calls it when the scheduler is
+idle; `run` never does, and with work queued it returns `busy`. Every
+decision keeps results:
+
+- A memoized op returns what it returned before for the same key: the
+  op's tag and its operands' versions, and the op is pure.
+- Sealing is exact (7.11).
+- Check mode evaluates raw, never through the store.
+
+The decisions:
+
+- **Memo opt-in.**
+  - A `Pure` leaf or scan op that costs at least `memo_probe_ns` (default
+    100) is watched: every evaluation's key is looked at, at about one
+    key hash each, and only for ops that cost more than a probe.
+  - It is opted in when cost × reuse > `memo_probe_ns`, with
+    `tune_min_samples` and `tune_min_keyed` as the evidence needed.
+  - It is opted out when cost × the hit rate since opt-in falls below the
+    probe cost; it then stays out for 64 runs.
+  - The store gets `auto_memo_bytes` if it had no budget.
+  - The membership test is a 64-bit filter, then a set.
+- **Sealing by region.**
+  - A region with at least `hot_runs` re-runs in the last 4 ×
+    `seal_quiet` runs waits four times longer before sealing.
+  - A region that re-ran once is sealed after `seal_quiet` / 8.
+  - The hot queue is re-ordered by these quiet times, and what is due is
+    sealed then and there, with the run end's pruning (`tidy`).
+
+**Measured.** On accl, job 7549, `prof`:
+
+| | K10, 1M steps | K20, 1M steps | K10, 8.4M steps (10^8 nodes) |
+|---|---|---|---|
+| main (b40d4bf) | 80.0 ns/node | 57.0 | 78.1 (off) |
+| off | 81.8 | 61.9 | |
+| on | 82.5 | 63.2 | 83.1 |
+
+- On vs off: +0.3 to 1.2% at 1M steps, and +6% at 10^8.
+- The off path had a +8% regression at K20. Its cause: once the hook
+  gave the crate more callers of `Args::get`, LLVM stopped inlining it
+  into client ops. It is now `inline(always)`; locally at K20,
+  instructions are +2% against main and cycles are level.
+
+Auto opt-in, with a preamble edit that re-runs 20k steps whose leaves
+cost n ns more (`LEAFHEAVY`):
+
+| n | before | after one tune |
+|---|---|---|
+| 100 | 50 ms | 39 ms |
+| 300 | 117 ms | 39 ms |
+| 1000 | 330 ms | 38 ms |
+
+The run in which the op is watched costs more (keys): 66 ms at n = 100.
+
+In the toy's random-edit test (40 seeds × 60 edits), a profiled and
+tuned document with check mode on makes 80 opt-ins and 7 opt-outs and
+seals 4281 steps, and equals the plain one after every edit.
+
+What the tests found:
+
+1. The tuned document's check-mode failure was `tune`'s sealing
+   compacting without the run end's pruning. The public `Graph::seal()`
+   had the same pattern; both now go through `tidy`.
+2. A pathological toy macro made one random-edit seed take minutes. The
+   toy now has a bound on pending input.
+
+### 7.22 Queries, named sources and continuation calls (for the TeX layer)
+
+**Reads after the step's own close.** `cx.read` after a group the step
+closed resolves past the close, as a leaf's operand does (the TeX
+layer's patch, taken as is).
+
+**Unrecorded queries** for the TeX layer's frontier (its engine arrays
+at a run's start):
+
+- `cx.defined_reaching()` lists every name a definition reaches, with
+  its value as `read` gives it. Groups and `\global` count, the step's
+  own definitions are included, and in a segment the parent's names are
+  listed too.
+- `cx.here()` and `cx.defined_since(p0)` list the names whose reaching
+  definition may differ since an earlier step of the unfold, each with
+  its value here (`None`: nothing reaches). That is:
+  - names defined from p0 on, nested unfolds included;
+  - names defined in a group closed since, so a local definition made
+    before p0 whose group closed is in the list.
+
+  It is `None` if p0's step is gone; then use `defined_reaching`. Cost:
+  the steps walked (a sealed run counts as one) plus their definitions.
+- Neither query records a read: the step depends only on what it then
+  reads.
+
+**Named sources.**
+
+- `g.source(key, value)` makes an input that is defined to a reserved
+  name at the root (before everything); later edits are `g.set` on its
+  node.
+- `g.remove_source(key)` removes the definition.
+- `cx.source(key)` reads that name. It is `None` when the source is
+  absent, and the read is recorded either way, so a file appearing,
+  changing or going wakes its readers (`\IfFileExists`, `\openin`).
+- A source's elements (`\read`) are a read of the same name.
+
+**Continuation calls.**
+
+- `cx.call(op, input, init, args)` emits a nested unfold, and the step
+  returns `Step::Call { key }`. The unfold runs in the step's sweep, and
+  its result is the step's value and the state its successor starts
+  from.
+- The step also takes the unfold as an operand. An edit inside the file
+  (the source's input) resumes the nested unfold at the edit, as any
+  unfold resumes. If its result changed, the call step runs again (one
+  step) and the document goes on after it until it converges; if not,
+  nothing after the call runs.
+- `Step` has no `Arg` (that would put a lifetime on `Lang::step`'s
+  return type), hence `cx.call` plus `Step::Call`.
+- Speculative entry works across calls. A book's chapters that are
+  `\input`s build in parallel from root-level entries, and the result
+  equals the sequential build. There is no speculation within one called
+  file yet.
+- Sealing never takes a step with an unfold child, so a call step stays
+  live.
+
+**What the tests found.** A segment packed its definitions with a step's
+own before its call's steps'. In position order the call's come first,
+so the name index was left unsorted and removed steps' definitions
+stayed in it. The pack now sorts each name's definitions by position.
+
+**Tests.**
+
+- `an_input_file_is_a_call_the_document_resumes_after`, with check mode
+  on:
+  - an edit inside the file re-runs at most 6 steps;
+  - an open conditional at the file's end resumes the document;
+  - a file appearing and going wakes `\iffileexists`;
+  - each state equals a fresh build.
+- `chapters_called_from_a_book_build_in_parallel_as_in_turn`.
+- The random-edit test's documents can `\input` two files, one with an
+  open conditional, and test `\iffileexists`.
+
+**Known, not yet fixed (on main too).** A cross-run slot can stay stale
+after an edit. `\ref{k}` reads Unit where a fresh build reads 1, with
+one random snippet set: seed 5, edit 51. The repro is in HANDOFF.md.
 
 ### 7.17 Dependencies
 
