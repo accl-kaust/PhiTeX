@@ -1155,6 +1155,7 @@ export class PreviewSession {
   /** The watch joined (or joined again): its pages, outline and last problems. */
   private async watchJoined(): Promise<void> {
     await this.layout();
+    this.status();
     void this.watchOutline();
     const r = await this.core.request({ op: "diagnostics" } as never);
     if (r.ok) this.onWatch({ event: "diagnostics", items: (r.json?.items ?? []) as Problem[] });
@@ -1194,7 +1195,7 @@ export class PreviewSession {
       case "settled":
         // (a pass shown while the job's own files settle: still building)
         if (!e.settling) this.watchBusy(false);
-        this.chain = this.chain.then(() => this.layout()).then(() => this.watchOutline());
+        this.chain = this.chain.then(() => this.layout()).then(() => (this.status(), this.watchOutline()));
         return;
       case "sync":
         void this.syncTo(e.file, e.lo, e.hi, e.at);

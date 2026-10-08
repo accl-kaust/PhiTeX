@@ -5,58 +5,12 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>phitex viewer</title>
 <style>
-  :root { --bg: #e8e8ea; --bar: #f6f6f7; --ink: #333; --dim: #777; --mark: rgba(255, 196, 0, 0.35); }
-  @media (prefers-color-scheme: dark) {
-    :root { --bg: #2a2b2e; --bar: #1f2023; --ink: #ddd; --dim: #999; }
-  }
-  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--ink); font: 13px system-ui, sans-serif; }
-  #bar { position: fixed; top: 0; left: 0; right: 0; height: 28px; display: flex; align-items: center; gap: 12px;
-         padding: 0 12px; background: var(--bar); border-bottom: 1px solid rgba(0, 0, 0, 0.12); z-index: 2; }
-  #bar b { font-weight: 600; }
-  #status { color: var(--dim); }
-  #hint { margin-left: auto; color: var(--dim); }
-  /* (the engine's status: what it does now, else how the last build went; a click shows the problems) */
-  #pill { display: inline-flex; align-items: center; gap: 6px; padding: 1px 9px 1px 7px; border-radius: 999px; font-size: 12px;
-          background: rgba(127, 127, 127, 0.14); color: var(--ink); cursor: default; white-space: nowrap; font-variant-numeric: tabular-nums; }
-  #pill::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--dim); flex: none; }
-  #pill.ok::before { background: #30a46c; }
-  #pill.warn::before { background: #f5a524; }
-  #pill.bad { background: rgba(229, 72, 77, 0.16); cursor: pointer; }
-  #pill.warn { cursor: pointer; }
-  #pill.bad::before { background: #e5484d; }
-  #pill.busy::before { background: #3e63dd; animation: pulse 1s ease-in-out infinite; }
-  @keyframes pulse { 50% { opacity: 0.3; } }
-  /* (a build running: a bar sweeping under the top bar) */
-  #bar::after { content: ""; position: absolute; left: 0; bottom: -1px; height: 2px; width: 30%; background: #3e63dd; opacity: 0; }
-  body.building #bar::after { opacity: 1; animation: sweep 1.2s ease-in-out infinite; }
-  @keyframes sweep { from { left: -30%; } to { left: 100%; } }
-  #scroller { position: absolute; top: 29px; left: 0; right: 0; bottom: 0; overflow: auto; }
-  /* (the contents beside the pages) */
-  #side { position: absolute; top: 29px; left: 0; bottom: 0; width: 280px; display: none; background: var(--bar);
-          border-right: 1px solid rgba(0, 0, 0, 0.12); overflow: auto; }
-  body.side #side { display: block; }
-  body.side #scroller { left: 281px; }
-  #toc { border: 0; background: none; color: var(--ink); font: inherit; padding: 2px 6px; border-radius: 4px; cursor: pointer; }
-  #toc:hover, body.side #toc { background: rgba(127, 127, 127, 0.16); }
-  @media (max-width: 700px) { body.side #side { width: 100%; z-index: 2; } }
-  #pages { padding: 12px 0 40px; }
-  .slot { position: relative; margin: 0 auto 12px; background: #fff; box-shadow: 0 1px 4px rgba(0, 0, 0, 0.25); overflow: hidden; }
-  .slot svg { display: block; }
-  .slot svg rect.paper { fill: #fff; }
-  .slot img, .slot canvas { display: block; width: 100%; height: 100%; }
-  .mark { position: absolute; background: var(--mark); border-radius: 2px; pointer-events: none; transition: all 0.15s ease-out; }
-  .mark.fade { opacity: 0; transition: opacity 1.2s; }
-  body.stale #pages { opacity: 0.85; }
-  #keys { position: fixed; top: 40px; right: 16px; z-index: 3; padding: 10px 14px; background: var(--bar); color: var(--ink);
-          border-radius: 8px; box-shadow: 0 4px 24px rgba(0, 0, 0, 0.3); font-size: 12px; }
-  #keys table { border-collapse: collapse; margin-top: 6px; }
-  #keys td { padding: 2px 10px 2px 0; }
-  #keys kbd { font: 11px ui-monospace, monospace; white-space: pre; }
+  /* (the page is the panel's, viewer/src/panel.ts: it fills the window) */
+  html, body { margin: 0; height: 100%; background: #e7e9ee; }
+  @media (prefers-color-scheme: dark) { html, body { background: #1b222c; } }
 </style>
 </head>
 <body>
-<div id="bar"><button type="button" id="toc" title="Contents (t)">☰</button><b>phitex</b><span id="pill" class="off">connecting…</span><span id="status"></span><span id="hint">? for keys · t contents · e errors · Ctrl+wheel to zoom</span></div>
-<nav id="side"></nav><div id="scroller"><div id="pages"></div></div>
 <script type="module" src="viewer.js"></script>
 </body>
 </html>
