@@ -624,3 +624,57 @@ fn a_read_after_the_steps_own_close_reads_past_it() {
     assert_eq!(val(&d, "sc"), Some(2));
     assert_eq!(val(&d, "count"), Some(2));
 }
+
+/// `defined_reaching` lists every name a definition reaches, unrecorded;
+/// `defined_since(p0)` the names whose reaching definition may have
+/// changed since an earlier step: a group closing in between ends the
+/// definitions made in it, even one made before `p0`, and `\\gdef` reaches
+/// past its group. An edit that removes `p0`'s step makes it `None`.
+#[test]
+fn the_names_reaching_a_step_and_those_defined_since_an_earlier_one() {
+    let src = r"\def\a{1} { \def\b{2} \here \def\c{3} \gdef\d{4} } \since \reach \par";
+    let mut d = Doc::new(ids(lex(src)));
+    d.g.cfg.check = true;
+    d.g.run();
+    let mut since = SINCE
+        .with(|c| c.borrow().clone())
+        .expect("p0 is a step before");
+    since.sort();
+    assert_eq!(
+        since,
+        vec![
+            ("b".to_string(), None),
+            ("c".to_string(), None),
+            ("d".to_string(), Some("4".to_string()))
+        ]
+    );
+    let mut reach = REACH.with(|c| c.borrow().clone());
+    reach.sort();
+    assert_eq!(
+        reach,
+        vec![
+            ("a".to_string(), "1".to_string()),
+            ("d".to_string(), "4".to_string())
+        ]
+    );
+    // (unrecorded: the step does not read `a`, so a new `a` does not run it)
+    let at = d.toks.iter().position(|t| t.1.text() == "1").expect("1");
+    d.splice(at, 1, lex("9"));
+    let r = d.g.run();
+    assert!(r.steps <= 2, "{r:?}");
+    // the step at p0 removed: None
+    let at = d
+        .toks
+        .iter()
+        .position(|t| t.1.text() == "\\here")
+        .expect("here");
+    d.splice(at, 1, vec![]);
+    let at = d
+        .toks
+        .iter()
+        .position(|t| t.1.text() == "\\since")
+        .expect("since");
+    d.splice(at, 1, lex("\\since \\relax"));
+    d.g.run();
+    assert_eq!(SINCE.with(|c| c.borrow().clone()), None);
+}

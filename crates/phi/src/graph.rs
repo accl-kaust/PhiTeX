@@ -987,6 +987,22 @@ impl<L: Lang> Emit<L> {
     }
 }
 
+/// Names' hashes and spellings (a segment's view of its parent's names).
+type Spellings = [(u64, Box<[u8]>)];
+type SpellVec = Vec<(u64, Box<[u8]>)>;
+
+/// `StepCx::defined_since`'s answer: names, each with its value here
+/// (`None`: no definition reaches).
+pub type Since<'s, V> = Vec<(NameId, Option<Proj<'s, V>>)>;
+
+/// The start of a step, for `StepCx::defined_since`: valid while that
+/// step lives.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Here {
+    step: u32,
+    key: u64,
+}
+
 /// What a step sees and does besides its state and operands: its input,
 /// names, and the nodes, definitions and scopes it makes.
 pub struct StepCx<'s, L: Lang> {
@@ -1006,6 +1022,13 @@ pub struct StepCx<'s, L: Lang> {
     opened: u32,
     em: &'s mut Emit<L>,
     ext: Option<&'s Map<u64, L::Val>>,
+    /// A segment: the spellings of the names in `ext`.
+    ext_spell: Option<&'s Spellings>,
+    /// The steps' records and the groups each step closed (for
+    /// `defined_since`).
+    steps: &'s [StepInfo],
+    unfolds: &'s [UnfoldInfo<L::Val>],
+    closes: &'s Map<u32, Vec<u64>>,
     /// Every emission is big ([`Config::keep_interior`]).
     keep: bool,
     /// The run's cancellation flag.
@@ -1098,7 +1121,14 @@ impl<'s, L: Lang> StepCx<'s, L> {
             let p = project(v, sel, &self.g.absent);
             return Some(Proj::Owned((*p).clone()));
         }
-        let o = if (n.0 as usize) < self.names.defs.len() {
+        let o = self.resolve_read(n.0);
+        self.em.reads.push((n.0, o));
+        self.value_of(n.0, o)
+    }
+
+    /// Name `m` resolved from outside the step, as `read` does.
+    fn resolve_read(&self, m: u32) -> Opd {
+        if (m as usize) < self.names.defs.len() {
             // (after a group this step closed: the name as it is past the
             // close, as a leaf's operand resolves)
             if self
@@ -1107,24 +1137,159 @@ impl<'s, L: Lang> StepCx<'s, L> {
                 .iter()
                 .any(|(e, _)| matches!(e, Event::Close(_)))
             {
-                self.resolve_here(n.0)
+                self.resolve_here(m)
             } else {
-                resolve(self.g, self.names, self.groups, n.0, self.pos)
+                resolve(self.g, self.names, self.groups, m, self.pos)
             }
         } else {
             Opd {
                 src: NONE,
                 sel: Sel::WHOLE,
-                name: n.0,
+                name: m,
             }
-        };
-        self.em.reads.push((n.0, o));
+        }
+    }
+
+    /// The value `o` (name `m`'s resolution) reads.
+    fn value_of(&self, m: u32, o: Opd) -> Option<Proj<'s, L::Val>> {
         if o.src == NONE {
             // (a segment: the name as the graph it was entered from has it)
             let ext = self.ext?;
-            ext.get(&self.name_hash(n.0)).map(Proj::Ref)
+            ext.get(&self.name_hash(m)).map(Proj::Ref)
         } else {
             Some(self.g.read(&o))
+        }
+    }
+
+    /// Name `m`'s value as `read` gives it, not recorded.
+    fn peek_name(&self, m: u32) -> Option<Proj<'s, L::Val>> {
+        match self.own_def(m) {
+            Some(SArg::Local(ix, sel)) if self.em.specs[ix as usize].done => {
+                let v = &self.em.vals[ix as usize];
+                return Some(Proj::Owned((*project(v, sel, &self.g.absent)).clone()));
+            }
+            Some(SArg::Node(src, sel)) => {
+                return Some(self.g.read(&Opd {
+                    src,
+                    sel,
+                    name: NONE,
+                }));
+            }
+            _ => {}
+        }
+        self.value_of(m, self.resolve_read(m))
+    }
+
+    /// Every name a definition reaches here, with its value, as `read`
+    /// would give it (the step's own definitions, the groups it closed
+    /// and `\global` included), but **not recorded**: the step depends on
+    /// none of them unless it reads them. In a segment, the names of the
+    /// graph it was entered from are included (made names of this step if
+    /// it has not named them).
+    pub fn defined_reaching(&mut self) -> Vec<(NameId, Proj<'s, L::Val>)> {
+        if let Some(sp) = self.ext_spell {
+            for (h, spelling) in sp {
+                if !self.names.by_hash.contains_key(h) {
+                    self.name(spelling);
+                }
+            }
+        }
+        let n = self.names.spell.len() + self.em.new_names.len();
+        (0..n)
+            .filter_map(|m| {
+                let m = u32::try_from(m).expect("names fit u32");
+                self.peek_name(m).map(|v| (NameId(m), v))
+            })
+            .collect()
+    }
+
+    /// This step's start, for a later [`StepCx::defined_since`].
+    #[must_use]
+    pub fn here(&self) -> Here {
+        Here {
+            step: self.step,
+            key: self.steps[self.g.h[self.step as usize].aux as usize].key,
+        }
+    }
+
+    /// The names whose reaching definition may differ between `p0` (the
+    /// start of an earlier step of this unfold) and here, each with its
+    /// value here as `read` gives it (`None`: no definition reaches),
+    /// **not recorded**. They are the names defined from `p0` on (by its
+    /// step, the steps after it, their nested unfolds, and this step so
+    /// far) and the names defined in groups closed in that stretch, so a
+    /// local definition made before `p0` whose group closed since is in
+    /// it. Names may be listed whose value did not change. `None` if
+    /// `p0`'s step is gone (an edit removed it), is not of this unfold, or
+    /// is not before here: then use [`StepCx::defined_reaching`]. Cost:
+    /// the steps walked (a sealed run is one) plus their definitions.
+    pub fn defined_since(&mut self, p0: Here) -> Option<Since<'s, L::Val>> {
+        let u = self.g.h[self.step as usize].parent;
+        let h0 = self.g.h.get(p0.step as usize)?;
+        if h0.kind != Kind::Step
+            || h0.flags & DEAD != 0
+            || h0.parent != u
+            || self.steps[h0.aux as usize].key != p0.key
+        {
+            return None;
+        }
+        let mut names: Set<u32> = Set::default();
+        let mut c = p0.step;
+        while c != self.step {
+            if c == NONE {
+                return None;
+            }
+            self.since_step(c, &mut names);
+            c = self.g.h[c as usize].next;
+        }
+        // (this step so far)
+        for d in &self.em.defs {
+            names.insert(d.0);
+        }
+        for (e, _) in &self.em.events {
+            if let Event::Close(g) = e
+                && let Some(gr) = self.groups.get(g)
+            {
+                names.extend(gr.names.iter().copied());
+            }
+        }
+        let mut names: Vec<u32> = names.into_iter().collect();
+        names.sort_unstable();
+        Some(
+            names
+                .into_iter()
+                .map(|m| (NameId(m), self.peek_name(m)))
+                .collect(),
+        )
+    }
+
+    /// Step `s`'s definitions and closed groups' names, and its nested
+    /// unfolds' steps', into `names`.
+    fn since_step(&self, s: u32, names: &mut Set<u32>) {
+        let si = &self.steps[self.g.h[s as usize].aux as usize];
+        for d in &self.names.recs[si.d0 as usize..(si.d0 + si.dn) as usize] {
+            names.insert(d.name);
+        }
+        if let Some(cl) = self.closes.get(&s) {
+            for g in cl {
+                if let Some(gr) = self.groups.get(g) {
+                    names.extend(gr.names.iter().copied());
+                }
+            }
+        }
+        let mut c = si.first;
+        while c != NONE {
+            let hc = &self.g.h[c as usize];
+            if hc.kind == Kind::Unfold && hc.flags & DEAD == 0 {
+                let mut t = self.unfolds[hc.aux as usize].first;
+                while t != NONE {
+                    if self.g.h[t as usize].kind == Kind::Step {
+                        self.since_step(t, names);
+                    }
+                    t = self.g.h[t as usize].next;
+                }
+            }
+            c = self.g.h[c as usize].next;
         }
     }
 
@@ -1744,6 +1909,7 @@ pub struct Graph<L: Lang, const P: bool = false> {
     /// A segment's names from the graph it was entered from: the value
     /// each has where the segment starts.
     ext: Option<std::sync::Arc<Map<u64, L::Val>>>,
+    ext_spell: Option<std::sync::Arc<SpellVec>>,
     /// Import nodes made for those, by name hash.
     imports: Map<u64, u32>,
     pub cfg: Config,
@@ -1826,6 +1992,7 @@ impl<L: Lang, const P: bool> Graph<L, P> {
             interior: Map::default(),
             entries: Map::default(),
             ext: None,
+            ext_spell: None,
             imports: Map::default(),
             cfg: Config::default(),
             rep: Report::default(),
@@ -2807,6 +2974,9 @@ impl<L: Lang, const P: bool> Graph<L, P> {
                     em,
                     steps,
                     ext,
+                    ext_spell,
+                    closes,
+                    unfolds,
                     cfg,
                     lcache,
                     cancel,
@@ -2838,6 +3008,10 @@ impl<L: Lang, const P: bool> Graph<L, P> {
                     opened: 0,
                     em,
                     ext: ext.as_deref(),
+                    ext_spell: ext_spell.as_deref().map(Vec::as_slice),
+                    steps,
+                    unfolds,
+                    closes,
                     keep: cfg.keep_interior,
                     cancel,
                     hook: (P || hook.memo_on).then_some(&*hook),
@@ -4395,13 +4569,16 @@ impl<L: Lang, const P: bool> Graph<L, P> {
             ord: self.n.h[parked.s as usize].ord + 1,
         };
         let mut ext = Map::default();
+        let mut spell = Vec::new();
         for m in 0..self.names.spell.len() {
             let o = resolve(&self.n, &self.names, &self.groups, m as u32, at);
             if o.src != NONE {
                 ext.insert(self.names.hashes[m], self.n.read(&o).clone());
+                spell.push((self.names.hashes[m], self.names.spell[m].clone()));
             }
         }
         let ext = std::sync::Arc::new(ext);
+        let spell = std::sync::Arc::new(spell);
         let uo: Vec<Opd> = self.n.opds_of(u).to_vec();
         let input = self.n.read(&uo[0]).clone();
         let args: Vec<L::Val> = uo[2..].iter().map(|o| self.n.read(o).clone()).collect();
@@ -4429,6 +4606,7 @@ impl<L: Lang, const P: bool> Graph<L, P> {
             p.cfg.debug = debug;
             p.hook = hook.clone();
             p.ext = Some(ext.clone());
+            p.ext_spell = Some(spell.clone());
             p.pred = pred.clone();
             p.fpred = fpred.clone();
             let i = p.input(input.clone());

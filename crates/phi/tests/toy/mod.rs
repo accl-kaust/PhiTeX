@@ -179,11 +179,19 @@ pub enum Op {
     Hook,
 }
 
+/// Names with their values shown (`None`: undefined).
+pub type Shown = Vec<(String, Option<String>)>;
+
 thread_local! {
     /// `Op::UseW` evaluations on this thread.
     pub static USEW: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     /// `Op::Hook` evaluations on this thread.
     pub static USEH: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// `\\here`'s position, and what `\\since` and `\\reach` saw (the
+    /// names `a`, `b`, `c`, `d`, `count` only, with their values shown).
+    pub static HERE: std::cell::Cell<Option<phi::Here>> = const { std::cell::Cell::new(None) };
+    pub static SINCE: std::cell::RefCell<Option<Shown>> = const { std::cell::RefCell::new(None) };
+    pub static REACH: std::cell::RefCell<Vec<(String, String)>> = const { std::cell::RefCell::new(Vec::new()) };
     /// Line breaker scan elements stepped on this thread.
     pub static BRK: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
@@ -848,6 +856,38 @@ fn step(op: Op, mut st: St, cx: &mut StepCx<'_, Toy>) -> Step<TV> {
                 let x = rd.cx.leaf(Op::Id, Class::Pure, &[Arg::Name(pr)]);
                 let pr2 = rd.cx.name(b"pr2");
                 rd.cx.define(pr2, Arg::Local(x), true);
+            }
+            "here" => {
+                let h = rd.cx.here();
+                HERE.with(|c| c.set(Some(h)));
+            }
+            "since" | "reach" => {
+                let ids: Vec<(String, NameId)> = ["a", "b", "c", "d", "count"]
+                    .iter()
+                    .map(|n| (n.to_string(), rd.cx.name(n.as_bytes())))
+                    .collect();
+                let show = |v: &TV| match v {
+                    TV::Toks(t) => t.iter().map(Tok::text).collect::<Vec<_>>().join(" "),
+                    v => format!("{}", v.int()),
+                };
+                let spell = |m: NameId| ids.iter().find(|x| x.1 == m).map(|x| x.0.clone());
+                if c.as_ref() == "since" {
+                    let r = HERE.with(|c| c.get()).and_then(|h| rd.cx.defined_since(h));
+                    let r = r.map(|l| {
+                        l.into_iter()
+                            .filter_map(|(m, v)| Some((spell(m)?, v.map(|v| show(&v)))))
+                            .collect::<Vec<_>>()
+                    });
+                    SINCE.with(|c| *c.borrow_mut() = r);
+                } else {
+                    let r: Vec<(String, String)> = rd
+                        .cx
+                        .defined_reaching()
+                        .into_iter()
+                        .filter_map(|(m, v)| Some((spell(m)?, show(&v))))
+                        .collect();
+                    REACH.with(|c| *c.borrow_mut() = r);
+                }
             }
             "scoped" => {
                 // (a group opened, `count` redefined in it and closed, all in
