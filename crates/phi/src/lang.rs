@@ -136,6 +136,14 @@ pub trait Lang: Sized + 'static {
         false
     }
 
+    /// Whether a step's equal leaves of this op are merged (CSE, DESIGN
+    /// 7.10). A probe costs a hash and a lookup (about 25 ns), so only
+    /// ops a client emits twice in a step are worth it.
+    fn cse(op: Self::Op) -> bool {
+        let _ = op;
+        false
+    }
+
     /// A stable number for the op, for memo keys.
     fn op_tag(op: Self::Op) -> u64;
 

@@ -439,6 +439,10 @@ impl Lang for Toy {
         Some(TV::Word(w.into(), n.parse().ok()?))
     }
 
+    fn cse(op: Op) -> bool {
+        matches!(op, Op::Add1 | Op::Sum | Op::Show | Op::IsZero)
+    }
+
     fn memo(op: Op) -> bool {
         matches!(op, Op::Hook | Op::Break)
     }
@@ -844,6 +848,27 @@ fn step(op: Op, mut st: St, cx: &mut StepCx<'_, Toy>) -> Step<TV> {
                 let x = rd.cx.leaf(Op::Id, Class::Pure, &[Arg::Name(pr)]);
                 let pr2 = rd.cx.name(b"pr2");
                 rd.cx.define(pr2, Arg::Local(x), true);
+            }
+            "twice" => {
+                // (the same leaf twice, merged by CSE; then, after a
+                // definition of the name it reads, the same leaf again,
+                // which must not be: y = 3 count + 4, count + 1 after)
+                let a = rd.cx.leaf(Op::Add1, Class::Pure, &[Arg::Name(count)]);
+                let b = rd.cx.leaf(Op::Add1, Class::Pure, &[Arg::Name(count)]);
+                let s = rd
+                    .cx
+                    .leaf(Op::Sum, Class::Pure, &[Arg::Local(a), Arg::Local(b)]);
+                rd.cx.define(count, Arg::Local(a), false);
+                let c = rd.cx.leaf(Op::Add1, Class::Pure, &[Arg::Name(count)]);
+                let s2 = rd
+                    .cx
+                    .leaf(Op::Sum, Class::Pure, &[Arg::Local(s), Arg::Local(c)]);
+                let y = rd.cx.name(b"y");
+                rd.cx.define(y, Arg::Local(s2), false);
+                if let Some(f) = st.conds.last_mut() {
+                    f.push(("count".into(), false));
+                    f.push(("y".into(), false));
+                }
             }
             "usew" => {
                 // (reads the width only: field 1 of `pr2`)

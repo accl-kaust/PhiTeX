@@ -4395,6 +4395,57 @@ dependency the unfolded graph lacks.
 - A fold is undone (unfolded) when its node runs again more than
   `refold_after` times in a session: granularity follows edits.
 
+As built (3b). Three of the four passes are not separate passes: the
+structure that 3a built does each one where it costs nothing, with the
+same argument. CSE is the one pass left, and it is built.
+
+- **Dead values: 7.4's transient interiors.** An emission that no one
+  outside its step reads (no definition, effect, slot, creator or
+  outside reader) never becomes a node. Its value lives in the sweep's
+  buffer and is dropped after the sweep. The emissions that remain nodes
+  are the ones something outside reads, or may read: a definition's
+  value is kept even when no reader reaches it yet, because a reader
+  that appears later, and the cutoff, compare against its version.
+  Nothing a result reads is dropped, so no result changes.
+- **Fold: the step's interior.** A step's interior is single entry
+  (its state and the reads it records) and single exit (its
+  definitions and big emissions), and it is pure where it is
+  transient. A woken step runs its interior again whole: that is the
+  fold, and its cost (no interior cutoff) is the cost the design
+  accepts. `keep_interior` is the unfolded form. Both build the same
+  results; the property test checks both.
+- **Constant folding: at emission.** A leaf whose operands are all
+  known when it is emitted is evaluated then (`Spec::done`), so no node
+  or sweep work is left for it.
+- **Step fold: 7.11's sealed regions.** Net definitions only, reads
+  unioned, consumed counts added. The refold rule is the unseal: a woken
+  sealed run unseals, and is sealed again only once it has been quiet
+  for `seal_quiet` runs.
+- **CSE: built, per step, opt-in per op (`Lang::cse`).** When a step
+  emits a pure leaf equal to one it emitted before (same op, aux and
+  operands), the earlier emission is returned and no new one is made. An
+  operand that reads a name counts as equal only if the step made no
+  definition and no group event between the two reads, so both resolve
+  to the same definition. *Argument:* the two leaves read the same
+  operands, so by purity their values are equal now and after any edit;
+  the readers of the second read the first, and no edge is lost. The
+  merge is a function of the step's emissions only, so a fresh build
+  and an edited one merge alike (the random-edit test compares them
+  with the `\twice` command in its snippets). Hash collisions are
+  checked against the operands, never trusted. `Report::merged` counts
+  merges. Cost: about 20 ns a probe (`prof`, every Add probed, no
+  merges: 116 -> 133 ns/node over 10M probes). That is why CSE is opt-in
+  per op: a client turns it on for ops it emits twice in a step.
+  Across steps and regions the memo store (7.8) shares results instead.
+- The property test found a core bug here: in a segment (7.15), a leaf
+  that read a name after its own step defined it, while that definition
+  was still pending, was left for the sweep. The sweep resolved it at
+  the step's position and recorded a read of the step's own definition
+  as an outside operand. The values were right, but the operands were
+  not the sequential build's. The sweep now resolves a name against the
+  step's own definitions first, at the emission's place
+  (`Emit::own_def_at`), as `eval_now` does.
+
 ### 7.11 Memory layout and cost
 
 As built (checkpoint 2), the graph is one arena indexed by `NodeId(u32)`:

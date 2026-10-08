@@ -264,6 +264,8 @@ struct Group {
 pub struct Report {
     /// Leaves, constants, crosses and chain reads evaluated.
     pub evals: u64,
+    /// Emissions merged into an equal earlier one of their step (CSE).
+    pub merged: u64,
     /// Steps run.
     pub steps: u64,
     /// Scan elements stepped.
@@ -600,7 +602,7 @@ pub enum Arg<'s> {
     NameField(NameId, u32),
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 enum SArg {
     Local(u32, Sel),
     Node(u32, Sel),
@@ -692,6 +694,13 @@ struct Emit<L: Lang> {
     new_names: Vec<(u64, Box<[u8]>)>,
     next_key: Option<u64>,
     sub: u64,
+    /// CSE (DESIGN 7.10): a pure leaf's (op, operands) hash -> its
+    /// emission, and the definitions and group events before it.
+    cse: Map<u64, (u32, u32, u32)>,
+    /// The leaf being pushed's entry, made by the probe.
+    cse_pending: Option<(u64, u32, u32)>,
+    /// Emissions merged into an earlier one.
+    merged: u32,
 }
 
 impl<L: Lang> Default for Emit<L> {
@@ -707,11 +716,33 @@ impl<L: Lang> Default for Emit<L> {
             new_names: Vec::new(),
             next_key: None,
             sub: 0,
+            cse: Map::default(),
+            cse_pending: None,
+            merged: 0,
         }
     }
 }
 
 impl<L: Lang> Emit<L> {
+    /// The step's own definition of `m` alive at emission `sub`, if any
+    /// (`StepCx::own_def` as it was when that emission was made).
+    fn own_def_at(&self, m: u32, sub: u64) -> Option<SArg> {
+        for &(n, a, global, dsub, grp) in self.defs.iter().rev() {
+            if n != m || dsub > sub {
+                continue;
+            }
+            let closed = !global
+                && grp != NOGROUP
+                && self.events.iter().any(|(e, esub)| {
+                    matches!(e, Event::Close(g) if *g == grp) && *esub > dsub && *esub < sub
+                });
+            if !closed {
+                return Some(a);
+            }
+        }
+        None
+    }
+
     /// Buffers sized for a typical step (a dry step's own).
     #[cfg_attr(target_arch = "wasm32", allow(dead_code, reason = "no rounds on wasm"))]
     fn sized() -> Self {
@@ -744,6 +775,9 @@ impl<L: Lang> Emit<L> {
         self.new_names.clear();
         self.next_key = None;
         self.sub = 0;
+        self.cse.clear();
+        self.cse_pending = None;
+        self.merged = 0;
     }
 }
 
@@ -892,6 +926,61 @@ impl<'s, L: Lang> StepCx<'s, L> {
         }
     }
 
+    /// CSE (DESIGN 7.10): an earlier emission of this step that is the
+    /// same pure leaf: the same op, aux and operands, and, if it reads a
+    /// name, no definition or group event since (so the name resolves to
+    /// the same definition). Its value is this one's, now and after any
+    /// edit. Otherwise the probe leaves the leaf's entry to `push`.
+    #[allow(
+        clippy::cast_possible_truncation,
+        reason = "emissions and operands of a step fit u32"
+    )]
+    fn cse(&mut self, op: L::Op, args: &[Arg<'s>], aux: u64) -> Option<Local<'s>> {
+        use std::hash::{BuildHasher, Hash};
+        let mut h = BuildHasherDefault::<Fx>::default().build_hasher();
+        op.hash(&mut h);
+        aux.hash(&mut h);
+        let mut named = false;
+        for &a in args {
+            let a = self.arg(a);
+            named |= matches!(a, SArg::Name(..));
+            a.hash(&mut h);
+        }
+        let (nd, ne) = if named {
+            (self.em.defs.len() as u32, self.em.events.len() as u32)
+        } else {
+            (0, 0)
+        };
+        let k = h.finish();
+        if let Some(&(ix, d, e)) = self.em.cse.get(&k) {
+            let sp = &self.em.specs[ix as usize];
+            let (a0, an) = (sp.args.0 as usize, sp.args.1 as usize);
+            if (d, e) == (nd, ne)
+                && sp.op == op
+                && sp.aux == aux
+                && sp.kind == Kind::Leaf
+                && sp.ctag == 0
+                && an == args.len()
+                && args
+                    .iter()
+                    .zip(&self.em.args[a0..a0 + an])
+                    .all(|(&a, ea)| self.arg(a) == ea.a)
+            {
+                self.em.merged += 1;
+                return Some(Local {
+                    ix,
+                    _brand: PhantomData,
+                });
+            }
+            if (d, e) != (nd, ne) {
+                // (a later definition: the later read takes the entry)
+                self.em.cse.remove(&k);
+            }
+        }
+        self.em.cse_pending = Some((k, nd, ne));
+        None
+    }
+
     #[allow(
         clippy::cast_possible_truncation,
         reason = "emissions and operands of a step fit u32"
@@ -905,6 +994,15 @@ impl<'s, L: Lang> StepCx<'s, L> {
         lit: Option<L::Val>,
         aux: u64,
     ) -> Local<'s> {
+        if kind == Kind::Leaf
+            && L::cse(op)
+            && matches!(class, Class::Pure)
+            && lit.is_none()
+            && self.em.next_key.is_none()
+            && let Some(l) = self.cse(op, args, aux)
+        {
+            return l;
+        }
         let a0 = self.em.args.len();
         // (a leaf whose operands are all known is evaluated now; one
         // reading a name, after its own definitions are looked at)
@@ -984,6 +1082,9 @@ impl<'s, L: Lang> StepCx<'s, L> {
             grp: self.grp,
         });
         self.em.vals.push(v);
+        if let Some(h) = self.em.cse_pending.take() {
+            self.em.cse.entry(h.0).or_insert((ix as u32, h.1, h.2));
+        }
         if ready && named {
             self.eval_now(ix);
         }
@@ -2505,6 +2606,7 @@ impl<L: Lang> Graph<L> {
             self.rep.state_max = self.rep.state_max.max(b);
             self.rep.state_sum += b as u64;
         }
+        self.rep.merged += u64::from(self.em.merged);
         // names the step made
         let new_names = std::mem::take(&mut self.em.new_names);
         for (h, sp) in new_names {
@@ -2827,6 +2929,20 @@ impl<L: Lang> Graph<L> {
             for a in a0..a0 + an {
                 if leaf && sp.done {
                     break;
+                }
+                // (a name the step itself defined before this emission
+                // reads that definition inside the step, as `eval_now`
+                // would have had the definition been evaluated then)
+                if let SArg::Name(m, x) = eargs[a].a {
+                    match self.em.own_def_at(m, u64::from(sp.sub)) {
+                        Some(SArg::Local(j, sel)) => {
+                            eargs[a].a = SArg::Local(j, sel.then(extra(x)));
+                        }
+                        Some(SArg::Node(src, sel)) => {
+                            eargs[a].a = SArg::Node(src, sel.then(extra(x)));
+                        }
+                        _ => {}
+                    }
                 }
                 match eargs[a].a {
                     SArg::Local(ix, sel) => {

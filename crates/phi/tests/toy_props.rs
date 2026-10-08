@@ -57,6 +57,7 @@ const SNIPPETS: &[&str] = &[
     "\\addto{h}{p}",
     "\\addto{h}{q}",
     "\\usehook{h}",
+    "\\twice",
 ];
 
 fn snippet(r: &mut Rng) -> Vec<Tok> {

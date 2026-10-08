@@ -49,6 +49,7 @@ enum O {
 
 struct B;
 
+static CSE: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| std::env::var("CSE").is_ok());
 static MEMO: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| std::env::var("MEMO").is_ok());
 
 impl Lang for B {
@@ -140,6 +141,10 @@ impl Lang for B {
     }
     fn chain_val(items: Seq<V>) -> V {
         V::S(Box::new(items))
+    }
+    /// (CSE: every Add probed for an equal one in its step)
+    fn cse(op: O) -> bool {
+        op == O::Add && *CSE
     }
     /// (MEMO: every Add through the memo store)
     fn memo(op: O) -> bool {

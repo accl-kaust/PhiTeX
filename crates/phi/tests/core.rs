@@ -483,3 +483,33 @@ fn a_memo_image_spares_a_fresh_build_its_memo_ops() {
     assert!(s.g.memo_stats().1 <= 256);
     assert_eq!(s.observe(), f.observe());
 }
+
+/// CSE (DESIGN 7.10): a step's two equal pure leaves are one node; a
+/// third reading the same name after the step defined it is not merged.
+#[test]
+fn equal_leaves_of_a_step_are_one_and_a_definition_parts_them() {
+    let src = r"\step \step \twice \par \the\y \par";
+    let mut d = Doc::new(ids(lex(src)));
+    let r = d.g.run();
+    assert_eq!(r.merged, 1, "{r:?}");
+    let val = |d: &Doc, n: &str| {
+        d.g.name_id(n.as_bytes())
+            .and_then(|m| d.g.name_value(m))
+            .map(|v| v.int())
+    };
+    assert_eq!(val(&d, "y"), Some(10));
+    assert_eq!(val(&d, "count"), Some(3));
+    // an edit before it: the merged leaf follows
+    let at = d
+        .toks
+        .iter()
+        .position(|t| t.1.text() == "\\step")
+        .expect("step");
+    d.splice(at, 1, vec![]);
+    d.g.run();
+    assert_eq!(val(&d, "y"), Some(7));
+    let mut f = Doc::new(d.toks.clone());
+    f.g.run();
+    assert_eq!(d.observe(), f.observe());
+    assert_eq!(d.g.to_text(), f.g.to_text());
+}
