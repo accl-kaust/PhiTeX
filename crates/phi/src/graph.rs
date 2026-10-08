@@ -901,6 +901,9 @@ struct Emit<L: Lang> {
     ev: Vec<Ev<L::Op>>,
     cse_ev: Vec<(L::Op, bool)>,
     impure: Vec<L::Op>,
+    /// The sources the step inserted (`StepCx::source_or_insert`): the
+    /// name, and the value, made sources when the step is applied.
+    new_sources: Vec<(u32, L::Val)>,
     /// The emission of the unfold the step called (`StepCx::call`).
     call: Option<u32>,
 }
@@ -925,6 +928,7 @@ impl<L: Lang> Default for Emit<L> {
             cse_ev: Vec::new(),
             impure: Vec::new(),
             call: None,
+            new_sources: Vec::new(),
         }
     }
 }
@@ -988,6 +992,7 @@ impl<L: Lang> Emit<L> {
         self.cse_ev.clear();
         self.impure.clear();
         self.call = None;
+        self.new_sources.clear();
     }
 }
 
@@ -1165,6 +1170,10 @@ impl<'s, L: Lang> StepCx<'s, L> {
     /// The value `o` (name `m`'s resolution) reads.
     fn value_of(&self, m: u32, o: Opd) -> Option<Proj<'s, L::Val>> {
         if o.src == NONE {
+            // (a source this step inserted: its value)
+            if let Some((_, v)) = self.em.new_sources.iter().find(|e| e.0 == m) {
+                return Some(Proj::Owned(v.clone()));
+            }
             // (a segment: the name as the graph it was entered from has it)
             let ext = self.ext?;
             ext.get(&self.name_hash(m)).map(Proj::Ref)
@@ -1670,6 +1679,51 @@ impl<'s, L: Lang> StepCx<'s, L> {
         let m = self.name(&source_spelling(key));
         self.read(m)?;
         Some(Arg::Name(m))
+    }
+
+    /// The named source `key`, inserted with value `v` if it is absent
+    /// (DESIGN 7.22): a file the step opened, whose bytes the host gave
+    /// it as it ran. Made a source (as `Graph::source` makes one) when
+    /// the step is applied, read by the step as `v` until then; the read
+    /// is recorded either way, as [`StepCx::source`]'s.
+    ///
+    /// A source is a fact about the host, keyed by the file, not the
+    /// step's output: one that a speculative step inserted stays when the
+    /// step is dropped, and two steps that insert one key must agree. A
+    /// source no step reads any more is kept, not dropped: it is one root
+    /// input holding the file's elements, shared with the host's copy,
+    /// and dropping it would make the next step that opens the file
+    /// insert it again (the client's driver removes a file that is gone
+    /// with `Graph::remove_source`).
+    ///
+    /// # Panics
+    ///
+    /// If the source exists, or this step inserted it, with other
+    /// content (`v`'s version differs): the host gave one file two
+    /// contents in one run.
+    pub fn source_or_insert(&mut self, key: &[u8], v: L::Val) -> Arg<'s> {
+        let m = self.name(&source_spelling(key));
+        if let Some(x) = self.read(m) {
+            assert!(
+                x.ver() == v.ver(),
+                "the source {:?} inserted with other content",
+                String::from_utf8_lossy(key)
+            );
+            return Arg::Name(m);
+        }
+        self.em.new_sources.push((m.0, v));
+        Arg::Name(m)
+    }
+
+    /// Name `n`'s spelling.
+    #[must_use]
+    pub fn spelling(&self, n: NameId) -> &[u8] {
+        let base = self.names.spell.len();
+        if (n.0 as usize) < base {
+            &self.names.spell[n.0 as usize]
+        } else {
+            &self.em.new_names[n.0 as usize - base].1
+        }
     }
 
     /// A scan over `input` from `init`.
@@ -2391,6 +2445,26 @@ impl<L: Lang, const P: bool> Graph<L, P> {
             self.set(NodeId(n), v);
             return NodeId(n);
         }
+        self.make_source(m, v)
+    }
+
+    /// Source name `m` inserted by a step (`StepCx::source_or_insert`):
+    /// made if absent; if present (another step, or a segment, inserted
+    /// it first), it must hold the same content.
+    fn insert_source(&mut self, m: u32, v: L::Val) {
+        if let Some(&n) = self.sources.get(&m) {
+            assert!(
+                self.n.val[n as usize].ver() == v.ver(),
+                "the source {:?} inserted with other content",
+                String::from_utf8_lossy(&self.names.spell[m as usize])
+            );
+            return;
+        }
+        self.make_source(m, v);
+    }
+
+    /// A new source for name `m`, holding `v`; its readers woken.
+    fn make_source(&mut self, m: u32, v: L::Val) -> NodeId {
         let i = self.root_node(Kind::Input, L::Op::default(), Class::Pure, 0);
         self.n.val[i as usize] = v;
         let ri = u32::try_from(self.names.recs.len()).expect("definitions fit u32");
@@ -3169,6 +3243,11 @@ impl<L: Lang, const P: bool> Graph<L, P> {
             self.names.defs.push(Runs::default());
             self.names.readers.push(Runs::default());
             self.names.gens.push(0);
+        }
+        // sources the step inserted (before its reads and its interior's
+        // names resolve: they read them)
+        for (m, v) in std::mem::take(&mut self.em.new_sources) {
+            self.insert_source(m, v);
         }
         // which emissions become nodes ("big"); the rest is the sweep's
         let ids = self.match_children(s);
@@ -4914,6 +4993,9 @@ struct Pack<L: Lang> {
     /// The top steps, in chain order.
     tops: Vec<u32>,
     spell: Vec<Box<[u8]>>,
+    /// The sources the segment's steps inserted (`StepCx::source_or_insert`):
+    /// their spellings and values, inserted in the graph grafted into.
+    sources: Vec<(Box<[u8]>, L::Val)>,
     end: Option<Parked>,
     depth: u16,
 }
@@ -4980,6 +5062,7 @@ impl<L: Lang, const P: bool> Graph<L, P> {
             dorder: Vec::new(),
             tops: Vec::new(),
             spell: Vec::new(),
+            sources: Vec::new(),
             end: None,
             depth: dpu,
             prof: std::mem::take(&mut p.prof),
@@ -5156,6 +5239,18 @@ impl<L: Lang, const P: bool> Graph<L, P> {
             grp: encg(e.grp),
             ..e
         });
+        // (the sources its steps inserted: a segment's graph has no others)
+        let mut srcs: Vec<(u32, u32)> = p.sources.iter().map(|(&m, &i)| (m, i)).collect();
+        srcs.sort_unstable();
+        pk.sources = srcs
+            .into_iter()
+            .map(|(m, i)| {
+                (
+                    p.names.spell[m as usize].clone(),
+                    std::mem::take(&mut pval[i as usize]),
+                )
+            })
+            .collect();
         pk.spell = std::mem::take(&mut p.names.spell);
         pk
     }
@@ -5165,7 +5260,14 @@ impl<L: Lang, const P: bool> Graph<L, P> {
     /// where the segment stopped (`None`: it ended).
     #[allow(clippy::too_many_lines, reason = "one pass per table, in order")]
     #[allow(clippy::cast_possible_truncation, reason = "ids and arenas fit u32")]
-    fn graft(&mut self, u: u32, tail: u32, pk: Pack<L>) -> Option<(u32, u32, Option<Parked>)> {
+    fn graft(&mut self, u: u32, tail: u32, mut pk: Pack<L>) -> Option<(u32, u32, Option<Parked>)> {
+        // (the sources the segment's steps inserted stay, whatever becomes
+        // of its steps: facts about the host; made before the segment's
+        // nodes are numbered)
+        for (sp, v) in std::mem::take(&mut pk.sources) {
+            let m = self.intern(&sp);
+            self.insert_source(m, v);
+        }
         if pk.tops.is_empty() {
             return None;
         }
