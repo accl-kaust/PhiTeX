@@ -96,6 +96,8 @@ const DEAD: u8 = 4;
 const SEALED: u8 = 8;
 
 mod check;
+mod runs;
+use runs::Runs;
 mod compact;
 mod seal;
 
@@ -221,16 +223,11 @@ struct NameTab {
     by_hash: Map<u64, u32>,
     hashes: Vec<u64>,
     spell: Vec<Box<[u8]>>,
-    defs: Vec<Vec<DefEntry>>,
+    defs: Vec<Runs<DefEntry>>,
     /// Nodes that read the name: (anchor, node, era), sorted by the
     /// anchor's position (a top-level step or root node, whose order
     /// never changes); stale entries pruned at the run's end.
-    readers: Vec<Vec<(u32, u32, u32)>>,
-    /// Readers not in order yet (one placed in the middle waits here, so
-    /// a run of them costs one merge, not a shift each), and the names
-    /// that have some.
-    rpend: Vec<Vec<(u32, u32, u32)>>,
-    rpend_names: Vec<u32>,
+    readers: Vec<Runs<(u32, u32, u32)>>,
     /// Names whose reader lists hold stale entries.
     prune: Vec<u32>,
     pruned: Vec<bool>,
@@ -1157,7 +1154,7 @@ fn resolve_with<L: Lang>(
         return none;
     };
     let k = defs.partition_point(|d| g.cmp_pos(d.pos, at) == Ordering::Less);
-    for d in defs[..k].iter().rev() {
+    for d in defs.iter_back(k) {
         let alive = d.global
             || d.group == NOGROUP
             || (!closed.contains(&d.group)
@@ -1194,7 +1191,7 @@ fn resolve<L: Lang>(
         return none;
     };
     let k = defs.partition_point(|d| g.cmp_pos(d.pos, at) == Ordering::Less);
-    for d in defs[..k].iter().rev() {
+    for d in defs.iter_back(k) {
         let alive = d.global
             || d.group == NOGROUP
             || groups
@@ -1424,12 +1421,7 @@ impl<L: Lang> Graph<L> {
         if self.n.h[u].an > 0 && self.n.opds_of(n) == os {
             return;
         }
-        for k in 0..self.n.h[u].an as usize {
-            let m = self.n.opds[self.n.h[u].a0 as usize + k].name;
-            if m != NONE {
-                self.mark_prune(m);
-            }
-        }
+        self.drop_readers(n);
         let era = self.n.h[u].era.wrapping_add(1);
         self.n.h[u].era = era;
         self.n.h[u].a0 = u32::try_from(self.n.opds.len()).expect("operands fit u32");
@@ -1449,6 +1441,28 @@ impl<L: Lang> Graph<L> {
             if o.name != NONE {
                 let a = self.anchor(n);
                 self.insert_reader(o.name, (a, n, era));
+            }
+        }
+    }
+
+    /// Node `n`'s entries in the reader lists of the names it reads, taken
+    /// out (in O(log R) each); a name where one is not found is pruned
+    /// whole at the run's end.
+    fn drop_readers(&mut self, n: u32) {
+        let u = n as usize;
+        let (a0, an, era) = (
+            self.n.h[u].a0 as usize,
+            self.n.h[u].an as usize,
+            self.n.h[u].era,
+        );
+        if an == 0 {
+            return;
+        }
+        let a = self.anchor(n);
+        for k in 0..an {
+            let m = self.n.opds[a0 + k].name;
+            if m != NONE && !self.remove_reader(m, a, n, era) {
+                self.mark_prune(m);
             }
         }
     }
@@ -2153,6 +2167,7 @@ impl<L: Lang> Graph<L> {
             return lo + if gap > 1 << 17 { 1 << 16 } else { gap / 2 };
         }
         // (no room: spread every step of `u` again, keeping the order)
+
         let mut c = self.first(u);
         let mut k = 0u64;
         let mut found = 0;
@@ -2262,9 +2277,8 @@ impl<L: Lang> Graph<L> {
             self.names.by_hash.insert(h, id);
             self.names.hashes.push(h);
             self.names.spell.push(sp);
-            self.names.defs.push(Vec::new());
-            self.names.readers.push(Vec::new());
-            self.names.rpend.push(Vec::new());
+            self.names.defs.push(Runs::default());
+            self.names.readers.push(Runs::default());
         }
         // which emissions become nodes ("big"); the rest is the sweep's
         let ids = self.match_children(s);
@@ -2926,13 +2940,32 @@ impl<L: Lang> Graph<L> {
     }
 
     /// Readers of name `m` after `from` resolved again; those whose value
-    /// changed are woken.
+    /// changed are woken. Only readers before the next definition after
+    /// `from` that is alive to the end (global, or in no group) can
+    /// change: past it, every reader reaches it or a later one. So the
+    /// cost is the run of readers between the two (DESIGN 7.5).
     fn reresolve(&mut self, m: u32, from: Pos) {
-        self.flush_readers(m);
         let rs = std::mem::take(&mut self.names.readers[m as usize]);
         let af = self.anchor_pos(from);
         let k0 = rs.partition_point(|e| self.n.cmp_pos(self.n.pos(e.0), af) == Ordering::Less);
-        for &(_, r, era) in &rs[k0..] {
+        // (the bound: the anchor of the next definition alive to the end)
+        let bound = {
+            let defs = &self.names.defs[m as usize];
+            // (in a later anchor: one in `from`'s own anchor, the changed
+            // step's own, does not bound it)
+            let k = defs.partition_point(|d| {
+                self.n.cmp_pos(self.anchor_pos(d.pos), af) != Ordering::Greater
+            });
+            defs.iter_from(k)
+                .find(|d| d.global || d.group == NOGROUP)
+                .map(|d| self.anchor_pos(d.pos))
+        };
+        for &(a, r, era) in rs.iter_from(k0) {
+            if let Some(b) = bound
+                && self.n.cmp_pos(self.n.pos(a), b) == Ordering::Greater
+            {
+                break;
+            }
             let ru = r as usize;
             if self.n.h[ru].era != era || self.n.h[ru].flags & DEAD != 0 {
                 continue;
@@ -2966,57 +2999,47 @@ impl<L: Lang> Graph<L> {
         }
         // (readers added meanwhile go in their places again)
         let added = std::mem::replace(&mut self.names.readers[m as usize], rs);
-        for e in added {
+        for &e in added.iter() {
             self.insert_reader(m, e);
         }
     }
 
-    /// A reader of name `m`, in its anchor's place: at the end, mostly;
-    /// else it waits in `rpend` for the next merge.
+    /// A reader of name `m`, in its anchor's place.
     fn insert_reader(&mut self, m: u32, e: (u32, u32, u32)) {
         let list = &self.names.readers[m as usize];
         let ap = self.n.pos(e.0);
-        let at_end = match list.last() {
-            None => true,
-            Some(l) => l.0 == e.0 || self.n.cmp_pos(self.n.pos(l.0), ap) != Ordering::Greater,
+        let k = match list.last() {
+            None => 0,
+            Some(l) if l.0 == e.0 || self.n.cmp_pos(self.n.pos(l.0), ap) != Ordering::Greater => {
+                list.len()
+            }
+            _ => list.partition_point(|x| self.n.cmp_pos(self.n.pos(x.0), ap) != Ordering::Greater),
         };
-        if at_end && self.names.rpend[m as usize].is_empty() {
-            self.names.readers[m as usize].push(e);
-        } else {
-            if self.names.rpend[m as usize].is_empty() {
-                self.names.rpend_names.push(m);
-            }
-            self.names.rpend[m as usize].push(e);
-        }
+        self.names.readers[m as usize].insert(k, e);
     }
 
-    /// Name `m`'s waiting readers merged into its list, in order.
-    pub(crate) fn flush_readers(&mut self, m: u32) {
-        let mut add = std::mem::take(&mut self.names.rpend[m as usize]);
-        if add.is_empty() {
-            return;
-        }
-        let g = &self.n;
-        add.sort_by(|a, b| g.cmp_pos(g.pos(a.0), g.pos(b.0)));
-        let old = std::mem::take(&mut self.names.readers[m as usize]);
-        let mut new = Vec::with_capacity(old.len() + add.len());
-        let mut a = add.into_iter().peekable();
-        for e in old {
-            while let Some(x) = a.peek()
-                && g.cmp_pos(g.pos(x.0), g.pos(e.0)) == Ordering::Less
-            {
-                new.push(a.next().expect("peeked"));
+    /// Name `m`'s reader entry for `node` at `era` (anchored at `a`)
+    /// removed; false if it is not found where it should be.
+    fn remove_reader(&mut self, m: u32, a: u32, node: u32, era: u32) -> bool {
+        let list = &self.names.readers[m as usize];
+        let ap = self.n.pos(a);
+        let k = list.partition_point(|x| self.n.cmp_pos(self.n.pos(x.0), ap) == Ordering::Less);
+        let mut found = None;
+        for (i, x) in (k..).zip(list.iter_from(k)) {
+            if x.0 != a && self.n.cmp_pos(self.n.pos(x.0), ap) == Ordering::Greater {
+                break;
             }
-            new.push(e);
+            if x.1 == node && x.2 == era {
+                found = Some(i);
+                break;
+            }
         }
-        new.extend(a);
-        self.names.readers[m as usize] = new;
-    }
-
-    /// Every name's waiting readers merged.
-    pub(crate) fn flush_all_readers(&mut self) {
-        for m in std::mem::take(&mut self.names.rpend_names) {
-            self.flush_readers(m);
+        match found {
+            Some(i) => {
+                self.names.readers[m as usize].remove(i);
+                true
+            }
+            None => false,
         }
     }
 
@@ -3035,7 +3058,7 @@ impl<L: Lang> Graph<L> {
     fn remove_def(&mut self, m: u32, pos: Pos) {
         let list = &self.names.defs[m as usize];
         let k = list.partition_point(|e| self.n.cmp_pos(e.pos, pos) == Ordering::Less);
-        if k < list.len() && list[k].pos == pos {
+        if list.get(k).is_some_and(|e| e.pos == pos) {
             self.names.defs[m as usize].remove(k);
         }
     }
@@ -3052,12 +3075,7 @@ impl<L: Lang> Graph<L> {
             self.remove(c);
             c = nx;
         }
-        for k in 0..self.n.h[u].an as usize {
-            let m = self.n.opds[self.n.h[u].a0 as usize + k].name;
-            if m != NONE {
-                self.mark_prune(m);
-            }
-        }
+        self.drop_readers(n);
         self.n.h[u].flags |= DEAD;
         self.n.h[u].era = self.n.h[u].era.wrapping_add(1);
         self.rep.removed += 1;
@@ -3347,7 +3365,6 @@ impl<L: Lang> Graph<L> {
         for v in self.fam_readers.values_mut() {
             v.retain(|&x| !dead(&self.n, x));
         }
-        self.flush_all_readers();
         for m in std::mem::take(&mut self.names.prune) {
             self.names.pruned[m as usize] = false;
             let g = &self.n;
@@ -3563,7 +3580,7 @@ impl<L: Lang> Graph<L> {
     #[must_use]
     pub fn debug_defs(&self, n: NameId) -> String {
         let mut out = String::new();
-        for d in &self.names.defs[n.0 as usize] {
+        for d in self.names.defs[n.0 as usize].iter() {
             let close = self.groups.get(&d.group).and_then(|g| g.close);
             let _ = writeln!(
                 out,
@@ -3829,9 +3846,8 @@ impl<L: Lang> Graph<L> {
         self.names.by_hash.insert(h, id);
         self.names.hashes.push(h);
         self.names.spell.push(sp.into());
-        self.names.defs.push(Vec::new());
-        self.names.readers.push(Vec::new());
-        self.names.rpend.push(Vec::new());
+        self.names.defs.push(Runs::default());
+        self.names.readers.push(Runs::default());
         id
     }
 }
@@ -4288,10 +4304,9 @@ impl<L: Lang> Graph<L> {
                 })
                 .collect();
             let list = &self.names.readers[m as usize];
-            let fast = self.names.rpend[m as usize].is_empty()
-                && list.last().is_none_or(|l| {
-                    self.n.cmp_pos(self.n.pos(l.0), self.n.pos(es[0].0)) != Ordering::Greater
-                });
+            let fast = list.last().is_none_or(|l| {
+                self.n.cmp_pos(self.n.pos(l.0), self.n.pos(es[0].0)) != Ordering::Greater
+            });
             if fast {
                 self.names.readers[m as usize].extend(es);
             } else {

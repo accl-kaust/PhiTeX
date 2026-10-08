@@ -4,7 +4,7 @@
 //! holds its id), the tables are truncated, and the operand, reverse-edge
 //! and definition arenas are rebuilt from the live nodes alone.
 
-use super::{DEAD, DefRec, Graph, Kind, Map, NOGROUP, NONE, Opd, Pos, Rev, Set, StepInfo};
+use super::{DEAD, DefRec, Graph, Kind, NOGROUP, NONE, Opd, Pos, Rev, Set, StepInfo};
 use crate::lang::Lang;
 
 impl<L: Lang> Graph<L> {
@@ -21,7 +21,6 @@ impl<L: Lang> Graph<L> {
     #[allow(clippy::cast_possible_truncation, reason = "ids fit u32")]
     pub fn compact(&mut self) {
         debug_assert!(self.heap.is_empty(), "compaction between runs");
-        self.flush_all_readers();
         let len = self.n.h.len();
         if cfg!(debug_assertions) {
             let dead =
@@ -157,6 +156,8 @@ impl<L: Lang> Graph<L> {
         self.n.h.shrink_to_fit();
         self.n.val.shrink_to_fit();
         // headers, operands and side tables, node by node
+        // (which slots hold live nodes now)
+        let hs: Vec<u8> = self.n.h.iter().map(|h| h.flags & DEAD).collect();
         let old_opds = std::mem::take(&mut self.n.opds);
         let old_steps = std::mem::take(&mut self.steps);
         let old_defs = std::mem::take(&mut self.step_defs);
@@ -210,9 +211,21 @@ impl<L: Lang> Graph<L> {
                         .expect("one unfold a slot");
                     ui.first = mp(ui.first);
                     ui.grp0 = mg(ui.grp0);
-                    ui.indexed = false;
-                    ui.keys = Map::default();
-                    ui.owners = Map::default();
+                    // (the maps kept, their steps renumbered: dead ones out)
+                    let live = |x: u32| {
+                        let m = map[x as usize] as usize;
+                        (m < new_len && hs[m] == 0).then_some(m as u32)
+                    };
+                    ui.keys = ui
+                        .keys
+                        .iter()
+                        .filter_map(|(&k, &x)| Some((k, live(x)?)))
+                        .collect();
+                    ui.owners = ui
+                        .owners
+                        .iter()
+                        .filter_map(|(&k, &x)| Some((k, live(x)?)))
+                        .collect();
                     if let Some(p) = ui.parked.as_mut() {
                         p.s = mp(p.s);
                         p.grp = mg(p.grp);

@@ -618,33 +618,20 @@ impl<T: Value, M: Measure<T>> Seq<T, M> {
     }
 
     /// Where `self` differs from `old`: the common prefix and suffix, by
-    /// identity and version, skipping subtrees shared by pointer.
+    /// identity and version, skipping subtrees shared by pointer at any
+    /// depth (a splice copies only its path, so the rest is shared even
+    /// where the trees' shapes differ): O(log n) per edit.
     #[must_use]
     pub fn diff(&self, old: &Self) -> Hunk {
         let (n, m) = (self.len(), old.len());
-        let mut prefix = match (&self.root, &old.root) {
-            (Some(a), Some(b)) => common(a, b, Side::Front).min(n).min(m),
-            _ => 0,
+        let (Some(a), Some(b)) = (&self.root, &old.root) else {
+            return Hunk {
+                prefix: 0,
+                suffix: 0,
+            };
         };
-        // (where the trees' shapes part, element by element to the edit)
-        for ((i, x), (j, y)) in self.iter_from(prefix).zip(old.iter_from(prefix)) {
-            if i != j || x.ver() != y.ver() {
-                break;
-            }
-            prefix += 1;
-        }
-        let room = n.min(m) - prefix;
-        let mut suffix = match (&self.root, &old.root) {
-            (Some(a), Some(b)) => common(a, b, Side::Back).min(room),
-            _ => 0,
-        };
-        while suffix < room {
-            let (x, y) = (self.get(n - 1 - suffix), old.get(m - 1 - suffix));
-            match (x, y) {
-                (Some((i, x)), Some((j, y))) if i == j && x.ver() == y.ver() => suffix += 1,
-                _ => break,
-            }
-        }
+        let prefix = common(a, b, Side::Front, n.min(m));
+        let suffix = common(a, b, Side::Back, n.min(m) - prefix);
         Hunk { prefix, suffix }
     }
 }
@@ -655,44 +642,89 @@ enum Side {
     Back,
 }
 
-type Pairs<'a, T, M> = Box<dyn Iterator<Item = (&'a Arc<Node<T, M>>, &'a Arc<Node<T, M>>)> + 'a>;
+/// A part of a sequence still to compare: a subtree or one element.
+enum Part<'a, T, M: Measure<T>> {
+    Node(&'a Arc<Node<T, M>>),
+    Elem(&'a (ElemId, T)),
+}
 
-/// The number of equal elements at one end of `a` and `b`.
-fn common<T: Value, M: Measure<T>>(a: &Arc<Node<T, M>>, b: &Arc<Node<T, M>>, side: Side) -> usize {
-    if Arc::ptr_eq(a, b) {
-        return a.len;
+impl<T, M: Measure<T>> Part<'_, T, M> {
+    fn len(&self) -> usize {
+        match self {
+            Part::Node(n) => n.len,
+            Part::Elem(_) => 1,
+        }
     }
-    if let (Kind::Inner(ka), Kind::Inner(kb)) = (&a.kind, &b.kind) {
-        // (children aligned at this end, compared pairwise)
-        let pairs: Pairs<'_, T, M> = match side {
-            Side::Front => Box::new(ka.iter().zip(kb.iter())),
-            Side::Back => Box::new(ka.iter().rev().zip(kb.iter().rev())),
+}
+
+/// Replace the node on top of `st` by its parts, the one at `side`'s end
+/// on top.
+fn expand<T, M: Measure<T>>(st: &mut Vec<Part<'_, T, M>>, side: Side) {
+    let Some(Part::Node(n)) = st.pop() else {
+        unreachable!("a node on top")
+    };
+    match &n.kind {
+        Kind::Leaf(xs) => match side {
+            Side::Front => st.extend(xs.iter().rev().map(Part::Elem)),
+            Side::Back => st.extend(xs.iter().map(Part::Elem)),
+        },
+        Kind::Inner(ks) => match side {
+            Side::Front => st.extend(ks.iter().rev().map(Part::Node)),
+            Side::Back => st.extend(ks.iter().map(Part::Node)),
+        },
+    }
+}
+
+/// The number of equal elements at one end of `a` and `b` (at most
+/// `max`).
+fn common<T: Value, M: Measure<T>>(
+    a: &Arc<Node<T, M>>,
+    b: &Arc<Node<T, M>>,
+    side: Side,
+    max: usize,
+) -> usize {
+    let mut sa = vec![Part::Node(a)];
+    let mut sb = vec![Part::Node(b)];
+    let mut k = 0;
+    while k < max {
+        let (Some(x), Some(y)) = (sa.last(), sb.last()) else {
+            break;
         };
-        let mut total = 0;
-        for (x, y) in pairs {
-            let c = common(x, y, side);
-            total += c;
-            if c < x.len || x.len != y.len {
-                return total;
+        match (x, y) {
+            (Part::Node(p), Part::Node(q)) if Arc::ptr_eq(p, q) => {
+                k += p.len;
+                sa.pop();
+                sb.pop();
+            }
+            (Part::Elem(e), Part::Elem(f)) => {
+                if e.0 != f.0 || e.1.ver() != f.1.ver() {
+                    break;
+                }
+                k += 1;
+                sa.pop();
+                sb.pop();
+            }
+            _ if x.len() == 0 => {
+                sa.pop();
+            }
+            _ if y.len() == 0 => {
+                sb.pop();
+            }
+            _ => {
+                // (the larger one opened; both when equal)
+                let (lx, ly) = (x.len(), y.len());
+                let ex = matches!(x, Part::Node(_)) && lx >= ly;
+                let ey = matches!(y, Part::Node(_)) && ly >= lx;
+                if ex {
+                    expand(&mut sa, side);
+                }
+                if ey {
+                    expand(&mut sb, side);
+                }
             }
         }
-        return total;
     }
-    // (shapes differ: element by element)
-    let (n, m) = (a.len, b.len);
-    let mut k = 0;
-    while k < n && k < m {
-        let (i, j) = match side {
-            Side::Front => (k, k),
-            Side::Back => (n - 1 - k, m - 1 - k),
-        };
-        let (x, y) = (a.get(i), b.get(j));
-        if x.0 != y.0 || x.1.ver() != y.1.ver() {
-            break;
-        }
-        k += 1;
-    }
-    k
+    k.min(max)
 }
 
 impl<T: Value, M: Measure<T>> PartialEq for Seq<T, M> {

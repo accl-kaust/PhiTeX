@@ -241,7 +241,7 @@ fn main() {
                     let r = g.run();
                     out.push(t.elapsed().as_secs_f64() * 1e6);
                     *st += r.steps;
-                    if std::env::var("TRACE").is_ok() {
+                    if std::env::var("TRACE").is_ok() || t.elapsed().as_secs_f64() > 2e-3 {
                         eprintln!("edit at {k}: {r:?}");
                     }
                 }

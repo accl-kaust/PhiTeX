@@ -108,10 +108,15 @@ impl<L: Lang> Graph<L> {
             c = self.n.h[c as usize].next;
         }
         let mut pend = Pending::default();
-        for u in us {
+        for &u in &us {
             self.seal_unfold(u, f, &mut pend);
         }
         self.seal_lists(pend);
+        // (the key and owner maps made here, with the pass, not by the
+        // first edit after it; compaction keeps them)
+        for u in us {
+            self.index_steps(u);
+        }
     }
 
     /// Whether step `s` may be in a sealed run.
@@ -445,13 +450,12 @@ impl<L: Lang> Graph<L> {
             let lo = list.partition_point(|d| g.cmp_pos(d.pos, p1) != Ordering::Greater);
             let hi = list.partition_point(|d| g.cmp_pos(d.pos, pq) == Ordering::Less);
             let add: Vec<DefEntry> = pend.defs.iter().filter(|x| x.0 == m).map(|x| x.1).collect();
-            self.names.defs[m as usize].splice(lo..hi, add);
+            self.names.defs[m as usize].splice(lo, hi, add);
         }
         pend.read.extend(pend.readers.iter().map(|x| x.0));
         pend.read.sort_unstable();
         pend.read.dedup();
         for &m in &pend.read {
-            self.flush_readers(m);
             let g = &self.n;
             let list = &self.names.readers[m as usize];
             let lo = list.partition_point(|e| g.cmp_pos(g.pos(e.0), p1) == Ordering::Less);
@@ -462,7 +466,7 @@ impl<L: Lang> Graph<L> {
                 .filter(|x| x.0 == m)
                 .map(|x| x.1)
                 .collect();
-            self.names.readers[m as usize].splice(lo..hi, add);
+            self.names.readers[m as usize].splice(lo, hi, add);
         }
         pend.touched.clear();
         pend.defs.clear();
@@ -540,7 +544,7 @@ impl<L: Lang> Graph<L> {
                 j += 1;
             }
             let mut a = add.into_iter().peekable();
-            for e in old {
+            for &e in &old {
                 if gone(e.pos) {
                     continue;
                 }
@@ -552,7 +556,7 @@ impl<L: Lang> Graph<L> {
                 new.push(e);
             }
             new.extend(a);
-            self.names.defs[m as usize] = new;
+            self.names.defs[m as usize] = new.into_iter().collect();
         }
         pend.readers.sort_by(|a, b| {
             a.0.cmp(&b.0)
@@ -565,12 +569,11 @@ impl<L: Lang> Graph<L> {
             while k < pend.readers.len() && pend.readers[k].0 == m {
                 k += 1;
             }
-            self.flush_readers(m);
             let g = &self.n;
             let old = std::mem::take(&mut self.names.readers[m as usize]);
             let mut new = Vec::with_capacity(old.len() + k - i);
             let mut a = pend.readers[i..k].iter().map(|x| x.1).peekable();
-            for e in old {
+            for &e in &old {
                 while let Some(x) = a.peek()
                     && g.cmp_pos(g.pos(x.0), g.pos(e.0)) == Ordering::Less
                 {
@@ -579,7 +582,7 @@ impl<L: Lang> Graph<L> {
                 new.push(e);
             }
             new.extend(a);
-            self.names.readers[m as usize] = new;
+            self.names.readers[m as usize] = new.into_iter().collect();
             i = k;
         }
     }
