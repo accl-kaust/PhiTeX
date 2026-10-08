@@ -1409,6 +1409,11 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         if self.cur_input.name == 18 || self.cur_input.name == 19 {
             self.pseudo_files.pop(); // e-TeX: close the pseudo file
         } else if self.cur_input.name > 17 {
+            if T::PURE
+                && let Some(f) = &self.input_file[index]
+            {
+                self.tracker.pure_file_end(&f.name, f.lines);
+            }
             self.input_file[index] = None; // forget it
             if T::VALUES {
                 self.tracker.file(index, None);

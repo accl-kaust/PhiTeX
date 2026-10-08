@@ -112,7 +112,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
     /// String `s`'s version as a name row holds it: its characters (odd,
     /// apart from the even versions of numbers), or its number if it is
     /// none or a character.
-    fn name_version(&self, s: i32) -> u128 {
+    pub(crate) fn name_version(&self, s: i32) -> u128 {
         match usize::try_from(s) {
             Ok(n) if n >= 256 && n < self.str_ptr => self.string_version(n) | 1,
             _ => crate::track::scalar_version_i32(s),

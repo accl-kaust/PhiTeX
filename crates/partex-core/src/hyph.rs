@@ -233,7 +233,7 @@ impl HyphState {
 
     /// The exception table's version: the map, with `hyph_count` and
     /// `hyph_next` (§926, §940).
-    fn exceptions_version(&self) -> u128 {
+    pub(crate) fn exceptions_version(&self) -> u128 {
         Version::node(
             0x6578_6300,
             &[

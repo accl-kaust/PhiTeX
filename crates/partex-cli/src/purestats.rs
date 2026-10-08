@@ -274,6 +274,10 @@ struct State {
     /// predicted (the last contribution, no fire since), not a page-chain
     /// operand.
     spec_tail: bool,
+    /// `PARTEX_PURE_SPEC_COND=1`: a conditional's outcome is predicted
+    /// (the last build's), so the nodes of its arm do not wait for its
+    /// test; a test that comes out otherwise re-evaluates its region.
+    spec_cond: bool,
     body_tail_reads: u64,
     /// What made each input level's token list: its node's operands.
     levels: Vec<(Dist, u64, u32)>,
@@ -497,6 +501,9 @@ impl State {
     /// The innermost conditional whose test is decided: the test's
     /// distance and origin, and the cause to name.
     fn cond_dep(&self) -> Option<(Dist, u64, u64, u32)> {
+        if self.spec_cond {
+            return None;
+        }
         self.conds.iter().rev().find_map(|c| {
             c.test.map(|t| {
                 let via = if t.1 != 0 {
@@ -743,6 +750,15 @@ impl State {
             b: f.d_in.b + if page { 0 } else { cost },
         };
         let after_page = if page { PAGE_ORIGIN } else { f.after_page };
+        if cost > 100_000 && std::env::var_os("PARTEX_PURE_BIG").is_some() {
+            eprintln!(
+                "big node {} kind {} cost {cost} reads {} writes {}",
+                f.id,
+                f.kind,
+                f.reads.len(),
+                f.writes.len()
+            );
+        }
         self.total.n += 1;
         self.total.w += cost;
         if d.w > self.crit.w {
@@ -970,6 +986,7 @@ impl Stats {
                 .ok()
                 .and_then(|v| v.parse().ok()),
             spec_tail: std::env::var("PARTEX_PURE_SPEC_TAIL").is_ok_and(|v| v == "1"),
+            spec_cond: std::env::var("PARTEX_PURE_SPEC_COND").is_ok_and(|v| v == "1"),
             split: std::env::var("PARTEX_PURE_SPLIT").is_ok_and(|v| v == "1"),
             dropped: std::env::var("PARTEX_PURE_FIELDS")
                 .ok()
@@ -1125,6 +1142,16 @@ impl Tracker for Stats {
             return None;
         }
         s.calls.push(true);
+        if f == Func::ShipOut && s.setup.is_none() && std::env::var_os("PARTEX_PURE_CONDS").is_some() {
+            for c in &s.conds {
+                eprintln!(
+                    "cond open at the first ship: opener {} kind {} test {:?}",
+                    c.opener,
+                    c.opener_kind,
+                    c.test.map(|t| t.0.w)
+                );
+            }
+        }
         if f == Func::ShipOut && s.setup.is_none() {
             s.setup = Some((s.total, s.crit));
             s.setup_end = s.crit_end;
@@ -1266,7 +1293,9 @@ impl Tracker for Stats {
     fn pure_level(&self, depth: usize) {
         let s = &mut *self.s.borrow_mut();
         let f = s.top();
-        let l = (f.d_in, f.after_page, f.id);
+        // (the level's tokens come from what its pusher read so far: its
+        // path in then)
+        let l = (f.d_in, f.after_page, f.pred.0);
         s.levels.truncate(depth);
         s.levels.resize(depth + 1, (Dist::default(), 0, NONE));
         s.levels[depth] = l;

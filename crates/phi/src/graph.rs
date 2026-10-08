@@ -898,7 +898,18 @@ impl<'s, L: Lang> StepCx<'s, L> {
             return Some(Proj::Owned((*p).clone()));
         }
         let o = if (n.0 as usize) < self.names.defs.len() {
-            resolve(self.g, self.names, self.groups, n.0, self.pos)
+            // (after a group this step closed: the name as it is past the
+            // close, as a leaf's operand resolves)
+            if self
+                .em
+                .events
+                .iter()
+                .any(|(e, _)| matches!(e, Event::Close(_)))
+            {
+                self.resolve_here(n.0)
+            } else {
+                resolve(self.g, self.names, self.groups, n.0, self.pos)
+            }
         } else {
             Opd {
                 src: NONE,

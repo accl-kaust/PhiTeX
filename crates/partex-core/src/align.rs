@@ -260,7 +260,7 @@ impl AlignState {
     }
 
     /// Field `f`'s version (`track::align`), from the values' own.
-    fn field_version(&self, f: u8) -> Version {
+    pub(crate) fn field_version(&self, f: u8) -> Version {
         use crate::track::align::*;
         let c = &self.cur;
         match f {

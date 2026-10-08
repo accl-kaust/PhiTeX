@@ -1350,7 +1350,7 @@ impl InputState {
     }
 
     /// Put the input where this state has it.
-    pub(super) fn set<H: Host, T: Tracker>(&self, t: &mut Tex<H, T>) {
+    pub(crate) fn set<H: Host, T: Tracker>(&self, t: &mut Tex<H, T>) {
         t.fire_pending = self.fire;
         t.ship_stop = u8::from(self.ship);
         t.load_stop = if self.load { 2 } else { 0 };

@@ -27,6 +27,7 @@ partex-core = { path = "../partex-core", features = ["std"] }
 partex-otf = { path = "../partex-otf" }
 partex-engine = { path = "../partex-engine" }
 partex-incr = { path = "../partex-incr" }
+phi = { path = "../phi" }
 partex-kpse = { path = "../partex-kpse" }
 partex-trace = { path = "../partex-trace" }
 partex-xdvipdfmx = { path = "../partex-xdvipdfmx" }

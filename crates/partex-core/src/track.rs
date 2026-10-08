@@ -427,6 +427,15 @@ pub trait Tracker {
     /// called: an observer that counts the nodes a pure graph would have.
     /// They change nothing the engine does.
     const PURE: bool = false;
+    /// (With [`Tracker::PURE`].) A group begins (`open`, §274) or ends
+    /// (§281, before its restores).
+    fn pure_group(&self, _open: bool) {}
+    /// (With [`Tracker::PURE`].) The next write of eqtb entry `p` is a
+    /// global assignment (§279).
+    fn pure_global(&self, _p: i32) {}
+    /// (With [`Tracker::PURE`].) The file level reading the file named
+    /// `name` ends, `lines` of its lines read (§362, `end_file_reading`).
+    fn pure_file_end(&self, _name: &[u8], _lines: u32) {}
     /// (With [`Tracker::PURE`].) Main control begins a command (§1030),
     /// inside the output routine if `output`.
     fn pure_begin(&self, _output: bool) {}

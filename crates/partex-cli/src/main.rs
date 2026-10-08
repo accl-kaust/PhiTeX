@@ -27,6 +27,7 @@ mod modern;
 mod native;
 mod origins;
 mod outline;
+mod pure;
 mod purestats;
 mod render;
 mod resident;
@@ -736,6 +737,11 @@ fn main() {
         std::process::exit(i32::from(history > 1));
     }
     if std::env::var("PARTEX_SSA").is_ok_and(|v| v == "1") {
+        // (`PHITEX_SSA_PURE=1`: on the φ core, DESIGN 3.17, `pure.rs`)
+        if std::env::var("PHITEX_SSA_PURE").is_ok_and(|v| v == "1") {
+            let history = pure::run(host, params, command_line.as_bytes());
+            std::process::exit(i32::from(history > 1));
+        }
         let history = run_ssa(host, params, command_line.as_bytes());
         std::process::exit(i32::from(history > 1));
     }

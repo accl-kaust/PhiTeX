@@ -698,6 +698,48 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         c.h.finish128()
     }
 
+    /// [`Tex::input_hash`] for pure SSA mode's step states (DESIGN 3.17):
+    /// a file's place is the count of its lines read, not the bytes left
+    /// in it (an edit after it leaves it), and the file named `main`, the
+    /// core's input, has no place here at all: the core's cursor is it.
+    #[must_use]
+    pub(crate) fn input_hash_pure(&self, main: &[u8]) -> u128 {
+        let mut c = Canon::new();
+        for r in &self.input_stack[..self.input_ptr] {
+            c.input(r);
+        }
+        c.input(&self.cur_input);
+        c.put(&(
+            self.input_ptr,
+            self.in_open,
+            self.open_parens,
+            self.base_ptr,
+        ));
+        c.put(&self.buffer.prefix(self.first.max(self.last)));
+        c.put(&(self.first, self.last, self.line));
+        let place = |f: &Option<crate::input::AlphaFile>| {
+            f.as_ref().map(|f| {
+                let m = &f.name[..] == main;
+                (m, if m { 0 } else { f.lines }, f.name.clone())
+            })
+        };
+        c.put(
+            &self
+                .input_file
+                .iter()
+                .map(place)
+                .collect::<alloc::vec::Vec<_>>(),
+        );
+        c.put(
+            &self
+                .read_file
+                .iter()
+                .map(place)
+                .collect::<alloc::vec::Vec<_>>(),
+        );
+        c.h.finish128()
+    }
+
     /// [`Tex::state_hash`] and [`Tex::state_hash_parts`] in one pass.
     #[must_use]
     pub fn state_hash_and_parts(&self) -> (u128, alloc::vec::Vec<(&'static str, u128)>) {

@@ -1002,7 +1002,7 @@ fn int(v: i32) -> u128 {
 
 impl<H: Host, T: Tracker> Tex<H, T> {
     /// The address of field `f`.
-    fn writer_row(f: u8) -> Row {
+    pub(crate) fn writer_row(f: u8) -> Row {
         if f >= DVI {
             Row::Dvi(f - DVI)
         } else {
@@ -1392,7 +1392,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
 
     /// Field `f`'s version from its content now, every element hashed
     /// again (check mode's test of the version its writer made).
-    fn writer_content(&self, f: u8) -> u128 {
+    pub(crate) fn writer_content(&self, f: u8) -> u128 {
         use field::*;
         match f {
             OBJS => self.pdf.objs.table_content_version(),

@@ -47,7 +47,7 @@ use crate::track::{Cell, LineCodes, Output, Row, Tracker, line_tokens};
 #[cfg(feature = "std")]
 mod cold;
 mod par;
-mod rebuild;
+pub(crate) mod rebuild;
 mod tools;
 mod view;
 
@@ -430,7 +430,7 @@ fn low32(x: i64) -> i32 {
 pub struct Slot(pub Fam, pub i64);
 
 impl Slot {
-    fn row(r: Row) -> Slot {
+    pub(crate) fn row(r: Row) -> Slot {
         match r {
             Row::Str(n) => Slot(Fam::Pool, i64::try_from(n).unwrap_or(i64::MAX)),
             Row::Cond => Slot(Fam::Cond, 0),
@@ -460,7 +460,7 @@ impl Slot {
         }
     }
 
-    fn of(c: Cell) -> Slot {
+    pub(crate) fn of(c: Cell) -> Slot {
         let (f, i) = match c {
             Cell::Eqtb(p) => (Fam::Eqtb, p),
             Cell::Hash(p) => (Fam::Hash, p),
@@ -4748,7 +4748,7 @@ impl<H: Host> Tex<H, SsaTracker> {
 // the names), have no value to keep.
 
 /// A scalar slot's field (`track::scalar`), read.
-fn scalar_get<H: Host, T: Tracker>(t: &Tex<H, T>, k: u16) -> Option<i32> {
+pub(crate) fn scalar_get<H: Host, T: Tracker>(t: &Tex<H, T>, k: u16) -> Option<i32> {
     use crate::track::scalar::*;
     let b = i32::from;
     Some(match k {
@@ -4859,7 +4859,7 @@ fn word_level(p: i32) -> bool {
 }
 
 /// The value slot `s` holds in `t` now, if its family keeps one.
-fn slot_value<H: Host, T: Tracker>(t: &Tex<H, T>, s: Slot) -> Option<SValue> {
+pub(crate) fn slot_value<H: Host, T: Tracker>(t: &Tex<H, T>, s: Slot) -> Option<SValue> {
     use crate::track::list;
     use crate::track::save;
     let i32of = |x: i64| i32::try_from(x).unwrap_or(0);
@@ -4960,7 +4960,7 @@ fn slot_value<H: Host, T: Tracker>(t: &Tex<H, T>, s: Slot) -> Option<SValue> {
 /// Put value `v` back at slot `s` (`Store::set`): one store of the field,
 /// the value shared; a table slot's version array takes the recorded
 /// version.
-fn set_value<H: Host, T: Tracker>(t: &mut Tex<H, T>, vers: &mut Versions, s: Slot, v: &SVal) {
+pub(crate) fn set_value<H: Host, T: Tracker>(t: &mut Tex<H, T>, vers: &mut Versions, s: Slot, v: &SVal) {
     use crate::track::list;
     use crate::track::save;
     let Some(val) = v.1.as_deref() else {

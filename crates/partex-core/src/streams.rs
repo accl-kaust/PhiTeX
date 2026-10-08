@@ -93,7 +93,7 @@ impl Streams {
 impl<H: Host, T: Tracker> Tex<H, T> {
     /// `Out(n)`'s version: the name stream `n` stores to and the file
     /// its bytes go to, or the log's file.
-    fn out_version(&self, n: u8) -> u128 {
+    pub(crate) fn out_version(&self, n: u8) -> u128 {
         if n == LOG {
             return Version::of(&(0x006c_6f67u32, self.log_file.id.map(|f| f.0))).0;
         }
@@ -171,7 +171,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
 
     /// `Read(n)`'s version: the contents' version and the position, or
     /// closed.
-    fn read_version(&self, n: usize) -> u128 {
+    pub(crate) fn read_version(&self, n: usize) -> u128 {
         match self.read_file.get(n).and_then(Option::as_ref) {
             None => Version::of(&0x636c_6f73u32).0,
             Some(f) => {

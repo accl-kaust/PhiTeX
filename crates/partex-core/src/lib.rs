@@ -47,6 +47,8 @@ pub mod params;
 pub mod progress;
 mod skipcache;
 pub mod ssa;
+#[cfg(feature = "std")]
+pub mod pure;
 pub mod track;
 
 mod adapter;

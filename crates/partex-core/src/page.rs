@@ -212,7 +212,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
 
     /// The row of mark `t` of class `class` (DESIGN 7.17.12, `cur_mark`:
     /// marks by class, each a shared token list carrying its version).
-    fn mark_row(class: i32, t: i32) -> crate::track::Row {
+    pub(crate) fn mark_row(class: i32, t: i32) -> crate::track::Row {
         crate::track::Row::Mark(
             class
                 .cast_unsigned()

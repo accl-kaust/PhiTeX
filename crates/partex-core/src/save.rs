@@ -69,7 +69,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
 
     /// Entry `p`'s version: its word, the value it holds, whether it holds
     /// one (made from the value; an object carries its own).
-    fn save_entry_version(&self, p: i32) -> u128 {
+    pub(crate) fn save_entry_version(&self, p: i32) -> u128 {
         let i = Self::sx(p);
         let word = if i < self.save_stack.len() {
             self.save_stack[i].bits()
@@ -278,6 +278,9 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         }
         self.set_cur_level(self.cur_level() + 1);
         self.set_save_ptr(self.save_ptr() + 1);
+        if T::PURE {
+            self.tracker.pure_group(true);
+        }
         Ok(())
     }
 
@@ -590,6 +593,9 @@ impl<H: Host, T: Tracker> Tex<H, T> {
 
     /// §279 with the object the entry holds.
     pub(crate) fn geq_define_obj(&mut self, p: Pointer, t: i32, e: i32, o: Option<Obj>) {
+        if T::PURE {
+            self.tracker.pure_global(p);
+        }
         self.memo.wrote_global(p);
         self.assign_trace(p, b"globally changing");
         let mut w = self.peek_eqtb(p);
@@ -602,6 +608,9 @@ impl<H: Host, T: Tracker> Tex<H, T> {
 
     /// §279: global `eq_word_define`.
     pub(crate) fn geq_word_define(&mut self, p: Pointer, w: i32) {
+        if T::PURE {
+            self.tracker.pure_global(p);
+        }
         self.note_count_write(p);
         self.memo.wrote_global(p);
         self.assign_trace(p, b"globally changing");
@@ -637,6 +646,9 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             return self.confusion(b"curlevel");
         }
         let group = self.cur_group();
+        if T::PURE {
+            self.tracker.pure_group(false);
+        }
         // (the input level below the `\aftergroup` tokens, for a memo
         // recording; `back_input` may first end finished lists)
         let mut below_after = None;
