@@ -17,9 +17,9 @@ use std::hash::{BuildHasherDefault, Hasher};
 use std::marker::PhantomData;
 
 use crate::lang::{Chain, Class, Fam, Lang, Slot, Step};
-use crate::seq::{ElemId, Seq};
+use crate::seq::{ElemId, Leaf, Seq};
 use crate::value::{Proj, Sel, Value, project};
-use crate::ver::{Ver, hash64};
+use crate::ver::{Ver, hash64, name_hash};
 
 /// A node's index in the arena.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
@@ -431,7 +431,7 @@ pub struct Args<'a, L: Lang> {
     sweep: Option<Sweep<'a, L>>,
 }
 
-type Sweep<'a, L> = (&'a [SArg], &'a [u32], &'a [<L as Lang>::Val], &'a [Opd]);
+type Sweep<'a, L> = (&'a [EArg], &'a [u32], &'a [<L as Lang>::Val]);
 
 impl<'a, L: Lang> Args<'a, L> {
     fn of(g: &'a Nodes<L>, opds: &'a [Opd]) -> Self {
@@ -459,10 +459,10 @@ impl<'a, L: Lang> Args<'a, L> {
     /// If there is no operand `i`.
     #[must_use]
     pub fn get(&self, i: usize) -> Proj<'a, L::Val> {
-        let Some((sa, ids, buf, ext)) = self.sweep else {
+        let Some((sa, ids, buf)) = self.sweep else {
             return self.g.read(&self.opds[i]);
         };
-        match sa[i] {
+        match sa[i].a {
             SArg::Local(ix, sel) => {
                 let x = ids.get(ix as usize).copied().unwrap_or(NONE);
                 if x == NONE {
@@ -471,7 +471,7 @@ impl<'a, L: Lang> Args<'a, L> {
                     project(&self.g.val[x as usize], sel, &self.g.absent)
                 }
             }
-            _ => self.g.read(&ext[i]),
+            _ => self.g.read(&sa[i].o),
         }
     }
 }
@@ -504,8 +504,27 @@ enum SArg {
     Name(u32),
 }
 
+/// An emission's operand, and what it resolved to outside the step.
+#[derive(Clone, Copy)]
+struct EArg {
+    a: SArg,
+    o: Opd,
+}
+
+const NOOPD: Opd = Opd {
+    src: NONE,
+    sel: Sel::WHOLE,
+    name: NONE,
+};
+
 struct Spec<O> {
     kind: Kind,
+    /// Its value is in the buffer already (evaluated as it was emitted).
+    done: bool,
+    /// It becomes a node (DESIGN 7.4, transient interiors): anything not
+    /// a pure leaf or constant, a definition's source, and what a creator
+    /// reads. The rest lives only in the sweep.
+    big: bool,
     /// The class's tag (its payload in `aux`, an entry's family in `fam`).
     ctag: u8,
     args: (u32, u16),
@@ -513,8 +532,7 @@ struct Spec<O> {
     sub: u32,
     fam: u32,
     op: O,
-    /// The class's payload, or the kind's (slot, chain), or a constant's
-    /// index in `Emit::lits`.
+    /// The class's payload, or the kind's (slot, chain).
     aux: u64,
     grp: u64,
 }
@@ -541,14 +559,14 @@ enum Event {
 /// A step's emissions.
 struct Emit<L: Lang> {
     specs: Vec<Spec<L::Op>>,
-    lits: Vec<L::Val>,
     /// Each emission's value, evaluated as it is emitted where it can be
-    /// (`done`), and the operands it read from outside the step, by
-    /// operand position.
+    /// (`Spec::done`).
     vals: Vec<L::Val>,
-    done: Vec<bool>,
-    xopds: Vec<Opd>,
-    args: Vec<SArg>,
+    /// The big emissions, in the order they became big.
+    bigs: Vec<u32>,
+    /// The emissions' operands, each with what it resolved to outside
+    /// the step.
+    args: Vec<EArg>,
     defs: Vec<(u32, SArg, bool, u64, u64)>,
     events: Vec<(Event, u64)>,
     reads: Vec<(u32, Opd)>,
@@ -561,10 +579,8 @@ impl<L: Lang> Default for Emit<L> {
     fn default() -> Self {
         Emit {
             specs: Vec::new(),
-            lits: Vec::new(),
             vals: Vec::new(),
-            done: Vec::new(),
-            xopds: Vec::new(),
+            bigs: Vec::new(),
             args: Vec::new(),
             defs: Vec::new(),
             events: Vec::new(),
@@ -577,12 +593,18 @@ impl<L: Lang> Default for Emit<L> {
 }
 
 impl<L: Lang> Emit<L> {
+    fn mark_big(&mut self, ix: u32) {
+        let sp = &mut self.specs[ix as usize];
+        if !sp.big {
+            sp.big = true;
+            self.bigs.push(ix);
+        }
+    }
+
     fn clear(&mut self) {
         self.specs.clear();
-        self.lits.clear();
         self.vals.clear();
-        self.done.clear();
-        self.xopds.clear();
+        self.bigs.clear();
         self.args.clear();
         self.defs.clear();
         self.events.clear();
@@ -612,6 +634,8 @@ pub struct StepCx<'s, L: Lang> {
     opened: u32,
     em: &'s mut Emit<L>,
     ext: Option<&'s Map<u64, L::Val>>,
+    /// Every emission is big ([`Config::keep_interior`]).
+    keep: bool,
     _brand: PhantomData<fn(&'s ()) -> &'s ()>,
 }
 
@@ -665,12 +689,17 @@ impl<'s, L: Lang> StepCx<'s, L> {
 
     /// The name spelled `s` (interned by content).
     pub fn name(&mut self, s: &[u8]) -> NameId {
-        let h = hash64(s);
+        let h = name_hash(s);
         if let Some(&i) = self.names.by_hash.get(&h) {
+            assert!(
+                *self.names.spell[i as usize] == *s,
+                "two names with one hash"
+            );
             return NameId(i);
         }
         let base = u32::try_from(self.names.spell.len()).expect("names fit u32");
         if let Some(k) = self.em.new_names.iter().position(|e| e.0 == h) {
+            assert!(*self.em.new_names[k].1 == *s, "two names with one hash");
             return NameId(base + u32::try_from(k).expect("names fit u32"));
         }
         self.em.new_names.push((h, s.into()));
@@ -681,16 +710,15 @@ impl<'s, L: Lang> StepCx<'s, L> {
     /// defined it to; `None` if undefined. The read is recorded: the step
     /// runs again when it changes.
     pub fn read(&mut self, n: NameId) -> Option<Proj<'s, L::Val>> {
-        // (its own definitions first: a constant's value is known now)
-        if let Some(d) = self.em.defs.iter().rev().find(|d| d.0 == n.0)
-            && let SArg::Local(ix, sel) = d.1
-            && self.em.specs[ix as usize].kind == Kind::Const
-            && let Some(v) = self.em.lits.get(self.em.specs[ix as usize].aux as usize)
+        // (its own definitions first: one whose value is known now)
+        if let Some(SArg::Local(ix, sel)) = self.own_def(n.0)
+            && self.em.specs[ix as usize].done
         {
-            debug_assert!(sel.is_whole());
-            // (a constant of this step: the borrow ends with the step's
-            // buffer, so the value is cloned)
-            return Some(Proj::Owned(v.clone()));
+            // (the borrow ends with the step's buffer, so the value is
+            // cloned)
+            let v = &self.em.vals[ix as usize];
+            let p = project(v, sel, &self.g.absent);
+            return Some(Proj::Owned((*p).clone()));
         }
         let o = if (n.0 as usize) < self.names.defs.len() {
             resolve(self.g, self.names, self.groups, n.0, self.pos)
@@ -728,6 +756,10 @@ impl<'s, L: Lang> StepCx<'s, L> {
         }
     }
 
+    #[allow(
+        clippy::cast_possible_truncation,
+        reason = "emissions and operands of a step fit u32"
+    )]
     fn push(
         &mut self,
         kind: Kind,
@@ -737,69 +769,90 @@ impl<'s, L: Lang> StepCx<'s, L> {
         lit: Option<L::Val>,
         aux: u64,
     ) -> Local<'s> {
-        let a0 = u32::try_from(self.em.args.len()).expect("args fit u32");
+        let a0 = self.em.args.len();
+        // (a leaf whose operands are all known is evaluated now; one
+        // reading a name, after its own definitions are looked at)
+        let mut ready = kind == Kind::Leaf;
+        let mut named = false;
         for &a in args {
-            let s = self.arg(a);
-            self.em.args.push(s);
+            let a = self.arg(a);
+            let o = match a {
+                SArg::Local(j, _) => {
+                    ready &= self.em.specs[j as usize].done;
+                    NOOPD
+                }
+                SArg::Node(src, sel) => Opd {
+                    src,
+                    sel,
+                    name: NONE,
+                },
+                SArg::Name(_) => {
+                    named = true;
+                    NOOPD
+                }
+            };
+            self.em.args.push(EArg { a, o });
         }
-        let ix = u32::try_from(self.em.specs.len()).expect("specs fit u32");
-        let (ctag, mut aux, fam) = match class {
+        let ix = self.em.specs.len();
+        let (ctag, aux, fam) = match class {
             Class::Pure => (0, aux, 0),
             Class::Effect(c) => (1, u64::from(c.0), 0),
             Class::Barrier => (2, aux, 0),
             Class::Publish(s) => (3, s.0, 0),
             Class::Entry(f, s) => (4, s.0, f.0),
         };
-        if let Some(v) = lit {
-            aux = self.em.lits.len() as u64;
-            self.em.lits.push(v);
-        }
         let key = match self.em.next_key.take() {
             // (explicit keys and ordinals apart)
-            Some(k) => {
-                #[allow(clippy::cast_possible_truncation)]
-                let h = (hash64(&k) as u32) | 0x8000_0000;
-                h
-            }
-            None => ix & 0x7fff_ffff,
+            Some(k) => (hash64(&k) as u32) | 0x8000_0000,
+            None => ix as u32 & 0x7fff_ffff,
         };
         let sub = self.em.sub;
         self.em.sub += 1;
+        debug_assert!(u16::try_from(args.len()).is_ok(), "at most 65535 operands");
+        let (done, v) = match (kind, lit) {
+            (Kind::Const, Some(v)) => (true, v),
+            _ if ready && !named => {
+                let em = &*self.em;
+                let args = Args {
+                    g: self.g,
+                    opds: &[],
+                    sweep: Some((&em.args[a0..], &[], &em.vals)),
+                };
+                (true, L::eval(op, &args))
+            }
+            _ => (false, L::Val::default()),
+        };
+        let big = self.keep || !matches!(kind, Kind::Leaf | Kind::Const) || ctag != 0;
+        if big {
+            self.em.bigs.push(ix as u32);
+        }
+        if matches!(kind, Kind::Unfold | Kind::Scan) {
+            // (a creator's operands are nodes: it reads them itself)
+            for k in a0..self.em.args.len() {
+                if let SArg::Local(j, _) = self.em.args[k].a {
+                    self.em.mark_big(j);
+                }
+            }
+        }
         self.em.specs.push(Spec {
             kind,
+            done,
+            big,
             ctag,
-            args: (
-                a0,
-                u16::try_from(args.len()).expect("at most 65535 operands"),
-            ),
+            args: (a0 as u32, args.len() as u16),
             key,
-            sub: u32::try_from(sub).expect("emissions fit u32"),
+            sub: sub as u32,
             fam,
             op,
             aux,
             grp: self.grp,
         });
-        self.em.vals.push(L::Val::default());
-        self.em.done.push(false);
-        self.em.xopds.resize(
-            self.em.args.len(),
-            Opd {
-                src: NONE,
-                sel: Sel::WHOLE,
-                name: NONE,
-            },
-        );
-        match kind {
-            Kind::Const => {
-                let v = std::mem::take(&mut self.em.lits[aux as usize]);
-                self.em.vals[ix as usize] = v;
-                self.em.done[ix as usize] = true;
-            }
-            Kind::Leaf => self.eval_now(ix as usize),
-            _ => {}
+        self.em.vals.push(v);
+        if ready && named {
+            self.eval_now(ix);
         }
         Local {
-            ix,
+            ix: ix as u32,
             _brand: PhantomData,
         }
     }
@@ -814,33 +867,36 @@ impl<'s, L: Lang> StepCx<'s, L> {
             (sp.args.0 as usize, sp.args.1 as usize)
         };
         for a in a0..a0 + an {
-            match self.em.args[a] {
+            match self.em.args[a].a {
                 SArg::Local(j, _) => {
-                    if !self.em.done[j as usize] {
+                    if !self.em.specs[j as usize].done {
                         return;
                     }
                 }
                 SArg::Node(src, sel) => {
-                    self.em.xopds[a] = Opd {
+                    self.em.args[a].o = Opd {
                         src,
                         sel,
                         name: NONE,
-                    }
+                    };
                 }
                 SArg::Name(m) => match self.own_def(m) {
                     Some(SArg::Local(j, sel)) => {
-                        if !self.em.done[j as usize] {
+                        if !self.em.specs[j as usize].done {
                             return;
                         }
                         // (this step's own definition: read in the step)
-                        self.em.args[a] = SArg::Local(j, sel);
+                        self.em.args[a].a = SArg::Local(j, sel);
                     }
                     Some(SArg::Node(src, sel)) => {
-                        self.em.xopds[a] = Opd {
-                            src,
-                            sel,
-                            name: NONE,
-                        }
+                        self.em.args[a] = EArg {
+                            a: SArg::Node(src, sel),
+                            o: Opd {
+                                src,
+                                sel,
+                                name: NONE,
+                            },
+                        };
                     }
                     Some(SArg::Name(_)) => return,
                     None => {
@@ -857,7 +913,7 @@ impl<'s, L: Lang> StepCx<'s, L> {
                             // (an import of a segment: made in the sweep)
                             return;
                         }
-                        self.em.xopds[a] = o;
+                        self.em.args[a].o = o;
                     }
                 },
             }
@@ -867,12 +923,13 @@ impl<'s, L: Lang> StepCx<'s, L> {
             let args = Args {
                 g: self.g,
                 opds: &[],
-                sweep: Some((&em.args[a0..a0 + an], &[], &em.vals, &em.xopds[a0..a0 + an])),
+                sweep: Some((&em.args[a0..a0 + an], &[], &em.vals)),
             };
             L::eval(em.specs[ix].op, &args)
         };
-        self.em.vals[ix] = v;
-        self.em.done[ix] = true;
+        let em = &mut *self.em;
+        em.vals[ix] = v;
+        em.specs[ix].done = true;
     }
 
     /// This step's own definition of `m` alive here, if any.
@@ -988,6 +1045,9 @@ impl<'s, L: Lang> StepCx<'s, L> {
         let sub = self.em.sub;
         self.em.sub += 1;
         let grp = if global { NOGROUP } else { self.grp };
+        if let SArg::Local(ix, _) = s {
+            self.em.mark_big(ix);
+        }
         self.em.defs.push((n.0, s, global, sub, grp));
     }
 
@@ -1135,6 +1195,8 @@ pub struct Graph<L: Lang> {
     root_first: u32,
     /// Where the last step ended: its unfold, cursor and input index.
     hint: (u32, ElemId, usize),
+    /// The input leaf the last step ran in.
+    lcache: Option<Leaf<L::Val>>,
     /// Steps' definitions (each step a range), and the groups each step
     /// closed.
     step_defs: Vec<DefRec>,
@@ -1143,7 +1205,6 @@ pub struct Graph<L: Lang> {
     sc_opds: Vec<Opd>,
     sc_ids: Vec<u32>,
     sc_gone: Vec<u32>,
-    sc_big: Vec<bool>,
     sc_copds: Vec<Opd>,
     sc_defs: Vec<DefRec>,
     sc_touched: Vec<u32>,
@@ -1207,12 +1268,12 @@ impl<L: Lang> Graph<L> {
             keymap: Map::default(),
             root_first: NONE,
             hint: (NONE, END, 0),
+            lcache: None,
             step_defs: Vec::new(),
             closes: Map::default(),
             sc_opds: Vec::new(),
             sc_ids: Vec::new(),
             sc_gone: Vec::new(),
-            sc_big: Vec::new(),
             sc_copds: Vec::new(),
             sc_defs: Vec::new(),
             sc_touched: Vec::new(),
@@ -2065,6 +2126,11 @@ impl<L: Lang> Graph<L> {
         };
         let prev_o = self.n.opds_of(s)[0];
         self.em.clear();
+        if let Some(inp) = &input
+            && !self.lcache.as_ref().is_some_and(|l| l.holds(inp, start))
+        {
+            self.lcache = inp.leaf(start);
+        }
         let (res, idx, grp_out, end_cursor, in_ver) = {
             let Graph {
                 n,
@@ -2073,8 +2139,15 @@ impl<L: Lang> Graph<L> {
                 em,
                 steps,
                 ext,
+                cfg,
+                lcache,
                 ..
             } = self;
+            // (the cached leaf, if it is this input's and holds the start)
+            let (leaf, lbase): (&[(ElemId, L::Val)], usize) = match (lcache.as_ref(), &input) {
+                (Some(l), Some(inp)) if l.holds(inp, start) => (l.elems(), l.base()),
+                _ => (&[], 0),
+            };
             let uo = n.opds_of(u);
             let mut cx = StepCx {
                 g: n,
@@ -2084,14 +2157,15 @@ impl<L: Lang> Graph<L> {
                 input: input.as_ref(),
                 idx: start,
                 start,
-                leaf: &[],
-                lbase: 0,
+                leaf,
+                lbase,
                 step: s,
                 pos: n.pos(s),
                 grp: steps[si].grp_in,
                 opened: 0,
                 em,
                 ext: ext.as_deref(),
+                keep: cfg.keep_interior,
                 _brand: PhantomData,
             };
             let args = Args::of(n, &uo[2..]);
@@ -2119,7 +2193,6 @@ impl<L: Lang> Graph<L> {
             self.names.readers.push(Vec::new());
         }
         // which emissions become nodes ("big"); the rest is the sweep's
-        self.classify();
         let ids = self.match_children(s);
         self.grp_hint = NOGROUP;
         self.apply_groups(s, si);
@@ -2274,32 +2347,6 @@ impl<L: Lang> Graph<L> {
         Some(n)
     }
 
-    /// Which emissions become nodes (DESIGN 7.4, transient interiors):
-    /// anything not a pure leaf or constant, a definition's source, and
-    /// what a creator reads. The rest lives only in the sweep.
-    fn classify(&mut self) {
-        let big = &mut self.sc_big;
-        big.clear();
-        let em = &self.em;
-        big.extend(em.specs.iter().map(|sp| {
-            self.cfg.keep_interior || !matches!(sp.kind, Kind::Leaf | Kind::Const) || sp.ctag != 0
-        }));
-        for d in &em.defs {
-            if let SArg::Local(ix, _) = d.1 {
-                big[ix as usize] = true;
-            }
-        }
-        for sp in &em.specs {
-            if matches!(sp.kind, Kind::Unfold | Kind::Scan) {
-                for k in 0..sp.args.1 {
-                    if let SArg::Local(ix, _) = em.args[(sp.args.0 + u32::from(k)) as usize] {
-                        big[ix as usize] = true;
-                    }
-                }
-            }
-        }
-    }
-
     /// Match the step's big emissions to its old children by key: the
     /// ids, in emission order (`NONE` for the interior). Old children not
     /// matched are removed.
@@ -2311,24 +2358,26 @@ impl<L: Lang> Graph<L> {
             c = self.n.h[c as usize].next;
         }
         let specs = std::mem::take(&mut self.em.specs);
-        let big = std::mem::take(&mut self.sc_big);
+        let mut bigs = std::mem::take(&mut self.em.bigs);
+        bigs.sort_unstable();
         let mut ids = std::mem::take(&mut self.sc_ids);
         ids.clear();
+        ids.resize(specs.len(), NONE);
         let mut gone = std::mem::take(&mut self.sc_gone);
         gone.clear();
-        let mut nbig = 0u32;
-        for (i, sp) in specs.iter().enumerate() {
-            if !big[i] {
-                ids.push(NONE);
-                continue;
-            }
+        for (nbig, &i) in bigs.iter().enumerate() {
+            #[allow(
+                clippy::cast_possible_truncation,
+                reason = "emissions of a step fit u32"
+            )]
+            let nbig = nbig as u32;
+            let sp = &specs[i as usize];
             // (an explicit key, else the ordinal among the big ones)
             let key = if sp.key & 0x8000_0000 != 0 {
                 sp.key
             } else {
                 nbig
             };
-            nbig += 1;
             let cand = self.keymap.remove(&key);
             let reuse = cand.filter(|&o| {
                 let u = o as usize;
@@ -2378,7 +2427,7 @@ impl<L: Lang> Graph<L> {
                 self.register(o);
                 o
             };
-            ids.push(id);
+            ids[i as usize] = id;
         }
         gone.extend(self.keymap.values().copied());
         for &o in &gone {
@@ -2387,7 +2436,8 @@ impl<L: Lang> Graph<L> {
         self.sc_gone = gone;
         // link the big ones in order
         let mut prev = NONE;
-        for &id in ids.iter().filter(|&&x| x != NONE) {
+        for &i in &bigs {
+            let id = ids[i as usize];
             if prev == NONE {
                 self.set_first(s, id);
             } else {
@@ -2401,7 +2451,7 @@ impl<L: Lang> Graph<L> {
             self.n.h[prev as usize].next = NONE;
         }
         self.em.specs = specs;
-        self.sc_big = big;
+        self.em.bigs = bigs;
         ids
     }
 
@@ -2413,20 +2463,32 @@ impl<L: Lang> Graph<L> {
     #[allow(clippy::too_many_lines, reason = "one pass over the emissions")]
     fn sweep(&mut self, s: u32, ids: &[u32], os: &mut Vec<Opd>) {
         let specs = std::mem::take(&mut self.em.specs);
-        let eargs = std::mem::take(&mut self.em.args);
+        let mut eargs = std::mem::take(&mut self.em.args);
         // (the emissions evaluated as they were emitted have their values
         // here already; the rest are evaluated here, in order)
         let mut buf = std::mem::take(&mut self.em.vals);
-        let done = std::mem::take(&mut self.em.done);
-        let mut ext = std::mem::take(&mut self.em.xopds);
         let mut copds = std::mem::take(&mut self.sc_copds);
         let mut interior = 0u32;
         for (i, sp) in specs.iter().enumerate() {
             let id = ids[i];
             let (a0, an) = (sp.args.0 as usize, sp.args.1 as usize);
             let leaf = sp.kind == Kind::Leaf;
+            if leaf && sp.done {
+                // (evaluated as it was emitted: what it read from outside
+                // the step is resolved already)
+                os.extend(
+                    eargs[a0..a0 + an]
+                        .iter()
+                        .filter(|e| !matches!(e.a, SArg::Local(..)))
+                        .map(|e| e.o),
+                );
+            }
+            #[allow(clippy::needless_range_loop, reason = "the operand is written back")]
             for a in a0..a0 + an {
-                match eargs[a] {
+                if leaf && sp.done {
+                    break;
+                }
+                match eargs[a].a {
                     SArg::Local(ix, sel) => {
                         // (a member whose value comes from outside the step:
                         // a leaf of the step reads it, so the step does)
@@ -2455,24 +2517,20 @@ impl<L: Lang> Graph<L> {
                             sel,
                             name: NONE,
                         };
-                        ext[a] = o;
+                        eargs[a].o = o;
                         if leaf {
                             os.push(o);
                         }
                     }
                     SArg::Name(m) => {
-                        let o = if done[i] && ext[a].name == m && ext[a].src != NONE {
-                            ext[a]
-                        } else {
-                            self.resolve_or_import(
-                                m,
-                                Pos {
-                                    parent: s,
-                                    ord: u64::from(sp.sub),
-                                },
-                            )
-                        };
-                        ext[a] = o;
+                        let o = self.resolve_or_import(
+                            m,
+                            Pos {
+                                parent: s,
+                                ord: u64::from(sp.sub),
+                            },
+                        );
+                        eargs[a].o = o;
                         if leaf {
                             os.push(o);
                         }
@@ -2487,12 +2545,12 @@ impl<L: Lang> Graph<L> {
                     }
                 }
                 Kind::Leaf => {
-                    if !done[i] {
+                    if !sp.done {
                         let v = {
                             let args = Args {
                                 g: &self.n,
                                 opds: &[],
-                                sweep: Some((&eargs[a0..a0 + an], ids, &buf, &ext[a0..a0 + an])),
+                                sweep: Some((&eargs[a0..a0 + an], ids, &buf)),
                             };
                             L::eval(sp.op, &args)
                         };
@@ -2509,13 +2567,13 @@ impl<L: Lang> Graph<L> {
                 Kind::Unfold | Kind::Scan => {
                     // (its operands are nodes: what it reads, it reads itself)
                     copds.clear();
-                    copds.extend((a0..a0 + an).map(|a| match eargs[a] {
+                    copds.extend((a0..a0 + an).map(|a| match eargs[a].a {
                         SArg::Local(ix, sel) => Opd {
                             src: ids[ix as usize],
                             sel,
                             name: NONE,
                         },
-                        _ => ext[a],
+                        _ => eargs[a].o,
                     }));
                     if self.n.opds_of(id) != copds.as_slice() {
                         self.set_opds(id, &copds);
@@ -2546,8 +2604,6 @@ impl<L: Lang> Graph<L> {
         self.em.specs = specs;
         self.em.args = eargs;
         self.em.vals = buf;
-        self.em.done = done;
-        self.em.xopds = ext;
         self.sc_copds = copds;
     }
 
@@ -3267,7 +3323,11 @@ impl<L: Lang> Graph<L> {
     /// The name spelled `s`, if any node has used it.
     #[must_use]
     pub fn name_id(&self, s: &[u8]) -> Option<NameId> {
-        self.names.by_hash.get(&hash64(s)).map(|&i| NameId(i))
+        self.names
+            .by_hash
+            .get(&name_hash(s))
+            .filter(|&&i| *self.names.spell[i as usize] == *s)
+            .map(|&i| NameId(i))
     }
 
     /// The spelling of name `n`.
@@ -3574,8 +3634,12 @@ impl<L: Lang> Graph<L> {
 
     /// The name with this spelling, interned.
     fn intern(&mut self, sp: &[u8]) -> u32 {
-        let h = hash64(sp);
+        let h = name_hash(sp);
         if let Some(&i) = self.names.by_hash.get(&h) {
+            assert!(
+                *self.names.spell[i as usize] == *sp,
+                "two names with one hash"
+            );
             return i;
         }
         let id = u32::try_from(self.names.spell.len()).expect("names fit u32");

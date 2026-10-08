@@ -268,6 +268,30 @@ impl Hasher for Stable {
     }
 }
 
+/// A name's 64-bit identity: a fast hash of its spelling (8 bytes at a
+/// time, then a full avalanche). Two spellings with the same hash are a
+/// detected failure (the name table checks the spelling), not a merge.
+#[must_use]
+pub fn name_hash(s: &[u8]) -> u64 {
+    const K: u64 = 0x9e37_79b9_7f4a_7c15;
+    let mut h = (s.len() as u64).wrapping_mul(K);
+    let (ws, r) = s.as_chunks::<8>();
+    for w in ws {
+        h = (h ^ u64::from_le_bytes(*w)).wrapping_mul(K).rotate_left(29);
+    }
+    if !r.is_empty() {
+        let mut b = [0u8; 8];
+        b[..r.len()].copy_from_slice(r);
+        h = (h ^ u64::from_le_bytes(b)).wrapping_mul(K).rotate_left(29);
+    }
+    // (murmur3's finalizer)
+    h ^= h >> 33;
+    h = h.wrapping_mul(0xff51_afd7_ed55_8ccd);
+    h ^= h >> 33;
+    h = h.wrapping_mul(0xc4ce_b9fe_1a85_ec53);
+    h ^ (h >> 33)
+}
+
 /// A 64-bit table hash of `v` (the low half of its version).
 pub fn hash64<T: Hash + ?Sized>(v: &T) -> u64 {
     Ver::of(v).low()

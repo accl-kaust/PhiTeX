@@ -42,6 +42,7 @@ enum O {
     /// only, so steps do not chain), the last defining name `out`.
     Para10,
     Para20,
+    Para1,
     /// A scan: greedy line filling (converges soon after an edit).
     Mod,
 }
@@ -61,6 +62,7 @@ impl Lang for B {
         let k = match op {
             O::Para10 => 10,
             O::Para20 => 20,
+            O::Para1 => 1,
             _ => unreachable!(),
         };
         let Some(x) = cx.next().cloned() else {
@@ -120,11 +122,12 @@ impl Lang for B {
             O::Add => 1,
             O::Para10 => 2,
             O::Para20 => 4,
+            O::Para1 => 5,
             O::Mod => 3,
         }
     }
     fn entries(op: O, input: &V, _a: &Args<'_, Self>) -> Vec<phi::Entry<V>> {
-        let (O::Para10 | O::Para20, V::S(s)) = (op, input) else {
+        let (O::Para10 | O::Para20 | O::Para1, V::S(s)) = (op, input) else {
             return Vec::new();
         };
         // (every 64 elements)
@@ -167,6 +170,8 @@ fn main() {
         g.unfold(
             if std::env::var("K20").is_ok() {
                 O::Para20
+            } else if std::env::var("K1").is_ok() {
+                O::Para1
             } else {
                 O::Para10
             },

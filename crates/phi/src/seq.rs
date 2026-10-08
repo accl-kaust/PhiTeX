@@ -258,6 +258,42 @@ impl<T: Value, M: Measure<T>> Node<T, M> {
 }
 
 /// A persistent sequence of values with identities.
+/// A leaf of a sequence, held: its elements and the index of its first.
+pub struct Leaf<T, M: Measure<T> = ()> {
+    node: Arc<Node<T, M>>,
+    base: usize,
+    /// (the sequence it is a leaf of, by identity)
+    root: Option<Arc<Node<T, M>>>,
+}
+
+impl<T, M: Measure<T>> Leaf<T, M> {
+    /// Its elements.
+    #[must_use]
+    pub fn elems(&self) -> &[(ElemId, T)] {
+        match &self.node.kind {
+            Kind::Leaf(xs) => xs,
+            Kind::Inner(_) => unreachable!("a leaf"),
+        }
+    }
+
+    /// The index of its first element.
+    #[must_use]
+    pub fn base(&self) -> usize {
+        self.base
+    }
+
+    /// Whether it is a leaf of `s` (the same sequence, not only equal)
+    /// holding element `i`.
+    #[must_use]
+    pub fn holds(&self, s: &Seq<T, M>, i: usize) -> bool {
+        let same = match (&self.root, &s.root) {
+            (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+            _ => false,
+        };
+        same && i >= self.base && i < self.base + self.node.len
+    }
+}
+
 pub struct Seq<T, M: Measure<T> = ()> {
     root: Option<Arc<Node<T, M>>>,
     ver: Ver,
@@ -390,6 +426,37 @@ impl<T: Value, M: Measure<T>> Seq<T, M> {
         loop {
             match &n.kind {
                 Kind::Leaf(xs) => return Some((xs, base)),
+                Kind::Inner(ks) => {
+                    let mut k = 0;
+                    while i >= ks[k].len {
+                        i -= ks[k].len;
+                        base += ks[k].len;
+                        k += 1;
+                    }
+                    n = &ks[k];
+                }
+            }
+        }
+    }
+
+    /// The leaf holding element `i`, held (a cursor kept across calls
+    /// descends once per leaf).
+    #[must_use]
+    pub fn leaf(&self, mut i: usize) -> Option<Leaf<T, M>> {
+        let mut n: &Arc<Node<T, M>> = self.root.as_ref()?;
+        if i >= n.len {
+            return None;
+        }
+        let mut base = 0;
+        loop {
+            match &n.kind {
+                Kind::Leaf(_) => {
+                    return Some(Leaf {
+                        node: Arc::clone(n),
+                        base,
+                        root: self.root.clone(),
+                    });
+                }
                 Kind::Inner(ks) => {
                     let mut k = 0;
                     while i >= ks[k].len {
