@@ -127,14 +127,27 @@ pub(crate) struct Pos {
     pub ord: u64,
 }
 
+/// A definition: the one record of it (DESIGN 7.5). Its step's range in
+/// `NameTab::recs` lists it, and its name's list indexes it.
 #[derive(Clone, Copy, Debug)]
 struct DefRec {
     name: u32,
-    sub: u64,
+    /// Where it is: (its step, its emission's ordinal there).
+    step: u32,
+    sub: u32,
     src: u32,
     sel: Sel,
     group: u64,
     global: bool,
+}
+
+impl DefRec {
+    fn pos(&self) -> Pos {
+        Pos {
+            parent: self.step,
+            ord: u64::from(self.sub),
+        }
+    }
 }
 
 /// A step's own record.
@@ -209,21 +222,16 @@ pub(crate) struct ScanInfo<V> {
     pub done: bool,
 }
 
-#[derive(Clone, Copy, Debug)]
-struct DefEntry {
-    pos: Pos,
-    src: u32,
-    sel: Sel,
-    group: u64,
-    global: bool,
-}
-
 #[derive(Default)]
 struct NameTab {
     by_hash: Map<u64, u32>,
     hashes: Vec<u64>,
     spell: Vec<Box<[u8]>>,
-    defs: Vec<Runs<DefEntry>>,
+    /// Each name's definitions, in position order: indices into `recs`.
+    defs: Vec<Runs<u32>>,
+    /// Every definition's record; a step's are a range (`StepInfo::d0`,
+    /// `dn`). A replaced range stays until compaction.
+    recs: Vec<DefRec>,
     /// Nodes that read the name: (anchor, node, era), sorted by the
     /// anchor's position (a top-level step or root node, whose order
     /// never changes); stale entries pruned at the run's end.
@@ -1153,8 +1161,10 @@ fn resolve_with<L: Lang>(
     let Some(defs) = names.defs.get(m as usize) else {
         return none;
     };
-    let k = defs.partition_point(|d| g.cmp_pos(d.pos, at) == Ordering::Less);
-    for d in defs.iter_back(k) {
+    let k =
+        defs.partition_point(|&i| g.cmp_pos(names.recs[i as usize].pos(), at) == Ordering::Less);
+    for &i in defs.iter_back(k) {
+        let d = &names.recs[i as usize];
         let alive = d.global
             || d.group == NOGROUP
             || (!closed.contains(&d.group)
@@ -1190,8 +1200,10 @@ fn resolve<L: Lang>(
     let Some(defs) = names.defs.get(m as usize) else {
         return none;
     };
-    let k = defs.partition_point(|d| g.cmp_pos(d.pos, at) == Ordering::Less);
-    for d in defs.iter_back(k) {
+    let k =
+        defs.partition_point(|&i| g.cmp_pos(names.recs[i as usize].pos(), at) == Ordering::Less);
+    for &i in defs.iter_back(k) {
+        let d = &names.recs[i as usize];
         let alive = d.global
             || d.group == NOGROUP
             || groups
@@ -1251,9 +1263,7 @@ pub struct Graph<L: Lang> {
     hot: std::collections::VecDeque<(u32, u32)>,
     /// The input leaf the last step ran in.
     lcache: Option<Leaf<L::Val>>,
-    /// Steps' definitions (each step a range), and the groups each step
-    /// closed.
-    step_defs: Vec<DefRec>,
+    /// The groups each step closed.
     closes: Map<u32, Vec<u64>>,
     /// Scratch buffers, reused so the hot path allocates nothing.
     sc_opds: Vec<Opd>,
@@ -1324,7 +1334,6 @@ impl<L: Lang> Graph<L> {
             epoch: 0,
             hot: std::collections::VecDeque::new(),
             lcache: None,
-            step_defs: Vec::new(),
             closes: Map::default(),
             sc_opds: Vec::new(),
             sc_ids: Vec::new(),
@@ -2760,19 +2769,17 @@ impl<L: Lang> Graph<L> {
         let i = self.root_node(Kind::Input, L::Op::default(), Class::Pure, 0);
         self.n.val[i as usize] = v;
         self.imports.insert(h, i);
-        self.names.defs[m as usize].insert(
-            0,
-            DefEntry {
-                pos: Pos {
-                    parent: ROOT,
-                    ord: 0,
-                },
-                src: i,
-                sel: Sel::WHOLE,
-                group: NOGROUP,
-                global: true,
-            },
-        );
+        let ri = u32::try_from(self.names.recs.len()).expect("definitions fit u32");
+        self.names.recs.push(DefRec {
+            name: m,
+            step: ROOT,
+            sub: 0,
+            src: i,
+            sel: Sel::WHOLE,
+            group: NOGROUP,
+            global: true,
+        });
+        self.names.defs[m as usize].insert(0, ri);
         resolve(&self.n, &self.names, &self.groups, m, at)
     }
 }
@@ -2874,7 +2881,8 @@ impl<L: Lang> Graph<L> {
             );
             DefRec {
                 name: m,
-                sub,
+                step: s,
+                sub: u32::try_from(sub).expect("emissions fit u32"),
                 src: o.src,
                 sel: o.sel,
                 group: grp,
@@ -2883,7 +2891,7 @@ impl<L: Lang> Graph<L> {
         }));
         self.em.defs = defs;
         let (d0, dn) = (self.steps[si].d0 as usize, self.steps[si].dn as usize);
-        let old = &self.step_defs[d0..d0 + dn];
+        let old = &self.names.recs[d0..d0 + dn];
         let same = old.len() == new.len()
             && old.iter().zip(&new).all(|(a, b)| {
                 a.name == b.name
@@ -2900,27 +2908,13 @@ impl<L: Lang> Graph<L> {
         let old = old.to_vec();
         let mut touched = Vec::new();
         for d in &old {
-            self.remove_def(
-                d.name,
-                Pos {
-                    parent: s,
-                    ord: d.sub,
-                },
-            );
+            self.remove_def(d.name, d.pos());
             touched.push(d.name);
         }
-        for d in &new {
-            let e = DefEntry {
-                pos: Pos {
-                    parent: s,
-                    ord: d.sub,
-                },
-                src: d.src,
-                sel: d.sel,
-                group: d.group,
-                global: d.global,
-            };
-            self.insert_def(d.name, e);
+        let r0 = u32::try_from(self.names.recs.len()).expect("definitions fit u32");
+        self.names.recs.extend_from_slice(&new);
+        for (k, d) in new.iter().enumerate() {
+            self.insert_def(d.name, r0 + u32::try_from(k).expect("definitions fit u32"));
             if !d.global
                 && d.group != NOGROUP
                 && let Some(gr) = self.groups.get_mut(&d.group)
@@ -2930,9 +2924,8 @@ impl<L: Lang> Graph<L> {
             }
             touched.push(d.name);
         }
-        self.steps[si].d0 = u32::try_from(self.step_defs.len()).expect("definitions fit u32");
+        self.steps[si].d0 = r0;
         self.steps[si].dn = u32::try_from(new.len()).expect("definitions fit u32");
-        self.step_defs.extend_from_slice(&new);
         self.sc_defs = new;
         touched.sort_unstable();
         touched.dedup();
@@ -2945,20 +2938,31 @@ impl<L: Lang> Graph<L> {
     /// change: past it, every reader reaches it or a later one. So the
     /// cost is the run of readers between the two (DESIGN 7.5).
     fn reresolve(&mut self, m: u32, from: Pos) {
-        let rs = std::mem::take(&mut self.names.readers[m as usize]);
         let af = self.anchor_pos(from);
+        // (no reader after it: nothing to do, and no search for the bound)
+        let rs = &self.names.readers[m as usize];
+        if rs
+            .last()
+            .is_none_or(|l| self.n.cmp_pos(self.n.pos(l.0), af) == Ordering::Less)
+        {
+            return;
+        }
+        let rs = std::mem::take(&mut self.names.readers[m as usize]);
         let k0 = rs.partition_point(|e| self.n.cmp_pos(self.n.pos(e.0), af) == Ordering::Less);
         // (the bound: the anchor of the next definition alive to the end)
         let bound = {
             let defs = &self.names.defs[m as usize];
             // (in a later anchor: one in `from`'s own anchor, the changed
             // step's own, does not bound it)
-            let k = defs.partition_point(|d| {
-                self.n.cmp_pos(self.anchor_pos(d.pos), af) != Ordering::Greater
+            let k = defs.partition_point(|&d| {
+                self.n
+                    .cmp_pos(self.anchor_pos(self.names.recs[d as usize].pos()), af)
+                    != Ordering::Greater
             });
             defs.iter_from(k)
+                .map(|&i| &self.names.recs[i as usize])
                 .find(|d| d.global || d.group == NOGROUP)
-                .map(|d| self.anchor_pos(d.pos))
+                .map(|d| self.anchor_pos(d.pos()))
         };
         for &(a, r, era) in rs.iter_from(k0) {
             if let Some(b) = bound
@@ -3044,21 +3048,26 @@ impl<L: Lang> Graph<L> {
     }
 
     /// A definition of name `m`, in its place (at the end, mostly).
-    fn insert_def(&mut self, m: u32, e: DefEntry) {
+    fn insert_def(&mut self, m: u32, ri: u32) {
+        let recs = &self.names.recs;
+        let at = recs[ri as usize].pos();
         let list = &self.names.defs[m as usize];
         let k = match list.last() {
             None => 0,
-            Some(l) if self.n.cmp_pos(l.pos, e.pos) == Ordering::Less => list.len(),
-            _ => list.partition_point(|x| self.n.cmp_pos(x.pos, e.pos) == Ordering::Less),
+            Some(&l) if self.n.cmp_pos(recs[l as usize].pos(), at) == Ordering::Less => list.len(),
+            _ => list
+                .partition_point(|&x| self.n.cmp_pos(recs[x as usize].pos(), at) == Ordering::Less),
         };
-        self.names.defs[m as usize].insert(k, e);
+        self.names.defs[m as usize].insert(k, ri);
     }
 
     /// Remove name `m`'s definition at `pos`.
     fn remove_def(&mut self, m: u32, pos: Pos) {
+        let recs = &self.names.recs;
         let list = &self.names.defs[m as usize];
-        let k = list.partition_point(|e| self.n.cmp_pos(e.pos, pos) == Ordering::Less);
-        if list.get(k).is_some_and(|e| e.pos == pos) {
+        let k = list
+            .partition_point(|&x| self.n.cmp_pos(recs[x as usize].pos(), pos) == Ordering::Less);
+        if list.get(k).is_some_and(|&x| recs[x as usize].pos() == pos) {
             self.names.defs[m as usize].remove(k);
         }
     }
@@ -3095,17 +3104,11 @@ impl<L: Lang> Graph<L> {
             }
             let (d0, dn) = (self.steps[si].d0 as usize, self.steps[si].dn as usize);
             self.steps[si].dn = 0;
-            let defs = self.step_defs[d0..d0 + dn].to_vec();
+            let defs = self.names.recs[d0..d0 + dn].to_vec();
             let from = self.n.pos(n);
             let mut touched = Vec::new();
             for d in &defs {
-                self.remove_def(
-                    d.name,
-                    Pos {
-                        parent: n,
-                        ord: d.sub,
-                    },
-                );
+                self.remove_def(d.name, d.pos());
                 touched.push(d.name);
             }
             touched.sort_unstable();
@@ -3549,7 +3552,7 @@ impl<L: Lang> Graph<L> {
     /// A step's definitions: (source, selector, name, global).
     pub(crate) fn step_defs(&self, s: u32) -> Vec<(u32, Sel, u32, bool)> {
         let si = &self.steps[self.n.h[s as usize].aux as usize];
-        self.step_defs[si.d0 as usize..(si.d0 + si.dn) as usize]
+        self.names.recs[si.d0 as usize..(si.d0 + si.dn) as usize]
             .iter()
             .map(|d| (d.src, d.sel, d.name, d.global))
             .collect()
@@ -3579,8 +3582,22 @@ impl<L: Lang> Graph<L> {
     /// group, its close, global).
     #[must_use]
     pub fn debug_defs(&self, n: NameId) -> String {
+        struct DebugDef {
+            src: u32,
+            pos: Pos,
+            group: u64,
+            global: bool,
+        }
         let mut out = String::new();
-        for d in self.names.defs[n.0 as usize].iter() {
+        for &i in self.names.defs[n.0 as usize].iter() {
+            let d = &self.names.recs[i as usize];
+            let d = (d.src, d.pos(), d.group, d.global);
+            let d = DebugDef {
+                src: d.0,
+                pos: d.1,
+                group: d.2,
+                global: d.3,
+            };
             let close = self.groups.get(&d.group).and_then(|g| g.close);
             let _ = writeln!(
                 out,
@@ -3606,12 +3623,12 @@ impl<L: Lang> Graph<L> {
         let cols = n.h.len() * (size_of::<Hdr<L::Op>>() + size_of::<L::Val>());
         let arenas = n.opds.len() * size_of::<Opd>() + n.revs.len() * size_of::<Rev>();
         let steps =
-            self.steps.len() * size_of::<StepInfo>() + self.step_defs.len() * size_of::<DefRec>();
+            self.steps.len() * size_of::<StepInfo>() + self.names.recs.len() * size_of::<DefRec>();
         let names: usize = self
             .names
             .defs
             .iter()
-            .map(|d| d.len() * size_of::<DefEntry>())
+            .map(|d| d.len() * size_of::<u32>())
             .sum::<usize>()
             + self
                 .names
@@ -3763,7 +3780,7 @@ impl<L: Lang> Graph<L> {
                             self.n.opds.reserve(n * o.opds.len());
                             self.n.revs.reserve(n * o.opds.len());
                             self.steps.reserve(n * o.steps.len());
-                            self.step_defs.reserve(n * o.defs.len());
+                            self.names.recs.reserve(n * o.defs.len());
                         }
                         self.graft_next(u, &mut st, o);
                         want += 1;
@@ -4014,10 +4031,11 @@ impl<L: Lang> Graph<L> {
                 Kind::Step => {
                     let si = &p.steps[h.aux as usize];
                     let d0 = pk.defs.len() as u32;
-                    for d in &p.step_defs[si.d0 as usize..(si.d0 + si.dn) as usize] {
+                    for d in &p.names.recs[si.d0 as usize..(si.d0 + si.dn) as usize] {
                         pk.dorder.push((d.name, pk.defs.len() as u32, r));
                         pk.defs.push(DefRec {
                             name: d.name,
+                            step: r,
                             sub: d.sub,
                             src: if inside(d.src) {
                                 map[d.src as usize] | REL
@@ -4135,7 +4153,7 @@ impl<L: Lang> Graph<L> {
         let base = self.n.h.len() as u32;
         let ob = self.n.opds.len() as u32;
         let (sb, ub, cb) = (self.steps.len(), self.unfolds.len(), self.scans.len());
-        let db = self.step_defs.len() as u32;
+        let db = self.names.recs.len() as u32;
         let du = self.n.h[u as usize].depth;
         let count = pk.hdrs.len();
         self.rep.created += count as u64;
@@ -4257,12 +4275,22 @@ impl<L: Lang> Graph<L> {
             name: NONE,
         };
         let mut dirty: Vec<u32> = Vec::new();
+        // (every such read resolves as at the segment's start: the
+        // segment's own definitions are not in the index yet, and nothing
+        // of the main graph lies between; so once per name)
+        let mut seen: Map<(u32, u32), Opd> = Map::default();
         for (i, r, was) in pk.named {
             let m = r + base;
-            let at = self.n.pos(m);
             let name = self.n.opds[(ob + i) as usize].name;
             let x = self.n.opds[(ob + i) as usize].sel.extra().unwrap_or(NOX);
-            let o = with_extra(resolve(&self.n, &self.names, &self.groups, name, at), x);
+            let o = if let Some(&o) = seen.get(&(name, x)) {
+                o
+            } else {
+                let at = self.n.pos(m);
+                let o = with_extra(resolve(&self.n, &self.names, &self.groups, name, at), x);
+                seen.insert((name, x), o);
+                o
+            };
             if self.n.read_ver(&o) != was && dirty.last() != Some(&m) {
                 dirty.push(m);
             }
@@ -4318,8 +4346,9 @@ impl<L: Lang> Graph<L> {
         }
         // definitions: the steps' records, then the name index a name at
         // a time
-        self.step_defs.extend(pk.defs.iter().map(|d| DefRec {
+        self.names.recs.extend(pk.defs.iter().map(|d| DefRec {
             name: names[d.name as usize],
+            step: d.step + base,
             src: decs(d.src),
             group: decg(d.group),
             ..*d
@@ -4332,31 +4361,19 @@ impl<L: Lang> Graph<L> {
                 j += 1;
             }
             let m = names[pm as usize];
-            let es: Vec<DefEntry> = pk.dorder[i..j]
-                .iter()
-                .map(|&(_, di, rs)| {
-                    let d = &pk.defs[di as usize];
-                    DefEntry {
-                        pos: Pos {
-                            parent: rs + base,
-                            ord: d.sub,
-                        },
-                        src: decs(d.src),
-                        sel: d.sel,
-                        group: decg(d.group),
-                        global: d.global,
-                    }
-                })
-                .collect();
+            let first = db + pk.dorder[i].1;
+            let recs = &self.names.recs;
             let list = &self.names.defs[m as usize];
-            let fast = list
-                .last()
-                .is_none_or(|l| self.n.cmp_pos(l.pos, es[0].pos) == Ordering::Less);
+            let fast = list.last().is_none_or(|&l| {
+                self.n
+                    .cmp_pos(recs[l as usize].pos(), recs[first as usize].pos())
+                    == Ordering::Less
+            });
             if fast {
-                self.names.defs[m as usize].extend(es);
+                self.names.defs[m as usize].extend(pk.dorder[i..j].iter().map(|x| db + x.1));
             } else {
-                for e in es {
-                    self.insert_def(m, e);
+                for k in i..j {
+                    self.insert_def(m, db + pk.dorder[k].1);
                 }
             }
             i = j;

@@ -26,13 +26,14 @@ impl<L: Lang> Graph<L> {
             let dead =
                 |x: u32| x != NONE && (x as usize >= len || self.n.h[x as usize].flags & DEAD != 0);
             for (m, list) in self.names.defs.iter().enumerate() {
-                for d in list {
-                    assert!(!dead(d.pos.parent), "def of {m} at dead %{}", d.pos.parent);
+                for &i in list {
+                    let d = &self.names.recs[i as usize];
+                    assert!(!dead(d.step), "def of {m} at dead %{}", d.step);
                     assert!(
                         !dead(d.src),
                         "def of {m} from dead %{} at %{}",
                         d.src,
-                        d.pos.parent
+                        d.step
                     );
                 }
             }
@@ -72,8 +73,10 @@ impl<L: Lang> Graph<L> {
                 used.insert(g);
             }
         };
-        for d in self.names.defs.iter().flatten() {
-            mark(d.group);
+        for list in &self.names.defs {
+            for &i in list {
+                mark(self.names.recs[i as usize].group);
+            }
         }
         for i in 1..len {
             if !live(self, i) {
@@ -160,7 +163,10 @@ impl<L: Lang> Graph<L> {
         let hs: Vec<u8> = self.n.h.iter().map(|h| h.flags & DEAD).collect();
         let old_opds = std::mem::take(&mut self.n.opds);
         let old_steps = std::mem::take(&mut self.steps);
-        let old_defs = std::mem::take(&mut self.step_defs);
+        let old_defs = std::mem::take(&mut self.names.recs);
+        // (each record's new index: steps' ranges in node order, then the
+        // imports, which no step holds)
+        let mut rmap = vec![NONE; old_defs.len()];
         let old_unfolds = std::mem::take(&mut self.unfolds);
         let mut old_unfolds: Vec<Option<_>> = old_unfolds.into_iter().map(Some).collect();
         let old_scans = std::mem::take(&mut self.scans);
@@ -186,16 +192,17 @@ impl<L: Lang> Graph<L> {
             match h.kind {
                 Kind::Step => {
                     let si = old_steps[h.aux as usize].clone();
-                    let d0 = self.step_defs.len() as u32;
-                    self.step_defs.extend(
-                        old_defs[si.d0 as usize..(si.d0 + si.dn) as usize]
-                            .iter()
-                            .map(|d| DefRec {
-                                src: mp(d.src),
-                                group: mg(d.group),
-                                ..*d
-                            }),
-                    );
+                    let d0 = self.names.recs.len() as u32;
+                    for k in si.d0..si.d0 + si.dn {
+                        rmap[k as usize] = self.names.recs.len() as u32;
+                        let d = &old_defs[k as usize];
+                        self.names.recs.push(DefRec {
+                            step: i as u32,
+                            src: mp(d.src),
+                            group: mg(d.group),
+                            ..*d
+                        });
+                    }
                     h.aux = self.steps.len() as u64;
                     self.steps.push(StepInfo {
                         unfold: mp(si.unfold),
@@ -265,18 +272,28 @@ impl<L: Lang> Graph<L> {
         revs.shrink_to_fit();
         self.n.opds = opds;
         self.n.revs = revs;
-        self.step_defs.shrink_to_fit();
+        // (imports: defined at the root, held by no step)
+        for list in &self.names.defs {
+            for &k in list {
+                if rmap[k as usize] == NONE {
+                    rmap[k as usize] = self.names.recs.len() as u32;
+                    let d = &old_defs[k as usize];
+                    self.names.recs.push(DefRec {
+                        step: mp(d.step),
+                        src: mp(d.src),
+                        group: mg(d.group),
+                        ..*d
+                    });
+                }
+            }
+        }
+        self.names.recs.shrink_to_fit();
         self.steps.shrink_to_fit();
         self.root_first = mp(self.root_first);
         // the name index
         for list in &mut self.names.defs {
             for d in list.iter_mut() {
-                d.pos = Pos {
-                    parent: mp(d.pos.parent),
-                    ord: d.pos.ord,
-                };
-                d.src = mp(d.src);
-                d.group = mg(d.group);
+                *d = rmap[*d as usize];
             }
         }
         let g = &self.n;

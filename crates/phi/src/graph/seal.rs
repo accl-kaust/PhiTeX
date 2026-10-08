@@ -15,14 +15,13 @@
 //! build and an edited one cut alike), or after `4 F` steps.
 
 use super::{
-    DEAD, DIRTY, DefEntry, DefRec, Graph, Kind, Map, NONE, Opd, Ordering, Pos, QUEUED, Rev, SEALED,
-    Set,
+    DEAD, DIRTY, DefRec, Graph, Kind, Map, NONE, Opd, Ordering, Pos, QUEUED, Rev, SEALED, Set,
 };
 use crate::lang::Lang;
 
 /// Net definitions' and kept members' labels in a fold (above any
 /// emission's ordinal).
-pub(super) const NETBASE: u64 = 1 << 62;
+pub(super) const NETBASE: u64 = 1 << 31;
 /// A step of the run being folded.
 const MARK: u8 = 16;
 
@@ -301,7 +300,7 @@ impl<L: Lang> Graph<L> {
             let si = &self.steps[self.n.h[s as usize].aux as usize];
             took += si.took;
             work += si.work;
-            for d in &self.step_defs[si.d0 as usize..(si.d0 + si.dn) as usize] {
+            for d in &self.names.recs[si.d0 as usize..(si.d0 + si.dn) as usize] {
                 pend.touched.push(d.name);
                 if !d.global && opened_here(self, d.group) {
                     continue;
@@ -369,26 +368,16 @@ impl<L: Lang> Graph<L> {
             self.set_first(s1, NONE);
         }
         let si1 = self.n.h[s1 as usize].aux as usize;
-        let d0 = u32::try_from(self.step_defs.len()).expect("definitions fit u32");
+        let d0 = u32::try_from(self.names.recs.len()).expect("definitions fit u32");
         for (i, d) in net.iter().enumerate() {
             let rec = DefRec {
-                sub: NETBASE + i as u64,
+                step: s1,
+                sub: u32::try_from(NETBASE).expect("fits") + u32::try_from(i).expect("fits"),
                 ..*d
             };
-            pend.defs.push((
-                rec.name,
-                DefEntry {
-                    pos: Pos {
-                        parent: s1,
-                        ord: rec.sub,
-                    },
-                    src: rec.src,
-                    sel: rec.sel,
-                    group: rec.group,
-                    global: rec.global,
-                },
-            ));
-            self.step_defs.push(rec);
+            let ri = u32::try_from(self.names.recs.len()).expect("definitions fit u32");
+            pend.defs.push((rec.name, ri));
+            self.names.recs.push(rec);
         }
         self.steps[si1].d0 = d0;
         self.steps[si1].dn = u32::try_from(net.len()).expect("definitions fit u32");
@@ -446,10 +435,13 @@ impl<L: Lang> Graph<L> {
         pend.touched.sort_unstable();
         pend.touched.dedup();
         for &m in &pend.touched {
+            let recs = &self.names.recs;
             let list = &self.names.defs[m as usize];
-            let lo = list.partition_point(|d| g.cmp_pos(d.pos, p1) != Ordering::Greater);
-            let hi = list.partition_point(|d| g.cmp_pos(d.pos, pq) == Ordering::Less);
-            let add: Vec<DefEntry> = pend.defs.iter().filter(|x| x.0 == m).map(|x| x.1).collect();
+            let lo = list
+                .partition_point(|&d| g.cmp_pos(recs[d as usize].pos(), p1) != Ordering::Greater);
+            let hi =
+                list.partition_point(|&d| g.cmp_pos(recs[d as usize].pos(), pq) == Ordering::Less);
+            let add: Vec<u32> = pend.defs.iter().filter(|x| x.0 == m).map(|x| x.1).collect();
             self.names.defs[m as usize].splice(lo, hi, add);
         }
         pend.read.extend(pend.readers.iter().map(|x| x.0));
@@ -527,8 +519,11 @@ impl<L: Lang> Graph<L> {
             let h = &g.h[p.parent as usize];
             h.flags & DEAD != 0 || (h.flags & SEALED != 0 && p.ord < NETBASE)
         };
-        pend.defs
-            .sort_by(|a, b| a.0.cmp(&b.0).then_with(|| g.cmp_pos(a.1.pos, b.1.pos)));
+        let recs = &self.names.recs;
+        pend.defs.sort_by(|a, b| {
+            a.0.cmp(&b.0)
+                .then_with(|| g.cmp_pos(recs[a.1 as usize].pos(), recs[b.1 as usize].pos()))
+        });
         pend.touched.sort_unstable();
         pend.touched.dedup();
         let mut j = 0;
@@ -545,11 +540,12 @@ impl<L: Lang> Graph<L> {
             }
             let mut a = add.into_iter().peekable();
             for &e in &old {
-                if gone(e.pos) {
+                let ep = recs[e as usize].pos();
+                if gone(ep) {
                     continue;
                 }
-                while let Some(x) = a.peek()
-                    && g.cmp_pos(x.pos, e.pos) == Ordering::Less
+                while let Some(&x) = a.peek()
+                    && g.cmp_pos(recs[x as usize].pos(), ep) == Ordering::Less
                 {
                     new.push(a.next().expect("peeked"));
                 }
@@ -597,6 +593,7 @@ struct Pending {
     /// Names the run's steps read (local only).
     read: Vec<u32>,
     touched: Vec<u32>,
-    defs: Vec<(u32, DefEntry)>,
+    /// (name, record index) of the folds' net definitions.
+    defs: Vec<(u32, u32)>,
     readers: Vec<(u32, (u32, u32, u32))>,
 }
