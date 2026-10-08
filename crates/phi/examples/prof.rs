@@ -321,4 +321,19 @@ fn main() {
         best * 1e3,
         best * 1e9 / (n * per) as f64
     );
+    // (the process's peak resident memory, where the OS tells)
+    if let Ok(st) = std::fs::read_to_string("/proc/self/status")
+        && let Some(l) = st.lines().find(|l| l.starts_with("VmHWM"))
+    {
+        let kb: f64 = l
+            .split_whitespace()
+            .nth(1)
+            .and_then(|x| x.parse().ok())
+            .unwrap_or(0.0);
+        eprintln!(
+            "peak RSS {:.2} GB, {:.1} B/node",
+            kb / 1048576.0,
+            kb * 1024.0 / (n * per) as f64
+        );
+    }
 }
