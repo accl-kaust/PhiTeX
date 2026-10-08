@@ -72,14 +72,14 @@ impl<T> Runs<T> {
             } else {
                 self.fen[k] -= 1;
             }
-            k += k & k.wrapping_neg();
+            k += k.isolate_lowest_one();
         }
     }
 
     /// A block appended at the end: its Fenwick entry.
     fn push_block(&mut self, b: Vec<T>) {
         let k = self.blocks.len() + 1;
-        let low = k & k.wrapping_neg();
+        let low = k.isolate_lowest_one();
         let before = self.start(k - low);
         self.len += b.len();
         self.blocks.push(b);
@@ -93,7 +93,7 @@ impl<T> Runs<T> {
         self.fen.push(0);
         self.fen.extend(self.blocks.iter().map(Vec::len));
         for k in 1..=n {
-            let p = k + (k & k.wrapping_neg());
+            let p = k + (k.isolate_lowest_one());
             if p <= n {
                 self.fen[p] += self.fen[k];
             }
