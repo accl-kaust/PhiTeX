@@ -501,7 +501,15 @@ struct Shared {
     /// watch is woken for it.
     asks: Mutex<Vec<Ask>>,
     wake: Mutex<Option<Box<dyn Fn() + Send>>>,
+    /// The diff job's PDF and marked-up text (`diff.pdf`, `diff.tex`).
+    diff_files: Mutex<(Option<PathBuf>, Option<PathBuf>)>,
+    /// The marked-up text's name, and the way from a byte of it back to
+    /// a project's file and a byte there (a double-click on a diff page).
+    diff_source: Mutex<Option<(String, SourceMap)>>,
 }
+
+/// A byte of a file the job typeset to a project's file and a byte there.
+pub type SourceMap = Box<dyn Fn(usize) -> Option<(String, usize)> + Send>;
 
 /// What a browser asks the watch for: its diff, as the Overleaf panel's
 /// compare drives one (`DiffRunner`: start, show, goto, download,
@@ -610,6 +618,8 @@ impl View {
             diff: Mutex::new(Arc::from("{}")),
             asks: Mutex::new(Vec::new()),
             wake: Mutex::new(None),
+            diff_files: Mutex::new((None, None)),
+            diff_source: Mutex::new(None),
         });
         crate::dpxfiles::keep_glyph_runs();
         let url = format!("http://127.0.0.1:{port}/{}/", shared.token);
@@ -686,6 +696,18 @@ impl View {
             &self.shared,
             &format!("{{\"event\":\"diff\",\"diff\":{json}}}"),
         );
+    }
+
+    /// The diff job's PDF and marked-up text, served as `diff.pdf` and
+    /// `diff.tex` (none: not served).
+    pub fn set_diff_files(&self, pdf: Option<PathBuf>, tex: Option<PathBuf>) {
+        *lock(&self.shared.diff_files) = (pdf, tex);
+    }
+
+    /// A double-click's source in `file` (the marked-up text) is taken
+    /// back to the project's by `map`.
+    pub fn set_diff_source(&self, file: String, map: SourceMap) {
+        *lock(&self.shared.diff_source) = Some((file, map));
     }
 
     /// Call `wake` when a browser asks the watch for something.
@@ -991,6 +1013,23 @@ fn serve(s: &Arc<Shared>, conn: TcpStream) {
                 }
                 None => {
                     let _ = ws::respond(&mut w, "404 Not Found", "text/plain", b"no PDF yet\n");
+                }
+            }
+        }
+        // (the diff's files: only the diff job's, no path from the request)
+        "diff.pdf" | "diff.tex" => {
+            let (pdf, tex) = lock(&s.diff_files).clone();
+            let (path, kind) = if rest == "diff.pdf" {
+                (pdf, "application/pdf")
+            } else {
+                (tex, "text/x-tex; charset=utf-8")
+            };
+            match path.and_then(|p| std::fs::read(p).ok()) {
+                Some(b) => {
+                    let _ = ws::respond(&mut w, "200 OK", kind, &b);
+                }
+                None => {
+                    let _ = ws::respond(&mut w, "404 Not Found", "text/plain", b"no diff yet\n");
                 }
             }
         }
@@ -1338,7 +1377,26 @@ fn answer(s: &Shared, req: &Value) -> String {
                 .get("line")
                 .and_then(Value::index)
                 .map(|l| (l, req.get("col").and_then(Value::index).unwrap_or(1)));
-            let _ = write!(out, "{}}}", to_source(s, file, start, at));
+            // (a place in the diff's marked-up text: in the project's file
+            // it came from)
+            let back = lock(&s.diff_source).as_ref().and_then(|(name, map)| {
+                if name != file {
+                    return None;
+                }
+                let pos = match at {
+                    Some((l, c)) => std::fs::read(s.root.join(file))
+                        .ok()
+                        .and_then(|t| line_bytes(&t, l, c))
+                        .map_or(0, |(_, _, at)| at),
+                    None => start,
+                };
+                map(pos)
+            });
+            let reply = match &back {
+                Some((f, pos)) => to_source(s, f, *pos, None),
+                None => to_source(s, file, start, at),
+            };
+            let _ = write!(out, "{reply}}}");
         }
         "diagnostics" => {
             let d = lock(&s.diagnostics).clone();

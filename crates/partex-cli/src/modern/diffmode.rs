@@ -51,6 +51,8 @@ struct Base {
     /// The working tree's files the last diff read, with their
     /// modification times then (empty: not diffed yet).
     stamps: Vec<(PathBuf, Option<SystemTime>)>,
+    /// The new version as the last diff read it, flattened.
+    flat: Flat,
 }
 
 /// The baseline list (`b`): each entry's revision and line, and the one
@@ -80,7 +82,17 @@ pub(super) struct Diff {
     /// The change `n` and `N` went to last.
     cursor: Option<usize>,
     picker: Option<Picker>,
-    formats: Option<PathBuf>,
+    /// The formats the diff job loads (the watch's).
+    pub(super) formats: Option<PathBuf>,
+}
+
+/// The file in [`DIR`] that says the watch made it (`phitex clean`
+/// removes only such a directory).
+const MARKER: &str = ".made-by-phitex";
+
+/// `phitex clean`: [`DIR`] removed, if the watch made it. Whether it was.
+pub(super) fn remove_dir() -> bool {
+    Path::new(DIR).join(MARKER).is_file() && std::fs::remove_dir_all(DIR).is_ok()
 }
 
 /// A file's modification time.
@@ -108,11 +120,7 @@ fn ago(time: i64) -> String {
 impl Diff {
     /// The diff mode of the watch of `target` (`rev`: `--diff`'s, taken
     /// now; an error if it names no version).
-    pub(super) fn new(
-        target: &Target,
-        rev: Option<&str>,
-        formats: Option<PathBuf>,
-    ) -> Result<Diff, String> {
+    pub(super) fn new(target: &Target, rev: Option<&str>) -> Result<Diff, String> {
         let repo = phitex_git::Repo::discover(Path::new("."));
         let mut d = Diff {
             repo: None,
@@ -127,7 +135,7 @@ impl Diff {
             places: Vec::new(),
             cursor: None,
             picker: None,
-            formats,
+            formats: None,
         };
         match repo {
             Ok(r) => d.repo = Some(r),
@@ -175,6 +183,7 @@ impl Diff {
             to,
             live: Live::new(base),
             stamps: Vec::new(),
+            flat: Flat::default(),
         });
         self.places.clear();
         self.cursor = None;
@@ -212,8 +221,8 @@ impl Diff {
             if !base.live.out().tex.is_empty() {
                 return false;
             }
-            let flat = phitex_diff::flatten(snap, &self.main).unwrap_or_default();
-            let out = base.live.update(&flat);
+            base.flat = phitex_diff::flatten(snap, &self.main).unwrap_or_default();
+            let out = base.live.update(&base.flat);
             return write_if_new(&tex, &out.tex, ren);
         }
         let flat = match phitex_diff::flatten(&Dir(PathBuf::from(".")), &self.main) {
@@ -229,6 +238,7 @@ impl Diff {
             .map(|f| (PathBuf::from(f), stamp(Path::new(f))))
             .collect();
         let out = base.live.update(&flat);
+        base.flat = flat;
         write_if_new(&tex, &out.tex, ren)
     }
 
@@ -333,10 +343,24 @@ impl Diff {
         self.finish(target, ren, &out, !first);
         self.out = Some((out, t));
         self.place();
+        self.publish(viewer);
         if let Some(w) = &mut self.watch {
             w.idle();
         }
         true
+    }
+
+    /// Tell the viewer where the diff's files are (its `diff.pdf` and
+    /// `diff.tex`), and how a place in the marked-up text goes back to
+    /// the project's files (a double-click on a diff page).
+    fn publish(&self, viewer: &Viewer) {
+        let (Some(v), Some(base), Some((out, _))) = (&viewer.live, &self.base, &self.out) else {
+            return;
+        };
+        let pdf = main_output(&out.outputs).map(PathBuf::from);
+        v.set_diff_files(pdf, Some(PathBuf::from(self.tex())));
+        let back = std::sync::Arc::new(Back::new(base.live.out(), &base.flat));
+        v.set_diff_source(self.tex(), Box::new(move |pos| back.back(pos)));
     }
 
     /// The diff job's engine command line: the watch's, on the marked-up
@@ -806,6 +830,9 @@ impl Diff {
         if self.shown {
             self.show(false, target, ren, viewer, main);
         }
+        if let Some(v) = &viewer.live {
+            v.set_diff_files(None, None);
+        }
         self.base = None;
         self.watch = None;
         self.out = None;
@@ -878,6 +905,103 @@ impl Diff {
     }
 }
 
+/// The way back from the marked-up text to the project's files: a place
+/// in a change's markup is the change's place in the new version (deleted
+/// text: where it would be, the nearest place there); any other is the
+/// same column of its line, the lines of the marked-up text aligned with
+/// the flattened new version's (a line not aligned, one of the markup's
+/// own: the line after the last aligned one before it), then located in
+/// its file by the flattening's map.
+pub(crate) struct Back {
+    out: String,
+    flat: Flat,
+    /// Each change's markup in the output, and its place in the new
+    /// version.
+    changes: Vec<(std::ops::Range<usize>, String, usize)>,
+    /// Where each line begins, in the output and in the flat text, and
+    /// the lines aligned (made the first time asked).
+    lines: std::sync::OnceLock<Lines>,
+}
+
+struct Lines {
+    out: Vec<usize>,
+    flat: Vec<usize>,
+    pairs: Vec<(usize, usize)>,
+}
+
+/// The lines of `t`.
+fn split(t: &str) -> Vec<&str> {
+    t.split('\n').collect()
+}
+
+/// Where each line of `t` begins.
+fn starts(t: &str) -> Vec<usize> {
+    std::iter::once(0)
+        .chain(
+            t.bytes()
+                .enumerate()
+                .filter(|&(_, c)| c == b'\n')
+                .map(|(i, _)| i + 1),
+        )
+        .collect()
+}
+
+impl Back {
+    pub(crate) fn new(out: &phitex_diff::DiffOut, flat: &Flat) -> Back {
+        let mut changes: Vec<_> = out
+            .changes
+            .iter()
+            .map(|c| (c.out.clone(), c.new.file.clone(), c.new.start))
+            .collect();
+        changes.sort_by_key(|c| (c.0.start, c.0.end));
+        Back {
+            out: out.tex.clone(),
+            flat: flat.clone(),
+            changes,
+            lines: std::sync::OnceLock::new(),
+        }
+    }
+
+    fn lines(&self) -> &Lines {
+        self.lines.get_or_init(|| {
+            let (out, flat) = (starts(&self.out), starts(&self.flat.text));
+            let pairs = phitex_diff::myers::patience(&split(&self.out), &split(&self.flat.text));
+            Lines { out, flat, pairs }
+        })
+    }
+
+    /// Byte `pos` of the marked-up text: a project's file and a byte in
+    /// it.
+    pub(crate) fn back(&self, pos: usize) -> Option<(String, usize)> {
+        let pos = pos.min(self.out.len());
+        // (in a change's markup: the change's place)
+        let k = self.changes.partition_point(|c| c.0.end <= pos);
+        if let Some((r, file, start)) = self.changes.get(k)
+            && r.start <= pos
+            && !file.is_empty()
+        {
+            return Some((file.clone(), *start));
+        }
+        let ls = self.lines();
+        let l = ls.out.partition_point(|&s| s <= pos).saturating_sub(1);
+        let col = pos - ls.out[l];
+        let i = ls.pairs.partition_point(|p| p.0 <= l);
+        let (fl, col) = match i.checked_sub(1).map(|i| ls.pairs[i]) {
+            Some((ol, f)) if ol == l => (f, col),
+            prev => {
+                let f = prev.map_or(0, |(ol, f)| f + (l - ol));
+                let f = ls.pairs.get(i).map_or(f, |&(_, n)| f.min(n));
+                (f, 0)
+            }
+        };
+        let fl = fl.min(ls.flat.len() - 1);
+        let end = ls.flat.get(fl + 1).map_or(self.flat.text.len(), |&e| e - 1);
+        let fpos = (ls.flat[fl] + col).min(end.max(ls.flat[fl]));
+        let (file, at) = self.flat.locate(fpos);
+        Some((self.flat.files.get(file)?.clone(), at))
+    }
+}
+
 /// How a revision and its snapshot are named: its short hash, after the
 /// revision if that is not a hash (`HEAD~2 (a1b2c3d)`).
 fn name(rev: &str, snap: &phitex_git::Snapshot) -> String {
@@ -900,7 +1024,12 @@ fn write_if_new(path: &str, text: &str, ren: &Renderer) -> bool {
     if std::fs::read(path).is_ok_and(|t| t == text.as_bytes()) {
         return false;
     }
-    let _ = std::fs::create_dir_all(DIR);
+    if !Path::new(DIR).is_dir() && std::fs::create_dir_all(DIR).is_ok() {
+        let _ = std::fs::write(
+            Path::new(DIR).join(MARKER),
+            "phitex watch's diff (phitex clean removes this directory)\n",
+        );
+    }
     if let Err(e) = std::fs::write(path, text) {
         ren.warn("Diff", &format!("can't write {path}: {e}"));
         return false;
@@ -925,6 +1054,54 @@ fn line_of(l: &phitex_diff::Loc) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A place in the marked-up text goes back to the project's file it
+    /// came from: unchanged text to the same bytes, added text to where it
+    /// was added, deleted text to where it would be.
+    #[test]
+    fn back_to_the_real_source() {
+        use std::collections::BTreeMap;
+        let files = |main: &str, sec: &str| {
+            BTreeMap::from([
+                ("main.tex".to_owned(), main.to_owned()),
+                ("sec.tex".to_owned(), sec.to_owned()),
+            ])
+        };
+        let main = "\\documentclass{article}\n\\begin{document}\nOpening words here.\n\n\\input{sec}\n\nClosing words here.\n\\end{document}\n";
+        let old = files(
+            main,
+            "Alpha beta gamma.\n\nA paragraph to be deleted entirely.\n\nOmega stays.\n",
+        );
+        let new_sec = "Alpha beta brandnew gamma.\n\nOmega stays.\n";
+        let new = files(main, new_sec);
+        let opts = phitex_diff::Options::default();
+        let base = Baseline::new(&old, "main.tex", &opts).unwrap();
+        let flat = phitex_diff::flatten(&new, "main.tex").unwrap();
+        let mut live = Live::new(base);
+        let out = live.update(&flat).clone();
+        let back = Back::new(&out, &flat);
+        let at = |w: &str| out.tex.find(w).unwrap();
+        // (unchanged: the same bytes of the same file)
+        assert_eq!(
+            back.back(at("Omega")),
+            Some(("sec.tex".into(), new_sec.find("Omega").unwrap()))
+        );
+        assert_eq!(
+            back.back(at("Closing") + 2),
+            Some(("main.tex".into(), main.find("Closing").unwrap() + 2))
+        );
+        // (added: where it is in the new version)
+        assert_eq!(
+            back.back(at("brandnew")),
+            Some(("sec.tex".into(), new_sec.find("brandnew").unwrap()))
+        );
+        // (deleted: where it would be, a place in the new sec.tex)
+        let (file, pos) = back.back(at("to be deleted")).unwrap();
+        assert_eq!(file, "sec.tex");
+        assert!(pos <= new_sec.find("Omega").unwrap(), "{pos}");
+        // (the markup's own lines, the preamble's: somewhere in the project)
+        assert_eq!(back.back(0).map(|p| p.0), Some("main.tex".into()));
+    }
 
     #[test]
     fn ages() {

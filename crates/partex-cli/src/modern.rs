@@ -34,8 +34,9 @@ commands:
   check    compile once without writing the output files
   why      why the last build ran as it did, and every warning it gave
   trace    build, writing a Chrome/Perfetto timeline (--open: open Perfetto)
-  clean    remove the files the last build wrote, its saved session and its
-           saved build: the next build starts over
+  clean    remove the files the last build wrote, the watch's diff
+           (.phitex-diff/), its saved session and its saved build: the
+           next build starts over
   clean --all
            remove every saved build, session and record, of every document
            (the formats stay); no file needed
@@ -901,6 +902,9 @@ fn clean(t: &Target, st: Settings) -> ! {
     if session {
         what.push("the saved session".into());
     }
+    if diffmode::remove_dir() {
+        what.push(format!("{}/", diffmode::DIR));
+    }
     // (the store keys a job as a build does: by its engine command line,
     // which `last_record` set)
     let job = crate::setup();
@@ -1540,7 +1544,11 @@ fn watch(opts: &Options, target: &Target, st: Settings) -> ! {
         ssawatch::watch(opts, target, &ren, &rx);
     }
     if target.machine {
-        machine_watch(opts, target, &ren, &rx, &tx);
+        // (`--diff`'s revision read now: a bad one said before anything
+        // is built)
+        let diff = diffmode::Diff::new(target, opts.diff.as_deref())
+            .unwrap_or_else(|e| fail(&e, st.style));
+        machine_watch(opts, target, &ren, &rx, &tx, diff);
     }
     BUSY.store(true, std::sync::atomic::Ordering::Relaxed);
     ren.status("Compiling", &format!("{} ({})", target.file, target.engine));
@@ -1751,12 +1759,12 @@ fn machine_watch(
     ren: &Renderer,
     rx: &mpsc::Receiver<Input>,
     tx: &mpsc::Sender<Input>,
+    mut diff: diffmode::Diff,
 ) -> ! {
     BUSY.store(true, std::sync::atomic::Ordering::Relaxed);
     ren.status("Compiling", &format!("{} ({})", target.file, target.engine));
     let formats = ensure_format(&target.engine, Some(ren));
-    let mut diff = diffmode::Diff::new(target, opts.diff.as_deref(), formats.clone())
-        .unwrap_or_else(|e| fail(&e, ren.style()));
+    diff.formats.clone_from(&formats);
     crate::set_args(target.engine_args("nonstopmode"));
     let mut job = crate::setup();
     job.host.formats = formats;
