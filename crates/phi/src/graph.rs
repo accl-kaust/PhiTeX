@@ -4447,7 +4447,70 @@ impl<L: Lang, const P: bool> Graph<L, P> {
                 }
             }
         }
+        self.check_index();
         self.check_steps();
+    }
+
+    /// The group table and the name index as the steps make them: a
+    /// close is a live step's that lists it; each name's definitions are
+    /// in position order, each one its step's, and every live step's are
+    /// there.
+    fn check_index(&self) {
+        // the group table: a close is a live step's, which lists it
+        for (g, gr) in &self.groups {
+            if let Some(c) = gr.close {
+                assert!(
+                    !self.n.is_dead(c.parent)
+                        && self.closes.get(&c.parent).is_some_and(|l| l.contains(g)),
+                    "check: group {g:x} closed at {c:?} by a step that does not close it"
+                );
+            }
+        }
+        // the name index: each name's definitions in position order, and
+        // every live step's definitions in it
+        for (m, list) in self.names.defs.iter().enumerate() {
+            for &k in list {
+                let d = &self.names.recs[k as usize];
+                let ok = d.step == ROOT
+                    || (!self.n.is_dead(d.step)
+                        && self.n.h[d.step as usize].kind == Kind::Step
+                        && {
+                            let si = &self.steps[self.n.h[d.step as usize].aux as usize];
+                            (si.d0..si.d0 + si.dn).contains(&k)
+                        });
+                assert!(
+                    ok,
+                    "check: name {m}'s definition (record {k}) at step %{} is not that step's",
+                    d.step
+                );
+            }
+            let v: Vec<u32> = list.iter().copied().collect();
+            for w in v.windows(2) {
+                let (a, b) = (
+                    self.names.recs[w[0] as usize].pos(),
+                    self.names.recs[w[1] as usize].pos(),
+                );
+                assert!(
+                    self.n.cmp_pos(a, b) == Ordering::Less,
+                    "check: name {m}'s definitions out of order: {a:?} then {b:?}"
+                );
+            }
+        }
+        for n in 1..self.n.h.len() {
+            let n32 = u32::try_from(n).expect("fits");
+            if self.n.is_dead(n32) || self.n.h[n].kind != Kind::Step {
+                continue;
+            }
+            let si = &self.steps[self.n.h[n].aux as usize];
+            for k in si.d0..si.d0 + si.dn {
+                let d = &self.names.recs[k as usize];
+                assert!(
+                    self.names.defs[d.name as usize].iter().any(|&x| x == k),
+                    "check: step %{n}'s definition of name {} (record {k}) is not in the index",
+                    d.name
+                );
+            }
+        }
     }
 
     // ---- reading the results ----
@@ -4471,6 +4534,28 @@ impl<L: Lang, const P: bool> Graph<L, P> {
     #[must_use]
     pub fn slot(&self, s: Slot) -> L::Val {
         self.pred.get(&s.0).cloned().unwrap_or_default()
+    }
+
+    /// Slot `s`'s publishers and prediction, for debugging.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn debug_slot(&self, s: Slot) -> String {
+        let mut out = format!(
+            "pred {:?}; published {:?}\n",
+            self.pred.get(&s.0),
+            self.published(s.0)
+        );
+        for &p in self.pubs.get(&s.0).into_iter().flatten() {
+            let _ = writeln!(
+                out,
+                "  pub %{p} dead {} val {:?} pos {:?} parent %{}",
+                self.n.is_dead(p),
+                self.n.val[p as usize],
+                self.n.pos(p),
+                self.n.h[p as usize].parent
+            );
+        }
+        out
     }
 
     /// Predict slot `s` (a cold start from a persisted run).
@@ -4593,6 +4678,12 @@ impl<L: Lang, const P: bool> Graph<L, P> {
                 global: d.3,
             };
             let close = self.groups.get(&d.group).and_then(|g| g.close);
+            let _ = write!(
+                out,
+                "[close before def: {:?}; group parent {:x?}] ",
+                close.map(|c| self.n.cmp_pos(c, d.pos)),
+                self.groups.get(&d.group).map(|g| g.parent)
+            );
             let _ = writeln!(
                 out,
                 "src %{} at ({}, {}) group {:x} close {:?} global {} dead {}",

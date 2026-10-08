@@ -153,6 +153,22 @@ impl<L: Lang, const P: bool> Graph<L, P> {
                 );
             }
         }
+        // the names it read: each as it resolves now (a stale one is a
+        // missed wake: the step should have run again)
+        let held_opds = self.n.opds_of(s);
+        for &(m, o) in &em.reads {
+            if o.src == NONE {
+                continue;
+            }
+            assert!(
+                held_opds.iter().any(|h| h.name == m && h.src == o.src),
+                "check: step %{s} reads name {} ({:?}) as %{} now but holds {:?}",
+                m,
+                String::from_utf8_lossy(&self.names.spell[m as usize]),
+                o.src,
+                held_opds.iter().filter(|h| h.name == m).collect::<Vec<_>>()
+            );
+        }
         // its definitions
         let held = self.step_defs(s);
         assert_eq!(
