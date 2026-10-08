@@ -174,3 +174,53 @@ fn a_word_edit_costs_the_edit() {
     assert!(r.scanned < 20, "{r:?}");
     assert!(r.evals < 20, "{r:?}");
 }
+
+/// Moving one label wakes only its own readers.
+#[test]
+fn moving_a_label_wakes_its_readers_only() {
+    let src = r"\label{a} \step \label{b} \step \label{c} \ref{a} \ref{b} \ref{c} \par \ref{b} x \ref{a} \par";
+    let mut d = Doc::new(ids(lex(src)));
+    d.g.run();
+    let b = Slot(phi::ver::hash64("b"));
+    assert_eq!(d.g.slot(b).int(), 1);
+    // \label{b} (tokens 5..9) moved after the second \step
+    let toks: Vec<Tok> = d.toks[5..9].iter().map(|t| t.1.clone()).collect();
+    assert_eq!(toks[0], Tok::Cs("label".into()));
+    d.splice(5, 4, Vec::new());
+    d.splice(6, 0, toks);
+    let r = d.g.run();
+    assert_eq!(d.g.slot(b).int(), 2);
+    assert_eq!(r.iterations, 1, "{r:?}");
+    assert_eq!(r.cross_evals, 2, "the two refs to b, no other: {r:?}");
+    let mut f = Doc::new(d.toks.clone());
+    f.g.run();
+    assert_eq!(d.observe(), f.observe());
+    assert_eq!(d.g.to_text(), f.g.to_text());
+}
+
+/// Renaming one table-of-contents entry runs exactly one TOC line again.
+#[test]
+fn renaming_a_toc_entry_runs_one_line() {
+    let mut src = String::from(r"\toc \par ");
+    for k in 0..40 {
+        src += &format!(r"\section{{s{k}}} text {k} \par ");
+    }
+    let mut d = Doc::new(ids(lex(&src)));
+    let r = d.g.run();
+    assert_eq!(r.iterations, 1);
+    assert_eq!(d.g.scanned(Op::TocLine), 40);
+    let at = d.toks.iter().position(|t| t.1 == Tok::Word("s17".into())).unwrap();
+    d.splice(at, 1, lex("renamed"));
+    let r = d.g.run();
+    assert_eq!(r.iterations, 1, "{r:?}");
+    assert_eq!(d.g.scanned(Op::TocLine), 1, "{r:?}");
+    let mut f = Doc::new(d.toks.clone());
+    f.g.run();
+    assert_eq!(d.g.to_text(), f.g.to_text());
+    // an edit elsewhere: the TOC is predicted right, nothing iterates
+    let at = d.toks.iter().position(|t| t.1 == Tok::Word("text".into())).unwrap();
+    d.splice(at, 1, lex("prose"));
+    let r = d.g.run();
+    assert_eq!(r.iterations, 0, "{r:?}");
+    assert_eq!(d.g.scanned(Op::TocLine), 0);
+}

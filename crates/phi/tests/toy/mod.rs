@@ -22,11 +22,12 @@
 
 use std::sync::Arc;
 
-use phi::{Arg, Args, Chain, Class, ElemId, Graph, Lang, NameId, NodeId, Sel, Seq, Slot, Step, StepCx, Value, Ver};
+use phi::{Arg, Args, Chain, Class, ElemId, Fam, Graph, Lang, NameId, NodeId, Sel, Seq, Slot, Step, StepCx, Value, Ver};
 
 pub const OUT: Chain = Chain(1);
 pub const LOG: Chain = Chain(2);
 pub const VLIST: Chain = Chain(3);
+pub const TOC: Fam = Fam(1);
 /// The line width and the page height.
 pub const WIDTH: i64 = 24;
 pub const HEIGHT: i64 = 5;
@@ -155,6 +156,10 @@ pub enum Op {
     Sum,
     /// Operand's field 1 times 2 (tests).
     Double,
+    /// A record of the operands.
+    Pair,
+    /// A table of contents line per entry (a scan).
+    TocLine,
 }
 
 pub struct Toy;
@@ -198,6 +203,7 @@ impl Lang for Toy {
             Op::Sum => TV::Int((0..a.len()).map(|i| a.get(i).int()).sum()),
             Op::Double => TV::Int(a.get(0).int() * 2),
             Op::Nop => TV::Unit,
+            Op::Pair => TV::rec((0..a.len()).map(|i| a.get(i).clone()).collect()),
             _ => unreachable!("{op:?}"),
         }
     }
@@ -213,6 +219,13 @@ impl Lang for Toy {
     fn scan(op: Op, st: &TV, x: &TV, a: &Args<'_, Self>) -> (TV, TV) {
         match op {
             Op::Break => break_step(st, x, a.get(0).int()),
+            Op::TocLine => {
+                // (a line from the entry; the state is nothing, so a changed
+                // entry changes its line only)
+                let line = format!("{} {:?}", x.field(0).map_or(0, |n| n.int()), x.field(1));
+                let n = line.len() as i64;
+                (TV::Unit, TV::Word(line.into(), n))
+            }
             Op::Page => {
                 // (state: lines on the current page; output: breaks inside)
                 let h = a.get(0).int();
@@ -238,6 +251,7 @@ impl Lang for Toy {
     fn scan_result(op: Op, st: &TV, outs: &Seq<TV>, _a: &Args<'_, Self>) -> TV {
         match op {
             Op::Break => traceback(outs),
+            Op::TocLine => TV::Int(outs.iter().map(|(_, o)| o.int()).sum()),
             Op::Page => {
                 let breaks: i64 = outs.iter().map(|(_, o)| o.int()).sum();
                 TV::Int(if st.int() == 0 && breaks == 0 { 0 } else { breaks + 1 })
@@ -588,6 +602,23 @@ fn step(op: Op, mut st: St, cx: &mut StepCx<'_, Toy>) -> Step<TV> {
             "label" => {
                 let k = rd.word();
                 rd.cx.leaf(Op::Id, Class::Publish(Slot(phi::ver::hash64(&k))), &[Arg::Name(count)]);
+            }
+            "section" => {
+                let title = rd.word();
+                let sec = rd.cx.name(b"sec");
+                let n = rd.cx.leaf(Op::Add1, Class::Pure, &[Arg::Name(sec)]);
+                rd.cx.define(sec, Arg::Local(n), true);
+                let w = title.len() as i64;
+                let t = rd.cx.lit(TV::Word(title.clone().into(), w));
+                rd.cx.leaf(Op::Pair, Class::Entry(TOC, Slot(phi::ver::hash64(&title))), &[Arg::Local(n), Arg::Local(t)]);
+                word(op, par, &mut rd, Arg::Local(t), here);
+            }
+            "toc" => {
+                let f = rd.cx.family(TOC);
+                let init = rd.cx.lit(TV::Unit);
+                let s = rd.cx.scan(Op::TocLine, Arg::Local(f), Arg::Local(init), &[]);
+                let w = rd.cx.leaf(Op::BoxWord, Class::Pure, &[Arg::Local(s)]);
+                word(op, par, &mut rd, Arg::Local(w), here);
             }
             "ref" => {
                 let k = rd.word();

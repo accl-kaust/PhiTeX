@@ -80,3 +80,18 @@ fn speculative_entry_is_faster() {
     eprintln!("cold build: 1 worker {best1:.3} s, 4 workers {best4:.3} s ({:.2}x)", best1 / best4);
     assert!(best4 < best1 * 0.8, "1 worker {best1:.3} s, 4 workers {best4:.3} s");
 }
+
+#[test]
+fn a_group_across_segments() {
+    for src in [
+        r"a { \def\a{x} \par y \par z } \a \par w",
+        r"{ \def\a{x} \par y \par } \par \a",
+        r"\def\a{o} { \def\a{x} \par { y \par } } \par \a \par",
+        r"\par \par zero \else \step \fi \def \x { 0 } { \def \a { inner } \a \def \x { \step } \section { s2 } \ref \ref { j \the \y { { s1 } { j } dyn o } \def \x { \step \par \barrier } { o } \section { s2 } \x j } \par } \def \b { longerword \x \b { t { \def \a { inner } \a } } no \def \y { \def \b { \step z } f } \def \x { \step } \gdef \a { q } q } ab longerword k } \ref { { }",
+    ] {
+        let (a, _) = build(src, 1);
+        let (b, _) = build(src, 3);
+        assert_eq!(a.g.to_text(), b.g.to_text(), "{src}");
+        assert_eq!(a.observe(), b.observe(), "{src}");
+    }
+}

@@ -17,6 +17,11 @@ pub struct Chain(pub u32);
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, PartialOrd, Ord)]
 pub struct Slot(pub u64);
 
+/// A family of cross-run slots, readable in order as a sequence (a
+/// table of contents: one slot per entry).
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, PartialOrd, Ord)]
+pub struct Fam(pub u32);
+
 /// A node's purity class.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
 pub enum Class {
@@ -29,6 +34,19 @@ pub enum Class {
     /// The value slot `s` takes in the next run (the last in position
     /// order wins).
     Publish(Slot),
+    /// Publish slot `s` and list it in family `f`, in position order.
+    Entry(Fam, Slot),
+}
+
+impl Class {
+    /// The slot this publishes, if any.
+    #[must_use]
+    pub fn slot(self) -> Option<Slot> {
+        match self {
+            Class::Publish(s) | Class::Entry(_, s) => Some(s),
+            _ => None,
+        }
+    }
 }
 
 /// What a step returns.

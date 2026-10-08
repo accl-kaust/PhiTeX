@@ -76,6 +76,7 @@ impl<L: Lang> Graph<L> {
             Kind::Scan => "scan",
             Kind::Cross => "cross",
             Kind::ChainRead => "chain",
+            Kind::Family => "family",
         };
         let _ = write!(out, "%{} = {kind}", num[&n]);
         match self.n.class[u] {
@@ -87,6 +88,9 @@ impl<L: Lang> Graph<L> {
             Class::Publish(s) => {
                 let _ = write!(out, " publish(#{:x})", s.0);
             }
+            Class::Entry(f, s) => {
+                let _ = write!(out, " entry({}, #{:x})", f.0, s.0);
+            }
         }
         if matches!(self.n.kind[u], Kind::Leaf | Kind::Unfold | Kind::Scan) {
             let _ = write!(out, " {}", L::fmt_op(self.n.op[u]));
@@ -95,7 +99,7 @@ impl<L: Lang> Graph<L> {
             Kind::Cross => {
                 let _ = write!(out, " #{:x}", self.n.aux[u]);
             }
-            Kind::ChainRead => {
+            Kind::ChainRead | Kind::Family => {
                 let _ = write!(out, " {}", self.n.aux[u]);
             }
             Kind::Step => {

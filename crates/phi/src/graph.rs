@@ -14,7 +14,7 @@ use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::marker::PhantomData;
 
-use crate::lang::{Chain, Class, Lang, Slot, Step};
+use crate::lang::{Chain, Class, Fam, Lang, Slot, Step};
 use crate::seq::{ElemId, Seq};
 use crate::value::{Proj, Sel, Value, project};
 use crate::ver::{Ver, hash64};
@@ -51,6 +51,8 @@ pub enum Kind {
     Cross,
     /// A chain's payloads.
     ChainRead,
+    /// A slot family's entries from the last run, in order.
+    Family,
 }
 
 const DIRTY: u8 = 1;
@@ -200,6 +202,8 @@ pub struct Report {
     /// Slots still changing when the loop's bound was reached, each with
     /// the versions it took, in order.
     pub oscillating: Vec<(Slot, Vec<Ver>)>,
+    /// Of `evals`: cross-run reads (slots and families) evaluated.
+    pub cross_evals: u64,
     /// Groups closed with none open (a client error).
     pub unbalanced: u64,
     /// The largest step state seen, in bytes ([`Config::debug`]).
@@ -654,6 +658,11 @@ impl<'s, L: Lang> StepCx<'s, L> {
         self.push(Kind::Cross, L::Op::default(), Class::Pure, &[], None, s.0)
     }
 
+    /// Family `f`'s entries from the last run, in order (predicted).
+    pub fn family(&mut self, f: Fam) -> Local<'s> {
+        self.push(Kind::Family, L::Op::default(), Class::Pure, &[], None, u64::from(f.0))
+    }
+
     /// The payloads of chain `c` (all of it: a chain read is placed after
     /// what it reads by the client).
     pub fn chain(&mut self, c: Chain) -> Local<'s> {
@@ -749,6 +758,16 @@ pub struct Graph<L: Lang> {
     pubs: HashMap<u64, Vec<u32>>,
     crosses: HashMap<u64, Vec<u32>>,
     pred: std::sync::Arc<HashMap<u64, L::Val>>,
+    /// Families: their entries' publishers, their readers, their values
+    /// from the last run.
+    fams: HashMap<u32, Vec<u32>>,
+    fam_readers: HashMap<u32, Vec<u32>>,
+    fpred: std::sync::Arc<HashMap<u32, L::Val>>,
+    /// Slots and families whose publishers changed in this run.
+    dirty_slots: std::collections::BTreeSet<u64>,
+    dirty_fams: std::collections::BTreeSet<u32>,
+    /// Elements each scan stepped in this run, by op.
+    scan_runs: Vec<(L::Op, u64)>,
     hunks: Vec<u32>,
     root_ord: u64,
     grp_hint: u64,
@@ -812,6 +831,12 @@ impl<L: Lang> Graph<L> {
             pubs: HashMap::new(),
             crosses: HashMap::new(),
             pred: std::sync::Arc::new(HashMap::new()),
+            fams: HashMap::new(),
+            fam_readers: HashMap::new(),
+            fpred: std::sync::Arc::new(HashMap::new()),
+            dirty_slots: std::collections::BTreeSet::new(),
+            dirty_fams: std::collections::BTreeSet::new(),
+            scan_runs: Vec::new(),
             hunks: Vec::new(),
             root_ord: 0,
             grp_hint: NOGROUP,
@@ -1033,10 +1058,24 @@ impl<L: Lang> Graph<L> {
         }
         let old = std::mem::replace(&mut self.n.val[u], v);
         self.wake(n, &old);
-        if let Class::Effect(c) = self.n.class[u] {
-            self.wake_chain(c.0);
-        }
+        self.class_changed(n);
         true
+    }
+
+    /// A node's class-side effect changed (its payload, or it came or
+    /// went): its chain's readers woken, its slot and family marked.
+    fn class_changed(&mut self, n: u32) {
+        match self.n.class[n as usize] {
+            Class::Effect(c) => self.wake_chain(c.0),
+            Class::Publish(s) => {
+                self.dirty_slots.insert(s.0);
+            }
+            Class::Entry(f, s) => {
+                self.dirty_slots.insert(s.0);
+                self.dirty_fams.insert(f.0);
+            }
+            _ => {}
+        }
     }
 
     fn wake_chain(&mut self, c: u32) {
@@ -1174,6 +1213,14 @@ impl<L: Lang> Graph<L> {
         NodeId(n)
     }
 
+    /// Family `f`'s entries from the last run, in the root region.
+    pub fn family(&mut self, f: Fam) -> NodeId {
+        let n = self.root_node(Kind::Family, L::Op::default(), Class::Pure, u64::from(f.0));
+        self.register(n);
+        self.settle_new(n);
+        NodeId(n)
+    }
+
     /// Set up a new node's side tables (unfold, scan, chains, slots).
     fn register(&mut self, n: u32) {
         let u = n as usize;
@@ -1212,11 +1259,27 @@ impl<L: Lang> Graph<L> {
                 let c = self.n.aux[u] as u32;
                 self.chain_readers.entry(c).or_default().push(n);
             }
+            Kind::Family => {
+                self.fam_readers.entry(self.n.aux[u] as u32).or_default().push(n);
+            }
             _ => {}
         }
-        match self.n.class[u] {
+        self.register_class(n);
+    }
+
+    fn register_class(&mut self, n: u32) {
+        match self.n.class[n as usize] {
             Class::Effect(c) => self.chains.entry(c.0).or_default().push(n),
-            Class::Publish(s) => self.pubs.entry(s.0).or_default().push(n),
+            Class::Publish(s) => {
+                self.pubs.entry(s.0).or_default().push(n);
+                self.dirty_slots.insert(s.0);
+            }
+            Class::Entry(f, s) => {
+                self.pubs.entry(s.0).or_default().push(n);
+                self.fams.entry(f.0).or_default().push(n);
+                self.dirty_slots.insert(s.0);
+                self.dirty_fams.insert(f.0);
+            }
             _ => {}
         }
     }
@@ -1235,7 +1298,7 @@ impl<L: Lang> Graph<L> {
     /// queued.
     fn settle_new(&mut self, n: u32) {
         let u = n as usize;
-        let leafy = matches!(self.n.kind[u], Kind::Leaf | Kind::Const | Kind::Cross);
+        let leafy = matches!(self.n.kind[u], Kind::Leaf | Kind::Const | Kind::Cross | Kind::Family);
         let clean = self
             .n
             .opds_of(n)
@@ -1265,6 +1328,14 @@ impl<L: Lang> Graph<L> {
             Kind::Cross => {
                 let v = self.pred.get(&self.n.aux[n as usize]).cloned().unwrap_or_default();
                 self.rep.evals += 1;
+                self.rep.cross_evals += 1;
+                self.set_val(n, v);
+            }
+            Kind::Family => {
+                let f = self.n.aux[n as usize] as u32;
+                let v = self.fpred.get(&f).cloned().unwrap_or_else(|| L::chain_val(Seq::new()));
+                self.rep.evals += 1;
+                self.rep.cross_evals += 1;
                 self.set_val(n, v);
             }
             Kind::ChainRead => self.eval_chain(n),
@@ -2049,9 +2120,7 @@ impl<L: Lang> Graph<L> {
                 }
             }
         }
-        if let Class::Effect(c) = self.n.class[u] {
-            self.wake_chain(c.0);
-        }
+        self.class_changed(n);
     }
 
     // ---- scans ----
@@ -2081,28 +2150,40 @@ impl<L: Lang> Graph<L> {
         let mut states: Vec<L::Val> = Vec::with_capacity(n_new);
         states.extend_from_slice(&old_states[..p]);
         let mut fresh: Vec<(ElemId, L::Val)> = Vec::new();
+        // (`met`: the old index from which the old run's states and outputs
+        // hold again)
         let mut met = None;
-        {
+        let mut stepped = 0;
+        let old_at = |k: usize| -> Ver {
+            // the old state before old element k
+            if k == 0 { init.ver() } else { old_states[k - 1].ver() }
+        };
+        if !full && p >= n_new - sfx && st.ver() == old_at(p + n_old - n_new) {
+            // (only deletions, and the state before them holds after them)
+            met = Some(p + n_old - n_new);
+        }
+        if met.is_none() {
             let args = Args { g: &self.n, opds: &uo[2..] };
             for (i, (id, x)) in input.iter_from(p).enumerate().map(|(k, e)| (k + p, e)) {
                 let (s2, out) = L::scan(op, &st, x, &args);
                 st = s2;
                 self.rep.scanned += 1;
+                stepped += 1;
                 fresh.push((id, out));
                 states.push(st.clone());
-                if !full && i >= n_new - sfx {
-                    let oi = i + n_old - n_new;
-                    if old_states[oi].ver() == st.ver() {
-                        met = Some(oi);
+                if !full && i + 1 >= n_new - sfx && i + 1 + n_old >= n_new {
+                    let ok = i + 1 + n_old - n_new;
+                    if ok >= 1 && ok <= n_old && old_at(ok) == st.ver() {
+                        met = Some(ok);
                         break;
                     }
                 }
             }
         }
         let outs = match met {
-            Some(oi) => {
-                states.extend_from_slice(&old_states[oi + 1..]);
-                old_outs.splice(p, oi + 1 - p, fresh)
+            Some(ok) => {
+                states.extend_from_slice(&old_states[ok..]);
+                old_outs.splice(p, ok - p.min(ok), fresh)
             }
             None => old_outs.splice(p, n_old - p.min(n_old), fresh),
         };
@@ -2118,11 +2199,32 @@ impl<L: Lang> Graph<L> {
         info.init_ver = init.ver();
         info.args_ver = args_ver;
         info.done = true;
+        self.scan_runs.push((op, stepped));
         self.rep.evals += 1;
         self.set_val(sc, v);
     }
 
     // ---- the run ----
+
+    /// Family `f`'s entries as published in this run, in position order
+    /// (each keyed by its slot).
+    fn family_value(&self, f: u32) -> L::Val {
+        let mut ns: Vec<u32> = self
+            .fams
+            .get(&f)
+            .map(|v| v.iter().copied().filter(|&x| !self.n.is_dead(x)).collect())
+            .unwrap_or_default();
+        ns.sort_by(|&a, &b| self.n.cmp_node(a, b));
+        ns.dedup();
+        let items = ns
+            .into_iter()
+            .map(|x| {
+                let s = self.n.class[x as usize].slot().map_or(0, |s| s.0);
+                (ElemId(s), self.n.val[x as usize].clone())
+            })
+            .collect();
+        L::chain_val(Seq::from_vec(items))
+    }
 
     /// The value slot `s` takes in the next run.
     fn published(&self, s: u64) -> L::Val {
@@ -2142,23 +2244,35 @@ impl<L: Lang> Graph<L> {
     /// cross-run slots to their fixed point.
     pub fn run(&mut self) -> Report {
         self.rep = Report::default();
+        self.scan_runs.clear();
         let mut hist: HashMap<u64, Vec<Ver>> = HashMap::new();
         loop {
             while let Some(n) = self.pop() {
                 self.process(n);
             }
-            let mut slots: Vec<u64> = self.pubs.keys().chain(self.crosses.keys()).copied().collect();
-            slots.sort_unstable();
-            slots.dedup();
+            if self.cfg.segment {
+                // (a segment's slots are its graph's: it reads, never iterates)
+                self.dirty_slots.clear();
+                self.dirty_fams.clear();
+                break;
+            }
             let mut changed = Vec::new();
-            for sl in slots {
+            for sl in std::mem::take(&mut self.dirty_slots) {
                 let v = self.published(sl);
                 let cur = self.pred.get(&sl).map_or_else(|| L::Val::default().ver(), Value::ver);
                 if cur != v.ver() {
                     changed.push((sl, v));
                 }
             }
-            if changed.is_empty() {
+            let mut fchanged = Vec::new();
+            for f in std::mem::take(&mut self.dirty_fams) {
+                let v = self.family_value(f);
+                let cur = self.fpred.get(&f).map_or_else(|| L::chain_val(Seq::new()).ver(), Value::ver);
+                if cur != v.ver() {
+                    fchanged.push((f, v));
+                }
+            }
+            if changed.is_empty() && fchanged.is_empty() {
                 break;
             }
             if self.rep.iterations >= self.cfg.max_iters {
@@ -2167,6 +2281,11 @@ impl<L: Lang> Graph<L> {
                     h.push(v.ver());
                     self.rep.oscillating.push((Slot(sl), h));
                 }
+                for (f, v) in fchanged {
+                    let mut h = hist.remove(&(u64::from(f) | 1 << 63)).unwrap_or_default();
+                    h.push(v.ver());
+                    self.rep.oscillating.push((Slot(u64::from(f) | 1 << 63), h));
+                }
                 break;
             }
             self.rep.iterations += 1;
@@ -2174,6 +2293,15 @@ impl<L: Lang> Graph<L> {
                 hist.entry(sl).or_default().push(v.ver());
                 std::sync::Arc::make_mut(&mut self.pred).insert(sl, v);
                 for c in self.crosses.get(&sl).cloned().unwrap_or_default() {
+                    if !self.n.is_dead(c) {
+                        self.push_dirty(c);
+                    }
+                }
+            }
+            for (f, v) in fchanged {
+                hist.entry(u64::from(f) | 1 << 63).or_default().push(v.ver());
+                std::sync::Arc::make_mut(&mut self.fpred).insert(f, v);
+                for c in self.fam_readers.get(&f).cloned().unwrap_or_default() {
                     if !self.n.is_dead(c) {
                         self.push_dirty(c);
                     }
@@ -2206,6 +2334,12 @@ impl<L: Lang> Graph<L> {
             v.retain(|&x| !dead(&self.n, x));
         }
         for v in self.crosses.values_mut() {
+            v.retain(|&x| !dead(&self.n, x));
+        }
+        for v in self.fams.values_mut() {
+            v.retain(|&x| !dead(&self.n, x));
+        }
+        for v in self.fam_readers.values_mut() {
             v.retain(|&x| !dead(&self.n, x));
         }
         for m in std::mem::take(&mut self.names.prune) {
@@ -2349,10 +2483,37 @@ impl<L: Lang> Graph<L> {
             .collect()
     }
 
+    /// The elements the scans of `op` stepped in the last run.
+    #[must_use]
+    pub fn scanned(&self, op: L::Op) -> u64 {
+        self.scan_runs.iter().filter(|r| r.0 == op).map(|r| r.1).sum()
+    }
+
     /// A scan's states after each element (versions), for tests.
     #[must_use]
     pub fn state_vers(&self, n: NodeId) -> Vec<Ver> {
         self.scans[self.n.aux[n.0 as usize] as usize].states.iter().map(Value::ver).collect()
+    }
+
+    /// Name `n`'s definitions, for debugging: (defining node, position,
+    /// group, its close, global).
+    #[must_use]
+    pub fn debug_defs(&self, n: NameId) -> String {
+        let mut out = String::new();
+        for d in &self.names.defs[n.0 as usize] {
+            let close = self.groups.get(&d.group).and_then(|g| g.close);
+            out += &format!(
+                "src %{} at ({}, {}) group {:x} close {:?} global {} dead {}\n",
+                d.src,
+                d.pos.parent,
+                d.pos.ord,
+                d.group,
+                close.map(|c| (c.parent, c.ord)),
+                d.global,
+                d.src != NONE && self.n.is_dead(d.src)
+            );
+        }
+        out
     }
 
     /// The root region's nodes, in order.
@@ -2416,11 +2577,13 @@ impl<L: Lang> Graph<L> {
             .map(|(k, e)| (e.at, ents.get(k + 1).map(|n| n.at), e.key, e.guess.clone().expect("guessed")))
             .collect();
         let pred = self.pred.clone();
+        let fpred = self.fpred.clone();
         let job = |seg: &(usize, Option<usize>, u64, L::Val)| {
             let mut p: Graph<L> = Graph::new();
             p.cfg.segment = true;
             p.ext = Some(ext.clone());
             p.pred = pred.clone();
+            p.fpred = fpred.clone();
             let i = p.input(input.clone());
             let init = p.input(seg.3.clone());
             let a: Vec<NodeId> = args.iter().map(|v| p.input(v.clone())).collect();
@@ -2504,6 +2667,8 @@ impl<L: Lang> Graph<L> {
     fn arrive(&mut self, u: u32, ui: usize, st: Grafting<L>) {
         for (p, first) in st.bounds {
             match p {
+                // (a step an earlier arrival's resync removed has no successor)
+                Some(p) if self.n.is_dead(p.s) => {}
                 Some(p) => self.successor(p.s, u, ui, p.key, p.cursor, p.idx, p.grp, p.ver),
                 None => {
                     // (the part before ended: nothing after it is the chain's)
@@ -2517,7 +2682,7 @@ impl<L: Lang> Graph<L> {
                 }
             }
         }
-        if let Some(p) = st.prev {
+        if let Some(p) = st.prev.filter(|p| !self.n.is_dead(p.s)) {
             // (the last segment stopped: go on from there)
             self.successor(p.s, u, ui, p.key, p.cursor, p.idx, p.grp, p.ver);
         } else if let Some(v) = st.done {
@@ -2761,16 +2926,13 @@ impl<L: Lang> Graph<L> {
             match self.n.kind[mx as usize] {
                 Kind::Cross => self.crosses.entry(self.n.aux[mx as usize]).or_default().push(mx),
                 Kind::ChainRead => self.chain_readers.entry(self.n.aux[mx as usize] as u32).or_default().push(mx),
+                Kind::Family => self.fam_readers.entry(self.n.aux[mx as usize] as u32).or_default().push(mx),
                 _ => {}
             }
-            match self.n.class[mx as usize] {
-                Class::Effect(c) => {
-                    self.chains.entry(c.0).or_default().push(mx);
-                    chains.push(c.0);
-                }
-                Class::Publish(s) => self.pubs.entry(s.0).or_default().push(mx),
-                _ => {}
+            if let Class::Effect(c) = self.n.class[mx as usize] {
+                chains.push(c.0);
             }
+            self.register_class(mx);
         }
         chains.sort_unstable();
         chains.dedup();
@@ -2791,7 +2953,11 @@ impl<L: Lang> Graph<L> {
         };
         self.set_opds(first, &os);
         let pui = p.n.aux[pu as usize] as usize;
-        let end = p.unfolds[pui].parked.map(|pk| Parked { s: map[&pk.s], ..pk });
+        let end = p.unfolds[pui].parked.map(|pk| Parked {
+            s: map[&pk.s],
+            grp: remap_grp(pk.grp, &map),
+            ..pk
+        });
         Some((first, last, end))
     }
 

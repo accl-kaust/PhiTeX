@@ -49,6 +49,9 @@ const SNIPPETS: &[&str] = &[
     "\\ref{j}",
     "\\hbox{h1 h2 \\the\\count}",
     "\\barrier",
+    "\\section{s1}",
+    "\\section{s2}",
+    "\\toc",
 ];
 
 fn snippet(r: &mut Rng) -> Vec<Tok> {
@@ -67,6 +70,40 @@ fn fresh(d: &Doc) -> Doc {
     let mut f = Doc::new(d.toks.clone());
     f.g.cfg.check = true;
     f.g.run();
+    // parallel (speculative entry at every paragraph) equals in turn
+    let mut p = Doc::new(d.toks.clone());
+    p.g.cfg.workers = 3;
+    p.g.cfg.check = true;
+    p.g.run();
+    let (a, b) = (p.g.to_text(), f.g.to_text());
+    if a != b {
+        if let Ok(dir) = std::env::var("PHI_DUMP") {
+            std::fs::write(format!("{dir}/par.txt"), &a).unwrap();
+            std::fs::write(format!("{dir}/seq.txt"), &b).unwrap();
+        }
+        let al: Vec<&str> = a.lines().collect();
+        let bl: Vec<&str> = b.lines().collect();
+        let k = al.iter().zip(&bl).take_while(|(x, y)| x == y).count();
+        panic!(
+            "3 workers differ from line {k}:\n{}\nin turn:\n{}",
+            al[k.saturating_sub(4)..(k + 6).min(al.len())].join("\n"),
+            bl[k.saturating_sub(4)..(k + 6).min(bl.len())].join("\n")
+        );
+    }
+    if p.observe() != f.observe() {
+        let src: Vec<String> = d.toks.iter().map(|t| t.1.text()).collect();
+        eprintln!("SRC {}", src.join(" "));
+        for n in ["a", "b", "x", "y", "count"] {
+            if let (Some(i), Some(j)) = (p.g.name_id(n.as_bytes()), f.g.name_id(n.as_bytes())) {
+                eprintln!("{n} parallel:\n{}in turn:\n{}", p.g.debug_defs(i), f.g.debug_defs(j));
+            }
+        }
+        if let Ok(dir) = std::env::var("PHI_DUMP") {
+            std::fs::write(format!("{dir}/par.txt"), p.g.to_text_ids()).unwrap();
+            std::fs::write(format!("{dir}/seq.txt"), f.g.to_text_ids()).unwrap();
+        }
+    }
+    assert_eq!(p.observe(), f.observe(), "3 workers");
     f
 }
 
