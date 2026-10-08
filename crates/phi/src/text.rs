@@ -36,7 +36,7 @@ impl<L: Lang> Graph<L> {
     }
 
     fn walk(&self, n: u32, out: &mut Vec<u32>) {
-        let mut c = self.n.h[n as usize].first;
+        let mut c = self.first(n);
         while c != NONE {
             out.push(c);
             self.walk(c, out);

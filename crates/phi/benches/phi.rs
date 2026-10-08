@@ -67,7 +67,13 @@ impl Lang for B {
             return Step::Done(st.clone());
         };
         let first = cx.consumed() == 1 && matches!(st, V::Nil);
-        let acc = cx.name(b"acc");
+        let solo = cx.name(b"solo");
+        if first {
+            // (the first step also defines `solo`, which one step reads)
+            let c = cx.lit(x.clone());
+            cx.define(solo, Arg::Local(c), false);
+        }
+        let acc = if matches!(x, V::I(-1)) { solo } else { cx.name(b"acc") };
         let out = cx.name(b"out");
         let c = cx.lit(x);
         let mut last = cx.leaf(O::Add, Class::Pure, &[Arg::Name(acc), Arg::Local(c)]);
@@ -75,7 +81,9 @@ impl Lang for B {
             last = cx.leaf(O::Add, Class::Pure, &[Arg::Local(last), Arg::Local(c)]);
         }
         if first {
-            cx.define(acc, Arg::Local(c), false);
+            // (a constant: no step's reads of `acc` change with the input)
+            let k = cx.lit(V::I(7));
+            cx.define(acc, Arg::Local(k), false);
         }
         cx.define(out, Arg::Local(last), false);
         let st = V::I(1);
@@ -202,6 +210,20 @@ fn rebuild(c: &mut Criterion) {
         b.iter(|| {
             v += 1;
             g.set(inputs[n / 2].0, V::I(v));
+            black_box(g.run().evals)
+        })
+    });
+    // a name read by one leaf of one 10-leaf step: its definition changes
+    let mut xs: Vec<(ElemId, V)> = (0..100_000).map(|i| (ElemId(i as u64 + 1), V::I((i * 7919 % 101) as i64))).collect();
+    xs[50_000].1 = V::I(-1);
+    let solo_base = Seq::from_vec(xs);
+    let (mut g, input, _) = unfold_over(solo_base.clone(), 10, 1);
+    let mut k = 0i64;
+    grp.bench_function("name-read-by-one-leaf", |b| {
+        b.iter(|| {
+            k += 1;
+            let s = solo_base.splice(0, 1, [(ElemId(1), V::I(k % 50))]);
+            g.set(input, V::S(s));
             black_box(g.run().evals)
         })
     });

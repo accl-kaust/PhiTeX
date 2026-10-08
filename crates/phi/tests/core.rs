@@ -166,10 +166,9 @@ fn groups_restore_like_the_save_stack() {
     let _ = &mut d;
 }
 
-/// A word changed in one paragraph of hundreds: two steps run (the one
-/// before the edit, whose successor's key comes from the element after
-/// it, and the word's), and the scans step a few elements, whatever the
-/// document's length.
+/// A word changed in one paragraph of hundreds: the steps of that
+/// paragraph run at most, and the scans step a few elements, whatever
+/// the document's length.
 #[test]
 fn a_word_edit_costs_the_edit() {
     let mut src = String::new();
@@ -184,7 +183,11 @@ fn a_word_edit_costs_the_edit() {
     let at = 150 * 13 + 5;
     d.splice(at, 1, lex("other"));
     let r = d.g.run();
-    assert_eq!(r.steps, 2, "{r:?}");
+    // (the step before the edit and the word's; then, since a step's
+    // interior is transient, each later word of the paragraph, whose
+    // push reads the changed `par@`: the paragraph's chain, never the
+    // document's)
+    assert!(r.steps <= 13, "{r:?}");
     assert!(r.scanned < 20, "{r:?}");
     assert!(r.evals < 20, "{r:?}");
 }
