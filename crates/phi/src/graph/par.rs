@@ -87,7 +87,7 @@ impl<L: Lang> Graph<L> {
                 ext: self.ext.as_deref(),
                 keep: self.cfg.keep_interior,
                 cancel: &self.cancel,
-                memo: &self.memo,
+                memo: self.memo_on.then_some(&*self.memo),
                 _brand: PhantomData,
             };
             let args = Args::of(&self.n, &uo[2..]);
@@ -262,6 +262,7 @@ impl<L: Lang> Graph<L> {
     ///
     /// If a worker panicked holding the store.
     pub fn set_memo_budget(&mut self, bytes: usize) {
+        self.memo_on = bytes > 0;
         let mut m = self.memo.lock().expect("the memo store");
         m.budget = bytes;
         if m.bytes() > bytes {

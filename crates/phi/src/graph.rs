@@ -496,18 +496,25 @@ type Sweep<'a, L> = (&'a [EArg], &'a [u32], &'a [<L as Lang>::Val]);
 /// Leaf `op` evaluated, through the memo store if the client opts the op
 /// in (DESIGN 7.8): keyed by the op and its operands' versions.
 fn eval_op<L: Lang>(
+    memo: Option<&std::sync::Mutex<Memo<L::Val>>>,
+    op: L::Op,
+    args: &Args<'_, L>,
+) -> L::Val {
+    match memo {
+        Some(m) if L::memo(op) => eval_memo(m, op, args),
+        _ => L::eval(op, args),
+    }
+}
+
+/// [`eval_op`] through the store (out of line: the leaf path without a
+/// store stays small).
+#[inline(never)]
+fn eval_memo<L: Lang>(
     memo: &std::sync::Mutex<Memo<L::Val>>,
     op: L::Op,
     args: &Args<'_, L>,
 ) -> L::Val {
-    if !L::memo(op) {
-        return L::eval(op, args);
-    }
     let mut m = memo.lock().expect("the memo store");
-    if m.budget == 0 {
-        drop(m);
-        return L::eval(op, args);
-    }
     let k = args.key(L::op_tag(op));
     if let Some(v) = m.get(k) {
         return v.clone();
@@ -804,7 +811,8 @@ pub struct StepCx<'s, L: Lang> {
     keep: bool,
     /// The run's cancellation flag.
     cancel: &'s std::sync::atomic::AtomicBool,
-    memo: &'s std::sync::Mutex<Memo<L::Val>>,
+    /// The memo store, if it has a budget.
+    memo: Option<&'s std::sync::Mutex<Memo<L::Val>>>,
     _brand: PhantomData<fn(&'s ()) -> &'s ()>,
 }
 
@@ -935,6 +943,7 @@ impl<'s, L: Lang> StepCx<'s, L> {
         clippy::cast_possible_truncation,
         reason = "emissions and operands of a step fit u32"
     )]
+    #[inline(never)]
     fn cse(&mut self, op: L::Op, args: &[Arg<'s>], aux: u64) -> Option<Local<'s>> {
         use std::hash::{BuildHasher, Hash};
         let mut h = BuildHasherDefault::<Fx>::default().build_hasher();
@@ -1480,6 +1489,8 @@ pub struct Graph<L: Lang> {
     /// The memo store (DESIGN 7.8): `Lang::memo` ops only, off while its
     /// budget is 0; shared with the segments of a parallel build).
     memo: std::sync::Arc<std::sync::Mutex<Memo<L::Val>>>,
+    /// Whether the store has a budget (checked before anything else).
+    memo_on: bool,
     /// The input leaf the last step ran in.
     lcache: Option<Leaf<L::Val>>,
     /// The groups each step closed.
@@ -1555,6 +1566,7 @@ impl<L: Lang> Graph<L> {
             outcomes: Map::default(),
             em_pool: Vec::new(),
             memo: std::sync::Arc::default(),
+            memo_on: false,
             groups_gen: 0,
             round_cool: 0,
             sampled: 0,
@@ -2233,7 +2245,11 @@ impl<L: Lang> Graph<L> {
     fn eval_leaf(&mut self, n: u32) {
         let v = {
             let args = Args::of(&self.n, self.n.opds_of(n));
-            eval_op(&self.memo, self.n.h[n as usize].op, &args)
+            eval_op(
+                self.memo_on.then_some(&*self.memo),
+                self.n.h[n as usize].op,
+                &args,
+            )
         };
         self.rep.evals += 1;
         self.set_val(n, v);
@@ -2550,6 +2566,7 @@ impl<L: Lang> Graph<L> {
                     lcache,
                     cancel,
                     memo,
+                    memo_on,
                     sampled,
                     step_ns,
                     ..
@@ -2578,7 +2595,7 @@ impl<L: Lang> Graph<L> {
                     ext: ext.as_deref(),
                     keep: cfg.keep_interior,
                     cancel,
-                    memo,
+                    memo: memo_on.then_some(&**memo),
                     _brand: PhantomData,
                 };
                 let args = Args::of(n, &uo[2..]);
@@ -3011,7 +3028,7 @@ impl<L: Lang> Graph<L> {
                                 opds: &[],
                                 sweep: Some((&eargs[a0..a0 + an], ids, &buf)),
                             };
-                            eval_op(&self.memo, sp.op, &args)
+                            eval_op(self.memo_on.then_some(&*self.memo), sp.op, &args)
                         };
                         buf[i] = v;
                     }
@@ -3526,7 +3543,7 @@ impl<L: Lang> Graph<L> {
         }
         if met.is_none() {
             let args = Args::of(&self.n, &uo[2..]);
-            let memo = L::memo(op) && self.memo.lock().expect("the memo store").budget > 0;
+            let memo = self.memo_on && L::memo(op);
             let av = if memo { args.key(0) } else { Ver::ABSENT };
             for (i, (id, x)) in input.iter_from(p).enumerate().map(|(k, e)| (k + p, e)) {
                 let (s2, out) = if memo {
@@ -4099,12 +4116,14 @@ impl<L: Lang> Graph<L> {
         let fpred = self.fpred.clone();
         let (keep, debug) = (self.cfg.keep_interior, self.cfg.debug);
         let memo = self.memo.clone();
+        let memo_on = self.memo_on;
         let job = |seg: &(usize, Option<usize>, u64, L::Val)| {
             let mut p: Graph<L> = Graph::new();
             p.cfg.segment = true;
             p.cfg.keep_interior = keep;
             p.cfg.debug = debug;
             p.memo = memo.clone();
+            p.memo_on = memo_on;
             p.ext = Some(ext.clone());
             p.pred = pred.clone();
             p.fpred = fpred.clone();

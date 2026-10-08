@@ -1,6 +1,7 @@
 //! Quick timing of the bench client's cold build (scratch; not a bench).
 #![allow(clippy::pedantic, dead_code)]
 use phi::{Arg, Args, Class, ElemId, Graph, Lang, Seq, Step, StepCx, Value, Ver};
+use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
 use std::time::Instant;
 
 /// A minimal client: integers, versioned by value.
@@ -47,12 +48,18 @@ enum O {
     Mod,
 }
 
-struct B;
+/// (`X`: the extras, HEAVY, CSE and MEMO, are compiled in; without them
+/// the client is the plain one, with no hook the core calls per leaf)
+struct B<const X: bool>;
 
-static CSE: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| std::env::var("CSE").is_ok());
-static MEMO: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| std::env::var("MEMO").is_ok());
+/// (read once: an environment lookup a step would cost ~10 ns/node)
+static HEAVY: std::sync::LazyLock<Option<u64>> =
+    std::sync::LazyLock::new(|| std::env::var("HEAVY").ok().and_then(|v| v.parse().ok()));
+/// (set in main: a hook the core calls per leaf must be a plain load)
+static CSE: AtomicBool = AtomicBool::new(false);
+static MEMO: AtomicBool = AtomicBool::new(false);
 
-impl Lang for B {
+impl<const X: bool> Lang for B<X> {
     type Val = V;
     type Op = O;
     fn eval(op: O, a: &Args<'_, Self>) -> V {
@@ -74,10 +81,7 @@ impl Lang for B {
         let x0 = x.clone();
         // (HEAVY=n: an op that costs about n ns more, as macro expansion
         // would)
-        if let Some(n) = std::env::var("HEAVY")
-            .ok()
-            .and_then(|v| v.parse::<u64>().ok())
-        {
+        if X && let Some(n) = *HEAVY {
             let mut h = x0.i() as u64;
             for i in 0..n {
                 h = std::hint::black_box(h.wrapping_mul(0x9e37_79b9_7f4a_7c15).rotate_left(7) ^ i);
@@ -110,7 +114,7 @@ impl Lang for B {
             // (a constant: no step's reads of `acc` change with the input)
             // (PRE: the first element's value, so changing it wakes
             // every step: a preamble definition)
-            let k = cx.lit(if std::env::var("PRE").is_ok() {
+            let k = cx.lit(if X && std::env::var("PRE").is_ok() {
                 x0.clone()
             } else {
                 V::I(7)
@@ -144,11 +148,11 @@ impl Lang for B {
     }
     /// (CSE: every Add probed for an equal one in its step)
     fn cse(op: O) -> bool {
-        op == O::Add && *CSE
+        X && op == O::Add && CSE.load(Relaxed)
     }
     /// (MEMO: every Add through the memo store)
     fn memo(op: O) -> bool {
-        op == O::Add && *MEMO
+        X && op == O::Add && MEMO.load(Relaxed)
     }
     fn op_tag(op: O) -> u64 {
         match op {
@@ -177,6 +181,19 @@ impl Lang for B {
 }
 
 fn main() {
+    CSE.store(std::env::var("CSE").is_ok(), Relaxed);
+    MEMO.store(std::env::var("MEMO").is_ok(), Relaxed);
+    if ["HEAVY", "CSE", "MEMO", "PRE"]
+        .iter()
+        .any(|v| std::env::var(v).is_ok())
+    {
+        run::<true>();
+    } else {
+        run::<false>();
+    }
+}
+
+fn run<const X: bool>() {
     let n: usize = std::env::args()
         .nth(1)
         .and_then(|a| a.parse().ok())
@@ -204,10 +221,10 @@ fn main() {
         12
     };
     for _ in 0..runs {
-        let mut g: Graph<B> = Graph::new();
+        let mut g: Graph<B<X>> = Graph::new();
         g.cfg.workers = w;
         g.cfg.debug = std::env::var("DEBUG").is_ok();
-        if *MEMO {
+        if MEMO.load(Relaxed) {
             g.set_memo_budget(1 << 30);
         }
         if std::env::var("RESERVE").is_ok() {
@@ -230,7 +247,7 @@ fn main() {
         );
         g.run();
         best = best.min(t.elapsed().as_secs_f64());
-        if *MEMO {
+        if MEMO.load(Relaxed) {
             eprintln!("memo (entries, bytes, probes, hits): {:?}", g.memo_stats());
         }
         if g.cfg.debug {
