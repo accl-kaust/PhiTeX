@@ -272,6 +272,21 @@ pub trait Host {
     /// viewer draws it through [`crate::pagepdf::page_pdf`].
     fn stream_shipped(&mut self, _page: Option<usize>, _stream: crate::pagepdf::ShippedStream) {}
 
+    /// Whether the host wants [`Host::will_need`]'s hints (they cost a
+    /// map lookup per font loaded).
+    fn wants_hints(&self) -> bool {
+        false
+    }
+
+    /// A hint: the job will read these files (by name and kind) later,
+    /// if it goes on as it is going: the Type 1 programs and encodings of
+    /// the fonts it loaded, named once a font map has been read (at its
+    /// first page). A host that fetches files from far away (the browser's
+    /// Shelf) can fetch them now, together, instead of one by one when
+    /// they are read. Nothing reads what the host does with it: the
+    /// output is the same with or without hints.
+    fn will_need(&mut self, _files: &[(Vec<u8>, FileKind)]) {}
+
     /// zlib's `compress` of `data` at `level` (1–9), as pdfTeX's zlib
     /// writes it; `None` if the host has no zlib (PDF streams are then
     /// stored uncompressed).
