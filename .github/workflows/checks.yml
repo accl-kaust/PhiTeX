@@ -44,6 +44,6 @@ jobs:
       - run: cargo clippy --workspace --all-targets --features partex-cli/trace -- -D warnings
       - run: >-
           cargo check --target wasm32-unknown-unknown -p partex-core -p partex-incr
-          -p partex-ssa -p partex-trace -p partex-otf -p partex-xdvipdfmx
+          -p partex-ssa -p partex-trace -p partex-otf -p partex-xdvipdfmx -p phi
       # (without TeX Live: the tests that compare with it skip themselves)
       - run: cargo test --workspace --quiet

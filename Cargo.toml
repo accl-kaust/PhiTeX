@@ -25,6 +25,10 @@ codegen-units = 1
 inherits = "release"
 debug = true
 
+# (the φ core's property tests run thousands of builds)
+[profile.dev.package.phi]
+opt-level = 2
+
 # Debug iterations: release speed without fat LTO's link (minutes -> seconds);
 # `cargo build --profile fastdev`, binary in target/fastdev/.
 [profile.fastdev]

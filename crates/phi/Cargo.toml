@@ -1,0 +1,21 @@
+[package]
+name = "phi"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "The φ core: a TeX-agnostic incremental and parallel SSA dataflow core (DESIGN.md 7)"
+
+# No dependencies, and never a workspace crate: `tests/deps.rs` checks it.
+[dependencies]
+
+[dev-dependencies]
+# (benches only: DESIGN 7.15)
+criterion = { version = "0.5", default-features = false }
+
+[[bench]]
+name = "phi"
+harness = false
+
+[lints]
+workspace = true
