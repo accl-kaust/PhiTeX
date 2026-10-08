@@ -25,7 +25,7 @@ pub(super) const NETBASE: u64 = 1 << 31;
 /// A step of the run being folded.
 const MARK: u8 = 16;
 
-impl<L: Lang> Graph<L> {
+impl<L: Lang, const P: bool> Graph<L, P> {
     /// Seal what is due at the end of a run: everything after the first
     /// build; later, the stretch of live steps around each step that has
     /// been quiet long enough since it ran.
@@ -52,7 +52,7 @@ impl<L: Lang> Graph<L> {
             let h = &self.n.h[d as usize];
             if h.kind != Kind::Step
                 || h.flags & (DEAD | SEALED) != 0
-                || self.epoch - self.steps[h.aux as usize].ran < self.cfg.seal_quiet
+                || self.epoch - self.steps[h.aux as usize].ran < self.quiet_of(h.aux as usize)
             {
                 continue;
             }
@@ -85,13 +85,12 @@ impl<L: Lang> Graph<L> {
     pub fn seal(&mut self) -> u64 {
         let before = self.rep.sealed;
         self.seal_all();
-        let tf = std::mem::take(&mut self.to_free);
-        for n in tf {
-            self.set_first(n, NONE);
-            self.n.val[n as usize] = L::Val::default();
-            self.free.push(n);
+        // (as at a run's end: the registries and reader lists pruned of
+        // what sealing let go, before compaction renumbers them)
+        self.tidy();
+        if self.cfg.seal == 0 {
+            self.compact_if_sparse();
         }
-        self.compact_if_sparse();
         self.rep.sealed - before
     }
 
@@ -134,7 +133,7 @@ impl<L: Lang> Graph<L> {
         }
         // (cold: run only in the first build, or quiet long enough since)
         let ran = self.steps[h.aux as usize].ran;
-        if ran > 1 && self.epoch - ran < self.cfg.seal_quiet {
+        if ran > 1 && self.epoch - ran < self.quiet_of(h.aux as usize) {
             return false;
         }
         let mut c = self.first(s);

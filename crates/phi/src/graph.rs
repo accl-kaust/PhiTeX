@@ -18,6 +18,7 @@ use std::marker::PhantomData;
 
 use crate::lang::{Chain, Class, Fam, Lang, Slot, Step};
 use crate::memo::Memo;
+use crate::profile::{Ev, Prof, Tick};
 use crate::seq::{ElemId, Leaf, Seq};
 use crate::value::{Proj, Sel, Value, project};
 use crate::ver::{Ver, hash64, name_hash};
@@ -108,6 +109,7 @@ mod runs;
 use runs::Runs;
 mod compact;
 mod seal;
+mod tune;
 
 /// An operand: what it reads (`src`, through `sel`), and the name it
 /// was resolved from, if any.
@@ -327,6 +329,21 @@ pub struct Config {
     /// on average (ns, sampled): cheaper ops cost less run in turn than
     /// their outcomes cost to hand over.
     pub round_min_ns: u64,
+    /// `tune` (DESIGN 7.21): what a memo probe costs (ns). An op is
+    /// memoized when its mean cost times its reuse is above it, and its
+    /// reuse is measured only when its cost alone is.
+    pub memo_probe_ns: u64,
+    /// `tune`: timed samples of an op, and keyed evaluations or memo
+    /// probes, before it decides about it.
+    pub tune_min_samples: u64,
+    pub tune_min_keyed: u64,
+    /// `tune`: the memo store's budget it sets when it opts the first op
+    /// in and the store has none.
+    pub auto_memo_bytes: usize,
+    /// `tune`: re-runs that make a region hot (kept live four times
+    /// longer); a region that re-ran once is sealed after an eighth of
+    /// `seal_quiet`.
+    pub hot_runs: u32,
 }
 
 impl Default for Config {
@@ -342,6 +359,11 @@ impl Default for Config {
             seal_max: 4096,
             seal_quiet: 16,
             round_min_ns: 10_000,
+            memo_probe_ns: 100,
+            tune_min_samples: 16,
+            tune_min_keyed: 64,
+            auto_memo_bytes: 64 << 20,
+            hot_runs: 4,
         }
     }
 }
@@ -493,38 +515,165 @@ pub struct Args<'a, L: Lang> {
 
 type Sweep<'a, L> = (&'a [EArg], &'a [u32], &'a [<L as Lang>::Val]);
 
-/// Leaf `op` evaluated, through the memo store if the client opts the op
-/// in (DESIGN 7.8): keyed by the op and its operands' versions.
-fn eval_op<L: Lang>(
-    memo: Option<&std::sync::Mutex<Memo<L::Val>>>,
-    op: L::Op,
-    args: &Args<'_, L>,
-) -> L::Val {
-    match memo {
-        Some(m) if L::memo(op) => eval_memo(m, op, args),
-        _ => L::eval(op, args),
+/// What a leaf's evaluation goes through besides its op (DESIGN 7.8,
+/// 7.21): the memo store, the ops the auto opt-in memoizes, the profile's
+/// sampling and the ops whose reuse it measures. Read only during a run;
+/// `None` (no store, no profile) is the plain path.
+pub(crate) struct Hook<L: Lang> {
+    pub(crate) memo: std::sync::Arc<std::sync::Mutex<Memo<L::Val>>>,
+    /// The store has a budget.
+    pub(crate) memo_on: bool,
+    /// The graph profiles (`P`).
+    pub(crate) prof: bool,
+    /// Ops memoized by `Graph::tune`.
+    pub(crate) auto: OpSet<L::Op>,
+    /// Ops whose evaluations' keys the profile looks at.
+    pub(crate) watch: OpSet<L::Op>,
+}
+
+impl<L: Lang> Default for Hook<L> {
+    fn default() -> Self {
+        Hook {
+            memo: std::sync::Arc::default(),
+            memo_on: false,
+            prof: false,
+            auto: OpSet::default(),
+            watch: OpSet::default(),
+        }
     }
 }
 
-/// [`eval_op`] through the store (out of line: the leaf path without a
-/// store stays small).
-#[inline(never)]
-fn eval_memo<L: Lang>(
-    memo: &std::sync::Mutex<Memo<L::Val>>,
+impl<L: Lang> Clone for Hook<L> {
+    fn clone(&self) -> Self {
+        Hook {
+            memo: self.memo.clone(),
+            memo_on: self.memo_on,
+            prof: self.prof,
+            auto: self.auto.clone(),
+            watch: self.watch.clone(),
+        }
+    }
+}
+
+/// A set of ops with a 64-bit filter in front: most ops not in it are
+/// turned away by a hash and a mask.
+#[derive(Clone)]
+pub(crate) struct OpSet<O> {
+    mask: u64,
+    set: Set<O>,
+}
+
+impl<O> Default for OpSet<O> {
+    fn default() -> Self {
+        OpSet {
+            mask: 0,
+            set: Set::default(),
+        }
+    }
+}
+
+impl<O: std::hash::Hash + Eq + Copy> OpSet<O> {
+    fn bit(op: &O) -> u64 {
+        use std::hash::BuildHasher;
+        1 << (BuildHasherDefault::<Fx>::default().hash_one(op) >> 58)
+    }
+    #[inline]
+    pub(crate) fn has(&self, op: &O) -> bool {
+        self.mask & Self::bit(op) != 0 && self.set.contains(op)
+    }
+    pub(crate) fn insert(&mut self, op: O) {
+        self.mask |= Self::bit(&op);
+        self.set.insert(op);
+    }
+    pub(crate) fn remove(&mut self, op: &O) {
+        if self.set.remove(op) {
+            self.mask = self.set.iter().fold(0, |m, o| m | Self::bit(o));
+        }
+    }
+    pub(crate) fn len(&self) -> usize {
+        self.set.len()
+    }
+}
+
+/// The time now, where the platform has a clock (not wasm32).
+#[inline]
+#[allow(clippy::unnecessary_wraps, reason = "None on wasm32")]
+pub(crate) fn now() -> Option<std::time::Instant> {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        Some(std::time::Instant::now())
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        None
+    }
+}
+
+/// Nanoseconds since `t`, saturated.
+pub(crate) fn ns_since(t: std::time::Instant) -> u32 {
+    u32::try_from(t.elapsed().as_nanos()).unwrap_or(u32::MAX)
+}
+
+/// Leaf `op` evaluated; with a hook, through it (the memo store, the
+/// profile), with what the profile should record.
+#[inline]
+fn eval_op<L: Lang>(
+    hook: Option<&Hook<L>>,
+    tick: &mut Tick,
     op: L::Op,
     args: &Args<'_, L>,
-) -> L::Val {
-    let mut m = memo.lock().expect("the memo store");
-    let k = args.key(L::op_tag(op));
-    if let Some(v) = m.get(k) {
-        return v.clone();
+) -> (L::Val, Option<Ev<L::Op>>) {
+    match hook {
+        None => (L::eval(op, args), None),
+        Some(h) => eval_hooked(h, tick, op, args),
     }
-    drop(m);
+}
+
+/// [`eval_op`] through the hook (out of line: the plain path stays small).
+#[inline(never)]
+fn eval_hooked<L: Lang>(
+    h: &Hook<L>,
+    tick: &mut Tick,
+    op: L::Op,
+    args: &Args<'_, L>,
+) -> (L::Val, Option<Ev<L::Op>>) {
+    let w = if h.prof { tick.next() } else { 0 };
+    let memo = h.memo_on && (L::memo(op) || h.auto.has(&op));
+    let watch = h.prof && h.watch.has(&op);
+    let (tag, key) = if memo || watch {
+        let t = L::op_tag(op);
+        (t, args.key(t))
+    } else {
+        (0, Ver::ABSENT)
+    };
+    let ev = |ns| {
+        (w > 0 || watch).then_some(Ev {
+            op,
+            w,
+            ns,
+            key: if watch { key } else { Ver::ABSENT },
+            kind: crate::profile::LEAF,
+        })
+    };
+    if memo {
+        let mut m = h.memo.lock().expect("the memo store");
+        let hit = m.get(key).cloned();
+        m.note(tag, hit.is_some());
+        drop(m);
+        if let Some(v) = hit {
+            return (v, ev(None));
+        }
+    }
+    let t = if w > 0 { now() } else { None };
     let v = L::eval(op, args);
-    memo.lock()
-        .expect("the memo store")
-        .put(k, v.clone(), v.bytes());
-    v
+    let ns = t.map(ns_since);
+    if memo {
+        h.memo
+            .lock()
+            .expect("the memo store")
+            .put(key, v.clone(), v.bytes());
+    }
+    (v, ev(ns))
 }
 
 impl<'a, L: Lang> Args<'a, L> {
@@ -708,6 +857,11 @@ struct Emit<L: Lang> {
     cse_pending: Option<(u64, u32, u32)>,
     /// Emissions merged into an earlier one.
     merged: u32,
+    /// For the profile (DESIGN 7.21): sampled or keyed evaluations, CSE
+    /// probes (op, merged) and ops emitted with a class other than Pure.
+    ev: Vec<Ev<L::Op>>,
+    cse_ev: Vec<(L::Op, bool)>,
+    impure: Vec<L::Op>,
 }
 
 impl<L: Lang> Default for Emit<L> {
@@ -726,6 +880,9 @@ impl<L: Lang> Default for Emit<L> {
             cse: Map::default(),
             cse_pending: None,
             merged: 0,
+            ev: Vec::new(),
+            cse_ev: Vec::new(),
+            impure: Vec::new(),
         }
     }
 }
@@ -785,6 +942,9 @@ impl<L: Lang> Emit<L> {
         self.cse.clear();
         self.cse_pending = None;
         self.merged = 0;
+        self.ev.clear();
+        self.cse_ev.clear();
+        self.impure.clear();
     }
 }
 
@@ -811,8 +971,10 @@ pub struct StepCx<'s, L: Lang> {
     keep: bool,
     /// The run's cancellation flag.
     cancel: &'s std::sync::atomic::AtomicBool,
-    /// The memo store, if it has a budget.
-    memo: Option<&'s std::sync::Mutex<Memo<L::Val>>>,
+    /// The hook leaves are evaluated through, if any.
+    hook: Option<&'s Hook<L>>,
+    /// The profile's sampling countdown (copied back after the step).
+    tick: Tick,
     _brand: PhantomData<fn(&'s ()) -> &'s ()>,
 }
 
@@ -976,6 +1138,9 @@ impl<'s, L: Lang> StepCx<'s, L> {
                     .all(|(&a, ea)| self.arg(a) == ea.a)
             {
                 self.em.merged += 1;
+                if self.hook.is_some_and(|h| h.prof) {
+                    self.em.cse_ev.push((op, true));
+                }
                 return Some(Local {
                     ix,
                     _brand: PhantomData,
@@ -987,6 +1152,9 @@ impl<'s, L: Lang> StepCx<'s, L> {
             }
         }
         self.em.cse_pending = Some((k, nd, ne));
+        if self.hook.is_some_and(|h| h.prof) {
+            self.em.cse_ev.push((op, false));
+        }
         None
     }
 
@@ -994,6 +1162,7 @@ impl<'s, L: Lang> StepCx<'s, L> {
         clippy::cast_possible_truncation,
         reason = "emissions and operands of a step fit u32"
     )]
+    #[allow(clippy::too_many_lines, reason = "one emission, in order")]
     fn push(
         &mut self,
         kind: Kind,
@@ -1061,10 +1230,17 @@ impl<'s, L: Lang> StepCx<'s, L> {
                     opds: &[],
                     sweep: Some((&em.args[a0..], &[], &em.vals)),
                 };
-                (true, eval_op(self.memo, op, &args))
+                let (v, ev) = eval_op(self.hook, &mut self.tick, op, &args);
+                if let Some(ev) = ev {
+                    self.em.ev.push(ev);
+                }
+                (true, v)
             }
             _ => (false, L::Val::default()),
         };
+        if ctag != 0 && kind == Kind::Leaf && self.hook.is_some_and(|h| h.prof) {
+            self.em.impure.push(op);
+        }
         let big = self.keep || !matches!(kind, Kind::Leaf | Kind::Const) || ctag != 0;
         if big {
             self.em.bigs.push(ix as u32);
@@ -1172,7 +1348,11 @@ impl<'s, L: Lang> StepCx<'s, L> {
                 opds: &[],
                 sweep: Some((&em.args[a0..a0 + an], &[], &em.vals)),
             };
-            eval_op(self.memo, em.specs[ix].op, &args)
+            let (v, ev) = eval_op(self.hook, &mut self.tick, em.specs[ix].op, &args);
+            if let Some(ev) = ev {
+                self.em.ev.push(ev);
+            }
+            v
         };
         let em = &mut *self.em;
         em.vals[ix] = v;
@@ -1427,8 +1607,9 @@ fn resolve<L: Lang>(
     none
 }
 
-/// The graph.
-pub struct Graph<L: Lang> {
+/// The graph. `P`: profiling compiled in (DESIGN 7.21); off, the
+/// default, it costs nothing.
+pub struct Graph<L: Lang, const P: bool = false> {
     pub(crate) n: Nodes<L>,
     names: NameTab,
     groups: Map<u64, Group>,
@@ -1488,9 +1669,14 @@ pub struct Graph<L: Lang> {
     cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// The memo store (DESIGN 7.8): `Lang::memo` ops only, off while its
     /// budget is 0; shared with the segments of a parallel build).
-    memo: std::sync::Arc<std::sync::Mutex<Memo<L::Val>>>,
-    /// Whether the store has a budget (checked before anything else).
-    memo_on: bool,
+    /// The memo store and the auto opt-in (DESIGN 7.8, 7.21).
+    pub(crate) hook: Hook<L>,
+    /// The profile's sampling countdown, and the profile (`P` only).
+    tick: Tick,
+    pub(crate) prof: Prof<L::Op>,
+    /// Regions' quiet times set by `tune` (by step key), where they are
+    /// not `Config::seal_quiet`.
+    pub(crate) quiet: Map<u64, u32>,
     /// The input leaf the last step ran in.
     lcache: Option<Leaf<L::Val>>,
     /// The groups each step closed.
@@ -1514,7 +1700,7 @@ pub struct Graph<L: Lang> {
     rep: Report,
 }
 
-impl<L: Lang> Default for Graph<L> {
+impl<L: Lang, const P: bool> Default for Graph<L, P> {
     fn default() -> Self {
         Self::new()
     }
@@ -1523,7 +1709,7 @@ impl<L: Lang> Default for Graph<L> {
 /// The spacing of step labels.
 const GAP: u64 = 1 << 32;
 
-impl<L: Lang> Graph<L> {
+impl<L: Lang, const P: bool> Graph<L, P> {
     #[must_use]
     pub fn new() -> Self {
         let mut g = Graph {
@@ -1565,8 +1751,13 @@ impl<L: Lang> Graph<L> {
             hot: std::collections::VecDeque::new(),
             outcomes: Map::default(),
             em_pool: Vec::new(),
-            memo: std::sync::Arc::default(),
-            memo_on: false,
+            hook: Hook {
+                prof: P,
+                ..Hook::default()
+            },
+            tick: Tick::default(),
+            prof: Prof::default(),
+            quiet: Map::default(),
             groups_gen: 0,
             round_cool: 0,
             sampled: 0,
@@ -2114,7 +2305,7 @@ impl<L: Lang> Graph<L> {
     }
 }
 
-impl<L: Lang> Graph<L> {
+impl<L: Lang, const P: bool> Graph<L, P> {
     /// The first child (or step) of a step, an unfold or the root.
     pub(crate) fn first(&self, n: u32) -> u32 {
         let h = &self.n.h[n as usize];
@@ -2228,15 +2419,18 @@ impl<L: Lang> Graph<L> {
         let parts = [st.ver(), x.ver(), av];
         let ks = Ver::node(L::op_tag(op) ^ SCAN_STATE, &parts);
         let ko = Ver::node(L::op_tag(op) ^ SCAN_OUT, &parts);
-        let mut m = self.memo.lock().expect("the memo store");
-        if let Some(a) = m.get(ks).cloned()
-            && let Some(b) = m.get(ko).cloned()
-        {
-            return (a, b);
-        }
+        let mut m = self.hook.memo.lock().expect("the memo store");
+        let hit = match (m.get(ks).cloned(), m.get(ko).cloned()) {
+            (Some(a), Some(b)) => Some((a, b)),
+            _ => None,
+        };
+        m.note(L::op_tag(op), hit.is_some());
         drop(m);
+        if let Some(h) = hit {
+            return h;
+        }
         let (a, b) = L::scan(op, st, x, args);
-        let mut m = self.memo.lock().expect("the memo store");
+        let mut m = self.hook.memo.lock().expect("the memo store");
         m.put(ks, a.clone(), a.bytes());
         m.put(ko, b.clone(), b.bytes());
         (a, b)
@@ -2245,11 +2439,12 @@ impl<L: Lang> Graph<L> {
     fn eval_leaf(&mut self, n: u32) {
         let v = {
             let args = Args::of(&self.n, self.n.opds_of(n));
-            eval_op(
-                self.memo_on.then_some(&*self.memo),
-                self.n.h[n as usize].op,
-                &args,
-            )
+            let hook = (P || self.hook.memo_on).then_some(&self.hook);
+            let (v, ev) = eval_op(hook, &mut self.tick, self.n.h[n as usize].op, &args);
+            if let Some(ev) = ev {
+                self.prof.fold(ev);
+            }
+            v
         };
         self.rep.evals += 1;
         self.set_val(n, v);
@@ -2565,8 +2760,8 @@ impl<L: Lang> Graph<L> {
                     cfg,
                     lcache,
                     cancel,
-                    memo,
-                    memo_on,
+                    hook,
+                    tick,
                     sampled,
                     step_ns,
                     ..
@@ -2595,7 +2790,8 @@ impl<L: Lang> Graph<L> {
                     ext: ext.as_deref(),
                     keep: cfg.keep_interior,
                     cancel,
-                    memo: memo_on.then_some(&**memo),
+                    hook: (P || hook.memo_on).then_some(&*hook),
+                    tick: *tick,
                     _brand: PhantomData,
                 };
                 let args = Args::of(n, &uo[2..]);
@@ -2604,13 +2800,14 @@ impl<L: Lang> Graph<L> {
                 // (one step in 32 timed: what an op costs decides whether a
                 // parallel round can pay for itself)
                 *sampled = sampled.wrapping_add(1);
-                let t = (*sampled % 32 == 0).then(std::time::Instant::now);
+                let t = if *sampled % 32 == 0 { now() } else { None };
                 let res = L::step(n.h[s as usize].op, &st, &args, &mut cx);
                 if let Some(t) = t {
                     #[allow(clippy::cast_possible_truncation, reason = "a step under 584 years")]
                     let ns = t.elapsed().as_nanos() as u64;
                     *step_ns = (*step_ns * 7 + ns) / 8;
                 }
+                *tick = cx.tick;
                 (res, cx.idx, cx.grp, cx.cursor(), in_ver)
             };
             (start, res, idx, grp_out, end_cursor, in_ver)
@@ -2624,6 +2821,23 @@ impl<L: Lang> Graph<L> {
             self.rep.state_sum += b as u64;
         }
         self.rep.merged += u64::from(self.em.merged);
+        if P {
+            let em = &mut self.em;
+            for ev in em.ev.drain(..) {
+                self.prof.fold(ev);
+            }
+            for (op, hit) in em.cse_ev.drain(..) {
+                self.prof.cse(op, hit);
+            }
+            for op in em.impure.drain(..) {
+                self.prof.impure(op);
+            }
+            let rerun = self.epoch > 1;
+            self.prof.step(self.n.h[s as usize].op, rerun);
+            if rerun {
+                self.prof.region(self.steps[si].key, self.epoch);
+            }
+        }
         // names the step made
         let new_names = std::mem::take(&mut self.em.new_names);
         for (h, sp) in new_names {
@@ -2688,7 +2902,15 @@ impl<L: Lang> Graph<L> {
         st_info.work = work;
         st_info.folded = 0;
         if epoch > 1 && self.cfg.seal > 0 {
-            self.hot.push_back((epoch + self.cfg.seal_quiet, s));
+            let due = epoch + self.quiet_of(si);
+            // (in order of due run: with quiet times per region, not
+            // always the last)
+            if self.hot.back().is_none_or(|b| b.0 <= due) {
+                self.hot.push_back((due, s));
+            } else {
+                let k = self.hot.partition_point(|b| b.0 <= due);
+                self.hot.insert(k, (due, s));
+            }
         }
         match res {
             Step::Done(v) => {
@@ -3028,7 +3250,12 @@ impl<L: Lang> Graph<L> {
                                 opds: &[],
                                 sweep: Some((&eargs[a0..a0 + an], ids, &buf)),
                             };
-                            eval_op(self.memo_on.then_some(&*self.memo), sp.op, &args)
+                            let hook = (P || self.hook.memo_on).then_some(&self.hook);
+                            let (v, ev) = eval_op(hook, &mut self.tick, sp.op, &args);
+                            if let Some(ev) = ev {
+                                self.prof.fold(ev);
+                            }
+                            v
                         };
                         buf[i] = v;
                     }
@@ -3145,7 +3372,7 @@ impl<L: Lang> Graph<L> {
     }
 }
 
-impl<L: Lang> Graph<L> {
+impl<L: Lang, const P: bool> Graph<L, P> {
     /// The step's scope events, applied to the group table.
     fn apply_groups(&mut self, s: u32, si: usize) {
         let events = std::mem::take(&mut self.em.events);
@@ -3497,6 +3724,7 @@ impl<L: Lang> Graph<L> {
 
     // ---- scans ----
 
+    #[allow(clippy::too_many_lines, reason = "one scan, resumed")]
     fn run_scan(&mut self, sc: u32) {
         let ix = self.n.h[sc as usize].aux as usize;
         let uo: Vec<Opd> = self.n.opds_of(sc).to_vec();
@@ -3543,14 +3771,36 @@ impl<L: Lang> Graph<L> {
         }
         if met.is_none() {
             let args = Args::of(&self.n, &uo[2..]);
-            let memo = self.memo_on && L::memo(op);
-            let av = if memo { args.key(0) } else { Ver::ABSENT };
+            let memo = self.hook.memo_on && (L::memo(op) || self.hook.auto.has(&op));
+            let watch = P && self.hook.watch.has(&op);
+            let av = if memo || watch {
+                args.key(0)
+            } else {
+                Ver::ABSENT
+            };
             for (i, (id, x)) in input.iter_from(p).enumerate().map(|(k, e)| (k + p, e)) {
+                let w = if P { self.tick.next() } else { 0 };
+                let t = if w > 0 { now() } else { None };
+                let key = if watch {
+                    Ver::node(L::op_tag(op) ^ SCAN_STATE, &[st.ver(), x.ver(), av])
+                } else {
+                    Ver::ABSENT
+                };
                 let (s2, out) = if memo {
                     self.scan_memo(op, &st, x, &args, av)
                 } else {
                     L::scan(op, &st, x, &args)
                 };
+                if P && (w > 0 || watch) {
+                    self.prof.fold(Ev {
+                        op,
+                        w,
+                        // (a memo hit's time is not the op's)
+                        ns: if memo { None } else { t.map(ns_since) },
+                        key,
+                        kind: crate::profile::SCAN,
+                    });
+                }
                 st = s2;
                 self.rep.scanned += 1;
                 stepped += 1;
@@ -3636,6 +3886,9 @@ impl<L: Lang> Graph<L> {
     pub fn run(&mut self) -> Report {
         self.rep = Report::default();
         self.epoch += 1;
+        if P {
+            self.prof.runs += 1;
+        }
         self.round_size = 0;
         self.round_made = 0;
         self.scan_runs.clear();
@@ -3741,6 +3994,9 @@ impl<L: Lang> Graph<L> {
             self.seal_due_now();
         }
         self.tidy();
+        if P {
+            self.prof.flush();
+        }
         self.rep.clone()
     }
 
@@ -4053,7 +4309,7 @@ struct Grafting<L: Lang> {
     ended: bool,
 }
 
-impl<L: Lang> Graph<L> {
+impl<L: Lang, const P: bool> Graph<L, P> {
     /// Speculative entry (DESIGN 7.4): the chain of `u` stopped at its
     /// first entry; run a segment from each entry on the workers, graft
     /// them in order, and check each arrival like any successor.
@@ -4115,15 +4371,13 @@ impl<L: Lang> Graph<L> {
         let pred = self.pred.clone();
         let fpred = self.fpred.clone();
         let (keep, debug) = (self.cfg.keep_interior, self.cfg.debug);
-        let memo = self.memo.clone();
-        let memo_on = self.memo_on;
+        let hook = self.hook.clone();
         let job = |seg: &(usize, Option<usize>, u64, L::Val)| {
-            let mut p: Graph<L> = Graph::new();
+            let mut p: Graph<L, P> = Graph::new();
             p.cfg.segment = true;
             p.cfg.keep_interior = keep;
             p.cfg.debug = debug;
-            p.memo = memo.clone();
-            p.memo_on = memo_on;
+            p.hook = hook.clone();
             p.ext = Some(ext.clone());
             p.pred = pred.clone();
             p.fpred = fpred.clone();
@@ -4205,6 +4459,10 @@ impl<L: Lang> Graph<L> {
         if st.ended {
             return;
         }
+        let mut out = out;
+        if P {
+            self.prof.merge(std::mem::take(&mut out.prof));
+        }
         let Some((first, last, end)) = self.graft(u, st.tail, out) else {
             return;
         };
@@ -4280,6 +4538,8 @@ impl<L: Lang> Graph<L> {
 /// its edge listed apart. Grafting it is then an append with the ids
 /// shifted.
 struct Pack<L: Lang> {
+    /// The segment's profile (DESIGN 7.21; empty unless `P`).
+    prof: Prof<L::Op>,
     hdrs: Vec<Hdr<L::Op>>,
     vals: Vec<L::Val>,
     /// Operands: `src` relative with [`REL`] set, or [`NONE`]; `name`
@@ -4318,7 +4578,7 @@ const REL: u32 = 0x8000_0000;
 /// The segment's unfold, in a [`Pack`].
 const UP: u32 = NONE - 1;
 
-impl<L: Lang> Graph<L> {
+impl<L: Lang, const P: bool> Graph<L, P> {
     /// This segment graph, made ready to graft (on its worker).
     #[allow(clippy::too_many_lines, reason = "one pass per table, in order")]
     #[allow(clippy::cast_possible_truncation, reason = "ids and arenas fit u32")]
@@ -4376,6 +4636,7 @@ impl<L: Lang> Graph<L> {
             spell: Vec::new(),
             end: None,
             depth: dpu,
+            prof: std::mem::take(&mut p.prof),
         };
         for x in 1..np {
             let r = map[x];

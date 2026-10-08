@@ -513,3 +513,98 @@ fn equal_leaves_of_a_step_are_one_and_a_definition_parts_them() {
     assert_eq!(d.observe(), f.observe());
     assert_eq!(d.g.to_text(), f.g.to_text());
 }
+
+/// The profile (DESIGN 7.21): steps and their re-runs on edits by op,
+/// regions that re-ran, sampled leaf costs; a snapshot that a later
+/// graph loads; `tune` does nothing while work is queued, and its memo
+/// opt-in keeps every value (check mode on).
+#[test]
+fn a_profiled_graph_reports_and_tunes_without_changing_results() {
+    let mut src = String::new();
+    for p in 0..200 {
+        src += &format!(r"w{p} \step \the\count x{p} \par ");
+    }
+    let mut d: DocP<true> = DocP::new(ids(lex(&src)));
+    d.g.cfg.check = true;
+    d.g.cfg.memo_probe_ns = 0;
+    d.g.cfg.tune_min_samples = 1;
+    d.g.cfg.tune_min_keyed = 4;
+    d.g.run();
+    let rep = d.g.profile();
+    let doc = rep
+        .ops
+        .iter()
+        .find(|(o, _)| *o == Op::Doc)
+        .map(|x| x.1.clone())
+        .expect("the document's steps");
+    assert!(doc.steps > 500 && doc.reruns == 0, "{doc:?}");
+    assert!(
+        rep.ops.iter().any(|(_, s)| s.timed > 0 && s.evals > 0),
+        "{:?}",
+        rep.ops
+    );
+    // edits: the edited paragraph's steps re-run, as a region
+    for k in 0..6 {
+        let at = d.toks.iter().position(|t| t.1.text() == "w7").expect("w7");
+        d.splice(at, 1, lex(&format!("w7{k} \\step")));
+        d.g.run();
+        let at = d
+            .toks
+            .iter()
+            .position(|t| t.1.text() == format!("w7{k}"))
+            .expect("edit");
+        d.splice(at, 2, lex("w7"));
+        assert!(d.g.tune().busy, "work is queued");
+        d.g.run();
+        d.g.tune();
+    }
+    let rep = d.g.profile();
+    let doc = rep
+        .ops
+        .iter()
+        .find(|(o, _)| *o == Op::Doc)
+        .expect("doc")
+        .1
+        .clone();
+    assert!(doc.reruns > 0, "{doc:?}");
+    assert!(
+        !rep.regions.is_empty() && rep.regions[0].1.runs >= 2,
+        "{:?}",
+        rep.regions
+    );
+    let mut f = Doc::new(d.toks.clone());
+    f.g.run();
+    assert_eq!(d.observe(), f.observe());
+    // the snapshot round-trips and a later graph starts from it
+    let snap = d.g.snapshot();
+    let back = phi::profile::Snapshot::from_bytes(&snap.to_bytes()).expect("a snapshot");
+    assert_eq!(back, snap);
+    let mut e: DocP<true> = DocP::new(d.toks.clone());
+    e.g.load_profile(&back);
+    e.g.run();
+    let t = e.g.tune();
+    let memo_before = snap.ops.iter().filter(|o| o.memo).count();
+    assert!(t.memo_in.len() >= memo_before.min(1), "{t:?}");
+    let rep = e.g.profile();
+    let doc = rep
+        .ops
+        .iter()
+        .find(|(o, _)| *o == Op::Doc)
+        .expect("doc")
+        .1
+        .clone();
+    assert!(
+        doc.reruns > 0 && doc.steps > 1000,
+        "the earlier session's counts: {doc:?}"
+    );
+    assert_eq!(e.observe(), f.observe());
+}
+
+/// A graph that does not profile reports nothing and `tune` does nothing.
+#[test]
+fn an_unprofiled_graph_has_an_empty_profile() {
+    let mut d = Doc::new(ids(lex(r"a \step b \par")));
+    d.g.run();
+    assert!(d.g.profile().ops.is_empty());
+    assert_eq!(d.g.tune(), phi::profile::Tuned::default());
+}

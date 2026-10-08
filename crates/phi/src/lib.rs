@@ -16,6 +16,7 @@
 pub mod graph;
 pub mod lang;
 pub mod memo;
+pub mod profile;
 pub mod seq;
 pub mod text;
 pub mod value;

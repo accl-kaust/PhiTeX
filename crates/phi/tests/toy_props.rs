@@ -148,6 +148,21 @@ fn run_seed_with(seed: u64, len: usize, edits: usize, keep: bool) {
     dp.g.cfg.keep_interior = keep;
     // (with a small memo store: hits, misses and evictions all exact)
     dp.g.set_memo_budget(4096);
+    // (and profiled, tuned when idle after every run: auto memo opt-in
+    // with the probe cost set so it opts in, keeps and opts out, profile
+    // driven sealing; check mode on)
+    let mut dt: DocP<true> = DocP::new(d.toks.clone());
+    dt.g.cfg.check = true;
+    dt.g.cfg.keep_interior = keep;
+    dt.g.cfg.memo_probe_ns = [0, 40, 400][(seed % 3) as usize];
+    dt.g.cfg.tune_min_samples = 1;
+    dt.g.cfg.tune_min_keyed = 4;
+    dt.g.cfg.auto_memo_bytes = 1 << 14;
+    dt.g.cfg.seal = 2 + (seed % 3) as u32;
+    dt.g.cfg.seal_quiet = 2;
+    dt.g.cfg.hot_runs = 2;
+    dt.g.run();
+    dt.g.tune();
     dp.g.run();
     d.g.run();
     assert_eq!(d.observe(), fresh(&d).observe(), "seed {seed}: cold");
@@ -168,6 +183,21 @@ fn run_seed_with(seed: u64, len: usize, edits: usize, keep: bool) {
         dp.g.set(dp.input, TV::Seq(seq_of(&dp.toks)));
         let rp = dp.g.run();
         DRY.with(|c| c.set(c.get() + rp.dry_used));
+        dt.toks = d.toks.clone();
+        dt.g.set(dt.input, TV::Seq(seq_of(&dt.toks)));
+        dt.g.run();
+        let tu = dt.g.tune();
+        TUNED.with(|c| {
+            let mut c = c.borrow_mut();
+            c.0 += tu.memo_in.len() as u64;
+            c.1 += tu.memo_out.len() as u64;
+            c.2 += tu.sealed;
+        });
+        assert_eq!(
+            dt.observe(),
+            d.observe(),
+            "seed {seed}, edit {e}: profiled and tuned differs"
+        );
         assert_eq!(
             dp.g.to_text(),
             d.g.to_text(),
@@ -223,6 +253,8 @@ fn run_seed_with(seed: u64, len: usize, edits: usize, keep: bool) {
 
 thread_local! {
     static DRY: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// What `tune` did: memo opt-ins, opt-outs, steps sealed.
+    static TUNED: std::cell::RefCell<(u64, u64, u64)> = const { std::cell::RefCell::new((0, 0, 0)) };
 }
 
 #[test]
@@ -237,6 +269,12 @@ fn random_edits_equal_fresh_builds() {
         let used = DRY.with(|c| c.get());
         eprintln!("dry outcomes used: {used}");
         assert!(used > 0, "no parallel round's outcome was used");
+        let t = TUNED.with(|c| *c.borrow());
+        eprintln!(
+            "tune: {} memo opt-ins, {} opt-outs, {} steps sealed",
+            t.0, t.1, t.2
+        );
+        assert!(t.0 > 0 && t.1 > 0 && t.2 > 0, "tune did not act: {t:?}");
     }
 }
 

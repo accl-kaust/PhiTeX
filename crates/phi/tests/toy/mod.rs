@@ -919,9 +919,13 @@ fn expand(rd: &mut Rd<'_, '_>, st: &mut St, m: NameId) {
 }
 
 /// A document: its tokens with identities, and the graph built over it.
-pub struct Doc {
+/// The plain document.
+pub type Doc = DocP<false>;
+
+/// A document over a graph that profiles (`P`) or not.
+pub struct DocP<const P: bool> {
     pub toks: Vec<(ElemId, Tok)>,
-    pub g: Graph<Toy>,
+    pub g: Graph<Toy, P>,
     pub input: NodeId,
     pub doc: NodeId,
     pub pages: NodeId,
@@ -931,12 +935,12 @@ pub fn seq_of(toks: &[(ElemId, Tok)]) -> Seq<TV> {
     Seq::from_vec(toks.iter().map(|(i, t)| (*i, TV::Tok(t.clone()))).collect())
 }
 
-impl Doc {
-    pub fn new(toks: Vec<(ElemId, Tok)>) -> Doc {
+impl<const P: bool> DocP<P> {
+    pub fn new(toks: Vec<(ElemId, Tok)>) -> Self {
         Self::with(toks, Graph::new())
     }
 
-    pub fn with(toks: Vec<(ElemId, Tok)>, mut g: Graph<Toy>) -> Doc {
+    pub fn with(toks: Vec<(ElemId, Tok)>, mut g: Graph<Toy, P>) -> Self {
         let input = g.input(TV::Seq(seq_of(&toks)));
         let init = g.input(TV::st(St::default()));
         let doc = g.unfold(Op::Doc, input, init, &[]);
@@ -944,7 +948,7 @@ impl Doc {
         let h = g.input(TV::Int(HEIGHT));
         let z = g.input(TV::Int(0));
         let pages = g.scan(Op::Page, (vl, Sel::WHOLE), z, &[h]);
-        Doc {
+        DocP {
             toks,
             g,
             input,

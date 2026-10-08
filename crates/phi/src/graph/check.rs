@@ -14,7 +14,7 @@ use crate::lang::{Lang, Step};
 use crate::seq::ElemId;
 use crate::value::Value;
 
-impl<L: Lang> Graph<L> {
+impl<L: Lang, const P: bool> Graph<L, P> {
     /// Every live step run again and compared (sealed regions are not:
     /// their interiors are gone by design).
     pub(super) fn check_steps(&self) {
@@ -61,7 +61,8 @@ impl<L: Lang> Graph<L> {
                 ext: None,
                 keep: self.cfg.keep_interior,
                 cancel: &self.cancel,
-                memo: self.memo_on.then_some(&*self.memo),
+                hook: None,
+                tick: crate::profile::Tick::default(),
                 _brand: PhantomData,
             };
             let args = Args::of(&self.n, &uo[2..]);
