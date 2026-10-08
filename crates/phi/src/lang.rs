@@ -55,6 +55,12 @@ pub enum Step<V> {
     Next { st: V, key: u64 },
     /// The unfold's result.
     Done(V),
+    /// Go on after the unfold this step called (`StepCx::call`): its
+    /// result is this step's value and the next step's state, and the
+    /// next step has this key. A continuation call: `\\input` and
+    /// `\\include`, whose file is a nested unfold the document resumes
+    /// after.
+    Call { key: u64 },
 }
 
 /// A place a speculative segment may start (DESIGN 7.4).
@@ -132,6 +138,14 @@ pub trait Lang: Sized + 'static {
 
     /// Whether a leaf's results go through the memo store.
     fn memo(op: Self::Op) -> bool {
+        let _ = op;
+        false
+    }
+
+    /// Whether a step's equal leaves of this op are merged (CSE, DESIGN
+    /// 7.10). A probe costs a hash and a lookup (about 25 ns), so only
+    /// ops a client emits twice in a step are worth it.
+    fn cse(op: Self::Op) -> bool {
         let _ = op;
         false
     }

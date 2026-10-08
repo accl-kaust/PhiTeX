@@ -30,6 +30,11 @@ use phi::{
 pub const OUT: Chain = Chain(1);
 pub const LOG: Chain = Chain(2);
 pub const VLIST: Chain = Chain(3);
+
+/// A hook's chain.
+pub fn hook(h: &str) -> Chain {
+    Chain(100 + (phi::ver::hash64(h) % 100_000) as u32)
+}
 pub const TOC: Fam = Fam(1);
 /// The line width and the page height.
 pub const WIDTH: i64 = 24;
@@ -140,7 +145,7 @@ pub enum Op {
     /// The document (an unfold).
     Doc,
     /// `\hbox{…}` (a nested unfold).
-    Box,
+    Box(u8),
     /// A word as a box (from a box's width).
     BoxWord,
     /// Append operand 1 to the sequence operand 0, with this identity.
@@ -170,11 +175,94 @@ pub enum Op {
     PageRec,
     /// Operand 0, counted (`USEW`): what reads a width.
     UseW,
+    /// The words of a hook (an append list), joined; counted (`USEH`).
+    Hook,
+    /// An `\\input` file (a called unfold): as the document, its result
+    /// its last state, which the document goes on from.
+    File,
 }
+
+/// Names with their values shown (`None`: undefined).
+pub type Shown = Vec<(String, Option<String>)>;
 
 thread_local! {
     /// `Op::UseW` evaluations on this thread.
     pub static USEW: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// `Op::Hook` evaluations on this thread.
+    pub static USEH: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// `\\here`'s position, and what `\\since` and `\\reach` saw (the
+    /// names `a`, `b`, `c`, `d`, `count` only, with their values shown).
+    pub static HERE: std::cell::Cell<Option<phi::Here>> = const { std::cell::Cell::new(None) };
+    pub static SINCE: std::cell::RefCell<Option<Shown>> = const { std::cell::RefCell::new(None) };
+    pub static REACH: std::cell::RefCell<Vec<(String, String)>> = const { std::cell::RefCell::new(Vec::new()) };
+    /// Line breaker scan elements stepped on this thread.
+    pub static BRK: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// The bytes of the values the memo store holds (hooks' words, the line
+/// breaker's windows and decisions).
+pub struct TvCodec;
+
+impl phi::memo::Codec<TV> for TvCodec {
+    fn encode(&self, v: &TV, out: &mut Vec<u8>) {
+        let ints = |out: &mut Vec<u8>, xs: &[i64]| {
+            out.extend_from_slice(&(xs.len() as u32).to_le_bytes());
+            for x in xs {
+                out.extend_from_slice(&x.to_le_bytes());
+            }
+        };
+        match v {
+            TV::Unit => out.push(0),
+            TV::Int(i) => {
+                out.push(1);
+                out.extend_from_slice(&i.to_le_bytes());
+            }
+            TV::Word(w, n) => {
+                out.push(2);
+                out.extend_from_slice(&(w.len() as u32).to_le_bytes());
+                out.extend_from_slice(w.as_bytes());
+                out.extend_from_slice(&n.to_le_bytes());
+            }
+            TV::Dp(d) => {
+                out.push(3);
+                ints(out, &d.0);
+                ints(out, &d.1);
+            }
+            _ => out.push(255),
+        }
+    }
+    fn decode(&self, b: &mut &[u8]) -> Option<TV> {
+        fn take<'a>(b: &mut &'a [u8], n: usize) -> Option<&'a [u8]> {
+            let (h, t) = b.split_at_checked(n)?;
+            *b = t;
+            Some(h)
+        }
+        fn i64_(b: &mut &[u8]) -> Option<i64> {
+            Some(i64::from_le_bytes(take(b, 8)?.try_into().ok()?))
+        }
+        fn u32_(b: &mut &[u8]) -> Option<usize> {
+            Some(u32::from_le_bytes(take(b, 4)?.try_into().ok()?) as usize)
+        }
+        fn ints(b: &mut &[u8]) -> Option<Vec<i64>> {
+            let n = u32_(b)?;
+            (0..n).map(|_| i64_(b)).collect()
+        }
+        match take(b, 1)?[0] {
+            0 => Some(TV::Unit),
+            1 => Some(TV::Int(i64_(b)?)),
+            2 => {
+                let n = u32_(b)?;
+                let w = std::str::from_utf8(take(b, n)?).ok()?.to_string();
+                Some(TV::Word(w.into(), i64_(b)?))
+            }
+            3 => {
+                let ws = ints(b)?;
+                let cs = ints(b)?;
+                Some(TV::Dp(Arc::new((ws, cs))))
+            }
+            _ => None,
+        }
+    }
 }
 
 pub struct Toy;
@@ -223,6 +311,22 @@ impl Lang for Toy {
                 let p = a.get(0).int();
                 TV::rec(vec![TV::Int(p), TV::Int(p.to_string().len() as i64)])
             }
+            Op::Hook => {
+                USEH.with(|c| c.set(c.get() + 1));
+                let words: Vec<String> = match &*a.get(0) {
+                    TV::Seq(s) => s
+                        .iter()
+                        .map(|(_, v)| match v {
+                            TV::Word(w, _) => w.to_string(),
+                            _ => String::new(),
+                        })
+                        .collect(),
+                    _ => Vec::new(),
+                };
+                let t = words.join("+");
+                let n = t.len() as i64;
+                TV::Word(t.into(), n)
+            }
             Op::UseW => {
                 USEW.with(|c| c.set(c.get() + 1));
                 a.get(0).clone()
@@ -241,7 +345,10 @@ impl Lang for Toy {
 
     fn scan(op: Op, st: &TV, x: &TV, a: &Args<'_, Self>) -> (TV, TV) {
         match op {
-            Op::Break => break_step(st, x, a.get(0).int()),
+            Op::Break => {
+                BRK.with(|c| c.set(c.get() + 1));
+                break_step(st, x, a.get(0).int())
+            }
             Op::TocLine => {
                 // (a line from the entry; the state is nothing, so a changed
                 // entry changes its line only)
@@ -341,6 +448,14 @@ impl Lang for Toy {
             return None;
         }
         Some(TV::Word(w.into(), n.parse().ok()?))
+    }
+
+    fn cse(op: Op) -> bool {
+        matches!(op, Op::Add1 | Op::Sum | Op::Show | Op::IsZero)
+    }
+
+    fn memo(op: Op) -> bool {
+        matches!(op, Op::Hook | Op::Break)
     }
 
     fn op_tag(op: Op) -> u64 {
@@ -500,8 +615,10 @@ fn step(op: Op, mut st: St, cx: &mut StepCx<'_, Toy>) -> Step<TV> {
         cx,
     };
     let Some(t) = rd.next() else {
-        return if op == Op::Box {
+        return if matches!(op, Op::Box(_)) {
             Step::Done(TV::Int(st.width))
+        } else if op == Op::File {
+            Step::Done(TV::st(st))
         } else {
             Step::Done(TV::Unit)
         };
@@ -510,16 +627,17 @@ fn step(op: Op, mut st: St, cx: &mut StepCx<'_, Toy>) -> Step<TV> {
     let count = rd.cx.name(b"count");
     // a word into the paragraph (or the box)
     fn word<'s>(op: Op, par: NameId, rd: &mut Rd<'_, 's>, w: Arg<'s>, id: u64) {
-        if op == Op::Box {
+        if matches!(op, Op::Box(_)) {
             return;
         }
         let p = rd.cx.leaf(Op::Push(id), Class::Pure, &[Arg::Name(par), w]);
         rd.cx.define(par, Arg::Local(p), true);
     }
     let here = rd.cx.cursor().0 ^ (rd.at as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+    let mut called = false;
     match t {
         Tok::Word(w) => {
-            if op == Op::Box {
+            if matches!(op, Op::Box(_)) {
                 st.width += w.len() as i64 + 1;
             } else {
                 let n = w.len() as i64;
@@ -531,7 +649,7 @@ fn step(op: Op, mut st: St, cx: &mut StepCx<'_, Toy>) -> Step<TV> {
         Tok::Close => rd.cx.close_group(),
         Tok::Cs(c) => match &*c {
             "par" => {
-                if op == Op::Doc {
+                if matches!(op, Op::Doc | Op::File) {
                     let init = rd.cx.lit(dp_init());
                     let w = rd.cx.lit(TV::Int(WIDTH));
                     let lines = rd.cx.scan(
@@ -589,7 +707,7 @@ fn step(op: Op, mut st: St, cx: &mut StepCx<'_, Toy>) -> Step<TV> {
                 };
                 let m = rd.cx.name(name.as_bytes());
                 let s = rd.cx.leaf(Op::Show, Class::Pure, &[Arg::Name(m)]);
-                if op == Op::Box {
+                if matches!(op, Op::Box(_)) {
                     // (a box reads names too: its width from the shown value)
                     st.width += 2;
                 } else {
@@ -597,7 +715,11 @@ fn step(op: Op, mut st: St, cx: &mut StepCx<'_, Toy>) -> Step<TV> {
                 }
             }
             "hbox" => {
+                // (boxes nest at most 8 deep: a box of a macro that makes
+                // the box again is the document's endless loop, cut here)
+                let d = if let Op::Box(d) = op { d + 1 } else { 0 };
                 let body = rd.group();
+                let body = if d >= 8 { Vec::new() } else { body };
                 let items: Vec<(ElemId, TV)> = body
                     .into_iter()
                     .enumerate()
@@ -607,7 +729,7 @@ fn step(op: Op, mut st: St, cx: &mut StepCx<'_, Toy>) -> Step<TV> {
                 let init = rd.cx.lit(TV::st(St::default()));
                 let b = rd
                     .cx
-                    .unfold(Op::Box, Arg::Local(input), Arg::Local(init), &[]);
+                    .unfold(Op::Box(d), Arg::Local(input), Arg::Local(init), &[]);
                 let w = rd.cx.leaf(Op::BoxWord, Class::Pure, &[Arg::Local(b)]);
                 word(op, par, &mut rd, Arg::Local(w), here);
             }
@@ -658,6 +780,23 @@ fn step(op: Op, mut st: St, cx: &mut StepCx<'_, Toy>) -> Step<TV> {
                 }
             }
             "else" | "fi" => {}
+            "addto" => {
+                // (an append to a hook: its payload does not read the hook)
+                let h = rd.word();
+                let w = rd.word();
+                let n = w.len() as i64;
+                let l = rd.cx.lit(TV::Word(w.into(), n));
+                rd.cx
+                    .leaf(Op::Id, Class::Effect(hook(&h)), &[Arg::Local(l)]);
+            }
+            "usehook" => {
+                // (the hook as it is here: its appends before this point)
+                let h = rd.word();
+                let c = rd.cx.chain_before(hook(&h));
+                let v = rd.cx.leaf(Op::Hook, Class::Pure, &[Arg::Local(c)]);
+                let m = rd.cx.name(format!("hook@{h}").as_bytes());
+                rd.cx.define(m, Arg::Local(v), true);
+            }
             "write" | "message" => {
                 let w = rd.word();
                 let n = w.len() as i64;
@@ -724,6 +863,100 @@ fn step(op: Op, mut st: St, cx: &mut StepCx<'_, Toy>) -> Step<TV> {
                 let pr2 = rd.cx.name(b"pr2");
                 rd.cx.define(pr2, Arg::Local(x), true);
             }
+            "here" => {
+                let h = rd.cx.here();
+                HERE.with(|c| c.set(Some(h)));
+            }
+            "since" | "reach" => {
+                let ids: Vec<(String, NameId)> = ["a", "b", "c", "d", "count"]
+                    .iter()
+                    .map(|n| (n.to_string(), rd.cx.name(n.as_bytes())))
+                    .collect();
+                let show = |v: &TV| match v {
+                    TV::Toks(t) => t.iter().map(Tok::text).collect::<Vec<_>>().join(" "),
+                    v => format!("{}", v.int()),
+                };
+                let spell = |m: NameId| ids.iter().find(|x| x.1 == m).map(|x| x.0.clone());
+                if c.as_ref() == "since" {
+                    let r = HERE.with(|c| c.get()).and_then(|h| rd.cx.defined_since(h));
+                    let r = r.map(|l| {
+                        l.into_iter()
+                            .filter_map(|(m, v)| Some((spell(m)?, v.map(|v| show(&v)))))
+                            .collect::<Vec<_>>()
+                    });
+                    SINCE.with(|c| *c.borrow_mut() = r);
+                } else {
+                    let r: Vec<(String, String)> = rd
+                        .cx
+                        .defined_reaching()
+                        .into_iter()
+                        .filter_map(|(m, v)| Some((spell(m)?, show(&v))))
+                        .collect();
+                    REACH.with(|c| *c.borrow_mut() = r);
+                }
+            }
+            "input" => {
+                // (a file, read as a named source: a continuation call, from
+                // input the document read itself, not a macro's)
+                let f = rd.word();
+                if rd.rest().is_empty()
+                    && let Some(src) = rd.cx.source(f.as_bytes())
+                {
+                    let init = rd.cx.lit(TV::st(St {
+                        conds: st.conds.clone(),
+                        width: st.width,
+                        ..St::default()
+                    }));
+                    rd.cx.call(Op::File, src, Arg::Local(init), &[]);
+                    called = true;
+                }
+            }
+            "iffileexists" => {
+                let f = rd.word();
+                let w = if rd.cx.source(f.as_bytes()).is_some() {
+                    "yes"
+                } else {
+                    "no"
+                };
+                let l = rd.cx.lit(TV::Word(w.into(), w.len() as i64));
+                word(op, par, &mut rd, Arg::Local(l), here);
+            }
+            "scoped" => {
+                // (a group opened, `count` redefined in it and closed, all in
+                // this step; then `count` read: the outer one, in `sc`)
+                rd.cx.open_group();
+                let k = rd.cx.lit(TV::Int(999));
+                rd.cx.define(count, Arg::Local(k), false);
+                rd.cx.close_group();
+                let v = rd.cx.read(count).map_or(-1, |v| v.int());
+                let l = rd.cx.lit(TV::Int(v));
+                let sc = rd.cx.name(b"sc");
+                rd.cx.define(sc, Arg::Local(l), false);
+                if let Some(f) = st.conds.last_mut() {
+                    f.push(("sc".into(), false));
+                }
+            }
+            "twice" => {
+                // (the same leaf twice, merged by CSE; then, after a
+                // definition of the name it reads, the same leaf again,
+                // which must not be: y = 3 count + 4, count + 1 after)
+                let a = rd.cx.leaf(Op::Add1, Class::Pure, &[Arg::Name(count)]);
+                let b = rd.cx.leaf(Op::Add1, Class::Pure, &[Arg::Name(count)]);
+                let s = rd
+                    .cx
+                    .leaf(Op::Sum, Class::Pure, &[Arg::Local(a), Arg::Local(b)]);
+                rd.cx.define(count, Arg::Local(a), false);
+                let c = rd.cx.leaf(Op::Add1, Class::Pure, &[Arg::Name(count)]);
+                let s2 = rd
+                    .cx
+                    .leaf(Op::Sum, Class::Pure, &[Arg::Local(s), Arg::Local(c)]);
+                let y = rd.cx.name(b"y");
+                rd.cx.define(y, Arg::Local(s2), false);
+                if let Some(f) = st.conds.last_mut() {
+                    f.push(("count".into(), false));
+                    f.push(("y".into(), false));
+                }
+            }
             "usew" => {
                 // (reads the width only: field 1 of `pr2`)
                 let pr2 = rd.cx.name(b"pr2");
@@ -751,6 +984,9 @@ fn step(op: Op, mut st: St, cx: &mut StepCx<'_, Toy>) -> Step<TV> {
         let cur = rd.cx.cursor().0;
         phi::ver::hash64(&(cur, &rest))
     };
+    if called {
+        return Step::Call { key };
+    }
     st.pending = rest;
     Step::Next {
         st: TV::st(st),
@@ -764,18 +1000,28 @@ fn expand(rd: &mut Rd<'_, '_>, st: &mut St, m: NameId) {
         && let TV::Toks(body) = &*v
         && st.exp < 64
     {
+        let rest = rd.rest();
+        // (and a bound on the pending input: a macro whose body holds
+        // itself twice grows it every expansion)
+        if rest.len() + body.len() > 512 {
+            return;
+        }
         st.exp += 1;
         let mut p: Vec<Tok> = (**body).clone();
-        p.extend(rd.rest());
+        p.extend(rest);
         rd.pending = p;
         rd.at = 0;
     }
 }
 
 /// A document: its tokens with identities, and the graph built over it.
-pub struct Doc {
+/// The plain document.
+pub type Doc = DocP<false>;
+
+/// A document over a graph that profiles (`P`) or not.
+pub struct DocP<const P: bool> {
     pub toks: Vec<(ElemId, Tok)>,
-    pub g: Graph<Toy>,
+    pub g: Graph<Toy, P>,
     pub input: NodeId,
     pub doc: NodeId,
     pub pages: NodeId,
@@ -785,12 +1031,12 @@ pub fn seq_of(toks: &[(ElemId, Tok)]) -> Seq<TV> {
     Seq::from_vec(toks.iter().map(|(i, t)| (*i, TV::Tok(t.clone()))).collect())
 }
 
-impl Doc {
-    pub fn new(toks: Vec<(ElemId, Tok)>) -> Doc {
+impl<const P: bool> DocP<P> {
+    pub fn new(toks: Vec<(ElemId, Tok)>) -> Self {
         Self::with(toks, Graph::new())
     }
 
-    pub fn with(toks: Vec<(ElemId, Tok)>, mut g: Graph<Toy>) -> Doc {
+    pub fn with(toks: Vec<(ElemId, Tok)>, mut g: Graph<Toy, P>) -> Self {
         let input = g.input(TV::Seq(seq_of(&toks)));
         let init = g.input(TV::st(St::default()));
         let doc = g.unfold(Op::Doc, input, init, &[]);
@@ -798,7 +1044,7 @@ impl Doc {
         let h = g.input(TV::Int(HEIGHT));
         let z = g.input(TV::Int(0));
         let pages = g.scan(Op::Page, (vl, Sel::WHOLE), z, &[h]);
-        Doc {
+        DocP {
             toks,
             g,
             input,
@@ -848,7 +1094,7 @@ impl Doc {
                 .collect();
             s += &format!("{name}={items:?}\n");
         }
-        for n in ["count", "a", "b", "x", "y", "par@"] {
+        for n in ["count", "a", "b", "x", "y", "par@", "hook@h"] {
             let v = g
                 .name_id(n.as_bytes())
                 .and_then(|id| g.name_value(id))

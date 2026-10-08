@@ -1,6 +1,7 @@
 //! Quick timing of the bench client's cold build (scratch; not a bench).
 #![allow(clippy::pedantic, dead_code)]
 use phi::{Arg, Args, Class, ElemId, Graph, Lang, Seq, Step, StepCx, Value, Ver};
+use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
 use std::time::Instant;
 
 /// A minimal client: integers, versioned by value.
@@ -47,14 +48,37 @@ enum O {
     Mod,
 }
 
-struct B;
+/// (`X`: the extras, HEAVY, CSE and MEMO, are compiled in; without them
+/// the client is the plain one, with no hook the core calls per leaf)
+struct B<const X: bool>;
 
-impl Lang for B {
+/// (read once: an environment lookup a step would cost ~10 ns/node)
+static LEAFHEAVY: std::sync::LazyLock<Option<u64>> =
+    std::sync::LazyLock::new(|| std::env::var("LEAFHEAVY").ok().and_then(|v| v.parse().ok()));
+static HEAVY: std::sync::LazyLock<Option<u64>> =
+    std::sync::LazyLock::new(|| std::env::var("HEAVY").ok().and_then(|v| v.parse().ok()));
+/// (set in main: a hook the core calls per leaf must be a plain load)
+static CSE: AtomicBool = AtomicBool::new(false);
+static MEMO: AtomicBool = AtomicBool::new(false);
+
+impl<const X: bool> Lang for B<X> {
     type Val = V;
     type Op = O;
     fn eval(op: O, a: &Args<'_, Self>) -> V {
         match op {
-            O::Add => V::I((0..a.len()).map(|i| a.get(i).i()).sum::<i64>() & 0xffff),
+            O::Add => {
+                // (LEAFHEAVY=n: a leaf that costs about n ns more)
+                if X && let Some(n) = *LEAFHEAVY {
+                    let mut h = a.get(1).i() as u64;
+                    for i in 0..n {
+                        h = std::hint::black_box(
+                            h.wrapping_mul(0x9e37_79b9_7f4a_7c15).rotate_left(7) ^ i,
+                        );
+                    }
+                    std::hint::black_box(h);
+                }
+                V::I((0..a.len()).map(|i| a.get(i).i()).sum::<i64>() & 0xffff)
+            }
             _ => V::Nil,
         }
     }
@@ -66,6 +90,20 @@ impl Lang for B {
             _ => unreachable!(),
         };
         let Some(x) = cx.next().cloned() else {
+            return Step::Done(st.clone());
+        };
+        let x0 = x.clone();
+        // (HEAVY=n: an op that costs about n ns more, as macro expansion
+        // would)
+        if X && let Some(n) = *HEAVY {
+            let mut h = x0.i() as u64;
+            for i in 0..n {
+                h = std::hint::black_box(h.wrapping_mul(0x9e37_79b9_7f4a_7c15).rotate_left(7) ^ i);
+            }
+            std::hint::black_box(h);
+        }
+        #[allow(unreachable_code)]
+        let Some(x) = Some(x) else {
             return Step::Done(st.clone());
         };
         let first = cx.consumed() == 1 && matches!(st, V::Nil);
@@ -88,7 +126,13 @@ impl Lang for B {
         }
         if first {
             // (a constant: no step's reads of `acc` change with the input)
-            let k = cx.lit(V::I(7));
+            // (PRE: the first element's value, so changing it wakes
+            // every step: a preamble definition)
+            let k = cx.lit(if X && std::env::var("PRE").is_ok() {
+                x0.clone()
+            } else {
+                V::I(7)
+            });
             cx.define(acc, Arg::Local(k), false);
         }
         cx.define(out, Arg::Local(last), false);
@@ -115,6 +159,14 @@ impl Lang for B {
     }
     fn chain_val(items: Seq<V>) -> V {
         V::S(Box::new(items))
+    }
+    /// (CSE: every Add probed for an equal one in its step)
+    fn cse(op: O) -> bool {
+        X && op == O::Add && CSE.load(Relaxed)
+    }
+    /// (MEMO: every Add through the memo store)
+    fn memo(op: O) -> bool {
+        X && op == O::Add && MEMO.load(Relaxed)
     }
     fn op_tag(op: O) -> u64 {
         match op {
@@ -143,6 +195,21 @@ impl Lang for B {
 }
 
 fn main() {
+    CSE.store(std::env::var("CSE").is_ok(), Relaxed);
+    MEMO.store(std::env::var("MEMO").is_ok(), Relaxed);
+    let x = ["HEAVY", "CSE", "MEMO", "PRE", "LEAFHEAVY", "TUNE"]
+        .iter()
+        .any(|v| std::env::var(v).is_ok());
+    // (PROFILE: a Graph<_, true>)
+    match (x, std::env::var("PROFILE").is_ok()) {
+        (false, false) => run::<false, false>(),
+        (false, true) => run::<false, true>(),
+        (true, false) => run::<true, false>(),
+        (true, true) => run::<true, true>(),
+    }
+}
+
+fn run<const X: bool, const P: bool>() {
     let n: usize = std::env::args()
         .nth(1)
         .and_then(|a| a.parse().ok())
@@ -170,9 +237,12 @@ fn main() {
         12
     };
     for _ in 0..runs {
-        let mut g: Graph<B> = Graph::new();
+        let mut g: Graph<B<X>, P> = Graph::new();
         g.cfg.workers = w;
         g.cfg.debug = std::env::var("DEBUG").is_ok();
+        if MEMO.load(Relaxed) {
+            g.set_memo_budget(1 << 30);
+        }
         if std::env::var("RESERVE").is_ok() {
             g.reserve(2 * n + 16, 4 * n);
         }
@@ -193,6 +263,23 @@ fn main() {
         );
         g.run();
         best = best.min(t.elapsed().as_secs_f64());
+        if P && std::env::var("SHOW").is_ok() {
+            let t = Instant::now();
+            let rep = g.profile();
+            eprintln!("profile() {:.2} ms", t.elapsed().as_secs_f64() * 1e3);
+            for (o, st) in rep.ops.iter().take(4) {
+                eprintln!(
+                    "  {o:?}: evals ~{} (timed {}), mean {:.1} ns, steps {}",
+                    st.evals,
+                    st.timed,
+                    st.mean_ns(),
+                    st.steps
+                );
+            }
+        }
+        if MEMO.load(Relaxed) {
+            eprintln!("memo (entries, bytes, probes, hits): {:?}", g.memo_stats());
+        }
         if g.cfg.debug {
             eprintln!("interiors (op, steps, max, p99): {:?}", g.interior_sizes());
         }
@@ -202,6 +289,37 @@ fn main() {
         }
         if let Some(f) = std::env::var("SEAL").ok().and_then(|v| v.parse().ok()) {
             g.cfg.seal = f;
+            if std::env::var("PRE").is_ok() {
+                // (a preamble edit: every step re-runs)
+                let mut cur = s.clone();
+                let tune = std::env::var("TUNE").is_ok();
+                if tune {
+                    eprintln!("tune: {:?}", g.tune());
+                }
+                for e in 0..if tune { 6i64 } else { 3 } {
+                    cur = cur.splice(0, 1, [(ElemId(1), V::I(500 + e))]);
+                    g.set(input, V::S(Box::new(cur.clone())));
+                    let t = Instant::now();
+                    let r = g.run();
+                    eprintln!(
+                        "preamble edit: {:.1} ms, {} steps, {} dry runs, {} used",
+                        t.elapsed().as_secs_f64() * 1e3,
+                        r.steps,
+                        r.dry_runs,
+                        r.dry_used
+                    );
+                    if tune {
+                        let tu = g.tune();
+                        eprintln!(
+                            "tune: memo in {:?} out {:?} watched {:?}; store {:?}",
+                            tu.memo_in,
+                            tu.memo_out,
+                            tu.watched,
+                            g.memo_stats()
+                        );
+                    }
+                }
+            }
             let t = Instant::now();
             let sealed = if f > 0 { g.seal() } else { 0 };
             let ts = t.elapsed().as_secs_f64();
@@ -242,7 +360,10 @@ fn main() {
                     out.push(t.elapsed().as_secs_f64() * 1e6);
                     *st += r.steps;
                     if std::env::var("TRACE").is_ok() || t.elapsed().as_secs_f64() > 2e-3 {
-                        eprintln!("edit at {k}: {r:?}");
+                        eprintln!(
+                            "edit at {k}: {:.0} us {r:?}",
+                            t.elapsed().as_secs_f64() * 1e6
+                        );
                     }
                 }
             }
@@ -264,4 +385,19 @@ fn main() {
         best * 1e3,
         best * 1e9 / (n * per) as f64
     );
+    // (the process's peak resident memory, where the OS tells)
+    if let Ok(st) = std::fs::read_to_string("/proc/self/status")
+        && let Some(l) = st.lines().find(|l| l.starts_with("VmHWM"))
+    {
+        let kb: f64 = l
+            .split_whitespace()
+            .nth(1)
+            .and_then(|x| x.parse().ok())
+            .unwrap_or(0.0);
+        eprintln!(
+            "peak RSS {:.2} GB, {:.1} B/node",
+            kb / 1048576.0,
+            kb * 1024.0 / (n * per) as f64
+        );
+    }
 }

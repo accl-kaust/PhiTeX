@@ -393,7 +393,7 @@ impl Renderer {
         r
     }
 
-    fn style(&self) -> Style {
+    pub fn style(&self) -> Style {
         self.settings.style
     }
 

@@ -9,7 +9,7 @@ use crate::graph::{Graph, Kind, NONE, Opd};
 use crate::lang::{Class, Lang};
 use crate::value::Value;
 
-impl<L: Lang> Graph<L> {
+impl<L: Lang, const P: bool> Graph<L, P> {
     /// The canonical text of the graph. Element identities and keys are
     /// left out: they decide reuse, never values ([`Graph::to_text_ids`]
     /// shows them).
@@ -109,7 +109,11 @@ impl<L: Lang> Graph<L> {
                 let _ = write!(out, " #{:x}", self.n.h[u].aux);
             }
             Kind::ChainRead | Kind::Family => {
-                let _ = write!(out, " {}", self.n.h[u].aux);
+                let aux = self.n.h[u].aux;
+                if aux >> 32 != 0 {
+                    out.push_str(" before");
+                }
+                let _ = write!(out, " {}", aux & 0xffff_ffff);
             }
             Kind::Step => {
                 let si = &self.steps[self.n.h[u].aux as usize];

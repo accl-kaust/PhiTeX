@@ -1,4 +1,4 @@
-//! A build in slices, its pages as they are shipped (DESIGN 4.10): the
+//! A build in slices, its pages as they are shipped (DESIGN 4.11): the
 //! job run a few commands at a time is the job run at once, plain and SSA;
 //! a page shipped and drawn from its own PDF has the hash the finished
 //! PDF's page has when nothing but its stream draws it; and the font
