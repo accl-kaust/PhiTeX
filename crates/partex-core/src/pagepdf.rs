@@ -109,6 +109,14 @@ impl Shipments {
         self.pages.clear();
     }
 
+    /// The forms kept (a form a page draws may be shipped after the page:
+    /// one not `\immediate` is written at its first use, after the page
+    /// object).
+    #[must_use]
+    pub fn forms(&self) -> usize {
+        self.forms.len()
+    }
+
     /// One past the last page shipped (0: none yet).
     #[must_use]
     pub fn pages(&self) -> usize {

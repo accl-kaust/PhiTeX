@@ -3748,14 +3748,21 @@ blocking and streamed opens in fresh sessions; page 1 = drawn):
 | ieeetran (10) | 414 → 294 ms | 405 → 420 ms | 1360 → 781 ms |
 | revtex (20) | 1199 → 721 ms | 1184 → 1222 ms | 6568 → 2204 ms |
 | article (41) | 1046 → 561 ms | 1040 → 1076 ms | 4534 → 1531 ms |
-| acmart (26) | 2869 → 1153 ms | 2828 → 2846 ms | (being measured again) |
+| acmart (26) | 2869 → 1153 ms | 2828 → 2846 ms | 21000 → 3300 ms |
 | longtail (62) | 3407 → 2058 ms | 3401 → 3524 ms | 8465 → 5150 ms |
 
-Every streamed build's PDF is the blocking build's, byte for byte. The
+Every streamed build's PDF is the blocking build's, byte for byte, the
+clock pinned (`SOURCE_DATE_EPOCH`: unpinned, two sessions a minute apart
+differ in the XMP date, as acmart's did once in four rounds). The
 plain build is the extension's first paint (worker A); a streamed build
 costs 1–4% more (the slices' clock and the page hashes). The `xelatex`
 project needs XeTeX (or the extension's stand-ins) and is left out;
-longtail ends fatally in this harness, both ways alike.
+longtail's numbers are of a harness that missed `lmbx6.pfb` (its
+discovery read the `.aux` of earlier builds, so a fresh build's bold `??`
+was never asked for): the job ends fatally at the end, both ways alike.
+A form not `\immediate` is shipped after the page that draws it (at its
+first use, after the page object): a page not whole is hashed again when
+forms come (`Shipments::forms`).
 
 XeTeX's pages still come with its PDF (xdvipdfmx runs after the job).
 `phitex watch` already streams (4.8): its viewer shows each page as it is
