@@ -80,6 +80,31 @@ const FI_OR_ELSE_CMD: u16 = partex_engine::web::FI_OR_ELSE as u16;
 /// The critical path's edges that are not an address's: a conditional's
 /// test, a token list's maker, a nested node's result.
 const COND_KEY: u64 = u64::MAX;
+
+/// A node's predecessor on its longest path in.
+#[derive(Clone, Copy)]
+struct PathRec {
+    kind: u16,
+    pred: u32,
+    key: u64,
+    end: u32,
+    cost: u32,
+}
+
+/// Whether `key` is on an effect chain of its own once the chains are
+/// split (`PARTEX_PURE_SPLIT`).
+fn effect_chain(key: u64) -> bool {
+    matches!(key >> 56, 11 | 13 | 14 | 15 | 17 | 22 | 23 | 24)
+        || key == row_key(Row::Scalar(scalar::FONT_COUNT)).0
+        || interline(key)
+}
+
+/// Whether `key` is a vertical list's `\prevdepth`: what the interline
+/// glue before a box reads (§679), a node of its own between the box's
+/// maker and the list, never an operand of the line breaker or a pack.
+fn interline(key: u64) -> bool {
+    key >> 56 == 5 && (key & 0xffff_ffff) % u64::from(list::STRIDE) == u64::from(list::PREV_DEPTH)
+}
 const LEVEL_KEY: u64 = u64::MAX - 1;
 const NESTED_KEY: u64 = u64::MAX - 2;
 /// The origin of a page-chain node's own definitions.
@@ -94,6 +119,8 @@ struct Dist {
     n: u64,
     w: u64,
     p: u64,
+    /// In body events only.
+    b: u64,
 }
 
 impl Dist {
@@ -102,6 +129,7 @@ impl Dist {
             n: self.n.max(o.n),
             w: self.w.max(o.w),
             p: self.p.max(o.p),
+            b: self.b.max(o.b),
         }
     }
 }
@@ -117,6 +145,9 @@ struct Def {
     fpos: u32,
     /// Its version, when known (0: not yet).
     ver: u64,
+    /// While its node runs: the node on that node's longest path in so
+    /// far (a provisional definition's path in).
+    ppred: u32,
 }
 
 impl Default for Def {
@@ -129,6 +160,7 @@ impl Default for Def {
             fold: NONE,
             fpos: 0,
             ver: 0,
+            ppred: NONE,
         }
     }
 }
@@ -171,6 +203,7 @@ struct Read {
     key: u64,
     prev_reader: u32,
     prod: u32,
+    path_src: u32,
     page: bool,
     after_page: u64,
     from_fold: u32,
@@ -246,8 +279,23 @@ struct State {
     levels: Vec<(Dist, u64, u32)>,
     /// `PARTEX_PURE_PATH=1`: each node's predecessor on its longest path
     /// in, by node id, and the node the critical path ends at.
-    path: Option<Vec<(u32, u64)>>,
+    path: Option<Vec<PathRec>>,
     crit_end: u32,
+    end_seq: u32,
+    setup_end: u32,
+    setup_first: u32,
+    /// `PARTEX_PURE_SPLIT=1`: the effect chains split (DESIGN 3.17): a body
+    /// node's read of the PDF and DVI writers' tables, the glyphs used, the
+    /// object numbering, a `\write` stream's state, the font table's
+    /// numbering is on that stream's chain, not a body operand.
+    split: bool,
+    split_reads: u64,
+    /// `PARTEX_PURE_FIELDS=FILE`: addresses (one key a line) whose reads
+    /// are not operands of the node, for a projection: an append-only
+    /// hook's earlier contents, an allocator's ordinal where only the
+    /// identity is used (DESIGN 3.17, "Identity and ordinal").
+    dropped: HashSet<u64>,
+    dropped_reads: u64,
     kinds: HashMap<u16, Kind>,
     macros: u64,
     phis: u64,
@@ -434,7 +482,8 @@ impl Addr {
             return;
         }
         for i in 0..2 {
-            if self.hist[i].ver == ver {
+            // (the equal one that is ready first: the reader needs either)
+            if self.hist[i].ver == ver && self.hist[i].d.w <= self.def.d.w {
                 let d = self.hist[i];
                 self.hist[i] = self.def;
                 self.def = d;
@@ -527,9 +576,19 @@ impl State {
             return;
         }
         let pending = std::mem::take(&mut self.pending_append);
+        let split = self.split;
+        let dropped = self.dropped.contains(&key);
         let f = self.top();
         f.events += 1;
         let id = f.id;
+        if split && f.class == BODY && effect_chain(key) {
+            self.split_reads += 1;
+            return;
+        }
+        if dropped {
+            self.dropped_reads += 1;
+            return;
+        }
         if class == Class::List && pending {
             f.append_key = Some(key);
             return;
@@ -574,10 +633,18 @@ impl State {
                 after_page = 0;
             }
         }
+        // (a definition of a node still running: its path in is that
+        // node's so far)
+        let path_src = if src.fold == NONE && src.prod != NONE && src.ppred != NONE {
+            src.ppred
+        } else {
+            src.prod
+        };
         let r = Read {
             key,
             prev_reader,
             prod: src.prod,
+            path_src,
             page,
             // (the origin: the page-chain address read first on the way)
             after_page: if page { key } else { after_page },
@@ -588,7 +655,7 @@ impl State {
         };
         let f = self.frames.last_mut().expect("a frame");
         if d.w > f.d_in.w {
-            f.pred = (r.prod, key);
+            f.pred = (r.path_src, key);
         }
         f.d_in = f.d_in.max(d);
         if r.after_page != 0 && f.after_page == 0 {
@@ -620,6 +687,7 @@ impl State {
             n: f.d_in.n + 1,
             w: f.d_in.w + f.events + 1,
             p: f.d_in.p + if fclass == PAGE { f.events + 1 } else { 0 },
+            b: f.d_in.b + if fclass == PAGE { 0 } else { f.events + 1 },
         };
         let after_page = if fclass == PAGE {
             PAGE_ORIGIN
@@ -630,6 +698,7 @@ impl State {
         if self.debug == Some(key) {
             eprintln!("pure: written by {id} kind {kind} class {fclass} after_page {ap} via {via}");
         }
+        let ppred = self.frames.last().map_or(NONE, |f| f.pred.0);
         let a = self.addr(key);
         a.hist[1] = a.hist[0];
         a.hist[0] = a.def;
@@ -641,6 +710,7 @@ impl State {
             fold: NONE,
             fpos: 0,
             ver: 0,
+            ppred,
         };
         if class == Class::List {
             a.app = None;
@@ -670,6 +740,7 @@ impl State {
             n: f.d_in.n + 1,
             w: f.d_in.w + cost,
             p: f.d_in.p + if page { cost } else { 0 },
+            b: f.d_in.b + if page { 0 } else { cost },
         };
         let after_page = if page { PAGE_ORIGIN } else { f.after_page };
         self.total.n += 1;
@@ -678,12 +749,28 @@ impl State {
             self.crit_end = f.id;
         }
         self.crit = self.crit.max(d);
+        self.end_seq += 1;
         if let Some(path) = self.path.as_mut() {
             let i = f.id as usize;
             if path.len() <= i {
-                path.resize(i + 1, (NONE, 0));
+                path.resize(
+                    i + 1,
+                    PathRec {
+                        kind: 0,
+                        pred: NONE,
+                        key: 0,
+                        end: 0,
+                        cost: 0,
+                    },
+                );
             }
-            path[i] = f.pred;
+            path[i] = PathRec {
+                kind: f.kind,
+                pred: f.pred.0,
+                key: f.pred.1,
+                end: self.end_seq,
+                cost: u32::try_from(cost).unwrap_or(u32::MAX),
+            };
         }
         let k = self.kinds.entry(f.kind).or_default();
         k.nodes += 1;
@@ -787,6 +874,7 @@ impl State {
                 fold,
                 fpos,
                 ver: 0,
+                ppred: NONE,
             });
         }
         self.list_reads += f.reads.iter().filter(|r| r.list).count() as u64;
@@ -882,6 +970,12 @@ impl Stats {
                 .ok()
                 .and_then(|v| v.parse().ok()),
             spec_tail: std::env::var("PARTEX_PURE_SPEC_TAIL").is_ok_and(|v| v == "1"),
+            split: std::env::var("PARTEX_PURE_SPLIT").is_ok_and(|v| v == "1"),
+            dropped: std::env::var("PARTEX_PURE_FIELDS")
+                .ok()
+                .and_then(|p| std::fs::read_to_string(p).ok())
+                .map(|t| t.lines().filter_map(|l| l.trim().parse().ok()).collect())
+                .unwrap_or_default(),
             path: std::env::var("PARTEX_PURE_PATH")
                 .is_ok_and(|v| v == "1")
                 .then(Vec::new),
@@ -1033,6 +1127,8 @@ impl Tracker for Stats {
         s.calls.push(true);
         if f == Func::ShipOut && s.setup.is_none() {
             s.setup = Some((s.total, s.crit));
+            s.setup_end = s.crit_end;
+            s.setup_first = s.next_id;
         }
         let page = matches!(f, Func::PageStep | Func::ShipOut);
         s.open(K_CALL + func_index(f), u8::from(page), false);
@@ -1259,14 +1355,14 @@ pub fn write<H: Host>(tex: &Tex<H, Stats>, path: &std::path::Path) -> std::io::R
     );
     let _ = writeln!(
         out,
-        "\"critical_nodes\": {}, \"critical_events\": {}, \"page_path_events\": {},",
-        s.crit.n, s.crit.w, s.crit.p
+        "\"critical_nodes\": {}, \"critical_events\": {}, \"page_path_events\": {}, \"body_path_events\": {},",
+        s.crit.n, s.crit.w, s.crit.p, s.crit.b
     );
     let (sw, sc) = s.setup.unwrap_or_default();
     let _ = writeln!(
         out,
-        "\"setup_nodes\": {}, \"setup_events\": {}, \"setup_critical_nodes\": {}, \"setup_critical_events\": {},",
-        sw.n, sw.w, sc.n, sc.w
+        "\"setup_nodes\": {}, \"setup_events\": {}, \"setup_critical_nodes\": {}, \"setup_critical_events\": {}, \"setup_body_path_events\": {},",
+        sw.n, sw.w, sc.n, sc.w, sc.b
     );
     let _ = writeln!(
         out,
@@ -1289,30 +1385,51 @@ pub fn write<H: Host>(tex: &Tex<H, Stats>, path: &std::path::Path) -> std::io::R
         unfolded,
         folded
     );
-    // the critical path's edges after the setup, by address
-    let mut on_path: HashMap<u64, u64> = HashMap::new();
-    let mut path_len = 0u64;
-    if let Some(path) = s.path.as_ref() {
-        let mut i = s.crit_end;
-        // (a predecessor ended before its successor; ids are given at the
-        // start, so a parent's nested predecessor has a larger one)
-        let mut steps = 0;
-        while let Some(&(p, k)) = path.get(i as usize) {
-            if p == NONE || p == i || (p > i && k != NESTED_KEY) || steps > path.len() {
+    // the critical paths' edges by operand, weighted by the events of
+    // the node each leads to: the whole path's after the setup, and the
+    // setup's own
+    let walk = |end: u32, from: u32| -> (Vec<(u64, u64)>, u64) {
+        let mut by: HashMap<u64, u64> = HashMap::new();
+        let mut total = 0;
+        let Some(path) = s.path.as_ref() else {
+            return (Vec::new(), 0);
+        };
+        let mut i = end;
+        let mut bound = u32::MAX;
+        let mut seen: HashSet<u32> = HashSet::new();
+        while let Some(r) = path.get(i as usize) {
+            if std::env::var_os("PARTEX_PURE_WALK").is_some() && seen.len() < 400 {
+                eprintln!(
+                    "walk: {i} kind {} pred {} key {} end {} cost {} bound {bound}",
+                    r.kind, r.pred, r.key, r.end, r.cost
+                );
+            }
+            if i < from || r.end == 0 || !seen.insert(i) {
                 break;
             }
-            steps += 1;
-            *on_path.entry(k).or_default() += 1;
-            path_len += 1;
-            i = p;
+            // (a node ended before the one it leads to; an ancestor still
+            // open, read provisionally, is passed through to its own path)
+            if r.end < bound {
+                *by.entry(r.key).or_default() += u64::from(r.cost);
+                total += u64::from(r.cost);
+                bound = r.end;
+            }
+            if r.pred == NONE {
+                break;
+            }
+            i = r.pred;
         }
-    }
-    let mut on_path: Vec<(u64, u64)> = on_path.into_iter().collect();
-    on_path.sort_by_key(|&(k, n)| (std::cmp::Reverse(n), k));
+        let mut by: Vec<(u64, u64)> = by.into_iter().collect();
+        by.sort_by_key(|&(k, n)| (std::cmp::Reverse(n), k));
+        (by, total)
+    };
+    let (on_path, path_len) = walk(s.crit_end, s.setup_first);
+    let (on_setup, setup_len) = walk(s.setup_end, 0);
     let mut via: Vec<(u64, u64)> = s.body_after_via.iter().map(|(&k, &n)| (k, n)).collect();
     via.sort_by_key(|&(k, n)| (std::cmp::Reverse(n), k));
     let mut addrs: Vec<(u64, u64)> = s.body_page_addrs.iter().map(|(&k, &n)| (k, n)).collect();
     addrs.sort_by_key(|&(k, n)| (std::cmp::Reverse(n), k));
+    let (split, split_reads, dropped_reads) = (s.split, s.split_reads, s.dropped_reads);
     drop(guard);
     let name = |k: u64| {
         let n = match k {
@@ -1324,15 +1441,20 @@ pub fn write<H: Host>(tex: &Tex<H, Stats>, path: &std::path::Path) -> std::io::R
         };
         n.replace('\\', "\\\\").replace('"', "\\\"")
     };
-    let _ = writeln!(out, "\"critical_path_walked\": {path_len},");
+    let _ = writeln!(
+        out,
+        "\"critical_path_walked\": {path_len}, \"setup_path_walked\": {setup_len}, \"split\": {}, \"split_reads\": {}, \"dropped_reads\": {},",
+        split, split_reads, dropped_reads
+    );
     for (label, list) in [
         ("body_page_addrs", &addrs),
         ("body_after_via", &via),
         ("critical_path_edges", &on_path),
+        ("setup_path_edges", &on_setup),
     ] {
         let _ = writeln!(out, "\"{label}\": [");
-        for (i, (k, n)) in list.iter().take(40).enumerate() {
-            let comma = if i + 1 < list.len().min(40) { "," } else { "" };
+        for (i, (k, n)) in list.iter().take(300).enumerate() {
+            let comma = if i + 1 < list.len().min(300) { "," } else { "" };
             let _ = writeln!(out, "  [\"{}\", {n}, {k}]{comma}", name(*k));
         }
         let _ = writeln!(out, "],");
@@ -1343,5 +1465,41 @@ pub fn write<H: Host>(tex: &Tex<H, Stats>, path: &std::path::Path) -> std::io::R
         let _ = writeln!(out, "  [{k}, {nodes}, {events}, {reads}, {writes}]{comma}");
     }
     let _ = writeln!(out, "]\n}}");
+    // (`PARTEX_PURE_NAMES=FILE`: each eqtb address read, by key, with its
+    // name, for the projections' address lists)
+    if let Some(p) = std::env::var_os("PARTEX_PURE_NAMES") {
+        let n = tex.tracker().s.borrow().eqtb.len();
+        let ext: Vec<u64> = tex
+            .tracker()
+            .s
+            .borrow()
+            .other
+            .keys()
+            .copied()
+            .filter(|k| k >> 56 == 25)
+            .collect();
+        let mut t = String::new();
+        for p in 0..n {
+            let used = tex.tracker().s.borrow().eqtb[p].reader != NONE;
+            if used {
+                use partex_engine::web::{CAT_CODE_BASE, COUNT_BASE, GLUE_BASE};
+                let q = i32::try_from(p).unwrap_or(0);
+                // (a register's name lists the names \countdef'd to it, a
+                // search of the hash: only the allocators' are named)
+                let name = if q < GLUE_BASE {
+                    tex.eqtb_loc_name(q)
+                } else if (CAT_CODE_BASE..CAT_CODE_BASE + 256).contains(&q) {
+                    format!("catcode {}", q - CAT_CODE_BASE)
+                } else if (COUNT_BASE + 10..COUNT_BASE + 20).contains(&q) {
+                    format!("count {}", q - COUNT_BASE)
+                } else {
+                    continue;
+                };
+                let _ = writeln!(t, "{p}\t{}", name.replace(['\n', '\t'], " "));
+            }
+        }
+        let _ = ext;
+        std::fs::write(p, t)?;
+    }
     std::fs::write(path, out)
 }

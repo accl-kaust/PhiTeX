@@ -82,6 +82,10 @@ def report(path, names):
         print(f"setup (before the first shipout): {r['setup_nodes']:,} nodes, {r['setup_events']:,} events, "
               f"path {r['setup_critical_events']:,} events; after it: work {bw:,} events, path grew by "
               f"{bc:,} ({bw / max(1, bc):.1f}x)")
+    if "body_path_events" in r:
+        print(f"the body's own path (page-chain events counted 0): {r['body_path_events']:,} events "
+              f"(setup's {r.get('setup_body_path_events', 0):,}); body work after the setup "
+              f"{w - r.get('setup_events', 0) - r['page_events']:,} events")
     print(f"page chain: {r['page_nodes']:,} nodes, {r['page_events']:,} events "
           f"({100 * r['page_events'] / max(1, w):.1f}% of the work); its own path "
           f"{r['page_path_events']:,} events")
