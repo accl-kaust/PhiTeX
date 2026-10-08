@@ -678,3 +678,121 @@ fn the_names_reaching_a_step_and_those_defined_since_an_earlier_one() {
     d.g.run();
     assert_eq!(SINCE.with(|c| c.borrow().clone()), None);
 }
+
+/// A document with named sources (files) set before it runs.
+fn with_files(src: &str, files: &[(&str, &str)], workers: usize) -> Doc {
+    let mut g: Graph<Toy> = Graph::new();
+    g.cfg.workers = workers;
+    g.cfg.check = workers == 1;
+    for (k, f) in files {
+        // (a file's tokens have identities of their own, apart from the
+        // document's)
+        let toks: Vec<(ElemId, Tok)> = lex(f)
+            .into_iter()
+            .enumerate()
+            .map(|(i, t)| (ElemId(((i as u64 + 1) << 20) | (1 << 60)), t))
+            .collect();
+        g.source(k.as_bytes(), TV::Seq(seq_of(&toks)));
+    }
+    Doc::with(ids(lex(src)), g)
+}
+
+fn file_toks(f: &str) -> Vec<(ElemId, Tok)> {
+    lex(f)
+        .into_iter()
+        .enumerate()
+        .map(|(i, t)| (ElemId(((i as u64 + 1) << 20) | (1 << 60)), t))
+        .collect()
+}
+
+/// Named sources and continuation calls (DESIGN 7.22): `\input{f}` calls
+/// the file's unfold and the document goes on from its last state; an
+/// edit inside the file re-runs the file from the edit and stops where
+/// it converges; a file whose last state changed resumes the document
+/// after the call; a file appearing wakes its `\iffileexists` reader.
+#[test]
+fn an_input_file_is_a_call_the_document_resumes_after() {
+    let main = r"a b \input{f} c d \par e \the\count \par";
+    let f = r"x y \step \par w1 w2 w3 w4 w5 \par z";
+    let mut d = with_files(main, &[("f", f)], 1);
+    d.g.run();
+    let count = |d: &Doc| {
+        d.g.name_id(b"count")
+            .and_then(|m| d.g.name_value(m))
+            .map(|v| v.int())
+    };
+    assert_eq!(count(&d), Some(1), "the file's \\step");
+    let fresh = |d: &Doc, f: &str| {
+        let mut e = with_files(main, &[("f", f)], 1);
+        e.toks = d.toks.clone();
+        e.g.set(e.input, TV::Seq(seq_of(&e.toks)));
+        e.g.run();
+        e
+    };
+    assert_eq!(d.observe(), fresh(&d, f).observe());
+    // an edit inside the file, its last state the same: the file's steps
+    // from the edit to where they converge, and the document's call step
+    let fnode = d.g.source(b"f", TV::Seq(seq_of(&file_toks(f))));
+    let f2 = r"x y \step \par w1 w2 W3 w4 w5 \par z";
+    d.g.set(fnode, TV::Seq(seq_of(&file_toks(f2))));
+    let r = d.g.run();
+    assert!(r.steps <= 6, "{r:?}");
+    assert_eq!(d.observe(), fresh(&d, f2).observe());
+    // a last state that changed (an open conditional at the file's end):
+    // the document resumes after the call
+    let f3 = r"x y \step \par w1 w2 W3 w4 w5 \par z \ifzero\count p \else q";
+    d.g.set(fnode, TV::Seq(seq_of(&file_toks(f3))));
+    let r3 = d.g.run();
+    assert!(r3.steps > r.steps, "{r3:?}");
+    assert_eq!(d.observe(), fresh(&d, f3).observe());
+    // a file appearing and going: its reader runs again each time
+    let mut e = with_files(r"\iffileexists{g}", &[], 1);
+    e.g.run();
+    let par = |d: &Doc| {
+        d.g.name_id(b"par@")
+            .and_then(|m| d.g.name_value(m))
+            .map(|v| format!("{v:?}"))
+            .unwrap_or_default()
+    };
+    let before = par(&e);
+    assert!(before.contains("\"no\""), "{before}");
+    e.g.source(b"g", TV::Seq(seq_of(&file_toks("hello"))));
+    let r = e.g.run();
+    assert!(r.steps >= 1, "{r:?}");
+    assert!(par(&e).contains("\"yes\""), "woken: {}", par(&e));
+    assert!(e.g.remove_source(b"g"));
+    e.g.run();
+    let mut f0 = with_files(r"\iffileexists{g}", &[], 1);
+    f0.g.run();
+    assert_eq!(e.observe(), f0.observe());
+}
+
+/// Speculative entry with calls: a book whose chapters are `\input`s,
+/// built cold with workers, equals the sequential build.
+#[test]
+fn chapters_called_from_a_book_build_in_parallel_as_in_turn() {
+    let main = r"\input{c1} \par \input{c2} \par \input{c3} \par end \par";
+    let mut chapters = Vec::new();
+    for c in 1..=3 {
+        let mut s = String::new();
+        for p in 0..30 {
+            s += &format!(r"c{c}w{p} \step more words here \par ");
+        }
+        chapters.push((format!("c{c}"), s));
+    }
+    let files: Vec<(&str, &str)> = chapters
+        .iter()
+        .map(|(k, s)| (k.as_str(), s.as_str()))
+        .collect();
+    let mut a = with_files(main, &files, 1);
+    a.g.run();
+    let mut b = with_files(main, &files, 3);
+    b.g.run();
+    assert_eq!(a.g.to_text(), b.g.to_text());
+    assert_eq!(a.observe(), b.observe());
+    let count =
+        a.g.name_id(b"count")
+            .and_then(|m| a.g.name_value(m))
+            .map(|v| v.int());
+    assert_eq!(count, Some(90));
+}

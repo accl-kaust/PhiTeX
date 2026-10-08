@@ -901,6 +901,8 @@ struct Emit<L: Lang> {
     ev: Vec<Ev<L::Op>>,
     cse_ev: Vec<(L::Op, bool)>,
     impure: Vec<L::Op>,
+    /// The emission of the unfold the step called (`StepCx::call`).
+    call: Option<u32>,
 }
 
 impl<L: Lang> Default for Emit<L> {
@@ -922,6 +924,7 @@ impl<L: Lang> Default for Emit<L> {
             ev: Vec::new(),
             cse_ev: Vec::new(),
             impure: Vec::new(),
+            call: None,
         }
     }
 }
@@ -984,7 +987,16 @@ impl<L: Lang> Emit<L> {
         self.ev.clear();
         self.cse_ev.clear();
         self.impure.clear();
+        self.call = None;
     }
+}
+
+/// The name a named source is defined to (DESIGN 7.22): a prefix no
+/// client spelling starts with.
+fn source_spelling(key: &[u8]) -> Vec<u8> {
+    let mut s = b"\0\x01phi-source\0".to_vec();
+    s.extend_from_slice(key);
+    s
 }
 
 /// Names' hashes and spellings (a segment's view of its parent's names).
@@ -1637,6 +1649,29 @@ impl<'s, L: Lang> StepCx<'s, L> {
         self.push(Kind::Unfold, op, Class::Pure, &all, None, 0)
     }
 
+    /// A continuation call: a nested unfold over `input` from `init`
+    /// whose result the step's successor continues from. The step then
+    /// returns `Step::Call { key }`. One call a step.
+    ///
+    /// # Panics
+    ///
+    /// On a second call in one step.
+    pub fn call(&mut self, op: L::Op, input: Arg<'s>, init: Arg<'s>, args: &[Arg<'s>]) {
+        assert!(self.em.call.is_none(), "one call a step");
+        let l = self.unfold(op, input, init, args);
+        self.em.call = Some(l.ix);
+    }
+
+    /// The named source `key` (`Graph::source`) read as a name: `None`
+    /// if it is absent. Either way the read is recorded, so a source that
+    /// appears, changes or goes wakes the step. Its value (the file's
+    /// elements, for `\\read`) is read with `read` on the same name.
+    pub fn source(&mut self, key: &[u8]) -> Option<Arg<'s>> {
+        let m = self.name(&source_spelling(key));
+        self.read(m)?;
+        Some(Arg::Name(m))
+    }
+
     /// A scan over `input` from `init`.
     pub fn scan(
         &mut self,
@@ -1912,6 +1947,8 @@ pub struct Graph<L: Lang, const P: bool = false> {
     ext_spell: Option<std::sync::Arc<SpellVec>>,
     /// Import nodes made for those, by name hash.
     imports: Map<u64, u32>,
+    /// Named sources: name -> its input (a root node: never moved).
+    sources: Map<u32, u32>,
     pub cfg: Config,
     rep: Report,
 }
@@ -1994,6 +2031,7 @@ impl<L: Lang, const P: bool> Graph<L, P> {
             ext: None,
             ext_spell: None,
             imports: Map::default(),
+            sources: Map::default(),
             cfg: Config::default(),
             rep: Report::default(),
         };
@@ -2341,6 +2379,62 @@ impl<L: Lang, const P: bool> Graph<L, P> {
         let n = self.root_node(Kind::Input, L::Op::default(), Class::Pure, 0);
         self.n.val[n as usize] = v;
         NodeId(n)
+    }
+
+    /// The named source `key` (DESIGN 7.22: a file `\\input`,
+    /// `\\include` or `\\openin` reads): an input steps read as a name
+    /// (`StepCx::source`). Made, or set if it exists; a source made after
+    /// steps found it absent wakes them. Edit it with `set` on the node.
+    pub fn source(&mut self, key: &[u8], v: L::Val) -> NodeId {
+        let m = self.intern(&source_spelling(key));
+        if let Some(&n) = self.sources.get(&m) {
+            self.set(NodeId(n), v);
+            return NodeId(n);
+        }
+        let i = self.root_node(Kind::Input, L::Op::default(), Class::Pure, 0);
+        self.n.val[i as usize] = v;
+        let ri = u32::try_from(self.names.recs.len()).expect("definitions fit u32");
+        self.names.recs.push(DefRec {
+            name: m,
+            step: ROOT,
+            sub: 0,
+            src: i,
+            sel: Sel::WHOLE,
+            group: NOGROUP,
+            global: true,
+        });
+        self.names.defs[m as usize].insert(0, ri);
+        self.names.gens[m as usize] += 1;
+        self.sources.insert(m, i);
+        self.reresolve(
+            m,
+            Pos {
+                parent: ROOT,
+                ord: 0,
+            },
+        );
+        NodeId(i)
+    }
+
+    /// The named source `key` removed (the file is gone): its readers
+    /// read it as absent. False if there was none.
+    pub fn remove_source(&mut self, key: &[u8]) -> bool {
+        let Some(m) = self.name_id(&source_spelling(key)).map(|n| n.0) else {
+            return false;
+        };
+        let Some(i) = self.sources.remove(&m) else {
+            return false;
+        };
+        let at = Pos {
+            parent: ROOT,
+            ord: 0,
+        };
+        self.remove_def(m, at);
+        self.reresolve(m, at);
+        // (the input itself stays, read by nothing now: a root node is
+        // never unlinked)
+        self.n.val[i as usize] = L::Val::default();
+        true
     }
 
     /// Set an input's value.
@@ -3040,10 +3134,13 @@ impl<L: Lang, const P: bool> Graph<L, P> {
             let b = match &res {
                 Step::Next { st, .. } => st.bytes(),
                 Step::Done(v) => v.bytes(),
+                Step::Call { .. } => 0,
             };
             self.rep.state_max = self.rep.state_max.max(b);
             self.rep.state_sum += b as u64;
         }
+        // (read now: a nested unfold running in the sweep reuses `em`)
+        let call_ix = self.em.call;
         self.rep.merged += u64::from(self.em.merged);
         if P {
             let em = &mut self.em;
@@ -3094,6 +3191,16 @@ impl<L: Lang, const P: bool> Graph<L, P> {
         }
         self.em.reads = reads;
         self.sweep(s, &ids, &mut os);
+        // (a call ran in the sweep: the step depends on its result, so an
+        // edit inside the called unfold that changes it resumes here)
+        let call = call_ix.map(|ix| ids[ix as usize]);
+        if let Some(c) = call {
+            os.push(Opd {
+                src: c,
+                sel: Sel::WHOLE,
+                name: NONE,
+            });
+        }
         // (readers of what the step defines, now that its sources have
         // their values)
         if !touched.is_empty() {
@@ -3152,6 +3259,16 @@ impl<L: Lang, const P: bool> Graph<L, P> {
             Step::Next { st, key } => {
                 let ver = st.ver();
                 self.set_val(s, st);
+                self.successor(s, u, ui, key, end_cursor, idx, grp_out, ver)
+            }
+            Step::Call { key } => {
+                let c = call.expect("Step::Call after StepCx::call");
+                let v = self.n.val[c as usize].clone();
+                let ver = v.ver();
+                self.set_val(s, v);
+                // (the call's result was set while it ran in the sweep,
+                // before this step read it: not a reason to run again)
+                self.n.h[s as usize].flags &= !DIRTY;
                 self.successor(s, u, ui, key, end_cursor, idx, grp_out, ver)
             }
         }
@@ -4844,6 +4961,7 @@ impl<L: Lang, const P: bool> Graph<L, P> {
         let puo = p.n.opds_of(pu).to_vec();
         let mut pval = std::mem::take(&mut p.n.val);
         let count = k as usize;
+        let mut dpos: Vec<Pos> = Vec::new();
         let mut pk = Pack {
             hdrs: Vec::with_capacity(count),
             vals: Vec::with_capacity(count),
@@ -4926,6 +5044,7 @@ impl<L: Lang, const P: bool> Graph<L, P> {
                     let si = &p.steps[h.aux as usize];
                     let d0 = pk.defs.len() as u32;
                     for d in &p.names.recs[si.d0 as usize..(si.d0 + si.dn) as usize] {
+                        dpos.push(d.pos());
                         pk.dorder.push((d.name, pk.defs.len() as u32, r));
                         pk.defs.push(DefRec {
                             name: d.name,
@@ -5024,7 +5143,13 @@ impl<L: Lang, const P: bool> Graph<L, P> {
             ));
         }
         pk.rnames.sort_unstable();
-        pk.dorder.sort_unstable();
+        // (by name, then by position: a step's own definitions come before
+        // its nested unfolds' steps' in the numbering, but those of a call
+        // made before them precede them in position)
+        pk.dorder.sort_unstable_by(|a, b| {
+            a.0.cmp(&b.0)
+                .then_with(|| p.n.cmp_pos(dpos[a.1 as usize], dpos[b.1 as usize]))
+        });
         let pui = p.n.h[pu as usize].aux as usize;
         pk.end = p.unfolds[pui].parked.map(|e| Parked {
             s: map[e.s as usize],

@@ -73,17 +73,14 @@ impl<L: Lang, const P: bool> Graph<L, P> {
             let st = self.n.read(&prev_o);
             L::step(self.n.h[s as usize].op, &st, &args, &mut cx)
         };
-        let out = match &res {
-            Step::Next { st, .. } | Step::Done(st) => st.ver(),
-        };
-        assert!(
-            out == self.n.val[s as usize].ver(),
-            "check: step %{s} makes {:?} but holds {:?}",
-            match res {
-                Step::Next { st, .. } | Step::Done(st) => st,
-            },
-            self.n.val[s as usize]
-        );
+        // (a call's result is the called unfold's value, checked with it)
+        if let Step::Next { st, .. } | Step::Done(st) = &res {
+            assert!(
+                st.ver() == self.n.val[s as usize].ver(),
+                "check: step %{s} makes {st:?} but holds {:?}",
+                self.n.val[s as usize]
+            );
+        }
         // its members, in order: the big emissions
         let kids = self.children(s);
         let mut bigs = em.bigs.clone();

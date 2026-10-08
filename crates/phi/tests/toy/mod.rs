@@ -177,6 +177,9 @@ pub enum Op {
     UseW,
     /// The words of a hook (an append list), joined; counted (`USEH`).
     Hook,
+    /// An `\\input` file (a called unfold): as the document, its result
+    /// its last state, which the document goes on from.
+    File,
 }
 
 /// Names with their values shown (`None`: undefined).
@@ -614,6 +617,8 @@ fn step(op: Op, mut st: St, cx: &mut StepCx<'_, Toy>) -> Step<TV> {
     let Some(t) = rd.next() else {
         return if matches!(op, Op::Box(_)) {
             Step::Done(TV::Int(st.width))
+        } else if op == Op::File {
+            Step::Done(TV::st(st))
         } else {
             Step::Done(TV::Unit)
         };
@@ -629,6 +634,7 @@ fn step(op: Op, mut st: St, cx: &mut StepCx<'_, Toy>) -> Step<TV> {
         rd.cx.define(par, Arg::Local(p), true);
     }
     let here = rd.cx.cursor().0 ^ (rd.at as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+    let mut called = false;
     match t {
         Tok::Word(w) => {
             if matches!(op, Op::Box(_)) {
@@ -643,7 +649,7 @@ fn step(op: Op, mut st: St, cx: &mut StepCx<'_, Toy>) -> Step<TV> {
         Tok::Close => rd.cx.close_group(),
         Tok::Cs(c) => match &*c {
             "par" => {
-                if op == Op::Doc {
+                if matches!(op, Op::Doc | Op::File) {
                     let init = rd.cx.lit(dp_init());
                     let w = rd.cx.lit(TV::Int(WIDTH));
                     let lines = rd.cx.scan(
@@ -889,6 +895,32 @@ fn step(op: Op, mut st: St, cx: &mut StepCx<'_, Toy>) -> Step<TV> {
                     REACH.with(|c| *c.borrow_mut() = r);
                 }
             }
+            "input" => {
+                // (a file, read as a named source: a continuation call, from
+                // input the document read itself, not a macro's)
+                let f = rd.word();
+                if rd.rest().is_empty()
+                    && let Some(src) = rd.cx.source(f.as_bytes())
+                {
+                    let init = rd.cx.lit(TV::st(St {
+                        conds: st.conds.clone(),
+                        width: st.width,
+                        ..St::default()
+                    }));
+                    rd.cx.call(Op::File, src, Arg::Local(init), &[]);
+                    called = true;
+                }
+            }
+            "iffileexists" => {
+                let f = rd.word();
+                let w = if rd.cx.source(f.as_bytes()).is_some() {
+                    "yes"
+                } else {
+                    "no"
+                };
+                let l = rd.cx.lit(TV::Word(w.into(), w.len() as i64));
+                word(op, par, &mut rd, Arg::Local(l), here);
+            }
             "scoped" => {
                 // (a group opened, `count` redefined in it and closed, all in
                 // this step; then `count` read: the outer one, in `sc`)
@@ -952,6 +984,9 @@ fn step(op: Op, mut st: St, cx: &mut StepCx<'_, Toy>) -> Step<TV> {
         let cur = rd.cx.cursor().0;
         phi::ver::hash64(&(cur, &rest))
     };
+    if called {
+        return Step::Call { key };
+    }
     st.pending = rest;
     Step::Next {
         st: TV::st(st),
