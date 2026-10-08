@@ -23,6 +23,7 @@ Contents:
 4. Where the code stands, and the work
 5. Performance, observability and the text form
 6. Risks and open questions
+7. The φ core
 - A. Old section numbers
 
 ---
@@ -3785,6 +3786,498 @@ gives the same values; printed again, the same text.
   bound is the largest step's, 12.4x.
 - **Read-set sizes** for expl3 documents are to be measured on the
   latex3 corpus.
+
+---
+
+## 7. The φ core (2026-10-08, design for review)
+
+`crates/phi` (package `phi`): a dataflow core that knows nothing of TeX.
+The engine will be ported onto it (branch `pure-ssa` designs the TeX
+side: ops, value kinds, node counts). It exists because chapter 3, as
+built, records reads and writes around opaque chunks of an imperative
+engine, and every attempt to make it finer drifted back there, because
+the engine could reach around the model. In φ, **an op receives its
+operand values and returns its results; it has no `&mut` to anything**,
+so an impure op cannot be written against the API (7.9 says exactly
+what the type system does and does not exclude).
+
+The core is chapter 3's invariant made structural:
+
+> A node runs again if and only if a version it read changed; the change
+> stops at a node whose read results come out equal. The graph is built
+> by evaluating it, and an edit rebuilds only what it reaches.
+
+It depends on no crate of the workspace (a test fails if it does,
+7.12), builds for `wasm32-unknown-unknown` with one thread, and has no
+`unsafe`.
+
+### 7.1 Overview
+
+```text
+ Seq (persistent, Poly-versioned) ──► input nodes ─┐
+                                                   ▼
+ Graph<L>: one arena of nodes, struct of arrays    scan / unfold nodes
+   leaf  = op(operands) → value                    (steps emit children,
+   step  = op(state, operands, names read) →        read and define names)
+           (children, defs, next state)                  │
+   effect / barrier / publish / cross                    ▼
+ the name store (reaching definitions, scopes)    chains (ordered effects)
+ the worklist (push, by position) ◄── edits        cross-run slots (μ)
+ Executor: sequential | threads (rounds, validate, commit in order)
+ Memo: content-addressed, Codec + Evict hooks      passes: DVE, CSE, fold
+```
+
+A client implements `Lang` (its value enum and op enum). The core
+evaluates; the client never holds the graph during an op.
+
+### 7.2 Values and fields (primitive 1)
+
+```rust
+#[repr(C, packed(8))] pub struct Ver(pub u128);    // partex-ssa's, copied
+pub trait Value: Clone + Send + Sync + 'static {
+    fn ver(&self) -> Ver;                           // O(1): cached in composites
+    fn field(&self, f: u32) -> Option<Self> { None }
+    fn field_ver(&self, f: u32) -> Ver;             // default: field(f)'s ver
+}
+pub enum Sel { Whole, Field(u32), Name(NameId) }    // what an operand reads
+```
+
+- A version is the content's: scalars by value, composites as a Merkle
+  hash of their parts' versions made when the value is made (the stable
+  128-bit hasher of `partex-ssa::hash`, copied, not depended on).
+- A derived value's *memo key* is `Ver::node(op, operand versions)`
+  (7.8). Its *version*, which cutoff compares, is its content's: a node
+  whose operands changed but whose result is equal stops propagation.
+- An operand reads `(node, Sel)`. When a node's value changes from `old`
+  to `new`, each reader is woken only if `old.field_ver(f) !=
+  new.field_ver(f)` for the field it reads. The old value is held only
+  during that comparison.
+- Forces it: the page builder reads a box's height and depth, not its
+  list; a glyph's metrics, not its identity; a step reads `\foo`, not
+  the whole environment.
+
+### 7.3 Nodes and purity classes (primitive 2)
+
+```rust
+pub trait Lang: Sized + 'static {
+    type Val: Value;
+    type Op: Copy + Eq + core::hash::Hash + Send + Sync + 'static;
+    fn eval(op: Self::Op, args: Args<'_, Self>) -> Self::Val;                 // leaf
+    fn step(op: Self::Op, st: &Self::Val, args: Args<'_, Self>,
+            cx: &mut StepCx<'_, Self>) -> Step<Self::Val>;                     // 7.4
+    fn scan(op: Self::Op, st: &Self::Val, x: &Self::Val,
+            args: Args<'_, Self>) -> (Self::Val, Self::Val);                  // 7.6
+    fn memo(op: Self::Op) -> bool { false }                                   // 7.8
+    fn ver_op(op: Self::Op) -> u64;                                           // memo keys
+}
+pub enum Class { Pure, Effect(Chain), Barrier, Publish(Slot), Cross(Slot) }
+pub struct Args<'a, L> { /* operand values, by index; Copy */ }
+impl<'a, L: Lang> Args<'a, L> { pub fn get(&self, i: usize) -> &'a L::Val; pub fn len(&self) -> usize; }
+```
+
+- A node is an op, a class, and operands. Kinds: *leaf* (`eval`),
+  *input* (a value set by the client between runs), *scan* (7.6),
+  *unfold* (a scan whose steps are nodes, 7.4), *step* (one step of an
+  unfold).
+- Classes:
+  - `Pure`.
+  - `Effect(c)`: the value is a payload on chain `c`, ordered within the
+    chain by position (7.7). Evaluation is still pure; only the commit
+    is ordered.
+  - `Barrier`: orders every chain's effects around it.
+  - `Publish(s)` and `Cross(s)`: the cross-run pair (7.7).
+- Dispatch is `L::eval`, a `match` over the client's op enum, so the
+  engine is monomorphised over `L` and the hot path has no `dyn`.
+- Forces it: `\write` and the PDF's bytes are effects on chains; a
+  `\ref` reads what `\label` wrote last run; `hpack` and `line_break`
+  are pure.
+
+### 7.4 Dynamic construction and stable keys (primitive 3)
+
+The graph is built by evaluating it. Only steps create nodes.
+
+```rust
+pub enum Step<V> { Next { st: V, key: u64 }, Done(V) }
+pub struct StepCx<'s, L> { /* the step's emission buffer; brand 's */ }
+impl<'s, L: Lang> StepCx<'s, L> {
+    pub fn next(&mut self) -> Option<&L::Val>;          // consume an input element
+    pub fn peek(&self, k: usize) -> Option<&L::Val>;    // consume() must follow a peek it depends on
+    pub fn read(&mut self, n: NameId) -> Option<&L::Val>;   // a name at this position (7.5)
+    pub fn emit(&mut self, op: L::Op, class: Class, args: &[Arg<'s>]) -> Local<'s>;
+    pub fn emit_unfold(&mut self, op: L::Op, input: Arg<'s>, init: Arg<'s>, args: &[Arg<'s>]) -> Local<'s>;
+    pub fn emit_scan(&mut self, op: L::Op, input: Arg<'s>, init: Arg<'s>, args: &[Arg<'s>]) -> Local<'s>;
+    pub fn key(&mut self, k: u64);                      // the next emit's key (default: its ordinal)
+    pub fn define(&mut self, n: NameId, v: Arg<'s>, global: bool);
+    pub fn open_group(&mut self);  pub fn close_group(&mut self);
+    pub fn name(&mut self, spelling: &[u8]) -> NameId;  // content-addressed (7.5)
+    pub fn cancelled(&self) -> bool;
+}
+pub enum Arg<'s> { Local(Local<'s>), Up(u16), Name(NameId), Field(Local<'s>, u32), Lit(/* constant node */) }
+```
+
+- **The unfold.** An unfold node has an input (a `Seq`), an initial
+  state and operands. Its first step runs on the initial state; each
+  step consumes input elements (`next`), reads names, emits children,
+  defines names, and returns the next state and the next step's key,
+  or `Done(result)`. The steps are nodes, in a linked list under the
+  unfold; a step's children are its own region. A macro call is a step
+  that emits nothing: it rewrites the input, which is the state (the
+  pending tokens) plus the core's cursor in the `Seq`.
+- **Regions and scoping.** A step can only refer to what it holds: its
+  unfold's operands (`Up(i)`), names (resolved by the core), and the
+  `Local`s it emitted in this call. `Local<'s>` carries an invariant
+  brand lifetime, so a handle cannot escape the call (it cannot be put
+  in a `'static` value nor passed to another step). A node in a region
+  is therefore read from outside only through names or through its
+  step's state, so replacing a region never leaves a dangling edge.
+- **Keys.** A node's identity is `(parent, key)`. A step's key is the
+  client's (TeX: the stable id of the element where the step starts,
+  with the expansion it came from); a child's is its ordinal unless the
+  step gives one. When a step runs again, its new emissions are matched
+  to its old children by key: a match keeps the old node's id, value
+  and readers; it is re-evaluated only if its op or operands differ or
+  an operand's version changed. Unmatched old children are removed.
+- **Resync and convergence.** When a step runs again and returns
+  `Next { st, key }`, the core compares with the old successor: if its
+  key is the same, its input cursor maps to the same old element and
+  `st` has the same version, the old successor and everything after it
+  are kept (convergence: the rest of the region is not visited). If not,
+  the core finds the old step with that key (a map per unfold), removes
+  the old steps in between with their regions, and runs the new step.
+  An unmatched key inserts a new step. So a flipped conditional, a
+  macro that now takes another argument, or a paragraph merged with the
+  next replaces exactly the steps between the edit and the point where
+  the state comes out equal.
+- **Input edits.** When an unfold's input `Seq` changes, the core diffs
+  old and new (7.6: equal subtrees skipped by version), finds the step
+  that consumed the first changed element (each step keeps the count it
+  consumed and the core keeps a map from a step's first element to the
+  step), and runs it again. Steps before it read nothing that changed
+  and are not visited.
+- **Keys decide reuse, never results.** A wrongly matched node is
+  re-evaluated because its op or operands differ, and its readers are
+  woken by version as always. So a key collision (keys are hashed to 32
+  bits in the node table) costs work, not correctness, and the random
+  edit tests check that.
+- **Why this keying, against the alternatives.**
+  - *Adapton* names thunks explicitly and globally, and dirties
+    demand-driven: an edit marks every transitive dependent dirty
+    before re-evaluating, with no cutoff during the marking. A preamble
+    `\def` would mark the document. φ propagates by push in position
+    order with cutoff at each node (self-adjusting computation's change
+    propagation), and names are scoped to a parent, so uniqueness is
+    local and an ordinal is a safe default.
+  - *Salsa* keys queries by interned arguments and verifies by pulling
+    from what is demanded: each revision walks the dependencies of the
+    outputs (the PDF), O(document) per keystroke. Durability only
+    coarsens that. It has no ordered program, no scoped names and no
+    sequence reuse. φ takes from it backdating (early cutoff),
+    interning (names), and the iterated cycle (7.7).
+  - *Self-adjusting computation* (Acar) re-executes a changed
+    function's interval and matches memoized calls inside it in order.
+    φ's resync is that matching, with keys instead of call equality,
+    bounded by convergence of the state instead of by the end of the
+    interval, which is what TeX's sequential main loop needs.
+- Forces it: macro expansion rewrites the input; `\if` reads one arm;
+  `\csname` creates a name; an edit that flips a conditional replaces a
+  subgraph and the rest of the document must be found again, not
+  rebuilt.
+
+### 7.5 Names: reaching definitions with scopes (part of primitives 3 and 5)
+
+A step's state is not an environment threaded through every step:
+that is the cursor chain V8 left the sea of nodes for (3.9). Names are
+an index of definitions by position, chapter 3.2's definition index made
+generic.
+
+```rust
+pub struct NameId(u32);         // interned from a 64-bit content hash of the spelling
+```
+
+- `define(n, v, global)` at a step is a definition of `n` at that
+  position: the value of node `v`. `open_group`/`close_group` are scope
+  events at positions. A definition is *alive* at position `t` if it is
+  global or its group has not closed before `t`.
+- A read of `n` at `t` resolves to the latest definition before `t`
+  that is alive at `t`: TeX's save stack, including `\global` inside
+  groups (checked against §279–§283 in the tests). A group's end makes
+  no node and no definition; it only ends lives.
+- A read is an edge to the defining node with `Sel::Name(n)`, so it is
+  woken when that value changes (field-level, 7.2). Inserting or
+  removing a definition, or moving a group's close, re-resolves the
+  readers of `n` in the affected range: those whose old definition's
+  range it cuts. They are found through the old definitions' reader
+  lists.
+- Name ids are interned from a stable 64-bit hash of the spelling. The
+  table is the core's, never seen by an op, so the numbering does not
+  affect results.
+- Children read names statically: `Arg::Name(n)` resolves at the
+  child's position. So `\the\count1` makes a node that depends on
+  `\count1`, while the step that made it does not.
+- Memory: the index holds every live definition. Folding steps (7.10)
+  keeps only a run's net definitions (3.2's measurement: 95% are
+  overwritten within 1,024 commands).
+- Forces it: `\def`, `\let`, registers, catcodes as names; groups that
+  open in one paragraph and close in another; `\global`.
+
+### 7.6 Persistent sequences and scans (primitives 4 and 5)
+
+```rust
+pub struct ElemId(pub u64);
+pub trait Measure<T>: Clone + Send + Sync { type S: Copy + Send + Sync; fn of(x: &T) -> Self::S; fn op(a: Self::S, b: Self::S) -> Self::S; const ID: Self::S; }
+pub struct Seq<T, M = ()> { /* Arc'd B-tree, B = 32 */ }
+impl<T: Value, M: Measure<T>> Seq<T, M> {
+    pub fn splice(&self, at: usize, del: usize, ins: impl IntoIterator<Item = (ElemId, T)>) -> Self;
+    pub fn get(&self, i: usize) -> Option<(ElemId, &T)>;
+    pub fn ver(&self) -> Ver;                       // Poly: independent of shape
+    pub fn measure(&self) -> M::S;  pub fn prefix(&self, i: usize) -> M::S;  // O(log n)
+    pub fn diff(&self, old: &Self) -> Hunk;         // common prefix/suffix, equal subtrees skipped
+    pub fn from_par<E: Executor>(items: Vec<(ElemId, T)>, e: &E) -> Self;
+}
+```
+
+- The tree is `partex-ssa::pvec`'s (32-way, `Arc` nodes, the two-lane
+  polynomial hash `Poly`, so a sequence's version is its content's
+  whatever its edit history). Elements carry an `ElemId` the client
+  assigns (deterministically), which is the identity steps and scans
+  key by. The version does not include ids.
+- Each tree node caches its measure, a monoid. Prefix sums are
+  O(log n), splices update O(log n) summaries, and building the tree
+  bottom-up over chunks is the parallel prefix (each subtree on a
+  worker).
+- **Scan** (`emit_scan`): `fold(L::scan, init, input)` with a state at
+  every element. The scan node keeps checkpoints (the state after each
+  element, every `k`th with a configurable stride) and its outputs, a
+  `Seq` keyed by the input's element ids. After its input changes it
+  diffs old and new, resumes at the checkpoint before the first changed
+  element, and after the last changed element stops at the first
+  checkpoint whose state has the old run's version at the same element;
+  the rest of the outputs is the old run's. Its value is
+  `(final state, outputs)`. The count of elements stepped is reported
+  (the tests assert it).
+- An unfold (7.4) is the same algorithm whose steps are nodes, consume
+  any number of elements and emit children.
+- Forces it: line breaking is a DP over a paragraph whose state (the
+  active breakpoints) comes out equal a few lines after an edit; the
+  page builder is a scan over the vertical list; `\count0`, footnote and
+  section numbers are prefix sums; the main loop over the source is an
+  unfold.
+
+### 7.7 Effects, barriers and the cross-run fixed point (primitive 6)
+
+- **Chains.** An `Effect(c)` node's value is a payload. The chain is
+  the payloads of its live effect nodes in position order, kept as a
+  sorted index per chain. Chains are unordered with respect to each
+  other except at barriers: a `Barrier` node splits every chain into
+  segments, and a sink receives segment by segment. Evaluation is never
+  ordered by effects; only commit is (`Graph::chain(c)`,
+  `Graph::segments()`).
+- **Cross-run.** `Publish(s)` nodes give slot `s` its value for the next
+  run (the last in position order, or absent). `Cross(s)` nodes read
+  slot `s`. A run:
+  1. predicts each slot from the last run (in the session, or the memo
+     store's persisted copy, 7.8);
+  2. propagates to quiescence;
+  3. compares each read slot's prediction with what was published;
+  4. for each mismatch, sets the `Cross` nodes' value and wakes their
+     readers: only the slice that reads the slot runs again;
+  5. repeats until no slot changes, at most `max_iters` (default 5),
+     else stops and reports the oscillating slots (3.9's bound).
+
+  A correct prediction costs no extra iteration, and the tests count
+  them.
+- Forces it: `\write` to `.aux`, `.toc`, `.idx` and the log are chains;
+  `\openout` truncation and `\shipout`'s order across streams are
+  barriers; `\ref`, `\pageref`, `\cite` and the `.toc` are slots.
+
+### 7.8 The memo store (primitive 8)
+
+```rust
+pub trait Codec<V> { fn encode(&self, v: &V, out: &mut Vec<u8>); fn decode(&self, b: &mut &[u8]) -> Option<V>; }
+pub trait Evict { fn touch(&mut self, k: Ver, bytes: usize); fn victims(&mut self, budget: usize) -> Vec<Ver>; }
+pub struct Memo<L: Lang, E: Evict = Lru> { /* Ver -> (L::Val, bytes) */ }
+impl<L: Lang, E: Evict> Memo<L, E> {
+    pub fn get(&mut self, k: Ver) -> Option<&L::Val>;  pub fn put(&mut self, k: Ver, v: L::Val, bytes: usize);
+    pub fn save<C: Codec<L::Val>>(&self, c: &C, out: &mut Vec<u8>);
+    pub fn load<C: Codec<L::Val>>(&mut self, c: &C, b: &[u8]) -> Result<(), Error>;
+}
+```
+
+- Keys are content: `Ver::node(L::ver_op(op), operand versions)` for a
+  leaf, `(op, init version, element version, state version)` for a scan
+  checkpoint. So entries are valid across builds and across documents
+  (a paragraph broken once is broken for every document with the same
+  paragraph and parameters).
+- Probed only for ops that opt in (`L::memo`): a probe costs a hash and
+  a lookup, more than a small op. Node identity (7.4) is what reuses
+  work inside a session; the memo is for expensive ops and for cold
+  starts.
+- Eviction is a trait: LRU by bytes by default.
+- Persistence is a byte image through the client's `Codec`, with a
+  format version; a decode error drops the image, never a build.
+- Forces it: fonts, a TikZ picture, the line breaking of an unchanged
+  paragraph, a cold start after a restart.
+
+### 7.9 Purity, by type
+
+- An op's whole input is `Args<'_, L>` (shared references to operand
+  values) and, for a step, `&mut StepCx`, which only buffers emissions
+  and resolves reads through the core. No op signature mentions the
+  graph, the store, the worklist or another node's state; there is no
+  way to name them.
+- `L::Op: Copy` excludes owned interior mutability (`Cell`, `RefCell`
+  are not `Copy`). `L::Val: Send + Sync` excludes `Cell`/`RefCell` in
+  values.
+- `Local<'s>` is branded: emitted handles cannot escape their step (no
+  edges to nodes out of scope).
+- What the types do not exclude: a `static` with a `Mutex` or an
+  atomic, or a value holding an `Arc<Mutex<_>>`. Those are reviewed
+  away, and *check mode* (`Config::check`) evaluates every node that
+  propagation would reuse and asserts its value is equal, naming the op
+  that is not a function of its operands. The property tests run with
+  it on.
+
+### 7.10 Passes (primitive 9)
+
+Each pass preserves the graph's results; each fold says why it adds no
+dependency the unfolded graph lacks.
+
+- **Dead values.** A node with no reader, no definition, no chain or
+  slot and not its step's result keeps its structure (for matching) and
+  drops its value. No result reads it, so none changes.
+- **CSE.** Within one region, pure nodes with the same op and the same
+  operands (node and `Sel`) are merged; the second's readers read the
+  first. By purity their values are equal now and after any edit (they
+  read the same operands), so every reader sees the same versions.
+  Across regions the memo shares results instead, without merging
+  identities.
+- **Fold.** A *single-entry, single-exit* set of pure nodes in one
+  region (no member read from outside but the exit, no definitions,
+  effects or children) becomes one node holding its members' ops and
+  local wiring (about 16 bytes a member, against 7.11's ~70). Its
+  operands are the union of the members' outside operands.
+  *Argument:* the folded node reads exactly what its members read, so
+  every change that wakes it woke a member before; a member's value
+  was read only inside the set, so no reader loses an edge; the fold's
+  value is the composition of pure functions, equal to the exit's.
+  Cost: an operand change re-runs the whole set where one member might
+  have sufficed (interior cutoff is lost), never a wrong value.
+- **Step fold.** A run of consecutive steps whose intermediate states
+  are read only by the next step becomes one step: consumed counts
+  added, reads unioned, children concatenated, and only the run's *net*
+  definitions kept. *Argument:* a definition overwritten (or ended by a
+  group's close) inside the run reaches no position after the run, so
+  only members read it; the run's reads from outside are the union of
+  the members'. Cost: a change re-runs the run from its start.
+- A fold is undone (unfolded) when its node runs again more than
+  `refold_after` times in a session: granularity follows edits.
+
+### 7.11 Memory layout and cost
+
+The graph is one arena, struct of arrays, indexed by `NodeId(u32)`:
+
+| column | bytes | |
+|---|---|---|
+| `op: L::Op` | client (TeX: 4–8) | |
+| `meta: u32` | 4 | kind, class tag, depth, dirty/queued/dead bits |
+| `parent: u32`, `next: u32` | 8 | region tree and sibling list |
+| `ord: u64` | 8 | sibling order label (gaps; local relabeling) |
+| `key: u32` | 4 | hashed key, for matching only |
+| `args: u32` | 4 | first operand in the operand arena (arity in `meta`) |
+| `readers: u32` | 4 | head of the cross-region reader list |
+| `val: L::Val` | client (TeX: 8–16) | |
+| operand `(src u32, sel u32)` | 8 each | |
+| reader entry `(node u32, sel u32, next u32)` | 12 per cross-region edge | |
+
+- A leaf with two operands read inside its region: about 64 bytes with
+  an 8-byte op and a 16-byte value. Edges inside a region carry no
+  reverse entry: a region is swept in order when one of its nodes is
+  dirty, comparing operand versions against the values changed in the
+  sweep. Cross-region edges (names, `Up`) have reverse entries and push.
+- Positions are Dewey paths (`parent`, `ord`), compared in O(depth); a
+  depth is the nesting of unfolds, small in practice.
+- No per-node heap allocation: columns grow by amortized doubling,
+  removed nodes go to a free list reused after the run, operand and
+  reader arenas are compacted when half is dead. Steps' children,
+  definitions and reads are ranges in shared arenas.
+- Targets (measured at checkpoint 2, reported as they come out):
+  tens of ns per node evaluated (leaf, cold, sequential), tens of bytes
+  per unfolded node, 10⁸ nodes at checkpoint 3.
+
+### 7.12 The scheduler (primitive 7)
+
+- **Sequential** (the default, and wasm's): a cold build evaluates in
+  creation order, which is topological, with no queue. A rebuild pops
+  the worklist (a binary heap by position): a region sweep from its
+  first dirty child, a step to run, a scan to resume. In the acyclic
+  part each node runs at most once per change.
+- **Parallel** (`Executor` with width > 1, std threads, never on wasm):
+  rounds, as Block-STM runs a block.
+  1. Take the earliest dirty items up to a work budget.
+  2. Workers evaluate them against the graph as it is (shared, read
+     only during the round), each item locally in order, recording every
+     outside version it read (operands, names with the definition they
+     resolved to). Items further on are *speculative*: they use values
+     an earlier item may change.
+  3. The coordinator validates outcomes in position order as they
+     arrive, against the changes accepted earlier in the round: an
+     outcome whose read versions still hold is accepted, else its item is
+     requeued. Accepted outcomes are applied in position order at the
+     round's end (values, matched or new nodes, definitions, wakes).
+  4. *Cancellation:* when an accepted outcome changes a value that an
+     in-flight item reads statically, that item's flag is set; long ops
+     (scans, unfolds) poll `cancelled()` between steps. A new edit bumps
+     an epoch that cancels every item.
+- **Determinism.** Every op is a function of its operands, every
+  accepted outcome read the versions current at its position, and
+  every later change re-wakes its readers; in the acyclic part the
+  fixed point is unique, so any schedule ends in the sequential result.
+  The order only changes the wasted work. Tests compare the two runs'
+  values, chains and slots.
+- Forces it: a preamble `\def` wakes thousands of paragraphs at once;
+  a cold build is wide only if later chapters run from predicted states
+  (the last build's), validated as the chain reaches them; a keystroke
+  cancels the background convergence.
+
+### 7.13 The acceptance client and the tests
+
+A toy TeX-like language in `crates/phi/tests/toy/` (not TeX):
+- tokens are words and `\commands` in a `Seq`; the document is an
+  unfold over it;
+- `\def\x{body}` and macros that rewrite the input; `\csname`;
+- `\if<a><b> … \else … \fi` with only the taken arm read, as a nested
+  unfold, and a φ node at the join for each name the arm defined;
+- `{`/`}` groups with local definitions and `\global`;
+- a running counter (`\step`), and the same as a prefix sum;
+- words become a paragraph `Seq`, broken by a scan (a minimum-raggedness
+  DP), whose lines feed a page scan;
+- `\write{out}`/`\message` effects on two chains, a barrier;
+- `\label{k}` publishes, `\ref{k}` reads the slot.
+
+Tests (seeded PRNG, as the repo's other tests; no `proptest`):
+- after random edit sequences (words, macros, conditionals flipping,
+  names appearing and disappearing, groups moving), every node value,
+  chain and slot equals a fresh build's;
+- parallel equals sequential, at several widths and seeds;
+- a field nobody reads changes: zero downstream evaluations, asserted
+  exactly;
+- a scan resumes at the edit and stops at convergence: the elements
+  stepped, asserted exactly;
+- a correctly predicted slot costs zero extra iterations;
+- `deps`: `crates/phi/Cargo.toml` has no path or workspace dependency
+  (no TeX or PDF crate can creep in).
+
+Benches (criterion, `crates/phi/benches/phi.rs`): build+evaluate N
+leaves; rebuild after one leaf edit; scan resume; parallel scaling;
+memory per node (counted, not timed).
+
+### 7.14 Dependencies
+
+- `criterion` (dev only, default features off): asked for, and the
+  repo has no bench harness to reuse.
+- Nothing else. Threads are `std::thread::scope` and channels, the
+  PRNG is a xorshift, hashing is the copied `Stable`, serialization is
+  the client's `Codec` over a small framed format.
 
 ---
 
