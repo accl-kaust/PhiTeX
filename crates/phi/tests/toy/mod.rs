@@ -849,6 +849,42 @@ fn step(op: Op, mut st: St, cx: &mut StepCx<'_, Toy>) -> Step<TV> {
                 let pr2 = rd.cx.name(b"pr2");
                 rd.cx.define(pr2, Arg::Local(x), true);
             }
+            "scoped" => {
+                // (a group opened, `count` redefined in it and closed, all in
+                // this step; then `count` read: the outer one, in `sc`)
+                rd.cx.open_group();
+                let k = rd.cx.lit(TV::Int(999));
+                rd.cx.define(count, Arg::Local(k), false);
+                rd.cx.close_group();
+                let v = rd.cx.read(count).map_or(-1, |v| v.int());
+                let l = rd.cx.lit(TV::Int(v));
+                let sc = rd.cx.name(b"sc");
+                rd.cx.define(sc, Arg::Local(l), false);
+                if let Some(f) = st.conds.last_mut() {
+                    f.push(("sc".into(), false));
+                }
+            }
+            "retry" | "plus2" => {
+                // (`retry`: work done, then rolled back, then `plus2`'s; the
+                // graph must be `plus2`'s)
+                if c.as_ref() == "retry" {
+                    let m = rd.cx.mark();
+                    let a = rd.cx.leaf(Op::Add1, Class::Pure, &[Arg::Name(count)]);
+                    rd.cx.define(count, Arg::Local(a), false);
+                    let b = rd.cx.leaf(Op::Add1, Class::Pure, &[Arg::Name(count)]);
+                    rd.cx.open_group();
+                    let y = rd.cx.name(b"y");
+                    rd.cx.define(y, Arg::Local(b), false);
+                    let _ = rd.cx.leaf(Op::Show, Class::Pure, &[Arg::Local(b)]);
+                    rd.cx.reset(m);
+                }
+                let a = rd.cx.leaf(Op::Add1, Class::Pure, &[Arg::Name(count)]);
+                let b = rd.cx.leaf(Op::Add1, Class::Pure, &[Arg::Local(a)]);
+                rd.cx.define(count, Arg::Local(b), false);
+                if let Some(f) = st.conds.last_mut() {
+                    f.push(("count".into(), false));
+                }
+            }
             "twice" => {
                 // (the same leaf twice, merged by CSE; then, after a
                 // definition of the name it reads, the same leaf again,

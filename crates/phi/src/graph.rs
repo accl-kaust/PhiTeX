@@ -895,6 +895,10 @@ struct Emit<L: Lang> {
     ev: Vec<Ev<L::Op>>,
     cse_ev: Vec<(L::Op, bool)>,
     impure: Vec<L::Op>,
+    /// The step made a mark: CSE entries it drops are logged, so a reset
+    /// puts them back.
+    marked: bool,
+    cse_log: Vec<(u64, (u32, u32, u32))>,
 }
 
 impl<L: Lang> Default for Emit<L> {
@@ -916,6 +920,8 @@ impl<L: Lang> Default for Emit<L> {
             ev: Vec::new(),
             cse_ev: Vec::new(),
             impure: Vec::new(),
+            marked: false,
+            cse_log: Vec::new(),
         }
     }
 }
@@ -978,7 +984,26 @@ impl<L: Lang> Emit<L> {
         self.ev.clear();
         self.cse_ev.clear();
         self.impure.clear();
+        self.marked = false;
+        self.cse_log.clear();
     }
+}
+
+/// A point in a step to roll back to (`StepCx::mark`, `StepCx::reset`).
+#[derive(Clone, Copy, Debug)]
+pub struct Mark {
+    specs: u32,
+    args: u32,
+    bigs: u32,
+    defs: u32,
+    events: u32,
+    cse_log: u32,
+    merged: u32,
+    sub: u64,
+    next_key: Option<u64>,
+    grp: u64,
+    opened: u32,
+    idx: usize,
 }
 
 /// What a step sees and does besides its state and operands: its input,
@@ -1093,7 +1118,18 @@ impl<'s, L: Lang> StepCx<'s, L> {
             return Some(Proj::Owned((*p).clone()));
         }
         let o = if (n.0 as usize) < self.names.defs.len() {
-            resolve(self.g, self.names, self.groups, n.0, self.pos)
+            // (after a group this step closed: the name as it is past the
+            // close, as a leaf's operand resolves)
+            if self
+                .em
+                .events
+                .iter()
+                .any(|(e, _)| matches!(e, Event::Close(_)))
+            {
+                self.resolve_here(n.0)
+            } else {
+                resolve(self.g, self.names, self.groups, n.0, self.pos)
+            }
         } else {
             Opd {
                 src: NONE,
@@ -1113,8 +1149,20 @@ impl<'s, L: Lang> StepCx<'s, L> {
 
     fn arg(&self, a: Arg<'s>) -> SArg {
         match a {
-            Arg::Local(l) => SArg::Local(l.ix, Sel::WHOLE),
-            Arg::Field(l, f) => SArg::Local(l.ix, Sel::field(f)),
+            Arg::Local(l) => {
+                debug_assert!(
+                    (l.ix as usize) < self.em.specs.len(),
+                    "a Local made after a reset's mark"
+                );
+                SArg::Local(l.ix, Sel::WHOLE)
+            }
+            Arg::Field(l, f) => {
+                debug_assert!(
+                    (l.ix as usize) < self.em.specs.len(),
+                    "a Local made after a reset's mark"
+                );
+                SArg::Local(l.ix, Sel::field(f))
+            }
             Arg::Up(i) => {
                 let o = self.unfold_opds[i as usize];
                 SArg::Node(o.src, o.sel)
@@ -1181,7 +1229,11 @@ impl<'s, L: Lang> StepCx<'s, L> {
             }
             if (d, e) != (nd, ne) {
                 // (a later definition: the later read takes the entry)
-                self.em.cse.remove(&k);
+                if let Some(e) = self.em.cse.remove(&k)
+                    && self.em.marked
+                {
+                    self.em.cse_log.push((k, e));
+                }
             }
         }
         self.em.cse_pending = Some((k, nd, ne));
@@ -1425,6 +1477,64 @@ impl<'s, L: Lang> StepCx<'s, L> {
             })
             .collect();
         resolve_with(self.g, self.names, self.groups, m, self.pos, &closed)
+    }
+
+    /// A point to roll the step back to ([`StepCx::reset`]).
+    pub fn mark(&mut self) -> Mark {
+        self.em.marked = true;
+        #[allow(
+            clippy::cast_possible_truncation,
+            reason = "a step's emissions fit u32"
+        )]
+        Mark {
+            specs: self.em.specs.len() as u32,
+            args: self.em.args.len() as u32,
+            bigs: self.em.bigs.len() as u32,
+            defs: self.em.defs.len() as u32,
+            events: self.em.events.len() as u32,
+            cse_log: self.em.cse_log.len() as u32,
+            merged: self.em.merged,
+            sub: self.em.sub,
+            next_key: self.em.next_key,
+            grp: self.grp,
+            opened: self.opened,
+            idx: self.idx,
+        }
+    }
+
+    /// The step as it was at `m`: the emissions, definitions and group
+    /// events made since are gone, and the input is where it was. What
+    /// it read since stays read (a dependency too many is harmless) and
+    /// the names it made stay made. `Local`s made since must not be used
+    /// again. Everything after behaves as if the work since `m` had never
+    /// been done, so the graph is the one a step without it builds.
+    pub fn reset(&mut self, m: Mark) {
+        let em = &mut *self.em;
+        let n = m.specs as usize;
+        // (emissions from before the mark made big since: not big again)
+        for &ix in &em.bigs[m.bigs as usize..] {
+            if (ix as usize) < n {
+                em.specs[ix as usize].big = false;
+            }
+        }
+        em.bigs.truncate(m.bigs as usize);
+        em.specs.truncate(n);
+        em.vals.truncate(n);
+        em.args.truncate(m.args as usize);
+        em.defs.truncate(m.defs as usize);
+        em.events.truncate(m.events as usize);
+        while em.cse_log.len() > m.cse_log as usize {
+            let (k, e) = em.cse_log.pop().expect("logged");
+            em.cse.insert(k, e);
+        }
+        em.cse.retain(|_, e| (e.0 as usize) < n);
+        em.cse_pending = None;
+        em.merged = m.merged;
+        em.sub = m.sub;
+        em.next_key = m.next_key;
+        self.grp = m.grp;
+        self.opened = m.opened;
+        self.idx = m.idx;
     }
 
     /// The next node emitted is keyed by `k` instead of its ordinal.

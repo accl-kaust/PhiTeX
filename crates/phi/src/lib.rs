@@ -22,7 +22,7 @@ pub mod text;
 pub mod value;
 pub mod ver;
 
-pub use graph::{Arg, Args, Config, END, Graph, Kind, Local, NameId, NodeId, Report, StepCx};
+pub use graph::{Arg, Args, Config, END, Graph, Kind, Local, Mark, NameId, NodeId, Report, StepCx};
 pub use lang::{Chain, Class, Entry, Fam, Lang, Slot, Step};
 pub use seq::{ElemId, Hunk, Leaf, Measure, Seq};
 pub use text::{Dump, Line};
