@@ -4279,6 +4279,32 @@ impl<T: Value, M: Measure<T>> Seq<T, M> {
     barriers.
   - Each `\ref`, `\pageref` and `\cite` target is a slot.
   - The `.toc` is a family of slots, one per entry.
+- **Append lists, as built (3b).** LaTeX's hooks (`\AddToHook`) and
+  expl3's `\tl_put_right` / `\clist_put_right` append to a list
+  without reading it. They are effects on a chain whose identity is the
+  list: the append's operand is the payload alone, not the list's
+  version, so an append wakes nothing before it and reads nothing. A use
+  reads the chain with `StepCx::chain_before(c)`: the payloads before
+  the reader's position, in position order. (A `ChainRead` with the
+  `BEFORE` bit reads up to its position; a plain one reads the whole
+  chain.)
+  - Chains are kept in position order (`chains: Map<u32, Runs<u32>>`,
+    the same blocked runs as the name index, so an insert or a removal
+    is O(log n)).
+  - A changed payload wakes only the bounded readers after it
+    (`wake_chain_at`). So editing one append re-runs that append's step
+    and the uses after it, never another append and never a use before
+    it.
+  - A segment's chain reads (7.15) are marked dirty at the graft, since
+    the segment saw only its own payloads.
+  - Test: `an_append_list_reruns_only_what_follows_the_edit`. Forty
+    appends with a use in the middle and one at the end; an edit to the
+    30th append runs one hook evaluation and at most two steps, and
+    equals a fresh build. The toy's `\addto{h}{w}` and `\usehook{h}`
+    are in the random-edit test's snippets.
+- No relocatable values. The core has no offset or relocation
+  primitive. Positions are node identities (7.4), and what a client
+  would relocate it recomputes from the identities.
 
 ### 7.8 The memo store (primitive 8)
 
@@ -4610,6 +4636,54 @@ Everything else of the run is dropped, and compaction frees it.
   a cold build is wide only if later chapters run from predicted states
   (the last build's), validated as the chain reaches them; a keystroke
   cancels the background convergence.
+
+As built (3b, `graph/par.rs`). The rounds are simpler than the plan
+above: workers never apply anything. The coordinator stays the
+sequential scheduler, and an outcome only replaces running an op.
+
+1. When the heap's top is a dirty step, a round takes it and the dirty
+   steps after it along its unfold's step list (a walk, not heap
+   pops), up to the round size.
+2. Workers (`std::thread::scope`) run each step's op *dry*: against the
+   graph as it is, read only, into an emission buffer from a pool. Each
+   records what it read from outside, with versions: its state, the
+   unfold's operands, every name it read with that name's definition
+   generation (`NameTab::gens`, bumped by any insert or remove of a
+   definition of that name), every node operand, the group table's
+   generation, the name count, the input's version and the step's
+   position.
+3. The sequential run goes on as before. When it reaches a step with an
+   outcome, the outcome is used if all of these still hold (`holds`);
+   otherwise the op runs again. Either way the step is then matched,
+   swept and woken as before.
+
+- *Correctness* is the sequential run's, by construction. A used
+  outcome is the op's result on exactly the inputs the sequential run
+  would give it, because an op is a function of what it reads, and
+  every read is recorded and checked.
+- *Round size* adapts. It starts at 64 steps a worker and doubles, up to
+  4096 a worker, while at least 90% of a round's outcomes are used;
+  otherwise it halves.
+- *Gating:* one step in 32 is timed, and rounds run only when the mean
+  op cost is at least `Config::round_min_ns` (default 10 us). A cheap
+  op costs less to run in turn than its outcome costs to hand over:
+  thread start, allocation, cold cache.
+- *Measured* (`prof` with `PRE` and `HEAVY=20000`, about 75 us an op; a
+  preamble edit re-runs 20k steps): 1512 ms sequential, 483 ms at W=4,
+  263 ms at W=8.
+- *Tests:* the random-edit test keeps a third document with
+  `workers = 2`, `round_min_ns = 0` and a 4 KB memo store. It is
+  compared with the sequential one after every edit, and asserts that
+  outcomes were used.
+
+Cancellation, as built: `Graph::cancel_token()` gives an
+`Arc<AtomicBool>` that another thread may set. The run polls it between
+work items, workers poll it between dry steps, and a long op may poll
+it through `StepCx::cancelled()`. A cancelled run returns at once with
+`Report::cancelled`. Its remaining work stays queued (dirty flags and
+the heap are untouched), the flag is cleared, and the next `run`
+finishes the job. The result equals an uncancelled run's
+(`a_cancelled_run_leaves_its_work_for_the_next`).
 
 ### 7.13 The acceptance client and the tests
 

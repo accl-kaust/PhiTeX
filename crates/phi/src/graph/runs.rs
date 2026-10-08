@@ -1,8 +1,11 @@
 //! A sorted list kept in runs (DESIGN 7.5): blocks of at most `2 RB`
-//! entries, with each block's start index. Finding a place is a binary
-//! search over the blocks then inside one; inserting or removing moves at
-//! most a block's entries and the block starts after it, so a name read
-//! or defined a million times costs O(log R + RB) a change, not O(R).
+//! entries, their lengths in a Fenwick tree (so a block's start index is
+//! a prefix sum). Finding a place is a binary search over the blocks then
+//! inside one; inserting or removing moves at most a block's entries and
+//! updates O(log B) sums, so a name read or defined a million times costs
+//! O(log R + RB) a change, not O(R). (A block split, or a middle block
+//! emptied, rebuilds the sums: O(B), after at least `RB` changes to that
+//! block.)
 
 /// Entries a block holds at most twice.
 const RB: usize = 128;
@@ -10,8 +13,9 @@ const RB: usize = 128;
 #[derive(Clone, Debug)]
 pub(crate) struct Runs<T> {
     blocks: Vec<Vec<T>>,
-    /// Each block's first entry's index.
-    starts: Vec<usize>,
+    /// The blocks' lengths, as a Fenwick tree (`fen[k]`, 1-based: the
+    /// lengths of blocks `k - lowbit(k) .. k`).
+    fen: Vec<usize>,
     len: usize,
 }
 
@@ -19,7 +23,7 @@ impl<T> Default for Runs<T> {
     fn default() -> Self {
         Runs {
             blocks: Vec::new(),
-            starts: Vec::new(),
+            fen: vec![0],
             len: 0,
         }
     }
@@ -36,8 +40,65 @@ impl<T> Runs<T> {
 
     /// The block holding index `i` (`i < len`), and the index in it.
     fn locate(&self, i: usize) -> (usize, usize) {
-        let b = self.starts.partition_point(|&s| s <= i) - 1;
-        (b, i - self.starts[b])
+        let n = self.blocks.len();
+        let (mut pos, mut rem) = (0, i);
+        let mut step = if n == 0 { 0 } else { 1 << n.ilog2() };
+        while step > 0 {
+            if pos + step <= n && self.fen[pos + step] <= rem {
+                pos += step;
+                rem -= self.fen[pos];
+            }
+            step >>= 1;
+        }
+        (pos, rem)
+    }
+
+    /// Block `b`'s first entry's index.
+    fn start(&self, b: usize) -> usize {
+        let (mut k, mut s) = (b, 0);
+        while k > 0 {
+            s += self.fen[k];
+            k &= k - 1;
+        }
+        s
+    }
+
+    /// Block `b`'s length changed by `d` (one, either way).
+    fn bump(&mut self, b: usize, up: bool) {
+        let mut k = b + 1;
+        while k < self.fen.len() {
+            if up {
+                self.fen[k] += 1;
+            } else {
+                self.fen[k] -= 1;
+            }
+            k += k & k.wrapping_neg();
+        }
+    }
+
+    /// A block appended at the end: its Fenwick entry.
+    fn push_block(&mut self, b: Vec<T>) {
+        let k = self.blocks.len() + 1;
+        let low = k & k.wrapping_neg();
+        let before = self.start(k - low);
+        self.len += b.len();
+        self.blocks.push(b);
+        self.fen.push(self.len - before);
+    }
+
+    /// The sums from the blocks' lengths, in O(B).
+    fn rebuild(&mut self) {
+        let n = self.blocks.len();
+        self.fen.clear();
+        self.fen.push(0);
+        self.fen.extend(self.blocks.iter().map(Vec::len));
+        for k in 1..=n {
+            let p = k + (k & k.wrapping_neg());
+            if p <= n {
+                self.fen[p] += self.fen[k];
+            }
+        }
+        self.len = self.blocks.iter().map(Vec::len).sum();
     }
 
     pub(crate) fn get(&self, i: usize) -> Option<&T> {
@@ -57,33 +118,22 @@ impl<T> Runs<T> {
         if b == self.blocks.len() {
             return self.len;
         }
-        self.starts[b] + self.blocks[b].partition_point(pred)
-    }
-
-    fn restart(&mut self, from: usize) {
-        let mut s = if from == 0 {
-            0
-        } else {
-            self.starts[from - 1] + self.blocks[from - 1].len()
-        };
-        for b in from..self.blocks.len() {
-            self.starts[b] = s;
-            s += self.blocks[b].len();
-        }
-        self.len = s;
+        self.start(b) + self.blocks[b].partition_point(pred)
     }
 
     pub(crate) fn push(&mut self, x: T) {
         match self.blocks.last_mut() {
-            Some(b) if b.len() < 2 * RB => b.push(x),
+            Some(b) if b.len() < 2 * RB => {
+                b.push(x);
+                self.len += 1;
+                self.bump(self.blocks.len() - 1, true);
+            }
             _ => {
-                self.starts.push(self.len);
                 let mut b = Vec::with_capacity(2 * RB);
                 b.push(x);
-                self.blocks.push(b);
+                self.push_block(b);
             }
         }
-        self.len += 1;
     }
 
     pub(crate) fn extend(&mut self, xs: impl IntoIterator<Item = T>) {
@@ -101,10 +151,23 @@ impl<T> Runs<T> {
         self.blocks[b].insert(k, x);
         if self.blocks[b].len() > 2 * RB {
             let tail = self.blocks[b].split_off(RB);
-            self.blocks.insert(b + 1, tail);
-            self.starts.insert(b + 1, 0);
+            if b + 1 == self.blocks.len() {
+                // (the last block: its entry fixed, the tail appended)
+                self.len -= tail.len();
+                self.len += 1;
+                self.fen.pop();
+                let head = self.blocks.pop().expect("a block");
+                self.len -= head.len();
+                self.push_block(head);
+                self.push_block(tail);
+            } else {
+                self.blocks.insert(b + 1, tail);
+                self.rebuild();
+            }
+        } else {
+            self.len += 1;
+            self.bump(b, true);
         }
-        self.restart(b);
     }
 
     pub(crate) fn remove(&mut self, i: usize) -> T {
@@ -112,14 +175,16 @@ impl<T> Runs<T> {
         let x = self.blocks[b].remove(k);
         if self.blocks[b].is_empty() {
             self.blocks.remove(b);
-            self.starts.remove(b);
-            if b < self.blocks.len() {
-                self.restart(b);
-            } else {
+            if b == self.blocks.len() {
+                // (the last block: its entry goes, no other holds it)
+                self.fen.pop();
                 self.len -= 1;
+            } else {
+                self.rebuild();
             }
         } else {
-            self.restart(b);
+            self.len -= 1;
+            self.bump(b, false);
         }
         x
     }
@@ -139,8 +204,7 @@ impl<T> Runs<T> {
             b.retain(&mut f);
         }
         self.blocks.retain(|b| !b.is_empty());
-        self.starts.truncate(self.blocks.len());
-        self.restart(0);
+        self.rebuild();
     }
 
     pub(crate) fn iter(&self) -> impl DoubleEndedIterator<Item = &T> {
@@ -179,7 +243,7 @@ impl<T> Runs<T> {
 
     pub(crate) fn shrink_to_fit(&mut self) {
         self.blocks.shrink_to_fit();
-        self.starts.shrink_to_fit();
+        self.fen.shrink_to_fit();
     }
 }
 
