@@ -2453,10 +2453,15 @@ What these say:
     (`scripts/pure-fields.py`; the address lists come from the names
     the run read).
   - The walk of the TikZ setup's path attributes 97% of its events to
-    one node. One command's step is that big: a huge `\edef` or `\xdef`
-    in pgfkeys or pgfmath, which expands for 650 K events. That is not a
-    dependency; it is a step's interior, and is listed as a hard case in
-    (a).
+    one node: the tracer's setup node, the format's load (653 K events,
+    630 K definitions), which the path starts from.
+    - The format is a constant of the build, not work. Without it the
+      setup path is about 24 K events on TikZ (about 470x) and about
+      0.83 M on the course (about 385x).
+    - The rest of the TikZ path is mainly expl3's
+      `\g__kernel_prg_map_int` (19 K events), a map-depth counter that
+      every `\seq_map` reads and writes, a true chain of the code as
+      written.
   - The preamble's reuse across builds is the content-addressed memo
     (3.17.7), not parallelism.
 - **Edits**, field-level re-evaluation from two traces diffed
@@ -2509,10 +2514,10 @@ What these say:
    - *alignments:* the column-width scan over rows, and `\span`/`\omit`
      changing templates;
    - *the `.aux` loop:* `Cross` slots per entry, with the rerun check;
-   - *huge single steps:* one `\edef` or `\xdef` that expands for
-     hundreds of thousands of events (pgfkeys, pgfmath). A step's
-     interior that big needs sub-step memoisation, the expansion of a
-     macro call keyed by its meaning and arguments, or it re-runs whole;
+   - *large steps:* one `\edef`, `\xdef` or `\message` whose expansion
+     is long (pgfkeys, pgfmath, expl3) is one step with a transient
+     interior. Memoising a macro call's expansion, keyed by its
+     meaning's and arguments' versions, is what keeps a re-run cheap;
    - *main-loop tail reads:* lig/kern with the previous item, read as
      the tail item only.
 
@@ -2559,8 +2564,8 @@ so an equal preamble (the same text, the same files by stamp) finds the
 last build's results in the memo store, as a whole or step by step
 until the first difference. Package loads are sequential in TeX, but
 what they define is mostly independent: the setup's path is 216x
-shorter than its work on the course and 17x on TikZ. The longest single
-contributors are single huge steps (3.17.6, item 4), not dependencies.
+shorter than its work on the course and 17x on TikZ. With the format's
+load counted as a constant, it is about 385x and 470x.
 
 #### 3.17.8 Enforcement and structural tests
 
@@ -2638,8 +2643,8 @@ must be carried over as fields and chains.
 **Risks.**
 1. Memory: 196 M nodes on the course. Without sealing and the stronger
    fold rules the graph does not fit in a session (25 GB unfolded).
-2. Huge single steps (pgfkeys `\edef`s of 650 K events) need sub-step
-   memoisation, or a TikZ edit re-runs them whole.
+2. Large steps (long `\edef`s in pgfkeys and expl3) need memoised
+   expansion, or a TikZ edit re-runs them whole.
 3. Exactness at the seams the old mode fixed one by one (fonts' numbers,
    names made late, virtual object numbers, the log's flow). They carry
    over as fields and chains, but each must be re-proved under the
