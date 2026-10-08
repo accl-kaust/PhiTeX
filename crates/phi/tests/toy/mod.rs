@@ -184,6 +184,74 @@ thread_local! {
     pub static USEW: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     /// `Op::Hook` evaluations on this thread.
     pub static USEH: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// Line breaker scan elements stepped on this thread.
+    pub static BRK: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// The bytes of the values the memo store holds (hooks' words, the line
+/// breaker's windows and decisions).
+pub struct TvCodec;
+
+impl phi::memo::Codec<TV> for TvCodec {
+    fn encode(&self, v: &TV, out: &mut Vec<u8>) {
+        let ints = |out: &mut Vec<u8>, xs: &[i64]| {
+            out.extend_from_slice(&(xs.len() as u32).to_le_bytes());
+            for x in xs {
+                out.extend_from_slice(&x.to_le_bytes());
+            }
+        };
+        match v {
+            TV::Unit => out.push(0),
+            TV::Int(i) => {
+                out.push(1);
+                out.extend_from_slice(&i.to_le_bytes());
+            }
+            TV::Word(w, n) => {
+                out.push(2);
+                out.extend_from_slice(&(w.len() as u32).to_le_bytes());
+                out.extend_from_slice(w.as_bytes());
+                out.extend_from_slice(&n.to_le_bytes());
+            }
+            TV::Dp(d) => {
+                out.push(3);
+                ints(out, &d.0);
+                ints(out, &d.1);
+            }
+            _ => out.push(255),
+        }
+    }
+    fn decode(&self, b: &mut &[u8]) -> Option<TV> {
+        fn take<'a>(b: &mut &'a [u8], n: usize) -> Option<&'a [u8]> {
+            let (h, t) = b.split_at_checked(n)?;
+            *b = t;
+            Some(h)
+        }
+        fn i64_(b: &mut &[u8]) -> Option<i64> {
+            Some(i64::from_le_bytes(take(b, 8)?.try_into().ok()?))
+        }
+        fn u32_(b: &mut &[u8]) -> Option<usize> {
+            Some(u32::from_le_bytes(take(b, 4)?.try_into().ok()?) as usize)
+        }
+        fn ints(b: &mut &[u8]) -> Option<Vec<i64>> {
+            let n = u32_(b)?;
+            (0..n).map(|_| i64_(b)).collect()
+        }
+        match take(b, 1)?[0] {
+            0 => Some(TV::Unit),
+            1 => Some(TV::Int(i64_(b)?)),
+            2 => {
+                let n = u32_(b)?;
+                let w = std::str::from_utf8(take(b, n)?).ok()?.to_string();
+                Some(TV::Word(w.into(), i64_(b)?))
+            }
+            3 => {
+                let ws = ints(b)?;
+                let cs = ints(b)?;
+                Some(TV::Dp(Arc::new((ws, cs))))
+            }
+            _ => None,
+        }
+    }
 }
 
 pub struct Toy;
@@ -266,7 +334,10 @@ impl Lang for Toy {
 
     fn scan(op: Op, st: &TV, x: &TV, a: &Args<'_, Self>) -> (TV, TV) {
         match op {
-            Op::Break => break_step(st, x, a.get(0).int()),
+            Op::Break => {
+                BRK.with(|c| c.set(c.get() + 1));
+                break_step(st, x, a.get(0).int())
+            }
             Op::TocLine => {
                 // (a line from the entry; the state is nothing, so a changed
                 // entry changes its line only)
@@ -366,6 +437,10 @@ impl Lang for Toy {
             return None;
         }
         Some(TV::Word(w.into(), n.parse().ok()?))
+    }
+
+    fn memo(op: Op) -> bool {
+        matches!(op, Op::Hook | Op::Break)
     }
 
     fn op_tag(op: Op) -> u64 {

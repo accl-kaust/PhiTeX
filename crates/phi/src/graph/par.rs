@@ -16,7 +16,11 @@
 
 #![cfg_attr(
     target_arch = "wasm32",
-    allow(dead_code, unused_imports, reason = "no threads on wasm: rounds never run")
+    allow(
+        dead_code,
+        unused_imports,
+        reason = "no threads on wasm: rounds never run"
+    )
 )]
 
 use std::marker::PhantomData;
@@ -24,6 +28,7 @@ use std::sync::atomic::Ordering as AO;
 
 use super::{Args, DEAD, DIRTY, END, Emit, Graph, Kind, NONE, Opd, SArg, StepCx};
 use crate::lang::{Lang, Step};
+use crate::memo::{Codec, Memo, MemoError};
 use crate::seq::ElemId;
 use crate::value::Value;
 use crate::ver::Ver;
@@ -82,6 +87,7 @@ impl<L: Lang> Graph<L> {
                 ext: self.ext.as_deref(),
                 keep: self.cfg.keep_interior,
                 cancel: &self.cancel,
+                memo: &self.memo,
                 _brand: PhantomData,
             };
             let args = Args::of(&self.n, &uo[2..]);
@@ -249,6 +255,54 @@ impl<L: Lang> Graph<L> {
 
     #[cfg(target_arch = "wasm32")]
     pub(super) fn round(&mut self) {}
+
+    /// The memo store's byte budget (0, the default: no store).
+    ///
+    /// # Panics
+    ///
+    /// If a worker panicked holding the store.
+    pub fn set_memo_budget(&mut self, bytes: usize) {
+        let mut m = self.memo.lock().expect("the memo store");
+        m.budget = bytes;
+        if m.bytes() > bytes {
+            *m = Memo::default();
+            m.budget = bytes;
+        }
+    }
+
+    /// The memo store's (entries, bytes, probes, hits).
+    ///
+    /// # Panics
+    ///
+    /// If a worker panicked holding the store.
+    pub fn memo_stats(&self) -> (usize, usize, u64, u64) {
+        let m = self.memo.lock().expect("the memo store");
+        (m.len(), m.bytes(), m.probes, m.hits)
+    }
+
+    /// The memo store as an image (to load into another graph, later).
+    ///
+    /// # Panics
+    ///
+    /// If a worker panicked holding the store.
+    pub fn save_memo<C: Codec<L::Val>>(&self, c: &C) -> Vec<u8> {
+        let mut out = Vec::new();
+        self.memo.lock().expect("the memo store").save(c, &mut out);
+        out
+    }
+
+    /// Entries from an image, up to the budget.
+    ///
+    /// # Errors
+    ///
+    /// A bad image: the store is then left empty.
+    ///
+    /// # Panics
+    ///
+    /// If a worker panicked holding the store.
+    pub fn load_memo<C: Codec<L::Val>>(&mut self, c: &C, img: &[u8]) -> Result<(), MemoError> {
+        self.memo.lock().expect("the memo store").load(c, img)
+    }
 
     /// The flag that cancels a run (another thread may set it; the run
     /// clears it when it returns cancelled).

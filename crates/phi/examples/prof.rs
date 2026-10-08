@@ -49,6 +49,8 @@ enum O {
 
 struct B;
 
+static MEMO: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| std::env::var("MEMO").is_ok());
+
 impl Lang for B {
     type Val = V;
     type Op = O;
@@ -139,6 +141,10 @@ impl Lang for B {
     fn chain_val(items: Seq<V>) -> V {
         V::S(Box::new(items))
     }
+    /// (MEMO: every Add through the memo store)
+    fn memo(op: O) -> bool {
+        op == O::Add && *MEMO
+    }
     fn op_tag(op: O) -> u64 {
         match op {
             O::Nop => 0,
@@ -196,6 +202,9 @@ fn main() {
         let mut g: Graph<B> = Graph::new();
         g.cfg.workers = w;
         g.cfg.debug = std::env::var("DEBUG").is_ok();
+        if *MEMO {
+            g.set_memo_budget(1 << 30);
+        }
         if std::env::var("RESERVE").is_ok() {
             g.reserve(2 * n + 16, 4 * n);
         }
@@ -216,6 +225,9 @@ fn main() {
         );
         g.run();
         best = best.min(t.elapsed().as_secs_f64());
+        if *MEMO {
+            eprintln!("memo (entries, bytes, probes, hits): {:?}", g.memo_stats());
+        }
         if g.cfg.debug {
             eprintln!("interiors (op, steps, max, p99): {:?}", g.interior_sizes());
         }

@@ -423,3 +423,63 @@ fn a_cancelled_run_leaves_its_work_for_the_next() {
     assert_eq!(d.observe(), f.observe());
     assert_eq!(d.g.to_text(), f.g.to_text());
 }
+
+/// The memo store (DESIGN 7.8): a graph that loads another's image
+/// evaluates none of the memo ops it already holds (here the hooks' uses
+/// and every line breaker element), and builds the same document; a bad
+/// image leaves the store empty and the build exact.
+#[test]
+fn a_memo_image_spares_a_fresh_build_its_memo_ops() {
+    let mut src = String::new();
+    for p in 0..30 {
+        src += &format!(r"w{p} word{p} more{p} \addto{{h}}{{a{p}}} \par ");
+    }
+    src += r"\usehook{h} \par ";
+    let count = || (toy::USEH.with(|c| c.get()), toy::BRK.with(|c| c.get()));
+    let mut a = Doc::new(ids(lex(&src)));
+    a.g.set_memo_budget(1 << 20);
+    let c0 = count();
+    a.g.run();
+    let c1 = count();
+    assert!(c1.0 > c0.0 && c1.1 > c0.1, "{c0:?} {c1:?}");
+    let (entries, bytes, ..) = a.g.memo_stats();
+    assert!(entries > 0 && bytes > 0);
+    let img = a.g.save_memo(&toy::TvCodec);
+    // a fresh graph, the image loaded: no hook use, no breaker element
+    let mut b = Doc::new(ids(lex(&src)));
+    b.g.set_memo_budget(1 << 20);
+    b.g.load_memo(&toy::TvCodec, &img).expect("the image");
+    b.g.run();
+    assert_eq!(count(), c1);
+    let (_, _, probes, hits) = b.g.memo_stats();
+    assert!(hits > 0 && hits == probes, "{probes} {hits}");
+    let mut f = Doc::new(ids(lex(&src)));
+    f.g.run();
+    assert_eq!(b.observe(), f.observe());
+    assert_eq!(b.g.to_text(), f.g.to_text());
+    // an edit: only the paragraph's new words are stepped
+    let at = b
+        .toks
+        .iter()
+        .position(|t| t.1.text() == "word7")
+        .expect("word7");
+    b.splice(at, 1, lex("other"));
+    let c1 = count();
+    b.g.run();
+    let c2 = count();
+    assert!(c2.1 > c1.1 && c2.1 - c1.1 <= 4, "{c1:?} {c2:?}");
+    assert_eq!(c2.0, c1.0, "{c1:?} {c2:?}");
+    // a bad image: an empty store, the same build
+    let mut e = Doc::new(ids(lex(&src)));
+    e.g.set_memo_budget(1 << 20);
+    assert!(e.g.load_memo(&toy::TvCodec, &img[..img.len() - 1]).is_err());
+    assert_eq!(e.g.memo_stats().0, 0);
+    e.g.run();
+    assert_eq!(e.observe(), f.observe());
+    // a small budget is kept
+    let mut s = Doc::new(ids(lex(&src)));
+    s.g.set_memo_budget(256);
+    s.g.run();
+    assert!(s.g.memo_stats().1 <= 256);
+    assert_eq!(s.observe(), f.observe());
+}

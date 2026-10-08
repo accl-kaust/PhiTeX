@@ -4308,6 +4308,39 @@ impl<L: Lang, E: Evict> Memo<L, E> {
 - Forces it: fonts, a TikZ picture, the line breaking of an unchanged
   paragraph, a cold start after a restart.
 
+As built (3b, `crates/phi/src/memo.rs`):
+
+- `Memo<V, E: Evict = Lru>` over the value type; the graph holds one
+  behind a mutex, shared with the segments of a parallel cold build and
+  read by dry steps (7.12), so a worker's miss fills it for the others.
+  Off (budget 0) by default: `Graph::set_memo_budget`, `memo_stats`
+  (entries, bytes, probes, hits), `save_memo` / `load_memo` (a bad
+  image leaves the store empty, `MemoError`).
+- Probed at every place a leaf is evaluated: emitted with ready
+  operands, evaluated in its step, re-evaluated in a sweep or on its
+  own. A leaf's key is `Ver::node(op_tag, operand versions)`, made
+  without allocating for up to 8 operands.
+- Scans: per element, two entries (the state after, the output), keyed
+  by `(op_tag, state, element, arguments)`. The scan's own convergence
+  (7.6) still decides where it stops; the memo only saves the element's
+  op.
+- `Lru`: a use stamps its entry; victims are sorted only when the store
+  is over budget, and it then frees an eighth of the budget beyond the
+  excess, so eviction is amortized.
+- The check (7.13) evaluates raw, never through the store, so a wrong
+  entry would be caught.
+- Cost: a probe is about 90 ns (lock, key hash, two lookups; `prof`
+  with every Add memoized: 123.7 -> 201.3 ns/node over 2M probes,
+  99.95% hits). Worth it for ops above about 0.2 us, which is what
+  `Lang::memo` is for.
+- Tests: `a_memo_image_spares_a_fresh_build_its_memo_ops` (a fresh
+  graph with another's image evaluates no hook use and no line breaker
+  element, and equals a build without the store; an edit then steps
+  only the edited paragraph's words; a truncated image errs and leaves
+  the store empty; a 256-byte budget holds), and the parallel document
+  of the random-edit test runs with a 4 KB store (hits, misses and
+  evictions, compared with the sequential build after every edit).
+
 ### 7.9 Purity, by type
 
 - An op's whole input is `Args<'_, L>` (shared references to operand

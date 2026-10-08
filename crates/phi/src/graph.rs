@@ -17,9 +17,14 @@ use std::hash::{BuildHasherDefault, Hasher};
 use std::marker::PhantomData;
 
 use crate::lang::{Chain, Class, Fam, Lang, Slot, Step};
+use crate::memo::Memo;
 use crate::seq::{ElemId, Leaf, Seq};
 use crate::value::{Proj, Sel, Value, project};
 use crate::ver::{Ver, hash64, name_hash};
+
+/// Tags that tell a scan element's memo entries (state, output) apart.
+const SCAN_STATE: u64 = 0x5343_414e_5354;
+const SCAN_OUT: u64 = 0x5343_414e_4f55;
 
 /// A node's index in the arena.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
@@ -486,7 +491,49 @@ pub struct Args<'a, L: Lang> {
 
 type Sweep<'a, L> = (&'a [EArg], &'a [u32], &'a [<L as Lang>::Val]);
 
+/// Leaf `op` evaluated, through the memo store if the client opts the op
+/// in (DESIGN 7.8): keyed by the op and its operands' versions.
+fn eval_op<L: Lang>(
+    memo: &std::sync::Mutex<Memo<L::Val>>,
+    op: L::Op,
+    args: &Args<'_, L>,
+) -> L::Val {
+    if !L::memo(op) {
+        return L::eval(op, args);
+    }
+    let mut m = memo.lock().expect("the memo store");
+    if m.budget == 0 {
+        drop(m);
+        return L::eval(op, args);
+    }
+    let k = args.key(L::op_tag(op));
+    if let Some(v) = m.get(k) {
+        return v.clone();
+    }
+    drop(m);
+    let v = L::eval(op, args);
+    memo.lock()
+        .expect("the memo store")
+        .put(k, v.clone(), v.bytes());
+    v
+}
+
 impl<'a, L: Lang> Args<'a, L> {
+    /// `Ver::node(tag, the operands' versions)`, without allocating for
+    /// up to 8 operands.
+    fn key(&self, tag: u64) -> Ver {
+        let n = self.len();
+        if n <= 8 {
+            let mut vs = [Ver::ABSENT; 8];
+            for (i, v) in vs.iter_mut().enumerate().take(n) {
+                *v = self.get(i).ver();
+            }
+            Ver::node(tag, &vs[..n])
+        } else {
+            let vs: Vec<Ver> = (0..n).map(|i| self.get(i).ver()).collect();
+            Ver::node(tag, &vs)
+        }
+    }
     fn of(g: &'a Nodes<L>, opds: &'a [Opd]) -> Self {
         Args {
             g,
@@ -723,6 +770,7 @@ pub struct StepCx<'s, L: Lang> {
     keep: bool,
     /// The run's cancellation flag.
     cancel: &'s std::sync::atomic::AtomicBool,
+    memo: &'s std::sync::Mutex<Memo<L::Val>>,
     _brand: PhantomData<fn(&'s ()) -> &'s ()>,
 }
 
@@ -906,7 +954,7 @@ impl<'s, L: Lang> StepCx<'s, L> {
                     opds: &[],
                     sweep: Some((&em.args[a0..], &[], &em.vals)),
                 };
-                (true, L::eval(op, &args))
+                (true, eval_op(self.memo, op, &args))
             }
             _ => (false, L::Val::default()),
         };
@@ -1014,7 +1062,7 @@ impl<'s, L: Lang> StepCx<'s, L> {
                 opds: &[],
                 sweep: Some((&em.args[a0..a0 + an], &[], &em.vals)),
             };
-            L::eval(em.specs[ix].op, &args)
+            eval_op(self.memo, em.specs[ix].op, &args)
         };
         let em = &mut *self.em;
         em.vals[ix] = v;
@@ -1328,6 +1376,9 @@ pub struct Graph<L: Lang> {
     #[cfg_attr(target_arch = "wasm32", allow(dead_code, reason = "no rounds on wasm"))]
     round_used0: u64,
     cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// The memo store (DESIGN 7.8): `Lang::memo` ops only, off while its
+    /// budget is 0; shared with the segments of a parallel build).
+    memo: std::sync::Arc<std::sync::Mutex<Memo<L::Val>>>,
     /// The input leaf the last step ran in.
     lcache: Option<Leaf<L::Val>>,
     /// The groups each step closed.
@@ -1402,6 +1453,7 @@ impl<L: Lang> Graph<L> {
             hot: std::collections::VecDeque::new(),
             outcomes: Map::default(),
             em_pool: Vec::new(),
+            memo: std::sync::Arc::default(),
             groups_gen: 0,
             round_cool: 0,
             sampled: 0,
@@ -2049,10 +2101,38 @@ impl<L: Lang> Graph<L> {
         }
     }
 
+    /// A scan element through the memo store: keyed by the op, the
+    /// state, the element and the arguments (valid in any scan of any
+    /// document).
+    fn scan_memo(
+        &self,
+        op: L::Op,
+        st: &L::Val,
+        x: &L::Val,
+        args: &Args<'_, L>,
+        av: Ver,
+    ) -> (L::Val, L::Val) {
+        let parts = [st.ver(), x.ver(), av];
+        let ks = Ver::node(L::op_tag(op) ^ SCAN_STATE, &parts);
+        let ko = Ver::node(L::op_tag(op) ^ SCAN_OUT, &parts);
+        let mut m = self.memo.lock().expect("the memo store");
+        if let Some(a) = m.get(ks).cloned()
+            && let Some(b) = m.get(ko).cloned()
+        {
+            return (a, b);
+        }
+        drop(m);
+        let (a, b) = L::scan(op, st, x, args);
+        let mut m = self.memo.lock().expect("the memo store");
+        m.put(ks, a.clone(), a.bytes());
+        m.put(ko, b.clone(), b.bytes());
+        (a, b)
+    }
+
     fn eval_leaf(&mut self, n: u32) {
         let v = {
             let args = Args::of(&self.n, self.n.opds_of(n));
-            L::eval(self.n.h[n as usize].op, &args)
+            eval_op(&self.memo, self.n.h[n as usize].op, &args)
         };
         self.rep.evals += 1;
         self.set_val(n, v);
@@ -2368,6 +2448,7 @@ impl<L: Lang> Graph<L> {
                     cfg,
                     lcache,
                     cancel,
+                    memo,
                     sampled,
                     step_ns,
                     ..
@@ -2396,6 +2477,7 @@ impl<L: Lang> Graph<L> {
                     ext: ext.as_deref(),
                     keep: cfg.keep_interior,
                     cancel,
+                    memo,
                     _brand: PhantomData,
                 };
                 let args = Args::of(n, &uo[2..]);
@@ -2813,7 +2895,7 @@ impl<L: Lang> Graph<L> {
                                 opds: &[],
                                 sweep: Some((&eargs[a0..a0 + an], ids, &buf)),
                             };
-                            L::eval(sp.op, &args)
+                            eval_op(&self.memo, sp.op, &args)
                         };
                         buf[i] = v;
                     }
@@ -3328,8 +3410,14 @@ impl<L: Lang> Graph<L> {
         }
         if met.is_none() {
             let args = Args::of(&self.n, &uo[2..]);
+            let memo = L::memo(op) && self.memo.lock().expect("the memo store").budget > 0;
+            let av = if memo { args.key(0) } else { Ver::ABSENT };
             for (i, (id, x)) in input.iter_from(p).enumerate().map(|(k, e)| (k + p, e)) {
-                let (s2, out) = L::scan(op, &st, x, &args);
+                let (s2, out) = if memo {
+                    self.scan_memo(op, &st, x, &args, av)
+                } else {
+                    L::scan(op, &st, x, &args)
+                };
                 st = s2;
                 self.rep.scanned += 1;
                 stepped += 1;
@@ -3894,11 +3982,13 @@ impl<L: Lang> Graph<L> {
         let pred = self.pred.clone();
         let fpred = self.fpred.clone();
         let (keep, debug) = (self.cfg.keep_interior, self.cfg.debug);
+        let memo = self.memo.clone();
         let job = |seg: &(usize, Option<usize>, u64, L::Val)| {
             let mut p: Graph<L> = Graph::new();
             p.cfg.segment = true;
             p.cfg.keep_interior = keep;
             p.cfg.debug = debug;
+            p.memo = memo.clone();
             p.ext = Some(ext.clone());
             p.pred = pred.clone();
             p.fpred = fpred.clone();

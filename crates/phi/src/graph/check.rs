@@ -61,6 +61,7 @@ impl<L: Lang> Graph<L> {
                 ext: None,
                 keep: self.cfg.keep_interior,
                 cancel: &self.cancel,
+                memo: &self.memo,
                 _brand: PhantomData,
             };
             let args = Args::of(&self.n, &uo[2..]);

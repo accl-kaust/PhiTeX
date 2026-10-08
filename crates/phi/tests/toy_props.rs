@@ -145,6 +145,8 @@ fn run_seed_with(seed: u64, len: usize, edits: usize, keep: bool) {
     dp.g.cfg.round_min_ns = 0;
     dp.g.cfg.check = true;
     dp.g.cfg.keep_interior = keep;
+    // (with a small memo store: hits, misses and evictions all exact)
+    dp.g.set_memo_budget(4096);
     dp.g.run();
     d.g.run();
     assert_eq!(d.observe(), fresh(&d).observe(), "seed {seed}: cold");
