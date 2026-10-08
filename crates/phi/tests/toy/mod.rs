@@ -22,7 +22,10 @@
 
 use std::sync::Arc;
 
-use phi::{Arg, Args, Chain, Class, ElemId, Fam, Graph, Lang, NameId, NodeId, Sel, Seq, Slot, Step, StepCx, Value, Ver};
+use phi::{
+    Arg, Args, Chain, Class, ElemId, Fam, Graph, Lang, NameId, NodeId, Sel, Seq, Slot, Step,
+    StepCx, Value, Ver,
+};
 
 pub const OUT: Chain = Chain(1);
 pub const LOG: Chain = Chain(2);
@@ -88,12 +91,15 @@ pub enum TV {
 
 impl TV {
     pub fn st(s: St) -> TV {
-        let v = Ver::of(&format!("{:?}|{:?}|{}|{}", s.pending, s.conds, s.width, s.exp));
+        let v = Ver::of(&format!(
+            "{:?}|{:?}|{}|{}",
+            s.pending, s.conds, s.width, s.exp
+        ));
         TV::St(Arc::new(s), v)
     }
     pub fn rec(xs: Vec<TV>) -> TV {
         let vs: Vec<Ver> = xs.iter().map(Value::ver).collect();
-        TV::Rec(Arc::new(xs), Ver::node(0x7265_63, &vs))
+        TV::Rec(Arc::new(xs), Ver::node(0x0072_6563, &vs))
     }
     pub fn int(&self) -> i64 {
         match self {
@@ -254,7 +260,11 @@ impl Lang for Toy {
             Op::TocLine => TV::Int(outs.iter().map(|(_, o)| o.int()).sum()),
             Op::Page => {
                 let breaks: i64 = outs.iter().map(|(_, o)| o.int()).sum();
-                TV::Int(if st.int() == 0 && breaks == 0 { 0 } else { breaks + 1 })
+                TV::Int(if st.int() == 0 && breaks == 0 {
+                    0
+                } else {
+                    breaks + 1
+                })
             }
             _ => st.clone(),
         }
@@ -343,7 +353,11 @@ fn break_step(st: &TV, x: &TV, width: i64) -> (TV, TV) {
         if len > width && k > 1 {
             break;
         }
-        let before = if n - k == 0 { 0 } else { cs.get(n - k - 1).copied().unwrap_or(0) };
+        let before = if n - k == 0 {
+            0
+        } else {
+            cs.get(n - k - 1).copied().unwrap_or(0)
+        };
         let slack = (width - len).max(0);
         let c = before.saturating_add(slack * slack);
         if c < best {
@@ -429,7 +443,11 @@ impl Rd<'_, '_> {
         }
     }
     fn word(&mut self) -> String {
-        self.group().iter().map(Tok::text).collect::<Vec<_>>().join(" ")
+        self.group()
+            .iter()
+            .map(Tok::text)
+            .collect::<Vec<_>>()
+            .join(" ")
     }
     /// The arms of a conditional: up to `\else` and `\fi` at this level.
     fn arms(&mut self) -> (Vec<Tok>, Vec<Tok>) {
@@ -465,7 +483,11 @@ fn step(op: Op, mut st: St, cx: &mut StepCx<'_, Toy>) -> Step<TV> {
         cx,
     };
     let Some(t) = rd.next() else {
-        return if op == Op::Box { Step::Done(TV::Int(st.width)) } else { Step::Done(TV::Unit) };
+        return if op == Op::Box {
+            Step::Done(TV::Int(st.width))
+        } else {
+            Step::Done(TV::Unit)
+        };
     };
     let par = rd.cx.name(b"par@");
     let count = rd.cx.name(b"count");
@@ -495,8 +517,14 @@ fn step(op: Op, mut st: St, cx: &mut StepCx<'_, Toy>) -> Step<TV> {
                 if op == Op::Doc {
                     let init = rd.cx.lit(dp_init());
                     let w = rd.cx.lit(TV::Int(WIDTH));
-                    let lines = rd.cx.scan(Op::Break, Arg::Name(par), Arg::Local(init), &[Arg::Local(w)]);
-                    rd.cx.leaf(Op::Id, Class::Effect(VLIST), &[Arg::Local(lines)]);
+                    let lines = rd.cx.scan(
+                        Op::Break,
+                        Arg::Name(par),
+                        Arg::Local(init),
+                        &[Arg::Local(w)],
+                    );
+                    rd.cx
+                        .leaf(Op::Id, Class::Effect(VLIST), &[Arg::Local(lines)]);
                     let e = rd.cx.lit(TV::Seq(Seq::new()));
                     rd.cx.define(par, Arg::Local(e), true);
                 }
@@ -553,11 +581,16 @@ fn step(op: Op, mut st: St, cx: &mut StepCx<'_, Toy>) -> Step<TV> {
             }
             "hbox" => {
                 let body = rd.group();
-                let items: Vec<(ElemId, TV)> =
-                    body.into_iter().enumerate().map(|(i, t)| (ElemId(i as u64 + 1), TV::Tok(t))).collect();
+                let items: Vec<(ElemId, TV)> = body
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, t)| (ElemId(i as u64 + 1), TV::Tok(t)))
+                    .collect();
                 let input = rd.cx.lit(TV::Seq(Seq::from_vec(items)));
                 let init = rd.cx.lit(TV::st(St::default()));
-                let b = rd.cx.unfold(Op::Box, Arg::Local(input), Arg::Local(init), &[]);
+                let b = rd
+                    .cx
+                    .unfold(Op::Box, Arg::Local(input), Arg::Local(init), &[]);
                 let w = rd.cx.leaf(Op::BoxWord, Class::Pure, &[Arg::Local(b)]);
                 word(op, par, &mut rd, Arg::Local(w), here);
             }
@@ -596,7 +629,11 @@ fn step(op: Op, mut st: St, cx: &mut StepCx<'_, Toy>) -> Step<TV> {
                     seen.push(n.clone());
                     let m = rd.cx.name(n.as_bytes());
                     let other = rd.cx.lit(TV::Unit);
-                    let phi = rd.cx.leaf(Op::Phi, Class::Pure, &[Arg::Name(hidden), Arg::Name(m), Arg::Local(other)]);
+                    let phi = rd.cx.leaf(
+                        Op::Phi,
+                        Class::Pure,
+                        &[Arg::Name(hidden), Arg::Name(m), Arg::Local(other)],
+                    );
                     rd.cx.define(m, Arg::Local(phi), *global);
                     if let Some(f) = st.conds.last_mut() {
                         f.push((n.clone(), *global));
@@ -616,7 +653,11 @@ fn step(op: Op, mut st: St, cx: &mut StepCx<'_, Toy>) -> Step<TV> {
             }
             "label" => {
                 let k = rd.word();
-                rd.cx.leaf(Op::Id, Class::Publish(Slot(phi::ver::hash64(&k))), &[Arg::Name(count)]);
+                rd.cx.leaf(
+                    Op::Id,
+                    Class::Publish(Slot(phi::ver::hash64(&k))),
+                    &[Arg::Name(count)],
+                );
             }
             "section" => {
                 let title = rd.word();
@@ -625,13 +666,19 @@ fn step(op: Op, mut st: St, cx: &mut StepCx<'_, Toy>) -> Step<TV> {
                 rd.cx.define(sec, Arg::Local(n), true);
                 let w = title.len() as i64;
                 let t = rd.cx.lit(TV::Word(title.clone().into(), w));
-                rd.cx.leaf(Op::Pair, Class::Entry(TOC, Slot(phi::ver::hash64(&title))), &[Arg::Local(n), Arg::Local(t)]);
+                rd.cx.leaf(
+                    Op::Pair,
+                    Class::Entry(TOC, Slot(phi::ver::hash64(&title))),
+                    &[Arg::Local(n), Arg::Local(t)],
+                );
                 word(op, par, &mut rd, Arg::Local(t), here);
             }
             "toc" => {
                 let f = rd.cx.family(TOC);
                 let init = rd.cx.lit(TV::Unit);
-                let s = rd.cx.scan(Op::TocLine, Arg::Local(f), Arg::Local(init), &[]);
+                let s = rd
+                    .cx
+                    .scan(Op::TocLine, Arg::Local(f), Arg::Local(init), &[]);
                 let w = rd.cx.leaf(Op::BoxWord, Class::Pure, &[Arg::Local(s)]);
                 word(op, par, &mut rd, Arg::Local(w), here);
             }
@@ -656,7 +703,10 @@ fn step(op: Op, mut st: St, cx: &mut StepCx<'_, Toy>) -> Step<TV> {
         phi::ver::hash64(&(cur, &rest))
     };
     st.pending = rest;
-    Step::Next { st: TV::st(st), key }
+    Step::Next {
+        st: TV::st(st),
+        key,
+    }
 }
 
 /// A macro call: its body before the rest of the input.
@@ -699,7 +749,13 @@ impl Doc {
         let h = g.input(TV::Int(HEIGHT));
         let z = g.input(TV::Int(0));
         let pages = g.scan(Op::Page, (vl, Sel::WHOLE), z, &[h]);
-        Doc { toks, g, input, doc, pages }
+        Doc {
+            toks,
+            g,
+            input,
+            doc,
+            pages,
+        }
     }
 
     /// Replace `del` tokens at `at` with `ins`, identities between the
@@ -709,7 +765,10 @@ impl Doc {
         let hi = self.toks.get(at + del).map_or(u64::MAX / 2, |t| t.0.0);
         let room = hi.saturating_sub(lo) / (ins.len() as u64 + 1);
         let new: Vec<(ElemId, Tok)> = if room > 0 {
-            ins.into_iter().enumerate().map(|(k, t)| (ElemId(lo + room * (k as u64 + 1)), t)).collect()
+            ins.into_iter()
+                .enumerate()
+                .map(|(k, t)| (ElemId(lo + room * (k as u64 + 1)), t))
+                .collect()
         } else {
             ins.into_iter().map(|t| (ElemId(0), t)).collect()
         };
@@ -741,7 +800,10 @@ impl Doc {
             s += &format!("{name}={items:?}\n");
         }
         for n in ["count", "a", "b", "x", "y", "par@"] {
-            let v = g.name_id(n.as_bytes()).and_then(|id| g.name_value(id)).map(|v| v.ver());
+            let v = g
+                .name_id(n.as_bytes())
+                .and_then(|id| g.name_value(id))
+                .map(|v| v.ver());
             s += &format!("{n}={v:?}\n");
         }
         s
@@ -761,7 +823,10 @@ pub fn lex(src: &str) -> Vec<Tok> {
                 out.push(Tok::Close);
                 rest = r;
             } else if let Some(r) = rest.strip_prefix('\\') {
-                let n = r.find(|c: char| !c.is_alphanumeric() && c != '@').unwrap_or(r.len()).max(1);
+                let n = r
+                    .find(|c: char| !c.is_alphanumeric() && c != '@')
+                    .unwrap_or(r.len())
+                    .max(1);
                 out.push(Tok::Cs(r[..n].into()));
                 rest = &r[n..];
             } else {
@@ -775,5 +840,8 @@ pub fn lex(src: &str) -> Vec<Tok> {
 }
 
 pub fn ids(toks: Vec<Tok>) -> Vec<(ElemId, Tok)> {
-    toks.into_iter().enumerate().map(|(k, t)| (ElemId((k as u64 + 1) << 20), t)).collect()
+    toks.into_iter()
+        .enumerate()
+        .map(|(k, t)| (ElemId((k as u64 + 1) << 20), t))
+        .collect()
 }

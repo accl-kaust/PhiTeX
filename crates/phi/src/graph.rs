@@ -11,7 +11,9 @@
 //! - Names are an index of definitions by position with scopes.
 
 use std::cmp::Ordering;
-use std::collections::HashMap;
+use std::collections::HashMap as StdMap;
+use std::fmt::Write as _;
+use std::hash::{BuildHasherDefault, Hasher};
 use std::marker::PhantomData;
 
 use crate::lang::{Chain, Class, Fam, Lang, Slot, Step};
@@ -26,6 +28,37 @@ pub struct NodeId(pub u32);
 /// An interned name.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct NameId(pub u32);
+
+/// A fast hasher for the core's own tables (ids and hashes as keys).
+#[derive(Default, Clone, Copy)]
+pub(crate) struct Fx(u64);
+
+impl Hasher for Fx {
+    #[inline]
+    fn write(&mut self, bytes: &[u8]) {
+        for &b in bytes {
+            self.write_u64(u64::from(b));
+        }
+    }
+    #[inline]
+    fn write_u64(&mut self, i: u64) {
+        self.0 = (self.0.rotate_left(5) ^ i).wrapping_mul(0x517c_c1b7_2722_0a95);
+    }
+    #[inline]
+    fn write_u32(&mut self, i: u32) {
+        self.write_u64(u64::from(i));
+    }
+    #[inline]
+    fn write_usize(&mut self, i: usize) {
+        self.write_u64(i as u64);
+    }
+    #[inline]
+    fn finish(&self) -> u64 {
+        self.0
+    }
+}
+
+pub(crate) type Map<K, V> = StdMap<K, V, BuildHasherDefault<Fx>>;
 
 pub(crate) const NONE: u32 = u32::MAX;
 const ROOT: u32 = 0;
@@ -114,9 +147,9 @@ pub(crate) struct StepInfo {
 }
 
 pub(crate) struct UnfoldInfo<V> {
-    pub keys: HashMap<u64, u32>,
+    pub keys: Map<u64, u32>,
     /// Each input element that starts a step's consumption → the step.
-    pub owners: HashMap<ElemId, u32>,
+    pub owners: Map<ElemId, u32>,
     pub input: Option<Seq<V>>,
     pub args_ver: Ver,
     /// During a resume after an input edit: where the changed elements
@@ -146,7 +179,8 @@ pub(crate) struct Parked {
 
 pub(crate) struct ScanInfo<V> {
     pub input: Seq<V>,
-    pub states: Vec<V>,
+    /// The state after each element (keyed like the input).
+    pub states: Seq<V>,
     pub outs: Seq<V>,
     pub init_ver: Ver,
     pub args_ver: Ver,
@@ -164,7 +198,7 @@ struct DefEntry {
 
 #[derive(Default)]
 struct NameTab {
-    by_hash: HashMap<u64, u32>,
+    by_hash: Map<u64, u32>,
     hashes: Vec<u64>,
     spell: Vec<Box<[u8]>>,
     defs: Vec<Vec<DefEntry>>,
@@ -242,41 +276,70 @@ impl Default for Config {
 
 /// The node columns.
 pub struct Nodes<L: Lang> {
-    pub(crate) kind: Vec<Kind>,
-    pub(crate) op: Vec<L::Op>,
-    pub(crate) class: Vec<Class>,
-    pub(crate) parent: Vec<u32>,
-    pub(crate) ord: Vec<u64>,
-    pub(crate) depth: Vec<u16>,
-    pub(crate) next: Vec<u32>,
-    pub(crate) first: Vec<u32>,
-    pub(crate) key: Vec<u32>,
-    pub(crate) a0: Vec<u32>,
-    pub(crate) an: Vec<u16>,
-    rd: Vec<u32>,
+    /// Each node's header: one cache line holds all a node's own fields
+    /// but its value.
+    pub(crate) h: Vec<Hdr<L::Op>>,
+    pub(crate) fams: Map<u32, u32>,
     pub(crate) val: Vec<L::Val>,
-    pub(crate) flags: Vec<u8>,
-    era: Vec<u32>,
-    /// Index into the kind's table (steps, unfolds, scans), or the slot
-    /// or chain.
-    pub(crate) aux: Vec<u64>,
     pub(crate) opds: Vec<Opd>,
     revs: Vec<Rev>,
     absent: L::Val,
 }
 
+/// A node's fields but its value (DESIGN 7.11).
+#[derive(Clone, Copy)]
+pub(crate) struct Hdr<O> {
+    /// Its label among its siblings.
+    pub ord: u64,
+    /// Index into the kind's table (steps, unfolds, scans), or the slot
+    /// or chain.
+    pub aux: u64,
+    pub op: O,
+    pub parent: u32,
+    pub next: u32,
+    pub first: u32,
+    /// Its key (hashed), for matching only.
+    pub key: u32,
+    /// Its operands: the first in the arena, and how many.
+    pub a0: u32,
+    /// Its reader list's head.
+    pub rd: u32,
+    pub era: u32,
+    pub an: u16,
+    pub depth: u16,
+    pub kind: Kind,
+    /// The class's tag (its payload, a chain or slot, is in `aux`; an
+    /// entry's family in `fams`).
+    pub class: u8,
+    pub flags: u8,
+}
+
 impl<L: Lang> Nodes<L> {
+    /// Node `n`'s class.
+    #[inline]
+    pub(crate) fn class(&self, n: u32) -> Class {
+        let u = n as usize;
+        match self.h[u].class {
+            0 => Class::Pure,
+            #[allow(clippy::cast_possible_truncation)]
+            1 => Class::Effect(Chain(self.h[u].aux as u32)),
+            2 => Class::Barrier,
+            3 => Class::Publish(Slot(self.h[u].aux)),
+            _ => Class::Entry(Fam(self.fams[&n]), Slot(self.h[u].aux)),
+        }
+    }
+
     #[inline]
     pub(crate) fn pos(&self, n: u32) -> Pos {
         Pos {
-            parent: self.parent[n as usize],
-            ord: self.ord[n as usize],
+            parent: self.h[n as usize].parent,
+            ord: self.h[n as usize].ord,
         }
     }
 
     #[inline]
     fn pdepth(&self, p: Pos) -> u16 {
-        self.depth[p.parent as usize] + 1
+        self.h[p.parent as usize].depth + 1
     }
 
     /// Position order: pre-order of the region tree.
@@ -320,8 +383,8 @@ impl<L: Lang> Nodes<L> {
 
     #[inline]
     pub(crate) fn opds_of(&self, n: u32) -> &[Opd] {
-        let a = self.a0[n as usize] as usize;
-        &self.opds[a..a + self.an[n as usize] as usize]
+        let a = self.h[n as usize].a0 as usize;
+        &self.opds[a..a + self.h[n as usize].an as usize]
     }
 
     #[inline]
@@ -343,16 +406,16 @@ impl<L: Lang> Nodes<L> {
     }
 
     pub(crate) fn is_dead(&self, n: u32) -> bool {
-        self.flags[n as usize] & DEAD != 0
+        self.h[n as usize].flags & DEAD != 0
     }
 
     /// The children (or steps) of `n`, in order.
     pub(crate) fn children(&self, n: u32) -> Vec<u32> {
         let mut out = Vec::new();
-        let mut c = self.first[n as usize];
+        let mut c = self.h[n as usize].first;
         while c != NONE {
             out.push(c);
-            c = self.next[c as usize];
+            c = self.h[c as usize].next;
         }
         out
     }
@@ -475,7 +538,7 @@ impl<L: Lang> Emit<L> {
 pub struct StepCx<'s, L: Lang> {
     g: &'s Nodes<L>,
     names: &'s NameTab,
-    groups: &'s HashMap<u64, Group>,
+    groups: &'s Map<u64, Group>,
     unfold_opds: &'s [Opd],
     input: Option<&'s Seq<L::Val>>,
     idx: usize,
@@ -485,7 +548,7 @@ pub struct StepCx<'s, L: Lang> {
     grp: u64,
     opened: u32,
     em: &'s mut Emit<L>,
-    ext: Option<&'s HashMap<u64, L::Val>>,
+    ext: Option<&'s Map<u64, L::Val>>,
     _brand: PhantomData<fn(&'s ()) -> &'s ()>,
 }
 
@@ -500,6 +563,10 @@ impl<'s, L: Lang> StepCx<'s, L> {
     }
 
     /// Consume the next input element.
+    #[allow(
+        clippy::should_implement_trait,
+        reason = "a cursor, not an iterator: it records what it consumed"
+    )]
     pub fn next(&mut self) -> Option<&'s L::Val> {
         let x = self.input?.get(self.idx)?.1;
         self.idx += 1;
@@ -515,7 +582,9 @@ impl<'s, L: Lang> StepCx<'s, L> {
     /// The identity of the next input element ([`END`] past the last).
     #[must_use]
     pub fn cursor(&self) -> ElemId {
-        self.input.and_then(|s| s.get(self.idx)).map_or(END, |e| e.0)
+        self.input
+            .and_then(|s| s.get(self.idx))
+            .map_or(END, |e| e.0)
     }
 
     /// The elements consumed so far by this step.
@@ -543,15 +612,14 @@ impl<'s, L: Lang> StepCx<'s, L> {
     /// runs again when it changes.
     pub fn read(&mut self, n: NameId) -> Option<Proj<'s, L::Val>> {
         // (its own definitions first: a constant's value is known now)
-        if let Some(d) = self.em.defs.iter().rev().find(|d| d.0 == n.0) {
-            if let SArg::Local(ix, sel) = d.1
-                && let Some(v) = &self.em.specs[ix as usize].lit
-            {
-                debug_assert!(sel.is_whole());
-                // (a constant of this step: the borrow ends with the step's
-                // buffer, so the value is cloned)
-                return Some(Proj::Owned(v.clone()));
-            }
+        if let Some(d) = self.em.defs.iter().rev().find(|d| d.0 == n.0)
+            && let SArg::Local(ix, sel) = d.1
+            && let Some(v) = &self.em.specs[ix as usize].lit
+        {
+            debug_assert!(sel.is_whole());
+            // (a constant of this step: the borrow ends with the step's
+            // buffer, so the value is cloned)
+            return Some(Proj::Owned(v.clone()));
         }
         let o = if (n.0 as usize) < self.names.defs.len() {
             resolve(self.g, self.names, self.groups, n.0, self.pos)
@@ -589,7 +657,15 @@ impl<'s, L: Lang> StepCx<'s, L> {
         }
     }
 
-    fn push(&mut self, kind: Kind, op: L::Op, class: Class, args: &[Arg<'s>], lit: Option<L::Val>, aux: u64) -> Local<'s> {
+    fn push(
+        &mut self,
+        kind: Kind,
+        op: L::Op,
+        class: Class,
+        args: &[Arg<'s>],
+        lit: Option<L::Val>,
+        aux: u64,
+    ) -> Local<'s> {
         let a0 = u32::try_from(self.em.args.len()).expect("args fit u32");
         for &a in args {
             let s = self.arg(a);
@@ -612,7 +688,10 @@ impl<'s, L: Lang> StepCx<'s, L> {
             op,
             class,
             key,
-            args: (a0, u16::try_from(args.len()).expect("at most 65535 operands")),
+            args: (
+                a0,
+                u16::try_from(args.len()).expect("at most 65535 operands"),
+            ),
             lit,
             aux,
             sub,
@@ -640,14 +719,26 @@ impl<'s, L: Lang> StepCx<'s, L> {
     }
 
     /// A nested unfold over `input` from `init`.
-    pub fn unfold(&mut self, op: L::Op, input: Arg<'s>, init: Arg<'s>, args: &[Arg<'s>]) -> Local<'s> {
+    pub fn unfold(
+        &mut self,
+        op: L::Op,
+        input: Arg<'s>,
+        init: Arg<'s>,
+        args: &[Arg<'s>],
+    ) -> Local<'s> {
         let mut all = vec![input, init];
         all.extend_from_slice(args);
         self.push(Kind::Unfold, op, Class::Pure, &all, None, 0)
     }
 
     /// A scan over `input` from `init`.
-    pub fn scan(&mut self, op: L::Op, input: Arg<'s>, init: Arg<'s>, args: &[Arg<'s>]) -> Local<'s> {
+    pub fn scan(
+        &mut self,
+        op: L::Op,
+        input: Arg<'s>,
+        init: Arg<'s>,
+        args: &[Arg<'s>],
+    ) -> Local<'s> {
         let mut all = vec![input, init];
         all.extend_from_slice(args);
         self.push(Kind::Scan, op, Class::Pure, &all, None, 0)
@@ -660,13 +751,27 @@ impl<'s, L: Lang> StepCx<'s, L> {
 
     /// Family `f`'s entries from the last run, in order (predicted).
     pub fn family(&mut self, f: Fam) -> Local<'s> {
-        self.push(Kind::Family, L::Op::default(), Class::Pure, &[], None, u64::from(f.0))
+        self.push(
+            Kind::Family,
+            L::Op::default(),
+            Class::Pure,
+            &[],
+            None,
+            u64::from(f.0),
+        )
     }
 
     /// The payloads of chain `c` (all of it: a chain read is placed after
     /// what it reads by the client).
     pub fn chain(&mut self, c: Chain) -> Local<'s> {
-        self.push(Kind::ChainRead, L::Op::default(), Class::Pure, &[], None, u64::from(c.0))
+        self.push(
+            Kind::ChainRead,
+            L::Op::default(),
+            Class::Pure,
+            &[],
+            None,
+            u64::from(c.0),
+        )
     }
 
     /// Define name `n` here as `v`'s value, local to the open group
@@ -714,7 +819,13 @@ impl<'s, L: Lang> StepCx<'s, L> {
 
 /// Where name `m` at `at` resolves: the latest definition before `at`
 /// alive there.
-fn resolve<L: Lang>(g: &Nodes<L>, names: &NameTab, groups: &HashMap<u64, Group>, m: u32, at: Pos) -> Opd {
+fn resolve<L: Lang>(
+    g: &Nodes<L>,
+    names: &NameTab,
+    groups: &Map<u64, Group>,
+    m: u32,
+    at: Pos,
+) -> Opd {
     let none = Opd {
         src: NONE,
         sel: Sel::WHOLE,
@@ -746,23 +857,23 @@ fn resolve<L: Lang>(g: &Nodes<L>, names: &NameTab, groups: &HashMap<u64, Group>,
 pub struct Graph<L: Lang> {
     pub(crate) n: Nodes<L>,
     names: NameTab,
-    groups: HashMap<u64, Group>,
+    groups: Map<u64, Group>,
     pub(crate) steps: Vec<StepInfo>,
     pub(crate) unfolds: Vec<UnfoldInfo<L::Val>>,
     pub(crate) scans: Vec<ScanInfo<L::Val>>,
     free: Vec<u32>,
     to_free: Vec<u32>,
     heap: Vec<u32>,
-    chains: HashMap<u32, Vec<u32>>,
-    chain_readers: HashMap<u32, Vec<u32>>,
-    pubs: HashMap<u64, Vec<u32>>,
-    crosses: HashMap<u64, Vec<u32>>,
-    pred: std::sync::Arc<HashMap<u64, L::Val>>,
+    chains: Map<u32, Vec<u32>>,
+    chain_readers: Map<u32, Vec<u32>>,
+    pubs: Map<u64, Vec<u32>>,
+    crosses: Map<u64, Vec<u32>>,
+    pred: std::sync::Arc<Map<u64, L::Val>>,
     /// Families: their entries' publishers, their readers, their values
     /// from the last run.
-    fams: HashMap<u32, Vec<u32>>,
-    fam_readers: HashMap<u32, Vec<u32>>,
-    fpred: std::sync::Arc<HashMap<u32, L::Val>>,
+    fams: Map<u32, Vec<u32>>,
+    fam_readers: Map<u32, Vec<u32>>,
+    fpred: std::sync::Arc<Map<u32, L::Val>>,
     /// Slots and families whose publishers changed in this run.
     dirty_slots: std::collections::BTreeSet<u64>,
     dirty_fams: std::collections::BTreeSet<u32>,
@@ -772,14 +883,18 @@ pub struct Graph<L: Lang> {
     root_ord: u64,
     grp_hint: u64,
     em: Emit<L>,
-    keymap: HashMap<u32, u32>,
+    keymap: Map<u32, u32>,
+    /// Scratch buffers, reused so the hot path allocates nothing.
+    sc_opds: Vec<Opd>,
+    sc_ids: Vec<u32>,
+    sc_gone: Vec<u32>,
     /// Speculative entries proposed for a cold unfold.
-    entries: HashMap<u32, Vec<crate::lang::Entry<L::Val>>>,
+    entries: Map<u32, Vec<crate::lang::Entry<L::Val>>>,
     /// A segment's names from the graph it was entered from: the value
     /// each has where the segment starts.
-    ext: Option<std::sync::Arc<HashMap<u64, L::Val>>>,
+    ext: Option<std::sync::Arc<Map<u64, L::Val>>>,
     /// Import nodes made for those, by name hash.
-    imports: HashMap<u64, u32>,
+    imports: Map<u64, u32>,
     pub cfg: Config,
     rep: Report,
 }
@@ -798,42 +913,29 @@ impl<L: Lang> Graph<L> {
     pub fn new() -> Self {
         let mut g = Graph {
             n: Nodes {
-                kind: Vec::new(),
-                op: Vec::new(),
-                class: Vec::new(),
-                parent: Vec::new(),
-                ord: Vec::new(),
-                depth: Vec::new(),
-                next: Vec::new(),
-                first: Vec::new(),
-                key: Vec::new(),
-                a0: Vec::new(),
-                an: Vec::new(),
-                rd: Vec::new(),
+                h: Vec::new(),
+                fams: Map::default(),
                 val: Vec::new(),
-                flags: Vec::new(),
-                era: Vec::new(),
-                aux: Vec::new(),
                 opds: Vec::new(),
                 revs: Vec::new(),
                 absent: L::Val::default(),
             },
             names: NameTab::default(),
-            groups: HashMap::new(),
+            groups: Map::default(),
             steps: Vec::new(),
             unfolds: Vec::new(),
             scans: Vec::new(),
             free: Vec::new(),
             to_free: Vec::new(),
             heap: Vec::new(),
-            chains: HashMap::new(),
-            chain_readers: HashMap::new(),
-            pubs: HashMap::new(),
-            crosses: HashMap::new(),
-            pred: std::sync::Arc::new(HashMap::new()),
-            fams: HashMap::new(),
-            fam_readers: HashMap::new(),
-            fpred: std::sync::Arc::new(HashMap::new()),
+            chains: Map::default(),
+            chain_readers: Map::default(),
+            pubs: Map::default(),
+            crosses: Map::default(),
+            pred: std::sync::Arc::new(Map::default()),
+            fams: Map::default(),
+            fam_readers: Map::default(),
+            fpred: std::sync::Arc::new(Map::default()),
             dirty_slots: std::collections::BTreeSet::new(),
             dirty_fams: std::collections::BTreeSet::new(),
             scan_runs: Vec::new(),
@@ -841,86 +943,89 @@ impl<L: Lang> Graph<L> {
             root_ord: 0,
             grp_hint: NOGROUP,
             em: Emit::default(),
-            keymap: HashMap::new(),
-            entries: HashMap::new(),
+            keymap: Map::default(),
+            sc_opds: Vec::new(),
+            sc_ids: Vec::new(),
+            sc_gone: Vec::new(),
+            entries: Map::default(),
             ext: None,
-            imports: HashMap::new(),
+            imports: Map::default(),
             cfg: Config::default(),
             rep: Report::default(),
         };
         // (node 0 is the root region)
         let r = g.alloc(Kind::Root, L::Op::default(), Class::Pure, NONE, 0, 0, 0);
         debug_assert_eq!(r, ROOT);
-        g.n.depth[0] = 0;
+        g.n.h[0].depth = 0;
         g
     }
 
     /// Reserve room for `nodes` nodes and `opds` operands.
     pub fn reserve(&mut self, nodes: usize, opds: usize) {
-        let n = &mut self.n;
-        n.kind.reserve(nodes);
-        n.op.reserve(nodes);
-        n.class.reserve(nodes);
-        n.parent.reserve(nodes);
-        n.ord.reserve(nodes);
-        n.depth.reserve(nodes);
-        n.next.reserve(nodes);
-        n.first.reserve(nodes);
-        n.key.reserve(nodes);
-        n.a0.reserve(nodes);
-        n.an.reserve(nodes);
-        n.rd.reserve(nodes);
-        n.val.reserve(nodes);
-        n.flags.reserve(nodes);
-        n.era.reserve(nodes);
-        n.aux.reserve(nodes);
-        n.opds.reserve(opds);
-        n.revs.reserve(opds);
+        self.n.h.reserve(nodes);
+        self.n.val.reserve(nodes);
+        self.n.opds.reserve(opds);
+        self.n.revs.reserve(opds);
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn alloc(&mut self, kind: Kind, op: L::Op, class: Class, parent: u32, ord: u64, key: u32, aux: u64) -> u32 {
-        let depth = if parent == NONE { 0 } else { self.n.depth[parent as usize] + 1 };
+    fn alloc(
+        &mut self,
+        kind: Kind,
+        op: L::Op,
+        class: Class,
+        parent: u32,
+        ord: u64,
+        key: u32,
+        aux: u64,
+    ) -> u32 {
+        let (tag, aux) = match class {
+            Class::Pure => (0, aux),
+            Class::Effect(c) => (1, u64::from(c.0)),
+            Class::Barrier => (2, aux),
+            Class::Publish(s) => (3, s.0),
+            Class::Entry(_, s) => (4, s.0),
+        };
+        let depth = if parent == NONE {
+            0
+        } else {
+            self.n.h[parent as usize].depth + 1
+        };
         self.rep.created += 1;
         let n = &mut self.n;
-        if let Some(i) = self.free.pop() {
+        let mut hdr = Hdr {
+            ord,
+            aux,
+            op,
+            parent,
+            next: NONE,
+            first: NONE,
+            key,
+            a0: 0,
+            rd: NONE,
+            era: 0,
+            an: 0,
+            depth,
+            kind,
+            class: tag,
+            flags: 0,
+        };
+        let i = if let Some(i) = self.free.pop() {
             let u = i as usize;
-            n.kind[u] = kind;
-            n.op[u] = op;
-            n.class[u] = class;
-            n.parent[u] = parent;
-            n.ord[u] = ord;
-            n.depth[u] = depth;
-            n.next[u] = NONE;
-            n.first[u] = NONE;
-            n.key[u] = key;
-            n.a0[u] = 0;
-            n.an[u] = 0;
-            n.rd[u] = NONE;
+            hdr.era = n.h[u].era.wrapping_add(1);
+            n.h[u] = hdr;
             n.val[u] = L::Val::default();
-            n.flags[u] = 0;
-            n.era[u] = n.era[u].wrapping_add(1);
-            n.aux[u] = aux;
-            return i;
+            i
+        } else {
+            let i = u32::try_from(n.h.len()).expect("fewer than 2^32 nodes");
+            assert!(i != NONE, "fewer than 2^32 - 1 nodes");
+            n.h.push(hdr);
+            n.val.push(L::Val::default());
+            i
+        };
+        if let Class::Entry(f, _) = class {
+            n.fams.insert(i, f.0);
         }
-        let i = u32::try_from(n.kind.len()).expect("fewer than 2^32 nodes");
-        assert!(i != NONE, "fewer than 2^32 - 1 nodes");
-        n.kind.push(kind);
-        n.op.push(op);
-        n.class.push(class);
-        n.parent.push(parent);
-        n.ord.push(ord);
-        n.depth.push(depth);
-        n.next.push(NONE);
-        n.first.push(NONE);
-        n.key.push(key);
-        n.a0.push(0);
-        n.an.push(0);
-        n.rd.push(NONE);
-        n.val.push(L::Val::default());
-        n.flags.push(0);
-        n.era.push(0);
-        n.aux.push(aux);
         i
     }
 
@@ -928,16 +1033,16 @@ impl<L: Lang> Graph<L> {
     /// go stale).
     fn set_opds(&mut self, n: u32, os: &[Opd]) {
         let u = n as usize;
-        for k in 0..self.n.an[u] as usize {
-            let m = self.n.opds[self.n.a0[u] as usize + k].name;
+        for k in 0..self.n.h[u].an as usize {
+            let m = self.n.opds[self.n.h[u].a0 as usize + k].name;
             if m != NONE {
                 self.mark_prune(m);
             }
         }
-        let era = self.n.era[u].wrapping_add(1);
-        self.n.era[u] = era;
-        self.n.a0[u] = u32::try_from(self.n.opds.len()).expect("operands fit u32");
-        self.n.an[u] = u16::try_from(os.len()).expect("at most 65535 operands");
+        let era = self.n.h[u].era.wrapping_add(1);
+        self.n.h[u].era = era;
+        self.n.h[u].a0 = u32::try_from(self.n.opds.len()).expect("operands fit u32");
+        self.n.h[u].an = u16::try_from(os.len()).expect("at most 65535 operands");
         for o in os {
             self.n.opds.push(*o);
             if o.src != NONE {
@@ -946,9 +1051,9 @@ impl<L: Lang> Graph<L> {
                 self.n.revs.push(Rev {
                     node: n,
                     era,
-                    next: self.n.rd[s],
+                    next: self.n.h[s].rd,
                 });
-                self.n.rd[s] = r;
+                self.n.h[s].rd = r;
             }
             if o.name != NONE {
                 let a = self.anchor(n);
@@ -971,15 +1076,15 @@ impl<L: Lang> Graph<L> {
     /// The node's anchor: its ancestor that is a root node or a step of a
     /// root unfold (itself if it is one).
     fn anchor(&self, mut n: u32) -> u32 {
-        while self.n.depth[n as usize] > 2 {
-            n = self.n.parent[n as usize];
+        while self.n.h[n as usize].depth > 2 {
+            n = self.n.h[n as usize].parent;
         }
         n
     }
 
     /// A position lifted to its anchor's.
     fn anchor_pos(&self, mut p: Pos) -> Pos {
-        while self.n.depth[p.parent as usize] + 1 > 2 {
+        while self.n.h[p.parent as usize].depth + 1 > 2 {
             p = self.n.pos(p.parent);
         }
         p
@@ -989,10 +1094,10 @@ impl<L: Lang> Graph<L> {
         let r = u32::try_from(self.n.revs.len()).expect("edges fit u32");
         self.n.revs.push(Rev {
             node: reader,
-            era: self.n.era[reader as usize],
-            next: self.n.rd[src as usize],
+            era: self.n.h[reader as usize].era,
+            next: self.n.h[src as usize].rd,
         });
-        self.n.rd[src as usize] = r;
+        self.n.h[src as usize].rd = r;
     }
 
     // ---- the worklist ----
@@ -1002,7 +1107,7 @@ impl<L: Lang> Graph<L> {
     }
 
     fn push_dirty(&mut self, n: u32) {
-        let f = &mut self.n.flags[n as usize];
+        let f = &mut self.n.h[n as usize].flags;
         *f |= DIRTY;
         if *f & (QUEUED | DEAD) != 0 {
             return;
@@ -1043,7 +1148,7 @@ impl<L: Lang> Graph<L> {
                 i = m;
             }
         }
-        self.n.flags[top as usize] &= !QUEUED;
+        self.n.h[top as usize].flags &= !QUEUED;
         Some(top)
     }
 
@@ -1065,7 +1170,7 @@ impl<L: Lang> Graph<L> {
     /// A node's class-side effect changed (its payload, or it came or
     /// went): its chain's readers woken, its slot and family marked.
     fn class_changed(&mut self, n: u32) {
-        match self.n.class[n as usize] {
+        match self.n.class(n) {
             Class::Effect(c) => self.wake_chain(c.0),
             Class::Publish(s) => {
                 self.dirty_slots.insert(s.0);
@@ -1093,14 +1198,14 @@ impl<L: Lang> Graph<L> {
     /// Wake the readers of `n` whose read of it changed from `old`.
     fn wake(&mut self, n: u32, old: &L::Val) {
         let mut prev = NONE;
-        let mut e = self.n.rd[n as usize];
+        let mut e = self.n.h[n as usize].rd;
         while e != NONE {
             let Rev { node: r, era, next } = self.n.revs[e as usize];
             let ru = r as usize;
-            if self.n.era[ru] != era || self.n.flags[ru] & DEAD != 0 {
+            if self.n.h[ru].era != era || self.n.h[ru].flags & DEAD != 0 {
                 // (stale: unlinked)
                 if prev == NONE {
-                    self.n.rd[n as usize] = next;
+                    self.n.h[n as usize].rd = next;
                 } else {
                     self.n.revs[prev as usize].next = next;
                 }
@@ -1136,15 +1241,15 @@ impl<L: Lang> Graph<L> {
 
     fn link_last(&mut self, parent: u32, n: u32) {
         // root regions are appended to; keep a tail in `aux` of the root
-        let tail = self.n.aux[parent as usize];
-        if self.n.first[parent as usize] == NONE {
-            self.n.first[parent as usize] = n;
+        let tail = self.n.h[parent as usize].aux;
+        if self.n.h[parent as usize].first == NONE {
+            self.n.h[parent as usize].first = n;
         } else {
             #[allow(clippy::cast_possible_truncation)]
             let t = tail as u32;
-            self.n.next[t as usize] = n;
+            self.n.h[t as usize].next = n;
         }
-        self.n.aux[parent as usize] = u64::from(n);
+        self.n.h[parent as usize].aux = u64::from(n);
     }
 
     /// An input: a value the client sets between runs.
@@ -1156,19 +1261,30 @@ impl<L: Lang> Graph<L> {
 
     /// Set an input's value.
     pub fn set(&mut self, n: NodeId, v: L::Val) {
-        debug_assert_eq!(self.n.kind[n.0 as usize], Kind::Input);
+        debug_assert_eq!(self.n.h[n.0 as usize].kind, Kind::Input);
         self.set_val(n.0, v);
     }
 
-    fn opd(&self, (n, sel): (NodeId, Sel)) -> Opd {
-        Opd { src: n.0, sel, name: NONE }
+    fn opd((n, sel): (NodeId, Sel)) -> Opd {
+        Opd {
+            src: n.0,
+            sel,
+            name: NONE,
+        }
     }
 
     /// A leaf of the root region.
     pub fn leaf(&mut self, op: L::Op, class: Class, args: &[(NodeId, Sel)]) -> NodeId {
         let n = self.root_node(Kind::Leaf, op, class, 0);
-        let os: Vec<Opd> = args.iter().map(|&a| self.opd(a)).collect();
+        let mut os = std::mem::take(&mut self.sc_opds);
+        os.clear();
+        os.extend(args.iter().map(|&(a, sel)| Opd {
+            src: a.0,
+            sel,
+            name: NONE,
+        }));
         self.set_opds(n, &os);
+        self.sc_opds = os;
         self.register(n);
         self.settle_new(n);
         NodeId(n)
@@ -1177,8 +1293,11 @@ impl<L: Lang> Graph<L> {
     /// An unfold of the root region.
     pub fn unfold(&mut self, op: L::Op, input: NodeId, init: NodeId, args: &[NodeId]) -> NodeId {
         let n = self.root_node(Kind::Unfold, op, Class::Pure, 0);
-        let mut os = vec![self.opd((input, Sel::WHOLE)), self.opd((init, Sel::WHOLE))];
-        os.extend(args.iter().map(|&a| self.opd((a, Sel::WHOLE))));
+        let mut os = vec![
+            Self::opd((input, Sel::WHOLE)),
+            Self::opd((init, Sel::WHOLE)),
+        ];
+        os.extend(args.iter().map(|&a| Self::opd((a, Sel::WHOLE))));
         self.set_opds(n, &os);
         self.register(n);
         self.push_dirty(n);
@@ -1186,10 +1305,16 @@ impl<L: Lang> Graph<L> {
     }
 
     /// A scan of the root region.
-    pub fn scan(&mut self, op: L::Op, input: (NodeId, Sel), init: NodeId, args: &[NodeId]) -> NodeId {
+    pub fn scan(
+        &mut self,
+        op: L::Op,
+        input: (NodeId, Sel),
+        init: NodeId,
+        args: &[NodeId],
+    ) -> NodeId {
         let n = self.root_node(Kind::Scan, op, Class::Pure, 0);
-        let mut os = vec![self.opd(input), self.opd((init, Sel::WHOLE))];
-        os.extend(args.iter().map(|&a| self.opd((a, Sel::WHOLE))));
+        let mut os = vec![Self::opd(input), Self::opd((init, Sel::WHOLE))];
+        os.extend(args.iter().map(|&a| Self::opd((a, Sel::WHOLE))));
         self.set_opds(n, &os);
         self.register(n);
         self.push_dirty(n);
@@ -1199,7 +1324,12 @@ impl<L: Lang> Graph<L> {
     /// A read of chain `c`, in the root region (place it after what it
     /// reads).
     pub fn chain_read(&mut self, c: Chain) -> NodeId {
-        let n = self.root_node(Kind::ChainRead, L::Op::default(), Class::Pure, u64::from(c.0));
+        let n = self.root_node(
+            Kind::ChainRead,
+            L::Op::default(),
+            Class::Pure,
+            u64::from(c.0),
+        );
         self.register(n);
         self.push_dirty(n);
         NodeId(n)
@@ -1224,13 +1354,13 @@ impl<L: Lang> Graph<L> {
     /// Set up a new node's side tables (unfold, scan, chains, slots).
     fn register(&mut self, n: u32) {
         let u = n as usize;
-        match self.n.kind[u] {
+        match self.n.h[u].kind {
             Kind::Unfold => {
                 let grp0 = self.cur_grp_for(n);
-                self.n.aux[u] = self.unfolds.len() as u64;
+                self.n.h[u].aux = self.unfolds.len() as u64;
                 self.unfolds.push(UnfoldInfo {
-                    keys: HashMap::new(),
-                    owners: HashMap::new(),
+                    keys: Map::default(),
+                    owners: Map::default(),
                     input: None,
                     args_ver: Ver::ABSENT,
                     hunk_end: None,
@@ -1241,10 +1371,10 @@ impl<L: Lang> Graph<L> {
                 });
             }
             Kind::Scan => {
-                self.n.aux[u] = self.scans.len() as u64;
+                self.n.h[u].aux = self.scans.len() as u64;
                 self.scans.push(ScanInfo {
                     input: Seq::new(),
-                    states: Vec::new(),
+                    states: Seq::new(),
                     outs: Seq::new(),
                     init_ver: Ver::ABSENT,
                     args_ver: Ver::ABSENT,
@@ -1252,15 +1382,18 @@ impl<L: Lang> Graph<L> {
                 });
             }
             Kind::Cross => {
-                self.crosses.entry(self.n.aux[u]).or_default().push(n);
+                self.crosses.entry(self.n.h[u].aux).or_default().push(n);
             }
             Kind::ChainRead => {
                 #[allow(clippy::cast_possible_truncation)]
-                let c = self.n.aux[u] as u32;
+                let c = self.n.h[u].aux as u32;
                 self.chain_readers.entry(c).or_default().push(n);
             }
             Kind::Family => {
-                self.fam_readers.entry(self.n.aux[u] as u32).or_default().push(n);
+                self.fam_readers
+                    .entry(self.n.h[u].aux as u32)
+                    .or_default()
+                    .push(n);
             }
             _ => {}
         }
@@ -1268,7 +1401,7 @@ impl<L: Lang> Graph<L> {
     }
 
     fn register_class(&mut self, n: u32) {
-        match self.n.class[n as usize] {
+        match self.n.class(n) {
             Class::Effect(c) => self.chains.entry(c.0).or_default().push(n),
             Class::Publish(s) => {
                 self.pubs.entry(s.0).or_default().push(n);
@@ -1298,14 +1431,17 @@ impl<L: Lang> Graph<L> {
     /// queued.
     fn settle_new(&mut self, n: u32) {
         let u = n as usize;
-        let leafy = matches!(self.n.kind[u], Kind::Leaf | Kind::Const | Kind::Cross | Kind::Family);
+        let leafy = matches!(
+            self.n.h[u].kind,
+            Kind::Leaf | Kind::Const | Kind::Cross | Kind::Family
+        );
         let clean = self
             .n
             .opds_of(n)
             .iter()
-            .all(|o| o.src == NONE || self.n.flags[o.src as usize] & DIRTY == 0);
+            .all(|o| o.src == NONE || self.n.h[o.src as usize].flags & DIRTY == 0);
         if leafy && clean {
-            self.n.flags[u] &= !DIRTY;
+            self.n.h[u].flags &= !DIRTY;
             self.process_kind(n);
         } else {
             self.push_dirty(n);
@@ -1313,27 +1449,35 @@ impl<L: Lang> Graph<L> {
     }
 
     fn process(&mut self, n: u32) {
-        let f = self.n.flags[n as usize];
+        let f = self.n.h[n as usize].flags;
         if f & DEAD != 0 || f & DIRTY == 0 {
             return;
         }
-        self.n.flags[n as usize] &= !DIRTY;
+        self.n.h[n as usize].flags &= !DIRTY;
         self.process_kind(n);
     }
 
     fn process_kind(&mut self, n: u32) {
-        match self.n.kind[n as usize] {
+        match self.n.h[n as usize].kind {
             Kind::Leaf => self.eval_leaf(n),
             Kind::Root | Kind::Input | Kind::Const => {}
             Kind::Cross => {
-                let v = self.pred.get(&self.n.aux[n as usize]).cloned().unwrap_or_default();
+                let v = self
+                    .pred
+                    .get(&self.n.h[n as usize].aux)
+                    .cloned()
+                    .unwrap_or_default();
                 self.rep.evals += 1;
                 self.rep.cross_evals += 1;
                 self.set_val(n, v);
             }
             Kind::Family => {
-                let f = self.n.aux[n as usize] as u32;
-                let v = self.fpred.get(&f).cloned().unwrap_or_else(|| L::chain_val(Seq::new()));
+                let f = self.n.h[n as usize].aux as u32;
+                let v = self
+                    .fpred
+                    .get(&f)
+                    .cloned()
+                    .unwrap_or_else(|| L::chain_val(Seq::new()));
                 self.rep.evals += 1;
                 self.rep.cross_evals += 1;
                 self.set_val(n, v);
@@ -1351,7 +1495,7 @@ impl<L: Lang> Graph<L> {
                 g: &self.n,
                 opds: self.n.opds_of(n),
             };
-            L::eval(self.n.op[n as usize], &args)
+            L::eval(self.n.h[n as usize].op, &args)
         };
         self.rep.evals += 1;
         self.set_val(n, v);
@@ -1371,7 +1515,7 @@ impl<L: Lang> Graph<L> {
 
     fn eval_chain(&mut self, n: u32) {
         #[allow(clippy::cast_possible_truncation)]
-        let c = self.n.aux[n as usize] as u32;
+        let c = self.n.h[n as usize].aux as u32;
         let items: Vec<(ElemId, L::Val)> = self
             .chain_nodes(c)
             .into_iter()
@@ -1385,16 +1529,19 @@ impl<L: Lang> Graph<L> {
     // ---- unfolds ----
 
     fn args_ver(&self, n: u32, from: usize) -> Ver {
-        let vs: Vec<Ver> = self.n.opds_of(n)[from..].iter().map(|o| self.n.read_ver(o)).collect();
+        let vs: Vec<Ver> = self.n.opds_of(n)[from..]
+            .iter()
+            .map(|o| self.n.read_ver(o))
+            .collect();
         Ver::node(0x6172_6773, &vs)
     }
 
     fn run_unfold(&mut self, u: u32) {
-        let ui = self.n.aux[u as usize] as usize;
+        let ui = self.n.h[u as usize].aux as usize;
         let uo: Vec<Opd> = self.n.opds_of(u).to_vec();
         let input = L::as_seq(&self.n.read(&uo[0])).cloned().unwrap_or_default();
         let args_ver = self.args_ver(u, 2);
-        let first = self.n.first[u as usize];
+        let first = self.n.h[u as usize].first;
         let init = Opd {
             src: uo[1].src,
             sel: uo[1].sel,
@@ -1404,13 +1551,13 @@ impl<L: Lang> Graph<L> {
             let (key0, i0) = self.unfolds[ui].start.unwrap_or((0, 0));
             let at = input.get(i0).map_or(END, |e| e.0);
             let grp = self.unfolds[ui].grp0;
-            if self.cfg.workers > 1 && !self.cfg.segment && self.n.parent[u as usize] == ROOT {
+            if self.cfg.workers > 1 && !self.cfg.segment && self.n.h[u as usize].parent == ROOT {
                 let ents = {
                     let args = Args {
                         g: &self.n,
                         opds: &self.n.opds_of(u)[2..],
                     };
-                    L::entries(self.n.op[u as usize], &self.n.read(&uo[0]), &args)
+                    L::entries(self.n.h[u as usize].op, &self.n.read(&uo[0]), &args)
                 };
                 if let Some(e) = ents.iter().map(|e| e.at).filter(|&a| a > 0).min() {
                     self.unfolds[ui].stop = Some(e);
@@ -1454,7 +1601,7 @@ impl<L: Lang> Graph<L> {
             }
             if s == first {
                 // (the first step starts at the input's start, wherever that is now)
-                let fi = self.n.aux[first as usize] as usize;
+                let fi = self.n.h[first as usize].aux as usize;
                 self.steps[fi].at = input.get(0).map_or(END, |e| e.0);
             }
             self.push_dirty(s);
@@ -1464,13 +1611,25 @@ impl<L: Lang> Graph<L> {
 
     /// A new step of unfold `u` after `prev` (`NONE`: the first).
     fn new_step(&mut self, u: u32, prev: u32, key: u64, at: ElemId, grp: u64, opd0: Opd) -> u32 {
-        let ui = self.n.aux[u as usize] as usize;
-        let after = if prev == NONE { NONE } else { self.n.next[prev as usize] };
+        let ui = self.n.h[u as usize].aux as usize;
+        let after = if prev == NONE {
+            NONE
+        } else {
+            self.n.h[prev as usize].next
+        };
         let ord = self.step_ord(u, prev, after);
         #[allow(clippy::cast_possible_truncation)]
         let k32 = key as u32;
         let si = self.steps.len() as u64;
-        let s = self.alloc(Kind::Step, self.n.op[u as usize], Class::Pure, u, ord, k32, si);
+        let s = self.alloc(
+            Kind::Step,
+            self.n.h[u as usize].op,
+            Class::Pure,
+            u,
+            ord,
+            k32,
+            si,
+        );
         self.steps.push(StepInfo {
             unfold: u,
             key,
@@ -1484,11 +1643,11 @@ impl<L: Lang> Graph<L> {
             closed: Vec::new(),
         });
         if prev == NONE {
-            self.n.next[s as usize] = self.n.first[u as usize];
-            self.n.first[u as usize] = s;
+            self.n.h[s as usize].next = self.n.h[u as usize].first;
+            self.n.h[u as usize].first = s;
         } else {
-            self.n.next[s as usize] = after;
-            self.n.next[prev as usize] = s;
+            self.n.h[s as usize].next = after;
+            self.n.h[prev as usize].next = s;
         }
         self.unfolds[ui].keys.insert(key, s);
         self.set_opds(s, &[opd0]);
@@ -1508,33 +1667,37 @@ impl<L: Lang> Graph<L> {
     /// A label between `prev` and `after` among `u`'s steps, relabeling
     /// them all if there is no room.
     fn step_ord(&mut self, u: u32, prev: u32, after: u32) -> u64 {
-        let lo = if prev == NONE { 0 } else { self.n.ord[prev as usize] };
+        let lo = if prev == NONE {
+            0
+        } else {
+            self.n.h[prev as usize].ord
+        };
         if after == NONE {
             return lo + GAP;
         }
-        let hi = self.n.ord[after as usize];
+        let hi = self.n.h[after as usize].ord;
         if hi - lo > 1 {
             return lo + (hi - lo) / 2;
         }
         // (no room: spread every step of `u` again, keeping the order)
-        let mut c = self.n.first[u as usize];
+        let mut c = self.n.h[u as usize].first;
         let mut k = 0u64;
         let mut found = 0;
         while c != NONE {
             k += 1;
-            self.n.ord[c as usize] = k * GAP;
+            self.n.h[c as usize].ord = k * GAP;
             if c == prev {
                 k += 1;
                 found = k * GAP;
             }
-            c = self.n.next[c as usize];
+            c = self.n.h[c as usize].next;
         }
         if prev == NONE {
             // (before the first: shift all by one gap)
-            let mut c = self.n.first[u as usize];
+            let mut c = self.n.h[u as usize].first;
             while c != NONE {
-                self.n.ord[c as usize] += GAP;
-                c = self.n.next[c as usize];
+                self.n.h[c as usize].ord += GAP;
+                c = self.n.h[c as usize].next;
             }
             return GAP;
         }
@@ -1546,9 +1709,9 @@ impl<L: Lang> Graph<L> {
     #[allow(clippy::too_many_lines)]
     fn run_step(&mut self, s: u32) {
         self.rep.steps += 1;
-        let si = self.n.aux[s as usize] as usize;
+        let si = self.n.h[s as usize].aux as usize;
         let u = self.steps[si].unfold;
-        let ui = self.n.aux[u as usize] as usize;
+        let ui = self.n.h[u as usize].aux as usize;
         let input = self.unfolds[ui].input.clone();
         let at = self.steps[si].at;
         let start = match &input {
@@ -1585,10 +1748,13 @@ impl<L: Lang> Graph<L> {
                 ext: ext.as_deref(),
                 _brand: PhantomData,
             };
-            let args = Args { g: n, opds: &uo[2..] };
+            let args = Args {
+                g: n,
+                opds: &uo[2..],
+            };
             let st = n.read(&prev_o);
             let in_ver = st.ver();
-            let res = L::step(n.op[s as usize], &st, &args, &mut cx);
+            let res = L::step(n.h[s as usize].op, &st, &args, &mut cx);
             (res, cx.idx, cx.grp, cx.cursor(), in_ver)
         };
         if self.cfg.debug {
@@ -1610,19 +1776,28 @@ impl<L: Lang> Graph<L> {
             self.names.readers.push(Vec::new());
         }
         let ids = self.match_children(s);
+        let ids_ref = ids;
         self.grp_hint = NOGROUP;
         self.apply_groups(s, si);
-        self.apply_defs(s, si, &ids);
-        self.settle_children(s, &ids);
+        self.apply_defs(s, si, &ids_ref);
+        self.settle_children(s, &ids_ref);
+        self.sc_ids = ids_ref;
         // the step's own operands: its state, then the names it read
-        let mut os = vec![prev_o];
+        let mut os = std::mem::take(&mut self.sc_opds);
+        os.clear();
+        os.push(prev_o);
         let reads = std::mem::take(&mut self.em.reads);
         let at_s = self.n.pos(s);
         for &(m, o) in &reads {
-            os.push(if o.src == NONE { self.resolve_or_import(m, at_s) } else { o });
+            os.push(if o.src == NONE {
+                self.resolve_or_import(m, at_s)
+            } else {
+                o
+            });
         }
         self.em.reads = reads;
         self.set_opds(s, &os);
+        self.sc_opds = os;
         // its input range
         let took = u32::try_from(idx - start).expect("took fits u32");
         let old_at = self.steps[si].at;
@@ -1639,13 +1814,13 @@ impl<L: Lang> Graph<L> {
         match res {
             Step::Done(v) => {
                 self.set_val(s, v.clone());
-                let mut c = self.n.next[s as usize];
+                let mut c = self.n.h[s as usize].next;
                 while c != NONE {
-                    let nx = self.n.next[c as usize];
+                    let nx = self.n.h[c as usize].next;
                     self.remove(c);
                     c = nx;
                 }
-                self.n.next[s as usize] = NONE;
+                self.n.h[s as usize].next = NONE;
                 self.set_val(u, v);
             }
             Step::Next { st, key } => {
@@ -1657,10 +1832,20 @@ impl<L: Lang> Graph<L> {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn successor(&mut self, s: u32, u: u32, ui: usize, key: u64, cursor: ElemId, idx: usize, grp: u64, ver: Ver) {
+    fn successor(
+        &mut self,
+        s: u32,
+        u: u32,
+        ui: usize,
+        key: u64,
+        cursor: ElemId,
+        idx: usize,
+        grp: u64,
+        ver: Ver,
+    ) {
         if let Some(stop) = self.unfolds[ui].stop
             && idx >= stop
-            && self.n.next[s as usize] == NONE
+            && self.n.h[s as usize].next == NONE
         {
             self.unfolds[ui].stop = None;
             self.unfolds[ui].parked = Some(Parked {
@@ -1677,13 +1862,13 @@ impl<L: Lang> Graph<L> {
             return;
         }
         let input_ok = self.unfolds[ui].hunk_end.is_none_or(|h| idx >= h);
-        let q = self.n.next[s as usize];
+        let q = self.n.h[s as usize].next;
         let fits = |g: &Self, j: u32| {
-            let sj = &g.steps[g.n.aux[j as usize] as usize];
+            let sj = &g.steps[g.n.h[j as usize].aux as usize];
             sj.key == key && sj.at == cursor && sj.grp_in == grp
         };
         if q != NONE && fits(self, q) {
-            let qi = self.n.aux[q as usize] as usize;
+            let qi = self.n.h[q as usize].aux as usize;
             if self.steps[qi].in_ver != ver || !input_ok {
                 self.push_dirty(q);
             }
@@ -1692,17 +1877,17 @@ impl<L: Lang> Graph<L> {
         if let Some(&j) = self.unfolds[ui].keys.get(&key)
             && j != s
             && !self.n.is_dead(j)
-            && self.n.parent[j as usize] == u
-            && self.n.ord[j as usize] > self.n.ord[s as usize]
+            && self.n.h[j as usize].parent == u
+            && self.n.h[j as usize].ord > self.n.h[s as usize].ord
             && fits(self, j)
         {
             let mut c = q;
             while c != j {
-                let nx = self.n.next[c as usize];
+                let nx = self.n.h[c as usize].next;
                 self.remove(c);
                 c = nx;
             }
-            self.n.next[s as usize] = j;
+            self.n.h[s as usize].next = j;
             let mut os: Vec<Opd> = self.n.opds_of(j).to_vec();
             os[0] = Opd {
                 src: s,
@@ -1710,7 +1895,7 @@ impl<L: Lang> Graph<L> {
                 name: NONE,
             };
             self.set_opds(j, &os);
-            let ji = self.n.aux[j as usize] as usize;
+            let ji = self.n.h[j as usize].aux as usize;
             if self.steps[ji].in_ver != ver || !input_ok {
                 self.push_dirty(j);
             }
@@ -1735,22 +1920,30 @@ impl<L: Lang> Graph<L> {
     /// in emission order. Old children not matched are removed.
     fn match_children(&mut self, s: u32) -> Vec<u32> {
         self.keymap.clear();
-        let mut c = self.n.first[s as usize];
+        let mut c = self.n.h[s as usize].first;
         while c != NONE {
-            self.keymap.insert(self.n.key[c as usize], c);
-            c = self.n.next[c as usize];
+            self.keymap.insert(self.n.h[c as usize].key, c);
+            c = self.n.h[c as usize].next;
         }
         let specs = std::mem::take(&mut self.em.specs);
-        let mut ids = Vec::with_capacity(specs.len());
-        let mut gone: Vec<u32> = Vec::new();
+        let mut ids = std::mem::take(&mut self.sc_ids);
+        ids.clear();
+        let mut gone = std::mem::take(&mut self.sc_gone);
+        gone.clear();
         for sp in &specs {
             let cand = self.keymap.remove(&sp.key);
             let reuse = cand.filter(|&o| {
                 let u = o as usize;
-                self.n.kind[u] == sp.kind && self.n.op[u] == sp.op && self.n.class[u] == sp.class && {
-                    // (an unfold's or scan's table index is its aux)
-                    matches!(sp.kind, Kind::Unfold | Kind::Scan | Kind::Leaf | Kind::Const) || self.n.aux[u] == sp.aux
-                }
+                self.n.h[u].kind == sp.kind
+                    && self.n.h[u].op == sp.op
+                    && self.n.class(o) == sp.class
+                    && {
+                        // (an unfold's or scan's table index is its aux)
+                        matches!(
+                            sp.kind,
+                            Kind::Unfold | Kind::Scan | Kind::Leaf | Kind::Const
+                        ) || self.n.h[u].aux == sp.aux
+                    }
             });
             if reuse.is_none()
                 && let Some(o) = cand
@@ -1758,14 +1951,14 @@ impl<L: Lang> Graph<L> {
                 gone.push(o);
             }
             let id = if let Some(o) = reuse {
-                self.n.ord[o as usize] = sp.sub;
+                self.n.h[o as usize].ord = sp.sub;
                 if sp.kind == Kind::Unfold {
-                    let ui = self.n.aux[o as usize] as usize;
+                    let ui = self.n.h[o as usize].aux as usize;
                     if self.unfolds[ui].grp0 != sp.grp {
                         self.unfolds[ui].grp0 = sp.grp;
-                        let f = self.n.first[o as usize];
+                        let f = self.n.h[o as usize].first;
                         if f != NONE {
-                            let fi = self.n.aux[f as usize] as usize;
+                            let fi = self.n.h[f as usize].aux as usize;
                             self.steps[fi].grp_in = sp.grp;
                             self.push_dirty(f);
                         }
@@ -1775,7 +1968,7 @@ impl<L: Lang> Graph<L> {
             } else {
                 self.grp_hint = sp.grp;
                 let o = self.alloc(sp.kind, sp.op, sp.class, s, sp.sub, sp.key, sp.aux);
-                self.n.flags[o as usize] |= DIRTY;
+                self.n.h[o as usize].flags |= DIRTY;
                 self.register(o);
                 o
             };
@@ -1783,22 +1976,23 @@ impl<L: Lang> Graph<L> {
         }
         // the old ones not matched
         gone.extend(self.keymap.values().copied());
-        for o in gone {
+        for &o in &gone {
             self.remove(o);
         }
+        self.sc_gone = gone;
         // link in order
-        self.n.first[s as usize] = ids.first().copied().unwrap_or(NONE);
+        self.n.h[s as usize].first = ids.first().copied().unwrap_or(NONE);
         for w in ids.windows(2) {
-            self.n.next[w[0] as usize] = w[1];
+            self.n.h[w[0] as usize].next = w[1];
         }
         if let Some(&l) = ids.last() {
-            self.n.next[l as usize] = NONE;
+            self.n.h[l as usize].next = NONE;
         }
         // constants take their values now
         for (sp, &id) in specs.iter().zip(&ids) {
             if let Some(v) = &sp.lit {
                 self.set_val(id, v.clone());
-                self.n.flags[id as usize] &= !DIRTY;
+                self.n.h[id as usize].flags &= !DIRTY;
             }
         }
         self.em.specs = specs;
@@ -1812,7 +2006,11 @@ impl<L: Lang> Graph<L> {
                 sel,
                 name: NONE,
             },
-            SArg::Node(src, sel) => Opd { src, sel, name: NONE },
+            SArg::Node(src, sel) => Opd {
+                src,
+                sel,
+                name: NONE,
+            },
             SArg::Name(m) => self.resolve_or_import(m, at),
         }
     }
@@ -1838,7 +2036,10 @@ impl<L: Lang> Graph<L> {
         self.names.defs[m as usize].insert(
             0,
             DefEntry {
-                pos: Pos { parent: ROOT, ord: 0 },
+                pos: Pos {
+                    parent: ROOT,
+                    ord: 0,
+                },
                 src: i,
                 sel: Sel::WHOLE,
                 group: NOGROUP,
@@ -1852,7 +2053,7 @@ impl<L: Lang> Graph<L> {
     /// new or changed child evaluated or queued, in order.
     fn settle_children(&mut self, s: u32, ids: &[u32]) {
         let specs = std::mem::take(&mut self.em.specs);
-        let mut os: Vec<Opd> = Vec::new();
+        let mut os = std::mem::take(&mut self.sc_opds);
         for (sp, &id) in specs.iter().zip(ids) {
             os.clear();
             let at = self.n.pos(id);
@@ -1862,14 +2063,15 @@ impl<L: Lang> Graph<L> {
             }
             if self.n.opds_of(id) != os.as_slice() {
                 self.set_opds(id, &os);
-                self.n.flags[id as usize] |= DIRTY;
+                self.n.h[id as usize].flags |= DIRTY;
             }
-            if self.n.flags[id as usize] & (DIRTY | QUEUED) == DIRTY {
+            if self.n.h[id as usize].flags & (DIRTY | QUEUED) == DIRTY {
                 self.settle_new(id);
             }
         }
         let _ = s;
         self.em.specs = specs;
+        self.sc_opds = os;
     }
 }
 
@@ -1897,7 +2099,10 @@ impl<L: Lang> Graph<L> {
                         self.rep.unbalanced += 1;
                         continue;
                     }
-                    let pos = Pos { parent: s, ord: *sub };
+                    let pos = Pos {
+                        parent: s,
+                        ord: *sub,
+                    };
                     let gr = self.groups.entry(g).or_insert_with(|| Group {
                         parent: NOGROUP,
                         close: None,
@@ -1935,7 +2140,11 @@ impl<L: Lang> Graph<L> {
     }
 
     fn reresolve_group(&mut self, g: u64, from: Pos) {
-        let names = self.groups.get(&g).map(|x| x.names.clone()).unwrap_or_default();
+        let names = self
+            .groups
+            .get(&g)
+            .map(|x| x.names.clone())
+            .unwrap_or_default();
         for m in names {
             self.reresolve(m, from);
         }
@@ -1947,7 +2156,14 @@ impl<L: Lang> Graph<L> {
         let new: Vec<DefRec> = defs
             .iter()
             .map(|&(m, a, global, sub, grp)| {
-                let o = self.sarg(a, ids, Pos { parent: s, ord: sub });
+                let o = self.sarg(
+                    a,
+                    ids,
+                    Pos {
+                        parent: s,
+                        ord: sub,
+                    },
+                );
                 DefRec {
                     name: m,
                     sub,
@@ -1962,7 +2178,12 @@ impl<L: Lang> Graph<L> {
         let old = std::mem::take(&mut self.steps[si].defs);
         let same = old.len() == new.len()
             && old.iter().zip(&new).all(|(a, b)| {
-                a.name == b.name && a.sub == b.sub && a.src == b.src && a.sel == b.sel && a.group == b.group && a.global == b.global
+                a.name == b.name
+                    && a.sub == b.sub
+                    && a.src == b.src
+                    && a.sel == b.sel
+                    && a.group == b.group
+                    && a.global == b.global
             });
         if same {
             self.steps[si].defs = new;
@@ -1970,20 +2191,27 @@ impl<L: Lang> Graph<L> {
         }
         let mut touched: Vec<u32> = Vec::new();
         for d in &old {
-            self.remove_def(d.name, Pos { parent: s, ord: d.sub });
+            self.remove_def(
+                d.name,
+                Pos {
+                    parent: s,
+                    ord: d.sub,
+                },
+            );
             touched.push(d.name);
         }
         for d in &new {
             let e = DefEntry {
-                pos: Pos { parent: s, ord: d.sub },
+                pos: Pos {
+                    parent: s,
+                    ord: d.sub,
+                },
                 src: d.src,
                 sel: d.sel,
                 group: d.group,
                 global: d.global,
             };
-            let list = &self.names.defs[d.name as usize];
-            let k = list.partition_point(|x| self.n.cmp_pos(x.pos, e.pos) == Ordering::Less);
-            self.names.defs[d.name as usize].insert(k, e);
+            self.insert_def(d.name, e);
             if !d.global
                 && d.group != NOGROUP
                 && let Some(gr) = self.groups.get_mut(&d.group)
@@ -2010,15 +2238,15 @@ impl<L: Lang> Graph<L> {
         let k0 = rs.partition_point(|e| self.n.cmp_pos(self.n.pos(e.0), af) == Ordering::Less);
         for &(_, r, era) in &rs[k0..] {
             let ru = r as usize;
-            if self.n.era[ru] != era || self.n.flags[ru] & DEAD != 0 {
+            if self.n.h[ru].era != era || self.n.h[ru].flags & DEAD != 0 {
                 continue;
             }
             let at = self.n.pos(r);
             if self.n.cmp_pos(at, from) != Ordering::Greater {
                 continue;
             }
-            let a0 = self.n.a0[ru] as usize;
-            for k in 0..self.n.an[ru] as usize {
+            let a0 = self.n.h[ru].a0 as usize;
+            for k in 0..self.n.h[ru].an as usize {
                 let o = self.n.opds[a0 + k];
                 if o.name != m {
                     continue;
@@ -2050,10 +2278,23 @@ impl<L: Lang> Graph<L> {
         let ap = self.n.pos(e.0);
         let k = match list.last() {
             None => 0,
-            Some(l) if l.0 == e.0 || self.n.cmp_pos(self.n.pos(l.0), ap) != Ordering::Greater => list.len(),
+            Some(l) if l.0 == e.0 || self.n.cmp_pos(self.n.pos(l.0), ap) != Ordering::Greater => {
+                list.len()
+            }
             _ => list.partition_point(|x| self.n.cmp_pos(self.n.pos(x.0), ap) != Ordering::Greater),
         };
         self.names.readers[m as usize].insert(k, e);
+    }
+
+    /// A definition of name `m`, in its place (at the end, mostly).
+    fn insert_def(&mut self, m: u32, e: DefEntry) {
+        let list = &self.names.defs[m as usize];
+        let k = match list.last() {
+            None => 0,
+            Some(l) if self.n.cmp_pos(l.pos, e.pos) == Ordering::Less => list.len(),
+            _ => list.partition_point(|x| self.n.cmp_pos(x.pos, e.pos) == Ordering::Less),
+        };
+        self.names.defs[m as usize].insert(k, e);
     }
 
     /// Remove name `m`'s definition at `pos`.
@@ -2068,29 +2309,29 @@ impl<L: Lang> Graph<L> {
     /// Remove `n` and everything under it.
     fn remove(&mut self, n: u32) {
         let u = n as usize;
-        if self.n.flags[u] & DEAD != 0 {
+        if self.n.h[u].flags & DEAD != 0 {
             return;
         }
-        let mut c = self.n.first[u];
+        let mut c = self.n.h[u].first;
         while c != NONE {
-            let nx = self.n.next[c as usize];
+            let nx = self.n.h[c as usize].next;
             self.remove(c);
             c = nx;
         }
-        for k in 0..self.n.an[u] as usize {
-            let m = self.n.opds[self.n.a0[u] as usize + k].name;
+        for k in 0..self.n.h[u].an as usize {
+            let m = self.n.opds[self.n.h[u].a0 as usize + k].name;
             if m != NONE {
                 self.mark_prune(m);
             }
         }
-        self.n.flags[u] |= DEAD;
-        self.n.era[u] = self.n.era[u].wrapping_add(1);
+        self.n.h[u].flags |= DEAD;
+        self.n.h[u].era = self.n.h[u].era.wrapping_add(1);
         self.rep.removed += 1;
         self.to_free.push(n);
-        if self.n.kind[u] == Kind::Step {
-            let si = self.n.aux[u] as usize;
+        if self.n.h[u].kind == Kind::Step {
+            let si = self.n.h[u].aux as usize;
             let su = self.steps[si].unfold;
-            let ui = self.n.aux[su as usize] as usize;
+            let ui = self.n.h[su as usize].aux as usize;
             let (key, at) = (self.steps[si].key, self.steps[si].at);
             if self.unfolds[ui].keys.get(&key) == Some(&n) {
                 self.unfolds[ui].keys.remove(&key);
@@ -2102,7 +2343,13 @@ impl<L: Lang> Graph<L> {
             let from = self.n.pos(n);
             let mut touched = Vec::new();
             for d in &defs {
-                self.remove_def(d.name, Pos { parent: n, ord: d.sub });
+                self.remove_def(
+                    d.name,
+                    Pos {
+                        parent: n,
+                        ord: d.sub,
+                    },
+                );
                 touched.push(d.name);
             }
             touched.sort_unstable();
@@ -2126,12 +2373,12 @@ impl<L: Lang> Graph<L> {
     // ---- scans ----
 
     fn run_scan(&mut self, sc: u32) {
-        let ix = self.n.aux[sc as usize] as usize;
+        let ix = self.n.h[sc as usize].aux as usize;
         let uo: Vec<Opd> = self.n.opds_of(sc).to_vec();
         let input = L::as_seq(&self.n.read(&uo[0])).cloned().unwrap_or_default();
         let init = self.n.read(&uo[1]).clone();
         let args_ver = self.args_ver(sc, 2);
-        let op = self.n.op[sc as usize];
+        let op = self.n.h[sc as usize].op;
         let info = &mut self.scans[ix];
         let full = !info.done || info.init_ver != init.ver() || info.args_ver != args_ver;
         let (old_input, old_states, old_outs) = (
@@ -2146,9 +2393,12 @@ impl<L: Lang> Graph<L> {
             (h.prefix, h.suffix)
         };
         let (n_new, n_old) = (input.len(), old_input.len());
-        let mut st = if p == 0 { init.clone() } else { old_states[p - 1].clone() };
-        let mut states: Vec<L::Val> = Vec::with_capacity(n_new);
-        states.extend_from_slice(&old_states[..p]);
+        let mut st = if p == 0 {
+            init.clone()
+        } else {
+            old_states.get(p - 1).expect("a state").1.clone()
+        };
+        let mut fresh_states: Vec<(ElemId, L::Val)> = Vec::new();
         let mut fresh: Vec<(ElemId, L::Val)> = Vec::new();
         // (`met`: the old index from which the old run's states and outputs
         // hold again)
@@ -2156,21 +2406,28 @@ impl<L: Lang> Graph<L> {
         let mut stepped = 0;
         let old_at = |k: usize| -> Ver {
             // the old state before old element k
-            if k == 0 { init.ver() } else { old_states[k - 1].ver() }
+            if k == 0 {
+                init.ver()
+            } else {
+                old_states.get(k - 1).expect("a state").1.ver()
+            }
         };
         if !full && p >= n_new - sfx && st.ver() == old_at(p + n_old - n_new) {
             // (only deletions, and the state before them holds after them)
             met = Some(p + n_old - n_new);
         }
         if met.is_none() {
-            let args = Args { g: &self.n, opds: &uo[2..] };
+            let args = Args {
+                g: &self.n,
+                opds: &uo[2..],
+            };
             for (i, (id, x)) in input.iter_from(p).enumerate().map(|(k, e)| (k + p, e)) {
                 let (s2, out) = L::scan(op, &st, x, &args);
                 st = s2;
                 self.rep.scanned += 1;
                 stepped += 1;
                 fresh.push((id, out));
-                states.push(st.clone());
+                fresh_states.push((id, st.clone()));
                 if !full && i + 1 >= n_new - sfx && i + 1 + n_old >= n_new {
                     let ok = i + 1 + n_old - n_new;
                     if ok >= 1 && ok <= n_old && old_at(ok) == st.ver() {
@@ -2180,16 +2437,20 @@ impl<L: Lang> Graph<L> {
                 }
             }
         }
-        let outs = match met {
-            Some(ok) => {
-                states.extend_from_slice(&old_states[ok..]);
-                old_outs.splice(p, ok - p.min(ok), fresh)
-            }
-            None => old_outs.splice(p, n_old - p.min(n_old), fresh),
+        let del = match met {
+            Some(ok) => ok - p.min(ok),
+            None => n_old - p.min(n_old),
         };
-        let last = states.last().cloned().unwrap_or_else(|| init.clone());
+        let outs = old_outs.splice(p, del, fresh);
+        let states = old_states.splice(p, del, fresh_states);
+        let last = states
+            .get(states.len().wrapping_sub(1))
+            .map_or_else(|| init.clone(), |e| e.1.clone());
         let v = {
-            let args = Args { g: &self.n, opds: &uo[2..] };
+            let args = Args {
+                g: &self.n,
+                opds: &uo[2..],
+            };
             L::scan_result(op, &last, &outs, &args)
         };
         let info = &mut self.scans[ix];
@@ -2219,7 +2480,7 @@ impl<L: Lang> Graph<L> {
         let items = ns
             .into_iter()
             .map(|x| {
-                let s = self.n.class[x as usize].slot().map_or(0, |s| s.0);
+                let s = self.n.class(x).slot().map_or(0, |s| s.0);
                 (ElemId(s), self.n.val[x as usize].clone())
             })
             .collect();
@@ -2237,7 +2498,8 @@ impl<L: Lang> Graph<L> {
                 best = Some(p);
             }
         }
-        best.map(|b| self.n.val[b as usize].clone()).unwrap_or_default()
+        best.map(|b| self.n.val[b as usize].clone())
+            .unwrap_or_default()
     }
 
     /// Evaluate what is new or changed, to quiescence, then iterate the
@@ -2245,7 +2507,7 @@ impl<L: Lang> Graph<L> {
     pub fn run(&mut self) -> Report {
         self.rep = Report::default();
         self.scan_runs.clear();
-        let mut hist: HashMap<u64, Vec<Ver>> = HashMap::new();
+        let mut hist: Map<u64, Vec<Ver>> = Map::default();
         loop {
             while let Some(n) = self.pop() {
                 self.process(n);
@@ -2259,7 +2521,10 @@ impl<L: Lang> Graph<L> {
             let mut changed = Vec::new();
             for sl in std::mem::take(&mut self.dirty_slots) {
                 let v = self.published(sl);
-                let cur = self.pred.get(&sl).map_or_else(|| L::Val::default().ver(), Value::ver);
+                let cur = self
+                    .pred
+                    .get(&sl)
+                    .map_or_else(|| L::Val::default().ver(), Value::ver);
                 if cur != v.ver() {
                     changed.push((sl, v));
                 }
@@ -2267,7 +2532,10 @@ impl<L: Lang> Graph<L> {
             let mut fchanged = Vec::new();
             for f in std::mem::take(&mut self.dirty_fams) {
                 let v = self.family_value(f);
-                let cur = self.fpred.get(&f).map_or_else(|| L::chain_val(Seq::new()).ver(), Value::ver);
+                let cur = self
+                    .fpred
+                    .get(&f)
+                    .map_or_else(|| L::chain_val(Seq::new()).ver(), Value::ver);
                 if cur != v.ver() {
                     fchanged.push((f, v));
                 }
@@ -2299,7 +2567,9 @@ impl<L: Lang> Graph<L> {
                 }
             }
             for (f, v) in fchanged {
-                hist.entry(u64::from(f) | 1 << 63).or_default().push(v.ver());
+                hist.entry(u64::from(f) | 1 << 63)
+                    .or_default()
+                    .push(v.ver());
                 std::sync::Arc::make_mut(&mut self.fpred).insert(f, v);
                 for c in self.fam_readers.get(&f).cloned().unwrap_or_default() {
                     if !self.n.is_dead(c) {
@@ -2309,7 +2579,7 @@ impl<L: Lang> Graph<L> {
             }
         }
         for u in std::mem::take(&mut self.hunks) {
-            let ui = self.n.aux[u as usize] as usize;
+            let ui = self.n.h[u as usize].aux as usize;
             if !self.n.is_dead(u) {
                 self.unfolds[ui].hunk_end = None;
             }
@@ -2323,7 +2593,7 @@ impl<L: Lang> Graph<L> {
 
     /// Registries pruned of the dead; removed slots freed for reuse.
     fn sweep(&mut self) {
-        let dead = |n: &Nodes<L>, x: u32| n.flags[x as usize] & DEAD != 0;
+        let dead = |n: &Nodes<L>, x: u32| n.h[x as usize].flags & DEAD != 0;
         for v in self.chains.values_mut() {
             v.retain(|&x| !dead(&self.n, x));
         }
@@ -2346,12 +2616,12 @@ impl<L: Lang> Graph<L> {
             self.names.pruned[m as usize] = false;
             let g = &self.n;
             self.names.readers[m as usize]
-                .retain(|&(_, r, e)| g.era[r as usize] == e && g.flags[r as usize] & DEAD == 0);
+                .retain(|&(_, r, e)| g.h[r as usize].era == e && g.h[r as usize].flags & DEAD == 0);
         }
         // (a freed node keeps its DEAD flag until reused)
         let tf = std::mem::take(&mut self.to_free);
         for n in tf {
-            self.n.first[n as usize] = NONE;
+            self.n.h[n as usize].first = NONE;
             self.n.val[n as usize] = L::Val::default();
             self.free.push(n);
         }
@@ -2360,30 +2630,36 @@ impl<L: Lang> Graph<L> {
     /// Every live leaf and scan evaluated again: a value that differs is
     /// an impure op or a missed wake.
     fn check(&mut self) {
-        let mut seen = vec![false; self.n.kind.len()];
+        let mut seen = vec![false; self.n.h.len()];
         let mut stack = vec![ROOT];
         while let Some(x) = stack.pop() {
             seen[x as usize] = true;
-            let mut c = self.n.first[x as usize];
+            let mut c = self.n.h[x as usize].first;
             while c != NONE {
-                assert!(!self.n.is_dead(c), "check: dead node %{c} linked under %{x}");
-                assert_eq!(self.n.parent[c as usize], x, "check: %{c} linked under %{x}");
+                assert!(
+                    !self.n.is_dead(c),
+                    "check: dead node %{c} linked under %{x}"
+                );
+                assert_eq!(
+                    self.n.h[c as usize].parent, x,
+                    "check: %{c} linked under %{x}"
+                );
                 stack.push(c);
-                c = self.n.next[c as usize];
+                c = self.n.h[c as usize].next;
             }
         }
         for (i, s) in seen.iter().enumerate() {
             assert!(
-                *s || self.n.flags[i] & DEAD != 0,
+                *s || self.n.h[i].flags & DEAD != 0,
                 "check: live node %{i} ({:?} {:?}, parent %{}) is not in the tree",
-                self.n.kind[i],
-                self.n.op[i],
-                self.n.parent[i]
+                self.n.h[i].kind,
+                self.n.h[i].op,
+                self.n.h[i].parent
             );
         }
-        for n in 1..self.n.kind.len() {
+        for n in 1..self.n.h.len() {
             let n32 = u32::try_from(n).expect("fits");
-            if self.n.is_dead(n32) || self.n.kind[n] != Kind::Leaf {
+            if self.n.is_dead(n32) || self.n.h[n].kind != Kind::Leaf {
                 continue;
             }
             let v = {
@@ -2391,12 +2667,12 @@ impl<L: Lang> Graph<L> {
                     g: &self.n,
                     opds: self.n.opds_of(n32),
                 };
-                L::eval(self.n.op[n], &args)
+                L::eval(self.n.h[n].op, &args)
             };
             assert!(
                 v.ver() == self.n.val[n].ver(),
                 "check: node %{n} ({:?}) is {:?} but evaluates to {:?}",
-                self.n.op[n],
+                self.n.h[n].op,
                 self.n.val[n],
                 v
             );
@@ -2427,7 +2703,10 @@ impl<L: Lang> Graph<L> {
     /// Chain `c`'s payloads in order.
     #[must_use]
     pub fn chain(&self, c: Chain) -> Vec<L::Val> {
-        self.chain_nodes(c.0).into_iter().map(|x| self.n.val[x as usize].clone()).collect()
+        self.chain_nodes(c.0)
+            .into_iter()
+            .map(|x| self.n.val[x as usize].clone())
+            .collect()
     }
 
     /// The value slot `s` was predicted to have in this run.
@@ -2444,7 +2723,9 @@ impl<L: Lang> Graph<L> {
     /// The number of live nodes.
     #[must_use]
     pub fn live(&self) -> usize {
-        (1..self.n.kind.len()).filter(|&i| self.n.flags[i] & DEAD == 0).count()
+        (1..self.n.h.len())
+            .filter(|&i| self.n.h[i].flags & DEAD == 0)
+            .count()
     }
 
     /// The name spelled `s`, if any node has used it.
@@ -2476,7 +2757,7 @@ impl<L: Lang> Graph<L> {
 
     /// A step's definitions: (source, selector, name, global).
     pub(crate) fn step_defs(&self, s: u32) -> Vec<(u32, Sel, u32, bool)> {
-        self.steps[self.n.aux[s as usize] as usize]
+        self.steps[self.n.h[s as usize].aux as usize]
             .defs
             .iter()
             .map(|d| (d.src, d.sel, d.name, d.global))
@@ -2486,13 +2767,21 @@ impl<L: Lang> Graph<L> {
     /// The elements the scans of `op` stepped in the last run.
     #[must_use]
     pub fn scanned(&self, op: L::Op) -> u64 {
-        self.scan_runs.iter().filter(|r| r.0 == op).map(|r| r.1).sum()
+        self.scan_runs
+            .iter()
+            .filter(|r| r.0 == op)
+            .map(|r| r.1)
+            .sum()
     }
 
     /// A scan's states after each element (versions), for tests.
     #[must_use]
     pub fn state_vers(&self, n: NodeId) -> Vec<Ver> {
-        self.scans[self.n.aux[n.0 as usize] as usize].states.iter().map(Value::ver).collect()
+        self.scans[self.n.h[n.0 as usize].aux as usize]
+            .states
+            .iter()
+            .map(|e| e.1.ver())
+            .collect()
     }
 
     /// Name `n`'s definitions, for debugging: (defining node, position,
@@ -2502,8 +2791,9 @@ impl<L: Lang> Graph<L> {
         let mut out = String::new();
         for d in &self.names.defs[n.0 as usize] {
             let close = self.groups.get(&d.group).and_then(|g| g.close);
-            out += &format!(
-                "src %{} at ({}, {}) group {:x} close {:?} global {} dead {}\n",
+            let _ = writeln!(
+                out,
+                "src %{} at ({}, {}) group {:x} close {:?} global {} dead {}",
                 d.src,
                 d.pos.parent,
                 d.pos.ord,
@@ -2514,6 +2804,35 @@ impl<L: Lang> Graph<L> {
             );
         }
         out
+    }
+
+    /// Bytes the graph holds in its own tables (values' heap contents,
+    /// the client's, not counted): (live nodes, bytes).
+    #[must_use]
+    pub fn mem(&self) -> (usize, usize) {
+        use std::mem::size_of;
+        let n = &self.n;
+        let cols = n.h.capacity() * (size_of::<Hdr<L::Op>>() + size_of::<L::Val>());
+        let arenas = n.opds.capacity() * size_of::<Opd>() + n.revs.capacity() * size_of::<Rev>();
+        let steps = self.steps.capacity() * size_of::<StepInfo>()
+            + self
+                .steps
+                .iter()
+                .map(|s| s.defs.capacity() * size_of::<DefRec>())
+                .sum::<usize>();
+        let names: usize = self
+            .names
+            .defs
+            .iter()
+            .map(|d| d.capacity() * size_of::<DefEntry>())
+            .sum::<usize>()
+            + self
+                .names
+                .readers
+                .iter()
+                .map(|r| r.capacity() * 12)
+                .sum::<usize>();
+        (self.live(), cols + arenas + steps + names)
     }
 
     /// The root region's nodes, in order.
@@ -2543,23 +2862,36 @@ impl<L: Lang> Graph<L> {
     /// Speculative entry (DESIGN 7.4): the chain of `u` stopped at its
     /// first entry; run a segment from each entry on the workers, graft
     /// them in order, and check each arrival like any successor.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the segments, their run on the workers, and the grafting, in order"
+    )]
     fn speculate(&mut self, u: u32) {
-        let ui = self.n.aux[u as usize] as usize;
+        let ui = self.n.h[u as usize].aux as usize;
         let parked = self.unfolds[ui].parked.take().expect("parked");
         let mut ents = self.entries.remove(&u).unwrap_or_default();
         ents.sort_by_key(|e| e.at);
         ents.retain(|e| e.at >= parked.idx && e.guess.is_some());
         ents.dedup_by_key(|e| e.at);
         if ents.is_empty() {
-            self.successor(parked.s, u, ui, parked.key, parked.cursor, parked.idx, parked.grp, parked.ver);
+            self.successor(
+                parked.s,
+                u,
+                ui,
+                parked.key,
+                parked.cursor,
+                parked.idx,
+                parked.grp,
+                parked.ver,
+            );
             return;
         }
         // every name as it is where the segments start
         let at = Pos {
             parent: u,
-            ord: self.n.ord[parked.s as usize] + 1,
+            ord: self.n.h[parked.s as usize].ord + 1,
         };
-        let mut ext = HashMap::new();
+        let mut ext = Map::default();
         for m in 0..self.names.spell.len() {
             let o = resolve(&self.n, &self.names, &self.groups, m as u32, at);
             if o.src != NONE {
@@ -2570,11 +2902,18 @@ impl<L: Lang> Graph<L> {
         let uo: Vec<Opd> = self.n.opds_of(u).to_vec();
         let input = self.n.read(&uo[0]).clone();
         let args: Vec<L::Val> = uo[2..].iter().map(|o| self.n.read(o).clone()).collect();
-        let op = self.n.op[u as usize];
+        let op = self.n.h[u as usize].op;
         let segs: Vec<(usize, Option<usize>, u64, L::Val)> = ents
             .iter()
             .enumerate()
-            .map(|(k, e)| (e.at, ents.get(k + 1).map(|n| n.at), e.key, e.guess.clone().expect("guessed")))
+            .map(|(k, e)| {
+                (
+                    e.at,
+                    ents.get(k + 1).map(|n| n.at),
+                    e.key,
+                    e.guess.clone().expect("guessed"),
+                )
+            })
             .collect();
         let pred = self.pred.clone();
         let fpred = self.fpred.clone();
@@ -2588,7 +2927,7 @@ impl<L: Lang> Graph<L> {
             let init = p.input(seg.3.clone());
             let a: Vec<NodeId> = args.iter().map(|v| p.input(v.clone())).collect();
             let pu = p.unfold(op, i, init, &a).0;
-            let pui = p.n.aux[pu as usize] as usize;
+            let pui = p.n.h[pu as usize].aux as usize;
             p.unfolds[pui].start = Some((seg.2, seg.0));
             p.unfolds[pui].stop = seg.1;
             p.run();
@@ -2626,7 +2965,8 @@ impl<L: Lang> Graph<L> {
                     });
                 }
                 drop(tx);
-                let mut waiting: std::collections::BTreeMap<usize, SegOut<L>> = std::collections::BTreeMap::new();
+                let mut waiting: std::collections::BTreeMap<usize, SegOut<L>> =
+                    std::collections::BTreeMap::new();
                 let mut want = 0;
                 for (k, out) in rx {
                     waiting.insert(k, out);
@@ -2674,7 +3014,7 @@ impl<L: Lang> Graph<L> {
                     // (the part before ended: nothing after it is the chain's)
                     let mut c = first;
                     while c != NONE {
-                        let nx = self.n.next[c as usize];
+                        let nx = self.n.h[c as usize].next;
                         self.remove(c);
                         c = nx;
                     }
@@ -2708,7 +3048,7 @@ impl<L: Lang> Graph<L> {
     /// Graft a segment's steps (and everything under them) after `tail`,
     /// the last step of `u`: the first and last steps grafted, and where
     /// the segment stopped (`None`: it ended).
-    #[allow(clippy::too_many_lines)]
+    #[allow(clippy::too_many_lines, reason = "one pass per table, in order")]
     fn graft(&mut self, u: u32, tail: u32, out: &SegOut<L>) -> Option<(u32, u32, Option<Parked>)> {
         let p = &out.g;
         let pu = out.u;
@@ -2716,24 +3056,26 @@ impl<L: Lang> Graph<L> {
         if psteps.is_empty() {
             return None;
         }
-        let ui = self.n.aux[u as usize] as usize;
-        let mut map = SegMap(vec![NONE; p.n.kind.len()]);
+        let ui = self.n.h[u as usize].aux as usize;
+        let mut map = SegMap(vec![NONE; p.n.h.len()]);
         // the segment's root inputs are the unfold's operands here
         let puo = p.n.opds_of(pu);
         let uo: Vec<Opd> = self.n.opds_of(u).to_vec();
-        let mut outer: HashMap<u32, Opd> = HashMap::new();
+        let mut outer: Map<u32, Opd> = Map::default();
         for (k, o) in puo.iter().enumerate() {
             outer.insert(o.src, uo[k]);
         }
-        let imports: HashMap<u32, u64> = p.imports.iter().map(|(&h, &n)| (n, h)).collect();
-        let names: Vec<u32> = (0..p.names.spell.len()).map(|m| self.intern(&p.names.spell[m])).collect();
+        let imports: Map<u32, u64> = p.imports.iter().map(|(&h, &n)| (n, h)).collect();
+        let names: Vec<u32> = (0..p.names.spell.len())
+            .map(|m| self.intern(&p.names.spell[m]))
+            .collect();
         // allocate, in order
         let mut order: Vec<u32> = Vec::new();
         let mut last = tail;
         for &ps in &psteps {
             let ord = self.step_ord(u, last, NONE);
             let ms = self.copy_node(p, ps, u, ord);
-            self.n.next[last as usize] = ms;
+            self.n.h[last as usize].next = ms;
             last = ms;
             map.insert(ps, ms);
             order.push(ps);
@@ -2742,26 +3084,27 @@ impl<L: Lang> Graph<L> {
                 let kids = p.n.children(x);
                 let mut prev_m = NONE;
                 for &c in &kids {
-                    let mc = self.copy_node(p, c, map[&x], p.n.ord[c as usize]);
+                    let mc = self.copy_node(p, c, map[&x], p.n.h[c as usize].ord);
                     map.insert(c, mc);
                     order.push(c);
                     if prev_m == NONE {
-                        self.n.first[map[&x] as usize] = mc;
+                        self.n.h[map[&x] as usize].first = mc;
                     } else {
-                        self.n.next[prev_m as usize] = mc;
+                        self.n.h[prev_m as usize].next = mc;
                     }
                     prev_m = mc;
                 }
                 stack.extend(kids.iter().rev());
             }
         }
-        self.n.next[last as usize] = NONE;
+        self.n.h[last as usize].next = NONE;
         let remap_grp = |g: u64, map: &SegMap| -> u64 {
             if g == NOGROUP {
                 return g;
             }
             let st = (g >> 32) as u32;
-            map.get(&st).map_or(g, |&m| (u64::from(m) << 32) | (g & 0xffff_ffff))
+            map.get(&st)
+                .map_or(g, |&m| (u64::from(m) << 32) | (g & 0xffff_ffff))
         };
         // groups first (definitions' lives depend on them)
         for (&g, gr) in &p.groups {
@@ -2784,17 +3127,21 @@ impl<L: Lang> Graph<L> {
         for &x in &order {
             let mx = map[&x];
             let xu = x as usize;
-            match p.n.kind[xu] {
+            match p.n.h[xu].kind {
                 Kind::Step => {
-                    let si = &p.steps[p.n.aux[xu] as usize];
-                    let owner = self.n.parent[mx as usize];
+                    let si = &p.steps[p.n.h[xu].aux as usize];
+                    let owner = self.n.h[mx as usize].parent;
                     let defs: Vec<DefRec> = si
                         .defs
                         .iter()
                         .map(|d| DefRec {
                             name: names[d.name as usize],
                             sub: d.sub,
-                            src: if d.src == NONE { NONE } else { map.get(&d.src).copied().unwrap_or(NONE) },
+                            src: if d.src == NONE {
+                                NONE
+                            } else {
+                                map.get(&d.src).copied().unwrap_or(NONE)
+                            },
                             sel: d.sel,
                             group: remap_grp(d.group, &map),
                             global: d.global,
@@ -2814,30 +3161,31 @@ impl<L: Lang> Graph<L> {
                     };
                     for d in &info.defs {
                         let e = DefEntry {
-                            pos: Pos { parent: mx, ord: d.sub },
+                            pos: Pos {
+                                parent: mx,
+                                ord: d.sub,
+                            },
                             src: d.src,
                             sel: d.sel,
                             group: d.group,
                             global: d.global,
                         };
-                        let list = &self.names.defs[d.name as usize];
-                        let k = list.partition_point(|y| self.n.cmp_pos(y.pos, e.pos) == Ordering::Less);
-                        self.names.defs[d.name as usize].insert(k, e);
+                        self.insert_def(d.name, e);
                     }
-                    let oi = self.n.aux[owner as usize] as usize;
+                    let oi = self.n.h[owner as usize].aux as usize;
                     self.unfolds[oi].keys.insert(info.key, mx);
                     if info.took > 0 {
                         self.unfolds[oi].owners.insert(info.at, mx);
                     }
-                    self.n.aux[mx as usize] = self.steps.len() as u64;
+                    self.n.h[mx as usize].aux = self.steps.len() as u64;
                     self.steps.push(info);
                 }
                 Kind::Unfold => {
-                    let pi = &p.unfolds[p.n.aux[xu] as usize];
-                    self.n.aux[mx as usize] = self.unfolds.len() as u64;
+                    let pi = &p.unfolds[p.n.h[xu].aux as usize];
+                    self.n.h[mx as usize].aux = self.unfolds.len() as u64;
                     self.unfolds.push(UnfoldInfo {
-                        keys: HashMap::new(),
-                        owners: HashMap::new(),
+                        keys: Map::default(),
+                        owners: Map::default(),
                         input: pi.input.clone(),
                         args_ver: pi.args_ver,
                         hunk_end: None,
@@ -2848,8 +3196,8 @@ impl<L: Lang> Graph<L> {
                     });
                 }
                 Kind::Scan => {
-                    let pi = &p.scans[p.n.aux[xu] as usize];
-                    self.n.aux[mx as usize] = self.scans.len() as u64;
+                    let pi = &p.scans[p.n.h[xu].aux as usize];
+                    self.n.h[mx as usize].aux = self.scans.len() as u64;
                     self.scans.push(ScanInfo {
                         input: pi.input.clone(),
                         states: pi.states.clone(),
@@ -2864,13 +3212,13 @@ impl<L: Lang> Graph<L> {
         }
         // (nested unfolds' keys and owners, now that their steps have ids)
         for &x in &order {
-            if p.n.kind[x as usize] == Kind::Step {
+            if p.n.h[x as usize].kind == Kind::Step {
                 let mx = map[&x];
-                let owner = self.n.parent[mx as usize];
+                let owner = self.n.h[mx as usize].parent;
                 if owner != u {
-                    let si = &self.steps[self.n.aux[mx as usize] as usize];
+                    let si = &self.steps[self.n.h[mx as usize].aux as usize];
                     let (k, a, t) = (si.key, si.at, si.took);
-                    let oi = self.n.aux[owner as usize] as usize;
+                    let oi = self.n.h[owner as usize].aux as usize;
                     self.unfolds[oi].keys.insert(k, mx);
                     if t > 0 {
                         self.unfolds[oi].owners.insert(a, mx);
@@ -2888,9 +3236,16 @@ impl<L: Lang> Graph<L> {
             let mut os: Vec<Opd> = Vec::new();
             let mut stale = false;
             for o in p.n.opds_of(x) {
-                let name = if o.name == NONE { NONE } else { names[o.name as usize] };
+                let name = if o.name == NONE {
+                    NONE
+                } else {
+                    names[o.name as usize]
+                };
                 let read_ver = p.n.read_ver(o);
-                let mo = if o.src != NONE && !imports.contains_key(&o.src) && !outer.contains_key(&o.src) {
+                let mo = if o.src != NONE
+                    && !imports.contains_key(&o.src)
+                    && !outer.contains_key(&o.src)
+                {
                     Opd {
                         src: map[&o.src],
                         sel: o.sel,
@@ -2923,13 +3278,25 @@ impl<L: Lang> Graph<L> {
         let mut chains: Vec<u32> = Vec::new();
         for &x in &order {
             let mx = map[&x];
-            match self.n.kind[mx as usize] {
-                Kind::Cross => self.crosses.entry(self.n.aux[mx as usize]).or_default().push(mx),
-                Kind::ChainRead => self.chain_readers.entry(self.n.aux[mx as usize] as u32).or_default().push(mx),
-                Kind::Family => self.fam_readers.entry(self.n.aux[mx as usize] as u32).or_default().push(mx),
+            match self.n.h[mx as usize].kind {
+                Kind::Cross => self
+                    .crosses
+                    .entry(self.n.h[mx as usize].aux)
+                    .or_default()
+                    .push(mx),
+                Kind::ChainRead => self
+                    .chain_readers
+                    .entry(self.n.h[mx as usize].aux as u32)
+                    .or_default()
+                    .push(mx),
+                Kind::Family => self
+                    .fam_readers
+                    .entry(self.n.h[mx as usize].aux as u32)
+                    .or_default()
+                    .push(mx),
                 _ => {}
             }
-            if let Class::Effect(c) = self.n.class[mx as usize] {
+            if let Class::Effect(c) = self.n.class(mx) {
                 chains.push(c.0);
             }
             self.register_class(mx);
@@ -2952,7 +3319,7 @@ impl<L: Lang> Graph<L> {
             name: NONE,
         };
         self.set_opds(first, &os);
-        let pui = p.n.aux[pu as usize] as usize;
+        let pui = p.n.h[pu as usize].aux as usize;
         let end = p.unfolds[pui].parked.map(|pk| Parked {
             s: map[&pk.s],
             grp: remap_grp(pk.grp, &map),
@@ -2964,12 +3331,19 @@ impl<L: Lang> Graph<L> {
     /// A copy of a segment's node here, under `parent` at `ord`.
     fn copy_node(&mut self, p: &Graph<L>, x: u32, parent: u32, ord: u64) -> u32 {
         let xu = x as usize;
-        let m = self.alloc(p.n.kind[xu], p.n.op[xu], p.n.class[xu], parent, ord, p.n.key[xu], p.n.aux[xu]);
+        let m = self.alloc(
+            p.n.h[xu].kind,
+            p.n.h[xu].op,
+            p.n.class(x),
+            parent,
+            ord,
+            p.n.h[xu].key,
+            p.n.h[xu].aux,
+        );
         self.n.val[m as usize] = p.n.val[xu].clone();
         m
     }
 }
-
 
 /// A segment's node ids to this graph's.
 struct SegMap(Vec<u32>);
@@ -2978,9 +3352,11 @@ impl SegMap {
     fn insert(&mut self, k: u32, v: u32) {
         self.0[k as usize] = v;
     }
+    #[allow(clippy::trivially_copy_pass_by_ref, reason = "a map's shape")]
     fn get(&self, k: &u32) -> Option<&u32> {
         self.0.get(*k as usize).filter(|&&v| v != NONE)
     }
+    #[allow(clippy::trivially_copy_pass_by_ref, reason = "a map's shape")]
     fn contains_key(&self, k: &u32) -> bool {
         self.get(k).is_some()
     }

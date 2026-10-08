@@ -443,7 +443,10 @@ impl<T: Value, M: Measure<T>> Seq<T, M> {
             Some(r) => {
                 if let Some(right) = Arc::make_mut(r).insert(i, (id, x)) {
                     let left = self.root.take().expect("root");
-                    self.root = Some(Arc::new(Node::new(Kind::Inner(vec![left, Arc::new(right)]))));
+                    self.root = Some(Arc::new(Node::new(Kind::Inner(vec![
+                        left,
+                        Arc::new(right),
+                    ]))));
                 }
             }
         }
@@ -468,7 +471,16 @@ impl<T: Value, M: Measure<T>> Seq<T, M> {
     /// `del` elements at `at` replaced by `ins`: a new sequence sharing
     /// every node the splice does not touch.
     #[must_use]
-    pub fn splice(&self, at: usize, del: usize, ins: impl IntoIterator<Item = (ElemId, T)>) -> Self {
+    pub fn splice(
+        &self,
+        at: usize,
+        del: usize,
+        ins: impl IntoIterator<Item = (ElemId, T)>,
+    ) -> Self {
+        if at == 0 && del >= self.len() {
+            // (all of it replaced: built bottom-up)
+            return Self::from_vec(ins.into_iter().collect());
+        }
         let mut s = self.clone();
         for _ in 0..del {
             s.remove(at);
@@ -551,6 +563,8 @@ enum Side {
     Back,
 }
 
+type Pairs<'a, T, M> = Box<dyn Iterator<Item = (&'a Arc<Node<T, M>>, &'a Arc<Node<T, M>>)> + 'a>;
+
 /// The number of equal elements at one end of `a` and `b`.
 fn common<T: Value, M: Measure<T>>(a: &Arc<Node<T, M>>, b: &Arc<Node<T, M>>, side: Side) -> usize {
     if Arc::ptr_eq(a, b) {
@@ -558,7 +572,7 @@ fn common<T: Value, M: Measure<T>>(a: &Arc<Node<T, M>>, b: &Arc<Node<T, M>>, sid
     }
     if let (Kind::Inner(ka), Kind::Inner(kb)) = (&a.kind, &b.kind) {
         // (children aligned at this end, compared pairwise)
-        let pairs: Box<dyn Iterator<Item = (&Arc<Node<T, M>>, &Arc<Node<T, M>>)>> = match side {
+        let pairs: Pairs<'_, T, M> = match side {
             Side::Front => Box::new(ka.iter().zip(kb.iter())),
             Side::Back => Box::new(ka.iter().rev().zip(kb.iter().rev())),
         };
@@ -599,6 +613,14 @@ impl<T: Value, M: Measure<T>> Eq for Seq<T, M> {}
 impl<T: Value + std::fmt::Debug, M: Measure<T>> std::fmt::Debug for Seq<T, M> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_list().entries(self.iter().map(|(_, x)| x)).finish()
+    }
+}
+
+impl<'a, T: Value, M: Measure<T>> IntoIterator for &'a Seq<T, M> {
+    type Item = (ElemId, &'a T);
+    type IntoIter = Iter<'a, T, M>;
+    fn into_iter(self) -> Iter<'a, T, M> {
+        self.iter()
     }
 }
 

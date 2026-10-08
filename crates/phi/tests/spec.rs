@@ -1,3 +1,5 @@
+#![allow(clippy::pedantic)]
+
 //! Speculative entry: a cold build entered at every paragraph on W
 //! workers equals the build in turn, and is faster.
 
@@ -77,8 +79,14 @@ fn speculative_entry_is_faster() {
         best1 = best1.min(build(&src, 1).1);
         best4 = best4.min(build(&src, 4).1);
     }
-    eprintln!("cold build: 1 worker {best1:.3} s, 4 workers {best4:.3} s ({:.2}x)", best1 / best4);
-    assert!(best4 < best1 * 0.8, "1 worker {best1:.3} s, 4 workers {best4:.3} s");
+    eprintln!(
+        "cold build: 1 worker {best1:.3} s, 4 workers {best4:.3} s ({:.2}x)",
+        best1 / best4
+    );
+    assert!(
+        best4 < best1 * 0.8,
+        "1 worker {best1:.3} s, 4 workers {best4:.3} s"
+    );
 }
 
 #[test]

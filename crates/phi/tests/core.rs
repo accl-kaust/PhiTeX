@@ -1,3 +1,5 @@
+#![allow(clippy::pedantic)]
+
 //! The acceptance properties of DESIGN 7.13 that are counts.
 
 mod toy;
@@ -140,12 +142,24 @@ fn groups_restore_like_the_save_stack() {
     assert_eq!(value_of(r"\def\a{o} { \def\a{l} }", "a"), "o");
     assert_eq!(value_of(r"\def\a{o} { \def\a{l} \gdef\a{g} }", "a"), "g");
     assert_eq!(value_of(r"{ \gdef\a{g} \def\a{l} }", "a"), "g");
-    assert_eq!(value_of(r"\def\a{o} { \def\a{l1} { \gdef\a{g} } }", "a"), "g");
-    assert_eq!(value_of(r"\def\a{o} { \gdef\a{g} } { \def\a{l} }", "a"), "g");
+    assert_eq!(
+        value_of(r"\def\a{o} { \def\a{l1} { \gdef\a{g} } }", "a"),
+        "g"
+    );
+    assert_eq!(
+        value_of(r"\def\a{o} { \gdef\a{g} } { \def\a{l} }", "a"),
+        "g"
+    );
     assert_eq!(value_of(r"{ \def\a{l} }", "a"), "undefined");
-    assert_eq!(value_of(r"\def\a{o} { { \def\a{l2} } \def\a{l1} }", "a"), "o");
+    assert_eq!(
+        value_of(r"\def\a{o} { { \def\a{l2} } \def\a{l1} }", "a"),
+        "o"
+    );
     // a group opened in one paragraph and closed in another
-    assert_eq!(value_of(r"\def\a{o} { \def\a{l} \par x \par } \a", "a"), "o");
+    assert_eq!(
+        value_of(r"\def\a{o} { \def\a{l} \par x \par } \a", "a"),
+        "o"
+    );
     // the readers inside see the local one
     let mut d = Doc::new(ids(lex(r"\def\a{o} { \def\a{l} \write{\a} } \write{\a}")));
     d.g.run();
@@ -209,7 +223,11 @@ fn renaming_a_toc_entry_runs_one_line() {
     let r = d.g.run();
     assert_eq!(r.iterations, 1);
     assert_eq!(d.g.scanned(Op::TocLine), 40);
-    let at = d.toks.iter().position(|t| t.1 == Tok::Word("s17".into())).unwrap();
+    let at = d
+        .toks
+        .iter()
+        .position(|t| t.1 == Tok::Word("s17".into()))
+        .unwrap();
     d.splice(at, 1, lex("renamed"));
     let r = d.g.run();
     assert_eq!(r.iterations, 1, "{r:?}");
@@ -218,7 +236,11 @@ fn renaming_a_toc_entry_runs_one_line() {
     f.g.run();
     assert_eq!(d.g.to_text(), f.g.to_text());
     // an edit elsewhere: the TOC is predicted right, nothing iterates
-    let at = d.toks.iter().position(|t| t.1 == Tok::Word("text".into())).unwrap();
+    let at = d
+        .toks
+        .iter()
+        .position(|t| t.1 == Tok::Word("text".into()))
+        .unwrap();
     d.splice(at, 1, lex("prose"));
     let r = d.g.run();
     assert_eq!(r.iterations, 0, "{r:?}");

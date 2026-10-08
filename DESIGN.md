@@ -3861,19 +3861,24 @@ pub enum Sel { Whole, Field(u32), Name(NameId) }    // what an operand reads
 
 ```rust
 pub trait Lang: Sized + 'static {
-    type Val: Value;
-    type Op: Copy + Eq + core::hash::Hash + Send + Sync + 'static;
-    fn eval(op: Self::Op, args: Args<'_, Self>) -> Self::Val;                 // leaf
-    fn step(op: Self::Op, st: &Self::Val, args: Args<'_, Self>,
+    type Val: Value + Default + Debug;
+    type Op: Copy + Eq + Hash + Debug + Default + Send + Sync + 'static;
+    fn eval(op: Self::Op, args: &Args<'_, Self>) -> Self::Val;                // leaf
+    fn step(op: Self::Op, st: &Self::Val, args: &Args<'_, Self>,
             cx: &mut StepCx<'_, Self>) -> Step<Self::Val>;                     // 7.4
     fn scan(op: Self::Op, st: &Self::Val, x: &Self::Val,
-            args: Args<'_, Self>) -> (Self::Val, Self::Val);                  // 7.6
+            args: &Args<'_, Self>) -> (Self::Val, Self::Val);                 // 7.6
+    fn scan_result(op: Self::Op, st: &Self::Val, outs: &Seq<Self::Val>, args: &Args<'_, Self>) -> Self::Val;
+    fn as_seq(v: &Self::Val) -> Option<&Seq<Self::Val>>;                     // an input
+    fn chain_val(items: Seq<Self::Val>) -> Self::Val;                         // a chain or family
+    fn entries(op: Self::Op, input: &Self::Val, args: &Args<'_, Self>) -> Vec<Entry<Self::Val>>; // 7.4
     fn memo(op: Self::Op) -> bool { false }                                   // 7.8
-    fn ver_op(op: Self::Op) -> u64;                                           // memo keys
+    fn op_tag(op: Self::Op) -> u64;                                           // memo keys
+    fn fmt_op / parse_op / fmt_val / parse_val                                // 7.14
 }
-pub enum Class { Pure, Effect(Chain), Barrier, Publish(Slot), Cross(Slot) }
-pub struct Args<'a, L> { /* operand values, by index; Copy */ }
-impl<'a, L: Lang> Args<'a, L> { pub fn get(&self, i: usize) -> &'a L::Val; pub fn len(&self) -> usize; }
+pub enum Class { Pure, Effect(Chain), Barrier, Publish(Slot), Entry(Fam, Slot) }
+pub struct Args<'a, L> { /* the node's operands, read through the core */ }
+impl<'a, L: Lang> Args<'a, L> { pub fn get(&self, i: usize) -> Proj<'a, L::Val>; pub fn len(&self) -> usize; }
 ```
 
 - A node is an op, a class, and operands. Kinds: *leaf* (`eval`),
@@ -3886,7 +3891,8 @@ impl<'a, L: Lang> Args<'a, L> { pub fn get(&self, i: usize) -> &'a L::Val; pub f
     chain by position (7.7). Evaluation is still pure; only the commit
     is ordered.
   - `Barrier`: orders every chain's effects around it.
-  - `Publish(s)` and `Cross(s)`: the cross-run pair (7.7).
+  - `Publish(s)` and `Entry(f, s)`, with the `Cross` and `Family`
+    kinds that read them: the cross-run slots (7.7).
 - Dispatch is `L::eval`, a `match` over the client's op enum, so the
   engine is monomorphised over `L` and the hot path has no `dyn`.
 - Forces it: `\write` and the PDF's bytes are effects on chains; a
@@ -4087,9 +4093,15 @@ pub struct NameId(u32);         // interned from a 64-bit content hash of the sp
     inherent reach, not overhead.
   - Removing a definition merges its run back into the one before.
     Moving a group's close splits or merges at the close.
-  - Checkpoint 2 implements this with sorted vectors (an O(R) move);
-    the run tree comes with checkpoint 3's memory work. The bench
-    `shadow` measures the move.
+  - *As built (checkpoint 2):* a name's readers are a vector sorted by
+    their *anchor*, the top-level step or root node they are under,
+    whose order never changes. A change at `p` binary-searches to the
+    anchor of `p` and visits the readers after it, each re-pointed one
+    by one: O(log R + readers after `p`). Splitting runs, so that
+    readers beyond the next definition are not visited either, comes
+    with checkpoint 3's memory work. Before this, every new definition
+    visited every reader of its name: a cold build of 800 paragraphs
+    took 5.6 s, and 0.25 s after.
 - Name ids are interned from a stable 64-bit hash of the spelling. The
   table is the core's, never seen by an op, so the numbering does not
   affect results.
@@ -4154,9 +4166,28 @@ impl<T: Value, M: Measure<T>> Seq<T, M> {
   segments, and a sink receives segment by segment. Evaluation is never
   ordered by effects; only commit is (`Graph::chain(c)`,
   `Graph::segments()`).
-- **Cross-run.** `Publish(s)` nodes give slot `s` its value for the next
-  run (the last in position order, or absent). `Cross(s)` nodes read
-  slot `s`. A run:
+- **Cross-run slots are per entry.** One slot per label, citation key,
+  or TOC, LOF or index entry, keyed by the client (`Slot(u64)`, a hash
+  of what it names), holding a value with fields (number, page, …). A
+  book has 10⁴–10⁵ of them.
+  - `Publish(s)` nodes give slot `s` its value for the next run: the
+    last in position order, or absent.
+  - A `Cross(s)` node reads slot `s`. Its readers read it by field
+    (`Arg::Field`), so a changed page number wakes only the readers of
+    the page.
+  - `Entry(f, s)` nodes publish slot `s` and list it in *family* `f`.
+    A `Family(f)` node reads the family as a `Seq` in the last run's
+    order, each element keyed by its slot, and a scan over it resumes
+    at the changed entry. So renaming one TOC entry runs one TOC line
+    again; the test asserts exactly one.
+  - A run checks only the slots and families whose publishers changed
+    in it (`dirty_slots`, `dirty_fams`): an edit that touches no
+    `\label` costs the cross-run loop nothing, however many slots
+    there are.
+  - Files like `.aux` are a write chain, committed at the end. They
+    are not slots.
+
+  A run:
   1. predicts each slot from the last run (in the session, or the memo
      store's persisted copy, 7.8);
   2. propagates to quiescence;
@@ -4172,9 +4203,12 @@ impl<T: Value, M: Measure<T>> Seq<T, M> {
 
   A correct prediction costs no extra iteration, and the tests count
   them.
-- Forces it: `\write` to `.aux`, `.toc`, `.idx` and the log are chains;
-  `\openout` truncation and `\shipout`'s order across streams are
-  barriers; `\ref`, `\pageref`, `\cite` and the `.toc` are slots.
+- Forces it:
+  - `\write` to `.aux`, `.toc` and `.idx`, and the log, are chains.
+  - `\openout` truncation and `\shipout`'s order across streams are
+    barriers.
+  - Each `\ref`, `\pageref` and `\cite` target is a slot.
+  - The `.toc` is a family of slots, one per entry.
 
 ### 7.8 The memo store (primitive 8)
 
@@ -4260,35 +4294,39 @@ dependency the unfolded graph lacks.
 
 ### 7.11 Memory layout and cost
 
-The graph is one arena, struct of arrays, indexed by `NodeId(u32)`:
+As built (checkpoint 2), the graph is one arena indexed by `NodeId(u32)`:
+a header per node, its value in a column beside it, and two shared
+arenas.
 
-| column | bytes | |
+| | bytes | |
 |---|---|---|
-| `op: L::Op` | client (TeX: 4–8) | |
-| `meta: u32` | 4 | kind, class tag, depth, dirty/queued/dead bits |
-| `parent: u32`, `next: u32` | 8 | region tree and sibling list |
-| `ord: u64` | 8 | sibling order label (gaps; local relabeling) |
-| `key: u32` | 4 | hashed key, for matching only |
-| `args: u32` | 4 | first operand in the operand arena (arity in `meta`) |
-| `readers: u32` | 4 | head of the cross-region reader list |
-| `val: L::Val` | client (TeX: 8–16) | |
-| operand `(src u32, sel u32)` | 8 each | |
-| reader entry `(node u32, sel u32, next u32)` | 12 per cross-region edge | |
+| header `Hdr` | 64 with an 8-byte op | `ord: u64` (label among siblings), `aux: u64` (table index, chain or slot), `op`, `parent`, `next`, `first`, `key` (hashed, for matching only), `a0` (first operand), `rd` (reader list head), `era`, `an: u16`, `depth: u16`, kind, class tag, flags |
+| `val: L::Val` | client's (the bench's: 32) | |
+| operand `(src, sel, name)` | 12 each | `name` set when it was resolved from a name |
+| reader entry `(node, era, next)` | 12 per edge | singly linked from the source; stale entries (an older `era`) unlinked when met |
 
-- A leaf with two operands read inside its region: about 64 bytes with
-  an 8-byte op and a 16-byte value. Edges inside a region carry no
-  reverse entry: a region is swept in order when one of its nodes is
-  dirty, comparing operand versions against the values changed in the
-  sweep. Cross-region edges (names, `Up`) have reverse entries and push.
-- Positions are Dewey paths (`parent`, `ord`), compared in O(depth); a
-  depth is the nesting of unfolds, small in practice.
-- No per-node heap allocation: columns grow by amortized doubling,
-  removed nodes go to a free list reused after the run, operand and
-  reader arenas are compacted when half is dead. Steps' children,
-  definitions and reads are ranges in shared arenas.
-- Targets (measured at checkpoint 2, reported as they come out):
-  tens of ns per node evaluated (leaf, cold, sequential), tens of bytes
-  per unfolded node, 10⁸ nodes at checkpoint 3.
+- The header was columns first: 16 vectors, about 20 cache lines
+  touched per node made. One 64-byte header is one line, and a cold
+  build of 1 M leaves went from 122 ms to 93 ms.
+- **Every edge has a reverse entry**, which is not what 7.11 first
+  said. The design had a region swept in order instead, but a client's
+  root region can hold millions of nodes, and the sweep would make a
+  one-leaf edit O(region). With reverse entries everywhere, a one-leaf
+  edit of 1 M is 93–114 ns.
+- Positions are Dewey paths (`parent`, `ord`), compared in O(depth).
+  Steps' labels have gaps of 2³², and an insertion where there is no
+  room relabels that unfold's steps.
+- No allocation per node on the hot path: the header and value columns
+  grow by doubling; emissions, operands and ids go through scratch
+  buffers that are reused; the core's maps hash with a multiply-rotate
+  hasher, not SipHash. A step that defines names allocates its
+  definition list (a `Vec`), the remaining per-step allocation.
+- Measured (7.16): 144 B per root leaf with two operands (64 header +
+  32 value + 24 operands + 24 reverse entries) and 206 B per node of
+  an unfold with ten leaves a step. That is above "tens of bytes".
+  The retained tiers below are the answer.
+- Targets: tens of ns per node evaluated (leaf, cold, sequential), tens
+  of bytes per unfolded node, 10⁸ nodes at checkpoint 3.
 
 **Retained memory** (designed before checkpoint 3). At 64 B a node, 10⁸
 nodes are 6.4 GB: too much for a laptop or wasm. Once evaluated, most of
@@ -4408,7 +4446,79 @@ Ops and values print and parse through `Lang` hooks (`fmt_op`,
 the same text and values again, which a test checks after random edits.
 It is the debugging view, and it comes with checkpoint 2.
 
-### 7.15 Dependencies
+### 7.15 Speculative entry, as built
+
+- A segment is a private `Graph` run on a worker. Its root holds the
+  unfold's input, a guessed initial state and the arguments, and its
+  unfold starts at the entry's element and key and stops at the next
+  entry's element.
+- Names the segment does not define are *imports*. Their values come
+  from a snapshot of every name as the main graph has it where the
+  segments start (`ext`, shared by all workers). An import is an input
+  defined at the segment's very start, so a local definition shadows
+  it.
+- Grafting copies the segment's steps and their subtrees into the main
+  unfold after its last step, remapping:
+  - node ids, group ids (which embed the opening step's id), name ids
+    (by spelling), and the operands that pointed at the segment's root
+    inputs (to the unfold's own operands);
+  - each operand that read an import or an undefined name, resolved
+    again at its place here. If the version differs, its reader is
+    woken: that is the validation of reads made during speculation.
+- Segments are grafted in order as they finish, while workers run the
+  rest. Each boundary is then checked by the ordinary successor check.
+  A segment whose chain ended (`Done`) ends the unfold there.
+- Segments keep the main graph's slot and family predictions and never
+  run the cross-run loop themselves.
+- The parked step's group is remapped as well. Before that fix, a
+  mismatched arrival resynchronised under a group id of another step,
+  and a local definition outlived its group (found by the random test
+  with three workers).
+
+### 7.16 Measured (checkpoint 2)
+
+Local and on a loaded machine, so ratios are indicative; accl numbers
+come at checkpoint 3. Criterion benches are in `crates/phi/benches/phi.rs`.
+The bench client: `i64` values versioned by value, `Add` leaves, an
+unfold whose steps emit ten leaves and define one name.
+
+| bench | time | per node | target |
+|---|---|---|---|
+| build 1 M root leaves (two operands each), cold | 93 ms | 93 ns | tens of ns: missed |
+| build an unfold of 100 k steps × 12 nodes, cold | 263 ms | 220 ns | missed |
+| rebuild after one leaf of 1 M changed | 0.11 µs | — | met |
+| rebuild after one step of 100 k changed (1.2 M nodes) | 8.5 µs | — | met |
+| scan resume after one element of 1 M changed | 28 µs | — | met |
+| memory, root leaves | 144 B/node | | tens of B: missed |
+| memory, unfold k = 10 | 206 B/node | | missed |
+
+- *Cold build.* Where the cost goes (perf, root leaves):
+  - set_opds 21% (operand and reverse-entry writes);
+  - alloc 11%;
+  - eval and set_val 20%;
+  - page faults on fresh memory 10%.
+
+  It is memory traffic: 144 B per node written. A step adds its own
+  emission, key matching and definitions.
+
+  Reaching tens of ns means writing fewer bytes:
+  - a 32-byte header (`first` only for parents, `key` only under steps);
+  - 8-byte operands, with the name in a side table;
+  - reverse entries only where a reader is outside its source's step.
+
+  This goes with the retained tiers.
+- *Parallel cold build.* The toy client, 800 paragraphs at 4 workers:
+  0.25 s → 0.115 s (2.2×), every segment accepted. With the bench
+  client, whose steps are as cheap as grafting a node, there is no
+  gain at 2–8 workers (209 ms → 216–233 ms): grafting copies each
+  node, and on one thread that costs about as much as making it.
+  Grafting by bulk column append (segment ids are contiguous: an
+  offset, not a map) is the checkpoint-3 fix.
+- *Rebuilds* are where the design pays. A changed element of a 100 k
+  step unfold runs two steps, and a changed element of a 1 M scan steps
+  to convergence, independent of size.
+
+### 7.17 Dependencies
 
 - `criterion` (dev only, default features off): asked for, and the
   repo has no bench harness to reuse.

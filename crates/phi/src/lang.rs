@@ -77,19 +77,34 @@ pub trait Lang: Sized + 'static {
 
     /// One step of an unfold: from the state, the unfold's operands and
     /// what it reads through `cx`, the next state or the result.
-    fn step(op: Self::Op, st: &Self::Val, args: &Args<'_, Self>, cx: &mut StepCx<'_, Self>) -> Step<Self::Val> {
+    fn step(
+        op: Self::Op,
+        st: &Self::Val,
+        args: &Args<'_, Self>,
+        cx: &mut StepCx<'_, Self>,
+    ) -> Step<Self::Val> {
         let _ = (op, st, args, cx);
         unimplemented!("{op:?} is not an unfold")
     }
 
     /// One element of a scan: the next state and the element's output.
-    fn scan(op: Self::Op, st: &Self::Val, x: &Self::Val, args: &Args<'_, Self>) -> (Self::Val, Self::Val) {
+    fn scan(
+        op: Self::Op,
+        st: &Self::Val,
+        x: &Self::Val,
+        args: &Args<'_, Self>,
+    ) -> (Self::Val, Self::Val) {
         let _ = (op, st, x, args);
         unimplemented!("{op:?} is not a scan")
     }
 
     /// A scan's value, from its last state and its outputs.
-    fn scan_result(op: Self::Op, st: &Self::Val, outs: &Seq<Self::Val>, args: &Args<'_, Self>) -> Self::Val {
+    fn scan_result(
+        op: Self::Op,
+        st: &Self::Val,
+        outs: &Seq<Self::Val>,
+        args: &Args<'_, Self>,
+    ) -> Self::Val {
         let _ = (op, outs, args);
         st.clone()
     }
@@ -116,16 +131,20 @@ pub trait Lang: Sized + 'static {
     fn op_tag(op: Self::Op) -> u64;
 
     /// The text form of an op and a value (DESIGN 7.14).
+    #[must_use]
     fn fmt_op(op: Self::Op) -> String {
         format!("{op:?}")
     }
+    #[must_use]
     fn parse_op(s: &str) -> Option<Self::Op> {
         let _ = s;
         None
     }
+    #[must_use]
     fn fmt_val(v: &Self::Val) -> String {
         format!("{v:?}")
     }
+    #[must_use]
     fn parse_val(s: &str) -> Option<Self::Val> {
         let _ = s;
         None

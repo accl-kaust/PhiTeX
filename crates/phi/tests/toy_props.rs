@@ -1,8 +1,8 @@
+#![allow(clippy::pedantic)]
+
 //! Random edit sequences: the incremental graph equals a fresh build.
 
 mod toy;
-
-use phi::Lang as _;
 
 use toy::*;
 
@@ -97,7 +97,11 @@ fn fresh(d: &Doc) -> Doc {
         eprintln!("SRC {}", src.join(" "));
         for n in ["a", "b", "x", "y", "count"] {
             if let (Some(i), Some(j)) = (p.g.name_id(n.as_bytes()), f.g.name_id(n.as_bytes())) {
-                eprintln!("{n} parallel:\n{}in turn:\n{}", p.g.debug_defs(i), f.g.debug_defs(j));
+                eprintln!(
+                    "{n} parallel:\n{}in turn:\n{}",
+                    p.g.debug_defs(i),
+                    f.g.debug_defs(j)
+                );
             }
         }
         if let Ok(dir) = std::env::var("PHI_DUMP") {
@@ -135,7 +139,11 @@ fn run_seed(seed: u64, len: usize, edits: usize) {
             edit(&mut r, &mut d);
         }
         if std::env::var("PHI_TRACE").is_ok() {
-            eprintln!("edit {e}: {} edits; toks[4..8] = {:?}", k, &d.toks[4..8.min(d.toks.len())]);
+            eprintln!(
+                "edit {e}: {} edits; toks[4..8] = {:?}",
+                k,
+                &d.toks[4..8.min(d.toks.len())]
+            );
         }
         let rep = d.g.run();
         // the text form round-trips, values included where the client parses them
@@ -143,12 +151,20 @@ fn run_seed(seed: u64, len: usize, edits: usize) {
         let dump = phi::Dump::parse(&text, <Toy as phi::Lang>::parse_val).expect("parses");
         assert_eq!(dump.to_text(), text);
         for l in &dump.lines {
-            if let phi::Line::Node { val, parsed: Some(v), .. } = l {
+            if let phi::Line::Node {
+                val,
+                parsed: Some(v),
+                ..
+            } = l
+            {
                 assert_eq!(&<Toy as phi::Lang>::fmt_val(v), val);
             }
         }
         if std::env::var("PHI_DUMP").is_ok() {
-            eprintln!("edit {e}: {rep:?} slot j = {:?}", d.g.slot(phi::Slot(phi::ver::hash64("j"))));
+            eprintln!(
+                "edit {e}: {rep:?} slot j = {:?}",
+                d.g.slot(phi::Slot(phi::ver::hash64("j")))
+            );
         }
         let f = fresh(&d);
         let src: Vec<String> = d.toks.iter().map(|t| t.1.text()).collect();

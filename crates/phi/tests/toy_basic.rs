@@ -1,3 +1,5 @@
+#![allow(clippy::pedantic)]
+
 mod toy;
 
 use toy::*;

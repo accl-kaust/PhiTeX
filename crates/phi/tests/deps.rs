@@ -1,3 +1,5 @@
+#![allow(clippy::pedantic)]
+
 //! φ depends on no crate of the workspace: no TeX or PDF crate can creep
 //! in (DESIGN 7.13).
 
@@ -16,7 +18,10 @@ fn no_workspace_dependencies() {
         }
         let name = l.split(['=', '.', ' ']).next().unwrap_or("");
         assert!(
-            !l.contains("path") && !l.contains("workspace") && !name.starts_with("partex") && !name.starts_with("phitex"),
+            !l.contains("path")
+                && !l.contains("workspace")
+                && !name.starts_with("partex")
+                && !name.starts_with("phitex"),
             "crates/phi must not depend on the workspace: {l}"
         );
     }

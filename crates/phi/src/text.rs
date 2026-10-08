@@ -36,23 +36,32 @@ impl<L: Lang> Graph<L> {
     }
 
     fn walk(&self, n: u32, out: &mut Vec<u32>) {
-        let mut c = self.n.first[n as usize];
+        let mut c = self.n.h[n as usize].first;
         while c != NONE {
             out.push(c);
             self.walk(c, out);
-            c = self.n.next[c as usize];
+            c = self.n.h[c as usize].next;
         }
     }
 
     fn opd_text(&self, o: &Opd, num: &HashMap<u32, usize>) -> String {
         let mut s = String::new();
         if o.name != NONE {
-            let _ = write!(s, "@{}:", String::from_utf8_lossy(&self.names_spell(o.name)));
+            let _ = write!(
+                s,
+                "@{}:",
+                String::from_utf8_lossy(&self.names_spell(o.name))
+            );
         }
         if o.src == NONE {
             s += "undef";
         } else {
-            let _ = write!(s, "%{}", num.get(&o.src).map_or_else(|| format!("?{}", o.src), ToString::to_string));
+            let _ = write!(
+                s,
+                "%{}",
+                num.get(&o.src)
+                    .map_or_else(|| format!("?{}", o.src), ToString::to_string)
+            );
         }
         if !o.sel.is_whole() {
             let _ = write!(s, ".{}", o.sel.0);
@@ -62,11 +71,11 @@ impl<L: Lang> Graph<L> {
 
     fn line(&self, n: u32, num: &HashMap<u32, usize>, ids: bool, out: &mut String) {
         let u = n as usize;
-        let depth = self.n.depth[u] as usize;
+        let depth = self.n.h[u].depth as usize;
         for _ in 1..depth {
             out.push_str("  ");
         }
-        let kind = match self.n.kind[u] {
+        let kind = match self.n.h[u].kind {
             Kind::Root => "root",
             Kind::Input => "input",
             Kind::Const => "const",
@@ -79,7 +88,7 @@ impl<L: Lang> Graph<L> {
             Kind::Family => "family",
         };
         let _ = write!(out, "%{} = {kind}", num[&n]);
-        match self.n.class[u] {
+        match self.n.class(n) {
             Class::Pure => {}
             Class::Effect(c) => {
                 let _ = write!(out, " effect({})", c.0);
@@ -92,18 +101,18 @@ impl<L: Lang> Graph<L> {
                 let _ = write!(out, " entry({}, #{:x})", f.0, s.0);
             }
         }
-        if matches!(self.n.kind[u], Kind::Leaf | Kind::Unfold | Kind::Scan) {
-            let _ = write!(out, " {}", L::fmt_op(self.n.op[u]));
+        if matches!(self.n.h[u].kind, Kind::Leaf | Kind::Unfold | Kind::Scan) {
+            let _ = write!(out, " {}", L::fmt_op(self.n.h[u].op));
         }
-        match self.n.kind[u] {
+        match self.n.h[u].kind {
             Kind::Cross => {
-                let _ = write!(out, " #{:x}", self.n.aux[u]);
+                let _ = write!(out, " #{:x}", self.n.h[u].aux);
             }
             Kind::ChainRead | Kind::Family => {
-                let _ = write!(out, " {}", self.n.aux[u]);
+                let _ = write!(out, " {}", self.n.h[u].aux);
             }
             Kind::Step => {
-                let si = &self.steps[self.n.aux[u] as usize];
+                let si = &self.steps[self.n.h[u].aux as usize];
                 if ids {
                     let _ = write!(out, " #{:x} at {}", si.key, si.at.0);
                 }
@@ -111,12 +120,17 @@ impl<L: Lang> Graph<L> {
             }
             _ => {}
         }
-        let os: Vec<String> = self.n.opds_of(n).iter().map(|o| self.opd_text(o, num)).collect();
+        let os: Vec<String> = self
+            .n
+            .opds_of(n)
+            .iter()
+            .map(|o| self.opd_text(o, num))
+            .collect();
         if !os.is_empty() {
             let _ = write!(out, "({})", os.join(", "));
         }
         let _ = writeln!(out, " = {}", L::fmt_val(&self.n.val[u]));
-        if self.n.kind[u] == Kind::Step {
+        if self.n.h[u].kind == Kind::Step {
             for d in self.step_defs(n) {
                 for _ in 0..depth {
                     out.push_str("  ");
@@ -232,10 +246,16 @@ impl<V> Dump<V> {
                 });
                 continue;
             }
-            let rest = body.strip_prefix('%').ok_or(format!("line {}: no node", k + 1))?;
-            let (num, rest) = rest.split_once(" = ").ok_or(format!("line {}: no '='", k + 1))?;
+            let rest = body
+                .strip_prefix('%')
+                .ok_or(format!("line {}: no node", k + 1))?;
+            let (num, rest) = rest
+                .split_once(" = ")
+                .ok_or(format!("line {}: no '='", k + 1))?;
             let num: usize = num.parse().map_err(|_| format!("line {}: number", k + 1))?;
-            let (desc, val) = rest.split_once(" = ").ok_or(format!("line {}: no value", k + 1))?;
+            let (desc, val) = rest
+                .split_once(" = ")
+                .ok_or(format!("line {}: no value", k + 1))?;
             let (head, opds) = match desc.strip_suffix(')').and_then(|d| d.rsplit_once('(')) {
                 Some((h, os)) => {
                     let opds = os
