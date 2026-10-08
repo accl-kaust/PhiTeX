@@ -156,8 +156,8 @@ impl<L: Lang> Graph<L> {
         };
         self.n.h.truncate(new_len);
         self.n.val.truncate(new_len);
-        self.n.h.shrink_to_fit();
-        self.n.val.shrink_to_fit();
+        shrink_roomy(&mut self.n.h);
+        shrink_roomy(&mut self.n.val);
         // headers, operands and side tables, node by node
         // (which slots hold live nodes now)
         let hs: Vec<u8> = self.n.h.iter().map(|h| h.flags & DEAD).collect();
@@ -233,6 +233,10 @@ impl<L: Lang> Graph<L> {
                         .iter()
                         .filter_map(|(&k, &x)| Some((k, live(x)?)))
                         .collect();
+                    // (room, as for the tables: the first edit after does not
+                    // rehash a map of every step)
+                    ui.keys.reserve(ui.keys.len() / 8 + 16);
+                    ui.owners.reserve(ui.owners.len() / 8 + 16);
                     if let Some(p) = ui.parked.as_mut() {
                         p.s = mp(p.s);
                         p.grp = mg(p.grp);
@@ -268,8 +272,8 @@ impl<L: Lang> Graph<L> {
                 }
             }
         }
-        opds.shrink_to_fit();
-        revs.shrink_to_fit();
+        shrink_roomy(&mut opds);
+        shrink_roomy(&mut revs);
         self.n.opds = opds;
         self.n.revs = revs;
         // (imports: defined at the root, held by no step)
@@ -287,8 +291,8 @@ impl<L: Lang> Graph<L> {
                 }
             }
         }
-        self.names.recs.shrink_to_fit();
-        self.steps.shrink_to_fit();
+        shrink_roomy(&mut self.names.recs);
+        shrink_roomy(&mut self.steps);
         self.root_first = mp(self.root_first);
         // the name index
         for list in &mut self.names.defs {
@@ -399,5 +403,34 @@ impl<L: Lang> Graph<L> {
             })
             .collect();
         self.hint = (NONE, super::END, 0);
+    }
+}
+
+/// Capacity cut to the length plus an eighth: the first nodes made after
+/// a compaction do not move the whole table (at 10^8 nodes, a 12 ms
+/// first edit). The room is address space, not memory, until it is used.
+///
+/// The first 2 MB of the room are written once here, so the page faults
+/// (a huge page cleared, about 150 us a table) are the seal's, not the
+/// first edit's.
+fn shrink_roomy<T>(v: &mut Vec<T>) {
+    let len = v.len();
+    let want = len + len / 8 + 64;
+    if v.capacity() > want {
+        v.shrink_to(want);
+    } else {
+        v.reserve_exact(want - len);
+    }
+    prefault(v);
+}
+
+/// The first 2 MB of `v`'s spare capacity written once, so the page
+/// faults there (a huge page found and cleared: up to 0.6 ms) are paid
+/// now, not by the push of the next edit.
+pub(super) fn prefault<T>(v: &mut Vec<T>) {
+    let spare = v.spare_capacity_mut();
+    let k = spare.len().min((2 << 20) / size_of::<T>().max(1));
+    for x in &mut spare[..k] {
+        *x = std::mem::MaybeUninit::zeroed();
     }
 }

@@ -116,6 +116,14 @@ impl<L: Lang> Graph<L> {
         for u in us {
             self.index_steps(u);
         }
+        // (the arenas' next pages touched: the first edit's pushes land in
+        // memory already there)
+        super::compact::prefault(&mut self.n.h);
+        super::compact::prefault(&mut self.n.val);
+        super::compact::prefault(&mut self.n.opds);
+        super::compact::prefault(&mut self.n.revs);
+        super::compact::prefault(&mut self.steps);
+        super::compact::prefault(&mut self.names.recs);
     }
 
     /// Whether step `s` may be in a sealed run.
