@@ -747,7 +747,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                 sync: b.sync,
             };
             self.pop_nest();
-            self.nodes_mut().push(Node::Unset(Box::new(unset)));
+            self.nodes_push().push(Node::Unset(Box::new(unset)));
             // §795: copy the tabskip glue between columns.
             let g = self.tabskip(cur + 1);
             self.tail_append(param_glue(g, TAB_SKIP_CODE));
@@ -781,16 +781,16 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             let adjust = core::mem::take(self.row_adjust_mut());
             let (mut pre, mut post) = partex_engine::pack::split_migrated(adjust.into_vec());
             self.sync_list(&mut pre);
-            self.nodes_mut().extend(pre);
+            self.nodes_push().extend(pre);
             self.append_to_vlist(row);
             self.sync_list(&mut post);
-            self.nodes_mut().extend(post);
+            self.nodes_push().extend(post);
         } else {
             let b = self.vpack(list, Spec::NATURAL)?;
             self.pop_nest();
             let mut row = unset_row(b);
             self.sync_node(&mut row);
-            self.nodes_mut().push(row);
+            self.nodes_push().push(row);
             self.set_space_factor(1000);
         }
         self.begin_toks_at(EVERY_CR_LOC, EVERY_CR_TEXT)?;
@@ -866,7 +866,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             self.set_prev_depth(pd);
             self.set_space_factor(sf);
             self.set_clang(lang);
-            self.nodes_mut().extend(p);
+            self.nodes_push().extend(p);
             if self.mode() == VMODE {
                 self.build_page()?;
             }

@@ -307,16 +307,16 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                     let (mut pre, mut post) =
                         partex_engine::pack::split_migrated(self.adjust.take().unwrap_or_default());
                     self.sync_list(&mut pre);
-                    self.nodes_mut().extend(pre);
+                    self.nodes_push().extend(pre);
                     self.append_to_vlist(Node::Box(b));
                     self.sync_list(&mut post);
-                    self.nodes_mut().extend(post);
+                    self.nodes_push().extend(post);
                     if self.mode() > 0 {
                         self.build_page()?;
                     }
                 } else if self.mode().abs() == HMODE {
                     self.set_space_factor(1000);
-                    self.nodes_mut().push(Node::Box(b));
+                    self.nodes_push().push(Node::Box(b));
                 } else {
                     let mut n = Noad::new(Kind::Ord);
                     n.nucleus = Field::Box(b);
@@ -547,7 +547,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         if indented {
             let mut indent = self.indent_box();
             self.sync_node(&mut indent);
-            self.nodes_mut().push(indent);
+            self.nodes_push().push(indent);
         }
         self.begin_toks_at(EVERY_PAR_LOC, EVERY_PAR_TEXT)?;
         if self.nest_ptr() == 1 {
@@ -592,7 +592,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             self.sync_node(&mut p);
             if self.mode().abs() == HMODE {
                 self.set_space_factor(1000);
-                self.nodes_mut().push(p);
+                self.nodes_push().push(p);
             } else if let Node::Box(b) = p {
                 let mut q = Noad::new(Kind::Ord);
                 q.nucleus = Field::Box(b);

@@ -67,6 +67,7 @@ mod etex;
 mod expand;
 pub use expand::WATCHDOG;
 mod expr;
+mod fields;
 mod files;
 mod fontexp;
 mod fontmap;

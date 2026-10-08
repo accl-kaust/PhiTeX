@@ -385,6 +385,12 @@ pub fn scalar_version_i32(v: i32) -> u128 {
     scalar_version(v.cast_unsigned() as usize)
 }
 
+/// The kinds of [`Tracker::pure_node`].
+pub mod purekind {
+    /// §994: `build_page`.
+    pub const BUILD_PAGE: u8 = 1;
+}
+
 /// Hooks called by state accessors.
 pub trait Tracker {
     /// Whether the value hooks below are called. Accessors test it at
@@ -417,6 +423,50 @@ pub trait Tracker {
     /// a body's token, an assignment's target) reads the control
     /// sequence's class ([`Tracker::read_class`]) instead of its meaning.
     const CLASSES: bool = false;
+    /// Whether the pure SSA tracer's hooks (`pure_*`, DESIGN 3.17) are
+    /// called: an observer that counts the nodes a pure graph would have.
+    /// They change nothing the engine does.
+    const PURE: bool = false;
+    /// (With [`Tracker::PURE`].) Main control begins a command (§1030),
+    /// inside the output routine if `output`.
+    fn pure_begin(&self, _output: bool) {}
+    /// (With [`Tracker::PURE`].) Main control dispatches command `cmd`,
+    /// `chr` (§1031's `reswitch`), in mode `mode`, inside the output
+    /// routine if `output`.
+    fn pure_cmd(&self, _cmd: u16, _chr: i32, _mode: i32, _output: bool) {}
+    /// (With [`Tracker::PURE`].) The expansion of the expandable primitive
+    /// `cmd`, `chr` begins (`begin`) or ends (§367).
+    fn pure_expand(&self, _begin: bool, _cmd: u16, _chr: i32) {}
+    /// (With [`Tracker::PURE`].) Macro `cs` is called (§389).
+    fn pure_macro(&self, _cs: i32) {}
+    /// (With [`Tracker::PURE`].) The condition stack was pushed (§495) or
+    /// popped (§496), and is `depth` deep now.
+    fn pure_cond(&self, _push: bool, _depth: usize) {}
+    /// (With [`Tracker::PURE`].) The next read of the current list (or
+    /// math list) is an append's, which does not look at what the list
+    /// holds (§214).
+    fn pure_append(&self) {}
+    /// (With [`Tracker::PURE`].) A routine that is a node of its own and
+    /// not a recorded call begins (`begin`) or ends: kind `kind`
+    /// ([`purekind`]).
+    fn pure_node(&self, _begin: bool, _kind: u8) {}
+    /// (With [`Tracker::PURE`].) A token was read from a file (§343):
+    /// source text, an operand of the node reading it.
+    fn pure_src(&self, _cmd: u16, _chr: i32, _cs: i32) {}
+    /// (With [`Tracker::PURE`].) An input level was pushed at depth
+    /// `depth` (§321): what it will be read by comes from the node running.
+    fn pure_level(&self, _depth: usize) {}
+    /// (With [`Tracker::PURE`].) A token was read from the token list at
+    /// input depth `depth` (§357): an operand of the node reading it, which
+    /// depends on what made the list.
+    fn pure_tok(&self, _depth: usize, _cmd: u16, _chr: i32, _cs: i32) {}
+    /// (With [`Tracker::PURE`].) The recorded call just begun reads of
+    /// its list only what `fields` versions (the metrics of what it holds,
+    /// and the letters a hyphenation pass reads), not the list itself.
+    fn pure_fields(&self, _fields: u128) {}
+    /// (With [`Tracker::PURE`].) The line breaker's call is ending: the
+    /// contents' versions of the lines it appended.
+    fn pure_lines(&self, _lines: &[u128]) {}
     /// Before a read of a cell.
     fn read(&self, cell: Cell);
     /// A local assignment at group level `level` to `cell`, whose old

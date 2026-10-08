@@ -27,6 +27,7 @@ mod modern;
 mod native;
 mod origins;
 mod outline;
+mod purestats;
 mod render;
 mod resident;
 mod sanitize;
@@ -708,6 +709,17 @@ fn main() {
         let mut tex = Tex::new(host, deps::Recorder::new(filter, base), params);
         let history = tex.run(command_line.as_bytes());
         deps::report(&tex, std::path::Path::new(&path));
+        std::process::exit(i32::from(history > 1));
+    }
+    // (`PARTEX_PURE=FILE`: the pure SSA tracer over a plain build,
+    // `purestats.rs`)
+    if let Some(path) = std::env::var_os("PARTEX_PURE") {
+        let trace = std::env::var_os("PARTEX_PURE_TRACE").map(std::path::PathBuf::from);
+        let mut tex = Tex::new(host, purestats::Stats::new(trace.as_deref()), params);
+        let history = tex.run(command_line.as_bytes());
+        if let Err(e) = purestats::write(&tex, std::path::Path::new(&path)) {
+            eprintln!("phitex: the pure SSA tracer: {e}");
+        }
         std::process::exit(i32::from(history > 1));
     }
     // (`PARTEX_EVENTS=DIR`: the event log of a plain build, `eventlog.rs`)

@@ -147,7 +147,28 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         let list = self.cur_list.list.version();
         let name = Version::node(0x6c62_726b, &[list, Version::of(&display)]);
         self.tracker.call_begin(Func::LineBreak, &[name.0], self);
+        let outer = self.nest.last().map(|l| l.list.len());
+        if T::PURE {
+            let reads = crate::fields::Reads {
+                letters: true,
+                marks: false,
+            };
+            let list = self.cur_list.list.to_vec();
+            self.tracker.pure_fields(self.fields_version(&list, reads));
+        }
         let r = self.line_break_body(display);
+        if T::PURE {
+            // (the contents of the lines it appended to the list around it)
+            let lines: alloc::vec::Vec<u128> = self
+                .cur_list
+                .list
+                .iter()
+                .skip(outer.unwrap_or(0))
+                .filter(|n| matches!(n, Node::Box(_)))
+                .map(|n| Version::of(n).0)
+                .collect();
+            self.tracker.pure_lines(&lines);
+        }
         if let Ok(b) = &r {
             self.tracker
                 .row_wrote(Row::Scalar(scalar::LINE_BREAK_RESULT), b.parts_version());
@@ -216,15 +237,15 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                     let (mut pre, mut post) = partex_engine::pack::split_migrated(migrated);
                     if !pre.is_empty() {
                         self.sync_list(&mut pre);
-                        self.nodes_mut().extend(pre);
+                        self.nodes_push().extend(pre);
                     }
                     self.append_to_vlist(Node::Box(b.share()));
                     if !post.is_empty() {
                         self.sync_list(&mut post);
-                        self.nodes_mut().extend(post);
+                        self.nodes_push().extend(post);
                     }
                 }
-                Item::Penalty(pi) => self.nodes_mut().push(Node::Penalty(pi)),
+                Item::Penalty(pi) => self.nodes_push().push(Node::Penalty(pi)),
             }
         }
         self.set_pg(broken.prev_graf);

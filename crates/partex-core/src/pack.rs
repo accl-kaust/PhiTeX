@@ -151,6 +151,13 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             ],
         );
         self.tracker.call_begin(Func::Hpack, &[name.0], self);
+        if T::PURE {
+            let reads = crate::fields::Reads {
+                letters: false,
+                marks: false,
+            };
+            self.tracker.pure_fields(self.fields_version(&list, reads));
+        }
         let mut adjust = adjust;
         let start = adjust.as_ref().map_or(0, |a| a.len());
         let r = body(self, list, adjust.as_deref_mut());
@@ -378,6 +385,13 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             ],
         );
         self.tracker.call_begin(Func::Vpack, &[name.0], self);
+        if T::PURE {
+            let reads = crate::fields::Reads {
+                letters: false,
+                marks: false,
+            };
+            self.tracker.pure_fields(self.fields_version(&list, reads));
+        }
         let r = self.vpack_body(list, spec, l, quiet);
         if let Ok(p) = &r {
             let v = Version::node(
@@ -487,9 +501,9 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             };
             let mut p = p;
             self.sync_node(&mut p);
-            self.nodes_mut().push(p);
+            self.nodes_push().push(p);
         }
-        self.nodes_mut().push(b);
+        self.nodes_push().push(b);
         self.set_prev_depth(depth);
     }
 }

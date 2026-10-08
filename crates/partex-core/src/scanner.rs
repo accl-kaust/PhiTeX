@@ -161,6 +161,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                     self.cur_cs = cs;
                     self.cur_cmd = cmd;
                     self.cur_chr = w.rh();
+                    self.pure_tok();
                     return Ok(());
                 }
             } else {
@@ -179,11 +180,25 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                     if is_tagged(t) {
                         self.read_tagged(t);
                     }
+                    self.pure_tok();
                     return Ok(());
                 }
             }
         }
         self.get_next_slow()
+    }
+
+    /// (With [`Tracker::PURE`].) The token just read from a token list.
+    #[inline]
+    fn pure_tok(&self) {
+        if T::PURE {
+            self.tracker.pure_tok(
+                self.input_ptr,
+                u16::try_from(self.cur_cmd).unwrap_or(u16::MAX),
+                self.cur_chr,
+                self.cur_cs,
+            );
+        }
     }
 
     /// §341 in full (see [`Self::get_next`]).
@@ -291,6 +306,15 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                 }
                 self.set_align_state(1_000_000);
                 continue 'restart;
+            }
+            if T::PURE && self.cur_input.state == TOKEN_LIST {
+                self.pure_tok();
+            } else if T::PURE {
+                self.tracker.pure_src(
+                    u16::try_from(self.cur_cmd).unwrap_or(u16::MAX),
+                    self.cur_chr,
+                    self.cur_cs,
+                );
             }
             return Ok(());
         }

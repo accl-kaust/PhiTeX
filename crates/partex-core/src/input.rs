@@ -1102,6 +1102,9 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             self.input_values.levels.forget(self.input_ptr);
         }
         self.input_ptr += 1;
+        if T::PURE {
+            self.tracker.pure_level(self.input_ptr);
+        }
     }
 
     /// §322: `pop_input`: leave an input level, re-enter the old.

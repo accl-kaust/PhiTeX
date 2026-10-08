@@ -56,8 +56,22 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         Ok(())
     }
 
-    /// §367: expand a nonmacro.
+    /// §367: expand a nonmacro (with [`Tracker::PURE`], a node of its own).
     fn expand_nonmacro(&mut self) -> Result<(), Jump> {
+        if !T::PURE {
+            return self.expand_nonmacro_body();
+        }
+        let (cmd, chr) = (
+            u16::try_from(self.cur_cmd).unwrap_or(u16::MAX),
+            self.cur_chr,
+        );
+        self.tracker.pure_expand(true, cmd, chr);
+        let r = self.expand_nonmacro_body();
+        self.tracker.pure_expand(false, cmd, chr);
+        r
+    }
+
+    fn expand_nonmacro_body(&mut self) -> Result<(), Jump> {
         self.origin_expand();
         if self.memo.recording() && !Self::memo_expand_ok(self.cur_cmd, self.cur_chr) {
             self.memo.impure_cmd(self.cur_cmd);
@@ -424,6 +438,9 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         if self.tracker.stop_expanding(self.commands()) {
             self.at_checkpoint = true;
             return Err(Jump::Checkpoint);
+        }
+        if T::PURE {
+            self.tracker.pure_macro(self.cur_cs);
         }
         self.origin_expand();
         let save_scanner_status = self.scanner_status;

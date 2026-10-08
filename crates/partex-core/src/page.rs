@@ -647,6 +647,18 @@ impl<H: Host, T: Tracker> Tex<H, T> {
     /// §994: append contributions to the current page, one step per
     /// node ([`Self::page_step`]).
     pub(crate) fn build_page(&mut self) -> Result<(), Jump> {
+        if !T::PURE {
+            return self.build_page_body();
+        }
+        self.tracker
+            .pure_node(true, crate::track::purekind::BUILD_PAGE);
+        let r = self.build_page_body();
+        self.tracker
+            .pure_node(false, crate::track::purekind::BUILD_PAGE);
+        r
+    }
+
+    fn build_page_body(&mut self) -> Result<(), Jump> {
         if self.level_list_is_empty(0) || self.output_active() {
             return Ok(());
         }
@@ -765,6 +777,17 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             ],
         );
         self.tracker.call_begin(Func::PageStep, &[name.0], self);
+        if T::PURE {
+            // (what the step reads of its node: a box's dimensions, a
+            // mark's tokens; the page's fields are reads of their own)
+            let reads = crate::fields::Reads {
+                letters: false,
+                marks: true,
+            };
+            let node = self.fields_version(core::slice::from_ref(&p), reads);
+            self.tracker
+                .pure_fields(Version::node(0x7066_6c64, &[Version(node), Version::of(&after)]).0);
+        }
         let r = self.page_step_body(p, after, Some(&before), mask);
         if let Ok(s) = &r {
             self.tracker

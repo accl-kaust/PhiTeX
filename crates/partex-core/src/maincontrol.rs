@@ -189,6 +189,9 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                                 self.cur_level,
                                 outer,
                             );
+                            if T::PURE {
+                                self.tracker.pure_begin(self.output_active);
+                            }
                             if self.tracker.stop_due(self.commands) {
                                 self.at_checkpoint = true;
                                 return Err(Jump::Checkpoint);
@@ -249,6 +252,14 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                         self.check_interrupt()?;
                         L::BigSwitch
                     } else {
+                        if T::PURE {
+                            self.tracker.pure_cmd(
+                                u16::try_from(self.cur_cmd).unwrap_or(u16::MAX),
+                                self.cur_chr,
+                                self.cur_list.mode,
+                                self.output_active,
+                            );
+                        }
                         if self.int_par(TRACING_COMMANDS_CODE) > 0 {
                             self.show_cur_cmd_chr();
                         }

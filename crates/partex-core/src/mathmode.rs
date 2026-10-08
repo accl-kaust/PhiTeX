@@ -1603,7 +1603,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         let (pre, post) = partex_engine::pack::split_migrated(adjust);
         for mut l in [post, pre] {
             self.sync_list(&mut l);
-            self.nodes_mut().extend(l);
+            self.nodes_push().extend(l);
         }
         self.tail_append(Node::Penalty(self.int_par(POST_DISPLAY_PENALTY_CODE)));
         if g2 > 0 {
@@ -1668,7 +1668,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         self.tail_append(g);
         let mut p = p;
         self.sync_list(&mut p);
-        self.nodes_mut().extend(p);
+        self.nodes_push().extend(p);
         self.tail_append(Node::Penalty(self.int_par(POST_DISPLAY_PENALTY_CODE)));
         let g = self.new_param_glue(BELOW_DISPLAY_SKIP_CODE);
         self.tail_append(g);

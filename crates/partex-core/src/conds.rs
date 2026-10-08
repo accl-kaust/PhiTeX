@@ -322,6 +322,9 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         self.if_limit = IF_CODE;
         self.if_line = self.line;
         self.cond_wrote();
+        if T::PURE {
+            self.tracker.pure_cond(true, self.cond_stack.len());
+        }
     }
 
     /// §496: pop the condition stack.
@@ -337,6 +340,9 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         self.cur_if = r.cur_if;
         self.if_limit = r.limit;
         self.cond_wrote();
+        if T::PURE {
+            self.tracker.pure_cond(false, self.cond_stack.len());
+        }
     }
 
     /// §497: `p` is the depth of the condition stack when the conditional

@@ -959,7 +959,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
     )]
     pub(crate) fn push_glyph(&mut self, f: partex_engine::node::FontId, c: u8, o: Org) {
         if self.org.is_none() {
-            self.nodes_mut().push_char(f, c);
+            self.nodes_push().push_char(f, c);
         } else {
             self.push_glyph_on(f, c, o);
         }

@@ -300,6 +300,14 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         self.list_wrote(crate::track::list::LIST);
         &mut self.cur_list.list
     }
+    /// The current list, to append to: with [`Tracker::PURE`], an append,
+    /// which does not read what the list holds.
+    pub(crate) fn nodes_push(&mut self) -> &mut partex_engine::nodelist::NodeList {
+        if T::PURE {
+            self.tracker.pure_append();
+        }
+        self.nodes_mut()
+    }
     pub(crate) fn mlist(&self) -> &Vec<Item> {
         self.list_read(crate::track::list::MLIST);
         &self.cur_list.mlist
@@ -421,9 +429,12 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         // (`SyncTeX`: a node made now is placed here)
         self.sync_node(&mut p);
         if self.mode().abs() == MMODE {
+            if T::PURE {
+                self.tracker.pure_append();
+            }
             self.mlist_mut().push(Item::Node(p));
         } else {
-            self.nodes_mut().push(p);
+            self.nodes_push().push(p);
         }
     }
 
