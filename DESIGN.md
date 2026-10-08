@@ -4918,6 +4918,55 @@ On accl, the same benches as 7.18.
   skips leaves done at emission, a cheaper `Args::get`), so it is not
   pursued until the TeX layer's step shapes say which costs matter.
 
+### 7.20 Measured (checkpoint 3b, the rest: 10^8 nodes)
+
+On accl (acclnode01, 16 CPUs), `prof` at 64e1af5. K10 is 12 nodes a
+step and K20 is 22, so 8.4M K10 steps and 4.6M K20 steps are each
+about 10^8 nodes.
+
+| | K10, 8.4M steps | K20, 4.6M steps |
+|---|---|---|
+| cold, W=1 | 74.9 ns/node, 7.55 s | 57.6 ns/node, 5.83 s |
+| cold, W=8 | 30.2 ns/node, 3.04 s (2.48x) | 15.8 ns/node, 1.59 s (3.65x) |
+| peak RSS, W=1 / W=8 | 2.74 / 4.16 GB | 1.50 / 2.06 GB |
+
+- Sealing all 8.4M K10 steps takes 1.85 s (18.3 ns/node) and makes
+  519,252 runs (mean 16.2 steps, max 117). Retained: 1.5 B/node.
+- First edit in a sealed run at 10^8 nodes: median 74 us, max 250 us
+  (30 steps). Second edit beside it: median 7 us, max 116 us. At 1M
+  steps: median 54 us, max 263 us. The edit cost no longer grows with
+  the document.
+- W=8 at 10^8 is below the 100k-step figure (6.29x, 7.19). The segments
+  run in parallel, but the coordinator grafts them one after another,
+  and at this size the graft and the memory bandwidth dominate. A
+  parallel graft is the next lever if the 10^8 cold build matters.
+- Preamble edit with parallel rounds (20k steps re-run, about 25 us an
+  op): 589 ms at W=1, 199 ms at W=4, 111 ms at W=8 (5.3x). Every
+  outcome was used (19,999 of 19,999).
+- Memo, every Add memoized (1M steps): 136.6 ns/node against 77.5, at
+  10M probes and 99.99% hits. A probe costs about 60 ns on accl.
+- CSE, every Add probed (1M steps): 90.8 ns/node against 77.5. A probe
+  costs about 13 ns on accl.
+
+What the 10^8 runs found, all fixed:
+
+1. **Reader lists rewrote their block starts on every change.** That
+   is O(R/256) per insert or remove, so a name read by every step made
+   each edit linear. perf at 4M steps: 37% in it. The starts are now a
+   Fenwick tree over the block lengths. First edit at 10^8: median
+   1148 -> 74 us.
+2. **Compaction cut every table's capacity to its length.** The first
+   edit after a seal then moved a whole table (12 ms at 10^8 nodes).
+   Compaction now leaves an eighth of room, as address space that is
+   not resident until used, and touches the next 2 MB at the seal.
+   `mem()` counts lengths, so the retained figure is unchanged.
+3. **The cold "regression" was the bench client.** Measured at 72.3 ->
+   84.8 ns/node, it came from the client: an environment lookup per
+   step and non-constant hooks per leaf. With part 1's client, the core
+   is 72.3 -> 75.8 ns/node (K10) and 54.1 -> 55.3 (K20) on accl,
+   +1.6% instructions. That is the cost of the rounds, cancellation,
+   appends, memo and CSE plumbing.
+
 ### 7.17 Dependencies
 
 - `criterion` (dev only, default features off): asked for, and the
