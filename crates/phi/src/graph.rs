@@ -65,6 +65,8 @@ pub(crate) const NONE: u32 = u32::MAX;
 const ROOT: u32 = 0;
 /// No group: definitions at the outer level live to the end.
 const NOGROUP: u64 = 0;
+/// A chain read's flag (in its aux): only the payloads before it.
+const BEFORE: u64 = 1 << 32;
 /// The cursor past the last element.
 pub const END: ElemId = ElemId(u64::MAX);
 
@@ -96,6 +98,7 @@ const DEAD: u8 = 4;
 const SEALED: u8 = 8;
 
 mod check;
+mod par;
 mod runs;
 use runs::Runs;
 mod compact;
@@ -239,6 +242,9 @@ struct NameTab {
     /// Names whose reader lists hold stale entries.
     prune: Vec<u32>,
     pruned: Vec<bool>,
+    /// Each name's definitions' generation: bumped when one is added or
+    /// removed (a dry outcome that read the name then no longer holds).
+    gens: Vec<u32>,
 }
 
 #[derive(Clone, Debug)]
@@ -276,6 +282,12 @@ pub struct Report {
     pub state_max: usize,
     /// The sum of step states' bytes, over `steps`.
     pub state_sum: u64,
+    /// Steps whose op ran dry on a worker (parallel rounds), and of
+    /// those, the ones whose outcome held when their turn came.
+    pub dry_runs: u64,
+    pub dry_used: u64,
+    /// The run was cancelled (`Graph::cancel_token`): work is left queued.
+    pub cancelled: bool,
 }
 
 /// Switches.
@@ -304,6 +316,10 @@ pub struct Config {
     /// Runs a step must stay quiet before it is sealed again, once it
     /// ran after the first build (an edited region stays live).
     pub seal_quiet: u32,
+    /// Parallel rounds run only when a step's op takes at least this long
+    /// on average (ns, sampled): cheaper ops cost less run in turn than
+    /// their outcomes cost to hand over.
+    pub round_min_ns: u64,
 }
 
 impl Default for Config {
@@ -318,6 +334,7 @@ impl Default for Config {
             seal: 0,
             seal_max: 4096,
             seal_quiet: 16,
+            round_min_ns: 10_000,
         }
     }
 }
@@ -648,6 +665,19 @@ impl<L: Lang> Default for Emit<L> {
 }
 
 impl<L: Lang> Emit<L> {
+    /// Buffers sized for a typical step (a dry step's own).
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code, reason = "no rounds on wasm"))]
+    fn sized() -> Self {
+        let mut e = Self::default();
+        e.specs.reserve(32);
+        e.vals.reserve(32);
+        e.args.reserve(64);
+        e.bigs.reserve(8);
+        e.defs.reserve(8);
+        e.reads.reserve(8);
+        e
+    }
+
     fn mark_big(&mut self, ix: u32) {
         let sp = &mut self.specs[ix as usize];
         if !sp.big {
@@ -691,6 +721,8 @@ pub struct StepCx<'s, L: Lang> {
     ext: Option<&'s Map<u64, L::Val>>,
     /// Every emission is big ([`Config::keep_interior`]).
     keep: bool,
+    /// The run's cancellation flag.
+    cancel: &'s std::sync::atomic::AtomicBool,
     _brand: PhantomData<fn(&'s ()) -> &'s ()>,
 }
 
@@ -1082,6 +1114,22 @@ impl<'s, L: Lang> StepCx<'s, L> {
         )
     }
 
+    /// The payloads of chain `c` before this point: an append list (a
+    /// hook, a token list built by appends) read where it is used. An
+    /// append is an effect on the chain whose payload does not read the
+    /// list, so changing one append re-runs that append and the reads
+    /// after it, never the other appends.
+    pub fn chain_before(&mut self, c: Chain) -> Local<'s> {
+        self.push(
+            Kind::ChainRead,
+            L::Op::default(),
+            Class::Pure,
+            &[],
+            None,
+            u64::from(c.0) | BEFORE,
+        )
+    }
+
     /// The payloads of chain `c` (all of it: a chain read is placed after
     /// what it reads by the client).
     pub fn chain(&mut self, c: Chain) -> Local<'s> {
@@ -1137,7 +1185,7 @@ impl<'s, L: Lang> StepCx<'s, L> {
     /// Whether the run was cancelled (long steps poll it).
     #[must_use]
     pub fn cancelled(&self) -> bool {
-        false
+        self.cancel.load(std::sync::atomic::Ordering::Relaxed)
     }
 }
 
@@ -1232,7 +1280,8 @@ pub struct Graph<L: Lang> {
     free: Vec<u32>,
     to_free: Vec<u32>,
     heap: Vec<u32>,
-    chains: Map<u32, Vec<u32>>,
+    /// Each chain's payloads, in position order.
+    chains: Map<u32, Runs<u32>>,
     chain_readers: Map<u32, Vec<u32>>,
     pubs: Map<u64, Vec<u32>>,
     crosses: Map<u64, Vec<u32>>,
@@ -1261,6 +1310,24 @@ pub struct Graph<L: Lang> {
     /// Steps that ran after the first build, with the run at which they
     /// will have been quiet long enough to be sealed (in that order).
     hot: std::collections::VecDeque<(u32, u32)>,
+    /// Emission buffers for dry steps, reused.
+    em_pool: Vec<Emit<L>>,
+    /// Dry outcomes of a parallel round, waiting for their steps' turns.
+    outcomes: Map<u32, par::Dry<L>>,
+    /// Bumped when the group table changes.
+    groups_gen: u64,
+    /// Items to pop before another round is tried.
+    round_cool: usize,
+    /// Steps run, and a running mean of an op's time in ns (sampled).
+    sampled: u64,
+    step_ns: u64,
+    /// The next round's size, the last round's outcomes, and the outcomes
+    /// used when it was made.
+    round_size: usize,
+    round_made: u64,
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code, reason = "no rounds on wasm"))]
+    round_used0: u64,
+    cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// The input leaf the last step ran in.
     lcache: Option<Leaf<L::Val>>,
     /// The groups each step closed.
@@ -1333,6 +1400,16 @@ impl<L: Lang> Graph<L> {
             hint: (NONE, END, 0),
             epoch: 0,
             hot: std::collections::VecDeque::new(),
+            outcomes: Map::default(),
+            em_pool: Vec::new(),
+            groups_gen: 0,
+            round_cool: 0,
+            sampled: 0,
+            step_ns: 0,
+            round_size: 0,
+            round_made: 0,
+            round_used0: 0,
+            cancel: std::sync::Arc::default(),
             lcache: None,
             closes: Map::default(),
             sc_opds: Vec::new(),
@@ -1585,7 +1662,7 @@ impl<L: Lang> Graph<L> {
     /// went): its chain's readers woken, its slot and family marked.
     fn class_changed(&mut self, n: u32) {
         match self.n.class(n) {
-            Class::Effect(c) => self.wake_chain(c.0),
+            Class::Effect(c) => self.wake_chain_at(c.0, n),
             Class::Publish(s) => {
                 self.dirty_slots.insert(s.0);
             }
@@ -1598,13 +1675,26 @@ impl<L: Lang> Graph<L> {
     }
 
     fn wake_chain(&mut self, c: u32) {
+        self.wake_chain_at(c, NONE);
+    }
+
+    /// Wake chain `c`'s readers that see payload `p` (`NONE`: all): a
+    /// bounded read only if it comes after `p`.
+    fn wake_chain_at(&mut self, c: u32, p: u32) {
         if let Some(rs) = self.chain_readers.get(&c) {
             let rs = rs.clone();
             for r in rs {
-                if !self.n.is_dead(r) {
-                    self.rep.woken += 1;
-                    self.push_dirty(r);
+                if self.n.is_dead(r) {
+                    continue;
                 }
+                if p != NONE
+                    && self.n.h[r as usize].aux & BEFORE != 0
+                    && self.n.cmp_node(r, p) != Ordering::Greater
+                {
+                    continue;
+                }
+                self.rep.woken += 1;
+                self.push_dirty(r);
             }
         }
     }
@@ -1825,7 +1915,18 @@ impl<L: Lang> Graph<L> {
 
     fn register_class(&mut self, n: u32) {
         match self.n.class(n) {
-            Class::Effect(c) => self.chains.entry(c.0).or_default().push(n),
+            Class::Effect(c) => {
+                let at = self.n.pos(n);
+                let g = &self.n;
+                let list = self.chains.entry(c.0).or_default();
+                let k = match list.last() {
+                    Some(&l) if g.cmp_pos(g.pos(l), at) == Ordering::Greater => {
+                        list.partition_point(|&x| g.cmp_pos(g.pos(x), at) == Ordering::Less)
+                    }
+                    _ => list.len(),
+                };
+                list.insert(k, n);
+            }
             Class::Publish(s) => {
                 self.pubs.entry(s.0).or_default().push(n);
                 self.dirty_slots.insert(s.0);
@@ -1964,19 +2065,37 @@ impl<L: Lang> Graph<L> {
             .get(&c)
             .map(|v| v.iter().copied().filter(|&x| !self.n.is_dead(x)).collect())
             .unwrap_or_default();
-        ns.sort_by(|&a, &b| self.n.cmp_node(a, b));
         ns.dedup();
         ns
     }
 
     fn eval_chain(&mut self, n: u32) {
+        let aux = self.n.h[n as usize].aux;
         #[allow(clippy::cast_possible_truncation)]
-        let c = self.n.h[n as usize].aux as u32;
-        let items: Vec<(ElemId, L::Val)> = self
-            .chain_nodes(c)
-            .into_iter()
-            .map(|x| (ElemId(u64::from(x)), self.n.val[x as usize].clone()))
-            .collect();
+        let c = aux as u32;
+        // (in position order already; a bounded read takes those before it)
+        let items: Vec<(ElemId, L::Val)> = match self.chains.get(&c) {
+            None => Vec::new(),
+            Some(list) => {
+                let k = if aux & BEFORE == 0 {
+                    list.len()
+                } else {
+                    let at = self.n.pos(n);
+                    list.partition_point(|&x| self.n.cmp_pos(self.n.pos(x), at) == Ordering::Less)
+                };
+                let mut last = NONE;
+                list.iter()
+                    .take(k)
+                    .copied()
+                    .filter(|&x| {
+                        let keep = x != last && !self.n.is_dead(x);
+                        last = x;
+                        keep
+                    })
+                    .map(|x| (ElemId(u64::from(x)), self.n.val[x as usize].clone()))
+                    .collect()
+            }
+        };
         let v = L::chain_val(Seq::from_vec(items));
         self.rep.evals += 1;
         self.set_val(n, v);
@@ -2222,54 +2341,79 @@ impl<L: Lang> Graph<L> {
             Some(inp) => inp.index_of(at).unwrap_or(inp.len()),
         };
         let prev_o = self.n.opds_of(s)[0];
-        self.em.clear();
-        if let Some(inp) = &input
-            && !self.lcache.as_ref().is_some_and(|l| l.holds(inp, start))
-        {
-            self.lcache = inp.leaf(start);
-        }
-        let (res, idx, grp_out, end_cursor, in_ver) = {
-            let Graph {
-                n,
-                names,
-                groups,
-                em,
-                steps,
-                ext,
-                cfg,
-                lcache,
-                ..
-            } = self;
-            // (the cached leaf, if it is this input's and holds the start)
-            let (leaf, lbase): (&[(ElemId, L::Val)], usize) = match (lcache.as_ref(), &input) {
-                (Some(l), Some(inp)) if l.holds(inp, start) => (l.elems(), l.base()),
-                _ => (&[], 0),
+        let dry = if self.outcomes.is_empty() {
+            None
+        } else {
+            self.take_outcome(s)
+        };
+        let (start, res, idx, grp_out, end_cursor, in_ver) = if let Some(d) = dry {
+            let old = std::mem::replace(&mut self.em, d.em);
+            self.em_pool.push(old);
+            (d.start, d.res, d.idx, d.grp_out, d.end_cursor, d.in_ver)
+        } else {
+            self.em.clear();
+            if let Some(inp) = &input
+                && !self.lcache.as_ref().is_some_and(|l| l.holds(inp, start))
+            {
+                self.lcache = inp.leaf(start);
+            }
+            let (res, idx, grp_out, end_cursor, in_ver) = {
+                let Graph {
+                    n,
+                    names,
+                    groups,
+                    em,
+                    steps,
+                    ext,
+                    cfg,
+                    lcache,
+                    cancel,
+                    sampled,
+                    step_ns,
+                    ..
+                } = self;
+                // (the cached leaf, if it is this input's and holds the start)
+                let (leaf, lbase): (&[(ElemId, L::Val)], usize) = match (lcache.as_ref(), &input) {
+                    (Some(l), Some(inp)) if l.holds(inp, start) => (l.elems(), l.base()),
+                    _ => (&[], 0),
+                };
+                let uo = n.opds_of(u);
+                let mut cx = StepCx {
+                    g: n,
+                    names,
+                    groups,
+                    unfold_opds: uo,
+                    input: input.as_ref(),
+                    idx: start,
+                    start,
+                    leaf,
+                    lbase,
+                    step: s,
+                    pos: n.pos(s),
+                    grp: steps[si].grp_in,
+                    opened: 0,
+                    em,
+                    ext: ext.as_deref(),
+                    keep: cfg.keep_interior,
+                    cancel,
+                    _brand: PhantomData,
+                };
+                let args = Args::of(n, &uo[2..]);
+                let st = n.read(&prev_o);
+                let in_ver = st.ver();
+                // (one step in 32 timed: what an op costs decides whether a
+                // parallel round can pay for itself)
+                *sampled = sampled.wrapping_add(1);
+                let t = (*sampled % 32 == 0).then(std::time::Instant::now);
+                let res = L::step(n.h[s as usize].op, &st, &args, &mut cx);
+                if let Some(t) = t {
+                    #[allow(clippy::cast_possible_truncation, reason = "a step under 584 years")]
+                    let ns = t.elapsed().as_nanos() as u64;
+                    *step_ns = (*step_ns * 7 + ns) / 8;
+                }
+                (res, cx.idx, cx.grp, cx.cursor(), in_ver)
             };
-            let uo = n.opds_of(u);
-            let mut cx = StepCx {
-                g: n,
-                names,
-                groups,
-                unfold_opds: uo,
-                input: input.as_ref(),
-                idx: start,
-                start,
-                leaf,
-                lbase,
-                step: s,
-                pos: n.pos(s),
-                grp: steps[si].grp_in,
-                opened: 0,
-                em,
-                ext: ext.as_deref(),
-                keep: cfg.keep_interior,
-                _brand: PhantomData,
-            };
-            let args = Args::of(n, &uo[2..]);
-            let st = n.read(&prev_o);
-            let in_ver = st.ver();
-            let res = L::step(n.h[s as usize].op, &st, &args, &mut cx);
-            (res, cx.idx, cx.grp, cx.cursor(), in_ver)
+            (start, res, idx, grp_out, end_cursor, in_ver)
         };
         if self.cfg.debug {
             let b = match &res {
@@ -2288,6 +2432,7 @@ impl<L: Lang> Graph<L> {
             self.names.spell.push(sp);
             self.names.defs.push(Runs::default());
             self.names.readers.push(Runs::default());
+            self.names.gens.push(0);
         }
         // which emissions become nodes ("big"); the rest is the sweep's
         let ids = self.match_children(s);
@@ -2780,6 +2925,7 @@ impl<L: Lang> Graph<L> {
             global: true,
         });
         self.names.defs[m as usize].insert(0, ri);
+        self.names.gens[m as usize] += 1;
         resolve(&self.n, &self.names, &self.groups, m, at)
     }
 }
@@ -2818,6 +2964,7 @@ impl<L: Lang> Graph<L> {
                     let old = gr.close;
                     if old != Some(pos) {
                         gr.close = Some(pos);
+                        self.groups_gen += 1;
                         let from = match old {
                             Some(o) if self.n.cmp_pos(o, pos) == Ordering::Less => o,
                             _ => pos,
@@ -2839,6 +2986,7 @@ impl<L: Lang> Graph<L> {
                 && c.parent == s
             {
                 gr.close = None;
+                self.groups_gen += 1;
                 self.reresolve_group(g, c);
             }
         }
@@ -3059,6 +3207,7 @@ impl<L: Lang> Graph<L> {
                 .partition_point(|&x| self.n.cmp_pos(recs[x as usize].pos(), at) == Ordering::Less),
         };
         self.names.defs[m as usize].insert(k, ri);
+        self.names.gens[m as usize] += 1;
     }
 
     /// Remove name `m`'s definition at `pos`.
@@ -3069,6 +3218,7 @@ impl<L: Lang> Graph<L> {
             .partition_point(|&x| self.n.cmp_pos(recs[x as usize].pos(), pos) == Ordering::Less);
         if list.get(k).is_some_and(|&x| recs[x as usize].pos() == pos) {
             self.names.defs[m as usize].remove(k);
+            self.names.gens[m as usize] += 1;
         }
     }
 
@@ -3122,6 +3272,7 @@ impl<L: Lang> Graph<L> {
                     && c.parent == n
                 {
                     gr.close = None;
+                    self.groups_gen += 1;
                     self.reresolve_group(g, c);
                 }
             }
@@ -3257,13 +3408,37 @@ impl<L: Lang> Graph<L> {
 
     /// Evaluate what is new or changed, to quiescence, then iterate the
     /// cross-run slots to their fixed point.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the run loop, then the cross-run loop"
+    )]
     pub fn run(&mut self) -> Report {
         self.rep = Report::default();
         self.epoch += 1;
+        self.round_size = 0;
+        self.round_made = 0;
         self.scan_runs.clear();
         let mut hist: Map<u64, Vec<Ver>> = Map::default();
+        let par = self.cfg.workers > 1 && !self.cfg.segment;
         loop {
-            while let Some(n) = self.pop() {
+            loop {
+                if self.cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                    // (the rest stays queued for the next run)
+                    self.cancel
+                        .store(false, std::sync::atomic::Ordering::Relaxed);
+                    self.outcomes.clear();
+                    self.rep.cancelled = true;
+                    self.tidy();
+                    return self.rep.clone();
+                }
+                if par && self.outcomes.is_empty() && self.step_ns >= self.cfg.round_min_ns {
+                    if self.round_cool == 0 && self.heap.len() >= 2 * self.cfg.workers {
+                        self.round();
+                    } else {
+                        self.round_cool = self.round_cool.saturating_sub(1);
+                    }
+                }
+                let Some(n) = self.pop() else { break };
                 self.process(n);
             }
             if self.cfg.segment {
@@ -3338,6 +3513,7 @@ impl<L: Lang> Graph<L> {
                 self.unfolds[ui].hunk_end = None;
             }
         }
+        self.outcomes.clear();
         if self.cfg.check {
             self.check();
         } else if !self.cfg.segment {
@@ -3717,9 +3893,12 @@ impl<L: Lang> Graph<L> {
             .collect();
         let pred = self.pred.clone();
         let fpred = self.fpred.clone();
+        let (keep, debug) = (self.cfg.keep_interior, self.cfg.debug);
         let job = |seg: &(usize, Option<usize>, u64, L::Val)| {
             let mut p: Graph<L> = Graph::new();
             p.cfg.segment = true;
+            p.cfg.keep_interior = keep;
+            p.cfg.debug = debug;
             p.ext = Some(ext.clone());
             p.pred = pred.clone();
             p.fpred = fpred.clone();
@@ -3865,6 +4044,7 @@ impl<L: Lang> Graph<L> {
         self.names.spell.push(sp.into());
         self.names.defs.push(Runs::default());
         self.names.readers.push(Runs::default());
+        self.names.gens.push(0);
         id
     }
 }
@@ -4240,6 +4420,7 @@ impl<L: Lang> Graph<L> {
                 names: gr.names.iter().map(|&m| names[m as usize]).collect(),
             };
             self.groups.insert(decg(g), ng);
+            self.groups_gen += 1;
         }
         for (r, cl) in pk.closes {
             self.closes
@@ -4385,11 +4566,15 @@ impl<L: Lang> Graph<L> {
             let mu = m as usize;
             match self.n.h[mu].kind {
                 Kind::Cross => self.crosses.entry(self.n.h[mu].aux).or_default().push(m),
-                Kind::ChainRead => self
-                    .chain_readers
-                    .entry(self.n.h[mu].aux as u32)
-                    .or_default()
-                    .push(m),
+                Kind::ChainRead => {
+                    // (a read in a segment saw only the segment's payloads:
+                    // read again here)
+                    self.chain_readers
+                        .entry(self.n.h[mu].aux as u32)
+                        .or_default()
+                        .push(m);
+                    dirty.push(m);
+                }
                 Kind::Family => self
                     .fam_readers
                     .entry(self.n.h[mu].aux as u32)

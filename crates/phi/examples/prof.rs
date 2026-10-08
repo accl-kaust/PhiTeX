@@ -68,6 +68,23 @@ impl Lang for B {
         let Some(x) = cx.next().cloned() else {
             return Step::Done(st.clone());
         };
+        let x0 = x.clone();
+        // (HEAVY=n: an op that costs about n ns more, as macro expansion
+        // would)
+        if let Some(n) = std::env::var("HEAVY")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+        {
+            let mut h = x0.i() as u64;
+            for i in 0..n {
+                h = std::hint::black_box(h.wrapping_mul(0x9e37_79b9_7f4a_7c15).rotate_left(7) ^ i);
+            }
+            std::hint::black_box(h);
+        }
+        #[allow(unreachable_code)]
+        let Some(x) = Some(x) else {
+            return Step::Done(st.clone());
+        };
         let first = cx.consumed() == 1 && matches!(st, V::Nil);
         let solo = cx.name(b"solo");
         if first {
@@ -88,7 +105,13 @@ impl Lang for B {
         }
         if first {
             // (a constant: no step's reads of `acc` change with the input)
-            let k = cx.lit(V::I(7));
+            // (PRE: the first element's value, so changing it wakes
+            // every step: a preamble definition)
+            let k = cx.lit(if std::env::var("PRE").is_ok() {
+                x0.clone()
+            } else {
+                V::I(7)
+            });
             cx.define(acc, Arg::Local(k), false);
         }
         cx.define(out, Arg::Local(last), false);
@@ -202,6 +225,23 @@ fn main() {
         }
         if let Some(f) = std::env::var("SEAL").ok().and_then(|v| v.parse().ok()) {
             g.cfg.seal = f;
+            if std::env::var("PRE").is_ok() {
+                // (a preamble edit: every step re-runs)
+                let mut cur = s.clone();
+                for e in 0..3i64 {
+                    cur = cur.splice(0, 1, [(ElemId(1), V::I(500 + e))]);
+                    g.set(input, V::S(Box::new(cur.clone())));
+                    let t = Instant::now();
+                    let r = g.run();
+                    eprintln!(
+                        "preamble edit: {:.1} ms, {} steps, {} dry runs, {} used",
+                        t.elapsed().as_secs_f64() * 1e3,
+                        r.steps,
+                        r.dry_runs,
+                        r.dry_used
+                    );
+                }
+            }
             let t = Instant::now();
             let sealed = if f > 0 { g.seal() } else { 0 };
             let ts = t.elapsed().as_secs_f64();

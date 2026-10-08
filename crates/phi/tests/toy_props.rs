@@ -54,6 +54,9 @@ const SNIPPETS: &[&str] = &[
     "\\section{s1}",
     "\\section{s2}",
     "\\toc",
+    "\\addto{h}{p}",
+    "\\addto{h}{q}",
+    "\\usehook{h}",
 ];
 
 fn snippet(r: &mut Rng) -> Vec<Tok> {
@@ -136,6 +139,13 @@ fn run_seed_with(seed: u64, len: usize, edits: usize, keep: bool) {
     let mut d = Doc::new(ids(random_doc(&mut r, len)));
     d.g.cfg.check = true;
     d.g.cfg.keep_interior = keep;
+    // (the same document rebuilt with parallel rounds: equal after each edit)
+    let mut dp = Doc::new(d.toks.clone());
+    dp.g.cfg.workers = 2;
+    dp.g.cfg.round_min_ns = 0;
+    dp.g.cfg.check = true;
+    dp.g.cfg.keep_interior = keep;
+    dp.g.run();
     d.g.run();
     assert_eq!(d.observe(), fresh(&d).observe(), "seed {seed}: cold");
     for e in 0..edits {
@@ -151,6 +161,20 @@ fn run_seed_with(seed: u64, len: usize, edits: usize, keep: bool) {
             );
         }
         let rep = d.g.run();
+        dp.toks = d.toks.clone();
+        dp.g.set(dp.input, TV::Seq(seq_of(&dp.toks)));
+        let rp = dp.g.run();
+        DRY.with(|c| c.set(c.get() + rp.dry_used));
+        assert_eq!(
+            dp.g.to_text(),
+            d.g.to_text(),
+            "seed {seed}, edit {e}: parallel rounds differ"
+        );
+        assert_eq!(
+            dp.observe(),
+            d.observe(),
+            "seed {seed}, edit {e}: parallel rounds differ"
+        );
         // the text form round-trips, values included where the client parses them
         let text = d.g.to_text();
         let dump = phi::Dump::parse(&text, <Toy as phi::Lang>::parse_val).expect("parses");
@@ -194,6 +218,10 @@ fn run_seed_with(seed: u64, len: usize, edits: usize, keep: bool) {
     }
 }
 
+thread_local! {
+    static DRY: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
 #[test]
 fn random_edits_equal_fresh_builds() {
     let only: Option<u64> = std::env::var("PHI_SEED").ok().and_then(|s| s.parse().ok());
@@ -201,6 +229,11 @@ fn random_edits_equal_fresh_builds() {
         if only.is_none_or(|o| o == seed) {
             run_seed(seed, 60, 60);
         }
+    }
+    if only.is_none() {
+        let used = DRY.with(|c| c.get());
+        eprintln!("dry outcomes used: {used}");
+        assert!(used > 0, "no parallel round's outcome was used");
     }
 }
 
@@ -223,6 +256,10 @@ fn run_seed_sealed(seed: u64, len: usize, edits: usize, f: u32) {
         let k = 1 + r.below(3);
         for _ in 0..k {
             edit(&mut r, &mut d);
+        }
+        if std::env::var("PHI_TRACE").is_ok() {
+            let src: Vec<String> = d.toks.iter().map(|t| t.1.text()).collect();
+            eprintln!("edit {e}: {}", src.join(" "));
         }
         let rep = d.g.run();
         sealed += rep.sealed;

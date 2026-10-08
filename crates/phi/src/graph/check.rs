@@ -60,6 +60,7 @@ impl<L: Lang> Graph<L> {
                 em: &mut em,
                 ext: None,
                 keep: self.cfg.keep_interior,
+                cancel: &self.cancel,
                 _brand: PhantomData,
             };
             let args = Args::of(&self.n, &uo[2..]);

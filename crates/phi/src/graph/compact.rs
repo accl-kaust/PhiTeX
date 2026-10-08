@@ -345,7 +345,13 @@ impl<L: Lang> Graph<L> {
             }
         };
         for v in self.chains.values_mut() {
-            fix(v, &self.n);
+            v.retain(|&x| {
+                let m = map[x as usize] as usize;
+                m < new_len && self.n.h[m].flags & DEAD == 0
+            });
+            for x in v.iter_mut() {
+                *x = map[*x as usize];
+            }
         }
         for v in self.chain_readers.values_mut() {
             fix(v, &self.n);

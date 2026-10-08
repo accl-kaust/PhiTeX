@@ -30,6 +30,11 @@ use phi::{
 pub const OUT: Chain = Chain(1);
 pub const LOG: Chain = Chain(2);
 pub const VLIST: Chain = Chain(3);
+
+/// A hook's chain.
+pub fn hook(h: &str) -> Chain {
+    Chain(100 + (phi::ver::hash64(h) % 100_000) as u32)
+}
 pub const TOC: Fam = Fam(1);
 /// The line width and the page height.
 pub const WIDTH: i64 = 24;
@@ -140,7 +145,7 @@ pub enum Op {
     /// The document (an unfold).
     Doc,
     /// `\hbox{…}` (a nested unfold).
-    Box,
+    Box(u8),
     /// A word as a box (from a box's width).
     BoxWord,
     /// Append operand 1 to the sequence operand 0, with this identity.
@@ -170,11 +175,15 @@ pub enum Op {
     PageRec,
     /// Operand 0, counted (`USEW`): what reads a width.
     UseW,
+    /// The words of a hook (an append list), joined; counted (`USEH`).
+    Hook,
 }
 
 thread_local! {
     /// `Op::UseW` evaluations on this thread.
     pub static USEW: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// `Op::Hook` evaluations on this thread.
+    pub static USEH: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
 pub struct Toy;
@@ -222,6 +231,22 @@ impl Lang for Toy {
             Op::PageRec => {
                 let p = a.get(0).int();
                 TV::rec(vec![TV::Int(p), TV::Int(p.to_string().len() as i64)])
+            }
+            Op::Hook => {
+                USEH.with(|c| c.set(c.get() + 1));
+                let words: Vec<String> = match &*a.get(0) {
+                    TV::Seq(s) => s
+                        .iter()
+                        .map(|(_, v)| match v {
+                            TV::Word(w, _) => w.to_string(),
+                            _ => String::new(),
+                        })
+                        .collect(),
+                    _ => Vec::new(),
+                };
+                let t = words.join("+");
+                let n = t.len() as i64;
+                TV::Word(t.into(), n)
             }
             Op::UseW => {
                 USEW.with(|c| c.set(c.get() + 1));
@@ -500,7 +525,7 @@ fn step(op: Op, mut st: St, cx: &mut StepCx<'_, Toy>) -> Step<TV> {
         cx,
     };
     let Some(t) = rd.next() else {
-        return if op == Op::Box {
+        return if matches!(op, Op::Box(_)) {
             Step::Done(TV::Int(st.width))
         } else {
             Step::Done(TV::Unit)
@@ -510,7 +535,7 @@ fn step(op: Op, mut st: St, cx: &mut StepCx<'_, Toy>) -> Step<TV> {
     let count = rd.cx.name(b"count");
     // a word into the paragraph (or the box)
     fn word<'s>(op: Op, par: NameId, rd: &mut Rd<'_, 's>, w: Arg<'s>, id: u64) {
-        if op == Op::Box {
+        if matches!(op, Op::Box(_)) {
             return;
         }
         let p = rd.cx.leaf(Op::Push(id), Class::Pure, &[Arg::Name(par), w]);
@@ -519,7 +544,7 @@ fn step(op: Op, mut st: St, cx: &mut StepCx<'_, Toy>) -> Step<TV> {
     let here = rd.cx.cursor().0 ^ (rd.at as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15);
     match t {
         Tok::Word(w) => {
-            if op == Op::Box {
+            if matches!(op, Op::Box(_)) {
                 st.width += w.len() as i64 + 1;
             } else {
                 let n = w.len() as i64;
@@ -589,7 +614,7 @@ fn step(op: Op, mut st: St, cx: &mut StepCx<'_, Toy>) -> Step<TV> {
                 };
                 let m = rd.cx.name(name.as_bytes());
                 let s = rd.cx.leaf(Op::Show, Class::Pure, &[Arg::Name(m)]);
-                if op == Op::Box {
+                if matches!(op, Op::Box(_)) {
                     // (a box reads names too: its width from the shown value)
                     st.width += 2;
                 } else {
@@ -597,7 +622,11 @@ fn step(op: Op, mut st: St, cx: &mut StepCx<'_, Toy>) -> Step<TV> {
                 }
             }
             "hbox" => {
+                // (boxes nest at most 8 deep: a box of a macro that makes
+                // the box again is the document's endless loop, cut here)
+                let d = if let Op::Box(d) = op { d + 1 } else { 0 };
                 let body = rd.group();
+                let body = if d >= 8 { Vec::new() } else { body };
                 let items: Vec<(ElemId, TV)> = body
                     .into_iter()
                     .enumerate()
@@ -607,7 +636,7 @@ fn step(op: Op, mut st: St, cx: &mut StepCx<'_, Toy>) -> Step<TV> {
                 let init = rd.cx.lit(TV::st(St::default()));
                 let b = rd
                     .cx
-                    .unfold(Op::Box, Arg::Local(input), Arg::Local(init), &[]);
+                    .unfold(Op::Box(d), Arg::Local(input), Arg::Local(init), &[]);
                 let w = rd.cx.leaf(Op::BoxWord, Class::Pure, &[Arg::Local(b)]);
                 word(op, par, &mut rd, Arg::Local(w), here);
             }
@@ -658,6 +687,23 @@ fn step(op: Op, mut st: St, cx: &mut StepCx<'_, Toy>) -> Step<TV> {
                 }
             }
             "else" | "fi" => {}
+            "addto" => {
+                // (an append to a hook: its payload does not read the hook)
+                let h = rd.word();
+                let w = rd.word();
+                let n = w.len() as i64;
+                let l = rd.cx.lit(TV::Word(w.into(), n));
+                rd.cx
+                    .leaf(Op::Id, Class::Effect(hook(&h)), &[Arg::Local(l)]);
+            }
+            "usehook" => {
+                // (the hook as it is here: its appends before this point)
+                let h = rd.word();
+                let c = rd.cx.chain_before(hook(&h));
+                let v = rd.cx.leaf(Op::Hook, Class::Pure, &[Arg::Local(c)]);
+                let m = rd.cx.name(format!("hook@{h}").as_bytes());
+                rd.cx.define(m, Arg::Local(v), true);
+            }
             "write" | "message" => {
                 let w = rd.word();
                 let n = w.len() as i64;
@@ -848,7 +894,7 @@ impl Doc {
                 .collect();
             s += &format!("{name}={items:?}\n");
         }
-        for n in ["count", "a", "b", "x", "y", "par@"] {
+        for n in ["count", "a", "b", "x", "y", "par@", "hook@h"] {
             let v = g
                 .name_id(n.as_bytes())
                 .and_then(|id| g.name_value(id))

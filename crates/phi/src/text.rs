@@ -109,7 +109,11 @@ impl<L: Lang> Graph<L> {
                 let _ = write!(out, " #{:x}", self.n.h[u].aux);
             }
             Kind::ChainRead | Kind::Family => {
-                let _ = write!(out, " {}", self.n.h[u].aux);
+                let aux = self.n.h[u].aux;
+                if aux >> 32 != 0 {
+                    out.push_str(" before");
+                }
+                let _ = write!(out, " {}", aux & 0xffff_ffff);
             }
             Kind::Step => {
                 let si = &self.steps[self.n.h[u].aux as usize];

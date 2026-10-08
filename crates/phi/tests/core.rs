@@ -356,3 +356,70 @@ fn interiors_are_reported_and_bounded() {
     }
     assert!(maxes.windows(2).all(|w| w[0] == w[1]), "{maxes:?}");
 }
+
+/// Appends to a list that do not read it are cheap (DESIGN 7.7): editing
+/// one append re-runs that append's step and the uses after it, never the
+/// other appends; a use sees only the appends before it.
+#[test]
+fn an_append_list_reruns_only_what_follows_the_edit() {
+    let mut src = String::new();
+    for p in 0..40 {
+        src += &format!(r"w{p} \addto{{h}}{{a{p}}} \par ");
+        if p == 20 {
+            src += r"\usehook{h} \par ";
+        }
+    }
+    src += r"\usehook{h} \par ";
+    let mut d = Doc::new(ids(lex(&src)));
+    d.g.run();
+    // the edit: the 30th append's word (after the first use)
+    let at = d
+        .toks
+        .iter()
+        .position(|t| t.1.text() == "a30")
+        .expect("a30");
+    let before = toy::USEH.with(|c| c.get());
+    d.splice(at, 1, lex("z30"));
+    let r = d.g.run();
+    let used = toy::USEH.with(|c| c.get()) - before;
+    // (the step of the append, and the last use only: the first use is
+    // before the edit, and no other append runs)
+    assert_eq!(used, 1, "{r:?}");
+    assert!(r.steps <= 2, "{r:?}");
+    let mut f = Doc::new(d.toks.clone());
+    f.g.run();
+    assert_eq!(d.observe(), f.observe());
+    assert_eq!(d.g.to_text(), f.g.to_text());
+    let v = d.g.name_id(b"hook@h").and_then(|n| d.g.name_value(n));
+    let TV::Word(w, _) = v.expect("the hook's last use") else {
+        panic!("a word")
+    };
+    assert!(w.contains("a29+z30+a31"), "{w}");
+    assert!(w.starts_with("a0+"), "{w}");
+}
+
+/// A cancelled run returns at once with its work still queued; the next
+/// run finishes it, and the result is the uncancelled one.
+#[test]
+fn a_cancelled_run_leaves_its_work_for_the_next() {
+    let mut src = String::new();
+    for p in 0..50 {
+        src += &format!(r"\def\x{{{p}}} w{p} \x \par ");
+    }
+    let mut d = Doc::new(ids(lex(&src)));
+    d.g.run();
+    let at = d.toks.iter().position(|t| t.1.text() == "w3").expect("w3");
+    d.splice(at, 1, lex("changed"));
+    let token = d.g.cancel_token();
+    token.store(true, std::sync::atomic::Ordering::Relaxed);
+    let r = d.g.run();
+    assert!(r.cancelled, "{r:?}");
+    assert_eq!(r.steps, 0, "{r:?}");
+    let r = d.g.run();
+    assert!(!r.cancelled);
+    assert!(r.steps > 0);
+    let mut f = Doc::new(d.toks.clone());
+    f.g.run();
+    assert_eq!(d.observe(), f.observe());
+    assert_eq!(d.g.to_text(), f.g.to_text());
+}
