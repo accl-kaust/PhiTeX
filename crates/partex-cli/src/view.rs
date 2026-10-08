@@ -335,6 +335,11 @@ struct Tapped {
     stream: ShippedStream,
 }
 
+/// The build running is not the one shown (the watch's diff job, or the
+/// document while the diff is shown): the pages it ships are not the
+/// viewer's.
+static MUTED: AtomicBool = AtomicBool::new(false);
+
 /// Whether the hosts hand the viewer each stream as it is shipped
 /// (`Host::wants_streams`).
 pub fn tapping() -> bool {
@@ -344,6 +349,9 @@ pub fn tapping() -> bool {
 /// A stream shipped by the build running (`Host::stream_shipped`): page
 /// `page` (from 0), or a form. Only queued: the engine goes on at once.
 pub fn shipped(page: Option<usize>, stream: ShippedStream) {
+    if MUTED.load(Ordering::Relaxed) {
+        return;
+    }
     if let Some(tx) = lock(&TAP).as_ref() {
         let serial = SERIAL.load(Ordering::Relaxed);
         let _ = tx.send(Tapped {
@@ -478,6 +486,25 @@ struct Shared {
     /// The PDF the builds write (a pass that settles is shown from it).
     pdf_path: Mutex<Option<PathBuf>>,
     sent: AtomicU64,
+    /// The watch's diff, as JSON (`diff` op; `{}`: none).
+    diff: Mutex<Arc<str>>,
+    /// What the browsers asked the watch for, not yet taken, and how the
+    /// watch is woken for it.
+    asks: Mutex<Vec<Ask>>,
+    wake: Mutex<Option<Box<dyn Fn() + Send>>>,
+}
+
+/// What a browser asks the watch for (its diff panel).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Ask {
+    /// The diff shown (`true`) or the document.
+    Show(bool),
+    /// The next change (`true`) or the previous one.
+    Step(bool),
+    /// Diff against this revision.
+    Baseline(String),
+    /// The diff written beside the outputs.
+    Write,
 }
 
 /// The live viewer of a watch.
@@ -544,6 +571,9 @@ impl View {
             status: Mutex::new((Status::default(), None)),
             diagnostics: Mutex::new(Arc::from("[]")),
             pdf_path: Mutex::new(None),
+            diff: Mutex::new(Arc::from("{}")),
+            asks: Mutex::new(Vec::new()),
+            wake: Mutex::new(None),
         });
         crate::dpxfiles::keep_glyph_runs();
         let url = format!("http://127.0.0.1:{port}/{}/", shared.token);
@@ -583,6 +613,53 @@ impl View {
     #[must_use]
     pub fn url(&self) -> &str {
         &self.url
+    }
+
+    /// The pages the builds ship are not shown (`true`: the build running
+    /// is not the job shown) or are again.
+    #[allow(
+        clippy::unused_self,
+        reason = "the tap is the process's; a view's call"
+    )]
+    pub fn mute(&self, on: bool) {
+        MUTED.store(on, Ordering::Relaxed);
+    }
+
+    /// The browsers show bytes `lo..hi` of `file` (from the watch's
+    /// directory), on page `at`'s page first if it is known: a change.
+    pub fn show_bytes(&self, file: &str, lo: usize, hi: usize, at: Option<(usize, f32)>) {
+        let mut b = Vec::new();
+        json_str(&mut b, file);
+        let mut ev = format!(
+            "{{\"event\":\"sync\",\"file\":{},\"lo\":{lo},\"hi\":{},\"at\":{lo}",
+            String::from_utf8_lossy(&b),
+            hi.max(lo + 1)
+        );
+        if let Some((page, y)) = at {
+            let _ = write!(ev, ",\"page\":{page},\"y\":{y:.2}");
+        }
+        ev.push('}');
+        broadcast(&self.shared, &ev);
+    }
+
+    /// The watch's diff now (`Diff::state_json`): kept for the `diff` op,
+    /// and pushed (`{"event":"diff",…}`).
+    pub fn set_diff(&self, json: &str) {
+        *lock(&self.shared.diff) = Arc::from(json);
+        broadcast(
+            &self.shared,
+            &format!("{{\"event\":\"diff\",\"diff\":{json}}}"),
+        );
+    }
+
+    /// Call `wake` when a browser asks the watch for something.
+    pub fn on_ask(&self, wake: Box<dyn Fn() + Send>) {
+        *lock(&self.shared.wake) = Some(wake);
+    }
+
+    /// What the browsers asked for since last taken.
+    pub fn take_asks(&self) -> Vec<Ask> {
+        std::mem::take(&mut *lock(&self.shared.asks))
     }
 
     /// The last build's glyph origins (the browsers ask for them again).
@@ -1155,6 +1232,7 @@ fn push_page(s: &Shared, k: usize, h: u64, n: usize, started: Option<Instant>) {
 }
 
 /// The reply to request `req` (`session.ts`'s `CoreRes`, with its `id`).
+#[allow(clippy::too_many_lines, reason = "one op an arm")]
 fn answer(s: &Shared, req: &Value) -> String {
     let id = req.get("id").and_then(Value::index).unwrap_or(0);
     let op = req.get("op").and_then(Value::str).unwrap_or("");
@@ -1241,6 +1319,53 @@ fn answer(s: &Shared, req: &Value) -> String {
                 .map_or_else(|| "[]".to_owned(), |d| d.outline());
             let _ = write!(out, "true,\"json\":{{\"items\":{items}}}}}");
         }
+        // (the watch's diff: its state, the repository's commits for a
+        // baseline, and what is asked of it)
+        "diff" => {
+            let d = lock(&s.diff).clone();
+            let _ = write!(out, "true,\"json\":{d}}}");
+        }
+        "diff_log" => {
+            let skip = req.get("skip").and_then(Value::index).unwrap_or(0);
+            let limit = req
+                .get("limit")
+                .and_then(Value::index)
+                .unwrap_or(200)
+                .min(2000);
+            match phitex_git::Repo::discover(&s.root).and_then(|r| r.log(skip, limit)) {
+                Ok(cs) => {
+                    let _ = write!(out, "true,\"json\":{{\"commits\":{}}}}}", commits_json(&cs));
+                }
+                Err(e) => {
+                    let mut b = Vec::new();
+                    json_str(&mut b, &e.to_string());
+                    let _ = write!(out, "false,\"error\":{}}}", String::from_utf8_lossy(&b));
+                }
+            }
+        }
+        "diff_show" | "diff_step" | "diff_base" | "diff_write" => {
+            let flag = |k: &str| req.get(k).and_then(Value::bool).unwrap_or(true);
+            let ask = match op {
+                "diff_show" => Some(Ask::Show(flag("on"))),
+                "diff_step" => Some(Ask::Step(flag("forward"))),
+                "diff_write" => Some(Ask::Write),
+                _ => req
+                    .get("rev")
+                    .and_then(Value::str)
+                    .filter(|r| !r.is_empty() && !r.starts_with('-'))
+                    .map(|r| Ask::Baseline(r.to_owned())),
+            };
+            match ask {
+                Some(a) => {
+                    lock(&s.asks).push(a);
+                    if let Some(w) = lock(&s.wake).as_ref() {
+                        w();
+                    }
+                    out.push_str("true,\"json\":{}}");
+                }
+                None => out.push_str("false,\"error\":\"no revision\"}"),
+            }
+        }
         "set_file" | "trace" | "check" => out.push_str("true,\"json\":{\"ok\":true,\"ms\":0}}"),
         _ => {
             out.push_str("false,\"error\":");
@@ -1251,6 +1376,47 @@ fn answer(s: &Shared, req: &Value) -> String {
         }
     }
     out
+}
+
+/// A commit graph's commits as JSON: `[{"id","short","parents":[…],
+/// "author","time","subject","refs":[{"name","kind"}]}]`, `kind` `head`,
+/// `branch`, `remote` or `tag`.
+fn commits_json(cs: &[phitex_git::CommitInfo]) -> String {
+    let q = |t: &str| {
+        let mut b = Vec::new();
+        json_str(&mut b, t);
+        String::from_utf8_lossy(&b).into_owned()
+    };
+    let items: Vec<String> = cs
+        .iter()
+        .map(|c| {
+            let parents: Vec<String> = c.parents.iter().map(|p| format!("\"{p}\"")).collect();
+            let refs: Vec<String> = c
+                .refs
+                .iter()
+                .map(|r| {
+                    let kind = match r.kind {
+                        phitex_git::RefKind::Head => "head",
+                        phitex_git::RefKind::Branch => "branch",
+                        phitex_git::RefKind::Remote => "remote",
+                        phitex_git::RefKind::Tag => "tag",
+                    };
+                    format!("{{\"name\":{},\"kind\":\"{kind}\"}}", q(&r.name))
+                })
+                .collect();
+            format!(
+                "{{\"id\":\"{}\",\"short\":{},\"parents\":[{}],\"author\":{},\"time\":{},\"subject\":{},\"refs\":[{}]}}",
+                c.id,
+                q(&c.short),
+                parents.join(","),
+                q(&c.author),
+                c.time,
+                q(&c.subject),
+                refs.join(",")
+            )
+        })
+        .collect();
+    format!("[{}]", items.join(","))
 }
 
 /// Page `page`'s glyphs with their sources (`{"files":[…],"g":[[x, y,

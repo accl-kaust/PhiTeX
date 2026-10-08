@@ -32,6 +32,14 @@ impl Value {
     }
 
     #[must_use]
+    pub fn bool(&self) -> Option<bool> {
+        match self {
+            Value::Bool(b) => Some(*b),
+            _ => None,
+        }
+    }
+
+    #[must_use]
     pub fn num(&self) -> Option<f64> {
         match self {
             Value::Num(n) => Some(*n),
