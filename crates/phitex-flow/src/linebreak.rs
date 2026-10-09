@@ -5,7 +5,7 @@ use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 use crate::arith::{INF_BAD, badness, clamp};
-use crate::piece::{HItem, Para};
+use crate::graph::{HItem, Para};
 
 /// How a box's glue is set.
 #[derive(Clone, Copy, Debug, PartialEq)]

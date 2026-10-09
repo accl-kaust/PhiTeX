@@ -37,7 +37,7 @@ pub mod dvi;
 pub mod hash;
 pub mod linebreak;
 pub mod page;
-pub mod piece;
+pub mod graph;
 pub mod tfm;
 pub mod val;
 

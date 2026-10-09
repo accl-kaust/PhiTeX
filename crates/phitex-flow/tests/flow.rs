@@ -98,8 +98,11 @@ fn a_changed_definition_reruns_its_readers_only() {
     let first = bld.update(&a, o);
     let e = bld.update(&b, o);
     assert!(e.dvi == cold(&b, o).dvi);
-    assert!(e.stats.ran < first.stats.ran, "not everything runs again: {:?}", e.stats);
-    assert!(e.stats.kept > 0);
+    // (every paragraph has a node reading \idle: that node runs, with what
+    // depends on it; the other nodes do not)
+    assert!(e.stats.commands_run * 10 < e.stats.commands, "only the reading nodes run: {:?}", e.stats);
+    assert!(e.stats.commands_run < first.stats.commands_run / 10);
+    assert_eq!(e.stats.kept, 3, "the three pieces reading nothing that changed: {:?}", e.stats);
 }
 
 #[test]

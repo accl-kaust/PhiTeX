@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use crate::linebreak::{GlueSet, Line};
 use crate::page::{Page, VItem};
-use crate::piece::HItem;
+use crate::graph::HItem;
 use crate::tfm::Font;
 
 const SET1: u8 = 128;

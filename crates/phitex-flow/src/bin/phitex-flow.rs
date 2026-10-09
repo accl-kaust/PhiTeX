@@ -25,9 +25,11 @@ fn report(what: &str, o: &Output) {
     let total: u64 = s.work.iter().sum();
     let max = s.work.iter().copied().max().unwrap_or(0);
     println!(
-        "{what}: {:.2} ms; {} pieces ({} ran, {} kept, {} re-run after a changed read; {} parks, {} run by the parked thread); \
+        "{what}: {:.2} ms; {} of {} commands run; {} pieces ({} ran, {} kept, {} re-run after a changed read; {} parks, {} run by the parked thread); \
          {} line breaks run, {} kept; {} pages ({} shipped, {} kept); {} of {} threads worked, the busiest did {:.0}% of the work",
         s.wall.as_secs_f64() * 1000.0,
+        s.commands_run,
+        s.commands,
         s.pieces,
         s.ran,
         s.kept,

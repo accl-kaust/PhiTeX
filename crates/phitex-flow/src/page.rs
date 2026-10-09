@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 use crate::arith::{AWFUL_BAD, INF_BAD, badness, clamp};
 use crate::linebreak::{GlueSet, Line, set_glue};
-use crate::piece::Para;
+use crate::graph::Para;
 
 /// The page parameters a paragraph was read with.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
