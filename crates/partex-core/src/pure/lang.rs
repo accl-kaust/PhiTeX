@@ -51,6 +51,8 @@ pub enum Val {
     /// `level` before its first command (the terminal's line named it):
     /// the job's first step calls the file.
     Enter(Arc<PState>, Ver, u64, u16),
+    /// A file the job wrote (`\\openout`): its lines so far.
+    Store(Arc<super::tracker::Store>),
 }
 
 impl core::fmt::Debug for Val {
@@ -65,6 +67,7 @@ impl core::fmt::Debug for Val {
             Val::Done(h) => write!(f, "Done({h})"),
             Val::Chain(s) => write!(f, "Chain({})", s.len()),
             Val::Enter(_, v, h, l) => write!(f, "Enter({:x}, {h:x}, {l})", v.0 & 0xffff_ffff),
+            Val::Store(s) => write!(f, "Store({})", s.lines.len()),
         }
     }
 }
@@ -86,6 +89,7 @@ impl Value for Val {
             Val::Done(h) => Ver::of(&(7u8, *h)),
             Val::Chain(s) => Ver::node(8, &[s.ver()]),
             Val::Enter(_, v, h, l) => Ver::node(9, &[*v, Ver::of(&(*h, *l))]),
+            Val::Store(s) => s.ver,
         }
     }
 }
@@ -324,6 +328,7 @@ fn command<H: Host + 'static>(op: Op, st: &Val, cx: &mut StepCx<'_, TexLang<H>>)
         e.tex.tracker.log.borrow_mut().clear();
         e.tex.tracker.file_ends.borrow_mut().clear();
         e.tex.tracker.loads.borrow_mut().clear();
+        e.tex.tracker.store_ev.borrow_mut().clear();
         let r = e.tex.resume();
         let fx = e.tex.take_effects();
         let log = core::mem::take(&mut *e.tex.tracker.log.borrow_mut());
@@ -359,7 +364,12 @@ fn frontier<H: Host + 'static>(e: &mut Engine<H>, cx: &mut StepCx<'_, TexLang<H>
     if let Some(list) = since {
         e.stats.since += 1;
         for (n, v) in list {
-            let Some(s) = slot_of(cx.spelling(n)) else {
+            let sp = cx.spelling(n);
+            if let Some(name) = store_of(sp) {
+                put_store(e, name, v.as_deref());
+                continue;
+            }
+            let Some(s) = slot_of(sp) else {
                 continue;
             };
             put(e, s, v.as_deref(), &mut vals);
@@ -368,8 +378,15 @@ fn frontier<H: Host + 'static>(e: &mut Engine<H>, cx: &mut StepCx<'_, TexLang<H>
         e.stats.runs += 1;
         let all = cx.defined_reaching();
         let mut seen: HashSet<Slot> = HashSet::with_capacity(all.len());
+        let mut stores: HashSet<Vec<u8>> = HashSet::new();
         for (n, v) in all {
-            let Some(s) = slot_of(cx.spelling(n)) else {
+            let sp = cx.spelling(n);
+            if let Some(name) = store_of(sp) {
+                stores.insert(name.to_vec());
+                put_store(e, name, Some(&*v));
+                continue;
+            }
+            let Some(s) = slot_of(sp) else {
                 continue;
             };
             seen.insert(s);
@@ -381,6 +398,11 @@ fn frontier<H: Host + 'static>(e: &mut Engine<H>, cx: &mut StepCx<'_, TexLang<H>
         for s in defined {
             put(e, s, None, &mut vals);
         }
+        e.tex
+            .tracker
+            .stores
+            .borrow_mut()
+            .retain(|k, _| stores.contains(k));
         e.last_defs.clear();
     }
     e.stats.loaded += vals.len() as u64;
@@ -504,6 +526,35 @@ fn finish<H: Host + 'static>(
             Ev::Close => {
                 cx.close_group();
             }
+        }
+    }
+    // the files the job writes: each read checked (before the command
+    // wrote it), each written defined, as it is now
+    let sev = core::mem::take(&mut *e.tex.tracker.store_ev.borrow_mut());
+    let mut swritten: HashSet<Vec<u8>> = HashSet::new();
+    for (w, name, got) in sev {
+        if w {
+            swritten.insert(name);
+            continue;
+        }
+        if swritten.contains(&name) {
+            continue;
+        }
+        let n = cx.name(&store_spelling(&name));
+        let want = cx.read(n).map(|v| v.ver());
+        assert!(
+            want == got,
+            "pure SSA: the enforcer: the file {} the job writes read as {got:?}, the definition reaching it is {want:?}",
+            alloc::string::String::from_utf8_lossy(&name)
+        );
+    }
+    for name in swritten {
+        let s = e.tex.tracker.stores.borrow().get(&name).cloned();
+        if let Some(s) = s {
+            let n = cx.name(&store_spelling(&name));
+            let l = cx.lit(Val::Store(Arc::new(s)));
+            cx.define(n, Arg::Local(l), true);
+            e.stats.defs += 1;
         }
     }
     // the files it looked up: sources; an `\input` level it opened, left
@@ -678,4 +729,31 @@ fn global_now<H: Host>(t: &Tex<H, PureTracker>, s: Slot) -> bool {
         i32::from(t.peek_eqtb(p).b1())
     };
     level <= crate::web::LEVEL_ONE
+}
+
+/// The core's name of the file the job writes as `name`.
+fn store_spelling(name: &[u8]) -> Vec<u8> {
+    let mut b = b"\xfdstore:".to_vec();
+    b.extend_from_slice(name);
+    b
+}
+
+/// The file a name spells, if it is a store's.
+fn store_of(sp: &[u8]) -> Option<&[u8]> {
+    sp.strip_prefix(b"\xfdstore:")
+}
+
+/// The file the job writes as `name`, as the frontier has it (`None`: no
+/// `\openout` of it reaches here).
+fn put_store<H: Host>(e: &mut Engine<H>, name: &[u8], v: Option<&Val>) {
+    let mut st = e.tex.tracker.stores.borrow_mut();
+    match v {
+        Some(Val::Store(s)) => {
+            st.insert(name.to_vec(), (**s).clone());
+        }
+        Some(v) => panic!("pure SSA: a store holds {v:?}"),
+        None => {
+            st.remove(name);
+        }
+    }
 }

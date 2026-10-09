@@ -86,6 +86,47 @@ pub struct PureTracker {
     pub(crate) file_ends: RefCell<Vec<(usize, Vec<u8>, u32)>>,
     /// The files looked up to be read (`Tracker::pure_load`).
     pub(crate) loads: RefCell<Vec<Load>>,
+    /// The files the job writes (`\\openout`): by name, the lines
+    /// written so far, as the frontier has them (names of the core).
+    pub(crate) stores: RefCell<std::collections::HashMap<Vec<u8>, Store>>,
+    /// This command's accesses to them: (written, the name), in order.
+    pub(crate) store_ev: RefCell<Vec<(bool, Vec<u8>, Option<phi::Ver>)>>,
+}
+
+/// A file the job writes: its lines so far (each without its end), and
+/// a version made from them in order.
+#[derive(Clone, Debug)]
+pub(crate) struct Store {
+    pub(crate) lines: phi::Seq<super::lang::Val>,
+    pub(crate) ver: phi::Ver,
+}
+
+impl Store {
+    pub(crate) fn empty() -> Store {
+        Store {
+            lines: phi::Seq::new(),
+            ver: phi::Ver::of(&0x7374_6f72u32),
+        }
+    }
+
+    /// Line `l` appended.
+    pub(crate) fn push(&mut self, l: &[u8]) {
+        let n = self.lines.len() as u64;
+        self.lines.insert(self.lines.len(), phi::ElemId(n + 1), super::lang::Val::line(l));
+        self.ver = phi::Ver::node(0x7374_6f72, &[self.ver, phi::Ver::of(l)]);
+    }
+
+    /// The file's bytes: each line with its end.
+    pub(crate) fn bytes(&self) -> alloc::sync::Arc<[u8]> {
+        let mut b = Vec::new();
+        for (_, v) in self.lines.iter() {
+            if let super::lang::Val::Line(l, _) = v {
+                b.extend_from_slice(l);
+                b.push(b'\n');
+            }
+        }
+        alloc::sync::Arc::from(b)
+    }
 }
 
 /// A file looked up: the name asked for, the name found and the
@@ -181,6 +222,26 @@ impl Tracker for PureTracker {
     }
     fn pure_global(&self, p: i32) {
         self.global.set(Some(p));
+    }
+    fn store_open(&self, _stream: u8, name: &[u8]) {
+        self.stores.borrow_mut().insert(name.to_vec(), Store::empty());
+        self.store_ev.borrow_mut().push((true, name.to_vec(), None));
+    }
+    fn store_line(&self, name: &[u8], line: &[u8]) {
+        if let Some(s) = self.stores.borrow_mut().get_mut(name) {
+            s.push(line);
+            self.store_ev.borrow_mut().push((true, name.to_vec(), None));
+        }
+    }
+    fn stored(&self, name: &[u8]) -> Option<Option<alloc::sync::Arc<[u8]>>> {
+        // (a file the job wrote before here: what it wrote; else the
+        // host's; read either way)
+        let st = self.stores.borrow();
+        let s = st.get(name);
+        self.store_ev
+            .borrow_mut()
+            .push((false, name.to_vec(), s.map(|s| s.ver)));
+        s.map(|s| Some(s.bytes()))
     }
     fn pure_file_end(&self, level: usize, name: &[u8], lines: u32) {
         self.file_ends.borrow_mut().push((level, name.to_vec(), lines));
