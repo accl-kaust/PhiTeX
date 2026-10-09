@@ -39,12 +39,17 @@ pub use crate::item::{Item, Para};
 use crate::page::IGNORE_DEPTH;
 use crate::tfm::Font;
 use crate::val::{DimenPar, IntPar, Key, Macro, Meaning, Prim, Tok, Val};
+use crate::show::{HALT, NL, RAW, THAT_MAKES_100};
 
 mod align;
 mod assign;
+pub(crate) mod diag;
+mod etex;
 mod expand;
 mod fonts;
+mod lang;
 mod material;
+mod math;
 mod scan;
 
 /// A piece's identity, stable across edits.
@@ -52,9 +57,11 @@ pub type PieceId = u32;
 
 /// Where a piece's reads of names from before it are answered.
 pub trait Env {
-    /// The definition of `key` reaching this piece's start, and where it
-    /// was made.
-    fn reach(&mut self, key: &Key) -> (Val, Src);
+    /// The definition of `key` reaching node `node` of this piece from
+    /// before the piece (or from an element between its nodes), where it
+    /// was made, and the nodes it reaches, `lo..hi` (`0..u32::MAX`: all of
+    /// them, as when no element between the piece's nodes defines `key`).
+    fn reach(&mut self, key: &Key, node: u32) -> (Val, Src, u32, u32);
 
     /// The bytes of the TFM file `name.tfm`, if there is one (a pure
     /// function of the name during a build).
@@ -75,8 +82,8 @@ enum TState {
 enum Mode {
     V,
     H,
-    /// Display math, as far as a display alignment needs it (`$$\halign
-    /// {...}$$`, tex.web 1145, 1206).
+    /// Math (`RState::inner`: an inline formula or a subformula; else a
+    /// display).
     M,
 }
 
@@ -95,7 +102,8 @@ enum GroupKind {
     Align,
     /// `\noalign{...}`.
     NoAlign,
-    /// A display (`$$`; `Group::align` holds what it needs).
+    /// A formula, a subformula, `\left`…`\right`, a `\mathchoice` part
+    /// (`Group::boxg`, `math::MathKind`).
     Math,
 }
 
@@ -107,6 +115,26 @@ struct Cond {
     open: u32,
     limit: u8,
     test: bool,
+    /// Which conditional (`IfKind::code`, plus 32 after `\unless`:
+    /// etex.web's `cur_if`), for `\currentiftype`.
+    code: u8,
+}
+
+/// A text the input was rewritten with (e-TeX's `\scantokens`): read
+/// with the category codes in force as it is read, line by line, each line
+/// ending in the `\endlinechar` in force when it is begun. It lies above
+/// the first `at` rewritten token lists: those above it are read first,
+/// then it, then those below. Where its reading is: `pos`, `tstate`, `eol`
+/// (as the piece's own are kept in `RState`); `eof`: its end was met once
+/// and `\everyeof` went in (etex.web §362).
+#[derive(Clone, PartialEq, Eq, Debug)]
+struct PendingText {
+    text: Arc<[char]>,
+    at: usize,
+    pos: usize,
+    tstate: TState,
+    eol: i16,
+    eof: bool,
 }
 
 /// An open group: its kind and the tokens `\aftergroup` gave it (its
@@ -119,7 +147,7 @@ struct Group {
     boxg: Option<Arc<material::BoxGroup>>,
     /// An alignment's preamble and what it began in; a display's
     /// dimensions and, once its alignment is set, its material.
-    align: Option<Arc<align::AlignGroup>>,
+    align: Option<Arc<align::AlignSpec>>,
 }
 
 /// A stack in the reader state, shared until changed: handing the state
@@ -184,7 +212,10 @@ pub struct RState {
     tstate: TState,
     /// Token lists the input was rewritten with, each with how far it has
     /// been read (innermost last).
-    pending: Vec<(Arc<[Tok]>, usize)>,
+    /// (and whether it was backed up, tex.web 325's `backed_up`: an error's
+    /// context shows it as such; a list read to its end stays until the
+    /// next token is read, as TeX's input level does)
+    pending: Vec<(Arc<[Tok]>, usize, bool)>,
     mode: Mode,
     /// The list being built is internal: a box's (TeX's negative modes).
     inner: bool,
@@ -215,7 +246,20 @@ pub struct RState {
     /// The alignment being read: `align_state`, the current column and
     /// span, how the entry began and ended (tex.web 309, 770).
     al: align::AlignCur,
+    /// e-TeX's `\protected` prefix is waiting for its definition.
+    protected: bool,
+    /// Texts the input was rewritten with (`\scantokens`), innermost last.
+    texts: Stack<PendingText>,
+    /// A paragraph's language state (tex.web 1091, 1376): `clang`, and
+    /// the language and hyphen minima it began with.
+    hyph_lang: [u8; 4],
+    /// tex.web 76's `error_count`: the errors since the last paragraph
+    /// ended (§1096); at [`FATAL_ERRORS`] the reader has stopped (§82).
+    error_count: u8,
 }
+
+/// tex.web 82: the hundredth error is fatal.
+const FATAL_ERRORS: u8 = 100;
 
 impl RState {
     fn start() -> RState {
@@ -238,6 +282,10 @@ impl RState {
             prev_graf: 0,
             eol: EOL_UNREAD,
             al: align::AlignCur::OFF,
+            protected: false,
+            texts: Stack::new(),
+            hyph_lang: [0, 0, 1, 1],
+            error_count: 0,
         }
     }
 }
@@ -303,6 +351,10 @@ impl RState {
             && self.eol == o.eol
             && self.al == o.al
             && self.pending == o.pending
+            && self.protected == o.protected
+            && self.texts == o.texts
+            && self.hyph_lang == o.hyph_lang
+            && self.error_count == o.error_count
     }
 
     /// Whether a node going from `self` to `out` begins a paragraph of the
@@ -323,6 +375,10 @@ pub struct Read {
     pub key: Key,
     pub src: Src,
     pub val: Val,
+    /// The scope of the definition read, as the reading node sees it
+    /// ([`Chain::scope_of`]): what a definition at the level of the one it
+    /// replaces (`Def::level`) is made from.
+    pub scope: Option<u16>,
 }
 
 /// A shared [`Read`].
@@ -330,9 +386,9 @@ pub type ReadRef = Arc<Read>;
 
 impl Read {
     /// Whether `r` read the definition this one did (by identity, then
-    /// equality).
+    /// equality of the value and of its scope).
     fn same(this: &ReadRef, r: &ReadRef) -> bool {
-        Arc::ptr_eq(this, r) || this.val == r.val
+        Arc::ptr_eq(this, r) || (this.val == r.val && this.scope == r.scope)
     }
 }
 
@@ -342,6 +398,12 @@ pub struct Def {
     pub key: Key,
     pub val: Val,
     pub global: bool,
+    /// A definition made at the level of the one it replaces (TeX's
+    /// assignments without the save stack, CORE.md Conflict 7): `Some(k)`,
+    /// it lives as long as the `k`-th group enclosing its node's own group
+    /// is open (`Some(0)`: its own group, as `None`). Counted from the
+    /// node, not an index, so it survives nodes moving.
+    pub level: Option<u16>,
 }
 
 /// A φ at the end of a conditional: the test, and per key the value after
@@ -609,6 +671,8 @@ pub struct Chain {
     /// The nodes with a paragraph, and with errors.
     para_at: Vec<u32>,
     err_at: Vec<u32>,
+    /// For each `Open` node, the `Open` node of the group enclosing it.
+    parent_of: FxMap<u32, u32>,
 }
 
 impl Chain {
@@ -648,14 +712,44 @@ impl Chain {
             let Some(def) = n.defs().iter().rev().find(|x| x.key == *key) else {
                 continue;
             };
-            let closed = n
-                .group
+            let closed = self
+                .def_group(n, def)
                 .is_some_and(|g| self.close_of.get(&g).is_some_and(|&c| (c as usize) < i));
             if def.global || !closed {
                 return Some((d, def.val.clone()));
             }
         }
         None
+    }
+
+    /// The group a definition of node `n` is local to (its `Open` node;
+    /// `None`: the piece's outer level).
+    pub fn def_group(&self, n: &Node, def: &Def) -> Option<u32> {
+        let mut g = n.group;
+        for _ in 0..def.level.unwrap_or(0) {
+            g = g.and_then(|x| self.parent_of.get(&x).copied());
+        }
+        g
+    }
+
+    /// The scope of node `d`'s definition of `key` seen from the next
+    /// node: `Some(k)` local to the group `k` levels out from the innermost
+    /// one open; `None` global, or made at the piece's outer level.
+    pub fn scope_of(&self, d: u32, key: &Key) -> Option<u16> {
+        let n = &self.nodes[d as usize];
+        let def = n.defs().iter().rev().find(|x| x.key == *key)?;
+        if def.global {
+            return None;
+        }
+        let g = self.def_group(n, def)?;
+        let p = self.open.iter().rposition(|&o| o == g)?;
+        Some((self.open.len() - 1 - p) as u16)
+    }
+
+    /// The groups open at the next node, outermost first (their `Open`
+    /// nodes).
+    pub fn open_groups(&self) -> &[u32] {
+        &self.open
     }
 
     /// A node about to be added, given the group it is in.
@@ -679,6 +773,9 @@ impl Chain {
     fn index(&mut self, n: &Node, i: u32) {
         match n.kind {
             Kind::Open => {
+                if let Some(&p) = self.open.last() {
+                    self.parent_of.insert(i, p);
+                }
                 self.open.push(i);
                 self.scopes.push(i);
             }
@@ -735,6 +832,9 @@ impl Chain {
         }
         for &i in &old.scopes[within(&old.scopes)] {
             if old.nodes[i as usize].kind == Kind::Open {
+                if let Some(&p) = self.open.last() {
+                    self.parent_of.insert(i, p);
+                }
                 self.open.push(i);
             } else if let Some(o) = self.open.pop() {
                 self.close_of.insert(o, i);
@@ -767,6 +867,21 @@ pub struct Run {
     /// The fonts this piece loads first (`Key::FontLoaded` definitions), in
     /// node order: the document's font numbering is these, piece by piece.
     pub fonts: Vec<Arc<str>>,
+}
+
+/// The `Open` node of the `k`-th group enclosing node `i` (0: its own
+/// innermost), for the log's line numbers.
+pub fn enclosing_open(chain: &Chain, i: usize, k: usize) -> Option<usize> {
+    let mut g = if i < chain.nodes.len() { chain.nodes[i].group } else { return None };
+    for _ in 0..k {
+        g = g.and_then(|x| chain.parent_of.get(&x).copied());
+    }
+    g.map(|x| x as usize)
+}
+
+/// The node that began the paragraph at `level` that node `i` is in.
+pub fn paragraph_start_at(chain: &Chain, i: usize, level: u16) -> usize {
+    material::para_start(chain, i, level)
 }
 
 /// The node that began the paragraph node `i` of `chain` ended (or is
@@ -895,20 +1010,26 @@ impl Edit {
     }
 }
 
-/// The definitions from before the piece read in this run, each read once.
-type Outside = FxMap<Key, ReadRef>;
+/// The definitions from before the piece read in this run, each read once
+/// for the nodes it reaches (`lo..hi`: all of them unless an element
+/// between the piece's nodes defines the name).
+type Outside = FxMap<Key, (ReadRef, u32, u32)>;
 
-fn outside_read(env: &mut dyn Env, outside: &mut Outside, k: &Key) -> ReadRef {
-    if let Some(v) = outside.get(k) {
+/// The definition of `k` from before the piece reaching node `node`.
+fn outside_read(env: &mut dyn Env, outside: &mut Outside, k: &Key, node: u32) -> ReadRef {
+    if let Some((v, lo, hi)) = outside.get(k)
+        && (*lo..*hi).contains(&node)
+    {
         return v.clone();
     }
-    let (val, src) = env.reach(k);
+    let (val, src, lo, hi) = env.reach(k, node);
     let r = Arc::new(Read {
         key: k.clone(),
         src,
         val,
+        scope: None,
     });
-    outside.insert(k.clone(), r.clone());
+    outside.insert(k.clone(), (r.clone(), lo, hi));
     r
 }
 
@@ -919,8 +1040,9 @@ fn resolve_now(chain: &Chain, env: &mut dyn Env, outside: &mut Outside, key: &Ke
             key: key.clone(),
             src: Src::Node(d),
             val,
+            scope: chain.scope_of(d, key),
         }),
-        None => outside_read(env, outside, key),
+        None => outside_read(env, outside, key, chain.nodes.len() as u32),
     }
 }
 
@@ -1106,10 +1228,12 @@ pub fn run_piece(
                     && o.kind == n.kind
                     && o.out == n.out
                     && o.defs().len() == n.defs().len()
-                    && o.defs()
-                        .iter()
-                        .zip(n.defs())
-                        .all(|(a, b)| a.key == b.key && a.val == b.val && a.global == b.global)
+                    && o.defs().iter().zip(n.defs()).all(|(a, b)| {
+                        a.key == b.key
+                            && a.val == b.val
+                            && a.global == b.global
+                            && a.level == b.level
+                    })
             });
             if same_as_old {
                 // (and emitting the same, the paragraph's material is the
@@ -1178,12 +1302,23 @@ pub fn run_piece(
             if matches!(r.src, Src::Node(_)) || !seen.insert(Arc::as_ptr(r) as usize) {
                 continue;
             }
-            if !reads.iter().any(|(k, _, v)| *k == r.key && *v == r.val) {
-                reads.push((r.key.clone(), i as u32, r.val.clone()));
-            }
+            reads.push((r.key.clone(), i as u32, r.val.clone()));
         }
     }
     reads.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+    // (one entry per (name, value): its first reader — the first of its
+    // name's run with that value)
+    let mut kept: Vec<(Key, u32, Val)> = Vec::with_capacity(reads.len());
+    let mut run_start = 0;
+    for e in reads {
+        if kept.last().is_none_or(|l| l.0 != e.0) {
+            run_start = kept.len();
+        } else if kept[run_start..].iter().any(|x| x.2 == e.2) {
+            continue;
+        }
+        kept.push(e);
+    }
+    let reads = kept;
     let mut fonts: Vec<(u32, Arc<str>)> = chain
         .defs_of
         .iter()
@@ -1209,8 +1344,13 @@ pub fn run_piece(
 /// content).
 #[derive(Default)]
 struct Scratch {
-    /// The node's reads so far (read once each), once there are many.
-    seen: FxMap<Key, ReadRef>,
+    /// The node's reads so far (read once each, by index), once there are
+    /// many.
+    seen: FxMap<Key, u32>,
+    /// The node's reads of `\catcode` and `\sfcode` of characters below
+    /// 256, by index, while their stamp is the node's.
+    chars: Vec<(u32, u32)>,
+    stamp: u32,
     /// The node's reads and what it emitted (their capacity kept).
     reads: Vec<ReadRef>,
     emit: Vec<Item>,
@@ -1247,13 +1387,26 @@ struct Exec<'a> {
     in_write: bool,
     /// How many of `reads` are in `scratch.seen`.
     seen_upto: usize,
+    /// This node's stamp in `scratch.chars`.
+    stamp: u32,
     /// The paragraph the old node at this place made, if any: an equal
     /// paragraph is that one (the same `Arc`).
     old_para: Option<Arc<Para>>,
+    /// While a rewritten text (`\scantokens`) is read: its characters,
+    /// which the tokenizer reads instead of the piece's.
+    ptext: Option<Arc<[char]>>,
+    /// This node made the hundredth error: the build ends here (§82).
+    halt: bool,
 }
 
 /// Up to this many reads, a node's reads are looked up by a scan.
 const FEW_READS: usize = 12;
+
+/// Where a node found a definition: its own `defs[i]`, or `reads[i]`.
+enum Found {
+    Own(usize),
+    Read(usize),
+}
 
 impl<'a> Exec<'a> {
     fn new(
@@ -1267,6 +1420,15 @@ impl<'a> Exec<'a> {
         if !scratch.seen.is_empty() {
             scratch.seen.clear();
         }
+        if scratch.chars.is_empty() {
+            scratch.chars = vec![(0, 0); 512];
+        }
+        scratch.stamp = scratch.stamp.wrapping_add(1);
+        if scratch.stamp == 0 {
+            scratch.chars.fill((0, 0));
+            scratch.stamp = 1;
+        }
+        let stamp = scratch.stamp;
         let reads = std::mem::take(&mut scratch.reads);
         let emit = std::mem::take(&mut scratch.emit);
         Exec {
@@ -1289,7 +1451,10 @@ impl<'a> Exec<'a> {
             noexp: false,
             in_write: false,
             seen_upto: 0,
+            stamp,
             old_para: None,
+            ptext: None,
+            halt: false,
         }
     }
 
@@ -1307,6 +1472,11 @@ impl<'a> Exec<'a> {
                     }));
                 }
             }
+        }
+        if self.halt {
+            // (§82: at any level, into the page fold's stream)
+            let p = self.para.get_or_insert_with(|| Arc::new(Para::default()));
+            Arc::make_mut(p).after.push(Item::Halt);
         }
         let reads = Few::take(&mut self.reads);
         let emit = Few::take(&mut self.emit);
@@ -1340,7 +1510,33 @@ impl<'a> Exec<'a> {
     }
 
     fn err(&mut self, s: String) {
+        if self.halted() {
+            return;
+        }
         self.errors.push(s);
+        if self.count_error() {
+            let mut l = String::from(RAW);
+            l.push(NL);
+            l.push_str(THAT_MAKES_100);
+            l.push(HALT);
+            self.log_raw(&l);
+        }
+    }
+
+    /// The reader has stopped at its hundredth error (tex.web 82).
+    fn halted(&self) -> bool {
+        self.st.error_count >= FATAL_ERRORS
+    }
+
+    /// tex.web 82: `incr(error_count)`; the hundredth is fatal: whether
+    /// this one was. Nothing more is read (the reader's state says so:
+    /// `next_raw` gives nothing, the next node ends the piece), and this
+    /// node's `Item::Halt` ends the page fold, wherever it is (`jump_out`:
+    /// the page so far is not shipped); its log ends with TeX's line.
+    fn count_error(&mut self) -> bool {
+        self.st.error_count += 1;
+        self.halt = self.st.error_count >= FATAL_ERRORS;
+        self.halt
     }
 
     // ------------------------------------------------------------ names
@@ -1348,42 +1544,80 @@ impl<'a> Exec<'a> {
     /// The definition of `key` reaching this node: this node's own, else a
     /// node before it in the piece, else from before the piece.
     fn get(&mut self, key: &Key) -> Val {
-        self.lookup(key).val.clone()
+        match self.find(key) {
+            Found::Own(i) => self.defs[i].val.clone(),
+            Found::Read(i) => self.reads[i].val.clone(),
+        }
     }
 
     /// [`Exec::get`], as the read (the value not copied out of it).
     fn lookup(&mut self, key: &Key) -> ReadRef {
-        if let Some(d) = self.defs.iter().rev().find(|d| d.key == *key) {
+        match self.find(key) {
             // (its own definition: not a read)
-            return Arc::new(Read {
+            Found::Own(i) => Arc::new(Read {
                 key: key.clone(),
                 src: Src::Node(self.chain.nodes.len() as u32),
-                val: d.val.clone(),
-            });
+                val: self.defs[i].val.clone(),
+                scope: None,
+            }),
+            Found::Read(i) => self.reads[i].clone(),
+        }
+    }
+
+    /// Where the definition of `key` reaching this node is: its own, or
+    /// one of its reads (read now if it was not).
+    fn find(&mut self, key: &Key) -> Found {
+        // (a character's code, read again in the node: by the character)
+        let slot = match key {
+            Key::Cat(c) if (*c as u32) < 256 && self.defs.is_empty() => Some(*c as usize),
+            Key::Sfcode(c) if (*c as u32) < 256 && self.defs.is_empty() => Some(256 + *c as usize),
+            _ => None,
+        };
+        if let Some(s) = slot {
+            let (stamp, i) = self.scratch.chars[s];
+            if stamp == self.stamp {
+                return Found::Read(i as usize);
+            }
+        }
+        let f = self.find_slow(key);
+        if let (Some(s), Found::Read(i)) = (slot, &f) {
+            self.scratch.chars[s] = (self.stamp, *i as u32);
+        }
+        f
+    }
+
+    fn find_slow(&mut self, key: &Key) -> Found {
+        if let Some(i) = self.defs.iter().rposition(|d| d.key == *key) {
+            return Found::Own(i);
         }
         if self.reads.len() <= FEW_READS {
-            if let Some(r) = self.reads.iter().find(|r| r.key == *key) {
-                return r.clone();
+            if let Some(i) = self.reads.iter().position(|r| r.key == *key) {
+                return Found::Read(i);
             }
         } else {
-            for r in &self.reads[self.seen_upto..] {
+            for (j, r) in self.reads[self.seen_upto..].iter().enumerate() {
                 self.scratch
                     .seen
                     .entry(r.key.clone())
-                    .or_insert_with(|| r.clone());
+                    .or_insert((self.seen_upto + j) as u32);
             }
             self.seen_upto = self.reads.len();
-            if let Some(r) = self.scratch.seen.get(key) {
-                return r.clone();
+            if let Some(&i) = self.scratch.seen.get(key) {
+                return Found::Read(i as usize);
             }
         }
         let r = resolve_now(self.chain, self.env, self.outside, key);
-        self.reads.push(r.clone());
-        r
+        self.reads.push(r);
+        Found::Read(self.reads.len() - 1)
     }
 
     fn define(&mut self, key: Key, val: Val, global: bool) {
-        self.defs.push(Def { key, val, global });
+        self.defs.push(Def {
+            key,
+            val,
+            global,
+            level: None,
+        });
     }
 
     fn meaning(&mut self, key: &Key) -> Meaning {
@@ -1461,13 +1695,19 @@ impl<'a> Exec<'a> {
             // (tex.web 325: a brace read again is counted again)
             align::uncount(&mut self.st.al, &t);
         }
-        self.st.pending.push((Arc::from([t]), 0));
+        // (tex.web 325: lists read to their end go first, not those under
+        // a rewritten text)
+        let floor = self.st.texts.last().map_or(0, |x| x.at);
+        while self.st.pending.len() > floor && self.st.pending.last().is_some_and(|(l, i, _)| *i >= l.len()) {
+            self.st.pending.pop();
+        }
+        self.st.pending.push((Arc::from([t]), 0, true));
     }
 
     /// Rewrites the input: `toks`, then the rest.
     fn rewrite(&mut self, toks: Vec<Tok>) {
         if !toks.is_empty() {
-            self.st.pending.push((Arc::from(toks), 0));
+            self.st.pending.push((Arc::from(toks), 0, false));
         }
     }
 
@@ -1494,9 +1734,18 @@ impl<'a> Exec<'a> {
         self.st.eol = EOL_UNREAD;
     }
 
+    /// The characters the tokenizer reads: the piece's, or a rewritten
+    /// text's while one is read.
+    fn txt(&self) -> &[char] {
+        match &self.ptext {
+            Some(t) => t,
+            None => self.text,
+        }
+    }
+
     /// Moves to `np`; past a line's end, the next line begins.
     fn advance(&mut self, np: usize) {
-        let crossed = self.text[self.st.pos..np].contains(&'\r');
+        let crossed = self.txt()[self.st.pos..np].contains(&'\r');
         self.st.pos = np;
         if crossed {
             self.new_line();
@@ -1508,18 +1757,18 @@ impl<'a> Exec<'a> {
     /// inactive), and `^^` reduces the character or the two hex digits
     /// after it.
     fn char_at(&mut self, pos: usize) -> Option<(char, usize, u8)> {
-        let raw = *self.text.get(pos)?;
+        let raw = *self.txt().get(pos)?;
         let c = if raw == '\r' { self.eol()? } else { raw };
         let cat = self.catcode(c);
         // (`^^`: the second circumflex on the line, and a character after it)
-        if raw == '\r' || cat != 7 || self.text.get(pos + 1) != Some(&c) {
+        if raw == '\r' || cat != 7 || self.txt().get(pos + 1) != Some(&c) {
             return Some((c, pos + 1, cat));
         }
         let at = |x: &mut Self, p: usize| -> Option<char> {
-            match x.text.get(p) {
+            let ch = x.txt().get(p).copied();
+            match ch {
                 Some('\r') => x.eol(),
-                Some(&ch) => Some(ch),
-                None => None,
+                other => other,
             }
         };
         let Some(c2) = at(self, pos + 2) else {
@@ -1530,7 +1779,7 @@ impl<'a> Exec<'a> {
         }
         let hex = |ch: char| ch.is_ascii_digit() || ('a'..='f').contains(&ch);
         let (r, np) = match at(self, pos + 3) {
-            Some(c3) if hex(c2) && hex(c3) && self.text.get(pos + 2) != Some(&'\r') => (
+            Some(c3) if hex(c2) && hex(c3) && self.txt().get(pos + 2) != Some(&'\r') => (
                 (c2.to_digit(16).unwrap_or(0) << 4) | c3.to_digit(16).unwrap_or(0),
                 pos + 4,
             ),
@@ -1545,10 +1794,11 @@ impl<'a> Exec<'a> {
 
     /// The position just after the current line's end.
     fn line_end_after(&self, pos: usize) -> usize {
-        self.text[pos..]
+        let text = self.txt();
+        text[pos..]
             .iter()
             .position(|&c| c == '\r')
-            .map_or(self.text.len(), |k| pos + k + 1)
+            .map_or(text.len(), |k| pos + k + 1)
     }
 
     /// The next token, unexpanded (tex.web 343-357). After `\noexpand`'s
@@ -1563,25 +1813,75 @@ impl<'a> Exec<'a> {
     /// [`Exec::next_raw`] before an alignment sees the token.
     fn next_raw0(&mut self) -> Option<Tok> {
         self.noexp = false;
-        while let Some((list, i)) = self.st.pending.last_mut() {
-            if *i < list.len() {
-                let t = list[*i].clone();
-                *i += 1;
-                if *i == list.len() {
-                    self.st.pending.pop();
-                }
-                if t == Tok::DontExpand {
-                    let n = self.next_raw0();
-                    self.noexp = n.as_ref().is_some_and(|x| x.key().is_some());
-                    return n;
-                }
-                return Some(t);
-            }
-            self.st.pending.pop();
+        if self.halted() {
+            return None;
         }
         loop {
+            // (the token lists above the innermost rewritten text; a list
+            // read to its end stays until the next read, tex.web 325)
+            let floor = self.st.texts.last().map_or(0, |x| x.at);
+            while self.st.pending.len() > floor {
+                let Some((list, i, _)) = self.st.pending.last_mut() else { break };
+                if *i < list.len() {
+                    let t = list[*i].clone();
+                    *i += 1;
+                    if t == Tok::DontExpand {
+                        // (the marked token, as the wrapper will see it)
+                        let n = self.next_raw0();
+                        self.noexp = n.as_ref().is_some_and(|x| x.key().is_some());
+                        return n;
+                    }
+                    return Some(t);
+                }
+                self.st.pending.pop();
+            }
+            if self.st.texts.is_empty() {
+                return self.tokenize();
+            }
+            if let Some(t) = self.text_token() {
+                return Some(t);
+            }
+        }
+    }
+
+    /// The next token of the innermost rewritten text, read as the piece's
+    /// text is; at its end `\everyeof` goes in once (etex.web §362), then
+    /// the text is done (`None`: read on below it).
+    fn text_token(&mut self) -> Option<Tok> {
+        let x = self.st.texts.last()?.clone();
+        let outer = (self.st.pos, self.st.tstate, self.st.eol);
+        (self.st.pos, self.st.tstate, self.st.eol) = (x.pos, x.tstate, x.eol);
+        let prev = self.ptext.replace(x.text.clone());
+        let t = self.tokenize();
+        self.ptext = prev;
+        let here = (self.st.pos, self.st.tstate, self.st.eol);
+        (self.st.pos, self.st.tstate, self.st.eol) = outer;
+        let Some(x) = self.st.texts.last_mut() else { return t };
+        (x.pos, x.tstate, x.eol) = here;
+        if t.is_some() {
+            return t;
+        }
+        if !x.eof {
+            x.eof = true;
+            let every = match self.get(&Key::TokPar(crate::val::TokPar::Everyeof)) {
+                Val::Toks(l) => l,
+                _ => Arc::new(Vec::new()),
+            };
+            if !every.is_empty() {
+                self.rewrite(every.to_vec());
+                return None;
+            }
+        }
+        self.st.texts.pop();
+        None
+    }
+
+    /// The next token of the text being read (the piece's, or a rewritten
+    /// one's: `txt`), unexpanded (tex.web 343-357).
+    fn tokenize(&mut self) -> Option<Tok> {
+        loop {
             let pos = self.st.pos;
-            let raw = *self.text.get(pos)?;
+            let raw = *self.txt().get(pos)?;
             if self.st.eol == EOL_UNREAD {
                 self.read_eol();
             }
@@ -1831,23 +2131,23 @@ impl<'a> Exec<'a> {
             std::mem::take(&mut self.st.long),
             std::mem::take(&mut self.st.outer),
         );
-        if self.st.mode == Mode::M && self.math_cmd(&t, &m) {
+        let protected = std::mem::take(&mut self.st.protected);
+        if self.st.mode == Mode::M && self.math_command(&t, &m) {
             return;
         }
         match m {
             Meaning::Prim(p) if p.conditional() => self.conditional(p, &t),
-            Meaning::Prim(Prim::Global | Prim::Long | Prim::Outer) => {
+            Meaning::Prim(Prim::Global | Prim::Long | Prim::Outer | Prim::Protected) => {
                 let Meaning::Prim(p) = m else { unreachable!() };
-                self.prefix(p, global, long, outer);
+                self.prefix(p, global, long, outer, protected);
             }
-            _ if assign::prefixable(&m) => self.prefixed(&t, &m, global, long, outer),
+            _ if assign::prefixable(&m) => self.prefixed(&t, &m, global, long, outer, protected),
             Meaning::Prim(Prim::Mat(x)) => self.mat(x, &t),
+            Meaning::Prim(Prim::Math(x)) => self.math_prim(x, &t),
             Meaning::Prim(p) => self.prim(p),
             Meaning::Char(cat, c) => self.char_tok(cat, c, &t),
             Meaning::CharGiven(c) => self.char_cmd(c, &t),
-            Meaning::MathCharGiven(_) => {
-                self.err("Missing $ inserted (math is not supported yet)".into());
-            }
+            Meaning::MathCharGiven(_) => self.insert_dollar_sign(&t),
             Meaning::Undefined => self.err(format!("Undefined control sequence {t}")),
             Meaning::Macro(_)
             | Meaning::CountRef(_)
@@ -1862,6 +2162,10 @@ impl<'a> Exec<'a> {
     /// The end of the piece: its last paragraph, its open groups and
     /// conditionals.
     fn end(&mut self) {
+        if self.halted() {
+            self.kind = Kind::End;
+            return;
+        }
         self.end_par();
         self.kind = Kind::End;
         if !self.st.groups.is_empty() {
@@ -1897,13 +2201,12 @@ impl<'a> Exec<'a> {
             2 => match self.st.groups.last().map(|g| g.kind) {
                 Some(GroupKind::Simple) => self.close_group(),
                 Some(GroupKind::Box) => self.close_box(t),
+                Some(GroupKind::Math) => self.math_right_brace(),
                 Some(GroupKind::SemiSimple) => self.err("Extra }, or forgotten \\endgroup".into()),
                 Some(GroupKind::Align) => self.missing_cr(t),
                 Some(GroupKind::NoAlign) => self.noalign_close(t),
-                Some(GroupKind::Math) => self.err("Extra }, or forgotten $".into()),
                 None => self.err("Too many }'s".into()),
             },
-            3 => self.math_shift(t),
             4 => self.align_error(t),
             10 => {
                 if self.st.mode == Mode::H {
@@ -1911,6 +2214,8 @@ impl<'a> Exec<'a> {
                 }
             }
             11 | 12 => self.char_cmd(u32::from(c), t),
+            3 => self.math_shift(t),
+            7 | 8 => self.sub_sup_cmd(cat == 7, t),
             _ => self.err(format!(
                 "Character {c} of category {cat} is not supported yet"
             )),
@@ -1931,7 +2236,11 @@ impl<'a> Exec<'a> {
             Prim::BeginGroup => self.open_group(GroupKind::SemiSimple),
             Prim::EndGroup => match self.st.groups.last().map(|g| g.kind) {
                 Some(GroupKind::SemiSimple) => self.close_group(),
-                Some(GroupKind::Simple | GroupKind::Box | GroupKind::Align | GroupKind::NoAlign | GroupKind::Math) => {
+                Some(GroupKind::Math) => {
+                    let t = self.cmd.clone();
+                    self.math_off_save(&t);
+                }
+                Some(GroupKind::Simple | GroupKind::Box | GroupKind::Align | GroupKind::NoAlign) => {
                     // (tex.web 1064: the missing `}` goes in first)
                     self.err("Missing } inserted".into());
                     let t = self.cmd.clone();
@@ -1961,6 +2270,8 @@ impl<'a> Exec<'a> {
                 }
             }
             Prim::Message | Prim::ErrMessage => self.message(p == Prim::ErrMessage),
+            Prim::SetLanguage => self.set_language(),
+            Prim::Show(c) => self.show_cmd(c),
             Prim::Immediate => self.immediate(),
             Prim::Write => {
                 self.err(
@@ -1974,6 +2285,7 @@ impl<'a> Exec<'a> {
             Prim::End | Prim::Dump => self.stop(),
             Prim::Align(a) => self.align_cmd(a),
             Prim::Relax => {}
+            Prim::Marks | Prim::Discards(_) | Prim::ShowE(_) | Prim::Middle | Prim::Lr(_) => self.etex_command(p),
             Prim::LastItem(_)
             | Prim::SpaceFactor
             | Prim::PrevDepth

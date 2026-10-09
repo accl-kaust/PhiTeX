@@ -1,0 +1,13 @@
+% \lastnodetype in horizontal and vertical lists; \marks and the mark
+% classes' reads; TeXXeT's \beginL...\endL as items.
+\font\tenrm=cmr10 \tenrm
+\setbox0\hbox{\message{\the\lastnodetype}A\message{\the\lastnodetype}fi\message{\the\lastnodetype}\kern1pt\message{\the\lastnodetype}%
+\hskip1pt\message{\the\lastnodetype}\penalty5 \message{\the\lastnodetype}\vrule\message{\the\lastnodetype}%
+\hbox{}\message{\the\lastnodetype}\vbox{}\message{\the\lastnodetype}\mark{m}\message{\the\lastnodetype}%
+\marks3{m}\message{\the\lastnodetype}\-\message{\the\lastnodetype}\marks0{n}\message{\the\lastnodetype}}
+\setbox0\vbox{\message{\the\lastnodetype}\kern1pt\message{\the\lastnodetype}\penalty1 \message{\the\lastnodetype}%
+\hrule\message{\the\lastnodetype}\vskip2pt\message{\the\lastnodetype}\marks2{x}\message{\the\lastnodetype}}
+\message{[\topmarks3][\firstmarks 2][\botmarks1][\splitfirstmarks0][\splitbotmarks 300]}
+\TeXXeTstate=1
+\setbox0\hbox{\beginL\message{\the\lastnodetype}A\endL\message{\the\lastnodetype}\beginR B\endR}
+\message{\the\wd0}

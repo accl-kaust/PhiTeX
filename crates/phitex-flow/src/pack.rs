@@ -72,7 +72,7 @@ fn order(t: &[i32; 4]) -> u8 {
 /// §649: `hpack`. Marks move out to `adjust` if given (§655).
 pub fn hpack(mut list: Vec<Item>, spec: Spec, params: &Params, adjust: Option<&mut Vec<Item>>) -> Packed {
     if let Some(adj) = adjust {
-        let (moved, kept): (Vec<Item>, Vec<Item>) = list.into_iter().partition(|i| matches!(i, Item::Mark(_)));
+        let (moved, kept): (Vec<Item>, Vec<Item>) = list.into_iter().partition(|i| matches!(i, Item::Mark(_) | Item::Marks(..)));
         adj.extend(moved);
         list = kept;
     }
@@ -103,7 +103,7 @@ pub fn hpack(mut list: Vec<Item>, spec: Spec, params: &Params, adjust: Option<&m
                 t.stretch[usize::from(g.stretch_order)] += g.stretch;
                 t.shrink[usize::from(g.shrink_order)] += g.shrink;
             }
-            Item::Kern { w, .. } => x += w,
+            Item::Kern { w, .. } | Item::Math { w, .. } => x += w,
             _ => {}
         }
     }

@@ -33,27 +33,27 @@
 //! Levels: an alignment begun at level `L` has its list at `L+1`, its rows
 //! at `L+2`, its entries at `L+3`.
 //!
-//! A display (`$$` in a paragraph, §1145) ends the paragraph so far (its
-//! lines broken here, with `\displaywidowpenalty`) and opens a group in
-//! display math mode, whose only content can be an alignment and
-//! assignments; its closing `$$` (§1206) puts `\predisplaypenalty`,
-//! `\abovedisplayskip`, the alignment, `\postdisplaypenalty` and
-//! `\belowdisplayskip` into the vertical list, and the paragraph resumes
-//! (§1200).
+//! A display alignment (`$$\halign{...}$$`, §1145, §1206) is an alignment
+//! begun in a display's math group (`graph::math`): its list starts from
+//! the depth of the vertical list before the display, its rows are shifted
+//! by `\displayindent`, and once it is set its material waits in the
+//! display's group record (`MathKind::DisplayAlign`) for the closing `$$`,
+//! whose packaging node puts `\predisplaypenalty`, `\abovedisplayskip`, the
+//! alignment, `\postdisplaypenalty` and `\belowdisplayskip` into the
+//! vertical list before the paragraph resumes (§1200).
 //!
 //! TeX's errors here are written as TeX writes them (the message, the
 //! context lines, the help): the log is compared.
 
 use std::sync::Arc;
 
-use super::material::{box_start, para_start, push_horizontal};
-use super::{Exec, Group, GroupKind, Kind, Mode, assign};
-use crate::item::{BoxNode, GlueSet, Item, RUNNING, Unset, is_zero, param_glue};
-use crate::linebreak;
+use super::material::{box_start, push_horizontal};
+use super::{Exec, Group, GroupKind, Kind, Mode};
+use crate::item::{BoxNode, GlueSet, Item, RUNNING, Unset, is_zero};
 use crate::pack::{Params, Spec, hpack, vpack};
 use crate::page::{IGNORE_DEPTH, push_vertical};
-use crate::show::{CTX, LINE, LN, NL, Place, RAW, report, zround};
-use crate::val::{Al, DimenPar, Glue, GluePar, IntPar, Key, Mat, Meaning, Prim, Tok, TokPar, Val};
+use crate::show::{CTX, HALT, LINE, LN, NL, Place, RAW, THAT_MAKES_100, report, zround};
+use crate::val::{Al, DimenPar, Glue, GluePar, IntPar, Key, Meaning, Prim, Tok, TokPar, Val};
 
 /// `align_state` outside an entry (tex.web 309).
 const ALIGN_BASE: i32 = 1_000_000;
@@ -71,7 +71,7 @@ pub(super) const END_SPAN: u8 = 2;
 pub(super) const END_CR: u8 = 3;
 pub(super) const END_CRCR: u8 = 4;
 
-/// The reader's own commands of an alignment and a display.
+/// The reader's own commands of an alignment.
 const PRE: &str = "\u{0}alignpre";
 const PEEK: &str = "\u{0}alignpeek";
 const COL: &str = "\u{0}aligncol";
@@ -83,10 +83,6 @@ const ROW: &str = "\u{0}alignrow";
 const FIN: &str = "\u{0}alignfin";
 const SET: &str = "\u{0}alignset";
 const FROZEN_CR: &str = "\u{0}cr";
-const DISPLAY_OPEN: &str = "\u{0}displayopen";
-const DISPLAY_DEFS: &str = "\u{0}displaydefs";
-const DISPLAY_CLOSE: &str = "\u{0}displayclose";
-const DISPLAY_RESUME: &str = "\u{0}displayresume";
 const END_GRAF: &str = "\u{0}endgraf";
 const NORMAL_PARAGRAPH: &str = "\u{0}normalparagraph";
 
@@ -208,6 +204,10 @@ pub(super) struct AlignSpec {
     pub(super) inner: bool,
     pub(super) space_factor: i32,
     pub(super) prev_depth: i32,
+    /// The enclosing list's `\prevgraf` and language state (a new list's
+    /// `\prevgraf` is 0: `push_nest`).
+    pub(super) prev_graf: i32,
+    pub(super) hyph_lang: [u8; 4],
     /// The enclosing alignment's state (§772).
     pub(super) outer: AlignCur,
     /// Begun in a display (§1145).
@@ -235,34 +235,6 @@ impl AlignSpec {
     fn tab_after(&self, j: usize) -> (Arc<Glue>, bool) {
         let c = self.col_of(j).unwrap_or(self.cols.len().saturating_sub(1));
         self.tabskips[(c + 1).min(self.tabskips.len() - 1)].clone()
-    }
-}
-
-/// A display: its dimensions (§1146, §1149), the vertical list's depth
-/// before it, and, once its alignment is set, the alignment's material
-/// and depth (`aux_save`, §1206).
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) struct Display {
-    w: i32,
-    l: i32,
-    s: i32,
-    prev_depth: i32,
-    done: Option<(Arc<Vec<Item>>, i32)>,
-}
-
-/// What a group entry holds for an alignment or a display.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) enum AlignGroup {
-    Align(AlignSpec),
-    Display(Display),
-}
-
-impl AlignGroup {
-    fn align(&self) -> Option<&AlignSpec> {
-        match self {
-            AlignGroup::Align(s) => Some(s),
-            AlignGroup::Display(_) => None,
-        }
     }
 }
 
@@ -476,48 +448,8 @@ fn set_row(
     row
 }
 
-/// §1146–§1148: the natural width of the last line before a display, as
-/// far as it is visible (`v`: from its shift plus two quads).
-fn natural_width(b: &BoxNode, quad: i32) -> i32 {
-    let mut v = b.shift + 2 * quad;
-    let mut w = -MAX_DIMEN;
-    for it in &b.list {
-        let (d, found) = match it {
-            Item::Char(f, c) => (f.glyph(i32::from(*c)).map_or(0, |g| g.width), true),
-            Item::Lig(l) => (l.font.glyph(i32::from(l.c)).map_or(0, |g| g.width), true),
-            Item::Box(x) => (x.w, true),
-            Item::Unset(x) => (x.w, true),
-            Item::Rule { w, .. } => (*w, true),
-            Item::Kern { w, .. } => (*w, false),
-            Item::Glue { g, .. } => {
-                if b.glue.sign == 1 {
-                    if b.glue.order == g.stretch_order && g.stretch != 0 {
-                        v = MAX_DIMEN;
-                    }
-                } else if b.glue.sign == -1 && b.glue.order == g.shrink_order && g.shrink != 0 {
-                    v = MAX_DIMEN;
-                }
-                (g.width, false)
-            }
-            _ => (0, false),
-        };
-        if found {
-            if v < MAX_DIMEN {
-                v += d;
-                w = v;
-            } else {
-                w = MAX_DIMEN;
-                break;
-            }
-        } else if v < MAX_DIMEN {
-            v += d;
-        }
-    }
-    w
-}
-
 /// A group entry.
-fn group(kind: GroupKind, align: Option<AlignGroup>) -> Group {
+fn group(kind: GroupKind, align: Option<AlignSpec>) -> Group {
     Group {
         kind,
         after: Vec::new(),
@@ -577,44 +509,21 @@ impl Exec<'_> {
     /// §789: the entry ended by `code`: its v template goes in.
     fn insert_v(&mut self, code: u8) {
         let Some(a) = self.cur_align() else { return };
-        let Some(s) = a.align() else { return };
+        let s = &*a;
         let v = if self.st.al.omit {
             s.omit.clone()
         } else {
             s.template(usize::from(self.st.al.col)).v.clone()
         };
         self.st.al.end = code;
-        self.st.pending.push((v, 0));
+        self.st.pending.push((v, 0, false));
         self.st.al.state = ALIGN_BASE;
     }
 
     /// The innermost alignment's group entry.
-    fn cur_align(&self) -> Option<Arc<AlignGroup>> {
+    fn cur_align(&self) -> Option<Arc<AlignSpec>> {
         let v = self.st.groups.0.as_ref()?;
-        v.iter().rev().find_map(|g| match g.align.as_deref() {
-            Some(AlignGroup::Align(_)) => g.align.clone(),
-            _ => None,
-        })
-    }
-
-    /// The innermost display.
-    fn display(&self) -> Option<Display> {
-        let v = self.st.groups.0.as_ref()?;
-        let g = v.iter().rev().find(|g| g.kind == GroupKind::Math)?;
-        match g.align.as_deref() {
-            Some(AlignGroup::Display(d)) => Some(d.clone()),
-            _ => None,
-        }
-    }
-
-    /// The next non-blank token, expanded (§406).
-    fn nonblank_x(&mut self) -> Option<(Tok, Meaning)> {
-        loop {
-            let x = self.next_x_m(false)?;
-            if !is_spacer(&x.1) {
-                return Some(x);
-            }
-        }
+        v.iter().rev().find_map(|g| g.align.clone())
     }
 
     // ------------------------------------------------------------ commands
@@ -625,14 +534,17 @@ impl Exec<'_> {
         match a {
             Al::Halign => match self.st.mode {
                 Mode::H => self.head_for_vmode(&t, false),
-                Mode::V | Mode::M => self.init_align(false),
+                Mode::V => self.init_align(false, None),
+                Mode::M => {
+                    if let Some(pd) = self.display_for_alignment(&t) {
+                        self.init_align(false, Some(pd));
+                    }
+                }
             },
             Al::Valign => match self.st.mode {
                 Mode::V => self.back_new_graf(&t),
-                Mode::H => self.init_align(true),
-                Mode::M => {
-                    self.err("Math mode is not supported yet (\\valign in a display)".into());
-                }
+                Mode::H => self.init_align(true, None),
+                Mode::M => self.insert_dollar_sign(&t),
             },
             Al::Noalign => self.misplaced("noalign", &HELP_NOALIGN),
             Al::Omit => self.misplaced("omit", &HELP_OMIT),
@@ -658,14 +570,6 @@ impl Exec<'_> {
                 self.back(p);
             }
             Al::Set => self.fin_align(),
-            Al::DisplayOpen => {
-                self.kind = Kind::Open;
-                let p = self.cs(DISPLAY_DEFS);
-                self.back(p);
-            }
-            Al::DisplayDefs => self.display_defs(),
-            Al::DisplayClose => self.display_close(),
-            Al::DisplayResume => self.display_resume(),
         }
     }
 
@@ -677,6 +581,9 @@ impl Exec<'_> {
     /// `\errorcontextlines` lets through (§311) — then the current line,
     /// and the help.
     fn tex_error(&mut self, msg: &str, levels: &[(&str, String, String)], help: &[&str]) {
+        if self.halted() {
+            return;
+        }
         let e = self.int_par(IntPar::Errorcontextlines);
         let mut s = String::new();
         s.push(RAW);
@@ -714,19 +621,26 @@ impl Exec<'_> {
             s.push_str(part);
         }
         s.push(CTX);
-        for h in help {
+        if self.count_error() {
+            // (§82: the hundredth, without its help)
             s.push(NL);
-            s.push_str(h);
+            s.push_str(THAT_MAKES_100);
+            s.push(HALT);
+        } else {
+            for h in help {
+                s.push(NL);
+                s.push_str(h);
+            }
+            s.push(LN);
+            s.push(LN);
         }
-        s.push(LN);
-        s.push(LN);
         self.log_raw(&s);
     }
 
     /// The line being read, split where the reader is (tex.web 318; a
     /// line's end read is still that line's).
     fn file_line(&self) -> (String, String) {
-        let text = self.text;
+        let text = self.txt();
         let pos = self.st.pos.min(text.len());
         let anchor = if pos > 0 && text[pos - 1] == '\r' {
             pos - 1
@@ -825,7 +739,7 @@ impl Exec<'_> {
         let tt = self.toks_text(std::slice::from_ref(t));
         self.back(t.clone());
         let cr = self.cs(FROZEN_CR);
-        self.st.pending.push((Arc::from(vec![cr]), 0));
+        self.st.pending.push((Arc::from(vec![cr]), 0, false));
         let mut msg = String::from("Missing ");
         self.print_esc(&mut msg, "cr");
         msg.push_str(" inserted");
@@ -843,10 +757,10 @@ impl Exec<'_> {
 
     // ------------------------------------------------------------ the preamble
 
-    /// §774–§776: `\halign` or `\valign` (a display's in display math
-    /// mode): an `Open` node; the preamble is read by the next.
-    fn init_align(&mut self, valign: bool) {
-        let display = self.st.mode == Mode::M;
+    /// §774–§776: `\halign` or `\valign` (in a display, `display` is the
+    /// depth of the vertical list before it: §775): an `Open` node; the
+    /// preamble is read by the next.
+    fn init_align(&mut self, valign: bool, display: Option<i32>) {
         let omit = self.cs(END_TEMPLATE);
         let mut spec = AlignSpec {
             valign,
@@ -860,8 +774,10 @@ impl Exec<'_> {
             inner: self.st.inner,
             space_factor: self.st.space_factor,
             prev_depth: self.st.prev_depth,
+            prev_graf: self.st.prev_graf,
+            hyph_lang: self.st.hyph_lang,
             outer: self.st.al,
-            display,
+            display: display.is_some(),
         };
         self.st.al = AlignCur {
             on: true,
@@ -870,14 +786,13 @@ impl Exec<'_> {
         };
         // (§775: the alignment's list, internal; in a display, vertical,
         // with the depth of the vertical list before it)
-        if display {
-            if let Some(d) = self.display() {
-                self.st.prev_depth = d.prev_depth;
-            }
+        if let Some(pd) = display {
+            self.st.prev_depth = pd;
             self.st.mode = Mode::V;
         }
         self.st.level += 1;
         self.st.inner = true;
+        self.st.prev_graf = 0;
         // (§645: `scan_spec`)
         spec.spec = if self.keyword("to") {
             Spec::Exactly(self.scan_dimen())
@@ -886,9 +801,7 @@ impl Exec<'_> {
         } else {
             Spec::NATURAL
         };
-        self.st
-            .groups
-            .push(group(GroupKind::Align, Some(AlignGroup::Align(spec))));
+        self.st.groups.push(group(GroupKind::Align, Some(spec)));
         self.kind = Kind::Open;
         self.scan_left_brace();
         let p = self.cs(PRE);
@@ -1024,8 +937,8 @@ impl Exec<'_> {
         }
         if let Some(g) = self.st.groups.last_mut()
             && let Some(a) = &mut g.align
-            && let AlignGroup::Align(s) = Arc::make_mut(a)
         {
+            let s = Arc::make_mut(a);
             s.cols = cols;
             s.tabskips = tabskips;
             s.looping = looping;
@@ -1044,7 +957,7 @@ impl Exec<'_> {
     /// (§786: `init_row`, its first tabskip glue).
     fn align_peek(&mut self) {
         let Some(a) = self.cur_align() else { return };
-        let Some(s) = a.align() else { return };
+        let s = &*a;
         loop {
             self.st.al.state = ALIGN_BASE;
             let Some((t, m)) = self.nonblank_x() else {
@@ -1073,6 +986,7 @@ impl Exec<'_> {
                 _ => {
                     self.st.level = s.level + 2;
                     self.st.inner = true;
+                    self.st.prev_graf = 0;
                     if s.valign {
                         self.st.mode = Mode::V;
                         self.st.prev_depth = 0;
@@ -1095,9 +1009,10 @@ impl Exec<'_> {
     /// its first token — `\omit`, or what follows the u template.
     fn align_col(&mut self) {
         let Some(a) = self.cur_align() else { return };
-        let Some(s) = a.align() else { return };
+        let s = &*a;
         self.st.level = s.level + 3;
         self.st.inner = true;
+        self.st.prev_graf = 0;
         self.st.al.span = self.st.al.col;
         if s.valign {
             self.st.mode = Mode::V;
@@ -1123,7 +1038,7 @@ impl Exec<'_> {
         } else {
             self.back(t);
             let u = s.template(usize::from(self.st.al.col)).u.clone();
-            self.st.pending.push((u, 0));
+            self.st.pending.push((u, 0, false));
         }
     }
 
@@ -1145,7 +1060,7 @@ impl Exec<'_> {
             return;
         }
         let Some(a) = self.cur_align() else { return };
-        let Some(s) = a.align() else { return };
+        let s = &*a;
         if self.st.al.state < 500_000 {
             self.interwoven();
         }
@@ -1204,7 +1119,7 @@ impl Exec<'_> {
     fn pack_entry(&mut self) {
         self.kind = Kind::Par;
         let Some(a) = self.cur_align() else { return };
-        let Some(s) = a.align() else { return };
+        let s = &*a;
         let cell = s.level + 3;
         let chain = self.chain;
         let end = chain.nodes.len().saturating_sub(1);
@@ -1256,6 +1171,8 @@ impl Exec<'_> {
         // (back in the row)
         self.st.level = s.level + 2;
         self.st.inner = true;
+        self.st.prev_graf = 0;
+        self.st.hyph_lang = s.hyph_lang;
         if s.valign {
             self.st.mode = Mode::V;
             self.st.prev_depth = 0;
@@ -1280,7 +1197,7 @@ impl Exec<'_> {
     fn fin_row(&mut self) {
         self.kind = Kind::Par;
         let Some(a) = self.cur_align() else { return };
-        let Some(s) = a.align() else { return };
+        let s = &*a;
         let row = s.level + 2;
         let chain = self.chain;
         let start = box_start(chain, chain.nodes.len(), row);
@@ -1299,6 +1216,8 @@ impl Exec<'_> {
             .partition(|i| matches!(i, Item::Unset(_) | Item::Glue { .. }));
         self.st.level = s.level + 1;
         self.st.inner = true;
+        self.st.prev_graf = 0;
+        self.st.hyph_lang = s.hyph_lang;
         if s.valign {
             let b = vpack(row_items, Spec::NATURAL, MAX_DIMEN, &Params::QUIET).b;
             self.st.mode = Mode::H;
@@ -1349,7 +1268,7 @@ impl Exec<'_> {
             return;
         };
         let Some(a) = g.align.clone() else { return };
-        let Some(s) = a.align() else { return };
+        let s = &*a;
         let list_level = s.level + 1;
         let chain = self.chain;
         let end = chain.nodes.len().saturating_sub(1);
@@ -1512,6 +1431,8 @@ impl Exec<'_> {
         self.st.level = s.level;
         self.st.inner = s.inner;
         self.st.mode = s.mode;
+        self.st.prev_graf = s.prev_graf;
+        self.st.hyph_lang = s.hyph_lang;
         if s.valign {
             self.st.prev_depth = s.prev_depth;
         } else {
@@ -1520,13 +1441,7 @@ impl Exec<'_> {
         self.rewrite(g.after);
         if s.display {
             let aux = self.st.prev_depth;
-            if let Some(m) = self.st.groups.last_mut()
-                && m.kind == GroupKind::Math
-                && let Some(x) = &mut m.align
-                && let AlignGroup::Display(d) = Arc::make_mut(x)
-            {
-                d.done = Some((Arc::new(out), aux));
-            }
+            self.display_aligned(out, aux);
             return;
         }
         for it in out {
@@ -1540,210 +1455,10 @@ impl Exec<'_> {
 
     // ------------------------------------------------------------ displays
 
-    /// A math shift character: in vertical mode a paragraph begins (§1090);
-    /// in a paragraph, `$$` begins a display (§1138, §1145). Other math is
-    /// not supported yet.
-    pub(super) fn math_shift(&mut self, t: &Tok) {
-        match self.st.mode {
-            Mode::V => self.back_new_graf(t),
-            Mode::H => {
-                // (§1138: `get_token`)
-                let u = self.next_raw();
-                let second = match &u {
-                    Some(u) => matches!(self.tok_meaning(u), Meaning::Char(3, _)),
-                    None => false,
-                };
-                if second && !self.st.inner {
-                    self.display_begin();
-                } else {
-                    if let Some(u) = u {
-                        self.back(u);
-                    }
-                    self.err("Math mode is not supported yet".into());
-                }
-            }
-            Mode::M => self.err("Math mode is not supported yet".into()),
-        }
-    }
-
-    /// §1145–§1149: a display begins — the paragraph so far is broken into
-    /// lines here (with `\displaywidowpenalty`, no `normal_paragraph`),
-    /// which go into the vertical list; the display's dimensions; display
-    /// math mode, whose group the next node opens.
-    fn display_begin(&mut self) {
-        self.kind = Kind::Par;
-        let level = self.st.level;
-        let chain = self.chain;
-        let start = para_start(chain, chain.nodes.len(), level);
-        let mut hlist = Vec::new();
-        for n in chain.nodes.range(start, chain.nodes.len()) {
-            if n.out.level == level && n.out.mode == Mode::H {
-                for it in n.emit.iter() {
-                    push_horizontal(&mut hlist, it.clone());
-                }
-            }
-        }
-        for it in std::mem::take(&mut self.emit) {
-            push_horizontal(&mut hlist, it);
-        }
-        let ships: Vec<Item> = hlist
-            .iter()
-            .filter(|i| matches!(i, Item::Shipout(_)))
-            .cloned()
-            .collect();
-        hlist.retain(|i| !matches!(i, Item::Shipout(_)));
-        self.vemit.extend(ships);
-        self.st.mode = Mode::M;
-        self.st.inner = false;
-        let mut w = -MAX_DIMEN;
-        if !hlist.is_empty() {
-            // (§816)
-            if matches!(hlist.last(), Some(Item::Glue { .. })) {
-                hlist.pop();
-            }
-            hlist.push(Item::Penalty(10000));
-            let g = self.glue_par(GluePar::Parfillskip);
-            hlist.push(param_glue(&g, GluePar::Parfillskip as u8));
-            let mut lp = self.line_params(&hlist);
-            lp.widowpenalty = self.int_par(IntPar::Displaywidowpenalty);
-            let lines = linebreak::lines(&hlist, &lp);
-            for l in &lines {
-                if let Some(r) = &l.report {
-                    self.log_raw(r);
-                }
-                self.vemit.push(Item::Append(l.b.clone(), lp.inter.clone()));
-                self.vemit.extend(l.adjust.iter().cloned());
-                if let Some(x) = l.pen {
-                    self.vemit.push(Item::Penalty(x));
-                }
-            }
-            self.st.prev_graf = linebreak::prev_graf_after(&lp, lines.len());
-            if let Some(l) = lines.last() {
-                self.st.prev_depth = l.b.d;
-                let quad = self.font_param(6);
-                w = natural_width(&l.b, quad);
-            }
-        }
-        // (§1149)
-        let pg = self.st.prev_graf;
-        let (l, s) = match self.get(&Key::Parshape) {
-            Val::Parshape(ps) if !ps.is_empty() => {
-                let n = ps.len() as i32;
-                let i = if pg + 2 >= n { n } else { (pg + 2).max(1) };
-                let (indent, length) = ps[(i - 1) as usize];
-                (length, indent)
-            }
-            _ => {
-                let hi = self.dimen_par(DimenPar::Hangindent);
-                let ha = self.int_par(IntPar::Hangafter);
-                let hsize = self.dimen_par(DimenPar::Hsize);
-                if hi != 0 && ((ha >= 0 && pg + 2 > ha) || pg + 1 < -ha) {
-                    (hsize - hi.abs(), hi.max(0))
-                } else {
-                    (hsize, 0)
-                }
-            }
-        };
-        let d = Display {
-            w,
-            l,
-            s,
-            prev_depth: self.st.prev_depth,
-            done: None,
-        };
-        self.st
-            .groups
-            .push(group(GroupKind::Math, Some(AlignGroup::Display(d))));
-        let p = self.cs(DISPLAY_OPEN);
-        self.back(p);
-    }
-
-    /// §1145: in the display's group, `\fam`, `\predisplaysize`,
-    /// `\displaywidth`, `\displayindent` (TeX's `eq_word_define`: local),
-    /// `\everydisplay`, and the page builder on the main vertical list.
-    fn display_defs(&mut self) {
-        let Some(d) = self.display() else { return };
-        self.define(Key::IntPar(IntPar::Fam), Val::Int(-1), false);
-        self.define(
-            Key::DimenPar(DimenPar::Predisplaysize),
-            Val::Int(d.w),
-            false,
-        );
-        self.define(Key::DimenPar(DimenPar::Displaywidth), Val::Int(d.l), false);
-        self.define(Key::DimenPar(DimenPar::Displayindent), Val::Int(d.s), false);
-        let every = self.toks_par(TokPar::Everydisplay);
-        self.rewrite(every);
-        if self.st.level == 0 {
-            let c = self.page_call();
-            self.vemit.push(Item::BuildPage(c));
-        }
-    }
-
-    /// A command in display math mode (only what a display alignment
-    /// needs): whether it was dealt with here. After the alignment, only
-    /// assignments may come before `$$` (§1206: `do_assignments`).
-    pub(super) fn math_cmd(&mut self, t: &Tok, m: &Meaning) -> bool {
-        let after = self.display().is_some_and(|d| d.done.is_some());
-        let ok = match m {
-            Meaning::Char(3, _) => {
-                if after {
-                    self.display_end(None);
-                } else {
-                    self.err("Math mode is not supported yet".into());
-                }
-                return true;
-            }
-            Meaning::Prim(Prim::Align(Al::Halign)) if !after => {
-                self.init_align(false);
-                return true;
-            }
-            // (the reader's own steps; not the commands)
-            Meaning::Prim(Prim::Align(a)) => !matches!(
-                a,
-                Al::Halign
-                    | Al::Valign
-                    | Al::Noalign
-                    | Al::Omit
-                    | Al::Span
-                    | Al::Cr
-                    | Al::Crcr
-                    | Al::FrozenCr
-            ),
-            Meaning::Prim(Prim::Relax | Prim::Mat(Mat::Internal(_))) => true,
-            Meaning::Prim(p) if p.conditional() => true,
-            _ if is_spacer(m) || assign::prefixable(m) => true,
-            Meaning::Prim(
-                Prim::Message
-                | Prim::ErrMessage
-                | Prim::Immediate
-                | Prim::Write
-                | Prim::BeginGroup
-                | Prim::EndGroup
-                | Prim::AfterGroup
-                | Prim::AfterAssignment
-                | Prim::IgnoreSpaces
-                | Prim::Uppercase
-                | Prim::Lowercase,
-            ) => !after,
-            _ => false,
-        };
-        if ok {
-            return false;
-        }
-        if after {
-            self.display_end(Some(t));
-        } else {
-            self.err(format!("Math mode is not supported yet ({t} in a display)"));
-        }
-        true
-    }
-
-    /// §1206: the display's end — its alignment between
-    /// `\predisplaypenalty` and `\abovedisplayskip`, `\postdisplaypenalty`
-    /// and `\belowdisplayskip`, read in the display's group; then its
-    /// group closes (the next node, a `Close` that emits nothing) and the
-    /// paragraph resumes (§1200). `bad`: what came instead of `$$` (§1207).
-    fn display_end(&mut self, bad: Option<&Tok>) {
+    /// §1206–§1207 (and §1197): after a display's alignment and its
+    /// assignments, `$$`; `bad`, what came instead, is read again after
+    /// "Missing $$ inserted".
+    pub(super) fn display_alignment_check(&mut self, bad: Option<&Tok>) {
         if let Some(t) = bad {
             let tt = self.toks_text(std::slice::from_ref(t));
             self.back(t.clone());
@@ -1752,64 +1467,20 @@ impl Exec<'_> {
                 &[("<to be read again> ", String::new(), tt)],
                 &HELP_DISPLAY,
             );
-        } else {
-            // (§1197)
-            let x = self.next_x_m(false);
-            if !matches!(x, Some((_, Meaning::Char(3, _)))) {
-                let mut levels = Vec::new();
-                if let Some((u, _)) = x {
-                    levels.push((
-                        "<to be read again> ",
-                        String::new(),
-                        self.toks_text(std::slice::from_ref(&u)),
-                    ));
-                    self.back(u);
-                }
-                self.tex_error("Display math should end with $$", &levels, &HELP_DOLLAR);
+            return;
+        }
+        let x = self.next_x_m(false);
+        if !matches!(x, Some((_, Meaning::Char(3, _)))) {
+            let mut levels = Vec::new();
+            if let Some((u, _)) = x {
+                levels.push((
+                    "<to be read again> ",
+                    String::new(),
+                    self.toks_text(std::slice::from_ref(&u)),
+                ));
+                self.back(u);
             }
-        }
-        let (items, aux) = self.display().and_then(|d| d.done).unwrap_or_default();
-        let pre = self.int_par(IntPar::Predisplaypenalty);
-        self.vemit.push(Item::Penalty(pre));
-        let above = self.glue_par(GluePar::Abovedisplayskip);
-        self.vemit
-            .push(param_glue(&above, GluePar::Abovedisplayskip as u8));
-        self.vemit.extend(items.iter().cloned());
-        let post = self.int_par(IntPar::Postdisplaypenalty);
-        self.vemit.push(Item::Penalty(post));
-        let below = self.glue_par(GluePar::Belowdisplayskip);
-        self.vemit
-            .push(param_glue(&below, GluePar::Belowdisplayskip as u8));
-        self.st.prev_depth = aux;
-        let p = self.cs(DISPLAY_CLOSE);
-        self.back(p);
-    }
-
-    /// §1200: `resume_after_display` — the display's group closes; the
-    /// paragraph goes on (no indentation, `\prevgraf` three more).
-    fn display_close(&mut self) {
-        let after = self.st.groups.pop().map(|g| g.after).unwrap_or_default();
-        self.kind = Kind::Close;
-        self.rewrite(after);
-        self.st.prev_graf += 3;
-        self.st.mode = Mode::H;
-        self.st.inner = false;
-        self.st.space_factor = 1000;
-        let p = self.cs(DISPLAY_RESUME);
-        self.back(p);
-    }
-
-    /// §1200: after the display's group closed, an optional space, and the
-    /// page builder on the main vertical list.
-    fn display_resume(&mut self) {
-        if let Some((u, m)) = self.next_x_m(false)
-            && !is_spacer(&m)
-        {
-            self.back(u);
-        }
-        if self.st.level == 0 {
-            let c = self.page_call();
-            self.vemit.push(Item::BuildPage(c));
+            self.tex_error("Display math should end with $$", &levels, &HELP_DOLLAR);
         }
     }
 }

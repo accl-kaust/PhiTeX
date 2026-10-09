@@ -206,6 +206,8 @@ impl Exec<'_> {
                     }
                 }
                 Prim::PrevGraf => IVal::Int(if self.in_write { 0 } else { self.st.prev_graf }),
+                // (e-TeX's `\interactionmode`: a key)
+                Prim::PageInt(2) => IVal::Int(self.int(&Key::Interaction)),
                 // (the page builder's state: not a read of the reader yet,
                 // CORE.md; an empty page's values)
                 Prim::PageInt(_) => IVal::Int(0),
@@ -223,6 +225,7 @@ impl Exec<'_> {
                     Some(k) => self.int(&k),
                     None => 0,
                 }),
+                Prim::LastItem(k) if k >= crate::prim::ETEX_ITEM => self.etex_item(k),
                 Prim::LastItem(k) => {
                     // (tex.web 424: the current list's last item, the one read
                     // of material, CORE.md; `\inputlineno` and `\badness`
@@ -388,8 +391,16 @@ impl Exec<'_> {
         }
     }
 
+    /// A register's number: up to 255, or 32767 in e-TeX's extended mode
+    /// (etex.web §1495, `scan_register_num`; the mode is read only for a
+    /// number past 255).
     pub(super) fn scan_eight_bit_int(&mut self) -> u16 {
-        self.limited(255, "register code") as u16
+        let v = self.scan_int();
+        if (0..=255).contains(&v) || ((256..=32767).contains(&v) && self.etex_mode()) {
+            return v as u16;
+        }
+        self.err(format!("Bad register code ({v})"));
+        0
     }
 
     pub(super) fn scan_char_num(&mut self) -> i32 {
@@ -402,6 +413,16 @@ impl Exec<'_> {
 
     pub(super) fn scan_fifteen_bit_int(&mut self) -> i32 {
         self.limited(0o77777, "mathchar")
+    }
+
+    /// tex.web 437: `scan_twenty_seven_bit_int`.
+    pub(super) fn scan_twenty_seven_bit_int(&mut self) -> i32 {
+        self.limited(0o777_777_777, "delimiter code")
+    }
+
+    /// A dimension in mu (`\mkern`, tex.web 1061).
+    pub(super) fn scan_mu_dimen(&mut self) -> i32 {
+        self.scan_dimen_full(true, false, None).0
     }
 
     // ------------------------------------------------------------ numbers
@@ -800,7 +821,8 @@ impl Exec<'_> {
     fn internal_level_hint(m: &Meaning) -> Lv {
         match m {
             Meaning::Prim(Prim::GluePar(q)) if q.is_mu() => Lv::Mu,
-            Meaning::Prim(Prim::Register(Reg::Muskip)) | Meaning::MuskipRef(_) => Lv::Mu,
+            // (and e-TeX's `\gluetomu`, `\muexpr`)
+            Meaning::Prim(Prim::Register(Reg::Muskip) | Prim::LastItem(24 | 28)) | Meaning::MuskipRef(_) => Lv::Mu,
             _ => Lv::Glue,
         }
     }

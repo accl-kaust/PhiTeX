@@ -164,6 +164,31 @@ pub enum Item {
     Mark(Arc<Vec<Tok>>),
     /// An unset box: only inside an alignment, until it is set.
     Unset(Arc<Unset>),
+    /// e-TeX's `\marks n` for a class `n` other than 0 (class 0 is
+    /// `Mark`).
+    Marks(u16, Arc<Vec<Tok>>),
+    /// A math node (tex.web 147): where a formula begins (`after` false)
+    /// or ends, with `\mathsurround` as its width; e-TeX's TeXXeT nodes
+    /// too (etex.web §1433), `lr` being the subtype of the beginning one
+    /// (0 a formula's edges, 2 `M`, 6 `\beginL`, 10 `\beginR`): the
+    /// subtype is `lr + after`.
+    Math {
+        w: i32,
+        after: bool,
+        lr: u8,
+    },
+    /// A language whatsit (tex.web 1341): `\setlanguage`, or a change of
+    /// `\language` in a paragraph (1376); the line breaker's hyphenation
+    /// takes language and minima from it.
+    Lang {
+        lang: u8,
+        lhm: u8,
+        rhm: u8,
+    },
+    /// An entry of a math list (a noad, a style change, a choice) or what
+    /// the list's gatherer applies to its last noad (`mlist::MItem`): only
+    /// in the items of nodes inside a formula.
+    Noad(Arc<crate::mlist::MItem>),
     // ---- pseudo-items, applied by the gatherer of the list
     /// `\unpenalty` (0), `\unkern` (1), `\unskip` (2): remove the last item
     /// if it is of that kind.
@@ -179,6 +204,9 @@ pub enum Item {
     Shipout(Arc<Shipped>),
     /// `\end` (tex.web 1054).
     End(Arc<PageCall>),
+    /// The hundredth error (tex.web 82: `jump_out`): the build ends, the
+    /// page so far is not shipped.
+    Halt,
 }
 
 impl Item {
@@ -190,7 +218,7 @@ impl Item {
             Item::Lig(l) => l.font.glyph(i32::from(l.c)).map_or(0, |g| g.width),
             Item::Box(b) => b.w,
             Item::Unset(u) => u.w,
-            Item::Rule { w, .. } | Item::Kern { w, .. } => *w,
+            Item::Rule { w, .. } | Item::Kern { w, .. } | Item::Math { w, .. } => *w,
             Item::Glue { g, .. } => g.width,
             _ => 0,
         }
@@ -204,7 +232,16 @@ impl Item {
     /// §148: `precedes_break` — a box, rule, insertion, mark, adjustment,
     /// ligature, discretionary or whatsit (types below `math_node`).
     pub fn precedes_break(&self) -> bool {
-        matches!(self, Item::Box(_) | Item::Rule { .. } | Item::Mark(_) | Item::Lig(_) | Item::Disc(_))
+        matches!(
+            self,
+            Item::Box(_)
+                | Item::Rule { .. }
+                | Item::Mark(_)
+                | Item::Marks(..)
+                | Item::Lig(_)
+                | Item::Disc(_)
+                | Item::Lang { .. }
+        )
     }
 
     /// §148: `non_discardable`.

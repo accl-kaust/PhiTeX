@@ -39,7 +39,10 @@ fn log_body(log: &str) -> Option<String> {
 
 /// TeX's DVI file and log of a document, if there is a `tex`.
 fn tex(name: &str, src: &str) -> Option<(Vec<u8>, String)> {
-    let tmp = std::env::temp_dir().join(format!("phitex-flow-dvi-{name}-{}", std::process::id()));
+    // (a directory per call: two tests run the same document at once)
+    static CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let call = CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp = std::env::temp_dir().join(format!("phitex-flow-dvi-{name}-{}-{call}", std::process::id()));
     std::fs::create_dir_all(&tmp).ok()?;
     std::fs::write(tmp.join(format!("{name}.tex")), src).ok()?;
     let st = Command::new("tex")
@@ -53,9 +56,41 @@ fn tex(name: &str, src: &str) -> Option<(Vec<u8>, String)> {
     let dvi = std::fs::read(tmp.join(format!("{name}.dvi"))).unwrap_or_default();
     let _ = std::fs::remove_dir_all(&tmp);
     let log = log?;
-    // (a document of errors: TeX exits with 1, its log is the oracle)
-    assert!(st.status.success() || log.contains("\n! "), "tex failed on {name}:\n{log}");
+    // (`\showbox`, `\showlists` end in an "OK" error: no other error; a
+    // document of errors, `alignerr*`, exits with 1 and its log is the
+    // oracle)
+    let only_ok = log.lines().filter(|l| l.starts_with("! ")).all(|l| l == "! OK.");
+    let errors_doc = name.starts_with("alignerr");
+    assert!(st.status.success() || only_ok || errors_doc, "tex failed on {name}:\n{log}");
     Some((dvi, log_body(&log)?))
+}
+
+/// TeX's error messages for a document, in order (the "! " lines).
+fn tex_errors(src: &str) -> Option<Vec<String>> {
+    // (a directory per call: tests run at once)
+    static CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let call = CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp = std::env::temp_dir().join(format!("phitex-flow-errs-{}-{call}", std::process::id()));
+    std::fs::create_dir_all(&tmp).ok()?;
+    std::fs::write(tmp.join("errs.tex"), src).ok()?;
+    Command::new("tex").args(["-ini", "-interaction=batchmode", "errs.tex"]).current_dir(&tmp).output().ok()?;
+    let log = std::fs::read_to_string(tmp.join("errs.log")).ok();
+    let _ = std::fs::remove_dir_all(&tmp);
+    Some(
+        log?.lines()
+            .filter_map(|l| l.strip_prefix("! "))
+            .map(|l| l.strip_suffix('.').unwrap_or(l).to_string())
+            .collect(),
+    )
+}
+
+/// A document whose line `%%% hyphen.tex %%%` stands for TeX Live's
+/// `hyphen.tex` (its patterns and exceptions, read by the `\patterns`
+/// and `\hyphenation` nodes).
+fn with_hyphen(name: &str) -> String {
+    let src = std::fs::read_to_string(dir().join(format!("{name}.tex"))).unwrap();
+    let h = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/hyph/hyphen.tex")).unwrap();
+    src.replace("%%% hyphen.tex %%%\n", &h)
 }
 
 /// The graph's DVI file and log of a document.
@@ -84,11 +119,11 @@ fn first_difference(a: &[u8], b: &[u8]) -> usize {
 
 /// The schedules each document runs with.
 const RUNS: [Options; 5] = [
-    Options { threads: 1, reads: Reads::Suspend, order: Order::Priority, dump: false },
-    Options { threads: 8, reads: Reads::Suspend, order: Order::Priority, dump: false },
-    Options { threads: 8, reads: Reads::Speculate, order: Order::Priority, dump: false },
-    Options { threads: 8, reads: Reads::Suspend, order: Order::Random(1), dump: false },
-    Options { threads: 8, reads: Reads::Speculate, order: Order::Random(7), dump: false },
+    Options { threads: 1, reads: Reads::Suspend, order: Order::Priority, dump: false, etex: false },
+    Options { threads: 8, reads: Reads::Suspend, order: Order::Priority, dump: false, etex: false },
+    Options { threads: 8, reads: Reads::Speculate, order: Order::Priority, dump: false, etex: false },
+    Options { threads: 8, reads: Reads::Suspend, order: Order::Random(1), dump: false, etex: false },
+    Options { threads: 8, reads: Reads::Speculate, order: Order::Random(7), dump: false, etex: false },
 ];
 
 fn check(name: &str) {
@@ -145,7 +180,56 @@ macro_rules! documents {
     };
 }
 
-documents!(para, skips, hbox, setbox, vbox, pages, fonts, shape, leave, show, ship, disc);
+documents!(para, skips, hbox, setbox, vbox, pages, fonts, shape, leave, show, ship, disc, math1, math2, math3, math4);
+
+/// Paragraphs hyphenated with hyphen.tex's patterns (loaded by the
+/// `\patterns` node), in every schedule: breaks at hyphens, ligatures and
+/// kerns around them, the minima, `\uchyph`, languages, `\setlanguage`,
+/// explicit discretionaries, `\hyphenchar`, the third pass, a display.
+#[test]
+fn hyph1() {
+    let src = with_hyphen("hyph1");
+    check_src("hyph1", &src, &RUNS);
+}
+
+/// More hyphenation: narrow lines, many fonts, `\showbox` of hyphenated
+/// lines (the discretionaries' ligatures shown), paragraphs in boxes.
+#[test]
+fn hyph2() {
+    let src = with_hyphen("hyph2");
+    check_src("hyph2", &src, &RUNS);
+}
+
+/// `\showlists` and `\showbox` in math (the noads displayed, tex.web
+/// 690–698), with their "OK" errors and contexts.
+#[test]
+fn showmath() {
+    check("showmath");
+}
+
+/// The errors of a formula without math fonts, and of mismatched math
+/// groups, are TeX's, in TeX's order (§1194: the fonts before the second
+/// `$`; `off_save` in math, tex.web 1064).
+#[test]
+fn math_errors_in_order() {
+    let src = "\\catcode`\\{=1 \\catcode`\\}=2 \\catcode`\\$=3 \\catcode`\\^=7\n               \\font\\tenrm=cmr10 \\tenrm \\hsize=100pt\n               A $$x$ $ b $$y\\eqno z$ $ c ${a\\right)$ d $\\left(a$ e\n               $\\left(a\\endgroup$ $\\begingroup a$\\endgroup$ f\n\n\\end\n";
+    let o = Build::new(font()).update(src, Options::default());
+    let got: Vec<String> = o.errors.iter().map(|e| e.split_once(": ").map_or(e.as_str(), |x| x.1).to_string()).collect();
+    let want = match tex_errors(src) {
+        Some(w) => {
+            let rec = w.join("\n") + "\n";
+            if std::env::var_os("PHITEX_FLOW_BLESS").is_some() {
+                std::fs::write(dir().join("matherrs.txt"), &rec).unwrap();
+            }
+            w
+        }
+        None => std::fs::read_to_string(dir().join("matherrs.txt")).unwrap().lines().map(str::to_string).collect(),
+    };
+    let rec: Vec<String> =
+        std::fs::read_to_string(dir().join("matherrs.txt")).unwrap().lines().map(str::to_string).collect();
+    assert_eq!(want, rec, "TeX's errors are not the recorded ones");
+    assert_eq!(got, want);
+}
 
 // Alignments (tex.web part 37, §1145, §1206): three columns with
 // `\tabskip` glue and `\hfil` templates, `\omit`, `\span` and a
@@ -153,8 +237,29 @@ documents!(para, skips, hbox, setbox, vbox, pages, fonts, shape, leave, show, sh
 // (`halign`); periodic preambles, `to`, `spread`, `\everycr`, `\crcr`, an
 // overfull alignment (`halign2`); `\valign` (`valign`); display alignments
 // in a paragraph and `\halign` ending one (`display`); TeX's errors and
-// what it does after them (`alignerr`).
-documents!(halign, halign2, valign, display, alignerr, alignerr2);
+// what it does after them (`alignerr`); the hundredth error, which ends
+// the build (tex.web 82: `alignerr3`, a later piece's page not shipped).
+documents!(halign, halign2, valign, display, alignerr, alignerr2, alignerr3);
+
+/// A loop of errors (a macro calling itself after an undefined name) stops
+/// at the hundredth error, as TeX does (tex.web 82), in every schedule.
+#[test]
+fn a_loop_of_errors_ends_at_the_hundredth() {
+    let src = "\\catcode`\\{=1 \\catcode`\\}=2\n\\def\\a{\\undefined\\a}\\a\n\n\\end\n";
+    let want: Vec<String> = match tex_errors(src) {
+        Some(w) => w,
+        None => vec!["Undefined control sequence".to_string(); 100],
+    };
+    assert_eq!(want.len(), 100, "TeX's errors: {want:?}");
+    for &o in &RUNS {
+        let out = Build::new(font()).update(src, o);
+        let got: Vec<&str> = out.errors.iter().map(|e| e.split_once(": ").map_or(e.as_str(), |x| x.1)).collect();
+        assert_eq!(got.len(), 100, "{o:?}: {got:?}");
+        assert!(got.iter().all(|e| e.starts_with("Undefined control sequence")), "{o:?}: {got:?}");
+        let log = phitex_flow::print::log("", &out.log, " )");
+        assert!(log.ends_with("(That makes 100 errors; please try again.)"), "{o:?}: {log}");
+    }
+}
 
 /// plain.tex (all but `\input hyphen`), then text set with its macros and
 /// the default output routine (`\output={}`), at 1 thread.
@@ -164,11 +269,23 @@ fn plaintext() {
     check_src("plaintext", &src, &RUNS[..1]);
 }
 
-/// FAILS sometimes (`run_piece`, not material): plain.tex at 8 threads —
-/// the in-place sharing of `run_piece` keeps a later reader of a name
-/// whose definition changed (the bug `tests/core.rs`'s ignored tests pin:
-/// here a page's `\count0` read as 0 where TeX has `\pageno`'s 1); with
-/// that sharing off it passes in every schedule (checked).
+/// plain.tex, then text using plain's math macros (`\sqrt`, `\int`,
+/// `\sum`, `\left`/`\right`, `\root`, `\choose`, `\buildrel`,
+/// displays with `\eqno`), at 1 thread.
+#[test]
+fn plainmath() {
+    let src = std::fs::read_to_string(dir().join("plainmath.tex")).unwrap();
+    check_src("plainmath", &src, &RUNS[..1]);
+}
+
+/// The same in every schedule.
+#[test]
+fn plainmath_any_schedule() {
+    let src = std::fs::read_to_string(dir().join("plainmath.tex")).unwrap();
+    check_src("plainmath", &src, &RUNS[1..]);
+}
+
+/// The same in every schedule (a page's `\count0` is `\pageno`'s 1).
 #[test]
 fn plaintext_any_schedule() {
     let src = std::fs::read_to_string(dir().join("plaintext.tex")).unwrap();
@@ -228,10 +345,7 @@ fn long() {
     check_src("long", &long_doc(), &RUNS[..1]);
 }
 
-/// FAILS (`run_piece`, not material), like `plaintext_any_schedule`: at 8
-/// threads a piece run again from its first dirty node shares its later
-/// nodes in place, stale (here a line's font name in the log); with that
-/// sharing off it passes in every schedule (checked).
+/// The same in every schedule.
 #[test]
 fn long_any_schedule() {
     check_src("long", &long_doc(), &RUNS[1..]);
@@ -245,7 +359,7 @@ fn edits_give_the_cold_dvi() {
     edits(1);
 }
 
-/// FAILS at 8 threads, same cause as `long_any_schedule`.
+/// The same at 8 threads.
 #[test]
 fn edits_give_the_cold_dvi_at_eight_threads() {
     edits(8);

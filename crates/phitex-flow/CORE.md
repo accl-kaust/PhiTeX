@@ -12,11 +12,11 @@ tex.web command code, its graph form and its status here.
 | class | primitives | done | partial | not yet |
 |---|---|---|---|---|
 | (i) expandable, input rewriting | 40 | 33 | 5 | 2 |
-| (ii) assignments, scopes | 151 | 146 | 3 | 2 |
-| (iii) material | 73 | 34 | 0 | 39 |
+| (ii) assignments, scopes | 151 | 148 | 3 | 0 |
+| (iii) material | 73 | 71 | 0 | 2 |
 | (iv) layout and output | 43 | 23 | 12 | 8 |
-| (v) IO and diagnostics | 18 | 6 | 2 | 10 |
-| all | 325 | 242 | 22 | 61 |
+| (v) IO and diagnostics | 18 | 7 | 3 | 8 |
+| all | 325 | 282 | 23 | 20 |
 
 ("done": tex.web's semantics, checked against `tex -ini` by `tests/core.rs`
 (logs of programs that do not typeset) and `tests/dvi.rs` (DVI files and
@@ -56,12 +56,16 @@ is a field of `RState`, the value a node hands its successor.
 | `dvi_buf`, `font_used`, `last_bop`… | the DVI fold (`dvi::assemble`) over the pages |
 | `cur_group`, the save stack's group boundaries | `RState.groups` (kind, for mismatch errors; and the `\aftergroup` tokens of each open group) — scoping itself is `Chain::resolve` |
 | `align_stack`, `preamble`, `cur_align`, `cur_span`, `cur_loop`, `align_state` | the preamble a value in the alignment's group entry (`align::AlignSpec`, with the enclosing list's state and alignment); the entry's column, span, `\omit`, end and `align_state` in `RState.al` (Conflict 25) |
+| `error_count`, `history` (fatal) | `RState.error_count`: counted by every error, 0 again when a paragraph ends (§1096); the hundredth stops the reader and the build (Conflict 28) |
 | `cond_ptr`, `if_limit` | `RState.conds`: per open conditional, the node that opened it, which ends may come, its test |
 | `\global`/`\long`/`\outer` prefixes | `RState.global/long/outer`, set by the prefix node, consumed by the assignment node |
 | `after_token` (`\afterassignment`) | `RState.after_assignment` |
 | mode, `space_factor`, `prev_depth`, `prev_graf` | `RState.mode`, `RState.space_factor`, `RState.prev_depth`, `RState.prev_graf` |
 | `end_line_char` as the line was read | `RState.eol` (read when a line is begun, as TeX's `input_ln` does) |
 | the input stack, `back_input`, `ins_list` | `RState.pending` (rewritten input; `Tok::DontExpand` is `\noexpand`'s mark) |
+| a math list (`head`…`tail` in math mode), `incompleat_noad` | none: math nodes emit `Item::Noad(MItem)` entries (noads, style changes, choices) and what the list's gatherer applies to its last noad (`Set`: a field filled; `Replace`; `Limits`; `Above`: `\over`'s split); the packaging node after a math group's `Close` gathers them (`mlist::gather`, tex.web's `fin_mlist`) |
+| math mode, `cur_fam`, a subformula's `saved(0)` | `RState.mode = M` (`inner`: an inline formula or subformula; a display is not inner); `\fam` is `Key::IntPar(Fam)`, defined `-1` inside a formula by `\0mathinit`; the field a subformula fills is its group record's `math::Target` |
+| `cur_style`, `cur_size`, `cur_mu`, `cur_f`… | inside `mlist::mlist_to_hlist`, a pure function of the list, the style, `mlist::Params`, the 48 family fonts and their `\fontdimen`s and `\skewchar`s |
 | `\message`, `\immediate\write` output | `Node.log`, gathered in document order into `Output.log`; `print::log` lays it out as TeX's log |
 
 The initial values (`val::initial`) are exactly IniTeX's (tex.web 222-240;
@@ -93,7 +97,8 @@ both TeX and the graph; `tests/flow.rs`'s `doc()` begins with its catcodes,
    `Key::File(name)` (content-versioned); the `\input` node reads it and its
    result is a call: the file's text cut into pieces that run between this
    node and the next, their first reads resolving at the call. Line numbers
-   are a field of the position, never in a version.
+   are a field of the position, never in a version. Decided: see
+   "`\input` (decided)" below.
 5. **`\endinput`** — stops reading a file at the end of the current line:
    a node changing which pieces of that file exist. Belongs with 4: the
    call's result is the text up to the line of the first executed
@@ -108,15 +113,24 @@ both TeX and the graph; `tests/flow.rs`'s `doc()` begins with its catcodes,
    the register and `\wd n=` changes it *without* respecting grouping
    (tex.web 1079, 1110, 1247: `box(n):=null`, `mem[box(n)+c]:=…` are not
    `eq_define`s): after `{\box0}` the register is void even if it was set
-   outside the group. Proposal (exact): a definition kind "at the level of
-   the definition it replaces": the node defines `Key::Box(n)` with the
-   scope of the reaching definition it read; `Chain::resolve` then treats
-   it as made in that definition's group. Now (`Exec::change_box`): the
-   definition is global when the replaced one was made at the outermost
-   level (or globally), local when it was made in the current group —
-   exact in both; for a definition made in an enclosing group between
-   those it is local (approximation: the change is undone one group too
-   early).
+   outside the group. Decided and done: one general rule, a definition
+   **at the level of the definition it replaces** (`Def.level`): the node
+   defines `Key::Box(n)` with the scope of the reaching definition it
+   read — global when that one was global, made at the piece's outer
+   level or before the piece (pieces are cut at depth 0, so no group
+   spans pieces), else living as long as that definition's group
+   (`Def.level = Some(k)`: the `k`-th group enclosing the node's own,
+   counted from the node so that it survives nodes moving;
+   `Chain::resolve` treats it as alive while that group is open,
+   `Chain::def_group`). `Exec::change_box` makes it for `\box n`,
+   `\unhbox n`, `\unvbox n` and `\wd n=` (`tests/core/boxlevel.tex`);
+   the fold's `\box255` and insertion boxes will use it too. For agent A
+   (merge): `Def` has the new field `level` (`None` everywhere else) and
+   `Chain` the map `parent_of` (`Open` node → enclosing `Open` node),
+   kept by `push_arc`; `run_piece` is unchanged. Gap: a kept node is
+   validated by the *values* it read, not by the scope of the definition
+   it read, so an edit that only moves the replaced definition into
+   another group (same value) keeps the old level.
 8. **`\global` on registers** — fits: `Def.global`; TeX's restore rules
    (a global assignment inside a group survives; a later local one in the
    same group is undone) are exactly reaching definitions (checked in
@@ -179,9 +193,22 @@ both TeX and the graph; `tests/flow.rs`'s `doc()` begins with its catcodes,
 15. **`\mag` and `true` units** — TeX freezes `\mag` at its first use
     (`mag_set`, a hidden global). Proposal: `Key::MagSet`, defined globally
     by the first node using it. Now: `\mag` is read, not frozen.
-16. **`\show`, `\showthe`, error contexts** — need the line-number field;
-    not implemented. `\message` and `\immediate\write` are the conformance
-    oracle meanwhile.
+16. **`\show`, `\showthe`, error contexts** — `\showbox` and `\showlists`
+    are done (`graph/diag.rs`): their text is a raw log entry whose line
+    numbers are placeholders the log's gatherer fills (`G` k: where the
+    `k`-th enclosing group's list began; `Q` level: a paragraph's first
+    line; `X`, `T`: an error context's two lines, laid out with
+    `error_line` 79 and `half_error_line` 50, tex.web 317), so no line
+    number is in a node's result. The context shows a backed-up list at
+    the top (`<to be read again>`, `<recently read>`: a list read to its
+    end stays in `RState.pending` until the next token is read, as TeX's
+    input level does), `...` for the levels between (IniTeX's
+    `\errorcontextlines` is 0), and the reader's line; a macro's level at
+    the top is not named yet. `\showlists` shows each open list (the main
+    vertical list: what this piece contributed since the page builder was
+    last called); the current page (`### current page:`) is the page
+    fold's state and is not shown — exact where the page is empty.
+    `\show` and `\showthe` are not yet.
 17. **The DVI file is a fold**: TeX writes a font's definition where it is
     first used, reuses `w`/`x`/`y`/`z` movements only within what its
     half-buffer (`dvi_buf_size` 16384) still holds (`dvi_gone`), points each
@@ -191,7 +218,7 @@ both TeX and the graph; `tests/flow.rs`'s `doc()` begins with its catcodes,
     to building them); `dvi::page_body` is empty. Proposal for incremental
     shipping: a page's bytes as a function of (page, the fonts defined
     before it, `dvi_gone` at its start) — equal inputs, equal bytes.
-18. **`\output`** (proposal only, not implemented): the page fold, firing,
+18. **`\output`** (not implemented; the first proposal, superseded by the decisions below): the page fold, firing,
     defines (as a node would) `\box255` = the page box, `\outputpenalty`,
     `\topmark`/`\firstmark`/`\botmark` and `\insertpenalties`; the output
     routine's tokens are read as a piece of their own — its nodes resolving
@@ -202,7 +229,8 @@ both TeX and the graph; `tests/flow.rs`'s `doc()` begins with its catcodes,
     (tex.web 1026). Readers after the firing call of anything the routine
     defines park on the fold reaching that call, which is the true
     dependency. Without `\output` the default output ships `\box255`
-    (done, tex.web 1023).
+    (done, tex.web 1023). Decided: see "Output routines, insertions and
+    marks (decided)" below.
 19. **`\the\font`** gives TeX's frozen font identifier (`font_id_base+f`,
     printing as the name the font was last defined by, meaning the font).
     Here it gives the name itself (`Key::FontIdent(key)`), whose meaning is
@@ -222,9 +250,7 @@ both TeX and the graph; `tests/flow.rs`'s `doc()` begins with its catcodes,
     `SOURCE_DATE_EPOCH`), the graph from `\year`… (1970.01.01:0000
     initially). `tests/dvi.rs` masks the comment's bytes (15 to 41) when it
     compares files; everything else is compared byte for byte.
-23. **Hyphenation** (patterns, `\hyphenation`) is not implemented: line
-    breaking's second pass does not hyphenate (exact for `-ini` documents
-    without patterns). `\accent`, `\noboundary`, `\vadjust`, `\insert`,
+23. **Hyphenation**: done (see Hyphenation below). `\accent`, `\noboundary`, `\vadjust`, `\insert`,
     leaders, `\special` and non-immediate `\write` are not yet.
 24. Small departures, documented: `\if…`'s inserted `\relax` (a `\fi` met
     while the test is read) is the name `\relax`, not a frozen one; a
@@ -255,13 +281,23 @@ both TeX and the graph; `tests/flow.rs`'s `doc()` begins with its catcodes,
     would count them; "interwoven preambles" is an error of the graph, not
     TeX's fatal error; an entry ended inside a group of its own (`off_save`
     at `\endtemplate`) is not supported.
-26. **Display math** exists only as far as a display alignment needs it
-    (`Mode::M`): `$$` in a paragraph breaks the paragraph so far (here, as
-    inside a box: the lines are emitted, not a line-breaking task), defines
-    `\predisplaysize`, `\displaywidth`, `\displayindent`, `\fam` in the
-    display's group; in it only assignments, `\halign` and the closing `$$`
-    (§1206: "Missing $$ inserted", "Display math should end with $$" with
-    TeX's logs); other math is an error of the graph.
+26. **Display alignments** (`$$\halign{…}$$`, §1145, §1206) live in the
+    display's math group (Math, below). `\halign` in a display whose
+    formula is empty is `init_align` with the depth of the vertical list
+    before the display (kept in the math group's record) as the alignment
+    list's; when it is set, `fin_align` makes the group record's kind
+    `MathKind::DisplayAlign` (the rows, shifted by `\displayindent`, and
+    the depth after them): a definition of the group's field, no emit.
+    After it only assignments come before `$$` (`do_assignments`): the
+    `$` node checks the second `$` ("Display math should end with $$"),
+    anything else is read again after "Missing $$ inserted" (TeX's logs,
+    Conflict 27); the display's parameters are read inside the group
+    (`math_end`), its `Close` emits nothing, and the packaging node emits
+    `\predisplaypenalty`, `\abovedisplayskip`, the rows,
+    `\postdisplaypenalty`, `\belowdisplayskip` and resumes the paragraph
+    (§1200, the same `resume_after_display` as a formula's). Gap: an
+    `\halign` after material in the display is an error of the graph
+    (TeX's "Improper \halign inside $$'s" flushes the formula).
 27. **TeX's errors in the log** (alignments, displays): the message, the
     help and the context are TeX's (tex.web 72–90, 311–318: the two lines,
     `half_error_line` 50, `error_line` 79, `\errorcontextlines`). The input
@@ -273,6 +309,346 @@ both TeX and the graph; `tests/flow.rs`'s `doc()` begins with its catcodes,
     error's line unless the node read past the line's end after it.
     "in alignment at lines a--b" takes `a` from the line the `\halign`
     node ended on (after its `{`), where TeX takes the line of `\halign`.
+28. **The hundredth error** (tex.web 82): `error_count` is a field of
+    the reader's state, handed from node to node like the mode; every error
+    counts (TeX's, and the graph's own "not supported yet"), and the end of
+    a paragraph sets it to 0 (`end_graf`, §1096). The node that makes the
+    hundredth writes TeX's "(That makes 100 errors; please try again.)"
+    instead of the help, and from its state on nothing is read (`next_raw`
+    gives nothing, the next node is the piece's `End`, which breaks no
+    paragraph); it emits `Item::Halt`, at whatever level it is, into the
+    page fold's stream, which ends there without `its_all_over` (`jump_out`:
+    the page so far is not shipped). The log ends at that line (no ` )`:
+    the file is not closed). A loop of errors is therefore bounded, as in
+    TeX. Gaps: a piece starts with the count at 0 (TeX's count goes on
+    across a blank line in vertical mode), and the pieces after the halt
+    still run, as after `\end` (Conflict 21): their errors are in the
+    build's list, not in the log.
+
+## Math
+
+Parts 34–36 and §1136–§1206 of tex.web, copied: `mlist.rs` (the noads and
+`mlist_to_hlist`, §680–§767, a pure function) and `graph/math.rs` (the
+commands). Checked by `tests/dvi.rs`: `math1`–`math4` (inline formulas,
+scripts, fractions and generalized fractions, radicals, operators with
+and without limits, `\left`/`\right` with extensible delimiters, accents
+with skews, styles, `\mathchoice`, `\nonscript`, `\mskip`, `\mkern`,
+`\vcenter`, boxes in formulas, `\mathsurround`, line breaks inside and
+after formulas, lines with formulas in their reports, displays with
+`\eqno`/`\leqno`, short skips, the squeeze, an equation number on its
+own line, displays under `\hangindent` and `\parshape` and in a `\vbox`)
+at all five schedules, and `plainmath` (plain.tex's math macros) at one
+thread (eight: the `run_piece` sharing bug, as `plaintext`). DVI and log
+byte for byte against `tex -ini`.
+
+- **A formula is a group.** `$`, a subformula's `{`, `\left` and each
+  `\mathchoice` part open a math group (`GroupKind::Math`, its record a
+  `math::MathKind`). The group's `Close` node (`$`, `}`, `\right`)
+  defines and emits nothing: it reads what TeX reads before the group
+  ends — `\mathsurround`, the 48 family fonts, the spacing and penalty
+  parameters, for a display its width, indent, size, skips, penalties,
+  interline glue and packing parameters (`math::MathEnd`) — and hands it
+  to the packaging node after it, which gathers the list the nodes inside
+  emitted and converts it. The family fonts' `\fontdimen`s are read
+  lazily by the packaging node (global values).
+- **A noad appended before a group opens.** Where TeX appends a noad to
+  the enclosing list and then opens a group for one of its fields (`^{`,
+  `\mathop{`, `{` in math, `\radical…{`), the node emits the noad and
+  hands the group to the next node (`\0mathgroup`), which opens it: a
+  node's items are in the list of the level it ends at. The packaging
+  node emits `MItem::Set(field, list)` (§1186: a lone ord noad gives its
+  nucleus; a lone accent noad replaces an ord noad whose nucleus it was).
+- **`^`, `_`, `\limits`, `\over` read the list** (`sub_sup` looks at the
+  last noad, §1176): the node gathers its math list from the items before
+  it, the one read of material (Conflict 13), and becomes `Kind::Par`.
+- **A display** is three nodes: the `$$` node ends the paragraph so far —
+  its lines are a separate task's at the outer level, and the node breaks
+  them too (the same pure function), for `\predisplaysize` (§1146) and
+  `\prevgraf`; `\0display` opens the group with `\displaywidth` and
+  `\displayindent` from the shape (§1149); `\0mathinit` defines them and
+  `\fam` inside it. After an equation number's group, its packaging node
+  keeps the box in the display's record and closes the display
+  (`\0displayend`). The display's packaging node emits the vertical
+  material (§1199–§1205) and resumes the paragraph (§1200, `\prevgraf`
+  + 3), which a later `\par` breaks with that `\prevgraf`.
+- **Math nodes** (`Item::Math`, `\mathon`/`\mathoff`): widths in `hpack`,
+  movements in the DVI fold, break points in line breaking (§866: no
+  break at glue inside a formula, a break at `\mathoff` before glue, its
+  width zero at a break), `$` in the short display, `\mathsurround` in
+  `show_box`. `\ifmmode` is true in math.
+- `\showlists` and `\showbox` display math lists (§690–§698: noads,
+  fractions, delimiters, styles, choices, `\mskip`, `\mkern`,
+  `\nonscript`, an incomplete fraction "this will begin denominator of:"),
+  checked by `tests/dvi/showmath.tex`. The errors of a formula are TeX's
+  in TeX's order (`tests/dvi.rs`'s `math_errors_in_order`): the font check
+  of §1195 is read by the closing `$` inside the group, before "Display
+  math should end with $$", and again for a display after its equation
+  number; `off_save` in math inserts what closes the innermost group
+  (`$`, `\right.`, `}`, `\endgroup`, tex.web 1064).
+- Display alignments (`$$\halign…$$`): Conflict 26.
+- Not yet: `\accent` in math (and outside), `\vadjust` and `\insert` in
+  formulas. Approximation: the check for enough symbol and extension font
+  parameters (§1195) counts the parameters the font was loaded with (TeX
+  also counts those `\fontdimen` added to the last loaded font); `\right`
+  inserted by `off_save` is the name `\right`, not a frozen one.
+
+## Hyphenation
+
+Knuth's algorithm as pure functions (`hyph.rs`, tex.web §891–965), checked
+by `tests/hyph.rs`: `hyphen.tex`'s patterns and exceptions, 368 words
+(plus `\uchyph`, minima and a later `\hyphenation`) break exactly where
+`tex -ini`'s `\showhyphens` breaks them. Integrated (`graph/lang.rs`,
+`hyph::hyphenate_after`, `linebreak.rs`): `tests/dvi/hyph1.tex` and
+`hyph2.tex` (hyphen.tex loaded by the `\patterns` node) are TeX's DVI
+and log at all five schedules; 60,800 dictionary words through the whole
+line breaker (`\showhyphens` in a `\vbox`, both minima 2/3 and 1/1) give
+TeX's log line for line at 8 threads (checked once, not a test).
+
+| TeX | graph |
+|---|---|
+| the trie of one language (§920–958) | `Key::Patterns(lang)` → `Val::Patterns(hyph::Patterns)`: an immutable `Arc` value, each pattern's letters to its digits; it answers as the packed trie does (§923–924) |
+| the exception dictionary (§926–941) | `Key::Exceptions(lang)` → `Val::Exceptions(hyph::Exceptions)`, one per language (TeX keys its one table by word + `cur_lang`: the same thing) |
+| `\patterns{…}` | a node reading `\language` (`IntPar`, made 0–255 by `hyph::cur_lang`), the old `Key::Patterns(lang)` and the `\lccode` of each character it reads; it defines `Key::Patterns(lang)` = `old.add(toks)` **globally** (TeX's tables have no save stack); its errors are the node's |
+| `\hyphenation{…}` | likewise: reads `\language`, `Key::Exceptions(lang)`, the `\lccode`s; defines `Key::Exceptions(lang)` globally (a word given again replaces the old one) |
+| `\language`, `\lefthyphenmin`, `\righthyphenmin`, `\uchyph` | `IntPar`s; a paragraph takes language and minima where it starts (§1091, `norm_min`) and where `\language` changes in it (a language whatsit, §1376), `\uchyph` where it ends (§891) |
+| `\hyphenchar` | `Key::HyphenChar(font key)` (done), read by the paragraph for each font its words use (§891: outside 0–255, no word of that font is hyphenated) |
+| `trie_not_ready` (§891, §960) | decided: `\patterns` is always accepted. The one divergence: TeX packs the trie at the first paragraph whose line breaking reaches the second pass, and gives "Too late for \patterns" (ignoring them) for a `\patterns` after that; here they are added and used by later paragraphs |
+| `clang`, a paragraph's `prev_graf` language field | `RState.hyph_lang` (`clang`, the language and minima the paragraph began with, tex.web 1091, 1200), saved by box and math groups like the space factor |
+| the language whatsit (§1341, §1376–1377) | `Item::Lang{lang, lhm, rhm}`, emitted by `\setlanguage` and where a run of characters begins in a paragraph whose `\language` changed (`fix_language`); a breakpoint before glue like any whatsit, shown as `\setlanguage1 (hyphenmin 2,3)` |
+
+The line breaker's second pass (§894–918) hyphenates the word after each
+glue it passes, in its own copy of the paragraph's list
+(`hyph::hyphenate_after`: which words are tried — after glue, letters of
+one font with nonzero `\lccode`, at most 63, followed by glue, a penalty,
+a mark, a whatsit or an explicit kern — then `hyphenate`, then the
+reconstitution of §903–§918 with the font's ligatures and kerns around
+each discretionary, which is where `raffish` loses a break); the third
+pass works on the hyphenated list, as TeX's does. What it reads is read by
+the node that breaks the paragraph (`\par`, `$$`, a box's end) into
+`LineParams::hyph` (`hyph::HyphParams`): the paragraph's starting
+language and minima, `\uchyph`, the `\lccode` of each character in the
+list, each font's `\hyphenchar`, `\tracinglostchars`, and the
+`Key::Patterns(l)`/`Key::Exceptions(l)` of each language it uses — reads
+like any other, so a changed `\patterns` or `\hyphenation` re-breaks
+exactly the paragraphs that read it.
+
+## Output routines, insertions and marks (decided)
+
+Today the page fold (`page::Scan`) is a pure fold over the outer vertical
+material: at each `Item::BuildPage` (the call, with the parameters TeX
+reads there) it moves contributions to the page (tex.web §980–1010), and
+at a break it ships `\box255` (§1023, the default output). The decisions
+below (coordinator, 2026-10-09) say what changes when there is an output
+routine. The core changes (index positions as `(piece, node)` pairs,
+routine runs as elements of the material sequence) are agent A's after
+the merge; the routine's execution as nodes is designed here.
+
+**What fits as is** (nodes emitting items; the fold a pure function of the
+items):
+
+- `\mark{…}`: a node emitting `Item::Mark` (done); marks move out of lines
+  and out of an `\hbox` in vertical mode (done). The fold computes
+  `top_mark`, `first_mark`, `bot_mark` (§1012–1014) from the marks on each
+  page: fold state, pure.
+- `\vadjust{…}`, `\insert n{…}` as material: a group like a box's; its
+  packaging node (§1100, reading `\splittopskip`, `\splitmaxdepth`,
+  `\floatingpenalty` at the close, before the group's definitions go)
+  emits `Item::Adjust(list)` / `Item::Ins{n, height+depth, list,
+  split_top, depth, float_cost}`. **`\insert n` reads nothing else** (no
+  register of its class): it only builds its item. In a paragraph the
+  items move out of the line after it (`hpack`'s adjust list, §655, §889,
+  as marks do now); after an `\hbox` in vertical mode likewise (§1076).
+- `\shipout`: a node whose result is a page (done); the DVI fold takes the
+  pages in document order.
+- The default output (no `\output`): done.
+
+**Only the fold reads, at the fire**: `\output`, `\holdinginserts`,
+`\maxdeadcycles`, and each insertion class's `\count n`, `\dimen n`,
+`\skip n`, `\box n` (dimensions when an insertion arrives on the page,
+§1008–1010; contents at the fire, §1018–1022). The fold is a reader with
+edges: it resolves these at the calling node's position (available: the
+fold cannot reach that call before the pieces up to it have run), and a
+changed value re-runs the fold from that page. `\par` nodes do not read
+them (`PageCall` keeps only what every call reads: `\vsize`,
+`\maxdepth`, `\topskip`, what shipping reads, `\hsize` for `\end`).
+
+**Firing with a routine** (§1012–1028): at a break where `\output` is not
+empty and `\deadcycles < \maxdeadcycles`, the fold's step is a **routine
+run**:
+
+- The fold *defines*, at the fire:
+  - `\box255` = the page box (`vpack` of the page to `\vsize`, §1017).
+    Like every box TeX assigns without the save stack, it is a definition
+    **at the level of the definition it replaces** (Conflict 7, `Def.level`):
+    in practice local to nothing (TeX requires `\box255` void before,
+    §1015, and after, §1028).
+  - each insertion class's `\box n` (§1018–1022, unless
+    `\holdinginserts>0`): the old box's contents plus the page's
+    insertions of class n, by the same rule.
+  - `\outputpenalty`, globally (§1013 `geq_word_define`; made by the
+    default output too).
+- The routine's tokens, `{` + `\output` + `}` (§1025), are read as **a
+  sequence of nodes at a position in the document order**: `(piece k,
+  node i)`, where the fold fired (the node carrying the firing
+  `Item::BuildPage`). They are ordinary nodes; RState starts as tex.web
+  sets it (internal vertical mode, `prev_depth` ignored,
+  `normal_paragraph`, the output group open); `\topmark`, `\firstmark`,
+  `\botmark`, `\insertpenalties` and `\deadcycles` (incremented, §1025)
+  are values the fold hands it, like RState fields.
+- Its **definitions enter the names index at that position**: the index's
+  positions become `(piece, node)` pairs (a piece's exports sit at
+  `(k, END)`), a routine run's definitions at `(k, i)`. Readers after that
+  position whose source is before it are marked by the existing edge
+  logic. On a cold build a reader assumes no routine defines the name and
+  is validated when the routine's nodes install — exactly the treatment of
+  any piece not yet run. (No `Key::OutputWrites`.)
+- Its other results, joined back by the fold (§1026):
+  - the pages its `\shipout` nodes produce, in order (to the DVI fold);
+    each `\shipout` sets `\deadcycles` to 0 (§640), returned with the run;
+  - the **material** its internal vertical list holds at its end (what it
+    `\unvbox`ed or built) and the held-over insertions: put *before* the
+    remaining contributions (§1026), which the fold's next step reads;
+  - errors: `\box255` not void at the end, an unbalanced routine.
+- `\end` (§1054 `its_all_over`) is a fold step too: while the page or
+  contributions are not empty or `\deadcycles≠0`, it appends `\hbox
+  to\hsize{}`, `\vfill`, `\penalty-'10000000000` and fires again.
+
+`\deadcycles` and `\insertpenalties` (set_page_int) are fold state, not
+`Key`s: an assignment to them in the body emits an item the fold applies
+in order (as `\prevdepth`'s `Item::PrevDepth` does now); in a routine run
+it changes the run's own copy, returned to the fold at the run's end. A
+read of them, of the marks, of `\pagegoal`… in the body is a read of the
+fold's state at the reading node's position (Conflict 12).
+
+**The page scan's incremental resume rule.** Routine runs are elements of
+the material sequence, like pieces. The resume point is the last page
+started before the first changed element (piece or routine run). When a
+fire moves (a page break moved), the routine run's position moves, and its
+definitions are treated like a moved piece's exports (the existing
+`touched` rule). There is no cycle: a run at `(k, i)` reaches only
+positions after it, and its material is consumed after it.
+
+## `\input` (decided)
+
+- A file is a value, `Key::File(name)`: the file's bytes are a read, so a
+  changed file re-runs the `\input` node.
+- The `\input` node's **result is the file's text**; its pieces (cut at
+  blank lines at brace depth 0, as the main file is) are inserted after it
+  in the order.
+- **The entry-state constant is unchanged** for the file's interior
+  pieces: their cuts stay canonical (each starts with the constant start
+  state and reads nothing at its start).
+- The **first** file piece and the piece holding **the rest of the calling
+  line** carry their predecessor's output state as their entry: a real
+  edge, sequential at that boundary only (TeX inserts the file in the
+  middle of the caller's input: a group, a paragraph, a conditional or a
+  macro's expansion may be open, and the rest of the line and the pending
+  tokens are read after the file's end).
+- `\endinput` (Conflict 5): the file's later pieces run on the guess that
+  none occurs, and are dropped when one does (the piece where it runs ends
+  at the end of that line).
+- Line numbers: `(file, line)` is a field of the position, read by
+  `\inputlineno` and error contexts, never in a version.
+
+## e-TeX (extended mode)
+
+`Options::etex` (default true; fixed for a `Build`'s life) is etex.web's
+extended mode: e-TeX's 66 primitives are named (`val::initial`,
+`prim::ETEX_PRIMITIVES`) and registers go to 32767. With it false the graph
+is TeX82 (`tests/core.rs`, `tests/dvi.rs` compare with `tex`); with it true
+`tests/etex.rs` compares with `etex -ini -etex`. The code is
+`src/graph/etex.rs`, with hooks in `expand.rs` (conditionals, `\the`-like
+steps, `\protected` in expanded text), `scan.rs` (items, register numbers),
+`assign.rs` (prefixes, `\interactionmode`) and `graph.rs` (the rewritten
+texts of `\scantokens`).
+
+| etex.web quantity | here |
+|---|---|
+| `eTeX_mode` | `Key::ETeXMode`: a value of the format no document defines; read only where TeX82 and e-TeX differ outside the names (a register number past 255) |
+| `interaction` | `Key::Interaction` (global; IniTeX's 3 initially — the oracle runs with `-interaction=batchmode`, so programs set it before reading it); `\batchmode`… and `\interactionmode=` define it and end the log's line (`new_interaction`'s `print_ln`) |
+| the new integer parameters, `\everyeof` | `IntPar::Tracingassigns` … `TeXXeTstate`, `TokPar::Everyeof` |
+| `cur_if`, `if_limit` for `\currentif…` | `RState.conds` (`Cond.code`: the conditional's code, +32 after `\unless`; `Cond.limit`) |
+| `cur_group`, `cur_level` for `\currentgroup…` | `RState.groups` (kind, and a box group's `BoxGroup`: hbox, adjusted hbox, vbox, vtop, disc) |
+| a pseudo file (`\scantokens`) | `RState.texts`: a text the input was rewritten with, above the rewritten token lists it was made over; read lazily with the catcodes in force (its own position, tokenizer state and end-of-line character), `\everyeof` once at its end |
+| the protected mark (`protected_token`) | `Macro.protected` |
+| mark classes | `Item::Marks(n, toks)` (class 0 is `Item::Mark`) |
+| TeXXeT's math nodes | the math node, `Item::Math { w, after, lr }` with `lr` the beginning subtype (6 `\beginL`/`\endL`, 10 `\beginR`/`\endR`; 0: a formula's edges) |
+
+Conflicts and gaps, with graph-shaped proposals:
+
+1. **`\scantokens`' end inside a scan**: TeX checks `scanner_status` at a
+   file's end ("File ended while scanning definition of …", which is why
+   `\everyeof{\noexpand}` is idiomatic). Not made: the end is silent.
+   Proposal: the scanner status as an `RState` field set by the scanning
+   step, read by the end of a text. `\tracingscantokens`' `( ` and line
+   display need the line field (Conflict 16).
+2. **`\lastnodetype`** is the one read of material (Conflict 13), with its
+   gaps: on the main vertical list after a paragraph's lines (TeX's
+   `last_node_type`, set by the page builder) it reads as -1.
+3. **`\showgroups`, `\showtokens`, `\showifs`**: their `> …` text is easy;
+   the error context after it (`l.N …`) needs the line field and
+   `show_context` (Conflict 16). Not yet: an error, the text consumed.
+4. **`\readline`**: parsed (`n to \cs`); the line comes from a stream
+   (Conflict 6), and from the terminal (refused in batch mode, as TeX does)
+   while no stream is open. `readline_toks` makes a line's tokens.
+5. **`\pagediscards`, `\splitdiscards`**: the items the page builder or
+   `\vsplit` discarded, saved while `\savingvdiscards` is positive.
+   Proposal: the page fold defines `Key::Discards(k)` at its firing call
+   (as Conflict 18's `\box255`); a reader parks on the fold. Now: empty
+   (exact while `\savingvdiscards` is not positive); in horizontal mode the
+   paragraph ends first (`head_for_vmode`), as TeX's `un_vbox`.
+6. **`\topmarks n`…`\splitbotmarks n`**: the number is scanned; empty, as
+   `\topmark` (Conflicts 12, 18).
+7. **TeXXeT**: `\beginL`… are items when `\TeXXeTstate` is positive
+   ("Improper `\beginL`" otherwise); no reversal yet in line breaking
+   (`post_line_break`'s LR nodes), packing (LR anomalies) or DVI
+   (`reverse`). Shared with math (agent B), whose math node is the same
+   item.
+8. **`\middle`**: math (agent B): the primitive exists; an error until the
+   math lists are.
+9. **`\interlinepenalties`, `\clubpenalties`, `\widowpenalties`,
+   `\displaywidowpenalties`**: not yet. Proposal: `Key::PenShape(k)` (a
+   list of penalties), read by the paragraph node's line parameters.
+10. **`\lastlinefit`, `\savinghyphcodes`, `\predisplaydirection`**:
+    parameters, assigned and read; line breaking, hyphenation and display
+    math do not read them yet. The `\tracing…` parameters are values only
+    (no tracing output: programs keep them non-positive).
+11. **Kept pieces and the mode**: `Options::etex` is read by
+    `val::initial`; changing it between two updates of one `Build` is not
+    supported (pieces kept from the earlier update read the earlier mode).
+
+e-TeX's primitives:
+
+| primitive | etex.web cmd | graph form | status |
+|---|---|---|---|
+| `\beginL`, `\endL`, `\beginR`, `\endR` | valign | node emitting `Item::Math` (horizontal mode; vertical: a paragraph begins) | items; no reversal (gap 7) |
+| `\botmarks`, `\firstmarks`, `\topmarks`, `\splitbotmarks`, `\splitfirstmarks` | top_bot_mark | step: scans the class; empty until the page fold has marks | approx: empty |
+| `\clubpenalties`, `\displaywidowpenalties`, `\interlinepenalties`, `\widowpenalties` | set_shape | `Key::PenShape(k)` (proposal) | not yet |
+| `\currentgrouplevel`, `\currentgrouptype` | last_item | a read of `RState.groups` | done |
+| `\currentifbranch`, `\currentiflevel`, `\currentiftype` | last_item | a read of `RState.conds` | done |
+| `\detokenize`, `\unexpanded` | the | step: the balanced text, shown as characters or as it is; not expanded again inside `\edef`/`\message`/`\write` | done |
+| `\eTeXrevision` | convert | step: `.6` | done |
+| `\eTeXversion` | last_item | 2 | done |
+| `\everyeof` | assign_toks | `Key::TokPar(Everyeof)`, read at a rewritten text's end | done |
+| `\fontchardp`, `\fontcharht`, `\fontcharic`, `\fontcharwd` | last_item | a read of the font value | done |
+| `\glueexpr`, `\muexpr`, `\numexpr`, `\dimexpr` | last_item | the expression grammar (§1520–1544), a pure function of the tokens and the quantities it reads; "Arithmetic overflow" makes it zero | done |
+| `\glueshrink`, `\glueshrinkorder`, `\gluestretch`, `\gluestretchorder` | last_item | scans glue | done |
+| `\gluetomu`, `\mutoglue` | last_item | scans glue, changes its level | done |
+| `\ifcsname` | if_test | conditional; reads the name's meaning, defines nothing | done |
+| `\ifdefined` | if_test | conditional; reads the meaning of the next token | done |
+| `\iffontchar` | if_test | conditional; reads the font value | done |
+| `\interactionmode` | set_page_int | `Key::Interaction`, read and assigned (global) | done |
+| `\lastlinefit`, `\predisplaydirection`, `\savinghyphcodes`, `\savingvdiscards`, `\TeXXeTstate`, `\tracingassigns`, `\tracinggroups`, `\tracingifs`, `\tracingnesting`, `\tracingscantokens` | assign_int | `Key::IntPar(p)` | done (values; readers: gap 10) |
+| `\lastnodetype` | last_item | the read of material (Conflict 13) | done (inside a piece; gap 2) |
+| `\marks` | mark | node emitting `Item::Marks(n, …)` (class 0: `Item::Mark`) | done |
+| `\middle` | left_right | math (agent B) | not yet |
+| `\pagediscards`, `\splitdiscards` | un_vbox | the page fold's discards (gap 5) | approx: empty |
+| `\parshapedimen`, `\parshapeindent`, `\parshapelength` | last_item | a read of `Key::Parshape` | done |
+| `\protected` | prefix | `RState.protected` to the definition; `Macro.protected` | done |
+| `\readline` | read_to_cs | parsed; streams are Conflict 6 | partial |
+| `\scantokens` | input | step: rewrites the input with the shown text, read again (`RState.texts`) | done (no "File ended" check: gap 1) |
+| `\showgroups`, `\showifs`, `\showtokens` | xray | log text and an error context (gap 3) | not yet |
+| `\unless` | expand_after | step (a node at the top, as conditionals are): the boolean conditional after it, negated | done |
 
 ## The inventory
 
@@ -388,7 +764,7 @@ both TeX and the graph; `tests/flow.rs`'s `doc()` begins with its catcodes,
 | `\hoffset` | assign_dimen | node defining `Key::DimenPar(p)` (Val::Int, sp) | done |
 | `\holdinginserts` | assign_int | node defining `Key::IntPar(p)` (Val::Int); `\global` via RState.global; `\globaldefs` read by every assignment | done |
 | `\hsize` | assign_dimen | node defining `Key::DimenPar(p)` (Val::Int, sp) | done |
-| `\hyphenation` | hyph_data | `\patterns` (IniTeX only) and `\hyphenation`: global definitions of a language's hyphenation tables, `Key::Patterns(lang)`/`Key::Exceptions(lang)`, read by line breaking | not yet |
+| `\hyphenation` | hyph_data | node defining `Key::Exceptions(lang)` globally (reads `\language`, the old value, the `\lccode`s); read by line breaking (see Hyphenation) | done |
 | `\hyphenchar` | assign_font_int | `Key::HyphenChar(font key)`, always global | done |
 | `\hyphenpenalty` | assign_int | node defining `Key::IntPar(p)` (Val::Int); `\global` via RState.global; `\globaldefs` read by every assignment | done |
 | `\interlinepenalty` | assign_int | node defining `Key::IntPar(p)` (Val::Int); `\global` via RState.global; `\globaldefs` read by every assignment | done |
@@ -424,7 +800,7 @@ both TeX and the graph; `tests/flow.rs`'s `doc()` begins with its catcodes,
 | `\parindent` | assign_dimen | node defining `Key::DimenPar(p)` (Val::Int, sp) | done |
 | `\parshape` | set_shape | node defining `Key::Parshape` (Val::Parshape) | done |
 | `\parskip` | assign_glue | node defining `Key::GluePar(p)` (Val::Glue) | done |
-| `\patterns` | hyph_data | `\patterns` (IniTeX only) and `\hyphenation`: global definitions of a language's hyphenation tables, `Key::Patterns(lang)`/`Key::Exceptions(lang)`, read by line breaking | not yet |
+| `\patterns` | hyph_data | node defining `Key::Patterns(lang)` globally (reads `\language`, the old value, the `\lccode`s); always accepted (see Hyphenation) | done |
 | `\pausing` | assign_int | node defining `Key::IntPar(p)` (Val::Int); `\global` via RState.global; `\globaldefs` read by every assignment | done |
 | `\postdisplaypenalty` | assign_int | node defining `Key::IntPar(p)` (Val::Int); `\global` via RState.global; `\globaldefs` read by every assignment | done |
 | `\predisplaypenalty` | assign_int | node defining `Key::IntPar(p)` (Val::Int); `\global` via RState.global; `\globaldefs` read by every assignment | done |
@@ -483,20 +859,20 @@ both TeX and the graph; `tests/flow.rs`'s `doc()` begins with its catcodes,
 |---|---|---|---|
 | `\-` | discretionary | node emitting `Item::Disc` with the font's `\hyphenchar` as its pre-break list (tex.web 1117) | done |
 | `\/` | ital_corr | node emitting the italic correction kern of the current list's last item (`last_item`: the one read of material, Conflict 13) | done |
-| `\above` | above | generalized fraction | not yet |
-| `\abovewithdelims` | above | generalized fraction | not yet |
+| `\above` | above | node emitting `MItem::Above{thickness}` (tex.web 1181): the list's gatherer makes the numerator of the list so far; a second one in a list is "Ambiguous" (the node reads its list) | done |
+| `\abovewithdelims` | above | as `\above`, with the two delimiters scanned (`\delcode`s read) | done |
 | `\accent` | accent | node emitting an accented character | not yet |
-| `\atop` | above | generalized fraction | not yet |
-| `\atopwithdelims` | above | generalized fraction | not yet |
+| `\atop` | above | node emitting `MItem::Above` with thickness 0 | done |
+| `\atopwithdelims` | above | as `\atop`, with the two delimiters | done |
 | `\char` | char_num | `\char n`: the main loop from that character (tex.web 1038) | done |
 | `\cr` | car_ret | an entry's end, read with `align_state` 0 (`RState.al`): its v template goes in (a step of the reading node, §789); its `\endtemplate` node closes the entry's group, the next gathers the entry, and `fin_row`'s node the row (§791–§799); elsewhere `align_error` with TeX's log (§1127) | done |
 | `\crcr` | car_ret | as `\cr`; ignored by `align_peek` and in a preamble's end (§785) | done |
-| `\delimiter` | delim_num | math delimiter | not yet |
+| `\delimiter` | delim_num | in math, `\delimiter n`: a math character `n div "1000` (tex.web 1160); outside math, a `$` is missing | done |
 | `\discretionary` | discretionary | three box-like groups (`BoxKind::Disc`): each `}` is a `Close` node, the packaging node keeps the part and opens the next; the last emits `Item::Disc` and the replacement (tex.web 1117–1121) | done |
-| `\displaylimits` | limit_switch | limits flag on the previous noad | not yet |
-| `\displaystyle` | math_style | math style item | not yet |
-| `\eqno` | eq_no | equation number | not yet |
-| `\halign` | halign | an `Open` node (the alignment's group; `to`/`spread`); the next reads the preamble once — a value in the group's entry (`AlignSpec`: templates, tabskip glue, loop) — and opens the entries' group; entries and rows are gathered by the nodes after their closes (unset items); `fin_align` (§800–§812) is the node after the alignment's close, a pure function of the rows and `\noalign` material its nodes emitted. In a paragraph it ends it (§1094); in `$$…$$` a display alignment (§1145, §1206: the paragraph broken before it, `\predisplaypenalty`, `\abovedisplayskip`…, `\displayindent`) | done |
+| `\displaylimits` | limit_switch | node emitting `MItem::Limits(normal)`, applied to the list's last noad by its gatherer; the node reads its list to complain if that is not an operator (tex.web 1159) | done |
+| `\displaystyle` | math_style | node emitting `MItem::Style(0)` | done |
+| `\eqno` | eq_no | in a display, opens the equation number's formula (a math group, tex.web 1142); its packaging node keeps the box in the display's group record and closes the display (`\0displayend`) | done |
+| `\halign` | halign | an `Open` node (the alignment's group; `to`/`spread`); the next reads the preamble once — a value in the group's entry (`AlignSpec`: templates, tabskip glue, loop) — and opens the entries' group; entries and rows are gathered by the nodes after their closes (unset items); `fin_align` (§800–§812) is the node after the alignment's close, a pure function of the rows and `\noalign` material its nodes emitted. In a paragraph it ends it (§1094); in `$$…$$` a display alignment in the display's math group (§1145, §1206: the list's depth the vertical list's before the display, rows shifted by `\displayindent`, kept in the group record as `MathKind::DisplayAlign` until `$$`; Conflict 26) | done |
 | `\hfil` | hskip | node emitting glue (tex.web 1060) | done |
 | `\hfill` | hskip | node emitting glue (tex.web 1060) | done |
 | `\hfilneg` | hskip | node emitting glue (tex.web 1060) | done |
@@ -506,47 +882,47 @@ both TeX and the graph; `tests/flow.rs`'s `doc()` begins with its catcodes,
 | `\ignorespaces` | ignore_spaces | node reading (with expansion) past spaces; the next token is the next node's command | done |
 | `\indent` | start_par | `new_graf`: node emitting `\parskip` and `Item::BuildPage` (vertical) and the indent box (horizontal), `\everypar` rewrites the input | done |
 | `\kern` | kern | node emitting an explicit kern | done |
-| `\left` | left_right | math delimiters (a group) | not yet |
-| `\leqno` | eq_no | equation number | not yet |
-| `\limits` | limit_switch | limits flag on the previous noad | not yet |
-| `\mathaccent` | math_accent | math accent | not yet |
-| `\mathbin` | math_comp | math noad | not yet |
-| `\mathchar` | math_char_num | math character | not yet |
-| `\mathchoice` | math_choice | math choice (four groups) | not yet |
-| `\mathclose` | math_comp | math noad | not yet |
-| `\mathinner` | math_comp | math noad | not yet |
-| `\mathop` | math_comp | math noad | not yet |
-| `\mathopen` | math_comp | math noad | not yet |
-| `\mathord` | math_comp | math noad | not yet |
-| `\mathpunct` | math_comp | math noad | not yet |
-| `\mathrel` | math_comp | math noad | not yet |
-| `\mkern` | mkern | node emitting a math kern | not yet |
-| `\mskip` | mskip | node emitting math glue | not yet |
+| `\left` | left_right | node reading the delimiter, opening a math group and emitting the left noad into it (tex.web 1191) | done |
+| `\leqno` | eq_no | as `\eqno`, on the left | done |
+| `\limits` | limit_switch | node emitting `MItem::Limits(limits)` (as `\displaylimits`) | done |
+| `\mathaccent` | math_accent | node emitting an accent noad whose nucleus `scan_math` gives (a character, or a subformula's group opened by the next node) | done |
+| `\mathbin` | math_comp | node emitting a bin noad, nucleus from `scan_math` (tex.web 1158) | done |
+| `\mathchar` | math_char_num | node emitting the noad of a 15-bit math code (`set_math_char`, tex.web 1155: class, family, `\fam` for a variable one) | done |
+| `\mathchoice` | math_choice | four math groups in turn (`\0choicenext` between them, as a discretionary's parts); the last packaging node emits `MItem::Choice` | done |
+| `\mathclose` | math_comp | node emitting a close noad, nucleus from `scan_math` | done |
+| `\mathinner` | math_comp | node emitting an inner noad, nucleus from `scan_math` | done |
+| `\mathop` | math_comp | node emitting an op noad, nucleus from `scan_math` | done |
+| `\mathopen` | math_comp | node emitting an open noad, nucleus from `scan_math` | done |
+| `\mathord` | math_comp | node emitting an ord noad, nucleus from `scan_math` | done |
+| `\mathpunct` | math_comp | node emitting a punct noad, nucleus from `scan_math` | done |
+| `\mathrel` | math_comp | node emitting a rel noad, nucleus from `scan_math` | done |
+| `\mkern` | mkern | node emitting a kern of subtype `mu_glue` (made explicit by `mlist_to_hlist`) | done |
+| `\mskip` | mskip | node emitting glue of subtype `mu_glue` | done |
 | `\noalign` | no_align | after a `\cr` (`align_peek`): an `Open` node (its group), its material emitted into the alignment's list; its `}` a `Close` node; elsewhere "Misplaced \noalign" (§1129) | done |
 | `\noboundary` | no_boundary | node affecting ligature boundaries | not yet |
 | `\noindent` | start_par | `new_graf` without the indent box | done |
-| `\nolimits` | limit_switch | limits flag on the previous noad | not yet |
-| `\nonscript` | non_script | math glue cancel | not yet |
+| `\nolimits` | limit_switch | node emitting `MItem::Limits(nolimits)` (as `\displaylimits`) | done |
+| `\nonscript` | non_script | node emitting zero glue of subtype `cond_math_glue` (tex.web 1171) | done |
 | `\omit` | omit | an entry's first token (`init_col`, §788): no u template, the v template `\endtemplate` alone (`RState.al.omit`); elsewhere "Misplaced \omit" | done |
-| `\over` | above | generalized fraction | not yet |
-| `\overline` | math_comp | math noad | not yet |
-| `\overwithdelims` | above | generalized fraction | not yet |
+| `\over` | above | node emitting `MItem::Above` with the default thickness (`default_code`, made `\fontdimen8` of family 3 by `mlist_to_hlist`) | done |
+| `\overline` | math_comp | node emitting an over noad, nucleus from `scan_math` | done |
+| `\overwithdelims` | above | as `\over`, with the two delimiters | done |
 | `\par` | par_end | `Kind::Par` node: the paragraph gathered from the items its nodes emitted (`Para`: list + `LineParams`); outer level: lines a separate task, inside a box broken here (tex.web 1096) | done |
 | `\penalty` | break_penalty | node emitting a penalty; in vertical mode also `Item::BuildPage` (tex.web 1103) | done |
-| `\radical` | radical | math radical | not yet |
+| `\radical` | radical | node reading the 24-bit delimiter, emitting a radical noad whose nucleus `scan_math` gives | done |
 | `\relax` | relax | node with no result | done |
-| `\right` | left_right | math delimiters (a group) | not yet |
-| `\scriptscriptstyle` | math_style | math style item | not yet |
-| `\scriptstyle` | math_style | math style item | not yet |
-| `\setlanguage` | extension | whatsit: material | not yet |
+| `\right` | left_right | `Close` node of the `\left` group: reads the delimiter inside the group; its packaging node gathers the list with the right noad and emits an inner noad | done |
+| `\scriptscriptstyle` | math_style | node emitting `MItem::Style(6)` | done |
+| `\scriptstyle` | math_style | node emitting `MItem::Style(4)` | done |
+| `\setlanguage` | extension | node emitting `Item::Lang` and setting `clang` (horizontal mode only, tex.web 1377) | done |
 | `\span` | tab_mark | in a preamble, expands the next token (§782); in an entry, ends it without closing it: the entry goes on in the next column (§791, span widths at `fin_align`, §798, §803) | done |
-| `\textstyle` | math_style | math style item | not yet |
-| `\underline` | math_comp | math noad | not yet |
+| `\textstyle` | math_style | node emitting `MItem::Style(2)` | done |
+| `\underline` | math_comp | node emitting an under noad, nucleus from `scan_math` | done |
 | `\unkern` | remove_item | node emitting `Item::Remove(1)`, applied by the list's gatherer (tex.web 1105) | done |
 | `\unpenalty` | remove_item | node emitting `Item::Remove(0)`, applied by the list's gatherer | done |
 | `\unskip` | remove_item | node emitting `Item::Remove(2)`, applied by the list's gatherer | done |
-| `\valign` | valign | as `\halign`, rotated: entries vertical (`vpackage(natural, 0)`), rows `vpack`ed into the paragraph (§799, §804, §811); in vertical mode it begins a paragraph | done |
-| `\vcenter` | vcenter | math box | not yet |
+| `\valign` | valign | as `\halign`, rotated: entries vertical (`vpackage(natural, 0)`), rows `vpack`ed into the paragraph (§799, §804, §811); in vertical mode it begins a paragraph; in math a `$` is missing (§1046) | done |
+| `\vcenter` | vcenter | a box group (`BoxKind::Vcenter`); its packaging node `vpack`s the list (with the box report) and emits a vcenter noad (tex.web 1167–1168) | done |
 | `\vfil` | vskip | node emitting glue (vertical mode) | done |
 | `\vfill` | vskip | node emitting glue (vertical mode) | done |
 | `\vfilneg` | vskip | node emitting glue (vertical mode) | done |
@@ -621,7 +997,7 @@ both TeX and the graph; `tests/flow.rs`'s `doc()` begins with its catcodes,
 | `\read` | read_to_cs | `\read n to \x`: a node defining `\x` from the next line of a stream — a stream is a source read by position (see Conflicts) | not yet |
 | `\scrollmode` | set_interaction | node with no result (interaction changes only what reaches the terminal) | done (no-op) |
 | `\show` | xray | diagnostic: `> \x=meaning.` in the log, an error context | not yet |
-| `\showbox` | xray | diagnostic node whose result is log text (`> ...`) and an error context — needs the line number field | not yet |
-| `\showlists` | xray | diagnostic node whose result is log text (`> ...`) and an error context — needs the line number field | not yet |
+| `\showbox` | xray | node whose result is log text (`> \boxN=`, the box, "OK" and its context; line numbers as placeholders, Conflict 16) | done |
+| `\showlists` | xray | node reading the open lists (the one read of material): log text as `show_activities`, the current page not shown (Conflict 16) | partial: the current page |
 | `\showthe` | xray | diagnostic node whose result is log text (`> ...`) and an error context — needs the line number field | not yet |
 | `\write` | extension | with `\immediate`: a node whose result is the written line (`Node.log`, ending in a newline), its text expanded in no mode; deferred: a whatsit expanded at `\shipout` | `\immediate` only |

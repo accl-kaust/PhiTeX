@@ -1,0 +1,10 @@
+(./math1.tex
+Tight \hbox (badness 68) in paragraph at lines 22--27
+[]\tenrm Text $\teni x \tenrm + \teni y \tenrm = \teni z$ \tenrm and $\teni a[]
+ \tenrm + \teni b[]$ \tenrm and $\teni x[]$ \tenrm here, with $\teni f\tenrm (\
+teni x\tenrm )$ and $\tensy 
+\teni x < y > z$\tenrm ,
+
+\hbox(8.14003+2.60292)x300.0, glue set - 0.88004 []
+
+[0] )

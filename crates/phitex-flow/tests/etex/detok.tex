@@ -1,0 +1,19 @@
+% \detokenize and \unexpanded in \edef, \xdef, \message; \protected
+% macros under \edef and \message.
+\def\a{A}\def\b{\a B}
+\message{\detokenize{\a #  b\b}}
+\edef\x{\detokenize{\a\b}}\message{\meaning\x}
+\edef\y{\unexpanded{\a#}\b}\message{\meaning\y}
+\xdef\z{\unexpanded\expandafter{\b}}\message{\meaning\z}
+\message{\unexpanded{\undefinedcs\a}}
+\toks0={\a}\edef\w{\the\toks0 \unexpanded{\b}\noexpand\a\a}\message{\meaning\w}
+\protected\def\p{P}\protected\long\def\q#1{Q#1}\long\protected\def\r{R}
+\edef\v{\p\q x\a}\message{\meaning\v}
+\message{\meaning\p, \meaning\q, \meaning\r, \p}
+\message{\detokenize\expandafter{\b}}
+\escapechar=`! \message{\detokenize{\a\b}}\escapechar=`\\
+\message{[\detokenize{}][\unexpanded{}]}
+\message{\expandafter\unexpanded\expandafter{\b}}
+\def\c{\unexpanded{\b}}\edef\d{\c}\message{\meaning\d}
+\edef\e{\expandafter\noexpand\p}\message{\meaning\e}
+\message{\p\unexpanded{\p}\detokenize{\p}}

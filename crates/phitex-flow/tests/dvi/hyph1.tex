@@ -1,0 +1,89 @@
+\catcode`\{=1 \catcode`\}=2 \catcode`\#=6 \catcode`\$=3 \catcode`\^=7
+%%% hyphen.tex %%%
+\language=1
+\patterns{1a 1e 1i 1o 1u .ab2c}
+\hyphenation{fan-tas-tic}
+\language=0
+\defaulthyphenchar=`\-
+\font\tenrm=cmr10 \font\tenbf=cmbx10 \font\tenit=cmti10 \font\tensl=cmsl10
+\tenrm \hsize=150pt \vsize=650pt \parindent=10pt \baselineskip=12pt
+\topskip=10pt \maxdepth=2pt \tolerance=1000 \pretolerance=100
+\lefthyphenmin=2 \righthyphenmin=3 \uchyph=1 \hyphenpenalty=50
+\exhyphenpenalty=50 \parfillskip=0pt plus 1fil \hbadness=10000
+\linepenalty=10 \adjdemerits=10000 \doublehyphendemerits=10000
+\finalhyphendemerits=5000
+
+Hyphenation of typographical paragraphs demonstrates the characteristic
+mathematical algorithms implemented in the typesetting program, with
+considerable interdisciplinary consequences for representation and
+documentation of extraordinarily complicated manuscripts.
+
+The difficult official affluent baffling efficient affirmative shuffling
+waffles of office officers sufficiently effective in suffocating flagrant
+inefficiencies: affluence, difficulties, officially, effectively.
+
+\lefthyphenmin=1 \righthyphenmin=1
+Raffish staffing raffish offline affix effigy baffled raffle scaffolding
+suffix effluent raffishness affable chaffinch saffron raffish raffish.
+
+\lefthyphenmin=2 \righthyphenmin=3 \uchyph=0
+Massachusetts Philadelphia California Mississippi Connecticut and lower
+case massachusetts philadelphia california mississippi connecticut words.
+
+\uchyph=1
+Massachusetts Philadelphia California Mississippi Connecticut and lower
+case massachusetts philadelphia california mississippi connecticut words.
+
+\language=1 \lefthyphenmin=1 \righthyphenmin=1
+Language one breaks before every vowel: abcdefghijklmno pqrstuvwxyz
+banana fantastic abacus elephant automobile operation tomato.
+
+\language=0 \lefthyphenmin=2 \righthyphenmin=3
+Back to language zero: fantastic elephant automobile operation tomato
+\setlanguage1 then set to one: banana elephant automobile operation
+\setlanguage0 and back: banana elephant automobile operation everything.
+
+Mixed {\language=1 elephant automobile} again elephant automobile with
+the language changed inside a group: operation {\language=1 operation}.
+
+Explicit super\-cali\-fragilistic and data-base and
+\discretionary{pre}{post}{nobreak}ification and
+anti\discretionary{-}{}{}disestablishmentarianism with hyphenation.
+
+\hyphenchar\tenrm=-1
+No hyphens now: characteristic mathematical algorithms implemented
+in the typesetting program with considerable interdisciplinary consequences.
+
+\hyphenchar\tenrm=`\-
+Punctuation: (hyphenation) ``quotation'' hyphenation. hyphenation,
+typesetting; algorithms! representation? {\tenbf bold hyphenation}
+hyphen{\tenbf ation} {\tenit italic characteristic} {\tensl slanted mathematics}.
+
+Kerns: available overwhelming LAVATORY Awkward convoy toward AVAILABLE
+WAVERING TOWARDS overview everyday conversation.
+
+\hyphenpenalty=10000
+No hyphen breaks taken with hyphenpenalty ten thousand: characteristic
+mathematical algorithms implemented in the typesetting program.
+
+\hyphenpenalty=-100
+Hyphen breaks wanted with a negative hyphenpenalty: characteristic
+mathematical algorithms implemented in the typesetting program.
+
+\hyphenpenalty=50 \pretolerance=-1
+Second pass at once: characteristic mathematical algorithms implemented in
+the typesetting program, with considerable interdisciplinary consequences.
+
+\pretolerance=100 \tolerance=100 \emergencystretch=20pt
+Emergency pass: characteristic mathematical algorithms implemented in the
+typesetting program, with considerable interdisciplinary consequences.
+
+\tolerance=1000 \emergencystretch=0pt
+\hyphenation{tab-le uni-ver-sity}
+A table at the university, the university's table, universities and tables
+in the representation of the documentation of the manuscripts.
+
+\setbox1\vbox{\hsize=100pt Inside a box, characteristic mathematical
+algorithms implemented in the typesetting program.}
+\box1
+\end

@@ -137,6 +137,7 @@ pub fn log(start: &str, entries: &[String], end: &str) -> String {
                     continue;
                 }
                 match c {
+                    crate::show::HALT => return p.out,
                     crate::show::LN => p.ln(),
                     crate::show::NL => {
                         if p.offset > 0 {
