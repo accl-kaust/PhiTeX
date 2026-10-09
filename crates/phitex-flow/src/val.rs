@@ -93,6 +93,10 @@ pub enum Key {
     /// `\textfont` (size 0), `\scriptfont` (1), `\scriptscriptfont` (2) of a
     /// family.
     FamFont(u8, u8),
+    /// A language's hyphenation patterns (`\patterns`, global).
+    Patterns(u8),
+    /// A language's hyphenation exceptions (`\hyphenation`, global).
+    Exceptions(u8),
 }
 
 impl Key {
@@ -183,6 +187,8 @@ impl Key {
             Key::Parshape => w(18, 0),
             Key::Font => w(19, 0),
             Key::FamFont(s, f) => w(25, (u64::from(*s) << 8) | u64::from(*f)),
+            Key::Patterns(l) => w(26, u64::from(*l)),
+            Key::Exceptions(l) => w(27, u64::from(*l)),
         }
     }
 }
@@ -216,6 +222,8 @@ impl fmt::Display for Key {
             Key::FontIdent(x) => write!(f, "font_id_text ({x})"),
             Key::FontLoaded(x) => write!(f, "font loaded ({x})"),
             Key::FamFont(s, x) => write!(f, "\\{}font{x}", ["text", "script", "scriptscript"][usize::from(*s).min(2)]),
+            Key::Patterns(l) => write!(f, "\\patterns (language {l})"),
+            Key::Exceptions(l) => write!(f, "\\hyphenation (language {l})"),
         }
     }
 }
@@ -281,6 +289,10 @@ pub enum Val {
     Box(Arc<crate::item::BoxNode>),
     /// A name (`Key::FontIdent`).
     Name(Arc<str>),
+    /// A language's patterns (`Key::Patterns`).
+    Patterns(crate::hyph::Patterns),
+    /// A language's exceptions (`Key::Exceptions`).
+    Exceptions(crate::hyph::Exceptions),
 }
 
 impl fmt::Display for Val {
@@ -304,6 +316,8 @@ impl fmt::Display for Val {
             Val::Void => write!(f, "void"),
             Val::Box(b) => write!(f, "{}box({}+{})x{}", if b.vertical { "v" } else { "h" }, b.h, b.d, b.w),
             Val::Name(n) => write!(f, "{n}"),
+            Val::Patterns(p) => write!(f, "{} patterns", p.len()),
+            Val::Exceptions(x) => write!(f, "{} exceptions", x.len()),
             Val::Meaning(Meaning::Font(x)) => write!(f, "select font {}", x.name),
             Val::Meaning(Meaning::Undefined) => write!(f, "undefined"),
             Val::Meaning(Meaning::Prim(p)) => write!(f, "primitive \\{}", p.name()),
@@ -373,6 +387,8 @@ pub fn initial(key: &Key, _font: &Arc<Font>) -> Val {
         Key::HyphenChar(_) => Val::Int(i32::from(b'-')),
         Key::SkewChar(_) => Val::Int(-1),
         Key::FontIdent(_) => Val::Name(Arc::from("nullfont")),
+        Key::Patterns(_) => Val::Patterns(crate::hyph::Patterns::new()),
+        Key::Exceptions(_) => Val::Exceptions(crate::hyph::Exceptions::new()),
     }
 }
 

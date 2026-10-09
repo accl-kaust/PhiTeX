@@ -7,7 +7,7 @@
 
 use std::fmt::Write as _;
 
-use crate::graph::{Run, paragraph_start};
+use crate::graph::{Run, enclosing_open, paragraph_start, paragraph_start_at};
 use crate::item::Item;
 use crate::page::{Lines, Page, page_mark};
 use crate::show::LINE;
@@ -34,11 +34,62 @@ fn resolve(s: &str, text: &[char], run: &Run, i: usize, base: usize) -> String {
                 let start = paragraph_start(&run.chain, i);
                 let _ = write!(out, "{}--{here}", line_of(text, run, start, base));
             }
+            // (where a list began, `\showlists`: the `Open` node of the
+            // `k`-th enclosing group, or the paragraph at a level)
+            g if g.starts_with('G') => {
+                let k: usize = g[1..].parse().unwrap_or(0);
+                let l = enclosing_open(&run.chain, i, k).map_or(here, |o| line_of(text, run, o, base));
+                out.push_str(&l.to_string());
+            }
+            x if x.starts_with('X') => context(&mut out, &format!("l.{here} "), &x[1..]),
+            x if x.starts_with('T') => {
+                let mut f = x[1..].splitn(2, crate::graph::diag::CUT);
+                let head = f.next().unwrap_or("");
+                context(&mut out, head, f.next().unwrap_or(""));
+            }
+            q if q.starts_with('Q') => {
+                let level: u16 = q[1..].parse().unwrap_or(0);
+                let start = paragraph_start_at(&run.chain, i, level);
+                out.push_str(&line_of(text, run, start, base).to_string());
+            }
             _ => out.push_str(&here.to_string()),
         }
         out.push_str(parts.next().unwrap_or(""));
     }
     out
+}
+
+/// TeX Live's `error_line`, `half_error_line` (texmf.cnf).
+const ERROR_LINE: usize = 79;
+const HALF_ERROR_LINE: usize = 50;
+
+/// tex.web 313–318: an error's context — `head` (`l.N `, or a token
+/// list's label), what was read and the rest (cut by `CUT`, each character
+/// as it prints): two lines, cut short as TeX does.
+fn context(out: &mut String, head: &str, x: &str) {
+    use crate::show::LN;
+    let (read, rest) = x.split_once(crate::graph::diag::CUT).unwrap_or((x, ""));
+    let read: Vec<char> = read.chars().collect();
+    let rest: Vec<char> = rest.chars().collect();
+    out.push_str(head);
+    let l = head.chars().count();
+    let first_count = read.len();
+    let trick_count = (first_count + 1 + ERROR_LINE - HALF_ERROR_LINE).max(ERROR_LINE);
+    let m = rest.len().min(trick_count - first_count);
+    let (p, n) = if l + first_count <= HALF_ERROR_LINE {
+        (0, l + first_count)
+    } else {
+        out.push_str("...");
+        (l + first_count - HALF_ERROR_LINE + 3, HALF_ERROR_LINE)
+    };
+    out.extend(&read[p.min(first_count)..]);
+    out.push(LN);
+    out.extend(std::iter::repeat_n(' ', n));
+    let k = if m + n <= ERROR_LINE { m } else { ERROR_LINE - n - 3 };
+    out.extend(&rest[..k.min(rest.len())]);
+    if m + n > ERROR_LINE {
+        out.push_str("...");
+    }
 }
 
 /// A piece as the log reads it: its text, its run, its paragraphs' lines.

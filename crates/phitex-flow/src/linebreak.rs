@@ -6,6 +6,7 @@
 //! marks the packager moved out, the interline penalty) and TeX's
 //! diagnostic about its box.
 
+use std::fmt::Write as _;
 use std::sync::Arc;
 
 use crate::arith::{AWFUL_BAD, INF_BAD, badness};
@@ -45,6 +46,9 @@ pub struct LineParams {
     pub inter: Arc<Interline>,
     /// For the diagnostics.
     pub show: Ctx,
+    /// What hyphenating the paragraph's words reads (its second pass,
+    /// tex.web 891–918).
+    pub hyph: Option<Arc<crate::hyph::HyphParams>>,
 }
 
 /// A line: its box (shifted by its indentation) and what follows it.
@@ -126,7 +130,9 @@ struct Passive {
 }
 
 struct Breaker<'a> {
-    items: &'a [Item],
+    /// The paragraph's list: owned, since its second pass hyphenates
+    /// words in it (tex.web 894).
+    items: Vec<Item>,
     p: &'a LineParams,
     /// `prefix[i]`: the widths of `items[..i]`.
     prefix: Vec<W>,
@@ -145,6 +151,11 @@ struct Breaker<'a> {
     best_line: [i32; 4],
     threshold: i32,
     final_pass: bool,
+    second_pass: bool,
+    /// `cur_lang`, `l_hyf`, `r_hyf` (tex.web 892).
+    lang: crate::hyph::LangState,
+    /// Hyphen characters the font lacks (tex.web 915), for the log.
+    missing: Vec<(Arc<crate::tfm::Font>, i32)>,
 }
 
 impl Breaker<'_> {
@@ -337,38 +348,58 @@ impl Breaker<'_> {
         self.passive.clear();
         self.minimal = [i64::from(AWFUL_BAD); 4];
         self.minimum = i64::from(AWFUL_BAD);
-        let items = self.items;
-        let n = items.len();
         let mut k = 0;
         let none = [0i64; 6];
         // (§866: no break at glue inside a formula)
         let mut auto_breaking = true;
-        while k < n && !self.active.is_empty() {
+        // (§891: initialize for hyphenating a paragraph)
+        if self.second_pass
+            && let Some(h) = &self.p.hyph
+        {
+            self.lang = h.init;
+        }
+        while k < self.items.len() && !self.active.is_empty() {
             // (§866)
-            match &items[k] {
+            let it = self.items[k].clone();
+            match &it {
                 Item::Glue { .. } => {
                     // (§868)
                     if k > 0 && auto_breaking {
-                        let pr = &items[k - 1];
+                        let pr = &self.items[k - 1];
                         if pr.is_char() || pr.precedes_break() || matches!(pr, Item::Kern { sub, .. } if *sub != 1) {
                             self.try_break(0, false, Some(k), &none);
                         }
                     }
+                    // (§894: try to hyphenate the following word)
+                    if self.second_pass
+                        && auto_breaking
+                        && let Some(h) = self.p.hyph.clone()
+                        && let Some(w) = crate::hyph::hyphenate_after(&self.items, k, &mut self.lang, &h)
+                    {
+                        self.missing.extend(w.missing);
+                        self.items.splice(w.start..w.end, w.items);
+                        self.reprefix(w.start);
+                    }
+                }
+                Item::Lang { lang, lhm, rhm } => {
+                    // (§1362)
+                    self.lang = crate::hyph::LangState { lang: *lang, lhm: *lhm, rhm: *rhm };
                 }
                 Item::Kern { sub: 1, .. } => {
-                    if auto_breaking && matches!(items.get(k + 1), Some(Item::Glue { .. })) {
+                    if auto_breaking && matches!(self.items.get(k + 1), Some(Item::Glue { .. })) {
                         self.try_break(0, false, Some(k), &none);
                     }
                 }
                 Item::Math { after, .. } => {
                     auto_breaking = *after;
-                    if auto_breaking && matches!(items.get(k + 1), Some(Item::Glue { .. })) {
+                    if auto_breaking && matches!(self.items.get(k + 1), Some(Item::Glue { .. })) {
                         self.try_break(0, false, Some(k), &none);
                     }
                 }
                 Item::Penalty(p) => self.try_break(*p, false, Some(k), &none),
                 Item::Disc(d) => {
                     // (§869)
+                    let d = d.clone();
                     if d.pre.is_empty() {
                         self.try_break(self.p.exhyphenpenalty, true, Some(k), &none);
                     } else {
@@ -381,7 +412,7 @@ impl Breaker<'_> {
             }
             k += 1;
         }
-        if k < n || self.active.is_empty() {
+        if k < self.items.len() || self.active.is_empty() {
             return None;
         }
         // (§873: the final break)
@@ -418,6 +449,19 @@ impl Breaker<'_> {
             }
         }
         if actual == self.p.looseness || self.final_pass { Some(bet) } else { None }
+    }
+}
+
+impl Breaker<'_> {
+    /// The widths' prefix sums again from item `from` on (a word there
+    /// was hyphenated).
+    fn reprefix(&mut self, from: usize) {
+        self.prefix.truncate(from + 1);
+        let mut acc = self.prefix[from];
+        for it in &self.items[from..] {
+            add(&mut acc, &widths(it));
+            self.prefix.push(acc);
+        }
     }
 }
 
@@ -461,7 +505,7 @@ pub fn lines(items: &[Item], p: &LineParams) -> Vec<Arc<Line>> {
     }
     let easy_line = if p.looseness == 0 { lsl } else { MAX_HALFWORD };
     let mut br = Breaker {
-        items,
+        items: items.to_vec(),
         p,
         prefix,
         background,
@@ -479,6 +523,9 @@ pub fn lines(items: &[Item], p: &LineParams) -> Vec<Arc<Line>> {
         best_line: [0; 4],
         threshold: 0,
         final_pass: false,
+        second_pass: false,
+        lang: p.hyph.as_ref().map(|h| h.init).unwrap_or_default(),
+        missing: Vec::new(),
     };
     // (§863: the passes)
     let mut second = if p.pretolerance >= 0 {
@@ -493,6 +540,7 @@ pub fn lines(items: &[Item], p: &LineParams) -> Vec<Arc<Line>> {
         if br.threshold > INF_BAD {
             br.threshold = INF_BAD;
         }
+        br.second_pass = second;
         if let Some(b) = br.pass() {
             break b;
         }
@@ -505,13 +553,32 @@ pub fn lines(items: &[Item], p: &LineParams) -> Vec<Arc<Line>> {
             br.final_pass = p.emergency_stretch <= 0;
         }
     };
-    post_line_break(&br, best)
+    let mut out = post_line_break(&br, best);
+    // (a hyphen character the font lacks, reported as the second pass met
+    // it: before the lines' diagnostics)
+    if p.hyph.as_ref().is_some_and(|h| h.lost_chars) && !br.missing.is_empty() {
+        let mut s = String::from(crate::show::RAW);
+        for (f, c) in &br.missing {
+            let ch = char::from_u32(*c as u32).unwrap_or('?');
+            s.push(crate::show::NL);
+            let _ = write!(s, "Missing character: There is no {ch} in font {}!", f.name);
+            s.push(crate::show::NL);
+        }
+        if let Some(first) = out.first_mut() {
+            let l = Arc::make_mut(first);
+            if let Some(r) = &l.report {
+                s.push_str(r.strip_prefix(crate::show::RAW).unwrap_or(r));
+            }
+            l.report = Some(s);
+        }
+    }
+    out
 }
 
 /// §877–§890: the lines, justified.
 fn post_line_break(br: &Breaker<'_>, best: Active) -> Vec<Arc<Line>> {
     let p = br.p;
-    let items = br.items;
+    let items = &br.items[..];
     let mut breaks: Vec<Option<usize>> = Vec::new();
     let mut q = best.passive;
     while let Some(pi) = q {

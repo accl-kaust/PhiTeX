@@ -47,8 +47,9 @@ pub(super) fn prefixable(m: &Meaning) -> bool {
             | Prim::BoxDimen(_)
             | Prim::Interaction(_)
             | Prim::DefFamily(_)
-            | Prim::Mat(Mat::SetBox | Mat::FontInt(_)) => true,
-            Prim::Unimpl(_) => matches!(p.name(), "read" | "hyphenation" | "patterns"),
+            | Prim::Mat(Mat::SetBox | Mat::FontInt(_))
+            | Prim::HyphData(_) => true,
+            Prim::Unimpl(_) => matches!(p.name(), "read"),
             _ => false,
         },
         Meaning::CountRef(_)
@@ -207,6 +208,7 @@ impl Exec<'_> {
                 Prim::Mat(Mat::SetBox) => self.setbox(global),
                 Prim::Mat(Mat::FontInt(k)) => self.assign_font_int(k),
                 Prim::Interaction(_) => {} // (batch mode or not: only the terminal differs)
+                Prim::HyphData(pat) => self.hyph_data(pat),
                 _ => self.err(format!("\\{} is not supported yet", p.name())),
             },
             Meaning::CountRef(_) | Meaning::DimenRef(_) | Meaning::SkipRef(_) | Meaning::MuskipRef(_) => {

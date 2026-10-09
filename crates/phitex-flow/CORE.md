@@ -12,11 +12,11 @@ tex.web command code, its graph form and its status here.
 | class | primitives | done | partial | not yet |
 |---|---|---|---|---|
 | (i) expandable, input rewriting | 40 | 33 | 5 | 2 |
-| (ii) assignments, scopes | 151 | 146 | 3 | 2 |
-| (iii) material | 73 | 63 | 0 | 10 |
+| (ii) assignments, scopes | 151 | 148 | 3 | 0 |
+| (iii) material | 73 | 64 | 0 | 9 |
 | (iv) layout and output | 43 | 23 | 12 | 8 |
-| (v) IO and diagnostics | 18 | 6 | 2 | 10 |
-| all | 325 | 271 | 22 | 32 |
+| (v) IO and diagnostics | 18 | 7 | 3 | 8 |
+| all | 325 | 275 | 23 | 27 |
 
 ("done": tex.web's semantics, checked against `tex -ini` by `tests/core.rs`
 (logs of programs that do not typeset) and `tests/dvi.rs` (DVI files and
@@ -191,9 +191,22 @@ both TeX and the graph; `tests/flow.rs`'s `doc()` begins with its catcodes,
 15. **`\mag` and `true` units** — TeX freezes `\mag` at its first use
     (`mag_set`, a hidden global). Proposal: `Key::MagSet`, defined globally
     by the first node using it. Now: `\mag` is read, not frozen.
-16. **`\show`, `\showthe`, error contexts** — need the line-number field;
-    not implemented. `\message` and `\immediate\write` are the conformance
-    oracle meanwhile.
+16. **`\show`, `\showthe`, error contexts** — `\showbox` and `\showlists`
+    are done (`graph/diag.rs`): their text is a raw log entry whose line
+    numbers are placeholders the log's gatherer fills (`G` k: where the
+    `k`-th enclosing group's list began; `Q` level: a paragraph's first
+    line; `X`, `T`: an error context's two lines, laid out with
+    `error_line` 79 and `half_error_line` 50, tex.web 317), so no line
+    number is in a node's result. The context shows a backed-up list at
+    the top (`<to be read again>`, `<recently read>`: a list read to its
+    end stays in `RState.pending` until the next token is read, as TeX's
+    input level does), `...` for the levels between (IniTeX's
+    `\errorcontextlines` is 0), and the reader's line; a macro's level at
+    the top is not named yet. `\showlists` shows each open list (the main
+    vertical list: what this piece contributed since the page builder was
+    last called); the current page (`### current page:`) is the page
+    fold's state and is not shown — exact where the page is empty.
+    `\show` and `\showthe` are not yet.
 17. **The DVI file is a fold**: TeX writes a font's definition where it is
     first used, reuses `w`/`x`/`y`/`z` movements only within what its
     half-buffer (`dvi_buf_size` 16384) still holds (`dvi_gone`), points each
@@ -235,10 +248,7 @@ both TeX and the graph; `tests/flow.rs`'s `doc()` begins with its catcodes,
     `SOURCE_DATE_EPOCH`), the graph from `\year`… (1970.01.01:0000
     initially). `tests/dvi.rs` masks the comment's bytes (15 to 41) when it
     compares files; everything else is compared byte for byte.
-23. **Hyphenation**: the tables and `hyphenate` are pure functions over
-    values (`hyph.rs`, see Hyphenation below); `\patterns` and
-    `\hyphenation` are not yet nodes and line breaking's second pass does
-    not hyphenate (exact for `-ini` documents without patterns). `\accent`, `\noboundary`, `\vadjust`, `\insert`,
+23. **Hyphenation**: done (see Hyphenation below). `\accent`, `\noboundary`, `\vadjust`, `\insert`,
     leaders, `\special` and non-immediate `\write` are not yet.
 24. Small departures, documented: `\if…`'s inserted `\relax` (a `\fi` met
     while the test is read) is the name `\relax`, not a frozen one; a
@@ -296,20 +306,33 @@ byte for byte against `tex -ini`.
   break at glue inside a formula, a break at `\mathoff` before glue, its
   width zero at a break), `$` in the short display, `\mathsurround` in
   `show_box`. `\ifmmode` is true in math.
+- `\showlists` and `\showbox` display math lists (§690–§698: noads,
+  fractions, delimiters, styles, choices, `\mskip`, `\mkern`,
+  `\nonscript`, an incomplete fraction "this will begin denominator of:"),
+  checked by `tests/dvi/showmath.tex`. The errors of a formula are TeX's
+  in TeX's order (`tests/dvi.rs`'s `math_errors_in_order`): the font check
+  of §1195 is read by the closing `$` inside the group, before "Display
+  math should end with $$", and again for a display after its equation
+  number; `off_save` in math inserts what closes the innermost group
+  (`$`, `\right.`, `}`, `\endgroup`, tex.web 1064).
 - Not yet: `\accent` in math (and outside), display alignments
   (`$$\halign…$$`, with the alignments), `\vadjust` and `\insert` in
-  formulas, `\showlists`/`\showbox` of noads. Approximations: the check
-  for enough symbol and extension font parameters (§1195) counts the
-  parameters the font was loaded with (TeX also counts those `\fontdimen`
-  added to the last loaded font); `off_save` in math (a `$` or `\right`
-  closing the wrong group) inserts a `}` only.
+  formulas. Approximation: the check for enough symbol and extension font
+  parameters (§1195) counts the parameters the font was loaded with (TeX
+  also counts those `\fontdimen` added to the last loaded font); `\right`
+  inserted by `off_save` is the name `\right`, not a frozen one.
 
 ## Hyphenation
 
 Knuth's algorithm as pure functions (`hyph.rs`, tex.web §891–965), checked
 by `tests/hyph.rs`: `hyphen.tex`'s patterns and exceptions, 368 words
 (plus `\uchyph`, minima and a later `\hyphenation`) break exactly where
-`tex -ini`'s `\showhyphens` breaks them.
+`tex -ini`'s `\showhyphens` breaks them. Integrated (`graph/lang.rs`,
+`hyph::hyphenate_after`, `linebreak.rs`): `tests/dvi/hyph1.tex` and
+`hyph2.tex` (hyphen.tex loaded by the `\patterns` node) are TeX's DVI
+and log at all five schedules; 60,800 dictionary words through the whole
+line breaker (`\showhyphens` in a `\vbox`, both minima 2/3 and 1/1) give
+TeX's log line for line at 8 threads (checked once, not a test).
 
 | TeX | graph |
 |---|---|
@@ -319,22 +342,25 @@ by `tests/hyph.rs`: `hyphen.tex`'s patterns and exceptions, 368 words
 | `\hyphenation{…}` | likewise: reads `\language`, `Key::Exceptions(lang)`, the `\lccode`s; defines `Key::Exceptions(lang)` globally (a word given again replaces the old one) |
 | `\language`, `\lefthyphenmin`, `\righthyphenmin`, `\uchyph` | `IntPar`s; a paragraph takes language and minima where it starts (§1091, `norm_min`) and where `\language` changes in it (a language whatsit, §1376), `\uchyph` where it ends (§891) |
 | `\hyphenchar` | `Key::HyphenChar(font key)` (done), read by the paragraph for each font its words use (§891: outside 0–255, no word of that font is hyphenated) |
-| `trie_not_ready` (§891, §960) | open: TeX packs the trie at the first paragraph whose line breaking reaches the second pass, and `\patterns` after that is "Too late for \patterns" — whether that happened is a read of earlier paragraphs' line breaking. Proposal: accept `\patterns` always (different from TeX only after that error) |
+| `trie_not_ready` (§891, §960) | decided: `\patterns` is always accepted. The one divergence: TeX packs the trie at the first paragraph whose line breaking reaches the second pass, and gives "Too late for \patterns" (ignoring them) for a `\patterns` after that; here they are added and used by later paragraphs |
+| `clang`, a paragraph's `prev_graf` language field | `RState.hyph_lang` (`clang`, the language and minima the paragraph began with, tex.web 1091, 1200), saved by box and math groups like the space factor |
+| the language whatsit (§1341, §1376–1377) | `Item::Lang{lang, lhm, rhm}`, emitted by `\setlanguage` and where a run of characters begins in a paragraph whose `\language` changed (`fix_language`); a breakpoint before glue like any whatsit, shown as `\setlanguage1 (hyphenmin 2,3)` |
 
-The integration (after the merge) is in the line-break task: its second
-pass (§894–903) finds the words — after glue, letters of one font with
-nonzero `\lccode`, at most 63, followed by glue, a penalty, an insertion,
-a mark, an adjust, a whatsit or an explicit kern (§896–899) — and calls
-`hyphenate` with the paragraph's `Patterns`/`Exceptions` (reads of
-`Key::Patterns(lang)`, `Key::Exceptions(lang)` at the paragraph's end, so
-an edit to the tables re-runs exactly the paragraphs that reached the
-second pass), memoised per word by (the two versions, the word, the
-minima). Reconstitution (§903–918) turns the positions into
-discretionaries with the font's ligatures and kerns; it can drop a
-position (§916 builds a post-break text without hyphens: `raffish` with
-both minima 1 gives `raf-fish` in cmr10 though `hyphenate` allows
-`raf-f-ish`), so the oracle for that step is the line breaker's own
-`tests/dvi.rs` documents.
+The line breaker's second pass (§894–918) hyphenates the word after each
+glue it passes, in its own copy of the paragraph's list
+(`hyph::hyphenate_after`: which words are tried — after glue, letters of
+one font with nonzero `\lccode`, at most 63, followed by glue, a penalty,
+a mark, a whatsit or an explicit kern — then `hyphenate`, then the
+reconstitution of §903–§918 with the font's ligatures and kerns around
+each discretionary, which is where `raffish` loses a break); the third
+pass works on the hyphenated list, as TeX's does. What it reads is read by
+the node that breaks the paragraph (`\par`, `$$`, a box's end) into
+`LineParams::hyph` (`hyph::HyphParams`): the paragraph's starting
+language and minima, `\uchyph`, the `\lccode` of each character in the
+list, each font's `\hyphenchar`, `\tracinglostchars`, and the
+`Key::Patterns(l)`/`Key::Exceptions(l)` of each language it uses — reads
+like any other, so a changed `\patterns` or `\hyphenation` re-breaks
+exactly the paragraphs that read it.
 
 ## Output routines, insertions and marks (decided)
 
@@ -568,7 +594,7 @@ positions after it, and its material is consumed after it.
 | `\hoffset` | assign_dimen | node defining `Key::DimenPar(p)` (Val::Int, sp) | done |
 | `\holdinginserts` | assign_int | node defining `Key::IntPar(p)` (Val::Int); `\global` via RState.global; `\globaldefs` read by every assignment | done |
 | `\hsize` | assign_dimen | node defining `Key::DimenPar(p)` (Val::Int, sp) | done |
-| `\hyphenation` | hyph_data | `\patterns` (IniTeX only) and `\hyphenation`: global definitions of a language's hyphenation tables, `Key::Patterns(lang)`/`Key::Exceptions(lang)`, read by line breaking (see Hyphenation) | not yet: the tables as values and `hyphenate` are done (`hyph.rs`, `tests/hyph.rs`); the nodes and the line breaker's pass come after the merge |
+| `\hyphenation` | hyph_data | node defining `Key::Exceptions(lang)` globally (reads `\language`, the old value, the `\lccode`s); read by line breaking (see Hyphenation) | done |
 | `\hyphenchar` | assign_font_int | `Key::HyphenChar(font key)`, always global | done |
 | `\hyphenpenalty` | assign_int | node defining `Key::IntPar(p)` (Val::Int); `\global` via RState.global; `\globaldefs` read by every assignment | done |
 | `\interlinepenalty` | assign_int | node defining `Key::IntPar(p)` (Val::Int); `\global` via RState.global; `\globaldefs` read by every assignment | done |
@@ -604,7 +630,7 @@ positions after it, and its material is consumed after it.
 | `\parindent` | assign_dimen | node defining `Key::DimenPar(p)` (Val::Int, sp) | done |
 | `\parshape` | set_shape | node defining `Key::Parshape` (Val::Parshape) | done |
 | `\parskip` | assign_glue | node defining `Key::GluePar(p)` (Val::Glue) | done |
-| `\patterns` | hyph_data | `\patterns` (IniTeX only) and `\hyphenation`: global definitions of a language's hyphenation tables, `Key::Patterns(lang)`/`Key::Exceptions(lang)`, read by line breaking (see Hyphenation) | not yet: the tables as values and `hyphenate` are done (`hyph.rs`, `tests/hyph.rs`); the nodes and the line breaker's pass come after the merge |
+| `\patterns` | hyph_data | node defining `Key::Patterns(lang)` globally (reads `\language`, the old value, the `\lccode`s); always accepted (see Hyphenation) | done |
 | `\pausing` | assign_int | node defining `Key::IntPar(p)` (Val::Int); `\global` via RState.global; `\globaldefs` read by every assignment | done |
 | `\postdisplaypenalty` | assign_int | node defining `Key::IntPar(p)` (Val::Int); `\global` via RState.global; `\globaldefs` read by every assignment | done |
 | `\predisplaypenalty` | assign_int | node defining `Key::IntPar(p)` (Val::Int); `\global` via RState.global; `\globaldefs` read by every assignment | done |
@@ -718,7 +744,7 @@ positions after it, and its material is consumed after it.
 | `\right` | left_right | `Close` node of the `\left` group: reads the delimiter inside the group; its packaging node gathers the list with the right noad and emits an inner noad | done |
 | `\scriptscriptstyle` | math_style | node emitting `MItem::Style(6)` | done |
 | `\scriptstyle` | math_style | node emitting `MItem::Style(4)` | done |
-| `\setlanguage` | extension | whatsit: material | not yet |
+| `\setlanguage` | extension | node emitting `Item::Lang` and setting `clang` (horizontal mode only, tex.web 1377) | done |
 | `\span` | tab_mark | alignment cell end | not yet |
 | `\textstyle` | math_style | node emitting `MItem::Style(2)` | done |
 | `\underline` | math_comp | node emitting an under noad, nucleus from `scan_math` | done |
@@ -801,7 +827,7 @@ positions after it, and its material is consumed after it.
 | `\read` | read_to_cs | `\read n to \x`: a node defining `\x` from the next line of a stream — a stream is a source read by position (see Conflicts) | not yet |
 | `\scrollmode` | set_interaction | node with no result (interaction changes only what reaches the terminal) | done (no-op) |
 | `\show` | xray | diagnostic: `> \x=meaning.` in the log, an error context | not yet |
-| `\showbox` | xray | diagnostic node whose result is log text (`> ...`) and an error context — needs the line number field | not yet |
-| `\showlists` | xray | diagnostic node whose result is log text (`> ...`) and an error context — needs the line number field | not yet |
+| `\showbox` | xray | node whose result is log text (`> \boxN=`, the box, "OK" and its context; line numbers as placeholders, Conflict 16) | done |
+| `\showlists` | xray | node reading the open lists (the one read of material): log text as `show_activities`, the current page not shown (Conflict 16) | partial: the current page |
 | `\showthe` | xray | diagnostic node whose result is log text (`> ...`) and an error context — needs the line number field | not yet |
 | `\write` | extension | with `\immediate`: a node whose result is the written line (`Node.log`, ending in a newline), its text expanded in no mode; deferred: a whatsit expanded at `\shipout` | `\immediate` only |

@@ -62,6 +62,10 @@ pub(super) struct BoxGroup {
     pub(super) inner: bool,
     pub(super) space_factor: i32,
     pub(super) prev_depth: i32,
+    /// The enclosing paragraph's language state.
+    pub(super) hyph_lang: [u8; 4],
+    /// The enclosing vertical list's `\prevgraf` (a new list's is 0).
+    pub(super) prev_graf: i32,
 }
 
 /// A box group just closed, for the packaging node: the group, and
@@ -189,6 +193,27 @@ pub(super) fn fonts_in(list: &[Item], out: &mut Vec<Arc<str>>) {
             Item::Disc(d) => {
                 fonts_in(&d.pre, out);
                 fonts_in(&d.post, out);
+                continue;
+            }
+            Item::Noad(m) => {
+                let field = |f: &crate::mlist::Field, out: &mut Vec<Arc<str>>| match f {
+                    crate::mlist::Field::Box(b) => fonts_in(std::slice::from_ref(&Item::Box(b.clone())), out),
+                    crate::mlist::Field::Mlist(l) => fonts_in(l, out),
+                    _ => {}
+                };
+                match &**m {
+                    crate::mlist::MItem::Noad(n) => {
+                        field(&n.nucleus, out);
+                        field(&n.sup, out);
+                        field(&n.sub, out);
+                    }
+                    crate::mlist::MItem::Choice(c) => {
+                        for l in &**c {
+                            fonts_in(l, out);
+                        }
+                    }
+                    _ => {}
+                }
                 continue;
             }
             _ => continue,
@@ -452,6 +477,7 @@ impl Exec<'_> {
         self.st.mode = Mode::H;
         self.st.inner = false;
         self.st.space_factor = 1000;
+        self.begin_paragraph_language();
         if indented {
             let w = self.dimen_par(DimenPar::Parindent);
             self.emit.push(Item::Box(Arc::new(BoxNode { w, ..BoxNode::default() })));
@@ -545,6 +571,7 @@ impl Exec<'_> {
             },
             inter: self.interline(),
             show: self.show_ctx(hlist),
+            hyph: Some(self.hyph_params(hlist)),
         }
     }
 
@@ -745,6 +772,7 @@ impl Exec<'_> {
         let font = self.font();
         let c0 = c0.min(255) as i32;
         self.adjust_space_factor(c0);
+        self.fix_language();
         let mut m = Main {
             bchar: font.bchar,
             false_bchar: font.false_bchar,
@@ -1154,6 +1182,8 @@ impl Exec<'_> {
             inner: self.st.inner,
             space_factor: self.st.space_factor,
             prev_depth: self.st.prev_depth,
+            hyph_lang: self.st.hyph_lang,
+            prev_graf: self.st.prev_graf,
         };
         self.scan_left_brace();
         self.open_box(g, Mode::H);
@@ -1167,6 +1197,8 @@ impl Exec<'_> {
         g.inner = self.st.inner;
         g.space_factor = self.st.space_factor;
         g.prev_depth = self.st.prev_depth;
+        g.hyph_lang = self.st.hyph_lang;
+        g.prev_graf = self.st.prev_graf;
         self.scan_left_brace();
         self.open_box(g, Mode::H);
     }
@@ -1180,6 +1212,7 @@ impl Exec<'_> {
         self.st.level += 1;
         self.st.mode = mode;
         self.st.inner = true;
+        self.st.prev_graf = 0;
         if mode == Mode::V {
             self.st.prev_depth = IGNORE_DEPTH;
         } else {
@@ -1257,6 +1290,8 @@ impl Exec<'_> {
                     inner: self.st.inner,
                     space_factor: self.st.space_factor,
                     prev_depth: self.st.prev_depth,
+            hyph_lang: self.st.hyph_lang,
+            prev_graf: self.st.prev_graf,
                 };
                 self.open_box(g, if vertical { Mode::V } else { Mode::H });
                 let every = self.toks_par(if vertical { TokPar::Everyvbox } else { TokPar::Everyhbox });
@@ -1346,6 +1381,8 @@ impl Exec<'_> {
         self.st.inner = g.inner;
         self.st.space_factor = g.space_factor;
         self.st.prev_depth = g.prev_depth;
+        self.st.hyph_lang = g.hyph_lang;
+        self.st.prev_graf = g.prev_graf;
         self.st.level -= 1;
         self.st.boxing = Some(Arc::new(BoxEnd { g, boxmaxdepth, math: None }));
         self.rewrite(after);

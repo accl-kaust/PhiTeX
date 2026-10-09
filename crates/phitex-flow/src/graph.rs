@@ -40,8 +40,10 @@ use crate::tfm::Font;
 use crate::val::{DimenPar, IntPar, Key, Macro, Meaning, Prim, Tok, Val};
 
 mod assign;
+pub(crate) mod diag;
 mod expand;
 mod fonts;
+mod lang;
 mod material;
 mod math;
 mod scan;
@@ -176,7 +178,10 @@ pub struct RState {
     tstate: TState,
     /// Token lists the input was rewritten with, each with how far it has
     /// been read (innermost last).
-    pending: Vec<(Arc<[Tok]>, usize)>,
+    /// (and whether it was backed up, tex.web 325's `backed_up`: an error's
+    /// context shows it as such; a list read to its end stays until the
+    /// next token is read, as TeX's input level does)
+    pending: Vec<(Arc<[Tok]>, usize, bool)>,
     mode: Mode,
     /// The list being built is internal: a box's (TeX's negative modes).
     inner: bool,
@@ -204,6 +209,9 @@ pub struct RState {
     /// The current line's end-of-line character (`\endlinechar` as the line
     /// was begun; -1: none), or `EOL_UNREAD`.
     eol: i16,
+    /// A paragraph's language state (tex.web 1091, 1376): `clang`, and
+    /// the language and hyphen minima it began with.
+    hyph_lang: [u8; 4],
 }
 
 impl RState {
@@ -226,6 +234,7 @@ impl RState {
             prev_depth: IGNORE_DEPTH,
             prev_graf: 0,
             eol: EOL_UNREAD,
+            hyph_lang: [0, 0, 1, 1],
         }
     }
 }
@@ -426,6 +435,21 @@ pub struct Run {
     pub errors: Vec<String>,
     /// Nodes run this time (the others were kept).
     pub ran: u64,
+}
+
+/// The `Open` node of the `k`-th group enclosing node `i` (0: its own
+/// innermost), for the log's line numbers.
+pub fn enclosing_open(chain: &Chain, i: usize, k: usize) -> Option<usize> {
+    let mut g = chain.nodes.get(i)?.group;
+    for _ in 0..k {
+        g = g.and_then(|x| chain.parent_of.get(&x).copied());
+    }
+    g.map(|x| x as usize)
+}
+
+/// The node that began the paragraph at `level` that node `i` is in.
+pub fn paragraph_start_at(chain: &Chain, i: usize, level: u16) -> usize {
+    material::para_start(chain, i, level)
 }
 
 /// The node that began the paragraph node `i` of `chain` ended (or is
@@ -880,13 +904,17 @@ impl<'a> Exec<'a> {
     // ------------------------------------------------------------ the input
 
     fn back(&mut self, t: Tok) {
-        self.st.pending.push((Arc::from([t]), 0));
+        // (tex.web 325: lists read to their end go first)
+        while self.st.pending.last().is_some_and(|(l, i, _)| *i >= l.len()) {
+            self.st.pending.pop();
+        }
+        self.st.pending.push((Arc::from([t]), 0, true));
     }
 
     /// Rewrites the input: `toks`, then the rest.
     fn rewrite(&mut self, toks: Vec<Tok>) {
         if !toks.is_empty() {
-            self.st.pending.push((Arc::from(toks), 0));
+            self.st.pending.push((Arc::from(toks), 0, false));
         }
     }
 
@@ -970,13 +998,10 @@ impl<'a> Exec<'a> {
     /// mark, the token after it, with `noexp` set.
     fn next_raw(&mut self) -> Option<Tok> {
         self.noexp = false;
-        while let Some((list, i)) = self.st.pending.last_mut() {
+        while let Some((list, i, _)) = self.st.pending.last_mut() {
             if *i < list.len() {
                 let t = list[*i].clone();
                 *i += 1;
-                if *i == list.len() {
-                    self.st.pending.pop();
-                }
                 if t == Tok::DontExpand {
                     let n = self.next_raw();
                     self.noexp = n.as_ref().is_some_and(|x| x.key().is_some());
@@ -1321,7 +1346,11 @@ impl<'a> Exec<'a> {
             Prim::BeginGroup => self.open_group(GroupKind::SemiSimple),
             Prim::EndGroup => match self.st.groups.last().map(|g| g.kind) {
                 Some(GroupKind::SemiSimple) => self.close_group(),
-                Some(GroupKind::Simple | GroupKind::Box | GroupKind::Math) => {
+                Some(GroupKind::Math) => {
+                    let t = self.cmd.clone();
+                    self.math_off_save(&t);
+                }
+                Some(GroupKind::Simple | GroupKind::Box) => {
                     // (tex.web 1064: the missing `}` goes in first)
                     self.err("Missing } inserted".into());
                     let t = self.cmd.clone();
@@ -1351,6 +1380,8 @@ impl<'a> Exec<'a> {
                 }
             }
             Prim::Message | Prim::ErrMessage => self.message(p == Prim::ErrMessage),
+            Prim::SetLanguage => self.set_language(),
+            Prim::Show(c) => self.show_cmd(c),
             Prim::Immediate => self.immediate(),
             Prim::Write => {
                 self.err("\\write without \\immediate is not supported yet (it needs \\shipout)".into());
