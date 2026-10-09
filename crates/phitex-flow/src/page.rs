@@ -283,6 +283,7 @@ impl Scan {
                 self.mark(from);
                 self.ended = true;
             }
+            Item::Halt => self.ended = true,
             Item::Shipout(s) => {
                 self.unsafe_since.push(org);
                 self.pages.push(Page {

@@ -39,7 +39,9 @@ pub use crate::item::{Item, Para};
 use crate::page::IGNORE_DEPTH;
 use crate::tfm::Font;
 use crate::val::{DimenPar, IntPar, Key, Macro, Meaning, Prim, Tok, Val};
+use crate::show::{HALT, NL, RAW, THAT_MAKES_100};
 
+mod align;
 mod assign;
 mod boxes;
 pub(crate) mod diag;
@@ -120,6 +122,11 @@ enum GroupKind {
     Box,
     /// An output routine's braces (tex.web 1025: `output_group`).
     Output,
+    /// An alignment's group, and each of its entries' (tex.web's
+    /// `align_group`; the alignment's carries `Group::align`).
+    Align,
+    /// `\noalign{...}`.
+    NoAlign,
     /// A formula, a subformula, `\left`…`\right`, a `\mathchoice` part
     /// (`Group::boxg`, `math::MathKind`).
     Math,
@@ -185,6 +192,9 @@ struct Group {
     /// The node that opened it (where it was entered, for e-TeX's
     /// `\showgroups`).
     at: u32,
+    /// An alignment's preamble and what it began in; a display's
+    /// dimensions and, once its alignment is set, its material.
+    align: Option<Arc<align::AlignSpec>>,
 }
 
 /// A stack in the reader state, shared until changed: handing the state
@@ -283,6 +293,9 @@ pub struct RState {
     /// The current line's end-of-line character (`\endlinechar` as the line
     /// was begun; -1: none), or `EOL_UNREAD`.
     eol: i16,
+    /// The alignment being read: `align_state`, the current column and
+    /// span, how the entry began and ended (tex.web 309, 770).
+    al: align::AlignCur,
     /// e-TeX's `\protected` prefix is waiting for its definition.
     protected: bool,
     /// The texts the reader is in above the piece's (`\scantokens`
@@ -294,7 +307,13 @@ pub struct RState {
     /// In an output routine's run: what the page builder handed it where
     /// it fired (the same for all its nodes; `output::output_entry`).
     fire: Option<Arc<output::Fire>>,
+    /// tex.web 76's `error_count`: the errors since the last paragraph
+    /// ended (§1096); at [`FATAL_ERRORS`] the reader has stopped (§82).
+    error_count: u8,
 }
+
+/// tex.web 82: the hundredth error is fatal.
+const FATAL_ERRORS: u8 = 100;
 
 impl RState {
     fn start() -> RState {
@@ -316,10 +335,12 @@ impl RState {
             prev_depth: IGNORE_DEPTH,
             prev_graf: 0,
             eol: EOL_UNREAD,
+            al: align::AlignCur::OFF,
             protected: false,
             texts: Stack::new(),
             hyph_lang: [0, 0, 1, 1],
             fire: None,
+            error_count: 0,
         }
     }
 }
@@ -387,7 +408,7 @@ impl Cond {
 impl Group {
     /// Equal but for the node that opened it (a position, not content).
     fn same_but_pos(&self, o: &Group) -> bool {
-        self.kind == o.kind && self.after == o.after && self.boxg == o.boxg
+        self.kind == o.kind && self.after == o.after && self.boxg == o.boxg && self.align == o.align
     }
 }
 
@@ -427,11 +448,13 @@ impl RState {
             && self.prev_depth == o.prev_depth
             && self.prev_graf == o.prev_graf
             && self.eol == o.eol
+            && self.al == o.al
             && self.pending == o.pending
             && self.protected == o.protected
             && self.texts == o.texts
             && self.hyph_lang == o.hyph_lang
             && self.fire == o.fire
+            && self.error_count == o.error_count
     }
 
     /// Whether a node going from `self` to `out` begins a paragraph of the
@@ -1004,6 +1027,13 @@ pub fn paragraph_start_at(chain: &Chain, i: usize, level: u16) -> usize {
 /// in): for the log's line numbers.
 pub fn paragraph_start(chain: &Chain, i: usize) -> usize {
     material::para_start(chain, i, chain.nodes[i].out.level)
+}
+
+/// The node that began the alignment node `i` of `chain` set (its
+/// `\halign` or `\valign`): for the log's line numbers.
+pub fn alignment_start(chain: &Chain, i: usize) -> usize {
+    let level = chain.nodes[i].out.level + 1;
+    material::box_start(chain, i.saturating_sub(1), level)
 }
 
 /// Cuts the source into pieces at blank lines at brace depth 0. Lines lose
@@ -1593,6 +1623,8 @@ struct Exec<'a> {
     ptext: Option<Arc<[char]>>,
     /// The output routine's end this node is (`output::OutputEnd`).
     output: Option<Box<output::OutputEnd>>,
+    /// This node made the hundredth error: the build ends here (§82).
+    halt: bool,
 }
 
 /// Up to this many reads, a node's reads are looked up by a scan.
@@ -1651,6 +1683,7 @@ impl<'a> Exec<'a> {
             old_para: None,
             ptext: None,
             output: None,
+            halt: false,
         }
     }
 
@@ -1668,6 +1701,11 @@ impl<'a> Exec<'a> {
                     }));
                 }
             }
+        }
+        if self.halt {
+            // (§82: at any level, into the page fold's stream)
+            let p = self.para.get_or_insert_with(|| Arc::new(Para::default()));
+            Arc::make_mut(p).after.push(Item::Halt);
         }
         let reads = Few::take(&mut self.reads);
         let emit = Few::take(&mut self.emit);
@@ -1703,7 +1741,33 @@ impl<'a> Exec<'a> {
     }
 
     fn err(&mut self, s: String) {
+        if self.halted() {
+            return;
+        }
         self.errors.push(s);
+        if self.count_error() {
+            let mut l = String::from(RAW);
+            l.push(NL);
+            l.push_str(THAT_MAKES_100);
+            l.push(HALT);
+            self.log_raw(&l);
+        }
+    }
+
+    /// The reader has stopped at its hundredth error (tex.web 82).
+    fn halted(&self) -> bool {
+        self.st.error_count >= FATAL_ERRORS
+    }
+
+    /// tex.web 82: `incr(error_count)`; the hundredth is fatal: whether
+    /// this one was. Nothing more is read (the reader's state says so:
+    /// `next_raw` gives nothing, the next node ends the piece), and this
+    /// node's `Item::Halt` ends the page fold, wherever it is (`jump_out`:
+    /// the page so far is not shipped); its log ends with TeX's line.
+    fn count_error(&mut self) -> bool {
+        self.st.error_count += 1;
+        self.halt = self.st.error_count >= FATAL_ERRORS;
+        self.halt
     }
 
     // ------------------------------------------------------------ names
@@ -1859,6 +1923,10 @@ impl<'a> Exec<'a> {
     // ------------------------------------------------------------ the input
 
     fn back(&mut self, t: Tok) {
+        if self.st.al.on {
+            // (tex.web 325: a brace read again is counted again)
+            align::uncount(&mut self.st.al, &t);
+        }
         // (tex.web 325: lists read to their end go first, not those under
         // a rewritten text)
         let floor = self.st.texts.last().map_or(0, |x| x.at);
@@ -1970,9 +2038,20 @@ impl<'a> Exec<'a> {
     }
 
     /// The next token, unexpanded (tex.web 343-357). After `\noexpand`'s
-    /// mark, the token after it, with `noexp` set.
+    /// mark, the token after it, with `noexp` set. In an alignment, the
+    /// braces are counted and an entry's end inserts its v template
+    /// (tex.web 342: `align_state`).
     fn next_raw(&mut self) -> Option<Tok> {
+        let t = self.next_raw0()?;
+        if self.st.al.on { self.align_token(t) } else { Some(t) }
+    }
+
+    /// [`Exec::next_raw`] before an alignment sees the token.
+    fn next_raw0(&mut self) -> Option<Tok> {
         self.noexp = false;
+        if self.halted() {
+            return None;
+        }
         loop {
             // (the token lists above the innermost rewritten text; a list
             // read to its end stays until the next read, tex.web 325)
@@ -1983,7 +2062,8 @@ impl<'a> Exec<'a> {
                     let t = list[*i].clone();
                     *i += 1;
                     if t == Tok::DontExpand {
-                        let n = self.next_raw();
+                        // (the marked token, as the wrapper will see it)
+                        let n = self.next_raw0();
                         self.noexp = n.as_ref().is_some_and(|x| x.key().is_some());
                         return n;
                     }
@@ -2326,6 +2406,10 @@ impl<'a> Exec<'a> {
     /// The end of the piece: its last paragraph, its open groups and
     /// conditionals.
     fn end(&mut self) {
+        if self.halted() {
+            self.kind = Kind::End;
+            return;
+        }
         self.end_par();
         self.kind = Kind::End;
         if !self.st.groups.is_empty() {
@@ -2343,6 +2427,7 @@ impl<'a> Exec<'a> {
             after: Vec::new(),
             boxg: None,
             at: self.chain.nodes.len() as u32,
+            align: None,
         });
         self.kind = Kind::Open;
     }
@@ -2364,8 +2449,11 @@ impl<'a> Exec<'a> {
                 Some(GroupKind::Math) => self.math_right_brace(),
                 Some(GroupKind::Output) => self.output_close(t),
                 Some(GroupKind::SemiSimple) => self.err("Extra }, or forgotten \\endgroup".into()),
+                Some(GroupKind::Align) => self.missing_cr(t),
+                Some(GroupKind::NoAlign) => self.noalign_close(t),
                 None => self.err("Too many }'s".into()),
             },
+            4 => self.align_error(t),
             10 => {
                 if self.st.mode == Mode::H {
                     self.space_cmd();
@@ -2398,7 +2486,7 @@ impl<'a> Exec<'a> {
                     let t = self.cmd.clone();
                     self.math_off_save(&t);
                 }
-                Some(GroupKind::Simple | GroupKind::Box | GroupKind::Output) => {
+                Some(GroupKind::Simple | GroupKind::Box | GroupKind::Output | GroupKind::Align | GroupKind::NoAlign) => {
                     // (tex.web 1064: the missing `}` goes in first)
                     self.err("Missing } inserted".into());
                     let t = self.cmd.clone();
@@ -2438,6 +2526,7 @@ impl<'a> Exec<'a> {
             Prim::Uppercase | Prim::Lowercase => self.case_shift(p == Prim::Uppercase),
             Prim::EndCsName => self.err("Extra \\endcsname".into()),
             Prim::End | Prim::Dump => self.stop_job(p == Prim::Dump),
+            Prim::Align(a) => self.align_cmd(a),
             Prim::Relax => {}
             Prim::Marks | Prim::Discards(_) | Prim::ShowE(_) | Prim::Lr(_) => self.etex_command(p),
             Prim::LastItem(_)

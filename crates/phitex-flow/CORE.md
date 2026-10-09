@@ -13,10 +13,10 @@ tex.web command code, its graph form and its status here.
 |---|---|---|---|---|
 | (i) expandable, input rewriting | 40 | 37 | 3 | 0 |
 | (ii) assignments, scopes | 151 | 148 | 3 | 0 |
-| (iii) material | 73 | 65 | 0 | 8 |
+| (iii) material | 73 | 72 | 0 | 1 |
 | (iv) layout and output | 43 | 31 | 12 | 0 |
 | (v) IO and diagnostics | 18 | 15 | 1 | 2 |
-| all | 325 | 296 | 19 | 10 |
+| all | 325 | 303 | 19 | 3 |
 
 ("done": tex.web's semantics, checked against `tex -ini` by `tests/core.rs`
 (logs of programs that do not typeset) and `tests/dvi.rs` (DVI files and
@@ -55,6 +55,8 @@ is a field of `RState`, the value a node hands its successor.
 | the contribution list, the current page, `page_so_far`… | the page fold (`page::Scan`): over the outer vertical material in document order, at `Item::BuildPage` (what TeX reads where it calls `build_page`) |
 | `dvi_buf`, `font_used`, `last_bop`… | the DVI fold (`dvi::assemble`) over the pages |
 | `cur_group`, the save stack's group boundaries | `RState.groups` (kind, for mismatch errors; and the `\aftergroup` tokens of each open group) — scoping itself is `Chain::resolve` |
+| `align_stack`, `preamble`, `cur_align`, `cur_span`, `cur_loop`, `align_state` | the preamble a value in the alignment's group entry (`align::AlignSpec`, with the enclosing list's state and alignment); the entry's column, span, `\omit`, end and `align_state` in `RState.al` (Conflict 25) |
+| `error_count`, `history` (fatal) | `RState.error_count`: counted by every error, 0 again when a paragraph ends (§1096); the hundredth stops the reader and the build (Conflict 28) |
 | `cond_ptr`, `if_limit` | `RState.conds`: per open conditional, the node that opened it, which ends may come, its test |
 | `\global`/`\long`/`\outer` prefixes | `RState.global/long/outer`, set by the prefix node, consumed by the assignment node |
 | `after_token` (`\afterassignment`) | `RState.after_assignment` |
@@ -260,6 +262,74 @@ both TeX and the graph; `tests/flow.rs`'s `doc()` begins with its catcodes,
     while the test is read) is the name `\relax`, not a frozen one; a
     macro's parameter shows as `#n` whatever its parameter character; a
     `^^` reduction is not reduced again.
+25. **Alignments** (`graph/align.rs`). `align_stack`, `cur_align`,
+    `cur_span`, `cur_loop`, `align_state`, `preamble` are values: the
+    preamble (`AlignSpec`) in the alignment's group entry of
+    `RState.groups`, read once by the node after `\halign`; the current
+    column, span, `\omit`, how the entry ended and `align_state` in
+    `RState.al`, saved in the spec of an alignment begun inside an entry and
+    given back at its end. `cur_loop`'s growing of the preamble (§793) is
+    the spec's `col_of`: column `j` past the preamble has the templates and
+    tabskip glue of `loop + (j-n) mod (n-loop)`; how many columns there are
+    is `fin_align`'s to find in the rows. Widths are never accumulated:
+    each entry is an unset item (its column, its span), and `fin_align`'s
+    node computes them from all the rows. A `\tabskip=` in a preamble is,
+    as in tex.web 782, a definition (`eq_define`, in the alignment's group:
+    cells see it in `\the\tabskip`), and the glue the spec keeps for the
+    columns after it is the value. `align_state` is TeX's: braces counted
+    as `next_raw` reads them while an alignment is open, a token put back
+    by `back` uncounted (§325), the u template's end a mark token that sets
+    it to 0 (§324); a tab or `\cr` read with it 0 — by any node, in any
+    scanning — inserts the v template, as `get_next` does (§342). Gaps:
+    `\csname` of an undefined name in an entry's first token defines
+    `\relax` in the enclosing group (the peek is in the node opening the
+    entry's group); `\aftergroup` tokens are not counted as `back_input`
+    would count them; "interwoven preambles" is an error of the graph, not
+    TeX's fatal error; an entry ended inside a group of its own (`off_save`
+    at `\endtemplate`) is not supported.
+26. **Display alignments** (`$$\halign{…}$$`, §1145, §1206) live in the
+    display's math group (Math, below). `\halign` in a display whose
+    formula is empty is `init_align` with the depth of the vertical list
+    before the display (kept in the math group's record) as the alignment
+    list's; when it is set, `fin_align` makes the group record's kind
+    `MathKind::DisplayAlign` (the rows, shifted by `\displayindent`, and
+    the depth after them): a definition of the group's field, no emit.
+    After it only assignments come before `$$` (`do_assignments`): the
+    `$` node checks the second `$` ("Display math should end with $$"),
+    anything else is read again after "Missing $$ inserted" (TeX's logs,
+    Conflict 27); the display's parameters are read inside the group
+    (`math_end`), its `Close` emits nothing, and the packaging node emits
+    `\predisplaypenalty`, `\abovedisplayskip`, the rows,
+    `\postdisplaypenalty`, `\belowdisplayskip` and resumes the paragraph
+    (§1200, the same `resume_after_display` as a formula's). Gap: an
+    `\halign` after material in the display is an error of the graph
+    (TeX's "Improper \halign inside $$'s" flushes the formula).
+27. **TeX's errors in the log** (alignments, displays): the message, the
+    help and the context are TeX's (tex.web 72–90, 311–318: the two lines,
+    `half_error_line` 50, `error_line` 79, `\errorcontextlines`). The input
+    levels shown are those the alignment code knows are there (the
+    inserted and put-back tokens, the v template, the token TeX puts back
+    after a character's lookahead read `\endtemplate`); a level the node
+    did not make (a macro's body the token came from) is not shown. The
+    line number is the line the node ended on (`LINE L`), which is the
+    error's line unless the node read past the line's end after it.
+    "in alignment at lines a--b" takes `a` from the line the `\halign`
+    node ended on (after its `{`), where TeX takes the line of `\halign`.
+28. **The hundredth error** (tex.web 82): `error_count` is a field of
+    the reader's state, handed from node to node like the mode; every error
+    counts (TeX's, and the graph's own "not supported yet"), and the end of
+    a paragraph sets it to 0 (`end_graf`, §1096). The node that makes the
+    hundredth writes TeX's "(That makes 100 errors; please try again.)"
+    instead of the help, and from its state on nothing is read (`next_raw`
+    gives nothing, the next node is the piece's `End`, which breaks no
+    paragraph); it emits `Item::Halt`, at whatever level it is, into the
+    page fold's stream, which ends there without `its_all_over` (`jump_out`:
+    the page so far is not shipped). The log ends at that line (no ` )`:
+    the file is not closed). A loop of errors is therefore bounded, as in
+    TeX. Gaps: a piece starts with the count at 0 (TeX's count goes on
+    across a blank line in vertical mode), and the pieces after the halt
+    still run, as after `\end` (Conflict 21): their errors are in the
+    build's list, not in the log.
 
 ## IO: files, streams, writes, `\input`, `\end` (agent E)
 
@@ -447,8 +517,8 @@ byte for byte against `tex -ini`.
   math should end with $$", and again for a display after its equation
   number; `off_save` in math inserts what closes the innermost group
   (`$`, `\right.`, `}`, `\endgroup`, tex.web 1064).
-- Not yet: `\accent` in math (and outside), display alignments
-  (`$$\halign…$$`, with the alignments), `\vadjust` and `\insert` in
+- Display alignments (`$$\halign…$$`): Conflict 26.
+- Not yet: `\accent` in math (and outside), `\vadjust` and `\insert` in
   formulas. Approximation: the check for enough symbol and extension font
   parameters (§1195) counts the parameters the font was loaded with (TeX
   also counts those `\fontdimen` added to the last loaded font); `\right`
@@ -1030,14 +1100,14 @@ e-TeX's primitives:
 | `\atop` | above | node emitting `MItem::Above` with thickness 0 | done |
 | `\atopwithdelims` | above | as `\atop`, with the two delimiters | done |
 | `\char` | char_num | `\char n`: the main loop from that character (tex.web 1038) | done |
-| `\cr` | car_ret | alignment row end | not yet |
-| `\crcr` | car_ret | alignment row end | not yet |
+| `\cr` | car_ret | an entry's end, read with `align_state` 0 (`RState.al`): its v template goes in (a step of the reading node, §789); its `\endtemplate` node closes the entry's group, the next gathers the entry, and `fin_row`'s node the row (§791–§799); elsewhere `align_error` with TeX's log (§1127) | done |
+| `\crcr` | car_ret | as `\cr`; ignored by `align_peek` and in a preamble's end (§785) | done |
 | `\delimiter` | delim_num | in math, `\delimiter n`: a math character `n div "1000` (tex.web 1160); outside math, a `$` is missing | done |
 | `\discretionary` | discretionary | three box-like groups (`BoxKind::Disc`): each `}` is a `Close` node, the packaging node keeps the part and opens the next; the last emits `Item::Disc` and the replacement (tex.web 1117–1121) | done |
 | `\displaylimits` | limit_switch | node emitting `MItem::Limits(normal)`, applied to the list's last noad by its gatherer; the node reads its list to complain if that is not an operator (tex.web 1159) | done |
 | `\displaystyle` | math_style | node emitting `MItem::Style(0)` | done |
 | `\eqno` | eq_no | in a display, opens the equation number's formula (a math group, tex.web 1142); its packaging node keeps the box in the display's group record and closes the display (`\0displayend`) | done |
-| `\halign` | halign | alignment: nodes for the template and rows; the alignment is a node whose operands are the rows' material | not yet |
+| `\halign` | halign | an `Open` node (the alignment's group; `to`/`spread`); the next reads the preamble once — a value in the group's entry (`AlignSpec`: templates, tabskip glue, loop) — and opens the entries' group; entries and rows are gathered by the nodes after their closes (unset items); `fin_align` (§800–§812) is the node after the alignment's close, a pure function of the rows and `\noalign` material its nodes emitted. In a paragraph it ends it (§1094); in `$$…$$` a display alignment in the display's math group (§1145, §1206: the list's depth the vertical list's before the display, rows shifted by `\displayindent`, kept in the group record as `MathKind::DisplayAlign` until `$$`; Conflict 26) | done |
 | `\hfil` | hskip | node emitting glue (tex.web 1060) | done |
 | `\hfill` | hskip | node emitting glue (tex.web 1060) | done |
 | `\hfilneg` | hskip | node emitting glue (tex.web 1060) | done |
@@ -1063,12 +1133,12 @@ e-TeX's primitives:
 | `\mathrel` | math_comp | node emitting a rel noad, nucleus from `scan_math` | done |
 | `\mkern` | mkern | node emitting a kern of subtype `mu_glue` (made explicit by `mlist_to_hlist`) | done |
 | `\mskip` | mskip | node emitting glue of subtype `mu_glue` | done |
-| `\noalign` | no_align | alignment | not yet |
+| `\noalign` | no_align | after a `\cr` (`align_peek`): an `Open` node (its group), its material emitted into the alignment's list; its `}` a `Close` node; elsewhere "Misplaced \noalign" (§1129) | done |
 | `\noboundary` | no_boundary | node affecting ligature boundaries | not yet |
 | `\noindent` | start_par | `new_graf` without the indent box | done |
 | `\nolimits` | limit_switch | node emitting `MItem::Limits(nolimits)` (as `\displaylimits`) | done |
 | `\nonscript` | non_script | node emitting zero glue of subtype `cond_math_glue` (tex.web 1171) | done |
-| `\omit` | omit | alignment | not yet |
+| `\omit` | omit | an entry's first token (`init_col`, §788): no u template, the v template `\endtemplate` alone (`RState.al.omit`); elsewhere "Misplaced \omit" | done |
 | `\over` | above | node emitting `MItem::Above` with the default thickness (`default_code`, made `\fontdimen8` of family 3 by `mlist_to_hlist`) | done |
 | `\overline` | math_comp | node emitting an over noad, nucleus from `scan_math` | done |
 | `\overwithdelims` | above | as `\over`, with the two delimiters | done |
@@ -1080,13 +1150,13 @@ e-TeX's primitives:
 | `\scriptscriptstyle` | math_style | node emitting `MItem::Style(6)` | done |
 | `\scriptstyle` | math_style | node emitting `MItem::Style(4)` | done |
 | `\setlanguage` | extension | node emitting `Item::Lang` and setting `clang` (horizontal mode only, tex.web 1377) | done |
-| `\span` | tab_mark | alignment cell end | not yet |
+| `\span` | tab_mark | in a preamble, expands the next token (§782); in an entry, ends it without closing it: the entry goes on in the next column (§791, span widths at `fin_align`, §798, §803) | done |
 | `\textstyle` | math_style | node emitting `MItem::Style(2)` | done |
 | `\underline` | math_comp | node emitting an under noad, nucleus from `scan_math` | done |
 | `\unkern` | remove_item | node emitting `Item::Remove(1)`, applied by the list's gatherer (tex.web 1105) | done |
 | `\unpenalty` | remove_item | node emitting `Item::Remove(0)`, applied by the list's gatherer | done |
 | `\unskip` | remove_item | node emitting `Item::Remove(2)`, applied by the list's gatherer | done |
-| `\valign` | valign | alignment, vertical | not yet |
+| `\valign` | valign | as `\halign`, rotated: entries vertical (`vpackage(natural, 0)`), rows `vpack`ed into the paragraph (§799, §804, §811); in vertical mode it begins a paragraph; in math a `$` is missing (§1046) | done |
 | `\vcenter` | vcenter | a box group (`BoxKind::Vcenter`); its packaging node `vpack`s the list (with the box report) and emits a vcenter noad (tex.web 1167–1168) | done |
 | `\vfil` | vskip | node emitting glue (vertical mode) | done |
 | `\vfill` | vskip | node emitting glue (vertical mode) | done |

@@ -313,6 +313,8 @@ impl Exec<'_> {
             GroupKind::Simple => 1,
             GroupKind::SemiSimple => 14,
             GroupKind::Output => 8,
+            GroupKind::Align => 6,
+            GroupKind::NoAlign => 7,
             GroupKind::Box | GroupKind::Math => match g.boxg.as_deref().map(|b| (&b.kind, b.adjusted)) {
                 Some((BoxKind::H, true)) => 3,
                 Some((BoxKind::V, _)) => 4,
@@ -359,6 +361,7 @@ impl Exec<'_> {
                 Item::Glue { .. } | Item::Leaders(_) => 11,
                 Item::Kern { .. } => 12,
                 Item::Penalty(_) => 13,
+                Item::Unset(_) => 14,
                 _ => -1,
             },
         }
@@ -366,7 +369,7 @@ impl Exec<'_> {
 
     /// The next token that is not a space, expanded (etex.web §1530:
     /// "get the next non-blank non-call token").
-    fn nonblank_x(&mut self) -> Option<(Tok, Meaning)> {
+    pub(super) fn nonblank_x(&mut self) -> Option<(Tok, Meaning)> {
         loop {
             let x = self.next_x_m(false)?;
             if !matches!(x.1, Meaning::Char(10, _)) {
@@ -730,6 +733,9 @@ impl Exec<'_> {
                 12 => "vcenter",
                 9 => "math",
                 13 => "math choice",
+                6 => "align",
+                7 => "no align",
+                8 => "output",
                 15 => "math shift",
                 _ => "math left",
             };
@@ -806,6 +812,20 @@ impl Exec<'_> {
                     for _ in 0..done.min(3) {
                         out.push_str("{}");
                     }
+                    out.push('{');
+                }
+                // (etex.web §1411; an alignment's entries are shown as its
+                // `\halign` for now)
+                6 => {
+                    self.print_esc(&mut out, "halign");
+                    out.push('{');
+                }
+                7 => {
+                    self.print_esc(&mut out, "noalign");
+                    out.push('{');
+                }
+                8 => {
+                    self.print_esc(&mut out, "output");
                     out.push('{');
                 }
                 15 => match bg.map(|b| &b.kind) {

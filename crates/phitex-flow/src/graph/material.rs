@@ -700,6 +700,10 @@ impl Exec<'_> {
             });
         }
         self.normal_paragraph();
+        // (§1096)
+        if !self.halted() {
+            self.st.error_count = 0;
+        }
     }
 
     // ------------------------------------------------------------ the current list
@@ -1280,7 +1284,7 @@ impl Exec<'_> {
     /// Opens a box group: a scope, and a new list (tex.web 1083: `push_nest`).
     pub(super) fn open_box(&mut self, g: BoxGroup, mode: Mode) {
         let at = self.chain.nodes.len() as u32;
-        self.st.groups.push(Group { kind: GroupKind::Box, after: Vec::new(), boxg: Some(Arc::new(g)), at });
+        self.st.groups.push(Group { kind: GroupKind::Box, after: Vec::new(), boxg: Some(Arc::new(g)), at, align: None });
         self.kind = Kind::Open;
         self.st.level += 1;
         self.st.mode = mode;
@@ -1462,8 +1466,11 @@ impl Exec<'_> {
     pub(super) fn close_box(&mut self, t: &Tok) {
         let Some(g) = self.st.groups.last().and_then(|g| g.boxg.clone()) else { return };
         if self.st.mode == Mode::H && !self.st.inner {
+            // (the `}` read again: as `back_input`, which an alignment's
+            // brace count sees)
             let e = self.cs("\u{0}endgraf");
-            self.rewrite(vec![e, t.clone()]);
+            self.back(t.clone());
+            self.back(e);
             return;
         }
         let boxmaxdepth = self.dimen_par(DimenPar::Boxmaxdepth);

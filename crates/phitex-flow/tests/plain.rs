@@ -28,7 +28,7 @@ const WAITING: [(&str, &str); 10] = [
     ("display", "the page fold running output routines (agent A)"),
     ("display-default", ""),
     ("table", "the page fold running output routines (agent A), \\halign and \\+ (agent C)"),
-    ("table-default", "\\halign and plain's \\+ (agent C)"),
+    ("table-default", ""),
     ("hyphens", "the page fold running output routines (agent A)"),
     ("hyphens-default", ""),
 ];
@@ -169,4 +169,9 @@ fn display_default() {
 #[test]
 fn hyphens_default() {
     check("hyphens-default");
+}
+
+#[test]
+fn table_default() {
+    check("table-default");
 }

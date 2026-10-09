@@ -155,6 +155,41 @@ pub enum Mat {
     Vadjust,
 }
 
+/// An alignment command (tex.web part 37), or one of the reader's own
+/// steps of an alignment (`graph::align`).
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum Al {
+    Halign,
+    Valign,
+    Noalign,
+    Omit,
+    Span,
+    Cr,
+    Crcr,
+    /// The preamble is read (and the entries' group opens).
+    Pre,
+    /// `align_peek` (§785).
+    Peek,
+    /// An entry begins: `init_span`, `init_col` (§787, §788).
+    Col,
+    /// The template's end (`\endtemplate`, §1131: `do_endv`).
+    EndV,
+    /// The end of a u template (an entry's text begins: §324).
+    EndU,
+    /// An entry is packaged into an unset box (§796).
+    Pack,
+    /// The next entry's group opens (§791).
+    Next,
+    /// A row ends (§799: `fin_row`).
+    Row,
+    /// The alignment's group closes (§800).
+    Fin,
+    /// The alignment is set (§800–§812: `fin_align`).
+    Set,
+    /// `\cr` as TeX inserts it (`frozen_cr`).
+    FrozenCr,
+}
+
 /// A math command (tex.web §1136–§1206).
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum MathP {
@@ -273,6 +308,8 @@ pub enum Prim {
     OpenOut,
     CloseOut,
     Special,
+    /// Alignments.
+    Align(Al),
     /// Math.
     Math(MathP),
     /// `\patterns` (true), `\hyphenation` (false).
@@ -422,7 +459,7 @@ params! { GluePar, 18, Lineskip = "lineskip", Baselineskip = "baselineskip", Par
 params! { TokPar, 10, Output = "output", Everypar = "everypar", Everymath = "everymath", Everydisplay = "everydisplay", Everyhbox = "everyhbox", Everyvbox = "everyvbox", Everyjob = "everyjob", Everycr = "everycr", Errhelp = "errhelp", Everyeof = "everyeof" }
 
 /// The reader's internal commands (`Mat::Internal`).
-pub const INTERNAL: [(&str, Prim); 12] = [
+pub const INTERNAL: [(&str, Prim); 23] = [
     ("\u{0}package", Prim::Mat(Mat::Internal(0))),
     ("\u{0}endgraf", Prim::Mat(Mat::Internal(1))),
     ("\u{0}discnext", Prim::Mat(Mat::Internal(2))),
@@ -436,6 +473,17 @@ pub const INTERNAL: [(&str, Prim); 12] = [
     // (an output routine's first two nodes: `graph::output`)
     ("\u{0}output", Prim::Mat(Mat::Internal(10))),
     ("\u{0}outputpage", Prim::Mat(Mat::Internal(11))),
+    ("\u{0}alignpre", Prim::Align(Al::Pre)),
+    ("\u{0}alignpeek", Prim::Align(Al::Peek)),
+    ("\u{0}aligncol", Prim::Align(Al::Col)),
+    ("\u{0}endtemplate", Prim::Align(Al::EndV)),
+    ("\u{0}endu", Prim::Align(Al::EndU)),
+    ("\u{0}alignpack", Prim::Align(Al::Pack)),
+    ("\u{0}alignnext", Prim::Align(Al::Next)),
+    ("\u{0}alignrow", Prim::Align(Al::Row)),
+    ("\u{0}alignfin", Prim::Align(Al::Fin)),
+    ("\u{0}alignset", Prim::Align(Al::Set)),
+    ("\u{0}cr", Prim::Align(Al::FrozenCr)),
 ];
 
 /// Every TeX82 primitive (tex.web §1336: partex-core's `init_prim_tex` less
@@ -477,8 +525,8 @@ pub const PRIMITIVES: [(&str, Prim, &str); 325] = [
     ("copy", Prim::Mat(Mat::MakeBox(1)), "MAKE_BOX"),
     ("count", Prim::Register(Reg::Count), "REGISTER"),
     ("countdef", Prim::Shorthand(Shorthand::Count), "SHORTHAND_DEF"),
-    ("cr", Prim::Unimpl(24), "CAR_RET"),
-    ("crcr", Prim::Unimpl(25), "CAR_RET"),
+    ("cr", Prim::Align(Al::Cr), "CAR_RET"),
+    ("crcr", Prim::Align(Al::Crcr), "CAR_RET"),
     ("csname", Prim::CsName, "CS_NAME"),
     ("day", Prim::IntPar(IntPar::Day), "ASSIGN_INT"),
     ("deadcycles", Prim::PageInt(0), "SET_PAGE_INT"),
@@ -536,7 +584,7 @@ pub const PRIMITIVES: [(&str, Prim, &str); 325] = [
     ("gdef", Prim::Gdef, "DEF"),
     ("global", Prim::Global, "PREFIX"),
     ("globaldefs", Prim::IntPar(IntPar::Globaldefs), "ASSIGN_INT"),
-    ("halign", Prim::Unimpl(3), "HALIGN"),
+    ("halign", Prim::Align(Al::Halign), "HALIGN"),
     ("hangafter", Prim::IntPar(IntPar::Hangafter), "ASSIGN_INT"),
     ("hangindent", Prim::DimenPar(DimenPar::Hangindent), "ASSIGN_DIMEN"),
     ("hbadness", Prim::IntPar(IntPar::Hbadness), "ASSIGN_INT"),
@@ -632,7 +680,7 @@ pub const PRIMITIVES: [(&str, Prim, &str); 325] = [
     ("muskip", Prim::Register(Reg::Muskip), "REGISTER"),
     ("muskipdef", Prim::Shorthand(Shorthand::Muskip), "SHORTHAND_DEF"),
     ("newlinechar", Prim::IntPar(IntPar::Newlinechar), "ASSIGN_INT"),
-    ("noalign", Prim::Unimpl(10), "NO_ALIGN"),
+    ("noalign", Prim::Align(Al::Noalign), "NO_ALIGN"),
     ("noboundary", Prim::Unimpl(11), "NO_BOUNDARY"),
     ("noexpand", Prim::NoExpand, "NO_EXPAND"),
     ("noindent", Prim::Noindent, "START_PAR"),
@@ -642,7 +690,7 @@ pub const PRIMITIVES: [(&str, Prim, &str); 325] = [
     ("nulldelimiterspace", Prim::DimenPar(DimenPar::Nulldelimiterspace), "ASSIGN_DIMEN"),
     ("nullfont", Prim::Unimpl(22), "SET_FONT"),
     ("number", Prim::Convert(Conv::Number), "CONVERT"),
-    ("omit", Prim::Unimpl(13), "OMIT"),
+    ("omit", Prim::Align(Al::Omit), "OMIT"),
     ("openin", Prim::InStream(true), "IN_STREAM"),
     ("openout", Prim::OpenOut, "EXTENSION"),
     ("or", Prim::Or, "FI_OR_ELSE"),
@@ -705,7 +753,7 @@ pub const PRIMITIVES: [(&str, Prim, &str); 325] = [
     ("skipdef", Prim::Shorthand(Shorthand::Skip), "SHORTHAND_DEF"),
     ("spacefactor", Prim::SpaceFactor, "SET_AUX"),
     ("spaceskip", Prim::GluePar(GluePar::Spaceskip), "ASSIGN_GLUE"),
-    ("span", Prim::Unimpl(23), "TAB_MARK"),
+    ("span", Prim::Align(Al::Span), "TAB_MARK"),
     ("special", Prim::Special, "EXTENSION"),
     ("splitbotmark", Prim::Mark(4), "TOP_BOT_MARK"),
     ("splitfirstmark", Prim::Mark(3), "TOP_BOT_MARK"),
@@ -745,7 +793,7 @@ pub const PRIMITIVES: [(&str, Prim, &str); 325] = [
     ("unvcopy", Prim::Mat(Mat::Unvbox(true)), "UN_VBOX"),
     ("uppercase", Prim::Uppercase, "CASE_SHIFT"),
     ("vadjust", Prim::Mat(Mat::Vadjust), "VADJUST"),
-    ("valign", Prim::Unimpl(19), "VALIGN"),
+    ("valign", Prim::Align(Al::Valign), "VALIGN"),
     ("vbadness", Prim::IntPar(IntPar::Vbadness), "ASSIGN_INT"),
     ("vbox", Prim::Mat(Mat::MakeBox(5)), "MAKE_BOX"),
     ("vcenter", Prim::Math(MathP::Vcenter), "VCENTER"),

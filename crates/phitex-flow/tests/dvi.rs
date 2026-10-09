@@ -107,15 +107,21 @@ fn tex_run(name: &str, src: &str, etex: bool) -> Option<(Vec<u8>, String, String
     }
     let _ = std::fs::remove_dir_all(&tmp);
     let log = log?;
-    // (`\showbox`, `\showlists` end in an "OK" error: no other error)
+    // (`\showbox`, `\showlists` end in an "OK" error: no other error; a
+    // document of errors, `alignerr*`, exits with 1 and its log is the
+    // oracle)
     let only_ok = log.lines().filter(|l| l.starts_with("! ")).all(|l| l == "! OK.");
-    assert!(st.status.success() || only_ok, "tex failed on {name}:\n{log}");
+    let errors_doc = name.starts_with("alignerr");
+    assert!(st.status.success() || only_ok || errors_doc, "tex failed on {name}:\n{log}");
     Some((dvi, log, writes_text(written)))
 }
 
 /// TeX's error messages for a document, in order (the "! " lines).
 fn tex_errors(src: &str) -> Option<Vec<String>> {
-    let tmp = std::env::temp_dir().join(format!("phitex-flow-errs-{}", std::process::id()));
+    // (a directory per call: tests run at once)
+    static CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let call = CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp = std::env::temp_dir().join(format!("phitex-flow-errs-{}-{call}", std::process::id()));
     std::fs::create_dir_all(&tmp).ok()?;
     std::fs::write(tmp.join("errs.tex"), src).ok()?;
     Command::new("tex").args(["-ini", "-interaction=batchmode", "errs.tex"]).current_dir(&tmp).output().ok()?;
@@ -353,6 +359,36 @@ fn dump() {
         assert!(dvi.is_empty(), "{name}: no pages");
         let log = log.lines().map(undated).collect::<Vec<_>>().join("\n");
         assert_eq!(log, want, "{name} ({o:?}): the graph's log differs from TeX's");
+    }
+}
+
+// Alignments (tex.web part 37, §1145, §1206): three columns with
+// `\tabskip` glue and `\hfil` templates, `\omit`, `\span` and a
+// `\multispan` made in the document, `\noalign` rules, skips and boxes
+// (`halign`); periodic preambles, `to`, `spread`, `\everycr`, `\crcr`, an
+// overfull alignment (`halign2`); `\valign` (`valign`); display alignments
+// in a paragraph and `\halign` ending one (`display`); TeX's errors and
+// what it does after them (`alignerr`); the hundredth error, which ends
+// the build (tex.web 82: `alignerr3`, a later piece's page not shipped).
+documents!(halign, halign2, valign, display, alignerr, alignerr2, alignerr3);
+
+/// A loop of errors (a macro calling itself after an undefined name) stops
+/// at the hundredth error, as TeX does (tex.web 82), in every schedule.
+#[test]
+fn a_loop_of_errors_ends_at_the_hundredth() {
+    let src = "\\catcode`\\{=1 \\catcode`\\}=2\n\\def\\a{\\undefined\\a}\\a\n\n\\end\n";
+    let want: Vec<String> = match tex_errors(src) {
+        Some(w) => w,
+        None => vec!["Undefined control sequence".to_string(); 100],
+    };
+    assert_eq!(want.len(), 100, "TeX's errors: {want:?}");
+    for &o in &RUNS {
+        let out = Build::new(font()).update(src, o);
+        let got: Vec<&str> = out.errors.iter().map(|e| e.split_once(": ").map_or(e.as_str(), |x| x.1)).collect();
+        assert_eq!(got.len(), 100, "{o:?}: {got:?}");
+        assert!(got.iter().all(|e| e.starts_with("Undefined control sequence")), "{o:?}: {got:?}");
+        let log = phitex_flow::print::log("", &out.log, " )");
+        assert!(log.ends_with("(That makes 100 errors; please try again.)"), "{o:?}: {log}");
     }
 }
 

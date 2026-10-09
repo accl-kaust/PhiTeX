@@ -116,11 +116,16 @@ pub fn log(start: &str, entries: &[String], end: &str) -> String {
     p.print(start);
     let (late, now): (Vec<&String>, Vec<&String>) = entries.iter().partition(|e| e.starts_with(ENDJOB));
     for e in now {
-        p.entry(e);
+        // (the hundredth error ends the log there, without `end`: §82)
+        if p.entry(e) {
+            return p.out;
+        }
     }
     p.print(end);
     for e in late {
-        p.entry(&e[ENDJOB.len_utf8()..]);
+        if p.entry(&e[ENDJOB.len_utf8()..]) {
+            break;
+        }
     }
     p.out
 }
@@ -130,14 +135,33 @@ pub fn log(start: &str, entries: &[String], end: &str) -> String {
 pub const ENDJOB: char = '\u{E006}';
 
 impl Printer {
-    /// One entry of the log.
-    fn entry(&mut self, e: &str) {
+    /// One entry of the log; true if it ends the log (`show::HALT`).
+    fn entry(&mut self, e: &str) -> bool {
         let p = self;
         if let Some(raw) = e.strip_prefix(crate::show::RAW) {
             // (print operations: `print_ln`, `print_nl`, a space if the
             // line is not empty, characters)
+            // (an error's context line: its label's length, what was read,
+            // what was not)
+            let mut ctx: Option<(usize, String, Option<String>)> = None;
             for c in raw.chars() {
+                if c == crate::show::CTX {
+                    ctx = match ctx.take() {
+                        None => Some((p.offset, String::new(), None)),
+                        Some((l, r, None)) => Some((l, r, Some(String::new()))),
+                        Some((l, r, Some(u))) => {
+                            p.context(l, &r, &u);
+                            None
+                        }
+                    };
+                    continue;
+                }
+                if let Some((_, r, u)) = &mut ctx {
+                    u.as_mut().unwrap_or(r).push(c);
+                    continue;
+                }
                 match c {
+                    crate::show::HALT => return true,
                     crate::show::LN => p.ln(),
                     crate::show::NL => {
                         if p.offset > 0 {
@@ -168,6 +192,7 @@ impl Printer {
             }
             p.print(e);
         }
+        false
     }
 }
 
@@ -199,6 +224,61 @@ impl Printer {
             } else {
                 self.char(c);
             }
+        }
+    }
+
+    /// tex.web 316–317: a context line after its label (`l` characters):
+    /// what was read on the first line (its last `half_error_line`
+    /// characters), what was not on the second, under it.
+    fn context(&mut self, l: usize, read: &str, unread: &str) {
+        const ERROR_LINE: usize = 79;
+        const HALF_ERROR_LINE: usize = 50;
+        let printed = |s: &str, out: &mut Vec<char>| {
+            for c in s.chars() {
+                let k = u32::from(c);
+                if k < 32 || k == 127 {
+                    out.push('^');
+                    out.push('^');
+                    out.push(char::from_u32(if k < 64 { k + 64 } else { k - 64 }).unwrap_or('?'));
+                } else {
+                    out.push(c);
+                }
+            }
+        };
+        let (mut a, mut b) = (Vec::new(), Vec::new());
+        printed(read, &mut a);
+        printed(unread, &mut b);
+        // (the pseudoprinting: `trick_buf` keeps what is printed while
+        // `tally<trick_count`, at `tally mod error_line`)
+        let mut buf = [' '; ERROR_LINE];
+        let first_count = a.len();
+        let trick_count = (first_count + 1 + ERROR_LINE - HALF_ERROR_LINE).max(ERROR_LINE);
+        for (tally, &c) in a.iter().chain(&b).enumerate() {
+            if tally < trick_count {
+                buf[tally % ERROR_LINE] = c;
+            }
+        }
+        let tally = a.len() + b.len();
+        let m = if tally < trick_count { tally - first_count } else { trick_count - first_count };
+        let (p, n) = if l + first_count <= HALF_ERROR_LINE {
+            (0, l + first_count)
+        } else {
+            self.print("...");
+            (l + first_count - HALF_ERROR_LINE + 3, HALF_ERROR_LINE)
+        };
+        for q in p..first_count {
+            self.char(buf[q % ERROR_LINE]);
+        }
+        self.ln();
+        for _ in 0..n {
+            self.char(' ');
+        }
+        let p = if m + n <= ERROR_LINE { first_count + m } else { first_count + (ERROR_LINE - n - 3) };
+        for q in first_count..p {
+            self.char(buf[q % ERROR_LINE]);
+        }
+        if m + n > ERROR_LINE {
+            self.print("...");
         }
     }
 }

@@ -150,6 +150,7 @@ pub fn hpack(mut list: Vec<Item>, spec: Spec, params: &Params, adjust: Option<&m
                 }
             }
             Item::Box(b) => boxed(b.w, b.h, b.d, b.shift, &mut x),
+            Item::Unset(u) => boxed(u.w, u.h, u.d, 0, &mut x),
             Item::Rule { w, h: rh, d: rd } => boxed(*w, *rh, *rd, 0, &mut x),
             Item::Glue { g, .. } => {
                 x += g.width;
@@ -191,6 +192,11 @@ pub fn vpack(list: Vec<Item>, spec: Spec, max_depth: i32, params: &Params) -> Pa
                 x += d + b.h;
                 d = b.d;
                 w = w.max(b.w + b.shift);
+            }
+            Item::Unset(u) => {
+                x += d + u.h;
+                d = u.d;
+                w = w.max(u.w);
             }
             Item::Rule { w: rw, h, d: rd } => {
                 x += d + h;
