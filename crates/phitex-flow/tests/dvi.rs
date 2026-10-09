@@ -39,7 +39,10 @@ fn log_body(log: &str) -> Option<String> {
 
 /// TeX's DVI file and log of a document, if there is a `tex`.
 fn tex(name: &str, src: &str) -> Option<(Vec<u8>, String)> {
-    let tmp = std::env::temp_dir().join(format!("phitex-flow-dvi-{name}-{}", std::process::id()));
+    // (a directory per call: two tests run the same document at once)
+    static CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let call = CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp = std::env::temp_dir().join(format!("phitex-flow-dvi-{name}-{}-{call}", std::process::id()));
     std::fs::create_dir_all(&tmp).ok()?;
     std::fs::write(tmp.join(format!("{name}.tex")), src).ok()?;
     let st = Command::new("tex")
