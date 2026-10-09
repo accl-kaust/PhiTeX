@@ -179,3 +179,51 @@ fn reruns_from_dirty_nodes_give_the_same_dvi() {
     }
     assert!(reruns > 0, "no piece ran again from a dirty node");
 }
+
+/// An edit of a document's text.
+type Edit = Box<dyn Fn(&str) -> String>;
+
+#[test]
+fn edits_that_move_piece_boundaries_equal_cold_builds() {
+    // (each edit applied to the previous text, as typing would: splitting
+    // and merging pieces, a brace that changes the depth the cut sees,
+    // edits at the start and at the end)
+    let a = doc(30);
+    let at = |s: &str, pat: &str| s.find(pat).unwrap();
+    let edits: Vec<Edit> = vec![
+        Box::new(|s| s.replacen("number 12 jumps", "number 12\n\njumps", 1)),
+        Box::new(|s| s.replacen("number 12\n\njumps", "number 12 jumps", 1)),
+        Box::new(move |s| {
+            let i = at(s, "number 15 jumps");
+            format!("{}{{{}", &s[..i], &s[i..])
+        }),
+        Box::new(|s| s.replacen("number 18 jumps", "number 18} jumps", 1)),
+        Box::new(|s| format!("\\def\\idle{{dozing}}\n\n{s}")),
+        Box::new(|s| format!("{s}A last word.\n")),
+        Box::new(|s| s.replacen("Pack my box", "\n\n\nPack my box", 3)),
+        Box::new(|s| s.replacen("\\let\\lazy=\\idle\n\n", "", 1)),
+    ];
+    for reads in [Reads::Suspend, Reads::Speculate] {
+        let o = opts(4, reads, Order::Priority);
+        let mut bld = Build::new(font());
+        bld.update(&a, o);
+        let mut s = a.clone();
+        for (i, e) in edits.iter().enumerate() {
+            s = e(&s);
+            let got = bld.update(&s, o);
+            let want = cold(&s, o);
+            assert!(
+                got.dvi == want.dvi,
+                "{reads:?}: edit {i}: the edit's DVI is not the cold build's"
+            );
+            assert_eq!(
+                got.stats.pieces, want.stats.pieces,
+                "{reads:?}: edit {i}: another cut"
+            );
+            assert_eq!(
+                got.stats.commands, want.stats.commands,
+                "{reads:?}: edit {i}: another graph"
+            );
+        }
+    }
+}

@@ -420,22 +420,44 @@ pub struct Run {
 /// Cuts the source into pieces at blank lines at brace depth 0. Lines lose
 /// their trailing spaces and end in `\r` (TeX's end of line).
 pub fn cut(src: &str) -> Vec<Arc<[char]>> {
+    cut_from(src, 0, |_| false).0
+}
+
+/// [`cut`] from byte `from` of `src` (0, or the start of a piece's first
+/// line: the cut there is the same as from the start), giving each piece
+/// with the byte offset of its first line. `stop(p)` is asked at each
+/// piece start `p` after the first; if it says so, the cut ends before it
+/// and `p` is returned too.
+pub fn cut_from(
+    src: &str,
+    from: usize,
+    mut stop: impl FnMut(usize) -> bool,
+) -> (Vec<Arc<[char]>>, Vec<usize>, Option<usize>) {
     let mut pieces: Vec<Arc<[char]>> = Vec::new();
+    let mut starts = vec![from];
     let mut cur: Vec<char> = Vec::new();
     let mut depth: i32 = 0;
     let mut blank_run = false;
-    let mut lines: Vec<&str> = src.split('\n').collect();
-    if lines.last() == Some(&"") {
-        lines.pop();
-    }
-    for line in lines {
-        let line = line.trim_end_matches([' ', '\r']);
+    let mut off = from;
+    let mut lines = src[from..].split('\n').peekable();
+    while let Some(raw) = lines.next() {
+        let line_start = off;
+        off += raw.len() + 1;
+        if raw.is_empty() && lines.peek().is_none() {
+            // (the source's final newline)
+            break;
+        }
+        let line = raw.trim_end_matches([' ', '\r']);
         let blank = line.trim_start_matches(' ').is_empty();
         if blank {
             blank_run = true;
         } else {
             if blank_run && depth == 0 && cur.iter().any(|c| !c.is_whitespace()) {
                 pieces.push(Arc::from(std::mem::take(&mut cur)));
+                if stop(line_start) {
+                    return (pieces, starts, Some(line_start));
+                }
+                starts.push(line_start);
             }
             blank_run = false;
             depth = brace_depth(line, depth);
@@ -443,10 +465,12 @@ pub fn cut(src: &str) -> Vec<Arc<[char]>> {
         cur.extend(line.chars());
         cur.push('\r');
     }
-    if !cur.is_empty() {
+    if cur.is_empty() {
+        starts.truncate(pieces.len());
+    } else {
         pieces.push(Arc::from(cur));
     }
-    pieces
+    (pieces, starts, None)
 }
 
 fn brace_depth(line: &str, mut depth: i32) -> i32 {

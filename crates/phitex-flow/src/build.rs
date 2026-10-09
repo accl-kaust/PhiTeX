@@ -38,7 +38,7 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard, RwLock};
 use std::time::{Duration, Instant};
 
 use crate::dvi;
-use crate::graph::{Env, Para, PieceId, Run, Src, cut, run_piece};
+use crate::graph::{Env, Para, PieceId, Run, Src, cut_from, run_piece};
 use crate::hash::{FxMap, FxSet, hash_of};
 use crate::linebreak::break_lines;
 use crate::page::{Lines, Page, Scan, VItem, material};
@@ -161,11 +161,47 @@ pub struct Build {
     pages: Vec<(Page, Arc<Vec<u8>>)>,
     next_id: PieceId,
     readers: Readers,
+    /// The source the pieces were cut from, and the byte offset of each
+    /// piece's first line in it.
+    src: String,
+    starts: Vec<usize>,
 }
 
 const SHARDS: usize = 64;
 
 type Defs = FxMap<Key, Vec<(u32, Val)>>;
+
+/// The length of the common prefix of `a` and `b`.
+fn common_prefix(a: &[u8], b: &[u8]) -> usize {
+    const CHUNK: usize = 4096;
+    let n = a.len().min(b.len());
+    let mut i = 0;
+    while i + CHUNK <= n && a[i..i + CHUNK] == b[i..i + CHUNK] {
+        i += CHUNK;
+    }
+    i + a[i..n]
+        .iter()
+        .zip(&b[i..n])
+        .take_while(|(x, y)| x == y)
+        .count()
+}
+
+/// The length of the common suffix of `a` and `b`.
+fn common_suffix(a: &[u8], b: &[u8]) -> usize {
+    const CHUNK: usize = 4096;
+    let n = a.len().min(b.len());
+    let (a, b) = (&a[a.len() - n..], &b[b.len() - n..]);
+    let mut i = 0;
+    while i + CHUNK <= n && a[n - i - CHUNK..n - i] == b[n - i - CHUNK..n - i] {
+        i += CHUNK;
+    }
+    i + a[..n - i]
+        .iter()
+        .rev()
+        .zip(b[..n - i].iter().rev())
+        .take_while(|(x, y)| x == y)
+        .count()
+}
 
 /// Every installed run's exports: name -> (piece position, value), by
 /// position. Read by every thread at once, in shards; written only when a
@@ -334,32 +370,100 @@ impl Build {
             pages: Vec::new(),
             next_id: 0,
             readers: FxMap::default(),
+            src: String::new(),
+            starts: Vec::new(),
         }
+    }
+
+    /// Cuts `src` into pieces, the pieces outside the edit from the last
+    /// source to this one being the last cut's (the same `Arc`s): the cut is
+    /// made again from the piece before the one the edit begins in, up to
+    /// the first piece start after the edit that is a piece start of the
+    /// last cut (from a piece start on, the cut depends only on the text
+    /// after it).
+    fn cut(&self, src: &str) -> (Vec<Arc<[char]>>, Vec<usize>) {
+        if self.pieces.is_empty() {
+            let (texts, starts, _) = cut_from(src, 0, |_| false);
+            return (texts, starts);
+        }
+        let (ob, nb) = (self.src.as_bytes(), src.as_bytes());
+        let pre = common_prefix(ob, nb);
+        let olds = || self.pieces.iter().map(|o| o.text.clone());
+        if pre == ob.len() && pre == nb.len() {
+            return (olds().collect(), self.starts.clone());
+        }
+        let suf = common_suffix(&ob[pre..], &nb[pre..]);
+        let new_end = nb.len() - suf;
+        // (the piece the edit begins in, and the one before it)
+        let i = self.starts.partition_point(|&s| s <= pre).saturating_sub(1);
+        let i0 = i.saturating_sub(1);
+        let from = self.starts[i0];
+        let mut again_at = None;
+        let (mid, mid_starts, _) = cut_from(src, from, |p| {
+            if p < new_end {
+                return false;
+            }
+            // (p is in the unchanged tail: its place in the old source)
+            let q = p + ob.len() - nb.len();
+            match self.starts.binary_search(&q) {
+                Ok(j) => {
+                    again_at = Some(j);
+                    true
+                }
+                Err(_) => false,
+            }
+        });
+        let mut texts: Vec<Arc<[char]>> = olds().take(i0).collect();
+        let mut starts: Vec<usize> = self.starts[..i0].to_vec();
+        texts.extend(mid);
+        starts.extend(mid_starts);
+        if let Some(j) = again_at {
+            texts.extend(olds().skip(j));
+            starts.extend(self.starts[j..].iter().map(|&s| s + nb.len() - ob.len()));
+        }
+        (texts, starts)
     }
 
     /// Builds `src`: what changed, and what the changes reach.
     pub fn update(&mut self, src: &str, opts: Options) -> Output {
         let t0 = Instant::now();
         let threads = opts.threads.max(1);
-        let texts = cut(src);
+        let (texts, starts) = self.cut(src);
+        self.src.clear();
+        self.src.push_str(src);
+        self.starts = starts;
         let time_cut = t0.elapsed();
-        // (old pieces found by their text: the map's hash only finds, `==`
-        // decides)
+        // (old pieces found by their text: the same `Arc` (a piece outside
+        // the edit), or equal text at its old place; then equal text
+        // anywhere, in order; the map's hash only finds, `==` decides)
         let olds: Vec<Kept> = std::mem::take(&mut self.pieces);
-        // (an unchanged piece at its old place first; then equal text
-        // anywhere, in order)
         let mut used = vec![false; olds.len()];
         let mut found: Vec<Option<usize>> = vec![None; texts.len()];
+        let by_ptr: FxMap<usize, usize> = olds
+            .iter()
+            .enumerate()
+            .filter(|(_, o)| o.run.is_some())
+            .map(|(i, o)| (o.text.as_ptr() as usize, i))
+            .collect();
         for (k, t) in texts.iter().enumerate() {
-            if olds.get(k).is_some_and(|o| o.run.is_some() && o.text == *t) {
-                used[k] = true;
-                found[k] = Some(k);
+            let at = by_ptr
+                .get(&(t.as_ptr() as usize))
+                .copied()
+                .filter(|&i| Arc::ptr_eq(&olds[i].text, t))
+                .or_else(|| {
+                    (olds.get(k).is_some_and(|o| o.run.is_some() && o.text == *t)).then_some(k)
+                });
+            if let Some(i) = at.filter(|&i| !used[i]) {
+                used[i] = true;
+                found[k] = Some(i);
             }
         }
         let mut by_text: FxMap<Arc<[char]>, VecDeque<usize>> = FxMap::default();
-        for (i, kp) in olds.iter().enumerate() {
-            if kp.run.is_some() && !used[i] {
-                by_text.entry(kp.text.clone()).or_default().push_back(i);
+        if found.iter().any(Option::is_none) {
+            for (i, kp) in olds.iter().enumerate() {
+                if kp.run.is_some() && !used[i] {
+                    by_text.entry(kp.text.clone()).or_default().push_back(i);
+                }
             }
         }
         for (k, t) in texts.iter().enumerate() {
