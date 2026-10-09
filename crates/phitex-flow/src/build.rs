@@ -1794,3 +1794,62 @@ impl Env for PieceEnv<'_> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn font() -> Arc<Font> {
+        let b = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../partex-core/testdata/cmr10.tfm"
+        ))
+        .unwrap();
+        Arc::new(Font::parse("cmr10", &b).unwrap())
+    }
+
+    /// An element between piece 2's nodes 5 and 6 defines `\x`: node 6 on
+    /// read it, the nodes before read piece 0's, the pieces after read
+    /// piece 2's exports; a read is kept for the nodes it reaches.
+    #[test]
+    fn places_are_pieces_and_nodes() {
+        let (names, font) = (Names::new(), font());
+        let x = Key::Cs("x".into());
+        names.set((0, END), &x, Some(&Val::Int(1)));
+        names.set((2, 5), &x, Some(&Val::Int(2)));
+        names.set((2, END), &x, Some(&Val::Int(3)));
+        assert!(matches!(
+            names.reaching(&x, (0, 7), &font),
+            (None, _, 0, END)
+        ));
+        assert!(matches!(
+            names.reaching(&x, (1, 7), &font),
+            (Some((0, END)), Val::Int(1), 0, END)
+        ));
+        assert!(matches!(
+            names.reaching(&x, (2, 3), &font),
+            (Some((0, END)), Val::Int(1), 0, 6)
+        ));
+        assert!(matches!(
+            names.reaching(&x, (2, 5), &font),
+            (Some((0, END)), Val::Int(1), 0, 6)
+        ));
+        assert!(matches!(
+            names.reaching(&x, (2, 6), &font),
+            (Some((2, 5)), Val::Int(2), 6, END)
+        ));
+        assert!(matches!(
+            names.reaching(&x, (3, 0), &font),
+            (Some((2, END)), Val::Int(3), 0, END)
+        ));
+        let mut seq = Sequence::new(vec![10, 11, 12, 13], 21);
+        seq.elems.insert(2, ((2, 5), 20));
+        seq.pos[20] = (2, 5);
+        assert_eq!(seq.id_at((2, 5)), 20);
+        assert_eq!(seq.id_at((2, END)), 12);
+        assert_eq!(seq.pos_of(20), Some((2, 5)));
+        assert_eq!(seq.pos_of(14), None);
+        assert!(src_at_or_before(&seq, 20, (2, END)) && !src_at_or_before(&seq, 20, (2, 4)));
+        assert!(src_at_or_before(&seq, INITIAL, (0, 0)));
+    }
+}
