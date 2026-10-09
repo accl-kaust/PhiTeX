@@ -1347,6 +1347,7 @@ impl<'s, L: Lang> StepCx<'s, L> {
     }
 
     /// `names` with this step's so far, with their values here.
+    #[allow(clippy::unnecessary_wraps, reason = "defined_since's answer")]
     fn since_here(&self, mut names: Set<u32>) -> Option<Since<'s, L::Val>> {
         // (this step so far)
         for d in &self.em.defs {
