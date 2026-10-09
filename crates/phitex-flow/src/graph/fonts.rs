@@ -1,10 +1,10 @@
 //! Fonts as values (tex.web 1252–1261, 577–578, 1253). `\font\f=name` is
 //! a node that reads the TFM file (a pure function of its bytes) and
-//! defines `\f` as the font; a font's identity is its internal number, the
-//! order in which the document first loaded it (`Key::Fonts`, read and
-//! extended by each `\font` that loads a new one), so equal loads are
-//! equal values. Its `\fontdimen`s, `\hyphenchar`, `\skewchar` and the name
-//! it was last defined by are global `Key`s defined at the load.
+//! defines `\f` as the font; a font's identity is its name and size
+//! (`Font::key`), so equal loads are equal values. Its `\fontdimen`s,
+//! `\hyphenchar`, `\skewchar` (defined when it is first loaded:
+//! `Key::FontLoaded`) and the name it was last defined by are global
+//! `Key`s.
 
 use std::sync::Arc;
 
@@ -48,46 +48,35 @@ impl Exec<'_> {
         } else {
             -1000
         };
-        let fonts = match self.get(&Key::Fonts) {
-            Val::Fonts(v) => v,
-            _ => Arc::new(Vec::new()),
+        let Some(data) = self.env.font_file(&name) else {
+            self.err(format!("Font {}={name} not loadable: Metric (TFM) file not found", key_text(&key)));
+            return;
         };
-        // (§1260: a font already loaded at this size is that font)
-        let same = fonts.iter().find(|f| {
-            f.name == name && if s > 0 { s == f.size } else { f.size == xn_over_d(f.design_size, -s, 1000).0 }
-        });
-        let f = if let Some(f) = same {
-            f.clone()
-        } else {
-            let id = fonts.len() as u16 + 1;
-            let loaded = self.env.font_file(&name).and_then(|data| {
-                let at = if s == -1000 {
-                    None
-                } else if s > 0 {
-                    Some(s)
-                } else {
-                    Some(xn_over_d(Font::design_size_of(&data).ok()?, -s, 1000).0)
-                };
-                Font::load(&name, id, data, at).ok()
-            });
-            let Some(f) = loaded else {
-                self.err(format!("Font {}={name} not loadable: Metric (TFM) file not found", key_text(&key)));
-                return;
-            };
-            let f = Arc::new(f);
-            let mut all = (*fonts).clone();
-            all.push(f.clone());
-            self.define(Key::Fonts, Val::Fonts(Arc::new(all)), true);
+        // (tex.web 568: the size; a bad file is not loaded)
+        let size = match s {
+            -1000 => Ok(None),
+            s if s > 0 => Ok(Some(s)),
+            s => Font::design_size_of(&data).map(|z| Some(xn_over_d(z, -s, 1000).0)),
+        };
+        let Some(f) = size.and_then(|at| Font::load(&name, data, at)).ok() else {
+            self.err(format!("Font {}={name} not loadable: Bad metric (TFM) file", key_text(&key)));
+            return;
+        };
+        let f = Arc::new(f);
+        // (§1260: a font already loaded — the same name at the same size — is
+        // that font, its parameters as they are now)
+        let loaded = Key::FontLoaded(f.key.clone());
+        if self.get(&loaded) == Val::Int(0) {
+            self.define(loaded, Val::Int(1), true);
             for (k, &v) in f.params.iter().enumerate().skip(1) {
-                self.define(Key::FontDimen(id, k as u16), Val::Int(v), true);
+                self.define(Key::FontDimen(f.key.clone(), k as u16), Val::Int(v), true);
             }
             let h = self.int_par(IntPar::Defaulthyphenchar);
             let sk = self.int_par(IntPar::Defaultskewchar);
-            self.define(Key::HyphenChar(id), Val::Int(h), true);
-            self.define(Key::SkewChar(id), Val::Int(sk), true);
-            f
-        };
-        self.define(Key::FontIdent(f.id), Val::Name(ident), true);
+            self.define(Key::HyphenChar(f.key.clone()), Val::Int(h), true);
+            self.define(Key::SkewChar(f.key.clone()), Val::Int(sk), true);
+        }
+        self.define(Key::FontIdent(f.key.clone()), Val::Name(ident), true);
         self.define(key, Val::Meaning(Meaning::Font(f)), global);
     }
 
@@ -155,12 +144,12 @@ impl Exec<'_> {
             self.err(format!("Font \\{id} has only {} fontdimen parameters", f.nparams()));
             return None;
         }
-        Some(Key::FontDimen(f.id, n as u16))
+        Some(Key::FontDimen(f.key.clone(), n as u16))
     }
 
     /// The name font `f` was last defined by (`font_id_text`).
     pub(super) fn font_ident(&mut self, f: &Font) -> Arc<str> {
-        match self.get(&Key::FontIdent(f.id)) {
+        match self.get(&Key::FontIdent(f.key.clone())) {
             Val::Name(n) => n,
             _ => Arc::from("FONT"),
         }
@@ -169,7 +158,7 @@ impl Exec<'_> {
     /// `\hyphenchar f` (0) or `\skewchar f` (1): its key.
     pub(super) fn font_int_key(&mut self, which: u8) -> Key {
         let f = self.scan_font_ident();
-        if which == 0 { Key::HyphenChar(f.id) } else { Key::SkewChar(f.id) }
+        if which == 0 { Key::HyphenChar(f.key.clone()) } else { Key::SkewChar(f.key.clone()) }
     }
 
     /// `\hyphenchar f=n`, `\skewchar f=n`: always global (tex.web 1253).

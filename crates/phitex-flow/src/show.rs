@@ -28,7 +28,8 @@ pub const SP: char = '\u{6}';
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub struct Ctx {
     pub esc: i32,
-    pub idents: Vec<(u16, Arc<str>)>,
+    /// Each font's name (`Font::key`) and the name it was last defined by.
+    pub idents: Vec<(Arc<str>, Arc<str>)>,
     pub depth: i32,
     pub breadth: i32,
 }
@@ -40,14 +41,14 @@ impl Ctx {
         }
         out.push_str(s);
     }
-    fn font_ident(&self, out: &mut String, id: u16) {
-        let name = self.idents.iter().find(|(i, _)| *i == id).map_or("FONT?", |(_, n)| &**n);
+    fn font_ident(&self, out: &mut String, key: &str) {
+        let name = self.idents.iter().find(|(i, _)| &**i == key).map_or("FONT?", |(_, n)| &**n);
         self.esc(out, name);
     }
 }
 
 /// §174: `short_display`.
-pub fn short_display(out: &mut String, list: &[Item], font: &mut u16, cx: &Ctx) {
+pub fn short_display(out: &mut String, list: &[Item], font: &mut Arc<str>, cx: &Ctx) {
     let mut skip = 0usize;
     for it in list {
         if skip > 0 {
@@ -57,10 +58,10 @@ pub fn short_display(out: &mut String, list: &[Item], font: &mut u16, cx: &Ctx) 
         }
         match it {
             Item::Char(f, c) => {
-                if f.id != *font {
-                    cx.font_ident(out, f.id);
+                if f.key != *font {
+                    cx.font_ident(out, &f.key);
                     out.push(' ');
-                    *font = f.id;
+                    font.clone_from(&f.key);
                 }
                 out.push(char::from(*c));
             }
@@ -73,10 +74,10 @@ pub fn short_display(out: &mut String, list: &[Item], font: &mut u16, cx: &Ctx) 
             }
             Item::Lig(l) => {
                 for &c in &l.orig {
-                    if l.font.id != *font {
-                        cx.font_ident(out, l.font.id);
+                    if l.font.key != *font {
+                        cx.font_ident(out, &l.font.key);
                         out.push(' ');
-                        *font = l.font.id;
+                        font.clone_from(&l.font.key);
                     }
                     out.push(char::from(c));
                 }
@@ -153,7 +154,6 @@ struct Shower<'a> {
     out: &'a mut String,
     cx: &'a Ctx,
     prefix: String,
-    font: u16,
 }
 
 impl Shower<'_> {
@@ -215,7 +215,7 @@ impl Shower<'_> {
     fn item(&mut self, it: &Item) {
         match it {
             Item::Char(f, c) => {
-                self.cx.font_ident(self.out, f.id);
+                self.cx.font_ident(self.out, &f.key);
                 self.out.push(' ');
                 self.out.push(char::from(*c));
             }
@@ -253,14 +253,13 @@ impl Shower<'_> {
                 let _ = write!(self.out, "{p}");
             }
             Item::Lig(l) => {
-                self.cx.font_ident(self.out, l.font.id);
+                self.cx.font_ident(self.out, &l.font.key);
                 self.out.push(' ');
                 self.out.push(char::from(l.c));
                 self.out.push_str(" (ligature ");
                 if l.left {
                     self.out.push('|');
                 }
-                self.font = l.font.id;
                 for &c in &l.orig {
                     self.out.push(char::from(c));
                 }
@@ -328,7 +327,7 @@ pub fn zround(r: f64) -> i32 {
 
 /// §198: `show_box` of one box (with `print_ln`s as [`LN`]).
 pub fn show_box(out: &mut String, b: &BoxNode, cx: &Ctx) {
-    let mut s = Shower { out, cx, prefix: String::new(), font: 0 };
+    let mut s = Shower { out, cx, prefix: String::new() };
     // (the list of one box, at depth 0: `show_node_list`'s cut applies)
     if cx.depth < 0 {
         s.out.push_str(" []");
@@ -386,7 +385,7 @@ pub fn report(r: Report, b: &BoxNode, place: Place, cx: &Ctx) -> String {
         o.push(LN);
     } else {
         o.push(LN);
-        let mut f = 0u16;
+        let mut f: Arc<str> = Arc::from("nullfont");
         short_display(&mut o, &b.list, &mut f, cx);
         o.push(LN);
     }

@@ -80,16 +80,16 @@ pub enum Key {
     Parshape,
     /// The current font.
     Font,
-    /// `\fontdimen n` of the font with that internal number (global).
-    FontDimen(u16, u16),
+    /// `\fontdimen n` of a font (`Font::key`), global.
+    FontDimen(Arc<str>, u16),
     /// `\hyphenchar`, `\skewchar` of a font (global).
-    HyphenChar(u16),
-    SkewChar(u16),
+    HyphenChar(Arc<str>),
+    SkewChar(Arc<str>),
     /// The name a font was last defined by (`font_id_text`, global).
-    FontIdent(u16),
-    /// The fonts loaded so far, in order: font `k` is entry `k - 1`
-    /// (global; each `\font` loading a new one reads and extends it).
-    Fonts,
+    FontIdent(Arc<str>),
+    /// Whether a font is loaded (global; read by `\font`, which loads it
+    /// once: its parameters are defined then, never again).
+    FontLoaded(Arc<str>),
     /// `\textfont` (size 0), `\scriptfont` (1), `\scriptscriptfont` (2) of a
     /// family.
     FamFont(u8, u8),
@@ -116,6 +116,14 @@ impl std::hash::Hash for Key {
         match self {
             Key::Cs(n) => n.hash(h),
             Key::Cat(x) => h.write_u64((2 << 40) | u64::from(u32::from(*x))),
+            Key::FontDimen(n, k) => {
+                n.hash(h);
+                h.write_u64((20 << 40) | u64::from(*k));
+            }
+            Key::HyphenChar(n) | Key::SkewChar(n) | Key::FontIdent(n) | Key::FontLoaded(n) => {
+                n.hash(h);
+                h.write_u64(self.word());
+            }
             _ => h.write_u64(self.word()),
         }
     }
@@ -125,9 +133,15 @@ impl PartialEq for Key {
     #[inline]
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
-            (Key::Cs(a), Key::Cs(b)) => Arc::ptr_eq(a, b) || a == b,
+            (Key::Cs(a), Key::Cs(b))
+            | (Key::HyphenChar(a), Key::HyphenChar(b))
+            | (Key::SkewChar(a), Key::SkewChar(b))
+            | (Key::FontIdent(a), Key::FontIdent(b))
+            | (Key::FontLoaded(a), Key::FontLoaded(b)) => Arc::ptr_eq(a, b) || a == b,
             (Key::Cat(a), Key::Cat(b)) => a == b,
+            (Key::FontDimen(a, k), Key::FontDimen(b, l)) => k == l && (Arc::ptr_eq(a, b) || a == b),
             (Key::Cs(_), _) | (_, Key::Cs(_)) => false,
+            (x, y) if x.word() == u64::MAX || y.word() == u64::MAX => false,
             _ => self.word() == other.word(),
         }
     }
@@ -143,7 +157,12 @@ impl Key {
         let w = |tag: u64, x: u64| (tag << 40) | x;
         let c = |x: &char| u64::from(u32::from(*x));
         match self {
-            Key::Cs(_) => u64::MAX,
+            Key::Cs(_) | Key::FontDimen(..) => u64::MAX,
+            // (a font's: the font's name is hashed too)
+            Key::HyphenChar(_) => w(21, 0),
+            Key::SkewChar(_) => w(22, 0),
+            Key::FontIdent(_) => w(23, 0),
+            Key::FontLoaded(_) => w(24, 0),
             Key::Active(x) => w(1, c(x)),
             Key::Cat(x) => w(2, c(x)),
             Key::Lccode(x) => w(3, c(x)),
@@ -163,11 +182,6 @@ impl Key {
             Key::Box(n) => w(17, u64::from(*n)),
             Key::Parshape => w(18, 0),
             Key::Font => w(19, 0),
-            Key::FontDimen(f, n) => w(20, (u64::from(*f) << 16) | u64::from(*n)),
-            Key::HyphenChar(f) => w(21, u64::from(*f)),
-            Key::SkewChar(f) => w(22, u64::from(*f)),
-            Key::FontIdent(f) => w(23, u64::from(*f)),
-            Key::Fonts => w(24, 0),
             Key::FamFont(s, f) => w(25, (u64::from(*s) << 8) | u64::from(*f)),
         }
     }
@@ -196,11 +210,11 @@ impl fmt::Display for Key {
             Key::Box(n) => write!(f, "\\box{n}"),
             Key::Parshape => write!(f, "\\parshape"),
             Key::Font => write!(f, "font"),
-            Key::FontDimen(x, n) => write!(f, "\\fontdimen{n} font{x}"),
-            Key::HyphenChar(x) => write!(f, "\\hyphenchar font{x}"),
-            Key::SkewChar(x) => write!(f, "\\skewchar font{x}"),
-            Key::FontIdent(x) => write!(f, "font_id_text font{x}"),
-            Key::Fonts => write!(f, "fonts"),
+            Key::FontDimen(x, n) => write!(f, "\\fontdimen{n} ({x})"),
+            Key::HyphenChar(x) => write!(f, "\\hyphenchar ({x})"),
+            Key::SkewChar(x) => write!(f, "\\skewchar ({x})"),
+            Key::FontIdent(x) => write!(f, "font_id_text ({x})"),
+            Key::FontLoaded(x) => write!(f, "font loaded ({x})"),
             Key::FamFont(s, x) => write!(f, "\\{}font{x}", ["text", "script", "scriptscript"][usize::from(*s).min(2)]),
         }
     }
@@ -265,8 +279,6 @@ pub enum Val {
     Void,
     /// A box register's box.
     Box(Arc<crate::item::BoxNode>),
-    /// The fonts loaded (`Key::Fonts`).
-    Fonts(Arc<Vec<Arc<Font>>>),
     /// A name (`Key::FontIdent`).
     Name(Arc<str>),
 }
@@ -291,7 +303,6 @@ impl fmt::Display for Val {
             Val::Parshape(p) => write!(f, "parshape {}", p.len()),
             Val::Void => write!(f, "void"),
             Val::Box(b) => write!(f, "{}box({}+{})x{}", if b.vertical { "v" } else { "h" }, b.h, b.d, b.w),
-            Val::Fonts(v) => write!(f, "{} fonts", v.len()),
             Val::Name(n) => write!(f, "{n}"),
             Val::Meaning(Meaning::Font(x)) => write!(f, "select font {}", x.name),
             Val::Meaning(Meaning::Undefined) => write!(f, "undefined"),
@@ -354,7 +365,7 @@ pub fn initial(key: &Key, _font: &Arc<Font>) -> Val {
         Key::TokPar(_) | Key::Toks(_) => Val::Toks(Arc::new(Vec::new())),
         // (`\fontdimen`: the null font's, tex.web 552; a loaded font's are
         // defined by its `\font`)
-        Key::DimenPar(_) | Key::Count(_) | Key::Dimen(_) | Key::FontDimen(..) => Val::Int(0),
+        Key::DimenPar(_) | Key::Count(_) | Key::Dimen(_) | Key::FontDimen(..) | Key::FontLoaded(_) => Val::Int(0),
         Key::GluePar(_) | Key::Skip(_) | Key::Muskip(_) => Val::Glue(Arc::new(Glue::default())),
         Key::Box(_) => Val::Void,
         Key::Parshape => Val::Parshape(Arc::new(Vec::new())),
@@ -362,7 +373,6 @@ pub fn initial(key: &Key, _font: &Arc<Font>) -> Val {
         Key::HyphenChar(_) => Val::Int(i32::from(b'-')),
         Key::SkewChar(_) => Val::Int(-1),
         Key::FontIdent(_) => Val::Name(Arc::from("nullfont")),
-        Key::Fonts => Val::Fonts(Arc::new(Vec::new())),
     }
 }
 

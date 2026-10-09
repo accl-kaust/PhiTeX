@@ -3,9 +3,10 @@
 //! function): dimensions, italic corrections, the ligature/kern program,
 //! extensible recipes and parameters.
 //!
-//! A font's identity is its internal number (`id`: the order in which the
-//! document first loaded it, `\nullfont` being 0), its name and its size;
-//! two loads of the same name at the same size are the same font.
+//! A font's identity is its name and its size (`Font::key`): two loads of
+//! the same name at the same size are the same font, an equal value. (TeX's
+//! internal font numbers, the order of first loading, are the DVI file's
+//! font numbers only: `dvi::font_order`.)
 
 use std::fmt;
 use std::sync::Arc;
@@ -58,8 +59,9 @@ impl LigKern {
 /// A loaded font.
 pub struct Font {
     pub name: String,
-    /// The internal font number (`\nullfont` is 0).
-    pub id: u16,
+    /// The font's identity, its name and size (`cmr10 655360`): what the
+    /// `Key`s of its parameters name it by.
+    pub key: Arc<str>,
     pub checksum: u32,
     pub design_size: i32,
     pub size: i32,
@@ -148,7 +150,7 @@ impl Font {
     pub fn null() -> Font {
         Font {
             name: "nullfont".into(),
-            id: 0,
+            key: Arc::from("nullfont"),
             checksum: 0,
             design_size: 0,
             size: 0,
@@ -165,10 +167,9 @@ impl Font {
         }
     }
 
-    /// Parses a TFM file at its design size (internal number 0: not
-    /// loaded by a document).
+    /// Parses a TFM file at its design size.
     pub fn parse(name: &str, b: &[u8]) -> Result<Font, String> {
-        Font::load(name, 0, Arc::from(b), None).map_err(|_| format!("{name}: bad TFM file"))
+        Font::load(name, Arc::from(b), None).map_err(|_| format!("{name}: bad TFM file"))
     }
 
     /// §568: the design size of a TFM file whose size fields are valid.
@@ -187,9 +188,9 @@ impl Font {
         Ok(z)
     }
 
-    /// Loads a TFM file at size `at` (`None`: its design size) as font
-    /// number `id` (tex.web 560–576).
-    pub fn load(name: &str, id: u16, data: Arc<[u8]>, at: Option<i32>) -> Result<Font, BadTfm> {
+    /// Loads a TFM file at size `at` (`None`: its design size), tex.web
+    /// 560–576.
+    pub fn load(name: &str, data: Arc<[u8]>, at: Option<i32>) -> Result<Font, BadTfm> {
         let mut r = Reader { data: &data, pos: 0 };
         let lf = r.sixteen()?;
         let lh = r.sixteen()?;
@@ -357,7 +358,7 @@ impl Font {
             .collect();
         Ok(Font {
             name: name.to_string(),
-            id,
+            key: Font::key_of(name, size),
             checksum: u32::from_be_bytes(check),
             design_size,
             size,
@@ -372,6 +373,11 @@ impl Font {
             bchar_label: (bch_label < nl).then_some(bch_label as u16),
             data,
         })
+    }
+
+    /// The identity of the font `name` at `size`.
+    pub fn key_of(name: &str, size: i32) -> Arc<str> {
+        Arc::from(format!("{name} {size}"))
     }
 
     /// The metrics of character `c`, if the font has it (§554).
@@ -398,8 +404,7 @@ impl Font {
 
 impl PartialEq for Font {
     fn eq(&self, o: &Self) -> bool {
-        std::ptr::eq(self, o)
-            || (self.id == o.id && self.size == o.size && self.checksum == o.checksum && self.name == o.name)
+        std::ptr::eq(self, o) || (self.size == o.size && self.checksum == o.checksum && self.name == o.name)
     }
 }
 
@@ -407,7 +412,7 @@ impl Eq for Font {}
 
 impl std::hash::Hash for Font {
     fn hash<H: std::hash::Hasher>(&self, h: &mut H) {
-        self.id.hash(h);
+        self.name.hash(h);
         self.size.hash(h);
     }
 }
@@ -420,7 +425,7 @@ pub fn null_font() -> Arc<Font> {
 
 impl fmt::Debug for Font {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Font({} #{})", self.name, self.id)
+        write!(f, "Font({})", self.key)
     }
 }
 

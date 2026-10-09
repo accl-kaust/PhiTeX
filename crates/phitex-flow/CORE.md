@@ -43,10 +43,12 @@ is a field of `RState`, the value a node hands its successor.
 | `\box` n | `Key::Box(n)` (`Val::Void`, or `Val::Box(Arc<BoxNode>)`: dimensions, glue setting, contents) |
 | `\parshape` | `Key::Parshape` (`Val::Parshape`) |
 | current font | `Key::Font` (`Val::Font(Arc<Font>)`; initially the null font) |
-| the fonts loaded (`font_ptr`, `font_info`…) | `Key::Fonts` (`Val::Fonts`: the loaded fonts in order; a font's internal number is its place there + 1), global |
-| a font identifier `\f` | `Key::Cs("f")` = `Meaning::Font(Arc<Font>)` (the TFM's data, a pure function of its bytes and size) |
-| `\fontdimen` n of a font | `Key::FontDimen(font id, n)` (always global; defined for every parameter when the font is loaded) |
-| `\hyphenchar`, `\skewchar`, `font_id_text` | `Key::HyphenChar(id)`, `Key::SkewChar(id)`, `Key::FontIdent(id)` (global) |
+| a font (`font_info`…) | `Arc<Font>`: the TFM's data at a size, a pure function of the file's bytes and the size; its identity is its name and size (`Font::key`, `cmr10 655360`), so equal loads are equal values |
+| whether a font is loaded (`font_ptr`'s fonts) | `Key::FontLoaded(font key)`, global: `\font` reads it and defines the font's parameters only at the first load (tex.web 1260) |
+| internal font numbers | none in values: the DVI fold numbers the fonts by their first `Key::FontLoaded` definition in document order (`dvi::font_order`) |
+| a font identifier `\f` | `Key::Cs("f")` = `Meaning::Font(Arc<Font>)` |
+| `\fontdimen` n of a font | `Key::FontDimen(font key, n)` (always global; defined for every parameter at the first load) |
+| `\hyphenchar`, `\skewchar`, `font_id_text` | `Key::HyphenChar(key)`, `Key::SkewChar(key)`, `Key::FontIdent(key)` (global) |
 | `\textfont`, `\scriptfont`, `\scriptscriptfont` | `Key::FamFont(size, fam)` (`Val::Font`) |
 | the current list (`head`…`tail`), `nest` | none: each node emits items (`Node.emit` horizontal, `Node.vemit` vertical; at the outer level `Node.para`), and the node ending a paragraph or a box gathers them; `RState.level` (boxes open), `RState.inner`, `RState.mode` say which list a node emits into |
 | `cur_box`, `box_context`, the saved state of `package` | `RState.groups` entries' `BoxGroup` (kind, context, spec, the enclosing list's mode/space factor/prev depth), handed by the box's `Close` node to its packaging node in `RState.boxing` |
@@ -202,7 +204,7 @@ both TeX and the graph; `tests/flow.rs`'s `doc()` begins with its catcodes,
     (done, tex.web 1023).
 19. **`\the\font`** gives TeX's frozen font identifier (`font_id_base+f`,
     printing as the name the font was last defined by, meaning the font).
-    Here it gives the name itself (`Key::FontIdent(id)`), whose meaning is
+    Here it gives the name itself (`Key::FontIdent(key)`), whose meaning is
     that font unless the name was redefined since: approximation.
 20. **`\badness`** is the badness of the last box packed anywhere — a read
     of the packager's history (lines are packed by another task, pages by
@@ -329,8 +331,8 @@ both TeX and the graph; `tests/flow.rs`'s `doc()` begins with its catcodes,
 | `\fam` | assign_int | node defining `Key::IntPar(p)` (Val::Int); `\global` via RState.global; `\globaldefs` read by every assignment | done |
 | `\finalhyphendemerits` | assign_int | node defining `Key::IntPar(p)` (Val::Int); `\global` via RState.global; `\globaldefs` read by every assignment | done |
 | `\floatingpenalty` | assign_int | node defining `Key::IntPar(p)` (Val::Int); `\global` via RState.global; `\globaldefs` read by every assignment | done |
-| `\font` | def_font | prefixed node: `\font\f=name [at|scaled]` reads the TFM (`Env::font_file`, a pure function of the name) and `Key::Fonts`; a new font gets the next internal number and global `Key::FontDimen(id,n)`, `HyphenChar`, `SkewChar`; defines `\f` = `Meaning::Font` and `Key::FontIdent(id)`; equal (name, size) is the same font (tex.web 1257–1260) | done |
-| `\fontdimen` | assign_font_dimen | `\fontdimen n f`: `Key::FontDimen(font id, n)`, always global | done (no extension of the last font) |
+| `\font` | def_font | prefixed node: `\font\f=name [at|scaled]` reads the TFM (`Env::font_file`, a pure function of the name): the font is a value whose identity is (name, size); at its first load (`Key::FontLoaded`) it defines global `Key::FontDimen(key,n)`, `HyphenChar`, `SkewChar`; defines `\f` = `Meaning::Font` and `Key::FontIdent(key)` (tex.web 1257–1260) | done |
+| `\fontdimen` | assign_font_dimen | `\fontdimen n f`: `Key::FontDimen(font key, n)`, always global | done (no extension of the last font) |
 | `\futurelet` | let | node defining `Key::Cs(name)` = the meaning read (`get`); `\futurelet` rewrites the input with the two tokens | done |
 | `\gdef` | def | node defining `Key::Cs(name)` = `Meaning::Macro` (long/outer flags from RState); `\edef`/`\xdef` expand the body as steps of this node | done |
 | `\global` | prefix | node setting RState.global/long/outer for the next node (which must be an assignment) | done |
@@ -343,7 +345,7 @@ both TeX and the graph; `tests/flow.rs`'s `doc()` begins with its catcodes,
 | `\holdinginserts` | assign_int | node defining `Key::IntPar(p)` (Val::Int); `\global` via RState.global; `\globaldefs` read by every assignment | done |
 | `\hsize` | assign_dimen | node defining `Key::DimenPar(p)` (Val::Int, sp) | done |
 | `\hyphenation` | hyph_data | `\patterns` (IniTeX only) and `\hyphenation`: global definitions of a language's hyphenation tables, `Key::Patterns(lang)`/`Key::Exceptions(lang)`, read by line breaking | not yet |
-| `\hyphenchar` | assign_font_int | `Key::HyphenChar(font id)`, always global | done |
+| `\hyphenchar` | assign_font_int | `Key::HyphenChar(font key)`, always global | done |
 | `\hyphenpenalty` | assign_int | node defining `Key::IntPar(p)` (Val::Int); `\global` via RState.global; `\globaldefs` read by every assignment | done |
 | `\interlinepenalty` | assign_int | node defining `Key::IntPar(p)` (Val::Int); `\global` via RState.global; `\globaldefs` read by every assignment | done |
 | `\language` | assign_int | node defining `Key::IntPar(p)` (Val::Int); `\global` via RState.global; `\globaldefs` read by every assignment | done |
@@ -395,7 +397,7 @@ both TeX and the graph; `tests/flow.rs`'s `doc()` begins with its catcodes,
 | `\sfcode` | def_code | node defining `Key::Cat/Mathcode/Lccode/Uccode/Sfcode/Delcode(c)` | done |
 | `\showboxbreadth` | assign_int | node defining `Key::IntPar(p)` (Val::Int); `\global` via RState.global; `\globaldefs` read by every assignment | done |
 | `\showboxdepth` | assign_int | node defining `Key::IntPar(p)` (Val::Int); `\global` via RState.global; `\globaldefs` read by every assignment | done |
-| `\skewchar` | assign_font_int | `Key::SkewChar(font id)`, always global | done |
+| `\skewchar` | assign_font_int | `Key::SkewChar(font key)`, always global | done |
 | `\skip` | register | node defining `Key::Count/Dimen/Skip/Muskip(n)`; as a value, a read of it | done |
 | `\skipdef` | shorthand_def | node defining `Key::Cs(name)`: first `\relax`, then `Meaning::CharGiven/MathCharGiven/CountRef/DimenRef/SkipRef/MuskipRef/ToksRef` | done |
 | `\spacefactor` | set_aux | `\spacefactor`/`\prevdepth`: fields of RState (the list being built), assigned and read there, never Keys; `\global` has no effect (as in TeX) | partial (see Conflicts) |

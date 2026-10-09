@@ -97,10 +97,12 @@ struct Writer {
     dvi_v: i32,
     cur_h: i32,
     cur_v: i32,
-    dvi_f: u16,
+    dvi_f: u32,
     cur_s: i32,
+    /// Each font's internal number (TeX's: the order of first loading).
+    numbers: std::collections::HashMap<Arc<str>, u32>,
     /// The fonts used so far, by internal number (`font_used`).
-    used: Vec<Option<Arc<Font>>>,
+    used: std::collections::BTreeMap<u32, Arc<Font>>,
 }
 
 impl Writer {
@@ -135,10 +137,10 @@ impl Writer {
         }
     }
 
-    /// §602: `dvi_font_def`.
-    fn font_def(&mut self, f: &Font) {
+    /// §602: `dvi_font_def` of font number `n`.
+    fn font_def(&mut self, f: &Font, n: u32) {
         self.byte(FNT_DEF1);
-        self.int(i32::from(f.id) - 1);
+        self.int(n as i32 - 1);
         self.out.extend(f.checksum.to_be_bytes());
         self.four(f.size);
         self.four(f.design_size);
@@ -149,22 +151,20 @@ impl Writer {
 
     /// §621: change font `dvi_f` to `f`.
     fn change_font(&mut self, f: &Arc<Font>) {
-        let i = usize::from(f.id);
-        if self.used.len() <= i {
-            self.used.resize(i + 1, None);
+        let next = self.numbers.len() as u32 + 1;
+        let k = *self.numbers.entry(f.key.clone()).or_insert(next);
+        if !self.used.contains_key(&k) {
+            self.font_def(f, k);
+            self.used.insert(k, f.clone());
         }
-        if self.used[i].is_none() {
-            self.font_def(f);
-            self.used[i] = Some(f.clone());
-        }
-        let n = i32::from(f.id) - 1;
-        if f.id <= 64 {
+        let n = k as i32 - 1;
+        if k <= 64 {
             self.int(n + i32::from(FNT_NUM_0));
         } else {
             self.byte(FNT1);
             self.int(n);
         }
-        self.dvi_f = f.id;
+        self.dvi_f = k;
     }
 
     /// §607: `movement(w, o)`.
@@ -332,7 +332,7 @@ impl Writer {
     fn char_out(&mut self, f: &Arc<Font>, c: u8) {
         self.synch_h();
         self.synch_v();
-        if f.id != self.dvi_f {
+        if self.numbers.get(&f.key) != Some(&self.dvi_f) {
             self.change_font(f);
         }
         if c >= 128 {
@@ -475,8 +475,29 @@ pub fn page_body(_p: &Page) -> Vec<u8> {
     Vec::new()
 }
 
-/// The DVI file of these pages (none: no file, as TeX writes none).
-pub fn assemble(_font: &Font, pages: &[Page], _bodies: &[Arc<Vec<u8>>]) -> Vec<u8> {
+/// The fonts a document loaded, in order (TeX's internal font numbers,
+/// which are the DVI file's): each font's first `Key::FontLoaded`
+/// definition, in document order.
+pub fn font_order(runs: &[&crate::graph::Run]) -> Vec<Arc<str>> {
+    let mut out: Vec<Arc<str>> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for r in runs {
+        for n in &r.chain.nodes {
+            for d in &n.defs {
+                if let crate::val::Key::FontLoaded(k) = &d.key
+                    && seen.insert(k.clone())
+                {
+                    out.push(k.clone());
+                }
+            }
+        }
+    }
+    out
+}
+
+/// The DVI file of these pages, with fonts numbered in `order` (none: no
+/// file, as TeX writes none).
+pub fn assemble(order: &[Arc<str>], pages: &[Page], _bodies: &[Arc<Vec<u8>>]) -> Vec<u8> {
     let Some(first) = pages.first() else { return Vec::new() };
     let mut w = Writer {
         out: Vec::new(),
@@ -493,7 +514,8 @@ pub fn assemble(_font: &Font, pages: &[Page], _bodies: &[Arc<Vec<u8>>]) -> Vec<u
         cur_v: 0,
         dvi_f: 0,
         cur_s: -1,
-        used: Vec::new(),
+        numbers: order.iter().enumerate().map(|(i, k)| (k.clone(), i as u32 + 1)).collect(),
+        used: std::collections::BTreeMap::new(),
     };
     // (§617: the preamble, at the first page)
     w.byte(PRE);
@@ -522,9 +544,9 @@ pub fn assemble(_font: &Font, pages: &[Page], _bodies: &[Arc<Vec<u8>>]) -> Vec<u
     w.int((w.total_pages / 256) % 256);
     w.int(w.total_pages % 256);
     // (§643: the fonts used, last loaded first)
-    let used: Vec<Arc<Font>> = w.used.iter().rev().flatten().cloned().collect();
-    for f in &used {
-        w.font_def(f);
+    let used: Vec<(u32, Arc<Font>)> = w.used.iter().rev().map(|(k, f)| (*k, f.clone())).collect();
+    for (k, f) in &used {
+        w.font_def(f, *k);
     }
     w.byte(POST_POST);
     w.four(w.last_bop);

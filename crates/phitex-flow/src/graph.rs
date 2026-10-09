@@ -818,7 +818,7 @@ impl<'a> Exec<'a> {
     /// `\fontdimen n` of the current font.
     fn font_param(&mut self, n: u16) -> i32 {
         let f = self.font();
-        self.int(&Key::FontDimen(f.id, n))
+        self.int(&Key::FontDimen(f.key.clone(), n))
     }
 
     fn tok_meaning(&mut self, t: &Tok) -> Meaning {

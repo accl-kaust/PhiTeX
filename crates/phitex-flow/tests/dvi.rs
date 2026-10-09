@@ -251,6 +251,7 @@ fn edits(threads: usize) {
         ("\\parskip=1pt plus 1pt", "\\parskip=2pt plus 1pt"),
         ("\\font\\sl=cmsl10", "\\font\\sl=cmsl10 scaled 1100"),
         ("\\penalty-10000\n\n", "\n"),
+        ("\\font\\rm=cmr10", "\\font\\extra=cmr12 \\font\\rm=cmr10"),
     ];
     {
         let o = Options { threads, ..Options::default() };
@@ -267,4 +268,21 @@ fn edits(threads: usize) {
             assert!(e.dvi == cold.dvi, "after {from:?} => {to:?} at {threads} threads: another DVI");
         }
     }
+}
+
+/// A font loaded before the others renumbers them in the DVI file (TeX's
+/// internal numbers), but a font is its name and size: no paragraph runs
+/// again, only the piece loading it.
+#[test]
+fn a_font_loaded_first_reruns_no_paragraph() {
+    let a = long_doc();
+    let b = a.replacen("\\font\\rm=cmr10", "\\font\\extra=cmr12 \\font\\rm=cmr10", 1);
+    let o = Options::default();
+    let mut bld = Build::new(font());
+    let first = bld.update(&a, o);
+    let e = bld.update(&b, o);
+    let cold = Build::new(font()).update(&b, o);
+    assert!(e.dvi == cold.dvi && e.log == cold.log, "the edit's output is not the cold build's");
+    assert!(e.dvi != first.dvi, "the fonts are numbered anew");
+    assert_eq!(e.stats.ran, 1, "only the piece loading the fonts runs: {:?}", e.stats);
 }

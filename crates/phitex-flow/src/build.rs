@@ -496,7 +496,8 @@ impl Build {
         let mut st = sh.state.into_inner().expect("state");
         let t_join = Instant::now();
         let bodies: Vec<Arc<Vec<u8>>> = st.bodies.iter().map(|b| b.clone().expect("every page shipped")).collect();
-        let out = dvi::assemble(&self.font, &st.pages, &bodies);
+        let order = dvi::font_order(&st.p.iter().filter_map(|ps| ps.run.as_deref()).collect::<Vec<_>>());
+        let out = dvi::assemble(&order, &st.pages, &bodies);
         let mut errors = Vec::new();
         let mut dump = String::new();
         let marks = st.scan.as_ref().map(|s| s.marks.clone()).unwrap_or_default();
