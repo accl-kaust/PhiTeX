@@ -20,7 +20,7 @@ use crate::item::{
 use crate::linebreak::{self, LineParams};
 use crate::pack::{Params, Spec, hpack, vpack};
 use crate::page::{IGNORE_DEPTH, page_mark, push_vertical, remove_last};
-use crate::show::{Ctx, NL, Place, RAW, report};
+use crate::show::{Ctx, NL, RAW, report};
 use crate::tfm::{Font, Glyph, LigKern, Tag};
 use crate::val::{DimenPar, Glue, GluePar, IntPar, Key, Mat, Meaning, Prim, Tok, TokPar, Val};
 
@@ -37,6 +37,8 @@ pub(super) enum BoxKind {
     Vcenter,
     /// A math group (`math.rs`).
     Math(Arc<super::math::MathKind>),
+    /// `\insert n` (tex.web 1097).
+    Insert(u8),
 }
 
 /// What happens to a box when it is made (tex.web 1075: `box_context`).
@@ -72,6 +74,9 @@ pub(super) struct BoxEnd {
     pub(super) boxmaxdepth: i32,
     /// What a math group's close read inside it.
     pub(super) math: Option<Arc<super::math::MathEnd>>,
+    /// An insertion's `\splittopskip`, `\splitmaxdepth`,
+    /// `\floatingpenalty` as its group ended (§1100).
+    pub(super) ins: Option<(Arc<Glue>, i32, i32)>,
 }
 
 /// tex.web 549: `non_char`.
@@ -251,7 +256,6 @@ impl Exec<'_> {
             maxdepth: self.dimen_par(DimenPar::Maxdepth),
             topskip: self.glue_par(GluePar::Topskip),
             hsize: self.dimen_par(DimenPar::Hsize),
-            ship: self.ship_params(),
         })
     }
 
@@ -303,7 +307,7 @@ impl Exec<'_> {
     /// The page builder is called here (only on the main vertical list,
     /// tex.web 994).
     pub(super) fn build_page(&mut self) {
-        if self.st.level == 0 && self.st.mode == Mode::V {
+        if self.st.level == 0 && self.st.mode == Mode::V && !self.st.in_output() {
             let c = self.page_call();
             self.vemit.push(Item::BuildPage(c));
         }
@@ -390,6 +394,7 @@ impl Exec<'_> {
                 }
             }
             Mat::Shipout => self.scan_box(BoxContext::Ship),
+            Mat::Insert => self.begin_insert(),
             Mat::Disc(explicit) => {
                 if v {
                     self.back_new_graf(t);
@@ -445,7 +450,8 @@ impl Exec<'_> {
     /// tex.web 1091: `new_graf`.
     pub(super) fn new_graf(&mut self, indented: bool) {
         self.st.prev_graf = 0;
-        if self.st.level == 0 || !self.current_list(true).is_empty() {
+        let outer = self.st.level == 0 && !self.st.in_output();
+        if outer || !self.current_list(true).is_empty() {
             let g = self.glue_par(GluePar::Parskip);
             self.vemit.push(param_glue(&g, GluePar::Parskip as u8));
         }
@@ -458,7 +464,7 @@ impl Exec<'_> {
         }
         let ep = self.toks_par(TokPar::Everypar);
         self.rewrite(ep);
-        if self.st.level == 0 {
+        if outer {
             let c = self.page_call();
             self.vemit.push(Item::BuildPage(c));
         }
@@ -1191,6 +1197,33 @@ impl Exec<'_> {
         }
     }
 
+    /// `\insert n` (tex.web 1097–1099): a vertical box group whose
+    /// packaging node makes the insertion.
+    fn begin_insert(&mut self) {
+        let n = self.scan_eight_bit_int();
+        if n == 255 {
+            self.err("You can't \\insert255".into());
+            return;
+        }
+        self.scan_left_brace();
+        let g = BoxGroup {
+            kind: BoxKind::Insert(n as u8),
+            context: BoxContext::Shift(0),
+            spec: Spec::NATURAL,
+            adjusted: false,
+            mode: self.st.mode,
+            inner: self.st.inner,
+            space_factor: self.st.space_factor,
+            prev_depth: self.st.prev_depth,
+        };
+        let shaped = self.paragraph_shaped();
+        self.open_box(g, Mode::V);
+        if shaped {
+            let t = self.cs("\u{0}normalparagraph");
+            self.back(t);
+        }
+    }
+
     /// `\setbox n=` (tex.web 1241).
     pub(super) fn setbox(&mut self, global: bool) {
         let n = self.scan_eight_bit_int();
@@ -1348,13 +1381,20 @@ impl Exec<'_> {
             return;
         }
         let boxmaxdepth = self.dimen_par(DimenPar::Boxmaxdepth);
+        let ins = matches!(g.kind, BoxKind::Insert(_)).then(|| {
+            (
+                self.glue_par(GluePar::Splittopskip),
+                self.dimen_par(DimenPar::Splitmaxdepth),
+                self.int_par(IntPar::Floatingpenalty),
+            )
+        });
         let after = self.st.groups.pop().map(|g| g.after).unwrap_or_default();
         self.st.mode = g.mode;
         self.st.inner = g.inner;
         self.st.space_factor = g.space_factor;
         self.st.prev_depth = g.prev_depth;
         self.st.level -= 1;
-        self.st.boxing = Some(Arc::new(BoxEnd { g, boxmaxdepth, math: None }));
+        self.st.boxing = Some(Arc::new(BoxEnd { g, boxmaxdepth, math: None, ins }));
         self.rewrite(after);
         let p = self.cs("\u{0}package");
         self.back(p);
@@ -1367,7 +1407,7 @@ impl Exec<'_> {
         let Some(be) = self.st.boxing.take() else { return };
         self.kind = Kind::Par;
         let inner = self.st.level + 1;
-        let vertical = matches!(be.g.kind, BoxKind::V | BoxKind::Vtop | BoxKind::Vcenter);
+        let vertical = matches!(be.g.kind, BoxKind::V | BoxKind::Vtop | BoxKind::Vcenter | BoxKind::Insert(_));
         let nodes = &self.chain.nodes;
         // (the nodes inside: back from the `Close` node before this one)
         let end = nodes.len().saturating_sub(1);
@@ -1391,6 +1431,20 @@ impl Exec<'_> {
         list.retain(|i| !matches!(i, Item::Shipout(_) | Item::BuildPage(_) | Item::End(_)));
         match &be.g.kind {
             BoxKind::Vcenter => self.vcenter_package(&be, list, ships),
+            BoxKind::Insert(n) => {
+                // (§1100: the insertion's item, its list's natural size)
+                for s in ships {
+                    self.emit_here(s);
+                }
+                let (split_top, depth, float_cost) =
+                    be.ins.clone().unwrap_or_else(|| (Arc::new(Glue::default()), 0, 0));
+                let b = vpack(list, Spec::NATURAL, 0x3FFF_FFFF, &Params::QUIET).b;
+                let ins = crate::item::Ins { n: *n, height: b.h + b.d, depth, split_top, float_cost, list: b.list };
+                self.emit_here(Item::Ins(Arc::new(ins)));
+                if self.st.mode == Mode::V {
+                    self.build_page();
+                }
+            }
             BoxKind::Math(k) => {
                 let k = k.clone();
                 self.math_package(&be, &k, list, ships);
@@ -1405,7 +1459,7 @@ impl Exec<'_> {
                 let packed = hpack(list, be.g.spec, &params, if be.g.adjusted { Some(&mut adj) } else { None });
                 if let Some(r) = packed.report {
                     let cx = self.show_ctx(std::slice::from_ref(&Item::Box(Arc::new(packed.b.clone()))));
-                    let s = report(r, &packed.b, Place::Here, &cx);
+                    let s = report(r, &packed.b, self.box_place(), &cx);
                     self.log_raw(&s);
                 }
                 self.box_end(be.g.context, Some(packed.b), adj, ships);
@@ -1419,7 +1473,7 @@ impl Exec<'_> {
                 let packed = vpack(list, be.g.spec, be.boxmaxdepth, &params);
                 if let Some(r) = packed.report {
                     let cx = self.show_ctx(std::slice::from_ref(&Item::Box(Arc::new(packed.b.clone()))));
-                    let s = report(r, &packed.b, Place::Here, &cx);
+                    let s = report(r, &packed.b, self.box_place(), &cx);
                     self.log_raw(&s);
                 }
                 let mut b = packed.b;
@@ -1451,7 +1505,8 @@ impl Exec<'_> {
                         let parts = if *stage == 0 { (list, Vec::new()) } else { (parts.0.clone(), list) };
                         let mut g = (*be.g).clone();
                         g.kind = BoxKind::Disc(stage + 1, Arc::new(parts));
-                        self.st.boxing = Some(Arc::new(BoxEnd { g: Arc::new(g), boxmaxdepth: be.boxmaxdepth, math: None }));
+                        self.st.boxing =
+                            Some(Arc::new(BoxEnd { g: Arc::new(g), boxmaxdepth: be.boxmaxdepth, math: None, ins: None }));
                         let t = self.cs("\u{0}discnext");
                         self.back(t);
                     }
@@ -1501,6 +1556,8 @@ impl Exec<'_> {
             }
             BoxContext::Set(n, global) => self.define(Key::Box(n), Val::Box(Arc::new(b)), global),
             BoxContext::Ship => {
+                // (§640: `dead_cycles:=0`)
+                self.define(Key::PageInt(0), Val::Int(0), true);
                 let ship = self.ship_params();
                 let mark = page_mark(&ship);
                 self.log_raw(&mark);

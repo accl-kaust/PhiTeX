@@ -208,7 +208,7 @@ impl Exec<'_> {
                 Prim::PrevGraf => IVal::Int(if self.in_write { 0 } else { self.st.prev_graf }),
                 // (the page builder's state: not a read of the reader yet,
                 // CORE.md; an empty page's values)
-                Prim::PageInt(_) => IVal::Int(0),
+                Prim::PageInt(k) => IVal::Int(self.int(&Key::PageInt(k))),
                 Prim::PageDimen(k) => IVal::Dimen(if k == 0 { MAX_DIMEN } else { 0 }),
                 Prim::BoxDimen(c) => IVal::Dimen(self.box_dimen(c)),
                 Prim::Mat(crate::val::Mat::FontInt(k)) => {

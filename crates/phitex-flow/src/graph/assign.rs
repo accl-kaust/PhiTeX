@@ -207,6 +207,14 @@ impl Exec<'_> {
                 Prim::Mat(Mat::SetBox) => self.setbox(global),
                 Prim::Mat(Mat::FontInt(k)) => self.assign_font_int(k),
                 Prim::Interaction(_) => {} // (batch mode or not: only the terminal differs)
+                Prim::PageInt(k) => {
+                    // (tex.web 1246: `\deadcycles`, `\insertpenalties`, set
+                    // without the save stack; the page builder's copy is the
+                    // one an output routine hands back)
+                    self.optional_equals();
+                    let v = self.scan_int();
+                    self.define(Key::PageInt(k), Val::Int(v), true);
+                }
                 _ => self.err(format!("\\{} is not supported yet", p.name())),
             },
             Meaning::CountRef(_) | Meaning::DimenRef(_) | Meaning::SkipRef(_) | Meaning::MuskipRef(_) => {

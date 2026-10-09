@@ -79,15 +79,15 @@ pub struct ShipParams {
 
 /// A point where TeX calls the page builder (tex.web 994), with what it
 /// reads there: the page's specifications (tex.web 987: frozen when the
-/// page gets its first box), `\topskip`, and what shipping a page reads;
-/// `\hsize` for `\end`'s box (tex.web 1054).
+/// page gets its first box), `\topskip`; `\hsize` for `\end`'s box
+/// (tex.web 1054). What shipping a page reads the page builder reads
+/// where it fires.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PageCall {
     pub vsize: i32,
     pub maxdepth: i32,
     pub topskip: Arc<Glue>,
     pub hsize: i32,
-    pub ship: Arc<ShipParams>,
 }
 
 /// An explicit `\shipout`: the box and what shipping reads.
@@ -109,6 +109,19 @@ pub struct Para {
     /// What line breaking reads; `None`: no paragraph.
     pub lb: Option<Arc<crate::linebreak::LineParams>>,
     pub after: Vec<Item>,
+}
+
+/// An insertion (tex.web 140): its class, the natural height plus depth
+/// of its list, `\splitmaxdepth`, `\splittopskip` and `\floatingpenalty`
+/// as its group ended, and its vertical list.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Ins {
+    pub n: u8,
+    pub height: i32,
+    pub depth: i32,
+    pub split_top: Arc<Glue>,
+    pub float_cost: i32,
+    pub list: Vec<Item>,
 }
 
 /// An item of a list.
@@ -138,6 +151,8 @@ pub enum Item {
     Penalty(i32),
     Disc(Arc<Disc>),
     Mark(Arc<Vec<Tok>>),
+    /// `\insert n{…}` (tex.web 140, 1100).
+    Ins(Arc<Ins>),
     /// A math node (tex.web 147): where a formula begins (`after` false)
     /// or ends, with `\mathsurround` as its width.
     Math {
@@ -187,7 +202,7 @@ impl Item {
     /// §148: `precedes_break` — a box, rule, insertion, mark, adjustment,
     /// ligature, discretionary or whatsit (types below `math_node`).
     pub fn precedes_break(&self) -> bool {
-        matches!(self, Item::Box(_) | Item::Rule { .. } | Item::Mark(_) | Item::Lig(_) | Item::Disc(_))
+        matches!(self, Item::Box(_) | Item::Rule { .. } | Item::Mark(_) | Item::Ins(_) | Item::Lig(_) | Item::Disc(_))
     }
 
     /// §148: `non_discardable`.

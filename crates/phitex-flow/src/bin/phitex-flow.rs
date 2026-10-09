@@ -171,7 +171,16 @@ fn main() -> ExitCode {
         }
     };
     let out = out.unwrap_or_else(|| format!("{}.dvi", file.trim_end_matches(".tex")));
-    let mut b = Build::new(font.clone());
+    // (the `.tex` files beside it are what `\input` reads)
+    let files = input_files(&file);
+    let new_build = || {
+        let mut b = Build::new(font.clone());
+        for (name, text) in &files {
+            b.set_file(name, text);
+        }
+        b
+    };
+    let mut b = new_build();
     let cold = b.update(&src, opts);
     report("cold", &cold);
     if dump {
@@ -197,7 +206,7 @@ fn main() -> ExitCode {
             print!("{}", e.dump);
         }
         if check {
-            let fresh = Build::new(font).update(&edited, opts);
+            let fresh = new_build().update(&edited, opts);
             report("cold of the edited text", &fresh);
             println!(
                 "edit == cold: {}",
@@ -212,4 +221,20 @@ fn main() -> ExitCode {
     }
     println!("wrote {out} ({} bytes)", last.dvi.len());
     ExitCode::SUCCESS
+}
+
+/// The `.tex` files in the directory of `file` (by name), for `\input`.
+fn input_files(file: &str) -> Vec<(String, String)> {
+    let dir = std::path::Path::new(file).parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(std::path::Path::new("."));
+    let Ok(rd) = std::fs::read_dir(dir) else { return Vec::new() };
+    let mut out = Vec::new();
+    for e in rd.flatten() {
+        let path = e.path();
+        if path.extension().is_some_and(|x| x == "tex")
+            && let (Some(name), Ok(text)) = (path.file_name().and_then(|n| n.to_str()), std::fs::read_to_string(&path))
+        {
+            out.push((name.to_string(), text));
+        }
+    }
+    out
 }

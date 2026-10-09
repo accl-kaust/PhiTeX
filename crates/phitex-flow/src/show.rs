@@ -76,7 +76,7 @@ pub fn short_display(out: &mut String, list: &[Item], font: &mut Arc<str>, cx: &
                 }
                 cx.chr(out, *c);
             }
-            Item::Box(_) | Item::Mark(_) => out.push_str("[]"),
+            Item::Box(_) | Item::Mark(_) | Item::Ins(_) => out.push_str("[]"),
             Item::Rule { .. } => out.push('|'),
             Item::Math { .. } => out.push('$'),
             Item::Glue { zero, .. } => {
@@ -296,6 +296,18 @@ impl Shower<'_> {
                     print::scaled(self.out, *w);
                 }
             }
+            Item::Ins(x) => {
+                // (§188)
+                self.cx.esc(self.out, "insert");
+                let _ = write!(self.out, "{}, natural size ", x.n);
+                print::scaled(self.out, x.height);
+                self.out.push_str("; split(");
+                spec(self.out, &x.split_top, "");
+                self.out.push(',');
+                print::scaled(self.out, x.depth);
+                let _ = write!(self.out, "); float cost {}", x.float_cost);
+                self.sub('.', &x.list);
+            }
             Item::Mark(t) => {
                 self.cx.esc(self.out, "mark");
                 self.out.push('{');
@@ -365,6 +377,8 @@ pub enum Place {
     Paragraph,
     /// A box made by a command (`detected at line n`).
     Here,
+    /// A box made in an output routine (tex.web 663).
+    Output,
 }
 
 /// The diagnostic TeX prints for a box (tex.web 660–667 for an hbox,
@@ -400,9 +414,13 @@ pub fn report(r: Report, b: &BoxNode, place: Place, cx: &Ctx) -> String {
         Place::Here => {
             let _ = write!(o, ") detected at line {LINE}L{LINE}");
         }
+        Place::Output => o.push_str(") has occurred while \\output is active"),
     }
     if b.vertical {
-        o.push(LN);
+        // (§675: no line ends after "while \output is active")
+        if !matches!(place, Place::Output) {
+            o.push(LN);
+        }
     } else {
         o.push(LN);
         let mut f: Arc<str> = Arc::from("nullfont");

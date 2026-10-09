@@ -391,3 +391,48 @@ fn edits_shift_the_pages() {
         }
     }
 }
+
+// Output routines (tex.web 1012–1028) as nodes where the page builder
+// fires: a routine of its own, marks in the headline, insertions held over
+// and split.
+documents!(outroutine, outmarks, outinserts);
+
+/// plain.tex's own `\output` (`\plainoutput`: the headline with marks, the
+/// page body with footnotes, the footline with `\folio`,
+/// `\advancepageno`), in every schedule.
+#[test]
+fn plainout() {
+    let src = std::fs::read_to_string(dir().join("plainout.tex")).unwrap();
+    check_src("plainout", &src, &RUNS);
+}
+
+/// Edits that move page breaks under an output routine give what a cold
+/// build gives (DVI and log), at 1 and 8 threads: a sentence added on the
+/// first page, a footnote made longer, a mark added.
+#[test]
+fn edits_under_an_output_routine() {
+    let a = std::fs::read_to_string(dir().join("plainout.tex")).unwrap();
+    // (each inserted after the first occurrence of its anchor)
+    let edits: [(&str, &str); 3] = [
+        ("{\\bf Part 1.} ", "An added sentence that moves every page break after it by a line or two of text. "),
+        ("\\footnote*{", "A footnote made longer by several words, enough to take a line more at the foot. "),
+        ("{\\bf Part 2.} ", "\\mark{Interlude}"),
+    ];
+    for threads in [1, 8] {
+        let o = Options { threads, ..Options::default() };
+        let mut b = Build::new(font());
+        let first = b.update(&a, o);
+        assert!(first.errors.is_empty(), "{:?}", first.errors);
+        let mut text = a.clone();
+        for &(anchor, ins) in &edits {
+            let at = text.find(anchor).expect("the anchor") + anchor.len();
+            text.insert_str(at, ins);
+            let e = b.update(&text, o);
+            let cold = Build::new(font()).update(&text, o);
+            assert!(e.errors.is_empty() && cold.errors.is_empty(), "{:?} {:?}", e.errors, cold.errors);
+            assert!(e.log == cold.log, "{ins:?} at {threads} threads: another log");
+            assert!(e.dvi == cold.dvi, "{ins:?} at {threads} threads: another DVI");
+            eprintln!("{threads} threads: edit {:?}, {} routines run, {} kept", e.stats.wall, e.stats.routines, e.stats.routines_kept);
+        }
+    }
+}

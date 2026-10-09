@@ -6,18 +6,235 @@
 //! order: it appends each item to TeX's contribution list (interline glue
 //! from the depth before, tex.web 679), and where a command called the page
 //! builder (`Item::BuildPage`, with what TeX reads there) it moves the
-//! contributions to the page exactly as tex.web part 45 does (§980–§1028,
-//! without insertions, marks' classes or `\output`: the default output
-//! ships `\box255`).
+//! contributions to the page exactly as tex.web part 45 does (§980–§1028:
+//! insertions, marks, `\outputpenalty`, `\deadcycles`; where `\output` is
+//! not empty the fold *fires*: it hands its definitions and the routine to
+//! its environment ([`FoldEnv`]), which runs the routine as nodes at that
+//! place in the document and gives back what it left; otherwise the
+//! default output ships `\box255`).
 
 use std::collections::VecDeque;
 use std::sync::Arc;
 
 use crate::arith::{AWFUL_BAD, INF_BAD, badness};
-use crate::item::{BoxNode, Item, PageCall, Para, ShipParams};
+use crate::item::{BoxNode, Ins, Item, PageCall, Para, ShipParams};
 use crate::linebreak::Line;
 use crate::pack::{Params, Spec, vpack};
-use crate::val::Glue;
+use crate::val::{DimenPar, Glue, IntPar, Key, Tok, TokPar, Val};
+
+/// What the fold reads and makes happen where the page builder is called
+/// (the build's: reads resolve at the calling node's place; a fire's
+/// definitions enter the names index there).
+pub trait FoldEnv {
+    /// The value of `key` where the page builder is called now.
+    fn read(&mut self, key: &Key) -> Val;
+    /// A fire (tex.web 1012): the fold defines `defs` here, then — with
+    /// `routine` — the output routine runs; returns what it left.
+    fn fire(&mut self, defs: Vec<(Key, Val)>, routine: Option<&Arc<Vec<Tok>>>) -> Fired;
+}
+
+/// What a fire gave back (tex.web 1026).
+#[derive(Default)]
+pub struct Fired {
+    /// The routine's vertical list (its `\shipout`s in order among it).
+    pub items: Vec<Item>,
+    /// `\deadcycles` after the routine.
+    pub dead_cycles: Option<i32>,
+    /// What the routine wrote to the log.
+    pub log: Vec<String>,
+    pub errors: Vec<String>,
+    /// The definitions reached a node already read: the fold stops after
+    /// this call (the scan resumes there).
+    pub halt: bool,
+}
+
+/// A fold that never fires a routine nor reads anything (tests, and
+/// documents without `\output`): every read is the initial value.
+pub struct NoEnv;
+
+impl FoldEnv for NoEnv {
+    fn read(&mut self, key: &Key) -> Val {
+        crate::val::initial(key, &crate::tfm::null_font())
+    }
+    fn fire(&mut self, _defs: Vec<(Key, Val)>, _routine: Option<&Arc<Vec<Tok>>>) -> Fired {
+        Fired::default()
+    }
+}
+
+/// tex.web 1009: a page insertion record (`page_ins_head`'s list).
+#[derive(Clone, Debug)]
+struct PageIns {
+    n: u8,
+    split_up: bool,
+    height: i32,
+    /// Indices into the current page: the last insertion of the class on
+    /// it, the last one on it at the best break so far, and the one being
+    /// split there with where its list breaks (`None`: at its end).
+    last_ins: Option<usize>,
+    best_ins: Option<usize>,
+    broken_ins: Option<usize>,
+    broken_ptr: Option<usize>,
+}
+
+/// One log entry of a call that fired a routine: a page shipped by the
+/// default output, or a line the routine wrote.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CallLog {
+    Page(u32),
+    Text(String),
+}
+
+const MAX_DIMEN: i32 = 0o7_777_777_777;
+const EJECT_PENALTY: i32 = -10000;
+const INSERTS_ONLY: u8 = 1;
+
+fn int(v: &Val) -> i32 {
+    match v {
+        Val::Int(i) => *i,
+        Val::Glue(g) => g.width,
+        _ => 0,
+    }
+}
+
+/// tex.web 106: `x_over_n` (truncating).
+fn x_over_n(x: i32, n: i32) -> i32 {
+    if n == 0 { 0 } else { x / n }
+}
+
+/// tex.web 970–976: `vert_break` — where to break the vertical list `list`
+/// for height `h` with `d` the maximum depth: the breakpoint (`None`: its
+/// end) and `best_height_plus_depth`.
+pub fn vert_break(list: &[Item], h: i32, d: i32) -> (Option<usize>, i32) {
+    let mut least_cost = AWFUL_BAD;
+    let (mut cur_height, mut prev_dp) = (0i32, 0i32);
+    let mut stretch = [0i32; 4];
+    let mut shrink = 0i32;
+    let mut best_place = None;
+    let mut best_hd = 0;
+    let mut i = 0;
+    loop {
+        let pi;
+        let p = list.get(i);
+        let mut update = false;
+        match p {
+            None => pi = EJECT_PENALTY,
+            Some(Item::Box(_) | Item::Rule { .. }) => {
+                let (bh, bd) = match p {
+                    Some(Item::Box(b)) => (b.h, b.d),
+                    Some(Item::Rule { h, d, .. }) => (*h, *d),
+                    _ => unreachable!(),
+                };
+                cur_height += prev_dp + bh;
+                prev_dp = bd;
+                if prev_dp > d {
+                    cur_height += prev_dp - d;
+                    prev_dp = d;
+                }
+                i += 1;
+                continue;
+            }
+            Some(Item::Glue { .. }) => {
+                if i > 0 && list[i - 1].precedes_break() {
+                    pi = 0;
+                } else {
+                    pi = 10000;
+                    update = true;
+                }
+            }
+            Some(Item::Kern { .. }) => {
+                if matches!(list.get(i + 1), Some(Item::Glue { .. })) {
+                    pi = 0;
+                } else {
+                    pi = 10000;
+                    update = true;
+                }
+            }
+            Some(Item::Penalty(x)) => pi = *x,
+            Some(_) => {
+                if prev_dp > d {
+                    cur_height += prev_dp - d;
+                    prev_dp = d;
+                }
+                i += 1;
+                continue;
+            }
+        }
+        if !update && pi < 10000 {
+            // (§974–975)
+            let b = if cur_height < h {
+                if stretch[1] != 0 || stretch[2] != 0 || stretch[3] != 0 { 0 } else { badness(h - cur_height, stretch[0]) }
+            } else if cur_height - h > shrink {
+                AWFUL_BAD
+            } else {
+                badness(cur_height - h, shrink)
+            };
+            let b = if b < AWFUL_BAD {
+                if pi <= EJECT_PENALTY {
+                    pi
+                } else if b < INF_BAD {
+                    b + pi
+                } else {
+                    DEPLORABLE
+                }
+            } else {
+                b
+            };
+            if b <= least_cost {
+                best_place = if p.is_none() { None } else { Some(i) };
+                least_cost = b;
+                best_hd = cur_height + prev_dp;
+            }
+            if b == AWFUL_BAD || pi <= EJECT_PENALTY {
+                return (best_place, best_hd);
+            }
+        }
+        // (§976: a glue or kern updates the heights)
+        match p {
+            Some(Item::Glue { g, .. }) => {
+                stretch[usize::from(g.stretch_order.min(3))] += g.stretch;
+                shrink += g.shrink;
+                cur_height += prev_dp + g.width;
+                prev_dp = 0;
+            }
+            Some(Item::Kern { w, .. }) => {
+                cur_height += prev_dp + w;
+                prev_dp = 0;
+            }
+            _ => {}
+        }
+        if prev_dp > d {
+            cur_height += prev_dp - d;
+            prev_dp = d;
+        }
+        i += 1;
+    }
+}
+
+/// tex.web 968: `prune_page_top` — the glue, kerns and penalties before
+/// the first box or rule go; `\splittopskip` (`top`) glue comes before it.
+pub fn prune_page_top(list: Vec<Item>, top: &Glue) -> Vec<Item> {
+    let mut out = Vec::with_capacity(list.len() + 1);
+    let mut it = list.into_iter();
+    for x in it.by_ref() {
+        match &x {
+            Item::Box(_) | Item::Rule { .. } => {
+                let h = match &x {
+                    Item::Box(b) => b.h,
+                    Item::Rule { h, .. } => *h,
+                    _ => 0,
+                };
+                let w = if top.width > h { top.width - h } else { 0 };
+                out.push(Item::Glue { g: Arc::new(Glue { width: w, ..*top }), sub: 11, zero: false });
+                out.push(x);
+                break;
+            }
+            Item::Glue { .. } | Item::Kern { .. } | Item::Penalty(_) => {}
+            _ => out.push(x),
+        }
+    }
+    out.extend(it);
+    out
+}
 
 /// `\prevdepth` meaning "no interline glue" (tex.web 212).
 pub const IGNORE_DEPTH: i32 = -65_536_000;
@@ -203,6 +420,26 @@ pub struct Scan {
     /// The first mark pushed takes this as its first page (a fold resumed
     /// inside a call: the call's pages before the resumption are kept).
     first_from: Option<u32>,
+    /// `\topmark`, `\firstmark`, `\botmark` (tex.web 382).
+    cur_marks: [Option<Arc<Vec<Tok>>>; 3],
+    /// Whether a mark was ever met (its values are then defined at each
+    /// fire).
+    marked: bool,
+    dead_cycles: i32,
+    insert_penalties: i32,
+    /// The page insertion records, by class.
+    ins: Vec<PageIns>,
+    /// Errors the page builder gave (`\box255 is not void`, …).
+    pub errors: Vec<String>,
+    /// For each call (by its mark's index) that fired a routine: its log.
+    pub call_logs: Vec<(u32, Vec<CallLog>)>,
+    /// A fire's definitions reached a node already read: stop feeding.
+    pub halt: bool,
+    /// A routine fired, an insertion or a mark came: the fold's restart
+    /// points are not recorded (the fold is made again from its start).
+    pub fancy: bool,
+    /// The first page the current call made.
+    call_start: u32,
 }
 
 impl Scan {
@@ -252,7 +489,7 @@ impl Scan {
     }
 
     /// Feeds `item`, from `org` in the material.
-    pub fn feed(&mut self, item: Item, org: Org) {
+    pub fn feed(&mut self, item: Item, org: Org, env: &mut dyn FoldEnv) {
         self.fed += 1;
         if self.ended {
             return;
@@ -267,8 +504,9 @@ impl Scan {
         match item {
             Item::BuildPage(call) => {
                 let from = self.pages_made;
+                self.call_start = from;
                 self.cur_call = Some(call.clone());
-                self.build_page(&call);
+                self.build_page(&call, env);
                 self.mark(from);
                 self.last_call = Some(call);
                 self.prev_call = Some(org);
@@ -276,13 +514,15 @@ impl Scan {
             }
             Item::End(call) => {
                 let from = self.pages_made;
+                self.call_start = from;
                 self.cur_call = Some(call.clone());
-                self.its_all_over(&call);
+                self.its_all_over(&call, env);
                 self.mark(from);
                 self.ended = true;
             }
             Item::Shipout(s) => {
                 self.unsafe_since.push(org);
+                self.dead_cycles = 0;
                 self.pages.push(Page {
                     b: s.b.clone(),
                     ship: s.ship.clone(),
@@ -314,6 +554,9 @@ impl Scan {
                 self.contrib.extend(v);
             }
             _ => {
+                if matches!(item, Item::Mark(_) | Item::Ins(_)) {
+                    self.fancy = true;
+                }
                 self.contrib.push_back(item);
                 self.contrib_org.push_back(self.cur);
             }
@@ -323,15 +566,16 @@ impl Scan {
 
     /// The end of the document (`end`: its origin): if it did not end with
     /// `\end`, as if it had (with the last page-builder call's parameters).
-    pub fn finish(&mut self, end: Org) {
+    pub fn finish(&mut self, end: Org, env: &mut dyn FoldEnv) {
         let from = self.pages_made;
+        self.call_start = from;
         if !self.ended
             && let Some(call) = self.last_call.clone()
         {
             self.cur = (end, self.prev_depth.unwrap_or(IGNORE_DEPTH));
             self.cur_call = Some(call.clone());
             self.pending = None;
-            self.its_all_over(&call);
+            self.its_all_over(&call, env);
         }
         self.ended = true;
         self.mark(from);
@@ -343,10 +587,10 @@ impl Scan {
     }
 
     /// tex.web 1054: `its_all_over`, until the page and the contributions
-    /// are empty.
-    fn its_all_over(&mut self, call: &PageCall) {
+    /// are empty and no output routine is in a dead cycle.
+    fn its_all_over(&mut self, call: &PageCall, env: &mut dyn FoldEnv) {
         for _ in 0..1000 {
-            if self.page.is_empty() && self.contrib.is_empty() {
+            if self.page.is_empty() && self.contrib.is_empty() && self.dead_cycles == 0 {
                 return;
             }
             let b = BoxNode {
@@ -365,13 +609,13 @@ impl Scan {
                 zero: false,
             });
             self.push_contrib(Item::Penalty(-0o10_000_000_000));
-            self.build_page(call);
+            self.build_page(call, env);
         }
     }
 
     /// §987
-    fn freeze_page_specs(&mut self, call: &PageCall) {
-        self.page_contents = BOX_THERE;
+    fn freeze_page_specs(&mut self, call: &PageCall, s: u8) {
+        self.page_contents = s;
         self.page_goal = call.vsize;
         self.page_max_depth = call.maxdepth;
         self.depth = 0;
@@ -382,7 +626,7 @@ impl Scan {
     }
 
     /// §994: `build_page`.
-    fn build_page(&mut self, call: &PageCall) {
+    fn build_page(&mut self, call: &PageCall, env: &mut dyn FoldEnv) {
         while let Some(p) = self.contrib.front().cloned() {
             // (§1000)
             let pi;
@@ -396,7 +640,7 @@ impl Scan {
                     if self.page_contents < BOX_THERE {
                         // (§1001: the page begins: `\topskip` before it)
                         if self.page_contents == EMPTY {
-                            self.freeze_page_specs(call);
+                            self.freeze_page_specs(call, BOX_THERE);
                         } else {
                             self.page_contents = BOX_THERE;
                         }
@@ -453,6 +697,11 @@ impl Scan {
                         _ => unreachable!(),
                     }
                 }
+                Item::Ins(x) => {
+                    self.page_insert(call, x, env);
+                    self.contribute();
+                    continue;
+                }
                 _ => {
                     // (marks and anything else: contributed)
                     self.contribute();
@@ -472,24 +721,30 @@ impl Scan {
                 } else {
                     badness(self.total - self.page_goal, self.shrink)
                 };
-                let c = if b < AWFUL_BAD {
+                let mut c = if b < AWFUL_BAD {
                     if pi <= -10000 {
                         pi
                     } else if b < INF_BAD {
-                        b + pi
+                        b + pi + self.insert_penalties
                     } else {
                         DEPLORABLE
                     }
                 } else {
                     b
                 };
+                if self.insert_penalties >= 10000 {
+                    c = AWFUL_BAD;
+                }
                 if c <= self.least_cost {
                     self.best = self.page.len();
                     self.best_size = self.page_goal;
                     self.least_cost = c;
+                    for r in &mut self.ins {
+                        r.best_ins = r.last_ins;
+                    }
                 }
                 if c == AWFUL_BAD || pi <= -10000 {
-                    self.fire_up(call);
+                    self.fire_up(env);
                     continue;
                 }
             }
@@ -531,32 +786,225 @@ impl Scan {
         }
     }
 
-    /// §1012, §1017: the page up to the best break becomes `\box255`, what
-    /// follows goes back to the contributions, and the default output
-    /// ships the box (§1023).
-    fn fire_up(&mut self, call: &PageCall) {
+    /// §1008–§1010: an insertion arrives on the page (its class's
+    /// registers read where the page builder is called).
+    fn page_insert(&mut self, call: &PageCall, x: &Arc<Ins>, env: &mut dyn FoldEnv) {
+        self.fancy = true;
+        if self.page_contents == EMPTY {
+            self.freeze_page_specs(call, INSERTS_ONLY);
+        }
+        let n = x.n;
+        let k = u16::from(n);
+        let ri = if let Some(i) = self.ins.iter().position(|r| r.n == n) {
+            i
+        } else {
+            {
+                // (§1009: a new record; the box's contents and `\skip n` count)
+                let height = match env.read(&Key::Box(k)) {
+                    Val::Box(b) => {
+                        if !b.vertical {
+                            self.errors.push(format!("Insertions can only be added to a vbox (\\box{n})"));
+                        }
+                        b.h + b.d
+                    }
+                    _ => 0,
+                };
+                let count = int(&env.read(&Key::Count(k)));
+                let h = if count == 1000 { height } else { x_over_n(height, 1000) * count };
+                let q = match env.read(&Key::Skip(k)) {
+                    Val::Glue(g) => g,
+                    _ => Arc::new(Glue::default()),
+                };
+                self.page_goal -= h + q.width;
+                self.stretch[usize::from(q.stretch_order.min(3))] += q.stretch;
+                self.shrink += q.shrink;
+                if q.shrink_order != 0 && q.shrink != 0 {
+                    self.errors.push(format!("Infinite glue shrinkage inserted from \\skip{n}"));
+                }
+                let at = self.ins.partition_point(|r| r.n < n);
+                self.ins.insert(
+                    at,
+                    PageIns {
+                        n,
+                        split_up: false,
+                        height,
+                        last_ins: None,
+                        best_ins: None,
+                        broken_ins: None,
+                        broken_ptr: None,
+                    },
+                );
+                at
+            }
+        };
+        if self.ins[ri].split_up {
+            self.insert_penalties += x.float_cost;
+            return;
+        }
+        let here = self.page.len();
+        self.ins[ri].last_ins = Some(here);
+        let delta = self.page_goal - self.total - self.depth + self.shrink;
+        let count = int(&env.read(&Key::Count(k)));
+        let h = if count == 1000 { x.height } else { x_over_n(x.height, 1000) * count };
+        let dimen = int(&env.read(&Key::Dimen(k)));
+        if (h <= 0 || h <= delta) && x.height + self.ins[ri].height <= dimen {
+            self.page_goal -= h;
+            self.ins[ri].height += x.height;
+        } else {
+            // (§1010: the best way to split it)
+            let mut w = if count <= 0 {
+                MAX_DIMEN
+            } else {
+                let mut w = self.page_goal - self.total - self.depth;
+                if count != 1000 {
+                    w = x_over_n(w, count) * 1000;
+                }
+                w
+            };
+            if w > dimen - self.ins[ri].height {
+                w = dimen - self.ins[ri].height;
+            }
+            let (q, mut best) = vert_break(&x.list, w, x.depth);
+            self.ins[ri].height += best;
+            if count != 1000 {
+                best = x_over_n(best, 1000) * count;
+            }
+            self.page_goal -= best;
+            let r = &mut self.ins[ri];
+            r.split_up = true;
+            r.broken_ptr = q;
+            r.broken_ins = Some(here);
+            match q {
+                None => self.insert_penalties += EJECT_PENALTY,
+                Some(i) => {
+                    if let Item::Penalty(p) = x.list[i] {
+                        self.insert_penalties += p;
+                    }
+                }
+            }
+        }
+    }
+
+    /// §1012–§1023: the page up to the best break becomes `\box255`, its
+    /// insertions go to their boxes (or are held over), its marks set
+    /// `\firstmark` and `\botmark`, what follows goes back to the
+    /// contributions; then the output routine fires (`env`), or the default
+    /// output ships the box.
+    fn fire_up(&mut self, env: &mut dyn FoldEnv) {
+        // (§1012: the bottom mark of the last page is the top mark)
+        if let Some(b) = self.cur_marks[2].clone() {
+            self.cur_marks[0] = Some(b);
+            self.cur_marks[1] = None;
+        }
         let at = self.best.min(self.page.len());
         let mut rest: Vec<Item> = self.page.drain(at..).collect();
         let rest_org: Vec<(Org, i32)> = self.page_org.drain(at..).collect();
-        // (§1013: the break's penalty becomes 10000)
-        if let Some(Item::Penalty(_)) = rest.first() {
+        // (§1013: the break's penalty is `\outputpenalty`, and 10000 now)
+        let mut out_pen = 10000;
+        if let Some(Item::Penalty(x)) = rest.first() {
+            out_pen = *x;
             rest[0] = Item::Penalty(10000);
         } else if rest.is_empty()
-            && let Some(Item::Penalty(_)) = self.contrib.front()
+            && let Some(Item::Penalty(x)) = self.contrib.front()
         {
+            out_pen = *x;
             self.contrib[0] = Item::Penalty(10000);
         }
         for (it, o) in rest.into_iter().zip(rest_org).rev() {
             self.contrib.push_front(it);
             self.contrib_org.push_front(o);
         }
+        let routine = match env.read(&Key::TokPar(TokPar::Output)) {
+            Val::Toks(t) if !t.is_empty() => Some(t),
+            _ => None,
+        };
+        let fancy = self.fancy || routine.is_some();
+        // (§1015: `\box255` must be void)
+        if fancy && !matches!(env.read(&Key::Box(255)), Val::Void) {
+            self.errors.push("\\box255 is not void".into());
+        }
+        self.insert_penalties = 0;
+        let holding = !self.ins.is_empty() && int(&env.read(&Key::IntPar(IntPar::Holdinginserts))) > 0;
+        // (§1018: the boxes of the classes with insertions on the page, as
+        // queues)
+        let mut boxes: Vec<(u8, Vec<Item>)> = Vec::new();
+        if !holding {
+            for r in &self.ins {
+                if r.best_ins.is_some() {
+                    let list = match env.read(&Key::Box(u16::from(r.n))) {
+                        Val::Box(b) => b.list.clone(),
+                        _ => Vec::new(),
+                    };
+                    boxes.push((r.n, list));
+                }
+            }
+        }
+        // (§1019–§1022: the page's items before the break)
         let items = std::mem::take(&mut self.page);
-        self.page_org.clear();
+        let item_orgs = std::mem::take(&mut self.page_org);
+        let mut kept = Vec::with_capacity(items.len());
+        let mut held: Vec<(Item, (Org, i32))> = Vec::new();
+        for (j, (it, o)) in items.into_iter().zip(item_orgs).enumerate() {
+            match it {
+                Item::Ins(x) if !holding => {
+                    let Some(ri) = self.ins.iter().position(|r| r.n == x.n) else {
+                        held.push((Item::Ins(x), o));
+                        continue;
+                    };
+                    let mut wait = self.ins[ri].best_ins.is_none();
+                    let mut keep = x.clone();
+                    if !wait {
+                        let bi = boxes.iter().position(|b| b.0 == x.n).expect("a queue box");
+                        if self.ins[ri].best_ins == Some(j) {
+                            // (§1021: the box is wrapped up, the insertion
+                            // split if it was chosen to be)
+                            let r = &self.ins[ri];
+                            if r.split_up
+                                && r.broken_ins == Some(j)
+                                && let Some(q) = r.broken_ptr
+                            {
+                                boxes[bi].1.extend(x.list[..q].iter().cloned());
+                                let remainder = prune_page_top(x.list[q..].to_vec(), &x.split_top);
+                                if !remainder.is_empty() {
+                                    let b = vpack(remainder, Spec::NATURAL, MAX_DIMEN, &Params::QUIET).b;
+                                    keep = Arc::new(Ins { height: b.h + b.d, list: b.list, ..(*x).clone() });
+                                    wait = true;
+                                }
+                            } else {
+                                boxes[bi].1.extend(x.list.iter().cloned());
+                            }
+                            self.ins[ri].best_ins = None;
+                        } else {
+                            boxes[bi].1.extend(x.list.iter().cloned());
+                        }
+                    }
+                    if wait {
+                        held.push((Item::Ins(keep), o));
+                        self.insert_penalties += 1;
+                    }
+                }
+                Item::Mark(t) => {
+                    // (§1014)
+                    if self.cur_marks[1].is_none() {
+                        self.cur_marks[1] = Some(t.clone());
+                    }
+                    self.cur_marks[2] = Some(t.clone());
+                    kept.push(Item::Mark(t));
+                }
+                other => kept.push(other),
+            }
+        }
+        if self.cur_marks[0].is_some() && self.cur_marks[1].is_none() {
+            let [top, first, _] = &mut self.cur_marks;
+            first.clone_from(top);
+        }
         // (where the fold can start again: the first contribution left, if
         // everything left was fed since the last call and nothing fed
         // since it depends on what came before it)
         let k = self.pages_made;
-        let resume = if let Some(&(s, d)) = self.contrib_org.front() {
+        let resume = if fancy {
+            None
+        } else if let Some(&(s, d)) = self.contrib_org.front() {
             (self.prev_call.is_none_or(|c| s > c) && !self.unsafe_since.iter().any(|&u| u >= s))
                 .then_some((s, d))
         } else {
@@ -570,32 +1018,145 @@ impl Scan {
         } else {
             self.cur_call.clone()
         };
-        self.orgs.push(PageOrg {
-            call: self.cur.0,
-            call_idx: self.marks_base + self.marks.len() as u32,
-            resume,
-            last_call,
-        });
-        if let Some(r) = resume {
-            self.just = Some((k, r));
-        }
-        let b = vpack(
-            items,
-            Spec::Exactly(self.best_size),
-            self.page_max_depth,
-            &Params::QUIET,
-        )
-        .b;
+        let b = vpack(kept, Spec::Exactly(self.best_size), self.page_max_depth, &Params::QUIET).b;
         // (§991: a new current page)
         self.page_contents = EMPTY;
         self.depth = 0;
         self.page_max_depth = 0;
-        self.pages.push(Page {
-            b: Arc::new(b),
-            ship: call.ship.clone(),
-        });
+        self.ins.clear();
+        // (the fold's definitions at the fire)
+        let mut defs: Vec<(Key, Val)> = Vec::new();
+        if fancy {
+            defs.push((Key::IntPar(IntPar::Outputpenalty), Val::Int(out_pen)));
+            for (n, list) in boxes {
+                let b = vpack(list, Spec::NATURAL, MAX_DIMEN, &Params::QUIET).b;
+                defs.push((Key::Box(u16::from(n)), Val::Box(Arc::new(b))));
+            }
+            if self.marked || self.cur_marks.iter().any(Option::is_some) {
+                self.marked = true;
+                for (i, m) in self.cur_marks.iter().enumerate() {
+                    let v = m.clone().unwrap_or_default();
+                    defs.push((Key::CurMark(i as u8), Val::Toks(v)));
+                }
+            }
+        }
+        let call_idx = self.marks_base + self.marks.len() as u32;
+        let dead_ok = routine.is_some() && {
+            let max = int(&env.read(&Key::IntPar(IntPar::Maxdeadcycles)));
+            if self.dead_cycles >= max {
+                self.errors.push(format!("Output loop---{} consecutive dead cycles", self.dead_cycles));
+                false
+            } else {
+                true
+            }
+        };
+        if let (true, Some(routine)) = (dead_ok, &routine) {
+            // (§1025: the routine fires)
+            self.fancy = true;
+            self.dead_cycles += 1;
+            defs.push((Key::Box(255), Val::Box(Arc::new(b))));
+            defs.push((Key::PageInt(0), Val::Int(self.dead_cycles)));
+            defs.push((Key::PageInt(1), Val::Int(self.insert_penalties)));
+            let fired = env.fire(defs, Some(routine));
+            self.errors.extend(fired.errors);
+            self.halt |= fired.halt;
+            if let Some(d) = fired.dead_cycles {
+                self.dead_cycles = d;
+            }
+            // (§1026: its list, after the held-over insertions, goes before
+            // the contributions; its `\shipout`s are pages)
+            let made_before = self.pages_made;
+            let mut log: Vec<CallLog> = fired.log.into_iter().map(CallLog::Text).collect();
+            let mut list: Vec<(Item, (Org, i32))> = held;
+            for it in fired.items {
+                match it {
+                    Item::Shipout(s) => {
+                        self.unsafe_since.push(self.cur.0);
+                        self.pages.push(Page { b: s.b.clone(), ship: s.ship.clone() });
+                        self.orgs.push(PageOrg { call: self.cur.0, call_idx, resume: None, last_call: last_call.clone() });
+                        self.pages_made += 1;
+                    }
+                    Item::BuildPage(_) | Item::End(_) => {}
+                    other => list.push((other, self.cur)),
+                }
+            }
+            for (it, o) in list.into_iter().rev() {
+                self.contrib.push_front(it);
+                self.contrib_org.push_front(o);
+            }
+            self.insert_penalties = 0;
+            self.add_call_log(call_idx, &mut log, made_before);
+            return;
+        }
+        // (§1023: the default output)
+        if fancy && !defs.is_empty() {
+            let fired = env.fire(defs, None);
+            self.errors.extend(fired.errors);
+            self.halt |= fired.halt;
+        }
+        for (it, o) in held.into_iter().rev() {
+            self.contrib.push_front(it);
+            self.contrib_org.push_front(o);
+        }
+        self.orgs.push(PageOrg { call: self.cur.0, call_idx, resume, last_call });
+        if let Some(r) = resume {
+            self.just = Some((k, r));
+        }
+        if self.call_logs.last().is_some_and(|c| c.0 == call_idx) {
+            let mut l = vec![CallLog::Page(k)];
+            self.add_call_log(call_idx, &mut l, k);
+        }
+        self.dead_cycles = 0;
+        let ship = ship_params(env);
+        self.pages.push(Page { b: Arc::new(b), ship });
         self.pages_made += 1;
     }
+
+    /// Appends to the log of call `call_idx` (made at its first routine,
+    /// with the default output's pages of the call before it).
+    fn add_call_log(&mut self, call_idx: u32, l: &mut Vec<CallLog>, upto: u32) {
+        match self.call_logs.last_mut() {
+            Some(c) if c.0 == call_idx => c.1.append(l),
+            _ => {
+                let mut v: Vec<CallLog> = (self.call_start..upto).map(CallLog::Page).collect();
+                v.append(l);
+                self.call_logs.push((call_idx, v));
+            }
+        }
+    }
+}
+
+/// What shipping a page reads (tex.web 638–641, 617), where the page
+/// builder fires: the default output's `ship_out` (not every call's read:
+/// an output routine's `\advancepageno` changes `\count0` at every page).
+fn ship_params(env: &mut dyn FoldEnv) -> Arc<ShipParams> {
+    let mut counts = [0; 10];
+    for (k, c) in counts.iter_mut().enumerate() {
+        *c = int(&env.read(&Key::Count(k as u16)));
+    }
+    let mut r = |k: Key| int(&env.read(&k));
+    Arc::new(ShipParams {
+        counts,
+        hoffset: r(Key::DimenPar(DimenPar::Hoffset)),
+        voffset: r(Key::DimenPar(DimenPar::Voffset)),
+        mag: r(Key::IntPar(IntPar::Mag)),
+        date: [r(Key::IntPar(IntPar::Year)), r(Key::IntPar(IntPar::Month)), r(Key::IntPar(IntPar::Day)), r(Key::IntPar(IntPar::Time))],
+    })
+}
+
+/// The names the default output's shipping reads ([`ship_params`]).
+pub fn ship_keys() -> Vec<Key> {
+    let mut v: Vec<Key> = (0..10).map(Key::Count).collect();
+    v.extend([
+        Key::DimenPar(DimenPar::Hoffset),
+        Key::DimenPar(DimenPar::Voffset),
+        Key::IntPar(IntPar::Mag),
+        Key::IntPar(IntPar::Year),
+        Key::IntPar(IntPar::Month),
+        Key::IntPar(IntPar::Day),
+        Key::IntPar(IntPar::Time),
+    ]);
+    v
 }
 
 /// The log's `[n]` for a page shipped (tex.web 638): a raw entry.

@@ -125,6 +125,8 @@ pub enum Mat {
     Shipout,
     /// `\-` (false), `\discretionary` (true).
     Disc(bool),
+    /// `\insert`.
+    Insert,
     /// `\/`.
     ItalCorr,
     /// `\hyphenchar` (0), `\skewchar` (1).
@@ -489,7 +491,7 @@ pub const PRIMITIVES: [(&str, Prim, &str); 325] = [
     ("indent", Prim::Indent, "START_PAR"),
     ("input", Prim::Input, "INPUT"),
     ("inputlineno", Prim::LastItem(3), "LAST_ITEM"),
-    ("insert", Prim::Unimpl(5), "INSERT"),
+    ("insert", Prim::Mat(Mat::Insert), "INSERT"),
     ("insertpenalties", Prim::PageInt(1), "SET_PAGE_INT"),
     ("interlinepenalty", Prim::IntPar(IntPar::Interlinepenalty), "ASSIGN_INT"),
     ("jobname", Prim::Convert(Conv::JobName), "CONVERT"),

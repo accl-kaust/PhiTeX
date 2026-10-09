@@ -95,6 +95,8 @@ enum GroupKind {
     /// A formula, a subformula, `\left`…`\right`, a `\mathchoice` part
     /// (`Group::boxg`, `math::MathKind`).
     Math,
+    /// An output routine's braces (tex.web 1025).
+    Output,
 }
 
 /// An open conditional: the node whose step opened it, which ends may end
@@ -155,6 +157,24 @@ impl<T: Clone> Stack<T> {
     }
 }
 
+impl Stack<Cond> {
+    /// The conditionals open, as a piece entered here sees them: opened
+    /// before it (no node of its own: their `\fi` makes no φ there).
+    fn outside(&self) -> Stack<Cond> {
+        match &self.0 {
+            None => Stack(None),
+            Some(v) => Stack(Some(Arc::new(
+                v.iter()
+                    .map(|c| Cond {
+                        open: u32::MAX,
+                        ..*c
+                    })
+                    .collect(),
+            ))),
+        }
+    }
+}
+
 impl<T: PartialEq> PartialEq for Stack<T> {
     fn eq(&self, other: &Self) -> bool {
         match (&self.0, &other.0) {
@@ -207,10 +227,12 @@ pub struct RState {
     /// The current line's end-of-line character (`\endlinechar` as the line
     /// was begun; -1: none), or `EOL_UNREAD`.
     eol: i16,
+    /// `\endinput` was read: the file ends after this line (tex.web 362).
+    endinput: bool,
 }
 
 impl RState {
-    fn start() -> RState {
+    pub fn start() -> RState {
         RState {
             pos: 0,
             tstate: TState::N,
@@ -229,7 +251,84 @@ impl RState {
             prev_depth: IGNORE_DEPTH,
             prev_graf: 0,
             eol: EOL_UNREAD,
+            endinput: false,
         }
+    }
+
+    /// The entry of an `\input` file's first piece: the state the
+    /// `\input` node left (its group, conditional, mode), at the file's
+    /// first line; the token lists waiting are read after the file (they
+    /// come back with the rest of the calling line, [`RState::rest`]).
+    pub fn file_start(caller: &RState) -> RState {
+        RState {
+            pos: 0,
+            tstate: TState::N,
+            pending: Vec::new(),
+            eol: EOL_UNREAD,
+            endinput: false,
+            conds: caller.conds.outside(),
+            ..caller.clone()
+        }
+    }
+
+    /// The entry of the rest of the line that called `\input` (`caller`,
+    /// the `\input` node's state): what the file's last piece left
+    /// (`file`; none: an empty file), with the caller's line and the token
+    /// lists waiting when the file was opened.
+    pub fn rest(file: Option<&RState>, caller: &RState) -> RState {
+        let base = file.unwrap_or(caller);
+        RState {
+            pos: 0,
+            tstate: caller.tstate,
+            pending: caller.pending.clone(),
+            eol: caller.eol,
+            endinput: caller.endinput,
+            conds: base.conds.outside(),
+            ..base.clone()
+        }
+    }
+
+    /// The entry of an output routine (tex.web 1025): internal vertical
+    /// mode, `\prevdepth` ignored, the output group open, the routine's
+    /// tokens (`{…}`, the brace read by `scan_left_brace`) to read, after
+    /// `normal_paragraph`.
+    pub fn routine(toks: &[Tok]) -> RState {
+        let mut list: Vec<Tok> = vec![Tok::Cs(Arc::from("\u{0}normalparagraph"))];
+        list.extend(
+            toks.iter()
+                .skip(usize::from(matches!(toks.first(), Some(Tok::Char(1, _)))))
+                .cloned(),
+        );
+        let mut st = RState::start();
+        st.inner = true;
+        st.pending = vec![(Arc::from(list), 0)];
+        st.groups.push(Group {
+            kind: GroupKind::Output,
+            after: Vec::new(),
+            boxg: None,
+        });
+        st
+    }
+
+    /// Whether a piece entered in this state may begin: no paragraph,
+    /// box or group open (an `\input` inside one is not supported: a
+    /// definition made inside would outlive the group).
+    pub fn plain_boundary(&self) -> bool {
+        self.mode == Mode::V && self.level == 0 && self.groups.is_empty()
+    }
+
+    /// The file ends after the current line (`\endinput`).
+    pub fn ends_file(&self) -> bool {
+        self.endinput
+    }
+
+    /// Inside an output routine (its group is the outermost): its
+    /// vertical list is internal (TeX's `-vmode`), not the main one.
+    fn in_output(&self) -> bool {
+        self.groups
+            .0
+            .as_ref()
+            .is_some_and(|v| v.first().is_some_and(|g| g.kind == GroupKind::Output))
     }
 }
 
@@ -251,6 +350,8 @@ pub enum Kind {
     Par,
     /// The end of the piece.
     End,
+    /// `\input`: the piece's run ends here, the file's pieces follow it.
+    Input,
 }
 
 impl Kind {
@@ -292,6 +393,7 @@ impl RState {
             && self.prev_depth == o.prev_depth
             && self.prev_graf == o.prev_graf
             && self.eol == o.eol
+            && self.endinput == o.endinput
             && self.pending == o.pending
     }
 
@@ -413,6 +515,15 @@ pub struct Rare {
     pub phi: Option<Box<Phi>>,
     pub vemit: Vec<Item>,
     pub log: Option<Box<str>>,
+    /// `\input`: the file read (its pieces follow the node's).
+    pub input: Option<Arc<FileText>>,
+}
+
+/// A file `\input` read: its name and its text.
+#[derive(Debug, PartialEq, Eq)]
+pub struct FileText {
+    pub name: Arc<str>,
+    pub text: Arc<str>,
 }
 
 /// A command node. Its input state is its predecessor's `out` (the
@@ -454,6 +565,10 @@ impl Node {
     /// in a newline), the diagnostic value.
     pub fn log(&self) -> Option<&str> {
         self.rare.as_ref().and_then(|r| r.log.as_deref())
+    }
+    /// The file an `\input` node read.
+    pub fn input(&self) -> Option<&Arc<FileText>> {
+        self.rare.as_ref().and_then(|r| r.input.as_ref())
     }
 }
 
@@ -599,6 +714,8 @@ impl std::ops::Index<usize> for Nodes {
 #[derive(Clone, Debug, Default)]
 pub struct Chain {
     pub nodes: Nodes,
+    /// The state the piece is entered in (none: the canonical start).
+    entry: Option<Arc<RState>>,
     /// Nodes defining each key, in order.
     defs_of: FxMap<Key, Vec<u32>>,
     /// For each `Open` node, the index of its `Close`, once there is one.
@@ -617,7 +734,7 @@ impl Chain {
     /// The input state of node `i` (`i == len`: of the next node).
     pub fn input(&self, i: usize) -> RState {
         if i == 0 {
-            RState::start()
+            self.entry.as_deref().cloned().unwrap_or_else(RState::start)
         } else {
             self.nodes[i - 1].out.clone()
         }
@@ -632,7 +749,7 @@ impl Chain {
     fn starts_para(&self, i: usize) -> bool {
         let out = &self.nodes[i].out;
         if i == 0 {
-            RState::start().starts_para(out)
+            self.input(0).starts_para(out)
         } else {
             self.nodes[i - 1].out.starts_para(out)
         }
@@ -682,6 +799,11 @@ impl Chain {
         let g = self.def_group(n, def)?;
         let p = self.open.iter().rposition(|&o| o == g)?;
         Some((self.open.len() - 1 - p) as u16)
+    }
+
+    /// The nodes with a paragraph, in order (`Run::paras` is theirs).
+    pub fn para_nodes(&self) -> &[u32] {
+        &self.para_at
     }
 
     /// The groups open at the next node, outermost first (their `Open`
@@ -805,6 +927,39 @@ pub struct Run {
     /// The fonts this piece loads first (`Key::FontLoaded` definitions), in
     /// node order: the document's font numbering is these, piece by piece.
     pub fonts: Vec<Arc<str>>,
+}
+
+impl Run {
+    /// The state its last node left (the piece's end, or its `\input`).
+    pub fn out(&self) -> RState {
+        self.chain.input(self.chain.nodes.len())
+    }
+
+    /// The file its last node, an `\input`, read.
+    pub fn input(&self) -> Option<&Arc<FileText>> {
+        let n = self.chain.nodes.len();
+        if n == 0 {
+            return None;
+        }
+        let last = &self.chain.nodes[n - 1];
+        if last.kind == Kind::Input {
+            last.input()
+        } else {
+            None
+        }
+    }
+
+    /// The state it was entered in.
+    pub fn entry(&self) -> RState {
+        self.chain.input(0)
+    }
+}
+
+/// Runs an output routine (tex.web 1025): its tokens `{…}` as nodes, from
+/// the routine's entry state ([`RState::routine`]), reading what the page
+/// builder and the document define where it fires through `env`.
+pub fn run_routine(toks: &[Tok], env: &mut dyn Env) -> Run {
+    run_piece(&[], env, None, &[], Some(&RState::routine(toks)))
 }
 
 /// The node that began the paragraph node `i` of `chain` ended (or is
@@ -964,16 +1119,23 @@ fn resolve_now(chain: &Chain, env: &mut dyn Env, outside: &mut Outside, key: &Ke
 
 /// Runs a piece: `old` is its previous run (and the text that made it),
 /// `dirty` the names from before the piece a definition of which was
-/// remade: every old node reading one of them is dirty. Returns the new
-/// chain, with every old node still holding kept.
+/// remade: every old node reading one of them is dirty; `entry` the state
+/// it is entered in (none: the canonical start). Returns the new chain,
+/// with every old node still holding kept.
 pub fn run_piece(
     text: &[char],
     env: &mut dyn Env,
     old: Option<(&Run, &[char])>,
     dirty: &[Key],
+    entry: Option<&RState>,
 ) -> Run {
     let mut outside: Outside = FxMap::default();
     let mut chain = Chain::default();
+    let entry: Option<Arc<RState>> = entry
+        .filter(|e| **e != RState::start())
+        .map(|e| Arc::new(e.clone()));
+    // (entered otherwise than the old run was: every node is looked at)
+    let entry_changed = old.is_some_and(|(r, _)| r.chain.entry != entry);
     let mut ran = 0u64;
     let edit = old.and_then(|(_, t)| Edit::between(t, text));
     let oldc = old.map(|(r, _)| &r.chain);
@@ -1010,10 +1172,15 @@ pub fn run_piece(
         let touched = lo;
         from = from.min(touched);
     }
-    let from = oldc.map_or(0, |oc| from.min(oc.nodes.len().saturating_sub(1)));
+    let from = if entry_changed {
+        0
+    } else {
+        oldc.map_or(0, |oc| from.min(oc.nodes.len().saturating_sub(1)))
+    };
     if let Some(oc) = oldc {
         chain = Chain::prefix(oc, from);
     }
+    chain.entry = entry;
     let mut state = chain.input(from);
     let mut scratch = Scratch::default();
     let mut oi = from;
@@ -1043,7 +1210,7 @@ pub fn run_piece(
                 let text_ok = edit.is_none_or(|e| n.out.pos < e.start || inp_pos >= e.old_end);
                 let par_ok = !(matches!(n.kind, Kind::Par | Kind::End) && para_fresh);
                 let state_ok = if oi == 0 {
-                    RState::start().eq_but_pos(&state)
+                    oc.input(0).eq_but_pos(&state)
                 } else {
                     oc.nodes[oi - 1].out.eq_but_pos(&state)
                 };
@@ -1173,7 +1340,7 @@ pub fn run_piece(
         } else if !same_material {
             para_fresh = true;
         }
-        let end = n.kind == Kind::End;
+        let end = matches!(n.kind, Kind::End | Kind::Input);
         state = n.out.clone();
         chain.push_arc(n);
         if end {
@@ -1303,6 +1470,11 @@ struct Exec<'a> {
     in_write: bool,
     /// How many of `reads` are in `scratch.seen`.
     seen_upto: usize,
+    /// `\input`: the file read (the node ends the piece's run).
+    input: Option<Arc<FileText>>,
+    /// The command is being looked for (an `\input` expanded now is a
+    /// node of its own).
+    at_start: bool,
     /// This node's stamp in `scratch.chars`.
     stamp: u32,
     /// The paragraph the old node at this place made, if any: an equal
@@ -1362,6 +1534,8 @@ impl<'a> Exec<'a> {
             noexp: false,
             in_write: false,
             seen_upto: 0,
+            input: None,
+            at_start: false,
             stamp,
             old_para: None,
         }
@@ -1391,7 +1565,8 @@ impl<'a> Exec<'a> {
             || !self.errors.is_empty()
             || self.phi.is_some()
             || !self.vemit.is_empty()
-            || self.log.is_some())
+            || self.log.is_some()
+            || self.input.is_some())
         .then(|| {
             Box::new(Rare {
                 defs: self.defs,
@@ -1400,6 +1575,7 @@ impl<'a> Exec<'a> {
                 phi: self.phi,
                 vemit: self.vemit,
                 log: self.log,
+                input: self.input,
             })
         });
         Node {
@@ -1608,6 +1784,10 @@ impl<'a> Exec<'a> {
         self.st.pos = np;
         if crossed {
             self.new_line();
+            if self.st.endinput {
+                // (`\endinput`: the file ends with the line, tex.web 362)
+                self.st.pos = self.text.len();
+            }
         }
     }
 
@@ -1921,8 +2101,15 @@ impl<'a> Exec<'a> {
 
     /// One command.
     fn command(&mut self) {
-        let Some((t, m)) = self.next_x_m(true) else {
-            self.end();
+        self.at_start = true;
+        let next = self.next_x_m(true);
+        self.at_start = false;
+        let Some((t, m)) = next else {
+            if self.input.is_some() {
+                self.kind = Kind::Input;
+            } else {
+                self.end();
+            }
             return;
         };
         self.cmd = t.clone();
@@ -1963,10 +2150,13 @@ impl<'a> Exec<'a> {
     fn end(&mut self) {
         self.end_par();
         self.kind = Kind::End;
-        if !self.st.groups.is_empty() {
+        // (groups and conditionals open where the piece was entered are
+        // its caller's, closed after it)
+        let entry = self.chain.input(0);
+        if self.st.groups.len() > entry.groups.len() {
             self.err("Missing } inserted at the end of a piece".into());
         }
-        if !self.st.conds.is_empty() {
+        if self.st.conds.len() > entry.conds.len() {
             self.err("Incomplete \\if at the end of a piece".into());
         }
     }
@@ -1983,10 +2173,41 @@ impl<'a> Exec<'a> {
 
     /// The innermost group closes: it defines nothing; the tokens
     /// `\aftergroup` gave it rewrite the input (tex.web 282).
+    /// Where a box's diagnostic says it was made (tex.web 663).
+    fn box_place(&self) -> crate::show::Place {
+        if self.st.in_output() {
+            crate::show::Place::Output
+        } else {
+            crate::show::Place::Here
+        }
+    }
+
     fn close_group(&mut self) {
         let after = self.st.groups.pop().map(|g| g.after).unwrap_or_default();
         self.rewrite(after);
         self.kind = Kind::Close;
+    }
+
+    /// The `}` ending an output routine (tex.web 1100, 1026): a paragraph
+    /// ends first; `\box255` must be void; nothing may follow in the
+    /// routine's tokens.
+    fn close_output(&mut self, t: &Tok) {
+        if self.st.mode == Mode::H {
+            let e = self.cs("\u{0}endgraf");
+            self.rewrite(vec![e, t.clone()]);
+            return;
+        }
+        if let Some((list, i)) = self.st.pending.last()
+            && *i < list.len()
+        {
+            self.err("Unbalanced output routine".into());
+            self.st.pending.clear();
+        }
+        if !matches!(self.get(&Key::Box(255)), Val::Void) {
+            self.err("Output routine didn't use all of \\box255".into());
+            self.change_box(255, Val::Void);
+        }
+        self.close_group();
     }
 
     fn char_tok(&mut self, cat: u8, c: char, t: &Tok) {
@@ -1996,6 +2217,7 @@ impl<'a> Exec<'a> {
                 Some(GroupKind::Simple) => self.close_group(),
                 Some(GroupKind::Box) => self.close_box(t),
                 Some(GroupKind::Math) => self.math_right_brace(),
+                Some(GroupKind::Output) => self.close_output(t),
                 Some(GroupKind::SemiSimple) => self.err("Extra }, or forgotten \\endgroup".into()),
                 None => self.err("Too many }'s".into()),
             },
@@ -2027,7 +2249,7 @@ impl<'a> Exec<'a> {
             Prim::BeginGroup => self.open_group(GroupKind::SemiSimple),
             Prim::EndGroup => match self.st.groups.last().map(|g| g.kind) {
                 Some(GroupKind::SemiSimple) => self.close_group(),
-                Some(GroupKind::Simple | GroupKind::Box | GroupKind::Math) => {
+                Some(GroupKind::Simple | GroupKind::Box | GroupKind::Math | GroupKind::Output) => {
                     // (tex.web 1064: the missing `}` goes in first)
                     self.err("Missing } inserted".into());
                     let t = self.cmd.clone();

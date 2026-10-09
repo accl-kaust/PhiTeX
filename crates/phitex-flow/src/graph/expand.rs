@@ -55,6 +55,10 @@ impl Exec<'_> {
             }
             if t.key().is_some() && expands(&m) {
                 self.expand(&t, &m);
+                if self.input.is_some() {
+                    // (`\input`: this node ends the piece's run)
+                    return None;
+                }
                 continue;
             }
             return Some((t, m));
@@ -92,11 +96,52 @@ impl Exec<'_> {
                     let toks = self.the_toks();
                     self.rewrite(toks);
                 }
-                Prim::Input | Prim::EndInput => self.err(format!("\\{} is not supported yet", p.name())),
-                // (`\topmark` and friends: no marks yet, every mark is empty)
+                Prim::Input => self.input_file(),
+                Prim::EndInput => self.st.endinput = true,
+                // (`\topmark`, `\firstmark`, `\botmark`: the page builder's,
+                // where it fired last; `\splitfirstmark`…: none yet)
+                Prim::Mark(k) if k < 3 => {
+                    if let Val::Toks(l) = self.get(&Key::CurMark(k)) {
+                        self.rewrite(l.to_vec());
+                    }
+                }
                 _ => {}
             },
             _ => {}
+        }
+    }
+
+    /// `\input` (tex.web 537): the file name (§526: characters up to a
+    /// space, expanded), its text a read of `Key::File`; the node ends the
+    /// piece's run, the file's pieces follow it. Only as a command of its
+    /// own: expanded inside another command it is not supported.
+    fn input_file(&mut self) {
+        if !self.at_start {
+            self.err("\\input inside another command is not supported yet".into());
+            return;
+        }
+        let mut name = String::new();
+        while let Some((t, _)) = self.next_x_m(false) {
+            match t {
+                Tok::Char(10, _) if name.is_empty() => {}
+                Tok::Char(10, _) => break,
+                Tok::Char(_, c) => name.push(c),
+                _ => {
+                    self.back(t);
+                    break;
+                }
+            }
+        }
+        if !name.contains('.') {
+            name.push_str(".tex");
+        }
+        if !self.st.plain_boundary() {
+            self.err("\\input inside a group, a box or a paragraph is not supported yet".into());
+        }
+        let name: Arc<str> = Arc::from(name);
+        match self.get(&Key::File(name.clone())) {
+            Val::Text(Some(text)) => self.input = Some(Arc::new(super::FileText { name, text })),
+            _ => self.err(format!("I can't find file `{name}'.")),
         }
     }
 

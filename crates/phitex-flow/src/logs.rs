@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 use crate::graph::{Run, paragraph_start};
 use crate::item::Item;
-use crate::page::{Lines, Page, page_mark};
+use crate::page::{CallLog, Lines, Page, page_mark};
 use crate::show::LINE;
 
 /// The line of the text node `i` of `run` had reached (tex.web's `line`:
@@ -141,28 +141,61 @@ fn rebase(s: &str, base: usize) -> String {
     out
 }
 
+/// A piece's part as the log lays it: its lines before it in its own file
+/// (`base`), and what follows it (an `\input`'s `(name`, a file's `)`).
+pub struct Part<'a> {
+    pub frag: &'a Frag,
+    pub base: usize,
+    pub post: Option<&'a str>,
+}
+
+/// A part's texts as they stand alone (line numbers from 1): an output
+/// routine's log.
+pub fn texts(f: &Frag) -> Vec<String> {
+    f.entries
+        .iter()
+        .filter_map(|e| match e {
+            Entry::Text(s) => Some(rebase(s, 0)),
+            Entry::Mark => None,
+        })
+        .collect()
+}
+
 /// The log's entries: the pieces' parts, the page builder's calls' pages
-/// (`marks`, in order: `page::Scan::marks`) and the pages.
-pub fn gather(frags: &[&Frag], marks: &[(u32, u32)], pages: &[Page]) -> Vec<String> {
+/// (`marks`, in order: `page::Scan::marks`; a call that fired an output
+/// routine has its log in `call_logs` instead) and the pages.
+pub fn gather(parts: &[Part<'_>], marks: &[(u32, u32)], call_logs: &[(u32, Vec<CallLog>)], pages: &[Page]) -> Vec<String> {
     let mut out = Vec::new();
-    let mut base = 0;
     let mut mi = 0;
     let marks_at = |out: &mut Vec<String>, mi: &mut usize| {
-        if let Some(&(a, b)) = marks.get(*mi) {
+        if let Ok(c) = call_logs.binary_search_by_key(&(*mi as u32), |c| c.0) {
+            for e in &call_logs[c].1 {
+                match e {
+                    CallLog::Page(p) => {
+                        if let Some(pg) = pages.get(*p as usize) {
+                            out.push(page_mark(&pg.ship));
+                        }
+                    }
+                    CallLog::Text(s) => out.push(s.clone()),
+                }
+            }
+        } else if let Some(&(a, b)) = marks.get(*mi) {
             for p in &pages[a as usize..(b as usize).min(pages.len())] {
                 out.push(page_mark(&p.ship));
             }
         }
         *mi += 1;
     };
-    for f in frags {
-        for e in &f.entries {
+    for part in parts {
+        for e in &part.frag.entries {
             match e {
-                Entry::Text(s) => out.push(rebase(s, base)),
+                Entry::Text(s) => out.push(rebase(s, part.base)),
                 Entry::Mark => marks_at(&mut out, &mut mi),
             }
         }
-        base += f.newlines;
+        if let Some(p) = part.post {
+            out.push(p.to_string());
+        }
     }
     while mi < marks.len() {
         marks_at(&mut out, &mut mi);

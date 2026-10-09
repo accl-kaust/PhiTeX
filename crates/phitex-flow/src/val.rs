@@ -93,6 +93,16 @@ pub enum Key {
     /// `\textfont` (size 0), `\scriptfont` (1), `\scriptscriptfont` (2) of a
     /// family.
     FamFont(u8, u8),
+    /// A file's text, by its name (`\input` reads it: a changed file runs
+    /// the `\input` node again).
+    File(Arc<str>),
+    /// `\topmark` (0), `\firstmark` (1), `\botmark` (2): the page
+    /// builder's marks, defined where it fires.
+    CurMark(u8),
+    /// `\deadcycles` (0), `\insertpenalties` (1): the page builder's
+    /// counts, as the fold hands them to an output routine (assignments
+    /// are global, tex.web 1246).
+    PageInt(u8),
 }
 
 impl Key {
@@ -120,7 +130,7 @@ impl std::hash::Hash for Key {
                 n.hash(h);
                 h.write_u64((20 << 40) | u64::from(*k));
             }
-            Key::HyphenChar(n) | Key::SkewChar(n) | Key::FontIdent(n) | Key::FontLoaded(n) => {
+            Key::HyphenChar(n) | Key::SkewChar(n) | Key::FontIdent(n) | Key::FontLoaded(n) | Key::File(n) => {
                 n.hash(h);
                 h.write_u64(self.word());
             }
@@ -137,7 +147,8 @@ impl PartialEq for Key {
             | (Key::HyphenChar(a), Key::HyphenChar(b))
             | (Key::SkewChar(a), Key::SkewChar(b))
             | (Key::FontIdent(a), Key::FontIdent(b))
-            | (Key::FontLoaded(a), Key::FontLoaded(b)) => Arc::ptr_eq(a, b) || a == b,
+            | (Key::FontLoaded(a), Key::FontLoaded(b))
+            | (Key::File(a), Key::File(b)) => Arc::ptr_eq(a, b) || a == b,
             (Key::Cat(a), Key::Cat(b)) => a == b,
             (Key::FontDimen(a, k), Key::FontDimen(b, l)) => k == l && (Arc::ptr_eq(a, b) || a == b),
             (Key::Cs(_), _) | (_, Key::Cs(_)) => false,
@@ -163,6 +174,9 @@ impl Key {
             Key::SkewChar(_) => w(22, 0),
             Key::FontIdent(_) => w(23, 0),
             Key::FontLoaded(_) => w(24, 0),
+            Key::File(_) => w(26, 0),
+            Key::CurMark(k) => w(27, u64::from(*k)),
+            Key::PageInt(k) => w(28, u64::from(*k)),
             Key::Active(x) => w(1, c(x)),
             Key::Cat(x) => w(2, c(x)),
             Key::Lccode(x) => w(3, c(x)),
@@ -216,6 +230,9 @@ impl fmt::Display for Key {
             Key::FontIdent(x) => write!(f, "font_id_text ({x})"),
             Key::FontLoaded(x) => write!(f, "font loaded ({x})"),
             Key::FamFont(s, x) => write!(f, "\\{}font{x}", ["text", "script", "scriptscript"][usize::from(*s).min(2)]),
+            Key::File(x) => write!(f, "file {x}"),
+            Key::CurMark(k) => write!(f, "\\{}mark", ["top", "first", "bot"][usize::from(*k).min(2)]),
+            Key::PageInt(k) => write!(f, "\\{}", if *k == 0 { "deadcycles" } else { "insertpenalties" }),
         }
     }
 }
@@ -281,6 +298,8 @@ pub enum Val {
     Box(Arc<crate::item::BoxNode>),
     /// A name (`Key::FontIdent`).
     Name(Arc<str>),
+    /// A file's text (`Key::File`); `None`: there is no such file.
+    Text(Option<Arc<str>>),
 }
 
 impl fmt::Display for Val {
@@ -304,6 +323,8 @@ impl fmt::Display for Val {
             Val::Void => write!(f, "void"),
             Val::Box(b) => write!(f, "{}box({}+{})x{}", if b.vertical { "v" } else { "h" }, b.h, b.d, b.w),
             Val::Name(n) => write!(f, "{n}"),
+            Val::Text(None) => write!(f, "no file"),
+            Val::Text(Some(t)) => write!(f, "text ({} bytes)", t.len()),
             Val::Meaning(Meaning::Font(x)) => write!(f, "select font {}", x.name),
             Val::Meaning(Meaning::Undefined) => write!(f, "undefined"),
             Val::Meaning(Meaning::Prim(p)) => write!(f, "primitive \\{}", p.name()),
@@ -362,10 +383,15 @@ pub fn initial(key: &Key, _font: &Arc<Font>) -> Val {
         }),
         Key::Delcode(c) => Val::Int(if *c == '.' { 0 } else { -1 }),
         Key::IntPar(p) => Val::Int(p.initial()),
-        Key::TokPar(_) | Key::Toks(_) => Val::Toks(Arc::new(Vec::new())),
+        Key::TokPar(_) | Key::Toks(_) | Key::CurMark(_) => Val::Toks(Arc::new(Vec::new())),
         // (`\fontdimen`: the null font's, tex.web 552; a loaded font's are
         // defined by its `\font`)
-        Key::DimenPar(_) | Key::Count(_) | Key::Dimen(_) | Key::FontDimen(..) | Key::FontLoaded(_) => Val::Int(0),
+        Key::DimenPar(_)
+        | Key::Count(_)
+        | Key::Dimen(_)
+        | Key::FontDimen(..)
+        | Key::FontLoaded(_)
+        | Key::PageInt(_) => Val::Int(0),
         Key::GluePar(_) | Key::Skip(_) | Key::Muskip(_) => Val::Glue(Arc::new(Glue::default())),
         Key::Box(_) => Val::Void,
         Key::Parshape => Val::Parshape(Arc::new(Vec::new())),
@@ -373,6 +399,9 @@ pub fn initial(key: &Key, _font: &Arc<Font>) -> Val {
         Key::HyphenChar(_) => Val::Int(i32::from(b'-')),
         Key::SkewChar(_) => Val::Int(-1),
         Key::FontIdent(_) => Val::Name(Arc::from("nullfont")),
+        // (a file's text is the build's, `Build::set_file`: the names
+        // index answers it)
+        Key::File(_) => Val::Text(None),
     }
 }
 

@@ -26,7 +26,7 @@ use crate::item::{BoxNode, Interline, Item, PageCall, Para, param_glue};
 use crate::linebreak;
 use crate::mlist::{self, Delim, Field, Kind as NK, Limits, MItem, MathEnv, Noad, Which};
 use crate::pack::{self, Params, Spec, hpack};
-use crate::show::{Place, report};
+use crate::show::report;
 use crate::tfm::Font;
 use crate::val::{DimenPar, Glue, GluePar, IntPar, Key, Mat, MathP, Meaning, Prim, Tok, TokPar, Val};
 
@@ -382,7 +382,7 @@ impl Exec<'_> {
     /// next node.
     fn open_sub_later(&mut self, target: Target, t: Tok) {
         let g = self.math_group_of(MathKind::Sub(target));
-        self.st.boxing = Some(Arc::new(BoxEnd { g: Arc::new(g), boxmaxdepth: 0, math: None }));
+        self.st.boxing = Some(Arc::new(BoxEnd { g: Arc::new(g), boxmaxdepth: 0, math: None, ins: None }));
         let n = self.cs("\u{0}mathgroup");
         self.rewrite(vec![n, t]);
     }
@@ -552,7 +552,7 @@ impl Exec<'_> {
         self.st.space_factor = g.space_factor;
         self.st.prev_depth = g.prev_depth;
         self.st.level -= 1;
-        self.st.boxing = Some(Arc::new(BoxEnd { g, boxmaxdepth: 0, math: end.map(Arc::new) }));
+        self.st.boxing = Some(Arc::new(BoxEnd { g, boxmaxdepth: 0, math: end.map(Arc::new), ins: None }));
         self.rewrite(after);
         let p = self.cs("\u{0}package");
         self.back(p);
@@ -752,7 +752,7 @@ impl Exec<'_> {
             self.vemit.push(Item::BuildPage(c));
         }
         let g = self.math_group_of(MathKind::DisplayInit { w });
-        self.st.boxing = Some(Arc::new(BoxEnd { g: Arc::new(g), boxmaxdepth: 0, math: None }));
+        self.st.boxing = Some(Arc::new(BoxEnd { g: Arc::new(g), boxmaxdepth: 0, math: None, ins: None }));
         let d = self.cs("\u{0}display");
         self.back(d);
     }
@@ -879,7 +879,7 @@ impl Exec<'_> {
         let packed = pack::vpack(list, be.g.spec, MAX_DIMEN, &params);
         if let Some(r) = packed.report {
             let cx = self.show_ctx(std::slice::from_ref(&Item::Box(Arc::new(packed.b.clone()))));
-            let s = report(r, &packed.b, Place::Here, &cx);
+            let s = report(r, &packed.b, self.box_place(), &cx);
             self.log_raw(&s);
         }
         let mut n = Noad::new(NK::Vcenter);
@@ -928,7 +928,7 @@ impl Exec<'_> {
                 if *stage < 3 {
                     let mut g = (*be.g).clone();
                     g.kind = BoxKind::Math(Arc::new(MathKind::Choice(stage + 1, Arc::new(parts))));
-                    self.st.boxing = Some(Arc::new(BoxEnd { g: Arc::new(g), boxmaxdepth: 0, math: None }));
+                    self.st.boxing = Some(Arc::new(BoxEnd { g: Arc::new(g), boxmaxdepth: 0, math: None, ins: None }));
                     let t = self.cs("\u{0}choicenext");
                     self.back(t);
                 } else {
@@ -1149,7 +1149,7 @@ impl Exec<'_> {
         let packed = hpack(list, Spec::Exactly(x), params, None);
         if let Some(r) = packed.report {
             let cx = self.show_ctx(std::slice::from_ref(&Item::Box(Arc::new(packed.b.clone()))));
-            let s = report(r, &packed.b, Place::Here, &cx);
+            let s = report(r, &packed.b, self.box_place(), &cx);
             self.log_raw(&s);
         }
         packed.b
