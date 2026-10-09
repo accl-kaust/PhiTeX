@@ -204,9 +204,13 @@ fn run_seed_with(seed: u64, len: usize, edits: usize, keep: bool) {
         }
         if std::env::var("PHI_TRACE").is_ok() {
             eprintln!(
-                "edit {e}: {} edits; toks[4..8] = {:?}",
+                "edit {e}: {} edits; {}",
                 k,
-                &d.toks[4..8.min(d.toks.len())]
+                d.toks
+                    .iter()
+                    .map(|t| t.1.text())
+                    .collect::<Vec<_>>()
+                    .join(" ")
             );
         }
         let rep = d.g.run();

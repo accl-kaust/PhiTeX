@@ -14,6 +14,7 @@
 )]
 
 pub mod graph;
+pub use graph::WAKES;
 pub mod lang;
 pub mod memo;
 pub mod profile;

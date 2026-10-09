@@ -183,6 +183,11 @@ pub(crate) struct StepInfo {
     pub work: u32,
     /// A sealed region: the steps folded (0: a step).
     pub folded: u32,
+    /// Validate before run: the versions of its operands and of the
+    /// input elements it saw at its last run, as one version
+    /// ([`Ver::ABSENT`]: none kept), and how many elements it saw.
+    pub reads: Ver,
+    pub seen: u32,
 }
 
 pub(crate) struct UnfoldInfo<V> {
@@ -301,6 +306,8 @@ pub struct Report {
     /// those, the ones whose outcome held when their turn came.
     pub dry_runs: u64,
     pub dry_used: u64,
+    /// Dirty steps found unchanged before running (validate before run).
+    pub verified: u64,
     /// The run was cancelled (`Graph::cancel_token`): work is left queued.
     pub cancelled: bool,
 }
@@ -913,6 +920,8 @@ struct Emit<L: Lang> {
     /// The sources the step inserted (`StepCx::source_or_insert`): the
     /// name, and the value, made sources when the step is applied.
     new_sources: Vec<(u32, L::Val)>,
+    /// One past the last input element the step peeked at.
+    peek_end: usize,
     /// The emission of the unfold the step called (`StepCx::call`).
     call: Option<u32>,
 }
@@ -938,6 +947,7 @@ impl<L: Lang> Default for Emit<L> {
             impure: Vec::new(),
             call: None,
             new_sources: Vec::new(),
+            peek_end: 0,
         }
     }
 }
@@ -1002,6 +1012,7 @@ impl<L: Lang> Emit<L> {
         self.impure.clear();
         self.call = None;
         self.new_sources.clear();
+        self.peek_end = 0;
     }
 }
 
@@ -1100,6 +1111,7 @@ impl<'s, L: Lang> StepCx<'s, L> {
 
     /// The input element `k` ahead, not consumed.
     pub fn peek(&mut self, k: usize) -> Option<&'s L::Val> {
+        self.em.peek_end = self.em.peek_end.max(self.idx + k + 1);
         Some(&self.elem(self.idx + k)?.1)
     }
 
@@ -2445,6 +2457,9 @@ impl<L: Lang, const P: bool> Graph<L, P> {
                     continue;
                 }
                 self.rep.woken += 1;
+                if *GRAFT_DEBUG {
+                    WAKES[0].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
                 self.push_dirty(r);
             }
         }
@@ -2482,6 +2497,9 @@ impl<L: Lang, const P: bool> Graph<L, P> {
             });
             if changed {
                 self.rep.woken += 1;
+                if *GRAFT_DEBUG {
+                    WAKES[1].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
                 self.push_dirty(r);
             }
             prev = e;
@@ -3114,6 +3132,8 @@ impl<L: Lang, const P: bool> Graph<L, P> {
             ran: self.epoch,
             work: 0,
             folded: 0,
+            reads: Ver::ABSENT,
+            seen: 0,
         });
         if prev == NONE {
             self.n.h[s as usize].next = self.first(u);
@@ -3301,6 +3321,7 @@ impl<L: Lang, const P: bool> Graph<L, P> {
         }
         // (read now: a nested unfold running in the sweep reuses `em`)
         let call_ix = self.em.call;
+        let peek_end = self.em.peek_end;
         self.rep.merged += u64::from(self.em.merged);
         if P {
             let em = &mut self.em;
@@ -3376,6 +3397,12 @@ impl<L: Lang, const P: bool> Graph<L, P> {
         }
         self.sc_ids = ids;
         self.set_opds(s, &os);
+        // (what it read, for validate-before-run: its operands, and the
+        // input from its start to the element after the last it saw)
+        let seen_end = idx.max(peek_end) + 1;
+        let reads = self.reads_ver(s, &os, input.as_ref(), start, seen_end);
+        self.steps[si].reads = reads;
+        self.steps[si].seen = u32::try_from(seen_end - start).unwrap_or(u32::MAX);
         self.sc_opds = os;
         // its input range
         let took = u32::try_from(idx - start).expect("took fits u32");
@@ -3444,6 +3471,20 @@ impl<L: Lang, const P: bool> Graph<L, P> {
         let mut s = s;
         loop {
             self.n.h[s as usize].flags &= !DIRTY;
+            // (validate before run: a step whose operands and input are as
+            // they were at its last run keeps its outputs)
+            if let Some(start) = self.verified(s) {
+                self.rep.verified += 1;
+                // (its successor matched as after a run with the same
+                // result: an input edit after what it read may still move it)
+                match self.kept_successor(s, start) {
+                    Some(nx) => {
+                        s = nx;
+                        continue;
+                    }
+                    None => break,
+                }
+            }
             match self.run_step(s) {
                 Some(nx) => s = nx,
                 None => break,
@@ -3478,6 +3519,12 @@ impl<L: Lang, const P: bool> Graph<L, P> {
             });
             if !self.cfg.segment {
                 self.speculate(u);
+                if *GRAFT_DEBUG {
+                    eprintln!(
+                        "phi park: unfold {u} grafted; dirty queue {}",
+                        self.heap.len()
+                    );
+                }
             }
             return None;
         }
@@ -3489,6 +3536,13 @@ impl<L: Lang, const P: bool> Graph<L, P> {
         };
         if q != NONE && fits(self, q) {
             let qi = self.n.h[q as usize].aux as usize;
+            if *GRAFT_DEBUG && self.steps[qi].in_ver != ver {
+                eprintln!(
+                    "phi successor: step {q} fits, state differs: key {key:x} was {:x} now {:x}",
+                    self.steps[qi].in_ver.0 & 0xffff_ffff,
+                    ver.0 & 0xffff_ffff
+                );
+            }
             return (self.steps[qi].in_ver != ver || !input_ok).then_some(q);
         }
         if q != NONE {
@@ -4118,6 +4172,18 @@ impl<L: Lang, const P: bool> Graph<L, P> {
                     }
                     if ov != self.n.read_ver(&nw) {
                         self.rep.woken += 1;
+                        if *GRAFT_DEBUG {
+                            WAKES[2].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            eprintln!(
+                                "phi wake: {:02x?} {}",
+                                self.names.spell[m as usize],
+                                if o.src == NONE {
+                                    "unresolved"
+                                } else {
+                                    "redefined"
+                                }
+                            );
+                        }
                         self.push_dirty(r);
                     }
                 }
@@ -5361,6 +5427,8 @@ impl<L: Lang, const P: bool> Graph<L, P> {
                         ran: 0,
                         work: si.work,
                         folded: 0,
+                        reads: si.reads,
+                        seen: si.seen,
                     });
                     if let Some(cl) = p.closes.get(&(x as u32)) {
                         pk.closes.push((r, cl.iter().map(|&g| encg(g)).collect()));
@@ -5635,6 +5703,12 @@ impl<L: Lang, const P: bool> Graph<L, P> {
                 o
             };
             if self.n.read_ver(&o) != was && dirty.last() != Some(&m) {
+                if *GRAFT_DEBUG {
+                    eprintln!(
+                        "phi graft: node {m} reads {:02x?} changed",
+                        self.names.spell[name as usize]
+                    );
+                }
                 dirty.push(m);
             }
             self.n.opds[(ob + i) as usize] = o;
@@ -5758,6 +5832,9 @@ impl<L: Lang, const P: bool> Graph<L, P> {
         }
         for d in dirty {
             self.rep.woken += 1;
+            if *GRAFT_DEBUG {
+                WAKES[3].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
             self.push_dirty(d);
         }
         let end = pk.end.map(|e| Parked {
@@ -5768,3 +5845,113 @@ impl<L: Lang, const P: bool> Graph<L, P> {
         Some((first, last, end))
     }
 }
+
+/// `PHITEX_GRAFT_DEBUG=1`: each read of a grafted segment that changed, on
+/// stderr (which names reject speculation).
+static GRAFT_DEBUG: std::sync::LazyLock<bool> =
+    std::sync::LazyLock::new(|| std::env::var("PHITEX_GRAFT_DEBUG").is_ok_and(|v| v == "1"));
+
+/// `PHITEX_GRAFT_DEBUG`: wakes by site (chain, read, name resolution,
+/// graft).
+pub static WAKES: [std::sync::atomic::AtomicU64; 4] = [
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+];
+
+impl<L: Lang, const P: bool> Graph<L, P> {
+    /// The version of what a step read: its operands `os` now, and the
+    /// input elements `[start, end)` (identities and versions; past the
+    /// input's end, its end).
+    fn reads_ver(
+        &self,
+        s: u32,
+        os: &[Opd],
+        input: Option<&Seq<L::Val>>,
+        start: usize,
+        end: usize,
+    ) -> Ver {
+        let mut parts: Vec<Ver> = Vec::with_capacity(os.len() + 8);
+        let _ = s;
+        for o in os {
+            parts.push(self.n.read_ver(o));
+        }
+        if let Some(inp) = input {
+            let n = inp.len();
+            for (id, v) in inp.iter_from(start).take(end.min(n).saturating_sub(start)) {
+                parts.push(Ver::node(0x656c, &[Ver(u128::from(id.0)), v.ver()]));
+            }
+            parts.push(Ver::of(&(end > n)));
+        }
+        Ver::node(0x7265_6164, &parts)
+    }
+
+    /// Whether step `s` may keep its outputs without running: it ran
+    /// before (not folded into a sealed region), and its operands and the
+    /// input it saw have the versions they had then.
+    fn verified(&self, s: u32) -> Option<usize> {
+        if *NO_VERIFY {
+            return None;
+        }
+        let h = &self.n.h[s as usize];
+        if h.kind != Kind::Step || h.flags & SEALED != 0 {
+            return None;
+        }
+        let si = &self.steps[h.aux as usize];
+        // (a step that closed a group read names past its close, which
+        // its operands, resolved at its start, do not say: it runs)
+        if si.reads == Ver::ABSENT || si.folded > 0 || self.closes.contains_key(&s) {
+            return None;
+        }
+        let u = si.unfold;
+        let ui = self.n.h[u as usize].aux as usize;
+        let input = self.unfolds[ui].input.as_ref();
+        let start = match input {
+            None => 0,
+            Some(inp) if si.at == END => inp.len(),
+            Some(inp) => inp.index_of(si.at)?,
+        };
+        let end = start + si.seen as usize;
+        let ok = self.reads_ver(s, self.n.opds_of(s), input, start, end) == si.reads;
+        if *GRAFT_DEBUG && ok {
+            eprintln!(
+                "phi verified: step {s} kept, opds {:?}",
+                self.n
+                    .opds_of(s)
+                    .iter()
+                    .map(|o| (o.src, o.name))
+                    .collect::<Vec<_>>()
+            );
+        }
+        ok.then_some(start)
+    }
+
+    /// Kept step `s` (starting at input index `start`): its successor,
+    /// matched as `run_step` matches one, if that must run.
+    fn kept_successor(&mut self, s: u32, start: usize) -> Option<u32> {
+        let q = self.n.h[s as usize].next;
+        if q == NONE {
+            return None;
+        }
+        let si = self.n.h[s as usize].aux as usize;
+        let u = self.steps[si].unfold;
+        let ui = self.n.h[u as usize].aux as usize;
+        let qi = self.n.h[q as usize].aux as usize;
+        let (key, grp) = (self.steps[qi].key, self.steps[qi].grp_in);
+        let idx = start + self.steps[si].took as usize;
+        let cursor = self.unfolds[ui]
+            .input
+            .as_ref()
+            .and_then(|i| i.get(idx))
+            .map_or(END, |e| e.0);
+        let ver = self.n.val[s as usize].ver();
+        self.hint = (u, cursor, idx);
+        self.successor(s, u, ui, key, cursor, idx, grp, ver)
+    }
+}
+
+/// `PHITEX_NO_VERIFY=1`: no validate before run (every dirty step runs),
+/// to compare.
+static NO_VERIFY: std::sync::LazyLock<bool> =
+    std::sync::LazyLock::new(|| std::env::var("PHITEX_NO_VERIFY").is_ok_and(|v| v == "1"));

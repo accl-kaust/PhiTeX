@@ -975,3 +975,55 @@ fn defined_since_crosses_calls() {
     d.g.run();
     assert_eq!(since(), vec![pair("b", "2"), pair("d", "4")]);
 }
+
+/// Validate before run: a group whose opener and closer are made anew (new
+/// identities, so new steps and a new group) with the same contents wakes
+/// the readers of the name it defines locally while it is open, but none
+/// of them runs: each is found unchanged by its operands' versions.
+#[test]
+fn a_group_made_anew_runs_no_reader_outside_it() {
+    // (the group in a macro's body, before a definition of `z` nothing
+    // reads: the steps of the body before it have it pending, so an edit
+    // to it gives the group's opener and closer new keys)
+    let mut src = String::from(r"\def\x{1} \def\m{{ \def\x{7} b } \def\z{1}} \m ");
+    for _ in 0..300 {
+        src += r"\x ";
+    }
+    let mut d = Doc::new(ids(lex(&src)));
+    d.g.cfg.check = true;
+    d.g.run();
+    let at = d
+        .toks
+        .iter()
+        .rposition(|t| t.1.text() == "1")
+        .expect("z's 1");
+    d.splice(at, 1, lex("2"));
+    let r = d.g.run();
+    // (the macro's steps run again, new keys; every reader of `x` is
+    // woken by the group open meanwhile and found unchanged: the local
+    // definition made anew has the same version, its value's)
+    assert!(r.steps <= 7 && r.verified >= 300, "{r:?}");
+    let mut e = Doc::new(d.toks.clone());
+    e.g.run();
+    assert_eq!(d.observe(), e.observe());
+}
+
+/// Validate before run at scale: a group made anew under many readers
+/// of the name it defines locally costs version compares, not runs.
+#[test]
+fn many_readers_of_an_unchanged_value_are_compared_not_run() {
+    let mut src = String::from(r"\def\x{1} \def\m{{ \def\x{7} b } \def\z{1}} \m ");
+    for _ in 0..5000 {
+        src += r"\x ";
+    }
+    let mut d = Doc::new(ids(lex(&src)));
+    d.g.run();
+    let at = d
+        .toks
+        .iter()
+        .rposition(|t| t.1.text() == "1")
+        .expect("z's 1");
+    d.splice(at, 1, lex("2"));
+    let r = d.g.run();
+    assert!(r.steps <= 8 && r.verified >= 5000, "{r:?}");
+}
