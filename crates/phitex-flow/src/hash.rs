@@ -4,6 +4,7 @@
 use std::hash::{Hash, Hasher};
 
 /// FxHash-style hasher, word at a time.
+#[derive(Default)]
 pub struct Fx(pub u64);
 
 impl Fx {
@@ -58,12 +59,6 @@ pub fn hash_of<T: Hash + ?Sized>(t: &T) -> u64 {
     let mut h = Fx(0);
     t.hash(&mut h);
     h.finish()
-}
-
-impl Default for Fx {
-    fn default() -> Self {
-        Fx(0)
-    }
 }
 
 /// A `HashMap` with [`Fx`].

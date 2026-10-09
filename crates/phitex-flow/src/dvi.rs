@@ -3,9 +3,9 @@
 
 use std::sync::Arc;
 
+use crate::graph::HItem;
 use crate::linebreak::{GlueSet, Line};
 use crate::page::{Page, VItem};
-use crate::graph::HItem;
 use crate::tfm::Font;
 
 const SET1: u8 = 128;
@@ -69,7 +69,13 @@ impl Out {
                     cur_h += i64::from(w);
                 }
                 HItem::Box { w, .. } => cur_h += i64::from(w),
-                HItem::Glue { w, st, st_ord, sh, sh_ord } => {
+                HItem::Glue {
+                    w,
+                    st,
+                    st_ord,
+                    sh,
+                    sh_ord,
+                } => {
                     cur_h += i64::from(w) + glue_amount(&l.glue, st, st_ord, sh, sh_ord);
                 }
                 HItem::Penalty(_) => {}

@@ -39,8 +39,8 @@ use std::time::{Duration, Instant};
 use crate::dvi;
 use crate::graph::{Env, Para, PieceId, Run, Src, cut, run_piece};
 use crate::hash::{FxMap, hash_of};
-use crate::linebreak::{Line, break_lines};
-use crate::page::{Page, Scan, VItem, material};
+use crate::linebreak::break_lines;
+use crate::page::{Lines, Page, Scan, VItem, material};
 use crate::tfm::Font;
 use crate::val::{Key, Val, initial};
 
@@ -74,7 +74,12 @@ pub struct Options {
 
 impl Default for Options {
     fn default() -> Self {
-        Options { threads: 1, reads: Reads::Suspend, order: Order::Priority, dump: false }
+        Options {
+            threads: 1,
+            reads: Reads::Suspend,
+            order: Order::Priority,
+            dump: false,
+        }
     }
 }
 
@@ -127,8 +132,6 @@ pub struct Output {
     pub dump: String,
 }
 
-type Lines = Arc<Vec<Arc<Line>>>;
-
 /// A piece whose definition was read before any definition.
 const INITIAL: PieceId = u32::MAX;
 /// A piece not in this build.
@@ -169,7 +172,9 @@ struct Names {
 
 impl Names {
     fn new() -> Names {
-        Names { shards: (0..SHARDS).map(|_| RwLock::default()).collect() }
+        Names {
+            shards: (0..SHARDS).map(|_| RwLock::default()).collect(),
+        }
     }
 
     fn shard(&self, key: &Key) -> &RwLock<Defs> {
@@ -226,11 +231,14 @@ struct PState {
     /// An edited piece's: the removed piece nearest its place, whose
     /// chain it runs from (kept wherever it still holds), with its lines
     /// and text.
-    prev: Option<(Arc<Run>, Vec<Option<Lines>>, Arc<[char]>)>,
+    prev: Option<Prev>,
     /// Nodes of its run that read a definition since remade.
     dirty: BTreeSet<u32>,
     runs: u32,
 }
+
+/// An edited piece's predecessor: its run, lines and text.
+type Prev = (Arc<Run>, Vec<Option<Lines>>, Arc<[char]>);
 
 /// The scheduler's state.
 struct State {
@@ -276,13 +284,24 @@ enum Task {
     /// Run piece `.0` from its dirty nodes `.1`.
     Run(usize, Vec<u32>),
     Break(usize, usize, Arc<Para>),
-    Scan { scan: Scan, to: usize, pieces: Vec<Vec<ParaLines>>, finish: bool },
+    Scan {
+        scan: Scan,
+        to: usize,
+        pieces: Vec<Vec<ParaLines>>,
+        finish: bool,
+    },
     Ship(usize, Page),
 }
 
 impl Build {
     pub fn new(font: Arc<Font>) -> Build {
-        Build { font, pieces: Vec::new(), pages: Vec::new(), next_id: 0, readers: FxMap::default() }
+        Build {
+            font,
+            pieces: Vec::new(),
+            pages: Vec::new(),
+            next_id: 0,
+            readers: FxMap::default(),
+        }
     }
 
     /// Builds `src`: what changed, and what the changes reach.
@@ -293,7 +312,7 @@ impl Build {
         let time_cut = t0.elapsed();
         // (old pieces found by their text: the map's hash only finds, `==`
         // decides)
-        let olds: Vec<Kept> = self.pieces.drain(..).collect();
+        let olds: Vec<Kept> = std::mem::take(&mut self.pieces);
         // (an unchanged piece at its old place first; then equal text
         // anywhere, in order)
         let mut used = vec![false; olds.len()];
@@ -314,7 +333,9 @@ impl Build {
             if found[k].is_some() {
                 continue;
             }
-            let Some(q) = by_text.get_mut(t) else { continue };
+            let Some(q) = by_text.get_mut(t) else {
+                continue;
+            };
             while let Some(i) = q.pop_front() {
                 if !used[i] {
                     used[i] = true;
@@ -347,22 +368,41 @@ impl Build {
                 let near = [k, k.wrapping_sub(1), k + 1]
                     .into_iter()
                     .filter(|&i| i < olds.len() && !used[i] && olds[i].run.is_some())
-                    .max_by_key(|&i| olds[i].text.iter().zip(text.iter()).take_while(|(a, b)| a == b).count());
+                    .max_by_key(|&i| {
+                        olds[i]
+                            .text
+                            .iter()
+                            .zip(text.iter())
+                            .take_while(|(a, b)| a == b)
+                            .count()
+                    });
                 let prev = near.map(|i| {
                     used[i] = true;
-                    (olds[i].run.clone().expect("a run"), olds[i].lines.clone(), olds[i].text.clone())
+                    (
+                        olds[i].run.clone().expect("a run"),
+                        olds[i].lines.clone(),
+                        olds[i].text.clone(),
+                    )
                 });
                 // (it keeps that piece's identity: its old definitions stay
                 // in the index as the prediction until it runs, so a reader
                 // of them parks on it rather than reading past it)
-                let id = match near {
-                    Some(i) => olds[i].id,
-                    None => {
-                        self.next_id += 1;
-                        self.next_id - 1
-                    }
+                let id = if let Some(i) = near {
+                    olds[i].id
+                } else {
+                    self.next_id += 1;
+                    self.next_id - 1
                 };
-                p.push(PState { id, text, status: Status::Unstarted, run: None, lines: Vec::new(), prev, dirty: BTreeSet::new(), runs: 0 });
+                p.push(PState {
+                    id,
+                    text,
+                    status: Status::Unstarted,
+                    run: None,
+                    lines: Vec::new(),
+                    prev,
+                    dirty: BTreeSet::new(),
+                    runs: 0,
+                });
             }
         }
         let n = p.len();
@@ -417,7 +457,12 @@ impl Build {
                 }
             }
         }
-        let unstarted: BTreeSet<usize> = p.iter().enumerate().filter(|(_, x)| x.status == Status::Unstarted).map(|(k, _)| k).collect();
+        let unstarted: BTreeSet<usize> = p
+            .iter()
+            .enumerate()
+            .filter(|(_, x)| x.status == Status::Unstarted)
+            .map(|(k, _)| k)
+            .collect();
         let mut state = State {
             p,
             unstarted,
@@ -437,7 +482,12 @@ impl Build {
                 Order::Random(s) => s.wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1,
                 Order::Priority => 1,
             },
-            stats: Stats { pieces: n, work: vec![0; threads], tasks: vec![0; threads], ..Stats::default() },
+            stats: Stats {
+                pieces: n,
+                work: vec![0; threads],
+                tasks: vec![0; threads],
+                ..Stats::default()
+            },
             done: false,
         };
         for (k, node) in marks {
@@ -451,7 +501,7 @@ impl Build {
             }
         }
         state.stats.time_cut = time_cut;
-        state.stats.time_setup = t0.elapsed() - time_cut;
+        state.stats.time_setup = t0.elapsed().saturating_sub(time_cut);
         let sh = Shared {
             names,
             ids,
@@ -475,7 +525,11 @@ impl Build {
         });
         let mut st = sh.state.into_inner().expect("state");
         let t_join = Instant::now();
-        let bodies: Vec<Arc<Vec<u8>>> = st.bodies.iter().map(|b| b.clone().expect("every page shipped")).collect();
+        let bodies: Vec<Arc<Vec<u8>>> = st
+            .bodies
+            .iter()
+            .map(|b| b.clone().expect("every page shipped"))
+            .collect();
         let out = dvi::assemble(&self.font, &st.pages, &bodies);
         let mut errors = Vec::new();
         let mut dump = String::new();
@@ -494,17 +548,34 @@ impl Build {
         }
         if opts.dump {
             for (i, pg) in st.pages.iter().enumerate() {
-                let lines = pg.items.iter().filter(|x| matches!(x, VItem::Line(..))).count();
+                let lines = pg
+                    .items
+                    .iter()
+                    .filter(|x| matches!(x, VItem::Line(..)))
+                    .count();
                 let _ = writeln!(dump, "page {}: {} lines", i + 1, lines);
             }
         }
         st.stats.time_join = t_join.elapsed();
         st.stats.pages = st.pages.len();
         st.stats.wall = t0.elapsed();
-        self.pieces = st.p.into_iter().map(|ps| Kept { id: ps.id, text: ps.text, run: ps.run, lines: ps.lines }).collect();
+        self.pieces =
+            st.p.into_iter()
+                .map(|ps| Kept {
+                    id: ps.id,
+                    text: ps.text,
+                    run: ps.run,
+                    lines: ps.lines,
+                })
+                .collect();
         self.readers = st.readers;
         self.pages = st.pages.into_iter().zip(bodies).collect();
-        Output { dvi: out, stats: st.stats, errors, dump }
+        Output {
+            dvi: out,
+            stats: st.stats,
+            errors,
+            dump,
+        }
     }
 }
 
@@ -542,7 +613,13 @@ fn dump_piece(out: &mut String, k: usize, ps: &PState, r: &Run) {
             }
         }
         for d in &n.defs {
-            let _ = write!(out, " | defines {}{} = {}", if d.global { "global " } else { "" }, d.key, d.val);
+            let _ = write!(
+                out,
+                " | defines {}{} = {}",
+                if d.global { "global " } else { "" },
+                d.key,
+                d.val
+            );
         }
         out.push('\n');
     }
@@ -639,7 +716,9 @@ fn changed_names(old: Option<&Run>, new: &Run) -> Vec<Key> {
 fn reached(g: &State, sh: &Shared, m: usize, keys: &[Key]) -> Vec<(usize, u32)> {
     let mut out = Vec::new();
     for key in keys {
-        let Some(rm) = g.readers.get(key) else { continue };
+        let Some(rm) = g.readers.get(key) else {
+            continue;
+        };
         for (&rid, &(node, src)) in rm {
             let rpos = sh.pos_of[rid as usize];
             if rpos == NONE || rpos as usize <= m {
@@ -691,7 +770,9 @@ fn queue_breaks(g: &mut State, k: usize, old: Option<Arc<Run>>) {
 
 fn lines_ready(g: &State, k: usize) -> bool {
     let ps = &g.p[k];
-    ps.run.as_ref().is_some_and(|r| ps.lines.len() == r.paras.len() && ps.lines.iter().all(Option::is_some))
+    ps.run
+        .as_ref()
+        .is_some_and(|r| ps.lines.len() == r.paras.len() && ps.lines.iter().all(Option::is_some))
 }
 
 fn rand(g: &mut State, n: usize) -> usize {
@@ -707,7 +788,8 @@ fn rand(g: &mut State, n: usize) -> usize {
 /// piece of work.
 fn pick(g: &mut State, sh: &Shared) -> Option<Task> {
     let n = g.p.len();
-    while g.settled < n && g.p[g.settled].status == Status::Done && g.p[g.settled].dirty.is_empty() {
+    while g.settled < n && g.p[g.settled].status == Status::Done && g.p[g.settled].dirty.is_empty()
+    {
         g.settled += 1;
     }
     let mut scan_to = g.scan_next;
@@ -720,7 +802,12 @@ fn pick(g: &mut State, sh: &Shared) -> Option<Task> {
     // (priority: pages out first, then the scan, the reading, line breaking)
     let mut kinds = [0u8; 4];
     let mut nk = 0;
-    for (ok, kind) in [(!g.ship_queue.is_empty(), 3u8), (scan_ok, 2), (run_ok, 0), (!g.break_queue.is_empty(), 1)] {
+    for (ok, kind) in [
+        (!g.ship_queue.is_empty(), 3u8),
+        (scan_ok, 2),
+        (run_ok, 0),
+        (!g.break_queue.is_empty(), 1),
+    ] {
         if ok {
             kinds[nk] = kind;
             nk += 1;
@@ -761,11 +848,20 @@ fn pick(g: &mut State, sh: &Shared) -> Option<Task> {
                 .map(|k| {
                     let ps = &g.p[k];
                     let r = ps.run.as_ref().expect("a settled piece has a run");
-                    r.paras.iter().zip(&ps.lines).map(|(p, l)| (p.clone(), l.clone().expect("lines ready"))).collect()
+                    r.paras
+                        .iter()
+                        .zip(&ps.lines)
+                        .map(|(p, l)| (p.clone(), l.clone().expect("lines ready")))
+                        .collect()
                 })
                 .collect();
             let scan = g.scan.take().expect("the scan is free");
-            Some(Task::Scan { scan, to: scan_to, pieces, finish: scan_finish })
+            Some(Task::Scan {
+                scan,
+                to: scan_to,
+                pieces,
+                finish: scan_finish,
+            })
         }
         _ => {
             let i = match sh.opts.order {
@@ -787,7 +883,11 @@ fn execute(sh: &Shared, task: Task) -> (u64, u8) {
             let lines = Arc::new(break_lines(&para));
             let mut g = lock(sh);
             // (the piece may have run again meanwhile: only its own paragraph)
-            let current = g.p[k].run.as_ref().and_then(|r| r.paras.get(j)).is_some_and(|q| Arc::ptr_eq(q, &para));
+            let current = g.p[k]
+                .run
+                .as_ref()
+                .and_then(|r| r.paras.get(j))
+                .is_some_and(|q| Arc::ptr_eq(q, &para));
             if current {
                 g.p[k].lines[j] = Some(lines);
             }
@@ -796,7 +896,12 @@ fn execute(sh: &Shared, task: Task) -> (u64, u8) {
             sh.cv.notify_all();
             (para.hlist.len() as u64, 1)
         }
-        Task::Scan { mut scan, to, pieces, finish } => {
+        Task::Scan {
+            mut scan,
+            to,
+            pieces,
+            finish,
+        } => {
             let before = scan.fed;
             for paras in &pieces {
                 for it in material(paras) {
@@ -813,7 +918,11 @@ fn execute(sh: &Shared, task: Task) -> (u64, u8) {
             for pg in new {
                 let i = g.pages.len();
                 // (unchanged lines are the same `Arc`s: a cheap comparison)
-                let same = g.old_pages.get(i).filter(|(op, _)| *op == pg).map(|(_, b)| b.clone());
+                let same = g
+                    .old_pages
+                    .get(i)
+                    .filter(|(op, _)| *op == pg)
+                    .map(|(_, b)| b.clone());
                 g.pages.push(pg);
                 if let Some(b) = same {
                     g.bodies.push(Some(b));
@@ -861,7 +970,12 @@ fn run_and_install(sh: &Shared, k: usize, dirty: &[u32]) -> u64 {
         (ps.text.clone(), old)
     };
     let mut env = PieceEnv { sh, k };
-    let run = Arc::new(run_piece(&text, &mut env, old.as_ref().map(|(r, t)| (&r.chain, &t[..])), dirty));
+    let run = Arc::new(run_piece(
+        &text,
+        &mut env,
+        old.as_ref().map(|(r, t)| (&r.chain, &t[..])),
+        dirty,
+    ));
     let steps = run.ran;
     let t = Instant::now();
     {
@@ -870,7 +984,10 @@ fn run_and_install(sh: &Shared, k: usize, dirty: &[u32]) -> u64 {
         let id = sh.ids[k];
         // (what stood for this piece until now: its last run, or for an
         // edited piece the run of the piece it replaces)
-        let old_run = g.p[k].run.clone().or_else(|| g.p[k].prev.as_ref().map(|(r, _, _)| r.clone()));
+        let old_run = g.p[k]
+            .run
+            .clone()
+            .or_else(|| g.p[k].prev.as_ref().map(|(r, _, _)| r.clone()));
         // (the edges: the old run's go, the new run's come, each with the
         // piece whose definition answers it now; a read answered otherwise
         // than it was is stale)
@@ -888,11 +1005,18 @@ fn run_and_install(sh: &Shared, k: usize, dirty: &[u32]) -> u64 {
                 stale.insert(*node);
             }
             let src = def.map_or(INITIAL, |d| sh.ids[d as usize]);
-            g.readers.entry(key.clone()).or_default().insert(id, (*node, src));
+            g.readers
+                .entry(key.clone())
+                .or_default()
+                .insert(id, (*node, src));
         }
         let changed = changed_names(old_run.as_deref(), &run);
         for key in &changed {
-            let val = run.exports.binary_search_by(|(x, _)| x.cmp(key)).ok().map(|i| &run.exports[i].1);
+            let val = run
+                .exports
+                .binary_search_by(|(x, _)| x.cmp(key))
+                .ok()
+                .map(|i| &run.exports[i].1);
             sh.names.set(k, key, val);
         }
         g.p[k].run = Some(run.clone());
@@ -933,7 +1057,9 @@ impl Env for PieceEnv<'_> {
         loop {
             let seen = *sh.generation.lock().expect("generation");
             let (def, val) = sh.names.reaching(key, self.k, &sh.font);
-            let Some(d) = def else { return (val, Src::Initial) };
+            let Some(d) = def else {
+                return (val, Src::Initial);
+            };
             let d = d as usize;
             let src = Src::Piece(sh.ids[d]);
             if sh.opts.reads == Reads::Speculate {
@@ -951,7 +1077,11 @@ impl Env for PieceEnv<'_> {
                         g.p[d].status = Status::Running;
                         g.stats.parks += 1;
                         g.stats.leapfrogs += 1;
-                        Some(std::mem::take(&mut g.p[d].dirty).into_iter().collect::<Vec<u32>>())
+                        Some(
+                            std::mem::take(&mut g.p[d].dirty)
+                                .into_iter()
+                                .collect::<Vec<u32>>(),
+                        )
                     }
                     Status::Running => {
                         g.stats.parks += 1;
@@ -959,15 +1089,12 @@ impl Env for PieceEnv<'_> {
                     }
                 }
             };
-            match leapfrog {
-                Some(dirty) => {
-                    run_and_install(sh, d, &dirty);
-                }
-                None => {
-                    let mut g = sh.generation.lock().expect("generation");
-                    while *g == seen {
-                        g = sh.parked.wait(g).expect("generation");
-                    }
+            if let Some(dirty) = leapfrog {
+                run_and_install(sh, d, &dirty);
+            } else {
+                let mut g = sh.generation.lock().expect("generation");
+                while *g == seen {
+                    g = sh.parked.wait(g).expect("generation");
                 }
             }
         }

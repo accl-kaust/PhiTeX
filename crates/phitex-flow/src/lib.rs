@@ -34,10 +34,10 @@
 pub mod arith;
 pub mod build;
 pub mod dvi;
+pub mod graph;
 pub mod hash;
 pub mod linebreak;
 pub mod page;
-pub mod graph;
 pub mod tfm;
 pub mod val;
 

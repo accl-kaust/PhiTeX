@@ -11,8 +11,8 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 
 use crate::arith::{AWFUL_BAD, INF_BAD, badness, clamp};
-use crate::linebreak::{GlueSet, Line, set_glue};
 use crate::graph::Para;
+use crate::linebreak::{GlueSet, Line, set_glue};
 
 /// The page parameters a paragraph was read with.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -26,10 +26,17 @@ pub struct PageParams {
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub enum VItem {
     Line(Arc<Line>, PageParams),
-    Glue { w: i32, st: i32, st_ord: u8, sh: i32 },
+    Glue {
+        w: i32,
+        st: i32,
+        st_ord: u8,
+        sh: i32,
+    },
     /// The interline glue before a piece's first line, resolved from its
     /// neighbours' dimensions.
-    Join { baselineskip: i32 },
+    Join {
+        baselineskip: i32,
+    },
     Penalty(i32),
 }
 
@@ -37,19 +44,38 @@ pub enum VItem {
 pub fn interline(prev_d: i32, h: i32, bs: i32) -> VItem {
     let b = bs - prev_d - h;
     let w = if b < 0 { 65536 } else { b };
-    VItem::Glue { w, st: 0, st_ord: 0, sh: 0 }
+    VItem::Glue {
+        w,
+        st: 0,
+        st_ord: 0,
+        sh: 0,
+    }
 }
 
+/// A paragraph's lines.
+pub type Lines = Arc<Vec<Arc<Line>>>;
+
 /// A piece's vertical material, from its paragraphs and their lines.
-pub fn material(paras: &[(Arc<Para>, Arc<Vec<Arc<Line>>>)]) -> Vec<VItem> {
+pub fn material(paras: &[(Arc<Para>, Lines)]) -> Vec<VItem> {
     let mut out = Vec::new();
     let mut prev: Option<i32> = None;
     for (p, lines) in paras {
-        let pp = PageParams { vsize: p.vsize, topskip: p.topskip, maxdepth: p.maxdepth };
-        out.push(VItem::Glue { w: p.parskip, st: 0, st_ord: 0, sh: 0 });
+        let pp = PageParams {
+            vsize: p.vsize,
+            topskip: p.topskip,
+            maxdepth: p.maxdepth,
+        };
+        out.push(VItem::Glue {
+            w: p.parskip,
+            st: 0,
+            st_ord: 0,
+            sh: 0,
+        });
         for l in lines.iter() {
             match prev {
-                None => out.push(VItem::Join { baselineskip: p.baselineskip }),
+                None => out.push(VItem::Join {
+                    baselineskip: p.baselineskip,
+                }),
                 Some(d) => out.push(interline(d, l.h, p.baselineskip)),
             }
             out.push(VItem::Line(l.clone(), pp));
@@ -100,7 +126,12 @@ impl Scan {
 
     /// The end of the document: fill and force the last page out.
     pub fn finish(&mut self) {
-        self.feed(VItem::Glue { w: 0, st: 65536, st_ord: 2, sh: 0 });
+        self.feed(VItem::Glue {
+            w: 0,
+            st: 65536,
+            st_ord: 2,
+            sh: 0,
+        });
         self.feed(VItem::Penalty(-(1 << 30)));
     }
 
@@ -108,13 +139,13 @@ impl Scan {
         match it {
             VItem::Join { baselineskip } => self.pending_join = Some(baselineskip),
             VItem::Line(l, pp) => {
-                if let Some(bs) = self.pending_join.take() {
-                    if let Some(pd) = self.prev_depth {
-                        let g = interline(pd, l.h, bs);
-                        q.push_front(VItem::Line(l, pp));
-                        q.push_front(g);
-                        return;
-                    }
+                if let Some(bs) = self.pending_join.take()
+                    && let Some(pd) = self.prev_depth
+                {
+                    let g = interline(pd, l.h, bs);
+                    q.push_front(VItem::Line(l, pp));
+                    q.push_front(g);
+                    return;
                 }
                 self.prev_depth = Some(l.d);
                 if !self.contents {
@@ -125,7 +156,12 @@ impl Scan {
                     self.best = None;
                     let t = (pp.topskip - l.h).max(0);
                     self.add_glue(t, 0, 0, 0);
-                    self.page.push(VItem::Glue { w: t, st: 0, st_ord: 0, sh: 0 });
+                    self.page.push(VItem::Glue {
+                        w: t,
+                        st: 0,
+                        st_ord: 0,
+                        sh: 0,
+                    });
                 }
                 self.total += i64::from(self.depth) + i64::from(l.h);
                 self.depth = l.d;
@@ -139,12 +175,12 @@ impl Scan {
                 if !self.contents {
                     return;
                 }
-                if matches!(self.page.last(), Some(VItem::Line(..))) {
-                    if let Some(best) = self.test(0) {
-                        q.push_front(VItem::Glue { w, st, st_ord, sh });
-                        self.fire(best, q);
-                        return;
-                    }
+                if matches!(self.page.last(), Some(VItem::Line(..)))
+                    && let Some(best) = self.test(0)
+                {
+                    q.push_front(VItem::Glue { w, st, st_ord, sh });
+                    self.fire(best, q);
+                    return;
                 }
                 self.add_glue(w, st, st_ord, sh);
                 self.page.push(VItem::Glue { w, st, st_ord, sh });
@@ -153,12 +189,12 @@ impl Scan {
                 if !self.contents {
                     return;
                 }
-                if p < 10000 {
-                    if let Some(best) = self.test(p) {
-                        q.push_front(VItem::Penalty(p));
-                        self.fire(best, q);
-                        return;
-                    }
+                if p < 10000
+                    && let Some(best) = self.test(p)
+                {
+                    q.push_front(VItem::Penalty(p));
+                    self.fire(best, q);
+                    return;
                 }
                 self.page.push(VItem::Penalty(p));
             }
@@ -202,7 +238,11 @@ impl Scan {
             self.best = Some(self.page.len());
             self.least = c;
         }
-        if c == AWFUL_BAD || pi <= -10000 { Some(self.best.unwrap_or(self.page.len())) } else { None }
+        if c == AWFUL_BAD || pi <= -10000 {
+            Some(self.best.unwrap_or(self.page.len()))
+        } else {
+            None
+        }
     }
 
     /// Ships the page up to `best`; what follows goes back to be read again.
@@ -219,7 +259,12 @@ impl Scan {
                     nat += i64::from(last_d) + i64::from(l.h);
                     last_d = l.d;
                 }
-                VItem::Glue { w, st: s, st_ord, sh: k } => {
+                VItem::Glue {
+                    w,
+                    st: s,
+                    st_ord,
+                    sh: k,
+                } => {
                     nat += i64::from(last_d) + i64::from(*w);
                     last_d = 0;
                     st[usize::from(*st_ord)] += i64::from(*s);
@@ -234,7 +279,12 @@ impl Scan {
             d = self.maxdepth;
         }
         let glue = set_glue(clamp(i64::from(self.goal) - nat), &st, &[sh, 0, 0, 0]);
-        self.pages.push(Page { items, h: self.goal, d, glue });
+        self.pages.push(Page {
+            items,
+            h: self.goal,
+            d,
+            glue,
+        });
         self.contents = false;
         self.total = 0;
         self.depth = 0;

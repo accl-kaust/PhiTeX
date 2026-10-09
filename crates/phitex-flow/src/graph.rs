@@ -54,10 +54,25 @@ pub trait Env {
 /// An item of a horizontal list.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum HItem {
-    Char { c: u8, w: i32, h: i32, d: i32 },
+    Char {
+        c: u8,
+        w: i32,
+        h: i32,
+        d: i32,
+    },
     /// An empty box (the paragraph indentation).
-    Box { w: i32, h: i32, d: i32 },
-    Glue { w: i32, st: i32, st_ord: u8, sh: i32, sh_ord: u8 },
+    Box {
+        w: i32,
+        h: i32,
+        d: i32,
+    },
+    Glue {
+        w: i32,
+        st: i32,
+        st_ord: u8,
+        sh: i32,
+        sh_ord: u8,
+    },
     Penalty(i32),
 }
 
@@ -147,7 +162,10 @@ pub enum Kind {
 impl Kind {
     /// Whether the node changes how later names resolve.
     fn scopes(self) -> bool {
-        matches!(self, Kind::Open | Kind::Close | Kind::If | Kind::IfClosed | Kind::EndIf)
+        matches!(
+            self,
+            Kind::Open | Kind::Close | Kind::If | Kind::IfClosed | Kind::EndIf
+        )
     }
 }
 
@@ -219,7 +237,11 @@ pub struct Chain {
 impl Chain {
     /// The input state of node `i` (`i == len`: of the next node).
     pub fn input(&self, i: usize) -> RState {
-        if i == 0 { RState::start() } else { self.nodes[i - 1].out.clone() }
+        if i == 0 {
+            RState::start()
+        } else {
+            self.nodes[i - 1].out.clone()
+        }
     }
 
     /// Whether node `i` begins in horizontal mode.
@@ -236,8 +258,12 @@ impl Chain {
                 continue;
             }
             let n = &self.nodes[d as usize];
-            let Some(def) = n.defs.iter().rev().find(|x| x.key == *key) else { continue };
-            let closed = n.group.is_some_and(|g| self.close_of.get(&g).is_some_and(|&c| (c as usize) < i));
+            let Some(def) = n.defs.iter().rev().find(|x| x.key == *key) else {
+                continue;
+            };
+            let closed = n
+                .group
+                .is_some_and(|g| self.close_of.get(&g).is_some_and(|&c| (c as usize) < i));
             if def.global || !closed {
                 return Some((d, def.val.clone()));
             }
@@ -353,8 +379,17 @@ impl Edit {
             return None;
         }
         let start = old.iter().zip(new).take_while(|(a, b)| a == b).count();
-        let tail = old[start..].iter().rev().zip(new[start..].iter().rev()).take_while(|(a, b)| a == b).count();
-        Some(Edit { start, old_end: old.len() - tail, new_end: new.len() - tail })
+        let tail = old[start..]
+            .iter()
+            .rev()
+            .zip(new[start..].iter().rev())
+            .take_while(|(a, b)| a == b)
+            .count();
+        Some(Edit {
+            start,
+            old_end: old.len() - tail,
+            new_end: new.len() - tail,
+        })
     }
 
     /// An old position in the new text, if it is outside the changed
@@ -392,7 +427,12 @@ fn resolve_now(chain: &Chain, env: &mut dyn Env, outside: &mut Outside, key: &Ke
 /// Runs a piece: `old` is its previous chain (and the text that made it),
 /// `dirty` the sorted indices of old nodes a definition of which was
 /// remade. Returns the new chain, with every old node still holding kept.
-pub fn run_piece(text: &[char], env: &mut dyn Env, old: Option<(&Chain, &[char])>, dirty: &[u32]) -> Run {
+pub fn run_piece(
+    text: &[char],
+    env: &mut dyn Env,
+    old: Option<(&Chain, &[char])>,
+    dirty: &[u32],
+) -> Run {
     let mut outside: Outside = FxMap::default();
     let mut chain = Chain::default();
     let mut ran = 0u64;
@@ -402,7 +442,11 @@ pub fn run_piece(text: &[char], env: &mut dyn Env, old: Option<(&Chain, &[char])
     // everything before it is kept as it is)
     let mut from = dirty.first().map_or(usize::MAX, |&d| d as usize);
     if let (Some(oc), Some(e)) = (oldc, edit) {
-        let touched = oc.nodes.iter().position(|n| n.out.pos >= e.start).unwrap_or(oc.nodes.len());
+        let touched = oc
+            .nodes
+            .iter()
+            .position(|n| n.out.pos >= e.start)
+            .unwrap_or(oc.nodes.len());
         from = from.min(touched);
     }
     let from = oldc.map_or(0, |oc| from.min(oc.nodes.len().saturating_sub(1)));
@@ -442,15 +486,22 @@ pub fn run_piece(text: &[char], env: &mut dyn Env, old: Option<(&Chain, &[char])
                 inp.pos = state.pos;
                 if start_ok && text_ok && inp == state {
                     cand = Some(oi);
-                    let reads_ok =
-                        par_ok && n.reads.iter().all(|r| resolve_now(&chain, env, &mut outside, &r.key).0 == r.val);
+                    let reads_ok = par_ok
+                        && n.reads
+                            .iter()
+                            .all(|r| resolve_now(&chain, env, &mut outside, &r.key).0 == r.val);
                     if reads_ok {
                         let in_place = edit.is_none() && !scope_changed && oi == chain.nodes.len();
                         if in_place {
                             // (the same node at the same index, its operands
                             // from the same nodes: shared, not copied; and so
                             // on up to the next node that must be looked at)
-                            copy_to = Some(dirty.iter().find(|&&d| d as usize > oi).map_or(oc.nodes.len(), |&d| d as usize));
+                            copy_to = Some(
+                                dirty
+                                    .iter()
+                                    .find(|&&d| d as usize > oi)
+                                    .map_or(oc.nodes.len(), |&d| d as usize),
+                            );
                         } else {
                             let mut n = (**n).clone();
                             if let Some(e) = edit {
@@ -483,7 +534,8 @@ pub fn run_piece(text: &[char], env: &mut dyn Env, old: Option<(&Chain, &[char])
                         break;
                     }
                     let holds = n.reads.iter().all(|r| {
-                        matches!(r.src, Src::Node(_)) || outside_read(env, &mut outside, &r.key).0 == r.val
+                        matches!(r.src, Src::Node(_))
+                            || outside_read(env, &mut outside, &r.key).0 == r.val
                     });
                     if !holds {
                         break;
@@ -533,7 +585,10 @@ pub fn run_piece(text: &[char], env: &mut dyn Env, old: Option<(&Chain, &[char])
                     && o.kind == n.kind
                     && o.out == n.out
                     && o.defs.len() == n.defs.len()
-                    && o.defs.iter().zip(&n.defs).all(|(a, b)| a.key == b.key && a.val == b.val && a.global == b.global)
+                    && o.defs
+                        .iter()
+                        .zip(&n.defs)
+                        .all(|(a, b)| a.key == b.key && a.val == b.val && a.global == b.global)
             });
             if same_as_old {
                 oi += 1;
@@ -556,11 +611,18 @@ pub fn run_piece(text: &[char], env: &mut dyn Env, old: Option<(&Chain, &[char])
     }
     // (exports: each key defined in the piece, as it reaches the end)
     let end = chain.nodes.len();
-    let mut exports: Vec<(Key, Val)> =
-        chain.defs_of.keys().filter_map(|k| chain.resolve(k, end).map(|(_, v)| (k.clone(), v))).collect();
+    let mut exports: Vec<(Key, Val)> = chain
+        .defs_of
+        .keys()
+        .filter_map(|k| chain.resolve(k, end).map(|(_, v)| (k.clone(), v)))
+        .collect();
     exports.sort_by(|a, b| a.0.cmp(&b.0));
     let paras = chain.nodes.iter().filter_map(|n| n.para.clone()).collect();
-    let errors = chain.nodes.iter().flat_map(|n| n.errors.iter().cloned()).collect();
+    let errors = chain
+        .nodes
+        .iter()
+        .flat_map(|n| n.errors.iter().cloned())
+        .collect();
     let mut reads = Vec::new();
     let mut seen: FxSet<&Key> = FxSet::default();
     for (i, n) in chain.nodes.iter().enumerate() {
@@ -570,7 +632,14 @@ pub fn run_piece(text: &[char], env: &mut dyn Env, old: Option<(&Chain, &[char])
             }
         }
     }
-    Run { chain, reads, exports, paras, errors, ran }
+    Run {
+        chain,
+        reads,
+        exports,
+        paras,
+        errors,
+        ran,
+    }
 }
 
 /// Buffers reused from node to node (their capacity, never their
@@ -661,7 +730,11 @@ impl<'a> Exec<'a> {
             return v.clone();
         }
         let (v, src) = resolve_now(self.chain, self.env, self.outside, key);
-        self.reads.push(Read { key: key.clone(), src, val: v.clone() });
+        self.reads.push(Read {
+            key: key.clone(),
+            src,
+            val: v.clone(),
+        });
         self.scratch.seen.insert(key.clone(), v.clone());
         v
     }
@@ -834,7 +907,11 @@ impl<'a> Exec<'a> {
                     j += 1;
                 }
                 let delim = &p[i + 1..j];
-                args[usize::from(n)] = if delim.is_empty() { self.undelimited() } else { self.delimited(delim) };
+                args[usize::from(n)] = if delim.is_empty() {
+                    self.undelimited()
+                } else {
+                    self.delimited(delim)
+                };
                 i = j;
             } else {
                 match self.next_raw() {
@@ -975,7 +1052,10 @@ impl<'a> Exec<'a> {
         if test {
             self.st.conds += 1;
             self.kind = Kind::If;
-            self.phi = Some(Box::new(Phi { test: true, keys: Vec::new() }));
+            self.phi = Some(Box::new(Phi {
+                test: true,
+                keys: Vec::new(),
+            }));
             return;
         }
         let at_else = self.skip(true);
@@ -985,7 +1065,10 @@ impl<'a> Exec<'a> {
         } else {
             self.kind = Kind::IfClosed;
         }
-        self.phi = Some(Box::new(Phi { test: false, keys: Vec::new() }));
+        self.phi = Some(Box::new(Phi {
+            test: false,
+            keys: Vec::new(),
+        }));
     }
 
     /// Skips an arm: up to the matching `\fi`, or `\else` if asked.
@@ -1036,7 +1119,10 @@ impl<'a> Exec<'a> {
             }
         }
         let Some(at) = at else {
-            self.phi = Some(Box::new(Phi { test: false, keys: Vec::new() }));
+            self.phi = Some(Box::new(Phi {
+                test: false,
+                keys: Vec::new(),
+            }));
             return;
         };
         let test = nodes[at].phi.as_ref().is_some_and(|p| p.test);
@@ -1050,21 +1136,29 @@ impl<'a> Exec<'a> {
         }
         let mut phis = Vec::new();
         for k in keys {
-            let Some((d, after)) = self.chain.resolve(&k, here) else { continue };
-            self.reads.push(Read { key: k.clone(), src: Src::Node(d), val: after.clone() });
-            let before = match self.chain.resolve(&k, at) {
-                Some((d, v)) => {
-                    self.reads.push(Read { key: k.clone(), src: Src::Node(d), val: v.clone() });
-                    v
-                }
-                None => {
-                    let (v, src) = outside_read(self.env, self.outside, &k);
-                    self.reads.push(Read { key: k.clone(), src, val: v.clone() });
-                    v
-                }
+            let Some((d, after)) = self.chain.resolve(&k, here) else {
+                continue;
             };
+            self.reads.push(Read {
+                key: k.clone(),
+                src: Src::Node(d),
+                val: after.clone(),
+            });
+            let (before, src) = match self.chain.resolve(&k, at) {
+                Some((d, v)) => (v, Src::Node(d)),
+                None => outside_read(self.env, self.outside, &k),
+            };
+            self.reads.push(Read {
+                key: k.clone(),
+                src,
+                val: before.clone(),
+            });
             // (the φ is a definition: readers after the `\fi` read it)
-            self.defs.push(Def { key: k.clone(), val: after.clone(), global: false });
+            self.defs.push(Def {
+                key: k.clone(),
+                val: after.clone(),
+                global: false,
+            });
             phis.push((k, after, before));
         }
         self.phi = Some(Box::new(Phi { test, keys: phis }));
@@ -1130,7 +1224,9 @@ impl<'a> Exec<'a> {
                 }
             }
             11 | 12 => self.letter(c),
-            _ => self.err(format!("Character {c} of category {cat} is not supported yet")),
+            _ => self.err(format!(
+                "Character {c} of category {cat} is not supported yet"
+            )),
         }
     }
 
@@ -1161,8 +1257,13 @@ impl<'a> Exec<'a> {
                 }
                 self.space();
             }
-            Prim::Relax | Prim::Global => {}
-            Prim::Ifx | Prim::Iftrue | Prim::Iffalse | Prim::Else | Prim::Fi => {}
+            Prim::Relax
+            | Prim::Global
+            | Prim::Ifx
+            | Prim::Iftrue
+            | Prim::Iffalse
+            | Prim::Else
+            | Prim::Fi => {}
         }
     }
 
@@ -1178,7 +1279,9 @@ impl<'a> Exec<'a> {
             match t.cat() {
                 Some(1) => break,
                 Some(6) => match self.next_raw() {
-                    Some(Tok::Char(_, d)) if d.is_ascii_digit() && d != '0' => params.push(Tok::Param(d as u8 - b'0')),
+                    Some(Tok::Char(_, d)) if d.is_ascii_digit() && d != '0' => {
+                        params.push(Tok::Param(d as u8 - b'0'));
+                    }
                     _ => self.err("Parameters must be numbered consecutively".into()),
                 },
                 _ => params.push(t),
@@ -1204,7 +1307,9 @@ impl<'a> Exec<'a> {
                     body.push(t);
                 }
                 Some(6) => match self.next_raw() {
-                    Some(Tok::Char(_, d)) if d.is_ascii_digit() && d != '0' => body.push(Tok::Param(d as u8 - b'0')),
+                    Some(Tok::Char(_, d)) if d.is_ascii_digit() && d != '0' => {
+                        body.push(Tok::Param(d as u8 - b'0'));
+                    }
                     Some(x) if x.cat() == Some(6) => body.push(x),
                     other => {
                         self.err("Illegal parameter number in a definition".into());
@@ -1216,7 +1321,11 @@ impl<'a> Exec<'a> {
                 _ => body.push(t),
             }
         }
-        self.define(key, Val::Meaning(Meaning::Macro(Arc::new(Macro { params, body }))), global);
+        self.define(
+            key,
+            Val::Meaning(Meaning::Macro(Arc::new(Macro { params, body }))),
+            global,
+        );
     }
 
     fn let_(&mut self, global: bool) {
@@ -1257,7 +1366,11 @@ impl<'a> Exec<'a> {
 
     fn param_assign(&mut self, p: Param, global: bool) {
         self.optional_equals();
-        let v = if p.is_int() { self.scan_int() } else { self.scan_dimen() };
+        let v = if p.is_int() {
+            self.scan_int()
+        } else {
+            self.scan_dimen()
+        };
         self.define(Key::Param(p), Val::Int(v), global);
     }
 
@@ -1273,18 +1386,18 @@ impl<'a> Exec<'a> {
     }
 
     fn optional_equals(&mut self) {
-        if let Some(t) = self.skip_spaces_x() {
-            if !t.is_char(12, '=') {
-                self.back(t);
-            }
+        if let Some(t) = self.skip_spaces_x()
+            && !t.is_char(12, '=')
+        {
+            self.back(t);
         }
     }
 
     fn optional_space(&mut self) {
-        if let Some(t) = self.next_x() {
-            if t.cat() != Some(10) {
-                self.back(t);
-            }
+        if let Some(t) = self.next_x()
+            && t.cat() != Some(10)
+        {
+            self.back(t);
         }
     }
 
@@ -1351,7 +1464,9 @@ impl<'a> Exec<'a> {
                 let Some(x) = x else { break };
                 let d = match &x {
                     Tok::Char(12, c) if c.is_ascii_digit() => c.to_digit(10),
-                    Tok::Char(11 | 12, c) if radix == 16 && ('A'..='F').contains(c) => c.to_digit(16),
+                    Tok::Char(11 | 12, c) if radix == 16 && ('A'..='F').contains(c) => {
+                        c.to_digit(16)
+                    }
                     _ => None,
                 };
                 match d {
@@ -1449,7 +1564,11 @@ impl<'a> Exec<'a> {
         if !any && !point {
             self.err("Missing number, treated as zero".into());
         }
-        let f = if digits.is_empty() { 0 } else { round_decimals(&digits) };
+        let f = if digits.is_empty() {
+            0
+        } else {
+            round_decimals(&digits)
+        };
         self.units(neg, ip as i32, f)
     }
 
@@ -1525,14 +1644,25 @@ impl<'a> Exec<'a> {
         }
         let font = self.font();
         match font.char(u32::from(c)) {
-            Some(d) if u32::from(c) < 256 => self.emit.push(HItem::Char { c: c as u8, w: d.w, h: d.h, d: d.d }),
+            Some(d) if u32::from(c) < 256 => self.emit.push(HItem::Char {
+                c: c as u8,
+                w: d.w,
+                h: d.h,
+                d: d.d,
+            }),
             _ => self.err(format!("Missing character {c} in font {}", font.name)),
         }
     }
 
     fn space(&mut self) {
         let f = self.font();
-        self.emit.push(HItem::Glue { w: f.param(2), st: f.param(3), st_ord: 0, sh: f.param(4), sh_ord: 0 });
+        self.emit.push(HItem::Glue {
+            w: f.param(2),
+            st: f.param(3),
+            st_ord: 0,
+            sh: f.param(4),
+            sh_ord: 0,
+        });
     }
 
     /// `\par`: the paragraph, from the material its nodes emitted, with the
@@ -1552,13 +1682,22 @@ impl<'a> Exec<'a> {
                 break;
             }
         }
-        let mut hlist: Vec<HItem> = nodes[first..].iter().flat_map(|n| n.emit.iter().copied()).collect();
-        hlist.extend(self.emit.drain(..));
+        let mut hlist: Vec<HItem> = nodes[first..]
+            .iter()
+            .flat_map(|n| n.emit.iter().copied())
+            .collect();
+        hlist.append(&mut self.emit);
         if matches!(hlist.last(), Some(HItem::Glue { .. })) {
             hlist.pop();
         }
         hlist.push(HItem::Penalty(10000));
-        hlist.push(HItem::Glue { w: 0, st: 65536, st_ord: 1, sh: 0, sh_ord: 0 });
+        hlist.push(HItem::Glue {
+            w: 0,
+            st: 65536,
+            st_ord: 1,
+            sh: 0,
+            sh_ord: 0,
+        });
         let para = Para {
             hlist,
             hsize: self.param(Param::Hsize),

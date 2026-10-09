@@ -24,7 +24,11 @@ pub enum Tok {
 
 impl Tok {
     pub fn cat(&self) -> Option<u8> {
-        if let Tok::Char(c, _) = self { Some(*c) } else { None }
+        if let Tok::Char(c, _) = self {
+            Some(*c)
+        } else {
+            None
+        }
     }
     pub fn is_char(&self, cat: u8, ch: char) -> bool {
         matches!(self, Tok::Char(c, x) if *c == cat && *x == ch)
@@ -42,9 +46,8 @@ impl Tok {
 impl fmt::Display for Tok {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Tok::Char(_, c) => write!(f, "{c}"),
+            Tok::Char(_, c) | Tok::Active(c) => write!(f, "{c}"),
             Tok::Cs(n) => write!(f, "\\{n}"),
-            Tok::Active(c) => write!(f, "{c}"),
             Tok::Param(n) => write!(f, "#{n}"),
         }
     }
@@ -157,7 +160,10 @@ pub enum Prim {
 
 impl Prim {
     pub fn expandable(self) -> bool {
-        matches!(self, Prim::Ifx | Prim::Iftrue | Prim::Iffalse | Prim::Else | Prim::Fi)
+        matches!(
+            self,
+            Prim::Ifx | Prim::Iftrue | Prim::Iffalse | Prim::Else | Prim::Fi
+        )
     }
     pub fn by_name(n: &str) -> Option<Prim> {
         Some(match n {
@@ -176,7 +182,12 @@ impl Prim {
             "indent" => Prim::Indent,
             "noindent" => Prim::Noindent,
             " " => Prim::Space,
-            _ => return Param::ALL.iter().find(|p| p.name() == n).map(|&p| Prim::Param(p)),
+            _ => {
+                return Param::ALL
+                    .iter()
+                    .find(|p| p.name() == n)
+                    .map(|&p| Prim::Param(p));
+            }
         })
     }
 }

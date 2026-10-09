@@ -42,8 +42,16 @@ impl Font {
             Ok((usize::from(b[o]) << 8) | usize::from(b[o + 1]))
         };
         let (lf, lh, bc, ec) = (hw(0)?, hw(1)?, hw(2)?, hw(3)?);
-        let (nw, nh, nd, ni, nl, nk, ne, np) =
-            (hw(4)?, hw(5)?, hw(6)?, hw(7)?, hw(8)?, hw(9)?, hw(10)?, hw(11)?);
+        let (nw, nh, nd, ni, nl, nk, ne, np) = (
+            hw(4)?,
+            hw(5)?,
+            hw(6)?,
+            hw(7)?,
+            hw(8)?,
+            hw(9)?,
+            hw(10)?,
+            hw(11)?,
+        );
         if lf * 4 > b.len() || lh < 2 || ec > 255 || bc > ec + 1 {
             return Err("bad TFM header".into());
         }
@@ -76,7 +84,12 @@ impl Font {
         let beta = 256 / alpha;
         let alpha = alpha * z;
         let store = |w: [u8; 4]| -> i32 {
-            let (a, bb, c, d) = (i32::from(w[0]), i32::from(w[1]), i32::from(w[2]), i32::from(w[3]));
+            let (a, bb, c, d) = (
+                i32::from(w[0]),
+                i32::from(w[1]),
+                i32::from(w[2]),
+                i32::from(w[3]),
+            );
             let sw = (((d * z) / 256 + c * z) / 256 + bb * z) / beta;
             match a {
                 0 => sw,
@@ -85,7 +98,7 @@ impl Font {
             }
         };
         let mut chars = vec![None; 256];
-        for c in bc..=ec {
+        for (c, slot) in chars.iter_mut().enumerate().take(ec + 1).skip(bc) {
             if c >= bc + nc {
                 break;
             }
@@ -96,7 +109,7 @@ impl Font {
             }
             let hi = usize::from(w[1] >> 4);
             let di = usize::from(w[1] & 15);
-            chars[c] = Some(CharDims {
+            *slot = Some(CharDims {
                 w: store(word(wt + wi)),
                 h: store(word(ht + hi)),
                 d: store(word(dt + di)),
@@ -105,7 +118,11 @@ impl Font {
         let mut params = vec![0; 8];
         for (k, p) in params.iter_mut().enumerate().take(np.min(7) + 1).skip(1) {
             let w = word(pt + k - 1);
-            *p = if k == 1 { i32::from_be_bytes(w) >> 4 } else { store(w) };
+            *p = if k == 1 {
+                i32::from_be_bytes(w) >> 4
+            } else {
+                store(w)
+            };
         }
         Ok(Font {
             name: name.to_string(),

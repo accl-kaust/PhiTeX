@@ -1,7 +1,7 @@
 //! TeX's integer arithmetic (tex.web part 7), copied as pure functions.
 
 pub const INF_BAD: i32 = 10000;
-pub const AWFUL_BAD: i32 = 0o7777_777_777;
+pub const AWFUL_BAD: i32 = 0o7_777_777_777;
 
 /// The badness of stretching or shrinking by `t` when `s` is available
 /// (tex.web 108).
@@ -32,7 +32,11 @@ pub fn xn_over_d(x: i32, n: i32, d: i32) -> (i32, i32) {
     let p = i64::from(x).abs() * i64::from(n);
     let (q, r) = (p / i64::from(d), p % i64::from(d));
     let q = q.min(i64::from(i32::MAX)) as i32;
-    if x < 0 { (-q, -(r as i32)) } else { (q, r as i32) }
+    if x < 0 {
+        (-q, -(r as i32))
+    } else {
+        (q, r as i32)
+    }
 }
 
 /// The fraction `0.d1d2...` in units of 2^-16, rounded (tex.web 102).

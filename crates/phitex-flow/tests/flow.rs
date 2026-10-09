@@ -1,18 +1,31 @@
-//! The design's tests (AGENTS_BRIEF.md): any schedule gives the same
+//! The design's tests (`AGENTS_BRIEF.md`): any schedule gives the same
 //! output; an edit gives what a cold build of the edited text gives; a
 //! version is content only; φ is explicit; work spreads over threads.
 
+// (a DVI file is compared whole; `assert_eq!` would print its bytes)
+#![allow(clippy::manual_assert_eq)]
+
+use std::fmt::Write as _;
 use std::sync::Arc;
 
 use phitex_flow::{Build, Font, Options, Order, Output, Reads};
 
 fn font() -> Arc<Font> {
-    let b = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/../partex-core/testdata/cmr10.tfm")).unwrap();
+    let b = std::fs::read(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../partex-core/testdata/cmr10.tfm"
+    ))
+    .unwrap();
     Arc::new(Font::parse("cmr10", &b).unwrap())
 }
 
 fn opts(threads: usize, reads: Reads, order: Order) -> Options {
-    Options { threads, reads, order, dump: false }
+    Options {
+        threads,
+        reads,
+        order,
+        dump: false,
+    }
 }
 
 /// A document of `n` paragraphs with definitions, groups, conditionals and
@@ -28,11 +41,12 @@ fn doc(n: usize) -> String {
         if k % 10 == 9 {
             s.push_str("\\def\\lazy{lazy}\n\n");
         }
-        s.push_str(&format!(
+        let _ = write!(
+            s,
             "The quick brown fox number {k} jumps over the \\lazy\\ dog; \\ifx\\lazy\\idle it rests\\else it runs\\fi. \
              {{\\def\\lazy{{local}}Inside a group the dog is \\lazy.}} \\pair ab and \\upto twelve words.\n\
              Pack my box with five dozen liquor jugs, and how vexingly quick daft zebras jump.\n\n"
-        ));
+        );
     }
     s
 }
@@ -51,7 +65,10 @@ fn any_schedule_gives_the_same_dvi() {
     for reads in [Reads::Suspend, Reads::Speculate] {
         for threads in [1, 2, 8] {
             let o = cold(&src, opts(threads, reads, Order::Priority));
-            assert!(o.dvi == base.dvi, "{threads} threads, {reads:?}: another DVI");
+            assert!(
+                o.dvi == base.dvi,
+                "{threads} threads, {reads:?}: another DVI"
+            );
         }
         for seed in 0..10 {
             let o = cold(&src, opts(8, reads, Order::Random(seed)));
@@ -69,8 +86,15 @@ fn an_edit_is_a_cold_build_of_the_edited_text() {
         let mut bld = Build::new(font());
         bld.update(&a, o);
         let e = bld.update(&b, o);
-        assert!(e.dvi == cold(&b, o).dvi, "{reads:?}: the edit's DVI is not the cold build's");
-        assert_eq!(e.stats.ran, 1, "{reads:?}: only the edited piece runs: {:?}", e.stats);
+        assert!(
+            e.dvi == cold(&b, o).dvi,
+            "{reads:?}: the edit's DVI is not the cold build's"
+        );
+        assert_eq!(
+            e.stats.ran, 1,
+            "{reads:?}: only the edited piece runs: {:?}",
+            e.stats
+        );
         assert_eq!(e.stats.reruns, 0);
     }
 }
@@ -100,15 +124,29 @@ fn a_changed_definition_reruns_its_readers_only() {
     assert!(e.dvi == cold(&b, o).dvi);
     // (every paragraph has a node reading \idle: that node runs, with what
     // depends on it; the other nodes do not)
-    assert!(e.stats.commands_run * 10 < e.stats.commands, "only the reading nodes run: {:?}", e.stats);
+    assert!(
+        e.stats.commands_run * 10 < e.stats.commands,
+        "only the reading nodes run: {:?}",
+        e.stats
+    );
     assert!(e.stats.commands_run < first.stats.commands_run / 10);
-    assert_eq!(e.stats.kept, 3, "the three pieces reading nothing that changed: {:?}", e.stats);
+    assert_eq!(
+        e.stats.kept, 3,
+        "the three pieces reading nothing that changed: {:?}",
+        e.stats
+    );
 }
 
 #[test]
 fn phi_is_explicit_at_fi() {
     let src = "\\def\\a{x}\\ifx\\a\\a \\def\\b{yes}\\else\\def\\b{no}\\fi\n";
-    let o = cold(src, Options { dump: true, ..Options::default() });
+    let o = cold(
+        src,
+        Options {
+            dump: true,
+            ..Options::default()
+        },
+    );
     assert!(o.dump.contains("φ test=true"), "{}", o.dump);
     assert!(o.dump.contains("\\b = φ("), "{}", o.dump);
 }
@@ -134,7 +172,10 @@ fn reruns_from_dirty_nodes_give_the_same_dvi() {
         let o = cold(&src, opts(8, Reads::Speculate, Order::Random(seed)));
         reruns += o.stats.reruns;
         assert!(o.dvi == base.dvi, "seed {seed}: another DVI: {:?}", o.stats);
-        assert_eq!(o.stats.commands, base.stats.commands, "seed {seed}: another graph");
+        assert_eq!(
+            o.stats.commands, base.stats.commands,
+            "seed {seed}: another graph"
+        );
     }
     assert!(reruns > 0, "no piece ran again from a dirty node");
 }

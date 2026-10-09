@@ -6,6 +6,9 @@
 //! occurrence of OLD becomes NEW) and builds again incrementally, and with
 //! `--check` compares that to a cold build of the edited text.
 
+// (work shares and milliseconds for printing)
+#![allow(clippy::cast_precision_loss)]
+
 use std::process::ExitCode;
 use std::sync::Arc;
 
@@ -43,7 +46,11 @@ fn report(what: &str, o: &Output) {
         s.pages_reused,
         busy,
         s.work.len(),
-        if total == 0 { 0.0 } else { 100.0 * max as f64 / total as f64 },
+        if total == 0 {
+            0.0
+        } else {
+            100.0 * max as f64 / total as f64
+        },
     );
     println!(
         "  serial: cut {:.1} ms, setup {:.1} ms, join {:.1} ms; by kind (all threads): reading {:.1} ms, line breaking {:.1} ms, page scan {:.1} ms, DVI {:.1} ms, confirming {:.1} ms",
@@ -61,6 +68,7 @@ fn report(what: &str, o: &Output) {
     }
 }
 
+#[allow(clippy::too_many_lines)]
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut file = None;
@@ -129,7 +137,10 @@ fn main() -> ExitCode {
         eprintln!("no cmr10.tfm found: pass --tfm PATH");
         return ExitCode::FAILURE;
     };
-    let font = match std::fs::read(&tfm).map_err(|e| e.to_string()).and_then(|b| Font::parse("cmr10", &b)) {
+    let font = match std::fs::read(&tfm)
+        .map_err(|e| e.to_string())
+        .and_then(|b| Font::parse("cmr10", &b))
+    {
         Ok(f) => Arc::new(f),
         Err(e) => {
             eprintln!("{tfm}: {e}");
@@ -165,7 +176,10 @@ fn main() -> ExitCode {
         if check {
             let fresh = Build::new(font).update(&edited, opts);
             report("cold of the edited text", &fresh);
-            println!("edit == cold: {}", if fresh.dvi == e.dvi { "yes" } else { "NO" });
+            println!(
+                "edit == cold: {}",
+                if fresh.dvi == e.dvi { "yes" } else { "NO" }
+            );
         }
         last = e;
     }

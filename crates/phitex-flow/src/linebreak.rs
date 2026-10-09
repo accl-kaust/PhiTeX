@@ -1,6 +1,7 @@
 //! Line breaking: a pure function of a paragraph (Knuth–Plass, tex.web
 //! part 38, without hyphenation, looseness or shapes yet), and packing.
 
+use std::cmp::Ordering;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
@@ -26,7 +27,11 @@ impl Hash for GlueSet {
     }
 }
 
-pub const NORMAL: GlueSet = GlueSet { sign: 0, order: 0, ratio: 0.0 };
+pub const NORMAL: GlueSet = GlueSet {
+    sign: 0,
+    order: 0,
+    ratio: 0.0,
+};
 
 /// A line: a box of width `hsize` with its glue set.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
@@ -41,24 +46,38 @@ pub struct Line {
 /// The glue setting that makes `x` more (or less) fit, given the stretch
 /// and shrink by order (tex.web 658, 664).
 pub fn set_glue(x: i32, st: &[i64; 4], sh: &[i64; 4]) -> GlueSet {
-    if x > 0 {
-        let o = (0..4).rev().find(|&o| st[o] != 0).unwrap_or(0);
-        if st[o] == 0 {
-            NORMAL
-        } else {
-            GlueSet { sign: 1, order: o as u8, ratio: f64::from(x) / st[o] as f64 }
+    match x.cmp(&0) {
+        Ordering::Greater => {
+            let o = (0..4).rev().find(|&o| st[o] != 0).unwrap_or(0);
+            if st[o] == 0 {
+                NORMAL
+            } else {
+                GlueSet {
+                    sign: 1,
+                    order: o as u8,
+                    ratio: f64::from(x) / st[o] as f64,
+                }
+            }
         }
-    } else if x < 0 {
-        let o = (0..4).rev().find(|&o| sh[o] != 0).unwrap_or(0);
-        if sh[o] == 0 {
-            NORMAL
-        } else if o == 0 && -i64::from(x) > sh[0] {
-            GlueSet { sign: -1, order: 0, ratio: 1.0 }
-        } else {
-            GlueSet { sign: -1, order: o as u8, ratio: f64::from(-x) / sh[o] as f64 }
+        Ordering::Less => {
+            let o = (0..4).rev().find(|&o| sh[o] != 0).unwrap_or(0);
+            if sh[o] == 0 {
+                NORMAL
+            } else if o == 0 && -i64::from(x) > sh[0] {
+                GlueSet {
+                    sign: -1,
+                    order: 0,
+                    ratio: 1.0,
+                }
+            } else {
+                GlueSet {
+                    sign: -1,
+                    order: o as u8,
+                    ratio: f64::from(-x) / sh[o] as f64,
+                }
+            }
         }
-    } else {
-        NORMAL
+        Ordering::Equal => NORMAL,
     }
 }
 
@@ -69,12 +88,28 @@ pub fn hpack(items: Vec<HItem>, target: i32) -> Line {
     let mut sh = [0i64; 4];
     for it in &items {
         match *it {
-            HItem::Char { w: cw, h: ch, d: cd, .. } | HItem::Box { w: cw, h: ch, d: cd } => {
+            HItem::Char {
+                w: cw,
+                h: ch,
+                d: cd,
+                ..
+            }
+            | HItem::Box {
+                w: cw,
+                h: ch,
+                d: cd,
+            } => {
                 w += i64::from(cw);
                 h = h.max(ch);
                 d = d.max(cd);
             }
-            HItem::Glue { w: gw, st: s, st_ord, sh: k, sh_ord } => {
+            HItem::Glue {
+                w: gw,
+                st: s,
+                st_ord,
+                sh: k,
+                sh_ord,
+            } => {
                 w += i64::from(gw);
                 st[usize::from(st_ord)] += i64::from(s);
                 sh[usize::from(sh_ord)] += i64::from(k);
@@ -83,7 +118,13 @@ pub fn hpack(items: Vec<HItem>, target: i32) -> Line {
         }
     }
     let glue = set_glue(clamp(i64::from(target) - w), &st, &sh);
-    Line { items, w: target, h, d, glue }
+    Line {
+        items,
+        w: target,
+        h,
+        d,
+        glue,
+    }
 }
 
 struct Node {
@@ -106,7 +147,9 @@ pub fn break_lines(p: &Para) -> Vec<Arc<Line>> {
         psh[i + 1] = psh[i];
         match *it {
             HItem::Char { w, .. } | HItem::Box { w, .. } => pw[i + 1] += i64::from(w),
-            HItem::Glue { w, st, st_ord, sh, .. } => {
+            HItem::Glue {
+                w, st, st_ord, sh, ..
+            } => {
                 pw[i + 1] += i64::from(w);
                 pst[i + 1][usize::from(st_ord)] += i64::from(st);
                 psh[i + 1] += i64::from(sh);
@@ -118,7 +161,9 @@ pub fn break_lines(p: &Para) -> Vec<Arc<Line>> {
     let mut cands: Vec<(usize, i32)> = Vec::new();
     for i in 0..n {
         match items[i] {
-            HItem::Glue { .. } if i > 0 && matches!(items[i - 1], HItem::Char { .. } | HItem::Box { .. }) => {
+            HItem::Glue { .. }
+                if i > 0 && matches!(items[i - 1], HItem::Char { .. } | HItem::Box { .. }) =>
+            {
                 cands.push((i, 0));
             }
             HItem::Penalty(pp) if pp < 10000 => cands.push((i, pp)),
@@ -135,7 +180,12 @@ pub fn break_lines(p: &Para) -> Vec<Arc<Line>> {
     };
     for pass in 0..2 {
         let threshold = if pass == 0 { p.tolerance } else { i32::MAX };
-        let mut arena = vec![Node { pos: usize::MAX, start: 0, total: 0, prev: None }];
+        let mut arena = vec![Node {
+            pos: usize::MAX,
+            start: 0,
+            total: 0,
+            prev: None,
+        }];
         let mut active: Vec<usize> = vec![0];
         let mut reached_end = false;
         for &(b, pen) in &cands {
@@ -147,24 +197,34 @@ pub fn break_lines(p: &Para) -> Vec<Arc<Line>> {
                 let stv: [i64; 4] = std::array::from_fn(|o| pst[b][o] - pst[s.min(b)][o]);
                 let shv = psh[b] - psh[s.min(b)];
                 let short = i64::from(p.hsize) - w;
-                let (bad, fit, overfull) = if short > 0 {
-                    if stv[1] + stv[2] + stv[3] > 0 {
-                        (0, 2usize, false)
-                    } else {
+                let (bad, fit, overfull) = match short.cmp(&0) {
+                    Ordering::Greater if stv[1] + stv[2] + stv[3] > 0 => (0, 2usize, false),
+                    Ordering::Greater => {
                         let bb = badness(clamp(short), clamp(stv[0]));
-                        (bb, if bb > 99 { 0 } else if bb > 12 { 1 } else { 2 }, false)
+                        (
+                            bb,
+                            if bb > 99 {
+                                0
+                            } else if bb > 12 {
+                                1
+                            } else {
+                                2
+                            },
+                            false,
+                        )
                     }
-                } else if short < 0 {
-                    if -short > shv {
-                        (INF_BAD + 1, 3, true)
-                    } else {
+                    Ordering::Less if -short > shv => (INF_BAD + 1, 3, true),
+                    Ordering::Less => {
                         let bb = badness(clamp(-short), clamp(shv));
                         (bb, if bb > 12 { 3 } else { 2 }, false)
                     }
-                } else {
-                    (0, 2, false)
+                    Ordering::Equal => (0, 2, false),
                 };
-                let feasible = if overfull { pass == 1 } else { bad <= threshold };
+                let feasible = if overfull {
+                    pass == 1
+                } else {
+                    bad <= threshold
+                };
                 if feasible {
                     let b2 = i64::from(if overfull { INF_BAD } else { bad });
                     let mut d = (i64::from(p.linepenalty) + b2).pow(2);
@@ -187,7 +247,12 @@ pub fn break_lines(p: &Para) -> Vec<Arc<Line>> {
             for slot in best.iter().flatten() {
                 let (tot, a) = *slot;
                 let start = if b >= n { n } else { start_after(b) };
-                arena.push(Node { pos: b, start, total: tot, prev: Some(a) });
+                arena.push(Node {
+                    pos: b,
+                    start,
+                    total: tot,
+                    prev: Some(a),
+                });
                 active.push(arena.len() - 1);
                 if b == n {
                     reached_end = true;
