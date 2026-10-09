@@ -288,5 +288,5 @@ pub fn break_lines(p: &Para) -> Vec<Arc<Line>> {
             return lines;
         }
     }
-    vec![Arc::new(hpack(items.clone(), p.hsize))]
+    vec![Arc::new(hpack(items.to_vec(), p.hsize))]
 }

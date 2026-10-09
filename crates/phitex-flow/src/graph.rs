@@ -81,7 +81,7 @@ pub enum HItem {
 /// lines.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub struct Para {
-    pub hlist: Vec<HItem>,
+    pub hlist: Arc<[HItem]>,
     pub hsize: i32,
     pub tolerance: i32,
     pub linepenalty: i32,
@@ -716,6 +716,14 @@ pub fn run_piece(
             (None, None) => {
                 ran += 1;
                 let mut x = Exec::new(text, &chain, &state, env, &mut outside, &mut scratch);
+                // (a paragraph none of whose nodes ran has the material the
+                // old one at this place had: every node of it is the old
+                // one, at the same input state)
+                if !para_fresh {
+                    x.old_hlist = cand
+                        .and_then(|ci| oldc.and_then(|oc| oc.nodes[ci].para()))
+                        .map(|p| p.hlist.clone());
+                }
                 x.command();
                 chain.with_group(x.finish())
             }
@@ -837,6 +845,9 @@ struct Exec<'a> {
     cmd: Tok,
     /// How many of `reads` are in `scratch.seen`.
     seen_upto: usize,
+    /// The material of the paragraph this node may end, if it is the old
+    /// paragraph's.
+    old_hlist: Option<Arc<[HItem]>>,
 }
 
 /// A read of the current font.
@@ -885,6 +896,7 @@ impl<'a> Exec<'a> {
             kind: Kind::Other,
             cmd: Tok::Char(0, '\0'),
             seen_upto: 0,
+            old_hlist: None,
         }
     }
 
@@ -1891,15 +1903,9 @@ impl<'a> Exec<'a> {
         });
     }
 
-    /// `\par`: the paragraph, from the material its nodes emitted, with the
-    /// parameters line breaking and pages read (tex.web 1096).
-    fn end_par(&mut self) {
-        if self.st.mode != Mode::H {
-            return;
-        }
-        self.kind = Kind::Par;
-        self.st.mode = Mode::V;
-        // (the paragraph's nodes: back to the one that began it)
+    /// The paragraph's material: what its nodes emitted, back to the one
+    /// that began it.
+    fn collect_hlist(&mut self) -> Arc<[HItem]> {
         let nodes = &self.chain.nodes;
         let mut first = nodes.len();
         for j in (0..nodes.len()).rev() {
@@ -1924,6 +1930,21 @@ impl<'a> Exec<'a> {
             sh: 0,
             sh_ord: 0,
         });
+        Arc::from(hlist)
+    }
+
+    /// `\par`: the paragraph, from the material its nodes emitted, with the
+    /// parameters line breaking and pages read (tex.web 1096).
+    fn end_par(&mut self) {
+        if self.st.mode != Mode::H {
+            return;
+        }
+        self.kind = Kind::Par;
+        self.st.mode = Mode::V;
+        let hlist = match self.old_hlist.take() {
+            Some(h) if self.emit.is_empty() => h,
+            _ => self.collect_hlist(),
+        };
         let para = Para {
             hlist,
             hsize: self.param(Param::Hsize),
