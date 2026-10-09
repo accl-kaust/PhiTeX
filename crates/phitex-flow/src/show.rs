@@ -329,8 +329,13 @@ pub fn zround(r: f64) -> i32 {
 /// §198: `show_box` of one box (with `print_ln`s as [`LN`]).
 pub fn show_box(out: &mut String, b: &BoxNode, cx: &Ctx) {
     let mut s = Shower { out, cx, prefix: String::new(), font: 0 };
-    s.out.push(LN);
-    s.boxed(b);
+    // (the list of one box, at depth 0: `show_node_list`'s cut applies)
+    if cx.depth < 0 {
+        s.out.push_str(" []");
+    } else {
+        s.out.push(LN);
+        s.boxed(b);
+    }
     s.out.push(LN);
 }
 

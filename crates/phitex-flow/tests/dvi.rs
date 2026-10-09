@@ -144,7 +144,7 @@ macro_rules! documents {
     };
 }
 
-documents!(para, skips, hbox, setbox, vbox, pages, fonts, shape);
+documents!(para, skips, hbox, setbox, vbox, pages, fonts, shape, leave, show, ship);
 
 /// plain.tex (all but `\input hyphen`), then text set with its macros and
 /// the default output routine (`\output={}`), at 1 thread.

@@ -1,0 +1,115 @@
+(./show.tex
+Underfull \hbox (badness 10000) detected at line 9
+\tenrm ffi -- \bf AV |\tenrm prepost-x[][]
+
+\hbox(7.07858+0.0)x300.0, glue set 53.03229
+.\tenrm ^^N (ligature ffi)
+.\glue 3.33333 plus 1.66666 minus 1.11111
+.\tenrm { (ligature --)
+.\glue 3.33333 plus 1.66666 minus 1.11111
+.\bf A
+.\kern-1.27777
+.\bf V
+.\kern 2.0
+.\penalty 7
+.\glue 3.0 plus 1.0 minus 2.0
+.\rule(*+*)x1.0
+.\discretionary replacing 2
+..\tenrm p
+..\tenrm r
+..\tenrm e
+.|\tenrm p
+.|\kern0.27779
+.|\tenrm o
+.|\tenrm s
+.|\tenrm t
+.\tenrm n
+.\tenrm o
+.\discretionary
+..\tenrm -
+.\tenrm x
+.\hbox(4.30554+0.0)x3.91667, shifted -2.0
+..\tenrm r
+.\vbox(7.07858+0.0)x8.33336
+..\rule(0.4+0.0)x*
+..\hbox(6.67859+0.0)x8.33336
+...\tenrm i
+...\tenrm n
+
+
+Overfull \hbox (65.97238pt too wide) detected at line 10
+ \tenrm Tight and overfull
+
+\hbox(6.94444+1.94444)x10.0, glue set - 1.0
+.\glue 0.0 minus 1.0
+.\tenrm T
+.\tenrm i
+.\tenrm g
+.\tenrm h
+.\kern-0.27779
+.\tenrm t
+.\glue 3.33333 plus 1.66666 minus 1.11111
+.\tenrm a
+.\tenrm n
+.\tenrm d
+.\glue 3.33333 plus 1.66666 minus 1.11111
+.\tenrm o
+.\kern-0.27779
+.\tenrm v
+.\kern-0.27779
+.\tenrm e
+.\tenrm r
+.\tenrm f
+.\tenrm u
+.\tenrm l
+.\tenrm l
+
+
+Tight \hbox (badness 1) detected at line 11
+\tenrm Tight a b c d
+
+\hbox(6.94444+1.94444)x57.05563, glue set - 0.225
+.\tenrm T
+.\tenrm i
+.\tenrm g
+.\tenrm h
+.\kern-0.27779
+.\tenrm t
+.\glue 3.33333 plus 1.66666 minus 1.11111
+.\tenrm a
+.\glue 3.33333 plus 1.66666 minus 1.11111
+.\tenrm b
+.\glue 3.33333 plus 1.66666 minus 1.11111
+.\tenrm c
+.\glue 3.33333 plus 1.66666 minus 1.11111
+.\tenrm d
+
+
+Overfull \hbox (120.66582pt too wide) detected at line 13
+\tenrm A list longer than the breadth: a b c d e f
+
+\hbox(6.94444+1.94444)x50.0, glue set - 1.0
+.\tenrm A
+.\glue 3.33333 plus 1.66498 minus 1.11221
+.etc.
+
+
+Underfull \vbox (badness 10000) detected at line 14
+
+\vbox(30.0+0.0)x15.55557, glue set 10.69446
+.\hbox(4.30554+0.0)x15.00003 []
+.\glue 2.0 plus 1.0
+.etc.
+
+
+Overfull \vbox (5.0pt too high) detected at line 15
+
+\vbox(5.0+0.0)x0.0
+.\rule(10.0+0.0)x*
+
+
+Overfull \hbox (24.33344pt too wide) detected at line 17
+\tenrm Depth below zero
+ []
+
+[0] )
