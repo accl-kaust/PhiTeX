@@ -86,11 +86,11 @@ fn first_difference(a: &[u8], b: &[u8]) -> usize {
 
 /// The schedules each document runs with.
 const RUNS: [Options; 5] = [
-    Options { threads: 1, reads: Reads::Suspend, order: Order::Priority, dump: false },
-    Options { threads: 8, reads: Reads::Suspend, order: Order::Priority, dump: false },
-    Options { threads: 8, reads: Reads::Speculate, order: Order::Priority, dump: false },
-    Options { threads: 8, reads: Reads::Suspend, order: Order::Random(1), dump: false },
-    Options { threads: 8, reads: Reads::Speculate, order: Order::Random(7), dump: false },
+    Options { threads: 1, reads: Reads::Suspend, order: Order::Priority, dump: false, etex: false },
+    Options { threads: 8, reads: Reads::Suspend, order: Order::Priority, dump: false, etex: false },
+    Options { threads: 8, reads: Reads::Speculate, order: Order::Priority, dump: false, etex: false },
+    Options { threads: 8, reads: Reads::Suspend, order: Order::Random(1), dump: false, etex: false },
+    Options { threads: 8, reads: Reads::Speculate, order: Order::Random(7), dump: false, etex: false },
 ];
 
 fn check(name: &str) {

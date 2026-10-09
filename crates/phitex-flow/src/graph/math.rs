@@ -945,11 +945,11 @@ impl Exec<'_> {
                     p.clear();
                 }
                 // (§1196)
-                self.emit.push(Item::Math { w: end.surround, after: false });
+                self.emit.push(Item::Math { w: end.surround, after: false, lr: 0 });
                 let penalties = !self.st.inner;
                 let hl = self.mlist_hlist(p, mlist::TEXT, penalties, &end);
                 self.emit.extend(hl);
-                self.emit.push(Item::Math { w: end.surround, after: true });
+                self.emit.push(Item::Math { w: end.surround, after: true, lr: 0 });
                 self.st.space_factor = 1000;
             }
             MathKind::EqNo { left } => {

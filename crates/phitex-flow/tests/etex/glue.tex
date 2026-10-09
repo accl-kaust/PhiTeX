@@ -1,0 +1,13 @@
+% \gluestretch, \glueshrink, their orders, \gluetomu, \mutoglue,
+% \parshapelength, \parshapeindent, \parshapedimen.
+\skip1=1pt plus 2fil minus 3fill
+\message{\the\gluestretch\skip1, \the\glueshrink\skip1, \the\gluestretchorder\skip1, \the\glueshrinkorder\skip1}
+\message{\the\gluestretchorder\skip0, \the\gluestretch 4pt plus 5.5pt minus 1filll, \the\glueshrinkorder 1pt minus 1filll}
+\message{\the\gluetomu\skip1, \the\mutoglue\thinmuskip}
+\muskip2=1mu plus 2fill \skip3=\mutoglue\muskip2 \message{\the\skip3}
+\muskip4=\gluetomu\skip1 \message{\the\muskip4}
+\count1=\gluestretch\skip1 \message{\the\count1}
+\parshape 2 1pt 2pt 3pt 4pt
+\message{\the\parshapelength1, \the\parshapeindent 2, \the\parshapedimen 3, \the\parshapedimen 4, \the\parshapelength 5, \the\parshapeindent 0, \the\parshapedimen 1}
+\message{\the\parshapedimen 7, \the\parshapelength -1}
+\parshape 0 \message{\the\parshapelength 1}

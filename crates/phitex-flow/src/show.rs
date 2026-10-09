@@ -76,9 +76,10 @@ pub fn short_display(out: &mut String, list: &[Item], font: &mut Arc<str>, cx: &
                 }
                 cx.chr(out, *c);
             }
-            Item::Box(_) | Item::Mark(_) => out.push_str("[]"),
+            Item::Box(_) | Item::Mark(_) | Item::Marks(..) => out.push_str("[]"),
+            // (§175, etex.web: a TeXXeT node as `[]`, a formula's edge as `$`)
+            Item::Math { lr, .. } => out.push_str(if *lr >= 4 { "[]" } else { "$" }),
             Item::Rule { .. } => out.push('|'),
-            Item::Math { .. } => out.push('$'),
             Item::Glue { zero, .. } => {
                 if !zero {
                     out.push(' ');
@@ -288,16 +289,33 @@ impl Shower<'_> {
                 self.sub('.', &d.pre);
                 self.sub('|', &d.post);
             }
-            Item::Math { w, after } => {
-                // (§192)
-                self.cx.esc(self.out, if *after { "mathoff" } else { "mathon" });
-                if *w != 0 {
-                    self.out.push_str(", surrounded ");
-                    print::scaled(self.out, *w);
+            Item::Math { w, after, lr } => {
+                // (§192, etex.web §1435)
+                if *lr > 0 {
+                    self.cx.esc(self.out, if *after { "end" } else { "begin" });
+                    self.out.push(match lr {
+                        10 => 'R',
+                        6 => 'L',
+                        _ => 'M',
+                    });
+                } else {
+                    self.cx.esc(self.out, if *after { "mathoff" } else { "mathon" });
+                    if *w != 0 {
+                        self.out.push_str(", surrounded ");
+                        print::scaled(self.out, *w);
+                    }
                 }
             }
             Item::Mark(t) => {
                 self.cx.esc(self.out, "mark");
+                self.out.push('{');
+                show_toks_plain(self.out, t, self.cx);
+                self.out.push('}');
+            }
+            Item::Marks(n, t) => {
+                // (etex.web §196: the class after `\marks`)
+                self.cx.esc(self.out, "marks");
+                let _ = write!(self.out, "{n}");
                 self.out.push('{');
                 show_toks_plain(self.out, t, self.cx);
                 self.out.push('}');

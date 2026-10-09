@@ -360,8 +360,11 @@ impl Breaker<'_> {
                         self.try_break(0, false, Some(k), &none);
                     }
                 }
-                Item::Math { after, .. } => {
-                    auto_breaking = *after;
+                Item::Math { after, lr, .. } => {
+                    // (etex.web: TeXXeT's nodes leave it as it is)
+                    if *lr < 4 {
+                        auto_breaking = *after;
+                    }
                     if auto_breaking && matches!(items.get(k + 1), Some(Item::Glue { .. })) {
                         self.try_break(0, false, Some(k), &none);
                     }
@@ -557,9 +560,9 @@ fn post_line_break(br: &Breaker<'_>, best: Active) -> Vec<Arc<Line>> {
                     line.push(rightskip);
                     b + 1
                 }
-                Item::Math { after, .. } => {
+                Item::Math { after, lr, .. } => {
                     line.extend(items[start..b].iter().cloned());
-                    line.push(Item::Math { w: 0, after: *after });
+                    line.push(Item::Math { w: 0, after: *after, lr: *lr });
                     line.push(rightskip);
                     b + 1
                 }
