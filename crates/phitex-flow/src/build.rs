@@ -172,24 +172,36 @@ type Defs = FxMap<Key, Vec<(u32, Val)>>;
 /// run is installed, under the scheduler's lock.
 struct Names {
     shards: Vec<RwLock<Defs>>,
+    /// Per shard, a bit per group of keys some piece has defined in this
+    /// build (set before the definition goes in, never cleared): a key
+    /// whose bit is clear has only its initial value, found without the
+    /// lock.
+    defined: Vec<AtomicU64>,
 }
 
 impl Names {
     fn new() -> Names {
         Names {
             shards: (0..SHARDS).map(|_| RwLock::default()).collect(),
+            defined: (0..SHARDS).map(|_| AtomicU64::new(0)).collect(),
         }
     }
 
-    fn shard(&self, key: &Key) -> &RwLock<Defs> {
-        // (the hash only routes to a shard; the map's `==` decides)
-        &self.shards[(hash_of(key) % SHARDS as u64) as usize]
+    /// The shard of `key` and its bit there. (The hash only routes; the
+    /// map's `==` decides.)
+    fn route(key: &Key) -> (usize, u64) {
+        let h = hash_of(key);
+        ((h % SHARDS as u64) as usize, 1 << ((h >> 32) % 64))
     }
 
     /// The definition of `key` reaching piece `k`: its piece's position
     /// (none: the initial value) and its value.
     fn reaching(&self, key: &Key, k: usize, font: &Arc<Font>) -> (Option<u32>, Val) {
-        let g = self.shard(key).read().expect("names");
+        let (s, bit) = Names::route(key);
+        if self.defined[s].load(Ordering::Acquire) & bit == 0 {
+            return (None, initial(key, font));
+        }
+        let g = self.shards[s].read().expect("names");
         if let Some(v) = g.get(key) {
             let i = v.partition_point(|(p, _)| (*p as usize) < k);
             if i > 0 {
@@ -201,7 +213,11 @@ impl Names {
 
     /// Piece `k` now defines `key` as `val` (none: no longer defines it).
     fn set(&self, k: usize, key: &Key, val: Option<&Val>) {
-        let mut g = self.shard(key).write().expect("names");
+        let (s, bit) = Names::route(key);
+        if val.is_some() {
+            self.defined[s].fetch_or(bit, Ordering::AcqRel);
+        }
+        let mut g = self.shards[s].write().expect("names");
         let v = g.entry(key.clone()).or_default();
         let i = v.partition_point(|(p, _)| (*p as usize) < k);
         let here = v.get(i).is_some_and(|(p, _)| *p as usize == k);
@@ -1029,7 +1045,7 @@ fn run_and_install(sh: &Shared, k: usize, dirty: &[u32]) -> u64 {
     let run = Arc::new(run_piece(
         &text,
         &mut env,
-        old.as_ref().map(|(r, t)| (&r.chain, &t[..])),
+        old.as_ref().map(|(r, t)| (&**r, &t[..])),
         dirty,
     ));
     let steps = run.ran;
@@ -1091,6 +1107,11 @@ fn run_and_install(sh: &Shared, k: usize, dirty: &[u32]) -> u64 {
             }
             let src = def.map_or(INITIAL, |d| sh.ids[d as usize]);
             srcs.push(src);
+            // (one edge per name: its first reader; a second entry for the
+            // name, read with another value, follows it)
+            if i > 0 && run.reads[i - 1].0 == *key {
+                continue;
+            }
             if same_keys
                 && old_srcs.get(i) == Some(&src)
                 && old_run.as_ref().is_some_and(|o| o.reads[i].1 == *node)

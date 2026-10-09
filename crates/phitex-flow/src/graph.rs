@@ -125,6 +125,17 @@ pub struct RState {
 }
 
 impl RState {
+    /// Equal but for the position.
+    fn eq_but_pos(&self, o: &RState) -> bool {
+        self.tstate == o.tstate
+            && self.mode == o.mode
+            && self.global == o.global
+            && self.depth == o.depth
+            && self.conds == o.conds
+            && self.parskip == o.parskip
+            && self.pending == o.pending
+    }
+
     fn start() -> RState {
         RState {
             pos: 0,
@@ -327,6 +338,11 @@ impl Chain {
         }
     }
 
+    /// The input position of node `i`.
+    fn input_pos(&self, i: usize) -> usize {
+        if i == 0 { 0 } else { self.nodes[i - 1].out.pos }
+    }
+
     /// Whether node `i` begins in horizontal mode.
     fn input_h(&self, i: usize) -> bool {
         i > 0 && self.nodes[i - 1].out.mode == Mode::H
@@ -387,9 +403,11 @@ impl Chain {
 #[derive(Clone, Debug, Default)]
 pub struct Run {
     pub chain: Chain,
-    /// Every name read from before the piece: (key, the first node reading
-    /// it, value). Every node reading it from before the piece read the
-    /// same value, so the first stands for all.
+    /// Every definition read from before the piece: (key, the first node
+    /// reading it, value), one entry per key and value, sorted by key then
+    /// node. A key read with two values (a node kept from an earlier run
+    /// and one run now) has two entries, and validating them all finds the
+    /// stale one.
     pub reads: Vec<(Key, u32, Val)>,
     /// Definitions reaching the piece's end, sorted by key.
     pub exports: Vec<(Key, Val)>,
@@ -523,14 +541,17 @@ fn resolve_now(chain: &Chain, env: &mut dyn Env, outside: &mut Outside, key: &Ke
 pub fn run_piece(
     text: &[char],
     env: &mut dyn Env,
-    old: Option<(&Chain, &[char])>,
+    old: Option<(&Run, &[char])>,
     dirty: &[u32],
 ) -> Run {
     let mut outside: Outside = FxMap::default();
+    // (reads from before the piece found to still hold in this run, by
+    // identity)
+    let mut holding: FxSet<usize> = FxSet::default();
     let mut chain = Chain::default();
     let mut ran = 0u64;
     let edit = old.and_then(|(_, t)| Edit::between(t, text));
-    let oldc = old.map(|(c, _)| c);
+    let oldc = old.map(|(r, _)| &r.chain);
     // (where to start: the first dirty node, or the first the edit touches;
     // everything before it is kept as it is)
     let mut from = dirty.first().map_or(usize::MAX, |&d| d as usize);
@@ -564,20 +585,24 @@ pub fn run_piece(
         let mut copy_to: Option<usize> = None;
         if let Some(oc) = oldc {
             let mapped = |p: usize| edit.map_or(Some(p), |e| e.map(p));
-            while oi < oc.nodes.len() && mapped(oc.input(oi).pos).is_none_or(|p| p < state.pos) {
+            while oi < oc.nodes.len() && mapped(oc.input_pos(oi)).is_none_or(|p| p < state.pos) {
                 let n = &oc.nodes[oi];
                 scope_changed |= !n.defs().is_empty() || n.kind.scopes();
                 oi += 1;
             }
             if oi < oc.nodes.len() {
                 let n = &oc.nodes[oi];
-                let mut inp = oc.input(oi);
-                let start_ok = mapped(inp.pos) == Some(state.pos);
+                let inp_pos = oc.input_pos(oi);
+                let start_ok = mapped(inp_pos) == Some(state.pos);
                 // (the text it read, through the character after it, unchanged)
-                let text_ok = edit.is_none_or(|e| n.out.pos < e.start || inp.pos >= e.old_end);
+                let text_ok = edit.is_none_or(|e| n.out.pos < e.start || inp_pos >= e.old_end);
                 let par_ok = !(matches!(n.kind, Kind::Par | Kind::End) && para_fresh);
-                inp.pos = state.pos;
-                if start_ok && text_ok && inp == state {
+                let state_ok = if oi == 0 {
+                    RState::start().eq_but_pos(&state)
+                } else {
+                    oc.nodes[oi - 1].out.eq_but_pos(&state)
+                };
+                if start_ok && text_ok && state_ok {
                     cand = Some(oi);
                     let reads_ok = par_ok
                         && n.reads.iter().all(|r| {
@@ -628,13 +653,15 @@ pub fn run_piece(
                     }
                     let holds = n.reads.iter().all(|r| {
                         matches!(r.src, Src::Node(_))
-                            || Read::same(&outside_read(env, &mut outside, &r.key), r)
+                            || holding.contains(&(Arc::as_ptr(r) as usize))
+                            || (Read::same(&outside_read(env, &mut outside, &r.key), r)
+                                && holding.insert(Arc::as_ptr(r) as usize))
                     });
                     if !holds {
                         break;
                     }
                 }
-                if oc.input(j).mode == Mode::V && n.out.mode == Mode::H {
+                if !oc.input_h(j) && n.out.mode == Mode::H {
                     para_fresh = false;
                 }
                 chain.push_arc(n.clone());
@@ -720,15 +747,30 @@ pub fn run_piece(
         .iter()
         .flat_map(|n| n.errors().iter().cloned())
         .collect();
-    let mut reads = Vec::new();
-    let mut seen: FxSet<&Key> = FxSet::default();
-    for (i, n) in chain.nodes.iter().enumerate() {
+    // (the kept nodes before `from` read what they read in the old run:
+    // its entries whose first reader is among them; then each read of the
+    // other nodes, its identity seen once)
+    let mut reads: Vec<(Key, u32, Val)> = match old {
+        Some((r, _)) => r
+            .reads
+            .iter()
+            .filter(|(_, i, _)| (*i as usize) < from)
+            .cloned()
+            .collect(),
+        None => Vec::new(),
+    };
+    let mut seen: FxSet<usize> = FxSet::default();
+    for (i, n) in chain.nodes.iter().enumerate().skip(from) {
         for r in n.reads.iter() {
-            if !matches!(r.src, Src::Node(_)) && seen.insert(&r.key) {
+            if matches!(r.src, Src::Node(_)) || !seen.insert(Arc::as_ptr(r) as usize) {
+                continue;
+            }
+            if !reads.iter().any(|(k, _, v)| *k == r.key && *v == r.val) {
                 reads.push((r.key.clone(), i as u32, r.val.clone()));
             }
         }
     }
+    reads.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
     Run {
         chain,
         reads,

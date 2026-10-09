@@ -1,10 +1,11 @@
 //! `phitex-flow FILE.tex [-j N] [--reads suspend|speculate]
 //! [--order priority|random:SEED] [--tfm PATH] [-o OUT.dvi] [--dump]
-//! [--edit OLD=>NEW] [--check]`
+//! [--edit OLD=>NEW] [--repeat N] [--check]`
 //!
 //! Builds FILE.tex to DVI; with `--edit`, then applies the edit (the first
 //! occurrence of OLD becomes NEW) and builds again incrementally, and with
-//! `--check` compares that to a cold build of the edited text.
+//! `--check` compares that to a cold build of the edited text. `--repeat N`
+//! undoes and redoes the edit N times more before that (for profiling).
 
 // (work shares and milliseconds for printing)
 #![allow(clippy::cast_precision_loss)]
@@ -21,7 +22,7 @@ static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 fn usage() -> ExitCode {
     eprintln!(
         "usage: phitex-flow FILE.tex [-j N] [--reads suspend|speculate] [--order priority|random:SEED] \
-         [--tfm PATH] [-o OUT.dvi] [--dump] [--edit OLD=>NEW] [--check]"
+         [--tfm PATH] [-o OUT.dvi] [--dump] [--edit OLD=>NEW] [--repeat N] [--check]"
     );
     ExitCode::from(2)
 }
@@ -83,6 +84,7 @@ fn main() -> ExitCode {
     let mut dump = false;
     let mut edit = None;
     let mut check = false;
+    let mut repeat = 0usize;
     let mut i = 0;
     while i < args.len() {
         let a = args[i].as_str();
@@ -115,6 +117,10 @@ fn main() -> ExitCode {
                 opts.dump = true;
             }
             "--check" => check = true,
+            "--repeat" => match val().and_then(|v| v.parse().ok()) {
+                Some(n) => repeat = n,
+                None => return usage(),
+            },
             "--edit" => match val() {
                 Some(v) if v.contains("=>") => {
                     let (a, b) = v.split_once("=>").expect("=>");
@@ -173,6 +179,10 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         };
         let edited = format!("{}{}{}", &src[..at], to, &src[at + from.len()..]);
+        for _ in 0..repeat {
+            b.update(&edited, opts);
+            b.update(&src, opts);
+        }
         let e = b.update(&edited, opts);
         report("edit", &e);
         if dump {
