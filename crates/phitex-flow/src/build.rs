@@ -36,6 +36,7 @@
 
 use std::collections::{BTreeSet, VecDeque};
 use std::fmt::Write as _;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, RwLock};
 use std::time::{Duration, Instant};
@@ -173,6 +174,11 @@ pub struct Output {
     /// texts; `\immediate\write` lines, ending in a newline):
     /// `print::log` lays it out as TeX's log.
     pub log: Vec<String>,
+    /// The files `\openout` opened and `\write` wrote (immediate ones in
+    /// document order, deferred ones as their pages were shipped, in DVI
+    /// order): each file's name and contents, in the order they were
+    /// first opened (`logs::replay`).
+    pub writes: Vec<(String, String)>,
 }
 
 /// A piece whose definition was read before any definition.
@@ -332,9 +338,9 @@ pub struct Build {
     starts: Vec<usize>,
     /// The pieces of the main text (the cut's).
     texts: Vec<Arc<[char]>>,
-    /// The files `\input` reads, and those changed since the last build.
-    files: Arc<FxMap<Arc<str>, Arc<str>>>,
-    files_changed: Vec<Arc<str>>,
+    /// Files given in memory (`set_file`), found before the input
+    /// directories' (a changed one is seen by its readers' reads).
+    files: Arc<FxMap<Arc<str>, Arc<[u8]>>>,
     /// The pieces of each file read (the same `Arc`s while its text is),
     /// and the rest of each line that called `\input`.
     file_cuts: FxMap<usize, FileCut>,
@@ -346,6 +352,9 @@ pub struct Build {
     fold: FoldKept,
     /// The ids of the elements between a piece's nodes (fires).
     virt: FxMap<(PieceId, u32), PieceId>,
+    /// Where `\input` and `\openin` find files, and the job's name.
+    inputs: Arc<Vec<PathBuf>>,
+    job: Arc<str>,
 }
 
 /// A file's text and its pieces.
@@ -379,23 +388,76 @@ struct Memo {
     errors: Vec<String>,
 }
 
-/// What a name's value is before any definition: `val::initial`, and the
-/// build's files for `Key::File`.
-struct Init {
-    font: Arc<Font>,
-    files: Arc<FxMap<Arc<str>, Arc<str>>>,
+const SHARDS: usize = 64;
+
+/// The input files read in a build, by name (`None`: not found).
+type FileCache = Mutex<FxMap<Arc<str>, Option<Arc<[u8]>>>>;
+
+/// What the build answers itself, never a definition (`Env::file`,
+/// `Env::jobname`, `Env::line_base`): the input files (each read once per
+/// build, so a pure function of its name during it), the job's name, the
+/// lines of the source before each piece.
+struct Given {
+    dirs: Arc<Vec<PathBuf>>,
+    /// The files given in memory (`Build::set_file`), before the
+    /// directories'.
+    mem: Arc<FxMap<Arc<str>, Arc<[u8]>>>,
+    files: FileCache,
+    job: Arc<str>,
+    /// The lines of its file before each piece of the sequence.
+    bases: Vec<u32>,
 }
 
-impl Init {
-    fn initial(&self, key: &Key, etex: bool) -> Val {
+impl Given {
+    fn new(
+        dirs: Arc<Vec<PathBuf>>,
+        job: Arc<str>,
+        mem: Arc<FxMap<Arc<str>, Arc<[u8]>>>,
+        bases: Vec<u32>,
+    ) -> Given {
+        Given {
+            dirs,
+            mem,
+            files: Mutex::default(),
+            job,
+            bases,
+        }
+    }
+
+    /// The file `name`: given in memory, else in the first directory
+    /// holding it.
+    fn file(&self, name: &str) -> Option<Arc<[u8]>> {
+        if let Some(b) = self.mem.get(name) {
+            return Some(b.clone());
+        }
+        let mut g = self.files.lock().expect("files");
+        if let Some(v) = g.get(name) {
+            return v.clone();
+        }
+        let v: Option<Arc<[u8]>> = self
+            .dirs
+            .iter()
+            .find_map(|d| std::fs::read(d.join(name)).ok())
+            .map(Arc::from);
+        g.insert(Arc::from(name), v.clone());
+        v
+    }
+
+    /// The lines of its file before piece `k`.
+    fn base(&self, k: usize) -> u32 {
+        self.bases.get(k).copied().unwrap_or(0)
+    }
+
+    /// What a read of `key` from piece `k` finds, if the build answers it.
+    fn answer(&self, key: &Key, k: usize) -> Option<Val> {
         match key {
-            Key::File(n) => Val::Text(self.files.get(n).cloned()),
-            _ => initial(key, &self.font, etex),
+            Key::File(n) => Some(self.file(n).map_or(Val::Void, Val::Bytes)),
+            Key::Job => Some(Val::Name(self.job.clone())),
+            Key::LineBase => Some(Val::Int(self.base(k) as i32)),
+            _ => None,
         }
     }
 }
-
-const SHARDS: usize = 64;
 
 type Defs = FxMap<Key, Vec<(Pos, Val)>>;
 
@@ -535,16 +597,19 @@ struct Names {
     /// The same, for the names ever defined between a piece's nodes (by
     /// the page builder or an output routine: never cleared).
     inner: Vec<AtomicU64>,
+    /// The names the build answers itself (files, the job, line bases).
+    given: Given,
     /// The values before any definition are e-TeX's extended mode's.
     etex: bool,
 }
 
 impl Names {
-    fn new(etex: bool) -> Names {
+    fn new(given: Given, etex: bool) -> Names {
         Names {
             shards: (0..SHARDS).map(|_| RwLock::default()).collect(),
             defined: (0..SHARDS).map(|_| AtomicU64::new(0)).collect(),
             inner: (0..SHARDS).map(|_| AtomicU64::new(0)).collect(),
+            given,
             etex,
         }
     }
@@ -560,10 +625,13 @@ impl Names {
     /// before it): its place (none: the initial value), its value, and the
     /// nodes of `at`'s piece it reaches, `lo..hi` (all of them, `0..END`,
     /// unless an element between the piece's nodes defines `key`).
-    fn reaching(&self, key: &Key, at: Pos, init: &Init) -> (Option<Pos>, Val, u32, u32) {
+    fn reaching(&self, key: &Key, at: Pos, font: &Arc<Font>) -> (Option<Pos>, Val, u32, u32) {
+        if let Some(v) = self.given.answer(key, at.0 as usize) {
+            return (None, v, 0, END);
+        }
         let (s, bit) = Names::route(key);
         if self.defined[s].load(Ordering::Acquire) & bit == 0 {
-            return (None, init.initial(key, self.etex), 0, END);
+            return (None, initial(key, font, self.etex), 0, END);
         }
         let g = self.shards[s].read().expect("names");
         if let Some(v) = g.get(key) {
@@ -577,9 +645,9 @@ impl Names {
                 let lo = if p.0 == at.0 { p.1 + 1 } else { 0 };
                 return (Some(*p), val.clone(), lo, hi);
             }
-            return (None, init.initial(key, self.etex), 0, hi);
+            return (None, initial(key, font, self.etex), 0, hi);
         }
-        (None, init.initial(key, self.etex), 0, END)
+        (None, initial(key, font, self.etex), 0, END)
     }
 
     /// Whether `key` may be defined between a piece's nodes.
@@ -746,7 +814,7 @@ struct Shared {
     done: Vec<AtomicBool>,
     state: Mutex<State>,
     cv: Condvar,
-    init: Init,
+    font: Arc<Font>,
     fonts: Arc<FontFiles>,
     opts: Options,
     /// The last build's routine runs, by their page's first box.
@@ -816,9 +884,10 @@ impl Build {
             readers: FxMap::default(),
             src: String::new(),
             starts: Vec::new(),
+            inputs: Arc::new(Vec::new()),
+            job: Arc::from(crate::graph::JOBNAME),
             texts: Vec::new(),
             files: Arc::default(),
-            files_changed: Vec::new(),
             file_cuts: FxMap::default(),
             rests: FxMap::default(),
             fold: FoldKept::default(),
@@ -826,21 +895,33 @@ impl Build {
         }
     }
 
-    /// The text of file `name` (what `\input name` reads), from now on.
+    /// The text of file `name` (what `\input name` and `\openin` find),
+    /// from now on, before the input directories'.
     pub fn set_file(&mut self, name: &str, text: &str) {
-        if self.files.get(name).is_some_and(|t| **t == *text) {
+        if self
+            .files
+            .get(name)
+            .is_some_and(|t| **t == *text.as_bytes())
+        {
             return;
         }
-        let name: Arc<str> = Arc::from(name);
-        Arc::make_mut(&mut self.files).insert(name.clone(), Arc::from(text));
-        self.files_changed.push(name);
+        Arc::make_mut(&mut self.files).insert(Arc::from(name), Arc::from(text.as_bytes()));
     }
 
-    /// File `name` is no more.
+    /// File `name` is no more in memory.
     pub fn remove_file(&mut self, name: &str) {
-        if Arc::make_mut(&mut self.files).remove(name).is_some() {
-            self.files_changed.push(Arc::from(name));
-        }
+        Arc::make_mut(&mut self.files).remove(name);
+    }
+
+    /// Where `\input` and `\openin` find files: these directories, in
+    /// order (a file's name is relative to them).
+    pub fn set_input_dirs(&mut self, dirs: Vec<PathBuf>) {
+        self.inputs = Arc::new(dirs);
+    }
+
+    /// The job's name (`\jobname`; `texput` until set).
+    pub fn set_jobname(&mut self, name: &str) {
+        self.job = Arc::from(name);
     }
 
     /// The pieces of a file's text (the last cut's `Arc`s while the text
@@ -1025,7 +1106,6 @@ impl Build {
             if let Some(mut out) = self.round(&texts, opts, t0, time_cut, rounds > 64) {
                 out.stats.rounds = rounds;
                 out.stats.wall = t0.elapsed();
-                self.files_changed.clear();
                 return out;
             }
             // (a run changed the sequence: evaluated again, its runs kept;
@@ -1161,13 +1241,18 @@ impl Build {
             self.next_id,
             std::mem::take(&mut self.virt),
         );
-        let init = Init {
-            font: self.font.clone(),
-            files: self.files.clone(),
-        };
         // (the names index: what the kept pieces define, at their places,
         // and what an edited piece's predecessor defined, as its prediction)
-        let names = Names::new(opts.etex);
+        let bases: Vec<u32> = p.iter().map(|x| x.base as u32).collect();
+        let names = Names::new(
+            Given::new(
+                self.inputs.clone(),
+                self.job.clone(),
+                self.files.clone(),
+                bases,
+            ),
+            opts.etex,
+        );
         for (k, ps) in p.iter().enumerate() {
             if let Some(r) = ps.run.as_ref().or(ps.prev.as_ref().map(|(r, _, _)| r)) {
                 for (key, val) in &r.exports {
@@ -1205,7 +1290,7 @@ impl Build {
             let k = pos.0 as usize;
             if let Some(r) = p[k].run.as_ref().or(p[k].prev.as_ref().map(|(r, _, _)| r)) {
                 for key in keys {
-                    refresh_export(&names, &init, k, r, key);
+                    refresh_export(&names, &self.font, k, r, key);
                 }
             }
         }
@@ -1236,21 +1321,33 @@ impl Build {
                 let Some(rpos) = seq.pos_of(rid) else {
                     continue;
                 };
-                let (def, ..) = names.reaching(key, (rpos.0, node), &init);
+                let (def, ..) = names.reaching(key, (rpos.0, node), &self.font);
                 let def_id = def.map_or(INITIAL, |d| seq.id_at(d));
                 if src != def_id {
                     marks.push((rpos.0 as usize, key.clone()));
                 }
             }
         }
-        // (a changed file: every reader of it reads it again)
-        for f in &self.files_changed {
-            let key = Key::File(f.clone());
-            if let Some(m) = readers.get(&key) {
-                for &rid in m.keys() {
-                    if let Some(rpos) = seq.pos_of(rid) {
-                        marks.push((rpos.0 as usize, key.clone()));
-                    }
+        // (the names the build answers itself — a file's bytes, the job's
+        // name, the lines before a piece — read with a value they no longer
+        // have: their readers are marked)
+        for (key, m) in &readers {
+            if !matches!(key, Key::File(_) | Key::Job | Key::LineBase) {
+                continue;
+            }
+            for &rid in m.keys() {
+                let Some(rpos) = seq.pos_of(rid).map(|x| x.0 as usize) else {
+                    continue;
+                };
+                let Some(r) = &p[rpos].run else { continue };
+                let now = names.given.answer(key, rpos);
+                let at = r.reads.partition_point(|x| x.0 < *key);
+                if r.reads[at..]
+                    .iter()
+                    .take_while(|x| x.0 == *key)
+                    .any(|x| now.as_ref() != Some(&x.2))
+                {
+                    marks.push((rpos, key.clone()));
                 }
             }
         }
@@ -1361,7 +1458,7 @@ impl Build {
                 .collect(),
             state: Mutex::new(state),
             cv: Condvar::new(),
-            init,
+            font: self.font.clone(),
             fonts: self.fonts.clone(),
             opts,
             restructure_ok: !last,
@@ -1395,7 +1492,7 @@ impl Build {
             }
             out
         };
-        let virt = sh.seq.virt.into_inner().expect("virt");
+        let virt = std::mem::take(&mut *sh.seq.virt.write().expect("virt"));
         self.virt = virt.ids;
         self.next_id = self.next_id.max(virt.next);
         let mut st = sh.state.into_inner().expect("state");
@@ -1478,21 +1575,65 @@ impl Build {
             .as_ref()
             .map(|s| s.call_logs.clone())
             .unwrap_or_default();
-        let log = {
-            let parts: Vec<logs::Part<'_>> =
-                st.p.iter()
-                    .map(|ps| logs::Part {
-                        frag: ps.log.as_ref().expect("a part"),
-                        base: ps.base,
-                        post: ps.post.as_deref(),
-                    })
-                    .collect();
-            logs::gather(&parts, &marks, &call_logs, &st.pages)
+        // (the piece holding `\end` ends the document: the pieces after it
+        // are not in the log; CORE.md: the core is to not run them)
+        let upto =
+            st.p.iter()
+                .position(|ps| {
+                    ps.run
+                        .as_ref()
+                        .is_some_and(|r| crate::graph::ends_document(r))
+                })
+                .map_or(st.p.len(), |e| e + 1);
+        let (log, writes) = {
+            let frags: Vec<&Frag> = st.p[..upto]
+                .iter()
+                .map(|ps| &**ps.log.as_ref().expect("a part"))
+                .collect();
+            // (each page the page builder shipped does its whatsits where
+            // its call stands: its `\write`s expanded with the definitions
+            // reaching there)
+            let end = upto.checked_sub(1).map_or((0, 0), |k| {
+                (k, st.p[k].run.as_ref().map_or(0, |r| r.chain.nodes.len()))
+            });
+            let places = logs::page_places(&frags, &marks, st.pages.len(), end);
+            let mut page_io = Vec::with_capacity(st.pages.len());
+            for (pg, at) in st.pages.iter().zip(&places) {
+                let io = match *at {
+                    Some((k, i)) if k < upto => match st.p[k].run.as_ref() {
+                        Some(r) => {
+                            let mut env = JoinEnv {
+                                names: &sh.names,
+                                seq: &sh.seq,
+                                font: &sh.font,
+                                k,
+                            };
+                            crate::graph::page_io(&r.chain, i, &mut env, &pg.b, &mut errors)
+                        }
+                        None => String::new(),
+                    },
+                    _ => String::new(),
+                };
+                page_io.push(io);
+            }
+            let parts: Vec<logs::Part<'_>> = st.p[..upto]
+                .iter()
+                .map(|ps| logs::Part {
+                    frag: ps.log.as_ref().expect("a part"),
+                    base: ps.base,
+                    post: ps.post.as_deref(),
+                })
+                .collect();
+            logs::replay(logs::gather(
+                &parts, &marks, &call_logs, &st.pages, &page_io,
+            ))
         };
         for (k, ps) in st.p.iter().enumerate() {
             let r = ps.run.as_ref().expect("every piece ran");
-            for e in &r.errors {
-                errors.push(format!("piece {k}: {e}"));
+            if k < upto {
+                for e in &r.errors {
+                    errors.push(format!("piece {k}: {e}"));
+                }
             }
             if ps.runs == 0 {
                 st.stats.kept += 1;
@@ -1548,7 +1689,41 @@ impl Build {
             errors,
             dump,
             log,
+            writes,
         })
+    }
+}
+
+/// The join's reads (a page's `\write`s expanded where it was shipped):
+/// every piece has run, nothing parks.
+struct JoinEnv<'a> {
+    names: &'a Names,
+    seq: &'a Sequence,
+    font: &'a Arc<Font>,
+    k: usize,
+}
+
+impl Env for JoinEnv<'_> {
+    fn reach(&mut self, key: &Key, node: u32) -> (Val, Src, u32, u32) {
+        let (def, val, lo, hi) = self.names.reaching(key, (self.k as u32, node), self.font);
+        (
+            val,
+            def.map_or(Src::Initial, |d| Src::Piece(self.seq.id_at(d))),
+            lo,
+            hi,
+        )
+    }
+
+    fn file(&mut self, name: &str) -> Option<Arc<[u8]>> {
+        self.names.given.file(name)
+    }
+
+    fn jobname(&mut self) -> Arc<str> {
+        self.names.given.job.clone()
+    }
+
+    fn line_base(&mut self) -> i32 {
+        self.names.given.base(self.k) as i32
     }
 }
 
@@ -1676,14 +1851,14 @@ fn mark(g: &mut State, k: usize, key: Key) -> bool {
 /// none when a definition made between its nodes after its own last
 /// definition of `key` (an output routine's, where the page builder fired)
 /// is the one reaching its end.
-fn export_of(names: &Names, init: &Init, k: usize, run: &Run, key: &Key) -> Option<Val> {
+fn export_of(names: &Names, font: &Arc<Font>, k: usize, run: &Run, key: &Key) -> Option<Val> {
     let i = run.exports.binary_search_by(|(x, _)| x.cmp(key)).ok()?;
     if names.has_inner(key) {
         let last = run
             .chain
             .resolve(key, run.chain.nodes.len())
             .map(|(d, _)| d);
-        if let (Some(p), ..) = names.reaching(key, (k as u32, END), init)
+        if let (Some(p), ..) = names.reaching(key, (k as u32, END), font)
             && p.0 == k as u32
             && p.1 != END
             && last.is_none_or(|d| p.1 >= d)
@@ -1696,8 +1871,8 @@ fn export_of(names: &Names, init: &Init, k: usize, run: &Run, key: &Key) -> Opti
 
 /// Sets piece `k`'s export of `key` as [`export_of`] gives it; whether it
 /// changed.
-fn refresh_export(names: &Names, init: &Init, k: usize, run: &Run, key: &Key) -> bool {
-    let v = export_of(names, init, k, run, key);
+fn refresh_export(names: &Names, font: &Arc<Font>, k: usize, run: &Run, key: &Key) -> bool {
+    let v = export_of(names, font, k, run, key);
     if names.at(key, (k as u32, END)) == v {
         return false;
     }
@@ -2418,7 +2593,7 @@ fn run_and_install(sh: &Shared, k: usize, dirty: &[Key]) -> u64 {
         .reads
         .iter()
         .map(|(key, node, val)| {
-            let (def, now, ..) = sh.names.reaching(key, (k as u32, *node), &sh.init);
+            let (def, now, ..) = sh.names.reaching(key, (k as u32, *node), &sh.font);
             (def, now == *val)
         })
         .collect();
@@ -2446,7 +2621,7 @@ fn run_and_install(sh: &Shared, k: usize, dirty: &[Key]) -> u64 {
             let since: FxSet<&Key> = g.names_log[seen..now_gen].iter().flatten().collect();
             for ((key, node, val), c) in run.reads.iter().zip(&mut checks) {
                 if since.contains(key) {
-                    let (def, now, ..) = sh.names.reaching(key, (k as u32, *node), &sh.init);
+                    let (def, now, ..) = sh.names.reaching(key, (k as u32, *node), &sh.font);
                     *c = (def, now == *val);
                 }
             }
@@ -2494,14 +2669,14 @@ fn run_and_install(sh: &Shared, k: usize, dirty: &[Key]) -> u64 {
         }
         let mut changed = changed;
         for key in &changed {
-            refresh_export(&sh.names, &sh.init, k, &run, key);
+            refresh_export(&sh.names, &sh.font, k, &run, key);
         }
         // (an export a definition between the piece's nodes may shadow:
         // where its own last definition is may have moved)
         for (key, _) in &run.exports {
             if sh.names.has_inner(key)
                 && !changed.contains(key)
-                && refresh_export(&sh.names, &sh.init, k, &run, key)
+                && refresh_export(&sh.names, &sh.font, k, &run, key)
             {
                 changed.push(key.clone());
             }
@@ -2602,7 +2777,7 @@ impl PieceEnv<'_> {
     fn refuted(&self) -> bool {
         let sh = self.sh;
         self.predicted.iter().any(|(key, node, val)| {
-            sh.names.reaching(key, (self.k as u32, *node), &sh.init).1 != *val
+            sh.names.reaching(key, (self.k as u32, *node), &sh.font).1 != *val
         })
     }
 
@@ -2659,7 +2834,7 @@ impl Env for PieceEnv<'_> {
             return None;
         }
         let k = self.k as u32;
-        match sh.names.reaching(key, (k, node), &sh.init) {
+        match sh.names.reaching(key, (k, node), &sh.font) {
             (Some(p), val, ..) if p.0 == k && p.1 != END && p.1 >= after => {
                 Some((val, Src::Piece(sh.seq.id_at(p))))
             }
@@ -2667,11 +2842,23 @@ impl Env for PieceEnv<'_> {
         }
     }
 
+    fn file(&mut self, name: &str) -> Option<Arc<[u8]>> {
+        self.sh.names.given.file(name)
+    }
+
+    fn jobname(&mut self) -> Arc<str> {
+        self.sh.names.given.job.clone()
+    }
+
+    fn line_base(&mut self) -> i32 {
+        self.sh.names.given.base(self.k) as i32
+    }
+
     fn reach(&mut self, key: &Key, node: u32) -> (Val, Src, u32, u32) {
         let sh = self.sh;
         loop {
             let seen = sh.generation.load(Ordering::Acquire);
-            let (def, val, lo, hi) = sh.names.reaching(key, (self.k as u32, node), &sh.init);
+            let (def, val, lo, hi) = sh.names.reaching(key, (self.k as u32, node), &sh.font);
             let Some(d) = def else {
                 // (an undefined name while an earlier piece may still
                 // define it: wait for the earlier pieces, or run the first
@@ -2779,7 +2966,7 @@ fn read_at(sh: &Shared, run: Option<&Run>, k: usize, node: u32, key: &Key) -> Va
     let local = run.and_then(|r| r.chain.resolve(key, node as usize + 1));
     let (ipos, ival, ..) = sh
         .names
-        .reaching(key, (k as u32, node.saturating_add(1)), &sh.init);
+        .reaching(key, (k as u32, node.saturating_add(1)), &sh.font);
     match (local, ipos) {
         (Some((d, _)), Some(p)) if p.0 == k as u32 && p.1 != END && p.1 >= d => ival,
         (Some((_, v)), _) => v,
@@ -3048,7 +3235,7 @@ fn refresh_exports(g: &mut State, sh: &Shared, pos: Pos, keys: &[Key]) -> bool {
     };
     let moved: Vec<Key> = keys
         .iter()
-        .filter(|key| refresh_export(&sh.names, &sh.init, k, &run, key))
+        .filter(|key| refresh_export(&sh.names, &sh.font, k, &run, key))
         .cloned()
         .collect();
     // (the readers of the export see the definition between the nodes now,
@@ -3118,13 +3305,13 @@ mod tests {
     /// piece 2's exports; a read is kept for the nodes it reaches.
     #[test]
     fn places_are_pieces_and_nodes() {
-        let (names, font) = (
-            Names::new(true),
-            Init {
-                font: font(),
-                files: Arc::default(),
-            },
+        let given = Given::new(
+            Arc::new(Vec::new()),
+            Arc::from("texput"),
+            Arc::default(),
+            Vec::new(),
         );
+        let (names, font) = (Names::new(given, true), font());
         let x = Key::Cs("x".into());
         names.set((0, END), &x, Some(&Val::Int(1)));
         names.set((2, 5), &x, Some(&Val::Int(2)));

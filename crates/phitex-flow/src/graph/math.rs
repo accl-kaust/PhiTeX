@@ -53,6 +53,10 @@ pub(super) enum MathKind {
     Display { w: i32, l: i32, s: i32, eqno: Option<(Arc<BoxNode>, bool)> },
     /// What the `$$` node hands the next node: `\predisplaysize`.
     DisplayInit { w: i32 },
+    /// A display whose alignment is set (§1206): its material, and the
+    /// depth of its list (`aux_save`); only assignments and `$$` may
+    /// follow.
+    DisplayAlign { rows: Arc<Vec<Item>>, aux: i32 },
     /// `\eqno`, `\leqno`.
     EqNo { left: bool },
     /// `{`…`}` in math.
@@ -119,6 +123,9 @@ impl Exec<'_> {
     /// A command in math mode that is math's own (tex.web 1045's `mmode+`
     /// cases); `false` for the commands every mode shares.
     pub(super) fn math_command(&mut self, t: &Tok, m: &Meaning) -> bool {
+        if self.math_kind().is_some_and(|k| matches!(*k, MathKind::DisplayAlign { .. })) {
+            return self.after_display_alignment(t, m);
+        }
         match m {
             Meaning::Char(11 | 12, c) => {
                 let v = self.int(&Key::Mathcode(*c));
@@ -309,7 +316,7 @@ impl Exec<'_> {
         g.hyph_lang = self.st.hyph_lang;
         g.prev_graf = self.st.prev_graf;
         let at = self.chain.nodes.len() as u32;
-        self.st.groups.push(Group { kind: GroupKind::Math, after: Vec::new(), boxg: Some(Arc::new(g)), at });
+        self.st.groups.push(Group { kind: GroupKind::Math, after: Vec::new(), boxg: Some(Arc::new(g)), at, align: None });
         self.kind = Kind::Open;
         self.st.level += 1;
         self.st.mode = Mode::M;
@@ -397,9 +404,12 @@ impl Exec<'_> {
     /// next node.
     fn open_sub_later(&mut self, target: Target, t: Tok) {
         let g = self.math_group_of(MathKind::Sub(target));
-        self.st.boxing = Some(Arc::new(BoxEnd { g: Arc::new(g), boxmaxdepth: 0, math: None, ins: None }));
+        self.st.boxing = Some(Arc::new(BoxEnd { g: Arc::new(g), boxmaxdepth: 0, math: None }));
+        // (§1153: `back_input`, then `scan_left_brace` reads it again: as
+        // TeX's, which an alignment's brace count sees)
         let n = self.cs("\u{0}mathgroup");
-        self.rewrite(vec![n, t]);
+        self.back(t);
+        self.rewrite(vec![n]);
     }
 
     /// `\0mathgroup`: the subformula's group opens (§1151's `push_math`).
@@ -565,7 +575,12 @@ impl Exec<'_> {
                 return;
             }
             (Some(GroupKind::SemiSimple), _) => (vec![self.cs("endgroup")], "\\endgroup".to_string()),
-            (Some(GroupKind::Math), Some(MathKind::Inline | MathKind::Display { .. } | MathKind::EqNo { .. })) => {
+            (
+                Some(GroupKind::Math),
+                Some(
+                    MathKind::Inline | MathKind::Display { .. } | MathKind::DisplayAlign { .. } | MathKind::EqNo { .. },
+                ),
+            ) => {
                 (vec![Tok::Char(3, '$')], "$".to_string())
             }
             (Some(GroupKind::Math), Some(MathKind::Left { .. })) => {
@@ -600,7 +615,7 @@ impl Exec<'_> {
         self.st.hyph_lang = g.hyph_lang;
         self.st.prev_graf = g.prev_graf;
         self.st.level -= 1;
-        self.st.boxing = Some(Arc::new(BoxEnd { g, boxmaxdepth: 0, math: end.map(Arc::new), ins: None }));
+        self.st.boxing = Some(Arc::new(BoxEnd { g, boxmaxdepth: 0, math: end.map(Arc::new) }));
         self.rewrite(after);
         let p = self.cs("\u{0}package");
         self.back(p);
@@ -691,6 +706,8 @@ impl Exec<'_> {
                     end.danger = danger;
                     self.math_close(Some(end));
                 }
+                // (§1206: no formula, no fonts checked)
+                Some(MathKind::DisplayAlign { .. }) => self.display_alignment_end(None),
                 _ => self.math_off_save(t),
             },
         }
@@ -813,7 +830,7 @@ impl Exec<'_> {
             self.vemit.push(Item::BuildPage(c));
         }
         let g = self.math_group_of(MathKind::DisplayInit { w });
-        self.st.boxing = Some(Arc::new(BoxEnd { g: Arc::new(g), boxmaxdepth: 0, math: None, ins: None }));
+        self.st.boxing = Some(Arc::new(BoxEnd { g: Arc::new(g), boxmaxdepth: 0, math: None }));
         let d = self.cs("\u{0}display");
         self.back(d);
     }
@@ -828,13 +845,15 @@ impl Exec<'_> {
             let (d, visible) = match it {
                 Item::Char(..) | Item::Lig(_) | Item::Box(_) | Item::Rule { .. } => (it.width(), true),
                 Item::Kern { w, .. } | Item::Math { w, .. } => (*w, false),
-                Item::Glue { g, .. } => {
+                Item::Glue { .. } | Item::Leaders(_) => {
+                    let g = it.glue().expect("glue");
                     if (just.glue.sign == 1 && just.glue.order == g.stretch_order && g.stretch != 0)
                         || (just.glue.sign == -1 && just.glue.order == g.shrink_order && g.shrink != 0)
                     {
                         v = MAX_DIMEN;
                     }
-                    (g.width, false)
+                    // (§1148: leaders are visible)
+                    (g.width, matches!(it, Item::Leaders(_)))
                 }
                 _ => (0, false),
             };
@@ -1009,7 +1028,7 @@ impl Exec<'_> {
                         carry: p,
                         danger: false,
                     };
-                    self.st.boxing = Some(Arc::new(BoxEnd { g: Arc::new(g), boxmaxdepth: 0, math: Some(Arc::new(end)), ins: None }));
+                    self.st.boxing = Some(Arc::new(BoxEnd { g: Arc::new(g), boxmaxdepth: 0, math: Some(Arc::new(end)) }));
                     let t = self.cs("\u{0}middlenext");
                     self.back(t);
                     return;
@@ -1025,7 +1044,7 @@ impl Exec<'_> {
                 if *stage < 3 {
                     let mut g = (*be.g).clone();
                     g.kind = BoxKind::Math(Arc::new(MathKind::Choice(stage + 1, Arc::new(parts))));
-                    self.st.boxing = Some(Arc::new(BoxEnd { g: Arc::new(g), boxmaxdepth: 0, math: None, ins: None }));
+                    self.st.boxing = Some(Arc::new(BoxEnd { g: Arc::new(g), boxmaxdepth: 0, math: None }));
                     let t = self.cs("\u{0}choicenext");
                     self.back(t);
                 } else {
@@ -1074,6 +1093,10 @@ impl Exec<'_> {
             MathKind::Display { eqno, .. } => {
                 let Some(end) = be.math.clone() else { return };
                 self.finish_display(list, &end, eqno.as_ref());
+            }
+            MathKind::DisplayAlign { rows, aux } => {
+                let Some(end) = be.math.clone() else { return };
+                self.finish_display_alignment(rows, *aux, &end);
             }
             MathKind::DisplayInit { .. } => {}
         }
@@ -1220,7 +1243,12 @@ impl Exec<'_> {
         if let Some(g2) = g2 {
             self.vemit.push(param_glue(&de.skips[g2], GluePar::Abovedisplayskip as u8 + g2 as u8));
         }
-        // (§1200: `resume_after_display`)
+        self.resume_after_display();
+    }
+
+    /// §1200: `resume_after_display`, the display's group closed: the
+    /// paragraph goes on.
+    fn resume_after_display(&mut self) {
         self.st.prev_graf += 3;
         self.st.mode = Mode::H;
         self.st.inner = false;
@@ -1234,6 +1262,83 @@ impl Exec<'_> {
             let c: Arc<PageCall> = self.page_call();
             self.vemit.push(Item::BuildPage(c));
         }
+    }
+
+    // ------------------------------------------------------------ display alignments
+
+    /// §1145, `mmode+halign`: an alignment may begin a display (not an
+    /// inline formula: `privileged`; in the display's own group, else
+    /// `off_save`); the vertical list's depth before the display, for the
+    /// alignment's list (§775).
+    pub(super) fn display_for_alignment(&mut self, t: &Tok) -> Option<i32> {
+        if self.st.inner {
+            // (§1049: `report_illegal_case`)
+            self.err(format!("You can't use `{t}' in {} mode", self.mode_name()));
+            return None;
+        }
+        if !self.math_kind().is_some_and(|k| matches!(*k, MathKind::Display { .. })) {
+            self.math_off_save(t);
+            return None;
+        }
+        if !self.math_items().is_empty() {
+            // (§776: TeX flushes the formula; not here)
+            self.err("Improper \\halign inside $$'s".into());
+        }
+        self.st.groups.last().and_then(|g| g.boxg.clone()).map(|g| g.prev_depth)
+    }
+
+    /// The display's alignment is set (§812, `mode=mmode`): its material
+    /// and depth wait in the display's group record for its `$$`.
+    pub(super) fn display_aligned(&mut self, rows: Vec<Item>, aux: i32) {
+        if let Some(g) = self.st.groups.last_mut()
+            && g.kind == GroupKind::Math
+            && let Some(bg) = &g.boxg
+        {
+            let mut nb = (**bg).clone();
+            nb.kind = BoxKind::Math(Arc::new(MathKind::DisplayAlign { rows: Arc::new(rows), aux }));
+            g.boxg = Some(Arc::new(nb));
+        }
+    }
+
+    /// §1206 `do_assignments`: after a display's alignment only
+    /// assignments come before `$$`; anything else ends the display
+    /// ("Missing $$ inserted").
+    fn after_display_alignment(&mut self, t: &Tok, m: &Meaning) -> bool {
+        let ok = match m {
+            Meaning::Char(3 | 10, _) | Meaning::Prim(Prim::Relax) => true,
+            Meaning::Prim(p) if p.conditional() => true,
+            _ => super::assign::prefixable(m),
+        };
+        if ok {
+            return false;
+        }
+        self.display_alignment_end(Some(t));
+        true
+    }
+
+    /// The end of a display alignment: `$$` checked (§1197, §1207, with
+    /// TeX's errors), what the display reads before its group ends, and the
+    /// group's `Close` node; its packaging node does the rest
+    /// ([`Exec::finish_display_alignment`]).
+    fn display_alignment_end(&mut self, bad: Option<&Tok>) {
+        self.display_alignment_check(bad);
+        let end = self.math_end(true);
+        self.math_close(Some(end));
+    }
+
+    /// §1206: the alignment between `\predisplaypenalty` and
+    /// `\abovedisplayskip`, `\postdisplaypenalty` and `\belowdisplayskip`
+    /// (read in the display's group); the depth after it the alignment's;
+    /// then the paragraph resumes (§1200).
+    fn finish_display_alignment(&mut self, rows: &Arc<Vec<Item>>, aux: i32, end: &MathEnd) {
+        let Some(de) = &end.display else { return };
+        self.vemit.push(Item::Penalty(de.pre_penalty));
+        self.vemit.push(param_glue(&de.skips[0], GluePar::Abovedisplayskip as u8));
+        self.vemit.extend(rows.iter().cloned());
+        self.vemit.push(Item::Penalty(de.post_penalty));
+        self.vemit.push(param_glue(&de.skips[1], GluePar::Belowdisplayskip as u8));
+        self.st.prev_depth = aux;
+        self.resume_after_display();
     }
 
     /// `append_to_vlist` into the list the display is in.

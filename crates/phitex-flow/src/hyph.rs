@@ -409,18 +409,21 @@ pub fn hyphenate_after(items: &[Item], cur_p: usize, st: &mut LangState, p: &Hyp
     // (§896: skip to node `ha`)
     let mut prev_s = cur_p;
     let mut s = cur_p + 1;
-    let hf: Arc<Font> = loop {
+    // (the word's font, borrowed: a font's `Arc` is shared by every
+    // thread, and counting it here would make them contend)
+    let hf: &Arc<Font> = loop {
         let (c, f) = match items.get(s)? {
-            Item::Char(f, c) => (*c, f.clone()),
+            Item::Char(f, c) => (*c, f),
             Item::Lig(l) => {
                 let Some(&c) = l.orig.first() else {
                     prev_s = s;
                     s += 1;
                     continue;
                 };
-                (c, l.font.clone())
+                (c, &l.font)
             }
-            Item::Kern { sub: 0, .. } => {
+            // (§896: and any other whatsit is passed)
+            Item::Kern { sub: 0, .. } | Item::Whatsit(_) => {
                 prev_s = s;
                 s += 1;
                 continue;
@@ -460,7 +463,7 @@ pub fn hyphenate_after(items: &[Item], cur_p: usize, st: &mut LangState, p: &Hyp
     loop {
         match items.get(s) {
             Some(Item::Char(f, c)) => {
-                if **f != *hf {
+                if **f != **hf {
                     break;
                 }
                 hyf_bchar = i32::from(*c);
@@ -474,7 +477,7 @@ pub fn hyphenate_after(items: &[Item], cur_p: usize, st: &mut LangState, p: &Hyp
             }
             Some(Item::Lig(l)) => {
                 // (§898)
-                if *l.font != *hf {
+                if *l.font != **hf {
                     break;
                 }
                 let mut j = hn;
@@ -517,20 +520,28 @@ pub fn hyphenate_after(items: &[Item], cur_p: usize, st: &mut LangState, p: &Hyp
                     break;
                 }
             }
-            Item::Lang { .. } | Item::Glue { .. } | Item::Penalty(_) | Item::Mark(_) => break,
+            Item::Lang { .. }
+            | Item::Glue { .. }
+            | Item::Leaders(_)
+            | Item::Penalty(_)
+            | Item::Mark(_)
+            | Item::Marks(..)
+            | Item::Whatsit(_)
+            | Item::Ins(_)
+            | Item::Adjust(_) => break,
             _ => return None,
         }
         s += 1;
     }
     // (§923: the hyphens)
-    let (pats, excs) = p
-        .tables
-        .iter()
-        .find(|(l, ..)| *l == st.lang)
-        .map_or_else(|| (Patterns::new(), Exceptions::new()), |(_, a, b)| (a.clone(), b.clone()));
+    // (a language without patterns or exceptions hyphenates nothing)
+    let (_, pats, excs) = p.tables.iter().find(|(l, ..)| *l == st.lang)?;
+    if pats.is_empty() && excs.is_empty() {
+        return None;
+    }
     let word: Vec<char> = (1..=hn).map(|j| char::from(hu[j] as u8)).collect();
     let lcc = |c: char| char::from(lc(c as u8));
-    let at = hyphenate(&word, lcc, i32::from(st.lhm), i32::from(st.rhm), &pats, &excs);
+    let at = hyphenate(&word, lcc, i32::from(st.lhm), i32::from(st.rhm), pats, excs);
     if at.is_empty() {
         return None;
     }
@@ -557,13 +568,13 @@ pub fn hyphenate_after(items: &[Item], cur_p: usize, st: &mut LangState, p: &Hyp
         w.init_list.clear();
     };
     let (start, j) = match &items[ha] {
-        Item::Char(f, c) if **f == *hf => {
+        Item::Char(f, c) if **f == **hf => {
             w.init_list = vec![*c];
             w.init_lig = false;
             w.hu[0] = i32::from(*c);
             (ha, 0)
         }
-        Item::Lig(l) if *l.font == *hf => {
+        Item::Lig(l) if *l.font == **hf => {
             w.init_list.clone_from(&l.orig);
             w.init_lig = true;
             w.init_lft = l.left;

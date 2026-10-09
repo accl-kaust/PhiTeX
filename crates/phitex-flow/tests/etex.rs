@@ -10,7 +10,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
 
-use phitex_flow::{Build, Font, Options};
+use phitex_flow::build::MAIN_MEMORY;
+use phitex_flow::{Build, Font, Options, Order, Reads};
 
 /// What every program begins with (`tests/core.rs`' prelude).
 const PRELUDE: &str = "\\catcode`\\{=1 \\catcode`\\}=2 \\catcode`\\$=3 \\catcode`\\&=4 \\catcode`\\#=6 \
@@ -30,9 +31,34 @@ fn opts() -> Options {
     Options { etex: true, ..Options::default() }
 }
 
+/// The schedules each program runs with (`tests/dvi.rs`'s, in extended
+/// mode).
+const RUNS: [Options; 5] = [
+    Options { threads: 1, reads: Reads::Suspend, order: Order::Priority, dump: false, etex: true, main_memory: MAIN_MEMORY },
+    Options { threads: 8, reads: Reads::Suspend, order: Order::Priority, dump: false, etex: true, main_memory: MAIN_MEMORY },
+    Options { threads: 8, reads: Reads::Speculate, order: Order::Priority, dump: false, etex: true, main_memory: MAIN_MEMORY },
+    Options { threads: 8, reads: Reads::Suspend, order: Order::Random(1), dump: false, etex: true, main_memory: MAIN_MEMORY },
+    Options { threads: 8, reads: Reads::Speculate, order: Order::Random(7), dump: false, etex: true, main_memory: MAIN_MEMORY },
+];
+
+/// The files programs read (`\input`, `\openin`): `inc-*.tex` and `*.dat`
+/// in `tests/etex/`.
+fn inputs() -> Vec<PathBuf> {
+    let mut v: Vec<PathBuf> = std::fs::read_dir(dir())
+        .map(|d| d.flatten().map(|e| e.path()).collect())
+        .unwrap_or_default();
+    v.retain(|p| {
+        let n = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        n.starts_with("inc-") || p.extension().is_some_and(|e| e == "dat")
+    });
+    v
+}
+
 /// The graph's log of a program, as TeX lays it out, and its errors.
-fn graph_log(src: &str) -> (String, Vec<String>) {
-    let o = Build::new(font()).update(&format!("{PRELUDE}{src}"), opts());
+fn graph_log(src: &str, opts: Options) -> (String, Vec<String>) {
+    let mut b = Build::new(font());
+    b.set_input_dirs(vec![dir()]);
+    let o = b.update(&format!("{PRELUDE}{src}"), opts);
     (phitex_flow::print::log("(./core.tex", &o.log, " )"), o.errors)
 }
 
@@ -40,6 +66,9 @@ fn graph_log(src: &str) -> (String, Vec<String>) {
 fn etex_log(name: &str, src: &str) -> Option<String> {
     let tmp = std::env::temp_dir().join(format!("phitex-flow-etex-{name}-{}", std::process::id()));
     std::fs::create_dir_all(&tmp).ok()?;
+    for p in inputs() {
+        std::fs::copy(&p, tmp.join(p.file_name()?)).ok()?;
+    }
     std::fs::write(tmp.join("core.tex"), format!("{PRELUDE}{src}\\end\n")).ok()?;
     let st = Command::new("etex")
         .args(["-ini", "-etex", "-interaction=batchmode", "-jobname=texput", "core.tex"])
@@ -76,18 +105,20 @@ fn expected(name: &str, src: &str) -> String {
 fn check(name: &str) {
     let src = std::fs::read_to_string(dir().join(format!("{name}.tex"))).unwrap();
     let expected = expected(name, &src);
-    let (got, errors) = graph_log(&src);
-    let got = got.strip_suffix('\n').unwrap_or(&got).to_string();
-    assert!(errors.is_empty(), "{name}: errors on the graph: {errors:?}");
-    if got != expected {
-        let (g, e): (Vec<&str>, Vec<&str>) = (got.lines().collect(), expected.lines().collect());
-        let at = g.iter().zip(&e).position(|(a, b)| a != b).unwrap_or(g.len().min(e.len()));
-        panic!(
-            "{name}: the graph's log differs from etex's at line {}:\n graph: {:?}\n  etex: {:?}\n--- graph:\n{got}\n--- etex:\n{expected}",
-            at + 1,
-            g.get(at),
-            e.get(at)
-        );
+    for o in RUNS {
+        let (got, errors) = graph_log(&src, o);
+        let got = got.strip_suffix('\n').unwrap_or(&got).to_string();
+        assert!(errors.is_empty(), "{name} ({o:?}): errors on the graph: {errors:?}");
+        if got != expected {
+            let (g, e): (Vec<&str>, Vec<&str>) = (got.lines().collect(), expected.lines().collect());
+            let at = g.iter().zip(&e).position(|(a, b)| a != b).unwrap_or(g.len().min(e.len()));
+            panic!(
+                "{name} ({o:?}): the graph's log differs from etex's at line {}:\n graph: {:?}\n  etex: {:?}\n--- graph:\n{got}\n--- etex:\n{expected}",
+                at + 1,
+                g.get(at),
+                e.get(at)
+            );
+        }
     }
 }
 
@@ -122,11 +153,13 @@ fn without_piece(e: &str) -> &str {
 fn check_errors(name: &str) {
     let src = std::fs::read_to_string(dir().join(format!("{name}.tex"))).unwrap();
     let (expected, tex_errors) = split_errors(&expected(name, &src));
-    let (got, errors) = graph_log(&src);
-    let errors: Vec<String> = errors.iter().map(|e| format!("{}.", without_piece(e))).collect();
-    assert_eq!(errors, tex_errors, "{name}: the graph's errors are not etex's");
     let words = |s: &str| s.split_whitespace().map(str::to_string).collect::<Vec<_>>();
-    assert_eq!(words(&got), words(&expected), "{name}: another log\n--- graph:\n{got}\n--- etex:\n{expected}");
+    for o in RUNS {
+        let (got, errors) = graph_log(&src, o);
+        let errors: Vec<String> = errors.iter().map(|e| format!("{}.", without_piece(e))).collect();
+        assert_eq!(errors, tex_errors, "{name} ({o:?}): the graph's errors are not etex's");
+        assert_eq!(words(&got), words(&expected), "{name} ({o:?}): another log\n--- graph:\n{got}\n--- etex:\n{expected}");
+    }
 }
 
 macro_rules! programs {
@@ -136,6 +169,12 @@ macro_rules! programs {
 }
 
 programs!(version, expr, detok, scan, ifs, groups, lastnode, glue, interaction, pens, show);
+
+// (e-TeX with input and output: `\readline` on a stream, `\everyeof` after
+// an `\input` file, a file inside `\scantokens`, `\endinput` in a
+// `\scantokens` text, `\inputlineno` there, `\splitfirstmarks n` and
+// `\splitbotmarks n`)
+programs!(io);
 
 #[test]
 fn expr_errors() {

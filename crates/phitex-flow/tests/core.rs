@@ -31,16 +31,26 @@ fn dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/core")
 }
 
-/// The graph's log of a program, as TeX lays it out.
+/// The graph's log of a program, as TeX lays it out (its files found in
+/// `tests/core/`).
 fn graph_log(src: &str) -> (String, Vec<String>) {
-    let o = Build::new(font()).update(&format!("{PRELUDE}{src}"), Options::default());
+    let mut b = Build::new(font());
+    b.set_input_dirs(vec![dir()]);
+    let o = b.update(&format!("{PRELUDE}{src}"), Options::default());
     (phitex_flow::print::log("(./core.tex", &o.log, " )"), o.errors)
 }
 
-/// TeX's log of a program, if there is a `tex`.
+/// TeX's log of a program, if there is a `tex` (the data files of
+/// `tests/core/`, `*.dat`, beside it).
 fn tex_log(name: &str, src: &str) -> Option<String> {
     let tmp = std::env::temp_dir().join(format!("phitex-flow-core-{name}-{}", std::process::id()));
     std::fs::create_dir_all(&tmp).ok()?;
+    for e in std::fs::read_dir(dir()).ok()?.flatten() {
+        let p = e.path();
+        if p.extension().is_some_and(|x| x == "dat") {
+            std::fs::copy(&p, tmp.join(e.file_name())).ok()?;
+        }
+    }
     std::fs::write(tmp.join("core.tex"), format!("{PRELUDE}{src}\\end\n")).ok()?;
     let st = Command::new("tex")
         .args(["-ini", "-interaction=batchmode", "-jobname=texput", "core.tex"])
@@ -93,7 +103,7 @@ macro_rules! programs {
     };
 }
 
-programs!(macros, expandafter, edef, conds, arith, the, case, groups, futurelet, plain, boxlevel);
+programs!(macros, expandafter, edef, conds, arith, the, case, groups, futurelet, plain, boxlevel, readin);
 
 /// The graph's own form: an `\ifnum` whose arms define a register gets a φ
 /// for it at `\fi`; expandable primitives and macro calls are steps, never

@@ -50,7 +50,9 @@ impl Exec<'_> {
             if self.noexp && expands(&m) {
                 return Some((t, Meaning::Prim(Prim::Relax)));
             }
-            if top && matches!(m, Meaning::Prim(p) if p.conditional()) {
+            // (`\input` at the top is a node of its own, whose result is the
+            // file: CORE.md)
+            if top && matches!(m, Meaning::Prim(p) if p.conditional() || p == Prim::Input) {
                 return Some((t, m));
             }
             if t.key().is_some() && expands(&m) {
@@ -97,7 +99,19 @@ impl Exec<'_> {
                     self.rewrite(toks);
                 }
                 Prim::Input => self.input_file(),
-                Prim::EndInput => self.st.endinput = true,
+                Prim::EndInput => self.end_input(),
+                // (`\splitfirstmark`, `\splitbotmark`, e-TeX's
+                // `\splitfirstmarks n`, `\splitbotmarks n`: what the last
+                // `\vsplit` defined, tex.web 386, etex.web §1493)
+                Prim::Mark(k @ (3 | 4 | 8 | 9)) => {
+                    let class = if k >= 5 { self.scan_eight_bit_int() } else { 0 };
+                    if let Val::SplitMarks(m) = self.get(&Key::SplitMarks)
+                        && let Ok(i) = m.binary_search_by_key(&class, |x| x.0)
+                    {
+                        let t = if k % 5 == 3 { &m[i].1 } else { &m[i].2 };
+                        self.rewrite(t.to_vec());
+                    }
+                }
                 // (e-TeX's: etex.web §1418, §1489)
                 Prim::Unexpanded | Prim::Detokenize => {
                     let toks = self.etex_the(*p);
@@ -121,38 +135,23 @@ impl Exec<'_> {
         }
     }
 
-    /// `\input` (tex.web 537): the file name (§526: characters up to a
-    /// space, expanded), its text a read of `Key::File`; the node ends the
-    /// piece's run, the file's pieces follow it. Only as a command of its
-    /// own: expanded inside another command it is not supported.
+    /// `\input` (tex.web 537) as a command of its own at a piece's top
+    /// level (vertical mode, no group, box or paragraph open, no text
+    /// rewritten): the file name, the file a read of `Key::File`; the node
+    /// ends the piece's run, the file's pieces follow it in the sequence.
+    /// Anywhere else the file is read in the piece ([`Exec::start_input`]).
     fn input_file(&mut self) {
-        if !self.at_start {
-            self.err("\\input inside another command is not supported yet".into());
+        if !self.at_start || !self.st.plain_boundary() || !self.st.texts.is_empty() {
+            self.start_input();
             return;
         }
-        let mut name = String::new();
-        while let Some((t, _)) = self.next_x_m(false) {
-            match t {
-                Tok::Char(10, _) if name.is_empty() => {}
-                Tok::Char(10, _) => break,
-                Tok::Char(_, c) => name.push(c),
-                _ => {
-                    self.back(t);
-                    break;
-                }
-            }
-        }
-        if !name.contains('.') {
-            name.push_str(".tex");
-        }
-        if !self.st.plain_boundary() {
-            self.err("\\input inside a group, a box or a paragraph is not supported yet".into());
-        }
-        let name: Arc<str> = Arc::from(name);
-        match self.get(&Key::File(name.clone())) {
-            Val::Text(Some(text)) => self.input = Some(Arc::new(super::FileText { name, text })),
-            _ => self.err(format!("I can't find file `{name}'.")),
-        }
+        let name = self.scan_name();
+        let Some((found, data)) = self.find_file(&name) else {
+            self.err(format!("I can't find file `{name}'"));
+            return;
+        };
+        let text: String = data.iter().map(|&b| char::from(b)).collect();
+        self.input = Some(Arc::new(super::FileText { name: Arc::from(found), text: Arc::from(text) }));
     }
 
     /// `\expandafter` (tex.web 368).
@@ -231,7 +230,10 @@ impl Exec<'_> {
                 }
             }
             Conv::FontName => self.font_name_text(&mut s),
-            Conv::JobName => s.push_str(JOBNAME),
+            Conv::JobName => match self.get(&Key::Job) {
+                Val::Name(n) => s.push_str(&n),
+                _ => s.push_str(JOBNAME),
+            },
             Conv::ETeXRevision => s.push_str(super::etex::ETEX_REVISION),
         }
         self.rewrite(print::str_toks(&s));
@@ -543,11 +545,7 @@ impl Exec<'_> {
                 let b = self.ifx_operand();
                 a == b
             }
-            IfKind::Eof => {
-                // (no stream is ever open yet)
-                let _ = self.scan_four_bit_int();
-                true
-            }
+            IfKind::Eof => self.if_eof(),
             IfKind::True => true,
             IfKind::Case => unreachable!("\\ifcase has no boolean test"),
             IfKind::Defined => {

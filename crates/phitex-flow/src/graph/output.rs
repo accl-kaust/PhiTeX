@@ -212,7 +212,7 @@ pub fn run_routine(entry: &RState, env: &mut dyn Env) -> Run {
         let mut x = Exec::new(text, &chain, &state, env, &mut outside, &mut scratch);
         x.command();
         if let Some(Check::Exceeded(size)) = x.stop.take() {
-            x.err(capacity_error(size));
+            x.overflow(capacity_error(size));
             x.kind = Kind::End;
         }
         let n = chain.with_group(x.finish());
@@ -227,7 +227,7 @@ pub fn run_routine(entry: &RState, env: &mut dyn Env) -> Run {
         // (a routine that never ends its input: TeX's memory runs out)
         if let Check::Exceeded(size) = verdict {
             let mut x = Exec::new(text, &chain, &state, env, &mut outside, &mut scratch);
-            x.err(capacity_error(size));
+            x.overflow(capacity_error(size));
             x.kind = Kind::End;
             let n = chain.with_group(x.finish());
             chain.push_arc(n);
@@ -293,7 +293,7 @@ impl Exec<'_> {
         // (§1025: `push_nest; mode:=-vmode; prev_depth:=ignore_depth`, the
         // group, its `{`)
         let at = self.chain.nodes.len() as u32;
-        self.st.groups.push(Group { kind: GroupKind::Output, after: Vec::new(), boxg: None, at });
+        self.st.groups.push(Group { kind: GroupKind::Output, after: Vec::new(), boxg: None, at, align: None });
         self.kind = Kind::Open;
         self.st.level += 1;
         self.st.mode = Mode::V;

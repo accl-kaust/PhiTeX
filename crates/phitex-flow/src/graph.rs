@@ -39,17 +39,24 @@ pub use crate::item::{Item, Para};
 use crate::page::IGNORE_DEPTH;
 use crate::tfm::Font;
 use crate::val::{DimenPar, IntPar, Key, Macro, Meaning, Prim, Tok, Val};
+use crate::show::{HALT, NL, RAW, THAT_MAKES_100};
 
+mod align;
 mod assign;
+mod boxes;
 pub(crate) mod diag;
 mod etex;
 mod expand;
 mod fonts;
+mod io;
 mod lang;
 mod material;
 mod math;
 pub mod output;
 mod scan;
+
+pub use expand::JOBNAME;
+pub use io::{ends_document, file_text, page_io, whatsits};
 
 /// A piece's identity, stable across edits.
 pub type PieceId = u32;
@@ -87,6 +94,23 @@ pub trait Env {
     /// function of the name during a build).
     fn font_file(&mut self, _name: &str) -> Option<std::sync::Arc<[u8]>> {
         None
+    }
+
+    /// The bytes of the input file of exactly this name, if there is one:
+    /// what a read of `Key::File(name)` answers (a pure function of the
+    /// name during a build).
+    fn file(&mut self, _name: &str) -> Option<Arc<[u8]>> {
+        None
+    }
+
+    /// The job's name (`\jobname`): what a read of `Key::Job` answers.
+    fn jobname(&mut self) -> Arc<str> {
+        Arc::from(expand::JOBNAME)
+    }
+
+    /// The lines of its file before this piece (`Key::LineBase`).
+    fn line_base(&mut self) -> i32 {
+        0
     }
 }
 
@@ -170,6 +194,11 @@ enum GroupKind {
     Box,
     /// An output routine's braces (tex.web 1025: `output_group`).
     Output,
+    /// An alignment's group, and each of its entries' (tex.web's
+    /// `align_group`; the alignment's carries `Group::align`).
+    Align,
+    /// `\noalign{...}`.
+    NoAlign,
     /// A formula, a subformula, `\left`…`\right`, a `\mathchoice` part
     /// (`Group::boxg`, `math::MathKind`).
     Math,
@@ -188,13 +217,17 @@ struct Cond {
     code: u8,
 }
 
-/// A text the input was rewritten with (e-TeX's `\scantokens`): read
-/// with the category codes in force as it is read, line by line, each line
-/// ending in the `\endlinechar` in force when it is begun. It lies above
-/// the first `at` rewritten token lists: those above it are read first,
-/// then it, then those below. Where its reading is: `pos`, `tstate`, `eol`
-/// (as the piece's own are kept in `RState`); `eof`: its end was met once
-/// and `\everyeof` went in (etex.web §362).
+/// A text the reader is in above the piece's (TeX's input levels that
+/// read characters, as a value of the reader state): e-TeX's
+/// `\scantokens` text, an `\input` file (read in the piece until the core
+/// cuts files into pieces: CORE.md, "`\input` (decided)") or a `\read`
+/// line. Read with the category codes in force as it is read, line by
+/// line, each line ending in the `\endlinechar` in force when it is begun.
+/// It lies above the first `at` rewritten token lists: those above it are
+/// read first, then it, then those below. Where its reading is: `pos`,
+/// `tstate`, `eol` (as the piece's own are kept in `RState`); `eof`: its
+/// end was met once and `\everyeof` went in (etex.web §362); `endinput`:
+/// `\endinput` was met, it ends with its current line (tex.web 362).
 #[derive(Clone, PartialEq, Eq, Debug)]
 struct PendingText {
     text: Arc<[char]>,
@@ -203,6 +236,21 @@ struct PendingText {
     tstate: TState,
     eol: i16,
     eof: bool,
+    kind: TextKind,
+    endinput: bool,
+}
+
+/// What a [`PendingText`] is.
+#[derive(Clone, PartialEq, Eq, Debug)]
+enum TextKind {
+    /// `\scantokens`'s pseudo file.
+    Scan,
+    /// An `\input` file, as the log names it (`./sub.tex`): its end is
+    /// `)` in the log.
+    File(Arc<str>),
+    /// A `\read` line: its end ends the reading (`next_raw` is `None`);
+    /// `\read` leaves it.
+    Read,
 }
 
 /// An open group: its kind and the tokens `\aftergroup` gave it (its
@@ -216,6 +264,9 @@ struct Group {
     /// The node that opened it (where it was entered, for e-TeX's
     /// `\showgroups`).
     at: u32,
+    /// An alignment's preamble and what it began in; a display's
+    /// dimensions and, once its alignment is set, its material.
+    align: Option<Arc<align::AlignSpec>>,
 }
 
 /// A stack in the reader state, shared until changed: handing the state
@@ -334,9 +385,13 @@ pub struct RState {
     eol: i16,
     /// `\endinput` was read: the file ends after this line (tex.web 362).
     endinput: bool,
+    /// The alignment being read: `align_state`, the current column and
+    /// span, how the entry began and ended (tex.web 309, 770).
+    al: align::AlignCur,
     /// e-TeX's `\protected` prefix is waiting for its definition.
     protected: bool,
-    /// Texts the input was rewritten with (`\scantokens`), innermost last.
+    /// The texts the reader is in above the piece's (`\scantokens`
+    /// texts, `\input` files, `\read` lines), innermost last.
     texts: Stack<PendingText>,
     /// A paragraph's language state (tex.web 1091, 1376): `clang`, and
     /// the language and hyphen minima it began with.
@@ -344,7 +399,13 @@ pub struct RState {
     /// In an output routine's run: what the page builder handed it where
     /// it fired (the same for all its nodes; `output::output_entry`).
     fire: Option<Arc<output::Fire>>,
+    /// tex.web 76's `error_count`: the errors since the last paragraph
+    /// ended (§1096); at [`FATAL_ERRORS`] the reader has stopped (§82).
+    error_count: u8,
 }
+
+/// tex.web 82: the hundredth error is fatal.
+const FATAL_ERRORS: u8 = 100;
 
 impl RState {
     pub fn start() -> RState {
@@ -367,10 +428,12 @@ impl RState {
             prev_graf: 0,
             eol: EOL_UNREAD,
             endinput: false,
+            al: align::AlignCur::OFF,
             protected: false,
             texts: Stack::new(),
             hyph_lang: [0, 0, 1, 1],
             fire: None,
+            error_count: 0,
         }
     }
 
@@ -494,7 +557,7 @@ impl Cond {
 impl Group {
     /// Equal but for the node that opened it (a position, not content).
     fn same_but_pos(&self, o: &Group) -> bool {
-        self.kind == o.kind && self.after == o.after && self.boxg == o.boxg
+        self.kind == o.kind && self.after == o.after && self.boxg == o.boxg && self.align == o.align
     }
 }
 
@@ -535,11 +598,13 @@ impl RState {
             && self.prev_graf == o.prev_graf
             && self.eol == o.eol
             && self.endinput == o.endinput
+            && self.al == o.al
             && self.pending == o.pending
             && self.protected == o.protected
             && self.texts == o.texts
             && self.hyph_lang == o.hyph_lang
             && self.fire == o.fire
+            && self.error_count == o.error_count
     }
 
     /// Whether a node going from `self` to `out` begins a paragraph of the
@@ -1162,6 +1227,13 @@ pub fn paragraph_start(chain: &Chain, i: usize) -> usize {
     material::para_start(chain, i, chain.nodes[i].out.level)
 }
 
+/// The node that began the alignment node `i` of `chain` set (its
+/// `\halign` or `\valign`): for the log's line numbers.
+pub fn alignment_start(chain: &Chain, i: usize) -> usize {
+    let level = chain.nodes[i].out.level + 1;
+    material::box_start(chain, i.saturating_sub(1), level)
+}
+
 /// Cuts the source into pieces at blank lines at brace depth 0. Lines lose
 /// their trailing spaces and end in `\r` (TeX's end of line).
 pub fn cut(src: &str) -> Vec<Arc<[char]>> {
@@ -1287,7 +1359,14 @@ fn outside_read(env: &mut dyn Env, outside: &mut Outside, k: &Key, node: u32) ->
     {
         return v.clone();
     }
-    let (val, src, lo, hi) = env.reach(k, node);
+    // (what the build answers itself: a file's bytes, the job's name, the
+    // lines before the piece)
+    let (val, src, lo, hi) = match k {
+        Key::File(n) => (env.file(n).map_or(Val::Void, Val::Bytes), Src::Initial, 0, u32::MAX),
+        Key::Job => (Val::Name(env.jobname()), Src::Initial, 0, u32::MAX),
+        Key::LineBase => (Val::Int(env.line_base()), Src::Initial, 0, u32::MAX),
+        _ => env.reach(k, node),
+    };
     let r = Arc::new(Read {
         key: k.clone(),
         src,
@@ -1593,7 +1672,7 @@ pub fn run_piece(
                 x.command();
                 let stop = x.stop.take();
                 if let Some(Check::Exceeded(size)) = stop {
-                    x.err(capacity_error(size));
+                    x.overflow(capacity_error(size));
                     x.kind = Kind::End;
                 }
                 let n = chain.with_group(x.finish());
@@ -1659,7 +1738,7 @@ pub fn run_piece(
             }
             Check::Exceeded(size) => {
                 let mut x = Exec::new(text, &chain, &state, env, &mut outside, &mut scratch);
-                x.err(capacity_error(size));
+                x.overflow(capacity_error(size));
                 x.kind = Kind::End;
                 let n = chain.with_group(x.finish());
                 chain.push_arc(n);
@@ -1760,6 +1839,11 @@ struct Scratch {
     emit: Vec<Item>,
     /// Shared copies of the names read in this piece.
     names: FxSet<Arc<str>>,
+    /// The piece's own copy of each font it sets (the font as read, then
+    /// the copy, its name the piece's): every character holds its font's
+    /// `Arc`, and one `Arc` counted by every thread at once would make
+    /// them wait on each other. A copy is equal to the font.
+    fonts: Vec<(Arc<Font>, Arc<Font>)>,
     buf: String,
     /// The glue `scan_glue` just gave is an internal quantity's own (for
     /// TeX's shared zero glue, which `\showbox` and the short display
@@ -1811,6 +1895,8 @@ struct Exec<'a> {
     /// node ends at once ([`Exec::rewrite`]).
     steps: u64,
     stop: Option<Check>,
+    /// This node made the hundredth error: the build ends here (§82).
+    halt: bool,
 }
 
 /// Up to this many reads, a node's reads are looked up by a scan.
@@ -1873,6 +1959,7 @@ impl<'a> Exec<'a> {
             output: None,
             steps: 0,
             stop: None,
+            halt: false,
         }
     }
 
@@ -1890,6 +1977,11 @@ impl<'a> Exec<'a> {
                     }));
                 }
             }
+        }
+        if self.halt {
+            // (§82: at any level, into the page fold's stream)
+            let p = self.para.get_or_insert_with(|| Arc::new(Para::default()));
+            Arc::make_mut(p).after.push(Item::Halt);
         }
         let reads = Few::take(&mut self.reads);
         let emit = Few::take(&mut self.emit);
@@ -1927,7 +2019,48 @@ impl<'a> Exec<'a> {
     }
 
     fn err(&mut self, s: String) {
+        if self.halted() {
+            return;
+        }
         self.errors.push(s);
+        if self.count_error() {
+            let mut l = String::from(RAW);
+            l.push(NL);
+            l.push_str(THAT_MAKES_100);
+            l.push(HALT);
+            self.log_raw(&l);
+        }
+    }
+
+    /// tex.web 94, `overflow`: "TeX capacity exceeded", a fatal error: as
+    /// at the hundredth error nothing more is read and this node's
+    /// `Item::Halt` ends the page fold.
+    fn overflow(&mut self, s: String) {
+        if self.halted() {
+            return;
+        }
+        self.errors.push(s);
+        self.st.error_count = FATAL_ERRORS;
+        self.halt = true;
+        let mut l = String::from(RAW);
+        l.push(HALT);
+        self.log_raw(&l);
+    }
+
+    /// The reader has stopped at its hundredth error (tex.web 82).
+    fn halted(&self) -> bool {
+        self.st.error_count >= FATAL_ERRORS
+    }
+
+    /// tex.web 82: `incr(error_count)`; the hundredth is fatal: whether
+    /// this one was. Nothing more is read (the reader's state says so:
+    /// `next_raw` gives nothing, the next node ends the piece), and this
+    /// node's `Item::Halt` ends the page fold, wherever it is (`jump_out`:
+    /// the page so far is not shipped); its log ends with TeX's line.
+    fn count_error(&mut self) -> bool {
+        self.st.error_count += 1;
+        self.halt = self.st.error_count >= FATAL_ERRORS;
+        self.halt
     }
 
     // ------------------------------------------------------------ names
@@ -2047,15 +2180,34 @@ impl<'a> Exec<'a> {
     fn font(&mut self) -> Arc<Font> {
         let r = self.lookup(&Key::Font);
         match &r.val {
-            Val::Font(f) => f.clone(),
+            Val::Font(f) => self.own_font(f),
             other => panic!("the font key holds {other:?}"),
         }
+    }
+
+    /// The piece's own copy of font `f` (`Scratch::fonts`).
+    fn own_font(&mut self, f: &Arc<Font>) -> Arc<Font> {
+        if let Some((_, o)) = self.scratch.fonts.iter().find(|(s, o)| Arc::ptr_eq(s, f) || Arc::ptr_eq(o, f)) {
+            return o.clone();
+        }
+        let mut c = (**f).clone();
+        c.key = intern(&mut self.scratch.names, &f.key);
+        let o = Arc::new(c);
+        self.scratch.fonts.push((f.clone(), o.clone()));
+        o
+    }
+
+    /// Font `f`'s identity as the piece's own name (for the keys of its
+    /// parameters).
+    fn font_key(&mut self, f: &Font) -> Arc<str> {
+        intern(&mut self.scratch.names, &f.key)
     }
 
     /// `\fontdimen n` of the current font.
     fn font_param(&mut self, n: u16) -> i32 {
         let f = self.font();
-        self.int(&Key::FontDimen(f.key.clone(), n))
+        let k = self.font_key(&f);
+        self.int(&Key::FontDimen(k, n))
     }
 
     fn tok_meaning(&mut self, t: &Tok) -> Meaning {
@@ -2083,13 +2235,24 @@ impl<'a> Exec<'a> {
     // ------------------------------------------------------------ the input
 
     fn back(&mut self, t: Tok) {
-        // (tex.web 325: lists read to their end go first, not those under
-        // a rewritten text)
+        if self.st.al.on {
+            // (tex.web 325: a brace read again is counted again)
+            align::uncount(&mut self.st.al, &t);
+        }
+        // (tex.web 325: lists read to their end go first)
+        self.end_read_lists();
+        self.st.pending.push((Arc::from([t]), 0, true));
+    }
+
+    /// The token lists read to their end go (not those under a rewritten
+    /// text): before a list is backed up (tex.web 325) and before a
+    /// macro's body is read (390: a macro calling itself last, as plain's
+    /// `\loop` does, keeps the input as long as it was).
+    fn end_read_lists(&mut self) {
         let floor = self.st.texts.last().map_or(0, |x| x.at);
         while self.st.pending.len() > floor && self.st.pending.last().is_some_and(|(l, i, _)| *i >= l.len()) {
             self.st.pending.pop();
         }
-        self.st.pending.push((Arc::from([t]), 0, true));
     }
 
     /// Rewrites the input: `toks`, then the rest. A node expanding on and
@@ -2148,14 +2311,18 @@ impl<'a> Exec<'a> {
         }
     }
 
-    /// Moves to `np`; past a line's end, the next line begins.
+    /// Moves to `np`; past a line's end, the next line begins (and a text
+    /// whose `\endinput` was met ends, tex.web 362).
     fn advance(&mut self, np: usize) {
         let crossed = self.txt()[self.st.pos..np].contains(&'\r');
         self.st.pos = np;
         if crossed {
             self.new_line();
-            if self.st.endinput {
-                // (`\endinput`: the file ends with the line, tex.web 362)
+            if self.ptext.is_some() && self.st.texts.last().is_some_and(|x| x.endinput) {
+                self.st.pos = self.txt().len();
+            } else if self.ptext.is_none() && self.st.endinput {
+                // (`\endinput` in a file piece: the file ends with the
+                // line, tex.web 362)
                 self.st.pos = self.text.len();
             }
         }
@@ -2211,9 +2378,20 @@ impl<'a> Exec<'a> {
     }
 
     /// The next token, unexpanded (tex.web 343-357). After `\noexpand`'s
-    /// mark, the token after it, with `noexp` set.
+    /// mark, the token after it, with `noexp` set. In an alignment, the
+    /// braces are counted and an entry's end inserts its v template
+    /// (tex.web 342: `align_state`).
     fn next_raw(&mut self) -> Option<Tok> {
+        let t = self.next_raw0()?;
+        if self.st.al.on { self.align_token(t) } else { Some(t) }
+    }
+
+    /// [`Exec::next_raw`] before an alignment sees the token.
+    fn next_raw0(&mut self) -> Option<Tok> {
         self.noexp = false;
+        if self.halted() {
+            return None;
+        }
         loop {
             // (the token lists above the innermost rewritten text; a list
             // read to its end stays until the next read, tex.web 325)
@@ -2224,7 +2402,8 @@ impl<'a> Exec<'a> {
                     let t = list[*i].clone();
                     *i += 1;
                     if t == Tok::DontExpand {
-                        let n = self.next_raw();
+                        // (the marked token, as the wrapper will see it)
+                        let n = self.next_raw0();
                         self.noexp = n.as_ref().is_some_and(|x| x.key().is_some());
                         return n;
                     }
@@ -2234,6 +2413,10 @@ impl<'a> Exec<'a> {
             }
             if self.st.texts.is_empty() {
                 return self.tokenize();
+            }
+            // (a `\read` line's end ends the reading)
+            if self.st.texts.last().is_some_and(|x| x.kind == TextKind::Read) {
+                return self.text_token();
             }
             if let Some(t) = self.text_token() {
                 return Some(t);
@@ -2255,10 +2438,11 @@ impl<'a> Exec<'a> {
         (self.st.pos, self.st.tstate, self.st.eol) = outer;
         let Some(x) = self.st.texts.last_mut() else { return t };
         (x.pos, x.tstate, x.eol) = here;
-        if t.is_some() {
+        if t.is_some() || x.kind == TextKind::Read {
             return t;
         }
-        if !x.eof {
+        // (`\endinput` forces the end: no `\everyeof`)
+        if !x.eof && !x.endinput {
             x.eof = true;
             let every = match self.get(&Key::TokPar(crate::val::TokPar::Everyeof)) {
                 Val::Toks(l) => l,
@@ -2269,7 +2453,10 @@ impl<'a> Exec<'a> {
                 return None;
             }
         }
-        self.st.texts.pop();
+        if let Some(PendingText { kind: TextKind::File(_), .. }) = self.st.texts.pop() {
+            // (an `\input` file is closed, tex.web 362)
+            self.log_raw(&format!("{}{}", crate::show::RAW, ')'));
+        }
         None
     }
 
@@ -2412,6 +2599,7 @@ impl<'a> Exec<'a> {
                 _ => out.push(t.clone()),
             }
         }
+        self.end_read_lists();
         self.rewrite(out);
     }
 
@@ -2566,6 +2754,10 @@ impl<'a> Exec<'a> {
     /// The end of the piece: its last paragraph, its open groups and
     /// conditionals.
     fn end(&mut self) {
+        if self.halted() {
+            self.kind = Kind::End;
+            return;
+        }
         self.end_par();
         self.kind = Kind::End;
         // (groups and conditionals open where the piece was entered are
@@ -2586,6 +2778,7 @@ impl<'a> Exec<'a> {
             after: Vec::new(),
             boxg: None,
             at: self.chain.nodes.len() as u32,
+            align: None,
         });
         self.kind = Kind::Open;
     }
@@ -2616,8 +2809,11 @@ impl<'a> Exec<'a> {
                 Some(GroupKind::Math) => self.math_right_brace(),
                 Some(GroupKind::Output) => self.output_close(t),
                 Some(GroupKind::SemiSimple) => self.err("Extra }, or forgotten \\endgroup".into()),
+                Some(GroupKind::Align) => self.missing_cr(t),
+                Some(GroupKind::NoAlign) => self.noalign_close(t),
                 None => self.err("Too many }'s".into()),
             },
+            4 => self.align_error(t),
             10 => {
                 if self.st.mode == Mode::H {
                     self.space_cmd();
@@ -2650,7 +2846,7 @@ impl<'a> Exec<'a> {
                     let t = self.cmd.clone();
                     self.math_off_save(&t);
                 }
-                Some(GroupKind::Simple | GroupKind::Box | GroupKind::Output) => {
+                Some(GroupKind::Simple | GroupKind::Box | GroupKind::Output | GroupKind::Align | GroupKind::NoAlign) => {
                     // (tex.web 1064: the missing `}` goes in first)
                     self.err("Missing } inserted".into());
                     let t = self.cmd.clone();
@@ -2683,16 +2879,14 @@ impl<'a> Exec<'a> {
             Prim::SetLanguage => self.set_language(),
             Prim::Show(c) => self.show_cmd(c),
             Prim::Immediate => self.immediate(),
-            Prim::Write => {
-                self.err(
-                    "\\write without \\immediate is not supported yet (it needs \\shipout)".into(),
-                );
-                let _ = self.scan_int();
-                let _ = self.scan_toks_raw();
-            }
+            Prim::Write => self.write_cmd(),
+            Prim::OpenOut | Prim::CloseOut | Prim::Special => self.extension(p),
+            Prim::InStream(open) => self.open_in(open),
+            Prim::Input => self.start_input(),
             Prim::Uppercase | Prim::Lowercase => self.case_shift(p == Prim::Uppercase),
             Prim::EndCsName => self.err("Extra \\endcsname".into()),
-            Prim::End | Prim::Dump => self.stop(),
+            Prim::End | Prim::Dump => self.stop_job(p == Prim::Dump),
+            Prim::Align(a) => self.align_cmd(a),
             Prim::Relax => {}
             Prim::Marks | Prim::Discards(_) | Prim::ShowE(_) | Prim::Lr(_) => self.etex_command(p),
             Prim::LastItem(_)

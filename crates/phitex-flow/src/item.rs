@@ -97,6 +97,30 @@ pub struct Shipped {
     pub ship: Arc<ShipParams>,
 }
 
+/// An unset box (tex.web 159): an alignment's entry, or a row, before the
+/// column widths are known. An entry's glue totals are its list's highest
+/// order (§796); a row's are zero (§799).
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub struct Unset {
+    /// A vertical list (`\valign`'s entries and rows).
+    pub vertical: bool,
+    pub w: i32,
+    pub h: i32,
+    pub d: i32,
+    /// The columns an entry spans, less one (`span_count`).
+    pub span: u16,
+    /// The column an entry begins in.
+    pub col: u16,
+    pub stretch: i32,
+    pub stretch_order: u8,
+    pub shrink: i32,
+    pub shrink_order: u8,
+    pub list: Vec<Item>,
+    /// A `\halign` row: what appending it to the vertical list read
+    /// (tex.web 799: `append_to_vlist`).
+    pub inter: Option<Arc<Interline>>,
+}
+
 /// A command's contribution to the main vertical list, in order: vertical
 /// items, then — for `\par` — a paragraph's lines (line breaking is a pure
 /// function of `hlist` and `lb`, memoised by equality), then more vertical
@@ -109,19 +133,6 @@ pub struct Para {
     /// What line breaking reads; `None`: no paragraph.
     pub lb: Option<Arc<crate::linebreak::LineParams>>,
     pub after: Vec<Item>,
-}
-
-/// An insertion (tex.web 140): its class, the natural height plus depth
-/// of its list, `\splitmaxdepth`, `\splittopskip` and `\floatingpenalty`
-/// as its group ended, and its vertical list.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Ins {
-    pub n: u8,
-    pub height: i32,
-    pub depth: i32,
-    pub split_top: Arc<Glue>,
-    pub float_cost: i32,
-    pub list: Vec<Item>,
 }
 
 /// An item of a list.
@@ -151,8 +162,19 @@ pub enum Item {
     Penalty(i32),
     Disc(Arc<Disc>),
     Mark(Arc<Vec<Tok>>),
-    /// `\insert n{…}` (tex.web 140, 1100).
+    /// Glue with leaders (tex.web 149: a glue node whose subtype is
+    /// `a_leaders`..`x_leaders` and whose `leader_ptr` is a box or rule):
+    /// everywhere glue is, it is glue ([`Item::glue`]).
+    Leaders(Arc<Leaders>),
+    /// A whatsit (tex.web 1341): `\openout`, `\write`, `\closeout`,
+    /// `\special`.
+    Whatsit(Arc<Whatsit>),
+    /// An insertion (tex.web 140).
     Ins(Arc<Ins>),
+    /// `\vadjust`'s vertical material (tex.web 142).
+    Adjust(Arc<Vec<Item>>),
+    /// An unset box: only inside an alignment, until it is set.
+    Unset(Arc<Unset>),
     /// e-TeX's `\marks n` for a class `n` other than 0 (class 0 is
     /// `Mark`).
     Marks(u16, Arc<Vec<Tok>>),
@@ -179,8 +201,8 @@ pub enum Item {
     /// in the items of nodes inside a formula.
     Noad(Arc<crate::mlist::MItem>),
     // ---- pseudo-items, applied by the gatherer of the list
-    /// `\unpenalty` (0), `\unkern` (1), `\unskip` (2): remove the last item
-    /// if it is of that kind.
+    /// `\unpenalty` (0), `\unkern` (1), `\unskip` (2), `\lastbox` (3: a
+    /// box): remove the last item if it is of that kind.
     Remove(u8),
     /// A box appended to a vertical list: the gatherer puts the interline
     /// glue before it (tex.web 679).
@@ -193,6 +215,9 @@ pub enum Item {
     Shipout(Arc<Shipped>),
     /// `\end` (tex.web 1054).
     End(Arc<PageCall>),
+    /// The hundredth error (tex.web 82: `jump_out`): the build ends, the
+    /// page so far is not shipped.
+    Halt,
 }
 
 impl Item {
@@ -203,10 +228,26 @@ impl Item {
             Item::Char(f, c) => f.glyph(i32::from(*c)).map_or(0, |g| g.width),
             Item::Lig(l) => l.font.glyph(i32::from(l.c)).map_or(0, |g| g.width),
             Item::Box(b) => b.w,
+            Item::Unset(u) => u.w,
             Item::Rule { w, .. } | Item::Kern { w, .. } | Item::Math { w, .. } => *w,
             Item::Glue { g, .. } => g.width,
+            Item::Leaders(l) => l.g.width,
             _ => 0,
         }
+    }
+
+    /// The glue specification of a glue node (glue, or glue with leaders).
+    pub fn glue(&self) -> Option<&Arc<Glue>> {
+        match self {
+            Item::Glue { g, .. } => Some(g),
+            Item::Leaders(l) => Some(&l.g),
+            _ => None,
+        }
+    }
+
+    /// tex.web's `type(p)=glue_node`.
+    pub fn is_glue(&self) -> bool {
+        matches!(self, Item::Glue { .. } | Item::Leaders(_))
     }
 
     /// tex.web's `is_char_node` (characters; ligatures are nodes).
@@ -227,6 +268,8 @@ impl Item {
                 | Item::Lig(_)
                 | Item::Disc(_)
                 | Item::Lang { .. }
+                | Item::Whatsit(_)
+                | Item::Adjust(_)
         )
     }
 
@@ -234,6 +277,50 @@ impl Item {
     pub fn non_discardable(&self) -> bool {
         self.is_char() || self.precedes_break()
     }
+}
+
+/// tex.web's leader subtypes (149).
+pub const A_LEADERS: u8 = 100;
+pub const C_LEADERS: u8 = 101;
+pub const X_LEADERS: u8 = 102;
+
+/// Glue with leaders: the glue, the kind (`A_LEADERS`, `C_LEADERS`,
+/// `X_LEADERS`), the box or rule repeated (an `Item::Box` or
+/// `Item::Rule`), and whether the glue is TeX's shared zero glue.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Leaders {
+    pub g: Arc<Glue>,
+    pub sub: u8,
+    pub b: Item,
+    pub zero: bool,
+}
+
+/// A whatsit (tex.web 1341). Streams: 0–15, 16 (`\write` to the
+/// terminal and log: a number above 15), 17 (to the log only: negative).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Whatsit {
+    /// `\openout n=name` (the name as scanned; `.tex` is added when it is
+    /// opened if it has no extension).
+    Open { stream: u8, name: Arc<str> },
+    /// `\write n{…}`: the tokens, expanded when the page holding it is
+    /// shipped.
+    Write { stream: u8, toks: Arc<Vec<Tok>> },
+    Close { stream: u8 },
+    /// `\special{…}`: the expanded text as shipping prints it.
+    Special(Arc<str>),
+}
+
+/// An insertion (tex.web 140): its class, its natural height plus depth,
+/// `\splitmaxdepth`, `\splittopskip` and `\floatingpenalty` as they were
+/// at its end, and its vertical list.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Ins {
+    pub n: u8,
+    pub height: i32,
+    pub depth: i32,
+    pub split_top: Arc<Glue>,
+    pub float_cost: i32,
+    pub list: Vec<Item>,
 }
 
 /// A glue item from a parameter (`sub` = its number + 1).

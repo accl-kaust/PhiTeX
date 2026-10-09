@@ -15,7 +15,7 @@
 use std::fmt::Write as _;
 use std::sync::Arc;
 
-use crate::graph::{Run, enclosing_open, opener, paragraph_start, paragraph_start_at};
+use crate::graph::{Run, alignment_start, enclosing_open, opener, paragraph_start, paragraph_start_at};
 use crate::item::Item;
 use crate::page::{CallLog, Lines, Page, page_mark};
 use crate::show::LINE;
@@ -54,6 +54,11 @@ fn resolve(s: &str, text: &[char], run: &Run, i: usize) -> String {
                 let j = opener(&run.chain, i, w.starts_with('E'), k).unwrap_or(i).min(i);
                 let _ = write!(out, "{REL}{}{REL}", line_of(text, run, j));
             }
+            // (an alignment's preamble report: from its `\halign` node)
+            "A" => {
+                let start = alignment_start(&run.chain, i);
+                let _ = write!(out, "{REL}{}{REL}--{REL}{here}{REL}", line_of(text, run, start));
+            }
             // (where a list began, `\showlists`: the `Open` node of the
             // `k`-th enclosing group, or the paragraph at a level)
             g if g.starts_with('G') => {
@@ -88,7 +93,23 @@ fn resolve(s: &str, text: &[char], run: &Run, i: usize) -> String {
 #[derive(Debug)]
 pub enum Entry {
     Text(String),
-    Mark,
+    /// A call of the page builder by node `.0` of the piece.
+    Mark(u32),
+}
+
+/// Between the entries of one node's log (`Node::log`).
+pub const SEP: char = '\u{E007}';
+
+/// Brackets the parts of an event of the output streams in a log entry
+/// ([`io_event`]).
+pub const IO: char = '\u{E005}';
+
+/// An event of the output streams, as a node's log holds it: `\openout`
+/// (`o`, the file's name as scanned), `\write` (`w`, the text written),
+/// `\closeout` (`c`), with the stream (0–15; a write's 16 is the terminal
+/// and the log, 17 the log only). [`replay`] does them in order.
+pub fn io_event(kind: char, stream: u8, payload: &str) -> String {
+    format!("{IO}{kind}{stream}{IO}{payload}{IO}")
 }
 
 /// Brackets an error's context, laid out by `rebase` (`context`).
@@ -155,19 +176,21 @@ impl Frag {
 pub fn fragment(text: &[char], run: &Arc<Run>, lines: &[Option<Lines>]) -> Frag {
     let mut entries = Vec::new();
     let mut pi = 0;
-    let mark = |entries: &mut Vec<Entry>, items: &[Item]| {
+    let mark = |entries: &mut Vec<Entry>, items: &[Item], i: usize| {
         for it in items {
             if matches!(it, Item::BuildPage(_) | Item::End(_)) {
-                entries.push(Entry::Mark);
+                entries.push(Entry::Mark(i as u32));
             }
         }
     };
     for (i, n) in run.chain.nodes.iter().enumerate() {
         if let Some(l) = n.log() {
-            entries.push(Entry::Text(resolve(l, text, run, i)));
+            for e in l.split(SEP) {
+                entries.push(Entry::Text(resolve(e, text, run, i)));
+            }
         }
         let Some(p) = n.para() else { continue };
-        mark(&mut entries, &p.before);
+        mark(&mut entries, &p.before, i);
         if p.lb.is_some()
             && let Some(Some(ls)) = lines.get(pi)
         {
@@ -177,7 +200,7 @@ pub fn fragment(text: &[char], run: &Arc<Run>, lines: &[Option<Lines>]) -> Frag 
                 }
             }
         }
-        mark(&mut entries, &p.after);
+        mark(&mut entries, &p.after, i);
         pi += 1;
     }
     Frag {
@@ -233,15 +256,23 @@ pub fn texts(f: &Frag) -> Vec<String> {
         .iter()
         .filter_map(|e| match e {
             Entry::Text(s) => Some(rebase(s, 0)),
-            Entry::Mark => None,
+            Entry::Mark(_) => None,
         })
         .collect()
 }
 
 /// The log's entries: the pieces' parts, the page builder's calls' pages
 /// (`marks`, in order: `page::Scan::marks`; a call that fired an output
-/// routine has its log in `call_logs` instead) and the pages.
-pub fn gather(parts: &[Part<'_>], marks: &[(u32, u32)], call_logs: &[(u32, Vec<CallLog>)], pages: &[Page]) -> Vec<String> {
+/// routine has its log in `call_logs` instead) and the pages, each page's
+/// `[n]` holding the events of its shipping (`page_io[i]` for page `i`:
+/// [`crate::graph::page_io`]).
+pub fn gather(
+    parts: &[Part<'_>],
+    marks: &[(u32, u32)],
+    call_logs: &[(u32, Vec<CallLog>)],
+    pages: &[Page],
+    page_io: &[String],
+) -> Vec<String> {
     let mut out = Vec::new();
     let mut mi = 0;
     let marks_at = |out: &mut Vec<String>, mi: &mut usize| {
@@ -257,8 +288,15 @@ pub fn gather(parts: &[Part<'_>], marks: &[(u32, u32)], call_logs: &[(u32, Vec<C
                 }
             }
         } else if let Some(&(a, b)) = marks.get(*mi) {
-            for p in &pages[a as usize..(b as usize).min(pages.len())] {
-                out.push(page_mark(&p.ship));
+            let b = (b as usize).min(pages.len());
+            for (i, p) in pages.iter().enumerate().take(b).skip(a as usize) {
+                let mut m = page_mark(&p.ship);
+                if let Some(io) = page_io.get(i).filter(|s| !s.is_empty()) {
+                    m.pop();
+                    m.push_str(io);
+                    m.push(']');
+                }
+                out.push(m);
             }
         }
         *mi += 1;
@@ -267,7 +305,7 @@ pub fn gather(parts: &[Part<'_>], marks: &[(u32, u32)], call_logs: &[(u32, Vec<C
         for e in &part.frag.entries {
             match e {
                 Entry::Text(s) => out.push(rebase(s, part.base)),
-                Entry::Mark => marks_at(&mut out, &mut mi),
+                Entry::Mark(_) => marks_at(&mut out, &mut mi),
             }
         }
         if let Some(p) = part.post {
@@ -278,4 +316,107 @@ pub fn gather(parts: &[Part<'_>], marks: &[(u32, u32)], call_logs: &[(u32, Vec<C
         marks_at(&mut out, &mut mi);
     }
     out
+}
+
+/// Where each page was shipped: the piece and the node after which the
+/// page builder's call that shipped it stands (a page shipped at the
+/// document's end: after the last piece's last node; an explicit
+/// `\shipout`'s page: none, its node did its events).
+pub fn page_places(frags: &[&Frag], marks: &[(u32, u32)], pages: usize, end: (usize, usize)) -> Vec<Option<(usize, usize)>> {
+    let mut at = vec![None; pages];
+    let mut j = 0;
+    let mut set = |j: usize, place: (usize, usize)| {
+        if let Some(&(a, b)) = marks.get(j) {
+            for p in at.iter_mut().take((b as usize).min(pages)).skip(a as usize) {
+                *p = Some(place);
+            }
+        }
+    };
+    for (k, f) in frags.iter().enumerate() {
+        for e in &f.entries {
+            if let Entry::Mark(i) = e {
+                set(j, (k, *i as usize + 1));
+                j += 1;
+            }
+        }
+    }
+    while j < marks.len() {
+        set(j, end);
+        j += 1;
+    }
+    at
+}
+
+/// The log's entries with the output streams' events done, in order
+/// (tex.web 1370, 1374): an `\openout` opens its file (the name with
+/// `.tex` if it has no extension; emptied) — web2c's `\openout j = `name'.`
+/// log line is off for `tex` (texmf.cnf `log_openout.tex = f`); a `\write` to an open stream is a line of its
+/// file, to any other a line of the log; `\closeout` closes. Returns the
+/// entries and the files written (name, contents), in the order they were
+/// first opened.
+pub fn replay(entries: Vec<String>) -> (Vec<String>, Vec<(String, String)>) {
+    use crate::show::{LN, NL, RAW};
+    let mut files: Vec<(String, String)> = Vec::new();
+    let mut open: [Option<usize>; 16] = [None; 16];
+    let mut out = Vec::with_capacity(entries.len());
+    for e in entries {
+        if !e.contains(IO) {
+            out.push(e);
+            continue;
+        }
+        let mut s = String::with_capacity(e.len());
+        let mut parts = e.split(IO);
+        let first = parts.next().unwrap_or("");
+        // (an entry with events is raw, its marker at the front)
+        let (lead, rest) = match first.find(RAW) {
+            Some(i) => (&first[..i], &first[i + RAW.len_utf8()..]),
+            None => ("", first),
+        };
+        s.push_str(lead);
+        s.push(RAW);
+        s.push_str(rest);
+        while let Some(head) = parts.next() {
+            let payload = parts.next().unwrap_or("");
+            let between = parts.next().unwrap_or("");
+            let mut h = head.chars();
+            let kind = h.next().unwrap_or('w');
+            let j: usize = h.as_str().parse().unwrap_or(17);
+            match kind {
+                'o' => {
+                    if j < 16 {
+                        let mut name = payload.to_string();
+                        if !name.rsplit('/').next().unwrap_or("").contains('.') {
+                            name.push_str(".tex");
+                        }
+                        let k = if let Some(k) = files.iter().position(|f| f.0 == name) {
+                            files[k].1.clear();
+                            k
+                        } else {
+                            files.push((name.clone(), String::new()));
+                            files.len() - 1
+                        };
+                        open[j] = Some(k);
+                    }
+                }
+                'c' => {
+                    if j < 16 {
+                        open[j] = None;
+                    }
+                }
+                _ => {
+                    if let Some(k) = open.get(j).copied().flatten() {
+                        files[k].1.push_str(payload);
+                        files[k].1.push('\n');
+                    } else {
+                        s.push(NL);
+                        s.extend(payload.chars().map(|c| if c == '\n' { LN } else { c }));
+                        s.push(LN);
+                    }
+                }
+            }
+            s.push_str(between);
+        }
+        out.push(s);
+    }
+    (out, files)
 }

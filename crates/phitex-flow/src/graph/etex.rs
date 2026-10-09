@@ -24,7 +24,7 @@ use std::sync::Arc;
 use super::material::{BoxContext, BoxKind};
 use super::math::MathKind;
 use super::scan::{IVal, Lv, MAX_DIMEN, mult_and_add, nx_plus_y};
-use super::{EOL_UNREAD, Exec, GroupKind, Mode, PendingText, TState};
+use super::{EOL_UNREAD, Exec, GroupKind, Mode, PendingText, TState, TextKind};
 use crate::item::Item;
 use crate::print;
 use crate::pack::Spec;
@@ -141,7 +141,6 @@ fn mul(n: i32, x: i32, max: i32, err: &mut bool) -> i32 {
 /// The tokens `\readline` makes of a line (etex.web §1445): each character
 /// of category 12, a space of category 10; the line's end-of-line
 /// character, if any, ends it.
-#[cfg_attr(not(test), allow(dead_code, reason = "\\readline's streams are not yet (CORE.md)"))]
 pub(super) fn readline_toks(line: &str, eol: Option<char>) -> Vec<Tok> {
     let s: String = line.trim_end_matches(' ').chars().chain(eol).collect();
     print::str_toks(&s)
@@ -201,6 +200,8 @@ impl Exec<'_> {
             tstate: TState::N,
             eol: EOL_UNREAD,
             eof: false,
+            kind: TextKind::Scan,
+            endinput: false,
         });
     }
 
@@ -312,6 +313,8 @@ impl Exec<'_> {
             GroupKind::Simple => 1,
             GroupKind::SemiSimple => 14,
             GroupKind::Output => 8,
+            GroupKind::Align => 6,
+            GroupKind::NoAlign => 7,
             GroupKind::Box | GroupKind::Math => match g.boxg.as_deref().map(|b| (&b.kind, b.adjusted)) {
                 Some((BoxKind::H, true)) => 3,
                 Some((BoxKind::V, _)) => 4,
@@ -348,13 +351,17 @@ impl Exec<'_> {
                     }
                 }
                 Item::Rule { .. } => 3,
+                Item::Ins(_) => 4,
                 Item::Mark(_) | Item::Marks(..) => 5,
+                Item::Adjust(_) => 6,
                 Item::Lig(_) => 7,
                 Item::Disc(_) => 8,
+                Item::Whatsit(_) | Item::Lang { .. } => 9,
                 Item::Math { .. } => 10,
-                Item::Glue { .. } => 11,
+                Item::Glue { .. } | Item::Leaders(_) => 11,
                 Item::Kern { .. } => 12,
                 Item::Penalty(_) => 13,
+                Item::Unset(_) => 14,
                 _ => -1,
             },
         }
@@ -362,7 +369,7 @@ impl Exec<'_> {
 
     /// The next token that is not a space, expanded (etex.web §1530:
     /// "get the next non-blank non-call token").
-    fn nonblank_x(&mut self) -> Option<(Tok, Meaning)> {
+    pub(super) fn nonblank_x(&mut self) -> Option<(Tok, Meaning)> {
         loop {
             let x = self.next_x_m(false)?;
             if !matches!(x.1, Meaning::Char(10, _)) {
@@ -726,6 +733,9 @@ impl Exec<'_> {
                 12 => "vcenter",
                 9 => "math",
                 13 => "math choice",
+                6 => "align",
+                7 => "no align",
+                8 => "output",
                 15 => "math shift",
                 _ => "math left",
             };
@@ -761,6 +771,11 @@ impl Exec<'_> {
                                     let _ = write!(out, "{n}=");
                                 }
                                 BoxContext::Ship => self.print_esc(&mut out, "shipout"),
+                                // (etex.web §1411: `\leaders`, `\cleaders`, `\xleaders`)
+                                BoxContext::Leaders(k) => self.print_esc(
+                                    &mut out,
+                                    ["leaders", "cleaders", "xleaders"][usize::from(k.saturating_sub(100)).min(2)],
+                                ),
                             }
                         }
                         let box_name = match ty {
@@ -797,6 +812,20 @@ impl Exec<'_> {
                     for _ in 0..done.min(3) {
                         out.push_str("{}");
                     }
+                    out.push('{');
+                }
+                // (etex.web §1411; an alignment's entries are shown as its
+                // `\halign` for now)
+                6 => {
+                    self.print_esc(&mut out, "halign");
+                    out.push('{');
+                }
+                7 => {
+                    self.print_esc(&mut out, "noalign");
+                    out.push('{');
+                }
+                8 => {
+                    self.print_esc(&mut out, "output");
                     out.push('{');
                 }
                 15 => match bg.map(|b| &b.kind) {
@@ -854,20 +883,6 @@ impl Exec<'_> {
         } else {
             self.err(format!("Bad interaction mode ({v})"));
         }
-    }
-
-    /// `\readline n to \cs` (etex.web §1444): its parsing. No stream is ever
-    /// open yet, so the line would come from the terminal, which TeX
-    /// refuses in batch mode (CORE.md: `\read`'s streams are not yet).
-    pub(super) fn read_line(&mut self) {
-        let _stream = self.scan_int();
-        if !self.keyword("to") {
-            self.err("Missing `to' inserted".into());
-        }
-        if self.r_token().is_none() {
-            return;
-        }
-        self.err("*** (cannot \\read from terminal in nonstop modes)".into());
     }
 }
 

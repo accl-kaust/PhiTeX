@@ -1,0 +1,319 @@
+(./inserts.tex
+Loose \hbox (badness 95) in paragraph at lines 6--8
+\tenrm its first line and more text that goes on to
+
+\hbox(6.94444+1.94444)x200.0, glue set 0.98517
+.\tenrm i
+.\tenrm t
+.\tenrm s
+.\glue 3.33333 plus 1.66666 minus 1.11111
+.\tenrm ^^L (ligature fi)
+.\tenrm r
+.\tenrm s
+.\tenrm t
+.\glue 3.33333 plus 1.66666 minus 1.11111
+.\tenrm l
+.\tenrm i
+.\tenrm n
+.\tenrm e
+.\glue 3.33333 plus 1.66666 minus 1.11111
+.\tenrm a
+.\tenrm n
+.\tenrm d
+.\glue 3.33333 plus 1.66666 minus 1.11111
+.\tenrm m
+.\tenrm o
+.\tenrm r
+.\tenrm e
+.\glue 3.33333 plus 1.66666 minus 1.11111
+.\tenrm t
+.\tenrm e
+.\tenrm x
+.\tenrm t
+.\glue 3.33333 plus 1.66666 minus 1.11111
+.\tenrm t
+.\tenrm h
+.\tenrm a
+.\tenrm t
+.\glue 3.33333 plus 1.66666 minus 1.11111
+.\tenrm g
+.\tenrm o
+.\kern0.27779
+.\tenrm e
+.\tenrm s
+.\glue 3.33333 plus 1.66666 minus 1.11111
+.\tenrm o
+.\tenrm n
+.\glue 3.33333 plus 1.66666 minus 1.11111
+.\tenrm t
+.\tenrm o
+.\glue(\rightskip) 0.0
+
+
+Underfull \hbox (badness 179) in paragraph at lines 6--8
+\tenrm a second line of the paragraph so that the
+
+\hbox(6.94444+1.94444)x200.0, glue set 1.21664
+.\tenrm a
+.\glue 3.33333 plus 1.66666 minus 1.11111
+.\tenrm s
+.\tenrm e
+.\tenrm c
+.\tenrm o
+.\tenrm n
+.\tenrm d
+.\glue 3.33333 plus 1.66666 minus 1.11111
+.\tenrm l
+.\tenrm i
+.\tenrm n
+.\tenrm e
+.\glue 3.33333 plus 1.66666 minus 1.11111
+.\tenrm o
+.\tenrm f
+.\glue 3.33333 plus 1.66666 minus 1.11111
+.\tenrm t
+.\tenrm h
+.\tenrm e
+.\glue 3.33333 plus 1.66666 minus 1.11111
+.\tenrm p
+.\tenrm a
+.\tenrm r
+.\tenrm a
+.\tenrm g
+.\tenrm r
+.\tenrm a
+.\tenrm p
+.\tenrm h
+.\glue 3.33333 plus 1.66666 minus 1.11111
+.\tenrm s
+.\tenrm o
+.\glue 3.33333 plus 1.66666 minus 1.11111
+.\tenrm t
+.\tenrm h
+.\tenrm a
+.\tenrm t
+.\glue 3.33333 plus 1.66666 minus 1.11111
+.\tenrm t
+.\tenrm h
+.\tenrm e
+.\glue(\rightskip) 0.0
+
+
+Loose \hbox (badness 13) in paragraph at lines 6--8
+\tenrm adjustments land after different lines of it in
+
+\hbox(6.94444+1.94444)x200.0, glue set 0.50473
+.\tenrm a
+.\tenrm d
+.\tenrm j
+.\tenrm u
+.\tenrm s
+.\tenrm t
+.\tenrm m
+.\tenrm e
+.\tenrm n
+.\kern-0.27779
+.\tenrm t
+.\tenrm s
+.\glue 3.33333 plus 1.66666 minus 1.11111
+.\tenrm l
+.\tenrm a
+.\tenrm n
+.\tenrm d
+.\glue 3.33333 plus 1.66666 minus 1.11111
+.\tenrm a
+.\tenrm f
+.\tenrm t
+.\tenrm e
+.\tenrm r
+.\glue 3.33333 plus 1.66666 minus 1.11111
+.\tenrm d
+.\tenrm i
+.\tenrm ^^K (ligature ff)
+.\tenrm e
+.\tenrm r
+.\tenrm e
+.\tenrm n
+.\kern-0.27779
+.\tenrm t
+.\glue 3.33333 plus 1.66666 minus 1.11111
+.\tenrm l
+.\tenrm i
+.\tenrm n
+.\tenrm e
+.\tenrm s
+.\glue 3.33333 plus 1.66666 minus 1.11111
+.\tenrm o
+.\tenrm f
+.\glue 3.33333 plus 1.66666 minus 1.11111
+.\tenrm i
+.\tenrm t
+.\glue 3.33333 plus 1.66666 minus 1.11111
+.\tenrm i
+.\tenrm n
+.\glue(\rightskip) 0.0
+
+
+Overfull \hbox (15.08243pt too wide) in paragraph at lines 10--11
+[]\tenrm A box with an insertion
+
+\hbox(6.94444+0.0)x100.0, glue set - 1.0
+.\hbox(0.0+0.0)x15.0
+.\tenrm A
+.\glue 3.33333 plus 1.66498 minus 1.11221
+.\tenrm b
+.\kern0.27779
+.\tenrm o
+.\kern-0.27779
+.\tenrm x
+.\glue 3.33333 plus 1.66666 minus 1.11111
+.\tenrm w
+.\tenrm i
+.\tenrm t
+.\tenrm h
+.\glue 3.33333 plus 1.66666 minus 1.11111
+.\tenrm a
+.\tenrm n
+.\glue 3.33333 plus 1.66666 minus 1.11111
+.\tenrm i
+.\tenrm n
+.\tenrm s
+.\tenrm e
+.\tenrm r
+.\tenrm t
+.\tenrm i
+.\tenrm o
+.\tenrm n
+.\glue(\rightskip) 0.0
+
+
+Underfull \hbox (badness 120) in paragraph at lines 10--11
+\tenrm in its paragraph and 
+
+\hbox(6.94444+1.94444)x100.0, glue set 1.06665
+.\tenrm i
+.\tenrm n
+.\glue 3.33333 plus 1.66666 minus 1.11111
+.\tenrm i
+.\tenrm t
+.\tenrm s
+.\glue 3.33333 plus 1.66666 minus 1.11111
+.\tenrm p
+.\tenrm a
+.\tenrm r
+.\tenrm a
+.\tenrm g
+.\tenrm r
+.\tenrm a
+.\tenrm p
+.\tenrm h
+.\glue 3.33333 plus 1.66666 minus 1.11111
+.\tenrm a
+.\tenrm n
+.\tenrm d
+.\glue 3.33333 plus 1.66666 minus 1.11111
+.\glue(\rightskip) 0.0
+
+
+Underfull \hbox (badness 10000) detected at line 13
+[][]\tenrm x
+
+\hbox(4.30554+0.0)x150.0
+.\insert200, natural size 6.67859; split(3.0 plus 1.0,1.0); float cost 7
+..\hbox(6.67859+0.0)x8.33336
+...\tenrm i
+...\tenrm n
+.\vadjust
+..\kern 1.0
+.\tenrm x
+
+
+Underfull \vbox (badness 10000) detected at line 14
+
+\vbox(100.0+0.0)x100.0
+.\hbox(6.94444+0.0)x100.0, glue set - 1.0
+..\hbox(0.0+0.0)x15.0
+..\tenrm A
+..\glue 3.33333 plus 1.66498 minus 1.11221
+..\tenrm b
+..\kern0.27779
+..\tenrm o
+..\kern-0.27779
+..\tenrm x
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\tenrm w
+..\tenrm i
+..\tenrm t
+..\tenrm h
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\tenrm a
+..\tenrm n
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\tenrm i
+..\tenrm n
+..\tenrm s
+..\tenrm e
+..\tenrm r
+..\tenrm t
+..\tenrm i
+..\tenrm o
+..\tenrm n
+..\glue(\rightskip) 0.0
+.\insert100, natural size 8.94444; split(0.0,0.0); float cost 0
+..\hbox(6.94444+0.0)x34.52783
+...\tenrm i
+...\tenrm n
+...\tenrm s
+...\tenrm e
+...\tenrm r
+...\tenrm t
+...\tenrm e
+...\tenrm d
+..\glue 2.0
+.\glue(\baselineskip) 5.05556
+.\hbox(6.94444+1.94444)x100.0, glue set 1.06665
+..\tenrm i
+..\tenrm n
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\tenrm i
+..\tenrm t
+..\tenrm s
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\tenrm p
+..\tenrm a
+..\tenrm r
+..\tenrm a
+..\tenrm g
+..\tenrm r
+..\tenrm a
+..\tenrm p
+..\tenrm h
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\tenrm a
+..\tenrm n
+..\tenrm d
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\glue(\rightskip) 0.0
+.\rule(0.4+0.0)x*
+.\glue(\baselineskip) 3.11111
+.\hbox(6.94444+1.94444)x100.0, glue set 34.38873fil
+..\tenrm a
+..\tenrm n
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\tenrm a
+..\tenrm d
+..\tenrm j
+..\tenrm u
+..\tenrm s
+..\tenrm t
+..\tenrm m
+..\tenrm e
+..\tenrm n
+..\kern-0.27779
+..\tenrm t
+..\tenrm .
+..\penalty 10000
+..\glue(\parfillskip) 0.0 plus 1.0fil
+..\glue(\rightskip) 0.0
+
+[0] )

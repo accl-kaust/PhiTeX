@@ -22,14 +22,14 @@ use phitex_flow::{Build, Font, Options, Order, Reads};
 /// Every document, and what the graph needs before it is a test (`""`:
 /// it is one).
 const WAITING: [(&str, &str); 10] = [
-    ("story", "\\accent (agent E, the next merge)"),
-    ("story-default", "\\accent (agent E, the next merge)"),
+    ("story", ""),
+    ("story-default", ""),
     ("pages", ""),
     ("pages-default", ""),
     ("display", ""),
     ("display-default", ""),
-    ("table", "\\halign and \\+ (agent C, the next merge)"),
-    ("table-default", "\\halign and plain's \\+ (agent C)"),
+    ("table", ""),
+    ("table-default", ""),
     ("hyphens", ""),
     ("hyphens-default", ""),
 ];
@@ -119,10 +119,15 @@ fn recorded(name: &str) -> (Vec<u8>, String) {
 
 /// The graph sets document `name` as TeX does, at every schedule.
 fn check(name: &str) {
+    check_runs(name, &RUNS);
+}
+
+/// [`check`] at the schedules `runs`.
+fn check_runs(name: &str, runs: &[Options]) {
     assert!(WAITING.iter().any(|(n, w)| *n == name && w.is_empty()), "{name} is not a test yet");
     let src = doc(name);
     let (want_dvi, want_log) = recorded(name);
-    for o in RUNS {
+    for &o in runs {
         let out = Build::new(font()).update(&src, o);
         assert!(out.errors.is_empty(), "{name} ({o:?}): errors on the graph: {:?}", out.errors);
         let log = phitex_flow::print::log(&format!("(./{name}.tex"), &out.log, " )");
@@ -185,4 +190,27 @@ fn display() {
 #[test]
 fn hyphens() {
     check("hyphens");
+}
+
+#[test]
+fn story() {
+    check("story");
+}
+
+#[test]
+fn story_default() {
+    check("story-default");
+}
+
+#[test]
+fn table() {
+    check("table");
+}
+
+/// Every schedule: a piece running on the prediction that plain's `\m@ne`
+/// is still 0 loops in `\settabs`'s `\loop` until the prediction is
+/// refuted and the run abandoned.
+#[test]
+fn table_default() {
+    check("table-default");
 }

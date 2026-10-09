@@ -11,7 +11,7 @@
 use std::fmt::Write as _;
 use std::sync::Arc;
 
-use crate::item::{BoxNode, Item, RUNNING};
+use crate::item::{BoxNode, C_LEADERS, Item, RUNNING, Whatsit, X_LEADERS};
 use crate::mlist::{Delim, Field, Kind as NK, Limits, MItem};
 use crate::pack::Report;
 use crate::print;
@@ -23,6 +23,14 @@ pub const NL: char = '\u{2}';
 pub const LINE: char = '\u{4}';
 /// A space if the log's line is not empty (tex.web 638's `[`).
 pub const SP: char = '\u{6}';
+/// An error's context line (tex.web 311–318): `CTX read CTX unread CTX`
+/// after its label (`l.N `, `<template> `…), laid out as TeX's two lines
+/// once the label's length is known (`print::log`).
+pub const CTX: char = '\u{7}';
+/// tex.web 82's `jump_out` after the hundredth error: the log ends here
+/// (no file is closed: no ` )`).
+pub const HALT: char = '\u{8}';
+pub const THAT_MAKES_100: &str = "(That makes 100 errors; please try again.)";
 
 /// What a display reads: the escape character, the font identifiers, and
 /// `\showboxdepth`/`\showboxbreadth`.
@@ -77,12 +85,24 @@ pub fn short_display(out: &mut String, list: &[Item], font: &mut Arc<str>, cx: &
                 }
                 cx.chr(out, *c);
             }
-            Item::Box(_) | Item::Mark(_) | Item::Marks(..) | Item::Ins(_) | Item::Lang { .. } => out.push_str("[]"),
+            Item::Box(_)
+            | Item::Mark(_)
+            | Item::Marks(..)
+            | Item::Lang { .. }
+            | Item::Ins(_)
+            | Item::Whatsit(_)
+            | Item::Adjust(_)
+            | Item::Unset(_) => out.push_str("[]"),
             // (§175, etex.web: a TeXXeT node as `[]`, a formula's edge as `$`)
             Item::Math { lr, .. } => out.push_str(if *lr >= 4 { "[]" } else { "$" }),
             Item::Rule { .. } => out.push('|'),
             Item::Glue { zero, .. } => {
                 if !zero {
+                    out.push(' ');
+                }
+            }
+            Item::Leaders(l) => {
+                if !l.zero {
                     out.push(' ');
                 }
             }
@@ -234,6 +254,28 @@ impl Shower<'_> {
                 self.cx.chr(self.out, *c);
             }
             Item::Box(b) => self.boxed(b),
+            Item::Unset(u) => {
+                // (§184, §185)
+                let o = &mut *self.out;
+                self.cx.esc(o, "unsetbox(");
+                print::scaled(o, u.h);
+                o.push('+');
+                print::scaled(o, u.d);
+                o.push_str(")x");
+                print::scaled(o, u.w);
+                if u.span != 0 {
+                    let _ = write!(o, " ({} columns)", u32::from(u.span) + 1);
+                }
+                if u.stretch != 0 {
+                    o.push_str(", stretch ");
+                    glue_part(o, u.stretch, u.stretch_order, "");
+                }
+                if u.shrink != 0 {
+                    o.push_str(", shrink ");
+                    glue_part(o, u.shrink, u.shrink_order, "");
+                }
+                self.sub('.', &u.list);
+            }
             Item::Rule { w, h, d } => {
                 self.cx.esc(self.out, "rule(");
                 rule_dim(self.out, *h);
@@ -321,18 +363,6 @@ impl Shower<'_> {
                     }
                 }
             }
-            Item::Ins(x) => {
-                // (§188)
-                self.cx.esc(self.out, "insert");
-                let _ = write!(self.out, "{}, natural size ", x.n);
-                print::scaled(self.out, x.height);
-                self.out.push_str("; split(");
-                spec(self.out, &x.split_top, "");
-                self.out.push(',');
-                print::scaled(self.out, x.depth);
-                let _ = write!(self.out, "); float cost {}", x.float_cost);
-                self.sub('.', &x.list);
-            }
             Item::Lang { lang, lhm, rhm } => {
                 // (§1356)
                 self.cx.esc(self.out, "setlanguage");
@@ -345,6 +375,36 @@ impl Shower<'_> {
                 show_toks_plain(self.out, t, self.cx);
                 self.out.push('}');
             }
+            Item::Leaders(l) => {
+                // (§190)
+                self.cx.esc(self.out, "");
+                if l.sub == C_LEADERS {
+                    self.out.push('c');
+                } else if l.sub == X_LEADERS {
+                    self.out.push('x');
+                }
+                self.out.push_str("leaders ");
+                spec(self.out, &l.g, "");
+                self.sub('.', std::slice::from_ref(&l.b));
+            }
+            Item::Ins(i) => {
+                // (§188)
+                self.cx.esc(self.out, "insert");
+                let _ = write!(self.out, "{}, natural size ", i.n);
+                print::scaled(self.out, i.height);
+                self.out.push_str("; split(");
+                spec(self.out, &i.split_top, "");
+                self.out.push(',');
+                print::scaled(self.out, i.depth);
+                let _ = write!(self.out, "); float cost {}", i.float_cost);
+                self.sub('.', &i.list);
+            }
+            Item::Adjust(l) => {
+                // (§197)
+                self.cx.esc(self.out, "vadjust");
+                self.sub('.', l);
+            }
+            Item::Whatsit(w) => self.whatsit(w),
             Item::Marks(n, t) => {
                 // (etex.web §196: the class after `\marks`)
                 self.cx.esc(self.out, "marks");
@@ -355,6 +415,54 @@ impl Shower<'_> {
             }
             _ => {}
         }
+    }
+
+    /// §1356: a whatsit; `print_mark`'s texts cut at `max_print_line-10`.
+    fn whatsit(&mut self, w: &Whatsit) {
+        let stream = |s: &mut Self, n: u8| match n {
+            0..=15 => {
+                let _ = write!(s.out, "{n}");
+            }
+            16 => s.out.push('*'),
+            _ => s.out.push('-'),
+        };
+        match w {
+            Whatsit::Open { stream: n, name } => {
+                self.cx.esc(self.out, "openout");
+                stream(self, *n);
+                self.out.push('=');
+                self.out.push_str(name);
+            }
+            Whatsit::Write { stream: n, toks } => {
+                self.cx.esc(self.out, "write");
+                stream(self, *n);
+                let mut t = String::new();
+                show_toks_plain(&mut t, toks, self.cx);
+                self.mark_text(&t);
+            }
+            Whatsit::Close { stream: n } => {
+                self.cx.esc(self.out, "closeout");
+                stream(self, *n);
+            }
+            Whatsit::Special(s) => {
+                self.cx.esc(self.out, "special");
+                self.mark_text(s);
+            }
+        }
+    }
+
+    /// tex.web 176's `print_mark`: braces round a text, cut with `\ETC.`
+    /// past 69 characters.
+    fn mark_text(&mut self, t: &str) {
+        const LIMIT: usize = crate::print::MAX_PRINT_LINE - 10;
+        self.out.push('{');
+        if t.chars().count() > LIMIT {
+            self.out.extend(t.chars().take(LIMIT));
+            self.cx.esc(self.out, "ETC.");
+        } else {
+            self.out.push_str(t);
+        }
+        self.out.push('}');
     }
 }
 
@@ -569,6 +677,9 @@ pub enum Place {
     Here,
     /// A box made in an output routine (tex.web 663).
     Output,
+    /// An alignment's preamble (`in alignment at lines a--b`, tex.web 663,
+    /// 675: from the alignment's first line to the current one).
+    Alignment,
 }
 
 /// The diagnostic TeX prints for a box (tex.web 660–667 for an hbox,
@@ -605,6 +716,9 @@ pub fn report(r: Report, b: &BoxNode, place: Place, cx: &Ctx) -> String {
             let _ = write!(o, ") detected at line {LINE}L{LINE}");
         }
         Place::Output => o.push_str(") has occurred while \\output is active"),
+        Place::Alignment => {
+            let _ = write!(o, ") in alignment at lines {LINE}A{LINE}");
+        }
     }
     if b.vertical {
         // (§675: no line ends after "while \output is active")

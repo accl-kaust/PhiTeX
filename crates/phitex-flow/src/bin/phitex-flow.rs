@@ -175,16 +175,14 @@ fn main() -> ExitCode {
         }
     };
     let out = out.unwrap_or_else(|| format!("{}.dvi", file.trim_end_matches(".tex")));
-    // (the `.tex` files beside it are what `\input` reads)
-    let files = input_files(&file);
-    let new_build = || {
-        let mut b = Build::new(font.clone());
-        for (name, text) in &files {
-            b.set_file(name, text);
-        }
-        b
-    };
-    let mut b = new_build();
+    // (`\input` and `\openin` find files beside the document; the job is
+    // its name)
+    let path = std::path::Path::new(&file);
+    let dir = path.parent().filter(|d| !d.as_os_str().is_empty()).map_or_else(|| ".".into(), std::path::Path::to_path_buf);
+    let job = path.file_stem().map_or_else(|| "texput".to_string(), |s| s.to_string_lossy().into_owned());
+    let mut b = Build::new(font.clone());
+    b.set_input_dirs(vec![dir.clone()]);
+    b.set_jobname(&job);
     let cold = b.update(&src, opts);
     report("cold", &cold);
     if dump {
@@ -210,7 +208,10 @@ fn main() -> ExitCode {
             print!("{}", e.dump);
         }
         if check {
-            let fresh = new_build().update(&edited, opts);
+            let mut fb = Build::new(font);
+            fb.set_input_dirs(vec![dir.clone()]);
+            fb.set_jobname(&job);
+            let fresh = fb.update(&edited, opts);
             report("cold of the edited text", &fresh);
             println!(
                 "edit == cold: {}",
@@ -223,22 +224,14 @@ fn main() -> ExitCode {
         eprintln!("{out}: {e}");
         return ExitCode::FAILURE;
     }
-    println!("wrote {out} ({} bytes)", last.dvi.len());
-    ExitCode::SUCCESS
-}
-
-/// The `.tex` files in the directory of `file` (by name), for `\input`.
-fn input_files(file: &str) -> Vec<(String, String)> {
-    let dir = std::path::Path::new(file).parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(std::path::Path::new("."));
-    let Ok(rd) = std::fs::read_dir(dir) else { return Vec::new() };
-    let mut out = Vec::new();
-    for e in rd.flatten() {
-        let path = e.path();
-        if path.extension().is_some_and(|x| x == "tex")
-            && let (Some(name), Ok(text)) = (path.file_name().and_then(|n| n.to_str()), std::fs::read_to_string(&path))
-        {
-            out.push((name.to_string(), text));
+    // (what `\openout` and `\write` made, beside the document)
+    for (name, text) in &last.writes {
+        let p = dir.join(name);
+        if let Err(e) = std::fs::write(&p, text.chars().map(|c| u32::from(c).min(255) as u8).collect::<Vec<u8>>()) {
+            eprintln!("{}: {e}", p.display());
+            return ExitCode::FAILURE;
         }
     }
-    out
+    println!("wrote {out} ({} bytes)", last.dvi.len());
+    ExitCode::SUCCESS
 }

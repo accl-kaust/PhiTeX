@@ -1,0 +1,16 @@
+\catcode`\{=1 \catcode`\}=2 \catcode`\#=6 \catcode`\&=4
+\font\tenrm=cmr10 \tenrm
+\hsize=300pt \vsize=500pt \parindent=20pt \baselineskip=12pt \topskip=10pt
+\tolerance=1000 \linepenalty=10 \maxdepth=2pt \parfillskip=0pt plus 1fil
+\lineskip=1pt \lineskiplimit=0pt
+\noindent\valign{\vfil#\vfil\tabskip=2pt&\hbox{#}\cr
+\hbox{A}\hbox{AA}&B\cr
+\noalign{\hskip 5pt}
+\hbox{C}&D\cr
+\hrule height 2pt width 10pt&E\cr}
+\par
+\noindent\valign to 40pt{#\vfil\tabskip=0pt plus 1fil&#\cr
+\hbox{x}&\hbox{y}\cr
+\hbox{z}&\hsize=100pt \parindent=0pt Paragraph text\cr}
+\par
+\end

@@ -231,11 +231,10 @@ impl Exec<'_> {
                 Prim::PenShape(k) => IVal::Int(self.penalties_item(k)),
                 Prim::LastItem(k) => {
                     // (tex.web 424: the current list's last item, the one read
-                    // of material, CORE.md; `\inputlineno` and `\badness`
-                    // not yet)
+                    // of material, CORE.md; `\inputlineno` a read of the
+                    // lines before the piece; `\badness` not yet)
                     if k == 3 {
-                        self.err(format!("\\{} is not supported yet", p.name()));
-                        IVal::Int(0)
+                        IVal::Int(self.input_line_no())
                     } else if k == 4 {
                         // (`last_badness`: the last box packed anywhere, a read
                         // of the packager's history; 0 before any, CORE.md)
@@ -252,6 +251,7 @@ impl Exec<'_> {
                             (_, Some(crate::item::Item::Glue { g, sub, .. })) => {
                                 if sub == 99 { IVal::Mu(*g) } else { IVal::Glue(*g) }
                             }
+                            (_, Some(crate::item::Item::Leaders(l))) => IVal::Glue(*l.g),
                             _ => IVal::Glue(Glue::default()),
                         }
                     }
