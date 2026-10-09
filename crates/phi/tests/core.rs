@@ -796,3 +796,55 @@ fn chapters_called_from_a_book_build_in_parallel_as_in_turn() {
             .map(|v| v.int());
     assert_eq!(count, Some(90));
 }
+
+/// A regression (the random-edit test, seed 5, edit 51, shrunk): a macro
+/// whose body boxes a `\step` in a group, and an edit to the body. The
+/// cross-run slot `k` must end as a fresh build's.
+#[test]
+fn an_edit_to_a_macro_whose_box_steps_in_a_group() {
+    let pre = r"\def \a { \label { k } { } \ref { k } \hbox {";
+    let suf = r"\the { \step } } } { \a { \the \def \a } }";
+    let mut d = Doc::new(ids(lex(&format!("{pre} {{ }} {suf}"))));
+    d.g.cfg.check = true;
+    d.g.run();
+    let at = lex(pre).len();
+    d.splice(at, 2, vec![]);
+    d.g.run();
+    let mut f = Doc::new(d.toks.clone());
+    f.g.run();
+    if std::env::var("PHI_DUMP").is_ok() {
+        eprintln!("INC\n{}\nFRESH\n{}", d.g.to_text_ids(), f.g.to_text_ids());
+    }
+    assert_eq!(d.observe(), f.observe());
+    assert_eq!(d.g.to_text(), f.g.to_text());
+}
+
+/// A regression (random-edit seed 32, shrunk): a group opened before a
+/// conditional whose arm defines a name and closes it; the edit adds an
+/// outer group. Check mode on.
+#[test]
+fn a_group_added_around_a_conditional_that_closes_one() {
+    let mut d = Doc::new(ids(lex(r"{ \ifzero w \twice } \fi } \scoped")));
+    d.g.cfg.check = true;
+    d.g.run();
+    d.splice(0, 0, lex("{"));
+    if std::env::var("PHI_DUMP").is_ok() {
+        d.g.cfg.check = false;
+    }
+    d.g.run();
+    let mut f = Doc::new(d.toks.clone());
+    f.g.run();
+    if std::env::var("PHI_DUMP").is_ok() {
+        eprintln!("INC\n{}\nFRESH\n{}", d.g.to_text_ids(), f.g.to_text_ids());
+        for n in ["count", "y", "sc"] {
+            if let (Some(i), Some(j)) = (d.g.name_id(n.as_bytes()), f.g.name_id(n.as_bytes())) {
+                eprintln!(
+                    "{n} inc:\n{}fresh:\n{}",
+                    d.g.debug_defs(i),
+                    f.g.debug_defs(j)
+                );
+            }
+        }
+    }
+    assert_eq!(d.observe(), f.observe());
+}

@@ -257,7 +257,13 @@ struct NameTab {
 #[derive(Clone, Debug)]
 struct Group {
     parent: u64,
+    /// Where it ends: the first of `closers` in position order.
     close: Option<Pos>,
+    /// Every place a step closes it. A client may close a group twice
+    /// (an unbalanced `}` in a box closes the group around the box, and
+    /// the outer `}` closes it again); its scope ends at the first, in
+    /// position order, whatever order the steps ran in.
+    closers: Vec<Pos>,
     names: Vec<u32>,
 }
 
@@ -492,7 +498,10 @@ impl<L: Lang> Nodes<L> {
     #[inline]
     fn read_ver(&self, o: &Opd) -> Ver {
         if o.src == NONE {
-            self.absent.ver()
+            // (not the default value's: a step tells an undefined name
+            // from one defined to the default, so a change between them
+            // must wake it)
+            Ver::ABSENT
         } else {
             o.sel.ver(&self.val[o.src as usize])
         }
@@ -3726,6 +3735,7 @@ impl<L: Lang, const P: bool> Graph<L, P> {
                         .or_insert_with(|| Group {
                             parent: p,
                             close: None,
+                            closers: Vec::new(),
                             names: Vec::new(),
                         })
                         .parent = p;
@@ -3739,44 +3749,69 @@ impl<L: Lang, const P: bool> Graph<L, P> {
                         parent: s,
                         ord: *sub,
                     };
-                    let gr = self.groups.entry(g).or_insert_with(|| Group {
+                    self.groups.entry(g).or_insert_with(|| Group {
                         parent: NOGROUP,
                         close: None,
+                        closers: Vec::new(),
                         names: Vec::new(),
                     });
-                    let old = gr.close;
-                    if old != Some(pos) {
-                        gr.close = Some(pos);
-                        self.groups_gen += 1;
-                        let from = match old {
-                            Some(o) if self.n.cmp_pos(o, pos) == Ordering::Less => o,
-                            _ => pos,
-                        };
-                        self.reresolve_group(g, from);
-                    }
-                    closed.push(g);
+                    closed.push((g, pos));
                 }
             }
         }
         let _ = si;
+        // (each group this step closes now or closed before: its places
+        // in this step replaced by the new ones)
         let old_closed = self.closes.remove(&s).unwrap_or_default();
-        for g in old_closed {
-            if closed.contains(&g) {
-                continue;
-            }
-            if let Some(gr) = self.groups.get_mut(&g)
-                && let Some(c) = gr.close
-                && c.parent == s
-            {
-                gr.close = None;
-                self.groups_gen += 1;
-                self.reresolve_group(g, c);
-            }
+        let mut gs: Vec<u64> = closed.iter().map(|c| c.0).chain(old_closed).collect();
+        gs.sort_unstable();
+        gs.dedup();
+        for g in &gs {
+            let now: Vec<Pos> = closed.iter().filter(|c| c.0 == *g).map(|c| c.1).collect();
+            self.set_closers(*g, s, &now);
         }
+        let closed: Vec<u64> = gs
+            .into_iter()
+            .filter(|g| closed.iter().any(|c| c.0 == *g))
+            .collect();
         if !closed.is_empty() {
             self.closes.insert(s, closed);
         }
         self.em.events = events;
+    }
+
+    /// Group `g`'s closes in step `s` set to `now`; where it ends moved,
+    /// its names' readers resolved again from the earlier of the two.
+    fn set_closers(&mut self, g: u64, s: u32, now: &[Pos]) {
+        let Some(gr) = self.groups.get_mut(&g) else {
+            return;
+        };
+        let before = gr.closers.len();
+        gr.closers.retain(|c| c.parent != s);
+        if now.is_empty() && gr.closers.len() == before {
+            return;
+        }
+        gr.closers.extend_from_slice(now);
+        let old = gr.close;
+        let n = &self.n;
+        let new = gr.closers.iter().copied().min_by(|a, b| n.cmp_pos(*a, *b));
+        if new == old {
+            return;
+        }
+        gr.close = new;
+        self.groups_gen += 1;
+        let from = match (old, new) {
+            (Some(a), Some(b)) => {
+                if self.n.cmp_pos(a, b) == Ordering::Less {
+                    a
+                } else {
+                    b
+                }
+            }
+            (Some(a), None) | (None, Some(a)) => a,
+            (None, None) => return,
+        };
+        self.reresolve_group(g, from);
     }
 
     fn reresolve_group(&mut self, g: u64, from: Pos) {
@@ -4050,14 +4085,7 @@ impl<L: Lang, const P: bool> Graph<L, P> {
                 self.reresolve(m, from);
             }
             for g in self.closes.remove(&n).unwrap_or_default() {
-                if let Some(gr) = self.groups.get_mut(&g)
-                    && let Some(c) = gr.close
-                    && c.parent == n
-                {
-                    gr.close = None;
-                    self.groups_gen += 1;
-                    self.reresolve_group(g, c);
-                }
+                self.set_closers(g, n, &[]);
             }
         }
         self.class_changed(n);
@@ -4458,13 +4486,22 @@ impl<L: Lang, const P: bool> Graph<L, P> {
     fn check_index(&self) {
         // the group table: a close is a live step's, which lists it
         for (g, gr) in &self.groups {
-            if let Some(c) = gr.close {
+            for c in &gr.closers {
                 assert!(
                     !self.n.is_dead(c.parent)
                         && self.closes.get(&c.parent).is_some_and(|l| l.contains(g)),
                     "check: group {g:x} closed at {c:?} by a step that does not close it"
                 );
             }
+            let first = gr
+                .closers
+                .iter()
+                .copied()
+                .min_by(|a, b| self.n.cmp_pos(*a, *b));
+            assert_eq!(
+                gr.close, first,
+                "check: group {g:x} ends elsewhere than its first close"
+            );
         }
         // the name index: each name's definitions in position order, and
         // every live step's definitions in it
@@ -5117,7 +5154,7 @@ impl<L: Lang, const P: bool> Graph<L, P> {
                     // (from before the segment: what it read there, a root
                     // of the segment's graph, whose value stays in `pval`)
                     let was = if o.src == NONE {
-                        p.n.absent.ver()
+                        Ver::ABSENT
                     } else {
                         o.sel.ver(&pval[o.src as usize])
                     };
@@ -5229,6 +5266,14 @@ impl<L: Lang, const P: bool> Graph<L, P> {
                         parent: rel(c.parent),
                         ord: c.ord,
                     }),
+                    closers: gr
+                        .closers
+                        .iter()
+                        .map(|c| Pos {
+                            parent: rel(c.parent),
+                            ord: c.ord,
+                        })
+                        .collect(),
                     names: gr.names.clone(),
                 },
             ));
@@ -5347,6 +5392,14 @@ impl<L: Lang, const P: bool> Graph<L, P> {
                     parent: dec(c.parent),
                     ord: c.ord,
                 }),
+                closers: gr
+                    .closers
+                    .iter()
+                    .map(|c| Pos {
+                        parent: dec(c.parent),
+                        ord: c.ord,
+                    })
+                    .collect(),
                 names: gr.names.iter().map(|&m| names[m as usize]).collect(),
             };
             self.groups.insert(decg(g), ng);
