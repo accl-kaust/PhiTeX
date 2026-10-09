@@ -202,6 +202,15 @@ fn edits_that_move_piece_boundaries_equal_cold_builds() {
         Box::new(|s| format!("{s}A last word.\n")),
         Box::new(|s| s.replacen("Pack my box", "\n\n\nPack my box", 3)),
         Box::new(|s| s.replacen("\\let\\lazy=\\idle\n\n", "", 1)),
+        // (lines added and removed: the page breaks after them move, and
+        // the scan resumes before them and may meet the old pages again)
+        Box::new(|s| {
+            s.replacen("number 4 jumps", "number 4 jumps and jumps and jumps and jumps and jumps and jumps and jumps and jumps and jumps and jumps", 1)
+        }),
+        Box::new(|s| s.replacen("number 9 jumps", "number 9 leaps", 1)),
+        Box::new(|s| {
+            s.replacen(" and jumps and jumps and jumps and jumps and jumps and jumps and jumps and jumps and jumps", "", 1)
+        }),
     ];
     for reads in [Reads::Suspend, Reads::Speculate] {
         let o = opts(4, reads, Order::Priority);

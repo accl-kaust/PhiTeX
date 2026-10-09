@@ -94,10 +94,30 @@ pub struct Page {
     pub glue: GlueSet,
 }
 
+/// Where an item of the material came from: the piece (by position) and
+/// the item's index in that piece's material.
+pub type Org = (u32, u32);
+
+/// Where a page came from: the origin of its first line (everything before
+/// it after the break before is discarded, so a scan started there with
+/// nothing reproduces the page), and the origin of the item that made the
+/// page go (what its break was decided on).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct PageOrg {
+    pub start: Org,
+    pub decided: Org,
+}
+
 /// The page builder's scan state.
 #[derive(Default)]
 pub struct Scan {
     page: Vec<VItem>,
+    /// The origins of `page`'s items.
+    page_org: Vec<Org>,
+    /// The origin of the current page's first line.
+    start: Org,
+    /// Set when a page starts: the origin of its first line.
+    pub started: Option<Org>,
     contents: bool,
     goal: i32,
     maxdepth: i32,
@@ -109,33 +129,38 @@ pub struct Scan {
     best: Option<usize>,
     prev_depth: Option<i32>,
     pending_join: Option<i32>,
-    /// Pages made and not yet taken.
+    /// Pages made and not yet taken, with where they came from.
     pub pages: Vec<Page>,
+    pub orgs: Vec<PageOrg>,
     /// Items fed (the scan's work).
     pub fed: u64,
 }
 
 impl Scan {
-    pub fn feed(&mut self, item: VItem) {
-        let mut q = VecDeque::from([item]);
-        while let Some(it) = q.pop_front() {
+    pub fn feed(&mut self, item: VItem, org: Org) {
+        let mut q = VecDeque::from([(item, org)]);
+        while let Some((it, o)) = q.pop_front() {
             self.fed += 1;
-            self.step(it, &mut q);
+            self.step(it, o, &mut q);
         }
     }
 
-    /// The end of the document: fill and force the last page out.
-    pub fn finish(&mut self) {
-        self.feed(VItem::Glue {
-            w: 0,
-            st: 65536,
-            st_ord: 2,
-            sh: 0,
-        });
-        self.feed(VItem::Penalty(-(1 << 30)));
+    /// The end of the document (piece position `end`): fill and force the
+    /// last page out.
+    pub fn finish(&mut self, end: u32) {
+        self.feed(
+            VItem::Glue {
+                w: 0,
+                st: 65536,
+                st_ord: 2,
+                sh: 0,
+            },
+            (end, 0),
+        );
+        self.feed(VItem::Penalty(-(1 << 30)), (end, 1));
     }
 
-    fn step(&mut self, it: VItem, q: &mut VecDeque<VItem>) {
+    fn step(&mut self, it: VItem, org: Org, q: &mut VecDeque<(VItem, Org)>) {
         match it {
             VItem::Join { baselineskip } => self.pending_join = Some(baselineskip),
             VItem::Line(l, pp) => {
@@ -143,13 +168,15 @@ impl Scan {
                     && let Some(pd) = self.prev_depth
                 {
                     let g = interline(pd, l.h, bs);
-                    q.push_front(VItem::Line(l, pp));
-                    q.push_front(g);
+                    q.push_front((VItem::Line(l, pp), org));
+                    q.push_front((g, org));
                     return;
                 }
                 self.prev_depth = Some(l.d);
                 if !self.contents {
                     self.contents = true;
+                    self.start = org;
+                    self.started = Some(org);
                     self.goal = pp.vsize;
                     self.maxdepth = pp.maxdepth;
                     self.least = AWFUL_BAD;
@@ -162,6 +189,7 @@ impl Scan {
                         st_ord: 0,
                         sh: 0,
                     });
+                    self.page_org.push(org);
                 }
                 self.total += i64::from(self.depth) + i64::from(l.h);
                 self.depth = l.d;
@@ -170,6 +198,7 @@ impl Scan {
                     self.depth = self.maxdepth;
                 }
                 self.page.push(VItem::Line(l, pp));
+                self.page_org.push(org);
             }
             VItem::Glue { w, st, st_ord, sh } => {
                 if !self.contents {
@@ -178,12 +207,13 @@ impl Scan {
                 if matches!(self.page.last(), Some(VItem::Line(..)))
                     && let Some(best) = self.test(0)
                 {
-                    q.push_front(VItem::Glue { w, st, st_ord, sh });
-                    self.fire(best, q);
+                    q.push_front((VItem::Glue { w, st, st_ord, sh }, org));
+                    self.fire(best, org, q);
                     return;
                 }
                 self.add_glue(w, st, st_ord, sh);
                 self.page.push(VItem::Glue { w, st, st_ord, sh });
+                self.page_org.push(org);
             }
             VItem::Penalty(p) => {
                 if !self.contents {
@@ -192,11 +222,12 @@ impl Scan {
                 if p < 10000
                     && let Some(best) = self.test(p)
                 {
-                    q.push_front(VItem::Penalty(p));
-                    self.fire(best, q);
+                    q.push_front((VItem::Penalty(p), org));
+                    self.fire(best, org, q);
                     return;
                 }
                 self.page.push(VItem::Penalty(p));
+                self.page_org.push(org);
             }
         }
     }
@@ -246,11 +277,13 @@ impl Scan {
     }
 
     /// Ships the page up to `best`; what follows goes back to be read again.
-    fn fire(&mut self, best: usize, q: &mut VecDeque<VItem>) {
+    fn fire(&mut self, best: usize, decided: Org, q: &mut VecDeque<(VItem, Org)>) {
         let rest: Vec<VItem> = self.page.drain(best..).collect();
-        for it in rest.into_iter().rev() {
+        let rest_org: Vec<Org> = self.page_org.drain(best..).collect();
+        for it in rest.into_iter().zip(rest_org).rev() {
             q.push_front(it);
         }
+        self.page_org.clear();
         let items = std::mem::take(&mut self.page);
         let (mut nat, mut st, mut sh, mut last_d) = (0i64, [0i64; 4], 0i64, 0i32);
         for it in &items {
@@ -284,6 +317,10 @@ impl Scan {
             h: self.goal,
             d,
             glue,
+        });
+        self.orgs.push(PageOrg {
+            start: self.start,
+            decided,
         });
         self.contents = false;
         self.total = 0;

@@ -41,7 +41,7 @@ use crate::dvi;
 use crate::graph::{Env, Para, PieceId, Run, Src, cut_from, run_piece};
 use crate::hash::{FxMap, FxSet, hash_of};
 use crate::linebreak::break_lines;
-use crate::page::{Lines, Page, Scan, VItem, material};
+use crate::page::{Lines, Page, PageOrg, Scan, VItem, material};
 use crate::tfm::Font;
 use crate::val::{Key, Val, initial};
 
@@ -159,6 +159,9 @@ pub struct Build {
     font: Arc<Font>,
     pieces: Vec<Kept>,
     pages: Vec<(Page, Arc<Vec<u8>>)>,
+    /// Where each page came from in the material (`page_orgs[i]` for
+    /// `pages[i]`).
+    page_orgs: Vec<PageOrg>,
     next_id: PieceId,
     readers: Readers,
     /// The source the pieces were cut from, and the byte offset of each
@@ -311,14 +314,29 @@ struct State {
     settled: usize,
     readers: Readers,
     break_queue: VecDeque<(usize, usize, Arc<Para>)>,
-    scan: Option<Scan>,
+    scan: Option<Box<Scan>>,
     scan_next: usize,
+    /// Items of piece `scan_next`'s material the scan does not feed (it
+    /// resumed at a page that started there).
+    scan_skip: u32,
     scan_done: bool,
+    /// The pieces are being compared with what the last build's scan was
+    /// fed at their place (its runs' paragraphs, `old_runs`), not fed: at
+    /// the first that differs the scan resumes from the last page that
+    /// started and was decided before it.
+    matching: bool,
+    old_runs: Vec<Option<Arc<Run>>>,
+    /// Once known (`last_diff_known`): the last piece whose material
+    /// differs from the last build's.
+    last_diff: Option<usize>,
+    last_diff_known: bool,
     pages: Vec<Page>,
+    orgs: Vec<PageOrg>,
     bodies: Vec<Option<Arc<Vec<u8>>>>,
     unshipped: usize,
     ship_queue: VecDeque<usize>,
-    old_pages: Vec<(Page, Arc<Vec<u8>>)>,
+    old_pages: Vec<Option<(Page, Arc<Vec<u8>>)>>,
+    old_orgs: Vec<PageOrg>,
     rng: u64,
     stats: Stats,
     done: bool,
@@ -354,7 +372,15 @@ enum Task {
     Run(usize, Vec<u32>),
     Break(usize, usize, Arc<Para>),
     Scan {
-        scan: Scan,
+        scan: Box<Scan>,
+        /// The position of `pieces[0]`, and how many items of its material
+        /// to leave out.
+        from: usize,
+        skip: u32,
+        /// Nothing differs from the last build after this piece, which had
+        /// pages start at these origins: a page starting at one of them
+        /// after it begins the last build's pages from there on.
+        converge: Option<(usize, Vec<(u32, u32)>)>,
         to: usize,
         pieces: Vec<Vec<ParaLines>>,
         finish: bool,
@@ -368,6 +394,7 @@ impl Build {
             font,
             pieces: Vec::new(),
             pages: Vec::new(),
+            page_orgs: Vec::new(),
             next_id: 0,
             readers: FxMap::default(),
             src: String::new(),
@@ -436,7 +463,8 @@ impl Build {
         // (old pieces found by their text: the same `Arc` (a piece outside
         // the edit), or equal text at its old place; then equal text
         // anywhere, in order; the map's hash only finds, `==` decides)
-        let olds: Vec<Kept> = std::mem::take(&mut self.pieces);
+        let mut olds: Vec<Kept> = std::mem::take(&mut self.pieces);
+        let old_runs: Vec<Option<Arc<Run>>> = olds.iter().map(|o| o.run.clone()).collect();
         let mut used = vec![false; olds.len()];
         let mut found: Vec<Option<usize>> = vec![None; texts.len()];
         let by_ptr: FxMap<usize, usize> = olds
@@ -488,14 +516,16 @@ impl Build {
         let mut p = Vec::with_capacity(texts.len());
         for (k, text) in texts.into_iter().enumerate() {
             if let Some(i) = found[k] {
-                let o = &olds[i];
+                // (each old piece is taken at most once: its lines and edge
+                // sources move)
+                let o = &mut olds[i];
                 p.push(PState {
                     id: o.id,
                     text,
                     status: Status::Done,
                     run: o.run.clone(),
-                    lines: o.lines.clone(),
-                    srcs: o.srcs.clone(),
+                    lines: std::mem::take(&mut o.lines),
+                    srcs: std::mem::take(&mut o.srcs),
                     prev: None,
                     dirty: BTreeSet::new(),
                     runs: 0,
@@ -518,7 +548,7 @@ impl Build {
                     used[i] = true;
                     (
                         olds[i].run.clone().expect("a run"),
-                        olds[i].lines.clone(),
+                        std::mem::take(&mut olds[i].lines),
                         olds[i].text.clone(),
                     )
                 });
@@ -537,7 +567,9 @@ impl Build {
                     status: Status::Unstarted,
                     run: None,
                     lines: Vec::new(),
-                    srcs: near.map(|i| olds[i].srcs.clone()).unwrap_or_default(),
+                    srcs: near
+                        .map(|i| std::mem::take(&mut olds[i].srcs))
+                        .unwrap_or_default(),
                     prev,
                     dirty: BTreeSet::new(),
                     runs: 0,
@@ -610,14 +642,24 @@ impl Build {
             settled: 0,
             readers,
             break_queue: VecDeque::new(),
-            scan: Some(Scan::default()),
+            scan: Some(Box::default()),
             scan_next: 0,
+            scan_skip: 0,
             scan_done: false,
+            matching: !self.page_orgs.is_empty(),
+            old_runs,
+            last_diff: None,
+            last_diff_known: false,
             pages: Vec::new(),
+            orgs: Vec::new(),
             bodies: Vec::new(),
             unshipped: 0,
             ship_queue: VecDeque::new(),
-            old_pages: std::mem::take(&mut self.pages),
+            old_pages: std::mem::take(&mut self.pages)
+                .into_iter()
+                .map(Some)
+                .collect(),
+            old_orgs: std::mem::take(&mut self.page_orgs),
             rng: match opts.order {
                 Order::Random(s) => s.wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1,
                 Order::Priority => 1,
@@ -719,6 +761,7 @@ impl Build {
                 .collect();
         self.readers = st.readers;
         self.pages = st.pages.into_iter().zip(bodies).collect();
+        self.page_orgs = st.orgs;
         Output {
             dvi: out,
             stats: st.stats,
@@ -960,6 +1003,90 @@ fn rand(g: &mut State, n: usize) -> usize {
     (x % n as u64) as usize
 }
 
+/// Compares the settled pieces with what the last build's scan was fed at
+/// their place, without feeding them; at the first that differs (or at the
+/// end, if the number of pieces differs) the scan resumes.
+fn advance_match(g: &mut State) {
+    let n = g.p.len();
+    while g.matching && g.scan_next < g.settled {
+        let k = g.scan_next;
+        if same_material(g, k) {
+            g.scan_next += 1;
+        } else {
+            resume(g, k);
+        }
+    }
+    if g.matching && g.scan_next == n && g.settled == n {
+        if g.old_runs.len() == n {
+            // (the same material throughout: the same pages)
+            for i in 0..g.old_pages.len() {
+                let (pg, b) = g.old_pages[i].take().expect("an old page");
+                g.pages.push(pg);
+                g.bodies.push(Some(b));
+                g.stats.pages_reused += 1;
+            }
+            g.orgs = std::mem::take(&mut g.old_orgs);
+            g.scan_done = true;
+            g.matching = false;
+        } else {
+            resume(g, n);
+        }
+    }
+}
+
+/// Whether piece `k`'s material is what the last build's scan was fed at
+/// its place.
+fn same_material(g: &State, k: usize) -> bool {
+    let run = g.p[k].run.as_ref().expect("a settled piece has a run");
+    g.old_runs.get(k).and_then(Option::as_ref).is_some_and(|o| {
+        Arc::ptr_eq(o, run)
+            || (o.paras.len() == run.paras.len()
+                && o.paras
+                    .iter()
+                    .zip(&run.paras)
+                    .all(|(a, b)| Arc::ptr_eq(a, b) || **a == **b))
+    })
+}
+
+/// Once every piece is settled, as many as the last build's: the last
+/// piece whose material differs from it (none: the scan cannot converge on
+/// the last build's pages).
+fn last_diff(g: &mut State) -> Option<usize> {
+    let n = g.p.len();
+    if g.settled < n || g.old_runs.len() != n || g.old_orgs.is_empty() {
+        return None;
+    }
+    if !g.last_diff_known {
+        g.last_diff = (0..n).rev().find(|&k| !same_material(g, k));
+        g.last_diff_known = true;
+    }
+    g.last_diff
+}
+
+/// The scan resumes before piece `c`, the first whose material differs
+/// from the last build's: at the last old page that started before `c` and
+/// whose page before it was decided before `c` (a paragraph's lines
+/// are a function of the paragraph, so equal paragraphs are equal
+/// material); the pages before it are kept.
+fn resume(g: &mut State, c: usize) {
+    g.matching = false;
+    let before = |o: (u32, u32)| (o.0 as usize) < c;
+    let p = (1..g.old_orgs.len())
+        .rev()
+        .find(|&p| before(g.old_orgs[p - 1].decided) && before(g.old_orgs[p].start))
+        .unwrap_or(0);
+    for i in 0..p {
+        let (pg, b) = g.old_pages[i].take().expect("an old page");
+        g.pages.push(pg);
+        g.bodies.push(Some(b));
+        g.orgs.push(g.old_orgs[i]);
+        g.stats.pages_reused += 1;
+    }
+    let start = if p == 0 { (0, 0) } else { g.old_orgs[p].start };
+    g.scan_next = start.0 as usize;
+    g.scan_skip = start.1;
+}
+
 /// The scheduler: a function of the state, choosing this thread's next
 /// piece of work.
 fn pick(g: &mut State, sh: &Shared) -> Option<Task> {
@@ -967,6 +1094,9 @@ fn pick(g: &mut State, sh: &Shared) -> Option<Task> {
     while g.settled < n && g.p[g.settled].status == Status::Done && g.p[g.settled].dirty.is_empty()
     {
         g.settled += 1;
+    }
+    if g.matching {
+        advance_match(g);
     }
     let mut scan_to = g.scan_next;
     while scan_to < g.settled && lines_ready(g, scan_to) {
@@ -1032,8 +1162,14 @@ fn pick(g: &mut State, sh: &Shared) -> Option<Task> {
                 })
                 .collect();
             let scan = g.scan.take().expect("the scan is free");
+            let (from, skip) = (g.scan_next, std::mem::take(&mut g.scan_skip));
+            let converge =
+                last_diff(g).map(|after| (after, g.old_orgs.iter().map(|o| o.start).collect()));
             Some(Task::Scan {
                 scan,
+                from,
+                skip,
+                converge,
                 to: scan_to,
                 pieces,
                 finish: scan_finish,
@@ -1074,32 +1210,49 @@ fn execute(sh: &Shared, task: Task) -> (u64, u8) {
         }
         Task::Scan {
             mut scan,
+            from,
+            skip,
+            converge,
             to,
             pieces,
             finish,
         } => {
             let before = scan.fed;
-            for paras in &pieces {
-                for it in material(paras) {
-                    scan.feed(it);
+            let mut converged = None;
+            'feed: for (d, paras) in pieces.iter().enumerate() {
+                let k = (from + d) as u32;
+                let skip = if d == 0 { skip as usize } else { 0 };
+                for (i, it) in material(paras).into_iter().enumerate().skip(skip) {
+                    scan.feed(it, (k, i as u32));
+                    if let Some((after, starts)) = &converge
+                        && let Some(s) = scan.started.take()
+                        && s.0 as usize > *after
+                        && let Ok(q) = starts.binary_search(&s)
+                    {
+                        converged = Some(q);
+                        break 'feed;
+                    }
                 }
             }
-            if finish {
-                scan.finish();
+            if finish && converged.is_none() {
+                scan.finish(to as u32);
             }
             let work = scan.fed - before;
             let new: Vec<Page> = std::mem::take(&mut scan.pages);
+            let new_orgs: Vec<PageOrg> = std::mem::take(&mut scan.orgs);
             let mut g = lock(sh);
             g.scan_next = to;
-            for pg in new {
+            for (pg, org) in new.into_iter().zip(new_orgs) {
                 let i = g.pages.len();
                 // (unchanged lines are the same `Arc`s: a cheap comparison)
                 let same = g
                     .old_pages
                     .get(i)
+                    .and_then(Option::as_ref)
                     .filter(|(op, _)| *op == pg)
                     .map(|(_, b)| b.clone());
                 g.pages.push(pg);
+                g.orgs.push(org);
                 if let Some(b) = same {
                     g.bodies.push(Some(b));
                     g.stats.pages_reused += 1;
@@ -1108,6 +1261,20 @@ fn execute(sh: &Shared, task: Task) -> (u64, u8) {
                     g.unshipped += 1;
                     g.ship_queue.push_back(i);
                 }
+            }
+            if let Some(q) = converged {
+                // (from a page start after the last difference on, the
+                // last build's pages)
+                for i in q..g.old_pages.len() {
+                    let (pg, b) = g.old_pages[i].take().expect("an old page");
+                    g.pages.push(pg);
+                    g.bodies.push(Some(b));
+                    let o = g.old_orgs[i];
+                    g.orgs.push(o);
+                    g.stats.pages_reused += 1;
+                }
+                g.scan_next = g.p.len();
+                g.scan_done = true;
             }
             if finish {
                 g.scan_done = true;
