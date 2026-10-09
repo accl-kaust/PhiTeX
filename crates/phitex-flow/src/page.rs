@@ -64,12 +64,14 @@ pub fn push_vertical(list: &mut Vec<Item>, prev_depth: &mut i32, it: Item) {
 }
 
 /// tex.web 1105: `\unpenalty` (0), `\unkern` (1), `\unskip` (2) remove the
-/// last item if it is of that kind (not one a discretionary replaces).
+/// last item if it is of that kind (not one a discretionary replaces);
+/// `\lastbox` (3) a box (tex.web 1081).
 pub fn remove_last(list: &mut Vec<Item>, k: u8) {
     let hit = match list.last() {
         Some(Item::Penalty(_)) => k == 0,
         Some(Item::Kern { .. }) => k == 1,
-        Some(Item::Glue { .. }) => k == 2,
+        Some(Item::Glue { .. } | Item::Leaders(_)) => k == 2,
+        Some(Item::Box(_)) => k == 3,
         _ => false,
     };
     if !hit {
@@ -424,14 +426,14 @@ impl Scan {
                     self.contribute();
                     continue;
                 }
-                Item::Glue { .. } | Item::Kern { .. } | Item::Penalty(_) => {
+                Item::Glue { .. } | Item::Leaders(_) | Item::Kern { .. } | Item::Penalty(_) => {
                     if self.page_contents < BOX_THERE {
                         self.contrib.pop_front();
                         self.contrib_org.pop_front();
                         continue;
                     }
                     match &p {
-                        Item::Glue { .. } => {
+                        Item::Glue { .. } | Item::Leaders(_) => {
                             if self.page.last().is_some_and(Item::precedes_break) {
                                 pi = 0;
                             } else {
@@ -442,7 +444,7 @@ impl Scan {
                         Item::Kern { .. } => {
                             if self.contrib.len() == 1 {
                                 return;
-                            } else if matches!(self.contrib.get(1), Some(Item::Glue { .. })) {
+                            } else if self.contrib.get(1).is_some_and(Item::is_glue) {
                                 pi = 0;
                             } else {
                                 self.update_heights(&p);
@@ -493,7 +495,7 @@ impl Scan {
                     continue;
                 }
             }
-            if matches!(p, Item::Glue { .. } | Item::Kern { .. }) {
+            if matches!(p, Item::Glue { .. } | Item::Leaders(_) | Item::Kern { .. }) {
                 self.update_heights(&p);
             } else {
                 self.contribute();
@@ -507,12 +509,13 @@ impl Scan {
             Item::Kern { w, .. } => {
                 self.total += self.depth + w;
             }
-            Item::Glue { g, .. } => {
-                self.stretch[usize::from(g.stretch_order.min(3))] += g.stretch;
-                self.shrink += g.shrink;
-                self.total += self.depth + g.width;
+            _ => {
+                if let Some(g) = p.glue() {
+                    self.stretch[usize::from(g.stretch_order.min(3))] += g.stretch;
+                    self.shrink += g.shrink;
+                    self.total += self.depth + g.width;
+                }
             }
-            _ => {}
         }
         self.depth = 0;
         self.contribute();

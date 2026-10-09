@@ -1,0 +1,5 @@
+(./endgroup.tex [0] )
+(\end occurred inside a group at level 2)
+(\end occurred when \ifcase on line 8 was incomplete)
+(\end occurred when \ifnum on line 7 was incomplete)
+(\end occurred when \iftrue on line 6 was incomplete)

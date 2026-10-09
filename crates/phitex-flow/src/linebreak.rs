@@ -108,6 +108,7 @@ fn widths(it: &Item) -> W {
     let mut w = [0i64; 6];
     match it {
         Item::Glue { g, .. } => glue_widths(&mut w, g),
+        Item::Leaders(l) => glue_widths(&mut w, &l.g),
         Item::Char(..) | Item::Lig(_) | Item::Box(_) | Item::Rule { .. } | Item::Kern { .. } | Item::Math { .. } => {
             w[0] = i64::from(it.width());
         }
@@ -260,7 +261,7 @@ impl Breaker<'_> {
         }
         while s < self.items.len() {
             match &self.items[s] {
-                Item::Glue { .. } | Item::Penalty(_) | Item::Kern { sub: 1, .. } | Item::Math { .. } => {}
+                Item::Glue { .. } | Item::Leaders(_) | Item::Penalty(_) | Item::Kern { sub: 1, .. } | Item::Math { .. } => {}
                 _ => break,
             }
             s += 1;
@@ -488,7 +489,7 @@ impl Breaker<'_> {
             // (§866)
             let it = self.items[k].clone();
             match &it {
-                Item::Glue { .. } => {
+                Item::Glue { .. } | Item::Leaders(_) => {
                     // (§868)
                     if k > 0 && auto_breaking {
                         let pr = &self.items[k - 1];
@@ -512,7 +513,7 @@ impl Breaker<'_> {
                     self.lang = crate::hyph::LangState { lang: *lang, lhm: *lhm, rhm: *rhm };
                 }
                 Item::Kern { sub: 1, .. } => {
-                    if auto_breaking && matches!(self.items.get(k + 1), Some(Item::Glue { .. })) {
+                    if auto_breaking && self.items.get(k + 1).is_some_and(Item::is_glue) {
                         self.try_break(0, false, Some(k), &none);
                     }
                 }
@@ -521,7 +522,7 @@ impl Breaker<'_> {
                     if *lr < 4 {
                         auto_breaking = *after;
                     }
-                    if auto_breaking && matches!(self.items.get(k + 1), Some(Item::Glue { .. })) {
+                    if auto_breaking && self.items.get(k + 1).is_some_and(Item::is_glue) {
                         self.try_break(0, false, Some(k), &none);
                     }
                 }
@@ -787,7 +788,7 @@ fn post_line_break(br: &Breaker<'_>, best: Active) -> Vec<Arc<Line>> {
         // (§881: the end of the line, with `\rightskip`)
         let next_start = if let Some(b) = brk {
             match &items[b] {
-                Item::Glue { .. } => {
+                Item::Glue { .. } | Item::Leaders(_) => {
                     line.extend(items[start..b].iter().cloned());
                     line.push(rightskip);
                     b + 1

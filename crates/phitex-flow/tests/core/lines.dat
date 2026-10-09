@@ -1,0 +1,9 @@
+line one
+  indented line two
+{braced
+ over two lines}
+ab}cd
+\relax \foo{x}
+% a comment line
+
+last; line

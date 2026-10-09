@@ -1,0 +1,15 @@
+(./lastbox.tex
+Underfull \hbox (badness 10000) detected at line 11
+[]
+
+\hbox(4.30554+0.0)x50.0
+.\hbox(4.30554+0.0)x9.44446
+..\hbox(4.30554+0.0)x5.00002
+...\tenrm a
+..\discretionary replacing 1
+...\hbox(6.94444+0.0)x5.55557
+....\tenrm b
+..\hbox(4.30554+0.0)x4.44444
+...\tenrm c
+
+void15.0pt [0] )

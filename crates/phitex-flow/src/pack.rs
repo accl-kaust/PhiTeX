@@ -115,11 +115,19 @@ pub fn lr_fix(list: &mut Vec<Item>) -> u32 {
     problems
 }
 
-/// §649: `hpack`. Marks move out to `adjust` if given (§655).
+/// §649: `hpack`. Marks, insertions and adjustments' material move out to
+/// `adjust` if given (§655).
 pub fn hpack(mut list: Vec<Item>, spec: Spec, params: &Params, adjust: Option<&mut Vec<Item>>) -> Packed {
     if let Some(adj) = adjust {
-        let (moved, kept): (Vec<Item>, Vec<Item>) = list.into_iter().partition(|i| matches!(i, Item::Mark(_) | Item::Marks(..)));
-        adj.extend(moved);
+        let (moved, kept): (Vec<Item>, Vec<Item>) = list
+            .into_iter()
+            .partition(|i| matches!(i, Item::Mark(_) | Item::Marks(..) | Item::Ins(_) | Item::Adjust(_)));
+        for m in moved {
+            match m {
+                Item::Adjust(l) => adj.extend(l.iter().cloned()),
+                other => adj.push(other),
+            }
+        }
         list = kept;
     }
     let (mut h, mut d, mut x) = (0i32, 0i32, 0i32);
@@ -147,6 +155,18 @@ pub fn hpack(mut list: Vec<Item>, spec: Spec, params: &Params, adjust: Option<&m
                 x += g.width;
                 t.stretch[usize::from(g.stretch_order)] += g.stretch;
                 t.shrink[usize::from(g.shrink_order)] += g.shrink;
+            }
+            Item::Leaders(l) => {
+                // (§656: and the leader box's height and depth)
+                let (lh, ld) = match &l.b {
+                    Item::Box(b) => (b.h, b.d),
+                    Item::Rule { h, d, .. } => (*h, *d),
+                    _ => (0, 0),
+                };
+                boxed(0, lh, ld, 0, &mut x);
+                x += l.g.width;
+                t.stretch[usize::from(l.g.stretch_order)] += l.g.stretch;
+                t.shrink[usize::from(l.g.shrink_order)] += l.g.shrink;
             }
             Item::Kern { w, .. } | Item::Math { w, .. } => x += w,
             _ => {}
@@ -182,6 +202,19 @@ pub fn vpack(list: Vec<Item>, spec: Spec, max_depth: i32, params: &Params) -> Pa
                 d = 0;
                 t.stretch[usize::from(g.stretch_order)] += g.stretch;
                 t.shrink[usize::from(g.shrink_order)] += g.shrink;
+            }
+            Item::Leaders(l) => {
+                // (§671: and the leader box's width)
+                x += d + l.g.width;
+                d = 0;
+                t.stretch[usize::from(l.g.stretch_order)] += l.g.stretch;
+                t.shrink[usize::from(l.g.shrink_order)] += l.g.shrink;
+                let lw = match &l.b {
+                    Item::Box(b) => b.w,
+                    Item::Rule { w, .. } => *w,
+                    _ => 0,
+                };
+                w = w.max(lw);
             }
             Item::Kern { w: k, .. } => {
                 x += d + k;

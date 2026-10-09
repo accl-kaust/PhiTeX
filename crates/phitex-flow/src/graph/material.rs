@@ -33,10 +33,22 @@ pub(super) enum BoxKind {
     /// A discretionary's part (0 pre-break, 1 post-break, 2 replacement)
     /// and the parts before it.
     Disc(u8, Arc<(Vec<Item>, Vec<Item>)>),
+    /// `\insert n` (255: `\vadjust`), with what its `}` read inside it
+    /// (tex.web 1100).
+    Insert(u8, Option<Arc<InsParams>>),
     /// `\vcenter` (tex.web 1167).
     Vcenter,
     /// A math group (`math.rs`).
     Math(Arc<super::math::MathKind>),
+}
+
+/// What an insertion reads as its group ends (tex.web 1100):
+/// `\splittopskip`, `\splitmaxdepth`, `\floatingpenalty`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct InsParams {
+    pub(super) split_top: Arc<Glue>,
+    pub(super) depth: i32,
+    pub(super) float: i32,
 }
 
 /// What happens to a box when it is made (tex.web 1075: `box_context`).
@@ -47,6 +59,8 @@ pub(super) enum BoxContext {
     /// `\setbox n`, `\global` or not.
     Set(u16, bool),
     Ship,
+    /// The box of `\leaders` (100), `\cleaders`, `\xleaders` (102).
+    Leaders(u8),
 }
 
 /// An open box group: what it makes, where it goes, and the enclosing
@@ -195,6 +209,18 @@ pub(super) fn fonts_in(list: &[Item], out: &mut Vec<Arc<str>>) {
                 fonts_in(&d.post, out);
                 continue;
             }
+            Item::Leaders(l) => {
+                fonts_in(std::slice::from_ref(&l.b), out);
+                continue;
+            }
+            Item::Ins(i) => {
+                fonts_in(&i.list, out);
+                continue;
+            }
+            Item::Adjust(a) => {
+                fonts_in(a, out);
+                continue;
+            }
             Item::Noad(m) => {
                 let field = |f: &crate::mlist::Field, out: &mut Vec<Arc<str>>| match f {
                     crate::mlist::Field::Box(b) => fonts_in(std::slice::from_ref(&Item::Box(b.clone())), out),
@@ -304,15 +330,17 @@ impl Exec<'_> {
         }
     }
 
-    /// Appends a raw entry to the node's log.
+    /// Appends a raw entry to the node's log: to its last entry if that is
+    /// raw, else as an entry of its own (`logs::SEP`).
     pub(super) fn log_raw(&mut self, raw: &str) {
         match &mut self.log {
-            Some(l) if l.starts_with(RAW) => {
+            Some(l) if l.rsplit(crate::logs::SEP).next().is_some_and(|e| e.starts_with(RAW)) => {
                 let mut s = l.to_string();
                 s.push_str(raw.strip_prefix(RAW).unwrap_or(raw));
                 *l = s.into_boxed_str();
             }
-            _ => self.log = Some(Box::from(raw)),
+            Some(_) => self.log_push(raw),
+            None => self.log = Some(Box::from(raw)),
         }
     }
 
@@ -430,6 +458,22 @@ impl Exec<'_> {
                 }
             }
             Mat::FontInt(k) => self.assign_font_int(k),
+            Mat::Leaders(sub) => self.scan_box(BoxContext::Leaders(sub)),
+            Mat::Accent => {
+                if v {
+                    self.back_new_graf(t);
+                } else {
+                    self.make_accent();
+                }
+            }
+            Mat::Insert => self.begin_insert(false),
+            Mat::Vadjust => {
+                if v {
+                    self.err(format!("You can't use `{t}' in vertical mode"));
+                } else {
+                    self.begin_insert(true);
+                }
+            }
             Mat::Internal(0) => self.package(),
             Mat::Internal(1) => self.end_par(),
             Mat::Internal(2) => self.disc_next(),
@@ -619,7 +663,7 @@ impl Exec<'_> {
         let mut para = Para { before: ships, ..Para::default() };
         if !hlist.is_empty() {
             // (§816)
-            if matches!(hlist.last(), Some(Item::Glue { .. })) {
+            if hlist.last().is_some_and(Item::is_glue) {
                 hlist.pop();
             }
             hlist.push(Item::Penalty(10000));
@@ -1129,9 +1173,16 @@ impl Exec<'_> {
 
     /// tex.web 1060: `append_glue`.
     fn append_glue(&mut self, k: u8) {
+        let (g, zero) = self.skip_glue(k);
+        self.emit_here(Item::Glue { g: Arc::new(g), sub: 0, zero });
+    }
+
+    /// The glue of `\hskip` (0), `\hfil`, `\hfill`, `\hss`, `\hfilneg` (4)
+    /// and their vertical twins, and whether it is a zero internal glue.
+    pub(super) fn skip_glue(&mut self, k: u8) -> (Glue, bool) {
         let fil =
             |stretch: i32, shrink: i32| Glue { stretch, shrink, stretch_order: 1, shrink_order: 1, ..Glue::default() };
-        let (g, zero) = match k {
+        match k {
             1 => (fil(65536, 0), false),
             2 => (Glue { stretch: 65536, stretch_order: 2, ..Glue::default() }, false),
             3 => (fil(65536, 65536), false),
@@ -1140,13 +1191,11 @@ impl Exec<'_> {
                 let g = self.scan_glue(false);
                 (g, self.scratch.glue_shared && is_zero(&g))
             }
-        };
-        self.emit_here(Item::Glue { g: Arc::new(g), sub: 0, zero });
+        }
     }
 
-    /// tex.web 463: `scan_rule_spec`, and the rule's effect on the list
-    /// (tex.web 1056).
-    fn rule(&mut self, hrule: bool) {
+    /// tex.web 463: `scan_rule_spec`.
+    pub(super) fn rule_spec(&mut self, hrule: bool) -> Item {
         let (mut w, mut h, mut d) = if hrule { (RUNNING, 26214, 0) } else { (26214, RUNNING, RUNNING) };
         loop {
             if self.keyword("width") {
@@ -1159,7 +1208,13 @@ impl Exec<'_> {
                 break;
             }
         }
-        self.emit_here(Item::Rule { w, h, d });
+        Item::Rule { w, h, d }
+    }
+
+    /// A rule, and its effect on the list (tex.web 1056).
+    fn rule(&mut self, hrule: bool) {
+        let r = self.rule_spec(hrule);
+        self.emit_here(r);
         if self.st.mode == Mode::V {
             self.vemit.push(Item::PrevDepth(IGNORE_DEPTH));
             self.st.prev_depth = IGNORE_DEPTH;
@@ -1249,6 +1304,15 @@ impl Exec<'_> {
     fn scan_box(&mut self, context: BoxContext) {
         match self.nonblank_nonrelax() {
             Some((_, Meaning::Prim(Prim::Mat(Mat::MakeBox(k))))) => self.begin_box(k, context),
+            // (leaders of a rule, tex.web 1084)
+            Some((_, Meaning::Prim(Prim::Mat(r @ (Mat::Hrule | Mat::Vrule)))))
+                if matches!(context, BoxContext::Leaders(_)) =>
+            {
+                let rule = self.rule_spec(r == Mat::Hrule);
+                if let BoxContext::Leaders(sub) = context {
+                    self.leaders_after(sub, rule);
+                }
+            }
             other => {
                 self.err("A <box> was supposed to be here".into());
                 if let Some((t, _)) = other {
@@ -1272,13 +1336,13 @@ impl Exec<'_> {
                 }
                 self.box_end(context, b.map(|b| (*b).clone()), Vec::new(), Vec::new());
             }
-            2 | 3 => {
-                self.err(format!("\\{} is not supported yet", if k == 2 { "lastbox" } else { "vsplit" }));
-                if k == 3 {
-                    let _ = self.scan_eight_bit_int();
-                    let _ = self.keyword("to");
-                    let _ = self.scan_dimen();
-                }
+            2 => {
+                let b = self.last_box();
+                self.box_end(context, b, Vec::new(), Vec::new());
+            }
+            3 => {
+                let b = self.vsplit_box();
+                self.box_end(context, b, Vec::new(), Vec::new());
             }
             _ => {
                 let kind = match k {
@@ -1403,6 +1467,18 @@ impl Exec<'_> {
             return;
         }
         let boxmaxdepth = self.dimen_par(DimenPar::Boxmaxdepth);
+        // (an insertion's parameters as they are inside it, tex.web 1100)
+        let g = match &g.kind {
+            BoxKind::Insert(n, _) => {
+                let p = InsParams {
+                    split_top: self.glue_par(GluePar::Splittopskip),
+                    depth: self.dimen_par(DimenPar::Splitmaxdepth),
+                    float: self.int_par(IntPar::Floatingpenalty),
+                };
+                Arc::new(BoxGroup { kind: BoxKind::Insert(*n, Some(Arc::new(p))), ..(*g).clone() })
+            }
+            _ => g,
+        };
         let after = self.st.groups.pop().map(|g| g.after).unwrap_or_default();
         self.st.mode = g.mode;
         self.st.inner = g.inner;
@@ -1424,7 +1500,7 @@ impl Exec<'_> {
         let Some(be) = self.st.boxing.take() else { return };
         self.kind = Kind::Par;
         let inner = self.st.level + 1;
-        let vertical = matches!(be.g.kind, BoxKind::V | BoxKind::Vtop | BoxKind::Vcenter);
+        let vertical = matches!(be.g.kind, BoxKind::V | BoxKind::Vtop | BoxKind::Insert(..) | BoxKind::Vcenter);
         let nodes = &self.chain.nodes;
         // (the nodes inside: back from the `Close` node before this one)
         let end = nodes.len().saturating_sub(1);
@@ -1497,6 +1573,7 @@ impl Exec<'_> {
                 }
                 self.box_end(be.g.context, Some(b), Vec::new(), ships);
             }
+            BoxKind::Insert(n, p) => self.insert_end(*n, p.as_deref(), list, ships),
             BoxKind::Disc(stage, parts) => {
                 for s in ships {
                     self.emit_here(s);
@@ -1533,7 +1610,7 @@ impl Exec<'_> {
     }
 
     /// tex.web 1075: `box_end`.
-    fn box_end(&mut self, context: BoxContext, b: Option<BoxNode>, adj: Vec<Item>, ships: Vec<Item>) {
+    pub(super) fn box_end(&mut self, context: BoxContext, b: Option<BoxNode>, adj: Vec<Item>, ships: Vec<Item>) {
         for s in ships {
             self.emit_here(s);
         }
@@ -1566,10 +1643,18 @@ impl Exec<'_> {
                 // (tex.web 638: `dead_cycles:=0`)
                 self.define(Key::Page(super::output::DEAD_CYCLES), Val::Int(0), true);
                 let ship = self.ship_params();
-                let mark = page_mark(&ship);
+                // (the page's whatsits are done as it is shipped, here:
+                // its `\write`s expanded with the definitions reaching this
+                // node, tex.web 1374)
+                let io = self.ship_io(&b);
+                let mut mark = page_mark(&ship);
+                mark.pop();
+                mark.push_str(&io);
+                mark.push(']');
                 self.log_raw(&mark);
                 self.emit_here(Item::Shipout(Arc::new(Shipped { b: Arc::new(b), ship })));
             }
+            BoxContext::Leaders(sub) => self.leaders_after(sub, Item::Box(Arc::new(b))),
         }
     }
 

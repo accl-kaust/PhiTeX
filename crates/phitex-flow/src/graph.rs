@@ -41,15 +41,20 @@ use crate::tfm::Font;
 use crate::val::{DimenPar, IntPar, Key, Macro, Meaning, Prim, Tok, Val};
 
 mod assign;
+mod boxes;
 pub(crate) mod diag;
 mod etex;
 mod expand;
 mod fonts;
+mod io;
 mod lang;
 mod material;
 mod math;
 pub mod output;
 mod scan;
+
+pub use expand::JOBNAME;
+pub use io::{ends_document, file_text, page_io, whatsits};
 
 /// A piece's identity, stable across edits.
 pub type PieceId = u32;
@@ -66,6 +71,23 @@ pub trait Env {
     /// function of the name during a build).
     fn font_file(&mut self, _name: &str) -> Option<std::sync::Arc<[u8]>> {
         None
+    }
+
+    /// The bytes of the input file of exactly this name, if there is one:
+    /// what a read of `Key::File(name)` answers (a pure function of the
+    /// name during a build).
+    fn file(&mut self, _name: &str) -> Option<Arc<[u8]>> {
+        None
+    }
+
+    /// The job's name (`\jobname`): what a read of `Key::Job` answers.
+    fn jobname(&mut self) -> Arc<str> {
+        Arc::from(expand::JOBNAME)
+    }
+
+    /// The lines of its file before this piece (`Key::LineBase`).
+    fn line_base(&mut self) -> i32 {
+        0
     }
 }
 
@@ -116,13 +138,17 @@ struct Cond {
     code: u8,
 }
 
-/// A text the input was rewritten with (e-TeX's `\scantokens`): read
-/// with the category codes in force as it is read, line by line, each line
-/// ending in the `\endlinechar` in force when it is begun. It lies above
-/// the first `at` rewritten token lists: those above it are read first,
-/// then it, then those below. Where its reading is: `pos`, `tstate`, `eol`
-/// (as the piece's own are kept in `RState`); `eof`: its end was met once
-/// and `\everyeof` went in (etex.web §362).
+/// A text the reader is in above the piece's (TeX's input levels that
+/// read characters, as a value of the reader state): e-TeX's
+/// `\scantokens` text, an `\input` file (read in the piece until the core
+/// cuts files into pieces: CORE.md, "`\input` (decided)") or a `\read`
+/// line. Read with the category codes in force as it is read, line by
+/// line, each line ending in the `\endlinechar` in force when it is begun.
+/// It lies above the first `at` rewritten token lists: those above it are
+/// read first, then it, then those below. Where its reading is: `pos`,
+/// `tstate`, `eol` (as the piece's own are kept in `RState`); `eof`: its
+/// end was met once and `\everyeof` went in (etex.web §362); `endinput`:
+/// `\endinput` was met, it ends with its current line (tex.web 362).
 #[derive(Clone, PartialEq, Eq, Debug)]
 struct PendingText {
     text: Arc<[char]>,
@@ -131,6 +157,21 @@ struct PendingText {
     tstate: TState,
     eol: i16,
     eof: bool,
+    kind: TextKind,
+    endinput: bool,
+}
+
+/// What a [`PendingText`] is.
+#[derive(Clone, PartialEq, Eq, Debug)]
+enum TextKind {
+    /// `\scantokens`'s pseudo file.
+    Scan,
+    /// An `\input` file, as the log names it (`./sub.tex`): its end is
+    /// `)` in the log.
+    File(Arc<str>),
+    /// A `\read` line: its end ends the reading (`next_raw` is `None`);
+    /// `\read` leaves it.
+    Read,
 }
 
 /// An open group: its kind and the tokens `\aftergroup` gave it (its
@@ -244,7 +285,8 @@ pub struct RState {
     eol: i16,
     /// e-TeX's `\protected` prefix is waiting for its definition.
     protected: bool,
-    /// Texts the input was rewritten with (`\scantokens`), innermost last.
+    /// The texts the reader is in above the piece's (`\scantokens`
+    /// texts, `\input` files, `\read` lines), innermost last.
     texts: Stack<PendingText>,
     /// A paragraph's language state (tex.web 1091, 1376): `clang`, and
     /// the language and hyphen minima it began with.
@@ -1089,7 +1131,14 @@ fn outside_read(env: &mut dyn Env, outside: &mut Outside, k: &Key, node: u32) ->
     {
         return v.clone();
     }
-    let (val, src, lo, hi) = env.reach(k, node);
+    // (what the build answers itself: a file's bytes, the job's name, the
+    // lines before the piece)
+    let (val, src, lo, hi) = match k {
+        Key::File(n) => (env.file(n).map_or(Val::Void, Val::Bytes), Src::Initial, 0, u32::MAX),
+        Key::Job => (Val::Name(env.jobname()), Src::Initial, 0, u32::MAX),
+        Key::LineBase => (Val::Int(env.line_base()), Src::Initial, 0, u32::MAX),
+        _ => env.reach(k, node),
+    };
     let r = Arc::new(Read {
         key: k.clone(),
         src,
@@ -1858,12 +1907,16 @@ impl<'a> Exec<'a> {
         }
     }
 
-    /// Moves to `np`; past a line's end, the next line begins.
+    /// Moves to `np`; past a line's end, the next line begins (and a text
+    /// whose `\endinput` was met ends, tex.web 362).
     fn advance(&mut self, np: usize) {
         let crossed = self.txt()[self.st.pos..np].contains(&'\r');
         self.st.pos = np;
         if crossed {
             self.new_line();
+            if self.ptext.is_some() && self.st.texts.last().is_some_and(|x| x.endinput) {
+                self.st.pos = self.txt().len();
+            }
         }
     }
 
@@ -1941,6 +1994,10 @@ impl<'a> Exec<'a> {
             if self.st.texts.is_empty() {
                 return self.tokenize();
             }
+            // (a `\read` line's end ends the reading)
+            if self.st.texts.last().is_some_and(|x| x.kind == TextKind::Read) {
+                return self.text_token();
+            }
             if let Some(t) = self.text_token() {
                 return Some(t);
             }
@@ -1961,10 +2018,11 @@ impl<'a> Exec<'a> {
         (self.st.pos, self.st.tstate, self.st.eol) = outer;
         let Some(x) = self.st.texts.last_mut() else { return t };
         (x.pos, x.tstate, x.eol) = here;
-        if t.is_some() {
+        if t.is_some() || x.kind == TextKind::Read {
             return t;
         }
-        if !x.eof {
+        // (`\endinput` forces the end: no `\everyeof`)
+        if !x.eof && !x.endinput {
             x.eof = true;
             let every = match self.get(&Key::TokPar(crate::val::TokPar::Everyeof)) {
                 Val::Toks(l) => l,
@@ -1975,7 +2033,10 @@ impl<'a> Exec<'a> {
                 return None;
             }
         }
-        self.st.texts.pop();
+        if let Some(PendingText { kind: TextKind::File(_), .. }) = self.st.texts.pop() {
+            // (an `\input` file is closed, tex.web 362)
+            self.log_raw(&format!("{}{}", crate::show::RAW, ')'));
+        }
         None
     }
 
@@ -2370,16 +2431,13 @@ impl<'a> Exec<'a> {
             Prim::SetLanguage => self.set_language(),
             Prim::Show(c) => self.show_cmd(c),
             Prim::Immediate => self.immediate(),
-            Prim::Write => {
-                self.err(
-                    "\\write without \\immediate is not supported yet (it needs \\shipout)".into(),
-                );
-                let _ = self.scan_int();
-                let _ = self.scan_toks_raw();
-            }
+            Prim::Write => self.write_cmd(),
+            Prim::OpenOut | Prim::CloseOut | Prim::Special => self.extension(p),
+            Prim::InStream(open) => self.open_in(open),
+            Prim::Input => self.start_input(),
             Prim::Uppercase | Prim::Lowercase => self.case_shift(p == Prim::Uppercase),
             Prim::EndCsName => self.err("Extra \\endcsname".into()),
-            Prim::End | Prim::Dump => self.stop(),
+            Prim::End | Prim::Dump => self.stop_job(p == Prim::Dump),
             Prim::Relax => {}
             Prim::Marks | Prim::Discards(_) | Prim::ShowE(_) | Prim::Lr(_) => self.etex_command(p),
             Prim::LastItem(_)

@@ -1,0 +1,25 @@
+% \openin, \read, \closein, \ifeof: a read stream is a Key whose value
+% advances by definition; lines tokenized with the codes in force.
+\openin3=lines.dat
+\ifeof3 \message{closed}\else\message{open}\fi
+\read3 to\x \message{[\meaning\x]}
+\read3 to\x \message{[\meaning\x]}
+\read3 to\x \message{[\meaning\x]}
+\read3 to\x \message{[\meaning\x]}
+\endlinechar=-1 \read3 to\x \endlinechar=13 \message{[\meaning\x]}
+\read3 to\x \message{[\meaning\x]}
+\read3 to\x \message{[\meaning\x]}
+{\catcode`\;=14 \global\read3 to\y}\message{[\meaning\y]}
+\def\loop{\ifeof3 \else\read3 to\x \message{[\meaning\x]}\expandafter\loop\fi}\loop
+\ifeof3 \message{closed at the end}\fi
+
+\closein3 \ifeof3 \message{still closed}\fi
+\openin4=nofile \ifeof4 \message{no such file}\fi
+\openin4=lines.dat \closein4 \ifeof4 \message{closed again}\fi
+\openin5=lines \ifeof5 \message{lines.tex is not lines.dat}\fi
+\openin6=lines.dat \read6 to\a {\read6 to\c}\message{[\meaning\c]}
+\read6 to\d \message{[\meaning\d]}
+
+\read6 to\e \message{[\meaning\e] \jobname}
+\count1=\inputlineno \message{line \the\count1, line \the\inputlineno}
+\openin6=lines.dat \read6 to\f \message{[\meaning\f]}

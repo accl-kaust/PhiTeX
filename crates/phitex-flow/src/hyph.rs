@@ -420,7 +420,8 @@ pub fn hyphenate_after(items: &[Item], cur_p: usize, st: &mut LangState, p: &Hyp
                 };
                 (c, l.font.clone())
             }
-            Item::Kern { sub: 0, .. } => {
+            // (§896: and any other whatsit is passed)
+            Item::Kern { sub: 0, .. } | Item::Whatsit(_) => {
                 prev_s = s;
                 s += 1;
                 continue;
@@ -517,7 +518,15 @@ pub fn hyphenate_after(items: &[Item], cur_p: usize, st: &mut LangState, p: &Hyp
                     break;
                 }
             }
-            Item::Lang { .. } | Item::Glue { .. } | Item::Penalty(_) | Item::Mark(_) => break,
+            Item::Lang { .. }
+            | Item::Glue { .. }
+            | Item::Leaders(_)
+            | Item::Penalty(_)
+            | Item::Mark(_)
+            | Item::Marks(..)
+            | Item::Whatsit(_)
+            | Item::Ins(_)
+            | Item::Adjust(_) => break,
             _ => return None,
         }
         s += 1;

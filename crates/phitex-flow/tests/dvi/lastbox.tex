@@ -1,0 +1,15 @@
+\catcode`\{=1 \catcode`\}=2 \catcode`\#=6
+\font\tenrm=cmr10 \tenrm
+\hsize=200pt \vsize=300pt \parindent=15pt \baselineskip=12pt \topskip=10pt
+\tolerance=1000 \linepenalty=10 \maxdepth=2pt \parfillskip=0pt plus 1fil
+\showboxdepth=10 \showboxbreadth=100
+\setbox1\vbox{\hbox{one}\hbox{two}\setbox2\lastbox \hbox{three}\box2}
+\box1
+\noindent A paragraph \hbox{boxed}\setbox3\lastbox{} with its box removed\unskip\setbox4\lastbox.\par
+\indent\setbox5\lastbox Paragraph without its indent.\par
+\setbox6\hbox{\hbox{a}\discretionary{\hbox{b}}{}{\hbox{c}}\setbox7\lastbox \hbox{d}\setbox7\lastbox}
+\hbox to 50pt{\box7\box6}
+\vbox{\moveright 10pt\hbox{shifted}\setbox8\lastbox\box8}
+\hbox to 50pt{\copy3\hss}
+\message{\ifvoid4 void\fi \ifvoid5 void\else\the\wd5\fi}
+\end

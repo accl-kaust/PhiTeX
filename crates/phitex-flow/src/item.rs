@@ -138,6 +138,17 @@ pub enum Item {
     Penalty(i32),
     Disc(Arc<Disc>),
     Mark(Arc<Vec<Tok>>),
+    /// Glue with leaders (tex.web 149: a glue node whose subtype is
+    /// `a_leaders`..`x_leaders` and whose `leader_ptr` is a box or rule):
+    /// everywhere glue is, it is glue ([`Item::glue`]).
+    Leaders(Arc<Leaders>),
+    /// A whatsit (tex.web 1341): `\openout`, `\write`, `\closeout`,
+    /// `\special`.
+    Whatsit(Arc<Whatsit>),
+    /// An insertion (tex.web 140).
+    Ins(Arc<Ins>),
+    /// `\vadjust`'s vertical material (tex.web 142).
+    Adjust(Arc<Vec<Item>>),
     /// e-TeX's `\marks n` for a class `n` other than 0 (class 0 is
     /// `Mark`).
     Marks(u16, Arc<Vec<Tok>>),
@@ -164,8 +175,8 @@ pub enum Item {
     /// in the items of nodes inside a formula.
     Noad(Arc<crate::mlist::MItem>),
     // ---- pseudo-items, applied by the gatherer of the list
-    /// `\unpenalty` (0), `\unkern` (1), `\unskip` (2): remove the last item
-    /// if it is of that kind.
+    /// `\unpenalty` (0), `\unkern` (1), `\unskip` (2), `\lastbox` (3: a
+    /// box): remove the last item if it is of that kind.
     Remove(u8),
     /// A box appended to a vertical list: the gatherer puts the interline
     /// glue before it (tex.web 679).
@@ -190,8 +201,23 @@ impl Item {
             Item::Box(b) => b.w,
             Item::Rule { w, .. } | Item::Kern { w, .. } | Item::Math { w, .. } => *w,
             Item::Glue { g, .. } => g.width,
+            Item::Leaders(l) => l.g.width,
             _ => 0,
         }
+    }
+
+    /// The glue specification of a glue node (glue, or glue with leaders).
+    pub fn glue(&self) -> Option<&Arc<Glue>> {
+        match self {
+            Item::Glue { g, .. } => Some(g),
+            Item::Leaders(l) => Some(&l.g),
+            _ => None,
+        }
+    }
+
+    /// tex.web's `type(p)=glue_node`.
+    pub fn is_glue(&self) -> bool {
+        matches!(self, Item::Glue { .. } | Item::Leaders(_))
     }
 
     /// tex.web's `is_char_node` (characters; ligatures are nodes).
@@ -211,6 +237,9 @@ impl Item {
                 | Item::Lig(_)
                 | Item::Disc(_)
                 | Item::Lang { .. }
+                | Item::Whatsit(_)
+                | Item::Ins(_)
+                | Item::Adjust(_)
         )
     }
 
@@ -218,6 +247,50 @@ impl Item {
     pub fn non_discardable(&self) -> bool {
         self.is_char() || self.precedes_break()
     }
+}
+
+/// tex.web's leader subtypes (149).
+pub const A_LEADERS: u8 = 100;
+pub const C_LEADERS: u8 = 101;
+pub const X_LEADERS: u8 = 102;
+
+/// Glue with leaders: the glue, the kind (`A_LEADERS`, `C_LEADERS`,
+/// `X_LEADERS`), the box or rule repeated (an `Item::Box` or
+/// `Item::Rule`), and whether the glue is TeX's shared zero glue.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Leaders {
+    pub g: Arc<Glue>,
+    pub sub: u8,
+    pub b: Item,
+    pub zero: bool,
+}
+
+/// A whatsit (tex.web 1341). Streams: 0–15, 16 (`\write` to the
+/// terminal and log: a number above 15), 17 (to the log only: negative).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Whatsit {
+    /// `\openout n=name` (the name as scanned; `.tex` is added when it is
+    /// opened if it has no extension).
+    Open { stream: u8, name: Arc<str> },
+    /// `\write n{…}`: the tokens, expanded when the page holding it is
+    /// shipped.
+    Write { stream: u8, toks: Arc<Vec<Tok>> },
+    Close { stream: u8 },
+    /// `\special{…}`: the expanded text as shipping prints it.
+    Special(Arc<str>),
+}
+
+/// An insertion (tex.web 140): its class, its natural height plus depth,
+/// `\splitmaxdepth`, `\splittopskip` and `\floatingpenalty` as they were
+/// at its end, and its vertical list.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Ins {
+    pub n: u8,
+    pub height: i32,
+    pub depth: i32,
+    pub split_top: Arc<Glue>,
+    pub float_cost: i32,
+    pub list: Vec<Item>,
 }
 
 /// A glue item from a parameter (`sub` = its number + 1).

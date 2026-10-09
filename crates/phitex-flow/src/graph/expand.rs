@@ -50,7 +50,9 @@ impl Exec<'_> {
             if self.noexp && expands(&m) {
                 return Some((t, Meaning::Prim(Prim::Relax)));
             }
-            if top && matches!(m, Meaning::Prim(p) if p.conditional()) {
+            // (`\input` at the top is a node of its own, whose result is the
+            // file: CORE.md)
+            if top && matches!(m, Meaning::Prim(p) if p.conditional() || p == Prim::Input) {
                 return Some((t, m));
             }
             if t.key().is_some() && expands(&m) {
@@ -92,7 +94,20 @@ impl Exec<'_> {
                     let toks = self.the_toks();
                     self.rewrite(toks);
                 }
-                Prim::Input | Prim::EndInput => self.err(format!("\\{} is not supported yet", p.name())),
+                Prim::Input => self.start_input(),
+                Prim::EndInput => self.end_input(),
+                // (`\splitfirstmark`, `\splitbotmark`, e-TeX's
+                // `\splitfirstmarks n`, `\splitbotmarks n`: what the last
+                // `\vsplit` defined, tex.web 386, etex.web §1493)
+                Prim::Mark(k @ (3 | 4 | 8 | 9)) => {
+                    let class = if k >= 5 { self.scan_eight_bit_int() } else { 0 };
+                    if let Val::SplitMarks(m) = self.get(&Key::SplitMarks)
+                        && let Ok(i) = m.binary_search_by_key(&class, |x| x.0)
+                    {
+                        let t = if k % 5 == 3 { &m[i].1 } else { &m[i].2 };
+                        self.rewrite(t.to_vec());
+                    }
+                }
                 // (e-TeX's: etex.web §1418, §1489)
                 Prim::Unexpanded | Prim::Detokenize => {
                     let toks = self.etex_the(*p);
@@ -192,7 +207,10 @@ impl Exec<'_> {
                 }
             }
             Conv::FontName => self.font_name_text(&mut s),
-            Conv::JobName => s.push_str(JOBNAME),
+            Conv::JobName => match self.get(&Key::Job) {
+                Val::Name(n) => s.push_str(&n),
+                _ => s.push_str(JOBNAME),
+            },
             Conv::ETeXRevision => s.push_str(super::etex::ETEX_REVISION),
         }
         self.rewrite(print::str_toks(&s));
@@ -504,11 +522,7 @@ impl Exec<'_> {
                 let b = self.ifx_operand();
                 a == b
             }
-            IfKind::Eof => {
-                // (no stream is ever open yet)
-                let _ = self.scan_four_bit_int();
-                true
-            }
+            IfKind::Eof => self.if_eof(),
             IfKind::True => true,
             IfKind::Case => unreachable!("\\ifcase has no boolean test"),
             IfKind::Defined => {

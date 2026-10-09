@@ -1,0 +1,16 @@
+\catcode`\{=1 \catcode`\}=2 \catcode`\#=6
+\font\tenrm=cmr10 \tenrm
+\hsize=200pt \vsize=400pt \parindent=15pt \baselineskip=12pt \topskip=10pt
+\tolerance=1000 \linepenalty=10 \maxdepth=2pt \parfillskip=0pt plus 1fil
+\showboxdepth=10 \showboxbreadth=100
+A paragraph with a vertical adjustment\vadjust{\kern 5pt\hrule} in its first line and
+more text\vadjust{\penalty-50 \kern 2pt} that goes on to a second line of the paragraph so that
+the adjustments land after different lines of it in the end.\par
+\hbox{An hbox in vertical mode\vadjust{\kern 3pt}\mark{x}}
+\setbox1\vbox{\hsize=100pt A box with an insertion\insert100{\hbox{inserted}\vskip 2pt}
+in its paragraph and \vadjust{\hrule} an adjustment.}
+\setbox3\hbox to 150pt{\insert200{\floatingpenalty=7 \splittopskip=3pt plus 1pt
+\splitmaxdepth=1pt \hbox{in}}\vadjust{\kern1pt}x}
+\setbox2\vbox to 100pt{\unvbox1}
+\box2
+\end

@@ -828,13 +828,15 @@ impl Exec<'_> {
             let (d, visible) = match it {
                 Item::Char(..) | Item::Lig(_) | Item::Box(_) | Item::Rule { .. } => (it.width(), true),
                 Item::Kern { w, .. } | Item::Math { w, .. } => (*w, false),
-                Item::Glue { g, .. } => {
+                Item::Glue { .. } | Item::Leaders(_) => {
+                    let g = it.glue().expect("glue");
                     if (just.glue.sign == 1 && just.glue.order == g.stretch_order && g.stretch != 0)
                         || (just.glue.sign == -1 && just.glue.order == g.shrink_order && g.shrink != 0)
                     {
                         v = MAX_DIMEN;
                     }
-                    (g.width, false)
+                    // (§1148: leaders are visible)
+                    (g.width, matches!(it, Item::Leaders(_)))
                 }
                 _ => (0, false),
             };
