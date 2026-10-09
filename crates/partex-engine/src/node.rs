@@ -392,10 +392,103 @@ pub fn tok_poly_step(h: u64, t: i32) -> u64 {
 
 /// The version of a token list: the polynomial of its tokens, its length
 /// and its `\protected` flag (equal iff the tokens and the flag are, up to
-/// the polynomial's collisions, 2^-61 a pair).
+/// the polynomial's collisions, 2^-61 a pair). A control sequence whose
+/// location a session's shared interner chose (its place depends on the
+/// order names were made in) counts by its spelling, never its location
+/// ([`Spellings`]).
 #[must_use]
 pub fn tok_version(toks: &[i32], protected: bool) -> u128 {
+    #[cfg(feature = "std")]
+    if let Some(v) = SPELLINGS.with(|s| {
+        s.borrow()
+            .as_ref()
+            .map(|sp| tok_version_spelled(toks, protected, sp))
+    }) {
+        return v;
+    }
     let poly = toks.iter().fold(0, |h, &t| tok_poly_step(h, t));
+    let len = u128::try_from(toks.len()).unwrap_or(u128::MAX >> 64);
+    (u128::from(poly) << 64) | (len << 1) | u128::from(protected)
+}
+
+/// The spellings of the control sequences a session's shared interner
+/// placed (DESIGN 3.17): location `base + i` holds a name whose
+/// spelling hashes to `hashes[i]` (0: none placed there by it). Shared by
+/// every engine view of the session; append-only.
+pub struct Spellings {
+    pub base: i32,
+    pub hashes: Box<[core::sync::atomic::AtomicU64]>,
+}
+
+impl Spellings {
+    /// Room for locations `base..base + n`.
+    #[must_use]
+    pub fn new(base: i32, n: usize) -> Spellings {
+        Spellings {
+            base,
+            hashes: (0..n)
+                .map(|_| core::sync::atomic::AtomicU64::new(0))
+                .collect(),
+        }
+    }
+
+    /// The spelling hash of the name at location `p`, if the interner
+    /// placed one there.
+    #[inline]
+    #[must_use]
+    pub fn get(&self, p: i32) -> Option<u64> {
+        let i = usize::try_from(p - self.base).ok()?;
+        let h = self
+            .hashes
+            .get(i)?
+            .load(core::sync::atomic::Ordering::Relaxed);
+        (h != 0).then_some(h)
+    }
+
+    /// Location `p` holds a name spelled with hash `h` (not 0).
+    pub fn set(&self, p: i32, h: u64) {
+        if let Some(x) = usize::try_from(p - self.base)
+            .ok()
+            .and_then(|i| self.hashes.get(i))
+        {
+            x.store(h.max(1), core::sync::atomic::Ordering::Relaxed);
+        }
+    }
+}
+
+#[cfg(feature = "std")]
+std::thread_local! {
+    /// The session's spellings for the engine running on this thread.
+    static SPELLINGS: core::cell::RefCell<Option<Arc<Spellings>>> =
+        const { core::cell::RefCell::new(None) };
+}
+
+/// The spellings token-list versions made on this thread use (`None`:
+/// every token by its value).
+#[cfg(feature = "std")]
+pub fn set_spellings(s: Option<Arc<Spellings>>) {
+    SPELLINGS.with(|x| *x.borrow_mut() = s);
+}
+
+/// [`tok_version`] with control sequences the interner placed by their
+/// spelling: such a token is two steps, a marker no token is (negative)
+/// and its spelling hash, in halves.
+#[cfg(feature = "std")]
+fn tok_version_spelled(toks: &[i32], protected: bool, sp: &Spellings) -> u128 {
+    let flag = crate::web::CS_TOKEN_FLAG;
+    let poly = toks.iter().fold(0, |h, &t| {
+        if t >= flag
+            && let Some(x) = sp.get(t - flag)
+        {
+            #[allow(clippy::cast_possible_truncation, reason = "halves")]
+            let (lo, hi) = (x as u32, (x >> 32) as u32);
+            let h = tok_poly_step(h, i32::MIN);
+            let h = tok_poly_step(h, lo.cast_signed());
+            tok_poly_step(h, hi.cast_signed())
+        } else {
+            tok_poly_step(h, t)
+        }
+    });
     let len = u128::try_from(toks.len()).unwrap_or(u128::MAX >> 64);
     (u128::from(poly) << 64) | (len << 1) | u128::from(protected)
 }

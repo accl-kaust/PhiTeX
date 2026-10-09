@@ -8,5 +8,10 @@ publish = false
 [dependencies]
 partex-ssa = { path = "../partex-ssa" }
 
+[features]
+# A token list's version by its names' spellings, per thread
+# (`node::set_spellings`).
+std = []
+
 [lints]
 workspace = true

@@ -79,6 +79,8 @@ mod hyph;
 mod icu_linebreak;
 mod icu_tables;
 mod input;
+#[cfg(feature = "std")]
+pub mod interner;
 mod journal;
 mod linebreak;
 pub mod machine;

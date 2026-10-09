@@ -2027,6 +2027,10 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             font_log: _,
             // (a switch: where names are, not what)
             probe_names: _,
+            #[cfg(feature = "std")]
+                shared_names: _,
+            #[cfg(feature = "std")]
+                share_decoys: _,
             seal_at,
             seal_log: _,
             stop_before_ship: _,

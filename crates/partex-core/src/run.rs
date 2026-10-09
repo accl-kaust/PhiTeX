@@ -717,6 +717,13 @@ impl<H: Host, T: Tracker> Tex<H, T> {
 
     /// §1337 after the format's load, to `main_control`.
     fn run_after_format(&mut self) -> Result<(), Jump> {
+        #[cfg(feature = "std")]
+        if let Some(decoys) = self.share_decoys.take() {
+            let _ = self.share_names();
+            for d in &decoys {
+                let _ = self.intern_name(d);
+            }
+        }
         if self.etex_ex() {
             self.term_bytes(b"entering extended mode\n");
         }

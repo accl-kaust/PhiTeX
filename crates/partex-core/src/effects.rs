@@ -260,6 +260,70 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         self.name_cells = on;
     }
 
+    /// A shared interner for this session (`interner.rs`), made from the
+    /// names this engine has now (the format's): every view forked from
+    /// it after places the names it makes through it. Token-list
+    /// versions made on this thread count those names by their spellings
+    /// (`SharedNames::enter` on each worker's).
+    #[cfg(feature = "std")]
+    pub fn share_names(&mut self) -> alloc::sync::Arc<crate::interner::SharedNames> {
+        use crate::web::{EQTB_SIZE, HASH_BASE};
+        let n = self.hash.len();
+        let taken: alloc::vec::Vec<bool> = (0..n).map(|i| self.hash[i].rh() != 0).collect();
+        let extra = usize::try_from(self.params.hash_extra).unwrap_or(0);
+        let s = alloc::sync::Arc::new(crate::interner::SharedNames::new(
+            HASH_BASE,
+            &taken,
+            EQTB_SIZE + 1,
+            extra.saturating_sub(usize::try_from(self.hash_high).unwrap_or(0)),
+        ));
+        s.enter();
+        self.shared_names = Some(s.clone());
+        s
+    }
+
+    /// Name `name` placed through the shared interner as this engine
+    /// would place it (its hash code's slot, then its probes), without
+    /// entering it in this engine's table (a test's decoy).
+    #[cfg(feature = "std")]
+    pub fn intern_name(&self, name: &[u8]) -> Option<i32> {
+        let sh = self.shared_names.as_ref()?;
+        let (&first, rest) = name.split_first()?;
+        let mut h = i32::from(first);
+        for &c in rest {
+            h = h + h + i32::from(c);
+            while h >= crate::eqtb::HASH_PRIME {
+                h -= crate::eqtb::HASH_PRIME;
+            }
+        }
+        sh.insert(
+            name,
+            core::iter::once(h + crate::eqtb::HASH_BASE).chain(self.name_probes(name)),
+        )
+    }
+
+    /// Share the names once the format is loaded (or, `-ini`, once the
+    /// primitives are in), `decoys` placed first so that the run's names
+    /// land elsewhere: the outputs must not change.
+    #[cfg(feature = "std")]
+    pub fn share_names_after_format(&mut self, decoys: alloc::vec::Vec<alloc::vec::Vec<u8>>) {
+        self.share_decoys = Some(decoys);
+    }
+
+    /// The shared interner, if names are shared.
+    #[cfg(feature = "std")]
+    #[must_use]
+    pub fn shared_names(&self) -> Option<&alloc::sync::Arc<crate::interner::SharedNames>> {
+        self.shared_names.as_ref()
+    }
+
+    /// Place the names this engine makes through `s` (a view of a session
+    /// that shares one).
+    #[cfg(feature = "std")]
+    pub fn set_shared_names(&mut self, s: Option<alloc::sync::Arc<crate::interner::SharedNames>>) {
+        self.shared_names = s;
+    }
+
     /// Place and find the run's names by probing (see `Tex::probe_names`;
     /// with names as cells and placed by name).
     pub fn set_probe_names(&mut self, on: bool) {
