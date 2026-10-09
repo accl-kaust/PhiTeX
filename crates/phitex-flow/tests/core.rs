@@ -122,3 +122,63 @@ fn a_register_gets_its_phi_and_expansion_makes_no_node() {
         assert!(commands.iter().any(|x| x == c), "no {c} node: {commands:?}");
     }
 }
+
+/// Builds plain.tex, applies `edits` one after the other, and checks each
+/// incremental build's log and errors against a cold build of the text.
+fn edits_give_the_cold_log(threads: usize, edits: &[(&str, &str)]) {
+    let src = std::fs::read_to_string(dir().join("plain.tex")).unwrap();
+    let o = Options { threads, ..Options::default() };
+    let mut b = Build::new(font());
+    let first = b.update(&src, o);
+    assert!(first.errors.is_empty(), "{threads} threads, cold: {:?}", first.errors);
+    let mut text = src.clone();
+    for &(from, to) in edits {
+        assert!(text.contains(from), "{from}");
+        text = text.replacen(from, to, 1);
+        let e = b.update(&text, o);
+        let cold = Build::new(font()).update(&text, o);
+        assert_eq!(e.errors, cold.errors, "after {from:?} => {to:?} at {threads} threads");
+        assert!(e.log == cold.log, "after {from:?} => {to:?} at {threads} threads: another log");
+    }
+}
+
+/// An edit gives what a cold build of the edited text gives, the log
+/// included: plain.tex edited in a definition read later, a macro, a
+/// catcode, a conditional's arm.
+#[test]
+fn an_edit_gives_the_cold_log() {
+    edits_give_the_cold_log(
+        1,
+        &[
+            ("\\mathchardef\\@M=10000", "\\mathchardef\\@M=10001"),
+            ("\\def\\magstephalf{1095 }", "\\def\\magstephalf{1096 }\\message{\\magstephalf}"),
+            ("\\catcode`@=11", "\\catcode`@=11 \\message{at}"),
+            ("\\footrue \\iffoo", "\\foofalse \\iffoo"),
+        ],
+    );
+}
+
+/// FAILS (run_piece, not the language): when a name read by two nodes of a
+/// piece changes, only the first reader is marked (the edges keep one node
+/// per piece and name); if it runs again with the same output, the nodes
+/// after it are shared in place without looking at their reads, so the
+/// second reader (`\global\advance\count18` inside `\newfam`) keeps the old
+/// value: `\myfam=\fam4` where a cold build says `\fam6`.
+#[test]
+#[ignore = "run_piece shares a later reader of a changed name in place"]
+fn an_edit_rereads_every_reader_of_a_changed_name() {
+    edits_give_the_cold_log(1, &[("\\count18=3 ", "\\count18=5 ")]);
+}
+
+/// FAILS, same cause (run_piece's in-place sharing): a cold build of
+/// plain.tex at 4 threads ends with `Undefined control sequence \maxdimen`
+/// in the probes piece: its first reader of `\maxdimen` runs again once the
+/// definition is installed, gives the same output, and the later reader
+/// (`\mydimen=\maxdimen`) is shared stale. With the in-place sharing off
+/// (`in_place = false`), both ignored tests and all of `tests/flow.rs`
+/// pass (checked; not committed: run_piece is not this change's to touch).
+#[test]
+#[ignore = "run_piece shares a later reader of a changed name in place"]
+fn plain_at_four_threads() {
+    edits_give_the_cold_log(4, &[]);
+}
