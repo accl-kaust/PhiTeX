@@ -217,6 +217,7 @@ impl Exec<'_> {
                 // (the mode is a key; `new_interaction` begins a line)
                 Prim::Interaction(k) => self.new_interaction(i32::from(k)),
                 Prim::PageInt(2) => self.interaction_mode_assign(),
+                Prim::PageInt(_) | Prim::PageDimen(_) => self.alter_page(*p),
                 Prim::ReadLine => self.read_line(),
                 Prim::HyphData(pat) => self.hyph_data(pat),
                 _ => self.err(format!("\\{} is not supported yet", p.name())),

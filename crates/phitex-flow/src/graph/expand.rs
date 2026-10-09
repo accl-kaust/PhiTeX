@@ -93,17 +93,23 @@ impl Exec<'_> {
                     self.rewrite(toks);
                 }
                 Prim::Input | Prim::EndInput => self.err(format!("\\{} is not supported yet", p.name())),
-                // (e-TeX's: etex.web §1418, §1489, and `\topmarks n`'s number:
-                // every mark is empty yet)
+                // (e-TeX's: etex.web §1418, §1489)
                 Prim::Unexpanded | Prim::Detokenize => {
                     let toks = self.etex_the(*p);
                     self.rewrite(toks);
                 }
                 Prim::ScanTokens => self.scan_tokens(),
-                Prim::Mark(k) if k >= 5 => {
-                    let _ = self.scan_eight_bit_int();
+                // (tex.web 386, etex.web §1493: `\topmark` and friends, `\topmarks
+                // n` and friends: the mark the page builder (or `\vsplit`)
+                // defined, a read)
+                Prim::Mark(k) => {
+                    let (which, class) = if k >= 5 { (k - 5, self.scan_eight_bit_int()) } else { (k, 0) };
+                    if let Val::Toks(l) = self.get(&Key::Mark(which, class))
+                        && !l.is_empty()
+                    {
+                        self.rewrite(l.to_vec());
+                    }
                 }
-                // (`\topmark` and friends: no marks yet, every mark is empty)
                 _ => {}
             },
             _ => {}

@@ -208,10 +208,11 @@ impl Exec<'_> {
                 Prim::PrevGraf => IVal::Int(if self.in_write { 0 } else { self.st.prev_graf }),
                 // (e-TeX's `\interactionmode`: a key)
                 Prim::PageInt(2) => IVal::Int(self.int(&Key::Interaction)),
-                // (the page builder's state: not a read of the reader yet,
-                // CORE.md; an empty page's values)
-                Prim::PageInt(_) => IVal::Int(0),
-                Prim::PageDimen(k) => IVal::Dimen(if k == 0 { MAX_DIMEN } else { 0 }),
+                // (the page builder's state: a read of `Key::Page`, defined
+                // by an output routine's run, CORE.md; outside one an empty
+                // page's values)
+                Prim::PageInt(k) => IVal::Int(self.int(&Key::Page(super::output::DEAD_CYCLES + k))),
+                Prim::PageDimen(k) => IVal::Dimen(self.int(&Key::Page(k))),
                 Prim::BoxDimen(c) => IVal::Dimen(self.box_dimen(c)),
                 Prim::Mat(crate::val::Mat::FontInt(k)) => {
                     let key = self.font_int_key(k);

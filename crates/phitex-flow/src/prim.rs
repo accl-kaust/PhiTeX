@@ -410,7 +410,7 @@ params! { GluePar, 18, Lineskip = "lineskip", Baselineskip = "baselineskip", Par
 params! { TokPar, 10, Output = "output", Everypar = "everypar", Everymath = "everymath", Everydisplay = "everydisplay", Everyhbox = "everyhbox", Everyvbox = "everyvbox", Everyjob = "everyjob", Everycr = "everycr", Errhelp = "errhelp", Everyeof = "everyeof" }
 
 /// The reader's internal commands (`Mat::Internal`).
-pub const INTERNAL: [(&str, Prim); 9] = [
+pub const INTERNAL: [(&str, Prim); 11] = [
     ("\u{0}package", Prim::Mat(Mat::Internal(0))),
     ("\u{0}endgraf", Prim::Mat(Mat::Internal(1))),
     ("\u{0}discnext", Prim::Mat(Mat::Internal(2))),
@@ -420,6 +420,9 @@ pub const INTERNAL: [(&str, Prim); 9] = [
     ("\u{0}displayend", Prim::Mat(Mat::Internal(6))),
     ("\u{0}mathgroup", Prim::Mat(Mat::Internal(7))),
     ("\u{0}choicenext", Prim::Mat(Mat::Internal(8))),
+    // (an output routine's first two nodes: `graph::output`)
+    ("\u{0}output", Prim::Mat(Mat::Internal(9))),
+    ("\u{0}outputpage", Prim::Mat(Mat::Internal(10))),
 ];
 
 /// Every TeX82 primitive (tex.web §1336: partex-core's `init_prim_tex` less

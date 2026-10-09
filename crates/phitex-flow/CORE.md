@@ -163,8 +163,10 @@ both TeX and the graph; `tests/flow.rs`'s `doc()` begins with its catcodes,
     material before it (the true dependency). The page builder also
     *defines* `\outputpenalty` (globally, tex.web 1013): with `\output`
     that becomes a definition made by the fold at the firing call, read by
-    the output routine's nodes (19). Now: an empty page's values, empty
-    marks, `\outputpenalty` not defined.
+    the output routine's nodes (19). Now: they are `Key`s (`Key::Page`,
+    `Key::Mark`) an output routine's run defines at its start ("The TeX
+    side of output routines"); elsewhere an empty page's values and empty
+    marks until the fold defines them.
 13. **The current list's last item**: `\lastpenalty`, `\lastkern`,
     `\lastskip`, `\/` read it; `\unskip`, `\unkern`, `\unpenalty` remove
     it. Done: the removals emit `Item::Remove`, which the list's gatherer
@@ -443,12 +445,84 @@ run**:
   contributions are not empty or `\deadcycles≠0`, it appends `\hbox
   to\hsize{}`, `\vfill`, `\penalty-'10000000000` and fires again.
 
-`\deadcycles` and `\insertpenalties` (set_page_int) are fold state, not
-`Key`s: an assignment to them in the body emits an item the fold applies
-in order (as `\prevdepth`'s `Item::PrevDepth` does now); in a routine run
-it changes the run's own copy, returned to the fold at the run's end. A
-read of them, of the marks, of `\pagegoal`… in the body is a read of the
-fold's state at the reading node's position (Conflict 12).
+`\deadcycles`, `\insertpenalties`, `\pagegoal`… and the marks are `Key`s
+(coordinator, 2026-10-09, superseding "fold state, not `Key`s"):
+`Key::Page(k)` and `Key::Mark(which, class)`. A routine run defines them
+at its start (the fold's values at the fire); outside a routine a read sees
+what the last definition before it made (a run's exports), else an empty
+page's values; `\shipout` defines `\deadcycles` 0 wherever it is (§638).
+The fold reads `\deadcycles` at the fire and at `\end` like any name.
+
+### The TeX side of output routines (done: `graph/output.rs`)
+
+The handoff for the page fold (agent A's sequence):
+
+1. **At a fire with a routine** (`\output` not empty, `\deadcycles <
+   \maxdeadcycles`, read at the firing place): the fold computes the page
+   box (`vpack` to the best size, as the default output does), the marks
+   (`output::fire_marks(prev, &page)`: §1012–1014 for every class, from
+   the marks after the previous page) and `OutputReads { output_penalty
+   (§1013), insert_penalties (§1018), dead_cycles (the value read at the
+   fire, before §1025's increment), marks, page_so_far }`, and calls
+   **`output::output_entry(&page, &reads, &output_tokens) -> RState`**
+   (`output_tokens`: `\output`'s value, braces included). The state is a
+   piece start's but for its input: `\0output`, then the routine's tokens;
+   `RState::fire` carries the fold's values to the run's first nodes.
+2. **The run**: a piece whose text is **empty** and whose chain starts
+   from that state (`Chain::with_entry`; `Chain::prefix` keeps it, so a
+   re-run of the routine with `run_piece` given the entry shares nodes as
+   a piece's does). `output::run_routine(&entry, env)` is the cold run
+   (what `tests/output.rs` uses). An empty text is safe for the reader
+   (the input ends where the pending tokens do: the `End` node), for
+   `logs` (every node is at the text's line 1) and for the context lines
+   of errors. Its nodes:
+   - node 0 (`\0output`, `Kind::Open`): defines, **globally**, `\box255`
+     (the page), `\outputpenalty`, `Key::Page(DEAD_CYCLES)` (incremented)
+     and every `Key::Mark(0..=2, class)` handed in; opens the output group
+     (`GroupKind::Output`, `\currentgrouptype` 8) with an internal vertical
+     list at level 1 (`prev_depth` ignored, `prev_graf` 0); reads the `{`.
+   - node 1 (`\0outputpage`): inside the group, `Key::Page(0..=7)`
+     (`page_so_far`) and `Key::Page(INSERT_PENALTIES)`; `normal_paragraph`.
+   - the routine's nodes. `\shipout` is a node as before (`Item::Shipout`,
+     `\deadcycles` 0).
+   - the group's `}` (`Kind::Close`): "Unbalanced output routine" (§1100,
+     the rest of the routine's text skipped); a paragraph in progress ends
+     first; the group closes; "Output routine didn't use all of \box255"
+     (§1028; `\box255` voided, globally); both errors carry TeX's help
+     lines after the message (`output::UNBALANCED`, `output::UNUSED`). The
+     node's **material** (`Para::before` at the run's outer level) is the
+     pages its `\shipout`s made (`Item::Shipout`, in order), then the
+     routine's vertical list at its end (the **leftover**, interline glue
+     in it); its result is **`Node::output() -> Some(&OutputEnd { shipped,
+     dead_cycles })`** (`Rare::output`; `shipped` counts the pages before
+     the leftover; `output::output_end(&run)` gives it with the leftover).
+   - anything read after the `}` (an `\aftergroup` token) runs at the run's
+     outer level (vertical mode): its material follows.
+3. **What the fold does with the run**: its **definitions** enter the
+   names index at the firing place `(k, i)` (its exports: `\box255` void,
+   `\outputpenalty`, `\deadcycles`, the marks, whatever the routine
+   defined globally); its **pages** (the run's material, `Item::Shipout`)
+   go to the DVI in order; the **leftover** (the rest of the `Close`
+   node's material) goes before the remaining contributions (after held-over insertions, §1026), then the fold calls
+   the page builder (§1026's `build_page`) with the firing call's
+   parameters, then feeds the run's other material; its **errors** are the
+   document's at that place. `OutputEnd::dead_cycles` equals the run's
+   export of `Key::Page(DEAD_CYCLES)`: the fold reads it (or the export)
+   at `\end` (§1054) and at the next fire (`Output loop---N consecutive
+   dead cycles`, §1024, is the fold's). Line numbers in the run's log
+   entries are line 1 of an empty text: the log's gatherer gives them the
+   firing node's line.
+4. Not here: insertions (`\insert`, `\vadjust`, `\vsplit` are not on this
+   line yet; `\floatingpenalty`, `\splittopskip`, `\splitmaxdepth` are
+   ordinary `Key`s their packaging node will read at the close, and
+   `\holdinginserts`, each class's `\count`/`\dimen`/`\skip`/`\box` are
+   names the fold reads at the firing place, as it reads `\output` and
+   `\maxdeadcycles`), `\showlists` inside a routine (its list is not one
+   `\showlists` shows yet), and the "The following box has been deleted:"
+   diagnostic of §1028 (errors' help and diagnostics are not in the log).
+   `tests/output.rs` checks plain's `\output` on a page with marks in its
+   headline against `tex -ini` (the DVI file, byte for byte), the two
+   errors against TeX's, and what a routine reads and leaves.
 
 **The page scan's incremental resume rule.** Routine runs are elements of
 the material sequence, like pieces. The resume point is the last page
@@ -527,8 +601,9 @@ Conflicts and gaps, with graph-shaped proposals:
    (as Conflict 18's `\box255`); a reader parks on the fold. Now: empty
    (exact while `\savingvdiscards` is not positive); in horizontal mode the
    paragraph ends first (`head_for_vmode`), as TeX's `un_vbox`.
-6. **`\topmarks n`…`\splitbotmarks n`**: the number is scanned; empty, as
-   `\topmark` (Conflicts 12, 18).
+6. **`\topmarks n`…`\splitbotmarks n`**: the number is scanned; a read of
+   `Key::Mark(which, n)`, as `\topmark` (Conflicts 12, 18; an output
+   routine's run defines them).
 7. **TeXXeT**: `\beginL`… are items when `\TeXXeTstate` is positive
    ("Improper `\beginL`" otherwise); no reversal yet in line breaking
    (`post_line_break`'s LR nodes), packing (LR anomalies) or DVI
@@ -552,7 +627,7 @@ e-TeX's primitives:
 | primitive | etex.web cmd | graph form | status |
 |---|---|---|---|
 | `\beginL`, `\endL`, `\beginR`, `\endR` | valign | node emitting `Item::Math` (horizontal mode; vertical: a paragraph begins) | items; no reversal (gap 7) |
-| `\botmarks`, `\firstmarks`, `\topmarks`, `\splitbotmarks`, `\splitfirstmarks` | top_bot_mark | step: scans the class; empty until the page fold has marks | approx: empty |
+| `\botmarks`, `\firstmarks`, `\topmarks`, `\splitbotmarks`, `\splitfirstmarks` | top_bot_mark | step: scans the class; rewrites the input with `Key::Mark(which, class)` (a read), defined by an output routine's run | approx: empty outside a routine until the fold runs routines |
 | `\clubpenalties`, `\displaywidowpenalties`, `\interlinepenalties`, `\widowpenalties` | set_shape | `Key::PenShape(k)` (proposal) | not yet |
 | `\currentgrouplevel`, `\currentgrouptype` | last_item | a read of `RState.groups` | done |
 | `\currentifbranch`, `\currentiflevel`, `\currentiftype` | last_item | a read of `RState.conds` | done |
@@ -586,14 +661,14 @@ e-TeX's primitives:
 
 | primitive | tex.web cmd | graph form | status |
 |---|---|---|---|
-| `\botmark` | top_bot_mark | step: rewrites the input with a mark of the page builder's last output — reads the page scan's result (see Conflicts); empty until marks exist | approx: empty |
+| `\botmark` | top_bot_mark | step: rewrites the input with `Key::Mark(which, 0)` (a read), defined by an output routine's run (`graph/output.rs`) | approx: empty outside a routine until the fold runs routines |
 | `\csname` | cs_name | step: builds the name, rewrites the input with it; an undefined name is defined `\relax` (local) by the node the step is in | done |
 | `\else` | fi_or_else | ends the taken arm (skips the rest to `\fi`): the closing node defines each key the arm defined as φ(after, before) | done |
 | `\endcsname` | end_cs_name | outside `\csname`: an error node | done |
 | `\endinput` | input | a call into a named source: the file is a value whose text becomes pieces — DESIGN CONVERSATION (see Conflicts) | not yet |
 | `\expandafter` | expand_after | step: expands the token after next once, rewrites the input | done |
 | `\fi` | fi_or_else | ends the taken arm (skips the rest to `\fi`): the closing node defines each key the arm defined as φ(after, before) | done |
-| `\firstmark` | top_bot_mark | step: rewrites the input with a mark of the page builder's last output — reads the page scan's result (see Conflicts); empty until marks exist | approx: empty |
+| `\firstmark` | top_bot_mark | step: rewrites the input with `Key::Mark(which, 0)` (a read), defined by an output routine's run (`graph/output.rs`) | approx: empty outside a routine until the fold runs routines |
 | `\fontname` | convert | step: the font's name and size (tex.web 472) | done |
 | `\if` | if_test | conditional: at the top a node (`Kind::If`, test operands = the reads it made); inside scanning a step of that node; only the taken arm is read; the end gets an explicit φ | done |
 | `\ifcase` | if_test | conditional: at the top a node (`Kind::If`, test operands = the reads it made); inside scanning a step of that node; only the taken arm is read; the end gets an explicit φ | done |
@@ -620,11 +695,11 @@ e-TeX's primitives:
 | `\number` | convert | step: reads its operand (a token, a number, `\escapechar`, catcodes of one-letter names) and rewrites the input with category-12 tokens | done |
 | `\or` | fi_or_else | ends the taken arm (skips the rest to `\fi`): the closing node defines each key the arm defined as φ(after, before) | done |
 | `\romannumeral` | convert | step: reads its operand (a token, a number, `\escapechar`, catcodes of one-letter names) and rewrites the input with category-12 tokens | done |
-| `\splitbotmark` | top_bot_mark | step: rewrites the input with a mark of the page builder's last output — reads the page scan's result (see Conflicts); empty until marks exist | approx: empty |
-| `\splitfirstmark` | top_bot_mark | step: rewrites the input with a mark of the page builder's last output — reads the page scan's result (see Conflicts); empty until marks exist | approx: empty |
+| `\splitbotmark` | top_bot_mark | step: rewrites the input with `Key::Mark(which, 0)` (a read), defined by an output routine's run (`graph/output.rs`) | approx: empty outside a routine until the fold runs routines |
+| `\splitfirstmark` | top_bot_mark | step: rewrites the input with `Key::Mark(which, 0)` (a read), defined by an output routine's run (`graph/output.rs`) | approx: empty outside a routine until the fold runs routines |
 | `\string` | convert | step: reads its operand (a token, a number, `\escapechar`, catcodes of one-letter names) and rewrites the input with category-12 tokens | done |
 | `\the` | the | step: reads the internal quantity (`get`) and rewrites the input with its tokens (unexpanded inside `\edef`/`\message`) | done |
-| `\topmark` | top_bot_mark | step: rewrites the input with a mark of the page builder's last output — reads the page scan's result (see Conflicts); empty until marks exist | approx: empty |
+| `\topmark` | top_bot_mark | step: rewrites the input with `Key::Mark(which, 0)` (a read), defined by an output routine's run (`graph/output.rs`) | approx: empty outside a routine until the fold runs routines |
 | `\uppercase` | case_shift | node (not expandable): reads lccode/uccode (`get`) of each character and rewrites the input with the changed text; defines nothing | done |
 
 ### (ii) Assignments and scoping: nodes defining Keys — 151
@@ -869,14 +944,14 @@ e-TeX's primitives:
 | `\box` | make_box | reads `Key::Box(n)`; `box_end` (append with interline glue, `\setbox`, `\shipout`); voids the register at the scope of the definition it replaces (Conflict 7) | done (voiding: Conflict 7) |
 | `\cleaders` | leader_ship | `\shipout`: a node whose operand is a box value and whose result is a page; leaders: material | not yet |
 | `\copy` | make_box | reads `Key::Box(n)`; `box_end` | done |
-| `\deadcycles` | set_page_int | `\deadcycles`, `\insertpenalties`: page builder / output state, a read of the page scan (see Conflicts) | approx: 0 |
+| `\deadcycles` | set_page_int | `Key::Page(8)`, `Key::Page(9)`: read; assigned at the level of the definition replaced (§1246); an output routine's run defines them, `\shipout` makes `\deadcycles` 0 | approx: outside a routine, 0 until the fold defines them |
 | `\dp` | set_box_dimen | `\wd n`...: a read of `Key::Box(n)`'s dimensions; assignment defines a new box value at the scope of the replaced definition (Conflict 7) | done |
 | `\dump` | stop | the end of a format: the format is the set of definitions reaching this point | no-op |
 | `\end` | stop | `its_all_over`: node emitting `Item::End` (the page fold appends `\hbox to\hsize{}\vfill\penalty-2^30` and builds pages until empty, tex.web 1054); reading stops | done (later pieces still run: Conflict 21) |
 | `\hbox` | make_box | a `Kind::Open` node opening a box group (`BoxGroup`: kind, context, `to`/`spread`, the enclosing list's mode, space factor, prev depth); its `}` is a `Close` node; the packaging node (`Kind::Par`) gathers the items emitted inside and packs them (hpack, tex.web 649) with `\hbadness`/`\hfuzz`/`\overfullrule` read after the group, diagnostics into the log | done |
 | `\ht` | set_box_dimen | `\wd n`...: a read of `Key::Box(n)`'s dimensions; assignment defines a new box value at the scope of the replaced definition (Conflict 7) | done |
 | `\insert` | insert | node emitting an insertion (material in a group); the page scan reads its size | not yet |
-| `\insertpenalties` | set_page_int | `\deadcycles`, `\insertpenalties`: page builder / output state, a read of the page scan (see Conflicts) | approx: 0 |
+| `\insertpenalties` | set_page_int | `Key::Page(8)`, `Key::Page(9)`: read; assigned at the level of the definition replaced (§1246); an output routine's run defines them, `\shipout` makes `\deadcycles` 0 | approx: outside a routine, 0 until the fold defines them |
 | `\lastbox` | make_box | removes the last box of the current list: a removal whose value the node needs — Conflict 13 | not yet |
 | `\lastkern` | last_item | the current list's last item (`last_item`, Conflict 13) | done (inside a piece) |
 | `\lastpenalty` | last_item | the current list's last item (`last_item`, Conflict 13) | done (inside a piece) |
@@ -886,14 +961,14 @@ e-TeX's primitives:
 | `\mark` | mark | node emitting `Item::Mark` (expanded text); marks move out of an `\hbox` in vertical mode and out of lines; `\topmark`... not yet | done (no mark classes) |
 | `\moveleft` | hmove | `scan_box` with a shift (vertical mode) | done |
 | `\moveright` | hmove | `scan_box` with a shift (vertical mode) | done |
-| `\pagedepth` | set_page_dimen | `\pagegoal`...: the page scan's state at this point — a read of the page scan (see Conflicts) | approx: empty page |
-| `\pagefilllstretch` | set_page_dimen | `\pagegoal`...: the page scan's state at this point — a read of the page scan (see Conflicts) | approx: empty page |
-| `\pagefillstretch` | set_page_dimen | `\pagegoal`...: the page scan's state at this point — a read of the page scan (see Conflicts) | approx: empty page |
-| `\pagefilstretch` | set_page_dimen | `\pagegoal`...: the page scan's state at this point — a read of the page scan (see Conflicts) | approx: empty page |
-| `\pagegoal` | set_page_dimen | `\pagegoal`...: the page scan's state at this point — a read of the page scan (see Conflicts) | approx: empty page |
-| `\pageshrink` | set_page_dimen | `\pagegoal`...: the page scan's state at this point — a read of the page scan (see Conflicts) | approx: empty page |
-| `\pagestretch` | set_page_dimen | `\pagegoal`...: the page scan's state at this point — a read of the page scan (see Conflicts) | approx: empty page |
-| `\pagetotal` | set_page_dimen | `\pagegoal`...: the page scan's state at this point — a read of the page scan (see Conflicts) | approx: empty page |
+| `\pagedepth` | set_page_dimen | `Key::Page(0..=7)`: read; assigned at the level of the definition replaced (§1245); an output routine's run defines them inside its group | approx: outside a routine, an empty page's |
+| `\pagefilllstretch` | set_page_dimen | `Key::Page(0..=7)`: read; assigned at the level of the definition replaced (§1245); an output routine's run defines them inside its group | approx: outside a routine, an empty page's |
+| `\pagefillstretch` | set_page_dimen | `Key::Page(0..=7)`: read; assigned at the level of the definition replaced (§1245); an output routine's run defines them inside its group | approx: outside a routine, an empty page's |
+| `\pagefilstretch` | set_page_dimen | `Key::Page(0..=7)`: read; assigned at the level of the definition replaced (§1245); an output routine's run defines them inside its group | approx: outside a routine, an empty page's |
+| `\pagegoal` | set_page_dimen | `Key::Page(0..=7)`: read; assigned at the level of the definition replaced (§1245); an output routine's run defines them inside its group | approx: outside a routine, an empty page's |
+| `\pageshrink` | set_page_dimen | `Key::Page(0..=7)`: read; assigned at the level of the definition replaced (§1245); an output routine's run defines them inside its group | approx: outside a routine, an empty page's |
+| `\pagestretch` | set_page_dimen | `Key::Page(0..=7)`: read; assigned at the level of the definition replaced (§1245); an output routine's run defines them inside its group | approx: outside a routine, an empty page's |
+| `\pagetotal` | set_page_dimen | `Key::Page(0..=7)`: read; assigned at the level of the definition replaced (§1245); an output routine's run defines them inside its group | approx: outside a routine, an empty page's |
 | `\raise` | vmove | `scan_box` with a shift (horizontal mode) | done |
 | `\setbox` | set_box | prefixed node: `scan_box` with context `Set(n, global)`; the packaging node defines `Key::Box(n)` = `Val::Box` | done |
 | `\shipout` | leader_ship | `scan_box`; `box_end` emits `Item::Shipout` (in the outer list's order, through paragraphs and boxes) with `\count0`–`9`, offsets, `\mag`, date read there; its `[n]` in the node's log | done |

@@ -48,6 +48,7 @@ mod fonts;
 mod lang;
 mod material;
 mod math;
+pub mod output;
 mod scan;
 
 /// A piece's identity, stable across edits.
@@ -95,6 +96,8 @@ enum GroupKind {
     SemiSimple,
     /// A box's or a discretionary's braces (`Group::boxg`).
     Box,
+    /// An output routine's braces (tex.web 1025: `output_group`).
+    Output,
     /// A formula, a subformula, `\left`…`\right`, a `\mathchoice` part
     /// (`Group::boxg`, `math::MathKind`).
     Math,
@@ -240,6 +243,9 @@ pub struct RState {
     /// A paragraph's language state (tex.web 1091, 1376): `clang`, and
     /// the language and hyphen minima it began with.
     hyph_lang: [u8; 4],
+    /// In an output routine's run: what the page builder handed it where
+    /// it fired (the same for all its nodes; `output::output_entry`).
+    fire: Option<Arc<output::Fire>>,
 }
 
 impl RState {
@@ -265,6 +271,7 @@ impl RState {
             protected: false,
             texts: Stack::new(),
             hyph_lang: [0, 0, 1, 1],
+            fire: None,
         }
     }
 }
@@ -332,6 +339,7 @@ impl RState {
             && self.protected == o.protected
             && self.texts == o.texts
             && self.hyph_lang == o.hyph_lang
+            && self.fire == o.fire
     }
 
     /// Whether a node going from `self` to `out` begins a paragraph of the
@@ -452,6 +460,9 @@ pub struct Rare {
     pub phi: Option<Box<Phi>>,
     pub vemit: Vec<Item>,
     pub log: Option<Box<str>>,
+    /// The `Close` of an output routine's group: what the page builder
+    /// takes back (`output::OutputEnd`).
+    pub output: Option<Box<output::OutputEnd>>,
 }
 
 /// A command node. Its input state is its predecessor's `out` (the
@@ -493,6 +504,11 @@ impl Node {
     /// in a newline), the diagnostic value.
     pub fn log(&self) -> Option<&str> {
         self.rare.as_ref().and_then(|r| r.log.as_deref())
+    }
+    /// What an output routine's end left for the page builder (the `Close`
+    /// node of its group).
+    pub fn output(&self) -> Option<&output::OutputEnd> {
+        self.rare.as_ref().and_then(|r| r.output.as_deref())
     }
 }
 
@@ -650,13 +666,26 @@ pub struct Chain {
     err_at: Vec<u32>,
     /// For each `Open` node, the `Open` node of the group enclosing it.
     parent_of: FxMap<u32, u32>,
+    /// The state the first node reads, when it is not a piece's start (an
+    /// output routine's run: `output::output_entry`).
+    entry: Option<Arc<RState>>,
 }
 
 impl Chain {
+    /// A chain whose first node reads `entry`.
+    pub fn with_entry(entry: RState) -> Chain {
+        Chain { entry: Some(Arc::new(entry)), ..Chain::default() }
+    }
+
+    /// The state the first node reads.
+    fn start(&self) -> RState {
+        self.entry.as_deref().map_or_else(RState::start, Clone::clone)
+    }
+
     /// The input state of node `i` (`i == len`: of the next node).
     pub fn input(&self, i: usize) -> RState {
         if i == 0 {
-            RState::start()
+            self.start()
         } else {
             self.nodes[i - 1].out.clone()
         }
@@ -664,14 +693,14 @@ impl Chain {
 
     /// The input position of node `i`.
     fn input_pos(&self, i: usize) -> usize {
-        if i == 0 { 0 } else { self.nodes[i - 1].out.pos }
+        if i == 0 { self.entry.as_ref().map_or(0, |e| e.pos) } else { self.nodes[i - 1].out.pos }
     }
 
     /// Whether node `i` begins a paragraph of the main vertical list.
     fn starts_para(&self, i: usize) -> bool {
         let out = &self.nodes[i].out;
         if i == 0 {
-            RState::start().starts_para(out)
+            self.start().starts_para(out)
         } else {
             self.nodes[i - 1].out.starts_para(out)
         }
@@ -779,7 +808,7 @@ impl Chain {
 
     /// The first `from` nodes of `old`, shared.
     fn prefix(old: &Chain, from: usize) -> Chain {
-        let mut c = Chain::default();
+        let mut c = Chain { entry: old.entry.clone(), ..Chain::default() };
         c.share(old, 0, from);
         c
     }
@@ -1365,6 +1394,8 @@ struct Exec<'a> {
     /// While a rewritten text (`\scantokens`) is read: its characters,
     /// which the tokenizer reads instead of the piece's.
     ptext: Option<Arc<[char]>>,
+    /// The output routine's end this node is (`output::OutputEnd`).
+    output: Option<Box<output::OutputEnd>>,
 }
 
 /// Up to this many reads, a node's reads are looked up by a scan.
@@ -1422,6 +1453,7 @@ impl<'a> Exec<'a> {
             stamp,
             old_para: None,
             ptext: None,
+            output: None,
         }
     }
 
@@ -1449,7 +1481,8 @@ impl<'a> Exec<'a> {
             || !self.errors.is_empty()
             || self.phi.is_some()
             || !self.vemit.is_empty()
-            || self.log.is_some())
+            || self.log.is_some()
+            || self.output.is_some())
         .then(|| {
             Box::new(Rare {
                 defs: self.defs,
@@ -1458,6 +1491,7 @@ impl<'a> Exec<'a> {
                 phi: self.phi,
                 vemit: self.vemit,
                 log: self.log,
+                output: self.output,
             })
         });
         Node {
@@ -2117,6 +2151,7 @@ impl<'a> Exec<'a> {
                 Some(GroupKind::Simple) => self.close_group(),
                 Some(GroupKind::Box) => self.close_box(t),
                 Some(GroupKind::Math) => self.math_right_brace(),
+                Some(GroupKind::Output) => self.output_close(t),
                 Some(GroupKind::SemiSimple) => self.err("Extra }, or forgotten \\endgroup".into()),
                 None => self.err("Too many }'s".into()),
             },
@@ -2152,7 +2187,7 @@ impl<'a> Exec<'a> {
                     let t = self.cmd.clone();
                     self.math_off_save(&t);
                 }
-                Some(GroupKind::Simple | GroupKind::Box) => {
+                Some(GroupKind::Simple | GroupKind::Box | GroupKind::Output) => {
                     // (tex.web 1064: the missing `}` goes in first)
                     self.err("Missing } inserted".into());
                     let t = self.cmd.clone();

@@ -319,6 +319,7 @@ impl Exec<'_> {
         match g.kind {
             GroupKind::Simple => 1,
             GroupKind::SemiSimple => 14,
+            GroupKind::Output => 8,
             GroupKind::Box | GroupKind::Math => match g.boxg.as_deref().map(|b| (&b.kind, b.adjusted)) {
                 Some((BoxKind::H, true)) => 3,
                 Some((BoxKind::V, _)) => 4,

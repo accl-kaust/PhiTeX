@@ -438,6 +438,8 @@ impl Exec<'_> {
             Mat::Internal(5) => self.display_open(),
             Mat::Internal(6) => self.display_end(),
             Mat::Internal(7) => self.math_group_open(),
+            Mat::Internal(9) => self.output_begin(),
+            Mat::Internal(10) => self.output_page_state(),
             Mat::Internal(_) => self.choice_next(),
         }
     }
@@ -1315,8 +1317,14 @@ impl Exec<'_> {
     /// piece (pieces are cut at depth 0: no group spans them); else living
     /// as long as its group.
     pub(super) fn change_box(&mut self, n: u16, val: Val) {
-        let key = Key::Box(n);
-        // (this node's own earlier definition of the register, if any)
+        self.change_direct(Key::Box(n), val);
+    }
+
+    /// A value tex.web assigns directly (a box register's, the
+    /// page builder's quantities, tex.web 1245–1246): a definition at the
+    /// level of the one it replaces ([`Exec::change_box`]).
+    pub(super) fn change_direct(&mut self, key: Key, val: Val) {
+        // (this node's own earlier definition, if any)
         if let Some(i) = self.defs.iter().rposition(|d| d.key == key) {
             let (global, level) = (self.defs[i].global, self.defs[i].level);
             self.defs.push(super::Def { key, val, global, level });
@@ -1538,6 +1546,8 @@ impl Exec<'_> {
             }
             BoxContext::Set(n, global) => self.define(Key::Box(n), Val::Box(Arc::new(b)), global),
             BoxContext::Ship => {
+                // (tex.web 638: `dead_cycles:=0`)
+                self.define(Key::Page(super::output::DEAD_CYCLES), Val::Int(0), true);
                 let ship = self.ship_params();
                 let mark = page_mark(&ship);
                 self.log_raw(&mark);

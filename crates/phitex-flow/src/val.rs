@@ -103,6 +103,17 @@ pub enum Key {
     Patterns(u8),
     /// A language's hyphenation exceptions (`\hyphenation`, global).
     Exceptions(u8),
+    /// The page builder's quantities a document reads and assigns
+    /// (`graph::output::PAGE_GOAL` …): `\pagegoal` … `\pagedepth`
+    /// (0–7, `page_so_far`), `\deadcycles` (8), `\insertpenalties` (9).
+    /// Assigned directly (at the level of the definition
+    /// replaced); an output routine's run defines them at its start.
+    Page(u8),
+    /// `\topmark` (0), `\firstmark` (1), `\botmark` (2),
+    /// `\splitfirstmark` (3), `\splitbotmark` (4) of a mark class (e-TeX's
+    /// `\marks`; TeX's are class 0): global, defined where the page
+    /// builder fires (an output routine's run).
+    Mark(u8, u16),
 }
 
 impl Key {
@@ -197,6 +208,8 @@ impl Key {
             Key::ETeXMode => w(27, 0),
             Key::Patterns(l) => w(28, u64::from(*l)),
             Key::Exceptions(l) => w(29, u64::from(*l)),
+            Key::Page(k) => w(30, u64::from(*k)),
+            Key::Mark(k, c) => w(31, (u64::from(*k) << 16) | u64::from(*c)),
         }
     }
 }
@@ -234,6 +247,26 @@ impl fmt::Display for Key {
             Key::ETeXMode => write!(f, "e-TeX mode"),
             Key::Patterns(l) => write!(f, "\\patterns (language {l})"),
             Key::Exceptions(l) => write!(f, "\\hyphenation (language {l})"),
+            Key::Page(k) => write!(
+                f,
+                "\\{}",
+                [
+                    "pagegoal",
+                    "pagetotal",
+                    "pagestretch",
+                    "pagefilstretch",
+                    "pagefillstretch",
+                    "pagefilllstretch",
+                    "pageshrink",
+                    "pagedepth",
+                    "deadcycles",
+                    "insertpenalties"
+                ][usize::from(*k).min(9)]
+            ),
+            Key::Mark(k, c) => {
+                let n = ["topmark", "firstmark", "botmark", "splitfirstmark", "splitbotmark"][usize::from(*k).min(4)];
+                if *c == 0 { write!(f, "\\{n}") } else { write!(f, "\\{n}s{c}") }
+            }
         }
     }
 }
@@ -396,7 +429,7 @@ pub fn initial(key: &Key, _font: &Arc<Font>, etex: bool) -> Val {
         }),
         Key::Delcode(c) => Val::Int(if *c == '.' { 0 } else { -1 }),
         Key::IntPar(p) => Val::Int(p.initial()),
-        Key::TokPar(_) | Key::Toks(_) => Val::Toks(Arc::new(Vec::new())),
+        Key::TokPar(_) | Key::Toks(_) | Key::Mark(..) => Val::Toks(Arc::new(Vec::new())),
         // (`\fontdimen`: the null font's, tex.web 552; a loaded font's are
         // defined by its `\font`)
         Key::DimenPar(_) | Key::Count(_) | Key::Dimen(_) | Key::FontDimen(..) | Key::FontLoaded(_) => Val::Int(0),
@@ -413,6 +446,9 @@ pub fn initial(key: &Key, _font: &Arc<Font>, etex: bool) -> Val {
         Key::ETeXMode => Val::Int(i32::from(etex)),
         Key::Patterns(_) => Val::Patterns(crate::hyph::Patterns::new()),
         Key::Exceptions(_) => Val::Exceptions(crate::hyph::Exceptions::new()),
+        // (an empty page's, read outside an output routine: tex.web 421's
+        // `max_dimen` for `\pagegoal`, else 0)
+        Key::Page(k) => Val::Int(if *k == 0 { 0x3FFF_FFFF } else { 0 }),
     }
 }
 
