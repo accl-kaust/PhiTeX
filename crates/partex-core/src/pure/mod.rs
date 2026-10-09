@@ -21,3 +21,5 @@ pub use tracker::PureTracker;
 mod driver;
 pub use driver::{Build, Refresh};
 mod files;
+mod shared;
+pub use shared::Shared;

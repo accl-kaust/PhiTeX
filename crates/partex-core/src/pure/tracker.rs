@@ -61,6 +61,9 @@ pub(crate) fn kind(s: Slot) -> Kind {
         | Fam::Sealed
         | Fam::Glyphs
         | Fam::PageNode => Kind::Name,
+        // (the outer vertical list's fields, level 0, are names: a
+        // paragraph's start reads its `\\prevdepth`, not the state)
+        Fam::List if s.1 < i64::from(crate::track::list::COUNT) => Kind::Name,
         Fam::List | Fam::Save | Fam::Cond => Kind::State,
         Fam::Alloc => match u16::try_from(s.1).unwrap_or(u16::MAX) {
             scalar::STR_TOP | scalar::HASH_USED | scalar::HASH_HIGH => Kind::Interner,
@@ -222,6 +225,12 @@ impl Tracker for PureTracker {
     }
     fn pure_global(&self, p: i32) {
         self.global.set(Some(p));
+    }
+    fn reopen(&self, name: &[u8], kind: crate::host::FileKind) -> Option<crate::host::WriteId> {
+        // (a file's handle is its name's: the same in every run of a
+        // step and on every worker, never an allocator's count)
+        let h = phi::ver::hash64(&(name, kind as u8));
+        Some(crate::host::WriteId(0x8000_0000 | (h as u32 & 0x7fff_ffff)))
     }
     fn store_open(&self, _stream: u8, name: &[u8]) {
         self.stores.borrow_mut().insert(name.to_vec(), Store::empty());

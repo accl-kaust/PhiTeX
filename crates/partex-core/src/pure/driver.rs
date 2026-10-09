@@ -88,7 +88,7 @@ impl<H: Host + 'static> Build<H> {
         // (the root unfold reads that file: speculative entries are a
         // root unfold's)
         let doc = match first {
-            Some((h, j, src)) => g.unfold(Op::File(h, j | super::lang::ROOT), src, init, &[]),
+            Some((h, j, src)) => g.unfold(Op::File(h, j | super::lang::ROOT), src, init, &[init]),
             None => g.unfold(Op::Main, input, init, &[]),
         };
         let _ = g.chain_read(OUTPUT);
@@ -176,5 +176,21 @@ impl<H: Host + 'static> Build<H> {
             Val::Done(h) => Some(*h),
             _ => None,
         }
+    }
+}
+
+impl<H: Host + Clone + Send + Sync + 'static> Build<H> {
+    /// Let the graph's workers run steps: each worker thread's engine a
+    /// view of the format's state on a clone of `host` (a host shared by
+    /// all, `pure::Shared`).
+    pub fn enable_workers(&mut self, host: H) {
+        let e = self.engine.as_ref().expect("pure SSA: the engine");
+        let base = std::sync::Arc::new(std::sync::Mutex::new(
+            e.base.fork_with(NoHost, PureTracker::default()),
+        ));
+        super::lang::set_factory::<H>(std::sync::Arc::new(move || {
+            let b = base.lock().expect("pure SSA: the format's state");
+            Engine::worker(&b, host.clone())
+        }));
     }
 }

@@ -1039,6 +1039,15 @@ impl Host for NativeHost {
         {
             return Some((id, n));
         }
+        // (a handle the caller chose, never given: pure SSA mode names a
+        // file's handle by the file, the same in every run and worker)
+        if let Some(id) = again
+            && id.0 & 0x8000_0000 != 0
+            && !self.given.contains_key(&id)
+        {
+            self.given.insert(id, (n.clone(), 0));
+            return Some((id, n));
+        }
         let id = WriteId(self.next_id);
         self.next_id += 1;
         self.given.insert(id, (n.clone(), 0));

@@ -5,14 +5,14 @@
 
 use partex_core::host::Host;
 use partex_core::params::Params;
-use partex_core::pure::{Build, PureTracker};
+use partex_core::pure::{Build, PureTracker, Shared};
 use partex_core::Tex;
 
 use crate::native;
 
 /// Link `b`'s effects and write its files, the terminal's text and the
 /// diagnostics.
-fn link(b: &mut Build<native::NativeHost>, linker: &mut crate::SsaLinker) -> String {
+fn link(b: &mut Build<Shared<native::NativeHost>>, linker: &mut crate::SsaLinker) -> String {
     let t0 = std::time::Instant::now();
     let fx = b.effects();
     let chunks: Vec<&[partex_core::effects::Effect]> = fx.iter().map(|x| &x[..]).collect();
@@ -28,7 +28,9 @@ fn link(b: &mut Build<native::NativeHost>, linker: &mut crate::SsaLinker) -> Str
         }
     };
     let t_link = t0.elapsed();
-    let host = b.engine().tex.host_mut();
+    let shared = b.engine().tex.host_mut().clone();
+    let mut guard = shared.lock();
+    let host: &mut native::NativeHost = &mut guard;
     let (files, bytes) = linker.write_full(host, &l);
     host.term_write(&l.term);
     for d in &l.diagnostics {
@@ -41,7 +43,7 @@ fn link(b: &mut Build<native::NativeHost>, linker: &mut crate::SsaLinker) -> Str
     )
 }
 
-fn report(n: usize, b: &mut Build<native::NativeHost>, rep: &phi::Report, ms: f64) {
+fn report(n: usize, b: &mut Build<Shared<native::NativeHost>>, rep: &phi::Report, ms: f64) {
     let s = b.engine().stats;
     let (live, _) = b.g.mem();
     eprintln!(
@@ -79,8 +81,12 @@ pub fn run(mut host: native::NativeHost, params: Params, command_line: &[u8]) ->
         .find_map(|k| std::env::var(k).ok()?.parse::<usize>().ok())
         .unwrap_or(1);
     let t0 = std::time::Instant::now();
-    let tex = Tex::new(host, PureTracker::default(), params);
+    let host = Shared(std::sync::Arc::new(std::sync::Mutex::new(host)));
+    let tex = Tex::new(host.clone(), PureTracker::default(), params);
     let mut b = Build::new(tex, command_line, workers);
+    if workers > 1 {
+        b.enable_workers(host);
+    }
     let rep = b.run();
     let ms = t0.elapsed().as_secs_f64() * 1e3;
     let mut linker = crate::SsaLinker::default();

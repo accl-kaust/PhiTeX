@@ -42,8 +42,11 @@ pub(crate) fn state_slots<H: Host, T: Tracker>(t: &Tex<H, T>) -> Vec<Slot> {
     let mut v = Vec::with_capacity(48);
     let d = u32::try_from(t.nest.len()).unwrap_or(0);
     v.push(Slot(Fam::List, i64::from(list::COUNT)));
-    for f in 0..list::COUNT {
-        v.push(Slot(Fam::List, i64::from(d * list::STRIDE + u32::from(f))));
+    // (level 0's fields are names)
+    if d > 0 {
+        for f in 0..list::COUNT {
+            v.push(Slot(Fam::List, i64::from(d * list::STRIDE + u32::from(f))));
+        }
     }
     for k in 0..crate::track::align::COUNT {
         v.push(Slot(Fam::List, i64::from(list::COUNT + 1 + k)));
@@ -94,7 +97,7 @@ fn version<H: Host, T: Tracker>(t: &Tex<H, T>, main: &[u8], slots: &[(Slot, SVal
         t.deletions_allowed,
         t.set_box_allowed,
     )));
-    for l in &t.nest {
+    for l in t.nest.iter().skip(1) {
         for f in 0..list::COUNT {
             parts.push(Version(crate::nest::field_version(l, f)));
         }
@@ -134,9 +137,14 @@ impl PState {
 
     /// Put this state in `t`.
     pub(crate) fn set<H: Host, T: Tracker>(&self, t: &mut Tex<H, T>) {
+        // (level 0 is names, the engine's: kept through the nest's change)
+        let l0 = t.level_at_depth(0).cloned();
         let mut vers = Versions::default();
         for (s, v) in &self.slots {
             set_value(t, &mut vers, *s, v);
+        }
+        if let (Some(l0), Some(l)) = (l0, t.level_at_depth_mut(0)) {
+            *l = l0;
         }
         // (a save stack that was deeper: its entries above the pointer are
         // dead, TeX never reads them)

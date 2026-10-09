@@ -169,12 +169,54 @@ pub fn uninstall<H: Host + 'static>() -> Option<Engine<H>> {
 fn with_engine<H: Host + 'static, R>(f: impl FnOnce(&mut Engine<H>) -> R) -> R {
     ENGINE.with(|x| {
         let mut b = x.borrow_mut();
+        if b.is_none() {
+            // (a worker's thread: its engine a view of the format's state,
+            // made by the build's factory)
+            let fac = FACTORY
+                .get()
+                .and_then(|f| f.downcast_ref::<Factory<H>>())
+                .expect("pure SSA: no engine on this thread, and no factory");
+            *b = Some(Box::new(fac()));
+        }
         let e = b
             .as_mut()
             .and_then(|b| b.downcast_mut::<Engine<H>>())
             .expect("pure SSA: no engine on this thread");
         f(e)
     })
+}
+
+/// What makes a worker's engine.
+pub type Factory<H> = Arc<dyn Fn() -> Engine<H> + Send + Sync>;
+
+/// The build's factory of workers' engines (one build a process).
+static FACTORY: std::sync::OnceLock<Box<dyn Any + Send + Sync>> = std::sync::OnceLock::new();
+
+/// Set the factory of workers' engines (the first set wins).
+pub fn set_factory<H: Host + 'static>(f: Factory<H>) {
+    let _ = FACTORY.set(Box::new(f));
+}
+
+impl<H: Host> Engine<H> {
+    /// A worker's engine: a copy-on-write view of the format's state
+    /// `base` (its journaled tables shared, not copied) on `host`.
+    #[must_use]
+    pub fn worker(base: &Tex<NoHost, PureTracker>, host: H) -> Self {
+        let mut tex = base.fork_with(host, PureTracker::default());
+        tex.set_effects(true);
+        tex.thaw();
+        let mut b = base.fork_with(NoHost, PureTracker::default());
+        b.thaw();
+        Engine {
+            tex,
+            base: b,
+            at: None,
+            stats: Stats::default(),
+            defined: HashSet::new(),
+            last: None,
+            last_defs: HashMap::new(),
+        }
+    }
 }
 
 /// The families, in the order their names spell them.
@@ -325,11 +367,13 @@ fn command<H: Host + 'static>(op: Op, st: &Val, cx: &mut StepCx<'_, TexLang<H>>)
         e.stats.steps += 1;
         // (the engine's arrays made the frontier at this step: the names
         // defined since the step it ran last, or every name)
-        frontier(e, cx);
         if e.at != Some(*sv) {
             e.stats.placed += 1;
             ps.set(&mut e.tex);
+            // (the state put back level 0 as it was: the names on it)
+            e.last_defs.clear();
         }
+        frontier(e, cx);
         if let Some((d, level, root)) = &file {
             place_file(&mut e.tex, d, *level, idx0, *root);
         }
@@ -644,17 +688,7 @@ fn finish<H: Host + 'static>(
     // (the next step's key: where it begins, a token list's place by its
     // kind only (its address is the allocator's), and how many steps
     // began there before it)
-    let t = &e.tex;
-    let tl = t.cur_input.state == partex_engine::web::TOKEN_LIST;
-    let base = phi::ver::hash64(&(
-        cx.cursor().0,
-        t.in_open,
-        t.line,
-        t.input_ptr,
-        t.cur_input.state,
-        t.cur_input.index,
-        if tl { 0 } else { t.cur_input.loc },
-    ));
+    let base = key_base(&ps, cx.cursor());
     let k = if base == prev.kbase { prev.k + 1 } else { 0 };
     ps.kbase = base;
     ps.k = k;
@@ -702,6 +736,10 @@ impl<H: Host + 'static> Lang for TexLang<H> {
             Op::Main | Op::File(..) => command::<H>(op, st, cx),
             _ => unimplemented!("{op:?} is not an unfold"),
         }
+    }
+
+    fn entries(op: Op, input: &Val, args: &Args<'_, Self>) -> Vec<phi::Entry<Val>> {
+        file_entries::<H>(op, input, args)
     }
 
     fn as_seq(v: &Val) -> Option<&Seq<Val>> {
@@ -766,4 +804,71 @@ fn put_store<H: Host>(e: &mut Engine<H>, name: &[u8], v: Option<&Val>) {
             st.remove(name);
         }
     }
+}
+
+/// Where a step begins, for its key: the input element next, and the
+/// input's place (`InputState::key_parts`).
+fn key_base(ps: &PState, cursor: ElemId) -> u64 {
+    phi::ver::hash64(&(cursor.0, ps.input.key_parts()))
+}
+
+/// Speculative entries of a file's unfold (DESIGN 3.17.7): at each line
+/// after a blank one, the state guessed as the unfold's first state
+/// (`args[0]`) with that line ahead (`InputState::after_blank_line`):
+/// what it is at a paragraph's start in a document's body where nothing
+/// else is open. A guess that is wrong is the core's to find (the
+/// segment's arrival is checked like any successor).
+fn file_entries<H: Host + 'static>(op: Op, input: &Val, args: &Args<'_, TexLang<H>>) -> Vec<phi::Entry<Val>> {
+    let Op::File(h, _) = op else {
+        return Vec::new();
+    };
+    let (Val::Lines(seq, _), Some(d)) = (input, super::files::doc(h)) else {
+        return Vec::new();
+    };
+    if args.is_empty() {
+        return Vec::new();
+    }
+    let init = args.get(0);
+    let Val::State(init, _) = &*init else {
+        return Vec::new();
+    };
+    let blank = |i: usize| {
+        let l = &d.bytes[d.starts[i]..d.starts[i + 1]];
+        l.iter().all(|&c| matches!(c, b' ' | b'\n' | b'\r' | b'\t'))
+    };
+    let n = d.starts.len() - 1;
+    let mut out = Vec::new();
+    with_engine::<H, _>(|e| {
+        for i in 1..n {
+            if !blank(i - 1) || blank(i) {
+                continue;
+            }
+            let Some((id, _)) = seq.get(i) else { continue };
+            let line = &d.bytes[d.starts[i - 1]..d.starts[i]];
+            let line: Vec<u8> = line
+                .iter()
+                .copied()
+                .filter(|c| !matches!(c, b'\n' | b'\r'))
+                .collect();
+            let mut g = (**init).clone();
+            g.input = g
+                .input
+                .after_blank_line(&line, i32::try_from(i).unwrap_or(i32::MAX), 13);
+            g.set(&mut e.tex);
+            let (mut ps, v) = PState::of(&mut e.tex, &d.name, None);
+            let base = key_base(&ps, id);
+            ps.kbase = base;
+            ps.k = 0;
+            out.push(phi::Entry {
+                at: i,
+                key: phi::ver::hash64(&(base, 0u32)),
+                guess: Some(Val::State(Arc::new(ps), Ver(v))),
+            });
+        }
+        // (the engine is a cache no longer)
+        e.at = None;
+        e.last = None;
+        e.last_defs.clear();
+    });
+    out
 }

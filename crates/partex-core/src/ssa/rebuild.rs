@@ -1183,6 +1183,57 @@ impl InputState {
         }
     }
 
+    /// Where the next command begins (pure SSA mode's step keys): the
+    /// input level's state, index and place in its line (a token list's:
+    /// none, its address is the allocator's), the line number, the file
+    /// levels and the input levels open.
+    pub(crate) fn key_parts(&self) -> (i32, i32, i32, i32, usize, usize) {
+        let c = &self.cur;
+        let tl = c.state == crate::web::TOKEN_LIST;
+        (
+            c.state,
+            c.index,
+            if tl { 0 } else { c.loc - c.start },
+            self.line,
+            self.in_open,
+            self.v.depth,
+        )
+    }
+
+    /// This state at the start of line `no` of the file read at the top
+    /// level (pure SSA mode's speculative entries), the line before it,
+    /// `blank` (its characters, without its end), just ended: read as
+    /// `input_ln` reads it, its end of line read as `\par` reads it
+    /// (§347: `state=new_line`, `loc=limit+1`).
+    pub(crate) fn after_blank_line(&self, blank: &[u8], no: i32, end_line_char: i32) -> InputState {
+        let mut s = self.clone();
+        let start = usize::try_from(s.cur.start).unwrap_or(0);
+        // (§31: trailing spaces dropped)
+        let mut n = blank.len();
+        while n > 0 && blank[n - 1] == b' ' {
+            n -= 1;
+        }
+        let from = s.v.from;
+        let mut top: Vec<u32> = s.top[..start.saturating_sub(from).min(s.top.len())].to_vec();
+        top.extend(blank[..n].iter().map(|&b| u32::from(b)));
+        let limit = start + n;
+        let ok = (0..256).contains(&end_line_char);
+        // (the end of line char in its place, `first` after it)
+        top.push(if ok { end_line_char.cast_unsigned() } else { u32::from(b' ') });
+        s.top = top;
+        s.last = limit;
+        s.first = limit + 1;
+        s.cur.limit = if ok {
+            i32::try_from(limit).unwrap_or(0)
+        } else {
+            i32::try_from(limit).unwrap_or(0) - 1
+        };
+        s.cur.loc = s.cur.limit + 1;
+        s.cur.state = crate::web::NEW_LINE;
+        s.line = no;
+        s
+    }
+
     /// Each open file level's file, bottom up.
     fn files(&self) -> impl Iterator<Item = Option<&AlphaFile>> {
         let lower = self.v.files.files.iter().map(Option::as_ref);
