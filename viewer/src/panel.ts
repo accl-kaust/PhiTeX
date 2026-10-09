@@ -151,6 +151,8 @@ export interface PanelOptions {
   outline?: boolean;
   /** The pages' keys (keys.ts: PDF viewers' and vim's, `?` lists them), and `e` for the problems; where the page owns the keyboard (the CLI's), not under an editor. */
   keys?: boolean;
+  /** Docked where the host has no toolbar of its own (the CLI's page, VS Code's webview): the panel's header and footer shown. */
+  header?: boolean;
 }
 
 /** Where the panel keeps its preferences (chrome.storage.local in the extension). */
@@ -411,6 +413,8 @@ footer .msg.err { color: var(--danger); }
 .win.docked.light .sum .n.error { color: var(--danger); } .win.docked.light .sum .n.warning { color: var(--warn); } .win.docked.light .sum .n.info { color: var(--info); }
 .win.docked.light .empty { color: var(--fg2); }
 .win.docked > header, .win.docked > footer { display: none; }
+/* (a host with no toolbar of its own: the panel's header and footer kept, PanelOptions.header) */
+.win.docked.own-header > header, .win.docked.own-header > footer { display: flex; }
 .win.docked > .bar { display: none; }
 .win.docked.sheet-open > .bar { display: flex; position: absolute; z-index: 4; top: 6px; right: 8px; width: min(340px, calc(100% - 16px));
   flex-direction: column; align-items: stretch; gap: 8px; padding: 12px; border-radius: var(--r2); border: 1px solid var(--divider);
@@ -1335,6 +1339,7 @@ export class Panel {
 
   /** The contents and the keys, as the host asked (PanelOptions). */
   private extras(opts: PanelOptions): void {
+    if (opts.header) this.win.classList.add("own-header");
     if (opts.outline) {
       this.win.classList.add("has-side");
       this.contents = new Outline(this.$("#side"), { goToPlace: (k, top) => this.viewer.goToPlace(k, top) });

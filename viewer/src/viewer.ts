@@ -63,6 +63,7 @@ export class Viewer {
         });
     }, { passive: true });
     // (text selected on the pages: its boxes, for the editor to select the source)
+    let told = "";
     const pick = () =>
       setTimeout(() => {
         const rn = root.getRootNode() as ShadowRoot & { getSelection?: () => Selection | null };
@@ -81,9 +82,25 @@ export class Viewer {
             }
           }
         }
-        if (out.size) host.selected?.([...out].map(([k, rects]) => ({ k, rects })));
+        if (!out.size) return;
+        const sel2 = [...out].map(([k, rects]) => ({ k, rects }));
+        // (as the drag goes: told again only when it changed)
+        const key = JSON.stringify(sel2);
+        if (key === told) return;
+        told = key;
+        host.selected?.(sel2);
       }, 0);
     root.addEventListener("pointerup", pick);
+    // (while a drag selects: told as it goes, at most once a frame, not only when the button is let go)
+    let dragFrame = 0;
+    root.addEventListener("pointerdown", () => (told = ""));
+    root.addEventListener("pointermove", (e) => {
+      if (!(e.buttons & 1) || dragFrame) return;
+      dragFrame = requestAnimationFrame(() => {
+        dragFrame = 0;
+        pick();
+      });
+    });
     root.addEventListener("keyup", (e) => e.shiftKey && pick());
     // (a double-click: the source of what is under it, as Overleaf's PDF viewer does)
     root.addEventListener("dblclick", (e) => {

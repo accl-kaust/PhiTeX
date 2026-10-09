@@ -108,10 +108,17 @@ const panel = new Panel(
     pdfjs: false,
     outline: true,
     keys: true,
+    header: true,
     words: {
       badge: "watch",
       badgeTitle: "phitex watch: built from the files on disk, again at each save",
       byline: "⚡ phitex watch",
+      about: `<b>⚡ phitex watch</b>: the document built from the files on disk, again at each save, its pages here as
+        they are shipped. Nothing leaves this machine.
+        <div class="about-foot">Free software (AGPL-3.0-only), provided as is, without any warranty.</div>`,
+      openFailed: "Restart phitex watch, then reload this page.",
+      reading: "Reading the document from phitex watch.",
+      keptIn: "this machine",
       stopped: "The build stopped: its problems are listed above (e).",
       notReady: "This engine does not run here yet.",
       realPdf: "",
@@ -214,7 +221,7 @@ panel.headerButton("⇄ Compare", "Compare with a past version: the commit graph
       pick: (from, to) => {
         closePick();
         const short = (id: string) => id.slice(0, 7);
-        void controls.start({ from, to }, to ? `${short(from)} → ${short(to)}` : `since ${short(from)}`, "git");
+        void controls.start({ from, to }, short(from), to ? `to ${short(to)}` : "working tree");
       },
     });
     void graph.load();

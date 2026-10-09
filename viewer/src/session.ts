@@ -1193,8 +1193,9 @@ export class PreviewSession {
         this.status();
         return;
       case "settled":
-        // (a pass shown while the job's own files settle: still building)
-        if (!e.settling) this.watchBusy(false);
+        // (a pass shown while the job's own files settle: still building;
+        // the watch's `preparing` ends here, it sends no `off`)
+        if (!e.settling) (this.watchBusy(false), this.sink.preparing?.(false));
         this.chain = this.chain.then(() => this.layout()).then(() => (this.status(), this.watchOutline()));
         return;
       case "sync":
