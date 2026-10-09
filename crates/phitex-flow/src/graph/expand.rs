@@ -564,7 +564,7 @@ impl Exec<'_> {
             self.reads.push(Arc::new(Read { key: k.clone(), src: Src::Node(d), val: after.clone() }));
             let before = match self.chain.resolve(&k, at) {
                 Some((d, v)) => Arc::new(Read { key: k.clone(), src: Src::Node(d), val: v }),
-                None => outside_read(self.env, self.outside, &k),
+                None => outside_read(self.env, self.outside, &k, at as u32),
             };
             let before_val = before.val.clone();
             self.reads.push(before);

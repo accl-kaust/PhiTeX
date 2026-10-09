@@ -189,7 +189,64 @@ pub struct Build {
 
 const SHARDS: usize = 64;
 
-type Defs = FxMap<Key, Vec<(u32, Val)>>;
+type Defs = FxMap<Key, Vec<(Pos, Val)>>;
+
+/// A place in document order: (piece position, node). A piece's exports
+/// are at `(k, END)`; node `j` of piece `k` reads what is defined before
+/// `(k, j)`. (Elements put between a piece's nodes — an output routine's,
+/// an `\input` file's — will define at `(k, j)`; none does yet.)
+pub type Pos = (u32, u32);
+/// The node of a piece's exports: after all its nodes.
+pub const END: u32 = u32::MAX;
+
+/// The document's elements in order, each with a stable id (a piece's is
+/// its `PieceId`), and where each is: what an edge's ids mean, and which
+/// element a place in the names index is.
+struct Sequence {
+    /// Position -> the piece there.
+    pieces: Vec<PieceId>,
+    /// Every element, by place (a piece at `(k, END)`).
+    elems: Vec<(Pos, PieceId)>,
+    /// Id -> place (`(NONE, END)`: not in this build).
+    pos: Vec<Pos>,
+}
+
+impl Sequence {
+    /// The sequence of these pieces, in order, ids below `next`.
+    fn new(pieces: Vec<PieceId>, next: PieceId) -> Sequence {
+        let mut pos = vec![(NONE, END); next as usize];
+        let mut elems = Vec::with_capacity(pieces.len());
+        for (k, &id) in pieces.iter().enumerate() {
+            pos[id as usize] = (k as u32, END);
+            elems.push(((k as u32, END), id));
+        }
+        Sequence { pieces, elems, pos }
+    }
+
+    /// The piece at position `k`.
+    fn piece(&self, k: usize) -> PieceId {
+        self.pieces[k]
+    }
+
+    /// Where element `id` is, if it is in this build.
+    fn pos_of(&self, id: PieceId) -> Option<Pos> {
+        self.pos.get(id as usize).copied().filter(|p| p.0 != NONE)
+    }
+
+    /// The element at place `p`.
+    fn id_at(&self, p: Pos) -> PieceId {
+        if p.1 == END {
+            return self.pieces[p.0 as usize];
+        }
+        let i = self.elems.partition_point(|e| e.0 < p);
+        self.elems[i].1
+    }
+}
+
+/// Is an edge's source (`src`, where it was defined) at or before `m`?
+fn src_at_or_before(seq: &Sequence, src: PieceId, m: Pos) -> bool {
+    src == INITIAL || seq.pos_of(src).is_none_or(|p| p <= m)
+}
 
 /// The length of the common prefix of `a` and `b`.
 fn common_prefix(a: &[u8], b: &[u8]) -> usize {
@@ -223,8 +280,7 @@ fn common_suffix(a: &[u8], b: &[u8]) -> usize {
         .count()
 }
 
-/// Every installed run's exports: name -> (piece position, value), by
-/// position. Read by every thread at once, in shards; written only when a
+/// Every installed run's exports: name -> (place, value), by place. Read by every thread at once, in shards; written only when a
 /// run is installed, under the scheduler's lock.
 struct Names {
     shards: Vec<RwLock<Defs>>,
@@ -250,36 +306,45 @@ impl Names {
         ((h % SHARDS as u64) as usize, 1 << ((h >> 32) % 64))
     }
 
-    /// The definition of `key` reaching piece `k`: its piece's position
-    /// (none: the initial value) and its value.
-    fn reaching(&self, key: &Key, k: usize, font: &Arc<Font>) -> (Option<u32>, Val) {
+    /// The definition of `key` reaching place `at` (what is defined
+    /// before it): its place (none: the initial value), its value, and the
+    /// nodes of `at`'s piece it reaches, `lo..hi` (all of them, `0..END`,
+    /// unless an element between the piece's nodes defines `key`).
+    fn reaching(&self, key: &Key, at: Pos, font: &Arc<Font>) -> (Option<Pos>, Val, u32, u32) {
         let (s, bit) = Names::route(key);
         if self.defined[s].load(Ordering::Acquire) & bit == 0 {
-            return (None, initial(key, font));
+            return (None, initial(key, font), 0, END);
         }
         let g = self.shards[s].read().expect("names");
         if let Some(v) = g.get(key) {
-            let i = v.partition_point(|(p, _)| (*p as usize) < k);
+            let i = v.partition_point(|(p, _)| *p < at);
+            let hi = match v.get(i) {
+                Some(((k, j), _)) if *k == at.0 && *j != END => j + 1,
+                _ => END,
+            };
             if i > 0 {
-                return (Some(v[i - 1].0), v[i - 1].1.clone());
+                let (p, val) = &v[i - 1];
+                let lo = if p.0 == at.0 { p.1 + 1 } else { 0 };
+                return (Some(*p), val.clone(), lo, hi);
             }
+            return (None, initial(key, font), 0, hi);
         }
-        (None, initial(key, font))
+        (None, initial(key, font), 0, END)
     }
 
-    /// Piece `k` now defines `key` as `val` (none: no longer defines it).
-    fn set(&self, k: usize, key: &Key, val: Option<&Val>) {
+    /// Place `at` now defines `key` as `val` (none: no longer defines it).
+    fn set(&self, at: Pos, key: &Key, val: Option<&Val>) {
         let (s, bit) = Names::route(key);
         if val.is_some() {
             self.defined[s].fetch_or(bit, Ordering::AcqRel);
         }
         let mut g = self.shards[s].write().expect("names");
         let v = g.entry(key.clone()).or_default();
-        let i = v.partition_point(|(p, _)| (*p as usize) < k);
-        let here = v.get(i).is_some_and(|(p, _)| *p as usize == k);
+        let i = v.partition_point(|(p, _)| *p < at);
+        let here = v.get(i).is_some_and(|(p, _)| *p == at);
         match (val, here) {
             (Some(val), true) => v[i].1 = val.clone(),
-            (Some(val), false) => v.insert(i, (k as u32, val.clone())),
+            (Some(val), false) => v.insert(i, (at, val.clone())),
             (None, true) => {
                 v.remove(i);
             }
@@ -377,10 +442,8 @@ struct State {
 
 struct Shared {
     names: Names,
-    /// Position -> piece, and piece -> position (`NONE`: not in this
-    /// build), fixed for the build.
-    ids: Vec<PieceId>,
-    pos_of: Vec<u32>,
+    /// The elements in order, fixed for the build.
+    seq: Sequence,
     /// Bumped (under `park`, and `parked` notified) whenever a run is
     /// installed.
     generation: AtomicU64,
@@ -636,18 +699,14 @@ impl Build {
             }
         }
         let n = p.len();
-        let ids: Vec<PieceId> = p.iter().map(|x| x.id).collect();
-        let mut pos_of = vec![NONE; self.next_id as usize];
-        for (k, &id) in ids.iter().enumerate() {
-            pos_of[id as usize] = k as u32;
-        }
+        let seq = Sequence::new(p.iter().map(|x| x.id).collect(), self.next_id);
         // (the names index: what the kept pieces define, at their places,
         // and what an edited piece's predecessor defined, as its prediction)
         let names = Names::new();
         for (k, ps) in p.iter().enumerate() {
             if let Some(r) = ps.run.as_ref().or(ps.prev.as_ref().map(|(r, _, _)| r)) {
                 for (key, val) in &r.exports {
-                    names.set(k, key, Some(val));
+                    names.set((k as u32, END), key, Some(val));
                 }
             }
         }
@@ -658,11 +717,11 @@ impl Build {
         let mut touched: Vec<Key> = Vec::new();
         for o in &olds {
             let Some(r) = &o.run else { continue };
-            let now = pos_of[o.id as usize];
-            if now == NONE || now != old_pos[o.id as usize] {
+            let now = seq.pos_of(o.id).map(|p| p.0);
+            if now != Some(old_pos[o.id as usize]) {
                 touched.extend(r.exports.iter().map(|(k, _)| k.clone()));
             }
-            if now == NONE {
+            if now.is_none() {
                 for (key, _, _) in &r.reads {
                     if let Some(m) = readers.get_mut(key) {
                         m.remove(&o.id);
@@ -675,15 +734,14 @@ impl Build {
         let mut marks: Vec<(usize, Key)> = Vec::new();
         for key in &touched {
             let Some(m) = readers.get(key) else { continue };
-            for (&rid, &(_, src)) in m {
-                let rpos = pos_of[rid as usize];
-                if rpos == NONE {
+            for (&rid, &(node, src)) in m {
+                let Some(rpos) = seq.pos_of(rid) else {
                     continue;
-                }
-                let (def, _) = names.reaching(key, rpos as usize, &self.font);
-                let def_id = def.map_or(INITIAL, |d| ids[d as usize]);
+                };
+                let (def, ..) = names.reaching(key, (rpos.0, node), &self.font);
+                let def_id = def.map_or(INITIAL, |d| seq.id_at(d));
                 if src != def_id {
-                    marks.push((rpos as usize, key.clone()));
+                    marks.push((rpos.0 as usize, key.clone()));
                 }
             }
         }
@@ -754,8 +812,7 @@ impl Build {
         state.stats.time_setup = t0.elapsed().saturating_sub(time_cut);
         let sh = Shared {
             names,
-            ids,
-            pos_of,
+            seq,
             generation: AtomicU64::new(0),
             names_gen: AtomicUsize::new(0),
             park: Mutex::new(()),
@@ -1006,23 +1063,21 @@ fn changed_names(old: Option<&Run>, new: &Run) -> Vec<Key> {
 
 /// Piece `m`'s definitions of `keys` changed: the nodes after it that
 /// read those names from before `m` (or from `m`), by the edges.
-fn reached(g: &State, sh: &Shared, m: usize, keys: &[Key]) -> Vec<(usize, Key)> {
+fn reached(g: &State, sh: &Shared, m: Pos, keys: &[Key]) -> Vec<(usize, Key)> {
     let mut out = Vec::new();
     for key in keys {
         let Some(rm) = g.readers.get(key) else {
             continue;
         };
-        for (&rid, &(_, src)) in rm {
-            let rpos = sh.pos_of[rid as usize];
-            if rpos == NONE || rpos as usize <= m {
+        for (&rid, &(node, src)) in rm {
+            let Some(rpos) = sh.seq.pos_of(rid) else {
+                continue;
+            };
+            if (rpos.0, node) <= m {
                 continue;
             }
-            let before = src == INITIAL || {
-                let spos = sh.pos_of[src as usize];
-                spos == NONE || spos as usize <= m
-            };
-            if before {
-                out.push((rpos as usize, key.clone()));
+            if src_at_or_before(&sh.seq, src, m) {
+                out.push((rpos.0 as usize, key.clone()));
             }
         }
     }
@@ -1516,11 +1571,11 @@ fn run_and_install(sh: &Shared, k: usize, dirty: &[Key]) -> u64 {
     // is now, noting how many changes to the index that has seen; the
     // names whose values this run changes; the paragraphs it kept)
     let seen = sh.names_gen.load(Ordering::Acquire);
-    let mut checks: Vec<(Option<u32>, bool)> = run
+    let mut checks: Vec<(Option<Pos>, bool)> = run
         .reads
         .iter()
-        .map(|(key, _, val)| {
-            let (def, now) = sh.names.reaching(key, k, &sh.font);
+        .map(|(key, node, val)| {
+            let (def, now, ..) = sh.names.reaching(key, (k as u32, *node), &sh.font);
             (def, now == *val)
         })
         .collect();
@@ -1540,15 +1595,15 @@ fn run_and_install(sh: &Shared, k: usize, dirty: &[Key]) -> u64 {
         let mut g = lock(sh);
         let held = Instant::now();
         g.stats.commands_run += run.ran;
-        let id = sh.ids[k];
+        let id = sh.seq.piece(k);
         // (names changed since the reads were validated: those reads again;
         // the index changes only under this lock)
         let now_gen = sh.names_gen.load(Ordering::Acquire);
         if now_gen != seen {
             let since: FxSet<&Key> = g.names_log[seen..now_gen].iter().flatten().collect();
-            for ((key, _, val), c) in run.reads.iter().zip(&mut checks) {
+            for ((key, node, val), c) in run.reads.iter().zip(&mut checks) {
                 if since.contains(key) {
-                    let (def, now) = sh.names.reaching(key, k, &sh.font);
+                    let (def, now, ..) = sh.names.reaching(key, (k as u32, *node), &sh.font);
                     *c = (def, now == *val);
                 }
             }
@@ -1563,7 +1618,7 @@ fn run_and_install(sh: &Shared, k: usize, dirty: &[Key]) -> u64 {
             if !same {
                 stale.insert(key.clone());
             }
-            let src = def.map_or(INITIAL, |d| sh.ids[d as usize]);
+            let src = def.map_or(INITIAL, |d| sh.seq.id_at(d));
             srcs.push(src);
             // (one edge per name: its first reader; a second entry for the
             // name, read with another value, follows it)
@@ -1603,7 +1658,7 @@ fn run_and_install(sh: &Shared, k: usize, dirty: &[Key]) -> u64 {
                 .binary_search_by(|(x, _)| x.cmp(key))
                 .ok()
                 .map(|i| &run.exports[i].1);
-            sh.names.set(k, key, val);
+            sh.names.set((k as u32, END), key, val);
         }
         sh.names_gen.store(g.names_log.len(), Ordering::Release);
         g.p[k].run = Some(run.clone());
@@ -1611,7 +1666,7 @@ fn run_and_install(sh: &Shared, k: usize, dirty: &[Key]) -> u64 {
         g.p[k].runs += 1;
         g.stats.ran += 1;
         g.running.remove(&k);
-        let marks = reached(&g, sh, k, &changed);
+        let marks = reached(&g, sh, (k as u32, END), &changed);
         for (r, key) in marks {
             if mark(&mut g, r, key) {
                 sh.done[r].store(false, Ordering::Release);
@@ -1650,11 +1705,11 @@ impl Env for PieceEnv<'_> {
         self.sh.fonts.get(name)
     }
 
-    fn reach(&mut self, key: &Key) -> (Val, Src) {
+    fn reach(&mut self, key: &Key, node: u32) -> (Val, Src, u32, u32) {
         let sh = self.sh;
         loop {
             let seen = sh.generation.load(Ordering::Acquire);
-            let (def, val) = sh.names.reaching(key, self.k, &sh.font);
+            let (def, val, lo, hi) = sh.names.reaching(key, (self.k as u32, node), &sh.font);
             let Some(d) = def else {
                 // (an undefined name while an earlier piece may still
                 // define it: wait for the earlier pieces, or run the first
@@ -1662,7 +1717,7 @@ impl Env for PieceEnv<'_> {
                 if sh.opts.reads == Reads::Speculate
                     || !matches!(val, Val::Meaning(Meaning::Undefined))
                 {
-                    return (val, Src::Initial);
+                    return (val, Src::Initial, lo, hi);
                 }
                 let leapfrog = {
                     let mut g = lock(sh);
@@ -1682,7 +1737,7 @@ impl Env for PieceEnv<'_> {
                         g.stats.parks += 1;
                         None
                     } else {
-                        return (val, Src::Initial);
+                        return (val, Src::Initial, lo, hi);
                     }
                 };
                 if let Some((e, dirty)) = leapfrog {
@@ -1695,17 +1750,21 @@ impl Env for PieceEnv<'_> {
                 }
                 continue;
             };
-            let d = d as usize;
-            let src = Src::Piece(sh.ids[d]);
-            if sh.opts.reads == Reads::Speculate || sh.done[d].load(Ordering::Acquire) {
-                return (val, src);
+            let src = Src::Piece(sh.seq.id_at(d));
+            let d = d.0 as usize;
+            // (an element between this piece's own nodes is this run's)
+            if sh.opts.reads == Reads::Speculate
+                || d == self.k
+                || sh.done[d].load(Ordering::Acquire)
+            {
+                return (val, src, lo, hi);
             }
             // (the definition is being remade: park until it is installed,
             // or make it here if nobody has started)
             let leapfrog = {
                 let mut g = lock(sh);
                 match g.p[d].status {
-                    Status::Done => return (val, src),
+                    Status::Done => return (val, src, lo, hi),
                     Status::Unstarted => {
                         g.unstarted.remove(&d);
                         g.running.insert(d);

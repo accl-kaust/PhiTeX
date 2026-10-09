@@ -51,9 +51,11 @@ pub type PieceId = u32;
 
 /// Where a piece's reads of names from before it are answered.
 pub trait Env {
-    /// The definition of `key` reaching this piece's start, and where it
-    /// was made.
-    fn reach(&mut self, key: &Key) -> (Val, Src);
+    /// The definition of `key` reaching node `node` of this piece from
+    /// before the piece (or from an element between its nodes), where it
+    /// was made, and the nodes it reaches, `lo..hi` (`0..u32::MAX`: all of
+    /// them, as when no element between the piece's nodes defines `key`).
+    fn reach(&mut self, key: &Key, node: u32) -> (Val, Src, u32, u32);
 
     /// The bytes of the TFM file `name.tfm`, if there is one (a pure
     /// function of the name during a build).
@@ -869,20 +871,25 @@ impl Edit {
     }
 }
 
-/// The definitions from before the piece read in this run, each read once.
-type Outside = FxMap<Key, ReadRef>;
+/// The definitions from before the piece read in this run, each read once
+/// for the nodes it reaches (`lo..hi`: all of them unless an element
+/// between the piece's nodes defines the name).
+type Outside = FxMap<Key, (ReadRef, u32, u32)>;
 
-fn outside_read(env: &mut dyn Env, outside: &mut Outside, k: &Key) -> ReadRef {
-    if let Some(v) = outside.get(k) {
+/// The definition of `k` from before the piece reaching node `node`.
+fn outside_read(env: &mut dyn Env, outside: &mut Outside, k: &Key, node: u32) -> ReadRef {
+    if let Some((v, lo, hi)) = outside.get(k)
+        && (*lo..*hi).contains(&node)
+    {
         return v.clone();
     }
-    let (val, src) = env.reach(k);
+    let (val, src, lo, hi) = env.reach(k, node);
     let r = Arc::new(Read {
         key: k.clone(),
         src,
         val,
     });
-    outside.insert(k.clone(), r.clone());
+    outside.insert(k.clone(), (r.clone(), lo, hi));
     r
 }
 
@@ -894,7 +901,7 @@ fn resolve_now(chain: &Chain, env: &mut dyn Env, outside: &mut Outside, key: &Ke
             src: Src::Node(d),
             val,
         }),
-        None => outside_read(env, outside, key),
+        None => outside_read(env, outside, key, chain.nodes.len() as u32),
     }
 }
 
