@@ -1159,12 +1159,23 @@ pub fn run_piece(
             if matches!(r.src, Src::Node(_)) || !seen.insert(Arc::as_ptr(r) as usize) {
                 continue;
             }
-            if !reads.iter().any(|(k, _, v)| *k == r.key && *v == r.val) {
-                reads.push((r.key.clone(), i as u32, r.val.clone()));
-            }
+            reads.push((r.key.clone(), i as u32, r.val.clone()));
         }
     }
     reads.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+    // (one entry per (name, value): its first reader — the first of its
+    // name's run with that value)
+    let mut kept: Vec<(Key, u32, Val)> = Vec::with_capacity(reads.len());
+    let mut run_start = 0;
+    for e in reads {
+        if kept.last().is_none_or(|l| l.0 != e.0) {
+            run_start = kept.len();
+        } else if kept[run_start..].iter().any(|x| x.2 == e.2) {
+            continue;
+        }
+        kept.push(e);
+    }
+    let reads = kept;
     let mut fonts: Vec<(u32, Arc<str>)> = chain
         .defs_of
         .iter()
@@ -1190,8 +1201,13 @@ pub fn run_piece(
 /// content).
 #[derive(Default)]
 struct Scratch {
-    /// The node's reads so far (read once each), once there are many.
-    seen: FxMap<Key, ReadRef>,
+    /// The node's reads so far (read once each, by index), once there are
+    /// many.
+    seen: FxMap<Key, u32>,
+    /// The node's reads of `\catcode` and `\sfcode` of characters below
+    /// 256, by index, while their stamp is the node's.
+    chars: Vec<(u32, u32)>,
+    stamp: u32,
     /// The node's reads and what it emitted (their capacity kept).
     reads: Vec<ReadRef>,
     emit: Vec<Item>,
@@ -1228,6 +1244,8 @@ struct Exec<'a> {
     in_write: bool,
     /// How many of `reads` are in `scratch.seen`.
     seen_upto: usize,
+    /// This node's stamp in `scratch.chars`.
+    stamp: u32,
     /// The paragraph the old node at this place made, if any: an equal
     /// paragraph is that one (the same `Arc`).
     old_para: Option<Arc<Para>>,
@@ -1235,6 +1253,12 @@ struct Exec<'a> {
 
 /// Up to this many reads, a node's reads are looked up by a scan.
 const FEW_READS: usize = 12;
+
+/// Where a node found a definition: its own `defs[i]`, or `reads[i]`.
+enum Found {
+    Own(usize),
+    Read(usize),
+}
 
 impl<'a> Exec<'a> {
     fn new(
@@ -1248,6 +1272,15 @@ impl<'a> Exec<'a> {
         if !scratch.seen.is_empty() {
             scratch.seen.clear();
         }
+        if scratch.chars.is_empty() {
+            scratch.chars = vec![(0, 0); 512];
+        }
+        scratch.stamp = scratch.stamp.wrapping_add(1);
+        if scratch.stamp == 0 {
+            scratch.chars.fill((0, 0));
+            scratch.stamp = 1;
+        }
+        let stamp = scratch.stamp;
         let reads = std::mem::take(&mut scratch.reads);
         let emit = std::mem::take(&mut scratch.emit);
         Exec {
@@ -1270,6 +1303,7 @@ impl<'a> Exec<'a> {
             noexp: false,
             in_write: false,
             seen_upto: 0,
+            stamp,
             old_para: None,
         }
     }
@@ -1329,38 +1363,70 @@ impl<'a> Exec<'a> {
     /// The definition of `key` reaching this node: this node's own, else a
     /// node before it in the piece, else from before the piece.
     fn get(&mut self, key: &Key) -> Val {
-        self.lookup(key).val.clone()
+        match self.find(key) {
+            Found::Own(i) => self.defs[i].val.clone(),
+            Found::Read(i) => self.reads[i].val.clone(),
+        }
     }
 
     /// [`Exec::get`], as the read (the value not copied out of it).
     fn lookup(&mut self, key: &Key) -> ReadRef {
-        if let Some(d) = self.defs.iter().rev().find(|d| d.key == *key) {
+        match self.find(key) {
             // (its own definition: not a read)
-            return Arc::new(Read {
+            Found::Own(i) => Arc::new(Read {
                 key: key.clone(),
                 src: Src::Node(self.chain.nodes.len() as u32),
-                val: d.val.clone(),
-            });
+                val: self.defs[i].val.clone(),
+            }),
+            Found::Read(i) => self.reads[i].clone(),
+        }
+    }
+
+    /// Where the definition of `key` reaching this node is: its own, or
+    /// one of its reads (read now if it was not).
+    fn find(&mut self, key: &Key) -> Found {
+        // (a character's code, read again in the node: by the character)
+        let slot = match key {
+            Key::Cat(c) if (*c as u32) < 256 && self.defs.is_empty() => Some(*c as usize),
+            Key::Sfcode(c) if (*c as u32) < 256 && self.defs.is_empty() => Some(256 + *c as usize),
+            _ => None,
+        };
+        if let Some(s) = slot {
+            let (stamp, i) = self.scratch.chars[s];
+            if stamp == self.stamp {
+                return Found::Read(i as usize);
+            }
+        }
+        let f = self.find_slow(key);
+        if let (Some(s), Found::Read(i)) = (slot, &f) {
+            self.scratch.chars[s] = (self.stamp, *i as u32);
+        }
+        f
+    }
+
+    fn find_slow(&mut self, key: &Key) -> Found {
+        if let Some(i) = self.defs.iter().rposition(|d| d.key == *key) {
+            return Found::Own(i);
         }
         if self.reads.len() <= FEW_READS {
-            if let Some(r) = self.reads.iter().find(|r| r.key == *key) {
-                return r.clone();
+            if let Some(i) = self.reads.iter().position(|r| r.key == *key) {
+                return Found::Read(i);
             }
         } else {
-            for r in &self.reads[self.seen_upto..] {
+            for (j, r) in self.reads[self.seen_upto..].iter().enumerate() {
                 self.scratch
                     .seen
                     .entry(r.key.clone())
-                    .or_insert_with(|| r.clone());
+                    .or_insert((self.seen_upto + j) as u32);
             }
             self.seen_upto = self.reads.len();
-            if let Some(r) = self.scratch.seen.get(key) {
-                return r.clone();
+            if let Some(&i) = self.scratch.seen.get(key) {
+                return Found::Read(i as usize);
             }
         }
         let r = resolve_now(self.chain, self.env, self.outside, key);
-        self.reads.push(r.clone());
-        r
+        self.reads.push(r);
+        Found::Read(self.reads.len() - 1)
     }
 
     fn define(&mut self, key: Key, val: Val, global: bool) {
