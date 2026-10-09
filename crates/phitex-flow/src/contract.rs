@@ -65,9 +65,21 @@ pub enum Key {
     /// A font's dimension or character data, keyed by font and number
     /// (`\fontdimen`, `\hyphenchar`, `\skewchar`): set per font, global.
     FontParam(FontId, u16),
-    /// The interaction mode, `\deadcycles`, `\insertpenalties` and other
-    /// globals the language defines: numbered in `defs`.
-    Special(u16),
+    /// The list being built. A box, paragraph or formula begins a group and
+    /// defines it as an empty list, local to that group; appending defines
+    /// it again; the group's close makes the enclosing list visible again.
+    /// Its mode, aux and tail are fields of the value (`Field::Mode`, ...).
+    List,
+    /// A quantity the page builder's scan produces (`\pagegoal`,
+    /// `\pagetotal`, `\insertpenalties`, ...): layout's numbering.
+    Page(u8),
+    /// A mark the page builder's scan produces: (class, 0 top / 1 first /
+    /// 2 bot / 3 split first / 4 split bot).
+    Mark(u16, u8),
+    /// `\batchmode` ... `\errorstopmode`.
+    Interaction,
+    /// `\deadcycles`.
+    DeadCycles,
 }
 
 /// The part of a value a read depends on. A reader of one field is not
@@ -85,6 +97,16 @@ pub enum Field {
     /// A meaning's class only (`\outer`-ness, expandable or not, macro or
     /// primitive): what a token-only scan (a macro argument) reads.
     Class,
+    /// A list's mode.
+    Mode,
+    /// A list's aux: `\prevdepth` in vertical mode, `\spacefactor` (and the
+    /// language) in horizontal mode.
+    Aux,
+    /// A list's last item (`\lastskip`, `\lastpenalty`, `\unskip`, interline
+    /// glue): readers of the tail are not woken by earlier items.
+    Tail,
+    /// `\prevgraf` of a vertical list.
+    PrevGraf,
 }
 
 // ---------------------------------------------------------------- tokens
@@ -197,10 +219,12 @@ pub struct Dims {
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub enum Item {
     Char { font: FontId, c: u32 },
-    Lig { font: FontId, c: u32, orig: Toks },
+    /// A ligature: its character, boundary bits (tex.web 143) and the
+    /// original characters.
+    Lig { font: FontId, c: u32, subtype: u8, orig: Arc<[u32]> },
     Box(Arc<BoxVal>),
     Rule(Dims),
-    Glue { glue: Glue, kind: u8, leader: Option<Arc<BoxVal>> },
+    Glue { glue: Glue, kind: u8, leader: Option<Arc<Item>> },
     Kern { width: i32, kind: u8 },
     Penalty(i32),
     Disc { pre: Arc<[Item]>, post: Arc<[Item]>, replace: u16 },
@@ -212,6 +236,8 @@ pub enum Item {
     Whatsit(Arc<Whatsit>),
     /// Math-list items, before conversion: material's encoding.
     Noad(Arc<[u8]>),
+    /// An alignment's unset box (tex.web 159).
+    Unset { dims: Dims, span: u16, stretch: (i32, u8), shrink: (i32, u8), vertical: bool, contents: Arc<[Item]> },
 }
 
 /// A whatsit: its kind and payload.
@@ -245,6 +271,22 @@ pub enum Val {
     Box(Option<Arc<BoxVal>>),
     /// A source file's contents (a named source).
     Text(Arc<[u8]>),
+    /// A list being built (the value of `Key::List`).
+    List(Arc<ListVal>),
+}
+
+/// A list being built: a value like any other. Its fields are read
+/// separately: mode, aux, tail, prev graf, dimensions-so-far, contents.
+#[derive(Clone, PartialEq, Eq, Hash, Debug, Default)]
+pub struct ListVal {
+    pub mode: Mode,
+    /// `\prevdepth` (vertical) or `\spacefactor` (horizontal).
+    pub aux: i32,
+    /// The current language (horizontal) / incompleat noad (math):
+    /// material's encoding.
+    pub aux2: i32,
+    pub prev_graf: i32,
+    pub items: Arc<[Item]>,
 }
 
 /// A field's version: a hash of its content and nothing else.
@@ -287,6 +329,27 @@ impl Val {
                 hash_toks(&x.params, &mut h, spell);
                 hash_toks(&x.body, &mut h, spell);
             }
+            (Val::List(l), Field::Mode) => {
+                8u8.hash(&mut h);
+                l.mode.hash(&mut h);
+            }
+            (Val::List(l), Field::Aux) => {
+                9u8.hash(&mut h);
+                (l.mode, l.aux, l.aux2).hash(&mut h);
+            }
+            (Val::List(l), Field::Tail) => {
+                10u8.hash(&mut h);
+                hash_items(l.items.last().map_or(&[][..], std::slice::from_ref), &mut h, spell);
+            }
+            (Val::List(l), Field::PrevGraf) => {
+                11u8.hash(&mut h);
+                l.prev_graf.hash(&mut h);
+            }
+            (Val::List(l), _) => {
+                12u8.hash(&mut h);
+                (l.mode, l.aux, l.aux2, l.prev_graf).hash(&mut h);
+                hash_items(&l.items, &mut h, spell);
+            }
             (Val::Box(Some(b)), Field::All) => {
                 6u8.hash(&mut h);
                 (b.vertical, b.dims, b.glue_set).hash(&mut h);
@@ -327,10 +390,7 @@ fn hash_items(items: &[Item], h: &mut Fx, spell: &dyn Fn(Sym) -> Arc<[u8]>) {
                 hash_toks(&w.toks, h, spell);
                 w.data.hash(h);
             }
-            Item::Lig { font, c, orig } => {
-                (font, c).hash(h);
-                hash_toks(orig, h, spell);
-            }
+            Item::Lig { font, c, subtype, orig } => (font, c, subtype, orig).hash(h),
             Item::Box(b) => {
                 (b.vertical, b.dims, b.glue_set).hash(h);
                 hash_items(&b.contents, h, spell);
@@ -415,41 +475,36 @@ pub enum Effect {
 
 // ---------------------------------------------------------------- Cx
 
-/// How a reader's input continues after a pushed list (TeX's token-list
-/// types, as far as a command needs to say).
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-pub enum Push {
-    /// A macro's expansion (memoised by the meaning's version and the
-    /// arguments).
-    Macro,
-    /// Inserted tokens (`\everypar`, `\the` results, back-up).
-    Inserted,
-}
-
-/// All a command sees. Implemented by the graph (module `graph`), which
-/// records every read as an operand of the node being built, parks the
-/// reader when a read is not available yet, and wakes it when it is.
+/// All a command sees. Implemented by the graph (module `graph`) together
+/// with the reader (module `reader`): every read is recorded as an operand
+/// of the node being built; a read that is not available yet parks the
+/// reader until it is.
 ///
-/// A command must not keep anything between calls except in what it
-/// defines, emits or effects: commands are pure functions of their reads.
+/// There is no machine behind it. The reader's input is a value, a token
+/// stream (source text read with the catcode version in force, plus
+/// rewrites); the reader holds only its position in it. The list being
+/// built is the value of `Key::List`; a box's group scopes it. Everything
+/// else is a reaching definition. A command keeps nothing between calls
+/// except what it defines or effects: it is a pure function of its reads.
 pub trait Cx {
-    // --- the reader's input (its own; never shared)
-    /// The next token, unexpanded; `None` at the end of the reader's span.
+    // --- the input stream (a value; the reader holds its position)
+    /// The next token of the stream, unexpanded; `None` at the end of the
+    /// reader's span.
     fn next(&mut self) -> Option<Tok>;
-    /// Puts a token back to be read next.
-    fn back(&mut self, t: Tok);
-    /// Inserts a list to be read next.
-    fn push(&mut self, toks: Toks, how: Push);
-    /// The source line of the reader's position: a read like any other
+    /// Rewrites the stream: `toks` followed by the rest. A macro call's
+    /// expansion (memoised by the meaning's version and the arguments), a
+    /// token read too far, `\the`'s result, `\everypar`.
+    fn rewrite(&mut self, toks: &[Tok]);
+    /// Continues the stream with a named source's text, then the rest
+    /// (`\input`); `false` if there is no such file. The text is a value
+    /// read like any other.
+    fn input(&mut self, name: &[u8]) -> bool;
+    /// Drops the rest of the current file from the stream (`\endinput`, at
+    /// its line's end).
+    fn end_input(&mut self);
+    /// The source line at the reader's position: a read like any other
     /// (`\inputlineno`, error context), never part of a version.
     fn line(&mut self) -> u32;
-    /// Opens a named source (`\input`): its contents, a value read like
-    /// any other; `None` if there is no such file.
-    fn source(&mut self, name: &[u8]) -> Option<Arc<[u8]>>;
-    /// Starts reading a source's text next (an `\input` continuation).
-    fn input(&mut self, name: &[u8], text: Arc<[u8]>);
-    /// Ends the current input file (`\endinput`).
-    fn end_input(&mut self);
 
     // --- names
     fn sym(&mut self, spelling: &[u8]) -> Sym;
@@ -461,27 +516,14 @@ pub trait Cx {
     fn define(&mut self, k: Key, v: Val, global: bool);
     fn begin_group(&mut self, g: Group);
     /// Closes the innermost group: emits nothing; later reads resolve to
-    /// older definitions. Returns the group's kind.
+    /// older definitions (the enclosing list included). Returns its kind.
     fn end_group(&mut self) -> Group;
-    /// The innermost group's kind, if any.
+    /// The innermost group's kind, if any (a scope is language, not state).
     fn group(&mut self) -> Option<Group>;
 
-    // --- material
-    fn mode(&mut self) -> Mode;
-    /// Appends to the list being built.
+    /// Appends to the list being built: defines `Key::List` as the list
+    /// read with `item` added (sugar the graph may store as an append).
     fn emit(&mut self, item: Item);
-    /// Starts a new list in `mode` (a box, a paragraph, a math formula).
-    fn push_list(&mut self, mode: Mode);
-    /// Ends the innermost list and returns it, a value.
-    fn pop_list(&mut self) -> Arc<[Item]>;
-    /// The list being built so far (`\lastbox`, `\lastskip`, `\unskip`
-    /// read and change its tail).
-    fn tail(&mut self) -> Option<Item>;
-    fn pop_tail(&mut self) -> Option<Item>;
-    /// The list fields TeX keeps per list (`\prevdepth`, `\spacefactor`,
-    /// `\prevgraf`, `\clubpenalties` state ...): material's numbering.
-    fn list_field(&mut self, n: u16) -> i32;
-    fn set_list_field(&mut self, n: u16, v: i32);
 
     // --- effects
     fn effect(&mut self, e: Effect);
