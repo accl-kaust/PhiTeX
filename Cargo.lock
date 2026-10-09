@@ -1510,6 +1510,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "phitex-flow"
+version = "0.0.0"
+dependencies = [
+ "phi",
+]
+
+[[package]]
 name = "phitex-git"
 version = "0.0.0"
 dependencies = [
