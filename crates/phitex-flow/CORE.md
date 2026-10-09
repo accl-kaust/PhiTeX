@@ -331,7 +331,9 @@ written are not `^^`-coded; an `\input` file's diagnostics (box reports'
 `at line n`) give the calling line; `\endinput` in the main file and
 `\read` from the terminal are errors; a deferred `\write` of a page the
 page builder ships is expanded at the join, serially (pure; not yet a
-task).
+task); `\dump`'s format date is `\year.\month.\day` (TeX's is the clock's,
+even under `SOURCE_DATE_EPOCH`: the `dump` test leaves the date out), and
+the memory statistics TeX logs after it are not made.
 
 ## The remaining material (agent E)
 
