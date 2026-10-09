@@ -255,20 +255,29 @@ fn rank(a: &Slot) -> u8 {
 pub struct TexLang<H>(PhantomData<H>);
 
 /// The file an unfold reads, and its input level, if it is a file's.
-type Reading = Option<(Arc<FileDoc>, usize)>;
+type Reading = Option<(Arc<FileDoc>, usize, bool)>;
+
+/// The root unfold's flag on a file op's level: the job's first file,
+/// after whose end the job goes on in the same unfold.
+pub const ROOT: u16 = 0x8000;
 
 /// Place file `d` at its level in `t`: the source's bytes, read up to
 /// line `idx` (the first step of a file's unfold begins after its first
 /// line, which the `\input` that called it read).
-fn place_file<H: Host>(t: &mut Tex<H, PureTracker>, d: &FileDoc, level: usize, idx: usize) {
+fn place_file<H: Host>(t: &mut Tex<H, PureTracker>, d: &FileDoc, level: usize, idx: usize, root: bool) {
     let n = d.starts.len() - 1;
     let at = if idx == 0 { n.min(1) } else { idx };
-    let f = t
+    let open = level <= t.in_open;
+    let Some(f) = t
         .input_file
         .get_mut(level)
         .and_then(Option::as_mut)
-        .filter(|f| f.name[..] == d.name[..])
-        .expect("pure SSA: a file's unfold at a level that does not read it");
+        .filter(|f| open && f.name[..] == d.name[..])
+    else {
+        // (the job's first file ended: the job goes on after it)
+        assert!(root, "pure SSA: a file's unfold at a level that does not read it");
+        return;
+    };
     f.data = d.bytes.clone();
     f.pos = d.starts[at.min(n)];
     f.lines = u32::try_from(at).unwrap_or(u32::MAX);
@@ -301,15 +310,16 @@ fn command<H: Host + 'static>(op: Op, st: &Val, cx: &mut StepCx<'_, TexLang<H>>)
     let file: Reading = match op {
         Op::File(h, level) => Some((
             super::files::doc(h).expect("pure SSA: a file's unfold with no file"),
-            usize::from(level),
+            usize::from(level & !ROOT),
+            level & ROOT != 0,
         )),
         _ => None,
     };
     let cur = cx.cursor();
     let idx0 = match &file {
         None => 0,
-        Some((d, _)) if cur == phi::END => d.starts.len() - 1,
-        Some((d, _)) => *d.index.get(&cur).expect("pure SSA: a cursor not in the file"),
+        Some((d, _, _)) if cur == phi::END => d.starts.len() - 1,
+        Some((d, _, _)) => *d.index.get(&cur).expect("pure SSA: a cursor not in the file"),
     };
     with_engine::<H, _>(|e| {
         e.stats.steps += 1;
@@ -320,8 +330,8 @@ fn command<H: Host + 'static>(op: Op, st: &Val, cx: &mut StepCx<'_, TexLang<H>>)
             e.stats.placed += 1;
             ps.set(&mut e.tex);
         }
-        if let Some((d, level)) = &file {
-            place_file(&mut e.tex, d, *level, idx0);
+        if let Some((d, level, root)) = &file {
+            place_file(&mut e.tex, d, *level, idx0, *root);
         }
         e.tex.at_checkpoint = true;
         e.last = Some(cx.here());
@@ -448,7 +458,7 @@ fn core_version<H: Host + 'static>(
 /// consume the lines it read, emit its effects, and the next state.
 fn finish<H: Host + 'static>(
     e: &mut Engine<H>,
-    file: Option<&(Arc<FileDoc>, usize)>,
+    file: Option<&(Arc<FileDoc>, usize, bool)>,
     idx0: usize,
     r: Run,
     fx: Vec<Effect>,
@@ -590,7 +600,7 @@ fn finish<H: Host + 'static>(
     // the lines of its own file it read, and whether the file's level
     // ended
     let mut done = false;
-    if let Some((d, level)) = file {
+    if let Some((d, level, root)) = file {
         let t = &e.tex;
         let open = t
             .input_file
@@ -600,7 +610,7 @@ fn finish<H: Host + 'static>(
         let read = match open {
             Some(f) => Some(f.lines),
             None => {
-                done = true;
+                done = !*root;
                 t.tracker
                     .file_ends
                     .borrow()
@@ -627,7 +637,7 @@ fn finish<H: Host + 'static>(
         Run::Checkpoint => None,
         Run::Finished(h) => Some(h),
     };
-    let main = file.map_or(&b""[..], |(d, _)| &d.name[..]);
+    let main = file.map_or(&b""[..], |(d, _, _)| &d.name[..]);
     let (mut ps, v) = PState::of(&mut e.tex, main, finished);
     let ver = Ver(v);
     e.at = Some(ver);

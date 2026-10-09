@@ -79,17 +79,18 @@ impl<H: Host + 'static> Build<H> {
                 let k = key(&l.name);
                 let h = key_hash(&k);
                 let d = FileDoc::new(&l.name, name, bytes.clone(), None);
-                g.source(&k, d.value.clone());
+                let src = g.source(&k, d.value.clone());
                 set_doc(h, Some(d));
-                first = Some((h, u16::try_from(j).expect("input levels fit u16")));
+                first = Some((h, u16::try_from(j).expect("input levels fit u16"), src));
             }
         }
-        let st = Arc::new(st);
-        let init = g.input(match first {
-            Some((h, j)) => Val::Enter(st, Ver(v), h, j),
-            None => Val::State(st, Ver(v)),
-        });
-        let doc = g.unfold(Op::Main, input, init, &[]);
+        let init = g.input(Val::State(Arc::new(st), Ver(v)));
+        // (the root unfold reads that file: speculative entries are a
+        // root unfold's)
+        let doc = match first {
+            Some((h, j, src)) => g.unfold(Op::File(h, j | super::lang::ROOT), src, init, &[]),
+            None => g.unfold(Op::Main, input, init, &[]),
+        };
         let _ = g.chain_read(OUTPUT);
         Build {
             g,
