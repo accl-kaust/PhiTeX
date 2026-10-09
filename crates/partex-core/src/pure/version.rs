@@ -67,6 +67,17 @@ pub(crate) fn slot_version<H: Host, T: Tracker>(t: &Tex<H, T>, s: Slot) -> Optio
                 k => scalar_version_i32(crate::ssa::scalar_get(t, k)?),
             }
         }
+        Fam::Glyphs => {
+            let g = t
+                .pdf
+                .ship
+                .glyphs
+                .get(usize::try_from(s.1).ok()?)
+                .cloned()
+                .unwrap_or_else(|| alloc::sync::Arc::from(&[][..]));
+            Version::of(&g).0
+        }
+        Fam::PageNode => t.page_node_version(usize::try_from(s.1).ok()?),
         Fam::Sealed => t
             .seals
             .get(u128::from(s.1.cast_unsigned()))

@@ -58,7 +58,9 @@ pub(crate) fn kind(s: Slot) -> Kind {
         | Fam::Random
         | Fam::Mark
         | Fam::Page
-        | Fam::Sealed => Kind::Name,
+        | Fam::Sealed
+        | Fam::Glyphs
+        | Fam::PageNode => Kind::Name,
         Fam::List | Fam::Save | Fam::Cond => Kind::State,
         Fam::Alloc => match u16::try_from(s.1).unwrap_or(u16::MAX) {
             scalar::STR_TOP | scalar::HASH_USED | scalar::HASH_HIGH => Kind::Interner,
