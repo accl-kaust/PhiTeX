@@ -39,6 +39,7 @@ pub mod item;
 pub mod linebreak;
 pub mod page;
 pub mod graph;
+pub mod hyph;
 pub mod logs;
 pub mod pack;
 pub mod prim;
