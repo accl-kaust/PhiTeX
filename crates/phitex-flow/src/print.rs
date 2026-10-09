@@ -116,9 +116,15 @@ pub fn log(start: &str, entries: &[String], end: &str) -> String {
     for e in entries {
         if let Some(raw) = e.strip_prefix(crate::show::RAW) {
             // (print operations: `print_ln`, `print_nl`, a space if the
-            // line is not empty, characters)
-            for c in raw.chars() {
+            // line is not empty, characters, an error's context)
+            let mut it = raw.chars();
+            while let Some(c) = it.next() {
                 match c {
+                    crate::show::CTX => {
+                        let first: String = it.by_ref().take_while(|&x| x != crate::show::CTX).collect();
+                        let second: String = it.by_ref().take_while(|&x| x != crate::show::CTX).collect();
+                        p.context(&first, &second);
+                    }
                     crate::show::LN => p.ln(),
                     crate::show::NL => {
                         if p.offset > 0 {
@@ -171,6 +177,51 @@ impl Printer {
             self.ln();
         }
     }
+    /// tex.web 317–318: an input level's two lines, the first (after the
+    /// `l.N ` printed, `l` characters) at most `half_error_line` long,
+    /// the second at most `error_line` (TeX Live's 50 and 79).
+    fn context(&mut self, first: &str, second: &str) {
+        const ERROR_LINE: usize = 79;
+        const HALF_ERROR_LINE: usize = 50;
+        let shown = |s: &str| {
+            let mut v = Vec::new();
+            for c in s.chars() {
+                let k = u32::from(c);
+                if k < 32 || k == 127 {
+                    v.extend(['^', '^', char::from_u32(if k < 64 { k + 64 } else { k - 64 }).unwrap_or('?')]);
+                } else {
+                    v.push(c);
+                }
+            }
+            v
+        };
+        let (f, s) = (shown(first), shown(second));
+        let l = self.offset;
+        let first_count = f.len();
+        let trick_count = (first_count + 1 + ERROR_LINE - HALF_ERROR_LINE).max(ERROR_LINE);
+        let m = if first_count + s.len() < trick_count { s.len() } else { trick_count - first_count };
+        let (p, n) = if l + first_count <= HALF_ERROR_LINE {
+            (0, l + first_count)
+        } else {
+            self.print("...");
+            (l + first_count - HALF_ERROR_LINE + 3, HALF_ERROR_LINE)
+        };
+        for &c in &f[p.min(first_count)..] {
+            self.char(c);
+        }
+        self.ln();
+        for _ in 0..n {
+            self.char(' ');
+        }
+        let upto = if m + n <= ERROR_LINE { m } else { ERROR_LINE.saturating_sub(n + 3) };
+        for &c in &s[..upto.min(s.len())] {
+            self.char(c);
+        }
+        if m + n > ERROR_LINE {
+            self.print("...");
+        }
+    }
+
     fn print(&mut self, s: &str) {
         for c in s.chars() {
             let k = u32::from(c);

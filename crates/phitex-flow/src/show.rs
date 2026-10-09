@@ -22,6 +22,10 @@ pub const NL: char = '\u{2}';
 pub const LINE: char = '\u{4}';
 /// A space if the log's line is not empty (tex.web 638's `[`).
 pub const SP: char = '\u{6}';
+/// An error's context at the file's level (tex.web 317–318): `CTX`, the
+/// line up to where it was read, `CTX`, the rest, `CTX`; printed as TeX's
+/// two lines, after the `l.N ` already printed.
+pub const CTX: char = '\u{5}';
 
 /// What a display reads: the escape character, the font identifiers, and
 /// `\showboxdepth`/`\showboxbreadth`.

@@ -174,6 +174,8 @@ pub enum MathP {
     Above(u8),
     Left,
     Right,
+    /// e-TeX's `\middle` (extended mode only).
+    Middle,
     /// `\eqno` (false), `\leqno` (true).
     EqNo(bool),
     Mskip,
@@ -283,8 +285,6 @@ pub enum Prim {
     Marks,
     /// `\pagediscards` (0), `\splitdiscards` (1).
     Discards(u8),
-    /// `\middle`.
-    Middle,
     /// `\beginL`, `\endL`, `\beginR`, `\endR`: the math node's subtype
     /// (6, 7, 10, 11).
     Lr(u8),
@@ -404,7 +404,7 @@ params! { GluePar, 18, Lineskip = "lineskip", Baselineskip = "baselineskip", Par
 params! { TokPar, 10, Output = "output", Everypar = "everypar", Everymath = "everymath", Everydisplay = "everydisplay", Everyhbox = "everyhbox", Everyvbox = "everyvbox", Everyjob = "everyjob", Everycr = "everycr", Errhelp = "errhelp", Everyeof = "everyeof" }
 
 /// The reader's internal commands (`Mat::Internal`).
-pub const INTERNAL: [(&str, Prim); 9] = [
+pub const INTERNAL: [(&str, Prim); 10] = [
     ("\u{0}package", Prim::Mat(Mat::Internal(0))),
     ("\u{0}endgraf", Prim::Mat(Mat::Internal(1))),
     ("\u{0}discnext", Prim::Mat(Mat::Internal(2))),
@@ -414,6 +414,7 @@ pub const INTERNAL: [(&str, Prim); 9] = [
     ("\u{0}displayend", Prim::Mat(Mat::Internal(6))),
     ("\u{0}mathgroup", Prim::Mat(Mat::Internal(7))),
     ("\u{0}choicenext", Prim::Mat(Mat::Internal(8))),
+    ("\u{0}middlenext", Prim::Mat(Mat::Internal(9))),
 ];
 
 /// Every TeX82 primitive (tex.web §1336: partex-core's `init_prim_tex` less
@@ -898,7 +899,7 @@ pub const ETEX_PRIMITIVES: [(&str, Prim); 66] = [
     ("lastlinefit", Prim::IntPar(IntPar::Lastlinefit)),
     ("lastnodetype", Prim::LastItem(11)),
     ("marks", Prim::Marks),
-    ("middle", Prim::Middle),
+    ("middle", Prim::Math(MathP::Middle)),
     ("muexpr", Prim::LastItem(28)),
     ("mutoglue", Prim::LastItem(23)),
     ("numexpr", Prim::LastItem(25)),

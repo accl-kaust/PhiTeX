@@ -99,6 +99,10 @@ pub enum Key {
     /// Whether the format is e-TeX's extended mode (1) or TeX's (0): a
     /// value of the format no document defines (`Options::etex`).
     ETeXMode,
+    /// e-TeX's `\interlinepenalties` (0), `\clubpenalties` (1),
+    /// `\widowpenalties` (2), `\displaywidowpenalties` (3):
+    /// `Val::Penalties`.
+    PenaltiesArray(u8),
 }
 
 impl Key {
@@ -191,6 +195,7 @@ impl Key {
             Key::FamFont(s, f) => w(25, (u64::from(*s) << 8) | u64::from(*f)),
             Key::Interaction => w(26, 0),
             Key::ETeXMode => w(27, 0),
+            Key::PenaltiesArray(k) => w(28, u64::from(*k)),
         }
     }
 }
@@ -226,6 +231,11 @@ impl fmt::Display for Key {
             Key::FamFont(s, x) => write!(f, "\\{}font{x}", ["text", "script", "scriptscript"][usize::from(*s).min(2)]),
             Key::Interaction => write!(f, "\\interactionmode"),
             Key::ETeXMode => write!(f, "e-TeX mode"),
+            Key::PenaltiesArray(k) => write!(
+                f,
+                "\\{}penalties",
+                ["interline", "club", "widow", "displaywidow"][usize::from(*k).min(3)]
+            ),
         }
     }
 }
@@ -288,6 +298,9 @@ pub enum Val {
     Toks(Arc<Vec<Tok>>),
     /// `\parshape`: (indent, length) per line.
     Parshape(Arc<Vec<(i32, i32)>>),
+    /// A penalties array (e-TeX's `\interlinepenalties`…): its values; none
+    /// is TeX's null.
+    Penalties(Arc<[i32]>),
     /// A void box register.
     Void,
     /// A box register's box.
@@ -314,6 +327,7 @@ impl fmt::Display for Val {
                 write!(f, "}}")
             }
             Val::Parshape(p) => write!(f, "parshape {}", p.len()),
+            Val::Penalties(p) => write!(f, "penalties {}", p.len()),
             Val::Void => write!(f, "void"),
             Val::Box(b) => write!(f, "{}box({}+{})x{}", if b.vertical { "v" } else { "h" }, b.h, b.d, b.w),
             Val::Name(n) => write!(f, "{n}"),
@@ -397,6 +411,7 @@ pub fn initial(key: &Key, _font: &Arc<Font>, etex: bool) -> Val {
         // in that mode instead)
         Key::Interaction => Val::Int(3),
         Key::ETeXMode => Val::Int(i32::from(etex)),
+        Key::PenaltiesArray(_) => Val::Penalties(Arc::from([])),
     }
 }
 

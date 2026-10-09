@@ -13,6 +13,7 @@
 use std::sync::Arc;
 
 use crate::item::{BoxNode, Item, RUNNING};
+use crate::pack::{end_lr_type, math_subtype};
 use crate::page::Page;
 use crate::show::zround;
 use crate::tfm::Font;
@@ -87,6 +88,19 @@ impl SetGlue {
         wd += self.cur_g;
         wd
     }
+}
+
+/// etex.web's `cur_dir` values.
+const RIGHT_TO_LEFT: u8 = 1;
+
+/// An item of an hlist being shipped, in the working copy TeXXeT's
+/// reversal rearranges (etex.web §1409–§1455): an item; a kern (a math
+/// node or set glue changed into one); an edge node (where the direction
+/// changes, with the left edge's distance).
+enum H {
+    I(Item),
+    Kern(i32),
+    Edge { dir: u8, w: i32, dist: i32 },
 }
 
 /// Each font's internal number (TeX's: the order of first loading).
@@ -167,6 +181,8 @@ struct Writer<'a> {
     /// movement, and where `dvi_pop` met an empty push.
     lookback: i32,
     edges: Vec<(i32, bool)>,
+    /// etex.web's `cur_dir`: 0 left to right, 1 right to left.
+    cur_dir: u8,
 }
 
 impl Writer<'_> {
@@ -413,50 +429,225 @@ impl Writer<'_> {
         self.dvi_h = self.cur_h;
     }
 
-    /// §619–§628
+    /// §619–§628, with e-TeX's mixed-direction typesetting (etex.web
+    /// §1409–§1455): the LR stack is a local of this function, and
+    /// right-to-left segments are reversed in a working copy of the list
+    /// (`H`), the box itself never changed.
     fn hlist_out(&mut self, this: &BoxNode) {
         let mut glue = SetGlue::default();
         let base_line = self.cur_v;
-        for it in &this.list {
-            match it {
-                Item::Char(f, c) => self.char_out(f, *c),
-                Item::Lig(l) => self.char_out(&l.font, l.c),
-                Item::Box(b) => {
-                    // (§623)
-                    if b.list.is_empty() {
-                        self.cur_h += b.w;
-                    } else {
-                        let (save_h, save_v) = (self.dvi_h, self.dvi_v);
-                        self.cur_v = base_line + b.shift;
-                        let edge = self.cur_h;
-                        self.list_out(b);
-                        self.dvi_h = save_h;
-                        self.dvi_v = save_v;
-                        self.cur_h = edge + b.w;
-                        self.cur_v = base_line;
-                    }
-                }
-                Item::Rule { w, h, d } => {
-                    // (§624)
-                    let rule_ht = if *h == RUNNING { this.h } else { *h };
-                    let rule_dp = if *d == RUNNING { this.d } else { *d };
-                    let rule_ht = rule_ht + rule_dp;
-                    if rule_ht > 0 && *w > 0 {
-                        self.synch_h();
-                        self.cur_v = base_line + rule_dp;
-                        self.synch_v();
-                        self.byte(SET_RULE);
-                        self.four(rule_ht);
-                        self.four(*w);
-                        self.cur_v = base_line;
-                        self.dvi_h += *w;
-                    }
+        // (`put_LR(before)`: never matches)
+        let mut lr: Vec<u8> = vec![0];
+        let mut v: Vec<H> = this.list.iter().cloned().map(H::I).collect();
+        if self.cur_dir == RIGHT_TO_LEFT {
+            // (the complete hlist reversed, after a kern back over it)
+            let save_h = self.cur_h;
+            self.cur_h = 0;
+            let rev = self.reverse(this, std::mem::take(&mut v), None, &mut glue, &mut lr);
+            v.push(H::Kern(-self.cur_h));
+            v.extend(rev);
+            self.cur_h = save_h;
+        }
+        let mut left_edge = self.cur_h;
+        let mut k = 0;
+        while k < v.len() {
+            match &v[k] {
+                H::Kern(w) => self.cur_h += *w,
+                H::Edge { dir, w, dist } => {
                     self.cur_h += *w;
+                    left_edge = self.cur_h + *dist;
+                    self.cur_dir = *dir;
                 }
-                Item::Glue { g, .. } => self.cur_h += glue.set(this, g),
-                Item::Kern { w, .. } | Item::Math { w, .. } => self.cur_h += *w,
-                _ => {}
+                H::I(it) => match it {
+                    Item::Char(f, c) => {
+                        let (f, c) = (f.clone(), *c);
+                        self.char_out(&f, c);
+                    }
+                    Item::Lig(l) => {
+                        let l = l.clone();
+                        self.char_out(&l.font, l.c);
+                    }
+                    Item::Box(b) => {
+                        // (§623)
+                        let b = b.clone();
+                        if b.list.is_empty() {
+                            self.cur_h += b.w;
+                        } else {
+                            let (save_h, save_v) = (self.dvi_h, self.dvi_v);
+                            self.cur_v = base_line + b.shift;
+                            let edge = self.cur_h + b.w;
+                            if self.cur_dir == RIGHT_TO_LEFT {
+                                self.cur_h = edge;
+                            }
+                            self.list_out(&b);
+                            self.dvi_h = save_h;
+                            self.dvi_v = save_v;
+                            self.cur_h = edge;
+                            self.cur_v = base_line;
+                        }
+                    }
+                    Item::Rule { w, h, d } => {
+                        // (§624)
+                        let rule_ht = if *h == RUNNING { this.h } else { *h };
+                        let rule_dp = if *d == RUNNING { this.d } else { *d };
+                        let rule_ht = rule_ht + rule_dp;
+                        let w = *w;
+                        if rule_ht > 0 && w > 0 {
+                            self.synch_h();
+                            self.cur_v = base_line + rule_dp;
+                            self.synch_v();
+                            self.byte(SET_RULE);
+                            self.four(rule_ht);
+                            self.four(w);
+                            self.cur_v = base_line;
+                            self.dvi_h += w;
+                        }
+                        self.cur_h += w;
+                    }
+                    Item::Glue { g, .. } => {
+                        let g = g.clone();
+                        self.cur_h += glue.set(this, &g);
+                    }
+                    Item::Kern { w, .. } => self.cur_h += *w,
+                    Item::Math { w, after, lr: base } => {
+                        // (etex.web §1450: the LR stack; a segment in the
+                        // other direction is reversed)
+                        let (w, s) = (*w, math_subtype(*base, *after));
+                        if *after {
+                            if lr.last() == Some(&end_lr_type(s)) {
+                                lr.pop();
+                            }
+                        } else {
+                            lr.push(end_lr_type(s));
+                            if s / 8 != self.cur_dir {
+                                let save_h = self.cur_h;
+                                let rest = v.split_off(k + 1);
+                                v.pop();
+                                self.cur_dir = 1 - self.cur_dir;
+                                self.cur_h = self.cur_h - left_edge + w;
+                                let tail = H::Edge { dir: 1 - self.cur_dir, w: 0, dist: 0 };
+                                let rev = self.reverse(this, rest, Some(tail), &mut glue, &mut lr);
+                                v.push(H::Edge { dir: self.cur_dir, w, dist: self.cur_h });
+                                v.extend(rev);
+                                self.cur_dir = 1 - self.cur_dir;
+                                self.cur_h = save_h;
+                                // (reswitch: the edge is processed next)
+                                continue;
+                            }
+                        }
+                        self.cur_h += w;
+                    }
+                    _ => {}
+                },
             }
+            k += 1;
+        }
+    }
+
+    /// etex.web's `reverse`: the items of `list` in reverse order, ending
+    /// with the edge `t` (if any) and then what follows the segment's end
+    /// in `list`; widths are added to `cur_h`, glue of the box's order is
+    /// set (and becomes a kern), math nodes become kerns or change sides.
+    fn reverse(&mut self, this: &BoxNode, list: Vec<H>, t: Option<H>, glue: &mut SetGlue, lr: &mut Vec<u8>) -> Vec<H> {
+        // (`out` is the new list backwards: its first element is the last)
+        let mut out: Vec<H> = Vec::new();
+        let has_t = t.is_some();
+        out.extend(t);
+        let (mut m, mut n) = (0u32, 0u32);
+        let mut it = list.into_iter();
+        loop {
+            let p = if let Some(p) = it.next() {
+                p
+            } else {
+                if !has_t && m == 0 && n == 0 {
+                    out.reverse();
+                    return out;
+                }
+                // (a missing math node is made)
+                let Some(&e) = lr.last().filter(|&&e| e != 0) else {
+                    out.reverse();
+                    return out;
+                };
+                H::I(Item::Math { w: 0, after: true, lr: e - 1 })
+            };
+            let (node, wd): (H, Option<i32>) = match p {
+                H::I(Item::Char(f, c)) => {
+                    self.cur_h += f.glyph(i32::from(c)).map_or(0, |g| g.width);
+                    (H::I(Item::Char(f, c)), None)
+                }
+                H::I(Item::Lig(l)) => {
+                    self.cur_h += l.font.glyph(i32::from(l.c)).map_or(0, |g| g.width);
+                    (H::I(Item::Char(l.font.clone(), l.c)), None)
+                }
+                H::I(Item::Box(b)) => {
+                    self.cur_h += b.w;
+                    (H::I(Item::Box(b)), None)
+                }
+                H::I(Item::Rule { w, h, d }) => {
+                    self.cur_h += w;
+                    (H::I(Item::Rule { w, h, d }), None)
+                }
+                H::I(Item::Kern { w, .. }) | H::Kern(w) => {
+                    self.cur_h += w;
+                    (H::Kern(w), Some(w))
+                }
+                H::I(Item::Glue { g, sub, zero }) => {
+                    let wd = glue.set(this, &g);
+                    self.cur_h += wd;
+                    let set = (this.glue.sign == 1 && g.stretch_order == this.glue.order)
+                        || (this.glue.sign == -1 && g.shrink_order == this.glue.order);
+                    if set { (H::Kern(wd), Some(wd)) } else { (H::I(Item::Glue { g, sub, zero }), None) }
+                }
+                H::I(Item::Math { w, after, lr: base }) => {
+                    let s = math_subtype(base, after);
+                    let node = if after {
+                        if lr.last() == Some(&end_lr_type(s)) {
+                            lr.pop();
+                            if n > 0 {
+                                n -= 1;
+                                // (`after` becomes `before`)
+                                H::I(Item::Math { w, after: false, lr: base })
+                            } else if m > 0 {
+                                m -= 1;
+                                H::Kern(w)
+                            } else {
+                                // (the segment's end: the edge `t` takes its
+                                // width, and the rest follows it)
+                                if let Some(H::Edge { w: tw, dist, .. }) = out.first_mut() {
+                                    *tw = w;
+                                    *dist = -self.cur_h - w;
+                                }
+                                out.reverse();
+                                out.extend(it);
+                                return out;
+                            }
+                        } else {
+                            H::Kern(w)
+                        }
+                    } else {
+                        lr.push(end_lr_type(s));
+                        if n > 0 || s / 8 != self.cur_dir {
+                            n += 1;
+                            // (`before` becomes `after`)
+                            H::I(Item::Math { w, after: true, lr: base })
+                        } else {
+                            m += 1;
+                            H::Kern(w)
+                        }
+                    };
+                    self.cur_h += w;
+                    let wd = if matches!(node, H::Kern(_)) { Some(w) } else { None };
+                    (node, wd)
+                }
+                other => (other, None),
+            };
+            // (a kern of no width, or with nothing after it, goes)
+            if let Some(w) = wd
+                && (w == 0 || out.is_empty())
+            {
+                continue;
+            }
+            out.push(node);
         }
     }
 
@@ -475,7 +666,8 @@ impl Writer<'_> {
                         self.cur_v += b.h;
                         self.synch_v();
                         let (save_h, save_v) = (self.dvi_h, self.dvi_v);
-                        self.cur_h = left_edge + b.shift;
+                        // (etex.web: in right-to-left text, shifted left)
+                        self.cur_h = if self.cur_dir == RIGHT_TO_LEFT { left_edge - b.shift } else { left_edge + b.shift };
                         self.list_out(b);
                         self.dvi_h = save_h;
                         self.dvi_v = save_v;
@@ -489,11 +681,15 @@ impl Writer<'_> {
                     let rule_ht = *h + *d;
                     self.cur_v += rule_ht;
                     if rule_ht > 0 && rule_wd > 0 {
+                        if self.cur_dir == RIGHT_TO_LEFT {
+                            self.cur_h -= rule_wd;
+                        }
                         self.synch_h();
                         self.synch_v();
                         self.byte(PUT_RULE);
                         self.four(rule_ht);
                         self.four(rule_wd);
+                        self.cur_h = left_edge;
                     }
                 }
                 Item::Glue { g, .. } => self.cur_v += glue.set(this, g),
@@ -563,6 +759,7 @@ pub fn page_body(p: &Page, numbers: &Numbers, extra: &[Arc<str>], defined: &[u32
         fonts: Vec::new(),
         lookback: 0,
         edges: Vec::new(),
+        cur_dir: 0,
     };
     w.page(p);
     // (putting in or leaving out its `fnt_def`s moves a look back by at

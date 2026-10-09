@@ -12,6 +12,10 @@
 //! `tests/dvi/NAME.dvi` and `NAME.log` (the log's lines after `**NAME.tex`
 //! up to `Output written`); where a `tex` binary is found they are checked
 //! against a fresh run; `PHITEX_FLOW_BLESS=1` records them anew.
+//!
+//! The `etex` flavour (`check_etex`) runs a document through `etex -ini
+//! -etex` and the graph in e-TeX's extended mode (`Options::etex`):
+//! `TeXXeT`, `\lastlinefit`, the penalties arrays, `\middle`.
 
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
@@ -37,16 +41,19 @@ fn log_body(log: &str) -> Option<String> {
     Some(lines[start..end].join("\n"))
 }
 
-/// TeX's DVI file and log of a document, if there is a `tex`.
-fn tex(name: &str, src: &str) -> Option<(Vec<u8>, String)> {
+/// TeX's DVI file and log of a document, if there is a `tex` (`etex -ini
+/// -etex` for e-TeX's extended mode).
+fn tex(name: &str, src: &str, etex: bool) -> Option<(Vec<u8>, String)> {
     // (a directory per call: two tests run the same document at once)
     static CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     let call = CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let tmp = std::env::temp_dir().join(format!("phitex-flow-dvi-{name}-{}-{call}", std::process::id()));
     std::fs::create_dir_all(&tmp).ok()?;
     std::fs::write(tmp.join(format!("{name}.tex")), src).ok()?;
-    let st = Command::new("tex")
-        .args(["-ini", "-interaction=batchmode", &format!("{name}.tex")])
+    let (bin, args): (&str, &[&str]) = if etex { ("etex", &["-ini", "-etex"]) } else { ("tex", &["-ini"]) };
+    let st = Command::new(bin)
+        .args(args)
+        .args(["-interaction=batchmode", &format!("{name}.tex")])
         .env("SOURCE_DATE_EPOCH", "0")
         .env("FORCE_SOURCE_DATE", "1")
         .current_dir(&tmp)
@@ -93,14 +100,29 @@ const RUNS: [Options; 5] = [
     Options { threads: 8, reads: Reads::Speculate, order: Order::Random(7), dump: false, etex: false },
 ];
 
+/// The same, in e-TeX's extended mode.
+const RUNS_ETEX: [Options; 5] = [
+    Options { threads: 1, reads: Reads::Suspend, order: Order::Priority, dump: false, etex: true },
+    Options { threads: 8, reads: Reads::Suspend, order: Order::Priority, dump: false, etex: true },
+    Options { threads: 8, reads: Reads::Speculate, order: Order::Priority, dump: false, etex: true },
+    Options { threads: 8, reads: Reads::Suspend, order: Order::Random(1), dump: false, etex: true },
+    Options { threads: 8, reads: Reads::Speculate, order: Order::Random(7), dump: false, etex: true },
+];
+
 fn check(name: &str) {
     let src = std::fs::read_to_string(dir().join(format!("{name}.tex"))).unwrap();
     check_src(name, &src, &RUNS);
 }
 
+/// A document of the `etex` flavour.
+fn check_etex(name: &str) {
+    let src = std::fs::read_to_string(dir().join(format!("{name}.tex"))).unwrap();
+    check_src(name, &src, &RUNS_ETEX);
+}
+
 fn check_src(name: &str, src: &str, runs: &[Options]) {
     let (dvi_path, log_path) = (dir().join(format!("{name}.dvi")), dir().join(format!("{name}.log")));
-    let t = tex(name, src);
+    let t = tex(name, src, runs.iter().any(|o| o.etex));
     if std::env::var_os("PHITEX_FLOW_BLESS").is_some() {
         let (d, l) = t.as_ref().expect("PHITEX_FLOW_BLESS needs a tex binary");
         std::fs::write(&dvi_path, d).unwrap();
@@ -148,6 +170,14 @@ macro_rules! documents {
 }
 
 documents!(para, skips, hbox, setbox, vbox, pages, fonts, shape, leave, show, ship, disc, math1, math2, math3, math4);
+
+macro_rules! etex_documents {
+    ($($name:ident),* $(,)?) => {
+        $(#[test] fn $name() { check_etex(stringify!($name)); })*
+    };
+}
+
+etex_documents!(texxet, llfit, pens, middle);
 
 /// plain.tex (all but `\input hyphen`), then text set with its macros and
 /// the default output routine (`\output={}`), at 1 thread.

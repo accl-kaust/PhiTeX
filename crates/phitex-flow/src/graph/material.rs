@@ -413,6 +413,7 @@ impl Exec<'_> {
             Mat::Internal(5) => self.display_open(),
             Mat::Internal(6) => self.display_end(),
             Mat::Internal(7) => self.math_group_open(),
+            Mat::Internal(9) => self.middle_next(),
             Mat::Internal(_) => self.choice_next(),
         }
     }
@@ -489,6 +490,10 @@ impl Exec<'_> {
         if matches!(self.get(&Key::Parshape), Val::Parshape(s) if !s.is_empty()) {
             self.define(Key::Parshape, Val::Parshape(Arc::new(Vec::new())), false);
         }
+        // (etex.web §1070: and `\interlinepenalties`)
+        if !self.penalties(0).is_empty() {
+            self.define(Key::PenaltiesArray(0), Val::Penalties(Arc::from([])), false);
+        }
     }
 
     /// Whether `normal_paragraph` would define anything.
@@ -497,6 +502,7 @@ impl Exec<'_> {
             || self.dimen_par(DimenPar::Hangindent) != 0
             || self.int_par(IntPar::Hangafter) != 1
             || matches!(self.get(&Key::Parshape), Val::Parshape(s) if !s.is_empty())
+            || !self.penalties(0).is_empty()
     }
 
     /// `\par` (tex.web 1094).
@@ -532,6 +538,11 @@ impl Exec<'_> {
             clubpenalty: self.int_par(IntPar::Clubpenalty),
             widowpenalty: self.int_par(IntPar::Widowpenalty),
             brokenpenalty: self.int_par(IntPar::Brokenpenalty),
+            interlinepenalties: self.penalties(0),
+            clubpenalties: self.penalties(1),
+            widowpenalties: self.penalties(2),
+            last_line_fit: self.int_par(IntPar::Lastlinefit),
+            texxet: self.int_par(IntPar::TeXXeTstate) > 0,
             leftskip: self.glue_par(GluePar::Leftskip),
             rightskip: self.glue_par(GluePar::Rightskip),
             hangindent: self.dimen_par(DimenPar::Hangindent),
@@ -1179,7 +1190,8 @@ impl Exec<'_> {
 
     /// Opens a box group: a scope, and a new list (tex.web 1083: `push_nest`).
     pub(super) fn open_box(&mut self, g: BoxGroup, mode: Mode) {
-        self.st.groups.push(Group { kind: GroupKind::Box, after: Vec::new(), boxg: Some(Arc::new(g)) });
+        let at = self.chain.nodes.len() as u32;
+        self.st.groups.push(Group { kind: GroupKind::Box, after: Vec::new(), boxg: Some(Arc::new(g)), at });
         self.kind = Kind::Open;
         self.st.level += 1;
         self.st.mode = mode;
@@ -1402,6 +1414,11 @@ impl Exec<'_> {
                     overfull_rule: self.dimen_par(DimenPar::Overfullrule),
                 };
                 let mut adj = Vec::new();
+                let mut list = list;
+                if self.int_par(IntPar::TeXXeTstate) > 0 {
+                    // (etex.web: TeXXeT's checks of `hpack`)
+                    crate::pack::lr_fix(&mut list);
+                }
                 let packed = hpack(list, be.g.spec, &params, if be.g.adjusted { Some(&mut adj) } else { None });
                 if let Some(r) = packed.report {
                     let cx = self.show_ctx(std::slice::from_ref(&Item::Box(Arc::new(packed.b.clone()))));

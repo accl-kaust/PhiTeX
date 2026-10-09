@@ -46,6 +46,13 @@ fn resolve(s: &str, text: &[char], run: &Run, i: usize) -> String {
                 let start = paragraph_start(&run.chain, i);
                 let _ = write!(out, "{REL}{}{REL}--{REL}{here}{REL}", line_of(text, run, start));
             }
+            // (`N` and a node's index: the line that node had reached —
+            // where a group or a conditional began, for e-TeX's
+            // `\showgroups`, `\showifs`)
+            w if w.starts_with('N') => {
+                let j = w[1..].parse::<usize>().unwrap_or(i).min(i);
+                let _ = write!(out, "{REL}{}{REL}", line_of(text, run, j));
+            }
             _ => {
                 let _ = write!(out, "{REL}{here}{REL}");
             }

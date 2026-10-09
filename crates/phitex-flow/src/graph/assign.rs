@@ -217,6 +217,7 @@ impl Exec<'_> {
                 Prim::Interaction(k) => self.new_interaction(i32::from(k)),
                 Prim::PageInt(2) => self.interaction_mode_assign(),
                 Prim::ReadLine => self.read_line(),
+                Prim::PenShape(k) => self.penalties_assign(k, global),
                 _ => self.err(format!("\\{} is not supported yet", p.name())),
             },
             Meaning::CountRef(_) | Meaning::DimenRef(_) | Meaning::SkipRef(_) | Meaning::MuskipRef(_) => {

@@ -52,3 +52,24 @@ pub fn round_decimals(digits: &[u8]) -> i32 {
 pub fn clamp(x: i64) -> i32 {
     x.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32
 }
+
+/// e-TeX's `fract` (etex.web §1483): `x * n / d` rounded (halves up in
+/// magnitude), from the exact product; `None` if `d` is zero or the
+/// result's magnitude exceeds `max`.
+pub fn fract(x: i32, n: i32, d: i32, max: i32) -> Option<i32> {
+    if d == 0 {
+        return None;
+    }
+    if x == 0 {
+        return Some(0);
+    }
+    let negative = ((x < 0) != (n < 0)) != (d < 0);
+    let num = i128::from(x).abs() * i128::from(n).abs();
+    let d = i128::from(d).abs();
+    let a = (2 * num + d) / (2 * d);
+    if a > i128::from(max) {
+        return None;
+    }
+    let a = a as i32;
+    Some(if negative { -a } else { a })
+}

@@ -140,7 +140,9 @@ pub enum Kind {
     },
     Vcenter,
     Left(Delim),
-    Right(Delim),
+    /// `\right`; e-TeX's `\middle` (`true`: etex.web's `middle_noad`
+    /// subtype).
+    Right(Delim, bool),
 }
 
 impl Kind {
@@ -162,7 +164,7 @@ impl Kind {
             Kind::Accent { .. } => 28,
             Kind::Vcenter => 29,
             Kind::Left(_) => LEFT,
-            Kind::Right(_) => RIGHT,
+            Kind::Right(..) => RIGHT,
         }
     }
 
@@ -353,9 +355,15 @@ pub fn gather(items: impl IntoIterator<Item = Item>, right: Option<Noad>) -> (Ve
             (vec![item(MItem::Noad(frac))], errors)
         }
         Some(r) => {
-            let first = if num.is_empty() { None } else { Some(num.remove(0)) };
-            frac.sup = Field::Mlist(num);
-            let mut out: Vec<Item> = first.into_iter().collect();
+            // (etex.web §1185: the numerator begins after the last left or
+            // middle noad, `delim_ptr`)
+            let k = num
+                .iter()
+                .rposition(|i| matches!(i, Item::Noad(m) if matches!(&**m, MItem::Noad(n) if matches!(n.kind, Kind::Left(_) | Kind::Right(_, true)))))
+                .map_or(usize::from(!num.is_empty()), |k| k + 1);
+            let rest = num.split_off(k.min(num.len()));
+            frac.sup = Field::Mlist(rest);
+            let mut out: Vec<Item> = num;
             out.push(item(MItem::Noad(frac)));
             out.push(item(MItem::Noad(r)));
             (out, errors)
@@ -851,17 +859,22 @@ impl<E: MathEnv> Ctx<'_, E> {
             }
             match &q.kind {
                 Kind::Bin | Kind::Open | Kind::Inner => {}
-                Kind::Rel | Kind::Close | Kind::Punct | Kind::Right(_) => {
+                Kind::Rel | Kind::Close | Kind::Punct | Kind::Right(..) => {
                     // (§729)
                     if r_type == BIN
                         && let Some(Done::Noad { code, .. }) = r.map(|i| &mut done[i])
                     {
                         *code = ORD;
                     }
-                    if let Kind::Right(d) = q.kind {
+                    if let Kind::Right(d, _) = q.kind {
                         done.push(Done::Noad { code: RIGHT, hlist: Vec::new(), delim: d });
                         r = Some(done.len() - 1);
-                        r_type = RIGHT;
+                        // (etex.web §727: after a right noad — a `\middle` —
+                        // the list goes on as after a left one, in the
+                        // list's style)
+                        r_type = LEFT;
+                        self.style = style;
+                        self.set_size_and_mu();
                         continue;
                     }
                 }
@@ -1454,7 +1467,8 @@ impl<E: MathEnv> Ctx<'_, E> {
             {
                 out.push(Item::Penalty(pen));
             }
-            r_type = t;
+            // (etex.web §760: after a right noad, as after an open one)
+            r_type = if code == RIGHT { OPEN } else { t };
         }
         out
     }

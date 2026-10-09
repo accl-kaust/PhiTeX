@@ -136,6 +136,9 @@ struct Group {
     after: Vec<Tok>,
     /// A box group's specification and context (tex.web 1083).
     boxg: Option<Arc<material::BoxGroup>>,
+    /// The node that opened it (where it was entered, for e-TeX's
+    /// `\showgroups`).
+    at: u32,
 }
 
 /// A stack in the reader state, shared until changed: handing the state
@@ -2069,6 +2072,7 @@ impl<'a> Exec<'a> {
             kind: g,
             after: Vec::new(),
             boxg: None,
+            at: self.chain.nodes.len() as u32,
         });
         self.kind = Kind::Open;
     }
@@ -2161,7 +2165,7 @@ impl<'a> Exec<'a> {
             Prim::EndCsName => self.err("Extra \\endcsname".into()),
             Prim::End | Prim::Dump => self.stop(),
             Prim::Relax => {}
-            Prim::Marks | Prim::Discards(_) | Prim::ShowE(_) | Prim::Middle | Prim::Lr(_) => self.etex_command(p),
+            Prim::Marks | Prim::Discards(_) | Prim::ShowE(_) | Prim::Lr(_) => self.etex_command(p),
             Prim::LastItem(_)
             | Prim::SpaceFactor
             | Prim::PrevDepth
