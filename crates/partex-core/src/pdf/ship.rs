@@ -340,6 +340,14 @@ pub(crate) struct ShipState {
     pub drawn: super::draw::DrawnList,
 }
 
+impl ShipState {
+    /// Whether the page being shipped has annotations or links (its
+    /// `/Annots`).
+    pub(crate) fn has_marks(&self) -> bool {
+        !self.annot_list.is_empty() || !self.link_list.is_empty()
+    }
+}
+
 super::val::record_by_hash!(ShipState);
 
 impl Ship {

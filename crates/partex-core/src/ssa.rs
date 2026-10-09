@@ -3903,6 +3903,129 @@ pub fn run_applying<H: Host>(
     epoch: u64,
     apply: bool,
 ) -> SsaReport {
+    let mut run = ColdRun::start(tex, command_line, check, epoch, apply);
+    while !run.step(tex, u64::MAX) {}
+    run.finish(tex)
+}
+
+/// A cold build's first trip ([`run_applying`]) run in slices: the host
+/// gets control back between them (a single-threaded host draws the
+/// pages shipped so far, answers its requests) and the trip goes on where
+/// it stopped, its whole state in the engine and here. The trip is the
+/// same whatever the slices: a slice stops only where the engine stops
+/// anyway, for a checkpoint between two commands, before it resumes.
+pub struct ColdRun {
+    rep: SsaReport,
+    open: Option<Open>,
+    check: bool,
+    /// Where the engine stopped: `None` after a slice that stopped at a
+    /// checkpoint it handled, so the next goes on with `resume`.
+    at: Option<Step>,
+    ended: bool,
+    #[cfg(feature = "std")]
+    cold: Option<cold::Cold>,
+}
+
+impl ColdRun {
+    /// Begin the trip: the runtime readied, the job started up to its
+    /// first checkpoint (as [`run_applying`] begins).
+    pub fn start<H: Host>(
+        tex: &mut Tex<H, SsaTracker>,
+        command_line: &[u8],
+        check: bool,
+        epoch: u64,
+        apply: bool,
+    ) -> ColdRun {
+        let (rep, open) = cold_begin(tex, command_line, check, epoch, apply);
+        // (its chunks on workers: DESIGN 3.10, "Cold builds", `cold.rs`)
+        #[cfg(feature = "std")]
+        let cold = (!check && tex.tracker.par.cold.get() && rebuild::may_speculate(tex))
+            .then(cold::Cold::default);
+        let at = tex.start(command_line);
+        ColdRun {
+            rep,
+            open,
+            check,
+            at: Some(at),
+            ended: false,
+            #[cfg(feature = "std")]
+            cold,
+        }
+    }
+
+    /// Run the trip on until it ends (true), or until it has run `budget`
+    /// more commands and stops for a checkpoint (false: call again).
+    pub fn step<H: Host>(&mut self, tex: &mut Tex<H, SsaTracker>, budget: u64) -> bool {
+        if self.ended {
+            return true;
+        }
+        let until = tex.commands().saturating_add(budget);
+        loop {
+            let step = match self.at.take() {
+                Some(s) => s,
+                None => tex.resume(),
+            };
+            match step {
+                Step::Checkpoint => {
+                    if step_ends(tex) {
+                        if tex.tracker.cancel.get().is_some_and(|c| c()) {
+                            self.rep.cancelled = true;
+                            self.ended = true;
+                            return true;
+                        }
+                        // (at the base, before its step ends: what the runs
+                        // would each make first, made in it, `Cold::prepare`)
+                        #[cfg(feature = "std")]
+                        let base = self.cold.as_mut().and_then(|c| {
+                            let plan = c.at_base(tex)?;
+                            c.prepare(tex, &plan);
+                            Some(plan)
+                        });
+                        close_paragraph(tex, &mut self.open, &mut self.rep, Close::Step);
+                        // (the rest of the job built on workers and made exact:
+                        // its last step the job's end, or the build goes on
+                        // from the fold's last one)
+                        #[cfg(feature = "std")]
+                        if let Some(plan) = base
+                            && let Some(c) = self.cold.as_mut()
+                            && let Some(h) = c.build(tex, plan)
+                        {
+                            self.rep.history = h;
+                            self.ended = true;
+                            return true;
+                        }
+                        self.open = Some(open_paragraph(tex, self.check, &mut self.rep, None));
+                    }
+                    if tex.commands() >= until {
+                        return false;
+                    }
+                }
+                Step::Finished(h) => {
+                    self.rep.history = h;
+                    self.ended = true;
+                    return true;
+                }
+            }
+        }
+    }
+
+    /// End the trip (after [`Self::step`] said it ended): its report, as
+    /// [`run_applying`]'s.
+    pub fn finish<H: Host>(mut self, tex: &mut Tex<H, SsaTracker>) -> SsaReport {
+        debug_assert!(self.ended);
+        cold_end(tex, &mut self.open, self.rep)
+    }
+}
+
+/// [`ColdRun::start`]'s work: the runtime readied for a build from the
+/// job's start, and the job started.
+fn cold_begin<H: Host>(
+    tex: &mut Tex<H, SsaTracker>,
+    command_line: &[u8],
+    check: bool,
+    epoch: u64,
+    apply: bool,
+) -> (SsaReport, Option<Open>) {
     let mut rep = SsaReport::default();
     {
         // the files loaded by name, as they are now (their loads are reads)
@@ -4018,7 +4141,7 @@ pub fn run_applying<H: Host>(
     // (and around the page builder after a paragraph's end, and at a
     // paragraph's start: its lines read none of the page's totals)
     tex.set_defer_page(true);
-    let mut open = Some(Open {
+    let open = Some(Open {
         hit: false,
         rec: None,
         name: String::from("start"),
@@ -4027,51 +4150,17 @@ pub fn run_applying<H: Host>(
     });
     // (the job's start is the first window's: DESIGN 4.3 item 1)
     tex.begin_window();
-    // (its chunks on workers: DESIGN 3.10, "Cold builds", `cold.rs`)
-    #[cfg(feature = "std")]
-    let mut cold = (!check && tex.tracker.par.cold.get() && rebuild::may_speculate(tex))
-        .then(cold::Cold::default);
-    let mut step = tex.start(command_line);
-    loop {
-        match step {
-            Step::Checkpoint => {
-                if step_ends(tex) {
-                    if tex.tracker.cancel.get().is_some_and(|c| c()) {
-                        rep.cancelled = true;
-                        break;
-                    }
-                    // (at the base, before its step ends: what the runs
-                    // would each make first, made in it, `Cold::prepare`)
-                    #[cfg(feature = "std")]
-                    let base = cold.as_mut().and_then(|c| {
-                        let plan = c.at_base(tex)?;
-                        c.prepare(tex, &plan);
-                        Some(plan)
-                    });
-                    close_paragraph(tex, &mut open, &mut rep, Close::Step);
-                    // (the rest of the job built on workers and made exact:
-                    // its last step the job's end, or the build goes on
-                    // from the fold's last one)
-                    #[cfg(feature = "std")]
-                    if let Some(plan) = base
-                        && let Some(c) = cold.as_mut()
-                        && let Some(h) = c.build(tex, plan)
-                    {
-                        rep.history = h;
-                        break;
-                    }
-                    open = Some(open_paragraph(tex, check, &mut rep, None));
-                }
-                step = tex.resume();
-            }
-            Step::Finished(h) => {
-                rep.history = h;
-                break;
-            }
-        }
-    }
+    (rep, open)
+}
+
+/// [`ColdRun::finish`]'s work: the trip's open calls closed, its report.
+fn cold_end<H: Host>(
+    tex: &mut Tex<H, SsaTracker>,
+    open: &mut Option<Open>,
+    mut rep: SsaReport,
+) -> SsaReport {
     tex.tracker.end_open_calls(&*tex);
-    close_paragraph(tex, &mut open, &mut rep, Close::Last);
+    close_paragraph(tex, open, &mut rep, Close::Last);
     tex.tracker.flush_effects();
     rep.applied = tex.tracker.applied.get();
     rep.commands_skipped = tex.tracker.skipped.get();

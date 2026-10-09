@@ -329,6 +329,9 @@ impl<L: Lang, const P: bool> Graph<L, P> {
                 parent: mp(c.parent),
                 ord: c.ord,
             });
+            for c in &mut gr.closers {
+                c.parent = mp(c.parent);
+            }
             self.groups.insert(mg(k), gr);
         }
         let closes = std::mem::take(&mut self.closes);

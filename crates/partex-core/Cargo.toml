@@ -24,6 +24,10 @@ libm = "0.2.16"
 # A cold build's paragraphs, the CST's (`ssa/cold.rs`, with `std`).
 phitex-syntax = { path = "../phitex-syntax", optional = true }
 
+[dev-dependencies]
+# (tests/stream.rs: the pages shipped hashed as the finished PDF's are)
+phitex-draw = { path = "../phitex-draw" }
+
 [features]
 # `std` threads: an SSA build's steps on workers (`ssa/par.rs`, and a
 # cold build's paragraphs, `ssa/cold.rs`). Without it the crate is

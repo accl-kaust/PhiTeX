@@ -257,7 +257,13 @@ struct NameTab {
 #[derive(Clone, Debug)]
 struct Group {
     parent: u64,
+    /// Where it ends: the first of `closers` in position order.
     close: Option<Pos>,
+    /// Every place a step closes it. A client may close a group twice
+    /// (an unbalanced `}` in a box closes the group around the box, and
+    /// the outer `}` closes it again); its scope ends at the first, in
+    /// position order, whatever order the steps ran in.
+    closers: Vec<Pos>,
     names: Vec<u32>,
 }
 
@@ -492,7 +498,10 @@ impl<L: Lang> Nodes<L> {
     #[inline]
     fn read_ver(&self, o: &Opd) -> Ver {
         if o.src == NONE {
-            self.absent.ver()
+            // (not the default value's: a step tells an undefined name
+            // from one defined to the default, so a change between them
+            // must wake it)
+            Ver::ABSENT
         } else {
             o.sel.ver(&self.val[o.src as usize])
         }
@@ -901,6 +910,9 @@ struct Emit<L: Lang> {
     ev: Vec<Ev<L::Op>>,
     cse_ev: Vec<(L::Op, bool)>,
     impure: Vec<L::Op>,
+    /// The sources the step inserted (`StepCx::source_or_insert`): the
+    /// name, and the value, made sources when the step is applied.
+    new_sources: Vec<(u32, L::Val)>,
     /// The emission of the unfold the step called (`StepCx::call`).
     call: Option<u32>,
 }
@@ -925,6 +937,7 @@ impl<L: Lang> Default for Emit<L> {
             cse_ev: Vec::new(),
             impure: Vec::new(),
             call: None,
+            new_sources: Vec::new(),
         }
     }
 }
@@ -988,6 +1001,7 @@ impl<L: Lang> Emit<L> {
         self.cse_ev.clear();
         self.impure.clear();
         self.call = None;
+        self.new_sources.clear();
     }
 }
 
@@ -1165,6 +1179,10 @@ impl<'s, L: Lang> StepCx<'s, L> {
     /// The value `o` (name `m`'s resolution) reads.
     fn value_of(&self, m: u32, o: Opd) -> Option<Proj<'s, L::Val>> {
         if o.src == NONE {
+            // (a source this step inserted: its value)
+            if let Some((_, v)) = self.em.new_sources.iter().find(|e| e.0 == m) {
+                return Some(Proj::Owned(v.clone()));
+            }
             // (a segment: the name as the graph it was entered from has it)
             let ext = self.ext?;
             ext.get(&self.name_hash(m)).map(Proj::Ref)
@@ -1236,24 +1254,101 @@ impl<'s, L: Lang> StepCx<'s, L> {
     /// is not before here: then use [`StepCx::defined_reaching`]. Cost:
     /// the steps walked (a sealed run is one) plus their definitions.
     pub fn defined_since(&mut self, p0: Here) -> Option<Since<'s, L::Val>> {
-        let u = self.g.h[self.step as usize].parent;
         let h0 = self.g.h.get(p0.step as usize)?;
         if h0.kind != Kind::Step
             || h0.flags & DEAD != 0
-            || h0.parent != u
             || self.steps[h0.aux as usize].key != p0.key
         {
             return None;
         }
+        // (the two steps' paths from the root unfold down: p0 and here may
+        // be in different unfolds, across a call and its return)
+        let a = self.step_path(p0.step);
+        let b = self.step_path(self.step);
+        let d = a.iter().zip(&b).take_while(|(x, y)| x == y).count();
+        if d == b.len() {
+            // (p0 is this step, or in an unfold this step made before:
+            // not before here)
+            return if d == a.len() {
+                self.since_here(Set::default())
+            } else {
+                None
+            };
+        }
         let mut names: Set<u32> = Set::default();
-        let mut c = p0.step;
-        while c != self.step {
-            if c == NONE {
+        if d < a.len() {
+            // (at the level they part, in one unfold: p0's step there up
+            // to here's, each with what it made inside)
+            let (x, y) = (a[d], b[d]);
+            if self.g.h[x as usize].parent != self.g.h[y as usize].parent
+                || self.g.cmp_pos(self.g.pos(x), self.g.pos(y)) != std::cmp::Ordering::Less
+            {
                 return None;
             }
-            self.since_step(c, &mut names);
-            c = self.g.h[c as usize].next;
+            let mut c = x;
+            while c != y {
+                if c == NONE {
+                    return None;
+                }
+                self.since_step(c, &mut names);
+                c = self.g.h[c as usize].next;
+            }
         }
+        // (then down to here: each level's step above it (its own), and
+        // the steps before here's in each nested unfold, with their inside)
+        let start = if d < a.len() { d + 1 } else { d };
+        for j in start..b.len() {
+            self.since_own(b[j - 1], &mut names);
+            let u = self.g.h[b[j] as usize].parent;
+            let mut c = self.unfolds[self.g.h[u as usize].aux as usize].first;
+            while c != b[j] {
+                if c == NONE {
+                    return None;
+                }
+                self.since_step(c, &mut names);
+                c = self.g.h[c as usize].next;
+            }
+        }
+        self.since_here(names)
+    }
+
+    /// Steps from the root unfold's down to `s`, each in the unfold the
+    /// one before made.
+    fn step_path(&self, s: u32) -> Vec<u32> {
+        let mut p = vec![s];
+        let mut c = s;
+        loop {
+            let u = self.g.h[c as usize].parent;
+            let up = self.g.h[u as usize].parent;
+            if up == NONE || self.g.h[up as usize].kind != Kind::Step {
+                break;
+            }
+            p.push(up);
+            c = up;
+        }
+        p.reverse();
+        p
+    }
+
+    /// Step `s`'s own definitions and closed groups' names (not its
+    /// nested unfolds').
+    fn since_own(&self, s: u32, names: &mut Set<u32>) {
+        let si = &self.steps[self.g.h[s as usize].aux as usize];
+        for d in &self.names.recs[si.d0 as usize..(si.d0 + si.dn) as usize] {
+            names.insert(d.name);
+        }
+        if let Some(cl) = self.closes.get(&s) {
+            for g in cl {
+                if let Some(gr) = self.groups.get(g) {
+                    names.extend(gr.names.iter().copied());
+                }
+            }
+        }
+    }
+
+    /// `names` with this step's so far, with their values here.
+    #[allow(clippy::unnecessary_wraps, reason = "defined_since's answer")]
+    fn since_here(&self, mut names: Set<u32>) -> Option<Since<'s, L::Val>> {
         // (this step so far)
         for d in &self.em.defs {
             names.insert(d.0);
@@ -1670,6 +1765,51 @@ impl<'s, L: Lang> StepCx<'s, L> {
         let m = self.name(&source_spelling(key));
         self.read(m)?;
         Some(Arg::Name(m))
+    }
+
+    /// The named source `key`, inserted with value `v` if it is absent
+    /// (DESIGN 7.22): a file the step opened, whose bytes the host gave
+    /// it as it ran. Made a source (as `Graph::source` makes one) when
+    /// the step is applied, read by the step as `v` until then; the read
+    /// is recorded either way, as [`StepCx::source`]'s.
+    ///
+    /// A source is a fact about the host, keyed by the file, not the
+    /// step's output: one that a speculative step inserted stays when the
+    /// step is dropped, and two steps that insert one key must agree. A
+    /// source no step reads any more is kept, not dropped: it is one root
+    /// input holding the file's elements, shared with the host's copy,
+    /// and dropping it would make the next step that opens the file
+    /// insert it again (the client's driver removes a file that is gone
+    /// with `Graph::remove_source`).
+    ///
+    /// # Panics
+    ///
+    /// If the source exists, or this step inserted it, with other
+    /// content (`v`'s version differs): the host gave one file two
+    /// contents in one run.
+    pub fn source_or_insert(&mut self, key: &[u8], v: L::Val) -> Arg<'s> {
+        let m = self.name(&source_spelling(key));
+        if let Some(x) = self.read(m) {
+            assert!(
+                x.ver() == v.ver(),
+                "the source {:?} inserted with other content",
+                String::from_utf8_lossy(key)
+            );
+            return Arg::Name(m);
+        }
+        self.em.new_sources.push((m.0, v));
+        Arg::Name(m)
+    }
+
+    /// Name `n`'s spelling.
+    #[must_use]
+    pub fn spelling(&self, n: NameId) -> &[u8] {
+        let base = self.names.spell.len();
+        if (n.0 as usize) < base {
+            &self.names.spell[n.0 as usize]
+        } else {
+            &self.em.new_names[n.0 as usize - base].1
+        }
     }
 
     /// A scan over `input` from `init`.
@@ -2391,6 +2531,26 @@ impl<L: Lang, const P: bool> Graph<L, P> {
             self.set(NodeId(n), v);
             return NodeId(n);
         }
+        self.make_source(m, v)
+    }
+
+    /// Source name `m` inserted by a step (`StepCx::source_or_insert`):
+    /// made if absent; if present (another step, or a segment, inserted
+    /// it first), it must hold the same content.
+    fn insert_source(&mut self, m: u32, v: L::Val) {
+        if let Some(&n) = self.sources.get(&m) {
+            assert!(
+                self.n.val[n as usize].ver() == v.ver(),
+                "the source {:?} inserted with other content",
+                String::from_utf8_lossy(&self.names.spell[m as usize])
+            );
+            return;
+        }
+        self.make_source(m, v);
+    }
+
+    /// A new source for name `m`, holding `v`; its readers woken.
+    fn make_source(&mut self, m: u32, v: L::Val) -> NodeId {
         let i = self.root_node(Kind::Input, L::Op::default(), Class::Pure, 0);
         self.n.val[i as usize] = v;
         let ri = u32::try_from(self.names.recs.len()).expect("definitions fit u32");
@@ -3170,6 +3330,11 @@ impl<L: Lang, const P: bool> Graph<L, P> {
             self.names.readers.push(Runs::default());
             self.names.gens.push(0);
         }
+        // sources the step inserted (before its reads and its interior's
+        // names resolve: they read them)
+        for (m, v) in std::mem::take(&mut self.em.new_sources) {
+            self.insert_source(m, v);
+        }
         // which emissions become nodes ("big"); the rest is the sweep's
         let ids = self.match_children(s);
         self.grp_hint = NOGROUP;
@@ -3726,6 +3891,7 @@ impl<L: Lang, const P: bool> Graph<L, P> {
                         .or_insert_with(|| Group {
                             parent: p,
                             close: None,
+                            closers: Vec::new(),
                             names: Vec::new(),
                         })
                         .parent = p;
@@ -3739,44 +3905,69 @@ impl<L: Lang, const P: bool> Graph<L, P> {
                         parent: s,
                         ord: *sub,
                     };
-                    let gr = self.groups.entry(g).or_insert_with(|| Group {
+                    self.groups.entry(g).or_insert_with(|| Group {
                         parent: NOGROUP,
                         close: None,
+                        closers: Vec::new(),
                         names: Vec::new(),
                     });
-                    let old = gr.close;
-                    if old != Some(pos) {
-                        gr.close = Some(pos);
-                        self.groups_gen += 1;
-                        let from = match old {
-                            Some(o) if self.n.cmp_pos(o, pos) == Ordering::Less => o,
-                            _ => pos,
-                        };
-                        self.reresolve_group(g, from);
-                    }
-                    closed.push(g);
+                    closed.push((g, pos));
                 }
             }
         }
         let _ = si;
+        // (each group this step closes now or closed before: its places
+        // in this step replaced by the new ones)
         let old_closed = self.closes.remove(&s).unwrap_or_default();
-        for g in old_closed {
-            if closed.contains(&g) {
-                continue;
-            }
-            if let Some(gr) = self.groups.get_mut(&g)
-                && let Some(c) = gr.close
-                && c.parent == s
-            {
-                gr.close = None;
-                self.groups_gen += 1;
-                self.reresolve_group(g, c);
-            }
+        let mut gs: Vec<u64> = closed.iter().map(|c| c.0).chain(old_closed).collect();
+        gs.sort_unstable();
+        gs.dedup();
+        for g in &gs {
+            let now: Vec<Pos> = closed.iter().filter(|c| c.0 == *g).map(|c| c.1).collect();
+            self.set_closers(*g, s, &now);
         }
+        let closed: Vec<u64> = gs
+            .into_iter()
+            .filter(|g| closed.iter().any(|c| c.0 == *g))
+            .collect();
         if !closed.is_empty() {
             self.closes.insert(s, closed);
         }
         self.em.events = events;
+    }
+
+    /// Group `g`'s closes in step `s` set to `now`; where it ends moved,
+    /// its names' readers resolved again from the earlier of the two.
+    fn set_closers(&mut self, g: u64, s: u32, now: &[Pos]) {
+        let Some(gr) = self.groups.get_mut(&g) else {
+            return;
+        };
+        let before = gr.closers.len();
+        gr.closers.retain(|c| c.parent != s);
+        if now.is_empty() && gr.closers.len() == before {
+            return;
+        }
+        gr.closers.extend_from_slice(now);
+        let old = gr.close;
+        let n = &self.n;
+        let new = gr.closers.iter().copied().min_by(|a, b| n.cmp_pos(*a, *b));
+        if new == old {
+            return;
+        }
+        gr.close = new;
+        self.groups_gen += 1;
+        let from = match (old, new) {
+            (Some(a), Some(b)) => {
+                if self.n.cmp_pos(a, b) == Ordering::Less {
+                    a
+                } else {
+                    b
+                }
+            }
+            (Some(a), None) | (None, Some(a)) => a,
+            (None, None) => return,
+        };
+        self.reresolve_group(g, from);
     }
 
     fn reresolve_group(&mut self, g: u64, from: Pos) {
@@ -4050,14 +4241,7 @@ impl<L: Lang, const P: bool> Graph<L, P> {
                 self.reresolve(m, from);
             }
             for g in self.closes.remove(&n).unwrap_or_default() {
-                if let Some(gr) = self.groups.get_mut(&g)
-                    && let Some(c) = gr.close
-                    && c.parent == n
-                {
-                    gr.close = None;
-                    self.groups_gen += 1;
-                    self.reresolve_group(g, c);
-                }
+                self.set_closers(g, n, &[]);
             }
         }
         self.class_changed(n);
@@ -4447,7 +4631,79 @@ impl<L: Lang, const P: bool> Graph<L, P> {
                 }
             }
         }
+        self.check_index();
         self.check_steps();
+    }
+
+    /// The group table and the name index as the steps make them: a
+    /// close is a live step's that lists it; each name's definitions are
+    /// in position order, each one its step's, and every live step's are
+    /// there.
+    fn check_index(&self) {
+        // the group table: a close is a live step's, which lists it
+        for (g, gr) in &self.groups {
+            for c in &gr.closers {
+                assert!(
+                    !self.n.is_dead(c.parent)
+                        && self.closes.get(&c.parent).is_some_and(|l| l.contains(g)),
+                    "check: group {g:x} closed at {c:?} by a step that does not close it"
+                );
+            }
+            let first = gr
+                .closers
+                .iter()
+                .copied()
+                .min_by(|a, b| self.n.cmp_pos(*a, *b));
+            assert_eq!(
+                gr.close, first,
+                "check: group {g:x} ends elsewhere than its first close"
+            );
+        }
+        // the name index: each name's definitions in position order, and
+        // every live step's definitions in it
+        for (m, list) in self.names.defs.iter().enumerate() {
+            for &k in list {
+                let d = &self.names.recs[k as usize];
+                let ok = d.step == ROOT
+                    || (!self.n.is_dead(d.step)
+                        && self.n.h[d.step as usize].kind == Kind::Step
+                        && {
+                            let si = &self.steps[self.n.h[d.step as usize].aux as usize];
+                            (si.d0..si.d0 + si.dn).contains(&k)
+                        });
+                assert!(
+                    ok,
+                    "check: name {m}'s definition (record {k}) at step %{} is not that step's",
+                    d.step
+                );
+            }
+            let v: Vec<u32> = list.iter().copied().collect();
+            for w in v.windows(2) {
+                let (a, b) = (
+                    self.names.recs[w[0] as usize].pos(),
+                    self.names.recs[w[1] as usize].pos(),
+                );
+                assert!(
+                    self.n.cmp_pos(a, b) == Ordering::Less,
+                    "check: name {m}'s definitions out of order: {a:?} then {b:?}"
+                );
+            }
+        }
+        for n in 1..self.n.h.len() {
+            let n32 = u32::try_from(n).expect("fits");
+            if self.n.is_dead(n32) || self.n.h[n].kind != Kind::Step {
+                continue;
+            }
+            let si = &self.steps[self.n.h[n].aux as usize];
+            for k in si.d0..si.d0 + si.dn {
+                let d = &self.names.recs[k as usize];
+                assert!(
+                    self.names.defs[d.name as usize].iter().any(|&x| x == k),
+                    "check: step %{n}'s definition of name {} (record {k}) is not in the index",
+                    d.name
+                );
+            }
+        }
     }
 
     // ---- reading the results ----
@@ -4471,6 +4727,28 @@ impl<L: Lang, const P: bool> Graph<L, P> {
     #[must_use]
     pub fn slot(&self, s: Slot) -> L::Val {
         self.pred.get(&s.0).cloned().unwrap_or_default()
+    }
+
+    /// Slot `s`'s publishers and prediction, for debugging.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn debug_slot(&self, s: Slot) -> String {
+        let mut out = format!(
+            "pred {:?}; published {:?}\n",
+            self.pred.get(&s.0),
+            self.published(s.0)
+        );
+        for &p in self.pubs.get(&s.0).into_iter().flatten() {
+            let _ = writeln!(
+                out,
+                "  pub %{p} dead {} val {:?} pos {:?} parent %{}",
+                self.n.is_dead(p),
+                self.n.val[p as usize],
+                self.n.pos(p),
+                self.n.h[p as usize].parent
+            );
+        }
+        out
     }
 
     /// Predict slot `s` (a cold start from a persisted run).
@@ -4593,6 +4871,12 @@ impl<L: Lang, const P: bool> Graph<L, P> {
                 global: d.3,
             };
             let close = self.groups.get(&d.group).and_then(|g| g.close);
+            let _ = write!(
+                out,
+                "[close before def: {:?}; group parent {:x?}] ",
+                close.map(|c| self.n.cmp_pos(c, d.pos)),
+                self.groups.get(&d.group).map(|g| g.parent)
+            );
             let _ = writeln!(
                 out,
                 "src %{} at ({}, {}) group {:x} close {:?} global {} dead {}",
@@ -4914,6 +5198,9 @@ struct Pack<L: Lang> {
     /// The top steps, in chain order.
     tops: Vec<u32>,
     spell: Vec<Box<[u8]>>,
+    /// The sources the segment's steps inserted (`StepCx::source_or_insert`):
+    /// their spellings and values, inserted in the graph grafted into.
+    sources: Vec<(Box<[u8]>, L::Val)>,
     end: Option<Parked>,
     depth: u16,
 }
@@ -4980,6 +5267,7 @@ impl<L: Lang, const P: bool> Graph<L, P> {
             dorder: Vec::new(),
             tops: Vec::new(),
             spell: Vec::new(),
+            sources: Vec::new(),
             end: None,
             depth: dpu,
             prof: std::mem::take(&mut p.prof),
@@ -5026,7 +5314,7 @@ impl<L: Lang, const P: bool> Graph<L, P> {
                     // (from before the segment: what it read there, a root
                     // of the segment's graph, whose value stays in `pval`)
                     let was = if o.src == NONE {
-                        p.n.absent.ver()
+                        Ver::ABSENT
                     } else {
                         o.sel.ver(&pval[o.src as usize])
                     };
@@ -5138,6 +5426,14 @@ impl<L: Lang, const P: bool> Graph<L, P> {
                         parent: rel(c.parent),
                         ord: c.ord,
                     }),
+                    closers: gr
+                        .closers
+                        .iter()
+                        .map(|c| Pos {
+                            parent: rel(c.parent),
+                            ord: c.ord,
+                        })
+                        .collect(),
                     names: gr.names.clone(),
                 },
             ));
@@ -5156,6 +5452,18 @@ impl<L: Lang, const P: bool> Graph<L, P> {
             grp: encg(e.grp),
             ..e
         });
+        // (the sources its steps inserted: a segment's graph has no others)
+        let mut srcs: Vec<(u32, u32)> = p.sources.iter().map(|(&m, &i)| (m, i)).collect();
+        srcs.sort_unstable();
+        pk.sources = srcs
+            .into_iter()
+            .map(|(m, i)| {
+                (
+                    p.names.spell[m as usize].clone(),
+                    std::mem::take(&mut pval[i as usize]),
+                )
+            })
+            .collect();
         pk.spell = std::mem::take(&mut p.names.spell);
         pk
     }
@@ -5165,7 +5473,14 @@ impl<L: Lang, const P: bool> Graph<L, P> {
     /// where the segment stopped (`None`: it ended).
     #[allow(clippy::too_many_lines, reason = "one pass per table, in order")]
     #[allow(clippy::cast_possible_truncation, reason = "ids and arenas fit u32")]
-    fn graft(&mut self, u: u32, tail: u32, pk: Pack<L>) -> Option<(u32, u32, Option<Parked>)> {
+    fn graft(&mut self, u: u32, tail: u32, mut pk: Pack<L>) -> Option<(u32, u32, Option<Parked>)> {
+        // (the sources the segment's steps inserted stay, whatever becomes
+        // of its steps: facts about the host; made before the segment's
+        // nodes are numbered)
+        for (sp, v) in std::mem::take(&mut pk.sources) {
+            let m = self.intern(&sp);
+            self.insert_source(m, v);
+        }
         if pk.tops.is_empty() {
             return None;
         }
@@ -5256,6 +5571,14 @@ impl<L: Lang, const P: bool> Graph<L, P> {
                     parent: dec(c.parent),
                     ord: c.ord,
                 }),
+                closers: gr
+                    .closers
+                    .iter()
+                    .map(|c| Pos {
+                        parent: dec(c.parent),
+                        ord: c.ord,
+                    })
+                    .collect(),
                 names: gr.names.iter().map(|&m| names[m as usize]).collect(),
             };
             self.groups.insert(decg(g), ng);

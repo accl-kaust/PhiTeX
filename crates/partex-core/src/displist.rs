@@ -273,6 +273,14 @@ impl Shipped {
     }
 }
 
+/// Whether a stream's images are all drawn from it alone (a page's own
+/// PDF holds JPEG images only, `pagepdf::page_pdf`).
+fn images_whole(s: &Shipped) -> bool {
+    s.images
+        .iter()
+        .all(|(_, _, im)| im.pdf.is_none() && !im.png)
+}
+
 /// The text after `key` in `s`, if `key` is there.
 fn after<'a>(s: &'a [u8], key: &[u8]) -> Option<&'a [u8]> {
     let at = s.windows(key.len()).position(|w| w == key)?;
@@ -900,7 +908,18 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             if form == 0 {
                 self.tap = Some(alloc::boxed::Box::new(rec.clone()));
             } else {
-                let s = crate::pagepdf::ShippedStream(Arc::new(rec.clone()));
+                // (whole: its images drawn from it, no `/Resources` of
+                // its own that its stream alone does not give)
+                let own = match &self.pdf.objs.get(self.pdf.ship.cur_form).aux {
+                    crate::pdf::objtab::Aux::XForm(x) => {
+                        x.resources.as_ref().is_some_and(|t| !t.is_empty())
+                    }
+                    _ => false,
+                };
+                let whole = !own && images_whole(&rec);
+                let uni = self.shipped_tounicode();
+                let whole = whole && uni.1;
+                let s = crate::pagepdf::ShippedStream(Arc::new(rec.clone()), whole, uni.0);
                 self.host.stream_shipped(None, s);
             }
         }
@@ -920,7 +939,17 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         if let Some(mut rec) = self.tap.take() {
             rec.attr = attr.unwrap_or_default().to_vec();
             let page = usize::try_from(self.pdf.ship.total_pages - 1).unwrap_or(0);
-            let s = crate::pagepdf::ShippedStream(Arc::new(*rec));
+            // (whole: drawn from its stream alone as from the PDF, no
+            // `\pdfpageresources` (graphics states), no annotations or
+            // links, its images drawn from it)
+            let res = self
+                .equiv_toks(crate::web::PDF_PAGE_RESOURCES_LOC)
+                .is_some_and(|t| !t.is_empty());
+            let marks = self.pdf.ship.has_marks();
+            let whole = !res && !marks && images_whole(&rec);
+            let uni = self.shipped_tounicode();
+            let whole = whole && uni.1;
+            let s = crate::pagepdf::ShippedStream(Arc::new(*rec), whole, uni.0);
             self.host.stream_shipped(Some(page), s);
         }
         let Some(mut rec) = self.dl.as_deref_mut().and_then(|d| d.page.take()) else {
@@ -928,6 +957,24 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         };
         rec.attr = attr.unwrap_or_default().to_vec();
         self.display_keep(rec);
+    }
+
+    /// The `\pdfglyphtounicode` entries the job's fonts will have their
+    /// `/ToUnicode` maps made from, if `\pdfgentounicode` is on (read as
+    /// it is now: the job's end reads it again), and whether a page's own
+    /// PDF makes them as the job will (no font is one of
+    /// `\pdfnobuiltintounicode`'s). Read quietly: a viewer's.
+    fn shipped_tounicode(&self) -> (Option<crate::pagepdf::Uni>, bool) {
+        let on = self
+            .peek_eqtb(INT_BASE + crate::web::PDF_GEN_TOUNICODE_CODE)
+            .int();
+        if on <= 0 || self.tounicode.is_empty() {
+            return (None, true);
+        }
+        (
+            Some(crate::pagepdf::Uni(self.tounicode.clone())),
+            self.pdf.nobuiltin_tounicode.len() == 0,
+        )
     }
 
     /// Stream record `rec` kept: the step's effect with a recorder, else

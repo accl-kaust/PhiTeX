@@ -796,3 +796,182 @@ fn chapters_called_from_a_book_build_in_parallel_as_in_turn() {
             .map(|v| v.int());
     assert_eq!(count, Some(90));
 }
+
+/// A regression (the random-edit test, seed 5, edit 51, shrunk): a macro
+/// whose body boxes a `\step` in a group, and an edit to the body. The
+/// cross-run slot `k` must end as a fresh build's.
+#[test]
+fn an_edit_to_a_macro_whose_box_steps_in_a_group() {
+    let pre = r"\def \a { \label { k } { } \ref { k } \hbox {";
+    let suf = r"\the { \step } } } { \a { \the \def \a } }";
+    let mut d = Doc::new(ids(lex(&format!("{pre} {{ }} {suf}"))));
+    d.g.cfg.check = true;
+    d.g.run();
+    let at = lex(pre).len();
+    d.splice(at, 2, vec![]);
+    d.g.run();
+    let mut f = Doc::new(d.toks.clone());
+    f.g.run();
+    if std::env::var("PHI_DUMP").is_ok() {
+        eprintln!("INC\n{}\nFRESH\n{}", d.g.to_text_ids(), f.g.to_text_ids());
+    }
+    assert_eq!(d.observe(), f.observe());
+    assert_eq!(d.g.to_text(), f.g.to_text());
+}
+
+/// A regression (random-edit seed 32, shrunk): a group opened before a
+/// conditional whose arm defines a name and closes it; the edit adds an
+/// outer group. Check mode on.
+#[test]
+fn a_group_added_around_a_conditional_that_closes_one() {
+    let mut d = Doc::new(ids(lex(r"{ \ifzero w \twice } \fi } \scoped")));
+    d.g.cfg.check = true;
+    d.g.run();
+    d.splice(0, 0, lex("{"));
+    if std::env::var("PHI_DUMP").is_ok() {
+        d.g.cfg.check = false;
+    }
+    d.g.run();
+    let mut f = Doc::new(d.toks.clone());
+    f.g.run();
+    if std::env::var("PHI_DUMP").is_ok() {
+        eprintln!("INC\n{}\nFRESH\n{}", d.g.to_text_ids(), f.g.to_text_ids());
+        for n in ["count", "y", "sc"] {
+            if let (Some(i), Some(j)) = (d.g.name_id(n.as_bytes()), f.g.name_id(n.as_bytes())) {
+                eprintln!(
+                    "{n} inc:\n{}fresh:\n{}",
+                    d.g.debug_defs(i),
+                    f.g.debug_defs(j)
+                );
+            }
+        }
+    }
+    assert_eq!(d.observe(), f.observe());
+}
+
+/// Put files in the toy host (names unique to a test: tests share it).
+fn host_put(files: &[(&str, String)]) {
+    let mut h = HOST.lock().expect("the toy host");
+    for (k, v) in files {
+        h.retain(|(x, _)| x != k);
+        h.push(((*k).to_string(), v.clone()));
+    }
+}
+
+/// `StepCx::source_or_insert` (DESIGN 7.22): a file a step finds as it
+/// runs is inserted as a source and called. The cold build steps through
+/// it once, as through a source set beforehand; an edit to it (the
+/// driver's `Graph::source`) runs that call again, not the document.
+#[test]
+fn a_file_found_as_the_step_runs_is_a_source_stepped_once() {
+    let mut body = String::new();
+    for p in 0..10 {
+        body += &format!(r"sow{p} \step more words \par ");
+    }
+    host_put(&[("soi_a", body.clone())]);
+    let mut d = Doc::new(ids(lex(r"a b \open{soi_a} c \par d \the\count \par")));
+    d.g.cfg.check = true;
+    let r = d.g.run();
+    // (the same document with the file set as a source first: as many
+    // steps)
+    let mut e = with_files(
+        r"a b \input{soi_a} c \par d \the\count \par",
+        &[("soi_a", &body)],
+        1,
+    );
+    let re = e.g.run();
+    assert_eq!(r.steps, re.steps, "{r:?} {re:?}");
+    assert_eq!(d.observe(), e.observe());
+    // an edit to the file, its last state the same: the call's steps from
+    // the edit on, and the document's call step
+    let body2 = body.replace("sow4", "SOW4");
+    host_put(&[("soi_a", body2.clone())]);
+    d.g.source(b"soi_a", host_file("soi_a").expect("the file"));
+    let r2 = d.g.run();
+    assert!(r2.steps <= 6, "{r2:?}");
+    let mut f = with_files(
+        r"a b \input{soi_a} c \par d \the\count \par",
+        &[("soi_a", &body2)],
+        1,
+    );
+    f.g.run();
+    assert_eq!(d.observe(), f.observe());
+}
+
+/// Parallel chapters that open the same file insert one source with one
+/// content; the build equals the one in turn, and the file is a source
+/// once.
+#[test]
+fn parallel_chapters_opening_one_file_agree() {
+    host_put(&[("soi_sty", r"\def\y{sty} \step".to_string())]);
+    let mut main = String::new();
+    for c in 1..=4 {
+        main += &format!(r"\open{{soi_c{c}}} \par ");
+        let mut s = String::from(r"\open{soi_sty} \par ");
+        for p in 0..20 {
+            s += &format!(r"c{c}w{p} \step words \par ");
+        }
+        host_put(&[(Box::leak(format!("soi_c{c}").into_boxed_str()), s)]);
+    }
+    main += r"end \par";
+    let mut a = Doc::new(ids(lex(&main)));
+    a.g.run();
+    let mut b = Doc::new(ids(lex(&main)));
+    b.g.cfg.workers = 3;
+    b.g.run();
+    assert_eq!(a.g.to_text(), b.g.to_text());
+    assert_eq!(a.observe(), b.observe());
+}
+
+/// A file inserted with another content than the source holds is the
+/// host contradicting itself: a hard error.
+#[test]
+#[should_panic(expected = "inserted with other content")]
+fn a_source_inserted_twice_must_agree() {
+    host_put(&[("soi_b", "one".to_string())]);
+    let mut d = Doc::new(ids(lex(r"\open{soi_b} \par")));
+    d.g.source(b"soi_b", host_file("soi_b").expect("the file"));
+    host_put(&[("soi_b", "two".to_string())]);
+    // (the document's step runs again, reads the host's new file, and
+    // the source still holds the old one)
+    d.g.run();
+}
+
+/// `defined_since` across a call and its return: p0 before the call and
+/// here inside the called file; p0 before the call and here after it;
+/// p0 inside the file and here after it.
+#[test]
+fn defined_since_crosses_calls() {
+    let since = || {
+        let mut s = SINCE
+            .with(|c| c.borrow().clone())
+            .expect("p0 is before here");
+        s.sort();
+        s
+    };
+    let pair = |n: &str, v: &str| (n.to_string(), Some(v.to_string()));
+    // into the file
+    let mut d = with_files(
+        r"\def\a{1} \here \def\b{2} \input{fs1}",
+        &[("fs1", r"\def\c{3} \since")],
+        1,
+    );
+    d.g.run();
+    assert_eq!(since(), vec![pair("b", "2"), pair("c", "3")]);
+    // over the call
+    let mut d = with_files(
+        r"\def\a{1} \here \def\b{2} \input{fs2} \since",
+        &[("fs2", r"\def\c{3} x")],
+        1,
+    );
+    d.g.run();
+    assert_eq!(since(), vec![pair("b", "2"), pair("c", "3")]);
+    // out of the file
+    let mut d = with_files(
+        r"\def\a{1} \input{fs3} \def\b{2} \since",
+        &[("fs3", r"\here \def\d{4} x")],
+        1,
+    );
+    d.g.run();
+    assert_eq!(since(), vec![pair("b", "2"), pair("d", "4")]);
+}

@@ -3742,6 +3742,131 @@ puts each change at its markup's first glyph (glyph origins or SyncTeX),
 `changes_json` is the list the watch and the extension send. Not built
 yet: the watch's second job and keys, the viewer's Diff panel.
 
+### 4.11 A build streamed: pages as they are shipped (2026-10-08)
+
+The Overleaf extension's `ph_open` answered only after the whole first
+pass: page 1 waited for page 62 (0.8–6.6 s with every cache warm on six
+arXiv papers). Now the open can stream: it starts the build and returns,
+and the host runs the build on in slices, drawing each page as it is
+shipped and answering its requests in between. The build is the same
+build; only where the host gets control back changes.
+
+**Slices, where the engine stops anyway.** A slice ends only at a
+checkpoint between two commands (`Tex::start`/`resume`, 3.15), where the
+whole state is in the engine:
+- *plain* (the first paint, worker A): `Tex::set_stop_at` every N
+  commands (the extension's core: 2048, the clock looked at between);
+- *SSA, trip 1*: `ssa::ColdRun`, `run_applying` cut in three
+  (`start`, `step(tex, budget)`, `finish`), the loop's state (the open
+  step, the report, the parallel cold plan) in the struct. `run_applying`
+  is `start`, `step` to the end, `finish`: one code path, so a trip in
+  slices is the trip by construction. Trip 1 is not preempted: an edit
+  made meanwhile waits for it and is then rebuilt as a one-trip
+  keystroke. The slices make a preemptible trip 1 possible later (stop
+  at a step boundary, keep the `ColdRun`, rebuild the edit's steps
+  against it), which a cold build's cancel today cannot (it throws the
+  build away);
+- *SSA, the settle's trips*: each stopped at a step boundary when the
+  slice is over (`SsaTracker::cancel`, 3.7 "A rebuild stopped"): the
+  work left is pending and the next slice's `settle` goes on with it; the
+  link waits until the trips end. An edit while they run stops them and
+  its rebuild takes their work with it, as `watch --ssa`'s keystroke.
+
+The tests (`partex-core/tests/stream.rs`): a plain run in slices of 1, 2
+and 7 commands writes the run's PDF byte for byte; an SSA trip in slices
+of 5 commands links the trip's PDF.
+
+**Pages as they are shipped.** A host that asks (`Host::wants_streams`)
+gets each content stream at its end (4.8), and keeps them in
+`pagepdf::Shipments` (each page's last stream, each form by number; a
+page shipped again by a later trip replaces it). Page k is drawn from its
+own PDF (`Shipments::page_pdf`, `page_pdf`, through `phitex-draw`, the
+reader of the finished PDF), its fonts' whole Type 1 programs read as the
+build reads them, and their `/ToUnicode` maps made as the job's end will
+make them (`\pdfgentounicode` on: the same `\pdfglyphtounicode` entries,
+the encoding's or the program's own glyph names, `tounicode::cmap_for`),
+so the text layer (selection, search) is the PDF's too.
+
+*Stable hashes.* A page's hash in the finished PDF covers its content
+stream, its size and the bytes of the `XObject`s it can paint
+(`phitex_draw::page_hash`); its fonts, annotations and resources are not
+in it. A stream is *whole* (`ShippedStream::whole`) when its own PDF draws
+what the finished PDF will: its images are JPEGs (a PNG's or a PDF
+page's bytes are written later), and, a page, it has no annotations or
+links (a link's target is resolved at the end) and no
+`\pdfpageresources` (graphics states), a form no resources of its own,
+no font is `\pdfnobuiltintounicode`'s; a page is whole when it and every
+form it draws are. A whole page shown before the build is in has its
+PDF's hash, so the host keeps its drawing when the PDF comes (the test:
+whole pages' hashes of the shipped streams equal the linked PDF's, plain
+and SSA); any other page gets a hash no built page has and is drawn again
+once. Drawn the same means: the same paths, glyph outlines, images and
+text; only the fonts' names differ (`"F"`: the PDF's subset tag is made
+from the glyphs of the whole document), which name the glyphs' `<use>`
+ids and draw nothing. On papers with `hyperref` most pages have links,
+and so are drawn twice. In SSA mode the link renumbers fonts
+(`PARTEX_SSA_FONT_REFS`), so a page with more than one font has another
+`/F` name in its stream than in the PDF, and is drawn again too.
+
+**Font files named ahead** (`Host::wants_hints`, `Host::will_need`). In
+the browser each file the job lacks is fetched when read, one pack and
+one round trip at a time (0.5 s each from Shelf when cold; 15 fetches,
+8.4 s, for one paper), and most of them are fonts: their Type 1 programs
+and encodings, read only when the PDF's fonts are written at the job's
+end. The engine names them when it first knows them: at each `\font`
+once a map has been read, and for every font loaded so far when the
+default map is read (the first page); the map entry's `.pfb` and `.enc`.
+A host that fetches from far away fetches them in the background between
+slices, so the job's end finds them. A hint is pure: the map is peeked
+at (`FontMap::peek`: nothing kept among the lookups found, which a
+loaded table must hand out again), no tracker sees it, and the test
+builds the same bytes with a host that records hints and one that does
+not.
+
+**The extension's core** (`phitex-overleaf/core-partex`, its own repo):
+`ph_open` with a trailing `stream` = 1 runs the setup and a first slice
+and answers `{"done":false,"building":true,"handle",…}`; `ph_step(h,
+budget_ms)` runs slices for about `budget_ms` and answers the pages
+shipped so far (`"pages"`, `"hashes"`), the phase (`typesetting`,
+`settling`), the pass, the time, and `"want"` (the hinted files resolved
+to `engine TAB key`, those the session has not got), or, done, what
+`ph_open` answered before with `first_page_ms` and `pages_at_first`.
+While it streams, `ph_png` draws a shipped page, `ph_pages` and
+`ph_status` answer from the pages so far, and nothing else builds. The
+worker runs one queue: a request is served whole between slices, a slice
+when no request waits (a `MessageChannel` turn, not a timer); an edit
+or a file set while trip 1 runs waits, and is answered once its own build
+has painted; at the end the PDF goes to the drawer before `settled`.
+
+**Measured** (native, the extension's core on this machine, release,
+every file given: the open with every cache warm; median of 3, alternating
+blocking and streamed opens in fresh sessions; page 1 = drawn):
+| project (pages) | plain: page 1, blocking → streamed | plain build | SSA: page 1, blocking → streamed |
+|---|---|---|---|
+| ieeetran (10) | 414 → 294 ms | 405 → 420 ms | 1360 → 781 ms |
+| revtex (20) | 1199 → 721 ms | 1184 → 1222 ms | 6568 → 2204 ms |
+| article (41) | 1046 → 561 ms | 1040 → 1076 ms | 4534 → 1531 ms |
+| acmart (26) | 2869 → 1153 ms | 2828 → 2846 ms | 21000 → 3300 ms |
+| longtail (62) | 3407 → 2058 ms | 3401 → 3524 ms | 8465 → 5150 ms |
+
+Every streamed build's PDF is the blocking build's, byte for byte, the
+clock pinned (`SOURCE_DATE_EPOCH`: unpinned, two sessions a minute apart
+differ in the XMP date, as acmart's did once in four rounds). The
+plain build is the extension's first paint (worker A); a streamed build
+costs 1–4% more (the slices' clock and the page hashes). The `xelatex`
+project needs XeTeX (or the extension's stand-ins) and is left out;
+longtail's numbers are of a harness that missed `lmbx6.pfb` (its
+discovery read the `.aux` of earlier builds, so a fresh build's bold `??`
+was never asked for): the job ends fatally at the end, both ways alike.
+A form not `\immediate` is shipped after the page that draws it (at its
+first use, after the page object): a page not whole is hashed again when
+forms come (`Shipments::forms`).
+
+XeTeX's pages still come with its PDF (xdvipdfmx runs after the job).
+`phitex watch` already streams (4.8): its viewer shows each page as it is
+shipped, machine and `--ssa`, and now gives a whole page the hash its PDF
+page will have.
+
 ---
 
 ## 5. Performance, observability and the text form
@@ -5178,8 +5303,10 @@ at a run's start):
   own definitions are included, and in a segment the parent's names are
   listed too.
 - `cx.here()` and `cx.defined_since(p0)` list the names whose reaching
-  definition may differ since an earlier step of the unfold, each with
-  its value here (`None`: nothing reaches). That is:
+  definition may differ since an earlier step, each with its value here
+  (`None`: nothing reaches). p0 and here may be in different unfolds,
+  across calls and returns: the walk goes by the two steps' paths from
+  the root unfold, from where they part down to here. That is:
   - names defined from p0 on, nested unfolds included;
   - names defined in a group closed since, so a local definition made
     before p0 whose group closed is in the list.

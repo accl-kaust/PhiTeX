@@ -199,6 +199,26 @@ thread_local! {
     pub static BRK: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
+/// The toy's host: the files `\open{f}` reads as it runs, by name (a
+/// file system; shared by the workers' threads).
+pub static HOST: std::sync::Mutex<Vec<(String, String)>> = std::sync::Mutex::new(Vec::new());
+
+/// `\open{f}`'s reads of the host, on every thread.
+pub static HOST_READS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// File `f` as the host has it now: its tokens, identities apart from
+/// the document's.
+pub fn host_file(f: &str) -> Option<TV> {
+    let h = HOST.lock().expect("the toy host");
+    let src = h.iter().find(|(k, _)| k == f)?.1.clone();
+    let toks: Vec<(ElemId, Tok)> = lex(&src)
+        .into_iter()
+        .enumerate()
+        .map(|(i, t)| (ElemId(((i as u64 + 1) << 20) | (1 << 60)), t))
+        .collect();
+    Some(TV::Seq(seq_of(&toks)))
+}
+
 /// The bytes of the values the memo store holds (hooks' words, the line
 /// breaker's windows and decisions).
 pub struct TvCodec;
@@ -902,6 +922,24 @@ fn step(op: Op, mut st: St, cx: &mut StepCx<'_, Toy>) -> Step<TV> {
                 if rd.rest().is_empty()
                     && let Some(src) = rd.cx.source(f.as_bytes())
                 {
+                    let init = rd.cx.lit(TV::st(St {
+                        conds: st.conds.clone(),
+                        width: st.width,
+                        ..St::default()
+                    }));
+                    rd.cx.call(Op::File, src, Arg::Local(init), &[]);
+                    called = true;
+                }
+            }
+            "open" => {
+                // (a file the step finds as it runs, the host's: inserted
+                // as a named source, then called as `\input` calls one)
+                let f = rd.word();
+                if rd.rest().is_empty()
+                    && let Some(v) = host_file(&f)
+                {
+                    HOST_READS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let src = rd.cx.source_or_insert(f.as_bytes(), v);
                     let init = rd.cx.lit(TV::st(St {
                         conds: st.conds.clone(),
                         width: st.width,
