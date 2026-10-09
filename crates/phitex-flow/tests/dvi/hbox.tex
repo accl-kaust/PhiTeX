@@ -1,0 +1,20 @@
+\catcode`\{=1 \catcode`\}=2 \catcode`\#=6
+\font\tenrm=cmr10 \tenrm
+\hsize=300pt \vsize=400pt \parindent=20pt \baselineskip=12pt \topskip=10pt
+\tolerance=1000 \linepenalty=10 \maxdepth=2pt \parfillskip=0pt plus 1fil
+\hbox{A natural box}
+\hbox to 100pt{Spread to a hundred}
+\hbox to 200pt{Too loose}
+\hbox to 20pt{Far too wide for this}
+\hbox spread 10pt{Spread ten more}
+\hbox to 100pt{\hfil centred\hfil}
+\hbox to 100pt{left\hss}
+\moveright 30pt\hbox{Moved right}
+\moveleft 10pt\hbox{Moved left}
+\overfullrule=5pt
+\hbox to 30pt{Overfull with a rule}
+Text with \hbox{a box} inside, \raise 2pt\hbox{raised} and
+\lower 3pt\hbox{lowered} boxes, and \hbox to 50pt{\hfil fixed} too.
+\hfuzz=100pt \hbox to 10pt{fuzz hides this}
+\hbadness=5000 \hbox to 120pt{badness hides this}
+\end

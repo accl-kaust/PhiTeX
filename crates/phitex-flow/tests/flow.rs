@@ -32,7 +32,9 @@ fn opts(threads: usize, reads: Reads, order: Order) -> Options {
 /// a category code change.
 fn doc(n: usize) -> String {
     let mut s = String::from(
-        "\\def\\lazy{lazy}\\def\\idle{idle}\n\\def\\pair#1#2{#2#1}\n\\def\\upto#1.{[#1]}\n\\hsize=300pt \\vsize=200pt\n\n",
+        "\\catcode`\\{=1 \\catcode`\\}=2 \\catcode`\\#=6 \\font\\tenrm=cmr10 \\tenrm \\tolerance=200 \\linepenalty=10\n\
+         \\parindent=20pt \\baselineskip=12pt \\topskip=10pt \\maxdepth=4pt \\parfillskip=0pt plus 1fil\n\
+         \\def\\lazy{lazy}\\def\\idle{idle}\n\\def\\pair#1#2{#2#1}\n\\def\\upto#1.{[#1]}\n\\hsize=300pt \\vsize=200pt\n\n",
     );
     for k in 0..n {
         if k % 10 == 7 {
@@ -139,7 +141,7 @@ fn a_changed_definition_reruns_its_readers_only() {
 
 #[test]
 fn phi_is_explicit_at_fi() {
-    let src = "\\def\\a{x}\\ifx\\a\\a \\def\\b{yes}\\else\\def\\b{no}\\fi\n";
+    let src = "\\catcode`\\{=1 \\catcode`\\}=2 \\def\\a{x}\\ifx\\a\\a \\def\\b{yes}\\else\\def\\b{no}\\fi\n";
     let o = cold(
         src,
         Options {

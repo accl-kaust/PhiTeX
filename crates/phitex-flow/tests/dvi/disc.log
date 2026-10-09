@@ -1,0 +1,115 @@
+(./disc.tex
+Underfull \hbox (badness 1189) in paragraph at lines 6--11
+[]\tenrm Words with dis-cre-
+
+\hbox(6.94444+0.0)x100.0, glue set 2.28331 []
+
+
+Underfull \hbox (badness 2856) in paragraph at lines 6--11
+\tenrm tion-ary hy-phens and
+
+\hbox(6.94444+1.94444)x100.0, glue set 3.05829 []
+
+
+Underfull \hbox (badness 3068) in paragraph at lines 6--11
+\tenrm ex-plicit self-contained
+
+\hbox(6.94444+1.94444)x100.0, glue set 3.13324 []
+
+
+Loose \hbox (badness 2) in paragraph at lines 6--11
+\tenrm com-pound-words, then
+
+\hbox(6.94444+1.94444)x100.0, glue set 0.28322 []
+
+
+Underfull \hbox (badness 2903) in paragraph at lines 6--11
+\tenrm pre-postbreak-able and 
+
+\hbox(6.94444+0.0)x100.0, glue set 3.07497 []
+
+
+Underfull \hbox (badness 10000) in paragraph at lines 6--11
+\tenrm empty
+
+\hbox(6.15079+1.94444)x100.0 []
+
+
+Underfull \hbox (badness 228) in paragraph at lines 6--11
+\tenrm and a replacements x
+
+\hbox(6.94444+1.94444)x100.0, glue set 1.31665 []
+
+
+Underfull \hbox (badness 1067) in paragraph at lines 6--11
+\tenrm y only and an over-
+
+\hbox(6.94444+1.94444)x100.0, glue set 2.20415 []
+
+
+Tight \hbox (badness 17) in paragraph at lines 6--11
+\tenrm full-ly-long-word-here too.
+
+\hbox(6.94444+1.94444)x100.0, glue set - 0.55022 []
+
+
+Underfull \hbox (badness 6332) in paragraph at lines 6--11
+ \tenrm A mark inside a
+
+\hbox(6.94444+0.0)x100.0, glue set 3.98851 []
+
+
+Underfull \hbox (badness 1348) in paragraph at lines 6--11
+\tenrm paragraph moves out
+
+\hbox(6.94444+1.94444)x100.0, glue set 2.38329 []
+
+
+Underfull \hbox (badness 2903) in paragraph at lines 12--14
+[]\tenrm text with zero-width
+
+\hbox(6.94444+1.94444)x100.0, glue set 3.07497 []
+
+
+Tight \hbox (badness 92) in paragraph at lines 12--14
+\tenrm boxes at the start and a
+
+\hbox(6.94444+0.0)x100.0, glue set - 0.97504 []
+
+
+Loose \hbox (badness 6) in paragraph at lines 12--14
+| \tenrm tall rule changing the
+
+\hbox(20.0+10.0)x100.0, glue set 0.39415 []
+
+
+Underfull \hbox (badness 371) in paragraph at lines 16--18
+[]\tenrm A paragraph whose
+
+\hbox(6.94444+1.94444)x100.0, glue set 1.55074 []
+
+
+Tight \hbox (badness 33) in paragraph at lines 16--18
+\tenrm lines are close: | lineskip
+
+\hbox(15.0+1.94444)x100.0, glue set - 0.69627 []
+
+
+Underfull \hbox (badness 981) in paragraph at lines 16--18
+\tenrm glue is used between
+
+\hbox(6.94444+1.94444)x100.0, glue set 2.14444 []
+
+
+Underfull \hbox (badness 581) in paragraph at lines 16--18
+\tenrm these lines instead of
+
+\hbox(6.94444+0.0)x100.0, glue set 1.79999 []
+
+
+Loose \hbox (badness 24) in paragraph at lines 16--18
+\tenrm the baselineskip glue, |
+
+\hbox(6.94444+8.0)x100.0, glue set 0.61996 []
+
+[0] )

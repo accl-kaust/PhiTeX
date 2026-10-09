@@ -1,8 +1,15 @@
-//! A font from its TFM file: a pure function of the file's bytes
-//! (tex.web part 30). Widths, heights, depths and parameters; ligatures
-//! and kerns are a later feature.
+//! A font from its TFM file: a pure function of the file's bytes and the
+//! size it is loaded at (tex.web part 30, §560–§576, copied as a pure
+//! function): dimensions, italic corrections, the ligature/kern program,
+//! extensible recipes and parameters.
+//!
+//! A font's identity is its name and its size (`Font::key`): two loads of
+//! the same name at the same size are the same font, an equal value. (TeX's
+//! internal font numbers, the order of first loading, are the DVI file's
+//! font numbers only: `dvi::font_order`.)
 
 use std::fmt;
+use std::sync::Arc;
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct CharDims {
@@ -11,145 +18,508 @@ pub struct CharDims {
     pub d: i32,
 }
 
+/// §544: what the remainder of a character's `char_info` means.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum Tag {
+    #[default]
+    None,
+    /// Its ligature/kern program starts at this index.
+    Lig(u16),
+    /// The next larger character.
+    List(u8),
+    /// An extensible recipe.
+    Ext(u8),
+}
+
+/// One existing character's metrics.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct Glyph {
+    pub width: i32,
+    pub height: i32,
+    pub depth: i32,
+    pub italic: i32,
+    pub tag: Tag,
+}
+
+/// §545: one lig/kern instruction.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct LigKern {
+    pub skip: u8,
+    pub next: u8,
+    pub op: u8,
+    pub remainder: u8,
+}
+
+impl LigKern {
+    /// §545: `stop_flag`, `kern_flag`.
+    pub const STOP: u8 = 128;
+    pub const KERN: u8 = 128;
+}
+
 /// A loaded font.
 pub struct Font {
     pub name: String,
+    /// The font's identity, its name and size (`cmr10 655360`): what the
+    /// `Key`s of its parameters name it by.
+    pub key: Arc<str>,
     pub checksum: u32,
     pub design_size: i32,
     pub size: i32,
-    pub chars: Vec<Option<CharDims>>,
-    /// `params[k]` is TeX's `\fontdimen k` (1 slant, 2 space, 3 stretch,
-    /// 4 shrink, 5 x-height, 6 quad, 7 extra space).
+    pub bc: i32,
+    pub ec: i32,
+    glyphs: Vec<Option<Glyph>>,
+    pub lig_kerns: Vec<LigKern>,
+    pub kerns: Vec<i32>,
+    /// `params[k]` is `\fontdimen k` as loaded (index 0 unused; at least
+    /// seven parameters).
     pub params: Vec<i32>,
+    /// §545: the right boundary character (256 if none).
+    pub bchar: i32,
+    /// §549: `bchar` unless that character exists (then 256).
+    pub false_bchar: i32,
+    /// §545: where the left boundary program starts, if any.
+    pub bchar_label: Option<u16>,
+    /// The file's bytes (to load it at another size).
+    pub data: Arc<[u8]>,
 }
 
-impl Font {
-    pub fn char(&self, c: u32) -> Option<CharDims> {
-        self.chars.get(c as usize).copied().flatten()
-    }
+/// A TFM file tex.web would not load (§560's `abort`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BadTfm;
 
-    pub fn param(&self, n: usize) -> i32 {
-        self.params.get(n).copied().unwrap_or(0)
-    }
+struct Reader<'a> {
+    data: &'a [u8],
+    pos: usize,
+}
 
-    /// Parses a TFM file at its design size.
-    pub fn parse(name: &str, b: &[u8]) -> Result<Font, String> {
-        let hw = |i: usize| -> Result<usize, String> {
-            let o = 2 * i;
-            if o + 1 >= b.len() {
-                return Err("TFM file too short".into());
-            }
-            Ok((usize::from(b[o]) << 8) | usize::from(b[o + 1]))
-        };
-        let (lf, lh, bc, ec) = (hw(0)?, hw(1)?, hw(2)?, hw(3)?);
-        let (nw, nh, nd, ni, nl, nk, ne, np) = (
-            hw(4)?,
-            hw(5)?,
-            hw(6)?,
-            hw(7)?,
-            hw(8)?,
-            hw(9)?,
-            hw(10)?,
-            hw(11)?,
-        );
-        if lf * 4 > b.len() || lh < 2 || ec > 255 || bc > ec + 1 {
-            return Err("bad TFM header".into());
+impl Reader<'_> {
+    fn byte(&mut self) -> Result<i32, BadTfm> {
+        let b = *self.data.get(self.pos).ok_or(BadTfm)?;
+        self.pos += 1;
+        Ok(i32::from(b))
+    }
+    fn four(&mut self) -> Result<[u8; 4], BadTfm> {
+        let w = self.data.get(self.pos..self.pos + 4).ok_or(BadTfm)?;
+        self.pos += 4;
+        Ok([w[0], w[1], w[2], w[3]])
+    }
+    /// §564: `read_sixteen`, rejecting values above 2^15.
+    fn sixteen(&mut self) -> Result<i32, BadTfm> {
+        let x = self.byte()?;
+        if x > 127 {
+            return Err(BadTfm);
         }
-        let nc = ec + 1 - bc;
-        if 6 + lh + nc + nw + nh + nd + ni + nl + nk + ne + np != lf {
-            return Err("TFM lengths do not add up".into());
-        }
-        let word = |i: usize| -> [u8; 4] {
-            let o = 4 * i;
-            [b[o], b[o + 1], b[o + 2], b[o + 3]]
-        };
-        let checksum = u32::from_be_bytes(word(6));
-        let design_size = i32::from_be_bytes(word(7)) >> 4;
-        let ci = 6 + lh;
-        let wt = ci + nc;
-        let ht = wt + nw;
-        let dt = ht + nh;
-        let it = dt + nd;
-        let lk = it + ni;
-        let kt = lk + nl;
-        let et = kt + nk;
-        let pt = et + ne;
-        // (tex.web 572: fix_words scaled by the size z)
-        let mut z = design_size;
-        let mut alpha: i32 = 16;
+        Ok(x * 0o400 + self.byte()?)
+    }
+}
+
+/// §571–§572: the scaling of `fix_word`s by size `z`.
+struct Scaler {
+    z: i32,
+    alpha: i32,
+    beta: i32,
+}
+
+impl Scaler {
+    fn new(mut z: i32) -> Self {
+        let mut alpha = 16;
         while z >= 0o40_000_000 {
             z /= 2;
             alpha += alpha;
         }
         let beta = 256 / alpha;
-        let alpha = alpha * z;
-        let store = |w: [u8; 4]| -> i32 {
-            let (a, bb, c, d) = (
-                i32::from(w[0]),
-                i32::from(w[1]),
-                i32::from(w[2]),
-                i32::from(w[3]),
-            );
-            let sw = (((d * z) / 256 + c * z) / 256 + bb * z) / beta;
-            match a {
-                0 => sw,
-                255 => sw - alpha,
-                _ => 0,
-            }
-        };
-        let mut chars = vec![None; 256];
-        for (c, slot) in chars.iter_mut().enumerate().take(ec + 1).skip(bc) {
-            if c >= bc + nc {
-                break;
-            }
-            let w = word(ci + c - bc);
-            let wi = usize::from(w[0]);
-            if wi == 0 {
-                continue;
-            }
-            let hi = usize::from(w[1] >> 4);
-            let di = usize::from(w[1] & 15);
-            *slot = Some(CharDims {
-                w: store(word(wt + wi)),
-                h: store(word(ht + hi)),
-                d: store(word(dt + di)),
-            });
+        Self { z, alpha: alpha * z, beta }
+    }
+    fn scale(&self, [a, b, c, d]: [u8; 4]) -> Result<i32, BadTfm> {
+        let (b, c, d) = (i32::from(b), i32::from(c), i32::from(d));
+        let z = self.z;
+        let sw = ((((d * z) / 0o400) + (c * z)) / 0o400 + (b * z)) / self.beta;
+        match a {
+            0 => Ok(sw),
+            255 => Ok(sw - self.alpha),
+            _ => Err(BadTfm),
         }
-        let mut params = vec![0; 8];
-        for (k, p) in params.iter_mut().enumerate().take(np.min(7) + 1).skip(1) {
-            let w = word(pt + k - 1);
-            *p = if k == 1 {
-                i32::from_be_bytes(w) >> 4
+    }
+    fn table(&self, r: &mut Reader<'_>, n: i32) -> Result<Vec<i32>, BadTfm> {
+        (0..n).map(|_| self.scale(r.four()?)).collect()
+    }
+}
+
+impl Font {
+    /// §552: the null font: no characters, seven zero parameters.
+    pub fn null() -> Font {
+        Font {
+            name: "nullfont".into(),
+            key: Arc::from("nullfont"),
+            checksum: 0,
+            design_size: 0,
+            size: 0,
+            bc: 1,
+            ec: 0,
+            glyphs: Vec::new(),
+            lig_kerns: Vec::new(),
+            kerns: Vec::new(),
+            params: vec![0; 8],
+            bchar: 256,
+            false_bchar: 256,
+            bchar_label: None,
+            data: Arc::from([]),
+        }
+    }
+
+    /// Parses a TFM file at its design size.
+    pub fn parse(name: &str, b: &[u8]) -> Result<Font, String> {
+        Font::load(name, Arc::from(b), None).map_err(|_| format!("{name}: bad TFM file"))
+    }
+
+    /// §568: the design size of a TFM file whose size fields are valid.
+    pub fn design_size_of(data: &[u8]) -> Result<i32, BadTfm> {
+        let mut r = Reader { data, pos: 2 };
+        if r.sixteen()? < 2 {
+            return Err(BadTfm);
+        }
+        r.pos = 28;
+        let mut z = r.sixteen()?;
+        z = z * 0o400 + r.byte()?;
+        z = z * 0o20 + r.byte()? / 0o20;
+        if z < 0o200_000 {
+            return Err(BadTfm);
+        }
+        Ok(z)
+    }
+
+    /// Loads a TFM file at size `at` (`None`: its design size), tex.web
+    /// 560–576.
+    pub fn load(name: &str, data: Arc<[u8]>, at: Option<i32>) -> Result<Font, BadTfm> {
+        let mut r = Reader { data: &data, pos: 0 };
+        let lf = r.sixteen()?;
+        let lh = r.sixteen()?;
+        let mut bc = r.sixteen()?;
+        let mut ec = r.sixteen()?;
+        if bc > ec + 1 || ec > 255 {
+            return Err(BadTfm);
+        }
+        if bc > 255 {
+            bc = 1;
+            ec = 0;
+        }
+        let nw = r.sixteen()?;
+        let nh = r.sixteen()?;
+        let nd = r.sixteen()?;
+        let ni = r.sixteen()?;
+        let nl = r.sixteen()?;
+        let nk = r.sixteen()?;
+        let ne = r.sixteen()?;
+        let np = r.sixteen()?;
+        if lf != 6 + lh + (ec - bc + 1) + nw + nh + nd + ni + nl + nk + ne + np {
+            return Err(BadTfm);
+        }
+        if nw == 0 || nh == 0 || nd == 0 || ni == 0 || lh < 2 {
+            return Err(BadTfm);
+        }
+        let check = r.four()?;
+        let mut z = r.sixteen()?;
+        z = z * 0o400 + r.byte()?;
+        z = z * 0o20 + r.byte()? / 0o20;
+        if z < 0o200_000 {
+            return Err(BadTfm);
+        }
+        for _ in 2..lh {
+            r.four()?;
+        }
+        let design_size = z;
+        let size = at.unwrap_or(design_size);
+        let n = usize::try_from(ec - bc + 1).unwrap_or(0);
+        // (width, height, depth, italic, tag, remainder)
+        let mut info: Vec<[u8; 6]> = Vec::with_capacity(n);
+        for k in 0..n {
+            let [a, b, c, d] = r.four()?;
+            let i = [a, b / 16, b % 16, c / 4, c % 4, d];
+            let di = i32::from(d);
+            if i32::from(a) >= nw || i32::from(i[1]) >= nh || i32::from(i[2]) >= nd || i32::from(i[3]) >= ni {
+                return Err(BadTfm);
+            }
+            match i[4] {
+                1 if di >= nl => return Err(BadTfm),
+                3 if di >= ne => return Err(BadTfm),
+                2 => {
+                    // (§570: a charlist cycle)
+                    if di < bc || di > ec {
+                        return Err(BadTfm);
+                    }
+                    let current = k as i32 + bc;
+                    let mut d = di;
+                    while d < current {
+                        let q = info[(d - bc) as usize];
+                        if q[4] != 2 {
+                            break;
+                        }
+                        d = i32::from(q[5]);
+                    }
+                    if d == current {
+                        return Err(BadTfm);
+                    }
+                }
+                _ => {}
+            }
+            info.push(i);
+        }
+        let scaler = Scaler::new(size);
+        let widths = scaler.table(&mut r, nw)?;
+        let heights = scaler.table(&mut r, nh)?;
+        let depths = scaler.table(&mut r, nd)?;
+        let italics = scaler.table(&mut r, ni)?;
+        if widths[0] != 0 || heights[0] != 0 || depths[0] != 0 || italics[0] != 0 {
+            return Err(BadTfm);
+        }
+        let exists = |c: i32| c >= bc && c <= ec && info[(c - bc) as usize][0] > 0;
+        let mut bch_label = 0o77777;
+        let mut bchar = 256;
+        let mut lig_kerns = Vec::with_capacity(nl as usize);
+        for k in 0..nl {
+            let [a, b, c, d] = r.four()?;
+            let (ai, bi, ci, di) = (i32::from(a), i32::from(b), i32::from(c), i32::from(d));
+            if ai > 128 {
+                if 256 * ci + di >= nl {
+                    return Err(BadTfm);
+                }
+                if ai == 255 && k == 0 {
+                    bchar = bi;
+                }
             } else {
-                store(w)
-            };
+                if bi != bchar && !exists(bi) {
+                    return Err(BadTfm);
+                }
+                if ci < 128 {
+                    if !exists(di) {
+                        return Err(BadTfm);
+                    }
+                } else if 256 * (ci - 128) + di >= nk {
+                    return Err(BadTfm);
+                }
+                if ai < 128 && k + ai + 1 >= nl {
+                    return Err(BadTfm);
+                }
+            }
+            lig_kerns.push(LigKern { skip: a, next: b, op: c, remainder: d });
         }
+        if let Some(last) = lig_kerns.last()
+            && last.skip == 255
+        {
+            bch_label = 256 * i32::from(last.op) + i32::from(last.remainder);
+        }
+        let kerns = scaler.table(&mut r, nk)?;
+        for _ in 0..ne {
+            let [a, b, c, d] = r.four()?;
+            for piece in [a, b, c] {
+                if piece != 0 && !exists(i32::from(piece)) {
+                    return Err(BadTfm);
+                }
+            }
+            if !exists(i32::from(d)) {
+                return Err(BadTfm);
+            }
+        }
+        let mut params = vec![0; 1];
+        for k in 1..=np {
+            let w = r.four()?;
+            if k == 1 {
+                let mut sw = i32::from(w[0]);
+                if sw > 127 {
+                    sw -= 256;
+                }
+                sw = sw * 0o400 + i32::from(w[1]);
+                sw = sw * 0o400 + i32::from(w[2]);
+                params.push(sw * 0o20 + i32::from(w[3]) / 0o20);
+            } else {
+                params.push(scaler.scale(w)?);
+            }
+        }
+        if params.len() < 8 {
+            params.resize(8, 0);
+        }
+        let false_bchar = if exists(bchar) { 256 } else { bchar };
+        let glyphs = info
+            .iter()
+            .map(|i| {
+                (i[0] != 0).then(|| Glyph {
+                    width: widths[usize::from(i[0])],
+                    height: heights[usize::from(i[1])],
+                    depth: depths[usize::from(i[2])],
+                    italic: italics[usize::from(i[3])],
+                    tag: match i[4] {
+                        1 => Tag::Lig(u16::from(i[5])),
+                        2 => Tag::List(i[5]),
+                        3 => Tag::Ext(i[5]),
+                        _ => Tag::None,
+                    },
+                })
+            })
+            .collect();
         Ok(Font {
             name: name.to_string(),
-            checksum,
+            key: Font::key_of(name, size),
+            checksum: u32::from_be_bytes(check),
             design_size,
-            size: design_size,
-            chars,
+            size,
+            bc,
+            ec,
+            glyphs,
+            lig_kerns,
+            kerns,
             params,
+            bchar,
+            false_bchar,
+            bchar_label: (bch_label < nl).then_some(bch_label as u16),
+            data,
         })
+    }
+
+    /// The identity of the font `name` at `size`.
+    pub fn key_of(name: &str, size: i32) -> Arc<str> {
+        Arc::from(format!("{name} {size}"))
+    }
+
+    /// The metrics of character `c`, if the font has it (§554).
+    #[inline]
+    pub fn glyph(&self, c: i32) -> Option<Glyph> {
+        let i = usize::try_from(c.wrapping_sub(self.bc)).ok()?;
+        self.glyphs.get(i).copied().flatten()
+    }
+
+    pub fn char(&self, c: u32) -> Option<CharDims> {
+        self.glyph(c as i32).map(|g| CharDims { w: g.width, h: g.height, d: g.depth })
+    }
+
+    /// `\fontdimen n` as loaded (0 beyond the parameters).
+    pub fn param(&self, n: usize) -> i32 {
+        self.params.get(n).copied().unwrap_or(0)
+    }
+
+    /// The number of parameters (`font_params`).
+    pub fn nparams(&self) -> usize {
+        self.params.len() - 1
     }
 }
 
 impl PartialEq for Font {
     fn eq(&self, o: &Self) -> bool {
-        std::ptr::eq(self, o)
-            || (self.name == o.name
-                && self.checksum == o.checksum
-                && self.size == o.size
-                && self.chars == o.chars
-                && self.params == o.params)
+        std::ptr::eq(self, o) || (self.size == o.size && self.checksum == o.checksum && self.name == o.name)
     }
 }
 
 impl Eq for Font {}
 
+impl std::hash::Hash for Font {
+    fn hash<H: std::hash::Hasher>(&self, h: &mut H) {
+        self.name.hash(h);
+        self.size.hash(h);
+    }
+}
+
+/// The null font, shared (tex.web 552).
+pub fn null_font() -> Arc<Font> {
+    static NULL: std::sync::OnceLock<Arc<Font>> = std::sync::OnceLock::new();
+    NULL.get_or_init(|| Arc::new(Font::null())).clone()
+}
+
 impl fmt::Debug for Font {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Font({})", self.name)
+        write!(f, "Font({})", self.key)
+    }
+}
+
+/// Where TFM files are: file name -> path, from walking the font
+/// directories once (a pure function of the file system, which is constant
+/// during a build).
+#[derive(Default)]
+pub struct Index {
+    paths: std::collections::HashMap<String, std::path::PathBuf>,
+}
+
+impl Index {
+    pub fn new(dirs: &[std::path::PathBuf]) -> Index {
+        fn walk(d: &std::path::Path, depth: u32, out: &mut std::collections::HashMap<String, std::path::PathBuf>) {
+            let Ok(rd) = std::fs::read_dir(d) else { return };
+            let mut entries: Vec<_> = rd.filter_map(Result::ok).map(|e| e.path()).collect();
+            entries.sort();
+            for p in entries {
+                if p.is_dir() {
+                    if depth > 0 {
+                        walk(&p, depth - 1, out);
+                    }
+                } else if let Some(n) = p.file_name().and_then(|n| n.to_str())
+                    && p.extension().is_some_and(|e| e == "tfm")
+                {
+                    out.entry(n.to_string()).or_insert(p);
+                }
+            }
+        }
+        let mut paths = std::collections::HashMap::new();
+        for d in dirs {
+            walk(d, 8, &mut paths);
+        }
+        Index { paths }
+    }
+
+    /// The bytes of `name.tfm`.
+    pub fn read(&self, name: &str) -> Option<Vec<u8>> {
+        self.paths.get(&format!("{name}.tfm")).and_then(|p| std::fs::read(p).ok())
+    }
+}
+
+/// TeX Live's TFM directories, where they exist.
+pub fn default_dirs() -> Vec<std::path::PathBuf> {
+    [
+        "/usr/share/texmf-dist/fonts/tfm",
+        "/usr/share/texlive/texmf-dist/fonts/tfm",
+        "/usr/local/texlive/texmf-dist/fonts/tfm",
+    ]
+    .iter()
+    .map(std::path::PathBuf::from)
+    .filter(|p| p.is_dir())
+    .collect()
+}
+
+/// The TFM files a build can load: those given to it by name, then the
+/// font directories (searched once, on the first name not given). Reading
+/// one is a pure function of its name while the files do not change.
+pub struct FontFiles {
+    given: Vec<(String, Arc<[u8]>)>,
+    dirs: Vec<std::path::PathBuf>,
+    index: std::sync::OnceLock<Arc<Index>>,
+    cache: std::sync::Mutex<std::collections::HashMap<String, Option<Arc<[u8]>>>>,
+}
+
+/// The index of each list of directories, made once per process (a pure
+/// function of the file system, which does not change while we run).
+fn index_of(dirs: &[std::path::PathBuf]) -> Arc<Index> {
+    type Indexes = std::sync::Mutex<Vec<(Vec<std::path::PathBuf>, Arc<Index>)>>;
+    static INDEXES: std::sync::OnceLock<Indexes> = std::sync::OnceLock::new();
+    let mut all = INDEXES.get_or_init(Indexes::default).lock().expect("font indexes");
+    if let Some((_, i)) = all.iter().find(|(d, _)| d == dirs) {
+        return i.clone();
+    }
+    let i = Arc::new(Index::new(dirs));
+    all.push((dirs.to_vec(), i.clone()));
+    i
+}
+
+impl FontFiles {
+    pub fn new(given: Vec<(String, Arc<[u8]>)>, dirs: Vec<std::path::PathBuf>) -> FontFiles {
+        FontFiles { given, dirs, index: std::sync::OnceLock::new(), cache: std::sync::Mutex::default() }
+    }
+
+    /// The bytes of `name.tfm`, if there is such a file.
+    pub fn get(&self, name: &str) -> Option<Arc<[u8]>> {
+        if let Some((_, d)) = self.given.iter().find(|(n, _)| n == name) {
+            return Some(d.clone());
+        }
+        if let Some(v) = self.cache.lock().expect("font cache").get(name) {
+            return v.clone();
+        }
+        let v = self.index.get_or_init(|| index_of(&self.dirs)).read(name).map(Arc::from);
+        self.cache.lock().expect("font cache").insert(name.to_string(), v.clone());
+        v
     }
 }

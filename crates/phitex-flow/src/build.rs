@@ -42,8 +42,8 @@ use crate::dvi;
 use crate::graph::{Env, Para, PieceId, Run, Src, cut_from, run_piece};
 use crate::hash::{FxMap, FxSet, hash_of};
 use crate::linebreak::break_lines;
-use crate::page::{Lines, Page, PageOrg, Scan, VItem, material};
-use crate::tfm::Font;
+use crate::page::{Lines, Page, PageOrg, Scan, material};
+use crate::tfm::{Font, FontFiles};
 use crate::val::{Key, Val, initial};
 
 /// What a read does when the definition it finds is being remade.
@@ -134,6 +134,10 @@ pub struct Output {
     pub errors: Vec<String>,
     /// The graph, as text.
     pub dump: String,
+    /// What the nodes wrote to the log, in document order (`\message`
+    /// texts; `\immediate\write` lines, ending in a newline):
+    /// `print::log` lays it out as TeX's log.
+    pub log: Vec<String>,
 }
 
 /// A piece whose definition was read before any definition.
@@ -158,11 +162,14 @@ type Readers = FxMap<Key, FxMap<PieceId, (u32, PieceId)>>;
 /// the pages with their DVI.
 pub struct Build {
     font: Arc<Font>,
+    /// The TFM files `\font` can load.
+    fonts: Arc<FontFiles>,
     pieces: Vec<Kept>,
     pages: Vec<(Page, Arc<Vec<u8>>)>,
     /// Where each page came from in the material (`page_orgs[i]` for
-    /// `pages[i]`).
+    /// `pages[i]`), and the page builder's marks.
     page_orgs: Vec<PageOrg>,
+    marks: Vec<(u32, u32)>,
     next_id: PieceId,
     readers: Readers,
     /// The source the pieces were cut from, and the byte offset of each
@@ -337,7 +344,12 @@ struct State {
     unshipped: usize,
     ship_queue: VecDeque<usize>,
     old_pages: Vec<Option<(Page, Arc<Vec<u8>>)>>,
-    old_orgs: Vec<PageOrg>,
+    old_orgs: Arc<Vec<PageOrg>>,
+    old_marks: Vec<(u32, u32)>,
+    /// The page builder's marks before the scan's (kept), and after them
+    /// (the last build's, where the scan met its pages again).
+    marks_before: Vec<(u32, u32)>,
+    marks_after: Vec<(u32, u32)>,
     rng: u64,
     stats: Stats,
     done: bool,
@@ -363,6 +375,7 @@ struct Shared {
     state: Mutex<State>,
     cv: Condvar,
     font: Arc<Font>,
+    fonts: Arc<FontFiles>,
     opts: Options,
 }
 
@@ -378,10 +391,10 @@ enum Task {
         /// to leave out.
         from: usize,
         skip: u32,
-        /// Nothing differs from the last build after this piece, which had
-        /// pages start at these origins: a page starting at one of them
-        /// after it begins the last build's pages from there on.
-        converge: Option<(usize, Vec<(u32, u32)>)>,
+        /// Nothing differs from the last build after this piece: a restart
+        /// point after it equal to one of the last build's pages' begins
+        /// the last build's pages from there on.
+        converge: Option<(usize, Arc<Vec<PageOrg>>)>,
         to: usize,
         pieces: Vec<Vec<ParaLines>>,
         finish: bool,
@@ -390,12 +403,20 @@ enum Task {
 }
 
 impl Build {
+    /// A build whose documents can load `font` by its name, and the TFM
+    /// files in TeX Live's directories.
     pub fn new(font: Arc<Font>) -> Build {
+        let fonts = Arc::new(FontFiles::new(
+            Self::given(&font),
+            crate::tfm::default_dirs(),
+        ));
         Build {
             font,
+            fonts,
             pieces: Vec::new(),
             pages: Vec::new(),
             page_orgs: Vec::new(),
+            marks: Vec::new(),
             next_id: 0,
             readers: FxMap::default(),
             src: String::new(),
@@ -450,6 +471,19 @@ impl Build {
             starts.extend(self.starts[j..].iter().map(|&s| s + nb.len() - ob.len()));
         }
         (texts, starts)
+    }
+
+    fn given(font: &Font) -> Vec<(String, Arc<[u8]>)> {
+        if font.data.is_empty() {
+            Vec::new()
+        } else {
+            vec![(font.name.clone(), font.data.clone())]
+        }
+    }
+
+    /// Where `\font` finds TFM files (searched below these directories).
+    pub fn set_font_dirs(&mut self, dirs: Vec<std::path::PathBuf>) {
+        self.fonts = Arc::new(FontFiles::new(Self::given(&self.font), dirs));
     }
 
     /// Builds `src`: what changed, and what the changes reach.
@@ -647,12 +681,14 @@ impl Build {
             scan_next: 0,
             scan_skip: 0,
             scan_done: false,
-            matching: !self.page_orgs.is_empty(),
+            matching: !self.page_orgs.is_empty() || !self.marks.is_empty(),
             old_runs,
             last_diff: None,
             last_diff_known: false,
             pages: Vec::new(),
             orgs: Vec::new(),
+            marks_before: Vec::new(),
+            marks_after: Vec::new(),
             bodies: Vec::new(),
             unshipped: 0,
             ship_queue: VecDeque::new(),
@@ -660,7 +696,8 @@ impl Build {
                 .into_iter()
                 .map(Some)
                 .collect(),
-            old_orgs: std::mem::take(&mut self.page_orgs),
+            old_orgs: Arc::new(std::mem::take(&mut self.page_orgs)),
+            old_marks: std::mem::take(&mut self.marks),
             rng: match opts.order {
                 Order::Random(s) => s.wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1,
                 Order::Priority => 1,
@@ -702,6 +739,7 @@ impl Build {
             state: Mutex::new(state),
             cv: Condvar::new(),
             font: self.font.clone(),
+            fonts: self.fonts.clone(),
             opts,
         };
         std::thread::scope(|s| {
@@ -721,9 +759,35 @@ impl Build {
             .iter()
             .map(|b| b.clone().expect("every page shipped"))
             .collect();
-        let out = dvi::assemble(&self.font, &st.pages, &bodies);
+        let order = dvi::font_order(
+            &st.p
+                .iter()
+                .filter_map(|ps| ps.run.as_deref())
+                .collect::<Vec<_>>(),
+        );
+        let out = dvi::assemble(&order, &st.pages, &bodies);
         let mut errors = Vec::new();
         let mut dump = String::new();
+        let marks: Vec<(u32, u32)> = st
+            .marks_before
+            .iter()
+            .chain(st.scan.as_ref().map_or(&[][..], |s| &s.marks[..]))
+            .chain(&st.marks_after)
+            .copied()
+            .collect();
+        let log = {
+            let pieces: Vec<_> =
+                st.p.iter()
+                    .map(|ps| {
+                        (
+                            &ps.text[..],
+                            &**ps.run.as_ref().expect("every piece ran"),
+                            &ps.lines[..],
+                        )
+                    })
+                    .collect();
+            crate::logs::gather(&pieces, &marks, &st.pages)
+        };
         for (k, ps) in st.p.iter().enumerate() {
             let r = ps.run.as_ref().expect("every piece ran");
             for e in &r.errors {
@@ -739,12 +803,7 @@ impl Build {
         }
         if opts.dump {
             for (i, pg) in st.pages.iter().enumerate() {
-                let lines = pg
-                    .items
-                    .iter()
-                    .filter(|x| matches!(x, VItem::Line(..)))
-                    .count();
-                let _ = writeln!(dump, "page {}: {} lines", i + 1, lines);
+                let _ = writeln!(dump, "page {}: {} items", i + 1, pg.b.list.len());
             }
         }
         st.stats.time_join = t_join.elapsed();
@@ -763,11 +822,13 @@ impl Build {
         self.readers = st.readers;
         self.pages = st.pages.into_iter().zip(bodies).collect();
         self.page_orgs = st.orgs;
+        self.marks = marks;
         Output {
             dvi: out,
             stats: st.stats,
             errors,
             dump,
+            log,
         }
     }
 }
@@ -1026,7 +1087,8 @@ fn advance_match(g: &mut State) {
                 g.bodies.push(Some(b));
                 g.stats.pages_reused += 1;
             }
-            g.orgs = std::mem::take(&mut g.old_orgs);
+            g.orgs = g.old_orgs.to_vec();
+            g.marks_before = std::mem::take(&mut g.old_marks);
             g.scan_done = true;
             g.matching = false;
         } else {
@@ -1065,27 +1127,49 @@ fn last_diff(g: &mut State) -> Option<usize> {
 }
 
 /// The scan resumes before piece `c`, the first whose material differs
-/// from the last build's: at the last old page that started before `c` and
-/// whose page before it was decided before `c` (a paragraph's lines
-/// are a function of the paragraph, so equal paragraphs are equal
-/// material); the pages before it are kept.
+/// from the last build's (equal paragraphs are equal material: lines are a
+/// function of the paragraph): at the restart point of the last old page
+/// whose making call and restart point are before `c`; the pages before it
+/// and the marks of the calls before it are kept.
 fn resume(g: &mut State, c: usize) {
     g.matching = false;
     let before = |o: (u32, u32)| (o.0 as usize) < c;
-    let p = (1..g.old_orgs.len())
-        .rev()
-        .find(|&p| before(g.old_orgs[p - 1].decided) && before(g.old_orgs[p].start))
-        .unwrap_or(0);
+    let at = (1..=g.old_orgs.len()).rev().find(|&p| {
+        let o = &g.old_orgs[p - 1];
+        before(o.call) && o.resume.is_some_and(|(s, _)| before(s))
+    });
+    let Some(p) = at else {
+        g.scan_next = 0;
+        g.scan_skip = 0;
+        return;
+    };
+    let o = g.old_orgs[p - 1].clone();
+    let (s, d) = o.resume.expect("a restart point");
+    let ci = o.call_idx as usize;
     for i in 0..p {
         let (pg, b) = g.old_pages[i].take().expect("an old page");
         g.pages.push(pg);
         g.bodies.push(Some(b));
-        g.orgs.push(g.old_orgs[i]);
+        g.orgs.push(g.old_orgs[i].clone());
         g.stats.pages_reused += 1;
     }
-    let start = if p == 0 { (0, 0) } else { g.old_orgs[p].start };
-    g.scan_next = start.0 as usize;
-    g.scan_skip = start.1;
+    // (a point after its call: the call's mark is kept whole; before it:
+    // the call is made again, its pages before the point kept)
+    let (kept, call_from) = if s > o.call {
+        (ci + 1, None)
+    } else {
+        (ci, Some(g.old_marks[ci].0))
+    };
+    g.marks_before = g.old_marks[..kept].to_vec();
+    g.scan = Some(Box::new(Scan::resumed(
+        p as u32,
+        d,
+        call_from,
+        kept as u32,
+        o.last_call.clone(),
+    )));
+    g.scan_next = s.0 as usize;
+    g.scan_skip = s.1;
 }
 
 /// The scheduler: a function of the state, choosing this thread's next
@@ -1164,8 +1248,7 @@ fn pick(g: &mut State, sh: &Shared) -> Option<Task> {
                 .collect();
             let scan = g.scan.take().expect("the scan is free");
             let (from, skip) = (g.scan_next, std::mem::take(&mut g.scan_skip));
-            let converge =
-                last_diff(g).map(|after| (after, g.old_orgs.iter().map(|o| o.start).collect()));
+            let converge = last_diff(g).map(|after| (after, g.old_orgs.clone()));
             Some(Task::Scan {
                 scan,
                 from,
@@ -1225,22 +1308,21 @@ fn execute(sh: &Shared, task: Task) -> (u64, u8) {
                 let skip = if d == 0 { skip as usize } else { 0 };
                 for (i, it) in material(paras).into_iter().enumerate().skip(skip) {
                     scan.feed(it, (k, i as u32));
-                    if let Some((after, starts)) = &converge
-                        && let Some(s) = scan.started.take()
-                        && s.0 as usize > *after
-                        && let Ok(q) = starts.binary_search(&s)
+                    if let Some((page, r)) = scan.just.take()
+                        && let Some((after, olds)) = &converge
+                        && r.0.0 as usize > *after
+                        && let Some(j) = olds.iter().position(|o| o.resume == Some(r))
                     {
-                        converged = Some(q);
+                        converged = Some((page as usize, j));
                         break 'feed;
                     }
                 }
             }
             if finish && converged.is_none() {
-                scan.finish(to as u32);
+                scan.finish((to as u32, 0));
             }
             let work = scan.fed - before;
-            let new: Vec<Page> = std::mem::take(&mut scan.pages);
-            let new_orgs: Vec<PageOrg> = std::mem::take(&mut scan.orgs);
+            let (new, new_orgs) = scan.take_pages();
             let mut g = lock(sh);
             g.scan_next = to;
             for (pg, org) in new.into_iter().zip(new_orgs) {
@@ -1263,17 +1345,35 @@ fn execute(sh: &Shared, task: Task) -> (u64, u8) {
                     g.ship_queue.push_back(i);
                 }
             }
-            if let Some(q) = converged {
-                // (from a page start after the last difference on, the
-                // last build's pages)
-                for i in q..g.old_pages.len() {
+            for (k, r) in std::mem::take(&mut scan.late) {
+                g.orgs[k as usize].resume = Some(r);
+            }
+            if let Some((k, j)) = converged {
+                // (new page k and old page j have the same restart point,
+                // after the last difference: the fold from there is the
+                // last build's, its pages and marks shifted)
+                let olds = g.old_orgs.clone();
+                let made = g.pages.len();
+                let shift = k as i64 - j as i64;
+                let dmarks = i64::from(g.orgs[k].call_idx) - i64::from(olds[j].call_idx);
+                for i in (made as i64 - shift) as usize..g.old_pages.len() {
                     let (pg, b) = g.old_pages[i].take().expect("an old page");
                     g.pages.push(pg);
                     g.bodies.push(Some(b));
-                    let o = g.old_orgs[i];
+                    let mut o = olds[i].clone();
+                    if o.call_idx != u32::MAX {
+                        o.call_idx = (i64::from(o.call_idx) + dmarks) as u32;
+                    }
                     g.orgs.push(o);
                     g.stats.pages_reused += 1;
                 }
+                let done = (g.marks_before.len() + scan.marks.len()) as i64;
+                let from = (done - dmarks) as usize;
+                let sh_ = |x: u32| (i64::from(x) + shift) as u32;
+                g.marks_after = g.old_marks[from.min(g.old_marks.len())..]
+                    .iter()
+                    .map(|&(a, b)| (sh_(a), sh_(b)))
+                    .collect();
                 g.scan_next = g.p.len();
                 g.scan_done = true;
             }
@@ -1293,7 +1393,7 @@ fn execute(sh: &Shared, task: Task) -> (u64, u8) {
             g.stats.pages_shipped += 1;
             drop(g);
             sh.cv.notify_all();
-            (page.items.len() as u64, 3)
+            (page.b.list.len() as u64, 3)
         }
     }
 }
@@ -1460,6 +1560,10 @@ struct PieceEnv<'a> {
 }
 
 impl Env for PieceEnv<'_> {
+    fn font_file(&mut self, name: &str) -> Option<Arc<[u8]>> {
+        self.sh.fonts.get(name)
+    }
+
     fn reach(&mut self, key: &Key) -> (Val, Src) {
         let sh = self.sh;
         loop {
