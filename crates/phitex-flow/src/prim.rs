@@ -261,6 +261,12 @@ pub enum Prim {
     Mat(Mat),
     /// Math.
     Math(MathP),
+    /// `\patterns` (true), `\hyphenation` (false).
+    HyphData(bool),
+    /// `\setlanguage`.
+    SetLanguage,
+    /// `\showbox` (1), `\showlists` (3) (tex.web 1291's codes).
+    Show(u8),
     /// A primitive without a graph form yet: `UNIMPL[i]`.
     Unimpl(u16),
     // ---- e-TeX's (etex.web), named only in extended mode
@@ -530,7 +536,7 @@ pub const PRIMITIVES: [(&str, Prim, &str); 325] = [
     ("hskip", Prim::Mat(Mat::Hskip(0)), "HSKIP"),
     ("hss", Prim::Mat(Mat::Hskip(3)), "HSKIP"),
     ("ht", Prim::BoxDimen(1), "SET_BOX_DIMEN"),
-    ("hyphenation", Prim::Unimpl(93), "HYPH_DATA"),
+    ("hyphenation", Prim::HyphData(false), "HYPH_DATA"),
     ("hyphenchar", Prim::Mat(Mat::FontInt(0)), "ASSIGN_FONT_INT"),
     ("hyphenpenalty", Prim::IntPar(IntPar::Hyphenpenalty), "ASSIGN_INT"),
     ("if", Prim::If(IfKind::Char), "IF_TEST"),
@@ -644,7 +650,7 @@ pub const PRIMITIVES: [(&str, Prim, &str); 325] = [
     ("parindent", Prim::DimenPar(DimenPar::Parindent), "ASSIGN_DIMEN"),
     ("parshape", Prim::Parshape, "SET_SHAPE"),
     ("parskip", Prim::GluePar(GluePar::Parskip), "ASSIGN_GLUE"),
-    ("patterns", Prim::Unimpl(94), "HYPH_DATA"),
+    ("patterns", Prim::HyphData(true), "HYPH_DATA"),
     ("pausing", Prim::IntPar(IntPar::Pausing), "ASSIGN_INT"),
     ("penalty", Prim::Mat(Mat::Penalty), "BREAK_PENALTY"),
     ("postdisplaypenalty", Prim::IntPar(IntPar::Postdisplaypenalty), "ASSIGN_INT"),
@@ -669,14 +675,14 @@ pub const PRIMITIVES: [(&str, Prim, &str); 325] = [
     ("scriptstyle", Prim::Math(MathP::Style(4)), "MATH_STYLE"),
     ("scrollmode", Prim::Interaction(2), "SET_INTERACTION"),
     ("setbox", Prim::Mat(Mat::SetBox), "SET_BOX"),
-    ("setlanguage", Prim::Unimpl(106), "EXTENSION"),
+    ("setlanguage", Prim::SetLanguage, "EXTENSION"),
     ("sfcode", Prim::Code(Code::Sf), "DEF_CODE"),
     ("shipout", Prim::Mat(Mat::Shipout), "LEADER_SHIP"),
     ("show", Prim::Unimpl(99), "XRAY"),
-    ("showbox", Prim::Unimpl(100), "XRAY"),
+    ("showbox", Prim::Show(1), "XRAY"),
     ("showboxbreadth", Prim::IntPar(IntPar::Showboxbreadth), "ASSIGN_INT"),
     ("showboxdepth", Prim::IntPar(IntPar::Showboxdepth), "ASSIGN_INT"),
-    ("showlists", Prim::Unimpl(102), "XRAY"),
+    ("showlists", Prim::Show(3), "XRAY"),
     ("showthe", Prim::Unimpl(101), "XRAY"),
     ("skewchar", Prim::Mat(Mat::FontInt(1)), "ASSIGN_FONT_INT"),
     ("skip", Prim::Register(Reg::Skip), "REGISTER"),

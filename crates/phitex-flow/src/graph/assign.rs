@@ -50,8 +50,9 @@ pub(super) fn prefixable(m: &Meaning) -> bool {
             | Prim::Protected
             | Prim::ReadLine
             | Prim::PenShape(_)
-            | Prim::Mat(Mat::SetBox | Mat::FontInt(_)) => true,
-            Prim::Unimpl(_) => matches!(p.name(), "read" | "hyphenation" | "patterns"),
+            | Prim::Mat(Mat::SetBox | Mat::FontInt(_))
+            | Prim::HyphData(_) => true,
+            Prim::Unimpl(_) => matches!(p.name(), "read"),
             _ => false,
         },
         Meaning::CountRef(_)
@@ -217,6 +218,7 @@ impl Exec<'_> {
                 Prim::Interaction(k) => self.new_interaction(i32::from(k)),
                 Prim::PageInt(2) => self.interaction_mode_assign(),
                 Prim::ReadLine => self.read_line(),
+                Prim::HyphData(pat) => self.hyph_data(pat),
                 _ => self.err(format!("\\{} is not supported yet", p.name())),
             },
             Meaning::CountRef(_) | Meaning::DimenRef(_) | Meaning::SkipRef(_) | Meaning::MuskipRef(_) => {
