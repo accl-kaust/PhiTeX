@@ -151,6 +151,14 @@ pub enum Item {
         after: bool,
         lr: u8,
     },
+    /// A language whatsit (tex.web 1341): `\setlanguage`, or a change of
+    /// `\language` in a paragraph (1376); the line breaker's hyphenation
+    /// takes language and minima from it.
+    Lang {
+        lang: u8,
+        lhm: u8,
+        rhm: u8,
+    },
     /// An entry of a math list (a noad, a style change, a choice) or what
     /// the list's gatherer applies to its last noad (`mlist::MItem`): only
     /// in the items of nodes inside a formula.
@@ -196,7 +204,13 @@ impl Item {
     pub fn precedes_break(&self) -> bool {
         matches!(
             self,
-            Item::Box(_) | Item::Rule { .. } | Item::Mark(_) | Item::Marks(..) | Item::Lig(_) | Item::Disc(_)
+            Item::Box(_)
+                | Item::Rule { .. }
+                | Item::Mark(_)
+                | Item::Marks(..)
+                | Item::Lig(_)
+                | Item::Disc(_)
+                | Item::Lang { .. }
         )
     }
 

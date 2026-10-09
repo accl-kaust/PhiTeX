@@ -89,6 +89,9 @@ pub(super) struct MathEnd {
     /// group opens again with the list so far (`carry`, etex.web §1191).
     middle: bool,
     carry: Vec<Item>,
+    /// §1195: the formula was deleted (not enough symbol or extension font
+    /// parameters).
+    danger: bool,
 }
 
 /// An ord noad around a box (§1076).
@@ -291,6 +294,8 @@ impl Exec<'_> {
             inner: self.st.inner,
             space_factor: self.st.space_factor,
             prev_depth: self.st.prev_depth,
+            hyph_lang: self.st.hyph_lang,
+            prev_graf: self.st.prev_graf,
         }
     }
 
@@ -301,12 +306,15 @@ impl Exec<'_> {
         g.inner = self.st.inner;
         g.space_factor = self.st.space_factor;
         g.prev_depth = self.st.prev_depth;
+        g.hyph_lang = self.st.hyph_lang;
+        g.prev_graf = self.st.prev_graf;
         let at = self.chain.nodes.len() as u32;
         self.st.groups.push(Group { kind: GroupKind::Math, after: Vec::new(), boxg: Some(Arc::new(g)), at });
         self.kind = Kind::Open;
         self.st.level += 1;
         self.st.mode = Mode::M;
         self.st.inner = true;
+        self.st.prev_graf = 0;
     }
 
     /// `\fam` if it is a family (`fam_in_range`).
@@ -532,6 +540,7 @@ impl Exec<'_> {
                     display: None,
                     middle,
                     carry: Vec::new(),
+                    danger: false,
                 };
                 self.math_close(Some(end));
             }
@@ -539,8 +548,35 @@ impl Exec<'_> {
                 let _ = self.scan_delimiter(false);
                 self.err(format!("Extra \\{}", if middle { "middle" } else { "right" }));
             }
-            _ => self.err("Extra }, or forgotten \\right".into()),
+            _ => {
+                let t = self.cmd.clone();
+                self.math_off_save(&t);
+            }
         }
+    }
+
+    /// tex.web 1064 `off_save` where the innermost group is not the one a
+    /// math command ends: the token that ends that group goes in first.
+    pub(super) fn math_off_save(&mut self, t: &Tok) {
+        let kind = self.st.groups.last().map(|g| g.kind);
+        let (ins, what) = match (kind, self.math_kind().as_deref()) {
+            (None, _) => {
+                self.err(format!("Extra {t}"));
+                return;
+            }
+            (Some(GroupKind::SemiSimple), _) => (vec![self.cs("endgroup")], "\\endgroup".to_string()),
+            (Some(GroupKind::Math), Some(MathKind::Inline | MathKind::Display { .. } | MathKind::EqNo { .. })) => {
+                (vec![Tok::Char(3, '$')], "$".to_string())
+            }
+            (Some(GroupKind::Math), Some(MathKind::Left { .. })) => {
+                (vec![self.cs("right"), Tok::Char(12, '.')], "\\right.".to_string())
+            }
+            _ => (vec![Tok::Char(2, '}')], "}".to_string()),
+        };
+        self.err(format!("Missing {what} inserted"));
+        let mut toks = ins;
+        toks.push(t.clone());
+        self.rewrite(toks);
     }
 
     /// `}` of a math group (tex.web 1186, 1174; 1069 for the others).
@@ -561,6 +597,8 @@ impl Exec<'_> {
         self.st.inner = g.inner;
         self.st.space_factor = g.space_factor;
         self.st.prev_depth = g.prev_depth;
+        self.st.hyph_lang = g.hyph_lang;
+        self.st.prev_graf = g.prev_graf;
         self.st.level -= 1;
         self.st.boxing = Some(Arc::new(BoxEnd { g, boxmaxdepth: 0, math: end.map(Arc::new) }));
         self.rewrite(after);
@@ -609,7 +647,16 @@ impl Exec<'_> {
                 overfull_rule: self.dimen_par(DimenPar::Overfullrule),
             },
         });
-        MathEnd { params, fonts: mlist::Fonts(fonts), surround, right: None, display, middle: false, carry: Vec::new() }
+        MathEnd {
+            params,
+            fonts: mlist::Fonts(fonts),
+            surround,
+            right: None,
+            display,
+            middle: false,
+            carry: Vec::new(),
+            danger: false,
+        }
     }
 
     // ------------------------------------------------------------ $
@@ -623,25 +670,28 @@ impl Exec<'_> {
             }
             Mode::H => self.init_math(),
             Mode::M => match self.math_kind().as_deref() {
+                // (§1194: the fonts first, then the second `$`)
                 Some(MathKind::Inline) => {
-                    let end = self.math_end(false);
+                    let danger = !self.fonts_ok();
+                    let mut end = self.math_end(false);
+                    end.danger = danger;
                     self.math_close(Some(end));
                 }
                 Some(MathKind::EqNo { .. }) => {
+                    let danger = !self.fonts_ok();
                     self.check_dollar();
-                    let end = self.math_end(false);
+                    let mut end = self.math_end(false);
+                    end.danger = danger;
                     self.math_close(Some(end));
                 }
                 Some(MathKind::Display { .. }) => {
+                    let danger = !self.fonts_ok();
                     self.check_dollar();
-                    let end = self.math_end(true);
+                    let mut end = self.math_end(true);
+                    end.danger = danger;
                     self.math_close(Some(end));
                 }
-                _ => {
-                    // (`off_save`)
-                    self.err("Missing } inserted".into());
-                    self.rewrite(vec![Tok::Char(2, '}'), t.clone()]);
-                }
+                _ => self.math_off_save(t),
             },
         }
     }
@@ -839,7 +889,9 @@ impl Exec<'_> {
     /// `\0displayend`: after an equation number, the display's own end
     /// (§1194: the rest of `after_math`).
     pub(super) fn display_end(&mut self) {
-        let end = self.math_end(true);
+        let danger = !self.fonts_ok();
+        let mut end = self.math_end(true);
+        end.danger = danger;
         self.math_close(Some(end));
     }
 
@@ -880,6 +932,8 @@ impl Exec<'_> {
             inner: self.st.inner,
             space_factor: self.st.space_factor,
             prev_depth: self.st.prev_depth,
+            hyph_lang: self.st.hyph_lang,
+            prev_graf: self.st.prev_graf,
         };
         self.open_box(g, Mode::V);
         let every = self.toks_par(TokPar::Everyvbox);
@@ -953,6 +1007,7 @@ impl Exec<'_> {
                         display: None,
                         middle: true,
                         carry: p,
+                        danger: false,
                     };
                     self.st.boxing = Some(Arc::new(BoxEnd { g: Arc::new(g), boxmaxdepth: 0, math: Some(Arc::new(end)) }));
                     let t = self.cs("\u{0}middlenext");
@@ -983,7 +1038,7 @@ impl Exec<'_> {
             MathKind::Inline => {
                 let Some(end) = be.math.clone() else { return };
                 let mut p = self.gather(list, None);
-                if !self.fonts_ok(&end.fonts) {
+                if end.danger {
                     p.clear();
                 }
                 // (§1196)
@@ -997,7 +1052,7 @@ impl Exec<'_> {
             MathKind::EqNo { left } => {
                 let Some(end) = be.math.clone() else { return };
                 let mut p = self.gather(list, None);
-                if !self.fonts_ok(&end.fonts) {
+                if end.danger {
                     p.clear();
                 }
                 // (§1194: the equation number's box, kept in the display's
@@ -1034,13 +1089,13 @@ impl Exec<'_> {
     }
 
     /// §1195: the symbol and extension fonts a formula needs.
-    fn fonts_ok(&mut self, fonts: &mlist::Fonts) -> bool {
-        let params = |z: usize| fonts.0.get(z).and_then(Option::as_ref).map_or(7, |f: &Arc<Font>| f.nparams());
-        if [2, 18, 34].iter().any(|&z| params(z) < 22) {
+    fn fonts_ok(&mut self) -> bool {
+        let mut params = |size: u8, fam: u8| self.fam_font(size, fam).nparams();
+        if [0, 1, 2].into_iter().any(|z| params(z, 2) < 22) {
             self.err("Math formula deleted: Insufficient symbol fonts".into());
             return false;
         }
-        if [3, 19, 35].iter().any(|&z| params(z) < 13) {
+        if [0, 1, 2].into_iter().any(|z| params(z, 3) < 13) {
             self.err("Math formula deleted: Insufficient extension fonts".into());
             return false;
         }
@@ -1071,7 +1126,7 @@ impl Exec<'_> {
     fn finish_display(&mut self, list: Vec<Item>, end: &MathEnd, eqno: Option<&(Arc<BoxNode>, bool)>) {
         let Some(de) = &end.display else { return };
         let mut p = self.gather(list, None);
-        let danger = !self.fonts_ok(&end.fonts);
+        let danger = end.danger;
         if danger {
             p.clear();
         }
@@ -1170,6 +1225,7 @@ impl Exec<'_> {
         self.st.mode = Mode::H;
         self.st.inner = false;
         self.st.space_factor = 1000;
+        self.begin_paragraph_language();
         match self.next_x_m(false) {
             Some((_, Meaning::Char(10, _))) | None => {}
             Some((t, _)) => self.back(t),

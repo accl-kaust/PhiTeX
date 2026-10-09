@@ -14,9 +14,10 @@
 //! §923 visits exactly the patterns whose letters occur in the word, and
 //! §924 takes, at each position, the largest digit any of them puts there.
 //! [`hyphenate`] (§923–932) does that for one word, after the exception
-//! dictionary; which words are tried, and how the found positions become
-//! discretionaries (§894–918), belong to the line breaker. That last step
-//! can drop a position: §916 builds a discretionary's post-break text with
+//! dictionary; [`hyphenate_after`] (§894–918) is the line breaker's step:
+//! which word after a glue is tried, and how the found positions become
+//! discretionaries with the font's ligatures and kerns. That last step can
+//! drop a position: §916 builds a discretionary's post-break text with
 //! no hyphen character, so a break inside it is lost (`raffish` with both
 //! minima 1, in cmr10: [`hyphenate`] gives `raf-f-ish`, TeX shows
 //! `raf-fish`, the second break falling in the `ffi` ligature's post-break
@@ -350,4 +351,582 @@ pub fn read_blocks(text: &str) -> Vec<(Block, Vec<Tok>)> {
 pub enum Block {
     Patterns,
     Hyphenation,
+}
+
+// ------------------------------------------------------------ a paragraph's words
+
+/// What hyphenating a paragraph's words reads (§891–§899), read where the
+/// paragraph is broken: the language and minima it began with (§1091),
+/// `\uchyph`, the `\lccode`s of its characters, its fonts' `\hyphenchar`s,
+/// and the tables of each language it uses.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HyphParams {
+    /// `init_cur_lang`, `init_l_hyf`, `init_r_hyf` (§891).
+    pub init: LangState,
+    pub uc_hyph: bool,
+    /// The `\lccode` of each character the paragraph has (0 for the rest:
+    /// never consulted).
+    pub lc: Vec<u8>,
+    /// Each font's `\hyphenchar`, by `Font::key`.
+    pub hyphen_chars: Vec<(Arc<str>, i32)>,
+    /// Each language's patterns and exceptions.
+    pub tables: Vec<(u8, Patterns, Exceptions)>,
+    /// `\tracinglostchars > 0` (a missing hyphen character is reported).
+    pub lost_chars: bool,
+}
+
+/// `cur_lang`, `l_hyf`, `r_hyf` (§892): the language whatsits change them
+/// as the line breaker passes them (§1362–§1363).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub struct LangState {
+    pub lang: u8,
+    pub lhm: u8,
+    pub rhm: u8,
+}
+
+/// A word hyphenated: `items[start..end]` becomes `items`, with the
+/// discretionaries; `missing`: the hyphen character the font lacks, each
+/// time `new_character` looked for it (§915).
+#[derive(Clone, Debug)]
+pub struct Hyphenated {
+    pub start: usize,
+    pub end: usize,
+    pub items: Vec<Item>,
+    pub missing: Vec<(Arc<Font>, i32)>,
+}
+
+use crate::item::{Disc, Item, Lig};
+use crate::tfm::{Font, LigKern, Tag};
+
+/// tex.web 549: `non_char`.
+const NON_CHAR: i32 = 256;
+
+/// §894–§903, §913–§918: the word after the glue `items[cur_p]`,
+/// hyphenated, if TeX would (`st`: the language state, changed by the
+/// language whatsits passed on the way, as §1363 does).
+pub fn hyphenate_after(items: &[Item], cur_p: usize, st: &mut LangState, p: &HyphParams) -> Option<Hyphenated> {
+    let lc = |c: u8| p.lc.get(usize::from(c)).copied().unwrap_or(0);
+    // (§896: skip to node `ha`)
+    let mut prev_s = cur_p;
+    let mut s = cur_p + 1;
+    let hf: Arc<Font> = loop {
+        let (c, f) = match items.get(s)? {
+            Item::Char(f, c) => (*c, f.clone()),
+            Item::Lig(l) => {
+                let Some(&c) = l.orig.first() else {
+                    prev_s = s;
+                    s += 1;
+                    continue;
+                };
+                (c, l.font.clone())
+            }
+            Item::Kern { sub: 0, .. } => {
+                prev_s = s;
+                s += 1;
+                continue;
+            }
+            Item::Lang { lang, lhm, rhm } => {
+                *st = LangState { lang: *lang, lhm: *lhm, rhm: *rhm };
+                prev_s = s;
+                s += 1;
+                continue;
+            }
+            _ => return None,
+        };
+        if lc(c) != 0 {
+            if lc(c) == c || p.uc_hyph {
+                break f;
+            }
+            return None;
+        }
+        prev_s = s;
+        s += 1;
+    };
+    let hyf_char = p.hyphen_chars.iter().find(|(k, _)| **k == *hf.key).map_or(-1, |(_, h)| *h);
+    if !(0..=255).contains(&hyf_char) {
+        return None;
+    }
+    let ha = prev_s;
+    let (l_hyf, r_hyf) = (usize::from(st.lhm), usize::from(st.rhm));
+    if l_hyf + r_hyf > 63 {
+        return None;
+    }
+    // (§897: skip to node `hb`, the letters into `hu` and `hc`)
+    let font_bchar = hf.bchar;
+    let mut hu = [0i32; 66];
+    let mut hn = 0usize;
+    let mut hb = s;
+    let mut hyf_bchar = NON_CHAR;
+    loop {
+        match items.get(s) {
+            Some(Item::Char(f, c)) => {
+                if **f != *hf {
+                    break;
+                }
+                hyf_bchar = i32::from(*c);
+                if lc(*c) == 0 || hn == 63 {
+                    break;
+                }
+                hb = s;
+                hn += 1;
+                hu[hn] = i32::from(*c);
+                hyf_bchar = NON_CHAR;
+            }
+            Some(Item::Lig(l)) => {
+                // (§898)
+                if *l.font != *hf {
+                    break;
+                }
+                let mut j = hn;
+                if let Some(&q) = l.orig.first() {
+                    hyf_bchar = i32::from(q);
+                }
+                let mut letters = true;
+                for &c in &l.orig {
+                    if lc(c) == 0 || j == 63 {
+                        letters = false;
+                        break;
+                    }
+                    j += 1;
+                    hu[j] = i32::from(c);
+                }
+                if !letters {
+                    break;
+                }
+                hb = s;
+                hn = j;
+                hyf_bchar = if l.right { font_bchar } else { NON_CHAR };
+            }
+            Some(Item::Kern { sub: 0, .. }) => {
+                hb = s;
+                hyf_bchar = font_bchar;
+            }
+            _ => break,
+        }
+        s += 1;
+    }
+    // (§899: what follows the word permits hyphenation)
+    if hn < l_hyf + r_hyf {
+        return None;
+    }
+    loop {
+        match items.get(s)? {
+            Item::Char(..) | Item::Lig(_) => {}
+            Item::Kern { sub, .. } => {
+                if *sub != 0 {
+                    break;
+                }
+            }
+            Item::Lang { .. } | Item::Glue { .. } | Item::Penalty(_) | Item::Mark(_) => break,
+            _ => return None,
+        }
+        s += 1;
+    }
+    // (§923: the hyphens)
+    let (pats, excs) = p
+        .tables
+        .iter()
+        .find(|(l, ..)| *l == st.lang)
+        .map_or_else(|| (Patterns::new(), Exceptions::new()), |(_, a, b)| (a.clone(), b.clone()));
+    let word: Vec<char> = (1..=hn).map(|j| char::from(hu[j] as u8)).collect();
+    let lcc = |c: char| char::from(lc(c as u8));
+    let at = hyphenate(&word, lcc, i32::from(st.lhm), i32::from(st.rhm), &pats, &excs);
+    if at.is_empty() {
+        return None;
+    }
+    let mut hyf = [0u8; 66];
+    for j in at {
+        hyf[j] = 1;
+    }
+    // (§903: the nodes `ha..hb` replaced)
+    let mut w = Word {
+        font: hf.clone(),
+        hu,
+        hyf,
+        hyf_char,
+        font_bchar,
+        init_list: Vec::new(),
+        init_lig: false,
+        init_lft: false,
+        hyphen_passed: 0,
+        missing: Vec::new(),
+    };
+    let found2 = |w: &mut Word| {
+        w.hu[0] = NON_CHAR;
+        w.init_lig = false;
+        w.init_list.clear();
+    };
+    let (start, j) = match &items[ha] {
+        Item::Char(f, c) if **f == *hf => {
+            w.init_list = vec![*c];
+            w.init_lig = false;
+            w.hu[0] = i32::from(*c);
+            (ha, 0)
+        }
+        Item::Lig(l) if *l.font == *hf => {
+            w.init_list.clone_from(&l.orig);
+            w.init_lig = true;
+            w.init_lft = l.left;
+            w.hu[0] = i32::from(l.c);
+            if w.init_list.is_empty() && w.init_lft {
+                w.hu[0] = NON_CHAR;
+                w.init_lig = false;
+            }
+            (ha, 0)
+        }
+        Item::Char(..) | Item::Lig(_) => {
+            found2(&mut w);
+            (ha + 1, 0)
+        }
+        _ => {
+            if let Some(Item::Lig(l)) = items.get(ha + 1)
+                && l.left
+            {
+                found2(&mut w);
+                (ha + 1, 0)
+            } else {
+                (ha + 1, 1)
+            }
+        }
+    };
+    let out = w.reconstitute_word(j, hn, hyf_bchar);
+    Some(Hyphenated { start, end: hb + 1, items: out, missing: w.missing })
+}
+
+/// §900, §905: the word being reconstituted.
+struct Word {
+    font: Arc<Font>,
+    hu: [i32; 66],
+    hyf: [u8; 66],
+    hyf_char: i32,
+    font_bchar: i32,
+    init_list: Vec<u8>,
+    init_lig: bool,
+    init_lft: bool,
+    hyphen_passed: usize,
+    missing: Vec<(Arc<Font>, i32)>,
+}
+
+/// §907: the ligature cursor of `reconstitute`.
+struct Cursor {
+    cur_l: i32,
+    cur_r: i32,
+    /// `t`'s length at `cur_q`: the characters after it form the next
+    /// ligature.
+    cur_q: usize,
+    /// The stack of inserted ligature characters (top last), each with the
+    /// character it holds for `hu[j+1]`, if any.
+    lig_stack: Vec<(i32, Option<u8>)>,
+    ligature_present: bool,
+    lft_hit: bool,
+    rt_hit: bool,
+}
+
+impl Word {
+    fn ch(&self, c: i32) -> Item {
+        Item::Char(self.font.clone(), c as u8)
+    }
+
+    /// §913: the word's nodes, from `hu[j]`, with discretionary hyphens.
+    fn reconstitute_word(&mut self, mut j: usize, hn: usize, bchar: i32) -> Vec<Item> {
+        let mut out: Vec<Item> = Vec::new();
+        loop {
+            let mut l = j;
+            let (next, mut hold) = self.reconstitute(j, hn, bchar, self.hyf_char);
+            j = next + 1;
+            if self.hyphen_passed == 0 {
+                out.append(&mut hold);
+                if self.hyf[j - 1] % 2 == 1 {
+                    l = j;
+                    self.hyphen_passed = j - 1;
+                }
+            }
+            if self.hyphen_passed > 0 {
+                self.discretionaries(&mut out, hold, &mut j, &mut l, hn, bchar);
+            }
+            if j > hn {
+                break;
+            }
+        }
+        out
+    }
+
+    /// §914–§918: a discretionary as an alternative to the unhyphenated
+    /// word, both branches developed until they are the same again.
+    fn discretionaries(
+        &mut self,
+        out: &mut Vec<Item>,
+        start: Vec<Item>,
+        j: &mut usize,
+        l: &mut usize,
+        hn: usize,
+        bchar: i32,
+    ) {
+        let mut major = start;
+        loop {
+            let mut i = self.hyphen_passed;
+            self.hyf[i] = 0;
+            // (§915: `hu[l..i]` and a hyphen, the pre-break text)
+            let mut pre = Vec::new();
+            let exists = self.font.glyph(self.hyf_char).is_some();
+            let mut c = 0;
+            if exists {
+                i += 1;
+                c = self.hu[i];
+                self.hu[i] = self.hyf_char;
+            } else {
+                self.missing.push((self.font.clone(), self.hyf_char));
+            }
+            while *l <= i {
+                let (next, hold) = self.reconstitute(*l, i, self.font_bchar, NON_CHAR);
+                *l = next + 1;
+                pre.extend(hold);
+            }
+            if exists {
+                self.hu[i] = c;
+                *l = i;
+            }
+            // (§916: `hu[i+1..]`, the post-break text, until it is in step
+            // with the unhyphenated one)
+            let mut post = Vec::new();
+            let mut c_loc = 0;
+            if self.font.bchar_label.is_some() {
+                *l -= 1;
+                c = self.hu[*l];
+                c_loc = *l;
+                self.hu[*l] = NON_CHAR;
+            }
+            while *l < *j {
+                loop {
+                    let (next, hold) = self.reconstitute(*l, hn, bchar, NON_CHAR);
+                    *l = next + 1;
+                    if c_loc > 0 {
+                        self.hu[c_loc] = c;
+                        c_loc = 0;
+                    }
+                    post.extend(hold);
+                    if *l >= *j {
+                        break;
+                    }
+                }
+                while *l > *j {
+                    // (§917)
+                    let (next, hold) = self.reconstitute(*j, hn, bchar, NON_CHAR);
+                    *j = next + 1;
+                    major.extend(hold);
+                }
+            }
+            // (§918)
+            let taken = std::mem::take(&mut major);
+            if taken.len() <= 127 {
+                out.push(Item::Disc(Arc::new(Disc { pre, post, replace: taken.len() as u8 })));
+            }
+            out.extend(taken);
+            self.hyphen_passed = *j - 1;
+            if self.hyf[*j - 1].is_multiple_of(2) {
+                return;
+            }
+        }
+    }
+
+    /// §908: `set_cur_r`; returns `cur_rh`.
+    fn set_cur_r(&self, cur: &mut Cursor, j: usize, n: usize, bchar: i32, hchar: i32) -> i32 {
+        cur.cur_r = if j < n { self.hu[j + 1] } else { bchar };
+        if self.hyf[j] % 2 == 1 { hchar } else { NON_CHAR }
+    }
+
+    /// §910: `wrap_lig(b)`.
+    fn wrap_lig(&self, cur: &mut Cursor, t: &mut Vec<Item>, b: bool) {
+        if !cur.ligature_present {
+            return;
+        }
+        let orig: Vec<u8> =
+            t.drain(cur.cur_q..).filter_map(|i| if let Item::Char(_, c) = i { Some(c) } else { None }).collect();
+        let mut left = false;
+        if cur.lft_hit {
+            left = true;
+            cur.lft_hit = false;
+        }
+        let mut right = false;
+        if b && cur.lig_stack.is_empty() {
+            right = true;
+            cur.rt_hit = false;
+        }
+        t.push(Item::Lig(Arc::new(Lig { font: self.font.clone(), c: cur.cur_l as u8, orig, left, right })));
+        cur.ligature_present = false;
+    }
+
+    /// §910: `pop_lig_stack`; returns the new `cur_rh`.
+    #[allow(clippy::too_many_arguments)]
+    fn pop_lig_stack(
+        &self,
+        cur: &mut Cursor,
+        t: &mut Vec<Item>,
+        j: &mut usize,
+        n: usize,
+        bchar: i32,
+        hchar: i32,
+        cur_rh: i32,
+    ) -> i32 {
+        let (_, held) = cur.lig_stack.pop().unwrap_or((0, None));
+        if let Some(c) = held {
+            t.push(self.ch(i32::from(c)));
+            *j += 1;
+        }
+        if let Some(&(top, _)) = cur.lig_stack.last() {
+            cur.cur_r = top;
+            cur_rh
+        } else {
+            self.set_cur_r(cur, *j, n, bchar, hchar)
+        }
+    }
+
+    /// §905–§911: `reconstitute(j, n, bchar, hchar)`: the nodes for
+    /// `hu[j..]` as far as one ligature/kern step goes; the index of the
+    /// last character used, and the nodes.
+    fn reconstitute(&mut self, mut j: usize, n: usize, mut bchar: i32, mut hchar: i32) -> (usize, Vec<Item>) {
+        self.hyphen_passed = 0;
+        let mut t: Vec<Item> = Vec::new();
+        let mut w = 0;
+        let font = self.font.clone();
+        // (§908)
+        let mut cur = Cursor {
+            cur_l: self.hu[j],
+            cur_r: 0,
+            cur_q: 0,
+            lig_stack: Vec::new(),
+            ligature_present: false,
+            lft_hit: false,
+            rt_hit: false,
+        };
+        if j == 0 {
+            cur.ligature_present = self.init_lig;
+            if cur.ligature_present {
+                cur.lft_hit = self.init_lft;
+            }
+            for &c in &self.init_list {
+                t.push(self.ch(i32::from(c)));
+            }
+        } else if cur.cur_l < NON_CHAR {
+            t.push(self.ch(cur.cur_l));
+        }
+        let mut cur_rh = self.set_cur_r(&mut cur, j, n, bchar, hchar);
+        'continue_: loop {
+            // (§909)
+            'done: {
+                let mut k = if cur.cur_l == NON_CHAR {
+                    match font.bchar_label {
+                        Some(k) => usize::from(k),
+                        None => break 'done,
+                    }
+                } else {
+                    let Some(g) = font.glyph(cur.cur_l) else { break 'done };
+                    let Tag::Lig(start) = g.tag else { break 'done };
+                    let mut k = usize::from(start);
+                    let q = font.lig_kerns[k];
+                    if q.skip > LigKern::STOP {
+                        k = 256 * usize::from(q.op) + usize::from(q.remainder);
+                    }
+                    k
+                };
+                let test_char = if cur_rh < NON_CHAR { cur_rh } else { cur.cur_r };
+                loop {
+                    let q = font.lig_kerns[k];
+                    if i32::from(q.next) == test_char && q.skip <= LigKern::STOP {
+                        if cur_rh < NON_CHAR {
+                            self.hyphen_passed = j;
+                            hchar = NON_CHAR;
+                            cur_rh = NON_CHAR;
+                            continue 'continue_;
+                        }
+                        if hchar < NON_CHAR && self.hyf[j] % 2 == 1 {
+                            self.hyphen_passed = j;
+                            hchar = NON_CHAR;
+                        }
+                        if q.op < LigKern::KERN {
+                            // (§911)
+                            if cur.cur_l == NON_CHAR {
+                                cur.lft_hit = true;
+                            }
+                            if j == n && cur.lig_stack.is_empty() {
+                                cur.rt_hit = true;
+                            }
+                            let rem = i32::from(q.remainder);
+                            match q.op {
+                                1 | 5 => {
+                                    cur.cur_l = rem;
+                                    cur.ligature_present = true;
+                                }
+                                2 | 6 => {
+                                    cur.cur_r = rem;
+                                    if let Some(top) = cur.lig_stack.last_mut() {
+                                        top.0 = rem;
+                                    } else if j == n {
+                                        cur.lig_stack.push((rem, None));
+                                        bchar = NON_CHAR;
+                                    } else {
+                                        cur.lig_stack.push((rem, Some(self.hu[j + 1] as u8)));
+                                    }
+                                }
+                                3 => {
+                                    cur.cur_r = rem;
+                                    cur.lig_stack.push((rem, None));
+                                }
+                                7 | 11 => {
+                                    self.wrap_lig(&mut cur, &mut t, false);
+                                    cur.cur_q = t.len();
+                                    cur.cur_l = rem;
+                                    cur.ligature_present = true;
+                                }
+                                _ => {
+                                    cur.cur_l = rem;
+                                    cur.ligature_present = true;
+                                    if !cur.lig_stack.is_empty() {
+                                        cur_rh = self.pop_lig_stack(&mut cur, &mut t, &mut j, n, bchar, hchar, cur_rh);
+                                    } else if j == n {
+                                        break 'done;
+                                    } else {
+                                        t.push(self.ch(cur.cur_r));
+                                        j += 1;
+                                        cur_rh = self.set_cur_r(&mut cur, j, n, bchar, hchar);
+                                    }
+                                }
+                            }
+                            if q.op > 4 && q.op != 7 {
+                                break 'done;
+                            }
+                            continue 'continue_;
+                        }
+                        let ki = 256 * usize::from(q.op - LigKern::KERN) + usize::from(q.remainder);
+                        w = font.kerns.get(ki).copied().unwrap_or(0);
+                        break 'done;
+                    }
+                    if q.skip >= LigKern::STOP {
+                        if cur_rh == NON_CHAR {
+                            break 'done;
+                        }
+                        cur_rh = NON_CHAR;
+                        continue 'continue_;
+                    }
+                    k += usize::from(q.skip) + 1;
+                }
+            }
+            // (§910)
+            let rt = cur.rt_hit;
+            self.wrap_lig(&mut cur, &mut t, rt);
+            if w != 0 {
+                t.push(Item::Kern { w, sub: 0 });
+                w = 0;
+            }
+            if let Some(&(top, _)) = cur.lig_stack.last() {
+                cur.cur_q = t.len();
+                cur.cur_l = top;
+                cur.ligature_present = true;
+                cur_rh = self.pop_lig_stack(&mut cur, &mut t, &mut j, n, bchar, hchar, cur_rh);
+                continue 'continue_;
+            }
+            break;
+        }
+        (j, t)
+    }
 }

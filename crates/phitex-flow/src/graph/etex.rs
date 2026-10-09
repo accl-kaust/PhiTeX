@@ -28,7 +28,7 @@ use super::{EOL_UNREAD, Exec, GroupKind, Mode, PendingText, TState};
 use crate::item::Item;
 use crate::print;
 use crate::pack::Spec;
-use crate::show::{CTX, LINE, LN, NL, RAW};
+use crate::show::{LINE, LN, NL, RAW};
 use crate::val::{Glue, IntPar, Key, Meaning, Prim, Tok, Val};
 
 /// `\eTeXversion` and `\eTeXrevision` (etex.web §2).
@@ -651,28 +651,23 @@ impl Exec<'_> {
 
     // ------------------------------------------------------------ \showgroups, \showifs, \showtokens
 
-    /// The error context of the command just read, at the file's level
-    /// (tex.web 311–318): `l.N` and the line up to here, the rest below;
-    /// then the end of a help-less error in batch mode (two `print_ln`s).
-    /// The line number is the log's placeholder for this node's line.
-    fn file_context(&self) -> String {
-        let text = self.text;
-        let pos = self.st.pos.min(text.len());
-        // (a line whose end was read is still the line: TeX's `loc` past
-        // its `limit`)
-        let end = if pos > 0 && text[pos - 1] == '\r' { pos - 1 } else { pos };
-        let start = text[..end].iter().rposition(|&c| c == '\r').map_or(0, |k| k + 1);
-        let line_end = text[end..].iter().position(|&c| c == '\r').map_or(text.len(), |k| end + k);
-        let first: String = text[start..end].iter().collect();
-        let second: String = text[end..line_end].iter().collect();
-        format!("{NL}l.{LINE}L{LINE} {CTX}{first}{CTX}{second}{CTX}{LN}{LN}")
+    /// The error context of the command just read (tex.web 311–318, as
+    /// `\showbox`'s: `show_context`, laid out by the log's gatherer once
+    /// the line number is known), then the end of a help-less error in
+    /// batch mode (two `print_ln`s).
+    fn file_context(&mut self) -> String {
+        let mut s = String::new();
+        self.show_context(&mut s);
+        s.push(LN);
+        s.push(LN);
+        s
     }
 
     /// Where the `k`-th open group (`group`) or conditional began, as a
     /// log placeholder: the line of the node that opened it, found through
     /// this node's state when the log is laid out (`graph::opener`).
     fn entry_line(group: bool, k: usize) -> String {
-        format!("{LINE}{}{k}{LINE}", if group { 'G' } else { 'C' })
+        format!("{LINE}{}{k}{LINE}", if group { 'E' } else { 'C' })
     }
 
     /// `\showgroups` (4), `\showtokens` (5), `\showifs` (6): etex.web's
@@ -707,8 +702,9 @@ impl Exec<'_> {
                 s.push_str("! OK.");
             }
         }
-        s.push_str(&self.file_context());
-        self.log = Some(s.into());
+        let cx = self.file_context();
+        s.push_str(&cx);
+        self.log_raw(&s);
     }
 
     /// etex.web's `show_save_groups`: each open group, innermost first,

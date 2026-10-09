@@ -63,8 +63,35 @@ fn tex(name: &str, src: &str, etex: bool) -> Option<(Vec<u8>, String)> {
     let dvi = std::fs::read(tmp.join(format!("{name}.dvi"))).unwrap_or_default();
     let _ = std::fs::remove_dir_all(&tmp);
     let log = log?;
-    assert!(st.status.success(), "tex failed on {name}:\n{log}");
+    // (`\showbox`, `\showlists` end in an "OK" error: no other error)
+    let only_ok = log.lines().filter(|l| l.starts_with("! ")).all(|l| l == "! OK.");
+    assert!(st.status.success() || only_ok, "tex failed on {name}:\n{log}");
     Some((dvi, log_body(&log)?))
+}
+
+/// TeX's error messages for a document, in order (the "! " lines).
+fn tex_errors(src: &str) -> Option<Vec<String>> {
+    let tmp = std::env::temp_dir().join(format!("phitex-flow-errs-{}", std::process::id()));
+    std::fs::create_dir_all(&tmp).ok()?;
+    std::fs::write(tmp.join("errs.tex"), src).ok()?;
+    Command::new("tex").args(["-ini", "-interaction=batchmode", "errs.tex"]).current_dir(&tmp).output().ok()?;
+    let log = std::fs::read_to_string(tmp.join("errs.log")).ok();
+    let _ = std::fs::remove_dir_all(&tmp);
+    Some(
+        log?.lines()
+            .filter_map(|l| l.strip_prefix("! "))
+            .map(|l| l.strip_suffix('.').unwrap_or(l).to_string())
+            .collect(),
+    )
+}
+
+/// A document whose line `%%% hyphen.tex %%%` stands for TeX Live's
+/// `hyphen.tex` (its patterns and exceptions, read by the `\patterns`
+/// and `\hyphenation` nodes).
+fn with_hyphen(name: &str) -> String {
+    let src = std::fs::read_to_string(dir().join(format!("{name}.tex"))).unwrap();
+    let h = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/hyph/hyphen.tex")).unwrap();
+    src.replace("%%% hyphen.tex %%%\n", &h)
 }
 
 /// The graph's DVI file and log of a document.
@@ -178,6 +205,54 @@ macro_rules! etex_documents {
 }
 
 etex_documents!(texxet, llfit, pens, middle);
+/// Paragraphs hyphenated with hyphen.tex's patterns (loaded by the
+/// `\patterns` node), in every schedule: breaks at hyphens, ligatures and
+/// kerns around them, the minima, `\uchyph`, languages, `\setlanguage`,
+/// explicit discretionaries, `\hyphenchar`, the third pass, a display.
+#[test]
+fn hyph1() {
+    let src = with_hyphen("hyph1");
+    check_src("hyph1", &src, &RUNS);
+}
+
+/// More hyphenation: narrow lines, many fonts, `\showbox` of hyphenated
+/// lines (the discretionaries' ligatures shown), paragraphs in boxes.
+#[test]
+fn hyph2() {
+    let src = with_hyphen("hyph2");
+    check_src("hyph2", &src, &RUNS);
+}
+
+/// `\showlists` and `\showbox` in math (the noads displayed, tex.web
+/// 690–698), with their "OK" errors and contexts.
+#[test]
+fn showmath() {
+    check("showmath");
+}
+
+/// The errors of a formula without math fonts, and of mismatched math
+/// groups, are TeX's, in TeX's order (§1194: the fonts before the second
+/// `$`; `off_save` in math, tex.web 1064).
+#[test]
+fn math_errors_in_order() {
+    let src = "\\catcode`\\{=1 \\catcode`\\}=2 \\catcode`\\$=3 \\catcode`\\^=7\n               \\font\\tenrm=cmr10 \\tenrm \\hsize=100pt\n               A $$x$ $ b $$y\\eqno z$ $ c ${a\\right)$ d $\\left(a$ e\n               $\\left(a\\endgroup$ $\\begingroup a$\\endgroup$ f\n\n\\end\n";
+    let o = Build::new(font()).update(src, Options::default());
+    let got: Vec<String> = o.errors.iter().map(|e| e.split_once(": ").map_or(e.as_str(), |x| x.1).to_string()).collect();
+    let want = match tex_errors(src) {
+        Some(w) => {
+            let rec = w.join("\n") + "\n";
+            if std::env::var_os("PHITEX_FLOW_BLESS").is_some() {
+                std::fs::write(dir().join("matherrs.txt"), &rec).unwrap();
+            }
+            w
+        }
+        None => std::fs::read_to_string(dir().join("matherrs.txt")).unwrap().lines().map(str::to_string).collect(),
+    };
+    let rec: Vec<String> =
+        std::fs::read_to_string(dir().join("matherrs.txt")).unwrap().lines().map(str::to_string).collect();
+    assert_eq!(want, rec, "TeX's errors are not the recorded ones");
+    assert_eq!(got, want);
+}
 
 /// plain.tex (all but `\input hyphen`), then text set with its macros and
 /// the default output routine (`\output={}`), at 1 thread.

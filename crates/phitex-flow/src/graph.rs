@@ -41,9 +41,11 @@ use crate::tfm::Font;
 use crate::val::{DimenPar, IntPar, Key, Macro, Meaning, Prim, Tok, Val};
 
 mod assign;
+pub(crate) mod diag;
 mod etex;
 mod expand;
 mod fonts;
+mod lang;
 mod material;
 mod math;
 mod scan;
@@ -206,7 +208,10 @@ pub struct RState {
     tstate: TState,
     /// Token lists the input was rewritten with, each with how far it has
     /// been read (innermost last).
-    pending: Vec<(Arc<[Tok]>, usize)>,
+    /// (and whether it was backed up, tex.web 325's `backed_up`: an error's
+    /// context shows it as such; a list read to its end stays until the
+    /// next token is read, as TeX's input level does)
+    pending: Vec<(Arc<[Tok]>, usize, bool)>,
     mode: Mode,
     /// The list being built is internal: a box's (TeX's negative modes).
     inner: bool,
@@ -238,6 +243,9 @@ pub struct RState {
     protected: bool,
     /// Texts the input was rewritten with (`\scantokens`), innermost last.
     texts: Stack<PendingText>,
+    /// A paragraph's language state (tex.web 1091, 1376): `clang`, and
+    /// the language and hyphen minima it began with.
+    hyph_lang: [u8; 4],
 }
 
 impl RState {
@@ -262,6 +270,7 @@ impl RState {
             eol: EOL_UNREAD,
             protected: false,
             texts: Stack::new(),
+            hyph_lang: [0, 0, 1, 1],
         }
     }
 }
@@ -372,6 +381,7 @@ impl RState {
             && self.pending == o.pending
             && self.protected == o.protected
             && self.texts == o.texts
+            && self.hyph_lang == o.hyph_lang
     }
 
     /// Whether a node going from `self` to `out` begins a paragraph of the
@@ -902,6 +912,21 @@ pub fn opener(chain: &Chain, i: usize, group: bool, k: usize) -> Option<usize> {
         st.conds.0.as_ref()?.get(k)?.open
     };
     Some(at as usize)
+}
+
+/// The `Open` node of the `k`-th group enclosing node `i` (0: its own
+/// innermost), for the log's line numbers.
+pub fn enclosing_open(chain: &Chain, i: usize, k: usize) -> Option<usize> {
+    let mut g = if i < chain.nodes.len() { chain.nodes[i].group } else { return None };
+    for _ in 0..k {
+        g = g.and_then(|x| chain.parent_of.get(&x).copied());
+    }
+    g.map(|x| x as usize)
+}
+
+/// The node that began the paragraph at `level` that node `i` is in.
+pub fn paragraph_start_at(chain: &Chain, i: usize, level: u16) -> usize {
+    material::para_start(chain, i, level)
 }
 
 /// The node that began the paragraph node `i` of `chain` ended (or is
@@ -1751,13 +1776,19 @@ impl<'a> Exec<'a> {
     // ------------------------------------------------------------ the input
 
     fn back(&mut self, t: Tok) {
-        self.st.pending.push((Arc::from([t]), 0));
+        // (tex.web 325: lists read to their end go first, not those under
+        // a rewritten text)
+        let floor = self.st.texts.last().map_or(0, |x| x.at);
+        while self.st.pending.len() > floor && self.st.pending.last().is_some_and(|(l, i, _)| *i >= l.len()) {
+            self.st.pending.pop();
+        }
+        self.st.pending.push((Arc::from([t]), 0, true));
     }
 
     /// Rewrites the input: `toks`, then the rest.
     fn rewrite(&mut self, toks: Vec<Tok>) {
         if !toks.is_empty() {
-            self.st.pending.push((Arc::from(toks), 0));
+            self.st.pending.push((Arc::from(toks), 0, false));
         }
     }
 
@@ -1856,16 +1887,14 @@ impl<'a> Exec<'a> {
     fn next_raw(&mut self) -> Option<Tok> {
         self.noexp = false;
         loop {
-            // (the token lists above the innermost rewritten text)
+            // (the token lists above the innermost rewritten text; a list
+            // read to its end stays until the next read, tex.web 325)
             let floor = self.st.texts.last().map_or(0, |x| x.at);
             while self.st.pending.len() > floor {
-                let Some((list, i)) = self.st.pending.last_mut() else { break };
+                let Some((list, i, _)) = self.st.pending.last_mut() else { break };
                 if *i < list.len() {
                     let t = list[*i].clone();
                     *i += 1;
-                    if *i == list.len() {
-                        self.st.pending.pop();
-                    }
                     if t == Tok::DontExpand {
                         let n = self.next_raw();
                         self.noexp = n.as_ref().is_some_and(|x| x.key().is_some());
@@ -2269,7 +2298,11 @@ impl<'a> Exec<'a> {
             Prim::BeginGroup => self.open_group(GroupKind::SemiSimple),
             Prim::EndGroup => match self.st.groups.last().map(|g| g.kind) {
                 Some(GroupKind::SemiSimple) => self.close_group(),
-                Some(GroupKind::Simple | GroupKind::Box | GroupKind::Math) => {
+                Some(GroupKind::Math) => {
+                    let t = self.cmd.clone();
+                    self.math_off_save(&t);
+                }
+                Some(GroupKind::Simple | GroupKind::Box) => {
                     // (tex.web 1064: the missing `}` goes in first)
                     self.err("Missing } inserted".into());
                     let t = self.cmd.clone();
@@ -2299,6 +2332,8 @@ impl<'a> Exec<'a> {
                 }
             }
             Prim::Message | Prim::ErrMessage => self.message(p == Prim::ErrMessage),
+            Prim::SetLanguage => self.set_language(),
+            Prim::Show(c) => self.show_cmd(c),
             Prim::Immediate => self.immediate(),
             Prim::Write => {
                 self.err(

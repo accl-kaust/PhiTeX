@@ -99,6 +99,10 @@ pub enum Key {
     /// Whether the format is e-TeX's extended mode (1) or TeX's (0): a
     /// value of the format no document defines (`Options::etex`).
     ETeXMode,
+    /// A language's hyphenation patterns (`\patterns`, global).
+    Patterns(u8),
+    /// A language's hyphenation exceptions (`\hyphenation`, global).
+    Exceptions(u8),
     /// e-TeX's `\interlinepenalties` (0), `\clubpenalties` (1),
     /// `\widowpenalties` (2), `\displaywidowpenalties` (3):
     /// `Val::Penalties`.
@@ -195,7 +199,9 @@ impl Key {
             Key::FamFont(s, f) => w(25, (u64::from(*s) << 8) | u64::from(*f)),
             Key::Interaction => w(26, 0),
             Key::ETeXMode => w(27, 0),
-            Key::PenaltiesArray(k) => w(28, u64::from(*k)),
+            Key::Patterns(l) => w(28, u64::from(*l)),
+            Key::Exceptions(l) => w(29, u64::from(*l)),
+            Key::PenaltiesArray(k) => w(30, u64::from(*k)),
         }
     }
 }
@@ -231,6 +237,8 @@ impl fmt::Display for Key {
             Key::FamFont(s, x) => write!(f, "\\{}font{x}", ["text", "script", "scriptscript"][usize::from(*s).min(2)]),
             Key::Interaction => write!(f, "\\interactionmode"),
             Key::ETeXMode => write!(f, "e-TeX mode"),
+            Key::Patterns(l) => write!(f, "\\patterns (language {l})"),
+            Key::Exceptions(l) => write!(f, "\\hyphenation (language {l})"),
             Key::PenaltiesArray(k) => write!(
                 f,
                 "\\{}penalties",
@@ -307,6 +315,10 @@ pub enum Val {
     Box(Arc<crate::item::BoxNode>),
     /// A name (`Key::FontIdent`).
     Name(Arc<str>),
+    /// A language's patterns (`Key::Patterns`).
+    Patterns(crate::hyph::Patterns),
+    /// A language's exceptions (`Key::Exceptions`).
+    Exceptions(crate::hyph::Exceptions),
 }
 
 impl fmt::Display for Val {
@@ -331,6 +343,8 @@ impl fmt::Display for Val {
             Val::Void => write!(f, "void"),
             Val::Box(b) => write!(f, "{}box({}+{})x{}", if b.vertical { "v" } else { "h" }, b.h, b.d, b.w),
             Val::Name(n) => write!(f, "{n}"),
+            Val::Patterns(p) => write!(f, "{} patterns", p.len()),
+            Val::Exceptions(x) => write!(f, "{} exceptions", x.len()),
             Val::Meaning(Meaning::Font(x)) => write!(f, "select font {}", x.name),
             Val::Meaning(Meaning::Undefined) => write!(f, "undefined"),
             Val::Meaning(Meaning::Prim(p)) => write!(f, "primitive \\{}", p.name()),
@@ -411,6 +425,8 @@ pub fn initial(key: &Key, _font: &Arc<Font>, etex: bool) -> Val {
         // in that mode instead)
         Key::Interaction => Val::Int(3),
         Key::ETeXMode => Val::Int(i32::from(etex)),
+        Key::Patterns(_) => Val::Patterns(crate::hyph::Patterns::new()),
+        Key::Exceptions(_) => Val::Exceptions(crate::hyph::Exceptions::new()),
         Key::PenaltiesArray(_) => Val::Penalties(Arc::from([])),
     }
 }
