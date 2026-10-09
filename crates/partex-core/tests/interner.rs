@@ -168,21 +168,26 @@ fn code(name: &[u8]) -> i32 {
 
 /// Names with the hash codes of the document's: `k` of them each.
 fn decoys(k: usize) -> Vec<Vec<u8>> {
-    let mut out = Vec::new();
-    for n in NAMES {
-        let want = code(n.as_bytes());
-        let mut found = 0;
-        let mut i = 0u64;
-        while found < k {
-            let d = format!("zq{i:x}").into_bytes();
-            i += 1;
-            if code(&d) == want {
-                out.push(d);
-                found += 1;
-            }
+    let mut want: BTreeMap<i32, Vec<Vec<u8>>> = NAMES
+        .iter()
+        .map(|n| (code(n.as_bytes()), Vec::new()))
+        .collect();
+    let mut i = 0u64;
+    while want.values().any(|v| v.len() < k) {
+        let d = format!("zq{i:x}").into_bytes();
+        i += 1;
+        if let Some(v) = want.get_mut(&code(&d))
+            && v.len() < k
+        {
+            v.push(d);
         }
     }
-    out
+    NAMES
+        .iter()
+        .flat_map(|n| want[&code(n.as_bytes())].clone())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect()
 }
 
 /// The run's outputs (PDF and `.aux`), and where its names landed.
@@ -191,10 +196,7 @@ fn run(shared: bool, decoys: &[Vec<u8>]) -> (Vec<(Vec<u8>, Vec<u8>)>, Vec<i32>) 
     tex.set_effects(false);
     let mut places = Vec::new();
     if shared {
-        let _ = tex.share_names();
-        for d in decoys {
-            assert!(tex.intern_name(d).is_some());
-        }
+        tex.share_names_after_format(decoys.to_vec());
     }
     let h = tex.run(b"doc");
     if h > 1 {
@@ -237,15 +239,17 @@ fn a_documents_bytes_do_not_depend_on_where_its_names_landed() {
     let (first, p1) = run(true, &ds);
     ds.reverse();
     let (second, _) = run(true, &ds);
-    let (third, p3) = run(true, &decoys(3));
+    let (third, _) = run(true, &decoys(3));
+    let (fourth, p4) = run(true, &partex_core::interner::random_names(7, 4000));
     // (the names did land elsewhere)
     assert_ne!(p0, p1);
-    assert_ne!(p1, p3);
+    assert_ne!(p0, p4);
     for (what, o) in [
         ("shared", &shared),
         ("decoys", &first),
         ("decoys reversed", &second),
         ("more decoys", &third),
+        ("random decoys", &fourth),
     ] {
         assert_eq!(o.len(), plain.len(), "{what}: the files written");
         for ((n, a), (m, b)) in plain.iter().zip(o.iter()) {

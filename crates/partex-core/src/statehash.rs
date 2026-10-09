@@ -2029,6 +2029,8 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             probe_names: _,
             #[cfg(feature = "std")]
                 shared_names: _,
+            #[cfg(feature = "std")]
+                share_decoys: _,
             seal_at,
             seal_log: _,
             stop_before_ship: _,

@@ -242,6 +242,8 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             probe_names: _,
             #[cfg(feature = "std")]
                 shared_names: _,
+            #[cfg(feature = "std")]
+                share_decoys: _,
             seal_at: _,
             seal_log: _,
             stop_before_ship: _,
@@ -934,6 +936,8 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             probe_names: false,
             #[cfg(feature = "std")]
             shared_names: None,
+            #[cfg(feature = "std")]
+            share_decoys: None,
             seal_at: (0, 0),
             seal_log: alloc::vec::Vec::new(),
             stop_before_ship: false,

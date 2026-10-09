@@ -296,10 +296,18 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                 h -= crate::eqtb::HASH_PRIME;
             }
         }
-        let places: alloc::vec::Vec<i32> = core::iter::once(h + crate::eqtb::HASH_BASE)
-            .chain(self.name_probes(name))
-            .collect();
-        sh.insert(name, places)
+        sh.insert(
+            name,
+            core::iter::once(h + crate::eqtb::HASH_BASE).chain(self.name_probes(name)),
+        )
+    }
+
+    /// Share the names once the format is loaded (or, `-ini`, once the
+    /// primitives are in), `decoys` placed first so that the run's names
+    /// land elsewhere: the outputs must not change.
+    #[cfg(feature = "std")]
+    pub fn share_names_after_format(&mut self, decoys: alloc::vec::Vec<alloc::vec::Vec<u8>>) {
+        self.share_decoys = Some(decoys);
     }
 
     /// Place the names this engine makes through `s` (a view of a session

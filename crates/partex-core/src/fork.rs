@@ -236,6 +236,8 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             probe_names: self.probe_names,
             #[cfg(feature = "std")]
             shared_names: self.shared_names.clone(),
+            #[cfg(feature = "std")]
+            share_decoys: self.share_decoys.clone(),
             seal_at: self.seal_at,
             seal_log: self.seal_log.clone(),
             stop_before_ship: self.stop_before_ship,

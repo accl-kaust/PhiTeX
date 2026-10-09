@@ -469,6 +469,10 @@ pub struct Tex<H: Host, T: Tracker = Untracked> {
     /// makes are placed by it, one place for every view.
     #[cfg(feature = "std")]
     pub(crate) shared_names: Option<alloc::sync::Arc<crate::interner::SharedNames>>,
+    /// Share the names once the format is in, these decoys placed first
+    /// (`Tex::share_names_after_format`, a test's).
+    #[cfg(feature = "std")]
+    pub(crate) share_decoys: Option<alloc::vec::Vec<alloc::vec::Vec<u8>>>,
     pub(crate) seal_at: (u128, u32),
     pub(crate) seal_log: Vec<(u128, Option<u128>)>,
     /// Stop before `\shipout` (a machine's region boundary: the region
@@ -881,6 +885,8 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             probe_names: false,
             #[cfg(feature = "std")]
             shared_names: None,
+            #[cfg(feature = "std")]
+            share_decoys: None,
             seal_at: (0, 0),
             seal_log: Vec::new(),
             stop_before_ship: false,

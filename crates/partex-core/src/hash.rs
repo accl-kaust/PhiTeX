@@ -407,8 +407,8 @@ impl<H: Host, T: Tracker> Tex<H, T> {
 
     /// The places `name` probes in the `hash_extra` region (`probes`).
     #[cfg(feature = "std")]
-    pub(crate) fn name_probes(&self, name: &[u8]) -> alloc::vec::Vec<i32> {
-        self.probes(name).collect()
+    pub(crate) fn name_probes(&self, name: &[u8]) -> impl Iterator<Item = i32> + use<H, T> {
+        self.probes(name)
     }
 
     /// `id_lookup` with the session's shared interner (`interner.rs`).
@@ -441,17 +441,13 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         let q = match sh.find(name) {
             Some(q) => q,
             None if self.no_new_control_sequence => return Ok(UNDEFINED_CONTROL_SEQUENCE),
-            None => {
-                let places: alloc::vec::Vec<i32> =
-                    core::iter::once(start).chain(self.probes(name)).collect();
-                match sh.insert(name, places) {
-                    Some(q) => q,
-                    None => {
-                        let n = HASH_SIZE + self.params.hash_extra;
-                        return self.overflow(b"hash size", n);
-                    }
+            None => match sh.insert(name, core::iter::once(start).chain(self.probes(name))) {
+                Some(q) => q,
+                None => {
+                    let n = HASH_SIZE + self.params.hash_extra;
+                    return self.overflow(b"hash size", n);
                 }
-            }
+            },
         };
         self.tracker.read(Cell::Hash(q));
         if !self.slot_is(q, name) {

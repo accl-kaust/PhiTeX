@@ -40,6 +40,29 @@ pub fn spelling_hash(name: &[u8]) -> u64 {
     h.max(1)
 }
 
+/// `n` names drawn from `seed` (`zq` and 2 to 8 letters), decoys for a
+/// test of the interner (`PARTEX_SHARE_NAMES=seed`).
+#[must_use]
+pub fn random_names(seed: u64, n: usize) -> Vec<Vec<u8>> {
+    let mut x = seed | 1;
+    (0..n)
+        .map(|_| {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            let mut y = x;
+            let mut name = b"zq".to_vec();
+            for _ in 0..2 + y % 7 {
+                y /= 7;
+                #[allow(clippy::cast_possible_truncation, reason = "y % 26 < 26")]
+                name.push(b'a' + (y % 26) as u8);
+                y /= 26;
+            }
+            name
+        })
+        .collect()
+}
+
 /// The interner, shared by every view of a session's engine.
 pub struct SharedNames {
     /// The locations the slots below start at.

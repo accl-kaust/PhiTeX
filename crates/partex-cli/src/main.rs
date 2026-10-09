@@ -2803,6 +2803,15 @@ fn run_memo(host: native::NativeHost, mut params: Params, command_line: &[u8]) -
     params.memo = !memo.is_empty() && memo != "0";
     let mut tex = Tex::new(host, Untracked, params);
     side_files_setup(&mut tex);
+    // (`PARTEX_SHARE_NAMES=seed`: names placed by the shared interner,
+    // with decoys from the seed first; the outputs must not change)
+    if let Some(seed) = std::env::var("PARTEX_SHARE_NAMES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+    {
+        let n = if seed == 0 { 0 } else { 4000 };
+        tex.share_names_after_format(partex_core::interner::random_names(seed, n));
+    }
     if memo == "check" {
         tex.set_memo_check();
     }
