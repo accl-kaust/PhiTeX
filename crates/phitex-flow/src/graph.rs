@@ -745,6 +745,9 @@ pub struct Run {
     pub errors: Vec<String>,
     /// Nodes run this time (the others were kept).
     pub ran: u64,
+    /// The fonts this piece loads first (`Key::FontLoaded` definitions), in
+    /// node order: the document's font numbering is these, piece by piece.
+    pub fonts: Vec<Arc<str>>,
 }
 
 /// The node that began the paragraph node `i` of `chain` ended (or is
@@ -1155,6 +1158,16 @@ pub fn run_piece(
         }
     }
     reads.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+    let mut fonts: Vec<(u32, Arc<str>)> = chain
+        .defs_of
+        .iter()
+        .filter_map(|(k, v)| match k {
+            Key::FontLoaded(f) => v.first().map(|&i| (i, f.clone())),
+            _ => None,
+        })
+        .collect();
+    fonts.sort_by_key(|x| x.0);
+    let fonts = fonts.into_iter().map(|(_, f)| f).collect();
     Run {
         chain,
         reads,
@@ -1162,6 +1175,7 @@ pub fn run_piece(
         paras,
         errors,
         ran,
+        fonts,
     }
 }
 

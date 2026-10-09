@@ -6,7 +6,7 @@
 //! A font's identity is its name and its size (`Font::key`): two loads of
 //! the same name at the same size are the same font, an equal value. (TeX's
 //! internal font numbers, the order of first loading, are the DVI file's
-//! font numbers only: `dvi::font_order`.)
+//! font numbers only: `dvi::numbers`.)
 
 use std::fmt;
 use std::sync::Arc;

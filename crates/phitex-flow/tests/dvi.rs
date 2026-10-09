@@ -283,3 +283,99 @@ fn a_font_loaded_first_reruns_no_paragraph() {
     assert!(e.dvi != first.dvi, "the fonts are numbered anew");
     assert_eq!(e.stats.ran, 1, "only the piece loading the fonts runs: {:?}", e.stats);
 }
+
+/// A document whose DVI file is long (past 16 KB, several fonts, pages of
+/// several KB) with dense pages whose bodies pass 8 KB: on each, a
+/// movement equal to one more than half TeX's buffer back (`\kern5pt`
+/// between paragraphs twice, `lines` lines apart), which TeX reuses or not
+/// by where the page lands in the file (`dvi_gone`, §611). `early` goes
+/// into the first page.
+fn shift_doc(early: &str) -> String {
+    let mut s = String::from(
+        "\\catcode`\\{=1 \\catcode`\\}=2 \\catcode`\\#=6\n\
+         \\font\\rm=cmr10 \\font\\bf=cmbx10 \\font\\sl=cmsl10 \\font\\it=cmti10 \\font\\tt=cmtt10\n\
+         \\rm \\hsize=225pt \\vsize=3600pt \\parindent=12pt \\baselineskip=11pt \\topskip=10pt\n\
+         \\tolerance=10000 \\linepenalty=10 \\maxdepth=2pt \\parfillskip=0pt plus 1fil \\parskip=0pt\n\
+         \\hbadness=10000 \\vbadness=10000 \\clubpenalty=0 \\widowpenalty=0\n\n",
+    );
+    let words = "office affluent efficient AVoid To Yes WAVE fjord baffle flight ruffle quick brown fox jumps \
+                 over lazy dog typesetting paragraph glue penalty";
+    let words: Vec<&str> = words.split_whitespace().collect();
+    let mut seed: u32 = 777;
+    let mut para = |s: &mut String, n: usize, font: Option<&str>| {
+        for i in 0..n {
+            seed = seed.wrapping_mul(1_103_515_245).wrapping_add(12345);
+            let word = words[(seed >> 16) as usize % words.len()];
+            match font {
+                Some(f) if i % 11 == 5 => {
+                    let _ = write!(s, "{{{f} {word}}} ");
+                }
+                _ => {
+                    s.push_str(word);
+                    s.push(' ');
+                }
+            }
+        }
+        s.push_str(".\n\n");
+    };
+    // (pages of a few KB; `\bf` first used on the third)
+    for page in 0..5 {
+        if page == 0 {
+            s.push_str(early);
+        }
+        for _ in 0..6 {
+            para(&mut s, 60, [None, Some("\\sl"), Some("\\bf"), Some("\\it"), Some("\\tt")][page]);
+        }
+        s.push_str("\\penalty-10000\n\n");
+    }
+    // (dense pages: ~70 bytes a line)
+    for lines in [130, 170, 210] {
+        para(&mut s, 40, Some("\\it"));
+        s.push_str("\\kern5pt\n\n");
+        for _ in 0..lines / 10 {
+            para(&mut s, 75, None);
+        }
+        s.push_str("\\kern5pt\n\n");
+        para(&mut s, 40, Some("\\tt"));
+        s.push_str("\\penalty-10000\n\n");
+    }
+    s.push_str("\\end\n");
+    s
+}
+
+/// The DVI file as per-page values: edits on the first page move every
+/// later page in the file (a word; a long paragraph; `\bf` used first
+/// there, so later pages define it no more) and give what TeX gives, at 1
+/// and 8 threads, the dense pages written again where they land.
+#[test]
+fn edits_shift_the_pages() {
+    let long = "Long inserted paragraph ".repeat(140) + "\n\n";
+    let versions = [
+        ("shift0", shift_doc("")),
+        ("shift1", shift_doc("Edited\n\n")),
+        ("shift2", shift_doc(&long)),
+        ("shift3", shift_doc(&format!("{long}{{\\bf bold}}\n\n"))),
+    ];
+    for (name, src) in &versions {
+        check_src(name, src, &RUNS[..1]);
+    }
+    let cold = Build::new(font()).update(&versions[0].1, RUNS[0]);
+    assert!(cold.dvi.len() > 3 * 16384, "{} bytes", cold.dvi.len());
+    assert!(cold.stats.bodies_fixed >= 3, "{:?}", cold.stats);
+    for threads in [1, 8] {
+        let o = Options { threads, ..Options::default() };
+        let mut b = Build::new(font());
+        let first = b.update(&versions[0].1, o);
+        eprintln!("{threads} threads: cold {:?}, {} bytes", first.stats.wall, first.dvi.len());
+        for (name, src) in &versions[1..] {
+            let e = b.update(src, o);
+            let want = std::fs::read(dir().join(format!("{name}.dvi"))).unwrap();
+            assert!(e.errors.is_empty(), "{:?}", e.errors);
+            assert!(masked(&e.dvi) == masked(&want), "{name} at {threads} threads: not TeX's DVI");
+            eprintln!(
+                "{threads} threads: {name}: edit {:?} ({} pages shipped, {} written again at the join)",
+                e.stats.wall, e.stats.pages_shipped, e.stats.bodies_again
+            );
+        }
+    }
+}

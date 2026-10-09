@@ -108,6 +108,10 @@ pub struct Stats {
     pub pages_shipped: usize,
     /// Pages equal to the last build's page at their place.
     pub pages_reused: usize,
+    /// Pages whose commands depend on where they start (written for a
+    /// place), and bodies written again when the DVI was laid out.
+    pub bodies_fixed: usize,
+    pub bodies_again: usize,
     /// Work done by each thread (tokens read, items broken, scanned,
     /// shipped).
     pub work: Vec<u64>,
@@ -165,7 +169,7 @@ pub struct Build {
     /// The TFM files `\font` can load.
     fonts: Arc<FontFiles>,
     pieces: Vec<Kept>,
-    pages: Vec<(Page, Arc<Vec<u8>>)>,
+    pages: Vec<(Page, Arc<dvi::Body>)>,
     /// Where each page came from in the material (`page_orgs[i]` for
     /// `pages[i]`), and the page builder's marks.
     page_orgs: Vec<PageOrg>,
@@ -340,10 +344,14 @@ struct State {
     last_diff_known: bool,
     pages: Vec<Page>,
     orgs: Vec<PageOrg>,
-    bodies: Vec<Option<Arc<Vec<u8>>>>,
+    bodies: Vec<Option<Arc<dvi::Body>>>,
+    /// The fonts' numbers as loaded by the pieces before `numbered` (what
+    /// a page shipped now numbers its fonts by; checked at the join).
+    numbers: Arc<dvi::Numbers>,
+    numbered: usize,
     unshipped: usize,
     ship_queue: VecDeque<usize>,
-    old_pages: Vec<Option<(Page, Arc<Vec<u8>>)>>,
+    old_pages: Vec<Option<(Page, Arc<dvi::Body>)>>,
     old_orgs: Arc<Vec<PageOrg>>,
     old_marks: Vec<(u32, u32)>,
     /// The page builder's marks before the scan's (kept), and after them
@@ -399,7 +407,7 @@ enum Task {
         pieces: Vec<Vec<ParaLines>>,
         finish: bool,
     },
-    Ship(usize, Page),
+    Ship(usize, Page, Arc<dvi::Numbers>),
 }
 
 impl Build {
@@ -690,6 +698,8 @@ impl Build {
             marks_before: Vec::new(),
             marks_after: Vec::new(),
             bodies: Vec::new(),
+            numbers: Arc::default(),
+            numbered: 0,
             unshipped: 0,
             ship_queue: VecDeque::new(),
             old_pages: std::mem::take(&mut self.pages)
@@ -754,18 +764,17 @@ impl Build {
         });
         let mut st = sh.state.into_inner().expect("state");
         let t_join = Instant::now();
-        let bodies: Vec<Arc<Vec<u8>>> = st
+        let mut bodies: Vec<Arc<dvi::Body>> = st
             .bodies
             .iter()
             .map(|b| b.clone().expect("every page shipped"))
             .collect();
-        let order = dvi::font_order(
-            &st.p
-                .iter()
-                .filter_map(|ps| ps.run.as_deref())
-                .collect::<Vec<_>>(),
+        let numbers = dvi::numbers(
+            st.p.iter()
+                .filter_map(|ps| ps.run.as_ref().map(|r| &r.fonts[..])),
         );
-        let out = dvi::assemble(&order, &st.pages, &bodies);
+        let (out, again) = dvi::assemble(&numbers, &st.pages, &mut bodies);
+        st.stats.bodies_again = again;
         let mut errors = Vec::new();
         let mut dump = String::new();
         let marks: Vec<(u32, u32)> = st
@@ -1265,7 +1274,7 @@ fn pick(g: &mut State, sh: &Shared) -> Option<Task> {
                 Order::Priority => 0,
             };
             let pg = g.ship_queue.remove(i).expect("a page to ship");
-            Some(Task::Ship(pg, g.pages[pg].clone()))
+            Some(Task::Ship(pg, g.pages[pg].clone(), g.numbers.clone()))
         }
     }
 }
@@ -1325,6 +1334,14 @@ fn execute(sh: &Shared, task: Task) -> (u64, u8) {
             let (new, new_orgs) = scan.take_pages();
             let mut g = lock(sh);
             g.scan_next = to;
+            // (the fonts the pieces fed load, numbered)
+            while g.numbered < to {
+                let k = g.numbered;
+                if let Some(r) = g.p[k].run.clone() {
+                    dvi::extend(Arc::make_mut(&mut g.numbers), &r.fonts);
+                }
+                g.numbered += 1;
+            }
             for (pg, org) in new.into_iter().zip(new_orgs) {
                 let i = g.pages.len();
                 // (unchanged lines are the same `Arc`s: a cheap comparison)
@@ -1385,9 +1402,15 @@ fn execute(sh: &Shared, task: Task) -> (u64, u8) {
             sh.cv.notify_all();
             (work, 2)
         }
-        Task::Ship(i, page) => {
-            let body = Arc::new(dvi::page_body(&page));
+        Task::Ship(i, page, numbers) => {
+            // (at the file's start, with nothing defined: the join puts in
+            // or leaves out the `fnt_def`s, and writes again a page whose
+            // commands depend on where it lands)
+            let body = Arc::new(dvi::page_body(&page, &numbers, &[], &[], 0));
             let mut g = lock(sh);
+            if body.fixed.is_some() {
+                g.stats.bodies_fixed += 1;
+            }
             g.bodies[i] = Some(body);
             g.unshipped -= 1;
             g.stats.pages_shipped += 1;

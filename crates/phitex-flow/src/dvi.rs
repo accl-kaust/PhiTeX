@@ -1,8 +1,14 @@
-//! DVI: tex.web part 32 (§583–§643), copied. The file is a fold over the
-//! pages in order — as TeX's is: a font is defined where it is first used,
-//! `w`/`x`/`y`/`z` reuse stops at what TeX's half-buffer has already
-//! written out (`dvi_gone`), `bop` points back at the page before — so
-//! [`assemble`] writes it whole, and [`page_body`] is empty (CORE.md).
+//! DVI: tex.web part 32 (§583–§643), copied. A page's commands are a pure
+//! function of the page and of what crosses its `bop` (§640: at `bop`
+//! h=v=w=x=y=z=0, the stack is empty, `dvi_f` is null; the top box's
+//! `prune_movements` leaves no movement from before the page): the
+//! numbers of its fonts, which of them are defined already (`fnt_def` comes
+//! at a font's first use), and — only when a movement it looked back at is
+//! farther than half TeX's buffer, or an empty push meets the buffer's
+//! edge — where in the file it starts (`dvi_gone`, §611; `dvi_pop`, §601).
+//! [`page_body`] writes a page under those assumptions and records them;
+//! [`assemble`] lays the bodies end to end, patching each `bop`'s back
+//! pointer, and writes again only a body whose assumptions do not hold.
 
 use std::sync::Arc;
 
@@ -83,14 +89,66 @@ impl SetGlue {
     }
 }
 
-/// The DVI writer's state (tex.web 592–595, 605, 616).
-struct Writer {
+/// Each font's internal number (TeX's: the order of first loading).
+pub type Numbers = std::collections::HashMap<Arc<str>, u32>;
+
+/// A page's DVI commands, from its `bop` to its `eop` (the back pointer
+/// left 0), and what they assumed about what crosses the `bop`.
+#[derive(Debug)]
+pub struct Body {
+    pub bytes: Vec<u8>,
+    /// The fonts it uses, in the order of first use, with their numbers,
+    /// where in `bytes` that first use is and how long the `fnt_def`
+    /// written there is (0: none, the font taken as defined before).
+    pub fonts: Vec<(Arc<Font>, u32, u32, u32)>,
+    /// `None`: no command depends on where the page starts or on which
+    /// fonts are defined before it — those `fnt_def`s are put in or left
+    /// out where they stand. Otherwise what it was written for.
+    pub fixed: Option<Fixed>,
+    pub max_push: i32,
+}
+
+/// What a page that depends on where it starts was written for.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Fixed {
+    /// The numbers of its fonts taken as defined before it, sorted.
+    pub defined: Vec<u32>,
+    /// A movement looked back farther than half the buffer (`dvi_gone`,
+    /// §611): the start's class, [`gone_class`].
+    pub gone: Option<i32>,
+    /// Where (from the start) `dvi_pop` met an empty push, and whether
+    /// that was at the buffer's edge (§601).
+    pub edges: Vec<(i32, bool)>,
+}
+
+/// What of a start offset `o` the `dvi_gone` test sees: all of it before
+/// the buffer was first full, then `o` modulo half the buffer (§598).
+fn gone_class(o: i32) -> i32 {
+    if o < BUF_SIZE { o } else { BUF_SIZE + o % HALF_BUF }
+}
+
+impl Body {
+    /// Is it this page's commands at offset `at`, with fonts numbered by
+    /// `number` and those `used` already defined?
+    fn holds(&self, at: i32, number: &mut impl FnMut(&Font) -> u32, used: &std::collections::HashSet<u32>) -> bool {
+        if !self.fonts.iter().all(|(f, n, _, _)| number(f) == *n) {
+            return false;
+        }
+        let Some(x) = &self.fixed else { return true };
+        let mut defined: Vec<u32> = self.fonts.iter().map(|f| f.1).filter(|n| used.contains(n)).collect();
+        defined.sort_unstable();
+        defined == x.defined
+            && x.gone.is_none_or(|c| c == gone_class(at))
+            && x.edges.iter().all(|&(r, e)| ((at + r) % BUF_SIZE == 0) == e)
+    }
+}
+
+/// The DVI writer's state for one page (tex.web 592–595, 605, 616).
+struct Writer<'a> {
     out: Vec<u8>,
-    total_pages: i32,
-    max_v: i32,
-    max_h: i32,
+    /// Where `out` starts in the file.
+    origin: i32,
     max_push: i32,
-    last_bop: i32,
     down: Vec<Movement>,
     right: Vec<Movement>,
     dvi_h: i32,
@@ -99,15 +157,25 @@ struct Writer {
     cur_v: i32,
     dvi_f: u32,
     cur_s: i32,
-    /// Each font's internal number (TeX's: the order of first loading).
-    numbers: std::collections::HashMap<Arc<str>, u32>,
-    /// The fonts used so far, by internal number (`font_used`).
-    used: std::collections::BTreeMap<u32, Arc<Font>>,
+    numbers: &'a Numbers,
+    /// Fonts not in `numbers`, numbered after them in the order met.
+    extra: Vec<Arc<str>>,
+    /// The fonts defined before the page, and those it used.
+    defined: &'a [u32],
+    fonts: Vec<(Arc<Font>, u32, u32, u32)>,
+    /// The farthest a movement search looked back at a matching buffered
+    /// movement, and where `dvi_pop` met an empty push.
+    lookback: i32,
+    edges: Vec<(i32, bool)>,
 }
 
-impl Writer {
+impl Writer<'_> {
     fn loc(&self) -> i32 {
-        self.out.len() as i32
+        self.origin + self.out.len() as i32
+    }
+
+    fn number(&mut self, f: &Font) -> u32 {
+        number(self.numbers, &mut self.extra, f)
     }
 
     /// `dvi_gone`: what the half-buffer has written out (§598).
@@ -130,6 +198,9 @@ impl Writer {
 
     /// §601: `dvi_pop`.
     fn pop(&mut self, l: i32) {
+        if l == self.loc() {
+            self.edges.push((l - self.origin, self.loc() % BUF_SIZE == 0));
+        }
         if l == self.loc() && self.loc() % BUF_SIZE != 0 {
             self.out.pop();
         } else {
@@ -139,23 +210,18 @@ impl Writer {
 
     /// §602: `dvi_font_def` of font number `n`.
     fn font_def(&mut self, f: &Font, n: u32) {
-        self.byte(FNT_DEF1);
-        self.int(n as i32 - 1);
-        self.out.extend(f.checksum.to_be_bytes());
-        self.four(f.size);
-        self.four(f.design_size);
-        self.byte(0);
-        self.int(f.name.len() as i32);
-        self.out.extend(f.name.as_bytes());
+        font_def(&mut self.out, f, n);
     }
 
     /// §621: change font `dvi_f` to `f`.
     fn change_font(&mut self, f: &Arc<Font>) {
-        let next = self.numbers.len() as u32 + 1;
-        let k = *self.numbers.entry(f.key.clone()).or_insert(next);
-        if !self.used.contains_key(&k) {
-            self.font_def(f, k);
-            self.used.insert(k, f.clone());
+        let k = self.number(f);
+        if !self.fonts.iter().any(|x| x.1 == k) {
+            let at = self.out.len();
+            if !self.defined.contains(&k) {
+                self.font_def(f, k);
+            }
+            self.fonts.push((f.clone(), k, at as u32, (self.out.len() - at) as u32));
         }
         let n = k as i32 - 1;
         if k <= 64 {
@@ -176,6 +242,7 @@ impl Writer {
         let q = stack.len() - 1;
         // (§611)
         let mut mstate = NONE_SEEN;
+        let mut lookback = self.lookback;
         let mut found = None;
         let mut retag = None;
         for p in (0..q).rev() {
@@ -188,6 +255,7 @@ impl Writer {
                         || x == Z_SEEN + YZ_OK
                         || x == Z_SEEN + Y_OK =>
                     {
+                        lookback = lookback.max(location - m.location);
                         if m.location < gone {
                             break;
                         }
@@ -197,6 +265,7 @@ impl Writer {
                         break;
                     }
                     x if x == NONE_SEEN + Z_OK || x == Y_SEEN + YZ_OK || x == Y_SEEN + Z_OK => {
+                        lookback = lookback.max(location - m.location);
                         if m.location < gone {
                             break;
                         }
@@ -224,8 +293,9 @@ impl Writer {
                 }
             }
         }
+        self.lookback = lookback;
         if let Some((p, delta, tag)) = retag {
-            let k = stack[p].location as usize;
+            let k = (stack[p].location - self.origin) as usize;
             stack[p].info = tag;
             self.out[k] = self.out[k].wrapping_add(delta);
         }
@@ -332,7 +402,7 @@ impl Writer {
     fn char_out(&mut self, f: &Arc<Font>, c: u8) {
         self.synch_h();
         self.synch_v();
-        if self.numbers.get(&f.key) != Some(&self.dvi_f) {
+        if self.number(f) != self.dvi_f {
             self.change_font(f);
         }
         if c >= 128 {
@@ -433,79 +503,52 @@ impl Writer {
         }
     }
 
-    /// §640: one page.
+    /// §640: one page, from `bop` to `eop` (the back pointer left 0).
     fn page(&mut self, p: &Page) {
         let b = &p.b;
         let s = &p.ship;
-        // (§641)
-        if b.h + b.d + s.voffset > self.max_v {
-            self.max_v = b.h + b.d + s.voffset;
-        }
-        if b.w + s.hoffset > self.max_h {
-            self.max_h = b.w + s.hoffset;
-        }
         // (§617)
         self.dvi_h = 0;
         self.dvi_v = 0;
         self.cur_h = s.hoffset;
         self.dvi_f = 0;
-        let page_loc = self.loc();
         self.byte(BOP);
         for &c in &s.counts {
             self.four(c);
         }
-        self.four(self.last_bop);
-        self.last_bop = page_loc;
+        self.four(0);
         self.cur_v = b.h + s.voffset;
         self.list_out(b);
         self.byte(EOP);
-        self.total_pages += 1;
         self.cur_s = -1;
     }
 }
 
-/// The preamble's comment (tex.web 617): ` TeX output YYYY.MM.DD:HHMM`.
-fn comment(date: [i32; 4]) -> String {
-    let two = |n: i32| format!("{:02}", n.rem_euclid(100));
-    format!(" TeX output {}.{}.{}:{}{}", date[0], two(date[1]), two(date[2]), two(date[3] / 60), two(date[3] % 60))
-}
-
-/// A page's own commands: none (the file is one fold, [`assemble`]).
-pub fn page_body(_p: &Page) -> Vec<u8> {
-    Vec::new()
-}
-
-/// The fonts a document loaded, in order (TeX's internal font numbers,
-/// which are the DVI file's): each font's first `Key::FontLoaded`
-/// definition, in document order.
-pub fn font_order(runs: &[&crate::graph::Run]) -> Vec<Arc<str>> {
-    let mut out: Vec<Arc<str>> = Vec::new();
-    let mut seen = std::collections::HashSet::new();
-    for r in runs {
-        for n in r.chain.nodes.iter() {
-            for d in n.defs() {
-                if let crate::val::Key::FontLoaded(k) = &d.key
-                    && seen.insert(k.clone())
-                {
-                    out.push(k.clone());
-                }
-            }
-        }
+/// Font `f`'s number: by `numbers`, else after them in the order of
+/// `extra` (where a font not met before is put).
+fn number(numbers: &Numbers, extra: &mut Vec<Arc<str>>, f: &Font) -> u32 {
+    if let Some(&k) = numbers.get(&f.key) {
+        return k;
     }
-    out
+    let i = extra.iter().position(|k| *k == f.key).unwrap_or_else(|| {
+        extra.push(f.key.clone());
+        extra.len() - 1
+    });
+    (numbers.len() + i + 1) as u32
 }
 
-/// The DVI file of these pages, with fonts numbered in `order` (none: no
-/// file, as TeX writes none).
-pub fn assemble(order: &[Arc<str>], pages: &[Page], _bodies: &[Arc<Vec<u8>>]) -> Vec<u8> {
-    let Some(first) = pages.first() else { return Vec::new() };
+/// The length of font `f`'s `fnt_def` (§602).
+fn def_len(f: &Font) -> i32 {
+    16 + f.name.len() as i32
+}
+
+/// Page `p`'s commands, with fonts numbered by `numbers` (then `extra`),
+/// those numbered `defined` already defined, written at file offset `at`.
+pub fn page_body(p: &Page, numbers: &Numbers, extra: &[Arc<str>], defined: &[u32], at: i32) -> Body {
     let mut w = Writer {
         out: Vec::new(),
-        total_pages: 0,
-        max_v: 0,
-        max_h: 0,
+        origin: at,
         max_push: 0,
-        last_bop: -1,
         down: Vec::new(),
         right: Vec::new(),
         dvi_h: 0,
@@ -514,48 +557,144 @@ pub fn assemble(order: &[Arc<str>], pages: &[Page], _bodies: &[Arc<Vec<u8>>]) ->
         cur_v: 0,
         dvi_f: 0,
         cur_s: -1,
-        numbers: order.iter().enumerate().map(|(i, k)| (k.clone(), i as u32 + 1)).collect(),
-        used: std::collections::BTreeMap::new(),
+        numbers,
+        extra: extra.to_vec(),
+        defined,
+        fonts: Vec::new(),
+        lookback: 0,
+        edges: Vec::new(),
     };
+    w.page(p);
+    // (putting in or leaving out its `fnt_def`s moves a look back by at
+    // most all of them)
+    let slack: i32 = w.fonts.iter().map(|x| def_len(&x.0)).sum();
+    let far = w.lookback + slack > HALF_BUF;
+    let fixed = (far || !w.edges.is_empty()).then(|| {
+        let mut defined: Vec<u32> = w.fonts.iter().filter(|x| x.3 == 0).map(|x| x.1).collect();
+        defined.sort_unstable();
+        Fixed { defined, gone: far.then(|| gone_class(at)), edges: w.edges }
+    });
+    Body { bytes: w.out, fonts: w.fonts, fixed, max_push: w.max_push }
+}
+
+/// The preamble's comment (tex.web 617): ` TeX output YYYY.MM.DD:HHMM`.
+fn comment(date: [i32; 4]) -> String {
+    let two = |n: i32| format!("{:02}", n.rem_euclid(100));
+    format!(" TeX output {}.{}.{}:{}{}", date[0], two(date[1]), two(date[2]), two(date[3] / 60), two(date[3] % 60))
+}
+
+/// §602: `dvi_font_def` of font number `n`.
+fn font_def(out: &mut Vec<u8>, f: &Font, n: u32) {
+    out.push(FNT_DEF1);
+    out.push((n - 1) as u8);
+    out.extend(f.checksum.to_be_bytes());
+    out.extend(f.size.to_be_bytes());
+    out.extend(f.design_size.to_be_bytes());
+    out.push(0);
+    out.push(f.name.len() as u8);
+    out.extend(f.name.as_bytes());
+}
+
+/// The DVI file of these pages, with fonts numbered by `numbers` (none: no
+/// file, as TeX writes none): the preamble, the pages' bodies end to end,
+/// each `bop` pointing back at the one before (§640), the postamble
+/// (§642). A body that does not hold where it lands is written again
+/// there, in `bodies`; returns the file and how many were.
+pub fn assemble(numbers: &Numbers, pages: &[Page], bodies: &mut [Arc<Body>]) -> (Vec<u8>, usize) {
+    let Some(first) = pages.first() else { return (Vec::new(), 0) };
+    let mut out = Vec::new();
     // (§617: the preamble, at the first page)
-    w.byte(PRE);
-    w.byte(ID_BYTE);
-    w.four(25_400_000);
-    w.four(473_628_672);
-    w.four(first.ship.mag);
+    out.push(PRE);
+    out.push(ID_BYTE);
+    out.extend(25_400_000i32.to_be_bytes());
+    out.extend(473_628_672i32.to_be_bytes());
+    out.extend(first.ship.mag.to_be_bytes());
     let c = comment(first.ship.date);
-    w.int(c.len() as i32);
-    w.out.extend(c.as_bytes());
-    for p in pages {
-        w.page(p);
+    out.push(c.len() as u8);
+    out.extend(c.as_bytes());
+    let mut extra: Vec<Arc<str>> = Vec::new();
+    let mut defined = std::collections::HashSet::new();
+    let mut used: std::collections::BTreeMap<u32, Arc<Font>> = std::collections::BTreeMap::new();
+    let (mut max_v, mut max_h, mut max_push, mut last_bop) = (0, 0, 0, -1i32);
+    let mut again = 0;
+    for (p, b) in pages.iter().zip(bodies.iter_mut()) {
+        let (bx, s) = (&p.b, &p.ship);
+        // (§641)
+        max_v = max_v.max(bx.h + bx.d + s.voffset);
+        max_h = max_h.max(bx.w + s.hoffset);
+        let at = out.len() as i32;
+        if !b.holds(at, &mut |f| number(numbers, &mut extra, f), &defined) {
+            let mut d: Vec<u32> = defined.iter().copied().collect();
+            d.sort_unstable();
+            *b = Arc::new(page_body(p, numbers, &extra, &d, at));
+            again += 1;
+        }
+        if b.fixed.is_some() {
+            out.extend(&b.bytes);
+        } else {
+            let mut from = 0;
+            for (f, n, pos, len) in &b.fonts {
+                let (pos, len) = (*pos as usize, *len as usize);
+                out.extend(&b.bytes[from..pos]);
+                if !defined.contains(n) {
+                    if len > 0 {
+                        out.extend(&b.bytes[pos..pos + len]);
+                    } else {
+                        font_def(&mut out, f, *n);
+                    }
+                }
+                from = pos + len;
+            }
+            out.extend(&b.bytes[from..]);
+        }
+        for (f, n, _, _) in &b.fonts {
+            number(numbers, &mut extra, f);
+            defined.insert(*n);
+            used.entry(*n).or_insert_with(|| f.clone());
+        }
+        // (the back pointer, after `bop` and `count0..9`)
+        let k = at as usize + 41;
+        out[k..k + 4].copy_from_slice(&last_bop.to_be_bytes());
+        last_bop = at;
+        max_push = max_push.max(b.max_push);
     }
     // (§642: the postamble)
+    let total_pages = pages.len() as i32;
     let mag = pages.last().map_or(1000, |p| p.ship.mag);
-    w.byte(POST);
-    w.four(w.last_bop);
-    w.last_bop = w.loc() - 5;
-    w.four(25_400_000);
-    w.four(473_628_672);
-    w.four(mag);
-    w.four(w.max_v);
-    w.four(w.max_h);
-    w.int(w.max_push / 256);
-    w.int(w.max_push % 256);
-    w.int((w.total_pages / 256) % 256);
-    w.int(w.total_pages % 256);
+    let post = out.len() as i32;
+    out.push(POST);
+    for x in [last_bop, 25_400_000, 473_628_672, mag, max_v, max_h] {
+        out.extend(x.to_be_bytes());
+    }
+    for x in [max_push / 256, max_push % 256, (total_pages / 256) % 256, total_pages % 256] {
+        out.push((x & 0xFF) as u8);
+    }
     // (§643: the fonts used, last loaded first)
-    let used: Vec<(u32, Arc<Font>)> = w.used.iter().rev().map(|(k, f)| (*k, f.clone())).collect();
-    for (k, f) in &used {
-        w.font_def(f, *k);
+    for (k, f) in used.iter().rev() {
+        font_def(&mut out, f, *k);
     }
-    w.byte(POST_POST);
-    w.four(w.last_bop);
-    w.byte(ID_BYTE);
-    let ptr = w.loc() % BUF_SIZE;
-    let mut k = 4 + (BUF_SIZE - ptr) % 4;
-    while k > 0 {
-        w.byte(223);
-        k -= 1;
+    out.push(POST_POST);
+    out.extend(post.to_be_bytes());
+    out.push(ID_BYTE);
+    let ptr = out.len() as i32 % BUF_SIZE;
+    let k = 4 + (BUF_SIZE - ptr) % 4;
+    out.extend(std::iter::repeat_n(223, k as usize));
+    (out, again)
+}
+
+/// Each font's number: the order in which the pieces load them first.
+pub fn numbers<'a>(pieces: impl IntoIterator<Item = &'a [Arc<str>]>) -> Numbers {
+    let mut m = Numbers::new();
+    for fs in pieces {
+        extend(&mut m, fs);
     }
-    w.out
+    m
+}
+
+/// Numbers the fonts `fs` not numbered yet, in order.
+pub fn extend(m: &mut Numbers, fs: &[Arc<str>]) {
+    for f in fs {
+        let n = m.len() as u32 + 1;
+        m.entry(f.clone()).or_insert(n);
+    }
 }
