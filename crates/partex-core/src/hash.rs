@@ -245,6 +245,10 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             }
         }
         let mut p = h + HASH_BASE; // we start searching here
+        #[cfg(feature = "std")]
+        if self.shared_names.is_some() && self.params.hash_extra > 0 {
+            return self.id_lookup_shared(name, p);
+        }
         if self.probe_names() {
             return self.id_lookup_probe(name, p);
         }
@@ -399,6 +403,66 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         // point of overflow, which the main table's free slots would move)
         let n = HASH_SIZE + self.params.hash_extra;
         self.overflow(b"hash size", n)
+    }
+
+    /// The places `name` probes in the `hash_extra` region (`probes`).
+    #[cfg(feature = "std")]
+    pub(crate) fn name_probes(&self, name: &[u8]) -> alloc::vec::Vec<i32> {
+        self.probes(name).collect()
+    }
+
+    /// `id_lookup` with the session's shared interner (`interner.rs`).
+    ///
+    /// The format's names are in their chains from `start`, which no run
+    /// changes; a run's name is where the interner placed it (by this view
+    /// or another), and is entered in this view's table when it is first
+    /// found here. The reads are the found slot's, as `id_lookup_probe`'s.
+    #[cfg(feature = "std")]
+    fn id_lookup_shared(&mut self, name: &[u8], start: i32) -> Result<i32, Jump> {
+        self.tracker.read(Cell::Hash(start));
+        if self.slot_is(start, name) {
+            return Ok(start);
+        }
+        if self.hash[Self::hash_idx(start)].rh() != 0 {
+            let mut q = start;
+            loop {
+                let next = self.walk(q).lh();
+                if next == 0 {
+                    break;
+                }
+                q = next;
+                if self.slot_is(q, name) {
+                    self.tracker.read(Cell::Hash(q));
+                    return Ok(q);
+                }
+            }
+        }
+        let sh = self.shared_names.clone().expect("a shared interner");
+        let q = match sh.find(name) {
+            Some(q) => q,
+            None if self.no_new_control_sequence => return Ok(UNDEFINED_CONTROL_SEQUENCE),
+            None => {
+                let places: alloc::vec::Vec<i32> =
+                    core::iter::once(start).chain(self.probes(name)).collect();
+                match sh.insert(name, places) {
+                    Some(q) => q,
+                    None => {
+                        let n = HASH_SIZE + self.params.hash_extra;
+                        return self.overflow(b"hash size", n);
+                    }
+                }
+            }
+        };
+        self.tracker.read(Cell::Hash(q));
+        if !self.slot_is(q, name) {
+            // (placed by another view, or just now: entered in this one's
+            // table; its string is this view's)
+            if q > EQTB_SIZE {
+                self.hash_high += 1;
+            }
+            self.name_slot(q, name)?;
+        }
+        Ok(q)
     }
 
     /// A name missing at free slot `q` (`id_lookup_probe`): entered there,

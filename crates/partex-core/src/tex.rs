@@ -465,6 +465,10 @@ pub struct Tex<H: Host, T: Tracker = Untracked> {
     /// by probing and found that way, not chained (`hash.rs`,
     /// `id_lookup_probe`), so a lookup reads no links.
     pub(crate) probe_names: bool,
+    /// The session's shared interner (`interner.rs`): the names the run
+    /// makes are placed by it, one place for every view.
+    #[cfg(feature = "std")]
+    pub(crate) shared_names: Option<alloc::sync::Arc<crate::interner::SharedNames>>,
     pub(crate) seal_at: (u128, u32),
     pub(crate) seal_log: Vec<(u128, Option<u128>)>,
     /// Stop before `\shipout` (a machine's region boundary: the region
@@ -875,6 +879,8 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             font_cells: false,
             font_log: Vec::new(),
             probe_names: false,
+            #[cfg(feature = "std")]
+            shared_names: None,
             seal_at: (0, 0),
             seal_log: Vec::new(),
             stop_before_ship: false,

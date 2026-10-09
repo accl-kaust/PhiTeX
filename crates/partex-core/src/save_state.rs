@@ -240,6 +240,8 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             font_cells: _,
             font_log: _,
             probe_names: _,
+            #[cfg(feature = "std")]
+                shared_names: _,
             seal_at: _,
             seal_log: _,
             stop_before_ship: _,
@@ -930,6 +932,8 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             font_cells: false,
             font_log: alloc::vec::Vec::new(),
             probe_names: false,
+            #[cfg(feature = "std")]
+            shared_names: None,
             seal_at: (0, 0),
             seal_log: alloc::vec::Vec::new(),
             stop_before_ship: false,
