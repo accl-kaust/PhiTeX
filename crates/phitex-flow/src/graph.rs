@@ -204,23 +204,94 @@ pub struct Phi {
     pub keys: Vec<(Key, Val, Val)>,
 }
 
+/// A short list: up to two items in place (what most nodes read and
+/// emit), more on the heap.
+#[derive(Clone, Debug, Default)]
+pub enum Few<T> {
+    #[default]
+    Zero,
+    One(T),
+    Two([T; 2]),
+    Many(Box<[T]>),
+}
+
+impl<T> Few<T> {
+    /// Takes the items out of `v` (which keeps its capacity).
+    fn take(v: &mut Vec<T>) -> Few<T> {
+        match v.len() {
+            0 => Few::Zero,
+            1 => Few::One(v.pop().expect("one item")),
+            2 => {
+                let b = v.pop().expect("two items");
+                let a = v.pop().expect("two items");
+                Few::Two([a, b])
+            }
+            _ => Few::Many(v.drain(..).collect()),
+        }
+    }
+}
+
+impl<T> std::ops::Deref for Few<T> {
+    type Target = [T];
+    fn deref(&self) -> &[T] {
+        match self {
+            Few::Zero => &[],
+            Few::One(x) => std::slice::from_ref(x),
+            Few::Two(a) => a,
+            Few::Many(b) => b,
+        }
+    }
+}
+
+impl<T> std::ops::DerefMut for Few<T> {
+    fn deref_mut(&mut self) -> &mut [T] {
+        match self {
+            Few::Zero => &mut [],
+            Few::One(x) => std::slice::from_mut(x),
+            Few::Two(a) => a,
+            Few::Many(b) => b,
+        }
+    }
+}
+
+/// What few nodes have: definitions, a paragraph, errors, a φ.
+#[derive(Clone, Debug, Default)]
+pub struct Rare {
+    pub defs: Vec<Def>,
+    pub para: Option<Arc<Para>>,
+    pub errors: Vec<String>,
+    pub phi: Option<Phi>,
+}
+
 /// A command node. Its input state is its predecessor's `out` (the
 /// piece's start for the first node): [`Chain::input`].
 #[derive(Clone, Debug)]
 pub struct Node {
     pub kind: Kind,
+    /// The innermost group open at it (its `Open` node's index), if any.
+    group: Option<u32>,
     /// The command, for printing.
     pub cmd: Tok,
     /// The reader state after it (its successor's input).
     pub out: RState,
-    pub reads: Vec<Read>,
-    pub defs: Vec<Def>,
-    pub emit: Vec<HItem>,
-    pub para: Option<Arc<Para>>,
-    pub errors: Vec<String>,
-    pub phi: Option<Box<Phi>>,
-    /// The innermost group open at it (its `Open` node's index), if any.
-    group: Option<u32>,
+    pub reads: Few<Read>,
+    pub emit: Few<HItem>,
+    pub rare: Option<Box<Rare>>,
+}
+
+impl Node {
+    pub fn defs(&self) -> &[Def] {
+        self.rare.as_ref().map_or(&[], |r| &r.defs)
+    }
+    pub fn para(&self) -> Option<&Arc<Para>> {
+        self.rare.as_ref().and_then(|r| r.para.as_ref())
+    }
+    pub fn errors(&self) -> &[String] {
+        self.rare.as_ref().map_or(&[], |r| &r.errors)
+    }
+    pub fn phi(&self) -> Option<&Phi> {
+        self.rare.as_ref().and_then(|r| r.phi.as_ref())
+    }
 }
 
 /// A piece's chain of nodes, with what resolving names over it needs.
@@ -258,7 +329,7 @@ impl Chain {
                 continue;
             }
             let n = &self.nodes[d as usize];
-            let Some(def) = n.defs.iter().rev().find(|x| x.key == *key) else {
+            let Some(def) = n.defs().iter().rev().find(|x| x.key == *key) else {
                 continue;
             };
             let closed = n
@@ -293,7 +364,7 @@ impl Chain {
             }
             _ => {}
         }
-        for d in &n.defs {
+        for d in n.defs() {
             self.defs_of.entry(d.key.clone()).or_default().push(i);
         }
         self.nodes.push(n);
@@ -473,7 +544,7 @@ pub fn run_piece(
             let mapped = |p: usize| edit.map_or(Some(p), |e| e.map(p));
             while oi < oc.nodes.len() && mapped(oc.input(oi).pos).is_none_or(|p| p < state.pos) {
                 let n = &oc.nodes[oi];
-                scope_changed |= !n.defs.is_empty() || n.kind.scopes();
+                scope_changed |= !n.defs().is_empty() || n.kind.scopes();
                 oi += 1;
             }
             if oi < oc.nodes.len() {
@@ -508,7 +579,7 @@ pub fn run_piece(
                                 n.out.pos = e.map(n.out.pos).unwrap_or(n.out.pos);
                             }
                             // (re-point reads at the nodes now defining them)
-                            for r in &mut n.reads {
+                            for r in n.reads.iter_mut() {
                                 r.src = resolve_now(&chain, env, &mut outside, &r.key).1;
                             }
                             kept = Some(n);
@@ -563,7 +634,7 @@ pub fn run_piece(
             (None, Some(n)) => {
                 // (kept at another index: later nodes' reads in the piece
                 // and their groups would name other nodes)
-                if oi != chain.nodes.len() && (!n.defs.is_empty() || n.kind.scopes()) {
+                if oi != chain.nodes.len() && (!n.defs().is_empty() || n.kind.scopes()) {
                     scope_changed = true;
                 }
                 oi += 1;
@@ -584,16 +655,16 @@ pub fn run_piece(
                 ci == chain.nodes.len()
                     && o.kind == n.kind
                     && o.out == n.out
-                    && o.defs.len() == n.defs.len()
-                    && o.defs
+                    && o.defs().len() == n.defs().len()
+                    && o.defs()
                         .iter()
-                        .zip(&n.defs)
+                        .zip(n.defs())
                         .all(|(a, b)| a.key == b.key && a.val == b.val && a.global == b.global)
             });
             if same_as_old {
                 oi += 1;
             } else {
-                scope_changed |= !n.defs.is_empty() || n.kind.scopes();
+                scope_changed |= !n.defs().is_empty() || n.kind.scopes();
             }
         }
         let starts_para = state.mode == Mode::V && n.out.mode == Mode::H;
@@ -617,16 +688,20 @@ pub fn run_piece(
         .filter_map(|k| chain.resolve(k, end).map(|(_, v)| (k.clone(), v)))
         .collect();
     exports.sort_by(|a, b| a.0.cmp(&b.0));
-    let paras = chain.nodes.iter().filter_map(|n| n.para.clone()).collect();
+    let paras = chain
+        .nodes
+        .iter()
+        .filter_map(|n| n.para().cloned())
+        .collect();
     let errors = chain
         .nodes
         .iter()
-        .flat_map(|n| n.errors.iter().cloned())
+        .flat_map(|n| n.errors().iter().cloned())
         .collect();
     let mut reads = Vec::new();
     let mut seen: FxSet<&Key> = FxSet::default();
     for (i, n) in chain.nodes.iter().enumerate() {
-        for r in &n.reads {
+        for r in n.reads.iter() {
             if !matches!(r.src, Src::Node(_)) && seen.insert(&r.key) {
                 reads.push((r.key.clone(), i as u32, r.val.clone()));
             }
@@ -646,8 +721,11 @@ pub fn run_piece(
 /// content).
 #[derive(Default)]
 struct Scratch {
-    /// The node's reads so far (read once each).
+    /// The node's reads so far (read once each), once there are many.
     seen: FxMap<Key, Val>,
+    /// The node's reads and what it emitted (their capacity kept).
+    reads: Vec<Read>,
+    emit: Vec<HItem>,
     /// Shared copies of the names read in this piece.
     names: FxSet<Arc<str>>,
     buf: String,
@@ -666,10 +744,15 @@ struct Exec<'a> {
     emit: Vec<HItem>,
     para: Option<Arc<Para>>,
     errors: Vec<String>,
-    phi: Option<Box<Phi>>,
+    phi: Option<Phi>,
     kind: Kind,
     cmd: Tok,
+    /// How many of `reads` are in `scratch.seen`.
+    seen_upto: usize,
 }
+
+/// Up to this many reads, a node's reads are looked up by a scan.
+const FEW_READS: usize = 12;
 
 impl<'a> Exec<'a> {
     fn new(
@@ -680,7 +763,11 @@ impl<'a> Exec<'a> {
         outside: &'a mut Outside,
         scratch: &'a mut Scratch,
     ) -> Exec<'a> {
-        scratch.seen.clear();
+        if !scratch.seen.is_empty() {
+            scratch.seen.clear();
+        }
+        let reads = std::mem::take(&mut scratch.reads);
+        let emit = std::mem::take(&mut scratch.emit);
         Exec {
             text,
             chain,
@@ -688,29 +775,43 @@ impl<'a> Exec<'a> {
             outside,
             scratch,
             st: input.clone(),
-            reads: Vec::new(),
+            reads,
             defs: Vec::new(),
-            emit: Vec::new(),
+            emit,
             para: None,
             errors: Vec::new(),
             phi: None,
             kind: Kind::Other,
             cmd: Tok::Char(0, '\0'),
+            seen_upto: 0,
         }
     }
 
-    fn finish(self) -> Node {
+    fn finish(mut self) -> Node {
+        let reads = Few::take(&mut self.reads);
+        let emit = Few::take(&mut self.emit);
+        self.scratch.reads = self.reads;
+        self.scratch.emit = self.emit;
+        let rare = (!self.defs.is_empty()
+            || self.para.is_some()
+            || !self.errors.is_empty()
+            || self.phi.is_some())
+        .then(|| {
+            Box::new(Rare {
+                defs: self.defs,
+                para: self.para,
+                errors: self.errors,
+                phi: self.phi,
+            })
+        });
         Node {
             kind: self.kind,
+            group: None,
             cmd: self.cmd,
             out: self.st,
-            reads: self.reads,
-            defs: self.defs,
-            emit: self.emit,
-            para: self.para,
-            errors: self.errors,
-            phi: self.phi,
-            group: None,
+            reads,
+            emit,
+            rare,
         }
     }
 
@@ -726,8 +827,21 @@ impl<'a> Exec<'a> {
         if let Some(d) = self.defs.iter().rev().find(|d| d.key == *key) {
             return d.val.clone();
         }
-        if let Some(v) = self.scratch.seen.get(key) {
-            return v.clone();
+        if self.reads.len() <= FEW_READS {
+            if let Some(r) = self.reads.iter().find(|r| r.key == *key) {
+                return r.val.clone();
+            }
+        } else {
+            for r in &self.reads[self.seen_upto..] {
+                self.scratch
+                    .seen
+                    .entry(r.key.clone())
+                    .or_insert_with(|| r.val.clone());
+            }
+            self.seen_upto = self.reads.len();
+            if let Some(v) = self.scratch.seen.get(key) {
+                return v.clone();
+            }
         }
         let (v, src) = resolve_now(self.chain, self.env, self.outside, key);
         self.reads.push(Read {
@@ -735,7 +849,6 @@ impl<'a> Exec<'a> {
             src,
             val: v.clone(),
         });
-        self.scratch.seen.insert(key.clone(), v.clone());
         v
     }
 
@@ -1052,10 +1165,10 @@ impl<'a> Exec<'a> {
         if test {
             self.st.conds += 1;
             self.kind = Kind::If;
-            self.phi = Some(Box::new(Phi {
+            self.phi = Some(Phi {
                 test: true,
                 keys: Vec::new(),
-            }));
+            });
             return;
         }
         let at_else = self.skip(true);
@@ -1065,10 +1178,10 @@ impl<'a> Exec<'a> {
         } else {
             self.kind = Kind::IfClosed;
         }
-        self.phi = Some(Box::new(Phi {
+        self.phi = Some(Phi {
             test: false,
             keys: Vec::new(),
-        }));
+        });
     }
 
     /// Skips an arm: up to the matching `\fi`, or `\else` if asked.
@@ -1119,16 +1232,16 @@ impl<'a> Exec<'a> {
             }
         }
         let Some(at) = at else {
-            self.phi = Some(Box::new(Phi {
+            self.phi = Some(Phi {
                 test: false,
                 keys: Vec::new(),
-            }));
+            });
             return;
         };
-        let test = nodes[at].phi.as_ref().is_some_and(|p| p.test);
+        let test = nodes[at].phi().is_some_and(|p| p.test);
         let mut keys: Vec<Key> = Vec::new();
         for n in &nodes[at + 1..here] {
-            for d in &n.defs {
+            for d in n.defs() {
                 if !keys.contains(&d.key) {
                     keys.push(d.key.clone());
                 }
@@ -1161,7 +1274,7 @@ impl<'a> Exec<'a> {
             });
             phis.push((k, after, before));
         }
-        self.phi = Some(Box::new(Phi { test, keys: phis }));
+        self.phi = Some(Phi { test, keys: phis });
     }
 
     // ------------------------------------------------------------ commands

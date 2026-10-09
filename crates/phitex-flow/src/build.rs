@@ -593,7 +593,7 @@ fn dump_piece(out: &mut String, k: usize, ps: &PState, r: &Run) {
     );
     for (i, n) in r.chain.nodes.iter().enumerate() {
         let _ = write!(out, "  n{i} {:?} {}", n.kind, n.cmd);
-        for rd in &n.reads {
+        for rd in n.reads.iter() {
             match rd.src {
                 Src::Node(d) => {
                     let _ = write!(out, " | reads {} = {} from n{d}", rd.key, rd.val);
@@ -606,13 +606,13 @@ fn dump_piece(out: &mut String, k: usize, ps: &PState, r: &Run) {
                 }
             }
         }
-        if let Some(phi) = &n.phi {
+        if let Some(phi) = n.phi() {
             let _ = write!(out, " | φ test={}", phi.test);
             for (key, after, before) in &phi.keys {
                 let _ = write!(out, " | {key} = φ({after} | {before})");
             }
         }
-        for d in &n.defs {
+        for d in n.defs() {
             let _ = write!(
                 out,
                 " | defines {}{} = {}",
