@@ -668,9 +668,11 @@ impl Exec<'_> {
         format!("{NL}l.{LINE}L{LINE} {CTX}{first}{CTX}{second}{CTX}{LN}{LN}")
     }
 
-    /// The line node `j` of this piece reached, as a log placeholder.
-    fn line_of_node(j: u32) -> String {
-        format!("{LINE}N{j}{LINE}")
+    /// Where the `k`-th open group (`group`) or conditional began, as a
+    /// log placeholder: the line of the node that opened it, found through
+    /// this node's state when the log is laid out (`graph::opener`).
+    fn entry_line(group: bool, k: usize) -> String {
+        format!("{LINE}{}{k}{LINE}", if group { 'G' } else { 'C' })
     }
 
     /// `\showgroups` (4), `\showtokens` (5), `\showifs` (6): etex.web's
@@ -731,7 +733,7 @@ impl Exec<'_> {
                 _ => "math left",
             };
             s.push(NL);
-            let _ = write!(s, "### {name} group (level {level}) entered at line {} (", Self::line_of_node(g.at));
+            let _ = write!(s, "### {name} group (level {level}) entered at line {} (", Self::entry_line(true, i));
             let bg = g.boxg.as_deref();
             let mut out = String::new();
             match ty {
@@ -842,7 +844,7 @@ impl Exec<'_> {
                 self.print_esc(&mut out, "else");
             }
             s.push(NL);
-            let _ = write!(s, "### level {}: {out} entered on line {}", i + 1, Self::line_of_node(c.open));
+            let _ = write!(s, "### level {}: {out} entered on line {}", i + 1, Self::entry_line(false, i));
         }
     }
 

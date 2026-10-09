@@ -153,6 +153,9 @@ impl<T: Clone> Stack<T> {
     fn len(&self) -> usize {
         self.0.as_ref().map_or(0, |v| v.len())
     }
+    fn get(&self, i: usize) -> Option<&T> {
+        self.0.as_ref().and_then(|v| v.get(i))
+    }
     fn is_empty(&self) -> bool {
         self.0.is_none()
     }
@@ -304,8 +307,52 @@ pub enum Src {
     Initial,
 }
 
+/// Two stacks equal but for the node indices their entries hold.
+fn same_but_pos<T: Clone>(a: &Stack<T>, b: &Stack<T>, same: impl Fn(&T, &T) -> bool) -> bool {
+    match (&a.0, &b.0) {
+        (Some(x), Some(y)) => {
+            Arc::ptr_eq(x, y)
+                || (x.len() == y.len() && x.iter().zip(y.iter()).all(|(p, q)| same(p, q)))
+        }
+        (None, None) => true,
+        _ => false,
+    }
+}
+
+impl Cond {
+    /// Equal but for the node that opened it (a position, not content).
+    fn same_but_pos(self, o: Cond) -> bool {
+        self.limit == o.limit && self.test == o.test && self.code == o.code
+    }
+}
+
+impl Group {
+    /// Equal but for the node that opened it (a position, not content).
+    fn same_but_pos(&self, o: &Group) -> bool {
+        self.kind == o.kind && self.after == o.after && self.boxg == o.boxg
+    }
+}
+
 impl RState {
-    /// Equal but for the position.
+    /// The node indices its open groups and conditionals hold, moved by
+    /// `map` (`None`: one of them has no place any more).
+    fn moved(&self, map: impl Fn(u32) -> Option<u32>) -> Option<RState> {
+        let mut st = self.clone();
+        if let Some(v) = st.groups.0.as_mut() {
+            for g in Arc::make_mut(v).iter_mut() {
+                g.at = map(g.at)?;
+            }
+        }
+        if let Some(v) = st.conds.0.as_mut() {
+            for c in Arc::make_mut(v).iter_mut() {
+                c.open = map(c.open)?;
+            }
+        }
+        Some(st)
+    }
+
+    /// Equal but for the position (where in the text, and the node indices
+    /// of where its open groups and conditionals began).
     fn eq_but_pos(&self, o: &RState) -> bool {
         self.tstate == o.tstate
             && self.mode == o.mode
@@ -313,10 +360,10 @@ impl RState {
             && self.level == o.level
             && self.boxing == o.boxing
             && self.global == o.global
-            && self.conds == o.conds
+            && same_but_pos(&self.conds, &o.conds, |a, b| a.same_but_pos(*b))
             && self.long == o.long
             && self.outer == o.outer
-            && self.groups == o.groups
+            && same_but_pos(&self.groups, &o.groups, Group::same_but_pos)
             && self.after_assignment == o.after_assignment
             && self.space_factor == o.space_factor
             && self.prev_depth == o.prev_depth
@@ -349,6 +396,11 @@ pub struct Read {
     /// ([`Chain::scope_of`]): what a definition at the level of the one it
     /// replaces (`Def::level`) is made from.
     pub scope: Option<u16>,
+    /// Read as of where the reading node's `.0`th open conditional began
+    /// (a `\fi`'s φ reads the value from before its `\if`); `None`: as
+    /// of the reading node. A depth, not a node: an edit moving the
+    /// conditional's opener does not change the read.
+    pub cond: Option<u16>,
 }
 
 /// A shared [`Read`].
@@ -839,6 +891,19 @@ pub struct Run {
     pub fonts: Vec<Arc<str>>,
 }
 
+/// The node that opened the `k`-th (from the outside) open group
+/// (`group`) or conditional at node `i`'s start: where it was entered, for
+/// the log's line numbers (e-TeX's `\showgroups`, `\showifs`).
+pub fn opener(chain: &Chain, i: usize, group: bool, k: usize) -> Option<usize> {
+    let st = chain.input(i);
+    let at = if group {
+        st.groups.0.as_ref()?.get(k)?.at
+    } else {
+        st.conds.0.as_ref()?.get(k)?.open
+    };
+    Some(at as usize)
+}
+
 /// The node that began the paragraph node `i` of `chain` ended (or is
 /// in): for the log's line numbers.
 pub fn paragraph_start(chain: &Chain, i: usize) -> usize {
@@ -976,6 +1041,7 @@ fn outside_read(env: &mut dyn Env, outside: &mut Outside, k: &Key, node: u32) ->
         src,
         val,
         scope: None,
+        cond: None,
     });
     outside.insert(k.clone(), (r.clone(), lo, hi));
     r
@@ -989,9 +1055,51 @@ fn resolve_now(chain: &Chain, env: &mut dyn Env, outside: &mut Outside, key: &Ke
             src: Src::Node(d),
             val,
             scope: chain.scope_of(d, key),
+            cond: None,
         }),
         None => outside_read(env, outside, key, chain.nodes.len() as u32),
     }
+}
+
+/// `r` read again for the next node of `chain`, whose input state is
+/// `state`: as of the node now opening the conditional it read before
+/// (`Read::cond`), or as of the next node (`None`: that conditional is
+/// not open any more).
+fn reread(
+    chain: &Chain,
+    state: &RState,
+    env: &mut dyn Env,
+    outside: &mut Outside,
+    r: &Read,
+) -> Option<ReadRef> {
+    let Some(c) = r.cond else {
+        return Some(resolve_now(chain, env, outside, &r.key));
+    };
+    let at = state.conds.get(c as usize)?.open as usize;
+    Some(before_read(chain, env, outside, &r.key, at, c))
+}
+
+/// The definition of `key` as of node `at`, the opener of the `c`th open
+/// conditional (`Read::cond`).
+fn before_read(
+    chain: &Chain,
+    env: &mut dyn Env,
+    outside: &mut Outside,
+    key: &Key,
+    at: usize,
+    c: u16,
+) -> ReadRef {
+    let r = match chain.resolve(key, at) {
+        Some((d, val)) => Read {
+            key: key.clone(),
+            src: Src::Node(d),
+            val,
+            scope: chain.scope_of(d, key),
+            cond: None,
+        },
+        None => (*outside_read(env, outside, key, at as u32)).clone(),
+    };
+    Arc::new(Read { cond: Some(c), ..r })
 }
 
 /// Runs a piece: `old` is its previous run (and the text that made it),
@@ -1054,6 +1162,17 @@ pub fn run_piece(
     // (a node ran or was dropped that changes how later names resolve:
     // later old nodes' reads must be looked at one by one)
     let mut scope_changed = false;
+    // (where the old nodes from `from` on are now: runs of old indices
+    // `a..b` at new `c..`, in order; an index the open groups and
+    // conditionals of a kept node's state hold is moved by it)
+    let mut moved: Vec<(u32, u32, u32)> = Vec::new();
+    let to_new = |moved: &[(u32, u32, u32)], x: u32| -> Option<u32> {
+        if (x as usize) < from {
+            return Some(x);
+        }
+        let k = moved.partition_point(|r| r.1 <= x);
+        moved.get(k).filter(|r| r.0 <= x).map(|r| r.2 + (x - r.0))
+    };
     loop {
         let mut kept: Option<Node> = None;
         let shared: Option<Arc<Node>> = None;
@@ -1083,7 +1202,8 @@ pub fn run_piece(
                     cand = Some(oi);
                     let reads_ok = par_ok
                         && n.reads.iter().all(|r| {
-                            Read::same(&resolve_now(&chain, env, &mut outside, &r.key), r)
+                            reread(&chain, &state, env, &mut outside, r)
+                                .is_some_and(|now| Read::same(&now, r))
                         });
                     if reads_ok {
                         let in_place = edit.is_none() && !scope_changed && oi == chain.nodes.len();
@@ -1102,11 +1222,26 @@ pub fn run_piece(
                             if let Some(e) = edit {
                                 n.out.pos = e.map(n.out.pos).unwrap_or(n.out.pos);
                             }
-                            // (re-point reads at the nodes now defining them)
-                            for r in n.reads.iter_mut() {
-                                *r = resolve_now(&chain, env, &mut outside, &r.key);
+                            // (the nodes its state's open groups and
+                            // conditionals began at, where they are now: as
+                            // the position, they are not content)
+                            let at = chain.nodes.len() as u32;
+                            let own = oi as u32;
+                            if let Some(out) = n.out.moved(|x| {
+                                if x == own {
+                                    Some(at)
+                                } else {
+                                    to_new(&moved, x)
+                                }
+                            }) {
+                                n.out = out;
+                                // (re-point reads at the nodes now defining them)
+                                for r in n.reads.iter_mut() {
+                                    *r = reread(&chain, &state, env, &mut outside, r)
+                                        .expect("read again above");
+                                }
+                                kept = Some(n);
                             }
-                            kept = Some(n);
                         }
                     }
                 }
@@ -1134,6 +1269,9 @@ pub fn run_piece(
                 j += 1;
             }
             chain.share(oc, oi, j);
+            if j > oi {
+                moved.push((oi as u32, j as u32, oi as u32));
+            }
             if j == oc.nodes.len() {
                 break;
             }
@@ -1142,6 +1280,13 @@ pub fn run_piece(
             continue;
         }
         let fresh = kept.is_none() && shared.is_none();
+        // (the old node this one stands for: kept, or run again at its input)
+        let was = if kept.is_some() { Some(oi) } else { cand };
+        if let Some(w) = was
+            && moved.last().is_none_or(|r| (r.1 as usize) <= w)
+        {
+            moved.push((w as u32, w as u32 + 1, chain.nodes.len() as u32));
+        }
         let n: Arc<Node> = match (shared, kept) {
             (Some(n), _) => {
                 oi += 1;
@@ -1473,6 +1618,7 @@ impl<'a> Exec<'a> {
                 src: Src::Node(self.chain.nodes.len() as u32),
                 val: self.defs[i].val.clone(),
                 scope: None,
+                cond: None,
             }),
             Found::Read(i) => self.reads[i].clone(),
         }

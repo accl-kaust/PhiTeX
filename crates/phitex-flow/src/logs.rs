@@ -15,7 +15,7 @@
 use std::fmt::Write as _;
 use std::sync::Arc;
 
-use crate::graph::{Run, paragraph_start};
+use crate::graph::{Run, opener, paragraph_start};
 use crate::item::Item;
 use crate::page::{Lines, Page, page_mark};
 use crate::show::LINE;
@@ -46,11 +46,14 @@ fn resolve(s: &str, text: &[char], run: &Run, i: usize) -> String {
                 let start = paragraph_start(&run.chain, i);
                 let _ = write!(out, "{REL}{}{REL}--{REL}{here}{REL}", line_of(text, run, start));
             }
-            // (`N` and a node's index: the line that node had reached —
-            // where a group or a conditional began, for e-TeX's
-            // `\showgroups`, `\showifs`)
-            w if w.starts_with('N') => {
-                let j = w[1..].parse::<usize>().unwrap_or(i).min(i);
+            // (`G`/`C` and k: the line where the k-th group or conditional
+            // open at node `i` began — for e-TeX's `\showgroups`,
+            // `\showifs` — read through the node's state now)
+            w if w.starts_with('G') || w.starts_with('C') => {
+                let k = w[1..].parse::<usize>().unwrap_or(0);
+                let j = opener(&run.chain, i, w.starts_with('G'), k)
+                    .unwrap_or(i)
+                    .min(i);
                 let _ = write!(out, "{REL}{}{REL}", line_of(text, run, j));
             }
             _ => {

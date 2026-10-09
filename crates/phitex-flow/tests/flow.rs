@@ -239,3 +239,46 @@ fn edits_that_move_piece_boundaries_equal_cold_builds() {
         }
     }
 }
+
+/// A blank line inserted inside an open group, above a `\begingroup`, a
+/// `\showgroups` and a `\showifs`: the nodes after it keep their reads and
+/// move by a node — where their open groups and conditionals began is a
+/// position, not content (`AGENTS_BRIEF.md`: no ids in a version) — so they
+/// are kept, not run again; only the nodes reading the changed text run.
+/// The log, with the lines where the groups began, is the cold log.
+#[test]
+fn an_edit_inside_a_group_keeps_the_nodes_after_it() {
+    let a = "\\catcode`\\{=1 \\catcode`\\}=2\n{\\count1=1\n\\count3=3\n\\begingroup\\count2=2 \\showgroups\n\
+             \\iftrue\\count4=4 \\showifs\\count5=5 \\fi\\endgroup\\count6=6 }\n";
+    let b = a.replacen("\\count3=3\n", "\\count3=3\n\n", 1);
+    let o = Options {
+        etex: true,
+        ..opts(1, Reads::Suspend, Order::Priority)
+    };
+    let mut bld = Build::new(font());
+    let first = bld.update(a, o);
+    assert!(first.errors.is_empty(), "{:?}", first.errors);
+    let e = bld.update(&b, o);
+    let cold = Build::new(font()).update(&b, o);
+    assert!(e.errors.is_empty(), "{:?}", e.errors);
+    assert_eq!(e.log, cold.log, "the edit's log is not the cold log");
+    assert!(
+        e.log.iter().any(|l| l.contains("entered at line 5")),
+        "{:?}",
+        e.log
+    );
+    eprintln!(
+        "nodes: {} run of {} (cold: {})",
+        e.stats.commands_run, e.stats.commands, cold.stats.commands_run
+    );
+    // (the `\count3` whose text the edit touched, the blank line's new
+    // `\par`, and the end, whose material since the last paragraph now
+    // holds that `\par`: the `\begingroup`, `\iftrue` and `\fi` after it,
+    // moved by a node, are kept)
+    assert!(
+        e.stats.commands_run <= 3,
+        "{} of {} nodes ran",
+        e.stats.commands_run,
+        e.stats.commands
+    );
+}
