@@ -33,13 +33,13 @@
 
 use std::collections::{BTreeSet, VecDeque};
 use std::fmt::Write as _;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, RwLock};
 use std::time::{Duration, Instant};
 
 use crate::dvi;
 use crate::graph::{Env, Para, PieceId, Run, Src, cut, run_piece};
-use crate::hash::{FxMap, hash_of};
+use crate::hash::{FxMap, FxSet, hash_of};
 use crate::linebreak::break_lines;
 use crate::page::{Lines, Page, Scan, VItem, material};
 use crate::tfm::Font;
@@ -118,6 +118,8 @@ pub struct Stats {
     pub time_scan: Duration,
     pub time_ship: Duration,
     pub time_confirm: Duration,
+    /// Of installing, the time the scheduler's lock was held.
+    pub time_held: Duration,
     /// Serial time: cutting the source, setting up, joining the DVI.
     pub time_cut: Duration,
     pub time_setup: Duration,
@@ -144,6 +146,7 @@ struct Kept {
     text: Arc<[char]>,
     run: Option<Arc<Run>>,
     lines: Vec<Option<Lines>>,
+    srcs: Vec<PieceId>,
 }
 
 /// The edges: name -> reader piece -> (its first node reading the name
@@ -236,6 +239,9 @@ struct PState {
     /// Nodes of its run that read a definition since remade.
     dirty: BTreeSet<u32>,
     runs: u32,
+    /// The piece whose definition answers each of its run's reads, as its
+    /// edges say (aligned with `Run::reads`).
+    srcs: Vec<PieceId>,
 }
 
 /// An edited piece's predecessor: its run, lines and text.
@@ -243,6 +249,8 @@ type Prev = (Arc<Run>, Vec<Option<Lines>>, Arc<[char]>);
 
 /// The scheduler's state.
 struct State {
+    /// The names each change to the names index changed, in order.
+    names_log: Vec<Vec<Key>>,
     p: Vec<PState>,
     unstarted: BTreeSet<usize>,
     running: BTreeSet<usize>,
@@ -275,6 +283,9 @@ struct Shared {
     generation: AtomicU64,
     park: Mutex<()>,
     parked: Condvar,
+    /// How many changes the names index has had (`State::names_log`'s
+    /// length, written under the scheduler's lock).
+    names_gen: AtomicUsize,
     /// Each piece's status is `Done` (a copy of the scheduler's, written
     /// under its lock, read without it).
     done: Vec<AtomicBool>,
@@ -364,6 +375,7 @@ impl Build {
                     status: Status::Done,
                     run: o.run.clone(),
                     lines: o.lines.clone(),
+                    srcs: o.srcs.clone(),
                     prev: None,
                     dirty: BTreeSet::new(),
                     runs: 0,
@@ -405,6 +417,7 @@ impl Build {
                     status: Status::Unstarted,
                     run: None,
                     lines: Vec::new(),
+                    srcs: near.map(|i| olds[i].srcs.clone()).unwrap_or_default(),
                     prev,
                     dirty: BTreeSet::new(),
                     runs: 0,
@@ -470,6 +483,7 @@ impl Build {
             .map(|(k, _)| k)
             .collect();
         let mut state = State {
+            names_log: Vec::new(),
             p,
             unstarted,
             running: BTreeSet::new(),
@@ -502,8 +516,9 @@ impl Build {
         // (kept runs' paragraphs never broken go to the queue)
         for k in 0..n {
             if state.p[k].status == Status::Done && !lines_ready(&state, k) {
-                let r = state.p[k].run.clone();
-                queue_breaks(&mut state, k, r);
+                let r = state.p[k].run.clone().expect("a run");
+                let equal = equal_paras(Some(&r), &r);
+                queue_breaks(&mut state, k, &equal);
             }
         }
         state.stats.time_cut = time_cut;
@@ -513,6 +528,7 @@ impl Build {
             ids,
             pos_of,
             generation: AtomicU64::new(0),
+            names_gen: AtomicUsize::new(0),
             park: Mutex::new(()),
             parked: Condvar::new(),
             done: state
@@ -578,6 +594,7 @@ impl Build {
                     text: ps.text,
                     run: ps.run,
                     lines: ps.lines,
+                    srcs: ps.srcs,
                 })
                 .collect();
         self.readers = st.readers;
@@ -754,24 +771,21 @@ fn reached(g: &State, sh: &Shared, m: usize, keys: &[Key]) -> Vec<(usize, u32)> 
 /// Gives each of piece `k`'s paragraphs its lines: a paragraph equal to
 /// one of `old`'s (or of the edited piece's predecessor) keeps its lines;
 /// the others are queued.
-fn queue_breaks(g: &mut State, k: usize, old: Option<Arc<Run>>) {
+///
+/// `equal[i]` lists the old paragraphs equal to paragraph `i`
+/// ([`equal_paras`], found before taking the lock), its own place first.
+fn queue_breaks(g: &mut State, k: usize, equal: &[Vec<u32>]) {
     let run = g.p[k].run.clone().expect("a run");
     let old_lines = std::mem::take(&mut g.p[k].lines);
-    let prev: Option<(Arc<Run>, Vec<Option<Lines>>)> = match g.p[k].prev.take() {
-        Some((r, l, _)) => Some((r, l)),
-        None => old.map(|r| (r, old_lines)),
+    let prev_lines = match g.p[k].prev.take() {
+        Some((_, l, _)) => l,
+        None => old_lines,
     };
     let mut lines = vec![None; run.paras.len()];
     for (i, para) in run.paras.iter().enumerate() {
-        let reuse = prev.as_ref().and_then(|(pr, pl)| {
-            let same = |j: usize| {
-                pr.paras
-                    .get(j)
-                    .filter(|q| Arc::ptr_eq(q, para) || ***q == **para)
-                    .and_then(|_| pl.get(j).cloned().flatten())
-            };
-            same(i).or_else(|| (0..pr.paras.len()).find_map(same))
-        });
+        let reuse = equal[i]
+            .iter()
+            .find_map(|&j| prev_lines.get(j as usize).cloned().flatten());
         match reuse {
             Some(l) => {
                 lines[i] = Some(l);
@@ -781,6 +795,33 @@ fn queue_breaks(g: &mut State, k: usize, old: Option<Arc<Run>>) {
         }
     }
     g.p[k].lines = lines;
+}
+
+/// For each paragraph of `run`, the paragraphs of `old` equal to it (by
+/// identity, then equality), its own place first.
+fn equal_paras(old: Option<&Run>, run: &Run) -> Vec<Vec<u32>> {
+    run.paras
+        .iter()
+        .enumerate()
+        .map(|(i, para)| {
+            let Some(o) = old else { return Vec::new() };
+            let eq = |j: usize| {
+                o.paras
+                    .get(j)
+                    .is_some_and(|q| Arc::ptr_eq(q, para) || **q == **para)
+            };
+            let mut v: Vec<u32> = Vec::new();
+            if eq(i) {
+                v.push(i as u32);
+            }
+            v.extend(
+                (0..o.paras.len())
+                    .filter(|&j| j != i && eq(j))
+                    .map(|j| j as u32),
+            );
+            v
+        })
+        .collect()
 }
 
 fn lines_ready(g: &State, k: usize) -> bool {
@@ -993,39 +1034,90 @@ fn run_and_install(sh: &Shared, k: usize, dirty: &[u32]) -> u64 {
     ));
     let steps = run.ran;
     let t = Instant::now();
+    // (what stood for this piece until now: its last run, or for an edited
+    // piece the run of the piece it replaces; nobody else installs this
+    // piece while it runs here)
+    let old_run = old.map(|(r, _)| r);
+    // (before the lock: each read validated against the names index as it
+    // is now, noting how many changes to the index that has seen; the
+    // names whose values this run changes; the paragraphs it kept)
+    let seen = sh.names_gen.load(Ordering::Acquire);
+    let mut checks: Vec<(Option<u32>, bool)> = run
+        .reads
+        .iter()
+        .map(|(key, _, val)| {
+            let (def, now) = sh.names.reaching(key, k, &sh.font);
+            (def, now == *val)
+        })
+        .collect();
+    let changed = changed_names(old_run.as_deref(), &run);
+    let equal = equal_paras(old_run.as_deref(), &run);
+    // (a run reading the same names as the old one, in the same order,
+    // leaves the edges whose node and source are the same as they are)
+    let same_keys = old_run.as_ref().is_some_and(|o| {
+        o.reads.len() == run.reads.len() && o.reads.iter().zip(&run.reads).all(|(a, b)| a.0 == b.0)
+    });
+    let read_keys: FxSet<&Key> = if old_run.is_some() && !same_keys {
+        run.reads.iter().map(|(key, _, _)| key).collect()
+    } else {
+        FxSet::default()
+    };
     {
         let mut g = lock(sh);
+        let held = Instant::now();
         g.stats.commands_run += run.ran;
         let id = sh.ids[k];
-        // (what stood for this piece until now: its last run, or for an
-        // edited piece the run of the piece it replaces)
-        let old_run = g.p[k]
-            .run
-            .clone()
-            .or_else(|| g.p[k].prev.as_ref().map(|(r, _, _)| r.clone()));
-        // (the edges: the old run's go, the new run's come, each with the
-        // piece whose definition answers it now; a read answered otherwise
+        // (names changed since the reads were validated: those reads again;
+        // the index changes only under this lock)
+        let now_gen = sh.names_gen.load(Ordering::Acquire);
+        if now_gen != seen {
+            let since: FxSet<&Key> = g.names_log[seen..now_gen].iter().flatten().collect();
+            for ((key, _, val), c) in run.reads.iter().zip(&mut checks) {
+                if since.contains(key) {
+                    let (def, now) = sh.names.reaching(key, k, &sh.font);
+                    *c = (def, now == *val);
+                }
+            }
+        }
+        // (the edges: the new run's, each with the piece whose definition
+        // answers it now, replace the old run's; a read answered otherwise
         // than it was is stale)
-        if let Some(o) = &old_run {
+        let mut stale: BTreeSet<u32> = BTreeSet::new();
+        let old_srcs = std::mem::take(&mut g.p[k].srcs);
+        let mut srcs = Vec::with_capacity(run.reads.len());
+        for (i, ((key, node, _), &(def, same))) in run.reads.iter().zip(&checks).enumerate() {
+            if !same {
+                stale.insert(*node);
+            }
+            let src = def.map_or(INITIAL, |d| sh.ids[d as usize]);
+            srcs.push(src);
+            if same_keys
+                && old_srcs.get(i) == Some(&src)
+                && old_run.as_ref().is_some_and(|o| o.reads[i].1 == *node)
+            {
+                continue;
+            }
+            if let Some(m) = g.readers.get_mut(key) {
+                m.insert(id, (*node, src));
+            } else {
+                let mut m = FxMap::default();
+                m.insert(id, (*node, src));
+                g.readers.insert(key.clone(), m);
+            }
+        }
+        g.p[k].srcs = srcs;
+        if let Some(o) = old_run.as_ref().filter(|_| !same_keys) {
             for (key, _, _) in &o.reads {
-                if let Some(m) = g.readers.get_mut(key) {
+                if !read_keys.contains(key)
+                    && let Some(m) = g.readers.get_mut(key)
+                {
                     m.remove(&id);
                 }
             }
         }
-        let mut stale: BTreeSet<u32> = BTreeSet::new();
-        for (key, node, val) in &run.reads {
-            let (def, now) = sh.names.reaching(key, k, &sh.font);
-            if now != *val {
-                stale.insert(*node);
-            }
-            let src = def.map_or(INITIAL, |d| sh.ids[d as usize]);
-            g.readers
-                .entry(key.clone())
-                .or_default()
-                .insert(id, (*node, src));
+        if !changed.is_empty() {
+            g.names_log.push(changed.clone());
         }
-        let changed = changed_names(old_run.as_deref(), &run);
         for key in &changed {
             let val = run
                 .exports
@@ -1034,6 +1126,7 @@ fn run_and_install(sh: &Shared, k: usize, dirty: &[u32]) -> u64 {
                 .map(|i| &run.exports[i].1);
             sh.names.set(k, key, val);
         }
+        sh.names_gen.store(g.names_log.len(), Ordering::Release);
         g.p[k].run = Some(run.clone());
         g.p[k].dirty.clear();
         g.p[k].runs += 1;
@@ -1045,7 +1138,7 @@ fn run_and_install(sh: &Shared, k: usize, dirty: &[u32]) -> u64 {
                 sh.done[r].store(false, Ordering::Release);
             }
         }
-        queue_breaks(&mut g, k, old_run);
+        queue_breaks(&mut g, k, &equal);
         if stale.is_empty() {
             g.p[k].status = Status::Done;
             sh.done[k].store(true, Ordering::Release);
@@ -1056,6 +1149,7 @@ fn run_and_install(sh: &Shared, k: usize, dirty: &[u32]) -> u64 {
             g.stats.reruns += 1;
         }
         g.stats.time_confirm += t.elapsed();
+        g.stats.time_held += held.elapsed();
     }
     {
         let _p = sh.park.lock().expect("park");
