@@ -97,6 +97,30 @@ pub struct Shipped {
     pub ship: Arc<ShipParams>,
 }
 
+/// An unset box (tex.web 159): an alignment's entry, or a row, before the
+/// column widths are known. An entry's glue totals are its list's highest
+/// order (§796); a row's are zero (§799).
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub struct Unset {
+    /// A vertical list (`\valign`'s entries and rows).
+    pub vertical: bool,
+    pub w: i32,
+    pub h: i32,
+    pub d: i32,
+    /// The columns an entry spans, less one (`span_count`).
+    pub span: u16,
+    /// The column an entry begins in.
+    pub col: u16,
+    pub stretch: i32,
+    pub stretch_order: u8,
+    pub shrink: i32,
+    pub shrink_order: u8,
+    pub list: Vec<Item>,
+    /// A `\halign` row: what appending it to the vertical list read
+    /// (tex.web 799: `append_to_vlist`).
+    pub inter: Option<Arc<Interline>>,
+}
+
 /// A command's contribution to the main vertical list, in order: vertical
 /// items, then — for `\par` — a paragraph's lines (line breaking is a pure
 /// function of `hlist` and `lb`, memoised by equality), then more vertical
@@ -138,6 +162,8 @@ pub enum Item {
     Penalty(i32),
     Disc(Arc<Disc>),
     Mark(Arc<Vec<Tok>>),
+    /// An unset box: only inside an alignment, until it is set.
+    Unset(Arc<Unset>),
     // ---- pseudo-items, applied by the gatherer of the list
     /// `\unpenalty` (0), `\unkern` (1), `\unskip` (2): remove the last item
     /// if it is of that kind.
@@ -163,6 +189,7 @@ impl Item {
             Item::Char(f, c) => f.glyph(i32::from(*c)).map_or(0, |g| g.width),
             Item::Lig(l) => l.font.glyph(i32::from(l.c)).map_or(0, |g| g.width),
             Item::Box(b) => b.w,
+            Item::Unset(u) => u.w,
             Item::Rule { w, .. } | Item::Kern { w, .. } => *w,
             Item::Glue { g, .. } => g.width,
             _ => 0,

@@ -154,7 +154,7 @@ pub(super) fn para_start(chain: &Chain, i: usize, level: u16) -> usize {
 }
 
 /// The first node inside the box at `level` that node `i` is in.
-fn box_start(chain: &Chain, i: usize, level: u16) -> usize {
+pub(super) fn box_start(chain: &Chain, i: usize, level: u16) -> usize {
     let mut j = i;
     while j > 0 && chain.nodes[j - 1].out.level >= level {
         j -= 1;
@@ -163,7 +163,7 @@ fn box_start(chain: &Chain, i: usize, level: u16) -> usize {
 }
 
 /// Appends an item emitted into a horizontal list, or applies it.
-fn push_horizontal(list: &mut Vec<Item>, it: Item) {
+pub(super) fn push_horizontal(list: &mut Vec<Item>, it: Item) {
     match it {
         Item::Remove(k) => remove_last(list, k),
         _ => list.push(it),
@@ -203,14 +203,14 @@ impl Exec<'_> {
         }
     }
 
-    fn toks_par(&mut self, p: TokPar) -> Vec<Tok> {
+    pub(super) fn toks_par(&mut self, p: TokPar) -> Vec<Tok> {
         match self.get(&Key::TokPar(p)) {
             Val::Toks(t) => t.to_vec(),
             _ => Vec::new(),
         }
     }
 
-    fn interline(&mut self) -> Arc<Interline> {
+    pub(super) fn interline(&mut self) -> Arc<Interline> {
         Arc::new(Interline {
             baselineskip: self.glue_par(GluePar::Baselineskip),
             lineskip: self.glue_par(GluePar::Lineskip),
@@ -239,7 +239,7 @@ impl Exec<'_> {
     }
 
     /// What the page builder reads where it is called.
-    fn page_call(&mut self) -> Arc<PageCall> {
+    pub(super) fn page_call(&mut self) -> Arc<PageCall> {
         Arc::new(PageCall {
             vsize: self.dimen_par(DimenPar::Vsize),
             maxdepth: self.dimen_par(DimenPar::Maxdepth),
@@ -251,7 +251,7 @@ impl Exec<'_> {
 
     /// What a display of `list` reads: the escape character, the names of
     /// its fonts, `\showboxdepth` and `\showboxbreadth`.
-    fn show_ctx(&mut self, list: &[Item]) -> Ctx {
+    pub(super) fn show_ctx(&mut self, list: &[Item]) -> Ctx {
         let mut ids = Vec::new();
         fonts_in(list, &mut ids);
         let idents = ids
@@ -273,7 +273,7 @@ impl Exec<'_> {
     }
 
     /// Appends a raw entry to the node's log.
-    fn log_raw(&mut self, raw: &str) {
+    pub(super) fn log_raw(&mut self, raw: &str) {
         match &mut self.log {
             Some(l) if l.starts_with(RAW) => {
                 let mut s = l.to_string();
@@ -285,7 +285,7 @@ impl Exec<'_> {
     }
 
     /// Emits into the current list (vertical or horizontal).
-    fn emit_here(&mut self, it: Item) {
+    pub(super) fn emit_here(&mut self, it: Item) {
         if self.st.mode == Mode::V {
             self.vemit.push(it);
         } else {
@@ -407,13 +407,13 @@ impl Exec<'_> {
 
     /// vmode + a horizontal command: a paragraph begins first (tex.web
     /// 1090).
-    fn back_new_graf(&mut self, t: &Tok) {
+    pub(super) fn back_new_graf(&mut self, t: &Tok) {
         self.back(t.clone());
         self.new_graf(true);
     }
 
     /// tex.web 1095: `head_for_vmode`.
-    fn head_for_vmode(&mut self, t: &Tok, hrule: bool) {
+    pub(super) fn head_for_vmode(&mut self, t: &Tok, hrule: bool) {
         if self.st.inner {
             if hrule {
                 self.err("You can't use `\\hrule' here except with leaders".into());
@@ -499,7 +499,7 @@ impl Exec<'_> {
     }
 
     /// What line breaking reads (tex.web 813–890).
-    fn line_params(&mut self, hlist: &[Item]) -> LineParams {
+    pub(super) fn line_params(&mut self, hlist: &[Item]) -> LineParams {
         let parshape = match self.get(&Key::Parshape) {
             Val::Parshape(s) => s,
             _ => Arc::new(Vec::new()),
@@ -1167,7 +1167,7 @@ impl Exec<'_> {
 
     /// Opens a box group: a scope, and a new list (tex.web 1083: `push_nest`).
     fn open_box(&mut self, g: BoxGroup, mode: Mode) {
-        self.st.groups.push(Group { kind: GroupKind::Box, after: Vec::new(), boxg: Some(Arc::new(g)) });
+        self.st.groups.push(Group { kind: GroupKind::Box, after: Vec::new(), boxg: Some(Arc::new(g)), align: None });
         self.kind = Kind::Open;
         self.st.level += 1;
         self.st.mode = mode;
@@ -1311,8 +1311,11 @@ impl Exec<'_> {
     pub(super) fn close_box(&mut self, t: &Tok) {
         let Some(g) = self.st.groups.last().and_then(|g| g.boxg.clone()) else { return };
         if self.st.mode == Mode::H && !self.st.inner {
+            // (the `}` read again: as `back_input`, which an alignment's
+            // brace count sees)
             let e = self.cs("\u{0}endgraf");
-            self.rewrite(vec![e, t.clone()]);
+            self.back(t.clone());
+            self.back(e);
             return;
         }
         let boxmaxdepth = self.dimen_par(DimenPar::Boxmaxdepth);

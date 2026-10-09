@@ -53,7 +53,8 @@ fn tex(name: &str, src: &str) -> Option<(Vec<u8>, String)> {
     let dvi = std::fs::read(tmp.join(format!("{name}.dvi"))).unwrap_or_default();
     let _ = std::fs::remove_dir_all(&tmp);
     let log = log?;
-    assert!(st.status.success(), "tex failed on {name}:\n{log}");
+    // (a document of errors: TeX exits with 1, its log is the oracle)
+    assert!(st.status.success() || log.contains("\n! "), "tex failed on {name}:\n{log}");
     Some((dvi, log_body(&log)?))
 }
 
@@ -145,6 +146,15 @@ macro_rules! documents {
 }
 
 documents!(para, skips, hbox, setbox, vbox, pages, fonts, shape, leave, show, ship, disc);
+
+// Alignments (tex.web part 37, §1145, §1206): three columns with
+// `\tabskip` glue and `\hfil` templates, `\omit`, `\span` and a
+// `\multispan` made in the document, `\noalign` rules, skips and boxes
+// (`halign`); periodic preambles, `to`, `spread`, `\everycr`, `\crcr`, an
+// overfull alignment (`halign2`); `\valign` (`valign`); display alignments
+// in a paragraph and `\halign` ending one (`display`); TeX's errors and
+// what it does after them (`alignerr`).
+documents!(halign, halign2, valign, display, alignerr, alignerr2);
 
 /// plain.tex (all but `\input hyphen`), then text set with its macros and
 /// the default output routine (`\output={}`), at 1 thread.

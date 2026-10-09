@@ -22,6 +22,10 @@ pub const NL: char = '\u{2}';
 pub const LINE: char = '\u{4}';
 /// A space if the log's line is not empty (tex.web 638's `[`).
 pub const SP: char = '\u{6}';
+/// An error's context line (tex.web 311–318): `CTX read CTX unread CTX`
+/// after its label (`l.N `, `<template> `…), laid out as TeX's two lines
+/// once the label's length is known (`print::log`).
+pub const CTX: char = '\u{7}';
 
 /// What a display reads: the escape character, the font identifiers, and
 /// `\showboxdepth`/`\showboxbreadth`.
@@ -65,7 +69,7 @@ pub fn short_display(out: &mut String, list: &[Item], font: &mut Arc<str>, cx: &
                 }
                 out.push(char::from(*c));
             }
-            Item::Box(_) | Item::Mark(_) => out.push_str("[]"),
+            Item::Box(_) | Item::Mark(_) | Item::Unset(_) => out.push_str("[]"),
             Item::Rule { .. } => out.push('|'),
             Item::Glue { zero, .. } => {
                 if !zero {
@@ -220,6 +224,28 @@ impl Shower<'_> {
                 self.out.push(char::from(*c));
             }
             Item::Box(b) => self.boxed(b),
+            Item::Unset(u) => {
+                // (§184, §185)
+                let o = &mut *self.out;
+                self.cx.esc(o, "unsetbox(");
+                print::scaled(o, u.h);
+                o.push('+');
+                print::scaled(o, u.d);
+                o.push_str(")x");
+                print::scaled(o, u.w);
+                if u.span != 0 {
+                    let _ = write!(o, " ({} columns)", u32::from(u.span) + 1);
+                }
+                if u.stretch != 0 {
+                    o.push_str(", stretch ");
+                    glue_part(o, u.stretch, u.stretch_order, "");
+                }
+                if u.shrink != 0 {
+                    o.push_str(", shrink ");
+                    glue_part(o, u.shrink, u.shrink_order, "");
+                }
+                self.sub('.', &u.list);
+            }
             Item::Rule { w, h, d } => {
                 self.cx.esc(self.out, "rule(");
                 rule_dim(self.out, *h);
@@ -345,6 +371,9 @@ pub enum Place {
     Paragraph,
     /// A box made by a command (`detected at line n`).
     Here,
+    /// An alignment's preamble (`in alignment at lines a--b`, tex.web 663,
+    /// 675: from the alignment's first line to the current one).
+    Alignment,
 }
 
 /// The diagnostic TeX prints for a box (tex.web 660–667 for an hbox,
@@ -379,6 +408,9 @@ pub fn report(r: Report, b: &BoxNode, place: Place, cx: &Ctx) -> String {
         }
         Place::Here => {
             let _ = write!(o, ") detected at line {LINE}L{LINE}");
+        }
+        Place::Alignment => {
+            let _ = write!(o, ") in alignment at lines {LINE}A{LINE}");
         }
     }
     if b.vertical {

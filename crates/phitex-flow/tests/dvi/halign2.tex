@@ -1,0 +1,22 @@
+\catcode`\{=1 \catcode`\}=2 \catcode`\#=6 \catcode`\&=4
+\font\tenrm=cmr10 \tenrm
+\hsize=300pt \vsize=500pt \parindent=20pt \baselineskip=12pt \topskip=10pt
+\tolerance=1000 \linepenalty=10 \maxdepth=2pt \parfillskip=0pt plus 1fil
+\lineskip=1pt \lineskiplimit=0pt
+\halign to 200pt{\tabskip=0pt plus 1fil#&&\hfil#\hfil\cr
+a&b&c&d\cr
+1&2\cr
+w&x&y&z&extra\cr}
+\everycr{\noalign{\kern 2pt}}
+\halign spread 20pt{#\tabskip=0pt plus 1fill&#\cr
+one&two\crcr
+three\cr\crcr
+\noalign{\hrule}
+four&five\crcr}
+\everycr{}
+\halign{&#\hfil\cr
+p&q&r\cr
+s\cr}
+\halign to 50pt{#&#\cr
+narrow&columns\cr}
+\end

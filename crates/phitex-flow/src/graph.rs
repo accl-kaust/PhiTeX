@@ -40,6 +40,7 @@ use crate::page::IGNORE_DEPTH;
 use crate::tfm::Font;
 use crate::val::{DimenPar, IntPar, Key, Macro, Meaning, Prim, Tok, Val};
 
+mod align;
 mod assign;
 mod expand;
 mod fonts;
@@ -74,6 +75,9 @@ enum TState {
 enum Mode {
     V,
     H,
+    /// Display math, as far as a display alignment needs it (`$$\halign
+    /// {...}$$`, tex.web 1145, 1206).
+    M,
 }
 
 /// What opened a group (only to report mismatches: the scoping itself is
@@ -86,6 +90,13 @@ enum GroupKind {
     SemiSimple,
     /// A box's or a discretionary's braces (`Group::boxg`).
     Box,
+    /// An alignment's group, and each of its entries' (tex.web's
+    /// `align_group`; the alignment's carries `Group::align`).
+    Align,
+    /// `\noalign{...}`.
+    NoAlign,
+    /// A display (`$$`; `Group::align` holds what it needs).
+    Math,
 }
 
 /// An open conditional: the node whose step opened it, which ends may end
@@ -106,6 +117,9 @@ struct Group {
     after: Vec<Tok>,
     /// A box group's specification and context (tex.web 1083).
     boxg: Option<Arc<material::BoxGroup>>,
+    /// An alignment's preamble and what it began in; a display's
+    /// dimensions and, once its alignment is set, its material.
+    align: Option<Arc<align::AlignGroup>>,
 }
 
 /// A stack in the reader state, shared until changed: handing the state
@@ -198,6 +212,9 @@ pub struct RState {
     /// The current line's end-of-line character (`\endlinechar` as the line
     /// was begun; -1: none), or `EOL_UNREAD`.
     eol: i16,
+    /// The alignment being read: `align_state`, the current column and
+    /// span, how the entry began and ended (tex.web 309, 770).
+    al: align::AlignCur,
 }
 
 impl RState {
@@ -220,6 +237,7 @@ impl RState {
             prev_depth: IGNORE_DEPTH,
             prev_graf: 0,
             eol: EOL_UNREAD,
+            al: align::AlignCur::OFF,
         }
     }
 }
@@ -283,6 +301,7 @@ impl RState {
             && self.prev_depth == o.prev_depth
             && self.prev_graf == o.prev_graf
             && self.eol == o.eol
+            && self.al == o.al
             && self.pending == o.pending
     }
 
@@ -754,6 +773,13 @@ pub struct Run {
 /// in): for the log's line numbers.
 pub fn paragraph_start(chain: &Chain, i: usize) -> usize {
     material::para_start(chain, i, chain.nodes[i].out.level)
+}
+
+/// The node that began the alignment node `i` of `chain` set (its
+/// `\halign` or `\valign`): for the log's line numbers.
+pub fn alignment_start(chain: &Chain, i: usize) -> usize {
+    let level = chain.nodes[i].out.level + 1;
+    material::box_start(chain, i.saturating_sub(1), level)
 }
 
 /// Cuts the source into pieces at blank lines at brace depth 0. Lines lose
@@ -1431,6 +1457,10 @@ impl<'a> Exec<'a> {
     // ------------------------------------------------------------ the input
 
     fn back(&mut self, t: Tok) {
+        if self.st.al.on {
+            // (tex.web 325: a brace read again is counted again)
+            align::uncount(&mut self.st.al, &t);
+        }
         self.st.pending.push((Arc::from([t]), 0));
     }
 
@@ -1522,8 +1552,16 @@ impl<'a> Exec<'a> {
     }
 
     /// The next token, unexpanded (tex.web 343-357). After `\noexpand`'s
-    /// mark, the token after it, with `noexp` set.
+    /// mark, the token after it, with `noexp` set. In an alignment, the
+    /// braces are counted and an entry's end inserts its v template
+    /// (tex.web 342: `align_state`).
     fn next_raw(&mut self) -> Option<Tok> {
+        let t = self.next_raw0()?;
+        if self.st.al.on { self.align_token(t) } else { Some(t) }
+    }
+
+    /// [`Exec::next_raw`] before an alignment sees the token.
+    fn next_raw0(&mut self) -> Option<Tok> {
         self.noexp = false;
         while let Some((list, i)) = self.st.pending.last_mut() {
             if *i < list.len() {
@@ -1533,7 +1571,7 @@ impl<'a> Exec<'a> {
                     self.st.pending.pop();
                 }
                 if t == Tok::DontExpand {
-                    let n = self.next_raw();
+                    let n = self.next_raw0();
                     self.noexp = n.as_ref().is_some_and(|x| x.key().is_some());
                     return n;
                 }
@@ -1793,6 +1831,9 @@ impl<'a> Exec<'a> {
             std::mem::take(&mut self.st.long),
             std::mem::take(&mut self.st.outer),
         );
+        if self.st.mode == Mode::M && self.math_cmd(&t, &m) {
+            return;
+        }
         match m {
             Meaning::Prim(p) if p.conditional() => self.conditional(p, &t),
             Meaning::Prim(Prim::Global | Prim::Long | Prim::Outer) => {
@@ -1837,6 +1878,7 @@ impl<'a> Exec<'a> {
             kind: g,
             after: Vec::new(),
             boxg: None,
+            align: None,
         });
         self.kind = Kind::Open;
     }
@@ -1856,8 +1898,13 @@ impl<'a> Exec<'a> {
                 Some(GroupKind::Simple) => self.close_group(),
                 Some(GroupKind::Box) => self.close_box(t),
                 Some(GroupKind::SemiSimple) => self.err("Extra }, or forgotten \\endgroup".into()),
+                Some(GroupKind::Align) => self.missing_cr(t),
+                Some(GroupKind::NoAlign) => self.noalign_close(t),
+                Some(GroupKind::Math) => self.err("Extra }, or forgotten $".into()),
                 None => self.err("Too many }'s".into()),
             },
+            3 => self.math_shift(t),
+            4 => self.align_error(t),
             10 => {
                 if self.st.mode == Mode::H {
                     self.space_cmd();
@@ -1884,7 +1931,7 @@ impl<'a> Exec<'a> {
             Prim::BeginGroup => self.open_group(GroupKind::SemiSimple),
             Prim::EndGroup => match self.st.groups.last().map(|g| g.kind) {
                 Some(GroupKind::SemiSimple) => self.close_group(),
-                Some(GroupKind::Simple | GroupKind::Box) => {
+                Some(GroupKind::Simple | GroupKind::Box | GroupKind::Align | GroupKind::NoAlign | GroupKind::Math) => {
                     // (tex.web 1064: the missing `}` goes in first)
                     self.err("Missing } inserted".into());
                     let t = self.cmd.clone();
@@ -1925,6 +1972,7 @@ impl<'a> Exec<'a> {
             Prim::Uppercase | Prim::Lowercase => self.case_shift(p == Prim::Uppercase),
             Prim::EndCsName => self.err("Extra \\endcsname".into()),
             Prim::End | Prim::Dump => self.stop(),
+            Prim::Align(a) => self.align_cmd(a),
             Prim::Relax => {}
             Prim::LastItem(_)
             | Prim::SpaceFactor

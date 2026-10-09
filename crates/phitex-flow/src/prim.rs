@@ -135,6 +135,49 @@ pub enum Mat {
     Internal(u8),
 }
 
+/// An alignment command (tex.web part 37), or one of the reader's own
+/// steps of an alignment and of a display (`graph::align`).
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum Al {
+    Halign,
+    Valign,
+    Noalign,
+    Omit,
+    Span,
+    Cr,
+    Crcr,
+    /// The preamble is read (and the entries' group opens).
+    Pre,
+    /// `align_peek` (§785).
+    Peek,
+    /// An entry begins: `init_span`, `init_col` (§787, §788).
+    Col,
+    /// The template's end (`\endtemplate`, §1131: `do_endv`).
+    EndV,
+    /// The end of a u template (an entry's text begins: §324).
+    EndU,
+    /// An entry is packaged into an unset box (§796).
+    Pack,
+    /// The next entry's group opens (§791).
+    Next,
+    /// A row ends (§799: `fin_row`).
+    Row,
+    /// The alignment's group closes (§800).
+    Fin,
+    /// The alignment is set (§800–§812: `fin_align`).
+    Set,
+    /// `\cr` as TeX inserts it (`frozen_cr`).
+    FrozenCr,
+    /// A display's group opens (§1145).
+    DisplayOpen,
+    /// A display's parameters are defined (§1145).
+    DisplayDefs,
+    /// A display's group closes (§1200).
+    DisplayClose,
+    /// The paragraph resumes after a display (§1200).
+    DisplayResume,
+}
+
 /// A primitive.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum Prim {
@@ -214,6 +257,8 @@ pub enum Prim {
     DefFamily(u8),
     /// Material, boxes and pages.
     Mat(Mat),
+    /// Alignments.
+    Align(Al),
     /// A primitive without a graph form yet: `UNIMPL[i]`.
     Unimpl(u16),
 }
@@ -305,11 +350,26 @@ params! { GluePar, 18, Lineskip = "lineskip", Baselineskip = "baselineskip", Par
 params! { TokPar, 9, Output = "output", Everypar = "everypar", Everymath = "everymath", Everydisplay = "everydisplay", Everyhbox = "everyhbox", Everyvbox = "everyvbox", Everyjob = "everyjob", Everycr = "everycr", Errhelp = "errhelp" }
 
 /// The reader's internal commands (`Mat::Internal`).
-pub const INTERNAL: [(&str, Prim); 4] = [
+pub const INTERNAL: [(&str, Prim); 19] = [
     ("\u{0}package", Prim::Mat(Mat::Internal(0))),
     ("\u{0}endgraf", Prim::Mat(Mat::Internal(1))),
     ("\u{0}discnext", Prim::Mat(Mat::Internal(2))),
     ("\u{0}normalparagraph", Prim::Mat(Mat::Internal(3))),
+    ("\u{0}alignpre", Prim::Align(Al::Pre)),
+    ("\u{0}alignpeek", Prim::Align(Al::Peek)),
+    ("\u{0}aligncol", Prim::Align(Al::Col)),
+    ("\u{0}endtemplate", Prim::Align(Al::EndV)),
+    ("\u{0}endu", Prim::Align(Al::EndU)),
+    ("\u{0}alignpack", Prim::Align(Al::Pack)),
+    ("\u{0}alignnext", Prim::Align(Al::Next)),
+    ("\u{0}alignrow", Prim::Align(Al::Row)),
+    ("\u{0}alignfin", Prim::Align(Al::Fin)),
+    ("\u{0}alignset", Prim::Align(Al::Set)),
+    ("\u{0}cr", Prim::Align(Al::FrozenCr)),
+    ("\u{0}displayopen", Prim::Align(Al::DisplayOpen)),
+    ("\u{0}displaydefs", Prim::Align(Al::DisplayDefs)),
+    ("\u{0}displayclose", Prim::Align(Al::DisplayClose)),
+    ("\u{0}displayresume", Prim::Align(Al::DisplayResume)),
 ];
 
 /// Every TeX82 primitive (tex.web §1336: partex-core's `init_prim_tex` less
@@ -351,8 +411,8 @@ pub const PRIMITIVES: [(&str, Prim, &str); 325] = [
     ("copy", Prim::Mat(Mat::MakeBox(1)), "MAKE_BOX"),
     ("count", Prim::Register(Reg::Count), "REGISTER"),
     ("countdef", Prim::Shorthand(Shorthand::Count), "SHORTHAND_DEF"),
-    ("cr", Prim::Unimpl(24), "CAR_RET"),
-    ("crcr", Prim::Unimpl(25), "CAR_RET"),
+    ("cr", Prim::Align(Al::Cr), "CAR_RET"),
+    ("crcr", Prim::Align(Al::Crcr), "CAR_RET"),
     ("csname", Prim::CsName, "CS_NAME"),
     ("day", Prim::IntPar(IntPar::Day), "ASSIGN_INT"),
     ("deadcycles", Prim::PageInt(0), "SET_PAGE_INT"),
@@ -410,7 +470,7 @@ pub const PRIMITIVES: [(&str, Prim, &str); 325] = [
     ("gdef", Prim::Gdef, "DEF"),
     ("global", Prim::Global, "PREFIX"),
     ("globaldefs", Prim::IntPar(IntPar::Globaldefs), "ASSIGN_INT"),
-    ("halign", Prim::Unimpl(3), "HALIGN"),
+    ("halign", Prim::Align(Al::Halign), "HALIGN"),
     ("hangafter", Prim::IntPar(IntPar::Hangafter), "ASSIGN_INT"),
     ("hangindent", Prim::DimenPar(DimenPar::Hangindent), "ASSIGN_DIMEN"),
     ("hbadness", Prim::IntPar(IntPar::Hbadness), "ASSIGN_INT"),
@@ -506,7 +566,7 @@ pub const PRIMITIVES: [(&str, Prim, &str); 325] = [
     ("muskip", Prim::Register(Reg::Muskip), "REGISTER"),
     ("muskipdef", Prim::Shorthand(Shorthand::Muskip), "SHORTHAND_DEF"),
     ("newlinechar", Prim::IntPar(IntPar::Newlinechar), "ASSIGN_INT"),
-    ("noalign", Prim::Unimpl(10), "NO_ALIGN"),
+    ("noalign", Prim::Align(Al::Noalign), "NO_ALIGN"),
     ("noboundary", Prim::Unimpl(11), "NO_BOUNDARY"),
     ("noexpand", Prim::NoExpand, "NO_EXPAND"),
     ("noindent", Prim::Noindent, "START_PAR"),
@@ -516,7 +576,7 @@ pub const PRIMITIVES: [(&str, Prim, &str); 325] = [
     ("nulldelimiterspace", Prim::DimenPar(DimenPar::Nulldelimiterspace), "ASSIGN_DIMEN"),
     ("nullfont", Prim::Unimpl(22), "SET_FONT"),
     ("number", Prim::Convert(Conv::Number), "CONVERT"),
-    ("omit", Prim::Unimpl(13), "OMIT"),
+    ("omit", Prim::Align(Al::Omit), "OMIT"),
     ("openin", Prim::Unimpl(97), "IN_STREAM"),
     ("openout", Prim::Unimpl(103), "EXTENSION"),
     ("or", Prim::Or, "FI_OR_ELSE"),
@@ -579,7 +639,7 @@ pub const PRIMITIVES: [(&str, Prim, &str); 325] = [
     ("skipdef", Prim::Shorthand(Shorthand::Skip), "SHORTHAND_DEF"),
     ("spacefactor", Prim::SpaceFactor, "SET_AUX"),
     ("spaceskip", Prim::GluePar(GluePar::Spaceskip), "ASSIGN_GLUE"),
-    ("span", Prim::Unimpl(23), "TAB_MARK"),
+    ("span", Prim::Align(Al::Span), "TAB_MARK"),
     ("special", Prim::Unimpl(105), "EXTENSION"),
     ("splitbotmark", Prim::Mark(4), "TOP_BOT_MARK"),
     ("splitfirstmark", Prim::Mark(3), "TOP_BOT_MARK"),
@@ -619,7 +679,7 @@ pub const PRIMITIVES: [(&str, Prim, &str); 325] = [
     ("unvcopy", Prim::Mat(Mat::Unvbox(true)), "UN_VBOX"),
     ("uppercase", Prim::Uppercase, "CASE_SHIFT"),
     ("vadjust", Prim::Unimpl(18), "VADJUST"),
-    ("valign", Prim::Unimpl(19), "VALIGN"),
+    ("valign", Prim::Align(Al::Valign), "VALIGN"),
     ("vbadness", Prim::IntPar(IntPar::Vbadness), "ASSIGN_INT"),
     ("vbox", Prim::Mat(Mat::MakeBox(5)), "MAKE_BOX"),
     ("vcenter", Prim::Unimpl(20), "VCENTER"),

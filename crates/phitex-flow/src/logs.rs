@@ -15,7 +15,7 @@
 use std::fmt::Write as _;
 use std::sync::Arc;
 
-use crate::graph::{Run, paragraph_start};
+use crate::graph::{Run, alignment_start, paragraph_start};
 use crate::item::Item;
 use crate::page::{Lines, Page, page_mark};
 use crate::show::LINE;
@@ -44,6 +44,10 @@ fn resolve(s: &str, text: &[char], run: &Run, i: usize) -> String {
         match what {
             "P" => {
                 let start = paragraph_start(&run.chain, i);
+                let _ = write!(out, "{REL}{}{REL}--{REL}{here}{REL}", line_of(text, run, start));
+            }
+            "A" => {
+                let start = alignment_start(&run.chain, i);
                 let _ = write!(out, "{REL}{}{REL}--{REL}{here}{REL}", line_of(text, run, start));
             }
             _ => {

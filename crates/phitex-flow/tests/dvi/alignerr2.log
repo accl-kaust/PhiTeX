@@ -1,0 +1,36 @@
+(./alignerr2.tex
+! Missing } inserted.
+<inserted text> 
+                }
+...
+l.7 \hbox{a&
+            b}
+I've put in what seems to be necessary to fix
+the current column of the current alignment.
+Try to go on, since this might almost work.
+
+! Missing \cr inserted.
+<inserted text> 
+                \cr 
+...
+l.7 \hbox{a&b}
+              
+I'm guessing that you meant to end an alignment here.
+
+! Missing $$ inserted.
+<to be read again> 
+                   x
+l.8 Text $$\halign{#\cr a\cr} x
+                                and more.\par
+Displays can use special alignments (like \eqalignno)
+only if nothing but the alignment itself is between $$'s.
+
+! Display math should end with $$.
+<to be read again> 
+                   y
+l.9 Text $$\halign{#\cr b\cr}$y
+                               .\par
+The `$' that I just saw supposedly matches a previous `$$'.
+So I shall assume that you typed `$$' both times.
+
+[0] )
