@@ -20,7 +20,7 @@ use crate::item::{
 use crate::linebreak::{self, LineParams};
 use crate::pack::{Params, Spec, hpack, vpack};
 use crate::page::{IGNORE_DEPTH, page_mark, push_vertical, remove_last};
-use crate::show::{Ctx, Place, RAW, report};
+use crate::show::{Ctx, NL, Place, RAW, report};
 use crate::tfm::{Font, Glyph, LigKern, Tag};
 use crate::val::{DimenPar, Glue, GluePar, IntPar, Key, Mat, Meaning, Prim, Tok, TokPar, Val};
 
@@ -700,6 +700,15 @@ impl Exec<'_> {
         }
     }
 
+    /// tex.web 581: `char_warning`, with `\tracinglostchars` positive.
+    fn char_warning(&mut self, f: &Font, c: i32) {
+        if self.int_par(IntPar::Tracinglostchars) > 0 {
+            let ch = char::from_u32(c as u32).unwrap_or('?');
+            let s = format!("{RAW}{NL}Missing character: There is no {ch} in font {}!{NL}", f.name);
+            self.log_raw(&s);
+        }
+    }
+
     /// §1034: `adjust_space_factor`.
     fn adjust_space_factor(&mut self, c: i32) {
         let ch = char::from_u32(c as u32).unwrap_or('\0');
@@ -785,8 +794,7 @@ impl Exec<'_> {
                             L::Lookahead
                         }
                         _ => {
-                            // (`char_warning`: logged only with
-                            // `\tracinglostchars`)
+                            self.char_warning(&m.font, m.cur_chr);
                             m.lig_stack.clear();
                             L::BigSwitch
                         }

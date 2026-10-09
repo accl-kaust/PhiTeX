@@ -12,11 +12,11 @@ tex.web command code, its graph form and its status here.
 | class | primitives | done | partial | not yet |
 |---|---|---|---|---|
 | (i) expandable, input rewriting | 40 | 33 | 5 | 2 |
-| (ii) assignments, scopes | 151 | 143 | 3 | 5 |
+| (ii) assignments, scopes | 151 | 146 | 3 | 2 |
 | (iii) material | 73 | 27 | 0 | 46 |
 | (iv) layout and output | 43 | 23 | 12 | 8 |
 | (v) IO and diagnostics | 18 | 6 | 2 | 10 |
-| all | 325 | 232 | 22 | 71 |
+| all | 325 | 235 | 22 | 68 |
 
 ("done": tex.web's semantics, checked against `tex -ini` by `tests/core.rs`
 (logs of programs that do not typeset) and `tests/dvi.rs` (DVI files and
@@ -47,7 +47,7 @@ is a field of `RState`, the value a node hands its successor.
 | a font identifier `\f` | `Key::Cs("f")` = `Meaning::Font(Arc<Font>)` (the TFM's data, a pure function of its bytes and size) |
 | `\fontdimen` n of a font | `Key::FontDimen(font id, n)` (always global; defined for every parameter when the font is loaded) |
 | `\hyphenchar`, `\skewchar`, `font_id_text` | `Key::HyphenChar(id)`, `Key::SkewChar(id)`, `Key::FontIdent(id)` (global) |
-| `\textfont`… (later) | `Key::FamFont(size, fam)` |
+| `\textfont`, `\scriptfont`, `\scriptscriptfont` | `Key::FamFont(size, fam)` (`Val::Font`) |
 | the current list (`head`…`tail`), `nest` | none: each node emits items (`Node.emit` horizontal, `Node.vemit` vertical; at the outer level `Node.para`), and the node ending a paragraph or a box gathers them; `RState.level` (boxes open), `RState.inner`, `RState.mode` say which list a node emits into |
 | `cur_box`, `box_context`, the saved state of `package` | `RState.groups` entries' `BoxGroup` (kind, context, spec, the enclosing list's mode/space factor/prev depth), handed by the box's `Close` node to its packaging node in `RState.boxing` |
 | the contribution list, the current page, `page_so_far`… | the page fold (`page::Scan`): over the outer vertical material in document order, at `Item::BuildPage` (what TeX reads where it calls `build_page`) |
@@ -389,8 +389,8 @@ both TeX and the graph; `tests/flow.rs`'s `doc()` begins with its catcodes,
 | `\relpenalty` | assign_int | node defining `Key::IntPar(p)` (Val::Int); `\global` via RState.global; `\globaldefs` read by every assignment | done |
 | `\righthyphenmin` | assign_int | node defining `Key::IntPar(p)` (Val::Int); `\global` via RState.global; `\globaldefs` read by every assignment | done |
 | `\rightskip` | assign_glue | node defining `Key::GluePar(p)` (Val::Glue) | done |
-| `\scriptfont` | def_family | node defining `Key::FamFont(size, fam)` — needs font identifiers | not yet |
-| `\scriptscriptfont` | def_family | node defining `Key::FamFont(size, fam)` — needs font identifiers | not yet |
+| `\scriptfont` | def_family | prefixed node defining `Key::FamFont(size, fam)` = `Val::Font`; as a font identifier, a read of it | done |
+| `\scriptscriptfont` | def_family | prefixed node defining `Key::FamFont(size, fam)` = `Val::Font`; as a font identifier, a read of it | done |
 | `\scriptspace` | assign_dimen | node defining `Key::DimenPar(p)` (Val::Int, sp) | done |
 | `\sfcode` | def_code | node defining `Key::Cat/Mathcode/Lccode/Uccode/Sfcode/Delcode(c)` | done |
 | `\showboxbreadth` | assign_int | node defining `Key::IntPar(p)` (Val::Int); `\global` via RState.global; `\globaldefs` read by every assignment | done |
@@ -403,7 +403,7 @@ both TeX and the graph; `tests/flow.rs`'s `doc()` begins with its catcodes,
 | `\splitmaxdepth` | assign_dimen | node defining `Key::DimenPar(p)` (Val::Int, sp) | done |
 | `\splittopskip` | assign_glue | node defining `Key::GluePar(p)` (Val::Glue) | done |
 | `\tabskip` | assign_glue | node defining `Key::GluePar(p)` (Val::Glue) | done |
-| `\textfont` | def_family | node defining `Key::FamFont(size, fam)` — needs font identifiers | not yet |
+| `\textfont` | def_family | prefixed node defining `Key::FamFont(size, fam)` = `Val::Font`; as a font identifier, a read of it | done |
 | `\thickmuskip` | assign_mu_glue | node defining `Key::GluePar(p)` (Val::Glue in mu) | done |
 | `\thinmuskip` | assign_mu_glue | node defining `Key::GluePar(p)` (Val::Glue in mu) | done |
 | `\time` | assign_int | node defining `Key::IntPar(p)` (Val::Int); `\global` via RState.global; `\globaldefs` read by every assignment | done |

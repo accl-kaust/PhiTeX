@@ -131,6 +131,10 @@ impl Exec<'_> {
                 Some((_, Meaning::Char(10, _))) => {}
                 Some((_, Meaning::Prim(Prim::Font))) => return self.font(),
                 Some((_, Meaning::Font(f))) => return f,
+                Some((_, Meaning::Prim(Prim::DefFamily(size)))) => {
+                    let fam = self.scan_four_bit_int() as u8;
+                    return self.fam_font(size, fam);
+                }
                 other => {
                     self.err("Missing font identifier".into());
                     if let Some((t, _)) = other {
@@ -193,6 +197,14 @@ impl Exec<'_> {
     pub(super) fn font_ident_tok(&mut self, f: &Font) -> Tok {
         let n = self.font_ident(f);
         Tok::Cs(n)
+    }
+
+    /// `\textfont n` and friends.
+    pub(super) fn fam_font(&mut self, size: u8, fam: u8) -> Arc<Font> {
+        match self.get(&Key::FamFont(size, fam)) {
+            Val::Font(f) => f,
+            _ => null_font(),
+        }
     }
 
     /// The current font after selecting `f` (`\f` as a command, tex.web

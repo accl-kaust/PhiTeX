@@ -90,6 +90,9 @@ pub enum Key {
     /// The fonts loaded so far, in order: font `k` is entry `k - 1`
     /// (global; each `\font` loading a new one reads and extends it).
     Fonts,
+    /// `\textfont` (size 0), `\scriptfont` (1), `\scriptscriptfont` (2) of a
+    /// family.
+    FamFont(u8, u8),
 }
 
 impl Key {
@@ -165,6 +168,7 @@ impl Key {
             Key::SkewChar(f) => w(22, u64::from(*f)),
             Key::FontIdent(f) => w(23, u64::from(*f)),
             Key::Fonts => w(24, 0),
+            Key::FamFont(s, f) => w(25, (u64::from(*s) << 8) | u64::from(*f)),
         }
     }
 }
@@ -197,6 +201,7 @@ impl fmt::Display for Key {
             Key::SkewChar(x) => write!(f, "\\skewchar font{x}"),
             Key::FontIdent(x) => write!(f, "font_id_text font{x}"),
             Key::Fonts => write!(f, "fonts"),
+            Key::FamFont(s, x) => write!(f, "\\{}font{x}", ["text", "script", "scriptscript"][usize::from(*s).min(2)]),
         }
     }
 }
@@ -353,7 +358,7 @@ pub fn initial(key: &Key, _font: &Arc<Font>) -> Val {
         Key::GluePar(_) | Key::Skip(_) | Key::Muskip(_) => Val::Glue(Arc::new(Glue::default())),
         Key::Box(_) => Val::Void,
         Key::Parshape => Val::Parshape(Arc::new(Vec::new())),
-        Key::Font => Val::Font(crate::tfm::null_font()),
+        Key::Font | Key::FamFont(..) => Val::Font(crate::tfm::null_font()),
         Key::HyphenChar(_) => Val::Int(i32::from(b'-')),
         Key::SkewChar(_) => Val::Int(-1),
         Key::FontIdent(_) => Val::Name(Arc::from("nullfont")),

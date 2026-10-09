@@ -71,6 +71,7 @@ pub(super) fn is_internal(m: &Meaning) -> bool {
                 | Prim::FontDimen
                 | Prim::LastItem(_)
                 | Prim::Font
+                | Prim::DefFamily(_)
                 | Prim::Mat(crate::val::Mat::FontInt(_))
         ),
         Meaning::Font(_)
@@ -96,7 +97,7 @@ pub(super) fn mult_and_add(mut n: i32, mut x: i32, y: i32, max: i32) -> Option<i
         n = n.checked_neg()?;
     }
     if n == 0 {
-        return Some(0);
+        return Some(y);
     }
     if x <= (max - y) / n && -x <= (max + y) / n { Some(n * x + y) } else { None }
 }
@@ -254,6 +255,14 @@ impl Exec<'_> {
                         return Some(toks_ok(self, Arc::new(Vec::new())));
                     }
                     IVal::Font(self.font())
+                }
+                Prim::DefFamily(size) => {
+                    let fam = self.scan_four_bit_int() as u8;
+                    let f = self.fam_font(size, fam);
+                    if level < Lv::Ident {
+                        return Some(toks_ok(self, Arc::new(Vec::new())));
+                    }
+                    IVal::Font(f)
                 }
                 _ => return None,
             },

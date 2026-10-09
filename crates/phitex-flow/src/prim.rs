@@ -210,6 +210,8 @@ pub enum Prim {
     Dump,
     /// `\batchmode` (0) … `\errorstopmode` (3).
     Interaction(u8),
+    /// `\textfont` (0), `\scriptfont` (1), `\scriptscriptfont` (2).
+    DefFamily(u8),
     /// Material, boxes and pages.
     Mat(Mat),
     /// A primitive without a graph form yet: `UNIMPL[i]`.
@@ -556,8 +558,8 @@ pub const PRIMITIVES: [(&str, Prim, &str); 325] = [
     ("righthyphenmin", Prim::IntPar(IntPar::Righthyphenmin), "ASSIGN_INT"),
     ("rightskip", Prim::GluePar(GluePar::Rightskip), "ASSIGN_GLUE"),
     ("romannumeral", Prim::Convert(Conv::Roman), "CONVERT"),
-    ("scriptfont", Prim::Unimpl(91), "DEF_FAMILY"),
-    ("scriptscriptfont", Prim::Unimpl(92), "DEF_FAMILY"),
+    ("scriptfont", Prim::DefFamily(1), "DEF_FAMILY"),
+    ("scriptscriptfont", Prim::DefFamily(2), "DEF_FAMILY"),
     ("scriptscriptstyle", Prim::Unimpl(81), "MATH_STYLE"),
     ("scriptspace", Prim::DimenPar(DimenPar::Scriptspace), "ASSIGN_DIMEN"),
     ("scriptstyle", Prim::Unimpl(80), "MATH_STYLE"),
@@ -585,7 +587,7 @@ pub const PRIMITIVES: [(&str, Prim, &str); 325] = [
     ("splittopskip", Prim::GluePar(GluePar::Splittopskip), "ASSIGN_GLUE"),
     ("string", Prim::Convert(Conv::String), "CONVERT"),
     ("tabskip", Prim::GluePar(GluePar::Tabskip), "ASSIGN_GLUE"),
-    ("textfont", Prim::Unimpl(90), "DEF_FAMILY"),
+    ("textfont", Prim::DefFamily(0), "DEF_FAMILY"),
     ("textstyle", Prim::Unimpl(79), "MATH_STYLE"),
     ("the", Prim::The, "THE"),
     ("thickmuskip", Prim::GluePar(GluePar::Thickmuskip), "ASSIGN_MU_GLUE"),

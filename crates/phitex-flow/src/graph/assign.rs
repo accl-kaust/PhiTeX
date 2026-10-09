@@ -46,10 +46,9 @@ pub(super) fn prefixable(m: &Meaning) -> bool {
             | Prim::PageDimen(_)
             | Prim::BoxDimen(_)
             | Prim::Interaction(_)
+            | Prim::DefFamily(_)
             | Prim::Mat(Mat::SetBox | Mat::FontInt(_)) => true,
-            Prim::Unimpl(_) => {
-                matches!(p.name(), "read" | "hyphenation" | "patterns" | "textfont" | "scriptfont" | "scriptscriptfont")
-            }
+            Prim::Unimpl(_) => matches!(p.name(), "read" | "hyphenation" | "patterns"),
             _ => false,
         },
         Meaning::CountRef(_)
@@ -198,6 +197,13 @@ impl Exec<'_> {
                 }
                 Prim::BoxDimen(c) => self.alter_box_dimen(c),
                 Prim::Font => self.new_font(global),
+                Prim::DefFamily(size) => {
+                    // (tex.web 1234)
+                    let fam = self.scan_four_bit_int() as u8;
+                    self.optional_equals();
+                    let f = self.scan_font_ident();
+                    self.assign(Key::FamFont(size, fam), Val::Font(f), global);
+                }
                 Prim::Mat(Mat::SetBox) => self.setbox(global),
                 Prim::Mat(Mat::FontInt(k)) => self.assign_font_int(k),
                 Prim::Interaction(_) => {} // (batch mode or not: only the terminal differs)
