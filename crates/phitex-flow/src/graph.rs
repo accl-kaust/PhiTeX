@@ -41,10 +41,15 @@ use crate::tfm::Font;
 use crate::val::{DimenPar, IntPar, Key, Macro, Meaning, Prim, Tok, Val};
 
 mod assign;
+mod boxes;
 mod expand;
 mod fonts;
+mod io;
 mod material;
 mod scan;
+
+pub use expand::JOBNAME;
+pub use io::{ends_document, file_text, page_io, whatsits};
 
 /// A piece's identity, stable across edits.
 pub type PieceId = u32;
@@ -59,6 +64,23 @@ pub trait Env {
     /// function of the name during a build).
     fn font_file(&mut self, _name: &str) -> Option<std::sync::Arc<[u8]>> {
         None
+    }
+
+    /// The bytes of the input file of exactly this name, if there is one:
+    /// what a read of `Key::File(name)` answers (a pure function of the
+    /// name during a build).
+    fn file(&mut self, _name: &str) -> Option<Arc<[u8]>> {
+        None
+    }
+
+    /// The job's name (`\jobname`): what a read of `Key::Job` answers.
+    fn jobname(&mut self) -> Arc<str> {
+        Arc::from(expand::JOBNAME)
+    }
+
+    /// The lines of its file before this piece (`Key::LineBase`).
+    fn line_base(&mut self) -> i32 {
+        0
     }
 }
 
@@ -96,6 +118,28 @@ struct Cond {
     open: u32,
     limit: u8,
     test: bool,
+    /// Which conditional (`\end` names it, tex.web 1335).
+    kind: crate::val::IfKind,
+}
+
+/// A source the reader is in, above the piece's text (TeX's file levels
+/// of the input, as a value of the reader state): an `\input` file (read
+/// in the piece until the core cuts files into pieces: CORE.md, "`\input`
+/// (decided)") or a `\read` line. Its text, the position in it, and what
+/// the level under it had: the rewritten input pending then, the
+/// tokenizer's state and the end-of-line character.
+#[derive(Clone, PartialEq, Eq, Debug)]
+struct Infile {
+    text: Arc<[char]>,
+    pos: usize,
+    /// How the log names an `\input` file (`./sub.tex`); none for a
+    /// `\read` line.
+    name: Option<Arc<str>>,
+    /// `\endinput` was met: the file ends with its current line.
+    endinput: bool,
+    under: Vec<(Arc<[Tok]>, usize)>,
+    tstate: TState,
+    eol: i16,
 }
 
 /// An open group: its kind and the tokens `\aftergroup` gave it (its
@@ -198,6 +242,9 @@ pub struct RState {
     /// The current line's end-of-line character (`\endlinechar` as the line
     /// was begun; -1: none), or `EOL_UNREAD`.
     eol: i16,
+    /// The files and `\read` lines being read, innermost last; `pos` is
+    /// the piece's position, where they were begun.
+    files: Stack<Infile>,
 }
 
 impl RState {
@@ -220,6 +267,7 @@ impl RState {
             prev_depth: IGNORE_DEPTH,
             prev_graf: 0,
             eol: EOL_UNREAD,
+            files: Stack::new(),
         }
     }
 }
@@ -284,6 +332,7 @@ impl RState {
             && self.prev_graf == o.prev_graf
             && self.eol == o.eol
             && self.pending == o.pending
+            && self.files == o.files
     }
 
     /// Whether a node going from `self` to `out` begins a paragraph of the
@@ -876,7 +925,14 @@ fn outside_read(env: &mut dyn Env, outside: &mut Outside, k: &Key) -> ReadRef {
     if let Some(v) = outside.get(k) {
         return v.clone();
     }
-    let (val, src) = env.reach(k);
+    // (what the build answers itself: a file's bytes, the job's name, the
+    // lines before the piece)
+    let (val, src) = match k {
+        Key::File(n) => (env.file(n).map_or(Val::Void, Val::Bytes), Src::Initial),
+        Key::Job => (Val::Name(env.jobname()), Src::Initial),
+        Key::LineBase => (Val::Int(env.line_base()), Src::Initial),
+        _ => env.reach(k),
+    };
     let r = Arc::new(Read {
         key: k.clone(),
         src,
@@ -1464,12 +1520,40 @@ impl<'a> Exec<'a> {
         self.st.eol = EOL_UNREAD;
     }
 
-    /// Moves to `np`; past a line's end, the next line begins.
+    /// The text being read: the innermost file's or `\read` line's, else
+    /// the piece's.
+    fn src(&self) -> &[char] {
+        match self.st.files.last() {
+            Some(f) => &f.text,
+            None => self.text,
+        }
+    }
+
+    /// The position in [`Exec::src`].
+    fn cur_pos(&self) -> usize {
+        self.st.files.last().map_or(self.st.pos, |f| f.pos)
+    }
+
+    fn set_pos(&mut self, p: usize) {
+        match self.st.files.last_mut() {
+            Some(f) => f.pos = p,
+            None => self.st.pos = p,
+        }
+    }
+
+    /// Moves to `np`; past a line's end, the next line begins (and a file
+    /// whose `\endinput` was met ends, tex.web 362).
     fn advance(&mut self, np: usize) {
-        let crossed = self.text[self.st.pos..np].contains(&'\r');
-        self.st.pos = np;
+        let at = self.cur_pos();
+        let crossed = self.src()[at..np].contains(&'\r');
+        self.set_pos(np);
         if crossed {
             self.new_line();
+            if self.st.files.last().is_some_and(|f| f.endinput)
+                && let Some(f) = self.st.files.last_mut()
+            {
+                f.pos = f.text.len();
+            }
         }
     }
 
@@ -1478,17 +1562,17 @@ impl<'a> Exec<'a> {
     /// inactive), and `^^` reduces the character or the two hex digits
     /// after it.
     fn char_at(&mut self, pos: usize) -> Option<(char, usize, u8)> {
-        let raw = *self.text.get(pos)?;
+        let raw = *self.src().get(pos)?;
         let c = if raw == '\r' { self.eol()? } else { raw };
         let cat = self.catcode(c);
         // (`^^`: the second circumflex on the line, and a character after it)
-        if raw == '\r' || cat != 7 || self.text.get(pos + 1) != Some(&c) {
+        if raw == '\r' || cat != 7 || self.src().get(pos + 1) != Some(&c) {
             return Some((c, pos + 1, cat));
         }
         let at = |x: &mut Self, p: usize| -> Option<char> {
-            match x.text.get(p) {
+            match x.src().get(p).copied() {
                 Some('\r') => x.eol(),
-                Some(&ch) => Some(ch),
+                Some(ch) => Some(ch),
                 None => None,
             }
         };
@@ -1500,7 +1584,7 @@ impl<'a> Exec<'a> {
         }
         let hex = |ch: char| ch.is_ascii_digit() || ('a'..='f').contains(&ch);
         let (r, np) = match at(self, pos + 3) {
-            Some(c3) if hex(c2) && hex(c3) && self.text.get(pos + 2) != Some(&'\r') => (
+            Some(c3) if hex(c2) && hex(c3) && self.src().get(pos + 2) != Some(&'\r') => (
                 (c2.to_digit(16).unwrap_or(0) << 4) | c3.to_digit(16).unwrap_or(0),
                 pos + 4,
             ),
@@ -1515,10 +1599,8 @@ impl<'a> Exec<'a> {
 
     /// The position just after the current line's end.
     fn line_end_after(&self, pos: usize) -> usize {
-        self.text[pos..]
-            .iter()
-            .position(|&c| c == '\r')
-            .map_or(self.text.len(), |k| pos + k + 1)
+        let t = self.src();
+        t[pos..].iter().position(|&c| c == '\r').map_or(t.len(), |k| pos + k + 1)
     }
 
     /// The next token, unexpanded (tex.web 343-357). After `\noexpand`'s
@@ -1542,8 +1624,15 @@ impl<'a> Exec<'a> {
             self.st.pending.pop();
         }
         loop {
-            let pos = self.st.pos;
-            let raw = *self.text.get(pos)?;
+            let pos = self.cur_pos();
+            let Some(&raw) = self.src().get(pos) else {
+                // (an `\input` file has ended: the reader goes on under it;
+                // a `\read` line or the piece has ended)
+                if self.end_source() {
+                    return self.next_raw();
+                }
+                return None;
+            };
             if self.st.eol == EOL_UNREAD {
                 self.read_eol();
             }
@@ -1915,16 +2004,13 @@ impl<'a> Exec<'a> {
             }
             Prim::Message | Prim::ErrMessage => self.message(p == Prim::ErrMessage),
             Prim::Immediate => self.immediate(),
-            Prim::Write => {
-                self.err(
-                    "\\write without \\immediate is not supported yet (it needs \\shipout)".into(),
-                );
-                let _ = self.scan_int();
-                let _ = self.scan_toks_raw();
-            }
+            Prim::Write => self.write_cmd(),
+            Prim::OpenOut | Prim::CloseOut | Prim::Special => self.extension(p),
+            Prim::InStream(open) => self.open_in(open),
+            Prim::Input => self.start_input(),
             Prim::Uppercase | Prim::Lowercase => self.case_shift(p == Prim::Uppercase),
             Prim::EndCsName => self.err("Extra \\endcsname".into()),
-            Prim::End | Prim::Dump => self.stop(),
+            Prim::End | Prim::Dump => self.stop_job(p == Prim::Dump),
             Prim::Relax => {}
             Prim::LastItem(_)
             | Prim::SpaceFactor

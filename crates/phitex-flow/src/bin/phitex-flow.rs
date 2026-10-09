@@ -171,7 +171,14 @@ fn main() -> ExitCode {
         }
     };
     let out = out.unwrap_or_else(|| format!("{}.dvi", file.trim_end_matches(".tex")));
+    // (`\input` and `\openin` find files beside the document; the job is
+    // its name)
+    let path = std::path::Path::new(&file);
+    let dir = path.parent().filter(|d| !d.as_os_str().is_empty()).map_or_else(|| ".".into(), std::path::Path::to_path_buf);
+    let job = path.file_stem().map_or_else(|| "texput".to_string(), |s| s.to_string_lossy().into_owned());
     let mut b = Build::new(font.clone());
+    b.set_input_dirs(vec![dir.clone()]);
+    b.set_jobname(&job);
     let cold = b.update(&src, opts);
     report("cold", &cold);
     if dump {
@@ -197,7 +204,10 @@ fn main() -> ExitCode {
             print!("{}", e.dump);
         }
         if check {
-            let fresh = Build::new(font).update(&edited, opts);
+            let mut fb = Build::new(font);
+            fb.set_input_dirs(vec![dir.clone()]);
+            fb.set_jobname(&job);
+            let fresh = fb.update(&edited, opts);
             report("cold of the edited text", &fresh);
             println!(
                 "edit == cold: {}",
@@ -209,6 +219,14 @@ fn main() -> ExitCode {
     if let Err(e) = std::fs::write(&out, &last.dvi) {
         eprintln!("{out}: {e}");
         return ExitCode::FAILURE;
+    }
+    // (what `\openout` and `\write` made, beside the document)
+    for (name, text) in &last.writes {
+        let p = dir.join(name);
+        if let Err(e) = std::fs::write(&p, text.chars().map(|c| u32::from(c).min(255) as u8).collect::<Vec<u8>>()) {
+            eprintln!("{}: {e}", p.display());
+            return ExitCode::FAILURE;
+        }
     }
     println!("wrote {out} ({} bytes)", last.dvi.len());
     ExitCode::SUCCESS

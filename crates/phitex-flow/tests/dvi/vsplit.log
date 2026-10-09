@@ -1,0 +1,47 @@
+(./vsplit.tex
+Underfull \vbox (badness 10000) detected at line 9
+
+\vbox(30.0+0.0)x34.44449
+.\hbox(6.94444+0.0)x33.88895
+..\tenrm l
+..\tenrm i
+..\tenrm n
+..\tenrm e
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\tenrm o
+..\tenrm n
+..\tenrm e
+.\mark{m1}
+.\penalty 0
+.\glue(\baselineskip) 5.05556
+.\hbox(6.94444+0.0)x34.44449
+..\tenrm l
+..\tenrm i
+..\tenrm n
+..\tenrm e
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\tenrm t
+..\kern-0.27779
+..\tenrm w
+..\kern-0.27779
+..\tenrm o
+.\mark{m2}
+
+[m1][m2] [][]
+Underfull \vbox (badness 10000) detected at line 15
+
+\vbox(100.0+0.0)x22.77783
+.\hbox(6.94444+0.0)x22.77783
+..\tenrm a
+..\tenrm l
+..\tenrm o
+..\tenrm n
+..\tenrm e
+
+[] void [] void too
+Underfull \vbox (badness 10000) detected at line 19
+
+\vbox(50.0+0.0)x0.0
+.\glue 5.0
+
+[0] )

@@ -50,7 +50,9 @@ impl Exec<'_> {
             if self.noexp && expands(&m) {
                 return Some((t, Meaning::Prim(Prim::Relax)));
             }
-            if top && matches!(m, Meaning::Prim(p) if p.conditional()) {
+            // (`\input` at the top is a node of its own, whose result is the
+            // file: CORE.md)
+            if top && matches!(m, Meaning::Prim(p) if p.conditional() || p == Prim::Input) {
                 return Some((t, m));
             }
             if t.key().is_some() && expands(&m) {
@@ -92,8 +94,17 @@ impl Exec<'_> {
                     let toks = self.the_toks();
                     self.rewrite(toks);
                 }
-                Prim::Input | Prim::EndInput => self.err(format!("\\{} is not supported yet", p.name())),
-                // (`\topmark` and friends: no marks yet, every mark is empty)
+                Prim::Input => self.start_input(),
+                Prim::EndInput => self.end_input(),
+                // (`\splitfirstmark`, `\splitbotmark`: what the last
+                // `\vsplit` defined, tex.web 386)
+                Prim::Mark(k @ 3..=4) => {
+                    if let Val::Toks(t) = self.get(&Key::SplitMark(k - 3)) {
+                        self.rewrite(t.to_vec());
+                    }
+                }
+                // (`\topmark` and friends: the page builder's marks are not
+                // wired yet, every one is empty)
                 _ => {}
             },
             _ => {}
@@ -176,7 +187,10 @@ impl Exec<'_> {
                 }
             }
             Conv::FontName => self.font_name_text(&mut s),
-            Conv::JobName => s.push_str(JOBNAME),
+            Conv::JobName => match self.get(&Key::Job) {
+                Val::Name(n) => s.push_str(&n),
+                _ => s.push_str(JOBNAME),
+            },
         }
         self.rewrite(print::str_toks(&s));
     }
@@ -347,7 +361,7 @@ impl Exec<'_> {
     /// skipped (tex.web 498).
     fn begin_if(&mut self, k: IfKind) {
         let here = self.chain.nodes.len() as u32;
-        self.st.conds.push(Cond { open: here, limit: IF_CODE, test: false });
+        self.st.conds.push(Cond { open: here, limit: IF_CODE, test: false, kind: k });
         let depth = self.st.conds.len();
         if k == IfKind::Case {
             let mut n = self.scan_int();
@@ -467,11 +481,7 @@ impl Exec<'_> {
                 let b = self.ifx_operand();
                 a == b
             }
-            IfKind::Eof => {
-                // (no stream is ever open yet)
-                let _ = self.scan_four_bit_int();
-                true
-            }
+            IfKind::Eof => self.if_eof(),
             IfKind::True => true,
             IfKind::Case => unreachable!("\\ifcase has no boolean test"),
         }

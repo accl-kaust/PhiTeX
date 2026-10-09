@@ -37,10 +37,48 @@ fn log_body(log: &str) -> Option<String> {
     Some(lines[start..end].join("\n"))
 }
 
-/// TeX's DVI file and log of a document, if there is a `tex`.
-fn tex(name: &str, src: &str) -> Option<(Vec<u8>, String)> {
-    let tmp = std::env::temp_dir().join(format!("phitex-flow-dvi-{name}-{}", std::process::id()));
+/// The files a document reads (`\input`, `\openin`): `inc-*.tex` and
+/// `*.dat` in `tests/dvi/`.
+fn inputs() -> Vec<PathBuf> {
+    let mut v: Vec<PathBuf> = std::fs::read_dir(dir())
+        .map(|d| d.flatten().map(|e| e.path()).collect())
+        .unwrap_or_default();
+    v.retain(|p| {
+        let n = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        n.starts_with("inc-") || p.extension().is_some_and(|e| e == "dat")
+    });
+    v
+}
+
+/// The files a run wrote, as one text: each name and contents, by name.
+fn writes_text(mut files: Vec<(String, String)>) -> String {
+    files.sort();
+    let mut s = String::new();
+    for (n, t) in files {
+        let _ = write!(s, "== {n}\n{t}");
+    }
+    s
+}
+
+/// TeX's DVI file, log and written files of a document, if there is a
+/// `tex` (run in a directory of its own, the inputs beside it).
+fn tex(name: &str, src: &str) -> Option<(Vec<u8>, String, String)> {
+    let (dvi, log, writes) = tex_run(name, src)?;
+    Some((dvi, log_body(&log)?, writes))
+}
+
+/// `tex -ini` on a document: its DVI file, its whole log and what it wrote.
+fn tex_run(name: &str, src: &str) -> Option<(Vec<u8>, String, String)> {
+    // (a directory per test thread: two tests of one document run at once)
+    let thread: String = format!("{:?}", std::thread::current().id()).chars().filter(char::is_ascii_digit).collect();
+    let tmp = std::env::temp_dir().join(format!("phitex-flow-dvi-{name}-{}-{thread}", std::process::id()));
     std::fs::create_dir_all(&tmp).ok()?;
+    let mut given = vec![format!("{name}.tex"), format!("{name}.log"), format!("{name}.dvi"), format!("{name}.fmt")];
+    for p in inputs() {
+        let n = p.file_name()?.to_string_lossy().into_owned();
+        std::fs::copy(&p, tmp.join(&n)).ok()?;
+        given.push(n);
+    }
     std::fs::write(tmp.join(format!("{name}.tex")), src).ok()?;
     let st = Command::new("tex")
         .args(["-ini", "-interaction=batchmode", &format!("{name}.tex")])
@@ -51,18 +89,29 @@ fn tex(name: &str, src: &str) -> Option<(Vec<u8>, String)> {
         .ok()?;
     let log = std::fs::read_to_string(tmp.join(format!("{name}.log"))).ok();
     let dvi = std::fs::read(tmp.join(format!("{name}.dvi"))).unwrap_or_default();
+    let mut written = Vec::new();
+    for e in std::fs::read_dir(&tmp).ok()?.flatten() {
+        let n = e.file_name().to_string_lossy().into_owned();
+        if !given.contains(&n) {
+            let b = std::fs::read(e.path()).unwrap_or_default();
+            written.push((n, b.iter().map(|&c| char::from(c)).collect::<String>()));
+        }
+    }
     let _ = std::fs::remove_dir_all(&tmp);
     let log = log?;
     assert!(st.status.success(), "tex failed on {name}:\n{log}");
-    Some((dvi, log_body(&log)?))
+    Some((dvi, log, writes_text(written)))
 }
 
-/// The graph's DVI file and log of a document.
-fn graph(name: &str, src: &str, o: Options) -> (Vec<u8>, String, Vec<String>) {
-    let out = Build::new(font()).update(src, o);
+/// The graph's DVI file, log, errors and written files of a document.
+fn graph(name: &str, src: &str, o: Options) -> (Vec<u8>, String, Vec<String>, String) {
+    let mut b = Build::new(font());
+    b.set_input_dirs(vec![dir()]);
+    b.set_jobname(name);
+    let out = b.update(src, o);
     let log = phitex_flow::print::log(&format!("(./{name}.tex"), &out.log, " )");
     let log = log.strip_suffix('\n').unwrap_or(&log).to_string();
-    (out.dvi, log, out.errors)
+    (out.dvi, log, out.errors, writes_text(out.writes))
 }
 
 /// A DVI file with its preamble's comment masked.
@@ -97,22 +146,30 @@ fn check(name: &str) {
 
 fn check_src(name: &str, src: &str, runs: &[Options]) {
     let (dvi_path, log_path) = (dir().join(format!("{name}.dvi")), dir().join(format!("{name}.log")));
+    let writes_path = dir().join(format!("{name}.writes"));
     let t = tex(name, src);
     if std::env::var_os("PHITEX_FLOW_BLESS").is_some() {
-        let (d, l) = t.as_ref().expect("PHITEX_FLOW_BLESS needs a tex binary");
+        let (d, l, w) = t.as_ref().expect("PHITEX_FLOW_BLESS needs a tex binary");
         std::fs::write(&dvi_path, d).unwrap();
         std::fs::write(&log_path, format!("{l}\n")).unwrap();
+        if !w.is_empty() {
+            std::fs::write(&writes_path, w).unwrap();
+        }
     }
     let want_dvi = std::fs::read(&dvi_path).unwrap_or_else(|_| panic!("no {}", dvi_path.display()));
     let want_log = std::fs::read_to_string(&log_path).unwrap_or_else(|_| panic!("no {}", log_path.display()));
     let want_log = want_log.strip_suffix('\n').unwrap_or(&want_log);
-    if let Some((d, l)) = &t {
+    // (the files the document writes: none unless recorded)
+    let want_writes = std::fs::read_to_string(&writes_path).unwrap_or_default();
+    if let Some((d, l, w)) = &t {
         assert!(masked(d) == masked(&want_dvi), "{name}: TeX's DVI is not the recorded one");
         assert_eq!(l, want_log, "{name}: TeX's log is not the recorded one");
+        assert_eq!(w, &want_writes, "{name}: TeX's written files are not the recorded ones");
     }
     for &o in runs {
-        let (dvi, log, errors) = graph(name, src, o);
+        let (dvi, log, errors, writes) = graph(name, src, o);
         assert!(errors.is_empty(), "{name} ({o:?}): errors on the graph: {errors:?}");
+        assert_eq!(writes, want_writes, "{name} ({o:?}): the graph's written files differ from TeX's");
         if log != want_log {
             let (g, e): (Vec<&str>, Vec<&str>) = (log.lines().collect(), want_log.lines().collect());
             let at = g.iter().zip(&e).position(|(a, b)| a != b).unwrap_or(g.len().min(e.len()));
@@ -145,6 +202,53 @@ macro_rules! documents {
 }
 
 documents!(para, skips, hbox, setbox, vbox, pages, fonts, shape, leave, show, ship, disc);
+
+// (IO and the remaining material: deferred `\write`s and `\special`s,
+// `\input` read in the piece, leaders, `\accent`, `\lastbox`, `\vsplit`,
+// `\vadjust` and `\insert` items, `\end` inside groups and conditionals)
+documents!(writes, input, leaders, accent, lastbox, vsplit, inserts, endgroup);
+
+/// A log line with the format's date left out: TeX dates the format by the
+/// clock, not by `SOURCE_DATE_EPOCH`.
+fn undated(l: &str) -> String {
+    match l.strip_prefix(" (preloaded format=").and_then(|r| r.rfind(' ').map(|i| &r[..i])) {
+        Some(job) => format!(" (preloaded format={job} DATE)"),
+        None => l.to_string(),
+    }
+}
+
+/// `\dump` (tex.web 1335, 1328): `\end` in `IniTeX`, and the log's
+/// `Beginning to dump` lines (the statistics after them describe TeX's
+/// memory, not the document: the log is compared up to the format's name).
+#[test]
+fn dump() {
+    let name = "dump";
+    let src = std::fs::read_to_string(dir().join(format!("{name}.tex"))).unwrap();
+    let path = dir().join(format!("{name}.log"));
+    let cut = |log: &str| -> Option<String> {
+        let lines: Vec<&str> = log.lines().collect();
+        let start = lines.iter().position(|l| l.starts_with("**"))? + 1;
+        let end = lines.iter().position(|l| l.starts_with(" (preloaded format="))?;
+        Some(lines[start..=end].iter().map(|l| undated(l)).collect::<Vec<_>>().join("\n"))
+    };
+    let t = tex_run(name, &src).and_then(|(_, l, _)| cut(&l));
+    if std::env::var_os("PHITEX_FLOW_BLESS").is_some() {
+        let l = t.as_ref().expect("PHITEX_FLOW_BLESS needs a tex binary");
+        std::fs::write(&path, format!("{l}\n")).unwrap();
+    }
+    let want = std::fs::read_to_string(&path).unwrap_or_else(|_| panic!("no {}", path.display()));
+    let want = want.strip_suffix('\n').unwrap_or(&want);
+    if let Some(l) = &t {
+        assert_eq!(l, want, "{name}: TeX's log is not the recorded one");
+    }
+    for &o in &RUNS {
+        let (dvi, log, errors, _) = graph(name, &src, o);
+        assert!(errors.is_empty(), "{name} ({o:?}): errors on the graph: {errors:?}");
+        assert!(dvi.is_empty(), "{name}: no pages");
+        let log = log.lines().map(undated).collect::<Vec<_>>().join("\n");
+        assert_eq!(log, want, "{name} ({o:?}): the graph's log differs from TeX's");
+    }
+}
 
 /// plain.tex (all but `\input hyphen`), then text set with its macros and
 /// the default output routine (`\output={}`), at 1 thread.

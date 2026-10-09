@@ -12,7 +12,7 @@
 
 use std::sync::Arc;
 
-use crate::item::{BoxNode, Item, RUNNING};
+use crate::item::{A_LEADERS, BoxNode, C_LEADERS, Item, Leaders, RUNNING, Whatsit};
 use crate::page::Page;
 use crate::show::zround;
 use crate::tfm::Font;
@@ -34,6 +34,8 @@ const Z1: u8 = 167;
 const FNT_NUM_0: u8 = 171;
 const FNT1: u8 = 235;
 const FNT_DEF1: u8 = 243;
+const XXX1: u8 = 239;
+const XXX4: u8 = 242;
 const PRE: u8 = 247;
 const POST: u8 = 248;
 const POST_POST: u8 = 249;
@@ -417,6 +419,7 @@ impl Writer<'_> {
     fn hlist_out(&mut self, this: &BoxNode) {
         let mut glue = SetGlue::default();
         let base_line = self.cur_v;
+        let left_edge = self.cur_h;
         for it in &this.list {
             match it {
                 Item::Char(f, c) => self.char_out(f, *c),
@@ -454,10 +457,153 @@ impl Writer<'_> {
                     self.cur_h += *w;
                 }
                 Item::Glue { g, .. } => self.cur_h += glue.set(this, g),
+                Item::Leaders(l) => {
+                    let rule_wd = glue.set(this, &l.g);
+                    self.hleaders(this, l, rule_wd, base_line, left_edge);
+                }
                 Item::Kern { w, .. } => self.cur_h += *w,
+                Item::Whatsit(w) => {
+                    if let Whatsit::Special(s) = &**w {
+                        self.special(s);
+                    }
+                }
                 _ => {}
             }
         }
+    }
+
+    /// §626–§628: leaders in an hlist, `rule_wd` wide: a rule that wide, or
+    /// copies of the box aligned (`\leaders`: on multiples of its width
+    /// from the box's left edge), centred (`\cleaders`) or spread
+    /// (`\xleaders`).
+    fn hleaders(&mut self, this: &BoxNode, l: &Leaders, rule_wd: i32, base_line: i32, left_edge: i32) {
+        match &l.b {
+            Item::Rule { h, d, .. } => {
+                // (§624)
+                let rule_ht = if *h == RUNNING { this.h } else { *h };
+                let rule_dp = if *d == RUNNING { this.d } else { *d };
+                let rule_ht = rule_ht + rule_dp;
+                if rule_ht > 0 && rule_wd > 0 {
+                    self.synch_h();
+                    self.cur_v = base_line + rule_dp;
+                    self.synch_v();
+                    self.byte(SET_RULE);
+                    self.four(rule_ht);
+                    self.four(rule_wd);
+                    self.cur_v = base_line;
+                    self.dvi_h += rule_wd;
+                }
+                self.cur_h += rule_wd;
+            }
+            Item::Box(lb) if lb.w > 0 && rule_wd > 0 => {
+                let leader_wd = lb.w;
+                let rule_wd = rule_wd + 10;
+                let edge = self.cur_h + rule_wd;
+                let mut lx = 0;
+                if l.sub == A_LEADERS {
+                    let save_h = self.cur_h;
+                    self.cur_h = left_edge + leader_wd * ((self.cur_h - left_edge) / leader_wd);
+                    if self.cur_h < save_h {
+                        self.cur_h += leader_wd;
+                    }
+                } else {
+                    let lq = rule_wd / leader_wd;
+                    let lr = rule_wd % leader_wd;
+                    if l.sub == C_LEADERS {
+                        self.cur_h += lr / 2;
+                    } else {
+                        lx = lr / (lq + 1);
+                        self.cur_h += (lr - (lq - 1) * lx) / 2;
+                    }
+                }
+                while self.cur_h + leader_wd <= edge {
+                    // (§628)
+                    self.cur_v = base_line + lb.shift;
+                    self.synch_v();
+                    let save_v = self.dvi_v;
+                    self.synch_h();
+                    let save_h = self.dvi_h;
+                    self.list_out(lb);
+                    self.dvi_v = save_v;
+                    self.dvi_h = save_h;
+                    self.cur_v = base_line;
+                    self.cur_h = save_h + leader_wd + lx;
+                }
+                self.cur_h = edge - 10;
+            }
+            _ => self.cur_h += rule_wd,
+        }
+    }
+
+    /// §635–§637: leaders in a vlist, `rule_ht` high.
+    fn vleaders(&mut self, this: &BoxNode, l: &Leaders, rule_ht: i32, left_edge: i32, top_edge: i32) {
+        match &l.b {
+            Item::Rule { w, .. } => {
+                // (§633, the rule's depth 0)
+                let rule_wd = if *w == RUNNING { this.w } else { *w };
+                self.cur_v += rule_ht;
+                if rule_ht > 0 && rule_wd > 0 {
+                    self.synch_h();
+                    self.synch_v();
+                    self.byte(PUT_RULE);
+                    self.four(rule_ht);
+                    self.four(rule_wd);
+                }
+            }
+            Item::Box(lb) if lb.h + lb.d > 0 && rule_ht > 0 => {
+                let leader_ht = lb.h + lb.d;
+                let rule_ht = rule_ht + 10;
+                let edge = self.cur_v + rule_ht;
+                let mut lx = 0;
+                if l.sub == A_LEADERS {
+                    let save_v = self.cur_v;
+                    self.cur_v = top_edge + leader_ht * ((self.cur_v - top_edge) / leader_ht);
+                    if self.cur_v < save_v {
+                        self.cur_v += leader_ht;
+                    }
+                } else {
+                    let lq = rule_ht / leader_ht;
+                    let lr = rule_ht % leader_ht;
+                    if l.sub == C_LEADERS {
+                        self.cur_v += lr / 2;
+                    } else {
+                        lx = lr / (lq + 1);
+                        self.cur_v += (lr - (lq - 1) * lx) / 2;
+                    }
+                }
+                while self.cur_v + leader_ht <= edge {
+                    // (§637)
+                    self.cur_h = left_edge + lb.shift;
+                    self.synch_h();
+                    let save_h = self.dvi_h;
+                    self.cur_v += lb.h;
+                    self.synch_v();
+                    let save_v = self.dvi_v;
+                    self.list_out(lb);
+                    self.dvi_v = save_v;
+                    self.dvi_h = save_h;
+                    self.cur_h = left_edge;
+                    self.cur_v = save_v - lb.h + leader_ht + lx;
+                }
+                self.cur_v = edge - 10;
+            }
+            _ => self.cur_v += rule_ht,
+        }
+    }
+
+    /// §1368: `special_out`.
+    fn special(&mut self, s: &str) {
+        self.synch_h();
+        self.synch_v();
+        let bytes: Vec<u8> = s.chars().map(|c| u32::from(c).min(255) as u8).collect();
+        if bytes.len() < 256 {
+            self.byte(XXX1);
+            self.byte(bytes.len() as u8);
+        } else {
+            self.byte(XXX4);
+            self.four(bytes.len() as i32);
+        }
+        self.out.extend(bytes);
     }
 
     /// §629–§637
@@ -465,6 +611,7 @@ impl Writer<'_> {
         let mut glue = SetGlue::default();
         let left_edge = self.cur_h;
         self.cur_v -= this.h;
+        let top_edge = self.cur_v;
         for it in &this.list {
             match it {
                 Item::Box(b) => {
@@ -497,7 +644,16 @@ impl Writer<'_> {
                     }
                 }
                 Item::Glue { g, .. } => self.cur_v += glue.set(this, g),
+                Item::Leaders(l) => {
+                    let rule_ht = glue.set(this, &l.g);
+                    self.vleaders(this, l, rule_ht, left_edge, top_edge);
+                }
                 Item::Kern { w, .. } => self.cur_v += *w,
+                Item::Whatsit(w) => {
+                    if let Whatsit::Special(s) = &**w {
+                        self.special(s);
+                    }
+                }
                 _ => {}
             }
         }

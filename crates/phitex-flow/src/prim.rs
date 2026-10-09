@@ -133,6 +133,12 @@ pub enum Mat {
     /// paragraph ends before a `}` (1); a discretionary's next part
     /// begins (2); a `\vbox`'s paragraph shape is reset inside it (3).
     Internal(u8),
+    /// `\leaders` (100), `\cleaders` (101), `\xleaders` (102): tex.web's
+    /// glue subtypes.
+    Leaders(u8),
+    Accent,
+    Insert,
+    Vadjust,
 }
 
 /// A primitive.
@@ -214,6 +220,12 @@ pub enum Prim {
     DefFamily(u8),
     /// Material, boxes and pages.
     Mat(Mat),
+    /// `\openin` (true), `\closein` (false).
+    InStream(bool),
+    Read,
+    OpenOut,
+    CloseOut,
+    Special,
     /// A primitive without a graph form yet: `UNIMPL[i]`.
     Unimpl(u16),
 }
@@ -323,7 +335,7 @@ pub const PRIMITIVES: [(&str, Prim, &str); 325] = [
     ("abovedisplayshortskip", Prim::GluePar(GluePar::Abovedisplayshortskip), "ASSIGN_GLUE"),
     ("abovedisplayskip", Prim::GluePar(GluePar::Abovedisplayskip), "ASSIGN_GLUE"),
     ("abovewithdelims", Prim::Unimpl(85), "ABOVE"),
-    ("accent", Prim::Unimpl(1), "ACCENT"),
+    ("accent", Prim::Mat(Mat::Accent), "ACCENT"),
     ("adjdemerits", Prim::IntPar(IntPar::Adjdemerits), "ASSIGN_INT"),
     ("advance", Prim::Advance, "ADVANCE"),
     ("afterassignment", Prim::AfterAssignment, "AFTER_ASSIGNMENT"),
@@ -344,9 +356,9 @@ pub const PRIMITIVES: [(&str, Prim, &str); 325] = [
     ("catcode", Prim::Code(Code::Cat), "DEF_CODE"),
     ("char", Prim::Char, "CHAR_NUM"),
     ("chardef", Prim::Shorthand(Shorthand::Char), "SHORTHAND_DEF"),
-    ("cleaders", Prim::Unimpl(52), "LEADER_SHIP"),
-    ("closein", Prim::Unimpl(98), "IN_STREAM"),
-    ("closeout", Prim::Unimpl(104), "EXTENSION"),
+    ("cleaders", Prim::Mat(Mat::Leaders(101)), "LEADER_SHIP"),
+    ("closein", Prim::InStream(false), "IN_STREAM"),
+    ("closeout", Prim::CloseOut, "EXTENSION"),
     ("clubpenalty", Prim::IntPar(IntPar::Clubpenalty), "ASSIGN_INT"),
     ("copy", Prim::Mat(Mat::MakeBox(1)), "MAKE_BOX"),
     ("count", Prim::Register(Reg::Count), "REGISTER"),
@@ -451,7 +463,7 @@ pub const PRIMITIVES: [(&str, Prim, &str); 325] = [
     ("indent", Prim::Indent, "START_PAR"),
     ("input", Prim::Input, "INPUT"),
     ("inputlineno", Prim::LastItem(3), "LAST_ITEM"),
-    ("insert", Prim::Unimpl(5), "INSERT"),
+    ("insert", Prim::Mat(Mat::Insert), "INSERT"),
     ("insertpenalties", Prim::PageInt(1), "SET_PAGE_INT"),
     ("interlinepenalty", Prim::IntPar(IntPar::Interlinepenalty), "ASSIGN_INT"),
     ("jobname", Prim::Convert(Conv::JobName), "CONVERT"),
@@ -462,7 +474,7 @@ pub const PRIMITIVES: [(&str, Prim, &str); 325] = [
     ("lastpenalty", Prim::LastItem(0), "LAST_ITEM"),
     ("lastskip", Prim::LastItem(2), "LAST_ITEM"),
     ("lccode", Prim::Code(Code::Lc), "DEF_CODE"),
-    ("leaders", Prim::Unimpl(51), "LEADER_SHIP"),
+    ("leaders", Prim::Mat(Mat::Leaders(100)), "LEADER_SHIP"),
     ("left", Prim::Unimpl(88), "LEFT_RIGHT"),
     ("lefthyphenmin", Prim::IntPar(IntPar::Lefthyphenmin), "ASSIGN_INT"),
     ("leftskip", Prim::GluePar(GluePar::Leftskip), "ASSIGN_GLUE"),
@@ -517,8 +529,8 @@ pub const PRIMITIVES: [(&str, Prim, &str); 325] = [
     ("nullfont", Prim::Unimpl(22), "SET_FONT"),
     ("number", Prim::Convert(Conv::Number), "CONVERT"),
     ("omit", Prim::Unimpl(13), "OMIT"),
-    ("openin", Prim::Unimpl(97), "IN_STREAM"),
-    ("openout", Prim::Unimpl(103), "EXTENSION"),
+    ("openin", Prim::InStream(true), "IN_STREAM"),
+    ("openout", Prim::OpenOut, "EXTENSION"),
     ("or", Prim::Or, "FI_OR_ELSE"),
     ("outer", Prim::Outer, "PREFIX"),
     ("output", Prim::TokPar(TokPar::Output), "ASSIGN_TOKS"),
@@ -551,7 +563,7 @@ pub const PRIMITIVES: [(&str, Prim, &str); 325] = [
     ("prevgraf", Prim::PrevGraf, "SET_PREV_GRAF"),
     ("radical", Prim::Unimpl(15), "RADICAL"),
     ("raise", Prim::Mat(Mat::Vmove(false)), "VMOVE"),
-    ("read", Prim::Unimpl(16), "READ_TO_CS"),
+    ("read", Prim::Read, "READ_TO_CS"),
     ("relax", Prim::Relax, "RELAX"),
     ("relpenalty", Prim::IntPar(IntPar::Relpenalty), "ASSIGN_INT"),
     ("right", Prim::Unimpl(89), "LEFT_RIGHT"),
@@ -580,7 +592,7 @@ pub const PRIMITIVES: [(&str, Prim, &str); 325] = [
     ("spacefactor", Prim::SpaceFactor, "SET_AUX"),
     ("spaceskip", Prim::GluePar(GluePar::Spaceskip), "ASSIGN_GLUE"),
     ("span", Prim::Unimpl(23), "TAB_MARK"),
-    ("special", Prim::Unimpl(105), "EXTENSION"),
+    ("special", Prim::Special, "EXTENSION"),
     ("splitbotmark", Prim::Mark(4), "TOP_BOT_MARK"),
     ("splitfirstmark", Prim::Mark(3), "TOP_BOT_MARK"),
     ("splitmaxdepth", Prim::DimenPar(DimenPar::Splitmaxdepth), "ASSIGN_DIMEN"),
@@ -618,7 +630,7 @@ pub const PRIMITIVES: [(&str, Prim, &str); 325] = [
     ("unvbox", Prim::Mat(Mat::Unvbox(false)), "UN_VBOX"),
     ("unvcopy", Prim::Mat(Mat::Unvbox(true)), "UN_VBOX"),
     ("uppercase", Prim::Uppercase, "CASE_SHIFT"),
-    ("vadjust", Prim::Unimpl(18), "VADJUST"),
+    ("vadjust", Prim::Mat(Mat::Vadjust), "VADJUST"),
     ("valign", Prim::Unimpl(19), "VALIGN"),
     ("vbadness", Prim::IntPar(IntPar::Vbadness), "ASSIGN_INT"),
     ("vbox", Prim::Mat(Mat::MakeBox(5)), "MAKE_BOX"),
@@ -638,7 +650,7 @@ pub const PRIMITIVES: [(&str, Prim, &str); 325] = [
     ("widowpenalty", Prim::IntPar(IntPar::Widowpenalty), "ASSIGN_INT"),
     ("write", Prim::Write, "EXTENSION"),
     ("xdef", Prim::Xdef, "DEF"),
-    ("xleaders", Prim::Unimpl(53), "LEADER_SHIP"),
+    ("xleaders", Prim::Mat(Mat::Leaders(102)), "LEADER_SHIP"),
     ("xspaceskip", Prim::GluePar(GluePar::Xspaceskip), "ASSIGN_GLUE"),
     ("year", Prim::IntPar(IntPar::Year), "ASSIGN_INT"),
 ];

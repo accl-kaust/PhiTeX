@@ -11,12 +11,12 @@ tex.web command code, its graph form and its status here.
 
 | class | primitives | done | partial | not yet |
 |---|---|---|---|---|
-| (i) expandable, input rewriting | 40 | 33 | 5 | 2 |
+| (i) expandable, input rewriting | 40 | 37 | 3 | 0 |
 | (ii) assignments, scopes | 151 | 146 | 3 | 2 |
-| (iii) material | 73 | 27 | 0 | 46 |
-| (iv) layout and output | 43 | 23 | 12 | 8 |
-| (v) IO and diagnostics | 18 | 6 | 2 | 10 |
-| all | 325 | 235 | 22 | 68 |
+| (iii) material | 73 | 28 | 0 | 45 |
+| (iv) layout and output | 43 | 31 | 12 | 0 |
+| (v) IO and diagnostics | 18 | 14 | 0 | 4 |
+| all | 325 | 256 | 18 | 51 |
 
 ("done": tex.web's semantics, checked against `tex -ini` by `tests/core.rs`
 (logs of programs that do not typeset) and `tests/dvi.rs` (DVI files and
@@ -99,9 +99,9 @@ both TeX and the graph; `tests/flow.rs`'s `doc()` begins with its catcodes,
    `\endinput`. Not implemented (error).
 6. **`\openin`/`\read`/`\ifeof`** — a read stream is a position in a file:
    `Key::ReadStream(n)` = (file value, line), defined by `\openin` and by
-   each `\read` (which also defines the macro). Not implemented; `\ifeof`
-   is true (no stream is ever open), which is exact while `\openin` is
-   absent.
+   each `\read` (which also defines the macro). Done: see "IO" below.
+   `\input` and `\endinput` (4, 5): the TeX side is done, the file read in
+   the piece until the core cuts it (IO).
 7. **`\setbox`/`\box`/`\copy`/`\wd`** — a box register's value is material:
    `Val::Box(Arc<BoxNode>)`. Conflict: `\box n`, `\unhbox n` (use) empty
    the register and `\wd n=` changes it *without* respecting grouping
@@ -167,7 +167,8 @@ both TeX and the graph; `tests/flow.rs`'s `doc()` begins with its catcodes,
     paragraph's lines, or at a piece's start, the last item is another
     task's (lines) or another piece's — read as none; TeX's `\lastpenalty`
     of a penalty the page builder has just set to 10000 is not seen.
-    `\lastbox` (a removal whose value the node needs) is not yet.
+    `\lastbox` (a removal whose value the node needs): done, the same read
+    and an `Item::Remove(3)`.
 14. **Groups and conditionals across a piece boundary** (a blank line inside
     `\begingroup…\endgroup` or an `\if…\fi`; `\obeylines` or a changed
     `\endlinechar`, where a blank line is not a `\par`): the cut assumes the
@@ -215,7 +216,9 @@ both TeX and the graph; `tests/flow.rs`'s `doc()` begins with its catcodes,
     would appear in the log); the page fold ignores material after `End`.
     A document whose last piece ends without `\end` is finished as if it
     had one (TeX would stop at its terminal prompt). The log's
-    `(\end occurred inside a group…)` lines are not written.
+    `(\end occurred inside a group…)` lines are written, and the pieces
+    after the one holding `\end` are left out of the log, the errors and
+    the written files; the core is to not run them (`ends_document`: IO).
 22. **The DVI comment and the date**: TeX Live's `tex` takes the
     preamble's comment date from the clock (it ignores
     `SOURCE_DATE_EPOCH`), the graph from `\year`… (1970.01.01:0000
@@ -223,12 +226,130 @@ both TeX and the graph; `tests/flow.rs`'s `doc()` begins with its catcodes,
     compares files; everything else is compared byte for byte.
 23. **Hyphenation** (patterns, `\hyphenation`) is not implemented: line
     breaking's second pass does not hyphenate (exact for `-ini` documents
-    without patterns). `\accent`, `\noboundary`, `\vadjust`, `\insert`,
-    leaders, `\special` and non-immediate `\write` are not yet.
+    without patterns). `\noboundary` is not yet; `\accent`, `\vadjust`,
+    `\insert` (the item), leaders, `\special` and deferred `\write`s are
+    done (IO, the remaining material).
 24. Small departures, documented: `\if…`'s inserted `\relax` (a `\fi` met
     while the test is read) is the name `\relax`, not a frozen one; a
     macro's parameter shows as `#n` whatever its parameter character; a
     `^^` reduction is not reduced again.
+
+## IO: files, streams, writes, `\input`, `\end` (agent E)
+
+Files are values; nothing opens or writes a file while commands run
+(`graph/io.rs`; the shapes gate holds: no file handle or stream object
+lives across commands).
+
+| TeX | graph |
+|---|---|
+| a file's bytes | a read of `Key::File(name)` → `Val::Bytes` (or `Val::Void`), answered by the `Env` (`Env::file`, a pure function of the name during a build: `Build::set_input_dirs`, read once per build). The TeX side does kpathsea's rule for inputs: `name.tex` first unless the name ends so, then `name` — each try a read. A changed file marks exactly its readers (the build compares the reads of every `Key::File` with the file at each update) |
+| `\jobname` | a read of `Key::Job` (`Env::jobname`, `Build::set_jobname`; `texput` by default) |
+| `read_open[n]`, `read_file[n]` | `Key::ReadStream(n)` → `Val::Stream{data, next, normal}` (the file's bytes and where its next line begins) or `Val::Void` (closed); always defined globally (no save stack in TeX) |
+| `\openin n=name` / `\closein n` | a node defining `Key::ReadStream(n)` (§1275) |
+| `\read n to \x` | a prefixed node (§1225, §482–486): reads `Key::ReadStream(m)`, tokenizes the next line with the codes and `\endlinechar` in force (the line is a source the reader enters above the pending input — `RState::files`, a `\read` line — and leaves at its end), more lines while braces are open, the rest of a line after an unmatched `}` dropped; defines `\x` (a macro without parameters) and the stream anew, advanced (a new value); at the file's end the stream is closed and the line is empty (a `\par`), with "File ended within \read" if braces were open; a non-control-sequence target is "Missing control sequence inserted" (and `\inaccessible` defined); stream 16 or a closed one is the terminal: an error (batch mode) |
+| `\ifeof n` | a read of `Key::ReadStream(n)`: closed? |
+| `write_open[j]`, `write_file[j]` | none while commands run: events, replayed by the log's gatherer (`logs::replay`) in document order |
+| `\immediate\openout/\write/\closeout` | the node's log holds an event (`logs::io_event`: kind, stream, payload); a `\write`'s text is expanded in the node (§1370, no mode, `\newlinechar` a line break, unprintables `^^`) |
+| `\openout`, `\write`, `\closeout`, `\special` | whatsit items (`Item::Whatsit`) in the current list, in any mode; a `\write` holds its tokens unexpanded, a `\special` its expanded text |
+| `ship_out`'s `out_what` (§1374) | an explicit `\shipout`: its node does the box's whatsits (DVI order, none inside leaders) — its `\write`s expanded with the definitions reaching it — between its `[n` and `]`. A page the page builder ships: at the join, `graph::page_io` expands its `\write`s with the definitions reaching the node whose `BuildPage` (or `End`) shipped it (`logs::page_places`: the call's node from the log fragments' marks; a pure function of the box, the place and those definitions: a candidate for a task and memo) |
+| the files written | `Output::writes`: (name, contents) per file, in the order first opened; `\openout` adds `.tex` to a name without extension (web2c's `\openout j = `name'.` log line is off for `tex`: texmf.cnf `log_openout.tex = f`); a `\write` to a closed stream, 16 or 17 is a log line |
+| `\special` in the DVI file | `xxx1`/`xxx4` after `synch_h`, `synch_v` (§1368) |
+
+**`\input` (decided design, TeX side complete; the core's part is A's).**
+`\input` met at the top is a node of its own (`next_x_m(top)` returns it,
+as a conditional): it scans the name (§526), reads `Key::File` (the
+kpathsea rule above), logs ` (./name` (§537), and its **result is the
+file's text in its out state**: `node.out.files` gains an entry
+`Infile { text, pos: 0, name, endinput: false, under, tstate, eol }` —
+`text` the file's lines (`graph::file_text`: web2c's `input_ln`, trailing
+spaces dropped, each line ending in `\r`, an empty file one empty line),
+`under` the input that was pending at the call (read after the file),
+`tstate`/`eol` the caller's tokenizer state, restored after it. Met while
+another command scans, `\input` is a step of that node (the same entry).
+
+*Now (single-piece emulation, exact TeX semantics):* the reader reads the
+entry's text in the same piece, above the piece's text (`Exec::src`); at
+its end it logs `)`, pops it and goes on with `under` and the rest of the
+calling line. So the first file line and the rest of the calling line
+carry the predecessor's state, as decided; nothing is cut.
+*Interface for the core (A):* for a node `i` of piece `k` whose command
+is `\input` (`Kind::Other`, `cmd` meaning `Prim::Input`) and whose
+`out.files` has one more entry than its input, at `pos: 0`:
+1. cut the entry's `text` with `graph::cut` into pieces F1..Fm, inserted
+   after node `i` of piece `k` in the order;
+2. F1 runs with entry state `node.out` *minus that entry*, with `pending`
+   empty, `tstate: N`, `eol: EOL_UNREAD`; F2..Fm keep the constant start
+   state (their cuts stay canonical);
+3. the piece R holding the rest of the calling line runs from Fm's `End`
+   state with `pending = under ++ Fm's pending`, `tstate`/`eol` restored,
+   `pos` = `node.out.pos`, and its log begins with `)`;
+4. `Key::LineBase` answered per piece is the piece's line offset *in its
+   own file* (F1: 0).
+With that, `RState::files` holds only `\read` lines and `\input`s met
+inside another command's scanning (those stay in-piece: a node cannot
+span pieces).
+*`\endinput`* (§378): now the innermost file's `endinput` flag; the file
+ends when the reader passes the current line's end. In pieces: proposal —
+`RState.endinput` set by the step when the file is a piece of its own; the
+reader stops at that line's end (as `\end` stops), and the core drops the
+file's later pieces (they ran on the guess that none occurs). In the main
+file it is an error (not supported).
+
+**`\inputlineno` (design).** A line number is never part of a version. A
+node reading `\inputlineno` reads `Key::LineBase` — the lines of its file
+before its piece, answered by the `Env` per piece (`Env::line_base`; the
+build's is a prefix sum of the pieces' line counts, made at the first such
+read) — and adds its line within the piece (from its position in the
+piece's text). A line count changed above changes `Key::LineBase` only for
+the pieces below; the build compares each reader's value at every update
+and marks exactly the nodes that read it. Inside a file read in the
+piece, the line is the file's (from the entry's position). The `\end`
+node reads it too (the lines of the conditionals still open). *Gap (for
+A's `run_piece`):* a node whose text and reads are unchanged is kept even
+when lines were added before it *within its own piece*; proposal: a node
+whose reads include `Key::LineBase` is kept only if its line within the
+piece (`line_of(old text, old pos) == line_of(new text, new pos)`) is.
+
+**`\end`, `\dump` (§1335).** The `\end` node (on the main vertical list)
+logs what `final_cleanup` writes after the job's last page — a ` )` per
+file still open, `(\end occurred inside a group at level n)`, and per open
+conditional, innermost first, `(\end occurred when \ifx on line n was
+incomplete)` — as an entry the log puts after the main file's ` )`
+(`print::ENDJOB`); then it clears the groups, conditionals and files
+(TeX pops them) and stops reading. `\dump` is `\end` plus `Beginning to
+dump on file JOB.fmt` and ` (preloaded format=JOB y.m.d)` (the format is
+the graph's prefix: no file); inside a group, TeX's fatal error.
+*Interface for the core (A):* `graph::ends_document(run)` — the piece's
+material holds `Item::End` — ends the document: the core is not to run
+the pieces after it. Now: they run, but the build leaves them out of the
+log, the errors and the written files (the page fold already ignores
+material after `End`).
+
+**Approximations (IO).** A `\special`'s text is printed with the escape
+character at the `\special` (TeX prints at shipout); characters 128–255
+written are not `^^`-coded; an `\input` file's diagnostics (box reports'
+`at line n`) give the calling line; `\endinput` in the main file and
+`\read` from the terminal are errors; a deferred `\write` of a page the
+page builder ships is expanded at the join, serially (pure; not yet a
+task).
+
+## The remaining material (agent E)
+
+| TeX | graph |
+|---|---|
+| `\leaders`, `\cleaders`, `\xleaders` (§1078) | `scan_box` with `BoxContext::Leaders(100..102)` (a box, or a rule: §1084); the glue after it (`\hskip`… in horizontal, `\vskip`… in vertical lists, else "Leaders not followed by proper glue") becomes `Item::Leaders{g, sub, b, zero}`: glue everywhere glue is (`Item::glue`, `Item::is_glue`: line breaking, the page builder, `\unskip`, `\lastskip`, `vert_break`, `prune_page_top`, §816's last glue), plus the box's height and depth in `hpack` (§656) and its width in `vpack` (§671); shipped as tex.web §626–628, §635–637 (aligned, centred, spread; rule leaders); shown as §190 |
+| `\accent` (§1123–1125) | a node: the accent character; `do_assignments` (§1270: prefixed assignments in this node, `\setbox` refused); the next character in the font then current; kerns `(for accent)` by both fonts' slants (`\fontdimen1`) and the accent font's x-height (`\fontdimen5`, read as Keys), the accent boxed and shifted when the heights differ |
+| `\lastbox` (§1080–1081) | the one read of material (Conflict 13): the current list's last box, unless a discretionary replaces it, is the node's value (unshifted) and an `Item::Remove(3)` its gatherer applies; on the main vertical list TeX's list is the contributions since the last page-builder call (none: "You can't use `\lastbox' in vertical mode") |
+| `\vsplit n to h` (§977–979) | `split::vsplit`, a pure function of the box's list, `h`, `\splitmaxdepth`, `\splittopskip` (`vert_break` §970–976, `prune_page_top` §968); the part split off packed to `h` (reports with `\vbadness`, `\vfuzz`), the rest packed naturally into the register at the scope of the definition it replaces (Conflict 7); `Key::SplitMark(0/1)` (`\splitfirstmark`, `\splitbotmark`) defined globally by every `\vsplit`, read by those steps |
+| `\vadjust`, `\insert n` (§1097–1100) | a group like a box's (`BoxKind::Insert(n, _)`, 255 for `\vadjust`), `normal_paragraph` inside; its `}` reads `\splittopskip`, `\splitmaxdepth`, `\floatingpenalty` inside the group; the packaging node emits `Item::Adjust(list)` / `Item::Ins{n, height+depth, depth, split_top, float_cost, list}` (reads nothing else: no register of the class); `hpack` with an adjust list moves `Ins`, `Mark` and `Adjust`'s material out (§655): after a paragraph's line (`linebreak`'s `Line.adjust`, no change there) and after an `\hbox` appended in vertical mode; on the main vertical list the page builder is called (§1100) |
+| `\topmark`, `\firstmark`, `\botmark` | not wired: B's marks value is not on `flow`; they stay empty (approx) |
+
+**Approximations (material).** The page fold does not handle insertions
+(A/B: an `Item::Ins` on the main vertical list is contributed to the page
+and ignored there; TeX moves it to `\box n` and its size into
+`\pagegoal`); `\lastbox` on the main vertical list sees the items
+emitted since the last page-builder call in its piece (TeX's
+contributions: exact but for a kern the page builder left there, §1000).
 
 ## The inventory
 
@@ -240,7 +361,7 @@ both TeX and the graph; `tests/flow.rs`'s `doc()` begins with its catcodes,
 | `\csname` | cs_name | step: builds the name, rewrites the input with it; an undefined name is defined `\relax` (local) by the node the step is in | done |
 | `\else` | fi_or_else | ends the taken arm (skips the rest to `\fi`): the closing node defines each key the arm defined as φ(after, before) | done |
 | `\endcsname` | end_cs_name | outside `\csname`: an error node | done |
-| `\endinput` | input | a call into a named source: the file is a value whose text becomes pieces — DESIGN CONVERSATION (see Conflicts) | not yet |
+| `\endinput` | input | step: the innermost `\input` file ends with its current line (`Infile.endinput`); in pieces the core drops its later pieces (IO) | done (in an `\input` file; in the main file an error) |
 | `\expandafter` | expand_after | step: expands the token after next once, rewrites the input | done |
 | `\fi` | fi_or_else | ends the taken arm (skips the rest to `\fi`): the closing node defines each key the arm defined as φ(after, before) | done |
 | `\firstmark` | top_bot_mark | step: rewrites the input with a mark of the page builder's last output — reads the page scan's result (see Conflicts); empty until marks exist | approx: empty |
@@ -249,7 +370,7 @@ both TeX and the graph; `tests/flow.rs`'s `doc()` begins with its catcodes,
 | `\ifcase` | if_test | conditional: at the top a node (`Kind::If`, test operands = the reads it made); inside scanning a step of that node; only the taken arm is read; the end gets an explicit φ | done |
 | `\ifcat` | if_test | conditional: at the top a node (`Kind::If`, test operands = the reads it made); inside scanning a step of that node; only the taken arm is read; the end gets an explicit φ | done |
 | `\ifdim` | if_test | conditional: at the top a node (`Kind::If`, test operands = the reads it made); inside scanning a step of that node; only the taken arm is read; the end gets an explicit φ | done |
-| `\ifeof` | if_test | conditional: at the top a node (`Kind::If`, test operands = the reads it made); inside scanning a step of that node; only the taken arm is read; the end gets an explicit φ | done (no stream is open) |
+| `\ifeof` | if_test | conditional: at the top a node (`Kind::If`, test operands = the reads it made); inside scanning a step of that node; only the taken arm is read; the end gets an explicit φ; the test reads `Key::ReadStream(n)` | done |
 | `\iffalse` | if_test | conditional: at the top a node (`Kind::If`, test operands = the reads it made); inside scanning a step of that node; only the taken arm is read; the end gets an explicit φ | done |
 | `\ifhbox` | if_test | conditional: at the top a node (`Kind::If`, test operands = the reads it made); inside scanning a step of that node; only the taken arm is read; the end gets an explicit φ | done |
 | `\ifhmode` | if_test | conditional: at the top a node (`Kind::If`, test operands = the reads it made); inside scanning a step of that node; only the taken arm is read; the end gets an explicit φ | done |
@@ -262,16 +383,16 @@ both TeX and the graph; `tests/flow.rs`'s `doc()` begins with its catcodes,
 | `\ifvmode` | if_test | conditional: at the top a node (`Kind::If`, test operands = the reads it made); inside scanning a step of that node; only the taken arm is read; the end gets an explicit φ | done |
 | `\ifvoid` | if_test | conditional: at the top a node (`Kind::If`, test operands = the reads it made); inside scanning a step of that node; only the taken arm is read; the end gets an explicit φ | done |
 | `\ifx` | if_test | conditional: at the top a node (`Kind::If`, test operands = the reads it made); inside scanning a step of that node; only the taken arm is read; the end gets an explicit φ | done |
-| `\input` | input | a call into a named source: the file is a value whose text becomes pieces — DESIGN CONVERSATION (see Conflicts) | not yet |
-| `\jobname` | convert | step: reads its operand (a token, a number, `\escapechar`, catcodes of one-letter names) and rewrites the input with category-12 tokens | done (constant `texput`) |
+| `\input` | input | at the top a node whose result is the file's text (`Key::File` read; its out state's new `RState::files` entry); inside scanning a step; read in the piece now, cut into pieces by the core (IO) | done (single-piece emulation) |
+| `\jobname` | convert | step: reads its operand (a token, a number, `\escapechar`, catcodes of one-letter names) and rewrites the input with category-12 tokens; the name a read of `Key::Job` | done |
 | `\lowercase` | case_shift | node (not expandable): reads lccode/uccode (`get`) of each character and rewrites the input with the changed text; defines nothing | done |
 | `\meaning` | convert | step: reads its operand (a token, a number, `\escapechar`, catcodes of one-letter names) and rewrites the input with category-12 tokens | done |
 | `\noexpand` | no_expand | step: marks the next token not-to-expand once (`Tok::DontExpand` in the rewritten input) | done |
 | `\number` | convert | step: reads its operand (a token, a number, `\escapechar`, catcodes of one-letter names) and rewrites the input with category-12 tokens | done |
 | `\or` | fi_or_else | ends the taken arm (skips the rest to `\fi`): the closing node defines each key the arm defined as φ(after, before) | done |
 | `\romannumeral` | convert | step: reads its operand (a token, a number, `\escapechar`, catcodes of one-letter names) and rewrites the input with category-12 tokens | done |
-| `\splitbotmark` | top_bot_mark | step: rewrites the input with a mark of the page builder's last output — reads the page scan's result (see Conflicts); empty until marks exist | approx: empty |
-| `\splitfirstmark` | top_bot_mark | step: rewrites the input with a mark of the page builder's last output — reads the page scan's result (see Conflicts); empty until marks exist | approx: empty |
+| `\splitbotmark` | top_bot_mark | step: rewrites the input with `Key::SplitMark(1)`, defined (globally) by each `\vsplit` | done |
+| `\splitfirstmark` | top_bot_mark | step: rewrites the input with `Key::SplitMark(0)`, defined (globally) by each `\vsplit` | done |
 | `\string` | convert | step: reads its operand (a token, a number, `\escapechar`, catcodes of one-letter names) and rewrites the input with category-12 tokens | done |
 | `\the` | the | step: reads the internal quantity (`get`) and rewrites the input with its tokens (unexpanded inside `\edef`/`\message`) | done |
 | `\topmark` | top_bot_mark | step: rewrites the input with a mark of the page builder's last output — reads the page scan's result (see Conflicts); empty until marks exist | approx: empty |
@@ -441,7 +562,7 @@ both TeX and the graph; `tests/flow.rs`'s `doc()` begins with its catcodes,
 | `\/` | ital_corr | node emitting the italic correction kern of the current list's last item (`last_item`: the one read of material, Conflict 13) | done |
 | `\above` | above | generalized fraction | not yet |
 | `\abovewithdelims` | above | generalized fraction | not yet |
-| `\accent` | accent | node emitting an accented character | not yet |
+| `\accent` | accent | node emitting the accent (boxed and shifted if need be) between kerns `(for accent)`, and the character after its assignments (§1123–1125; the remaining material) | done |
 | `\atop` | above | generalized fraction | not yet |
 | `\atopwithdelims` | above | generalized fraction | not yet |
 | `\char` | char_num | `\char n`: the main loop from that character (tex.web 1038) | done |
@@ -517,21 +638,21 @@ both TeX and the graph; `tests/flow.rs`'s `doc()` begins with its catcodes,
 |---|---|---|---|
 | `\badness` | last_item | a read of the last box packing's badness (the packager's history: Conflict 20) | approx: 0 |
 | `\box` | make_box | reads `Key::Box(n)`; `box_end` (append with interline glue, `\setbox`, `\shipout`); voids the register at the scope of the definition it replaces (Conflict 7) | done (voiding: Conflict 7) |
-| `\cleaders` | leader_ship | `\shipout`: a node whose operand is a box value and whose result is a page; leaders: material | not yet |
+| `\cleaders` | leader_ship | `scan_box` (a box or a rule), then the glue after it: `Item::Leaders` (the remaining material) | done |
 | `\copy` | make_box | reads `Key::Box(n)`; `box_end` | done |
 | `\deadcycles` | set_page_int | `\deadcycles`, `\insertpenalties`: page builder / output state, a read of the page scan (see Conflicts) | approx: 0 |
 | `\dp` | set_box_dimen | `\wd n`...: a read of `Key::Box(n)`'s dimensions; assignment defines a new box value at the scope of the replaced definition (Conflict 7) | done |
-| `\dump` | stop | the end of a format: the format is the set of definitions reaching this point | no-op |
-| `\end` | stop | `its_all_over`: node emitting `Item::End` (the page fold appends `\hbox to\hsize{}\vfill\penalty-2^30` and builds pages until empty, tex.web 1054); reading stops | done (later pieces still run: Conflict 21) |
+| `\dump` | stop | `\end`, and the log's "Beginning to dump" lines: the format is the set of definitions reaching this point (no file) | done (the log up to the format's name) |
+| `\end` | stop | `its_all_over`: node emitting `Item::End` (the page fold appends `\hbox to\hsize{}\vfill\penalty-2^30` and builds pages until empty, tex.web 1054); `final_cleanup`'s lines after the main file's ` )` (§1335); reading stops | done (later pieces run but are left out: Conflict 21, IO) |
 | `\hbox` | make_box | a `Kind::Open` node opening a box group (`BoxGroup`: kind, context, `to`/`spread`, the enclosing list's mode, space factor, prev depth); its `}` is a `Close` node; the packaging node (`Kind::Par`) gathers the items emitted inside and packs them (hpack, tex.web 649) with `\hbadness`/`\hfuzz`/`\overfullrule` read after the group, diagnostics into the log | done |
 | `\ht` | set_box_dimen | `\wd n`...: a read of `Key::Box(n)`'s dimensions; assignment defines a new box value at the scope of the replaced definition (Conflict 7) | done |
-| `\insert` | insert | node emitting an insertion (material in a group); the page scan reads its size | not yet |
+| `\insert` | insert | a group whose packaging node emits `Item::Ins` (with `\splittopskip`, `\splitmaxdepth`, `\floatingpenalty` read inside it); moved out of lines and adjusted hboxes (§655) | partial (the item; the page fold's handling is A/B's) |
 | `\insertpenalties` | set_page_int | `\deadcycles`, `\insertpenalties`: page builder / output state, a read of the page scan (see Conflicts) | approx: 0 |
-| `\lastbox` | make_box | removes the last box of the current list: a removal whose value the node needs — Conflict 13 | not yet |
+| `\lastbox` | make_box | the current list's last box (Conflict 13's read of material) is the node's value, and an `Item::Remove(3)` its gatherer applies | done |
 | `\lastkern` | last_item | the current list's last item (`last_item`, Conflict 13) | done (inside a piece) |
 | `\lastpenalty` | last_item | the current list's last item (`last_item`, Conflict 13) | done (inside a piece) |
 | `\lastskip` | last_item | the current list's last item (`last_item`, Conflict 13) | done (inside a piece) |
-| `\leaders` | leader_ship | `\shipout`: a node whose operand is a box value and whose result is a page; leaders: material | not yet |
+| `\leaders` | leader_ship | `scan_box` (a box or a rule), then the glue after it: `Item::Leaders` (the remaining material) | done |
 | `\lower` | vmove | `scan_box` with a shift (horizontal mode) | done |
 | `\mark` | mark | node emitting `Item::Mark` (expanded text); marks move out of an `\hbox` in vertical mode and out of lines; `\topmark`... not yet | done (no mark classes) |
 | `\moveleft` | hmove | `scan_box` with a shift (vertical mode) | done |
@@ -547,37 +668,37 @@ both TeX and the graph; `tests/flow.rs`'s `doc()` begins with its catcodes,
 | `\raise` | vmove | `scan_box` with a shift (horizontal mode) | done |
 | `\setbox` | set_box | prefixed node: `scan_box` with context `Set(n, global)`; the packaging node defines `Key::Box(n)` = `Val::Box` | done |
 | `\shipout` | leader_ship | `scan_box`; `box_end` emits `Item::Shipout` (in the outer list's order, through paragraphs and boxes) with `\count0`–`9`, offsets, `\mag`, date read there; its `[n]` in the node's log | done |
-| `\special` | extension | whatsit: material reaching `\shipout` | not yet |
+| `\special` | extension | whatsit item holding the expanded text; `xxx` in the DVI file where shipping meets it (IO) | done |
 | `\unhbox` | un_hbox | node emitting a box register's list (reads `Key::Box(n)`, voids it: Conflict 7) | done |
 | `\unhcopy` | un_hbox | node emitting a box register's list | done |
 | `\unvbox` | un_vbox | as `\unhbox`, vertical | done |
 | `\unvcopy` | un_vbox | as `\unhbox`, vertical | done |
-| `\vadjust` | vadjust | node emitting adjust material in a group | not yet |
+| `\vadjust` | vadjust | a group whose packaging node emits `Item::Adjust`, its material moved after the line or adjusted hbox holding it (§655) | done |
 | `\vbox` | make_box | as `\hbox`, vpack (tex.web 668) with `\boxmaxdepth` read inside the group; a paragraph open at its `}` ends first | done |
-| `\vsplit` | make_box | box construction: a node opening a group whose Close node packs the material emitted inside into a box value | not yet |
+| `\vsplit` | make_box | a node: `split::vsplit` of the register's box value (pure), the rest left in the register (Conflict 7), `Key::SplitMark` defined | done |
 | `\vtop` | make_box | as `\vbox`, height and depth readjusted (tex.web 1087) | done |
 | `\wd` | set_box_dimen | `\wd n`...: a read of `Key::Box(n)`'s dimensions; assignment defines a new box value at the scope of the replaced definition (Conflict 7) | done |
-| `\xleaders` | leader_ship | `\shipout`: a node whose operand is a box value and whose result is a page; leaders: material | not yet |
+| `\xleaders` | leader_ship | `scan_box` (a box or a rule), then the glue after it: `Item::Leaders` (the remaining material) | done |
 
 ### (v) IO and diagnostics — 18
 
 | primitive | tex.web cmd | graph form | status |
 |---|---|---|---|
 | `\batchmode` | set_interaction | node with no result (interaction changes only what reaches the terminal) | done (no-op) |
-| `\closein` | in_stream | `\openin`/`\closein`: a node defining `Key::ReadStream(n)` = the opened file value (see Conflicts) | not yet |
-| `\closeout` | extension | a write stream: a node defining `Key::WriteStream(n)`; deferred ones are whatsits run at `\shipout` | not yet |
+| `\closein` | in_stream | a node defining `Key::ReadStream(n)` closed (global) | done |
+| `\closeout` | extension | a whatsit (or with `\immediate` an event in the node's log), done when its page is shipped: the log's gatherer replays the streams (IO) | done |
 | `\errmessage` | message | node whose result is a string (`Node.log`), the expanded text shown; `\errmessage` an error | done |
 | `\errorstopmode` | set_interaction | node with no result (interaction changes only what reaches the terminal) | done (no-op) |
-| `\immediate` | extension | prefix for `\write`/`\openout`/`\closeout`: the extension runs in this node | with `\write` |
-| `\inputlineno` | last_item | a read of the line-number field of the position (never part of a version) | not yet (error, 0) |
+| `\immediate` | extension | prefix for `\write`/`\openout`/`\closeout`: the extension's event is this node's (IO) | done |
+| `\inputlineno` | last_item | a read of `Key::LineBase` (the lines before the piece, answered by the `Env`) plus the line within the piece; in a file read in the piece, its line there (IO) | done |
 | `\message` | message | node whose result is a string (`Node.log`), the expanded text shown; `\errmessage` an error | done |
 | `\nonstopmode` | set_interaction | node with no result (interaction changes only what reaches the terminal) | done (no-op) |
-| `\openin` | in_stream | `\openin`/`\closein`: a node defining `Key::ReadStream(n)` = the opened file value (see Conflicts) | not yet |
-| `\openout` | extension | a write stream: a node defining `Key::WriteStream(n)`; deferred ones are whatsits run at `\shipout` | not yet |
-| `\read` | read_to_cs | `\read n to \x`: a node defining `\x` from the next line of a stream — a stream is a source read by position (see Conflicts) | not yet |
+| `\openin` | in_stream | a node reading `Key::File` and defining `Key::ReadStream(n)` = `Val::Stream` (global) | done |
+| `\openout` | extension | a whatsit (or with `\immediate` an event in the node's log), done when its page is shipped (IO) | done |
+| `\read` | read_to_cs | a prefixed node: reads `Key::ReadStream(n)`, tokenizes its next line(s), defines `\x` and the stream advanced (IO) | done |
 | `\scrollmode` | set_interaction | node with no result (interaction changes only what reaches the terminal) | done (no-op) |
 | `\show` | xray | diagnostic: `> \x=meaning.` in the log, an error context | not yet |
 | `\showbox` | xray | diagnostic node whose result is log text (`> ...`) and an error context — needs the line number field | not yet |
 | `\showlists` | xray | diagnostic node whose result is log text (`> ...`) and an error context — needs the line number field | not yet |
 | `\showthe` | xray | diagnostic node whose result is log text (`> ...`) and an error context — needs the line number field | not yet |
-| `\write` | extension | with `\immediate`: a node whose result is the written line (`Node.log`, ending in a newline), its text expanded in no mode; deferred: a whatsit expanded at `\shipout` | `\immediate` only |
+| `\write` | extension | with `\immediate`: an event in the node's log, its text expanded in no mode; deferred: a whatsit whose text is expanded where its page is shipped (IO) | done |

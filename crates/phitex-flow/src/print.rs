@@ -109,11 +109,30 @@ pub const MAX_PRINT_LINE: usize = 79;
 /// on the current line: lines broken at 79 characters, a `\message` after
 /// a space or on a line of its own if it is long (tex.web 1280), a written
 /// line on lines of its own (tex.web 1370). Characters below 32 and 127
-/// print as `^^` codes.
+/// print as `^^` codes. An entry marked [`ENDJOB`] comes after `end` (the
+/// main file's ` )`): what `\end` writes last (tex.web 1335).
 pub fn log(start: &str, entries: &[String], end: &str) -> String {
     let mut p = Printer { out: String::new(), offset: 0 };
     p.print(start);
-    for e in entries {
+    let (late, now): (Vec<&String>, Vec<&String>) = entries.iter().partition(|e| e.starts_with(ENDJOB));
+    for e in now {
+        p.entry(e);
+    }
+    p.print(end);
+    for e in late {
+        p.entry(&e[ENDJOB.len_utf8()..]);
+    }
+    p.out
+}
+
+/// Marks a log entry that goes after the main file's ` )`
+/// (`final_cleanup`'s lines, tex.web 1335).
+pub const ENDJOB: char = '\u{E006}';
+
+impl Printer {
+    /// One entry of the log.
+    fn entry(&mut self, e: &str) {
+        let p = self;
         if let Some(raw) = e.strip_prefix(crate::show::RAW) {
             // (print operations: `print_ln`, `print_nl`, a space if the
             // line is not empty, characters)
@@ -150,8 +169,6 @@ pub fn log(start: &str, entries: &[String], end: &str) -> String {
             p.print(e);
         }
     }
-    p.print(end);
-    p.out
 }
 
 struct Printer {

@@ -93,6 +93,25 @@ pub enum Key {
     /// `\textfont` (size 0), `\scriptfont` (1), `\scriptscriptfont` (2) of a
     /// family.
     FamFont(u8, u8),
+    /// The bytes of the input file of this exact name (`Val::Bytes`, or
+    /// `Val::Void` if there is none): answered by the build's `Env`, never
+    /// defined. Reading a file is a read of it.
+    File(Arc<str>),
+    /// `\openin` stream `n` (0–15; 16 is the terminal): `Val::Stream` while
+    /// open, `Val::Void` when closed. Always defined globally (TeX's
+    /// `read_open` has no save stack); each `\read` defines it anew,
+    /// advanced by its lines.
+    ReadStream(u8),
+    /// The job's name (`\jobname`): answered by the `Env`.
+    Job,
+    /// The number of lines of its file before the reading piece's first
+    /// line (`\inputlineno` adds the line within the piece): answered by
+    /// the `Env` per piece, never defined, so a changed line count above
+    /// re-runs only the nodes that read it.
+    LineBase,
+    /// `\splitfirstmark` (0) and `\splitbotmark` (1): defined globally by
+    /// each `\vsplit` (`Val::Toks`, empty for none).
+    SplitMark(u8),
 }
 
 impl Key {
@@ -120,7 +139,7 @@ impl std::hash::Hash for Key {
                 n.hash(h);
                 h.write_u64((20 << 40) | u64::from(*k));
             }
-            Key::HyphenChar(n) | Key::SkewChar(n) | Key::FontIdent(n) | Key::FontLoaded(n) => {
+            Key::HyphenChar(n) | Key::SkewChar(n) | Key::FontIdent(n) | Key::FontLoaded(n) | Key::File(n) => {
                 n.hash(h);
                 h.write_u64(self.word());
             }
@@ -137,7 +156,8 @@ impl PartialEq for Key {
             | (Key::HyphenChar(a), Key::HyphenChar(b))
             | (Key::SkewChar(a), Key::SkewChar(b))
             | (Key::FontIdent(a), Key::FontIdent(b))
-            | (Key::FontLoaded(a), Key::FontLoaded(b)) => Arc::ptr_eq(a, b) || a == b,
+            | (Key::FontLoaded(a), Key::FontLoaded(b))
+            | (Key::File(a), Key::File(b)) => Arc::ptr_eq(a, b) || a == b,
             (Key::Cat(a), Key::Cat(b)) => a == b,
             (Key::FontDimen(a, k), Key::FontDimen(b, l)) => k == l && (Arc::ptr_eq(a, b) || a == b),
             (Key::Cs(_), _) | (_, Key::Cs(_)) => false,
@@ -163,6 +183,11 @@ impl Key {
             Key::SkewChar(_) => w(22, 0),
             Key::FontIdent(_) => w(23, 0),
             Key::FontLoaded(_) => w(24, 0),
+            Key::File(_) => w(26, 0),
+            Key::ReadStream(n) => w(27, u64::from(*n)),
+            Key::Job => w(28, 0),
+            Key::LineBase => w(29, 0),
+            Key::SplitMark(n) => w(30, u64::from(*n)),
             Key::Active(x) => w(1, c(x)),
             Key::Cat(x) => w(2, c(x)),
             Key::Lccode(x) => w(3, c(x)),
@@ -216,6 +241,11 @@ impl fmt::Display for Key {
             Key::FontIdent(x) => write!(f, "font_id_text ({x})"),
             Key::FontLoaded(x) => write!(f, "font loaded ({x})"),
             Key::FamFont(s, x) => write!(f, "\\{}font{x}", ["text", "script", "scriptscript"][usize::from(*s).min(2)]),
+            Key::File(n) => write!(f, "file {n}"),
+            Key::ReadStream(n) => write!(f, "read stream {n}"),
+            Key::Job => write!(f, "\\jobname"),
+            Key::LineBase => write!(f, "line base"),
+            Key::SplitMark(n) => write!(f, "\\split{}mark", if *n == 0 { "first" } else { "bot" }),
         }
     }
 }
@@ -281,6 +311,22 @@ pub enum Val {
     Box(Arc<crate::item::BoxNode>),
     /// A name (`Key::FontIdent`).
     Name(Arc<str>),
+    /// A file's bytes (`Key::File`).
+    Bytes(Arc<[u8]>),
+    /// An open read stream (`Key::ReadStream`).
+    Stream(Arc<Stream>),
+}
+
+/// An open `\read` stream: a file's bytes and where its next line begins
+/// (tex.web 480: `read_open` is `just_open` until a line has been read,
+/// then `normal`). A value: `\read` defines the stream anew, advanced.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Stream {
+    pub data: Arc<[u8]>,
+    /// The byte offset of the next line.
+    pub next: usize,
+    /// A line has been read (`normal`; else `just_open`).
+    pub normal: bool,
 }
 
 impl fmt::Display for Val {
@@ -304,6 +350,8 @@ impl fmt::Display for Val {
             Val::Void => write!(f, "void"),
             Val::Box(b) => write!(f, "{}box({}+{})x{}", if b.vertical { "v" } else { "h" }, b.h, b.d, b.w),
             Val::Name(n) => write!(f, "{n}"),
+            Val::Bytes(b) => write!(f, "{} bytes", b.len()),
+            Val::Stream(x) => write!(f, "stream at {} of {}", x.next, x.data.len()),
             Val::Meaning(Meaning::Font(x)) => write!(f, "select font {}", x.name),
             Val::Meaning(Meaning::Undefined) => write!(f, "undefined"),
             Val::Meaning(Meaning::Prim(p)) => write!(f, "primitive \\{}", p.name()),
@@ -362,17 +410,20 @@ pub fn initial(key: &Key, _font: &Arc<Font>) -> Val {
         }),
         Key::Delcode(c) => Val::Int(if *c == '.' { 0 } else { -1 }),
         Key::IntPar(p) => Val::Int(p.initial()),
-        Key::TokPar(_) | Key::Toks(_) => Val::Toks(Arc::new(Vec::new())),
+        Key::TokPar(_) | Key::Toks(_) | Key::SplitMark(_) => Val::Toks(Arc::new(Vec::new())),
         // (`\fontdimen`: the null font's, tex.web 552; a loaded font's are
         // defined by its `\font`)
-        Key::DimenPar(_) | Key::Count(_) | Key::Dimen(_) | Key::FontDimen(..) | Key::FontLoaded(_) => Val::Int(0),
+        Key::DimenPar(_) | Key::Count(_) | Key::Dimen(_) | Key::FontDimen(..) | Key::FontLoaded(_) | Key::LineBase => {
+            Val::Int(0)
+        }
         Key::GluePar(_) | Key::Skip(_) | Key::Muskip(_) => Val::Glue(Arc::new(Glue::default())),
-        Key::Box(_) => Val::Void,
+        Key::Box(_) | Key::File(_) | Key::ReadStream(_) => Val::Void,
         Key::Parshape => Val::Parshape(Arc::new(Vec::new())),
         Key::Font | Key::FamFont(..) => Val::Font(crate::tfm::null_font()),
         Key::HyphenChar(_) => Val::Int(i32::from(b'-')),
         Key::SkewChar(_) => Val::Int(-1),
         Key::FontIdent(_) => Val::Name(Arc::from("nullfont")),
+        Key::Job => Val::Name(Arc::from("texput")),
     }
 }
 

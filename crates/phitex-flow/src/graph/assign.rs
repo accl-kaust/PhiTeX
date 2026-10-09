@@ -2,9 +2,9 @@
 //! its definitions (`Exec::define`). Prefixes are nodes that hand their
 //! flags to the next node through the reader state (`RState::global`,
 //! `long`, `outer`); `\afterassignment`'s token is handed the same way.
-//! Also the commands whose result is a string for the log (`\message`,
-//! `\immediate\write`) and `\uppercase`/`\lowercase`, which rewrite the
-//! input.
+//! Also `\message`, whose result is a string for the log (the output
+//! streams are in `io.rs`), `\read` (a definition, also in `io.rs`), and
+//! `\uppercase`/`\lowercase`, which rewrite the input.
 
 use std::sync::Arc;
 
@@ -47,6 +47,7 @@ pub(super) fn prefixable(m: &Meaning) -> bool {
             | Prim::BoxDimen(_)
             | Prim::Interaction(_)
             | Prim::DefFamily(_)
+            | Prim::Read
             | Prim::Mat(Mat::SetBox | Mat::FontInt(_)) => true,
             Prim::Unimpl(_) => matches!(p.name(), "read" | "hyphenation" | "patterns"),
             _ => false,
@@ -206,6 +207,7 @@ impl Exec<'_> {
                 }
                 Prim::Mat(Mat::SetBox) => self.setbox(global),
                 Prim::Mat(Mat::FontInt(k)) => self.assign_font_int(k),
+                Prim::Read => self.read_to_cs(global),
                 Prim::Interaction(_) => {} // (batch mode or not: only the terminal differs)
                 _ => self.err(format!("\\{} is not supported yet", p.name())),
             },
@@ -585,37 +587,8 @@ impl Exec<'_> {
         if error {
             self.err(s);
         } else {
-            self.log = Some(s.into());
+            self.log_push(&s);
         }
-    }
-
-    /// `\immediate` (tex.web 1375): only `\write` yet.
-    pub(super) fn immediate(&mut self) {
-        let Some((t, m)) = self.next_x_m(false) else {
-            return;
-        };
-        if m != Meaning::Prim(Prim::Write) {
-            if matches!(m, Meaning::Prim(Prim::Unimpl(_))) {
-                self.err(format!("\\immediate{t} is not supported yet"));
-            }
-            self.back(t);
-            return;
-        }
-        // (tex.web 1350: the stream; a closed one is the log)
-        let _stream = self.scan_int();
-        let text = self.scan_toks_raw();
-        // (tex.web 1370: expanded now, with no mode, inside braces)
-        let mut l = Vec::with_capacity(text.len() + 1);
-        l.extend(text);
-        l.push(Tok::Char(2, '}'));
-        self.rewrite(l);
-        self.in_write = true;
-        let toks = self.expand_text(None);
-        self.in_write = false;
-        let mut s = String::new();
-        self.show_toks(&mut s, &toks);
-        s.push('\n');
-        self.log = Some(s.into());
     }
 
     /// `\uppercase`, `\lowercase` (tex.web 1285): the text with its
