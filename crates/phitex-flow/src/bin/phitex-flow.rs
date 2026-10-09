@@ -14,6 +14,10 @@ use std::sync::Arc;
 
 use phitex_flow::{Build, Font, Options, Order, Output, Reads};
 
+#[cfg(all(feature = "jemalloc", not(target_family = "wasm")))]
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
 fn usage() -> ExitCode {
     eprintln!(
         "usage: phitex-flow FILE.tex [-j N] [--reads suspend|speculate] [--order priority|random:SEED] \
