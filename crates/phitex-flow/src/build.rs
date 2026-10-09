@@ -33,6 +33,7 @@
 
 use std::collections::{BTreeSet, VecDeque};
 use std::fmt::Write as _;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, RwLock};
 use std::time::{Duration, Instant};
 
@@ -269,9 +270,14 @@ struct Shared {
     /// build), fixed for the build.
     ids: Vec<PieceId>,
     pos_of: Vec<u32>,
-    /// Bumped (and `parked` notified) whenever a run is installed.
-    generation: Mutex<u64>,
+    /// Bumped (under `park`, and `parked` notified) whenever a run is
+    /// installed.
+    generation: AtomicU64,
+    park: Mutex<()>,
     parked: Condvar,
+    /// Each piece's status is `Done` (a copy of the scheduler's, written
+    /// under its lock, read without it).
+    done: Vec<AtomicBool>,
     state: Mutex<State>,
     cv: Condvar,
     font: Arc<Font>,
@@ -506,8 +512,14 @@ impl Build {
             names,
             ids,
             pos_of,
-            generation: Mutex::new(0),
+            generation: AtomicU64::new(0),
+            park: Mutex::new(()),
             parked: Condvar::new(),
+            done: state
+                .p
+                .iter()
+                .map(|ps| AtomicBool::new(ps.status == Status::Done))
+                .collect(),
             state: Mutex::new(state),
             cv: Condvar::new(),
             font: self.font.clone(),
@@ -666,14 +678,17 @@ fn finished(g: &State) -> bool {
 
 /// Node `node` of piece `k` read a definition since remade: the piece
 /// runs again from it.
-fn mark(g: &mut State, k: usize, node: u32) {
+/// Returns whether it was done.
+fn mark(g: &mut State, k: usize, node: u32) -> bool {
     let ps = &mut g.p[k];
     ps.dirty.insert(node);
     if ps.status == Status::Done {
         ps.status = Status::Unstarted;
         g.unstarted.insert(k);
         g.stats.reruns += 1;
+        return true;
     }
+    false
 }
 
 /// The names whose exported values differ between two runs of a piece.
@@ -1026,11 +1041,14 @@ fn run_and_install(sh: &Shared, k: usize, dirty: &[u32]) -> u64 {
         g.running.remove(&k);
         let marks = reached(&g, sh, k, &changed);
         for (r, node) in marks {
-            mark(&mut g, r, node);
+            if mark(&mut g, r, node) {
+                sh.done[r].store(false, Ordering::Release);
+            }
         }
         queue_breaks(&mut g, k, old_run);
         if stale.is_empty() {
             g.p[k].status = Status::Done;
+            sh.done[k].store(true, Ordering::Release);
         } else {
             g.p[k].dirty = stale;
             g.p[k].status = Status::Unstarted;
@@ -1039,7 +1057,10 @@ fn run_and_install(sh: &Shared, k: usize, dirty: &[u32]) -> u64 {
         }
         g.stats.time_confirm += t.elapsed();
     }
-    *sh.generation.lock().expect("generation") += 1;
+    {
+        let _p = sh.park.lock().expect("park");
+        sh.generation.fetch_add(1, Ordering::AcqRel);
+    }
     sh.parked.notify_all();
     sh.cv.notify_all();
     steps
@@ -1055,14 +1076,14 @@ impl Env for PieceEnv<'_> {
     fn reach(&mut self, key: &Key) -> (Val, Src) {
         let sh = self.sh;
         loop {
-            let seen = *sh.generation.lock().expect("generation");
+            let seen = sh.generation.load(Ordering::Acquire);
             let (def, val) = sh.names.reaching(key, self.k, &sh.font);
             let Some(d) = def else {
                 return (val, Src::Initial);
             };
             let d = d as usize;
             let src = Src::Piece(sh.ids[d]);
-            if sh.opts.reads == Reads::Speculate {
+            if sh.opts.reads == Reads::Speculate || sh.done[d].load(Ordering::Acquire) {
                 return (val, src);
             }
             // (the definition is being remade: park until it is installed,
@@ -1092,9 +1113,9 @@ impl Env for PieceEnv<'_> {
             if let Some(dirty) = leapfrog {
                 run_and_install(sh, d, &dirty);
             } else {
-                let mut g = sh.generation.lock().expect("generation");
-                while *g == seen {
-                    g = sh.parked.wait(g).expect("generation");
+                let mut p = sh.park.lock().expect("park");
+                while sh.generation.load(Ordering::Acquire) == seen {
+                    p = sh.parked.wait(p).expect("park");
                 }
             }
         }
