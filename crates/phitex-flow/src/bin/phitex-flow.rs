@@ -60,7 +60,7 @@ fn report(what: &str, o: &Output) {
         },
     );
     println!(
-        "  serial: cut {:.1} ms, setup {:.1} ms, join {:.1} ms; by kind (all threads): reading {:.1} ms, line breaking {:.1} ms, page scan {:.1} ms, DVI {:.1} ms, confirming {:.1} ms ({:.1} ms holding the lock)",
+        "  serial: cut {:.1} ms, setup {:.1} ms, join {:.1} ms; by kind (all threads): reading {:.1} ms, line breaking {:.1} ms, page scan {:.1} ms, DVI {:.1} ms, log {:.1} ms, confirming {:.1} ms ({:.1} ms holding the lock)",
         s.time_cut.as_secs_f64() * 1000.0,
         s.time_setup.as_secs_f64() * 1000.0,
         s.time_join.as_secs_f64() * 1000.0,
@@ -68,6 +68,7 @@ fn report(what: &str, o: &Output) {
         s.time_break.as_secs_f64() * 1000.0,
         s.time_scan.as_secs_f64() * 1000.0,
         s.time_ship.as_secs_f64() * 1000.0,
+        s.time_log.as_secs_f64() * 1000.0,
         s.time_confirm.as_secs_f64() * 1000.0,
         s.time_held.as_secs_f64() * 1000.0
     );

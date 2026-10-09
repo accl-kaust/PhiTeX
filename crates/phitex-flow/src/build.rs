@@ -42,6 +42,7 @@ use crate::dvi;
 use crate::graph::{Env, Para, PieceId, Run, Src, cut_from, run_piece};
 use crate::hash::{FxMap, FxSet, hash_of};
 use crate::linebreak::break_lines;
+use crate::logs::{self, Frag};
 use crate::page::{Lines, Page, PageOrg, Scan, material};
 use crate::tfm::{Font, FontFiles};
 use crate::val::{Key, Val, initial};
@@ -122,6 +123,7 @@ pub struct Stats {
     pub time_break: Duration,
     pub time_scan: Duration,
     pub time_ship: Duration,
+    pub time_log: Duration,
     pub time_confirm: Duration,
     /// Of installing, the time the scheduler's lock was held.
     pub time_held: Duration,
@@ -156,6 +158,7 @@ struct Kept {
     run: Option<Arc<Run>>,
     lines: Vec<Option<Lines>>,
     srcs: Vec<PieceId>,
+    log: Option<Arc<Frag>>,
 }
 
 /// The edges: name -> reader piece -> (its first node reading the name
@@ -309,6 +312,8 @@ struct PState {
     /// The piece whose definition answers each of its run's reads, as its
     /// edges say (aligned with `Run::reads`).
     srcs: Vec<PieceId>,
+    /// Its part of the log, once its run and lines are final.
+    log: Option<Arc<Frag>>,
 }
 
 /// An edited piece's predecessor: its run, lines and text.
@@ -349,6 +354,11 @@ struct State {
     /// a page shipped now numbers its fonts by; checked at the join).
     numbers: Arc<dvi::Numbers>,
     numbered: usize,
+    /// The pieces before `log_next` have their part of the log, or are
+    /// queued for it, or are making it (`logs_running`).
+    log_next: usize,
+    log_queue: VecDeque<usize>,
+    logs_running: usize,
     unshipped: usize,
     ship_queue: VecDeque<usize>,
     old_pages: Vec<Option<(Page, Arc<dvi::Body>)>>,
@@ -408,6 +418,8 @@ enum Task {
         finish: bool,
     },
     Ship(usize, Page, Arc<dvi::Numbers>),
+    /// Piece `.0`'s part of the log, from its text, run and lines.
+    Log(usize, Arc<[char]>, Arc<Run>, Vec<Option<Lines>>),
 }
 
 impl Build {
@@ -569,6 +581,7 @@ impl Build {
                     run: o.run.clone(),
                     lines: std::mem::take(&mut o.lines),
                     srcs: std::mem::take(&mut o.srcs),
+                    log: o.log.take(),
                     prev: None,
                     dirty: BTreeSet::new(),
                     runs: 0,
@@ -613,6 +626,7 @@ impl Build {
                     srcs: near
                         .map(|i| std::mem::take(&mut olds[i].srcs))
                         .unwrap_or_default(),
+                    log: None,
                     prev,
                     dirty: BTreeSet::new(),
                     runs: 0,
@@ -700,6 +714,9 @@ impl Build {
             bodies: Vec::new(),
             numbers: Arc::default(),
             numbered: 0,
+            log_next: 0,
+            log_queue: VecDeque::new(),
+            logs_running: 0,
             unshipped: 0,
             ship_queue: VecDeque::new(),
             old_pages: std::mem::take(&mut self.pages)
@@ -784,18 +801,20 @@ impl Build {
             .chain(&st.marks_after)
             .copied()
             .collect();
+        // (a piece whose part was not made in the build: none, unless its
+        // lines were not all broken)
+        for ps in &mut st.p {
+            let run = ps.run.as_ref().expect("every piece ran");
+            if !ps.log.as_ref().is_some_and(|f| f.holds(run, &ps.lines)) {
+                ps.log = Some(Arc::new(logs::fragment(&ps.text, run, &ps.lines)));
+            }
+        }
         let log = {
-            let pieces: Vec<_> =
+            let frags: Vec<&Frag> =
                 st.p.iter()
-                    .map(|ps| {
-                        (
-                            &ps.text[..],
-                            &**ps.run.as_ref().expect("every piece ran"),
-                            &ps.lines[..],
-                        )
-                    })
+                    .map(|ps| &**ps.log.as_ref().expect("a part"))
                     .collect();
-            crate::logs::gather(&pieces, &marks, &st.pages)
+            logs::gather(&frags, &marks, &st.pages)
         };
         for (k, ps) in st.p.iter().enumerate() {
             let r = ps.run.as_ref().expect("every piece ran");
@@ -826,6 +845,7 @@ impl Build {
                     run: ps.run,
                     lines: ps.lines,
                     srcs: ps.srcs,
+                    log: ps.log,
                 })
                 .collect();
         self.readers = st.readers;
@@ -918,13 +938,18 @@ fn worker(sh: &Shared, id: usize) {
             0 => g.stats.time_run += dt,
             1 => g.stats.time_break += dt,
             2 => g.stats.time_scan += dt,
+            4 => g.stats.time_log += dt,
             _ => g.stats.time_ship += dt,
         }
     }
 }
 
 fn finished(g: &State) -> bool {
-    g.settled == g.p.len() && g.scan_done && g.unshipped == 0
+    g.settled == g.p.len()
+        && g.scan_done
+        && g.unshipped == 0
+        && g.log_queue.is_empty()
+        && g.logs_running == 0
 }
 
 /// Piece `k` read a definition of `key` since remade: it runs again from
@@ -1196,17 +1221,28 @@ fn pick(g: &mut State, sh: &Shared) -> Option<Task> {
     while scan_to < g.settled && lines_ready(g, scan_to) {
         scan_to += 1;
     }
+    // (a settled piece whose lines are all broken: its part of the log)
+    while g.log_next < g.settled && lines_ready(g, g.log_next) {
+        let k = g.log_next;
+        let ps = &g.p[k];
+        let run = ps.run.as_ref().expect("a settled piece has a run");
+        if !ps.log.as_ref().is_some_and(|f| f.holds(run, &ps.lines)) {
+            g.log_queue.push_back(k);
+        }
+        g.log_next += 1;
+    }
     let scan_finish = g.scan_next == n && g.settled == n && !g.scan_done;
     let scan_ok = g.scan.is_some() && (scan_to > g.scan_next || scan_finish);
     let run_ok = !g.unstarted.is_empty();
     // (priority: pages out first, then the scan, the reading, line breaking)
-    let mut kinds = [0u8; 4];
+    let mut kinds = [0u8; 5];
     let mut nk = 0;
     for (ok, kind) in [
         (!g.ship_queue.is_empty(), 3u8),
         (scan_ok, 2),
         (run_ok, 0),
         (!g.break_queue.is_empty(), 1),
+        (!g.log_queue.is_empty(), 4),
     ] {
         if ok {
             kinds[nk] = kind;
@@ -1267,6 +1303,21 @@ fn pick(g: &mut State, sh: &Shared) -> Option<Task> {
                 pieces,
                 finish: scan_finish,
             })
+        }
+        4 => {
+            let i = match sh.opts.order {
+                Order::Random(_) => rand(g, g.log_queue.len()),
+                Order::Priority => 0,
+            };
+            let k = g.log_queue.remove(i).expect("a queued piece");
+            g.logs_running += 1;
+            let ps = &g.p[k];
+            Some(Task::Log(
+                k,
+                ps.text.clone(),
+                ps.run.clone().expect("a run"),
+                ps.lines.clone(),
+            ))
         }
         _ => {
             let i = match sh.opts.order {
@@ -1417,6 +1468,16 @@ fn execute(sh: &Shared, task: Task) -> (u64, u8) {
             drop(g);
             sh.cv.notify_all();
             (page.b.list.len() as u64, 3)
+        }
+        Task::Log(k, text, run, lines) => {
+            let f = Arc::new(logs::fragment(&text, &run, &lines));
+            let work = f.entries.len() as u64;
+            let mut g = lock(sh);
+            g.p[k].log = Some(f);
+            g.logs_running -= 1;
+            drop(g);
+            sh.cv.notify_all();
+            (work, 4)
         }
     }
 }
