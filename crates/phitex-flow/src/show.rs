@@ -12,6 +12,7 @@ use std::fmt::Write as _;
 use std::sync::Arc;
 
 use crate::item::{BoxNode, C_LEADERS, Item, RUNNING, Whatsit, X_LEADERS};
+use crate::mlist::{Delim, Field, Kind as NK, Limits, MItem};
 use crate::pack::Report;
 use crate::print;
 use crate::val::Tok;
@@ -32,6 +33,8 @@ pub struct Ctx {
     pub idents: Vec<(Arc<str>, Arc<str>)>,
     pub depth: i32,
     pub breadth: i32,
+    /// `\newlinechar`: printing that character ends the line (tex.web 59).
+    pub newline: i32,
 }
 
 impl Ctx {
@@ -40,6 +43,15 @@ impl Ctx {
             out.push(c);
         }
         out.push_str(s);
+    }
+    /// tex.web 59 `print` of a character: the new-line character ends the
+    /// line.
+    fn chr(&self, out: &mut String, c: u8) {
+        if i32::from(c) == self.newline {
+            out.push(LN);
+        } else {
+            out.push(char::from(c));
+        }
     }
     fn font_ident(&self, out: &mut String, key: &str) {
         let name = self.idents.iter().find(|(i, _)| &**i == key).map_or("FONT?", |(_, n)| &**n);
@@ -63,9 +75,17 @@ pub fn short_display(out: &mut String, list: &[Item], font: &mut Arc<str>, cx: &
                     out.push(' ');
                     font.clone_from(&f.key);
                 }
-                out.push(char::from(*c));
+                cx.chr(out, *c);
             }
-            Item::Box(_) | Item::Mark(_) | Item::Ins(_) | Item::Whatsit(_) | Item::Adjust(_) => out.push_str("[]"),
+            Item::Box(_)
+            | Item::Mark(_)
+            | Item::Marks(..)
+            | Item::Lang { .. }
+            | Item::Ins(_)
+            | Item::Whatsit(_)
+            | Item::Adjust(_) => out.push_str("[]"),
+            // (§175, etex.web: a TeXXeT node as `[]`, a formula's edge as `$`)
+            Item::Math { lr, .. } => out.push_str(if *lr >= 4 { "[]" } else { "$" }),
             Item::Rule { .. } => out.push('|'),
             Item::Glue { zero, .. } => {
                 if !zero {
@@ -84,7 +104,7 @@ pub fn short_display(out: &mut String, list: &[Item], font: &mut Arc<str>, cx: &
                         out.push(' ');
                         font.clone_from(&l.font.key);
                     }
-                    out.push(char::from(c));
+                    cx.chr(out, c);
                 }
             }
             Item::Disc(d) => {
@@ -222,7 +242,7 @@ impl Shower<'_> {
             Item::Char(f, c) => {
                 self.cx.font_ident(self.out, &f.key);
                 self.out.push(' ');
-                self.out.push(char::from(*c));
+                self.cx.chr(self.out, *c);
             }
             Item::Box(b) => self.boxed(b),
             Item::Rule { w, h, d } => {
@@ -234,14 +254,28 @@ impl Shower<'_> {
                 rule_dim(self.out, *w);
             }
             Item::Glue { g, sub, .. } => {
+                // (§189)
                 self.cx.esc(self.out, "glue");
-                if *sub != 0 && *sub < 98 {
+                if *sub != 0 {
                     self.out.push('(');
-                    self.cx.esc(self.out, SKIPS.get(usize::from(*sub - 1)).copied().unwrap_or("?"));
+                    let name = match *sub {
+                        98 => "nonscript",
+                        99 => "mskip",
+                        s => SKIPS.get(usize::from(s - 1)).copied().unwrap_or("?"),
+                    };
+                    self.cx.esc(self.out, name);
                     self.out.push(')');
                 }
-                self.out.push(' ');
-                spec(self.out, g, if *sub == 99 { "mu" } else { "" });
+                if *sub != 98 {
+                    self.out.push(' ');
+                    spec(self.out, g, if *sub == 99 { "mu" } else { "" });
+                }
+            }
+            Item::Kern { w, sub: 99 } => {
+                // (§191)
+                self.cx.esc(self.out, "mkern");
+                print::scaled(self.out, *w);
+                self.out.push_str("mu");
             }
             Item::Kern { w, sub } => {
                 self.cx.esc(self.out, "kern");
@@ -260,13 +294,13 @@ impl Shower<'_> {
             Item::Lig(l) => {
                 self.cx.font_ident(self.out, &l.font.key);
                 self.out.push(' ');
-                self.out.push(char::from(l.c));
+                self.cx.chr(self.out, l.c);
                 self.out.push_str(" (ligature ");
                 if l.left {
                     self.out.push('|');
                 }
                 for &c in &l.orig {
-                    self.out.push(char::from(c));
+                    self.cx.chr(self.out, c);
                 }
                 if l.right {
                     self.out.push('|');
@@ -281,6 +315,29 @@ impl Shower<'_> {
                 self.sub('.', &d.pre);
                 self.sub('|', &d.post);
             }
+            Item::Math { w, after, lr } => {
+                // (§192, etex.web §1435)
+                if *lr > 0 {
+                    self.cx.esc(self.out, if *after { "end" } else { "begin" });
+                    self.out.push(match lr {
+                        10 => 'R',
+                        6 => 'L',
+                        _ => 'M',
+                    });
+                } else {
+                    self.cx.esc(self.out, if *after { "mathoff" } else { "mathon" });
+                    if *w != 0 {
+                        self.out.push_str(", surrounded ");
+                        print::scaled(self.out, *w);
+                    }
+                }
+            }
+            Item::Lang { lang, lhm, rhm } => {
+                // (§1356)
+                self.cx.esc(self.out, "setlanguage");
+                let _ = write!(self.out, "{lang} (hyphenmin {lhm},{rhm})");
+            }
+            Item::Noad(m) => self.noad(m),
             Item::Mark(t) => {
                 self.cx.esc(self.out, "mark");
                 self.out.push('{');
@@ -317,6 +374,14 @@ impl Shower<'_> {
                 self.sub('.', l);
             }
             Item::Whatsit(w) => self.whatsit(w),
+            Item::Marks(n, t) => {
+                // (etex.web §196: the class after `\marks`)
+                self.cx.esc(self.out, "marks");
+                let _ = write!(self.out, "{n}");
+                self.out.push('{');
+                show_toks_plain(self.out, t, self.cx);
+                self.out.push('}');
+            }
             _ => {}
         }
     }
@@ -368,6 +433,151 @@ impl Shower<'_> {
         }
         self.out.push('}');
     }
+}
+
+impl Shower<'_> {
+    /// §690: `print_fam_and_char`.
+    fn fam_and_char(&mut self, fam: u8, ch: u8) {
+        self.cx.esc(self.out, "fam");
+        let _ = write!(self.out, "{fam} ");
+        print_ascii(self.out, ch);
+    }
+
+    /// §691: `print_delimiter`.
+    fn delimiter(&mut self, d: Delim) {
+        let a = (i32::from(d.small_fam) * 256 + i32::from(d.small_char)) * 0x1000
+            + i32::from(d.large_fam) * 256
+            + i32::from(d.large_char);
+        let _ = write!(self.out, "\"{a:X}");
+    }
+
+    /// §692: `print_subsidiary_data`.
+    fn field(&mut self, f: &Field, c: char) {
+        if self.prefix.len() as i32 >= self.cx.depth {
+            if *f != Field::Empty {
+                self.out.push_str(" []");
+            }
+            return;
+        }
+        self.prefix.push(c);
+        match f {
+            Field::Char { fam, ch } | Field::TextChar { fam, ch } => {
+                self.out.push(LN);
+                self.out.push_str(&self.prefix.clone());
+                self.fam_and_char(*fam, *ch);
+            }
+            Field::Box(b) => self.list(std::slice::from_ref(&Item::Box(b.clone()))),
+            Field::Mlist(l) => {
+                if l.is_empty() {
+                    self.out.push(LN);
+                    self.out.push_str(&self.prefix.clone());
+                    self.out.push_str("{}");
+                } else {
+                    self.list(l);
+                }
+            }
+            Field::Empty => {}
+        }
+        self.prefix.pop();
+    }
+
+    /// §694–§697: a math list's entry.
+    fn noad(&mut self, m: &MItem) {
+        match m {
+            MItem::Style(s) => self.cx.esc(
+                self.out,
+                match s / 2 {
+                    0 => "displaystyle",
+                    1 => "textstyle",
+                    2 => "scriptstyle",
+                    _ => "scriptscriptstyle",
+                },
+            ),
+            MItem::Choice(c) => {
+                self.cx.esc(self.out, "mathchoice");
+                for (k, l) in ['D', 'T', 'S', 's'].into_iter().zip(c.iter()) {
+                    self.sub(k, l);
+                }
+            }
+            MItem::Noad(n) => {
+                if let NK::Fraction { thickness, left, right } = &n.kind {
+                    self.cx.esc(self.out, "fraction, thickness ");
+                    if *thickness == crate::mlist::DEFAULT_CODE {
+                        self.out.push_str("= default");
+                    } else {
+                        print::scaled(self.out, *thickness);
+                    }
+                    if *left != Delim::default() {
+                        self.out.push_str(", left-delimiter ");
+                        self.delimiter(*left);
+                    }
+                    if *right != Delim::default() {
+                        self.out.push_str(", right-delimiter ");
+                        self.delimiter(*right);
+                    }
+                    self.field(&n.sup, '\\');
+                    self.field(&n.sub, '/');
+                    return;
+                }
+                let name = match &n.kind {
+                    NK::Ord => "mathord",
+                    NK::Op(_) => "mathop",
+                    NK::Bin => "mathbin",
+                    NK::Rel => "mathrel",
+                    NK::Open => "mathopen",
+                    NK::Close => "mathclose",
+                    NK::Punct => "mathpunct",
+                    NK::Inner => "mathinner",
+                    NK::Over => "overline",
+                    NK::Under => "underline",
+                    NK::Vcenter => "vcenter",
+                    NK::Radical(_) => "radical",
+                    NK::Accent { .. } => "accent",
+                    NK::Left(_) => "left",
+                    NK::Right(_) => "right",
+                    NK::Fraction { .. } => unreachable!(),
+                };
+                self.cx.esc(self.out, name);
+                match &n.kind {
+                    NK::Radical(d) | NK::Left(d) | NK::Right(d) => self.delimiter(*d),
+                    NK::Accent { fam, ch } => self.fam_and_char(*fam, *ch),
+                    NK::Op(Limits::Limits) => self.cx.esc(self.out, "limits"),
+                    NK::Op(Limits::NoLimits) => self.cx.esc(self.out, "nolimits"),
+                    _ => {}
+                }
+                if !matches!(n.kind, NK::Left(_) | NK::Right(_)) {
+                    self.field(&n.nucleus, '.');
+                }
+                self.field(&n.sup, '^');
+                self.field(&n.sub, '_');
+            }
+            _ => {}
+        }
+    }
+}
+
+/// tex.web 68 `print_ASCII`: a printable character as itself, others in
+/// `^^` notation.
+fn print_ascii(out: &mut String, c: u8) {
+    if (32..127).contains(&c) {
+        out.push(char::from(c));
+    } else if c < 64 {
+        out.push_str("^^");
+        out.push(char::from(c + 64));
+    } else if c < 128 {
+        out.push_str("^^");
+        out.push(char::from(c - 64));
+    } else {
+        let _ = write!(out, "^^{c:02x}");
+    }
+}
+
+/// §198 `show_box` of a list (what `\showlists` shows of each list): its
+/// nodes, then `print_ln`.
+pub fn show_list(out: &mut String, list: &[Item], cx: &Ctx) {
+    let mut s = Shower { out, cx, prefix: String::new() };
+    s.list(list);
+    s.out.push(LN);
 }
 
 /// A token list as a mark shows it (tex.web 292), with every one-letter

@@ -10,11 +10,11 @@
 //!   the stream anew, advanced by the lines it read; `\closein` defines it
 //!   closed. Streams are global (TeX's `read_open` has no save stack).
 //! - `\input` reads `Key::File`; the reader goes into the file's text
-//!   (`RState::files`), above the input pending at the call, as TeX's
-//!   input stack does. At the top `\input` is a node of its own whose
-//!   result is the file's text in its out state: the core may cut that
-//!   text into pieces instead of reading it in this piece (CORE.md,
-//!   "`\input` (decided)").
+//!   (an entry of `RState::texts`, `TextKind::File`, as `\scantokens`'s
+//!   text is), above the input pending at the call, as TeX's input stack
+//!   does. At the top `\input` is a node of its own whose result is the
+//!   file's text in its out state: the core may cut that text into pieces
+//!   instead of reading it in this piece (CORE.md, "`\input` (decided)").
 //! - Writing is a node's result. `\immediate\openout`, `\write`,
 //!   `\closeout` make an event in the node's log ([`crate::logs::io_event`]);
 //!   without `\immediate` they are whatsit items, and shipping a page makes
@@ -30,12 +30,12 @@
 use std::fmt::Write as _;
 use std::sync::Arc;
 
-use super::{Chain, EOL_UNREAD, Env, Exec, Infile, Mode, Outside, Scratch, Stack, TState};
+use super::{Chain, EOL_UNREAD, Env, Exec, Mode, Outside, PendingText, Scratch, Stack, TState, TextKind};
 use crate::item::{BoxNode, Item, Whatsit};
 use crate::logs::{SEP, io_event};
 use crate::print::{ENDJOB, MAX_PRINT_LINE};
 use crate::show::{LN, NL, RAW, SP};
-use crate::val::{IfKind, IntPar, Key, Macro, Meaning, Prim, Stream, Tok, Val};
+use crate::val::{IntPar, Key, Macro, Meaning, Prim, Stream, Tok, Val};
 
 /// The name `\read` defines when it was not given one (tex.web 1215:
 /// `frozen_protection`, which no document can spell).
@@ -141,27 +141,14 @@ pub fn page_io(chain: &Chain, at: usize, env: &mut dyn Env, b: &BoxNode, errors:
     s
 }
 
-/// The name of a conditional (tex.web 488's `print_cmd_chr`).
-fn if_name(k: IfKind) -> &'static str {
-    match k {
-        IfKind::Char => "if",
-        IfKind::Cat => "ifcat",
-        IfKind::Num => "ifnum",
-        IfKind::Dim => "ifdim",
-        IfKind::Odd => "ifodd",
-        IfKind::Vmode => "ifvmode",
-        IfKind::Hmode => "ifhmode",
-        IfKind::Mmode => "ifmmode",
-        IfKind::Inner => "ifinner",
-        IfKind::Void => "ifvoid",
-        IfKind::Hbox => "ifhbox",
-        IfKind::Vbox => "ifvbox",
-        IfKind::X => "ifx",
-        IfKind::Eof => "ifeof",
-        IfKind::True => "iftrue",
-        IfKind::False => "iffalse",
-        IfKind::Case => "ifcase",
-    }
+/// A conditional's name from its code (`IfKind::code`; 32 more after
+/// `\unless`, which is printed before it: etex.web's `print_cmd_chr`).
+fn if_name(code: u8) -> &'static str {
+    const NAMES: [&str; 20] = [
+        "if", "ifcat", "ifnum", "ifdim", "ifodd", "ifvmode", "ifhmode", "ifmmode", "ifinner", "ifvoid", "ifhbox",
+        "ifvbox", "ifx", "ifeof", "iftrue", "iffalse", "ifcase", "ifdefined", "ifcsname", "iffontchar",
+    ];
+    NAMES.get(usize::from(code % 32)).copied().unwrap_or("if")
 }
 
 /// The line `pos` of `text` is on (as the log counts: a line's end
@@ -236,45 +223,19 @@ impl Exec<'_> {
         None
     }
 
-    /// The reader goes into `text` — an `\input` file (`name`, as the log
-    /// shows it) or a `\read` line — above the input pending now, its first
-    /// line in state `new_line` (TeX's `begin_file_reading`, tex.web 328,
-    /// 537).
-    pub(super) fn push_source(&mut self, text: Arc<[char]>, name: Option<Arc<str>>) {
-        let under = std::mem::take(&mut self.st.pending);
-        let f = Infile { text, pos: 0, name, endinput: false, under, tstate: self.st.tstate, eol: self.st.eol };
-        self.st.files.push(f);
-        self.st.tstate = TState::N;
-        self.st.eol = EOL_UNREAD;
-    }
-
-    /// The innermost source is left: the reader is back where it was, with
-    /// the input pending then under what is pending now.
-    fn pop_source(&mut self) {
-        if let Some(f) = self.st.files.pop() {
-            let mut p = f.under;
-            p.append(&mut self.st.pending);
-            self.st.pending = p;
-            self.st.tstate = f.tstate;
-            self.st.eol = f.eol;
-        }
-    }
-
-    /// The innermost source has ended (tex.web 362): an `\input` file is
-    /// closed (`)` in the log) and the reader goes on under it (true); a
-    /// `\read` line, or the piece, has ended (false).
-    pub(super) fn end_source(&mut self) -> bool {
-        if self.st.files.last().is_none_or(|f| f.name.is_none()) {
-            return false;
-        }
-        self.pop_source();
-        self.log_raw(&format!("{RAW})"));
-        true
+    /// The reader goes into `text` — an `\input` file or a `\read` line —
+    /// above the input pending now, its first line in state `new_line`
+    /// (TeX's `begin_file_reading`, tex.web 328, 537). Its end is the
+    /// reader's (`Exec::text_token`).
+    fn push_source(&mut self, text: Arc<[char]>, kind: TextKind) {
+        let at = self.st.pending.len();
+        let x = PendingText { text, at, pos: 0, tstate: TState::N, eol: EOL_UNREAD, eof: false, kind, endinput: false };
+        self.st.texts.push(x);
     }
 
     /// `\input name` (tex.web 537): the file is read now (`(name` in the
     /// log). At the top a node of its own, whose result is the file's text
-    /// (its out state's new `RState::files` entry, at its start); met while
+    /// (its out state's new `RState::texts` entry, at its start); met while
     /// another command scans, a step of that command's node.
     pub(super) fn start_input(&mut self) {
         let name = self.scan_name();
@@ -286,14 +247,14 @@ impl Exec<'_> {
         // (`term_offset` is 0: in batch mode nothing reaches the terminal)
         let lead = if shown.chars().count() > MAX_PRINT_LINE - 2 { LN } else { SP };
         self.log_raw(&format!("{RAW}{lead}({shown}"));
-        self.push_source(file_text(&data), Some(Arc::from(shown)));
+        self.push_source(file_text(&data), TextKind::File(Arc::from(shown)));
     }
 
-    /// `\endinput` (tex.web 378, `force_eof`): the file being read ends with
-    /// its current line.
+    /// `\endinput` (tex.web 378, `force_eof`): the file being read (or
+    /// `\scantokens`'s text) ends with its current line.
     pub(super) fn end_input(&mut self) {
-        match self.st.files.last_mut() {
-            Some(f) if f.name.is_some() => f.endinput = true,
+        match self.st.texts.last_mut() {
+            Some(x) if x.kind != TextKind::Read => x.endinput = true,
             _ => self.err("\\endinput outside an \\input file is not supported".into()),
         }
     }
@@ -304,10 +265,8 @@ impl Exec<'_> {
     /// changed line count above re-runs only this node) plus its line in
     /// the piece.
     pub(super) fn input_line_no(&mut self) -> i32 {
-        if let Some(v) = &self.st.files.0
-            && let Some(f) = v.iter().rev().find(|f| f.name.is_some())
-        {
-            return line_in(&f.text, f.pos);
+        if let Some(x) = self.st.texts.last().filter(|x| x.kind != TextKind::Read) {
+            return line_in(&x.text, x.pos);
         }
         let base = self.int(&Key::LineBase);
         base + line_in(self.text, self.st.pos)
@@ -363,7 +322,41 @@ impl Exec<'_> {
         };
         let m = if (0..=15).contains(&n) { n as u8 } else { 16 };
         let body = self.read_toks(m);
-        let mac = Macro { params: Vec::new(), body, long: false, outer: false };
+        let mac = Macro { params: Vec::new(), body, long: false, outer: false, protected: false };
+        self.define(key, Val::Meaning(Meaning::Macro(Arc::new(mac))), global);
+    }
+
+    /// e-TeX's `\readline n to \x` (etex.web §1445): like `\read`, one
+    /// line, its characters (and the `\endlinechar`, if in range) made
+    /// tokens of category 12, a space of category 10; braces are nothing.
+    pub(super) fn read_line(&mut self, global: bool) {
+        let n = self.scan_int();
+        if !self.keyword("to") {
+            self.err("Missing `to' inserted".into());
+        }
+        let key = self.r_token().unwrap_or_else(|| Key::Cs(Arc::from(INACCESSIBLE)));
+        let m = if (0..=15).contains(&n) { n as u8 } else { 16 };
+        let stream = Key::ReadStream(m);
+        let line: String = match self.get(&stream) {
+            Val::Stream(s) if s.next < s.data.len() => {
+                let (l, next) = next_line(&s.data, s.next);
+                let l = l.iter().map(|&b| char::from(b)).collect();
+                let v = Stream { data: s.data.clone(), next, normal: true };
+                self.define(stream, Val::Stream(Arc::new(v)), true);
+                l
+            }
+            Val::Stream(_) => {
+                self.define(stream, Val::Void, true);
+                String::new()
+            }
+            _ => {
+                self.err("*** (cannot \\read from terminal in nonstop modes)".into());
+                return;
+            }
+        };
+        let eol = u8::try_from(self.int_par(IntPar::Endlinechar)).ok().map(char::from);
+        let body = super::etex::readline_toks(&line, eol);
+        let mac = Macro { params: Vec::new(), body, long: false, outer: false, protected: false };
         self.define(key, Val::Meaning(Meaning::Macro(Arc::new(mac))), global);
     }
 
@@ -402,7 +395,7 @@ impl Exec<'_> {
             };
             let mut text = line;
             text.push('\r');
-            self.push_source(Arc::from(text), None);
+            self.push_source(Arc::from(text), TextKind::Read);
             while let Some(t) = self.next_raw() {
                 match t.cat() {
                     Some(1) => depth += 1,
@@ -417,7 +410,7 @@ impl Exec<'_> {
                 }
                 out.push(t);
             }
-            self.pop_source();
+            self.st.texts.pop();
             if depth == 0 {
                 return out;
             }
@@ -542,8 +535,8 @@ impl Exec<'_> {
             let mut s = String::new();
             s.push(ENDJOB);
             s.push(RAW);
-            if let Some(v) = &self.st.files.0 {
-                for _ in v.iter().filter(|f| f.name.is_some()) {
+            if let Some(v) = &self.st.texts.0 {
+                for _ in v.iter().filter(|x| matches!(x.kind, TextKind::File(_))) {
                     s.push_str(" )");
                 }
             }
@@ -560,7 +553,10 @@ impl Exec<'_> {
                 s.push('(');
                 self.print_esc(&mut s, "end occurred ");
                 s.push_str("when ");
-                self.print_esc(&mut s, if_name(c.kind));
+                if c.code >= 32 {
+                    self.print_esc(&mut s, "unless");
+                }
+                self.print_esc(&mut s, if_name(c.code));
                 let line = self.cond_line(c.open);
                 if line != 0 {
                     let _ = write!(s, " on line {line}");
@@ -589,7 +585,7 @@ impl Exec<'_> {
             }
             self.st.groups = Stack::new();
             self.st.conds = Stack::new();
-            self.st.files = Stack::new();
+            self.st.texts = Stack::new();
         }
         self.stop();
     }

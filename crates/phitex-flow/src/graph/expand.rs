@@ -76,7 +76,7 @@ impl Exec<'_> {
             }
             Meaning::Undefined => self.err(format!("Undefined control sequence {t}")),
             Meaning::Prim(p) => match *p {
-                Prim::If(_) | Prim::Fi | Prim::Else | Prim::Or => self.conditional(*p, t),
+                Prim::If(_) | Prim::Fi | Prim::Else | Prim::Or | Prim::Unless => self.conditional(*p, t),
                 Prim::ExpandAfter => self.expandafter(),
                 Prim::NoExpand => {
                     // (tex.web 369: the token, marked not to be expanded once)
@@ -96,12 +96,28 @@ impl Exec<'_> {
                 }
                 Prim::Input => self.start_input(),
                 Prim::EndInput => self.end_input(),
-                // (`\splitfirstmark`, `\splitbotmark`: what the last
-                // `\vsplit` defined, tex.web 386)
-                Prim::Mark(k @ 3..=4) => {
-                    if let Val::Toks(t) = self.get(&Key::SplitMark(k - 3)) {
+                // (`\splitfirstmark`, `\splitbotmark`, e-TeX's
+                // `\splitfirstmarks n`, `\splitbotmarks n`: what the last
+                // `\vsplit` defined, tex.web 386, etex.web §1493)
+                Prim::Mark(k @ (3 | 4 | 8 | 9)) => {
+                    let class = if k >= 5 { self.scan_eight_bit_int() } else { 0 };
+                    if let Val::SplitMarks(m) = self.get(&Key::SplitMarks)
+                        && let Ok(i) = m.binary_search_by_key(&class, |x| x.0)
+                    {
+                        let t = if k % 5 == 3 { &m[i].1 } else { &m[i].2 };
                         self.rewrite(t.to_vec());
                     }
+                }
+                // (e-TeX's: etex.web §1418, §1489)
+                Prim::Unexpanded | Prim::Detokenize => {
+                    let toks = self.etex_the(*p);
+                    self.rewrite(toks);
+                }
+                Prim::ScanTokens => self.scan_tokens(),
+                // (`\topmarks n` and friends: the page's marks are not
+                // wired yet, every one is empty)
+                Prim::Mark(k) if k >= 5 => {
+                    let _ = self.scan_eight_bit_int();
                 }
                 // (`\topmark` and friends: the page builder's marks are not
                 // wired yet, every one is empty)
@@ -191,6 +207,7 @@ impl Exec<'_> {
                 Val::Name(n) => s.push_str(&n),
                 _ => s.push_str(JOBNAME),
             },
+            Conv::ETeXRevision => s.push_str(super::etex::ETEX_REVISION),
         }
         self.rewrite(print::str_toks(&s));
     }
@@ -301,13 +318,16 @@ impl Exec<'_> {
                 }
             }
             Meaning::Macro(mac) => {
+                if mac.protected {
+                    self.print_esc(out, "protected");
+                }
                 if mac.long {
                     self.print_esc(out, "long");
                 }
                 if mac.outer {
                     self.print_esc(out, "outer");
                 }
-                if mac.long || mac.outer {
+                if mac.long || mac.outer || mac.protected {
                     out.push_str(" macro:");
                 } else {
                     out.push_str("macro:");
@@ -326,7 +346,22 @@ impl Exec<'_> {
     /// inside another command's scanning (tex.web 498, 510).
     pub(super) fn conditional(&mut self, p: Prim, t: &Tok) {
         match p {
-            Prim::If(k) => self.begin_if(k),
+            Prim::If(k) => self.begin_if(k, false),
+            Prim::Unless => {
+                // (etex.web §1449: before a boolean conditional, negates it)
+                let Some(u) = self.next_raw() else { return };
+                match self.tok_meaning(&u) {
+                    Meaning::Prim(Prim::If(k)) if k != IfKind::Case && !self.noexp => self.begin_if(k, true),
+                    _ => {
+                        self.err(format!("You can't use `\\unless' before `{u}'"));
+                        if self.noexp {
+                            self.rewrite(vec![Tok::DontExpand, u]);
+                        } else {
+                            self.back(u);
+                        }
+                    }
+                }
+            }
             Prim::Fi | Prim::Else | Prim::Or => {
                 let code = match p {
                     Prim::Fi => FI_CODE,
@@ -358,10 +393,11 @@ impl Exec<'_> {
     }
 
     /// An `\if...`: its test, then the taken arm is read and the other is
-    /// skipped (tex.web 498).
-    fn begin_if(&mut self, k: IfKind) {
+    /// skipped (tex.web 498); after e-TeX's `\unless`, the test negated.
+    fn begin_if(&mut self, k: IfKind, unless: bool) {
         let here = self.chain.nodes.len() as u32;
-        self.st.conds.push(Cond { open: here, limit: IF_CODE, test: false, kind: k });
+        let code = k.code() + if unless { 32 } else { 0 };
+        self.st.conds.push(Cond { open: here, limit: IF_CODE, test: false, code });
         let depth = self.st.conds.len();
         if k == IfKind::Case {
             let mut n = self.scan_int();
@@ -386,7 +422,7 @@ impl Exec<'_> {
             self.phi = Some(Box::new(Phi { test: true, keys: Vec::new() }));
             return;
         }
-        let b = self.test(k);
+        let b = self.test(k) != unless;
         if b {
             self.set_cond(depth, ELSE_CODE, true);
             self.cond_kind(Kind::If);
@@ -468,7 +504,8 @@ impl Exec<'_> {
             IfKind::Vmode => !self.in_write && self.st.mode == Mode::V,
             IfKind::Hmode => !self.in_write && self.st.mode == Mode::H,
             IfKind::Inner => !self.in_write && self.st.inner,
-            IfKind::Mmode | IfKind::False => false,
+            IfKind::Mmode => !self.in_write && self.st.mode == Mode::M,
+            IfKind::False => false,
             IfKind::Void | IfKind::Hbox | IfKind::Vbox => {
                 let n = self.scan_eight_bit_int();
                 match self.get(&Key::Box(n)) {
@@ -484,6 +521,20 @@ impl Exec<'_> {
             IfKind::Eof => self.if_eof(),
             IfKind::True => true,
             IfKind::Case => unreachable!("\\ifcase has no boolean test"),
+            IfKind::Defined => {
+                // (etex.web §1450: `get_next`; a `\noexpand`ed name means
+                // `\relax`)
+                let Some(t) = self.next_raw() else { return false };
+                let m = self.tok_meaning(&t);
+                (self.noexp && expands(&m)) || m != Meaning::Undefined
+            }
+            IfKind::Csname => self.if_csname(),
+            IfKind::FontChar => {
+                // (etex.web §1452)
+                let f = self.scan_font_ident();
+                let c = self.scan_char_num();
+                f.glyph(c).is_some()
+            }
         }
     }
 
@@ -571,15 +622,19 @@ impl Exec<'_> {
             let Some((d, after)) = self.chain.resolve(&k, here) else {
                 continue;
             };
-            self.reads.push(Arc::new(Read { key: k.clone(), src: Src::Node(d), val: after.clone() }));
+            let scope = self.chain.scope_of(d, &k);
+            self.reads.push(Arc::new(Read { key: k.clone(), src: Src::Node(d), val: after.clone(), scope }));
             let before = match self.chain.resolve(&k, at) {
-                Some((d, v)) => Arc::new(Read { key: k.clone(), src: Src::Node(d), val: v }),
-                None => outside_read(self.env, self.outside, &k),
+                Some((d, v)) => {
+                    let scope = self.chain.scope_of(d, &k);
+                    Arc::new(Read { key: k.clone(), src: Src::Node(d), val: v, scope })
+                }
+                None => outside_read(self.env, self.outside, &k, at as u32),
             };
             let before_val = before.val.clone();
             self.reads.push(before);
             // (the φ is a definition: readers after the `\fi` read it)
-            self.defs.push(super::Def { key: k.clone(), val: after.clone(), global: false });
+            self.defs.push(super::Def { key: k.clone(), val: after.clone(), global: false, level: None });
             phis.push((k, after, before_val));
         }
         match &mut self.phi {
@@ -631,12 +686,18 @@ impl Exec<'_> {
             };
             if !self.noexp && t.key().is_some() {
                 let m = self.tok_meaning(&t);
-                if expands(&m) {
-                    if m == Meaning::Prim(Prim::The) {
-                        let toks = self.the_toks();
-                        out.extend(toks);
-                    } else {
-                        self.expand(&t, &m);
+                // (etex.web §1417: a `\protected` macro is not expanded here)
+                if expands(&m) && !matches!(&m, Meaning::Macro(mac) if mac.protected) {
+                    match m {
+                        Meaning::Prim(Prim::The) => {
+                            let toks = self.the_toks();
+                            out.extend(toks);
+                        }
+                        Meaning::Prim(p @ (Prim::Unexpanded | Prim::Detokenize)) => {
+                            let toks = self.etex_the(p);
+                            out.extend(toks);
+                        }
+                        _ => self.expand(&t, &m),
                     }
                     continue;
                 }

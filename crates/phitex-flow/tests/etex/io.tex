@@ -1,0 +1,24 @@
+\openin3=rl.dat
+\readline3 to\a \message{[\meaning\a]}
+\readline3 to\a \message{[\meaning\a]}
+\ifeof3 \message{eof}\else\message{more}\fi
+\readline3 to\a \message{[\meaning\a]}
+\ifeof3 \message{eof}\else\message{more}\fi
+\endlinechar=-1 \openin3=rl.dat \global\readline3 to\b \endlinechar=13
+\message{[\meaning\b]}
+\everyeof{\message{EOF}}
+\input inc-eof
+\scantokens{\message{in scan}\input inc-eof \message{after file in scan}}
+\message{after scan}
+{\newlinechar=`\| \scantokens{\message{s1}\endinput \message{s1b}|\message{s2}}}
+{\newlinechar=`\| \scantokens{\message{l\the\inputlineno}|\message{l\the\inputlineno}}}
+\everyeof{}
+\message{main \the\inputlineno}
+\setbox1\vbox{\hrule height 5pt\marks3{three-a}\mark{zero}\hrule height 5pt\marks3{three-b}%
+\penalty-10000 \hrule height 5pt \marks3{three-c}}
+\setbox2\vsplit1 to 10pt
+\message{[\splitfirstmarks3][\splitbotmarks3][\splitfirstmark][\splitbotmark][\splitfirstmarks2]}
+\setbox2\vsplit1 to 10pt
+\message{[\splitfirstmarks3][\splitbotmarks3][\splitfirstmark]}
+\setbox2\vsplit1 to 10pt
+\message{[\splitfirstmarks3]}

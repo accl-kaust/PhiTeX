@@ -1,0 +1,213 @@
+(./hyph2.tex
+Underfull \hbox (badness 1242) in paragraph at lines 4484--4485
+[]\tenrm Office dif-fi-cul-ties ef-fi-
+
+\hbox(6.94444+0.0)x100.0, glue set 2.31664
+.\hbox(0.0+0.0)x0.0
+.\tenrm O
+.\tenrm ^^N (ligature ffi)
+.\tenrm c
+.\tenrm e
+.\glue 3.33333 plus 1.66666 minus 1.11111
+.\tenrm d
+.\tenrm i
+.\discretionary replacing 1
+..\tenrm f
+..\tenrm -
+.|\tenrm ^^L (ligature fi)
+.\tenrm ^^N (ligature ffi)
+.\discretionary
+..\tenrm -
+.\tenrm c
+.\tenrm u
+.\tenrm l
+.\discretionary
+..\tenrm -
+.\tenrm t
+.\tenrm i
+.\tenrm e
+.\tenrm s
+.\glue 3.33333 plus 1.66666 minus 1.11111
+.\tenrm e
+.\discretionary replacing 1
+..\tenrm f
+..\tenrm -
+.|\tenrm ^^L (ligature fi)
+.\tenrm ^^N (ligature ffi)
+.\discretionary
+.\tenrm -
+.\glue(\rightskip) 0.0
+
+
+Underfull \hbox (badness 10000) in paragraph at lines 4487--4488
+[]\tenrm Shuffling
+
+\hbox(6.94444+1.94444)x40.0
+.\hbox(0.0+0.0)x0.0
+.\tenrm S
+.\tenrm h
+.\kern-0.27779
+.\tenrm u
+.\tenrm ^^O (ligature ffl)
+.\tenrm i
+.\tenrm n
+.\tenrm g
+.\glue(\rightskip) 0.0
+
+
+Underfull \hbox (badness 10000) in paragraph at lines 4487--4488
+\tenrm af-flu-ent
+
+\hbox(6.94444+0.0)x40.0
+.\tenrm a
+.\discretionary replacing 1
+..\tenrm f
+..\tenrm -
+.|\tenrm ^^M (ligature fl)
+.\tenrm ^^O (ligature ffl)
+.\tenrm u
+.\discretionary
+..\tenrm -
+.\tenrm e
+.\tenrm n
+.\kern-0.27779
+.\tenrm t
+.\glue(\rightskip) 0.0
+
+
+Underfull \hbox (badness 10000) in paragraph at lines 4487--4488
+\tenrm raf-
+
+\hbox(6.94444+0.0)x40.0
+.\tenrm r
+.\tenrm a
+.\discretionary
+.\tenrm f
+.\tenrm -
+.\glue(\rightskip) 0.0
+
+
+Underfull \hbox (badness 2189) in paragraph at lines 4487--4488
+\tenrm fish baf-
+
+\hbox(6.94444+0.0)x40.0, glue set 2.79997
+.\tenrm ^^L (ligature fi)
+.\tenrm s
+.\tenrm h
+.\glue 3.33333 plus 1.66666 minus 1.11111
+.\tenrm b
+.\tenrm a
+.\discretionary
+.\tenrm f
+.\tenrm -
+.\glue(\rightskip) 0.0
+
+> \box1=
+\vbox(42.94444+0.0)x50.0
+.\hbox(6.94444+0.0)x50.0, glue set 0.24995
+..\hbox(0.0+0.0)x0.0
+..\tenrm D
+..\tenrm i
+..\tenrm ^^N (ligature ffi)
+..\tenrm c
+..\tenrm u
+..\tenrm l
+..\tenrm t
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\tenrm e
+..\discretionary
+..\tenrm f
+..\tenrm -
+..\glue(\rightskip) 0.0
+.\glue(\baselineskip) 5.05556
+.\hbox(6.94444+0.0)x50.0, glue set 4.33331
+..\tenrm f
+..\tenrm e
+..\tenrm c
+..\discretionary
+...\tenrm -
+..\tenrm t
+..\tenrm i
+..\tenrm v
+..\kern-0.27779
+..\tenrm e
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\tenrm a
+..\discretionary
+..\tenrm f
+..\tenrm -
+..\glue(\rightskip) 0.0
+.\glue(\baselineskip) 5.05556
+.\hbox(6.94444+0.0)x50.0, glue set 3.16664
+..\tenrm ^^M (ligature fl)
+..\tenrm u
+..\discretionary
+...\tenrm -
+..\tenrm e
+..\tenrm n
+..\kern-0.27779
+..\tenrm t
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\tenrm o
+..\discretionary replacing 1
+...\tenrm f
+...\tenrm -
+..|\tenrm ^^L (ligature fi)
+..\tenrm ^^N (ligature ffi)
+..\discretionary
+..\tenrm -
+..\glue(\rightskip) 0.0
+.\glue(\baselineskip) 7.69446
+.\hbox(4.30554+0.0)x50.0, glue set 30.47221fil
+..\tenrm c
+..\tenrm e
+..\tenrm r
+..\tenrm s
+..\tenrm .
+..\penalty 10000
+..\glue(\parfillskip) 0.0 plus 1.0fil
+..\glue(\rightskip) 0.0
+
+! OK.
+l.4492 \showbox1
+                
+
+> \box2=
+\vbox(20.88889+0.0)x60.0
+.\hbox(6.94444+0.0)x60.0, glue set 1.89995
+..\hbox(0.0+0.0)x0.0
+..\tenrm r
+..\tenrm a
+..\tenrm ^^N (ligature ffi)
+..\tenrm s
+..\tenrm h
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\tenrm r
+..\tenrm a
+..\discretionary replacing 1
+...\tenrm f
+...\tenrm -
+..|\tenrm ^^L (ligature fi)
+..\tenrm ^^N (ligature ffi)
+..\tenrm s
+..\tenrm h
+..\glue(\rightskip) 0.0
+.\glue(\baselineskip) 5.05556
+.\hbox(6.94444+1.94444)x60.0, glue set 28.2777fil
+..\tenrm s
+..\tenrm t
+..\tenrm a
+..\tenrm ^^N (ligature ffi)
+..\tenrm n
+..\discretionary
+...\tenrm -
+..\tenrm g
+..\penalty 10000
+..\glue(\parfillskip) 0.0 plus 1.0fil
+..\glue(\rightskip) 0.0
+
+! OK.
+l.4496 \showbox2
+                
+
+[0] )

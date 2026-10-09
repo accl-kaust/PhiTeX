@@ -7,7 +7,7 @@
 use std::fmt;
 use std::sync::Arc;
 
-pub use crate::prim::{Code, Conv, DimenPar, GluePar, IfKind, IntPar, Mat, Prim, Reg, Shorthand, TokPar};
+pub use crate::prim::{Code, Conv, DimenPar, GluePar, IfKind, IntPar, Mat, MathP, Prim, Reg, Shorthand, TokPar};
 use crate::tfm::Font;
 
 /// A token.
@@ -109,9 +109,21 @@ pub enum Key {
     /// the `Env` per piece, never defined, so a changed line count above
     /// re-runs only the nodes that read it.
     LineBase,
-    /// `\splitfirstmark` (0) and `\splitbotmark` (1): defined globally by
-    /// each `\vsplit` (`Val::Toks`, empty for none).
-    SplitMark(u8),
+    /// The split marks of every class (`\splitfirstmark`, `\splitbotmark`,
+    /// e-TeX's `\splitfirstmarks n`, `\splitbotmarks n`): one value,
+    /// `Val::SplitMarks`, defined globally by each `\vsplit` (which clears
+    /// every class's, etex.web's `vsplit_init`).
+    SplitMarks,
+    /// The interaction mode (`\batchmode` 0 … `\errorstopmode` 3; e-TeX's
+    /// `\interactionmode`), global.
+    Interaction,
+    /// Whether the format is e-TeX's extended mode (1) or TeX's (0): a
+    /// value of the format no document defines (`Options::etex`).
+    ETeXMode,
+    /// A language's hyphenation patterns (`\patterns`, global).
+    Patterns(u8),
+    /// A language's hyphenation exceptions (`\hyphenation`, global).
+    Exceptions(u8),
 }
 
 impl Key {
@@ -183,11 +195,7 @@ impl Key {
             Key::SkewChar(_) => w(22, 0),
             Key::FontIdent(_) => w(23, 0),
             Key::FontLoaded(_) => w(24, 0),
-            Key::File(_) => w(26, 0),
-            Key::ReadStream(n) => w(27, u64::from(*n)),
-            Key::Job => w(28, 0),
-            Key::LineBase => w(29, 0),
-            Key::SplitMark(n) => w(30, u64::from(*n)),
+            Key::File(_) => w(30, 0),
             Key::Active(x) => w(1, c(x)),
             Key::Cat(x) => w(2, c(x)),
             Key::Lccode(x) => w(3, c(x)),
@@ -208,6 +216,14 @@ impl Key {
             Key::Parshape => w(18, 0),
             Key::Font => w(19, 0),
             Key::FamFont(s, f) => w(25, (u64::from(*s) << 8) | u64::from(*f)),
+            Key::Interaction => w(26, 0),
+            Key::ETeXMode => w(27, 0),
+            Key::Patterns(l) => w(28, u64::from(*l)),
+            Key::Exceptions(l) => w(29, u64::from(*l)),
+            Key::ReadStream(n) => w(31, u64::from(*n)),
+            Key::Job => w(32, 0),
+            Key::LineBase => w(33, 0),
+            Key::SplitMarks => w(34, 0),
         }
     }
 }
@@ -245,7 +261,11 @@ impl fmt::Display for Key {
             Key::ReadStream(n) => write!(f, "read stream {n}"),
             Key::Job => write!(f, "\\jobname"),
             Key::LineBase => write!(f, "line base"),
-            Key::SplitMark(n) => write!(f, "\\split{}mark", if *n == 0 { "first" } else { "bot" }),
+            Key::SplitMarks => write!(f, "\\splitfirstmarks"),
+            Key::Interaction => write!(f, "\\interactionmode"),
+            Key::ETeXMode => write!(f, "e-TeX mode"),
+            Key::Patterns(l) => write!(f, "\\patterns (language {l})"),
+            Key::Exceptions(l) => write!(f, "\\hyphenation (language {l})"),
         }
     }
 }
@@ -257,6 +277,9 @@ pub struct Macro {
     pub body: Vec<Tok>,
     pub long: bool,
     pub outer: bool,
+    /// e-TeX's `\protected`: not expanded where `\edef` and `\write`
+    /// expand.
+    pub protected: bool,
 }
 
 /// What a control sequence or active character means.
@@ -311,11 +334,21 @@ pub enum Val {
     Box(Arc<crate::item::BoxNode>),
     /// A name (`Key::FontIdent`).
     Name(Arc<str>),
+    /// A language's patterns (`Key::Patterns`).
+    Patterns(crate::hyph::Patterns),
+    /// A language's exceptions (`Key::Exceptions`).
+    Exceptions(crate::hyph::Exceptions),
     /// A file's bytes (`Key::File`).
     Bytes(Arc<[u8]>),
     /// An open read stream (`Key::ReadStream`).
     Stream(Arc<Stream>),
+    /// The split marks (`Key::SplitMarks`): per class with a mark in the
+    /// part the last `\vsplit` split off, by class, its first and last.
+    SplitMarks(Arc<[SplitMark]>),
 }
+
+/// A class's split marks: the class, the first mark, the last.
+pub type SplitMark = (u16, Arc<Vec<Tok>>, Arc<Vec<Tok>>);
 
 /// An open `\read` stream: a file's bytes and where its next line begins
 /// (tex.web 480: `read_open` is `just_open` until a line has been read,
@@ -352,6 +385,9 @@ impl fmt::Display for Val {
             Val::Name(n) => write!(f, "{n}"),
             Val::Bytes(b) => write!(f, "{} bytes", b.len()),
             Val::Stream(x) => write!(f, "stream at {} of {}", x.next, x.data.len()),
+            Val::SplitMarks(m) => write!(f, "split marks of {} classes", m.len()),
+            Val::Patterns(p) => write!(f, "{} patterns", p.len()),
+            Val::Exceptions(x) => write!(f, "{} exceptions", x.len()),
             Val::Meaning(Meaning::Font(x)) => write!(f, "select font {}", x.name),
             Val::Meaning(Meaning::Undefined) => write!(f, "undefined"),
             Val::Meaning(Meaning::Prim(p)) => write!(f, "primitive \\{}", p.name()),
@@ -385,11 +421,18 @@ impl fmt::Display for Val {
 /// \year, \month, \day, \time as `SOURCE_DATE_EPOCH=0` gives them: the
 /// DVI file's comment says 1970.01.01:0000). The font given to `Build` is
 /// a file `\font` can load, not the initial font: that is `\nullfont`.
-pub fn initial(key: &Key, _font: &Arc<Font>) -> Val {
+/// With `etex` (e-TeX's extended mode, etex.web §1337), e-TeX's
+/// primitives are named too.
+pub fn initial(key: &Key, _font: &Arc<Font>, etex: bool) -> Val {
     let c32 = |c: &char| u32::from(*c) as i32;
     match key {
         Key::Cs(n) if &**n == "nullfont" => Val::Meaning(Meaning::Font(crate::tfm::null_font())),
-        Key::Cs(n) => Val::Meaning(Prim::by_name(n).or_else(|| Prim::internal(n)).map_or(Meaning::Undefined, Meaning::Prim)),
+        Key::Cs(n) => Val::Meaning(
+            Prim::by_name(n)
+                .or_else(|| if etex { Prim::by_name_etex(n) } else { None })
+                .or_else(|| Prim::internal(n))
+                .map_or(Meaning::Undefined, Meaning::Prim),
+        ),
         Key::Active(_) => Val::Meaning(Meaning::Undefined),
         Key::Cat(c) => Val::Cat(initial_cat(*c)),
         Key::Lccode(c) => Val::Int(match c {
@@ -410,7 +453,7 @@ pub fn initial(key: &Key, _font: &Arc<Font>) -> Val {
         }),
         Key::Delcode(c) => Val::Int(if *c == '.' { 0 } else { -1 }),
         Key::IntPar(p) => Val::Int(p.initial()),
-        Key::TokPar(_) | Key::Toks(_) | Key::SplitMark(_) => Val::Toks(Arc::new(Vec::new())),
+        Key::TokPar(_) | Key::Toks(_) => Val::Toks(Arc::new(Vec::new())),
         // (`\fontdimen`: the null font's, tex.web 552; a loaded font's are
         // defined by its `\font`)
         Key::DimenPar(_) | Key::Count(_) | Key::Dimen(_) | Key::FontDimen(..) | Key::FontLoaded(_) | Key::LineBase => {
@@ -424,6 +467,13 @@ pub fn initial(key: &Key, _font: &Arc<Font>) -> Val {
         Key::SkewChar(_) => Val::Int(-1),
         Key::FontIdent(_) => Val::Name(Arc::from("nullfont")),
         Key::Job => Val::Name(Arc::from("texput")),
+        Key::SplitMarks => Val::SplitMarks(Arc::from(Vec::new())),
+        // (IniTeX's `error_stop_mode`; TeX run with `-interaction` starts
+        // in that mode instead)
+        Key::Interaction => Val::Int(3),
+        Key::ETeXMode => Val::Int(i32::from(etex)),
+        Key::Patterns(_) => Val::Patterns(crate::hyph::Patterns::new()),
+        Key::Exceptions(_) => Val::Exceptions(crate::hyph::Exceptions::new()),
     }
 }
 

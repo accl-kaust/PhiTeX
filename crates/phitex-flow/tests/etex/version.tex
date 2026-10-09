@@ -1,0 +1,11 @@
+% e-TeX's mode: its version, its primitives' meanings, registers past 255,
+% the new parameters.
+\message{\the\eTeXversion\eTeXrevision}
+\message{\meaning\eTeXversion, \meaning\numexpr, \meaning\protected, \meaning\everyeof, \meaning\TeXXeTstate, \meaning\ifcsname}
+\count300=5 \dimen32767=1.5pt \countdef\c=1000 \c=7 \toks300={a#b}\skip256=1pt plus 1fil
+\message{\the\count300, \the\dimen32767, \the\c, \the\count1000, \the\toks300, \the\skip256}
+\tracingifs=-1 \tracingassigns=-2 \tracinggroups=-3 \tracingnesting=-4 \tracingscantokens=-5
+\savinghyphcodes=2 \lastlinefit=500 \predisplaydirection=-1 \savingvdiscards=-1
+\message{\the\tracingifs\the\tracingassigns\the\tracinggroups\the\tracingnesting\the\tracingscantokens}
+\message{\the\savinghyphcodes, \the\lastlinefit, \the\predisplaydirection, \the\savingvdiscards, \the\TeXXeTstate}
+\everyeof{x\y}\message{\the\everyeof}

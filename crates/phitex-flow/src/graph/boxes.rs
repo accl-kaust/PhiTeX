@@ -85,23 +85,21 @@ impl Exec<'_> {
     /// break for `h` (`split::vsplit`), packed to `h` with `\splitmaxdepth`
     /// (reported with `\vbadness`, `\vfuzz`); the rest stays in the
     /// register, packed, at the scope of the definition it replaces
-    /// (CORE.md Conflict 7); `\splitfirstmark` and `\splitbotmark` are
-    /// defined, globally, from the marks of the part split off.
+    /// (CORE.md Conflict 7); the split marks of every class are defined,
+    /// globally, from the marks of the part split off.
     pub(super) fn vsplit_box(&mut self) -> Option<BoxNode> {
         let n = self.scan_eight_bit_int();
         if !self.keyword("to") {
             self.err("Missing `to' inserted".into());
         }
         let h = self.scan_dimen();
-        let none = || Arc::new(Vec::<Tok>::new());
         let v = match self.get(&Key::Box(n)) {
             Val::Box(b) if b.vertical => b,
             other => {
                 if matches!(other, Val::Box(_)) {
                     self.err("\\vsplit needs a \\vbox".into());
                 }
-                self.define(Key::SplitMark(0), Val::Toks(none()), true);
-                self.define(Key::SplitMark(1), Val::Toks(none()), true);
+                self.define(Key::SplitMarks, Val::SplitMarks(Arc::from(Vec::new())), true);
                 return None;
             }
         };
@@ -111,8 +109,7 @@ impl Exec<'_> {
         if s.bad_shrink {
             self.err("Infinite glue shrinkage found in box being split".into());
         }
-        self.define(Key::SplitMark(0), Val::Toks(s.first_mark.unwrap_or_else(none)), true);
-        self.define(Key::SplitMark(1), Val::Toks(s.bot_mark.unwrap_or_else(none)), true);
+        self.define(Key::SplitMarks, Val::SplitMarks(Arc::from(s.marks)), true);
         let rest = if s.rest.is_empty() {
             Val::Void
         } else {
@@ -158,6 +155,8 @@ impl Exec<'_> {
             inner: self.st.inner,
             space_factor: self.st.space_factor,
             prev_depth: self.st.prev_depth,
+            hyph_lang: self.st.hyph_lang,
+            prev_graf: self.st.prev_graf,
         };
         self.scan_left_brace();
         let shaped = self.paragraph_shaped();
@@ -258,12 +257,13 @@ impl Exec<'_> {
             if !prefixable(&m) {
                 return Some((t, m));
             }
-            let (mut g, mut l, mut o) = (false, false, false);
-            while let Meaning::Prim(p @ (Prim::Global | Prim::Long | Prim::Outer)) = m {
+            let (mut g, mut l, mut o, mut pr) = (false, false, false, false);
+            while let Meaning::Prim(p @ (Prim::Global | Prim::Long | Prim::Outer | Prim::Protected)) = m {
                 match p {
                     Prim::Global => g = true,
                     Prim::Long => l = true,
-                    _ => o = true,
+                    Prim::Outer => o = true,
+                    _ => pr = true,
                 }
                 (t, m) = self.nonblank_nonrelax()?;
                 if !prefixable(&m) {
@@ -276,7 +276,7 @@ impl Exec<'_> {
                 self.err("Improper \\setbox".into());
                 continue;
             }
-            self.prefixed(&t, &m, g, l, o);
+            self.prefixed(&t, &m, g, l, o, pr);
         }
     }
 }

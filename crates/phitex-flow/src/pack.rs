@@ -73,8 +73,9 @@ fn order(t: &[i32; 4]) -> u8 {
 /// `adjust` if given (§655).
 pub fn hpack(mut list: Vec<Item>, spec: Spec, params: &Params, adjust: Option<&mut Vec<Item>>) -> Packed {
     if let Some(adj) = adjust {
-        let (moved, kept): (Vec<Item>, Vec<Item>) =
-            list.into_iter().partition(|i| matches!(i, Item::Mark(_) | Item::Ins(_) | Item::Adjust(_)));
+        let (moved, kept): (Vec<Item>, Vec<Item>) = list
+            .into_iter()
+            .partition(|i| matches!(i, Item::Mark(_) | Item::Marks(..) | Item::Ins(_) | Item::Adjust(_)));
         for m in moved {
             match m {
                 Item::Adjust(l) => adj.extend(l.iter().cloned()),
@@ -121,7 +122,7 @@ pub fn hpack(mut list: Vec<Item>, spec: Spec, params: &Params, adjust: Option<&m
                 t.stretch[usize::from(l.g.stretch_order)] += l.g.stretch;
                 t.shrink[usize::from(l.g.shrink_order)] += l.g.shrink;
             }
-            Item::Kern { w, .. } => x += w,
+            Item::Kern { w, .. } | Item::Math { w, .. } => x += w,
             _ => {}
         }
     }

@@ -36,6 +36,10 @@ pub(super) enum BoxKind {
     /// `\insert n` (255: `\vadjust`), with what its `}` read inside it
     /// (tex.web 1100).
     Insert(u8, Option<Arc<InsParams>>),
+    /// `\vcenter` (tex.web 1167).
+    Vcenter,
+    /// A math group (`math.rs`).
+    Math(Arc<super::math::MathKind>),
 }
 
 /// What an insertion reads as its group ends (tex.web 1100):
@@ -72,6 +76,10 @@ pub(super) struct BoxGroup {
     pub(super) inner: bool,
     pub(super) space_factor: i32,
     pub(super) prev_depth: i32,
+    /// The enclosing paragraph's language state.
+    pub(super) hyph_lang: [u8; 4],
+    /// The enclosing vertical list's `\prevgraf` (a new list's is 0).
+    pub(super) prev_graf: i32,
 }
 
 /// A box group just closed, for the packaging node: the group, and
@@ -80,6 +88,8 @@ pub(super) struct BoxGroup {
 pub(super) struct BoxEnd {
     pub(super) g: Arc<BoxGroup>,
     pub(super) boxmaxdepth: i32,
+    /// What a math group's close read inside it.
+    pub(super) math: Option<Arc<super::math::MathEnd>>,
 }
 
 /// tex.web 549: `non_char`.
@@ -168,7 +178,7 @@ pub(super) fn para_start(chain: &Chain, i: usize, level: u16) -> usize {
 }
 
 /// The first node inside the box at `level` that node `i` is in.
-fn box_start(chain: &Chain, i: usize, level: u16) -> usize {
+pub(super) fn box_start(chain: &Chain, i: usize, level: u16) -> usize {
     let mut j = i;
     while j > 0 && chain.nodes[j - 1].out.level >= level {
         j -= 1;
@@ -177,7 +187,7 @@ fn box_start(chain: &Chain, i: usize, level: u16) -> usize {
 }
 
 /// Appends an item emitted into a horizontal list, or applies it.
-fn push_horizontal(list: &mut Vec<Item>, it: Item) {
+pub(super) fn push_horizontal(list: &mut Vec<Item>, it: Item) {
     match it {
         Item::Remove(k) => remove_last(list, k),
         _ => list.push(it),
@@ -185,7 +195,7 @@ fn push_horizontal(list: &mut Vec<Item>, it: Item) {
 }
 
 /// The fonts appearing in a list (for the names its display shows).
-fn fonts_in(list: &[Item], out: &mut Vec<Arc<str>>) {
+pub(super) fn fonts_in(list: &[Item], out: &mut Vec<Arc<str>>) {
     for it in list {
         let id = match it {
             Item::Char(f, _) => f.key.clone(),
@@ -211,6 +221,27 @@ fn fonts_in(list: &[Item], out: &mut Vec<Arc<str>>) {
                 fonts_in(a, out);
                 continue;
             }
+            Item::Noad(m) => {
+                let field = |f: &crate::mlist::Field, out: &mut Vec<Arc<str>>| match f {
+                    crate::mlist::Field::Box(b) => fonts_in(std::slice::from_ref(&Item::Box(b.clone())), out),
+                    crate::mlist::Field::Mlist(l) => fonts_in(l, out),
+                    _ => {}
+                };
+                match &**m {
+                    crate::mlist::MItem::Noad(n) => {
+                        field(&n.nucleus, out);
+                        field(&n.sup, out);
+                        field(&n.sub, out);
+                    }
+                    crate::mlist::MItem::Choice(c) => {
+                        for l in &**c {
+                            fonts_in(l, out);
+                        }
+                    }
+                    _ => {}
+                }
+                continue;
+            }
             _ => continue,
         };
         if !out.contains(&id) {
@@ -229,14 +260,14 @@ impl Exec<'_> {
         }
     }
 
-    fn toks_par(&mut self, p: TokPar) -> Vec<Tok> {
+    pub(super) fn toks_par(&mut self, p: TokPar) -> Vec<Tok> {
         match self.get(&Key::TokPar(p)) {
             Val::Toks(t) => t.to_vec(),
             _ => Vec::new(),
         }
     }
 
-    fn interline(&mut self) -> Arc<Interline> {
+    pub(super) fn interline(&mut self) -> Arc<Interline> {
         Arc::new(Interline {
             baselineskip: self.glue_par(GluePar::Baselineskip),
             lineskip: self.glue_par(GluePar::Lineskip),
@@ -245,7 +276,7 @@ impl Exec<'_> {
     }
 
     /// What shipping a page reads (tex.web 638–641, 617).
-    fn ship_params(&mut self) -> Arc<ShipParams> {
+    pub(super) fn ship_params(&mut self) -> Arc<ShipParams> {
         let mut counts = [0; 10];
         for (k, c) in counts.iter_mut().enumerate() {
             *c = self.int(&Key::Count(k as u16));
@@ -265,7 +296,7 @@ impl Exec<'_> {
     }
 
     /// What the page builder reads where it is called.
-    fn page_call(&mut self) -> Arc<PageCall> {
+    pub(super) fn page_call(&mut self) -> Arc<PageCall> {
         Arc::new(PageCall {
             vsize: self.dimen_par(DimenPar::Vsize),
             maxdepth: self.dimen_par(DimenPar::Maxdepth),
@@ -295,6 +326,7 @@ impl Exec<'_> {
             idents,
             depth: self.int_par(IntPar::Showboxdepth),
             breadth: self.int_par(IntPar::Showboxbreadth),
+            newline: self.int_par(IntPar::Newlinechar),
         }
     }
 
@@ -445,19 +477,24 @@ impl Exec<'_> {
             Mat::Internal(0) => self.package(),
             Mat::Internal(1) => self.end_par(),
             Mat::Internal(2) => self.disc_next(),
-            Mat::Internal(_) => self.normal_paragraph(),
+            Mat::Internal(3) => self.normal_paragraph(),
+            Mat::Internal(4) => self.math_init(),
+            Mat::Internal(5) => self.display_open(),
+            Mat::Internal(6) => self.display_end(),
+            Mat::Internal(7) => self.math_group_open(),
+            Mat::Internal(_) => self.choice_next(),
         }
     }
 
     /// vmode + a horizontal command: a paragraph begins first (tex.web
     /// 1090).
-    fn back_new_graf(&mut self, t: &Tok) {
+    pub(super) fn back_new_graf(&mut self, t: &Tok) {
         self.back(t.clone());
         self.new_graf(true);
     }
 
     /// tex.web 1095: `head_for_vmode`.
-    fn head_for_vmode(&mut self, t: &Tok, hrule: bool) {
+    pub(super) fn head_for_vmode(&mut self, t: &Tok, hrule: bool) {
         if self.st.inner {
             if hrule {
                 self.err("You can't use `\\hrule' here except with leaders".into());
@@ -484,6 +521,7 @@ impl Exec<'_> {
         self.st.mode = Mode::H;
         self.st.inner = false;
         self.st.space_factor = 1000;
+        self.begin_paragraph_language();
         if indented {
             let w = self.dimen_par(DimenPar::Parindent);
             self.emit.push(Item::Box(Arc::new(BoxNode { w, ..BoxNode::default() })));
@@ -543,7 +581,7 @@ impl Exec<'_> {
     }
 
     /// What line breaking reads (tex.web 813–890).
-    fn line_params(&mut self, hlist: &[Item]) -> LineParams {
+    pub(super) fn line_params(&mut self, hlist: &[Item]) -> LineParams {
         let parshape = match self.get(&Key::Parshape) {
             Val::Parshape(s) => s,
             _ => Arc::new(Vec::new()),
@@ -577,6 +615,7 @@ impl Exec<'_> {
             },
             inter: self.interline(),
             show: self.show_ctx(hlist),
+            hyph: Some(self.hyph_params(hlist)),
         }
     }
 
@@ -697,7 +736,7 @@ impl Exec<'_> {
             }
             return list;
         }
-        let start = if self.st.inner {
+        let start = if self.st.inner || self.st.mode == Mode::M {
             box_start(self.chain, nodes.len(), level)
         } else {
             para_start(self.chain, nodes.len(), level)
@@ -781,6 +820,7 @@ impl Exec<'_> {
         let font = self.font();
         let c0 = c0.min(255) as i32;
         self.adjust_space_factor(c0);
+        self.fix_language();
         let mut m = Main {
             bchar: font.bchar,
             false_bchar: font.false_bchar,
@@ -1201,6 +1241,8 @@ impl Exec<'_> {
             inner: self.st.inner,
             space_factor: self.st.space_factor,
             prev_depth: self.st.prev_depth,
+            hyph_lang: self.st.hyph_lang,
+            prev_graf: self.st.prev_graf,
         };
         self.scan_left_brace();
         self.open_box(g, Mode::H);
@@ -1214,6 +1256,8 @@ impl Exec<'_> {
         g.inner = self.st.inner;
         g.space_factor = self.st.space_factor;
         g.prev_depth = self.st.prev_depth;
+        g.hyph_lang = self.st.hyph_lang;
+        g.prev_graf = self.st.prev_graf;
         self.scan_left_brace();
         self.open_box(g, Mode::H);
     }
@@ -1227,6 +1271,7 @@ impl Exec<'_> {
         self.st.level += 1;
         self.st.mode = mode;
         self.st.inner = true;
+        self.st.prev_graf = 0;
         if mode == Mode::V {
             self.st.prev_depth = IGNORE_DEPTH;
         } else {
@@ -1313,6 +1358,8 @@ impl Exec<'_> {
                     inner: self.st.inner,
                     space_factor: self.st.space_factor,
                     prev_depth: self.st.prev_depth,
+            hyph_lang: self.st.hyph_lang,
+            prev_graf: self.st.prev_graf,
                 };
                 self.open_box(g, if vertical { Mode::V } else { Mode::H });
                 let every = self.toks_par(if vertical { TokPar::Everyvbox } else { TokPar::Everyhbox });
@@ -1326,19 +1373,39 @@ impl Exec<'_> {
     }
 
     /// A box register's new value where TeX assigns it without the save
-    /// stack (`box(n):=null`, tex.web 1079, 1110, 1247): at the scope of
-    /// the definition it replaces where that is the current group's or the
-    /// outermost (CORE.md; between those, local).
+    /// stack (`box(n):=null`, tex.web 1079, 1110, 1247): a definition at
+    /// the level of the one it replaces (CORE.md Conflict 7): global when
+    /// that one was global, made at the piece's outer level or before the
+    /// piece (pieces are cut at depth 0: no group spans them); else living
+    /// as long as its group.
     pub(super) fn change_box(&mut self, n: u16, val: Val) {
         let key = Key::Box(n);
-        let global = match self.chain.resolve(&key, self.chain.nodes.len()) {
+        // (this node's own earlier definition of the register, if any)
+        if let Some(i) = self.defs.iter().rposition(|d| d.key == key) {
+            let (global, level) = (self.defs[i].global, self.defs[i].level);
+            self.defs.push(super::Def { key, val, global, level });
+            return;
+        }
+        // (the definition it replaces, read: a kept node is checked by its
+        // value and its scope)
+        let _ = self.lookup(&key);
+        let scope = match self.chain.resolve(&key, self.chain.nodes.len()) {
             Some((d, _)) => {
                 let node = &self.chain.nodes[d as usize];
-                node.defs().iter().rev().find(|x| x.key == key).is_some_and(|x| x.global) || node.group.is_none()
+                match node.defs().iter().rev().find(|x| x.key == key) {
+                    Some(def) if !def.global => self.chain.def_group(node, def),
+                    _ => None,
+                }
             }
-            None => true,
+            None => None,
         };
-        self.define(key, val, global && !self.st.groups.is_empty());
+        let open = self.chain.open_groups();
+        let level = scope.and_then(|g| open.iter().rposition(|&o| o == g).map(|p| (open.len() - 1 - p) as u16));
+        match (scope, level) {
+            (Some(_), Some(0)) => self.define(key, val, false),
+            (Some(_), Some(k)) => self.defs.push(super::Def { key, val, global: false, level: Some(k) }),
+            _ => self.define(key, val, !self.st.groups.is_empty()),
+        }
     }
 
     /// `\wd n=d` and friends (tex.web 1247).
@@ -1397,8 +1464,10 @@ impl Exec<'_> {
         self.st.inner = g.inner;
         self.st.space_factor = g.space_factor;
         self.st.prev_depth = g.prev_depth;
+        self.st.hyph_lang = g.hyph_lang;
+        self.st.prev_graf = g.prev_graf;
         self.st.level -= 1;
-        self.st.boxing = Some(Arc::new(BoxEnd { g, boxmaxdepth }));
+        self.st.boxing = Some(Arc::new(BoxEnd { g, boxmaxdepth, math: None }));
         self.rewrite(after);
         let p = self.cs("\u{0}package");
         self.back(p);
@@ -1411,7 +1480,7 @@ impl Exec<'_> {
         let Some(be) = self.st.boxing.take() else { return };
         self.kind = Kind::Par;
         let inner = self.st.level + 1;
-        let vertical = matches!(be.g.kind, BoxKind::V | BoxKind::Vtop | BoxKind::Insert(..));
+        let vertical = matches!(be.g.kind, BoxKind::V | BoxKind::Vtop | BoxKind::Insert(..) | BoxKind::Vcenter);
         let nodes = &self.chain.nodes;
         // (the nodes inside: back from the `Close` node before this one)
         let end = nodes.len().saturating_sub(1);
@@ -1434,6 +1503,11 @@ impl Exec<'_> {
         let ships: Vec<Item> = list.iter().filter(|i| matches!(i, Item::Shipout(_))).cloned().collect();
         list.retain(|i| !matches!(i, Item::Shipout(_) | Item::BuildPage(_) | Item::End(_)));
         match &be.g.kind {
+            BoxKind::Vcenter => self.vcenter_package(&be, list, ships),
+            BoxKind::Math(k) => {
+                let k = k.clone();
+                self.math_package(&be, &k, list, ships);
+            }
             BoxKind::H => {
                 let params = Params {
                     badness: self.int_par(IntPar::Hbadness),
@@ -1491,7 +1565,7 @@ impl Exec<'_> {
                         let parts = if *stage == 0 { (list, Vec::new()) } else { (parts.0.clone(), list) };
                         let mut g = (*be.g).clone();
                         g.kind = BoxKind::Disc(stage + 1, Arc::new(parts));
-                        self.st.boxing = Some(Arc::new(BoxEnd { g: Arc::new(g), boxmaxdepth: be.boxmaxdepth }));
+                        self.st.boxing = Some(Arc::new(BoxEnd { g: Arc::new(g), boxmaxdepth: be.boxmaxdepth, math: None }));
                         let t = self.cs("\u{0}discnext");
                         self.back(t);
                     }
@@ -1531,6 +1605,9 @@ impl Exec<'_> {
                     self.vemit.push(Item::Append(b, inter));
                     self.vemit.extend(adj);
                     self.build_page();
+                } else if self.st.mode == Mode::M {
+                    // (§1076: in math, an ord noad around it)
+                    self.emit.push(super::math::box_noad(b));
                 } else {
                     self.st.space_factor = 1000;
                     self.emit.push(Item::Box(b));
@@ -1587,7 +1664,7 @@ impl Exec<'_> {
         let c = self.page_call();
         self.vemit.push(Item::End(c));
         self.st.pending.clear();
-        self.st.files = super::Stack::new();
+        self.st.texts = super::Stack::new();
         self.st.pos = self.text.len();
     }
 }

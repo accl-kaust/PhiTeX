@@ -37,6 +37,18 @@ pub enum IfKind {
     True,
     False,
     Case,
+    /// e-TeX's `\ifdefined`, `\ifcsname`, `\iffontchar`.
+    Defined,
+    Csname,
+    FontChar,
+}
+
+impl IfKind {
+    /// Its code in tex.web/etex.web (`if_char_code` 0 … `if_font_char_code`
+    /// 19): `\currentiftype` is this plus one.
+    pub fn code(self) -> u8 {
+        self as u8
+    }
 }
 
 /// A register bank.
@@ -93,6 +105,8 @@ pub enum Conv {
     Meaning,
     FontName,
     JobName,
+    /// e-TeX's `\eTeXrevision`.
+    ETeXRevision,
 }
 
 /// A primitive that makes material, boxes or pages (tex.web's commands
@@ -139,6 +153,37 @@ pub enum Mat {
     Accent,
     Insert,
     Vadjust,
+}
+
+/// A math command (tex.web §1136–§1206).
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum MathP {
+    /// `\mathchar`.
+    MathChar,
+    /// `\delimiter`.
+    Delimiter,
+    /// `\mathord` (0) … `\mathinner` (7), `\underline` (8), `\overline` (9).
+    Comp(u8),
+    /// `\displaylimits` (0), `\limits` (1), `\nolimits` (2).
+    Limits(u8),
+    Radical,
+    /// `\mathaccent`.
+    Accent,
+    Vcenter,
+    /// `\displaystyle` (0), `\textstyle` (2), `\scriptstyle` (4),
+    /// `\scriptscriptstyle` (6).
+    Style(u8),
+    NonScript,
+    /// `\mathchoice`.
+    Choice,
+    /// `\above` (0), `\over` (1), `\atop` (2); the `withdelims` forms +3.
+    Above(u8),
+    Left,
+    Right,
+    /// `\eqno` (false), `\leqno` (true).
+    EqNo(bool),
+    Mskip,
+    Mkern,
 }
 
 /// A primitive.
@@ -226,9 +271,55 @@ pub enum Prim {
     OpenOut,
     CloseOut,
     Special,
+    /// Math.
+    Math(MathP),
+    /// `\patterns` (true), `\hyphenation` (false).
+    HyphData(bool),
+    /// `\setlanguage`.
+    SetLanguage,
+    /// `\showbox` (1), `\showlists` (3) (tex.web 1291's codes).
+    Show(u8),
     /// A primitive without a graph form yet: `UNIMPL[i]`.
     Unimpl(u16),
+    // ---- e-TeX's (etex.web), named only in extended mode
+    // (`ETEX_PRIMITIVES`); `LastItem(ETEX_ITEM..)`, `Mark(5..)` and
+    // `PageInt(2)` are e-TeX's too.
+    /// `\unless`: negates the boolean conditional after it.
+    Unless,
+    /// `\unexpanded`, `\detokenize` (`the` with chr 1 and 5).
+    Unexpanded,
+    Detokenize,
+    /// `\scantokens`: the text becomes input, read again.
+    ScanTokens,
+    /// `\protected` (a prefix).
+    Protected,
+    /// `\readline`.
+    ReadLine,
+    /// `\showgroups` (4), `\showtokens` (5), `\showifs` (6).
+    ShowE(u8),
+    /// `\marks`.
+    Marks,
+    /// `\pagediscards` (0), `\splitdiscards` (1).
+    Discards(u8),
+    /// `\middle`.
+    Middle,
+    /// `\beginL`, `\endL`, `\beginR`, `\endR`: the math node's subtype
+    /// (6, 7, 10, 11).
+    Lr(u8),
+    /// `\interlinepenalties` (0), `\clubpenalties`, `\widowpenalties`,
+    /// `\displaywidowpenalties` (3).
+    PenShape(u8),
 }
+
+/// The first of e-TeX's `LastItem` codes (`\eTeXversion`); the others
+/// follow in `ETEX_PRIMITIVES`' order of codes: 6 `\currentgrouplevel`, 7
+/// `\currentgrouptype`, 8 `\currentiflevel`, 9 `\currentiftype`, 10
+/// `\currentifbranch`, 11 `\lastnodetype`, 12 `\gluestretchorder`, 13
+/// `\glueshrinkorder`, 14–17 `\fontcharwd/ht/dp/ic`, 18–20
+/// `\parshapelength/indent/dimen`, 21 `\gluestretch`, 22 `\glueshrink`,
+/// 23 `\mutoglue`, 24 `\gluetomu`, 25–28 `\numexpr`, `\dimexpr`,
+/// `\glueexpr`, `\muexpr`.
+pub const ETEX_ITEM: u8 = 5;
 
 impl Prim {
     /// Whether it is expanded (a step) rather than executed (tex.web 366).
@@ -247,16 +338,25 @@ impl Prim {
                 | Prim::Input
                 | Prim::EndInput
                 | Prim::Mark(_)
+                | Prim::Unless
+                | Prim::Unexpanded
+                | Prim::Detokenize
+                | Prim::ScanTokens
         )
     }
 
     /// Whether it is a conditional or a conditional's end.
     pub fn conditional(self) -> bool {
-        matches!(self, Prim::If(_) | Prim::Fi | Prim::Else | Prim::Or)
+        matches!(self, Prim::If(_) | Prim::Fi | Prim::Else | Prim::Or | Prim::Unless)
     }
 
     pub fn by_name(n: &str) -> Option<Prim> {
         PRIMITIVES.binary_search_by(|(m, _, _)| (*m).cmp(n)).ok().map(|i| PRIMITIVES[i].1)
+    }
+
+    /// e-TeX's primitive of that name (extended mode only).
+    pub fn by_name_etex(n: &str) -> Option<Prim> {
+        ETEX_PRIMITIVES.binary_search_by(|(m, _)| (*m).cmp(n)).ok().map(|i| ETEX_PRIMITIVES[i].1)
     }
 
     /// The reader's internal commands, by the names only it makes (never
@@ -273,7 +373,12 @@ impl Prim {
         if let Some((n, _)) = INTERNAL.iter().find(|(_, p)| *p == self) {
             return n;
         }
-        PRIMITIVES.iter().find(|(_, p, _)| *p == self).map_or("IMPOSSIBLE.", |(n, _, _)| n)
+        PRIMITIVES
+            .iter()
+            .find(|(_, p, _)| *p == self)
+            .map(|(n, _, _)| *n)
+            .or_else(|| ETEX_PRIMITIVES.iter().find(|(_, p)| *p == self).map(|(n, _)| *n))
+            .unwrap_or("IMPOSSIBLE.")
     }
 }
 
@@ -311,17 +416,22 @@ impl GluePar {
     }
 }
 
-params! { IntPar, 55, Pretolerance = "pretolerance", Tolerance = "tolerance", Linepenalty = "linepenalty", Hyphenpenalty = "hyphenpenalty", Exhyphenpenalty = "exhyphenpenalty", Clubpenalty = "clubpenalty", Widowpenalty = "widowpenalty", Displaywidowpenalty = "displaywidowpenalty", Brokenpenalty = "brokenpenalty", Binoppenalty = "binoppenalty", Relpenalty = "relpenalty", Predisplaypenalty = "predisplaypenalty", Postdisplaypenalty = "postdisplaypenalty", Interlinepenalty = "interlinepenalty", Doublehyphendemerits = "doublehyphendemerits", Finalhyphendemerits = "finalhyphendemerits", Adjdemerits = "adjdemerits", Mag = "mag", Delimiterfactor = "delimiterfactor", Looseness = "looseness", Time = "time", Day = "day", Month = "month", Year = "year", Showboxbreadth = "showboxbreadth", Showboxdepth = "showboxdepth", Hbadness = "hbadness", Vbadness = "vbadness", Pausing = "pausing", Tracingonline = "tracingonline", Tracingmacros = "tracingmacros", Tracingstats = "tracingstats", Tracingparagraphs = "tracingparagraphs", Tracingpages = "tracingpages", Tracingoutput = "tracingoutput", Tracinglostchars = "tracinglostchars", Tracingcommands = "tracingcommands", Tracingrestores = "tracingrestores", Uchyph = "uchyph", Outputpenalty = "outputpenalty", Maxdeadcycles = "maxdeadcycles", Hangafter = "hangafter", Floatingpenalty = "floatingpenalty", Globaldefs = "globaldefs", Fam = "fam", Escapechar = "escapechar", Defaulthyphenchar = "defaulthyphenchar", Defaultskewchar = "defaultskewchar", Endlinechar = "endlinechar", Newlinechar = "newlinechar", Language = "language", Lefthyphenmin = "lefthyphenmin", Righthyphenmin = "righthyphenmin", Holdinginserts = "holdinginserts", Errorcontextlines = "errorcontextlines" }
+params! { IntPar, 65, Pretolerance = "pretolerance", Tolerance = "tolerance", Linepenalty = "linepenalty", Hyphenpenalty = "hyphenpenalty", Exhyphenpenalty = "exhyphenpenalty", Clubpenalty = "clubpenalty", Widowpenalty = "widowpenalty", Displaywidowpenalty = "displaywidowpenalty", Brokenpenalty = "brokenpenalty", Binoppenalty = "binoppenalty", Relpenalty = "relpenalty", Predisplaypenalty = "predisplaypenalty", Postdisplaypenalty = "postdisplaypenalty", Interlinepenalty = "interlinepenalty", Doublehyphendemerits = "doublehyphendemerits", Finalhyphendemerits = "finalhyphendemerits", Adjdemerits = "adjdemerits", Mag = "mag", Delimiterfactor = "delimiterfactor", Looseness = "looseness", Time = "time", Day = "day", Month = "month", Year = "year", Showboxbreadth = "showboxbreadth", Showboxdepth = "showboxdepth", Hbadness = "hbadness", Vbadness = "vbadness", Pausing = "pausing", Tracingonline = "tracingonline", Tracingmacros = "tracingmacros", Tracingstats = "tracingstats", Tracingparagraphs = "tracingparagraphs", Tracingpages = "tracingpages", Tracingoutput = "tracingoutput", Tracinglostchars = "tracinglostchars", Tracingcommands = "tracingcommands", Tracingrestores = "tracingrestores", Uchyph = "uchyph", Outputpenalty = "outputpenalty", Maxdeadcycles = "maxdeadcycles", Hangafter = "hangafter", Floatingpenalty = "floatingpenalty", Globaldefs = "globaldefs", Fam = "fam", Escapechar = "escapechar", Defaulthyphenchar = "defaulthyphenchar", Defaultskewchar = "defaultskewchar", Endlinechar = "endlinechar", Newlinechar = "newlinechar", Language = "language", Lefthyphenmin = "lefthyphenmin", Righthyphenmin = "righthyphenmin", Holdinginserts = "holdinginserts", Errorcontextlines = "errorcontextlines", Tracingassigns = "tracingassigns", Tracinggroups = "tracinggroups", Tracingifs = "tracingifs", Tracingscantokens = "tracingscantokens", Tracingnesting = "tracingnesting", Predisplaydirection = "predisplaydirection", Lastlinefit = "lastlinefit", Savingvdiscards = "savingvdiscards", Savinghyphcodes = "savinghyphcodes", TeXXeTstate = "TeXXeTstate" }
 params! { DimenPar, 21, Parindent = "parindent", Mathsurround = "mathsurround", Lineskiplimit = "lineskiplimit", Hsize = "hsize", Vsize = "vsize", Maxdepth = "maxdepth", Splitmaxdepth = "splitmaxdepth", Boxmaxdepth = "boxmaxdepth", Hfuzz = "hfuzz", Vfuzz = "vfuzz", Delimitershortfall = "delimitershortfall", Nulldelimiterspace = "nulldelimiterspace", Scriptspace = "scriptspace", Predisplaysize = "predisplaysize", Displaywidth = "displaywidth", Displayindent = "displayindent", Overfullrule = "overfullrule", Hangindent = "hangindent", Hoffset = "hoffset", Voffset = "voffset", Emergencystretch = "emergencystretch" }
 params! { GluePar, 18, Lineskip = "lineskip", Baselineskip = "baselineskip", Parskip = "parskip", Abovedisplayskip = "abovedisplayskip", Belowdisplayskip = "belowdisplayskip", Abovedisplayshortskip = "abovedisplayshortskip", Belowdisplayshortskip = "belowdisplayshortskip", Leftskip = "leftskip", Rightskip = "rightskip", Topskip = "topskip", Splittopskip = "splittopskip", Tabskip = "tabskip", Spaceskip = "spaceskip", Xspaceskip = "xspaceskip", Parfillskip = "parfillskip", Thinmuskip = "thinmuskip", Medmuskip = "medmuskip", Thickmuskip = "thickmuskip" }
-params! { TokPar, 9, Output = "output", Everypar = "everypar", Everymath = "everymath", Everydisplay = "everydisplay", Everyhbox = "everyhbox", Everyvbox = "everyvbox", Everyjob = "everyjob", Everycr = "everycr", Errhelp = "errhelp" }
+params! { TokPar, 10, Output = "output", Everypar = "everypar", Everymath = "everymath", Everydisplay = "everydisplay", Everyhbox = "everyhbox", Everyvbox = "everyvbox", Everyjob = "everyjob", Everycr = "everycr", Errhelp = "errhelp", Everyeof = "everyeof" }
 
 /// The reader's internal commands (`Mat::Internal`).
-pub const INTERNAL: [(&str, Prim); 4] = [
+pub const INTERNAL: [(&str, Prim); 9] = [
     ("\u{0}package", Prim::Mat(Mat::Internal(0))),
     ("\u{0}endgraf", Prim::Mat(Mat::Internal(1))),
     ("\u{0}discnext", Prim::Mat(Mat::Internal(2))),
     ("\u{0}normalparagraph", Prim::Mat(Mat::Internal(3))),
+    ("\u{0}mathinit", Prim::Mat(Mat::Internal(4))),
+    ("\u{0}display", Prim::Mat(Mat::Internal(5))),
+    ("\u{0}displayend", Prim::Mat(Mat::Internal(6))),
+    ("\u{0}mathgroup", Prim::Mat(Mat::Internal(7))),
+    ("\u{0}choicenext", Prim::Mat(Mat::Internal(8))),
 ];
 
 /// Every TeX82 primitive (tex.web §1336: partex-core's `init_prim_tex` less
@@ -331,17 +441,17 @@ pub const PRIMITIVES: [(&str, Prim, &str); 325] = [
     (" ", Prim::Space, "EX_SPACE"),
     ("-", Prim::Mat(Mat::Disc(false)), "DISCRETIONARY"),
     ("/", Prim::Mat(Mat::ItalCorr), "ITAL_CORR"),
-    ("above", Prim::Unimpl(82), "ABOVE"),
+    ("above", Prim::Math(MathP::Above(0)), "ABOVE"),
     ("abovedisplayshortskip", Prim::GluePar(GluePar::Abovedisplayshortskip), "ASSIGN_GLUE"),
     ("abovedisplayskip", Prim::GluePar(GluePar::Abovedisplayskip), "ASSIGN_GLUE"),
-    ("abovewithdelims", Prim::Unimpl(85), "ABOVE"),
+    ("abovewithdelims", Prim::Math(MathP::Above(3)), "ABOVE"),
     ("accent", Prim::Mat(Mat::Accent), "ACCENT"),
     ("adjdemerits", Prim::IntPar(IntPar::Adjdemerits), "ASSIGN_INT"),
     ("advance", Prim::Advance, "ADVANCE"),
     ("afterassignment", Prim::AfterAssignment, "AFTER_ASSIGNMENT"),
     ("aftergroup", Prim::AfterGroup, "AFTER_GROUP"),
-    ("atop", Prim::Unimpl(84), "ABOVE"),
-    ("atopwithdelims", Prim::Unimpl(87), "ABOVE"),
+    ("atop", Prim::Math(MathP::Above(2)), "ABOVE"),
+    ("atopwithdelims", Prim::Math(MathP::Above(5)), "ABOVE"),
     ("badness", Prim::LastItem(4), "LAST_ITEM"),
     ("baselineskip", Prim::GluePar(GluePar::Baselineskip), "ASSIGN_GLUE"),
     ("batchmode", Prim::Interaction(0), "SET_INTERACTION"),
@@ -372,15 +482,15 @@ pub const PRIMITIVES: [(&str, Prim, &str); 325] = [
     ("defaulthyphenchar", Prim::IntPar(IntPar::Defaulthyphenchar), "ASSIGN_INT"),
     ("defaultskewchar", Prim::IntPar(IntPar::Defaultskewchar), "ASSIGN_INT"),
     ("delcode", Prim::Code(Code::Del), "DEF_CODE"),
-    ("delimiter", Prim::Unimpl(2), "DELIM_NUM"),
+    ("delimiter", Prim::Math(MathP::Delimiter), "DELIM_NUM"),
     ("delimiterfactor", Prim::IntPar(IntPar::Delimiterfactor), "ASSIGN_INT"),
     ("delimitershortfall", Prim::DimenPar(DimenPar::Delimitershortfall), "ASSIGN_DIMEN"),
     ("dimen", Prim::Register(Reg::Dimen), "REGISTER"),
     ("dimendef", Prim::Shorthand(Shorthand::Dimen), "SHORTHAND_DEF"),
     ("discretionary", Prim::Mat(Mat::Disc(true)), "DISCRETIONARY"),
     ("displayindent", Prim::DimenPar(DimenPar::Displayindent), "ASSIGN_DIMEN"),
-    ("displaylimits", Prim::Unimpl(75), "LIMIT_SWITCH"),
-    ("displaystyle", Prim::Unimpl(78), "MATH_STYLE"),
+    ("displaylimits", Prim::Math(MathP::Limits(0)), "LIMIT_SWITCH"),
+    ("displaystyle", Prim::Math(MathP::Style(0)), "MATH_STYLE"),
     ("displaywidowpenalty", Prim::IntPar(IntPar::Displaywidowpenalty), "ASSIGN_INT"),
     ("displaywidth", Prim::DimenPar(DimenPar::Displaywidth), "ASSIGN_DIMEN"),
     ("divide", Prim::Divide, "DIVIDE"),
@@ -395,7 +505,7 @@ pub const PRIMITIVES: [(&str, Prim, &str); 325] = [
     ("endgroup", Prim::EndGroup, "END_GROUP"),
     ("endinput", Prim::EndInput, "INPUT"),
     ("endlinechar", Prim::IntPar(IntPar::Endlinechar), "ASSIGN_INT"),
-    ("eqno", Prim::Unimpl(63), "EQ_NO"),
+    ("eqno", Prim::Math(MathP::EqNo(false)), "EQ_NO"),
     ("errhelp", Prim::TokPar(TokPar::Errhelp), "ASSIGN_TOKS"),
     ("errmessage", Prim::ErrMessage, "MESSAGE"),
     ("errorcontextlines", Prim::IntPar(IntPar::Errorcontextlines), "ASSIGN_INT"),
@@ -438,7 +548,7 @@ pub const PRIMITIVES: [(&str, Prim, &str); 325] = [
     ("hskip", Prim::Mat(Mat::Hskip(0)), "HSKIP"),
     ("hss", Prim::Mat(Mat::Hskip(3)), "HSKIP"),
     ("ht", Prim::BoxDimen(1), "SET_BOX_DIMEN"),
-    ("hyphenation", Prim::Unimpl(93), "HYPH_DATA"),
+    ("hyphenation", Prim::HyphData(false), "HYPH_DATA"),
     ("hyphenchar", Prim::Mat(Mat::FontInt(0)), "ASSIGN_FONT_INT"),
     ("hyphenpenalty", Prim::IntPar(IntPar::Hyphenpenalty), "ASSIGN_INT"),
     ("if", Prim::If(IfKind::Char), "IF_TEST"),
@@ -475,12 +585,12 @@ pub const PRIMITIVES: [(&str, Prim, &str); 325] = [
     ("lastskip", Prim::LastItem(2), "LAST_ITEM"),
     ("lccode", Prim::Code(Code::Lc), "DEF_CODE"),
     ("leaders", Prim::Mat(Mat::Leaders(100)), "LEADER_SHIP"),
-    ("left", Prim::Unimpl(88), "LEFT_RIGHT"),
+    ("left", Prim::Math(MathP::Left), "LEFT_RIGHT"),
     ("lefthyphenmin", Prim::IntPar(IntPar::Lefthyphenmin), "ASSIGN_INT"),
     ("leftskip", Prim::GluePar(GluePar::Leftskip), "ASSIGN_GLUE"),
-    ("leqno", Prim::Unimpl(64), "EQ_NO"),
+    ("leqno", Prim::Math(MathP::EqNo(true)), "EQ_NO"),
     ("let", Prim::Let, "LET"),
-    ("limits", Prim::Unimpl(76), "LIMIT_SWITCH"),
+    ("limits", Prim::Math(MathP::Limits(1)), "LIMIT_SWITCH"),
     ("linepenalty", Prim::IntPar(IntPar::Linepenalty), "ASSIGN_INT"),
     ("lineskip", Prim::GluePar(GluePar::Lineskip), "ASSIGN_GLUE"),
     ("lineskiplimit", Prim::DimenPar(DimenPar::Lineskiplimit), "ASSIGN_DIMEN"),
@@ -490,30 +600,30 @@ pub const PRIMITIVES: [(&str, Prim, &str); 325] = [
     ("lowercase", Prim::Lowercase, "CASE_SHIFT"),
     ("mag", Prim::IntPar(IntPar::Mag), "ASSIGN_INT"),
     ("mark", Prim::Mat(Mat::Mark), "MARK"),
-    ("mathaccent", Prim::Unimpl(7), "MATH_ACCENT"),
-    ("mathbin", Prim::Unimpl(67), "MATH_COMP"),
-    ("mathchar", Prim::Unimpl(8), "MATH_CHAR_NUM"),
+    ("mathaccent", Prim::Math(MathP::Accent), "MATH_ACCENT"),
+    ("mathbin", Prim::Math(MathP::Comp(2)), "MATH_COMP"),
+    ("mathchar", Prim::Math(MathP::MathChar), "MATH_CHAR_NUM"),
     ("mathchardef", Prim::Shorthand(Shorthand::MathChar), "SHORTHAND_DEF"),
-    ("mathchoice", Prim::Unimpl(9), "MATH_CHOICE"),
-    ("mathclose", Prim::Unimpl(70), "MATH_COMP"),
+    ("mathchoice", Prim::Math(MathP::Choice), "MATH_CHOICE"),
+    ("mathclose", Prim::Math(MathP::Comp(5)), "MATH_COMP"),
     ("mathcode", Prim::Code(Code::Math), "DEF_CODE"),
-    ("mathinner", Prim::Unimpl(72), "MATH_COMP"),
-    ("mathop", Prim::Unimpl(66), "MATH_COMP"),
-    ("mathopen", Prim::Unimpl(69), "MATH_COMP"),
-    ("mathord", Prim::Unimpl(65), "MATH_COMP"),
-    ("mathpunct", Prim::Unimpl(71), "MATH_COMP"),
-    ("mathrel", Prim::Unimpl(68), "MATH_COMP"),
+    ("mathinner", Prim::Math(MathP::Comp(7)), "MATH_COMP"),
+    ("mathop", Prim::Math(MathP::Comp(1)), "MATH_COMP"),
+    ("mathopen", Prim::Math(MathP::Comp(4)), "MATH_COMP"),
+    ("mathord", Prim::Math(MathP::Comp(0)), "MATH_COMP"),
+    ("mathpunct", Prim::Math(MathP::Comp(6)), "MATH_COMP"),
+    ("mathrel", Prim::Math(MathP::Comp(3)), "MATH_COMP"),
     ("mathsurround", Prim::DimenPar(DimenPar::Mathsurround), "ASSIGN_DIMEN"),
     ("maxdeadcycles", Prim::IntPar(IntPar::Maxdeadcycles), "ASSIGN_INT"),
     ("maxdepth", Prim::DimenPar(DimenPar::Maxdepth), "ASSIGN_DIMEN"),
     ("meaning", Prim::Convert(Conv::Meaning), "CONVERT"),
     ("medmuskip", Prim::GluePar(GluePar::Medmuskip), "ASSIGN_MU_GLUE"),
     ("message", Prim::Message, "MESSAGE"),
-    ("mkern", Prim::Unimpl(38), "MKERN"),
+    ("mkern", Prim::Math(MathP::Mkern), "MKERN"),
     ("month", Prim::IntPar(IntPar::Month), "ASSIGN_INT"),
     ("moveleft", Prim::Mat(Mat::Hmove(true)), "HMOVE"),
     ("moveright", Prim::Mat(Mat::Hmove(false)), "HMOVE"),
-    ("mskip", Prim::Unimpl(36), "MSKIP"),
+    ("mskip", Prim::Math(MathP::Mskip), "MSKIP"),
     ("multiply", Prim::Multiply, "MULTIPLY"),
     ("muskip", Prim::Register(Reg::Muskip), "REGISTER"),
     ("muskipdef", Prim::Shorthand(Shorthand::Muskip), "SHORTHAND_DEF"),
@@ -522,8 +632,8 @@ pub const PRIMITIVES: [(&str, Prim, &str); 325] = [
     ("noboundary", Prim::Unimpl(11), "NO_BOUNDARY"),
     ("noexpand", Prim::NoExpand, "NO_EXPAND"),
     ("noindent", Prim::Noindent, "START_PAR"),
-    ("nolimits", Prim::Unimpl(77), "LIMIT_SWITCH"),
-    ("nonscript", Prim::Unimpl(12), "NON_SCRIPT"),
+    ("nolimits", Prim::Math(MathP::Limits(2)), "LIMIT_SWITCH"),
+    ("nonscript", Prim::Math(MathP::NonScript), "NON_SCRIPT"),
     ("nonstopmode", Prim::Interaction(1), "SET_INTERACTION"),
     ("nulldelimiterspace", Prim::DimenPar(DimenPar::Nulldelimiterspace), "ASSIGN_DIMEN"),
     ("nullfont", Prim::Unimpl(22), "SET_FONT"),
@@ -535,10 +645,10 @@ pub const PRIMITIVES: [(&str, Prim, &str); 325] = [
     ("outer", Prim::Outer, "PREFIX"),
     ("output", Prim::TokPar(TokPar::Output), "ASSIGN_TOKS"),
     ("outputpenalty", Prim::IntPar(IntPar::Outputpenalty), "ASSIGN_INT"),
-    ("over", Prim::Unimpl(83), "ABOVE"),
+    ("over", Prim::Math(MathP::Above(1)), "ABOVE"),
     ("overfullrule", Prim::DimenPar(DimenPar::Overfullrule), "ASSIGN_DIMEN"),
-    ("overline", Prim::Unimpl(74), "MATH_COMP"),
-    ("overwithdelims", Prim::Unimpl(86), "ABOVE"),
+    ("overline", Prim::Math(MathP::Comp(9)), "MATH_COMP"),
+    ("overwithdelims", Prim::Math(MathP::Above(4)), "ABOVE"),
     ("pagedepth", Prim::PageDimen(7), "SET_PAGE_DIMEN"),
     ("pagefilllstretch", Prim::PageDimen(5), "SET_PAGE_DIMEN"),
     ("pagefillstretch", Prim::PageDimen(4), "SET_PAGE_DIMEN"),
@@ -552,7 +662,7 @@ pub const PRIMITIVES: [(&str, Prim, &str); 325] = [
     ("parindent", Prim::DimenPar(DimenPar::Parindent), "ASSIGN_DIMEN"),
     ("parshape", Prim::Parshape, "SET_SHAPE"),
     ("parskip", Prim::GluePar(GluePar::Parskip), "ASSIGN_GLUE"),
-    ("patterns", Prim::Unimpl(94), "HYPH_DATA"),
+    ("patterns", Prim::HyphData(true), "HYPH_DATA"),
     ("pausing", Prim::IntPar(IntPar::Pausing), "ASSIGN_INT"),
     ("penalty", Prim::Mat(Mat::Penalty), "BREAK_PENALTY"),
     ("postdisplaypenalty", Prim::IntPar(IntPar::Postdisplaypenalty), "ASSIGN_INT"),
@@ -561,30 +671,30 @@ pub const PRIMITIVES: [(&str, Prim, &str); 325] = [
     ("pretolerance", Prim::IntPar(IntPar::Pretolerance), "ASSIGN_INT"),
     ("prevdepth", Prim::PrevDepth, "SET_AUX"),
     ("prevgraf", Prim::PrevGraf, "SET_PREV_GRAF"),
-    ("radical", Prim::Unimpl(15), "RADICAL"),
+    ("radical", Prim::Math(MathP::Radical), "RADICAL"),
     ("raise", Prim::Mat(Mat::Vmove(false)), "VMOVE"),
     ("read", Prim::Read, "READ_TO_CS"),
     ("relax", Prim::Relax, "RELAX"),
     ("relpenalty", Prim::IntPar(IntPar::Relpenalty), "ASSIGN_INT"),
-    ("right", Prim::Unimpl(89), "LEFT_RIGHT"),
+    ("right", Prim::Math(MathP::Right), "LEFT_RIGHT"),
     ("righthyphenmin", Prim::IntPar(IntPar::Righthyphenmin), "ASSIGN_INT"),
     ("rightskip", Prim::GluePar(GluePar::Rightskip), "ASSIGN_GLUE"),
     ("romannumeral", Prim::Convert(Conv::Roman), "CONVERT"),
     ("scriptfont", Prim::DefFamily(1), "DEF_FAMILY"),
     ("scriptscriptfont", Prim::DefFamily(2), "DEF_FAMILY"),
-    ("scriptscriptstyle", Prim::Unimpl(81), "MATH_STYLE"),
+    ("scriptscriptstyle", Prim::Math(MathP::Style(6)), "MATH_STYLE"),
     ("scriptspace", Prim::DimenPar(DimenPar::Scriptspace), "ASSIGN_DIMEN"),
-    ("scriptstyle", Prim::Unimpl(80), "MATH_STYLE"),
+    ("scriptstyle", Prim::Math(MathP::Style(4)), "MATH_STYLE"),
     ("scrollmode", Prim::Interaction(2), "SET_INTERACTION"),
     ("setbox", Prim::Mat(Mat::SetBox), "SET_BOX"),
-    ("setlanguage", Prim::Unimpl(106), "EXTENSION"),
+    ("setlanguage", Prim::SetLanguage, "EXTENSION"),
     ("sfcode", Prim::Code(Code::Sf), "DEF_CODE"),
     ("shipout", Prim::Mat(Mat::Shipout), "LEADER_SHIP"),
     ("show", Prim::Unimpl(99), "XRAY"),
-    ("showbox", Prim::Unimpl(100), "XRAY"),
+    ("showbox", Prim::Show(1), "XRAY"),
     ("showboxbreadth", Prim::IntPar(IntPar::Showboxbreadth), "ASSIGN_INT"),
     ("showboxdepth", Prim::IntPar(IntPar::Showboxdepth), "ASSIGN_INT"),
-    ("showlists", Prim::Unimpl(102), "XRAY"),
+    ("showlists", Prim::Show(3), "XRAY"),
     ("showthe", Prim::Unimpl(101), "XRAY"),
     ("skewchar", Prim::Mat(Mat::FontInt(1)), "ASSIGN_FONT_INT"),
     ("skip", Prim::Register(Reg::Skip), "REGISTER"),
@@ -600,7 +710,7 @@ pub const PRIMITIVES: [(&str, Prim, &str); 325] = [
     ("string", Prim::Convert(Conv::String), "CONVERT"),
     ("tabskip", Prim::GluePar(GluePar::Tabskip), "ASSIGN_GLUE"),
     ("textfont", Prim::DefFamily(0), "DEF_FAMILY"),
-    ("textstyle", Prim::Unimpl(79), "MATH_STYLE"),
+    ("textstyle", Prim::Math(MathP::Style(2)), "MATH_STYLE"),
     ("the", Prim::The, "THE"),
     ("thickmuskip", Prim::GluePar(GluePar::Thickmuskip), "ASSIGN_MU_GLUE"),
     ("thinmuskip", Prim::GluePar(GluePar::Thinmuskip), "ASSIGN_MU_GLUE"),
@@ -621,7 +731,7 @@ pub const PRIMITIVES: [(&str, Prim, &str); 325] = [
     ("tracingstats", Prim::IntPar(IntPar::Tracingstats), "ASSIGN_INT"),
     ("uccode", Prim::Code(Code::Uc), "DEF_CODE"),
     ("uchyph", Prim::IntPar(IntPar::Uchyph), "ASSIGN_INT"),
-    ("underline", Prim::Unimpl(73), "MATH_COMP"),
+    ("underline", Prim::Math(MathP::Comp(8)), "MATH_COMP"),
     ("unhbox", Prim::Mat(Mat::Unhbox(false)), "UN_HBOX"),
     ("unhcopy", Prim::Mat(Mat::Unhbox(true)), "UN_HBOX"),
     ("unkern", Prim::Mat(Mat::Remove(1)), "REMOVE_ITEM"),
@@ -634,7 +744,7 @@ pub const PRIMITIVES: [(&str, Prim, &str); 325] = [
     ("valign", Prim::Unimpl(19), "VALIGN"),
     ("vbadness", Prim::IntPar(IntPar::Vbadness), "ASSIGN_INT"),
     ("vbox", Prim::Mat(Mat::MakeBox(5)), "MAKE_BOX"),
-    ("vcenter", Prim::Unimpl(20), "VCENTER"),
+    ("vcenter", Prim::Math(MathP::Vcenter), "VCENTER"),
     ("vfil", Prim::Mat(Mat::Vskip(1)), "VSKIP"),
     ("vfill", Prim::Mat(Mat::Vskip(2)), "VSKIP"),
     ("vfilneg", Prim::Mat(Mat::Vskip(4)), "VSKIP"),
@@ -765,3 +875,91 @@ pub const UNIMPL: [&str; 107] = [
     "special",
     "setlanguage",
 ];
+
+/// e-TeX's primitives (etex.web §1380, `generate_eTeX_prims`), sorted by
+/// name (byte order): named only in extended mode (`Options::etex`).
+pub const ETEX_PRIMITIVES: [(&str, Prim); 66] = [
+    ("TeXXeTstate", Prim::IntPar(IntPar::TeXXeTstate)),
+    ("beginL", Prim::Lr(6)),
+    ("beginR", Prim::Lr(10)),
+    ("botmarks", Prim::Mark(7)),
+    ("clubpenalties", Prim::PenShape(1)),
+    ("currentgrouplevel", Prim::LastItem(6)),
+    ("currentgrouptype", Prim::LastItem(7)),
+    ("currentifbranch", Prim::LastItem(10)),
+    ("currentiflevel", Prim::LastItem(8)),
+    ("currentiftype", Prim::LastItem(9)),
+    ("detokenize", Prim::Detokenize),
+    ("dimexpr", Prim::LastItem(26)),
+    ("displaywidowpenalties", Prim::PenShape(3)),
+    ("eTeXrevision", Prim::Convert(Conv::ETeXRevision)),
+    ("eTeXversion", Prim::LastItem(5)),
+    ("endL", Prim::Lr(7)),
+    ("endR", Prim::Lr(11)),
+    ("everyeof", Prim::TokPar(TokPar::Everyeof)),
+    ("firstmarks", Prim::Mark(6)),
+    ("fontchardp", Prim::LastItem(16)),
+    ("fontcharht", Prim::LastItem(15)),
+    ("fontcharic", Prim::LastItem(17)),
+    ("fontcharwd", Prim::LastItem(14)),
+    ("glueexpr", Prim::LastItem(27)),
+    ("glueshrink", Prim::LastItem(22)),
+    ("glueshrinkorder", Prim::LastItem(13)),
+    ("gluestretch", Prim::LastItem(21)),
+    ("gluestretchorder", Prim::LastItem(12)),
+    ("gluetomu", Prim::LastItem(24)),
+    ("ifcsname", Prim::If(IfKind::Csname)),
+    ("ifdefined", Prim::If(IfKind::Defined)),
+    ("iffontchar", Prim::If(IfKind::FontChar)),
+    ("interactionmode", Prim::PageInt(2)),
+    ("interlinepenalties", Prim::PenShape(0)),
+    ("lastlinefit", Prim::IntPar(IntPar::Lastlinefit)),
+    ("lastnodetype", Prim::LastItem(11)),
+    ("marks", Prim::Marks),
+    ("middle", Prim::Middle),
+    ("muexpr", Prim::LastItem(28)),
+    ("mutoglue", Prim::LastItem(23)),
+    ("numexpr", Prim::LastItem(25)),
+    ("pagediscards", Prim::Discards(0)),
+    ("parshapedimen", Prim::LastItem(20)),
+    ("parshapeindent", Prim::LastItem(19)),
+    ("parshapelength", Prim::LastItem(18)),
+    ("predisplaydirection", Prim::IntPar(IntPar::Predisplaydirection)),
+    ("protected", Prim::Protected),
+    ("readline", Prim::ReadLine),
+    ("savinghyphcodes", Prim::IntPar(IntPar::Savinghyphcodes)),
+    ("savingvdiscards", Prim::IntPar(IntPar::Savingvdiscards)),
+    ("scantokens", Prim::ScanTokens),
+    ("showgroups", Prim::ShowE(4)),
+    ("showifs", Prim::ShowE(6)),
+    ("showtokens", Prim::ShowE(5)),
+    ("splitbotmarks", Prim::Mark(9)),
+    ("splitdiscards", Prim::Discards(1)),
+    ("splitfirstmarks", Prim::Mark(8)),
+    ("topmarks", Prim::Mark(5)),
+    ("tracingassigns", Prim::IntPar(IntPar::Tracingassigns)),
+    ("tracinggroups", Prim::IntPar(IntPar::Tracinggroups)),
+    ("tracingifs", Prim::IntPar(IntPar::Tracingifs)),
+    ("tracingnesting", Prim::IntPar(IntPar::Tracingnesting)),
+    ("tracingscantokens", Prim::IntPar(IntPar::Tracingscantokens)),
+    ("unexpanded", Prim::Unexpanded),
+    ("unless", Prim::Unless),
+    ("widowpenalties", Prim::PenShape(2)),
+];
+
+#[cfg(test)]
+mod etex_tests {
+    use super::*;
+
+    #[test]
+    fn etex_table_is_sorted_and_named_back() {
+        for w in ETEX_PRIMITIVES.windows(2) {
+            assert!(w[0].0 < w[1].0, "{} before {}", w[0].0, w[1].0);
+        }
+        for (n, p) in ETEX_PRIMITIVES {
+            assert_eq!(Prim::by_name_etex(n), Some(p));
+            assert_eq!(p.name(), n);
+            assert_eq!(Prim::by_name(n), None, "{n} is TeX82's");
+        }
+    }
+}

@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use crate::arith::{AWFUL_BAD, INF_BAD, badness};
 use crate::item::{Item, Leaders};
-use crate::val::{Glue, GluePar, Tok};
+use crate::val::{Glue, GluePar, SplitMark};
 
 const INF_PENALTY: i32 = 10000;
 const EJECT_PENALTY: i32 = -10000;
@@ -168,9 +168,9 @@ pub struct Split {
     pub first: Vec<Item>,
     /// What stays, its top pruned.
     pub rest: Vec<Item>,
-    /// The first and last marks of the part split off.
-    pub first_mark: Option<Arc<Vec<Tok>>>,
-    pub bot_mark: Option<Arc<Vec<Tok>>>,
+    /// The first and last marks of each class in the part split off
+    /// (`Item::Mark` class 0, `Item::Marks`), by class.
+    pub marks: Vec<SplitMark>,
     /// Glue of infinite shrinkability was met (an error in TeX).
     pub bad_shrink: bool,
 }
@@ -181,14 +181,17 @@ pub fn vsplit(list: &[Item], h: i32, d: i32, top: &Glue) -> Split {
     let mut l = list.to_vec();
     let (q, bad_shrink) = vert_break(&mut l, h, d);
     let rest = l.split_off(q.min(l.len()));
-    let (mut first_mark, mut bot_mark) = (None, None);
+    let mut marks: Vec<SplitMark> = Vec::new();
     for it in &l {
-        if let Item::Mark(t) = it {
-            if first_mark.is_none() {
-                first_mark = Some(t.clone());
-            }
-            bot_mark = Some(t.clone());
+        let (n, t) = match it {
+            Item::Mark(t) => (0, t),
+            Item::Marks(n, t) => (*n, t),
+            _ => continue,
+        };
+        match marks.binary_search_by_key(&n, |m| m.0) {
+            Ok(k) => marks[k].2 = t.clone(),
+            Err(k) => marks.insert(k, (n, t.clone(), t.clone())),
         }
     }
-    Split { first: l, rest: prune_page_top(rest, top), first_mark, bot_mark, bad_shrink }
+    Split { first: l, rest: prune_page_top(rest, top), marks, bad_shrink }
 }
