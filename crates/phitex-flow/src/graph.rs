@@ -44,6 +44,7 @@ mod assign;
 mod expand;
 mod fonts;
 mod material;
+mod math;
 mod scan;
 
 /// A piece's identity, stable across edits.
@@ -76,6 +77,9 @@ enum TState {
 enum Mode {
     V,
     H,
+    /// Math (`RState::inner`: an inline formula or a subformula; else a
+    /// display).
+    M,
 }
 
 /// What opened a group (only to report mismatches: the scoping itself is
@@ -88,6 +92,9 @@ enum GroupKind {
     SemiSimple,
     /// A box's or a discretionary's braces (`Group::boxg`).
     Box,
+    /// A formula, a subformula, `\left`…`\right`, a `\mathchoice` part
+    /// (`Group::boxg`, `math::MathKind`).
+    Math,
 }
 
 /// An open conditional: the node whose step opened it, which ends may end
@@ -306,6 +313,10 @@ pub struct Read {
     pub key: Key,
     pub src: Src,
     pub val: Val,
+    /// The scope of the definition read, as the reading node sees it
+    /// ([`Chain::scope_of`]): what a definition at the level of the one it
+    /// replaces (`Def::level`) is made from.
+    pub scope: Option<u16>,
 }
 
 /// A shared [`Read`].
@@ -313,9 +324,9 @@ pub type ReadRef = Arc<Read>;
 
 impl Read {
     /// Whether `r` read the definition this one did (by identity, then
-    /// equality).
+    /// equality of the value and of its scope).
     fn same(this: &ReadRef, r: &ReadRef) -> bool {
-        Arc::ptr_eq(this, r) || this.val == r.val
+        Arc::ptr_eq(this, r) || (this.val == r.val && this.scope == r.scope)
     }
 }
 
@@ -325,6 +336,12 @@ pub struct Def {
     pub key: Key,
     pub val: Val,
     pub global: bool,
+    /// A definition made at the level of the one it replaces (TeX's
+    /// assignments without the save stack, CORE.md Conflict 7): `Some(k)`,
+    /// it lives as long as the `k`-th group enclosing its node's own group
+    /// is open (`Some(0)`: its own group, as `None`). Counted from the
+    /// node, not an index, so it survives nodes moving.
+    pub level: Option<u16>,
 }
 
 /// A φ at the end of a conditional: the test, and per key the value after
@@ -592,6 +609,8 @@ pub struct Chain {
     /// The nodes with a paragraph, and with errors.
     para_at: Vec<u32>,
     err_at: Vec<u32>,
+    /// For each `Open` node, the `Open` node of the group enclosing it.
+    parent_of: FxMap<u32, u32>,
 }
 
 impl Chain {
@@ -631,14 +650,44 @@ impl Chain {
             let Some(def) = n.defs().iter().rev().find(|x| x.key == *key) else {
                 continue;
             };
-            let closed = n
-                .group
+            let closed = self
+                .def_group(n, def)
                 .is_some_and(|g| self.close_of.get(&g).is_some_and(|&c| (c as usize) < i));
             if def.global || !closed {
                 return Some((d, def.val.clone()));
             }
         }
         None
+    }
+
+    /// The group a definition of node `n` is local to (its `Open` node;
+    /// `None`: the piece's outer level).
+    pub fn def_group(&self, n: &Node, def: &Def) -> Option<u32> {
+        let mut g = n.group;
+        for _ in 0..def.level.unwrap_or(0) {
+            g = g.and_then(|x| self.parent_of.get(&x).copied());
+        }
+        g
+    }
+
+    /// The scope of node `d`'s definition of `key` seen from the next
+    /// node: `Some(k)` local to the group `k` levels out from the innermost
+    /// one open; `None` global, or made at the piece's outer level.
+    pub fn scope_of(&self, d: u32, key: &Key) -> Option<u16> {
+        let n = &self.nodes[d as usize];
+        let def = n.defs().iter().rev().find(|x| x.key == *key)?;
+        if def.global {
+            return None;
+        }
+        let g = self.def_group(n, def)?;
+        let p = self.open.iter().rposition(|&o| o == g)?;
+        Some((self.open.len() - 1 - p) as u16)
+    }
+
+    /// The groups open at the next node, outermost first (their `Open`
+    /// nodes).
+    pub fn open_groups(&self) -> &[u32] {
+        &self.open
     }
 
     /// A node about to be added, given the group it is in.
@@ -662,6 +711,9 @@ impl Chain {
     fn index(&mut self, n: &Node, i: u32) {
         match n.kind {
             Kind::Open => {
+                if let Some(&p) = self.open.last() {
+                    self.parent_of.insert(i, p);
+                }
                 self.open.push(i);
                 self.scopes.push(i);
             }
@@ -718,6 +770,9 @@ impl Chain {
         }
         for &i in &old.scopes[within(&old.scopes)] {
             if old.nodes[i as usize].kind == Kind::Open {
+                if let Some(&p) = self.open.last() {
+                    self.parent_of.insert(i, p);
+                }
                 self.open.push(i);
             } else if let Some(o) = self.open.pop() {
                 self.close_of.insert(o, i);
@@ -888,6 +943,7 @@ fn outside_read(env: &mut dyn Env, outside: &mut Outside, k: &Key, node: u32) ->
         key: k.clone(),
         src,
         val,
+        scope: None,
     });
     outside.insert(k.clone(), (r.clone(), lo, hi));
     r
@@ -900,6 +956,7 @@ fn resolve_now(chain: &Chain, env: &mut dyn Env, outside: &mut Outside, key: &Ke
             key: key.clone(),
             src: Src::Node(d),
             val,
+            scope: chain.scope_of(d, key),
         }),
         None => outside_read(env, outside, key, chain.nodes.len() as u32),
     }
@@ -1087,10 +1144,12 @@ pub fn run_piece(
                     && o.kind == n.kind
                     && o.out == n.out
                     && o.defs().len() == n.defs().len()
-                    && o.defs()
-                        .iter()
-                        .zip(n.defs())
-                        .all(|(a, b)| a.key == b.key && a.val == b.val && a.global == b.global)
+                    && o.defs().iter().zip(n.defs()).all(|(a, b)| {
+                        a.key == b.key
+                            && a.val == b.val
+                            && a.global == b.global
+                            && a.level == b.level
+                    })
             });
             if same_as_old {
                 // (and emitting the same, the paragraph's material is the
@@ -1377,6 +1436,7 @@ impl<'a> Exec<'a> {
                 key: key.clone(),
                 src: Src::Node(self.chain.nodes.len() as u32),
                 val: self.defs[i].val.clone(),
+                scope: None,
             }),
             Found::Read(i) => self.reads[i].clone(),
         }
@@ -1430,7 +1490,12 @@ impl<'a> Exec<'a> {
     }
 
     fn define(&mut self, key: Key, val: Val, global: bool) {
-        self.defs.push(Def { key, val, global });
+        self.defs.push(Def {
+            key,
+            val,
+            global,
+            level: None,
+        });
     }
 
     fn meaning(&mut self, key: &Key) -> Meaning {
@@ -1866,6 +1931,9 @@ impl<'a> Exec<'a> {
             std::mem::take(&mut self.st.long),
             std::mem::take(&mut self.st.outer),
         );
+        if self.st.mode == Mode::M && self.math_command(&t, &m) {
+            return;
+        }
         match m {
             Meaning::Prim(p) if p.conditional() => self.conditional(p, &t),
             Meaning::Prim(Prim::Global | Prim::Long | Prim::Outer) => {
@@ -1874,12 +1942,11 @@ impl<'a> Exec<'a> {
             }
             _ if assign::prefixable(&m) => self.prefixed(&t, &m, global, long, outer),
             Meaning::Prim(Prim::Mat(x)) => self.mat(x, &t),
+            Meaning::Prim(Prim::Math(x)) => self.math_prim(x, &t),
             Meaning::Prim(p) => self.prim(p),
             Meaning::Char(cat, c) => self.char_tok(cat, c, &t),
             Meaning::CharGiven(c) => self.char_cmd(c, &t),
-            Meaning::MathCharGiven(_) => {
-                self.err("Missing $ inserted (math is not supported yet)".into());
-            }
+            Meaning::MathCharGiven(_) => self.insert_dollar_sign(&t),
             Meaning::Undefined => self.err(format!("Undefined control sequence {t}")),
             Meaning::Macro(_)
             | Meaning::CountRef(_)
@@ -1928,6 +1995,7 @@ impl<'a> Exec<'a> {
             2 => match self.st.groups.last().map(|g| g.kind) {
                 Some(GroupKind::Simple) => self.close_group(),
                 Some(GroupKind::Box) => self.close_box(t),
+                Some(GroupKind::Math) => self.math_right_brace(),
                 Some(GroupKind::SemiSimple) => self.err("Extra }, or forgotten \\endgroup".into()),
                 None => self.err("Too many }'s".into()),
             },
@@ -1937,6 +2005,8 @@ impl<'a> Exec<'a> {
                 }
             }
             11 | 12 => self.char_cmd(u32::from(c), t),
+            3 => self.math_shift(t),
+            7 | 8 => self.sub_sup_cmd(cat == 7, t),
             _ => self.err(format!(
                 "Character {c} of category {cat} is not supported yet"
             )),
@@ -1957,7 +2027,7 @@ impl<'a> Exec<'a> {
             Prim::BeginGroup => self.open_group(GroupKind::SemiSimple),
             Prim::EndGroup => match self.st.groups.last().map(|g| g.kind) {
                 Some(GroupKind::SemiSimple) => self.close_group(),
-                Some(GroupKind::Simple | GroupKind::Box) => {
+                Some(GroupKind::Simple | GroupKind::Box | GroupKind::Math) => {
                     // (tex.web 1064: the missing `}` goes in first)
                     self.err("Missing } inserted".into());
                     let t = self.cmd.clone();

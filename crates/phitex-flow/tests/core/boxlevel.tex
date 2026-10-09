@@ -1,0 +1,9 @@
+\setbox0\hbox{}
+\begingroup \setbox0\hbox{}
+  \begingroup\begingroup \setbox2\box0 \message{[\ifvoid0 v\else s\fi]}\endgroup
+  \message{[\ifvoid0 v\else s\fi]}\endgroup
+  \message{[\ifvoid0 v\else s\fi]}
+\endgroup
+\message{[\ifvoid0 v\else s\fi]}
+{\setbox3\hbox{}{\global\setbox4\copy3 {\wd3=5pt \setbox5\box4 }\message{[\the\wd3:\ifvoid4 v\else s\fi]}}
+ \message{[\the\wd3]}}\message{[\ifvoid3 v\else s\fi\ifvoid4 v\else s\fi]}

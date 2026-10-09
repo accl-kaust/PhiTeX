@@ -404,6 +404,16 @@ impl Exec<'_> {
         self.limited(0o77777, "mathchar")
     }
 
+    /// tex.web 437: `scan_twenty_seven_bit_int`.
+    pub(super) fn scan_twenty_seven_bit_int(&mut self) -> i32 {
+        self.limited(0o777_777_777, "delimiter code")
+    }
+
+    /// A dimension in mu (`\mkern`, tex.web 1061).
+    pub(super) fn scan_mu_dimen(&mut self) -> i32 {
+        self.scan_dimen_full(true, false, None).0
+    }
+
     // ------------------------------------------------------------ numbers
 
     /// An integer (tex.web 440).

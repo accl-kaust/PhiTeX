@@ -147,7 +147,7 @@ macro_rules! documents {
     };
 }
 
-documents!(para, skips, hbox, setbox, vbox, pages, fonts, shape, leave, show, ship, disc);
+documents!(para, skips, hbox, setbox, vbox, pages, fonts, shape, leave, show, ship, disc, math1, math2, math3, math4);
 
 /// plain.tex (all but `\input hyphen`), then text set with its macros and
 /// the default output routine (`\output={}`), at 1 thread.
@@ -157,11 +157,23 @@ fn plaintext() {
     check_src("plaintext", &src, &RUNS[..1]);
 }
 
-/// FAILS sometimes (`run_piece`, not material): plain.tex at 8 threads —
-/// the in-place sharing of `run_piece` keeps a later reader of a name
-/// whose definition changed (the bug `tests/core.rs`'s ignored tests pin:
-/// here a page's `\count0` read as 0 where TeX has `\pageno`'s 1); with
-/// that sharing off it passes in every schedule (checked).
+/// plain.tex, then text using plain's math macros (`\sqrt`, `\int`,
+/// `\sum`, `\left`/`\right`, `\root`, `\choose`, `\buildrel`,
+/// displays with `\eqno`), at 1 thread.
+#[test]
+fn plainmath() {
+    let src = std::fs::read_to_string(dir().join("plainmath.tex")).unwrap();
+    check_src("plainmath", &src, &RUNS[..1]);
+}
+
+/// The same in every schedule.
+#[test]
+fn plainmath_any_schedule() {
+    let src = std::fs::read_to_string(dir().join("plainmath.tex")).unwrap();
+    check_src("plainmath", &src, &RUNS[1..]);
+}
+
+/// The same in every schedule (a page's `\count0` is `\pageno`'s 1).
 #[test]
 fn plaintext_any_schedule() {
     let src = std::fs::read_to_string(dir().join("plaintext.tex")).unwrap();
@@ -221,10 +233,7 @@ fn long() {
     check_src("long", &long_doc(), &RUNS[..1]);
 }
 
-/// FAILS (`run_piece`, not material), like `plaintext_any_schedule`: at 8
-/// threads a piece run again from its first dirty node shares its later
-/// nodes in place, stale (here a line's font name in the log); with that
-/// sharing off it passes in every schedule (checked).
+/// The same in every schedule.
 #[test]
 fn long_any_schedule() {
     check_src("long", &long_doc(), &RUNS[1..]);
@@ -238,7 +247,7 @@ fn edits_give_the_cold_dvi() {
     edits(1);
 }
 
-/// FAILS at 8 threads, same cause as `long_any_schedule`.
+/// The same at 8 threads.
 #[test]
 fn edits_give_the_cold_dvi_at_eight_threads() {
     edits(8);

@@ -93,7 +93,7 @@ macro_rules! programs {
     };
 }
 
-programs!(macros, expandafter, edef, conds, arith, the, case, groups, futurelet, plain);
+programs!(macros, expandafter, edef, conds, arith, the, case, groups, futurelet, plain, boxlevel);
 
 /// The graph's own form: an `\ifnum` whose arms define a register gets a φ
 /// for it at `\fi`; expandable primitives and macro calls are steps, never
@@ -158,25 +158,38 @@ fn an_edit_gives_the_cold_log() {
     );
 }
 
-/// FAILS (`run_piece`, not the language): when a name read by two nodes of a
-/// piece changes, only the first reader is marked (the edges keep one node
-/// per piece and name); if it runs again with the same output, the nodes
-/// after it are shared in place without looking at their reads, so the
-/// second reader (`\global\advance\count18` inside `\newfam`) keeps the old
-/// value: `\myfam=\fam4` where a cold build says `\fam6`.
+/// When a name read by two nodes of a piece changes, both readers read
+/// it again (`\global\advance\count18` inside `\newfam`: `\myfam=\fam6`).
 #[test]
 fn an_edit_rereads_every_reader_of_a_changed_name() {
     edits_give_the_cold_log(1, &[("\\count18=3 ", "\\count18=5 ")]);
 }
 
-/// FAILS, same cause (`run_piece`'s in-place sharing): a cold build of
-/// `plain.tex` at 4 threads ends with `Undefined control sequence \maxdimen`
-/// in the probes piece: its first reader of `\maxdimen` runs again once the
-/// definition is installed, gives the same output, and the later reader
-/// (`\mydimen=\maxdimen`) is shared stale. With the in-place sharing off
-/// (`in_place = false`), both ignored tests and all of `tests/flow.rs`
-/// pass (checked; not committed: `run_piece` is not this change's to touch).
+/// A cold build of `plain.tex` at 4 threads: every reader of
+/// `\maxdimen` in the probes piece reads its definition once installed.
 #[test]
 fn plain_at_four_threads() {
     edits_give_the_cold_log(4, &[]);
+}
+
+/// A kept node is checked by the scope of the definition it read, not
+/// only by its value: `\box1` at depth 3 makes box 1 void at the level of
+/// the `\setbox` it replaces; an edit above moves that `\setbox` (the
+/// same box) from the second group out to the first, so the `\box1` node,
+/// at the same depth and reading an equal box, must run again — its void
+/// now outlives the second group.
+#[test]
+fn a_kept_node_reads_the_scope_of_its_definition() {
+    let a = format!("{PRELUDE}{{{{\\setbox1=\\hbox to5pt{{}}{{\\box1}}}}\\message{{\\the\\wd1}}}}\\message{{\\the\\wd1}}\n");
+    let b = format!("{PRELUDE}{{\\setbox1=\\hbox to5pt{{}}{{{{\\box1}}}}\\message{{\\the\\wd1}}}}\\message{{\\the\\wd1}}\n");
+    for threads in [1, 8] {
+        let o = Options { threads, ..Options::default() };
+        let mut bld = Build::new(font());
+        bld.update(&a, o);
+        let e = bld.update(&b, o);
+        let cold = Build::new(font()).update(&b, o);
+        assert!(e.errors.is_empty() && cold.errors.is_empty(), "{:?} {:?}", e.errors, cold.errors);
+        assert_eq!(cold.log[..2], ["0.0pt", "0.0pt"], "box 1 is void at both messages (TeX)");
+        assert!(e.log == cold.log && e.dvi == cold.dvi, "{threads} threads: {:?}, cold {:?}", e.log, cold.log);
+    }
 }

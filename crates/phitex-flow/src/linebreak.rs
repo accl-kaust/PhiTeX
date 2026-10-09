@@ -90,7 +90,7 @@ fn widths(it: &Item) -> W {
     let mut w = [0i64; 6];
     match it {
         Item::Glue { g, .. } => glue_widths(&mut w, g),
-        Item::Char(..) | Item::Lig(_) | Item::Box(_) | Item::Rule { .. } | Item::Kern { .. } => {
+        Item::Char(..) | Item::Lig(_) | Item::Box(_) | Item::Rule { .. } | Item::Kern { .. } | Item::Math { .. } => {
             w[0] = i64::from(it.width());
         }
         _ => {}
@@ -164,7 +164,7 @@ impl Breaker<'_> {
         }
         while s < self.items.len() {
             match &self.items[s] {
-                Item::Glue { .. } | Item::Penalty(_) | Item::Kern { sub: 1, .. } => {}
+                Item::Glue { .. } | Item::Penalty(_) | Item::Kern { sub: 1, .. } | Item::Math { .. } => {}
                 _ => break,
             }
             s += 1;
@@ -341,12 +341,14 @@ impl Breaker<'_> {
         let n = items.len();
         let mut k = 0;
         let none = [0i64; 6];
+        // (§866: no break at glue inside a formula)
+        let mut auto_breaking = true;
         while k < n && !self.active.is_empty() {
             // (§866)
             match &items[k] {
                 Item::Glue { .. } => {
                     // (§868)
-                    if k > 0 {
+                    if k > 0 && auto_breaking {
                         let pr = &items[k - 1];
                         if pr.is_char() || pr.precedes_break() || matches!(pr, Item::Kern { sub, .. } if *sub != 1) {
                             self.try_break(0, false, Some(k), &none);
@@ -354,7 +356,13 @@ impl Breaker<'_> {
                     }
                 }
                 Item::Kern { sub: 1, .. } => {
-                    if matches!(items.get(k + 1), Some(Item::Glue { .. })) {
+                    if auto_breaking && matches!(items.get(k + 1), Some(Item::Glue { .. })) {
+                        self.try_break(0, false, Some(k), &none);
+                    }
+                }
+                Item::Math { after, .. } => {
+                    auto_breaking = *after;
+                    if auto_breaking && matches!(items.get(k + 1), Some(Item::Glue { .. })) {
                         self.try_break(0, false, Some(k), &none);
                     }
                 }
@@ -546,6 +554,12 @@ fn post_line_break(br: &Breaker<'_>, best: Active) -> Vec<Arc<Line>> {
                 Item::Kern { sub, .. } => {
                     line.extend(items[start..b].iter().cloned());
                     line.push(Item::Kern { w: 0, sub: *sub });
+                    line.push(rightskip);
+                    b + 1
+                }
+                Item::Math { after, .. } => {
+                    line.extend(items[start..b].iter().cloned());
+                    line.push(Item::Math { w: 0, after: *after });
                     line.push(rightskip);
                     b + 1
                 }

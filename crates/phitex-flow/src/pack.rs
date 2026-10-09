@@ -102,7 +102,7 @@ pub fn hpack(mut list: Vec<Item>, spec: Spec, params: &Params, adjust: Option<&m
                 t.stretch[usize::from(g.stretch_order)] += g.stretch;
                 t.shrink[usize::from(g.shrink_order)] += g.shrink;
             }
-            Item::Kern { w, .. } => x += w,
+            Item::Kern { w, .. } | Item::Math { w, .. } => x += w,
             _ => {}
         }
     }

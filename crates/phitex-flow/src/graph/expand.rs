@@ -454,7 +454,8 @@ impl Exec<'_> {
             IfKind::Vmode => !self.in_write && self.st.mode == Mode::V,
             IfKind::Hmode => !self.in_write && self.st.mode == Mode::H,
             IfKind::Inner => !self.in_write && self.st.inner,
-            IfKind::Mmode | IfKind::False => false,
+            IfKind::Mmode => !self.in_write && self.st.mode == Mode::M,
+            IfKind::False => false,
             IfKind::Void | IfKind::Hbox | IfKind::Vbox => {
                 let n = self.scan_eight_bit_int();
                 match self.get(&Key::Box(n)) {
@@ -561,15 +562,19 @@ impl Exec<'_> {
             let Some((d, after)) = self.chain.resolve(&k, here) else {
                 continue;
             };
-            self.reads.push(Arc::new(Read { key: k.clone(), src: Src::Node(d), val: after.clone() }));
+            let scope = self.chain.scope_of(d, &k);
+            self.reads.push(Arc::new(Read { key: k.clone(), src: Src::Node(d), val: after.clone(), scope }));
             let before = match self.chain.resolve(&k, at) {
-                Some((d, v)) => Arc::new(Read { key: k.clone(), src: Src::Node(d), val: v }),
+                Some((d, v)) => {
+                    let scope = self.chain.scope_of(d, &k);
+                    Arc::new(Read { key: k.clone(), src: Src::Node(d), val: v, scope })
+                }
                 None => outside_read(self.env, self.outside, &k, at as u32),
             };
             let before_val = before.val.clone();
             self.reads.push(before);
             // (the φ is a definition: readers after the `\fi` read it)
-            self.defs.push(super::Def { key: k.clone(), val: after.clone(), global: false });
+            self.defs.push(super::Def { key: k.clone(), val: after.clone(), global: false, level: None });
             phis.push((k, after, before_val));
         }
         match &mut self.phi {
