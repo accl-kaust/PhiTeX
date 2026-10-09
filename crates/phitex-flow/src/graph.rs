@@ -33,10 +33,16 @@
 
 use std::sync::Arc;
 
-use crate::arith::{round_decimals, xn_over_d};
 use crate::hash::{FxMap, FxSet};
 use crate::tfm::Font;
-use crate::val::{Key, Macro, Meaning, Param, Prim, Tok, Val};
+use crate::val::{DimenPar, GluePar, IntPar, Key, Macro, Meaning, Prim, Tok, Val};
+
+mod assign;
+mod expand;
+mod scan;
+
+/// `\prevdepth` meaning "no interline glue" (tex.web 212).
+const IGNORE_DEPTH: i32 = -65_536_000;
 
 /// A piece's identity, stable across edits.
 pub type PieceId = u32;
@@ -88,6 +94,88 @@ enum Mode {
     H,
 }
 
+/// What opened a group (only to report mismatches: the scoping itself is
+/// the reaching definitions over the `Open`/`Close` nodes).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum GroupKind {
+    /// `{`.
+    Simple,
+    /// `\begingroup`.
+    SemiSimple,
+}
+
+/// An open conditional: the node whose step opened it, which ends may end
+/// it now (tex.web 489: 1 while its test is read, 2 `\fi`, 3 `\else` or
+/// `\fi`, 4 `\or` too), and its test.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct Cond {
+    open: u32,
+    limit: u8,
+    test: bool,
+}
+
+/// An open group: its kind and the tokens `\aftergroup` gave it (its
+/// close rewrites the input with them).
+#[derive(Clone, PartialEq, Eq, Debug)]
+struct Group {
+    kind: GroupKind,
+    after: Vec<Tok>,
+}
+
+/// A stack in the reader state, shared until changed: handing the state
+/// from a node to the next copies nothing.
+#[derive(Clone, Debug)]
+struct Stack<T>(Option<Arc<Vec<T>>>);
+
+impl<T: Clone> Stack<T> {
+    const fn new() -> Self {
+        Stack(None)
+    }
+    fn len(&self) -> usize {
+        self.0.as_ref().map_or(0, |v| v.len())
+    }
+    fn is_empty(&self) -> bool {
+        self.0.is_none()
+    }
+    fn last(&self) -> Option<&T> {
+        self.0.as_ref().and_then(|v| v.last())
+    }
+    fn get_mut(&mut self, i: usize) -> Option<&mut T> {
+        self.0.as_mut().and_then(|v| Arc::make_mut(v).get_mut(i))
+    }
+    fn last_mut(&mut self) -> Option<&mut T> {
+        let n = self.len();
+        n.checked_sub(1).and_then(|i| self.get_mut(i))
+    }
+    fn push(&mut self, x: T) {
+        Arc::make_mut(self.0.get_or_insert_with(Default::default)).push(x);
+    }
+    fn pop(&mut self) -> Option<T> {
+        let v = Arc::make_mut(self.0.as_mut()?);
+        let x = v.pop();
+        if v.is_empty() {
+            self.0 = None;
+        }
+        x
+    }
+}
+
+impl<T: PartialEq> PartialEq for Stack<T> {
+    fn eq(&self, other: &Self) -> bool {
+        match (&self.0, &other.0) {
+            (Some(a), Some(b)) => Arc::ptr_eq(a, b) || a == b,
+            (None, None) => true,
+            _ => false,
+        }
+    }
+}
+
+impl<T: Eq> Eq for Stack<T> {}
+
+/// The value `RState::eol` holds before the line's end-of-line character
+/// has been read.
+const EOL_UNREAD: i16 = i16::MIN;
+
 /// The reader state between two commands: a value, the next node's
 /// operand.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -100,10 +188,24 @@ pub struct RState {
     mode: Mode,
     /// A `\global` prefix is waiting for its assignment.
     global: bool,
-    depth: u32,
-    /// Conditionals open.
-    conds: u32,
+    /// Conditionals open (innermost last).
+    conds: Stack<Cond>,
     parskip: i32,
+    /// `\long`, `\outer` prefixes waiting for their definition.
+    long: bool,
+    outer: bool,
+    /// The groups open, innermost last.
+    groups: Stack<Group>,
+    /// The token `\afterassignment` gave: the next assignment rewrites the
+    /// input with it.
+    after_assignment: Option<Box<Tok>>,
+    /// The list being built's `\spacefactor`, `\prevdepth`, `\prevgraf`.
+    space_factor: i32,
+    prev_depth: i32,
+    prev_graf: i32,
+    /// The current line's end-of-line character (`\endlinechar` as the line
+    /// was begun; -1: none), or `EOL_UNREAD`.
+    eol: i16,
 }
 
 impl RState {
@@ -114,9 +216,16 @@ impl RState {
             pending: Vec::new(),
             mode: Mode::V,
             global: false,
-            depth: 0,
-            conds: 0,
+            conds: Stack::new(),
             parskip: 0,
+            long: false,
+            outer: false,
+            groups: Stack::new(),
+            after_assignment: None,
+            space_factor: 1000,
+            prev_depth: IGNORE_DEPTH,
+            prev_graf: 0,
+            eol: EOL_UNREAD,
         }
     }
 }
@@ -198,6 +307,9 @@ pub struct Node {
     pub para: Option<Arc<Para>>,
     pub errors: Vec<String>,
     pub phi: Option<Box<Phi>>,
+    /// What it wrote to the log (`\message`; `\immediate\write`, ending in
+    /// a newline), the diagnostic value.
+    pub log: Option<Box<str>>,
     /// The innermost group open at it (its `Open` node's index), if any.
     group: Option<u32>,
 }
@@ -571,8 +683,13 @@ struct Exec<'a> {
     para: Option<Arc<Para>>,
     errors: Vec<String>,
     phi: Option<Box<Phi>>,
+    log: Option<Box<str>>,
     kind: Kind,
     cmd: Tok,
+    /// The token `next_raw` just gave came after `\noexpand`'s mark.
+    noexp: bool,
+    /// Expanding a `\write`'s text (no mode: tex.web 1370).
+    in_write: bool,
 }
 
 impl<'a> Exec<'a> {
@@ -598,8 +715,11 @@ impl<'a> Exec<'a> {
             para: None,
             errors: Vec::new(),
             phi: None,
+            log: None,
             kind: Kind::Other,
             cmd: Tok::Char(0, '\0'),
+            noexp: false,
+            in_write: false,
         }
     }
 
@@ -614,6 +734,7 @@ impl<'a> Exec<'a> {
             para: self.para,
             errors: self.errors,
             phi: self.phi,
+            log: self.log,
             group: None,
         }
     }
@@ -657,11 +778,25 @@ impl<'a> Exec<'a> {
         }
     }
 
-    fn param(&mut self, p: Param) -> i32 {
-        match self.get(&Key::Param(p)) {
+    fn int(&mut self, key: &Key) -> i32 {
+        match self.get(key) {
             Val::Int(i) => i,
+            Val::Glue(g) => g.width,
             _ => 0,
         }
+    }
+
+    fn int_par(&mut self, p: IntPar) -> i32 {
+        self.int(&Key::IntPar(p))
+    }
+
+    fn dimen_par(&mut self, p: DimenPar) -> i32 {
+        self.int(&Key::DimenPar(p))
+    }
+
+    /// A glue parameter's width.
+    fn glue_width(&mut self, p: GluePar) -> i32 {
+        self.int(&Key::GluePar(p))
     }
 
     fn font(&mut self) -> Arc<Font> {
@@ -669,6 +804,13 @@ impl<'a> Exec<'a> {
             Val::Font(f) => f,
             other => panic!("the font key holds {other:?}"),
         }
+    }
+
+    /// `\fontdimen n` of the current font.
+    fn font_param(&mut self, n: u16) -> i32 {
+        let f = self.font();
+        let name: Arc<str> = intern(&mut self.scratch.names, &f.name);
+        self.int(&Key::FontDimen(name, n))
     }
 
     fn tok_meaning(&mut self, t: &Tok) -> Meaning {
@@ -680,6 +822,14 @@ impl<'a> Exec<'a> {
 
     fn cs(&mut self, name: &str) -> Tok {
         Tok::Cs(intern(&mut self.scratch.names, name))
+    }
+
+    /// Sets the node's kind from a conditional's step, unless its command
+    /// already gave it a kind that matters more (a group, a paragraph).
+    fn cond_kind(&mut self, k: Kind) {
+        if matches!(self.kind, Kind::Other | Kind::If | Kind::IfClosed | Kind::EndIf) {
+            self.kind = k;
+        }
     }
 
     // ------------------------------------------------------------ the input
@@ -695,8 +845,86 @@ impl<'a> Exec<'a> {
         }
     }
 
-    /// The next token, unexpanded (tex.web 343-357, without `^^`).
+    /// The current line's end-of-line character (tex.web 360: the value of
+    /// `\endlinechar` when the line was begun), if active.
+    fn eol(&mut self) -> Option<char> {
+        if self.st.eol == EOL_UNREAD {
+            self.read_eol();
+        }
+        u8::try_from(self.st.eol).ok().map(char::from)
+    }
+
+    /// Reads `\endlinechar` for the line being begun.
+    fn read_eol(&mut self) {
+        let v = self.int_par(IntPar::Endlinechar);
+        self.st.eol = if (0..=255).contains(&v) { v as i16 } else { -1 };
+    }
+
+    /// The reader has passed a line's end: the next line begins (its
+    /// end-of-line character is read when the line is: as its first
+    /// character is).
+    fn new_line(&mut self) {
+        self.st.tstate = TState::N;
+        self.st.eol = EOL_UNREAD;
+    }
+
+    /// Moves to `np`; past a line's end, the next line begins.
+    fn advance(&mut self, np: usize) {
+        let crossed = self.text[self.st.pos..np].contains(&'\r');
+        self.st.pos = np;
+        if crossed {
+            self.new_line();
+        }
+    }
+
+    /// The character at `pos`, the position after it and its category
+    /// (tex.web 355): a line's end is its end-of-line character (none if
+    /// inactive), and `^^` reduces the character or the two hex digits
+    /// after it.
+    fn char_at(&mut self, pos: usize) -> Option<(char, usize, u8)> {
+        let raw = *self.text.get(pos)?;
+        let c = if raw == '\r' { self.eol()? } else { raw };
+        let cat = self.catcode(c);
+        // (`^^`: the second circumflex on the line, and a character after it)
+        if raw == '\r' || cat != 7 || self.text.get(pos + 1) != Some(&c) {
+            return Some((c, pos + 1, cat));
+        }
+        let at = |x: &mut Self, p: usize| -> Option<char> {
+            match x.text.get(p) {
+                Some('\r') => x.eol(),
+                Some(&ch) => Some(ch),
+                None => None,
+            }
+        };
+        let Some(c2) = at(self, pos + 2) else {
+            return Some((c, pos + 1, cat));
+        };
+        if u32::from(c2) >= 128 {
+            return Some((c, pos + 1, cat));
+        }
+        let hex = |ch: char| ch.is_ascii_digit() || ('a'..='f').contains(&ch);
+        let (r, np) = match at(self, pos + 3) {
+            Some(c3) if hex(c2) && hex(c3) && self.text.get(pos + 2) != Some(&'\r') => {
+                ((c2.to_digit(16).unwrap_or(0) << 4) | c3.to_digit(16).unwrap_or(0), pos + 4)
+            }
+            _ => {
+                let v = u32::from(c2);
+                (if v < 64 { v + 64 } else { v - 64 }, pos + 3)
+            }
+        };
+        let r = char::from_u32(r).unwrap_or('\0');
+        Some((r, np, self.catcode(r)))
+    }
+
+    /// The position just after the current line's end.
+    fn line_end_after(&self, pos: usize) -> usize {
+        self.text[pos..].iter().position(|&c| c == '\r').map_or(self.text.len(), |k| pos + k + 1)
+    }
+
+    /// The next token, unexpanded (tex.web 343-357). After `\noexpand`'s
+    /// mark, the token after it, with `noexp` set.
     fn next_raw(&mut self) -> Option<Tok> {
+        self.noexp = false;
         while let Some((list, i)) = self.st.pending.last_mut() {
             if *i < list.len() {
                 let t = list[*i].clone();
@@ -704,43 +932,66 @@ impl<'a> Exec<'a> {
                 if *i == list.len() {
                     self.st.pending.pop();
                 }
+                if t == Tok::DontExpand {
+                    let n = self.next_raw();
+                    self.noexp = n.as_ref().is_some_and(|x| x.key().is_some());
+                    return n;
+                }
                 return Some(t);
             }
             self.st.pending.pop();
         }
         loop {
-            let c = *self.text.get(self.st.pos)?;
-            let cat = self.catcode(c);
-            self.st.pos += 1;
+            let pos = self.st.pos;
+            let raw = *self.text.get(pos)?;
+            if self.st.eol == EOL_UNREAD {
+                self.read_eol();
+            }
+            if raw == '\r' && self.eol().is_none() {
+                // (an inactive end-of-line character: the line just ends)
+                self.advance(pos + 1);
+                continue;
+            }
+            let (c, np, cat) = self.char_at(pos)?;
             match cat {
                 0 => {
-                    let Some(&c2) = self.text.get(self.st.pos) else {
+                    // (a control sequence: a run of letters, or one character)
+                    let line_end = self.line_end_after(pos);
+                    let first = if np < line_end { self.char_at(np) } else { None };
+                    let Some((c2, mut q, cat2)) = first else {
+                        self.advance(np);
                         self.st.tstate = TState::S;
                         return Some(self.cs(""));
                     };
-                    let cat2 = self.catcode(c2);
                     if cat2 == 11 {
-                        let start = self.st.pos;
-                        while self.st.pos < self.text.len() {
-                            let c3 = self.text[self.st.pos];
-                            if self.catcode(c3) != 11 {
+                        self.scratch.buf.clear();
+                        self.scratch.buf.push(c2);
+                        while q < line_end {
+                            let Some((c3, q3, cat3)) = self.char_at(q) else {
+                                break;
+                            };
+                            if cat3 != 11 {
                                 break;
                             }
-                            self.st.pos += 1;
+                            self.scratch.buf.push(c3);
+                            q = q3;
                         }
-                        self.scratch.buf.clear();
-                        self.scratch.buf.extend(&self.text[start..self.st.pos]);
                         self.st.tstate = TState::S;
-                        return Some(Tok::Cs(intern(&mut self.scratch.names, &self.scratch.buf)));
+                        let t = Tok::Cs(intern(&mut self.scratch.names, &self.scratch.buf));
+                        self.advance(q);
+                        return Some(t);
                     }
-                    self.st.pos += 1;
                     self.st.tstate = if cat2 == 10 { TState::S } else { TState::M };
                     let mut b = [0u8; 4];
-                    return Some(self.cs(c2.encode_utf8(&mut b)));
+                    let t = self.cs(c2.encode_utf8(&mut b));
+                    self.advance(q);
+                    return Some(t);
                 }
                 5 => {
+                    // (the rest of the line is discarded)
                     let ts = self.st.tstate;
-                    self.st.tstate = TState::N;
+                    let end = self.line_end_after(pos);
+                    self.advance(end.max(np));
                     match ts {
                         TState::N => return Some(self.cs("par")),
                         TState::M => return Some(Tok::Char(10, ' ')),
@@ -748,54 +999,40 @@ impl<'a> Exec<'a> {
                     }
                 }
                 10 => {
-                    if self.st.tstate == TState::M {
-                        self.st.tstate = TState::S;
+                    let ts = self.st.tstate;
+                    self.st.tstate = TState::S;
+                    self.advance(np);
+                    if ts == TState::M {
                         return Some(Tok::Char(10, ' '));
                     }
                 }
                 14 => {
-                    while self.st.pos < self.text.len() && self.text[self.st.pos] != '\r' {
-                        self.st.pos += 1;
-                    }
-                    self.st.pos += 1;
-                    self.st.tstate = TState::N;
+                    let end = self.line_end_after(pos);
+                    self.advance(end.max(np));
                 }
-                9 => {}
-                15 => self.err("Text line contains an invalid character".into()),
+                9 => self.advance(np),
+                15 => {
+                    self.advance(np);
+                    self.err("Text line contains an invalid character".into());
+                }
                 13 => {
                     self.st.tstate = TState::M;
+                    self.advance(np);
                     return Some(Tok::Active(c));
                 }
                 _ => {
                     self.st.tstate = TState::M;
+                    self.advance(np);
                     return Some(Tok::Char(cat, c));
                 }
             }
         }
     }
 
-    /// The next token, macro calls expanded; conditionals too unless `top`
-    /// (at the top, a conditional is a command: a node of its own).
-    fn next_x_in(&mut self, top: bool) -> Option<Tok> {
-        loop {
-            let t = self.next_raw()?;
-            let Some(key) = t.key() else { return Some(t) };
-            match self.meaning(&key) {
-                Meaning::Macro(m) => self.call(&t, &m),
-                Meaning::Prim(p) if p.expandable() && !top => self.conditional(p),
-                _ => return Some(t),
-            }
-        }
-    }
-
-    fn next_x(&mut self) -> Option<Tok> {
-        self.next_x_in(false)
-    }
-
     // ------------------------------------------------------------ macros
 
     /// A macro call: matches the arguments and rewrites the input with the
-    /// body (tex.web 389-399).
+    /// body (tex.web 389-399). A step: it defines nothing.
     fn call(&mut self, name: &Tok, m: &Macro) {
         let mut args: Vec<Vec<Tok>> = vec![Vec::new(); 10];
         let p = &m.params;
@@ -807,7 +1044,10 @@ impl<'a> Exec<'a> {
                     j += 1;
                 }
                 let delim = &p[i + 1..j];
-                args[usize::from(n)] = if delim.is_empty() { self.undelimited() } else { self.delimited(delim) };
+                let arg =
+                    if delim.is_empty() { self.undelimited(name, m.long) } else { self.delimited(name, delim, m.long) };
+                let Some(arg) = arg else { return };
+                args[usize::from(n)] = arg;
                 i = j;
             } else {
                 match self.next_raw() {
@@ -833,30 +1073,46 @@ impl<'a> Exec<'a> {
         self.rewrite(out);
     }
 
-    fn undelimited(&mut self) -> Vec<Tok> {
+    /// A `\par` in a short macro's argument ends the call (tex.web 392).
+    fn runaway(&mut self, name: &Tok, t: &Tok, long: bool) -> bool {
+        if !long && matches!(t, Tok::Cs(n) if &**n == "par") {
+            self.err(format!("Paragraph ended before {name} was complete"));
+            self.back(t.clone());
+            return true;
+        }
+        false
+    }
+
+    fn undelimited(&mut self, name: &Tok, long: bool) -> Option<Vec<Tok>> {
         loop {
             let Some(t) = self.next_raw() else {
                 self.err("File ended while scanning an argument".into());
-                return Vec::new();
+                return Some(Vec::new());
             };
+            if self.runaway(name, &t, long) {
+                return None;
+            }
             match t.cat() {
                 Some(10) => {}
-                Some(1) => return self.group_body(),
-                _ => return vec![t],
+                Some(1) => return self.group_body(name, long),
+                _ => return Some(vec![t]),
             }
         }
     }
 
-    fn group_body(&mut self) -> Vec<Tok> {
+    fn group_body(&mut self, name: &Tok, long: bool) -> Option<Vec<Tok>> {
         let mut out = Vec::new();
         let mut depth = 1;
         while let Some(t) = self.next_raw() {
+            if self.runaway(name, &t, long) {
+                return None;
+            }
             match t.cat() {
                 Some(1) => depth += 1,
                 Some(2) => {
                     depth -= 1;
                     if depth == 0 {
-                        return out;
+                        return Some(out);
                     }
                 }
                 _ => {}
@@ -864,24 +1120,32 @@ impl<'a> Exec<'a> {
             out.push(t);
         }
         self.err("File ended while scanning an argument".into());
-        out
+        Some(out)
     }
 
-    fn delimited(&mut self, delim: &[Tok]) -> Vec<Tok> {
+    fn delimited(&mut self, name: &Tok, delim: &[Tok], long: bool) -> Option<Vec<Tok>> {
         let mut buf: Vec<Tok> = Vec::new();
         let mut depth = 0;
+        // (`#{`: the left brace delimits, and stays in the input)
+        let brace_delim = delim.last().is_some_and(|t| t.cat() == Some(1));
         loop {
             let Some(t) = self.next_raw() else {
                 self.err("File ended while scanning a delimited argument".into());
                 break;
             };
+            if self.runaway(name, &t, long) {
+                return None;
+            }
+            let at_zero = depth == 0;
             match t.cat() {
                 Some(1) => depth += 1,
                 Some(2) => depth -= 1,
                 _ => {}
             }
             buf.push(t);
-            if depth == 0 && buf.len() >= delim.len() && buf[buf.len() - delim.len()..] == *delim {
+            let check = if brace_delim { at_zero } else { depth == 0 };
+            if check && buf.len() >= delim.len() && buf[buf.len() - delim.len()..] == *delim {
+                // (a `#{` brace is consumed: the body ends with it)
                 buf.truncate(buf.len() - delim.len());
                 break;
             }
@@ -905,168 +1169,41 @@ impl<'a> Exec<'a> {
                 buf.remove(0);
             }
         }
-        buf
-    }
-
-    // ------------------------------------------------------------ conditionals
-
-    /// A conditional primitive (as a command node at the top, or inline
-    /// inside another command's scanning).
-    fn conditional(&mut self, p: Prim) {
-        match p {
-            Prim::Ifx => {
-                let a = self.next_raw();
-                let b = self.next_raw();
-                let t = match (a, b) {
-                    (Some(a), Some(b)) => self.tok_meaning(&a) == self.tok_meaning(&b),
-                    _ => false,
-                };
-                self.begin_cond(t);
-            }
-            Prim::Iftrue => self.begin_cond(true),
-            Prim::Iffalse => self.begin_cond(false),
-            Prim::Else => {
-                if self.st.conds == 0 {
-                    self.err("Extra \\else".into());
-                    return;
-                }
-                self.skip(false);
-                self.end_cond();
-            }
-            Prim::Fi => {
-                if self.st.conds == 0 {
-                    self.err("Extra \\fi".into());
-                    return;
-                }
-                self.end_cond();
-            }
-            _ => {}
-        }
-    }
-
-    fn begin_cond(&mut self, test: bool) {
-        if test {
-            self.st.conds += 1;
-            self.kind = Kind::If;
-            self.phi = Some(Box::new(Phi { test: true, keys: Vec::new() }));
-            return;
-        }
-        let at_else = self.skip(true);
-        if at_else {
-            self.st.conds += 1;
-            self.kind = Kind::If;
-        } else {
-            self.kind = Kind::IfClosed;
-        }
-        self.phi = Some(Box::new(Phi { test: false, keys: Vec::new() }));
-    }
-
-    /// Skips an arm: up to the matching `\fi`, or `\else` if asked.
-    /// Returns whether it stopped at an `\else`.
-    fn skip(&mut self, stop_at_else: bool) -> bool {
-        let mut depth = 0usize;
-        loop {
-            let Some(t) = self.next_raw() else {
-                self.err("Incomplete \\if".into());
-                return false;
-            };
-            let Some(k) = t.key() else { continue };
-            match self.meaning(&k) {
-                Meaning::Prim(Prim::Ifx | Prim::Iftrue | Prim::Iffalse) => depth += 1,
-                Meaning::Prim(Prim::Fi) => {
-                    if depth == 0 {
-                        return false;
-                    }
-                    depth -= 1;
-                }
-                Meaning::Prim(Prim::Else) if depth == 0 && stop_at_else => return true,
-                _ => {}
-            }
-        }
-    }
-
-    /// The end of a conditional: a φ for each key its taken arm defined
-    /// (found over the nodes since its `\if`).
-    fn end_cond(&mut self) {
-        self.st.conds -= 1;
-        self.kind = Kind::EndIf;
-        let nodes = &self.chain.nodes;
-        let here = nodes.len();
-        // (the matching `\if`, walking back)
-        let mut depth = 0usize;
-        let mut at = None;
-        for j in (0..here).rev() {
-            match nodes[j].kind {
-                Kind::EndIf => depth += 1,
-                Kind::If => {
-                    if depth == 0 {
-                        at = Some(j);
-                        break;
-                    }
-                    depth -= 1;
-                }
-                _ => {}
-            }
-        }
-        let Some(at) = at else {
-            self.phi = Some(Box::new(Phi { test: false, keys: Vec::new() }));
-            return;
-        };
-        let test = nodes[at].phi.as_ref().is_some_and(|p| p.test);
-        let mut keys: Vec<Key> = Vec::new();
-        for n in &nodes[at + 1..here] {
-            for d in &n.defs {
-                if !keys.contains(&d.key) {
-                    keys.push(d.key.clone());
-                }
-            }
-        }
-        let mut phis = Vec::new();
-        for k in keys {
-            let Some((d, after)) = self.chain.resolve(&k, here) else { continue };
-            self.reads.push(Read { key: k.clone(), src: Src::Node(d), val: after.clone() });
-            let before = match self.chain.resolve(&k, at) {
-                Some((d, v)) => {
-                    self.reads.push(Read { key: k.clone(), src: Src::Node(d), val: v.clone() });
-                    v
-                }
-                None => {
-                    let (v, src) = outside_read(self.env, self.outside, &k);
-                    self.reads.push(Read { key: k.clone(), src, val: v.clone() });
-                    v
-                }
-            };
-            // (the φ is a definition: readers after the `\fi` read it)
-            self.defs.push(Def { key: k.clone(), val: after.clone(), global: false });
-            phis.push((k, after, before));
-        }
-        self.phi = Some(Box::new(Phi { test, keys: phis }));
+        Some(buf)
     }
 
     // ------------------------------------------------------------ commands
 
     /// One command.
     fn command(&mut self) {
-        let Some(t) = self.next_x_in(true) else {
+        let Some((t, m)) = self.next_x_m(true) else {
             self.end();
             return;
         };
         self.cmd = t.clone();
-        let global = std::mem::take(&mut self.st.global);
-        match &t {
-            Tok::Char(cat, c) => self.char_tok(*cat, *c),
-            Tok::Param(_) => self.err("Illegal parameter number in a paragraph".into()),
-            Tok::Cs(_) | Tok::Active(_) => {
-                let key = t.key().expect("a name");
-                match self.meaning(&key) {
-                    Meaning::Prim(Prim::Global) => self.st.global = true,
-                    Meaning::Prim(p) if p.expandable() => self.conditional(p),
-                    Meaning::Prim(p) => self.prim(p, global),
-                    Meaning::Char(cat, c) => self.char_tok(cat, c),
-                    Meaning::Undefined => self.err(format!("Undefined control sequence {t}")),
-                    Meaning::Macro(_) => {}
-                }
+        let (global, long, outer) = (
+            std::mem::take(&mut self.st.global),
+            std::mem::take(&mut self.st.long),
+            std::mem::take(&mut self.st.outer),
+        );
+        match m {
+            Meaning::Prim(p) if p.conditional() => self.conditional(p, &t),
+            Meaning::Prim(Prim::Global | Prim::Long | Prim::Outer) => {
+                let Meaning::Prim(p) = m else { unreachable!() };
+                self.prefix(p, global, long, outer);
             }
+            _ if assign::prefixable(&m) => self.prefixed(&t, &m, global, long, outer),
+            Meaning::Prim(p) => self.prim(p),
+            Meaning::Char(cat, c) => self.char_tok(cat, c),
+            Meaning::CharGiven(c) => self.letter(char::from_u32(c).unwrap_or('\0')),
+            Meaning::MathCharGiven(_) => self.err("Missing $ inserted (math is not supported yet)".into()),
+            Meaning::Undefined => self.err(format!("Undefined control sequence {t}")),
+            Meaning::Macro(_)
+            | Meaning::CountRef(_)
+            | Meaning::DimenRef(_)
+            | Meaning::SkipRef(_)
+            | Meaning::MuskipRef(_)
+            | Meaning::ToksRef(_) => {}
         }
     }
 
@@ -1075,28 +1212,36 @@ impl<'a> Exec<'a> {
     fn end(&mut self) {
         self.end_par();
         self.kind = Kind::End;
-        if self.st.depth > 0 {
+        if !self.st.groups.is_empty() {
             self.err("Missing } inserted at the end of a piece".into());
         }
-        if self.st.conds > 0 {
+        if !self.st.conds.is_empty() {
             self.err("Incomplete \\if at the end of a piece".into());
         }
     }
 
+    /// A group opens: a scope (tex.web 1063).
+    fn open_group(&mut self, g: GroupKind) {
+        self.st.groups.push(Group { kind: g, after: Vec::new() });
+        self.kind = Kind::Open;
+    }
+
+    /// The innermost group closes: it defines nothing; the tokens
+    /// `\aftergroup` gave it rewrite the input (tex.web 282).
+    fn close_group(&mut self) {
+        let after = self.st.groups.pop().map(|g| g.after).unwrap_or_default();
+        self.rewrite(after);
+        self.kind = Kind::Close;
+    }
+
     fn char_tok(&mut self, cat: u8, c: char) {
         match cat {
-            1 => {
-                self.st.depth += 1;
-                self.kind = Kind::Open;
-            }
-            2 => {
-                if self.st.depth > 0 {
-                    self.st.depth -= 1;
-                    self.kind = Kind::Close;
-                } else {
-                    self.err("Too many }'s".into());
-                }
-            }
+            1 => self.open_group(GroupKind::Simple),
+            2 => match self.st.groups.last().map(|g| g.kind) {
+                Some(GroupKind::Simple) => self.close_group(),
+                Some(GroupKind::SemiSimple) => self.err("Extra }, or forgotten \\endgroup".into()),
+                None => self.err("Too many }'s".into()),
+            },
             10 => {
                 if self.st.mode == Mode::H {
                     self.space();
@@ -1107,19 +1252,16 @@ impl<'a> Exec<'a> {
         }
     }
 
-    fn prim(&mut self, p: Prim, global: bool) {
+    /// A primitive that is neither expanded, a conditional nor an
+    /// assignment.
+    fn prim(&mut self, p: Prim) {
         match p {
-            Prim::Def => self.def(global),
-            Prim::Gdef => self.def(true),
-            Prim::Let => self.let_(global),
-            Prim::Catcode => self.catcode_assign(global),
-            Prim::Param(q) => self.param_assign(q, global),
             Prim::Par => self.end_par(),
             Prim::Indent => {
                 if self.st.mode == Mode::V {
                     self.begin_par(true);
                 } else {
-                    let w = self.param(Param::Parindent);
+                    let w = self.dimen_par(DimenPar::Parindent);
                     self.emit.push(HItem::Box { w, h: 0, d: 0 });
                 }
             }
@@ -1134,360 +1276,71 @@ impl<'a> Exec<'a> {
                 }
                 self.space();
             }
-            Prim::Relax | Prim::Global => {}
-            Prim::Ifx | Prim::Iftrue | Prim::Iffalse | Prim::Else | Prim::Fi => {}
-        }
-    }
-
-    fn def(&mut self, global: bool) {
-        let Some(name) = self.next_raw() else { return };
-        let Some(key) = name.key() else {
-            self.err("Missing control sequence inserted".into());
-            return;
-        };
-        let mut params = Vec::new();
-        loop {
-            let Some(t) = self.next_raw() else { return };
-            match t.cat() {
-                Some(1) => break,
-                Some(6) => match self.next_raw() {
-                    Some(Tok::Char(_, d)) if d.is_ascii_digit() && d != '0' => params.push(Tok::Param(d as u8 - b'0')),
-                    _ => self.err("Parameters must be numbered consecutively".into()),
-                },
-                _ => params.push(t),
+            Prim::Char => {
+                let c = self.scan_char_num();
+                self.letter(char::from_u32(c as u32).unwrap_or('\0'));
             }
-        }
-        let mut body = Vec::new();
-        let mut depth = 1;
-        loop {
-            let Some(t) = self.next_raw() else {
-                self.err("File ended while scanning a definition".into());
-                break;
-            };
-            match t.cat() {
-                Some(1) => {
-                    depth += 1;
-                    body.push(t);
+            Prim::BeginGroup => self.open_group(GroupKind::SemiSimple),
+            Prim::EndGroup => match self.st.groups.last().map(|g| g.kind) {
+                Some(GroupKind::SemiSimple) => self.close_group(),
+                Some(GroupKind::Simple) => {
+                    // (tex.web 1064: the missing `}` goes in first)
+                    self.err("Missing } inserted".into());
+                    let t = self.cmd.clone();
+                    self.rewrite(vec![Tok::Char(2, '}'), t]);
                 }
-                Some(2) => {
-                    depth -= 1;
-                    if depth == 0 {
-                        break;
-                    }
-                    body.push(t);
+                None => self.err("Extra \\endgroup".into()),
+            },
+            Prim::AfterGroup => {
+                if let Some(t) = self.next_raw()
+                    && let Some(g) = self.st.groups.last_mut()
+                {
+                    g.after.push(t);
                 }
-                Some(6) => match self.next_raw() {
-                    Some(Tok::Char(_, d)) if d.is_ascii_digit() && d != '0' => body.push(Tok::Param(d as u8 - b'0')),
-                    Some(x) if x.cat() == Some(6) => body.push(x),
-                    other => {
-                        self.err("Illegal parameter number in a definition".into());
-                        if let Some(x) = other {
-                            body.push(x);
+            }
+            Prim::AfterAssignment => self.st.after_assignment = self.next_raw().map(Box::new),
+            Prim::IgnoreSpaces => {
+                // (the next non-blank token, expanded, is the next command)
+                loop {
+                    match self.next_x_m(false) {
+                        Some((t, _)) if t.cat() == Some(10) => {}
+                        Some((t, _)) => {
+                            self.back(t);
+                            break;
                         }
-                    }
-                },
-                _ => body.push(t),
-            }
-        }
-        self.define(key, Val::Meaning(Meaning::Macro(Arc::new(Macro { params, body }))), global);
-    }
-
-    fn let_(&mut self, global: bool) {
-        let Some(name) = self.next_raw() else { return };
-        let Some(key) = name.key() else {
-            self.err("Missing control sequence inserted".into());
-            return;
-        };
-        let mut t = self.next_raw();
-        while matches!(t, Some(Tok::Char(10, _))) {
-            t = self.next_raw();
-        }
-        if matches!(t, Some(Tok::Char(12, '='))) {
-            t = self.next_raw();
-            if matches!(t, Some(Tok::Char(10, _))) {
-                t = self.next_raw();
-            }
-        }
-        let Some(t) = t else { return };
-        let m = self.tok_meaning(&t);
-        self.define(key, Val::Meaning(m), global);
-    }
-
-    fn catcode_assign(&mut self, global: bool) {
-        let c = self.scan_int();
-        self.optional_equals();
-        let v = self.scan_int();
-        let Some(ch) = char::from_u32(c as u32) else {
-            self.err("Bad character code".into());
-            return;
-        };
-        if !(0..=15).contains(&v) {
-            self.err("Invalid code".into());
-            return;
-        }
-        self.define(Key::Cat(ch), Val::Cat(v as u8), global);
-    }
-
-    fn param_assign(&mut self, p: Param, global: bool) {
-        self.optional_equals();
-        let v = if p.is_int() { self.scan_int() } else { self.scan_dimen() };
-        self.define(Key::Param(p), Val::Int(v), global);
-    }
-
-    // ------------------------------------------------------------ scanning
-
-    fn skip_spaces_x(&mut self) -> Option<Tok> {
-        loop {
-            let t = self.next_x()?;
-            if t.cat() != Some(10) {
-                return Some(t);
-            }
-        }
-    }
-
-    fn optional_equals(&mut self) {
-        if let Some(t) = self.skip_spaces_x() {
-            if !t.is_char(12, '=') {
-                self.back(t);
-            }
-        }
-    }
-
-    fn optional_space(&mut self) {
-        if let Some(t) = self.next_x() {
-            if t.cat() != Some(10) {
-                self.back(t);
-            }
-        }
-    }
-
-    fn signs(&mut self) -> (bool, Option<Tok>) {
-        let mut neg = false;
-        loop {
-            let t = self.skip_spaces_x();
-            match &t {
-                Some(x) if x.is_char(12, '-') => neg = !neg,
-                Some(x) if x.is_char(12, '+') => {}
-                _ => return (neg, t),
-            }
-        }
-    }
-
-    fn internal(&mut self, t: &Tok) -> Option<(i32, bool)> {
-        let k = t.key()?;
-        match self.meaning(&k) {
-            Meaning::Prim(Prim::Param(p)) => Some((self.param(p), p.is_int())),
-            _ => None,
-        }
-    }
-
-    /// An integer (tex.web 440-447).
-    fn scan_int(&mut self) -> i32 {
-        let (neg, t) = self.signs();
-        let Some(t) = t else {
-            self.err("Missing number, treated as zero".into());
-            return 0;
-        };
-        let v: i64 = if t.is_char(12, '`') {
-            let c = match self.next_raw() {
-                Some(Tok::Char(_, c) | Tok::Active(c)) => i64::from(u32::from(c)),
-                Some(Tok::Cs(n)) => {
-                    let mut it = n.chars();
-                    if let (Some(c), None) = (it.next(), it.next()) {
-                        i64::from(u32::from(c))
-                    } else {
-                        self.err("Improper alphabetic constant".into());
-                        0
-                    }
-                }
-                _ => 0,
-            };
-            self.optional_space();
-            c
-        } else if let Some((v, _)) = self.internal(&t) {
-            i64::from(v)
-        } else {
-            let (radix, mut first) = if t.is_char(12, '\'') {
-                (8u32, None)
-            } else if t.is_char(12, '"') {
-                (16, None)
-            } else {
-                (10, Some(t))
-            };
-            let mut v: i64 = 0;
-            let mut any = false;
-            loop {
-                let x = match first.take() {
-                    Some(x) => Some(x),
-                    None => self.next_x(),
-                };
-                let Some(x) = x else { break };
-                let d = match &x {
-                    Tok::Char(12, c) if c.is_ascii_digit() => c.to_digit(10),
-                    Tok::Char(11 | 12, c) if radix == 16 && ('A'..='F').contains(c) => c.to_digit(16),
-                    _ => None,
-                };
-                match d {
-                    Some(d) if d < radix => {
-                        v = (v * i64::from(radix) + i64::from(d)).min(i64::from(i32::MAX));
-                        any = true;
-                    }
-                    _ => {
-                        if x.cat() != Some(10) {
-                            self.back(x);
-                        }
-                        break;
+                        None => break,
                     }
                 }
             }
-            if !any {
-                self.err("Missing number, treated as zero".into());
+            Prim::Message | Prim::ErrMessage => self.message(p == Prim::ErrMessage),
+            Prim::Immediate => self.immediate(),
+            Prim::Write => {
+                self.err("\\write without \\immediate is not supported yet (it needs \\shipout)".into());
+                let _ = self.scan_int();
+                let _ = self.scan_toks_raw();
             }
-            v
-        };
-        let v = v as i32;
-        if neg { -v } else { v }
-    }
-
-    fn keyword(&mut self, kw: &str) -> bool {
-        let kws: Vec<char> = kw.chars().collect();
-        let mut buf = Vec::new();
-        let mut i = 0;
-        while i < kws.len() {
-            let Some(t) = self.next_x() else {
-                for x in buf.into_iter().rev() {
-                    self.back(x);
-                }
-                return false;
-            };
-            let hit = matches!(&t, Tok::Char(_, c) if c.to_ascii_lowercase() == kws[i]);
-            if hit {
-                buf.push(t);
-                i += 1;
-            } else if buf.is_empty() && t.cat() == Some(10) {
-            } else {
-                self.back(t);
-                for x in buf.into_iter().rev() {
-                    self.back(x);
-                }
-                return false;
-            }
+            Prim::Uppercase | Prim::Lowercase => self.case_shift(p == Prim::Uppercase),
+            Prim::EndCsName => self.err("Extra \\endcsname".into()),
+            Prim::Relax | Prim::End | Prim::Dump => {}
+            Prim::LastItem(_)
+            | Prim::SpaceFactor
+            | Prim::PrevDepth
+            | Prim::PrevGraf
+            | Prim::PageInt(_)
+            | Prim::PageDimen(_)
+            | Prim::BoxDimen(_) => self.err(format!("You can't use `\\{}' here", p.name())),
+            _ => self.err(format!("\\{} is not supported yet", p.name())),
         }
-        true
-    }
-
-    /// A dimension (tex.web 448-461).
-    fn scan_dimen(&mut self) -> i32 {
-        let (neg, t) = self.signs();
-        let Some(t) = t else {
-            self.err("Missing number, treated as zero".into());
-            return 0;
-        };
-        if let Some((v, is_int)) = self.internal(&t) {
-            if !is_int {
-                return if neg { -v } else { v };
-            }
-            return self.units(neg, v, 0);
-        }
-        let mut ip: i64 = 0;
-        let mut digits: Vec<u8> = Vec::new();
-        let mut point = false;
-        let mut any = false;
-        let mut first = Some(t);
-        loop {
-            let x = match first.take() {
-                Some(x) => Some(x),
-                None => self.next_x(),
-            };
-            let Some(x) = x else { break };
-            match &x {
-                Tok::Char(12, c) if c.is_ascii_digit() => {
-                    let d = c.to_digit(10).unwrap_or(0);
-                    any = true;
-                    if point {
-                        if digits.len() < 17 {
-                            digits.push(d as u8);
-                        }
-                    } else {
-                        ip = (ip * 10 + i64::from(d)).min(i64::from(i32::MAX));
-                    }
-                }
-                Tok::Char(12, '.' | ',') if !point => point = true,
-                _ => {
-                    self.back(x);
-                    break;
-                }
-            }
-        }
-        if !any && !point {
-            self.err("Missing number, treated as zero".into());
-        }
-        let f = if digits.is_empty() { 0 } else { round_decimals(&digits) };
-        self.units(neg, ip as i32, f)
-    }
-
-    fn units(&mut self, neg: bool, mut v: i32, mut f: i32) -> i32 {
-        let font_unit = if self.keyword("em") {
-            Some(6)
-        } else if self.keyword("ex") {
-            Some(5)
-        } else {
-            None
-        };
-        if let Some(n) = font_unit {
-            let q = self.font().param(n);
-            let r = i64::from(v) * i64::from(q) + i64::from(xn_over_d(q, f, 65536).0);
-            self.optional_space();
-            let r = crate::arith::clamp(r);
-            return if neg { -r } else { r };
-        }
-        let _ = self.keyword("true");
-        let (num, den) = if self.keyword("pt") {
-            (1, 1)
-        } else if self.keyword("in") {
-            (7227, 100)
-        } else if self.keyword("pc") {
-            (12, 1)
-        } else if self.keyword("cm") {
-            (7227, 254)
-        } else if self.keyword("mm") {
-            (7227, 2540)
-        } else if self.keyword("bp") {
-            (7227, 7200)
-        } else if self.keyword("dd") {
-            (1238, 1157)
-        } else if self.keyword("cc") {
-            (14856, 1157)
-        } else if self.keyword("sp") {
-            self.optional_space();
-            return if neg { -v } else { v };
-        } else {
-            self.err("Illegal unit of measure (pt inserted)".into());
-            (1, 1)
-        };
-        if num != 1 || den != 1 {
-            let (q, rem) = xn_over_d(v, num, den);
-            f = ((i64::from(num) * i64::from(f) + 65536 * i64::from(rem)) / i64::from(den)) as i32;
-            v = q + f / 65536;
-            f %= 65536;
-        }
-        if v >= 0o40000 {
-            self.err("Dimension too large".into());
-            v = 0o37777;
-            f = 0o177_777;
-        }
-        let r = v * 65536 + f;
-        self.optional_space();
-        if neg { -r } else { r }
     }
 
     // ------------------------------------------------------------ material
 
     fn begin_par(&mut self, indent: bool) {
         self.st.mode = Mode::H;
-        self.st.parskip = self.param(Param::Parskip);
+        self.st.space_factor = 1000;
+        self.st.parskip = self.glue_width(GluePar::Parskip);
         if indent {
-            let w = self.param(Param::Parindent);
+            let w = self.dimen_par(DimenPar::Parindent);
             self.emit.push(HItem::Box { w, h: 0, d: 0 });
         }
     }
@@ -1526,7 +1379,7 @@ impl<'a> Exec<'a> {
             }
         }
         let mut hlist: Vec<HItem> = nodes[first..].iter().flat_map(|n| n.emit.iter().copied()).collect();
-        hlist.extend(self.emit.drain(..));
+        hlist.append(&mut self.emit);
         if matches!(hlist.last(), Some(HItem::Glue { .. })) {
             hlist.pop();
         }
@@ -1534,14 +1387,14 @@ impl<'a> Exec<'a> {
         hlist.push(HItem::Glue { w: 0, st: 65536, st_ord: 1, sh: 0, sh_ord: 0 });
         let para = Para {
             hlist,
-            hsize: self.param(Param::Hsize),
-            tolerance: self.param(Param::Tolerance),
-            linepenalty: self.param(Param::Linepenalty),
-            baselineskip: self.param(Param::Baselineskip),
+            hsize: self.dimen_par(DimenPar::Hsize),
+            tolerance: self.int_par(IntPar::Tolerance),
+            linepenalty: self.int_par(IntPar::Linepenalty),
+            baselineskip: self.glue_width(GluePar::Baselineskip),
             parskip: self.st.parskip,
-            vsize: self.param(Param::Vsize),
-            topskip: self.param(Param::Topskip),
-            maxdepth: self.param(Param::Maxdepth),
+            vsize: self.dimen_par(DimenPar::Vsize),
+            topskip: self.glue_width(GluePar::Topskip),
+            maxdepth: self.dimen_par(DimenPar::Maxdepth),
         };
         self.para = Some(Arc::new(para));
     }

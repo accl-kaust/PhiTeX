@@ -1,10 +1,11 @@
 //! `phitex-flow FILE.tex [-j N] [--reads suspend|speculate]
 //! [--order priority|random:SEED] [--tfm PATH] [-o OUT.dvi] [--dump]
-//! [--edit OLD=>NEW] [--check]`
+//! [--edit OLD=>NEW] [--check] [--log]`
 //!
 //! Builds FILE.tex to DVI; with `--edit`, then applies the edit (the first
 //! occurrence of OLD becomes NEW) and builds again incrementally, and with
-//! `--check` compares that to a cold build of the edited text.
+//! `--check` compares that to a cold build of the edited text. `--log` prints
+//! what `\message` and `\immediate\write` wrote, laid out as TeX's log.
 
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -14,7 +15,7 @@ use phitex_flow::{Build, Font, Options, Order, Output, Reads};
 fn usage() -> ExitCode {
     eprintln!(
         "usage: phitex-flow FILE.tex [-j N] [--reads suspend|speculate] [--order priority|random:SEED] \
-         [--tfm PATH] [-o OUT.dvi] [--dump] [--edit OLD=>NEW] [--check]"
+         [--tfm PATH] [-o OUT.dvi] [--dump] [--edit OLD=>NEW] [--check] [--log]"
     );
     ExitCode::from(2)
 }
@@ -70,6 +71,7 @@ fn main() -> ExitCode {
     let mut dump = false;
     let mut edit = None;
     let mut check = false;
+    let mut log = false;
     let mut i = 0;
     while i < args.len() {
         let a = args[i].as_str();
@@ -102,6 +104,7 @@ fn main() -> ExitCode {
                 opts.dump = true;
             }
             "--check" => check = true,
+            "--log" => log = true,
             "--edit" => match val() {
                 Some(v) if v.contains("=>") => {
                     let (a, b) = v.split_once("=>").expect("=>");
@@ -149,6 +152,9 @@ fn main() -> ExitCode {
     report("cold", &cold);
     if dump {
         print!("{}", cold.dump);
+    }
+    if log {
+        println!("{}", phitex_flow::print::log("", &cold.log, ""));
     }
     let mut last = cold;
     if let Some((from, to)) = edit {

@@ -38,6 +38,8 @@ pub mod hash;
 pub mod linebreak;
 pub mod page;
 pub mod graph;
+pub mod prim;
+pub mod print;
 pub mod tfm;
 pub mod val;
 

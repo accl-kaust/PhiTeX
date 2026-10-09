@@ -125,6 +125,10 @@ pub struct Output {
     pub errors: Vec<String>,
     /// The graph, as text.
     pub dump: String,
+    /// What the nodes wrote to the log, in document order (`\message`
+    /// texts; `\immediate\write` lines, ending in a newline):
+    /// `print::log` lays it out as TeX's log.
+    pub log: Vec<String>,
 }
 
 type Lines = Arc<Vec<Arc<Line>>>;
@@ -479,8 +483,10 @@ impl Build {
         let out = dvi::assemble(&self.font, &st.pages, &bodies);
         let mut errors = Vec::new();
         let mut dump = String::new();
+        let mut log = Vec::new();
         for (k, ps) in st.p.iter().enumerate() {
             let r = ps.run.as_ref().expect("every piece ran");
+            log.extend(r.chain.nodes.iter().filter_map(|n| n.log.as_deref().map(str::to_string)));
             for e in &r.errors {
                 errors.push(format!("piece {k}: {e}"));
             }
@@ -504,7 +510,7 @@ impl Build {
         self.pieces = st.p.into_iter().map(|ps| Kept { id: ps.id, text: ps.text, run: ps.run, lines: ps.lines }).collect();
         self.readers = st.readers;
         self.pages = st.pages.into_iter().zip(bodies).collect();
-        Output { dvi: out, stats: st.stats, errors, dump }
+        Output { dvi: out, stats: st.stats, errors, dump, log }
     }
 }
 
