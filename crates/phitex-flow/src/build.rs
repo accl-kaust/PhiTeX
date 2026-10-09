@@ -11,11 +11,12 @@
 //! A read is answered with the definitions known so far; it may be wrong
 //! if an earlier piece that has not run yet defines the name. So when a
 //! piece's definitions are installed, exactly the readers of the names
-//! whose values changed are marked **dirty**, node by node (those after it
-//! that read the name from before it), and their pieces run again from
-//! those nodes. A piece's own reads are validated when it is installed,
-//! against the index as it is then; a stale read marks its node and the
-//! piece runs again from it. Under `Reads::Suspend` a read of a name whose
+//! whose values changed are marked **dirty** (the pieces after it that read
+//! the name from before it, by name: every node of theirs reading it is
+//! dirty), and those pieces run again from their first dirty node. A
+//! piece's own reads are validated when it is installed, against the index
+//! as it is then; a stale read marks its name and the piece runs again
+//! from its readers. Under `Reads::Suspend` a read of a name whose
 //! definition is being remade parks until that definition is installed
 //! (or runs the defining piece itself if nobody has started it); under
 //! `Reads::Speculate` it takes the old value and is validated. Either way
@@ -292,7 +293,7 @@ struct PState {
     /// and text.
     prev: Option<Prev>,
     /// Nodes of its run that read a definition since remade.
-    dirty: BTreeSet<u32>,
+    dirty: BTreeSet<Key>,
     runs: u32,
     /// The piece whose definition answers each of its run's reads, as its
     /// edges say (aligned with `Run::reads`).
@@ -368,8 +369,8 @@ struct Shared {
 type ParaLines = (Arc<Para>, Lines);
 
 enum Task {
-    /// Run piece `.0` from its dirty nodes `.1`.
-    Run(usize, Vec<u32>),
+    /// Run piece `.0` again from the nodes reading the names `.1`.
+    Run(usize, Vec<Key>),
     Break(usize, usize, Arc<Para>),
     Scan {
         scan: Box<Scan>,
@@ -613,10 +614,10 @@ impl Build {
         }
         touched.sort();
         touched.dedup();
-        let mut marks: Vec<(usize, u32)> = Vec::new();
+        let mut marks: Vec<(usize, Key)> = Vec::new();
         for key in &touched {
             let Some(m) = readers.get(key) else { continue };
-            for (&rid, &(node, src)) in m {
+            for (&rid, &(_, src)) in m {
                 let rpos = pos_of[rid as usize];
                 if rpos == NONE {
                     continue;
@@ -624,7 +625,7 @@ impl Build {
                 let (def, _) = names.reaching(key, rpos as usize, &self.font);
                 let def_id = def.map_or(INITIAL, |d| ids[d as usize]);
                 if src != def_id {
-                    marks.push((rpos as usize, node));
+                    marks.push((rpos as usize, key.clone()));
                 }
             }
         }
@@ -672,8 +673,8 @@ impl Build {
             },
             done: false,
         };
-        for (k, node) in marks {
-            mark(&mut state, k, node);
+        for (k, key) in marks {
+            mark(&mut state, k, key);
         }
         // (kept runs' paragraphs never broken go to the queue)
         for k in 0..n {
@@ -856,12 +857,12 @@ fn finished(g: &State) -> bool {
     g.settled == g.p.len() && g.scan_done && g.unshipped == 0
 }
 
-/// Node `node` of piece `k` read a definition since remade: the piece
-/// runs again from it.
-/// Returns whether it was done.
-fn mark(g: &mut State, k: usize, node: u32) -> bool {
+/// Piece `k` read a definition of `key` since remade: it runs again from
+/// the first of its nodes reading the name (every node reading it is
+/// looked at again). Returns whether it was done.
+fn mark(g: &mut State, k: usize, key: Key) -> bool {
     let ps = &mut g.p[k];
-    ps.dirty.insert(node);
+    ps.dirty.insert(key);
     if ps.status == Status::Done {
         ps.status = Status::Unstarted;
         g.unstarted.insert(k);
@@ -908,13 +909,13 @@ fn changed_names(old: Option<&Run>, new: &Run) -> Vec<Key> {
 
 /// Piece `m`'s definitions of `keys` changed: the nodes after it that
 /// read those names from before `m` (or from `m`), by the edges.
-fn reached(g: &State, sh: &Shared, m: usize, keys: &[Key]) -> Vec<(usize, u32)> {
+fn reached(g: &State, sh: &Shared, m: usize, keys: &[Key]) -> Vec<(usize, Key)> {
     let mut out = Vec::new();
     for key in keys {
         let Some(rm) = g.readers.get(key) else {
             continue;
         };
-        for (&rid, &(node, src)) in rm {
+        for (&rid, &(_, src)) in rm {
             let rpos = sh.pos_of[rid as usize];
             if rpos == NONE || rpos as usize <= m {
                 continue;
@@ -924,7 +925,7 @@ fn reached(g: &State, sh: &Shared, m: usize, keys: &[Key]) -> Vec<(usize, u32)> 
                 spos == NONE || spos as usize <= m
             };
             if before {
-                out.push((rpos as usize, node));
+                out.push((rpos as usize, key.clone()));
             }
         }
     }
@@ -1301,7 +1302,7 @@ fn execute(sh: &Shared, task: Task) -> (u64, u8) {
 /// nodes and installs the run: its exports into the names index, its
 /// reads as edges, the readers its changed definitions reach marked; its
 /// own reads validated against the index as it is now.
-fn run_and_install(sh: &Shared, k: usize, dirty: &[u32]) -> u64 {
+fn run_and_install(sh: &Shared, k: usize, dirty: &[Key]) -> u64 {
     let (text, old) = {
         let g = lock(sh);
         let ps = &g.p[k];
@@ -1369,12 +1370,12 @@ fn run_and_install(sh: &Shared, k: usize, dirty: &[u32]) -> u64 {
         // (the edges: the new run's, each with the piece whose definition
         // answers it now, replace the old run's; a read answered otherwise
         // than it was is stale)
-        let mut stale: BTreeSet<u32> = BTreeSet::new();
+        let mut stale: BTreeSet<Key> = BTreeSet::new();
         let old_srcs = std::mem::take(&mut g.p[k].srcs);
         let mut srcs = Vec::with_capacity(run.reads.len());
         for (i, ((key, node, _), &(def, same))) in run.reads.iter().zip(&checks).enumerate() {
             if !same {
-                stale.insert(*node);
+                stale.insert(key.clone());
             }
             let src = def.map_or(INITIAL, |d| sh.ids[d as usize]);
             srcs.push(src);
@@ -1425,8 +1426,8 @@ fn run_and_install(sh: &Shared, k: usize, dirty: &[u32]) -> u64 {
         g.stats.ran += 1;
         g.running.remove(&k);
         let marks = reached(&g, sh, k, &changed);
-        for (r, node) in marks {
-            if mark(&mut g, r, node) {
+        for (r, key) in marks {
+            if mark(&mut g, r, key) {
                 sh.done[r].store(false, Ordering::Release);
             }
         }
@@ -1487,7 +1488,7 @@ impl Env for PieceEnv<'_> {
                         Some(
                             std::mem::take(&mut g.p[d].dirty)
                                 .into_iter()
-                                .collect::<Vec<u32>>(),
+                                .collect::<Vec<Key>>(),
                         )
                     }
                     Status::Running => {

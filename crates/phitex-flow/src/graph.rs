@@ -23,16 +23,14 @@
 //! paragraph, a value line breaking is a function of.
 //!
 //! [`run_piece`] runs a piece again from exactly the nodes whose operands
-//! may have changed: the nodes marked dirty (a definition they read was
-//! remade) and the nodes the edited text touches. Everything before the
-//! first of them is kept as it is. From there each old node is kept when
-//! its input state is the state reached, its text is unchanged and every
-//! definition it read is still equal; otherwise a node runs. Once the
-//! chain is back on the old one at the same index with no scope changed,
-//! old nodes are shared as they are up to the next dirty node, each read
-//! of a name from before the piece still checked (only the first node
-//! reading a name is marked, and every node reading it must read the same
-//! definition).
+//! may have changed: the dirty nodes (every node reading a name from before
+//! the piece whose definition was remade) and the nodes the edited text
+//! touches. Everything before the first of them is kept as it is. From
+//! there each old node is kept when its input state is the state reached,
+//! its text is unchanged and every definition it read is still equal;
+//! otherwise a node runs. Once the chain is back on the old one at the same
+//! index with no scope changed, old nodes are shared as they are up to the
+//! next dirty node.
 
 use std::sync::Arc;
 
@@ -763,23 +761,37 @@ fn resolve_now(chain: &Chain, env: &mut dyn Env, outside: &mut Outside, key: &Ke
     }
 }
 
-/// Runs a piece: `old` is its previous chain (and the text that made it),
-/// `dirty` the sorted indices of old nodes a definition of which was
-/// remade. Returns the new chain, with every old node still holding kept.
+/// Runs a piece: `old` is its previous run (and the text that made it),
+/// `dirty` the names from before the piece a definition of which was
+/// remade: every old node reading one of them is dirty. Returns the new
+/// chain, with every old node still holding kept.
 pub fn run_piece(
     text: &[char],
     env: &mut dyn Env,
     old: Option<(&Run, &[char])>,
-    dirty: &[u32],
+    dirty: &[Key],
 ) -> Run {
     let mut outside: Outside = FxMap::default();
-    // (reads from before the piece found to still hold in this run, by
-    // identity)
-    let mut holding: FxSet<usize> = FxSet::default();
     let mut chain = Chain::default();
     let mut ran = 0u64;
     let edit = old.and_then(|(_, t)| Edit::between(t, text));
     let oldc = old.map(|(r, _)| &r.chain);
+    // (the dirty old nodes: those reading a dirty name from before the
+    // piece, in order)
+    let dirty: Vec<u32> = match oldc {
+        Some(oc) if !dirty.is_empty() => oc
+            .nodes
+            .iter()
+            .enumerate()
+            .filter(|(_, n)| {
+                n.reads
+                    .iter()
+                    .any(|r| !matches!(r.src, Src::Node(_)) && dirty.contains(&r.key))
+            })
+            .map(|(i, _)| i as u32)
+            .collect(),
+        _ => Vec::new(),
+    };
     // (where to start: the first dirty node, or the first the edit touches;
     // everything before it is kept as it is)
     let mut from = dirty.first().map_or(usize::MAX, |&d| d as usize);
@@ -868,30 +880,20 @@ pub fn run_piece(
             }
         }
         if let Some(stop) = copy_to {
-            // (node `oi` was looked at; each node after it is shared as long
-            // as nothing it read can differ: the definitions it read in the
-            // piece are at the same nodes with the same values (no scope
-            // changed), but a definition from before the piece is checked
-            // read by read, since only the first node reading a name is
-            // marked; a paragraph's node is looked at if a node of its
+            // (node `oi` was looked at; each node after it up to the next
+            // dirty one is shared: the definitions it read in the piece are
+            // at the same nodes with the same values (no scope changed), and
+            // every node reading a remade definition from before the piece
+            // is dirty (a definition remade since, not yet marked, is
+            // caught when the run is validated: its reads list every value
+            // read); a paragraph's node is looked at if a node of its
             // paragraph ran)
             let oc = oldc.expect("an old chain");
             let mut j = oi;
             while j < stop {
                 let n = &oc.nodes[j];
-                if j > oi {
-                    if para_fresh && matches!(n.kind, Kind::Par | Kind::End) {
-                        break;
-                    }
-                    let holds = n.reads.iter().all(|r| {
-                        matches!(r.src, Src::Node(_))
-                            || holding.contains(&(Arc::as_ptr(r) as usize))
-                            || (Read::same(&outside_read(env, &mut outside, &r.key), r)
-                                && holding.insert(Arc::as_ptr(r) as usize))
-                    });
-                    if !holds {
-                        break;
-                    }
+                if j > oi && para_fresh && matches!(n.kind, Kind::Par | Kind::End) {
+                    break;
                 }
                 if !oc.input_h(j) && n.out.mode == Mode::H {
                     para_fresh = false;
