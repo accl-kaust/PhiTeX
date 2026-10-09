@@ -115,7 +115,11 @@ impl Store {
     /// Line `l` appended.
     pub(crate) fn push(&mut self, l: &[u8]) {
         let n = self.lines.len() as u64;
-        self.lines.insert(self.lines.len(), phi::ElemId(n + 1), super::lang::Val::line(l));
+        self.lines.insert(
+            self.lines.len(),
+            phi::ElemId(n + 1),
+            super::lang::Val::line(l),
+        );
         self.ver = phi::Ver::node(0x7374_6f72, &[self.ver, phi::Ver::of(l)]);
     }
 
@@ -233,7 +237,9 @@ impl Tracker for PureTracker {
         Some(crate::host::WriteId(0x8000_0000 | (h as u32 & 0x7fff_ffff)))
     }
     fn store_open(&self, _stream: u8, name: &[u8]) {
-        self.stores.borrow_mut().insert(name.to_vec(), Store::empty());
+        self.stores
+            .borrow_mut()
+            .insert(name.to_vec(), Store::empty());
         self.store_ev.borrow_mut().push((true, name.to_vec(), None));
     }
     fn store_line(&self, name: &[u8], line: &[u8]) {
@@ -253,7 +259,9 @@ impl Tracker for PureTracker {
         s.map(|s| Some(s.bytes()))
     }
     fn pure_file_end(&self, level: usize, name: &[u8], lines: u32) {
-        self.file_ends.borrow_mut().push((level, name.to_vec(), lines));
+        self.file_ends
+            .borrow_mut()
+            .push((level, name.to_vec(), lines));
     }
     fn pure_load(&self, name: &[u8], found: Option<(&[u8], &alloc::sync::Arc<[u8]>)>, lines: bool) {
         self.loads.borrow_mut().push(Load {

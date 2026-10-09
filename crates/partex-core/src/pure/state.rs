@@ -31,7 +31,12 @@ pub struct PState {
 
 impl core::fmt::Debug for PState {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "PState({} slots, finished {:?})", self.slots.len(), self.finished)
+        write!(
+            f,
+            "PState({} slots, finished {:?})",
+            self.slots.len(),
+            self.finished
+        )
     }
 }
 
@@ -154,3 +159,75 @@ impl PState {
 
 /// A shared state, for the core's values.
 pub(crate) type Shared = Arc<PState>;
+
+/// [`version`]'s parts, named (`PHITEX_PURE_SPEC=1`: a guess compared
+/// with the state the run made there).
+pub(crate) fn version_parts<H: Host, T: Tracker>(
+    t: &Tex<H, T>,
+    main: &[u8],
+    slots: &[(Slot, SVal)],
+) -> Vec<(alloc::string::String, u128)> {
+    use alloc::format;
+    let mut parts = Vec::new();
+    parts.push((format!("input"), t.input_hash_pure(main)));
+    parts.push((
+        format!("buffer/first/last/line {}/{}/{}", t.first, t.last, t.line),
+        Version::of(&(t.first, t.last, t.line)).0,
+    ));
+    parts.push((
+        format!(
+            "cur state {} index {} start {} loc {} limit {} ptr {} in_open {}",
+            t.cur_input.state,
+            t.cur_input.index,
+            t.cur_input.start,
+            t.cur_input.loc,
+            t.cur_input.limit,
+            t.input_ptr,
+            t.in_open
+        ),
+        Version::of(&(
+            t.cur_input.state,
+            t.cur_input.index,
+            t.cur_input.start,
+            t.cur_input.loc,
+            t.cur_input.limit,
+            t.input_ptr,
+            t.in_open,
+        ))
+        .0,
+    ));
+    parts.push((
+        format!("flags"),
+        Version::of(&(
+            t.fire_pending,
+            t.page_pending,
+            t.graf_stop,
+            t.par_start,
+            t.force_eof,
+        ))
+        .0,
+    ));
+    for (d, l) in t.nest.iter().enumerate().skip(1) {
+        for f in 0..list::COUNT {
+            parts.push((
+                format!("nest {d} field {f}"),
+                crate::nest::field_version(l, f),
+            ));
+        }
+    }
+    for (s, v) in slots {
+        parts.push((format!("{s:?}"), v.0.0));
+    }
+    parts
+}
+
+impl PState {
+    /// [`PState::of`]'s version's parts (debugging).
+    pub(crate) fn parts<H: Host, T: Tracker>(
+        t: &mut Tex<H, T>,
+        main: &[u8],
+    ) -> Vec<(alloc::string::String, u128)> {
+        let (ps, _) = PState::of(t, main, None);
+        version_parts(t, main, &ps.slots)
+    }
+}

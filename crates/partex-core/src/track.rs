@@ -439,7 +439,13 @@ pub trait Tracker {
     /// (With [`Tracker::PURE`].) File `name` was looked up to be read
     /// (by `lines`: `\\input`, `\\openin`; or whole): the name the host
     /// found it by and its contents, if found.
-    fn pure_load(&self, _name: &[u8], _found: Option<(&[u8], &alloc::sync::Arc<[u8]>)>, _lines: bool) {}
+    fn pure_load(
+        &self,
+        _name: &[u8],
+        _found: Option<(&[u8], &alloc::sync::Arc<[u8]>)>,
+        _lines: bool,
+    ) {
+    }
     /// (With [`Tracker::PURE`].) Main control begins a command (§1030),
     /// inside the output routine if `output`.
     fn pure_begin(&self, _output: bool) {}

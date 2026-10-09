@@ -108,7 +108,6 @@ pub enum Op {
     File(u64, u16),
 }
 
-
 /// What the steps count (the report's).
 #[derive(Default, Clone, Copy, Debug)]
 pub struct Stats {
@@ -306,7 +305,13 @@ pub const ROOT: u16 = 0x8000;
 /// Place file `d` at its level in `t`: the source's bytes, read up to
 /// line `idx` (the first step of a file's unfold begins after its first
 /// line, which the `\input` that called it read).
-fn place_file<H: Host>(t: &mut Tex<H, PureTracker>, d: &FileDoc, level: usize, idx: usize, root: bool) {
+fn place_file<H: Host>(
+    t: &mut Tex<H, PureTracker>,
+    d: &FileDoc,
+    level: usize,
+    idx: usize,
+    root: bool,
+) {
     let n = d.starts.len() - 1;
     let at = if idx == 0 { n.min(1) } else { idx };
     let open = level <= t.in_open;
@@ -317,7 +322,10 @@ fn place_file<H: Host>(t: &mut Tex<H, PureTracker>, d: &FileDoc, level: usize, i
         .filter(|f| open && f.name[..] == d.name[..])
     else {
         // (the job's first file ended: the job goes on after it)
-        assert!(root, "pure SSA: a file's unfold at a level that does not read it");
+        assert!(
+            root,
+            "pure SSA: a file's unfold at a level that does not read it"
+        );
         return;
     };
     f.data = d.bytes.clone();
@@ -361,7 +369,10 @@ fn command<H: Host + 'static>(op: Op, st: &Val, cx: &mut StepCx<'_, TexLang<H>>)
     let idx0 = match &file {
         None => 0,
         Some((d, _, _)) if cur == phi::END => d.starts.len() - 1,
-        Some((d, _, _)) => *d.index.get(&cur).expect("pure SSA: a cursor not in the file"),
+        Some((d, _, _)) => *d
+            .index
+            .get(&cur)
+            .expect("pure SSA: a cursor not in the file"),
     };
     with_engine::<H, _>(|e| {
         e.stats.steps += 1;
@@ -370,8 +381,11 @@ fn command<H: Host + 'static>(op: Op, st: &Val, cx: &mut StepCx<'_, TexLang<H>>)
         if e.at != Some(*sv) {
             e.stats.placed += 1;
             ps.set(&mut e.tex);
-            // (the state put back level 0 as it was: the names on it)
+            // (the state put back level 0 as it was: the names on it; and a
+            // run begins here, maybe in another graph, a segment's: the
+            // frontier made whole)
             e.last_defs.clear();
+            e.last = None;
         }
         frontier(e, cx);
         if let Some((d, level, root)) = &file {
@@ -448,7 +462,12 @@ fn frontier<H: Host + 'static>(e: &mut Engine<H>, cx: &mut StepCx<'_, TexLang<H>
         }
         // (a name the engine holds a later definition of, none reaching
         // here: the format's value)
-        let defined: Vec<Slot> = e.defined.iter().copied().filter(|s| !seen.contains(s)).collect();
+        let defined: Vec<Slot> = e
+            .defined
+            .iter()
+            .copied()
+            .filter(|s| !seen.contains(s))
+            .collect();
         for s in defined {
             put(e, s, None, &mut vals);
         }
@@ -693,9 +712,15 @@ fn finish<H: Host + 'static>(
     ps.kbase = base;
     ps.k = k;
     let key = phi::ver::hash64(&(base, k));
+    if *SPEC {
+        spec_check(e, key, ver, main);
+    }
     let st = Val::State(Arc::new(ps), ver);
     if done {
-        assert!(call.is_none(), "pure SSA: a file ended and another began in one command");
+        assert!(
+            call.is_none(),
+            "pure SSA: a file ended and another began in one command"
+        );
         return Step::Done(st);
     }
     if let Some((arg, h, j)) = call {
@@ -818,7 +843,11 @@ fn key_base(ps: &PState, cursor: ElemId) -> u64 {
 /// what it is at a paragraph's start in a document's body where nothing
 /// else is open. A guess that is wrong is the core's to find (the
 /// segment's arrival is checked like any successor).
-fn file_entries<H: Host + 'static>(op: Op, input: &Val, args: &Args<'_, TexLang<H>>) -> Vec<phi::Entry<Val>> {
+fn file_entries<H: Host + 'static>(
+    op: Op,
+    input: &Val,
+    args: &Args<'_, TexLang<H>>,
+) -> Vec<phi::Entry<Val>> {
     let Op::File(h, _) = op else {
         return Vec::new();
     };
@@ -859,9 +888,14 @@ fn file_entries<H: Host + 'static>(op: Op, input: &Val, args: &Args<'_, TexLang<
             let base = key_base(&ps, id);
             ps.kbase = base;
             ps.k = 0;
+            let key = phi::ver::hash64(&(base, 0u32));
+            if *SPEC {
+                let parts = PState::parts(&mut e.tex, &d.name);
+                GUESSES.lock().expect("guesses").insert(key, (v, parts));
+            }
             out.push(phi::Entry {
                 at: i,
-                key: phi::ver::hash64(&(base, 0u32)),
+                key,
                 guess: Some(Val::State(Arc::new(ps), Ver(v))),
             });
         }
@@ -872,3 +906,45 @@ fn file_entries<H: Host + 'static>(op: Op, input: &Val, args: &Args<'_, TexLang<
     });
     out
 }
+
+/// `SPEC`: the state the run in order made at key `key` against the
+/// guess made there, if any: which parts differ.
+fn spec_check<H: Host>(e: &mut Engine<H>, key: u64, ver: Ver, main: &[u8]) {
+    let g = GUESSES.lock().expect("guesses").remove(&key);
+    let Some((gv, gparts)) = g else {
+        return;
+    };
+    if gv == ver.0 {
+        std::eprintln!("pure spec: entry {key:x} guessed right");
+        return;
+    }
+    let parts = PState::parts(&mut e.tex, main);
+    let mut shown = 0;
+    for (a, b) in gparts.iter().zip(&parts) {
+        if a.1 != b.1 && shown < 6 {
+            std::eprintln!(
+                "pure spec: entry {key:x} wrong: guessed {} / made {}",
+                a.0,
+                b.0
+            );
+            shown += 1;
+        }
+    }
+    if gparts.len() != parts.len() {
+        std::eprintln!(
+            "pure spec: entry {key:x} wrong: {} parts guessed, {} made",
+            gparts.len(),
+            parts.len()
+        );
+    }
+}
+
+/// `PHITEX_PURE_SPEC=1`: each speculative entry's guess compared with
+/// the state the run in order made there, on stderr.
+static SPEC: std::sync::LazyLock<bool> =
+    std::sync::LazyLock::new(|| std::env::var("PHITEX_PURE_SPEC").is_ok_and(|v| v == "1"));
+
+/// The guesses made (`SPEC`), by key: their versions and parts.
+type Guesses = HashMap<u64, (u128, Vec<(alloc::string::String, u128)>)>;
+static GUESSES: std::sync::LazyLock<std::sync::Mutex<Guesses>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));

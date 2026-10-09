@@ -556,7 +556,7 @@ impl<H: Host, T: Tracker> Tex<H, T> {
             self.par_start = self.stop_at_candidate && crate::machine::clean_cuts();
             if T::VALUES
                 && self.defer_page
-                && self.commands - self.step_began >= crate::run::DEFER_PAGE_AFTER
+                && (T::PURE || self.commands - self.step_began >= crate::run::DEFER_PAGE_AFTER)
             {
                 // (the step ran commands before the paragraph began, a
                 // picture built in vertical mode before its `\leavevmode`:

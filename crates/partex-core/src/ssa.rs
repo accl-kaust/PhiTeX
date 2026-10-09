@@ -4960,7 +4960,12 @@ pub(crate) fn slot_value<H: Host, T: Tracker>(t: &Tex<H, T>, s: Slot) -> Option<
 /// Put value `v` back at slot `s` (`Store::set`): one store of the field,
 /// the value shared; a table slot's version array takes the recorded
 /// version.
-pub(crate) fn set_value<H: Host, T: Tracker>(t: &mut Tex<H, T>, vers: &mut Versions, s: Slot, v: &SVal) {
+pub(crate) fn set_value<H: Host, T: Tracker>(
+    t: &mut Tex<H, T>,
+    vers: &mut Versions,
+    s: Slot,
+    v: &SVal,
+) {
     use crate::track::list;
     use crate::track::save;
     let Some(val) = v.1.as_deref() else {

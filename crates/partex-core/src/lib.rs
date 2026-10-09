@@ -45,10 +45,10 @@ pub mod host;
 pub mod pagepdf;
 pub mod params;
 pub mod progress;
-mod skipcache;
-pub mod ssa;
 #[cfg(feature = "std")]
 pub mod pure;
+mod skipcache;
+pub mod ssa;
 pub mod track;
 
 mod adapter;

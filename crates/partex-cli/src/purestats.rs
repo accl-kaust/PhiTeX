@@ -1142,7 +1142,10 @@ impl Tracker for Stats {
             return None;
         }
         s.calls.push(true);
-        if f == Func::ShipOut && s.setup.is_none() && std::env::var_os("PARTEX_PURE_CONDS").is_some() {
+        if f == Func::ShipOut
+            && s.setup.is_none()
+            && std::env::var_os("PARTEX_PURE_CONDS").is_some()
+        {
             for c in &s.conds {
                 eprintln!(
                     "cond open at the first ship: opener {} kind {} test {:?}",

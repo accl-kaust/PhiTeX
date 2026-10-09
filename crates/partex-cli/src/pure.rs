@@ -3,10 +3,10 @@
 //! after each line of `PARTEX_SSA_REBUILD` run as a shell command (an
 //! edit), each linked from the steps' effects and its files written.
 
+use partex_core::Tex;
 use partex_core::host::Host;
 use partex_core::params::Params;
 use partex_core::pure::{Build, PureTracker, Shared};
-use partex_core::Tex;
 
 use crate::native;
 
@@ -109,7 +109,12 @@ pub fn run(mut host: native::NativeHost, params: Params, command_line: &[u8]) ->
         let t0 = std::time::Instant::now();
         b.engine().stats = partex_core::pure::Stats::default();
         let fr = b.refresh();
-        eprintln!("phitex: pure ssa build {}: files changed {}, removed {}", n + 1, fr.changed, fr.removed);
+        eprintln!(
+            "phitex: pure ssa build {}: files changed {}, removed {}",
+            n + 1,
+            fr.changed,
+            fr.removed
+        );
         let rep = b.run();
         let ms = t0.elapsed().as_secs_f64() * 1e3;
         let how = link(&mut b, &mut linker);

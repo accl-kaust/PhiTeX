@@ -154,7 +154,8 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                             // a fire it decides, at a clean point)
                             self.page_pending = false;
                             self.build_page()?;
-                            if self.fire_pending || self.candidate_due()? {
+                            // (pure SSA: the page builder a step of its own)
+                            if T::PURE || self.fire_pending || self.candidate_due()? {
                                 self.at_checkpoint = true;
                                 return Err(Jump::Checkpoint);
                             }

@@ -10,10 +10,10 @@
 //! not a name is the step's state ([`state::PState`]): the input stack,
 //! the nest, the save stack, the conditionals.
 
-pub mod tracker;
-mod version;
 mod lang;
 mod state;
+pub mod tracker;
+mod version;
 
 pub use lang::{Engine, OUTPUT, Op, Stats, TexLang, Val, install, uninstall};
 pub use state::PState;

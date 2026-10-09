@@ -104,7 +104,10 @@ impl FileDoc {
                 };
                 let n = ranges.len() - pre - suf;
                 let room = (hi - lo) / (n as u64 + 1);
-                assert!(room > 0 || n == 0, "pure SSA: no room for new lines' identities");
+                assert!(
+                    room > 0 || n == 0,
+                    "pure SSA: no room for new lines' identities"
+                );
                 ids.extend((0..n).map(|k| ElemId(lo + room * (k as u64 + 1))));
                 ids.extend_from_slice(&o.ids[o.ids.len() - suf..]);
             }
@@ -166,6 +169,9 @@ pub fn set_doc(h: u64, d: Option<FileDoc>) {
 pub fn all() -> Vec<(u64, Arc<FileDoc>)> {
     DOCS.read()
         .ok()
-        .and_then(|d| d.as_ref().map(|m| m.iter().map(|(k, v)| (*k, v.clone())).collect()))
+        .and_then(|d| {
+            d.as_ref()
+                .map(|m| m.iter().map(|(k, v)| (*k, v.clone())).collect())
+        })
         .unwrap_or_default()
 }

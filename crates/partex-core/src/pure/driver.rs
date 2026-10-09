@@ -42,6 +42,9 @@ impl<H: Host + 'static> Build<H> {
     pub fn new(mut tex: Tex<H, PureTracker>, command_line: &[u8], workers: usize) -> Self {
         // (the files are linked from the steps' effects)
         tex.set_effects(true);
+        // (the page builder after a paragraph's end or start a step of its
+        // own: a paragraph's lines read none of the page's state)
+        tex.set_defer_page(true);
         // (boxes carry versions, made when each becomes a shared value)
         partex_engine::node::VERSIONS.store(true, core::sync::atomic::Ordering::Relaxed);
         tex.remake_constant_lists();
@@ -60,6 +63,10 @@ impl<H: Host + 'static> Build<H> {
         tex.tracker.file_ends.borrow_mut().clear();
         let mut g: Graph<TexLang<H>> = Graph::new();
         g.cfg.workers = workers.max(1);
+        // (no rounds of dry steps: a worker's engine is a frontier of one
+        // run in order, a segment's; dry steps out of order would read a
+        // stale one)
+        g.cfg.round_min_ns = u64::MAX;
         // (the job's own input is the terminal's line, in the state: the
         // unfold reads no elements; its files are calls)
         let input = g.input(Val::Lines(Seq::new(), Ver::of(&0u8)));

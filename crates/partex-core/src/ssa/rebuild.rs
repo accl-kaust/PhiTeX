@@ -1219,7 +1219,11 @@ impl InputState {
         let limit = start + n;
         let ok = (0..256).contains(&end_line_char);
         // (the end of line char in its place, `first` after it)
-        top.push(if ok { end_line_char.cast_unsigned() } else { u32::from(b' ') });
+        top.push(if ok {
+            end_line_char.cast_unsigned()
+        } else {
+            u32::from(b' ')
+        });
         s.top = top;
         s.last = limit;
         s.first = limit + 1;
