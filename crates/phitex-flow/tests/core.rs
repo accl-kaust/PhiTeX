@@ -158,7 +158,7 @@ fn an_edit_gives_the_cold_log() {
     );
 }
 
-/// FAILS (run_piece, not the language): when a name read by two nodes of a
+/// FAILS (`run_piece`, not the language): when a name read by two nodes of a
 /// piece changes, only the first reader is marked (the edges keep one node
 /// per piece and name); if it runs again with the same output, the nodes
 /// after it are shared in place without looking at their reads, so the
@@ -170,13 +170,13 @@ fn an_edit_rereads_every_reader_of_a_changed_name() {
     edits_give_the_cold_log(1, &[("\\count18=3 ", "\\count18=5 ")]);
 }
 
-/// FAILS, same cause (run_piece's in-place sharing): a cold build of
-/// plain.tex at 4 threads ends with `Undefined control sequence \maxdimen`
+/// FAILS, same cause (`run_piece`'s in-place sharing): a cold build of
+/// `plain.tex` at 4 threads ends with `Undefined control sequence \maxdimen`
 /// in the probes piece: its first reader of `\maxdimen` runs again once the
 /// definition is installed, gives the same output, and the later reader
 /// (`\mydimen=\maxdimen`) is shared stale. With the in-place sharing off
 /// (`in_place = false`), both ignored tests and all of `tests/flow.rs`
-/// pass (checked; not committed: run_piece is not this change's to touch).
+/// pass (checked; not committed: `run_piece` is not this change's to touch).
 #[test]
 #[ignore = "run_piece shares a later reader of a changed name in place"]
 fn plain_at_four_threads() {
