@@ -441,13 +441,14 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         let q = match sh.find(name) {
             Some(q) => q,
             None if self.no_new_control_sequence => return Ok(UNDEFINED_CONTROL_SEQUENCE),
-            None => match sh.insert(name, core::iter::once(start).chain(self.probes(name))) {
-                Some(q) => q,
-                None => {
+            None => {
+                let Some(q) = sh.insert(name, core::iter::once(start).chain(self.probes(name)))
+                else {
                     let n = HASH_SIZE + self.params.hash_extra;
                     return self.overflow(b"hash size", n);
-                }
-            },
+                };
+                q
+            }
         };
         self.tracker.read(Cell::Hash(q));
         if !self.slot_is(q, name) {

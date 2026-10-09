@@ -1,4 +1,4 @@
-//! The session's shared interner (DESIGN 3.17.10): where a run's names
+//! The session's shared interner (DESIGN 3.17): where a run's names
 //! land depends on the names made before them, so a document run with
 //! other names placed first (decoys on its names' hash codes, in two
 //! orders) must write the same bytes as without the interner: every
@@ -166,32 +166,36 @@ fn code(name: &[u8]) -> i32 {
     h
 }
 
-/// Names with the hash codes of the document's: `k` of them each.
+/// Names with the hash codes of the document's: `k` of them each
+/// (`zq`, a letter for the copy, then 14 letters that land the code:
+/// their weights are powers of 2, so the digits a binary greedy picks
+/// reach any code).
 fn decoys(k: usize) -> Vec<Vec<u8>> {
-    let mut want: BTreeMap<i32, Vec<Vec<u8>>> = NAMES
-        .iter()
-        .map(|n| (code(n.as_bytes()), Vec::new()))
-        .collect();
-    let mut i = 0u64;
-    while want.values().any(|v| v.len() < k) {
-        let d = format!("zq{i:x}").into_bytes();
-        i += 1;
-        if let Some(v) = want.get_mut(&code(&d))
-            && v.len() < k
-        {
-            v.push(d);
+    const N: u32 = 14;
+    let mut out = std::collections::BTreeSet::new();
+    for n in NAMES {
+        let want = code(n.as_bytes());
+        for copy in 0..k {
+            let mut d = vec![b'z', b'q', b'a' + u8::try_from(copy).expect("a letter")];
+            let mut r = i64::from(want) - (i64::from(code(&d)) << N);
+            r -= (0..N).map(|i| 97i64 << i).sum::<i64>();
+            let mut r = r.rem_euclid(8501);
+            for i in (0..N).rev() {
+                let digit = (r >> i).min(25);
+                r -= digit << i;
+                d.push(b'a' + u8::try_from(digit).expect("a letter"));
+            }
+            assert_eq!(code(&d), want);
+            out.insert(d);
         }
     }
-    NAMES
-        .iter()
-        .flat_map(|n| want[&code(n.as_bytes())].clone())
-        .collect::<std::collections::BTreeSet<_>>()
-        .into_iter()
-        .collect()
+    out.into_iter().collect()
 }
 
 /// The run's outputs (PDF and `.aux`), and where its names landed.
-fn run(shared: bool, decoys: &[Vec<u8>]) -> (Vec<(Vec<u8>, Vec<u8>)>, Vec<i32>) {
+type Outputs = Vec<(Vec<u8>, Vec<u8>)>;
+
+fn run(shared: bool, decoys: &[Vec<u8>]) -> (Outputs, Vec<i32>) {
     let mut tex = Tex::new(host(), Untracked, params());
     tex.set_effects(false);
     let mut places = Vec::new();

@@ -1,6 +1,6 @@
 # HANDOFF: shared interner (branch `interner`), then the parallel graft
 
-This branch is work in progress and may be red. It branches off `main` (merge 1944023).
+The interner is ready for gating (see §2-4). It branches off `main` (merge 1944023).
 It covers queue item 4, the content-hash interner. Item 5, the parallel graft for the
 φ core in crates/phi, comes next and is designed below.
 
@@ -49,54 +49,40 @@ Known limit: p still depends on the insertion order of colliding names, because 
 never moved once lists hold it. The guarantee is "no output or version depends on p". The
 coordinator approved this.
 
-## 2. Decoy-order test: status
+## 2. Order tests: status (green)
 
-crates/partex-core/tests/interner.rs runs an ini pdfTeX doc five ways:
-plain, shared, shared with decoys(2), decoys(2) reversed, and decoys(3).
-- The doc uses \csname, \let, \toks, \write to doc.aux, \meaning, \string, and `\ifx\csname`.
-- Decoys are names with the same TeX hash codes.
-- The test asserts that the PDF and .aux bytes equal plain's, and that the names did land elsewhere (p0≠p1, p1≠p3).
+- crates/partex-core/tests/interner.rs (release, ~4 min) is green. It runs an ini pdfTeX doc six ways and checks that the PDF and .aux bytes equal plain's:
+  plain, shared, decoys(2), decoys(2) reversed, decoys(3), and 4000 random decoys.
+  It also asserts that the names did land elsewhere (p0≠p1, p0≠p4).
+- Sharing starts in `run_after_format`, once the format is loaded (or once -ini's primitives are in).
+  `Tex::share_names_after_format(decoys)` arms it.
+  Calling `share_names()` before the format loads would be wrong: the format load replaces the hash.
+- latexdoc check: `PARTEX_SHARE_NAMES=seed phitex --compat=pdftex -fmt=latex latexdoc` shares names with 4000 random decoys (seed 0: none).
+  dvi, aux and toc are byte-identical to plain for seeds 0, 7, 11 and 12345.
+  The CLI prints "phitex: shared interner: N names placed" (1144 for seed 0).
+  The script is target/x/ld/run.sh (untracked). It builds latex.fmt with `-ini -etex '*latex.ini'` from tests/e2e/latexdoc.tex.
 
-Status:
-- In an earlier debug run, plain and shared both completed. The test then failed on p1 == p2,
-  because reversing the same decoys gives the same taken set.
-  It now compares different decoy sets.
-- The release run with the new comparison was still running when I handed off, so the result is unknown.
-  Run it first.
-- If bytes differ, p or a string number leaks somewhere. The candidate places are in §3.
-
-Not done (coordinator point c, if cheap): W=1 against a shuffled insertion order on a LaTeX doc (latexdoc).
-- Easiest route: a CLI env var that calls `share_names()` and then interns N seeded decoys before the run.
-- Compare the PDF and .aux against a plain run.
-
-## 3. Audit list (coordinator point b): where p or a string number could reach output or behaviour
+## 3. Audit (coordinator point b): no leak found
 
 Checked:
-- diag.rs: suggestions are sorted by content. OK.
-- track.rs: cell_names is used only in reports. OK.
-- BTreeMaps in the pdf code are keyed by object or form numbers, not p. OK.
+- **pdfTeX dest names:** `sort_dest_names` in pdf/finish.rs sorts by bytes.
+- **Font trees:** writefont.rs keys them by name bytes and font numbers.
+- **PDF BTreeMaps:** keyed by object or form numbers.
+- **Prints:** every print of a cs goes through its text (characters). The only `print_int(str_ptr)` is the \dump statistics, which go to the log only.
+- **Hash iteration:**
+  - diag suggestions are sorted by content;
+  - track.rs cell names are reports only;
+  - equiv.rs versions Hash(p) cells by content, in-session;
+  - format.rs dump goes to the format, never shared;
+  - overlay.rs and statehash.rs differences are convergence probes within one view.
+- **Token versions:** `tok_version` is the only fold over raw tokens, and it uses spellings when shared.
+- **Shared table persistence:** save_state/statehash skip the shared table (`_`). It is never dumped or hashed.
 
-To do:
-- pdfTeX name trees and destination ordering (\pdfdest names, /Dests, /Names): sort by string bytes, never by string number or p.
-- \meaning, \show and \string of internal or frozen names. Also the print of an undefined cs.
-- Format dump / save_state: the shared table must not be dumped. Check that a dump made with sharing on equals one made with it off.
-- Every Ord or Hash on p (or a str number) in a map whose iteration feeds output or versions.
-  `grep -n "HashMap<i32\|BTreeMap<i32\|BTreeSet<i32"` in crates/partex-core/src, then follow each to its users.
-- statehash.rs: hashes over eqtb or hash contents keyed by p. With sharing on, any state hash used for reuse
-  must hash spellings instead.
-- Token-list versions made outside `tok_version` (any other fold over raw token values).
-- \fontname and font identifiers (`font_id_text`) are string numbers, so check that they print by characters.
-- The pure-SSA layer's Eqtb slot keys (in pure/*, not ours): agreement across views holds only if every view
-  calls `set_shared_names` before making names. Tell the coordinator.
+Open caveat for the pure layer: views agree on p only if each view gets the same `Arc<SharedNames>` (`set_shared_names`) before it makes names, and calls `SharedNames::enter` on its thread.
 
-## 4. Next steps for the interner
+## 4. Remaining for the interner
 
-1. Get tests/interner.rs green, in release (debug takes 12+ minutes).
-2. Finish the §3 audit. Fix leaks and add each one to the doc in the test.
-3. Point c (the latexdoc shuffle) if it is cheap.
-4. Run fmt, `cargo clippy --workspace --all-targets` (and with `--features std` for partex-core), and the wasm check.
-5. Add a two-line note to DESIGN (3.17.10, "shared interner").
-6. Commit and push to accl `interner`. Gate it (commands below) and report to the coordinator, who lands it.
+The coordinator gates it with `ACCL_COMMIT=<rev> scripts/accl/accl submit gate` and `… submit edits --brief --fixpoint`, then lands it.
 
 ## 5. Parallel graft design (approved model; build after the interner)
 
@@ -129,6 +115,8 @@ Model:
   - commit time per segment (it must stay flat with the segment count);
   - graft bytes copied (target 0 on the commit path).
 - The current serial graft is why W=8 cold at 1e8 was only 2.48×.
+
+Note (coordinator): the TeX agent is adding validate-before-run to crates/phi (a dirty step reruns only if an operand's version changed). Avoid crates/phi/src/graph.rs edits until that lands.
 
 The φ core lives in crates/phi on branch phi-core (head 9a6bb93, landed by the coordinator as 3a02b35 on main).
 - graph.rs is the engine, and graph/compact.rs, seal.rs, runs.rs and check.rs are its helpers.

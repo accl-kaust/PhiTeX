@@ -310,6 +310,13 @@ impl<H: Host, T: Tracker> Tex<H, T> {
         self.share_decoys = Some(decoys);
     }
 
+    /// The shared interner, if names are shared.
+    #[cfg(feature = "std")]
+    #[must_use]
+    pub fn shared_names(&self) -> Option<&alloc::sync::Arc<crate::interner::SharedNames>> {
+        self.shared_names.as_ref()
+    }
+
     /// Place the names this engine makes through `s` (a view of a session
     /// that shares one).
     #[cfg(feature = "std")]

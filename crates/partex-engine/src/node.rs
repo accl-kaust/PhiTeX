@@ -412,7 +412,7 @@ pub fn tok_version(toks: &[i32], protected: bool) -> u128 {
 }
 
 /// The spellings of the control sequences a session's shared interner
-/// placed (DESIGN 3.17.10): location `base + i` holds a name whose
+/// placed (DESIGN 3.17): location `base + i` holds a name whose
 /// spelling hashes to `hashes[i]` (0: none placed there by it). Shared by
 /// every engine view of the session; append-only.
 pub struct Spellings {
@@ -473,6 +473,7 @@ pub fn set_spellings(s: Option<Arc<Spellings>>) {
 /// [`tok_version`] with control sequences the interner placed by their
 /// spelling: such a token is two steps, a marker no token is (negative)
 /// and its spelling hash, in halves.
+#[cfg(feature = "std")]
 fn tok_version_spelled(toks: &[i32], protected: bool, sp: &Spellings) -> u128 {
     let flag = crate::web::CS_TOKEN_FLAG;
     let poly = toks.iter().fold(0, |h, &t| {

@@ -1,4 +1,4 @@
-//! The session's shared interner (DESIGN 3.17.10): the control sequences
+//! The session's shared interner (DESIGN 3.17): the control sequences
 //! a run makes, placed once for every engine view of the session, so that
 //! a name has one location whichever worker made it first.
 //!
@@ -102,6 +102,10 @@ impl SharedNames {
     }
 
     /// Where `name` is, if some view made it.
+    ///
+    /// # Panics
+    ///
+    /// If a thread panicked holding the interner's lock.
     #[must_use]
     pub fn find(&self, name: &[u8]) -> Option<i32> {
         let h = spelling_hash(name);
@@ -115,6 +119,10 @@ impl SharedNames {
     /// Where `name` is: found, or placed at the first free place of
     /// `places` (`None`: none is free, or the `hash_extra` region is
     /// full).
+    ///
+    /// # Panics
+    ///
+    /// If a thread panicked holding the interner's lock.
     pub fn insert(&self, name: &[u8], places: impl IntoIterator<Item = i32>) -> Option<i32> {
         let h = spelling_hash(name);
         let mut m = self.shard(h).lock().expect("the interner");
@@ -150,6 +158,10 @@ impl SharedNames {
     }
 
     /// Names placed so far.
+    ///
+    /// # Panics
+    ///
+    /// If a thread panicked holding the interner's lock.
     #[must_use]
     pub fn len(&self) -> usize {
         self.shards

@@ -2827,6 +2827,9 @@ fn run_memo(host: native::NativeHost, mut params: Params, command_line: &[u8]) -
     let effects = std::env::var("PARTEX_EFFECTS").is_ok_and(|v| v == "1");
     tex.set_effects(effects);
     let history = tex.run(command_line);
+    if let Some(s) = tex.shared_names() {
+        eprintln!("phitex: shared interner: {} names placed", s.len());
+    }
     if effects {
         deliver_effects(&mut tex);
     }

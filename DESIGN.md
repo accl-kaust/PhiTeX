@@ -2088,6 +2088,10 @@ between trips instead (the reference); `PARTEX_SSA_TOOLS=0` none.
 
 ---
 
+### 3.17 The shared interner
+
+A session's views place the names they make through one interner (`partex-core/src/interner.rs`): spelling → location, atomic per spelling and per slot, so `\foo` has one location in every view. Where a name lands still depends on the colliding names made first, so no output and no version may depend on it: token-list versions count a shared name by its spelling, and `tests/interner.rs` (decoys) plus `PARTEX_SHARE_NAMES=seed` on latexdoc check that the bytes do not change.
+
 ## 4. Where the code stands, and the work
 
 ### 4.1 What the code has, and what replaces it
