@@ -109,6 +109,8 @@ export interface PanelWords {
   /** The line under the page, and what it opens. */
   byline: string;
   about: string;
+  /** The strip while the core readies its next rebuild (`{s}`: the seconds so far). */
+  preparing: string;
   /** Where the full license is. */
   license: string;
   /** Where the real PDF is, after a stop, an approximation or an engine not yet run. */
@@ -131,6 +133,7 @@ const OVERLEAF_WORDS: PanelWords = {
       <div class="about-foot">LaTeX, with TeX Live's packages fetched as needed. Free software (AGPL-3.0-only,
       <a id="license" target="_blank" rel="noopener">full license</a>), provided as is, without any warranty.
       To turn it off: <code>chrome://extensions</code>.</div>`,
+  preparing: "Getting ready for instant edits… {s} s (pages still scroll)",
   license: "LICENSE.txt",
   realPdf: "Overleaf's PDF is the real one.",
   stopped: "Open ⓘ diagnostics for the details. Overleaf's PDF is one click away (PDF).",
@@ -913,7 +916,7 @@ export class Panel {
       // (a build waiting behind it is part of the same wait)
       const s = (performance.now() - this.prepSince) / 1000;
       el.innerHTML = `${icon("sync", 16)}<span></span><span class="mini busy"><i></i></span>`;
-      el.querySelector("span")!.textContent = `Getting ready for instant edits… ${s < 10 ? s.toFixed(1) : Math.round(s)} s (pages still scroll)`;
+      el.querySelector("span")!.textContent = this.words.preparing.replace("{s}", s < 10 ? s.toFixed(1) : String(Math.round(s)));
     } else {
       const s = (performance.now() - this.buildSince) / 1000;
       el.innerHTML = `${icon("sync", 16)}<span></span><span class="mini busy"><i></i></span>`;
