@@ -9,7 +9,7 @@
 use std::sync::Arc;
 
 use super::scan::IVal;
-use super::{Cond, Exec, Kind, Mode, Phi, Read, Src, outside_read};
+use super::{Cond, Exec, Kind, Mode, Phi, Read, Src};
 use crate::print;
 use crate::val::{Conv, IfKind, IntPar, Key, Meaning, Prim, Tok, Val};
 
@@ -592,6 +592,7 @@ impl Exec<'_> {
         let nodes = &self.chain.nodes;
         let here = nodes.len();
         let at = c.open as usize;
+        let depth = u16::try_from(self.st.conds.len()).unwrap_or(u16::MAX);
         if at >= here {
             // (opened and closed within this node: no arm of nodes)
             if self.phi.is_none() {
@@ -613,14 +614,10 @@ impl Exec<'_> {
                 continue;
             };
             let scope = self.chain.scope_of(d, &k);
-            self.reads.push(Arc::new(Read { key: k.clone(), src: Src::Node(d), val: after.clone(), scope }));
-            let before = match self.chain.resolve(&k, at) {
-                Some((d, v)) => {
-                    let scope = self.chain.scope_of(d, &k);
-                    Arc::new(Read { key: k.clone(), src: Src::Node(d), val: v, scope })
-                }
-                None => outside_read(self.env, self.outside, &k, at as u32),
-            };
+            self.reads.push(Arc::new(Read { key: k.clone(), src: Src::Node(d), val: after.clone(), scope, cond: None }));
+            // (as of the `\if`: the conditional's depth in the node's input
+            // state, the same as below the ones it opened and closed)
+            let before = super::before_read(self.chain, self.env, self.outside, &k, at, depth);
             let before_val = before.val.clone();
             self.reads.push(before);
             // (the φ is a definition: readers after the `\fi` read it)

@@ -9,9 +9,9 @@
 use std::fmt::Write as _;
 use std::sync::Arc;
 
-use crate::arith::{AWFUL_BAD, INF_BAD, badness};
+use crate::arith::{AWFUL_BAD, INF_BAD, badness, fract};
 use crate::item::{BoxNode, Disc, Interline, Item, Para, is_zero};
-use crate::pack::{Params, Spec, hpack};
+use crate::pack::{Params, Spec, end_lr_type, hpack, math_subtype};
 use crate::show::{Ctx, Place, report};
 use crate::val::Glue;
 
@@ -33,6 +33,16 @@ pub struct LineParams {
     pub clubpenalty: i32,
     pub widowpenalty: i32,
     pub brokenpenalty: i32,
+    /// e-TeX's `\interlinepenalties`, `\clubpenalties`, `\widowpenalties`
+    /// (`\displaywidowpenalties` before a display): empty is TeX's null.
+    pub interlinepenalties: Arc<[i32]>,
+    pub clubpenalties: Arc<[i32]>,
+    pub widowpenalties: Arc<[i32]>,
+    /// e-TeX's `\lastlinefit` (etex.web §1575–§1583).
+    pub last_line_fit: i32,
+    /// `\TeXXeTstate` positive: the lines get the LR nodes of the text
+    /// directions open across them (etex.web §1517–§1520).
+    pub texxet: bool,
     pub leftskip: Arc<Glue>,
     pub rightskip: Arc<Glue>,
     pub hangindent: i32,
@@ -64,6 +74,10 @@ pub struct Line {
 }
 
 const EJECT: i32 = -10000;
+/// `max_dimen`.
+const MAX_DIMEN: i32 = 0o7_777_777_777;
+/// `\parfillskip`'s glue subtype (its parameter's number + 1).
+const PAR_FILL_SKIP: u8 = 15;
 /// `max_halfword`: the line number of the last active node (tex.web 820).
 const MAX_HALFWORD: i32 = 0x0FFF_FFFF;
 
@@ -119,6 +133,10 @@ struct Active {
     line: i32,
     fit: usize,
     total: i64,
+    /// e-TeX's `active_short`, `active_glue` (with `\lastlinefit`): the
+    /// line's shortfall and its glue's stretch or shrink.
+    short: i64,
+    glue: i64,
 }
 
 /// A passive node (tex.web 821): the break's item (`None`: the end) and
@@ -151,6 +169,12 @@ struct Breaker<'a> {
     best_line: [i32; 4],
     threshold: i32,
     final_pass: bool,
+    /// e-TeX's `do_last_line_fit`, `fill_width`, `best_pl_short`,
+    /// `best_pl_glue`.
+    last_line_fit: bool,
+    fill_width: [i64; 3],
+    best_short: [i64; 4],
+    best_glue: [i64; 4],
     second_pass: bool,
     /// `cur_lang`, `l_hyf`, `r_hyf` (tex.web 892).
     lang: crate::hyph::LangState,
@@ -159,6 +183,67 @@ struct Breaker<'a> {
 }
 
 impl Breaker<'_> {
+    /// etex.web §1579: the badness and fitness of the last line, adjusted
+    /// as the line before it was (`\lastlinefit`), and the adjustment;
+    /// `None` when the criteria fail (the normal algorithm goes on).
+    fn last_line(&self, a: &Active, w: &W, shortfall: i64) -> Option<(i32, usize, i64)> {
+        if a.short == 0 || a.glue <= 0 {
+            return None;
+        }
+        if w[2] != self.fill_width[0] || w[3] != self.fill_width[1] || w[4] != self.fill_width[2] {
+            return None;
+        }
+        let g = if a.short > 0 { w[1] } else { w[5] };
+        if g <= 0 {
+            return None;
+        }
+        let clamp = |x: i64| x.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32;
+        let mut err = false;
+        let mut g = fract(clamp(g), clamp(a.short), clamp(a.glue), MAX_DIMEN).unwrap_or_else(|| {
+            err = true;
+            0
+        });
+        if self.p.last_line_fit < 1000 {
+            g = fract(g, self.p.last_line_fit, 1000, MAX_DIMEN).unwrap_or_else(|| {
+                err = true;
+                0
+            });
+        }
+        if err {
+            g = if a.short > 0 { MAX_DIMEN } else { -MAX_DIMEN };
+        }
+        let mut g = i64::from(g);
+        match g.cmp(&0) {
+            std::cmp::Ordering::Greater => {
+                // (§1580)
+                if g > shortfall {
+                    g = shortfall;
+                }
+                if g > 7_230_584 && w[1] < 1_663_497 {
+                    return Some((INF_BAD, 0, g));
+                }
+                let b = badness(g as i32, w[1] as i32);
+                let fit = if b > 99 {
+                    0
+                } else if b > 12 {
+                    1
+                } else {
+                    2
+                };
+                Some((b, fit, g))
+            }
+            std::cmp::Ordering::Less => {
+                // (§1581)
+                if -g > w[5] {
+                    g = -w[5];
+                }
+                let b = badness((-g) as i32, w[5] as i32);
+                Some((b, if b > 12 { 3 } else { 2 }, g))
+            }
+            std::cmp::Ordering::Equal => None,
+        }
+    }
+
     /// Where the line after an active node's break begins, and the widths
     /// before that point it has (a discretionary's post-break list): what
     /// tex.web's `break_width` computes (tex.web 837–840).
@@ -230,6 +315,8 @@ impl Breaker<'_> {
                                 line: self.best_line[fit] + 1,
                                 fit,
                                 total: self.minimal[fit],
+                                short: self.best_short[fit],
+                                glue: self.best_glue[fit],
                             };
                             self.active.insert(i, a);
                             i += 1;
@@ -258,11 +345,26 @@ impl Breaker<'_> {
             sub(&mut w, &self.prefix[s]);
             add(&mut w, &extra);
             add(&mut w, pre);
-            let shortfall = i64::from(line_width) - w[0];
+            let mut shortfall = i64::from(line_width) - w[0];
+            // (e-TeX's `g`: the line's glue stretch or shrink, or the last
+            // line's adjustment; set by `last_line`: `found`)
+            let mut g: i64 = 0;
+            let mut found = false;
             let (b, fit): (i32, usize) = if shortfall > 0 {
                 // (§852)
                 if w[2] != 0 || w[3] != 0 || w[4] != 0 {
-                    (0, 2)
+                    let mut r = (0, 2);
+                    if self.last_line_fit {
+                        // (etex.web §1579: the paragraph's last line)
+                        if let Some((b, fit, x)) = cur.map_or_else(|| self.last_line(&a, &w, shortfall), |_| None) {
+                            r = (b, fit);
+                            g = x;
+                            found = true;
+                        } else {
+                            shortfall = 0;
+                        }
+                    }
+                    r
                 } else if shortfall > 7_230_584 && w[1] < 1_663_497 {
                     (INF_BAD, 0)
                 } else {
@@ -281,6 +383,17 @@ impl Breaker<'_> {
                 let b = if -shortfall > w[5] { INF_BAD + 1 } else { badness((-shortfall) as i32, w[5] as i32) };
                 (b, if b > 12 { 3 } else { 2 })
             };
+            if self.last_line_fit && !found {
+                // (etex.web §1582)
+                if cur.is_none() {
+                    shortfall = 0;
+                }
+                g = match shortfall.cmp(&0) {
+                    std::cmp::Ordering::Greater => w[1],
+                    std::cmp::Ordering::Less => w[5],
+                    std::cmp::Ordering::Equal => 0,
+                };
+            }
             let mut artificial = false;
             let stays = if b > INF_BAD || pi == EJECT {
                 // (§854)
@@ -329,6 +442,11 @@ impl Breaker<'_> {
                 self.minimal[fit] = d;
                 self.best_place[fit] = a.passive;
                 self.best_line[fit] = l;
+                if self.last_line_fit {
+                    // (etex.web §1583)
+                    self.best_short[fit] = shortfall;
+                    self.best_glue[fit] = g;
+                }
                 if d < self.minimum {
                     self.minimum = d;
                 }
@@ -344,7 +462,15 @@ impl Breaker<'_> {
     /// One pass (tex.web 863–873): the chosen final active node, if the
     /// pass found breaks.
     fn pass(&mut self) -> Option<Active> {
-        self.active = vec![Active { passive: None, hyphenated: false, line: self.p.prev_graf + 1, fit: 2, total: 0 }];
+        self.active = vec![Active {
+            passive: None,
+            hyphenated: false,
+            line: self.p.prev_graf + 1,
+            fit: 2,
+            total: 0,
+            short: 0,
+            glue: 0,
+        }];
         self.passive.clear();
         self.minimal = [i64::from(AWFUL_BAD); 4];
         self.minimum = i64::from(AWFUL_BAD);
@@ -526,10 +652,31 @@ pub fn lines(items: &[Item], p: &LineParams) -> Vec<Arc<Line>> {
         best_line: [0; 4],
         threshold: 0,
         final_pass: false,
+        last_line_fit: false,
+        fill_width: [0; 3],
+        best_short: [0; 4],
+        best_glue: [0; 4],
         second_pass: false,
         lang: p.hyph.as_ref().map(|h| h.init).unwrap_or_default(),
         missing: Vec::new(),
     };
+    // (etex.web §1578: `\lastlinefit` needs `\parfillskip`'s stretch
+    // infinite and `\leftskip` plus `\rightskip`'s finite)
+    let fill = match items.last() {
+        Some(Item::Glue { g, sub: PAR_FILL_SKIP, .. }) => Some(g.clone()),
+        _ => None,
+    };
+    if p.last_line_fit > 0
+        && let Some(q) = &fill
+        && q.stretch > 0
+        && q.stretch_order > 0
+        && br.background[2] == 0
+        && br.background[3] == 0
+        && br.background[4] == 0
+    {
+        br.last_line_fit = true;
+        br.fill_width[usize::from(q.stretch_order.min(3)) - 1] = i64::from(q.stretch);
+    }
     // (§863: the passes)
     let mut second = if p.pretolerance >= 0 {
         br.threshold = p.pretolerance;
@@ -556,6 +703,17 @@ pub fn lines(items: &[Item], p: &LineParams) -> Vec<Arc<Line>> {
             br.final_pass = p.emergency_stretch <= 0;
         }
     };
+    // (etex.web §1583: the last line's `\parfillskip` adjusted)
+    if br.last_line_fit
+        && best.short != 0
+        && let Some(q) = &fill
+    {
+        let mut g = **q;
+        g.width = (i64::from(g.width) + best.short - best.glue) as i32;
+        g.stretch = 0;
+        let last = br.items.len() - 1;
+        br.items[last] = Item::Glue { g: Arc::new(g), sub: PAR_FILL_SKIP, zero: false };
+    }
     let mut out = post_line_break(&br, best);
     // (a hyphen character the font lacks, reported as the second pass met
     // it: before the lines' diagnostics)
@@ -581,6 +739,21 @@ pub fn lines(items: &[Item], p: &LineParams) -> Vec<Arc<Line>> {
 /// §877–§890: the lines, justified.
 fn post_line_break(br: &Breaker<'_>, best: Active) -> Vec<Arc<Line>> {
     let p = br.p;
+    // (etex.web's LR stack, a local: the end types of the text directions
+    // open, innermost last)
+    let mut lr: Vec<u8> = Vec::new();
+    let adjust_lr = |lr: &mut Vec<u8>, it: &Item| {
+        if let Item::Math { after, lr: base, .. } = it {
+            let s = math_subtype(*base, *after);
+            if *after {
+                if lr.last() == Some(&end_lr_type(s)) {
+                    lr.pop();
+                }
+            } else {
+                lr.push(end_lr_type(s));
+            }
+        }
+    };
     let items = &br.items[..];
     let mut breaks: Vec<Option<usize>> = Vec::new();
     let mut q = best.passive;
@@ -596,7 +769,18 @@ fn post_line_break(br: &Breaker<'_>, best: Active) -> Vec<Arc<Line>> {
     let mut carry: Vec<Item> = Vec::new();
     for (bi, &brk) in breaks.iter().enumerate() {
         let cur_line = p.prev_graf + 1 + bi as i32;
-        let mut line: Vec<Item> = std::mem::take(&mut carry);
+        let mut line: Vec<Item> = Vec::new();
+        if p.texxet {
+            // (etex.web §1517: the directions open at the line's start begin
+            // it, outermost first; then those of the line's own nodes)
+            for &e in &lr {
+                line.push(Item::Math { w: 0, after: false, lr: e - 1 });
+            }
+            for it in &items[start..brk.unwrap_or(items.len()).max(start)] {
+                adjust_lr(&mut lr, it);
+            }
+        }
+        line.append(&mut carry);
         let mut disc_break = false;
         let mut post_disc = false;
         let rightskip = Item::Glue { g: p.rightskip.clone(), sub: 9, zero: is_zero(&p.rightskip) };
@@ -627,9 +811,13 @@ fn post_line_break(br: &Breaker<'_>, best: Active) -> Vec<Arc<Line>> {
                     line.push(rightskip);
                     b + 1
                 }
-                Item::Math { after, lr, .. } => {
+                Item::Math { after, lr: base, .. } => {
                     line.extend(items[start..b].iter().cloned());
-                    line.push(Item::Math { w: 0, after: *after, lr: *lr });
+                    let m = Item::Math { w: 0, after: *after, lr: *base };
+                    if p.texxet {
+                        adjust_lr(&mut lr, &m);
+                    }
+                    line.push(m);
                     line.push(rightskip);
                     b + 1
                 }
@@ -644,6 +832,12 @@ fn post_line_break(br: &Breaker<'_>, best: Active) -> Vec<Arc<Line>> {
             line.push(rightskip);
             items.len()
         };
+        if p.texxet && !lr.is_empty() {
+            // (etex.web §1520: and end before `\rightskip`, innermost first)
+            let at = line.len() - 1;
+            let ends: Vec<Item> = lr.iter().rev().map(|&e| Item::Math { w: 0, after: true, lr: e - 1 }).collect();
+            line.splice(at..at, ends);
+        }
         // (§887: `\leftskip`, unless zero)
         if !is_zero(&p.leftskip) {
             line.insert(0, Item::Glue { g: p.leftskip.clone(), sub: 8, zero: false });
@@ -658,6 +852,9 @@ fn post_line_break(br: &Breaker<'_>, best: Active) -> Vec<Arc<Line>> {
             (w, i)
         };
         let mut adjust = Vec::new();
+        if p.texxet {
+            crate::pack::lr_fix(&mut line);
+        }
         let packed = hpack(line, Spec::Exactly(width), &p.pack, Some(&mut adjust));
         // (the diagnostic is hpack's: before the shift, tex.web 889)
         let report = packed.report.map(|r| report(r, &packed.b, Place::Paragraph, &p.show));
@@ -666,11 +863,21 @@ fn post_line_break(br: &Breaker<'_>, best: Active) -> Vec<Arc<Line>> {
         // (§890: the interline penalty)
         let mut pen = None;
         if cur_line + 1 != best_line {
-            let mut x = p.interlinepenalty;
-            if cur_line == p.prev_graf + 1 {
+            // (etex.web §890: a penalties array, where there is one)
+            let at = |a: &[i32], r: i32| a[(r.max(1) as usize).min(a.len()) - 1];
+            let mut x = if p.interlinepenalties.is_empty() {
+                p.interlinepenalty
+            } else {
+                at(&p.interlinepenalties, cur_line)
+            };
+            if !p.clubpenalties.is_empty() {
+                x += at(&p.clubpenalties, cur_line - p.prev_graf);
+            } else if cur_line == p.prev_graf + 1 {
                 x += p.clubpenalty;
             }
-            if cur_line + 2 == best_line {
+            if !p.widowpenalties.is_empty() {
+                x += at(&p.widowpenalties, best_line - cur_line - 1);
+            } else if cur_line + 2 == best_line {
                 x += p.widowpenalty;
             }
             if disc_break {
@@ -689,6 +896,10 @@ fn post_line_break(br: &Breaker<'_>, best: Active) -> Vec<Arc<Line>> {
                 let it = &items[start];
                 if it.non_discardable() || matches!(it, Item::Kern { sub, .. } if *sub != 1) {
                     break;
+                }
+                if p.texxet {
+                    // (etex.web §879: a math node discarded still counts)
+                    adjust_lr(&mut lr, it);
                 }
                 start += 1;
             }

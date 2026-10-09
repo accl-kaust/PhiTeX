@@ -18,15 +18,17 @@
 //!   parameters (plain `IntPar`s and `\everyeof`), `\readline`'s parsing;
 //! - material: `\marks` (`Item::Marks`), TeXXeT's `\beginL`… (`Item::Math`).
 
+use std::fmt::Write as _;
 use std::sync::Arc;
 
-use super::material::BoxKind;
+use super::material::{BoxContext, BoxKind};
 use super::math::MathKind;
 use super::scan::{IVal, Lv, MAX_DIMEN, mult_and_add, nx_plus_y};
 use super::{EOL_UNREAD, Exec, GroupKind, Mode, PendingText, TState};
 use crate::item::Item;
 use crate::print;
-use crate::show::{LN, RAW};
+use crate::pack::Spec;
+use crate::show::{LINE, LN, NL, RAW};
 use crate::val::{Glue, IntPar, Key, Meaning, Prim, Tok, Val};
 
 /// `\eTeXversion` and `\eTeXrevision` (etex.web §2).
@@ -109,26 +111,12 @@ fn quotient(n: i32, d: i32, err: &mut bool) -> i32 {
     (if negative { -a } else { a }) as i32
 }
 
-/// etex.web §1539, `fract`: `x * n / d` rounded, with the exact product;
-/// an error past `max`.
+/// etex.web §1539, `fract` (`arith::fract`), `err` set on an error.
 fn fract(x: i32, n: i32, d: i32, max: i32, err: &mut bool) -> i32 {
-    if d == 0 {
+    crate::arith::fract(x, n, d, max).unwrap_or_else(|| {
         *err = true;
-        return 0;
-    }
-    if x == 0 {
-        return 0;
-    }
-    let negative = ((x < 0) != (n < 0)) != (d < 0);
-    let num = i128::from(x).abs() * i128::from(n).abs();
-    let d = i128::from(d).abs();
-    let a = (2 * num + d) / (2 * d);
-    if a > i128::from(max) {
-        *err = true;
-        return 0;
-    }
-    let a = a as i32;
-    if negative { -a } else { a }
+        0
+    })
 }
 
 /// `normalize_glue` (etex.web §1529): no order for a zero component.
@@ -315,7 +303,11 @@ impl Exec<'_> {
     /// `\currentgrouptype` (etex.web §1393, tex.web 269's group codes) of
     /// the innermost open group.
     fn group_type(&self) -> i32 {
-        let Some(g) = self.st.groups.last() else { return 0 };
+        self.st.groups.last().map_or(0, Self::type_of)
+    }
+
+    /// A group's code (tex.web 269).
+    fn type_of(g: &super::Group) -> i32 {
         match g.kind {
             GroupKind::Simple => 1,
             GroupKind::SemiSimple => 14,
@@ -329,7 +321,7 @@ impl Exec<'_> {
                 Some((BoxKind::Math(k), _)) => match **k {
                     MathKind::Sub(_) => 9,
                     MathKind::Choice(..) => 13,
-                    MathKind::Left => 16,
+                    MathKind::Left { .. } => 16,
                     // (`$`, `$$`, `\eqno`: `math_shift_group`)
                     _ => 15,
                 },
@@ -603,13 +595,7 @@ impl Exec<'_> {
                     self.err(format!("Improper {t}"));
                 }
             }
-            Prim::Middle => self.err("\\middle is not supported yet (math)".into()),
-            Prim::ShowE(k) => {
-                if k == 5 {
-                    let _ = self.scan_toks_raw();
-                }
-                self.err(format!("{t} is not supported yet (it needs the error context, CORE.md)"));
-            }
+            Prim::ShowE(k) => self.show_etex(k),
             _ => {}
         }
     }
@@ -620,6 +606,243 @@ impl Exec<'_> {
     pub(super) fn new_interaction(&mut self, k: i32) {
         self.log = Some(format!("{RAW}{LN}").into());
         self.define(Key::Interaction, Val::Int(k), true);
+    }
+
+    // ------------------------------------------------------------ penalties arrays
+
+    /// `\interlinepenalties n p1 … pn` and friends (etex.web §1248): `n`
+    /// values, none if `n` is not positive.
+    pub(super) fn penalties_assign(&mut self, k: u8, global: bool) {
+        self.optional_equals();
+        let mut n = self.scan_int();
+        // (TeX's memory holds at most a few million words)
+        if n > 1 << 20 {
+            self.err("TeX capacity exceeded, sorry [main memory size]".into());
+            n = 0;
+        }
+        let mut v = Vec::with_capacity(usize::try_from(n).unwrap_or(0).min(1024));
+        for _ in 0..n.max(0) {
+            v.push(self.scan_int());
+        }
+        self.define(Key::PenaltiesArray(k), Val::Penalties(Arc::from(v)), global);
+    }
+
+    /// A penalties array (empty: TeX's null).
+    pub(super) fn penalties(&mut self, k: u8) -> Arc<[i32]> {
+        match self.get(&Key::PenaltiesArray(k)) {
+            Val::Penalties(p) => p,
+            _ => Arc::from([]),
+        }
+    }
+
+    /// `\the\interlinepenalties n` (etex.web's "Fetch a penalties array
+    /// element"): element `n` (the last past the end), the count for 0, 0
+    /// for a negative `n` or no array.
+    pub(super) fn penalties_item(&mut self, k: u8) -> i32 {
+        let n = self.scan_int();
+        let p = self.penalties(k);
+        if p.is_empty() || n < 0 {
+            0
+        } else if n == 0 {
+            p.len() as i32
+        } else {
+            p[(n as usize).min(p.len()) - 1]
+        }
+    }
+
+    // ------------------------------------------------------------ \showgroups, \showifs, \showtokens
+
+    /// The error context of the command just read (tex.web 311–318, as
+    /// `\showbox`'s: `show_context`, laid out by the log's gatherer once
+    /// the line number is known), then the end of a help-less error in
+    /// batch mode (two `print_ln`s).
+    fn file_context(&mut self) -> String {
+        let mut s = String::new();
+        self.show_context(&mut s);
+        s.push(LN);
+        s.push(LN);
+        s
+    }
+
+    /// Where the `k`-th open group (`group`) or conditional began, as a
+    /// log placeholder: the line of the node that opened it, found through
+    /// this node's state when the log is laid out (`graph::opener`).
+    fn entry_line(group: bool, k: usize) -> String {
+        format!("{LINE}{}{k}{LINE}", if group { 'E' } else { 'C' })
+    }
+
+    /// `\showgroups` (4), `\showtokens` (5), `\showifs` (6): etex.web's
+    /// cases of `show_whatever`, in batch mode: the display, then `! OK.`
+    /// (but for `\showtokens`) and the error's context, in the log.
+    fn show_etex(&mut self, k: u8) {
+        let mut s = String::new();
+        s.push(RAW);
+        match k {
+            5 => {
+                // (`the_toks` with `show_tokens`: a general text, shown)
+                let toks = self.scan_toks_raw();
+                let mut t = String::new();
+                self.show_toks(&mut t, &toks);
+                s.push(NL);
+                s.push_str("> ");
+                s.push_str(&t);
+                s.push('.');
+            }
+            4 => {
+                s.push(NL);
+                s.push(LN);
+                self.show_save_groups(&mut s);
+                s.extend([NL, LN, NL]);
+                s.push_str("! OK.");
+            }
+            _ => {
+                s.push(NL);
+                s.push(LN);
+                self.show_ifs(&mut s);
+                s.extend([NL, LN, NL]);
+                s.push_str("! OK.");
+            }
+        }
+        let cx = self.file_context();
+        s.push_str(&cx);
+        self.log_raw(&s);
+    }
+
+    /// etex.web's `show_save_groups`: each open group, innermost first,
+    /// with where it was entered and what began it.
+    fn show_save_groups(&mut self, s: &mut String) {
+        let groups: Vec<super::Group> = self.st.groups.0.as_deref().cloned().unwrap_or_default();
+        for (i, g) in groups.iter().enumerate().rev() {
+            let level = i + 1;
+            let ty = Self::type_of(g);
+            let name = match ty {
+                1 => "simple",
+                14 => "semi simple",
+                2 => "hbox",
+                3 => "adjusted hbox",
+                4 => "vbox",
+                5 => "vtop",
+                10 => "disc",
+                12 => "vcenter",
+                9 => "math",
+                13 => "math choice",
+                15 => "math shift",
+                _ => "math left",
+            };
+            s.push(NL);
+            let _ = write!(s, "### {name} group (level {level}) entered at line {} (", Self::entry_line(true, i));
+            let bg = g.boxg.as_deref();
+            let mut out = String::new();
+            match ty {
+                1 | 9 => out.push('{'),
+                14 => self.print_esc(&mut out, "begingroup"),
+                2..=5 | 12 => {
+                    if let Some(b) = bg {
+                        if ty != 12 {
+                            // (the box context)
+                            match b.context {
+                                BoxContext::Shift(0) => {}
+                                BoxContext::Shift(d) => {
+                                    let cmd = match (b.mode == Mode::V, d > 0) {
+                                        (true, true) => "moveright",
+                                        (true, false) => "moveleft",
+                                        (false, true) => "lower",
+                                        (false, false) => "raise",
+                                    };
+                                    self.print_esc(&mut out, cmd);
+                                    print::scaled(&mut out, d.abs());
+                                    out.push_str("pt");
+                                }
+                                BoxContext::Set(n, global) => {
+                                    if global {
+                                        self.print_esc(&mut out, "global");
+                                    }
+                                    self.print_esc(&mut out, "setbox");
+                                    let _ = write!(out, "{n}=");
+                                }
+                                BoxContext::Ship => self.print_esc(&mut out, "shipout"),
+                            }
+                        }
+                        let box_name = match ty {
+                            4 => "vbox",
+                            5 => "vtop",
+                            12 => "vcenter",
+                            _ => "hbox",
+                        };
+                        self.print_esc(&mut out, box_name);
+                        // (the box's packaging)
+                        let (word, d) = match b.spec {
+                            Spec::Exactly(w) => ("to", w),
+                            Spec::Additional(w) => ("spread", w),
+                        };
+                        if d != 0 {
+                            out.push(' ');
+                            out.push_str(word);
+                            print::scaled(&mut out, d);
+                            out.push_str("pt");
+                        }
+                    }
+                    out.push('{');
+                }
+                10 | 13 => {
+                    let done = match bg.map(|b| &b.kind) {
+                        Some(BoxKind::Disc(k, _)) => usize::from(*k),
+                        Some(BoxKind::Math(m)) => match &**m {
+                            MathKind::Choice(k, _) => usize::from(*k),
+                            _ => 0,
+                        },
+                        _ => 0,
+                    };
+                    self.print_esc(&mut out, if ty == 10 { "discretionary" } else { "mathchoice" });
+                    for _ in 0..done.min(3) {
+                        out.push_str("{}");
+                    }
+                    out.push('{');
+                }
+                15 => match bg.map(|b| &b.kind) {
+                    Some(BoxKind::Math(m)) => match &**m {
+                        MathKind::EqNo { left } => self.print_esc(&mut out, if *left { "leqno" } else { "eqno" }),
+                        MathKind::Inline => out.push('$'),
+                        _ => out.push_str("$$"),
+                    },
+                    _ => out.push('$'),
+                },
+                _ => {
+                    let middle = matches!(bg.map(|b| &b.kind), Some(BoxKind::Math(m)) if matches!(**m, MathKind::Left { middle: true }));
+                    self.print_esc(&mut out, if middle { "middle" } else { "left" });
+                }
+            }
+            s.push_str(&out);
+            s.push(')');
+        }
+        s.push(NL);
+        s.push_str("### bottom level");
+    }
+
+    /// etex.web's `show_ifs`: each open conditional, innermost first.
+    fn show_ifs(&mut self, s: &mut String) {
+        const NAMES: [&str; 20] = [
+            "if", "ifcat", "ifnum", "ifdim", "ifodd", "ifvmode", "ifhmode", "ifmmode", "ifinner", "ifvoid", "ifhbox",
+            "ifvbox", "ifx", "ifeof", "iftrue", "iffalse", "ifcase", "ifdefined", "ifcsname", "iffontchar",
+        ];
+        let conds: Vec<super::Cond> = self.st.conds.0.as_deref().cloned().unwrap_or_default();
+        if conds.is_empty() {
+            s.push(NL);
+            s.push_str("### no active conditionals");
+            return;
+        }
+        for (i, c) in conds.iter().enumerate().rev() {
+            let mut out = String::new();
+            if c.code >= 32 {
+                self.print_esc(&mut out, "unless");
+            }
+            self.print_esc(&mut out, NAMES[usize::from(c.code % 32).min(19)]);
+            if c.limit == 2 {
+                self.print_esc(&mut out, "else");
+            }
+            s.push(NL);
+            let _ = write!(s, "### level {}: {out} entered on line {}", i + 1, Self::entry_line(false, i));
+        }
     }
 
     /// `\interactionmode=n` (etex.web §1428).

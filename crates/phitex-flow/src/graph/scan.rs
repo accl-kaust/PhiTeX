@@ -68,6 +68,7 @@ pub(super) fn is_internal(m: &Meaning) -> bool {
                 | Prim::PageDimen(_)
                 | Prim::BoxDimen(_)
                 | Prim::Parshape
+                | Prim::PenShape(_)
                 | Prim::FontDimen
                 | Prim::LastItem(_)
                 | Prim::Font
@@ -227,6 +228,7 @@ impl Exec<'_> {
                     None => 0,
                 }),
                 Prim::LastItem(k) if k >= crate::prim::ETEX_ITEM => self.etex_item(k),
+                Prim::PenShape(k) => IVal::Int(self.penalties_item(k)),
                 Prim::LastItem(k) => {
                     // (tex.web 424: the current list's last item, the one read
                     // of material, CORE.md; `\inputlineno` and `\badness`

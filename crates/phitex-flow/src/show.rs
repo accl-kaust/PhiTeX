@@ -445,18 +445,24 @@ impl Shower<'_> {
                     NK::Radical(_) => "radical",
                     NK::Accent { .. } => "accent",
                     NK::Left(_) => "left",
-                    NK::Right(_) => "right",
+                    NK::Right(_, middle) => {
+                        if *middle {
+                            "middle"
+                        } else {
+                            "right"
+                        }
+                    }
                     NK::Fraction { .. } => unreachable!(),
                 };
                 self.cx.esc(self.out, name);
                 match &n.kind {
-                    NK::Radical(d) | NK::Left(d) | NK::Right(d) => self.delimiter(*d),
+                    NK::Radical(d) | NK::Left(d) | NK::Right(d, _) => self.delimiter(*d),
                     NK::Accent { fam, ch } => self.fam_and_char(*fam, *ch),
                     NK::Op(Limits::Limits) => self.cx.esc(self.out, "limits"),
                     NK::Op(Limits::NoLimits) => self.cx.esc(self.out, "nolimits"),
                     _ => {}
                 }
-                if !matches!(n.kind, NK::Left(_) | NK::Right(_)) {
+                if !matches!(n.kind, NK::Left(_) | NK::Right(..)) {
                     self.field(&n.nucleus, '.');
                 }
                 self.field(&n.sup, '^');

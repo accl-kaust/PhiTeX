@@ -15,7 +15,7 @@
 use std::fmt::Write as _;
 use std::sync::Arc;
 
-use crate::graph::{Run, enclosing_open, paragraph_start, paragraph_start_at};
+use crate::graph::{Run, enclosing_open, opener, paragraph_start, paragraph_start_at};
 use crate::item::Item;
 use crate::page::{Lines, Page, page_mark};
 use crate::show::LINE;
@@ -45,6 +45,14 @@ fn resolve(s: &str, text: &[char], run: &Run, i: usize) -> String {
             "P" => {
                 let start = paragraph_start(&run.chain, i);
                 let _ = write!(out, "{REL}{}{REL}--{REL}{here}{REL}", line_of(text, run, start));
+            }
+            // (`E`/`C` and k: the line where the k-th group or conditional
+            // open at node `i` (from the outside) began — for e-TeX's
+            // `\showgroups`, `\showifs` — read through the node's state now)
+            w if w.starts_with('E') || w.starts_with('C') => {
+                let k = w[1..].parse::<usize>().unwrap_or(0);
+                let j = opener(&run.chain, i, w.starts_with('E'), k).unwrap_or(i).min(i);
+                let _ = write!(out, "{REL}{}{REL}", line_of(text, run, j));
             }
             // (where a list began, `\showlists`: the `Open` node of the
             // `k`-th enclosing group, or the paragraph at a level)

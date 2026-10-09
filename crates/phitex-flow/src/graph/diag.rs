@@ -73,7 +73,7 @@ impl Exec<'_> {
     /// again>`, `<recently read>`), `...` for the levels between (IniTeX's
     /// `\errorcontextlines` is 0; macro levels are not named here: CORE.md),
     /// and the reader's own line.
-    fn show_context(&mut self, s: &mut String) {
+    pub(super) fn show_context(&mut self, s: &mut String) {
         let n = self.st.pending.len();
         let mut middle = n;
         if let Some((list, i, true)) = self.st.pending.last().cloned() {

@@ -589,9 +589,22 @@ Conflicts and gaps, with graph-shaped proposals:
 2. **`\lastnodetype`** is the one read of material (Conflict 13), with its
    gaps: on the main vertical list after a paragraph's lines (TeX's
    `last_node_type`, set by the page builder) it reads as -1.
-3. **`\showgroups`, `\showtokens`, `\showifs`**: their `> …` text is easy;
-   the error context after it (`l.N …`) needs the line field and
-   `show_context` (Conflict 16). Not yet: an error, the text consumed.
+3. **`\showgroups`, `\showtokens`, `\showifs`**: the display, `! OK.`
+   and the error's context are log text, as in batch mode. The context is
+   `\showbox`'s (`diag::show_context`: a backed-up list at the top, `...`
+   for the levels between, the file level's two lines, tex.web 311–318),
+   one mechanism: its placeholders (`X`, `T`) are laid out by the log's
+   `rebase` once the absolute line number is known, cut at
+   `half_error_line` 50 and `error_line` 79. Where each open group or
+   conditional was entered is a placeholder too (`E`k, `C`k: the k-th
+   from the outside), read through the node's input state when the log is
+   gathered: the node indices `Group::at`, `Cond::open` are positions,
+   never compared when deciding what an edit keeps (`eq_but_pos`), and a
+   kept node's state has them moved to where those nodes are now. Not
+   yet: a `\scantokens` text's own level in the context (the file's line
+   is shown).
+   The entry lines of groups and conditionals are their opening nodes'
+   lines (`Group.at`, `Cond.open`: `LINE N<node> LINE`).
 4. **`\readline`**: parsed (`n to \cs`); the line comes from a stream
    (Conflict 6), and from the terminal (refused in batch mode, as TeX does)
    while no stream is open. `readline_toks` makes a line's tokens.
@@ -604,20 +617,35 @@ Conflicts and gaps, with graph-shaped proposals:
 6. **`\topmarks n`…`\splitbotmarks n`**: the number is scanned; a read of
    `Key::Mark(which, n)`, as `\topmark` (Conflicts 12, 18; an output
    routine's run defines them).
-7. **TeXXeT**: `\beginL`… are items when `\TeXXeTstate` is positive
-   ("Improper `\beginL`" otherwise); no reversal yet in line breaking
-   (`post_line_break`'s LR nodes), packing (LR anomalies) or DVI
-   (`reverse`). Shared with math (agent B), whose math node is the same
-   item.
-8. **`\middle`**: math (agent B): the primitive exists; an error until the
-   math lists are.
-9. **`\interlinepenalties`, `\clubpenalties`, `\widowpenalties`,
-   `\displaywidowpenalties`**: not yet. Proposal: `Key::PenShape(k)` (a
-   list of penalties), read by the paragraph node's line parameters.
-10. **`\lastlinefit`, `\savinghyphcodes`, `\predisplaydirection`**:
-    parameters, assigned and read; line breaking, hyphenation and display
-    math do not read them yet. The `\tracing…` parameters are values only
-    (no tracing output: programs keep them non-positive).
+7. **TeXXeT**: `\beginL`… are math nodes when `\TeXXeTstate` is positive
+   ("Improper `\beginL`" otherwise). Done as etex.web: `hpack`'s checks
+   (`pack::lr_fix`: an unmatched end becomes a kern, missing ends are
+   appended), the lines' LR nodes in `post_line_break` (the LR stack a
+   local of the function), and the reversal when shipping (`dvi.rs`:
+   `reverse` and the edge nodes on a working copy of the box's list, the
+   LR stack and `cur_dir` locals of the page's writer). Not yet: the
+   report of LR problems (`\endL or \endR problem`, in `hpack`'s and
+   `ship_out`'s diagnostics), the LR state across a display (`LR_save`,
+   `LR_box`, `just_reverse`, display boxes' `dlist`).
+8. **`\middle`** (with B's math): `\middle` closes the `\left` group like
+   `\right` (a right noad with the middle flag, `mlist::Kind::Right(d,
+   true)`) and opens it again, its list the one so far, in a node of its
+   own (`\0middlenext`, as `\mathchoice`'s parts); a fraction's numerator
+   begins after the last left or middle noad (`delim_ptr`); in
+   `mlist_to_hlist` a right noad is followed as a left one (etex.web §727,
+   §760).
+9. **The penalties arrays** (`\interlinepenalties`, `\clubpenalties`,
+   `\widowpenalties`, `\displaywidowpenalties`): `Key::PenaltiesArray(k)`
+   = `Val::Penalties(Arc<[i32]>)` (empty: null), assigned, read by `\the`,
+   read by the paragraph node into `LineParams` (§890 as etex.web; the
+   display's paragraph reads `\displaywidowpenalties`); `\par` in
+   vertical mode resets `\interlinepenalties` (`normal_paragraph`).
+10. **`\lastlinefit`** is read by line breaking (etex.web §1575–§1583:
+    the active nodes' shortfall and glue, the last line's badness from the
+    line before, the last `\parfillskip` adjusted). `\savinghyphcodes`,
+    `\predisplaydirection`: parameters, assigned and read; hyphenation
+    and display math do not read them yet. The `\tracing…` parameters
+    are values only (no tracing output: programs keep them non-positive).
 11. **Kept pieces and the mode**: `Options::etex` is read by
     `val::initial`; changing it between two updates of one `Build` is not
     supported (pieces kept from the earlier update read the earlier mode).
@@ -626,9 +654,9 @@ e-TeX's primitives:
 
 | primitive | etex.web cmd | graph form | status |
 |---|---|---|---|
-| `\beginL`, `\endL`, `\beginR`, `\endR` | valign | node emitting `Item::Math` (horizontal mode; vertical: a paragraph begins) | items; no reversal (gap 7) |
+| `\beginL`, `\endL`, `\beginR`, `\endR` | valign | node emitting the math node (horizontal mode; vertical: a paragraph begins); reversed when shipped | done (gap 7: LR problem reports, displays) |
 | `\botmarks`, `\firstmarks`, `\topmarks`, `\splitbotmarks`, `\splitfirstmarks` | top_bot_mark | step: scans the class; rewrites the input with `Key::Mark(which, class)` (a read), defined by an output routine's run | approx: empty outside a routine until the fold runs routines |
-| `\clubpenalties`, `\displaywidowpenalties`, `\interlinepenalties`, `\widowpenalties` | set_shape | `Key::PenShape(k)` (proposal) | not yet |
+| `\clubpenalties`, `\displaywidowpenalties`, `\interlinepenalties`, `\widowpenalties` | set_shape | `Key::PenaltiesArray(k)`, read by line breaking | done |
 | `\currentgrouplevel`, `\currentgrouptype` | last_item | a read of `RState.groups` | done |
 | `\currentifbranch`, `\currentiflevel`, `\currentiftype` | last_item | a read of `RState.conds` | done |
 | `\detokenize`, `\unexpanded` | the | step: the balanced text, shown as characters or as it is; not expanded again inside `\edef`/`\message`/`\write` | done |
@@ -643,16 +671,16 @@ e-TeX's primitives:
 | `\ifdefined` | if_test | conditional; reads the meaning of the next token | done |
 | `\iffontchar` | if_test | conditional; reads the font value | done |
 | `\interactionmode` | set_page_int | `Key::Interaction`, read and assigned (global) | done |
-| `\lastlinefit`, `\predisplaydirection`, `\savinghyphcodes`, `\savingvdiscards`, `\TeXXeTstate`, `\tracingassigns`, `\tracinggroups`, `\tracingifs`, `\tracingnesting`, `\tracingscantokens` | assign_int | `Key::IntPar(p)` | done (values; readers: gap 10) |
+| `\lastlinefit`, `\predisplaydirection`, `\savinghyphcodes`, `\savingvdiscards`, `\TeXXeTstate`, `\tracingassigns`, `\tracinggroups`, `\tracingifs`, `\tracingnesting`, `\tracingscantokens` | assign_int | `Key::IntPar(p)` | done (`\lastlinefit`, `\TeXXeTstate` read; others: gap 10) |
 | `\lastnodetype` | last_item | the read of material (Conflict 13) | done (inside a piece; gap 2) |
 | `\marks` | mark | node emitting `Item::Marks(n, …)` (class 0: `Item::Mark`) | done |
-| `\middle` | left_right | math (agent B) | not yet |
+| `\middle` | left_right | closes and opens again the `\left` group (gap 8) | done |
 | `\pagediscards`, `\splitdiscards` | un_vbox | the page fold's discards (gap 5) | approx: empty |
 | `\parshapedimen`, `\parshapeindent`, `\parshapelength` | last_item | a read of `Key::Parshape` | done |
 | `\protected` | prefix | `RState.protected` to the definition; `Macro.protected` | done |
 | `\readline` | read_to_cs | parsed; streams are Conflict 6 | partial |
 | `\scantokens` | input | step: rewrites the input with the shown text, read again (`RState.texts`) | done (no "File ended" check: gap 1) |
-| `\showgroups`, `\showifs`, `\showtokens` | xray | log text and an error context (gap 3) | not yet |
+| `\showgroups`, `\showifs`, `\showtokens` | xray | log text and the error's context, the line a placeholder (gap 3) | done (file-level context) |
 | `\unless` | expand_after | step (a node at the top, as conditionals are): the boolean conditional after it, negated | done |
 
 ## The inventory

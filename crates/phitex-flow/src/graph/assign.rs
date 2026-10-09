@@ -219,6 +219,7 @@ impl Exec<'_> {
                 Prim::PageInt(2) => self.interaction_mode_assign(),
                 Prim::PageInt(_) | Prim::PageDimen(_) => self.alter_page(*p),
                 Prim::ReadLine => self.read_line(),
+                Prim::PenShape(k) => self.penalties_assign(k, global),
                 Prim::HyphData(pat) => self.hyph_data(pat),
                 _ => self.err(format!("\\{} is not supported yet", p.name())),
             },

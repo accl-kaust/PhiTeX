@@ -103,6 +103,10 @@ pub enum Key {
     Patterns(u8),
     /// A language's hyphenation exceptions (`\hyphenation`, global).
     Exceptions(u8),
+    /// e-TeX's `\interlinepenalties` (0), `\clubpenalties` (1),
+    /// `\widowpenalties` (2), `\displaywidowpenalties` (3):
+    /// `Val::Penalties`.
+    PenaltiesArray(u8),
     /// The page builder's quantities a document reads and assigns
     /// (`graph::output::PAGE_GOAL` …): `\pagegoal` … `\pagedepth`
     /// (0–7, `page_so_far`), `\deadcycles` (8), `\insertpenalties` (9).
@@ -208,8 +212,9 @@ impl Key {
             Key::ETeXMode => w(27, 0),
             Key::Patterns(l) => w(28, u64::from(*l)),
             Key::Exceptions(l) => w(29, u64::from(*l)),
-            Key::Page(k) => w(30, u64::from(*k)),
-            Key::Mark(k, c) => w(31, (u64::from(*k) << 16) | u64::from(*c)),
+            Key::PenaltiesArray(k) => w(30, u64::from(*k)),
+            Key::Page(k) => w(31, u64::from(*k)),
+            Key::Mark(k, c) => w(32, (u64::from(*k) << 16) | u64::from(*c)),
         }
     }
 }
@@ -247,6 +252,11 @@ impl fmt::Display for Key {
             Key::ETeXMode => write!(f, "e-TeX mode"),
             Key::Patterns(l) => write!(f, "\\patterns (language {l})"),
             Key::Exceptions(l) => write!(f, "\\hyphenation (language {l})"),
+            Key::PenaltiesArray(k) => write!(
+                f,
+                "\\{}penalties",
+                ["interline", "club", "widow", "displaywidow"][usize::from(*k).min(3)]
+            ),
             Key::Page(k) => write!(
                 f,
                 "\\{}",
@@ -329,6 +339,9 @@ pub enum Val {
     Toks(Arc<Vec<Tok>>),
     /// `\parshape`: (indent, length) per line.
     Parshape(Arc<Vec<(i32, i32)>>),
+    /// A penalties array (e-TeX's `\interlinepenalties`…): its values; none
+    /// is TeX's null.
+    Penalties(Arc<[i32]>),
     /// A void box register.
     Void,
     /// A box register's box.
@@ -359,6 +372,7 @@ impl fmt::Display for Val {
                 write!(f, "}}")
             }
             Val::Parshape(p) => write!(f, "parshape {}", p.len()),
+            Val::Penalties(p) => write!(f, "penalties {}", p.len()),
             Val::Void => write!(f, "void"),
             Val::Box(b) => write!(f, "{}box({}+{})x{}", if b.vertical { "v" } else { "h" }, b.h, b.d, b.w),
             Val::Name(n) => write!(f, "{n}"),
@@ -446,6 +460,7 @@ pub fn initial(key: &Key, _font: &Arc<Font>, etex: bool) -> Val {
         Key::ETeXMode => Val::Int(i32::from(etex)),
         Key::Patterns(_) => Val::Patterns(crate::hyph::Patterns::new()),
         Key::Exceptions(_) => Val::Exceptions(crate::hyph::Exceptions::new()),
+        Key::PenaltiesArray(_) => Val::Penalties(Arc::from([])),
         // (an empty page's, read outside an output routine: tex.web 421's
         // `max_dimen` for `\pagegoal`, else 0)
         Key::Page(k) => Val::Int(if *k == 0 { 0x3FFF_FFFF } else { 0 }),

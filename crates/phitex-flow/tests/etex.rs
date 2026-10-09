@@ -135,7 +135,7 @@ macro_rules! programs {
     };
 }
 
-programs!(version, expr, detok, scan, ifs, groups, lastnode, glue, interaction);
+programs!(version, expr, detok, scan, ifs, groups, lastnode, glue, interaction, pens, show);
 
 #[test]
 fn expr_errors() {

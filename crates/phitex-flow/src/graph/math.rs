@@ -57,8 +57,9 @@ pub(super) enum MathKind {
     EqNo { left: bool },
     /// `{`…`}` in math.
     Sub(Target),
-    /// `\left`…`\right`.
-    Left,
+    /// `\left`…`\right`; after e-TeX's `\middle` (`middle`), the
+    /// group it reopened.
+    Left { middle: bool },
     /// A `\mathchoice` part and the parts before it.
     Choice(u8, Arc<Vec<Vec<Item>>>),
 }
@@ -84,6 +85,10 @@ pub(super) struct MathEnd {
     surround: i32,
     right: Option<Delim>,
     display: Option<DisplayEnd>,
+    /// e-TeX's `\middle`: the right delimiter is a middle one, and the
+    /// group opens again with the list so far (`carry`, etex.web §1191).
+    middle: bool,
+    carry: Vec<Item>,
     /// §1195: the formula was deleted (not enough symbol or extension font
     /// parameters).
     danger: bool,
@@ -222,11 +227,12 @@ impl Exec<'_> {
             MathP::Left => {
                 // (§1191)
                 let d = self.scan_delimiter(false);
-                let g = self.math_group_of(MathKind::Left);
+                let g = self.math_group_of(MathKind::Left { middle: false });
                 self.push_math(g);
                 self.emit.push(mlist::item(MItem::Noad(Noad::new(NK::Left(d)))));
             }
-            MathP::Right => self.math_right(),
+            MathP::Right => self.math_right(false),
+            MathP::Middle => self.math_right(true),
             MathP::EqNo(left) => {
                 // (§1140, §1142)
                 if self.st.inner {
@@ -302,7 +308,8 @@ impl Exec<'_> {
         g.prev_depth = self.st.prev_depth;
         g.hyph_lang = self.st.hyph_lang;
         g.prev_graf = self.st.prev_graf;
-        self.st.groups.push(Group { kind: GroupKind::Math, after: Vec::new(), boxg: Some(Arc::new(g)) });
+        let at = self.chain.nodes.len() as u32;
+        self.st.groups.push(Group { kind: GroupKind::Math, after: Vec::new(), boxg: Some(Arc::new(g)), at });
         self.kind = Kind::Open;
         self.st.level += 1;
         self.st.mode = Mode::M;
@@ -519,10 +526,11 @@ impl Exec<'_> {
         self.emit.push(mlist::item(MItem::Above { thickness, left, right }));
     }
 
-    /// `\right` (§1191–§1192).
-    fn math_right(&mut self) {
+    /// `\right`, e-TeX's `\middle` (§1191–§1192, etex.web's
+    /// `math_left_right`).
+    fn math_right(&mut self, middle: bool) {
         match self.math_kind().as_deref() {
-            Some(MathKind::Left) => {
+            Some(MathKind::Left { .. }) => {
                 let d = self.scan_delimiter(false);
                 let end = MathEnd {
                     params: mlist::Params::default(),
@@ -530,13 +538,15 @@ impl Exec<'_> {
                     surround: 0,
                     right: Some(d),
                     display: None,
+                    middle,
+                    carry: Vec::new(),
                     danger: false,
                 };
                 self.math_close(Some(end));
             }
             Some(MathKind::Inline | MathKind::Display { .. } | MathKind::EqNo { .. }) => {
                 let _ = self.scan_delimiter(false);
-                self.err("Extra \\right".into());
+                self.err(format!("Extra \\{}", if middle { "middle" } else { "right" }));
             }
             _ => {
                 let t = self.cmd.clone();
@@ -558,7 +568,7 @@ impl Exec<'_> {
             (Some(GroupKind::Math), Some(MathKind::Inline | MathKind::Display { .. } | MathKind::EqNo { .. })) => {
                 (vec![Tok::Char(3, '$')], "$".to_string())
             }
-            (Some(GroupKind::Math), Some(MathKind::Left)) => {
+            (Some(GroupKind::Math), Some(MathKind::Left { .. })) => {
                 (vec![self.cs("right"), Tok::Char(12, '.')], "\\right.".to_string())
             }
             _ => (vec![Tok::Char(2, '}')], "}".to_string()),
@@ -573,7 +583,7 @@ impl Exec<'_> {
     pub(super) fn math_right_brace(&mut self) {
         match self.math_kind().as_deref() {
             Some(MathKind::Sub(_) | MathKind::Choice(..)) => self.math_close(None),
-            Some(MathKind::Left) => self.err("Extra }, or forgotten \\right".into()),
+            Some(MathKind::Left { .. }) => self.err("Extra }, or forgotten \\right".into()),
             _ => self.err("Extra }, or forgotten $".into()),
         }
     }
@@ -637,7 +647,16 @@ impl Exec<'_> {
                 overfull_rule: self.dimen_par(DimenPar::Overfullrule),
             },
         });
-        MathEnd { params, fonts: mlist::Fonts(fonts), surround, right: None, display, danger: false }
+        MathEnd {
+            params,
+            fonts: mlist::Fonts(fonts),
+            surround,
+            right: None,
+            display,
+            middle: false,
+            carry: Vec::new(),
+            danger: false,
+        }
     }
 
     // ------------------------------------------------------------ $
@@ -759,6 +778,7 @@ impl Exec<'_> {
             hlist.push(param_glue(&g, GluePar::Parfillskip as u8));
             let mut lp = self.line_params(&hlist);
             lp.widowpenalty = self.int_par(IntPar::Displaywidowpenalty);
+            lp.widowpenalties = self.penalties(3);
             let lines = linebreak::lines(&hlist, &lp);
             if level == 0 {
                 para.hlist = hlist;
@@ -876,6 +896,16 @@ impl Exec<'_> {
     }
 
     /// `\0choicenext`: the next `\mathchoice` part (§1174).
+    /// `\0middlenext`: the `\left` group opens again after `\middle`, its
+    /// list the one so far (etex.web §1191).
+    pub(super) fn middle_next(&mut self) {
+        let Some(be) = self.st.boxing.take() else { return };
+        self.push_math((*be.g).clone());
+        if let Some(m) = &be.math {
+            self.emit.extend(m.carry.iter().cloned());
+        }
+    }
+
     pub(super) fn choice_next(&mut self) {
         let Some(be) = self.st.boxing.take() else { return };
         self.push_math((*be.g).clone());
@@ -959,9 +989,31 @@ impl Exec<'_> {
                 }
                 self.emit.push(mlist::item(MItem::Set(target.which, Field::Mlist(p))));
             }
-            MathKind::Left => {
+            MathKind::Left { .. } => {
                 let d = be.math.as_ref().and_then(|m| m.right).unwrap_or_default();
-                let p = self.gather(list, Some(Noad::new(NK::Right(d))));
+                let middle = be.math.as_ref().is_some_and(|m| m.middle);
+                let p = self.gather(list, Some(Noad::new(NK::Right(d, middle))));
+                if middle {
+                    // (etex.web §1191: the group opens again, its list the
+                    // one so far, ending with the middle noad; in a node of
+                    // its own, as `\mathchoice`'s parts)
+                    let mut g = (*be.g).clone();
+                    g.kind = BoxKind::Math(Arc::new(MathKind::Left { middle: true }));
+                    let end = MathEnd {
+                        params: mlist::Params::default(),
+                        fonts: mlist::Fonts::default(),
+                        surround: 0,
+                        right: None,
+                        display: None,
+                        middle: true,
+                        carry: p,
+                        danger: false,
+                    };
+                    self.st.boxing = Some(Arc::new(BoxEnd { g: Arc::new(g), boxmaxdepth: 0, math: Some(Arc::new(end)) }));
+                    let t = self.cs("\u{0}middlenext");
+                    self.back(t);
+                    return;
+                }
                 let mut n = Noad::new(NK::Inner);
                 n.nucleus = Field::Mlist(p);
                 self.emit.push(mlist::item(MItem::Noad(n)));

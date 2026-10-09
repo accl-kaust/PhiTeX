@@ -276,7 +276,8 @@ impl Exec<'_> {
         }
         // (§1025: `push_nest; mode:=-vmode; prev_depth:=ignore_depth`, the
         // group, its `{`)
-        self.st.groups.push(Group { kind: GroupKind::Output, after: Vec::new(), boxg: None });
+        let at = self.chain.nodes.len() as u32;
+        self.st.groups.push(Group { kind: GroupKind::Output, after: Vec::new(), boxg: None, at });
         self.kind = Kind::Open;
         self.st.level += 1;
         self.st.mode = Mode::V;
