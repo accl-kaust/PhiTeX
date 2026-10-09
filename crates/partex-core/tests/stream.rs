@@ -122,13 +122,11 @@ fn host(streams: bool, hints: bool) -> Disk {
     host
 }
 
-/// TeX Live's `cmr10.pfb` (the PDF embeds the font's program).
+/// The AMS `cmr10.pfb` (the PDF embeds the font's program), kept in
+/// `testdata` (SIL Open Font License 1.1, in the font's own header) so the
+/// tests need no TeX Live.
 fn pfb() -> &'static [u8] {
-    static PFB: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
-    PFB.get_or_init(|| {
-        std::fs::read("/usr/share/texmf-dist/fonts/type1/public/amsfonts/cm/cmr10.pfb")
-            .expect("TeX Live's cmr10.pfb")
-    })
+    include_bytes!("../testdata/cmr10.pfb")
 }
 
 fn params() -> Params {
