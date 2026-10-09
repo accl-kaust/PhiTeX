@@ -197,29 +197,11 @@ drifted. Stop and re-read this file.
   on `phi` (and std/crates.io) only, never on any `partex-*` crate.
   Knuth's algorithms come across by copying them out of `partex-core` as
   pure functions. Reaching for eqtb is a compile error.
-- **The contract** is `crates/phitex-flow/src/contract.rs`: values,
-  fields, versions, names, and `Cx`, the only thing a command sees. Every
-  command is a function written against `Cx`.
-- **Branches.** Integration branch `flow` (worktree `~/code/tmp/flow`);
-  each agent works on `flow-<letter>` in `~/code/tmp/flow-<letter>`,
-  branched from `flow`, and owns its modules. The lead merges into `flow`
-  often; agents merge `flow` back in often.
-- **Agents:**
-  - **A, the graph:** `Cx` backed by the graph: values, fields, content
-    versions, reaching definitions with scopes, park and wake, validation,
-    edits. Built on `phi`.
-  - **B, definitions:** macros (`\def` and friends, expansion as a
-    memoised step), `\let`, catcodes, parameters, registers, `\the`,
-    `\csname`, `\expandafter`, `\noexpand`, conditionals with φ.
-  - **C, material:** characters, fonts (TFM), lists, boxes (dimensions and
-    contents as separate fields), glue, kerns, penalties, the paragraph
-    builder (line breaking, hyphenation), math.
-  - **D, readers and the scheduler:** reading characters into tokens,
-    entries from the CST, re-cutting, threads, parking, the scheduler as a
-    function (pure suspension first), the random-scheduler test.
-  - **E, layout, output and proof:** the page builder as a scan reading
-    dimensions, output routines, shipout to DVI/PDF, writes; the design
-    tests; e2e against TeX at W=1 and W=8; budgets.
+- **The minimal system** (2026-10-09) is the base: `crates/phitex-flow`
+  (pieces, reads that park or predict, the thin confirmation, joins, the
+  page scan, DVI, N equal threads, edits). Features are added on top of it;
+  a feature that seems to need its core changed is a design conversation
+  first.
 - **Milestones:**
   1. `{\def\a{x}}\a` and an `\if` with φ on the graph at W=8, random
      scheduler, the graph printed.
