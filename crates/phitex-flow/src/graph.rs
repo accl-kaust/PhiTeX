@@ -28,8 +28,11 @@
 //! first of them is kept as it is. From there each old node is kept when
 //! its input state is the state reached, its text is unchanged and every
 //! definition it read is still equal; otherwise a node runs. Once the
-//! chain is back on the old one with nothing changed ahead, the rest is
-//! kept wholesale.
+//! chain is back on the old one at the same index with no scope changed,
+//! old nodes are shared as they are up to the next dirty node, each read
+//! of a name from before the piece still checked (only the first node
+//! reading a name is marked, and every node reading it must read the same
+//! definition).
 
 use std::sync::Arc;
 
@@ -447,12 +450,7 @@ pub fn run_piece(text: &[char], env: &mut dyn Env, old: Option<(&Chain, &[char])
                             // (the same node at the same index, its operands
                             // from the same nodes: shared, not copied; and so
                             // on up to the next node that must be looked at)
-                            let next_dirty = dirty.iter().find(|&&d| d as usize > oi).map(|&d| d as usize);
-                            let next_par = para_fresh
-                                .then(|| (oi + 1..oc.nodes.len()).find(|&j| matches!(oc.nodes[j].kind, Kind::Par | Kind::End)))
-                                .flatten();
-                            let stop = [next_dirty, next_par].into_iter().flatten().min().unwrap_or(oc.nodes.len());
-                            copy_to = Some(stop);
+                            copy_to = Some(dirty.iter().find(|&&d| d as usize > oi).map_or(oc.nodes.len(), |&d| d as usize));
                         } else {
                             let mut n = (**n).clone();
                             if let Some(e) = edit {
@@ -469,15 +467,39 @@ pub fn run_piece(text: &[char], env: &mut dyn Env, old: Option<(&Chain, &[char])
             }
         }
         if let Some(stop) = copy_to {
+            // (node `oi` was looked at; each node after it is shared as long
+            // as nothing it read can differ: the definitions it read in the
+            // piece are at the same nodes with the same values (no scope
+            // changed), but a definition from before the piece is checked
+            // read by read, since only the first node reading a name is
+            // marked; a paragraph's node is looked at if a node of its
+            // paragraph ran)
             let oc = oldc.expect("an old chain");
-            for n in &oc.nodes[oi..stop] {
+            let mut j = oi;
+            while j < stop {
+                let n = &oc.nodes[j];
+                if j > oi {
+                    if para_fresh && matches!(n.kind, Kind::Par | Kind::End) {
+                        break;
+                    }
+                    let holds = n.reads.iter().all(|r| {
+                        matches!(r.src, Src::Node(_)) || outside_read(env, &mut outside, &r.key).0 == r.val
+                    });
+                    if !holds {
+                        break;
+                    }
+                }
+                if oc.input(j).mode == Mode::V && n.out.mode == Mode::H {
+                    para_fresh = false;
+                }
                 chain.push_arc(n.clone());
+                j += 1;
             }
-            if stop == oc.nodes.len() {
+            if j == oc.nodes.len() {
                 break;
             }
-            oi = stop;
-            state = chain.input(stop);
+            oi = j;
+            state = chain.input(j);
             continue;
         }
         let fresh = kept.is_none() && shared.is_none();
@@ -487,6 +509,11 @@ pub fn run_piece(text: &[char], env: &mut dyn Env, old: Option<(&Chain, &[char])
                 n
             }
             (None, Some(n)) => {
+                // (kept at another index: later nodes' reads in the piece
+                // and their groups would name other nodes)
+                if oi != chain.nodes.len() && (!n.defs.is_empty() || n.kind.scopes()) {
+                    scope_changed = true;
+                }
                 oi += 1;
                 chain.with_group(n)
             }

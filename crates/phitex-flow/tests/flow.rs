@@ -121,3 +121,20 @@ fn speculation_spreads_the_work() {
     assert!(busy >= 2, "work by thread: {:?}", o.stats.work);
     assert!(o.dvi == cold(&src, Options::default()).dvi);
 }
+
+#[test]
+fn reruns_from_dirty_nodes_give_the_same_dvi() {
+    // (random order with speculation runs pieces before the definitions
+    // they read: their nodes are marked and the pieces run again from them,
+    // mid-piece)
+    let src = doc(200);
+    let base = cold(&src, Options::default());
+    let mut reruns = 0;
+    for seed in 0..6 {
+        let o = cold(&src, opts(8, Reads::Speculate, Order::Random(seed)));
+        reruns += o.stats.reruns;
+        assert!(o.dvi == base.dvi, "seed {seed}: another DVI: {:?}", o.stats);
+        assert_eq!(o.stats.commands, base.stats.commands, "seed {seed}: another graph");
+    }
+    assert!(reruns > 0, "no piece ran again from a dirty node");
+}
