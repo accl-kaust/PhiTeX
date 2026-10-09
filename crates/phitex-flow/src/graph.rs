@@ -275,6 +275,12 @@ pub struct Def {
     pub key: Key,
     pub val: Val,
     pub global: bool,
+    /// A definition made at the level of the one it replaces (TeX's
+    /// assignments without the save stack, CORE.md Conflict 7): `Some(k)`,
+    /// it lives as long as the `k`-th group enclosing its node's own group
+    /// is open (`Some(0)`: its own group, as `None`). Counted from the
+    /// node, not an index, so it survives nodes moving.
+    pub level: Option<u16>,
 }
 
 /// A φ at the end of a conditional: the test, and per key the value after
@@ -320,6 +326,8 @@ pub struct Chain {
     /// For each `Open` node, the index of its `Close`, once there is one.
     close_of: FxMap<u32, u32>,
     open: Vec<u32>,
+    /// For each `Open` node, the `Open` node of the group enclosing it.
+    parent_of: FxMap<u32, u32>,
 }
 
 impl Chain {
@@ -338,12 +346,28 @@ impl Chain {
             }
             let n = &self.nodes[d as usize];
             let Some(def) = n.defs.iter().rev().find(|x| x.key == *key) else { continue };
-            let closed = n.group.is_some_and(|g| self.close_of.get(&g).is_some_and(|&c| (c as usize) < i));
+            let closed = self.def_group(n, def).is_some_and(|g| self.close_of.get(&g).is_some_and(|&c| (c as usize) < i));
             if def.global || !closed {
                 return Some((d, def.val.clone()));
             }
         }
         None
+    }
+
+    /// The group a definition of node `n` is local to (its `Open` node;
+    /// `None`: the piece's outer level).
+    pub fn def_group(&self, n: &Node, def: &Def) -> Option<u32> {
+        let mut g = n.group;
+        for _ in 0..def.level.unwrap_or(0) {
+            g = g.and_then(|x| self.parent_of.get(&x).copied());
+        }
+        g
+    }
+
+    /// The groups open at the next node, outermost first (their `Open`
+    /// nodes).
+    pub fn open_groups(&self) -> &[u32] {
+        &self.open
     }
 
     /// A node about to be added, given the group it is in.
@@ -360,7 +384,12 @@ impl Chain {
     fn push_arc(&mut self, n: Arc<Node>) {
         let i = self.nodes.len() as u32;
         match n.kind {
-            Kind::Open => self.open.push(i),
+            Kind::Open => {
+                if let Some(&p) = self.open.last() {
+                    self.parent_of.insert(i, p);
+                }
+                self.open.push(i);
+            }
             Kind::Close => {
                 if let Some(o) = self.open.pop() {
                     self.close_of.insert(o, i);
@@ -775,7 +804,7 @@ impl<'a> Exec<'a> {
     }
 
     fn define(&mut self, key: Key, val: Val, global: bool) {
-        self.defs.push(Def { key, val, global });
+        self.defs.push(Def { key, val, global, level: None });
     }
 
     fn meaning(&mut self, key: &Key) -> Meaning {

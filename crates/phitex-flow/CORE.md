@@ -92,8 +92,8 @@ both TeX and the graph; `tests/flow.rs`'s `doc()` begins with its catcodes,
    `Key::File(name)` (content-versioned); the `\input` node reads it and its
    result is a call: the file's text cut into pieces that run between this
    node and the next, their first reads resolving at the call. Line numbers
-   are a field of the position, never in a version. Worked out in
-   "`\input` (proposal)" below.
+   are a field of the position, never in a version. Decided: see
+   "`\input` (decided)" below.
 5. **`\endinput`** — stops reading a file at the end of the current line:
    a node changing which pieces of that file exist. Belongs with 4: the
    call's result is the text up to the line of the first executed
@@ -108,15 +108,24 @@ both TeX and the graph; `tests/flow.rs`'s `doc()` begins with its catcodes,
    the register and `\wd n=` changes it *without* respecting grouping
    (tex.web 1079, 1110, 1247: `box(n):=null`, `mem[box(n)+c]:=…` are not
    `eq_define`s): after `{\box0}` the register is void even if it was set
-   outside the group. Proposal (exact): a definition kind "at the level of
-   the definition it replaces": the node defines `Key::Box(n)` with the
-   scope of the reaching definition it read; `Chain::resolve` then treats
-   it as made in that definition's group. Now (`Exec::change_box`): the
-   definition is global when the replaced one was made at the outermost
-   level (or globally), local when it was made in the current group —
-   exact in both; for a definition made in an enclosing group between
-   those it is local (approximation: the change is undone one group too
-   early).
+   outside the group. Decided and done: one general rule, a definition
+   **at the level of the definition it replaces** (`Def.level`): the node
+   defines `Key::Box(n)` with the scope of the reaching definition it
+   read — global when that one was global, made at the piece's outer
+   level or before the piece (pieces are cut at depth 0, so no group
+   spans pieces), else living as long as that definition's group
+   (`Def.level = Some(k)`: the `k`-th group enclosing the node's own,
+   counted from the node so that it survives nodes moving;
+   `Chain::resolve` treats it as alive while that group is open,
+   `Chain::def_group`). `Exec::change_box` makes it for `\box n`,
+   `\unhbox n`, `\unvbox n` and `\wd n=` (`tests/core/boxlevel.tex`);
+   the fold's `\box255` and insertion boxes will use it too. For agent A
+   (merge): `Def` has the new field `level` (`None` everywhere else) and
+   `Chain` the map `parent_of` (`Open` node → enclosing `Open` node),
+   kept by `push_arc`; `run_piece` is unchanged. Gap: a kept node is
+   validated by the *values* it read, not by the scope of the definition
+   it read, so an edit that only moves the replaced definition into
+   another group (same value) keeps the old level.
 8. **`\global` on registers** — fits: `Def.global`; TeX's restore rules
    (a global assignment inside a group survives; a later local one in the
    same group is undone) are exactly reaching definitions (checked in
@@ -191,7 +200,7 @@ both TeX and the graph; `tests/flow.rs`'s `doc()` begins with its catcodes,
     to building them); `dvi::page_body` is empty. Proposal for incremental
     shipping: a page's bytes as a function of (page, the fonts defined
     before it, `dvi_gone` at its start) — equal inputs, equal bytes.
-18. **`\output`** (proposal only, not implemented): the page fold, firing,
+18. **`\output`** (not implemented; the first proposal, superseded by the decisions below): the page fold, firing,
     defines (as a node would) `\box255` = the page box, `\outputpenalty`,
     `\topmark`/`\firstmark`/`\botmark` and `\insertpenalties`; the output
     routine's tokens are read as a piece of their own — its nodes resolving
@@ -202,8 +211,8 @@ both TeX and the graph; `tests/flow.rs`'s `doc()` begins with its catcodes,
     (tex.web 1026). Readers after the firing call of anything the routine
     defines park on the fold reaching that call, which is the true
     dependency. Without `\output` the default output ships `\box255`
-    (done, tex.web 1023). Worked out in "Output routines, insertions and
-    marks (proposal)" below.
+    (done, tex.web 1023). Decided: see "Output routines, insertions and
+    marks (decided)" below.
 19. **`\the\font`** gives TeX's frozen font identifier (`font_id_base+f`,
     printing as the name the font was last defined by, meaning the font).
     Here it gives the name itself (`Key::FontIdent(key)`), whose meaning is
@@ -265,17 +274,19 @@ both minima 1 gives `raf-fish` in cmr10 though `hyphenate` allows
 `raf-f-ish`), so the oracle for that step is the line breaker's own
 `tests/dvi.rs` documents.
 
-## Output routines, insertions and marks (proposal)
+## Output routines, insertions and marks (decided)
 
 Today the page fold (`page::Scan`) is a pure fold over the outer vertical
 material: at each `Item::BuildPage` (the call, with the parameters TeX
 reads there) it moves contributions to the page (tex.web §980–1010), and
-at a break it ships `\box255` (§1023, the default output). This section
-says what changes when there is an output routine, which pieces fit as
-they are, and which need the fold to read the routine.
+at a break it ships `\box255` (§1023, the default output). The decisions
+below (coordinator, 2026-10-09) say what changes when there is an output
+routine. The core changes (index positions as `(piece, node)` pairs,
+routine runs as elements of the material sequence) are agent A's after
+the merge; the routine's execution as nodes is designed here.
 
 **What fits as is** (nodes emitting items; the fold a pure function of the
-items and of what the call carries):
+items):
 
 - `\mark{…}`: a node emitting `Item::Mark` (done); marks move out of lines
   and out of an `\hbox` in vertical mode (done). The fold computes
@@ -285,170 +296,101 @@ items and of what the call carries):
   packaging node (§1100, reading `\splittopskip`, `\splitmaxdepth`,
   `\floatingpenalty` at the close, before the group's definitions go)
   emits `Item::Adjust(list)` / `Item::Ins{n, height+depth, list,
-  split_top, depth, float_cost}`. In a paragraph they move out of the line
-  after it (`hpack`'s adjust list, §655, §889, as marks do now); after an
-  `\hbox` in vertical mode likewise (§1076). Pure.
+  split_top, depth, float_cost}`. **`\insert n` reads nothing else** (no
+  register of its class): it only builds its item. In a paragraph the
+  items move out of the line after it (`hpack`'s adjust list, §655, §889,
+  as marks do now); after an `\hbox` in vertical mode likewise (§1076).
 - `\shipout`: a node whose result is a page (done); the DVI fold takes the
   pages in document order.
 - The default output (no `\output`): done.
-- `\holdinginserts`, `\vbadness`, `\vfuzz` (the page's `vpack`),
-  `\maxdeadcycles`, `\output` itself: parameters TeX reads in `fire_up`,
-  i.e. inside the `build_page` call — reads at the call's position, like
-  `\vsize` and `\maxdepth` that `PageCall` carries now. Either the calling
-  node reads them eagerly (every `\par` node then depends on them; exact
-  but coarse) or, better, the fold step reads them lazily at the call's
-  position, only when it fires (see below).
 
-**What needs the fold to read definitions at a call's position**: an
-insertion's arrival on the page (§1008–1010) reads `\count n`, `\dimen n`,
-`\skip n` and the height and depth of `\box n` for its class, at the call
-where it moves from the contributions — the calling node cannot know
-which classes the contributions hold. So a fold step at call `c` becomes
-a node whose operands are: the fold state before `c`, the material
-contributed up to `c`, and the definitions it resolved at `c`'s position
-(`Chain::resolve` at the calling node: available, because the fold cannot
-reach `c` before the pieces up to `c` have run). Reading `\box n`'s
-*dimensions* only is the brief's read by field. With that, the page side of
-insertions (§1000–1010: `page_ins_head`, the goal reduced by `h·count/1000
-+ width(skip n)`, splitting by `vert_break` against `\dimen n`) is a pure
-function again.
+**Only the fold reads, at the fire**: `\output`, `\holdinginserts`,
+`\maxdeadcycles`, and each insertion class's `\count n`, `\dimen n`,
+`\skip n`, `\box n` (dimensions when an insertion arrives on the page,
+§1008–1010; contents at the fire, §1018–1022). The fold is a reader with
+edges: it resolves these at the calling node's position (available: the
+fold cannot reach that call before the pieces up to it have run), and a
+changed value re-runs the fold from that page. `\par` nodes do not read
+them (`PageCall` keeps only what every call reads: `\vsize`,
+`\maxdepth`, `\topskip`, what shipping reads, `\hsize` for `\end`).
 
-**What needs the fold to read the output routine as an operand** (firing,
-§1012–1028): at a break, the fold step at call `c` reads `\output`
-(`Key::TokPar(Output)` at `c`). Empty, or `\deadcycles ≥ \maxdeadcycles`:
-the default output, as now. Otherwise the step's result is not a page but
-a **routine run**:
+**Firing with a routine** (§1012–1028): at a break where `\output` is not
+empty and `\deadcycles < \maxdeadcycles`, the fold's step is a **routine
+run**:
 
-- The fold *defines*, at `c`:
-  - `\box255` = the page box (`vpack` of the page to `\vsize`,
-    §1017), as a definition of `Key::Box(255)` **local to the output
-    group**. Exact: TeX requires `\box255` void before (§1015 "\box255 is
-    not void") and after (§1028), so outside the group it is void either
-    way.
+- The fold *defines*, at the fire:
+  - `\box255` = the page box (`vpack` of the page to `\vsize`, §1017).
+    Like every box TeX assigns without the save stack, it is a definition
+    **at the level of the definition it replaces** (Conflict 7, `Def.level`):
+    in practice local to nothing (TeX requires `\box255` void before,
+    §1015, and after, §1028).
   - each insertion class's `\box n` (§1018–1022, unless
-    `\holdinginserts>0`): the old box's contents (a read of its contents
-    field at `c`) plus the page's insertions of class n. TeX assigns
-    `box(n)` directly, so this is the "at the level of the definition it
-    replaces" kind of Conflict 7: global when the reaching definition at
-    `c` was made at the outer level or globally (the usual case: plain's
-    and LaTeX's insertion boxes), local otherwise.
-  - `\outputpenalty`, globally (§1013 `geq_word_define`): this one is made
-    by the default output too, and so belongs to the same category as the
-    routine's global definitions below.
-- The routine's tokens, `{` + `\output` + `}` (§1025), are read by a
-  **reader of their own** — ordinary nodes, resolving names at a position
-  inside the output group opened after `c`; RState starts as tex.web sets
-  it (internal vertical mode, `prev_depth` ignored, `normal_paragraph`).
-  Its reads of `\box255`, `\box n` resolve to the fold's definitions above;
-  its `\topmark`/`\firstmark`/`\botmark` and `\insertpenalties` read
-  values the fold hands it at the start (like `RState` fields, set by the
-  fold: the marks of this firing, the count of held insertions), and so
-  does `\deadcycles` (incremented, §1025).
-- Its **results**, joined back by the fold (§1026):
+    `\holdinginserts>0`): the old box's contents plus the page's
+    insertions of class n, by the same rule.
+  - `\outputpenalty`, globally (§1013 `geq_word_define`; made by the
+    default output too).
+- The routine's tokens, `{` + `\output` + `}` (§1025), are read as **a
+  sequence of nodes at a position in the document order**: `(piece k,
+  node i)`, where the fold fired (the node carrying the firing
+  `Item::BuildPage`). They are ordinary nodes; RState starts as tex.web
+  sets it (internal vertical mode, `prev_depth` ignored,
+  `normal_paragraph`, the output group open); `\topmark`, `\firstmark`,
+  `\botmark`, `\insertpenalties` and `\deadcycles` (incremented, §1025)
+  are values the fold hands it, like RState fields.
+- Its **definitions enter the names index at that position**: the index's
+  positions become `(piece, node)` pairs (a piece's exports sit at
+  `(k, END)`), a routine run's definitions at `(k, i)`. Readers after that
+  position whose source is before it are marked by the existing edge
+  logic. On a cold build a reader assumes no routine defines the name and
+  is validated when the routine's nodes install — exactly the treatment of
+  any piece not yet run. (No `Key::OutputWrites`.)
+- Its other results, joined back by the fold (§1026):
   - the pages its `\shipout` nodes produce, in order (to the DVI fold);
     each `\shipout` sets `\deadcycles` to 0 (§640), returned with the run;
-  - its **global definitions** (`\global\advance\pageno`, LaTeX's
-    `\c@page`, `\@colht`…), which reach every node after `c` — their
-    position in the chain is the call `c`, a position only the fold
-    knows;
   - the **material** its internal vertical list holds at its end (what it
     `\unvbox`ed or built) and the held-over insertions: put *before* the
-    remaining contributions (§1026), which the fold's next step reads —
-    material fed back, internal to the fold state;
+    remaining contributions (§1026), which the fold's next step reads;
   - errors: `\box255` not void at the end, an unbalanced routine.
-- `\end` (§1054 `its_all_over`) becomes a fold step too: while the page
-  or contributions are not empty or `\deadcycles≠0`, it appends `\hbox
-  to\hsize{}`, `\vfill`, `\penalty-'10000000000` (reading `\hsize` at the
-  `\end` node) and fires again.
+- `\end` (§1054 `its_all_over`) is a fold step too: while the page or
+  contributions are not empty or `\deadcycles≠0`, it appends `\hbox
+  to\hsize{}`, `\vfill`, `\penalty-'10000000000` and fires again.
 
 `\deadcycles` and `\insertpenalties` (set_page_int) are fold state, not
 `Key`s: an assignment to them in the body emits an item the fold applies
 in order (as `\prevdepth`'s `Item::PrevDepth` does now); in a routine run
 it changes the run's own copy, returned to the fold at the run's end. A
 read of them, of the marks, of `\pagegoal`… in the body is a read of the
-fold's state at the reading node's position: it parks until the fold has
-consumed everything before it (Conflict 12).
+fold's state at the reading node's position (Conflict 12).
 
-**The chain gains writers at fold-determined positions.** The routine's
-global definitions and `\outputpenalty` are definitions *at* a call `c`,
-but which calls fire is the fold's result. So for a read of name X at
-position P, every earlier call is a possible writer of X: a kind (2)
-unavailable read in the brief's terms. Pure suspension would make every
-read after the first possible break wait for the fold — a serial build.
-Proposal: one value `Key::OutputWrites`, the set of names some routine run
-has defined globally (from the last build; on a cold build, the routines'
-runs so far), read like Conflict 3's `OuterNames`: a read of X ∉ that set
-resolves past the calls without waiting (speculation that no routine
-writes X), and a routine run that defines a name outside the set
-invalidates exactly the reads of that name after its call (validation of
-exact reads, the brief's rule). Reads of names in the set (`\pageno`,
-`\c@page`: rare in body text, common in the routine itself) park on the
-fold reaching their position, the true dependency.
+**The page scan's incremental resume rule.** Routine runs are elements of
+the material sequence, like pieces. The resume point is the last page
+started before the first changed element (piece or routine run). When a
+fire moves (a page break moved), the routine run's position moves, and its
+definitions are treated like a moved piece's exports (the existing
+`touched` rule). There is no cycle: a run at `(k, i)` reaches only
+positions after it, and its material is consumed after it.
 
-**The page scan's incremental resume rule.** Now: on an edit, the fold
-resumes at the first call whose material changed, from its state before
-that call (a value), and stops re-running where its incoming state and its
-material equal the last build's — the rest of its results are reused.
-With routines a fold step's operands are: incoming state, material,
-definitions resolved at its call (`\output`, the insertion registers,
-`\holdinginserts`…), and, for a firing, the routine run's results. The
-rule becomes:
+## `\input` (decided)
 
-1. A step re-runs when any of its operands changed — including a
-   definition resolved at its call that an edit elsewhere changed (an
-   edit to `\output`'s definition re-runs the firings after it and
-   nothing else).
-2. A firing step's routine run is a node set like any piece: memoised by
-   its operands (the page box's content version, the marks, the
-   definitions it read), so an unchanged page with unchanged reads reuses
-   its run.
-3. The fold converges (stops) at the first call where incoming state and
-   material are equal **and** every firing re-run on the way produced
-   global definitions equal to the last build's. If a firing's global
-   definitions changed, or a firing moved to another call (a page break
-   moved), the readers of those names after the earlier of the old and
-   new call are dirtied as by any changed definition; they may re-run and
-   change material that the fold consumes later — always after `c`, so
-   the dependency points forward and there is no cycle: the fold resumes
-   at the first such changed material.
-4. Material fed back by a routine is inside the fold state, so rule 3's
-   state comparison covers it.
-
-## `\input` (proposal)
-
-- A file is a value, `Key::File(name)`, content-versioned (Conflict 4).
-- The `\input` node reads the file name tokens and `Key::File(name)`; its
-  **result is the file's text cut into pieces** (at blank lines at brace
-  depth 0, as the main file is) — pieces as values of a node, memoised by
-  the file's content version. They are inserted in document order right
-  after the node: positions become paths (main piece i, then the j-th
-  piece of the file its node at i inputs, …), compared in document order.
-  An edit to the file is an edit of those pieces (its CST, `Tree::edit`,
-  splices them), the same path as an edit to the main file.
-- **The entry-state constant is unchanged**: each of those pieces starts
-  with the same constant start state as any piece and reads nothing at
-  its start; its reads resolve through the chain at its position, so a
-  definition in the file reaches the caller's later text and the file sees
-  the caller's earlier definitions, with no state copied in.
-- TeX inserts the file in the middle of the caller's input: the reader
-  may be in a group, a paragraph, a conditional or a macro's expansion,
-  and the rest of the line (and the pending tokens) is read after the
-  file's end. So the node's result also holds the **continuation**: the
-  caller's pending input after the file name, which becomes a piece after
-  the file's last piece. Where the caller's state at the node is not the
-  start state, the file's first piece runs on from it, and the
-  continuation runs on from the file's end state: the re-cut rule of
-  Conflict 14 (a piece whose predecessor ends in a state other than the
-  start state runs on from that state), with nothing new.
-- `\endinput` (Conflict 5): the piece where it runs ends at the end of that
-  line and the file's later pieces cease to exist — a result of that
-  piece. The pieces after it run as speculation (predicting no
-  `\endinput`), dropped when it comes; most `\endinput`s are in a
-  conditional at a file's top (a load guard), so the guard's piece is the
-  first one.
+- A file is a value, `Key::File(name)`: the file's bytes are a read, so a
+  changed file re-runs the `\input` node.
+- The `\input` node's **result is the file's text**; its pieces (cut at
+  blank lines at brace depth 0, as the main file is) are inserted after it
+  in the order.
+- **The entry-state constant is unchanged** for the file's interior
+  pieces: their cuts stay canonical (each starts with the constant start
+  state and reads nothing at its start).
+- The **first** file piece and the piece holding **the rest of the calling
+  line** carry their predecessor's output state as their entry: a real
+  edge, sequential at that boundary only (TeX inserts the file in the
+  middle of the caller's input: a group, a paragraph, a conditional or a
+  macro's expansion may be open, and the rest of the line and the pending
+  tokens are read after the file's end).
+- `\endinput` (Conflict 5): the file's later pieces run on the guess that
+  none occurs, and are dropped when one does (the piece where it runs ends
+  at the end of that line).
 - Line numbers: `(file, line)` is a field of the position, read by
-  `\inputlineno` and error contexts, never in a version; inserting a line
-  in a file changes no version after it.
+  `\inputlineno` and error contexts, never in a version.
 
 ## The inventory
 

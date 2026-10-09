@@ -93,7 +93,7 @@ macro_rules! programs {
     };
 }
 
-programs!(macros, expandafter, edef, conds, arith, the, case, groups, futurelet, plain);
+programs!(macros, expandafter, edef, conds, arith, the, case, groups, futurelet, plain, boxlevel);
 
 /// The graph's own form: an `\ifnum` whose arms define a register gets a φ
 /// for it at `\fi`; expandable primitives and macro calls are steps, never

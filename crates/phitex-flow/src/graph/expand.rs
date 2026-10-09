@@ -566,7 +566,7 @@ impl Exec<'_> {
             };
             self.reads.push(Read { key: k.clone(), src, val: before.clone() });
             // (the φ is a definition: readers after the `\fi` read it)
-            self.defs.push(super::Def { key: k.clone(), val: after.clone(), global: false });
+            self.defs.push(super::Def { key: k.clone(), val: after.clone(), global: false, level: None });
             phis.push((k, after, before));
         }
         match &mut self.phi {

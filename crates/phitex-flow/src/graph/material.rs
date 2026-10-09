@@ -1258,19 +1258,36 @@ impl Exec<'_> {
     }
 
     /// A box register's new value where TeX assigns it without the save
-    /// stack (`box(n):=null`, tex.web 1079, 1110, 1247): at the scope of
-    /// the definition it replaces where that is the current group's or the
-    /// outermost (CORE.md; between those, local).
-    fn change_box(&mut self, n: u16, val: Val) {
+    /// stack (`box(n):=null`, tex.web 1079, 1110, 1247): a definition at
+    /// the level of the one it replaces (CORE.md Conflict 7): global when
+    /// that one was global, made at the piece's outer level or before the
+    /// piece (pieces are cut at depth 0: no group spans them); else living
+    /// as long as its group.
+    pub(super) fn change_box(&mut self, n: u16, val: Val) {
         let key = Key::Box(n);
-        let global = match self.chain.resolve(&key, self.chain.nodes.len()) {
+        // (this node's own earlier definition of the register, if any)
+        if let Some(i) = self.defs.iter().rposition(|d| d.key == key) {
+            let (global, level) = (self.defs[i].global, self.defs[i].level);
+            self.defs.push(super::Def { key, val, global, level });
+            return;
+        }
+        let scope = match self.chain.resolve(&key, self.chain.nodes.len()) {
             Some((d, _)) => {
                 let node = &self.chain.nodes[d as usize];
-                node.defs.iter().rev().find(|x| x.key == key).is_some_and(|x| x.global) || node.group.is_none()
+                match node.defs.iter().rev().find(|x| x.key == key) {
+                    Some(def) if !def.global => self.chain.def_group(node, def),
+                    _ => None,
+                }
             }
-            None => true,
+            None => None,
         };
-        self.define(key, val, global && !self.st.groups.is_empty());
+        let open = self.chain.open_groups();
+        let level = scope.and_then(|g| open.iter().rposition(|&o| o == g).map(|p| (open.len() - 1 - p) as u16));
+        match (scope, level) {
+            (Some(_), Some(0)) => self.define(key, val, false),
+            (Some(_), Some(k)) => self.defs.push(super::Def { key, val, global: false, level: Some(k) }),
+            _ => self.define(key, val, !self.st.groups.is_empty()),
+        }
     }
 
     /// `\wd n=d` and friends (tex.web 1247).
