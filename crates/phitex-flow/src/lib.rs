@@ -35,11 +35,15 @@ pub mod arith;
 pub mod build;
 pub mod dvi;
 pub mod hash;
+pub mod item;
 pub mod linebreak;
 pub mod page;
 pub mod graph;
+pub mod logs;
+pub mod pack;
 pub mod prim;
 pub mod print;
+pub mod show;
 pub mod tfm;
 pub mod val;
 

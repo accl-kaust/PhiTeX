@@ -173,26 +173,7 @@ impl Exec<'_> {
                     self.meaning_text(&mut s, &m);
                 }
             }
-            Conv::FontName => {
-                // (only the current font, `\font`, is an identifier yet)
-                match self.next_x_m(false) {
-                    Some((_, Meaning::Prim(Prim::Font))) => {
-                        let f = self.font();
-                        s.push_str(&f.name);
-                        if f.size != f.design_size {
-                            s.push_str(" at ");
-                            print::scaled(&mut s, f.size);
-                            s.push_str("pt");
-                        }
-                    }
-                    other => {
-                        self.err("Missing font identifier".into());
-                        if let Some((t, _)) = other {
-                            self.back(t);
-                        }
-                    }
-                }
-            }
+            Conv::FontName => self.font_name_text(&mut s),
             Conv::JobName => s.push_str(JOBNAME),
         }
         self.rewrite(print::str_toks(&s));
@@ -294,6 +275,15 @@ impl Exec<'_> {
             Meaning::SkipRef(n) => self.print_esc(out, &format!("skip{n}")),
             Meaning::MuskipRef(n) => self.print_esc(out, &format!("muskip{n}")),
             Meaning::ToksRef(n) => self.print_esc(out, &format!("toks{n}")),
+            Meaning::Font(f) => {
+                out.push_str("select font ");
+                out.push_str(&f.name);
+                if f.size != f.design_size {
+                    out.push_str(" at ");
+                    print::scaled(out, f.size);
+                    out.push_str("pt");
+                }
+            }
             Meaning::Macro(mac) => {
                 if mac.long {
                     self.print_esc(out, "long");
@@ -461,11 +451,14 @@ impl Exec<'_> {
             IfKind::Odd => self.scan_int() % 2 != 0,
             IfKind::Vmode => !self.in_write && self.st.mode == Mode::V,
             IfKind::Hmode => !self.in_write && self.st.mode == Mode::H,
-            IfKind::Mmode | IfKind::Inner | IfKind::False => false,
+            IfKind::Inner => !self.in_write && self.st.inner,
+            IfKind::Mmode | IfKind::False => false,
             IfKind::Void | IfKind::Hbox | IfKind::Vbox => {
                 let n = self.scan_eight_bit_int();
-                let void = self.get(&Key::Box(n)) == Val::Void;
-                k == IfKind::Void && void
+                match self.get(&Key::Box(n)) {
+                    Val::Box(b) => (k == IfKind::Hbox && !b.vertical) || (k == IfKind::Vbox && b.vertical),
+                    _ => k == IfKind::Void,
+                }
             }
             IfKind::X => {
                 let a = self.ifx_operand();
@@ -595,6 +588,7 @@ impl Exec<'_> {
         };
         let s = match v {
             IVal::Toks(l) => return l.to_vec(),
+            IVal::Font(f) => return vec![self.font_ident_tok(&f)],
             IVal::Int(i) => i.to_string(),
             IVal::Dimen(d) => {
                 let mut s = String::new();

@@ -114,7 +114,26 @@ pub fn log(start: &str, entries: &[String], end: &str) -> String {
     let mut p = Printer { out: String::new(), offset: 0 };
     p.print(start);
     for e in entries {
-        if let Some(line) = e.strip_suffix('\n') {
+        if let Some(raw) = e.strip_prefix(crate::show::RAW) {
+            // (print operations: `print_ln`, `print_nl`, a space if the
+            // line is not empty, characters)
+            for c in raw.chars() {
+                match c {
+                    crate::show::LN => p.ln(),
+                    crate::show::NL => {
+                        if p.offset > 0 {
+                            p.ln();
+                        }
+                    }
+                    crate::show::SP => {
+                        if p.offset > 0 {
+                            p.char(' ');
+                        }
+                    }
+                    _ => p.print(&c.to_string()),
+                }
+            }
+        } else if let Some(line) = e.strip_suffix('\n') {
             if p.offset > 0 {
                 p.ln();
             }

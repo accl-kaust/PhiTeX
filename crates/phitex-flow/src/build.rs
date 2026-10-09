@@ -40,8 +40,8 @@ use crate::dvi;
 use crate::graph::{Env, Para, PieceId, Run, Src, cut, run_piece};
 use crate::hash::{FxMap, hash_of};
 use crate::linebreak::{Line, break_lines};
-use crate::page::{Page, Scan, VItem, material};
-use crate::tfm::Font;
+use crate::page::{Page, Scan, material};
+use crate::tfm::{Font, FontFiles};
 use crate::val::{Key, Val, initial};
 
 /// What a read does when the definition it finds is being remade.
@@ -154,6 +154,8 @@ type Readers = FxMap<Key, FxMap<PieceId, (u32, PieceId)>>;
 /// the pages with their DVI.
 pub struct Build {
     font: Arc<Font>,
+    /// The TFM files `\font` can load.
+    fonts: Arc<FontFiles>,
     pieces: Vec<Kept>,
     pages: Vec<(Page, Arc<Vec<u8>>)>,
     next_id: PieceId,
@@ -271,6 +273,7 @@ struct Shared {
     state: Mutex<State>,
     cv: Condvar,
     font: Arc<Font>,
+    fonts: Arc<FontFiles>,
     opts: Options,
 }
 
@@ -285,8 +288,20 @@ enum Task {
 }
 
 impl Build {
+    /// A build whose documents can load `font` by its name, and the TFM
+    /// files in TeX Live's directories.
     pub fn new(font: Arc<Font>) -> Build {
-        Build { font, pieces: Vec::new(), pages: Vec::new(), next_id: 0, readers: FxMap::default() }
+        let fonts = Arc::new(FontFiles::new(Self::given(&font), crate::tfm::default_dirs()));
+        Build { font, fonts, pieces: Vec::new(), pages: Vec::new(), next_id: 0, readers: FxMap::default() }
+    }
+
+    fn given(font: &Font) -> Vec<(String, Arc<[u8]>)> {
+        if font.data.is_empty() { Vec::new() } else { vec![(font.name.clone(), font.data.clone())] }
+    }
+
+    /// Where `\font` finds TFM files (searched below these directories).
+    pub fn set_font_dirs(&mut self, dirs: Vec<std::path::PathBuf>) {
+        self.fonts = Arc::new(FontFiles::new(Self::given(&self.font), dirs));
     }
 
     /// Builds `src`: what changed, and what the changes reach.
@@ -465,6 +480,7 @@ impl Build {
             state: Mutex::new(state),
             cv: Condvar::new(),
             font: self.font.clone(),
+            fonts: self.fonts.clone(),
             opts,
         };
         std::thread::scope(|s| {
@@ -483,10 +499,14 @@ impl Build {
         let out = dvi::assemble(&self.font, &st.pages, &bodies);
         let mut errors = Vec::new();
         let mut dump = String::new();
-        let mut log = Vec::new();
+        let marks = st.scan.as_ref().map(|s| s.marks.clone()).unwrap_or_default();
+        let log = {
+            let pieces: Vec<_> =
+                st.p.iter().map(|ps| (&ps.text[..], &**ps.run.as_ref().expect("every piece ran"), &ps.lines[..])).collect();
+            crate::logs::gather(&pieces, &marks, &st.pages)
+        };
         for (k, ps) in st.p.iter().enumerate() {
             let r = ps.run.as_ref().expect("every piece ran");
-            log.extend(r.chain.nodes.iter().filter_map(|n| n.log.as_deref().map(str::to_string)));
             for e in &r.errors {
                 errors.push(format!("piece {k}: {e}"));
             }
@@ -500,8 +520,7 @@ impl Build {
         }
         if opts.dump {
             for (i, pg) in st.pages.iter().enumerate() {
-                let lines = pg.items.iter().filter(|x| matches!(x, VItem::Line(..))).count();
-                let _ = writeln!(dump, "page {}: {} lines", i + 1, lines);
+                let _ = writeln!(dump, "page {}: {} items", i + 1, pg.b.list.len());
             }
         }
         st.stats.time_join = t_join.elapsed();
@@ -846,7 +865,7 @@ fn execute(sh: &Shared, task: Task) -> (u64, u8) {
             g.stats.pages_shipped += 1;
             drop(g);
             sh.cv.notify_all();
-            (page.items.len() as u64, 3)
+            (page.b.list.len() as u64, 3)
         }
     }
 }
@@ -934,6 +953,10 @@ struct PieceEnv<'a> {
 }
 
 impl Env for PieceEnv<'_> {
+    fn font_file(&mut self, name: &str) -> Option<Arc<[u8]>> {
+        self.sh.fonts.get(name)
+    }
+
     fn reach(&mut self, key: &Key) -> (Val, Src) {
         let sh = self.sh;
         loop {

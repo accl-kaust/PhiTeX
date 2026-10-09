@@ -95,6 +95,46 @@ pub enum Conv {
     JobName,
 }
 
+/// A primitive that makes material, boxes or pages (tex.web's commands
+/// `hskip` … `leader_ship`), and the reader's own internal commands.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum Mat {
+    /// `\hskip` (0), `\hfil`, `\hfill`, `\hss`, `\hfilneg` (4).
+    Hskip(u8),
+    /// `\vskip` (0), `\vfil`, `\vfill`, `\vss`, `\vfilneg` (4).
+    Vskip(u8),
+    Kern,
+    Penalty,
+    Hrule,
+    Vrule,
+    /// `\unpenalty` (0), `\unkern` (1), `\unskip` (2).
+    Remove(u8),
+    Mark,
+    /// `\box` (0), `\copy`, `\lastbox`, `\vsplit`, `\vtop`, `\vbox`,
+    /// `\hbox` (6).
+    MakeBox(u8),
+    SetBox,
+    /// `\unhbox`, `\unhcopy` (true).
+    Unhbox(bool),
+    /// `\unvbox`, `\unvcopy` (true).
+    Unvbox(bool),
+    /// `\raise` (false), `\lower` (true).
+    Vmove(bool),
+    /// `\moveright` (false), `\moveleft` (true).
+    Hmove(bool),
+    Shipout,
+    /// `\-` (false), `\discretionary` (true).
+    Disc(bool),
+    /// `\/`.
+    ItalCorr,
+    /// `\hyphenchar` (0), `\skewchar` (1).
+    FontInt(u8),
+    /// The reader's own: a box group's contents are packaged (0); a
+    /// paragraph ends before a `}` (1); a discretionary's next part
+    /// begins (2); a `\vbox`'s paragraph shape is reset inside it (3).
+    Internal(u8),
+}
+
 /// A primitive.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum Prim {
@@ -170,6 +210,8 @@ pub enum Prim {
     Dump,
     /// `\batchmode` (0) … `\errorstopmode` (3).
     Interaction(u8),
+    /// Material, boxes and pages.
+    Mat(Mat),
     /// A primitive without a graph form yet: `UNIMPL[i]`.
     Unimpl(u16),
 }
@@ -203,44 +245,45 @@ impl Prim {
         PRIMITIVES.binary_search_by(|(m, _, _)| (*m).cmp(n)).ok().map(|i| PRIMITIVES[i].1)
     }
 
+    /// The reader's internal commands, by the names only it makes (never
+    /// a name a document can spell: they begin with a NUL).
+    pub fn internal(n: &str) -> Option<Prim> {
+        INTERNAL.iter().find(|(m, _)| *m == n).map(|(_, p)| *p)
+    }
+
     /// Its name (`\meaning` prints it after the escape character).
     pub fn name(self) -> &'static str {
         if let Prim::Unimpl(i) = self {
             return UNIMPL[usize::from(i)];
+        }
+        if let Some((n, _)) = INTERNAL.iter().find(|(_, p)| *p == self) {
+            return n;
         }
         PRIMITIVES.iter().find(|(_, p, _)| *p == self).map_or("IMPOSSIBLE.", |(n, _, _)| n)
     }
 }
 
 impl IntPar {
-    /// IniTeX's value (tex.web 240), except the two the minimal system's
-    /// documents rely on (`\tolerance`, `\linepenalty`: plain TeX's).
+    /// IniTeX's value (tex.web 240; the date and time as
+    /// `SOURCE_DATE_EPOCH=0 FORCE_SOURCE_DATE=1` make them).
     pub fn initial(self) -> i32 {
         match self {
             IntPar::Mag => 1000,
-            IntPar::Tolerance => 200,
-            IntPar::Linepenalty => 10,
-            IntPar::Hangafter => 1,
+            IntPar::Tolerance => 10000,
+            IntPar::Hangafter | IntPar::Month | IntPar::Day => 1,
             IntPar::Maxdeadcycles => 25,
             IntPar::Escapechar => 92,
             IntPar::Endlinechar => 13,
+            IntPar::Year => 1970,
             _ => 0,
         }
     }
 }
 
 impl DimenPar {
-    /// IniTeX's value (zero), except the ones the minimal system's
-    /// documents rely on (plain TeX's, roughly).
+    /// IniTeX's value: zero.
     pub fn initial(self) -> i32 {
-        const PT: i32 = 65536;
-        match self {
-            DimenPar::Hsize => 468 * PT,
-            DimenPar::Vsize => 643 * PT,
-            DimenPar::Parindent => 20 * PT,
-            DimenPar::Maxdepth => 4 * PT,
-            _ => 0,
-        }
+        0
     }
 }
 
@@ -248,15 +291,9 @@ impl GluePar {
     pub fn is_mu(self) -> bool {
         matches!(self, GluePar::Thinmuskip | GluePar::Medmuskip | GluePar::Thickmuskip)
     }
-    /// IniTeX's value (zero glue), except the widths the minimal system's
-    /// documents rely on.
+    /// IniTeX's value: zero glue.
     pub fn initial_width(self) -> i32 {
-        const PT: i32 = 65536;
-        match self {
-            GluePar::Baselineskip => 12 * PT,
-            GluePar::Topskip => 10 * PT,
-            _ => 0,
-        }
+        0
     }
 }
 
@@ -265,13 +302,21 @@ params! { DimenPar, 21, Parindent = "parindent", Mathsurround = "mathsurround", 
 params! { GluePar, 18, Lineskip = "lineskip", Baselineskip = "baselineskip", Parskip = "parskip", Abovedisplayskip = "abovedisplayskip", Belowdisplayskip = "belowdisplayskip", Abovedisplayshortskip = "abovedisplayshortskip", Belowdisplayshortskip = "belowdisplayshortskip", Leftskip = "leftskip", Rightskip = "rightskip", Topskip = "topskip", Splittopskip = "splittopskip", Tabskip = "tabskip", Spaceskip = "spaceskip", Xspaceskip = "xspaceskip", Parfillskip = "parfillskip", Thinmuskip = "thinmuskip", Medmuskip = "medmuskip", Thickmuskip = "thickmuskip" }
 params! { TokPar, 9, Output = "output", Everypar = "everypar", Everymath = "everymath", Everydisplay = "everydisplay", Everyhbox = "everyhbox", Everyvbox = "everyvbox", Everyjob = "everyjob", Everycr = "everycr", Errhelp = "errhelp" }
 
+/// The reader's internal commands (`Mat::Internal`).
+pub const INTERNAL: [(&str, Prim); 4] = [
+    ("\u{0}package", Prim::Mat(Mat::Internal(0))),
+    ("\u{0}endgraf", Prim::Mat(Mat::Internal(1))),
+    ("\u{0}discnext", Prim::Mat(Mat::Internal(2))),
+    ("\u{0}normalparagraph", Prim::Mat(Mat::Internal(3))),
+];
+
 /// Every TeX82 primitive (tex.web §1336: partex-core's `init_prim_tex` less
 /// encTeX's 14), sorted by name: its name, its meaning here, and its
 /// command code in tex.web.
 pub const PRIMITIVES: [(&str, Prim, &str); 325] = [
     (" ", Prim::Space, "EX_SPACE"),
-    ("-", Prim::Unimpl(61), "DISCRETIONARY"),
-    ("/", Prim::Unimpl(0), "ITAL_CORR"),
+    ("-", Prim::Mat(Mat::Disc(false)), "DISCRETIONARY"),
+    ("/", Prim::Mat(Mat::ItalCorr), "ITAL_CORR"),
     ("above", Prim::Unimpl(82), "ABOVE"),
     ("abovedisplayshortskip", Prim::GluePar(GluePar::Abovedisplayshortskip), "ASSIGN_GLUE"),
     ("abovedisplayskip", Prim::GluePar(GluePar::Abovedisplayskip), "ASSIGN_GLUE"),
@@ -291,7 +336,7 @@ pub const PRIMITIVES: [(&str, Prim, &str); 325] = [
     ("belowdisplayskip", Prim::GluePar(GluePar::Belowdisplayskip), "ASSIGN_GLUE"),
     ("binoppenalty", Prim::IntPar(IntPar::Binoppenalty), "ASSIGN_INT"),
     ("botmark", Prim::Mark(2), "TOP_BOT_MARK"),
-    ("box", Prim::Unimpl(43), "MAKE_BOX"),
+    ("box", Prim::Mat(Mat::MakeBox(0)), "MAKE_BOX"),
     ("boxmaxdepth", Prim::DimenPar(DimenPar::Boxmaxdepth), "ASSIGN_DIMEN"),
     ("brokenpenalty", Prim::IntPar(IntPar::Brokenpenalty), "ASSIGN_INT"),
     ("catcode", Prim::Code(Code::Cat), "DEF_CODE"),
@@ -301,7 +346,7 @@ pub const PRIMITIVES: [(&str, Prim, &str); 325] = [
     ("closein", Prim::Unimpl(98), "IN_STREAM"),
     ("closeout", Prim::Unimpl(104), "EXTENSION"),
     ("clubpenalty", Prim::IntPar(IntPar::Clubpenalty), "ASSIGN_INT"),
-    ("copy", Prim::Unimpl(44), "MAKE_BOX"),
+    ("copy", Prim::Mat(Mat::MakeBox(1)), "MAKE_BOX"),
     ("count", Prim::Register(Reg::Count), "REGISTER"),
     ("countdef", Prim::Shorthand(Shorthand::Count), "SHORTHAND_DEF"),
     ("cr", Prim::Unimpl(24), "CAR_RET"),
@@ -318,7 +363,7 @@ pub const PRIMITIVES: [(&str, Prim, &str); 325] = [
     ("delimitershortfall", Prim::DimenPar(DimenPar::Delimitershortfall), "ASSIGN_DIMEN"),
     ("dimen", Prim::Register(Reg::Dimen), "REGISTER"),
     ("dimendef", Prim::Shorthand(Shorthand::Dimen), "SHORTHAND_DEF"),
-    ("discretionary", Prim::Unimpl(62), "DISCRETIONARY"),
+    ("discretionary", Prim::Mat(Mat::Disc(true)), "DISCRETIONARY"),
     ("displayindent", Prim::DimenPar(DimenPar::Displayindent), "ASSIGN_DIMEN"),
     ("displaylimits", Prim::Unimpl(75), "LIMIT_SWITCH"),
     ("displaystyle", Prim::Unimpl(78), "MATH_STYLE"),
@@ -367,20 +412,20 @@ pub const PRIMITIVES: [(&str, Prim, &str); 325] = [
     ("hangafter", Prim::IntPar(IntPar::Hangafter), "ASSIGN_INT"),
     ("hangindent", Prim::DimenPar(DimenPar::Hangindent), "ASSIGN_DIMEN"),
     ("hbadness", Prim::IntPar(IntPar::Hbadness), "ASSIGN_INT"),
-    ("hbox", Prim::Unimpl(49), "MAKE_BOX"),
-    ("hfil", Prim::Unimpl(27), "HSKIP"),
-    ("hfill", Prim::Unimpl(28), "HSKIP"),
-    ("hfilneg", Prim::Unimpl(30), "HSKIP"),
+    ("hbox", Prim::Mat(Mat::MakeBox(6)), "MAKE_BOX"),
+    ("hfil", Prim::Mat(Mat::Hskip(1)), "HSKIP"),
+    ("hfill", Prim::Mat(Mat::Hskip(2)), "HSKIP"),
+    ("hfilneg", Prim::Mat(Mat::Hskip(4)), "HSKIP"),
     ("hfuzz", Prim::DimenPar(DimenPar::Hfuzz), "ASSIGN_DIMEN"),
     ("hoffset", Prim::DimenPar(DimenPar::Hoffset), "ASSIGN_DIMEN"),
     ("holdinginserts", Prim::IntPar(IntPar::Holdinginserts), "ASSIGN_INT"),
-    ("hrule", Prim::Unimpl(4), "HRULE"),
+    ("hrule", Prim::Mat(Mat::Hrule), "HRULE"),
     ("hsize", Prim::DimenPar(DimenPar::Hsize), "ASSIGN_DIMEN"),
-    ("hskip", Prim::Unimpl(26), "HSKIP"),
-    ("hss", Prim::Unimpl(29), "HSKIP"),
+    ("hskip", Prim::Mat(Mat::Hskip(0)), "HSKIP"),
+    ("hss", Prim::Mat(Mat::Hskip(3)), "HSKIP"),
     ("ht", Prim::BoxDimen(1), "SET_BOX_DIMEN"),
     ("hyphenation", Prim::Unimpl(93), "HYPH_DATA"),
-    ("hyphenchar", Prim::Unimpl(95), "ASSIGN_FONT_INT"),
+    ("hyphenchar", Prim::Mat(Mat::FontInt(0)), "ASSIGN_FONT_INT"),
     ("hyphenpenalty", Prim::IntPar(IntPar::Hyphenpenalty), "ASSIGN_INT"),
     ("if", Prim::If(IfKind::Char), "IF_TEST"),
     ("ifcase", Prim::If(IfKind::Case), "IF_TEST"),
@@ -408,9 +453,9 @@ pub const PRIMITIVES: [(&str, Prim, &str); 325] = [
     ("insertpenalties", Prim::PageInt(1), "SET_PAGE_INT"),
     ("interlinepenalty", Prim::IntPar(IntPar::Interlinepenalty), "ASSIGN_INT"),
     ("jobname", Prim::Convert(Conv::JobName), "CONVERT"),
-    ("kern", Prim::Unimpl(37), "KERN"),
+    ("kern", Prim::Mat(Mat::Kern), "KERN"),
     ("language", Prim::IntPar(IntPar::Language), "ASSIGN_INT"),
-    ("lastbox", Prim::Unimpl(45), "MAKE_BOX"),
+    ("lastbox", Prim::Mat(Mat::MakeBox(2)), "MAKE_BOX"),
     ("lastkern", Prim::LastItem(1), "LAST_ITEM"),
     ("lastpenalty", Prim::LastItem(0), "LAST_ITEM"),
     ("lastskip", Prim::LastItem(2), "LAST_ITEM"),
@@ -427,10 +472,10 @@ pub const PRIMITIVES: [(&str, Prim, &str); 325] = [
     ("lineskiplimit", Prim::DimenPar(DimenPar::Lineskiplimit), "ASSIGN_DIMEN"),
     ("long", Prim::Long, "PREFIX"),
     ("looseness", Prim::IntPar(IntPar::Looseness), "ASSIGN_INT"),
-    ("lower", Prim::Unimpl(42), "VMOVE"),
+    ("lower", Prim::Mat(Mat::Vmove(true)), "VMOVE"),
     ("lowercase", Prim::Lowercase, "CASE_SHIFT"),
     ("mag", Prim::IntPar(IntPar::Mag), "ASSIGN_INT"),
-    ("mark", Prim::Unimpl(6), "MARK"),
+    ("mark", Prim::Mat(Mat::Mark), "MARK"),
     ("mathaccent", Prim::Unimpl(7), "MATH_ACCENT"),
     ("mathbin", Prim::Unimpl(67), "MATH_COMP"),
     ("mathchar", Prim::Unimpl(8), "MATH_CHAR_NUM"),
@@ -452,8 +497,8 @@ pub const PRIMITIVES: [(&str, Prim, &str); 325] = [
     ("message", Prim::Message, "MESSAGE"),
     ("mkern", Prim::Unimpl(38), "MKERN"),
     ("month", Prim::IntPar(IntPar::Month), "ASSIGN_INT"),
-    ("moveleft", Prim::Unimpl(39), "HMOVE"),
-    ("moveright", Prim::Unimpl(40), "HMOVE"),
+    ("moveleft", Prim::Mat(Mat::Hmove(true)), "HMOVE"),
+    ("moveright", Prim::Mat(Mat::Hmove(false)), "HMOVE"),
     ("mskip", Prim::Unimpl(36), "MSKIP"),
     ("multiply", Prim::Multiply, "MULTIPLY"),
     ("muskip", Prim::Register(Reg::Muskip), "REGISTER"),
@@ -495,7 +540,7 @@ pub const PRIMITIVES: [(&str, Prim, &str); 325] = [
     ("parskip", Prim::GluePar(GluePar::Parskip), "ASSIGN_GLUE"),
     ("patterns", Prim::Unimpl(94), "HYPH_DATA"),
     ("pausing", Prim::IntPar(IntPar::Pausing), "ASSIGN_INT"),
-    ("penalty", Prim::Unimpl(14), "BREAK_PENALTY"),
+    ("penalty", Prim::Mat(Mat::Penalty), "BREAK_PENALTY"),
     ("postdisplaypenalty", Prim::IntPar(IntPar::Postdisplaypenalty), "ASSIGN_INT"),
     ("predisplaypenalty", Prim::IntPar(IntPar::Predisplaypenalty), "ASSIGN_INT"),
     ("predisplaysize", Prim::DimenPar(DimenPar::Predisplaysize), "ASSIGN_DIMEN"),
@@ -503,7 +548,7 @@ pub const PRIMITIVES: [(&str, Prim, &str); 325] = [
     ("prevdepth", Prim::PrevDepth, "SET_AUX"),
     ("prevgraf", Prim::PrevGraf, "SET_PREV_GRAF"),
     ("radical", Prim::Unimpl(15), "RADICAL"),
-    ("raise", Prim::Unimpl(41), "VMOVE"),
+    ("raise", Prim::Mat(Mat::Vmove(false)), "VMOVE"),
     ("read", Prim::Unimpl(16), "READ_TO_CS"),
     ("relax", Prim::Relax, "RELAX"),
     ("relpenalty", Prim::IntPar(IntPar::Relpenalty), "ASSIGN_INT"),
@@ -517,17 +562,17 @@ pub const PRIMITIVES: [(&str, Prim, &str); 325] = [
     ("scriptspace", Prim::DimenPar(DimenPar::Scriptspace), "ASSIGN_DIMEN"),
     ("scriptstyle", Prim::Unimpl(80), "MATH_STYLE"),
     ("scrollmode", Prim::Interaction(2), "SET_INTERACTION"),
-    ("setbox", Prim::Unimpl(17), "SET_BOX"),
+    ("setbox", Prim::Mat(Mat::SetBox), "SET_BOX"),
     ("setlanguage", Prim::Unimpl(106), "EXTENSION"),
     ("sfcode", Prim::Code(Code::Sf), "DEF_CODE"),
-    ("shipout", Prim::Unimpl(50), "LEADER_SHIP"),
+    ("shipout", Prim::Mat(Mat::Shipout), "LEADER_SHIP"),
     ("show", Prim::Unimpl(99), "XRAY"),
     ("showbox", Prim::Unimpl(100), "XRAY"),
     ("showboxbreadth", Prim::IntPar(IntPar::Showboxbreadth), "ASSIGN_INT"),
     ("showboxdepth", Prim::IntPar(IntPar::Showboxdepth), "ASSIGN_INT"),
     ("showlists", Prim::Unimpl(102), "XRAY"),
     ("showthe", Prim::Unimpl(101), "XRAY"),
-    ("skewchar", Prim::Unimpl(96), "ASSIGN_FONT_INT"),
+    ("skewchar", Prim::Mat(Mat::FontInt(1)), "ASSIGN_FONT_INT"),
     ("skip", Prim::Register(Reg::Skip), "REGISTER"),
     ("skipdef", Prim::Shorthand(Shorthand::Skip), "SHORTHAND_DEF"),
     ("spacefactor", Prim::SpaceFactor, "SET_AUX"),
@@ -563,30 +608,30 @@ pub const PRIMITIVES: [(&str, Prim, &str); 325] = [
     ("uccode", Prim::Code(Code::Uc), "DEF_CODE"),
     ("uchyph", Prim::IntPar(IntPar::Uchyph), "ASSIGN_INT"),
     ("underline", Prim::Unimpl(73), "MATH_COMP"),
-    ("unhbox", Prim::Unimpl(57), "UN_HBOX"),
-    ("unhcopy", Prim::Unimpl(58), "UN_HBOX"),
-    ("unkern", Prim::Unimpl(55), "REMOVE_ITEM"),
-    ("unpenalty", Prim::Unimpl(54), "REMOVE_ITEM"),
-    ("unskip", Prim::Unimpl(56), "REMOVE_ITEM"),
-    ("unvbox", Prim::Unimpl(59), "UN_VBOX"),
-    ("unvcopy", Prim::Unimpl(60), "UN_VBOX"),
+    ("unhbox", Prim::Mat(Mat::Unhbox(false)), "UN_HBOX"),
+    ("unhcopy", Prim::Mat(Mat::Unhbox(true)), "UN_HBOX"),
+    ("unkern", Prim::Mat(Mat::Remove(1)), "REMOVE_ITEM"),
+    ("unpenalty", Prim::Mat(Mat::Remove(0)), "REMOVE_ITEM"),
+    ("unskip", Prim::Mat(Mat::Remove(2)), "REMOVE_ITEM"),
+    ("unvbox", Prim::Mat(Mat::Unvbox(false)), "UN_VBOX"),
+    ("unvcopy", Prim::Mat(Mat::Unvbox(true)), "UN_VBOX"),
     ("uppercase", Prim::Uppercase, "CASE_SHIFT"),
     ("vadjust", Prim::Unimpl(18), "VADJUST"),
     ("valign", Prim::Unimpl(19), "VALIGN"),
     ("vbadness", Prim::IntPar(IntPar::Vbadness), "ASSIGN_INT"),
-    ("vbox", Prim::Unimpl(48), "MAKE_BOX"),
+    ("vbox", Prim::Mat(Mat::MakeBox(5)), "MAKE_BOX"),
     ("vcenter", Prim::Unimpl(20), "VCENTER"),
-    ("vfil", Prim::Unimpl(32), "VSKIP"),
-    ("vfill", Prim::Unimpl(33), "VSKIP"),
-    ("vfilneg", Prim::Unimpl(35), "VSKIP"),
+    ("vfil", Prim::Mat(Mat::Vskip(1)), "VSKIP"),
+    ("vfill", Prim::Mat(Mat::Vskip(2)), "VSKIP"),
+    ("vfilneg", Prim::Mat(Mat::Vskip(4)), "VSKIP"),
     ("vfuzz", Prim::DimenPar(DimenPar::Vfuzz), "ASSIGN_DIMEN"),
     ("voffset", Prim::DimenPar(DimenPar::Voffset), "ASSIGN_DIMEN"),
-    ("vrule", Prim::Unimpl(21), "VRULE"),
+    ("vrule", Prim::Mat(Mat::Vrule), "VRULE"),
     ("vsize", Prim::DimenPar(DimenPar::Vsize), "ASSIGN_DIMEN"),
-    ("vskip", Prim::Unimpl(31), "VSKIP"),
-    ("vsplit", Prim::Unimpl(46), "MAKE_BOX"),
-    ("vss", Prim::Unimpl(34), "VSKIP"),
-    ("vtop", Prim::Unimpl(47), "MAKE_BOX"),
+    ("vskip", Prim::Mat(Mat::Vskip(0)), "VSKIP"),
+    ("vsplit", Prim::Mat(Mat::MakeBox(3)), "MAKE_BOX"),
+    ("vss", Prim::Mat(Mat::Vskip(3)), "VSKIP"),
+    ("vtop", Prim::Mat(Mat::MakeBox(4)), "MAKE_BOX"),
     ("wd", Prim::BoxDimen(0), "SET_BOX_DIMEN"),
     ("widowpenalty", Prim::IntPar(IntPar::Widowpenalty), "ASSIGN_INT"),
     ("write", Prim::Write, "EXTENSION"),

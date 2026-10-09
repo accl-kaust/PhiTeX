@@ -7,9 +7,9 @@
 //! the recorded log is checked against a fresh run of it too;
 //! `PHITEX_FLOW_BLESS=1` records it anew.
 //!
-//! TeX runs each program after a prelude giving it the graph's initial
-//! state where that differs from `IniTeX`'s (the category codes and
-//! parameters the minimal system's documents rely on: `val::initial`).
+//! Both run each program after the same prelude (category codes for
+//! braces and parameters, and a few parameters: the graph's initial state
+//! is `IniTeX`'s, `val::initial`).
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 use phitex_flow::{Build, Font, Options};
 
-/// What makes `tex -ini`'s state the graph's initial one.
+/// What every program begins with.
 const PRELUDE: &str = "\\catcode`\\{=1 \\catcode`\\}=2 \\catcode`\\$=3 \\catcode`\\&=4 \\catcode`\\#=6 \
 \\catcode`\\^=7 \\catcode`\\~=13 \\hsize=468pt \\vsize=643pt \\parindent=20pt \\maxdepth=4pt \
 \\baselineskip=12pt \\topskip=10pt \\tolerance=200 \\linepenalty=10 %\n";
@@ -33,7 +33,7 @@ fn dir() -> PathBuf {
 
 /// The graph's log of a program, as TeX lays it out.
 fn graph_log(src: &str) -> (String, Vec<String>) {
-    let o = Build::new(font()).update(src, Options::default());
+    let o = Build::new(font()).update(&format!("{PRELUDE}{src}"), Options::default());
     (phitex_flow::print::log("(./core.tex", &o.log, " )"), o.errors)
 }
 
@@ -103,7 +103,7 @@ fn a_register_gets_its_phi_and_expansion_makes_no_node() {
     let src = "\\count1=0 \\def\\x{1}\\ifnum\\x=1 \\count1=5 \\else\\count1=6 \\fi\n\
                \\expandafter\\def\\csname a\\endcsname{A}\\count2=\\number\\count1 \\csname relax\\endcsname\n\
                \\edef\\b{\\the\\count2\\a}\\message{\\romannumeral\\count2 \\b}\n";
-    let o = Build::new(font()).update(src, Options { dump: true, ..Options::default() });
+    let o = Build::new(font()).update(&format!("{PRELUDE}{src}"), Options { dump: true, ..Options::default() });
     assert!(o.errors.is_empty(), "{:?}", o.errors);
     assert!(o.dump.contains("\\count1 = φ(5 | 0)"), "no φ for \\count1:\n{}", o.dump);
     assert_eq!(o.log, ["v5A"]);

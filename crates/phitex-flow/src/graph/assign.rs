@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use super::Exec;
 use super::scan::{mult_and_add, nx_plus_y, x_over_n};
-use crate::val::{Code, Glue, IntPar, Key, Macro, Meaning, Prim, Reg, Shorthand, Tok, Val};
+use crate::val::{Code, Glue, IntPar, Key, Macro, Mat, Meaning, Prim, Reg, Shorthand, Tok, Val};
 
 /// Whether a command takes prefixes: an assignment (tex.web 1210,
 /// `max_non_prefixed_command`).
@@ -45,27 +45,19 @@ pub(super) fn prefixable(m: &Meaning) -> bool {
             | Prim::PageInt(_)
             | Prim::PageDimen(_)
             | Prim::BoxDimen(_)
-            | Prim::Interaction(_) => true,
-            Prim::Unimpl(_) => matches!(
-                p.name(),
-                "read"
-                    | "setbox"
-                    | "hyphenation"
-                    | "patterns"
-                    | "textfont"
-                    | "scriptfont"
-                    | "scriptscriptfont"
-                    | "hyphenchar"
-                    | "skewchar"
-                    | "nullfont"
-            ),
+            | Prim::Interaction(_)
+            | Prim::Mat(Mat::SetBox | Mat::FontInt(_)) => true,
+            Prim::Unimpl(_) => {
+                matches!(p.name(), "read" | "hyphenation" | "patterns" | "textfont" | "scriptfont" | "scriptscriptfont")
+            }
             _ => false,
         },
         Meaning::CountRef(_)
         | Meaning::DimenRef(_)
         | Meaning::SkipRef(_)
         | Meaning::MuskipRef(_)
-        | Meaning::ToksRef(_) => true,
+        | Meaning::ToksRef(_)
+        | Meaning::Font(_) => true,
         _ => false,
     }
 }
@@ -182,7 +174,10 @@ impl Exec<'_> {
                     }
                     self.optional_equals();
                     if want == super::Mode::V {
+                        // (and the list's gatherer sets it where it is in the
+                        // list: the depth before is material, CORE.md)
                         self.st.prev_depth = self.scan_dimen();
+                        self.vemit.push(crate::item::Item::PrevDepth(self.st.prev_depth));
                     } else {
                         let v = self.scan_int();
                         if v <= 0 || v > 32767 {
@@ -201,13 +196,10 @@ impl Exec<'_> {
                         self.st.prev_graf = v;
                     }
                 }
-                Prim::BoxDimen(_) => {
-                    // (a void box's dimension: nothing to set, tex.web 1247)
-                    let n = self.scan_eight_bit_int();
-                    self.optional_equals();
-                    let _ = self.scan_dimen();
-                    let _void = self.get(&Key::Box(n));
-                }
+                Prim::BoxDimen(c) => self.alter_box_dimen(c),
+                Prim::Font => self.new_font(global),
+                Prim::Mat(Mat::SetBox) => self.setbox(global),
+                Prim::Mat(Mat::FontInt(k)) => self.assign_font_int(k),
                 Prim::Interaction(_) => {} // (batch mode or not: only the terminal differs)
                 _ => self.err(format!("\\{} is not supported yet", p.name())),
             },
@@ -215,6 +207,7 @@ impl Exec<'_> {
                 self.register_command(t, m, global);
             }
             Meaning::ToksRef(n) => self.toks_assign(Key::Toks(*n), false, global),
+            Meaning::Font(f) => self.select_font(f.clone(), global),
             _ => {}
         }
         // (tex.web 1269)
@@ -224,7 +217,7 @@ impl Exec<'_> {
     }
 
     /// The control sequence an assignment defines (tex.web 1215).
-    fn r_token(&mut self) -> Option<Key> {
+    pub(super) fn r_token(&mut self) -> Option<Key> {
         loop {
             let t = self.next_raw()?;
             if t.is_char(10, ' ') {

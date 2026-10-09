@@ -34,15 +34,16 @@
 use std::sync::Arc;
 
 use crate::hash::{FxMap, FxSet};
+pub use crate::item::{Item, Para};
+use crate::page::IGNORE_DEPTH;
 use crate::tfm::Font;
-use crate::val::{DimenPar, GluePar, IntPar, Key, Macro, Meaning, Prim, Tok, Val};
+use crate::val::{DimenPar, IntPar, Key, Macro, Meaning, Prim, Tok, Val};
 
 mod assign;
 mod expand;
+mod fonts;
+mod material;
 mod scan;
-
-/// `\prevdepth` meaning "no interline glue" (tex.web 212).
-const IGNORE_DEPTH: i32 = -65_536_000;
 
 /// A piece's identity, stable across edits.
 pub type PieceId = u32;
@@ -52,32 +53,12 @@ pub trait Env {
     /// The definition of `key` reaching this piece's start, and where it
     /// was made.
     fn reach(&mut self, key: &Key) -> (Val, Src);
-}
 
-/// An item of a horizontal list.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-pub enum HItem {
-    Char { c: u8, w: i32, h: i32, d: i32 },
-    /// An empty box (the paragraph indentation).
-    Box { w: i32, h: i32, d: i32 },
-    Glue { w: i32, st: i32, st_ord: u8, sh: i32, sh_ord: u8 },
-    Penalty(i32),
-}
-
-/// A paragraph: its list and the parameters it was read with. Line
-/// breaking is a pure function of this; an equal paragraph has equal
-/// lines.
-#[derive(Clone, PartialEq, Eq, Hash, Debug)]
-pub struct Para {
-    pub hlist: Vec<HItem>,
-    pub hsize: i32,
-    pub tolerance: i32,
-    pub linepenalty: i32,
-    pub baselineskip: i32,
-    pub parskip: i32,
-    pub vsize: i32,
-    pub topskip: i32,
-    pub maxdepth: i32,
+    /// The bytes of the TFM file `name.tfm`, if there is one (a pure
+    /// function of the name during a build).
+    fn font_file(&mut self, _name: &str) -> Option<std::sync::Arc<[u8]>> {
+        None
+    }
 }
 
 /// The tokenizer's state (tex.web 303).
@@ -102,6 +83,8 @@ enum GroupKind {
     Simple,
     /// `\begingroup`.
     SemiSimple,
+    /// A box's or a discretionary's braces (`Group::boxg`).
+    Box,
 }
 
 /// An open conditional: the node whose step opened it, which ends may end
@@ -120,6 +103,8 @@ struct Cond {
 struct Group {
     kind: GroupKind,
     after: Vec<Tok>,
+    /// A box group's specification and context (tex.web 1083).
+    boxg: Option<Arc<material::BoxGroup>>,
 }
 
 /// A stack in the reader state, shared until changed: handing the state
@@ -186,11 +171,17 @@ pub struct RState {
     /// been read (innermost last).
     pending: Vec<(Arc<[Tok]>, usize)>,
     mode: Mode,
+    /// The list being built is internal: a box's (TeX's negative modes).
+    inner: bool,
+    /// Boxes open: the level of the list being built (0: the main vertical
+    /// list and its paragraphs).
+    level: u16,
+    /// A box group just closed: what its packaging node reads.
+    boxing: Option<Arc<material::BoxEnd>>,
     /// A `\global` prefix is waiting for its assignment.
     global: bool,
     /// Conditionals open (innermost last).
     conds: Stack<Cond>,
-    parskip: i32,
     /// `\long`, `\outer` prefixes waiting for their definition.
     long: bool,
     outer: bool,
@@ -215,9 +206,11 @@ impl RState {
             tstate: TState::N,
             pending: Vec::new(),
             mode: Mode::V,
+            inner: false,
+            level: 0,
+            boxing: None,
             global: false,
             conds: Stack::new(),
-            parskip: 0,
             long: false,
             outer: false,
             groups: Stack::new(),
@@ -303,7 +296,11 @@ pub struct Node {
     pub out: RState,
     pub reads: Vec<Read>,
     pub defs: Vec<Def>,
-    pub emit: Vec<HItem>,
+    /// The items it emitted into the horizontal list being built (at
+    /// `out.level`), and into the vertical list (inside a box: at the
+    /// outer level they are carried by `para`).
+    pub emit: Vec<Item>,
+    pub vemit: Vec<Item>,
     pub para: Option<Arc<Para>>,
     pub errors: Vec<String>,
     pub phi: Option<Box<Phi>>,
@@ -329,11 +326,6 @@ impl Chain {
     /// The input state of node `i` (`i == len`: of the next node).
     pub fn input(&self, i: usize) -> RState {
         if i == 0 { RState::start() } else { self.nodes[i - 1].out.clone() }
-    }
-
-    /// Whether node `i` begins in horizontal mode.
-    fn input_h(&self, i: usize) -> bool {
-        i > 0 && self.nodes[i - 1].out.mode == Mode::H
     }
 
     /// The definition of `key` reaching node `i` (`i == len`: the next
@@ -397,6 +389,12 @@ pub struct Run {
     pub errors: Vec<String>,
     /// Nodes run this time (the others were kept).
     pub ran: u64,
+}
+
+/// The node that began the paragraph node `i` of `chain` ended (or is
+/// in): for the log's line numbers.
+pub fn paragraph_start(chain: &Chain, i: usize) -> usize {
+    material::para_start(chain, i, chain.nodes[i].out.level)
 }
 
 /// Cuts the source into pieces at blank lines at brace depth 0. Lines lose
@@ -667,6 +665,10 @@ struct Scratch {
     /// Shared copies of the names read in this piece.
     names: FxSet<Arc<str>>,
     buf: String,
+    /// The glue `scan_glue` just gave is an internal quantity's own (for
+    /// TeX's shared zero glue, which `\showbox` and the short display
+    /// tell apart).
+    glue_shared: bool,
 }
 
 /// One node's execution: one command, from the state its predecessor left.
@@ -679,7 +681,8 @@ struct Exec<'a> {
     st: RState,
     reads: Vec<Read>,
     defs: Vec<Def>,
-    emit: Vec<HItem>,
+    emit: Vec<Item>,
+    vemit: Vec<Item>,
     para: Option<Arc<Para>>,
     errors: Vec<String>,
     phi: Option<Box<Phi>>,
@@ -712,6 +715,7 @@ impl<'a> Exec<'a> {
             reads: Vec::new(),
             defs: Vec::new(),
             emit: Vec::new(),
+            vemit: Vec::new(),
             para: None,
             errors: Vec::new(),
             phi: None,
@@ -723,7 +727,16 @@ impl<'a> Exec<'a> {
         }
     }
 
-    fn finish(self) -> Node {
+    fn finish(mut self) -> Node {
+        // (vertical material at the outer level is carried by `para`, in
+        // the order the build's page fold reads it)
+        if self.st.level == 0 && !self.vemit.is_empty() {
+            let v = std::mem::take(&mut self.vemit);
+            match &mut self.para {
+                Some(p) => Arc::make_mut(p).after.extend(v),
+                None => self.para = Some(Arc::new(Para { before: v, ..Para::default() })),
+            }
+        }
         Node {
             kind: self.kind,
             cmd: self.cmd,
@@ -731,6 +744,7 @@ impl<'a> Exec<'a> {
             reads: self.reads,
             defs: self.defs,
             emit: self.emit,
+            vemit: self.vemit,
             para: self.para,
             errors: self.errors,
             phi: self.phi,
@@ -794,11 +808,6 @@ impl<'a> Exec<'a> {
         self.int(&Key::DimenPar(p))
     }
 
-    /// A glue parameter's width.
-    fn glue_width(&mut self, p: GluePar) -> i32 {
-        self.int(&Key::GluePar(p))
-    }
-
     fn font(&mut self) -> Arc<Font> {
         match self.get(&Key::Font) {
             Val::Font(f) => f,
@@ -809,8 +818,7 @@ impl<'a> Exec<'a> {
     /// `\fontdimen n` of the current font.
     fn font_param(&mut self, n: u16) -> i32 {
         let f = self.font();
-        let name: Arc<str> = intern(&mut self.scratch.names, &f.name);
-        self.int(&Key::FontDimen(name, n))
+        self.int(&Key::FontDimen(f.id, n))
     }
 
     fn tok_meaning(&mut self, t: &Tok) -> Meaning {
@@ -1193,9 +1201,10 @@ impl<'a> Exec<'a> {
                 self.prefix(p, global, long, outer);
             }
             _ if assign::prefixable(&m) => self.prefixed(&t, &m, global, long, outer),
+            Meaning::Prim(Prim::Mat(x)) => self.mat(x, &t),
             Meaning::Prim(p) => self.prim(p),
-            Meaning::Char(cat, c) => self.char_tok(cat, c),
-            Meaning::CharGiven(c) => self.letter(char::from_u32(c).unwrap_or('\0')),
+            Meaning::Char(cat, c) => self.char_tok(cat, c, &t),
+            Meaning::CharGiven(c) => self.char_cmd(c, &t),
             Meaning::MathCharGiven(_) => self.err("Missing $ inserted (math is not supported yet)".into()),
             Meaning::Undefined => self.err(format!("Undefined control sequence {t}")),
             Meaning::Macro(_)
@@ -1203,7 +1212,8 @@ impl<'a> Exec<'a> {
             | Meaning::DimenRef(_)
             | Meaning::SkipRef(_)
             | Meaning::MuskipRef(_)
-            | Meaning::ToksRef(_) => {}
+            | Meaning::ToksRef(_)
+            | Meaning::Font(_) => {}
         }
     }
 
@@ -1222,7 +1232,7 @@ impl<'a> Exec<'a> {
 
     /// A group opens: a scope (tex.web 1063).
     fn open_group(&mut self, g: GroupKind) {
-        self.st.groups.push(Group { kind: g, after: Vec::new() });
+        self.st.groups.push(Group { kind: g, after: Vec::new(), boxg: None });
         self.kind = Kind::Open;
     }
 
@@ -1234,20 +1244,21 @@ impl<'a> Exec<'a> {
         self.kind = Kind::Close;
     }
 
-    fn char_tok(&mut self, cat: u8, c: char) {
+    fn char_tok(&mut self, cat: u8, c: char, t: &Tok) {
         match cat {
             1 => self.open_group(GroupKind::Simple),
             2 => match self.st.groups.last().map(|g| g.kind) {
                 Some(GroupKind::Simple) => self.close_group(),
+                Some(GroupKind::Box) => self.close_box(t),
                 Some(GroupKind::SemiSimple) => self.err("Extra }, or forgotten \\endgroup".into()),
                 None => self.err("Too many }'s".into()),
             },
             10 => {
                 if self.st.mode == Mode::H {
-                    self.space();
+                    self.space_cmd();
                 }
             }
-            11 | 12 => self.letter(c),
+            11 | 12 => self.char_cmd(u32::from(c), t),
             _ => self.err(format!("Character {c} of category {cat} is not supported yet")),
         }
     }
@@ -1256,34 +1267,17 @@ impl<'a> Exec<'a> {
     /// assignment.
     fn prim(&mut self, p: Prim) {
         match p {
-            Prim::Par => self.end_par(),
-            Prim::Indent => {
-                if self.st.mode == Mode::V {
-                    self.begin_par(true);
-                } else {
-                    let w = self.dimen_par(DimenPar::Parindent);
-                    self.emit.push(HItem::Box { w, h: 0, d: 0 });
-                }
-            }
-            Prim::Noindent => {
-                if self.st.mode == Mode::V {
-                    self.begin_par(false);
-                }
-            }
-            Prim::Space => {
-                if self.st.mode == Mode::V {
-                    self.begin_par(true);
-                }
-                self.space();
-            }
+            Prim::Par => self.par_cmd(),
+            Prim::Indent | Prim::Noindent => self.start_par(p == Prim::Indent),
+            Prim::Space => self.ex_space(),
             Prim::Char => {
-                let c = self.scan_char_num();
-                self.letter(char::from_u32(c as u32).unwrap_or('\0'));
+                let t = self.cmd.clone();
+                self.char_cmd_num(&t);
             }
             Prim::BeginGroup => self.open_group(GroupKind::SemiSimple),
             Prim::EndGroup => match self.st.groups.last().map(|g| g.kind) {
                 Some(GroupKind::SemiSimple) => self.close_group(),
-                Some(GroupKind::Simple) => {
+                Some(GroupKind::Simple | GroupKind::Box) => {
                     // (tex.web 1064: the missing `}` goes in first)
                     self.err("Missing } inserted".into());
                     let t = self.cmd.clone();
@@ -1321,7 +1315,8 @@ impl<'a> Exec<'a> {
             }
             Prim::Uppercase | Prim::Lowercase => self.case_shift(p == Prim::Uppercase),
             Prim::EndCsName => self.err("Extra \\endcsname".into()),
-            Prim::Relax | Prim::End | Prim::Dump => {}
+            Prim::End | Prim::Dump => self.stop(),
+            Prim::Relax => {}
             Prim::LastItem(_)
             | Prim::SpaceFactor
             | Prim::PrevDepth
@@ -1331,72 +1326,6 @@ impl<'a> Exec<'a> {
             | Prim::BoxDimen(_) => self.err(format!("You can't use `\\{}' here", p.name())),
             _ => self.err(format!("\\{} is not supported yet", p.name())),
         }
-    }
-
-    // ------------------------------------------------------------ material
-
-    fn begin_par(&mut self, indent: bool) {
-        self.st.mode = Mode::H;
-        self.st.space_factor = 1000;
-        self.st.parskip = self.glue_width(GluePar::Parskip);
-        if indent {
-            let w = self.dimen_par(DimenPar::Parindent);
-            self.emit.push(HItem::Box { w, h: 0, d: 0 });
-        }
-    }
-
-    fn letter(&mut self, c: char) {
-        if self.st.mode == Mode::V {
-            self.begin_par(true);
-        }
-        let font = self.font();
-        match font.char(u32::from(c)) {
-            Some(d) if u32::from(c) < 256 => self.emit.push(HItem::Char { c: c as u8, w: d.w, h: d.h, d: d.d }),
-            _ => self.err(format!("Missing character {c} in font {}", font.name)),
-        }
-    }
-
-    fn space(&mut self) {
-        let f = self.font();
-        self.emit.push(HItem::Glue { w: f.param(2), st: f.param(3), st_ord: 0, sh: f.param(4), sh_ord: 0 });
-    }
-
-    /// `\par`: the paragraph, from the material its nodes emitted, with the
-    /// parameters line breaking and pages read (tex.web 1096).
-    fn end_par(&mut self) {
-        if self.st.mode != Mode::H {
-            return;
-        }
-        self.kind = Kind::Par;
-        self.st.mode = Mode::V;
-        // (the paragraph's nodes: back to the one that began it)
-        let nodes = &self.chain.nodes;
-        let mut first = nodes.len();
-        for j in (0..nodes.len()).rev() {
-            first = j;
-            if !self.chain.input_h(j) {
-                break;
-            }
-        }
-        let mut hlist: Vec<HItem> = nodes[first..].iter().flat_map(|n| n.emit.iter().copied()).collect();
-        hlist.append(&mut self.emit);
-        if matches!(hlist.last(), Some(HItem::Glue { .. })) {
-            hlist.pop();
-        }
-        hlist.push(HItem::Penalty(10000));
-        hlist.push(HItem::Glue { w: 0, st: 65536, st_ord: 1, sh: 0, sh_ord: 0 });
-        let para = Para {
-            hlist,
-            hsize: self.dimen_par(DimenPar::Hsize),
-            tolerance: self.int_par(IntPar::Tolerance),
-            linepenalty: self.int_par(IntPar::Linepenalty),
-            baselineskip: self.glue_width(GluePar::Baselineskip),
-            parskip: self.st.parskip,
-            vsize: self.dimen_par(DimenPar::Vsize),
-            topskip: self.glue_width(GluePar::Topskip),
-            maxdepth: self.dimen_par(DimenPar::Maxdepth),
-        };
-        self.para = Some(Arc::new(para));
     }
 }
 

@@ -1,227 +1,619 @@
-//! Line breaking: a pure function of a paragraph (Knuth–Plass, tex.web
-//! part 38, without hyphenation, looseness or shapes yet), and packing.
+//! Line breaking: a pure function of a paragraph (tex.web parts 38–39,
+//! §813–§890, without hyphenation: an `-ini` document has no patterns),
+//! copied. The paragraph's list ends with `\penalty10000\parfillskip`
+//! (`Exec::end_par` puts them there, tex.web 816); the result is the
+//! justified lines, each with what follows it in the vertical list (the
+//! marks the packager moved out, the interline penalty) and TeX's
+//! diagnostic about its box.
 
-use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
-use crate::arith::{INF_BAD, badness, clamp};
-use crate::graph::{HItem, Para};
+use crate::arith::{AWFUL_BAD, INF_BAD, badness};
+use crate::item::{BoxNode, Disc, Interline, Item, Para, is_zero};
+use crate::pack::{Params, Spec, hpack};
+use crate::show::{Ctx, Place, report};
+use crate::val::Glue;
 
-/// How a box's glue is set.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct GlueSet {
-    /// 0 normal, 1 stretching, -1 shrinking.
-    pub sign: i8,
-    pub order: u8,
-    pub ratio: f64,
+/// What line breaking reads, read by the `\par` node.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LineParams {
+    pub hsize: i32,
+    pub pretolerance: i32,
+    pub tolerance: i32,
+    pub emergency_stretch: i32,
+    pub looseness: i32,
+    pub linepenalty: i32,
+    pub hyphenpenalty: i32,
+    pub exhyphenpenalty: i32,
+    pub adjdemerits: i32,
+    pub doublehyphendemerits: i32,
+    pub finalhyphendemerits: i32,
+    pub interlinepenalty: i32,
+    pub clubpenalty: i32,
+    pub widowpenalty: i32,
+    pub brokenpenalty: i32,
+    pub leftskip: Arc<Glue>,
+    pub rightskip: Arc<Glue>,
+    pub hangindent: i32,
+    pub hangafter: i32,
+    pub parshape: Arc<Vec<(i32, i32)>>,
+    /// The enclosing vertical list's `\prevgraf` (tex.web 877).
+    pub prev_graf: i32,
+    /// `\hbadness`, `\hfuzz`, `\overfullrule` for the lines.
+    pub pack: Params,
+    /// What appending each line to the vertical list reads.
+    pub inter: Arc<Interline>,
+    /// For the diagnostics.
+    pub show: Ctx,
 }
 
-impl Eq for GlueSet {}
-
-impl Hash for GlueSet {
-    fn hash<H: Hasher>(&self, h: &mut H) {
-        self.sign.hash(h);
-        self.order.hash(h);
-        self.ratio.to_bits().hash(h);
-    }
-}
-
-pub const NORMAL: GlueSet = GlueSet { sign: 0, order: 0, ratio: 0.0 };
-
-/// A line: a box of width `hsize` with its glue set.
-#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+/// A line: its box (shifted by its indentation) and what follows it.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Line {
-    pub items: Vec<HItem>,
-    pub w: i32,
-    pub h: i32,
-    pub d: i32,
-    pub glue: GlueSet,
+    pub b: Arc<BoxNode>,
+    /// Marks the packager moved out of the line (tex.web 655).
+    pub adjust: Vec<Item>,
+    /// The interline penalty after it, if any (tex.web 890).
+    pub pen: Option<i32>,
+    /// TeX's diagnostic about the line's box, a raw log entry.
+    pub report: Option<String>,
 }
 
-/// The glue setting that makes `x` more (or less) fit, given the stretch
-/// and shrink by order (tex.web 658, 664).
-pub fn set_glue(x: i32, st: &[i64; 4], sh: &[i64; 4]) -> GlueSet {
-    if x > 0 {
-        let o = (0..4).rev().find(|&o| st[o] != 0).unwrap_or(0);
-        if st[o] == 0 {
-            NORMAL
-        } else {
-            GlueSet { sign: 1, order: o as u8, ratio: f64::from(x) / st[o] as f64 }
-        }
-    } else if x < 0 {
-        let o = (0..4).rev().find(|&o| sh[o] != 0).unwrap_or(0);
-        if sh[o] == 0 {
-            NORMAL
-        } else if o == 0 && -i64::from(x) > sh[0] {
-            GlueSet { sign: -1, order: 0, ratio: 1.0 }
-        } else {
-            GlueSet { sign: -1, order: o as u8, ratio: f64::from(-x) / sh[o] as f64 }
-        }
-    } else {
-        NORMAL
+const EJECT: i32 = -10000;
+/// `max_halfword`: the line number of the last active node (tex.web 820).
+const MAX_HALFWORD: i32 = 0x0FFF_FFFF;
+
+/// Widths: natural, stretch of each order, shrink (tex.web 823).
+type W = [i64; 6];
+
+fn add(a: &mut W, b: &W) {
+    for k in 0..6 {
+        a[k] += b[k];
     }
 }
 
-/// `hpack(items, exactly target)`.
-pub fn hpack(items: Vec<HItem>, target: i32) -> Line {
-    let (mut w, mut h, mut d) = (0i64, 0, 0);
-    let mut st = [0i64; 4];
-    let mut sh = [0i64; 4];
-    for it in &items {
-        match *it {
-            HItem::Char { w: cw, h: ch, d: cd, .. } | HItem::Box { w: cw, h: ch, d: cd } => {
-                w += i64::from(cw);
-                h = h.max(ch);
-                d = d.max(cd);
-            }
-            HItem::Glue { w: gw, st: s, st_ord, sh: k, sh_ord } => {
-                w += i64::from(gw);
-                st[usize::from(st_ord)] += i64::from(s);
-                sh[usize::from(sh_ord)] += i64::from(k);
-            }
-            HItem::Penalty(_) => {}
-        }
+fn sub(a: &mut W, b: &W) {
+    for k in 0..6 {
+        a[k] -= b[k];
     }
-    let glue = set_glue(clamp(i64::from(target) - w), &st, &sh);
-    Line { items, w: target, h, d, glue }
 }
 
-struct Node {
-    pos: usize,
-    start: usize,
+fn glue_widths(w: &mut W, g: &Glue) {
+    w[0] += i64::from(g.width);
+    w[1 + usize::from(g.stretch_order.min(3))] += i64::from(g.stretch);
+    // (`check_shrinkage`: an infinite shrink is taken as finite, tex.web 826)
+    w[5] += i64::from(g.shrink);
+}
+
+/// The widths an item adds (tex.web 866–871).
+fn widths(it: &Item) -> W {
+    let mut w = [0i64; 6];
+    match it {
+        Item::Glue { g, .. } => glue_widths(&mut w, g),
+        Item::Char(..) | Item::Lig(_) | Item::Box(_) | Item::Rule { .. } | Item::Kern { .. } => {
+            w[0] = i64::from(it.width());
+        }
+        _ => {}
+    }
+    w
+}
+
+fn list_widths(l: &[Item]) -> W {
+    let mut w = [0i64; 6];
+    for it in l {
+        add(&mut w, &widths(it));
+    }
+    w
+}
+
+/// An active node (tex.web 819): the break it stands for (a passive node;
+/// `None`, the paragraph's start), and what the line after it is.
+#[derive(Clone, Copy)]
+struct Active {
+    passive: Option<usize>,
+    hyphenated: bool,
+    line: i32,
+    fit: usize,
     total: i64,
+}
+
+/// A passive node (tex.web 821): the break's item (`None`: the end) and
+/// the break before it.
+#[derive(Clone, Copy)]
+struct Passive {
+    at: Option<usize>,
     prev: Option<usize>,
 }
 
-/// Breaks a paragraph into lines.
-pub fn break_lines(p: &Para) -> Vec<Arc<Line>> {
-    let items = &p.hlist;
-    let n = items.len();
-    let mut pw = vec![0i64; n + 1];
-    let mut pst = vec![[0i64; 4]; n + 1];
-    let mut psh = vec![0i64; n + 1];
-    for (i, it) in items.iter().enumerate() {
-        pw[i + 1] = pw[i];
-        pst[i + 1] = pst[i];
-        psh[i + 1] = psh[i];
-        match *it {
-            HItem::Char { w, .. } | HItem::Box { w, .. } => pw[i + 1] += i64::from(w),
-            HItem::Glue { w, st, st_ord, sh, .. } => {
-                pw[i + 1] += i64::from(w);
-                pst[i + 1][usize::from(st_ord)] += i64::from(st);
-                psh[i + 1] += i64::from(sh);
+struct Breaker<'a> {
+    items: &'a [Item],
+    p: &'a LineParams,
+    /// `prefix[i]`: the widths of `items[..i]`.
+    prefix: Vec<W>,
+    background: W,
+    easy_line: i32,
+    last_special_line: i32,
+    first_width: i32,
+    second_width: i32,
+    first_indent: i32,
+    second_indent: i32,
+    active: Vec<Active>,
+    passive: Vec<Passive>,
+    minimal: [i64; 4],
+    minimum: i64,
+    best_place: [Option<usize>; 4],
+    best_line: [i32; 4],
+    threshold: i32,
+    final_pass: bool,
+}
+
+impl Breaker<'_> {
+    /// Where the line after an active node's break begins, and the widths
+    /// before that point it has (a discretionary's post-break list): what
+    /// tex.web's `break_width` computes (tex.web 837–840).
+    fn start(&self, a: &Active) -> (usize, W) {
+        let Some(pi) = a.passive else { return (0, [0; 6]) };
+        let Some(b) = self.passive[pi].at else { return (self.items.len(), [0; 6]) };
+        let mut s = b;
+        if let Item::Disc(d) = &self.items[b] {
+            let v = b + usize::from(d.replace);
+            if !d.post.is_empty() {
+                return (v + 1, list_widths(&d.post));
             }
-            HItem::Penalty(_) => {}
+            s = v + 1;
+        }
+        while s < self.items.len() {
+            match &self.items[s] {
+                Item::Glue { .. } | Item::Penalty(_) | Item::Kern { sub: 1, .. } => {}
+                _ => break,
+            }
+            s += 1;
+        }
+        (s, [0; 6])
+    }
+
+    /// §850: the length of line `l`.
+    fn line_width(&self, l: i32) -> i32 {
+        if l > self.last_special_line {
+            self.second_width
+        } else if self.p.parshape.is_empty() {
+            self.first_width
+        } else {
+            self.p.parshape[(l - 1) as usize].1
         }
     }
-    // (legal breakpoints: glue after a box, penalties < 10000, the end)
-    let mut cands: Vec<(usize, i32)> = Vec::new();
-    for i in 0..n {
-        match items[i] {
-            HItem::Glue { .. } if i > 0 && matches!(items[i - 1], HItem::Char { .. } | HItem::Box { .. }) => {
-                cands.push((i, 0));
+
+    /// §829: `try_break` at item `cur` (`None`: the paragraph's end), with
+    /// the widths of a discretionary's pre-break list.
+    fn try_break(&mut self, mut pi: i32, hyphenated: bool, cur: Option<usize>, pre: &W) {
+        // (§831)
+        if pi.abs() >= 10000 {
+            if pi > 0 {
+                return;
             }
-            HItem::Penalty(pp) if pp < 10000 => cands.push((i, pp)),
-            _ => {}
+            pi = EJECT;
         }
-    }
-    cands.push((n, -10000));
-    let start_after = |b: usize| -> usize {
-        let mut j = b + 1;
-        while j < n && matches!(items[j], HItem::Glue { .. } | HItem::Penalty(_)) {
-            j += 1;
-        }
-        j
-    };
-    for pass in 0..2 {
-        let threshold = if pass == 0 { p.tolerance } else { i32::MAX };
-        let mut arena = vec![Node { pos: usize::MAX, start: 0, total: 0, prev: None }];
-        let mut active: Vec<usize> = vec![0];
-        let mut reached_end = false;
-        for &(b, pen) in &cands {
-            let mut best: [Option<(i64, usize)>; 4] = [None; 4];
-            let mut keep = Vec::with_capacity(active.len());
-            for &a in &active {
-                let s = arena[a].start;
-                let w = pw[b] - pw[s.min(b)];
-                let stv: [i64; 4] = std::array::from_fn(|o| pst[b][o] - pst[s.min(b)][o]);
-                let shv = psh[b] - psh[s.min(b)];
-                let short = i64::from(p.hsize) - w;
-                let (bad, fit, overfull) = if short > 0 {
-                    if stv[1] + stv[2] + stv[3] > 0 {
-                        (0, 2usize, false)
+        let upto = cur.unwrap_or(self.items.len());
+        let mut old_l = 0;
+        let mut line_width = 0;
+        let mut i = 0usize;
+        loop {
+            // (§835: a line number class has ended)
+            let l = self.active.get(i).map_or(MAX_HALFWORD, |a| a.line);
+            if l > old_l {
+                if self.minimum < i64::from(AWFUL_BAD) && (old_l != self.easy_line || i == self.active.len()) {
+                    // (§836: new active nodes for the best feasible breaks)
+                    let adj = i64::from(self.p.adjdemerits.abs());
+                    if adj >= i64::from(AWFUL_BAD) - self.minimum {
+                        self.minimum = i64::from(AWFUL_BAD) - 1;
                     } else {
-                        let bb = badness(clamp(short), clamp(stv[0]));
-                        (bb, if bb > 99 { 0 } else if bb > 12 { 1 } else { 2 }, false)
+                        self.minimum += adj;
                     }
-                } else if short < 0 {
-                    if -short > shv {
-                        (INF_BAD + 1, 3, true)
-                    } else {
-                        let bb = badness(clamp(-short), clamp(shv));
-                        (bb, if bb > 12 { 3 } else { 2 }, false)
+                    for fit in 0..4 {
+                        if self.minimal[fit] <= self.minimum {
+                            // (§845)
+                            self.passive.push(Passive { at: cur, prev: self.best_place[fit] });
+                            let a = Active {
+                                passive: Some(self.passive.len() - 1),
+                                hyphenated,
+                                line: self.best_line[fit] + 1,
+                                fit,
+                                total: self.minimal[fit],
+                            };
+                            self.active.insert(i, a);
+                            i += 1;
+                        }
+                        self.minimal[fit] = i64::from(AWFUL_BAD);
                     }
+                    self.minimum = i64::from(AWFUL_BAD);
+                }
+                if i == self.active.len() {
+                    return;
+                }
+                // (§850)
+                if l > self.easy_line {
+                    line_width = self.second_width;
+                    old_l = MAX_HALFWORD - 1;
                 } else {
-                    (0, 2, false)
-                };
-                let feasible = if overfull { pass == 1 } else { bad <= threshold };
-                if feasible {
-                    let b2 = i64::from(if overfull { INF_BAD } else { bad });
-                    let mut d = (i64::from(p.linepenalty) + b2).pow(2);
-                    if pen > 0 {
-                        d += i64::from(pen).pow(2);
-                    } else if pen > -10000 {
-                        d -= i64::from(pen).pow(2);
+                    old_l = l;
+                    line_width = self.line_width(l);
+                }
+            }
+            // (§851: the demerits for a line from `a` to `cur`)
+            let a = self.active[i];
+            let (s, extra) = self.start(&a);
+            let mut w = self.background;
+            add(&mut w, &self.prefix[upto]);
+            sub(&mut w, &self.prefix[s]);
+            add(&mut w, &extra);
+            add(&mut w, pre);
+            let shortfall = i64::from(line_width) - w[0];
+            let (b, fit): (i32, usize) = if shortfall > 0 {
+                // (§852)
+                if w[2] != 0 || w[3] != 0 || w[4] != 0 {
+                    (0, 2)
+                } else if shortfall > 7_230_584 && w[1] < 1_663_497 {
+                    (INF_BAD, 0)
+                } else {
+                    let b = badness(shortfall as i32, w[1] as i32);
+                    let fit = if b > 99 {
+                        0
+                    } else if b > 12 {
+                        1
+                    } else {
+                        2
+                    };
+                    (b, fit)
+                }
+            } else {
+                // (§853)
+                let b = if -shortfall > w[5] { INF_BAD + 1 } else { badness((-shortfall) as i32, w[5] as i32) };
+                (b, if b > 12 { 3 } else { 2 })
+            };
+            let mut artificial = false;
+            let stays = if b > INF_BAD || pi == EJECT {
+                // (§854)
+                if self.final_pass && self.minimum == i64::from(AWFUL_BAD) && self.active.len() == 1 && i == 0 {
+                    artificial = true;
+                } else if b > self.threshold {
+                    self.active.remove(i);
+                    continue;
+                }
+                false
+            } else {
+                if b > self.threshold {
+                    i += 1;
+                    continue;
+                }
+                true
+            };
+            // (§855: record a new feasible break)
+            let mut d: i64 = if artificial {
+                0
+            } else {
+                // (§859)
+                let mut d = i64::from(self.p.linepenalty) + i64::from(b);
+                d = if d.abs() >= 10000 { 100_000_000 } else { d * d };
+                if pi != 0 {
+                    if pi > 0 {
+                        d += i64::from(pi) * i64::from(pi);
+                    } else if pi > EJECT {
+                        d -= i64::from(pi) * i64::from(pi);
                     }
-                    let tot = arena[a].total + d;
-                    if best[fit].is_none_or(|(t, _)| tot < t) {
-                        best[fit] = Some((tot, a));
+                }
+                if hyphenated && a.hyphenated {
+                    if cur.is_some() {
+                        d += i64::from(self.p.doublehyphendemerits);
+                    } else {
+                        d += i64::from(self.p.finalhyphendemerits);
                     }
                 }
-                let drop = (short < 0 && (overfull || bad > threshold)) || pen <= -10000;
-                if !drop {
-                    keep.push(a);
+                if fit.abs_diff(a.fit) > 1 {
+                    d += i64::from(self.p.adjdemerits);
+                }
+                d
+            };
+            d += a.total;
+            if d <= self.minimal[fit] {
+                self.minimal[fit] = d;
+                self.best_place[fit] = a.passive;
+                self.best_line[fit] = l;
+                if d < self.minimum {
+                    self.minimum = d;
                 }
             }
-            active = keep;
-            for slot in best.iter().flatten() {
-                let (tot, a) = *slot;
-                let start = if b >= n { n } else { start_after(b) };
-                arena.push(Node { pos: b, start, total: tot, prev: Some(a) });
-                active.push(arena.len() - 1);
-                if b == n {
-                    reached_end = true;
-                }
+            if stays {
+                i += 1;
+            } else {
+                self.active.remove(i);
             }
-            if active.is_empty() {
-                break;
-            }
-        }
-        if !reached_end {
-            continue;
-        }
-        let fin = arena
-            .iter()
-            .enumerate()
-            .filter(|(_, x)| x.pos == n && x.prev.is_some())
-            .min_by_key(|(_, x)| x.total)
-            .map(|(i, _)| i);
-        if let Some(mut i) = fin {
-            let mut breaks = Vec::new();
-            while let Some(pr) = arena[i].prev {
-                breaks.push(arena[i].pos);
-                i = pr;
-            }
-            breaks.reverse();
-            let mut lines = Vec::with_capacity(breaks.len());
-            let mut s = 0;
-            for &b in &breaks {
-                let end = b.min(n);
-                lines.push(Arc::new(hpack(items[s.min(end)..end].to_vec(), p.hsize)));
-                s = if b < n { start_after(b) } else { n };
-            }
-            return lines;
         }
     }
-    vec![Arc::new(hpack(items.clone(), p.hsize))]
+
+    /// One pass (tex.web 863–873): the chosen final active node, if the
+    /// pass found breaks.
+    fn pass(&mut self) -> Option<Active> {
+        self.active = vec![Active { passive: None, hyphenated: false, line: self.p.prev_graf + 1, fit: 2, total: 0 }];
+        self.passive.clear();
+        self.minimal = [i64::from(AWFUL_BAD); 4];
+        self.minimum = i64::from(AWFUL_BAD);
+        let items = self.items;
+        let n = items.len();
+        let mut k = 0;
+        let none = [0i64; 6];
+        while k < n && !self.active.is_empty() {
+            // (§866)
+            match &items[k] {
+                Item::Glue { .. } => {
+                    // (§868)
+                    if k > 0 {
+                        let pr = &items[k - 1];
+                        if pr.is_char() || pr.precedes_break() || matches!(pr, Item::Kern { sub, .. } if *sub != 1) {
+                            self.try_break(0, false, Some(k), &none);
+                        }
+                    }
+                }
+                Item::Kern { sub: 1, .. } => {
+                    if matches!(items.get(k + 1), Some(Item::Glue { .. })) {
+                        self.try_break(0, false, Some(k), &none);
+                    }
+                }
+                Item::Penalty(p) => self.try_break(*p, false, Some(k), &none),
+                Item::Disc(d) => {
+                    // (§869)
+                    if d.pre.is_empty() {
+                        self.try_break(self.p.exhyphenpenalty, true, Some(k), &none);
+                    } else {
+                        let pre = list_widths(&d.pre);
+                        self.try_break(self.p.hyphenpenalty, true, Some(k), &pre);
+                    }
+                    k += usize::from(d.replace);
+                }
+                _ => {}
+            }
+            k += 1;
+        }
+        if k < n || self.active.is_empty() {
+            return None;
+        }
+        // (§873: the final break)
+        self.try_break(EJECT, true, None, &none);
+        if self.active.is_empty() {
+            return None;
+        }
+        // (§874: fewest demerits)
+        let mut best: Option<Active> = None;
+        let mut fewest = i64::from(AWFUL_BAD);
+        for a in &self.active {
+            if a.total < fewest {
+                fewest = a.total;
+                best = Some(*a);
+            }
+        }
+        let best = best?;
+        if self.p.looseness == 0 {
+            return Some(best);
+        }
+        // (§875: the desired looseness)
+        let best_line = best.line;
+        let mut bet = best;
+        let mut actual = 0;
+        for a in &self.active {
+            let diff = a.line - best_line;
+            if (diff < actual && self.p.looseness <= diff) || (diff > actual && self.p.looseness >= diff) {
+                bet = *a;
+                actual = diff;
+                fewest = a.total;
+            } else if diff == actual && a.total < fewest {
+                bet = *a;
+                fewest = a.total;
+            }
+        }
+        if actual == self.p.looseness || self.final_pass { Some(bet) } else { None }
+    }
+}
+
+/// Breaks a paragraph into lines (none for a carrier of vertical items).
+pub fn break_lines(para: &Para) -> Vec<Arc<Line>> {
+    let Some(p) = &para.lb else { return Vec::new() };
+    lines(&para.hlist, p)
+}
+
+/// The lines of a paragraph's list.
+pub fn lines(items: &[Item], p: &LineParams) -> Vec<Arc<Line>> {
+    let mut prefix = Vec::with_capacity(items.len() + 1);
+    let mut acc = [0i64; 6];
+    prefix.push(acc);
+    for it in items {
+        add(&mut acc, &widths(it));
+        prefix.push(acc);
+    }
+    // (§827: the background)
+    let mut background = [0i64; 6];
+    glue_widths(&mut background, &p.leftskip);
+    glue_widths(&mut background, &p.rightskip);
+    // (§848, §849: the lines' lengths)
+    let (mut lsl, mut fw, mut fi, mut sw, mut si) = (0, p.hsize, 0, p.hsize, 0);
+    if p.parshape.is_empty() {
+        if p.hangindent != 0 {
+            lsl = p.hangafter.abs();
+            if p.hangafter < 0 {
+                fw = p.hsize - p.hangindent.abs();
+                fi = p.hangindent.max(0);
+            } else {
+                sw = p.hsize - p.hangindent.abs();
+                si = p.hangindent.max(0);
+            }
+        }
+    } else {
+        lsl = p.parshape.len() as i32 - 1;
+        let last = p.parshape[p.parshape.len() - 1];
+        sw = last.1;
+        si = last.0;
+    }
+    let easy_line = if p.looseness == 0 { lsl } else { MAX_HALFWORD };
+    let mut br = Breaker {
+        items,
+        p,
+        prefix,
+        background,
+        easy_line,
+        last_special_line: lsl,
+        first_width: fw,
+        second_width: sw,
+        first_indent: fi,
+        second_indent: si,
+        active: Vec::new(),
+        passive: Vec::new(),
+        minimal: [i64::from(AWFUL_BAD); 4],
+        minimum: i64::from(AWFUL_BAD),
+        best_place: [None; 4],
+        best_line: [0; 4],
+        threshold: 0,
+        final_pass: false,
+    };
+    // (§863: the passes)
+    let mut second = if p.pretolerance >= 0 {
+        br.threshold = p.pretolerance;
+        false
+    } else {
+        br.threshold = p.tolerance;
+        br.final_pass = p.emergency_stretch <= 0;
+        true
+    };
+    let best = loop {
+        if br.threshold > INF_BAD {
+            br.threshold = INF_BAD;
+        }
+        if let Some(b) = br.pass() {
+            break b;
+        }
+        if second {
+            br.background[1] += i64::from(p.emergency_stretch);
+            br.final_pass = true;
+        } else {
+            br.threshold = p.tolerance;
+            second = true;
+            br.final_pass = p.emergency_stretch <= 0;
+        }
+    };
+    post_line_break(&br, best)
+}
+
+/// §877–§890: the lines, justified.
+fn post_line_break(br: &Breaker<'_>, best: Active) -> Vec<Arc<Line>> {
+    let p = br.p;
+    let items = br.items;
+    let mut breaks: Vec<Option<usize>> = Vec::new();
+    let mut q = best.passive;
+    while let Some(pi) = q {
+        breaks.push(br.passive[pi].at);
+        q = br.passive[pi].prev;
+    }
+    breaks.reverse();
+    let best_line = best.line;
+    let mut out = Vec::with_capacity(breaks.len());
+    let mut start = 0usize;
+    // (a discretionary's post-break list, beginning the next line)
+    let mut carry: Vec<Item> = Vec::new();
+    for (bi, &brk) in breaks.iter().enumerate() {
+        let cur_line = p.prev_graf + 1 + bi as i32;
+        let mut line: Vec<Item> = std::mem::take(&mut carry);
+        let mut disc_break = false;
+        let mut post_disc = false;
+        let rightskip = Item::Glue { g: p.rightskip.clone(), sub: 9, zero: is_zero(&p.rightskip) };
+        // (§881: the end of the line, with `\rightskip`)
+        let next_start = if let Some(b) = brk {
+            match &items[b] {
+                Item::Glue { .. } => {
+                    line.extend(items[start..b].iter().cloned());
+                    line.push(rightskip);
+                    b + 1
+                }
+                Item::Disc(d) => {
+                    // (§882: the discretionary becomes compulsory)
+                    line.extend(items[start..b].iter().cloned());
+                    line.push(Item::Disc(Arc::new(Disc { pre: Vec::new(), post: Vec::new(), replace: 0 })));
+                    line.extend(d.pre.iter().cloned());
+                    line.push(rightskip);
+                    if !d.post.is_empty() {
+                        carry.clone_from(&d.post);
+                        post_disc = true;
+                    }
+                    disc_break = true;
+                    b + 1 + usize::from(d.replace)
+                }
+                Item::Kern { sub, .. } => {
+                    line.extend(items[start..b].iter().cloned());
+                    line.push(Item::Kern { w: 0, sub: *sub });
+                    line.push(rightskip);
+                    b + 1
+                }
+                _ => {
+                    line.extend(items[start..=b].iter().cloned());
+                    line.push(rightskip);
+                    b + 1
+                }
+            }
+        } else {
+            line.extend(items[start..].iter().cloned());
+            line.push(rightskip);
+            items.len()
+        };
+        // (§887: `\leftskip`, unless zero)
+        if !is_zero(&p.leftskip) {
+            line.insert(0, Item::Glue { g: p.leftskip.clone(), sub: 8, zero: false });
+        }
+        // (§889: the packaging)
+        let (width, indent) = if cur_line > br.last_special_line {
+            (br.second_width, br.second_indent)
+        } else if p.parshape.is_empty() {
+            (br.first_width, br.first_indent)
+        } else {
+            let (i, w) = p.parshape[(cur_line - 1) as usize];
+            (w, i)
+        };
+        let mut adjust = Vec::new();
+        let packed = hpack(line, Spec::Exactly(width), &p.pack, Some(&mut adjust));
+        // (the diagnostic is hpack's: before the shift, tex.web 889)
+        let report = packed.report.map(|r| report(r, &packed.b, Place::Paragraph, &p.show));
+        let mut b = packed.b;
+        b.shift = indent;
+        // (§890: the interline penalty)
+        let mut pen = None;
+        if cur_line + 1 != best_line {
+            let mut x = p.interlinepenalty;
+            if cur_line == p.prev_graf + 1 {
+                x += p.clubpenalty;
+            }
+            if cur_line + 2 == best_line {
+                x += p.widowpenalty;
+            }
+            if disc_break {
+                x += p.brokenpenalty;
+            }
+            if x != 0 {
+                pen = Some(x);
+            }
+        }
+        out.push(Arc::new(Line { b: Arc::new(b), adjust, pen, report }));
+        // (§879: discardable items at the next line's start go)
+        start = next_start;
+        if !post_disc {
+            let next_break = breaks.get(bi + 1).copied().flatten();
+            while start < items.len() && Some(start) != next_break {
+                let it = &items[start];
+                if it.non_discardable() || matches!(it, Item::Kern { sub, .. } if *sub != 1) {
+                    break;
+                }
+                start += 1;
+            }
+        }
+    }
+    out
+}
+
+/// `\prevgraf` after a paragraph of `n` lines (tex.web 890).
+pub fn prev_graf_after(p: &LineParams, n: usize) -> i32 {
+    p.prev_graf + n as i32
 }

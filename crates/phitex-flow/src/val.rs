@@ -7,7 +7,7 @@
 use std::fmt;
 use std::sync::Arc;
 
-pub use crate::prim::{Code, Conv, DimenPar, GluePar, IfKind, IntPar, Prim, Reg, Shorthand, TokPar};
+pub use crate::prim::{Code, Conv, DimenPar, GluePar, IfKind, IntPar, Mat, Prim, Reg, Shorthand, TokPar};
 use crate::tfm::Font;
 
 /// A token.
@@ -80,8 +80,16 @@ pub enum Key {
     Parshape,
     /// The current font.
     Font,
-    /// `\fontdimen n` of the font of that name.
-    FontDimen(Arc<str>, u16),
+    /// `\fontdimen n` of the font with that internal number (global).
+    FontDimen(u16, u16),
+    /// `\hyphenchar`, `\skewchar` of a font (global).
+    HyphenChar(u16),
+    SkewChar(u16),
+    /// The name a font was last defined by (`font_id_text`, global).
+    FontIdent(u16),
+    /// The fonts loaded so far, in order: font `k` is entry `k - 1`
+    /// (global; each `\font` loading a new one reads and extends it).
+    Fonts,
 }
 
 impl Key {
@@ -105,10 +113,6 @@ impl std::hash::Hash for Key {
         match self {
             Key::Cs(n) => n.hash(h),
             Key::Cat(x) => h.write_u64((2 << 40) | u64::from(u32::from(*x))),
-            Key::FontDimen(n, k) => {
-                n.hash(h);
-                h.write_u64((20 << 40) | u64::from(*k));
-            }
             _ => h.write_u64(self.word()),
         }
     }
@@ -120,8 +124,7 @@ impl PartialEq for Key {
         match (self, other) {
             (Key::Cs(a), Key::Cs(b)) => Arc::ptr_eq(a, b) || a == b,
             (Key::Cat(a), Key::Cat(b)) => a == b,
-            (Key::FontDimen(a, k), Key::FontDimen(b, l)) => k == l && a == b,
-            (Key::Cs(_) | Key::FontDimen(..), _) | (_, Key::Cs(_) | Key::FontDimen(..)) => false,
+            (Key::Cs(_), _) | (_, Key::Cs(_)) => false,
             _ => self.word() == other.word(),
         }
     }
@@ -137,7 +140,7 @@ impl Key {
         let w = |tag: u64, x: u64| (tag << 40) | x;
         let c = |x: &char| u64::from(u32::from(*x));
         match self {
-            Key::Cs(_) | Key::FontDimen(..) => u64::MAX,
+            Key::Cs(_) => u64::MAX,
             Key::Active(x) => w(1, c(x)),
             Key::Cat(x) => w(2, c(x)),
             Key::Lccode(x) => w(3, c(x)),
@@ -157,6 +160,11 @@ impl Key {
             Key::Box(n) => w(17, u64::from(*n)),
             Key::Parshape => w(18, 0),
             Key::Font => w(19, 0),
+            Key::FontDimen(f, n) => w(20, (u64::from(*f) << 16) | u64::from(*n)),
+            Key::HyphenChar(f) => w(21, u64::from(*f)),
+            Key::SkewChar(f) => w(22, u64::from(*f)),
+            Key::FontIdent(f) => w(23, u64::from(*f)),
+            Key::Fonts => w(24, 0),
         }
     }
 }
@@ -184,7 +192,11 @@ impl fmt::Display for Key {
             Key::Box(n) => write!(f, "\\box{n}"),
             Key::Parshape => write!(f, "\\parshape"),
             Key::Font => write!(f, "font"),
-            Key::FontDimen(x, n) => write!(f, "\\fontdimen{n} {x}"),
+            Key::FontDimen(x, n) => write!(f, "\\fontdimen{n} font{x}"),
+            Key::HyphenChar(x) => write!(f, "\\hyphenchar font{x}"),
+            Key::SkewChar(x) => write!(f, "\\skewchar font{x}"),
+            Key::FontIdent(x) => write!(f, "font_id_text font{x}"),
+            Key::Fonts => write!(f, "fonts"),
         }
     }
 }
@@ -217,6 +229,9 @@ pub enum Meaning {
     SkipRef(u16),
     MuskipRef(u16),
     ToksRef(u16),
+    /// A font identifier (`\font\x=...`; `\nullfont`): selecting it
+    /// defines `Key::Font`.
+    Font(Arc<Font>),
 }
 
 /// A glue specification (tex.web 150).
@@ -243,6 +258,12 @@ pub enum Val {
     Parshape(Arc<Vec<(i32, i32)>>),
     /// A void box register.
     Void,
+    /// A box register's box.
+    Box(Arc<crate::item::BoxNode>),
+    /// The fonts loaded (`Key::Fonts`).
+    Fonts(Arc<Vec<Arc<Font>>>),
+    /// A name (`Key::FontIdent`).
+    Name(Arc<str>),
 }
 
 impl fmt::Display for Val {
@@ -264,6 +285,10 @@ impl fmt::Display for Val {
             }
             Val::Parshape(p) => write!(f, "parshape {}", p.len()),
             Val::Void => write!(f, "void"),
+            Val::Box(b) => write!(f, "{}box({}+{})x{}", if b.vertical { "v" } else { "h" }, b.h, b.d, b.w),
+            Val::Fonts(v) => write!(f, "{} fonts", v.len()),
+            Val::Name(n) => write!(f, "{n}"),
+            Val::Meaning(Meaning::Font(x)) => write!(f, "select font {}", x.name),
             Val::Meaning(Meaning::Undefined) => write!(f, "undefined"),
             Val::Meaning(Meaning::Prim(p)) => write!(f, "primitive \\{}", p.name()),
             Val::Meaning(Meaning::Char(c, x)) => write!(f, "the character {x} (cat {c})"),
@@ -292,13 +317,15 @@ impl fmt::Display for Val {
     }
 }
 
-/// A key's value before any definition: IniTeX's (tex.web 222-240), but
-/// for the category codes and parameters the minimal system's documents
-/// rely on ([`initial_cat`], [`IntPar::initial`], ...).
-pub fn initial(key: &Key, font: &Arc<Font>) -> Val {
+/// A key's value before any definition: IniTeX's (tex.web 222-240, and
+/// \year, \month, \day, \time as `SOURCE_DATE_EPOCH=0` gives them: the
+/// DVI file's comment says 1970.01.01:0000). The font given to `Build` is
+/// a file `\font` can load, not the initial font: that is `\nullfont`.
+pub fn initial(key: &Key, _font: &Arc<Font>) -> Val {
     let c32 = |c: &char| u32::from(*c) as i32;
     match key {
-        Key::Cs(n) => Val::Meaning(Prim::by_name(n).map_or(Meaning::Undefined, Meaning::Prim)),
+        Key::Cs(n) if &**n == "nullfont" => Val::Meaning(Meaning::Font(crate::tfm::null_font())),
+        Key::Cs(n) => Val::Meaning(Prim::by_name(n).or_else(|| Prim::internal(n)).map_or(Meaning::Undefined, Meaning::Prim)),
         Key::Active(_) => Val::Meaning(Meaning::Undefined),
         Key::Cat(c) => Val::Cat(initial_cat(*c)),
         Key::Lccode(c) => Val::Int(match c {
@@ -319,36 +346,30 @@ pub fn initial(key: &Key, font: &Arc<Font>) -> Val {
         }),
         Key::Delcode(c) => Val::Int(if *c == '.' { 0 } else { -1 }),
         Key::IntPar(p) => Val::Int(p.initial()),
-        Key::DimenPar(p) => Val::Int(p.initial()),
-        Key::GluePar(p) => Val::Glue(Arc::new(Glue { width: p.initial_width(), ..Glue::default() })),
         Key::TokPar(_) | Key::Toks(_) => Val::Toks(Arc::new(Vec::new())),
-        Key::Count(_) | Key::Dimen(_) => Val::Int(0),
-        Key::Skip(_) | Key::Muskip(_) => Val::Glue(Arc::new(Glue::default())),
+        // (`\fontdimen`: the null font's, tex.web 552; a loaded font's are
+        // defined by its `\font`)
+        Key::DimenPar(_) | Key::Count(_) | Key::Dimen(_) | Key::FontDimen(..) => Val::Int(0),
+        Key::GluePar(_) | Key::Skip(_) | Key::Muskip(_) => Val::Glue(Arc::new(Glue::default())),
         Key::Box(_) => Val::Void,
         Key::Parshape => Val::Parshape(Arc::new(Vec::new())),
-        Key::Font => Val::Font(font.clone()),
-        Key::FontDimen(name, n) => Val::Int(if **name == *font.name { font.param(usize::from(*n)) } else { 0 }),
+        Key::Font => Val::Font(crate::tfm::null_font()),
+        Key::HyphenChar(_) => Val::Int(i32::from(b'-')),
+        Key::SkewChar(_) => Val::Int(-1),
+        Key::FontIdent(_) => Val::Name(Arc::from("nullfont")),
+        Key::Fonts => Val::Fonts(Arc::new(Vec::new())),
     }
 }
 
-/// The category codes before any `\catcode`: IniTeX's (tex.web 232), but
-/// with braces, `$`, `&`, `#`, `^` and `~` set as plain TeX sets them (the
-/// minimal system's documents rely on them).
+/// The category codes before any `\catcode`: IniTeX's (tex.web 232).
 pub fn initial_cat(c: char) -> u8 {
     match c {
         '\\' => 0,
-        '{' => 1,
-        '}' => 2,
-        '$' => 3,
-        '&' => 4,
         '\r' => 5,
-        '#' => 6,
-        '^' => 7,
         '%' => 14,
         ' ' => 10,
         '\u{7f}' => 15,
         '\0' => 9,
-        '~' => 13,
         c if c.is_ascii_alphabetic() => 11,
         _ => 12,
     }

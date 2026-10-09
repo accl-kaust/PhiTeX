@@ -20,6 +20,7 @@ pub(super) enum Lv {
     Dimen,
     Glue,
     Mu,
+    Ident,
     Tok,
 }
 
@@ -30,6 +31,8 @@ pub(super) enum IVal {
     Dimen(i32),
     Glue(Glue),
     Mu(Glue),
+    /// A font identifier (`\the\font`).
+    Font(Arc<crate::tfm::Font>),
     Toks(Arc<Vec<Tok>>),
 }
 
@@ -40,6 +43,7 @@ impl IVal {
             IVal::Dimen(_) => Lv::Dimen,
             IVal::Glue(_) => Lv::Glue,
             IVal::Mu(_) => Lv::Mu,
+            IVal::Font(_) => Lv::Ident,
             IVal::Toks(_) => Lv::Tok,
         }
     }
@@ -67,8 +71,10 @@ pub(super) fn is_internal(m: &Meaning) -> bool {
                 | Prim::FontDimen
                 | Prim::LastItem(_)
                 | Prim::Font
+                | Prim::Mat(crate::val::Mat::FontInt(_))
         ),
-        Meaning::CharGiven(_)
+        Meaning::Font(_)
+        | Meaning::CharGiven(_)
         | Meaning::MathCharGiven(_)
         | Meaning::CountRef(_)
         | Meaning::DimenRef(_)
@@ -139,7 +145,7 @@ impl Exec<'_> {
     /// most at `level` (tex.web 413, 429); `None` if it is none.
     pub(super) fn internal(&mut self, t: &Tok, m: &Meaning, level: Lv) -> Option<IVal> {
         let toks_ok = |x: &mut Self, l: Arc<Vec<Tok>>| {
-            if level == Lv::Tok {
+            if level >= Lv::Ident {
                 IVal::Toks(l)
             } else {
                 x.err("Missing number, treated as zero".into());
@@ -203,10 +209,10 @@ impl Exec<'_> {
                 // CORE.md; an empty page's values)
                 Prim::PageInt(_) => IVal::Int(0),
                 Prim::PageDimen(k) => IVal::Dimen(if k == 0 { MAX_DIMEN } else { 0 }),
-                Prim::BoxDimen(_) => {
-                    let n = self.scan_eight_bit_int();
-                    let _void = self.get(&Key::Box(n));
-                    IVal::Dimen(0)
+                Prim::BoxDimen(c) => IVal::Dimen(self.box_dimen(c)),
+                Prim::Mat(crate::val::Mat::FontInt(k)) => {
+                    let key = self.font_int_key(k);
+                    IVal::Int(self.int(&key))
                 }
                 Prim::Parshape => IVal::Int(match self.get(&Key::Parshape) {
                     Val::Parshape(s) => s.len() as i32,
@@ -217,23 +223,46 @@ impl Exec<'_> {
                     None => 0,
                 }),
                 Prim::LastItem(k) => {
-                    // (the list's last item: none in vertical mode yet, as no
-                    // command appends one; CORE.md)
-                    if self.st.mode == Mode::H || k == 3 {
+                    // (tex.web 424: the current list's last item, the one read
+                    // of material, CORE.md; `\inputlineno` and `\badness`
+                    // not yet)
+                    if k == 3 {
                         self.err(format!("\\{} is not supported yet", p.name()));
-                    }
-                    match k {
-                        1 => IVal::Dimen(0),
-                        2 => IVal::Glue(Glue::default()),
-                        _ => IVal::Int(0),
+                        IVal::Int(0)
+                    } else if k == 4 {
+                        // (`last_badness`: the last box packed anywhere, a read
+                        // of the packager's history; 0 before any, CORE.md)
+                        IVal::Int(0)
+                    } else if self.in_write {
+                        if k == 2 { IVal::Glue(Glue::default()) } else { IVal::Int(0) }
+                    } else {
+                        let last = self.last_item();
+                        match (k, last) {
+                            (0, Some(crate::item::Item::Penalty(p))) => IVal::Int(p),
+                            (0, _) => IVal::Int(0),
+                            (1, Some(crate::item::Item::Kern { w, .. })) => IVal::Dimen(w),
+                            (1, _) => IVal::Dimen(0),
+                            (_, Some(crate::item::Item::Glue { g, sub, .. })) => {
+                                if sub == 99 { IVal::Mu(*g) } else { IVal::Glue(*g) }
+                            }
+                            _ => IVal::Glue(Glue::default()),
+                        }
                     }
                 }
                 Prim::Font => {
-                    self.err("A font identifier as a value is not supported yet".into());
-                    IVal::Int(0)
+                    if level < Lv::Ident {
+                        return Some(toks_ok(self, Arc::new(Vec::new())));
+                    }
+                    IVal::Font(self.font())
                 }
                 _ => return None,
             },
+            Meaning::Font(f) => {
+                if level < Lv::Ident {
+                    return Some(toks_ok(self, Arc::new(Vec::new())));
+                }
+                IVal::Font(f.clone())
+            }
             Meaning::CharGiven(c) | Meaning::MathCharGiven(c) => IVal::Int(*c as i32),
             Meaning::CountRef(n) => IVal::Int(self.int(&Key::Count(*n))),
             Meaning::DimenRef(n) => IVal::Dimen(self.int(&Key::Dimen(*n))),
@@ -261,28 +290,6 @@ impl Exec<'_> {
             };
         }
         Some(v)
-    }
-
-    /// `\fontdimen n \font`: its key (tex.web 578).
-    pub(super) fn find_font_dimen(&mut self) -> Option<Key> {
-        let n = self.scan_int();
-        match self.next_x_m(false) {
-            Some((_, Meaning::Prim(Prim::Font))) => {}
-            other => {
-                self.err("Missing font identifier".into());
-                if let Some((t, _)) = other {
-                    self.back(t);
-                }
-                return None;
-            }
-        }
-        let f = self.font();
-        if n <= 0 || n as usize >= f.params.len() {
-            self.err(format!("Font {} has only {} fontdimen parameters", f.name, f.params.len().saturating_sub(1)));
-            return None;
-        }
-        let name: Arc<str> = super::intern(&mut self.scratch.names, &f.name);
-        Some(Key::FontDimen(name, n as u16))
     }
 
     // ------------------------------------------------------------ small things
@@ -731,6 +738,7 @@ impl Exec<'_> {
 
     /// A glue specification, in mu if `mu` (tex.web 461).
     pub(super) fn scan_glue(&mut self, mu: bool) -> Glue {
+        self.scratch.glue_shared = false;
         let level = if mu { Lv::Mu } else { Lv::Glue };
         let (neg, x) = self.signs();
         let Some((t, m)) = x else {
@@ -745,6 +753,7 @@ impl Exec<'_> {
                     if is_mu != mu {
                         self.err("Incompatible glue units".into());
                     }
+                    self.scratch.glue_shared = !neg;
                     return if neg { Glue { width: -g.width, stretch: -g.stretch, shrink: -g.shrink, ..g } } else { g };
                 }
                 Some(IVal::Int(i)) => {
