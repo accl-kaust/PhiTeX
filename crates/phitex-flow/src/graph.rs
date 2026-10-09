@@ -180,12 +180,24 @@ pub enum Src {
     Initial,
 }
 
-/// A read: an operand.
+/// A read: an operand. The nodes of a run reading the same definition
+/// share it.
 #[derive(Clone, Debug)]
 pub struct Read {
     pub key: Key,
     pub src: Src,
     pub val: Val,
+}
+
+/// A shared [`Read`].
+pub type ReadRef = Arc<Read>;
+
+impl Read {
+    /// Whether `r` read the definition this one did (by identity, then
+    /// equality).
+    fn same(this: &ReadRef, r: &ReadRef) -> bool {
+        Arc::ptr_eq(this, r) || this.val == r.val
+    }
 }
 
 /// A definition: a result.
@@ -274,7 +286,7 @@ pub struct Node {
     pub cmd: Tok,
     /// The reader state after it (its successor's input).
     pub out: RState,
-    pub reads: Few<Read>,
+    pub reads: Few<ReadRef>,
     pub emit: Few<HItem>,
     pub rare: Option<Box<Rare>>,
 }
@@ -476,21 +488,23 @@ impl Edit {
     }
 }
 
-type Outside = FxMap<Key, (Val, Src)>;
+/// The definitions from before the piece read in this run, each read once.
+type Outside = FxMap<Key, ReadRef>;
 
-fn outside_read(env: &mut dyn Env, outside: &mut Outside, k: &Key) -> (Val, Src) {
+fn outside_read(env: &mut dyn Env, outside: &mut Outside, k: &Key) -> ReadRef {
     if let Some(v) = outside.get(k) {
         return v.clone();
     }
-    let v = env.reach(k);
-    outside.insert(k.clone(), v.clone());
-    v
+    let (val, src) = env.reach(k);
+    let r = Arc::new(Read { key: k.clone(), src, val });
+    outside.insert(k.clone(), r.clone());
+    r
 }
 
-/// The value of `key` for the next node of `chain`, and where from.
-fn resolve_now(chain: &Chain, env: &mut dyn Env, outside: &mut Outside, key: &Key) -> (Val, Src) {
+/// The definition of `key` for the next node of `chain`, and where from.
+fn resolve_now(chain: &Chain, env: &mut dyn Env, outside: &mut Outside, key: &Key) -> ReadRef {
     match chain.resolve(key, chain.nodes.len()) {
-        Some((d, v)) => (v, Src::Node(d)),
+        Some((d, val)) => Arc::new(Read { key: key.clone(), src: Src::Node(d), val }),
         None => outside_read(env, outside, key),
     }
 }
@@ -560,7 +574,7 @@ pub fn run_piece(
                     let reads_ok = par_ok
                         && n.reads
                             .iter()
-                            .all(|r| resolve_now(&chain, env, &mut outside, &r.key).0 == r.val);
+                            .all(|r| Read::same(&resolve_now(&chain, env, &mut outside, &r.key), r));
                     if reads_ok {
                         let in_place = edit.is_none() && !scope_changed && oi == chain.nodes.len();
                         if in_place {
@@ -580,7 +594,7 @@ pub fn run_piece(
                             }
                             // (re-point reads at the nodes now defining them)
                             for r in n.reads.iter_mut() {
-                                r.src = resolve_now(&chain, env, &mut outside, &r.key).1;
+                                *r = resolve_now(&chain, env, &mut outside, &r.key);
                             }
                             kept = Some(n);
                         }
@@ -606,7 +620,7 @@ pub fn run_piece(
                     }
                     let holds = n.reads.iter().all(|r| {
                         matches!(r.src, Src::Node(_))
-                            || outside_read(env, &mut outside, &r.key).0 == r.val
+                            || Read::same(&outside_read(env, &mut outside, &r.key), r)
                     });
                     if !holds {
                         break;
@@ -724,7 +738,7 @@ struct Scratch {
     /// The node's reads so far (read once each), once there are many.
     seen: FxMap<Key, Val>,
     /// The node's reads and what it emitted (their capacity kept).
-    reads: Vec<Read>,
+    reads: Vec<ReadRef>,
     emit: Vec<HItem>,
     /// Shared copies of the names read in this piece.
     names: FxSet<Arc<str>>,
@@ -739,7 +753,7 @@ struct Exec<'a> {
     outside: &'a mut Outside,
     scratch: &'a mut Scratch,
     st: RState,
-    reads: Vec<Read>,
+    reads: Vec<ReadRef>,
     defs: Vec<Def>,
     emit: Vec<HItem>,
     para: Option<Arc<Para>>,
@@ -843,12 +857,9 @@ impl<'a> Exec<'a> {
                 return v.clone();
             }
         }
-        let (v, src) = resolve_now(self.chain, self.env, self.outside, key);
-        self.reads.push(Read {
-            key: key.clone(),
-            src,
-            val: v.clone(),
-        });
+        let r = resolve_now(self.chain, self.env, self.outside, key);
+        let v = r.val.clone();
+        self.reads.push(r);
         v
     }
 
@@ -1252,27 +1263,20 @@ impl<'a> Exec<'a> {
             let Some((d, after)) = self.chain.resolve(&k, here) else {
                 continue;
             };
-            self.reads.push(Read {
-                key: k.clone(),
-                src: Src::Node(d),
-                val: after.clone(),
-            });
-            let (before, src) = match self.chain.resolve(&k, at) {
-                Some((d, v)) => (v, Src::Node(d)),
+            self.reads.push(Arc::new(Read { key: k.clone(), src: Src::Node(d), val: after.clone() }));
+            let before = match self.chain.resolve(&k, at) {
+                Some((d, v)) => Arc::new(Read { key: k.clone(), src: Src::Node(d), val: v }),
                 None => outside_read(self.env, self.outside, &k),
             };
-            self.reads.push(Read {
-                key: k.clone(),
-                src,
-                val: before.clone(),
-            });
+            let before_val = before.val.clone();
+            self.reads.push(before);
             // (the φ is a definition: readers after the `\fi` read it)
             self.defs.push(Def {
                 key: k.clone(),
                 val: after.clone(),
                 global: false,
             });
-            phis.push((k, after, before));
+            phis.push((k, after, before_val));
         }
         self.phi = Some(Phi { test, keys: phis });
     }
