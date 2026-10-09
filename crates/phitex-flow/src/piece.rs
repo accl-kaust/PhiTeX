@@ -7,13 +7,12 @@
 //! it reads (through [`Env`], recorded with versions) and what it exports
 //! (its top-level and global definitions) and its paragraphs.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::arith::{round_decimals, xn_over_d};
-use crate::hash::hash_of;
+use crate::hash::{FxMap, FxSet};
 use crate::tfm::Font;
-use crate::val::{Key, Macro, Meaning, Param, Prim, Tok, Val, Ver};
+use crate::val::{Key, Macro, Meaning, Param, Prim, Tok, Val};
 
 /// Where a piece's reads of names from outside it are answered.
 pub trait Env {
@@ -32,7 +31,8 @@ pub enum HItem {
 }
 
 /// A paragraph: its list and the parameters it was read with. Line
-/// breaking is a pure function of this, memoised by its hash.
+/// breaking is a pure function of this; a paragraph equal to the one a
+/// piece's previous run made keeps its lines.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub struct Para {
     pub hlist: Vec<HItem>,
@@ -49,22 +49,21 @@ pub struct Para {
 /// An explicit φ at a `\fi`: the test's result, the keys either arm
 /// defined (value after, value before the `\if`), and how many tokens the
 /// untaken arm held.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Phi {
     pub test: bool,
     pub skipped: usize,
-    pub keys: Vec<(Key, Ver, Ver)>,
+    pub keys: Vec<(Key, Val, Val)>,
 }
 
 /// What a piece's run produced.
 #[derive(Clone, Debug, Default)]
 pub struct PieceRun {
-    /// Names read from outside the piece, with the versions read.
-    pub reads: Vec<(Key, Ver)>,
+    /// Names read from outside the piece, with the values read.
+    pub reads: Vec<(Key, Val)>,
     /// Definitions visible after the piece (top level and global).
-    pub exports: Vec<(Key, Ver, Val)>,
+    pub exports: Vec<(Key, Val)>,
     pub paras: Vec<Arc<Para>>,
-    pub para_hashes: Vec<u64>,
     pub phis: Vec<Phi>,
     pub errors: Vec<String>,
     /// Tokens processed (the run's work).
@@ -120,22 +119,23 @@ fn brace_depth(line: &str, mut depth: i32) -> i32 {
     depth
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum State {
     N,
     M,
     S,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Mode {
     V,
     H,
 }
 
+#[derive(Clone, Debug)]
 struct Cond {
     test: bool,
-    defined: Vec<(Key, Ver)>,
+    defined: Vec<(Key, Val)>,
     skipped: usize,
 }
 
@@ -144,79 +144,101 @@ struct Reader<'a> {
     text: &'a [char],
     pos: usize,
     state: State,
-    /// Tokens the stream was rewritten with (read next, last first).
-    pending: Vec<Tok>,
-    /// The piece's own scopes: innermost last.
-    frames: Vec<HashMap<Key, Val>>,
+    /// Token lists the stream was rewritten with, each with how far it has
+    /// been read (the innermost last).
+    pending: Vec<(Arc<[Tok]>, usize)>,
+    /// The piece's own scopes: innermost last (shared until written).
+    frames: Vec<Arc<FxMap<Key, Val>>>,
     /// Names read from outside, as read.
-    imports: HashMap<Key, Val>,
+    imports: FxMap<Key, Val>,
+    /// Category codes of ASCII characters as last looked up (255: not
+    /// known); a definition of one forgets it.
+    cats: [u8; 128],
+    /// Control-sequence names met, shared.
+    names: FxSet<Arc<str>>,
+    buf: String,
+    /// The font as last looked up (a definition of the font forgets it).
+    font: Option<Arc<Font>>,
     run: PieceRun,
     conds: Vec<Cond>,
     mode: Mode,
     hlist: Vec<HItem>,
     parskip: i32,
+    global: bool,
 }
 
 /// Runs a piece: reads its text with the reaching definitions `env`
 /// answers, and returns what it produced.
 pub fn run_piece(text: &[char], env: &mut dyn Env) -> PieceRun {
-    let mut r = Reader {
+    Reader {
         env,
         text,
         pos: 0,
         state: State::N,
         pending: Vec::new(),
-        frames: vec![HashMap::new()],
-        imports: HashMap::new(),
+        frames: vec![Arc::new(FxMap::default())],
+        imports: FxMap::default(),
+        cats: [255; 128],
+        names: FxSet::default(),
+        buf: String::new(),
+        font: None,
         run: PieceRun::default(),
         conds: Vec::new(),
         mode: Mode::V,
         hlist: Vec::new(),
         parskip: 0,
-    };
-    let mut global = false;
-    while let Some(t) = r.next_x() {
-        r.run.steps += 1;
-        let was_global = std::mem::take(&mut global);
-        match &t {
-            Tok::Char(cat, c) => r.char_tok(*cat, *c),
-            Tok::Param(_) => r.err("Illegal parameter number in a paragraph".into()),
-            Tok::Cs(_) | Tok::Active(_) => {
-                let key = t.key().expect("a name");
-                match r.meaning(&key) {
-                    Meaning::Prim(Prim::Global) => global = true,
-                    Meaning::Prim(p) => r.prim(p, was_global),
-                    Meaning::Char(cat, c) => r.char_tok(cat, c),
-                    Meaning::Undefined => r.err(format!("Undefined control sequence {t}")),
-                    Meaning::Macro(_) => {}
-                }
-            }
-        }
+        global: false,
     }
-    r.end_par();
-    while r.frames.len() > 1 {
-        r.frames.pop();
-        r.err("Missing } inserted at the end of a piece".into());
+    .main()
+}
+
+/// A macro is used through a copy of its own: other threads' pieces share
+/// the original, and a shared count would be fought over.
+fn local_copy(v: Val) -> Val {
+    match &v {
+        Val::Meaning(Meaning::Macro(m)) => Val::Meaning(Meaning::Macro(Arc::new((**m).clone()))),
+        _ => v,
     }
-    while !r.conds.is_empty() {
-        r.err("Incomplete \\if at the end of a piece".into());
-        r.end_cond(0);
-    }
-    let mut exports: Vec<(Key, Ver, Val)> = r
-        .frames
-        .pop()
-        .unwrap_or_default()
-        .into_iter()
-        .map(|(k, v)| (k, v.ver(), v))
-        .collect();
-    exports.sort_by(|a, b| a.0.cmp(&b.0));
-    let mut run = r.run;
-    run.exports = exports;
-    run.para_hashes = run.paras.iter().map(|p| hash_of(&**p)).collect();
-    run
 }
 
 impl Reader<'_> {
+    fn main(mut self) -> PieceRun {
+        loop {
+            let Some(t) = self.next_x() else { break };
+            self.run.steps += 1;
+            let was_global = std::mem::take(&mut self.global);
+            match &t {
+                Tok::Char(cat, c) => self.char_tok(*cat, *c),
+                Tok::Param(_) => self.err("Illegal parameter number in a paragraph".into()),
+                Tok::Cs(_) | Tok::Active(_) => {
+                    let key = t.key().expect("a name");
+                    match self.meaning(&key) {
+                        Meaning::Prim(Prim::Global) => self.global = true,
+                        Meaning::Prim(p) => self.prim(p, was_global),
+                        Meaning::Char(cat, c) => self.char_tok(cat, c),
+                        Meaning::Undefined => self.err(format!("Undefined control sequence {t}")),
+                        Meaning::Macro(_) => {}
+                    }
+                }
+            }
+        }
+        self.end_par();
+        while self.frames.len() > 1 {
+            self.pop_frame();
+            self.err("Missing } inserted at the end of a piece".into());
+        }
+        while !self.conds.is_empty() {
+            self.err("Incomplete \\if at the end of a piece".into());
+            self.end_cond(0);
+        }
+        let top = self.frames.pop().unwrap_or_default();
+        let mut exports: Vec<(Key, Val)> = Arc::unwrap_or_clone(top).into_iter().collect();
+        exports.sort_by(|a, b| a.0.cmp(&b.0));
+        let mut run = self.run;
+        run.exports = exports;
+        run
+    }
+
     fn err(&mut self, s: String) {
         self.run.errors.push(s);
     }
@@ -235,27 +257,35 @@ impl Reader<'_> {
             return v.clone();
         }
         let v = self.env.reach(key);
-        self.run.reads.push((key.clone(), v.ver()));
-        self.imports.insert(key.clone(), v.clone());
-        v
+        self.run.reads.push((key.clone(), v.clone()));
+        let local = local_copy(v);
+        self.imports.insert(key.clone(), local.clone());
+        local
     }
 
     fn define(&mut self, key: Key, v: Val, global: bool) {
         if !self.conds.is_empty() {
-            let before = self.get(&key).ver();
+            let before = self.get(&key);
             for c in &mut self.conds {
                 if !c.defined.iter().any(|(k, _)| *k == key) {
-                    c.defined.push((key.clone(), before));
+                    c.defined.push((key.clone(), before.clone()));
                 }
             }
         }
+        match key {
+            Key::Cat(c) if (c as u32) < 128 => self.cats[c as usize] = 255,
+            Key::Font => self.font = None,
+            _ => {}
+        }
         if global {
             for f in &mut self.frames {
-                f.remove(&key);
+                if f.contains_key(&key) {
+                    Arc::make_mut(f).remove(&key);
+                }
             }
-            self.frames[0].insert(key, v);
+            Arc::make_mut(&mut self.frames[0]).insert(key, v);
         } else {
-            self.frames.last_mut().expect("a frame").insert(key, v);
+            Arc::make_mut(self.frames.last_mut().expect("a frame")).insert(key, v);
         }
     }
 
@@ -267,10 +297,31 @@ impl Reader<'_> {
     }
 
     fn catcode(&mut self, c: char) -> u8 {
-        match self.get(&Key::Cat(c)) {
+        let ascii = (c as u32) < 128;
+        if ascii && self.cats[c as usize] != 255 {
+            return self.cats[c as usize];
+        }
+        let k = match self.get(&Key::Cat(c)) {
             Val::Cat(k) => k,
             _ => 12,
+        };
+        if ascii {
+            self.cats[c as usize] = k;
         }
+        k
+    }
+
+    /// Closes one of the piece's own scopes.
+    fn pop_frame(&mut self) {
+        if let Some(f) = self.frames.pop() {
+            if f.keys().any(|k| matches!(k, Key::Cat(_))) {
+                self.cats = [255; 128];
+            }
+        }
+    }
+
+    fn cs(&mut self, name: &str) -> Tok {
+        Tok::Cs(intern(&mut self.names, name))
     }
 
     fn param(&mut self, p: Param) -> i32 {
@@ -281,10 +332,15 @@ impl Reader<'_> {
     }
 
     fn font(&mut self) -> Arc<Font> {
-        match self.get(&Key::Font) {
+        if let Some(f) = &self.font {
+            return f.clone();
+        }
+        let f = match self.get(&Key::Font) {
             Val::Font(f) => f,
             other => panic!("the font key holds {other:?}"),
-        }
+        };
+        self.font = Some(f.clone());
+        f
     }
 
     fn tok_meaning(&mut self, t: &Tok) -> Meaning {
@@ -297,18 +353,28 @@ impl Reader<'_> {
     // ------------------------------------------------------------ the stream
 
     fn back(&mut self, t: Tok) {
-        self.pending.push(t);
+        self.pending.push((Arc::from([t]), 0));
     }
 
     /// Rewrites the stream: `toks`, then the rest.
     fn rewrite(&mut self, toks: Vec<Tok>) {
-        self.pending.extend(toks.into_iter().rev());
+        if !toks.is_empty() {
+            self.pending.push((Arc::from(toks), 0));
+        }
     }
 
     /// The next token, unexpanded (tex.web 343-357, without `^^`).
     fn next_raw(&mut self) -> Option<Tok> {
-        if let Some(t) = self.pending.pop() {
-            return Some(t);
+        while let Some((list, i)) = self.pending.last_mut() {
+            if *i < list.len() {
+                let t = list[*i].clone();
+                *i += 1;
+                if *i == list.len() {
+                    self.pending.pop();
+                }
+                return Some(t);
+            }
+            self.pending.pop();
         }
         loop {
             let c = *self.text.get(self.pos)?;
@@ -318,7 +384,7 @@ impl Reader<'_> {
                 0 => {
                     let Some(&c2) = self.text.get(self.pos) else {
                         self.state = State::S;
-                        return Some(Tok::Cs(Arc::from("")));
+                        return Some(self.cs(""));
                     };
                     let cat2 = self.catcode(c2);
                     if cat2 == 11 {
@@ -330,19 +396,21 @@ impl Reader<'_> {
                             }
                             self.pos += 1;
                         }
-                        let name: String = self.text[start..self.pos].iter().collect();
+                        self.buf.clear();
+                        self.buf.extend(&self.text[start..self.pos]);
                         self.state = State::S;
-                        return Some(Tok::Cs(Arc::from(name)));
+                        return Some(Tok::Cs(intern(&mut self.names, &self.buf)));
                     }
                     self.pos += 1;
                     self.state = if cat2 == 10 { State::S } else { State::M };
-                    return Some(Tok::Cs(Arc::from(c2.to_string())));
+                    let mut b = [0u8; 4];
+                    return Some(self.cs(c2.encode_utf8(&mut b)));
                 }
                 5 => {
                     let st = self.state;
                     self.state = State::N;
                     match st {
-                        State::N => return Some(Tok::Cs(Arc::from("par"))),
+                        State::N => return Some(self.cs("par")),
                         State::M => return Some(Tok::Char(10, ' ')),
                         State::S => {}
                     }
@@ -592,7 +660,7 @@ impl Reader<'_> {
             .defined
             .into_iter()
             .map(|(k, before)| {
-                let after = self.get(&k).ver();
+                let after = self.get(&k);
                 (k, after, before)
             })
             .collect();
@@ -603,10 +671,10 @@ impl Reader<'_> {
 
     fn char_tok(&mut self, cat: u8, c: char) {
         match cat {
-            1 => self.frames.push(HashMap::new()),
+            1 => self.frames.push(Arc::new(FxMap::default())),
             2 => {
                 if self.frames.len() > 1 {
-                    self.frames.pop();
+                    self.pop_frame();
                 } else {
                     self.err("Too many }'s".into());
                 }
@@ -1017,18 +1085,28 @@ impl Reader<'_> {
         if self.mode == Mode::V {
             self.begin_par(true);
         }
-        let font = self.font();
-        match font.char(u32::from(c)) {
+        if self.font.is_none() {
+            self.font();
+        }
+        let dims = self.font.as_ref().and_then(|f| f.char(u32::from(c)));
+        match dims {
             Some(d) if u32::from(c) < 256 => {
                 self.hlist.push(HItem::Char { c: c as u8, w: d.w, h: d.h, d: d.d });
             }
-            _ => self.err(format!("Missing character {c} in font {}", font.name)),
+            _ => {
+                let name = self.font().name.clone();
+                self.err(format!("Missing character {c} in font {name}"));
+            }
         }
     }
 
     fn space(&mut self) {
-        let f = self.font();
-        self.hlist.push(HItem::Glue { w: f.param(2), st: f.param(3), st_ord: 0, sh: f.param(4), sh_ord: 0 });
+        if self.font.is_none() {
+            self.font();
+        }
+        let f = self.font.as_ref().expect("the font");
+        let g = HItem::Glue { w: f.param(2), st: f.param(3), st_ord: 0, sh: f.param(4), sh_ord: 0 };
+        self.hlist.push(g);
     }
 
     /// `\par`: the paragraph, with the parameters line breaking and pages
@@ -1056,4 +1134,14 @@ impl Reader<'_> {
         };
         self.run.paras.push(Arc::new(para));
     }
+}
+
+/// The shared copy of a name.
+fn intern(names: &mut FxSet<Arc<str>>, s: &str) -> Arc<str> {
+    if let Some(a) = names.get(s) {
+        return a.clone();
+    }
+    let a: Arc<str> = Arc::from(s);
+    names.insert(a.clone());
+    a
 }

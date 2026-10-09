@@ -3,9 +3,6 @@
 //! and kerns are a later feature.
 
 use std::fmt;
-use std::hash::{Hash, Hasher};
-
-use crate::hash::hash_of;
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct CharDims {
@@ -14,8 +11,7 @@ pub struct CharDims {
     pub d: i32,
 }
 
-/// A loaded font. Its identity (and version) is the hash of its file and
-/// size.
+/// A loaded font.
 pub struct Font {
     pub name: String,
     pub checksum: u32,
@@ -25,7 +21,6 @@ pub struct Font {
     /// `params[k]` is TeX's `\fontdimen k` (1 slant, 2 space, 3 stretch,
     /// 4 shrink, 5 x-height, 6 quad, 7 extra space).
     pub params: Vec<i32>,
-    pub hash: u64,
 }
 
 impl Font {
@@ -119,20 +114,18 @@ impl Font {
             size: design_size,
             chars,
             params,
-            hash: hash_of(&(name, b)),
         })
-    }
-}
-
-impl Hash for Font {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        self.hash.hash(state);
     }
 }
 
 impl PartialEq for Font {
     fn eq(&self, o: &Self) -> bool {
-        self.hash == o.hash
+        std::ptr::eq(self, o)
+            || (self.name == o.name
+                && self.checksum == o.checksum
+                && self.size == o.size
+                && self.chars == o.chars
+                && self.params == o.params)
     }
 }
 
@@ -140,6 +133,6 @@ impl Eq for Font {}
 
 impl fmt::Debug for Font {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Font({}, {:016x})", self.name, self.hash)
+        write!(f, "Font({})", self.name)
     }
 }

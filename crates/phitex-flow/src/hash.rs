@@ -59,3 +59,14 @@ pub fn hash_of<T: Hash + ?Sized>(t: &T) -> u64 {
     t.hash(&mut h);
     h.finish()
 }
+
+impl Default for Fx {
+    fn default() -> Self {
+        Fx(0)
+    }
+}
+
+/// A `HashMap` with [`Fx`].
+pub type FxMap<K, V> = std::collections::HashMap<K, V, std::hash::BuildHasherDefault<Fx>>;
+/// A `HashSet` with [`Fx`].
+pub type FxSet<K> = std::collections::HashSet<K, std::hash::BuildHasherDefault<Fx>>;

@@ -26,7 +26,7 @@ fn report(what: &str, o: &Output) {
     let max = s.work.iter().copied().max().unwrap_or(0);
     println!(
         "{what}: {:.2} ms; {} pieces ({} ran, {} kept, {} re-run after a changed read; {} parks, {} run by the parked thread); \
-         {} line breaks run, {} from memo; {} pages ({} shipped, {} from memo); {} of {} threads worked, the busiest did {:.0}% of the work",
+         {} line breaks run, {} kept; {} pages ({} shipped, {} kept); {} of {} threads worked, the busiest did {:.0}% of the work",
         s.wall.as_secs_f64() * 1000.0,
         s.pieces,
         s.ran,
@@ -35,13 +35,24 @@ fn report(what: &str, o: &Output) {
         s.parks,
         s.leapfrogs,
         s.breaks_run,
-        s.breaks_memo,
+        s.breaks_reused,
         s.pages,
         s.pages_shipped,
-        s.pages_memo,
+        s.pages_reused,
         busy,
         s.work.len(),
         if total == 0 { 0.0 } else { 100.0 * max as f64 / total as f64 },
+    );
+    println!(
+        "  serial: cut {:.1} ms, setup {:.1} ms, join {:.1} ms; by kind (all threads): reading {:.1} ms, line breaking {:.1} ms, page scan {:.1} ms, DVI {:.1} ms, confirming {:.1} ms",
+        s.time_cut.as_secs_f64() * 1000.0,
+        s.time_setup.as_secs_f64() * 1000.0,
+        s.time_join.as_secs_f64() * 1000.0,
+        s.time_run.as_secs_f64() * 1000.0,
+        s.time_break.as_secs_f64() * 1000.0,
+        s.time_scan.as_secs_f64() * 1000.0,
+        s.time_ship.as_secs_f64() * 1000.0,
+        s.time_confirm.as_secs_f64() * 1000.0
     );
     for e in o.errors.iter().take(20) {
         eprintln!("! {e}");
@@ -84,7 +95,10 @@ fn main() -> ExitCode {
             },
             "--tfm" => tfm = val(),
             "-o" => out = val(),
-            "--dump" => dump = true,
+            "--dump" => {
+                dump = true;
+                opts.dump = true;
+            }
             "--check" => check = true,
             "--edit" => match val() {
                 Some(v) if v.contains("=>") => {

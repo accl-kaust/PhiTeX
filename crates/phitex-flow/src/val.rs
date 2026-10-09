@@ -1,13 +1,12 @@
 //! Names, values and versions.
 //!
 //! A [`Key`] is anything a document can define. Its meaning at a point is
-//! its reaching definition: a [`Val`], whose [`Ver`] is a hash of its
-//! content only.
+//! its reaching definition: a [`Val`]. Values are immutable; whether two
+//! are the same is identity first (the same `Arc`), then equality.
 
 use std::fmt;
 use std::sync::Arc;
 
-use crate::hash::hash_of;
 use crate::tfm::Font;
 
 /// A token.
@@ -201,7 +200,7 @@ pub enum Meaning {
 }
 
 /// A value: what a definition binds a key to.
-#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Val {
     Int(i32),
     Cat(u8),
@@ -209,19 +208,30 @@ pub enum Val {
     Font(Arc<Font>),
 }
 
-/// A version: a hash of a value's content.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, PartialOrd, Ord)]
-pub struct Ver(pub u64);
-
-impl fmt::Display for Ver {
+impl fmt::Display for Val {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{:06x}", self.0 >> 40)
-    }
-}
-
-impl Val {
-    pub fn ver(&self) -> Ver {
-        Ver(hash_of(self))
+        match self {
+            Val::Int(i) => write!(f, "{i}"),
+            Val::Cat(c) => write!(f, "cat {c}"),
+            Val::Font(x) => write!(f, "font {}", x.name),
+            Val::Meaning(Meaning::Undefined) => write!(f, "undefined"),
+            Val::Meaning(Meaning::Prim(p)) => write!(f, "primitive {p:?}"),
+            Val::Meaning(Meaning::Char(c, x)) => write!(f, "the character {x} (cat {c})"),
+            Val::Meaning(Meaning::Macro(m)) => {
+                write!(f, "macro:")?;
+                for t in &m.params {
+                    write!(f, "{t}")?;
+                }
+                write!(f, "->")?;
+                for t in m.body.iter().take(24) {
+                    write!(f, "{t}")?;
+                }
+                if m.body.len() > 24 {
+                    write!(f, "...")?;
+                }
+                Ok(())
+            }
+        }
     }
 }
 

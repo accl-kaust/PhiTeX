@@ -12,7 +12,7 @@ fn font() -> Arc<Font> {
 }
 
 fn opts(threads: usize, reads: Reads, order: Order) -> Options {
-    Options { threads, reads, order }
+    Options { threads, reads, order, dump: false }
 }
 
 /// A document of `n` paragraphs with definitions, groups, conditionals and
@@ -105,7 +105,7 @@ fn a_changed_definition_reruns_its_readers_only() {
 #[test]
 fn phi_is_explicit_at_fi() {
     let src = "\\def\\a{x}\\ifx\\a\\a \\def\\b{yes}\\else\\def\\b{no}\\fi\n";
-    let o = cold(src, Options::default());
+    let o = cold(src, Options { dump: true, ..Options::default() });
     assert!(o.dump.contains("φ test=true"), "{}", o.dump);
     assert!(o.dump.contains("\\b = φ("), "{}", o.dump);
 }
