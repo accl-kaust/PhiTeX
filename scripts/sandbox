@@ -11,6 +11,19 @@
 # - No network unless --net is given (cargo is then allowed to fetch).
 set -euo pipefail
 
+# Memory is capped here, not by whoever types the command: every run joins
+# partex.slice (48G for all of them together) as its own scope, 16G and no
+# swap each, at the lowest CPU and IO priority. A runaway test outside the
+# slice once took the whole desktop session down with it. PHITEX_NO_SLICE=1
+# opts out (CI, machines without a user systemd).
+if [ -z "${PHITEX_NO_SLICE:-}" ] && command -v systemd-run >/dev/null \
+   && ! grep -q partex.slice /proc/self/cgroup 2>/dev/null \
+   && systemctl --user is-active -q -- -.slice 2>/dev/null; then
+  exec systemd-run --user --scope -q --slice=partex.slice \
+    -p "MemoryMax=${PHITEX_MEMORY_MAX:-16G}" -p MemorySwapMax=0 \
+    nice -n 19 ionice -c 3 "$0" "$@"
+fi
+
 repo="$(cd "$(dirname "$0")/.." && pwd)"
 cargo_home="${CARGO_HOME:-$HOME/.cargo}"
 rustup_home="${RUSTUP_HOME:-$HOME/.rustup}"
