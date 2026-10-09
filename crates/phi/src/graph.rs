@@ -1254,24 +1254,100 @@ impl<'s, L: Lang> StepCx<'s, L> {
     /// is not before here: then use [`StepCx::defined_reaching`]. Cost:
     /// the steps walked (a sealed run is one) plus their definitions.
     pub fn defined_since(&mut self, p0: Here) -> Option<Since<'s, L::Val>> {
-        let u = self.g.h[self.step as usize].parent;
         let h0 = self.g.h.get(p0.step as usize)?;
         if h0.kind != Kind::Step
             || h0.flags & DEAD != 0
-            || h0.parent != u
             || self.steps[h0.aux as usize].key != p0.key
         {
             return None;
         }
+        // (the two steps' paths from the root unfold down: p0 and here may
+        // be in different unfolds, across a call and its return)
+        let a = self.step_path(p0.step);
+        let b = self.step_path(self.step);
+        let d = a.iter().zip(&b).take_while(|(x, y)| x == y).count();
+        if d == b.len() {
+            // (p0 is this step, or in an unfold this step made before:
+            // not before here)
+            return if d == a.len() {
+                self.since_here(Set::default())
+            } else {
+                None
+            };
+        }
         let mut names: Set<u32> = Set::default();
-        let mut c = p0.step;
-        while c != self.step {
-            if c == NONE {
+        if d < a.len() {
+            // (at the level they part, in one unfold: p0's step there up
+            // to here's, each with what it made inside)
+            let (x, y) = (a[d], b[d]);
+            if self.g.h[x as usize].parent != self.g.h[y as usize].parent
+                || self.g.cmp_pos(self.g.pos(x), self.g.pos(y)) != std::cmp::Ordering::Less
+            {
                 return None;
             }
-            self.since_step(c, &mut names);
-            c = self.g.h[c as usize].next;
+            let mut c = x;
+            while c != y {
+                if c == NONE {
+                    return None;
+                }
+                self.since_step(c, &mut names);
+                c = self.g.h[c as usize].next;
+            }
         }
+        // (then down to here: each level's step above it (its own), and
+        // the steps before here's in each nested unfold, with their inside)
+        let start = if d < a.len() { d + 1 } else { d };
+        for j in start..b.len() {
+            self.since_own(b[j - 1], &mut names);
+            let u = self.g.h[b[j] as usize].parent;
+            let mut c = self.unfolds[self.g.h[u as usize].aux as usize].first;
+            while c != b[j] {
+                if c == NONE {
+                    return None;
+                }
+                self.since_step(c, &mut names);
+                c = self.g.h[c as usize].next;
+            }
+        }
+        self.since_here(names)
+    }
+
+    /// Steps from the root unfold's down to `s`, each in the unfold the
+    /// one before made.
+    fn step_path(&self, s: u32) -> Vec<u32> {
+        let mut p = vec![s];
+        let mut c = s;
+        loop {
+            let u = self.g.h[c as usize].parent;
+            let up = self.g.h[u as usize].parent;
+            if up == NONE || self.g.h[up as usize].kind != Kind::Step {
+                break;
+            }
+            p.push(up);
+            c = up;
+        }
+        p.reverse();
+        p
+    }
+
+    /// Step `s`'s own definitions and closed groups' names (not its
+    /// nested unfolds').
+    fn since_own(&self, s: u32, names: &mut Set<u32>) {
+        let si = &self.steps[self.g.h[s as usize].aux as usize];
+        for d in &self.names.recs[si.d0 as usize..(si.d0 + si.dn) as usize] {
+            names.insert(d.name);
+        }
+        if let Some(cl) = self.closes.get(&s) {
+            for g in cl {
+                if let Some(gr) = self.groups.get(g) {
+                    names.extend(gr.names.iter().copied());
+                }
+            }
+        }
+    }
+
+    /// `names` with this step's so far, with their values here.
+    fn since_here(&self, mut names: Set<u32>) -> Option<Since<'s, L::Val>> {
         // (this step so far)
         for d in &self.em.defs {
             names.insert(d.0);

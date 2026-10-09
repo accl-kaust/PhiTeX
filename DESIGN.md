@@ -5303,8 +5303,10 @@ at a run's start):
   own definitions are included, and in a segment the parent's names are
   listed too.
 - `cx.here()` and `cx.defined_since(p0)` list the names whose reaching
-  definition may differ since an earlier step of the unfold, each with
-  its value here (`None`: nothing reaches). That is:
+  definition may differ since an earlier step, each with its value here
+  (`None`: nothing reaches). p0 and here may be in different unfolds,
+  across calls and returns: the walk goes by the two steps' paths from
+  the root unfold, from where they part down to here. That is:
   - names defined from p0 on, nested unfolds included;
   - names defined in a group closed since, so a local definition made
     before p0 whose group closed is in the list.

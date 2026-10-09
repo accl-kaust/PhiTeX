@@ -936,3 +936,42 @@ fn a_source_inserted_twice_must_agree() {
     // the source still holds the old one)
     d.g.run();
 }
+
+/// `defined_since` across a call and its return: p0 before the call and
+/// here inside the called file; p0 before the call and here after it;
+/// p0 inside the file and here after it.
+#[test]
+fn defined_since_crosses_calls() {
+    let since = || {
+        let mut s = SINCE
+            .with(|c| c.borrow().clone())
+            .expect("p0 is before here");
+        s.sort();
+        s
+    };
+    let pair = |n: &str, v: &str| (n.to_string(), Some(v.to_string()));
+    // into the file
+    let mut d = with_files(
+        r"\def\a{1} \here \def\b{2} \input{fs1}",
+        &[("fs1", r"\def\c{3} \since")],
+        1,
+    );
+    d.g.run();
+    assert_eq!(since(), vec![pair("b", "2"), pair("c", "3")]);
+    // over the call
+    let mut d = with_files(
+        r"\def\a{1} \here \def\b{2} \input{fs2} \since",
+        &[("fs2", r"\def\c{3} x")],
+        1,
+    );
+    d.g.run();
+    assert_eq!(since(), vec![pair("b", "2"), pair("c", "3")]);
+    // out of the file
+    let mut d = with_files(
+        r"\def\a{1} \input{fs3} \def\b{2} \since",
+        &[("fs3", r"\here \def\d{4} x")],
+        1,
+    );
+    d.g.run();
+    assert_eq!(since(), vec![pair("b", "2"), pair("d", "4")]);
+}
