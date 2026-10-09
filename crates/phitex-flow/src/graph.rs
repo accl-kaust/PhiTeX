@@ -1582,6 +1582,11 @@ struct Scratch {
     emit: Vec<Item>,
     /// Shared copies of the names read in this piece.
     names: FxSet<Arc<str>>,
+    /// The piece's own copy of each font it sets (the font as read, then
+    /// the copy, its name the piece's): every character holds its font's
+    /// `Arc`, and one `Arc` counted by every thread at once would make
+    /// them wait on each other. A copy is equal to the font.
+    fonts: Vec<(Arc<Font>, Arc<Font>)>,
     buf: String,
     /// The glue `scan_glue` just gave is an internal quantity's own (for
     /// TeX's shared zero glue, which `\showbox` and the short display
@@ -1887,15 +1892,34 @@ impl<'a> Exec<'a> {
     fn font(&mut self) -> Arc<Font> {
         let r = self.lookup(&Key::Font);
         match &r.val {
-            Val::Font(f) => f.clone(),
+            Val::Font(f) => self.own_font(f),
             other => panic!("the font key holds {other:?}"),
         }
+    }
+
+    /// The piece's own copy of font `f` (`Scratch::fonts`).
+    fn own_font(&mut self, f: &Arc<Font>) -> Arc<Font> {
+        if let Some((_, o)) = self.scratch.fonts.iter().find(|(s, o)| Arc::ptr_eq(s, f) || Arc::ptr_eq(o, f)) {
+            return o.clone();
+        }
+        let mut c = (**f).clone();
+        c.key = intern(&mut self.scratch.names, &f.key);
+        let o = Arc::new(c);
+        self.scratch.fonts.push((f.clone(), o.clone()));
+        o
+    }
+
+    /// Font `f`'s identity as the piece's own name (for the keys of its
+    /// parameters).
+    fn font_key(&mut self, f: &Font) -> Arc<str> {
+        intern(&mut self.scratch.names, &f.key)
     }
 
     /// `\fontdimen n` of the current font.
     fn font_param(&mut self, n: u16) -> i32 {
         let f = self.font();
-        self.int(&Key::FontDimen(f.key.clone(), n))
+        let k = self.font_key(&f);
+        self.int(&Key::FontDimen(k, n))
     }
 
     fn tok_meaning(&mut self, t: &Tok) -> Meaning {
@@ -1927,13 +1951,20 @@ impl<'a> Exec<'a> {
             // (tex.web 325: a brace read again is counted again)
             align::uncount(&mut self.st.al, &t);
         }
-        // (tex.web 325: lists read to their end go first, not those under
-        // a rewritten text)
+        // (tex.web 325: lists read to their end go first)
+        self.end_read_lists();
+        self.st.pending.push((Arc::from([t]), 0, true));
+    }
+
+    /// The token lists read to their end go (not those under a rewritten
+    /// text): before a list is backed up (tex.web 325) and before a
+    /// macro's body is read (390: a macro calling itself last, as plain's
+    /// `\loop` does, keeps the input as long as it was).
+    fn end_read_lists(&mut self) {
         let floor = self.st.texts.last().map_or(0, |x| x.at);
         while self.st.pending.len() > floor && self.st.pending.last().is_some_and(|(l, i, _)| *i >= l.len()) {
             self.st.pending.pop();
         }
-        self.st.pending.push((Arc::from([t]), 0, true));
     }
 
     /// Rewrites the input: `toks`, then the rest.
@@ -2259,6 +2290,7 @@ impl<'a> Exec<'a> {
                 _ => out.push(t.clone()),
             }
         }
+        self.end_read_lists();
         self.rewrite(out);
     }
 

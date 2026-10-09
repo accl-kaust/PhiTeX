@@ -198,8 +198,8 @@ pub(super) fn push_horizontal(list: &mut Vec<Item>, it: Item) {
 pub(super) fn fonts_in(list: &[Item], out: &mut Vec<Arc<str>>) {
     for it in list {
         let id = match it {
-            Item::Char(f, _) => f.key.clone(),
-            Item::Lig(l) => l.font.key.clone(),
+            Item::Char(f, _) => &f.key,
+            Item::Lig(l) => &l.font.key,
             Item::Box(b) => {
                 fonts_in(&b.list, out);
                 continue;
@@ -244,8 +244,8 @@ pub(super) fn fonts_in(list: &[Item], out: &mut Vec<Arc<str>>) {
             }
             _ => continue,
         };
-        if !out.contains(&id) {
-            out.push(id);
+        if !out.iter().any(|x| **x == **id) {
+            out.push(id.clone());
         }
     }
 }
@@ -1028,7 +1028,8 @@ impl Exec<'_> {
                 && let Some(Item::Char(_, c)) = self.emit.last()
             {
                 let c = i32::from(*c);
-                if c == self.int(&Key::HyphenChar(m.font.key.clone())) {
+                let k = self.font_key(&m.font);
+                if c == self.int(&Key::HyphenChar(k)) {
                     m.ins_disc = true;
                 }
             }
@@ -1132,10 +1133,11 @@ impl Exec<'_> {
     /// §1042: the current font's interword glue.
     fn font_glue(&mut self) -> Glue {
         let f = self.font();
+        let k = self.font_key(&f);
         Glue {
-            width: self.int(&Key::FontDimen(f.key.clone(), 2)),
-            stretch: self.int(&Key::FontDimen(f.key.clone(), 3)),
-            shrink: self.int(&Key::FontDimen(f.key.clone(), 4)),
+            width: self.int(&Key::FontDimen(k.clone(), 2)),
+            stretch: self.int(&Key::FontDimen(k.clone(), 3)),
+            shrink: self.int(&Key::FontDimen(k, 4)),
             ..Glue::default()
         }
     }
@@ -1164,7 +1166,8 @@ impl Exec<'_> {
             // (§1044)
             if sf >= 2000 {
                 let f = self.font();
-                g.width += self.int(&Key::FontDimen(f.key.clone(), 7));
+                let k = self.font_key(&f);
+                g.width += self.int(&Key::FontDimen(k, 7));
             }
             g.stretch = xn_over_d(g.stretch, sf, 1000).0;
             g.shrink = xn_over_d(g.shrink, 1000, sf).0;
@@ -1243,7 +1246,8 @@ impl Exec<'_> {
     fn append_discretionary(&mut self, explicit: bool) {
         if !explicit {
             let f = self.font();
-            let c = self.int(&Key::HyphenChar(f.key.clone()));
+            let k = self.font_key(&f);
+            let c = self.int(&Key::HyphenChar(k));
             let pre =
                 if (0..256).contains(&c) && f.glyph(c).is_some() { vec![Item::Char(f, c as u8)] } else { Vec::new() };
             self.emit.push(Item::Disc(Arc::new(Disc { pre, post: Vec::new(), replace: 0 })));

@@ -148,10 +148,22 @@ struct Passive {
     prev: Option<usize>,
 }
 
+/// What the pass does at an item (tex.web 866), read from it first.
+enum Step {
+    Glue,
+    Lang(crate::hyph::LangState),
+    Kern,
+    Math(bool, u8),
+    Penalty(i32),
+    Disc(Option<W>, u8),
+    Other,
+}
+
 struct Breaker<'a> {
-    /// The paragraph's list: owned, since its second pass hyphenates
-    /// words in it (tex.web 894).
-    items: Vec<Item>,
+    /// The paragraph's list: borrowed until its second pass hyphenates a
+    /// word in it (tex.web 894); never copied item by item otherwise (an
+    /// item's font is an `Arc` every thread shares).
+    items: std::borrow::Cow<'a, [Item]>,
     p: &'a LineParams,
     /// `prefix[i]`: the widths of `items[..i]`.
     prefix: Vec<W>,
@@ -485,11 +497,22 @@ impl Breaker<'_> {
         {
             self.lang = h.init;
         }
+        // (no hyphenation at all when no language present has patterns or
+        // exceptions)
+        let hyph = self.p.hyph.as_deref().filter(|h| h.tables.iter().any(|(_, a, b)| !a.is_empty() || !b.is_empty()));
         while k < self.items.len() && !self.active.is_empty() {
-            // (§866)
-            let it = self.items[k].clone();
-            match &it {
-                Item::Glue { .. } | Item::Leaders(_) => {
+            // (§866: what the item needs, read before the breaker changes)
+            let step = match &self.items[k] {
+                Item::Glue { .. } | Item::Leaders(_) => Step::Glue,
+                Item::Lang { lang, lhm, rhm } => Step::Lang(crate::hyph::LangState { lang: *lang, lhm: *lhm, rhm: *rhm }),
+                Item::Kern { sub: 1, .. } => Step::Kern,
+                Item::Math { after, lr, .. } => Step::Math(*after, *lr),
+                Item::Penalty(p) => Step::Penalty(*p),
+                Item::Disc(d) => Step::Disc((!d.pre.is_empty()).then(|| list_widths(&d.pre)), d.replace),
+                _ => Step::Other,
+            };
+            match step {
+                Step::Glue => {
                     // (§868)
                     if k > 0 && auto_breaking {
                         let pr = &self.items[k - 1];
@@ -500,45 +523,42 @@ impl Breaker<'_> {
                     // (§894: try to hyphenate the following word)
                     if self.second_pass
                         && auto_breaking
-                        && let Some(h) = self.p.hyph.clone()
-                        && let Some(w) = crate::hyph::hyphenate_after(&self.items, k, &mut self.lang, &h)
+                        && let Some(h) = hyph
+                        && let Some(w) = crate::hyph::hyphenate_after(&self.items, k, &mut self.lang, h)
                     {
                         self.missing.extend(w.missing);
-                        self.items.splice(w.start..w.end, w.items);
+                        self.items.to_mut().splice(w.start..w.end, w.items);
                         self.reprefix(w.start);
                     }
                 }
-                Item::Lang { lang, lhm, rhm } => {
+                Step::Lang(l) => {
                     // (§1362)
-                    self.lang = crate::hyph::LangState { lang: *lang, lhm: *lhm, rhm: *rhm };
+                    self.lang = l;
                 }
-                Item::Kern { sub: 1, .. } => {
+                Step::Kern => {
                     if auto_breaking && self.items.get(k + 1).is_some_and(Item::is_glue) {
                         self.try_break(0, false, Some(k), &none);
                     }
                 }
-                Item::Math { after, lr, .. } => {
+                Step::Math(after, lr) => {
                     // (etex.web: TeXXeT's nodes leave it as it is)
-                    if *lr < 4 {
-                        auto_breaking = *after;
+                    if lr < 4 {
+                        auto_breaking = after;
                     }
                     if auto_breaking && self.items.get(k + 1).is_some_and(Item::is_glue) {
                         self.try_break(0, false, Some(k), &none);
                     }
                 }
-                Item::Penalty(p) => self.try_break(*p, false, Some(k), &none),
-                Item::Disc(d) => {
+                Step::Penalty(p) => self.try_break(p, false, Some(k), &none),
+                Step::Disc(pre, replace) => {
                     // (§869)
-                    let d = d.clone();
-                    if d.pre.is_empty() {
-                        self.try_break(self.p.exhyphenpenalty, true, Some(k), &none);
-                    } else {
-                        let pre = list_widths(&d.pre);
-                        self.try_break(self.p.hyphenpenalty, true, Some(k), &pre);
+                    match pre {
+                        None => self.try_break(self.p.exhyphenpenalty, true, Some(k), &none),
+                        Some(pre) => self.try_break(self.p.hyphenpenalty, true, Some(k), &pre),
                     }
-                    k += usize::from(d.replace);
+                    k += usize::from(replace);
                 }
-                _ => {}
+                Step::Other => {}
             }
             k += 1;
         }
@@ -635,7 +655,7 @@ pub fn lines(items: &[Item], p: &LineParams) -> Vec<Arc<Line>> {
     }
     let easy_line = if p.looseness == 0 { lsl } else { MAX_HALFWORD };
     let mut br = Breaker {
-        items: items.to_vec(),
+        items: std::borrow::Cow::Borrowed(items),
         p,
         prefix,
         background,
@@ -713,7 +733,7 @@ pub fn lines(items: &[Item], p: &LineParams) -> Vec<Arc<Line>> {
         g.width = (i64::from(g.width) + best.short - best.glue) as i32;
         g.stretch = 0;
         let last = br.items.len() - 1;
-        br.items[last] = Item::Glue { g: Arc::new(g), sub: PAR_FILL_SKIP, zero: false };
+        br.items.to_mut()[last] = Item::Glue { g: Arc::new(g), sub: PAR_FILL_SKIP, zero: false };
     }
     let mut out = post_line_break(&br, best);
     // (a hyphen character the font lacks, reported as the second pass met

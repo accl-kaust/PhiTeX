@@ -66,7 +66,12 @@ pub struct Exten {
     pub rep: u8,
 }
 
-/// A loaded font.
+/// A loaded font. Its tables are shared: a copy is a few counts (a piece's
+/// reader holds its own copy of each font it sets, `graph.rs`), and it is
+/// laid out apart from its count's cache line (which every copy of the
+/// `Arc` writes).
+#[derive(Clone)]
+#[repr(align(128))]
 pub struct Font {
     pub name: String,
     /// The font's identity, its name and size (`cmr10 655360`): what the
@@ -77,13 +82,13 @@ pub struct Font {
     pub size: i32,
     pub bc: i32,
     pub ec: i32,
-    glyphs: Vec<Option<Glyph>>,
-    pub lig_kerns: Vec<LigKern>,
-    pub kerns: Vec<i32>,
-    pub extens: Vec<Exten>,
+    glyphs: Arc<[Option<Glyph>]>,
+    pub lig_kerns: Arc<[LigKern]>,
+    pub kerns: Arc<[i32]>,
+    pub extens: Arc<[Exten]>,
     /// `params[k]` is `\fontdimen k` as loaded (index 0 unused; at least
     /// seven parameters).
-    pub params: Vec<i32>,
+    pub params: Arc<[i32]>,
     /// §545: the right boundary character (256 if none).
     pub bchar: i32,
     /// §549: `bchar` unless that character exists (then 256).
@@ -167,11 +172,11 @@ impl Font {
             size: 0,
             bc: 1,
             ec: 0,
-            glyphs: Vec::new(),
-            lig_kerns: Vec::new(),
-            kerns: Vec::new(),
-            extens: Vec::new(),
-            params: vec![0; 8],
+            glyphs: Arc::from([]),
+            lig_kerns: Arc::from([]),
+            kerns: Arc::from([]),
+            extens: Arc::from([]),
+            params: Arc::from([0; 8]),
             bchar: 256,
             false_bchar: 256,
             bchar_label: None,
@@ -379,10 +384,10 @@ impl Font {
             bc,
             ec,
             glyphs,
-            lig_kerns,
-            kerns,
-            extens,
-            params,
+            lig_kerns: lig_kerns.into(),
+            kerns: kerns.into(),
+            extens: extens.into(),
+            params: params.into(),
             bchar,
             false_bchar,
             bchar_label: (bch_label < nl).then_some(bch_label as u16),
