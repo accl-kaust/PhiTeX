@@ -1,144 +1,198 @@
-# HANDOFF: pure SSA (branch pure-ssa, pushed to accl only; origin/forgejo ignored)
+# HANDOFF: pure SSA (branch `pure-ssa`)
 
-TeX layer on the φ core (crates/phi; merged accl/main b40d4bf into
-pure-ssa at 662fa3a). Checkpoint 1 approved (DESIGN 3.17). Now: the
-ONE-SHOT implementation behind PHITEX_SSA_PURE=1. Report to main only at
-the end, or at a design wall.
+This branch holds the TeX layer on the TeX-agnostic φ core (`crates/phi`), behind
+`PARTEX_SSA=1 PHITEX_SSA_PURE=1`. It is a one-shot rewrite of SSA mode: every
+command of `main_control` is one step of a φ unfold, engine state is either core
+*names* or the step *state* (`PState`), and outputs are effects linked at the end.
+The design notes are DESIGN.md §3.17 (checkpoint 1, approved).
 
-## Done means (main's conditions)
-- e2e and ssa-edits byte-identical with pure on, at W=1 and W=8; the
-  course and pgfsub included.
-- The structural tests (DESIGN 3.17.8) and the enforced invariant.
-- Parallel cold builds and rebuilds at W=1/4/8 against current SSA and
-  machine mode, on accl; the speculation acceptance rate.
-  - Lang::entries at paragraph and block boundaries, predicted states.
-  - Rebuilds in the core's parallel rounds, cancelled by a keystroke.
-- Memory against the core as built (~30 B a live node, 1.5 B sealed):
-  - course peak RSS ≤ 8 GB in the cold build, ≤ 2 GB retained after
-    sealing;
-  - pgfsub proportionally;
-  - recompute from persisted nodes (steps, definitions, sources,
-    effects, creators).
-- Large single-command steps accepted, but memoised macro-call
-  expansion (core memo store, keyed by meaning and argument versions) is
-  REQUIRED. Report the worst interiors on the course.
-- The old SSA mode's exactness fixes carried over: the checklist below,
-  each ticked with its test.
+## Where it stands (2026-10-09)
 
-## Architecture (the bridge), crates/partex-pure (std; deps phi, partex-core)
-- TexLang: Lang impl.
-  - Op::Main is the unfold of main control; one step is one command
-    (engine stop_due → true).
-  - Then scans: LineBreak, PageBuild; leaves: interline glue, ship
-    segments.
-- The engine runs a command against a CACHE of names (its own arrays).
-  Every name it read is verified afterwards with cx.read (content
-  version); on a mismatch the values are loaded and the command is run
-  again. Every definition is reported with cx.define, and groups with
-  open_group/close_group, in order. A group's restores are not
-  definitions.
-- Step state (Phase A): the engine's non-name state as a value
-  (snapshot), its version from the state hash without the name tables.
-  It is to be shrunk to the true sequential state as the scans and
-  chains land.
-- Effects: each step's effects are an Effect leaf on its chain; the link
-  runs at the end.
+Done and byte-identical (pure vs plain partex, same binary):
+- `-ini` test document, cold build and 2 rebuilds (edits).
+- e2e incremental cases with plain format: `bye`, `verbatim`, `pagetail`, cold
+  build and every edit stage.
+- A synthetic plain document (400 paragraphs, 30.5K steps, PDF): identical at
+  W=1 (1.05 s) and **W=4 (3.0 s, slower: see "Next")**.
+- φ change `fee9137` (`StepCx::source_or_insert`, `StepCx::spelling`, toy tests),
+  which the φ core agent is landing on main.
 
-## Architecture as built (crates/partex-core/src/pure, CLI pure.rs)
-- PARTEX_SSA=1 PHITEX_SSA_PURE=1 → partex-cli/src/pure.rs::run.
-- pure/driver.rs Build: engine started to its first command (format
-  load) outside the graph; that state is the unfold's init, the engine
-  then forked (NoHost) as `base`: the value of a name no step defines.
-  Input: the main file's lines (ElemIds kept across edits by common
-  prefix/suffix). Op::Main unfold, a step per command.
-- pure/lang.rs step: place PState if the engine is not in it (version
-  check), place the main file at the core's cursor, resume one command,
-  replay the PureTracker log: reads before the first group event checked
-  (registered; a mismatch = enforcer hard error);
-  then reads checked, definitions at each slot's last live write (end
-  value), groups in order; main-file lines read → cx.next(); effects →
-  Effect leaf on Chain 0 (OUTPUT); key = hash(place, k).
-- phi patch (told main): cx.read honours groups closed in the step.
-- FRONTIER (user decision, replaces cache+validate/rollback): the
-  engine's arrays are the run's frontier. A run (a step not after the
-  one the engine just ran) starts by loading the reaching definition of
-  every defined name (stopgap: slots this engine ever defined, through
-  cx.read; target: frontier snapshots at sparse positions, CoW, patched
-  with defs in (P0, P] — core asked for defined_reaching() and a range
-  query). Reads registered after the command; a mismatch is the
-  enforcer's hard error. No rollback, no mark/reset.
-- Pending core: cx.source + Step::Call (files), cx.mark/reset.
+Failing or deferred (by the coordinator, until after the first parallel speedup):
+- `effects` (stage 1+ log), `readback` (a file the job writes and then `\input`s
+  by lines: stores are names, but a stored file read by lines needs a call over
+  the store, half done in `finish`), `cutoff_pdf` (rebuild PDF), the DVI cases
+  `incremental`, `cutoff`, `tokens` (they differ even cold; DVI output through
+  effects, `Shared::page_sink` returns None).
+- LaTeX: not tried yet.
 
-## Enforcer coverage (guardrail 1: nothing outside names and PState)
-- Names (checked reads, defined writes): Eqtb, Font, FontTable, Hyph,
-  Pdf, Dvi, Out, Read, Random, Mark, Page, Sealed, Alloc scalars (but
-  the interner/state ones below).
-- PState: InputState (input stack, buffer, files, scanner flags,
-  pseudo files), List (nest, cur_list, align), Save (pointers, entries,
-  xchain), Cond, Alloc ALIGN_STATE/AFTER_TOKEN.
-- Interners (not operands; to be content-deterministic, wall 2):
-  Hash/HashNext/Name/Search, Str/Pool, Alloc STR_TOP/HASH_USED/HASH_HIGH.
-- NOT YET COVERED (reported by `others()` per build): Source, Line,
-  Load, Glyphs, PageNode, HyphWord, Class, PdfObj, PdfName, PdfNum,
-  Clock, Unknown.
-- Debug enforcer (to build): each step re-run on a clean engine from
-  base + PState + only the name values it read; writes, effects, next
-  state must match; hard error.
-## Order of work (DESIGN 3.17.9 table) and status
-1. [ ] crate + Lang shell + PureTracker + driver (PHITEX_SSA_PURE=1 in CLI)
-2. [ ] eqtb/registers as names (cache + verify)
-3. [ ] expansion/macros; memoised macro expansion
-4. [ ] catcodes/tokenisation, sources as input Seq / line names
-5. [ ] groups as scopes
-6. [ ] conditionals, φ
-7. [ ] boxes/lists Seq, field values
-8. [ ] line_break scan, interline glue node
-9. [ ] page builder scan, output routine unfold, inserts, marks
-10. [ ] alignments
-11. [ ] math
-12. [ ] e-TeX extras
-13. [ ] files, \write chains, per-entry .aux slots, rerun check, tools
-14. [ ] pdfTeX extras, PDF writer chains, segments
-15. [ ] parallel entries, folding/sealing, memo, timings, memory
+**The last commit is untested**: the page builder after a paragraph's end or start
+is now a step of its own (`set_defer_page(true)` in `pure/driver.rs`, `T::PURE`
+in `build.rs` new_graf and in `maincontrol.rs` after the deferred `build_page`).
+Rebuild, then rerun the W=1 cases and the W=4 synthetic document.
 
-## Carry-over checklist (old SSA exactness fixes; tick with the covering test)
-- [ ] virtual PDF object numbers / numbering events (3.12) — e2e pdf cases
-- [ ] fonts' /F numbers by the link (FontRef), font numbers as values (DVI) — fontnum, font-rerun
-- [ ] font made again in its slot when found before load (found_font, 8a5a454) — includeonly
-- [ ] font_id_text positioned (3.2) — fontid
-- [ ] names made where first defined (name_defined; citations [?]) — names, names-rerun
-- [ ] PDF object lists placed whole with heads (5868b6a) — font-rerun
-- [ ] columns as the link's flow (3.8) — every case's log/terminal
-- [ ] page tail placed with its length (a9ecc56, dc035b1) — pagetail
-- [ ] paragraph-start flag at a step's start (a5e77d0) — course-diff case
-- [ ] expansion-scoped flags in the input state (66eb245: \ifincsname ~) — names / thesis-like case
-- [ ] remembered skips replay their reads (0f2dd82)
-- [ ] e-TeX saved registers above 255 per entry (3.12)
-- [ ] soft reads / entry values of the save stack (3.12)
-- [ ] dead save stack entries (3.12)
-- [ ] streams: loads served from stores, φ of written files, keep_complete, stopped trips publish nothing (3.7) — petals_keys, petals_stop
-- [ ] \write18 commands as nodes, doomed runs run none (3.7) — minted, shell
-- [ ] BibTeX/makeindex as nodes (3.16) — bibtex, idx cases
-- [ ] cascade gone cold runs to the job's end (5dbc810, "auxloss") — includeonly, incl cases
-- [ ] fatal trip: no PDF, cut .aux per keep_complete (3.7) — petals
-- [ ] virtual object ids by TeX identity, end of job's seed (ac655eb)
-- [ ] sealed lines' contents read only by ship/unhbox (seal.rs) — replaced by box fields
-- [ ] SyncTeX tags as values (synctex_default_on) — synctex cases
+## Architecture as built
 
-## Notes
-- The course on accl: ACCL_COURSE=/home/mohaam0e/code/tmp/course-par.
-- The tracer: PARTEX_PURE (purestats.rs); scripts/pure-*.py; job 7536's
-  results in target/x/r7536; job 7540 (course and pgfsub edit diffs) in
-  partex-phitex-runs/cmd-7540 on accl.
-- Scratch: target/x.
+- `crates/partex-core/src/pure/`
+  - `tracker.rs` `PureTracker`: logs each command's slot reads (with the
+    version seen), writes, group open and close (close after unsave's restores),
+    file ends, loads (`pure_load`), and the job's written files (stores). It also
+    sorts slot families into Name, State or Interner (`kind`). Level 0's list
+    fields (`List` slot < COUNT) are names. File handles are named by their files
+    (`reopen`).
+  - `version.rs`: a slot's version, matching the read hooks.
+  - `state.rs` `PState`: the input state, nest levels 1+, the save stack, the
+    conditionals, align_state, after_token. Its version is computed from the
+    engine. Level 0 is kept from the engine on `set`.
+  - `lang.rs` `TexLang` (`phi::Lang`):
+    - Step: if the engine is not in `st`, place it (`ps.set`). Then make the
+      **frontier**: the engine's arrays are the run's frontier, loaded with
+      `defined_since(last)` or else `defined_reaching()`. Not recorded.
+    - Run one command (`resume`).
+    - Replay the log: reads are registered with `cx.read` (a mismatch is a hard
+      **enforcer** error), definitions go at each slot's last live write (global
+      when the slot's level is 1), groups are replayed.
+    - Loads become sources (`source_or_insert`). An `\input` level is
+      `cx.call(Op::File(h, level))` plus `Step::Call`.
+    - The step consumes the lines of its own file, and puts its effects on
+      chain 0 as `Op::Fx` leaves.
+    - The step key is hashed from the cursor, the input place, and k.
+  - `files.rs` `FileDoc` / `DOCS`: each file's lines and identities; the
+    driver refreshes them between runs (prefix and suffix line ids kept).
+  - `driver.rs` `Build`: runs the engine to the first command (format load).
+    The first file is the **root unfold** `Op::File(h, level|ROOT)` with init
+    passed as `args[0]`. Also `refresh`, `run`, `effects`, `history`, and
+    `enable_workers`, which installs a factory of worker engines: copy-on-write
+    `fork_with` views of the format snapshot.
+  - `shared.rs` `Shared<H>`: one host behind a mutex, used by all engines.
+  - `file_entries`: speculative entries after each blank line. The guess is the
+    file's first state with the blank line read (`InputState::after_blank_line`)
+    and is canonicalised by placing it in the engine.
+- `crates/partex-cli/src/pure.rs`: the cold build, the link (`effects::link`
+  plus `SsaLinker::write_full`), and one rebuild per `PARTEX_SSA_REBUILD` line
+  (`refresh` then `run`).
+- `scripts/sandbox` now passes switches whose values hold newlines.
+- Debug switches:
+  - `PHITEX_PURE_DEBUG=1`: each step's access log.
+  - `PHITEX_PURE_SPEC=1`: each speculative guess compared with the state the run
+    in order made there.
+- Dry-step rounds are off (`round_min_ns = u64::MAX`), because a worker would
+  run steps out of order on a stale frontier.
 
-## WHERE I AM (paused 2026-10-09 00:35)
-- Bridge written and compiling (frontier semantics, no rollback): core
-  pure/{tracker,version,state,lang,driver}.rs, CLI pure.rs, switch
-  PARTEX_SSA=1 PHITEX_SSA_PURE=1. Never run yet.
-- The release build of e346a17 finished OK after the pause (target/release/phitex is current;
-  no rebuild needed before the first run).
-- NEXT: run target/x/p1/doc.tex (-ini test) with and without pure; diff
-  log/terminal; then e2e plain cases (bye, pages, skips) vs plain run;
-  then LaTeX (latexdoc). Then frontier snapshots, files via cx.source /
-  Step::Call (core pending), interner by content (wall 2), enforcer.
+## Findings behind the next steps
+
+`PHITEX_PURE_SPEC=1` on the synthetic document shows all 401 guesses right
+(equal state versions). The W=4 slowness is therefore not guesses but **reads of
+names across paragraphs**:
+- every `\par` step ran `build_page` and read and wrote the page builder's names;
+- `\prevdepth` (level 0) chains each paragraph's first line to the previous one.
+
+When grafted, a segment's reads of those names come from the graph at the
+speculation's start, so the core wakes them and the main thread reruns nearly
+everything ("woken 2.65M").
+
+## Approved design for the next steps (user, via the coordinator)
+
+- No single-threaded main executor. Every worker executes segments and
+  validates them against the field-level reads each segment made, checked
+  against the definitions reaching its entry. Only a thin in-order commit
+  stays sequential: it stamps and grafts, a few hash compares per segment.
+- A failed validation reruns from the first step that read the mismatching
+  field (Block-STM style), not the whole segment. A later provisional
+  validation is redone only if an earlier commit changes what it read.
+- The page builder is its own resumable, convergent scan, never in a
+  paragraph's entry state and never read by a paragraph's steps.
+- Order:
+  1. Read-set acceptance, so the main thread commits more than it executes
+     and W=4 beats W=1.
+  2. Remove main-as-executor: workers pull entries, run and validate them;
+     the committer only stamps.
+  3. Bring back parallel rounds for rebuilds.
+- Report the first speedup and the top fields that differ at rejected entries.
+
+## Next concrete steps
+
+1. Build and test the page-step change (W=1 cases, then the W=4 synthetic
+   document). Count main-thread reruns. Then make entries sparser
+   (every N blank lines) and look at what the grafted segments' first steps read.
+2. `\prevdepth`: the first line's interline glue must not chain paragraphs.
+   Either a paragraph's line-break step does not read level 0's `prev_depth`
+   (the page step joins), or accept one rerun per segment.
+3. Read-set acceptance and workers that validate (needs the φ core: the
+   coordinator's φ agent owns graft and acceptance; coordinate with it).
+4. The φ agent's queue: stale slot, landing fee9137, `defined_since` across
+   call boundaries (today every file call or return falls back to
+   `defined_reaching`), a content-hash interner (cs spelling -> p by hash,
+   versions hashing spellings: required for W>1 with new control sequences),
+   the parallel graft, the e2e harness for PURE, enforcer coverage.
+5. Then the deferred cases above, LaTeX (latexdoc, the course, pgfsub), the
+   carry-over checklist (DESIGN 3.17 / older HANDOFF), the memory budget
+   (course ≤ 8 GB peak, ≤ 2 GB after sealing), memoised macro expansion
+   (required), timings at W=1/4/8 on the cluster.
+
+## Building and running without the cluster or local paths
+
+Toolchain: the pinned nightly in `rust-toolchain.toml` (rustup installs it).
+Locally, every cargo or binary run goes through `scripts/sandbox` (bubblewrap).
+Where bubblewrap is missing (a cloud box), set `SANDBOX=` (empty) for the
+`scripts/pure/*` scripts and run cargo directly.
+
+Packages (Debian/Ubuntu):
+
+    apt install build-essential pkg-config bubblewrap python3 \
+      texlive-base texlive-binaries texlive-fonts-recommended \
+      texlive-latex-base texlive-latex-recommended
+
+What the tests read from TeX Live: `plain.tex` and hyphen.tex (texlive-base),
+cm `*.tfm` and the AMS Type 1 `cmr10.pfb` and friends
+(`fonts/type1/public/amsfonts/cm`), `pdftex.map`, kpathsea's `texmf.cnf`.
+partex finds the tree through its own kpathsea (`partex-kpse`). If the tree is
+not at the system path, set `TEXMFCNF`/`TEXMF` as kpathsea expects.
+
+Build (fastdev profile: release speed, thin LTO):
+
+    scripts/sandbox cargo build --profile fastdev -p partex-cli   # target/fastdev/phitex
+    scripts/sandbox cargo test -p phi --release                   # the core's tests
+
+Formats (once). The scripts expect these directories under `target/x`:
+
+    mkdir -p target/x/fmtp target/x/fmtk
+    (cd target/x/fmtp && ../../../scripts/sandbox ../../fastdev/phitex --compat=pdftex -ini -interaction=nonstopmode '\input plain \dump')
+    (cd target/x/fmtk && ../../../scripts/sandbox ../../fastdev/phitex --compat=tex -ini -interaction=nonstopmode '\input plain \dump')
+
+The comparison scripts (`scripts/pure/`):
+- `cmp.sh DIR ARGS`: DIR/src is the job. Runs it plain in DIR/a and pure in
+  DIR/b, then compares every output (logs without their first line).
+  `PUREENV="PHITEX_SSA_WORKERS=4 PHITEX_PURE_SPEC=1"` adds switches to the pure
+  run. `BIN=` sets the binary (default `target/fastdev/phitex`).
+- `edit.sh DIR ARGS`: DIR/src plus DIR/edits/1..n. One pure process rebuilds
+  after each edit (`PARTEX_SSA_REBUILD`), and each stage is compared with a
+  cold plain run. Files are stamped as e2e stamps them, with
+  `SOURCE_DATE_EPOCH` fixed.
+- `runcase.sh NAME`: lays out xtask's e2e incremental case NAME (parsed from
+  `xtask/src/e2e.rs`) in `target/x/e2e/NAME` and runs `edit.sh` with the
+  plain format.
+- `gen.py N`: a synthetic plain document of N paragraphs.
+
+Examples:
+
+    bash scripts/pure/runcase.sh bye        # also verbatim pagetail effects readback cutoff_pdf incremental cutoff tokens
+    mkdir -p target/x/syn/src && scripts/sandbox python3 scripts/pure/gen.py 400 > target/x/syn/src/syn.tex
+    cp target/x/fmtp/plain.fmt target/x/syn/src/
+    bash scripts/pure/cmp.sh target/x/syn --compat=pdftex -fmt=plain -interaction=nonstopmode syn
+    PUREENV="PHITEX_SSA_WORKERS=4" bash scripts/pure/cmp.sh target/x/syn --compat=pdftex -fmt=plain -interaction=nonstopmode syn
+
+The pure run's stderr (`DIR/b/err.txt`) holds the `phitex: pure ssa build N:`
+reports: steps, placements, whole vs since frontiers, names loaded, reads,
+definitions, groups, file calls, the core's report, and families not versioned.
+
+## Rules (from the task)
+
+- fmt and clippy pedantic clean; `unsafe_code` denied.
+- No subagents; no pgrep or pkill.
+- No force-push. Push only to the `accl` remote, never to main or github; the
+  user lands the work.
+- No commit trailers, and no claude.ai links in commits.
+- Never commit the course's text: use synthetic tests.
+- Heavy local runs go under systemd-run memory caps and `nice`.
+- No heuristics standing in for semantics. Nothing may live outside names and
+  PState: the enforcer must catch it.
