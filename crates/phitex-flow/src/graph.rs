@@ -317,15 +317,158 @@ impl Node {
     }
 }
 
-/// A piece's chain of nodes, with what resolving names over it needs.
+/// A stretch of a chain's nodes, shared with the chain it was made in.
+#[derive(Clone, Debug)]
+struct Seg {
+    v: Arc<Vec<Arc<Node>>>,
+    start: u32,
+    end: u32,
+}
+
+/// A chain's nodes: stretches shared with the chains that made them (a
+/// kept stretch is shared by one pointer, not node by node), then the
+/// nodes added since.
+#[derive(Clone, Debug, Default)]
+pub struct Nodes {
+    segs: Vec<Seg>,
+    /// Where each segment ends in this chain.
+    ends: Vec<u32>,
+    tail: Vec<Arc<Node>>,
+}
+
+/// Past this many stretches, a chain's nodes are made one again.
+const MAX_SEGS: usize = 16;
+
+impl Nodes {
+    pub fn len(&self) -> usize {
+        self.in_segs() + self.tail.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    fn in_segs(&self) -> usize {
+        self.ends.last().map_or(0, |&e| e as usize)
+    }
+
+    pub fn get(&self, i: usize) -> &Arc<Node> {
+        let b = self.in_segs();
+        if i >= b {
+            return &self.tail[i - b];
+        }
+        let s = self.ends.partition_point(|&e| e as usize <= i);
+        let lo = if s == 0 { 0 } else { self.ends[s - 1] as usize };
+        let seg = &self.segs[s];
+        &seg.v[seg.start as usize + i - lo]
+    }
+
+    fn push(&mut self, n: Arc<Node>) {
+        self.tail.push(n);
+    }
+
+    /// The nodes added since become a stretch others can share.
+    fn freeze(&mut self) {
+        if self.segs.len() > MAX_SEGS {
+            let all: Vec<Arc<Node>> = self.iter().cloned().collect();
+            self.segs.clear();
+            self.ends.clear();
+            self.tail = all;
+        }
+        if self.tail.is_empty() {
+            return;
+        }
+        let v = Arc::new(std::mem::take(&mut self.tail));
+        let end = v.len() as u32;
+        self.add_seg(Seg { v, start: 0, end });
+    }
+
+    fn add_seg(&mut self, s: Seg) {
+        let len = s.end - s.start;
+        if len == 0 {
+            return;
+        }
+        if let Some(last) = self.segs.last_mut()
+            && Arc::ptr_eq(&last.v, &s.v)
+            && last.end == s.start
+        {
+            last.end = s.end;
+            *self.ends.last_mut().expect("a segment") += len;
+            return;
+        }
+        let e = self.in_segs() as u32 + len;
+        self.segs.push(s);
+        self.ends.push(e);
+    }
+
+    /// Appends `other`'s nodes `a..b`, shared (`other` is frozen).
+    fn share(&mut self, other: &Nodes, a: usize, b: usize) {
+        debug_assert!(other.tail.is_empty(), "a frozen chain");
+        if a >= b {
+            return;
+        }
+        self.freeze();
+        let mut lo = 0usize;
+        for (s, &e) in other.segs.iter().zip(&other.ends) {
+            let e = e as usize;
+            let (x, y) = (a.max(lo), b.min(e));
+            if x < y {
+                self.add_seg(Seg {
+                    v: s.v.clone(),
+                    start: s.start + (x - lo) as u32,
+                    end: s.start + (y - lo) as u32,
+                });
+            }
+            lo = e;
+            if lo >= b {
+                break;
+            }
+        }
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &Arc<Node>> {
+        self.range(0, self.len())
+    }
+
+    /// Nodes `a..b`.
+    pub fn range(&self, a: usize, b: usize) -> impl Iterator<Item = &Arc<Node>> {
+        let mut lo = 0usize;
+        let segs = self.segs.iter().zip(&self.ends).filter_map(move |(s, &e)| {
+            let e = e as usize;
+            let (x, y) = (a.max(lo), b.min(e));
+            let r = (x < y).then(|| &s.v[s.start as usize + x - lo..s.start as usize + y - lo]);
+            lo = e;
+            r
+        });
+        let (base, n) = (self.in_segs(), self.tail.len());
+        let ta = a.clamp(base, base + n) - base;
+        let tb = b.clamp(base, base + n) - base;
+        segs.flatten().chain(self.tail[ta..tb.max(ta)].iter())
+    }
+}
+
+impl std::ops::Index<usize> for Nodes {
+    type Output = Arc<Node>;
+    fn index(&self, i: usize) -> &Arc<Node> {
+        self.get(i)
+    }
+}
+
+/// A piece's chain of nodes, with what resolving names over it needs (each
+/// index a cache of the nodes).
 #[derive(Clone, Debug, Default)]
 pub struct Chain {
-    pub nodes: Vec<Arc<Node>>,
+    pub nodes: Nodes,
     /// Nodes defining each key, in order.
     defs_of: FxMap<Key, Vec<u32>>,
     /// For each `Open` node, the index of its `Close`, once there is one.
     close_of: FxMap<u32, u32>,
     open: Vec<u32>,
+    /// Every `Open` and `Close` node, in order.
+    scopes: Vec<u32>,
+    /// The nodes with a paragraph, and with errors.
+    para_at: Vec<u32>,
+    err_at: Vec<u32>,
 }
 
 impl Chain {
@@ -383,19 +526,80 @@ impl Chain {
     /// Adds a node whose `group` is already right (kept at its old index).
     fn push_arc(&mut self, n: Arc<Node>) {
         let i = self.nodes.len() as u32;
+        self.index(&n, i);
+        self.nodes.push(n);
+    }
+
+    /// Node `n`, at `i`, in the indices.
+    fn index(&mut self, n: &Node, i: u32) {
         match n.kind {
-            Kind::Open => self.open.push(i),
+            Kind::Open => {
+                self.open.push(i);
+                self.scopes.push(i);
+            }
             Kind::Close => {
                 if let Some(o) = self.open.pop() {
                     self.close_of.insert(o, i);
                 }
+                self.scopes.push(i);
             }
             _ => {}
         }
-        for d in n.defs() {
-            self.defs_of.entry(d.key.clone()).or_default().push(i);
+        if let Some(r) = &n.rare {
+            for d in &r.defs {
+                self.defs_of.entry(d.key.clone()).or_default().push(i);
+            }
+            if r.para.is_some() {
+                self.para_at.push(i);
+            }
+            if !r.errors.is_empty() {
+                self.err_at.push(i);
+            }
         }
-        self.nodes.push(n);
+    }
+
+    /// The first `from` nodes of `old`, shared.
+    fn prefix(old: &Chain, from: usize) -> Chain {
+        let mut c = Chain::default();
+        c.share(old, 0, from);
+        c
+    }
+
+    /// Appends `old`'s nodes `a..b`, shared, at the same indices (the chain
+    /// has `a` nodes, and how names resolve at `a` is the same in both):
+    /// their entries in `old`'s indices are copied, not found again.
+    fn share(&mut self, old: &Chain, a: usize, b: usize) {
+        debug_assert_eq!(self.nodes.len(), a);
+        if a >= b {
+            return;
+        }
+        self.nodes.share(&old.nodes, a, b);
+        let within = |v: &[u32]| {
+            let s = v.partition_point(|&i| (i as usize) < a);
+            let e = v.partition_point(|&i| (i as usize) < b);
+            s..e
+        };
+        for (k, v) in &old.defs_of {
+            let r = within(v);
+            if !r.is_empty() {
+                self.defs_of
+                    .entry(k.clone())
+                    .or_default()
+                    .extend_from_slice(&v[r]);
+            }
+        }
+        for &i in &old.scopes[within(&old.scopes)] {
+            if old.nodes[i as usize].kind == Kind::Open {
+                self.open.push(i);
+            } else if let Some(o) = self.open.pop() {
+                self.close_of.insert(o, i);
+            }
+            self.scopes.push(i);
+        }
+        self.para_at
+            .extend_from_slice(&old.para_at[within(&old.para_at)]);
+        self.err_at
+            .extend_from_slice(&old.err_at[within(&old.err_at)]);
     }
 }
 
@@ -580,18 +784,22 @@ pub fn run_piece(
     // everything before it is kept as it is)
     let mut from = dirty.first().map_or(usize::MAX, |&d| d as usize);
     if let (Some(oc), Some(e)) = (oldc, edit) {
-        let touched = oc
-            .nodes
-            .iter()
-            .position(|n| n.out.pos >= e.start)
-            .unwrap_or(oc.nodes.len());
+        // (positions only grow along a chain)
+        let (mut lo, mut hi) = (0, oc.nodes.len());
+        while lo < hi {
+            let mid = usize::midpoint(lo, hi);
+            if oc.nodes[mid].out.pos >= e.start {
+                hi = mid;
+            } else {
+                lo = mid + 1;
+            }
+        }
+        let touched = lo;
         from = from.min(touched);
     }
     let from = oldc.map_or(0, |oc| from.min(oc.nodes.len().saturating_sub(1)));
     if let Some(oc) = oldc {
-        for n in &oc.nodes[..from] {
-            chain.push_arc(n.clone());
-        }
+        chain = Chain::prefix(oc, from);
     }
     let mut state = chain.input(from);
     let mut scratch = Scratch::default();
@@ -688,9 +896,9 @@ pub fn run_piece(
                 if !oc.input_h(j) && n.out.mode == Mode::H {
                     para_fresh = false;
                 }
-                chain.push_arc(n.clone());
                 j += 1;
             }
+            chain.share(oc, oi, j);
             if j == oc.nodes.len() {
                 break;
             }
@@ -728,6 +936,7 @@ pub fn run_piece(
                 chain.with_group(x.finish())
             }
         };
+        let mut same_material = !fresh;
         if fresh {
             // (the same command run again, defining the same and leaving the
             // same state, changes nothing about how later names resolve)
@@ -743,6 +952,10 @@ pub fn run_piece(
                         .all(|(a, b)| a.key == b.key && a.val == b.val && a.global == b.global)
             });
             if same_as_old {
+                // (and emitting the same, the paragraph's material is the
+                // same: a re-run producing equal results stops there)
+                let o = &oldc.expect("an old chain").nodes[oi];
+                same_material = o.emit[..] == n.emit[..];
                 oi += 1;
             } else {
                 scope_changed |= !n.defs().is_empty() || n.kind.scopes();
@@ -750,8 +963,8 @@ pub fn run_piece(
         }
         let starts_para = state.mode == Mode::V && n.out.mode == Mode::H;
         if starts_para {
-            para_fresh = fresh;
-        } else if fresh {
+            para_fresh = !same_material;
+        } else if !same_material {
             para_fresh = true;
         }
         let end = n.kind == Kind::End;
@@ -762,6 +975,7 @@ pub fn run_piece(
         }
     }
     // (exports: each key defined in the piece, as it reaches the end)
+    chain.nodes.freeze();
     let end = chain.nodes.len();
     let mut exports: Vec<(Key, Val)> = chain
         .defs_of
@@ -770,14 +984,14 @@ pub fn run_piece(
         .collect();
     exports.sort_by(|a, b| a.0.cmp(&b.0));
     let paras = chain
-        .nodes
+        .para_at
         .iter()
-        .filter_map(|n| n.para().cloned())
+        .filter_map(|&i| chain.nodes[i as usize].para().cloned())
         .collect();
     let errors = chain
-        .nodes
+        .err_at
         .iter()
-        .flat_map(|n| n.errors().iter().cloned())
+        .flat_map(|&i| chain.nodes[i as usize].errors().iter().cloned())
         .collect();
     // (the kept nodes before `from` read what they read in the old run:
     // its entries whose first reader is among them; then each read of the
@@ -792,7 +1006,8 @@ pub fn run_piece(
         None => Vec::new(),
     };
     let mut seen: FxSet<usize> = FxSet::default();
-    for (i, n) in chain.nodes.iter().enumerate().skip(from) {
+    for (d, n) in chain.nodes.range(from, end).enumerate() {
+        let i = from + d;
         for r in n.reads.iter() {
             if matches!(r.src, Src::Node(_)) || !seen.insert(Arc::as_ptr(r) as usize) {
                 continue;
@@ -1364,7 +1579,7 @@ impl<'a> Exec<'a> {
         };
         let test = nodes[at].phi().is_some_and(|p| p.test);
         let mut keys: Vec<Key> = Vec::new();
-        for n in &nodes[at + 1..here] {
+        for n in nodes.range(at + 1, here) {
             for d in n.defs() {
                 if !keys.contains(&d.key) {
                     keys.push(d.key.clone());
@@ -1914,8 +2129,8 @@ impl<'a> Exec<'a> {
                 break;
             }
         }
-        let mut hlist: Vec<HItem> = nodes[first..]
-            .iter()
+        let mut hlist: Vec<HItem> = nodes
+            .range(first, nodes.len())
             .flat_map(|n| n.emit.iter().copied())
             .collect();
         hlist.append(&mut self.emit);
