@@ -138,6 +138,16 @@ pub enum Item {
     Penalty(i32),
     Disc(Arc<Disc>),
     Mark(Arc<Vec<Tok>>),
+    /// A math node (tex.web 147): where a formula begins (`after` false)
+    /// or ends, with `\mathsurround` as its width.
+    Math {
+        w: i32,
+        after: bool,
+    },
+    /// An entry of a math list (a noad, a style change, a choice) or what
+    /// the list's gatherer applies to its last noad (`mlist::MItem`): only
+    /// in the items of nodes inside a formula.
+    Noad(Arc<crate::mlist::MItem>),
     // ---- pseudo-items, applied by the gatherer of the list
     /// `\unpenalty` (0), `\unkern` (1), `\unskip` (2): remove the last item
     /// if it is of that kind.
@@ -163,7 +173,7 @@ impl Item {
             Item::Char(f, c) => f.glyph(i32::from(*c)).map_or(0, |g| g.width),
             Item::Lig(l) => l.font.glyph(i32::from(l.c)).map_or(0, |g| g.width),
             Item::Box(b) => b.w,
-            Item::Rule { w, .. } | Item::Kern { w, .. } => *w,
+            Item::Rule { w, .. } | Item::Kern { w, .. } | Item::Math { w, .. } => *w,
             Item::Glue { g, .. } => g.width,
             _ => 0,
         }

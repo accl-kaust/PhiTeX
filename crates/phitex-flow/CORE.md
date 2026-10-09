@@ -13,10 +13,10 @@ tex.web command code, its graph form and its status here.
 |---|---|---|---|---|
 | (i) expandable, input rewriting | 40 | 33 | 5 | 2 |
 | (ii) assignments, scopes | 151 | 146 | 3 | 2 |
-| (iii) material | 73 | 27 | 0 | 46 |
+| (iii) material | 73 | 63 | 0 | 10 |
 | (iv) layout and output | 43 | 23 | 12 | 8 |
 | (v) IO and diagnostics | 18 | 6 | 2 | 10 |
-| all | 325 | 235 | 22 | 68 |
+| all | 325 | 271 | 22 | 32 |
 
 ("done": tex.web's semantics, checked against `tex -ini` by `tests/core.rs`
 (logs of programs that do not typeset) and `tests/dvi.rs` (DVI files and
@@ -61,6 +61,9 @@ is a field of `RState`, the value a node hands its successor.
 | mode, `space_factor`, `prev_depth`, `prev_graf` | `RState.mode`, `RState.space_factor`, `RState.prev_depth`, `RState.prev_graf` |
 | `end_line_char` as the line was read | `RState.eol` (read when a line is begun, as TeX's `input_ln` does) |
 | the input stack, `back_input`, `ins_list` | `RState.pending` (rewritten input; `Tok::DontExpand` is `\noexpand`'s mark) |
+| a math list (`head`…`tail` in math mode), `incompleat_noad` | none: math nodes emit `Item::Noad(MItem)` entries (noads, style changes, choices) and what the list's gatherer applies to its last noad (`Set`: a field filled; `Replace`; `Limits`; `Above`: `\over`'s split); the packaging node after a math group's `Close` gathers them (`mlist::gather`, tex.web's `fin_mlist`) |
+| math mode, `cur_fam`, a subformula's `saved(0)` | `RState.mode = M` (`inner`: an inline formula or subformula; a display is not inner); `\fam` is `Key::IntPar(Fam)`, defined `-1` inside a formula by `\0mathinit`; the field a subformula fills is its group record's `math::Target` |
+| `cur_style`, `cur_size`, `cur_mu`, `cur_f`… | inside `mlist::mlist_to_hlist`, a pure function of the list, the style, `mlist::Params`, the 48 family fonts and their `\fontdimen`s and `\skewchar`s |
 | `\message`, `\immediate\write` output | `Node.log`, gathered in document order into `Output.log`; `print::log` lays it out as TeX's log |
 
 The initial values (`val::initial`) are exactly IniTeX's (tex.web 222-240;
@@ -241,6 +244,65 @@ both TeX and the graph; `tests/flow.rs`'s `doc()` begins with its catcodes,
     while the test is read) is the name `\relax`, not a frozen one; a
     macro's parameter shows as `#n` whatever its parameter character; a
     `^^` reduction is not reduced again.
+
+## Math
+
+Parts 34–36 and §1136–§1206 of tex.web, copied: `mlist.rs` (the noads and
+`mlist_to_hlist`, §680–§767, a pure function) and `graph/math.rs` (the
+commands). Checked by `tests/dvi.rs`: `math1`–`math4` (inline formulas,
+scripts, fractions and generalized fractions, radicals, operators with
+and without limits, `\left`/`\right` with extensible delimiters, accents
+with skews, styles, `\mathchoice`, `\nonscript`, `\mskip`, `\mkern`,
+`\vcenter`, boxes in formulas, `\mathsurround`, line breaks inside and
+after formulas, lines with formulas in their reports, displays with
+`\eqno`/`\leqno`, short skips, the squeeze, an equation number on its
+own line, displays under `\hangindent` and `\parshape` and in a `\vbox`)
+at all five schedules, and `plainmath` (plain.tex's math macros) at one
+thread (eight: the `run_piece` sharing bug, as `plaintext`). DVI and log
+byte for byte against `tex -ini`.
+
+- **A formula is a group.** `$`, a subformula's `{`, `\left` and each
+  `\mathchoice` part open a math group (`GroupKind::Math`, its record a
+  `math::MathKind`). The group's `Close` node (`$`, `}`, `\right`)
+  defines and emits nothing: it reads what TeX reads before the group
+  ends — `\mathsurround`, the 48 family fonts, the spacing and penalty
+  parameters, for a display its width, indent, size, skips, penalties,
+  interline glue and packing parameters (`math::MathEnd`) — and hands it
+  to the packaging node after it, which gathers the list the nodes inside
+  emitted and converts it. The family fonts' `\fontdimen`s are read
+  lazily by the packaging node (global values).
+- **A noad appended before a group opens.** Where TeX appends a noad to
+  the enclosing list and then opens a group for one of its fields (`^{`,
+  `\mathop{`, `{` in math, `\radical…{`), the node emits the noad and
+  hands the group to the next node (`\0mathgroup`), which opens it: a
+  node's items are in the list of the level it ends at. The packaging
+  node emits `MItem::Set(field, list)` (§1186: a lone ord noad gives its
+  nucleus; a lone accent noad replaces an ord noad whose nucleus it was).
+- **`^`, `_`, `\limits`, `\over` read the list** (`sub_sup` looks at the
+  last noad, §1176): the node gathers its math list from the items before
+  it, the one read of material (Conflict 13), and becomes `Kind::Par`.
+- **A display** is three nodes: the `$$` node ends the paragraph so far —
+  its lines are a separate task's at the outer level, and the node breaks
+  them too (the same pure function), for `\predisplaysize` (§1146) and
+  `\prevgraf`; `\0display` opens the group with `\displaywidth` and
+  `\displayindent` from the shape (§1149); `\0mathinit` defines them and
+  `\fam` inside it. After an equation number's group, its packaging node
+  keeps the box in the display's record and closes the display
+  (`\0displayend`). The display's packaging node emits the vertical
+  material (§1199–§1205) and resumes the paragraph (§1200, `\prevgraf`
+  + 3), which a later `\par` breaks with that `\prevgraf`.
+- **Math nodes** (`Item::Math`, `\mathon`/`\mathoff`): widths in `hpack`,
+  movements in the DVI fold, break points in line breaking (§866: no
+  break at glue inside a formula, a break at `\mathoff` before glue, its
+  width zero at a break), `$` in the short display, `\mathsurround` in
+  `show_box`. `\ifmmode` is true in math.
+- Not yet: `\accent` in math (and outside), display alignments
+  (`$$\halign…$$`, with the alignments), `\vadjust` and `\insert` in
+  formulas, `\showlists`/`\showbox` of noads. Approximations: the check
+  for enough symbol and extension font parameters (§1195) counts the
+  parameters the font was loaded with (TeX also counts those `\fontdimen`
+  added to the last loaded font); `off_save` in math (a `$` or `\right`
+  closing the wrong group) inserts a `}` only.
 
 ## Hyphenation
 
@@ -601,19 +663,19 @@ positions after it, and its material is consumed after it.
 |---|---|---|---|
 | `\-` | discretionary | node emitting `Item::Disc` with the font's `\hyphenchar` as its pre-break list (tex.web 1117) | done |
 | `\/` | ital_corr | node emitting the italic correction kern of the current list's last item (`last_item`: the one read of material, Conflict 13) | done |
-| `\above` | above | generalized fraction | not yet |
-| `\abovewithdelims` | above | generalized fraction | not yet |
+| `\above` | above | node emitting `MItem::Above{thickness}` (tex.web 1181): the list's gatherer makes the numerator of the list so far; a second one in a list is "Ambiguous" (the node reads its list) | done |
+| `\abovewithdelims` | above | as `\above`, with the two delimiters scanned (`\delcode`s read) | done |
 | `\accent` | accent | node emitting an accented character | not yet |
-| `\atop` | above | generalized fraction | not yet |
-| `\atopwithdelims` | above | generalized fraction | not yet |
+| `\atop` | above | node emitting `MItem::Above` with thickness 0 | done |
+| `\atopwithdelims` | above | as `\atop`, with the two delimiters | done |
 | `\char` | char_num | `\char n`: the main loop from that character (tex.web 1038) | done |
 | `\cr` | car_ret | alignment row end | not yet |
 | `\crcr` | car_ret | alignment row end | not yet |
-| `\delimiter` | delim_num | math delimiter | not yet |
+| `\delimiter` | delim_num | in math, `\delimiter n`: a math character `n div "1000` (tex.web 1160); outside math, a `$` is missing | done |
 | `\discretionary` | discretionary | three box-like groups (`BoxKind::Disc`): each `}` is a `Close` node, the packaging node keeps the part and opens the next; the last emits `Item::Disc` and the replacement (tex.web 1117–1121) | done |
-| `\displaylimits` | limit_switch | limits flag on the previous noad | not yet |
-| `\displaystyle` | math_style | math style item | not yet |
-| `\eqno` | eq_no | equation number | not yet |
+| `\displaylimits` | limit_switch | node emitting `MItem::Limits(normal)`, applied to the list's last noad by its gatherer; the node reads its list to complain if that is not an operator (tex.web 1159) | done |
+| `\displaystyle` | math_style | node emitting `MItem::Style(0)` | done |
+| `\eqno` | eq_no | in a display, opens the equation number's formula (a math group, tex.web 1142); its packaging node keeps the box in the display's group record and closes the display (`\0displayend`) | done |
 | `\halign` | halign | alignment: nodes for the template and rows; the alignment is a node whose operands are the rows' material | not yet |
 | `\hfil` | hskip | node emitting glue (tex.web 1060) | done |
 | `\hfill` | hskip | node emitting glue (tex.web 1060) | done |
@@ -624,47 +686,47 @@ positions after it, and its material is consumed after it.
 | `\ignorespaces` | ignore_spaces | node reading (with expansion) past spaces; the next token is the next node's command | done |
 | `\indent` | start_par | `new_graf`: node emitting `\parskip` and `Item::BuildPage` (vertical) and the indent box (horizontal), `\everypar` rewrites the input | done |
 | `\kern` | kern | node emitting an explicit kern | done |
-| `\left` | left_right | math delimiters (a group) | not yet |
-| `\leqno` | eq_no | equation number | not yet |
-| `\limits` | limit_switch | limits flag on the previous noad | not yet |
-| `\mathaccent` | math_accent | math accent | not yet |
-| `\mathbin` | math_comp | math noad | not yet |
-| `\mathchar` | math_char_num | math character | not yet |
-| `\mathchoice` | math_choice | math choice (four groups) | not yet |
-| `\mathclose` | math_comp | math noad | not yet |
-| `\mathinner` | math_comp | math noad | not yet |
-| `\mathop` | math_comp | math noad | not yet |
-| `\mathopen` | math_comp | math noad | not yet |
-| `\mathord` | math_comp | math noad | not yet |
-| `\mathpunct` | math_comp | math noad | not yet |
-| `\mathrel` | math_comp | math noad | not yet |
-| `\mkern` | mkern | node emitting a math kern | not yet |
-| `\mskip` | mskip | node emitting math glue | not yet |
+| `\left` | left_right | node reading the delimiter, opening a math group and emitting the left noad into it (tex.web 1191) | done |
+| `\leqno` | eq_no | as `\eqno`, on the left | done |
+| `\limits` | limit_switch | node emitting `MItem::Limits(limits)` (as `\displaylimits`) | done |
+| `\mathaccent` | math_accent | node emitting an accent noad whose nucleus `scan_math` gives (a character, or a subformula's group opened by the next node) | done |
+| `\mathbin` | math_comp | node emitting a bin noad, nucleus from `scan_math` (tex.web 1158) | done |
+| `\mathchar` | math_char_num | node emitting the noad of a 15-bit math code (`set_math_char`, tex.web 1155: class, family, `\fam` for a variable one) | done |
+| `\mathchoice` | math_choice | four math groups in turn (`\0choicenext` between them, as a discretionary's parts); the last packaging node emits `MItem::Choice` | done |
+| `\mathclose` | math_comp | node emitting a close noad, nucleus from `scan_math` | done |
+| `\mathinner` | math_comp | node emitting an inner noad, nucleus from `scan_math` | done |
+| `\mathop` | math_comp | node emitting an op noad, nucleus from `scan_math` | done |
+| `\mathopen` | math_comp | node emitting an open noad, nucleus from `scan_math` | done |
+| `\mathord` | math_comp | node emitting an ord noad, nucleus from `scan_math` | done |
+| `\mathpunct` | math_comp | node emitting a punct noad, nucleus from `scan_math` | done |
+| `\mathrel` | math_comp | node emitting a rel noad, nucleus from `scan_math` | done |
+| `\mkern` | mkern | node emitting a kern of subtype `mu_glue` (made explicit by `mlist_to_hlist`) | done |
+| `\mskip` | mskip | node emitting glue of subtype `mu_glue` | done |
 | `\noalign` | no_align | alignment | not yet |
 | `\noboundary` | no_boundary | node affecting ligature boundaries | not yet |
 | `\noindent` | start_par | `new_graf` without the indent box | done |
-| `\nolimits` | limit_switch | limits flag on the previous noad | not yet |
-| `\nonscript` | non_script | math glue cancel | not yet |
+| `\nolimits` | limit_switch | node emitting `MItem::Limits(nolimits)` (as `\displaylimits`) | done |
+| `\nonscript` | non_script | node emitting zero glue of subtype `cond_math_glue` (tex.web 1171) | done |
 | `\omit` | omit | alignment | not yet |
-| `\over` | above | generalized fraction | not yet |
-| `\overline` | math_comp | math noad | not yet |
-| `\overwithdelims` | above | generalized fraction | not yet |
+| `\over` | above | node emitting `MItem::Above` with the default thickness (`default_code`, made `\fontdimen8` of family 3 by `mlist_to_hlist`) | done |
+| `\overline` | math_comp | node emitting an over noad, nucleus from `scan_math` | done |
+| `\overwithdelims` | above | as `\over`, with the two delimiters | done |
 | `\par` | par_end | `Kind::Par` node: the paragraph gathered from the items its nodes emitted (`Para`: list + `LineParams`); outer level: lines a separate task, inside a box broken here (tex.web 1096) | done |
 | `\penalty` | break_penalty | node emitting a penalty; in vertical mode also `Item::BuildPage` (tex.web 1103) | done |
-| `\radical` | radical | math radical | not yet |
+| `\radical` | radical | node reading the 24-bit delimiter, emitting a radical noad whose nucleus `scan_math` gives | done |
 | `\relax` | relax | node with no result | done |
-| `\right` | left_right | math delimiters (a group) | not yet |
-| `\scriptscriptstyle` | math_style | math style item | not yet |
-| `\scriptstyle` | math_style | math style item | not yet |
+| `\right` | left_right | `Close` node of the `\left` group: reads the delimiter inside the group; its packaging node gathers the list with the right noad and emits an inner noad | done |
+| `\scriptscriptstyle` | math_style | node emitting `MItem::Style(6)` | done |
+| `\scriptstyle` | math_style | node emitting `MItem::Style(4)` | done |
 | `\setlanguage` | extension | whatsit: material | not yet |
 | `\span` | tab_mark | alignment cell end | not yet |
-| `\textstyle` | math_style | math style item | not yet |
-| `\underline` | math_comp | math noad | not yet |
+| `\textstyle` | math_style | node emitting `MItem::Style(2)` | done |
+| `\underline` | math_comp | node emitting an under noad, nucleus from `scan_math` | done |
 | `\unkern` | remove_item | node emitting `Item::Remove(1)`, applied by the list's gatherer (tex.web 1105) | done |
 | `\unpenalty` | remove_item | node emitting `Item::Remove(0)`, applied by the list's gatherer | done |
 | `\unskip` | remove_item | node emitting `Item::Remove(2)`, applied by the list's gatherer | done |
 | `\valign` | valign | alignment, vertical | not yet |
-| `\vcenter` | vcenter | math box | not yet |
+| `\vcenter` | vcenter | a box group (`BoxKind::Vcenter`); its packaging node `vpack`s the list (with the box report) and emits a vcenter noad (tex.web 1167–1168) | done |
 | `\vfil` | vskip | node emitting glue (vertical mode) | done |
 | `\vfill` | vskip | node emitting glue (vertical mode) | done |
 | `\vfilneg` | vskip | node emitting glue (vertical mode) | done |

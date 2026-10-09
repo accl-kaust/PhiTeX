@@ -32,6 +32,8 @@ pub struct Ctx {
     pub idents: Vec<(Arc<str>, Arc<str>)>,
     pub depth: i32,
     pub breadth: i32,
+    /// `\newlinechar`: printing that character ends the line (tex.web 59).
+    pub newline: i32,
 }
 
 impl Ctx {
@@ -40,6 +42,15 @@ impl Ctx {
             out.push(c);
         }
         out.push_str(s);
+    }
+    /// tex.web 59 `print` of a character: the new-line character ends the
+    /// line.
+    fn chr(&self, out: &mut String, c: u8) {
+        if i32::from(c) == self.newline {
+            out.push(LN);
+        } else {
+            out.push(char::from(c));
+        }
     }
     fn font_ident(&self, out: &mut String, key: &str) {
         let name = self.idents.iter().find(|(i, _)| &**i == key).map_or("FONT?", |(_, n)| &**n);
@@ -63,10 +74,11 @@ pub fn short_display(out: &mut String, list: &[Item], font: &mut Arc<str>, cx: &
                     out.push(' ');
                     font.clone_from(&f.key);
                 }
-                out.push(char::from(*c));
+                cx.chr(out, *c);
             }
             Item::Box(_) | Item::Mark(_) => out.push_str("[]"),
             Item::Rule { .. } => out.push('|'),
+            Item::Math { .. } => out.push('$'),
             Item::Glue { zero, .. } => {
                 if !zero {
                     out.push(' ');
@@ -79,7 +91,7 @@ pub fn short_display(out: &mut String, list: &[Item], font: &mut Arc<str>, cx: &
                         out.push(' ');
                         font.clone_from(&l.font.key);
                     }
-                    out.push(char::from(c));
+                    cx.chr(out, c);
                 }
             }
             Item::Disc(d) => {
@@ -217,7 +229,7 @@ impl Shower<'_> {
             Item::Char(f, c) => {
                 self.cx.font_ident(self.out, &f.key);
                 self.out.push(' ');
-                self.out.push(char::from(*c));
+                self.cx.chr(self.out, *c);
             }
             Item::Box(b) => self.boxed(b),
             Item::Rule { w, h, d } => {
@@ -255,13 +267,13 @@ impl Shower<'_> {
             Item::Lig(l) => {
                 self.cx.font_ident(self.out, &l.font.key);
                 self.out.push(' ');
-                self.out.push(char::from(l.c));
+                self.cx.chr(self.out, l.c);
                 self.out.push_str(" (ligature ");
                 if l.left {
                     self.out.push('|');
                 }
                 for &c in &l.orig {
-                    self.out.push(char::from(c));
+                    self.cx.chr(self.out, c);
                 }
                 if l.right {
                     self.out.push('|');
@@ -275,6 +287,14 @@ impl Shower<'_> {
                 }
                 self.sub('.', &d.pre);
                 self.sub('|', &d.post);
+            }
+            Item::Math { w, after } => {
+                // (§192)
+                self.cx.esc(self.out, if *after { "mathoff" } else { "mathon" });
+                if *w != 0 {
+                    self.out.push_str(", surrounded ");
+                    print::scaled(self.out, *w);
+                }
             }
             Item::Mark(t) => {
                 self.cx.esc(self.out, "mark");

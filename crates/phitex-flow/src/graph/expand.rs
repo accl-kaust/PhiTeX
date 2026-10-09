@@ -452,7 +452,8 @@ impl Exec<'_> {
             IfKind::Vmode => !self.in_write && self.st.mode == Mode::V,
             IfKind::Hmode => !self.in_write && self.st.mode == Mode::H,
             IfKind::Inner => !self.in_write && self.st.inner,
-            IfKind::Mmode | IfKind::False => false,
+            IfKind::Mmode => !self.in_write && self.st.mode == Mode::M,
+            IfKind::False => false,
             IfKind::Void | IfKind::Hbox | IfKind::Vbox => {
                 let n = self.scan_eight_bit_int();
                 match self.get(&Key::Box(n)) {

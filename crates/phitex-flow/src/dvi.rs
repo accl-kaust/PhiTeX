@@ -384,7 +384,7 @@ impl Writer {
                     self.cur_h += *w;
                 }
                 Item::Glue { g, .. } => self.cur_h += glue.set(this, g),
-                Item::Kern { w, .. } => self.cur_h += *w,
+                Item::Kern { w, .. } | Item::Math { w, .. } => self.cur_h += *w,
                 _ => {}
             }
         }

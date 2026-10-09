@@ -144,7 +144,7 @@ macro_rules! documents {
     };
 }
 
-documents!(para, skips, hbox, setbox, vbox, pages, fonts, shape, leave, show, ship, disc);
+documents!(para, skips, hbox, setbox, vbox, pages, fonts, shape, leave, show, ship, disc, math1, math2, math3, math4);
 
 /// plain.tex (all but `\input hyphen`), then text set with its macros and
 /// the default output routine (`\output={}`), at 1 thread.
@@ -152,6 +152,23 @@ documents!(para, skips, hbox, setbox, vbox, pages, fonts, shape, leave, show, sh
 fn plaintext() {
     let src = std::fs::read_to_string(dir().join("plaintext.tex")).unwrap();
     check_src("plaintext", &src, &RUNS[..1]);
+}
+
+/// plain.tex, then text using plain's math macros (`\sqrt`, `\int`,
+/// `\sum`, `\left`/`\right`, `\root`, `\choose`, `\buildrel`,
+/// displays with `\eqno`), at 1 thread.
+#[test]
+fn plainmath() {
+    let src = std::fs::read_to_string(dir().join("plainmath.tex")).unwrap();
+    check_src("plainmath", &src, &RUNS[..1]);
+}
+
+/// FAILS sometimes, as `plaintext_any_schedule` (`run_piece`).
+#[test]
+#[ignore = "run_piece shares a later reader of a changed name in place"]
+fn plainmath_any_schedule() {
+    let src = std::fs::read_to_string(dir().join("plainmath.tex")).unwrap();
+    check_src("plainmath", &src, &RUNS[1..]);
 }
 
 /// FAILS sometimes (`run_piece`, not material): plain.tex at 8 threads —

@@ -56,6 +56,16 @@ impl LigKern {
     pub const KERN: u8 = 128;
 }
 
+/// §546: an extensible recipe: top, middle, bottom (0: none) and the
+/// repeated piece.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct Exten {
+    pub top: u8,
+    pub mid: u8,
+    pub bot: u8,
+    pub rep: u8,
+}
+
 /// A loaded font.
 pub struct Font {
     pub name: String,
@@ -70,6 +80,7 @@ pub struct Font {
     glyphs: Vec<Option<Glyph>>,
     pub lig_kerns: Vec<LigKern>,
     pub kerns: Vec<i32>,
+    pub extens: Vec<Exten>,
     /// `params[k]` is `\fontdimen k` as loaded (index 0 unused; at least
     /// seven parameters).
     pub params: Vec<i32>,
@@ -159,6 +170,7 @@ impl Font {
             glyphs: Vec::new(),
             lig_kerns: Vec::new(),
             kerns: Vec::new(),
+            extens: Vec::new(),
             params: vec![0; 8],
             bchar: 256,
             false_bchar: 256,
@@ -309,8 +321,10 @@ impl Font {
             bch_label = 256 * i32::from(last.op) + i32::from(last.remainder);
         }
         let kerns = scaler.table(&mut r, nk)?;
+        let mut extens = Vec::with_capacity(ne as usize);
         for _ in 0..ne {
             let [a, b, c, d] = r.four()?;
+            extens.push(Exten { top: a, mid: b, bot: c, rep: d });
             for piece in [a, b, c] {
                 if piece != 0 && !exists(i32::from(piece)) {
                     return Err(BadTfm);
@@ -367,6 +381,7 @@ impl Font {
             glyphs,
             lig_kerns,
             kerns,
+            extens,
             params,
             bchar,
             false_bchar,

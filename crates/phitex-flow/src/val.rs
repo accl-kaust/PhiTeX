@@ -7,7 +7,7 @@
 use std::fmt;
 use std::sync::Arc;
 
-pub use crate::prim::{Code, Conv, DimenPar, GluePar, IfKind, IntPar, Mat, Prim, Reg, Shorthand, TokPar};
+pub use crate::prim::{Code, Conv, DimenPar, GluePar, IfKind, IntPar, Mat, MathP, Prim, Reg, Shorthand, TokPar};
 use crate::tfm::Font;
 
 /// A token.

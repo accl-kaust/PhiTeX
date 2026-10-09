@@ -43,6 +43,7 @@ mod assign;
 mod expand;
 mod fonts;
 mod material;
+mod math;
 mod scan;
 
 /// A piece's identity, stable across edits.
@@ -73,6 +74,9 @@ enum TState {
 enum Mode {
     V,
     H,
+    /// Math (`RState::inner`: an inline formula or a subformula; else a
+    /// display).
+    M,
 }
 
 /// What opened a group (only to report mismatches: the scoping itself is
@@ -85,6 +89,9 @@ enum GroupKind {
     SemiSimple,
     /// A box's or a discretionary's braces (`Group::boxg`).
     Box,
+    /// A formula, a subformula, `\left`…`\right`, a `\mathchoice` part
+    /// (`Group::boxg`, `math::MathKind`).
+    Math,
 }
 
 /// An open conditional: the node whose step opened it, which ends may end
@@ -346,7 +353,8 @@ impl Chain {
             }
             let n = &self.nodes[d as usize];
             let Some(def) = n.defs.iter().rev().find(|x| x.key == *key) else { continue };
-            let closed = self.def_group(n, def).is_some_and(|g| self.close_of.get(&g).is_some_and(|&c| (c as usize) < i));
+            let closed =
+                self.def_group(n, def).is_some_and(|g| self.close_of.get(&g).is_some_and(|&c| (c as usize) < i));
             if def.global || !closed {
                 return Some((d, def.val.clone()));
             }
@@ -1223,6 +1231,9 @@ impl<'a> Exec<'a> {
             std::mem::take(&mut self.st.long),
             std::mem::take(&mut self.st.outer),
         );
+        if self.st.mode == Mode::M && self.math_command(&t, &m) {
+            return;
+        }
         match m {
             Meaning::Prim(p) if p.conditional() => self.conditional(p, &t),
             Meaning::Prim(Prim::Global | Prim::Long | Prim::Outer) => {
@@ -1231,10 +1242,11 @@ impl<'a> Exec<'a> {
             }
             _ if assign::prefixable(&m) => self.prefixed(&t, &m, global, long, outer),
             Meaning::Prim(Prim::Mat(x)) => self.mat(x, &t),
+            Meaning::Prim(Prim::Math(x)) => self.math_prim(x, &t),
             Meaning::Prim(p) => self.prim(p),
             Meaning::Char(cat, c) => self.char_tok(cat, c, &t),
             Meaning::CharGiven(c) => self.char_cmd(c, &t),
-            Meaning::MathCharGiven(_) => self.err("Missing $ inserted (math is not supported yet)".into()),
+            Meaning::MathCharGiven(_) => self.insert_dollar_sign(&t),
             Meaning::Undefined => self.err(format!("Undefined control sequence {t}")),
             Meaning::Macro(_)
             | Meaning::CountRef(_)
@@ -1279,6 +1291,7 @@ impl<'a> Exec<'a> {
             2 => match self.st.groups.last().map(|g| g.kind) {
                 Some(GroupKind::Simple) => self.close_group(),
                 Some(GroupKind::Box) => self.close_box(t),
+                Some(GroupKind::Math) => self.math_right_brace(),
                 Some(GroupKind::SemiSimple) => self.err("Extra }, or forgotten \\endgroup".into()),
                 None => self.err("Too many }'s".into()),
             },
@@ -1288,6 +1301,8 @@ impl<'a> Exec<'a> {
                 }
             }
             11 | 12 => self.char_cmd(u32::from(c), t),
+            3 => self.math_shift(t),
+            7 | 8 => self.sub_sup_cmd(cat == 7, t),
             _ => self.err(format!("Character {c} of category {cat} is not supported yet")),
         }
     }
@@ -1306,7 +1321,7 @@ impl<'a> Exec<'a> {
             Prim::BeginGroup => self.open_group(GroupKind::SemiSimple),
             Prim::EndGroup => match self.st.groups.last().map(|g| g.kind) {
                 Some(GroupKind::SemiSimple) => self.close_group(),
-                Some(GroupKind::Simple | GroupKind::Box) => {
+                Some(GroupKind::Simple | GroupKind::Box | GroupKind::Math) => {
                     // (tex.web 1064: the missing `}` goes in first)
                     self.err("Missing } inserted".into());
                     let t = self.cmd.clone();
