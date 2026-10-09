@@ -12,12 +12,17 @@
 //! `tests/dvi/NAME.dvi` and `NAME.log` (the log's lines after `**NAME.tex`
 //! up to `Output written`); where a `tex` binary is found they are checked
 //! against a fresh run; `PHITEX_FLOW_BLESS=1` records them anew.
+//!
+//! The `etex` flavour (`check_etex`) runs a document through `etex -ini
+//! -etex` and the graph in e-TeX's extended mode (`Options::etex`):
+//! `TeXXeT`, `\lastlinefit`, the penalties arrays, `\middle`.
 
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
 
+use phitex_flow::build::MAIN_MEMORY;
 use phitex_flow::{Build, Font, Options, Order, Reads};
 
 fn font() -> Arc<Font> {
@@ -37,16 +42,19 @@ fn log_body(log: &str) -> Option<String> {
     Some(lines[start..end].join("\n"))
 }
 
-/// TeX's DVI file and log of a document, if there is a `tex`.
-fn tex(name: &str, src: &str) -> Option<(Vec<u8>, String)> {
+/// TeX's DVI file and log of a document, if there is a `tex` (`etex -ini
+/// -etex` for e-TeX's extended mode).
+fn tex(name: &str, src: &str, etex: bool) -> Option<(Vec<u8>, String)> {
     // (a directory per call: two tests run the same document at once)
     static CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     let call = CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let tmp = std::env::temp_dir().join(format!("phitex-flow-dvi-{name}-{}-{call}", std::process::id()));
     std::fs::create_dir_all(&tmp).ok()?;
     std::fs::write(tmp.join(format!("{name}.tex")), src).ok()?;
-    let st = Command::new("tex")
-        .args(["-ini", "-interaction=batchmode", &format!("{name}.tex")])
+    let (bin, args): (&str, &[&str]) = if etex { ("etex", &["-ini", "-etex"]) } else { ("tex", &["-ini"]) };
+    let st = Command::new(bin)
+        .args(args)
+        .args(["-interaction=batchmode", &format!("{name}.tex")])
         .env("SOURCE_DATE_EPOCH", "0")
         .env("FORCE_SOURCE_DATE", "1")
         .current_dir(&tmp)
@@ -56,8 +64,35 @@ fn tex(name: &str, src: &str) -> Option<(Vec<u8>, String)> {
     let dvi = std::fs::read(tmp.join(format!("{name}.dvi"))).unwrap_or_default();
     let _ = std::fs::remove_dir_all(&tmp);
     let log = log?;
-    assert!(st.status.success(), "tex failed on {name}:\n{log}");
+    // (`\showbox`, `\showlists` end in an "OK" error: no other error)
+    let only_ok = log.lines().filter(|l| l.starts_with("! ")).all(|l| l == "! OK.");
+    assert!(st.status.success() || only_ok, "tex failed on {name}:\n{log}");
     Some((dvi, log_body(&log)?))
+}
+
+/// TeX's error messages for a document, in order (the "! " lines).
+fn tex_errors(src: &str) -> Option<Vec<String>> {
+    let tmp = std::env::temp_dir().join(format!("phitex-flow-errs-{}", std::process::id()));
+    std::fs::create_dir_all(&tmp).ok()?;
+    std::fs::write(tmp.join("errs.tex"), src).ok()?;
+    Command::new("tex").args(["-ini", "-interaction=batchmode", "errs.tex"]).current_dir(&tmp).output().ok()?;
+    let log = std::fs::read_to_string(tmp.join("errs.log")).ok();
+    let _ = std::fs::remove_dir_all(&tmp);
+    Some(
+        log?.lines()
+            .filter_map(|l| l.strip_prefix("! "))
+            .map(|l| l.strip_suffix('.').unwrap_or(l).to_string())
+            .collect(),
+    )
+}
+
+/// A document whose line `%%% hyphen.tex %%%` stands for TeX Live's
+/// `hyphen.tex` (its patterns and exceptions, read by the `\patterns`
+/// and `\hyphenation` nodes).
+fn with_hyphen(name: &str) -> String {
+    let src = std::fs::read_to_string(dir().join(format!("{name}.tex"))).unwrap();
+    let h = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/hyph/hyphen.tex")).unwrap();
+    src.replace("%%% hyphen.tex %%%\n", &h)
 }
 
 /// The graph's DVI file and log of a document.
@@ -86,11 +121,20 @@ fn first_difference(a: &[u8], b: &[u8]) -> usize {
 
 /// The schedules each document runs with.
 const RUNS: [Options; 5] = [
-    Options { threads: 1, reads: Reads::Suspend, order: Order::Priority, dump: false },
-    Options { threads: 8, reads: Reads::Suspend, order: Order::Priority, dump: false },
-    Options { threads: 8, reads: Reads::Speculate, order: Order::Priority, dump: false },
-    Options { threads: 8, reads: Reads::Suspend, order: Order::Random(1), dump: false },
-    Options { threads: 8, reads: Reads::Speculate, order: Order::Random(7), dump: false },
+    Options { threads: 1, reads: Reads::Suspend, order: Order::Priority, dump: false, etex: false, main_memory: MAIN_MEMORY },
+    Options { threads: 8, reads: Reads::Suspend, order: Order::Priority, dump: false, etex: false, main_memory: MAIN_MEMORY },
+    Options { threads: 8, reads: Reads::Speculate, order: Order::Priority, dump: false, etex: false, main_memory: MAIN_MEMORY },
+    Options { threads: 8, reads: Reads::Suspend, order: Order::Random(1), dump: false, etex: false, main_memory: MAIN_MEMORY },
+    Options { threads: 8, reads: Reads::Speculate, order: Order::Random(7), dump: false, etex: false, main_memory: MAIN_MEMORY },
+];
+
+/// The same, in e-TeX's extended mode.
+const RUNS_ETEX: [Options; 5] = [
+    Options { threads: 1, reads: Reads::Suspend, order: Order::Priority, dump: false, etex: true, main_memory: MAIN_MEMORY },
+    Options { threads: 8, reads: Reads::Suspend, order: Order::Priority, dump: false, etex: true, main_memory: MAIN_MEMORY },
+    Options { threads: 8, reads: Reads::Speculate, order: Order::Priority, dump: false, etex: true, main_memory: MAIN_MEMORY },
+    Options { threads: 8, reads: Reads::Suspend, order: Order::Random(1), dump: false, etex: true, main_memory: MAIN_MEMORY },
+    Options { threads: 8, reads: Reads::Speculate, order: Order::Random(7), dump: false, etex: true, main_memory: MAIN_MEMORY },
 ];
 
 fn check(name: &str) {
@@ -98,9 +142,15 @@ fn check(name: &str) {
     check_src(name, &src, &RUNS);
 }
 
+/// A document of the `etex` flavour.
+fn check_etex(name: &str) {
+    let src = std::fs::read_to_string(dir().join(format!("{name}.tex"))).unwrap();
+    check_src(name, &src, &RUNS_ETEX);
+}
+
 fn check_src(name: &str, src: &str, runs: &[Options]) {
     let (dvi_path, log_path) = (dir().join(format!("{name}.dvi")), dir().join(format!("{name}.log")));
-    let t = tex(name, src);
+    let t = tex(name, src, runs.iter().any(|o| o.etex));
     if std::env::var_os("PHITEX_FLOW_BLESS").is_some() {
         let (d, l) = t.as_ref().expect("PHITEX_FLOW_BLESS needs a tex binary");
         std::fs::write(&dvi_path, d).unwrap();
@@ -148,6 +198,62 @@ macro_rules! documents {
 }
 
 documents!(para, skips, hbox, setbox, vbox, pages, fonts, shape, leave, show, ship, disc, math1, math2, math3, math4);
+
+macro_rules! etex_documents {
+    ($($name:ident),* $(,)?) => {
+        $(#[test] fn $name() { check_etex(stringify!($name)); })*
+    };
+}
+
+etex_documents!(texxet, llfit, pens, middle);
+/// Paragraphs hyphenated with hyphen.tex's patterns (loaded by the
+/// `\patterns` node), in every schedule: breaks at hyphens, ligatures and
+/// kerns around them, the minima, `\uchyph`, languages, `\setlanguage`,
+/// explicit discretionaries, `\hyphenchar`, the third pass, a display.
+#[test]
+fn hyph1() {
+    let src = with_hyphen("hyph1");
+    check_src("hyph1", &src, &RUNS);
+}
+
+/// More hyphenation: narrow lines, many fonts, `\showbox` of hyphenated
+/// lines (the discretionaries' ligatures shown), paragraphs in boxes.
+#[test]
+fn hyph2() {
+    let src = with_hyphen("hyph2");
+    check_src("hyph2", &src, &RUNS);
+}
+
+/// `\showlists` and `\showbox` in math (the noads displayed, tex.web
+/// 690–698), with their "OK" errors and contexts.
+#[test]
+fn showmath() {
+    check("showmath");
+}
+
+/// The errors of a formula without math fonts, and of mismatched math
+/// groups, are TeX's, in TeX's order (§1194: the fonts before the second
+/// `$`; `off_save` in math, tex.web 1064).
+#[test]
+fn math_errors_in_order() {
+    let src = "\\catcode`\\{=1 \\catcode`\\}=2 \\catcode`\\$=3 \\catcode`\\^=7\n               \\font\\tenrm=cmr10 \\tenrm \\hsize=100pt\n               A $$x$ $ b $$y\\eqno z$ $ c ${a\\right)$ d $\\left(a$ e\n               $\\left(a\\endgroup$ $\\begingroup a$\\endgroup$ f\n\n\\end\n";
+    let o = Build::new(font()).update(src, Options::default());
+    let got: Vec<String> = o.errors.iter().map(|e| e.split_once(": ").map_or(e.as_str(), |x| x.1).to_string()).collect();
+    let want = match tex_errors(src) {
+        Some(w) => {
+            let rec = w.join("\n") + "\n";
+            if std::env::var_os("PHITEX_FLOW_BLESS").is_some() {
+                std::fs::write(dir().join("matherrs.txt"), &rec).unwrap();
+            }
+            w
+        }
+        None => std::fs::read_to_string(dir().join("matherrs.txt")).unwrap().lines().map(str::to_string).collect(),
+    };
+    let rec: Vec<String> =
+        std::fs::read_to_string(dir().join("matherrs.txt")).unwrap().lines().map(str::to_string).collect();
+    assert_eq!(want, rec, "TeX's errors are not the recorded ones");
+    assert_eq!(got, want);
+}
 
 /// plain.tex (all but `\input hyphen`), then text set with its macros and
 /// the default output routine (`\output={}`), at 1 thread.
@@ -397,6 +503,11 @@ fn edits_shift_the_pages() {
 // and split.
 documents!(outroutine, outmarks, outinserts);
 
+// (an output routine's definitions reach the nodes after the place it
+// fired, in the same piece: `\pageno`, a macro, a local `\count1` gone;
+// `\outputpenalty` at every fire of the default output)
+documents!(outsame, outpen);
+
 /// plain.tex's own `\output` (`\plainoutput`: the headline with marks, the
 /// page body with footnotes, the footline with `\folio`,
 /// `\advancepageno`), in every schedule.
@@ -434,5 +545,37 @@ fn edits_under_an_output_routine() {
             assert!(e.dvi == cold.dvi, "{ins:?} at {threads} threads: another DVI");
             eprintln!("{threads} threads: edit {:?}, {} routines run, {} kept", e.stats.wall, e.stats.routines, e.stats.routines_kept);
         }
+    }
+}
+
+/// A piece that loops for ever on the prediction that `\count22` is 0 (an
+/// earlier piece makes it -1): its run is abandoned when the definition
+/// is installed, or given up and run again waiting for the earlier piece;
+/// TeX's result at every schedule, in many random orders.
+#[test]
+fn specloop() {
+    check("specloop");
+    let src = std::fs::read_to_string(dir().join("specloop.tex")).unwrap();
+    let want = std::fs::read(dir().join("specloop.dvi")).unwrap();
+    for seed in 0..24u64 {
+        for (threads, reads) in [(1, Reads::Speculate), (8, Reads::Speculate), (1, Reads::Suspend), (8, Reads::Suspend)] {
+            let o = Options { threads, reads, order: Order::Random(seed), dump: false, etex: false, main_memory: MAIN_MEMORY };
+            let (dvi, _, errors) = graph("specloop", &src, o);
+            assert!(errors.is_empty(), "specloop ({o:?}): {errors:?}");
+            assert!(masked(&dvi) == masked(&want), "specloop ({o:?}): the DVI differs");
+        }
+    }
+}
+
+/// A document that really loops ends as TeX ends it: "TeX capacity
+/// exceeded" (here with a small main memory).
+#[test]
+fn capacity_exceeded() {
+    let src = "\\catcode`\\{=1 \\catcode`\\}=2 \\catcode`\\#=6\n\\def\\a{x\\a}\\setbox1\\hbox{\\a}\n\\end\n";
+    for o in RUNS {
+        let o = Options { main_memory: 5_000, ..o };
+        let (_, log, errors) = graph("capacity", src, o);
+        let all = format!("{log}{errors:?}");
+        assert!(all.contains("TeX capacity exceeded, sorry [main memory size=5000]"), "({o:?}): {all}");
     }
 }

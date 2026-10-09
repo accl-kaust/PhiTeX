@@ -68,6 +68,7 @@ pub(super) fn is_internal(m: &Meaning) -> bool {
                 | Prim::PageDimen(_)
                 | Prim::BoxDimen(_)
                 | Prim::Parshape
+                | Prim::PenShape(_)
                 | Prim::FontDimen
                 | Prim::LastItem(_)
                 | Prim::Font
@@ -206,10 +207,13 @@ impl Exec<'_> {
                     }
                 }
                 Prim::PrevGraf => IVal::Int(if self.in_write { 0 } else { self.st.prev_graf }),
-                // (the page builder's state: not a read of the reader yet,
-                // CORE.md; an empty page's values)
-                Prim::PageInt(k) => IVal::Int(self.int(&Key::PageInt(k))),
-                Prim::PageDimen(k) => IVal::Dimen(if k == 0 { MAX_DIMEN } else { 0 }),
+                // (e-TeX's `\interactionmode`: a key)
+                Prim::PageInt(2) => IVal::Int(self.int(&Key::Interaction)),
+                // (the page builder's state: a read of `Key::Page`, defined
+                // by an output routine's run, CORE.md; outside one an empty
+                // page's values)
+                Prim::PageInt(k) => IVal::Int(self.int(&Key::Page(super::output::DEAD_CYCLES + k))),
+                Prim::PageDimen(k) => IVal::Dimen(self.int(&Key::Page(k))),
                 Prim::BoxDimen(c) => IVal::Dimen(self.box_dimen(c)),
                 Prim::Mat(crate::val::Mat::FontInt(k)) => {
                     let key = self.font_int_key(k);
@@ -223,6 +227,8 @@ impl Exec<'_> {
                     Some(k) => self.int(&k),
                     None => 0,
                 }),
+                Prim::LastItem(k) if k >= crate::prim::ETEX_ITEM => self.etex_item(k),
+                Prim::PenShape(k) => IVal::Int(self.penalties_item(k)),
                 Prim::LastItem(k) => {
                     // (tex.web 424: the current list's last item, the one read
                     // of material, CORE.md; `\inputlineno` and `\badness`
@@ -388,8 +394,16 @@ impl Exec<'_> {
         }
     }
 
+    /// A register's number: up to 255, or 32767 in e-TeX's extended mode
+    /// (etex.web §1495, `scan_register_num`; the mode is read only for a
+    /// number past 255).
     pub(super) fn scan_eight_bit_int(&mut self) -> u16 {
-        self.limited(255, "register code") as u16
+        let v = self.scan_int();
+        if (0..=255).contains(&v) || ((256..=32767).contains(&v) && self.etex_mode()) {
+            return v as u16;
+        }
+        self.err(format!("Bad register code ({v})"));
+        0
     }
 
     pub(super) fn scan_char_num(&mut self) -> i32 {
@@ -810,7 +824,8 @@ impl Exec<'_> {
     fn internal_level_hint(m: &Meaning) -> Lv {
         match m {
             Meaning::Prim(Prim::GluePar(q)) if q.is_mu() => Lv::Mu,
-            Meaning::Prim(Prim::Register(Reg::Muskip)) | Meaning::MuskipRef(_) => Lv::Mu,
+            // (and e-TeX's `\gluetomu`, `\muexpr`)
+            Meaning::Prim(Prim::Register(Reg::Muskip) | Prim::LastItem(24 | 28)) | Meaning::MuskipRef(_) => Lv::Mu,
             _ => Lv::Glue,
         }
     }

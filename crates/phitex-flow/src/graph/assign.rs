@@ -47,8 +47,12 @@ pub(super) fn prefixable(m: &Meaning) -> bool {
             | Prim::BoxDimen(_)
             | Prim::Interaction(_)
             | Prim::DefFamily(_)
-            | Prim::Mat(Mat::SetBox | Mat::FontInt(_)) => true,
-            Prim::Unimpl(_) => matches!(p.name(), "read" | "hyphenation" | "patterns"),
+            | Prim::Protected
+            | Prim::ReadLine
+            | Prim::PenShape(_)
+            | Prim::Mat(Mat::SetBox | Mat::FontInt(_))
+            | Prim::HyphData(_) => true,
+            Prim::Unimpl(_) => matches!(p.name(), "read"),
             _ => false,
         },
         Meaning::CountRef(_)
@@ -70,13 +74,15 @@ enum Target {
 }
 
 impl Exec<'_> {
-    /// `\global`, `\long`, `\outer`: the flags go to the next node, which
-    /// must be an assignment (tex.web 1211).
-    pub(super) fn prefix(&mut self, p: Prim, global: bool, long: bool, outer: bool) {
-        let (mut g, mut l, mut o) = (global, long, outer);
+    /// `\global`, `\long`, `\outer`, e-TeX's `\protected`: the flags go to
+    /// the next node, which must be an assignment (tex.web 1211).
+    #[allow(clippy::fn_params_excessive_bools, reason = "TeX's prefixes")]
+    pub(super) fn prefix(&mut self, p: Prim, global: bool, long: bool, outer: bool, protected: bool) {
+        let (mut g, mut l, mut o, mut pr) = (global, long, outer, protected);
         match p {
             Prim::Global => g = true,
             Prim::Long => l = true,
+            Prim::Protected => pr = true,
             _ => o = true,
         }
         let Some((t, m)) = self.nonblank_nonrelax() else {
@@ -90,6 +96,7 @@ impl Exec<'_> {
         self.st.global = g;
         self.st.long = l;
         self.st.outer = o;
+        self.st.protected = pr;
         self.back(t);
     }
 
@@ -99,9 +106,10 @@ impl Exec<'_> {
     }
 
     /// An assignment, with its prefixes (tex.web 1211-1214).
-    pub(super) fn prefixed(&mut self, t: &Tok, m: &Meaning, global: bool, long: bool, outer: bool) {
+    #[allow(clippy::fn_params_excessive_bools, reason = "TeX's prefixes")]
+    pub(super) fn prefixed(&mut self, t: &Tok, m: &Meaning, global: bool, long: bool, outer: bool, protected: bool) {
         let is_def = matches!(m, Meaning::Prim(Prim::Def | Prim::Gdef | Prim::Edef | Prim::Xdef));
-        if (long || outer) && !is_def {
+        if (long || outer || protected) && !is_def {
             self.err(format!("You can't use `\\long' or `\\outer' with `{t}'"));
         }
         let gd = self.int_par(IntPar::Globaldefs);
@@ -115,7 +123,7 @@ impl Exec<'_> {
             Meaning::Prim(p) => match *p {
                 Prim::Def | Prim::Gdef | Prim::Edef | Prim::Xdef => {
                     let g = global || (matches!(p, Prim::Gdef | Prim::Xdef) && gd >= 0);
-                    self.def(g, matches!(p, Prim::Edef | Prim::Xdef), long, outer);
+                    self.def(g, matches!(p, Prim::Edef | Prim::Xdef), long, outer, protected);
                 }
                 Prim::Let | Prim::Futurelet => self.let_(*p == Prim::Futurelet, global),
                 Prim::Shorthand(s) => self.shorthand(s, global),
@@ -206,15 +214,13 @@ impl Exec<'_> {
                 }
                 Prim::Mat(Mat::SetBox) => self.setbox(global),
                 Prim::Mat(Mat::FontInt(k)) => self.assign_font_int(k),
-                Prim::Interaction(_) => {} // (batch mode or not: only the terminal differs)
-                Prim::PageInt(k) => {
-                    // (tex.web 1246: `\deadcycles`, `\insertpenalties`, set
-                    // without the save stack; the page builder's copy is the
-                    // one an output routine hands back)
-                    self.optional_equals();
-                    let v = self.scan_int();
-                    self.define(Key::PageInt(k), Val::Int(v), true);
-                }
+                // (the mode is a key; `new_interaction` begins a line)
+                Prim::Interaction(k) => self.new_interaction(i32::from(k)),
+                Prim::PageInt(2) => self.interaction_mode_assign(),
+                Prim::PageInt(_) | Prim::PageDimen(_) => self.alter_page(*p),
+                Prim::ReadLine => self.read_line(),
+                Prim::PenShape(k) => self.penalties_assign(k, global),
+                Prim::HyphData(pat) => self.hyph_data(pat),
                 _ => self.err(format!("\\{} is not supported yet", p.name())),
             },
             Meaning::CountRef(_) | Meaning::DimenRef(_) | Meaning::SkipRef(_) | Meaning::MuskipRef(_) => {
@@ -248,7 +254,7 @@ impl Exec<'_> {
 
     /// `\def`, `\gdef`, `\edef`, `\xdef` (tex.web 1218, 473-479).
     #[allow(clippy::fn_params_excessive_bools, reason = "TeX's prefixes")]
-    fn def(&mut self, global: bool, expand: bool, long: bool, outer: bool) {
+    fn def(&mut self, global: bool, expand: bool, long: bool, outer: bool, protected: bool) {
         let Some(key) = self.r_token() else { return };
         let mut params = Vec::new();
         let mut n = 0u8;
@@ -261,7 +267,7 @@ impl Exec<'_> {
                     self.err("Missing { inserted".into());
                     self.define(
                         key,
-                        Val::Meaning(Meaning::Macro(Arc::new(Macro { params, body: Vec::new(), long, outer }))),
+                        Val::Meaning(Meaning::Macro(Arc::new(Macro { params, body: Vec::new(), long, outer, protected }))),
                         global,
                     );
                     return;
@@ -293,7 +299,11 @@ impl Exec<'_> {
         if hash_brace {
             body.push(Tok::Char(1, '{'));
         }
-        self.define(key, Val::Meaning(Meaning::Macro(Arc::new(Macro { params, body, long, outer }))), global);
+        self.define(
+            key,
+            Val::Meaning(Meaning::Macro(Arc::new(Macro { params, body, long, outer, protected }))),
+            global,
+        );
     }
 
     /// A definition's body, unexpanded (tex.web 477, 479).

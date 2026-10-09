@@ -67,7 +67,7 @@ pub struct Interline {
 
 /// What `ship_out` reads (tex.web 638–641, 617): `\count0`–`\count9`,
 /// `\hoffset`, `\voffset`, `\mag` and the date (for the file's comment).
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ShipParams {
     pub counts: [i32; 10],
     pub hoffset: i32,
@@ -153,11 +153,26 @@ pub enum Item {
     Mark(Arc<Vec<Tok>>),
     /// `\insert n{…}` (tex.web 140, 1100).
     Ins(Arc<Ins>),
+    /// e-TeX's `\marks n` for a class `n` other than 0 (class 0 is
+    /// `Mark`).
+    Marks(u16, Arc<Vec<Tok>>),
     /// A math node (tex.web 147): where a formula begins (`after` false)
-    /// or ends, with `\mathsurround` as its width.
+    /// or ends, with `\mathsurround` as its width; e-TeX's TeXXeT nodes
+    /// too (etex.web §1433), `lr` being the subtype of the beginning one
+    /// (0 a formula's edges, 2 `M`, 6 `\beginL`, 10 `\beginR`): the
+    /// subtype is `lr + after`.
     Math {
         w: i32,
         after: bool,
+        lr: u8,
+    },
+    /// A language whatsit (tex.web 1341): `\setlanguage`, or a change of
+    /// `\language` in a paragraph (1376); the line breaker's hyphenation
+    /// takes language and minima from it.
+    Lang {
+        lang: u8,
+        lhm: u8,
+        rhm: u8,
     },
     /// An entry of a math list (a noad, a style change, a choice) or what
     /// the list's gatherer applies to its last noad (`mlist::MItem`): only
@@ -202,7 +217,17 @@ impl Item {
     /// §148: `precedes_break` — a box, rule, insertion, mark, adjustment,
     /// ligature, discretionary or whatsit (types below `math_node`).
     pub fn precedes_break(&self) -> bool {
-        matches!(self, Item::Box(_) | Item::Rule { .. } | Item::Mark(_) | Item::Ins(_) | Item::Lig(_) | Item::Disc(_))
+        matches!(
+            self,
+            Item::Box(_)
+                | Item::Rule { .. }
+                | Item::Mark(_)
+                | Item::Marks(..)
+                | Item::Ins(_)
+                | Item::Lig(_)
+                | Item::Disc(_)
+                | Item::Lang { .. }
+        )
     }
 
     /// §148: `non_discardable`.

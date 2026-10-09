@@ -1,0 +1,18 @@
+\catcode`\{=1 \catcode`\}=2 \catcode`\#=6
+\font\tenrm=cmr10 \tenrm
+\hsize=200pt \vsize=400pt \parindent=20pt \baselineskip=12pt \topskip=10pt
+\tolerance=1000 \linepenalty=10 \maxdepth=4pt \parfillskip=0pt plus 1fil
+\hbadness=10000
+\TeXXeTstate=1
+Left text \beginR right to left words here\endR\ and back to the left again.
+
+\beginR A whole paragraph set from right to left, with several words that
+break across lines because it is long enough, and more words to fill
+it up nicely, so that its lines get their begin and end nodes.\endR
+
+\hbox{abc \beginR def \vrule width 2pt height 5pt \hbox{xyz} ghi\endR\ jkl}
+\hbox to 150pt{\beginR a\hfil b \beginL cd ef\endL\ g\endR}
+\hbox{\beginR outer \beginL inner \beginR deep\endR\ inner\endL\ outer\endR}
+\noindent\beginR\vbox{\hbox{one}\hrule width 30pt height 1pt\moveright 5pt\hbox{two}}\ x\endR
+\par
+\end

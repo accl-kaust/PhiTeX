@@ -64,6 +64,10 @@ pub(super) struct BoxGroup {
     pub(super) inner: bool,
     pub(super) space_factor: i32,
     pub(super) prev_depth: i32,
+    /// The enclosing paragraph's language state.
+    pub(super) hyph_lang: [u8; 4],
+    /// The enclosing vertical list's `\prevgraf` (a new list's is 0).
+    pub(super) prev_graf: i32,
 }
 
 /// A box group just closed, for the packaging node: the group, and
@@ -194,6 +198,27 @@ pub(super) fn fonts_in(list: &[Item], out: &mut Vec<Arc<str>>) {
             Item::Disc(d) => {
                 fonts_in(&d.pre, out);
                 fonts_in(&d.post, out);
+                continue;
+            }
+            Item::Noad(m) => {
+                let field = |f: &crate::mlist::Field, out: &mut Vec<Arc<str>>| match f {
+                    crate::mlist::Field::Box(b) => fonts_in(std::slice::from_ref(&Item::Box(b.clone())), out),
+                    crate::mlist::Field::Mlist(l) => fonts_in(l, out),
+                    _ => {}
+                };
+                match &**m {
+                    crate::mlist::MItem::Noad(n) => {
+                        field(&n.nucleus, out);
+                        field(&n.sup, out);
+                        field(&n.sub, out);
+                    }
+                    crate::mlist::MItem::Choice(c) => {
+                        for l in &**c {
+                            fonts_in(l, out);
+                        }
+                    }
+                    _ => {}
+                }
                 continue;
             }
             _ => continue,
@@ -418,19 +443,22 @@ impl Exec<'_> {
             Mat::Internal(5) => self.display_open(),
             Mat::Internal(6) => self.display_end(),
             Mat::Internal(7) => self.math_group_open(),
+            Mat::Internal(9) => self.middle_next(),
+            Mat::Internal(10) => self.output_begin(),
+            Mat::Internal(11) => self.output_page_state(),
             Mat::Internal(_) => self.choice_next(),
         }
     }
 
     /// vmode + a horizontal command: a paragraph begins first (tex.web
     /// 1090).
-    fn back_new_graf(&mut self, t: &Tok) {
+    pub(super) fn back_new_graf(&mut self, t: &Tok) {
         self.back(t.clone());
         self.new_graf(true);
     }
 
     /// tex.web 1095: `head_for_vmode`.
-    fn head_for_vmode(&mut self, t: &Tok, hrule: bool) {
+    pub(super) fn head_for_vmode(&mut self, t: &Tok, hrule: bool) {
         if self.st.inner {
             if hrule {
                 self.err("You can't use `\\hrule' here except with leaders".into());
@@ -458,6 +486,7 @@ impl Exec<'_> {
         self.st.mode = Mode::H;
         self.st.inner = false;
         self.st.space_factor = 1000;
+        self.begin_paragraph_language();
         if indented {
             let w = self.dimen_par(DimenPar::Parindent);
             self.emit.push(Item::Box(Arc::new(BoxNode { w, ..BoxNode::default() })));
@@ -495,6 +524,10 @@ impl Exec<'_> {
         if matches!(self.get(&Key::Parshape), Val::Parshape(s) if !s.is_empty()) {
             self.define(Key::Parshape, Val::Parshape(Arc::new(Vec::new())), false);
         }
+        // (etex.web §1070: and `\interlinepenalties`)
+        if !self.penalties(0).is_empty() {
+            self.define(Key::PenaltiesArray(0), Val::Penalties(Arc::from([])), false);
+        }
     }
 
     /// Whether `normal_paragraph` would define anything.
@@ -503,6 +536,7 @@ impl Exec<'_> {
             || self.dimen_par(DimenPar::Hangindent) != 0
             || self.int_par(IntPar::Hangafter) != 1
             || matches!(self.get(&Key::Parshape), Val::Parshape(s) if !s.is_empty())
+            || !self.penalties(0).is_empty()
     }
 
     /// `\par` (tex.web 1094).
@@ -538,6 +572,11 @@ impl Exec<'_> {
             clubpenalty: self.int_par(IntPar::Clubpenalty),
             widowpenalty: self.int_par(IntPar::Widowpenalty),
             brokenpenalty: self.int_par(IntPar::Brokenpenalty),
+            interlinepenalties: self.penalties(0),
+            clubpenalties: self.penalties(1),
+            widowpenalties: self.penalties(2),
+            last_line_fit: self.int_par(IntPar::Lastlinefit),
+            texxet: self.int_par(IntPar::TeXXeTstate) > 0,
             leftskip: self.glue_par(GluePar::Leftskip),
             rightskip: self.glue_par(GluePar::Rightskip),
             hangindent: self.dimen_par(DimenPar::Hangindent),
@@ -551,6 +590,7 @@ impl Exec<'_> {
             },
             inter: self.interline(),
             show: self.show_ctx(hlist),
+            hyph: Some(self.hyph_params(hlist)),
         }
     }
 
@@ -755,6 +795,7 @@ impl Exec<'_> {
         let font = self.font();
         let c0 = c0.min(255) as i32;
         self.adjust_space_factor(c0);
+        self.fix_language();
         let mut m = Main {
             bchar: font.bchar,
             false_bchar: font.false_bchar,
@@ -1164,6 +1205,8 @@ impl Exec<'_> {
             inner: self.st.inner,
             space_factor: self.st.space_factor,
             prev_depth: self.st.prev_depth,
+            hyph_lang: self.st.hyph_lang,
+            prev_graf: self.st.prev_graf,
         };
         self.scan_left_brace();
         self.open_box(g, Mode::H);
@@ -1177,6 +1220,8 @@ impl Exec<'_> {
         g.inner = self.st.inner;
         g.space_factor = self.st.space_factor;
         g.prev_depth = self.st.prev_depth;
+        g.hyph_lang = self.st.hyph_lang;
+        g.prev_graf = self.st.prev_graf;
         self.scan_left_brace();
         self.open_box(g, Mode::H);
     }
@@ -1185,11 +1230,13 @@ impl Exec<'_> {
 
     /// Opens a box group: a scope, and a new list (tex.web 1083: `push_nest`).
     pub(super) fn open_box(&mut self, g: BoxGroup, mode: Mode) {
-        self.st.groups.push(Group { kind: GroupKind::Box, after: Vec::new(), boxg: Some(Arc::new(g)) });
+        let at = self.chain.nodes.len() as u32;
+        self.st.groups.push(Group { kind: GroupKind::Box, after: Vec::new(), boxg: Some(Arc::new(g)), at });
         self.kind = Kind::Open;
         self.st.level += 1;
         self.st.mode = mode;
         self.st.inner = true;
+        self.st.prev_graf = 0;
         if mode == Mode::V {
             self.st.prev_depth = IGNORE_DEPTH;
         } else {
@@ -1215,6 +1262,8 @@ impl Exec<'_> {
             inner: self.st.inner,
             space_factor: self.st.space_factor,
             prev_depth: self.st.prev_depth,
+            hyph_lang: self.st.hyph_lang,
+            prev_graf: self.st.prev_graf,
         };
         let shaped = self.paragraph_shaped();
         self.open_box(g, Mode::V);
@@ -1294,6 +1343,8 @@ impl Exec<'_> {
                     inner: self.st.inner,
                     space_factor: self.st.space_factor,
                     prev_depth: self.st.prev_depth,
+            hyph_lang: self.st.hyph_lang,
+            prev_graf: self.st.prev_graf,
                 };
                 self.open_box(g, if vertical { Mode::V } else { Mode::H });
                 let every = self.toks_par(if vertical { TokPar::Everyvbox } else { TokPar::Everyhbox });
@@ -1313,8 +1364,14 @@ impl Exec<'_> {
     /// piece (pieces are cut at depth 0: no group spans them); else living
     /// as long as its group.
     pub(super) fn change_box(&mut self, n: u16, val: Val) {
-        let key = Key::Box(n);
-        // (this node's own earlier definition of the register, if any)
+        self.change_direct(Key::Box(n), val);
+    }
+
+    /// A value tex.web assigns directly (a box register's, the
+    /// page builder's quantities, tex.web 1245–1246): a definition at the
+    /// level of the one it replaces ([`Exec::change_box`]).
+    pub(super) fn change_direct(&mut self, key: Key, val: Val) {
+        // (this node's own earlier definition, if any)
         if let Some(i) = self.defs.iter().rposition(|d| d.key == key) {
             let (global, level) = (self.defs[i].global, self.defs[i].level);
             self.defs.push(super::Def { key, val, global, level });
@@ -1393,6 +1450,8 @@ impl Exec<'_> {
         self.st.inner = g.inner;
         self.st.space_factor = g.space_factor;
         self.st.prev_depth = g.prev_depth;
+        self.st.hyph_lang = g.hyph_lang;
+        self.st.prev_graf = g.prev_graf;
         self.st.level -= 1;
         self.st.boxing = Some(Arc::new(BoxEnd { g, boxmaxdepth, math: None, ins }));
         self.rewrite(after);
@@ -1456,6 +1515,11 @@ impl Exec<'_> {
                     overfull_rule: self.dimen_par(DimenPar::Overfullrule),
                 };
                 let mut adj = Vec::new();
+                let mut list = list;
+                if self.int_par(IntPar::TeXXeTstate) > 0 {
+                    // (etex.web: TeXXeT's checks of `hpack`)
+                    crate::pack::lr_fix(&mut list);
+                }
                 let packed = hpack(list, be.g.spec, &params, if be.g.adjusted { Some(&mut adj) } else { None });
                 if let Some(r) = packed.report {
                     let cx = self.show_ctx(std::slice::from_ref(&Item::Box(Arc::new(packed.b.clone()))));
@@ -1556,8 +1620,8 @@ impl Exec<'_> {
             }
             BoxContext::Set(n, global) => self.define(Key::Box(n), Val::Box(Arc::new(b)), global),
             BoxContext::Ship => {
-                // (§640: `dead_cycles:=0`)
-                self.define(Key::PageInt(0), Val::Int(0), true);
+                // (tex.web 638: `dead_cycles:=0`)
+                self.define(Key::Page(super::output::DEAD_CYCLES), Val::Int(0), true);
                 let ship = self.ship_params();
                 let mark = page_mark(&ship);
                 self.log_raw(&mark);
@@ -1599,6 +1663,7 @@ impl Exec<'_> {
         let c = self.page_call();
         self.vemit.push(Item::End(c));
         self.st.pending.clear();
+        self.st.texts = super::Stack::new();
         self.st.pos = self.text.len();
     }
 }

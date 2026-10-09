@@ -93,16 +93,34 @@ pub enum Key {
     /// `\textfont` (size 0), `\scriptfont` (1), `\scriptscriptfont` (2) of a
     /// family.
     FamFont(u8, u8),
+    /// The interaction mode (`\batchmode` 0 … `\errorstopmode` 3; e-TeX's
+    /// `\interactionmode`), global.
+    Interaction,
+    /// Whether the format is e-TeX's extended mode (1) or TeX's (0): a
+    /// value of the format no document defines (`Options::etex`).
+    ETeXMode,
+    /// A language's hyphenation patterns (`\patterns`, global).
+    Patterns(u8),
+    /// A language's hyphenation exceptions (`\hyphenation`, global).
+    Exceptions(u8),
+    /// e-TeX's `\interlinepenalties` (0), `\clubpenalties` (1),
+    /// `\widowpenalties` (2), `\displaywidowpenalties` (3):
+    /// `Val::Penalties`.
+    PenaltiesArray(u8),
+    /// The page builder's quantities a document reads and assigns
+    /// (`graph::output::PAGE_GOAL` …): `\pagegoal` … `\pagedepth`
+    /// (0–7, `page_so_far`), `\deadcycles` (8), `\insertpenalties` (9).
+    /// Assigned directly (at the level of the definition
+    /// replaced); an output routine's run defines them at its start.
+    Page(u8),
+    /// `\topmark` (0), `\firstmark` (1), `\botmark` (2),
+    /// `\splitfirstmark` (3), `\splitbotmark` (4) of a mark class (e-TeX's
+    /// `\marks`; TeX's are class 0): global, defined where the page
+    /// builder fires (an output routine's run).
+    Mark(u8, u16),
     /// A file's text, by its name (`\input` reads it: a changed file runs
     /// the `\input` node again).
     File(Arc<str>),
-    /// `\topmark` (0), `\firstmark` (1), `\botmark` (2): the page
-    /// builder's marks, defined where it fires.
-    CurMark(u8),
-    /// `\deadcycles` (0), `\insertpenalties` (1): the page builder's
-    /// counts, as the fold hands them to an output routine (assignments
-    /// are global, tex.web 1246).
-    PageInt(u8),
 }
 
 impl Key {
@@ -174,9 +192,7 @@ impl Key {
             Key::SkewChar(_) => w(22, 0),
             Key::FontIdent(_) => w(23, 0),
             Key::FontLoaded(_) => w(24, 0),
-            Key::File(_) => w(26, 0),
-            Key::CurMark(k) => w(27, u64::from(*k)),
-            Key::PageInt(k) => w(28, u64::from(*k)),
+            Key::File(_) => w(33, 0),
             Key::Active(x) => w(1, c(x)),
             Key::Cat(x) => w(2, c(x)),
             Key::Lccode(x) => w(3, c(x)),
@@ -197,6 +213,13 @@ impl Key {
             Key::Parshape => w(18, 0),
             Key::Font => w(19, 0),
             Key::FamFont(s, f) => w(25, (u64::from(*s) << 8) | u64::from(*f)),
+            Key::Interaction => w(26, 0),
+            Key::ETeXMode => w(27, 0),
+            Key::Patterns(l) => w(28, u64::from(*l)),
+            Key::Exceptions(l) => w(29, u64::from(*l)),
+            Key::PenaltiesArray(k) => w(30, u64::from(*k)),
+            Key::Page(k) => w(31, u64::from(*k)),
+            Key::Mark(k, c) => w(32, (u64::from(*k) << 16) | u64::from(*c)),
         }
     }
 }
@@ -230,9 +253,36 @@ impl fmt::Display for Key {
             Key::FontIdent(x) => write!(f, "font_id_text ({x})"),
             Key::FontLoaded(x) => write!(f, "font loaded ({x})"),
             Key::FamFont(s, x) => write!(f, "\\{}font{x}", ["text", "script", "scriptscript"][usize::from(*s).min(2)]),
+            Key::Interaction => write!(f, "\\interactionmode"),
+            Key::ETeXMode => write!(f, "e-TeX mode"),
+            Key::Patterns(l) => write!(f, "\\patterns (language {l})"),
+            Key::Exceptions(l) => write!(f, "\\hyphenation (language {l})"),
+            Key::PenaltiesArray(k) => write!(
+                f,
+                "\\{}penalties",
+                ["interline", "club", "widow", "displaywidow"][usize::from(*k).min(3)]
+            ),
+            Key::Page(k) => write!(
+                f,
+                "\\{}",
+                [
+                    "pagegoal",
+                    "pagetotal",
+                    "pagestretch",
+                    "pagefilstretch",
+                    "pagefillstretch",
+                    "pagefilllstretch",
+                    "pageshrink",
+                    "pagedepth",
+                    "deadcycles",
+                    "insertpenalties"
+                ][usize::from(*k).min(9)]
+            ),
+            Key::Mark(k, c) => {
+                let n = ["topmark", "firstmark", "botmark", "splitfirstmark", "splitbotmark"][usize::from(*k).min(4)];
+                if *c == 0 { write!(f, "\\{n}") } else { write!(f, "\\{n}s{c}") }
+            }
             Key::File(x) => write!(f, "file {x}"),
-            Key::CurMark(k) => write!(f, "\\{}mark", ["top", "first", "bot"][usize::from(*k).min(2)]),
-            Key::PageInt(k) => write!(f, "\\{}", if *k == 0 { "deadcycles" } else { "insertpenalties" }),
         }
     }
 }
@@ -244,6 +294,9 @@ pub struct Macro {
     pub body: Vec<Tok>,
     pub long: bool,
     pub outer: bool,
+    /// e-TeX's `\protected`: not expanded where `\edef` and `\write`
+    /// expand.
+    pub protected: bool,
 }
 
 /// What a control sequence or active character means.
@@ -292,12 +345,19 @@ pub enum Val {
     Toks(Arc<Vec<Tok>>),
     /// `\parshape`: (indent, length) per line.
     Parshape(Arc<Vec<(i32, i32)>>),
+    /// A penalties array (e-TeX's `\interlinepenalties`…): its values; none
+    /// is TeX's null.
+    Penalties(Arc<[i32]>),
     /// A void box register.
     Void,
     /// A box register's box.
     Box(Arc<crate::item::BoxNode>),
     /// A name (`Key::FontIdent`).
     Name(Arc<str>),
+    /// A language's patterns (`Key::Patterns`).
+    Patterns(crate::hyph::Patterns),
+    /// A language's exceptions (`Key::Exceptions`).
+    Exceptions(crate::hyph::Exceptions),
     /// A file's text (`Key::File`); `None`: there is no such file.
     Text(Option<Arc<str>>),
 }
@@ -320,11 +380,14 @@ impl fmt::Display for Val {
                 write!(f, "}}")
             }
             Val::Parshape(p) => write!(f, "parshape {}", p.len()),
+            Val::Penalties(p) => write!(f, "penalties {}", p.len()),
             Val::Void => write!(f, "void"),
             Val::Box(b) => write!(f, "{}box({}+{})x{}", if b.vertical { "v" } else { "h" }, b.h, b.d, b.w),
             Val::Name(n) => write!(f, "{n}"),
             Val::Text(None) => write!(f, "no file"),
             Val::Text(Some(t)) => write!(f, "text ({} bytes)", t.len()),
+            Val::Patterns(p) => write!(f, "{} patterns", p.len()),
+            Val::Exceptions(x) => write!(f, "{} exceptions", x.len()),
             Val::Meaning(Meaning::Font(x)) => write!(f, "select font {}", x.name),
             Val::Meaning(Meaning::Undefined) => write!(f, "undefined"),
             Val::Meaning(Meaning::Prim(p)) => write!(f, "primitive \\{}", p.name()),
@@ -358,11 +421,18 @@ impl fmt::Display for Val {
 /// \year, \month, \day, \time as `SOURCE_DATE_EPOCH=0` gives them: the
 /// DVI file's comment says 1970.01.01:0000). The font given to `Build` is
 /// a file `\font` can load, not the initial font: that is `\nullfont`.
-pub fn initial(key: &Key, _font: &Arc<Font>) -> Val {
+/// With `etex` (e-TeX's extended mode, etex.web §1337), e-TeX's
+/// primitives are named too.
+pub fn initial(key: &Key, _font: &Arc<Font>, etex: bool) -> Val {
     let c32 = |c: &char| u32::from(*c) as i32;
     match key {
         Key::Cs(n) if &**n == "nullfont" => Val::Meaning(Meaning::Font(crate::tfm::null_font())),
-        Key::Cs(n) => Val::Meaning(Prim::by_name(n).or_else(|| Prim::internal(n)).map_or(Meaning::Undefined, Meaning::Prim)),
+        Key::Cs(n) => Val::Meaning(
+            Prim::by_name(n)
+                .or_else(|| if etex { Prim::by_name_etex(n) } else { None })
+                .or_else(|| Prim::internal(n))
+                .map_or(Meaning::Undefined, Meaning::Prim),
+        ),
         Key::Active(_) => Val::Meaning(Meaning::Undefined),
         Key::Cat(c) => Val::Cat(initial_cat(*c)),
         Key::Lccode(c) => Val::Int(match c {
@@ -383,15 +453,14 @@ pub fn initial(key: &Key, _font: &Arc<Font>) -> Val {
         }),
         Key::Delcode(c) => Val::Int(if *c == '.' { 0 } else { -1 }),
         Key::IntPar(p) => Val::Int(p.initial()),
-        Key::TokPar(_) | Key::Toks(_) | Key::CurMark(_) => Val::Toks(Arc::new(Vec::new())),
+        Key::TokPar(_) | Key::Toks(_) | Key::Mark(..) => Val::Toks(Arc::new(Vec::new())),
         // (`\fontdimen`: the null font's, tex.web 552; a loaded font's are
         // defined by its `\font`)
         Key::DimenPar(_)
         | Key::Count(_)
         | Key::Dimen(_)
         | Key::FontDimen(..)
-        | Key::FontLoaded(_)
-        | Key::PageInt(_) => Val::Int(0),
+        | Key::FontLoaded(_) => Val::Int(0),
         Key::GluePar(_) | Key::Skip(_) | Key::Muskip(_) => Val::Glue(Arc::new(Glue::default())),
         Key::Box(_) => Val::Void,
         Key::Parshape => Val::Parshape(Arc::new(Vec::new())),
@@ -399,6 +468,16 @@ pub fn initial(key: &Key, _font: &Arc<Font>) -> Val {
         Key::HyphenChar(_) => Val::Int(i32::from(b'-')),
         Key::SkewChar(_) => Val::Int(-1),
         Key::FontIdent(_) => Val::Name(Arc::from("nullfont")),
+        // (IniTeX's `error_stop_mode`; TeX run with `-interaction` starts
+        // in that mode instead)
+        Key::Interaction => Val::Int(3),
+        Key::ETeXMode => Val::Int(i32::from(etex)),
+        Key::Patterns(_) => Val::Patterns(crate::hyph::Patterns::new()),
+        Key::Exceptions(_) => Val::Exceptions(crate::hyph::Exceptions::new()),
+        Key::PenaltiesArray(_) => Val::Penalties(Arc::from([])),
+        // (an empty page's, read outside an output routine: tex.web 421's
+        // `max_dimen` for `\pagegoal`, else 0)
+        Key::Page(k) => Val::Int(if *k == 0 { 0x3FFF_FFFF } else { 0 }),
         // (a file's text is the build's, `Build::set_file`: the names
         // index answers it)
         Key::File(_) => Val::Text(None),

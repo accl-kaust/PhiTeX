@@ -24,7 +24,7 @@ static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 fn usage() -> ExitCode {
     eprintln!(
         "usage: phitex-flow FILE.tex [-j N] [--reads suspend|speculate] [--order priority|random:SEED] \
-         [--tfm PATH] [-o OUT.dvi] [--dump] [--edit OLD=>NEW] [--repeat N] [--check] [--log]"
+         [--tfm PATH] [-o OUT.dvi] [--dump] [--edit OLD=>NEW] [--repeat N] [--check] [--log] [--main-memory WORDS]"
     );
     ExitCode::from(2)
 }
@@ -126,6 +126,10 @@ fn main() -> ExitCode {
                 None => return usage(),
             },
             "--log" => log = true,
+            "--main-memory" => match val().and_then(|v| v.parse().ok()) {
+                Some(n) => opts.main_memory = n,
+                None => return usage(),
+            },
             "--edit" => match val() {
                 Some(v) if v.contains("=>") => {
                     let (a, b) = v.split_once("=>").expect("=>");

@@ -20,6 +20,7 @@ use crate::arith::{AWFUL_BAD, INF_BAD, badness};
 use crate::item::{BoxNode, Ins, Item, PageCall, Para, ShipParams};
 use crate::linebreak::Line;
 use crate::pack::{Params, Spec, vpack};
+use crate::graph::output::{self, DEAD_CYCLES, Marks, OutputReads};
 use crate::val::{DimenPar, Glue, IntPar, Key, Tok, TokPar, Val};
 
 /// What the fold reads and makes happen where the page builder is called
@@ -30,7 +31,18 @@ pub trait FoldEnv {
     fn read(&mut self, key: &Key) -> Val;
     /// A fire (tex.web 1012): the fold defines `defs` here, then — with
     /// `routine` — the output routine runs; returns what it left.
-    fn fire(&mut self, defs: Vec<(Key, Val)>, routine: Option<&Arc<Vec<Tok>>>) -> Fired;
+    fn fire(&mut self, defs: Vec<(Key, Val)>, routine: Option<Routine>) -> Fired;
+}
+
+/// An output routine to run where the page builder fires (tex.web 1025):
+/// what `output::output_entry` makes its entry state from.
+pub struct Routine {
+    /// `\output`'s tokens, braces included.
+    pub toks: Arc<Vec<Tok>>,
+    /// The page fired (`\box255`).
+    pub page: Page,
+    /// What the fold read and computed at the fire.
+    pub reads: OutputReads,
 }
 
 /// What a fire gave back (tex.web 1026).
@@ -54,9 +66,9 @@ pub struct NoEnv;
 
 impl FoldEnv for NoEnv {
     fn read(&mut self, key: &Key) -> Val {
-        crate::val::initial(key, &crate::tfm::null_font())
+        crate::val::initial(key, &crate::tfm::null_font(), true)
     }
-    fn fire(&mut self, _defs: Vec<(Key, Val)>, _routine: Option<&Arc<Vec<Tok>>>) -> Fired {
+    fn fire(&mut self, _defs: Vec<(Key, Val)>, _routine: Option<Routine>) -> Fired {
         Fired::default()
     }
 }
@@ -420,8 +432,9 @@ pub struct Scan {
     /// The first mark pushed takes this as its first page (a fold resumed
     /// inside a call: the call's pages before the resumption are kept).
     first_from: Option<u32>,
-    /// `\topmark`, `\firstmark`, `\botmark` (tex.web 382).
-    cur_marks: [Option<Arc<Vec<Tok>>>; 3],
+    /// Each mark class's `\topmark`, `\firstmark`, `\botmark` (tex.web
+    /// 382, etex.web's classes), by class.
+    cur_marks: Vec<(u16, Marks)>,
     /// Whether a mark was ever met (its values are then defined at each
     /// fire).
     marked: bool,
@@ -891,11 +904,18 @@ impl Scan {
     /// contributions; then the output routine fires (`env`), or the default
     /// output ships the box.
     fn fire_up(&mut self, env: &mut dyn FoldEnv) {
-        // (§1012: the bottom mark of the last page is the top mark)
-        if let Some(b) = self.cur_marks[2].clone() {
-            self.cur_marks[0] = Some(b);
-            self.cur_marks[1] = None;
-        }
+        // (§1012–1013: the marks, the break's penalty, the page so far as
+        // the routine reads it, §991 having made its depth 0)
+        let page_so_far = [
+            self.page_goal,
+            self.total,
+            self.stretch[0],
+            self.stretch[1],
+            self.stretch[2],
+            self.stretch[3],
+            self.shrink,
+            0,
+        ];
         let at = self.best.min(self.page.len());
         let mut rest: Vec<Item> = self.page.drain(at..).collect();
         let rest_org: Vec<(Org, i32)> = self.page_org.drain(at..).collect();
@@ -983,20 +1003,8 @@ impl Scan {
                         self.insert_penalties += 1;
                     }
                 }
-                Item::Mark(t) => {
-                    // (§1014)
-                    if self.cur_marks[1].is_none() {
-                        self.cur_marks[1] = Some(t.clone());
-                    }
-                    self.cur_marks[2] = Some(t.clone());
-                    kept.push(Item::Mark(t));
-                }
                 other => kept.push(other),
             }
-        }
-        if self.cur_marks[0].is_some() && self.cur_marks[1].is_none() {
-            let [top, first, _] = &mut self.cur_marks;
-            first.clone_from(top);
         }
         // (where the fold can start again: the first contribution left, if
         // everything left was fed since the last call and nothing fed
@@ -1018,25 +1026,29 @@ impl Scan {
         } else {
             self.cur_call.clone()
         };
-        let b = vpack(kept, Spec::Exactly(self.best_size), self.page_max_depth, &Params::QUIET).b;
+        let b = Arc::new(vpack(kept, Spec::Exactly(self.best_size), self.page_max_depth, &Params::QUIET).b);
+        // (§1012–1014, each class)
+        let had_marks = !self.cur_marks.is_empty();
+        self.cur_marks = output::fire_marks(&self.cur_marks, &b);
         // (§991: a new current page)
         self.page_contents = EMPTY;
         self.depth = 0;
         self.page_max_depth = 0;
         self.ins.clear();
-        // (the fold's definitions at the fire)
-        let mut defs: Vec<(Key, Val)> = Vec::new();
-        if fancy {
-            defs.push((Key::IntPar(IntPar::Outputpenalty), Val::Int(out_pen)));
-            for (n, list) in boxes {
-                let b = vpack(list, Spec::NATURAL, MAX_DIMEN, &Params::QUIET).b;
-                defs.push((Key::Box(u16::from(n)), Val::Box(Arc::new(b))));
-            }
-            if self.marked || self.cur_marks.iter().any(Option::is_some) {
-                self.marked = true;
-                for (i, m) in self.cur_marks.iter().enumerate() {
-                    let v = m.clone().unwrap_or_default();
-                    defs.push((Key::CurMark(i as u8), Val::Toks(v)));
+        // (the fold's definitions at the fire: `\outputpenalty` globally at
+        // every fire, §1013; the insertion boxes, §1018–1022; the marks,
+        // once there are any)
+        let mut defs: Vec<(Key, Val)> = vec![(Key::IntPar(IntPar::Outputpenalty), Val::Int(out_pen))];
+        for (n, list) in boxes {
+            let b = vpack(list, Spec::NATURAL, MAX_DIMEN, &Params::QUIET).b;
+            defs.push((Key::Box(u16::from(n)), Val::Box(Arc::new(b))));
+        }
+        if self.marked || had_marks || !self.cur_marks.is_empty() {
+            self.marked = true;
+            self.fancy = true;
+            for (c, m) in &self.cur_marks {
+                for (w, t) in m.iter().enumerate() {
+                    defs.push((Key::Mark(w as u8, *c), Val::Toks(t.clone().unwrap_or_default())));
                 }
             }
         }
@@ -1050,14 +1062,20 @@ impl Scan {
                 true
             }
         };
-        if let (true, Some(routine)) = (dead_ok, &routine) {
-            // (§1025: the routine fires)
+        if let (true, Some(toks)) = (dead_ok, routine) {
+            // (§1025: the routine fires; its run defines `\box255`,
+            // `\outputpenalty`, `\deadcycles` and the marks at its start)
             self.fancy = true;
+            let reads = OutputReads {
+                output_penalty: out_pen,
+                insert_penalties: self.insert_penalties,
+                dead_cycles: self.dead_cycles,
+                marks: self.cur_marks.clone(),
+                page_so_far,
+            };
             self.dead_cycles += 1;
-            defs.push((Key::Box(255), Val::Box(Arc::new(b))));
-            defs.push((Key::PageInt(0), Val::Int(self.dead_cycles)));
-            defs.push((Key::PageInt(1), Val::Int(self.insert_penalties)));
-            let fired = env.fire(defs, Some(routine));
+            let page = Page { b, ship: Arc::default() };
+            let fired = env.fire(defs, Some(Routine { toks, page, reads }));
             self.errors.extend(fired.errors);
             self.halt |= fired.halt;
             if let Some(d) = fired.dead_cycles {
@@ -1088,12 +1106,13 @@ impl Scan {
             self.add_call_log(call_idx, &mut log, made_before);
             return;
         }
-        // (§1023: the default output)
-        if fancy && !defs.is_empty() {
-            let fired = env.fire(defs, None);
-            self.errors.extend(fired.errors);
-            self.halt |= fired.halt;
+        // (§1023: the default output; `ship_out` makes `\deadcycles` 0)
+        if self.fancy {
+            defs.push((Key::Page(DEAD_CYCLES), Val::Int(0)));
         }
+        let fired = env.fire(defs, None);
+        self.errors.extend(fired.errors);
+        self.halt |= fired.halt;
         for (it, o) in held.into_iter().rev() {
             self.contrib.push_front(it);
             self.contrib_org.push_front(o);
@@ -1108,7 +1127,7 @@ impl Scan {
         }
         self.dead_cycles = 0;
         let ship = ship_params(env);
-        self.pages.push(Page { b: Arc::new(b), ship });
+        self.pages.push(Page { b, ship });
         self.pages_made += 1;
     }
 

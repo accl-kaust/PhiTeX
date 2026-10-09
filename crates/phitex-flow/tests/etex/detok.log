@@ -1,0 +1,4 @@
+(./core.tex \a ## b\b  macro:->\a \b  macro:->\a ##AB macro:->\a B \undefinedcs
+ \a  macro:->\a \b \a A macro:->\p \q xA
+\protected macro:->P, \protected\long macro:#1->Q#1, \protected\long macro:->R,
+ \p  \a B !a !b  [][] \a B macro:->\b  macro:->P \p \p \p  )

@@ -41,14 +41,17 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard, RwLock};
 use std::time::{Duration, Instant};
 
 use crate::dvi;
+pub use crate::graph::MAIN_MEMORY;
+use crate::graph::output::{self, DEAD_CYCLES, OutputReads};
 use crate::graph::{
-    Env, FileText, Para, PieceId, RState, Run, Src, cut, cut_from, run_piece, run_routine,
+    Check, Env, FileText, Para, PieceId, RState, Run, Src, cut, cut_from, run_piece,
 };
 use crate::hash::{FxMap, FxSet, hash_of};
 use crate::linebreak::break_lines;
 use crate::logs::{self, Frag};
 use crate::page::{
-    CallLog, Fired, FoldEnv, IGNORE_DEPTH, Lines, Page, PageOrg, Scan, material, push_vertical,
+    CallLog, Fired, FoldEnv, IGNORE_DEPTH, Lines, Page, PageOrg, Routine, Scan, material,
+    push_vertical,
 };
 use crate::show::{RAW, SP};
 use crate::tfm::{Font, FontFiles};
@@ -80,6 +83,14 @@ pub struct Options {
     pub order: Order,
     /// Print the graph into `Output::dump`.
     pub dump: bool,
+    /// The format is e-TeX's extended mode (`etex -ini` given `*`): e-TeX's
+    /// primitives are named (`val::initial`). Fixed for a `Build`'s life:
+    /// pieces kept from an earlier update read the mode they ran with.
+    pub etex: bool,
+    /// TeX's main memory, in words of material a run may hold
+    /// (`graph::words_of`): past it, "TeX capacity exceeded" ends the run
+    /// (tex.web 94, 120). [`MAIN_MEMORY`] is web2c's.
+    pub main_memory: u64,
 }
 
 impl Default for Options {
@@ -89,6 +100,8 @@ impl Default for Options {
             reads: Reads::Suspend,
             order: Order::Priority,
             dump: false,
+            etex: true,
+            main_memory: MAIN_MEMORY,
         }
     }
 }
@@ -109,6 +122,9 @@ pub struct Stats {
     /// Reads that parked, and parks resolved by running the piece here.
     pub parks: usize,
     pub leapfrogs: usize,
+    /// Speculating runs abandoned while running (a prediction refuted, or
+    /// a long run on predictions an earlier piece has not confirmed).
+    pub abandoned: usize,
     pub breaks_run: usize,
     /// Paragraphs equal to one already broken, keeping its lines.
     pub breaks_reused: usize,
@@ -348,10 +364,13 @@ struct FoldKept {
     memo: Vec<Arc<Memo>>,
 }
 
-/// An output routine's run: what it read (its tokens, the fold's
-/// definitions, the document's), and what it gave.
+/// An output routine's run: what it read (its tokens, the page, what the
+/// fold handed it, the fold's definitions, the document's), and what it
+/// gave.
 struct Memo {
     toks: Arc<Vec<Tok>>,
+    page: Arc<crate::item::BoxNode>,
+    fire: OutputReads,
     overlay: Vec<(Key, Val)>,
     reads: Vec<(Key, Val)>,
     exports: Vec<(Key, Val)>,
@@ -368,10 +387,10 @@ struct Init {
 }
 
 impl Init {
-    fn initial(&self, key: &Key) -> Val {
+    fn initial(&self, key: &Key, etex: bool) -> Val {
         match key {
             Key::File(n) => Val::Text(self.files.get(n).cloned()),
-            _ => initial(key, &self.font),
+            _ => initial(key, &self.font, etex),
         }
     }
 }
@@ -513,13 +532,20 @@ struct Names {
     /// whose bit is clear has only its initial value, found without the
     /// lock.
     defined: Vec<AtomicU64>,
+    /// The same, for the names ever defined between a piece's nodes (by
+    /// the page builder or an output routine: never cleared).
+    inner: Vec<AtomicU64>,
+    /// The values before any definition are e-TeX's extended mode's.
+    etex: bool,
 }
 
 impl Names {
-    fn new() -> Names {
+    fn new(etex: bool) -> Names {
         Names {
             shards: (0..SHARDS).map(|_| RwLock::default()).collect(),
             defined: (0..SHARDS).map(|_| AtomicU64::new(0)).collect(),
+            inner: (0..SHARDS).map(|_| AtomicU64::new(0)).collect(),
+            etex,
         }
     }
 
@@ -537,7 +563,7 @@ impl Names {
     fn reaching(&self, key: &Key, at: Pos, init: &Init) -> (Option<Pos>, Val, u32, u32) {
         let (s, bit) = Names::route(key);
         if self.defined[s].load(Ordering::Acquire) & bit == 0 {
-            return (None, init.initial(key), 0, END);
+            return (None, init.initial(key, self.etex), 0, END);
         }
         let g = self.shards[s].read().expect("names");
         if let Some(v) = g.get(key) {
@@ -551,9 +577,15 @@ impl Names {
                 let lo = if p.0 == at.0 { p.1 + 1 } else { 0 };
                 return (Some(*p), val.clone(), lo, hi);
             }
-            return (None, init.initial(key), 0, hi);
+            return (None, init.initial(key, self.etex), 0, hi);
         }
-        (None, init.initial(key), 0, END)
+        (None, init.initial(key, self.etex), 0, END)
+    }
+
+    /// Whether `key` may be defined between a piece's nodes.
+    fn has_inner(&self, key: &Key) -> bool {
+        let (s, bit) = Names::route(key);
+        self.inner[s].load(Ordering::Acquire) & bit != 0
     }
 
     /// The value defined exactly at `at`, if any.
@@ -570,6 +602,9 @@ impl Names {
         let (s, bit) = Names::route(key);
         if val.is_some() {
             self.defined[s].fetch_or(bit, Ordering::AcqRel);
+            if at.1 != END {
+                self.inner[s].fetch_or(bit, Ordering::AcqRel);
+            }
         }
         let mut g = self.shards[s].write().expect("names");
         let v = g.entry(key.clone()).or_default();
@@ -620,6 +655,9 @@ struct PState {
     got: Expect,
     base: usize,
     post: Option<String>,
+    /// Its reads suspend whatever the policy (a speculating run of it went
+    /// on long on predictions nothing confirmed).
+    suspend: bool,
 }
 
 /// An edited piece's predecessor: its run, lines and text.
@@ -720,14 +758,11 @@ struct Shared {
 
 /// Where to look a routine run up: its page's first box (the same `Arc`
 /// while the page begins with the same line), or 0.
-fn memo_key(overlay: &[(Key, Val)]) -> usize {
-    overlay
+fn memo_key(page: &crate::item::BoxNode) -> usize {
+    page.list
         .iter()
-        .find_map(|(k, v)| match (k, v) {
-            (Key::Box(255), Val::Box(b)) => b.list.iter().find_map(|it| match it {
-                crate::item::Item::Box(x) => Some(Arc::as_ptr(x) as usize),
-                _ => None,
-            }),
+        .find_map(|it| match it {
+            crate::item::Item::Box(x) => Some(Arc::as_ptr(x) as usize),
             _ => None,
         })
         .unwrap_or(0)
@@ -1059,6 +1094,7 @@ impl Build {
                 got: sp.expect.clone(),
                 base: sp.base,
                 post: sp.post.clone(),
+                suspend: false,
             };
             if let Some(i) = sp.old {
                 // (each old piece is taken at most once: its lines and edge
@@ -1131,7 +1167,7 @@ impl Build {
         };
         // (the names index: what the kept pieces define, at their places,
         // and what an edited piece's predecessor defined, as its prediction)
-        let names = Names::new();
+        let names = Names::new(opts.etex);
         for (k, ps) in p.iter().enumerate() {
             if let Some(r) = ps.run.as_ref().or(ps.prev.as_ref().map(|(r, _, _)| r)) {
                 for (key, val) in &r.exports {
@@ -1165,6 +1201,14 @@ impl Build {
             }
         }
         predicted.sort_by_key(|x| x.0);
+        for (pos, keys) in &predicted {
+            let k = pos.0 as usize;
+            if let Some(r) = p[k].run.as_ref().or(p[k].prev.as_ref().map(|(r, _, _)| r)) {
+                for key in keys {
+                    refresh_export(&names, &init, k, r, key);
+                }
+            }
+        }
         // (the edges of removed pieces go; the names whose defining places
         // changed — defined by a removed or moved piece — have their
         // readers looked at: one reading another definition now is marked)
@@ -1232,7 +1276,7 @@ impl Build {
         let fancy = fold.fancy;
         let mut memo_old: FxMap<usize, Vec<Arc<Memo>>> = FxMap::default();
         for m in fold.memo {
-            memo_old.entry(memo_key(&m.overlay)).or_default().push(m);
+            memo_old.entry(memo_key(&m.page)).or_default().push(m);
         }
         let mut state = State {
             names_log: Vec::new(),
@@ -1333,6 +1377,24 @@ impl Build {
                     .expect("spawn a worker");
             }
         });
+        // (the last build's page builder definitions the scan did not reach
+        // again — a fold that converged — stay as they were)
+        let unreached: FoldDefs = {
+            let mut g = lock(&sh);
+            let mut out: FoldDefs = Vec::new();
+            for (pos, keys) in std::mem::take(&mut g.predicted) {
+                let pid = sh.seq.piece(pos.0 as usize);
+                if g.fold_defs.iter().any(|x| x.0 == pid && x.1 == pos.1) {
+                    continue;
+                }
+                let defs: Vec<(Key, Val)> = keys
+                    .into_iter()
+                    .filter_map(|k| sh.names.at(&k, pos).map(|v| (k, v)))
+                    .collect();
+                out.push((pid, pos.1, defs));
+            }
+            out
+        };
         let virt = sh.seq.virt.into_inner().expect("virt");
         self.virt = virt.ids;
         self.next_id = self.next_id.max(virt.next);
@@ -1456,9 +1518,11 @@ impl Build {
         st.stats.time_join = t_join.elapsed();
         st.stats.pages = st.pages.len();
         st.stats.wall = t0.elapsed();
+        let mut fold_defs = std::mem::take(&mut st.fold_defs);
+        fold_defs.extend(unreached);
         self.fold = FoldKept {
             fancy: st.scan.as_ref().is_some_and(|s| s.fancy),
-            defs: std::mem::take(&mut st.fold_defs),
+            defs: fold_defs,
             memo: std::mem::take(&mut st.memo_new),
         };
         self.pieces =
@@ -1606,6 +1670,39 @@ fn mark(g: &mut State, k: usize, key: Key) -> bool {
         return true;
     }
     false
+}
+
+/// Piece `k`'s export of `key` as the names index holds it at `(k, END)`:
+/// none when a definition made between its nodes after its own last
+/// definition of `key` (an output routine's, where the page builder fired)
+/// is the one reaching its end.
+fn export_of(names: &Names, init: &Init, k: usize, run: &Run, key: &Key) -> Option<Val> {
+    let i = run.exports.binary_search_by(|(x, _)| x.cmp(key)).ok()?;
+    if names.has_inner(key) {
+        let last = run
+            .chain
+            .resolve(key, run.chain.nodes.len())
+            .map(|(d, _)| d);
+        if let (Some(p), ..) = names.reaching(key, (k as u32, END), init)
+            && p.0 == k as u32
+            && p.1 != END
+            && last.is_none_or(|d| p.1 >= d)
+        {
+            return None;
+        }
+    }
+    Some(run.exports[i].1.clone())
+}
+
+/// Sets piece `k`'s export of `key` as [`export_of`] gives it; whether it
+/// changed.
+fn refresh_export(names: &Names, init: &Init, k: usize, run: &Run, key: &Key) -> bool {
+    let v = export_of(names, init, k, run, key);
+    if names.at(key, (k as u32, END)) == v {
+        return false;
+    }
+    names.set((k as u32, END), key, v.as_ref());
+    true
 }
 
 /// The names whose exported values differ between two runs of a piece.
@@ -1942,7 +2039,7 @@ fn pick(g: &mut State, sh: &Shared) -> Option<Task> {
         .unstarted
         .iter()
         .copied()
-        .find(|&k| entry_ready(g, k, speculate));
+        .find(|&k| entry_ready(g, k, speculate && !g.p[k].suspend));
     let run_ok = ready.is_some();
     // (priority: pages out first, then the scan, the reading, line breaking)
     let mut kinds = [0u8; 5];
@@ -2265,7 +2362,7 @@ fn execute(sh: &Shared, task: Task) -> (u64, u8) {
 /// reads as edges, the readers its changed definitions reach marked; its
 /// own reads validated against the index as it is now.
 fn run_and_install(sh: &Shared, k: usize, dirty: &[Key]) -> u64 {
-    let (text, old, entry) = {
+    let (text, old, entry, strict) = {
         let g = lock(sh);
         let ps = &g.p[k];
         let old = match (&ps.run, &ps.prev) {
@@ -2273,9 +2370,17 @@ fn run_and_install(sh: &Shared, k: usize, dirty: &[Key]) -> u64 {
             (None, Some((r, _, t))) => Some((r.clone(), t.clone())),
             (None, None) => None,
         };
-        (ps.text.clone(), old, entry_state(&g, k))
+        (ps.text.clone(), old, entry_state(&g, k), ps.suspend)
     };
-    let mut env = PieceEnv { sh, k };
+    let mut env = PieceEnv {
+        sh,
+        k,
+        spec: sh.opts.reads == Reads::Speculate && !strict,
+        strict,
+        predicted: Vec::new(),
+        checked: sh.names_gen.load(Ordering::Acquire),
+        gave_up: false,
+    };
     let run = Arc::new(run_piece(
         &text,
         &mut env,
@@ -2283,6 +2388,21 @@ fn run_and_install(sh: &Shared, k: usize, dirty: &[Key]) -> u64 {
         dirty,
         entry.as_ref(),
     ));
+    if run.abandoned {
+        // (not a result: the piece runs again, from its last run, its
+        // dirty names still dirty)
+        let mut g = lock(sh);
+        g.stats.abandoned += 1;
+        g.stats.commands_run += run.ran;
+        g.p[k].suspend |= env.gave_up;
+        g.p[k].dirty.extend(dirty.iter().cloned());
+        g.p[k].status = Status::Unstarted;
+        g.running.remove(&k);
+        g.unstarted.insert(k);
+        drop(g);
+        notify(sh, true);
+        return run.ran;
+    }
     let steps = run.ran;
     let t = Instant::now();
     let got = Expect::of(&run);
@@ -2372,21 +2492,31 @@ fn run_and_install(sh: &Shared, k: usize, dirty: &[Key]) -> u64 {
                 }
             }
         }
+        let mut changed = changed;
+        for key in &changed {
+            refresh_export(&sh.names, &sh.init, k, &run, key);
+        }
+        // (an export a definition between the piece's nodes may shadow:
+        // where its own last definition is may have moved)
+        for (key, _) in &run.exports {
+            if sh.names.has_inner(key)
+                && !changed.contains(key)
+                && refresh_export(&sh.names, &sh.init, k, &run, key)
+            {
+                changed.push(key.clone());
+            }
+        }
         if !changed.is_empty() {
             g.names_log.push(changed.clone());
-        }
-        for key in &changed {
-            let val = run
-                .exports
-                .binary_search_by(|(x, _)| x.cmp(key))
-                .ok()
-                .map(|i| &run.exports[i].1);
-            sh.names.set((k as u32, END), key, val);
         }
         sh.names_gen.store(g.names_log.len(), Ordering::Release);
         g.p[k].run = Some(run.clone());
         g.p[k].got = got.clone();
-        g.p[k].dirty.clear();
+        // (names marked while it ran — a definition made between its nodes
+        // reaching a node whose read the run's first reader of the same
+        // value stands for — are read again)
+        let late = std::mem::take(&mut g.p[k].dirty);
+        stale.extend(late);
         g.p[k].runs += 1;
         g.stats.ran += 1;
         g.running.remove(&k);
@@ -2443,11 +2573,98 @@ fn run_and_install(sh: &Shared, k: usize, dirty: &[Key]) -> u64 {
 struct PieceEnv<'a> {
     sh: &'a Shared,
     k: usize,
+    /// Reads run on predictions (`Reads::Speculate`, and not a piece whose
+    /// speculation was given up).
+    spec: bool,
+    /// Every read waits for the pieces before it that may define its name
+    /// (a piece whose speculating run was given up).
+    strict: bool,
+    /// The reads made on predictions: a definition not installed yet, or
+    /// none while earlier pieces may still make one (name, node, value).
+    predicted: Vec<(Key, u32, Val)>,
+    /// The names index's change count when the predictions were last
+    /// checked.
+    checked: usize,
+    /// The run was abandoned on predictions nothing confirmed (its piece
+    /// then reads strictly).
+    gave_up: bool,
+}
+
+/// How often (in nodes run) a run on predictions looks at them again.
+const CHECK_EVERY: u64 = 1 << 12;
+/// Nodes after which a run on predictions an earlier piece has not
+/// confirmed yet is given up (its piece then waits for them).
+const GIVE_UP_AFTER: u64 = 1 << 18;
+
+impl PieceEnv<'_> {
+    /// Whether a prediction this run read is refuted: the names index now
+    /// gives another value there.
+    fn refuted(&self) -> bool {
+        let sh = self.sh;
+        self.predicted.iter().any(|(key, node, val)| {
+            sh.names.reaching(key, (self.k as u32, *node), &sh.init).1 != *val
+        })
+    }
+
+    /// Whether a piece before this one has not settled its run.
+    fn unconfirmed(&self) -> bool {
+        (0..self.k).any(|e| !self.sh.done[e].load(Ordering::Acquire))
+    }
 }
 
 impl Env for PieceEnv<'_> {
     fn font_file(&mut self, name: &str) -> Option<Arc<[u8]>> {
         self.sh.fonts.get(name)
+    }
+
+    fn check(&mut self, ran: u64, words: u64) -> Check {
+        let cap = self.sh.opts.main_memory;
+        let periodic = ran.is_multiple_of(CHECK_EVERY);
+        if !(periodic || words > cap) || self.predicted.is_empty() {
+            return if words > cap {
+                Check::Exceeded(cap)
+            } else {
+                Check::Go
+            };
+        }
+        // (validate while running: a prediction refuted abandons the run,
+        // which runs again on what is known then)
+        let now = self.sh.names_gen.load(Ordering::Acquire);
+        if now != self.checked {
+            self.checked = now;
+            if self.refuted() {
+                return Check::Abandon;
+            }
+        }
+        // (a long run, or one past the memory, on predictions not confirmed
+        // yet: given up; its piece waits for the pieces before it)
+        if (ran >= GIVE_UP_AFTER || words > cap) && self.unconfirmed() {
+            self.gave_up = true;
+            return Check::Abandon;
+        }
+        if words > cap {
+            Check::Exceeded(cap)
+        } else {
+            Check::Go
+        }
+    }
+
+    fn has_between(&mut self, key: &Key) -> bool {
+        self.sh.names.has_inner(key)
+    }
+
+    fn between(&mut self, key: &Key, after: u32, node: u32) -> Option<(Val, Src)> {
+        let sh = self.sh;
+        if !sh.names.has_inner(key) {
+            return None;
+        }
+        let k = self.k as u32;
+        match sh.names.reaching(key, (k, node), &sh.init) {
+            (Some(p), val, ..) if p.0 == k && p.1 != END && p.1 >= after => {
+                Some((val, Src::Piece(sh.seq.id_at(p))))
+            }
+            _ => None,
+        }
     }
 
     fn reach(&mut self, key: &Key, node: u32) -> (Val, Src, u32, u32) {
@@ -2459,9 +2676,10 @@ impl Env for PieceEnv<'_> {
                 // (an undefined name while an earlier piece may still
                 // define it: wait for the earlier pieces, or run the first
                 // of them nobody has started)
-                if sh.opts.reads == Reads::Speculate
-                    || !matches!(val, Val::Meaning(Meaning::Undefined))
-                {
+                if self.spec || !(self.strict || matches!(val, Val::Meaning(Meaning::Undefined))) {
+                    if self.k > 0 {
+                        self.predicted.push((key.clone(), node, val.clone()));
+                    }
                     return (val, Src::Initial, lo, hi);
                 }
                 let leapfrog = {
@@ -2506,10 +2724,11 @@ impl Env for PieceEnv<'_> {
             let src = Src::Piece(sh.seq.id_at(d));
             let d = d.0 as usize;
             // (an element between this piece's own nodes is this run's)
-            if sh.opts.reads == Reads::Speculate
-                || d == self.k
-                || sh.done[d].load(Ordering::Acquire)
-            {
+            if d == self.k || sh.done[d].load(Ordering::Acquire) {
+                return (val, src, lo, hi);
+            }
+            if self.spec {
+                self.predicted.push((key.clone(), node, val.clone()));
                 return (val, src, lo, hi);
             }
             // (the definition is being remade: park until it is installed,
@@ -2609,6 +2828,7 @@ impl BuildFold<'_> {
             for key in &keys {
                 sh.names.set(pos, key, None);
             }
+            any |= refresh_exports(&mut g, sh, pos, &keys);
             any |= changed_at(&mut g, sh, pos, keys);
         }
         drop(g);
@@ -2627,12 +2847,14 @@ impl BuildFold<'_> {
 
     /// The last build's run of this routine on this page, if everything
     /// it read is the same.
-    fn find_memo(&self, toks: &Arc<Vec<Tok>>, overlay: &[(Key, Val)]) -> Option<Arc<Memo>> {
-        let cands = self.sh.memo_old.get(&memo_key(overlay))?;
+    fn find_memo(&self, rt: &Routine, overlay: &[(Key, Val)]) -> Option<Arc<Memo>> {
+        let cands = self.sh.memo_old.get(&memo_key(&rt.page.b))?;
         cands
             .iter()
             .find(|m| {
-                (Arc::ptr_eq(&m.toks, toks) || m.toks == *toks)
+                (Arc::ptr_eq(&m.toks, &rt.toks) || m.toks == rt.toks)
+                    && (Arc::ptr_eq(&m.page, &rt.page.b) || m.page == rt.page.b)
+                    && m.fire == rt.reads
                     && m.overlay == overlay
                     && m.reads
                         .iter()
@@ -2641,14 +2863,16 @@ impl BuildFold<'_> {
             .cloned()
     }
 
-    /// Runs the routine as nodes (tex.web 1025–1026): its paragraphs
-    /// broken, its vertical list gathered.
-    fn run_routine(&self, toks: &Arc<Vec<Tok>>, overlay: &[(Key, Val)]) -> Memo {
+    /// Runs the routine as nodes (tex.web 1025–1026) from the entry state
+    /// `output::output_entry` makes of the fire: its paragraphs broken,
+    /// its pages and its list at its end (`OutputEnd`) gathered.
+    fn run_routine(&self, rt: &Routine, overlay: &[(Key, Val)]) -> Memo {
         let mut env = RoutineEnv {
             fold: self,
             overlay,
         };
-        let run = Arc::new(run_routine(toks, &mut env));
+        let entry = output::output_entry(&rt.page, &rt.reads, &rt.toks);
+        let run = Arc::new(output::run_routine(&entry, &mut env));
         let paras: Vec<ParaLines> = run
             .paras
             .iter()
@@ -2671,7 +2895,9 @@ impl BuildFold<'_> {
         let lines: Vec<Option<Lines>> = paras.iter().map(|(_, l)| Some(l.clone())).collect();
         let log = logs::texts(&logs::fragment(&[], &run, &lines));
         Memo {
-            toks: toks.clone(),
+            toks: rt.toks.clone(),
+            page: rt.page.b.clone(),
+            fire: rt.reads.clone(),
             overlay: overlay.to_vec(),
             reads: run
                 .reads
@@ -2691,30 +2917,36 @@ impl FoldEnv for BuildFold<'_> {
         read_at(self.sh, self.run.as_deref(), self.k, self.node, key)
     }
 
-    fn fire(&mut self, defs: Vec<(Key, Val)>, routine: Option<&Arc<Vec<Tok>>>) -> Fired {
+    fn fire(&mut self, defs: Vec<(Key, Val)>, routine: Option<Routine>) -> Fired {
         let mut fired = Fired::default();
-        // (the last build's definitions here go before the routine reads:
-        // it reads only this build's)
         let pos = (self.k as u32, self.node);
         if self.predicted.contains(&pos) {
             self.predicted.retain(|&p| p != pos);
-            fired.halt |= self.retract(vec![pos]);
+            // (the last build's definitions here go before a routine reads:
+            // it reads only this build's; without one they are compared
+            // as they are made again)
+            if routine.is_some() {
+                fired.halt |= self.retract(vec![pos]);
+            }
         }
         let mut all = defs.clone();
         let mut memo = None;
-        if let Some(toks) = routine {
-            let m = if let Some(m) = self.find_memo(toks, &defs) {
+        if let Some(rt) = routine {
+            let m = if let Some(m) = self.find_memo(&rt, &defs) {
                 self.kept += 1;
                 m
             } else {
                 self.routines += 1;
-                Arc::new(self.run_routine(toks, &defs))
+                Arc::new(self.run_routine(&rt, &defs))
             };
             fired.items.clone_from(&m.items);
             fired.log.clone_from(&m.log);
             fired.errors.clone_from(&m.errors);
+            // (its exports — `\box255` void, `\outputpenalty`,
+            // `\deadcycles`, the marks, what it defined globally — at the
+            // firing place, after the fold's own)
             for (key, val) in &m.exports {
-                if *key == Key::PageInt(0)
+                if *key == Key::Page(DEAD_CYCLES)
                     && let Val::Int(d) = val
                 {
                     fired.dead_cycles = Some(*d);
@@ -2723,10 +2955,6 @@ impl FoldEnv for BuildFold<'_> {
                     Some(x) => x.1 = val.clone(),
                     None => all.push((key.clone(), val.clone())),
                 }
-            }
-            // (§1026: `insert_penalties:=0`)
-            if let Some(x) = all.iter_mut().find(|x| x.0 == Key::PageInt(1)) {
-                x.1 = Val::Int(0);
             }
             memo = Some(m);
         }
@@ -2789,6 +3017,7 @@ fn install_fold_defs(
             changed.push(key.clone());
         }
     }
+    let moved = refresh_exports(&mut g, sh, pos, &changed);
     let pid = sh.seq.piece(pos.0 as usize);
     match g.fold_defs.iter_mut().find(|x| x.0 == pid && x.1 == pos.1) {
         Some(x) => {
@@ -2801,10 +3030,30 @@ fn install_fold_defs(
         }
         None => g.fold_defs.push((pid, pos.1, defs)),
     }
-    let any = changed_at(&mut g, sh, pos, changed);
+    let any = changed_at(&mut g, sh, pos, changed) || moved;
     drop(g);
     notify(sh, any);
     any
+}
+
+/// Definitions of `keys` between piece `pos.0`'s nodes changed: its
+/// exports of them, as [`export_of`] gives them.
+fn refresh_exports(g: &mut State, sh: &Shared, pos: Pos, keys: &[Key]) -> bool {
+    if pos.1 == END {
+        return false;
+    }
+    let k = pos.0 as usize;
+    let Some(run) = g.p.get(k).and_then(|ps| ps.run.clone()) else {
+        return false;
+    };
+    let moved: Vec<Key> = keys
+        .iter()
+        .filter(|key| refresh_export(&sh.names, &sh.init, k, &run, key))
+        .cloned()
+        .collect();
+    // (the readers of the export see the definition between the nodes now,
+    // or the export again)
+    changed_at(g, sh, (pos.0, END), moved)
 }
 
 /// The names `keys` changed at `pos`: logged, and their readers after it
@@ -2813,7 +3062,21 @@ fn changed_at(g: &mut State, sh: &Shared, pos: Pos, keys: Vec<Key>) -> bool {
     if keys.is_empty() {
         return false;
     }
-    let marks = reached(g, sh, pos, &keys);
+    let mut marks = reached(g, sh, pos, &keys);
+    // (a place between piece k's nodes reaches its own later nodes, those
+    // reading the name from one of its earlier nodes included)
+    if pos.1 != END
+        && let Some(run) = g.p.get(pos.0 as usize).and_then(|ps| ps.run.as_ref())
+    {
+        let from = pos.1 as usize + 1;
+        for key in &keys {
+            let reads = (from..run.chain.nodes.len())
+                .any(|j| run.chain.nodes[j].reads.iter().any(|r| r.key == *key));
+            if reads && !marks.iter().any(|m| m.0 == pos.0 as usize && m.1 == *key) {
+                marks.push((pos.0 as usize, key.clone()));
+            }
+        }
+    }
     g.names_log.push(keys);
     sh.names_gen.store(g.names_log.len(), Ordering::Release);
     let any = !marks.is_empty();
@@ -2856,7 +3119,7 @@ mod tests {
     #[test]
     fn places_are_pieces_and_nodes() {
         let (names, font) = (
-            Names::new(),
+            Names::new(true),
             Init {
                 font: font(),
                 files: Arc::default(),

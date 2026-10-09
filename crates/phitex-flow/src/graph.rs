@@ -41,10 +41,14 @@ use crate::tfm::Font;
 use crate::val::{DimenPar, IntPar, Key, Macro, Meaning, Prim, Tok, Val};
 
 mod assign;
+pub(crate) mod diag;
+mod etex;
 mod expand;
 mod fonts;
+mod lang;
 mod material;
 mod math;
+pub mod output;
 mod scan;
 
 /// A piece's identity, stable across edits.
@@ -58,11 +62,83 @@ pub trait Env {
     /// them, as when no element between the piece's nodes defines `key`).
     fn reach(&mut self, key: &Key, node: u32) -> (Val, Src, u32, u32);
 
+    /// A definition of `key` made between this piece's nodes `after` and
+    /// `node` (an output routine's run where the page builder fired there),
+    /// which reaches `node` instead of node `after`'s own: its value and
+    /// where it was made.
+    fn between(&mut self, _key: &Key, _after: u32, _node: u32) -> Option<(Val, Src)> {
+        None
+    }
+
+    /// Whether anything between this piece's nodes may define `key`.
+    fn has_between(&mut self, _key: &Key) -> bool {
+        false
+    }
+
+    /// Whether the run goes on after a node it ran (`ran` run so far, the
+    /// run holding `words` of material, [`words_of`]): a speculating run
+    /// whose predictions are refuted is abandoned; one past TeX's main
+    /// memory ends (tex.web 120).
+    fn check(&mut self, _ran: u64, words: u64) -> Check {
+        if words > MAIN_MEMORY { Check::Exceeded(MAIN_MEMORY) } else { Check::Go }
+    }
+
     /// The bytes of the TFM file `name.tfm`, if there is one (a pure
     /// function of the name during a build).
     fn font_file(&mut self, _name: &str) -> Option<std::sync::Arc<[u8]>> {
         None
     }
+}
+
+/// web2c's `main_memory` (tex.web 11's `mem_max`): words a run's material
+/// may hold ([`words_of`]) before "TeX capacity exceeded".
+pub const MAIN_MEMORY: u64 = 5_000_000;
+
+/// What [`Env::check`] says of a run.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Check {
+    Go,
+    /// The run is dropped (not installed): it is run again.
+    Abandon,
+    /// "TeX capacity exceeded, sorry [main memory size=N]" (tex.web 94,
+    /// 120): the run ends there, a fatal error.
+    Exceeded(u64),
+}
+
+/// The words of material a node holds as TeX's memory would (an item,
+/// a box's items, a token list's tokens; one for the node): the measure of
+/// [`MAIN_MEMORY`].
+pub fn words_of(n: &Node) -> u64 {
+    let items = |v: &[crate::item::Item]| -> u64 {
+        v.iter()
+            .map(|it| match it {
+                crate::item::Item::Box(b) => 1 + b.list.len() as u64,
+                _ => 1,
+            })
+            .sum()
+    };
+    let defs: u64 = n
+        .defs()
+        .iter()
+        .map(|d| match &d.val {
+            Val::Box(b) => 1 + b.list.len() as u64,
+            Val::Toks(t) => 1 + t.len() as u64,
+            Val::Meaning(Meaning::Macro(m)) => 1 + m.body.len() as u64,
+            _ => 1,
+        })
+        .sum();
+    1 + items(&n.emit) + items(n.vemit()) + defs
+}
+
+/// The tokens of input pending in `st` (tex.web 120 counts them in the
+/// memory too).
+pub fn pending_words(st: &RState) -> u64 {
+    st.pending.iter().map(|(l, i, _)| l.len().saturating_sub(*i) as u64).sum()
+}
+
+/// The fatal error of a run past TeX's main memory.
+pub fn capacity_error(size: u64) -> String {
+    format!("TeX capacity exceeded, sorry [main memory size={size}]")
 }
 
 /// The tokenizer's state (tex.web 303).
@@ -92,11 +168,11 @@ enum GroupKind {
     SemiSimple,
     /// A box's or a discretionary's braces (`Group::boxg`).
     Box,
+    /// An output routine's braces (tex.web 1025: `output_group`).
+    Output,
     /// A formula, a subformula, `\left`…`\right`, a `\mathchoice` part
     /// (`Group::boxg`, `math::MathKind`).
     Math,
-    /// An output routine's braces (tex.web 1025).
-    Output,
 }
 
 /// An open conditional: the node whose step opened it, which ends may end
@@ -107,6 +183,26 @@ struct Cond {
     open: u32,
     limit: u8,
     test: bool,
+    /// Which conditional (`IfKind::code`, plus 32 after `\unless`:
+    /// etex.web's `cur_if`), for `\currentiftype`.
+    code: u8,
+}
+
+/// A text the input was rewritten with (e-TeX's `\scantokens`): read
+/// with the category codes in force as it is read, line by line, each line
+/// ending in the `\endlinechar` in force when it is begun. It lies above
+/// the first `at` rewritten token lists: those above it are read first,
+/// then it, then those below. Where its reading is: `pos`, `tstate`, `eol`
+/// (as the piece's own are kept in `RState`); `eof`: its end was met once
+/// and `\everyeof` went in (etex.web §362).
+#[derive(Clone, PartialEq, Eq, Debug)]
+struct PendingText {
+    text: Arc<[char]>,
+    at: usize,
+    pos: usize,
+    tstate: TState,
+    eol: i16,
+    eof: bool,
 }
 
 /// An open group: its kind and the tokens `\aftergroup` gave it (its
@@ -117,6 +213,9 @@ struct Group {
     after: Vec<Tok>,
     /// A box group's specification and context (tex.web 1083).
     boxg: Option<Arc<material::BoxGroup>>,
+    /// The node that opened it (where it was entered, for e-TeX's
+    /// `\showgroups`).
+    at: u32,
 }
 
 /// A stack in the reader state, shared until changed: handing the state
@@ -130,6 +229,9 @@ impl<T: Clone> Stack<T> {
     }
     fn len(&self) -> usize {
         self.0.as_ref().map_or(0, |v| v.len())
+    }
+    fn get(&self, i: usize) -> Option<&T> {
+        self.0.as_ref().and_then(|v| v.get(i))
     }
     fn is_empty(&self) -> bool {
         self.0.is_none()
@@ -199,7 +301,10 @@ pub struct RState {
     tstate: TState,
     /// Token lists the input was rewritten with, each with how far it has
     /// been read (innermost last).
-    pending: Vec<(Arc<[Tok]>, usize)>,
+    /// (and whether it was backed up, tex.web 325's `backed_up`: an error's
+    /// context shows it as such; a list read to its end stays until the
+    /// next token is read, as TeX's input level does)
+    pending: Vec<(Arc<[Tok]>, usize, bool)>,
     mode: Mode,
     /// The list being built is internal: a box's (TeX's negative modes).
     inner: bool,
@@ -229,6 +334,16 @@ pub struct RState {
     eol: i16,
     /// `\endinput` was read: the file ends after this line (tex.web 362).
     endinput: bool,
+    /// e-TeX's `\protected` prefix is waiting for its definition.
+    protected: bool,
+    /// Texts the input was rewritten with (`\scantokens`), innermost last.
+    texts: Stack<PendingText>,
+    /// A paragraph's language state (tex.web 1091, 1376): `clang`, and
+    /// the language and hyphen minima it began with.
+    hyph_lang: [u8; 4],
+    /// In an output routine's run: what the page builder handed it where
+    /// it fired (the same for all its nodes; `output::output_entry`).
+    fire: Option<Arc<output::Fire>>,
 }
 
 impl RState {
@@ -252,6 +367,10 @@ impl RState {
             prev_graf: 0,
             eol: EOL_UNREAD,
             endinput: false,
+            protected: false,
+            texts: Stack::new(),
+            hyph_lang: [0, 0, 1, 1],
+            fire: None,
         }
     }
 
@@ -286,28 +405,6 @@ impl RState {
             conds: base.conds.outside(),
             ..base.clone()
         }
-    }
-
-    /// The entry of an output routine (tex.web 1025): internal vertical
-    /// mode, `\prevdepth` ignored, the output group open, the routine's
-    /// tokens (`{…}`, the brace read by `scan_left_brace`) to read, after
-    /// `normal_paragraph`.
-    pub fn routine(toks: &[Tok]) -> RState {
-        let mut list: Vec<Tok> = vec![Tok::Cs(Arc::from("\u{0}normalparagraph"))];
-        list.extend(
-            toks.iter()
-                .skip(usize::from(matches!(toks.first(), Some(Tok::Char(1, _)))))
-                .cloned(),
-        );
-        let mut st = RState::start();
-        st.inner = true;
-        st.pending = vec![(Arc::from(list), 0)];
-        st.groups.push(Group {
-            kind: GroupKind::Output,
-            after: Vec::new(),
-            boxg: None,
-        });
-        st
     }
 
     /// Whether a piece entered in this state may begin: no paragraph,
@@ -375,8 +472,52 @@ pub enum Src {
     Initial,
 }
 
+/// Two stacks equal but for the node indices their entries hold.
+fn same_but_pos<T: Clone>(a: &Stack<T>, b: &Stack<T>, same: impl Fn(&T, &T) -> bool) -> bool {
+    match (&a.0, &b.0) {
+        (Some(x), Some(y)) => {
+            Arc::ptr_eq(x, y)
+                || (x.len() == y.len() && x.iter().zip(y.iter()).all(|(p, q)| same(p, q)))
+        }
+        (None, None) => true,
+        _ => false,
+    }
+}
+
+impl Cond {
+    /// Equal but for the node that opened it (a position, not content).
+    fn same_but_pos(self, o: Cond) -> bool {
+        self.limit == o.limit && self.test == o.test && self.code == o.code
+    }
+}
+
+impl Group {
+    /// Equal but for the node that opened it (a position, not content).
+    fn same_but_pos(&self, o: &Group) -> bool {
+        self.kind == o.kind && self.after == o.after && self.boxg == o.boxg
+    }
+}
+
 impl RState {
-    /// Equal but for the position.
+    /// The node indices its open groups and conditionals hold, moved by
+    /// `map` (`None`: one of them has no place any more).
+    fn moved(&self, map: impl Fn(u32) -> Option<u32>) -> Option<RState> {
+        let mut st = self.clone();
+        if let Some(v) = st.groups.0.as_mut() {
+            for g in Arc::make_mut(v).iter_mut() {
+                g.at = map(g.at)?;
+            }
+        }
+        if let Some(v) = st.conds.0.as_mut() {
+            for c in Arc::make_mut(v).iter_mut() {
+                c.open = map(c.open)?;
+            }
+        }
+        Some(st)
+    }
+
+    /// Equal but for the position (where in the text, and the node indices
+    /// of where its open groups and conditionals began).
     fn eq_but_pos(&self, o: &RState) -> bool {
         self.tstate == o.tstate
             && self.mode == o.mode
@@ -384,10 +525,10 @@ impl RState {
             && self.level == o.level
             && self.boxing == o.boxing
             && self.global == o.global
-            && self.conds == o.conds
+            && same_but_pos(&self.conds, &o.conds, |a, b| a.same_but_pos(*b))
             && self.long == o.long
             && self.outer == o.outer
-            && self.groups == o.groups
+            && same_but_pos(&self.groups, &o.groups, Group::same_but_pos)
             && self.after_assignment == o.after_assignment
             && self.space_factor == o.space_factor
             && self.prev_depth == o.prev_depth
@@ -395,6 +536,10 @@ impl RState {
             && self.eol == o.eol
             && self.endinput == o.endinput
             && self.pending == o.pending
+            && self.protected == o.protected
+            && self.texts == o.texts
+            && self.hyph_lang == o.hyph_lang
+            && self.fire == o.fire
     }
 
     /// Whether a node going from `self` to `out` begins a paragraph of the
@@ -419,6 +564,11 @@ pub struct Read {
     /// ([`Chain::scope_of`]): what a definition at the level of the one it
     /// replaces (`Def::level`) is made from.
     pub scope: Option<u16>,
+    /// Read as of where the reading node's `.0`th open conditional began
+    /// (a `\fi`'s φ reads the value from before its `\if`); `None`: as
+    /// of the reading node. A depth, not a node: an edit moving the
+    /// conditional's opener does not change the read.
+    pub cond: Option<u16>,
 }
 
 /// A shared [`Read`].
@@ -515,6 +665,9 @@ pub struct Rare {
     pub phi: Option<Box<Phi>>,
     pub vemit: Vec<Item>,
     pub log: Option<Box<str>>,
+    /// The `Close` of an output routine's group: what the page builder
+    /// takes back (`output::OutputEnd`).
+    pub output: Option<Box<output::OutputEnd>>,
     /// `\input`: the file read (its pieces follow the node's).
     pub input: Option<Arc<FileText>>,
 }
@@ -569,6 +722,12 @@ impl Node {
     /// The file an `\input` node read.
     pub fn input(&self) -> Option<&Arc<FileText>> {
         self.rare.as_ref().and_then(|r| r.input.as_ref())
+    }
+
+    /// What an output routine's end left for the page builder (the `Close`
+    /// node of its group).
+    pub fn output(&self) -> Option<&output::OutputEnd> {
+        self.rare.as_ref().and_then(|r| r.output.as_deref())
     }
 }
 
@@ -714,7 +873,9 @@ impl std::ops::Index<usize> for Nodes {
 #[derive(Clone, Debug, Default)]
 pub struct Chain {
     pub nodes: Nodes,
-    /// The state the piece is entered in (none: the canonical start).
+    /// The state the first node reads (none: the canonical start): a file
+    /// piece's or a rest-of-line piece's entry edge, or an output
+    /// routine's run (`output::output_entry`).
     entry: Option<Arc<RState>>,
     /// Nodes defining each key, in order.
     defs_of: FxMap<Key, Vec<u32>>,
@@ -731,10 +892,20 @@ pub struct Chain {
 }
 
 impl Chain {
+    /// A chain whose first node reads `entry`.
+    pub fn with_entry(entry: RState) -> Chain {
+        Chain { entry: Some(Arc::new(entry)), ..Chain::default() }
+    }
+
+    /// The state the first node reads.
+    fn start(&self) -> RState {
+        self.entry.as_deref().map_or_else(RState::start, Clone::clone)
+    }
+
     /// The input state of node `i` (`i == len`: of the next node).
     pub fn input(&self, i: usize) -> RState {
         if i == 0 {
-            self.entry.as_deref().cloned().unwrap_or_else(RState::start)
+            self.start()
         } else {
             self.nodes[i - 1].out.clone()
         }
@@ -742,14 +913,14 @@ impl Chain {
 
     /// The input position of node `i`.
     fn input_pos(&self, i: usize) -> usize {
-        if i == 0 { 0 } else { self.nodes[i - 1].out.pos }
+        if i == 0 { self.entry.as_ref().map_or(0, |e| e.pos) } else { self.nodes[i - 1].out.pos }
     }
 
     /// Whether node `i` begins a paragraph of the main vertical list.
     fn starts_para(&self, i: usize) -> bool {
         let out = &self.nodes[i].out;
         if i == 0 {
-            self.input(0).starts_para(out)
+            self.start().starts_para(out)
         } else {
             self.nodes[i - 1].out.starts_para(out)
         }
@@ -862,7 +1033,7 @@ impl Chain {
 
     /// The first `from` nodes of `old`, shared.
     fn prefix(old: &Chain, from: usize) -> Chain {
-        let mut c = Chain::default();
+        let mut c = Chain { entry: old.entry.clone(), ..Chain::default() };
         c.share(old, 0, from);
         c
     }
@@ -927,6 +1098,8 @@ pub struct Run {
     /// The fonts this piece loads first (`Key::FontLoaded` definitions), in
     /// node order: the document's font numbering is these, piece by piece.
     pub fonts: Vec<Arc<str>>,
+    /// The run was abandoned ([`Check::Abandon`]): not a result.
+    pub abandoned: bool,
 }
 
 impl Run {
@@ -955,11 +1128,32 @@ impl Run {
     }
 }
 
-/// Runs an output routine (tex.web 1025): its tokens `{…}` as nodes, from
-/// the routine's entry state ([`RState::routine`]), reading what the page
-/// builder and the document define where it fires through `env`.
-pub fn run_routine(toks: &[Tok], env: &mut dyn Env) -> Run {
-    run_piece(&[], env, None, &[], Some(&RState::routine(toks)))
+/// The node that opened the `k`-th (from the outside) open group
+/// (`group`) or conditional at node `i`'s start: where it was entered, for
+/// the log's line numbers (e-TeX's `\showgroups`, `\showifs`).
+pub fn opener(chain: &Chain, i: usize, group: bool, k: usize) -> Option<usize> {
+    let st = chain.input(i);
+    let at = if group {
+        st.groups.0.as_ref()?.get(k)?.at
+    } else {
+        st.conds.0.as_ref()?.get(k)?.open
+    };
+    Some(at as usize)
+}
+
+/// The `Open` node of the `k`-th group enclosing node `i` (0: its own
+/// innermost), for the log's line numbers.
+pub fn enclosing_open(chain: &Chain, i: usize, k: usize) -> Option<usize> {
+    let mut g = if i < chain.nodes.len() { chain.nodes[i].group } else { return None };
+    for _ in 0..k {
+        g = g.and_then(|x| chain.parent_of.get(&x).copied());
+    }
+    g.map(|x| x as usize)
+}
+
+/// The node that began the paragraph at `level` that node `i` is in.
+pub fn paragraph_start_at(chain: &Chain, i: usize, level: u16) -> usize {
+    material::para_start(chain, i, level)
 }
 
 /// The node that began the paragraph node `i` of `chain` ended (or is
@@ -1099,6 +1293,7 @@ fn outside_read(env: &mut dyn Env, outside: &mut Outside, k: &Key, node: u32) ->
         src,
         val,
         scope: None,
+        cond: None,
     });
     outside.insert(k.clone(), (r.clone(), lo, hi));
     r
@@ -1106,15 +1301,71 @@ fn outside_read(env: &mut dyn Env, outside: &mut Outside, k: &Key, node: u32) ->
 
 /// The definition of `key` for the next node of `chain`, and where from.
 fn resolve_now(chain: &Chain, env: &mut dyn Env, outside: &mut Outside, key: &Key) -> ReadRef {
-    match chain.resolve(key, chain.nodes.len()) {
+    let local = chain.resolve(key, chain.nodes.len());
+    // (a definition made between the piece's nodes after the local one
+    // reaches further: a routine's, where the page builder fired)
+    if let Some((d, _)) = local
+        && let Some((val, src)) = env.between(key, d, chain.nodes.len() as u32)
+    {
+        return Arc::new(Read {
+            key: key.clone(),
+            src,
+            val,
+            scope: None,
+            cond: None,
+        });
+    }
+    match local {
         Some((d, val)) => Arc::new(Read {
             key: key.clone(),
             src: Src::Node(d),
             val,
             scope: chain.scope_of(d, key),
+            cond: None,
         }),
         None => outside_read(env, outside, key, chain.nodes.len() as u32),
     }
+}
+
+/// `r` read again for the next node of `chain`, whose input state is
+/// `state`: as of the node now opening the conditional it read before
+/// (`Read::cond`), or as of the next node (`None`: that conditional is
+/// not open any more).
+fn reread(
+    chain: &Chain,
+    state: &RState,
+    env: &mut dyn Env,
+    outside: &mut Outside,
+    r: &Read,
+) -> Option<ReadRef> {
+    let Some(c) = r.cond else {
+        return Some(resolve_now(chain, env, outside, &r.key));
+    };
+    let at = state.conds.get(c as usize)?.open as usize;
+    Some(before_read(chain, env, outside, &r.key, at, c))
+}
+
+/// The definition of `key` as of node `at`, the opener of the `c`th open
+/// conditional (`Read::cond`).
+fn before_read(
+    chain: &Chain,
+    env: &mut dyn Env,
+    outside: &mut Outside,
+    key: &Key,
+    at: usize,
+    c: u16,
+) -> ReadRef {
+    let r = match chain.resolve(key, at) {
+        Some((d, val)) => Read {
+            key: key.clone(),
+            src: Src::Node(d),
+            val,
+            scope: chain.scope_of(d, key),
+            cond: None,
+        },
+        None => (*outside_read(env, outside, key, at as u32)).clone(),
+    };
+    Arc::new(Read { cond: Some(c), ..r })
 }
 
 /// Runs a piece: `old` is its previous run (and the text that made it),
@@ -1147,9 +1398,9 @@ pub fn run_piece(
             .iter()
             .enumerate()
             .filter(|(_, n)| {
-                n.reads
-                    .iter()
-                    .any(|r| !matches!(r.src, Src::Node(_)) && dirty.contains(&r.key))
+                n.reads.iter().any(|r| {
+                    dirty.contains(&r.key) && (!matches!(r.src, Src::Node(_)) || env.has_between(&r.key))
+                })
             })
             .map(|(i, _)| i as u32)
             .collect(),
@@ -1184,11 +1435,27 @@ pub fn run_piece(
     let mut state = chain.input(from);
     let mut scratch = Scratch::default();
     let mut oi = from;
+    // (the material the nodes run hold, and what the environment says of
+    // the run after each)
+    let mut words = 0u64;
+    let mut verdict = Check::Go;
+    let mut abandoned = false;
     // (a paragraph's node runs again if any node of its paragraph did)
     let mut para_fresh = false;
     // (a node ran or was dropped that changes how later names resolve:
     // later old nodes' reads must be looked at one by one)
     let mut scope_changed = false;
+    // (where the old nodes from `from` on are now: runs of old indices
+    // `a..b` at new `c..`, in order; an index the open groups and
+    // conditionals of a kept node's state hold is moved by it)
+    let mut moved: Vec<(u32, u32, u32)> = Vec::new();
+    let to_new = |moved: &[(u32, u32, u32)], x: u32| -> Option<u32> {
+        if (x as usize) < from {
+            return Some(x);
+        }
+        let k = moved.partition_point(|r| r.1 <= x);
+        moved.get(k).filter(|r| r.0 <= x).map(|r| r.2 + (x - r.0))
+    };
     loop {
         let mut kept: Option<Node> = None;
         let shared: Option<Arc<Node>> = None;
@@ -1218,7 +1485,8 @@ pub fn run_piece(
                     cand = Some(oi);
                     let reads_ok = par_ok
                         && n.reads.iter().all(|r| {
-                            Read::same(&resolve_now(&chain, env, &mut outside, &r.key), r)
+                            reread(&chain, &state, env, &mut outside, r)
+                                .is_some_and(|now| Read::same(&now, r))
                         });
                     if reads_ok {
                         let in_place = edit.is_none() && !scope_changed && oi == chain.nodes.len();
@@ -1237,11 +1505,26 @@ pub fn run_piece(
                             if let Some(e) = edit {
                                 n.out.pos = e.map(n.out.pos).unwrap_or(n.out.pos);
                             }
-                            // (re-point reads at the nodes now defining them)
-                            for r in n.reads.iter_mut() {
-                                *r = resolve_now(&chain, env, &mut outside, &r.key);
+                            // (the nodes its state's open groups and
+                            // conditionals began at, where they are now: as
+                            // the position, they are not content)
+                            let at = chain.nodes.len() as u32;
+                            let own = oi as u32;
+                            if let Some(out) = n.out.moved(|x| {
+                                if x == own {
+                                    Some(at)
+                                } else {
+                                    to_new(&moved, x)
+                                }
+                            }) {
+                                n.out = out;
+                                // (re-point reads at the nodes now defining them)
+                                for r in n.reads.iter_mut() {
+                                    *r = reread(&chain, &state, env, &mut outside, r)
+                                        .expect("read again above");
+                                }
+                                kept = Some(n);
                             }
-                            kept = Some(n);
                         }
                     }
                 }
@@ -1269,6 +1552,9 @@ pub fn run_piece(
                 j += 1;
             }
             chain.share(oc, oi, j);
+            if j > oi {
+                moved.push((oi as u32, j as u32, oi as u32));
+            }
             if j == oc.nodes.len() {
                 break;
             }
@@ -1277,6 +1563,13 @@ pub fn run_piece(
             continue;
         }
         let fresh = kept.is_none() && shared.is_none();
+        // (the old node this one stands for: kept, or run again at its input)
+        let was = if kept.is_some() { Some(oi) } else { cand };
+        if let Some(w) = was
+            && moved.last().is_none_or(|r| (r.1 as usize) <= w)
+        {
+            moved.push((w as u32, w as u32 + 1, chain.nodes.len() as u32));
+        }
         let n: Arc<Node> = match (shared, kept) {
             (Some(n), _) => {
                 oi += 1;
@@ -1298,7 +1591,19 @@ pub fn run_piece(
                 // shared)
                 x.old_para = cand.and_then(|ci| oldc.and_then(|oc| oc.nodes[ci].para().cloned()));
                 x.command();
-                chain.with_group(x.finish())
+                let stop = x.stop.take();
+                if let Some(Check::Exceeded(size)) = stop {
+                    x.err(capacity_error(size));
+                    x.kind = Kind::End;
+                }
+                let n = chain.with_group(x.finish());
+                words += words_of(&n);
+                verdict = match stop {
+                    Some(Check::Abandon) => Check::Abandon,
+                    Some(_) => Check::Go,
+                    None => env.check(ran, words.max(pending_words(&n.out))),
+                };
+                n
             }
         };
         let mut same_material = !fresh;
@@ -1345,6 +1650,21 @@ pub fn run_piece(
         chain.push_arc(n);
         if end {
             break;
+        }
+        match std::mem::replace(&mut verdict, Check::Go) {
+            Check::Go => {}
+            Check::Abandon => {
+                abandoned = true;
+                break;
+            }
+            Check::Exceeded(size) => {
+                let mut x = Exec::new(text, &chain, &state, env, &mut outside, &mut scratch);
+                x.err(capacity_error(size));
+                x.kind = Kind::End;
+                let n = chain.with_group(x.finish());
+                chain.push_arc(n);
+                break;
+            }
         }
     }
     // (exports: each key defined in the piece, as it reaches the end)
@@ -1420,6 +1740,7 @@ pub fn run_piece(
         errors,
         ran,
         fonts,
+        abandoned,
     }
 }
 
@@ -1480,6 +1801,16 @@ struct Exec<'a> {
     /// The paragraph the old node at this place made, if any: an equal
     /// paragraph is that one (the same `Arc`).
     old_para: Option<Arc<Para>>,
+    /// While a rewritten text (`\scantokens`) is read: its characters,
+    /// which the tokenizer reads instead of the piece's.
+    ptext: Option<Arc<[char]>>,
+    /// The output routine's end this node is (`output::OutputEnd`).
+    output: Option<Box<output::OutputEnd>>,
+    /// Input rewrites (macro calls and the like) in this node, and what
+    /// the environment said of the run while it expanded on and on: the
+    /// node ends at once ([`Exec::rewrite`]).
+    steps: u64,
+    stop: Option<Check>,
 }
 
 /// Up to this many reads, a node's reads are looked up by a scan.
@@ -1538,6 +1869,10 @@ impl<'a> Exec<'a> {
             at_start: false,
             stamp,
             old_para: None,
+            ptext: None,
+            output: None,
+            steps: 0,
+            stop: None,
         }
     }
 
@@ -1566,7 +1901,8 @@ impl<'a> Exec<'a> {
             || self.phi.is_some()
             || !self.vemit.is_empty()
             || self.log.is_some()
-            || self.input.is_some())
+            || self.input.is_some()
+            || self.output.is_some())
         .then(|| {
             Box::new(Rare {
                 defs: self.defs,
@@ -1576,6 +1912,7 @@ impl<'a> Exec<'a> {
                 vemit: self.vemit,
                 log: self.log,
                 input: self.input,
+                output: self.output,
             })
         });
         Node {
@@ -1613,6 +1950,7 @@ impl<'a> Exec<'a> {
                 src: Src::Node(self.chain.nodes.len() as u32),
                 val: self.defs[i].val.clone(),
                 scope: None,
+                cond: None,
             }),
             Found::Read(i) => self.reads[i].clone(),
         }
@@ -1745,13 +2083,36 @@ impl<'a> Exec<'a> {
     // ------------------------------------------------------------ the input
 
     fn back(&mut self, t: Tok) {
-        self.st.pending.push((Arc::from([t]), 0));
+        // (tex.web 325: lists read to their end go first, not those under
+        // a rewritten text)
+        let floor = self.st.texts.last().map_or(0, |x| x.at);
+        while self.st.pending.len() > floor && self.st.pending.last().is_some_and(|(l, i, _)| *i >= l.len()) {
+            self.st.pending.pop();
+        }
+        self.st.pending.push((Arc::from([t]), 0, true));
     }
 
-    /// Rewrites the input: `toks`, then the rest.
+    /// Rewrites the input: `toks`, then the rest. A node expanding on and
+    /// on (a macro calling itself) asks the environment now and then
+    /// whether the run goes on ([`Env::check`]); if not, its input ends
+    /// here.
     fn rewrite(&mut self, toks: Vec<Tok>) {
         if !toks.is_empty() {
-            self.st.pending.push((Arc::from(toks), 0));
+            self.st.pending.push((Arc::from(toks), 0, false));
+        }
+        self.steps += 1;
+        if self.steps.is_multiple_of(1 << 12) && self.stop.is_none() {
+            let words = pending_words(&self.st) + (self.emit.len() + self.vemit.len()) as u64;
+            match self.env.check(self.steps, words) {
+                Check::Go => {}
+                c => {
+                    self.stop = Some(c);
+                    self.st.pending.clear();
+                    self.st.texts = Stack::new();
+                    self.ptext = None;
+                    self.st.pos = self.text.len();
+                }
+            }
         }
     }
 
@@ -1778,9 +2139,18 @@ impl<'a> Exec<'a> {
         self.st.eol = EOL_UNREAD;
     }
 
+    /// The characters the tokenizer reads: the piece's, or a rewritten
+    /// text's while one is read.
+    fn txt(&self) -> &[char] {
+        match &self.ptext {
+            Some(t) => t,
+            None => self.text,
+        }
+    }
+
     /// Moves to `np`; past a line's end, the next line begins.
     fn advance(&mut self, np: usize) {
-        let crossed = self.text[self.st.pos..np].contains(&'\r');
+        let crossed = self.txt()[self.st.pos..np].contains(&'\r');
         self.st.pos = np;
         if crossed {
             self.new_line();
@@ -1796,18 +2166,18 @@ impl<'a> Exec<'a> {
     /// inactive), and `^^` reduces the character or the two hex digits
     /// after it.
     fn char_at(&mut self, pos: usize) -> Option<(char, usize, u8)> {
-        let raw = *self.text.get(pos)?;
+        let raw = *self.txt().get(pos)?;
         let c = if raw == '\r' { self.eol()? } else { raw };
         let cat = self.catcode(c);
         // (`^^`: the second circumflex on the line, and a character after it)
-        if raw == '\r' || cat != 7 || self.text.get(pos + 1) != Some(&c) {
+        if raw == '\r' || cat != 7 || self.txt().get(pos + 1) != Some(&c) {
             return Some((c, pos + 1, cat));
         }
         let at = |x: &mut Self, p: usize| -> Option<char> {
-            match x.text.get(p) {
+            let ch = x.txt().get(p).copied();
+            match ch {
                 Some('\r') => x.eol(),
-                Some(&ch) => Some(ch),
-                None => None,
+                other => other,
             }
         };
         let Some(c2) = at(self, pos + 2) else {
@@ -1818,7 +2188,7 @@ impl<'a> Exec<'a> {
         }
         let hex = |ch: char| ch.is_ascii_digit() || ('a'..='f').contains(&ch);
         let (r, np) = match at(self, pos + 3) {
-            Some(c3) if hex(c2) && hex(c3) && self.text.get(pos + 2) != Some(&'\r') => (
+            Some(c3) if hex(c2) && hex(c3) && self.txt().get(pos + 2) != Some(&'\r') => (
                 (c2.to_digit(16).unwrap_or(0) << 4) | c3.to_digit(16).unwrap_or(0),
                 pos + 4,
             ),
@@ -1833,35 +2203,82 @@ impl<'a> Exec<'a> {
 
     /// The position just after the current line's end.
     fn line_end_after(&self, pos: usize) -> usize {
-        self.text[pos..]
+        let text = self.txt();
+        text[pos..]
             .iter()
             .position(|&c| c == '\r')
-            .map_or(self.text.len(), |k| pos + k + 1)
+            .map_or(text.len(), |k| pos + k + 1)
     }
 
     /// The next token, unexpanded (tex.web 343-357). After `\noexpand`'s
     /// mark, the token after it, with `noexp` set.
     fn next_raw(&mut self) -> Option<Tok> {
         self.noexp = false;
-        while let Some((list, i)) = self.st.pending.last_mut() {
-            if *i < list.len() {
-                let t = list[*i].clone();
-                *i += 1;
-                if *i == list.len() {
-                    self.st.pending.pop();
+        loop {
+            // (the token lists above the innermost rewritten text; a list
+            // read to its end stays until the next read, tex.web 325)
+            let floor = self.st.texts.last().map_or(0, |x| x.at);
+            while self.st.pending.len() > floor {
+                let Some((list, i, _)) = self.st.pending.last_mut() else { break };
+                if *i < list.len() {
+                    let t = list[*i].clone();
+                    *i += 1;
+                    if t == Tok::DontExpand {
+                        let n = self.next_raw();
+                        self.noexp = n.as_ref().is_some_and(|x| x.key().is_some());
+                        return n;
+                    }
+                    return Some(t);
                 }
-                if t == Tok::DontExpand {
-                    let n = self.next_raw();
-                    self.noexp = n.as_ref().is_some_and(|x| x.key().is_some());
-                    return n;
-                }
+                self.st.pending.pop();
+            }
+            if self.st.texts.is_empty() {
+                return self.tokenize();
+            }
+            if let Some(t) = self.text_token() {
                 return Some(t);
             }
-            self.st.pending.pop();
         }
+    }
+
+    /// The next token of the innermost rewritten text, read as the piece's
+    /// text is; at its end `\everyeof` goes in once (etex.web §362), then
+    /// the text is done (`None`: read on below it).
+    fn text_token(&mut self) -> Option<Tok> {
+        let x = self.st.texts.last()?.clone();
+        let outer = (self.st.pos, self.st.tstate, self.st.eol);
+        (self.st.pos, self.st.tstate, self.st.eol) = (x.pos, x.tstate, x.eol);
+        let prev = self.ptext.replace(x.text.clone());
+        let t = self.tokenize();
+        self.ptext = prev;
+        let here = (self.st.pos, self.st.tstate, self.st.eol);
+        (self.st.pos, self.st.tstate, self.st.eol) = outer;
+        let Some(x) = self.st.texts.last_mut() else { return t };
+        (x.pos, x.tstate, x.eol) = here;
+        if t.is_some() {
+            return t;
+        }
+        if !x.eof {
+            x.eof = true;
+            let every = match self.get(&Key::TokPar(crate::val::TokPar::Everyeof)) {
+                Val::Toks(l) => l,
+                _ => Arc::new(Vec::new()),
+            };
+            if !every.is_empty() {
+                self.rewrite(every.to_vec());
+                return None;
+            }
+        }
+        self.st.texts.pop();
+        None
+    }
+
+    /// The next token of the text being read (the piece's, or a rewritten
+    /// one's: `txt`), unexpanded (tex.web 343-357).
+    fn tokenize(&mut self) -> Option<Tok> {
         loop {
             let pos = self.st.pos;
-            let raw = *self.text.get(pos)?;
+            let raw = *self.txt().get(pos)?;
             if self.st.eol == EOL_UNREAD {
                 self.read_eol();
             }
@@ -2118,16 +2535,17 @@ impl<'a> Exec<'a> {
             std::mem::take(&mut self.st.long),
             std::mem::take(&mut self.st.outer),
         );
+        let protected = std::mem::take(&mut self.st.protected);
         if self.st.mode == Mode::M && self.math_command(&t, &m) {
             return;
         }
         match m {
             Meaning::Prim(p) if p.conditional() => self.conditional(p, &t),
-            Meaning::Prim(Prim::Global | Prim::Long | Prim::Outer) => {
+            Meaning::Prim(Prim::Global | Prim::Long | Prim::Outer | Prim::Protected) => {
                 let Meaning::Prim(p) = m else { unreachable!() };
-                self.prefix(p, global, long, outer);
+                self.prefix(p, global, long, outer, protected);
             }
-            _ if assign::prefixable(&m) => self.prefixed(&t, &m, global, long, outer),
+            _ if assign::prefixable(&m) => self.prefixed(&t, &m, global, long, outer, protected),
             Meaning::Prim(Prim::Mat(x)) => self.mat(x, &t),
             Meaning::Prim(Prim::Math(x)) => self.math_prim(x, &t),
             Meaning::Prim(p) => self.prim(p),
@@ -2167,12 +2585,11 @@ impl<'a> Exec<'a> {
             kind: g,
             after: Vec::new(),
             boxg: None,
+            at: self.chain.nodes.len() as u32,
         });
         self.kind = Kind::Open;
     }
 
-    /// The innermost group closes: it defines nothing; the tokens
-    /// `\aftergroup` gave it rewrite the input (tex.web 282).
     /// Where a box's diagnostic says it was made (tex.web 663).
     fn box_place(&self) -> crate::show::Place {
         if self.st.in_output() {
@@ -2182,32 +2599,12 @@ impl<'a> Exec<'a> {
         }
     }
 
+    /// The innermost group closes: it defines nothing; the tokens
+    /// `\aftergroup` gave it rewrite the input (tex.web 282).
     fn close_group(&mut self) {
         let after = self.st.groups.pop().map(|g| g.after).unwrap_or_default();
         self.rewrite(after);
         self.kind = Kind::Close;
-    }
-
-    /// The `}` ending an output routine (tex.web 1100, 1026): a paragraph
-    /// ends first; `\box255` must be void; nothing may follow in the
-    /// routine's tokens.
-    fn close_output(&mut self, t: &Tok) {
-        if self.st.mode == Mode::H {
-            let e = self.cs("\u{0}endgraf");
-            self.rewrite(vec![e, t.clone()]);
-            return;
-        }
-        if let Some((list, i)) = self.st.pending.last()
-            && *i < list.len()
-        {
-            self.err("Unbalanced output routine".into());
-            self.st.pending.clear();
-        }
-        if !matches!(self.get(&Key::Box(255)), Val::Void) {
-            self.err("Output routine didn't use all of \\box255".into());
-            self.change_box(255, Val::Void);
-        }
-        self.close_group();
     }
 
     fn char_tok(&mut self, cat: u8, c: char, t: &Tok) {
@@ -2217,7 +2614,7 @@ impl<'a> Exec<'a> {
                 Some(GroupKind::Simple) => self.close_group(),
                 Some(GroupKind::Box) => self.close_box(t),
                 Some(GroupKind::Math) => self.math_right_brace(),
-                Some(GroupKind::Output) => self.close_output(t),
+                Some(GroupKind::Output) => self.output_close(t),
                 Some(GroupKind::SemiSimple) => self.err("Extra }, or forgotten \\endgroup".into()),
                 None => self.err("Too many }'s".into()),
             },
@@ -2249,7 +2646,11 @@ impl<'a> Exec<'a> {
             Prim::BeginGroup => self.open_group(GroupKind::SemiSimple),
             Prim::EndGroup => match self.st.groups.last().map(|g| g.kind) {
                 Some(GroupKind::SemiSimple) => self.close_group(),
-                Some(GroupKind::Simple | GroupKind::Box | GroupKind::Math | GroupKind::Output) => {
+                Some(GroupKind::Math) => {
+                    let t = self.cmd.clone();
+                    self.math_off_save(&t);
+                }
+                Some(GroupKind::Simple | GroupKind::Box | GroupKind::Output) => {
                     // (tex.web 1064: the missing `}` goes in first)
                     self.err("Missing } inserted".into());
                     let t = self.cmd.clone();
@@ -2279,6 +2680,8 @@ impl<'a> Exec<'a> {
                 }
             }
             Prim::Message | Prim::ErrMessage => self.message(p == Prim::ErrMessage),
+            Prim::SetLanguage => self.set_language(),
+            Prim::Show(c) => self.show_cmd(c),
             Prim::Immediate => self.immediate(),
             Prim::Write => {
                 self.err(
@@ -2291,6 +2694,7 @@ impl<'a> Exec<'a> {
             Prim::EndCsName => self.err("Extra \\endcsname".into()),
             Prim::End | Prim::Dump => self.stop(),
             Prim::Relax => {}
+            Prim::Marks | Prim::Discards(_) | Prim::ShowE(_) | Prim::Lr(_) => self.etex_command(p),
             Prim::LastItem(_)
             | Prim::SpaceFactor
             | Prim::PrevDepth

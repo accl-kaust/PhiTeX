@@ -12,11 +12,11 @@ tex.web command code, its graph form and its status here.
 | class | primitives | done | partial | not yet |
 |---|---|---|---|---|
 | (i) expandable, input rewriting | 40 | 33 | 5 | 2 |
-| (ii) assignments, scopes | 151 | 146 | 3 | 2 |
-| (iii) material | 73 | 63 | 0 | 10 |
+| (ii) assignments, scopes | 151 | 148 | 3 | 0 |
+| (iii) material | 73 | 64 | 0 | 9 |
 | (iv) layout and output | 43 | 23 | 12 | 8 |
-| (v) IO and diagnostics | 18 | 6 | 2 | 10 |
-| all | 325 | 271 | 22 | 32 |
+| (v) IO and diagnostics | 18 | 7 | 3 | 8 |
+| all | 325 | 275 | 23 | 27 |
 
 ("done": tex.web's semantics, checked against `tex -ini` by `tests/core.rs`
 (logs of programs that do not typeset) and `tests/dvi.rs` (DVI files and
@@ -163,8 +163,10 @@ both TeX and the graph; `tests/flow.rs`'s `doc()` begins with its catcodes,
     material before it (the true dependency). The page builder also
     *defines* `\outputpenalty` (globally, tex.web 1013): with `\output`
     that becomes a definition made by the fold at the firing call, read by
-    the output routine's nodes (19). Now: an empty page's values, empty
-    marks, `\outputpenalty` not defined.
+    the output routine's nodes (19). Now: they are `Key`s (`Key::Page`,
+    `Key::Mark`) an output routine's run defines at its start ("The TeX
+    side of output routines"); elsewhere an empty page's values and empty
+    marks until the fold defines them.
 13. **The current list's last item**: `\lastpenalty`, `\lastkern`,
     `\lastskip`, `\/` read it; `\unskip`, `\unkern`, `\unpenalty` remove
     it. Done: the removals emit `Item::Remove`, which the list's gatherer
@@ -191,9 +193,22 @@ both TeX and the graph; `tests/flow.rs`'s `doc()` begins with its catcodes,
 15. **`\mag` and `true` units** — TeX freezes `\mag` at its first use
     (`mag_set`, a hidden global). Proposal: `Key::MagSet`, defined globally
     by the first node using it. Now: `\mag` is read, not frozen.
-16. **`\show`, `\showthe`, error contexts** — need the line-number field;
-    not implemented. `\message` and `\immediate\write` are the conformance
-    oracle meanwhile.
+16. **`\show`, `\showthe`, error contexts** — `\showbox` and `\showlists`
+    are done (`graph/diag.rs`): their text is a raw log entry whose line
+    numbers are placeholders the log's gatherer fills (`G` k: where the
+    `k`-th enclosing group's list began; `Q` level: a paragraph's first
+    line; `X`, `T`: an error context's two lines, laid out with
+    `error_line` 79 and `half_error_line` 50, tex.web 317), so no line
+    number is in a node's result. The context shows a backed-up list at
+    the top (`<to be read again>`, `<recently read>`: a list read to its
+    end stays in `RState.pending` until the next token is read, as TeX's
+    input level does), `...` for the levels between (IniTeX's
+    `\errorcontextlines` is 0), and the reader's line; a macro's level at
+    the top is not named yet. `\showlists` shows each open list (the main
+    vertical list: what this piece contributed since the page builder was
+    last called); the current page (`### current page:`) is the page
+    fold's state and is not shown — exact where the page is empty.
+    `\show` and `\showthe` are not yet.
 17. **The DVI file is a fold**: TeX writes a font's definition where it is
     first used, reuses `w`/`x`/`y`/`z` movements only within what its
     half-buffer (`dvi_buf_size` 16384) still holds (`dvi_gone`), points each
@@ -235,10 +250,7 @@ both TeX and the graph; `tests/flow.rs`'s `doc()` begins with its catcodes,
     `SOURCE_DATE_EPOCH`), the graph from `\year`… (1970.01.01:0000
     initially). `tests/dvi.rs` masks the comment's bytes (15 to 41) when it
     compares files; everything else is compared byte for byte.
-23. **Hyphenation**: the tables and `hyphenate` are pure functions over
-    values (`hyph.rs`, see Hyphenation below); `\patterns` and
-    `\hyphenation` are not yet nodes and line breaking's second pass does
-    not hyphenate (exact for `-ini` documents without patterns). `\accent`, `\noboundary`, `\vadjust`, `\insert`,
+23. **Hyphenation**: done (see Hyphenation below). `\accent`, `\noboundary`, `\vadjust`, `\insert`,
     leaders, `\special` and non-immediate `\write` are not yet.
 24. Small departures, documented: `\if…`'s inserted `\relax` (a `\fi` met
     while the test is read) is the name `\relax`, not a frozen one; a
@@ -296,20 +308,33 @@ byte for byte against `tex -ini`.
   break at glue inside a formula, a break at `\mathoff` before glue, its
   width zero at a break), `$` in the short display, `\mathsurround` in
   `show_box`. `\ifmmode` is true in math.
+- `\showlists` and `\showbox` display math lists (§690–§698: noads,
+  fractions, delimiters, styles, choices, `\mskip`, `\mkern`,
+  `\nonscript`, an incomplete fraction "this will begin denominator of:"),
+  checked by `tests/dvi/showmath.tex`. The errors of a formula are TeX's
+  in TeX's order (`tests/dvi.rs`'s `math_errors_in_order`): the font check
+  of §1195 is read by the closing `$` inside the group, before "Display
+  math should end with $$", and again for a display after its equation
+  number; `off_save` in math inserts what closes the innermost group
+  (`$`, `\right.`, `}`, `\endgroup`, tex.web 1064).
 - Not yet: `\accent` in math (and outside), display alignments
   (`$$\halign…$$`, with the alignments), `\vadjust` and `\insert` in
-  formulas, `\showlists`/`\showbox` of noads. Approximations: the check
-  for enough symbol and extension font parameters (§1195) counts the
-  parameters the font was loaded with (TeX also counts those `\fontdimen`
-  added to the last loaded font); `off_save` in math (a `$` or `\right`
-  closing the wrong group) inserts a `}` only.
+  formulas. Approximation: the check for enough symbol and extension font
+  parameters (§1195) counts the parameters the font was loaded with (TeX
+  also counts those `\fontdimen` added to the last loaded font); `\right`
+  inserted by `off_save` is the name `\right`, not a frozen one.
 
 ## Hyphenation
 
 Knuth's algorithm as pure functions (`hyph.rs`, tex.web §891–965), checked
 by `tests/hyph.rs`: `hyphen.tex`'s patterns and exceptions, 368 words
 (plus `\uchyph`, minima and a later `\hyphenation`) break exactly where
-`tex -ini`'s `\showhyphens` breaks them.
+`tex -ini`'s `\showhyphens` breaks them. Integrated (`graph/lang.rs`,
+`hyph::hyphenate_after`, `linebreak.rs`): `tests/dvi/hyph1.tex` and
+`hyph2.tex` (hyphen.tex loaded by the `\patterns` node) are TeX's DVI
+and log at all five schedules; 60,800 dictionary words through the whole
+line breaker (`\showhyphens` in a `\vbox`, both minima 2/3 and 1/1) give
+TeX's log line for line at 8 threads (checked once, not a test).
 
 | TeX | graph |
 |---|---|
@@ -319,22 +344,25 @@ by `tests/hyph.rs`: `hyphen.tex`'s patterns and exceptions, 368 words
 | `\hyphenation{…}` | likewise: reads `\language`, `Key::Exceptions(lang)`, the `\lccode`s; defines `Key::Exceptions(lang)` globally (a word given again replaces the old one) |
 | `\language`, `\lefthyphenmin`, `\righthyphenmin`, `\uchyph` | `IntPar`s; a paragraph takes language and minima where it starts (§1091, `norm_min`) and where `\language` changes in it (a language whatsit, §1376), `\uchyph` where it ends (§891) |
 | `\hyphenchar` | `Key::HyphenChar(font key)` (done), read by the paragraph for each font its words use (§891: outside 0–255, no word of that font is hyphenated) |
-| `trie_not_ready` (§891, §960) | open: TeX packs the trie at the first paragraph whose line breaking reaches the second pass, and `\patterns` after that is "Too late for \patterns" — whether that happened is a read of earlier paragraphs' line breaking. Proposal: accept `\patterns` always (different from TeX only after that error) |
+| `trie_not_ready` (§891, §960) | decided: `\patterns` is always accepted. The one divergence: TeX packs the trie at the first paragraph whose line breaking reaches the second pass, and gives "Too late for \patterns" (ignoring them) for a `\patterns` after that; here they are added and used by later paragraphs |
+| `clang`, a paragraph's `prev_graf` language field | `RState.hyph_lang` (`clang`, the language and minima the paragraph began with, tex.web 1091, 1200), saved by box and math groups like the space factor |
+| the language whatsit (§1341, §1376–1377) | `Item::Lang{lang, lhm, rhm}`, emitted by `\setlanguage` and where a run of characters begins in a paragraph whose `\language` changed (`fix_language`); a breakpoint before glue like any whatsit, shown as `\setlanguage1 (hyphenmin 2,3)` |
 
-The integration (after the merge) is in the line-break task: its second
-pass (§894–903) finds the words — after glue, letters of one font with
-nonzero `\lccode`, at most 63, followed by glue, a penalty, an insertion,
-a mark, an adjust, a whatsit or an explicit kern (§896–899) — and calls
-`hyphenate` with the paragraph's `Patterns`/`Exceptions` (reads of
-`Key::Patterns(lang)`, `Key::Exceptions(lang)` at the paragraph's end, so
-an edit to the tables re-runs exactly the paragraphs that reached the
-second pass), memoised per word by (the two versions, the word, the
-minima). Reconstitution (§903–918) turns the positions into
-discretionaries with the font's ligatures and kerns; it can drop a
-position (§916 builds a post-break text without hyphens: `raffish` with
-both minima 1 gives `raf-fish` in cmr10 though `hyphenate` allows
-`raf-f-ish`), so the oracle for that step is the line breaker's own
-`tests/dvi.rs` documents.
+The line breaker's second pass (§894–918) hyphenates the word after each
+glue it passes, in its own copy of the paragraph's list
+(`hyph::hyphenate_after`: which words are tried — after glue, letters of
+one font with nonzero `\lccode`, at most 63, followed by glue, a penalty,
+a mark, a whatsit or an explicit kern — then `hyphenate`, then the
+reconstitution of §903–§918 with the font's ligatures and kerns around
+each discretionary, which is where `raffish` loses a break); the third
+pass works on the hyphenated list, as TeX's does. What it reads is read by
+the node that breaks the paragraph (`\par`, `$$`, a box's end) into
+`LineParams::hyph` (`hyph::HyphParams`): the paragraph's starting
+language and minima, `\uchyph`, the `\lccode` of each character in the
+list, each font's `\hyphenchar`, `\tracinglostchars`, and the
+`Key::Patterns(l)`/`Key::Exceptions(l)` of each language it uses — reads
+like any other, so a changed `\patterns` or `\hyphenation` re-breaks
+exactly the paragraphs that read it.
 
 ## Output routines, insertions and marks (decided)
 
@@ -417,12 +445,106 @@ run**:
   contributions are not empty or `\deadcycles≠0`, it appends `\hbox
   to\hsize{}`, `\vfill`, `\penalty-'10000000000` and fires again.
 
-`\deadcycles` and `\insertpenalties` (set_page_int) are fold state, not
-`Key`s: an assignment to them in the body emits an item the fold applies
-in order (as `\prevdepth`'s `Item::PrevDepth` does now); in a routine run
-it changes the run's own copy, returned to the fold at the run's end. A
-read of them, of the marks, of `\pagegoal`… in the body is a read of the
-fold's state at the reading node's position (Conflict 12).
+`\deadcycles`, `\insertpenalties`, `\pagegoal`… and the marks are `Key`s
+(coordinator, 2026-10-09, superseding "fold state, not `Key`s"):
+`Key::Page(k)` and `Key::Mark(which, class)`. A routine run defines them
+at its start (the fold's values at the fire); outside a routine a read sees
+what the last definition before it made (a run's exports), else an empty
+page's values; `\shipout` defines `\deadcycles` 0 wherever it is (§638).
+The fold reads `\deadcycles` at the fire and at `\end` like any name.
+
+### The TeX side of output routines (done: `graph/output.rs`)
+
+The handoff for the page fold (agent A's sequence):
+
+1. **At a fire with a routine** (`\output` not empty, `\deadcycles <
+   \maxdeadcycles`, read at the firing place): the fold computes the page
+   box (`vpack` to the best size, as the default output does), the marks
+   (`output::fire_marks(prev, &page)`: §1012–1014 for every class, from
+   the marks after the previous page) and `OutputReads { output_penalty
+   (§1013), insert_penalties (§1018), dead_cycles (the value read at the
+   fire, before §1025's increment), marks, page_so_far }`, and calls
+   **`output::output_entry(&page, &reads, &output_tokens) -> RState`**
+   (`output_tokens`: `\output`'s value, braces included). The state is a
+   piece start's but for its input: `\0output`, then the routine's tokens;
+   `RState::fire` carries the fold's values to the run's first nodes.
+2. **The run**: a piece whose text is **empty** and whose chain starts
+   from that state (`Chain::with_entry`; `Chain::prefix` keeps it, so a
+   re-run of the routine with `run_piece` given the entry shares nodes as
+   a piece's does). `output::run_routine(&entry, env)` is the cold run
+   (what `tests/output.rs` uses). An empty text is safe for the reader
+   (the input ends where the pending tokens do: the `End` node), for
+   `logs` (every node is at the text's line 1) and for the context lines
+   of errors. Its nodes:
+   - node 0 (`\0output`, `Kind::Open`): defines, **globally**, `\box255`
+     (the page), `\outputpenalty`, `Key::Page(DEAD_CYCLES)` (incremented)
+     and every `Key::Mark(0..=2, class)` handed in; opens the output group
+     (`GroupKind::Output`, `\currentgrouptype` 8) with an internal vertical
+     list at level 1 (`prev_depth` ignored, `prev_graf` 0); reads the `{`.
+   - node 1 (`\0outputpage`): inside the group, `Key::Page(0..=7)`
+     (`page_so_far`) and `Key::Page(INSERT_PENALTIES)`; `normal_paragraph`.
+   - the routine's nodes. `\shipout` is a node as before (`Item::Shipout`,
+     `\deadcycles` 0).
+   - the group's `}` (`Kind::Close`): "Unbalanced output routine" (§1100,
+     the rest of the routine's text skipped); a paragraph in progress ends
+     first; the group closes; "Output routine didn't use all of \box255"
+     (§1028; `\box255` voided, globally); both errors carry TeX's help
+     lines after the message (`output::UNBALANCED`, `output::UNUSED`). The
+     node's **material** (`Para::before` at the run's outer level) is the
+     pages its `\shipout`s made (`Item::Shipout`, in order), then the
+     routine's vertical list at its end (the **leftover**, interline glue
+     in it); its result is **`Node::output() -> Some(&OutputEnd { shipped,
+     dead_cycles })`** (`Rare::output`; `shipped` counts the pages before
+     the leftover; `output::output_end(&run)` gives it with the leftover).
+   - anything read after the `}` (an `\aftergroup` token) runs at the run's
+     outer level (vertical mode): its material follows.
+3. **What the fold does with the run**: its **definitions** enter the
+   names index at the firing place `(k, i)` (its exports: `\box255` void,
+   `\outputpenalty`, `\deadcycles`, the marks, whatever the routine
+   defined globally); its **pages** (the run's material, `Item::Shipout`)
+   go to the DVI in order; the **leftover** (the rest of the `Close`
+   node's material) goes before the remaining contributions (after held-over insertions, §1026), then the fold calls
+   the page builder (§1026's `build_page`) with the firing call's
+   parameters, then feeds the run's other material; its **errors** are the
+   document's at that place. `OutputEnd::dead_cycles` equals the run's
+   export of `Key::Page(DEAD_CYCLES)`: the fold reads it (or the export)
+   at `\end` (§1054) and at the next fire (`Output loop---N consecutive
+   dead cycles`, §1024, is the fold's). Line numbers in the run's log
+   entries are line 1 of an empty text: the log's gatherer gives them the
+   firing node's line.
+4. Not here: insertions (`\insert`, `\vadjust`, `\vsplit` are not on this
+   line yet; `\floatingpenalty`, `\splittopskip`, `\splitmaxdepth` are
+   ordinary `Key`s their packaging node will read at the close, and
+   `\holdinginserts`, each class's `\count`/`\dimen`/`\skip`/`\box` are
+   names the fold reads at the firing place, as it reads `\output` and
+   `\maxdeadcycles`), `\showlists` inside a routine (its list is not one
+   `\showlists` shows yet), and the "The following box has been deleted:"
+   diagnostic of §1028 (errors' help and diagnostics are not in the log).
+   `tests/output.rs` checks plain's `\output` on a page with marks in its
+   headline against `tex -ini` (the DVI file, byte for byte), the two
+   errors against TeX's, and what a routine reads and leaves.
+
+### The fold side (done: `page.rs`, `build.rs`)
+
+One mechanism: at a fire with a routine the fold (`Scan::fire_up`) builds
+the page box, the marks of every class (`output::fire_marks`) and
+`OutputReads`, and hands them with `\output`'s tokens to the build
+(`page::Routine`); `BuildFold::fire` makes the entry with
+`output::output_entry`, runs it with `output::run_routine` (memoised by
+the page, the reads, the tokens and what the routine read), takes its
+pages and leftover from its `Close` node's material and enters its
+exports at the firing place `(k, i)`, with the fold's own definitions
+(the insertion boxes, §1018–1022). At every fire, the default output's
+included, the fold defines `\outputpenalty` (§1013) and, once there are
+marks, `Key::Mark(0..=2, class)`; the default output defines
+`\deadcycles` 0 once the fold has fired a routine.
+
+A definition at `(k, i)` reaches piece `k`'s nodes after `i`, those that
+would otherwise read one of the piece's own earlier definitions included
+(`Env::between`), and the pieces after `k`: piece `k`'s export of a name
+gives way to a definition between its nodes made after its own last one
+(`export_of`). A node reading the name in piece `k` after `i` is marked
+when the definition changes.
 
 **The page scan's incremental resume rule.** Routine runs are elements of
 the material sequence, like pieces. The resume point is the last page
@@ -454,20 +576,149 @@ positions after it, and its material is consumed after it.
 - Line numbers: `(file, line)` is a field of the position, read by
   `\inputlineno` and error contexts, never in a version.
 
+## e-TeX (extended mode)
+
+`Options::etex` (default true; fixed for a `Build`'s life) is etex.web's
+extended mode: e-TeX's 66 primitives are named (`val::initial`,
+`prim::ETEX_PRIMITIVES`) and registers go to 32767. With it false the graph
+is TeX82 (`tests/core.rs`, `tests/dvi.rs` compare with `tex`); with it true
+`tests/etex.rs` compares with `etex -ini -etex`. The code is
+`src/graph/etex.rs`, with hooks in `expand.rs` (conditionals, `\the`-like
+steps, `\protected` in expanded text), `scan.rs` (items, register numbers),
+`assign.rs` (prefixes, `\interactionmode`) and `graph.rs` (the rewritten
+texts of `\scantokens`).
+
+| etex.web quantity | here |
+|---|---|
+| `eTeX_mode` | `Key::ETeXMode`: a value of the format no document defines; read only where TeX82 and e-TeX differ outside the names (a register number past 255) |
+| `interaction` | `Key::Interaction` (global; IniTeX's 3 initially — the oracle runs with `-interaction=batchmode`, so programs set it before reading it); `\batchmode`… and `\interactionmode=` define it and end the log's line (`new_interaction`'s `print_ln`) |
+| the new integer parameters, `\everyeof` | `IntPar::Tracingassigns` … `TeXXeTstate`, `TokPar::Everyeof` |
+| `cur_if`, `if_limit` for `\currentif…` | `RState.conds` (`Cond.code`: the conditional's code, +32 after `\unless`; `Cond.limit`) |
+| `cur_group`, `cur_level` for `\currentgroup…` | `RState.groups` (kind, and a box group's `BoxGroup`: hbox, adjusted hbox, vbox, vtop, disc) |
+| a pseudo file (`\scantokens`) | `RState.texts`: a text the input was rewritten with, above the rewritten token lists it was made over; read lazily with the catcodes in force (its own position, tokenizer state and end-of-line character), `\everyeof` once at its end |
+| the protected mark (`protected_token`) | `Macro.protected` |
+| mark classes | `Item::Marks(n, toks)` (class 0 is `Item::Mark`) |
+| TeXXeT's math nodes | the math node, `Item::Math { w, after, lr }` with `lr` the beginning subtype (6 `\beginL`/`\endL`, 10 `\beginR`/`\endR`; 0: a formula's edges) |
+
+Conflicts and gaps, with graph-shaped proposals:
+
+1. **`\scantokens`' end inside a scan**: TeX checks `scanner_status` at a
+   file's end ("File ended while scanning definition of …", which is why
+   `\everyeof{\noexpand}` is idiomatic). Not made: the end is silent.
+   Proposal: the scanner status as an `RState` field set by the scanning
+   step, read by the end of a text. `\tracingscantokens`' `( ` and line
+   display need the line field (Conflict 16).
+2. **`\lastnodetype`** is the one read of material (Conflict 13), with its
+   gaps: on the main vertical list after a paragraph's lines (TeX's
+   `last_node_type`, set by the page builder) it reads as -1.
+3. **`\showgroups`, `\showtokens`, `\showifs`**: the display, `! OK.`
+   and the error's context are log text, as in batch mode. The context is
+   `\showbox`'s (`diag::show_context`: a backed-up list at the top, `...`
+   for the levels between, the file level's two lines, tex.web 311–318),
+   one mechanism: its placeholders (`X`, `T`) are laid out by the log's
+   `rebase` once the absolute line number is known, cut at
+   `half_error_line` 50 and `error_line` 79. Where each open group or
+   conditional was entered is a placeholder too (`E`k, `C`k: the k-th
+   from the outside), read through the node's input state when the log is
+   gathered: the node indices `Group::at`, `Cond::open` are positions,
+   never compared when deciding what an edit keeps (`eq_but_pos`), and a
+   kept node's state has them moved to where those nodes are now. Not
+   yet: a `\scantokens` text's own level in the context (the file's line
+   is shown).
+   The entry lines of groups and conditionals are their opening nodes'
+   lines (`Group.at`, `Cond.open`: `LINE N<node> LINE`).
+4. **`\readline`**: parsed (`n to \cs`); the line comes from a stream
+   (Conflict 6), and from the terminal (refused in batch mode, as TeX does)
+   while no stream is open. `readline_toks` makes a line's tokens.
+5. **`\pagediscards`, `\splitdiscards`**: the items the page builder or
+   `\vsplit` discarded, saved while `\savingvdiscards` is positive.
+   Proposal: the page fold defines `Key::Discards(k)` at its firing call
+   (as Conflict 18's `\box255`); a reader parks on the fold. Now: empty
+   (exact while `\savingvdiscards` is not positive); in horizontal mode the
+   paragraph ends first (`head_for_vmode`), as TeX's `un_vbox`.
+6. **`\topmarks n`…`\splitbotmarks n`**: the number is scanned; a read of
+   `Key::Mark(which, n)`, as `\topmark` (Conflicts 12, 18; an output
+   routine's run defines them).
+7. **TeXXeT**: `\beginL`… are math nodes when `\TeXXeTstate` is positive
+   ("Improper `\beginL`" otherwise). Done as etex.web: `hpack`'s checks
+   (`pack::lr_fix`: an unmatched end becomes a kern, missing ends are
+   appended), the lines' LR nodes in `post_line_break` (the LR stack a
+   local of the function), and the reversal when shipping (`dvi.rs`:
+   `reverse` and the edge nodes on a working copy of the box's list, the
+   LR stack and `cur_dir` locals of the page's writer). Not yet: the
+   report of LR problems (`\endL or \endR problem`, in `hpack`'s and
+   `ship_out`'s diagnostics), the LR state across a display (`LR_save`,
+   `LR_box`, `just_reverse`, display boxes' `dlist`).
+8. **`\middle`** (with B's math): `\middle` closes the `\left` group like
+   `\right` (a right noad with the middle flag, `mlist::Kind::Right(d,
+   true)`) and opens it again, its list the one so far, in a node of its
+   own (`\0middlenext`, as `\mathchoice`'s parts); a fraction's numerator
+   begins after the last left or middle noad (`delim_ptr`); in
+   `mlist_to_hlist` a right noad is followed as a left one (etex.web §727,
+   §760).
+9. **The penalties arrays** (`\interlinepenalties`, `\clubpenalties`,
+   `\widowpenalties`, `\displaywidowpenalties`): `Key::PenaltiesArray(k)`
+   = `Val::Penalties(Arc<[i32]>)` (empty: null), assigned, read by `\the`,
+   read by the paragraph node into `LineParams` (§890 as etex.web; the
+   display's paragraph reads `\displaywidowpenalties`); `\par` in
+   vertical mode resets `\interlinepenalties` (`normal_paragraph`).
+10. **`\lastlinefit`** is read by line breaking (etex.web §1575–§1583:
+    the active nodes' shortfall and glue, the last line's badness from the
+    line before, the last `\parfillskip` adjusted). `\savinghyphcodes`,
+    `\predisplaydirection`: parameters, assigned and read; hyphenation
+    and display math do not read them yet. The `\tracing…` parameters
+    are values only (no tracing output: programs keep them non-positive).
+11. **Kept pieces and the mode**: `Options::etex` is read by
+    `val::initial`; changing it between two updates of one `Build` is not
+    supported (pieces kept from the earlier update read the earlier mode).
+
+e-TeX's primitives:
+
+| primitive | etex.web cmd | graph form | status |
+|---|---|---|---|
+| `\beginL`, `\endL`, `\beginR`, `\endR` | valign | node emitting the math node (horizontal mode; vertical: a paragraph begins); reversed when shipped | done (gap 7: LR problem reports, displays) |
+| `\botmarks`, `\firstmarks`, `\topmarks`, `\splitbotmarks`, `\splitfirstmarks` | top_bot_mark | step: scans the class; rewrites the input with `Key::Mark(which, class)` (a read), defined by an output routine's run | approx: empty outside a routine until the fold runs routines |
+| `\clubpenalties`, `\displaywidowpenalties`, `\interlinepenalties`, `\widowpenalties` | set_shape | `Key::PenaltiesArray(k)`, read by line breaking | done |
+| `\currentgrouplevel`, `\currentgrouptype` | last_item | a read of `RState.groups` | done |
+| `\currentifbranch`, `\currentiflevel`, `\currentiftype` | last_item | a read of `RState.conds` | done |
+| `\detokenize`, `\unexpanded` | the | step: the balanced text, shown as characters or as it is; not expanded again inside `\edef`/`\message`/`\write` | done |
+| `\eTeXrevision` | convert | step: `.6` | done |
+| `\eTeXversion` | last_item | 2 | done |
+| `\everyeof` | assign_toks | `Key::TokPar(Everyeof)`, read at a rewritten text's end | done |
+| `\fontchardp`, `\fontcharht`, `\fontcharic`, `\fontcharwd` | last_item | a read of the font value | done |
+| `\glueexpr`, `\muexpr`, `\numexpr`, `\dimexpr` | last_item | the expression grammar (§1520–1544), a pure function of the tokens and the quantities it reads; "Arithmetic overflow" makes it zero | done |
+| `\glueshrink`, `\glueshrinkorder`, `\gluestretch`, `\gluestretchorder` | last_item | scans glue | done |
+| `\gluetomu`, `\mutoglue` | last_item | scans glue, changes its level | done |
+| `\ifcsname` | if_test | conditional; reads the name's meaning, defines nothing | done |
+| `\ifdefined` | if_test | conditional; reads the meaning of the next token | done |
+| `\iffontchar` | if_test | conditional; reads the font value | done |
+| `\interactionmode` | set_page_int | `Key::Interaction`, read and assigned (global) | done |
+| `\lastlinefit`, `\predisplaydirection`, `\savinghyphcodes`, `\savingvdiscards`, `\TeXXeTstate`, `\tracingassigns`, `\tracinggroups`, `\tracingifs`, `\tracingnesting`, `\tracingscantokens` | assign_int | `Key::IntPar(p)` | done (`\lastlinefit`, `\TeXXeTstate` read; others: gap 10) |
+| `\lastnodetype` | last_item | the read of material (Conflict 13) | done (inside a piece; gap 2) |
+| `\marks` | mark | node emitting `Item::Marks(n, …)` (class 0: `Item::Mark`) | done |
+| `\middle` | left_right | closes and opens again the `\left` group (gap 8) | done |
+| `\pagediscards`, `\splitdiscards` | un_vbox | the page fold's discards (gap 5) | approx: empty |
+| `\parshapedimen`, `\parshapeindent`, `\parshapelength` | last_item | a read of `Key::Parshape` | done |
+| `\protected` | prefix | `RState.protected` to the definition; `Macro.protected` | done |
+| `\readline` | read_to_cs | parsed; streams are Conflict 6 | partial |
+| `\scantokens` | input | step: rewrites the input with the shown text, read again (`RState.texts`) | done (no "File ended" check: gap 1) |
+| `\showgroups`, `\showifs`, `\showtokens` | xray | log text and the error's context, the line a placeholder (gap 3) | done (file-level context) |
+| `\unless` | expand_after | step (a node at the top, as conditionals are): the boolean conditional after it, negated | done |
+
 ## The inventory
 
 ### (i) Expandable and input-rewriting: steps — 40
 
 | primitive | tex.web cmd | graph form | status |
 |---|---|---|---|
-| `\botmark` | top_bot_mark | step: rewrites the input with a mark of the page builder's last output — reads the page scan's result (see Conflicts); empty until marks exist | approx: empty |
+| `\botmark` | top_bot_mark | step: rewrites the input with `Key::Mark(which, 0)` (a read), defined by an output routine's run (`graph/output.rs`) | approx: empty outside a routine until the fold runs routines |
 | `\csname` | cs_name | step: builds the name, rewrites the input with it; an undefined name is defined `\relax` (local) by the node the step is in | done |
 | `\else` | fi_or_else | ends the taken arm (skips the rest to `\fi`): the closing node defines each key the arm defined as φ(after, before) | done |
 | `\endcsname` | end_cs_name | outside `\csname`: an error node | done |
 | `\endinput` | input | a call into a named source: the file is a value whose text becomes pieces — DESIGN CONVERSATION (see Conflicts) | not yet |
 | `\expandafter` | expand_after | step: expands the token after next once, rewrites the input | done |
 | `\fi` | fi_or_else | ends the taken arm (skips the rest to `\fi`): the closing node defines each key the arm defined as φ(after, before) | done |
-| `\firstmark` | top_bot_mark | step: rewrites the input with a mark of the page builder's last output — reads the page scan's result (see Conflicts); empty until marks exist | approx: empty |
+| `\firstmark` | top_bot_mark | step: rewrites the input with `Key::Mark(which, 0)` (a read), defined by an output routine's run (`graph/output.rs`) | approx: empty outside a routine until the fold runs routines |
 | `\fontname` | convert | step: the font's name and size (tex.web 472) | done |
 | `\if` | if_test | conditional: at the top a node (`Kind::If`, test operands = the reads it made); inside scanning a step of that node; only the taken arm is read; the end gets an explicit φ | done |
 | `\ifcase` | if_test | conditional: at the top a node (`Kind::If`, test operands = the reads it made); inside scanning a step of that node; only the taken arm is read; the end gets an explicit φ | done |
@@ -494,11 +745,11 @@ positions after it, and its material is consumed after it.
 | `\number` | convert | step: reads its operand (a token, a number, `\escapechar`, catcodes of one-letter names) and rewrites the input with category-12 tokens | done |
 | `\or` | fi_or_else | ends the taken arm (skips the rest to `\fi`): the closing node defines each key the arm defined as φ(after, before) | done |
 | `\romannumeral` | convert | step: reads its operand (a token, a number, `\escapechar`, catcodes of one-letter names) and rewrites the input with category-12 tokens | done |
-| `\splitbotmark` | top_bot_mark | step: rewrites the input with a mark of the page builder's last output — reads the page scan's result (see Conflicts); empty until marks exist | approx: empty |
-| `\splitfirstmark` | top_bot_mark | step: rewrites the input with a mark of the page builder's last output — reads the page scan's result (see Conflicts); empty until marks exist | approx: empty |
+| `\splitbotmark` | top_bot_mark | step: rewrites the input with `Key::Mark(which, 0)` (a read), defined by an output routine's run (`graph/output.rs`) | approx: empty outside a routine until the fold runs routines |
+| `\splitfirstmark` | top_bot_mark | step: rewrites the input with `Key::Mark(which, 0)` (a read), defined by an output routine's run (`graph/output.rs`) | approx: empty outside a routine until the fold runs routines |
 | `\string` | convert | step: reads its operand (a token, a number, `\escapechar`, catcodes of one-letter names) and rewrites the input with category-12 tokens | done |
 | `\the` | the | step: reads the internal quantity (`get`) and rewrites the input with its tokens (unexpanded inside `\edef`/`\message`) | done |
-| `\topmark` | top_bot_mark | step: rewrites the input with a mark of the page builder's last output — reads the page scan's result (see Conflicts); empty until marks exist | approx: empty |
+| `\topmark` | top_bot_mark | step: rewrites the input with `Key::Mark(which, 0)` (a read), defined by an output routine's run (`graph/output.rs`) | approx: empty outside a routine until the fold runs routines |
 | `\uppercase` | case_shift | node (not expandable): reads lccode/uccode (`get`) of each character and rewrites the input with the changed text; defines nothing | done |
 
 ### (ii) Assignments and scoping: nodes defining Keys — 151
@@ -568,7 +819,7 @@ positions after it, and its material is consumed after it.
 | `\hoffset` | assign_dimen | node defining `Key::DimenPar(p)` (Val::Int, sp) | done |
 | `\holdinginserts` | assign_int | node defining `Key::IntPar(p)` (Val::Int); `\global` via RState.global; `\globaldefs` read by every assignment | done |
 | `\hsize` | assign_dimen | node defining `Key::DimenPar(p)` (Val::Int, sp) | done |
-| `\hyphenation` | hyph_data | `\patterns` (IniTeX only) and `\hyphenation`: global definitions of a language's hyphenation tables, `Key::Patterns(lang)`/`Key::Exceptions(lang)`, read by line breaking (see Hyphenation) | not yet: the tables as values and `hyphenate` are done (`hyph.rs`, `tests/hyph.rs`); the nodes and the line breaker's pass come after the merge |
+| `\hyphenation` | hyph_data | node defining `Key::Exceptions(lang)` globally (reads `\language`, the old value, the `\lccode`s); read by line breaking (see Hyphenation) | done |
 | `\hyphenchar` | assign_font_int | `Key::HyphenChar(font key)`, always global | done |
 | `\hyphenpenalty` | assign_int | node defining `Key::IntPar(p)` (Val::Int); `\global` via RState.global; `\globaldefs` read by every assignment | done |
 | `\interlinepenalty` | assign_int | node defining `Key::IntPar(p)` (Val::Int); `\global` via RState.global; `\globaldefs` read by every assignment | done |
@@ -604,7 +855,7 @@ positions after it, and its material is consumed after it.
 | `\parindent` | assign_dimen | node defining `Key::DimenPar(p)` (Val::Int, sp) | done |
 | `\parshape` | set_shape | node defining `Key::Parshape` (Val::Parshape) | done |
 | `\parskip` | assign_glue | node defining `Key::GluePar(p)` (Val::Glue) | done |
-| `\patterns` | hyph_data | `\patterns` (IniTeX only) and `\hyphenation`: global definitions of a language's hyphenation tables, `Key::Patterns(lang)`/`Key::Exceptions(lang)`, read by line breaking (see Hyphenation) | not yet: the tables as values and `hyphenate` are done (`hyph.rs`, `tests/hyph.rs`); the nodes and the line breaker's pass come after the merge |
+| `\patterns` | hyph_data | node defining `Key::Patterns(lang)` globally (reads `\language`, the old value, the `\lccode`s); always accepted (see Hyphenation) | done |
 | `\pausing` | assign_int | node defining `Key::IntPar(p)` (Val::Int); `\global` via RState.global; `\globaldefs` read by every assignment | done |
 | `\postdisplaypenalty` | assign_int | node defining `Key::IntPar(p)` (Val::Int); `\global` via RState.global; `\globaldefs` read by every assignment | done |
 | `\predisplaypenalty` | assign_int | node defining `Key::IntPar(p)` (Val::Int); `\global` via RState.global; `\globaldefs` read by every assignment | done |
@@ -718,7 +969,7 @@ positions after it, and its material is consumed after it.
 | `\right` | left_right | `Close` node of the `\left` group: reads the delimiter inside the group; its packaging node gathers the list with the right noad and emits an inner noad | done |
 | `\scriptscriptstyle` | math_style | node emitting `MItem::Style(6)` | done |
 | `\scriptstyle` | math_style | node emitting `MItem::Style(4)` | done |
-| `\setlanguage` | extension | whatsit: material | not yet |
+| `\setlanguage` | extension | node emitting `Item::Lang` and setting `clang` (horizontal mode only, tex.web 1377) | done |
 | `\span` | tab_mark | alignment cell end | not yet |
 | `\textstyle` | math_style | node emitting `MItem::Style(2)` | done |
 | `\underline` | math_comp | node emitting an under noad, nucleus from `scan_math` | done |
@@ -743,14 +994,14 @@ positions after it, and its material is consumed after it.
 | `\box` | make_box | reads `Key::Box(n)`; `box_end` (append with interline glue, `\setbox`, `\shipout`); voids the register at the scope of the definition it replaces (Conflict 7) | done (voiding: Conflict 7) |
 | `\cleaders` | leader_ship | `\shipout`: a node whose operand is a box value and whose result is a page; leaders: material | not yet |
 | `\copy` | make_box | reads `Key::Box(n)`; `box_end` | done |
-| `\deadcycles` | set_page_int | `\deadcycles`, `\insertpenalties`: page builder / output state, a read of the page scan (see Conflicts) | approx: 0 |
+| `\deadcycles` | set_page_int | `Key::Page(8)`, `Key::Page(9)`: read; assigned at the level of the definition replaced (§1246); an output routine's run defines them, `\shipout` makes `\deadcycles` 0 | approx: outside a routine, 0 until the fold defines them |
 | `\dp` | set_box_dimen | `\wd n`...: a read of `Key::Box(n)`'s dimensions; assignment defines a new box value at the scope of the replaced definition (Conflict 7) | done |
 | `\dump` | stop | the end of a format: the format is the set of definitions reaching this point | no-op |
 | `\end` | stop | `its_all_over`: node emitting `Item::End` (the page fold appends `\hbox to\hsize{}\vfill\penalty-2^30` and builds pages until empty, tex.web 1054); reading stops | done (later pieces still run: Conflict 21) |
 | `\hbox` | make_box | a `Kind::Open` node opening a box group (`BoxGroup`: kind, context, `to`/`spread`, the enclosing list's mode, space factor, prev depth); its `}` is a `Close` node; the packaging node (`Kind::Par`) gathers the items emitted inside and packs them (hpack, tex.web 649) with `\hbadness`/`\hfuzz`/`\overfullrule` read after the group, diagnostics into the log | done |
 | `\ht` | set_box_dimen | `\wd n`...: a read of `Key::Box(n)`'s dimensions; assignment defines a new box value at the scope of the replaced definition (Conflict 7) | done |
 | `\insert` | insert | node emitting an insertion (material in a group); the page scan reads its size | not yet |
-| `\insertpenalties` | set_page_int | `\deadcycles`, `\insertpenalties`: page builder / output state, a read of the page scan (see Conflicts) | approx: 0 |
+| `\insertpenalties` | set_page_int | `Key::Page(8)`, `Key::Page(9)`: read; assigned at the level of the definition replaced (§1246); an output routine's run defines them, `\shipout` makes `\deadcycles` 0 | approx: outside a routine, 0 until the fold defines them |
 | `\lastbox` | make_box | removes the last box of the current list: a removal whose value the node needs — Conflict 13 | not yet |
 | `\lastkern` | last_item | the current list's last item (`last_item`, Conflict 13) | done (inside a piece) |
 | `\lastpenalty` | last_item | the current list's last item (`last_item`, Conflict 13) | done (inside a piece) |
@@ -760,14 +1011,14 @@ positions after it, and its material is consumed after it.
 | `\mark` | mark | node emitting `Item::Mark` (expanded text); marks move out of an `\hbox` in vertical mode and out of lines; `\topmark`... not yet | done (no mark classes) |
 | `\moveleft` | hmove | `scan_box` with a shift (vertical mode) | done |
 | `\moveright` | hmove | `scan_box` with a shift (vertical mode) | done |
-| `\pagedepth` | set_page_dimen | `\pagegoal`...: the page scan's state at this point — a read of the page scan (see Conflicts) | approx: empty page |
-| `\pagefilllstretch` | set_page_dimen | `\pagegoal`...: the page scan's state at this point — a read of the page scan (see Conflicts) | approx: empty page |
-| `\pagefillstretch` | set_page_dimen | `\pagegoal`...: the page scan's state at this point — a read of the page scan (see Conflicts) | approx: empty page |
-| `\pagefilstretch` | set_page_dimen | `\pagegoal`...: the page scan's state at this point — a read of the page scan (see Conflicts) | approx: empty page |
-| `\pagegoal` | set_page_dimen | `\pagegoal`...: the page scan's state at this point — a read of the page scan (see Conflicts) | approx: empty page |
-| `\pageshrink` | set_page_dimen | `\pagegoal`...: the page scan's state at this point — a read of the page scan (see Conflicts) | approx: empty page |
-| `\pagestretch` | set_page_dimen | `\pagegoal`...: the page scan's state at this point — a read of the page scan (see Conflicts) | approx: empty page |
-| `\pagetotal` | set_page_dimen | `\pagegoal`...: the page scan's state at this point — a read of the page scan (see Conflicts) | approx: empty page |
+| `\pagedepth` | set_page_dimen | `Key::Page(0..=7)`: read; assigned at the level of the definition replaced (§1245); an output routine's run defines them inside its group | approx: outside a routine, an empty page's |
+| `\pagefilllstretch` | set_page_dimen | `Key::Page(0..=7)`: read; assigned at the level of the definition replaced (§1245); an output routine's run defines them inside its group | approx: outside a routine, an empty page's |
+| `\pagefillstretch` | set_page_dimen | `Key::Page(0..=7)`: read; assigned at the level of the definition replaced (§1245); an output routine's run defines them inside its group | approx: outside a routine, an empty page's |
+| `\pagefilstretch` | set_page_dimen | `Key::Page(0..=7)`: read; assigned at the level of the definition replaced (§1245); an output routine's run defines them inside its group | approx: outside a routine, an empty page's |
+| `\pagegoal` | set_page_dimen | `Key::Page(0..=7)`: read; assigned at the level of the definition replaced (§1245); an output routine's run defines them inside its group | approx: outside a routine, an empty page's |
+| `\pageshrink` | set_page_dimen | `Key::Page(0..=7)`: read; assigned at the level of the definition replaced (§1245); an output routine's run defines them inside its group | approx: outside a routine, an empty page's |
+| `\pagestretch` | set_page_dimen | `Key::Page(0..=7)`: read; assigned at the level of the definition replaced (§1245); an output routine's run defines them inside its group | approx: outside a routine, an empty page's |
+| `\pagetotal` | set_page_dimen | `Key::Page(0..=7)`: read; assigned at the level of the definition replaced (§1245); an output routine's run defines them inside its group | approx: outside a routine, an empty page's |
 | `\raise` | vmove | `scan_box` with a shift (horizontal mode) | done |
 | `\setbox` | set_box | prefixed node: `scan_box` with context `Set(n, global)`; the packaging node defines `Key::Box(n)` = `Val::Box` | done |
 | `\shipout` | leader_ship | `scan_box`; `box_end` emits `Item::Shipout` (in the outer list's order, through paragraphs and boxes) with `\count0`–`9`, offsets, `\mag`, date read there; its `[n]` in the node's log | done |
@@ -801,7 +1052,7 @@ positions after it, and its material is consumed after it.
 | `\read` | read_to_cs | `\read n to \x`: a node defining `\x` from the next line of a stream — a stream is a source read by position (see Conflicts) | not yet |
 | `\scrollmode` | set_interaction | node with no result (interaction changes only what reaches the terminal) | done (no-op) |
 | `\show` | xray | diagnostic: `> \x=meaning.` in the log, an error context | not yet |
-| `\showbox` | xray | diagnostic node whose result is log text (`> ...`) and an error context — needs the line number field | not yet |
-| `\showlists` | xray | diagnostic node whose result is log text (`> ...`) and an error context — needs the line number field | not yet |
+| `\showbox` | xray | node whose result is log text (`> \boxN=`, the box, "OK" and its context; line numbers as placeholders, Conflict 16) | done |
+| `\showlists` | xray | node reading the open lists (the one read of material): log text as `show_activities`, the current page not shown (Conflict 16) | partial: the current page |
 | `\showthe` | xray | diagnostic node whose result is log text (`> ...`) and an error context — needs the line number field | not yet |
 | `\write` | extension | with `\immediate`: a node whose result is the written line (`Node.log`, ending in a newline), its text expanded in no mode; deferred: a whatsit expanded at `\shipout` | `\immediate` only |

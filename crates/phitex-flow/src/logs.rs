@@ -15,7 +15,7 @@
 use std::fmt::Write as _;
 use std::sync::Arc;
 
-use crate::graph::{Run, paragraph_start};
+use crate::graph::{Run, enclosing_open, opener, paragraph_start, paragraph_start_at};
 use crate::item::Item;
 use crate::page::{CallLog, Lines, Page, page_mark};
 use crate::show::LINE;
@@ -46,6 +46,34 @@ fn resolve(s: &str, text: &[char], run: &Run, i: usize) -> String {
                 let start = paragraph_start(&run.chain, i);
                 let _ = write!(out, "{REL}{}{REL}--{REL}{here}{REL}", line_of(text, run, start));
             }
+            // (`E`/`C` and k: the line where the k-th group or conditional
+            // open at node `i` (from the outside) began — for e-TeX's
+            // `\showgroups`, `\showifs` — read through the node's state now)
+            w if w.starts_with('E') || w.starts_with('C') => {
+                let k = w[1..].parse::<usize>().unwrap_or(0);
+                let j = opener(&run.chain, i, w.starts_with('E'), k).unwrap_or(i).min(i);
+                let _ = write!(out, "{REL}{}{REL}", line_of(text, run, j));
+            }
+            // (where a list began, `\showlists`: the `Open` node of the
+            // `k`-th enclosing group, or the paragraph at a level)
+            g if g.starts_with('G') => {
+                let k: usize = g[1..].parse().unwrap_or(0);
+                let l = enclosing_open(&run.chain, i, k).map_or(here, |o| line_of(text, run, o));
+                let _ = write!(out, "{REL}{l}{REL}");
+            }
+            q if q.starts_with('Q') => {
+                let level: u16 = q[1..].parse().unwrap_or(0);
+                let start = paragraph_start_at(&run.chain, i, level);
+                let _ = write!(out, "{REL}{}{REL}", line_of(text, run, start));
+            }
+            // (an error's context: laid out once the line number is known,
+            // in `rebase`; head, what was read and the rest, cut by `CUT`)
+            x if x.starts_with('X') => {
+                let _ = write!(out, "{CTX}l.{REL}{here}{REL} {}{}{CTX}", crate::graph::diag::CUT, &x[1..]);
+            }
+            x if x.starts_with('T') => {
+                let _ = write!(out, "{CTX}{}{CTX}", &x[1..]);
+            }
             _ => {
                 let _ = write!(out, "{REL}{here}{REL}");
             }
@@ -61,6 +89,42 @@ fn resolve(s: &str, text: &[char], run: &Run, i: usize) -> String {
 pub enum Entry {
     Text(String),
     Mark,
+}
+
+/// Brackets an error's context, laid out by `rebase` (`context`).
+const CTX: char = '\u{E002}';
+
+/// TeX Live's `error_line`, `half_error_line` (texmf.cnf).
+const ERROR_LINE: usize = 79;
+const HALF_ERROR_LINE: usize = 50;
+
+/// tex.web 313–318: an error's context — `head` (`l.N `, or a token
+/// list's label), what was read and the rest (cut by `CUT`, each character
+/// as it prints): two lines, cut short as TeX does.
+fn context(out: &mut String, head: &str, x: &str) {
+    use crate::show::LN;
+    let (read, rest) = x.split_once(crate::graph::diag::CUT).unwrap_or((x, ""));
+    let read: Vec<char> = read.chars().collect();
+    let rest: Vec<char> = rest.chars().collect();
+    out.push_str(head);
+    let l = head.chars().count();
+    let first_count = read.len();
+    let trick_count = (first_count + 1 + ERROR_LINE - HALF_ERROR_LINE).max(ERROR_LINE);
+    let m = rest.len().min(trick_count - first_count);
+    let (p, n) = if l + first_count <= HALF_ERROR_LINE {
+        (0, l + first_count)
+    } else {
+        out.push_str("...");
+        (l + first_count - HALF_ERROR_LINE + 3, HALF_ERROR_LINE)
+    };
+    out.extend(&read[p.min(first_count)..]);
+    out.push(LN);
+    out.extend(std::iter::repeat_n(' ', n));
+    let k = if m + n <= ERROR_LINE { m } else { ERROR_LINE - n - 3 };
+    out.extend(&rest[..k.min(rest.len())]);
+    if m + n > ERROR_LINE {
+        out.push_str("...");
+    }
 }
 
 /// A piece's part of the log, and the run and lines it was made from.
@@ -124,9 +188,10 @@ pub fn fragment(text: &[char], run: &Arc<Run>, lines: &[Option<Lines>]) -> Frag 
     }
 }
 
-/// `s` with its line numbers moved down by `base` lines.
+/// `s` with its line numbers moved down by `base` lines, then its errors'
+/// contexts laid out (their width depends on the line number).
 fn rebase(s: &str, base: usize) -> String {
-    if !s.contains(REL) {
+    if !s.contains(REL) && !s.contains(CTX) {
         return s.to_string();
     }
     let mut out = String::with_capacity(s.len());
@@ -138,7 +203,19 @@ fn rebase(s: &str, base: usize) -> String {
             out.push_str(part);
         }
     }
-    out
+    if !out.contains(CTX) {
+        return out;
+    }
+    let mut laid = String::with_capacity(out.len());
+    for (k, part) in out.split(CTX).enumerate() {
+        if k % 2 == 1 {
+            let (head, x) = part.split_once(crate::graph::diag::CUT).unwrap_or((part, ""));
+            context(&mut laid, head, x);
+        } else {
+            laid.push_str(part);
+        }
+    }
+    laid
 }
 
 /// A piece's part as the log lays it: its lines before it in its own file

@@ -37,6 +37,18 @@ pub enum IfKind {
     True,
     False,
     Case,
+    /// e-TeX's `\ifdefined`, `\ifcsname`, `\iffontchar`.
+    Defined,
+    Csname,
+    FontChar,
+}
+
+impl IfKind {
+    /// Its code in tex.web/etex.web (`if_char_code` 0 … `if_font_char_code`
+    /// 19): `\currentiftype` is this plus one.
+    pub fn code(self) -> u8 {
+        self as u8
+    }
 }
 
 /// A register bank.
@@ -93,6 +105,8 @@ pub enum Conv {
     Meaning,
     FontName,
     JobName,
+    /// e-TeX's `\eTeXrevision`.
+    ETeXRevision,
 }
 
 /// A primitive that makes material, boxes or pages (tex.web's commands
@@ -162,6 +176,8 @@ pub enum MathP {
     Above(u8),
     Left,
     Right,
+    /// e-TeX's `\middle` (extended mode only).
+    Middle,
     /// `\eqno` (false), `\leqno` (true).
     EqNo(bool),
     Mskip,
@@ -249,9 +265,51 @@ pub enum Prim {
     Mat(Mat),
     /// Math.
     Math(MathP),
+    /// `\patterns` (true), `\hyphenation` (false).
+    HyphData(bool),
+    /// `\setlanguage`.
+    SetLanguage,
+    /// `\showbox` (1), `\showlists` (3) (tex.web 1291's codes).
+    Show(u8),
     /// A primitive without a graph form yet: `UNIMPL[i]`.
     Unimpl(u16),
+    // ---- e-TeX's (etex.web), named only in extended mode
+    // (`ETEX_PRIMITIVES`); `LastItem(ETEX_ITEM..)`, `Mark(5..)` and
+    // `PageInt(2)` are e-TeX's too.
+    /// `\unless`: negates the boolean conditional after it.
+    Unless,
+    /// `\unexpanded`, `\detokenize` (`the` with chr 1 and 5).
+    Unexpanded,
+    Detokenize,
+    /// `\scantokens`: the text becomes input, read again.
+    ScanTokens,
+    /// `\protected` (a prefix).
+    Protected,
+    /// `\readline`.
+    ReadLine,
+    /// `\showgroups` (4), `\showtokens` (5), `\showifs` (6).
+    ShowE(u8),
+    /// `\marks`.
+    Marks,
+    /// `\pagediscards` (0), `\splitdiscards` (1).
+    Discards(u8),
+    /// `\beginL`, `\endL`, `\beginR`, `\endR`: the math node's subtype
+    /// (6, 7, 10, 11).
+    Lr(u8),
+    /// `\interlinepenalties` (0), `\clubpenalties`, `\widowpenalties`,
+    /// `\displaywidowpenalties` (3).
+    PenShape(u8),
 }
+
+/// The first of e-TeX's `LastItem` codes (`\eTeXversion`); the others
+/// follow in `ETEX_PRIMITIVES`' order of codes: 6 `\currentgrouplevel`, 7
+/// `\currentgrouptype`, 8 `\currentiflevel`, 9 `\currentiftype`, 10
+/// `\currentifbranch`, 11 `\lastnodetype`, 12 `\gluestretchorder`, 13
+/// `\glueshrinkorder`, 14–17 `\fontcharwd/ht/dp/ic`, 18–20
+/// `\parshapelength/indent/dimen`, 21 `\gluestretch`, 22 `\glueshrink`,
+/// 23 `\mutoglue`, 24 `\gluetomu`, 25–28 `\numexpr`, `\dimexpr`,
+/// `\glueexpr`, `\muexpr`.
+pub const ETEX_ITEM: u8 = 5;
 
 impl Prim {
     /// Whether it is expanded (a step) rather than executed (tex.web 366).
@@ -270,16 +328,25 @@ impl Prim {
                 | Prim::Input
                 | Prim::EndInput
                 | Prim::Mark(_)
+                | Prim::Unless
+                | Prim::Unexpanded
+                | Prim::Detokenize
+                | Prim::ScanTokens
         )
     }
 
     /// Whether it is a conditional or a conditional's end.
     pub fn conditional(self) -> bool {
-        matches!(self, Prim::If(_) | Prim::Fi | Prim::Else | Prim::Or)
+        matches!(self, Prim::If(_) | Prim::Fi | Prim::Else | Prim::Or | Prim::Unless)
     }
 
     pub fn by_name(n: &str) -> Option<Prim> {
         PRIMITIVES.binary_search_by(|(m, _, _)| (*m).cmp(n)).ok().map(|i| PRIMITIVES[i].1)
+    }
+
+    /// e-TeX's primitive of that name (extended mode only).
+    pub fn by_name_etex(n: &str) -> Option<Prim> {
+        ETEX_PRIMITIVES.binary_search_by(|(m, _)| (*m).cmp(n)).ok().map(|i| ETEX_PRIMITIVES[i].1)
     }
 
     /// The reader's internal commands, by the names only it makes (never
@@ -296,7 +363,12 @@ impl Prim {
         if let Some((n, _)) = INTERNAL.iter().find(|(_, p)| *p == self) {
             return n;
         }
-        PRIMITIVES.iter().find(|(_, p, _)| *p == self).map_or("IMPOSSIBLE.", |(n, _, _)| n)
+        PRIMITIVES
+            .iter()
+            .find(|(_, p, _)| *p == self)
+            .map(|(n, _, _)| *n)
+            .or_else(|| ETEX_PRIMITIVES.iter().find(|(_, p)| *p == self).map(|(n, _)| *n))
+            .unwrap_or("IMPOSSIBLE.")
     }
 }
 
@@ -334,13 +406,13 @@ impl GluePar {
     }
 }
 
-params! { IntPar, 55, Pretolerance = "pretolerance", Tolerance = "tolerance", Linepenalty = "linepenalty", Hyphenpenalty = "hyphenpenalty", Exhyphenpenalty = "exhyphenpenalty", Clubpenalty = "clubpenalty", Widowpenalty = "widowpenalty", Displaywidowpenalty = "displaywidowpenalty", Brokenpenalty = "brokenpenalty", Binoppenalty = "binoppenalty", Relpenalty = "relpenalty", Predisplaypenalty = "predisplaypenalty", Postdisplaypenalty = "postdisplaypenalty", Interlinepenalty = "interlinepenalty", Doublehyphendemerits = "doublehyphendemerits", Finalhyphendemerits = "finalhyphendemerits", Adjdemerits = "adjdemerits", Mag = "mag", Delimiterfactor = "delimiterfactor", Looseness = "looseness", Time = "time", Day = "day", Month = "month", Year = "year", Showboxbreadth = "showboxbreadth", Showboxdepth = "showboxdepth", Hbadness = "hbadness", Vbadness = "vbadness", Pausing = "pausing", Tracingonline = "tracingonline", Tracingmacros = "tracingmacros", Tracingstats = "tracingstats", Tracingparagraphs = "tracingparagraphs", Tracingpages = "tracingpages", Tracingoutput = "tracingoutput", Tracinglostchars = "tracinglostchars", Tracingcommands = "tracingcommands", Tracingrestores = "tracingrestores", Uchyph = "uchyph", Outputpenalty = "outputpenalty", Maxdeadcycles = "maxdeadcycles", Hangafter = "hangafter", Floatingpenalty = "floatingpenalty", Globaldefs = "globaldefs", Fam = "fam", Escapechar = "escapechar", Defaulthyphenchar = "defaulthyphenchar", Defaultskewchar = "defaultskewchar", Endlinechar = "endlinechar", Newlinechar = "newlinechar", Language = "language", Lefthyphenmin = "lefthyphenmin", Righthyphenmin = "righthyphenmin", Holdinginserts = "holdinginserts", Errorcontextlines = "errorcontextlines" }
+params! { IntPar, 65, Pretolerance = "pretolerance", Tolerance = "tolerance", Linepenalty = "linepenalty", Hyphenpenalty = "hyphenpenalty", Exhyphenpenalty = "exhyphenpenalty", Clubpenalty = "clubpenalty", Widowpenalty = "widowpenalty", Displaywidowpenalty = "displaywidowpenalty", Brokenpenalty = "brokenpenalty", Binoppenalty = "binoppenalty", Relpenalty = "relpenalty", Predisplaypenalty = "predisplaypenalty", Postdisplaypenalty = "postdisplaypenalty", Interlinepenalty = "interlinepenalty", Doublehyphendemerits = "doublehyphendemerits", Finalhyphendemerits = "finalhyphendemerits", Adjdemerits = "adjdemerits", Mag = "mag", Delimiterfactor = "delimiterfactor", Looseness = "looseness", Time = "time", Day = "day", Month = "month", Year = "year", Showboxbreadth = "showboxbreadth", Showboxdepth = "showboxdepth", Hbadness = "hbadness", Vbadness = "vbadness", Pausing = "pausing", Tracingonline = "tracingonline", Tracingmacros = "tracingmacros", Tracingstats = "tracingstats", Tracingparagraphs = "tracingparagraphs", Tracingpages = "tracingpages", Tracingoutput = "tracingoutput", Tracinglostchars = "tracinglostchars", Tracingcommands = "tracingcommands", Tracingrestores = "tracingrestores", Uchyph = "uchyph", Outputpenalty = "outputpenalty", Maxdeadcycles = "maxdeadcycles", Hangafter = "hangafter", Floatingpenalty = "floatingpenalty", Globaldefs = "globaldefs", Fam = "fam", Escapechar = "escapechar", Defaulthyphenchar = "defaulthyphenchar", Defaultskewchar = "defaultskewchar", Endlinechar = "endlinechar", Newlinechar = "newlinechar", Language = "language", Lefthyphenmin = "lefthyphenmin", Righthyphenmin = "righthyphenmin", Holdinginserts = "holdinginserts", Errorcontextlines = "errorcontextlines", Tracingassigns = "tracingassigns", Tracinggroups = "tracinggroups", Tracingifs = "tracingifs", Tracingscantokens = "tracingscantokens", Tracingnesting = "tracingnesting", Predisplaydirection = "predisplaydirection", Lastlinefit = "lastlinefit", Savingvdiscards = "savingvdiscards", Savinghyphcodes = "savinghyphcodes", TeXXeTstate = "TeXXeTstate" }
 params! { DimenPar, 21, Parindent = "parindent", Mathsurround = "mathsurround", Lineskiplimit = "lineskiplimit", Hsize = "hsize", Vsize = "vsize", Maxdepth = "maxdepth", Splitmaxdepth = "splitmaxdepth", Boxmaxdepth = "boxmaxdepth", Hfuzz = "hfuzz", Vfuzz = "vfuzz", Delimitershortfall = "delimitershortfall", Nulldelimiterspace = "nulldelimiterspace", Scriptspace = "scriptspace", Predisplaysize = "predisplaysize", Displaywidth = "displaywidth", Displayindent = "displayindent", Overfullrule = "overfullrule", Hangindent = "hangindent", Hoffset = "hoffset", Voffset = "voffset", Emergencystretch = "emergencystretch" }
 params! { GluePar, 18, Lineskip = "lineskip", Baselineskip = "baselineskip", Parskip = "parskip", Abovedisplayskip = "abovedisplayskip", Belowdisplayskip = "belowdisplayskip", Abovedisplayshortskip = "abovedisplayshortskip", Belowdisplayshortskip = "belowdisplayshortskip", Leftskip = "leftskip", Rightskip = "rightskip", Topskip = "topskip", Splittopskip = "splittopskip", Tabskip = "tabskip", Spaceskip = "spaceskip", Xspaceskip = "xspaceskip", Parfillskip = "parfillskip", Thinmuskip = "thinmuskip", Medmuskip = "medmuskip", Thickmuskip = "thickmuskip" }
-params! { TokPar, 9, Output = "output", Everypar = "everypar", Everymath = "everymath", Everydisplay = "everydisplay", Everyhbox = "everyhbox", Everyvbox = "everyvbox", Everyjob = "everyjob", Everycr = "everycr", Errhelp = "errhelp" }
+params! { TokPar, 10, Output = "output", Everypar = "everypar", Everymath = "everymath", Everydisplay = "everydisplay", Everyhbox = "everyhbox", Everyvbox = "everyvbox", Everyjob = "everyjob", Everycr = "everycr", Errhelp = "errhelp", Everyeof = "everyeof" }
 
 /// The reader's internal commands (`Mat::Internal`).
-pub const INTERNAL: [(&str, Prim); 9] = [
+pub const INTERNAL: [(&str, Prim); 12] = [
     ("\u{0}package", Prim::Mat(Mat::Internal(0))),
     ("\u{0}endgraf", Prim::Mat(Mat::Internal(1))),
     ("\u{0}discnext", Prim::Mat(Mat::Internal(2))),
@@ -350,6 +422,10 @@ pub const INTERNAL: [(&str, Prim); 9] = [
     ("\u{0}displayend", Prim::Mat(Mat::Internal(6))),
     ("\u{0}mathgroup", Prim::Mat(Mat::Internal(7))),
     ("\u{0}choicenext", Prim::Mat(Mat::Internal(8))),
+    ("\u{0}middlenext", Prim::Mat(Mat::Internal(9))),
+    // (an output routine's first two nodes: `graph::output`)
+    ("\u{0}output", Prim::Mat(Mat::Internal(10))),
+    ("\u{0}outputpage", Prim::Mat(Mat::Internal(11))),
 ];
 
 /// Every TeX82 primitive (tex.web §1336: partex-core's `init_prim_tex` less
@@ -466,7 +542,7 @@ pub const PRIMITIVES: [(&str, Prim, &str); 325] = [
     ("hskip", Prim::Mat(Mat::Hskip(0)), "HSKIP"),
     ("hss", Prim::Mat(Mat::Hskip(3)), "HSKIP"),
     ("ht", Prim::BoxDimen(1), "SET_BOX_DIMEN"),
-    ("hyphenation", Prim::Unimpl(93), "HYPH_DATA"),
+    ("hyphenation", Prim::HyphData(false), "HYPH_DATA"),
     ("hyphenchar", Prim::Mat(Mat::FontInt(0)), "ASSIGN_FONT_INT"),
     ("hyphenpenalty", Prim::IntPar(IntPar::Hyphenpenalty), "ASSIGN_INT"),
     ("if", Prim::If(IfKind::Char), "IF_TEST"),
@@ -580,7 +656,7 @@ pub const PRIMITIVES: [(&str, Prim, &str); 325] = [
     ("parindent", Prim::DimenPar(DimenPar::Parindent), "ASSIGN_DIMEN"),
     ("parshape", Prim::Parshape, "SET_SHAPE"),
     ("parskip", Prim::GluePar(GluePar::Parskip), "ASSIGN_GLUE"),
-    ("patterns", Prim::Unimpl(94), "HYPH_DATA"),
+    ("patterns", Prim::HyphData(true), "HYPH_DATA"),
     ("pausing", Prim::IntPar(IntPar::Pausing), "ASSIGN_INT"),
     ("penalty", Prim::Mat(Mat::Penalty), "BREAK_PENALTY"),
     ("postdisplaypenalty", Prim::IntPar(IntPar::Postdisplaypenalty), "ASSIGN_INT"),
@@ -605,14 +681,14 @@ pub const PRIMITIVES: [(&str, Prim, &str); 325] = [
     ("scriptstyle", Prim::Math(MathP::Style(4)), "MATH_STYLE"),
     ("scrollmode", Prim::Interaction(2), "SET_INTERACTION"),
     ("setbox", Prim::Mat(Mat::SetBox), "SET_BOX"),
-    ("setlanguage", Prim::Unimpl(106), "EXTENSION"),
+    ("setlanguage", Prim::SetLanguage, "EXTENSION"),
     ("sfcode", Prim::Code(Code::Sf), "DEF_CODE"),
     ("shipout", Prim::Mat(Mat::Shipout), "LEADER_SHIP"),
     ("show", Prim::Unimpl(99), "XRAY"),
-    ("showbox", Prim::Unimpl(100), "XRAY"),
+    ("showbox", Prim::Show(1), "XRAY"),
     ("showboxbreadth", Prim::IntPar(IntPar::Showboxbreadth), "ASSIGN_INT"),
     ("showboxdepth", Prim::IntPar(IntPar::Showboxdepth), "ASSIGN_INT"),
-    ("showlists", Prim::Unimpl(102), "XRAY"),
+    ("showlists", Prim::Show(3), "XRAY"),
     ("showthe", Prim::Unimpl(101), "XRAY"),
     ("skewchar", Prim::Mat(Mat::FontInt(1)), "ASSIGN_FONT_INT"),
     ("skip", Prim::Register(Reg::Skip), "REGISTER"),
@@ -793,3 +869,91 @@ pub const UNIMPL: [&str; 107] = [
     "special",
     "setlanguage",
 ];
+
+/// e-TeX's primitives (etex.web §1380, `generate_eTeX_prims`), sorted by
+/// name (byte order): named only in extended mode (`Options::etex`).
+pub const ETEX_PRIMITIVES: [(&str, Prim); 66] = [
+    ("TeXXeTstate", Prim::IntPar(IntPar::TeXXeTstate)),
+    ("beginL", Prim::Lr(6)),
+    ("beginR", Prim::Lr(10)),
+    ("botmarks", Prim::Mark(7)),
+    ("clubpenalties", Prim::PenShape(1)),
+    ("currentgrouplevel", Prim::LastItem(6)),
+    ("currentgrouptype", Prim::LastItem(7)),
+    ("currentifbranch", Prim::LastItem(10)),
+    ("currentiflevel", Prim::LastItem(8)),
+    ("currentiftype", Prim::LastItem(9)),
+    ("detokenize", Prim::Detokenize),
+    ("dimexpr", Prim::LastItem(26)),
+    ("displaywidowpenalties", Prim::PenShape(3)),
+    ("eTeXrevision", Prim::Convert(Conv::ETeXRevision)),
+    ("eTeXversion", Prim::LastItem(5)),
+    ("endL", Prim::Lr(7)),
+    ("endR", Prim::Lr(11)),
+    ("everyeof", Prim::TokPar(TokPar::Everyeof)),
+    ("firstmarks", Prim::Mark(6)),
+    ("fontchardp", Prim::LastItem(16)),
+    ("fontcharht", Prim::LastItem(15)),
+    ("fontcharic", Prim::LastItem(17)),
+    ("fontcharwd", Prim::LastItem(14)),
+    ("glueexpr", Prim::LastItem(27)),
+    ("glueshrink", Prim::LastItem(22)),
+    ("glueshrinkorder", Prim::LastItem(13)),
+    ("gluestretch", Prim::LastItem(21)),
+    ("gluestretchorder", Prim::LastItem(12)),
+    ("gluetomu", Prim::LastItem(24)),
+    ("ifcsname", Prim::If(IfKind::Csname)),
+    ("ifdefined", Prim::If(IfKind::Defined)),
+    ("iffontchar", Prim::If(IfKind::FontChar)),
+    ("interactionmode", Prim::PageInt(2)),
+    ("interlinepenalties", Prim::PenShape(0)),
+    ("lastlinefit", Prim::IntPar(IntPar::Lastlinefit)),
+    ("lastnodetype", Prim::LastItem(11)),
+    ("marks", Prim::Marks),
+    ("middle", Prim::Math(MathP::Middle)),
+    ("muexpr", Prim::LastItem(28)),
+    ("mutoglue", Prim::LastItem(23)),
+    ("numexpr", Prim::LastItem(25)),
+    ("pagediscards", Prim::Discards(0)),
+    ("parshapedimen", Prim::LastItem(20)),
+    ("parshapeindent", Prim::LastItem(19)),
+    ("parshapelength", Prim::LastItem(18)),
+    ("predisplaydirection", Prim::IntPar(IntPar::Predisplaydirection)),
+    ("protected", Prim::Protected),
+    ("readline", Prim::ReadLine),
+    ("savinghyphcodes", Prim::IntPar(IntPar::Savinghyphcodes)),
+    ("savingvdiscards", Prim::IntPar(IntPar::Savingvdiscards)),
+    ("scantokens", Prim::ScanTokens),
+    ("showgroups", Prim::ShowE(4)),
+    ("showifs", Prim::ShowE(6)),
+    ("showtokens", Prim::ShowE(5)),
+    ("splitbotmarks", Prim::Mark(9)),
+    ("splitdiscards", Prim::Discards(1)),
+    ("splitfirstmarks", Prim::Mark(8)),
+    ("topmarks", Prim::Mark(5)),
+    ("tracingassigns", Prim::IntPar(IntPar::Tracingassigns)),
+    ("tracinggroups", Prim::IntPar(IntPar::Tracinggroups)),
+    ("tracingifs", Prim::IntPar(IntPar::Tracingifs)),
+    ("tracingnesting", Prim::IntPar(IntPar::Tracingnesting)),
+    ("tracingscantokens", Prim::IntPar(IntPar::Tracingscantokens)),
+    ("unexpanded", Prim::Unexpanded),
+    ("unless", Prim::Unless),
+    ("widowpenalties", Prim::PenShape(2)),
+];
+
+#[cfg(test)]
+mod etex_tests {
+    use super::*;
+
+    #[test]
+    fn etex_table_is_sorted_and_named_back() {
+        for w in ETEX_PRIMITIVES.windows(2) {
+            assert!(w[0].0 < w[1].0, "{} before {}", w[0].0, w[1].0);
+        }
+        for (n, p) in ETEX_PRIMITIVES {
+            assert_eq!(Prim::by_name_etex(n), Some(p));
+            assert_eq!(p.name(), n);
+            assert_eq!(Prim::by_name(n), None, "{n} is TeX82's");
+        }
+    }
+}

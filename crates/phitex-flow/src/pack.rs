@@ -69,10 +69,56 @@ fn order(t: &[i32; 4]) -> u8 {
     }
 }
 
+/// etex.web's `end_LR_type`: the subtype of the node ending a math
+/// node of subtype `s` (`L_code*(s div L_code)+end_M_code`).
+pub fn end_lr_type(s: u8) -> u8 {
+    4 * (s / 4) + 3
+}
+
+/// The subtype of a math node (etex.web: `lr + after`).
+pub fn math_subtype(lr: u8, after: bool) -> u8 {
+    lr + u8::from(after)
+}
+
+/// TeXXeT's checks of `hpack` (etex.web §1438–§1440), with `\TeXXeTstate`
+/// positive: an end node matching no begin node becomes an explicit kern;
+/// the begin nodes left open get their end nodes at the list's end. The
+/// number of problems (missing ends ×10000, extra ends), which TeX
+/// reports in the box's diagnostic (not yet: CORE.md).
+pub fn lr_fix(list: &mut Vec<Item>) -> u32 {
+    // (`before` at the bottom never matches)
+    let mut stack: Vec<u8> = vec![0];
+    let mut problems = 0;
+    for it in list.iter_mut() {
+        if let Item::Math { w, after, lr } = *it {
+            let s = math_subtype(lr, after);
+            if after {
+                if stack.last() == Some(&end_lr_type(s)) {
+                    stack.pop();
+                } else {
+                    problems += 1;
+                    *it = Item::Kern { w, sub: 1 };
+                }
+            } else {
+                stack.push(end_lr_type(s));
+            }
+        }
+    }
+    while let Some(&e) = stack.last() {
+        if e == 0 {
+            break;
+        }
+        list.push(Item::Math { w: 0, after: true, lr: e - 1 });
+        problems += 10000;
+        stack.pop();
+    }
+    problems
+}
+
 /// §649: `hpack`. Marks move out to `adjust` if given (§655).
 pub fn hpack(mut list: Vec<Item>, spec: Spec, params: &Params, adjust: Option<&mut Vec<Item>>) -> Packed {
     if let Some(adj) = adjust {
-        let (moved, kept): (Vec<Item>, Vec<Item>) = list.into_iter().partition(|i| matches!(i, Item::Mark(_) | Item::Ins(_)));
+        let (moved, kept): (Vec<Item>, Vec<Item>) = list.into_iter().partition(|i| matches!(i, Item::Mark(_) | Item::Marks(..) | Item::Ins(_)));
         adj.extend(moved);
         list = kept;
     }

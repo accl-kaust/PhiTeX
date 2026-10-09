@@ -171,6 +171,7 @@ impl Printer {
             self.ln();
         }
     }
+
     fn print(&mut self, s: &str) {
         for c in s.chars() {
             let k = u32::from(c);
