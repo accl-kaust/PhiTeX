@@ -1,0 +1,18 @@
+% Macro arguments: undelimited, delimited, #{, braces, \long, \outer, ##.
+\def\a#1#2{(#2,#1)}\message{\a xy \a {ab}{cd} \a x {y}}
+\def\b#1.#2\stop{[#1|#2]}\message{\b ab.cd\stop \b {x}.{y}\stop \b {x}y.{z}\stop}
+\def\c#1#{<#1>}\message{\c abc{d}}
+\message{\meaning\a}
+\message{\meaning\b}
+\message{\meaning\c}
+\long\def\d#1{#1}\outer\def\e{}\long\outer\def\f#1#2.{##1}
+\message{\meaning\d}
+\expandafter\message\expandafter{\meaning\e}
+\expandafter\message\expandafter{\meaning\f}
+\def\g#1#2#3#4#5#6#7#8#9{#9#8#7#6#5#4#3#2#1}\message{\g123456789}
+\def\h{\i}\def\i{\j}\def\j{deep}\message{\h}
+\def\k#1{\l{#1}{#1}}\def\l#1#2{#1-#2}\message{\k{q r}}
+\long\def\n#1{/#1/}\message{\n\par}
+\def\o{one two}\message{\o\ \o}
+\def\p#1 #2 {#2#1}\message{\p a b c}
+\message{\meaning\undefined}

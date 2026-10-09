@@ -1,0 +1,58 @@
+(./core.tex Preloading the plain format: codes, registers,
+\maxdimen=\dimen10
+\hideskip=\skip10
+\centering=\skip11
+\p@=\dimen11
+\z@=\dimen12
+\z@skip=\skip12
+\voidb@x=\box10
+parameters,
+\smallskipamount=\skip13
+\medskipamount=\skip14
+\bigskipamount=\skip15
+\normalbaselineskip=\skip16
+\normallineskip=\skip17
+\normallineskiplimit=\dimen13
+\jot=\dimen14
+\interdisplaylinepenalty=\count23
+\interfootnotelinepenalty=\count24
+[24,14,17,9,10,9,-1,-1,3,0,255,24,-1]
+[16383.99998pt|-1000.0pt plus 1.0fill|0.0pt plus 1000.0pt minus 1000.0pt|1.0pt|
+0.0pt|0.0pt|\char"A]
+[3.0pt plus 1.0pt minus 1.0pt|6.0pt plus 2.0pt minus 2.0pt|12.0pt plus 4.0pt mi
+nus 4.0pt|12.0pt|1.0pt|0.0pt|3.0pt|100|100] [100,200,1000,1000,10,50,700,150,10
+0,10000,10000,10000,1,45,-1,-1,901,5,5]
+[0.1pt,5.0pt,469.75499pt,643.20255pt,4.0pt,16383.99998pt,16383.99998pt,5.0pt,1.
+2pt,0.5pt,20.0pt]
+[0.0pt plus 1.0pt|12.0pt plus 3.0pt minus 9.0pt|0.0pt plus 3.0pt|7.0pt plus 3.0
+pt minus 4.0pt|10.0pt|10.0pt|0.0pt plus 1.0fil|3.0mu|4.0mu plus 2.0mu minus 4.0
+mu|5.0mu plus 5.0mu] [12346778810131311] [8705,32768,32768,622,4723,29025,28720
+,0,999,164608,2548495,-1,0]
+[\char"D,\char"1,\char"2,\char"FF,\mathchar"100,\mathchar"2710,\count20,\count2
+55,\dimen2,\skip0,\toks0] \outer macro:->\alloc@ 0\count \countdef \insc@unt 
+macro:#1#2#3#4#5->\global \advance \count 1#1by\@ne \ch@ck #1#4#2\allocationnum
+ber =\count 1#1\global #3#5=\allocationnumber \wlog {\string #5=\string #2\the 
+\allocationnumber }
+macro:#1#2#3->\ifnum \count 1#1<#2\else \errmessage {No room for a new #3}\fi  
+macro:#1#2->\csname \expandafter \if@ \string #1#2\endcsname  macro:if->
+macro:->\do \ \do \\\do \{\do \}\do \$\do \&\do \#\do \^\do \^^K\do \_\do \^^A\
+do \%\do \~ macro:->\immediate \write \m@ne  macro:#1->\ifcase #1 \@m \or 1200\
+or 1440\or 1728\or 2074\or 2488\fi \relax  [\iffalse|macro:->\let \iffoo =\iftr
+ue |macro:->\let \iffoo =\iffalse ] foo is true
+\mycount=\count25
+[1728]
+\mydimen=\dimen15
+[16382.99998pt]
+\mytoks=\toks10
+[\a \b {c}|\toks10]
+\myhelp=\toks11
+[\help me ]
+\myins=\insert254
+[\char"FE|254]
+\myread=\read0
+\mywrite=\write0
+\myfam=\fam4
+\mylang=\language1
+\mymu=\muskip10
+\mybox=\box11
+[\char"0|\char"0|\char"4|\char"1|\muskip10|\char"B] \outer macro:->\par  )
