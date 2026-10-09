@@ -70,10 +70,12 @@ pub struct Em<'a> {
     pub amsmath: bool,
     pub out: String,
     pub changes: Vec<RawChange>,
-    section: Option<String>,
+    /// The section the text written is in (the title of the last
+    /// sectioning command written).
+    pub section: Option<String>,
     /// A line end is owed before the next text (a comment was written
     /// last): unless that text begins with one.
-    nl: bool,
+    pub nl: bool,
 }
 
 impl<'a> Em<'a> {
@@ -132,7 +134,7 @@ impl<'a> Em<'a> {
                 let nb = nc.get(pj).map_or(new.len(), |r| r.start);
                 let oe = old.get(ob).map_or(old_end, |t| t.start);
                 let ne = new.get(nb).map_or(new_end, |t| t.start);
-                self.seq(&old[oa..ob], &new[na..nb], oe, ne, Ctx::default());
+                self.run(&old[oa..ob], &new[na..nb], oe, ne);
             }
             if pi < oc.len() {
                 for t in &new[nc[pj].clone()] {
@@ -142,6 +144,12 @@ impl<'a> Em<'a> {
             i = pi + 1;
             j = pj + 1;
         }
+    }
+
+    /// A run of paragraphs that differ, diffed by tokens (`old_end`,
+    /// `new_end`: where the tokens after them begin).
+    pub fn run(&mut self, old: &[Tok], new: &[Tok], old_end: usize, new_end: usize) {
+        self.seq(old, new, old_end, new_end, Ctx::default());
     }
 
     /// Diff two token sequences (ending at `old_end`, `new_end`).
@@ -608,7 +616,7 @@ impl<'a> Em<'a> {
 
 /// The paragraphs of a token sequence: runs up to and including a blank
 /// line.
-fn chunks(toks: &[Tok]) -> Vec<std::ops::Range<usize>> {
+pub fn chunks(toks: &[Tok]) -> Vec<std::ops::Range<usize>> {
     let mut out = Vec::new();
     let mut from = 0;
     for (i, t) in toks.iter().enumerate() {
@@ -623,7 +631,7 @@ fn chunks(toks: &[Tok]) -> Vec<std::ops::Range<usize>> {
     out
 }
 
-fn chunk_key(toks: &[Tok]) -> u64 {
+pub fn chunk_key(toks: &[Tok]) -> u64 {
     use std::hash::{DefaultHasher, Hash, Hasher};
     let mut h = DefaultHasher::new();
     for t in toks {

@@ -1056,7 +1056,11 @@ impl<H: Host, T: Tracker> Tex<H, T> {
                     }
                 }
             }
-            self.read_font_info(u, self.cur_name, self.cur_area, s)?
+            let f = self.read_font_info(u, self.cur_name, self.cur_area, s)?;
+            // (the files its pages will embed, named to the host now: a
+            // hint, read by nothing)
+            self.hint_font_files(&[f]);
+            f
         };
         if self.params.flavor == crate::params::Flavor::Tex {
             self.set_equiv(u, f);

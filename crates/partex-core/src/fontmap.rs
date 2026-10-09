@@ -223,6 +223,14 @@ impl Lookups {
         if let Some(e) = self.found.get(tfm) {
             return e.clone();
         }
+        let found = self.scan(lazy, tfm);
+        self.found.insert(tfm.to_vec(), found.clone());
+        found
+    }
+
+    /// `tfm`'s entry read from the file (its index made if it is not:
+    /// a cache, not kept), not kept among those found.
+    fn scan(&mut self, lazy: &Lazy, tfm: &[u8]) -> Option<Arc<MapEntry>> {
         let data = &lazy.data[..];
         // (the index holds the first line of the name's hash: no line of
         // the name comes before it)
@@ -248,7 +256,6 @@ impl Lookups {
             }
             at = next;
         }
-        self.found.insert(tfm.to_vec(), found.clone());
         found
     }
 }
@@ -405,6 +412,19 @@ impl FontMap {
     pub(crate) fn lookup(&mut self, tfm: &[u8]) -> Option<Arc<MapEntry>> {
         match &self.table.lazy {
             Some(l) => self.lookups.lookup(l, tfm),
+            None => self.table.by_tfm.get(tfm).cloned(),
+        }
+    }
+
+    /// The entry for a TFM name, as [`Self::lookup`] finds it, without
+    /// keeping it among the lookups found (a hint's: see
+    /// `Tex::hint_font_files`).
+    pub(crate) fn peek(&mut self, tfm: &[u8]) -> Option<Arc<MapEntry>> {
+        match &self.table.lazy {
+            Some(l) => match self.lookups.found.get(tfm) {
+                Some(e) => e.clone(),
+                None => self.lookups.scan(l, tfm),
+            },
             None => self.table.by_tfm.get(tfm).cloned(),
         }
     }
@@ -1186,6 +1206,40 @@ impl<H: crate::host::Host, T: crate::track::Tracker> crate::tex::Tex<H, T> {
         self.fontmap.read = true;
         if let Some(name) = self.fontmap.pending.take() {
             self.read_map_file(&name, Mode::DupIgnore);
+            // (the fonts loaded so far: the files their pages will embed)
+            let fonts: Vec<i32> = (crate::web::FONT_BASE + 1..=self.font_ptr).collect();
+            self.hint_font_files(&fonts);
+        }
+    }
+
+    /// [`Host::will_need`](crate::Host::will_need) of the files fonts
+    /// `fonts` will embed (their map entries' Type 1 programs and
+    /// encodings), once a map has been read: a hint to the host, which
+    /// can fetch them ahead. Pure: the map is peeked at, nothing it keeps
+    /// (the lookups found, which a loaded table must hand out again) is
+    /// changed, and no tracker sees it.
+    pub(crate) fn hint_font_files(&mut self, fonts: &[i32]) {
+        if !self.fontmap.read || !self.host.wants_hints() {
+            return;
+        }
+        let mut want = Vec::new();
+        for &f in fonts {
+            if f == crate::web::NULL_FONT {
+                continue;
+            }
+            let name = self.font_name_bytes(f);
+            let Some(e) = self.fontmap.peek(&name) else {
+                continue;
+            };
+            if let Some(n) = &e.ff_name {
+                want.push((n.clone(), crate::host::FileKind::Type1));
+            }
+            if let Some(n) = &e.encname {
+                want.push((n.clone(), crate::host::FileKind::Enc));
+            }
+        }
+        if !want.is_empty() {
+            self.host.will_need(&want);
         }
     }
 

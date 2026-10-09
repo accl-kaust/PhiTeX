@@ -1417,6 +1417,7 @@ dependencies = [
  "partex-otf",
  "partex-ssa",
  "partex-trace",
+ "phitex-draw",
  "phitex-ir",
  "phitex-syntax",
 ]

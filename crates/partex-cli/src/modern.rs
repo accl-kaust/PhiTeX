@@ -13,6 +13,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::mpsc;
 use std::time::{Duration, Instant, SystemTime};
 
+mod diffmode;
 mod ssawatch;
 
 use crate::config;
@@ -28,12 +29,14 @@ commands:
   build    build the document to its fixpoint (BibTeX and makeindex included)
   watch    build, then rebuild whenever an input changes, the pages live in
            the browser (on a terminal, keys: r rebuild, o open the viewer,
-           w errors and warnings, q quit, ? help)
+           w errors and warnings, d diff, b baseline, n/N next/previous
+           change, D write the diff, q quit, ? help)
   check    compile once without writing the output files
   why      why the last build ran as it did, and every warning it gave
   trace    build, writing a Chrome/Perfetto timeline (--open: open Perfetto)
-  clean    remove the files the last build wrote, its saved session and its
-           saved build: the next build starts over
+  clean    remove the files the last build wrote, the watch's diff
+           (.phitex-diff/), its saved session and its saved build: the
+           next build starts over
   clean --all
            remove every saved build, session and record, of every document
            (the formats stay); no file needed
@@ -60,6 +63,10 @@ options:
                            VISUAL, EDITOR)
       --copy-pdf[=DIR]     build, watch: copy the PDF after each successful
                            build into DIR (default: where phitex was run)
+      --diff REV           watch: show the diff against git revision REV
+                           (HEAD, HEAD~3, a branch, a tag, a hash, or
+                           `staged`), latexdiff's markup typeset beside the
+                           document (`d` switches; machine runtime only)
       --no-machine         watch: rebuild through checkpoints instead of the
                            machine runtime (also PARTEX_MACHINE=0)
       --ssa                watch (experimental): rebuild on the dynamic-SSA
@@ -128,6 +135,8 @@ struct Options {
     editor: Option<String>,
     /// `--synctex` or `--no-synctex` (none: `phitex.toml`'s, else on).
     synctex: Option<bool>,
+    /// `watch --diff REV`.
+    diff: Option<String>,
 }
 
 #[allow(clippy::too_many_lines, reason = "one option a line")]
@@ -169,6 +178,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
         view: None,
         editor: None,
         synctex: None,
+        diff: None,
     };
     let mut it = args[1..].iter();
     while let Some(a) = it.next() {
@@ -228,6 +238,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
             "--no-synctex" => o.synctex = Some(false),
             "--machine" => o.no_machine = false,
             "--output" if o.command == Command::Trace => o.timeline = Some(value()?),
+            "--diff" if o.command == Command::Watch => o.diff = Some(value()?),
             "--all" if o.command == Command::Clean => o.all = true,
             "-h" | "--help" => return Err(String::new()),
             f if f.starts_with('-') && f.len() > 1 => {
@@ -891,6 +902,9 @@ fn clean(t: &Target, st: Settings) -> ! {
     if session {
         what.push("the saved session".into());
     }
+    if diffmode::remove_dir() {
+        what.push(format!("{}/", diffmode::DIR));
+    }
     // (the store keys a job as a build does: by its engine command line,
     // which `last_record` set)
     let job = crate::setup();
@@ -1104,11 +1118,36 @@ enum Input {
     Problems,
     /// `c`, Ctrl-L: clear the screen.
     Clear,
+    /// `d`: the diff against the baseline shown, or the document again.
+    Diff,
+    /// `b`: choose the baseline, from the repository's commits.
+    Baseline,
+    /// `n` and `N` (`p`): the next and the previous change.
+    Next,
+    Prev,
+    /// `D`: the diff written beside the outputs (`<job>-diff.tex`, `.pdf`).
+    WriteDiff,
+    /// The arrows (and `j`, `k`), Enter and Esc: a list's.
+    Up,
+    Down,
+    Enter,
+    Esc,
+    /// The live viewer asked for something (`View::take_asks`).
+    Viewer,
+}
+
+impl Input {
+    /// Whether each press counts (a list's steps), not only the first of
+    /// a build's time.
+    fn repeats(self) -> bool {
+        matches!(self, Input::Up | Input::Down | Input::Next | Input::Prev)
+    }
 }
 
 /// What `?` shows (the status line says only `? help`).
-const KEYS: [&str; 2] = [
+const KEYS: [&str; 3] = [
     "r rebuild now · o open the viewer (or the PDF) · w the errors and warnings · c clear the screen",
+    "d diff against the baseline (or back) · b choose the baseline · n/N next/previous change · D write <job>-diff.tex and .pdf",
     "q quit, after saving the build (Ctrl-C too; twice: at once) · Ctrl-Z suspend",
 ];
 
@@ -1116,6 +1155,41 @@ const KEYS: [&str; 2] = [
 static BUSY: AtomicBool = AtomicBool::new(false);
 /// Ctrl-C was pressed (a second one stops the watch at once).
 static INTERRUPTED: AtomicBool = AtomicBool::new(false);
+
+/// An escape sequence at the start of `rest` (after its ESC): what it
+/// means, and its length. ESC alone is Esc; a sequence not known (a
+/// function key) means nothing.
+fn escape(rest: &[u8]) -> (Option<Input>, usize) {
+    match rest {
+        [b'[' | b'O', b'A', ..] => (Some(Input::Up), 2),
+        [b'[' | b'O', b'B', ..] => (Some(Input::Down), 2),
+        [b'[', tail @ ..] => {
+            // (CSI: parameters, then a final byte)
+            let n = tail
+                .iter()
+                .position(|c| (0x40..=0x7e).contains(c))
+                .map_or(tail.len(), |k| k + 1);
+            (None, 1 + n)
+        }
+        [b'O', _, ..] => (None, 2),
+        // (ESC alone; or Alt and a key, Esc then a key: the Esc)
+        _ => (Some(Input::Esc), 0),
+    }
+}
+
+/// What a line means to a watch reading lines (not keys): `q`, and the
+/// diff's `d`, `n`, `N`, `D` (scripts and tests).
+fn line_input(line: &str) -> Option<Input> {
+    Some(match line.trim() {
+        "q" => Input::Quit,
+        "r" => Input::Rebuild,
+        "d" => Input::Diff,
+        "n" => Input::Next,
+        "N" | "p" => Input::Prev,
+        "D" => Input::WriteDiff,
+        _ => return None,
+    })
+}
 
 /// Read the user's keys (`keys`: the terminal's modes are set for it) or
 /// lines into `tx`, on a thread of its own, from the watch's start: a key
@@ -1128,7 +1202,9 @@ fn read_input(keys: bool, printer: std::sync::Arc<crate::live::Live>, tx: mpsc::
         if !keys {
             for line in std::io::stdin().lines() {
                 let Ok(line) = line else { break };
-                if line.trim() == "q" && tx.send(Input::Quit).is_err() {
+                if let Some(i) = line_input(&line)
+                    && tx.send(i).is_err()
+                {
                     break;
                 }
             }
@@ -1144,10 +1220,20 @@ fn read_input(keys: bool, printer: std::sync::Arc<crate::live::Live>, tx: mpsc::
                 }
                 Ok(n) => n,
             };
-            for &b in &buf[..n] {
+            let mut at = 0;
+            while at < n {
+                let b = buf[at];
+                at += 1;
                 let input = match b {
                     // (an escape sequence: an arrow, a function key)
-                    0x1b => break,
+                    0x1b => {
+                        let (i, len) = escape(&buf[at..n]);
+                        at += len;
+                        match i {
+                            Some(i) => i,
+                            None => continue,
+                        }
+                    }
                     b'q' | b'Q' | 0x04 => Input::Quit,
                     0x03 => {
                         if INTERRUPTED.swap(true, Relaxed) {
@@ -1171,6 +1257,14 @@ fn read_input(keys: bool, printer: std::sync::Arc<crate::live::Live>, tx: mpsc::
                     b'o' | b'O' => Input::Open,
                     b'w' | b'W' | b'e' | b'E' => Input::Problems,
                     b'c' | b'C' | 0x0c => Input::Clear,
+                    b'd' => Input::Diff,
+                    b'D' => Input::WriteDiff,
+                    b'b' | b'B' => Input::Baseline,
+                    b'n' => Input::Next,
+                    b'N' | b'p' | b'P' => Input::Prev,
+                    b'k' => Input::Up,
+                    b'j' => Input::Down,
+                    b'\r' | b'\n' => Input::Enter,
                     b'?' | b'h' | b'H' => {
                         printer.help(&KEYS);
                         continue;
@@ -1209,7 +1303,7 @@ fn next_inputs(rx: &mpsc::Receiver<Input>, poll: Duration) -> Vec<Input> {
     };
     let mut all = vec![first];
     while let Ok(i) = rx.try_recv() {
-        if !all.contains(&i) {
+        if i.repeats() || !all.contains(&i) {
             all.push(i);
         }
     }
@@ -1229,7 +1323,19 @@ fn answer(
         Input::Open => viewer.open(ren, target, outputs),
         Input::Problems => ren.show_problems(),
         Input::Clear => ren.live().clear_screen(),
-        Input::Quit | Input::Rebuild => {}
+        // (the diff's, answered by the machine-mode watch)
+        Input::Diff
+        | Input::Baseline
+        | Input::Next
+        | Input::Prev
+        | Input::WriteDiff
+        | Input::Up
+        | Input::Down
+        | Input::Enter
+        | Input::Esc
+        | Input::Viewer
+        | Input::Quit
+        | Input::Rebuild => {}
     }
 }
 
@@ -1416,17 +1522,33 @@ impl Viewer {
 
 /// `phitex watch`: build, then rebuild whenever an input changes (`q`
 /// and Enter quits; on a terminal, keys).
+#[allow(clippy::too_many_lines)]
 fn watch(opts: &Options, target: &Target, st: Settings) -> ! {
     // (keys from the start: a key pressed while the first build runs)
     let keys = st.progress && term::keys_on();
     let ren = Renderer::for_watch(st, keys);
     let (tx, rx) = mpsc::channel();
-    read_input(keys, ren.live(), tx);
+    read_input(keys, ren.live(), tx.clone());
+    if opts.diff.is_some() && (target.ssa || !target.machine) {
+        let how = if target.ssa {
+            "--ssa"
+        } else {
+            "--no-machine (or machine = false)"
+        };
+        fail(
+            &format!("--diff needs the machine runtime, not {how}"),
+            st.style,
+        );
+    }
     if target.ssa {
         ssawatch::watch(opts, target, &ren, &rx);
     }
     if target.machine {
-        machine_watch(opts, target, &ren, &rx);
+        // (`--diff`'s revision read now: a bad one said before anything
+        // is built)
+        let diff = diffmode::Diff::new(target, opts.diff.as_deref())
+            .unwrap_or_else(|e| fail(&e, st.style));
+        machine_watch(opts, target, &ren, &rx, &tx, diff);
     }
     BUSY.store(true, std::sync::atomic::Ordering::Relaxed);
     ren.status("Compiling", &format!("{} ({})", target.file, target.engine));
@@ -1630,16 +1752,31 @@ fn machine_quit(ren: &Renderer, w: &mut crate::machinehost::Watch, history: i32)
 /// `phitex watch` in machine mode (DESIGN.md §6.1, §7.0): the build is
 /// recorded as regions, and an edit re-runs only the regions whose reads
 /// it changed. `ren` and `rx` are the watch's, reading keys already.
-fn machine_watch(opts: &Options, target: &Target, ren: &Renderer, rx: &mpsc::Receiver<Input>) -> ! {
+#[allow(clippy::too_many_lines)]
+fn machine_watch(
+    opts: &Options,
+    target: &Target,
+    ren: &Renderer,
+    rx: &mpsc::Receiver<Input>,
+    tx: &mpsc::Sender<Input>,
+    mut diff: diffmode::Diff,
+) -> ! {
     BUSY.store(true, std::sync::atomic::Ordering::Relaxed);
     ren.status("Compiling", &format!("{} ({})", target.file, target.engine));
     let formats = ensure_format(&target.engine, Some(ren));
+    diff.formats.clone_from(&formats);
     crate::set_args(target.engine_args("nonstopmode"));
     let mut job = crate::setup();
     job.host.formats = formats;
     job.host.notes = true;
     crate::make_output_dir(&job.host);
     let mut viewer = Viewer::start(opts, ren);
+    if let Some(v) = &viewer.live {
+        let tx = tx.clone();
+        v.on_ask(Box::new(move || {
+            let _ = tx.send(Input::Viewer);
+        }));
+    }
     ren.set_estimate(load_estimate());
     ren.start();
     let mut between = crate::Between::default();
@@ -1663,6 +1800,8 @@ fn machine_watch(opts: &Options, target: &Target, ren: &Renderer, rx: &mpsc::Rec
     if opts.open {
         viewer.open(ren, target, &out.outputs);
     }
+    // (the document's last build, shown again when the diff is not)
+    let mut last = (out, t);
     // (after a restart with nothing changed: the saved build, loading
     // meanwhile, and what changed since the look)
     let t = Instant::now();
@@ -1676,10 +1815,14 @@ fn machine_watch(opts: &Options, target: &Target, ren: &Renderer, rx: &mpsc::Rec
         let changed = w.last_changes().to_vec();
         machine_finish(target, ren, &out, Some(Rebuild { changed }), true);
         viewer.built(&outputs, history, t, &out.diagnostics);
+        last = (out, t);
     }
     BUSY.store(false, std::sync::atomic::Ordering::Relaxed);
     w.idle();
     ren.watching(&target.file, main_output(&outputs).as_deref());
+    if opts.diff.is_some() {
+        diff.key(Input::Diff, target, ren, &viewer, (&last.0, last.1));
+    }
     let poll = poll_period(50);
     loop {
         let inputs = next_inputs(rx, poll);
@@ -1688,7 +1831,17 @@ fn machine_watch(opts: &Options, target: &Target, ren: &Renderer, rx: &mpsc::Rec
         }
         let asked = inputs.contains(&Input::Rebuild);
         for &i in &inputs {
-            answer(i, ren, target, &outputs, &mut viewer);
+            if !diff.key(i, target, ren, &viewer, (&last.0, last.1)) {
+                answer(i, ren, target, &outputs, &mut viewer);
+            }
+        }
+        // (only the job shown rebuilds: the document's when it is shown
+        // again)
+        if diff.shown {
+            if asked || inputs.is_empty() {
+                diff.poll(target, ren, &viewer, asked);
+            }
+            continue;
         }
         if !asked && (!inputs.is_empty() || !w.changed()) {
             continue;
@@ -1714,6 +1867,7 @@ fn machine_watch(opts: &Options, target: &Target, ren: &Renderer, rx: &mpsc::Rec
         let changed = w.last_changes().to_vec();
         machine_finish(target, ren, &out, Some(Rebuild { changed }), true);
         viewer.built(&outputs, history, t, &out.diagnostics);
+        last = (out, t);
         w.idle();
         ren.watching(&target.file, main_output(&outputs).as_deref());
         if INTERRUPTED.load(std::sync::atomic::Ordering::Relaxed) {
@@ -1764,6 +1918,29 @@ mod tests {
         assert_eq!(copy_pdf(&pdf, &src).unwrap(), None);
         assert_eq!(std::fs::read(&pdf).unwrap(), b"%PDF-1.5 two");
         std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn escape_sequences() {
+        assert_eq!(escape(b""), (Some(Input::Esc), 0));
+        assert_eq!(escape(b"[A"), (Some(Input::Up), 2));
+        assert_eq!(escape(b"OBx"), (Some(Input::Down), 2));
+        // (a function key: nothing, all of it read)
+        assert_eq!(escape(b"[15~q"), (None, 4));
+        assert_eq!(escape(b"x"), (Some(Input::Esc), 0));
+        assert_eq!(line_input(" d "), Some(Input::Diff));
+        assert_eq!(line_input("N"), Some(Input::Prev));
+        assert_eq!(line_input("x"), None);
+    }
+
+    #[test]
+    fn steps_through_a_list_count_each_press() {
+        let (tx, rx) = mpsc::channel();
+        for i in [Input::Down, Input::Down, Input::Diff, Input::Diff] {
+            tx.send(i).unwrap();
+        }
+        let got = next_inputs(&rx, Duration::from_millis(10));
+        assert_eq!(got, vec![Input::Down, Input::Down, Input::Diff]);
     }
 
     #[test]

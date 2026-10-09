@@ -23,6 +23,7 @@
 //! against (phase 2, the live diff, re-diffs only what an edit touched).
 
 pub mod flatten;
+pub mod live;
 pub mod myers;
 pub mod sig;
 pub mod tok;
@@ -33,6 +34,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 
 pub use flatten::{Flat, flatten};
+pub use live::{Live, Place, Stats, changes_json, places};
 pub use sig::{Class, EnvKind, EnvSig, Sig, Signatures};
 
 /// A set of files: a project, at one version. Paths are relative to the
@@ -66,17 +68,112 @@ impl Files for Dir {
     }
 }
 
-/// How changes look (latexdiff's `--type`).
+/// How changes look (latexdiff's `--type`): its definitions of `\DIFadd`
+/// and `\DIFdel`, as latexdiff.pl has them.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Markup {
-    /// Added text wavy-underlined in blue, deleted struck out in red.
+    /// Added text wavy-underlined in blue, deleted struck out in red
+    /// (ulem).
     #[default]
     Underline,
+    /// Added text blue and sans serif, deleted red, in a footnote.
+    Ctraditional,
+    /// Added text sans serif, deleted in a footnote.
+    Traditional,
     /// Added text blue and sans serif, deleted red and small.
     Cfont,
+    /// Added text sans serif, deleted small and struck out (ulem).
+    Fontstrike,
+    /// A change bar in the margin, added text blue, deleted red
+    /// (changebar).
+    Cchangebar,
+    /// [`Markup::Cfont`] with change bars.
+    Cfontchbar,
+    /// [`Markup::Underline`] with change bars.
+    Culinechbar,
+    /// Change bars only, deleted text not shown.
+    Changebar,
+    /// Added text as it is, deleted text not shown.
+    Invisible,
+    /// Added text bold, deleted text not shown.
+    Bold,
 }
 
-/// How a changed range is set off (latexdiff's `--subtype`).
+impl Markup {
+    /// Every type, in latexdiff's order.
+    pub const ALL: [Markup; 11] = [
+        Markup::Underline,
+        Markup::Ctraditional,
+        Markup::Traditional,
+        Markup::Cfont,
+        Markup::Fontstrike,
+        Markup::Cchangebar,
+        Markup::Cfontchbar,
+        Markup::Culinechbar,
+        Markup::Changebar,
+        Markup::Invisible,
+        Markup::Bold,
+    ];
+
+    /// latexdiff's name for it (`UNDERLINE`, …).
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            Markup::Underline => "UNDERLINE",
+            Markup::Ctraditional => "CTRADITIONAL",
+            Markup::Traditional => "TRADITIONAL",
+            Markup::Cfont => "CFONT",
+            Markup::Fontstrike => "FONTSTRIKE",
+            Markup::Cchangebar => "CCHANGEBAR",
+            Markup::Cfontchbar => "CFONTCHBAR",
+            Markup::Culinechbar => "CULINECHBAR",
+            Markup::Changebar => "CHANGEBAR",
+            Markup::Invisible => "INVISIBLE",
+            Markup::Bold => "BOLD",
+        }
+    }
+
+    /// The type latexdiff's name (any case) names.
+    #[must_use]
+    pub fn parse(name: &str) -> Option<Markup> {
+        Markup::ALL
+            .into_iter()
+            .find(|m| m.name().eq_ignore_ascii_case(name.trim()))
+    }
+
+    /// Its definitions, as latexdiff.pl has them.
+    fn preamble(self) -> &'static str {
+        match self {
+            Markup::Underline => UNDERLINE,
+            Markup::Ctraditional => CTRADITIONAL,
+            Markup::Traditional => TRADITIONAL,
+            Markup::Cfont => CFONT,
+            Markup::Fontstrike => FONTSTRIKE,
+            Markup::Cchangebar => CCHANGEBAR,
+            Markup::Cfontchbar => CFONTCHBAR,
+            Markup::Culinechbar => CULINECHBAR,
+            Markup::Changebar => CHANGEBAR,
+            Markup::Invisible => INVISIBLE,
+            Markup::Bold => BOLD,
+        }
+    }
+
+    /// Whether it uses ulem (`\sout` then works in math with amsmath).
+    #[must_use]
+    pub fn ulem(self) -> bool {
+        self.preamble().contains("{ulem}")
+    }
+
+    /// Whether deleted text goes in a footnote (not in floats: shown small
+    /// there).
+    fn footnotes(self) -> bool {
+        matches!(self, Markup::Ctraditional | Markup::Traditional)
+    }
+}
+
+/// How a changed range is set off (latexdiff's `--subtype`): its
+/// definitions of `\DIFaddbegin`, `\DIFaddend`, … (latexdiff's `DVIPSCOL`,
+/// for dvips only, is not here).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Subtype {
     /// Not at all (the markup alone).
@@ -84,6 +181,138 @@ pub enum Subtype {
     Safe,
     /// The whole range colored: added blue, deleted red.
     Color,
+    /// A marker in the margin where a change begins and ends (`a[`, `d[`,
+    /// `]`; latexdiff's `MARGIN`).
+    Margin,
+    /// A label at each change's ends (`DIFchgb1`, …), from which the pages
+    /// with changes can be found (deprecated by latexdiff for `ZLABEL`).
+    Label,
+    /// The labels by zref, with absolute page numbers.
+    Zlabel,
+    /// Only the pages with changes shipped (atbegshi).
+    OnlyChangedPage,
+}
+
+impl Subtype {
+    pub const ALL: [Subtype; 6] = [
+        Subtype::Safe,
+        Subtype::Color,
+        Subtype::Margin,
+        Subtype::Label,
+        Subtype::Zlabel,
+        Subtype::OnlyChangedPage,
+    ];
+
+    /// latexdiff's name for it (`SAFE`, …).
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            Subtype::Safe => "SAFE",
+            Subtype::Color => "COLOR",
+            Subtype::Margin => "MARGIN",
+            Subtype::Label => "LABEL",
+            Subtype::Zlabel => "ZLABEL",
+            Subtype::OnlyChangedPage => "ONLYCHANGEDPAGE",
+        }
+    }
+
+    /// The subtype latexdiff's name (any case) names; `MARKER` is
+    /// `MARGIN`.
+    #[must_use]
+    pub fn parse(name: &str) -> Option<Subtype> {
+        if name.trim().eq_ignore_ascii_case("marker") {
+            return Some(Subtype::Margin);
+        }
+        Subtype::ALL
+            .into_iter()
+            .find(|m| m.name().eq_ignore_ascii_case(name.trim()))
+    }
+
+    fn preamble(self) -> &'static str {
+        match self {
+            Subtype::Safe => SAFE,
+            Subtype::Color => COLOR,
+            Subtype::Margin => MARGIN,
+            Subtype::Label => LABEL,
+            Subtype::Zlabel => ZLABEL,
+            Subtype::OnlyChangedPage => ONLYCHANGEDPAGE,
+        }
+    }
+
+    /// Whether floats are marked as the text is (latexdiff's `IDENTICAL`
+    /// float type: a change in a float is a change for the labels too).
+    fn identical_floats(self) -> bool {
+        matches!(self, Subtype::Label | Subtype::OnlyChangedPage)
+    }
+}
+
+/// The output driver changebar is loaded for (latexdiff's `--driver`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Driver {
+    #[default]
+    Pdftex,
+    Xetex,
+    Dvips,
+}
+
+impl Driver {
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            Driver::Pdftex => "pdftex",
+            Driver::Xetex => "xetex",
+            Driver::Dvips => "dvips",
+        }
+    }
+}
+
+/// A color for added or deleted text: an xcolor name or expression
+/// (`blue`, `blue!60!black`: letters, digits, `!` and `.`), or `#RRGGBB`.
+/// Nothing else is taken, so nothing but a color reaches the preamble.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Color(String);
+
+impl Color {
+    /// The color `s` names.
+    ///
+    /// # Errors
+    ///
+    /// If it is neither a hex color (`#` and six hex digits, or the
+    /// digits alone) nor a name of letters, digits, `!` and `.`.
+    pub fn parse(s: &str) -> Result<Color, String> {
+        let s = s.trim();
+        let hex = s.strip_prefix('#').unwrap_or(s);
+        if hex.len() == 6 && hex.bytes().all(|c| c.is_ascii_hexdigit()) {
+            return Ok(Color(format!("#{}", hex.to_ascii_uppercase())));
+        }
+        if s.starts_with('#') {
+            return Err(format!("`{s}` is not a color: #RRGGBB has six hex digits"));
+        }
+        if !s.is_empty()
+            && s.bytes()
+                .all(|c| c.is_ascii_alphanumeric() || c == b'!' || c == b'.')
+            && s.as_bytes()[0].is_ascii_alphabetic()
+        {
+            return Ok(Color(s.to_owned()));
+        }
+        Err(format!(
+            "`{s}` is not a color: an xcolor name (blue, blue!60!black) or #RRGGBB"
+        ))
+    }
+
+    /// As given: `#RRGGBB` or a name.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// The xcolor command that defines color `name` as this one.
+    fn define(&self, name: &str) -> String {
+        match self.0.strip_prefix('#') {
+            Some(hex) => format!("\\definecolor{{{name}}}{{HTML}}{{{hex}}}"),
+            None => format!("\\colorlet{{{name}}}{{{}}}", self.0),
+        }
+    }
 }
 
 /// What to diff, and how.
@@ -91,6 +320,13 @@ pub enum Subtype {
 pub struct Options {
     pub markup: Markup,
     pub subtype: Subtype,
+    /// The colors of added and deleted text, where the type or subtype
+    /// colors it (none: latexdiff's blue and red, its preamble as it is).
+    /// latexdiff has no option for them.
+    pub add_color: Option<Color>,
+    pub del_color: Option<Color>,
+    /// The driver changebar is loaded for.
+    pub driver: Driver,
     /// Commands to take as safe, text (last argument diffed inside) or
     /// unsafe, over the table and the preambles (latexdiff's
     /// `--append-safecmd`, `--append-textcmd`, `--exclude-safecmd`).
@@ -101,27 +337,19 @@ pub struct Options {
 
 impl Options {
     /// The latexdiff command line that marks up as these options do (for
-    /// comparisons).
+    /// comparisons; the colors have no latexdiff option).
     #[must_use]
     pub fn latexdiff_args(&self) -> Vec<String> {
-        vec![
-            format!(
-                "--type={}",
-                match self.markup {
-                    Markup::Underline => "UNDERLINE",
-                    Markup::Cfont => "CFONT",
-                }
-            ),
-            format!(
-                "--subtype={}",
-                match self.subtype {
-                    Subtype::Safe => "SAFE",
-                    Subtype::Color => "COLOR",
-                }
-            ),
+        let mut a = vec![
+            format!("--type={}", self.markup.name()),
+            format!("--subtype={}", self.subtype.name()),
             "--math-markup=coarse".into(),
             "--flatten".into(),
-        ]
+        ];
+        if self.driver != Driver::Pdftex {
+            a.push(format!("--driver={}", self.driver.name()));
+        }
+        a
     }
 }
 
@@ -321,8 +549,41 @@ impl Baseline {
     pub fn diff_flat(&self, new: &Flat) -> DiffOut {
         let nb = find_body(&new.text);
         let preamble = &new.text[..nb.begin];
-        // (the table: latexdiff's, the new preamble's definitions, the
-        // caller's; what only the old preamble defines is unsafe deleted)
+        let sigs = self.signatures(preamble);
+        let old_text = &self.flat.text;
+        let ob = self.body;
+        let read = |text: &str, b: Body| {
+            let r = tok::Reader { text, sigs: &sigs };
+            r.seq(&tok::lexemes(text, b.start, b.end))
+        };
+        let old_toks = read(old_text, ob);
+        let new_toks = read(&new.text, nb);
+        let amsmath = loads(preamble, &["amsmath", "mathtools"]);
+        let mut em = emit::Em::new(old_text, &new.text, &sigs, amsmath);
+        em.out.push_str(&self.head(new, nb));
+        em.body(&old_toks, &new_toks, ob.end, nb.end);
+        em.push(&new.text[nb.end..]);
+        let (tex, raw) = em.finish();
+        let changes = raw
+            .iter()
+            .map(|c| {
+                let new_loc = locate(new, c.new);
+                self.change(
+                    c,
+                    new_loc,
+                    new.text[c.new.0..c.new.1].to_owned(),
+                    c.section.clone(),
+                    c.out.0..c.out.1,
+                )
+            })
+            .collect();
+        DiffOut { tex, changes }
+    }
+
+    /// The signature table for a new version whose preamble is `preamble`:
+    /// latexdiff's, the new preamble's definitions, the caller's; what
+    /// only the old preamble defines is unsafe deleted.
+    fn signatures(&self, preamble: &str) -> Signatures {
         let mut sigs = Signatures::latexdiff();
         let new_learned = sigs.learn(preamble);
         sigs.set_old_only(&self.learned, &new_learned);
@@ -342,50 +603,65 @@ impl Baseline {
             let spec = sigs.cmd(n).map(|s| s.spec).unwrap_or_default();
             sigs.define(n, Sig::new(&spec, Class::Unsafe));
         }
-        let old_text = &self.flat.text;
-        let ob = self.body;
-        let read = |text: &str, b: Body| {
-            let r = tok::Reader { text, sigs: &sigs };
-            r.seq(&tok::lexemes(text, b.start, b.end))
+        sigs
+    }
+
+    /// The output before the body: the new preamble, latexdiff's
+    /// definitions at its end, `\begin{document}`.
+    fn head(&self, new: &Flat, nb: Body) -> String {
+        let mut s = String::from(&new.text[..nb.begin]);
+        s.push_str(&dif_preamble(&self.opts, &new.text[..nb.begin]));
+        s.push_str(&new.text[nb.begin..nb.start]);
+        s
+    }
+
+    /// The old side's tokens, read with `sigs`.
+    fn old_tokens(&self, sigs: &Signatures) -> Vec<tok::Tok> {
+        let r = tok::Reader {
+            text: &self.flat.text,
+            sigs,
         };
-        let old_toks = read(old_text, ob);
-        let new_toks = read(&new.text, nb);
-        let amsmath = loads(preamble, &["amsmath", "mathtools"]);
-        let mut em = emit::Em::new(old_text, &new.text, &sigs, amsmath);
-        em.out.push_str(&new.text[..nb.begin]);
-        em.out.push_str(&dif_preamble(&self.opts, preamble));
-        em.out.push_str(&new.text[nb.begin..nb.start]);
-        em.body(&old_toks, &new_toks, ob.end, nb.end);
-        em.push(&new.text[nb.end..]);
-        let (tex, raw) = em.finish();
-        let changes = raw
-            .iter()
-            .map(|c| {
-                let kind = match (c.old.0 < c.old.1, c.new.0 < c.new.1) {
-                    (true, true) => ChangeKind::Change,
-                    (true, false) => ChangeKind::Del,
-                    _ => ChangeKind::Add,
-                };
-                let loc = |f: &Flat, r: (usize, usize)| {
-                    let (file, start, end) = f.locate_range(r.0, r.1);
-                    Loc {
-                        file: f.files.get(file).cloned().unwrap_or_default(),
-                        start,
-                        end,
-                    }
-                };
-                Change {
-                    kind,
-                    old: loc(&self.flat, c.old),
-                    new: loc(new, c.new),
-                    old_text: old_text[c.old.0..c.old.1].to_owned(),
-                    new_text: new.text[c.new.0..c.new.1].to_owned(),
-                    section: c.section.clone(),
-                    out: c.out.0..c.out.1,
-                }
-            })
-            .collect();
-        DiffOut { tex, changes }
+        r.seq(&tok::lexemes(
+            &self.flat.text,
+            self.body.start,
+            self.body.end,
+        ))
+    }
+
+    /// A change, from its raw form (the old side in flat offsets) and its
+    /// new side placed.
+    fn change(
+        &self,
+        c: &emit::RawChange,
+        new: Loc,
+        new_text: String,
+        section: Option<String>,
+        out: std::ops::Range<usize>,
+    ) -> Change {
+        let kind = match (c.old.0 < c.old.1, c.new.0 < c.new.1) {
+            (true, true) => ChangeKind::Change,
+            (true, false) => ChangeKind::Del,
+            _ => ChangeKind::Add,
+        };
+        Change {
+            kind,
+            old: locate(&self.flat, c.old),
+            new,
+            old_text: self.flat.text[c.old.0..c.old.1].to_owned(),
+            new_text,
+            section,
+            out,
+        }
+    }
+}
+
+/// Flat range `r` of `f`, as a file and a range in it.
+fn locate(f: &Flat, r: (usize, usize)) -> Loc {
+    let (file, start, end) = f.locate_range(r.0, r.1);
+    Loc {
+        file: f.files.get(file).cloned().unwrap_or_default(),
+        start,
+        end,
     }
 }
 
@@ -418,34 +694,65 @@ fn loads(preamble: &str, packages: &[&str]) -> bool {
 
 /// The definitions latexdiff puts in the preamble, for `opts` (and a
 /// preamble that loads amsmath or hyperref), each line tagged
-/// `%DIF PREAMBLE` as latexdiff tags them.
+/// `%DIF PREAMBLE` as latexdiff tags them. With colors chosen, xcolor is
+/// loaded where latexdiff loads color, and the type's and subtype's blue
+/// and red are `DIFaddcolor` and `DIFdelcolor`.
 #[must_use]
 pub fn dif_preamble(opts: &Options, preamble: &str) -> String {
     let hyperref = loads(preamble, &["hyperref"]);
     let amsmath = loads(preamble, &["amsmath", "mathtools"]);
-    let (name, ty) = match opts.markup {
-        Markup::Underline => ("UNDERLINE", UNDERLINE),
-        Markup::Cfont => ("CFONT", CFONT),
+    let colored = opts.add_color.is_some() || opts.del_color.is_some();
+    let recolor = |l: &str| -> String {
+        let l = l.replace(
+            "[pdftex]{changebar}",
+            &format!("[{}]{{changebar}}", opts.driver.name()),
+        );
+        if !colored {
+            return l;
+        }
+        l.replace("\\RequirePackage{color}", "\\RequirePackage{xcolor}")
+            .replace("\\color{blue}", "\\color{DIFaddcolor}")
+            .replace("\\color{red}", "\\color{DIFdelcolor}")
     };
-    let mut lines = vec![format!("%DIF {name} PREAMBLE")];
-    for l in ty.lines() {
+    let mut lines = Vec::new();
+    if colored {
+        let add = opts.add_color.clone().unwrap_or(Color("blue".into()));
+        let del = opts.del_color.clone().unwrap_or(Color("red".into()));
+        lines.push("%DIF COLORS PREAMBLE".to_owned());
+        lines.push("\\RequirePackage{xcolor}".to_owned());
+        lines.push(add.define("DIFaddcolor"));
+        lines.push(del.define("DIFdelcolor"));
+    }
+    lines.push(format!("%DIF {} PREAMBLE", opts.markup.name()));
+    for l in opts.markup.preamble().lines() {
         // (with hyperref, the markup is \DIFaddtex, wrapped below)
+        let l = recolor(l);
         lines.push(if hyperref {
             l.replace("{\\DIFadd}", "{\\DIFaddtex}")
                 .replace("{\\DIFdel}", "{\\DIFdeltex}")
         } else {
-            l.to_owned()
+            l
         });
     }
-    let (sname, sub) = match opts.subtype {
-        Subtype::Safe => ("SAFE", SAFE),
-        Subtype::Color => ("COLOR", COLOR),
-    };
-    lines.push(format!("%DIF {sname} PREAMBLE"));
-    lines.extend(sub.lines().map(str::to_owned));
-    lines.push("%DIF FLOATSAFE PREAMBLE".into());
-    lines.extend(FLOATSAFE.lines().map(str::to_owned));
-    if amsmath && opts.markup == Markup::Underline {
+    lines.push(format!("%DIF {} PREAMBLE", opts.subtype.name()));
+    lines.extend(opts.subtype.preamble().lines().map(recolor));
+    if opts.subtype.identical_floats() {
+        lines.push("%DIF IDENTICAL PREAMBLE".into());
+        lines.extend(IDENTICAL.lines().map(str::to_owned));
+    } else {
+        lines.push("%DIF FLOATSAFE PREAMBLE".into());
+        if opts.markup.footnotes() {
+            // (a footnote cannot be in a float's caption or cell: deleted
+            // text there shown small, as latexdiff's TRADITIONALSAFE shows
+            // it)
+            lines.push("\\providecommand{\\color}[1]{}".into());
+            lines.push(recolor(
+                "\\providecommand{\\DIFdelFL}[1]{{\\protect\\color{red}[..{\\scriptsize {removed: #1}} ]}}",
+            ));
+        }
+        lines.extend(FLOATSAFE.lines().map(str::to_owned));
+    }
+    if amsmath && opts.markup.ulem() {
         lines.push("%DIF AMSMATHULEM PREAMBLE".into());
         lines.extend(AMSMATHULEM.lines().map(str::to_owned));
     }
@@ -469,10 +776,53 @@ const UNDERLINE: &str = r"\RequirePackage[normalem]{ulem}
 \providecommand{\DIFadd}[1]{{\protect\color{blue}\uwave{#1}}}
 \providecommand{\DIFdel}[1]{{\protect\color{red}\sout{#1}}}";
 
+const CTRADITIONAL: &str = r"\RequirePackage{color}\definecolor{RED}{rgb}{1,0,0}\definecolor{BLUE}{rgb}{0,0,1}
+\RequirePackage[stable]{footmisc}
+\DeclareOldFontCommand{\sf}{\normalfont\sffamily}{\mathsf}
+\providecommand{\DIFadd}[1]{{\protect\color{blue} \sf #1}}
+\providecommand{\DIFdel}[1]{{\protect\color{red} [..\footnote{removed: #1} ]}}";
+
+const TRADITIONAL: &str = r"\RequirePackage[stable]{footmisc}
+\DeclareOldFontCommand{\sf}{\normalfont\sffamily}{\mathsf}
+\providecommand{\DIFadd}[1]{{\sf #1}}
+\providecommand{\DIFdel}[1]{{[..\footnote{removed: #1} ]}}";
+
 const CFONT: &str = r"\RequirePackage{color}\definecolor{RED}{rgb}{1,0,0}\definecolor{BLUE}{rgb}{0,0,1}
 \DeclareOldFontCommand{\sf}{\normalfont\sffamily}{\mathsf}
 \providecommand{\DIFadd}[1]{{\protect\color{blue} \sf #1}}
 \providecommand{\DIFdel}[1]{{\protect\color{red} \scriptsize #1}}";
+
+const FONTSTRIKE: &str = r"\RequirePackage[normalem]{ulem}
+\DeclareOldFontCommand{\sf}{\normalfont\sffamily}{\mathsf}
+\providecommand{\DIFadd}[1]{{\sf #1}}
+\providecommand{\DIFdel}[1]{{\footnotesize \sout{#1}}}";
+
+const CCHANGEBAR: &str = r"\RequirePackage[pdftex]{changebar}
+\RequirePackage{color}\definecolor{RED}{rgb}{1,0,0}\definecolor{BLUE}{rgb}{0,0,1}
+\providecommand{\DIFadd}[1]{\protect\cbstart{\protect\color{blue}#1}\protect\cbend}
+\providecommand{\DIFdel}[1]{\protect\cbdelete{\protect\color{red}#1}\protect\cbdelete}";
+
+const CFONTCHBAR: &str = r"\RequirePackage[pdftex]{changebar}
+\RequirePackage{color}\definecolor{RED}{rgb}{1,0,0}\definecolor{BLUE}{rgb}{0,0,1}
+\providecommand{\DIFadd}[1]{\protect\cbstart{\protect\color{blue}\sf #1}\protect\cbend}
+\providecommand{\DIFdel}[1]{\protect\cbdelete{\protect\color{red}\scriptsize #1}\protect\cbdelete}";
+
+const CULINECHBAR: &str = r"\RequirePackage[normalem]{ulem}
+\RequirePackage[pdftex]{changebar}
+\RequirePackage{color}\definecolor{RED}{rgb}{1,0,0}\definecolor{BLUE}{rgb}{0,0,1}
+\providecommand{\DIFadd}[1]{\protect\cbstart{\protect\color{blue}\uwave{#1}}\protect\cbend}
+\providecommand{\DIFdel}[1]{\protect\cbdelete{\protect\color{red}\sout{#1}}\protect\cbdelete}";
+
+const CHANGEBAR: &str = r"\RequirePackage[pdftex]{changebar}
+\providecommand{\DIFadd}[1]{\protect\cbstart{#1}\protect\cbend}
+\providecommand{\DIFdel}[1]{\protect\cbdelete}";
+
+const INVISIBLE: &str = r"\providecommand{\DIFadd}[1]{#1}
+\providecommand{\DIFdel}[1]{}";
+
+const BOLD: &str = r"\DeclareOldFontCommand{\bf}{\normalfont\bfseries}{\mathbf}
+\providecommand{\DIFadd}[1]{{\bf #1}}
+\providecommand{\DIFdel}[1]{}";
 
 const SAFE: &str = r"\providecommand{\DIFaddbegin}{}
 \providecommand{\DIFaddend}{}
@@ -480,6 +830,13 @@ const SAFE: &str = r"\providecommand{\DIFaddbegin}{}
 \providecommand{\DIFdelend}{}
 \providecommand{\DIFmodbegin}{}
 \providecommand{\DIFmodend}{}";
+
+const MARGIN: &str = r"\providecommand{\DIFaddbegin}{\protect\marginpar{a[}}
+\providecommand{\DIFaddend}{\protect\marginpar{]}}
+\providecommand{\DIFdelbegin}{\protect\marginpar{d[}}
+\providecommand{\DIFdelend}{\protect\marginpar{]}}
+\providecommand{\DIFmodbegin}{\protect\marginpar{m[}}
+\providecommand{\DIFmodend}{\protect\marginpar{]}}";
 
 const COLOR: &str = r"\RequirePackage{color}
 \providecommand{\DIFaddbegin}{\protect\color{blue}}
@@ -489,12 +846,109 @@ const COLOR: &str = r"\RequirePackage{color}
 \providecommand{\DIFmodbegin}{}
 \providecommand{\DIFmodend}{}";
 
+const LABEL: &str = r#"% To show only pages with changes (pdf) (external program pdftk needs to be installed)
+% (only works for simple documents with non-repeated page numbers, otherwise use ZLABEL)
+% pdflatex diff.tex
+% pdflatex diff.tex
+%pdftk diff.pdf cat \
+%`perl -lne '\
+% if (m/\\newlabel{DIFchg[b](\d*)}{{.*}{(.*)}}/) { $start{$1}=$2; print $2}\
+% if (m/\\newlabel{DIFchg[e](\d*)}{{.*}{(.*)}}/) { \
+%      if (defined($start{$1})) { \
+%         for ($j=$start{$1}; $j<=$2; $j++) {print "$j";}\
+%      } else { \
+%         print "$2"\
+%      }\
+% }' diff.aux \
+% | uniq \
+% | tr  \\n ' '` \
+% output diff-changedpages.pdf
+% To show only pages with changes (dvips/dvipdf)
+% dvips -pp `\
+% [ put here the perl script from above]
+% | uniq | tr -s \\n ','`
+\typeout{Check comments in preamble of output for instructions how to show only pages where changes have been made}
+\newcount\DIFcounterb
+\global\DIFcounterb 0\relax
+\newcount\DIFcountere
+\global\DIFcountere 0\relax
+\providecommand{\DIFaddbegin}{\global\advance\DIFcounterb 1\relax\label{DIFchgb\the\DIFcounterb}}
+\providecommand{\DIFaddend}{\global\advance\DIFcountere 1\relax\label{DIFchge\the\DIFcountere}}
+\providecommand{\DIFdelbegin}{\global\advance\DIFcounterb 1\relax\label{DIFchgb\the\DIFcounterb}}
+\providecommand{\DIFdelend}{\global\advance\DIFcountere 1\relax\label{DIFchge\the\DIFcountere}}
+\providecommand{\DIFmodbegin}{\global\advance\DIFcounterb 1\relax\label{DIFchgb\the\DIFcounterb}}
+\providecommand{\DIFmodend}{\global\advance\DIFcountere 1\relax\label{DIFchge\the\DIFcountere}}"#;
+
+const ZLABEL: &str = r#"% To show only pages with changes (pdf) (external program pdftk needs to be installed)
+% (uses zref for reference to absolute page numbers)
+% pdflatex diff.tex
+% pdflatex diff.tex
+%pdftk diff.pdf cat \
+%`perl -lne 'if (m/\\zref\@newlabel{DIFchgb(\d*)}{.*\\abspage{(\d*)}}/ ) { $start{$1}=$2; print $2 } \
+%  if (m/\\zref\@newlabel{DIFchge(\d*)}{.*\\abspage{(\d*)}}/) { \
+%      if (defined($start{$1})) { \
+%         for ($j=$start{$1}; $j<=$2; $j++) {print "$j";}\
+%      } else { \
+%         print "$2"\
+%      }\
+% }' diff.aux \
+% | uniq \
+% | tr  \\n ' '` \
+% output diff-changedpages.pdf
+% To show only pages with changes (dvips/dvipdf)
+% latex diff.tex
+% latex diff.tex
+% dvips -pp `perl -lne 'if (m/\\newlabel{DIFchg[be]\d*}{{.*}{(.*)}}/) { print $1 }' diff.aux | uniq | tr -s \\n ','` diff.dvi
+\typeout{Check comments in preamble of output for instructions how to show only pages where changes have been made}
+\usepackage[user,abspage]{zref}
+\newcount\DIFcounterb
+\global\DIFcounterb 0\relax
+\newcount\DIFcountere
+\global\DIFcountere 0\relax
+\providecommand{\DIFaddbegin}{\global\advance\DIFcounterb 1\relax\zlabel{DIFchgb\the\DIFcounterb}}
+\providecommand{\DIFaddend}{\global\advance\DIFcountere 1\relax\zlabel{DIFchge\the\DIFcountere}}
+\providecommand{\DIFdelbegin}{\global\advance\DIFcounterb 1\relax\zlabel{DIFchgb\the\DIFcounterb}}
+\providecommand{\DIFdelend}{\global\advance\DIFcountere 1\relax\zlabel{DIFchge\the\DIFcountere}}
+\providecommand{\DIFmodbegin}{\global\advance\DIFcounterb 1\relax\zlabel{DIFchgb\the\DIFcounterb}}
+\providecommand{\DIFmodend}{\global\advance\DIFcountere 1\relax\zlabel{DIFchge\the\DIFcountere}}"#;
+
+const ONLYCHANGEDPAGE: &str = r"\RequirePackage{atbegshi}
+\RequirePackage{etoolbox}
+\RequirePackage{zref}
+% redefine label command to write immediately to aux file - page references will be lost
+\makeatletter \let\oldlabel\label% Store \label
+\renewcommand{\label}[1]{% Update \label to write to the .aux immediately
+\zref@wrapper@immediate{\oldlabel{#1}}}
+\makeatother
+\newbool{DIFkeeppage}
+\newbool{DIFchange}
+\boolfalse{DIFkeeppage}
+\boolfalse{DIFchange}
+\AtBeginShipout{%
+  \ifbool{DIFkeeppage}
+        {\global\boolfalse{DIFkeeppage}}  % True DIFkeeppage
+         {\ifbool{DIFchange}{\global\boolfalse{DIFkeeppage}}{\global\boolfalse{DIFkeeppage}\AtBeginShipoutDiscard}} % False DIFkeeppage
+}
+\providecommand{\DIFaddbegin}{\global\booltrue{DIFkeeppage}\global\booltrue{DIFchange}}
+\providecommand{\DIFaddend}{\global\booltrue{DIFkeeppage}\global\boolfalse{DIFchange}}
+\providecommand{\DIFdelbegin}{\global\booltrue{DIFkeeppage}\global\booltrue{DIFchange}}
+\providecommand{\DIFdelend}{\global\booltrue{DIFkeeppage}\global\boolfalse{DIFchange}}
+\providecommand{\DIFmodbegin}{\global\booltrue{DIFkeeppage}\global\booltrue{DIFchange}}
+\providecommand{\DIFmodend}{\global\booltrue{DIFkeeppage}\global\boolfalse{DIFchange}}";
+
 const FLOATSAFE: &str = r"\providecommand{\DIFaddFL}[1]{\DIFadd{#1}}
 \providecommand{\DIFdelFL}[1]{\DIFdel{#1}}
 \providecommand{\DIFaddbeginFL}{}
 \providecommand{\DIFaddendFL}{}
 \providecommand{\DIFdelbeginFL}{}
 \providecommand{\DIFdelendFL}{}";
+
+const IDENTICAL: &str = r"\providecommand{\DIFaddFL}[1]{\DIFadd{#1}}
+\providecommand{\DIFdelFL}[1]{\DIFdel{#1}}
+\providecommand{\DIFaddbeginFL}{\DIFaddbegin}
+\providecommand{\DIFaddendFL}{\DIFaddend}
+\providecommand{\DIFdelbeginFL}{\DIFdelbegin}
+\providecommand{\DIFdelendFL}{\DIFdelend}";
 
 const AMSMATHULEM: &str = r"\makeatletter
 \let\sout@orig\sout
@@ -601,5 +1055,88 @@ mod tests {
         assert!(d.tex.contains(
             "\\providecommand{\\DIFadd}[1]{{\\protect\\color{blue}\\uwave{#1}}} %DIF PREAMBLE\n"
         ));
+    }
+
+    #[test]
+    fn types_by_name() {
+        for m in Markup::ALL {
+            assert_eq!(Markup::parse(&m.name().to_lowercase()), Some(m));
+        }
+        for t in Subtype::ALL {
+            assert_eq!(Subtype::parse(t.name()), Some(t));
+        }
+        assert_eq!(Subtype::parse("marker"), Some(Subtype::Margin));
+        assert_eq!(Markup::parse("LUAUNDERLINE"), None);
+        assert!(Markup::Underline.ulem() && Markup::Culinechbar.ulem() && !Markup::Cfont.ulem());
+        let o = Options {
+            markup: Markup::Cchangebar,
+            subtype: Subtype::Zlabel,
+            driver: Driver::Xetex,
+            ..Options::default()
+        };
+        assert_eq!(
+            o.latexdiff_args()[..2],
+            [
+                "--type=CCHANGEBAR".to_owned(),
+                "--subtype=ZLABEL".to_owned()
+            ]
+        );
+        assert!(o.latexdiff_args().contains(&"--driver=xetex".to_owned()));
+        let p = dif_preamble(&o, "");
+        assert!(
+            p.contains("\\RequirePackage[xetex]{changebar} %DIF PREAMBLE\n"),
+            "{p}"
+        );
+        assert!(p.contains("\\zlabel{DIFchgb\\the\\DIFcounterb}"));
+    }
+
+    #[test]
+    fn colors() {
+        assert_eq!(Color::parse("#1a2B3c").unwrap().as_str(), "#1A2B3C");
+        assert_eq!(Color::parse("1a2b3c").unwrap().as_str(), "#1A2B3C");
+        assert_eq!(
+            Color::parse(" blue!60!black ").unwrap().as_str(),
+            "blue!60!black"
+        );
+        for bad in [
+            "",
+            "#12345",
+            "#12345g",
+            "red}\\input{x}",
+            "re d",
+            "a{b}",
+            "!red",
+            "x%y",
+        ] {
+            assert!(Color::parse(bad).is_err(), "{bad}");
+        }
+        let o = Options {
+            add_color: Some(Color::parse("#008000").unwrap()),
+            ..Options::default()
+        };
+        let p = dif_preamble(&o, "");
+        let at = |s: &str| p.find(s).unwrap_or_else(|| panic!("{s} in {p}"));
+        assert!(at("\\RequirePackage{xcolor}") < at("\\definecolor{DIFaddcolor}{HTML}{008000}"));
+        assert!(at("\\colorlet{DIFdelcolor}{red}") < at("%DIF UNDERLINE PREAMBLE"));
+        assert!(
+            p.contains("\\providecommand{\\DIFadd}[1]{{\\protect\\color{DIFaddcolor}\\uwave{#1}}}")
+        );
+        assert!(
+            p.contains("\\providecommand{\\DIFdel}[1]{{\\protect\\color{DIFdelcolor}\\sout{#1}}}")
+        );
+        assert!(!p.contains("\\RequirePackage{color}"));
+        // (no colors: latexdiff's preamble as it is)
+        let plain = dif_preamble(&Options::default(), "");
+        assert!(!plain.contains("xcolor") && !plain.contains("DIFaddcolor"));
+        // (the subtype colors too)
+        let o = Options {
+            markup: Markup::Traditional,
+            subtype: Subtype::Color,
+            del_color: Some(Color::parse("orange").unwrap()),
+            ..Options::default()
+        };
+        let p = dif_preamble(&o, "");
+        assert!(p.contains("\\providecommand{\\DIFdelbegin}{\\protect\\color{DIFdelcolor}}"));
+        assert!(p.contains("\\providecommand{\\DIFdelFL}[1]{{\\protect\\color{DIFdelcolor}[..{\\scriptsize {removed: #1}} ]}}"));
     }
 }

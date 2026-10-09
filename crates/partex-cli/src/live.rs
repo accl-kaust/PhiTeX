@@ -76,6 +76,9 @@ struct Footer {
     /// The PDF it makes, by its name.
     output: Option<String>,
     keys: bool,
+    /// What is shown, if not the document (`diff against HEAD · 3
+    /// changes`).
+    mode: Option<String>,
 }
 
 /// What the render thread draws.
@@ -87,6 +90,8 @@ struct State {
     footer: Option<Footer>,
     /// The last builds' times, oldest first.
     times: Vec<Duration>,
+    /// Lines above the status line (a list to choose from).
+    panel: Vec<String>,
     quit: bool,
 }
 
@@ -326,13 +331,42 @@ impl Live {
         let output = output.map(|o| o.rsplit('/').next().unwrap_or(o).to_owned());
         self.update(|st| {
             st.task = None;
+            let mode = st.footer.take().and_then(|f| f.mode);
             st.footer = Some(Footer {
                 file: file.to_owned(),
                 output,
                 keys,
+                mode,
             });
         });
         true
+    }
+
+    /// What the status line says is shown (none: the document).
+    pub fn mode(&self, mode: Option<String>) {
+        self.update(|st| {
+            if let Some(f) = &mut st.footer {
+                f.mode = mode;
+            }
+        });
+    }
+
+    /// Lines shown above the status line, until set again (empty: none).
+    pub fn panel(&self, lines: Vec<String>) {
+        self.update(|st| st.panel = lines);
+        if !self.settings.progress {
+            return;
+        }
+        // (drawn now: a key's answer)
+        let st = lock(&self.state);
+        let generation = st.generation;
+        let area = self.compose(&st);
+        drop(st);
+        let mut sc = lock(&self.screen);
+        if sc.generation <= generation {
+            sc.generation = generation;
+            sc.draw(area);
+        }
     }
 
     /// A build took `d` (the footer's sparkline).
@@ -440,9 +474,14 @@ impl Live {
         let line = match (&st.task, &st.footer) {
             (Some(t), _) if now - t.started >= SHOW_AFTER => task_line(t, s, now, width),
             (_, Some(f)) => footer_line(f, &st.times, s, self.settings.verbose > 0, width),
-            _ => return Vec::new(),
+            _ if st.panel.is_empty() => return Vec::new(),
+            _ => String::new(),
         };
-        vec![crate::term::truncate(&line, width, s.unicode)]
+        st.panel
+            .iter()
+            .chain(std::iter::once(&line))
+            .map(|l| crate::term::truncate(l, width, s.unicode))
+            .collect()
     }
 }
 
@@ -635,6 +674,9 @@ fn footer_line(f: &Footer, times: &[Duration], s: Style, verbose: bool, width: u
     if let Some(o) = &f.output {
         let _ = write!(head, " {} {o}", s.dim(s.sym("→", "->")));
     }
+    if let Some(m) = &f.mode {
+        let _ = write!(head, "{}{}", s.dim(s.sep()), s.cyan(m));
+    }
     let mut facts = Vec::new();
     if verbose && let Some(last) = times.last() {
         let spark = if s.unicode && times.len() > 1 {
@@ -708,6 +750,7 @@ mod tests {
             file: "paper.tex".into(),
             output: Some("paper.pdf".into()),
             keys: true,
+            mode: None,
         };
         let times = [Duration::from_millis(18), Duration::from_millis(400)];
         assert_eq!(

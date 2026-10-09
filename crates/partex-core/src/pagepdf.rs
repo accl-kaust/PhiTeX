@@ -24,7 +24,23 @@ use crate::pdf::image::Image;
 
 /// A content stream as shipped: a page's or a form's.
 #[derive(Clone, Debug)]
-pub struct ShippedStream(pub(crate) Arc<Shipped>);
+pub struct ShippedStream(
+    pub(crate) Arc<Shipped>,
+    pub(crate) bool,
+    pub(crate) Option<Uni>,
+);
+
+/// The `\pdfglyphtounicode` entries a stream's fonts get their
+/// `/ToUnicode` maps from (`\pdfgentounicode` on), as the job's fonts
+/// will.
+#[derive(Clone)]
+pub struct Uni(pub(crate) crate::pdfconv::ToUnicodeTable);
+
+impl core::fmt::Debug for Uni {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "Uni({} entries)", self.0.len())
+    }
+}
 
 impl ShippedStream {
     /// The form's object number (as the page's resources name it), or
@@ -37,6 +53,107 @@ impl ShippedStream {
     /// The forms it draws, by object number.
     pub fn forms(&self) -> impl Iterator<Item = i32> + '_ {
         self.0.forms.iter().map(|&(_, k)| k)
+    }
+
+    /// Whether [`page_pdf`] draws it as the job's PDF will: its images are
+    /// JPEGs, and (a page) it has no `\pdfpageresources` and no
+    /// annotations or links, (a form) no resources of its own. Its forms
+    /// are asked apart ([`Shipments::page_pdf`]).
+    #[must_use]
+    pub fn whole(&self) -> bool {
+        self.1
+    }
+}
+
+/// The streams a build shipped so far, as a host that draws pages while
+/// the build runs keeps them ([`crate::Host::stream_shipped`]): each
+/// page's last, each form by object number. A page shipped again (a later
+/// trip's, a rebuild's) replaces the one before.
+#[derive(Clone, Debug, Default)]
+pub struct Shipments {
+    forms: BTreeMap<i32, ShippedStream>,
+    pages: Vec<Option<ShippedStream>>,
+}
+
+impl Shipments {
+    /// Keep stream `s`, page `page` (from 0) or a form.
+    pub fn add(&mut self, page: Option<usize>, s: ShippedStream) {
+        match (page, s.form()) {
+            (Some(k), _) => {
+                if self.pages.len() <= k {
+                    self.pages.resize_with(k + 1, || None);
+                }
+                self.pages[k] = Some(s);
+            }
+            (None, Some(n)) => {
+                self.forms.insert(n, s);
+            }
+            (None, None) => {}
+        }
+    }
+
+    /// `other`'s streams kept too, over those kept for the same page or
+    /// form (they were shipped after them).
+    pub fn extend(&mut self, other: Shipments) {
+        self.forms.extend(other.forms);
+        for (k, p) in other.pages.into_iter().enumerate() {
+            if let Some(p) = p {
+                self.add(Some(k), p);
+            }
+        }
+    }
+
+    /// Forget every stream (a build from the start).
+    pub fn clear(&mut self) {
+        self.forms.clear();
+        self.pages.clear();
+    }
+
+    /// The forms kept (a form a page draws may be shipped after the page:
+    /// one not `\immediate` is written at its first use, after the page
+    /// object).
+    #[must_use]
+    pub fn forms(&self) -> usize {
+        self.forms.len()
+    }
+
+    /// One past the last page shipped (0: none yet).
+    #[must_use]
+    pub fn pages(&self) -> usize {
+        self.pages.len()
+    }
+
+    /// Page `k`'s stream, if it was shipped.
+    #[must_use]
+    pub fn page(&self, k: usize) -> Option<&ShippedStream> {
+        self.pages.get(k)?.as_ref()
+    }
+
+    /// Page `k`'s own PDF ([`page_pdf`]), its fonts' programs read through
+    /// `read`, and whether it is whole: drawn as the job's PDF will draw
+    /// it, so that its page hash there is this PDF's (the page's stream,
+    /// its size and its forms' and images' bytes, which a hash of the
+    /// job's PDF covers, are the same), the page and every form it draws
+    /// being [`ShippedStream::whole`] and found.
+    pub fn page_pdf(&self, k: usize, read: ReadFile<'_>) -> Option<(Vec<u8>, bool)> {
+        let page = self.page(k)?;
+        let mut whole = page.whole();
+        let mut seen = alloc::collections::BTreeSet::new();
+        let mut todo: Vec<i32> = page.forms().collect();
+        while let Some(n) = todo.pop() {
+            if !seen.insert(n) {
+                continue;
+            }
+            match self.forms.get(&n) {
+                Some(f) => {
+                    whole &= f.whole();
+                    todo.extend(f.forms());
+                }
+                None => whole = false,
+            }
+        }
+        let pdf = page_pdf(page, &|n| self.forms.get(&n).cloned(), read);
+        Some((pdf, whole))
     }
 }
 
@@ -60,6 +177,7 @@ pub fn page_pdf(
     read: ReadFile<'_>,
 ) -> Vec<u8> {
     let mut w = Writer {
+        uni: page.2.clone(),
         out: b"%PDF-1.5\n%\xd0\xd4\xc5\xd8\n".to_vec(),
         at: Vec::new(),
         fonts: BTreeMap::new(),
@@ -105,6 +223,8 @@ struct Writer<'a, 'r> {
     images: BTreeMap<usize, Option<u32>>,
     form: &'a dyn Fn(i32) -> Option<ShippedStream>,
     read: ReadFile<'r>,
+    /// `/ToUnicode` maps made from these entries, as the job's fonts get.
+    uni: Option<Uni>,
 }
 
 impl Writer<'_, '_> {
@@ -247,10 +367,32 @@ impl Writer<'_, '_> {
         }
         d.push(b']');
         // (the map entry's encoding, else the program's own)
-        let names = map
-            .and_then(|m| m.encname.clone())
+        let encname = map.and_then(|m| m.encname.clone());
+        let names = encname
+            .clone()
             .and_then(|e| (self.read)(&e, FileKind::Enc))
             .and_then(|e| crate::pdf::enc::parse_enc(&e).ok());
+        let file = map
+            .and_then(|m| m.ff_name.clone())
+            .and_then(|f| (self.read)(&f, FileKind::Type1));
+        // (the job's `/ToUnicode`: from the encoding's glyph names, else the
+        // program's own encoding's, `write_fontdictionary`)
+        if let Some(uni) = &self.uni {
+            let glyphs = match (&encname, &names) {
+                (Some(_), Some(n)) => Some(n.clone()),
+                (Some(_), None) => None,
+                (None, _) => file
+                    .as_deref()
+                    .and_then(crate::pdf::writet1::builtin_encoding),
+            };
+            if let Some(g) = glyphs {
+                let text =
+                    crate::pdf::tounicode::cmap_for(&g, &rec.tfm, encname.as_deref(), &uni.0);
+                let t = self.alloc();
+                self.stream(t, b"", &text);
+                d.extend_from_slice(format!(" /ToUnicode {t} 0 R").as_bytes());
+            }
+        }
         if let Some(names) = names {
             d.extend_from_slice(b" /Encoding << /Type /Encoding /Differences [0");
             for n in &names {
@@ -259,10 +401,7 @@ impl Writer<'_, '_> {
             }
             d.extend_from_slice(b"] >>");
         }
-        let program = map
-            .and_then(|m| m.ff_name.clone())
-            .and_then(|f| (self.read)(&f, FileKind::Type1))
-            .and_then(|p| type1_parts(&p));
+        let program = file.and_then(|p| type1_parts(&p));
         if let Some((data, len1)) = program {
             let (fd, ff) = (self.alloc(), self.alloc());
             d.extend_from_slice(format!(" /FontDescriptor {fd} 0 R").as_bytes());
@@ -337,7 +476,7 @@ mod tests {
     fn a_page_as_a_pdf() {
         use alloc::string::String;
         use partex_engine::pdfread::{Doc, Obj};
-        let page = ShippedStream(Arc::new(Shipped::example()));
+        let page = ShippedStream(Arc::new(Shipped::example()), true, None);
         let mut asked = Vec::new();
         let pdf: Arc<[u8]> = page_pdf(&page, &|_| None, &mut |n, _| {
             asked.push(n.to_vec());
@@ -361,7 +500,7 @@ mod tests {
         form.form = 12;
         form.forms = alloc::vec![].into();
         form.bbox = b"0 0 10 10".to_vec();
-        let form = ShippedStream(Arc::new(form));
+        let form = ShippedStream(Arc::new(form), true, None);
         let pdf: Arc<[u8]> = page_pdf(&page, &|k| (k == 12).then(|| form.clone()), &mut |_, _| {
             None
         })
