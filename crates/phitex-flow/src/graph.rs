@@ -496,7 +496,11 @@ fn outside_read(env: &mut dyn Env, outside: &mut Outside, k: &Key) -> ReadRef {
         return v.clone();
     }
     let (val, src) = env.reach(k);
-    let r = Arc::new(Read { key: k.clone(), src, val });
+    let r = Arc::new(Read {
+        key: k.clone(),
+        src,
+        val,
+    });
     outside.insert(k.clone(), r.clone());
     r
 }
@@ -504,7 +508,11 @@ fn outside_read(env: &mut dyn Env, outside: &mut Outside, k: &Key) -> ReadRef {
 /// The definition of `key` for the next node of `chain`, and where from.
 fn resolve_now(chain: &Chain, env: &mut dyn Env, outside: &mut Outside, key: &Key) -> ReadRef {
     match chain.resolve(key, chain.nodes.len()) {
-        Some((d, val)) => Arc::new(Read { key: key.clone(), src: Src::Node(d), val }),
+        Some((d, val)) => Arc::new(Read {
+            key: key.clone(),
+            src: Src::Node(d),
+            val,
+        }),
         None => outside_read(env, outside, key),
     }
 }
@@ -572,9 +580,9 @@ pub fn run_piece(
                 if start_ok && text_ok && inp == state {
                     cand = Some(oi);
                     let reads_ok = par_ok
-                        && n.reads
-                            .iter()
-                            .all(|r| Read::same(&resolve_now(&chain, env, &mut outside, &r.key), r));
+                        && n.reads.iter().all(|r| {
+                            Read::same(&resolve_now(&chain, env, &mut outside, &r.key), r)
+                        });
                     if reads_ok {
                         let in_place = edit.is_none() && !scope_changed && oi == chain.nodes.len();
                         if in_place {
@@ -736,7 +744,7 @@ pub fn run_piece(
 #[derive(Default)]
 struct Scratch {
     /// The node's reads so far (read once each), once there are many.
-    seen: FxMap<Key, Val>,
+    seen: FxMap<Key, ReadRef>,
     /// The node's reads and what it emitted (their capacity kept).
     reads: Vec<ReadRef>,
     emit: Vec<HItem>,
@@ -763,6 +771,19 @@ struct Exec<'a> {
     cmd: Tok,
     /// How many of `reads` are in `scratch.seen`.
     seen_upto: usize,
+}
+
+/// A read of the current font.
+struct FontRead(ReadRef);
+
+impl std::ops::Deref for FontRead {
+    type Target = Font;
+    fn deref(&self) -> &Font {
+        match &self.0.val {
+            Val::Font(f) => f,
+            _ => unreachable!("checked when read"),
+        }
+    }
 }
 
 /// Up to this many reads, a node's reads are looked up by a scan.
@@ -838,29 +859,38 @@ impl<'a> Exec<'a> {
     /// The definition of `key` reaching this node: this node's own, else a
     /// node before it in the piece, else from before the piece.
     fn get(&mut self, key: &Key) -> Val {
+        self.lookup(key).val.clone()
+    }
+
+    /// [`Exec::get`], as the read (the value not copied out of it).
+    fn lookup(&mut self, key: &Key) -> ReadRef {
         if let Some(d) = self.defs.iter().rev().find(|d| d.key == *key) {
-            return d.val.clone();
+            // (its own definition: not a read)
+            return Arc::new(Read {
+                key: key.clone(),
+                src: Src::Node(self.chain.nodes.len() as u32),
+                val: d.val.clone(),
+            });
         }
         if self.reads.len() <= FEW_READS {
             if let Some(r) = self.reads.iter().find(|r| r.key == *key) {
-                return r.val.clone();
+                return r.clone();
             }
         } else {
             for r in &self.reads[self.seen_upto..] {
                 self.scratch
                     .seen
                     .entry(r.key.clone())
-                    .or_insert_with(|| r.val.clone());
+                    .or_insert_with(|| r.clone());
             }
             self.seen_upto = self.reads.len();
-            if let Some(v) = self.scratch.seen.get(key) {
-                return v.clone();
+            if let Some(r) = self.scratch.seen.get(key) {
+                return r.clone();
             }
         }
         let r = resolve_now(self.chain, self.env, self.outside, key);
-        let v = r.val.clone();
-        self.reads.push(r);
-        v
+        self.reads.push(r.clone());
+        r
     }
 
     fn define(&mut self, key: Key, val: Val, global: bool) {
@@ -888,11 +918,16 @@ impl<'a> Exec<'a> {
         }
     }
 
-    fn font(&mut self) -> Arc<Font> {
-        match self.get(&Key::Font) {
-            Val::Font(f) => f,
-            other => panic!("the font key holds {other:?}"),
-        }
+    /// The current font, through the read (the font's own count, which
+    /// every thread would touch, is left alone).
+    fn font(&mut self) -> FontRead {
+        let r = self.lookup(&Key::Font);
+        assert!(
+            matches!(r.val, Val::Font(_)),
+            "the font key holds {:?}",
+            r.val
+        );
+        FontRead(r)
     }
 
     fn tok_meaning(&mut self, t: &Tok) -> Meaning {
@@ -1263,9 +1298,17 @@ impl<'a> Exec<'a> {
             let Some((d, after)) = self.chain.resolve(&k, here) else {
                 continue;
             };
-            self.reads.push(Arc::new(Read { key: k.clone(), src: Src::Node(d), val: after.clone() }));
+            self.reads.push(Arc::new(Read {
+                key: k.clone(),
+                src: Src::Node(d),
+                val: after.clone(),
+            }));
             let before = match self.chain.resolve(&k, at) {
-                Some((d, v)) => Arc::new(Read { key: k.clone(), src: Src::Node(d), val: v }),
+                Some((d, v)) => Arc::new(Read {
+                    key: k.clone(),
+                    src: Src::Node(d),
+                    val: v,
+                }),
                 None => outside_read(self.env, self.outside, &k),
             };
             let before_val = before.val.clone();
