@@ -18,7 +18,9 @@
 //! as it is then; a stale read marks its name and the piece runs again
 //! from its readers. Under `Reads::Suspend` a read of a name whose
 //! definition is being remade parks until that definition is installed
-//! (or runs the defining piece itself if nobody has started it); under
+//! (or runs the defining piece itself if nobody has started it), and so
+//! does a read of an undefined name while an earlier piece has not
+//! finished (or it runs the first earlier piece nobody has started); under
 //! `Reads::Speculate` it takes the old value and is validated. Either way
 //! the result is the same: the scheduler affects speed, never results.
 //!
@@ -45,7 +47,7 @@ use crate::linebreak::break_lines;
 use crate::logs::{self, Frag};
 use crate::page::{Lines, Page, PageOrg, Scan, material};
 use crate::tfm::{Font, FontFiles};
-use crate::val::{Key, Val, initial};
+use crate::val::{Key, Meaning, Val, initial};
 
 /// What a read does when the definition it finds is being remade.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1654,7 +1656,44 @@ impl Env for PieceEnv<'_> {
             let seen = sh.generation.load(Ordering::Acquire);
             let (def, val) = sh.names.reaching(key, self.k, &sh.font);
             let Some(d) = def else {
-                return (val, Src::Initial);
+                // (an undefined name while an earlier piece may still
+                // define it: wait for the earlier pieces, or run the first
+                // of them nobody has started)
+                if sh.opts.reads == Reads::Speculate
+                    || !matches!(val, Val::Meaning(Meaning::Undefined))
+                {
+                    return (val, Src::Initial);
+                }
+                let leapfrog = {
+                    let mut g = lock(sh);
+                    if let Some(&e) = g.unstarted.first().filter(|&&e| e < self.k) {
+                        g.unstarted.remove(&e);
+                        g.running.insert(e);
+                        g.p[e].status = Status::Running;
+                        g.stats.parks += 1;
+                        g.stats.leapfrogs += 1;
+                        Some((
+                            e,
+                            std::mem::take(&mut g.p[e].dirty)
+                                .into_iter()
+                                .collect::<Vec<Key>>(),
+                        ))
+                    } else if g.running.first().is_some_and(|&e| e < self.k) {
+                        g.stats.parks += 1;
+                        None
+                    } else {
+                        return (val, Src::Initial);
+                    }
+                };
+                if let Some((e, dirty)) = leapfrog {
+                    run_and_install(sh, e, &dirty);
+                } else {
+                    let mut p = sh.park.lock().expect("park");
+                    while sh.generation.load(Ordering::Acquire) == seen {
+                        p = sh.parked.wait(p).expect("park");
+                    }
+                }
+                continue;
             };
             let d = d as usize;
             let src = Src::Piece(sh.ids[d]);
