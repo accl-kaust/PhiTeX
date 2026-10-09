@@ -94,3 +94,31 @@ macro_rules! programs {
 }
 
 programs!(macros, expandafter, edef, conds, arith, the, case, groups, futurelet, plain);
+
+/// The graph's own form: an `\ifnum` whose arms define a register gets a φ
+/// for it at `\fi`; expandable primitives and macro calls are steps, never
+/// nodes.
+#[test]
+fn a_register_gets_its_phi_and_expansion_makes_no_node() {
+    let src = "\\count1=0 \\def\\x{1}\\ifnum\\x=1 \\count1=5 \\else\\count1=6 \\fi\n\
+               \\expandafter\\def\\csname a\\endcsname{A}\\count2=\\number\\count1 \\csname relax\\endcsname\n\
+               \\edef\\b{\\the\\count2\\a}\\message{\\romannumeral\\count2 \\b}\n";
+    let o = Build::new(font()).update(src, Options { dump: true, ..Options::default() });
+    assert!(o.errors.is_empty(), "{:?}", o.errors);
+    assert!(o.dump.contains("\\count1 = φ(5 | 0)"), "no φ for \\count1:\n{}", o.dump);
+    assert_eq!(o.log, ["v5A"]);
+    let steps = ["\\expandafter", "\\csname", "\\number", "\\the", "\\romannumeral", "\\x", "\\b", "\\a"];
+    let mut commands = Vec::new();
+    for l in o.dump.lines().filter(|l| l.starts_with("  n")) {
+        let head = l.split(" | ").next().unwrap_or("");
+        let cmd = head.split_whitespace().nth(2).unwrap_or("");
+        assert!(!steps.contains(&cmd), "a step became a node: {l}");
+        commands.push(cmd.to_string());
+    }
+    // (the commands: the assignments, the conditional's nodes — `\else`
+    // ends the taken arm and skips to `\fi`, so it holds the φ —, `\def`,
+    // `\relax` from `\csname`, `\edef`, `\message`)
+    for c in ["\\count", "\\ifnum", "\\else", "\\def", "\\relax", "\\edef", "\\message"] {
+        assert!(commands.iter().any(|x| x == c), "no {c} node: {commands:?}");
+    }
+}
