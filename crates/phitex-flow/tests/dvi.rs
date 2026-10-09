@@ -13,6 +13,7 @@
 //! up to `Output written`); where a `tex` binary is found they are checked
 //! against a fresh run; `PHITEX_FLOW_BLESS=1` records them anew.
 
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
@@ -176,34 +177,11 @@ fn long_doc() -> String {
          \\tolerance=2000 \\linepenalty=10 \\maxdepth=2pt \\parfillskip=0pt plus 1fil \\parskip=1pt plus 1pt\n\
          \\hbadness=10000 \\vbadness=10000 \\clubpenalty=150 \\widowpenalty=150\n\n",
     );
-    let words = [
-        "office",
-        "affluent",
-        "efficient",
-        "AVoid",
-        "To",
-        "Yes",
-        "WAVE",
-        "fjord",
-        "baffle",
-        "flight",
-        "ruffle",
-        "--",
-        "---",
-        "quick",
-        "brown",
-        "fox",
-        "jumps",
-        "over",
-        "lazy",
-        "dog",
-        "typesetting",
-        "paragraph",
-        "glue",
-        "penalty",
-    ];
+    let words = "office affluent efficient AVoid To Yes WAVE fjord baffle flight ruffle -- --- quick brown fox jumps \
+                 over lazy dog typesetting paragraph glue penalty";
+    let words: Vec<&str> = words.split_whitespace().collect();
     let fonts = ["\\bf", "\\sl", "\\it", "\\tt"];
-    let mut r: u32 = 12345;
+    let mut seed: u32 = 12345;
     for k in 0..120 {
         if k % 17 == 5 {
             s.push_str("\\vskip 6pt plus 2pt\n\\hbox to\\hsize{\\bf Section\\hfil ");
@@ -214,19 +192,19 @@ fn long_doc() -> String {
             s.push_str("\\penalty-10000\n\n");
         }
         if k % 29 == 3 {
-            s.push_str(&format!("\\count0={k}\n"));
+            let _ = writeln!(s, "\\count0={k}");
         }
         let n = 20 + (k * 7) % 45;
         for i in 0..n {
-            r = r.wrapping_mul(1_103_515_245).wrapping_add(12345);
-            let w = words[(r >> 16) as usize % words.len()];
+            seed = seed.wrapping_mul(1_103_515_245).wrapping_add(12345);
+            let word = words[(seed >> 16) as usize % words.len()];
             if i % 13 == 7 {
-                let f = fonts[(r >> 8) as usize % fonts.len()];
-                s.push_str(&format!("{{{f} {w}}} "));
+                let f = fonts[(seed >> 8) as usize % fonts.len()];
+                let _ = write!(s, "{{{f} {word}}} ");
             } else if i % 31 == 17 {
-                s.push_str(&format!("\\hbox{{{w}}} "));
+                let _ = write!(s, "\\hbox{{{word}}} ");
             } else {
-                s.push_str(w);
+                s.push_str(word);
                 s.push(' ');
             }
         }
