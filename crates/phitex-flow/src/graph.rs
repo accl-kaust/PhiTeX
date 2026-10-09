@@ -41,6 +41,7 @@ use crate::tfm::Font;
 use crate::val::{DimenPar, IntPar, Key, Macro, Meaning, Prim, Tok, Val};
 
 mod assign;
+mod etex;
 mod expand;
 mod fonts;
 mod material;
@@ -96,6 +97,26 @@ struct Cond {
     open: u32,
     limit: u8,
     test: bool,
+    /// Which conditional (`IfKind::code`, plus 32 after `\unless`:
+    /// etex.web's `cur_if`), for `\currentiftype`.
+    code: u8,
+}
+
+/// A text the input was rewritten with (e-TeX's `\scantokens`): read
+/// with the category codes in force as it is read, line by line, each line
+/// ending in the `\endlinechar` in force when it is begun. It lies above
+/// the first `at` rewritten token lists: those above it are read first,
+/// then it, then those below. Where its reading is: `pos`, `tstate`, `eol`
+/// (as the piece's own are kept in `RState`); `eof`: its end was met once
+/// and `\everyeof` went in (etex.web §362).
+#[derive(Clone, PartialEq, Eq, Debug)]
+struct PendingText {
+    text: Arc<[char]>,
+    at: usize,
+    pos: usize,
+    tstate: TState,
+    eol: i16,
+    eof: bool,
 }
 
 /// An open group: its kind and the tokens `\aftergroup` gave it (its
@@ -198,6 +219,10 @@ pub struct RState {
     /// The current line's end-of-line character (`\endlinechar` as the line
     /// was begun; -1: none), or `EOL_UNREAD`.
     eol: i16,
+    /// e-TeX's `\protected` prefix is waiting for its definition.
+    protected: bool,
+    /// Texts the input was rewritten with (`\scantokens`), innermost last.
+    texts: Stack<PendingText>,
 }
 
 impl RState {
@@ -220,6 +245,8 @@ impl RState {
             prev_depth: IGNORE_DEPTH,
             prev_graf: 0,
             eol: EOL_UNREAD,
+            protected: false,
+            texts: Stack::new(),
         }
     }
 }
@@ -284,6 +311,8 @@ impl RState {
             && self.prev_graf == o.prev_graf
             && self.eol == o.eol
             && self.pending == o.pending
+            && self.protected == o.protected
+            && self.texts == o.texts
     }
 
     /// Whether a node going from `self` to `out` begins a paragraph of the
@@ -1224,6 +1253,9 @@ struct Exec<'a> {
     /// The paragraph the old node at this place made, if any: an equal
     /// paragraph is that one (the same `Arc`).
     old_para: Option<Arc<Para>>,
+    /// While a rewritten text (`\scantokens`) is read: its characters,
+    /// which the tokenizer reads instead of the piece's.
+    ptext: Option<Arc<[char]>>,
 }
 
 /// Up to this many reads, a node's reads are looked up by a scan.
@@ -1264,6 +1296,7 @@ impl<'a> Exec<'a> {
             in_write: false,
             seen_upto: 0,
             old_para: None,
+            ptext: None,
         }
     }
 
@@ -1464,9 +1497,18 @@ impl<'a> Exec<'a> {
         self.st.eol = EOL_UNREAD;
     }
 
+    /// The characters the tokenizer reads: the piece's, or a rewritten
+    /// text's while one is read.
+    fn txt(&self) -> &[char] {
+        match &self.ptext {
+            Some(t) => t,
+            None => self.text,
+        }
+    }
+
     /// Moves to `np`; past a line's end, the next line begins.
     fn advance(&mut self, np: usize) {
-        let crossed = self.text[self.st.pos..np].contains(&'\r');
+        let crossed = self.txt()[self.st.pos..np].contains(&'\r');
         self.st.pos = np;
         if crossed {
             self.new_line();
@@ -1478,18 +1520,18 @@ impl<'a> Exec<'a> {
     /// inactive), and `^^` reduces the character or the two hex digits
     /// after it.
     fn char_at(&mut self, pos: usize) -> Option<(char, usize, u8)> {
-        let raw = *self.text.get(pos)?;
+        let raw = *self.txt().get(pos)?;
         let c = if raw == '\r' { self.eol()? } else { raw };
         let cat = self.catcode(c);
         // (`^^`: the second circumflex on the line, and a character after it)
-        if raw == '\r' || cat != 7 || self.text.get(pos + 1) != Some(&c) {
+        if raw == '\r' || cat != 7 || self.txt().get(pos + 1) != Some(&c) {
             return Some((c, pos + 1, cat));
         }
         let at = |x: &mut Self, p: usize| -> Option<char> {
-            match x.text.get(p) {
+            let ch = x.txt().get(p).copied();
+            match ch {
                 Some('\r') => x.eol(),
-                Some(&ch) => Some(ch),
-                None => None,
+                other => other,
             }
         };
         let Some(c2) = at(self, pos + 2) else {
@@ -1500,7 +1542,7 @@ impl<'a> Exec<'a> {
         }
         let hex = |ch: char| ch.is_ascii_digit() || ('a'..='f').contains(&ch);
         let (r, np) = match at(self, pos + 3) {
-            Some(c3) if hex(c2) && hex(c3) && self.text.get(pos + 2) != Some(&'\r') => (
+            Some(c3) if hex(c2) && hex(c3) && self.txt().get(pos + 2) != Some(&'\r') => (
                 (c2.to_digit(16).unwrap_or(0) << 4) | c3.to_digit(16).unwrap_or(0),
                 pos + 4,
             ),
@@ -1515,35 +1557,84 @@ impl<'a> Exec<'a> {
 
     /// The position just after the current line's end.
     fn line_end_after(&self, pos: usize) -> usize {
-        self.text[pos..]
+        let text = self.txt();
+        text[pos..]
             .iter()
             .position(|&c| c == '\r')
-            .map_or(self.text.len(), |k| pos + k + 1)
+            .map_or(text.len(), |k| pos + k + 1)
     }
 
     /// The next token, unexpanded (tex.web 343-357). After `\noexpand`'s
     /// mark, the token after it, with `noexp` set.
     fn next_raw(&mut self) -> Option<Tok> {
         self.noexp = false;
-        while let Some((list, i)) = self.st.pending.last_mut() {
-            if *i < list.len() {
-                let t = list[*i].clone();
-                *i += 1;
-                if *i == list.len() {
-                    self.st.pending.pop();
+        loop {
+            // (the token lists above the innermost rewritten text)
+            let floor = self.st.texts.last().map_or(0, |x| x.at);
+            while self.st.pending.len() > floor {
+                let Some((list, i)) = self.st.pending.last_mut() else { break };
+                if *i < list.len() {
+                    let t = list[*i].clone();
+                    *i += 1;
+                    if *i == list.len() {
+                        self.st.pending.pop();
+                    }
+                    if t == Tok::DontExpand {
+                        let n = self.next_raw();
+                        self.noexp = n.as_ref().is_some_and(|x| x.key().is_some());
+                        return n;
+                    }
+                    return Some(t);
                 }
-                if t == Tok::DontExpand {
-                    let n = self.next_raw();
-                    self.noexp = n.as_ref().is_some_and(|x| x.key().is_some());
-                    return n;
-                }
+                self.st.pending.pop();
+            }
+            if self.st.texts.is_empty() {
+                return self.tokenize();
+            }
+            if let Some(t) = self.text_token() {
                 return Some(t);
             }
-            self.st.pending.pop();
         }
+    }
+
+    /// The next token of the innermost rewritten text, read as the piece's
+    /// text is; at its end `\everyeof` goes in once (etex.web §362), then
+    /// the text is done (`None`: read on below it).
+    fn text_token(&mut self) -> Option<Tok> {
+        let x = self.st.texts.last()?.clone();
+        let outer = (self.st.pos, self.st.tstate, self.st.eol);
+        (self.st.pos, self.st.tstate, self.st.eol) = (x.pos, x.tstate, x.eol);
+        let prev = self.ptext.replace(x.text.clone());
+        let t = self.tokenize();
+        self.ptext = prev;
+        let here = (self.st.pos, self.st.tstate, self.st.eol);
+        (self.st.pos, self.st.tstate, self.st.eol) = outer;
+        let Some(x) = self.st.texts.last_mut() else { return t };
+        (x.pos, x.tstate, x.eol) = here;
+        if t.is_some() {
+            return t;
+        }
+        if !x.eof {
+            x.eof = true;
+            let every = match self.get(&Key::TokPar(crate::val::TokPar::Everyeof)) {
+                Val::Toks(l) => l,
+                _ => Arc::new(Vec::new()),
+            };
+            if !every.is_empty() {
+                self.rewrite(every.to_vec());
+                return None;
+            }
+        }
+        self.st.texts.pop();
+        None
+    }
+
+    /// The next token of the text being read (the piece's, or a rewritten
+    /// one's: `txt`), unexpanded (tex.web 343-357).
+    fn tokenize(&mut self) -> Option<Tok> {
         loop {
             let pos = self.st.pos;
-            let raw = *self.text.get(pos)?;
+            let raw = *self.txt().get(pos)?;
             if self.st.eol == EOL_UNREAD {
                 self.read_eol();
             }
@@ -1793,13 +1884,14 @@ impl<'a> Exec<'a> {
             std::mem::take(&mut self.st.long),
             std::mem::take(&mut self.st.outer),
         );
+        let protected = std::mem::take(&mut self.st.protected);
         match m {
             Meaning::Prim(p) if p.conditional() => self.conditional(p, &t),
-            Meaning::Prim(Prim::Global | Prim::Long | Prim::Outer) => {
+            Meaning::Prim(Prim::Global | Prim::Long | Prim::Outer | Prim::Protected) => {
                 let Meaning::Prim(p) = m else { unreachable!() };
-                self.prefix(p, global, long, outer);
+                self.prefix(p, global, long, outer, protected);
             }
-            _ if assign::prefixable(&m) => self.prefixed(&t, &m, global, long, outer),
+            _ if assign::prefixable(&m) => self.prefixed(&t, &m, global, long, outer, protected),
             Meaning::Prim(Prim::Mat(x)) => self.mat(x, &t),
             Meaning::Prim(p) => self.prim(p),
             Meaning::Char(cat, c) => self.char_tok(cat, c, &t),
@@ -1926,6 +2018,7 @@ impl<'a> Exec<'a> {
             Prim::EndCsName => self.err("Extra \\endcsname".into()),
             Prim::End | Prim::Dump => self.stop(),
             Prim::Relax => {}
+            Prim::Marks | Prim::Discards(_) | Prim::ShowE(_) | Prim::Middle | Prim::Lr(_) => self.etex_command(p),
             Prim::LastItem(_)
             | Prim::SpaceFactor
             | Prim::PrevDepth

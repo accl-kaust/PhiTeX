@@ -65,7 +65,9 @@ pub fn short_display(out: &mut String, list: &[Item], font: &mut Arc<str>, cx: &
                 }
                 out.push(char::from(*c));
             }
-            Item::Box(_) | Item::Mark(_) => out.push_str("[]"),
+            Item::Box(_) | Item::Mark(_) | Item::Marks(..) => out.push_str("[]"),
+            // (§175: a TeXXeT node as `[]`, a formula's edge as `$`)
+            Item::Math { sub, .. } => out.push_str(if *sub >= 4 { "[]" } else { "$" }),
             Item::Rule { .. } => out.push('|'),
             Item::Glue { zero, .. } => {
                 if !zero {
@@ -281,6 +283,34 @@ impl Shower<'_> {
                 self.out.push('{');
                 show_toks_plain(self.out, t, self.cx);
                 self.out.push('}');
+            }
+            Item::Marks(n, t) => {
+                // (etex.web §196: the class after `\marks`)
+                self.cx.esc(self.out, "marks");
+                let _ = write!(self.out, "{n}");
+                self.out.push('{');
+                show_toks_plain(self.out, t, self.cx);
+                self.out.push('}');
+            }
+            Item::Math { sub, w } => {
+                // (tex.web 192, etex.web §1435)
+                if *sub > 1 {
+                    self.cx.esc(self.out, if sub % 2 == 1 { "end" } else { "begin" });
+                    self.out.push(if *sub > 8 {
+                        'R'
+                    } else if *sub > 4 {
+                        'L'
+                    } else {
+                        'M'
+                    });
+                } else {
+                    self.cx.esc(self.out, "math");
+                    self.out.push_str(if *sub == 0 { "on" } else { "off" });
+                    if *w != 0 {
+                        self.out.push_str(", surrounded ");
+                        print::scaled(self.out, *w);
+                    }
+                }
             }
             _ => {}
         }

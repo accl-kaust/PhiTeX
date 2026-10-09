@@ -1,0 +1,7 @@
+% Expressions that overflow, divide by zero or lack a `)': errors, zero.
+\message{\the\numexpr 2147483647+1\relax}
+\message{\the\numexpr 1/0\relax}
+\message{\the\dimexpr 16383pt*2\relax}
+\message{\the\numexpr 65536*65536\relax}
+\message{\the\numexpr 2*(3+4\relax}
+\message{\the\glueexpr 1pt plus 16000pt*2\relax}

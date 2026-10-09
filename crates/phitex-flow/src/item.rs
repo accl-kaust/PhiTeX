@@ -138,6 +138,16 @@ pub enum Item {
     Penalty(i32),
     Disc(Arc<Disc>),
     Mark(Arc<Vec<Tok>>),
+    /// e-TeX's `\marks n` for a class `n` other than 0 (class 0 is
+    /// `Mark`).
+    Marks(u16, Arc<Vec<Tok>>),
+    /// A math node (tex.web 147): `sub` 0 before, 1 after a formula; e-TeX's
+    /// TeXXeT `\beginL` 6, `\endL` 7, `\beginR` 10, `\endR` 11 (etex.web
+    /// §1433); its width.
+    Math {
+        sub: u8,
+        w: i32,
+    },
     // ---- pseudo-items, applied by the gatherer of the list
     /// `\unpenalty` (0), `\unkern` (1), `\unskip` (2): remove the last item
     /// if it is of that kind.
@@ -177,7 +187,10 @@ impl Item {
     /// §148: `precedes_break` — a box, rule, insertion, mark, adjustment,
     /// ligature, discretionary or whatsit (types below `math_node`).
     pub fn precedes_break(&self) -> bool {
-        matches!(self, Item::Box(_) | Item::Rule { .. } | Item::Mark(_) | Item::Lig(_) | Item::Disc(_))
+        matches!(
+            self,
+            Item::Box(_) | Item::Rule { .. } | Item::Mark(_) | Item::Marks(..) | Item::Lig(_) | Item::Disc(_)
+        )
     }
 
     /// §148: `non_discardable`.

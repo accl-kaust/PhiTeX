@@ -1,0 +1,19 @@
+% \scantokens: the text read again, with the category codes and the
+% \endlinechar in force; \everyeof; \newlinechar cutting lines.
+\everyeof{\noexpand}
+\def\a{A}
+\message{[\scantokens{\a b}]}
+\edef\x{\scantokens{x\a}}\message{\meaning\x}
+{\endlinechar=-1 \xdef\y{\scantokens{ab}}}\message{\meaning\y}
+{\endlinechar=`\Z \xdef\z{\scantokens{ab}}}\message{\meaning\z}
+{\newlinechar=`\| \endlinechar=`\Z \xdef\w{\scantokens{a|b||c}}}\message{\meaning\w}
+\def\t{\message{T}}
+\scantokens{\catcode`\! =0 !t}
+\catcode`\!=12
+{\catcode`\Q=13 \gdef Q{qq}}
+\scantokens{\catcode`\Q=13 \message{Q}}\catcode`\Q=11
+\message{\scantokens{\a} \scantokens{\scantokens{b}c}}
+\edef\u{\scantokens{\noexpand\a\a}}\message{\meaning\u}
+\everyeof{\message{eof}}\scantokens{\message{in}}\everyeof{}
+\scantokens{\def\v{V}}\message{\v}
+\begingroup\scantokens{\endgroup}\message{\the\currentgrouplevel}

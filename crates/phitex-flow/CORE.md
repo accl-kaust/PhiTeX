@@ -230,6 +230,106 @@ both TeX and the graph; `tests/flow.rs`'s `doc()` begins with its catcodes,
     macro's parameter shows as `#n` whatever its parameter character; a
     `^^` reduction is not reduced again.
 
+## e-TeX (extended mode)
+
+`Options::etex` (default true; fixed for a `Build`'s life) is etex.web's
+extended mode: e-TeX's 66 primitives are named (`val::initial`,
+`prim::ETEX_PRIMITIVES`) and registers go to 32767. With it false the graph
+is TeX82 (`tests/core.rs`, `tests/dvi.rs` compare with `tex`); with it true
+`tests/etex.rs` compares with `etex -ini -etex`. The code is
+`src/graph/etex.rs`, with hooks in `expand.rs` (conditionals, `\the`-like
+steps, `\protected` in expanded text), `scan.rs` (items, register numbers),
+`assign.rs` (prefixes, `\interactionmode`) and `graph.rs` (the rewritten
+texts of `\scantokens`).
+
+| etex.web quantity | here |
+|---|---|
+| `eTeX_mode` | `Key::ETeXMode`: a value of the format no document defines; read only where TeX82 and e-TeX differ outside the names (a register number past 255) |
+| `interaction` | `Key::Interaction` (global; IniTeX's 3 initially — the oracle runs with `-interaction=batchmode`, so programs set it before reading it); `\batchmode`… and `\interactionmode=` define it and end the log's line (`new_interaction`'s `print_ln`) |
+| the new integer parameters, `\everyeof` | `IntPar::Tracingassigns` … `TeXXeTstate`, `TokPar::Everyeof` |
+| `cur_if`, `if_limit` for `\currentif…` | `RState.conds` (`Cond.code`: the conditional's code, +32 after `\unless`; `Cond.limit`) |
+| `cur_group`, `cur_level` for `\currentgroup…` | `RState.groups` (kind, and a box group's `BoxGroup`: hbox, adjusted hbox, vbox, vtop, disc) |
+| a pseudo file (`\scantokens`) | `RState.texts`: a text the input was rewritten with, above the rewritten token lists it was made over; read lazily with the catcodes in force (its own position, tokenizer state and end-of-line character), `\everyeof` once at its end |
+| the protected mark (`protected_token`) | `Macro.protected` |
+| mark classes | `Item::Marks(n, toks)` (class 0 is `Item::Mark`) |
+| TeXXeT's math nodes | `Item::Math { sub, w }` (6 `\beginL`, 7 `\endL`, 10 `\beginR`, 11 `\endR`) |
+
+Conflicts and gaps, with graph-shaped proposals:
+
+1. **`\scantokens`' end inside a scan**: TeX checks `scanner_status` at a
+   file's end ("File ended while scanning definition of …", which is why
+   `\everyeof{\noexpand}` is idiomatic). Not made: the end is silent.
+   Proposal: the scanner status as an `RState` field set by the scanning
+   step, read by the end of a text. `\tracingscantokens`' `( ` and line
+   display need the line field (Conflict 16).
+2. **`\lastnodetype`** is the one read of material (Conflict 13), with its
+   gaps: on the main vertical list after a paragraph's lines (TeX's
+   `last_node_type`, set by the page builder) it reads as -1.
+3. **`\showgroups`, `\showtokens`, `\showifs`**: their `> …` text is easy;
+   the error context after it (`l.N …`) needs the line field and
+   `show_context` (Conflict 16). Not yet: an error, the text consumed.
+4. **`\readline`**: parsed (`n to \cs`); the line comes from a stream
+   (Conflict 6), and from the terminal (refused in batch mode, as TeX does)
+   while no stream is open. `readline_toks` makes a line's tokens.
+5. **`\pagediscards`, `\splitdiscards`**: the items the page builder or
+   `\vsplit` discarded, saved while `\savingvdiscards` is positive.
+   Proposal: the page fold defines `Key::Discards(k)` at its firing call
+   (as Conflict 18's `\box255`); a reader parks on the fold. Now: empty
+   (exact while `\savingvdiscards` is not positive); in horizontal mode the
+   paragraph ends first (`head_for_vmode`), as TeX's `un_vbox`.
+6. **`\topmarks n`…`\splitbotmarks n`**: the number is scanned; empty, as
+   `\topmark` (Conflicts 12, 18).
+7. **TeXXeT**: `\beginL`… are items when `\TeXXeTstate` is positive
+   ("Improper `\beginL`" otherwise); no reversal yet in line breaking
+   (`post_line_break`'s LR nodes), packing (LR anomalies) or DVI
+   (`reverse`). Shared with math (agent B), whose math node is the same
+   item.
+8. **`\middle`**: math (agent B): the primitive exists; an error until the
+   math lists are.
+9. **`\interlinepenalties`, `\clubpenalties`, `\widowpenalties`,
+   `\displaywidowpenalties`**: not yet. Proposal: `Key::PenShape(k)` (a
+   list of penalties), read by the paragraph node's line parameters.
+10. **`\lastlinefit`, `\savinghyphcodes`, `\predisplaydirection`**:
+    parameters, assigned and read; line breaking, hyphenation and display
+    math do not read them yet. The `\tracing…` parameters are values only
+    (no tracing output: programs keep them non-positive).
+11. **Kept pieces and the mode**: `Options::etex` is read by
+    `val::initial`; changing it between two updates of one `Build` is not
+    supported (pieces kept from the earlier update read the earlier mode).
+
+e-TeX's primitives:
+
+| primitive | etex.web cmd | graph form | status |
+|---|---|---|---|
+| `\beginL`, `\endL`, `\beginR`, `\endR` | valign | node emitting `Item::Math` (horizontal mode; vertical: a paragraph begins) | items; no reversal (gap 7) |
+| `\botmarks`, `\firstmarks`, `\topmarks`, `\splitbotmarks`, `\splitfirstmarks` | top_bot_mark | step: scans the class; empty until the page fold has marks | approx: empty |
+| `\clubpenalties`, `\displaywidowpenalties`, `\interlinepenalties`, `\widowpenalties` | set_shape | `Key::PenShape(k)` (proposal) | not yet |
+| `\currentgrouplevel`, `\currentgrouptype` | last_item | a read of `RState.groups` | done |
+| `\currentifbranch`, `\currentiflevel`, `\currentiftype` | last_item | a read of `RState.conds` | done |
+| `\detokenize`, `\unexpanded` | the | step: the balanced text, shown as characters or as it is; not expanded again inside `\edef`/`\message`/`\write` | done |
+| `\eTeXrevision` | convert | step: `.6` | done |
+| `\eTeXversion` | last_item | 2 | done |
+| `\everyeof` | assign_toks | `Key::TokPar(Everyeof)`, read at a rewritten text's end | done |
+| `\fontchardp`, `\fontcharht`, `\fontcharic`, `\fontcharwd` | last_item | a read of the font value | done |
+| `\glueexpr`, `\muexpr`, `\numexpr`, `\dimexpr` | last_item | the expression grammar (§1520–1544), a pure function of the tokens and the quantities it reads; "Arithmetic overflow" makes it zero | done |
+| `\glueshrink`, `\glueshrinkorder`, `\gluestretch`, `\gluestretchorder` | last_item | scans glue | done |
+| `\gluetomu`, `\mutoglue` | last_item | scans glue, changes its level | done |
+| `\ifcsname` | if_test | conditional; reads the name's meaning, defines nothing | done |
+| `\ifdefined` | if_test | conditional; reads the meaning of the next token | done |
+| `\iffontchar` | if_test | conditional; reads the font value | done |
+| `\interactionmode` | set_page_int | `Key::Interaction`, read and assigned (global) | done |
+| `\lastlinefit`, `\predisplaydirection`, `\savinghyphcodes`, `\savingvdiscards`, `\TeXXeTstate`, `\tracingassigns`, `\tracinggroups`, `\tracingifs`, `\tracingnesting`, `\tracingscantokens` | assign_int | `Key::IntPar(p)` | done (values; readers: gap 10) |
+| `\lastnodetype` | last_item | the read of material (Conflict 13) | done (inside a piece; gap 2) |
+| `\marks` | mark | node emitting `Item::Marks(n, …)` (class 0: `Item::Mark`) | done |
+| `\middle` | left_right | math (agent B) | not yet |
+| `\pagediscards`, `\splitdiscards` | un_vbox | the page fold's discards (gap 5) | approx: empty |
+| `\parshapedimen`, `\parshapeindent`, `\parshapelength` | last_item | a read of `Key::Parshape` | done |
+| `\protected` | prefix | `RState.protected` to the definition; `Macro.protected` | done |
+| `\readline` | read_to_cs | parsed; streams are Conflict 6 | partial |
+| `\scantokens` | input | step: rewrites the input with the shown text, read again (`RState.texts`) | done (no "File ended" check: gap 1) |
+| `\showgroups`, `\showifs`, `\showtokens` | xray | log text and an error context (gap 3) | not yet |
+| `\unless` | expand_after | step (a node at the top, as conditionals are): the boolean conditional after it, negated | done |
+
 ## The inventory
 
 ### (i) Expandable and input-rewriting: steps — 40

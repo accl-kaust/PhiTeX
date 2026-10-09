@@ -93,6 +93,12 @@ pub enum Key {
     /// `\textfont` (size 0), `\scriptfont` (1), `\scriptscriptfont` (2) of a
     /// family.
     FamFont(u8, u8),
+    /// The interaction mode (`\batchmode` 0 … `\errorstopmode` 3; e-TeX's
+    /// `\interactionmode`), global.
+    Interaction,
+    /// Whether the format is e-TeX's extended mode (1) or TeX's (0): a
+    /// value of the format no document defines (`Options::etex`).
+    ETeXMode,
 }
 
 impl Key {
@@ -183,6 +189,8 @@ impl Key {
             Key::Parshape => w(18, 0),
             Key::Font => w(19, 0),
             Key::FamFont(s, f) => w(25, (u64::from(*s) << 8) | u64::from(*f)),
+            Key::Interaction => w(26, 0),
+            Key::ETeXMode => w(27, 0),
         }
     }
 }
@@ -216,6 +224,8 @@ impl fmt::Display for Key {
             Key::FontIdent(x) => write!(f, "font_id_text ({x})"),
             Key::FontLoaded(x) => write!(f, "font loaded ({x})"),
             Key::FamFont(s, x) => write!(f, "\\{}font{x}", ["text", "script", "scriptscript"][usize::from(*s).min(2)]),
+            Key::Interaction => write!(f, "\\interactionmode"),
+            Key::ETeXMode => write!(f, "e-TeX mode"),
         }
     }
 }
@@ -227,6 +237,9 @@ pub struct Macro {
     pub body: Vec<Tok>,
     pub long: bool,
     pub outer: bool,
+    /// e-TeX's `\protected`: not expanded where `\edef` and `\write`
+    /// expand.
+    pub protected: bool,
 }
 
 /// What a control sequence or active character means.
@@ -337,11 +350,18 @@ impl fmt::Display for Val {
 /// \year, \month, \day, \time as `SOURCE_DATE_EPOCH=0` gives them: the
 /// DVI file's comment says 1970.01.01:0000). The font given to `Build` is
 /// a file `\font` can load, not the initial font: that is `\nullfont`.
-pub fn initial(key: &Key, _font: &Arc<Font>) -> Val {
+/// With `etex` (e-TeX's extended mode, etex.web §1337), e-TeX's
+/// primitives are named too.
+pub fn initial(key: &Key, _font: &Arc<Font>, etex: bool) -> Val {
     let c32 = |c: &char| u32::from(*c) as i32;
     match key {
         Key::Cs(n) if &**n == "nullfont" => Val::Meaning(Meaning::Font(crate::tfm::null_font())),
-        Key::Cs(n) => Val::Meaning(Prim::by_name(n).or_else(|| Prim::internal(n)).map_or(Meaning::Undefined, Meaning::Prim)),
+        Key::Cs(n) => Val::Meaning(
+            Prim::by_name(n)
+                .or_else(|| if etex { Prim::by_name_etex(n) } else { None })
+                .or_else(|| Prim::internal(n))
+                .map_or(Meaning::Undefined, Meaning::Prim),
+        ),
         Key::Active(_) => Val::Meaning(Meaning::Undefined),
         Key::Cat(c) => Val::Cat(initial_cat(*c)),
         Key::Lccode(c) => Val::Int(match c {
@@ -373,6 +393,10 @@ pub fn initial(key: &Key, _font: &Arc<Font>) -> Val {
         Key::HyphenChar(_) => Val::Int(i32::from(b'-')),
         Key::SkewChar(_) => Val::Int(-1),
         Key::FontIdent(_) => Val::Name(Arc::from("nullfont")),
+        // (IniTeX's `error_stop_mode`; TeX run with `-interaction` starts
+        // in that mode instead)
+        Key::Interaction => Val::Int(3),
+        Key::ETeXMode => Val::Int(i32::from(etex)),
     }
 }
 

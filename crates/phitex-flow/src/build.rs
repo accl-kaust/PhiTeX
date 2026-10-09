@@ -75,6 +75,10 @@ pub struct Options {
     pub order: Order,
     /// Print the graph into `Output::dump`.
     pub dump: bool,
+    /// The format is e-TeX's extended mode (`etex -ini` given `*`): e-TeX's
+    /// primitives are named (`val::initial`). Fixed for a `Build`'s life:
+    /// pieces kept from an earlier update read the mode they ran with.
+    pub etex: bool,
 }
 
 impl Default for Options {
@@ -84,6 +88,7 @@ impl Default for Options {
             reads: Reads::Suspend,
             order: Order::Priority,
             dump: false,
+            etex: true,
         }
     }
 }
@@ -233,13 +238,16 @@ struct Names {
     /// whose bit is clear has only its initial value, found without the
     /// lock.
     defined: Vec<AtomicU64>,
+    /// The values before any definition are e-TeX's extended mode's.
+    etex: bool,
 }
 
 impl Names {
-    fn new() -> Names {
+    fn new(etex: bool) -> Names {
         Names {
             shards: (0..SHARDS).map(|_| RwLock::default()).collect(),
             defined: (0..SHARDS).map(|_| AtomicU64::new(0)).collect(),
+            etex,
         }
     }
 
@@ -255,7 +263,7 @@ impl Names {
     fn reaching(&self, key: &Key, k: usize, font: &Arc<Font>) -> (Option<u32>, Val) {
         let (s, bit) = Names::route(key);
         if self.defined[s].load(Ordering::Acquire) & bit == 0 {
-            return (None, initial(key, font));
+            return (None, initial(key, font, self.etex));
         }
         let g = self.shards[s].read().expect("names");
         if let Some(v) = g.get(key) {
@@ -264,7 +272,7 @@ impl Names {
                 return (Some(v[i - 1].0), v[i - 1].1.clone());
             }
         }
-        (None, initial(key, font))
+        (None, initial(key, font, self.etex))
     }
 
     /// Piece `k` now defines `key` as `val` (none: no longer defines it).
@@ -643,7 +651,7 @@ impl Build {
         }
         // (the names index: what the kept pieces define, at their places,
         // and what an edited piece's predecessor defined, as its prediction)
-        let names = Names::new();
+        let names = Names::new(opts.etex);
         for (k, ps) in p.iter().enumerate() {
             if let Some(r) = ps.run.as_ref().or(ps.prev.as_ref().map(|(r, _, _)| r)) {
                 for (key, val) in &r.exports {

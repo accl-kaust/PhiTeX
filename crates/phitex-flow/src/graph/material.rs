@@ -285,7 +285,7 @@ impl Exec<'_> {
     }
 
     /// Emits into the current list (vertical or horizontal).
-    fn emit_here(&mut self, it: Item) {
+    pub(super) fn emit_here(&mut self, it: Item) {
         if self.st.mode == Mode::V {
             self.vemit.push(it);
         } else {
@@ -407,13 +407,13 @@ impl Exec<'_> {
 
     /// vmode + a horizontal command: a paragraph begins first (tex.web
     /// 1090).
-    fn back_new_graf(&mut self, t: &Tok) {
+    pub(super) fn back_new_graf(&mut self, t: &Tok) {
         self.back(t.clone());
         self.new_graf(true);
     }
 
     /// tex.web 1095: `head_for_vmode`.
-    fn head_for_vmode(&mut self, t: &Tok, hrule: bool) {
+    pub(super) fn head_for_vmode(&mut self, t: &Tok, hrule: bool) {
         if self.st.inner {
             if hrule {
                 self.err("You can't use `\\hrule' here except with leaders".into());
@@ -1502,6 +1502,7 @@ impl Exec<'_> {
         let c = self.page_call();
         self.vemit.push(Item::End(c));
         self.st.pending.clear();
+        self.st.texts = super::Stack::new();
         self.st.pos = self.text.len();
     }
 }
