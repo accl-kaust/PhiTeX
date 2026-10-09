@@ -482,8 +482,22 @@ pub fn default_dirs() -> Vec<std::path::PathBuf> {
 pub struct FontFiles {
     given: Vec<(String, Arc<[u8]>)>,
     dirs: Vec<std::path::PathBuf>,
-    index: std::sync::OnceLock<Index>,
+    index: std::sync::OnceLock<Arc<Index>>,
     cache: std::sync::Mutex<std::collections::HashMap<String, Option<Arc<[u8]>>>>,
+}
+
+/// The index of each list of directories, made once per process (a pure
+/// function of the file system, which does not change while we run).
+fn index_of(dirs: &[std::path::PathBuf]) -> Arc<Index> {
+    type Indexes = std::sync::Mutex<Vec<(Vec<std::path::PathBuf>, Arc<Index>)>>;
+    static INDEXES: std::sync::OnceLock<Indexes> = std::sync::OnceLock::new();
+    let mut all = INDEXES.get_or_init(Indexes::default).lock().expect("font indexes");
+    if let Some((_, i)) = all.iter().find(|(d, _)| d == dirs) {
+        return i.clone();
+    }
+    let i = Arc::new(Index::new(dirs));
+    all.push((dirs.to_vec(), i.clone()));
+    i
 }
 
 impl FontFiles {
@@ -499,7 +513,7 @@ impl FontFiles {
         if let Some(v) = self.cache.lock().expect("font cache").get(name) {
             return v.clone();
         }
-        let v = self.index.get_or_init(|| Index::new(&self.dirs)).read(name).map(Arc::from);
+        let v = self.index.get_or_init(|| index_of(&self.dirs)).read(name).map(Arc::from);
         self.cache.lock().expect("font cache").insert(name.to_string(), v.clone());
         v
     }
