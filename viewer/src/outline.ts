@@ -71,7 +71,7 @@ export class Outline {
           const p = `${path}/${e.t}`;
           const kids = e.k.length ? list(e.k, p, depth + 1) : "";
           const cls = [e.k.length ? "parent" : "", this.folded.has(p) ? "folded" : ""].filter(Boolean).join(" ");
-          return `<li data-i="${i}" data-path="${esc(p)}" class="${cls}"><div class="phx-row" style="--d:${depth}">${e.k.length ? `<span class="phx-fold" aria-hidden="true"></span>` : `<span class="phx-dot"></span>`}<a href="#" class="phx-t" title="${esc(e.t)}">${esc(e.t)}</a>${e.p != null ? `<span class="phx-p">${e.p + 1}</span>` : ""}</div>${kids}</li>`;
+          return `<li data-i="${i}" data-path="${esc(p)}" class="${cls}"><div class="phx-row" style="--d:${depth}">${e.k.length ? `<span class="phx-fold" aria-hidden="true"></span>` : `<span class="phx-dot"></span>`}<a href="#" class="phx-t" title="${esc(e.t)}">${esc(e.t)}</a>${e.p != null ? `<span class="phx-p">${Number(e.p) + 1}</span>` : ""}</div>${kids}</li>`;
         })
         .join("")}</ul>`;
     this.el.innerHTML = list(items, "", 0);

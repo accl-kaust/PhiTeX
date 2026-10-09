@@ -110,7 +110,7 @@ export class Problems {
 }
 
 function place(file: string, line: number | null, col: number | null, text?: string): string {
-  return `<a href="#" class="phx-place" data-file="${esc(file)}" data-line="${line ?? 1}" data-col="${col ?? 1}">${esc(text ?? `${file}${line ? `:${line}` : ""}${col ? `:${col}` : ""}`)}</a>`;
+  return `<a href="#" class="phx-place" data-file="${esc(file)}" data-line="${Number(line) || 1}" data-col="${Number(col) || 1}">${esc(text ?? `${file}${line ? `:${line}` : ""}${col ? `:${col}` : ""}`)}</a>`;
 }
 
 /** One problem's card (the CLI's panel, and the Overleaf-style panel's diagnostics drawer). */
@@ -125,7 +125,8 @@ export function asDiagnostic(p: Problem): { severity: "error" | "warning" | "inf
 }
 
 function item(p: Problem): string {
-  const sev = p.severity === "fatal" ? "error" : p.severity;
+  // (a class name: only the four known)
+  const sev = p.severity === "fatal" ? "error" : p.severity === "warning" || p.severity === "note" ? p.severity : "error";
   const where = p.file ? place(p.file, p.line, p.col) : "";
   let ex = "";
   if (p.excerpt) {
@@ -133,7 +134,7 @@ function item(p: Problem): string {
     const a = chars.slice(0, p.excerpt.start).join("");
     const b = chars.slice(p.excerpt.start, p.excerpt.start + p.excerpt.len).join("");
     const c = chars.slice(p.excerpt.start + p.excerpt.len).join("");
-    ex = `<pre class="phx-excerpt">${p.line ? `<span class="phx-ln">${p.line} │ </span>` : ""}${esc(a)}<mark>${esc(b)}</mark>${esc(c)}</pre>`;
+    ex = `<pre class="phx-excerpt">${p.line ? `<span class="phx-ln">${Number(p.line)} │ </span>` : ""}${esc(a)}<mark>${esc(b)}</mark>${esc(c)}</pre>`;
   }
   const ctx = p.context.length
     ? `<details class="phx-ctx"><summary>in ${p.context.map((m) => `<code>${esc(m.name)}</code>`).join(" ← ")}</summary>${p.context
@@ -143,7 +144,7 @@ function item(p: Problem): string {
   const inc = p.included.length ? `<div class="phx-inc">included from ${p.included.map((i) => place(i.file, i.line, 1)).join(", ")}</div>` : "";
   const box = p.box ? `<pre class="phx-excerpt">${esc(p.box.excerpt)}</pre>` : "";
   const list = (cls: string, xs: string[]) => (xs.length ? `<ul class="${cls}">${xs.map((x) => `<li>${esc(x)}</li>`).join("")}</ul>` : "");
-  return `<li class="phx-${sev}"><div class="phx-msg"><span class="phx-sev">${esc(p.severity)}</span>${p.code ? `<code class="phx-code">${esc(p.code)}</code>` : ""}<span>${esc(p.message)}</span></div>${where ? `<div class="phx-where">${where}</div>` : ""}${ex}${box}${list("phx-notes", p.notes)}${ctx}${inc}${list("phx-help", [...p.help, ...p.suggestions])}</li>`;
+  return `<li class="phx-${sev}"><div class="phx-msg"><span class="phx-sev">${esc(String(p.severity))}</span>${p.code ? `<code class="phx-code">${esc(p.code)}</code>` : ""}<span>${esc(p.message)}</span></div>${where ? `<div class="phx-where">${where}</div>` : ""}${ex}${box}${list("phx-notes", p.notes)}${ctx}${inc}${list("phx-help", [...p.help, ...p.suggestions])}</li>`;
 }
 
 /** The panel's CSS, in the host's tokens where it has them (fallbacks otherwise). */

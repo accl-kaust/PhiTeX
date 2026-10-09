@@ -115,6 +115,9 @@ export const COMMITS_CSS = `
 `;
 
 /** What a commit graph needs: the commits (or why there are none), and what to do with a pair chosen. */
+/** The ref kinds a pill may be (its class). */
+const KINDS = new Set(["head", "branch", "remote", "tag"]);
+
 export interface CommitsHost {
   /** Commits `skip`.. (at most `limit`), or an error to show. */
   load(skip: number, limit: number): Promise<Commit[] | string>;
@@ -246,7 +249,7 @@ export class Commits {
       // (the lines down to the next row, over its top half)
       const svg = r.down.map(([a, b]) => `<path d="M${x(a)} ${ROW / 2} C${x(a)} ${ROW} ${x(b)} ${ROW} ${x(b)} ${ROW * 1.5}" stroke="${COLORS[b % COLORS.length]}" fill="none" stroke-width="1.6"/>`);
       svg.push(c.parents.length > 1 ? `<circle cx="${x(r.lane)}" cy="${ROW / 2}" r="4.5" fill="Canvas" stroke="${col}" stroke-width="2"/>` : `<circle cx="${x(r.lane)}" cy="${ROW / 2}" r="4" fill="${col}"/>`);
-      const pills = c.refs.map((f) => `<span class="pill ${f.kind}">${esc(f.name)}</span>`).join("");
+      const pills = c.refs.map((f) => `<span class="pill ${KINDS.has(f.kind) ? f.kind : "branch"}">${esc(f.name)}</span>`).join("");
       const lo = this.to ? ti : -1;
       const cls = i === fi ? " from" : i === ti ? " to" : fi >= 0 && i > lo && i < fi ? " inrange" : "";
       const end = i === fi ? '<span class="end">FROM</span>' : i === ti ? '<span class="end">TO</span>' : "";

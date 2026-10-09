@@ -140,6 +140,11 @@ const OVERLEAF_WORDS: PanelWords = {
   keptIn: "this browser",
 };
 
+/** `c` if it is a #rrggbb color (what goes into a style or value attribute), else `or`. */
+export function safeColor(c: unknown, or: string): string {
+  return typeof c === "string" && /^#[0-9a-fA-F]{6}$/.test(c) ? c : or;
+}
+
 /** What a host may leave out: a control whose event it doesn't handle is hidden. */
 export interface PanelOptions {
   words?: Partial<PanelWords>;
@@ -1513,6 +1518,9 @@ export class Panel {
       el.className = "diffset";
       return;
     }
+    // (the look comes from a host, a store or a server: its colors go into
+    // attributes, so only #rrggbb is taken, its names only as the lists have them)
+    look = { ...look, add_color: safeColor(look.add_color, "#0000ff"), del_color: safeColor(look.del_color, "#ff0000") };
     const MARKUP: [string, string][] = [
       ["underline", "Underline"], ["ctraditional", "Color + font"], ["traditional", "Font"], ["cfont", "Color + size"],
       ["fontstrike", "Strike"], ["bold", "Bold"], ["changebar", "Change bars"], ["culinechbar", "Underline + bars"], ["invisible", "Hide deletions"],

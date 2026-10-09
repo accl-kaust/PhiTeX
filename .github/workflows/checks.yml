@@ -39,6 +39,8 @@ jobs:
       # (and it type-checks strict with erasable syntax only, as the
       # Overleaf extension runs it in Node with the types stripped)
       - run: PHITEX_BUNDLE_DIRECT=1 scripts/viewer-typecheck.sh
+      # (untrusted text, a repository's or a document's, never reaches the DOM as markup)
+      - run: PHITEX_BUNDLE_DIRECT=1 scripts/viewer-test.sh
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo clippy --workspace --all-targets --features partex-cli/trace -- -D warnings
