@@ -1806,6 +1806,23 @@ any schedule (1 thread, Suspend, priority too). Pre-existing: 72ee98e
 hangs the same. Not in `open/` (its replay does not end); a timeout's
 reproduction names its step now (`fuzz::run_seed_at`).
 
+*T1's trip timeouts are mostly TeX's own.* Job 7978 checked 7899's 108
+trip timeouts (5000 plain seeds on 86941d0, 120 s a seed) with
+`scripts/flow-fuzz-tex.py`: the system's `tex` on TRIP's two passes,
+before and after the edit, a run counted only when tex wrote its files.
+It also ran `phitex-flow --fuzz-cold FILE before|after` on each.
+- 89 (and both of 7853's originals): tex loops on pass 2 after the edit,
+  so this is TRIP edited into a loop, not a bug. flow-fuzz.sh now
+  classes these "tex-loops trip".
+- 20: our cold build of the text after the edit loops while tex ends on
+  every pass. All 20 are `swap` edits, so the bug is in a cold build
+  with no update (owner A), e.g. `cmd-7899/fuzz-out/j1/fuzz-trip-398-2.repro`.
+- 1: both cold builds end.
+The two cut repros named below were cut before the cold builds were
+checked (A found that their text loops before the edit); the
+minimizer now requires the cold builds to end, or, with FLOW_MIN_TEX,
+cuts a cold loop of ours while tex still ends.
+
 *T1 on plain documents too.* Fuzz subset 7853 ran 300 seeds at 1 thread and 60 at 8 on each of trip,
 pages and table, with a 120 s limit per seed, on a50fa8a. 43 timeouts:
 42 trip and 1 pages; table had none. The log is not compared, so the 9
