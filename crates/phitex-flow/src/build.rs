@@ -456,9 +456,51 @@ fn count_lines(t: &[char]) -> usize {
     t.iter().filter(|&&c| c == '\r').count()
 }
 
-/// The edges: name -> reader piece -> (its first node reading the name
+/// A name's readers: reader piece -> (its first node reading the name
 /// from before the piece, the piece whose definition it read).
-type Readers = FxMap<Key, FxMap<PieceId, (u32, PieceId)>>;
+type ReadersOf = FxMap<PieceId, (u32, PieceId)>;
+
+/// The edges, name -> its readers, in shards by name (`Names::route`, as
+/// the names index): a run's edges go in before the scheduler's lock is
+/// taken (`run_and_install`), each shard locked once per run; under the
+/// lock, `reached` and the edge moves lock the shard of each name they
+/// look at. Between rounds the build alone holds it (`get_mut`, no
+/// locking).
+struct Readers(Vec<Mutex<FxMap<Key, ReadersOf>>>);
+
+impl Default for Readers {
+    fn default() -> Self {
+        Readers((0..SHARDS).map(|_| Mutex::default()).collect())
+    }
+}
+
+impl Readers {
+    /// The shard holding `key`'s readers, locked.
+    fn shard(&self, key: &Key) -> MutexGuard<'_, FxMap<Key, ReadersOf>> {
+        self.0[Names::route(key).0].lock().expect("readers")
+    }
+
+    /// `key`'s readers, the build alone holding the index.
+    fn get_mut(&mut self, key: &Key) -> Option<&mut ReadersOf> {
+        self.0[Names::route(key).0].get_mut().expect("readers").get_mut(key)
+    }
+
+    /// Every name and its readers, the build alone holding the index.
+    fn iter_mut(&mut self) -> impl Iterator<Item = (&Key, &mut ReadersOf)> {
+        self.0.iter_mut().flat_map(|m| m.get_mut().expect("readers").iter_mut())
+    }
+
+    /// Piece `id`'s edge for `key` is now `e`.
+    fn insert(map: &mut FxMap<Key, ReadersOf>, key: &Key, id: PieceId, e: (u32, PieceId)) {
+        if let Some(m) = map.get_mut(key) {
+            m.insert(id, e);
+        } else {
+            let mut m = FxMap::default();
+            m.insert(id, e);
+            map.insert(key.clone(), m);
+        }
+    }
+}
 
 /// A piece's text and the pieces it was re-cut into.
 type Recut = (Arc<[char]>, Vec<Arc<[char]>>);
@@ -1186,7 +1228,6 @@ struct State {
     /// Pieces before this one cannot change any more in this build: the
     /// page scan reads them.
     settled: usize,
-    readers: Readers,
     break_queue: VecDeque<(usize, usize, Arc<Para>)>,
     scan: Option<Box<Scan>>,
     scan_next: usize,
@@ -1293,6 +1334,8 @@ struct Shared {
     opts: Options,
     /// The last build's routine runs, by their page's first box.
     memo_old: FxMap<usize, Vec<Arc<Memo>>>,
+    /// The edges (`Readers`): outside the scheduler's lock.
+    readers: Readers,
     /// `PHITEX_SCHED`: the scheduler's events, for measuring (none: off).
     sched: Option<Mutex<Vec<Ev>>>,
     /// When the round began (the events' times count from it).
@@ -1367,7 +1410,7 @@ impl Build {
             page_orgs: Vec::new(),
             marks: Vec::new(),
             next_id: 0,
-            readers: FxMap::default(),
+            readers: Readers::default(),
             fold_vals: FxMap::default(),
             places: FxMap::default(),
             src: String::new(),
@@ -2054,7 +2097,6 @@ impl Build {
                     }
                 })
                 .collect();
-        self.readers = st.readers;
         self.carried.absorb(st.stats);
     }
 
@@ -2291,8 +2333,8 @@ impl Build {
         let mut marks: Vec<(usize, Key)> = Vec::new();
         let mut moves: Vec<(usize, Key, PieceId)> = Vec::new();
         for key in &touched {
-            let Some(m) = readers.get(key) else { continue };
-            for (&rid, &(node, src)) in m {
+            let Some(m) = readers.get_mut(key) else { continue };
+            for (&rid, &(node, src)) in m.iter() {
                 let Some(rpos) = seq.pos_of(rid) else {
                     continue;
                 };
@@ -2312,12 +2354,12 @@ impl Build {
             }
         }
         for (r, key, src) in moves {
-            move_edge(&mut readers, &mut p[r], &key, src);
+            move_edge(&readers, &mut p[r], &key, src);
         }
         // (the names the build answers itself — a file's bytes, the job's
         // name, the lines before a piece — read with a value they no longer
         // have: their readers are marked)
-        for (key, m) in &readers {
+        for (key, m) in readers.iter_mut() {
             if !matches!(key, Key::File(_) | Key::Job | Key::LineBase) {
                 continue;
             }
@@ -2381,7 +2423,6 @@ impl Build {
             unstarted,
             running: BTreeSet::new(),
             settled: 0,
-            readers,
             break_queue: VecDeque::new(),
             scan: Some(Box::default()),
             scan_next: 0,
@@ -2483,6 +2524,7 @@ impl Build {
             lean: self.lean,
             build_no: self.builds,
             memo_old,
+            readers,
             sched: std::env::var_os("PHITEX_SCHED").map(|_| Mutex::new(Vec::new())),
             t_base: Instant::now(),
             lock_wait: AtomicU64::new(0),
@@ -2520,6 +2562,7 @@ impl Build {
         self.virt = virt.ids;
         self.next_id = self.next_id.max(virt.next);
         let mut st = sh.state.into_inner().expect("state");
+        self.readers = sh.readers;
         if let Some(ev) = &sh.sched {
             let waits = (sh.lock_wait.load(Ordering::Relaxed), sh.lock_n.load(Ordering::Relaxed));
             write_sched(&ev.lock().expect("sched"), &st, threads, sh.build_no, sh.t_base.elapsed(), waits);
@@ -2784,9 +2827,8 @@ impl Build {
                     }
                 })
                 .collect();
-        self.readers = st.readers;
         // (the edges are kept until the next build: no spare capacity)
-        for m in self.readers.values_mut() {
+        for (_, m) in self.readers.iter_mut() {
             m.shrink_to_fit();
         }
         self.pages = st.pages.into_iter().zip(bodies).collect();
@@ -3451,11 +3493,15 @@ fn changed_names(old: Option<&Run>, new: &Run) -> Vec<Key> {
 /// definer reaching it now.
 fn reached(g: &mut State, sh: &Shared, m: Pos, keys: &[Key]) -> Vec<(usize, Key)> {
     let mut out = Vec::new();
-    let mut moves: Vec<(usize, Key, PieceId)> = Vec::new();
     for key in keys {
-        let Some(rm) = g.readers.get(key) else {
+        // (the shard stays locked while its readers are looked at and their
+        // edges moved: a run putting its edges in waits; see
+        // `run_and_install`)
+        let mut shard = sh.readers.shard(key);
+        let Some(rm) = shard.get(key) else {
             continue;
         };
+        let mut moves: Vec<(usize, PieceId)> = Vec::new();
         for (&rid, &(node, src)) in rm {
             let Some(rpos) = sh.seq.pos_of(rid) else {
                 continue;
@@ -3480,15 +3526,15 @@ fn reached(g: &mut State, sh: &Shared, m: Pos, keys: &[Key]) -> Vec<(usize, Key)
                 let (def, ..) = sh.names.reaching(key, (rpos.0, node), &sh.font);
                 let def_id = def.map_or(INITIAL, |d| sh.seq.id_at(d));
                 if def_id != src {
-                    moves.push((r, key.clone(), def_id));
+                    moves.push((r, def_id));
                 }
                 continue;
             }
             out.push((r, key.clone()));
         }
-    }
-    for (r, key, src) in moves {
-        move_edge(&mut g.readers, &mut g.p[r], &key, src);
+        for (r, src) in moves {
+            move_edge_in(&mut shard, &mut g.p[r], key, src);
+        }
     }
     out
 }
@@ -3529,7 +3575,7 @@ fn still_dirty(g: &mut State, sh: &Shared, k: usize) -> Vec<(Key, u32)> {
         let node = run.values_read(&key)[0].1;
         let (def, ..) = sh.names.reaching(&key, (k as u32, node), &sh.font);
         let src = def.map_or(INITIAL, |d| sh.seq.id_at(d));
-        move_edge(&mut g.readers, &mut g.p[k], &key, src);
+        move_edge(&sh.readers, &mut g.p[k], &key, src);
     }
     g.p[k].recheck = any && out.is_empty();
     out
@@ -3568,8 +3614,13 @@ fn keep_again(g: &mut State, sh: &Shared, k: usize) -> bool {
 }
 
 /// Piece `ps`'s edge for `key` comes from `src` now (its reads unchanged).
-fn move_edge(readers: &mut Readers, ps: &mut PState, key: &Key, src: PieceId) {
-    if let Some(e) = readers.get_mut(key).and_then(|m| m.get_mut(&ps.id)) {
+fn move_edge(readers: &Readers, ps: &mut PState, key: &Key, src: PieceId) {
+    move_edge_in(&mut readers.shard(key), ps, key, src);
+}
+
+/// [`move_edge`], `key`'s shard locked already.
+fn move_edge_in(shard: &mut FxMap<Key, ReadersOf>, ps: &mut PState, key: &Key, src: PieceId) {
+    if let Some(e) = shard.get_mut(key).and_then(|m| m.get_mut(&ps.id)) {
         e.1 = src;
     }
     if let Some(i) = ps.run.as_ref().and_then(|r| r.first_read(key))
@@ -4356,7 +4407,7 @@ fn execute(sh: &Shared, task: Task, wid: u16) -> (u64, u8) {
 fn run_and_install(sh: &Shared, k: usize, dirty: &[(Key, u32)], wid: u16) -> u64 {
     let tb = sh.now();
     let k32 = u32::try_from(k).unwrap_or(u32::MAX);
-    let (text, old, entry, strict, entry_assumed) = {
+    let (text, old, entry, strict, entry_assumed, old_srcs) = {
         let mut g = lock(sh);
         if std::mem::take(&mut g.p[k].recheck) && dirty.is_empty() && keep_again(&mut g, sh, k) {
             drop(g);
@@ -4376,7 +4427,10 @@ fn run_and_install(sh: &Shared, k: usize, dirty: &[(Key, u32)], wid: u16) -> u64
             (None, Some((r, _, t))) => Some((r.clone(), t.clone())),
             (None, None) => None,
         };
-        (ps.text.clone(), old, ps.entered.clone(), ps.suspend, entry_assumed)
+        // (the old run's edges' sources: nobody moves a running piece's
+        // edges — `reached` moves a settled piece's, `still_dirty` one's
+        // about to run)
+        (ps.text.clone(), old, ps.entered.clone(), ps.suspend, entry_assumed, ps.srcs.clone())
     };
     sh.cancel[k].store(false, Ordering::Relaxed);
     let tr = sh.now();
@@ -4464,6 +4518,62 @@ fn run_and_install(sh: &Shared, k: usize, dirty: &[(Key, u32)], wid: u16) -> u64
     } else {
         FxSet::default()
     };
+    // (from here on the run is installed: no return before the lock below,
+    // or the old run's edges taken out here would be lost while it stays)
+    // (the edges, before the scheduler's lock: the new run's, each with the
+    // piece whose definition answers it now, replace the old run's. In this
+    // order — `seen` taken, the reads validated, the edges in, then the
+    // lock — no mark is lost: an install changing one of these names under
+    // the lock either finds the edge (it went in before that install
+    // looked), or made its change after `seen` (the reads of that name are
+    // validated again under the lock below), or before it (then the read
+    // above already saw the new value). Each shard is locked once.)
+    let id = sh.seq.piece(k);
+    let mut srcs: Vec<PieceId> = checks.iter().map(|&(def, _)| def.map_or(INITIAL, |d| sh.seq.id_at(d))).collect();
+    // (whether read `i` holds its name's edge: its first reader; the page
+    // builder's quantities have none, the scan validates each read)
+    let holds_edge = |i: usize| {
+        let key = &run.reads[i].0;
+        !((i > 0 && run.reads[i - 1].0 == *key) || matches!(key, Key::Page(_)))
+    };
+    {
+        let mut ins: Vec<(usize, usize)> = (0..run.reads.len())
+            .filter(|&i| holds_edge(i))
+            .filter(|&i| {
+                !(same_keys
+                    && old_srcs.get(i) == Some(&srcs[i])
+                    && old_run.as_ref().is_some_and(|o| o.read_at(i).1 == run.reads[i].1))
+            })
+            .map(|i| (Names::route(&run.reads[i].0).0, i))
+            .collect();
+        ins.sort_unstable();
+        let mut gone: Vec<(usize, &Key)> = Vec::new();
+        if let Some(o) = old_run.as_ref().filter(|_| !same_keys) {
+            for i in 0..o.read_count() {
+                let key = o.read_at(i).0;
+                if !read_keys.contains(key) {
+                    gone.push((Names::route(key).0, key));
+                }
+            }
+        }
+        gone.sort_unstable_by_key(|x| x.0);
+        let (mut a, mut b) = (0, 0);
+        while a < ins.len() || b < gone.len() {
+            let sh_i = ins.get(a).map_or(usize::MAX, |x| x.0).min(gone.get(b).map_or(usize::MAX, |x| x.0));
+            let mut m = sh.readers.0[sh_i].lock().expect("readers");
+            while let Some(&(_, i)) = ins.get(a).filter(|x| x.0 == sh_i) {
+                let (key, node, _) = &run.reads[i];
+                Readers::insert(&mut m, key, id, (*node, srcs[i]));
+                a += 1;
+            }
+            while let Some(&(_, key)) = gone.get(b).filter(|x| x.0 == sh_i) {
+                if let Some(r) = m.get_mut(key) {
+                    r.remove(&id);
+                }
+                b += 1;
+            }
+        }
+    }
     let outcome;
     let tl;
     let ta = sh.now();
@@ -4472,16 +4582,23 @@ fn run_and_install(sh: &Shared, k: usize, dirty: &[(Key, u32)], wid: u16) -> u64
         tl = sh.now();
         let held = Instant::now();
         g.stats.commands_run += run.ran;
-        let id = sh.seq.piece(k);
-        // (names changed since the reads were validated: those reads again;
-        // the index changes only under this lock)
+        // (names changed since the reads were validated: those reads again,
+        // and an edge whose source moved follows it; the index changes only
+        // under this lock)
         let now_gen = sh.names_gen.load(Ordering::Acquire);
         if now_gen != seen {
             let since: FxSet<&Key> = g.names_log[seen..now_gen].iter().flatten().collect();
-            for ((key, node, val), c) in run.reads.iter().zip(&mut checks) {
+            for (i, ((key, node, val), c)) in run.reads.iter().zip(&mut checks).enumerate() {
                 if since.contains(key) {
                     let (def, now) = sh.names.read_now(key, (k as u32, *node), &sh.font);
                     *c = (def, val.seen_as(&now));
+                    let src = def.map_or(INITIAL, |d| sh.seq.id_at(d));
+                    if src != srcs[i] {
+                        srcs[i] = src;
+                        if holds_edge(i) {
+                            Readers::insert(&mut sh.readers.shard(key), key, id, (*node, src));
+                        }
+                    }
                 }
             }
         }
@@ -4489,46 +4606,14 @@ fn run_and_install(sh: &Shared, k: usize, dirty: &[(Key, u32)], wid: u16) -> u64
         // answers it now, replace the old run's; a read answered otherwise
         // than it was is stale)
         let tp1 = sh.now();
+        // (a read answered otherwise than it was is stale)
         let mut stale = Dirty::new();
-        let old_srcs = std::mem::take(&mut g.p[k].srcs);
-        let mut srcs = Vec::with_capacity(run.reads.len());
-        for (i, ((key, node, _), &(def, same))) in run.reads.iter().zip(&checks).enumerate() {
+        for ((key, _, _), &(_, same)) in run.reads.iter().zip(&checks) {
             if !same {
                 dirty_from(&mut stale, key.clone(), 0);
             }
-            let src = def.map_or(INITIAL, |d| sh.seq.id_at(d));
-            srcs.push(src);
-            // (one edge per name: its first reader; a second entry for the
-            // name, read with another value, follows it; the page builder's
-            // quantities have none: the scan validates each read)
-            if (i > 0 && run.reads[i - 1].0 == *key) || matches!(key, Key::Page(_)) {
-                continue;
-            }
-            if same_keys
-                && old_srcs.get(i) == Some(&src)
-                && old_run.as_ref().is_some_and(|o| o.read_at(i).1 == *node)
-            {
-                continue;
-            }
-            if let Some(m) = g.readers.get_mut(key) {
-                m.insert(id, (*node, src));
-            } else {
-                let mut m = FxMap::default();
-                m.insert(id, (*node, src));
-                g.readers.insert(key.clone(), m);
-            }
         }
         g.p[k].srcs = srcs;
-        if let Some(o) = old_run.as_ref().filter(|_| !same_keys) {
-            for i in 0..o.read_count() {
-                let key = o.read_at(i).0;
-                if !read_keys.contains(key)
-                    && let Some(m) = g.readers.get_mut(key)
-                {
-                    m.remove(&id);
-                }
-            }
-        }
         let tp2 = sh.now();
         let mut changed = changed;
         for key in &changed {
