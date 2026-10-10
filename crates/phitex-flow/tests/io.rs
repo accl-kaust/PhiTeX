@@ -62,8 +62,8 @@ fn io_errors_are_reported() {
     assert_eq!(o.log, ["macro:->line one "]);
 }
 
-/// A changed input file runs again exactly the piece reading it; the
-/// output is a cold build's.
+/// A changed input file runs again exactly the pieces reading it (the
+/// `\input` node's, the file's own); the output is a cold build's.
 #[test]
 fn an_edited_input_file_reruns_its_readers() {
     let dir = scratch("edit");
@@ -83,7 +83,8 @@ fn an_edited_input_file_reruns_its_readers() {
     let _ = std::fs::remove_dir_all(&dir);
     assert!(edited.log.iter().any(|x| x == "two"), "{:?}", edited.log);
     assert_eq!(edited.log, cold.log);
-    assert_eq!(edited.stats.ran, 1, "only the piece reading the file runs: {:?}", edited.stats);
+    // (the `\input` node reading the file, and the file's piece)
+    assert_eq!(edited.stats.ran, 2, "only the pieces reading the file run: {:?}", edited.stats);
 }
 
 /// `\inputlineno` reads the lines before its piece: lines added above it

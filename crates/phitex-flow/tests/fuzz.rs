@@ -25,7 +25,8 @@ use phitex_flow::{Options, Order, Reads};
 /// Documents whose every update may differ from a cold build whatever the
 /// edit (a no-op edit fails too), each an open finding in CORE.md ("Fuzz
 /// findings"): such a seed is reported, not counted, while it stays open.
-const NOOP_OPEN: [(&str, &str); 1] = [("trip", "F1: a second update of TRIP differs from a cold build, edit or not")];
+/// (None now: F1, which made every TRIP update differ, is fixed.)
+const NOOP_OPEN: [(&str, &str); 0] = [];
 
 /// Whether a no-op edit fails too, at 1 thread in priority order (where
 /// F1 always shows; the 8-thread schedule of the failure may hide it).
