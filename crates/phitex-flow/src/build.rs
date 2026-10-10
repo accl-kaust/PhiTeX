@@ -60,7 +60,7 @@ use crate::page::{
     push_vertical,
 };
 use crate::show::RAW;
-use crate::tfm::{Font, FontFiles};
+use crate::tfm::{Font, FontFiles, Kpse, KpseFormat};
 use crate::val::{Key, Meaning, Shown, Tok, TokPar, Val, initial};
 
 /// What a read does when the definition it finds is being remade.
@@ -462,6 +462,10 @@ pub struct Build {
     /// (the page builder's quantities, the files the run wrote), by piece
     /// id and node: the next build's predictions ([`Names::fold_value`]).
     fold_vals: FxMap<(PieceId, u32, Key), Val>,
+    /// Each piece's file (`None`: the main file) and the lines of that
+    /// file before it, as the last build laid them out
+    /// ([`Build::source_place`]).
+    places: FxMap<PieceId, (Option<Arc<str>>, u32)>,
     /// The TFM files `\font` can load.
     fonts: Arc<FontFiles>,
     pieces: Vec<Kept>,
@@ -512,6 +516,9 @@ pub struct Build {
     virt: FxMap<(PieceId, u32), PieceId>,
     /// Where `\input` and `\openin` find files, and the job's name.
     inputs: Arc<Vec<PathBuf>>,
+    /// How a file's name becomes a path, if not by the input directories,
+    /// and the program name it asks as ([`Build::set_kpse`]).
+    finder: Option<(Arc<dyn Kpse>, Arc<str>)>,
     job: Arc<str>,
     /// What the session gives before any definition: the terminal's lines
     /// (`Key::ReadStream(16)`), the interaction mode (`Key::Interaction`).
@@ -655,6 +662,8 @@ type FileCache = Mutex<FxMap<Arc<str>, Option<(Arc<str>, Arc<[u8]>)>>>;
 /// lines of the source before each piece.
 struct Given {
     dirs: Arc<Vec<PathBuf>>,
+    /// The lookup instead of `dirs`, as a program ([`Build::set_kpse`]).
+    finder: Option<(Arc<dyn Kpse>, Arc<str>)>,
     /// The files given in memory (`Build::set_file`), before the
     /// directories'.
     mem: Arc<FxMap<Arc<str>, Arc<[u8]>>>,
@@ -683,6 +692,7 @@ impl Given {
     ) -> Given {
         Given {
             dirs,
+            finder: None,
             mem,
             files: Mutex::default(),
             job,
@@ -716,6 +726,15 @@ impl Given {
         let mut g = self.files.lock().expect("files");
         if let Some(v) = g.get(name) {
             return v.clone();
+        }
+        if let Some((f, prog)) = &self.finder {
+            let v = f.find(name, KpseFormat::Tex, prog).and_then(|p| {
+                let b = f.read(&p)?;
+                let shown = if p.starts_with('/') { p } else { format!("./{}", p.trim_start_matches("./")) };
+                Some((Arc::from(shown), b))
+            });
+            g.insert(Arc::from(name), v.clone());
+            return v;
         }
         let v = self.dirs.iter().enumerate().find_map(|(k, d)| {
             let b = std::fs::read(d.join(name)).ok()?;
@@ -1297,9 +1316,11 @@ impl Build {
             next_id: 0,
             readers: FxMap::default(),
             fold_vals: FxMap::default(),
+            places: FxMap::default(),
             src: String::new(),
             starts: Vec::new(),
             inputs: Arc::new(Vec::new()),
+            finder: None,
             job: Arc::from(crate::graph::JOBNAME),
             lean: true,
             builds: 0,
@@ -1389,6 +1410,15 @@ impl Build {
     /// order (a file's name is relative to them).
     pub fn set_input_dirs(&mut self, dirs: Vec<PathBuf>) {
         self.inputs = Arc::new(dirs);
+    }
+
+    /// How a file's name becomes a path (the CLI's: TeX Live's kpathsea,
+    /// `partex-kpse`, as program `prog`: `tex`, `etex`, `pdftex`…),
+    /// instead of the input directories in order. A given of the build: a
+    /// read of `Key::File` is answered as before (the file's bytes), only
+    /// the lookup differs. Files given in memory (`set_file`) come first.
+    pub fn set_kpse(&mut self, kpse: Arc<dyn Kpse>, prog: &str) {
+        self.finder = Some((kpse, Arc::from(prog)));
     }
 
     /// The job's name (`\jobname`; `texput` until set).
@@ -1847,6 +1877,75 @@ impl Build {
         }
     }
 
+    /// Piece `k`'s material as the page builder is fed it
+    /// (`page::material`), as the last build left it.
+    pub fn material_of(&self, k: usize) -> Option<Vec<crate::item::Item>> {
+        let kept = self.pieces.get(k)?;
+        let run = kept.run.as_ref()?;
+        let paras: Option<Vec<(Arc<crate::item::Para>, Lines)>> = run
+            .paras
+            .iter()
+            .zip(&kept.lines)
+            .map(|(p, l)| Some((p.clone(), l.clone().unwrap_or_default())))
+            .collect();
+        Some(material(&paras?))
+    }
+
+    /// The node (its index in piece `k`) that made an item of the piece's
+    /// material (`page::material`, as the page builder's `Org` names it:
+    /// `item`), or, `path` naming items inside it — a line's box's item,
+    /// then an item of a box among those, and so on — the item there
+    /// (`item::Origins`, `linebreak::Line::node_of`). For SyncTeX and the
+    /// viewer, with [`Build::source_place`].
+    pub fn material_node(&self, k: usize, item: u32, path: &[usize]) -> Option<u32> {
+        let kept = self.pieces.get(k)?;
+        let run = kept.run.as_ref()?;
+        let nodes = run.para_nodes();
+        let mut i = item as usize;
+        for (j, para) in run.paras.iter().enumerate() {
+            let pn = *nodes.get(j)?;
+            if i < para.before.len() {
+                return inner_node(pn, &para.before[i], path);
+            }
+            i -= para.before.len();
+            if para.lb.is_some() {
+                let lines = kept.lines.get(j)?.as_ref()?;
+                for l in lines.iter() {
+                    let n = 1 + l.adjust.len() + usize::from(l.pen.is_some());
+                    if i < n {
+                        if i > 0 {
+                            return Some(pn);
+                        }
+                        let Some((&first, rest)) = path.split_first() else { return Some(pn) };
+                        let node = l.node_of(para, pn, first)?;
+                        return inner_node(node, l.b.list.get(first)?, rest);
+                    }
+                    i -= n;
+                }
+            }
+            if i < para.after.len() {
+                return inner_node(pn, &para.after[i], path);
+            }
+            i -= para.after.len();
+        }
+        None
+    }
+
+    /// Where node `node` of piece `k` (as the last build laid it out) is in
+    /// the source: its file (`None`: the main file) and line, the lines of
+    /// the file before the piece (what `Key::LineBase` answers) plus its
+    /// line in the piece — as `\inputlineno` counts it. A node reading a
+    /// file read in its piece is placed where the `\input` is. For the
+    /// CLI's SyncTeX and inverse search.
+    pub fn source_place(&self, k: usize, node: u32) -> Option<(Option<Arc<str>>, u32)> {
+        let kept = self.pieces.get(k)?;
+        let (file, base) = self.places.get(&kept.id)?;
+        let pos = kept.run.as_ref()?.node_pos(node as usize)?;
+        let p = pos.saturating_sub(1).min(kept.text.len());
+        let line = 1 + kept.text[..p].iter().filter(|&&c| c == '\r').count() as u32;
+        Some((file.clone(), base + line))
+    }
+
     /// A round that does not end the build: its runs are kept for the
     /// next, each with what it still has to read again.
     fn keep_round(&mut self, st: State) {
@@ -2050,6 +2149,7 @@ impl Build {
         // and what an edited piece's predecessor defined, as its prediction)
         let bases: Vec<u32> = p.iter().map(|x| x.base as u32).collect();
         let mut given = Given::new(self.inputs.clone(), self.job.clone(), self.files.clone(), bases);
+        given.finder.clone_from(&self.finder);
         given.terminal.clone_from(&self.terminal);
         given.interaction = self.interaction;
         given.interaction_option = self.interaction_option;
@@ -2485,6 +2585,19 @@ impl Build {
                 self.keep_round(st);
                 return None;
             }
+        }
+        // (each piece's file and lines before it, for `source_place`)
+        {
+            let mut file: Vec<Option<Arc<str>>> = Vec::with_capacity(st.p.len());
+            for ps in &st.p {
+                let f = match ps.entry {
+                    Entry::Start => None,
+                    Entry::File(c) => st.p[c].got.input.as_ref().map(|x| x.name.clone()),
+                    Entry::Rest(c, _) | Entry::After(c, _) => file.get(c).cloned().flatten(),
+                };
+                file.push(f);
+            }
+            self.places = st.p.iter().zip(file).map(|(ps, f)| (ps.id, (f, ps.base as u32))).collect();
         }
         // (the files read, each once, in document order, where found)
         let mut files_read: Vec<(String, Option<String>)> = Vec::new();
@@ -4907,6 +5020,19 @@ fn park(sh: &Shared, k: usize, seen: u64) {
         }
     }
     sh.waiting[k].store(false, Ordering::Release);
+}
+
+/// The node that made the item at `path` inside `it`, which node `maker`
+/// made (`it` itself if `path` is empty; a box's items by its
+/// [`crate::item::Origins`]).
+fn inner_node(maker: u32, it: &crate::item::Item, path: &[usize]) -> Option<u32> {
+    let Some((&first, rest)) = path.split_first() else { return Some(maker) };
+    let b = match it {
+        crate::item::Item::Box(b) | crate::item::Item::Append(b, _) => b,
+        _ => return Some(maker),
+    };
+    let node = b.origins.node_of(maker, first).unwrap_or(maker);
+    inner_node(node, b.list.get(first)?, rest)
 }
 
 /// The folds' values the round validated, by piece id ([`Build::fold_vals`]).

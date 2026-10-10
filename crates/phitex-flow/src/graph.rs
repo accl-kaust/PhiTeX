@@ -1677,6 +1677,9 @@ pub struct Run {
 pub struct Lean {
     /// How many nodes it had.
     len: u32,
+    /// Where each node began in the piece's text (its input position):
+    /// the source place of what it made (`Run::node_pos`).
+    pos: Vec<u32>,
     para_at: Vec<u32>,
     /// Every definition, by name then node: the name, the node, the first
     /// node it no longer reaches (its group's close + 1; `u32::MAX`: the
@@ -1721,6 +1724,7 @@ impl Run {
         defs.shrink_to_fit();
         let lean = Lean {
             len: c.nodes.len() as u32,
+            pos: (0..c.nodes.len()).map(|i| c.input_pos(i) as u32).collect(),
             para_at: c.para_at.clone(),
             defs,
             out: self.out(),
@@ -1740,6 +1744,15 @@ impl Run {
             abandoned: false,
             lean: Some(Arc::new(lean)),
             crossed: self.crossed,
+        }
+    }
+
+    /// Where node `i` began in the piece's text (its input position; a
+    /// node reading a file read in the piece: where the `\input` was).
+    pub fn node_pos(&self, i: usize) -> Option<usize> {
+        match &self.lean {
+            Some(l) => l.pos.get(i).map(|&p| p as usize),
+            None => (i < self.chain.nodes.len()).then(|| self.chain.input_pos(i)),
         }
     }
 
@@ -2258,6 +2271,14 @@ pub fn run_piece(
     let entry_changed = old.is_some_and(|(r, _)| r.chain.entry != entry);
     let mut ran = 0u64;
     let edit = old.and_then(|(_, t)| Edit::between(t, text));
+    // (the edit changed how many lines are before the text after it: a node
+    // there that read its line, `\inputlineno` in the piece's own text —
+    // the lines before the piece, `Key::LineBase`, plus its line in the
+    // piece —, is not kept)
+    let lines_moved = old.zip(edit).is_some_and(|((_, t), e)| {
+        let n = |x: &[char]| x.iter().filter(|&&c| c == '\r').count();
+        n(&t[e.start..e.old_end]) != n(&text[e.start..e.new_end])
+    });
     let oldc = old.map(|(r, _)| &r.chain);
     // (the dirty old nodes: those reading a dirty name from before the
     // piece, in order)
@@ -2354,9 +2375,13 @@ pub fn run_piece(
                 } else {
                     oc.nodes[oi - 1].out.eq_but_pos(&state)
                 };
+                let line_ok = !(lines_moved
+                    && edit.is_some_and(|e| inp_pos >= e.old_end)
+                    && n.reads.iter().any(|r| r.key == Key::LineBase));
                 if start_ok && text_ok && state_ok {
                     cand = Some(oi);
                     let reads_ok = par_ok
+                        && line_ok
                         && n.reads.iter().all(|r| {
                             reread(&chain, &state, env, &mut outside, r)
                                 .is_some_and(|now| Read::same(&now, r))

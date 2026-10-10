@@ -909,6 +909,42 @@ the fold's value at the node's position (Conflict 12, decided).
   `.aux` read back, no gap; TRIP's `tripos.tex` in one build
   (`Session::run`).
 
+## Source places and item provenance (SyncTeX, inverse search)
+
+- **A node's source place** (`Build::source_place(k, node)`): the
+  piece's file (`None`: the main file; a piece after `\input`'s file
+  piece names that file) and line: the lines of the file before the
+  piece (what `Key::LineBase` answers) plus the node's line in the piece
+  (`Run::node_pos`, kept by lean runs too). A node reading a file read
+  inside its piece is placed at the `\input`.
+- **F8 (F's: a kept node's `\inputlineno`)**: a node's line in its piece
+  is not a read; an edit that changes the number of lines before a node
+  in the same piece keeps it unless the node read its line
+  (`Key::LineBase`): then it runs again (`run_piece`'s `line_ok`).
+  `tests/fuzz/fixed/f8-kept-node-line-in-piece.repro`.
+- **Which node made an item** (`item::Origins`): a side table per list,
+  not per item — runs of item indices with the distance back from the
+  node that made the list (the paragraph's `\par` node: `Para::origins`;
+  a box's closing node: `BoxNode::origins`; a line of a paragraph inside
+  a box: its box's). Not part of a list's value (equal lists are equal
+  whoever made them). A distance, so a paragraph whose nodes were all
+  kept where an edit moved them still says it; a node reusing its old
+  paragraph does so only with equal origins. Lines of the main vertical
+  list are line breaking's, memoised by equality: a `Line` says which
+  item of the paragraph's list each of its box's items came from
+  (`Line::from`, runs; a hyphenated word's items, a discretionary's and
+  the skips at the item they stand at), and the paragraph's origins give
+  the node (`Line::node_of`). `Build::material_node(k, item, path)`:
+  from an item of piece k's material (the page builder's `Org`), down
+  `path` (a line's box's item, a box's item…), to its node;
+  `Build::material_of(k)`. Not yet: alignments, math lists, inserts and
+  the output routine's lists carry no origins (their items lead to the
+  node that made the whole); TeXXeT's reversed lines are approximate.
+- **Files by kpathsea** (`tfm::Kpse`, X's shape; `Build::set_kpse(kpse,
+  prog)`): a given of the build — a name becomes a path by kpathsea's
+  lookup (format `tex`, the program's name) instead of the input
+  directories; reads stay `Key::File`.
+
 ## `\input` (decided)
 
 - A file is a value, `Key::File(name)`: the file's bytes are a read, so a
@@ -1614,8 +1650,9 @@ in one piece, every line reading `\count0`: 5629 -> 752 commands of
 433). Still 0.5–0.8 s cold per document: the per-command cost, not
 reruns.
 
-**F8 (open, A). An edit of TRIP that never ends.** Found once F1 let
-TRIP's updates be checked: `tests/fuzz/hang/f8-trip-edit-hangs.repro`
+**T1 (open, A; was called F8 before F's F8). An edit of TRIP that never
+ends.** Found once F1 let TRIP's updates be checked:
+`tests/fuzz/hang/t1-trip-edit-hangs.repro`
 (TRIP seed 1 step 3, `--fuzz 1 3 1 --doc trip`): a character of
 `\hbox to 23pt{} % output now` replaced (`23st`). The update runs a
 piece again and again (a worker in `run_piece`, the round waiting), at

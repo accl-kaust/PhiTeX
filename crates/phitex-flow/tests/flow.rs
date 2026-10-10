@@ -176,6 +176,48 @@ fn a_fire_between_a_pieces_nodes_reruns_only_the_nodes_after_it() {
     }
 }
 
+/// Item provenance: each glyph of a line, and of a box in it, leads to
+/// the node that made it and that node's source line (SyncTeX's tags).
+#[test]
+fn a_glyph_leads_to_its_source_line() {
+    use phitex_flow::item::Item;
+    let src = "\\catcode`\\{=1 \\catcode`\\}=2 \\font\\x=cmr10 \\x \\hsize=300pt \\vsize=200pt \\parfillskip=0pt plus 1fil\nAlpha\nBeta \\hbox{Gamma}\nDelta\\par\n\\end\n";
+    for lean in [true, false] {
+        let mut b = Build::new(font());
+        b.set_lean(lean);
+        let out = b.update(src, opts(1, Reads::Suspend, Order::Priority));
+        assert!(out.errors.is_empty(), "{:?}", out.errors);
+        let mat = b.material_of(0).expect("piece 0's material");
+        let (at, line) = mat
+            .iter()
+            .enumerate()
+            .find_map(|(i, it)| match it {
+                Item::Append(l, _) => Some((i, l.clone())),
+                _ => None,
+            })
+            .expect("a line");
+        let mut seen = Vec::new();
+        for (j, it) in line.list.iter().enumerate() {
+            match it {
+                Item::Char(_, c) if c.is_ascii_uppercase() => {
+                    let n = b.material_node(0, at as u32, &[j]).expect("a node");
+                    seen.push((char::from(*c), b.source_place(0, n).expect("a place").1));
+                }
+                Item::Box(bx) => {
+                    let n = b.material_node(0, at as u32, &[j, 0]).expect("a node in the box");
+                    let c = match &bx.list[0] {
+                        Item::Char(_, c) => char::from(*c),
+                        _ => '?',
+                    };
+                    seen.push((c, b.source_place(0, n).expect("a place").1));
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(seen, [('A', 2), ('B', 3), ('G', 3), ('D', 4)], "lean {lean}");
+    }
+}
+
 #[test]
 fn a_changed_definition_reruns_its_readers_only() {
     let a = doc(30);
