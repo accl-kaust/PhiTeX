@@ -1230,11 +1230,14 @@ pub fn assemble(pages: &[Page], bodies: &mut [Arc<PageBody>], numbers: &Numbers,
             let Some(name) = body.fonts.iter().find(|u| u.num == k).map(|u| u.font.name.clone()) else { return g };
             f.fonts.iter().find(|(_, u)| u.font.name == name && u.num > 0).map_or(g, |(&n, _)| n)
         };
-        let ff_holds = body.ff.iter().all(|&(k, g)| truth(&f, k, g) == g);
+        // (and the fonts' numbers: the job's, every font loaded by then)
+        let numbered = body.fonts.iter().all(|u| numbers.get(&u.font.key) == Some(&u.num));
+        let ff_holds = numbered && body.ff.iter().all(|&(k, g)| truth(&f, k, g) == g);
         if body.fixed != fixed || !ff_holds {
-            let ff: Vec<(u32, u32)> = body.ff.iter().map(|&(k, g)| (k, truth(&f, k, g))).collect();
+            let guess = if numbered { body.ff.clone() } else { super::content::guess_ff(p, numbers, &[]) };
+            let ff: Vec<(u32, u32)> = guess.iter().map(|&(k, g)| (k, truth(&f, k, g))).collect();
             let ff_of = |k: u32| -> Option<u32> { ff.iter().find(|x| x.0 == k).map(|x| x.1).filter(|&o| o != k) };
-            *body = Arc::new(super::content::page_body(p, &ship, numbers, &ff_of, fixed));
+            *body = Arc::new(super::content::page_body(p, &ship, numbers, &[], &ff_of, fixed));
             again += 1;
         }
         f.ship(p, &ship, body);

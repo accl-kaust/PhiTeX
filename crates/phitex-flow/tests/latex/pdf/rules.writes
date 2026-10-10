@@ -1,0 +1,8 @@
+=== rules.aux 501
+\relax 
+\@writefile{toc}{\contentsline {section}{\numberline {1}Rules and captions}{1}{}\protected@file@percent }
+\@writefile{lot}{\contentsline {table}{\numberline {1}{\ignorespaces A table with booktabs rules.}}{1}{}\protected@file@percent }
+\providecommand*\caption@xref[2]{\@setref\relax\@undefined{#1}}
+\newlabel{tab:one}{{1}{1}{}{table.1}{}}
+\@writefile{lof}{\contentsline {figure}{\numberline {1}{\ignorespaces A caption outside a float.}}{1}{}\protected@file@percent }
+\gdef \@abspage@last{1}
