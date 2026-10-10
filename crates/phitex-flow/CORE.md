@@ -2298,6 +2298,30 @@ hold, nodes and outcome; parks; idle waits; picks with the pieces ready;
 the settled runs that change the sequence; every wait for the scheduler's
 lock); `perf-in/sched.py FILE` reports them per round.
 
+**Hardware first.** Measure pinned to physical cores
+(`perf-in/hw.sh`: `sched_setaffinity`, one hardware thread per core or
+two), with N independent `-j 1` processes side by side as the control
+(job 7919, harrier): eight big2 processes read 772 → 790 ms each, so the
+hardware alone costs nothing up to eight cores; unpinned on a busy node
+with siblings (job 7914) the same build's reading looked 3.7x dearer. A
+thread count above the physical cores buys nothing today: big2 at `-j 8`
+on 4 cores with their siblings takes 183 ms (round 1), on 8 cores 194 ms.
+The CLI's default thread count should be the physical cores, not the
+logical CPUs.
+
+**The first wall: the scheduler's lock (big2).** big2 (2401 pieces of 83
+commands), pinned, round 1: 758.6 / 429 / 227 / 194 ms at `-j` 1 / 2 / 4
+/ 8; the whole cold build 930-966 / 606 / 378 / 351 ms, the DVI the same
+at every `-j`. Reading summed over the threads grows only 649 → 839 ms;
+what grows is the one `Mutex<State>`: installs hold it 51.6 / 58.9 /
+60.7 / 115.7 ms in all (21 → 48 µs an install as its lines move between
+cores), at `-j 8` 60% of the round's wall, and threads wait for it 31.8%
+of their time (15% before an install, 16% taking it back after a task).
+Of the time held, the edges (`readers`, one insert per distinct name a
+run read: 382k reads, 2401 installs) are 87%: 45.9 of 52.7 ms at `-j 1`,
+91.6 of 109 ms at `-j 8` (job 7925); validation again 0.2, exports 3.2,
+marks 1.8, entries 1.6 ms at `-j 1`.
+
 **`latex.ltx` is a true chain.** 31.2 s at `-j 1`, 31.1 s at `-j 8`
 (job 7914). Of its 19-20 rounds one holds 27.3 s, and in it one piece
 holds 96.2% of the commands (2.9M): expl3-code.tex's Unicode-data block
