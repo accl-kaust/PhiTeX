@@ -44,6 +44,11 @@ if [ -n "${CLI:-}" ]; then
     if cmp -s "$w/$n.pdf" "$oracle/docs/$n.pdf"; then echo "cli $n: the PDF is xelatex's" >> "$r/summary.txt"; else echo "cli $n: the PDF differs ($(cmp "$w/$n.pdf" "$oracle/docs/$n.pdf" 2>&1 | head -1))" >> "$r/summary.txt"; fi
   done
 fi
+# (CLI_TESTS=1: phitex-cli's own tests)
+if [ -n "${CLI_TESTS:-}" ]; then
+  cargo test --release -p phitex-cli --test cli > "$r/cli-tests.txt" 2>&1; echo "phitex-cli --test cli exit $?" >> "$r/summary.txt"
+  grep -E "^test result|FAILED|panicked" "$r/cli-tests.txt" | head -20 >> "$r/summary.txt"
+fi
 if [ -n "${REGRESS:-1}" ]; then
 cargo test --release -p phitex-flow --lib --test wall --test shapes --test dvi --test plain --test pdf --test etex --test output > "$r/regress.txt" 2>&1; echo "regress exit $?" >> "$r/summary.txt"
 grep -E "^test result|FAILED|panicked" "$r/regress.txt" | head -40 >> "$r/summary.txt"
