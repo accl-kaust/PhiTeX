@@ -38,6 +38,7 @@ mod json;
 mod modern;
 mod outline;
 mod session;
+mod synctex;
 mod tex;
 mod tools;
 mod view;
