@@ -1,0 +1,14 @@
+ini /usr/share/texmf-dist/tex/latex/tex-ini-files/pdflatex.ini
+input /usr/share/texmf-dist/tex/latex/tex-ini-files
+input /etc/texmf/tex/generic/tex-ini-files
+input /usr/share/texmf-dist/tex/latex/base
+input /usr/share/texmf-dist/tex/latex/amsmath
+input /usr/share/texmf-dist/tex/latex/amsfonts
+input /usr/share/texmf-dist/tex/latex/l3backend
+font /usr/share/texmf-dist/fonts/tfm/public/cm
+font /usr/share/texmf-dist/fonts/tfm/public/amsfonts/cmextra
+font /usr/share/texmf-dist/fonts/tfm/public/amsfonts/symbols
+font /usr/share/texmf-dist/fonts/tfm/public/amsfonts/euler
+input /usr/share/texmf-dist/fonts/type1/public/amsfonts/cm
+input /usr/share/texmf-dist/fonts/type1/public/amsfonts/euler
+input /usr/share/texmf-dist/fonts/type1/public/amsfonts/symbols

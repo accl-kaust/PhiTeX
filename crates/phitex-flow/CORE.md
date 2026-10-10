@@ -2433,6 +2433,24 @@ plain's `\output` and TeX's default) are byte-identical with
 `pdftex -ini -etex` at six schedules (1 thread, 8, 8 speculating, three
 random orders).
 
+**State (Q2).** `\pdfglyphtounicode` is a global entry
+(`Key::GlyphUnicode(name)`: a code or a string of hexadecimal digits;
+the empty name marks that the table exists), kept by the format as
+pdfTeX dumps its table; with `\pdfgentounicode` positive at the end the
+fold writes each font's ToUnicode CMap before its dictionary
+(`pdf/font/unicode.rs`, tounicode.c), reading the entries reaching the
+end of the job. LaTeX's `latex.ltx` loads `glyphtounicode.tex` and sets
+`\pdfgentounicode=1`, so every pdflatex document has the maps.
+`tests/pdflatex_docs.rs`: the ten documents of `tests/latex_docs.rs`
+on the saved format of `pdflatex.ini`'s job are byte-identical with
+`pdflatex` (first run, `SOURCE_DATE_EPOCH=0 FORCE_SOURCE_DATE=1`,
+batch mode; the `.aux` read-back gap of "LaTeX documents" stands) at
+five schedules: the PDF file and the files written. Found on the way: a
+page made where it is shipped numbers the fonts loaded after the pages
+before it by its own guess (as the DVI writer does, `extra`); the fold
+now checks every font's number against the job's and makes the page
+again when one differs (as the DVI join does).
+
 **pdfTeX work split** (modules another agent can take in parallel; each
 is a pure function or a fold step, no state shared with the others):
 
