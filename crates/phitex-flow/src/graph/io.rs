@@ -177,7 +177,7 @@ impl Exec<'_> {
 
     /// tex.web 526: a file name (characters up to a space, which goes, or
     /// anything else, which stays; web2c's `"` quotes spaces).
-    fn scan_name(&mut self) -> String {
+    pub(super) fn scan_name(&mut self) -> String {
         let mut name = String::new();
         let mut quoted = false;
         let mut first = true;
@@ -209,7 +209,7 @@ impl Exec<'_> {
     /// (`name.tex` first unless the name ends so, then the name as it is):
     /// the name it was found by and its bytes. Each try is a read of
     /// `Key::File`.
-    fn find_file(&mut self, name: &str) -> Option<(String, Arc<[u8]>)> {
+    pub(super) fn find_file(&mut self, name: &str) -> Option<(String, Arc<[u8]>)> {
         let mut tries = Vec::with_capacity(2);
         if !std::path::Path::new(name).extension().is_some_and(|e| e.eq_ignore_ascii_case("tex")) {
             tries.push(format!("{name}.tex"));
@@ -255,7 +255,9 @@ impl Exec<'_> {
     pub(super) fn end_input(&mut self) {
         match self.st.texts.last_mut() {
             Some(x) if x.kind != TextKind::Read => x.endinput = true,
-            _ => self.err("\\endinput outside an \\input file is not supported".into()),
+            // (a file piece's, or the main file's: the piece ends with the
+            // line)
+            _ => self.st.endinput = true,
         }
     }
 

@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
 
+use phitex_flow::build::MAIN_MEMORY;
 use phitex_flow::{Build, Font, Options, Order, Reads};
 
 /// What every program begins with (`tests/core.rs`' prelude).
@@ -33,11 +34,11 @@ fn opts() -> Options {
 /// The schedules each program runs with (`tests/dvi.rs`'s, in extended
 /// mode).
 const RUNS: [Options; 5] = [
-    Options { threads: 1, reads: Reads::Suspend, order: Order::Priority, dump: false, etex: true },
-    Options { threads: 8, reads: Reads::Suspend, order: Order::Priority, dump: false, etex: true },
-    Options { threads: 8, reads: Reads::Speculate, order: Order::Priority, dump: false, etex: true },
-    Options { threads: 8, reads: Reads::Suspend, order: Order::Random(1), dump: false, etex: true },
-    Options { threads: 8, reads: Reads::Speculate, order: Order::Random(7), dump: false, etex: true },
+    Options { threads: 1, reads: Reads::Suspend, order: Order::Priority, dump: false, etex: true, main_memory: MAIN_MEMORY },
+    Options { threads: 8, reads: Reads::Suspend, order: Order::Priority, dump: false, etex: true, main_memory: MAIN_MEMORY },
+    Options { threads: 8, reads: Reads::Speculate, order: Order::Priority, dump: false, etex: true, main_memory: MAIN_MEMORY },
+    Options { threads: 8, reads: Reads::Suspend, order: Order::Random(1), dump: false, etex: true, main_memory: MAIN_MEMORY },
+    Options { threads: 8, reads: Reads::Speculate, order: Order::Random(7), dump: false, etex: true, main_memory: MAIN_MEMORY },
 ];
 
 /// The files programs read (`\input`, `\openin`): `inc-*.tex` and `*.dat`

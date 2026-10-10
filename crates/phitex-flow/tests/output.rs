@@ -23,7 +23,7 @@ use phitex_flow::graph::output::{OutputEnd, OutputReads, fire_marks, output_end,
 use phitex_flow::graph::{Env, Run, Src, cut, run_piece};
 use phitex_flow::item::{BoxNode, Item, ShipParams};
 use phitex_flow::linebreak::break_lines;
-use phitex_flow::page::{Lines, Page, Scan, material};
+use phitex_flow::page::{Fired, FoldEnv, Lines, Page, Routine, Scan, material};
 use phitex_flow::tfm::{FontFiles, default_dirs, null_font};
 use phitex_flow::val::{Key, Tok, TokPar, Val, initial};
 
@@ -121,13 +121,30 @@ struct Doc {
     pages: Vec<Page>,
 }
 
+/// The page fold's reads in [`run_doc`]: the names as the pieces fed so
+/// far left them, but `\output` empty (the default output makes the page
+/// the tests run the routine on themselves).
+struct DocFold<'a>(&'a Names);
+
+impl FoldEnv for DocFold<'_> {
+    fn read(&mut self, key: &Key) -> Val {
+        if *key == Key::TokPar(TokPar::Output) {
+            return Val::Toks(Arc::new(Vec::new()));
+        }
+        self.0.defs.get(key).cloned().unwrap_or_else(|| initial(key, &null_font(), true))
+    }
+    fn fire(&mut self, _defs: Vec<(Key, Val)>, _routine: Option<Routine>) -> Fired {
+        Fired::default()
+    }
+}
+
 fn run_doc(src: &str) -> Doc {
     let mut names = Names { defs: HashMap::new(), fonts: FontFiles::new(Vec::new(), default_dirs()) };
     let mut scan = Scan::default();
     let mut fonts = Vec::new();
     let pieces = cut(src);
     for (k, text) in pieces.iter().enumerate() {
-        let run = run_piece(text, &mut names, None, &[]);
+        let run = run_piece(text, &mut names, None, &[], None);
         assert!(run.errors.is_empty(), "errors in piece {k}: {:?}", run.errors);
         for (key, val) in &run.exports {
             names.defs.insert(key.clone(), val.clone());
@@ -138,11 +155,11 @@ fn run_doc(src: &str) -> Doc {
             .map(|p| (p.clone(), Arc::new(if p.lb.is_some() { break_lines(p) } else { Vec::new() })))
             .collect();
         for (j, it) in material(&paras).into_iter().enumerate() {
-            scan.feed(it, (u32::try_from(k).unwrap(), u32::try_from(j).unwrap()));
+            scan.feed(it, (u32::try_from(k).unwrap(), u32::try_from(j).unwrap()), &mut DocFold(&names));
         }
         fonts.push(run.fonts.clone());
     }
-    scan.finish((u32::try_from(pieces.len()).unwrap(), 0));
+    scan.finish((u32::try_from(pieces.len()).unwrap(), 0), &mut DocFold(&names));
     let (pages, _) = scan.take_pages();
     Doc { names, fonts, pages }
 }

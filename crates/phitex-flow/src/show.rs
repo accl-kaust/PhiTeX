@@ -675,6 +675,8 @@ pub enum Place {
     Paragraph,
     /// A box made by a command (`detected at line n`).
     Here,
+    /// A box made in an output routine (tex.web 663).
+    Output,
     /// An alignment's preamble (`in alignment at lines a--b`, tex.web 663,
     /// 675: from the alignment's first line to the current one).
     Alignment,
@@ -713,12 +715,16 @@ pub fn report(r: Report, b: &BoxNode, place: Place, cx: &Ctx) -> String {
         Place::Here => {
             let _ = write!(o, ") detected at line {LINE}L{LINE}");
         }
+        Place::Output => o.push_str(") has occurred while \\output is active"),
         Place::Alignment => {
             let _ = write!(o, ") in alignment at lines {LINE}A{LINE}");
         }
     }
     if b.vertical {
-        o.push(LN);
+        // (§675: no line ends after "while \output is active")
+        if !matches!(place, Place::Output) {
+            o.push(LN);
+        }
     } else {
         o.push(LN);
         let mut f: Arc<str> = Arc::from("nullfont");

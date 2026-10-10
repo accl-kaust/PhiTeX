@@ -31,7 +31,10 @@
 use std::sync::Arc;
 
 use super::material::box_start;
-use super::{Chain, Env, Exec, Group, GroupKind, Kind, Mode, Outside, Pending, RState, Run, Scratch, Src, outside_read};
+use super::{
+    Chain, Check, Env, Exec, Group, GroupKind, Kind, Mode, Outside, Pending, RState, Run, Scratch, Src, capacity_error,
+    outside_read, pending_words, words_of,
+};
 use crate::hash::FxSet;
 use crate::item::{BoxNode, Item};
 use crate::page::{IGNORE_DEPTH, Page, push_vertical};
@@ -192,10 +195,6 @@ pub fn output_end(run: &Run) -> Option<(&OutputEnd, &[Item])> {
     run.chain.nodes.iter().find_map(|n| n.output().map(|o| (o, o.leftover(n))))
 }
 
-/// Nodes a routine's run may make: past it the run stops, with an error
-/// (a routine that never ends its input).
-const MAX_NODES: usize = 1 << 22;
-
 /// An output routine's run, cold: nodes from `entry` until its input ends,
 /// as [`super::run_piece`] runs a piece's (`env` answers the reads of
 /// names from before the routine's place). The page fold (agent A's
@@ -209,20 +208,28 @@ pub fn run_routine(entry: &RState, env: &mut dyn Env) -> Run {
     let mut scratch = Scratch::default();
     let mut state = entry.clone();
     let mut ran = 0u64;
+    let mut words = 0u64;
     loop {
         ran += 1;
         let mut x = Exec::new(text, &chain, &state, env, &mut outside, &mut scratch);
         x.command();
+        if let Some(Check::Exceeded(size)) = x.stop.take() {
+            x.overflow(capacity_error(size));
+            x.kind = Kind::End;
+        }
         let n = chain.with_group(x.finish());
         let end = n.kind == Kind::End;
+        words += words_of(&n);
+        let verdict = env.check(ran, words.max(pending_words(&n.out)));
         state = n.out.clone();
         chain.push_arc(n);
         if end {
             break;
         }
-        if chain.nodes.len() >= MAX_NODES {
+        // (a routine that never ends its input: TeX's memory runs out)
+        if let Check::Exceeded(size) = verdict {
             let mut x = Exec::new(text, &chain, &state, env, &mut outside, &mut scratch);
-            x.err("The output routine did not end".into());
+            x.overflow(capacity_error(size));
             x.kind = Kind::End;
             let n = chain.with_group(x.finish());
             chain.push_arc(n);
@@ -260,7 +267,16 @@ pub fn run_routine(entry: &RState, env: &mut dyn Env) -> Run {
         })
         .collect();
     fonts.sort_by_key(|x| x.0);
-    Run { chain, reads, exports, paras, errors, ran, fonts: fonts.into_iter().map(|(_, f)| f).collect() }
+    Run {
+        chain,
+        reads,
+        exports,
+        paras,
+        errors,
+        ran,
+        fonts: fonts.into_iter().map(|(_, f)| f).collect(),
+        abandoned: false,
+    }
 }
 
 impl Exec<'_> {

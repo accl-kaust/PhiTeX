@@ -26,7 +26,7 @@ use crate::item::{BoxNode, Interline, Item, PageCall, Para, param_glue};
 use crate::linebreak;
 use crate::mlist::{self, Delim, Field, Kind as NK, Limits, MItem, MathEnv, Noad, Which};
 use crate::pack::{self, Params, Spec, hpack};
-use crate::show::{Place, report};
+use crate::show::report;
 use crate::tfm::Font;
 use crate::val::{DimenPar, Glue, GluePar, IntPar, Key, Mat, MathP, Meaning, Prim, Tok, TokPar, Val};
 
@@ -973,7 +973,7 @@ impl Exec<'_> {
         let packed = pack::vpack(list, be.g.spec, MAX_DIMEN, &params);
         if let Some(r) = packed.report {
             let cx = self.show_ctx(std::slice::from_ref(&Item::Box(Arc::new(packed.b.clone()))));
-            let s = report(r, &packed.b, Place::Here, &cx);
+            let s = report(r, &packed.b, self.box_place(), &cx);
             self.log_raw(&s);
         }
         let mut n = Noad::new(NK::Vcenter);
@@ -1352,7 +1352,7 @@ impl Exec<'_> {
         let packed = hpack(list, Spec::Exactly(x), params, None);
         if let Some(r) = packed.report {
             let cx = self.show_ctx(std::slice::from_ref(&Item::Box(Arc::new(packed.b.clone()))));
-            let s = report(r, &packed.b, Place::Here, &cx);
+            let s = report(r, &packed.b, self.box_place(), &cx);
             self.log_raw(&s);
         }
         packed.b

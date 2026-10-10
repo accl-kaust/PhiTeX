@@ -726,6 +726,28 @@ The handoff for the page fold (agent A's sequence):
    headline against `tex -ini` (the DVI file, byte for byte), the two
    errors against TeX's, and what a routine reads and leaves.
 
+### The fold side (done: `page.rs`, `build.rs`)
+
+One mechanism: at a fire with a routine the fold (`Scan::fire_up`) builds
+the page box, the marks of every class (`output::fire_marks`) and
+`OutputReads`, and hands them with `\output`'s tokens to the build
+(`page::Routine`); `BuildFold::fire` makes the entry with
+`output::output_entry`, runs it with `output::run_routine` (memoised by
+the page, the reads, the tokens and what the routine read), takes its
+pages and leftover from its `Close` node's material and enters its
+exports at the firing place `(k, i)`, with the fold's own definitions
+(the insertion boxes, §1018–1022). At every fire, the default output's
+included, the fold defines `\outputpenalty` (§1013) and, once there are
+marks, `Key::Mark(0..=2, class)`; the default output defines
+`\deadcycles` 0 once the fold has fired a routine.
+
+A definition at `(k, i)` reaches piece `k`'s nodes after `i`, those that
+would otherwise read one of the piece's own earlier definitions included
+(`Env::between`), and the pieces after `k`: piece `k`'s export of a name
+gives way to a definition between its nodes made after its own last one
+(`export_of`). A node reading the name in piece `k` after `i` is marked
+when the definition changes.
+
 **The page scan's incremental resume rule.** Routine runs are elements of
 the material sequence, like pieces. The resume point is the last page
 started before the first changed element (piece or routine run). When a
@@ -755,6 +777,18 @@ positions after it, and its material is consumed after it.
   at the end of that line).
 - Line numbers: `(file, line)` is a field of the position, read by
   `\inputlineno` and error contexts, never in a version.
+- Two paths (done). An `\input` that is a command of its own at a piece's
+  top level (vertical mode, no group, box or paragraph open, no text
+  rewritten) ends its node's run and its file's pieces join the sequence
+  (`Build::layout`, entry edges, `\endinput` dropping the later pieces):
+  they run in parallel like the main file's. Anywhere else (inside a
+  group, a box, a paragraph, a macro's expansion, another `\input` read
+  in the piece) the file is read in the piece as a text on the
+  `\scantokens` stack (`TextKind::File`, `Exec::start_input`). Files are
+  `Key::File(name)` = `Val::Bytes` answered by the build (`Given`: the
+  files given in memory with `Build::set_file`, then the input
+  directories); `Key::LineBase` is the lines of its own file before a
+  piece of the sequence.
 
 ## e-TeX (extended mode)
 
@@ -954,10 +988,20 @@ Now 4.65 GB at `-j 1` and 4.69 GB at `-j 8` (1.5 KB a node).
    count reads `%` as a comment, stays at depth 1 to the end of the file,
    and `latex.ltx` is one piece (94 blank lines). Repro: those three
    lines, then two paragraphs with a blank line between: one piece.
-3. *`\input`'ed files run inside the calling piece* (the single-piece
-   emulation above): expl3-code.tex's 36k lines, the font definitions and
-   the patterns are read by the one piece, so the build is sequential
-   (3 of 8 threads worked, one did 100%).
+3. *`\input`'ed files run inside the calling piece* where `\input` is
+   not a command of its own at a piece's top level: in `latex.ltx` every
+   `\input` is inside a macro or a group (`\@input`, `\InputIfFileExists`,
+   expl3.ltx's), so expl3-code.tex's 36k lines, the font definitions and
+   the patterns are read by the one piece, and the build is sequential
+   (one thread did 100%).
+4. *The main memory counts what was ever defined.* `graph::words_of`
+   sums every node's definitions (a macro's body, a box, a token list)
+   over the run, kept or not; TeX's `mem` holds only what is live (a
+   macro defined again frees the old body). LaTeX's format passes 5M
+   words this way (`tests/latex.rs` runs with `main_memory` 2^32). Repro:
+   `\count1=0 \def\l{\def\a{<1000 x>}\advance\count1 1 \ifnum\count1<10000
+   \expandafter\l\fi}\l \message{\the\count1}\end`: TeX 10000, the graph
+   "TeX capacity exceeded, sorry [main memory size=5000000]".
 
 ## The inventory
 

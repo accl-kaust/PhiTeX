@@ -67,7 +67,7 @@ pub struct Interline {
 
 /// What `ship_out` reads (tex.web 638–641, 617): `\count0`–`\count9`,
 /// `\hoffset`, `\voffset`, `\mag` and the date (for the file's comment).
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ShipParams {
     pub counts: [i32; 10],
     pub hoffset: i32,
@@ -79,15 +79,15 @@ pub struct ShipParams {
 
 /// A point where TeX calls the page builder (tex.web 994), with what it
 /// reads there: the page's specifications (tex.web 987: frozen when the
-/// page gets its first box), `\topskip`, and what shipping a page reads;
-/// `\hsize` for `\end`'s box (tex.web 1054).
+/// page gets its first box), `\topskip`; `\hsize` for `\end`'s box
+/// (tex.web 1054). What shipping a page reads the page builder reads
+/// where it fires.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PageCall {
     pub vsize: i32,
     pub maxdepth: i32,
     pub topskip: Arc<Glue>,
     pub hsize: i32,
-    pub ship: Arc<ShipParams>,
 }
 
 /// An explicit `\shipout`: the box and what shipping reads.
@@ -264,11 +264,11 @@ impl Item {
                 | Item::Rule { .. }
                 | Item::Mark(_)
                 | Item::Marks(..)
+                | Item::Ins(_)
                 | Item::Lig(_)
                 | Item::Disc(_)
                 | Item::Lang { .. }
                 | Item::Whatsit(_)
-                | Item::Ins(_)
                 | Item::Adjust(_)
         )
     }

@@ -22,6 +22,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
 
+use phitex_flow::build::MAIN_MEMORY;
 use phitex_flow::{Build, Font, Options, Order, Reads};
 
 fn font() -> Arc<Font> {
@@ -173,20 +174,20 @@ fn first_difference(a: &[u8], b: &[u8]) -> usize {
 
 /// The schedules each document runs with.
 const RUNS: [Options; 5] = [
-    Options { threads: 1, reads: Reads::Suspend, order: Order::Priority, dump: false, etex: false },
-    Options { threads: 8, reads: Reads::Suspend, order: Order::Priority, dump: false, etex: false },
-    Options { threads: 8, reads: Reads::Speculate, order: Order::Priority, dump: false, etex: false },
-    Options { threads: 8, reads: Reads::Suspend, order: Order::Random(1), dump: false, etex: false },
-    Options { threads: 8, reads: Reads::Speculate, order: Order::Random(7), dump: false, etex: false },
+    Options { threads: 1, reads: Reads::Suspend, order: Order::Priority, dump: false, etex: false, main_memory: MAIN_MEMORY },
+    Options { threads: 8, reads: Reads::Suspend, order: Order::Priority, dump: false, etex: false, main_memory: MAIN_MEMORY },
+    Options { threads: 8, reads: Reads::Speculate, order: Order::Priority, dump: false, etex: false, main_memory: MAIN_MEMORY },
+    Options { threads: 8, reads: Reads::Suspend, order: Order::Random(1), dump: false, etex: false, main_memory: MAIN_MEMORY },
+    Options { threads: 8, reads: Reads::Speculate, order: Order::Random(7), dump: false, etex: false, main_memory: MAIN_MEMORY },
 ];
 
 /// The same, in e-TeX's extended mode.
 const RUNS_ETEX: [Options; 5] = [
-    Options { threads: 1, reads: Reads::Suspend, order: Order::Priority, dump: false, etex: true },
-    Options { threads: 8, reads: Reads::Suspend, order: Order::Priority, dump: false, etex: true },
-    Options { threads: 8, reads: Reads::Speculate, order: Order::Priority, dump: false, etex: true },
-    Options { threads: 8, reads: Reads::Suspend, order: Order::Random(1), dump: false, etex: true },
-    Options { threads: 8, reads: Reads::Speculate, order: Order::Random(7), dump: false, etex: true },
+    Options { threads: 1, reads: Reads::Suspend, order: Order::Priority, dump: false, etex: true, main_memory: MAIN_MEMORY },
+    Options { threads: 8, reads: Reads::Suspend, order: Order::Priority, dump: false, etex: true, main_memory: MAIN_MEMORY },
+    Options { threads: 8, reads: Reads::Speculate, order: Order::Priority, dump: false, etex: true, main_memory: MAIN_MEMORY },
+    Options { threads: 8, reads: Reads::Suspend, order: Order::Random(1), dump: false, etex: true, main_memory: MAIN_MEMORY },
+    Options { threads: 8, reads: Reads::Speculate, order: Order::Random(7), dump: false, etex: true, main_memory: MAIN_MEMORY },
 ];
 
 fn check(name: &str) {
@@ -632,5 +633,87 @@ fn edits_shift_the_pages() {
                 e.stats.wall, e.stats.pages_shipped, e.stats.bodies_again
             );
         }
+    }
+}
+
+// Output routines (tex.web 1012–1028) as nodes where the page builder
+// fires: a routine of its own, marks in the headline, insertions held over
+// and split.
+documents!(outroutine, outmarks, outinserts);
+
+// (an output routine's definitions reach the nodes after the place it
+// fired, in the same piece: `\pageno`, a macro, a local `\count1` gone;
+// `\outputpenalty` at every fire of the default output)
+documents!(outsame, outpen);
+
+/// plain.tex's own `\output` (`\plainoutput`: the headline with marks, the
+/// page body with footnotes, the footline with `\folio`,
+/// `\advancepageno`), in every schedule.
+#[test]
+fn plainout() {
+    let src = std::fs::read_to_string(dir().join("plainout.tex")).unwrap();
+    check_src("plainout", &src, &RUNS);
+}
+
+/// Edits that move page breaks under an output routine give what a cold
+/// build gives (DVI and log), at 1 and 8 threads: a sentence added on the
+/// first page, a footnote made longer, a mark added.
+#[test]
+fn edits_under_an_output_routine() {
+    let a = std::fs::read_to_string(dir().join("plainout.tex")).unwrap();
+    // (each inserted after the first occurrence of its anchor)
+    let edits: [(&str, &str); 3] = [
+        ("{\\bf Part 1.} ", "An added sentence that moves every page break after it by a line or two of text. "),
+        ("\\footnote*{", "A footnote made longer by several words, enough to take a line more at the foot. "),
+        ("{\\bf Part 2.} ", "\\mark{Interlude}"),
+    ];
+    for threads in [1, 8] {
+        let o = Options { threads, ..Options::default() };
+        let mut b = Build::new(font());
+        let first = b.update(&a, o);
+        assert!(first.errors.is_empty(), "{:?}", first.errors);
+        let mut text = a.clone();
+        for &(anchor, ins) in &edits {
+            let at = text.find(anchor).expect("the anchor") + anchor.len();
+            text.insert_str(at, ins);
+            let e = b.update(&text, o);
+            let cold = Build::new(font()).update(&text, o);
+            assert!(e.errors.is_empty() && cold.errors.is_empty(), "{:?} {:?}", e.errors, cold.errors);
+            assert!(e.log == cold.log, "{ins:?} at {threads} threads: another log");
+            assert!(e.dvi == cold.dvi, "{ins:?} at {threads} threads: another DVI");
+            eprintln!("{threads} threads: edit {:?}, {} routines run, {} kept", e.stats.wall, e.stats.routines, e.stats.routines_kept);
+        }
+    }
+}
+
+/// A piece that loops for ever on the prediction that `\count22` is 0 (an
+/// earlier piece makes it -1): its run is abandoned when the definition
+/// is installed, or given up and run again waiting for the earlier piece;
+/// TeX's result at every schedule, in many random orders.
+#[test]
+fn specloop() {
+    check("specloop");
+    let src = std::fs::read_to_string(dir().join("specloop.tex")).unwrap();
+    let want = std::fs::read(dir().join("specloop.dvi")).unwrap();
+    for seed in 0..24u64 {
+        for (threads, reads) in [(1, Reads::Speculate), (8, Reads::Speculate), (1, Reads::Suspend), (8, Reads::Suspend)] {
+            let o = Options { threads, reads, order: Order::Random(seed), dump: false, etex: false, main_memory: MAIN_MEMORY };
+            let (dvi, _, errors, _) = graph("specloop", &src, o);
+            assert!(errors.is_empty(), "specloop ({o:?}): {errors:?}");
+            assert!(masked(&dvi) == masked(&want), "specloop ({o:?}): the DVI differs");
+        }
+    }
+}
+
+/// A document that really loops ends as TeX ends it: "TeX capacity
+/// exceeded" (here with a small main memory).
+#[test]
+fn capacity_exceeded() {
+    let src = "\\catcode`\\{=1 \\catcode`\\}=2 \\catcode`\\#=6\n\\def\\a{x\\a}\\setbox1\\hbox{\\a}\n\\end\n";
+    for o in RUNS {
+        let o = Options { main_memory: 5_000, ..o };
+        let (_, log, errors, _) = graph("capacity", src, o);
+        let all = format!("{log}{errors:?}");
+        assert!(all.contains("TeX capacity exceeded, sorry [main memory size=5000]"), "({o:?}): {all}");
     }
 }

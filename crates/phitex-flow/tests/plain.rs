@@ -16,20 +16,21 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
 
+use phitex_flow::build::MAIN_MEMORY;
 use phitex_flow::{Build, Font, Options, Order, Reads};
 
 /// Every document, and what the graph needs before it is a test (`""`:
 /// it is one).
 const WAITING: [(&str, &str); 10] = [
-    ("story", "the page fold running output routines (agent A), \\footnote's \\insert (agent E)"),
-    ("story-default", "\\footnote's \\insert and the fold's insertions (agents E, A)"),
-    ("pages", "the page fold running output routines (agent A)"),
+    ("story", ""),
+    ("story-default", ""),
+    ("pages", ""),
     ("pages-default", ""),
-    ("display", "the page fold running output routines (agent A)"),
+    ("display", ""),
     ("display-default", ""),
-    ("table", "the page fold running output routines (agent A), \\halign and \\+ (agent C)"),
+    ("table", ""),
     ("table-default", ""),
-    ("hyphens", "the page fold running output routines (agent A)"),
+    ("hyphens", ""),
     ("hyphens-default", ""),
 ];
 
@@ -103,11 +104,11 @@ fn masked(dvi: &[u8]) -> Vec<u8> {
 
 /// The schedules (as `tests/dvi.rs`).
 const RUNS: [Options; 5] = [
-    Options { threads: 1, reads: Reads::Suspend, order: Order::Priority, dump: false, etex: false },
-    Options { threads: 8, reads: Reads::Suspend, order: Order::Priority, dump: false, etex: false },
-    Options { threads: 8, reads: Reads::Speculate, order: Order::Priority, dump: false, etex: false },
-    Options { threads: 8, reads: Reads::Suspend, order: Order::Random(1), dump: false, etex: false },
-    Options { threads: 8, reads: Reads::Speculate, order: Order::Random(7), dump: false, etex: false },
+    Options { threads: 1, reads: Reads::Suspend, order: Order::Priority, dump: false, etex: false, main_memory: MAIN_MEMORY },
+    Options { threads: 8, reads: Reads::Suspend, order: Order::Priority, dump: false, etex: false, main_memory: MAIN_MEMORY },
+    Options { threads: 8, reads: Reads::Speculate, order: Order::Priority, dump: false, etex: false, main_memory: MAIN_MEMORY },
+    Options { threads: 8, reads: Reads::Suspend, order: Order::Random(1), dump: false, etex: false, main_memory: MAIN_MEMORY },
+    Options { threads: 8, reads: Reads::Speculate, order: Order::Random(7), dump: false, etex: false, main_memory: MAIN_MEMORY },
 ];
 
 fn recorded(name: &str) -> (Vec<u8>, String) {
@@ -176,13 +177,40 @@ fn hyphens_default() {
     check("hyphens-default");
 }
 
-/// At the suspending schedules only, for now: under `Reads::Speculate` a
-/// piece can run on the prediction that plain's `\m@ne` (a count register
-/// set to -1 by an earlier piece) is still 0, and `\settabs`'s `\loop` then
-/// never ends, so the run is never validated and never abandoned (a few
-/// runs in a hundred: the scheduler does not stop a speculative run whose
-/// prediction was refuted; reported to the coordinator).
+#[test]
+fn pages() {
+    check("pages");
+}
+
+#[test]
+fn display() {
+    check("display");
+}
+
+#[test]
+fn hyphens() {
+    check("hyphens");
+}
+
+#[test]
+fn story() {
+    check("story");
+}
+
+#[test]
+fn story_default() {
+    check("story-default");
+}
+
+#[test]
+fn table() {
+    check("table");
+}
+
+/// Every schedule: a piece running on the prediction that plain's `\m@ne`
+/// is still 0 loops in `\settabs`'s `\loop` until the prediction is
+/// refuted and the run abandoned.
 #[test]
 fn table_default() {
-    check_runs("table-default", &[RUNS[0], RUNS[1], RUNS[3]]);
+    check("table-default");
 }

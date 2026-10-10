@@ -26,6 +26,7 @@ fn opts(threads: usize, reads: Reads, order: Order) -> Options {
         order,
         dump: false,
         etex: false,
+        ..Options::default()
     }
 }
 

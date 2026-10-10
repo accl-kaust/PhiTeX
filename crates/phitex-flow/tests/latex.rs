@@ -75,13 +75,40 @@ fn etex() -> Option<(String, Vec<String>, Vec<u8>)> {
     Some((cut(&log)?, dirs, aux))
 }
 
+/// The main memory the runs may hold. The graph counts every definition
+/// a run makes, kept or not (`graph::words_of`); TeX counts what is live,
+/// and LaTeX redefines much. Past `MAIN_MEMORY` (TeX Live's 5000000) until
+/// the core counts the live words (CORE.md, LaTeX's format, gap 4).
+const MEMORY: u64 = 1 << 32;
+
 /// The schedules (`tests/etex.rs`'s).
 const RUNS: [Options; 5] = [
-    Options { threads: 1, reads: Reads::Suspend, order: Order::Priority, dump: false, etex: true },
-    Options { threads: 8, reads: Reads::Suspend, order: Order::Priority, dump: false, etex: true },
-    Options { threads: 8, reads: Reads::Speculate, order: Order::Priority, dump: false, etex: true },
-    Options { threads: 8, reads: Reads::Suspend, order: Order::Random(1), dump: false, etex: true },
-    Options { threads: 8, reads: Reads::Speculate, order: Order::Random(7), dump: false, etex: true },
+    Options { threads: 1, reads: Reads::Suspend, order: Order::Priority, dump: false, etex: true, main_memory: MEMORY },
+    Options { threads: 8, reads: Reads::Suspend, order: Order::Priority, dump: false, etex: true, main_memory: MEMORY },
+    Options {
+        threads: 8,
+        reads: Reads::Speculate,
+        order: Order::Priority,
+        dump: false,
+        etex: true,
+        main_memory: MEMORY,
+    },
+    Options {
+        threads: 8,
+        reads: Reads::Suspend,
+        order: Order::Random(1),
+        dump: false,
+        etex: true,
+        main_memory: MEMORY,
+    },
+    Options {
+        threads: 8,
+        reads: Reads::Speculate,
+        order: Order::Random(7),
+        dump: false,
+        etex: true,
+        main_memory: MEMORY,
+    },
 ];
 
 /// The recorded oracle: the log, the directories, `texsys.aux`.
@@ -109,34 +136,52 @@ fn oracles_are_etex() {
 }
 
 /// The format's log on the graph is etex's, at every schedule, without
-/// errors.
+/// errors. Each schedule runs in a process of its own (this test, run
+/// again with `PHITEX_FLOW_LATEX_RUN` naming it): a build of the format
+/// holds about 5 GB, and the memory one build gave back is not all
+/// reusable by the next in the same process (the allocator's per-thread
+/// arenas), which would pass the sandbox's 16 GB.
 #[test]
 fn latex_format() {
+    if let Ok(k) = std::env::var("PHITEX_FLOW_LATEX_RUN") {
+        format_at(RUNS[k.parse::<usize>().expect("a schedule")]);
+        return;
+    }
+    for (k, o) in RUNS.iter().enumerate() {
+        let st = Command::new(std::env::current_exe().expect("the test binary"))
+            .args(["--exact", "latex_format", "--nocapture", "--test-threads=1"])
+            .env("PHITEX_FLOW_LATEX_RUN", k.to_string())
+            .status()
+            .expect("the test binary runs");
+        assert!(st.success(), "({o:?}) the format on the graph failed (its message above)");
+    }
+}
+
+/// [`latex_format`] at schedule `o`.
+fn format_at(o: Options) {
     let (want, dirs) = recorded();
     let main = Path::new(&dirs[0]).join("latex.ltx");
     let src = std::fs::read_to_string(&main).expect("latex.ltx");
     let mut inputs = vec![dir()];
     inputs.extend(dirs.iter().map(PathBuf::from));
-    for o in RUNS {
-        let mut b = Build::new(font());
-        b.set_input_dirs(inputs.clone());
-        b.set_jobname("latex");
-        let out = b.update(&src, o);
-        assert!(out.errors.is_empty(), "({o:?}) errors on the graph: {:?}", &out.errors[..out.errors.len().min(20)]);
-        let log = phitex_flow::print::log(&format!("({}", main.display()), &out.log, " )");
-        let got = log.lines().take_while(|l| !l.starts_with(" (preloaded format=")).count();
-        let lines: Vec<&str> = log.lines().collect();
-        let log = lines[..(got + 1).min(lines.len())].join("\n");
-        if log != want {
-            let (g, e): (Vec<&str>, Vec<&str>) = (log.lines().collect(), want.lines().collect());
-            let at = g.iter().zip(&e).position(|(a, b)| a != b).unwrap_or(g.len().min(e.len()));
-            panic!(
-                "({o:?}) the log differs at line {} of {}:\n graph: {:?}\n   TeX: {:?}",
-                at + 1,
-                e.len(),
-                g.get(at),
-                e.get(at)
-            );
-        }
+    let mut b = Build::new(font());
+    b.set_input_dirs(inputs);
+    b.set_jobname("latex");
+    let out = b.update(&src, o);
+    assert!(out.errors.is_empty(), "({o:?}) errors on the graph: {:?}", &out.errors[..out.errors.len().min(20)]);
+    let log = phitex_flow::print::log(&format!("({}", main.display()), &out.log, " )");
+    let got = log.lines().take_while(|l| !l.starts_with(" (preloaded format=")).count();
+    let lines: Vec<&str> = log.lines().collect();
+    let log = lines[..(got + 1).min(lines.len())].join("\n");
+    if log != want {
+        let (g, e): (Vec<&str>, Vec<&str>) = (log.lines().collect(), want.lines().collect());
+        let at = g.iter().zip(&e).position(|(a, b)| a != b).unwrap_or(g.len().min(e.len()));
+        panic!(
+            "({o:?}) the log differs at line {} of {}:\n graph: {:?}\n   TeX: {:?}",
+            at + 1,
+            e.len(),
+            g.get(at),
+            e.get(at)
+        );
     }
 }

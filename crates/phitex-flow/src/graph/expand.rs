@@ -77,6 +77,10 @@ impl Exec<'_> {
             }
             if t.key().is_some() && expands(&m) {
                 self.expand(&t, &m);
+                if self.input.is_some() {
+                    // (`\input`: this node ends the piece's run)
+                    return None;
+                }
                 continue;
             }
             return Some((t, m));
@@ -114,7 +118,7 @@ impl Exec<'_> {
                     let toks = self.the_toks();
                     self.rewrite(toks);
                 }
-                Prim::Input => self.start_input(),
+                Prim::Input => self.input_file(),
                 Prim::EndInput => self.end_input(),
                 // (`\splitfirstmark`, `\splitbotmark`, e-TeX's
                 // `\splitfirstmarks n`, `\splitbotmarks n`: what the last
@@ -149,6 +153,25 @@ impl Exec<'_> {
             },
             _ => {}
         }
+    }
+
+    /// `\input` (tex.web 537) as a command of its own at a piece's top
+    /// level (vertical mode, no group, box or paragraph open, no text
+    /// rewritten): the file name, the file a read of `Key::File`; the node
+    /// ends the piece's run, the file's pieces follow it in the sequence.
+    /// Anywhere else the file is read in the piece ([`Exec::start_input`]).
+    fn input_file(&mut self) {
+        if !self.at_start || !self.st.plain_boundary() || !self.st.texts.is_empty() {
+            self.start_input();
+            return;
+        }
+        let name = self.scan_name();
+        let Some((found, data)) = self.find_file(&name) else {
+            self.err(format!("I can't find file `{name}'"));
+            return;
+        };
+        let text: String = data.iter().map(|&b| char::from(b)).collect();
+        self.input = Some(Arc::new(super::FileText { name: Arc::from(found), text: Arc::from(text) }));
     }
 
     /// `\expandafter` (tex.web 368).

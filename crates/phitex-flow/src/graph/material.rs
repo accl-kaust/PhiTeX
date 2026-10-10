@@ -20,7 +20,7 @@ use crate::item::{
 use crate::linebreak::{self, LineParams};
 use crate::pack::{Params, Spec, hpack, vpack};
 use crate::page::{IGNORE_DEPTH, page_mark, push_vertical, remove_last};
-use crate::show::{Ctx, NL, Place, RAW, report};
+use crate::show::{Ctx, NL, RAW, report};
 use crate::tfm::{Font, Glyph, LigKern, Tag};
 use crate::val::{DimenPar, Glue, GluePar, IntPar, Key, Mat, Meaning, Prim, Tok, TokPar, Val};
 
@@ -302,7 +302,6 @@ impl Exec<'_> {
             maxdepth: self.dimen_par(DimenPar::Maxdepth),
             topskip: self.glue_par(GluePar::Topskip),
             hsize: self.dimen_par(DimenPar::Hsize),
-            ship: self.ship_params(),
         })
     }
 
@@ -356,7 +355,7 @@ impl Exec<'_> {
     /// The page builder is called here (only on the main vertical list,
     /// tex.web 994).
     pub(super) fn build_page(&mut self) {
-        if self.st.level == 0 && self.st.mode == Mode::V {
+        if self.st.level == 0 && self.st.mode == Mode::V && !self.st.in_output() {
             let c = self.page_call();
             self.vemit.push(Item::BuildPage(c));
         }
@@ -517,7 +516,8 @@ impl Exec<'_> {
     /// tex.web 1091: `new_graf`.
     pub(super) fn new_graf(&mut self, indented: bool) {
         self.st.prev_graf = 0;
-        if self.st.level == 0 || !self.current_list(true).is_empty() {
+        let outer = self.st.level == 0 && !self.st.in_output();
+        if outer || !self.current_list(true).is_empty() {
             let g = self.glue_par(GluePar::Parskip);
             self.vemit.push(param_glue(&g, GluePar::Parskip as u8));
         }
@@ -531,7 +531,7 @@ impl Exec<'_> {
         }
         let ep = self.toks_par(TokPar::Everypar);
         self.rewrite(ep);
-        if self.st.level == 0 {
+        if outer {
             let c = self.page_call();
             self.vemit.push(Item::BuildPage(c));
         }
@@ -1554,7 +1554,7 @@ impl Exec<'_> {
                 let packed = hpack(list, be.g.spec, &params, if be.g.adjusted { Some(&mut adj) } else { None });
                 if let Some(r) = packed.report {
                     let cx = self.show_ctx(std::slice::from_ref(&Item::Box(Arc::new(packed.b.clone()))));
-                    let s = report(r, &packed.b, Place::Here, &cx);
+                    let s = report(r, &packed.b, self.box_place(), &cx);
                     self.log_raw(&s);
                 }
                 self.box_end(be.g.context, Some(packed.b), adj, ships);
@@ -1568,7 +1568,7 @@ impl Exec<'_> {
                 let packed = vpack(list, be.g.spec, be.boxmaxdepth, &params);
                 if let Some(r) = packed.report {
                     let cx = self.show_ctx(std::slice::from_ref(&Item::Box(Arc::new(packed.b.clone()))));
-                    let s = report(r, &packed.b, Place::Here, &cx);
+                    let s = report(r, &packed.b, self.box_place(), &cx);
                     self.log_raw(&s);
                 }
                 let mut b = packed.b;
@@ -1601,7 +1601,8 @@ impl Exec<'_> {
                         let parts = if *stage == 0 { (list, Vec::new()) } else { (parts.0.clone(), list) };
                         let mut g = (*be.g).clone();
                         g.kind = BoxKind::Disc(stage + 1, Arc::new(parts));
-                        self.st.boxing = Some(Arc::new(BoxEnd { g: Arc::new(g), boxmaxdepth: be.boxmaxdepth, math: None }));
+                        self.st.boxing =
+                            Some(Arc::new(BoxEnd { g: Arc::new(g), boxmaxdepth: be.boxmaxdepth, math: None }));
                         let t = self.cs("\u{0}discnext");
                         self.back(t);
                     }

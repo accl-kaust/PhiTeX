@@ -69,6 +69,27 @@ pub trait Env {
     /// them, as when no element between the piece's nodes defines `key`).
     fn reach(&mut self, key: &Key, node: u32) -> (Val, Src, u32, u32);
 
+    /// A definition of `key` made between this piece's nodes `after` and
+    /// `node` (an output routine's run where the page builder fired there),
+    /// which reaches `node` instead of node `after`'s own: its value and
+    /// where it was made.
+    fn between(&mut self, _key: &Key, _after: u32, _node: u32) -> Option<(Val, Src)> {
+        None
+    }
+
+    /// Whether anything between this piece's nodes may define `key`.
+    fn has_between(&mut self, _key: &Key) -> bool {
+        false
+    }
+
+    /// Whether the run goes on after a node it ran (`ran` run so far, the
+    /// run holding `words` of material, [`words_of`]): a speculating run
+    /// whose predictions are refuted is abandoned; one past TeX's main
+    /// memory ends (tex.web 120).
+    fn check(&mut self, _ran: u64, words: u64) -> Check {
+        if words > MAIN_MEMORY { Check::Exceeded(MAIN_MEMORY) } else { Check::Go }
+    }
+
     /// The bytes of the TFM file `name.tfm`, if there is one (a pure
     /// function of the name during a build).
     fn font_file(&mut self, _name: &str) -> Option<std::sync::Arc<[u8]>> {
@@ -98,6 +119,57 @@ pub trait Env {
     fn line_base(&mut self) -> i32 {
         0
     }
+}
+
+/// web2c's `main_memory` (tex.web 11's `mem_max`): words a run's material
+/// may hold ([`words_of`]) before "TeX capacity exceeded".
+pub const MAIN_MEMORY: u64 = 5_000_000;
+
+/// What [`Env::check`] says of a run.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Check {
+    Go,
+    /// The run is dropped (not installed): it is run again.
+    Abandon,
+    /// "TeX capacity exceeded, sorry [main memory size=N]" (tex.web 94,
+    /// 120): the run ends there, a fatal error.
+    Exceeded(u64),
+}
+
+/// The words of material a node holds as TeX's memory would (an item,
+/// a box's items, a token list's tokens; one for the node): the measure of
+/// [`MAIN_MEMORY`].
+pub fn words_of(n: &Node) -> u64 {
+    let items = |v: &[crate::item::Item]| -> u64 {
+        v.iter()
+            .map(|it| match it {
+                crate::item::Item::Box(b) => 1 + b.list.len() as u64,
+                _ => 1,
+            })
+            .sum()
+    };
+    let defs: u64 = n
+        .defs()
+        .iter()
+        .map(|d| match &d.val {
+            Val::Box(b) => 1 + b.list.len() as u64,
+            Val::Toks(t) => 1 + t.len() as u64,
+            Val::Meaning(Meaning::Macro(m)) => 1 + m.body.len() as u64,
+            _ => 1,
+        })
+        .sum();
+    1 + items(&n.emit) + items(n.vemit()) + defs
+}
+
+/// The tokens of input pending in `st` (tex.web 120 counts them in the
+/// memory too).
+pub fn pending_words(st: &RState) -> u64 {
+    st.pending.levels().map(|l| l.list.len().saturating_sub(l.at) as u64).sum()
+}
+
+/// The fatal error of a run past TeX's main memory.
+pub fn capacity_error(size: u64) -> String {
+    format!("TeX capacity exceeded, sorry [main memory size={size}]")
 }
 
 /// The tokenizer's state (tex.web 303).
@@ -245,6 +317,24 @@ impl<T: Clone> Stack<T> {
     }
 }
 
+impl Stack<Cond> {
+    /// The conditionals open, as a piece entered here sees them: opened
+    /// before it (no node of its own: their `\fi` makes no φ there).
+    fn outside(&self) -> Stack<Cond> {
+        match &self.0 {
+            None => Stack(None),
+            Some(v) => Stack(Some(Arc::new(
+                v.iter()
+                    .map(|c| Cond {
+                        open: u32::MAX,
+                        ..*c
+                    })
+                    .collect(),
+            ))),
+        }
+    }
+}
+
 impl<T: PartialEq> PartialEq for Stack<T> {
     fn eq(&self, other: &Self) -> bool {
         match (&self.0, &other.0) {
@@ -352,7 +442,7 @@ impl Pending {
 }
 
 impl Drop for Pending {
-    /// Cell by cell, not recursively (a deep input stack).
+    /// Cell by cell, not recursively (many lists pending).
     fn drop(&mut self) {
         let mut next = self.below.take();
         while let Some(c) = next {
@@ -434,6 +524,8 @@ pub struct RState {
     /// The current line's end-of-line character (`\endlinechar` as the line
     /// was begun; -1: none), or `EOL_UNREAD`.
     eol: i16,
+    /// `\endinput` was read: the file ends after this line (tex.web 362).
+    endinput: bool,
     /// The alignment being read: `align_state`, the current column and
     /// span, how the entry began and ended (tex.web 309, 770).
     al: align::AlignCur,
@@ -457,7 +549,7 @@ pub struct RState {
 const FATAL_ERRORS: u8 = 100;
 
 impl RState {
-    fn start() -> RState {
+    pub fn start() -> RState {
         RState {
             pos: 0,
             tstate: TState::N,
@@ -476,6 +568,7 @@ impl RState {
             prev_depth: IGNORE_DEPTH,
             prev_graf: 0,
             eol: EOL_UNREAD,
+            endinput: false,
             al: align::AlignCur::OFF,
             protected: false,
             texts: Stack::new(),
@@ -483,6 +576,60 @@ impl RState {
             fire: None,
             error_count: 0,
         }
+    }
+
+    /// The entry of an `\input` file's first piece: the state the
+    /// `\input` node left (its group, conditional, mode), at the file's
+    /// first line; the token lists waiting are read after the file (they
+    /// come back with the rest of the calling line, [`RState::rest`]).
+    pub fn file_start(caller: &RState) -> RState {
+        RState {
+            pos: 0,
+            tstate: TState::N,
+            pending: Pending::default(),
+            eol: EOL_UNREAD,
+            endinput: false,
+            conds: caller.conds.outside(),
+            ..caller.clone()
+        }
+    }
+
+    /// The entry of the rest of the line that called `\input` (`caller`,
+    /// the `\input` node's state): what the file's last piece left
+    /// (`file`; none: an empty file), with the caller's line and the token
+    /// lists waiting when the file was opened.
+    pub fn rest(file: Option<&RState>, caller: &RState) -> RState {
+        let base = file.unwrap_or(caller);
+        RState {
+            pos: 0,
+            tstate: caller.tstate,
+            pending: caller.pending.clone(),
+            eol: caller.eol,
+            endinput: caller.endinput,
+            conds: base.conds.outside(),
+            ..base.clone()
+        }
+    }
+
+    /// Whether a piece entered in this state may begin: no paragraph,
+    /// box or group open (an `\input` inside one is not supported: a
+    /// definition made inside would outlive the group).
+    pub fn plain_boundary(&self) -> bool {
+        self.mode == Mode::V && self.level == 0 && self.groups.is_empty()
+    }
+
+    /// The file ends after the current line (`\endinput`).
+    pub fn ends_file(&self) -> bool {
+        self.endinput
+    }
+
+    /// Inside an output routine (its group is the outermost): its
+    /// vertical list is internal (TeX's `-vmode`), not the main one.
+    fn in_output(&self) -> bool {
+        self.groups
+            .0
+            .as_ref()
+            .is_some_and(|v| v.first().is_some_and(|g| g.kind == GroupKind::Output))
     }
 }
 
@@ -504,6 +651,8 @@ pub enum Kind {
     Par,
     /// The end of the piece.
     End,
+    /// `\input`: the piece's run ends here, the file's pieces follow it.
+    Input,
 }
 
 impl Kind {
@@ -589,6 +738,7 @@ impl RState {
             && self.prev_depth == o.prev_depth
             && self.prev_graf == o.prev_graf
             && self.eol == o.eol
+            && self.endinput == o.endinput
             && self.al == o.al
             && self.pending == o.pending
             && self.protected == o.protected
@@ -724,6 +874,15 @@ pub struct Rare {
     /// The `Close` of an output routine's group: what the page builder
     /// takes back (`output::OutputEnd`).
     pub output: Option<Box<output::OutputEnd>>,
+    /// `\input`: the file read (its pieces follow the node's).
+    pub input: Option<Arc<FileText>>,
+}
+
+/// A file `\input` read: its name and its text.
+#[derive(Debug, PartialEq, Eq)]
+pub struct FileText {
+    pub name: Arc<str>,
+    pub text: Arc<str>,
 }
 
 /// A command node. Its input state is its predecessor's `out` (the
@@ -766,6 +925,11 @@ impl Node {
     pub fn log(&self) -> Option<&str> {
         self.rare.as_ref().and_then(|r| r.log.as_deref())
     }
+    /// The file an `\input` node read.
+    pub fn input(&self) -> Option<&Arc<FileText>> {
+        self.rare.as_ref().and_then(|r| r.input.as_ref())
+    }
+
     /// What an output routine's end left for the page builder (the `Close`
     /// node of its group).
     pub fn output(&self) -> Option<&output::OutputEnd> {
@@ -915,6 +1079,10 @@ impl std::ops::Index<usize> for Nodes {
 #[derive(Clone, Debug, Default)]
 pub struct Chain {
     pub nodes: Nodes,
+    /// The state the first node reads (none: the canonical start): a file
+    /// piece's or a rest-of-line piece's entry edge, or an output
+    /// routine's run (`output::output_entry`).
+    entry: Option<Arc<RState>>,
     /// Nodes defining each key, in order.
     defs_of: FxMap<Key, Vec<u32>>,
     /// For each `Open` node, the index of its `Close`, once there is one.
@@ -927,9 +1095,6 @@ pub struct Chain {
     err_at: Vec<u32>,
     /// For each `Open` node, the `Open` node of the group enclosing it.
     parent_of: FxMap<u32, u32>,
-    /// The state the first node reads, when it is not a piece's start (an
-    /// output routine's run: `output::output_entry`).
-    entry: Option<Arc<RState>>,
 }
 
 impl Chain {
@@ -1011,6 +1176,11 @@ impl Chain {
         let g = self.def_group(n, def)?;
         let p = self.open.iter().rposition(|&o| o == g)?;
         Some((self.open.len() - 1 - p) as u16)
+    }
+
+    /// The nodes with a paragraph, in order (`Run::paras` is theirs).
+    pub fn para_nodes(&self) -> &[u32] {
+        &self.para_at
     }
 
     /// The groups open at the next node, outermost first (their `Open`
@@ -1134,6 +1304,34 @@ pub struct Run {
     /// The fonts this piece loads first (`Key::FontLoaded` definitions), in
     /// node order: the document's font numbering is these, piece by piece.
     pub fonts: Vec<Arc<str>>,
+    /// The run was abandoned ([`Check::Abandon`]): not a result.
+    pub abandoned: bool,
+}
+
+impl Run {
+    /// The state its last node left (the piece's end, or its `\input`).
+    pub fn out(&self) -> RState {
+        self.chain.input(self.chain.nodes.len())
+    }
+
+    /// The file its last node, an `\input`, read.
+    pub fn input(&self) -> Option<&Arc<FileText>> {
+        let n = self.chain.nodes.len();
+        if n == 0 {
+            return None;
+        }
+        let last = &self.chain.nodes[n - 1];
+        if last.kind == Kind::Input {
+            last.input()
+        } else {
+            None
+        }
+    }
+
+    /// The state it was entered in.
+    pub fn entry(&self) -> RState {
+        self.chain.input(0)
+    }
 }
 
 /// The node that opened the `k`-th (from the outside) open group
@@ -1323,7 +1521,21 @@ fn outside_read(env: &mut dyn Env, outside: &mut Outside, k: &Key, node: u32) ->
 
 /// The definition of `key` for the next node of `chain`, and where from.
 fn resolve_now(chain: &Chain, env: &mut dyn Env, outside: &mut Outside, key: &Key) -> ReadRef {
-    match chain.resolve(key, chain.nodes.len()) {
+    let local = chain.resolve(key, chain.nodes.len());
+    // (a definition made between the piece's nodes after the local one
+    // reaches further: a routine's, where the page builder fired)
+    if let Some((d, _)) = local
+        && let Some((val, src)) = env.between(key, d, chain.nodes.len() as u32)
+    {
+        return Arc::new(Read {
+            key: key.clone(),
+            src,
+            val,
+            scope: None,
+            cond: None,
+        });
+    }
+    match local {
         Some((d, val)) => Arc::new(Read {
             key: key.clone(),
             src: Src::Node(d),
@@ -1378,16 +1590,23 @@ fn before_read(
 
 /// Runs a piece: `old` is its previous run (and the text that made it),
 /// `dirty` the names from before the piece a definition of which was
-/// remade: every old node reading one of them is dirty. Returns the new
-/// chain, with every old node still holding kept.
+/// remade: every old node reading one of them is dirty; `entry` the state
+/// it is entered in (none: the canonical start). Returns the new chain,
+/// with every old node still holding kept.
 pub fn run_piece(
     text: &[char],
     env: &mut dyn Env,
     old: Option<(&Run, &[char])>,
     dirty: &[Key],
+    entry: Option<&RState>,
 ) -> Run {
     let mut outside: Outside = FxMap::default();
     let mut chain = Chain::default();
+    let entry: Option<Arc<RState>> = entry
+        .filter(|e| **e != RState::start())
+        .map(|e| Arc::new(e.clone()));
+    // (entered otherwise than the old run was: every node is looked at)
+    let entry_changed = old.is_some_and(|(r, _)| r.chain.entry != entry);
     let mut ran = 0u64;
     let edit = old.and_then(|(_, t)| Edit::between(t, text));
     let oldc = old.map(|(r, _)| &r.chain);
@@ -1399,9 +1618,9 @@ pub fn run_piece(
             .iter()
             .enumerate()
             .filter(|(_, n)| {
-                n.reads
-                    .iter()
-                    .any(|r| !matches!(r.src, Src::Node(_)) && dirty.contains(&r.key))
+                n.reads.iter().any(|r| {
+                    dirty.contains(&r.key) && (!matches!(r.src, Src::Node(_)) || env.has_between(&r.key))
+                })
             })
             .map(|(i, _)| i as u32)
             .collect(),
@@ -1424,13 +1643,23 @@ pub fn run_piece(
         let touched = lo;
         from = from.min(touched);
     }
-    let from = oldc.map_or(0, |oc| from.min(oc.nodes.len().saturating_sub(1)));
+    let from = if entry_changed {
+        0
+    } else {
+        oldc.map_or(0, |oc| from.min(oc.nodes.len().saturating_sub(1)))
+    };
     if let Some(oc) = oldc {
         chain = Chain::prefix(oc, from);
     }
+    chain.entry = entry;
     let mut state = chain.input(from);
     let mut scratch = Scratch::default();
     let mut oi = from;
+    // (the material the nodes run hold, and what the environment says of
+    // the run after each)
+    let mut words = 0u64;
+    let mut verdict = Check::Go;
+    let mut abandoned = false;
     // (a paragraph's node runs again if any node of its paragraph did)
     let mut para_fresh = false;
     // (a node ran or was dropped that changes how later names resolve:
@@ -1468,7 +1697,7 @@ pub fn run_piece(
                 let text_ok = edit.is_none_or(|e| n.out.pos < e.start || inp_pos >= e.old_end);
                 let par_ok = !(matches!(n.kind, Kind::Par | Kind::End) && para_fresh);
                 let state_ok = if oi == 0 {
-                    RState::start().eq_but_pos(&state)
+                    oc.input(0).eq_but_pos(&state)
                 } else {
                     oc.nodes[oi - 1].out.eq_but_pos(&state)
                 };
@@ -1582,7 +1811,19 @@ pub fn run_piece(
                 // shared)
                 x.old_para = cand.and_then(|ci| oldc.and_then(|oc| oc.nodes[ci].para().cloned()));
                 x.command();
-                chain.with_group(x.finish())
+                let stop = x.stop.take();
+                if let Some(Check::Exceeded(size)) = stop {
+                    x.overflow(capacity_error(size));
+                    x.kind = Kind::End;
+                }
+                let n = chain.with_group(x.finish());
+                words += words_of(&n);
+                verdict = match stop {
+                    Some(Check::Abandon) => Check::Abandon,
+                    Some(_) => Check::Go,
+                    None => env.check(ran, words.max(pending_words(&n.out))),
+                };
+                n
             }
         };
         let mut same_material = !fresh;
@@ -1624,11 +1865,26 @@ pub fn run_piece(
         } else if !same_material {
             para_fresh = true;
         }
-        let end = n.kind == Kind::End;
+        let end = matches!(n.kind, Kind::End | Kind::Input);
         state = n.out.clone();
         chain.push_arc(n);
         if end {
             break;
+        }
+        match std::mem::replace(&mut verdict, Check::Go) {
+            Check::Go => {}
+            Check::Abandon => {
+                abandoned = true;
+                break;
+            }
+            Check::Exceeded(size) => {
+                let mut x = Exec::new(text, &chain, &state, env, &mut outside, &mut scratch);
+                x.overflow(capacity_error(size));
+                x.kind = Kind::End;
+                let n = chain.with_group(x.finish());
+                chain.push_arc(n);
+                break;
+            }
         }
     }
     // (exports: each key defined in the piece, as it reaches the end)
@@ -1704,6 +1960,7 @@ pub fn run_piece(
         errors,
         ran,
         fonts,
+        abandoned,
     }
 }
 
@@ -1763,6 +2020,11 @@ struct Exec<'a> {
     in_write: bool,
     /// How many of `reads` are in `scratch.seen`.
     seen_upto: usize,
+    /// `\input`: the file read (the node ends the piece's run).
+    input: Option<Arc<FileText>>,
+    /// The command is being looked for (an `\input` expanded now is a
+    /// node of its own).
+    at_start: bool,
     /// This node's stamp in `scratch.chars`.
     stamp: u32,
     /// The paragraph the old node at this place made, if any: an equal
@@ -1775,6 +2037,11 @@ struct Exec<'a> {
     output: Option<Box<output::OutputEnd>>,
     /// Inside `\csname`…`\endcsname` (pdfTeX's `\ifincsname`).
     in_csname: u16,
+    /// Input rewrites (macro calls and the like) in this node, and what
+    /// the environment said of the run while it expanded on and on: the
+    /// node ends at once ([`Exec::rewrite`]).
+    steps: u64,
+    stop: Option<Check>,
     /// This node made the hundredth error: the build ends here (§82).
     halt: bool,
 }
@@ -1831,11 +2098,15 @@ impl<'a> Exec<'a> {
             noexp: false,
             in_write: false,
             seen_upto: 0,
+            input: None,
+            at_start: false,
             stamp,
             old_para: None,
             ptext: None,
             output: None,
             in_csname: 0,
+            steps: 0,
+            stop: None,
             halt: false,
         }
     }
@@ -1870,6 +2141,7 @@ impl<'a> Exec<'a> {
             || self.phi.is_some()
             || !self.vemit.is_empty()
             || self.log.is_some()
+            || self.input.is_some()
             || self.output.is_some())
         .then(|| {
             Box::new(Rare {
@@ -1879,6 +2151,7 @@ impl<'a> Exec<'a> {
                 phi: self.phi,
                 vemit: self.vemit,
                 log: self.log,
+                input: self.input,
                 output: self.output,
             })
         });
@@ -1905,6 +2178,21 @@ impl<'a> Exec<'a> {
             l.push(HALT);
             self.log_raw(&l);
         }
+    }
+
+    /// tex.web 94, `overflow`: "TeX capacity exceeded", a fatal error: as
+    /// at the hundredth error nothing more is read and this node's
+    /// `Item::Halt` ends the page fold.
+    fn overflow(&mut self, s: String) {
+        if self.halted() {
+            return;
+        }
+        self.errors.push(s);
+        self.st.error_count = FATAL_ERRORS;
+        self.halt = true;
+        let mut l = String::from(RAW);
+        l.push(HALT);
+        self.log_raw(&l);
     }
 
     /// The reader has stopped at its hundredth error (tex.web 82).
@@ -2003,6 +2291,10 @@ impl<'a> Exec<'a> {
         let Some((d, val)) = chain.resolve(key, chain.nodes.len()) else {
             return outside_read(self.env, self.outside, key, chain.nodes.len() as u32);
         };
+        if self.env.has_between(key) {
+            // (a routine's definition may reach further: `resolve_now`'s)
+            return resolve_now(chain, self.env, self.outside, key);
+        }
         let scope = chain.scope_of(d, key);
         if let Some(r) = self.scratch.inside.get(key)
             && r.src == Src::Node(d)
@@ -2136,10 +2428,33 @@ impl<'a> Exec<'a> {
         }
     }
 
-    /// Rewrites the input: `toks`, then the rest.
+    /// Rewrites the input: `toks`, then the rest. A node expanding on and
+    /// on (a macro calling itself) asks the environment now and then
+    /// whether the run goes on ([`Env::check`]); if not, its input ends
+    /// here.
     fn rewrite(&mut self, toks: Vec<Tok>) {
         if !toks.is_empty() {
             self.st.pending.push((Arc::from(toks), 0, false));
+        }
+        self.step();
+    }
+
+    /// One input rewrite (a macro call, [`Exec::rewrite`]): counted, the
+    /// environment asked now and then.
+    fn step(&mut self) {
+        self.steps += 1;
+        if self.steps.is_multiple_of(1 << 12) && self.stop.is_none() {
+            let words = pending_words(&self.st) + (self.emit.len() + self.vemit.len()) as u64;
+            match self.env.check(self.steps, words) {
+                Check::Go => {}
+                c => {
+                    self.stop = Some(c);
+                    self.st.pending.clear();
+                    self.st.texts = Stack::new();
+                    self.ptext = None;
+                    self.st.pos = self.text.len();
+                }
+            }
         }
     }
 
@@ -2184,6 +2499,10 @@ impl<'a> Exec<'a> {
             self.new_line();
             if self.ptext.is_some() && self.st.texts.last().is_some_and(|x| x.endinput) {
                 self.st.pos = self.txt().len();
+            } else if self.ptext.is_none() && self.st.endinput {
+                // (`\endinput` in a file piece: the file ends with the
+                // line, tex.web 362)
+                self.st.pos = self.text.len();
             }
         }
     }
@@ -2461,17 +2780,18 @@ impl<'a> Exec<'a> {
         // (the body is read where it is, the macro's; its parameters are
         // the arguments, tex.web 390, 357)
         self.end_read_lists();
-        if m.body.is_empty() {
-            return;
-        }
-        let used = m.body.iter().filter_map(|t| if let Tok::Param(n) = t { Some(usize::from(*n)) } else { None }).max();
-        match used {
-            None => self.st.pending.push((m.body.clone(), 0, false)),
-            Some(k) => {
-                let args: Args = args.into_iter().take(k + 1).map(Arc::from).collect();
-                self.st.pending.push_body(m.body.clone(), args);
+        if !m.body.is_empty() {
+            let used =
+                m.body.iter().filter_map(|t| if let Tok::Param(n) = t { Some(usize::from(*n)) } else { None }).max();
+            match used {
+                None => self.st.pending.push((m.body.clone(), 0, false)),
+                Some(k) => {
+                    let args: Args = args.into_iter().take(k + 1).map(Arc::from).collect();
+                    self.st.pending.push_body(m.body.clone(), args);
+                }
             }
         }
+        self.step();
     }
 
     /// A `\par` in a short macro's argument ends the call (tex.web 392).
@@ -2577,8 +2897,15 @@ impl<'a> Exec<'a> {
 
     /// One command.
     fn command(&mut self) {
-        let Some((t, m)) = self.next_x_m(true) else {
-            self.end();
+        self.at_start = true;
+        let next = self.next_x_m(true);
+        self.at_start = false;
+        let Some((t, m)) = next else {
+            if self.input.is_some() {
+                self.kind = Kind::Input;
+            } else {
+                self.end();
+            }
             return;
         };
         self.cmd = t.clone();
@@ -2624,10 +2951,13 @@ impl<'a> Exec<'a> {
         }
         self.end_par();
         self.kind = Kind::End;
-        if !self.st.groups.is_empty() {
+        // (groups and conditionals open where the piece was entered are
+        // its caller's, closed after it)
+        let entry = self.chain.input(0);
+        if self.st.groups.len() > entry.groups.len() {
             self.err("Missing } inserted at the end of a piece".into());
         }
-        if !self.st.conds.is_empty() {
+        if self.st.conds.len() > entry.conds.len() {
             self.err("Incomplete \\if at the end of a piece".into());
         }
     }
@@ -2662,6 +2992,15 @@ impl<'a> Exec<'a> {
                 }
         });
         self.kind = Kind::Close;
+    }
+
+    /// Where a box's diagnostic says it was made (tex.web 663).
+    fn box_place(&self) -> crate::show::Place {
+        if self.st.in_output() {
+            crate::show::Place::Output
+        } else {
+            crate::show::Place::Here
+        }
     }
 
     /// The innermost group closes: it defines nothing; the tokens
