@@ -1313,6 +1313,12 @@ struct State {
     /// again with all they say (the runs in progress are not stopped for
     /// it, and the pieces after it keep runs that still hold).
     restructure_due: bool,
+    /// The first settled run that changes the sequence while not final (a
+    /// fold read unchecked, or its entry not holding): no piece after it
+    /// starts, and the runs after it stopped, until it is final (the round
+    /// ends: `pick`) or a run of it says nothing new (cleared at every
+    /// install of it, set again by `settle` if it still differs).
+    due_at: Option<usize>,
     inflight: usize,
     /// The page builder's definitions installed this build (by piece id
     /// and node), the last build's not yet made again (by place), and its
@@ -2512,6 +2518,7 @@ impl Build {
             deps,
             restructure: false,
             restructure_due: false,
+            due_at: None,
             inflight: 0,
             fold_defs: Vec::new(),
             predicted,
@@ -3402,10 +3409,11 @@ const STALL_CHECK: Duration = Duration::from_secs(2);
 /// build fails with the pieces' states.
 fn stall(g: &mut State, sh: &Shared, parked: usize, why: &str) {
     let mut d = format!(
-        "{why}: {} running ({parked} parked), settled {}/{}, scan at {} (free {}, done {}), {} to ship, {} logs queued ({} running), {} breaks queued;",
+        "{why}: {} running ({parked} parked), settled {}/{}, due at {:?}, scan at {} (free {}, done {}), {} to ship, {} logs queued ({} running), {} breaks queued;",
         g.inflight,
         g.settled,
         g.p.len(),
+        g.due_at,
         g.scan_next,
         g.scan.is_some(),
         g.scan_done,
@@ -3688,6 +3696,9 @@ fn keep_again(g: &mut State, sh: &Shared, k: usize) -> bool {
     g.running.remove(&k);
     g.p[k].status = Status::Done;
     g.p[k].entered = None;
+    if g.due_at == Some(k) {
+        g.due_at = None;
+    }
     // (its paragraphs whose breaks a restructure or a rerun since the
     // round began left without lines go to the queue: the scan waits for
     // every line, and nothing else queues them for a kept run)
@@ -4088,16 +4099,17 @@ fn settle(g: &mut State, sh: &Shared) -> bool {
             // defined yet (biglatex: the body ran 1.35 s before its class
             // was read, all of it thrown away). The runs in progress after
             // it stop; what they finished is kept as at any round's end.)
-            let fin = !g.p[k].fold_unchecked && g.p[k].run.as_ref().is_some_and(|r| entry_holds(g, k, r));
-            if fin {
-                for &q in &g.running {
-                    if q > k {
-                        sh.cancel[q].store(true, Ordering::Relaxed);
-                    }
+            for &q in &g.running {
+                if q > k {
+                    sh.cancel[q].store(true, Ordering::Relaxed);
                 }
+            }
+            if change_final(g, k) {
                 restructure_now(g, sh);
                 return true;
             }
+            // (not final: the pieces after it wait, `due_at`)
+            g.due_at = Some(g.due_at.map_or(k, |d| d.min(k)));
             g.restructure_due = true;
         }
         g.settled += 1;
@@ -4113,6 +4125,18 @@ fn settle(g: &mut State, sh: &Shared) -> bool {
     false
 }
 
+/// Whether piece `k`'s settled run changes the sequence and nothing can
+/// give back its old `got`: done, unmarked, no fold read unchecked, entered
+/// as its piece is.
+fn change_final(g: &State, k: usize) -> bool {
+    let ps = &g.p[k];
+    ps.status == Status::Done
+        && ps.dirty.is_empty()
+        && !ps.fold_unchecked
+        && !ps.got.same(&ps.expect)
+        && ps.run.as_ref().is_some_and(|r| entry_holds(g, k, r))
+}
+
 /// The scheduler: a function of the state, choosing this thread's next
 /// piece of work.
 fn pick(g: &mut State, sh: &Shared) -> Option<Task> {
@@ -4121,6 +4145,13 @@ fn pick(g: &mut State, sh: &Shared) -> Option<Task> {
     }
     let n = g.p.len();
     if settle(g, sh) {
+        return None;
+    }
+    // (a change waiting to be final, now final: the round ends)
+    if let Some(d) = g.due_at
+        && change_final(g, d)
+    {
+        restructure_now(g, sh);
         return None;
     }
     if g.matching {
@@ -4145,10 +4176,12 @@ fn pick(g: &mut State, sh: &Shared) -> Option<Task> {
     let scan_finish = g.scan_next == n && g.settled == n && !g.scan_done;
     let scan_ok = g.scan.is_some() && (scan_to > g.scan_next || scan_finish);
     let speculate = sh.opts.reads == Reads::Speculate;
+    let due = g.due_at.unwrap_or(usize::MAX);
     let ready = g
         .unstarted
         .iter()
         .copied()
+        .take_while(|&k| k <= due)
         .find(|&k| entry_ready(g, k, speculate && !g.p[k].suspend));
     let run_ok = ready.is_some();
     // (priority: pages out first, then the scan, the reading, line breaking)
@@ -4180,7 +4213,7 @@ fn pick(g: &mut State, sh: &Shared) -> Option<Task> {
                 Order::Random(_) => {
                     let i = rand(g, g.unstarted.len());
                     let k = *g.unstarted.iter().nth(i).expect("an unstarted piece");
-                    if entry_ready(g, k, speculate) {
+                    if k <= due && entry_ready(g, k, speculate) {
                         k
                     } else {
                         first
@@ -4836,6 +4869,11 @@ fn run_and_install(sh: &Shared, k: usize, dirty: &[(Key, u32)], wid: u16) -> u64
         }
         // (entered in the state its predecessors leave now, or run again)
         let entered = entry_holds(&g, k, &run);
+        // (a change waiting at this piece: its new run says again, or not,
+        // when it settles)
+        if g.due_at == Some(k) {
+            g.due_at = None;
+        }
         outcome = u32::from(!(stale.is_empty() && entered));
         if stale.is_empty() && entered {
             g.p[k].lean_later = lean.map(|l| (run.clone(), l));

@@ -268,3 +268,36 @@ fn a_file_read_stops_the_pieces_after_it() {
         }
     }
 }
+
+/// A settled run that reads a file on a page quantity read before the page
+/// scan checked it: the change waits (`due_at`), the pieces after it do
+/// not run, and when the scan refutes the read the piece runs again
+/// without the file: the change is revoked, the pieces after it run, the
+/// file is never read (TeX: `\pagegoal` is `\vsize` after a paragraph).
+#[test]
+fn a_revoked_sequence_change_lets_the_pieces_after_it_run() {
+    let mut main = String::from(
+        "\\catcode`\\{=1 \\catcode`\\}=2 \\catcode`\\#=6 \\font\\tenrm=cmr10 \\tenrm \\tolerance=200 \\linepenalty=10\n\
+         \\parindent=20pt \\baselineskip=12pt \\topskip=10pt \\maxdepth=4pt \\parfillskip=0pt plus 1fil\n\
+         \\hsize=300pt \\vsize=200pt\n\nSome text on the page.\n\n\\ifdim\\pagegoal>1000pt \\input sub \\fi\n\n",
+    );
+    for k in 0..30 {
+        main.push_str(&format!("Word number {k}.\n\n"));
+    }
+    main.push_str("\\end\n");
+    let files = vec![("sub.tex", String::from("\\message{SUB}\n"))];
+    let base = build_with(&files).update(&main, Options::default());
+    assert!(base.errors.is_empty(), "{:?}", base.errors);
+    let log = phitex_flow::print::log("", &base.log, "");
+    assert!(!log.contains("SUB") && !log.contains("(sub"), "the file was read:\n{log}");
+    assert!(base.stats.reruns > 0, "the page quantity was never predicted wrong: {:?}", base.stats);
+    for reads in [phitex_flow::Reads::Suspend, phitex_flow::Reads::Speculate] {
+        for threads in [2, 8] {
+            for order in [phitex_flow::Order::Priority, phitex_flow::Order::Random(2), phitex_flow::Order::Random(9)] {
+                let o = build_with(&files).update(&main, Options { threads, reads, order, ..Options::default() });
+                assert!(o.errors.is_empty(), "{threads} {reads:?} {order:?}: {:?}", o.errors);
+                assert!(o.dvi == base.dvi, "{threads} {reads:?} {order:?}: another DVI");
+            }
+        }
+    }
+}
