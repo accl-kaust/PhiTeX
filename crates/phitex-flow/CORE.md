@@ -897,6 +897,24 @@ at that node (`Names::read_now`/`read_holds`, the one check install and
 `still_dirty` make; the names index answered it twice: 5e3ea81 at
 install, then `reads_still`, which dropped a refuted file read's mark).
 
+Invariant: a node kept by sharing (`run_piece`'s in-place copy of the
+old chain) has had every check a node looked at gets: the copy stops
+before a `Cut` node, and before an `Input` node when the layout reads
+the piece's `\input`s in it (F's TRIP update class: the shared node
+ended the run at the file the layout read inline, its run saying
+"input" at every round's end, 64 rounds). A written file a read finds
+no fold value for at its place is guessed as a read last found it
+(`Names::file_guess`), so the layout a read of it makes comes back;
+the probes validate it like any prediction.
+
+Invariant: a written file's content at a read is what the writes that
+reached it in this build's sequence wrote, kept pages included: the
+routines' call logs (their deferred `\write`s among them) are kept with
+the pages and marks (`Build::call_logs`), all of them when every page
+is kept, those before the scan's and after its convergence otherwise
+(B2 had let a LaTeX document keep its pages without them: run 2 of the
+fixpoint wrote the `.aux` without a kept page's `\@writefile`).
+
 - **The read** (`graph::Env::fold_read`, `Names::fold_value`): answered
   with the fold's value at `(piece, node)` as known — this build's,
   else the last build's (`Build::fold_vals`, by piece id and node),
@@ -1596,6 +1614,26 @@ piece 0.
 seeds (1) of one edit on tiny, compared with the cold build and with
 `latex` itself on its first run (DVI with the date masked, `.aux`). Locally, 3 seeds of 2 edits at 8
 threads (random schedules) passed, and so did seed 0 against `latex`.
+
+**300 LaTeX seeds** (job 7878: `LATEX=1 JOBS=6 TIMEOUT=180
+scripts/flow-fuzz.sh 30`, 30 seeds of 6 edits on each of B's ten
+documents, at 1 or 8 threads at random, on the saved format; snapshot
+89f3a41 = 96bdfcc with the timeout-resume and OUT fixes, before
+A's W2 and keep_again fixes): 229 passed, 0 over-invalidated, 71 failed.
+- **Over-invalidation: none.** The check runs on the seeds that keep
+  their nodes (a third), now that the graph holds only the document's
+  nodes.
+- **69 timeouts** (180 s a seed): gfx 30 of 30, rules 12, titlepage 7,
+  packages 7, math 7, tables 2, ams 2, sections 1, figures 1; layout
+  none. gfx fails at step 2–4 whatever the edit or schedule, so it may
+  be slowness (W3: gfx 40 s through the CLI) rather than a hang; the
+  others are mostly blank lines in or out. To be told apart: each
+  replayed alone with a longer limit.
+- **2 DVI mismatches**, the update against our cold build: ams seed 24
+  step 3 (the class option toggled) and rules seed 10 step 3 (an `\item`
+  removed). The log first differs at a `Package:` line (amsmath,
+  caption).
+- The repros are in `~/code/flinner/partex-phitex-runs/cmd-7878/fuzz-latex/latex/`.
 The budgets table gets LaTeX rows (`phitex-flow --budgets REPS latex`
 for all of them, `latex-NAME` for one; `tests/budgets.rs` runs tiny once).
 The edits are word, line, page-break, the `\newcommand` body (def) and

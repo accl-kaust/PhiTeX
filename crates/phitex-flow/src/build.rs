@@ -471,6 +471,8 @@ pub struct Build {
     /// (the page builder's quantities, the files the run wrote), by piece
     /// id and node: the next build's predictions ([`Names::fold_value`]).
     fold_vals: FxMap<(PieceId, u32, Key), Val>,
+    /// [`Names::file_guess`], kept from round to round and build to build.
+    file_guess: FxMap<Arc<str>, Val>,
     /// Each piece's file (`None`: the main file) and the lines of that
     /// file before it, as the last build laid them out
     /// ([`Build::source_place`]).
@@ -483,6 +485,11 @@ pub struct Build {
     /// `pages[i]`), and the page builder's marks.
     page_orgs: Vec<PageOrg>,
     marks: Vec<(u32, u32)>,
+    /// The log of each call that fired a routine (by its mark's index),
+    /// with its pages: what the routines wrote, the deferred `\write`s of
+    /// the pages they shipped among it. Kept with the pages and marks, so
+    /// that a page kept from the last build keeps what it wrote.
+    call_logs: CallLogs,
     next_id: PieceId,
     readers: Readers,
     /// The source the pieces were cut from, and the byte offset of each
@@ -1008,6 +1015,12 @@ struct Names {
     /// build's, then this build's as the folds validate the reads
     /// ([`Names::fold_value`]).
     fold_vals: RwLock<FxMap<(u32, u32, Key), Val>>,
+    /// Each written file's bytes as a read of it last found them, for a
+    /// read at a place the folds have no value for yet: a piece the
+    /// sequence made again (cut otherwise around an `\input` of the file
+    /// itself) reads what it read before, not the file as given, so that
+    /// the layout the read makes comes back ([`Names::fold_value`]).
+    file_guess: RwLock<FxMap<Arc<str>, Val>>,
 }
 
 /// A format's definitions by name, and its fonts' numbering
@@ -1030,6 +1043,7 @@ impl Names {
             given,
             etex,
             fold_vals: RwLock::default(),
+            file_guess: RwLock::default(),
         }
     }
 
@@ -1050,7 +1064,13 @@ impl Names {
             .get(&(at.0, at.1, key.clone()))
             .cloned();
         Some(known.unwrap_or_else(|| match key {
-            Key::File(n) => self.given.file(n).map_or(Val::Void, Val::Bytes),
+            Key::File(n) => self
+                .file_guess
+                .read()
+                .expect("file guesses")
+                .get(n)
+                .cloned()
+                .unwrap_or_else(|| self.given.file(n).map_or(Val::Void, Val::Bytes)),
             _ => self.reaching(key, at, font).1,
         }))
     }
@@ -1246,6 +1266,9 @@ fn dirty_from(d: &mut Dirty, key: Key, from: u32) {
 /// ([`State::last_readers`]).
 type LastReaders = (Arc<Run>, Arc<FxMap<Key, u32>>);
 
+/// The logs of the calls that fired a routine, by call ([`page::Scan::call_logs`]).
+type CallLogs = Vec<(u32, Vec<CallLog>)>;
+
 /// An edited piece's predecessor: its run, lines and text.
 type Prev = (Arc<Run>, Vec<Option<Lines>>, Arc<[char]>);
 
@@ -1302,6 +1325,11 @@ struct State {
     /// (the last build's, where the scan met its pages again).
     marks_before: Vec<(u32, u32)>,
     marks_after: Vec<(u32, u32)>,
+    /// The same of the calls' logs: the last build's, those kept before
+    /// the scan's and after them (their calls and pages shifted).
+    old_call_logs: CallLogs,
+    call_logs_before: CallLogs,
+    call_logs_after: CallLogs,
     rng: u64,
     stats: Stats,
     done: bool,
@@ -1334,6 +1362,9 @@ struct State {
 
 struct Shared {
     names: Names,
+    /// How many commands each piece's run in progress has run (set every
+    /// `CHECK_EVERY`; for the dumps).
+    progress: Vec<AtomicU64>,
     /// The elements in order, fixed for the build.
     seq: Sequence,
     /// Bumped (under `park`, and `parked` notified) whenever a run is
@@ -1435,9 +1466,11 @@ impl Build {
             pages: Vec::new(),
             page_orgs: Vec::new(),
             marks: Vec::new(),
+            call_logs: Vec::new(),
             next_id: 0,
             readers: FxMap::default(),
             fold_vals: FxMap::default(),
+            file_guess: FxMap::default(),
             places: FxMap::default(),
             src: String::new(),
             starts: Vec::new(),
@@ -1988,6 +2021,7 @@ impl Build {
             self.pages.clone(),
             self.page_orgs.clone(),
             self.marks.clone(),
+            self.call_logs.clone(),
         );
         // (the pages to compare with are the last build's: so are the runs
         // whose material made them, whatever a round lays out)
@@ -1997,7 +2031,7 @@ impl Build {
         loop {
             rounds += 1;
             let t_round = Instant::now();
-            if let Some(mut out) = self.round(&texts, opts, t0, time_cut, rounds > 64) {
+            if let Some(mut out) = self.round(&texts, opts, t0, time_cut, rounds > MAX_ROUNDS) {
                 let mut carried = std::mem::take(&mut self.carried);
                 carried.round_walls.push(t_round.elapsed());
                 out.stats.absorb(carried);
@@ -2011,6 +2045,7 @@ impl Build {
             self.pages.clone_from(&saved.0);
             self.page_orgs.clone_from(&saved.1);
             self.marks.clone_from(&saved.2);
+            self.call_logs.clone_from(&saved.3);
         }
     }
 
@@ -2308,6 +2343,7 @@ impl Build {
         // (the last build's folds' values, at the pieces' places now)
         {
             let at: FxMap<PieceId, u32> = p.iter().enumerate().map(|(k, x)| (x.id, k as u32)).collect();
+            names.file_guess.write().expect("file guesses").clone_from(&self.file_guess);
             let mut fv = names.fold_vals.write().expect("fold values");
             for ((id, node, key), v) in &self.fold_vals {
                 if let Some(&k) = at.get(id) {
@@ -2487,6 +2523,8 @@ impl Build {
             orgs: Vec::new(),
             marks_before: Vec::new(),
             marks_after: Vec::new(),
+            call_logs_before: Vec::new(),
+            call_logs_after: Vec::new(),
             bodies: Vec::new(),
             numbers: Arc::new(dvi::numbers([self.format_fonts()])),
             numbered: 0,
@@ -2507,6 +2545,7 @@ impl Build {
             old_marks: std::mem::take(&mut self.marks),
             old_pdf_tail: self.pdf.tail.clone(),
             pdf_tail: Arc::default(),
+            old_call_logs: std::mem::take(&mut self.call_logs),
             rng: match opts.order {
                 Order::Random(s) => s.wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1,
                 Order::Priority => 1,
@@ -2554,6 +2593,7 @@ impl Build {
                 .map(|ps| AtomicBool::new(ps.status == Status::Done))
                 .collect(),
             cancel: state.p.iter().map(|_| AtomicBool::new(false)).collect(),
+            progress: state.p.iter().map(|_| AtomicU64::new(0)).collect(),
             inline: state.p.iter().map(|ps| ps.inline).collect(),
             waiting: state.p.iter().map(|_| AtomicBool::new(false)).collect(),
             restructuring: AtomicBool::new(false),
@@ -2578,6 +2618,10 @@ impl Build {
             memo_old,
         };
         std::thread::scope(|s| {
+            if let Some(secs) = std::env::var("PHITEX_HANG_DUMP").ok().and_then(|v| v.parse::<u64>().ok()) {
+                let sh = &sh;
+                s.spawn(move || watchdog(sh, Duration::from_secs(secs.max(1))));
+            }
             for id in 0..threads {
                 let sh = &sh;
                 std::thread::Builder::new()
@@ -2676,11 +2720,15 @@ impl Build {
                 ps.log = Some(Arc::new(logs::fragment(&ps.text, run, &ps.lines)));
             }
         }
-        let call_logs: Vec<(u32, Vec<CallLog>)> = st
-            .scan
-            .as_ref()
-            .map(|s| s.call_logs.clone())
-            .unwrap_or_default();
+        // (the kept calls' logs around the scan's: a page kept from the last
+        // build keeps what its routine wrote)
+        let call_logs: CallLogs = st
+            .call_logs_before
+            .iter()
+            .chain(st.scan.as_ref().map_or(&[][..], |s| &s.call_logs[..]))
+            .chain(&st.call_logs_after)
+            .cloned()
+            .collect();
         // (the piece holding `\end` ends the document: the pieces after it
         // are not in the log; CORE.md: the core is to not run them)
         // (and in a session, the pieces after it up to the next job's start)
@@ -2755,6 +2803,7 @@ impl Build {
                 if now != *read {
                     refuted.push((*k, key.clone(), *n));
                 }
+                self.file_guess.insert(name.clone(), now.clone());
                 sh.names.set_fold_value(key, (*k as u32, *n), now);
             }
         }
@@ -2895,6 +2944,7 @@ impl Build {
         self.pages = st.pages.into_iter().zip(bodies).collect();
         self.page_orgs = st.orgs;
         self.marks = marks;
+        self.call_logs = call_logs;
         self.pdf.tail = st.pdf_tail;
         // (pdfTeX's read-backs: the fold answered otherwise than the nodes
         // read — another round, the readers of the answers that changed
@@ -3281,6 +3331,10 @@ fn outside_ranges(names: &Names, key: &Key, k: usize, node: u32, font: &Arc<Font
     v.join(", ")
 }
 
+/// How many rounds a build lays its sequence out before its last, which
+/// may not lay it out again.
+const MAX_ROUNDS: usize = 64;
+
 /// How many times a piece may run in one round before the build fails as
 /// a livelock ([`stall`]).
 const RUN_LIMIT: u32 = 4096;
@@ -3292,6 +3346,21 @@ const STALL_CHECK: Duration = Duration::from_secs(2);
 /// The scheduler stalled: the round ends, the runs parked stop, and the
 /// build fails with the pieces' states.
 fn stall(g: &mut State, sh: &Shared, parked: usize, why: &str) {
+    let d = state_dump(g, sh, parked, why);
+    g.stalled = Some(d);
+    g.done = true;
+    for c in &sh.cancel {
+        c.store(true, Ordering::Relaxed);
+    }
+    sh.restructuring.store(true, Ordering::Release);
+    sh.cv.notify_all();
+    notify(sh, true);
+}
+
+/// The scheduler's state, for a stall's or a hang's dump: what runs and
+/// how far each run has got, the scan, the queues, and every piece not
+/// settled.
+fn state_dump(g: &State, sh: &Shared, parked: usize, why: &str) -> String {
     let mut d = format!(
         "{why}: {} running ({parked} parked), settled {}/{}, scan at {} (free {}, done {}), {} to ship, {} logs queued ({} running), {} breaks queued;",
         g.inflight,
@@ -3347,15 +3416,36 @@ fn stall(g: &mut State, sh: &Shared, parked: usize, why: &str) {
             sh.waiting[k].load(Ordering::Acquire),
             ps.run.is_some()
         );
+        if ps.status == Status::Running {
+            let _ = write!(
+                d,
+                " (this run: {} commands so far, run {} times this round)",
+                sh.progress[k].load(Ordering::Relaxed),
+                ps.runs
+            );
+        }
     }
-    g.stalled = Some(d);
-    g.done = true;
-    for c in &sh.cancel {
-        c.store(true, Ordering::Relaxed);
+    d
+}
+
+/// `PHITEX_HANG_DUMP=SECS`: every SECS seconds of a round, the
+/// scheduler's state on stderr ([`state_dump`]), so that a build cut off
+/// by a timeout says where it was.
+fn watchdog(sh: &Shared, every: Duration) {
+    let t0 = Instant::now();
+    let mut next = every;
+    loop {
+        std::thread::sleep(Duration::from_millis(100));
+        let g = lock(sh);
+        if g.done || finished(&g) {
+            return;
+        }
+        if t0.elapsed() >= next {
+            let parked = sh.waiting.iter().filter(|w| w.load(Ordering::Acquire)).count();
+            eprintln!("{}", state_dump(&g, sh, parked, &format!("hang watchdog at {:.0} s", t0.elapsed().as_secs_f64())));
+            next += every;
+        }
     }
-    sh.restructuring.store(true, Ordering::Release);
-    sh.cv.notify_all();
-    notify(sh, true);
 }
 
 fn finished(g: &State) -> bool {
@@ -3819,6 +3909,7 @@ fn advance_match(g: &mut State) {
             g.orgs = g.old_orgs.to_vec();
             g.marks_before = std::mem::take(&mut g.old_marks);
             g.pdf_tail = g.old_pdf_tail.clone();
+            g.call_logs_before = std::mem::take(&mut g.old_call_logs);
             g.scan_done = true;
             g.matching = false;
         } else {
@@ -3907,6 +3998,8 @@ fn resume(g: &mut State, c: usize) {
         (ci, Some(g.old_marks[ci].0))
     };
     g.marks_before = g.old_marks[..kept].to_vec();
+    // (the calls made again from here log again)
+    g.call_logs_before = g.old_call_logs.iter().filter(|c| (c.0 as usize) < kept).cloned().collect();
     g.scan = Some(Box::new(Scan::resumed(
         p as u32,
         d,
@@ -3947,6 +4040,17 @@ fn settle(g: &mut State, sh: &Shared) -> bool {
         // (a settled run that says otherwise of the sequence than the
         // layout assumed changes it, once all have settled)
         let k = g.settled;
+        // (the last round may not lay the sequence out again: a run reading
+        // on into the next text there leaves the pieces after it unable to
+        // start — the build fails saying so, it does not stall)
+        if !sh.restructure_ok && g.p[k].got.join && !g.p[k].got.same(&g.p[k].expect) {
+            let parked = sh.waiting.iter().filter(|w| w.load(Ordering::Acquire)).count();
+            let why = format!(
+                "the sequence of pieces did not settle in {MAX_ROUNDS} rounds: piece {k}'s run reads on into the next piece's text (a group or command open at its end), and the last round may not join them"
+            );
+            stall(g, sh, parked, &why);
+            return true;
+        }
         if sh.restructure_ok && !g.p[k].got.same(&g.p[k].expect) {
             // (a settled run reading on into the next text: the pieces
             // after it begin in the middle of a command, they wait for the
@@ -4340,6 +4444,24 @@ fn execute(sh: &Shared, task: Task) -> (u64, u8) {
                     .iter()
                     .map(|&(a, b)| (sh_(a), sh_(b)))
                     .collect();
+                // (the last build's calls from there, their marks and pages
+                // shifted as the pages are)
+                let page_ = |x: u32| (i64::from(x) + shift) as u32;
+                g.call_logs_after = g
+                    .old_call_logs
+                    .iter()
+                    .filter(|c| c.0 as usize >= from)
+                    .map(|(c, l)| {
+                        let l = l
+                            .iter()
+                            .map(|e| match e {
+                                CallLog::Page(p) => CallLog::Page(page_(*p)),
+                                CallLog::Text(t) => CallLog::Text(t.clone()),
+                            })
+                            .collect();
+                        ((i64::from(*c) + dmarks) as u32, l)
+                    })
+                    .collect();
                 g.scan_next = g.p.len();
                 g.pdf_tail = g.old_pdf_tail.clone();
                 g.scan_done = true;
@@ -4388,7 +4510,9 @@ fn execute(sh: &Shared, task: Task) -> (u64, u8) {
 fn run_and_install(sh: &Shared, k: usize, dirty: &[(Key, u32)]) -> u64 {
     let (text, old, entry, strict, entry_assumed) = {
         let mut g = lock(sh);
-        if std::mem::take(&mut g.p[k].recheck) && dirty.is_empty() && keep_again(&mut g, sh, k) {
+        // (kept again only if no mark came since it was picked: a mark
+        // made while it was Running is in its dirty names, not its status)
+        if std::mem::take(&mut g.p[k].recheck) && dirty.is_empty() && g.p[k].dirty.is_empty() && keep_again(&mut g, sh, k) {
             drop(g);
             notify(sh, true);
             return 0;
@@ -4443,6 +4567,18 @@ fn run_and_install(sh: &Shared, k: usize, dirty: &[(Key, u32)]) -> u64 {
         return run.ran;
     }
     let steps = run.ran;
+    if std::env::var_os("PHITEX_GROUPS").is_some() {
+        let shown = run.groups_shown(&text);
+        eprintln!("groups: piece {k} ran {}: {shown}", run.ran);
+        // (a group opened in this run and open at its end: the nodes from
+        // its opener)
+        if let Some(at) = shown.split("opened at node ").nth(1).and_then(|r| r.split(|c: char| !c.is_ascii_digit()).next()).and_then(|x| x.parse::<usize>().ok())
+            && !shown.contains("(before the piece)")
+        {
+            let name = |x: u32| sh.names.cs.name(x).to_string();
+            eprintln!("groups: piece {k} from node {at}:{}", run.nodes_shown(&text, at.saturating_sub(2), 60, &name));
+        }
+    }
     if std::env::var_os("PHITEX_CENSUS").is_some() {
         eprintln!("census piece {k} ran {}: {}", run.ran, run.census());
     }
@@ -4928,6 +5064,9 @@ impl Env for PieceEnv<'_> {
         }
         let cap = self.sh.opts.main_memory;
         let periodic = ran.is_multiple_of(CHECK_EVERY);
+        if periodic {
+            self.sh.progress[self.k].store(ran, Ordering::Relaxed);
+        }
         if !(periodic || words > cap) {
             return Check::Go;
         }
