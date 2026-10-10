@@ -30,6 +30,7 @@ pub mod lib;
 pub mod image;
 pub mod colorstack;
 pub mod rand;
+pub mod vf;
 
 use std::sync::Arc;
 

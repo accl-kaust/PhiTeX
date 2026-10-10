@@ -2588,6 +2588,19 @@ impl Build {
             std::iter::once(self.format_fonts())
                 .chain(st.p.iter().filter_map(|ps| ps.run.as_ref().map(|r| &r.fonts[..]))),
         );
+        // (how many fonts the job had loaded up to each piece: a page's
+        // virtual fonts' local fonts are numbered after its piece's)
+        let loaded_by_piece: Vec<u32> = {
+            let mut m = dvi::numbers([self.format_fonts()]);
+            st.p.iter()
+                .map(|ps| {
+                    if let Some(r) = &ps.run {
+                        dvi::extend(&mut m, &r.fonts);
+                    }
+                    m.len() as u32
+                })
+                .collect()
+        };
         let mut errors = Vec::new();
         // (PDF mode, from the first page's `\pdfoutput`: the PDF file is
         // the fold over the pages, as the DVI file is)
@@ -2595,7 +2608,9 @@ impl Build {
         let (out, pdf, again) = if st.pages.first().is_some_and(|p| p.ship.pdf.is_some()) {
             let live = live_pieces(&st.p);
             let last = live.iter().rposition(|&l| l).unwrap_or(0);
-            let w = pdf_file(&sh.names, &sh.font, last, &numbers, &st.pages, &st.orgs, &st.pdf_tail, &mut bodies);
+            let ship_fonts: Vec<u32> =
+                st.orgs.iter().map(|o| loaded_by_piece.get(o.call.0 as usize).or(loaded_by_piece.last()).copied().unwrap_or(0)).collect();
+            let w = pdf_file(&sh.names, &sh.font, &sh.fonts, last, &numbers, ship_fonts, &st.pages, &st.orgs, &st.pdf_tail, &mut bodies);
             errors.extend(w.errors.into_iter().map(|e| format!("pdf: {e}")));
             pdf_answers = Some(w.answers);
             (Vec::new(), w.bytes, w.again)
@@ -2882,6 +2897,8 @@ impl Build {
 struct PdfFiles<'a> {
     names: &'a Names,
     font: &'a Arc<Font>,
+    /// The TFM files `\font` can load (a virtual font's local fonts).
+    fonts: &'a Arc<FontFiles>,
     /// The end of the job.
     at: Pos,
 }
@@ -2889,6 +2906,18 @@ struct PdfFiles<'a> {
 impl crate::pdf::fold::Files for PdfFiles<'_> {
     fn get(&mut self, name: &str) -> Option<(Arc<str>, Arc<[u8]>)> {
         self.names.given.found(name).or_else(|| crate::tfm::pdf_file(name))
+    }
+    fn vf(&mut self, name: &str) -> Option<Arc<[u8]>> {
+        match &self.names.given.finder {
+            Some((f, prog)) => f.find(name, KpseFormat::Vf, prog).and_then(|p| f.read(&p)),
+            None => crate::tfm::vf_file(name),
+        }
+    }
+    fn tfm(&mut self, name: &str) -> Option<Arc<[u8]>> {
+        match &self.names.given.finder {
+            Some((f, prog)) => f.find(name, KpseFormat::Tfm, prog).and_then(|p| f.read(&p)),
+            None => self.fonts.get(name),
+        }
     }
     fn glyph_unicode(&mut self, name: &str) -> Option<crate::pdf::font::unicode::Uni> {
         use crate::pdf::font::unicode::Uni;
@@ -2904,8 +2933,10 @@ impl crate::pdf::fold::Files for PdfFiles<'_> {
 fn pdf_file(
     names: &Names,
     font: &Arc<Font>,
+    fonts: &Arc<FontFiles>,
     last: usize,
     numbers: &dvi::Numbers,
+    ship_fonts: Vec<u32>,
     pages: &[Page],
     orgs: &[PageOrg],
     tail: &crate::page::PdfEvents,
@@ -2947,11 +2978,12 @@ fn pdf_file(
             Val::Int(i) => i,
             _ => 0,
         },
+        ship_fonts,
     };
     let mut pdf_bodies: Vec<Arc<crate::pdf::content::PageBody>> =
         bodies.iter().map(|b| b.pdf.clone().unwrap_or_else(|| Arc::new(crate::pdf::content::empty()))).collect();
     let events: Vec<&crate::page::PdfEvents> = orgs.iter().map(|o| &o.pdf).chain(std::iter::once(tail)).collect();
-    let w = crate::pdf::fold::assemble(pages, &mut pdf_bodies, &events, numbers, &end, &mut PdfFiles { names, font, at });
+    let w = crate::pdf::fold::assemble(pages, &mut pdf_bodies, &events, numbers, &end, &mut PdfFiles { names, font, fonts, at });
     for (b, p) in bodies.iter_mut().zip(pdf_bodies) {
         if !b.pdf.as_ref().is_some_and(|x| Arc::ptr_eq(x, &p)) {
             let mut nb = dvi::Body { bytes: Vec::new(), fonts: Vec::new(), fixed: None, max_push: 0, io: p.io, pdf: None };

@@ -99,6 +99,10 @@ pub enum What {
     SavePos,
     /// `\pdfrunninglinkoff` (false), `\pdfrunninglinkon`.
     RunningLink(bool),
+    /// `\pdfinterwordspaceoff` (false), `\pdfinterwordspaceon`;
+    /// `\pdffakespace`.
+    InterwordSpace(bool),
+    FakeSpace,
 }
 
 impl What {
@@ -201,9 +205,10 @@ pub enum Event {
     ColorStacks,
     /// A font's PDF object made if it is not (`pdf_init_font`:
     /// `\pdffontobjnum`, `\pdffontname`). Answer: \[its object number, the
-    /// font whose name it is shown with (`ff`)].
+    /// font whose name it is shown with (`ff`), 1 if the font is virtual].
     FontInit(Arc<Font>),
     /// `\pdfincludechars`: the font initialized, characters marked used.
+    /// Answer: \[-, -, 1 if the font is virtual].
     IncludeChars(Arc<Font>, Vec<u8>),
     /// `\pdffontattr`, `\pdfnobuiltintounicode`.
     FontAttr(Arc<Font>, Text),

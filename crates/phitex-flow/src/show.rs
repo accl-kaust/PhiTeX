@@ -623,6 +623,8 @@ impl Shower<'_> {
             What::EndThread => self.cx.esc(self.out, "pdfendthread"),
             What::SavePos => self.cx.esc(self.out, "pdfsavepos"),
             What::RunningLink(on) => self.cx.esc(self.out, if *on { "pdfrunninglinkon" } else { "pdfrunninglinkoff" }),
+            What::InterwordSpace(on) => self.cx.esc(self.out, if *on { "pdfinterwordspaceon" } else { "pdfinterwordspaceoff" }),
+            What::FakeSpace => self.cx.esc(self.out, "pdffakespace"),
         }
     }
 

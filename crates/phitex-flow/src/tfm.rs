@@ -593,6 +593,31 @@ pub fn pdf_file(name: &str) -> Option<(Arc<str>, Arc<[u8]>)> {
     v
 }
 
+/// TeX Live's virtual font directories, where they exist.
+pub fn vf_dirs() -> Vec<std::path::PathBuf> {
+    ["/usr/share/texmf-dist/fonts/vf", "/usr/share/texlive/texmf-dist/fonts/vf", "/usr/local/texlive/texmf-dist/fonts/vf"]
+        .iter()
+        .map(std::path::PathBuf::from)
+        .filter(|p| p.is_dir())
+        .collect()
+}
+
+/// Font `name`'s `.vf` file below [`vf_dirs`], if there is one (the index
+/// and the bytes made once per process, as [`pdf_file`]'s).
+pub fn vf_file(name: &str) -> Option<Arc<[u8]>> {
+    type Cache = std::sync::Mutex<std::collections::HashMap<String, Option<Arc<[u8]>>>>;
+    static INDEX: std::sync::OnceLock<Index> = std::sync::OnceLock::new();
+    static CACHE: std::sync::OnceLock<Cache> = std::sync::OnceLock::new();
+    let cache = CACHE.get_or_init(Cache::default);
+    if let Some(v) = cache.lock().expect("vf cache").get(name) {
+        return v.clone();
+    }
+    let index = INDEX.get_or_init(|| Index::of_kinds(&vf_dirs(), &["vf"]));
+    let v = index.paths.get(&format!("{name}.vf")).and_then(|p| std::fs::read(p).ok()).map(Arc::from);
+    cache.lock().expect("vf cache").insert(name.to_string(), v.clone());
+    v
+}
+
 /// kpathsea's lookups as a build is given them: a file of a format by
 /// name, the path found, and a file's bytes by path (each a pure function
 /// of its argument during a build). XeTeX's native fonts (`[file]`

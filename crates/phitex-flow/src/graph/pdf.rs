@@ -510,7 +510,11 @@ impl Exec<'_> {
                 }
                 let Some(f) = self.pdf_font() else { return };
                 let t = self.pdf_text();
-                self.pdf_event(Event::IncludeChars(f, t.to_vec()));
+                let i = self.pdf_event(Event::IncludeChars(f, t.to_vec()));
+                // (`pdf_check_vf_cur_val`)
+                if self.pdf_answer(i, 2) == Some(1) {
+                    self.pdf_fatal("font", "command cannot be used with virtual font");
+                }
             }
             "pdffontattr" => {
                 if !self.pdf_on(name, true) {
@@ -537,6 +541,16 @@ impl Exec<'_> {
             "pdfrunninglinkoff" | "pdfrunninglinkon" => {
                 if self.pdf_on(name, true) {
                     self.pdf_whatsit(What::RunningLink(name == "pdfrunninglinkon"));
+                }
+            }
+            "pdfinterwordspaceoff" | "pdfinterwordspaceon" => {
+                if self.pdf_on(name, true) {
+                    self.pdf_whatsit(What::InterwordSpace(name == "pdfinterwordspaceon"));
+                }
+            }
+            "pdffakespace" => {
+                if self.pdf_on(name, true) {
+                    self.pdf_whatsit(What::FakeSpace);
                 }
             }
             _ => self.err(format!("\\{name} is not supported yet")),
@@ -669,8 +683,10 @@ impl Exec<'_> {
             self.pdf_fatal("ext1", &format!("cannot find image file '{fname}'"));
             return;
         };
+        // (`img_name`: the file's path as found, `/PTEX.FileName`'s)
+        let path = self.env.file_path(&found);
         let read = crate::pdf::image::read_image(
-            &found,
+            &path,
             data,
             page,
             named.as_deref(),
@@ -912,6 +928,10 @@ impl Exec<'_> {
             "pdffontname" | "pdffontobjnum" => {
                 let Some(f) = self.pdf_font() else { return };
                 let i = self.pdf_event(Event::FontInit(f));
+                if self.pdf_answer(i, 2) == Some(1) {
+                    self.pdf_fatal("font", "command cannot be used with virtual font");
+                    return;
+                }
                 let v = if name == "pdffontname" { self.pdf_answer(i, 1) } else { self.pdf_answer(i, 0) };
                 let _ = write!(s, "{}", v.unwrap_or(0));
             }

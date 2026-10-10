@@ -12,7 +12,7 @@ use phitex_flow::build::MAIN_MEMORY;
 use phitex_flow::{Build, Font, Options, Order, Reads};
 
 /// The documents.
-const DOCS: [&str; 26] = [
+const DOCS: [&str; 28] = [
     "hello",
     "compressed",
     "mag",
@@ -40,6 +40,8 @@ const DOCS: [&str; 26] = [
     "readback",
     "thread",
     "pageref",
+    "vf",
+    "interword",
 ];
 
 /// The directories a document's files are found in: its own, and the
@@ -342,6 +344,16 @@ fn thread() {
 #[test]
 fn pageref() {
     check("pageref");
+}
+
+#[test]
+fn vf() {
+    check("vf");
+}
+
+#[test]
+fn interword() {
+    check("interword");
 }
 
 /// Page 2 guesses its decimal digits (page 1 fixed 3) and which font

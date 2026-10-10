@@ -60,6 +60,12 @@ pub struct End {
     pub params: Arc<Params>,
     pub page_width: i32,
     pub page_height: i32,
+    /// For each page, how many fonts the job had loaded where it was
+    /// shipped (the format's and those of the pieces up to the page's):
+    /// a virtual font's local fonts loaded then are numbered after them
+    /// (`vf_def_font`'s `read_font_info`), the fonts loaded later after
+    /// those.
+    pub ship_fonts: Vec<u32>,
 }
 
 /// The files the fold reads (the map file, font files, encodings): their
@@ -69,6 +75,14 @@ pub trait Files {
     /// `\pdfglyphtounicode`'s entry of a name reaching the end of the job
     /// (`Key::GlyphUnicode`); the empty name's says whether there is any.
     fn glyph_unicode(&mut self, _name: &str) -> Option<Uni> {
+        None
+    }
+    /// Font `name`'s `.vf` file, if there is one.
+    fn vf(&mut self, _name: &str) -> Option<Arc<[u8]>> {
+        None
+    }
+    /// Font `name`'s TFM file (a virtual font's local font).
+    fn tfm(&mut self, _name: &str) -> Option<Arc<[u8]>> {
         None
     }
 }
@@ -318,6 +332,22 @@ struct F<'a> {
     png_group: u32,
     png_group_written: bool,
     numbers: &'a Numbers,
+    /// Virtual fonts (pdftex.web part 32e): each font looked for once
+    /// (`None`: real), by its identity; the numbering once a virtual
+    /// font's local fonts were loaded (`numbers` before), the fonts in
+    /// that order with whether each is such a local; how many fonts the
+    /// job had loaded where the page being shipped was; the fonts known,
+    /// by identity.
+    vfs: HashMap<Arc<str>, Option<Arc<super::vf::Vf>>>,
+    /// Faked interword spaces: each font's space character, as found;
+    /// the dummy font, once read.
+    space_chars: HashMap<Arc<str>, bool>,
+    dummy: Option<Arc<Font>>,
+    dummy_tried: bool,
+    vf_numbers: Option<Numbers>,
+    vf_order: Vec<(Arc<str>, bool)>,
+    ship_count: u32,
+    known_fonts: HashMap<Arc<str>, Arc<Font>>,
     answers: crate::build::PdfAnswers,
     /// `\pdfpagewidth`, `\pdfpageheight` at the end; `\pdfptexuseunderscore`.
     end_page_dims: (i32, i32),
@@ -330,6 +360,10 @@ struct F<'a> {
 struct View<'x> {
     objs: &'x [Obj],
     data: &'x HashMap<u32, Data>,
+    vfs: &'x HashMap<Arc<str>, Option<Arc<super::vf::Vf>>>,
+    fonts: &'x BTreeMap<u32, UsedFont>,
+    space_chars: &'x HashMap<Arc<str>, bool>,
+    dummy: Option<&'x Arc<Font>>,
 }
 
 impl Objs for View<'_> {
@@ -347,6 +381,22 @@ impl Objs for View<'_> {
             Data::Ximage { image, index, .. } => Some(ImageRef { index: *index, image: image.clone() }),
             _ => None,
         }
+    }
+    fn vf(&self, f: &Font) -> content::VfKnown {
+        match self.vfs.get(&f.key) {
+            None => content::VfKnown::Unknown,
+            Some(None) => content::VfKnown::Real,
+            Some(Some(v)) => content::VfKnown::Virtual(v.clone()),
+        }
+    }
+    fn font_used(&self, k: u32) -> Option<bool> {
+        Some(self.fonts.contains_key(&k))
+    }
+    fn space_char(&self, f: &Font) -> Option<bool> {
+        self.space_chars.get(&f.key).copied()
+    }
+    fn dummy_font(&self) -> Option<Arc<Font>> {
+        self.dummy.cloned()
     }
 }
 
@@ -1270,7 +1320,174 @@ impl F<'_> {
 
     /// The font number of `font` (TeX's order of loading).
     fn font_num(&self, font: &Font) -> Option<u32> {
-        self.numbers.get(&font.key).copied()
+        self.nums().get(&font.key).copied()
+    }
+
+    /// The fonts' numbering where the fold is.
+    fn nums(&self) -> &Numbers {
+        self.vf_numbers.as_ref().unwrap_or(self.numbers)
+    }
+
+    // ---- virtual fonts (pdftex.web part 32e)
+
+    /// `do_vf`: font `font`'s `.vf` file read if there is one, its local
+    /// fonts loaded (`vf_def_font`); `Some` if it is virtual. Once per
+    /// font.
+    fn do_vf(&mut self, font: &Arc<Font>) -> Option<Arc<super::vf::Vf>> {
+        if let Some(v) = self.vfs.get(&font.key) {
+            return v.clone();
+        }
+        self.vfs.insert(font.key.clone(), None);
+        self.known_fonts.entry(font.key.clone()).or_insert_with(|| font.clone());
+        let data = self.files.vf(&font.name)?;
+        let parsed = match super::vf::parse(font, &data) {
+            Ok(p) => p,
+            Err(e) => {
+                self.errors.push(e);
+                return None;
+            }
+        };
+        self.warnings.extend(parsed.warnings);
+        let mut fonts = Vec::with_capacity(parsed.locals.len());
+        for l in &parsed.locals {
+            let k = self.vf_def_font(l);
+            if let Some(kf) = &k {
+                let check = kf.checksum.to_be_bytes();
+                if l.checksum != [0; 4] && check != [0; 4] && l.checksum != check {
+                    self.warnings.push(super::vf::local_warning(font, kf, "checksum mismatch"));
+                }
+                if l.ds != kf.design_size {
+                    self.warnings.push(super::vf::local_warning(font, kf, "design size mismatch"));
+                }
+            }
+            fonts.push((l.e, k));
+        }
+        let v = Arc::new(super::vf::Vf { fonts, packets: parsed.packets });
+        self.vfs.insert(font.key.clone(), Some(v.clone()));
+        Some(v)
+    }
+
+    /// `vf_def_font`'s font: one loaded before of that name and size
+    /// (`tfm_lookup`), else the TFM file read at that size
+    /// (`read_font_info`), numbered after the fonts the job had loaded
+    /// where the page is shipped; `None` if it is not loadable.
+    fn vf_def_font(&mut self, l: &super::vf::LocalDef) -> Option<Arc<Font>> {
+        let key = Font::key_of(&l.name, l.fs);
+        let font = match self.known_fonts.get(&key) {
+            Some(f) => f.clone(),
+            None => {
+                let data = self.files.tfm(&l.name);
+                let Some(f) = data.and_then(|d| Font::load(&l.name, d, Some(l.fs)).ok()) else {
+                    self.errors.push(format!("! Font \\relax={} not loadable: Metric (TFM) file not found.", l.name));
+                    return None;
+                };
+                let f = Arc::new(f);
+                self.known_fonts.insert(key.clone(), f.clone());
+                f
+            }
+        };
+        self.number_loaded(&key);
+        Some(font)
+    }
+
+    /// Font `key` loaded where the page being shipped is (by a virtual
+    /// font, or as the dummy font): numbered after the fonts the job had
+    /// loaded there, unless it was one of them (`tfm_lookup`).
+    fn number_loaded(&mut self, key: &Arc<str>) {
+        if self.vf_order.is_empty() {
+            let mut v: Vec<(u32, Arc<str>)> = self.numbers.iter().map(|(k, &n)| (n, k.clone())).collect();
+            v.sort();
+            self.vf_order = v.into_iter().map(|(_, k)| (k, false)).collect();
+        }
+        // (where the fonts loaded so far end: after `ship_count` of the
+        // job's own, and the fonts loaded at pages since)
+        let mut at = 0;
+        let mut own = 0;
+        for (i, (_, local)) in self.vf_order.iter().enumerate() {
+            if !local {
+                if own == self.ship_count {
+                    break;
+                }
+                own += 1;
+            }
+            at = i + 1;
+        }
+        if self.vf_order[..at].iter().any(|(k, _)| k == key) {
+            return;
+        }
+        // (a font the job loads later is this one: TeX finds it loaded)
+        if let Some(i) = self.vf_order.iter().position(|(k, _)| k == key) {
+            self.vf_order.remove(i);
+        }
+        self.vf_order.insert(at, (key.clone(), true));
+        let m: Numbers = self.vf_order.iter().enumerate().map(|(i, (k, _))| (k.clone(), i as u32 + 1)).collect();
+        self.vf_numbers = Some(m);
+    }
+
+    // ---- faked interword spaces (`\pdfinterwordspaceon`)
+
+    /// `pdf_font_has_space_char` of `font` (`hasspacechar`: a scalable
+    /// font whose map entry re-encodes it with `space` at 32; and a space
+    /// wider than 1bp). Once per font.
+    fn space_char_of(&mut self, font: &Arc<Font>) -> bool {
+        if let Some(&b) = self.space_chars.get(&font.key) {
+            return b;
+        }
+        let wide = font.glyph(32).is_some_and(|g| g.width > super::num::ONE_BP);
+        let has = wide
+            && self.map_entry(font).is_some_and(|fm| {
+                !fm.is(F_PK)
+                    && fm.encname.clone().and_then(|e| self.fe_names(&e)).is_some_and(|n| n.get(32).is_some_and(|g| g == b"space"))
+            });
+        self.space_chars.insert(font.key.clone(), has);
+        has
+    }
+
+    /// `pdf_read_dummy_font`: `pdftexspace` read at its design size,
+    /// numbered where the page is, its map line added (`pdfmaplinesp`).
+    fn read_dummy_font(&mut self) {
+        if self.dummy_tried {
+            return;
+        }
+        self.dummy_tried = true;
+        let name = "pdftexspace";
+        let Some(f) = self.files.tfm(name).and_then(|d| Font::load(name, d, None).ok()) else {
+            self.errors.push(format!("! Font \\relax={name} not loadable: Metric (TFM) file not found."));
+            return;
+        };
+        let f = Arc::new(f);
+        self.known_fonts.insert(f.key.clone(), f.clone());
+        self.number_loaded(&f.key);
+        self.map_item(b"=pdftexspace PdfTeX-Space <pdftexspace.pfb", false);
+        self.dummy = Some(f);
+    }
+
+    /// What a walk did not know about for faked interword spaces, found
+    /// out: whether there was anything.
+    fn resolve_spaces(&mut self, body: &PageBody) -> bool {
+        let mut any = false;
+        for f in &body.space_asked {
+            if !self.space_chars.contains_key(&f.key) {
+                self.space_char_of(f);
+                any = true;
+            }
+        }
+        if body.wants_dummy && !self.dummy_tried {
+            self.read_dummy_font();
+            any = true;
+        }
+        any
+    }
+
+    /// The fonts a walk asked about looked for, in its order, up to the
+    /// first virtual one: whether one was.
+    fn resolve_vfs(&mut self, asked: &[Arc<Font>]) -> bool {
+        for f in asked {
+            if !self.vfs.contains_key(&f.key) && self.do_vf(f).is_some() {
+                return true;
+            }
+        }
+        false
     }
 
     /// The font `f` is used (`pdf_init_font` unless it was).
@@ -1470,6 +1687,11 @@ impl F<'_> {
                 self.answer(piece, tag, 0, n);
             }
             Event::FontInit(font) => {
+                // (`pdf_check_vf_cur_val`: fatal for a virtual font)
+                if self.do_vf(font).is_some() {
+                    self.answer(piece, tag, 2, 1);
+                    return;
+                }
                 let Some(f) = self.font_num(font) else { return };
                 self.use_font(f, font);
                 let ff = self.ff(f);
@@ -1478,6 +1700,10 @@ impl F<'_> {
                 self.answer(piece, tag, 1, ff as i32);
             }
             Event::IncludeChars(font, chars) => {
+                if self.do_vf(font).is_some() {
+                    self.answer(piece, tag, 2, 1);
+                    return;
+                }
                 let Some(f) = self.font_num(font) else { return };
                 self.use_font(f, font);
                 if let Some(u) = self.fonts.get_mut(&f) {
@@ -1892,17 +2118,31 @@ impl F<'_> {
     /// Form box `b`'s stream and marks where the fold is (`ff_of`: the
     /// fonts' sharing).
     fn form_render(&self, b: &crate::item::BoxNode, ff_of: &dyn Fn(u32) -> Option<u32>) -> PageBody {
-        let view = View { objs: &self.objs, data: &self.data };
+        let view = View {
+            objs: &self.objs,
+            data: &self.data,
+            vfs: &self.vfs,
+            fonts: &self.fonts,
+            space_chars: &self.space_chars,
+            dummy: self.dummy.as_ref(),
+        };
         let fixed = self.fixed.unwrap_or(Fixed { decimal_digits: 3 });
-        let g = content::Given { numbers: self.numbers, extra: &[], ff_of, fixed, objs: &view, entry: &self.walk };
+        let g = content::Given { numbers: self.nums(), extra: &[], ff_of, fixed, objs: &view, entry: &self.walk };
         content::form_body(b, self.cur_page_height, self.compress_level, content::Margins::default(), &g)
     }
 
     /// Page `p`'s stream and marks where the fold is.
     fn page_render(&self, p: &Page, ship: &Ship, ff_of: &dyn Fn(u32) -> Option<u32>) -> PageBody {
-        let view = View { objs: &self.objs, data: &self.data };
+        let view = View {
+            objs: &self.objs,
+            data: &self.data,
+            vfs: &self.vfs,
+            fonts: &self.fonts,
+            space_chars: &self.space_chars,
+            dummy: self.dummy.as_ref(),
+        };
         let fixed = self.fixed.unwrap_or(Fixed { decimal_digits: 3 });
-        let g = content::Given { numbers: self.numbers, extra: &[], ff_of, fixed, objs: &view, entry: &self.walk };
+        let g = content::Given { numbers: self.nums(), extra: &[], ff_of, fixed, objs: &view, entry: &self.walk };
         content::page_body(p, ship, &g)
     }
 
@@ -2011,10 +2251,18 @@ impl F<'_> {
         self.print_out(&o);
         // (the walk with the fonts' sharing as the fold knows it, made
         // again if a font it uses first shares another's object)
-        let body = {
-            let guess = |k: u32| -> Option<u32> { self.fonts.contains_key(&k).then(|| self.ff(k)).filter(|&o| o != k) };
-            self.form_render(&b, &guess)
+        let render = |f: &F<'_>| {
+            let guess = |k: u32| -> Option<u32> { f.fonts.contains_key(&k).then(|| f.ff(k)).filter(|&o| o != k) };
+            f.form_render(&b, &guess)
         };
+        let mut body = render(self);
+        // (its virtual fonts, as a page's)
+        for _ in 0..8 {
+            if !(self.resolve_vfs(&body.vf_asked) | self.resolve_spaces(&body)) {
+                break;
+            }
+            body = render(self);
+        }
         self.walk_events(&body);
         let ff: Vec<(u32, u32)> = body.ff.iter().map(|&(k, _)| (k, self.ff(k))).collect();
         let data = if ff == body.ff {
@@ -2528,6 +2776,14 @@ pub fn assemble(
         png_group: 0,
         png_group_written: false,
         numbers,
+        vfs: HashMap::new(),
+        space_chars: HashMap::new(),
+        dummy: None,
+        dummy_tried: false,
+        vf_numbers: None,
+        vf_order: Vec::new(),
+        ship_count: 0,
+        known_fonts: HashMap::new(),
         answers: crate::build::PdfAnswers::default(),
         end_page_dims: (end.page_width, end.page_height),
         ptex_use_underscore: end.ptex_use_underscore > 0,
@@ -2536,6 +2792,7 @@ pub fn assemble(
     };
     let mut again = 0;
     for (i, (p, body)) in pages.iter().zip(bodies.iter_mut()).enumerate() {
+        f.ship_count = end.ship_fonts.get(i).copied().unwrap_or(u32::MAX);
         if let Some(ev) = events.get(i) {
             for ((piece, _), it) in ev.iter() {
                 f.step(*piece, it);
@@ -2553,17 +2810,36 @@ pub fn assemble(
         // with; one not used before, an earlier page's font of its name,
         // else the page's own guess; the walk's state at its start; the
         // forms and images it refers to)
-        let numbered = body.fonts.iter().all(|u| numbers.get(&u.font.key) == Some(&u.num));
-        let truth = |f: &F<'_>, k: u32, g: u32| -> u32 {
-            let name = body.fonts.iter().find(|u| u.num == k).map(|u| u.font.name.clone());
-            f.ff_truth(k, name.as_deref(), g)
-        };
-        let ff_holds = numbered && body.ff.iter().all(|&(k, g)| truth(&f, k, g) == g);
-        if body.fixed != fixed || !ff_holds || body.incomplete || *body.entry != *f.walk {
-            let guess = if numbered { body.ff.clone() } else { content::guess_ff(p, numbers, &[]) };
+        // (virtual fonts: the fonts the walk asked about are looked for in
+        // its order; one that is virtual makes the walk again, which may
+        // ask about its local fonts)
+        // (a walk again also when the one before set fonts the guesses did
+        // not know of — a virtual font's local fonts — and guessed their
+        // sharing wrong)
+        let mut renders = 0;
+        loop {
+            let virt = f.resolve_vfs(&body.vf_asked) | f.resolve_spaces(body);
+            let numbered = body.fonts.iter().all(|u| f.nums().get(&u.font.key) == Some(&u.num));
+            let truth = |f: &F<'_>, k: u32, g: u32| -> u32 {
+                let name = body.fonts.iter().find(|u| u.num == k).map(|u| u.font.name.clone());
+                f.ff_truth(k, name.as_deref(), g)
+            };
+            let ff_holds = numbered && body.ff.iter().all(|&(k, g)| truth(&f, k, g) == g);
+            let stale = if renders == 0 {
+                !ff_holds || body.fixed != fixed || body.incomplete || *body.entry != *f.walk
+            } else {
+                numbered && !ff_holds
+            };
+            if !(virt || stale) || renders == 4 {
+                break;
+            }
+            let guess = if numbered { body.ff.clone() } else { content::guess_ff(p, f.nums(), &[]) };
             let ff: Vec<(u32, u32)> = guess.iter().map(|&(k, g)| (k, truth(&f, k, g))).collect();
             let ff_of = |k: u32| -> Option<u32> { ff.iter().find(|x| x.0 == k).map(|x| x.1).filter(|&o| o != k) };
             *body = Arc::new(f.page_render(p, &ship, &ff_of));
+            renders += 1;
+        }
+        if renders > 0 {
             again += 1;
         }
         f.ship(p, &ship, body);

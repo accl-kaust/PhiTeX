@@ -118,6 +118,8 @@ pub struct WalkState {
     pub thread_id: Option<Id>,
     /// `pdf_last_x_pos`, `pdf_last_y_pos`.
     pub last_pos: (i32, i32),
+    /// `gen_faked_interword_space` (`\pdfinterwordspaceon`, `off`).
+    pub faked_space: bool,
 }
 
 impl Default for WalkState {
@@ -132,6 +134,7 @@ impl Default for WalkState {
             thread_dims: (0, 0, 0),
             thread_id: None,
             last_pos: (0, 0),
+            faked_space: false,
         }
     }
 }
@@ -155,6 +158,35 @@ pub struct ImageRef {
 pub trait Objs {
     fn form(&self, n: i32) -> Option<FormRef>;
     fn image(&self, n: i32) -> Option<ImageRef>;
+    /// Whether font `f` is virtual (`pdf_font_type`), if known: the fold
+    /// reads a font's `.vf` file when a walk first asks (`do_vf`).
+    fn vf(&self, _f: &Font) -> VfKnown {
+        VfKnown::Unknown
+    }
+    /// `font_used[k]` before the walk (a font an earlier page or a
+    /// command initialized), if known.
+    fn font_used(&self, _k: u32) -> Option<bool> {
+        None
+    }
+    /// `pdf_font_has_space_char` of font `f` (its map entry's encoding
+    /// names character 32 `space`, and its width is over 1bp), if known.
+    fn space_char(&self, _f: &Font) -> Option<bool> {
+        None
+    }
+    /// `pdf_dummy_font` (`pdftexspace`), once read.
+    fn dummy_font(&self) -> Option<Arc<Font>> {
+        None
+    }
+}
+
+/// What a walk knows of a font's `.vf` file.
+pub enum VfKnown {
+    /// Not looked for yet: the walk takes the font as real and lists it
+    /// (`PageBody::vf_asked`), the fold looks and walks again if it is
+    /// virtual.
+    Unknown,
+    Real,
+    Virtual(Arc<super::vf::Vf>),
 }
 
 /// The table where a page is made: nothing known.
@@ -218,6 +250,13 @@ pub struct PageBody {
     pub data: Vec<u8>,
     /// The fonts the page used, in the order it first set them.
     pub fonts: Vec<FontUse>,
+    /// The fonts whose `.vf` file the walk did not know about, in the
+    /// order it first showed a character of each (`do_vf`'s order).
+    pub vf_asked: Vec<Arc<Font>>,
+    /// Faked interword spaces: the fonts whose space character the walk
+    /// did not know about; it needed the dummy font, unknown.
+    pub space_asked: Vec<Arc<Font>>,
+    pub wants_dummy: bool,
     pub events: Vec<Event>,
     /// The page's link annotations and its beads' rectangles.
     pub links: Vec<LinkRec>,
@@ -311,6 +350,11 @@ struct W<'a> {
     last_f: u32,
     last_fs: i32,
     fonts: Vec<FontUse>,
+    vf_asked: Vec<Arc<Font>>,
+    space_asked: Vec<Arc<Font>>,
+    wants_dummy: bool,
+    /// `vf_cur_s`: the depth of virtual fonts' packets being played.
+    vf_depth: u32,
     events: Vec<Event>,
     links: Vec<LinkRec>,
     beads: Vec<Rect>,
@@ -451,19 +495,63 @@ impl W<'_> {
         self.doing_string = false;
     }
 
-    /// `pdf_begin_string` (no faked interword spaces, no expansion).
+    /// `font_used[k]`: initialized on this page or before it (unknown
+    /// before: the page is made again by the fold).
+    fn font_used(&mut self, k: u32) -> bool {
+        if k == 0 {
+            return false;
+        }
+        if self.fonts.iter().any(|u| u.num == k) {
+            return true;
+        }
+        self.objs.font_used(k).unwrap_or_else(|| {
+            self.incomplete = true;
+            false
+        })
+    }
+
+    /// `pdf_font_has_space_char[f]`.
+    fn space_char(&mut self, f: &Arc<Font>) -> bool {
+        self.objs.space_char(f).unwrap_or_else(|| {
+            if !self.space_asked.iter().any(|a| a.key == f.key) {
+                self.space_asked.push(f.clone());
+            }
+            false
+        })
+    }
+
+    /// `adv_char_width`: `pdf_delta_h` moved; `adv_char_width_s`,
+    /// `adv_char_width_s_out`.
+    fn adv_char_width(&mut self, f: &Font, c: u8) -> (i32, i32) {
+        let w = f.glyph(i32::from(c)).map_or(0, |g| g.width);
+        let (s, s_out) = divide_scaled(w, Self::font_size(f), 4).unwrap_or((0, 0));
+        self.delta_h += s_out;
+        (round10(s), s_out)
+    }
+
+    /// `pdf_begin_string` (no expansion: `pdf_cur_Tm_a` is 0).
     fn begin_string(&mut self, f: &Arc<Font>, k: u32) {
+        let mut must_end_string = false;
+        let mut must_insert_space = false;
         let mut must_set_text_pos = false;
         if !self.doing_text {
             self.begin_text();
             must_set_text_pos = true;
         }
-        if self.pdf_f != k {
+        let faked = self.st.faked_space;
+        // (the font switch delayed if an interword space must go first)
+        let switch = if faked {
+            let (a, b) = (self.font_used(k), self.font_used(self.pdf_f));
+            !(a && b)
+        } else {
+            self.pdf_f != k
+        };
+        if switch {
             self.end_string();
             self.set_font(f, k);
         }
         let size = Self::font_size(f);
-        let (mut s, s_out) =
+        let (mut s, mut s_out) =
             divide_scaled(self.cur_h - (self.tj_start_h + self.delta_h), size, 3).unwrap_or((0, 0));
         let (v, v_out) = if (self.cur_v - self.pdf_v).abs() >= self.min_bp_val {
             divide_scaled(self.pdf_v - self.cur_v, ONE_HUNDRED_BP, self.dd + 2).unwrap_or((0, 0))
@@ -474,11 +562,40 @@ impl W<'_> {
             must_set_text_pos = v != 0 || s.abs() >= 0o100_000;
         }
         if must_set_text_pos {
+            must_end_string = true;
+        }
+        let (space, shrink) = (f.param(2), f.param(4));
+        let looks_like_space = space > ONE_BP && s_out > space - shrink - ONE_BP / 10 && v == 0;
+        if faked && looks_like_space {
+            must_insert_space = true;
+        }
+        let has_space = must_insert_space && self.space_char(f);
+        if must_insert_space {
+            // (a real space character of the font when it can)
+            if has_space && self.doing_string {
+                self.o.out(b' ');
+                let (a, a_out) = self.adv_char_width(f, 32);
+                s -= a;
+                s_out -= a_out;
+                self.mark(k, 32);
+            } else {
+                must_end_string = true;
+            }
+        }
+        if must_end_string {
             self.end_string();
+            if must_insert_space && !has_space {
+                self.insert_interword_space();
+            }
             self.set_font(f, k);
             self.set_text_pos(v, v_out);
             s = 0;
         }
+        if faked && self.pdf_f != k {
+            self.end_string();
+            self.set_font(f, k);
+        }
+        let _ = s_out;
         if !self.doing_string {
             self.o.print(b" [");
             if s == 0 {
@@ -494,6 +611,39 @@ impl W<'_> {
             self.delta_h += s_out;
         }
         self.doing_string = true;
+    }
+
+    /// `pdf_read_dummy_font`: the dummy font and its number (`None`: not
+    /// read yet where the page is made).
+    fn dummy(&mut self) -> Option<(Arc<Font>, u32)> {
+        let Some(d) = self.objs.dummy_font() else {
+            self.wants_dummy = true;
+            self.incomplete = true;
+            return None;
+        };
+        let k = self.number(&d);
+        Some((d, k))
+    }
+
+    /// `pdf_insert_interword_space`.
+    fn insert_interword_space(&mut self) {
+        let Some((d, k)) = self.dummy() else { return };
+        self.set_font(&d, k);
+        self.mark(k, 32);
+        self.o.print(b"( )Tj");
+    }
+
+    /// `pdf_insert_fake_space` (`\pdffakespace`).
+    fn insert_fake_space(&mut self) {
+        let Some((d, k)) = self.dummy() else { return };
+        let saved = self.st.faked_space;
+        self.st.faked_space = false;
+        self.begin_string(&d, k);
+        self.mark(k, 32);
+        self.o.out(b' ');
+        self.adv_char_width(&d, 32);
+        self.end_string_nl();
+        self.st.faked_space = saved;
     }
 
     /// `pdf_end_text`.
@@ -525,10 +675,7 @@ impl W<'_> {
             self.o.out(c);
         }
         // (`adv_char_width`: the width on the raster of the `/Widths`)
-        let w = f.glyph(i32::from(c)).map_or(0, |g| g.width);
-        let (s, s_out) = divide_scaled(w, Self::font_size(f), 4).unwrap_or((0, 0));
-        let _ = round10(s);
-        self.delta_h += s_out;
+        self.adv_char_width(f, c);
     }
 
     /// `pdf_set_rule`.
@@ -567,6 +714,12 @@ impl W<'_> {
     /// are written.
     fn special(&mut self, s: &str) {
         let b: Vec<u8> = s.chars().map(|c| u32::from(c).min(255) as u8).collect();
+        self.special_bytes(&b);
+    }
+
+    /// `literal(s, scan_special, false)` of a special's bytes (a
+    /// `\special`'s, a virtual font packet's `xxx`).
+    fn special_bytes(&mut self, b: &[u8]) {
         if !(b.starts_with(b"PDF:") || b.starts_with(b"pdf:")) {
             return;
         }
@@ -680,9 +833,177 @@ impl W<'_> {
                 let k = self.number(f);
                 self.origin(i, k, c);
             }
-            self.char_out(f, c);
+            self.output_char(f, c);
             self.cur_h += g.width;
         }
+    }
+
+    /// `output_one_char`: a virtual font's character is its packet
+    /// played, another's is shown.
+    fn output_char(&mut self, f: &Arc<Font>, c: u8) {
+        match self.objs.vf(f) {
+            VfKnown::Virtual(v) => self.vf_packet(f, &v, c),
+            VfKnown::Real => self.char_out(f, c),
+            VfKnown::Unknown => {
+                if !self.vf_asked.iter().any(|a| a.key == f.key) {
+                    self.vf_asked.push(f.clone());
+                }
+                self.char_out(f, c);
+            }
+        }
+    }
+
+    /// `do_vf_packet`: character `c` of virtual font `vf_f`.
+    fn vf_packet(&mut self, vf_f: &Arc<Font>, vf: &super::vf::Vf, c: u8) {
+        use super::vf::{
+            DOWN1, FNT_NUM_0, FNT1, POP, PUSH, PUT_RULE, PUT1, RIGHT1, SET_CHAR_127, SET_RULE, SET1, VF_MAX_RECURSION, W0, X0, XXX1, Y0, Z0,
+        };
+        self.vf_depth += 1;
+        if self.vf_depth > VF_MAX_RECURSION {
+            self.errors.push(format!("! TeX capacity exceeded, sorry [max level recursion of virtual fonts={VF_MAX_RECURSION}]."));
+            self.vf_depth -= 1;
+            return;
+        }
+        let (save_h, save_v) = (self.cur_h, self.cur_v);
+        let p = vf.packet(c);
+        let size = vf_f.size;
+        let mut f = vf.default_font();
+        let (mut w, mut x, mut y, mut z) = (0, 0, 0, 0);
+        let mut stack: Vec<[i32; 6]> = Vec::new();
+        let mut i = 0;
+        let next = |i: &mut usize| {
+            let b = p.get(*i).copied().unwrap_or(0);
+            *i += 1;
+            b
+        };
+        let read = |i: &mut usize, k: u8, signed: bool| {
+            let mut v = i32::from(next(i));
+            if signed && v >= 128 {
+                v -= 256;
+            }
+            for _ in 1..k {
+                v = v.wrapping_mul(256) + i32::from(next(i));
+            }
+            v
+        };
+        // (`packet_scaled`: a scaling error is fatal)
+        let mut fatal: Option<String> = None;
+        let scaled = |a: i32, fatal: &mut Option<String>| match super::vf::store_scaled_f(a, size) {
+            Ok(v) => v,
+            Err(e) => {
+                fatal.get_or_insert(e);
+                0
+            }
+        };
+        while i < p.len() && fatal.is_none() {
+            let cmd = next(&mut i);
+            let (ch, char_move) = if cmd <= SET_CHAR_127 {
+                (i32::from(cmd), true)
+            } else if (FNT_NUM_0..FNT_NUM_0 + 64).contains(&cmd) || cmd == FNT1 {
+                let k = if cmd == FNT1 { i32::from(next(&mut i)) } else { i32::from(cmd - FNT_NUM_0) };
+                match vf.local(k) {
+                    Ok(lf) => f = lf,
+                    Err(()) => fatal = Some("pdfTeX error (vf): local font not found".into()),
+                }
+                continue;
+            } else {
+                match cmd {
+                    PUSH => {
+                        stack.push([self.cur_h, self.cur_v, w, x, y, z]);
+                        continue;
+                    }
+                    POP => {
+                        let [h, v, w1, x1, y1, z1] = stack.pop().unwrap_or_default();
+                        (self.cur_h, self.cur_v) = (h, v);
+                        (w, x, y, z) = (w1, x1, y1, z1);
+                        continue;
+                    }
+                    SET1..=131 => (read(&mut i, cmd - SET1 + 1, false), true),
+                    PUT1..=136 => (read(&mut i, cmd - PUT1 + 1, false), false),
+                    SET_RULE | PUT_RULE => {
+                        let a = read(&mut i, 4, true);
+                        let ht = scaled(a, &mut fatal);
+                        let b = read(&mut i, 4, true);
+                        let wd = scaled(b, &mut fatal);
+                        if wd > 0 && ht > 0 {
+                            let (h, v) = (self.cur_h, self.cur_v);
+                            self.set_rule(h, v, wd, ht);
+                            if cmd == SET_RULE {
+                                self.cur_h += wd;
+                            }
+                        }
+                        continue;
+                    }
+                    RIGHT1..=146 => {
+                        let a = read(&mut i, cmd - RIGHT1 + 1, true);
+                        self.cur_h += scaled(a, &mut fatal);
+                        continue;
+                    }
+                    W0..=151 => {
+                        if cmd > W0 {
+                            let a = read(&mut i, cmd - W0, true);
+                            w = scaled(a, &mut fatal);
+                        }
+                        self.cur_h += w;
+                        continue;
+                    }
+                    X0..=156 => {
+                        if cmd > X0 {
+                            let a = read(&mut i, cmd - X0, true);
+                            x = scaled(a, &mut fatal);
+                        }
+                        self.cur_h += x;
+                        continue;
+                    }
+                    DOWN1..=160 => {
+                        let a = read(&mut i, cmd - DOWN1 + 1, true);
+                        self.cur_v += scaled(a, &mut fatal);
+                        continue;
+                    }
+                    Y0..=165 => {
+                        if cmd > Y0 {
+                            let a = read(&mut i, cmd - Y0, true);
+                            y = scaled(a, &mut fatal);
+                        }
+                        self.cur_v += y;
+                        continue;
+                    }
+                    Z0..=170 => {
+                        if cmd > Z0 {
+                            let a = read(&mut i, cmd - Z0, true);
+                            z = scaled(a, &mut fatal);
+                        }
+                        self.cur_v += z;
+                        continue;
+                    }
+                    XXX1..=242 => {
+                        let n = read(&mut i, cmd - XXX1 + 1, false);
+                        let mut s = Vec::new();
+                        for _ in 0..n {
+                            s.push(next(&mut i));
+                        }
+                        self.special_bytes(&s);
+                        continue;
+                    }
+                    _ => {
+                        fatal = Some("pdfTeX error (vf): invalid DVI command".into());
+                        continue;
+                    }
+                }
+            };
+            // ("do_char": a character the font lacks is not shown)
+            let Some(lf) = f.clone() else { continue };
+            let Some(g) = u8::try_from(ch).ok().and_then(|c| lf.glyph(i32::from(c)).map(|g| (c, g))) else { continue };
+            self.output_char(&lf, g.0);
+            if char_move {
+                self.cur_h += g.1.width;
+            }
+        }
+        if let Some(e) = fatal {
+            self.errors.push(e);
+        }
+        (self.cur_h, self.cur_v) = (save_h, save_v);
+        self.vf_depth -= 1;
     }
 
     /// A rule in an hlist, then past it.
@@ -1013,6 +1334,8 @@ impl W<'_> {
                 self.st.last_pos = (self.cur_h, y);
             }
             What::RunningLink(on) => self.st.running_link = *on,
+            What::InterwordSpace(on) => self.st.faked_space = *on,
+            What::FakeSpace => self.insert_fake_space(),
         }
     }
 
@@ -1273,6 +1596,10 @@ fn new_writer<'a>(g: &Given<'a>, page: bool, margins: Margins, page_height: i32)
         last_f: 0,
         last_fs: 0,
         fonts: Vec::new(),
+        vf_asked: Vec::new(),
+        space_asked: Vec::new(),
+        wants_dummy: false,
+        vf_depth: 0,
         events: Vec::new(),
         links: Vec::new(),
         beads: Vec::new(),
@@ -1313,6 +1640,9 @@ fn finish(mut w: W<'_>, entry: &Arc<WalkState>, compress_level: i32, width: i32,
         stream,
         data,
         fonts: w.fonts,
+        vf_asked: w.vf_asked,
+        space_asked: w.space_asked,
+        wants_dummy: w.wants_dummy,
         events: w.events,
         links: w.links,
         beads: w.beads,
@@ -1460,6 +1790,9 @@ pub fn empty() -> PageBody {
         stream: Vec::new(),
         data: Vec::new(),
         fonts: Vec::new(),
+        vf_asked: Vec::new(),
+        space_asked: Vec::new(),
+        wants_dummy: false,
         events: Vec::new(),
         links: Vec::new(),
         beads: Vec::new(),

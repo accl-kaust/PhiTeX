@@ -21,11 +21,11 @@ mkdir -p "$r/bless/pdf" "$r/bless/latexpdf" "$r/logs"
 cp $T/pdf/*.pdf "$r/bless/pdf/"; cp $T/pdf/*.pos "$r/bless/pdf/" 2>/dev/null
 cp $T/latex/pdf/* "$r/bless/latexpdf/"
 w=$(mktemp -d)
-for n in literal colorstack obj trailerid xform annot outline ximage ximage2 random misc savepos rerun readback thread pageref; do
+for n in literal colorstack obj trailerid xform annot outline ximage ximage2 random misc savepos rerun readback thread pageref vf interword; do
   cp $T/pdf/$n.tex $w/; (cd $w && TEXINPUTS=".:$(dirname "$(kpsewhich example-image.png)"):" SOURCE_DATE_EPOCH=0 FORCE_SOURCE_DATE=1 timeout 60 pdftex -ini -etex -interaction=batchmode $n.tex >/dev/null 2>&1); cp $w/$n.log "$r/logs/" 2>/dev/null
   echo "$n tex errors: $(grep -c '^!' $w/$n.log)" >> "$S"
 done
-for n in hyper graphics color tikz zsavepos objs; do
+for n in hyper graphics color tikz zsavepos objs vfont; do
   cp $T/latex/pdfdocs/$n.tex $w/; (cd $w && SOURCE_DATE_EPOCH=0 FORCE_SOURCE_DATE=1 timeout 300 pdflatex -interaction=batchmode $n.tex >/dev/null 2>&1); cp $w/$n.log "$r/logs/" 2>/dev/null
   echo "$n tex errors: $(grep -c '^!' $w/$n.log)" >> "$S"
 done

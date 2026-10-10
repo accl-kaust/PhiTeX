@@ -2813,6 +2813,49 @@ failed the build: `what::ECHO`); documents pdfTeX itself rejected
 and those after them, were not recorded. Not known yet: `graphics`,
 `objs`, `tikz` (still running at the time limit).
 
+**Virtual fonts.** A character of a font with a `.vf` file is its
+packet played in the walk (`content.rs` `vf_packet`, pdftex.web's
+`do_vf_packet`: local fonts, rules, moves, the stack, `xxx` as a
+`\special`, recursion to 10). The file is read by the fold, once per
+font, when a walk first shows a character of it (`F::do_vf`,
+`pdf/vf.rs` `parse`): a walk that does not know a font takes it as real
+and lists it (`PageBody::vf_asked`, in the order it showed them); the
+fold looks for those files in that order up to the first virtual font
+and walks again, until a walk asks about nothing new (a page made where
+it was shipped knows no font, so a page whose fonts are all real is
+kept as it was). The local fonts are TeX fonts loaded then
+(`vf_def_font`: one of that name and size loaded before, else the TFM
+file at that size), numbered after the fonts the job had loaded where
+the page was shipped and before those it loads later (`End::ship_fonts`,
+the fold's `vf_order`): the `/F` names are pdfTeX's. `\pdffontname`,
+`\pdffontobjnum`, `\pdfincludechars` of a virtual font are fatal, as
+pdfTeX's `pdf_check_vf_cur_val`. Tests: `tests/pdf.rs` `vf` (Times and
+Helvetica in OT1, a font loaded after a page that loaded local fonts, a
+form), `tests/pdflatex_docs.rs` `vfont` (T1 Times, Helvetica, Courier).
+Gaps: where a page was shipped is counted by pieces (a `\font` in the
+same piece after the page builder fired counts as before); an
+auto-expanded virtual font and `\letterspacefont` wait for font
+expansion.
+
+**Faked interword spaces.** `\pdfinterwordspaceon`/`off` and
+`\pdffakespace` are whatsits; `gen_faked_interword_space` is part of
+the walk's state across pages (`WalkState::faked_space`), and
+`pdf_begin_string` is pdfTeX's whole (the font switch delayed while
+both fonts are used, a move that looks like a space shown as the font's
+own space character or the dummy font's). What the walk needs of the
+fold — `font_used`, `pdf_font_has_space_char` (`hasspacechar`: the map
+entry's encoding names 32 `space`), the dummy font `pdftexspace` (read
+where the page is, numbered there as a virtual font's local font, its
+map line `pdfmaplinesp`) — a page made where it was shipped does not
+know: the fold makes it again (`PageBody::space_asked`, `wants_dummy`).
+Test: `tests/pdf.rs` `interword`. Missing from the primitive table, to
+be added once B's table changes are on flow (adding a name renumbers
+the table): `\pdfspacefont` (the dummy font's name; `pdftexspace`
+until then), `\pdfsnaprefpoint`, `\pdfsnapy`, `\pdfsnapycomp`, and the
+old parameter names `\pdfmovechars`, `\pdfforcepagebox`,
+`\pdfoptionalwaysusepdfpagebox`, `\pdfoptionpdfinclusionerrorlevel`,
+`\pdfoptionpdfminorversion`.
+
 **pdfTeX's read-backs.** What a command reads back of the PDF file —
 `\pdflastobj`, `\pdflastxform`, `\pdflastximage` (its pages and colour
 depth are the node's own, from the file), `\pdflastannot`,
@@ -2895,7 +2938,7 @@ is a pure function or a fold step, no state shared with the others):
 | numbers, zlib, MD5 | `pdf/num.rs`, `pdf/zlib.rs`, `pdf/md5.rs` | `num::Out` (pdfTeX's printing), `zlib::compress(data, level)`, `md5::md5` — done |
 | a page's content stream | `pdf/content.rs` | `content::page(&Page, &Ship, &Numbers, extra) -> PageBody` where the page is shipped; `content::page_body(&Page, &Ship, &Given)` and `form_body` in the fold: the stream, `fonts` (font, number, glyphs), `events` (marks and references in the walk's order: fonts, annotations, links and their pieces per line, destinations, beads, `\pdfrefobj`, forms, images), `links`/`beads` rectangles, `write_pos` (`\pdfsavepos` at each `\write`), the walk's state `entry`/`exit` (`WalkState`: colour stacks, matrix stack, the open links, the thread, the last position), `incomplete` (a form or image not known where the page was made), guesses (`ff`, `fixed`); `origins` (a non-version field, below). pdfTeX's whatsits are `Item::Whatsit(Whatsit::Pdf(what::What))`, made by their nodes (`graph/pdf.rs`) — done |
 | the fold | `pdf/fold.rs`, `pdf/fold/marks.rs`, `pdf/fold/image.rs` | `fold::assemble(pages, bodies, events, numbers, &End, &mut dyn Files) -> Written`: the PDF events before each page and after the last (`PageOrg::pdf`, the build's tail: `Item::Pdf` of the material, which the page builder hands to the pages in the order it meets them) are fold steps (`F::step`, part 53's commands: objects, forms, images, outlines, catalog, info, names, trailer, colour stacks, fonts, maps); each page is shipped as `pdf_ship_out` does (its walk's marks numbered in walk order, the page object with `/Group`, `/Annots`, `/B`, the raw objects, images and forms it refers to — forms shipped recursively — the marks, the resources); the end as "Finish the PDF file" (pages checked, destinations fixed, fonts, page tree, outlines, name tree, threads, catalog, info, xref, trailer). `Written::answers` are the read-backs' answers — done |
-| fonts | `pdf/font/` (`map.rs`, `enc.rs`, `t1.rs`), the font part of `fold.rs` | the map file (`map::Map`), encodings, Type 1 subsetting (`t1::writet1`), `fold::F::{do_pdf_font, write_fontdescriptor, write_enc, write_fontdictionary}`. To come: ToUnicode (`\pdfgentounicode`, `\pdfglyphtounicode`'s table as a document-level value), virtual fonts (`do_vf_packet` in the content walk), PK fonts (Type 3), TrueType/OpenType, `\pdfmapfile`/`\pdfmapline` (document-level items the fold applies before the first font is initialized), `\pdffontattr`. How the TrueType/OpenType gap closes: the face (tables, cmap, glyf/loca, hmtx, post, CFF) is read through `partex-otf` (a pure library, linked, on the wall's allowlist), never a second parser copied from the old port; only the subset writer (which tables, in which order, pdfTeX's checksums and glyph renumbering) is the byte-exact port of `writettf.c` (and its CFF path for `.otf`), with the ttf2afm-style metrics and the map's `<[` encodings; PFB and encoding parsing through `partex-otf` where it has them, `writet1`'s writer kept. Files (map, pfb, enc, ttf/otf) are to be found through the build's kpathsea given (A's `Build::set_kpse`, `tfm::Kpse::find` with formats `FontMap`, `Type1`, `Enc`, program `pdftex`), not by `tfm::pdf_file`'s directory walk: `PdfFiles::get` switches to it when A's commit reaches this branch |
+| fonts | `pdf/font/` (`map.rs`, `enc.rs`, `t1.rs`), the font part of `fold.rs` | the map file (`map::Map`), encodings, Type 1 subsetting (`t1::writet1`), `fold::F::{do_pdf_font, write_fontdescriptor, write_enc, write_fontdictionary}`. To come: ToUnicode (`\pdfgentounicode`, `\pdfglyphtounicode`'s table as a document-level value) (virtual fonts: done, "Virtual fonts" below), PK fonts (Type 3), TrueType/OpenType, `\pdfmapfile`/`\pdfmapline` (document-level items the fold applies before the first font is initialized), `\pdffontattr`. How the TrueType/OpenType gap closes: the face (tables, cmap, glyf/loca, hmtx, post, CFF) is read through `partex-otf` (a pure library, linked, on the wall's allowlist), never a second parser copied from the old port; only the subset writer (which tables, in which order, pdfTeX's checksums and glyph renumbering) is the byte-exact port of `writettf.c` (and its CFF path for `.otf`), with the ttf2afm-style metrics and the map's `<[` encodings; PFB and encoding parsing through `partex-otf` where it has them, `writet1`'s writer kept. Files (map, pfb, enc, ttf/otf) are to be found through the build's kpathsea given (A's `Build::set_kpse`, `tfm::Kpse::find` with formats `FontMap`, `Type1`, `Enc`, program `pdftex`), not by `tfm::pdf_file`'s directory walk: `PdfFiles::get` switches to it when A's commit reaches this branch |
 | images | `pdf/image/mod.rs` (reading, at the node), `pdf/fold/image.rs` (writing) | `\pdfximage` reads the file (`Key::File`) at its node: `image::read_image`, `image::scale` (pdfTeX's `scale_image`); the fold writes JPEG as it is, PNG (`write_png`, IDAT copied or rows through `lib::png`, soft masks, palettes, the transparency group), a PDF page (`write_epdf` through `lib::pdfread`: objects copied, Type 1 fonts the map has replaced by the job's embedding unless `\pdfinclusioncopyfonts`) — done; `\pdfimageapplygamma`, JBIG2 are gaps |
 | links, dests, outlines | `pdf/content.rs` (rectangles), `pdf/fold/marks.rs` | links split per line box at their nesting level and threaded across pages by `WalkState::links`; destinations' duplicates the fold's; outlines, the name tree (`sort_dest_names`, `str_less_str`), threads and beads as pdfTeX writes them — done |
 | reads of the fold | `graph/pdf.rs`, `build.rs` (`PdfKept`, `Given::answer`) | `Key::PdfAns` answered from the last fold, rounds until they hold ("pdfTeX's read-backs" below); A's `ReadRef` may take this over later — the keys are listed there |
