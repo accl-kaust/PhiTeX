@@ -4126,7 +4126,22 @@ impl<'a> Exec<'a> {
         r
     }
 
+    /// The token after a `\noexpand` mark, as the wrapper will see it
+    /// (out of [`Exec::next_raw0`]'s line: that is inlined, and this rare
+    /// case reads on through it again).
+    #[cold]
+    #[inline(never)]
+    fn marked(&mut self) -> Option<Tok> {
+        let n = self.next_raw0();
+        self.noexp = n.as_ref().is_some_and(|x| x.key().is_some());
+        n
+    }
+
     /// [`Exec::next_raw`] before an alignment sees the token.
+    // (LLVM declined a plain #[inline]; inline(always) measured
+    // latex.ltx -0.7%, the documents -0.3% to -0.6%, job 8059)
+    #[allow(clippy::inline_always)]
+    #[inline(always)]
     fn next_raw0(&mut self) -> Option<Tok> {
         self.noexp = false;
         if self.halted() {
@@ -4139,10 +4154,7 @@ impl<'a> Exec<'a> {
             while self.st.pending.len() > floor {
                 if let Some(t) = self.st.pending.next_tok() {
                     if t == Tok::DontExpand {
-                        // (the marked token, as the wrapper will see it)
-                        let n = self.next_raw0();
-                        self.noexp = n.as_ref().is_some_and(|x| x.key().is_some());
-                        return n;
+                        return self.marked();
                     }
                     return Some(t);
                 }
