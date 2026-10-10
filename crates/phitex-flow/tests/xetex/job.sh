@@ -46,8 +46,8 @@ if [ -n "${CLI:-}" ]; then
 fi
 # (SYNCTEX=1: phitex-cli's SyncTeX against xelatex's; both files kept in $r/synctex)
 if [ -n "${SYNCTEX:-}" ]; then
-  cargo test --release -p phitex-cli --test synctex synctex_against_xetex -- --ignored --nocapture > "$r/synctex.txt" 2>&1; echo "synctex_against_xetex exit $?" >> "$r/summary.txt"
-  grep -E "^xelatex|^all|forward|panicked" "$r/synctex.txt" | head -20 >> "$r/summary.txt"
+  cargo test --release -p phitex-cli --test synctex synctex_against -- --include-ignored --nocapture --test-threads=1 > "$r/synctex.txt" 2>&1; echo "synctex_against (xetex, pdftex) exit $?" >> "$r/summary.txt"
+  grep -E "^xelatex|^pdflatex|^latex|^pdftex|^all|forward|panicked|^test " "$r/synctex.txt" | head -20 >> "$r/summary.txt"
   mkdir -p "$r/synctex"; for d in target/tmp/synctex/xelatex-*; do mkdir -p "$r/synctex/$(basename "$d")"; cp "$d"/*.synctex.gz "$d"/*.log "$r/synctex/$(basename "$d")/" 2>/dev/null; done
 fi
 # (CLI_TESTS=1: phitex-cli's own tests)
