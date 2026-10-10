@@ -530,7 +530,7 @@ impl Writer<'_> {
                         let g = g.clone();
                         self.cur_h += glue.set(this, &g);
                     }
-                    Item::Kern { w, .. } => self.cur_h += *w,
+                    Item::Kern { w, .. } | Item::MarginKern { w, .. } => self.cur_h += *w,
                     Item::Math { w, after, lr: base } => {
                         // (etex.web §1450: the LR stack; a segment in the
                         // other direction is reversed)
@@ -649,7 +649,7 @@ impl Writer<'_> {
                     self.cur_h += it.xdims().map_or(0, |x| x.0);
                     (H::I(it), None)
                 }
-                H::I(Item::Kern { w, .. }) | H::Kern(w) => {
+                H::I(Item::Kern { w, .. } | Item::MarginKern { w, .. }) | H::Kern(w) => {
                     self.cur_h += w;
                     (H::Kern(w), Some(w))
                 }

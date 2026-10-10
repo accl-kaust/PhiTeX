@@ -63,6 +63,7 @@ pub fn saved(key: &Key) -> bool {
             | Key::Ended
             | Key::MainTail
             | Key::MainDepth
+            | Key::LastMatch(_)
     )
 }
 
@@ -520,6 +521,14 @@ impl Writer<'_> {
                 self.byte(34);
                 self.str(g);
             }
+            Key::FontCode(k, f) => {
+                font_key(self, 35, f);
+                self.byte(*k);
+            }
+            Key::FontExpand(f) => font_key(self, 36, f),
+            Key::FontAttr(f) => font_key(self, 37, f),
+            Key::FontCopies(f) => font_key(self, 38, f),
+            Key::ParToken => self.byte(39),
             // (XeTeX's)
             Key::InterChar(a, b) => {
                 self.byte(50);
@@ -914,6 +923,14 @@ impl Reader<'_> {
             32 => Key::LastFont,
             33 => Key::Interaction,
             34 => Key::GlyphUnicode(Arc::from(self.str()?)),
+            35 => {
+                let f = Arc::from(self.str()?);
+                Key::FontCode(self.byte()?, f)
+            }
+            36 => Key::FontExpand(Arc::from(self.str()?)),
+            37 => Key::FontAttr(Arc::from(self.str()?)),
+            38 => Key::FontCopies(Arc::from(self.str()?)),
+            39 => Key::ParToken,
             50 => Key::InterChar(self.n()?, self.n()?),
             51 => Key::InputEncoding,
             52 => Key::DefaultEncoding,

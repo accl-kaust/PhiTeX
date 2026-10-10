@@ -24,7 +24,11 @@ commands:
   check    build without writing the outputs
   clean    remove the files a build writes (clean --all: the cache of
            formats and TeX Live's links too; no file needed)
-  sync     sync FILE:LINE[:COL]: the watch's viewer shows that line
+  sync     sync FILE:LINE[:COL]: the watch's viewer shows that line;
+           sync --pdf PAGE X Y [file.tex]: the source of what is at (X, Y)
+           (big points from the page's top left), sync --tex FILE LINE
+           [file.tex]: where that line is shown, both from <job>.synctex.gz
+           (printed as TeX Live's `synctex edit` and `synctex view` do)
   outline  the document's structure, read from its source without TeX
 
 options:
@@ -44,7 +48,7 @@ options:
       --view, --no-view    watch: serve the live viewer (default: on a terminal)
       --editor CMD         watch: where a double-click on a page opens its source
       --copy-pdf[=DIR]     copy the PDF after each successful build
-      --synctex            write <job>.synctex.gz (not yet on phitex-flow)
+      --no-synctex         no <job>.synctex.gz (build and watch write it)
       --recorder           write <job>.fls
   -V, --version
   -h, --help
@@ -148,7 +152,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
             "--view" => o.view = Some(true),
             "--no-view" => o.view = Some(false),
             "--editor" => o.editor = Some(value()?),
-            "--synctex" => o.synctex = Some(true),
+            "--synctex" => o.synctex = Some(inline.as_deref().is_none_or(|v| v.trim() != "0")),
             "--no-synctex" => o.synctex = Some(false),
             "--recorder" => o.recorder = true,
             // (the value only inline: `--copy-pdf paper.tex` names the file)
@@ -199,7 +203,7 @@ impl Target {
 /// in its directory), then the file's magic comments. Without a
 /// `phitex.toml` the build runs in the main file's directory, as latexmk
 /// -cd does.
-fn resolve(o: &Options) -> Result<Target, String> {
+pub(crate) fn resolve(o: &Options) -> Result<Target, String> {
     let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
     let found = config::find(&cwd)?;
     let (root, cfg, configured) = match (&o.file, found) {
@@ -256,8 +260,8 @@ fn resolve(o: &Options) -> Result<Target, String> {
         engine,
         output_dir,
         copy_pdf,
-        // (an external engine writes its own SyncTeX file)
-        synctex: o.synctex.or(cfg.synctex).unwrap_or(external.is_some()),
+        // (on unless asked otherwise; an external engine writes its own)
+        synctex: o.synctex.or(cfg.synctex).unwrap_or(true),
         external,
     })
 }
@@ -512,6 +516,9 @@ pub fn main(args: &[String]) -> ! {
     }
     if args.first().is_some_and(|a| a == "outline") {
         crate::outline::main(&args[1..]);
+    }
+    if args.first().is_some_and(|a| a == "sync") && args.iter().any(|a| a == "--pdf" || a == "--tex") {
+        std::process::exit(crate::synctex::sync_main(&args[1..]));
     }
     let o = match parse(args) {
         Ok(o) => o,

@@ -134,6 +134,43 @@ struct Main {
     /// XeTeX: the category of the character looked ahead at (a letter
     /// or not, for `\XeTeXinterchartoks`).
     cat: u8,
+    /// pdfTeX: the tags `\pdfnoligatures` and `\tagcode` cleared of the
+    /// font's characters (`micro::TAG`'s table): one whose lig/kern
+    /// program's is cleared has none.
+    tags: Arc<[i32]>,
+    /// pdfTeX's `\pdfprependkern`/`\pdfappendkern` kerns, if either is
+    /// positive.
+    auto: Option<AutoKern>,
+}
+
+/// What `get_auto_kern` reads of the main loop's font.
+struct AutoKern {
+    pre: bool,
+    app: bool,
+    quad: i32,
+    knbc: Arc<[i32]>,
+    knac: Arc<[i32]>,
+}
+
+impl AutoKern {
+    /// pdftex.web's `get_auto_kern(f, l, r)`: the kern after `l` and
+    /// before `r` (either `NON_CHAR`), if any.
+    fn kern(&self, l: i32, r: i32) -> Option<Item> {
+        let mut w = 0;
+        if self.app && l < NON_CHAR {
+            let k = crate::micro::code(&self.knac, crate::micro::KNAC, l as u8);
+            if k != 0 {
+                w = Font::round_xn_over_d(self.quad, k, 1000);
+            }
+        }
+        if self.pre && r < NON_CHAR {
+            let k = crate::micro::code(&self.knbc, crate::micro::KNBC, r as u8);
+            if k != 0 {
+                w += Font::round_xn_over_d(self.quad, k, 1000);
+            }
+        }
+        (w != 0).then_some(Item::Kern { w, sub: 3 })
+    }
 }
 
 impl Main {
@@ -197,14 +234,38 @@ pub(super) fn push_horizontal(list: &mut Vec<Item>, it: Item) {
     }
 }
 
+/// The fonts of a paragraph's characters, where its lines' expansion and
+/// protrusion look (the list, its discretionaries, its hboxes).
+fn para_fonts(list: &[Item], out: &mut Vec<Arc<Font>>) {
+    for it in list {
+        let f = match it {
+            Item::Char(f, _) => f,
+            Item::Lig(l) => &l.font,
+            Item::Box(b) if !b.vertical => {
+                para_fonts(&b.list, out);
+                continue;
+            }
+            Item::Disc(d) => {
+                para_fonts(&d.pre, out);
+                para_fonts(&d.post, out);
+                continue;
+            }
+            _ => continue,
+        };
+        if !out.iter().any(|x| Arc::ptr_eq(x, f) || x.key == f.key) {
+            out.push(f.clone());
+        }
+    }
+}
+
 /// The fonts appearing in a list (for the names its display shows).
 pub(super) fn fonts_in(list: &[Item], out: &mut Vec<Arc<str>>) {
     for it in list {
         let id = match it {
-            Item::Char(f, _) => &f.key,
-            Item::Lig(l) => &l.font.key,
-            Item::Native(w) => &w.font.key,
-            Item::Glyph(g) => &g.font.key,
+            Item::Char(f, _) => f.ident_key(),
+            Item::Lig(l) => l.font.ident_key(),
+            Item::Native(w) => w.font.ident_key(),
+            Item::Glyph(g) => g.font.ident_key(),
             Item::Box(b) => {
                 fonts_in(&b.list, out);
                 continue;
@@ -516,7 +577,7 @@ impl Exec<'_> {
                 self.rewrite(vec![Tok::Char(2, '}'), t.clone()]);
             }
         } else {
-            let par = self.cs("par");
+            let par = self.par_token();
             self.rewrite(vec![par, t.clone()]);
         }
     }
@@ -603,6 +664,39 @@ impl Exec<'_> {
         }
     }
 
+    /// `\partokenname\cs` (pdfTeX's partoken.ch): a control sequence
+    /// becomes the token ending paragraphs, globally; anything else is
+    /// read and ignored.
+    pub(super) fn par_token_name(&mut self) {
+        if let Some(t) = self.next_raw()
+            && matches!(t, Tok::Cs(_) | Tok::Active(_))
+        {
+            self.define(Key::ParToken, Val::Toks(Arc::new(vec![t])), true);
+        }
+    }
+
+    /// The token ending paragraphs (`par_token`): `\par`, or
+    /// `\partokenname`'s.
+    pub(super) fn par_token(&mut self) -> Tok {
+        match self.get(&Key::ParToken) {
+            Val::Toks(t) if t.len() == 1 => t[0].clone(),
+            _ => self.cs("par"),
+        }
+    }
+
+    /// What ends a paragraph before a group's `}` in horizontal mode:
+    /// TeX's `end_graf`, or with `\partokencontext` at least `level` the
+    /// paragraph token (pdfTeX's partoken.ch: 1 for `\vbox`, `\vtop`,
+    /// `\vcenter`; 2 for `\insert`, `\vadjust`, `\output`, `\noalign`
+    /// and a `\valign` entry).
+    pub(super) fn end_graf_token(&mut self, level: i32) -> Tok {
+        if self.int_par(IntPar::Partokencontext) >= level {
+            self.par_token()
+        } else {
+            self.cs("\u{0}endgraf")
+        }
+    }
+
     /// What line breaking reads (tex.web 813–890).
     pub(super) fn line_params(&mut self, hlist: &[Item]) -> LineParams {
         let parshape = match self.get(&Key::Parshape) {
@@ -644,7 +738,77 @@ impl Exec<'_> {
             inter: self.interline(),
             show: self.show_ctx(hlist),
             hyph: Some(self.hyph_params(hlist)),
+            micro: self.micro(hlist),
         }
+    }
+
+    /// What pdfTeX's font expansion and character protrusion read of the
+    /// paragraph's fonts, if `\pdfadjustspacing` or `\pdfprotrudechars`
+    /// is positive (pdftex.web: `check_expand_pars` and the codes
+    /// `char_stretch`, `char_pw` read).
+    fn micro(&mut self, hlist: &[Item]) -> Option<Arc<crate::micro::Micro>> {
+        use crate::micro::{Expand, Micro, MicroFont};
+        let adjust = self.int_par(IntPar::Pdfadjustspacing);
+        let protrude = self.int_par(IntPar::Pdfprotrudechars);
+        if adjust <= 0 && protrude <= 0 {
+            return None;
+        }
+        let mut fonts: Vec<Arc<Font>> = Vec::new();
+        para_fonts(hlist, &mut fonts);
+        let mut out = Micro { adjust_spacing: adjust, protrude_chars: protrude, fonts: Vec::new(), max_stretch: -1, max_shrink: -1, step: -1 };
+        let empty: Arc<[i32]> = Arc::from([]);
+        for f in fonts {
+            let k = self.font_key(&f);
+            let (ef, expand) = if adjust > 0 {
+                let x = self.font_expand_of(&f);
+                (self.font_code_table(&Key::FontCode(crate::micro::EF, k.clone())), x)
+            } else {
+                (empty.clone(), None)
+            };
+            let (lp, rp, quad) = if protrude > 0 {
+                (
+                    self.font_code_table(&Key::FontCode(crate::micro::LP, k.clone())),
+                    self.font_code_table(&Key::FontCode(crate::micro::RP, k.clone())),
+                    self.int(&Key::FontDimen(k, 6)),
+                )
+            } else {
+                (empty.clone(), empty.clone(), 0)
+            };
+            if let Some(e) = expand.filter(Expand::expandable) {
+                // (`check_expand_pars`: one step and one pair of limits
+                // in a paragraph)
+                let bad = if out.step < 0 {
+                    out.step = e.step;
+                    None
+                } else if out.step != e.step {
+                    Some("using fonts with different step of expansion in one paragraph is not allowed")
+                } else {
+                    None
+                };
+                let mut bad = bad;
+                if e.stretch > 0 {
+                    if out.max_stretch < 0 {
+                        out.max_stretch = e.stretch;
+                    } else if out.max_stretch != e.stretch {
+                        bad = Some("using fonts with different limit of expansion in one paragraph is not allowed");
+                    }
+                }
+                if e.shrink > 0 {
+                    if out.max_shrink < 0 {
+                        out.max_shrink = e.shrink;
+                    } else if out.max_shrink != e.shrink {
+                        bad = Some("using fonts with different limit of expansion in one paragraph is not allowed");
+                    }
+                }
+                if let Some(b) = bad
+                    && adjust > 1
+                {
+                    self.pdf_error("font expansion", b);
+                }
+            }
+            out.fonts.push(MicroFont { font: f, quad, ef, lp, rp, expand });
+        }
+        Some(Arc::new(out))
     }
 
     /// `\par` in horizontal mode (tex.web 1096: `end_graf`): the
@@ -964,14 +1128,26 @@ impl Exec<'_> {
             ins_disc: false,
             look: None,
             cat: cat0,
+            tags: Arc::from([]),
+            auto: None,
         };
-        let mut l = match m.font.bchar_label {
-            None => L::Move2,
-            Some(k) => {
-                m.k = usize::from(k);
-                m.cur_r = m.cur_l;
-                m.cur_l = NON_CHAR;
-                L::LigLoop1
+        let key = self.font_key(&m.font);
+        m.tags = self.font_code_table(&Key::FontCode(crate::micro::TAG, key.clone()));
+        m.auto = self.auto_kern(&key);
+        let mut l = if let Some(k) = m.auto.as_ref().and_then(|a| a.kern(NON_CHAR, m.cur_l)) {
+            // (pdftex.web: a kern before the first character, which then
+            // has no left boundary)
+            self.emit.push(k);
+            L::Move
+        } else {
+            match m.font.bchar_label {
+                None => L::Move2,
+                Some(k) => {
+                    m.k = usize::from(k);
+                    m.cur_r = m.cur_l;
+                    m.cur_l = NON_CHAR;
+                    L::LigLoop1
+                }
             }
         };
         loop {
@@ -1089,8 +1265,23 @@ impl Exec<'_> {
                     L::LigLoop
                 }
                 L::LigLoop => match m.i.tag {
+                    // (pdftex.web: a `\pdfappendkern`/`\pdfprependkern`
+                    // kern between the two instead of their program)
+                    _ if let Some(k) = m.auto.as_ref().and_then(|a| a.kern(m.cur_l, m.cur_r)) => {
+                        let z = m.rt_hit;
+                        if self.wrapup(&mut m, z) {
+                            let at = self.emit.len() - 1;
+                            self.emit.insert(at, k);
+                        } else {
+                            self.emit.push(k);
+                        }
+                        L::Move
+                    }
                     // (§1039)
-                    Tag::Lig(start) if m.cur_r != NON_CHAR => {
+                    Tag::Lig(start)
+                        if m.cur_r != NON_CHAR
+                            && m.tags.get(m.cur_l as usize).is_none_or(|t| t & crate::micro::TAG_LIG == 0) =>
+                    {
                         m.k = usize::from(start);
                         m.j = m.lk();
                         if m.j.skip <= LigKern::STOP {
@@ -1144,13 +1335,31 @@ impl Exec<'_> {
             right = true;
             m.rt_hit = false;
         }
+        // (pdftex.web: a `\pdfprependkern` kern before it)
+        if let Some(k) = m.auto.as_ref().filter(|a| a.pre).and_then(|a| a.kern(NON_CHAR, m.cur_l)) {
+            self.emit.push(k);
+        }
         self.emit.push(Item::Lig(Arc::new(Lig { font: m.font.clone(), c: m.cur_l as u8, orig, left, right })));
         m.after_q = 0;
         m.ligature_present = false;
     }
 
-    /// §1035: `wrapup(z)`.
-    fn wrapup(&mut self, m: &mut Main, z: bool) {
+    /// What `get_auto_kern` reads (`None`: neither `\pdfprependkern` nor
+    /// `\pdfappendkern` is positive).
+    fn auto_kern(&mut self, key: &Arc<str>) -> Option<AutoKern> {
+        let pre = self.int_par(IntPar::Pdfprependkern) > 0;
+        let app = self.int_par(IntPar::Pdfappendkern) > 0;
+        if !pre && !app {
+            return None;
+        }
+        let quad = self.int(&Key::FontDimen(key.clone(), 6));
+        let knbc = if pre { self.font_code_table(&Key::FontCode(crate::micro::KNBC, key.clone())) } else { Arc::from([]) };
+        let knac = if app { self.font_code_table(&Key::FontCode(crate::micro::KNAC, key.clone())) } else { Arc::from([]) };
+        Some(AutoKern { pre, app, quad, knbc, knac })
+    }
+
+    /// §1035: `wrapup(z)`: whether it put in a null discretionary.
+    fn wrapup(&mut self, m: &mut Main, z: bool) -> bool {
         if m.cur_l < NON_CHAR {
             if m.after_q > 0
                 && let Some(Item::Char(_, c)) = self.emit.last()
@@ -1168,9 +1377,11 @@ impl Exec<'_> {
                 m.ins_disc = false;
                 if !self.st.inner {
                     self.emit.push(Item::Disc(Arc::new(Disc { pre: Vec::new(), post: Vec::new(), replace: 0 })));
+                    return true;
                 }
             }
         }
+        false
     }
 
     /// §1040: a ligature or kern instruction.
@@ -1241,7 +1452,9 @@ impl Exec<'_> {
 
     /// A space token in horizontal mode (tex.web 1030, 1041, 1043).
     pub(super) fn space_cmd(&mut self) {
-        if self.st.space_factor == 1000 {
+        // (pdfTeX: with `\pdfadjustinterwordglue` positive, always the
+        // normal space)
+        if self.st.space_factor == 1000 || self.int_par(IntPar::Pdfadjustinterwordglue) > 0 {
             self.normal_space();
         } else {
             self.app_space();
@@ -1279,7 +1492,42 @@ impl Exec<'_> {
         } else {
             param_glue(&ss, GluePar::Spaceskip as u8)
         };
+        let it = if self.int_par(IntPar::Pdfadjustinterwordglue) > 0 { self.adjust_interword_glue(it) } else { it };
         self.emit.push(it);
+    }
+
+    /// pdftex.web's `adjust_interword_glue`: the glue after a character
+    /// (the list's last item, or before the last if that is a
+    /// `\pdfappendkern` kern) widened, stretched and shrunk by that
+    /// character's `\knbscode`, `\stbscode`, `\shbscode` in thousandths
+    /// of its font's quad.
+    fn adjust_interword_glue(&mut self, it: Item) -> Item {
+        let Item::Glue { g, sub, .. } = &it else { return it };
+        if self.kind == Kind::Other {
+            self.kind = Kind::Par;
+        }
+        let list = self.current_list(false);
+        let ch = match list.last() {
+            Some(Item::Kern { sub: 3, .. }) => list.len().checked_sub(2).and_then(|j| crate::micro::char_of(&list[j])),
+            Some(x) => crate::micro::char_of(x),
+            None => None,
+        };
+        let Some((f, c)) = ch.map(|(f, c)| (f.clone(), c)) else { return it };
+        let k = self.font_key(&f);
+        let mut codes = [0; 3];
+        for (x, kind) in codes.iter_mut().zip([crate::micro::KNBS, crate::micro::STBS, crate::micro::SHBS]) {
+            let t = self.font_code_table(&Key::FontCode(kind, k.clone()));
+            *x = crate::micro::code(&t, kind, c);
+        }
+        if codes == [0; 3] {
+            return it;
+        }
+        let quad = self.int(&Key::FontDimen(k, 6));
+        let mut q = **g;
+        q.width += Font::round_xn_over_d(quad, codes[0], 1000);
+        q.stretch += Font::round_xn_over_d(quad, codes[1], 1000);
+        q.shrink += Font::round_xn_over_d(quad, codes[2], 1000);
+        Item::Glue { g: Arc::new(q), sub: *sub, zero: false }
     }
 
     /// §1043: `app_space`.
@@ -1378,15 +1626,27 @@ impl Exec<'_> {
         if !explicit {
             let f = self.font();
             let k = self.font_key(&f);
-            let c = self.int(&Key::HyphenChar(k));
-            let pre = if self.xetex && f.native.is_some() {
+            let c = self.int(&Key::HyphenChar(k.clone()));
+            let mut pre = Vec::new();
+            if self.xetex && f.native.is_some() {
                 // (xetex.web: `new_character` of a native font)
-                if (0..=65535).contains(&c) { vec![Item::Native(Arc::new(self.native_character(&f, c as u32)))] } else { Vec::new() }
-            } else if (0..256).contains(&c) && f.glyph(c).is_some() {
-                vec![Item::Char(f, c as u8)]
-            } else {
-                Vec::new()
-            };
+                if (0..=65535).contains(&c) {
+                    pre.push(Item::Native(Arc::new(self.native_character(&f, c as u32))));
+                }
+            } else if (0..256).contains(&c) {
+                // (pdftex.web: the hyphen's `\pdfprependkern` and
+                // `\pdfappendkern` kerns around it)
+                let auto = self.auto_kern(&k);
+                if let Some(x) = auto.as_ref().and_then(|a| a.kern(NON_CHAR, c)) {
+                    pre.push(x);
+                }
+                if f.glyph(c).is_some() {
+                    pre.push(Item::Char(f, c as u8));
+                }
+                if let Some(x) = auto.as_ref().and_then(|a| a.kern(c, NON_CHAR)) {
+                    pre.push(x);
+                }
+            }
             self.emit.push(Item::Disc(Arc::new(Disc { pre, post: Vec::new(), replace: 0 })));
             return;
         }
@@ -1609,7 +1869,12 @@ impl Exec<'_> {
         if self.st.mode == Mode::H && !self.st.inner {
             // (the `}` read again: as `back_input`, which an alignment's
             // brace count sees)
-            let e = self.cs("\u{0}endgraf");
+            let level = match g.kind {
+                BoxKind::V | BoxKind::Vtop | BoxKind::Vcenter => 1,
+                BoxKind::Insert(..) => 2,
+                _ => i32::MAX,
+            };
+            let e = self.end_graf_token(level);
             self.back(t.clone());
             self.back(e);
             return;
@@ -1899,7 +2164,8 @@ impl Exec<'_> {
         if !copy {
             self.change_box(n, Val::Void);
         }
-        for it in &b.list {
+        // (pdftex.web 1110: the margin kerns are dropped)
+        for it in b.list.iter().filter(|it| !matches!(it, Item::MarginKern { .. })) {
             self.emit_here(it.clone());
         }
     }

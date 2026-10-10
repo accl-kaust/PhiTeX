@@ -10,6 +10,7 @@ use std::sync::Arc;
 
 use super::Exec;
 use crate::arith::xn_over_d;
+use crate::micro;
 use crate::tfm::{Font, null_font};
 use crate::val::{IntPar, Key, Meaning, Prim, Tok, Val};
 
@@ -238,12 +239,262 @@ impl Exec<'_> {
         if which == 0 { Key::HyphenChar(f.key.clone()) } else { Key::SkewChar(f.key.clone()) }
     }
 
-    /// `\hyphenchar f=n`, `\skewchar f=n`: always global (tex.web 1253).
+    /// `\hyphenchar f=n`, `\skewchar f=n`: always global (tex.web 1253);
+    /// pdfTeX's `\lpcode f c=n` and the other codes (global too:
+    /// `set_*_code`), `\pdfnoligatures f`.
     pub(super) fn assign_font_int(&mut self, which: u8) {
-        let k = self.font_int_key(which);
+        if which < 2 {
+            let k = self.font_int_key(which);
+            self.optional_equals();
+            let v = self.scan_int();
+            self.define(k, Val::Int(v), true);
+            return;
+        }
+        let f = self.scan_font_ident();
+        let key = Key::FontCode(which, f.key.clone());
+        // (`\pdfnoligatures` and `\tagcode` clear characters' tags: the
+        // font's `micro::TAG` table of the tags cleared, `set_no_ligatures`
+        // the lig/kern program's of every character, `set_tag_code` those
+        // of `abs(fix_int(n, -7, 0))`'s bits of an existing character)
+        if which == micro::NOLIG || which == micro::TAG {
+            let tkey = Key::FontCode(micro::TAG, f.key.clone());
+            let mut t: Vec<i32> = self.font_code_table(&tkey).to_vec();
+            t.resize(256, 0);
+            if which == micro::NOLIG {
+                for x in &mut t {
+                    *x |= micro::TAG_LIG;
+                }
+            } else {
+                let c = self.scan_char_num();
+                self.optional_equals();
+                let v = self.scan_int().clamp(-7, 0).abs();
+                if f.glyph(c).is_none() {
+                    return;
+                }
+                t[c as usize] |= v;
+            }
+            self.define(tkey, Val::Penalties(t.into()), true);
+            return;
+        }
+        let c = self.scan_char_num();
         self.optional_equals();
         let v = self.scan_int();
-        self.define(k, Val::Int(v), true);
+        let table = self.font_code_table(&key);
+        let t = micro::set_code(&table, which, u8::try_from(c).unwrap_or(0), v);
+        self.define(key, Val::Penalties(t), true);
+    }
+
+    /// A font's table of a code (`Key::FontCode`; empty: the defaults).
+    pub(super) fn font_code_table(&mut self, key: &Key) -> Arc<[i32]> {
+        match self.get(key) {
+            Val::Penalties(t) => t,
+            _ => Arc::from([]),
+        }
+    }
+
+    /// `\the` of `\hyphenchar f`, `\skewchar f`, a pdfTeX code `f c` or
+    /// `\pdfnoligatures f` (pdftex.web 425's `Fetch a font integer`).
+    pub(super) fn font_int_value(&mut self, which: u8) -> i32 {
+        if which < 2 {
+            let k = self.font_int_key(which);
+            return self.int(&k);
+        }
+        let f = self.scan_font_ident();
+        if which == micro::NOLIG || which == micro::TAG {
+            let t = self.font_code_table(&Key::FontCode(micro::TAG, f.key.clone()));
+            if which == micro::NOLIG {
+                return f.test_no_ligatures(&t);
+            }
+            let c = self.scan_char_num();
+            return micro::tag_code(&f, &t, c);
+        }
+        let c = self.scan_char_num();
+        let t = self.font_code_table(&Key::FontCode(which, f.key.clone()));
+        micro::code(&t, which, u8::try_from(c).unwrap_or(0))
+    }
+
+    /// pdftex.web's `pdf_error`: an error that ends the job.
+    pub(super) fn pdf_error(&mut self, t: &str, p: &str) {
+        self.err(format!("pdfTeX error ({t}): {p}"));
+        self.overflow(String::new());
+    }
+
+    /// `\pdffontexpand f stretch shrink step [autoexpand]`
+    /// (`read_expand_font`): the font's parameters, global, checked
+    /// against those it was given before. Its fonts expanded by the limits
+    /// are loaded now (they are numbered now: `get_expand_font`); the
+    /// others where a line is set in them. Every font is taken as
+    /// `autoexpand` (CORE.md).
+    pub(super) fn pdf_font_expand(&mut self) {
+        let f = self.scan_font_ident();
+        if *f.key == *"nullfont" {
+            self.pdf_error("font expansion", "invalid font identifier");
+            return;
+        }
+        if f.expanded_from().is_some() {
+            self.pdf_error(
+                "font expansion",
+                "\\pdffontexpand cannot be used this way (the base font has been expanded)",
+            );
+            return;
+        }
+        self.optional_equals();
+        let mut stretch = self.scan_int().clamp(0, 1000);
+        let mut shrink = self.scan_int().clamp(0, 500);
+        let step = self.scan_int().clamp(0, 100);
+        if step == 0 {
+            self.pdf_error("font expansion", "invalid step");
+            return;
+        }
+        stretch -= stretch % step;
+        shrink -= shrink % step;
+        if stretch == 0 && shrink == 0 {
+            self.pdf_error("font expansion", "invalid limit(s)");
+            return;
+        }
+        let auto = self.keyword("autoexpand");
+        if auto {
+            self.optional_space();
+        }
+        let key = Key::FontExpand(f.key.clone());
+        let now = micro::Expand { stretch, shrink, step, auto };
+        if let Val::Penalties(v) = self.get(&key)
+            && let Some(was) = micro::Expand::of(&v)
+        {
+            let bad = if was.step != step {
+                Some("font has been expanded with different expansion step")
+            } else if was.stretch != stretch {
+                Some("font has been expanded with different stretch limit")
+            } else if was.shrink != shrink {
+                Some("font has been expanded with different shrink limit")
+            } else if was.auto != auto {
+                Some("font has been expanded with different auto expansion value")
+            } else {
+                None
+            };
+            if let Some(b) = bad {
+                self.pdf_error("font expansion", b);
+            }
+            return;
+        }
+        self.define(key, Val::Penalties(now.val()), true);
+        for e in [stretch, -shrink] {
+            if e != 0 {
+                let x = Font::expanded(&f, e);
+                let loaded = Key::FontLoaded(x.key.clone());
+                if self.get(&loaded) == Val::Int(0) {
+                    self.define(loaded, Val::Int(1), true);
+                }
+            }
+        }
+    }
+
+    /// `\pdffontattr f {text}`: the text, global; read by PDF output only
+    /// (an error in DVI mode, `check_pdfoutput`).
+    pub(super) fn pdf_font_attr(&mut self) {
+        if self.int_par(IntPar::Pdfoutput) <= 0 {
+            self.pdf_error("\\pdffontattr", "not allowed in DVI mode (\\pdfoutput <= 0)");
+            return;
+        }
+        let f = self.scan_font_ident();
+        if *f.key == *"nullfont" {
+            self.pdf_error("font", "invalid font identifier");
+            return;
+        }
+        let toks = self.scan_toks_x();
+        let mut text = String::new();
+        self.show_toks(&mut text, &toks);
+        self.define(Key::FontAttr(f.key.clone()), Val::Name(Arc::from(text)), true);
+    }
+
+    /// The name `key` (`\font`'s, `\pdfcopyfont`'s) gives the font it
+    /// defines (`font_id_text`).
+    fn ident_of(&self, key: &Key) -> Arc<str> {
+        match key {
+            Key::Cs(n) => {
+                let s = self.env.cs().name(*n);
+                if s.is_empty() { Arc::from("FONT") } else { s }
+            }
+            Key::Active(c) => Arc::from(format!("FONT{c}")),
+            _ => Arc::from("FONT"),
+        }
+    }
+
+    /// The next number of a font made from `f` (`Key::FontCopies`).
+    fn next_copy(&mut self, f: &Font) -> u32 {
+        let k = Key::FontCopies(f.key.clone());
+        let n = self.int(&k) + 1;
+        self.define(k, Val::Int(n), true);
+        n.cast_unsigned()
+    }
+
+    /// A font pdfTeX made is loaded (`font_ptr` its): its parameters,
+    /// `\hyphenchar` and `\skewchar` defined, and `key` defined as it.
+    fn define_made_font(&mut self, key: Key, f: Font, hyphen: i32, skew: i32, global: bool) {
+        let f = Arc::new(f);
+        let ident = self.ident_of(&key);
+        self.define(Key::FontLoaded(f.key.clone()), Val::Int(1), true);
+        self.define(Key::LastFont, Val::Name(f.key.clone()), true);
+        for (k, &v) in f.params.iter().enumerate().skip(1) {
+            self.define(Key::FontDimen(f.key.clone(), k as u32), Val::Int(v), true);
+        }
+        self.define(Key::HyphenChar(f.key.clone()), Val::Int(hyphen), true);
+        self.define(Key::SkewChar(f.key.clone()), Val::Int(skew), true);
+        self.define(Key::FontIdent(f.key.clone()), Val::Name(ident), true);
+        self.define(key, Val::Meaning(Meaning::Font(f)), global);
+    }
+
+    /// `\pdfcopyfont\cs=f` (`make_font_copy`): a copy of `f`, a font of
+    /// its own, with `f`'s parameters, `\hyphenchar` and `\skewchar` as
+    /// they are now.
+    pub(super) fn pdf_copy_font(&mut self, global: bool) {
+        let Some(key) = self.r_token() else { return };
+        self.define(key.clone(), Val::Meaning(Meaning::Font(null_font())), global);
+        self.optional_equals();
+        let f = self.scan_font_ident();
+        if f.expanded_from().is_some() || self.font_expand_of(&f).is_some() {
+            self.pdf_error("\\pdfcopyfont", "cannot copy an expanded font");
+            return;
+        }
+        if matches!(f.derived.as_deref(), Some(crate::tfm::Derived { kind: crate::tfm::DerivedKind::LetterSpaced { .. }, .. })) {
+            self.pdf_error("\\pdfcopyfont", "cannot copy a letterspaced font");
+            return;
+        }
+        let np = self.font_params(&f);
+        let mut params = vec![0; np.max(7) + 1];
+        for (k, p) in params.iter_mut().enumerate().skip(1) {
+            *p = self.int(&Key::FontDimen(f.key.clone(), k as u32));
+        }
+        let hyphen = self.int(&Key::HyphenChar(f.key.clone()));
+        let skew = self.int(&Key::SkewChar(f.key.clone()));
+        let n = self.next_copy(&f);
+        let c = Font::copied(&f, n, params.into());
+        self.define_made_font(key, c, hyphen, skew, global);
+    }
+
+    /// `\letterspacefont\cs=f n [nolig]` (`new_letterspaced_font`): `f`'s
+    /// file loaded again, its characters `n` thousandths of its quad wider.
+    pub(super) fn letterspace_font(&mut self, global: bool) {
+        let Some(key) = self.r_token() else { return };
+        self.define(key.clone(), Val::Meaning(Meaning::Font(null_font())), global);
+        self.optional_equals();
+        let f = self.scan_font_ident();
+        let e = self.scan_int().clamp(-1000, 1000);
+        let nolig = self.keyword("nolig");
+        let quad = self.int(&Key::FontDimen(f.key.clone(), 6));
+        let n = self.next_copy(&f);
+        let ls = Font::letterspaced(&f, e, n, nolig, quad);
+        let h = self.int_par(IntPar::Defaulthyphenchar);
+        let sk = self.int_par(IntPar::Defaultskewchar);
+        self.define_made_font(key, ls, h, sk, global);
+    }
+
+    /// A font's `\pdffontexpand` parameters, if it was given them.
+    pub(super) fn font_expand_of(&mut self, f: &Font) -> Option<micro::Expand> {
+        match self.get(&Key::FontExpand(f.key.clone())) {
+            Val::Penalties(v) => micro::Expand::of(&v),
+            _ => None,
+        }
     }
 
     /// `\fontname f` (tex.web 472).

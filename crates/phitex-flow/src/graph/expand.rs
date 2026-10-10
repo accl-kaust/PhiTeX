@@ -14,7 +14,7 @@ use super::{Cond, Exec, Kind, Mode, Phi, Read, Src};
 use crate::print;
 use crate::print::MAX_PRINT_LINE;
 use crate::show::{LN, RAW, SP};
-use crate::val::{Conv, IfKind, IntPar, Key, Meaning, Prim, Tok, Val, Xe};
+use crate::val::{Conv, IfKind, IntPar, Key, Meaning, Prim, Tok, Val};
 
 /// The job's name (`\jobname`): TeX's when it was given no file name.
 pub const JOBNAME: &str = "texput";
@@ -93,6 +93,18 @@ impl Exec<'_> {
         self.next_x_m(false).map(|(t, _)| t)
     }
 
+    /// The primitive a control sequence's name names (pdftex.web's
+    /// `prim_lookup`: TeX's, and in extended mode e-TeX's and pdfTeX's).
+    pub(super) fn primitive_of(&mut self, t: &Tok) -> Option<Prim> {
+        let Tok::Cs(n) = t else { return None };
+        let n = self.env.cs().name(*n);
+        let etex = self.int(&Key::ETeXMode) != 0;
+        Prim::by_name(&n)
+            .or_else(|| if etex { Prim::by_name_etex(&n).or_else(|| Prim::by_name_pdftex(&n)) } else { None })
+            // (XeTeX's `\primitive` and `\ifprimitive`: its own names too)
+            .or_else(|| if self.xetex { Prim::by_name_xetex(&n) } else { None })
+    }
+
     /// One expansion step of `t`, whose meaning is `m` (tex.web 366).
     pub(super) fn expand(&mut self, t: &Tok, m: &Meaning) {
         match m {
@@ -112,27 +124,22 @@ impl Exec<'_> {
                     }
                 }
                 Prim::CsName => self.csname(),
-                Prim::Convert(c) => self.convert(c),
-                // (pdftex.web's `\primitive`: the next token, if it names a
-                // primitive, read as a frozen token that always means that
-                // primitive, whatever the name means now; else as it was)
-                Prim::Xe(Xe::Primitive) => {
-                    let Some(x) = self.next_raw_normal() else { return };
-                    let frozen = match &x {
-                        Tok::Cs(n) => {
-                            let name = self.env.cs().name(*n);
-                            crate::val::primitive_named(&name).is_some().then(|| format!("{}{name}", crate::val::FROZEN_PRIMITIVE))
+                Prim::PdfPrimitive => {
+                    // (pdftex.web: `get_token`; the name's primitive expands
+                    // here, or is executed: the frozen `\pdfprimitive` goes
+                    // before the token; a name of none is dropped)
+                    let Some(x) = self.next_raw() else { return };
+                    match self.primitive_of(&x) {
+                        Some(p) if p.expandable() => self.expand(&x, &Meaning::Prim(p)),
+                        Some(_) => {
+                            self.back(x);
+                            let f = self.cs("\u{0}pdfprimitive");
+                            self.back(f);
                         }
-                        _ => None,
-                    };
-                    match frozen {
-                        Some(f) => {
-                            let t = self.cs(&f);
-                            self.back(t);
-                        }
-                        None => self.back(x),
+                        None => {}
                     }
                 }
+                Prim::Convert(c) => self.convert(c),
                 Prim::Xe(x) => self.xe_convert(x),
                 Prim::The => {
                     let toks = self.the_toks();
@@ -370,6 +377,104 @@ impl Exec<'_> {
                     let b = (pair[0] << 4) | pair.get(1).copied().unwrap_or(0);
                     s.push(char::from(b));
                 }
+            }
+            Conv::PdfMatch => {
+                // (pdftex.web 470, `matchstrings`: 1, 0, or -1 for a bad
+                // expression; the string and the submatches, up to the
+                // subcount (10), defined for `\pdflastmatch`, global)
+                let icase = self.keyword("icase");
+                let subcount = if self.keyword("subcount") { self.scan_int() } else { -1 };
+                let pat = self.pdf_string();
+                let t = self.pdf_string();
+                match crate::ere::find(&pat, &t, icase) {
+                    None => s.push_str("-1"),
+                    Some(found) => {
+                        s.push(if found.is_some() { '1' } else { '0' });
+                        let n = if subcount < 0 { 10 } else { subcount as usize };
+                        let caps: Vec<i32> = found
+                            .map(|c| {
+                                (0..n)
+                                    .flat_map(|i| match c.get(i).copied().flatten() {
+                                        Some((a, b)) => [a as i32, b as i32],
+                                        None => [-1, -1],
+                                    })
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        self.define(Key::LastMatch(0), Val::Name(Arc::from(t)), true);
+                        self.define(Key::LastMatch(1), Val::Penalties(caps.into()), true);
+                    }
+                }
+            }
+            Conv::PdfLastMatch => {
+                // (pdftex.web 470, `getmatch`: `start->text`, or `-1->`)
+                let mut n = self.scan_int();
+                if n < 0 {
+                    self.err("Bad match number".into());
+                    n = 0;
+                }
+                let caps = match self.get(&Key::LastMatch(1)) {
+                    Val::Penalties(c) => c,
+                    _ => Arc::from([]),
+                };
+                let at = 2 * n as usize;
+                match (caps.get(at).copied(), caps.get(at + 1).copied()) {
+                    (Some(a), Some(b)) if a >= 0 && b >= a => {
+                        let t = match self.get(&Key::LastMatch(0)) {
+                            Val::Name(t) => t,
+                            _ => Arc::from(""),
+                        };
+                        let _ = write!(s, "{a}->");
+                        s.extend(t.chars().skip(a as usize).take((b - a) as usize));
+                    }
+                    _ => s.push_str("-1->"),
+                }
+            }
+            Conv::PdfInsertHt => {
+                // (pdftex.web 470: insertion class `n`'s height on the page so
+                // far, a read of the page builder's fold, `Key::Page(n)`;
+                // classes 0–9 are the page builder's own quantities' keys:
+                // CORE.md)
+                let n = self.scan_eight_bit_int();
+                let h = match u8::try_from(n) {
+                    Ok(n) if n > 9 => self.int(&Key::Page(n)),
+                    _ => 0,
+                };
+                // (no record of the class on the page: `0`; a record of
+                // height 0 is taken as none)
+                if h == 0 {
+                    s.push('0');
+                } else {
+                    print::scaled(&mut s, h);
+                }
+                s.push_str("pt");
+            }
+            Conv::LeftMarginKern | Conv::RightMarginKern => {
+                // (pdftex.web 470: a box register's hbox, its margin kern at
+                // that edge past what protrusion skips and the skip glue)
+                let n = self.scan_eight_bit_int();
+                let b = match self.get(&Key::Box(n)) {
+                    Val::Box(b) if !b.vertical => b,
+                    _ => {
+                        self.pdf_error("marginkern", "a non-empty hbox expected");
+                        return;
+                    }
+                };
+                let right = c == Conv::RightMarginKern;
+                let pass = |it: &&crate::item::Item| {
+                    crate::micro::skipable(it)
+                        || matches!(it, crate::item::Item::Glue { sub, .. } if *sub == if right { 9 } else { 8 })
+                };
+                let found = if right {
+                    b.list.iter().rev().find(|it| !pass(it))
+                } else {
+                    b.list.iter().find(|it| !pass(it))
+                };
+                match found {
+                    Some(crate::item::Item::MarginKern { w, right: r, .. }) if *r == right => print::scaled(&mut s, *w),
+                    _ => s.push('0'),
+                }
+                s.push_str("pt");
             }
         }
         self.rewrite(print::str_toks(&s));
@@ -745,12 +850,7 @@ impl Exec<'_> {
                 // (pdftex.web: `get_next`; the name's primitive, still its
                 // meaning)
                 let Some(t) = self.next_raw() else { return false };
-                let Tok::Cs(n) = &t else { return false };
-                let n = self.env.cs().name(*n);
-                let etex = self.int(&Key::ETeXMode) != 0;
-                let p = Prim::by_name(&n)
-                    .or_else(|| if etex { Prim::by_name_etex(&n).or_else(|| Prim::by_name_pdftex(&n)) } else { None })
-                    .or_else(|| if self.xetex { Prim::by_name_xetex(&n) } else { None });
+                let p = self.primitive_of(&t);
                 p.is_some_and(|p| self.tok_meaning(&t) == Meaning::Prim(p))
             }
             IfKind::FontChar => {

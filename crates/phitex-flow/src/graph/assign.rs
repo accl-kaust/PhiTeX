@@ -54,6 +54,7 @@ pub(super) fn prefixable(m: &Meaning) -> bool {
             | Prim::PenShape(_)
             | Prim::Mat(Mat::SetBox | Mat::FontInt(_))
             | Prim::HyphData(_)
+            | Prim::PdfFont(2 | 3)
             | Prim::Xe(Xe::DefCode(_) | Xe::MathCharDef(_) | Xe::InterCharToks)
         ) | Meaning::CountRef(_)
             | Meaning::DimenRef(_)
@@ -224,6 +225,8 @@ impl Exec<'_> {
                 Prim::ReadLine => self.read_line(global),
                 Prim::PenShape(k) => self.penalties_assign(k, global),
                 Prim::HyphData(pat) => self.hyph_data(pat),
+                Prim::PdfFont(2) => self.pdf_copy_font(global),
+                Prim::PdfFont(3) => self.letterspace_font(global),
                 _ => self.err(format!("\\{} is not supported yet", p.name())),
             },
             Meaning::CountRef(_) | Meaning::DimenRef(_) | Meaning::SkipRef(_) | Meaning::MuskipRef(_) => {

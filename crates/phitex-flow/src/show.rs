@@ -90,9 +90,15 @@ impl Ctx {
             out.push(char::from(c));
         }
     }
-    fn font_ident(&self, out: &mut String, key: &str) {
+    /// pdftex.web's `print_font_identifier`: an expanded font by its
+    /// base's name and the amount.
+    fn font_ident(&self, out: &mut String, f: &crate::tfm::Font) {
+        let key = &**f.ident_key();
         let name = self.idents.iter().find(|(i, _)| &**i == key).map_or("FONT?", |(_, n)| &**n);
         self.esc(out, name);
+        if let Some((_, e)) = f.expanded_from() {
+            let _ = write!(out, " ({}{e})", if e > 0 { "+" } else { "" });
+        }
     }
 }
 
@@ -108,7 +114,7 @@ pub fn short_display(out: &mut String, list: &[Item], font: &mut Arc<str>, cx: &
         match it {
             Item::Char(f, c) => {
                 if f.key != *font {
-                    cx.font_ident(out, &f.key);
+                    cx.font_ident(out, f);
                     out.push(' ');
                     font.clone_from(&f.key);
                 }
@@ -138,7 +144,7 @@ pub fn short_display(out: &mut String, list: &[Item], font: &mut Arc<str>, cx: &
             Item::Lig(l) => {
                 for &c in &l.orig {
                     if l.font.key != *font {
-                        cx.font_ident(out, &l.font.key);
+                        cx.font_ident(out, &l.font);
                         out.push(' ');
                         font.clone_from(&l.font.key);
                     }
@@ -278,7 +284,7 @@ impl Shower<'_> {
     fn item(&mut self, it: &Item) {
         match it {
             Item::Char(f, c) => {
-                self.cx.font_ident(self.out, &f.key);
+                self.cx.font_ident(self.out, f);
                 self.out.push(' ');
                 self.cx.chr(self.out, *c);
             }
@@ -346,13 +352,22 @@ impl Shower<'_> {
                 if *sub == 2 {
                     self.out.push_str(" (for accent)");
                 }
+                if *sub == 3 {
+                    self.out.push_str(" (for \\pdfprependkern/\\pdfappendkern)");
+                }
+            }
+            Item::MarginKern { w, right, .. } => {
+                // (pdftex.web 183: no space after `\kern`)
+                self.cx.esc(self.out, "kern");
+                print::scaled(self.out, *w);
+                self.out.push_str(if *right { " (right margin)" } else { " (left margin)" });
             }
             Item::Penalty(p) => {
                 self.cx.esc(self.out, "penalty ");
                 let _ = write!(self.out, "{p}");
             }
             Item::Lig(l) => {
-                self.cx.font_ident(self.out, &l.font.key);
+                self.cx.font_ident(self.out, &l.font);
                 self.out.push(' ');
                 self.cx.chr(self.out, l.c);
                 self.out.push_str(" (ligature ");
@@ -436,12 +451,12 @@ impl Shower<'_> {
             Item::Whatsit(w) => self.whatsit(w),
             // (xetex.web's `print_native_word`, glyph and picture nodes)
             Item::Native(w) => {
-                self.cx.font_ident(self.out, &w.font.key);
+                self.cx.font_ident(self.out, &w.font);
                 self.out.push(' ');
                 self.out.push_str(&crate::native::text_of(&w.text));
             }
             Item::Glyph(g) => {
-                self.cx.font_ident(self.out, &g.font.key);
+                self.cx.font_ident(self.out, &g.font);
                 let _ = write!(self.out, " glyph#{}", g.gid);
             }
             Item::Pic(p) => {

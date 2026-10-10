@@ -1850,6 +1850,35 @@ impl Run {
         (!vals.is_empty() && vals.iter().all(|x| matches!(x.2, Val::Outer(_)))).then_some(vals)
     }
 
+    /// The boxes its nodes put in registers (`\setbox`), with the node
+    /// defining each, in node order (a lean run's too): the way back from
+    /// a box an output routine moved onto a page to the node that made it
+    /// (SyncTeX, `build::sync`). Reads nothing.
+    pub fn box_defs(&self) -> Vec<(u32, Arc<crate::item::BoxNode>)> {
+        let mut v: Vec<(u32, Arc<crate::item::BoxNode>)> = Vec::new();
+        if let Some(l) = &self.lean {
+            for (key, d, _, val) in &l.defs {
+                if let (Key::Box(_), Val::Box(b)) = (key, val) {
+                    v.push((*d, b.clone()));
+                }
+            }
+        } else {
+            let c = &self.chain;
+            for (key, ds) in &c.defs_of {
+                if !matches!(key, Key::Box(_)) {
+                    continue;
+                }
+                for &(d, j) in ds {
+                    if let Some(Val::Box(b)) = c.nodes[d as usize].defs().get(j as usize).map(|x| &x.val) {
+                        v.push((d, b.clone()));
+                    }
+                }
+            }
+        }
+        v.sort_by_key(|x| x.0);
+        v
+    }
+
     /// How many nodes it has (had, if lean).
     pub fn nodes_len(&self) -> usize {
         self.lean.as_ref().map_or(self.chain.nodes.len(), |l| l.len as usize)
@@ -4536,6 +4565,17 @@ impl<'a> Exec<'a> {
             }
             return;
         };
+        // (pdfTeX's frozen `\pdfprimitive`: the next token, as its name's
+        // primitive)
+        let (t, m) = if m == Meaning::Prim(Prim::PdfPrimitiveExec) {
+            let Some(x) = self.next_raw() else { return };
+            match self.primitive_of(&x) {
+                Some(p) => (x, Meaning::Prim(p)),
+                None => return,
+            }
+        } else {
+            (t, m)
+        };
         self.cmd = t.clone();
         // (XeTeX's big switch: a command other than a character's, in
         // horizontal mode, after a run of characters: the list from the
@@ -4725,6 +4765,10 @@ impl<'a> Exec<'a> {
                 }
             }
             Prim::Space => self.ex_space(),
+            // (pdfTeX's extensions: no whatsit, done where they are met)
+            Prim::ParTokenName => self.par_token_name(),
+            Prim::PdfFont(0) => self.pdf_font_expand(),
+            Prim::PdfFont(1) => self.pdf_font_attr(),
             Prim::Char => {
                 let t = self.cmd.clone();
                 self.char_cmd_num(&t);

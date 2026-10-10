@@ -1,0 +1,16 @@
+% microtype with pdflatex (PDF mode): letterspacing (\textls,
+% \letterspacefont), tracking, interword spacing (\pdfadjustinterwordglue,
+% \knbscode…) and extra kerning (\pdfprependkern, \pdfappendkern, French
+% punctuation); for the pdflatex harness (tests/pdflatex_docs.rs).
+\documentclass{article}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage[tracking=true,spacing=true,kerning=true]{microtype}
+\begin{document}
+\textls{LETTERSPACED CAPITALS} and \textls[200]{more of them}, then
+\textsc{Small Capitals, Tracked} by microtype's default tracking.
+
+\microtypecontext{spacing=nonfrench,kerning=french}
+Interword spacing after punctuation: a, b; c. D: e! F? g --- the end ;
+French kerning before colons : semicolons ; and exclamation marks !
+\end{document}
