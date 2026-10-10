@@ -611,9 +611,11 @@ impl Parsed {
         v
     }
 
-    /// Forward search: where line `line` of input `file` is shown: the
-    /// line boxes holding its records (else the nearest line's that has
-    /// some, the next first), in page order.
+    /// Forward search: where line `line` of input `file` is shown, as
+    /// `synctex view` answers: the hboxes holding its records (one up if
+    /// that is in an hbox), its boxes' own records only if it has no
+    /// others; else the nearest line's that has some, the next first; in
+    /// page order.
     pub fn view(&self, file: &str, line: u32) -> Vec<Shown> {
         let tags = self.tags_of(file);
         if tags.is_empty() {
@@ -626,35 +628,40 @@ impl Parsed {
             if l < 1 {
                 continue;
             }
-            let mut out: Vec<Shown> = Vec::new();
-            let mut seen = std::collections::HashSet::new();
-            for (k, recs) in self.pages.iter().enumerate() {
-                for (i, r) in recs.iter().enumerate() {
-                    if !tags.contains(&r.tag) || i64::from(r.line) != l || matches!(r.kind, b'[') {
-                        continue;
+            for boxes in [false, true] {
+                let mut out: Vec<Shown> = Vec::new();
+                let mut seen = std::collections::HashSet::new();
+                for (k, recs) in self.pages.iter().enumerate() {
+                    for (i, r) in recs.iter().enumerate() {
+                        if !tags.contains(&r.tag) || i64::from(r.line) != l || (r.kind == b'(') != boxes || r.kind == b'[' {
+                            continue;
+                        }
+                        // (the hbox holding it, or the one holding that)
+                        let mut b = if r.kind == b'(' { i } else { r.parent };
+                        while b < recs.len() && recs[b].kind != b'(' {
+                            b = recs[b].parent;
+                        }
+                        if let Some(up) = recs.get(b).map(|x| x.parent).filter(|&p| recs.get(p).is_some_and(|x| x.kind == b'(')) {
+                            b = up;
+                        }
+                        let bx = recs.get(b).unwrap_or(r);
+                        if !seen.insert((k, b)) {
+                            continue;
+                        }
+                        out.push(Shown {
+                            page: k + 1,
+                            x: self.bp(r.h, self.xoff),
+                            y: self.bp(r.v, self.yoff),
+                            h: self.bp(bx.h, self.xoff),
+                            v: self.bp(bx.v + bx.dp, self.yoff),
+                            w: f64::from(bx.w) * scale,
+                            ht: f64::from(bx.ht + bx.dp) * scale,
+                        });
                     }
-                    // (its line box: the hbox holding it)
-                    let mut b = if r.kind == b'(' { i } else { r.parent };
-                    while b < recs.len() && recs[b].kind != b'(' {
-                        b = recs[b].parent;
-                    }
-                    let bx = recs.get(b).unwrap_or(r);
-                    if !seen.insert((k, b)) {
-                        continue;
-                    }
-                    out.push(Shown {
-                        page: k + 1,
-                        x: self.bp(r.h, self.xoff),
-                        y: self.bp(r.v, self.yoff),
-                        h: self.bp(bx.h, self.xoff),
-                        v: self.bp(bx.v + bx.dp, self.yoff),
-                        w: f64::from(bx.w) * scale,
-                        ht: f64::from(bx.ht + bx.dp) * scale,
-                    });
                 }
-            }
-            if !out.is_empty() {
-                return out;
+                if !out.is_empty() {
+                    return out;
+                }
             }
         }
         Vec::new()

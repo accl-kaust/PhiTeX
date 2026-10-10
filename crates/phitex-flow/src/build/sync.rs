@@ -130,11 +130,28 @@ enum Anchor {
 }
 
 /// The boxes of the last build's material and registers, by address: how
-/// a page's boxes are traced to their makers ([`Build::sync_index`]).
-pub struct Index(FxMap<usize, Anchor>);
+/// a page's boxes are traced to their makers ([`Build::sync_index`]); and
+/// the registers' boxes by their content too, for a box an output routine
+/// moved that is an equal box, not the same (`Arc`).
+pub struct Index(FxMap<usize, Anchor>, FxMap<u64, Vec<(Arc<BoxNode>, Anchor)>>);
 
 fn addr(b: &Arc<BoxNode>) -> usize {
     Arc::as_ptr(b) as usize
+}
+
+/// What [`Index`]'s second table finds a box by: its kind, dimensions,
+/// glue setting and length.
+fn shape(b: &BoxNode) -> u64 {
+    let mut x: u64 = u64::from(b.vertical);
+    for v in [b.w, b.h, b.d, b.list.len() as i32, i32::from(b.glue.sign), i32::from(b.glue.order)] {
+        x = (x ^ u64::from(v as u32)).wrapping_mul(0x0100_0000_01b3).rotate_left(23);
+    }
+    x
+}
+
+/// Equal boxes but for where they are shifted.
+fn same_box(a: &BoxNode, b: &BoxNode) -> bool {
+    a.vertical == b.vertical && a.w == b.w && a.h == b.h && a.d == b.d && a.glue == b.glue && a.list == b.list
 }
 
 /// An item of piece `k`'s vertical material, carried by node `pn`.
@@ -158,15 +175,19 @@ fn anchor_item(m: &mut FxMap<usize, Anchor>, it: &Item, k: u32, pn: u32) {
 }
 
 /// Box `b`, made by node `maker` of piece `k`, and the boxes in it (their
-/// makers by its origins), each known once.
-fn descend(m: &mut FxMap<usize, Anchor>, b: &Arc<BoxNode>, k: u32, maker: u32) {
-    if m.contains_key(&addr(b)) {
+/// makers by its origins), each known once, by address and by content.
+fn descend(idx: &mut Index, b: &Arc<BoxNode>, k: u32, maker: u32) {
+    if idx.0.contains_key(&addr(b)) {
         return;
     }
-    m.insert(addr(b), Anchor::Made { k, maker });
+    let a = Anchor::Made { k, maker };
+    idx.0.insert(addr(b), a);
+    if !b.list.is_empty() {
+        idx.1.entry(shape(b)).or_default().push((b.clone(), a));
+    }
     for (i, it) in b.list.iter().enumerate() {
         if let Item::Box(c) | Item::Append(c, _) = it {
-            descend(m, c, k, b.origins.node_of(maker, i).unwrap_or(maker));
+            descend(idx, c, k, b.origins.node_of(maker, i).unwrap_or(maker));
         }
     }
 }
@@ -293,6 +314,14 @@ impl<'a> Walk<'a> {
     /// the material or a register knows it, else by `this`'s tables.
     fn child(&mut self, ctx: &Ctx<'a>, this: &BoxNode, i: usize, c: &Arc<BoxNode>) -> (Ctx<'a>, Place) {
         if let Some(&a) = self.idx.0.get(&addr(c))
+            && let Some(r) = self.anchored(a)
+        {
+            return r;
+        }
+        // (a box not known by address where nothing else says: an equal
+        // register's box)
+        if matches!(ctx, Ctx::Fixed(_))
+            && let Some(&(_, a)) = self.idx.1.get(&shape(c)).and_then(|v| v.iter().find(|(x, _)| same_box(x, c)))
             && let Some(r) = self.anchored(a)
         {
             return r;
@@ -546,15 +575,16 @@ impl Build {
     /// put in registers, with the boxes in those: what
     /// [`Build::page_sync`] traces a page's boxes by.
     pub fn sync_index(&self) -> Index {
-        let mut m: FxMap<usize, Anchor> = FxMap::default();
+        let mut idx = Index(FxMap::default(), FxMap::default());
         for (k, kept) in self.pieces.iter().enumerate() {
+            let m = &mut idx.0;
             let Some(run) = kept.run.as_ref() else { continue };
             let k = k as u32;
             let nodes = run.para_nodes();
             for (j, para) in run.paras.iter().enumerate() {
                 let Some(&pn) = nodes.get(j) else { break };
                 for it in para.before.iter().chain(&para.after) {
-                    anchor_item(&mut m, it, k, pn);
+                    anchor_item(m, it, k, pn);
                 }
                 if let Some(Some(lines)) = kept.lines.get(j) {
                     // (the inserts the lines moved out: by the node that
@@ -572,16 +602,16 @@ impl Build {
                                 Item::Ins(x) => ins.get(&(Arc::as_ptr(x) as usize)).copied().unwrap_or(pn),
                                 _ => pn,
                             };
-                            anchor_item(&mut m, it, k, node);
+                            anchor_item(m, it, k, node);
                         }
                     }
                 }
             }
             for (d, b) in run.box_defs() {
-                descend(&mut m, &b, k, d);
+                descend(&mut idx, &b, k, d);
             }
         }
-        Index(m)
+        idx
     }
 
     /// Page `j`'s records, as shipping it walks it (`idx`: this build's
