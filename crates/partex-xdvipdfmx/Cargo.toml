@@ -7,7 +7,7 @@ publish = false
 description = "xdvipdfmx (dvipdfm-x 20260113) ported: XDV in, PDF out, byte for byte"
 
 [dependencies]
-partex-engine = { path = "../partex-engine" }
+phitex-codecs = { path = "../phitex-codecs" }
 libm = "0.2"
 
 [features]

@@ -6,7 +6,7 @@
 //!
 //! The Overleaf extension's core made these first (its `pdfdraw.rs`,
 //! `type1.rs` and `xetex.rs`'s glyph runs); this crate is that code, reading the PDF through
-//! `partex_engine::pdfread`, so the CLI's viewer and the extension's draw
+//! `phitex_codecs::pdfread`, so the CLI's viewer and the extension's draw
 //! the same pages from the same functions.
 
 mod glyphs;

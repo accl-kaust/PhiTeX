@@ -1,5 +1,13 @@
 # CORE: the command set of TeX on the graph
 
+## Crates
+
+Pure, link them: partex-kpse (kpathsea: texmf.cnf, ls-R, path search; the input finder the CLI gives the build), partex-otf (OpenType faces/shaping/OT math/TECkit; X, and Q for TrueType embedding), partex-xdvipdfmx (XDV→PDF byte for byte; X's backend; its image readers are dvipdfmx's, for the PDF it writes: XeTeX's pictures are measured by XeTeX's own readers, X's xpic.rs copy, not dvipdfmx's, and pdfTeX's by pdfTeX's), phitex-codecs (inflate, md5, png, pdfread, pdftext, zlib crc; yours), partex-bibtex and partex-makeindex (in-process, between fixpoint runs), phi (allowed, unused), phitex-syntax/doc/draw/diff/git (CLI/viewer).
+
+Never link, deleted: partex-core, partex-engine, partex-incr, partex-ssa, partex-trace, phitex-ir, partex-cli; copy pure bodies only, naming the source file in the commit.
+
+## The command set
+
 Every TeX82 primitive (325: partex-core's `init_prim_tex`, less encTeX's 14),
 classified by what it is on the graph (AGENTS_BRIEF.md): **(i)** an
 expandable primitive or input rewriting — a *step* inside a node, which
@@ -2154,6 +2162,53 @@ after on the same base):
    7.22G, sections 2.72G → 2.54G, `latex.ltx` 190.8G → 189.2G, big2
    unchanged; DVIs identical.
 
+## Found by the CLI (agent W)
+
+- **W1 (open, A): a LaTeX document in nonstop mode with no `.aux` never
+  ends.** `phitex build --output-format dvi titlepage.tex` (the CLI's
+  build then ran in `\nonstopmode` over the `latex` format: `Build::
+  set_interaction_option(Some(1))`, terminal `&latex titlepage.tex`, the
+  document of `tests/latex/docs/`, no `titlepage.aux` anywhere) ran over
+  25 minutes without ending on flow 9fa4ccf (cluster job 7802, test
+  `build_to_the_fixpoint`); the same document in batch mode (`latex
+  -interaction=batchmode`) ends in under a second with the `.aux` gap's
+  two errors. Suspected: the missing `.aux` at `\enddocument` in nonstop
+  mode (TeX: `*** (job aborted, file error in nonstop mode)`). The CLI
+  now builds in batch mode by default; its tests run every build under
+  `timeout 600`.
+
+- **W2 (open, A/B): the fixpoint's second run of a LaTeX document never
+  ends.** `phitex build --output-format dvi titlepage.tex` in batch mode
+  (cluster job 7826, test `build_to_the_fixpoint`, flow 45ffd43): run 1
+  is the `latex` run that passes (0.84 s, the `.aux` gap's errors); then
+  the CLI gives the build the files run 1 wrote (`Build::set_file` of
+  `titlepage.aux` and `titlepage.toc`) and calls `update` with the same
+  source: that update did not end within 600 s (killed by the test's
+  `timeout`). The CLI's loop is `crates/phitex-cli/src/session.rs`,
+  `Session::fixpoint`; B's `Fixpoint` replaces it when on flow.
+- **W3 (open, A): `gfx` takes 40 s through the CLI** (`latex
+  -interaction=batchmode gfx.tex`, job 7826; the other documents 0.7–1.6
+  s, all on the cached format), its DVI right. The CLI's input
+  directories are the document's, then one directory of links standing
+  for TEXINPUTS.
+
+## Tag numbers
+
+Several tag namespaces must stay free of collisions. `Key::word` puts the
+kind of key in the bits above 40, and `Hash` and `Eq` compare that word,
+so two kinds with one tag are one key. The format file (`format.rs`) has
+one-byte tags for keys, meanings, items, whatsits and values. The tests
+check the tags without upkeep:
+- `val.rs` `tag_tests`: `every_key` lists one key of each kind.
+  `key_index` is a `match` without wildcard, so a new `Key` variant does
+  not compile until it has an index, and `every_key_once` fails until it
+  is listed. `key_word_tags_are_distinct` then checks the word tags.
+- `format.rs` `tag_tests` does the same for meanings and whatsits
+  (`every_meaning`, `every_whatsit`). It checks that the bytes the
+  writer gives each key, meaning and whatsit are distinct per namespace.
+To add a variant, give it the next free tag, then its index and sample
+in these lists. `cargo test -p phitex-flow --lib tag_tests` runs them.
+
 ## The inventory
 
 ### (i) Expandable and input-rewriting: steps — 40
@@ -2532,6 +2587,24 @@ in a line, a page made again) and plain TeX's ten documents of
 plain's `\output` and TeX's default) are byte-identical with
 `pdftex -ini -etex` at six schedules (1 thread, 8, 8 speculating, three
 random orders).
+
+**State (Q2).** `\pdfglyphtounicode` is a global entry
+(`Key::GlyphUnicode(name)`: a code or a string of hexadecimal digits;
+the empty name marks that the table exists), kept by the format as
+pdfTeX dumps its table; with `\pdfgentounicode` positive at the end the
+fold writes each font's ToUnicode CMap before its dictionary
+(`pdf/font/unicode.rs`, tounicode.c), reading the entries reaching the
+end of the job. LaTeX's `latex.ltx` loads `glyphtounicode.tex` and sets
+`\pdfgentounicode=1`, so every pdflatex document has the maps.
+`tests/pdflatex_docs.rs`: the ten documents of `tests/latex_docs.rs`
+on the saved format of `pdflatex.ini`'s job are byte-identical with
+`pdflatex` (first run, `SOURCE_DATE_EPOCH=0 FORCE_SOURCE_DATE=1`,
+batch mode; the `.aux` read-back gap of "LaTeX documents" stands) at
+five schedules: the PDF file and the files written. Found on the way: a
+page made where it is shipped numbers the fonts loaded after the pages
+before it by its own guess (as the DVI writer does, `extra`); the fold
+now checks every font's number against the job's and makes the page
+again when one differs (as the DVI join does).
 
 **pdfTeX work split** (modules another agent can take in parallel; each
 is a pure function or a fold step, no state shared with the others):

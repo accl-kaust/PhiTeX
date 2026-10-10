@@ -4437,11 +4437,26 @@ impl<'a> Exec<'a> {
                     self.start_par(true);
                 }
             }
-            // (pdfTeX: two general texts, expanded; the table they fill is
-            // read only when writing PDF)
+            // (pdfTeX: two general texts, expanded, shown; the entry they
+            // make is global, read only when writing PDF)
             Prim::GlyphToUnicode => {
-                let _ = self.scan_toks_x();
-                let _ = self.scan_toks_x();
+                let a = self.scan_toks_x();
+                let b = self.scan_toks_x();
+                let (mut x, mut y) = (String::new(), String::new());
+                self.show_toks(&mut x, &a);
+                self.show_toks(&mut y, &b);
+                let bytes = |s: &str| -> Vec<u8> { s.chars().map(|c| u32::from(c).min(255) as u8).collect() };
+                if let (Some((g, u)), _) = crate::pdf::font::unicode::def(&bytes(&x), &bytes(&y)) {
+                    let name: String = g.iter().map(|&c| char::from(c)).collect();
+                    let val = match u {
+                        crate::pdf::font::unicode::Uni::Code(c) => Val::Int(c as i32),
+                        crate::pdf::font::unicode::Uni::Seq(s) => Val::Name(s),
+                    };
+                    self.define(Key::GlyphUnicode(Arc::from(name)), val, true);
+                    if self.get(&Key::GlyphUnicode(Arc::from(""))) == Val::Void {
+                        self.define(Key::GlyphUnicode(Arc::from("")), Val::Int(1), true);
+                    }
+                }
             }
             Prim::Space => self.ex_space(),
             Prim::Char => {

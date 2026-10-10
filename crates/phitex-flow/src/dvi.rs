@@ -924,7 +924,7 @@ pub fn page_body(p: &Page, numbers: &Numbers, extra: &[Arc<str>], defined: &[u32
 /// (`dvi_buf_size`).
 pub fn page_body_in(p: &Page, numbers: &Numbers, extra: &[Arc<str>], defined: &[u32], at: i32, buf: i32) -> Body {
     if let Some(ship) = &p.ship.pdf {
-        let body = crate::pdf::content::page(p, ship, numbers);
+        let body = crate::pdf::content::page(p, ship, numbers, extra);
         return Body { bytes: Vec::new(), fonts: Vec::new(), fixed: None, max_push: 0, io: body.io, pdf: Some(Arc::new(body)) };
     }
     let mut w = Writer {
