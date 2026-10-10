@@ -534,6 +534,9 @@ pub struct Build {
     page_orgs: Vec<PageOrg>,
     marks: Vec<(u32, u32)>,
     next_id: PieceId,
+    /// Measuring (`PHITEX_SCHED`): each piece's last installed run's
+    /// reading time (ns) and nodes run, by piece id.
+    run_times: FxMap<PieceId, (u64, u64)>,
     readers: Readers,
     /// The source the pieces were cut from, and the byte offset of each
     /// piece's first line in it.
@@ -1369,6 +1372,8 @@ struct Shared {
     readers: Readers,
     /// `PHITEX_SCHED`: the scheduler's events, for measuring (none: off).
     sched: Option<Mutex<Vec<Ev>>>,
+    /// Measuring: `Build::run_times`, this round's installs added.
+    run_times: Mutex<FxMap<PieceId, (u64, u64)>>,
     /// When the round began (the events' times count from it).
     t_base: Instant,
     /// Measuring: the time threads waited for the scheduler's lock, and how
@@ -1442,6 +1447,7 @@ impl Build {
             marks: Vec::new(),
             next_id: 0,
             readers: Readers::default(),
+            run_times: FxMap::default(),
             fold_vals: FxMap::default(),
             places: FxMap::default(),
             src: String::new(),
@@ -2563,6 +2569,7 @@ impl Build {
             memo_old,
             readers,
             sched: std::env::var_os("PHITEX_SCHED").map(|_| Mutex::new(Vec::new())),
+            run_times: Mutex::new(std::mem::take(&mut self.run_times)),
             t_base: Instant::now(),
             lock_wait: AtomicU64::new(0),
             lock_n: AtomicU64::new(0),
@@ -2600,9 +2607,13 @@ impl Build {
         self.next_id = self.next_id.max(virt.next);
         let mut st = sh.state.into_inner().expect("state");
         self.readers = sh.readers;
+        self.run_times = sh.run_times.into_inner().expect("run times");
         if let Some(ev) = &sh.sched {
             let waits = (sh.lock_wait.load(Ordering::Relaxed), sh.lock_n.load(Ordering::Relaxed));
             write_sched(&ev.lock().expect("sched"), &st, threads, sh.build_no, sh.t_base.elapsed(), waits);
+            if !st.restructure {
+                write_deps(&st, &sh.seq, &sh.names.cs, &self.run_times);
+            }
         }
         // (a stalled scheduler is a bug of the core: the build fails with
         // the pieces' states, it does not hang)
@@ -3194,6 +3205,51 @@ fn ready_count(g: &State, sh: &Shared) -> u64 {
 /// Appends a round's events to the file `PHITEX_SCHED` names, as text: a
 /// line for the round, one per piece (its runs, the nodes and text of its
 /// last run) and one per event (`Ev`'s fields in order).
+/// Appends the last round's dependencies to the file `PHITEX_SCHED`
+/// names (measuring: the critical path with hindsight): per piece a line
+/// `G k entry-deps ran nodes ns ran` (the pieces its entry state came
+/// from, when it is not the state assumed at its cut; its last installed
+/// run's reading time and nodes run) and per read from before it a
+/// line `D k piece inner name` (the piece whose definition answered it;
+/// `inner` 1: a definition between that piece's nodes, the page builder's
+/// or an output routine's).
+fn write_deps(st: &State, seq: &Sequence, cs: &CsTable, times: &FxMap<PieceId, (u64, u64)>) {
+    use std::io::Write as _;
+    let Some(path) = std::env::var_os("PHITEX_SCHED") else { return };
+    let mut s = String::new();
+    for (k, ps) in st.p.iter().enumerate() {
+        let Some(run) = &ps.run else { continue };
+        let entry: Vec<usize> = match ps.entry {
+            Entry::Start => Vec::new(),
+            Entry::File(c) => vec![c],
+            Entry::Rest(c, l) => std::iter::once(c).chain(l).collect(),
+            Entry::After(q, c) => {
+                if assumed_entry(&st.p, c).is_some_and(|a| run.entry() == a) {
+                    Vec::new()
+                } else {
+                    vec![q]
+                }
+            }
+        };
+        let e: Vec<String> = entry.iter().map(ToString::to_string).collect();
+        let (ns, ran) = times.get(&ps.id).copied().unwrap_or((0, 0));
+        let _ = writeln!(s, "G\t{k}\t{}\t{}\t{}\t{ns}\t{ran}", e.join(","), run.ran, run.nodes_len());
+        for i in 0..run.read_count() {
+            let Some(&src) = ps.srcs.get(i) else { continue };
+            let Some(pos) = seq.pos_of(src) else { continue };
+            let key = run.read_at(i).0;
+            let name = match key {
+                Key::Cs(n) => format!("\\{}", cs.name(*n)),
+                _ => format!("{key:?}"),
+            };
+            let _ = writeln!(s, "D\t{k}\t{}\t{}\t{}", pos.0, u8::from(pos.1 != END), name.replace(['\t', '\n'], " "));
+        }
+    }
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        let _ = f.write_all(s.as_bytes());
+    }
+}
+
 fn write_sched(ev: &[Ev], st: &State, threads: usize, build_no: u64, wall: Duration, waits: (u64, u64)) {
     use std::io::Write as _;
     let Some(path) = std::env::var_os("PHITEX_SCHED") else { return };
@@ -3287,9 +3343,9 @@ fn worker(sh: &Shared, id: usize) {
         g.stats.tasks[id] += 1;
         g.inflight += 1;
         drop(g);
-        let tk = match &task {
-            Task::Run(k, _) | Task::Break(k, ..) | Task::Ship(k, ..) | Task::Log(k, ..) => *k,
-            Task::Scan { from, .. } => *from,
+        let (tk, tto) = match &task {
+            Task::Run(k, _) | Task::Break(k, ..) | Task::Ship(k, ..) | Task::Log(k, ..) => (*k, 0),
+            Task::Scan { from, to, .. } => (*from, *to as u64),
         };
         let t0 = sh.now();
         let t = Instant::now();
@@ -3303,7 +3359,7 @@ fn worker(sh: &Shared, id: usize) {
             k: u32::try_from(tk).unwrap_or(u32::MAX),
             t: [t0, t1, sh.now(), 0, 0, 0],
             a: work,
-            b: 0,
+            b: tto,
             c: 0,
             d: 0,
             e: 0,
@@ -4827,6 +4883,9 @@ fn run_and_install(sh: &Shared, k: usize, dirty: &[(Key, u32)], wid: u16) -> u64
         g.stats.time_held += held.elapsed();
     }
     sh.ev(Ev { wid, kind: 0, k: k32, t: [tb, tr, te, tl, sh.now(), ta], a: run.ran, b: run.nodes_len() as u64, c: outcome, d: env.idx.0, e: env.idx.1 });
+    if sh.sched.is_some() {
+        sh.run_times.lock().expect("run times").insert(sh.seq.piece(k), (te - tr, run.ran));
+    }
     {
         let _p = sh.park.lock().expect("park");
         sh.generation.fetch_add(1, Ordering::AcqRel);
