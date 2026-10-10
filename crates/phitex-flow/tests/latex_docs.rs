@@ -35,7 +35,7 @@ use phitex_flow::print::Limits;
 use phitex_flow::{Build, Font, Options, Order, Output, Reads};
 
 /// The documents.
-const DOCS: [&str; 16] = [
+const DOCS: [&str; 17] = [
     "sections",
     "math",
     "tables",
@@ -52,6 +52,7 @@ const DOCS: [&str; 16] = [
     "bib",
     "href",
     "micro",
+    "hrefcell",
 ];
 
 /// The schedules: one thread; eight suspending, in priority order and in
@@ -639,6 +640,14 @@ fn doc_micro() {
     doc("micro");
 }
 
+/// hyperref's `\href` in a `tabular` entry and in `\maketitle`'s
+/// `\author` (a tabular too): `\Hy@href#{` matches the `{` that is read
+/// again from its body, counted once in the entry (tex.web 397).
+#[test]
+fn doc_hrefcell() {
+    doc("hrefcell");
+}
+
 /// The document on the saved format run to the cross-run fixpoint
 /// (`fixpoint::fixpoint`: each run reads what the run before wrote) at
 /// schedule `o`: it stops where `latex` stops, its last run's DVI file and
@@ -730,4 +739,5 @@ fix_tests! {
     fix_ltmc: "ltmc",
     fix_bib: "bib",
     fix_href: "href",
+    fix_hrefcell: "hrefcell",
 }

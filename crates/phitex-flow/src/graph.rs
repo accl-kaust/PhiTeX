@@ -4491,7 +4491,13 @@ impl<'a> Exec<'a> {
                 i = j;
             } else {
                 match self.next_raw() {
-                    Some(x) if x == p[i] => {}
+                    Some(x) if x == p[i] => {
+                        // (tex.web 397: a `#{` brace is read again from the
+                        // body, counted there)
+                        if i + 1 == p.len() && x.cat() == Some(1) && self.st.al.on {
+                            self.st.al.state -= 1;
+                        }
+                    }
                     other => {
                         self.err(format!("Use of {} doesn't match its definition", self.shown(name)));
                         if let Some(x) = other {
@@ -4739,8 +4745,12 @@ impl<'a> Exec<'a> {
             buf.push(t);
             let check = if brace_delim { at_zero } else { depth == 0 };
             if check && buf.len() >= delim.len() && buf[buf.len() - delim.len()..] == *delim {
-                // (a `#{` brace is consumed: the body ends with it)
+                // (a `#{` brace is consumed: the body ends with it, and it
+                // is counted when read from there, tex.web 397)
                 buf.truncate(buf.len() - delim.len());
+                if brace_delim && self.st.al.on {
+                    self.st.al.state -= 1;
+                }
                 break;
             }
         }
