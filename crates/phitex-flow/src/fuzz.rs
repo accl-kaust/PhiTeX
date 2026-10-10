@@ -1375,21 +1375,34 @@ pub fn replay(r: &Repro) -> Option<Fail> {
 
 /// [`replay`], with the edit's and the cold build's outputs.
 fn replay_outputs(r: &Repro) -> Option<(Option<Fail>, Output, Output)> {
+    // (`PHITEX_FUZZ_TIME`: each step's time on stderr)
+    let timing = std::env::var_os("PHITEX_FUZZ_TIME").is_some();
+    let mut t = std::time::Instant::now();
+    let mut lap = |what: &str| {
+        if timing {
+            eprintln!("replay: {what} {:.1} s", t.elapsed().as_secs_f64());
+            t = std::time::Instant::now();
+        }
+    };
     let doc = find_doc(&r.doc)?;
     let mut text = r.text.clone();
     let mut files = r.files.clone();
     let mut b = builder(&doc, &files);
+    lap("the document and its builder");
     b.set_lean(r.before.lean);
     let over = !r.before.lean && !r.schedule.lean;
     let etex = doc.kind.etex();
     let prev = b.update(&text, r.before.options(etex, over));
+    lap("the build before the edit");
     r.edit.apply(&mut text, &mut files);
     for (n, t) in &files {
         b.set_file(n, t);
     }
     b.set_lean(r.schedule.lean);
     let inc = b.update(&text, r.schedule.options(etex, over));
+    lap("the edit's update");
     let c = cold(&doc, &text, &files);
+    lap("the cold build");
     // (the two graphs, for looking at: `PHITEX_FUZZ_DUMP=DIR`)
     if let Some(d) = std::env::var_os("PHITEX_FUZZ_DUMP") {
         write_outputs(&PathBuf::from(d), &prev, &inc, &c);

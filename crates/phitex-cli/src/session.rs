@@ -9,8 +9,8 @@
 //! k−1 wrote, as new versions of those files (`Build::set_file`), with
 //! BibTeX and makeindex between runs; it stops when the written files are
 //! the versions the run read, after at most [`FIXPOINT_RUNS`] runs, and
-//! says which files did not settle. (Agent B is putting this loop into
-//! phitex-flow; [`Session::fixpoint`] is the one place that calls it.)
+//! says which files did not settle. Each run is phitex-flow's
+//! `fixpoint::Fixpoint::run_reading` ([`Session::fixpoint`]).
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -19,6 +19,7 @@ use std::time::{Duration, Instant};
 
 use phitex_flow::graph::jobs;
 use phitex_flow::print::Limits;
+use phitex_flow::fixpoint::Fixpoint;
 use phitex_flow::{Build, Options, Output, Reads};
 
 use crate::tex::{self, Engine, Tree};
@@ -152,6 +153,18 @@ pub struct Session {
     builds: usize,
 }
 
+/// What a run reads as file `name`: the version given, else the disk's
+/// (the output directory first, then here).
+fn read_back_in(given: &BTreeMap<String, String>, out_dir: &Path, name: &str) -> Option<String> {
+    if let Some(t) = given.get(name) {
+        return Some(t.clone());
+    }
+    [out_dir.join(name), PathBuf::from(name)]
+        .iter()
+        .find_map(|p| if p.is_file() { std::fs::read(p).ok() } else { None })
+        .map(|b| tex::chars(&b))
+}
+
 /// `SOURCE_DATE_EPOCH`, else the time now.
 pub fn pdf_date() -> i64 {
     std::env::var("SOURCE_DATE_EPOCH")
@@ -245,13 +258,7 @@ impl Session {
     /// What a run reads as file `name`: the version given, else the disk's
     /// (the output directory first, then here).
     fn read_back(&self, name: &str) -> Option<String> {
-        if let Some(t) = self.given.get(name) {
-            return Some(t.clone());
-        }
-        [self.job.out_dir.join(name), PathBuf::from(name)]
-            .iter()
-            .find_map(|p| if p.is_file() { std::fs::read(p).ok() } else { None })
-            .map(|b| tex::chars(&b))
+        read_back_in(&self.given, &self.job.out_dir, name)
     }
 
     fn give(&mut self, name: &str, text: String) {
@@ -269,7 +276,9 @@ impl Session {
         self.fixpoint(opts, bound, if edit { "edit" } else { "cold" })
     }
 
-    /// The cross-run fixpoint, at most `bound` runs.
+    /// The cross-run fixpoint, at most `bound` runs: each run phitex-flow's
+    /// `Fixpoint::run_reading` (a written file compared with the version
+    /// the run read: given before, else on disk), then BibTeX and makeindex.
     fn fixpoint(&mut self, opts: Options, bound: usize, first: &str) -> Report {
         let t0 = Instant::now();
         let src = self.src();
@@ -278,9 +287,14 @@ impl Session {
         let mut why = first.to_owned();
         let mut changed: Vec<String> = Vec::new();
         let mut last = None;
+        let mut fix = Fixpoint::new();
         for k in 1..=bound {
             let t = Instant::now();
-            let out = self.build.update(&src, opts);
+            let run = {
+                let (given, dir) = (&self.given, &self.job.out_dir);
+                fix.run_reading(&mut self.build, &src, opts, &|n| read_back_in(given, dir, n))
+            };
+            let out = run.out;
             let s = &out.stats;
             runs.push(RunInfo {
                 wall: t.elapsed(),
@@ -292,12 +306,12 @@ impl Session {
                 pages: s.pages,
                 pages_reused: s.pages_reused,
             });
-            changed.clear();
-            let mut new: Vec<(String, String)> = Vec::new();
+            // (the run's files are the next run's: `run_reading` gave them
+            // to the build; `given` is what a run reads, for `read_back`)
+            changed = run.changed;
             for (n, t) in &out.writes {
-                if self.read_back(n).as_deref() != Some(t.as_str()) {
-                    changed.push(n.clone());
-                    new.push((n.clone(), t.clone()));
+                if changed.contains(n) {
+                    self.given.insert(n.clone(), t.clone());
                 }
             }
             if self.job.tools {
@@ -325,9 +339,6 @@ impl Session {
             last = Some(out);
             if !self.job.fixpoint || changed.is_empty() || k == bound {
                 break;
-            }
-            for (n, t) in new {
-                self.give(&n, t);
             }
             why.clone_from(&changed.join(", "));
             why.push_str(" changed");

@@ -1,0 +1,27 @@
+% microtype with pdflatex (PDF mode): font expansion (\pdffontexpand
+% autoexpand, \pdfadjustspacing=2) and character protrusion
+% (\pdfprotrudechars=2), microtype's defaults; for the pdflatex harness
+% (tests/pdflatex_docs.rs): the PDF and the written files as pdflatex
+% makes them, at every schedule (CORE.md, "Font expansion and character
+% protrusion").
+\documentclass{article}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage{microtype}
+\begin{document}
+\section{Expansion and protrusion}
+
+A quick brown fox jumps over the lazy dog, and then (again) it jumps over
+the lazy dog once more. ``Quick,'' said the fox --- and it jumped. The end
+of the story: dogs are lazy, foxes are quick; and so on, and so forth,
+until the end of the paragraph is reached at last, which it is, here.
+
+\begin{minipage}{0.4\textwidth}
+A narrow minipage stretches its fonts more: ``margins,'' hyphens-, and dots.
+More text here, to have more lines; and still more, until it ends here.
+\end{minipage}
+
+\microtypesetup{expansion=false}
+The same words without expansion: ``margins,'' hyphens-, and dots, as the
+lines without it set them, to compare; and so on until the paragraph ends.
+\end{document}

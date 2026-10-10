@@ -173,6 +173,10 @@ macro_rules! programs {
 
 programs!(version, expr, detok, scan, ifs, groups, lastnode, glue, interaction, pens, show);
 
+// (pdfTeX's font expansion and character protrusion, in PDF mode: the
+// lines `\showbox` shows)
+programs!(micro, pdfmatch);
+
 // (e-TeX with input and output: `\readline` on a stream, `\everyeof` after
 // an `\input` file, a file inside `\scantokens`, `\endinput` in a
 // `\scantokens` text, `\inputlineno` there, `\splitfirstmarks n` and

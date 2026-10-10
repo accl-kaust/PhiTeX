@@ -43,7 +43,7 @@ fn tex_live(prog: &str) -> Option<Arc<phitex_flow::kpse::Kpathsea>> {
 fn usage() -> ExitCode {
     eprintln!(
         "usage: phitex-flow FILE.tex [-j N] [--reads suspend|speculate] [--order priority|random:SEED] \
-         [--tfm PATH] [-o OUT.dvi] [--dump] [--etex] [--input-dir DIR]... [--jobname NAME] [--before FILE]... [--terminal LINE]... [--font-dir DIR]... [--kpse PROG] [--no-kpse] [--fmt FILE] [--dump-fmt FILE] [--interaction MODE] [--edit OLD=>NEW] [--repeat N] \
+         [--tfm PATH] [-o OUT.dvi] [--dump] [--etex] [--input-dir DIR]... [--jobname NAME] [--before FILE]... [--terminal LINE]... [--font-dir DIR]... [--kpse PROG] [--no-kpse] [--fmt FILE] [--dump-fmt FILE] [--interaction MODE] [--runs N] [--edit OLD=>NEW] [--repeat N] \
          [--check] [--log] [--main-memory WORDS] [--cut-lines N|inf]"
     );
     ExitCode::from(2)
@@ -462,6 +462,7 @@ fn main() -> ExitCode {
     let mut fmt: Option<String> = None;
     let mut dump_fmt: Option<String> = None;
     let mut interaction: Option<i32> = None;
+    let mut runs: usize = 1;
     let mut i = 0;
     while i < args.len() {
         let a = args[i].as_str();
@@ -524,6 +525,10 @@ fn main() -> ExitCode {
             "--dump-fmt" => match val() {
                 Some(f) => dump_fmt = Some(f),
                 None => return usage(),
+            },
+            "--runs" => match val().and_then(|v| v.parse().ok()) {
+                Some(n) if n >= 1 => runs = n,
+                _ => return usage(),
             },
             "--interaction" => match val().as_deref() {
                 Some("batchmode") => interaction = Some(0),
@@ -684,8 +689,23 @@ fn main() -> ExitCode {
         }
         println!("format: {f} ({} bytes) read in {:.2} ms", bytes.len(), t.elapsed().as_secs_f64() * 1e3);
     }
-    let cold = b.update(&src, opts);
-    report("cold", &cold);
+    // (`--runs N`: the cross-run fixpoint, each run reading what the one
+    // before wrote; the last run is the result)
+    let cold = if runs > 1 {
+        let r = phitex_flow::fixpoint::fixpoint(&mut b, &src, opts, runs);
+        for (k, (o, ch)) in r.outs.iter().zip(&r.changed).enumerate() {
+            report(&format!("run {}", k + 1), o);
+            println!("run {}: changed {}", k + 1, if ch.is_empty() { "nothing".to_string() } else { ch.join(", ") });
+        }
+        if !r.stable {
+            println!("not stable after {} runs", r.outs.len());
+        }
+        r.outs.into_iter().last().expect("a run")
+    } else {
+        let c = b.update(&src, opts);
+        report("cold", &c);
+        c
+    };
     if let Some(f) = &dump_fmt {
         let t = std::time::Instant::now();
         match b.format().map(|bytes| std::fs::write(f, &bytes).map(|()| bytes.len())) {
