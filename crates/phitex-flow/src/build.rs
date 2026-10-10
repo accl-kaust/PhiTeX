@@ -320,6 +320,23 @@ impl Expect {
         }
     }
 
+    /// What differs from `o` (measuring, `PHITEX_SCHED`): bits 1 a file
+    /// read, 2 a join, 4 a re-cut, 8 `\endinput`, 16 the job's end, 32 where
+    /// it stops.
+    fn differs(&self, o: &Expect) -> u32 {
+        let input = match (&self.input, &o.input) {
+            (Some(a), Some(b)) => !(Arc::ptr_eq(a, b) || **a == **b),
+            (None, None) => false,
+            _ => true,
+        };
+        u32::from(input)
+            | u32::from(self.join != o.join) << 1
+            | u32::from(self.cut != o.cut) << 2
+            | u32::from(self.endinput != o.endinput) << 3
+            | u32::from(self.ends != o.ends) << 4
+            | u32::from(self.stop != o.stop) << 5
+    }
+
     fn same(&self, o: &Expect) -> bool {
         self.stop == o.stop
             && self.endinput == o.endinput
@@ -3046,7 +3063,8 @@ fn dump_piece(out: &mut String, k: usize, ps: &PState, r: &Run, cs: &CsTable) {
 struct Ev {
     /// The worker; the kind: 0 a piece's run (`run_and_install`), 5 idle
     /// (waiting for work), 6 parked (a read waiting for a definition), 7 a
-    /// pick, 16 + the task's kind a worker's task (16 run, 17 line
+    /// pick, 8 a settled run that changes the sequence (`c`: what differs,
+    /// `Expect::differs`; `a`: 1 a join, which ends the round at once), 16 + the task's kind a worker's task (16 run, 17 line
     /// breaking, 18 the scan, 19 shipping, 20 the log); the piece.
     wid: u16,
     kind: u8,
@@ -3098,7 +3116,16 @@ fn write_sched(ev: &[Ev], st: &State, threads: usize, build_no: u64, wall: Durat
     use std::io::Write as _;
     let Some(path) = std::env::var_os("PHITEX_SCHED") else { return };
     let mut s = String::new();
-    let _ = writeln!(s, "R\t{build_no}\t{threads}\t{}\t{}\t{}\t{}\t{}", st.p.len(), wall.as_nanos(), ev.len(), waits.0, waits.1);
+    let _ = writeln!(
+        s,
+        "R\t{build_no}\t{threads}\t{}\t{}\t{}\t{}\t{}\t{}",
+        st.p.len(),
+        wall.as_nanos(),
+        ev.len(),
+        waits.0,
+        waits.1,
+        st.stats.time_setup.as_nanos()
+    );
     for (k, ps) in st.p.iter().enumerate() {
         let nodes = ps.run.as_ref().map_or(0, |r| r.nodes_len());
         let _ = writeln!(s, "P\t{k}\t{}\t{nodes}\t{}", ps.runs, ps.text.len());
@@ -3890,6 +3917,11 @@ fn settle(g: &mut State, sh: &Shared) -> bool {
         // layout assumed changes it, once all have settled)
         let k = g.settled;
         if sh.restructure_ok && !g.p[k].got.same(&g.p[k].expect) {
+            if sh.sched.is_some() {
+                let t = sh.now();
+                let why = g.p[k].got.differs(&g.p[k].expect);
+                sh.ev(Ev { wid: 0, kind: 8, k: k as u32, t: [t, t, 0, 0, 0, 0], a: u64::from(g.p[k].got.join), b: 0, c: why, d: 0, e: 0 });
+            }
             // (a settled run reading on into the next text: the pieces
             // after it begin in the middle of a command, they wait for the
             // sequence laid out again — the runs in progress finish and are
