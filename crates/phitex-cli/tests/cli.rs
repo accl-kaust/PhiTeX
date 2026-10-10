@@ -408,6 +408,118 @@ fn watch_word_edit() {
     }
 }
 
+/// A WebSocket text frame from a client (masked, RFC 6455).
+fn ws_frame(text: &str) -> Vec<u8> {
+    let p = text.as_bytes();
+    let mut f = vec![0x81u8];
+    if p.len() < 126 {
+        f.push(0x80 | u8::try_from(p.len()).expect("short"));
+    } else if p.len() < 65536 {
+        f.push(0xfe);
+        f.extend_from_slice(&u16::try_from(p.len()).expect("medium").to_be_bytes());
+    } else {
+        f.push(0xff);
+        f.extend_from_slice(&(p.len() as u64).to_be_bytes());
+    }
+    let mask = [0x37u8, 0xfa, 0x21, 0x3d];
+    f.extend_from_slice(&mask);
+    f.extend(p.iter().enumerate().map(|(i, b)| b ^ mask[i % 4]));
+    f
+}
+
+/// Sends `request` (JSON) to the viewer at `url` over a WebSocket; the
+/// socket, kept open.
+fn ws_send(url: &str, request: &str) -> std::net::TcpStream {
+    let rest = url.trim().strip_prefix("http://").expect("an http URL");
+    let (addr, path) = rest.split_once('/').expect("a path");
+    let mut s = std::net::TcpStream::connect(addr).expect("the viewer answers");
+    write!(
+        s,
+        "GET /{path}ws HTTP/1.1\r\nHost: {addr}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\
+         Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n"
+    )
+    .expect("the handshake");
+    let mut head = Vec::new();
+    let mut b = [0u8; 1];
+    while !head.ends_with(b"\r\n\r\n") {
+        std::io::Read::read_exact(&mut s, &mut b).expect("the handshake's answer");
+        head.push(b[0]);
+    }
+    assert!(head.starts_with(b"HTTP/1.1 101"), "no upgrade: {}", String::from_utf8_lossy(&head));
+    s.write_all(&ws_frame(request)).expect("the request");
+    s
+}
+
+/// `phitex watch --view`, headless: an editor's unsaved buffer
+/// (`set_file` over the viewer's WebSocket, the file on disk untouched)
+/// is built as an edit; the PDF is the cold build's of the buffer's text.
+#[test]
+fn watch_editor_buffer() {
+    let _one = one();
+    let body = std::fs::read_to_string(flow().join("tests/plain/story.tex")).expect("a body");
+    let text = "\\pdfoutput=1\n".to_string() + &plain() + &body;
+    let dir = scratch("watch-editor");
+    std::fs::write(dir.join("story.tex"), &text).expect("the document");
+    let mut child = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &dir)
+        .args(["watch", "--view", "--ini", "--etex", "-j", "8", "story.tex"])
+        .env("XDG_RUNTIME_DIR", &dir)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .expect("phitex watch runs");
+    let stdout = child.stdout.take().expect("its output");
+    let mut lines = BufReader::new(stdout).lines().map_while(Result::ok);
+    let mut seen = Vec::new();
+    let url = until(&mut lines, "phitex: the viewer is at ", &mut seen)["phitex: the viewer is at ".len()..].to_owned();
+    until(&mut lines, "phitex: build 1 ", &mut seen);
+    let at = body.find(" the ").expect("a word") + "\\pdfoutput=1\n".len() + plain().len();
+    let edited = format!("{} thy {}", &text[..at], &text[at + 5..]);
+    let req = format!(
+        "{{\"id\":1,\"op\":\"set_file\",\"file\":\"story.tex\",\"text\":{}}}",
+        json_string(&edited)
+    );
+    let _socket = ws_send(&url, &req);
+    let line = until(&mut lines, "phitex: build 2 ", &mut seen);
+    eprintln!("{line}");
+    assert!(line.contains("(editor)"), "the second build is not the editor's: {line}");
+    let watched = std::fs::read(dir.join("story.pdf")).expect("the watch's PDF");
+    assert_eq!(std::fs::read_to_string(dir.join("story.tex")).expect("the file"), text, "the file on disk changed");
+    if let Some(mut i) = child.stdin.take() {
+        let _ = i.write_all(b"q\n");
+    }
+    let _ = child.wait();
+    let cold_dir = scratch("watch-editor-cold");
+    std::fs::write(cold_dir.join("story.tex"), &edited).expect("the edited document");
+    let out = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &cold_dir)
+        .args(["build", "--ini", "--etex", "story.tex"])
+        .output()
+        .expect("phitex build runs");
+    assert!(out.status.success(), "the cold build failed: {}", String::from_utf8_lossy(&out.stderr));
+    let cold_pdf = std::fs::read(cold_dir.join("story.pdf")).expect("the cold PDF");
+    assert!(watched == cold_pdf, "the buffer's build is not the cold build's: {}", first_difference(&watched, &cold_pdf));
+}
+
+/// `s` as a JSON string.
+fn json_string(s: &str) -> String {
+    let mut o = String::from("\"");
+    for c in s.chars() {
+        match c {
+            '"' => o.push_str("\\\""),
+            '\\' => o.push_str("\\\\"),
+            '\n' => o.push_str("\\n"),
+            '\r' => o.push_str("\\r"),
+            '\t' => o.push_str("\\t"),
+            c if u32::from(c) < 0x20 => {
+                let _ = std::fmt::Write::write_fmt(&mut o, format_args!("\\u{:04x}", u32::from(c)));
+            }
+            c => o.push(c),
+        }
+    }
+    o.push('"');
+    o
+}
+
 /// `pdflatex` through phitex on the LaTeX documents, against TeX Live's
 /// `pdflatex` (`SOURCE_DATE_EPOCH=0`): the PDF files byte for byte.
 #[test]
