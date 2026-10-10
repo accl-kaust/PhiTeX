@@ -1218,6 +1218,9 @@ pub struct Node {
     /// outer level they are carried by `para`).
     pub emit: Few<Item>,
     pub rare: Option<Box<Rare>>,
+    /// A conditional's test, where its φ defines nothing (most of them):
+    /// held here, not in `rare`.
+    test: Option<bool>,
 }
 
 impl Node {
@@ -1230,8 +1233,11 @@ impl Node {
     pub fn errors(&self) -> &[String] {
         self.rare.as_ref().map_or(&[], |r| &r.errors)
     }
-    pub fn phi(&self) -> Option<&Phi> {
-        self.rare.as_ref().and_then(|r| r.phi.as_deref())
+    pub fn phi(&self) -> Option<std::borrow::Cow<'_, Phi>> {
+        match self.rare.as_ref().and_then(|r| r.phi.as_deref()) {
+            Some(p) => Some(std::borrow::Cow::Borrowed(p)),
+            None => self.test.map(|test| std::borrow::Cow::Owned(Phi { test, keys: Vec::new() })),
+        }
     }
     pub fn vemit(&self) -> &[Item] {
         self.rare.as_ref().map_or(&[], |r| &r.vemit)
@@ -2933,6 +2939,12 @@ impl<'a> Exec<'a> {
         let emit = Few::take(&mut self.emit);
         self.scratch.reads = self.reads;
         self.scratch.emit = self.emit;
+        // (a φ defining nothing is its test)
+        let (phi, test) = match self.phi {
+            Some(p) if p.keys.is_empty() => (None, Some(p.test)),
+            p => (p, None),
+        };
+        self.phi = phi;
         let rare = (!self.defs.is_empty()
             || self.para.is_some()
             || !self.errors.is_empty()
@@ -2963,6 +2975,7 @@ impl<'a> Exec<'a> {
             reads,
             emit,
             rare,
+            test,
         }
     }
 
