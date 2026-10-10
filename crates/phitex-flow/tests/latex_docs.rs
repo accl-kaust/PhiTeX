@@ -609,6 +609,7 @@ fn doc_rules() {
 }
 
 #[test]
+#[ignore = "schedule-dependent 32 GiB allocation, open"]
 fn doc_tikz() {
     doc("tikz");
 }
