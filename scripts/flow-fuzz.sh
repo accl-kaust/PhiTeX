@@ -14,7 +14,8 @@
 #   OUT/min/         one reproduction per new class, cut down by
 #                    scripts/flow-fuzz-min.py (MIN=0 skips it).
 # Everything runs under scripts/sandbox (directly when already inside it).
-# Env: JOBS, EDITS (6), TIMEOUT (seconds a seed may take, 600), MIN (1).
+# Env: JOBS, EDITS (6), TIMEOUT (seconds a seed may take, 600), MIN (1),
+# MIN_LIMIT (seconds a cut-down may take, 900).
 # LATEX=1: the LaTeX documents instead (fuzz::LATEX_DOCS but tiny, on the
 # saved format, made once into OUT/latex.fmt): SEEDS seeds (default 30)
 # of each document, one chunk a document, at 1 or 8 threads at random
@@ -172,7 +173,7 @@ if [ "$MIN" = 1 ] || [ "$MIN" = timeouts ]; then
 		name=$(basename "$f" .repro)
 		[ -n "$f" ] || continue
 		echo "== new class: $c ($f)"
-		run python3 scripts/flow-fuzz-min.py "$BIN" "$f" "$OUT/min/$name.repro" | tail -1 || true
+		run timeout "${MIN_LIMIT:-900}" python3 scripts/flow-fuzz-min.py "$BIN" "$f" "$OUT/min/$name.repro" | tail -1 || true
 	done
 fi
 # (the summary and the classes again, at the end of the output; and OUT

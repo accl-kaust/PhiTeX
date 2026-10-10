@@ -1132,8 +1132,14 @@ impl Exec<'_> {
             auto: None,
         };
         let key = self.font_key(&m.font);
-        m.tags = self.font_code_table(&Key::FontCode(crate::micro::TAG, key.clone()));
-        m.auto = self.auto_kern(&key);
+        // (one read a word: what else the font needs read)
+        let state = self.main_state_of(&key);
+        if state & crate::micro::MAIN_TAGS != 0 {
+            m.tags = self.font_code_table(&Key::FontCode(crate::micro::TAG, key.clone()));
+        }
+        if state & (crate::micro::MAIN_KNBC | crate::micro::MAIN_KNAC) != 0 {
+            m.auto = self.auto_kern(&key);
+        }
         let mut l = if let Some(k) = m.auto.as_ref().and_then(|a| a.kern(NON_CHAR, m.cur_l)) {
             // (pdftex.web: a kern before the first character, which then
             // has no left boundary)
@@ -1636,7 +1642,11 @@ impl Exec<'_> {
             } else if (0..256).contains(&c) {
                 // (pdftex.web: the hyphen's `\pdfprependkern` and
                 // `\pdfappendkern` kerns around it)
-                let auto = self.auto_kern(&k);
+                let auto = if self.main_state_of(&k) & (crate::micro::MAIN_KNBC | crate::micro::MAIN_KNAC) != 0 {
+                    self.auto_kern(&k)
+                } else {
+                    None
+                };
                 if let Some(x) = auto.as_ref().and_then(|a| a.kern(NON_CHAR, c)) {
                     pre.push(x);
                 }

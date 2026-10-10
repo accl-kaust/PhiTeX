@@ -444,7 +444,56 @@ fn count_lines(t: &[char]) -> usize {
 
 /// The edges: name -> reader piece -> (its first node reading the name
 /// from before the piece, the piece whose definition it read).
-type Readers = FxMap<Key, FxMap<PieceId, (u32, PieceId)>>;
+type Readers = FxMap<Key, Edges>;
+
+/// A name's edges: per reading piece (by id, in order), its first reader
+/// node and the piece whose definition it read. Pieces are installed
+/// mostly in order, so an edge is mostly added at the end.
+#[derive(Clone, Debug, Default)]
+struct Edges(Vec<Edge>);
+
+/// A reading piece's edge: (its id, (its first reader node, the defining
+/// piece)).
+type Edge = (PieceId, (u32, PieceId));
+
+impl Edges {
+    fn find(&self, id: PieceId) -> Result<usize, usize> {
+        match self.0.last() {
+            None => Err(0),
+            Some(l) if l.0 < id => Err(self.0.len()),
+            _ => self.0.binary_search_by_key(&id, |e| e.0),
+        }
+    }
+    fn get_mut(&mut self, id: PieceId) -> Option<&mut (u32, PieceId)> {
+        let i = self.find(id).ok()?;
+        Some(&mut self.0[i].1)
+    }
+    fn insert(&mut self, id: PieceId, e: (u32, PieceId)) {
+        match self.find(id) {
+            Ok(i) => self.0[i].1 = e,
+            Err(i) => self.0.insert(i, (id, e)),
+        }
+    }
+    fn remove(&mut self, id: PieceId) {
+        if let Ok(i) = self.find(id) {
+            self.0.remove(i);
+        }
+    }
+    fn keys(&self) -> impl Iterator<Item = &PieceId> {
+        self.0.iter().map(|e| &e.0)
+    }
+    fn shrink_to_fit(&mut self) {
+        self.0.shrink_to_fit();
+    }
+}
+
+impl<'a> IntoIterator for &'a Edges {
+    type Item = (&'a PieceId, &'a (u32, PieceId));
+    type IntoIter = std::iter::Map<std::slice::Iter<'a, Edge>, fn(&'a Edge) -> Self::Item>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.iter().map(|e| (&e.0, &e.1))
+    }
+}
 
 /// A piece's text and the pieces it was re-cut into.
 type Recut = (Arc<[char]>, Vec<Arc<[char]>>);
@@ -2381,7 +2430,7 @@ impl Build {
             if now.is_none() {
                 for i in 0..r.read_count() {
                     if let Some(m) = readers.get_mut(r.read_at(i).0) {
-                        m.remove(&o.id);
+                        m.remove(o.id);
                     }
                 }
             }
@@ -3629,7 +3678,7 @@ fn keep_again(g: &mut State, sh: &Shared, k: usize) -> bool {
 
 /// Piece `ps`'s edge for `key` comes from `src` now (its reads unchanged).
 fn move_edge(readers: &mut Readers, ps: &mut PState, key: &Key, src: PieceId) {
-    if let Some(e) = readers.get_mut(key).and_then(|m| m.get_mut(&ps.id)) {
+    if let Some(e) = readers.get_mut(key).and_then(|m| m.get_mut(ps.id)) {
         e.1 = src;
     }
     if let Some(i) = ps.run.as_ref().and_then(|r| r.first_read(key))
@@ -4405,6 +4454,11 @@ fn execute(sh: &Shared, task: Task) -> (u64, u8) {
             g.scan = Some(scan);
             drop(g);
             sh.cv.notify_all();
+            // (a lean piece's full run is the scan's alone now: freed on
+            // the drop thread, as a replaced run)
+            for (r, _) in pieces {
+                let _ = sh.drops.send(r);
+            }
             (work, 2)
         }
         Task::Ship(i, page, numbers) => {
@@ -4598,7 +4652,7 @@ fn run_and_install(sh: &Shared, k: usize, dirty: &[(Key, u32)]) -> u64 {
             if let Some(m) = g.readers.get_mut(key) {
                 m.insert(id, (*node, src));
             } else {
-                let mut m = FxMap::default();
+                let mut m = Edges::default();
                 m.insert(id, (*node, src));
                 g.readers.insert(key.clone(), m);
             }
@@ -4610,7 +4664,7 @@ fn run_and_install(sh: &Shared, k: usize, dirty: &[(Key, u32)]) -> u64 {
                 if !read_keys.contains(key)
                     && let Some(m) = g.readers.get_mut(key)
                 {
-                    m.remove(&id);
+                    m.remove(id);
                 }
             }
         }
