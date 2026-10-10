@@ -2516,7 +2516,7 @@ opentype tree here, so `cjk.tex` sets its CJK text in Latin Modern
   `cur_f` its conversion ended on, and the conversion takes the read of it
   at its own position as its starting `cur_f`. The previous formula's value
   then reaches it by position order like any name's.
-- Accents (`\accent`) in a native font; `\XeTeXinterwordspaceshaping=2`'s
+- `\XeTeXinterwordspaceshaping=2`'s
   hlist_out merging; TFM fonts with a mapping.
 - `\XeTeXinputencoding` is global, not per file. ICU converters other
   than single-byte tables and UTF-8 are errors; ICU's dictionary and

@@ -197,13 +197,24 @@ impl Exec<'_> {
     pub(super) fn make_accent(&mut self) {
         let c = self.scan_char_num();
         let f = self.font();
-        let Some(ga) = f.glyph(c) else {
-            self.char_warning(&f, c);
-            return;
+        // (XeTeX: a native font's character is a word, `new_character`)
+        let (pa, a) = if self.xetex && f.native.is_some() {
+            let w = self.native_character(&f, c as u32);
+            let a = w.w;
+            (Item::Native(Arc::new(w)), a)
+        } else {
+            let Some(ga) = f.glyph(c).filter(|_| (0..256).contains(&c)) else {
+                self.char_warning(&f, c);
+                return;
+            };
+            (Item::Char(f.clone(), c as u8), ga.width)
+        };
+        let (lsb, rsb) = match crate::native::native(&f) {
+            Some(nf) if a == 0 => nf.xf.char_sidebearings(c),
+            _ => (0, 0),
         };
         let x = self.int(&Key::FontDimen(f.key.clone(), 5));
         let s = f64::from(self.int(&Key::FontDimen(f.key.clone(), 1))) / 65536.0;
-        let a = ga.width;
         let next = self.do_assignments();
         // (§1124: the character accented, in the font now current)
         let f2 = self.font();
@@ -217,19 +228,27 @@ impl Exec<'_> {
             }
             None => None,
         };
-        let q = q.and_then(|q| {
-            let g = f2.glyph(q);
+        // (the character, its width and height)
+        let q: Option<(Item, i32, i32)> = q.and_then(|q| {
+            if self.xetex && f2.native.is_some() {
+                let w = self.native_character(&f2, q as u32);
+                let k = self.font_key(&f2);
+                let p = |x: &mut Self, n: u32| x.int(&Key::FontDimen(k.clone(), n));
+                let (quad, xh, cap) = (p(self, 6), p(self, 5), p(self, 8));
+                let h = crate::native::native(&f2).map_or(0, |nf| nf.xf.char_height_depth(q, quad, xh, cap).0);
+                let width = w.w;
+                return Some((Item::Native(Arc::new(w)), width, h));
+            }
+            let g = f2.glyph(q).filter(|_| (0..256).contains(&q));
             if g.is_none() {
                 self.char_warning(&f2, q);
             }
-            g.map(|g| (q, g))
+            g.map(|g| (Item::Char(f2.clone(), q as u8), g.width, g.height))
         });
-        let pa = Item::Char(f.clone(), c as u8);
         match q {
-            Some((qc, gq)) => {
+            Some((qi, w, h)) => {
                 // (§1125)
                 let t = f64::from(self.int(&Key::FontDimen(f2.key.clone(), 1))) / 65536.0;
-                let (w, h) = (gq.width, gq.height);
                 let p = if h == x {
                     pa
                 } else {
@@ -237,11 +256,16 @@ impl Exec<'_> {
                     b.shift = x - h;
                     Item::Box(Arc::new(b))
                 };
-                let delta = zround(f64::from(w - a) / 2.0 + f64::from(h) * t - f64::from(x) * s);
+                let delta = if f2.native.is_some() && a == 0 {
+                    // (a non-spacing mark)
+                    zround(f64::from(w - lsb + rsb) / 2.0 + f64::from(h) * t - f64::from(x) * s)
+                } else {
+                    zround(f64::from(w - a) / 2.0 + f64::from(h) * t - f64::from(x) * s)
+                };
                 self.emit.push(Item::Kern { w: delta, sub: 2 });
                 self.emit.push(p);
                 self.emit.push(Item::Kern { w: -a - delta, sub: 2 });
-                self.emit.push(Item::Char(f2, qc as u8));
+                self.emit.push(qi);
             }
             None => self.emit.push(pa),
         }
