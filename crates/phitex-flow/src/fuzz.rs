@@ -1293,7 +1293,15 @@ pub fn classify(r: &Repro) -> String {
     if let Some((Some(Fail::Over { .. }), ..)) = replay_outputs(r) {
         return format!("over {} {}", r.doc, r.edit.what);
     }
-    let noop = r.noop();
+    // (the no-op at 1 thread in priority order, deterministic; else at the
+    // failure's schedules)
+    let mut quiet = r.noop();
+    for s in [&mut quiet.before, &mut quiet.schedule] {
+        s.threads = 1;
+        s.reads = Reads::Suspend;
+        s.order = Order::Priority;
+    }
+    let noop = if replay(&quiet).is_some() { quiet } else { r.noop() };
     if let Some((Some(_), inc, c)) = replay_outputs(&noop) {
         let mut p = noop.clone();
         p.before = Schedule { threads: 1, reads: Reads::Suspend, order: Order::Priority, lean: r.before.lean };
@@ -1366,4 +1374,10 @@ pub fn orders_differ(doc: &Doc, text: &str, a: Order, b: Order, dump: bool) -> (
     let x = builder(doc, &doc.files).update(text, o(a));
     let y = builder(doc, &doc.files).update(text, o(b));
     (differs(&x, &y), x, y)
+}
+
+/// A plain document of the corpus's kind with `body` after plain.tex (and
+/// the scaffold), named `name`.
+pub fn plain_body_doc(name: &str, body: &str) -> Option<Doc> {
+    Some(plain_doc(name, body, &cmr10()?, &plain()?))
 }

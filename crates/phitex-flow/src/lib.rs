@@ -32,6 +32,7 @@
 )]
 
 pub mod arith;
+pub mod budgets;
 pub mod build;
 pub mod dvi;
 pub mod fuzz;

@@ -256,6 +256,15 @@ fn fuzz_orders(args: &[String]) -> ExitCode {
     }
 }
 
+/// `phitex-flow --budgets [REPS] [DOC]`: the edit budgets' table
+/// (`phitex_flow::budgets`), each edit kind REPS times (5).
+fn budgets(args: &[String]) -> ExitCode {
+    let reps = args.first().and_then(|r| r.parse().ok()).unwrap_or(5);
+    let rows = phitex_flow::budgets::run_all(reps, args.get(1).map(String::as_str));
+    print!("{}", phitex_flow::budgets::table(&rows));
+    ExitCode::SUCCESS
+}
+
 /// `phitex-flow --fuzz-classify FILE...`: each reproduction's class
 /// (`fuzz::classify`), a line `CLASS<TAB>FILE`.
 fn fuzz_classify(files: &[String]) -> ExitCode {
@@ -296,6 +305,9 @@ fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.first().map(String::as_str) == Some("--fuzz") {
         return fuzz(&args[1..]);
+    }
+    if args.first().map(String::as_str) == Some("--budgets") {
+        return budgets(&args[1..]);
     }
     if args.first().map(String::as_str) == Some("--fuzz-classify") {
         return fuzz_classify(&args[1..]);
