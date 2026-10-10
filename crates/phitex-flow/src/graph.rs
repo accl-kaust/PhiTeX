@@ -2427,14 +2427,23 @@ pub fn run_piece(
                     && n.reads.iter().any(|r| r.key == Key::LineBase));
                 if start_ok && text_ok && state_ok {
                     cand = Some(oi);
+                    // (a read answered with the same value from elsewhere
+                    // than before — the piece's own definition where a
+                    // routine's between its nodes answered it, or the other
+                    // way — keeps the node, its read re-pointed: whether a
+                    // read is from before the piece is what the run's reads
+                    // list, and install validates them as such)
+                    let mut repoint = false;
                     let reads_ok = par_ok
                         && line_ok
                         && n.reads.iter().all(|r| {
-                            reread(&chain, &state, env, &mut outside, r)
-                                .is_some_and(|now| Read::same(&now, r))
+                            reread(&chain, &state, env, &mut outside, r).is_some_and(|now| {
+                                repoint |= matches!(now.src, Src::Node(_)) != matches!(r.src, Src::Node(_));
+                                Read::same(&now, r)
+                            })
                         });
                     if reads_ok {
-                        let in_place = edit.is_none() && !scope_changed && oi == chain.nodes.len();
+                        let in_place = edit.is_none() && !scope_changed && !repoint && oi == chain.nodes.len();
                         if in_place {
                             // (the same node at the same index, its operands
                             // from the same nodes: shared, not copied; and so

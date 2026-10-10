@@ -3050,6 +3050,28 @@ fn worker(sh: &Shared, id: usize) {
     }
 }
 
+/// What a read of `key` the run entered at node `node` (from before the
+/// piece) finds now, and the definition the names index has there (a
+/// fold's read is the fold's to validate: against what it has there now,
+/// not the names index). A kept node's reads have the sources the run
+/// would give them now (`graph::run_piece` re-points one whose source
+/// moved into or out of the piece), so an entry is a read from before the
+/// piece as the run would make it again.
+fn read_now(sh: &Shared, k: usize, node: u32, key: &Key) -> (Option<Pos>, Val) {
+    let (def, now, ..) = sh.names.reaching(key, (k as u32, node), &sh.font);
+    (def, sh.names.fold_value(key, (k as u32, node), &sh.font).unwrap_or(now))
+}
+
+/// The definitions of `key` between piece `k`'s nodes, for a dump.
+fn outside_ranges(names: &Names, key: &Key, k: usize, node: u32, font: &Arc<Font>) -> String {
+    let mut v = Vec::new();
+    for n in [0, node.saturating_sub(1), node, node + 1] {
+        let r = names.reaching(key, (k as u32, n), font);
+        v.push(format!("@{n}: {:?} {}..{}", r.0, r.2, r.3));
+    }
+    v.join(", ")
+}
+
 /// How many times a piece may run in one round before the build fails as
 /// a livelock ([`stall`]).
 const RUN_LIMIT: u32 = 4096;
@@ -4187,10 +4209,7 @@ fn run_and_install(sh: &Shared, k: usize, dirty: &[(Key, u32)]) -> u64 {
         .reads
         .iter()
         .map(|(key, node, val)| {
-            let (def, now, ..) = sh.names.reaching(key, (k as u32, *node), &sh.font);
-            // (a fold's read is the fold's to validate: against what it
-            // has there now, not the names index)
-            let now = sh.names.fold_value(key, (k as u32, *node), &sh.font).unwrap_or(now);
+            let (def, now) = read_now(sh, k, *node, key);
             (def, val.seen_as(&now))
         })
         .collect();
@@ -4223,8 +4242,7 @@ fn run_and_install(sh: &Shared, k: usize, dirty: &[(Key, u32)]) -> u64 {
             let since: FxSet<&Key> = g.names_log[seen..now_gen].iter().flatten().collect();
             for ((key, node, val), c) in run.reads.iter().zip(&mut checks) {
                 if since.contains(key) {
-                    let (def, now, ..) = sh.names.reaching(key, (k as u32, *node), &sh.font);
-                    let now = sh.names.fold_value(key, (k as u32, *node), &sh.font).unwrap_or(now);
+                    let (def, now) = read_now(sh, k, *node, key);
                     *c = (def, val.seen_as(&now));
                 }
             }
@@ -4304,6 +4322,52 @@ fn run_and_install(sh: &Shared, k: usize, dirty: &[(Key, u32)]) -> u64 {
         g.stats.ran += 1;
         // (a piece run again and again in one build: a livelock of the
         // core, which fails the build with the pieces' states, as a stall)
+        if g.p[k].runs + 4 >= RUN_LIMIT {
+            for ((key, node, val), &(def, same)) in run.reads.iter().zip(&checks) {
+                if !same {
+                    let now = sh.names.reaching(key, (k as u32, *node), &sh.font);
+                    let o = outside_ranges(&sh.names, key, k, *node, &sh.font);
+                    // (the nodes holding a read of it, and their sources: none
+                    // is an entry no node stands for, which no rerun clears)
+                    let holders: Vec<(usize, String)> = (0..run.chain.nodes.len())
+                        .filter_map(|i| {
+                            let n = &run.chain.nodes[i];
+                            n.reads
+                                .iter()
+                                .find(|r| r.key == *key && (!matches!(r.src, Src::Node(_)) || i.abs_diff(*node as usize) < 4))
+                                .map(|r| (i, format!("{:?}/{:?}/{:?}", r.src, r.cond, r.val)))
+                        })
+                        .take(8)
+                        .collect();
+                    let entries: Vec<(u32, &Val)> = run.reads.iter().filter(|e| e.0 == *key).map(|e| (e.1, &e.2)).collect();
+                    eprintln!("livelock piece {k}: nodes reading {key:?} {holders:?}; its entries {entries:?}");
+                    eprintln!(
+                        "livelock piece {k}: read {key:?} at node {node} saw {} now {} (def {def:?}, reaching {:?} lo {} hi {}; {o})",
+                        format!("{val:?}").chars().take(80).collect::<String>(),
+                        format!("{:?}", now.1).chars().take(80).collect::<String>(),
+                        now.0,
+                        now.2,
+                        now.3
+                    );
+                }
+            }
+            // (the last runs before the limit, for the livelock's dump: the
+            // reads found stale and what the names index has around them)
+            let id = g.p[k].id;
+            let fires: Vec<(u32, usize)> = g.fold_defs.iter().filter(|x| x.0 == id).map(|x| (x.1, x.2.len())).collect();
+            let pred: Vec<Pos> = g.predicted.iter().map(|x| x.0).filter(|p| p.0 == k as u32).collect();
+            let log: Vec<&Vec<Key>> = g.names_log.iter().rev().take(4).collect();
+            eprintln!(
+                "livelock piece {k} run {}: ran {} of {} nodes, read again {:?}, fires here (node, defs) {:?}, predicted here {:?}, names changed last {:?}",
+                g.p[k].runs,
+                run.ran,
+                run.nodes_len(),
+                stale.iter().take(8).collect::<Vec<_>>(),
+                fires,
+                pred,
+                log
+            );
+        }
         if g.p[k].runs == RUN_LIMIT {
             let why = format!(
                 "piece {k} ran {RUN_LIMIT} times (a livelock): read again {:?}, its definitions that changed {:?}",

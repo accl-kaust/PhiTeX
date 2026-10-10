@@ -426,6 +426,37 @@ fn format_edit_is_cold() {
     }
 }
 
+/// The cross-run fixpoint's second run (W2, B's titlepage): the document
+/// built on the format, then built again by the same `Build` given the
+/// files the first run wrote (`.aux`, `.toc`): it ends, and gives the same
+/// output as a cold build given them.
+#[test]
+fn fixpoint_run_two_ends() {
+    for name in ["titlepage"] {
+        let text = doc_text(name);
+        let fmt = format_file();
+        for o in [RUNS[0], RUNS[1]] {
+            let (mut b, first) = on_format(name, name, &text, o);
+            for (n, t) in &first.writes {
+                b.set_file(n, t);
+            }
+            let t0 = std::time::Instant::now();
+            let second = b.update(&jobs(&[&text]), o);
+            eprintln!("{name} ({o:?}): run 2 in {:.0} ms, {} of {} commands run, {} runs", t0.elapsed().as_secs_f64() * 1e3, second.stats.commands_run, second.stats.commands, second.stats.ran);
+            let mut c = build_for(name, name);
+            c.set_format(&fmt).expect("the format reads");
+            c.set_terminal(&[&format!("&latex {name}")]);
+            for (n, t) in &first.writes {
+                c.set_file(n, t);
+            }
+            let cold = c.update(&jobs(&[&text]), o);
+            assert!(second.dvi == cold.dvi, "{name} ({o:?}): run 2's DVI file is not a cold build's");
+            assert_eq!(second.writes, cold.writes, "{name} ({o:?}): run 2's written files");
+            assert_eq!(second.errors, cold.errors, "{name} ({o:?}): run 2's errors");
+        }
+    }
+}
+
 /// The format's file reads back as the same definitions: written again,
 /// the same bytes.
 #[test]
