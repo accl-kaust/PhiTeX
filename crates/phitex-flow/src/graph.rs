@@ -2518,6 +2518,9 @@ struct Known {
     /// The groups opened and closed before it was read (a definition
     /// local to a group is seen by its level from the group open).
     scopes: usize,
+    /// The same read of the meaning's outer-ness alone ([`Field::Outer`]),
+    /// once made.
+    outer: Option<ReadRef>,
 }
 
 /// One node's execution: one command, from the state its predecessor left.
@@ -2969,6 +2972,30 @@ impl<'a> Exec<'a> {
     /// Whether the name `key` means an `\outer` macro, read as that alone
     /// ([`Field::Outer`]) unless the node read or defined it already.
     fn outer_of(&mut self, key: &Key) -> bool {
+        // (a name: found by its number, as `find_name`, read as outer-ness)
+        if let Key::Cs(n) = *key {
+            if !self.defs.is_empty()
+                && let Some(i) = self.defs.iter().rposition(|d| d.key == *key)
+            {
+                return self.defs[i].val.is_outer();
+            }
+            if let Some(i) = self.name_read(n) {
+                return self.reads[i].val.is_outer();
+            }
+            let r = self.resolve_shared(key);
+            let outer = r.val.is_outer();
+            let epoch = self.scratch.known_epoch;
+            let as_outer = |r: &ReadRef| Arc::new(Read { field: Field::Outer, ..(**r).clone() });
+            let r = match self.scratch.cs.get_mut(n as usize).and_then(|e| e.known.as_mut()) {
+                _ if r.field == Field::Outer => r,
+                // (the piece's kept read of the name: its outer-ness read
+                // made once)
+                Some(k) if k.epoch == epoch && Arc::ptr_eq(&k.read, &r) => k.outer.get_or_insert_with(|| as_outer(&r)).clone(),
+                _ => as_outer(&r),
+            };
+            self.push_read(r);
+            return outer;
+        }
         match self.find_slow(key, Field::Outer) {
             Found::Own(i) => self.defs[i].val.is_outer(),
             Found::Read(i) => self.reads[i].val.is_outer(),
@@ -3030,7 +3057,7 @@ impl<'a> Exec<'a> {
                 _ => self.outside.get(key).map_or(0, |(_, _, hi)| *hi),
             };
             let scopes = chain.scopes.len();
-            self.cs_at(n).known = Some(Known { epoch, read: r.clone(), hi, scopes });
+            self.cs_at(n).known = Some(Known { epoch, read: r.clone(), hi, scopes, outer: None });
         }
         r
     }

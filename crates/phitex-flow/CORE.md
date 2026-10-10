@@ -1322,6 +1322,27 @@ input lists (`Pending` pop) 8%; definitions 6%. By self time: `expand` 11%,
 the input lists) and the lists' cells (an allocation per macro call); a
 meaning is still cloned per lookup (a macro's handle).
 
+*The Unicode data block* (expl3-code.tex's `\ior_str_map_inline` reading
+the Unicode data into intarrays, about 2.9M of latex.ltx's 3.1M commands,
+one serial chain). Its piece exports 171,120 names: 157,260 of them
+`Key::FontDimen` (the intarrays' entries, 157,753 definitions), 17,671
+control sequences (619,065 definitions), 45 counts; `Key::ReadStream` is
+defined 45,533 times (a line each), the stream advancing by offset over
+the file's shared bytes (no copy). Installing the exports is about 2% of
+the run, dropping the replaced run's 3M nodes at the commit 6.5% (on the
+critical path). Profile (perf, frame pointers, inclusive): `next_x_m`
+63%, `expand` 45%, `scan_int_ext` 32%, `\if` tests 26%, expanded texts
+26%, `\expandafter` 26%, definitions 24%, `next_raw` 20%, conversions
+19%, `scan_expr` 19%; by self time `expand` 11%, `Cursor::next` 10%,
+`next_raw0` 6%, `Pending::pop` 4%, the allocator 6%, `outer_of` 3%,
+`Cursor::arg` 3%, `Chain::resolve` 2%. *The `\outer` check of each
+token scanned* (`Exec::outer_of`, `Field::Outer`) went through
+`find_slow` (the node's reads searched one by one, a key hashed, a new
+read made per name and node): 13.5% of the run. Now a name's is found by
+its number as `find_name` does, and the piece's kept read (`Known`) holds
+its outer-ness read, made once. latex.ltx `-j 1`: 119.4G → 109.2G cycles,
+212G → 191G instructions (45 s → 42 s on a loaded machine).
+
 **Gaps left for the core (A), with repros.**
 1. *A file written and read back in one run.* `texsys.cfg` writes
    `texsys.aux` with `\immediate\openout`/`\write`/`\closeout`, then
