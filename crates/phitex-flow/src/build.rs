@@ -534,8 +534,8 @@ pub struct Build {
     page_orgs: Vec<PageOrg>,
     marks: Vec<(u32, u32)>,
     next_id: PieceId,
-    /// Measuring (`PHITEX_SCHED`): each piece's last installed run's
-    /// reading time (ns) and nodes run, by piece id.
+    /// Measuring (`PHITEX_SCHED`): each piece's installed runs' reading
+    /// time (ns) and nodes run, summed, by piece id.
     run_times: FxMap<PieceId, (u64, u64)>,
     readers: Readers,
     /// The source the pieces were cut from, and the byte offset of each
@@ -2619,7 +2619,7 @@ impl Build {
             let waits = (sh.lock_wait.load(Ordering::Relaxed), sh.lock_n.load(Ordering::Relaxed));
             write_sched(&ev.lock().expect("sched"), &st, threads, sh.build_no, sh.t_base.elapsed(), waits);
             if !st.restructure {
-                write_deps(&st, &sh.seq, &sh.names.cs, &self.run_times);
+                write_deps(&st, &sh.seq, &sh.names, &sh.font, &self.run_times);
             }
         }
         // (a stalled scheduler is a bug of the core: the build fails with
@@ -3215,12 +3215,14 @@ fn ready_count(g: &State, sh: &Shared) -> u64 {
 /// Appends the last round's dependencies to the file `PHITEX_SCHED`
 /// names (measuring: the critical path with hindsight): per piece a line
 /// `G k entry-deps ran nodes ns ran` (the pieces its entry state came
-/// from, when it is not the state assumed at its cut; its last installed
-/// run's reading time and nodes run) and per read from before it a
-/// line `D k piece inner name` (the piece whose definition answered it;
-/// `inner` 1: a definition between that piece's nodes, the page builder's
-/// or an output routine's).
-fn write_deps(st: &State, seq: &Sequence, cs: &CsTable, times: &FxMap<PieceId, (u64, u64)>) {
+/// from, when it is not the state assumed at its cut; the reading time and
+/// nodes run of all its installed runs) and per read from before it a
+/// line `D k piece inner name init` (the piece whose definition answered
+/// it; `inner` 1: a definition between that piece's nodes, the page
+/// builder's or an output routine's; `init` 1: the value read is the one
+/// before any definition).
+fn write_deps(st: &State, seq: &Sequence, names: &Names, font: &Arc<Font>, times: &FxMap<PieceId, (u64, u64)>) {
+    let cs = &names.cs;
     use std::io::Write as _;
     let Some(path) = std::env::var_os("PHITEX_SCHED") else { return };
     let mut s = String::new();
@@ -3249,7 +3251,12 @@ fn write_deps(st: &State, seq: &Sequence, cs: &CsTable, times: &FxMap<PieceId, (
                 Key::Cs(n) => format!("\\{}", cs.name(*n)),
                 _ => format!("{key:?}"),
             };
-            let _ = writeln!(s, "D\t{k}\t{}\t{}\t{}", pos.0, u8::from(pos.1 != END), name.replace(['\t', '\n'], " "));
+            // (whether every value it read is the name's value before any
+            // definition, the format's or IniTeX's: what a cold build's
+            // prediction of no earlier write gets right)
+            let init = names.initial(key, font);
+            let same = run.values_read(key).iter().all(|x| x.2.seen_as(&init));
+            let _ = writeln!(s, "D\t{k}\t{}\t{}\t{}\t{}", pos.0, u8::from(pos.1 != END), name.replace(['\t', '\n'], " "), u8::from(same));
         }
     }
     if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
@@ -4922,7 +4929,10 @@ fn run_and_install(sh: &Shared, k: usize, dirty: &[(Key, u32)], wid: u16) -> u64
     }
     sh.ev(Ev { wid, kind: 0, k: k32, t: [tb, tr, te, tl, sh.now(), ta], a: run.ran, b: run.nodes_len() as u64, c: outcome, d: env.idx.0, e: env.idx.1 });
     if sh.sched.is_some() {
-        sh.run_times.lock().expect("run times").insert(sh.seq.piece(k), (te - tr, run.ran));
+        let mut m = sh.run_times.lock().expect("run times");
+        let e = m.entry(sh.seq.piece(k)).or_insert((0, 0));
+        e.0 += te - tr;
+        e.1 += run.ran;
     }
     {
         let _p = sh.park.lock().expect("park");
