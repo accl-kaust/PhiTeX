@@ -2611,6 +2611,8 @@ struct Scratch {
     /// index, while its stamp is the node's; and the read the piece keeps
     /// of it ([`Known`]).
     cs: Vec<CsAt>,
+    /// The same for the keys with a small number ([`small_slot`]).
+    small: Vec<CsAt>,
     /// The kept reads are those of this epoch (a new one: none kept).
     known_epoch: u32,
     known_len: Option<usize>,
@@ -2688,6 +2690,9 @@ struct Exec<'a> {
     in_write: bool,
     /// How many of `reads` are in `scratch.seen`.
     seen_upto: usize,
+    /// How many of `reads` came through [`Exec::push_read`] (while all
+    /// did, a small key's stamp says whether and where the node read it).
+    pushed: usize,
     /// `\input`: the file read (the node ends the piece's run).
     input: Option<Arc<FileText>>,
     /// The command is being looked for (an `\input` expanded now is a
@@ -2748,9 +2753,33 @@ fn is_par(t: &Tok) -> bool {
     matches!(t, Tok::Cs(crate::build::CS_PAR))
 }
 
-/// The nodes a run makes before it keeps the names it read
-/// ([`Scratch::known`]).
-const KNOWN_AFTER: usize = 256;
+/// A key's place in [`Scratch::small`]: the current font, the
+/// parameters, the codes of characters below 256, the registers below
+/// 256, the family fonts (none: a key without one).
+fn small_slot(key: &Key) -> Option<usize> {
+    let (base, x, n) = match key {
+        Key::Font => (0, 0, 1),
+        Key::IntPar(p) => (1, *p as usize, 128),
+        Key::DimenPar(p) => (129, *p as usize, 128),
+        Key::GluePar(p) => (257, *p as usize, 128),
+        Key::TokPar(p) => (385, *p as usize, 128),
+        Key::Cat(c) => (513, *c as usize, 256),
+        Key::Sfcode(c) => (769, *c as usize, 256),
+        Key::Lccode(c) => (1025, *c as usize, 256),
+        Key::Uccode(c) => (1281, *c as usize, 256),
+        Key::Mathcode(c) => (1537, *c as usize, 256),
+        Key::Delcode(c) => (1793, *c as usize, 256),
+        Key::Count(r) => (2049, usize::from(*r), 256),
+        Key::Dimen(r) => (2305, usize::from(*r), 256),
+        Key::Skip(r) => (2561, usize::from(*r), 256),
+        Key::Muskip(r) => (2817, usize::from(*r), 256),
+        Key::Toks(r) => (3073, usize::from(*r), 256),
+        Key::Box(r) => (3329, usize::from(*r), 256),
+        Key::FamFont(s, f) if *f < 16 => (3585, usize::from(*s) * 16 + usize::from(*f), 48),
+        _ => return None,
+    };
+    (x < n).then_some(base + x)
+}
 
 /// [`Known`] for the next node of `chain`: the names the nodes added since
 /// defined are read again; all of them, if the chain is not the one they
@@ -2758,18 +2787,16 @@ const KNOWN_AFTER: usize = 256;
 /// name.
 fn known_since(scratch: &mut Scratch, chain: &Chain, env: &mut dyn Env) {
     let len = chain.nodes.len();
-    // (a short run reads few names twice: none kept)
-    if len < KNOWN_AFTER && scratch.known_len.is_none() {
-        return;
-    }
     let between = env.any_between();
     let keep = match scratch.known_len {
         Some(prev) if prev <= len && !between => {
             for i in prev..len {
                 for d in chain.nodes[i].defs() {
-                    if let Key::Cs(n) = d.key
-                        && let Some(e) = scratch.cs.get_mut(n as usize)
-                    {
+                    let e = match d.key {
+                        Key::Cs(n) => scratch.cs.get_mut(n as usize),
+                        ref k => small_slot(k).and_then(|s| scratch.small.get_mut(s)),
+                    };
+                    if let Some(e) = e {
                         e.known = None;
                     }
                 }
@@ -2781,7 +2808,7 @@ fn known_since(scratch: &mut Scratch, chain: &Chain, env: &mut dyn Env) {
     if !keep {
         scratch.known_epoch = scratch.known_epoch.wrapping_add(1);
     }
-    scratch.known_len = (len >= KNOWN_AFTER && !between).then_some(len);
+    scratch.known_len = (!between).then_some(len);
 }
 
 /// Where a node found a definition: its own `defs[i]`, or `reads[i]`.
@@ -2809,7 +2836,7 @@ impl<'a> Exec<'a> {
         scratch.stamp = scratch.stamp.wrapping_add(1);
         if scratch.stamp == 0 {
             scratch.chars.fill((0, 0));
-            for e in &mut scratch.cs {
+            for e in scratch.cs.iter_mut().chain(scratch.small.iter_mut()) {
                 e.stamp = 0;
             }
             scratch.stamp = 1;
@@ -2837,6 +2864,7 @@ impl<'a> Exec<'a> {
             noexp: false,
             in_write: false,
             seen_upto: 0,
+            pushed: 0,
             input: None,
             at_start: false,
             boundary: false,
@@ -3008,6 +3036,26 @@ impl<'a> Exec<'a> {
         if let Key::Cs(n) = *key {
             return self.find_name(n, key);
         }
+        // (a small key, as a name: its own definition, its read in the
+        // node by its stamp, else read now)
+        if let Some(s) = small_slot(key)
+            && self.pushed == self.reads.len()
+        {
+            if !self.defs.is_empty()
+                && let Some(i) = self.defs.iter().rposition(|d| d.key == *key)
+            {
+                return Found::Own(i);
+            }
+            if let Some(e) = self.scratch.small.get(s)
+                && e.stamp == self.stamp
+            {
+                let i = e.idx as usize;
+                self.whole(i);
+                return Found::Read(i);
+            }
+            let r = self.resolve_shared(key);
+            return Found::Read(self.push_read(r));
+        }
         // (a character's code, read again in the node: by the character)
         let slot = match key {
             Key::Cat(c) if (*c as u32) < 256 && self.defs.is_empty() => Some(*c as usize),
@@ -3063,17 +3111,31 @@ impl<'a> Exec<'a> {
         &mut self.scratch.cs[i]
     }
 
+    /// Small key `s`'s entry in [`Scratch::small`].
+    fn small_at(&mut self, s: usize) -> &mut CsAt {
+        if s >= self.scratch.small.len() {
+            self.scratch.small.resize(s + 1, CsAt::default());
+        }
+        &mut self.scratch.small[s]
+    }
+
     /// A read of the node, its index (the first of a name is the node's
     /// read of it, [`Exec::name_read`]).
     fn push_read(&mut self, r: ReadRef) -> usize {
         let i = self.reads.len();
-        if let Key::Cs(n) = r.key {
-            let stamp = self.stamp;
-            let e = self.cs_at(n);
-            if e.stamp != stamp {
-                e.stamp = stamp;
-                e.idx = i as u32;
-            }
+        let stamp = self.stamp;
+        let e = match r.key {
+            Key::Cs(n) => Some(self.cs_at(n)),
+            ref k => small_slot(k).map(|s| self.small_at(s)),
+        };
+        if let Some(e) = e
+            && e.stamp != stamp
+        {
+            e.stamp = stamp;
+            e.idx = i as u32;
+        }
+        if self.pushed == i {
+            self.pushed += 1;
         }
         self.reads.push(r);
         i
@@ -3185,13 +3247,15 @@ impl<'a> Exec<'a> {
     /// ([`Scratch::inside`], [`Known`]).
     fn resolve_shared(&mut self, key: &Key) -> ReadRef {
         let chain = self.chain;
+        // (a name by its number, a small key by its slot)
         let n = match *key {
-            Key::Cs(n) if self.scratch.known_len.is_some() => Some(n),
-            _ => None,
+            _ if self.scratch.known_len.is_none() => None,
+            Key::Cs(n) => Some((true, n as usize)),
+            ref k => small_slot(k).map(|s| (false, s)),
         };
         let epoch = self.scratch.known_epoch;
-        if let Some(n) = n
-            && let Some(k) = self.scratch.cs.get(n as usize).and_then(|e| e.known.as_ref())
+        if let Some((cs, n)) = n
+            && let Some(k) = if cs { self.scratch.cs.get(n) } else { self.scratch.small.get(n) }.and_then(|e| e.known.as_ref())
             && k.epoch == epoch
             && (chain.nodes.len() as u32) < k.hi
             && (k.read.scope.is_none() || k.scopes == chain.scopes.len())
@@ -3199,7 +3263,7 @@ impl<'a> Exec<'a> {
             return k.read.clone();
         }
         let r = self.resolve_shared_slow(key);
-        if let Some(n) = n
+        if let Some((cs, n)) = n
             && r.cond.is_none()
         {
             let hi = match r.src {
@@ -3207,7 +3271,12 @@ impl<'a> Exec<'a> {
                 _ => self.outside.get(key).map_or(0, |(_, _, hi)| *hi),
             };
             let scopes = chain.scopes.len();
-            self.cs_at(n).known = Some(Known { epoch, read: r.clone(), hi, scopes, outer: None });
+            let known = Some(Known { epoch, read: r.clone(), hi, scopes, outer: None });
+            if cs {
+                self.cs_at(n as u32).known = known;
+            } else {
+                self.small_at(n).known = known;
+            }
         }
         r
     }

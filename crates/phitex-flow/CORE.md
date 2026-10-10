@@ -2045,6 +2045,20 @@ after on the same base):
    (before → after): tikz 759G → 207G (149 s → 40 s), titlepage 8.41G →
    7.22G, sections 2.72G → 2.54G, `latex.ltx` 190.8G → 189.2G, big2
    unchanged; DVIs identical.
+2. *Small keys read like names, and kept reads in every run.* The
+   current font, the parameters, the codes of characters below 256, the
+   registers below 256 and the family fonts have a slot
+   (`graph::small_slot`): a node's read of one is found by its stamp
+   (`Scratch::small`, as a name's by its number), and the run's kept
+   read of it (`Known`) is the name's, with the same rules (a
+   definition in a later node ends it; a local one holds while no group
+   opens or closes; one from before the piece within its nodes). `Known`
+   is no longer off in runs under 256 nodes. The read made is the one
+   `resolve_shared` made, the same handle. Instructions: big2 4.36G →
+   3.92G, `latex.ltx` 189.2G → 183.9G, sections 2.54G → 2.51G,
+   titlepage 7.22G → 7.13G, tikz 207.0G → 206.5G; DVIs identical; the
+   fuzz (60 seeds of 6 edits at 8 threads) fails the same 8 TRIP seeds
+   as before (F1).
 
 ## The inventory
 
