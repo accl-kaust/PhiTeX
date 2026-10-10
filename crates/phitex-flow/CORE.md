@@ -2472,6 +2472,24 @@ after on the same base):
    drops the `Option<Key>` it made without calling `Key`'s drop glue
    (3.2G self on `latex.ltx`). Ir (job 7984): `latex.ltx` 175.57G ->
    172.43G (-1.8%), the documents on the format -0.2% to +0.4%.
+12. *The dirty old nodes of a rerun by a map* from each dirty name to
+   its first dirty node (`run_piece`; more than four names), not a scan
+   of the dirty names for every read of every old node (113M of
+   sections' 1.5G). Ir (job 8034, on flow 09b454f0): sections -6.6%,
+   titlepage -6.5%, math -3.1%, tables -2.9%, figures -2.3%.
+
+Where a LaTeX document's first body piece goes (job 8027, sections and
+titlepage at `-j 1`, callgrind dumped after each `run_piece`): in
+sections it runs once, 3829 steps, 71M Ir: 18.6K a step, as the other
+body pieces (piece 10 19.3K); its wall time at `-j N` is waiting, not
+work. In titlepage it runs 18 times, and each rerun costs 40-120M
+whatever it runs again (0-257 new steps): the output routine fired
+again (`BuildFold::fire`, 60% of a 0-step rerun), then `run_piece`'s
+copy of the shared prefix (`Chain::share` rebuilding `defs_of`, 17.5M
+for a 7K-node piece: A's). The first fonts are not it: a TFM load is
+about 1M Ir; kpathsea's `texmf.cnf` is 92M once a process. Tried and
+dropped: the output routine's merges of definitions by a map (job 8034,
+within 0.1%).
 
 Upstream between the two stacks: flow through 96bdfcc (`pop_cond`'s
 set, B's tikz fix) moved 99ff426's numbers by 0% to -1.2% (the
