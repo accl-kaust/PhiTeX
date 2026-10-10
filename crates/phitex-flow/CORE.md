@@ -1485,6 +1485,22 @@ First local table (5 repetitions, median ms):
 - The one-page documents miss the 25% rule on any edit (cold ≈ 20–30 ms,
   an edit 3–7 ms).
 
+**F's F7 (fixed, A). An `\input` added by an edit never completes**
+(bisected by F to 2c217c3; 1203 of 5000 cluster seeds).
+`tests/fuzz/fixed/f7-input-added-in-update.repro`: the update printed
+`(./fzsub.tex` and stopped. Cause: the edited piece's run ran again from
+its old chain, and a kept node could be the run's end at a `Kind::Input`
+(or `Kind::Cut`) whose file was laid out as pieces or not by the last
+layout, so the new layout's decision was never asked again. Fixed in
+29b6919 (a node ending a run at a cut or an `\input` is never kept:
+`run_piece`'s `par_ok`). `tests/fuzz/fixed/f7-input-added-hang.repro`
+(big seed 565): a deadlock under Suspend at one thread. A run waiting for
+a definition of piece d, d not started and not enterable yet (its entry
+pieces not run), parked; but its thread was the only one, running it
+nested in the runs it had leapfrogged. Now it runs the first piece before
+d that can be entered (`reach_now`), as an undefined name's wait already
+did.
+
 **F8 (open, A). An edit of TRIP that never ends.** Found once F1 let
 TRIP's updates be checked: `tests/fuzz/hang/f8-trip-edit-hangs.repro`
 (TRIP seed 1 step 3, `--fuzz 1 3 1 --doc trip`): a character of

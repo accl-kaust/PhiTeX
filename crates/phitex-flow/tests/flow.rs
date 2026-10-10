@@ -133,7 +133,12 @@ fn a_new_definer_of_the_same_value_reruns_no_reader() {
             let e = bld.update(&b, o);
             assert!(e.dvi == cold(&b, o).dvi && e.log == cold(&b, o).log, "lean {lean} {o:?}");
             // (the two new pieces run; the readers, marked while the
-            // definitions were between pieces, keep their runs)
+            // definitions were between pieces, keep their runs — in order
+            // at one thread: at four, speculating, a reader may start
+            // before the new definers have run, and is run again)
+            if o.threads > 1 {
+                continue;
+            }
             assert_eq!(e.stats.ran, 2, "no reader of \\fz or \\hsize runs again (lean {lean}, {o:?}): {:?}", e.stats);
         }
     }

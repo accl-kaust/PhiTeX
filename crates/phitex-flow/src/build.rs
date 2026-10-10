@@ -3979,18 +3979,25 @@ impl PieceEnv<'_> {
                 let mut g = lock(sh);
                 match g.p[d].status {
                     Status::Done => return (val, src, lo, hi),
-                    Status::Unstarted if !entry_ready(&g, d, false) => {
-                        // (it waits for the piece it is entered from)
-                        g.stats.parks += 1;
-                        None
-                    }
                     Status::Unstarted => {
-                        g.unstarted.remove(&d);
-                        g.running.insert(d);
-                        g.p[d].status = Status::Running;
+                        // (not entered yet — it waits for the pieces it is
+                        // entered from —: the first of the pieces before it
+                        // that may run now runs here; a thread parked here
+                        // may be the only one, its own run nested in
+                        // others' it leapfrogged)
+                        let e = if entry_ready(&g, d, false) {
+                            Some(d)
+                        } else {
+                            g.unstarted.iter().copied().take_while(|&e| e < d).find(|&e| entry_ready(&g, e, false))
+                        };
                         g.stats.parks += 1;
-                        g.stats.leapfrogs += 1;
-                        Some(still_dirty(&mut g, self.sh, d))
+                        e.map(|e| {
+                            g.unstarted.remove(&e);
+                            g.running.insert(e);
+                            g.p[e].status = Status::Running;
+                            g.stats.leapfrogs += 1;
+                            (e, still_dirty(&mut g, self.sh, e))
+                        })
                     }
                     Status::Running => {
                         g.stats.parks += 1;
@@ -3998,8 +4005,8 @@ impl PieceEnv<'_> {
                     }
                 }
             };
-            if let Some(dirty) = leapfrog {
-                run_and_install(sh, d, &dirty);
+            if let Some((e, dirty)) = leapfrog {
+                run_and_install(sh, e, &dirty);
             } else {
                 if !wait(self) {
                     return (val, Src::Initial, lo, hi);
