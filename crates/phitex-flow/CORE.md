@@ -1634,6 +1634,31 @@ A's W2 and keep_again fixes): 229 passed, 0 over-invalidated, 71 failed.
   removed). The log first differs at a `Package:` line (amsmath,
   caption).
 - The repros are in `~/code/flinner/partex-phitex-runs/cmd-7878/fuzz-latex/latex/`.
+
+**Again on c89d1fec** (job 8044, the same 300 seeds; S's at-once and
+A's stack fixes not in): 237 passed, 0 over-invalidated, 62 timeouts
+(gfx 30, titlepage 8, math 8, packages 7, ams 3, tables 2, rules 2,
+sections 1, figures 1), no DVI mismatch (7878's two noop ones gone), and
+1 written-file mismatch: figures seed 23 step 2, a `\label` moved, the
+update's written files are not the cold build's, its DVI is
+(`cmd-8044/fuzz-latex/latex/fuzz-latex-figures-23-2.repro`).
+**On 7adf78f9** (job 8091, S's and A's fixes in): the 12 sampled LaTeX
+timeouts (four of gfx) and titlepage-15-6 replay alone in 1–4 s and
+pass, and the 20 TRIP swap seeds end cold (TeX's input stack size,
+now enforced) with their replays passing. That makes 8044's timeouts
+c89d1fec's slowness and loops. A swap's replay takes 34–43 s, against
+TRIP's 0.75 s cold.
+
+**The ship candidate's gates** (one line each, `ACCL_COMMIT` the
+candidate, which must contain the scripts):
+- `scripts/flow-gate-fuzz.sh`: the 5000 plain seeds (one cut of each new
+  class, MIN_LIMIT 900 s each), then the 300 LaTeX seeds;
+  `-c 12 --mem=48G -t 03:00:00 --exclude=harrier`.
+- `scripts/flow-gate-cli.sh`: phitex-cli's `latex`, `pdflatex` and
+  `pdftex -ini` oracles byte for byte (DVI date-masked) and SyncTeX
+  (synctex.rs' tallies, files counted); `-c 3 --mem=10G -t 00:30:00
+  --exclude=harrier`. On 37a9ffe3 (job 8045): 21 + 3 passed, 53
+  `.synctex.gz` files, 7.5 min.
 The budgets table gets LaTeX rows (`phitex-flow --budgets REPS latex`
 for all of them, `latex-NAME` for one; `tests/budgets.rs` runs tiny once).
 The edits are word, line, page-break, the `\newcommand` body (def) and
