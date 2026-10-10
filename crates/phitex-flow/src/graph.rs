@@ -487,6 +487,7 @@ impl Cursor {
 
     /// The next token from here, as the reader reads it (an argument's
     /// tokens where its parameter is), and the place after it.
+    #[inline]
     fn next<'l>(&mut self, l: &'l Level) -> Option<&'l Tok> {
         loop {
             if let Some((n, q)) = self.arg {
@@ -649,6 +650,7 @@ impl Pending {
     }
     /// The top list's next token, read (`None`: it has been read to its
     /// end): a macro body's parameter is read as its argument.
+    #[inline]
     fn next_tok(&mut self) -> Option<Tok> {
         let t = self.top.as_mut()?;
         if t.sub.is_none() && t.at < t.end {
