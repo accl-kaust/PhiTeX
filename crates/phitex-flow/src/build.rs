@@ -537,6 +537,10 @@ pub struct Build {
     /// Measuring (`PHITEX_SCHED`): each piece's installed runs' reading
     /// time (ns) and nodes run, summed, by piece id.
     run_times: FxMap<PieceId, (u64, u64)>,
+    /// Measuring: for each piece's last installed run, what read each name
+    /// from before it (the reading node's kind and command, the read's
+    /// field, whether it is a φ's read from before its `\if`).
+    read_cmds: FxMap<PieceId, Vec<String>>,
     readers: Readers,
     /// The source the pieces were cut from, and the byte offset of each
     /// piece's first line in it.
@@ -1380,6 +1384,8 @@ struct Shared {
     sched: Option<Mutex<Vec<Ev>>>,
     /// Measuring: `Build::run_times`, this round's installs added.
     run_times: Mutex<FxMap<PieceId, (u64, u64)>>,
+    /// Measuring: `Build::read_cmds`, likewise.
+    read_cmds: Mutex<FxMap<PieceId, Vec<String>>>,
     /// When the round began (the events' times count from it).
     t_base: Instant,
     /// Measuring: the time threads waited for the scheduler's lock, and how
@@ -1454,6 +1460,7 @@ impl Build {
             next_id: 0,
             readers: Readers::default(),
             run_times: FxMap::default(),
+            read_cmds: FxMap::default(),
             fold_vals: FxMap::default(),
             places: FxMap::default(),
             src: String::new(),
@@ -2577,6 +2584,7 @@ impl Build {
             readers,
             sched: std::env::var_os("PHITEX_SCHED").map(|_| Mutex::new(Vec::new())),
             run_times: Mutex::new(std::mem::take(&mut self.run_times)),
+            read_cmds: Mutex::new(std::mem::take(&mut self.read_cmds)),
             t_base: Instant::now(),
             lock_wait: AtomicU64::new(0),
             lock_n: AtomicU64::new(0),
@@ -2615,11 +2623,12 @@ impl Build {
         let mut st = sh.state.into_inner().expect("state");
         self.readers = sh.readers;
         self.run_times = sh.run_times.into_inner().expect("run times");
+        self.read_cmds = sh.read_cmds.into_inner().expect("read commands");
         if let Some(ev) = &sh.sched {
             let waits = (sh.lock_wait.load(Ordering::Relaxed), sh.lock_n.load(Ordering::Relaxed));
             write_sched(&ev.lock().expect("sched"), &st, threads, sh.build_no, sh.t_base.elapsed(), waits);
             if !st.restructure {
-                write_deps(&st, &sh.seq, &sh.names, &sh.font, &self.run_times);
+                write_deps(&st, &sh.seq, &sh.names, &sh.font, &self.run_times, &self.read_cmds);
             }
         }
         // (a stalled scheduler is a bug of the core: the build fails with
@@ -3221,7 +3230,14 @@ fn ready_count(g: &State, sh: &Shared) -> u64 {
 /// it; `inner` 1: a definition between that piece's nodes, the page
 /// builder's or an output routine's; `init` 1: the value read is the one
 /// before any definition).
-fn write_deps(st: &State, seq: &Sequence, names: &Names, font: &Arc<Font>, times: &FxMap<PieceId, (u64, u64)>) {
+fn write_deps(
+    st: &State,
+    seq: &Sequence,
+    names: &Names,
+    font: &Arc<Font>,
+    times: &FxMap<PieceId, (u64, u64)>,
+    cmds: &FxMap<PieceId, Vec<String>>,
+) {
     let cs = &names.cs;
     use std::io::Write as _;
     let Some(path) = std::env::var_os("PHITEX_SCHED") else { return };
@@ -3264,11 +3280,12 @@ fn write_deps(st: &State, seq: &Sequence, names: &Names, font: &Arc<Font>, times
             let ih = crate::hash::hash_of(&format!("{init:?}"));
             let _ = writeln!(
                 s,
-                "D\t{k}\t{}\t{}\t{}\t{}\t{vh}\t{ih}",
+                "D\t{k}\t{}\t{}\t{}\t{}\t{vh}\t{ih}\t{}",
                 pos.0,
                 u8::from(pos.1 != END),
                 name.replace(['\t', '\n'], " "),
-                u8::from(same)
+                u8::from(same),
+                cmds.get(&ps.id).and_then(|v| v.get(i)).map_or("", String::as_str).replace(['\t', '\n'], " ")
             );
         }
         for (key, val) in &run.exports {
@@ -4953,6 +4970,27 @@ fn run_and_install(sh: &Shared, k: usize, dirty: &[(Key, u32)], wid: u16) -> u64
         let e = m.entry(sh.seq.piece(k)).or_insert((0, 0));
         e.0 += te - tr;
         e.1 += run.ran;
+        drop(m);
+        // (what read each name from before the piece: its first reader)
+        let v: Vec<String> = run
+            .reads
+            .iter()
+            .map(|(key, node, _)| {
+                if *node as usize >= run.chain.nodes.len() {
+                    return String::new();
+                }
+                let n = &run.chain.nodes[*node as usize];
+                let r = n.reads.iter().find(|r| r.key == *key);
+                format!(
+                    "{:?} {} {:?}{}",
+                    n.kind,
+                    crate::val::Shown(&n.cmd, &sh.names.cs),
+                    r.map(|r| r.field),
+                    if r.is_some_and(|r| r.cond.is_some()) { " phi" } else { "" }
+                )
+            })
+            .collect();
+        sh.read_cmds.lock().expect("read commands").insert(sh.seq.piece(k), v);
     }
     {
         let _p = sh.park.lock().expect("park");
