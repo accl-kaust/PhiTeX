@@ -24,7 +24,8 @@ static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 fn usage() -> ExitCode {
     eprintln!(
         "usage: phitex-flow FILE.tex [-j N] [--reads suspend|speculate] [--order priority|random:SEED] \
-         [--tfm PATH] [-o OUT.dvi] [--dump] [--etex] [--input-dir DIR]... [--jobname NAME] [--edit OLD=>NEW] [--repeat N] [--check] [--log] [--main-memory WORDS]"
+         [--tfm PATH] [-o OUT.dvi] [--dump] [--etex] [--input-dir DIR]... [--jobname NAME] [--edit OLD=>NEW] [--repeat N] \
+         [--check] [--log] [--main-memory WORDS]"
     );
     ExitCode::from(2)
 }

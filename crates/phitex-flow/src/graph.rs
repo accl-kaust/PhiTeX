@@ -444,7 +444,7 @@ impl Pending {
 }
 
 impl Drop for Pending {
-    /// Cell by cell, not recursively (a deep input stack).
+    /// Cell by cell, not recursively (many lists pending).
     fn drop(&mut self) {
         let mut next = self.below.take();
         while let Some(c) = next {
@@ -2195,13 +2195,13 @@ struct Exec<'a> {
     ptext: Option<Arc<[char]>>,
     /// The output routine's end this node is (`output::OutputEnd`).
     output: Option<Box<output::OutputEnd>>,
+    /// Inside `\csname`…`\endcsname` (pdfTeX's `\ifincsname`).
+    in_csname: u16,
     /// Input rewrites (macro calls and the like) in this node, and what
     /// the environment said of the run while it expanded on and on: the
     /// node ends at once ([`Exec::rewrite`]).
     steps: u64,
     stop: Option<Check>,
-    /// Inside `\csname`…`\endcsname` (pdfTeX's `\ifincsname`).
-    in_csname: u16,
     /// This node made the hundredth error: the build ends here (§82).
     halt: bool,
 }
@@ -2264,9 +2264,9 @@ impl<'a> Exec<'a> {
             old_para: None,
             ptext: None,
             output: None,
+            in_csname: 0,
             steps: 0,
             stop: None,
-            in_csname: 0,
             halt: false,
         }
     }
@@ -2451,10 +2451,9 @@ impl<'a> Exec<'a> {
         let Some((d, val)) = chain.resolve(key, chain.nodes.len()) else {
             return outside_read(self.env, self.outside, key, chain.nodes.len() as u32);
         };
-        // (a definition made between the piece's nodes after the local one
-        // reaches further: [`resolve_now`])
-        if let Some((val, src)) = self.env.between(key, d, chain.nodes.len() as u32) {
-            return Arc::new(Read { key: key.clone(), src, val, scope: None, cond: None });
+        if self.env.has_between(key) {
+            // (a routine's definition may reach further: `resolve_now`'s)
+            return resolve_now(chain, self.env, self.outside, key);
         }
         let scope = chain.scope_of(d, key);
         if let Some(r) = self.scratch.inside.get(key)
@@ -2942,15 +2941,15 @@ impl<'a> Exec<'a> {
         // (the body is read where it is, the macro's; its parameters are
         // the arguments, tex.web 390, 357)
         self.end_read_lists();
-        if m.body.is_empty() {
-            return;
-        }
-        let used = m.body.iter().filter_map(|t| if let Tok::Param(n) = t { Some(usize::from(*n)) } else { None }).max();
-        match used {
-            None => self.st.pending.push((m.body.clone(), 0, false)),
-            Some(k) => {
-                let args: Args = args.into_iter().take(k + 1).map(Arc::from).collect();
-                self.st.pending.push_body(m.body.clone(), args);
+        if !m.body.is_empty() {
+            let used =
+                m.body.iter().filter_map(|t| if let Tok::Param(n) = t { Some(usize::from(*n)) } else { None }).max();
+            match used {
+                None => self.st.pending.push((m.body.clone(), 0, false)),
+                Some(k) => {
+                    let args: Args = args.into_iter().take(k + 1).map(Arc::from).collect();
+                    self.st.pending.push_body(m.body.clone(), args);
+                }
             }
         }
         self.step();
@@ -3136,15 +3135,6 @@ impl<'a> Exec<'a> {
         self.kind = Kind::Open;
     }
 
-    /// Where a box's diagnostic says it was made (tex.web 663).
-    fn box_place(&self) -> crate::show::Place {
-        if self.st.in_output() {
-            crate::show::Place::Output
-        } else {
-            crate::show::Place::Here
-        }
-    }
-
     /// This node closes the innermost group. What it defined locally
     /// before, reading up to the closing command (`\csname`'s `\relax`
     /// in `\expandafter\endgroup`, tex.web 372), was inside that group
@@ -3163,6 +3153,15 @@ impl<'a> Exec<'a> {
                 }
         });
         self.kind = Kind::Close;
+    }
+
+    /// Where a box's diagnostic says it was made (tex.web 663).
+    fn box_place(&self) -> crate::show::Place {
+        if self.st.in_output() {
+            crate::show::Place::Output
+        } else {
+            crate::show::Place::Here
+        }
     }
 
     /// The innermost group closes: it defines nothing; the tokens

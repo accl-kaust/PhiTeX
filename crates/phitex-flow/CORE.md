@@ -988,10 +988,20 @@ Now 4.65 GB at `-j 1` and 4.69 GB at `-j 8` (1.5 KB a node).
    count reads `%` as a comment, stays at depth 1 to the end of the file,
    and `latex.ltx` is one piece (94 blank lines). Repro: those three
    lines, then two paragraphs with a blank line between: one piece.
-3. *`\input`'ed files run inside the calling piece* (the single-piece
-   emulation above): expl3-code.tex's 36k lines, the font definitions and
-   the patterns are read by the one piece, so the build is sequential
-   (3 of 8 threads worked, one did 100%).
+3. *`\input`'ed files run inside the calling piece* where `\input` is
+   not a command of its own at a piece's top level: in `latex.ltx` every
+   `\input` is inside a macro or a group (`\@input`, `\InputIfFileExists`,
+   expl3.ltx's), so expl3-code.tex's 36k lines, the font definitions and
+   the patterns are read by the one piece, and the build is sequential
+   (one thread did 100%).
+4. *The main memory counts what was ever defined.* `graph::words_of`
+   sums every node's definitions (a macro's body, a box, a token list)
+   over the run, kept or not; TeX's `mem` holds only what is live (a
+   macro defined again frees the old body). LaTeX's format passes 5M
+   words this way (`tests/latex.rs` runs with `main_memory` 2^32). Repro:
+   `\count1=0 \def\l{\def\a{<1000 x>}\advance\count1 1 \ifnum\count1<10000
+   \expandafter\l\fi}\l \message{\the\count1}\end`: TeX 10000, the graph
+   "TeX capacity exceeded, sorry [main memory size=5000000]".
 
 ## The inventory
 

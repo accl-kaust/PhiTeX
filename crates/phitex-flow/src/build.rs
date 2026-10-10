@@ -440,9 +440,9 @@ impl Given {
         self.found(name).map(|(_, b)| b)
     }
 
-    /// Where file `name` was found, as TeX Live shows it: `./name` in the
-    /// first directory (the document's, kpathsea's current directory) or a
-    /// relative one; else the path.
+    /// Where file `name` was found, as TeX Live shows it: `./name` given
+    /// in memory, in the first directory (the document's, kpathsea's
+    /// current directory) or a relative one; else the path.
     fn path(&self, name: &str) -> Arc<str> {
         self.found(name)
             .map_or_else(|| Arc::from(format!("./{name}")), |(p, _)| p)
@@ -1674,10 +1674,7 @@ impl Build {
                     post: ps.post.as_deref(),
                 })
                 .collect();
-            logs::replay(
-                logs::gather(&parts, &marks, &call_logs, &st.pages, &page_io),
-                opts.etex,
-            )
+            logs::replay(logs::gather(&parts, &marks, &call_logs, &st.pages, &page_io), opts.etex)
         };
         for (k, ps) in st.p.iter().enumerate() {
             let r = ps.run.as_ref().expect("every piece ran");
