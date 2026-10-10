@@ -325,6 +325,24 @@ struct PendingText {
     endinput: bool,
 }
 
+/// Where node `n` of a run left the input, for a dump: its kind, its
+/// place in the piece's text and the text there, and each text it is
+/// reading (a file, a `\read` line, `\scantokens`) with its place.
+fn where_shown(text: &[char], n: &Node) -> String {
+    let around = |t: &[char], p: usize| -> String {
+        let a = p.saturating_sub(40).min(t.len());
+        let b = (p + 40).min(t.len());
+        t[a..b].iter().collect::<String>().replace('\r', "|")
+    };
+    let mut s = format!("node {:?} at {} [{}]", n.kind, n.out.pos, around(text, n.out.pos));
+    for i in 0..n.out.texts.len() {
+        if let Some(x) = n.out.texts.get(i) {
+            let _ = std::fmt::Write::write_fmt(&mut s, format_args!("; text {i} {:?} at {} [{}]", x.kind, x.pos, around(&x.text, x.pos)));
+        }
+    }
+    s
+}
+
 /// What a [`PendingText`] is.
 #[derive(Clone, PartialEq, Eq, Debug)]
 enum TextKind {
@@ -1828,6 +1846,65 @@ impl Run {
         }
     }
 
+    /// (debug) The nodes from `from` on, one line each: index, kind,
+    /// command (`name` names a control sequence), the groups open after
+    /// it, and the text where it began.
+    pub fn nodes_shown(&self, text: &[char], from: usize, max: usize, name: &dyn Fn(u32) -> String) -> String {
+        let c = &self.chain;
+        let mut s = String::new();
+        for i in from..c.nodes.len().min(from + max) {
+            let n = &c.nodes[i];
+            let p = c.input_pos(i);
+            let b = (p + 24).min(text.len());
+            let cmd = match &n.cmd {
+                crate::val::Tok::Cs(x) => format!("\\{}", name(*x)),
+                t => format!("{t:?}"),
+            };
+            let _ = std::fmt::Write::write_fmt(
+                &mut s,
+                format_args!(
+                    "\n    node {i} {:?} {cmd} groups {} [{}]",
+                    n.kind,
+                    n.out.groups.len(),
+                    text[p.min(text.len())..b].iter().collect::<String>().replace('\r', "|")
+                ),
+            );
+        }
+        s
+    }
+
+    /// (debug) Its groups: how many are open where it is entered and at
+    /// its end, and each open at its end — kind, the node that opened it
+    /// and the text there.
+    pub fn groups_shown(&self, text: &[char]) -> String {
+        let c = &self.chain;
+        let entry = c.entry.as_ref().map_or(0, |e| e.groups.len());
+        let Some(last) = c.nodes.len().checked_sub(1).map(|i| &c.nodes[i]) else {
+            return format!("entry {entry}, no nodes");
+        };
+        let g = &last.out.groups;
+        let mut s = format!("entry {entry} exit {}", g.len());
+        for i in 0..g.len() {
+            if let Some(x) = g.get(i) {
+                let pos = (x.at as usize) < c.nodes.len();
+                let p = if pos { c.input_pos(x.at as usize) } else { 0 };
+                let a = p.saturating_sub(30).min(text.len());
+                let b = (p + 50).min(text.len());
+                let _ = std::fmt::Write::write_fmt(
+                    &mut s,
+                    format_args!(
+                        "; group {i} {:?} opened at node {}{} [{}]",
+                        x.kind,
+                        x.at,
+                        if pos { "" } else { " (before the piece)" },
+                        text[a..b].iter().collect::<String>().replace('\r', "|")
+                    ),
+                );
+            }
+        }
+        s
+    }
+
     /// The reads its nodes hold, and how many distinct `Read`s they are
     /// (a lean run: none).
     pub fn reads_held(&self) -> (usize, usize) {
@@ -2531,10 +2608,18 @@ pub fn run_piece(
             // read); a paragraph's node is looked at if a node of its
             // paragraph ran)
             let oc = oldc.expect("an old chain");
+            let split = env.split_inputs();
             let mut j = oi;
             while j < stop {
                 let n = &oc.nodes[j];
                 if j > oi && para_fresh && matches!(n.kind, Kind::Par | Kind::End) {
+                    break;
+                }
+                // (where a run ends is the build's to say again, as for a
+                // node looked at: a cut, an `\input` whose file is read in
+                // the piece now — shared, it would end the run at the file
+                // the layout reads in it, a restructure every round)
+                if j > oi && (n.kind == Kind::Cut || (n.kind == Kind::Input && !split)) {
                     break;
                 }
                 if oc.starts_para(j) {
@@ -2595,6 +2680,11 @@ pub fn run_piece(
                     None if n.out.groups.len() > DEEP && env.give_up_deep() => Check::Abandon,
                     None => env.check(ran, words.max(pending_words(&n.out))),
                 };
+                // (`PHITEX_HANG_DUMP`: a run past millions of commands says
+                // where it is, for a loop's diagnosis)
+                if ran.is_multiple_of(1 << 22) && std::env::var_os("PHITEX_HANG_DUMP").is_some() {
+                    eprintln!("runaway run: {ran} commands; {}", where_shown(text, &n));
+                }
                 n
             }
         };
