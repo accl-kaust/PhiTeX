@@ -674,12 +674,16 @@ pub fn default_dirs() -> Vec<std::path::PathBuf> {
     .collect()
 }
 
-/// The TFM files a build can load: those given to it by name, then the
-/// font directories (searched once, on the first name not given). Reading
-/// one is a pure function of its name while the files do not change.
+/// The TFM files a build can load: those given to it by name, then
+/// kpathsea's (`name.tfm` in format `tfm`, as the program: the build's
+/// finder, [`FontFiles::with_kpse`]) or else the font directories
+/// (walked once, on the first name not given). Reading one is a pure
+/// function of its name while the files do not change.
 pub struct FontFiles {
     given: Vec<(String, Arc<[u8]>)>,
     dirs: Vec<std::path::PathBuf>,
+    /// kpathsea instead of `dirs`, and the program name it asks as.
+    finder: Option<(Arc<dyn Kpse>, Arc<str>)>,
     index: std::sync::OnceLock<Arc<Index>>,
     cache: std::sync::Mutex<std::collections::HashMap<String, Option<Arc<[u8]>>>>,
 }
@@ -700,7 +704,20 @@ fn index_of(dirs: &[std::path::PathBuf]) -> Arc<Index> {
 
 impl FontFiles {
     pub fn new(given: Vec<(String, Arc<[u8]>)>, dirs: Vec<std::path::PathBuf>) -> FontFiles {
-        FontFiles { given, dirs, index: std::sync::OnceLock::new(), cache: std::sync::Mutex::default() }
+        FontFiles { given, dirs, finder: None, index: std::sync::OnceLock::new(), cache: std::sync::Mutex::default() }
+    }
+
+    /// The files `given`, then those kpathsea finds as program `prog`
+    /// (`kpse_find_file("name.tfm", kpse_tfm_format)`): no directory is
+    /// walked.
+    pub fn with_kpse(given: Vec<(String, Arc<[u8]>)>, kpse: Arc<dyn Kpse>, prog: Arc<str>) -> FontFiles {
+        FontFiles {
+            given,
+            dirs: Vec::new(),
+            finder: Some((kpse, prog)),
+            index: std::sync::OnceLock::new(),
+            cache: std::sync::Mutex::default(),
+        }
     }
 
     /// The bytes of `name.tfm`, if there is such a file.
@@ -711,7 +728,10 @@ impl FontFiles {
         if let Some(v) = self.cache.lock().expect("font cache").get(name) {
             return v.clone();
         }
-        let v = self.index.get_or_init(|| index_of(&self.dirs)).read(name).map(Arc::from);
+        let v = match &self.finder {
+            Some((k, prog)) => k.find(&format!("{name}.tfm"), KpseFormat::Tfm, prog).and_then(|p| k.read(&p)),
+            None => self.index.get_or_init(|| index_of(&self.dirs)).read(name).map(Arc::from),
+        };
         self.cache.lock().expect("font cache").insert(name.to_string(), v.clone());
         v
     }
