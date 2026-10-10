@@ -2343,6 +2343,17 @@ run read: 382k reads, 2401 installs) are 87%: 45.9 of 52.7 ms at `-j 1`,
 91.6 of 109 ms at `-j 8` (job 7925); validation again 0.2, exports 3.2,
 marks 1.8, entries 1.6 ms at `-j 1`.
 
+**The edges out of the lock** (edaa404; A reviewed): the readers index
+is sharded by name (`Readers`, 64 shards), a run's edges go in after its
+reads are validated and before the scheduler's lock, each shard locked
+once (`run_and_install` states the order and why no mark is lost;
+`edges_outside_the_lock_lose_no_mark`). big2 pinned, before → after (job
+7935, three runs each, the DVI the same): `-j 8` cold 355-368 → 303-307
+ms, round 1 192-202 → 142-144 ms, waits for the lock 32-34% → 4.6-4.9%
+of the threads' time; `-j 2`, `-j 4` the same walls, waits 4.5 → 0.7%, 8
+→ 1.1%. Known cost to revisit: `-j 1` is 2.5-4% slower (923-930 → 946-968
+ms), the inserts sorted by shard and the shard locks.
+
 **LaTeX documents: rounds, the body's chain, per-page reruns** (job
 7930, pinned, `Reads::Suspend`; `perf-in/biglatex.tex` is sections.tex's
 body 40 times, 130 pieces). Walls `-j 1` / `-j 8`: sections 694 / 728
