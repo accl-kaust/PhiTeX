@@ -1906,7 +1906,7 @@ impl Build {
         loop {
             rounds += 1;
             let t_round = Instant::now();
-            if let Some(mut out) = self.round(&texts, opts, t0, time_cut, rounds > 64) {
+            if let Some(mut out) = self.round(&texts, opts, t0, time_cut, rounds > MAX_ROUNDS) {
                 let mut carried = std::mem::take(&mut self.carried);
                 carried.round_walls.push(t_round.elapsed());
                 out.stats.absorb(carried);
@@ -3122,6 +3122,10 @@ fn outside_ranges(names: &Names, key: &Key, k: usize, node: u32, font: &Arc<Font
     v.join(", ")
 }
 
+/// How many rounds a build lays its sequence out before its last, which
+/// may not lay it out again.
+const MAX_ROUNDS: usize = 64;
+
 /// How many times a piece may run in one round before the build fails as
 /// a livelock ([`stall`]).
 const RUN_LIMIT: u32 = 4096;
@@ -3825,6 +3829,17 @@ fn settle(g: &mut State, sh: &Shared) -> bool {
         // (a settled run that says otherwise of the sequence than the
         // layout assumed changes it, once all have settled)
         let k = g.settled;
+        // (the last round may not lay the sequence out again: a run reading
+        // on into the next text there leaves the pieces after it unable to
+        // start — the build fails saying so, it does not stall)
+        if !sh.restructure_ok && g.p[k].got.join && !g.p[k].got.same(&g.p[k].expect) {
+            let parked = sh.waiting.iter().filter(|w| w.load(Ordering::Acquire)).count();
+            let why = format!(
+                "the sequence of pieces did not settle in {MAX_ROUNDS} rounds: piece {k}'s run reads on into the next piece's text (a group or command open at its end), and the last round may not join them"
+            );
+            stall(g, sh, parked, &why);
+            return true;
+        }
         if sh.restructure_ok && !g.p[k].got.same(&g.p[k].expect) {
             // (a settled run reading on into the next text: the pieces
             // after it begin in the middle of a command, they wait for the
@@ -4275,7 +4290,9 @@ fn execute(sh: &Shared, task: Task) -> (u64, u8) {
 fn run_and_install(sh: &Shared, k: usize, dirty: &[(Key, u32)]) -> u64 {
     let (text, old, entry, strict, entry_assumed) = {
         let mut g = lock(sh);
-        if std::mem::take(&mut g.p[k].recheck) && dirty.is_empty() && keep_again(&mut g, sh, k) {
+        // (kept again only if no mark came since it was picked: a mark
+        // made while it was Running is in its dirty names, not its status)
+        if std::mem::take(&mut g.p[k].recheck) && dirty.is_empty() && g.p[k].dirty.is_empty() && keep_again(&mut g, sh, k) {
             drop(g);
             notify(sh, true);
             return 0;
