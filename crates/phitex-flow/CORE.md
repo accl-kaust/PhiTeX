@@ -2895,9 +2895,11 @@ values:
   A table per font, not a key per character: a paragraph's `\par` node
   reads three keys a font, not three a character, and a document sets
   them once, at a font's first use (microtype's `\MT@setupfont`).
-  `\pdfnoligatures f` is `Key::FontCode(6, f)` = 1, read by the main loop
-  (its lig/kern program is not looked at; the left boundary's still is,
-  as `set_no_ligatures` clears only the characters' tags).
+  `\pdfnoligatures f` and `\tagcode` clear tag bits in the font's `TAG`
+  table (`Key::FontCode(micro::TAG, f)`: per character, the tags gone;
+  `\pdfnoligatures` clears every character's `TAG_LIG`, so its lig/kern
+  program is not looked at; the left boundary's still is, as
+  `set_no_ligatures` clears only the characters' tags).
 - **`\pdffontexpand f stretch shrink step [autoexpand]`**:
   `Key::FontExpand(f)` = `micro::Expand` (`read_expand_font`'s checks;
   given twice, the same parameters or pdfTeX's fatal error). The fonts
@@ -2939,6 +2941,33 @@ values:
   every space is the normal space, widened by the character before's
   `\knbscode`… (`adjust_interword_glue`; it reads the current list's
   tail, so a space node with it positive runs again with its paragraph).
+- **The main loop's one read a word** (`Key::FontCode(micro::MAIN, f)`,
+  a `Val::Int` of bits, global as the codes are): a word of characters
+  of font `f` reads it once, at its start, and nothing else of the
+  micro-typography unless a bit says so. `MAIN_TAGS` (some `\tagcode` or
+  `\pdfnoligatures` cleared a tag of `f`): read the `TAG` table;
+  `MAIN_KNBC`/`MAIN_KNAC` (some `\knbccode`/`\knaccode` of `f` set
+  nonzero): read those two tables, `\pdfprependkern` and
+  `\pdfappendkern` (`AutoKern`). The bits are set by the assignment
+  node (`main_state`: a node reading the state and defining it with the
+  bit added, only when the bit is new) and never cleared, so a document
+  that sets a code back to 0 keeps reading the tables (same output, a
+  read more). `\-` (its hyphen's auto kerns) is gated the same way. A
+  font that no code ever touched costs the word one read (the default
+  `0`), where it read the tables and both kern parameters before: A/B 8021, outputs byte-identical,
+  `big2` -4.3% instructions, `titlepage` -0.5%, `story` ~0.
+  **A space is not under the gate.** `\pdfadjustinterwordglue` is an
+  integer parameter (local, grouped: `\begingroup` can turn it on for a
+  phrase), not something of a font, and the codes it consults
+  (`\knbscode`, `\stbscode`, `\shbscode`) are those of the character
+  *before* the space (the list's tail, its font, which need not be the
+  current font), so no per-font global bit can stand for it. So
+  `normal_space` reads the parameter every time (and only with it
+  positive reads the tail and those three tables); `space_cmd` reads it
+  only when the space factor is not 1000 (with 1000 the normal space is
+  taken anyway, `||` short-circuits), the one read pdfTeX's own
+  `main_loop` test costs. A gate bit for it would have to be per group
+  level, which is the parameter itself.
 - **`\pdfcopyfont\cs=f`**: `Font::copied` (a font of its own: key
   `f.key copyN`, parameters as `f`'s are now, its own codes);
   **`\letterspacefont\cs=f n [nolig]`**: `Font::letterspaced` (widths
