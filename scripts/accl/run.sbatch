@@ -32,7 +32,7 @@ else
   cp -a "$cache/upstream-$key" upstream
 fi
 echo "node $(hostname), commit $(git rev-parse --short=12 HEAD), $(nproc) CPUs"
-run cargo build --release -p partex-cli -q
+run cargo build --release -p phitex-cli -q
 # (scripts/build-pdflatex-format.sh without its sandbox: the container is one)
 shim=target/partex-shim
 mkdir -p $shim/formats

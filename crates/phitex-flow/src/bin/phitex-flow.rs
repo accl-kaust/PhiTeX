@@ -316,7 +316,7 @@ fn fuzz_classify(files: &[String]) -> ExitCode {
 }
 
 /// `phitex-flow --fuzz-replay FILE`: a reproduction run again.
-fn fuzz_replay(file: &str) -> ExitCode {
+fn fuzz_replay(file: &str, alone: bool) -> ExitCode {
     let Some(r) = std::fs::read_to_string(file).ok().and_then(|s| phitex_flow::fuzz::Repro::parse(&s)) else {
         eprintln!("--fuzz-replay: {file}: not a reproduction");
         return ExitCode::FAILURE;
@@ -324,6 +324,11 @@ fn fuzz_replay(file: &str) -> ExitCode {
     if let Some(f) = phitex_flow::fuzz::replay(&r) {
         println!("{file}: fails: {f:?}");
         return ExitCode::FAILURE;
+    }
+    // (`--alone`: the last edit only, as a hang's reduction asks)
+    if alone {
+        println!("{file}: the last edit alone passes");
+        return ExitCode::SUCCESS;
     }
     // (the last edit alone passes: the seed again, with what came before it)
     match phitex_flow::fuzz::replay_history(&r) {
@@ -357,7 +362,7 @@ fn main() -> ExitCode {
         return fuzz_orders(&args[1..]);
     }
     if args.first().map(String::as_str) == Some("--fuzz-replay") {
-        return fuzz_replay(args.get(1).map_or("", String::as_str));
+        return fuzz_replay(args.get(1).map_or("", String::as_str), args.get(2).is_some_and(|a| a == "--alone"));
     }
     if args.first().map(String::as_str) == Some("--trip") {
         return trip(args.get(1).map_or(".", String::as_str), args.get(2).and_then(|j| j.parse().ok()).unwrap_or(1));
@@ -477,7 +482,6 @@ fn main() -> ExitCode {
     let tfm = tfm.or_else(|| {
         [
             "crates/phitex-flow/testdata/cmr10.tfm",
-            "crates/partex-core/testdata/cmr10.tfm",
             "/usr/share/texmf-dist/fonts/tfm/public/cm/cmr10.tfm",
             "/usr/share/texlive/texmf-dist/fonts/tfm/public/cm/cmr10.tfm",
         ]
