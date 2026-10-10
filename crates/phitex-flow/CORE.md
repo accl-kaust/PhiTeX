@@ -2497,6 +2497,19 @@ within 0.1%).
    left in the reader is the walk of the pending lists: `next_raw0`'s
    94 Ir a token.
 
+The pending lists' own cost (job 8059, `latex.ltx`): 53M lists pushed
+(`back` 26.2M, a macro's body 24.7M, `rewrite` 2.4M) and as many
+popped; a push about 90 Ir (a `PCell` for the level below), a pop about
+165 (`Arc::try_unwrap`, the level moved out, the frees): 13.7G, 8%. Half
+are `back`'s one-token lists. Declined, as they change the input
+stack's depth, which is TeX's meaning here (`input_stack_size` is
+enforced: TRIP's 200, TeX Live's 10000, its overflow fatal at the same
+place as TeX's; the depth floor and `end_read_lists` read it): `back`
+rewinding the top list when the token it backs is the one just read
+from it, and a coarser level for a run of backed tokens. The persistent
+`Arc<PCell>` stack (shared with the nodes' snapshots) stays: the 8% is
+the price of an exact input stack.
+
 Upstream between the two stacks: flow through 96bdfcc (`pop_cond`'s
 set, B's tikz fix) moved 99ff426's numbers by 0% to -1.2% (the
 documents on the format; `latex.ltx` 229.1G -> 228.9G; big2 and plain
@@ -2514,14 +2527,20 @@ after flow f56da28 the long read lists are few).
 **After 1-8** (callgrind Ir, exact, the cluster image's TeX Live; base
 and 1-6 job 7857, 7-8 job 7892; the same DVIs at every step):
 
-| document | base 9fa4ccf | after 1-6 (99ff426) | after 1-8 (4aca73b's code) | TeX |
-|---|---|---|---|---|
-| big2 | 5.121G | 4.694G | 4.717G | `tex -ini` 0.653G (7.2x) |
-| plain story, DVI | 0.414G | 0.322G | 0.322G | `tex -ini` 0.224G (1.4x) |
-| plain story, PDF | 0.592G | 0.462G | 0.462G | `pdftex -ini` 0.796G (0.58x) |
-| sections on the format | 1.693G | 1.366G | 1.308G | `latex` 0.622G, of which 0.481G loading the format (2.1x) |
-| titlepage on the format | 2.309G | 1.985G | 1.926G | `latex` 0.633G (3.0x) |
-| `latex.ltx` | 240.3G | 229.1G | 200.8G | `etex -ini` 71.2G (2.8x) |
+| document | base 9fa4ccf | after 1-6 (99ff426) | after 1-8 (4aca73b's code) | now (12145980: flow 09b454f0, 1-13; job 8059) | TeX |
+|---|---|---|---|---|---|
+| big2 | 5.121G | 4.694G | 4.717G | 5.436G | `tex -ini` 0.653G (8.3x) |
+| plain story, DVI | 0.414G | 0.322G | 0.322G | 0.222G | `tex -ini` 0.224G (0.99x) |
+| plain story, PDF | 0.592G | 0.462G | 0.462G | 0.357G | `pdftex -ini` 0.796G (0.45x) |
+| sections on the format | 1.693G | 1.366G | 1.308G | 1.354G | `latex` 0.622G, of which 0.481G loading the format (2.2x) |
+| titlepage on the format | 2.309G | 1.985G | 1.926G | 2.165G | `latex` 0.633G (3.4x) |
+| `latex.ltx` | 240.3G | 229.1G | 200.8G | 172.9G | `etex -ini` 71.2G (2.4x) |
+
+The last column has upstream's changes too: the kpathsea finder (the
+plain documents' TFM walk gone), and between 4aca73b and 09b454f0 flow's
+own work moved big2, sections and titlepage up (reruns of the format's
+documents; the tripos fix 90113ce brought figures and tables back from
+8x) and `latex.ltx` down (177.8G on 9c2c4ab before 10-13).
 
 Wall time (bash `time`, 3 runs, median, 4 CPUs of a shared node, job
 7817, the stack through 6 with the dropped items in it: noisy, the
