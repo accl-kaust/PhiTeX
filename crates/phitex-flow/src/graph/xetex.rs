@@ -796,8 +796,8 @@ impl Exec<'_> {
             );
             return;
         };
+        // (the path as kpathsea found it: `./NAME` in the document's directory)
         let path = self.env.file_path(&name);
-        let path = path.strip_prefix("./").unwrap_or(&path).to_string();
         let p = native::Pic {
             pdf,
             path: Arc::from(path.as_bytes()),

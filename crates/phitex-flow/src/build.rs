@@ -1716,7 +1716,12 @@ impl Build {
     pub fn xdv_pdf(&self, xdv: &[u8]) -> Option<Result<Vec<u8>, String>> {
         let xe = self.xe.as_ref()?;
         let name = format!("{}.pdf", self.job);
-        Some(crate::native::xdv_to_pdf(xdv, xe.kpse(), &name, self.pdf_date))
+        let files: Arc<dyn crate::tfm::Kpse> = Arc::new(DocFiles {
+            mem: self.files.clone(),
+            dirs: self.inputs.clone(),
+            inner: xe.kpse().clone(),
+        });
+        Some(crate::native::xdv_to_pdf(xdv, &files, &name, self.pdf_date))
     }
 
     /// The engine is XeTeX ([`Build::set_xetex`]).
@@ -2683,6 +2688,41 @@ impl Env for JoinEnv<'_> {
 
     fn line_base(&mut self) -> i32 {
         self.names.given.base(self.k) as i32
+    }
+}
+
+/// xdvipdfmx's finder in [`Build::xdv_pdf`]: the document's files first
+/// (those given in memory, then the input directories, as the picture
+/// specials name them, `./NAME` in the first), then kpathsea's.
+struct DocFiles {
+    mem: Arc<FxMap<Arc<str>, Arc<[u8]>>>,
+    dirs: Arc<Vec<PathBuf>>,
+    inner: Arc<dyn crate::tfm::Kpse>,
+}
+
+impl crate::tfm::Kpse for DocFiles {
+    fn find(&self, name: &str, format: crate::tfm::KpseFormat, prog: &str) -> Option<String> {
+        let bare = name.strip_prefix("./").unwrap_or(name);
+        if self.mem.contains_key(bare) {
+            return Some(format!("./{bare}"));
+        }
+        if let Some(p) = self.dirs.iter().map(|d| d.join(bare)).find(|p| p.is_file()) {
+            return Some(p.to_string_lossy().into_owned());
+        }
+        self.inner.find(name, format, prog)
+    }
+
+    fn read(&self, path: &str) -> Option<Arc<[u8]>> {
+        let bare = path.strip_prefix("./").unwrap_or(path);
+        if let Some(b) = self.mem.get(bare) {
+            return Some(b.clone());
+        }
+        if std::path::Path::new(bare).is_relative()
+            && let Some(b) = self.dirs.iter().find_map(|d| std::fs::read(d.join(bare)).ok())
+        {
+            return Some(Arc::from(b));
+        }
+        self.inner.read(path)
     }
 }
 
