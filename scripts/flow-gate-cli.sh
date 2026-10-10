@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # A ship candidate's CLI oracle gate, as one cluster job:
 #
-#   ACCL_COMMIT=REV ACCL_OPTS="-c 4 --mem=16G -t 01:30:00 --exclude=harrier" \
+#   ACCL_COMMIT=REV ACCL_OPTS="-c 3 --mem=10G -t 00:30:00 --exclude=harrier" \
 #     scripts/accl/accl submit cmd bash scripts/flow-gate-cli.sh
 #
 # The `phitex` binary on phitex-flow (crates/phitex-cli/tests/cli.rs and
@@ -15,7 +15,9 @@
 #   are written and asked the same questions as pdfTeX's; its tallies are
 #   reported, not a bar.
 # lualatex_external and the fixpoint and watch tests are not this gate's.
-# Results in $r (target/flow-gate-cli outside a job): cli.txt,
+# Sized from job 8045 on 37a9ffe3: 7.5 min, 1.5 cores, 7.1 GB (21 + 3
+# tests passed, 53 .synctex.gz files). Results in $r
+# (target/flow-gate-cli outside a job): cli.txt,
 # synctex.txt, summary.txt.
 set -uo pipefail
 cd "$(dirname "$0")/.."
