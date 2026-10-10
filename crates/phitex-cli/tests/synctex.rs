@@ -473,6 +473,59 @@ fn synctex_against_pdftex() {
     assert!(x >= 99.0, "positions: {x:.1}% of pdfTeX's x records within 1 sp of phitex's");
 }
 
+/// The LaTeX documents xelatex makes as phitex does (gfx's `dvips` driver
+/// apart), and fontspec's of the XeTeX documents.
+const XELATEX: [&str; 10] = ["sections", "math", "tables", "figures", "titlepage", "packages", "ams", "layout", "rules", "fontspec"];
+
+/// phitex's SyncTeX files against xelatex's, as against pdfTeX's above.
+/// Ignored until XeTeX's records are there (CORE.md, "XeTeX on the graph":
+/// the header and the records of native words, glyphs and pictures); run
+/// with `--ignored` for the tallies. Both files stay in the scratch
+/// directories.
+#[test]
+#[ignore = "XeTeX's SyncTeX records are a gap (CORE.md)"]
+fn synctex_against_xetex() {
+    if !have("synctex", "help") || !have("xelatex", "--version") {
+        eprintln!("synctex_against_xetex: no `synctex` or `xelatex` here: not checked");
+        return;
+    }
+    let _one = one();
+    let mut all = Tally::default();
+    let mut lines = Vec::new();
+    for name in XELATEX {
+        let ours = scratch(&format!("xelatex-{name}"));
+        let theirs = scratch(&format!("xelatex-{name}-texlive"));
+        for d in [&ours, &theirs] {
+            if name == "fontspec" {
+                std::fs::copy(flow().join("tests/xetex/docs/fontspec.tex"), d.join("fontspec.tex")).expect("a copy");
+            } else {
+                copy_doc(name, d);
+            }
+        }
+        let file = format!("{name}.tex");
+        run(&as_program("xelatex"), &ours, &[], &file);
+        run(Path::new("xelatex"), &theirs, &[], &file);
+        let n = std::fs::read_to_string(ours.join(&file)).expect("the document").lines().count();
+        let t = compare(name, "pdf", &ours, &theirs, 1..=n);
+        lines.push(t.line(&format!("xelatex {name}")));
+        all.add(&t);
+    }
+    lines.push(all.line("all"));
+    eprintln!("SyncTeX, phitex against xelatex (synctex's answers):\n{}", lines.join("\n"));
+    for b in all.fwd_bad.iter().take(30).chain(all.inv_bad.iter().take(40)) {
+        eprintln!("  {b}");
+    }
+    let pct = |a: usize, b: usize| if b == 0 { 100.0 } else { 100.0 * a as f64 / b as f64 };
+    assert!(all.fwd > 0 && all.inv > 0, "nothing compared: {all:?}");
+    let fwd = pct(all.fwd_ok, all.fwd);
+    let inv = pct(all.inv_same + all.inv_one + all.inv_box, all.inv);
+    let x = pct(all.x_ok, all.x);
+    eprintln!("forward {fwd:.1}%, inverse {inv:.1}%, positions {x:.1}%");
+    assert!(fwd >= 95.0, "forward search: {fwd:.1}% within a box of xelatex's");
+    assert!(inv >= 95.0, "inverse search: {inv:.1}% within a line of xelatex's (alignments apart)");
+    assert!(x >= 99.0, "positions: {x:.1}% of xelatex's x records within 1 sp of phitex's");
+}
+
 /// `phitex sync --pdf` and `--tex` answer as `synctex edit` and `synctex
 /// view` do on the same file.
 #[test]
