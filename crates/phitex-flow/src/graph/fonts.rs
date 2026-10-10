@@ -225,6 +225,7 @@ impl Exec<'_> {
                 t[c as usize] |= v;
             }
             self.define(tkey, Val::Penalties(t.into()), true);
+            self.main_state(&f, micro::MAIN_TAGS);
             return;
         }
         let c = self.scan_char_num();
@@ -233,6 +234,26 @@ impl Exec<'_> {
         let table = self.font_code_table(&key);
         let t = micro::set_code(&table, which, u8::try_from(c).unwrap_or(0), v);
         self.define(key, Val::Penalties(t), true);
+        if v != 0 && which == micro::KNBC {
+            self.main_state(&f, micro::MAIN_KNBC);
+        } else if v != 0 && which == micro::KNAC {
+            self.main_state(&f, micro::MAIN_KNAC);
+        }
+    }
+
+    /// Adds `bit` to font `f`'s main-loop state (`micro::MAIN`), if not
+    /// there yet.
+    fn main_state(&mut self, f: &Font, bit: i32) {
+        let k = Key::FontCode(micro::MAIN, f.key.clone());
+        let was = self.int(&k);
+        if was & bit == 0 {
+            self.define(k, Val::Int(was | bit), true);
+        }
+    }
+
+    /// What the main loop must read of a font (`micro::MAIN`'s bits).
+    pub(super) fn main_state_of(&mut self, key: &Arc<str>) -> i32 {
+        self.int(&Key::FontCode(micro::MAIN, key.clone()))
     }
 
     /// A font's table of a code (`Key::FontCode`; empty: the defaults).
