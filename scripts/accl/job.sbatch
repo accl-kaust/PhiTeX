@@ -6,10 +6,6 @@
 #
 # Tasks:
 #   gate                 fmt --check, clippy -D warnings, cargo xtask check
-#   course <what> [...]  the course: plain | ssa | rebuild | label (tasks/course.sh)
-#   edits [ARGS...]      the SSA edit harness (scripts/ssa-edits ARGS)
-#   watch [COURSE] [N]   `phitex watch` against `watch --ssa` on the course
-#                        (tasks/watch.sh), N sessions each
 #   cmd <command...>     any command in the checkout (the course in $w/course,
 #                        its aux files in $w/aux; $w and $r are exported)
 #
@@ -36,7 +32,7 @@ mkdir -p "$w/cargo" "$out" "$r"
 # (the results reach the shared home however the job ends)
 trap 'cp -a "$r/." "$out/" 2>/dev/null; rm -rf "$w"' EXIT
 exec > >(tee "$out/job.log") 2>&1
-cp -a "$here/tasks" "$w/tasks"
+[ -d "$here/tasks" ] && cp -a "$here/tasks" "$w/tasks"  # (machine mode's task scripts, gone with b8c6a5d; `cmd` needs none)
 
 git clone -q "$HOME/code/flinner/partex-phitex.git" "$w/partex"
 git -C "$w/partex" -c advice.detachedHead=false checkout -q "$commit"
@@ -94,39 +90,12 @@ export -f box
 export w sif r
 case $task in
   gate)
-    # (the trip tests' oracle references, made once here: the check runs
-    # its trip and etrip variants at once, and each would make them)
-    box cargo xtask oracle --engine tex --filter "^trip" > "$r/oracle.log" 2>&1
-    box cargo xtask etrip --oracle >> "$r/oracle.log" 2>&1 || true
     box cargo fmt --all --check
     box cargo clippy --workspace --all-targets -q -- -D warnings
     status=0
     box cargo xtask check > "$r/gate.log" 2>&1 || status=$?
     tail -25 "$r/gate.log"
     echo "gate exit $status" | tee "$r/summary.txt"
-    ;;
-  course)
-    box cargo build --release -p partex-cli -q
-    # (the course, node-local: its sources and the settled aux files)
-    cp -a "$HOME/code/tmp/np-course/src" "$w/course"
-    cp -a "$HOME/code/tmp/np-course/aux" "$w/aux"
-    status=0
-    box "$w/tasks/course.sh" "$@" || status=$?
-    ;;
-  watch)
-    # (`phitex watch` and `watch --ssa` head to head, tasks/watch.sh; the
-    # course from ~/code/tmp/<first argument>, np-course/src by default)
-    box cargo build --release -p partex-cli -q
-    cp -a "$HOME/code/tmp/${1:-np-course/src}" "$w/course"
-    shift || true
-    status=0
-    box "$w/tasks/watch.sh" "$@" || status=$?
-    ;;
-  edits)
-    box cargo build --release -p partex-cli -q
-    status=0
-    bin=target/release/phitex; [ -x $bin ] || bin=target/release/partex
-    box scripts/ssa-edits --bin $bin --work "$w/edits" "$@" | tee "$r/summary.txt" || status=$?
     ;;
   cmd)
     # (the course too, as the course task has it: $w/course, $w/aux;

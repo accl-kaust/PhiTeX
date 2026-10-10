@@ -185,7 +185,7 @@ pub fn hpack(mut list: Vec<Item>, spec: Spec, params: &Params, adjust: Option<&m
     };
     // (a box is kept long: no spare capacity)
     list.shrink_to_fit();
-    let mut b = BoxNode { vertical: false, w, h, d, shift: 0, list, glue: GlueSet::default() };
+    let mut b = BoxNode { origins: crate::item::Origins::default(), vertical: false, w, h, d, shift: 0, list, glue: GlueSet::default() };
     let (badness, report) = set_glue(&mut b, w - x, &t, params, true);
     Packed { b, badness, report }
 }
@@ -255,7 +255,7 @@ pub fn vpack(list: Vec<Item>, spec: Spec, max_depth: i32, params: &Params) -> Pa
         Spec::Exactly(h) => h,
         Spec::Additional(s) => x + s,
     };
-    let mut b = BoxNode { vertical: true, w, h, d: depth, shift: 0, list, glue: GlueSet::default() };
+    let mut b = BoxNode { origins: crate::item::Origins::default(), vertical: true, w, h, d: depth, shift: 0, list, glue: GlueSet::default() };
     let (badness, report) = set_glue(&mut b, h - x, &t, params, false);
     Packed { b, badness, report }
 }

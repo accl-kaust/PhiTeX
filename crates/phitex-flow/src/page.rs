@@ -67,6 +67,18 @@ pub struct Fired {
     /// The definitions reached a node already read: the fold stops after
     /// this call (the scan resumes there).
     pub halt: bool,
+    /// The routine's run was the last build's (a memo hit: the same
+    /// `\box255`, reads and exports).
+    pub memo: bool,
+}
+
+/// What a fold that fired routines or met marks carries from a page to
+/// the next besides the contributions: the marks, `\deadcycles`. A
+/// restart point of such a fold ([`PageOrg::fold`]) starts with them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FoldState {
+    pub marks: Vec<(u16, Marks)>,
+    pub dead_cycles: i32,
 }
 
 /// A fold that never fires a routine nor reads anything (tests, and
@@ -417,6 +429,10 @@ pub struct PageOrg {
     /// The PDF events met since the page before (pdfTeX does them before
     /// it ships this page), with where they came from.
     pub pdf: PdfEvents,
+    /// A fancy fold's state at the restart point (B2: after a fire whose
+    /// routine was a memo hit and put nothing back, or the default output
+    /// with nothing held over): `None`, a fold with nothing.
+    pub fold: Option<Arc<FoldState>>,
 }
 
 /// PDF events in the order they are done, each with its origin (a
@@ -480,7 +496,7 @@ pub struct Scan {
     /// Restart points found for pages already taken (`(page, point)`).
     pub late: Vec<(u32, (Org, i32))>,
     /// The last restart point found, with its page's number.
-    pub just: Option<(u32, (Org, i32))>,
+    pub just: Option<(u32, (Org, i32), Option<Arc<FoldState>>)>,
     /// The first mark pushed takes this as its first page (a fold resumed
     /// inside a call: the call's pages before the resumption are kept).
     first_from: Option<u32>,
@@ -526,8 +542,9 @@ impl Scan {
         marks: u32,
         last_call: Option<Arc<PageCall>>,
         pdf_skip: Org,
+        fold: Option<&FoldState>,
     ) -> Scan {
-        Scan {
+        let mut s = Scan {
             pdf_skip: Some(pdf_skip),
             prev_depth: Some(prev_depth),
             pages_made: pages,
@@ -536,7 +553,14 @@ impl Scan {
             first_from: call_from,
             last_call,
             ..Scan::default()
+        };
+        if let Some(f) = fold {
+            s.fancy = true;
+            s.marked = !f.marks.is_empty();
+            s.cur_marks.clone_from(&f.marks);
+            s.dead_cycles = f.dead_cycles;
         }
+        s
     }
 
     /// The pages made since the last take, with where they came from.
@@ -554,12 +578,36 @@ impl Scan {
             Some(i) => self.orgs[i as usize].resume = Some(r),
             None => self.late.push((k, r)),
         }
-        self.just = Some((k, r));
+        self.just = Some((k, r, None));
     }
 
     fn mark(&mut self, from: u32) {
         let from = self.first_from.take().unwrap_or(from);
         self.marks.push((from, self.pages_made));
+    }
+
+    /// A page builder's quantity as a node outside an output routine reads
+    /// it here (tex.web 421, 1245): `\pagegoal` (0) … `\pagedepth` (7) of
+    /// the page so far — `\pagegoal` is `\maxdimen` and the others 0 while
+    /// the page is empty —, `\deadcycles` (8), `\insertpenalties` (9).
+    pub fn page_quantity(&self, q: u8) -> i32 {
+        match q {
+            8 => self.dead_cycles,
+            9 => self.insert_penalties,
+            _ if self.page_contents == EMPTY => {
+                if q == 0 {
+                    MAX_DIMEN
+                } else {
+                    0
+                }
+            }
+            0 => self.page_goal,
+            1 => self.total,
+            2..=5 => self.stretch[usize::from(q - 2)],
+            6 => self.shrink,
+            7 => self.depth,
+            _ => 0,
+        }
     }
 
     /// Feeds `item`, from `org` in the material.
@@ -628,6 +676,7 @@ impl Scan {
                     resume: None,
                     last_call: None,
                     pdf,
+                    fold: None,
                 });
                 self.pages_made += 1;
             }
@@ -1118,11 +1167,15 @@ impl Scan {
         // everything left was fed since the last call and nothing fed
         // since it depends on what came before it)
         let k = self.pages_made;
+        let restart = self
+            .contrib_org
+            .front()
+            .filter(|&&(s, _)| self.prev_call.is_none_or(|c| s > c) && !self.unsafe_since.iter().any(|&u| u >= s))
+            .copied();
         let resume = if fancy {
             None
-        } else if let Some(&(s, d)) = self.contrib_org.front() {
-            (self.prev_call.is_none_or(|c| s > c) && !self.unsafe_since.iter().any(|&u| u >= s))
-                .then_some((s, d))
+        } else if self.contrib_org.front().is_some() {
+            restart
         } else {
             self.pending = Some(k);
             None
@@ -1207,7 +1260,7 @@ impl Scan {
                         self.unsafe_since.push(self.cur.0);
                         self.pages.push(Page { b: s.b.clone(), ship: s.ship.clone(), builder: false });
                         let pdf = self.take_pdf();
-                        self.orgs.push(PageOrg { call: self.cur.0, call_idx, resume: None, last_call: last_call.clone(), pdf });
+                        self.orgs.push(PageOrg { call: self.cur.0, call_idx, resume: None, last_call: last_call.clone(), pdf, fold: None });
                         self.pages_made += 1;
                     }
                     Item::Pdf(e) => self.pdf.push((self.cur.0, e)),
@@ -1215,11 +1268,25 @@ impl Scan {
                     other => list.push((other, self.cur)),
                 }
             }
+            // (B2: a routine the last build ran the same, that put nothing
+            // back: its last page is a restart point, with the marks and
+            // `\deadcycles` it leaves)
+            let restartable = fired.memo && list.is_empty() && self.pages_made > made_before;
             for (it, o) in list.into_iter().rev() {
                 self.contrib.push_front(it);
                 self.contrib_org.push_front(o);
             }
             self.insert_penalties = 0;
+            if restartable
+                && let Some(r) = restart
+                && let Some(o) = self.orgs.last_mut()
+            {
+                let f = Arc::new(FoldState { marks: self.cur_marks.clone(), dead_cycles: self.dead_cycles });
+                o.resume = Some(r);
+                o.last_call.clone_from(&self.last_call);
+                o.fold = Some(f.clone());
+                self.just = Some((self.pages_made - 1, r, Some(f)));
+            }
             self.add_call_log(call_idx, &mut log, made_before);
             return;
         }
@@ -1230,14 +1297,22 @@ impl Scan {
         let fired = env.fire(defs, None);
         self.errors.extend(fired.errors);
         self.halt |= fired.halt;
+        // (B2: a fancy fold's page with nothing held over is a restart
+        // point too, with its marks)
+        let (resume, last_call, fold) = if fancy && held.is_empty() && restart.is_some() {
+            let f = Arc::new(FoldState { marks: self.cur_marks.clone(), dead_cycles: 0 });
+            (restart, self.last_call.clone(), Some(f))
+        } else {
+            (resume, last_call, None)
+        };
         for (it, o) in held.into_iter().rev() {
             self.contrib.push_front(it);
             self.contrib_org.push_front(o);
         }
         let pdf = self.take_pdf();
-        self.orgs.push(PageOrg { call: self.cur.0, call_idx, resume, last_call, pdf });
+        self.orgs.push(PageOrg { call: self.cur.0, call_idx, resume, last_call, pdf, fold: fold.clone() });
         if let Some(r) = resume {
-            self.just = Some((k, r));
+            self.just = Some((k, r, fold));
         }
         if self.call_logs.last().is_some_and(|c| c.0 == call_idx) {
             let mut l = vec![CallLog::Page(k)];

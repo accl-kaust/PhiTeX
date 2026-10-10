@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/banner.png" alt="PhiTeX: incremental TeX, exact output. Byte-identical to pdfTeX, SSA-tracked rebuilds, Rust." width="100%">
+  <img src="assets/banner.png" alt="PhiTeX: incremental TeX, exact output, Rust." width="100%">
 </p>
 
 <p align="center">
@@ -13,40 +13,40 @@
 
 # PhiTeX
 
-A TeX engine in Rust that compiles a LaTeX document incrementally. A cold
-build produces exactly what pdfTeX produces, byte for byte. After that, an
-edit re-runs only the parts of the job it can affect, and its output is
-still byte-identical to a fresh pdfTeX run.
-
-The engine records the job as a program in SSA form (dynamic single
-assignment). Each run of a piece of the job is a *step*. A step records
-what it read and what it defined, so an edit re-runs exactly the steps
-whose inputs changed. The files the job writes and reads back (`.aux`,
-`.toc`, `.bbl`, ...) live inside the build, and BibTeX and makeindex are
-steps of it, so a build settles in one process with no separate passes.
+A TeX engine in Rust that compiles a document as a dataflow graph over
+content-versioned values (`phitex-flow`): every command is a node, a
+macro call a step, a group's close emits nothing, and N equal threads
+evaluate the graph. A cold build is an edit from nothing; an edit re-runs
+only the nodes whose reads changed, and its output is the cold build's,
+byte for byte.
 
 ## Status
 
-- **Exactness:** the PDF is byte-identical to pdfTeX 1.40 (pdflatex), for
-  a cold build and after every edit. That includes `\write18` (minted) and
-  BibTeX/makeindex. The `.log` may differ.
-- **Speed:** a word edit in a 64-page thesis rebuilds in about 10 ms
-  natively. A cold tracked build takes about 2x a plain run.
-- **Engines:** pdfTeX and TeX, and XeTeX (`xelatex`, with xdvipdfmx in
-  process) through `phitex build` and `phitex watch`; there is no LuaTeX.
+- **Exactness:** plain TeX, e-TeX, LaTeX (`latex`) and pdfLaTeX
+  (`pdflatex`) are byte-identical with TeX Live on the tested documents;
+  hyperref, images and colour in PDF mode come next, then XeTeX. The
+  `.log` may differ.
+- **Edits:** a word edit on a 48-page plain document is about 10 ms
+  (`phitex-flow --budgets`).
+- **The cross-run fixpoint:** `phitex build` runs the document again with
+  the files it wrote (`.aux`, `.toc`, `.bbl`, `.ind`) until they settle,
+  BibTeX and makeindex in process between runs.
 
 ## Layout
 
 | Crate | What it is |
 |---|---|
-| `partex-engine`, `partex-core` | the engine: `tex.web`, e-TeX and pdfTeX, the PDF/DVI writers, and the SSA build and rebuild (`partex-core/src/ssa`) |
-| `partex-ssa` | the SSA records: steps, slots, the fold of definitions |
-| `partex-cli` | the `phitex` command |
+| `phitex-flow` | the engine: TeX as a suspending dataflow graph (`AGENTS_BRIEF.md`, `crates/phitex-flow/CORE.md`) |
+| `phitex-cli` | the `phitex` command |
+| `phi` | the φ core |
 | `partex-kpse` | kpathsea file lookup |
-| `partex-bibtex`, `partex-makeindex` | BibTeX and makeindex, also as incremental build nodes |
-| `phitex-syntax`, `phitex-ir`, `phitex-doc` | the source CST, the SSA text form, the static document layer |
+| `partex-bibtex`, `partex-makeindex` | BibTeX and makeindex |
+| `partex-otf`, `partex-xdvipdfmx` | OpenType shaping, xdvipdfmx |
+| `phitex-syntax`, `phitex-doc`, `phitex-diff`, `phitex-git` | the source CST, the document's structure, latexdiff, git |
+| `phitex-draw`, `phitex-codecs` | the viewer's pages, the codecs and PDF reader |
 
-`DESIGN.md` is the design and `AGENTS.md` the working rules.
+`AGENTS_BRIEF.md` is the design, `DESIGN.md` the crates and the φ core,
+and `AGENTS.md` the working rules.
 
 ## Building
 
@@ -68,17 +68,24 @@ fonts and packages.
 included), or watches it and rebuilds as it is edited:
 
     phitex build paper.tex
+    phitex build --output-format dvi paper.tex
     phitex watch -o out paper.tex
-    phitex clean paper.tex       # the outputs and what was saved: start over
+    phitex clean paper.tex
 
-Under an engine's name, or with `--compat`, it takes that engine's
-command line:
+Under an engine's name (`pdflatex`, `latex`, `pdftex`, `etex`, `tex`), or
+with `--compat=NAME`, it takes that engine's command line and runs once:
 
-    phitex --compat=pdftex -ini -jobname=pdflatex -translate-file=cp227.tcx '*pdflatex.ini'
-    phitex --compat=pdftex -fmt=pdflatex -interaction=batchmode doc.tex
+    phitex --compat=latex -interaction=batchmode doc.tex
+    phitex --compat=pdftex -ini -etex doc.tex
 
-For an incremental build, set `PARTEX_SSA=1`. To keep rebuilding as the
-sources change, use `-watch`.
+The formats are made on the graph from TeX Live's ini files the first
+time they are needed, and cached (`$XDG_CACHE_HOME/phitex`).
+
+LuaLaTeX is not on the graph: `phitex build --engine lualatex` (or a `%
+!TEX program = lualatex` comment) runs the system's `lualatex` as an
+external process to the fixpoint (BibTeX, makeindex, biber between runs;
+SyncTeX from lualatex), and `phitex watch` runs the whole build again on
+each saved change. It is not incremental.
 
 ## License
 

@@ -50,6 +50,29 @@ fn depends_on_the_listed_crates_only() {
     }
 }
 
+/// The crates of the machine-mode engine (deleted): never in phitex-flow's
+/// dependency closure, directly or through another crate.
+const NEVER: &[&str] = &["partex-core", "partex-engine", "partex-incr", "partex-ssa", "partex-trace", "phitex-ir", "partex-cli"];
+
+/// The transitive closure too (`cargo tree`, normal and build
+/// dependencies): a pure crate that linked an engine crate would bring
+/// it in with the direct check still green.
+#[test]
+fn no_engine_crate_in_the_closure() {
+    let out = std::process::Command::new(env!("CARGO"))
+        .args(["tree", "-p", "phitex-flow", "-e", "normal,build", "--prefix", "none", "--offline", "--all-features"])
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .output()
+        .expect("cargo tree runs");
+    assert!(out.status.success(), "cargo tree: {}", String::from_utf8_lossy(&out.stderr));
+    let tree = String::from_utf8_lossy(&out.stdout);
+    assert!(tree.lines().any(|l| l.starts_with("phi ")), "the closure is listed: {tree}");
+    for l in tree.lines() {
+        let name = l.split(' ').next().unwrap_or("");
+        assert!(!NEVER.contains(&name), "phitex-flow's dependency closure holds {name}: {tree}");
+    }
+}
+
 #[test]
 fn the_wall_forbids_unlisted_crates() {
     let bad = "[dependencies]\nphi = { path = \"../phi\" }\npartex-core = { path = \"../partex-core\" }\n\

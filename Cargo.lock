@@ -1386,54 +1386,6 @@ name = "partex-bibtex"
 version = "0.0.0"
 
 [[package]]
-name = "partex-cli"
-version = "0.0.0"
-dependencies = [
- "partex-bibtex",
- "partex-core",
- "partex-engine",
- "partex-incr",
- "partex-kpse",
- "partex-makeindex",
- "partex-otf",
- "partex-trace",
- "partex-xdvipdfmx",
- "phitex-diff",
- "phitex-doc",
- "phitex-draw",
- "phitex-git",
- "tikv-jemallocator",
-]
-
-[[package]]
-name = "partex-core"
-version = "0.0.0"
-dependencies = [
- "libm",
- "partex-bibtex",
- "partex-engine",
- "partex-incr",
- "partex-makeindex",
- "partex-otf",
- "partex-ssa",
- "partex-trace",
- "phitex-draw",
- "phitex-ir",
- "phitex-syntax",
-]
-
-[[package]]
-name = "partex-engine"
-version = "0.0.0"
-dependencies = [
- "partex-ssa",
-]
-
-[[package]]
-name = "partex-incr"
-version = "0.0.0"
-
-[[package]]
 name = "partex-kpse"
 version = "0.0.0"
 
@@ -1454,22 +1406,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "partex-ssa"
-version = "0.0.0"
-
-[[package]]
-name = "partex-trace"
-version = "0.0.0"
-dependencies = [
- "tracing",
-]
-
-[[package]]
 name = "partex-xdvipdfmx"
 version = "0.0.0"
 dependencies = [
  "libm",
- "partex-engine",
+ "phitex-codecs",
 ]
 
 [[package]]
@@ -1484,6 +1425,25 @@ version = "0.0.0"
 dependencies = [
  "criterion",
 ]
+
+[[package]]
+name = "phitex-cli"
+version = "0.0.0"
+dependencies = [
+ "partex-bibtex",
+ "partex-kpse",
+ "partex-makeindex",
+ "partex-xdvipdfmx",
+ "phitex-codecs",
+ "phitex-doc",
+ "phitex-draw",
+ "phitex-flow",
+ "tikv-jemallocator",
+]
+
+[[package]]
+name = "phitex-codecs"
+version = "0.0.0"
 
 [[package]]
 name = "phitex-diff"
@@ -1504,8 +1464,8 @@ name = "phitex-draw"
 version = "0.0.0"
 dependencies = [
  "miniz_oxide",
- "partex-engine",
  "partex-xdvipdfmx",
+ "phitex-codecs",
  "skrifa",
 ]
 
@@ -1526,18 +1486,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "phitex-ir"
-version = "0.0.0"
-
-[[package]]
 name = "phitex-syntax"
 version = "0.0.0"
-
-[[package]]
-name = "pin-project-lite"
-version = "0.2.17"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
 
 [[package]]
 name = "portable-atomic"
@@ -1865,34 +1815,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fd3ca314f692efd6c868f8408f53fe444634a845f96c028b97d35f6a1f79f0ee"
 
 [[package]]
-name = "tracing"
-version = "0.1.44"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "63e71662fa4b2a2c3a26f570f037eb95bb1f85397f3cd8076caed2f026a6d100"
-dependencies = [
- "pin-project-lite",
- "tracing-attributes",
- "tracing-core",
-]
-
-[[package]]
-name = "tracing-attributes"
-version = "0.1.31"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7490cfa5ec963746568740651ac6781f701c9c5ea257c58e057f3ba8cf69e8da"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.119",
-]
-
-[[package]]
-name = "tracing-core"
-version = "0.1.36"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "db97caf9d906fbde555dd62fa95ddba9eecfd14cb388e4f491a66d74cd5fb79a"
-
-[[package]]
 name = "unicode-bidi"
 version = "0.3.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1958,7 +1880,6 @@ name = "xtask"
 version = "0.0.0"
 dependencies = [
  "anyhow",
- "partex-engine",
  "regex",
  "serde",
  "serde_json",

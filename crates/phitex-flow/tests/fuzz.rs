@@ -299,9 +299,8 @@ fn run_latex(dir: &Path, name: &str, text: &str) -> Option<(Vec<u8>, String)> {
     Some((dvi, aux.iter().map(|&b| char::from(b)).collect()))
 }
 
-/// A LaTeX document edited (`tests/fuzz/latex/tiny.tex`, latex.ltx as
-/// the prelude until the saved format: one schedule, a build of about a
-/// minute): the edit's build equals a cold build of the edited text
+/// A LaTeX document edited (`tests/fuzz/latex/tiny.tex` on the saved
+/// format, one schedule): the edit's build equals a cold build of the edited text
 /// (DVI, log, written files), and `latex` itself on its first run (the
 /// DVI, the `.aux`). `PHITEX_FUZZ_LATEX` seeds of one edit (1); none
 /// without TeX Live's `latex.ini`.
@@ -320,7 +319,8 @@ fn latex_edits_equal_cold_and_latex() {
         let inc = b.update(&text, o);
         drop(b);
         let cold = fuzz::cold(&doc, &text, &files);
-        let same = inc.dvi == cold.dvi && inc.log == cold.log && inc.writes == cold.writes;
+        // (the log need not match: the DVI and the written files must)
+        let same = inc.dvi == cold.dvi && inc.writes == cold.writes;
         assert!(same, "seed {seed} ({}): the edit's build is not the cold build's", edit.what);
         // (and latex's: the document's own text, after its job's mark)
         let at = text.rfind(phitex_flow::graph::JOB).map_or(0, |i| i + phitex_flow::graph::JOB.len_utf8());
@@ -332,4 +332,24 @@ fn latex_edits_equal_cold_and_latex() {
         assert!(masked(&inc.dvi) == masked(&dvi), "seed {seed} ({}): the DVI is not latex's", edit.what);
         assert_eq!(ours, aux, "seed {seed} ({}): the .aux is not latex's", edit.what);
     }
+}
+
+/// `fuzz::rerun_reasons` names, for a piece run again, its first read
+/// from before it that changed: the value before and now, each with the
+/// node that defined it.
+#[test]
+fn rerun_reasons_name_the_changed_read() {
+    let Some(doc) = fuzz::corpus().into_iter().next() else { return };
+    let o = phitex_flow::Options { threads: 1, dump: true, ..phitex_flow::Options::default() };
+    let a = "\\catcode`\\{=1 \\catcode`\\}=2 \\def\\a{x}\n\n\\message{\\a}\n\n\\end\n";
+    let mut b = fuzz::builder(&doc, &[]);
+    b.set_lean(false);
+    let before = b.update(a, o);
+    let after = b.update(&a.replace("{x}", "{y}"), o);
+    let r = fuzz::rerun_reasons(&before.dump, &after.dump);
+    // (the pieces' headers, if it fails)
+    let heads = |d: &str| d.lines().filter(|l| l.starts_with("piece ")).collect::<Vec<_>>().join("\n");
+    let why = format!("{r}\nbefore:\n{}\nafter:\n{}", heads(&before.dump), heads(&after.dump));
+    assert!(r.contains("\\a: before macro:->x from piece id 0 n"), "{why}");
+    assert!(r.contains("now macro:->y from piece id 0 n"), "{why}");
 }

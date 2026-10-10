@@ -1,5 +1,15 @@
 # CORE: the command set of TeX on the graph
 
+> **Note (W, the CLI slice):** `crates/partex-core` is gone; the test font is `crates/phitex-flow/testdata/cmr10.tfm` (`concat!(env!("CARGO_MANIFEST_DIR"), "/testdata/cmr10.tfm")`): rebase paths that named `../partex-core/testdata/cmr10.tfm`.
+
+## Crates
+
+Pure, link them: partex-kpse (kpathsea: texmf.cnf, ls-R, path search; the input finder the CLI gives the build), partex-otf (OpenType faces/shaping/OT math/TECkit; X, and Q for TrueType embedding), partex-xdvipdfmx (XDV→PDF byte for byte; X's backend; its image readers are dvipdfmx's, for the PDF it writes: XeTeX's pictures are measured by XeTeX's own readers, X's xpic.rs copy, not dvipdfmx's, and pdfTeX's by pdfTeX's), phitex-codecs (inflate, md5, png, pdfread, pdftext, zlib crc; yours), partex-bibtex and partex-makeindex (in-process, between fixpoint runs), phi (allowed, unused), phitex-syntax/doc/draw/diff/git (CLI/viewer).
+
+Never link, deleted: partex-core, partex-engine, partex-incr, partex-ssa, partex-trace, phitex-ir, partex-cli; copy pure bodies only, naming the source file in the commit.
+
+## The command set
+
 Every TeX82 primitive (325: partex-core's `init_prim_tex`, less encTeX's 14),
 classified by what it is on the graph (AGENTS_BRIEF.md): **(i)** an
 expandable primitive or input rewriting — a *step* inside a node, which
@@ -851,6 +861,108 @@ decides. "Where the reader is is itself a read."
   canonical state where the cutter saw none ends its run there; the rest
   is cut again.
 
+## Reads of folds (decided, 2026-10-10)
+
+Two values are folds over the document's positions, not definitions any
+node makes: the page builder's state (`\pagegoal`…`\pagedepth`,
+`\deadcycles`, `\insertpenalties`: `Key::Page(0..=9)`; Q's `\pdflast*`
+counters are next), and a file the run writes (`\openout`/`\write`,
+immediate at their nodes, deferred at their pages' ship positions;
+`\closeout` ends what was written). A node's read of one is a read of
+the fold's value at the node's position (Conflict 12, decided).
+
+Invariant: a fold's read is only ever validated against the fold's value
+at that node (`Names::read_now`/`read_holds`, the one check install and
+`still_dirty` make; the names index answered it twice: 5e3ea81 at
+install, then `reads_still`, which dropped a refuted file read's mark).
+
+- **The read** (`graph::Env::fold_read`, `Names::fold_value`): answered
+  with the fold's value at `(piece, node)` as known — this build's,
+  else the last build's (`Build::fold_vals`, by piece id and node),
+  else the names index's (the page builder's fires' definitions;
+  IniTeX's values before any) or the file as found in the directories.
+  A node's own definitions do not answer a page quantity (`Env::folds`:
+  an assignment `\pagegoal=…` is an item the fold applies). Every such
+  read is entered in the run's reads, at its node (`graph::positional`:
+  not one per value); the page quantities have no edges.
+- **Validated by the fold.** The scan, before the first item of each
+  node of a piece's material (and after the piece's material), compares
+  the reads of the page quantities at the nodes up to there with its
+  page so far (`Scan::page_quantity`, tex.web 421: `\pagegoal` is
+  `\maxdimen` and the others 0 while the page is empty; the goal and
+  totals as the insertions left them), keeps each value
+  (`Names::set_fold_value`) and, at the first that differs, marks the
+  piece from that node (`check_page_reads`, `mark_from`) and stops there,
+  as a fire's definitions do. The scan does not converge with the last
+  build's pages before a run whose reads it has not validated
+  (`PState::fold_unchecked`). Files: the log's replay takes what was
+  written of each file at each node reading one (`logs::Entry::Probe`,
+  `logs::replay_probed`); a read that saw something else marks its piece
+  from its node and the build goes another round (`Build::keep_round`).
+  LaTeX's `\enddocument` reads back the `.aux` it wrote and closed: on a
+  cold build, one more round runs that piece's tail.
+- **The Suspend policy's one speculative exception, and why.** Under
+  `Reads::Suspend` a read waits for the value it reads. A fold's value at
+  node n depends on the items of the reading piece's own nodes before n,
+  and the scan sees a run's items only when the run is installed: waiting
+  would wait for itself. So these reads are predicted and validated under
+  both policies; the result is the same (validation is by exact value,
+  a refuted read runs again from its node). The generalization that
+  removes the exception: a run publishing its items per node, so the scan
+  can pass node n−1 while the run is at node n — which also removes Q's
+  second round and is the brief's §6.4 overlap. Not built yet.
+- `Output::files_read`: every file read (each name once, in document
+  order) and where it was found (`None`: not found), for the CLI's
+  `-recorder` and a watch's dependencies.
+- Tests: `tests/dvi.rs` `pagequant` (each quantity read mid-page:
+  empty page, after a paragraph, skips of each order, an insertion, a
+  split insertion with `\floatingpenalty`, a deep box, inside a paragraph
+  after `\pagegoal=`, after a page break), `readback` (immediate and
+  deferred writes read back with `\input` and `\read`, a file before it
+  is opened and after `\closeout`; not while open: TeX's buffering), both at five schedules against `tex`;
+  `reads_of_folds_follow_edits`; `tests/latex_docs.rs`: the documents'
+  `.aux` read back, no gap; TRIP's `tripos.tex` in one build
+  (`Session::run`).
+
+## Source places and item provenance (SyncTeX, inverse search)
+
+- **A node's source place** (`Build::source_place(k, node)`): the
+  piece's file (`None`: the main file; a piece after `\input`'s file
+  piece names that file) and line: the lines of the file before the
+  piece (what `Key::LineBase` answers) plus the node's line in the piece
+  (`Run::node_pos`, kept by lean runs too). A node reading a file read
+  inside its piece is placed at the `\input`.
+- **F8 (F's: a kept node's `\inputlineno`)**: a node's line in its piece
+  is not a read; an edit that changes the number of lines before a node
+  in the same piece keeps it unless the node read its line
+  (`Key::LineBase`): then it runs again (`run_piece`'s `line_ok`).
+  `tests/fuzz/fixed/f8-kept-node-line-in-piece.repro`; F's F9 (story,
+  a line removed, the log's line numbers) is the same finding, made on a
+  branch without this fix (`tests/fuzz/log-only/`, F's: the fuzz compares
+  the DVI and written files).
+- **Which node made an item** (`item::Origins`): a side table per list,
+  not per item — runs of item indices with the distance back from the
+  node that made the list (the paragraph's `\par` node: `Para::origins`;
+  a box's closing node: `BoxNode::origins`; a line of a paragraph inside
+  a box: its box's). Not part of a list's value (equal lists are equal
+  whoever made them). A distance, so a paragraph whose nodes were all
+  kept where an edit moved them still says it; a node reusing its old
+  paragraph does so only with equal origins. Lines of the main vertical
+  list are line breaking's, memoised by equality: a `Line` says which
+  item of the paragraph's list each of its box's items came from
+  (`Line::from`, runs; a hyphenated word's items, a discretionary's and
+  the skips at the item they stand at), and the paragraph's origins give
+  the node (`Line::node_of`). `Build::material_node(k, item, path)`:
+  from an item of piece k's material (the page builder's `Org`), down
+  `path` (a line's box's item, a box's item…), to its node;
+  `Build::material_of(k)`. Not yet: alignments, math lists, inserts and
+  the output routine's lists carry no origins (their items lead to the
+  node that made the whole); TeXXeT's reversed lines are approximate.
+- **Files by kpathsea** (`tfm::Kpse`, X's shape; `Build::set_kpse(kpse,
+  prog)`): a given of the build — a name becomes a path by kpathsea's
+  lookup (format `tex`, the program's name) instead of the input
+  directories; reads stay `Key::File`.
+
 ## `\input` (decided)
 
 - A file is a value, `Key::File(name)`: the file's bytes are a read, so a
@@ -1170,8 +1282,9 @@ span grouped, `\input fzsub` added or removed and the file edited, a
 `\footnote`/`\mark`/`\insert`, an edit inside an alignment or a display.
 After each edit, `Build::update` at a random schedule (1 or 8 threads,
 waiting or predicted reads, priority or random order; lean, not lean, or
-either at random by seed) must give a cold build's DVI, log and written
-files. A failure is written as a reproduction (`--out`, the text before,
+either at random by seed) must give a cold build's DVI and written
+files. The log is not compared, since the bar is the DVI/PDF and the
+feedback files. A failure is written as a reproduction (`--out`, the text before,
 the edit, both schedules, the run's history) that `--fuzz-replay FILE`
 runs again: the last edit alone, then, if that passes, the seed again to
 its step. A summary line says "(a no-op edit fails too)" when the update
@@ -1191,6 +1304,12 @@ reproduction per new class goes into `OUT/min/`, cut down by
 text; the edit's paragraph stays). `phitex-flow --fuzz-orders DOC FILE A
 B [DIR]` compares two cold builds of a text in two orders (`priority`,
 `random:N`; `-` is the document's own text). It was the oracle for F6.
+`LATEX=1 scripts/flow-fuzz.sh [SEEDS] [OUT]`: the LaTeX documents
+instead, SEEDS (30) seeds of each of B's ten, one chunk a document, on a
+format made once (`OUT/latex.fmt`). DOCS="trip pages ..." runs those
+plain documents only, each by `--doc`. A seed that times out ends its
+process (exit 3, its thread cannot be stopped and held memory: job
+7846's OOM). The chunk resumes after it.
 
 **Over-invalidation** (seeds that keep their nodes; `src/fuzz.rs`
 `over_invalidation`): a piece whose text the edit changed, a new piece, or
@@ -1201,6 +1320,17 @@ value the dump shows only in part that a node run defines), and it may
 run nothing before its first node reading one. `--strict-over`: the
 design's bound, only the readers of changed names outside the edited
 pieces, on the sum (hook H2 below would make it node by node).
+`fuzz::rerun_reasons` (`phitex-flow --fuzz-reruns BEFORE AFTER` on two
+`--dump` graphs; `reruns.txt` beside every `PHITEX_FUZZ_DUMP` pair; the
+first line of it in an over-invalidation's failure) says why each piece
+run again ran. For a piece the build before had (marked when entered in
+a predecessor's state), it gives the first read from before it that
+changed: the node, the name, the
+value it read before and the value reaching it now, each with its
+defining node (`piece id N nM`, the last node of piece N defining the
+name; `initial`; `the format`). A piece with no changed read is marked
+"(over-invalidated)". Values the dump shows only in part are marked when
+they read the same.
 
 **TRIP edited** (`tests/fuzz.rs` `edited_trip_is_tex`): TeX (the system's
 `tex`, which gives Knuth's `trip.typ` on the unedited file) is the oracle
@@ -1412,14 +1542,17 @@ moves to `tests/fuzz/fixed/`, which must pass):
   (no restructure) does not have it.
 
 **LaTeX documents** (`fuzz::Kind::Latex`, `fuzz::latex_corpus`,
-`phitex-flow --fuzz ... --latex`). A LaTeX document is a session of two
-jobs as `tests/latex_docs.rs` builds them: `latex.ini`, with `latex.ltx`
-as the prelude until the saved format, then `&latex NAME`. It runs in
-extended mode, with the directories B's documents' `.dirs` and
-`tests/latex/dirs.txt` give. The corpus is `tests/fuzz/latex/tiny.tex`
-(the harness is made on it: sections, labels and refs, a list, an
-equation, a tabular, a figure, `\newcommand`, `ifthen`) and B's six
-documents, named `latex-NAME`. The edits are made in the document's text
+`phitex-flow --fuzz ... --latex`). A LaTeX document is its own job,
+`&latex NAME`, on the saved format, as `tests/latex_docs.rs` builds them
+(`fuzz::latex_format`: `latex.ini`'s job as job `latex`, `Build::format`,
+made once per process and shared by the corpus;
+`PHITEX_FUZZ_LATEX_FMT=FILE` keeps it in FILE across processes). It runs
+in extended mode and batch mode, with the directories that B's
+documents' `.dirs` and `tests/latex/dirs.txt` give. The corpus
+(`fuzz::LATEX_DOCS`) is `tests/fuzz/latex/tiny.tex` plus B's ten
+documents, named `latex-NAME`. The harness was made on tiny: sections,
+labels and refs, a list, an equation, a tabular, a figure,
+`\newcommand`, `ifthen`. The edits are made in the document's text
 (`fuzz::edit_latex`):
 - a word; an inserted paragraph; a `\section` title;
 - a `\label` moved to another paragraph; a `\ref`'s target changed;
@@ -1430,22 +1563,56 @@ documents, named `latex-NAME`. The edits are made in the document's text
 - the class option toggled (none, 11pt, 12pt, twocolumn);
 - the `\newcommand` body; a comment line; a blank line inside or outside
   an environment.
-Each update is compared with a cold build (at 8 workers). There are no
-dumps and no over-invalidation check until the format, since
-latex.ltx's graph has millions of nodes (`PHITEX_FUZZ_LATEX_OVER=1`
-forces them).
+Each update is compared with a cold build (at 8 workers). A seed that
+times out names its step: its reproduction holds the text and edit it
+hung on. Seeds that
+keep their nodes check over-invalidation, as for plain: the graph now
+holds only the document's nodes, and the format's definitions sit before
+piece 0.
 
 `tests/fuzz.rs` `latex_edits_equal_cold_and_latex`: `PHITEX_FUZZ_LATEX`
 seeds (1) of one edit on tiny, compared with the cold build and with
-`latex` itself on its first run (DVI with the date masked, `.aux`). It
-takes about 100 s with the prelude. Locally, 3 seeds of 2 edits at 8
+`latex` itself on its first run (DVI with the date masked, `.aux`). Locally, 3 seeds of 2 edits at 8
 threads (random schedules) passed, and so did seed 0 against `latex`.
-The budgets table gets a LaTeX row set
-(`phitex-flow --budgets 1 latex-tiny`, `tests/budgets.rs`): word, line,
-page-break, the `\newcommand` body and `\parskip`, once at 8 workers,
-lean. With the prelude, tiny's cold build takes 42 s and its edits
-140–290 ms: a word reruns 9 pieces and 17365 steps, `\parskip` 3039. The
-real numbers come with the format.
+The budgets table gets LaTeX rows (`phitex-flow --budgets REPS latex`
+for all of them, `latex-NAME` for one; `tests/budgets.rs` runs tiny once).
+The edits are word, line, page-break, the `\newcommand` body (def) and
+`\parskip` (param), at 8 workers, lean, on the saved format.
+
+LaTeX budgets, job 7816 (accl node, `-c 10`, commit b137ad8 = 1e84df9
+with this slice): 5 repetitions, median ms (median steps). Cold is the
+document's cold build. "-": the edit has no place in that document (no
+`\newcommand`; sections has no word of five letters in a paragraph the
+edit picks).
+
+| document | cold ms | word | line | page-break | param | def |
+|---|---|---|---|---|---|---|
+| tiny | 378 | 102 (486) | 102 (870) | 406 (29289) | 92 (3265) | 122 (3207) |
+| sections | 315 | - | 197 (964) | 460 (30772) | 105 (3049) | - |
+| math | 622 | 260 (630) | 290 (2588) | 508 (22187) | 293 (1866) | - |
+| tables | 723 | 281 (478) | 335 (1681) | 522 (21994) | 336 (2352) | - |
+| titlepage | 1564 | 941 (2872) | 1274 (4407) | 1097 (26608) | 1203 (6498) | - |
+| packages | 506 | 120 (408) | 119 (1916) | 545 (26250) | 121 (2931) | - |
+| ams | 2224 | 911 (2368) | 962 (9527) | 1733 (55298) | 1043 (9097) | - |
+| gfx | 678 | 169 (420) | 166 (483) | 729 (31100) | 142 (788) | - |
+| layout | 5307 | 2624 (490) | 3098 (2458) | 3549 (60257) | 3327 (3416) | - |
+
+- **figures and rules hang.** Each ran into the 1500 s limit: figures on
+  page-break (after word 313 ms and line 324 ms, max), rules on line
+  (after word 1421 ms, cold 3507 ms). A says it is the same bug as W2
+  (the fixpoint's second run). Repro: `phitex-flow --budgets 1
+  latex-figures`, `latex-rules`.
+- Every row misses the brief's budgets: a word is 100–2600 ms, not
+  ≤ 50 ms, and page-break reruns the whole document's nodes (21994 to
+  60257 steps), about a cold build.
+- The time is not in the steps. A word edit runs 400–3000 steps
+  (median), yet its longest phase is `run`: layout runs 490 steps in
+  2.5 s of `run` (pieces: 11). Not traced yet: the next profile, for P
+  or A.
+- Each edit kind's maximum steps (17000–58000) is a whole-document
+  rerun in one of the five repetitions. The median is the edit's own
+  cost.
+
 
 **Edit budgets** (`src/budgets.rs`, `phitex-flow --budgets [REPS]
 [DOC]`, `scripts/flow-budgets.sh`, `tests/budgets.rs`, informational).
@@ -1476,7 +1643,18 @@ First local table (5 repetitions, median ms):
 | param | 140 | 133 | 550 | 430 |
 | cold | 135 | 160 | 360 | 400 |
 
-- **B2. Every edit scans every page, lean or not** (traced: the root of
+- **B2 (fixed, A). Every edit scans every page, lean or not.** Fixed as
+  wanted: a fancy fold has restart points too. After a fire whose
+  routine was a memo hit and put nothing back (no held-over insertions,
+  no list), the routine's last page is one; so is a default-output page
+  of a fancy fold with nothing held over. The point carries the fold's
+  state besides the contributions (`page::FoldState`: the marks,
+  `\deadcycles`; `PageOrg::fold`); `Scan::resumed` starts with it, and
+  convergence asks for the same restart point and the same state.
+  Matching (`advance_match`) is on for fancy folds. A cold build has no
+  memo hits, so its routine pages are not restart points; the first
+  edit's are.
+  Was: **Every edit scans every page, lean or not** (traced: the root of
   both). A word edit in the middle of big makes the scan feed all 1850
   items from piece 0 and fire all 48 output routines (memo hits), in both
   modes. Nothing is skipped: no `advance_match` match, no `resume`, no
@@ -1497,8 +1675,10 @@ First local table (5 repetitions, median ms):
   at the last such page before the first changed piece, and converge at
   the first page after the last changed piece. That makes the scan
   O(changed pages).
-- **B1. With pieces keeping their nodes the same scan costs 15 times
-  more** (traced). 66 ms against 4.5 ms on big, 188 ms against 16 ms on
+- **B1 (fixed, A). With pieces keeping their nodes the same scan costs 15 times
+  more** (traced). Fixed: `changed_at` looks up each name's last reader
+  in a per-run table made at the first fire in the run (`Run::last_readers`,
+  `State::last_readers`), not a walk over the later nodes' reads. 66 ms against 4.5 ms on big, 188 ms against 16 ms on
   bigout, for the same items fed and the same 152 memo hits. On bigout,
   `install_fold_defs` takes 89 ms (lean: 2 ms), the retraction of the
   predicted definitions inside `fire` about 93 ms, `find_memo` 6.5 ms.
@@ -1556,14 +1736,31 @@ in one piece, every line reading `\count0`: 5629 -> 752 commands of
 433). Still 0.5–0.8 s cold per document: the per-command cost, not
 reruns.
 
-**F8 (open, A). An edit of TRIP that never ends.** Found once F1 let
-TRIP's updates be checked: `tests/fuzz/hang/f8-trip-edit-hangs.repro`
+**T1 (open, A; was called F8 before F's F8). An edit of TRIP that never
+ends.** Found once F1 let TRIP's updates be checked:
+`tests/fuzz/hang/t1-trip-edit-hangs.repro`
 (TRIP seed 1 step 3, `--fuzz 1 3 1 --doc trip`): a character of
 `\hbox to 23pt{} % output now` replaced (`23st`). The update runs a
 piece again and again (a worker in `run_piece`, the round waiting), at
 any schedule (1 thread, Suspend, priority too). Pre-existing: 72ee98e
 hangs the same. Not in `open/` (its replay does not end); a timeout's
 reproduction names its step now (`fuzz::run_seed_at`).
+
+**T1 (open, A). Plain-document and TRIP edits that never end.** Fuzz
+subset 7853 ran 300 seeds at 1 thread and 60 at 8 on each of trip,
+pages and table, with a 120 s limit per seed, on a50fa8a. 43 timeouts:
+42 trip and 1 pages; table had none. The log is not compared, so the 9
+log-only failures do not count. By edit kind the trip timeouts are 21
+swap, 8 char-delete, 6 char-replace, 5 char-insert and 2 blank-delete,
+at any schedule. A reports that trip fails differently run to run on the
+same tree, and is bisecting. Three were cut down (job 7869,
+`flow-fuzz-min.py`, while `--fuzz-replay FILE --alone` still runs past
+45 s). They are in `tests/fuzz/hang/`, not replayed by the tests:
+- `t1-pages-blank-insert.repro`, pages seed 134 step 4: 3 paragraphs,
+  1587 bytes, a blank line inserted inside the second paragraph.
+- `t1-trip-swap.repro` (trip seed 29 step 2, Suspend, priority, nodes
+  kept) and `t1-trip-char-delete.repro` (trip seed 12 step 5, lean):
+  2 and 3 of trip.tex's units.
 
 F's report of it (F7):
 - **F7 (fixed, A: above). An `\input` added by an edit stops the update at the file**
@@ -1586,6 +1783,43 @@ F's report of it (F7):
   `f7-input-added-hang.repro` (big, seed 565's first edit: on 394eeab
   the update never ends). B's bac0a76 does not contain 2c217c3, and both
   repros pass on it.
+
+**F9 (log only, A, core). A kept node in an edited piece reads its old
+line.** The log is not compared any more (the bar is the DVI/PDF and the
+written files), so F9 fails no seed. Its repro is kept, not replayed, in
+`tests/fuzz/log-only/`, for when a line number reaches a written file
+(an `.aux` `\write` of `\the\inputlineno` would). Found by the LaTeX fuzz: tiny seed 2, with `\usepackage{ifthen}`
+removed, gives `LaTeX Warning: Reference ... on input line 7` where a
+cold build says 6. The cut-down repro is
+`tests/fuzz/log-only/f9-kept-node-line-in-piece.repro`. Four lines and a
+blank one, nodes kept: `\count2=2` is removed from the line above
+`\message{[\the\inputlineno]}`, in the same piece. The update prints
+`[4]`; a cold build prints `[3]`.
+
+*Cause*: `input_line_no` (graph/io.rs) is `Key::LineBase` plus
+`line_in(text, pos)`, the line within the piece. Only the first part is
+a read. When an edit inside the piece removes or adds a line above a
+node, that node can still be matched: its text and reads are the same,
+so it keeps its run and the line it computed then. `cond_line` (the
+`\if` line of `\showifs` and of the end-of-file warning) has the same
+shape.
+The keeping is in `run_piece` (graph.rs). An old node after the edit
+(`text_ok`: `inp_pos >= e.old_end`) whose reads `reread` the same is
+kept. Its `Key::LineBase` read is the same, because the base is the
+piece's, not the node's.
+
+*Wanted*: the node's line in the piece counts as one of its reads. For
+example, a node that computed a line (`input_line_no`, `cond_line`)
+carries a flag, and `text_ok` fails for it when the edit changed the
+number of `\r` before it (`Edit` gives the old and new spans). The F2 fix in `logs.rs` covers
+only the error context.
+
+In LaTeX it is common: in a local run of 30 seeds on sections, 9
+failed and all 9 were F9. Edits that add or remove a line above
+(`\usepackage`, a comment line) move every later
+`on input line N` of the piece, and pieces are long in LaTeX. 4 of
+the 9 show it on the last edit alone; 5 show it only through the
+seed's history.
 
 The cluster run's other classes: 827 F1 (TRIP), 27 "timeout trip" (F1's
 document, at 8 threads under load), and about 12 "F2?" on hyphens. The F2
@@ -2045,6 +2279,96 @@ after on the same base):
    (before → after): tikz 759G → 207G (149 s → 40 s), titlepage 8.41G →
    7.22G, sections 2.72G → 2.54G, `latex.ltx` 190.8G → 189.2G, big2
    unchanged; DVIs identical.
+
+## Found by the CLI (agent W)
+
+- **W1 (open, A): a LaTeX document in nonstop mode with no `.aux` never
+  ends.** `phitex build --output-format dvi titlepage.tex` (the CLI's
+  build then ran in `\nonstopmode` over the `latex` format: `Build::
+  set_interaction_option(Some(1))`, terminal `&latex titlepage.tex`, the
+  document of `tests/latex/docs/`, no `titlepage.aux` anywhere) ran over
+  25 minutes without ending on flow 9fa4ccf (cluster job 7802, test
+  `build_to_the_fixpoint`); the same document in batch mode (`latex
+  -interaction=batchmode`) ends in under a second with the `.aux` gap's
+  two errors. Suspected: the missing `.aux` at `\enddocument` in nonstop
+  mode (TeX: `*** (job aborted, file error in nonstop mode)`). The CLI
+  now builds in batch mode by default; its tests run every build under
+  `timeout 600`.
+
+- **W2 (open, A/B): the fixpoint's second run of a LaTeX document never
+  ends.** `phitex build --output-format dvi titlepage.tex` in batch mode
+  (cluster job 7826, test `build_to_the_fixpoint`, flow 45ffd43): run 1
+  is the `latex` run that passes (0.84 s, the `.aux` gap's errors); then
+  the CLI gives the build the files run 1 wrote (`Build::set_file` of
+  `titlepage.aux` and `titlepage.toc`) and calls `update` with the same
+  source: that update did not end within 600 s (killed by the test's
+  `timeout`). The CLI's loop is `crates/phitex-cli/src/session.rs`,
+  `Session::fixpoint`; B's `Fixpoint` replaces it when on flow.
+- **W3 (open, A): `gfx` takes 40 s through the CLI** (`latex
+  -interaction=batchmode gfx.tex`, job 7826; the other documents 0.7–1.6
+  s, all on the cached format), its DVI right. The CLI's input
+  directories are the document's, then one directory of links standing
+  for TEXINPUTS.
+
+## Tag numbers
+
+Several tag namespaces must stay free of collisions. `Key::word` puts the
+kind of key in the bits above 40, and `Hash` and `Eq` compare that word,
+so two kinds with one tag are one key. The format file (`format.rs`) has
+one-byte tags for keys, meanings, items, whatsits and values. The tests
+check the tags without upkeep:
+- `val.rs` `tag_tests`: `every_key` lists one key of each kind.
+  `key_index` is a `match` without wildcard, so a new `Key` variant does
+  not compile until it has an index, and `every_key_once` fails until it
+  is listed. `key_word_tags_are_distinct` then checks the word tags.
+- `format.rs` `tag_tests` does the same for meanings and whatsits
+  (`every_meaning`, `every_whatsit`). It checks that the bytes the
+  writer gives each key, meaning and whatsit are distinct per namespace.
+To add a variant, give it the next free tag, then its index and sample
+in these lists. `cargo test -p phitex-flow --lib tag_tests` runs them.
+
+Who took which (new ones go here). Key word tags: 1–42 and 63–65 (flow), 66 `GlyphUnicode`; B
+(c94cc4e) 67 `FontExpand`, 68 `FontAttr`, 69 `FontCopies`, 70
+`FontCode` (its hash); Q 80 `PdfAns` (its hash), 81 `PdfLast`, 82
+`PdfRandom`, 83 `PdfSeed`, 84 `PdfClock`, 85 `PdfDate`, 86 `PdfMatch`;
+X 87–91; 71–79 and 92 on are free. Format key tags: 34
+`GlyphUnicode`, B 35–38, X 50–53. Format meaning tags: 0–7 (flow),
+X 12 (`XMathCharGiven`). Format whatsit tags: 0–3 (flow), X 4
+(`SavePos`). Q takes no format tag of any kind: a primitive meaning is
+written by name (`Prim::Pdf`, `Prim::PdfX` included), `Item::Pdf` and
+`Whatsit::Pdf` are refused by the format writer, and the PDF keys are
+not dumped (pdfTeX does not dump its PDF globals); nothing of Q3 hashes
+a tag but `Key::word`.
+
+## Memory (agent A, 2026-10-10)
+
+`latex.ltx` as a format at `-j 1` (`--cut-lines 200`), peak RSS: bac0a76
+5.39 GB, 2c217c3 4.46, 021c65e 5.92, their merge 1ae75fa 7.82, head
+36b0c50 6.85. `PHITEX_CENSUS=1` prints what each run holds
+(`Run::census`): nodes, reads, distinct `Read`s, and the distinct ones
+that are copies of another (same name, source, scope, conditional and
+field: a read not shared).
+
+| | reads held | distinct `Read`s | of the expl3 piece (2.9M nodes) | copies | RSS |
+|---|---|---|---|---|---|
+| 2c217c3 | 51.6M | 1.41M | 0.76M | | 4.46 GB |
+| 1ae75fa | 51.3M | 25.9M | 23.9M | | 7.82 GB |
+| 36b0c50 | 51.3M | 20.0M | 18.5M | 18.4M | 6.85 GB |
+| shared outer-ness (this commit) | 51.3M | 1.70M | 1.05M | 79K | 3.75 GB |
+
+The merge brought F's reads of outer-ness alone (`Field::Outer`): a
+name scanned where `\outer` is forbidden reads only that, a copy of the
+read with the field changed; a later whole read of it in the same node
+(`Exec::whole`, the scanned argument expanded) made another copy, with
+the field back. Every node scanning and then expanding a name held two
+`Read`s of its own instead of the one all its readers share (the
+`Known` cache made each outer copy once only for a name the piece
+kept). Now `Exec::outer_copy` makes one outer copy per read in a run
+(`Scratch::outer_of`), and `whole` gives back the read it was copied
+from (`Scratch::whole_of`). Cold build 41.6 s -> 35.1 s.
+`tests/flow.rs` `a_scanned_and_expanded_name_is_one_read`: 400 nodes
+scanning and expanding `\x` hold 40 distinct reads (439 without
+`whole`'s lookup).
 
 ## The inventory
 
@@ -2527,21 +2851,6 @@ builder of a document with routines is made again from its start
 anyway). Keys for A, if `ReadRef` takes over: `Key::PdfAns`,
 `Key::PdfLast`, `Key::PdfSeed`, `Key::PdfClock`, `Key::PdfDate`,
 `Key::PdfRandom`, `Key::PdfMatch`.
-
-**Tag numbers (who took which).** `Key::word`'s tags (`tag << 40`) and
-the format's key tags must not collide across agents; new ones go
-here. Key word tags: 1–42 and 63–65 (flow), 66 `GlyphUnicode`; B
-(c94cc4e) 67 `FontExpand`, 68 `FontAttr`, 69 `FontCopies`, 70
-`FontCode` (its hash); Q 80 `PdfAns` (its hash), 81 `PdfLast`, 82
-`PdfRandom`, 83 `PdfSeed`, 84 `PdfClock`, 85 `PdfDate`, 86 `PdfMatch`;
-X 87–91; 71–79 and 92 on are free. Format key tags: 34
-`GlyphUnicode`, B 35–38, X 50–53. Format meaning tags: 0–7 (flow),
-X 12 (`XMathCharGiven`). Format whatsit tags: 0–3 (flow), X 4
-(`SavePos`). Q takes no format tag of any kind: a primitive meaning is
-written by name (`Prim::Pdf`, `Prim::PdfX` included), `Item::Pdf` and
-`Whatsit::Pdf` are refused by the format writer, and the PDF keys are
-not dumped (pdfTeX does not dump its PDF globals); nothing of Q3 hashes
-a tag but `Key::word`.
 
 **Origins (for SyncTeX and the viewer).** Each PDF page value carries
 `origins` (`content::Origins`, a non-version field: never in

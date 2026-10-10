@@ -798,10 +798,13 @@ impl Exec<'_> {
             }
             return;
         }
+        // (in the order first defined; a set beside it, as an arm may hold
+        // a whole table's definitions: xelatex.ini's Unicode data)
         let mut keys: Vec<Key> = Vec::new();
+        let mut seen: crate::hash::FxSet<Key> = crate::hash::FxSet::default();
         for n in nodes.range(at, here) {
             for d in n.defs() {
-                if !keys.contains(&d.key) {
+                if seen.insert(d.key.clone()) {
                     keys.push(d.key.clone());
                 }
             }

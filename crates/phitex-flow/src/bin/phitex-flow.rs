@@ -137,7 +137,9 @@ fn trip(dir: &str, threads: usize) -> ExitCode {
 /// `phitex-flow --fuzz SEED COUNT [SEEDS] [--threads N,..] [--doc NAME]
 /// [--out DIR] [--no-over] [--strict-over] [--latex] [--timeout SECS]`: the incremental fuzz gate
 /// (`phitex_flow::fuzz`): SEEDS seeds from SEED (1), COUNT edits each; a
-/// failing seed's reproduction goes to DIR (`fuzz-out`).
+/// failing seed's reproduction goes to DIR (`fuzz-out`). After a seed
+/// that times out it stops (exit status 3, "resume at seed N"): the
+/// seed's thread cannot be stopped and may hold memory without end.
 fn fuzz(args: &[String]) -> ExitCode {
     use phitex_flow::fuzz;
     let num = |i: usize| args.get(i).and_then(|a| a.parse::<u64>().ok());
@@ -195,8 +197,10 @@ fn fuzz(args: &[String]) -> ExitCode {
                 } else {
                     fails += 1;
                 }
-                // (a failure a no-op edit has too is the update's, not the edit's)
-                let noop = !r.fail.is_over() && r.step > 0 && fuzz::replay(&r.noop()).is_some();
+                // (a failure a no-op edit has too is the update's, not the
+                // edit's; a timeout's no-op is not tried, it may not end)
+                let timeout = matches!(r.fail, fuzz::Fail::Timeout);
+                let noop = !r.fail.is_over() && !timeout && r.step > 0 && fuzz::replay(&r.noop()).is_some();
                 println!(
                     "seed {s} ({}, edit {}: {}): {:?}{} -> {}",
                     r.doc,
@@ -206,6 +210,14 @@ fn fuzz(args: &[String]) -> ExitCode {
                     if noop { " (a no-op edit fails too)" } else { "" },
                     p.display()
                 );
+                // (the seed's thread is left running, and may hold memory
+                // without end: stop here, the caller resumes after it)
+                if timeout {
+                    let done = s - seed + 1;
+                    println!("fuzz: {done} seeds of {count} edits from {seed}: {ok} passed, {fails} failed, {over} over-invalidated");
+                    println!("fuzz: stopped after a timeout; resume at seed {}", s + 1);
+                    std::process::exit(3);
+                }
             }
         }
     }
@@ -271,6 +283,26 @@ fn budgets(args: &[String]) -> ExitCode {
     ExitCode::SUCCESS
 }
 
+/// `phitex-flow --fuzz-reruns BEFORE AFTER`: why each piece run again in
+/// the build of graph AFTER ran, from the graph BEFORE it (`--dump`
+/// output, or a fuzz dump's `before.dump`, `after.dump`):
+/// `fuzz::rerun_reasons`, the first read from before it that changed.
+fn fuzz_reruns(args: &[String]) -> ExitCode {
+    let (Some(a), Some(b)) = (args.first(), args.get(1)) else {
+        eprintln!("usage: phitex-flow --fuzz-reruns BEFORE AFTER");
+        return ExitCode::FAILURE;
+    };
+    // (a dump may hold bytes that are not UTF-8: a character each)
+    let read = |f: &str| std::fs::read(f).map(|b| String::from_utf8(b.clone()).unwrap_or_else(|_| b.iter().map(|&c| char::from(c)).collect()));
+    if let (Ok(x), Ok(y)) = (read(a), read(b)) {
+        print!("{}", phitex_flow::fuzz::rerun_reasons(&x, &y));
+        ExitCode::SUCCESS
+    } else {
+        eprintln!("--fuzz-reruns: {a} or {b} unreadable");
+        ExitCode::FAILURE
+    }
+}
+
 /// `phitex-flow --fuzz-classify FILE...`: each reproduction's class
 /// (`fuzz::classify`), a line `CLASS<TAB>FILE`.
 fn fuzz_classify(files: &[String]) -> ExitCode {
@@ -284,7 +316,7 @@ fn fuzz_classify(files: &[String]) -> ExitCode {
 }
 
 /// `phitex-flow --fuzz-replay FILE`: a reproduction run again.
-fn fuzz_replay(file: &str) -> ExitCode {
+fn fuzz_replay(file: &str, alone: bool) -> ExitCode {
     let Some(r) = std::fs::read_to_string(file).ok().and_then(|s| phitex_flow::fuzz::Repro::parse(&s)) else {
         eprintln!("--fuzz-replay: {file}: not a reproduction");
         return ExitCode::FAILURE;
@@ -292,6 +324,11 @@ fn fuzz_replay(file: &str) -> ExitCode {
     if let Some(f) = phitex_flow::fuzz::replay(&r) {
         println!("{file}: fails: {f:?}");
         return ExitCode::FAILURE;
+    }
+    // (`--alone`: the last edit only, as a hang's reduction asks)
+    if alone {
+        println!("{file}: the last edit alone passes");
+        return ExitCode::SUCCESS;
     }
     // (the last edit alone passes: the seed again, with what came before it)
     match phitex_flow::fuzz::replay_history(&r) {
@@ -315,6 +352,9 @@ fn main() -> ExitCode {
     if args.first().map(String::as_str) == Some("--budgets") {
         return budgets(&args[1..]);
     }
+    if args.first().map(String::as_str) == Some("--fuzz-reruns") {
+        return fuzz_reruns(&args[1..]);
+    }
     if args.first().map(String::as_str) == Some("--fuzz-classify") {
         return fuzz_classify(&args[1..]);
     }
@@ -322,7 +362,7 @@ fn main() -> ExitCode {
         return fuzz_orders(&args[1..]);
     }
     if args.first().map(String::as_str) == Some("--fuzz-replay") {
-        return fuzz_replay(args.get(1).map_or("", String::as_str));
+        return fuzz_replay(args.get(1).map_or("", String::as_str), args.get(2).is_some_and(|a| a == "--alone"));
     }
     if args.first().map(String::as_str) == Some("--trip") {
         return trip(args.get(1).map_or(".", String::as_str), args.get(2).and_then(|j| j.parse().ok()).unwrap_or(1));
@@ -441,7 +481,7 @@ fn main() -> ExitCode {
     let Some(file) = file else { return usage() };
     let tfm = tfm.or_else(|| {
         [
-            "crates/partex-core/testdata/cmr10.tfm",
+            "crates/phitex-flow/testdata/cmr10.tfm",
             "/usr/share/texmf-dist/fonts/tfm/public/cm/cmr10.tfm",
             "/usr/share/texlive/texmf-dist/fonts/tfm/public/cm/cmr10.tfm",
         ]

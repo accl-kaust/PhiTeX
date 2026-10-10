@@ -1,6 +1,6 @@
 /* What pdfTeX's writepng.c does with libpng (read_png_info, then
  * write_png's transformations and rows), printed for comparison with
- * partex's port (crates/partex-engine/examples/png_dump.rs).
+ * partex's port (crates/phitex-codecs/examples/png_dump.rs).
  *
  *   harness [-x] FILE...
  *
