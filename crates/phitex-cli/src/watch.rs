@@ -37,11 +37,11 @@ const SOURCES: &[&str] = &[
     "png", "jpg", "jpeg", "pdf", "eps", "mp", "txt", "dat", "csv", "tikz", "pgf", "inc",
 ];
 
-type Stamp = (u64, SystemTime);
+pub type Stamp = (u64, SystemTime);
 
 /// The project's source files under `root` (to depth 6, no hidden
 /// directories) with their sizes and times.
-fn scan(root: &Path) -> HashMap<PathBuf, Stamp> {
+pub fn scan(root: &Path) -> HashMap<PathBuf, Stamp> {
     let mut out = HashMap::new();
     let mut todo = vec![(root.to_path_buf(), 0)];
     while let Some((d, depth)) = todo.pop() {

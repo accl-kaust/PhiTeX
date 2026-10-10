@@ -592,3 +592,49 @@ fn pdflatex_layout() {
 fn pdflatex_rules() {
     pdflatex_doc("rules");
 }
+
+/// A small `LuaLaTeX` document (a reference, `\directlua`).
+const LUA_DOC: &str = "\\documentclass{article}\n\\begin{document}\n\\section{One}\\label{one}\nSee section~\\ref{one}; \
+six times seven is \\directlua{tex.print(6*7)}.\n\\end{document}\n";
+
+/// `phitex build --engine lualatex`: the system's `lualatex` run as an
+/// external process to the fixpoint; its PDF is `lualatex`'s own, run
+/// until its `.aux` file settles, with the same flags.
+#[test]
+fn lualatex_external() {
+    if !have("lualatex") {
+        eprintln!("lualatex_external: no `lualatex` here to compare with: not checked");
+        return;
+    }
+    let _one = one();
+    let ours = scratch("lua");
+    std::fs::write(ours.join("lua.tex"), LUA_DOC).expect("the document");
+    let out = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &ours)
+        .args(["build", "--engine", "lualatex", "lua.tex"])
+        .output()
+        .expect("phitex runs");
+    let errs = String::from_utf8_lossy(&out.stderr);
+    eprintln!("phitex build --engine lualatex:\n{errs}");
+    assert!(out.status.success(), "phitex build --engine lualatex failed:\n{errs}");
+    assert!(errs.contains("not incremental"), "the build does not say it is not incremental:\n{errs}");
+    let theirs = scratch("lua-tl");
+    std::fs::write(theirs.join("lua.tex"), LUA_DOC).expect("the document");
+    let mut last = None;
+    for _ in 0..5 {
+        let _ = Command::new("lualatex")
+            .args(["-interaction=batchmode", "-recorder", "-synctex=1", "lua.tex"])
+            .current_dir(&theirs)
+            .env("SOURCE_DATE_EPOCH", "0")
+            .env("FORCE_SOURCE_DATE", "1")
+            .output();
+        let aux = std::fs::read(theirs.join("lua.aux")).ok();
+        if aux == last {
+            break;
+        }
+        last = aux;
+    }
+    let want = std::fs::read(theirs.join("lua.pdf")).expect("lualatex's PDF");
+    let got = std::fs::read(ours.join("lua.pdf")).expect("phitex's PDF");
+    assert!(got == want, "the PDF is not lualatex's: {}", first_difference(&got, &want));
+    assert!(ours.join("lua.synctex.gz").is_file(), "lualatex's SyncTeX file is not there");
+}
