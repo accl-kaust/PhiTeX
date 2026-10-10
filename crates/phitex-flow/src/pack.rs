@@ -201,6 +201,7 @@ pub fn merge_native(list: &mut Vec<Item>) {
         return;
     }
     let same = |it: Option<&Item>, f: &crate::tfm::Font| matches!(it, Some(Item::Native(n)) if *n.font == *f);
+    let mut q: Option<usize> = None;
     let mut i = 0;
     while i < list.len() {
         let Item::Native(first) = &list[i] else {
@@ -208,10 +209,24 @@ pub fn merge_native(list: &mut Vec<Item>) {
             continue;
         };
         let first = first.clone();
-        let k = match i.checked_sub(1).map(|j| &list[j]) {
+        // (xetex.web: `q` walks up to the word from where it stood, `k`
+        // counting down from the last discretionary's replace count: a
+        // word in a discretionary's replaced text starts no chain)
+        let mut k = match q.map(|x: usize| &list[x]) {
             Some(Item::Disc(d)) => i32::from(d.replace),
             _ => 0,
         };
+        loop {
+            let next = q.map_or(0, |x| x + 1);
+            if next >= i {
+                break;
+            }
+            k -= 1;
+            q = Some(next);
+            if let Item::Disc(d) = &list[next] {
+                k = i32::from(d.replace);
+            }
+        }
         let mut j = i + 1;
         if k <= 0 {
             loop {
