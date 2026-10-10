@@ -1536,6 +1536,14 @@ fn write_outputs(d: &Path, prev: &Output, inc: &Output, c: &Output) {
     };
     let _ = std::fs::write(d.join("edit.entries"), entries(inc));
     let _ = std::fs::write(d.join("cold.entries"), entries(c));
+    // (the written files, each after a line with its name)
+    let writes = |o: &Output| o.writes.iter().fold(String::new(), |mut s, (n, t)| {
+        let _ = writeln!(s, "=== {n}");
+        s.push_str(t);
+        s
+    });
+    let _ = std::fs::write(d.join("edit.writes"), writes(inc));
+    let _ = std::fs::write(d.join("cold.writes"), writes(c));
     let _ = std::fs::write(d.join("edit.dvi"), &inc.dvi);
     let _ = std::fs::write(d.join("cold.dvi"), &c.dvi);
 }
