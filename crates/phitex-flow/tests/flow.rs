@@ -486,3 +486,40 @@ fn a_scanned_name_reads_only_whether_it_is_outer() {
         assert_eq!(forbidden, 13, "lean {lean}: {:?}", outer.errors);
     }
 }
+
+/// Edges go into the readers index before the scheduler's lock
+/// (`run_and_install`): a piece reading `\x` installs its edge while a slow
+/// piece before it installs a new definition of `\x`. Every reader must
+/// still be marked or see the new value: any schedule, either policy,
+/// gives the one-thread DVI.
+#[test]
+fn edges_outside_the_lock_lose_no_mark() {
+    let mut src = String::from(
+        "\\catcode`\\{=1 \\catcode`\\}=2 \\catcode`\\#=6 \\font\\tenrm=cmr10 \\tenrm \\tolerance=200 \\linepenalty=10\n\
+         \\parindent=20pt \\baselineskip=12pt \\topskip=10pt \\maxdepth=4pt \\parfillskip=0pt plus 1fil\n\
+         \\hsize=300pt \\vsize=200pt \\def\\x{A}\\def\\y{C}\n\n\
+         \\count1=0 \\def\\l{\\advance\\count1 1 \\ifnum\\count1<4000 \\expandafter\\l\\fi}\\l \\gdef\\x{B}\n\n",
+    );
+    for k in 0..300 {
+        if k % 50 == 25 {
+            // (a second slow definer, of another name, in the middle)
+            src.push_str("\\count2=0 \\def\\m{\\advance\\count2 1 \\ifnum\\count2<2000 \\expandafter\\m\\fi}\\m \\gdef\\y{D}\n\n");
+        }
+        let _ = write!(src, "Word \\x\\ and \\y\\ number {k}.\n\n");
+    }
+    let base = cold(&src, opts(1, Reads::Suspend, Order::Priority));
+    assert!(base.errors.is_empty(), "{:?}", base.errors);
+    assert!(base.dvi.len() > 1000, "a DVI file");
+    let mut reruns = 0;
+    for reads in [Reads::Suspend, Reads::Speculate] {
+        for threads in [2, 8, 16] {
+            for order in std::iter::once(Order::Priority).chain((0..12).map(Order::Random)) {
+                let o = cold(&src, opts(threads, reads, order));
+                reruns += o.stats.reruns;
+                assert!(o.dvi == base.dvi, "{threads} threads, {reads:?}, {order:?}: another DVI: {:?}", o.stats);
+                assert!(o.errors == base.errors, "{threads} threads, {reads:?}, {order:?}: {:?}", o.errors);
+            }
+        }
+    }
+    assert!(reruns > 0, "no reader ran again: the race was never there");
+}

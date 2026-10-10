@@ -399,6 +399,32 @@ fn main() -> ExitCode {
     if args.first().map(String::as_str) == Some("--budgets") {
         return budgets(&args[1..]);
     }
+    if args.first().map(String::as_str) == Some("--scaling") {
+        // (`--scaling [J,J,...] [suspend|speculate] [DOC...]`: cold builds at
+        // each thread count, speculating unless told)
+        let js: Vec<usize> = args
+            .get(1)
+            .map_or("1,2,4,8,16,48", String::as_str)
+            .split(',')
+            .filter_map(|x| x.parse().ok())
+            .collect();
+        let mut reads = Reads::Speculate;
+        let only: Vec<String> = args
+            .iter()
+            .skip(2)
+            .filter(|a| match a.as_str() {
+                "suspend" => {
+                    reads = Reads::Suspend;
+                    false
+                }
+                "speculate" => false,
+                _ => true,
+            })
+            .cloned()
+            .collect();
+        print!("{}", phitex_flow::fuzz::scaling(&js, reads, &only));
+        return ExitCode::SUCCESS;
+    }
     if args.first().map(String::as_str) == Some("--fuzz-cold") {
         return fuzz_cold(args.get(1).map_or("", String::as_str), args.get(2).map(String::as_str));
     }
