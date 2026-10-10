@@ -126,6 +126,9 @@ pub struct ShipParams {
     pub date: [i32; 4],
     /// What shipping reads in PDF mode (`\pdfoutput` positive).
     pub pdf: Option<Arc<crate::pdf::Ship>>,
+    /// XeTeX: `\pdfpagewidth`, `\pdfpageheight`, for the page's
+    /// `pdf:pagesize` special (xetex.web's "Ship box |p| out").
+    pub xdv: Option<(i32, i32)>,
 }
 
 /// A point where TeX calls the page builder (tex.web 994), with what it
@@ -297,6 +300,13 @@ pub enum Item {
     /// A job of a session begins (`graph::JOB`): the page builder starts
     /// again from an empty page (TeX run again).
     JobStart,
+    // ---- XeTeX's whatsits with dimensions (xetex.web §169–§170)
+    /// A word in a native font (`native_word_node`).
+    Native(Arc<crate::native::NativeWord>),
+    /// One glyph of a native font (`glyph_node`, `\XeTeXglyph`).
+    Glyph(Arc<crate::native::GlyphItem>),
+    /// A picture (`pic_node`, `pdf_node`: `\XeTeXpicfile`, `\XeTeXpdffile`).
+    Pic(Arc<crate::native::Pic>),
 }
 
 impl Item {
@@ -318,7 +328,21 @@ impl Item {
             Item::Glue { g, .. } => g.width,
             Item::Leaders(l) => l.g.width,
             Item::Whatsit(w) => w.dims().map_or(0, |d| d.0),
+            Item::Native(n) => n.w,
+            Item::Glyph(g) => g.w,
+            Item::Pic(p) => p.w,
             _ => 0,
+        }
+    }
+
+    /// XeTeX's whatsits that have a box's dimensions (native words, glyphs,
+    /// pictures): width, height, depth.
+    pub fn xdims(&self) -> Option<(i32, i32, i32)> {
+        match self {
+            Item::Native(n) => Some((n.w, n.h, n.d)),
+            Item::Glyph(g) => Some((g.w, g.h, g.d)),
+            Item::Pic(p) => Some((p.w, p.h, p.d)),
+            _ => None,
         }
     }
 
@@ -356,6 +380,9 @@ impl Item {
                 | Item::Lang { .. }
                 | Item::Whatsit(_)
                 | Item::Adjust(_)
+                | Item::Native(_)
+                | Item::Glyph(_)
+                | Item::Pic(_)
         )
     }
 
@@ -394,6 +421,9 @@ pub enum Whatsit {
     Close { stream: u8 },
     /// `\special{…}`: the expanded text as shipping prints it.
     Special(Arc<str>),
+    /// XeTeX's `\pdfsavepos` (`pdf_save_pos_node`): shipping notes where
+    /// it is; nothing is written.
+    SavePos,
     /// One of pdfTeX's (`pdf::what`).
     Pdf(Arc<crate::pdf::what::What>),
 }

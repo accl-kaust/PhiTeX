@@ -7,7 +7,7 @@
 use std::fmt;
 use std::sync::Arc;
 
-pub use crate::prim::{Al, Code, Conv, DimenPar, GluePar, IfKind, IntPar, Mat, MathP, Prim, Reg, Shorthand, TokPar};
+pub use crate::prim::{Al, Code, Conv, DimenPar, GluePar, IfKind, IntPar, Mat, MathP, Prim, Reg, Shorthand, TokPar, Xe};
 use crate::build::CsTable;
 use crate::tfm::Font;
 
@@ -222,6 +222,24 @@ pub enum Key {
     PdfSeed,
     PdfClock,
     PdfDate,
+    // ---- XeTeX's
+    /// `\XeTeXinterchartoks a b` (`Val::Toks`): the tokens put between a
+    /// character of class `a` and one of class `b` (4095: the boundary).
+    InterChar(u16, u16),
+    /// The script a native font's last word was shaped in (XeTeX's
+    /// `hb_buffer` script, which sets the next word's default direction):
+    /// `Val::Int` (0: none), defined globally by the nodes setting words
+    /// in the font (its key, `Font::key`).
+    NativeDir(Arc<str>),
+    /// How the input is decoded from the next line on
+    /// (`\XeTeXinputencoding`; `Val::Int`, `graph::xetex`'s modes), and
+    /// files opened later (`\XeTeXdefaultencoding`): global, as XeTeX sets
+    /// them in place.
+    InputEncoding,
+    DefaultEncoding,
+    /// `\XeTeXlinebreaklocale` (`Val::Name`; empty: none): global, as
+    /// XeTeX assigns it in place (no save stack).
+    LinebreakLocale,
 }
 
 impl Key {
@@ -265,7 +283,8 @@ impl std::hash::Hash for Key {
             | Key::FontExpand(n)
             | Key::FontAttr(n)
             | Key::FontCopies(n)
-            | Key::GlyphUnicode(n) => {
+            | Key::GlyphUnicode(n)
+            | Key::NativeDir(n) => {
                 n.hash(h);
                 h.write_u64(self.word());
             }
@@ -287,7 +306,8 @@ impl PartialEq for Key {
             | (Key::FontExpand(a), Key::FontExpand(b))
             | (Key::FontAttr(a), Key::FontAttr(b))
             | (Key::FontCopies(a), Key::FontCopies(b))
-            | (Key::GlyphUnicode(a), Key::GlyphUnicode(b)) => Arc::ptr_eq(a, b) || a == b,
+            | (Key::GlyphUnicode(a), Key::GlyphUnicode(b))
+            | (Key::NativeDir(a), Key::NativeDir(b)) => Arc::ptr_eq(a, b) || a == b,
             (Key::FontCode(k, a), Key::FontCode(l, b)) => k == l && (Arc::ptr_eq(a, b) || a == b),
             (Key::Cat(a), Key::Cat(b)) => a == b,
             (Key::FontDimen(a, k), Key::FontDimen(b, l)) => k == l && (Arc::ptr_eq(a, b) || a == b),
@@ -332,6 +352,11 @@ impl Key {
             Key::PdfSeed => w(83, 0),
             Key::PdfClock => w(84, 0),
             Key::PdfDate => w(85, 0),
+            Key::NativeDir(_) => w(87, 0),
+            Key::InterChar(a, b) => w(88, (u64::from(*a) << 16) | u64::from(*b)),
+            Key::InputEncoding => w(89, 0),
+            Key::DefaultEncoding => w(90, 0),
+            Key::LinebreakLocale => w(91, 0),
             Key::Active(x) => w(1, c(x)),
             Key::Cat(x) => w(2, c(x)),
             Key::Lccode(x) => w(3, c(x)),
@@ -396,6 +421,9 @@ pub enum Meaning {
     CharGiven(u32),
     /// `\mathchardef`.
     MathCharGiven(u32),
+    /// XeTeX's `\Umathchardef`, `\Umathcharnumdef`: a 32-bit math code
+    /// (`fam<<24 | class<<21 | usv`).
+    XMathCharGiven(u32),
     /// `\countdef` and friends: the register the name stands for.
     CountRef(u16),
     DimenRef(u16),
@@ -564,6 +592,11 @@ impl fmt::Display for Shown<'_, Key> {
             Key::PdfSeed => write!(f, "the random seed given"),
             Key::PdfClock => write!(f, "the clock given"),
             Key::PdfDate => write!(f, "the creation date given"),
+            Key::InterChar(a, b) => write!(f, "\\XeTeXinterchartoks{a} {b}"),
+            Key::NativeDir(x) => write!(f, "the last script shaped ({x})"),
+            Key::InputEncoding => write!(f, "\\XeTeXinputencoding"),
+            Key::DefaultEncoding => write!(f, "\\XeTeXdefaultencoding"),
+            Key::LinebreakLocale => write!(f, "\\XeTeXlinebreaklocale"),
             Key::Interaction => write!(f, "\\interactionmode"),
             Key::ETeXMode => write!(f, "e-TeX mode"),
             Key::Patterns(l) => write!(f, "\\patterns (language {l})"),
@@ -635,6 +668,7 @@ impl fmt::Display for Shown<'_, Val> {
             Val::Meaning(Meaning::Char(c, x)) => write!(f, "the character {x} (cat {c})"),
             Val::Meaning(Meaning::CharGiven(c)) => write!(f, "\\char{c}"),
             Val::Meaning(Meaning::MathCharGiven(c)) => write!(f, "\\mathchar{c}"),
+            Val::Meaning(Meaning::XMathCharGiven(c)) => write!(f, "\\Umathchar{c}"),
             Val::Meaning(Meaning::CountRef(n)) => write!(f, "\\count{n}"),
             Val::Meaning(Meaning::DimenRef(n)) => write!(f, "\\dimen{n}"),
             Val::Meaning(Meaning::SkipRef(n)) => write!(f, "\\skip{n}"),
@@ -664,8 +698,44 @@ impl fmt::Display for Shown<'_, Val> {
 /// a file `\font` can load, not the initial font: that is `\nullfont`.
 /// With `etex` (e-TeX's extended mode, etex.web §1337), e-TeX's
 /// primitives are named too.
-pub fn initial(key: &Key, _font: &Arc<Font>, etex: bool, cs: Option<&CsTable>) -> Val {
+pub fn initial(key: &Key, font: &Arc<Font>, etex: bool, cs: Option<&CsTable>) -> Val {
+    initial_in(key, font, etex, false, cs)
+}
+
+/// [`initial`] for an engine: with `xetex`, XeTeX's IniTeX (xetex.web
+/// §232, §240): XeTeX's primitives named (with e-TeX's), its math codes
+/// (`fam<<24 | class<<21 | usv`: digits class 7, letters class 7 family
+/// 1), its space factor codes holding the character class above 16 bits
+/// (class 0), its parameters' initial values.
+pub fn initial_in(key: &Key, _font: &Arc<Font>, etex: bool, xetex: bool, cs: Option<&CsTable>) -> Val {
     let c32 = |c: &char| u32::from(*c) as i32;
+    if xetex {
+        match key {
+            Key::Cs(crate::build::CS_NULLFONT) => {}
+            Key::Cs(n) => {
+                let Some(cs) = cs else { return Val::Meaning(Meaning::Undefined) };
+                let n = cs.name(*n);
+                return Val::Meaning(
+                    Prim::by_name(&n)
+                        .or_else(|| Prim::by_name_etex(&n))
+                        .or_else(|| Prim::by_name_xetex(&n))
+                        .or_else(|| Prim::internal(&n))
+                        .map_or(Meaning::Undefined, Meaning::Prim),
+                );
+            }
+            Key::Mathcode(c) => {
+                return Val::Int(match c {
+                    '0'..='9' => c32(c) + (7 << 21),
+                    'A'..='Z' | 'a'..='z' => c32(c) + (1 << 24) + (7 << 21),
+                    _ => c32(c),
+                });
+            }
+            Key::InterChar(..) => return Val::Toks(Arc::new(Vec::new())),
+            Key::NativeDir(_) | Key::InputEncoding | Key::DefaultEncoding => return Val::Int(0),
+            Key::LinebreakLocale => return Val::Name(Arc::from("")),
+            _ => {}
+        }
+    }
     match key {
         Key::Cs(crate::build::CS_NULLFONT) => Val::Meaning(Meaning::Font(crate::tfm::null_font())),
         Key::Cs(n) => {
@@ -698,7 +768,7 @@ pub fn initial(key: &Key, _font: &Arc<Font>, etex: bool, cs: Option<&CsTable>) -
         }),
         Key::Delcode(c) => Val::Int(if *c == '.' { 0 } else { -1 }),
         Key::IntPar(p) => Val::Int(p.initial()),
-        Key::TokPar(_) | Key::Toks(_) | Key::Mark(..) | Key::ParToken => Val::Toks(Arc::new(Vec::new())),
+        Key::TokPar(_) | Key::Toks(_) | Key::Mark(..) | Key::ParToken | Key::InterChar(..) => Val::Toks(Arc::new(Vec::new())),
         // (`\fontdimen`: the null font's, tex.web 552; a loaded font's are
         // defined by its `\font`)
         Key::DimenPar(p) => Val::Int(p.initial()),
@@ -711,7 +781,13 @@ pub fn initial(key: &Key, _font: &Arc<Font>, etex: bool, cs: Option<&CsTable>) -
         | Key::FontCopies(_)
         | Key::Ended
         | Key::MagSet
-        | Key::Interaction => Val::Int(0),
+        | Key::Interaction
+        | Key::NativeDir(_)
+        | Key::InputEncoding
+        | Key::DefaultEncoding
+        | Key::PdfLast(_)
+        | Key::PdfSeed
+        | Key::PdfClock => Val::Int(0),
         Key::GluePar(_) | Key::Skip(_) | Key::Muskip(_) => Val::Glue(Arc::new(Glue::default())),
         Key::Box(_)
         | Key::File(_)
@@ -728,12 +804,11 @@ pub fn initial(key: &Key, _font: &Arc<Font>, etex: bool, cs: Option<&CsTable>) -
         Key::Job => Val::Name(Arc::from("texput")),
         Key::SplitMarks => Val::SplitMarks(Arc::from(Vec::new())),
         // (and no `\pdffontattr` text)
-        Key::Format | Key::FontAttr(_) | Key::LastMatch(0) | Key::PdfDate => Val::Name(Arc::from("")),
+        Key::Format | Key::FontAttr(_) | Key::LastMatch(0) | Key::LinebreakLocale | Key::PdfDate => Val::Name(Arc::from("")),
         // (above, 0: the job not ended; no magnification fixed yet; batch
         // mode, as the oracles run TeX: `-interaction=batchmode`; a build
         // gives its own, `Build::set_interaction`: IniTeX's
         // `error_stop_mode` is 3)
-        Key::PdfLast(_) | Key::PdfSeed | Key::PdfClock => Val::Int(0),
         Key::MainDepth => Val::Int(crate::page::IGNORE_DEPTH),
         Key::ETeXMode => Val::Int(i32::from(etex)),
         Key::Patterns(_) => Val::Patterns(crate::hyph::Patterns::new()),
@@ -820,9 +895,14 @@ pub(crate) fn every_key() -> Vec<Key> {
         Key::FontCode(crate::micro::EF, f.clone()),
         Key::FontExpand(f.clone()),
         Key::FontAttr(f.clone()),
-        Key::FontCopies(f),
+        Key::FontCopies(f.clone()),
         Key::LastMatch(0),
         Key::ParToken,
+        Key::InterChar(0, 1),
+        Key::NativeDir(f.clone()),
+        Key::InputEncoding,
+        Key::DefaultEncoding,
+        Key::LinebreakLocale,
         Key::PdfLast(1),
         Key::PdfAns(0, 0, 1, 0),
         Key::PdfRandom,
@@ -888,12 +968,17 @@ pub(crate) fn key_index(k: &Key) -> usize {
         Key::FontCopies(_) => 49,
         Key::LastMatch(_) => 50,
         Key::ParToken => 51,
-        Key::PdfLast(_) => 52,
-        Key::PdfAns(..) => 53,
-        Key::PdfRandom => 54,
-        Key::PdfSeed => 55,
-        Key::PdfClock => 56,
-        Key::PdfDate => 57,
+        Key::InterChar(..) => 52,
+        Key::NativeDir(_) => 53,
+        Key::InputEncoding => 54,
+        Key::DefaultEncoding => 55,
+        Key::LinebreakLocale => 56,
+        Key::PdfLast(_) => 57,
+        Key::PdfAns(..) => 58,
+        Key::PdfRandom => 59,
+        Key::PdfSeed => 60,
+        Key::PdfClock => 61,
+        Key::PdfDate => 62,
     }
 }
 

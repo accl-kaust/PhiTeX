@@ -1167,6 +1167,8 @@ impl W<'_> {
         match w {
             Whatsit::Special(s) => self.special(s),
             Whatsit::Pdf(p) => self.pdf_whatsit(p, this, x, y, vlist),
+            // (XeTeX's, as pdfTeX's)
+            Whatsit::SavePos => self.pdf_whatsit(&What::SavePos, this, x, y, vlist),
             Whatsit::Open { .. } | Whatsit::Write { .. } | Whatsit::Close { .. } => {
                 self.io = true;
                 if !self.doing_leaders {

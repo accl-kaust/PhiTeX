@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use super::Exec;
 use super::scan::{mult_and_add, nx_plus_y, x_over_n};
-use crate::val::{Code, Glue, IntPar, Key, Macro, Mat, Meaning, Prim, Reg, Shorthand, Tok, Val};
+use crate::val::{Code, Glue, IntPar, Key, Macro, Mat, Meaning, Prim, Reg, Shorthand, Tok, Val, Xe};
 
 /// Whether a command takes prefixes: an assignment (tex.web 1210,
 /// `max_non_prefixed_command`).
@@ -55,6 +55,7 @@ pub(super) fn prefixable(m: &Meaning) -> bool {
             | Prim::Mat(Mat::SetBox | Mat::FontInt(_))
             | Prim::HyphData(_)
             | Prim::PdfFont(2 | 3)
+            | Prim::Xe(Xe::DefCode(_) | Xe::MathCharDef(_) | Xe::InterCharToks)
         ) | Meaning::CountRef(_)
             | Meaning::DimenRef(_)
             | Meaning::SkipRef(_)
@@ -127,6 +128,9 @@ impl Exec<'_> {
                 Prim::Let | Prim::Futurelet => self.let_(*p == Prim::Futurelet, global),
                 Prim::Shorthand(s) => self.shorthand(s, global),
                 Prim::Code(c) => self.code_assign(c, global),
+                Prim::Xe(Xe::DefCode(k)) => self.xe_def_code(k, global),
+                Prim::Xe(Xe::MathCharDef(full)) => self.xe_math_char_def(full, global),
+                Prim::Xe(Xe::InterCharToks) => self.xe_interchar_assign(global),
                 Prim::IntPar(q) => {
                     self.optional_equals();
                     let v = self.scan_int();
@@ -206,7 +210,7 @@ impl Exec<'_> {
                 Prim::Font => self.new_font(global),
                 Prim::DefFamily(size) => {
                     // (tex.web 1234)
-                    let fam = self.scan_four_bit_int() as u8;
+                    let fam = self.scan_fam_num();
                     self.optional_equals();
                     let f = self.scan_font_ident();
                     self.assign(Key::FamFont(size, fam), Val::Font(f), global);
@@ -405,7 +409,10 @@ impl Exec<'_> {
         self.define(key.clone(), Val::Meaning(Meaning::Prim(Prim::Relax)), global);
         self.optional_equals();
         let m = match s {
-            Shorthand::Char => Meaning::CharGiven(self.scan_char_num() as u32),
+            Shorthand::Char => {
+                let c = if self.xetex { self.scan_usv_num() } else { self.scan_char_num() };
+                Meaning::CharGiven(c as u32)
+            }
             Shorthand::MathChar => Meaning::MathCharGiven(self.scan_fifteen_bit_int() as u32),
             _ => {
                 let n = self.scan_eight_bit_int();
@@ -423,13 +430,15 @@ impl Exec<'_> {
 
     /// `\catcode` and the other code tables (tex.web 1232).
     fn code_assign(&mut self, c: Code, global: bool) {
-        let n = self.scan_char_num();
-        let ch = char::from_u32(n as u32).unwrap_or('\0');
+        // (XeTeX: any Unicode scalar value, xetex.web's `def_code`)
+        let n = self.scan_code_char();
+        let ch = super::xetex::usv(n);
         self.optional_equals();
         let mut v = self.scan_int();
         let max = match c {
             Code::Cat => 15,
             Code::Math => 0o100_000,
+            Code::Lc | Code::Uc if self.xetex => 0x10_FFFF,
             Code::Lc | Code::Uc => 255,
             Code::Sf => 0o77777,
             Code::Del => 0o77_777_777,
@@ -441,12 +450,15 @@ impl Exec<'_> {
             ));
             v = 0;
         }
+        if self.xetex {
+            v = self.xe_code_in(c, ch, v);
+        }
         let val = if c == Code::Cat { Val::Cat(v as u8) } else { Val::Int(v) };
         self.assign(Self::code_key(c, ch), val, global);
     }
 
     /// A token list assignment (tex.web 1226-1227).
-    fn toks_assign(&mut self, key: Key, output: bool, global: bool) {
+    pub(super) fn toks_assign(&mut self, key: Key, output: bool, global: bool) {
         self.optional_equals();
         let Some((t, m)) = self.nonblank_nonrelax() else {
             return;

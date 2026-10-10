@@ -395,6 +395,22 @@ pub struct HyphParams {
     pub tables: Vec<(u8, Patterns, Exceptions)>,
     /// `\tracinglostchars > 0` (a missing hyphen character is reported).
     pub lost_chars: bool,
+    /// XeTeX: the `\lccode` of each character native words have, sorted
+    /// (any Unicode value), and `max_hyphenatable_length`
+    /// (`\XeTeXhyphenatablelength`, at most 4095; TeX's 63).
+    pub lc_wide: Vec<(char, u32)>,
+    pub max_len: usize,
+}
+
+impl HyphParams {
+    /// The `\lccode` of `c` in a native word.
+    fn lc_of(&self, c: u32) -> u32 {
+        let Some(ch) = char::from_u32(c) else { return 0 };
+        match self.lc_wide.binary_search_by_key(&ch, |x| x.0) {
+            Ok(i) => self.lc_wide[i].1,
+            Err(_) => 0,
+        }
+    }
 }
 
 /// `cur_lang`, `l_hyf`, `r_hyf` (§892): the language whatsits change them
@@ -444,14 +460,29 @@ pub fn hyphenate_after(items: &[Item], cur_p: usize, st: &mut LangState, p: &Hyp
                 };
                 (c, &l.font)
             }
-            // (§896: and any other whatsit is passed)
-            Item::Kern { sub: 0, .. } | Item::Whatsit(_) => {
+            // (§896: and any other whatsit is passed; XeTeX's glyphs and
+            // pictures too)
+            Item::Kern { sub: 0, .. } | Item::Whatsit(_) | Item::Glyph(_) | Item::Pic(_) => {
                 prev_s = s;
                 s += 1;
                 continue;
             }
             Item::Lang { lang, lhm, rhm } => {
                 *st = LangState { lang: *lang, lhm: *lhm, rhm: *rhm };
+                prev_s = s;
+                s += 1;
+                continue;
+            }
+            // (xetex.web: a native word with a letter is `ha` itself; one
+            // without is passed)
+            Item::Native(nw) => {
+                let first = crate::native::chars_of(&nw.text).into_iter().find(|&c| p.lc_of(c) != 0);
+                if let Some(c) = first {
+                    if p.lc_of(c) == c || p.uc_hyph {
+                        return hyphenate_native(items, s, *st, p);
+                    }
+                    return None;
+                }
                 prev_s = s;
                 s += 1;
                 continue;
@@ -625,6 +656,134 @@ pub fn hyphenate_after(items: &[Item], cur_p: usize, st: &mut LangState, p: &Hyp
     let out = w.reconstitute_word(j, hn, hyf_bchar);
     Some(Hyphenated { start, end: hb + 1, items: out, missing: w.missing })
 }
+
+/// xetex.web §945–§946, §956–§957: the native word `items[ha]`
+/// hyphenated. Its letters (the first run of characters with nonzero
+/// `\lccode`) are split from what is before and after them (a split stays
+/// even where no hyphen is found, as XeTeX's does), then cut at each
+/// hyphen into words with a discretionary holding the hyphen character
+/// between them. The parts are shaped with the word's own direction
+/// (CORE.md: `Key::NativeDir` is read where the word was made, never
+/// again).
+fn hyphenate_native(items: &[Item], ha: usize, st: LangState, p: &HyphParams) -> Option<Hyphenated> {
+    let Item::Native(w0) = &items[ha] else { return None };
+    let hf = w0.font.clone();
+    let hyf_char = p.hyphen_chars.iter().find(|(k, _)| **k == *hf.key).map_or(-1, |(_, h)| *h);
+    if !(0..=65535).contains(&hyf_char) {
+        return None;
+    }
+    let (l_hyf, r_hyf) = (usize::from(st.lhm), usize::from(st.rhm));
+    if l_hyf + r_hyf > p.max_len {
+        return None;
+    }
+    // (§945: what follows the word permits hyphenation)
+    let mut s = ha + 1;
+    loop {
+        match items.get(s)? {
+            Item::Char(..) | Item::Lig(_) | Item::Kern { sub: 0, .. } => {}
+            Item::Kern { .. }
+            | Item::Whatsit(_)
+            | Item::Native(_)
+            | Item::Glyph(_)
+            | Item::Pic(_)
+            | Item::Lang { .. }
+            | Item::Glue { .. }
+            | Item::Leaders(_)
+            | Item::Penalty(_)
+            | Item::Ins(_)
+            | Item::Adjust(_)
+            | Item::Mark(_)
+            | Item::Marks(..) => break,
+            _ => return None,
+        }
+        s += 1;
+    }
+    // (§946: the letters; what is before them, and after, split off)
+    let mut out: Vec<Item> = Vec::new();
+    let mut word: NativeWordRef = w0.clone();
+    let mut tail: Option<Item> = None;
+    let mut hc: Vec<char> = Vec::new();
+    let mut split = false;
+    'restart: loop {
+        hc.clear();
+        let text = word.text.clone();
+        let mut l = 0usize;
+        while l < text.len() {
+            let c = crate::native::usv_at(&text, l);
+            let n = if c >= 0x1_0000 { 2 } else { 1 };
+            let lc = p.lc_of(c);
+            if lc == 0 {
+                if !hc.is_empty() {
+                    tail = Some(Item::Native(Arc::new(word.part(&text[l..]))));
+                    word = Arc::new(word.part(&text[..l]));
+                    split = true;
+                    break;
+                }
+            } else if hc.is_empty() && l > 0 {
+                out.push(Item::Native(Arc::new(word.part(&text[..l]))));
+                word = Arc::new(word.part(&text[l..]));
+                split = true;
+                continue 'restart;
+            } else if hc.len() >= p.max_len {
+                break;
+            } else {
+                // (an astral letter is two units: CORE.md, a gap)
+                hc.push(char::from_u32(lc).unwrap_or('\0'));
+                if n == 2 {
+                    hc.push('\0');
+                }
+            }
+            l += n;
+        }
+        break;
+    }
+    let hn = hc.len();
+    let finish = |out: &mut Vec<Item>, mid: Vec<Item>, tail: Option<Item>| {
+        out.extend(mid);
+        out.extend(tail);
+    };
+    let tables = p.tables.iter().find(|(l, ..)| *l == st.lang);
+    let at = match tables {
+        Some((_, pats, excs)) if hn >= l_hyf + r_hyf && !(pats.is_empty() && excs.is_empty()) => {
+            hyphenate(&hc, |c| c, i32::from(st.lhm), i32::from(st.rhm), pats, excs)
+        }
+        _ => Vec::new(),
+    };
+    if at.is_empty() {
+        if !split {
+            return None;
+        }
+        finish(&mut out, vec![Item::Native(word)], tail);
+        return Some(Hyphenated { start: ha, end: ha + 1, items: out, missing: Vec::new() });
+    }
+    // (§957: the word cut at each hyphen)
+    let mut missing = Vec::new();
+    let text = word.text.clone();
+    let hyphen = {
+        let units = crate::native::mapped(&hf, hyf_char as u32);
+        if p.lost_chars {
+            for c in crate::native::chars_of(&units) {
+                if !crate::native::has_char(&hf, c) {
+                    missing.push((hf.clone(), c as i32));
+                }
+            }
+        }
+        Item::Native(Arc::new(word.part(&units)))
+    };
+    let mut mid = Vec::new();
+    let mut passed = 0usize;
+    for j in at {
+        mid.push(Item::Native(Arc::new(word.part(&text[passed..j]))));
+        mid.push(Item::Disc(Arc::new(Disc { pre: vec![hyphen.clone()], post: Vec::new(), replace: 0 })));
+        passed = j;
+    }
+    mid.push(Item::Native(Arc::new(word.part(&text[passed..]))));
+    finish(&mut out, mid, tail);
+    Some(Hyphenated { start: ha, end: ha + 1, items: out, missing })
+}
+
+/// A native word, shared.
+type NativeWordRef = Arc<crate::native::NativeWord>;
 
 /// §900, §905: the word being reconstituted.
 struct Word {

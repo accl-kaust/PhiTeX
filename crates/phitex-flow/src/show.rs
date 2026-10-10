@@ -449,6 +449,22 @@ impl Shower<'_> {
                 self.sub('.', l);
             }
             Item::Whatsit(w) => self.whatsit(w),
+            // (xetex.web's `print_native_word`, glyph and picture nodes)
+            Item::Native(w) => {
+                self.cx.font_ident(self.out, &w.font);
+                self.out.push(' ');
+                self.out.push_str(&crate::native::text_of(&w.text));
+            }
+            Item::Glyph(g) => {
+                self.cx.font_ident(self.out, &g.font);
+                let _ = write!(self.out, " glyph#{}", g.gid);
+            }
+            Item::Pic(p) => {
+                self.cx.esc(self.out, if p.pdf { "XeTeXpdffile" } else { "XeTeXpicfile" });
+                self.out.push_str(" \"");
+                self.out.push_str(&String::from_utf8_lossy(&p.path));
+                self.out.push('"');
+            }
             Item::Marks(n, t) => {
                 // (etex.web §196: the class after `\marks`)
                 self.cx.esc(self.out, "marks");
@@ -492,6 +508,7 @@ impl Shower<'_> {
                 self.cx.esc(self.out, "special");
                 self.mark_text(s);
             }
+            Whatsit::SavePos => self.cx.esc(self.out, "pdfsavepos"),
             Whatsit::Pdf(p) => self.pdf_whatsit(p),
         }
     }
@@ -660,17 +677,20 @@ impl Shower<'_> {
 
 impl Shower<'_> {
     /// §690: `print_fam_and_char`.
-    fn fam_and_char(&mut self, fam: u8, ch: u8) {
+    fn fam_and_char(&mut self, fam: u8, ch: u32) {
         self.cx.esc(self.out, "fam");
         let _ = write!(self.out, "{fam} ");
-        print_ascii(self.out, ch);
+        match u8::try_from(ch) {
+            Ok(c) => print_ascii(self.out, c),
+            Err(_) => self.out.push(char::from_u32(ch).unwrap_or('?')),
+        }
     }
 
     /// §691: `print_delimiter`.
     fn delimiter(&mut self, d: Delim) {
-        let a = (i32::from(d.small_fam) * 256 + i32::from(d.small_char)) * 0x1000
-            + i32::from(d.large_fam) * 256
-            + i32::from(d.large_char);
+        let a = (i64::from(d.small_fam) * 256 + i64::from(d.small_char)) * 0x1000
+            + i64::from(d.large_fam) * 256
+            + i64::from(d.large_char);
         let _ = write!(self.out, "\"{a:X}");
     }
 
@@ -769,7 +789,7 @@ impl Shower<'_> {
                 self.cx.esc(self.out, name);
                 match &n.kind {
                     NK::Radical(d) | NK::Left(d) | NK::Right(d, _) => self.delimiter(*d),
-                    NK::Accent { fam, ch } => self.fam_and_char(*fam, *ch),
+                    NK::Accent { fam, ch, .. } => self.fam_and_char(*fam, *ch),
                     NK::Op(Limits::Limits) => self.cx.esc(self.out, "limits"),
                     NK::Op(Limits::NoLimits) => self.cx.esc(self.out, "nolimits"),
                     _ => {}

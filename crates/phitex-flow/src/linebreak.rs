@@ -142,8 +142,9 @@ fn widths(it: &Item) -> W {
         Item::Char(..) | Item::Lig(_) | Item::Box(_) | Item::Rule { .. } | Item::Kern { .. } | Item::Math { .. } => {
             w[0] = i64::from(it.width());
         }
-        // (pdfTeX: an image's or a form's reference has a width, §1586)
-        Item::Whatsit(_) => w[0] = i64::from(it.width()),
+        // (pdfTeX: an image's or a form's reference has a width, §1586;
+        // xetex.web: native words, glyphs and pictures have widths)
+        Item::Whatsit(_) | Item::Native(_) | Item::Glyph(_) | Item::Pic(_) => w[0] = i64::from(it.width()),
         _ => {}
     }
     w

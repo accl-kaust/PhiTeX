@@ -19,6 +19,8 @@ use phitex_flow::tfm::{Kpse as _, KpseFormat};
 pub enum Output {
     Dvi,
     Pdf,
+    /// XeTeX's `-no-pdf`: the XDV file, not given to xdvipdfmx.
+    Xdv,
 }
 
 impl Output {
@@ -26,6 +28,7 @@ impl Output {
         match self {
             Output::Dvi => "dvi",
             Output::Pdf => "pdf",
+            Output::Xdv => "xdv",
         }
     }
 }
@@ -44,17 +47,23 @@ pub struct Engine {
     pub kpse_engine: &'static str,
     /// What the format writes.
     pub output: Output,
+    /// XeTeX: native fonts, XDV pages given to xdvipdfmx (in process).
+    pub xetex: bool,
 }
 
 /// fmtutil.cnf: `tex tex - tex.ini`, `etex pdftex language.def … *etex.ini`,
 /// `pdftex pdftex language.def … *pdfetex.ini`, `latex pdftex language.dat
-/// … *latex.ini`, `pdflatex pdftex language.dat … *pdflatex.ini`.
-const ENGINES: [Engine; 5] = [
-    Engine { name: "tex", ini: "tex.ini", etex: false, kpse_engine: "tex", output: Output::Dvi },
-    Engine { name: "etex", ini: "etex.ini", etex: true, kpse_engine: "pdftex", output: Output::Dvi },
-    Engine { name: "pdftex", ini: "pdfetex.ini", etex: true, kpse_engine: "pdftex", output: Output::Pdf },
-    Engine { name: "latex", ini: "latex.ini", etex: true, kpse_engine: "pdftex", output: Output::Dvi },
-    Engine { name: "pdflatex", ini: "pdflatex.ini", etex: true, kpse_engine: "pdftex", output: Output::Pdf },
+/// … *latex.ini`, `pdflatex pdftex language.dat … *pdflatex.ini`,
+/// `xetex xetex language.def -etex xetex.ini`, `xelatex xetex
+/// language.dat -etex xelatex.ini`.
+const ENGINES: [Engine; 7] = [
+    Engine { name: "tex", ini: "tex.ini", etex: false, kpse_engine: "tex", output: Output::Dvi, xetex: false },
+    Engine { name: "etex", ini: "etex.ini", etex: true, kpse_engine: "pdftex", output: Output::Dvi, xetex: false },
+    Engine { name: "pdftex", ini: "pdfetex.ini", etex: true, kpse_engine: "pdftex", output: Output::Pdf, xetex: false },
+    Engine { name: "latex", ini: "latex.ini", etex: true, kpse_engine: "pdftex", output: Output::Dvi, xetex: false },
+    Engine { name: "pdflatex", ini: "pdflatex.ini", etex: true, kpse_engine: "pdftex", output: Output::Pdf, xetex: false },
+    Engine { name: "xetex", ini: "xetex.ini", etex: true, kpse_engine: "xetex", output: Output::Pdf, xetex: true },
+    Engine { name: "xelatex", ini: "xelatex.ini", etex: true, kpse_engine: "xetex", output: Output::Pdf, xetex: true },
 ];
 
 /// The engine a program name (or a magic comment's, `phitex.toml`'s
@@ -62,10 +71,6 @@ const ENGINES: [Engine; 5] = [
 pub fn engine(name: &str) -> Result<Engine, String> {
     let n = name.trim().to_ascii_lowercase();
     match n.as_str() {
-        "xetex" | "xelatex" | "xelatex-dev" => Err(format!(
-            "{n}: XeTeX on phitex-flow is not there yet (it is agent X's slice); \
-             pdflatex, latex, pdftex, etex and tex are"
-        )),
         "luatex" | "lualatex" | "luahbtex" | "lualatex-dev" | "dvilualatex" => Err(format!(
             "{n} is not on the graph: `phitex build --engine {n}` runs the system's {n} as an external \
              process (not incremental)"
@@ -87,6 +92,13 @@ impl Engine {
     pub fn with_output(self, out: Output) -> Result<Engine, String> {
         if self.output == out {
             return Ok(self);
+        }
+        // (XeTeX's formats write PDF, or with `-no-pdf` the XDV file)
+        if self.xetex {
+            return match out {
+                Output::Xdv | Output::Pdf => Ok(Engine { output: out, ..self }),
+                Output::Dvi => Err(format!("{} writes XDV or PDF, not DVI", self.name)),
+            };
         }
         match (self.name, out) {
             ("latex", Output::Pdf) => engine("pdflatex"),
@@ -260,7 +272,10 @@ mod tests {
         assert_eq!(engine("latex").unwrap().with_output(Output::Pdf).unwrap().name, "pdflatex");
         assert_eq!(engine("pdftex").unwrap().with_output(Output::Dvi).unwrap().name, "etex");
         assert!(engine("tex").unwrap().with_output(Output::Pdf).is_err());
-        assert!(engine("xelatex").unwrap_err().contains("agent X"));
+        let x = engine("XeLaTeX").unwrap();
+        assert!(x.xetex && x.ini == "xelatex.ini" && x.output == Output::Pdf);
+        assert_eq!(x.with_output(Output::Xdv).unwrap().output.ext(), "xdv");
+        assert!(x.with_output(Output::Dvi).is_err());
         assert!(engine("foo").is_err());
     }
 

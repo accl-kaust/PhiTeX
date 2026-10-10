@@ -64,6 +64,11 @@ impl Fixpoint {
     /// file on disk from an earlier job), so a first run can be stable.
     pub fn run_reading(&mut self, b: &mut Build, src: &str, opts: Options, read: &dyn Fn(&str) -> Option<String>) -> Run {
         let out = b.update(src, opts);
+        // (XeTeX writes UTF-8: a file's bytes, and what a build reads of
+        // them, a character per byte)
+        let xetex = b.xetex();
+        let bytes = |t: &str| if xetex { t.as_bytes().to_vec() } else { bytes(t) };
+        let as_read = |t: &str| -> String { if xetex { t.bytes().map(char::from).collect() } else { t.to_owned() } };
         let empty = Vec::new();
         let prev = self.prev.as_ref().unwrap_or(&empty);
         let mut changed: Vec<String> = out
@@ -71,7 +76,7 @@ impl Fixpoint {
             .iter()
             .filter(|(n, t)| match prev.iter().find(|(m, _)| m == n) {
                 Some((_, u)) => u != t,
-                None => read(n).as_deref() != Some(t.as_str()),
+                None => read(n).as_deref() != Some(as_read(t).as_str()),
             })
             .map(|(n, _)| n.clone())
             .collect();

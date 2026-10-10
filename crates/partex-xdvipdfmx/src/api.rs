@@ -234,6 +234,9 @@ impl Session {
         {
             crate::fatal!("tpic and MetaPost options are not supported");
         }
+        // (main: the `D` option's distiller, for EPS pictures)
+        let filter_template = d.session.filter_template.clone();
+        d.set_distiller_template(filter_template.as_deref());
         // do_dvi_pages
         d.spc_exec_at_begin_document()?;
         self.init_paper_width = d.session.paper_width;

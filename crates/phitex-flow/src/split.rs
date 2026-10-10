@@ -60,6 +60,11 @@ pub fn vert_break(list: &mut [Item], h: i32, d: i32) -> (usize, bool) {
                     ah[1] = ah[1].wrapping_add(prev_dp).wrapping_add(wh);
                     prev_dp = wd;
                 }
+                // (xetex.web: a picture's height and depth count)
+                Item::Pic(pc) => {
+                    ah[1] = ah[1].wrapping_add(prev_dp).wrapping_add(pc.h);
+                    prev_dp = pc.d;
+                }
                 Item::Kern { .. } => {
                     if list.get(i + 1).is_some_and(Item::is_glue) {
                         pi = Some(0);

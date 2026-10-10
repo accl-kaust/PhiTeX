@@ -14,7 +14,8 @@
 //! scheduler picks. A cold build is an edit from nothing.
 //!
 //! Depends on no `partex-*` crate but the pure libraries `tests/wall.rs`
-//! lists (partex-kpse: kpathsea, the build's file finder).
+//! lists (partex-kpse: kpathsea, the build's file finder; partex-otf:
+//! OpenType, and partex-xdvipdfmx: XDV to PDF, for XeTeX).
 
 #![allow(
     clippy::missing_panics_doc,
@@ -49,8 +50,12 @@ pub mod page;
 pub mod pdf;
 pub mod graph;
 pub mod hyph;
+pub mod icu_linebreak;
+#[rustfmt::skip]
+pub mod icu_tables;
 pub mod logs;
 pub mod mlist;
+pub mod native;
 pub mod pack;
 pub mod prim;
 pub mod print;
@@ -59,6 +64,7 @@ pub mod show;
 pub mod split;
 pub mod tfm;
 pub mod val;
+pub mod xpic;
 
 pub use build::{Build, Options, Order, Output, Reads, Stats};
 pub use tfm::Font;

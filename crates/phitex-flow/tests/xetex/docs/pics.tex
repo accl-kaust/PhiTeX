@@ -1,0 +1,21 @@
+\documentclass{article}
+\usepackage{graphicx}
+\begin{document}
+Text before \includegraphics[width=3cm]{example-image.png} and after.
+
+\includegraphics[height=2cm]{example-image-a.jpg}
+\includegraphics[scale=0.3]{example-image.pdf}
+\includegraphics[width=4cm,angle=30]{example-image-a4.pdf}
+
+\begin{figure}[ht]
+  \centering
+  \includegraphics[width=0.5\textwidth]{xpic-plain.png}
+  \caption{A PNG}\label{fig:a}
+\end{figure}
+
+\includegraphics[page=2]{xpic-three.pdf}
+\includegraphics[page=3,trim=10 10 10 10,clip]{xpic-three.pdf}
+\includegraphics[width=2cm,height=3cm,keepaspectratio]{xpic-jfif200.jpg}
+
+See figure~\ref{fig:a} on page~\pageref{fig:a}.
+\end{document}

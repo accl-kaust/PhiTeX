@@ -235,7 +235,7 @@ impl Exec<'_> {
     /// reader's (`Exec::text_token`).
     fn push_source(&mut self, text: Arc<[char]>, kind: TextKind) {
         let at = self.st.pending.len();
-        let x = PendingText { text, at, pos: 0, tstate: TState::N, eol: EOL_UNREAD, eof: false, kind, endinput: false };
+        let x = PendingText { text, at, pos: 0, tstate: TState::N, eol: EOL_UNREAD, enc: 0, eof: false, kind, endinput: false };
         self.st.texts.push(x);
     }
 
@@ -586,7 +586,7 @@ impl Exec<'_> {
                     let text = self.expand_write(toks);
                     s.push_str(&io_event('w', *stream, &text));
                 }
-                Whatsit::Special(_) | Whatsit::Pdf(_) => {}
+                Whatsit::Special(_) | Whatsit::Pdf(_) | Whatsit::SavePos => {}
             }
         }
         self.pdf_pos = None;

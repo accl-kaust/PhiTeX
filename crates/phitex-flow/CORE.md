@@ -2490,6 +2490,25 @@ for a 7K-node piece: A's). The first fonts are not it: a TFM load is
 about 1M Ir; kpathsea's `texmf.cnf` is 92M once a process. Tried and
 dropped: the output routine's merges of definitions by a map (job 8034,
 within 0.1%).
+13. *`next_raw0` inlined into `next_raw`* (`#[inline(always)]`; a plain
+   `#[inline]` was not taken, job 8047), its `\noexpand` case out of line
+   (`Exec::marked`): one call a token less (235M on `latex.ltx`). Ir
+   (job 8059): `latex.ltx` -0.7%, the documents -0.2% to -0.6%. What is
+   left in the reader is the walk of the pending lists: `next_raw0`'s
+   94 Ir a token.
+
+The pending lists' own cost (job 8059, `latex.ltx`): 53M lists pushed
+(`back` 26.2M, a macro's body 24.7M, `rewrite` 2.4M) and as many
+popped; a push about 90 Ir (a `PCell` for the level below), a pop about
+165 (`Arc::try_unwrap`, the level moved out, the frees): 13.7G, 8%. Half
+are `back`'s one-token lists. Declined, as they change the input
+stack's depth, which is TeX's meaning here (`input_stack_size` is
+enforced: TRIP's 200, TeX Live's 10000, its overflow fatal at the same
+place as TeX's; the depth floor and `end_read_lists` read it): `back`
+rewinding the top list when the token it backs is the one just read
+from it, and a coarser level for a run of backed tokens. The persistent
+`Arc<PCell>` stack (shared with the nodes' snapshots) stays: the 8% is
+the price of an exact input stack.
 
 Upstream between the two stacks: flow through 96bdfcc (`pop_cond`'s
 set, B's tikz fix) moved 99ff426's numbers by 0% to -1.2% (the
@@ -2508,14 +2527,20 @@ after flow f56da28 the long read lists are few).
 **After 1-8** (callgrind Ir, exact, the cluster image's TeX Live; base
 and 1-6 job 7857, 7-8 job 7892; the same DVIs at every step):
 
-| document | base 9fa4ccf | after 1-6 (99ff426) | after 1-8 (4aca73b's code) | TeX |
-|---|---|---|---|---|
-| big2 | 5.121G | 4.694G | 4.717G | `tex -ini` 0.653G (7.2x) |
-| plain story, DVI | 0.414G | 0.322G | 0.322G | `tex -ini` 0.224G (1.4x) |
-| plain story, PDF | 0.592G | 0.462G | 0.462G | `pdftex -ini` 0.796G (0.58x) |
-| sections on the format | 1.693G | 1.366G | 1.308G | `latex` 0.622G, of which 0.481G loading the format (2.1x) |
-| titlepage on the format | 2.309G | 1.985G | 1.926G | `latex` 0.633G (3.0x) |
-| `latex.ltx` | 240.3G | 229.1G | 200.8G | `etex -ini` 71.2G (2.8x) |
+| document | base 9fa4ccf | after 1-6 (99ff426) | after 1-8 (4aca73b's code) | now (12145980: flow 09b454f0, 1-13; job 8059) | TeX |
+|---|---|---|---|---|---|
+| big2 | 5.121G | 4.694G | 4.717G | 5.436G | `tex -ini` 0.653G (8.3x) |
+| plain story, DVI | 0.414G | 0.322G | 0.322G | 0.222G | `tex -ini` 0.224G (0.99x) |
+| plain story, PDF | 0.592G | 0.462G | 0.462G | 0.357G | `pdftex -ini` 0.796G (0.45x) |
+| sections on the format | 1.693G | 1.366G | 1.308G | 1.354G | `latex` 0.622G, of which 0.481G loading the format (2.2x) |
+| titlepage on the format | 2.309G | 1.985G | 1.926G | 2.165G | `latex` 0.633G (3.4x) |
+| `latex.ltx` | 240.3G | 229.1G | 200.8G | 172.9G | `etex -ini` 71.2G (2.4x) |
+
+The last column has upstream's changes too: the kpathsea finder (the
+plain documents' TFM walk gone), and between 4aca73b and 09b454f0 flow's
+own work moved big2, sections and titlepage up (reruns of the format's
+documents; the tripos fix 90113ce brought figures and tables back from
+8x) and `latex.ltx` down (177.8G on 9c2c4ab before 10-13).
 
 Wall time (bash `time`, 3 runs, median, 4 CPUs of a shared node, job
 7817, the stack through 6 with the dropped items in it: noisy, the
@@ -2530,6 +2555,109 @@ self cost) the input lists and argument scanning lead (`Cursor::next`
 by `Key` (`Key::cmp` 5.1% and the sort about 3.5%: a piece's reads and
 exports, once per run, over 171k names; 7 removes most of the reads'
 part), `tok_meaning` 2.2%.
+
+## Parallelism (agent S, 2026-10-10)
+
+Measured on accl (64 cores, 2 hardware threads each; a job's `-c N` is N
+hardware threads), release build, cold builds, `Reads::Suspend` (the
+CLI's cold build). `PHITEX_SCHED=FILE` writes the scheduler's events of
+every round (each run's setup, reading, install validation, lock wait and
+hold, nodes and outcome; parks; idle waits; picks with the pieces ready;
+the settled runs that change the sequence; every wait for the scheduler's
+lock); `perf-in/sched.py FILE` reports them per round.
+
+**Hardware first.** Measure pinned to physical cores
+(`perf-in/hw.sh`: `sched_setaffinity`, one hardware thread per core or
+two), with N independent `-j 1` processes side by side as the control
+(job 7919, harrier): eight big2 processes read 772 → 790 ms each, so the
+hardware alone costs nothing up to eight cores; unpinned on a busy node
+with siblings (job 7914) the same build's reading looked 3.7x dearer. A
+thread count above the physical cores buys nothing today: big2 at `-j 8`
+on 4 cores with their siblings takes 183 ms (round 1), on 8 cores 194 ms.
+The CLI's default thread count should be the physical cores, not the
+logical CPUs.
+
+**The first wall: the scheduler's lock (big2).** big2 (2401 pieces of 83
+commands), pinned, round 1: 758.6 / 429 / 227 / 194 ms at `-j` 1 / 2 / 4
+/ 8; the whole cold build 930-966 / 606 / 378 / 351 ms, the DVI the same
+at every `-j`. Reading summed over the threads grows only 649 → 839 ms;
+what grows is the one `Mutex<State>`: installs hold it 51.6 / 58.9 /
+60.7 / 115.7 ms in all (21 → 48 µs an install as its lines move between
+cores), at `-j 8` 60% of the round's wall, and threads wait for it 31.8%
+of their time (15% before an install, 16% taking it back after a task).
+Of the time held, the edges (`readers`, one insert per distinct name a
+run read: 382k reads, 2401 installs) are 87%: 45.9 of 52.7 ms at `-j 1`,
+91.6 of 109 ms at `-j 8` (job 7925); validation again 0.2, exports 3.2,
+marks 1.8, entries 1.6 ms at `-j 1`.
+
+**The edges out of the lock** (edaa404; A reviewed): the readers index
+is sharded by name (`Readers`, 64 shards), a run's edges go in after its
+reads are validated and before the scheduler's lock, each shard locked
+once (`run_and_install` states the order and why no mark is lost;
+`edges_outside_the_lock_lose_no_mark`). big2 pinned, before → after (job
+7935, three runs each, the DVI the same): `-j 8` cold 355-368 → 303-307
+ms, round 1 192-202 → 142-144 ms, waits for the lock 32-34% → 4.6-4.9%
+of the threads' time; `-j 2`, `-j 4` the same walls, waits 4.5 → 0.7%, 8
+→ 1.1%. Known cost to revisit: `-j 1` is 2.5-4% slower (923-930 → 946-968
+ms), the inserts sorted by shard and the shard locks.
+
+**LaTeX documents: rounds, the body's chain, per-page reruns** (job
+7930, pinned, `Reads::Suspend`; `perf-in/biglatex.tex` is sections.tex's
+body 40 times, 130 pieces). Walls `-j 1` / `-j 8`: sections 694 / 728
+ms, titlepage 833 / 910, biglatex 5659 / 3992; six rounds each. A round's
+barrier is cheap (layout 0.1-5.7 ms); what it lets run is not. biglatex
+by round (`-j 1` / `-j 8`, ms): R1 1360 / 1613: `\documentclass` (a file
+read) changed the sequence at 5.9 ms, but the round went on until every
+piece settled, so the body ran on the layout before its class was read
+and was thrown away (at `-j 8` serially too: parks 85%); R2 50 / 61 the
+class's pieces; R3 1513 / 1351 the body on the right layout (at `-j 8`
+parks 68%, 1.44 readers at once: each section defines names the next
+reads, counters and `\@currentlabel`, a chain under `Suspend`); R4 1888 /
+438 the output routine's definitions between nodes, every later piece
+run again once per page (piece 129: 23-26 runs, 23 pages); R5-R6 676 /
+479. Fix of R1's waste (A reviewed): a final settled run that changes
+the sequence ends the round at once (`settle`, b06939f); one that is not
+final yet (a fold read unchecked, its entry not holding) holds the pieces
+after it, their runs stopped (`State::due_at`, de0d20cd). Measured by P
+at `-j 1` (flow 67d83701 + these): tikz 58,619 → 2,487 ms (238k commands
+run for 226k, 905 runs, 2 reruns), c0 54,735 → 1,397 ms, the DVIs
+`latex`'s. Format builds no longer run a piece to 2.4M commands and 50
+GB on a layout about to change. What remains for tikz: 65 rounds, one per
+file it discovers (rounds 1-64 2-90 ms each), and the 65th, past the cap
+of 64, reads every further file inline (519 ms).
+Then (A reviewed): the cap counts rounds without progress (`Build::progress`:
+a file placed, a rest of a line, a re-cut, a join, an inline mark not
+placed by an earlier round of the update; 8 in a row, 4096 in all), and
+a change ends the round at once only when its cause is known now: a file
+read as the directories or the build give it, or an `\endinput`, a stop,
+a cut. A file the run itself writes (TRIP's `\input tripos`, written at
+a shipout) is known to the layout only from the round's fold replaying
+the writes; ended at once, every round repeated the same change (65
+rounds, and the capped last round gave another DVI). Now TRIP takes 10
+rounds (12 before). tikz still loops on a join the layout never absorbs
+(piece 2270, the same since flow 90113ce): 8 rounds placing nothing, then
+the last round's loud failure.
+The cap's commit (ede297fa, titled "(wip)" inside the merge c7277c4f)
+was meant to say: the round cap counts rounds without progress
+(`Build::progress`: a file placed, a rest of a line, a re-cut, a join,
+an inline mark no earlier round of the update placed; `MAX_STALLED_ROUNDS`
+8 in a row, `MAX_ROUNDS` 4096 in all; `Stats::forced_last`); test
+`a_file_read_at_twenty_places_needs_no_fallback_round`; tikz: 65 rounds
+then a silent inline last round before, 77 rounds then the loud join
+failure after. The harness is `bench/flow-par/` (its inputs big2.tex,
+tikz.tex and the pgf manual's sources are staged by hand, not committed).
+
+**`latex.ltx` is a true chain.** 31.2 s at `-j 1`, 31.1 s at `-j 8`
+(job 7914). Of its 19-20 rounds one holds 27.3 s, and in it one piece
+holds 96.2% of the commands (2.9M): expl3-code.tex's Unicode-data block
+(`\ior_str_map_inline`), read inside a macro's argument. Each iteration
+reads the next line of the stream (`Key::ReadStream`, defined again per
+line) and defines intarray entries the next ones read: a dependency
+chain, not a granularity problem: no cut, file piece or scheduler policy
+shortens it (AGENTS_BRIEF §6.5: the build is as long as its true chain).
+Amdahl's serial fraction from that round alone is at least 0.88. The
+format is built once and saved (`--dump-fmt`); documents start from it,
+so this is left as is.
 
 ## Found by the CLI (agent W)
 
@@ -3201,6 +3329,131 @@ is a pure function or a fold step, no state shared with the others):
 | images | `pdf/image/mod.rs` (reading, at the node), `pdf/fold/image.rs` (writing) | `\pdfximage` reads the file (`Key::File`) at its node: `image::read_image`, `image::scale` (pdfTeX's `scale_image`); the fold writes JPEG as it is, PNG (`write_png`, IDAT copied or rows through `lib::png`, soft masks, palettes, the transparency group), a PDF page (`write_epdf` through `lib::pdfread`: objects copied, Type 1 fonts the map has replaced by the job's embedding unless `\pdfinclusioncopyfonts`) — done; `\pdfimageapplygamma`, JBIG2 are gaps |
 | links, dests, outlines | `pdf/content.rs` (rectangles), `pdf/fold/marks.rs` | links split per line box at their nesting level and threaded across pages by `WalkState::links`; destinations' duplicates the fold's; outlines, the name tree (`sort_dest_names`, `str_less_str`), threads and beads as pdfTeX writes them — done |
 | reads of the fold | `graph/pdf.rs`, `build.rs` (`PdfKept`, `Given::answer`) | `Key::PdfAns` answered from the last fold, rounds until they hold ("pdfTeX's read-backs" below); A's `ReadRef` may take this over later — the keys are listed there |
+
+## XeTeX on the graph (agent X)
+
+The engine is a given of the build: `Build::set_xetex(fonts)` (the CLI's
+`--xetex [--font-index FILE] [--pdf OUT.pdf]`), with e-TeX's extended mode
+as `Options::etex` says. `fonts` is `tfm::Fonts`: the installed fonts'
+index (partex-otf's `FontIndex`, made by `otf-index` from what fontconfig
+lists with `scripts/xetex/fonts.conf`: TeX Live's `fonts/opentype` and
+`fonts/truetype`, nothing of the system's) and the file finder
+(`tfm::Kpse`: `find(name, format, prog) -> Option<path>`, `read(path)`;
+`kpse::Kpathsea` is TeX Live's kpathsea over partex-kpse, `tfm::DirKpse`
+walks directories).
+Both are givens, never searched for by a node. `tfm::Kpse` is flow's one
+file-finding interface: `Build::set_kpse` takes it for `\input`, and
+xdvipdfmx's finder in `Build::xdv_pdf` (`DocFiles`: the build's memory
+files and input directories, then the build's finder) is one more
+implementation. phitex-cli's `xelatex`/`xetex` (`tex.rs`, `xetex.rs`)
+index the installed fonts as fontconfig lists them (`fc-list` in XeTeX's
+`FcFontList` order, cached under the hash of its output: the one thing
+kpathsea cannot answer) and write `JOB.pdf` through xdvipdfmx in process
+(`-no-pdf`: the XDV file).
+
+Linked (tests/wall.rs allows them): partex-otf (faces, HarfBuzz-equal
+shaping, TECkit mappings, OpenType math tables, `xetex::fontmgr`),
+partex-xdvipdfmx (XDV to PDF, itself on phitex-codecs since W's
+extraction; EPS pictures through dvipdfmx.cfg's `D` distiller, which the
+host runs: `Files::apply_filter`, given as `native::Distiller` with
+`Fonts::with_distiller`, since the library runs no process; the CLI, the
+binary and the tests give `sh -c` on a scratch copy) and
+phitex-codecs (the PDF reader `\XeTeXpdffile` measures
+with). Copied: `icu_tables.rs` (from partex-core), `icu_linebreak.rs` and
+`.bin` (ICU's line-break rules, from partex-core), and `xpic.rs`
+(XeTeX_pic.c's own image readers and poppler's page boxes, as
+partex-engine/src/xpic.rs ported them).
+
+### Construct → graph
+
+| XeTeX construct | On the graph |
+|---|---|
+| 21-bit characters | Rust's `char` everywhere already (Keys are char-keyed); surrogates (no `char`) read as U+FFFD (gap). |
+| The input encodings (`\XeTeXinputencoding`, `\XeTeXdefaultencoding`) | `Key::InputEncoding`/`Key::DefaultEncoding`, global (XeTeX keeps them per file, never local to a group). Texts stay bytes (one `char` each). The tokenizer decodes a byte ≥ 0x80 at `char_at` with the mode the line was begun in (`RState::enc`, read with `\endlinechar` at the line's start: a read like the catcodes). `\scantokens` and terminal texts are `DECODED`. |
+| `^^^^XXXX`, `^^^^^^XXXXXX` | `reduce_sup_xetex` (xetex.web §355). |
+| Codes per code point (`\catcode`… up to "10FFFF) | The same keys. `\mathcode` holds XeTeX's 32 bits (fam<<24 \| class<<21 \| usv; active "1FFFFF). `\the\mathcode` converts back (`xe_code_out`: "Extended mathchar used as mathchar"). The math list reads TeX's 15 bits (`Exec::mathcode`). |
+| `\XeTeXcharclass` | Shares `Key::Sfcode(c)`: class<<16 \| sf. This is right only because XeTeX's own semantics merge them: one eqtb word with two ranges. In xetex.web's `def_code` (~27923–27980), `XeTeX_def_code` for sf_code_base keeps `n:=sf_code mod "10000`, and `def_code` for `\sfcode` keeps `equiv(p) div "10000`. A space factor read masks `& 0xFFFF` (`adjust_space_factor`). |
+| `\XeTeXinterchartoks a b` | `Key::InterChar(a, b)`, a token list. `prev_class`/`space_class` are reader state (`RState::xclass`): a run of characters sets them (begun at the boundary), and the next command in horizontal mode that is not a character's reads them (xetex.web's big switch, `check_for_post_char_toks`). A piece begins at the boundary class: a gap where a piece begins right after a character. The character put back behind a list is marked by the internal `\0xbackedchar` (`backed_up_char`). |
+| `\Umathcode`, `\Umathcodenum`, `\Udelcode`, `\Udelcodenum`, `\Umathchardef`, `\Umathcharnumdef`, `\Umathchar`, `\Umathcharnum`, `\Udelimiter`, `\Uradical`, `\Umathaccent [fixed\|bottom]`, the `\XeTeXmath…` names | XeTeX's 32-bit codes (class 3, fam 8, char 21). A math list's fields are `fam: u8, ch: u32` (`mlist::Field`, `Delim`, `Kind::Accent { sub }`). Families run 0–255 (sizes at 0/256/512, `\textfont n` by `scan_math_fam_int`). A formula reads TeX's 16 families where it ends, and the families past 15 that it uses (`mlist::families`) where it is converted, after its group. That is a gap for a `\textfont n` (n > 15) set inside the formula. TeX's codes are converted to XeTeX's form (`xe_form`), so one path serves both. |
+| Native fonts (`\font\x="Name:features" at s`, `[file]`) | A font is a value: `Font { native: Some(NativeFont { xf, height_base, depth_base, glue, … }) }`. It is loaded by `Env::native_font` (a pure function of name, size and `\XeTeXtracingfonts` through `tfm::Fonts`, memoised for the build, a fresh `FontManager` per load). Its identity is `Font::key_of(canonical name, size)`, as `load_native_font` finds a loaded font again. A quoted name goes native first, an unquoted one TFM first (`read_font_info`). |
+| The shaping state (`hb_buffer`'s last script) | `Key::NativeDir(font)`: a value a node defines (the main loop's `native_word`, global as XeTeX's font engine is) and a later node reads. **Nodes that only measure or hyphenate read the SAME definition the main loop made, never re-derive it.** A word carries the direction it was shaped with (`NativeWord::rtl`), and its parts (hyphenation, hpack's merging) are shaped again with it. |
+| A run of characters in a native font | `main_loop_native`: the run collected (interchar lists, mapping, lost characters), cut at hyphens into words with empty discretionaries, ICU's breaks with `\XeTeXlinebreaklocale` (penalty, `\XeTeXlinebreakskip`). A word joins the previous one (`native_tail`: the tail and the item before it, own emit first, else a read of material, `Kind::Par`) by `Item::Remove(4)` and one merged word. `\XeTeXinterwordspaceshaping` adds a space-adjustment kern. |
+| `Item::Native`, `Item::Glyph`, `Item::Pic` | Items with a box's dimensions (`Item::xdims`): hpack, vpack, line breaking (widths), the page builder and `\vsplit` (pictures). |
+| Hyphenation of a native word | `hyph::hyphenate_native` (xetex.web §945–§957): split at non-letters (the split stays even without a hyphen, as XeTeX's does), patterns on the `\lccode`s (`HyphParams::lc_wide`, any code point), fragments with a discretionary holding the hyphen character; `\XeTeXhyphenatablelength` (`HyphParams::max_len`). |
+| `hpack` | `pack::merge_native` first: fragments of one font joined across empty discretionaries (xetex.web §1409). |
+| Font queries (`\XeTeXcountglyphs`, `\XeTeXOT…`, `\XeTeXcharglyph`, `\XeTeXglyphindex`, `\XeTeXglyphname`, `\XeTeXglyphbounds`, `\fontcharwd`… of a native font, `\iffontchar`) | Pure functions of the font value (`xe_item`, `native_char_dimen`). The AAT and Graphite queries give XeTeX's errors. |
+| `\XeTeXpicfile`, `\XeTeXpdffile` | A value measured from the file's bytes (a read of `Key::File`) and the keywords (`xpic::picture`); `Item::Pic`. |
+| `\XeTeXglyph` | `Item::Glyph`. |
+| `\pdfsavepos` | `Whatsit::SavePos` (`\pdflastxpos`/`ypos` stay 0: gap). |
+| XDV | DVI's fold (`dvi::assemble_as(…, xdv)`): id byte 7, " XeTeX output" comment, `define_native_font` (252, partex-otf's `font_def`), `set_glyphs` (253), `set_text_and_glyphs` (254, `\XeTeXgenerateactualtext`), pictures as `pdf:image matrix … page … (path)` specials. |
+| PDF | `Build::xdv_pdf(xdv)`: partex-xdvipdfmx in process, as `xdvipdfmx -q -E -o JOB.pdf`, its files through the same `Kpse`, zlib's deflate from `pdf::zlib`, dated `SOURCE_DATE_EPOCH` (`Build::set_pdf_date`). |
+| `xelatex.fmt` | `Build::format`: the code tables are definitions, so a wide table is saved sparsely (only what was defined). The new keys are format keys 50–53. A native font cannot be dumped (XeTeX's error). |
+| `\strcmp`, `\filesize`, `\shellescape`, `\ifprimitive`, … (pdfTeX's names XeTeX has) | `XETEX_PRIMITIVES` (95, sorted). `\primitive` is pdfTeX's `\pdfprimitive` (`Prim::PdfPrimitive`, its frozen token `\0pdfprimitive`), `\ifprimitive` is `IfKind::PdfPrimitive`; both find XeTeX's own names too (`primitive_of`). |
+
+### The fonts
+
+The oracle's fontconfig sees TeX Live's `fonts/opentype` and
+`fonts/truetype` (2711 faces on the cluster's TeX Live 2026, Arch;
+`tests/xetex/oracle/fc-list.txt`). The documents use:
+lm/lmroman{6,7,8,9,10,12,17}-regular, lmroman{9,10,12}-bold,
+lmroman{8,10}-italic, lmromancaps10-regular, lmsans{8,10}-regular,
+lmsans10-bold, lmmono10-regular, lm-math/latinmodern-math,
+tex-gyre/texgyrepagella-{regular,bold,italic}, texgyretermes-regular,
+texgyreheros-regular, libertinus-fonts/LibertinusSerif-Regular,
+truetype amiri/Amiri-Regular. There is no CJK face in TeX Live's
+opentype tree here, so `cjk.tex` sets its CJK text in Latin Modern
+(missing glyphs). It still tests `\XeTeXlinebreaklocale`'s breaks.
+
+### Gaps (repros in `tests/xetex/`)
+
+- OpenType math: the MATH table's constants are pure functions of the font
+  value (`native::mathsy`, `native::mathex`, `ot_math_constant`). A family's
+  font is a read of `Key::FamFont`, so a changed font runs again exactly the
+  formulas reading it. Variants, assemblies, italic corrections, accent
+  attachment and math kerns follow xetex.web §749–§806. `cur_f` begins each
+  formula at none, whereas XeTeX's carries over from the formula before
+  (a gap for a fraction of boxes only). The shape, should an oracle need
+  it: each formula's packaging node defines `Key::MathLastFont`, the
+  `cur_f` its conversion ended on, and the conversion takes the read of it
+  at its own position as its starting `cur_f`. The previous formula's value
+  then reaches it by position order like any name's.
+- `\XeTeXinterwordspaceshaping=2`'s
+  hlist_out merging; TFM fonts with a mapping.
+- `\XeTeXinputencoding` is global, not per file. ICU converters other
+  than single-byte tables and UTF-8 are errors; ICU's dictionary and
+  phrase line breaking (Thai, Lao, Khmer, Myanmar; `lw=phrase`) are
+  errors. TeX Live 2026's xetex crashes opening any ICU converter
+  (`\XeTeXinputencoding "latin1"` in `xetex -ini`), so they have no oracle.
+- Astral letters in hyphenated native words (two code units).
+- `\pdflastxpos`/`\pdflastypos` are 0.
+- SyncTeX for XeTeX: as xetex writes it (`Output:pdf`, positions from
+  the page's corner an inch in; native words, glyphs and pictures passed
+  with no record; e-TeX's set glue a kern). `tests/synctex.rs`'s
+  `synctex_against_xetex`: forward 98.5%, inverse 98.6%, positions 100%
+  (job 8065).
+- graphicx's `dvips` driver under xelatex (`gfx`): the XDV is xetex's,
+  but partex-xdvipdfmx has no `spc_dvips.c` (`PSfile=`) nor `mpost.c`
+  (`ps:` code), so its EPS picture and PostScript transforms are missing
+  from the PDF.
+- `pics` (LaTeX, graphicx's xetex.def): page 2 of `xpic-three.pdf` makes a
+  line of about 397pt where xelatex's is about 633pt, so the document
+  breaks into one page, not two (the IniTeX `\XeTeXpdffile` of the same
+  page measures right); `umath`: a 10pt vertical move. Both open.
+- `\tracingcommands` shows `\0xbackedchar` where XeTeX shows the
+  character read again. Native items print in no box display (the log is
+  not a bar).
+- The empty-but-set `\XeTeXinterchartoks` inside a group drops the token
+  that ended the run (XeTeX's `cur_ptr` quirk): not reproduced.
+
+### Tag numbers (X)
+
+XeTeX's keys take Key word tags 87–91 (`NativeDir` 87, `InterChar` 88,
+`InputEncoding` 89, `DefaultEncoding` 90, `LinebreakLocale` 91) and format
+key tags 50–53 (`InterChar`, `InputEncoding`, `DefaultEncoding`,
+`LinebreakLocale`). There is also format meaning tag 12
+(`Meaning::XMathCharGiven`) and format whatsit tag 4 (`Whatsit::SavePos`).
+This is clear of flow's 1–42 and 63–66, B's 67–70 and format 35–38, and
+Q's 80–86.
 
 ## Font expansion and character protrusion (agent B)
 
