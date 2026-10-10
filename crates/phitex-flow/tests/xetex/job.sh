@@ -22,7 +22,8 @@ export PHITEX_FONT_INDEX="$r/fonts.idx" r bin
 if [ -n "${HANG:-}" ]; then
   mkdir -p "$r/hang"
   for t in $(echo "$HANG" | tr ',' ' '); do
-    PHITEX_XETEX_ONE=1 PHITEX_HANG_DUMP=${HANG_DUMP:-60} timeout ${HANG_LIMIT:-8m} "$bin" --exact "$t" --nocapture > "$r/hang/$t.txt" 2>&1
+    # (a virtual memory cap, so a blowup dumps before the job is killed)
+    ( ulimit -v ${HANG_VMEM_KB:-31457280}; PHITEX_XETEX_ONE=1 PHITEX_HANG_DUMP=${HANG_DUMP:-60} timeout ${HANG_LIMIT:-8m} "$bin" --exact "$t" --nocapture > "$r/hang/$t.txt" 2>&1 )
     echo "hang $t exit $? ($(wc -c < "$r/hang/$t.txt") bytes)" >> "$r/summary.txt"
     grep -vx "$t" "$r/tests.list" > "$r/tests.list.tmp"; mv "$r/tests.list.tmp" "$r/tests.list"
   done
