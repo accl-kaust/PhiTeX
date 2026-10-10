@@ -15,10 +15,13 @@
 //! - positions: every `x` record of pdfTeX's (where a run of characters
 //!   ends) is within 1 sp of one of phitex's on the same page.
 //!
-//! The tallies are printed; the bounds are below 100% where phitex-flow's
-//! provenance has gaps (alignments' cells, math lists' items: CORE.md,
-//! "Source places and item provenance"). Skipped where `synctex` is not on
-//! the path.
+//! The tallies are printed. Inverse-search points whose pdfTeX line is
+//! inside an alignment (`\halign`/`\valign`: a tabular, array, eqnarray,
+//! matrix or cases cell) are counted apart: phitex-flow's alignment cells
+//! carry no origins yet (CORE.md, "Source places and item provenance"),
+//! so their characters have the place of the node that ended the
+//! alignment. Their number may not grow ([`ALIGNMENT_POINTS`]); the bounds
+//! apply to the rest. Skipped where `synctex` is not on the path.
 //! Then `phitex watch` (headless) on the 48-page plain document: a word
 //! edit's SyncTeX file is the cold build's of the edited text, made
 //! walking the remade pages only, within the word budget.
@@ -196,6 +199,8 @@ struct Tally {
     inv_same: usize,
     inv_one: usize,
     inv_box: usize,
+    /// Points whose pdfTeX line is inside an alignment (counted apart).
+    inv_align: usize,
     inv_bad: Vec<String>,
     x: usize,
     x_ok: usize,
@@ -210,6 +215,7 @@ impl Tally {
         self.inv_same += o.inv_same;
         self.inv_one += o.inv_one;
         self.inv_box += o.inv_box;
+        self.inv_align += o.inv_align;
         self.x += o.x;
         self.x_ok += o.x_ok;
         self.fwd_bad.extend(o.fwd_bad.iter().take(3).cloned());
@@ -218,7 +224,7 @@ impl Tally {
 
     fn line(&self, name: &str) -> String {
         format!(
-            "{name:<22} forward {}/{} within a box ({} with every box so); inverse {} points: {} same line, {} within one, {} pdfTeX's line-box line, {} other; x records {}/{} within 1 sp",
+            "{name:<22} forward {}/{} within a box ({} with every box so); inverse {} points: {} same line, {} within one, {} pdfTeX's line-box line, {} other ({} in alignments apart); x records {}/{} within 1 sp",
             self.fwd_ok,
             self.fwd,
             self.fwd_all,
@@ -227,6 +233,7 @@ impl Tally {
             self.inv_one,
             self.inv_box,
             self.inv - self.inv_same - self.inv_one - self.inv_box,
+            self.inv_align,
             self.x_ok,
             self.x
         )
@@ -265,6 +272,7 @@ fn compare(name: &str, ext: &str, ours: &Path, theirs: &Path, lines: std::ops::R
         }
     }
     // (inverse: points along pdfTeX's line boxes, at most about 150)
+    let aligned = alignment_lines(&std::fs::read_to_string(theirs.join(&input)).unwrap_or_default());
     let (recs, xo, yo) = records(&theirs_text);
     let boxes: Vec<&Rec> = recs.iter().filter(|r| r.kind == b'(' && r.w > 0 && r.ht + r.dp > 0).collect();
     let step = (boxes.len() * 3).div_ceil(150).max(1);
@@ -279,6 +287,10 @@ fn compare(name: &str, ext: &str, ours: &Path, theirs: &Path, lines: std::ops::R
             let x = bp(b.h + (b.w as f64 * f) as i64, xo);
             let y = bp(b.v - b.ht / 2, yo);
             let Some(want) = edit(theirs, &out, b.page, x, y) else { continue };
+            if want.0 == input && usize::try_from(want.1).is_ok_and(|l| aligned.contains(&l)) {
+                t.inv_align += 1;
+                continue;
+            }
             t.inv += 1;
             let got = edit(ours, &out, b.page, x, y);
             match &got {
@@ -317,6 +329,72 @@ fn run(program: &Path, dir: &Path, pre: &[&str], file: &str) {
     if !o.status.success() {
         eprintln!("{} {args:?} in {}: status {:?}", program.display(), dir.display(), o.status.code());
     }
+}
+
+/// The inverse-search points inside alignments (all fifteen documents,
+/// both outputs): may not grow; 0 once alignment cells carry origins.
+const ALIGNMENT_POINTS: usize = 0;
+
+/// The lines (from 1) of `text` inside an alignment: a LaTeX environment
+/// set by `\halign` (`tabular`, `array`, `eqnarray`, amsmath's matrices,
+/// `cases`, `align`, `gather`…), or the braced argument of plain's
+/// `\halign`, `\valign`, `\matrix`, `\pmatrix`, `\cases`, `\eqalign`…, or
+/// a `\+` line.
+fn alignment_lines(text: &str) -> std::collections::HashSet<usize> {
+    const ENVS: [&str; 18] = [
+        "tabular", "tabular*", "array", "eqnarray", "eqnarray*", "align", "align*", "alignat", "gather", "gather*",
+        "matrix", "pmatrix", "bmatrix", "vmatrix", "Vmatrix", "cases", "aligned", "split",
+    ];
+    const MACROS: [&str; 10] =
+        ["\\halign", "\\valign", "\\matrix", "\\pmatrix", "\\bordermatrix", "\\cases", "\\eqalignno", "\\leqalignno", "\\eqalign", "\\displaylines"];
+    let mut out = std::collections::HashSet::new();
+    let lines: Vec<&str> = text.lines().collect();
+    let mut open: Vec<&str> = Vec::new();
+    for (i, l) in lines.iter().enumerate() {
+        let code = l.split('%').next().unwrap_or("");
+        let starts_inside = !open.is_empty();
+        for e in ENVS {
+            if code.contains(&format!("\\begin{{{e}}}")) {
+                open.push(e);
+            }
+        }
+        if !open.is_empty() || starts_inside || code.trim_start().starts_with("\\+") {
+            out.insert(i + 1);
+        }
+        open.retain(|e| !code.contains(&format!("\\end{{{e}}}")));
+    }
+    // (plain's: from the macro to its argument's closing brace)
+    let flat: Vec<(usize, char)> =
+        lines.iter().enumerate().flat_map(|(i, l)| l.split('%').next().unwrap_or("").chars().chain(['\n']).map(move |c| (i + 1, c))).collect();
+    let chars: String = flat.iter().map(|x| x.1).collect();
+    for m in MACROS {
+        let mut from = 0;
+        while let Some(at) = chars[from..].find(m).map(|x| x + from) {
+            from = at + m.len();
+            // (a whole name: `\matrix` not `\matrixx`)
+            if chars[from..].chars().next().is_some_and(char::is_alphabetic) {
+                continue;
+            }
+            let Some(b) = chars[from..].find('{').map(|x| x + from) else { break };
+            let mut depth = 0i32;
+            let start = chars[..at].chars().count();
+            for (k, c) in chars[b..].char_indices() {
+                match c {
+                    '{' => depth += 1,
+                    '}' => depth -= 1,
+                    _ => {}
+                }
+                if depth == 0 {
+                    let end = chars[..b + k].chars().count();
+                    for x in &flat[start..=end.min(flat.len() - 1)] {
+                        out.insert(x.0);
+                    }
+                    break;
+                }
+            }
+        }
+    }
+    out
 }
 
 const LATEX: [&str; 10] = ["sections", "math", "tables", "figures", "titlepage", "packages", "ams", "gfx", "layout", "rules"];
@@ -374,12 +452,14 @@ fn synctex_against_pdftex() {
     let inv = pct(all.inv_same + all.inv_one + all.inv_box, all.inv);
     let x = pct(all.x_ok, all.x);
     eprintln!("forward {fwd:.1}%, inverse {inv:.1}% (same or within one line, or pdfTeX's line-box line), positions {x:.1}%");
-    // (what is left: phitex-flow's alignments carry no origins yet — a
-    // table's cells have the place of the node that ended the alignment,
-    // pdfTeX's each its own line — and math lists' items the formula's
-    // end, CORE.md "Source places"; these bounds hold what there is)
+    eprintln!("{} alignment points skipped: flow's alignment cells have no origins", all.inv_align);
+    assert!(
+        all.inv_align <= ALIGNMENT_POINTS,
+        "{} inverse-search points inside alignments, more than the {ALIGNMENT_POINTS} known",
+        all.inv_align
+    );
     assert!(fwd >= 95.0, "forward search: {fwd:.1}% within a box of pdfTeX's");
-    assert!(inv >= 93.0, "inverse search: {inv:.1}% within a line of pdfTeX's");
+    assert!(inv >= 95.0, "inverse search: {inv:.1}% within a line of pdfTeX's (alignments apart)");
     assert!(x >= 99.0, "positions: {x:.1}% of pdfTeX's x records within 1 sp of phitex's");
 }
 
