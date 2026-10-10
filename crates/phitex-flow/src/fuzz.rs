@@ -1458,7 +1458,15 @@ fn first_log_diff(a: &Output, b: &Output) -> String {
 pub fn classify(r: &Repro) -> String {
     match &r.fail {
         Fail::Timeout => return format!("timeout {}", r.doc),
-        Fail::Panic(p) => return format!("panic {} | {}", r.doc, p.lines().next().unwrap_or("").chars().take(60).collect::<String>()),
+        // (a panic as the reproduction replays now: a cut that loses it
+        // is not the same class)
+        Fail::Panic(_) => {
+            return match replay(r) {
+                Some(Fail::Panic(p)) => format!("panic {} | {}", r.doc, p.lines().next().unwrap_or("").chars().take(60).collect::<String>()),
+                Some(f) => format!("edit {} {} | {}", r.doc, r.edit.what, f.text()),
+                None => format!("passes {}", r.doc),
+            };
+        }
         Fail::Over { .. } | Fail::Mismatch(_) => {}
     }
     // (an over-invalidation as the last edit alone shows it)
