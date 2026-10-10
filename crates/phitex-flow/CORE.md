@@ -1801,6 +1801,96 @@ Gaps:
   reader, once per round. The session had the same reruns (hidden in the
   format's 45 s).
 
+## Single-thread cost (agent P)
+
+Why one thread of the graph is slower than TeX, measured (2026-10-10,
+release build, `-j 1`, `perf stat -e cycles:u,instructions:u` inside
+`scripts/sandbox`; the machine is shared, so cycles move by 10-20% from
+run to run and instructions are the steadier figure).
+
+**Against TeX on this machine.**
+
+| document | graph | TeX | cycles |
+|---|---|---|---|
+| `latex.ltx` as a format (`etex -ini -etex`) | 41.5 s, 107.8G cycles, 190.8G instructions | 10.8 s, 28.8G, 71.2G | 3.75x |
+| big2 (IniTeX prelude, 616 kB of text; `tex -ini`) | 0.98 s, 2.54G, 4.36G | 0.19 s, 0.38G, 0.65G | 6.7x |
+| sections on the saved format (`latex`) | 0.68 s, 1.47G | 0.165 s, 0.45G | 13x the document's own work |
+| titlepage on the saved format | 2.24 s, 5.42G | 0.14 s, 0.44G | 50x the document's own work |
+
+`etex -ini` takes 10.8 s on `latex.ltx` here, not about 1 s: the expl3
+Unicode-data block is as slow in TeX. `latex` spends 0.34G of its
+0.38-0.45G cycles loading its format (a bare `\stop`), so a document's
+own work is 40-110M cycles in TeX. The documents' other factor is
+commands run per command: 1.9x (sections), 4x (math, figures), 5x
+(tables), 9x (titlepage) — the reruns from definitions between a piece's
+nodes (LaTeX documents, gaps). Per command run the graph costs about 6x
+TeX; on `latex.ltx` 34k cycles a command against 9.2k.
+
+**Per token.** `latex.ltx` hands out 228M tokens (2.8M of them made
+from characters, the rest from rewritten lists; arguments taken in one
+go are not counted): 177 ns a token, `etex` 47 ns over the same count.
+A token is a plain value (`Tok` holds no counted handle); about 0.5
+counted-handle increments a token come from the lists: a macro's
+meaning cloned per call (31M), the body and argument handles, the
+input lists' cells.
+
+**Counts** (temporary counters, not in the code).
+
+| | `latex.ltx` | big2 |
+|---|---|---|
+| nodes | 3.13M | 199k |
+| reads a node | 15.6 | 9.6 |
+| definitions a node | 0.30 | 0.04 |
+| allocations a node | 71 | 9.2 |
+| bytes allocated a node | 6.7 KB | 3.4 KB |
+| macro calls / expansion steps | 29.0M / 32.5M | 8k / 12k |
+| input-list cells (one allocation each) | 52.7M | 102k |
+| argument arrays (`Arc<[Arg]>`) | 20.7M | 4k |
+| one-token lists put back (`Exec::back`) | 26.0M | 94k |
+| outer-ness reads (one a token scanned in an argument or definition) | 88.9M | 2k |
+| reads through `Known` / `Chain::resolve` | 44.7M / 4.3M | 0 / 1.9M |
+
+In big2 every read goes `Chain::resolve` (a miss in `defs_of`), then
+the run's `Outside` map (80% hits), the rest to the names index:
+`Known` is off in pieces under 256 nodes (they average 83).
+
+**By phase** (perf -g on a frame-pointer build, each sample under the
+innermost phase on its stack: the allocator, hashing and counted
+handles are charged to the phase that called them).
+
+| phase | `latex.ltx` | big2 |
+|---|---|---|
+| the input lists and argument scanning (`next_raw0`, `Pending`, `Cursor`, `call`) | 46% | 2% |
+| name lookup (`find`, `resolve_shared`, `Chain::resolve`, `Outside`, the names index) | 20% | 39% |
+| expansion primitives (`\expandafter`, `\csname`, conversions, `\the`, conditionals) | 17% | 1% |
+| node recording (`Exec::new`/`finish`, the chain's indices, dropping nodes) | 7% | 10% |
+| a piece's end (exports, sorting its reads) | 2.5% | 9.5% |
+| install (validation, the readers map) | 2.4% | 10% |
+| commands (material, assignments) | 1% | 9.5% |
+| line breaking, the page fold, DVI | 0% | 12% |
+| tokenizing characters | 1.2% | 2% |
+
+Also: dropping a lean piece's 3.1M nodes is 5.9% of `latex.ltx`; the
+growth of `Vec<Tok>`s (realloc) about 4%. On titlepage a node's
+definitions scanned key by key (`Chain::resolve`, `scope_of`: `Key::eq`
+16% inclusive) and the walk of TeX Live's whole TFM tree at the first
+`\font` (`tfm::Index`, 0.28 s) stand out; on B's tikz document the
+first is 62%.
+
+**Changes** (each its own commit; results unchanged, the before and
+after on the same base):
+
+1. *A node's definition of a name found by index.* `Chain::defs_of`
+   holds, per key, each defining node once with the index of its last
+   definition of the key (the one `Chain::resolve` took by scanning the
+   node's definitions backwards, `Key::eq` each); `resolve`,
+   `scope_of`, `Run::leaned` and the routine's `after_close` read it.
+   A φ at the `\fi` of a long arm defines every name the arm changed,
+   and each later read reaching it scanned them all. Instructions
+   (before → after): tikz 759G → 207G (149 s → 40 s), titlepage 8.41G →
+   7.22G, sections 2.72G → 2.54G, `latex.ltx` 190.8G → 189.2G, big2
+   unchanged; DVIs identical.
+
 ## The inventory
 
 ### (i) Expandable and input-rewriting: steps — 40
