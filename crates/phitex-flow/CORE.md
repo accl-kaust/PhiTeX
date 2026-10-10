@@ -1730,6 +1730,34 @@ Not yet: hyperref (the `.aux` fixpoint — format gap 1 — and its many
 `\special`s/`\pdf…` commands), microtype (pdfTeX's font expansion and
 protrusion, PDF mode only).
 
+## LaTeX corpus, round 3 (agent B)
+
+Five more documents, on the saved format, five schedules, identical with
+`latex` (DVI, written files): `tikz` (pgf/TikZ: paths, nodes, a circle, a
+fill, a `matrix of nodes`), `ltmc` (longtable over a page break's worth
+of rows, multicol), `lst` (listings with numbers and a frame,
+`\lstinline`, fancyvrb's `Verbatim`), `bib` (a given `bib.bbl` read by
+`\bibliography`; makeidx's `\index` writing `bib.idx`, compared as a
+written file), `href` (hyperref with the dvips driver: `\url`, `\href`,
+`\ref` with anchors; it gets through on the first run without the `.aux`
+read-back, writing `href.aux` and `href.out`). No language gap in their
+output.
+
+*TikZ is the expansion-heaviest document* (P measures with it): cold, `-j
+1`, on the format (fastdev): 132 s, 1,127,514 commands run for 225,506
+(five runs of its one piece: the reruns from a routine's definitions,
+F7). Profile (perf, frame pointers): 62% is `Chain::resolve` and
+`Chain::scope_of` finding a definition inside its node by scanning the
+node's definitions (`Key::eq`, `Key::word`). The φ nodes are large: of
+267,608 definitions in the run, 164,646 are φs; the largest φ nodes hold
+9,828, 7,666, 6,986 and 4,069 (each twice: nested `\fi`s, the outer one
+taking every φ of the inner arm again), and every later read of a name
+whose definition is in one of them scans it. For P (name lookup): find a
+definition in its node by index (the node's def position in `defs_of`),
+not by scanning. Fixed on the language side: `pop_cond` collected the
+arm's keys with `Vec::contains` (quadratic in the keys an arm defines):
+now a set (164 s → 132 s).
+
 ## The format: definitions before the first piece (agent B)
 
 AGENTS_BRIEF §6.1: "known at t=0: the format, a set of definitions with

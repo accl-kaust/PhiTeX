@@ -33,8 +33,23 @@ use phitex_flow::print::Limits;
 use phitex_flow::{Build, Font, Options, Order, Output, Reads};
 
 /// The documents.
-const DOCS: [&str; 10] =
-    ["sections", "math", "tables", "figures", "titlepage", "packages", "ams", "gfx", "layout", "rules"];
+const DOCS: [&str; 15] = [
+    "sections",
+    "math",
+    "tables",
+    "figures",
+    "titlepage",
+    "packages",
+    "ams",
+    "gfx",
+    "layout",
+    "rules",
+    "tikz",
+    "ltmc",
+    "lst",
+    "bib",
+    "href",
+];
 
 /// The schedules: one thread; eight suspending, in priority order and in
 /// a random one; eight speculating, in priority order and in a random one.
@@ -77,14 +92,15 @@ struct Made {
     dirs: Vec<String>,
 }
 
-/// A document's files: `NAME.tex` and the `NAME-*` files it reads (a
-/// picture).
+/// A document's files: `NAME.tex`, the `NAME-*` files it reads (a
+/// picture) and its `NAME.bbl` (a bibliography as BibTeX made it).
 fn doc_files(name: &str) -> Vec<String> {
     let mut v = vec![format!("{name}.tex")];
     let pre = format!("{name}-");
+    let bbl = format!("{name}.bbl");
     for e in std::fs::read_dir(docs_dir()).expect("tests/latex/docs").flatten() {
         let f = e.file_name().to_string_lossy().into_owned();
-        if f.starts_with(&pre) {
+        if f.starts_with(&pre) || f == bbl {
             v.push(f);
         }
     }
@@ -507,4 +523,29 @@ fn doc_layout() {
 #[test]
 fn doc_rules() {
     doc("rules");
+}
+
+#[test]
+fn doc_tikz() {
+    doc("tikz");
+}
+
+#[test]
+fn doc_ltmc() {
+    doc("ltmc");
+}
+
+#[test]
+fn doc_lst() {
+    doc("lst");
+}
+
+#[test]
+fn doc_bib() {
+    doc("bib");
+}
+
+#[test]
+fn doc_href() {
+    doc("href");
 }

@@ -777,10 +777,12 @@ impl Exec<'_> {
             }
             return;
         }
+        // (each key once, in the order first defined)
         let mut keys: Vec<Key> = Vec::new();
+        let mut seen: crate::hash::FxSet<&Key> = crate::hash::FxSet::default();
         for n in nodes.range(at, here) {
             for d in n.defs() {
-                if !keys.contains(&d.key) {
+                if seen.insert(&d.key) {
                     keys.push(d.key.clone());
                 }
             }
