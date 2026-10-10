@@ -2973,6 +2973,19 @@ opentype tree here, so `cjk.tex` sets its CJK text in Latin Modern
   (`\XeTeXinputencoding "latin1"` in `xetex -ini`), so they have no oracle.
 - Astral letters in hyphenated native words (two code units).
 - `\pdflastxpos`/`\pdflastypos` are 0.
+- SyncTeX for XeTeX: the CLI's writer works on the page boxes, so a
+  XeTeX document gets a `.synctex.gz`, but its header says `Output:dvi`
+  (`PageSync::pdf` follows `ShipParams::pdf`, `None` in XeTeX), and native
+  words, glyphs and pictures make no records (`build/sync.rs`); no xetex
+  oracle yet.
+- graphicx's `dvips` driver under xelatex (`gfx`): the XDV is xetex's,
+  but partex-xdvipdfmx has no `spc_dvips.c` (`PSfile=`) nor `mpost.c`
+  (`ps:` code), so its EPS picture and PostScript transforms are missing
+  from the PDF.
+- `pics` (LaTeX, graphicx's xetex.def): page 2 of `xpic-three.pdf` makes a
+  line of about 397pt where xelatex's is about 633pt, so the document
+  breaks into one page, not two (the IniTeX `\XeTeXpdffile` of the same
+  page measures right); `umath`: a 10pt vertical move. Both open.
 - `\tracingcommands` shows `\0xbackedchar` where XeTeX shows the
   character read again. Native items print in no box display (the log is
   not a bar).
